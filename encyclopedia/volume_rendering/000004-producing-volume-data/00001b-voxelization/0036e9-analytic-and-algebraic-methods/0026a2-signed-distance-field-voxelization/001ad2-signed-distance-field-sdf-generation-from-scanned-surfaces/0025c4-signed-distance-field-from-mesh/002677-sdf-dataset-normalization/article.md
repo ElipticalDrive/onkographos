@@ -1,0 +1,105 @@
+# SDF Dataset Normalization
+
+Also called: SDF Mesh Loading
+
+## Overview
+SDF Dataset Normalization is a preprocessing method that transforms a 3D mesh's vertex coordinates so that the geometry fits within a standardized canonical space, typically a unit cube or unit sphere centered at the origin [S1, S2, S3, S1, unofficial]. This process solves the problem of inconsistent scale and position in input meshes, which is critical for downstream volume rendering pipelines such as Signed Distance Field (SDF) generation, where grid resolution and sampling bounds depend on predictable input dimensions [S1, S3, S1, unofficial]. It differs from [Explicit Surface to TSDF Conversion](2615-explicit-surface-to-tsdf-conversion.md) and [Sparse VDB SDF Generation](4498-sparse-vdb-sdf-generation.md) by operating on the source mesh geometry directly rather than on an existing voxel grid, ensuring the input data is normalized before discretization [S1, S3, S1, unofficial].
+
+## How it works
+**Inputs:** A path to a mesh file (e.g., STL, OBJ).
+**Outputs:** A normalized mesh object with vertices scaled and translated to fit within the bounding box $[-1, 1]^3$.
+
+**Data Structures:**
+- `mesh`: An object containing vertex coordinates `vertices` (array of shape $[N, 3]$) and faces.
+- `vs`: The vertex array extracted from `mesh`.
+- `vmin`: A 3D vector representing the minimum coordinate extent.
+- `vmax`: A 3D vector representing the maximum coordinate extent.
+- `v_center`: A 3D vector representing the centroid of the bounding box.
+
+**Steps:**
+1. Load the mesh from the given path using a library such as `trimesh.load` with `force='mesh'` [S1, S1, unofficial].
+2. Extract the vertex coordinates `vs` from `self.mesh.vertices` [S1, S1, unofficial].
+3. Calculate `vmin` as the minimum value of `vs` along axis 0 (the vertex index axis), resulting in a 3D vector where each component is the minimum coordinate for that axis across all vertices [S1, S1, unofficial].
+4. Calculate `vmax` as the maximum value of `vs` along axis 0 [S1, S1, unofficial].
+5. Calculate `v_center` as the midpoint of the bounding box:
+   $$ v_{center} = \frac{v_{min} + v_{max}}{2} $$
+6. [G] Compute the scale factor. To fit the mesh into $[-1, 1]$, the scale is determined by the largest dimension of the bounding box to ensure the entire object fits. Let $d = v_{max} - v_{min}$. The scale $s$ is:
+   $$ s = \frac{2}{\max(d_x, d_y, d_z)} $$
+7. [G] Apply the transformation to each vertex $v_i$:
+   $$ v_i' = (v_i - v_{center}) \times s $$
+   This centers the mesh at the origin and scales it to fit within the unit cube.
+
+**Parameters:**
+- Target range: $[-1, 1]$ for each axis [S1, S1, unofficial].
+
+**Edge cases and pitfalls:**
+- If the mesh has zero volume (all vertices are identical), the bounding box dimensions are zero, leading to division by zero during scaling. A guard should check for this degenerate case [G].
+- The method assumes the mesh is watertight or at least has a well-defined bounding box. Non-manifold geometry may have unexpected extents.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import trimesh
+
+def normalize_sdf_mesh(mesh_path: str) -> trimesh.Trimesh:
+    # Step 1: Load mesh
+    mesh = trimesh.load(mesh_path, force='mesh')
+    
+    # Step 2: Extract vertices
+    vs = mesh.vertices  # Shape: [N, 3]
+    
+    # Step 3 & 4: Calculate vmin and vmax
+    vmin = np.min(vs, axis=0)
+    vmax = np.max(vs, axis=0)
+    
+    # Step 5: Calculate center
+    v_center = (vmin + vmax) / 2.0
+    
+    # Step 6: Calculate scale
+    # Compute the dimensions of the bounding box
+    dimensions = vmax - vmin
+    
+    # Handle degenerate case where dimensions are zero
+    max_dim = np.max(dimensions)
+    if max_dim == 0:
+        # Return original mesh or handle error appropriately
+        return mesh
+    
+    # Scale to fit in [-1, 1]
+    # The distance from center to edge in the largest dimension should be 1.0
+    # So scale = 1.0 / (max_dim / 2) = 2.0 / max_dim
+    scale = 2.0 / max_dim
+    
+    # Step 7: Apply transformation
+    # Translate to origin then scale
+    normalized_vertices = (vs - v_center) * scale
+    
+    # Create a new mesh with normalized vertices
+    normalized_mesh = trimesh.Trimesh(vertices=normalized_vertices, faces=mesh.faces)
+    
+    return normalized_mesh
+```
+
+## Subtopics
+
+### [Mesh Normalization](3796-mesh-normalization.md)
+Mesh Normalization is a preprocessing method that transforms a 3D mesh's vertex coordinates so that the geometry fits within a standardized canonical space, typically a unit cube or unit sphere centered at the origin. This process solves the problem of inconsistent scale and position in input meshes, which is critical for downstream volume rendering pipelines such as Signed Distance Field (SDF) generation, where grid resolution and sampling bounds depend on predictable input dimensions. It differs from [SDF Grid Resampling from File](4878-sdf-grid-resampling-from-file.md) by operating on the source mesh geometry directly rather than on an existing voxel grid, ensuring the input data is normalized before discretization.
+
+### [SDF Grid Resampling from File](4878-sdf-grid-resampling-from-file.md)
+Reads a raw Signed Distance Field (SDF) text file, parses its grid resolution, bounding box, and voxel size, then resamples it to a target cubic grid resolution using coordinate mapping and clamping. It differs from sibling methods by handling non-cubic source grids and normalizing the spatial extent to a centered bounding box before interpolation.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of vertices, as it requires a single pass to find min/max and a single pass to transform vertices.
+- **Memory Complexity:** $O(N)$ to store the vertex array and the new mesh.
+- **Strengths:** Ensures consistent input scale for SDF generation, preventing issues with grid resolution and sampling bounds. Simple and fast.
+- **Limitations:** Only normalizes position and scale; does not handle rotation or non-uniform scaling of the original mesh unless explicitly included. Does not account for mesh topology or quality.
+- **When to use:** When preparing mesh data for SDF voxelization or other volume rendering pipelines that require canonical input bounds.
+- **When not to use:** When the original scale or orientation is critical and must be preserved, or when the input is already a voxel grid rather than a mesh.
+
+## Background
+The method originates from the NeRF-Factory/IDDR-NGP project, which uses it as part of its data loading pipeline for generating Signed Distance Fields from meshes [S1, S1, unofficial]. It is a standard preprocessing step in many 3D deep learning and rendering frameworks to ensure consistent input data.
+
+## Sources
+[S1] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)

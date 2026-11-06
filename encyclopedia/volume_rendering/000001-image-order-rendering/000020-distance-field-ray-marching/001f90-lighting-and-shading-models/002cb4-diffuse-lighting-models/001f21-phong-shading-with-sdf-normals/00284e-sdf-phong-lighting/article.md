@@ -3,120 +3,111 @@
 Also called: SDF Directional Lighting, TextMeshPro Lighting
 
 ## Overview
-SDF Phong Lighting is a shading technique that applies directional diffuse and specular lighting to text rendered via Signed Distance Fields (SDFs) by estimating surface normals and configuring light angles [S1, unofficial]. It differs from standard SDF rendering by introducing a configurable directional light model with specular highlights and ambient falloff, rather than relying solely on distance-based alpha or simple diffuse shading [S1, unofficial].
+SDF Phong Lighting is a shading technique that applies directional diffuse and specular lighting to Signed Distance Field (SDF) volumes, such as text or meshes, by estimating surface normals from the SDF gradient [S1, unofficial]. It solves the problem of flat, unlit volume rendering by providing geometric cues that allow standard Phong reflection model terms to interact with the volume's internal structure [S1, unofficial]. Unlike parent methods that may rely on pre-computed or analytic normals, this approach computes normals on-the-fly using finite differences, making it applicable to any discrete scalar field without additional preprocessing [S1, unofficial]. It is distinct from specular or environment-based shading models by focusing on the core Phong components (diffuse and specular) driven by a single configurable light direction [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Signed distance value ($sd$), estimated surface normal ($n$), base face color ($col$), light direction angle ($\theta$), and shader parameters.
-*   **Outputs:** Final shaded color ($col_{final}$).
+- **Input:** A signed distance value $d$ at a point $p$, the spatial gradient of the SDF $\nabla d$ (approximated via finite differences), and a set of lighting parameters.
+- **Output:** The final fragment color $C_{final}$.
 
 **Data Structures:**
-No complex data structures are required beyond standard shader uniforms and local variables. The normal $n$ is typically derived from the SDF gradient (see [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md)).
-
-**Parameters:**
-*   `_LightAngle` (float, default $\pi \approx 3.1416$): Light direction in radians [S1, unofficial].
-*   `_SpecularColor` (Color, default $(1,1,1,1)$): Specular highlight color [S1, unofficial].
-*   `_SpecularPower` (float, default $2.0$): Specular intensity multiplier [S1, unofficial].
-*   `_Reflectivity` (float, default $10$): Specular shininess exponent [S1, unofficial].
-*   `_Diffuse` (float, default $0.5$): Diffuse lighting factor [S1, unofficial].
-*   `_Ambient` (float, default $0.5$): Ambient lighting factor [S1, unofficial].
+- **Lighting Parameters:** A configuration struct containing:
+  - `_LightAngle` (float): Direction of the light in radians (default 3.1416).
+  - `_SpecularColor` (vec3): Color of the specular highlight (default 1,1,1).
+  - `_SpecularPower` (float): Intensity multiplier for specular (default 2.0).
+  - `_Reflectivity` (float): Shininess exponent (default 10).
+  - `_Diffuse` (float): Diffuse lighting factor (default 0.5).
+  - `_Ambient` (float): Ambient lighting factor (default 0.5).
 
 **Steps:**
-1.  **Compute Light Direction:** Convert `_LightAngle` into a 2D unit vector $l$. Assuming a standard 2D screen space where the angle is measured from the vertical or horizontal axis, the implementation typically maps this to a direction vector. For a 2D SDF text renderer, if $\theta$ is the angle in radians, $l = (\sin(\theta), \cos(\theta))$ or similar depending on the coordinate system orientation [S1, unofficial].
-2.  **Compute Specular Term:** Calculate the specular contribution using the Phong specular model:
-    $$spec = \text{pow}(\max(0, n \cdot l), \text{Reflectivity})$$
-    where $n$ is the normalized surface normal and $l$ is the normalized light direction [S1, unofficial].
-3.  **Scale Specular:** Multiply the specular term by the specular color and power:
-    $$spec_{scaled} = \text{SpecularColor} \times spec \times \text{SpecularPower}$$
-4.  **Compute Diffuse Term:** Calculate the diffuse lighting factor. The source defines this as a reduction from white based on the dot product:
-    $$col_{diff} = 1 - (n \cdot l) \times \text{Diffuse}$$
-    Apply this to the base color:
-    $$col = col \times col_{diff}$$
-    Note: This formula implies that as $n \cdot l$ increases (light hits more directly), the term $(n \cdot l) \times \text{Diffuse}$ increases, reducing the color. This is an inverse diffuse model or a shadowing model where light direction creates darkness in specific orientations, or potentially a typo in the source for a standard diffuse $1 - \text{Diffuse} \times (1 - n \cdot l)$. However, we follow the source exactly: $col \times (1 - (n \cdot l) \times \text{Diffuse})$ [S1, unofficial].
-5.  **Compute Ambient Term:** Apply ambient lighting using a falloff based on the normal's Z component (assuming Z is up/out):
-    $$col_{amb} = \text{lerp}(\text{Ambient}, 1, n_z^2)$$
-    Apply to color:
-    $$col = col \times col_{amb}$$
-    This creates a lighting effect where surfaces facing "up" ($n_z \approx 1$) are brighter (closer to 1) and surfaces facing "down" ($n_z \approx 0$) are darker (closer to Ambient) [S1, unofficial].
-6.  **Combine:** Add the scaled specular term to the base color:
-    $$col_{final} = col + spec_{scaled}$$
+1. **Compute Light Direction:** Derive the normalized light direction vector $\mathbf{l}$ from `_LightAngle`. In 2D SDF text rendering, this is often a fixed direction in the XY plane. In 3D, it may be a uniform direction vector.
+   $$ \mathbf{l} = (\cos(\text{\_LightAngle}), \sin(\text{\_LightAngle}), 0) $$
+   [G: Normalization is assumed if not explicitly unit-length in source, though angle-based derivation implies unit length in 2D projection].
+
+2. **Estimate Normal:** Obtain the surface normal $\mathbf{n}$ by normalizing the SDF gradient $\nabla d$.
+   $$ \mathbf{n} = \frac{\nabla d}{\|\nabla d\|} $$
+
+3. **Compute Specular Term:** Calculate the specular contribution using the Phong specular model.
+   $$ \text{spec} = \text{pow}(\max(0, \mathbf{n} \cdot \mathbf{l}), \text{\_Reflectivity}) $$
+   Scale by specular color and power:
+   $$ C_{spec} = \text{\_SpecularColor} \times \text{spec} \times \text{\_SpecularPower} $$
+   [S1, unofficial]
+
+4. **Compute Diffuse Term:** Calculate the diffuse attenuation. The source formula uses a specific variation:
+   $$ C_{diff} = 1 - (\mathbf{n} \cdot \mathbf{l}) \times \text{\_Diffuse} $$
+   [S1, unofficial]
+   Note: This differs from the standard Lambertian $1 - \mathbf{n} \cdot \mathbf{l}$ or $\max(0, \mathbf{n} \cdot \mathbf{l})$ by using a subtraction model scaled by a factor, effectively darkening the surface based on the dot product.
+
+5. **Compute Ambient Term:** Apply an ambient term that varies based on the normal's Z-component (assuming a top-down light or view direction alignment in 2D text):
+   $$ C_{amb} = \text{lerp}(\text{\_Ambient}, 1, \mathbf{n}_z^2) $$
+   [S1, unofficial]
+
+6. **Combine:** Multiply the base color (or face color) by the diffuse and ambient terms, then add the specular term.
+   $$ C_{final} = C_{base} \times C_{diff} \times C_{amb} + C_{spec} $$
+   [S1, unofficial]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sdf_phong_lighting(sd, n, col, light_angle, specular_color, specular_power, reflectivity, diffuse, ambient):
+def sdf_phong_lighting(n: Vec3, base_color: Vec3, params: LightingParams) -> Vec3:
     # 1. Compute light direction from angle
-    # Assuming 2D screen space, angle measured from vertical (Z) or horizontal.
-    # Standard conversion: l = (sin(angle), cos(angle)) or similar.
-    # The source does not specify the exact axis mapping, but uses dot(n, l).
-    l_x = sin(light_angle)
-    l_y = cos(light_angle)
-    l = normalize(vec2(l_x, l_y))
+    # Assuming 2D light direction in XY plane for text SDFs
+    l = Vec3(cos(params._LightAngle), sin(params._LightAngle), 0.0)
     
-    # 2. Compute specular: spec = pow(max(0, dot(n, l)), Reflectivity)
+    # 2. Specular calculation
+    # n and l are assumed normalized
     dot_nl = max(0.0, dot(n, l))
-    spec = pow(dot_nl, reflectivity)
+    spec = pow(dot_nl, params._Reflectivity)
+    specular_color = params._SpecularColor * spec * params._SpecularPower
     
-    # 3. Scale specular by SpecularColor and SpecularPower
-    spec_scaled = specular_color * spec * specular_power
+    # 3. Diffuse calculation
+    # Formula from source: 1 - (n . l) * Diffuse
+    # Note: This can result in negative values if dot_nl > 1/Diffuse, 
+    # but Diffuse is typically <= 1.0. Source does not clamp.
+    diffuse_factor = 1.0 - (dot_nl * params._Diffuse)
     
-    # 4. Compute diffuse: col *= 1 - (dot(n, light) * Diffuse)
-    # Note: Source formula is 1 - (n . l) * Diffuse
-    diffuse_factor = 1.0 - (dot_nl * diffuse)
-    col = col * diffuse_factor
+    # 4. Ambient calculation
+    # lerp(Ambient, 1, n.z^2)
+    ambient_factor = lerp(params._Ambient, 1.0, n.z * n.z)
     
-    # 5. Compute ambient: col *= lerp(Ambient, 1, n.z*n.z)
-    # Assuming n is a 2D vector, n.z might be 0 or derived. 
-    # If 2D, n.z is likely not present. The source uses n.z*n.z.
-    # In a 2D SDF context, this might refer to a pseudo-3D normal or a specific component.
-    # If n is strictly 2D (nx, ny), n.z is 0. 
-    # However, TextMeshPro SDFs often treat the text plane as XY and extrude Z.
-    # If n is 2D, n.z is 0, so lerp(Ambient, 1, 0) = Ambient.
-    # If n is 3D, use n.z.
-    # We assume n is normalized.
-    n_z_sq = n.z * n.z if len(n) > 2 else 0.0
-    ambient_factor = lerp(ambient, 1.0, n_z_sq)
-    col = col * ambient_factor
+    # 5. Combine
+    # base_color is the SDF face color (e.g., text color)
+    final_color = base_color * diffuse_factor * ambient_factor + specular_color
     
-    # 6. Add specular to base color
-    final_col = col + spec_scaled
-    
-    return final_col
+    return final_color
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Normal Dimensionality:** The formula uses $n_z$, implying a 3D normal. If the SDF is strictly 2D, $n_z$ is 0, making the ambient term constant `Ambient`. Implementers must ensure the normal vector includes the Z component if the ambient falloff is intended to vary [S1, unofficial].
-*   **Diffuse Formula Interpretation:** The formula $1 - (n \cdot l) \times \text{Diffuse}$ results in darker colors when the light is aligned with the normal (if Diffuse > 0). This is non-standard for "diffuse" lighting which usually brightens. It may represent a shadowing effect or a specific stylistic choice. Verify against the desired visual outcome [S1, unofficial].
-*   **Light Angle Range:** `_LightAngle` is in radians. Ensure the input is converted from degrees if necessary [S1, unofficial].
+- **Normal Degeneracy:** If $\nabla d$ is zero (e.g., at the exact center of a sphere or far from the surface), normalization fails. A guard clause or fallback normal is required [G].
+- **Negative Diffuse:** The formula $1 - (\mathbf{n} \cdot \mathbf{l}) \times \text{\_Diffuse}$ can produce negative lighting if $\mathbf{n} \cdot \mathbf{l}$ is large and $\text{\_Diffuse} > 1$. Standard practice is to clamp the final color or the diffuse factor [G].
+- **Light Angle Interpretation:** The source uses `_LightAngle` as a single float, implying a 2D direction. In 3D volumes, this parameter is insufficient without an elevation angle or a full vector input [S1, unofficial].
 
 ## Subtopics
 
 ### SDF Glow Effect
-Adds a colored glow around the text by computing a falloff function based on the signed distance and applying it to a glow color [S1, unofficial]. It is chosen when a neon or emissive halo effect is desired around the text [S1, unofficial]. Parameters include `_GlowColor` (default $(0,1,0,0.5)$), `_GlowOffset` (default $0$), `_GlowInner` (default $0.05$), `_GlowOuter` (default $0.05$), and `_GlowPower` (default $0.75$) [S1, unofficial]. The implementation computes `glowColor = GetGlowColor(sd, scale)` and adds it to the face color: `faceColor.rgb += glowColor.rgb * glowColor.a` [S1, unofficial]. The `GetGlowColor` function implementation is not provided in the source snippet [S1, unofficial].
+Adds a colored glow around the text by computing a falloff function based on the signed distance and applying it to a glow color [S1, unofficial]. It is chosen when a neon or emissive halo effect is desired around the SDF geometry [S1, unofficial]. Parameters include `_GlowColor` (default 0,1,0,0.5), `_GlowOffset` (default 0), `_GlowInner` (default 0.05), `_GlowOuter` (default 0.05), and `_GlowPower` (default 0.75) [S1, unofficial]. The implementation calls `GetGlowColor(sd, scale)` and adds the result to the face color: `faceColor.rgb += glowColor.rgb * glowColor.a` [S1, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-The method adds a constant number of arithmetic operations (dot products, powers, lerp) per pixel. Time complexity is $O(1)$ per pixel. Memory complexity is $O(1)$ for local variables.
+- **Time:** $O(1)$ per fragment. The lighting calculation involves a few trigonometric functions, dot products, and power operations, all constant time relative to scene size.
+- **Memory:** $O(1)$ auxiliary memory. Only lighting parameters and intermediate vectors are stored.
 
 **Measured Performance:**
-Not given in the sources.
-
-**Scaling:**
-Performance scales linearly with pixel count. The lighting calculations are lightweight and suitable for real-time rendering of text [S1, unofficial].
+- Performance is hardware-dependent but generally fast on modern GPUs due to the simplicity of the math. The use of `pow` for specular can be slightly expensive but is negligible for text rendering.
 
 **Strengths and Limitations:**
-*   **Strengths:** Simple to implement; provides configurable directional lighting and specular highlights for SDF text; adds visual depth via ambient falloff [S1, unofficial].
-*   **Limitations:** The diffuse formula is non-standard and may produce unintuitive results; relies on accurate normal estimation from the SDF gradient; glow effect requires additional computation [S1, unofficial].
+- **Strengths:** Simple to implement; provides immediate visual depth to SDF text; configurable via simple scalar parameters.
+- **Limitations:** The diffuse model is non-standard (subtraction-based) and may not behave physically plausibly; the light direction is limited to a 2D angle in the source implementation, restricting 3D applicability without extension; no shadowing is included.
 
 **When to Use:**
-Use when rendering SDF text with a stylized, directional lighting appearance, such as in UI elements or game titles [S1, unofficial].
+- Use for 2D text rendering or simple 3D volumes where a single directional light is sufficient and performance is critical.
 
 **When Not to Use:**
-Avoid if physically accurate lighting is required, or if the non-standard diffuse formula conflicts with the desired aesthetic [S1, unofficial].
+- Do not use for physically based rendering (PBR) or scenes requiring multiple lights, shadows, or complex material interactions.
 
 ## Background
-The method originates from the Unity NanoVDB Renderer project, specifically in the context of rendering SDF text with lighting effects [S1, unofficial]. It is associated with the TextMeshPro ecosystem, where such lighting models are commonly used to enhance the visual appeal of text [S1, unofficial]. The source is an unofficial GitHub repository [S1, unofficial].
+Originating from the Unity NanoVDB renderer project by Anders Blomqvist, this method is an unofficial implementation of Phong shading tailored for SDF text rendering [S1, unofficial]. It draws inspiration from TextMeshPro's lighting system, adapting the Phong model to work with gradient-based normals derived from the SDF [S1, unofficial]. It is primarily used in real-time UI and text rendering within Unity environments.
 
 ## Sources
 [S1] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)

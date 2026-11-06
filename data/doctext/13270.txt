@@ -1,0 +1,194 @@
+Contribute to DeGrootResearchGroup/aquaflux development by creating an account on GitHub.
+
+Radiation: walk the triangle grid in one compiled loop per ray (Numba), 14-22x on the mask builds by ctdegroot · Pull Request #571 · DeGrootResearchGroup/aquaflux · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ctdegroot
+commented
+Sep 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+What and why
+TriangleGrid.blocks walked each segment through the voxels it crosses as whole-array numpy passes over every ray still in flight. Profiled on a 51,200-triangle cylindrical wall, that bookkeeping cost ~150-180 ns per ray per voxel step and was most of the walk's time (the traced triangle test was 6-47%). That is also why refining the grid made it slower: fewer triangles tested, more steps taken.
+A survey of how production ray tracers (Embree) get their speed found that the execution model (compiled per-ray traversal) came first and the data structure second. The first of these can be adopted without importing a ray tracer, so this PR does that:
+aquaflux/radiation/grid_walk.py: a numba.njit(parallel=True) loop, one ray per prange iteration, walked to its first hit or its end. It visits the same voxels, in the same order, with the same tie rule and step cap, and uses the same watertight test (Woop, Benthin & Wald), including the averaged, exactly antisymmetric edge function. Each ray's axis permutation and shear are formed once per ray.
+Numba is a core dependency (numba>=0.61, the first release with Python 3.13 wheels), as decided by the project owner instead of keeping it optional.
+The array walk is deleted as dominated: it lost at every grid and scene measured. Its machinery (_Rays, _indexed_pair_is_cut, _work_groups, _pad, triangles._pair_is_cut) goes with it.
+blocks takes no work_limit, since no (ray, triangle) pair array is formed. RayCastOcclusion(grid=...) and TriangleBody get the walk with no new setting.
+NUMBA_NUM_THREADS=1 is set beside OMP_NUM_THREADS in tools/fastgate.sh's parallel tier and in CI, so xdist workers don't each start a machine-sized pool.
+⚠️ The intersection test now exists twice: grid_walk._cuts alongside the traced _watertight_hit + _counts_as_hit, which the dense path still needs. A Numba loop cannot call a traced function. Every grid contract test compares the walk against segment_is_cut, and both docstrings say that a change to one must be made to the other.
+Measured
+All runs used jax 0.10.2 and numba 0.67.0 on a 4-core Linux container, CPU, x64. main (392f935) was measured from a worktree, then this branch, back to back in two processes, so read the ratios.
+path
+main
+this PR
+speed-up
+answers
+RayCastOcclusion(grid=True) volume mask, radiation_receiver_ray_mask.py's 4,992-facet annular reactor, 500 receivers
+54.47 s
+2.49 s
+21.9x
+same mask (SHA-256 of the packed bits)
+TriangleBody wall, every pair (sozzi_radiation/triangle_culling.py, 51,328 triangles, 18.4M pairs)
+211.9 s
+15.4 s
+13.8x
+identical to its reference
+same, default ShaftCulling()
+43.8 s
+2.3 s
+19.0x
+identical, 89.3% certified
+The walk alone was measured against the array walk in one process, on the same 200,000 rays, at the prototype commit d9fc017. The speed-up was 16.9-37.3x across two scenes and three resolutions, with identical answers. The first call of a process also compiles the loop, which takes ~2 s.
+⚠️ Not measured on the Sozzi wall (bodyWall.stl / work/case are absent here) or on the 11-core machine. What this buys against the 88 h mesh-scale estimate in the rules is therefore not established; grid_mask_check.py is the run that would establish it.
+Tests
+Contract tests: test_radiation_grid.py compares the walk against segment_is_cut at several resolutions.
+New in this PR:
+rays aimed at every vertex and edge midpoint of a closed drum (the watertight fixture);
+the inclusive far end: a segment ending in a triangle's plane is blocked;
+the exclusive near margin: a hit exactly at the margin doesn't count (axis-aligned, so the distance is exact);
+y-parallel segments, added to the shared fixture.
+Removed: the work-limit and compiled-shape tests, which went with the array walk.
+Mutation pass on the final kernel: 13 mutations, 8 red. The 5 survivors are each recorded with the reason they cannot change an answer. Notably, the plain edge function survives even with fastmath={"contract"}; the averaged form stays so watertightness doesn't depend on the compiler.
+Local runs: the radiation suite, the validation-API guard, check_rules and fastgate tests passed (653), and two crashed files passed serially (39). After merging main (Radiation rules: why shaft culling keeps one ladder, not a depth per body (#554) #562, perf(radiation): the silhouette cull runs on clusters of facets first (#555) #563), the clusters, silhouette, self-occlusion, grid and validation-API tests passed again (130).
+⚠️ The local fast gate is incomplete. It ran 2,036 tests before two xdist workers were killed in this container, in test_flow_march.py and test_radiation_coarsen.py, which don't touch the grid. Both files pass serially. CI is the complete run.
+The docs build failed locally only on the four unreachable intersphinx inventories (no network in this container).
+Not in this PR, filed
+These are the other ideas from the survey that could be adopted into our code without Embree:
+Radiation: cluster the emitters for the gather with an error bound (the "many lights" problem: lightcuts, low-rank sampling) #565: many-lights emitter clustering for the gather (lightcuts / low-rank sampling), widening Radiation: decide the shadow mask a block at a time — conservative shaft certificates between receiver blocks and facet clusters #554 D
+Radiation: hierarchical radiosity with clustering, so reflecting walls stop costing facets squared #566: hierarchical radiosity with clustering (Radiation: reflecting walls at mesh scale need a coarser optical surface #491)
+Radiation: compute the fluence rate exactly at a subset of receivers and interpolate the rest (irradiance caching) #567: irradiance caching for receivers
+Radiation: shadow a triangulated vessel through convex regions and portals, as Outside does for primitives #568: convex regions and portals for triangulated vessels
+Radiation: light-space transmittance volumes for a graded medium, so each pair stops walking the absorbance grid (conditional) #569: light-space transmittance volumes for a graded medium (conditional)
+Radiation: measure a 32-bit (mixed-precision) gather and grid walk before deciding on either #570: a 32-bit / mixed-precision measurement
+Radiation: re-tune the triangle grid's ten-triangles-a-voxel target under the compiled walk #572: re-tune the ten-triangles-a-voxel grid target under the compiled walk
+Radiation: should RayCastOcclusion use the grid by default, now that the walk is compiled? #573: whether RayCastOcclusion should use the grid by default
+Radiation: the grid walk's cost is the distance travelled, not the triangles tested — start from the near end and skip empty space #503 (existing: empty-space skipping, BVH) has a comment with the new profile
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01KXcjwUvupBDVcryv4iWojw
+claude
+added 3 commits
+September 26, 2026 18:36
+Radiation: prototype a compiled triangle-grid walk (Numba), 17-37x th…
+…
+d9fc017
+```
+…e array walk
+
+TriangleGrid.blocks walks each segment through the voxels it crosses as whole-array
+numpy passes over every ray still in flight. Profiled on a 51,200-triangle wall, that
+bookkeeping costs ~150-180 ns per ray per voxel step and is most of the walk's time,
+which is also why a finer grid makes it slower.
+
+walk="compiled" hands the same DDA state to a numba.njit(parallel=True) loop that walks
+each ray to its first hit: same voxels, same triangles in the same order, same
+watertight predicate (a second implementation of _watertight_hit/_counts_as_hit, kept
+equal by running every contract test on both walks against segment_is_cut).
+
+- Numba is an optional extra (aquaflux[numba]), imported on first use; the test extra
+  carries it so CI runs both arms. walk="array" stays the default and nothing selects
+  the compiled walk yet.
+- validation/radiation_grid_walk.py: both walks in one process, identical answers,
+  16.9-37.3x on a long thin vessel and an annular reactor (4-core Linux container).
+- Tests: contract tests parametrized over both walks, plus edge/vertex-aimed rays on a
+  closed drum, the inclusive far end, the exclusive near margin, y-parallel segments,
+  and the two refusals. Mutation pass 12, 7 red, 5 dismissed with reasons.
+- NUMBA_NUM_THREADS=1 beside OMP_NUM_THREADS in fastgate's parallel tier and CI.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KXcjwUvupBDVcryv4iWojw
+```
+Radiation: the compiled grid walk is the only walk; Numba becomes a c…
+…
+f178383
+```
+…ore dependency
+
+Build the prototype of d9fc017 as the feature, by the project owner's decision:
+
+- Numba moves into the core dependencies (numba>=0.61, the first release with
+  Python 3.13 wheels); the optional extra and its test-extra entry are gone.
+- TriangleGrid.blocks always walks each ray to its first hit in one compiled loop.
+  The array walk and its machinery (_Rays, _indexed_pair_is_cut, _work_groups,
+  _pad, triangles._pair_is_cut) are deleted as dominated, and blocks takes no
+  work_limit any more, since the compiled walk forms no (ray, triangle) pairs.
+  RayCastOcclusion and TriangleBody get the walk with no new setting.
+- Each ray's axis permutation and shear is formed once per ray, not per triangle.
+
+Measured through the paths users call, main against this branch, same 4-core
+container, answers identical: the grid ray mask on the 4,992-facet annular reactor
+54.47 -> 2.49 s (21.9x); the triangle-body wall of triangle_culling.py 211.9 -> 15.4 s
+testing every pair (13.8x) and 43.8 -> 2.3 s under the default shaft culling (19.0x).
+
+validation/radiation_grid_walk.py now times the walk across grid resolutions and
+checks it against every triangle. Mutation pass on the final kernel: 13, 8 red, the
+5 survivors dismissed with reasons in the rules.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KXcjwUvupBDVcryv4iWojw
+```
+Merge remote-tracking branch 'origin/main' into claude/issue-530-e7dvcr
+53074d2
+This was referenced Sep 26, 2026
+Radiation: re-tune the triangle grid's ten-triangles-a-voxel target under the compiled walk
+#572
+Closed
+Radiation: should RayCastOcclusion use the grid by default, now that the walk is compiled?
+#573
+Open
+Radiation: the grid walk's cost is the distance travelled, not the triangles tested — start from the near end and skip empty space
+#503
+Closed
+ctdegroot
+added
+the
+full-ci
+Run the full test suite (slow + validation tiers) on this PR
+label
+Sep 26, 2026
+— with
+Claude
+Hide details
+View details
+ctdegroot
+merged commit 594792d
+into
+main
+Sep 26, 2026
+39 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+ctdegroot
+deleted the
+claude/issue-530-e7dvcr
+branch
+September 26, 2026 22:55
+This was referenced Sep 27, 2026
+validation(radiation): the Sozzi field with the vessel wall as triangles — 62 min measured, not 88 h
+#576
+Merged
+Radiation: triangle grid voxels shaped like the box, not cubes (#503)
+#581
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+full-ci
+Run the full test suite (slow + validation tiers) on this PR
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

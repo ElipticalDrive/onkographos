@@ -1,0 +1,136 @@
+# Post-classification Shading Pipeline
+
+Also called: Post-DVRI, Post-classification DVR, Post-shaded DVRI
+
+## Overview
+The Post-classification Shading Pipeline (also known as Post-DVRI) is a volume rendering method where the original density volume is interpolated, sample values are classified via transfer functions to yield material, opacity, and color, and shading follows immediately after classification [S1]. It is distinct from the Pre-classification Shading Pipeline primarily in its handling of partial voluming and its susceptibility to blurring at high image resolutions [S1][S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar density volume $f$, ray direction $r$, ray origin $x$, transfer functions for color $C_\lambda$ and opacity $\alpha$, and step size $\Delta s$.
+*   **Output:** The final image intensity $I_\lambda(x,r)$ for each pixel.
+
+**Data Structures:**
+*   **Density Volume:** A 3D grid of scalar values $f(x,y,z)$.
+*   **Transfer Functions:** Lookup tables mapping density values to color $C_\lambda$ and opacity $\alpha$.
+
+**Numbered Steps:**
+1.  **Ray Casting:** For each pixel, cast a ray through the volume.
+2.  **Interpolation:** Sample the raw density volume $f$ at intervals $\Delta s$ along the ray. Let $s_i$ be the position of the $i$-th sample, where $i$ ranges from $0$ to $L/\Delta s$ ($L$ is the ray length within the volume). The density value at this position is $f(s_i)$, obtained by interpolating the grid values (e.g., trilinear interpolation) [S1].
+3.  **Classification:** Apply the transfer functions to the interpolated density value $f(s_i)$ to determine the color $C_\lambda(f(s_i))$ and opacity $\alpha(f(s_i))$ for that sample [S1].
+4.  **Shading:** Compute the gradient of the density grid at the sample location to estimate the surface normal. Use this normal for shading calculations (e.g., Phong or Blinn-Phong model) to determine the final color contribution. This shading step occurs *after* classification but *before* compositing [S1].
+5.  **Compositing:** Composite the shaded samples along the ray using front-to-back alpha blending.
+
+**Formula:**
+The final intensity $I_\lambda(x,r)$ is computed as [S1]:
+
+$$
+I_\lambda(x,r) = \sum_{i=0}^{L/\Delta s} C_\lambda(f(s_i)) \alpha(f(s_i)) \prod_{j=0}^{i-1} (1 - \alpha(f(s_j)))
+$$
+
+Where:
+*   $L$ is the length of the ray $r$.
+*   $\Delta s$ is the step size.
+*   $s_i$ is the position of the $i$-th sample along the ray.
+*   $f(s_i)$ is the interpolated density value at $s_i$.
+*   $C_\lambda(f(s_i))$ is the color (wavelength $\lambda$) determined by the transfer function applied to $f(s_i)$.
+*   $\alpha(f(s_i))$ is the opacity determined by the transfer function applied to $f(s_i)$.
+*   The product term $\prod_{j=0}^{i-1} (1 - \alpha(f(s_j)))$ represents the transmittance from the ray origin to sample $i$.
+
+**Parameters:**
+*   **Step Size ($\Delta s$):** Determines the sampling rate. Not given in the sources.
+*   **Transfer Functions:** Typically implemented as lookup tables. Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Partial Volume Effect:** Interpolated density values may fall between distinct material densities, resulting in a classification that yields a material not actually present at the sample location. This leads to "false colors" in the final image [S1].
+*   **Staircasing Artifacts:** To avoid false colors, prior segmentation can be used. However, this introduces high-frequency discontinuities, leading to severe staircasing artifacts [S1].
+*   **Blurriness:** Unlike pre-classification methods, this approach avoids blurriness at high image resolutions (zoomed viewing or wide perspectives) because fine details in the transfer functions are expressed in the final image [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def post_classification_shading_pipeline(volume, ray_origin, ray_direction, transfer_functions, step_size):
+    """
+    Renders a single ray using the Post-classification Shading Pipeline.
+    
+    Args:
+        volume: 3D array of density values.
+        ray_origin: 3D vector (x, y, z).
+        ray_direction: 3D vector (x, y, z), normalized.
+        transfer_functions: Object with methods get_color(density) and get_opacity(density).
+        step_size: Float, distance between samples.
+        
+    Returns:
+        Color vector (r, g, b).
+    """
+    # 1. Determine ray bounds and total length L within the volume
+    # [G] Implementation detail: Intersect ray with volume bounding box to find t_min and t_max.
+    # L = t_max - t_min
+    # If L <= 0, return black.
+    
+    num_samples = int(L / step_size)
+    
+    accumulated_color = [0.0, 0.0, 0.0]
+    accumulated_opacity = 0.0
+    
+    for i in range(num_samples):
+        # 2. Interpolate raw volume densities
+        # Current sample position
+        t = t_min + i * step_size
+        sample_pos = ray_origin + t * ray_direction
+        
+        # Interpolate density f(s_i) from volume grid at sample_pos
+        # [G] Use trilinear interpolation on the volume grid.
+        density = interpolate_volume(volume, sample_pos)
+        
+        # 3. Classify resulting sample values via transfer functions
+        color = transfer_functions.get_color(density)
+        opacity = transfer_functions.get_opacity(density)
+        
+        # 4. Compute gradients from the density grid for shading
+        # [G] Compute gradient vector grad_f at sample_pos using central differences on the volume grid.
+        # grad_f = compute_gradient(volume, sample_pos)
+        
+        # 5. Shading follows immediately after classification
+        # [G] Compute lighting model (e.g., Phong) using grad_f as normal, light sources, and view direction.
+        # shaded_color = apply_lighting(color, grad_f, light_sources, view_direction)
+        # Note: The formula in [S1] uses C_lambda(f(s_i)), implying the color output of the transfer function
+        # is modulated by shading. The exact shading formula is not provided in the source, but the order is clear.
+        # We assume shaded_color replaces color in the compositing step.
+        final_color = shaded_color # Placeholder for shading calculation [G]
+        
+        # 6. Composite
+        # I_lambda(x,r) = sum( C * alpha * product(1 - alpha_prev) )
+        transmittance = 1.0 - accumulated_opacity
+        
+        contribution = final_color * opacity * transmittance
+        accumulated_color += contribution
+        accumulated_opacity += opacity * transmittance
+        
+        if accumulated_opacity >= 1.0:
+            break
+            
+    return accumulated_color
+```
+
+## Subtopics
+
+### [Pre-classification Shading Pipeline](7803-pre-classification-shading-pipeline.md)
+The Pre-classification Shading Pipeline (also known as Pre-DVRI) is a volume rendering method where voxel values are mapped to optical properties (color and opacity) and shaded *before* ray sample interpolation occurs. Unlike the Post-classification Shading Pipeline, which interpolates raw density values first, this approach classifies and shades the discrete grid samples, then composites them along the ray. It is distinct from post-classification primarily in its handling of partial voluming and its susceptibility to blurring at high image resolutions.
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of samples per ray and the number of rays (pixels).
+*   **Memory Complexity:** Linear with respect to the volume size for storage.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales with image resolution and volume size.
+*   **Strengths:** Avoids blurriness at high image resolutions (zoomed viewing or wide perspectives) because fine details in transfer functions are expressed in the final image [S1].
+*   **Limitations:** Susceptible to false colors due to the partial volume effect, where interpolated densities are classified as materials not present at the sample location [S1]. Prior segmentation to avoid false colors can introduce severe staircasing artifacts [S1].
+*   **When to use:** When high-resolution detail preservation is critical and partial volume artifacts are acceptable or can be mitigated.
+*   **When not:** When partial volume effects cause unacceptable false colors and segmentation is not feasible or introduces too much noise.
+
+## Background
+The Post-classification Shading Pipeline, also termed Post-DVRI (post-shaded DVRI), was described in the context of comparing popular volume rendering algorithms [S1]. It is one of the two common optical models for volume rendering, depending on the order of classification/interpolation components [S1]. The algorithms differ mostly in the way interpolation and sampling is performed and also how interpolations are avoided in less relevant or irrelevant volume regions [S1].
+
+## Sources
+[S1] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29

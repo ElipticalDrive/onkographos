@@ -1,0 +1,206 @@
+# Face Direction and Quad Geometry
+
+Also called: FaceDir, Index Generation, Quad Position Generation, UV Generation, Standard Vertex Buffer Rendering (Pipeline B/C)
+
+## Overview
+This method defines the geometric primitives for voxel face meshing by mapping six axis-aligned face directions to explicit vertex positions, indices, and UV coordinates. It solves the problem of converting abstract voxel face data into a renderable triangle strip or indexed triangle list suitable for standard GPU pipelines. It differs from [Texture Atlas UV Mapping](4238-texture-atlas-uv-mapping.md) by handling the raw spatial positioning and winding order logic, whereas the sibling method handles texture coordinate lookup and packing.
+
+## How it works
+**Inputs:**
+- `face_dir`: An enum representing the six face directions (XNeg, XPos, YNeg, YPos, ZNeg, ZPos).
+- `voxel`: The minimum-corner voxel coordinates `[u32; 3]` in padded chunk space.
+- `width`, `height`: The dimensions of the quad in voxel units (typically 1.0 for standard voxels, but stored as `u32` for scaling).
+- `chunk_world_pos`: The world-space translation offset for the chunk.
+- `flip_u`, `flip_v`: Boolean flags for UV orientation.
+
+**Outputs:**
+- `vertices`: A buffer of vertex structs containing position `(x, y, z)` and UV `(u, v)`.
+- `indices`: A buffer of 6 indices forming two triangles per quad.
+
+**Data Structures:**
+1.  **FaceDir Enum**: Mapped to `u8` discriminants.
+    -   `XNeg = 0`, `XPos = 1`, `YNeg = 2`, `YPos = 3`, `ZNeg = 4`, `ZPos = 5`.
+    -   These discriminants correspond to indices in a `[Vec<Quad>; 6]` buffer.
+2.  **Quad Struct**:
+    -   `voxel`: `[u32; 3]` (minimum-corner voxel in padded chunk coordinates).
+    -   `width`: `u32`.
+    -   `height`: `u32`.
+3.  **Vertex Struct**:
+    -   `x`, `y`, `z`: `float`.
+    -   `u`, `v`: `float`.
+
+**Step-by-Step Generation:**
+
+1.  **Normal Calculation**: Determine the integer normal vector $\mathbf{n}$ for the `face_dir`.
+    -   `XNeg`: $[-1, 0, 0]$
+    -   `XPos`: $[1, 0, 0]$
+    -   `YNeg`: $[0, -1, 0]$
+    -   `YPos`: $[0, 1, 0]$
+    -   `ZNeg`: $[0, 0, -1]$
+    -   `ZPos`: $[0, 0, 1]$
+
+2.  **Axis Identification**: Determine the local U and V axes relative to the face normal.
+    -   `normal_axis()`: Returns 0 for X faces, 1 for Y faces, 2 for Z faces.
+    -   `u_axis()`: Returns 2 (Z) for X faces, 2 (Z) for Y faces, 0 (X) for Z faces.
+    -   `v_axis()`: Returns 1 (Y) for X faces, 0 (X) for Y faces, 1 (Y) for Z faces.
+
+3.  **Quad Position Generation**: Calculate the world-space positions of the four vertices.
+    -   Let $\mathbf{origin}$ be the base position. If `is_positive()` (face direction is XPos, YPos, or ZPos), add $1.0$ to the coordinate corresponding to `normal_axis()`. Otherwise, use the `voxel` coordinate directly.
+    -   Let $w$ be `width` and $h$ be `height`.
+    -   Vertex 0 (min_u_min_v): $\mathbf{origin}$
+    -   Vertex 1 (max_u_min_v): $\mathbf{origin} + w \cdot \mathbf{axis\_vec}(u\_axis())$
+    -   Vertex 2 (min_u_max_v): $\mathbf{origin} + h \cdot \mathbf{axis\_vec}(v\_axis())$
+    -   Vertex 3 (max_u_max_v): $\mathbf{origin} + w \cdot \mathbf{axis\_vec}(u\_axis()) + h \cdot \mathbf{axis\_vec}(v\_axis())$
+    -   *Note*: In some implementations, world position is computed as `basePos + faceVertices[face][i] + translation`, where `translation` is the chunk world position [S2, unofficial].
+
+4.  **Index Generation**: Determine winding order and generate indices.
+    -   Base winding for XNeg, YPos, ZPos is Counter-Clockwise (CCW): `[base, base+1, base+2, base+1, base+3, base+2]`.
+    -   Base winding for XPos, YNeg, ZNeg is Clockwise (CW): `[base, base+2, base+1, base+1, base+2, base+3]`.
+    -   *Alternative Static Buffer Approach*: Define a base index pattern `{0, 2, 1, 0, 3, 2}`. For each quad $i$, generate indices by adding $i \times 4$ to the base pattern. The maximum number of indices is `CHUNK_SIZE * 6 * 6` [S3, unofficial].
+
+5.  **UV Generation**: Assign texture coordinates.
+    -   Base UVs for corners: $(0,0), (0,1), (1,1), (0,0)$ corresponding to vertices 0, 1, 2, 3? No, the vertex order is min_u_min_v, max_u_min_v, min_u_max_v, max_u_max_v.
+    -   Standard UVs:
+        -   Vertex 0: $(0, 0)$
+        -   Vertex 1: $(1, 0)$
+        -   Vertex 2: $(0, 1)$
+        -   Vertex 3: $(1, 1)$
+    -   Apply flips: If `flip_u` is true, negate $u$ or swap min/max. If `flip_v` is true, negate $v$ or swap min/max. Positive faces typically flip U [S1, unofficial].
+    -   In atlas implementations, UVs are computed via `Atlas::GetUVCoords` [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_face_quad(face_dir: FaceDir, voxel: [u32, u32, u32], width: u32, height: u32, chunk_world_pos: [f32, f32, f32], flip_u: bool, flip_v: bool) -> (List[Vertex], List[u32]):
+    # 1. Determine Normal and Axes
+    if face_dir == FaceDir.XNeg:
+        normal = [-1, 0, 0]
+        normal_axis = 0
+        u_axis = 2 # Z
+        v_axis = 1 # Y
+        is_positive = False
+    elif face_dir == FaceDir.XPos:
+        normal = [1, 0, 0]
+        normal_axis = 0
+        u_axis = 2 # Z
+        v_axis = 1 # Y
+        is_positive = True
+    elif face_dir == FaceDir.YNeg:
+        normal = [0, -1, 0]
+        normal_axis = 1
+        u_axis = 0 # X
+        v_axis = 2 # Z
+        is_positive = False
+    elif face_dir == FaceDir.YPos:
+        normal = [0, 1, 0]
+        normal_axis = 1
+        u_axis = 0 # X
+        v_axis = 2 # Z
+        is_positive = True
+    elif face_dir == FaceDir.ZNeg:
+        normal = [0, 0, -1]
+        normal_axis = 2
+        u_axis = 0 # X
+        v_axis = 1 # Y
+        is_positive = False
+    elif face_dir == FaceDir.ZPos:
+        normal = [0, 0, 1]
+        normal_axis = 2
+        u_axis = 0 # X
+        v_axis = 1 # Y
+        is_positive = True
+    
+    # 2. Calculate Origin
+    origin = [float(voxel[0]), float(voxel[1]), float(voxel[2])]
+    if is_positive:
+        origin[normal_axis] += 1.0
+    
+    # Add chunk world translation
+    origin[0] += chunk_world_pos[0]
+    origin[1] += chunk_world_pos[1]
+    origin[2] += chunk_world_pos[2]
+    
+    # 3. Generate Vertices
+    # Axis vectors for X, Y, Z
+    axis_x = [1.0, 0.0, 0.0]
+    axis_y = [0.0, 1.0, 0.0]
+    axis_z = [0.0, 0.0, 1.0]
+    
+    u_vec = axis_x if u_axis == 0 else (axis_y if u_axis == 1 else axis_z)
+    v_vec = axis_x if v_axis == 0 else (axis_y if v_axis == 1 else axis_z)
+    
+    w = float(width)
+    h = float(height)
+    
+    # Vertex 0: min_u_min_v
+    v0_pos = [origin[0] + 0*u_vec[0] + 0*v_vec[0], origin[1] + 0*u_vec[1] + 0*v_vec[1], origin[2] + 0*u_vec[2] + 0*v_vec[2]]
+    v0_uv = [0.0, 0.0]
+    
+    # Vertex 1: max_u_min_v
+    v1_pos = [origin[0] + w*u_vec[0] + 0*v_vec[0], origin[1] + w*u_vec[1] + 0*v_vec[1], origin[2] + w*u_vec[2] + 0*v_vec[2]]
+    v1_uv = [1.0, 0.0]
+    
+    # Vertex 2: min_u_max_v
+    v2_pos = [origin[0] + 0*u_vec[0] + h*v_vec[0], origin[1] + 0*u_vec[1] + h*v_vec[1], origin[2] + 0*u_vec[2] + h*v_vec[2]]
+    v2_uv = [0.0, 1.0]
+    
+    # Vertex 3: max_u_max_v
+    v3_pos = [origin[0] + w*u_vec[0] + h*v_vec[0], origin[1] + w*u_vec[1] + h*v_vec[1], origin[2] + w*u_vec[2] + h*v_vec[2]]
+    v3_uv = [1.0, 1.0]
+    
+    # Apply UV flips
+    if flip_u:
+        v0_uv[0] = 1.0 - v0_uv[0]
+        v1_uv[0] = 1.0 - v1_uv[0]
+        v2_uv[0] = 1.0 - v2_uv[0]
+        v3_uv[0] = 1.0 - v3_uv[0]
+    if flip_v:
+        v0_uv[1] = 1.0 - v0_uv[1]
+        v1_uv[1] = 1.0 - v1_uv[1]
+        v2_uv[1] = 1.0 - v2_uv[1]
+        v3_uv[1] = 1.0 - v3_uv[1]
+        
+    vertices = [
+        Vertex(pos=v0_pos, uv=v0_uv),
+        Vertex(pos=v1_pos, uv=v1_uv),
+        Vertex(pos=v2_pos, uv=v2_uv),
+        Vertex(pos=v3_pos, uv=v3_uv)
+    ]
+    
+    # 4. Generate Indices
+    # Determine winding based on face direction
+    # XNeg, YPos, ZPos -> CCW: [0, 1, 2, 1, 3, 2]
+    # Others -> CW: [0, 2, 1, 1, 2, 3]
+    if face_dir in [FaceDir.XNeg, FaceDir.YPos, FaceDir.ZPos]:
+        indices = [0, 1, 2, 1, 3, 2]
+    else:
+        indices = [0, 2, 1, 1, 2, 3]
+        
+    return vertices, indices
+```
+
+## Subtopics
+
+### Static Index Buffer Generation
+Uses a pre-defined base index pattern `{0, 2, 1, 0, 3, 2}` and iterates through quads, adding an offset of `i * 4` to each index. This avoids per-quad index calculation overhead. The maximum index count is `CHUNK_SIZE * 6 * 6` [S3, unofficial].
+
+### Voxel Face Normal and Offset Mapping
+Maps an `EVoxelFace` enum to a unit normal vector and an integer offset vector for neighbor voxel access. It also provides a function to return the opposite face direction (e.g., Top <-> Bottom, North <-> South, East <-> West) [S4, unofficial].
+
+## Operating characteristics
+-   **Time Complexity**: $O(1)$ per quad. The generation involves a fixed number of arithmetic operations and array lookups.
+-   **Memory Complexity**: $O(N)$ where $N$ is the number of exposed faces. Each quad consumes 4 vertices and 6 indices.
+-   **Strengths**: Simple, deterministic, and highly cache-friendly due to regular structure. Matches standard right-handed Y-up configurations for consistent backface culling and texture orientation [S1, unofficial].
+-   **Limitations**: Generates duplicate vertices at shared edges, leading to higher memory usage and potential interpolation artifacts if normals are not shared. Does not handle texture atlasing directly (requires sibling method).
+-   **When to use**: When implementing a standard voxel renderer with explicit vertex buffers. When not to use: When vertex sharing is critical for performance (consider [Voxel Face Mesh Generation](4212-voxel-face-mesh-generation.md) variants that merge vertices).
+
+## Background
+This method is foundational to voxel meshing implementations such as `block-mesh-rs` and various custom voxel engines. It establishes the coordinate system and winding conventions that ensure textures appear upright and culling works correctly across all six face orientations.
+
+## Sources
+[S1] jameshiew/infinigen, https://github.com/jameshiew/infinigen, fetched 2026-10-27 (unofficial)
+[S2] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)
+[S3] gabkhanfig/Cube, https://github.com/gabkhanfig/Cube, fetched 2026-10-27 (unofficial)
+[S4] draquel/VoxelWorlds, https://github.com/draquel/VoxelWorlds, fetched 2026-10-27 (unofficial)

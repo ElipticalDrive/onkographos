@@ -1,0 +1,215 @@
+--- v002.md
++++ v003.md
+@@ -4,174 +4,65 @@
+ 
+ ## Overview
+-Plane Slicing is a direct volume rendering method for unstructured or curvilinear grids that approximates the volume by slicing cells into polygons on evenly spaced planes perpendicular to the X, Y, and Z axes [S1, S2][S3, unofficial]. It differs from ray casting by leveraging spatial coherence through pre-computed planar slices and from standard texture slicing by generating explicit geometry (polygons) for each cell rather than relying solely on hardware texture sampling of a 3D texture [S1, S2][S3, unofficial]. The method selects the set of slices whose axis is closest to the viewing direction and renders them back-to-front using hardware alpha blending [S1, S2][S3, unofficial].
++Plane Slicing is a volume rendering method that approximates a 3D scalar field by intersecting the volume with a dense set of parallel planes perpendicular to the X, Y, and Z axes, generating polygons via a marching cubes variant, and compositing them using hardware alpha blending [S1, S2][S3, unofficial]. It differs from [Sliced Volume Rendering](3568-sliced-volume-rendering.md) by pre-computing slices for all three axes to allow dynamic view orientation without re-slicing, and from [GPU-based Cut-off Slice Generation](948-gpu-based-cut-off-slice-generation.md) by relying on CPU-side tessellation of unstructured or structured cells into planar polygons rather than GPU-driven implicit surface extraction [S1, S2][S3, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D scalar field defined on an unstructured or curvilinear grid (cells with vertex scalar values).
+-*   **Output:** A 2D image with correct transparency and color mapping.
++**Inputs:** A 3D scalar field defined on a grid (structured or unstructured); a transfer function mapping scalar values to color and opacity.
++**Outputs:** A 2D image.
+ 
+ **Data Structures:**
+-*   **Slicing Planes:** Three sets of evenly spaced parallel planes, one set perpendicular to each axis (X, Y, Z). The number of planes is typically several hundred per axis [S1, S2][S3, unofficial].
+-*   **Polygon Arrays:** For each plane in each axis set, an array of polygons (quadrilaterals or triangles) generated from the cells intersected by that plane.
+-*   **Texture Map:** A 1D texture map storing the transfer function (mapping scalar values to RGBA) [S1, S2][S3, unofficial].
++1.  **Slicing Planes:** Three sets of evenly spaced planes, one set perpendicular to each axis (X, Y, Z). The number of planes is typically "several hundred" per axis [S1, S2].
++2.  **Polygon Arrays:** For each plane, an array of polygons (triangles or triangle strips) representing the intersection of the volume cells with that plane.
++3.  **Texture Map:** A 1D texture storing the transfer function, indexed by normalized scalar values [S1, S2][S3, unofficial].
+ 
+-**Steps:**
++**Algorithm Steps:**
+ 
+ 1.  **Preprocessing (Slicing):**
+-    *   Generate several hundred evenly spaced slicing planes perpendicular to the X, Y, and Z axes [S1, S2][S3, unofficial].
+-    *   For each cell in the grid, use a variant of the marching cubes algorithm to slice the cell incrementally into polygons on these three sets of planes [S1, S2][S3, unofficial].
+-    *   Group the resulting polygons for each slice into an array for efficient rendering [S1, S2][S3, unofficial].
+-    *   *Note:* This phase is performed once during preprocessing [S1, S2][S3, unofficial].
++    For each cell in the volume:
++    a.  Generate three planar slices, one perpendicular to the X-axis, one to the Y-axis, and one to the Z-axis [S3, unofficial].
++    b.  Use a variant of the marching cubes algorithm to slice the cell into polygons on these planes [S1, S2][S3, unofficial].
++    c.  For each resulting polygon vertex, compute its scalar value.
++    d.  Normalize the scalar value $s$ to the range $[0, 1]$ to serve as a 1D texture coordinate for the transfer function [S1, S2][S3, unofficial].
++    e.  Store the polygons in arrays grouped by their respective slice planes [S1, S2].
+ 
+-2.  **Transfer Function Mapping:**
+-    *   Normalize the scalar values of the polygon vertices to the range [0, 1] [S1, S2][S3, unofficial].
+-    *   Use these normalized values as 1D texture coordinates to sample the transfer function stored in a 1D texture map [S1, S2][S3, unofficial].
+-    *   *Optimization:* An alpha dithering technique may be applied to the texture map to expand the range of allowable opacity values for hardware with limited bit depth (e.g., 8 bits per channel), adjusting the per-slice opacity when slice plane spacing changes [S1, S2][S3, unofficial].
++2.  **Rendering Selection:**
++    a.  Determine the viewing direction vector $\vec{v}$.
++    b.  Calculate the alignment of the three axes (X, Y, Z) with $\vec{v}$.
++    c.  Select the set of slices (X, Y, or Z) whose axis is closest to the viewing direction [S1, S2][S3, unofficial]. This minimizes the angle between the slice normal and the view vector, reducing perspective distortion and improving sampling density [S1, S2][S3, unofficial].
+ 
+-3.  **Rendering Selection:**
+-    *   Determine the viewing direction.
+-    *   Select the set of slices (X, Y, or Z) whose axis is closest to the viewing direction [S1, S2][S3, unofficial].
+-
+-4.  **Rendering:**
+-    *   Render the selected polygons from back to front relative to the viewer [S1, S2][S3, unofficial].
+-    *   Use hardware-supported opacity blending (alpha blending) to composite the fragments [S1, S2][S3, unofficial].
+-    *   *Ordering:* Parent objects must be drawn back-to-front to prevent transparent objects from appearing blended in front of obscured objects, especially when different colors are involved [S5, unofficial].
+-
+-5.  **Progressive Refinement (Optional):**
+-    *   Initially render with a few slices.
+-    *   Improve resolution by rendering with more slices as time permits [S1, S2][S3, unofficial].
+-    *   Users may request a new set of slices perpendicular to any viewing direction [S1, S2][S3, unofficial].
+-
+-6.  **Anti-aliasing for Small Cells (Optional):**
+-    *   Cells that fall between slice planes or are too small to be captured by scan conversion may be rendered using anti-aliased ellipsoidal splats [S1, S2][S3, unofficial].
+-    *   Only cells above a specific volume threshold are sliced; others are splatted [S1, S2][S3, unofficial].
+-
+-**Pseudocode:**
+-
+-```python
+-# Preprocessing Phase
+-def preprocess_volume(grid, num_planes_per_axis=300):
+-    """
+-    Slices cells into polygons on evenly spaced planes perpendicular to X, Y, Z axes.
+-    """
+-    # Define planes
+-    planes_x = generate_evenly_spaced_planes(axis='X', count=num_planes_per_axis)
+-    planes_y = generate_evenly_spaced_planes(axis='Y', count=num_planes_per_axis)
+-    planes_z = generate_evenly_spaced_planes(axis='Z', count=num_planes_per_axis)
+-    
+-    # Initialize polygon arrays for each plane
+-    polygons_x = {p: [] for p in planes_x}
+-    polygons_y = {p: [] for p in planes_y}
+-    polygons_z = {p: [] for p in planes_z}
+-    
+-    # Slice each cell
+-    for cell in grid.cells:
+-        # Use marching cubes variant to slice cell on X planes
+-        for plane in planes_x:
+-            polys = slice_cell_with_plane(cell, plane)
+-            if polys:
+-                polygons_x[plane].extend(polys)
+-        
+-        # Slice each cell on Y planes
+-        for plane in planes_y:
+-            polys = slice_cell_with_plane(cell, plane)
+-            if polys:
+-                polygons_y[plane].extend(polys)
+-                
+-        # Slice each cell on Z planes
+-        for plane in planes_z:
+-            polys = slice_cell_with_plane(cell, plane)
+-            if polys:
+-                polygons_z[plane].extend(polys)
+-                
+-    return polygons_x, polygons_y, polygons_z
+-
+-def slice_cell_with_plane(cell, plane):
+-    """
+-    Slices a single cell with a single plane using a marching cubes variant.
+-    Returns a list of polygons (quads/tris).
+-    """
+-    # Implementation details of marching cubes variant for unstructured grids
+-    # Intersect cell edges with plane, generate polygons
+-    pass
+-
+-# Rendering Phase
+-def render(polygons_x, polygons_y, polygons_z, view_direction, transfer_function_texture):
+-    """
+-    Renders the selected slice set back-to-front.
+-    """
+-    # Determine closest axis
+-    axis_x_dot = abs(dot(view_direction, vector(1, 0, 0)))
+-    axis_y_dot = abs(dot(view_direction, vector(0, 1, 0)))
+-    axis_z_dot = abs(dot(view_direction, vector(0, 0, 1)))
+-    
+-    if axis_x_dot >= axis_y_dot and axis_x_dot >= axis_z_dot:
+-        selected_polygons = polygons_x
+-        axis = 'X'
+-    elif axis_y_dot >= axis_x_dot and axis_y_dot >= axis_z_dot:
+-        selected_polygons = polygons_y
+-        axis = 'Y'
+-    else:
+-        selected_polygons = polygons_z
+-        axis = 'Z'
+-        
+-    # Sort planes back-to-front relative to view
+-    sorted_planes = sort_planes_back_to_front(selected_polygons, view_direction)
+-    
+-    # Render each plane's polygons
+-    for plane in sorted_planes:
+-        polys = selected_polygons[plane]
+-        for poly in polys:
+-            # Normalize vertex scalar values to [0, 1] for texture lookup
+-            for vertex in poly.vertices:
+-                vertex.tex_coord = normalize_scalar(vertex.scalar_value)
+-            
+-            # Rasterize polygon with texture mapping
+-            rasterize_polygon(poly, transfer_function_texture)
+-            
+-            # Hardware alpha blending is handled by the graphics pipeline
+-            # glEnable(GL_BLEND)
+-            # glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+-
+-def normalize_scalar(value):
+-    """
+-    Normalizes scalar value to [0, 1] range.
+-    """
+-    # Assuming scalar range is known or normalized during preprocessing
+-    return value / max_scalar_value
+-```
++3.  **Rendering (Compositing):**
++    a.  Sort the selected slices in back-to-front order relative to the viewer [S1, S2][S3, S5, unofficial].
++    b.  For each slice, render the polygons using graphics hardware.
++    c.  Sample the transfer function texture using the normalized scalar values at the polygon vertices to determine color and opacity [S1, S2][S3, unofficial].
++    d.  Composite fragments into the frame buffer using hardware alpha blending:
++        $$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
++        where $C_{src}$ and $A_{src}$ are the color and opacity from the texture sample, and $C_{dest}$ is the current frame buffer color [S3, unofficial].
+ 
+ **Parameters:**
+-*   **Number of Slicing Planes:** Several hundred per axis (e.g., 300) [S1, S2][S3, unofficial].
+-*   **Volume Threshold:** Cells below this threshold are not sliced but may be rendered as splats [S1, S2][S3, unofficial].
++*   **Slice Density:** "Several hundred" evenly spaced planes per axis [S1, S2].
++*   **Alpha Dithering:** Used to expand the range of allowable opacity values for 8-bit hardware when slice density is high and per-slice opacity is low [S1, S2][S3, unofficial]. The texture map is adjusted for per-slice opacity when spacing changes [S1, S2][S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Small Cells:** Small cells may be missed between slice planes or during scan conversion. This is addressed by anti-aliased ellipsoidal splats for cells below a threshold [S1, S2][S3, unofficial].
+-*   **Opacity Precision:** With high slice density, per-slice opacity becomes very low, potentially below hardware precision. Alpha dithering in the texture map mitigates this [S1, S2][S3, unofficial].
+-*   **Perspective View:** Viewing ray lengths vary between slanted slice planes in perspective views, potentially requiring per-pixel opacity corrections (noted as future work) [S1, S2][S3, unofficial].
+-*   **Sorting:** Incorrect back-to-front ordering can cause transparent objects to appear in front of obscured objects, especially with different colors [S5, unofficial].
++*   **Small Cells:** Cells smaller than the slice spacing may be missed between planes or during scan conversion. The method supplements this with anti-aliased ellipsoidal splats for cells below a threshold [S1, S2][S3, unofficial].
++*   **Non-planar Faces:** Convex polyhedral cells with non-planar faces can cause sorting and scan conversion issues. A solution involves selectively subdividing such cells into tetrahedra [S1, S2][S3, unofficial].
++*   **Perspective Distortion:** In perspective views, viewing rays between slanted slice planes vary in length. The basic method does not account for this per-pixel opacity correction [S1, S2][S3, unofficial].
++*   **Ordering Importance:** Slice plane ordering is critical when drawing objects with different colors (e.g., smoke and fire) or elaborate lighting, but less critical for single-color smoke where only opacity varies [S5, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Plane Composing Algorithms](2154-plane-composing-algorithms.md)
+-Plane Composing Algorithms are a category of direct volume rendering methods that operate by compositing several slices which comprise a volumetric model. They tend to work best when the view-plane is fixed parallel to the model, so that each of the voxels being composed may be accessed on separate planes. This approach differs from ray casting by leveraging spatial coherence through slicing, often enhanced by texture-based rendering techniques.
+-
+ ### View-Oriented Planes Technique
+-A volume rendering technique using oriented planes that covers the entire data volume with a fixed number of planes [S4, unofficial]. The minimum number of planes required is equal to the number of voxels in the volume diagonal to intercept all possible voxels when the volume is rotated to maximum plane size, calculated as $\sqrt{W^2 + H^2 + D^2}$, where $W, H, D$ are volume dimensions [S4, unofficial]. For example, a volume of $181 \times 217 \times 181$ requires at least 336 planes [S4, unofficial]. This technique suffers from low performance due to insufficient optimizations; the high number of memory accesses makes the gain from alpha testing negligible [S4, unofficial]. Using 400 planes increases image quality but significantly reduces speed due to generated fragments, memory accesses, and blending operations [S4, unofficial].
++A variant using a fixed number of planes oriented to cover the entire data volume. The minimum number of planes required is equal to the number of voxels in the volume diagonal: $\sqrt{W^2 + H^2 + D^2}$, where $W, H, D$ are volume dimensions [S4, unofficial]. For a $181 \times 217 \times 181$ volume, this is 336 planes [S4, unofficial]. Using more planes (e.g., 400) improves quality but significantly reduces speed due to increased fragments, memory accesses, and blending operations, making alpha testing gains negligible [S4, unofficial].
+ 
+ ### Slice Plane Ordering
+-A rendering rule where parent objects are drawn back-to-front to prevent transparent objects from appearing blended in front of obscured objects [S5, unofficial]. Slice plane ordering is not important when drawing 3D smoke if all smoke has the same color (only opacity varies), but is important when drawing smoke and fire (different colors) or using elaborate lighting algorithms [S5, unofficial].
++A rendering rule requiring parent objects to be drawn back-to-front to prevent transparent objects from appearing blended in front of obscured objects [S5, unofficial]. This is essential for multi-color scenes (e.g., smoke and fire) or complex lighting, but not for single-color smoke [S5, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is $O(N \cdot P)$, where $N$ is the number of cells and $P$ is the number of planes per axis, as each cell is sliced against all planes [S1, S2][S3, unofficial]. Rendering is $O(M)$, where $M$ is the number of generated polygons, dominated by rasterization and blending [S1, S2][S3, unofficial].
+-*   **Memory Complexity:** $O(N \cdot P)$ to store the polygon arrays for all planes [S1, S2][S3, unofficial].
+-*   **Measured Performance:** The View-Oriented Planes Technique (a variant) with 400 planes on a $181 \times 217 \times 181$ volume significantly reduced speed due to fragments and memory accesses [S4, unofficial].
+-*   **Strengths:** Leverages hardware rasterization and blending; supports progressive refinement; handles unstructured grids [S1, S2][S3, unofficial].
+-*   **Limitations:** Preprocessing is expensive; small cells may be missed without splatting; perspective view requires opacity corrections [S1, S2][S3, unofficial].
+-*   **When to Use:** Interactive visualization of unstructured grids where view direction is known or changes slowly; when hardware blending is available [S1, S2][S3, unofficial].
+-*   **When Not to Use:** When high-quality perspective rendering with varying ray lengths is critical without post-correction; when memory is constrained due to polygon storage [S1, S2][S3, unofficial].
++*   **Time Complexity:** Preprocessing is $O(N)$ where $N$ is the number of cells, as each cell is sliced into three polygons. Rendering is $O(S)$ where $S$ is the number of selected slices.
++*   **Memory Complexity:** $O(S \cdot P)$ where $S$ is the number of slices and $P$ is the average number of polygons per slice. Storing three sets of slices triples the memory requirement compared to single-axis slicing [S1, S2][S3, unofficial].
++*   **Performance:** High performance for interactive visualization when the view direction is aligned with one of the axes. Performance degrades with perspective views due to lack of per-pixel opacity correction [S1, S2][S3, unofficial]. The View-Oriented Planes Technique suffers from low performance due to excessive memory accesses and blending [S4, unofficial].
++*   **Strengths:** Allows dynamic view orientation without re-computing slices; leverages hardware alpha blending; supports progressive refinement [S1, S2][S3, unofficial].
++*   **Limitations:** High memory usage for three axis sets; potential for gaps between slices for small cells; sorting complexity for unstructured grids [S1, S2][S3, unofficial].
+ 
+ ## Background
+-Plane Slicing was proposed by Yagel et al. [4] and detailed by Max et al. in the context of volume rendering for curvilinear and unstructured grids [S1, S2][S3, unofficial]. It was developed to address the challenges of rendering unstructured data using graphics hardware, leveraging the efficiency of polygon rasterization and alpha blending [S1, S2][S3, unofficial]. The method has been parallelized for large datasets [S1, S2][S3, unofficial].
++Plane Slicing was proposed by Yagel et al. [4] and implemented for curvilinear and unstructured grids by Max et al. in the early 2000s [S1, S2][S3, unofficial]. It was developed to address the need for interactive volume rendering of large scientific datasets, leveraging graphics hardware for compositing [S1, S2][S3, unofficial]. The method is used in scientific visualization tools for unstructured grids [S1, S2][S3, unofficial].
+ 
+ ## Sources

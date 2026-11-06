@@ -1,0 +1,193 @@
+--- v001.md
++++ v002.md
+@@ -1,16 +1,15 @@
+ # Fixed Step Ray Marching
+-
+-
++Also called: Ray Marching for Volume Integration
+ ## Overview
+-Fixed Step Ray Marching is a direct volume rendering technique that visualizes 3D scalar fields (such as fog or smoke) by casting rays from the camera and accumulating color and opacity along a fixed-distance path [S1, unofficial]. It solves the problem of rendering heterogeneous, translucent media without requiring explicit mesh extraction or adaptive traversal logic [S1, unofficial]. Unlike sibling methods that may use adaptive stepping or discrete integral approximations, this method employs a uniform step size with front-to-back compositing, often integrating gradient-based shading and transfer functions for material appearance [S4, S7, unofficial].
++Fixed Step Ray Marching is a direct volume rendering technique that visualizes 3D scalar fields (such as fog or smoke) by casting rays from the camera and accumulating color and opacity along a fixed-distance path [S1, unofficial]. It solves the problem of integrating in-scattered light and absorption along a ray using a uniform discretization [S2, unofficial]. Unlike adaptive stepping methods, it employs a constant step size with front-to-back compositing and gradient-based shading [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D density grid (e.g., VDB or sparse voxel octree), a camera ray for each pixel, a directional light vector, and rendering parameters (`step_size`, `absorption`, `max_steps`, `vol_color`).
++*   **Input:** A 3D density grid (e.g., VDB or sparse voxel octree), a camera ray for each pixel, a directional light vector, and rendering parameters (`step_size`, `absorption`, `max_steps`, `vol_color`) [S1, unofficial].
+ *   **Output:** A 2D image where each pixel contains the accumulated RGB color and opacity.
+ 
+ **Data Structures:**
+-*   **Grid:** A sparse 3D structure storing density values. Access is performed via `sample(x, y, z)` which returns the density at world coordinates.
+-*   **Scene:** Contains bounding box bounds (`bmin`, `bmax`), light direction (`light_dir`), and volume color (`vol_color`).
++*   **Grid:** A sparse 3D structure storing density values. Access is performed via `sample(x, y, z)` which returns the density at world coordinates [S1, unofficial].
++*   **Scene:** Contains bounding box bounds (`bmin`, `bmax`), light direction (`light_dir`), volume color (`vol_color`), and background color (`bg_color`) [S1, unofficial].
+ 
+ **Parameters:**
+@@ -18,5 +17,5 @@
+ *   `absorption`: Absorption coefficient multiplier. Default: 12.0 [S1, unofficial].
+ *   `max_steps`: Maximum number of steps per ray. Default: 800 [S1, unofficial].
+-*   `vol_color`: Base volume color (RGB). Default: (1.0, 0.95, 0.88) [S1, unofficial].
++*   `vol_color`: Base volume color (RGB tuple). Default: (1.0, 0.95, 0.88) [S1, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -28,5 +27,5 @@
+ 
+ 2.  **Ray Generation:**
+-    *   For each pixel $(x, y)$, compute the ray origin and direction.
++    *   For each pixel $(x, y)$, compute the ray origin and direction. Normalize the ray direction so $t$ represents physical distance [G].
+     *   Compute intersection parameters $t_{enter}$ and $t_{exit}$ with the bounding box using a ray-box intersection test [S1, unofficial].
+     *   If the ray does not intersect the box (invalid intersection), set the pixel to the background color and continue to the next pixel [S1, unofficial].
+@@ -50,5 +49,5 @@
+                 *   **Shading:**
+                     *   Normalize the gradient: $\hat{n} = \frac{\nabla d}{\|\nabla d\|}$ [S1, unofficial].
+-                    *   Compute the dot product with the light direction: $ndotl = \max(0.0, -(\hat{n}_x \cdot \text{light}_x + \hat{n}_y \cdot \text{light}_y + \hat{n}_z \cdot \text{light}_z))$ [S1, unofficial]. Note the negative sign indicates the gradient points outward, so we negate for standard lighting models or adjust light direction convention.
++                    *   Compute the dot product with the light direction: $ndotl = \max(0.0, -(\hat{n}_x \cdot \text{light}_x + \hat{n}_y \cdot \text{light}_y + \hat{n}_z \cdot \text{light}_z))$ [S1, unofficial].
+                     *   Compute the shading factor: $shade = 0.3 + 0.7 \times ndotl$ [S1, unofficial].
+                 *   **Composition:**
+@@ -72,42 +71,46 @@
+     scene: object with bmin, bmax, light_dir, vol_color, bg_color
+     grid: object with sample(x, y, z) method
+-    params: object with step_size, absorption, max_steps
++    params: object with step_size, absorption, max_steps, vol_color
+     """
+-    # 1. Setup
+-    t_enter, t_exit = ray_box_intersection(ray_origin, ray_direction, scene.bmin, scene.bmax)
++    # Normalize ray direction so t represents distance
++    ray_direction = normalize(ray_direction)
++    light_dir = normalize(scene.light_dir)
++
++    # Ray-box intersection (slab method)
++    t_enter, t_exit = ray_box_intersect(ray_origin, ray_direction, scene.bmin, scene.bmax)
+     if t_enter is None:
+         return scene.bg_color
+-    
+-    light_dir = normalize(scene.light_dir)
++
+     step_size = params.step_size
+     absorption = params.absorption
+     max_steps = params.max_steps
+-    
+-    # 2. Initialize
++    vol_color = params.vol_color  # tuple (r, g, b)
++    bg_color = scene.bg_color
++
++    # Initialize
+     t = max(t_enter, 0.001)
+     transmittance = 1.0
+-    color_r = 0.0
+-    color_g = 0.0
+-    color_b = 0.0
+-    
++    cr, cg, cb = 0.0, 0.0, 0.0
++
+     for _ in range(max_steps):
+         if t > t_exit or transmittance < 0.005:
+             break
+-            
+-        # 3. Sampling
+-        px, py, pz = ray_origin + ray_direction * t
++
++        # Sampling
++        px = ray_origin[0] + ray_direction[0] * t
++        py = ray_origin[1] + ray_direction[1] * t
++        pz = ray_origin[2] + ray_direction[2] * t
+         density = grid.sample(px, py, pz)
+-        
++
+         if density > 0.001:
+-            # Optical depth
+             ext = density * absorption * step_size
+-            
++            tr_step = exp(-ext)
++
+             # Gradient Calculation
+             h = step_size * 0.5
+-            # [G] Clamp coordinates to grid bounds before sampling
+             gx = grid.sample(px + h, py, pz) - grid.sample(px - h, py, pz)
+             gy = grid.sample(px, py + h, pz) - grid.sample(px, py - h, pz)
+             gz = grid.sample(px, py, pz + h) - grid.sample(px, py, pz - h)
+-            
++
+             # Shading
+             grad_len = sqrt(gx*gx + gy*gy + gz*gz)
+@@ -116,25 +119,39 @@
+             else:
+                 nx, ny, nz = 0.0, 0.0, 0.0
+-                
+-            ndotl = max(0.0, -(nx * light_dir.x + ny * light_dir.y + nz * light_dir.z))
++
++            ndotl = max(0.0, -(nx * light_dir[0] + ny * light_dir[1] + nz * light_dir[2]))
+             shade = 0.3 + 0.7 * ndotl
+-            
++
+             # Composition
+-            tr_step = exp(-ext)
+-            
+-            color_r += transmittance * (1.0 - tr_step) * scene.vol_color.r * shade
+-            color_g += transmittance * (1.0 - tr_step) * scene.vol_color.g * shade
+-            color_b += transmittance * (1.0 - tr_step) * scene.vol_color.b * shade
+-            
++            cr += transmittance * (1.0 - tr_step) * vol_color[0] * shade
++            cg += transmittance * (1.0 - tr_step) * vol_color[1] * shade
++            cb += transmittance * (1.0 - tr_step) * vol_color[2] * shade
+             transmittance *= tr_step
+-            
++
+         t += step_size
+-        
+-    # 4. Final Composition
+-    color_r += transmittance * scene.bg_color.r
+-    color_g += transmittance * scene.bg_color.g
+-    color_b += transmittance * scene.bg_color.b
+-    
+-    return clamp(color_r, 0.0, 1.0), clamp(color_g, 0.0, 1.0), clamp(color_b, 0.0, 1.0)
++
++    # Final Composition
++    cr += transmittance * bg_color[0]
++    cg += transmittance * bg_color[1]
++    cb += transmittance * bg_color[2]
++
++    return clamp(cr, 0.0, 1.0), clamp(cg, 0.0, 1.0), clamp(cb, 0.0, 1.0)
++
++def ray_box_intersect(origin, direction, bmin, bmax):
++    """Standard slab method AABB intersection."""
++    tmin = float('-inf')
++    tmax = float('inf')
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < bmin[i] or origin[i] > bmax[i]:
++                return None, None
++        else:
++            t1 = (bmin[i] - origin[i]) / direction[i]
++            t2 = (bmax[i] - origin[i]) / direction[i]
++            if t1 > t2: t1, t2 = t2, t1
++            if t1 > tmin: tmin = t1
++            if t2 < tmax: tmax = t2
++            if tmin > tmax: return None, None
++    return tmin, tmax
+ ```
+ 
+@@ -157,15 +174,16 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of steps per ray (`max_steps`). The complexity is linear with respect to resolution and step count.
+-*   **Memory Complexity:** $O(1)$ per ray for the marching loop state, plus the memory required to store the volume grid.
+-*   **Measured Performance:** In benchmarks using the Lyr.jl library on CUDA hardware, Fixed Step Ray Marching with HDDA (Hierarchical Data-Driven Acceleration) and caching showed significant speedups over linear GPU rendering and CPU baselines. For example, on a "fire.vdb" complex sparse grid, HDDA+cache rendering was significantly faster than linear GPU rendering, with speedup factors varying by grid complexity [S1, unofficial].
+-*   **Strengths:** Simple implementation, predictable memory usage, easy to parallelize on GPUs, suitable for real-time applications when combined with acceleration structures like HDDA.
+-*   **Limitations:** Fixed step size can lead to aliasing or slow convergence if the step size is too large, or excessive computation if too small. Does not handle complex scattering or participating media with high optical depth efficiently without many steps.
+-*   **When to use:** Real-time fog, smoke, or simple volumetric effects where performance is critical and high-fidelity scattering is not required.
+-*   **When not to use:** Scenes requiring high-fidelity light transport, complex scattering, or highly heterogeneous volumes where adaptive stepping would be more efficient.
++*   **Time Complexity:** $O(N \cdot M)$ per frame, where $N$ is the number of pixels and $M$ is `max_steps` [G].
++*   **Memory Complexity:** $O(1)$ auxiliary per ray for the marching loop state, plus the memory required to store the volume grid [G].
++*   **Measured Performance:** Benchmarks in Lyr.jl on CUDA hardware show that Hierarchical Data-Driven Acceleration (HDDA) with caching yields significant speedups over linear GPU rendering and CPU baselines, with factors varying by grid sparsity and resolution [S1, unofficial].
++*   **Strengths:** Predictable memory access patterns, easy GPU parallelization, suitable for real-time applications when combined with acceleration structures [G].
++*   **Limitations:** Fixed step size may cause aliasing if too large or excessive computation if too small. Assumes homogeneous media between steps; accurate integration for highly heterogeneous media requires advanced techniques like Woodcock tracking [S2, unofficial].
++*   **When to use:** Real-time fog, smoke, or simple volumetric effects where performance is critical and high-fidelity scattering is not required [G].
++*   **When not to use:** Scenes requiring high-fidelity light transport, complex multi-scattering, or highly heterogeneous volumes where adaptive stepping would be more efficient [S2, unofficial].
+ 
+ ## Background
+-Fixed Step Ray Marching is a foundational technique in direct volume rendering, originating from the need to efficiently visualize 3D scalar fields such as medical imaging data or atmospheric effects. It is implemented in various graphics libraries and frameworks, including Lyr.jl, which provides a volume ray marcher for fog volumes using fixed step size, exponential absorption, and gradient-based shading [S1, unofficial]. The method is widely used in real-time graphics engines and scientific visualization tools due to its simplicity and parallelizability.
++Fixed Step Ray Marching is a foundational technique in direct volume rendering, originating from the need to efficiently visualize 3D scalar fields such as medical imaging data or atmospheric effects. It is implemented in various graphics libraries and frameworks, including Lyr.jl, which provides a volume ray marcher for fog volumes using fixed step size, exponential absorption, and gradient-based shading [S1, unofficial]. The method is widely used in real-time graphics engines and scientific visualization tools due to its simplicity and parallelizability [G].
+ 
+ ## Sources
+-[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)+[S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
++[S2] Volume Rendering (Path Tracing & Real-Time), https://computergraphics.stackexchange.com/questions/4412, fetched 2026-10-30 (unofficial)

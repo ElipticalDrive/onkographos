@@ -1,0 +1,203 @@
+# Elliptic Case Triangulation
+
+Also called: Elliptic SDF Triangulation, Paraboloid-based Triangulation
+
+## Overview
+Elliptic Case Triangulation generates a mesh approximation for the zero-level set of a quadratic Signed Distance Field (SDF) primitive where the quadratic form is positive definite (elliptic). It solves the problem of converting a continuous quadratic surface into a discrete triangular mesh suitable for ray marching or rasterization by mapping an optimal equilateral prototype triangle from a canonical paraboloid space to the target surface space. It is distinguished from the Hyperbolic Case Triangulation by its use of a paraboloid prototype ($g = \bar{x}^2 + \bar{y}^2$) rather than a hyperbolic one ($h = \bar{x}^2 - \bar{y}^2$), and from general meshing methods by its reliance on the principal axis transformation to preserve error bounds analytically.
+
+## How it works
+**Inputs:**
+*   Quadratic function $f(x, y)$ defined by a symmetric matrix $C$ and linear/constant terms (neglected for the shape, used for position).
+*   Error tolerance $\epsilon > 0$.
+*   Cluster region boundary (convex polygon or implicit boundary).
+*   Cluster centroid $c$.
+
+**Outputs:**
+*   A set of triangles forming a triangulation of the surface within the cluster region.
+
+**Data Structures:**
+*   **Prototype Triangle:** Defined in canonical coordinates $(\bar{x}, \bar{y})$.
+*   **Transformation Matrix $G$:** $2 \times 2$ matrix mapping canonical to physical coordinates.
+*   **Edge Vectors:** Two vectors defining the regular triangulation lattice.
+
+**Steps:**
+
+1.  **Eigen-decomposition:** Compute the eigenvalues $\lambda_1, \lambda_2$ and normalized eigenvectors $e_1 = (e_{11}, e_{12})^T, e_2 = (e_{21}, e_{22})^T$ of the quadratic matrix $C$. For the elliptic case, $\lambda_1 > 0$ and $\lambda_2 > 0$. [S1, unofficial]
+
+2.  **Handle Negative Eigenvalues:** If the surface orientation requires it (or if eigenvalues are negative in a generalized context), replace $f$ with $-f$ to ensure positive eigenvalues. This flips the "above/below" placement logic but keeps the geometry identical. [S1, unofficial]
+
+3.  **Construct Transformation Matrix $G$:**
+    The transformation maps the canonical paraboloid $g(\bar{x}, \bar{y}) = \bar{x}^2 + \bar{y}^2$ to the quadratic form $f$. The matrix $G$ is constructed from the eigenvectors scaled by the inverse square roots of the eigenvalues:
+    $$
+    G = \begin{pmatrix}
+    \frac{1}{\sqrt{\lambda_1}} e_{11} & \frac{1}{\sqrt{\lambda_2}} e_{21} \\
+    \frac{1}{\sqrt{\lambda_1}} e_{12} & \frac{1}{\sqrt{\lambda_2}} e_{22}
+    \end{pmatrix}
+    $$
+    Note: The source text contains a typo in equation (2.9) writing $\frac{1}{\sqrt{1}}$ and $\frac{1}{\sqrt{2}}$ instead of $\frac{1}{\sqrt{\lambda_1}}$ and $\frac{1}{\sqrt{\lambda_2}}$. The context confirms the scaling by eigenvalues is required to normalize the quadratic form to identity. [S1, unofficial]
+
+4.  **Define Prototype Triangle:**
+    In the canonical space $(\bar{x}, \bar{y})$, the optimal triangle is equilateral with a circumscribed circle radius $R = \sqrt{2\epsilon}$. The vertices are:
+    $$
+    v_1 = \begin{pmatrix} -\sqrt{2\epsilon} \\ 0 \end{pmatrix}, \quad
+    v_2 = \begin{pmatrix} \sqrt{0.5\epsilon} \\ \sqrt{1.5\epsilon} \end{pmatrix}, \quad
+    v_3 = \begin{pmatrix} \sqrt{0.5\epsilon} \\ -\sqrt{1.5\epsilon} \end{pmatrix}
+    $$
+    This triangle maximizes area for a given maximal error $\epsilon$. The error is $\epsilon$ at the center and vertices. [S1, unofficial]
+
+5.  **Transform Edges:**
+    Only two edges of the prototype triangle need to be transformed to define the lattice. Let $u = v_2 - v_1$ and $v = v_3 - v_1$. Transform these vectors:
+    $$
+    U = G u, \quad V = G v
+    $$
+    These vectors $U$ and $V$ define the basis for the regular triangulation in the physical space. [S1, unofficial]
+
+6.  **Generate Triangulation:**
+    *   Start at the cluster centroid $c$.
+    *   Generate a regular grid of points using integer combinations of $U$ and $V$: $p_{i,j} = c + i U + j V$.
+    *   Form triangles from the grid points.
+    *   **Placement Offset:**
+        *   If eigenvalues are positive (standard elliptic), place vertices **below** the surface by $\epsilon$. This means the actual vertex position $P$ is calculated such that $f(P) = -\epsilon$ (or geometrically shifted in the normal direction). [S1, unofficial]
+        *   If eigenvalues were negative (handled by flipping $f$), place vertices **above** the surface by $\epsilon$. [S1, unofficial]
+    *   **Boundary Culling:** Only include triangles that lie **entirely** within the cluster region. Triangles intersecting the boundary are discarded, leaving untriangulated gaps at the cluster edges. [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def elliptic_case_triangulation(quadratic_matrix_C, centroid, cluster_boundary, epsilon):
+    """
+    Generates triangulation for elliptic quadratic SDF.
+    quadratic_matrix_C: 2x2 symmetric matrix [[c11, c12], [c12, c22]]
+    centroid: (cx, cy)
+    cluster_boundary: function is_inside(x, y) returning bool
+    epsilon: float, error tolerance
+    """
+    # 1. Eigen-decomposition
+    # For 2x2 symmetric matrix, eigenvalues are roots of characteristic polynomial
+    c11, c12, c22 = quadratic_matrix_C[0][0], quadratic_matrix_C[0][1], quadratic_matrix_C[1][1]
+    trace = c11 + c22
+    det = c11 * c22 - c12 * c12
+    discriminant = math.sqrt(trace**2 - 4 * det)
+    
+    lambda1 = (trace + discriminant) / 2
+    lambda2 = (trace - discriminant) / 2
+    
+    # Ensure positive eigenvalues (elliptic case)
+    # If lambda1 or lambda2 are negative, the surface is not elliptic or requires f -> -f
+    # For this method, we assume elliptic (positive definite).
+    if lambda1 <= 0 or lambda2 <= 0:
+        raise ValueError("Not an elliptic case (eigenvalues must be positive)")
+
+    # Compute normalized eigenvectors
+    # For lambda1: (c11 - lambda1)*x + c12*y = 0
+    if abs(c12) > 1e-9:
+        e1 = (1, -(c11 - lambda1) / c12)
+    else:
+        e1 = (0, 1) # Fallback
+    norm_e1 = math.sqrt(e1[0]**2 + e1[1]**2)
+    e1 = (e1[0]/norm_e1, e1[1]/norm_e1)
+
+    # For lambda2: orthogonal to e1
+    e2 = (-e1[1], e1[0])
+
+    # 2. Construct G matrix
+    # G = [[ e1[0]/sqrt(l1), e2[0]/sqrt(l2) ],
+    #      [ e1[1]/sqrt(l1), e2[1]/sqrt(l2) ]]
+    inv_sqrt_l1 = 1.0 / math.sqrt(lambda1)
+    inv_sqrt_l2 = 1.0 / math.sqrt(lambda2)
+    
+    G = [
+        [e1[0] * inv_sqrt_l1, e2[0] * inv_sqrt_l2],
+        [e1[1] * inv_sqrt_l1, e2[1] * inv_sqrt_l2]
+    ]
+
+    # 3. Prototype triangle vertices in canonical space
+    sqrt_eps = math.sqrt(epsilon)
+    v1 = (-math.sqrt(2) * sqrt_eps, 0)
+    v2 = (math.sqrt(0.5) * sqrt_eps, math.sqrt(1.5) * sqrt_eps)
+    v3 = (math.sqrt(0.5) * sqrt_eps, -math.sqrt(1.5) * sqrt_eps)
+
+    # 4. Transform edge vectors U and V
+    def mat_vec_mul(M, v):
+        return (M[0][0]*v[0] + M[0][1]*v[1], M[1][0]*v[0] + M[1][1]*v[1])
+
+    u = (v2[0] - v1[0], v2[1] - v1[1])
+    v = (v3[0] - v1[0], v3[1] - v1[1])
+    
+    U = mat_vec_mul(G, u)
+    V = mat_vec_mul(G, v)
+
+    # 5. Generate Triangles
+    # Determine grid range to cover cluster
+    # Estimate max extent from centroid to boundary
+    # For simplicity, iterate a reasonable range and cull
+    triangles = []
+    
+    # Heuristic range for grid indices
+    # Calculate distance from centroid to boundary in U and V directions
+    # This is complex; for implementation, we assume a bounding box or iterative expansion
+    # Here we use a fixed large range for demonstration, relying on culling
+    max_idx = 100 
+    
+    for i in range(-max_idx, max_idx):
+        for j in range(-max_idx, max_idx):
+            # Base point
+            p0_x = centroid[0] + i * U[0] + j * V[0]
+            p0_y = centroid[1] + i * U[1] + j * V[1]
+            
+            p1_x = p0_x + U[0]
+            p1_y = p0_y + U[1]
+            
+            p2_x = p0_x + V[0]
+            p2_y = p0_y + V[1]
+            
+            # Check if triangle is entirely inside cluster
+            if (cluster_boundary(p0_x, p0_y) and 
+                cluster_boundary(p1_x, p1_y) and 
+                cluster_boundary(p2_x, p2_y)):
+                
+                # Apply offset: vertices below surface by epsilon
+                # In SDF context, this means shifting along the gradient
+                # For quadratic approximation, the shift is approximately epsilon / |grad|
+                # However, the source specifies "place vertices below... by distance epsilon"
+                # This usually implies the geometric offset in the normal direction.
+                # For exact implementation, one would compute the normal at the projected point.
+                # Here we store the canonical-relative positions and apply offset later or assume
+                # the mesh represents the surface at f(x) = -epsilon.
+                
+                triangles.append(((p0_x, p0_y), (p1_x, p1_y), (p2_x, p2_y)))
+                
+    return triangles
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The square roots of eigenvalues can be small, leading to large scaling factors in $G$. Use double precision. [S1, unofficial]
+*   **Boundary Gaps:** The method explicitly leaves gaps at cluster boundaries. Post-processing or blending with neighboring clusters is required for a watertight mesh. [S1, unofficial]
+*   **Degenerate Input:** If eigenvalues are zero, the surface is not elliptic (parabolic or planar). The method fails. [S1, unofficial]
+
+## Subtopics
+
+### Hyperbolic Case Triangulation
+Uses prototype $h = \bar{x}^2 - \bar{y}^2$. Choose when eigenvalues have opposite signs. [Link](4072-hyperbolic-case-triangulation.md)
+
+### Parabolic Case Triangulation
+Uses prototype $p = \bar{x}^2$. Choose when one eigenvalue is zero. [Link](4073-parabolic-case-triangulation.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of triangles in the cluster. Generating the grid is linear in the area covered.
+*   **Memory Complexity:** $O(N)$ to store the triangle list.
+*   **Performance:** The method is analytically optimal for error bound $\epsilon$ within the elliptic region. It avoids iterative meshing algorithms.
+*   **Strengths:** Exact error control, simple construction, regular structure.
+*   **Limitations:** Only works for positive definite quadratic forms. Leaves boundary gaps. Requires eigen-decomposition.
+*   **When to use:** When rendering quadratic SDF primitives (ellipsoids, ellipsoidal blobs) with strict error bounds.
+*   **When not to use:** For hyperbolic surfaces (use Hyperbolic Case) or if a watertight mesh is required without post-processing (gaps are inherent).
+
+## Background
+The method originates from multiresolution modeling for scientific visualization, specifically in the context of approximating quadratic surfaces for volume rendering. It is detailed in the work by [S1, unofficial]. The approach leverages the rotational symmetry of the canonical paraboloid to define an optimal equilateral triangle, then maps this triangle to the general elliptic case via principal axis transformation.
+
+## Sources
+[S1] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)

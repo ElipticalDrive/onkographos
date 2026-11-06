@@ -1,0 +1,156 @@
+Follow-up to #12737, which was closed after #12766 fixed the shape it reported. On CUDA, a writable texture's surface access takes its x-coordinate scale and the _convert suffix from the texture's [format] attribute. #12766 fixed the cas...
+
+CUDA: `[format]` of a writable texture is not recovered for array elements, returned textures, runtime-selected and mixed-call arguments (wrong surface stride) · Issue #13580 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+CUDA: [format] of a writable texture is not recovered for array elements, returned textures, runtime-selected and mixed-call arguments (wrong surface stride) #13580
+New issue
+Copy link
+New issue
+Copy link
+Open
+Bug
+Open
+CUDA: [format] of a writable texture is not recovered for array elements, returned textures, runtime-selected and mixed-call arguments (wrong surface stride)#13580
+Bug
+Copy link
+Assignees
+Labels
+cudareproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Milestone
+Q1 2027 (Winter)
+Description
+nv-slang-bot
+bot
+opened on Oct 12, 2026
+Issue body actions
+Follow-up to #12737, which was closed after #12766 fixed the shape it reported.
+On CUDA, a writable texture's surface access takes its x-coordinate scale and the _convert suffix from the texture's [format] attribute. #12766 fixed the case where a formatted global is passed straight to a function parameter. For the shapes below, the access site still doesn't find the [format]. The access then uses the element-type size and the plain non-converting intrinsic. Nothing is reported, and -target ptx also succeeds.
+Reproducer
+```
+[format("r16f")] RWTexture2D<float> gA;
+[format("r16f")] RWTexture2D<float> gB;
+[format("r16f")] RWTexture2D<float> gArr[2];
+uniform uint c;
+
+RWTexture2D<float> getTex() { return gA; }
+void write2(RWTexture2D<float> x, RWTexture2D<float> y)
+{
+    x[uint2(3, 0)] = 3.0f;
+    y[uint2(4, 0)] = 4.0f;
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void computeMain()
+{
+    gA[uint2(0, 0)] = 0.0f;                  // direct: correct
+    gArr[1][uint2(1, 0)] = 1.0f;             // (1) array element
+    getTex()[uint2(2, 0)] = 2.0f;            // (2) function-returned texture
+    write2(gA, c != 0 ? gA : gB);            // (3) runtime-selected argument, (4) mixed call
+}
+```
+slangc repro.slang -target cuda -entry computeMain -stage compute at master b00d9e4 emits:
+```
+surf2Dwrite<float>((3.0f), (x_0), ((_S1)).x * 4, ...);                                   // (3)/(4) inside write2
+surf2Dwrite<float>((4.0f), (y_0), ((_S2)).x * 4, ...);
+surf2Dwrite_convert<float>((0.0f), (globalParams_0->gA_0), ((_S3)).x * 1, ...);          // direct, correct
+surf2Dwrite<float>((1.0f), (globalParams_0->gArr_0[int(1)]), ((_S4)).x * 4, ...);        // (1)
+surf2Dwrite<float>((2.0f), (getTex_0()), ((_S5)).x * 4, ...);                            // (2)
+```
+All four textures are r16f, so every access should be the same as the direct one: surf2Dwrite_convert<float>(…, x * 1, …). Instead, the other writes request a non-converting 32-bit access at byte 4 * x (not run on a GPU). Reads are affected the same way. o[0] = gArr[1][uint2(1, 0)] emits surf2Dread<float>(…, x * 4, …), while the direct read gA[uint2(1, 0)] emits surf2Dread_convert<float>(…, x * 2, …).
+The cases:
+Array element. gArr[1] (and gArr[i]) is wrong even with direct access, not only through a parameter. The access receives getElement(load(get_field_addr(%globalParams, %gArr)), 1), and the [format] sits on the gArr field key. _findImageFormatDecoration (source/slang/slang-intrinsic-expand.cpp:216-232) recognizes only load(get_field_addr(...)) and a decoration on the instruction itself, so it misses that key.
+Function-returned texture. getTex() stays a call on CUDA, so the access sees a call result with no format.
+Runtime-selected argument. c != 0 ? gA : gB is not rooted in a single global, so write2 isn't specialized for it. In this reproducer both textures are r16f, so one stride would be correct. With formats that need different strides or conversion paths, one fixed access can't serve both.
+Mixed call. canSpecializeCall (source/slang/slang-ir-specialize-function-call.cpp:197-276) is all-or-nothing. When one argument that wants specialization isn't suitable, it returns false (:267). The call is then left alone, and x loses its format too, even though its argument gA could be folded.
+#12766 made CUDA writable-texture parameters want specialization (source/slang/slang-ir-specialize-resources.cpp:95-102). For the shapes here, the relevant suitable argument is one rooted in a global through an access chain (isParamSuitableForSpecialization, slang-ir-specialize-function-call.cpp:13). The comment at slang-intrinsic-expand.cpp:191-214 describes the remaining limitation. resolveTextureFormat (source/slang/slang-emit.cpp:2329-2336) runs only for GLSL, SPIR-V and WGSL.
+For comparison, -target spirv was run on (1), (2) and (4) as separate files. Each emits a validated R16f image. (3) fails with E56004 ("opaque type in local variable"). That error is about the opaque local, not about texture formats.
+docs/cuda-target.md:167 is now out of date. It says the call getValue(g_texture) accesses the texture erroneously because t has no format attribute. Since #12766, the call is specialized to the global, and master emits surf2Dread_convert<float2> with the rg16f stride. The warning at :176, that a parameter-side [format] is never checked against callers, still applies.
+Expected
+Each access should use the format its texture was declared with. When a texture is formatted but the format can't be determined at the access site, or the formats that reach it disagree, the compiler should report it instead of silently using the element-type stride. Textures with no [format] keep today's rule: the format is assumed to match the element type.
+Possible directions (not prototyped):
+When recovering the format, look through access chains (getElement/getElementPtr over load(get_field_addr(...))). That covers (1).
+Specialize the arguments that can be folded even when another argument can't. That covers the foldable half of (4).
+(2) and (3) need either a diagnostic or a representation that carries the format through returns and selections. Recover texture [format] across function parameters on CUDA (#12737) #12766 chose specialization over putting the format in the texture type because of multi-call-site ambiguity, so the second option is a design change, not a direct fix.
+Notes
+These shapes also reproduce with v2025.4; the original through-parameter shape was fixed by Recover texture [format] across function parameters on CUDA (#12737) #12766.
+Related:
+Support format conversion on RWTexture in CUDA #11088 tracks CUDA format conversions the prelude doesn't implement. Here the format is lost before the conversion is chosen.
+Draft PR Fix #12627: lower partial RWTexture texel writes on CUDA to a surface read-modify-write #13363 adds E56007 for partial-texel accesses the prelude can't express. Open proposal CUDA: spell RWTexture Load/Store surface accesses once, through kIROp_ImageLoad/kIROp_ImageStore #13364 would extend that kind of check to every CUDA image access. A lost format looks like a plain access, so such checks would not catch it.
+Draft Lower RWTexture atomics to PTX sured on CUDA/PTX (#12636) #12672 (texel atomics, CUDA/PTX: no-result RWTexture2D<uint>.InterlockedAdd emits a pointer atomic on CUsurfObject #12636) uses the same stride computation and cites CUDA: wrong surface byte-stride when a formatted RWTexture is accessed through a function parameter #12737 for this limitation.
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+Activity
+nv-slang-bot
+added
+reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+cuda
+on Oct 12, 2026
+nv-slang-bot
+added the
+Bug
+issue type on Oct 12, 2026
+tangent-vector
+changed the issue type from
+Bug
+to
+Language Maturity
+on Oct 14, 2026
+tangent-vector
+changed the issue type from
+Language Maturity
+to
+Bug
+on Oct 14, 2026
+tangent-vector
+changed the issue type from
+Bug
+to
+Language Maturity
+on Oct 14, 2026
+tangent-vector
+changed the issue type from
+Language Maturity
+to
+Bug
+on Oct 14, 2026
+tangent-vector commented on Oct 14, 2026
+tangent-vector
+on Oct 14, 2026
+Contributor
+More actions
+I think we need to decompose this issue into two topics:
+A more near-term fix to the user-observable problem that the code doesn't behave as expected.
+A longer-term effort to address how we are handling format information for resource types like RWTexture2D
+From what I can tell, the RWTexture2D type already has a generic argument to represent the format. Hopefully we are already taking a [format(...)] attribute on a declaration and using it refine a plain RWTexture2D<float4> type over to one that includes an explicit format value (I guess that would be RWTexture2D<float4, 0, format>). We should be consistently translating [format(...)] attributes over to generic arguments, after which the Slang type system sees things like passing a texture with a format as the argument for a function parameter without a format (as part of coercion). If that isn't the case already, then some front-end fixes are required (and may need to be tracked as distinct issues).
+Given this near-term approach, the problem at hand in an issue like this is then that we need to propagate an inferred format on read-write resource types from callers to callees (potentially leading to specialized versions of the callee being created), in an approach similar to how we propagate address spaces at present. The propagation/inference needs to be completed before whatever point expands the surface-access logic in the callee. Any failure to propagate format information (or ambiguity in the format) needs to be detected and diagnosed.
+Those are my thoughts on the short-term fix topic. I'll follow up later with thoughts on the longer-term fix for the large class of issues here...
+👀React with 👀1Reacted by nv-slang-bot
+tangent-vector
+self-assigned this
+on Oct 14, 2026
+tangent-vector
+added this to the Q1 2027 (Winter) milestone on Oct 14, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+tangent-vector
+Labels
+cudareproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Type
+Bug
+Projects
+No projects
+Milestone
+Q1 2027 (Winter)
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

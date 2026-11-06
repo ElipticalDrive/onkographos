@@ -3,7 +3,7 @@
 Also called: OpenVDB/NanoVDB rendering, NanoVDB encoding, OpenVDB structure
 
 ## Overview
-This method enables GPU volume rendering of large, sparse volumetric datasets by combining offline fixed-rate lossy compression on the CPU (using OpenVDB) with fast, low-overhead on-the-fly decompression and sampling on the GPU (using NanoVDB) [S2, unofficial]. It solves the problem of rendering volumes that exceed single-GPU memory capacity by significantly reducing the memory footprint while maintaining random access patterns suitable for incoherent workloads like path tracing [S2, unofficial]. Unlike hierarchical space-skipping approaches which show diminishing returns with RGBA transfer functions, this method typically employs a uniform majorant grid for traversal acceleration to facilitate direct comparison with dense texture rendering [S1, S2, unofficial].
+This method enables GPU volume rendering of large, sparse volumetric datasets by combining offline fixed-rate lossy compression on the CPU (using OpenVDB) with fast, low-overhead on-the-fly decompression and sampling on the GPU (using NanoVDB) [S2, unofficial]. It solves the problem of rendering volumes that exceed single-GPU memory capacity by significantly reducing the memory footprint while maintaining random access patterns suitable for incoherent workloads like path tracing [S2, unofficial]. Unlike hierarchical space-skipping approaches which show diminishing returns with RGBA transfer functions, this method typically employs a uniform majorant grid for traversal acceleration to facilitate direct comparison with dense texture rendering [S1][S2, unofficial].
 
 ## How it works
 The method consists of two phases: CPU-side compression/conversion and GPU-side rendering [S2, unofficial].
@@ -48,22 +48,22 @@ Each node (Node5, Node4, Node3) contains [S3, unofficial]:
 *   Compression: BC7 block compression is applied to the 3D texture, resulting in 2 bits per voxel [S3, unofficial].
 
 ### Compression Algorithm (CPU)
-The fixed-rate encoding algorithm achieves target compression ratios by encoding homogeneous blocks as nearly empty and voxelizing non-empty regions [S1, unofficial].
+The fixed-rate encoding algorithm achieves target compression ratios by encoding homogeneous blocks as nearly empty and voxelizing non-empty regions [S1].
 
 1.  **Background Value Identification:** Compute a histogram of the input volume's values. The most frequent value is assumed to be the background value $B$ [S2, unofficial].
 2.  **Bricking:** Divide the volume conceptually into bricks sized to match the leaf node dimensions (e.g., $32 \times 32 \times 32$) [S2, unofficial].
 3.  **Brick Analysis:** For each brick, compute the minimum and maximum voxel values $[lo, hi]$ [S2, unofficial].
 4.  **Brick Sorting:** Sort bricks in ascending order of distance to $B$ (most similar first) [S2, unofficial]. Three metrics are defined [S2, unofficial]:
-    *   $f_1 = \min(|lo - B|, |hi - B|)$ (closest point-in-range) [S1, unofficial]
-    *   $f_2 = \max(|lo - B|, |hi - B|)$ (farthest point-in-range) [S1, unofficial]
-    *   $f_3 = |(lo + hi)/2 - B|$ (median distance) [S1, unofficial]
+    *   $f_1 = \min(|lo - B|, |hi - B|)$ (closest point-in-range) [S1]
+    *   $f_2 = \max(|lo - B|, |hi - B|)$ (farthest point-in-range) [S1]
+    *   $f_3 = |(lo + hi)/2 - B|$ (median distance) [S1]
     *   Evaluation suggests $f_2$ and $32 \times 32 \times 32$ brick size generally yield better quality [S2, unofficial].
-5.  **Voxel Activation:** Determine the target number of bricks to activate based on quality $q$ [S2, unofficial]. Iterate through the sorted list starting from the brick *least* similar to the background (end of list) [S2, unofficial]. Activate all voxels in the current brick by setting their original values [S1, unofficial]. Continue until the target number of bricks is processed [S2, unofficial]. Voxels in non-selected bricks remain inactive (implicitly background) [S2, unofficial].
+5.  **Voxel Activation:** Determine the target number of bricks to activate based on quality $q$ [S2, unofficial]. Iterate through the sorted list starting from the brick *least* similar to the background (end of list) [S2, unofficial]. Activate all voxels in the current brick by setting their original values [S1]. Continue until the target number of bricks is processed [S2, unofficial]. Voxels in non-selected bricks remain inactive (implicitly background) [S2, unofficial].
 6.  **Finalization:** Prune the resulting OpenVDB tree for memory optimization [S2, unofficial].
 
 ### GPU Rendering and Decompression
 1.  **Conversion:** Convert the compressed OpenVDB structure to NanoVDB [S2, unofficial]. This creates a linear, pointer-free layout [S2, unofficial]. Copy this block to GPU memory [S2, unofficial].
-2.  **Traversal Acceleration:** Use a uniform majorant grid for traversal acceleration [S2, unofficial]. Hierarchical traversal was found to offer diminishing returns for this representation [S1, S2, unofficial].
+2.  **Traversal Acceleration:** Use a uniform majorant grid for traversal acceleration [S2, unofficial]. Hierarchical traversal was found to offer diminishing returns for this representation [S1][S2, unofficial].
 3.  **On-the-Fly Decompression:** During rendering, GPU threads sample the volume using NanoVDB accessor and sampler functions [S2, unofficial]. These functions handle tree traversal and voxel value retrieval directly on the GPU [S2, unofficial].
     *   Supported sampling: Nearest-neighbor and trilinear interpolation [S2, unofficial].
     *   If a sample location falls into an inactive region, the background value $B$ is returned [S2, unofficial].
@@ -104,7 +104,7 @@ def compress_volume(volume, W, H, D, quality):
     # 5. Voxel Activation
     openvdb_tree = create_empty_openvdb_tree()  # [G] Standard OpenVDB tree creation
     
-    # Activate extreme corners explicitly to preserve world bounds [S1, unofficial]
+    # Activate extreme corners explicitly to preserve world bounds [S1]
     openvdb_tree.set((0, 0, 0), volume.value_at((0, 0, 0)))
     openvdb_tree.set((W-1, H-1, D-1), volume.value_at((W-1, H-1, D-1)))
 
@@ -135,27 +135,27 @@ def render_vdb(nanovdb_ptr, ray, uniform_grid):
 ```
 
 ### Parameters
-*   **Compression Rates:** 1:8, 1:4, 1:2, 1:1 [S1, unofficial]. 1:1 means zero percent targeted reduction (lossless activation of non-empty voxels) [S1, unofficial].
+*   **Compression Rates:** 1:8, 1:4, 1:2, 1:1 [S1]. 1:1 means zero percent targeted reduction (lossless activation of non-empty voxels) [S1].
 *   **Quality:** A user-defined parameter between 0 and 1 that controls the compression rate. It determines the percentage of bricks to fully activate [S2, unofficial].
 *   **NanoVDB Overhead:** Modest, approximately 10% for large datasets compared to raw data size [S2, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Lossless Compression:** At 1:1 rate, the algorithm only activates voxels not considered empty, resulting in an actual size lower than the original even if target reduction is zero [S1, unofficial].
+*   **Lossless Compression:** At 1:1 rate, the algorithm only activates voxels not considered empty, resulting in an actual size lower than the original even if target reduction is zero [S1].
 *   **High Compression:** High compression rates may lead to missing features if the transfer function highlights regions deemed 'background' and thus deactivated during compression, resulting in block artifacts [S2, unofficial].
-*   **Corner Voxels:** The extreme (minimum and maximum) corners of the VDB must be explicitly activated even if they match the background value. If not, OpenVDB excludes them, causing the VDB tree's aspect ratio (world bound size) to differ from the original volume [S1, unofficial].
-*   **Tile Activation:** Activating a whole tile on a level higher than leaf node level 0 (using `addTile`) sets all voxels in that tile to the same value, providing no additional compression benefit from hierarchical encoding [S1, unofficial].
+*   **Corner Voxels:** The extreme (minimum and maximum) corners of the VDB must be explicitly activated even if they match the background value. If not, OpenVDB excludes them, causing the VDB tree's aspect ratio (world bound size) to differ from the original volume [S1].
+*   **Tile Activation:** Activating a whole tile on a level higher than leaf node level 0 (using `addTile`) sets all voxels in that tile to the same value, providing no additional compression benefit from hierarchical encoding [S1].
 *   **Animation:** Each animation frame has a unique Node5 vector. Switching frames changes only the starting point of structure traversal [S3, unofficial].
 
 ## Operating characteristics
 *   **Time Complexity:** Rendering performance is competitive with hardware-accelerated 3D texture sampling [S2, unofficial].
-*   **Memory Complexity:** Significant memory savings compared to dense textures [S2, unofficial]. For the Galaxy dataset (108 GB raw), VDB achieves 14 GB at 1:8 rate [S1, unofficial]. NanoVDB overhead is ~10% for large datasets [S2, unofficial].
+*   **Memory Complexity:** Significant memory savings compared to dense textures [S2, unofficial]. For the Galaxy dataset (108 GB raw), VDB achieves 14 GB at 1:8 rate [S1]. NanoVDB overhead is ~10% for large datasets [S2, unofficial].
 *   **Measured Performance:**
-    *   Galaxy dataset: VDB achieves 34.8 FPS on 1 GPU vs 18.6 FPS for dense textures on 3 GPUs [S1, unofficial].
-    *   Aneurism dataset: VDB achieves 55.8 FPS on 1 GPU vs 75.9 FPS for dense textures on 1 GPU [S1, unofficial].
-    *   WDAS dataset: VDB achieves 24.2 FPS on 1 GPU vs 25.4 FPS for dense textures on 1 GPU [S1, unofficial].
+    *   Galaxy dataset: VDB achieves 34.8 FPS on 1 GPU vs 18.6 FPS for dense textures on 3 GPUs [S1].
+    *   Aneurism dataset: VDB achieves 55.8 FPS on 1 GPU vs 75.9 FPS for dense textures on 1 GPU [S1].
+    *   WDAS dataset: VDB achieves 24.2 FPS on 1 GPU vs 25.4 FPS for dense textures on 1 GPU [S1].
 *   **Scaling:** Enables rendering of datasets requiring multiple GPUs uncompressed on a single GPU [S2, unofficial].
 *   **Strengths:** Low memory footprint, random access suitable for path tracing, competitive performance with dense textures [S2, unofficial].
-*   **Limitations:** Block artifacts at high compression; hierarchical traversal offers diminishing returns [S1, S2, unofficial].
+*   **Limitations:** Block artifacts at high compression; hierarchical traversal offers diminishing returns [S1][S2, unofficial].
 
 ## Background
 *   **Origin:** The method was proposed by Stefan Zellmann, Milan Jaros, Jefferson Amstutz, and Ingo Wald in 2025 [S2, unofficial].
@@ -163,6 +163,6 @@ def render_vdb(nanovdb_ptr, ray, uniform_grid):
 *   **Usage:** Used for scientific visualization of large, sparse volumetric data [S2, unofficial].
 
 ## Sources
-[S1] GPU Volume Rendering with Hierarchical Compression Using VDB, https://arxiv.org/pdf/2504.04564, fetched 2026-10-26 (unofficial)
+[S1] GPU Volume Rendering with Hierarchical Compression Using VDB, https://arxiv.org/pdf/2504.04564, fetched 2026-10-26
 [S2] GPU Volume Rendering with VDB Compression - emergentmind.com, https://www.emergentmind.com/papers/2504.04564, fetched 2026-10-26 (unofficial)
 [S3] | Evolve, https://www.evolvebenchmark.com/blog-posts/intro-to-rendering-of-animated-volumetric-models-in-breda, fetched 2026-10-27 (unofficial)

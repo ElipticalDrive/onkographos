@@ -3,78 +3,83 @@
 Also called: Chunk Management, Chunk Spawning and Despawn
 
 ## Overview
-Chunk Lifecycle Management is the core mechanism for maintaining the set of active volumetric chunks in a streaming world, ensuring that only chunks within the player's vicinity are resident in memory. It solves the problem of memory exhaustion and unnecessary I/O by explicitly spawning new chunks as the player approaches and despawning distant chunks as they move away. It differs from [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md) by serving as the foundational logic for set-difference operations, whereas the radius variant optimizes the geometric query; it differs from [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md) by focusing on the state transition of individual chunk objects rather than scanning discrete spatial regions for load/unload triggers.
+Chunk Lifecycle Management is the core synchronization mechanism in chunk-based volume streaming that ensures the set of loaded chunks matches the set of chunks required by the current camera position. It solves the problem of memory leaks and visual pop-in by explicitly identifying which chunks must be spawned (loaded) and which must be despawned (unloaded) each frame. It sets itself apart from [Synchronous Chunk Loading](3904-synchronous-chunk-loading.md) by focusing on the *decision* logic of what to load/unload rather than the blocking I/O operations, and from [Chunk-Based World Management & Asynchronous Loading](6440-chunk-based-world-management-asynchronous-loading.md) by providing the foundational state-transition logic that higher-level managers orchestrate.
 
 ## How it works
 **Inputs:**
-- Player position (or camera position) in world coordinates.
-- Render distance radius $R$.
-- Current set of existing chunks, stored in a hash map `chunks` mapping `ChunkPosition` to `Chunk` object.
-- Chunk grid resolution (implicit in `ChunkPosition` definition).
+- Current camera/player position.
+- Render distance (radius) defining the visible volume.
+- Current world state: a collection of existing chunk objects and their positions.
 
 **Outputs:**
-- Updated `chunks` hash map with new entries added and removed entries deleted.
-- List of `newChunks` for terrain generation.
-- List of `chunksToDelete` for cleanup.
+- A list of chunks to spawn (newly created objects).
+- A list of chunks to despawn (objects to destroy).
+- Updated world state containing only chunks within the render distance.
 
 **Data Structures:**
-- `ChunkPosition`: A tuple or struct representing the integer grid coordinates $(x, y, z)$ of a chunk.
-- `chunks`: A hash map (dictionary) where keys are `ChunkPosition` and values are `Chunk` objects.
-- `_nearbyPositionsSet`: A set of `ChunkPosition` objects calculated to be within the render distance.
-- `_chunksAlreadyExist`: A set of `ChunkPosition` keys extracted from the `chunks` hash map.
+- `chunks`: A hash map (dictionary) mapping `ChunkPosition` (key) to `Chunk` object (value).
+- `nearbyPositionsSet`: A hash set of `ChunkPosition` objects representing all chunk coordinates within the render distance.
+- `chunksAlreadyExist`: A hash set of `ChunkPosition` objects representing keys present in `chunks`.
 
 **Steps:**
-1. **Calculate Nearby Positions:** Determine all integer chunk positions $(x, y, z)$ that fall within a spherical volume of radius $R$ centered at the player's position. Store these in `_nearbyPositionsSet` [S1, unofficial].
-2. **Identify Existing Chunks:** Extract all keys from the `chunks` hash map into `_chunksAlreadyExist` [S1, unofficial].
-3. **Despawn Distant Chunks:** Iterate through each position $p$ in `_chunksAlreadyExist`. If $p$ is not present in `_nearbyPositionsSet`, the chunk is too far away. Remove the chunk object from the `chunks` hash map, remove it from frame draw calls, and add $p$ to `chunksToDelete` [S1, unofficial].
-4. **Spawn Nearby Chunks:** Iterate through each position $p$ in `_nearbyPositionsSet`. If $p$ is not present in `_chunksAlreadyExist`, the chunk does not exist. Create a new `Chunk` object, insert it into the `chunks` hash map with key $p$, and add the new chunk to `newChunks` [S1, unofficial].
-5. **Generate Terrain:** For every chunk in `newChunks`, initiate asynchronous or synchronous terrain generation using `Chunk::MultithreadGenerateTerrain` [S1, unofficial].
+1. **Identify Nearby Positions:** Calculate all integer chunk coordinates within the spherical render distance centered on the player's current position. Store these in `nearbyPositionsSet` [S1, unofficial].
+2. **Identify Existing Chunks:** Populate `chunksAlreadyExist` with all keys currently present in the `chunks` hash map [S1, unofficial].
+3. **Despawn Logic:** Iterate through `chunksAlreadyExist`. For each position:
+   - If the position is *not* in `nearbyPositionsSet`, the chunk is outside the render distance.
+   - Remove the chunk object from the `chunks` map.
+   - Remove the chunk from frame draw calls (e.g., render list).
+   - Add the position to a `chunksToDelete` list for cleanup [S1, unofficial].
+4. **Spawn Logic:** Iterate through `nearbyPositionsSet`. For each position:
+   - If the position is *not* in `chunksAlreadyExist`, the chunk does not exist.
+   - Create a new `Chunk` object.
+   - Insert the object into the `chunks` hash map with the position as the key.
+   - Add the new chunk to a `newChunks` list [S1, unofficial].
+5. **Generation:** For all chunks in `newChunks`, trigger terrain or data generation (e.g., `Chunk::MultithreadGenerateTerrain`) [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def manage_chunk_lifecycle(player_pos, render_distance, chunks):
-    # Step 1: Identify nearby chunk positions
-    # Assumes a function that returns all integer grid positions within radius R of player_pos
-    nearby_positions = ChunkPositionsWithinRenderDistance(player_pos, render_distance)
-    nearby_set = set(nearby_positions)
+    # Step 1: Identify nearby positions
+    nearby_positions = get_chunk_positions_within_radius(player_pos, render_distance)
+    nearby_positions_set = set(nearby_positions)
     
-    # Step 2: Get positions of chunks that currently exist
+    # Step 2: Identify existing chunks
     existing_positions = set(chunks.keys())
     
     chunks_to_delete = []
     new_chunks = []
     
-    # Step 3: Iterate through existing chunks; delete if not nearby
+    # Step 3: Despawn logic
     for pos in existing_positions:
-        if pos not in nearby_set:
-            # Remove from hash map and draw calls
-            del chunks[pos]
+        if pos not in nearby_positions_set:
+            # Remove from world
+            chunk_obj = chunks.pop(pos)
+            remove_from_draw_list(chunk_obj)
             chunks_to_delete.append(pos)
             
-    # Step 4: Iterate through nearby positions; create if not existing
+    # Step 4: Spawn logic
     for pos in nearby_positions:
         if pos not in existing_positions:
-            # Create new chunk object
-            new_chunk = Chunk(pos)
+            # Create new chunk
+            new_chunk = create_chunk(pos)
             chunks[pos] = new_chunk
             new_chunks.append(new_chunk)
             
-    # Step 5: Generate terrain for new chunks
+    # Step 5: Generation
     for chunk in new_chunks:
-        chunk.MultithreadGenerateTerrain()
+        chunk.generate_terrain_multithreaded()
         
     return chunks_to_delete, new_chunks
 ```
 
 **Parameters:**
-- `render_distance`: The radius $R$ in world units. Typical values depend on the scale of the volume and performance constraints. Not given in the sources.
+- `render_distance`: The radius in chunk units. Typical values depend on the game's scale and hardware capabilities [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Precision:** Floating-point player positions must be correctly converted to integer chunk grid coordinates. [G] Ensure consistent rounding or floor/ceil logic when mapping world coordinates to chunk indices.
-- **Boundaries:** If the volume has hard boundaries, `ChunkPositionsWithinRenderDistance` must clamp results to valid volume extents. Not given in the sources.
-- **Degenerate Input:** If `render_distance` is zero, only the chunk containing the player should exist. Not given in the sources.
+**Edge Cases:**
+- **Precision:** Floating-point player positions must be correctly converted to integer chunk coordinates to avoid jitter or missed chunks at boundaries [G].
+- **Degenerate Input:** If `render_distance` is zero, all chunks outside the immediate player chunk should be despawned [G].
 
 ## Subtopics
 
@@ -82,21 +87,21 @@ def manage_chunk_lifecycle(player_pos, render_distance, chunks):
 Manages chunk instantiation and removal based on a spherical render distance around the player, using set difference operations to determine which chunks to load or unload. It builds on [Chunk Lifecycle Management](3987-chunk-lifecycle-management.md) by replacing static or scanner-based triggers with a continuous distance check against the player's current position. Unlike [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md), which scans discrete regions, this method evaluates every chunk within a calculated bounding box relative to the player to maintain a consistent spherical visibility volume.
 
 ### [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md)
-The Chunk Loading/Unloading Scanner identifies which chunks in a volumetric world need to be loaded or unloaded based on the camera's current and previous positions, using offset grids to define load and unload areas. It differs from [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md) by explicitly tracking state transitions between frames via previous position comparison, and from [Budget Plans](5497-budget-plans.md) by using a fixed-radius offset strategy rather than a dynamic priority queue.
+The Chunk Loading/Unloading Scanner is a spatial management technique that determines which chunks of a volume dataset need to be loaded into memory or unloaded based on the camera's current and previous positions. It solves the problem of efficiently streaming large voxel worlds by identifying a "load area" and an "unload area" using offset grids, then computing the symmetric difference between these areas to generate precise queue updates. Unlike [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md), which focuses on procedural generation triggers, or [Budget Plans](5497-budget-plans.md), which manage resource limits, the Scanner focuses on the geometric transition logic between camera states. It differs from [Chunk Visibility Culling](5031-chunk-visibility-culling.md) by operating on a flat list of chunks and performing binary load/unload decisions based on distance thresholds rather than frustum intersection tests.
 
 ### [Budget Plans](5497-budget-plans.md)
 Budget Plans provide a system for managing chunk loading policies in chunk-based volume streaming, replacing the previous single octree-focused policy with configurable presets for exploration, whole-volume visualization, and frame-rate maintenance. This method allows an application to switch loading strategies mid-session to balance visual fidelity against performance constraints, addressing the limitation where a single policy was "right for exploring and wrong for a whole-volume figure or for holding a frame rate while rotating". It sets itself apart from sibling methods like [Dynamic Chunk Generation with Radius](4002-dynamic-chunk-generation-with-radius.md) by focusing on high-level policy presets and precedence rules rather than geometric radius calculations, and from [Chunk Loading/Unloading Scanner](4404-chunk-loading-unloading-scanner.md) by managing the *intent* of the load queue rather than the mechanical scanning of the spatial hierarchy.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N + M)$, where $N$ is the number of existing chunks and $M$ is the number of chunks within the render distance. Set lookups are $O(1)$ on average.
-- **Memory Complexity:** Proportional to the number of active chunks. The hash map stores references to all active chunks.
-- **Strengths:** Simple logic, easy to implement, deterministic behavior based on distance.
-- **Limitations:** Does not account for occlusion or view frustum culling beyond the radius. May load chunks that are not visible if the radius is large. Not given in the sources for specific performance metrics.
-- **When to use:** When a simple, distance-based streaming strategy is sufficient and performance constraints allow for loading all chunks within a fixed radius.
-- **When not to use:** When occlusion culling is critical, or when memory is extremely constrained and a more sophisticated priority-based system (like [Budget Plans](5497-budget-plans.md)) is needed.
+- **Time Complexity:** $O(N)$ where $N$ is the number of chunks in the render distance, as it iterates through existing and nearby positions [S1, unofficial].
+- **Memory Complexity:** $O(M)$ where $M$ is the number of loaded chunks, storing chunk objects and position sets [S1, unofficial].
+- **Strengths:** Simple to implement; guarantees no chunks are loaded outside the render distance; prevents memory leaks by explicit despawning [S1, unofficial].
+- **Limitations:** Can cause "pop-in" if generation is slow; does not account for occlusion or frustum culling beyond distance; may load chunks that are not immediately visible [G].
+- **When to use:** Ideal for simple voxel worlds where render distance is the primary culling factor [S1, unofficial].
+- **When not to use:** When complex visibility culling or budget constraints are required [S1, unofficial].
 
 ## Background
-Originating from the Cube project, this method provides a basic but effective framework for managing chunk lifecycles in volumetric worlds [S1, unofficial]. It serves as the foundational logic for more advanced streaming techniques that build upon set-difference operations to optimize chunk loading and unloading.
+Originated in open-source voxel engine implementations, specifically cited in the `Cube` repository by gabkhanfig [S1, unofficial]. It represents a fundamental approach to chunk management before more advanced asynchronous or budget-based systems were introduced.
 
 ## Sources
 [S1] gabkhanfig/Cube, https://github.com/gabkhanfig/Cube, fetched 2026-10-27 (unofficial)

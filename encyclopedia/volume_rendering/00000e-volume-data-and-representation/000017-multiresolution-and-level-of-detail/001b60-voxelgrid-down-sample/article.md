@@ -1,27 +1,30 @@
 # VoxelGrid Down Sample
 
 ## Overview
-VoxelGrid Down Sample reduces the resolution of a voxel grid by a specified integer factor using max pooling [S1, unofficial]. It solves the problem of generating lower-resolution representations for multiresolution volume rendering pipelines [S1, unofficial]. It is distinguished from its siblings by its simplicity and deterministic nature, relying on block-wise maximum operations rather than learned parameters or complex geometric decompositions [S1, unofficial][S2, unofficial].
+VoxelGrid Down Sample reduces the resolution of a volumetric voxel grid by a specified integer factor using max pooling [S1, unofficial]. It solves the problem of managing memory and computational load for high-resolution volumes by generating a coarser representation [S1, unofficial]. It differs from its siblings, such as [Mipmap Generation](2602-mipmap-generation.md) which often uses averaging or Gaussian blurring for smooth transitions, by strictly selecting the maximum value within local neighborhoods, which preserves high-intensity features and sharp boundaries [S1, unofficial][S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 - Input: A `VoxelGrid` object containing a 3D data array `data` of shape $(N_x, N_y, N_z)$, a location `loc`, and a scale `scale`.
-- Output: A new `VoxelGrid` object with resolution reduced by `factor` in each dimension, retaining the original `loc` and `scale`.
+- Output: A new `VoxelGrid` object with data of shape $(N_x/f, N_y/f, N_z/f)$, retaining the original `loc` and `scale`.
 
 **Data Structures:**
 - `VoxelGrid`:
-  - `data`: numpy array of shape $(N_x, N_y, N_z)$.
-  - `loc`: 3D vector representing the grid's origin.
-  - `scale`: scalar or 3D vector representing voxel size.
+  - `data`: 3D NumPy array (or equivalent dense tensor) of voxel values.
+  - `loc`: Spatial origin or bounding box definition.
+  - `scale`: Voxel size (physical units per voxel).
 
 **Parameters:**
-- `factor`: Integer downsampling factor. Must divide the resolution dimensions evenly.
+- `factor` (int): The downsampling factor $f$. Must be an integer divisor of the grid dimensions. Typical value: 2 [S1, unofficial][S2, unofficial].
 
 **Steps:**
-1. **Validate Divisibility**: Check if the current resolution dimensions $(N_x, N_y, N_z)$ are divisible by `factor`. If $N_i \pmod{\text{factor}} \neq 0$ for any dimension $i \in \{x, y, z\}$, raise a `ValueError` [S1, unofficial].
-2. **Downsample**: Apply a max-pooling operation over non-overlapping blocks of size $(\text{factor}, \text{factor}, \text{factor})$ [S1, unofficial][S2, unofficial]. The new data value for each block is the maximum value within that block [S1, unofficial].
-   $$ \text{new\_data}[i, j, k] = \max_{\substack{0 \le dx < \text{factor} \\ 0 \le dy < \text{factor} \\ 0 \le dz < \text{factor}}} \text{data}[i \cdot \text{factor} + dx, j \cdot \text{factor} + dy, k \cdot \text{factor} + dz] $$
-3. **Construct Output**: Create a new `VoxelGrid` instance. Set its `data` to the downsampled array. Copy `loc` and `scale` from the input grid [S1, unofficial].
+1. **Validate Divisibility**: Check if the current resolution dimensions $(N_x, N_y, N_z)$ are divisible by `factor`. If $N_i \pmod f \neq 0$ for any dimension $i \in \{x, y, z\}$, raise a `ValueError` [S1, unofficial].
+2. **Block Reduction**: Apply a max-pooling operation over non-overlapping blocks of size $f \times f \times f$. For each output voxel at index $(i, j, k)$, the value is the maximum of the input voxels in the corresponding block:
+   $$
+   \text{new\_data}[i, j, k] = \max \{ \text{data}[i \cdot f + dx, j \cdot f + dy, k \cdot f + dz] \mid dx, dy, dz \in [0, f-1] \}
+   $$
+   This is implemented as `block_reduce(self.data, (factor,)*3, np.max)` [S1, unofficial].
+3. **Construct Output**: Create a new `VoxelGrid` instance using `new_data`, the original `loc`, and the original `scale` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -34,11 +37,11 @@ def voxel_grid_down_sample(voxel_grid, factor):
     Downsample a VoxelGrid by a factor using max pooling.
     
     Args:
-        voxel_grid: An object with attributes .data (numpy array), .loc, .scale.
-        factor: Integer downsampling factor.
+        voxel_grid: Object with attributes .data (3D array), .loc, .scale.
+        factor (int): Downsampling factor.
         
     Returns:
-        A new VoxelGrid with reduced resolution.
+        VoxelGrid: New downsampled grid.
     """
     data = voxel_grid.data
     shape = data.shape
@@ -49,46 +52,88 @@ def voxel_grid_down_sample(voxel_grid, factor):
             raise ValueError(f"Resolution {dim_size} is not divisible by factor {factor}")
             
     # Step 2: Downsample using max pooling
-    # Reshape to group voxels into blocks of size (factor, factor, factor)
-    # Shape becomes (Nx/factor, factor, Ny/factor, factor, Nz/factor, factor)
+    # Reshape to group voxels into blocks of size factor x factor x factor
+    # and then take the max over the block dimensions.
+    # Example for factor=2: shape (N, N, N) -> (N/2, 2, N/2, 2, N/2, 2)
+    # Then reshape to (N/2, N/2, N/2, 2, 2, 2) and max over last 3 dims.
+    
+    # Generic implementation for any factor f:
+    f = factor
+    new_shape = tuple(s // f for s in shape)
+    
+    # Reshape to separate block indices and intra-block indices
+    # We need to interleave the block dimension and the stride dimension
     reshaped = data.reshape(
-        shape[0] // factor, factor,
-        shape[1] // factor, factor,
-        shape[2] // factor, factor
+        new_shape[0], f,
+        new_shape[1], f,
+        new_shape[2], f
     )
     
-    # Take max over the pooling dimensions (axes 1, 3, 5)
-    new_data = np.max(reshaped, axis=(1, 3, 5))
+    # Move the intra-block dimensions to the end
+    reshaped = reshaped.transpose(0, 2, 4, 1, 3, 5)
     
-    # Step 3: Return new VoxelGrid
-    # Assuming VoxelGrid is a simple class or namedtuple-like structure
+    # Reshape to combine intra-block dimensions into a single last dimension
+    # and compute max over that dimension
+    reshaped = reshaped.reshape(
+        new_shape[0],
+        new_shape[1],
+        new_shape[2],
+        -1  # f * f * f
+    )
+    
+    new_data = np.max(reshaped, axis=-1)
+    
+    # Step 3: Return new VoxelGrid with same loc and scale
     return VoxelGrid(data=new_data, loc=voxel_grid.loc, scale=voxel_grid.scale)
 ```
 
 **Edge Cases and Pitfalls:**
-- **Non-divisible Resolution**: If the grid dimensions are not multiples of the factor, the method fails. Implementers must ensure input grids are padded or cropped before downsampling [S1, unofficial].
-- **Data Type**: The output data type should match the input to preserve precision, though max pooling is generally stable [S1, unofficial].
+- **Non-divisible Dimensions**: The method requires exact divisibility. If the grid size is not a multiple of the factor, it fails rather than cropping or padding [S1, unofficial].
+- **Feature Preservation**: Max pooling preserves the highest intensity value in a block. This is beneficial for density or occupancy grids but may introduce artifacts in smooth scalar fields where averaging is preferred [S2, unofficial].
+- **Precision**: Standard floating-point max operations are used. No special precision handling is noted [S1, unofficial].
 
 ## Subtopics
 
 ### [Volume Resampling and Overflow Guard](1772-volume-resampling-and-overflow-guard.md)
-A procedure to resample volumes to a target shape and enforce a maximum voxel count to prevent downstream memory overflow [1772-volume-resampling-and-overflow-guard.md]. It addresses memory constraints that simple downsampling might not explicitly handle if the target resolution is not predefined by a factor.
+This method resamples a candidate volume grid to a target shape while enforcing a maximum voxel count to prevent downstream memory overflow. It differs from sibling methods by combining a strict safety cap with precise trilinear interpolation and a fallback dimension-decrement mechanism to guarantee reduction even when rounding constraints interfere.
 
 ### [Grid Deformation](5372-grid-deformation.md)
 Grid Deformation is a preprocessing technique applied prior to data reduction in volume rendering compression. It transforms the input data grid according to user-defined regions to better preserve salient features during subsequent downsampling. It is an orthogonal approach to hierarchical models like wavelets, reporting improved visual results compared to pure downsampling and wavelet-based methods.
 
 ### [Optimization-based Downsampling](5825-optimization-based-downsampling.md)
-Optimization-based downsampling is a method for generating low-resolution microflake volume representations that preserve the visual appearance of the reference high-resolution volume, specifically accounting for microscopic self-shadowing effects. It distinguishes itself from simple max-pooling or linear resampling by iteratively optimizing scattering parameters via large-scale training rendering to match the target appearance.
+Optimization-based downsampling is a method for reducing the resolution of microflake volumes that preserves appearance by iteratively optimizing scattering parameters to match a high-resolution reference. It solves the problem of geometric aliasing and shadowing artifacts in aggregated microgeometry, distinguishing itself from naive averaging or simple SGGX approximation by explicitly accounting for shadowing effects through image-space error minimization.
+
+### [Pre-processing for Half Resolution](6436-pre-processing-for-half-resolution.md)
+This method constructs a half-resolution volumetric representation from a full-resolution input to reduce data size while preserving visual quality and avoiding the information loss associated with direct subsampling. It differs from its sibling [VoxelGrid Down Sample](1014-voxelgrid-down-sample.md), which uses max pooling, by explicitly filling "holes" (transparent voxels in the downsampled grid) with median values from adjacent full-resolution neighbors to prevent occlusion artifacts. Unlike [Frequency-Domain Downsampling](6578-frequency-domain-downsampling.md), which relies on low-pass filtering in the frequency domain, this approach operates directly in the spatial domain using a specific subsampling pattern and local median replacement.
+
+### Max-Pooling Layer
+A layer that applies a max filter to non-overlapping sub-regions of the input to downsample the input and reduce parameters in subsequent encoder layers. Contains no trainable parameters [S2, unofficial]. Filter Size is typically 2x2 with a Stride of 2, applied in layers with input channels 64, 32, and 8 [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N)$, where $N$ is the number of voxels in the input grid, as each voxel is visited exactly once during the max operation.
-- **Memory Complexity**: $O(N / \text{factor}^3)$ for the output grid. The input grid must remain in memory during the operation.
-- **Strengths**: Deterministic, fast, and simple to implement. Preserves the maximum intensity, which is often desirable for density or opacity fields [S1, unofficial][S2, unofficial].
-- **Limitations**: Loses all information except the maximum value in each block. Not suitable for data where mean or average intensity is critical. Requires divisible resolutions [S1, unofficial].
-- **When to use**: When generating MIPmaps or lower LOD levels for volume rendering where the highest density/opacity is the most important feature to preserve [S1, unofficial].
+**Time and Memory Complexity:**
+- Time: $O(N)$ where $N$ is the number of input voxels, as each voxel is visited once to compute the block maximum [S1, unofficial].
+- Memory: $O(N/f^3)$ for the output grid, plus temporary memory for reshaping operations [S1, unofficial].
+
+**Measured Performance:**
+- Not given in the sources.
+
+**Scaling:**
+- Scales linearly with input size. The factor $f$ determines the reduction in spatial dimensions [S1, unofficial][S2, unofficial].
+
+**Strengths and Limitations:**
+- Strengths: Simple implementation, fast execution, preserves high-intensity features (e.g., smoke density, surface boundaries) [S1, unofficial][S2, unofficial].
+- Limitations: Requires grid dimensions to be divisible by the factor; does not smooth data, which may lead to aliasing in continuous fields [S1, unofficial][S2, unofficial].
+
+**When to Use:**
+- Use when preserving sharp high-value features is critical and grid dimensions allow for exact division [S1, unofficial].
+- Use as a building block in deep learning architectures for volume autoencoders [S2, unofficial].
+
+**When Not to Use:**
+- Use when smooth interpolation is required (use [Mipmap Generation](2602-mipmap-generation.md) or [Pre-processing for Half Resolution](6436-pre-processing-for-half-resolution.md) instead) [S1, unofficial].
+- Use when grid dimensions are not multiples of the desired factor (use [Volume Resampling and Overflow Guard](1772-volume-resampling-and-overflow-guard.md) instead) [S1, unofficial].
 
 ## Background
-The method is derived from the `differentiable_volumetric_rendering` repository by autonomousvision [S1, unofficial]. It is also conceptually aligned with max-pooling layers used in deep learning autoencoders for volume compression, where max-pooling is applied to non-overlapping sub-regions to downsample input and reduce parameters in subsequent encoder layers [S2, unofficial].
+The method originates from the implementation of differentiable volumetric rendering pipelines, specifically within the `autonomousvision/differentiable_volumetric_rendering` repository [S1, unofficial]. It is also a standard component in deep learning architectures for compressed volume rendering, such as autoencoders, where max-pooling layers are used to reduce spatial dimensions and parameter counts [S2, unofficial].
 
 ## Sources
 [S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

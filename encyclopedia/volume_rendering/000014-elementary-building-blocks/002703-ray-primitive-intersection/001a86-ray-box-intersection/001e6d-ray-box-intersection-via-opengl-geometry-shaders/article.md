@@ -3,102 +3,145 @@
 Also called: CubeIntersection, Front/Back Hit Textures
 
 ## Overview
-This method computes the entry and exit points of rays intersecting a volume's axis-aligned bounding box (AABB) by rendering the box geometry to textures using OpenGL geometry shaders [S1, unofficial]. It solves the problem of providing fragment shaders with precise start and end texture coordinates for volume traversal without complex CPU-side ray-box intersection calculations [S2, unofficial]. It sets itself apart from sibling methods by using a single-pass geometry shader approach to compute these points, whereas alternatives like [Two-Pass Ray Entry/Exit Determination](2669-two-pass-ray-entry-exit-determination.md) use a two-pass rendering approach with separate FBOs for front and back hits [S1, S2, unofficial].
+This method computes the 3D entry and exit points of view rays intersecting a volume’s axis-aligned bounding box (AABB) by rasterizing the box geometry to textures, thereby avoiding procedural intersection calculations in the fragment shader [S1, unofficial][S3]. It sets apart from analytical ray-box intersection tests by leveraging the GPU's parallel rasterization pipeline to generate ray setup data (origins and directions) as a byproduct of rendering a simple color cube [S3]. Unlike the parent method which uses geometry shaders to output hit positions, this approach relies on standard vertex/fragment pipelines with face culling to separate front and back intersections [S2, S4, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** Camera projection matrix, model-view matrix, volume bounding box geometry (cube), and a boolean flag `m_bFront` to select front (entry) or back (exit) hit computation.
-- **Outputs:** Two 2D textures (`TEXTURE_FRONT_HIT` and `TEXTURE_BACK_HIT`) storing the 3D world-space hit positions (or texture coordinates) for each pixel.
+*   **Input:** A camera projection matrix (Model-View-Projection, MVP), a boolean flag `m_bFront` indicating whether to compute the front (entry) or back (exit) intersection, and the geometry of a unit cube centered at the origin.
+*   **Output:** Two 2D textures (`TEXTURE_FRONT_HIT` and `TEXTURE_BACK_HIT`) storing the 3D world-space intersection coordinates for each pixel.
 
 **Data Structures:**
-- **Hit Textures:** 2D textures of size `Width x Height` (screen resolution). Format is `GL_RGBA16F`, internal format `GL_RGBA16F`, type `GL_FLOAT` [S1, unofficial].
-- **Framebuffer Object (FBO):** Contains a color attachment (the hit texture) and a depth renderbuffer of format `GL_DEPTH_COMPONENT16` [S1, unofficial].
+*   **Hit Textures:** Two 2D textures of size $W \times H$ (matching the viewport resolution).
+    *   Format: `GL_RGBA16F`
+    *   Internal Format: `GL_RGBA16F`
+    *   Type: `GL_FLOAT`
+    *   Layout: Each texel stores a 4-component vector $(x, y, z, w)$. The $x, y, z$ components store the world-space intersection point. The $w$ component is typically unused or set to 1.0.
+*   **Framebuffer Object (FBO):** Contains the color attachment (the hit texture) and a depth renderbuffer.
+    *   **Depth Buffer:** Format `GL_DEPTH_COMPONENT16`.
 
-**Steps:**
-1. Create an FBO with a color attachment (`TEXTURE_FRONT_HIT` or `TEXTURE_BACK_HIT`) of format `GL_RGBA16F` and a depth renderbuffer of format `GL_DEPTH_COMPONENT16` [S1, unofficial].
-2. Clear the color buffer and the depth buffer [S1, unofficial].
-3. Enable `GL_CULL_FACE` and `GL_DEPTH_TEST` [S1, unofficial].
-4. If `m_bFront` is true, cull `GL_BACK` faces; otherwise, cull `GL_FRONT` faces [S1, unofficial].
-5. Set up the geometry shader program. The vertex shader passes the vertex position and normal. The geometry shader receives the triangle vertices, computes the ray-box intersection for the ray defined by the camera origin and the fragment's screen position, and outputs the hit position. The fragment shader writes the hit position to the color attachment [S1, unofficial].
-6. Draw the cube geometry using the hit shader program, passing the Model-View-Projection (MVP) matrix as a uniform [S1, unofficial].
-7. Repeat steps 1-6 for the opposite hit (front or back) by toggling `m_bFront` and using the other FBO/texture [S1, unofficial].
+**Numbered Steps:**
+1.  **Initialize FBO:** Create a Framebuffer Object (FBO). Attach a `GL_RGBA16F` texture as the color attachment (either `TEXTURE_FRONT_HIT` or `TEXTURE_BACK_HIT`). Attach a `GL_DEPTH_COMPONENT16` renderbuffer as the depth attachment. Clear both the color buffer and the depth buffer [S1, unofficial].
+2.  **Configure Rasterization State:**
+    *   Enable `GL_CULL_FACE` and `GL_DEPTH_TEST` [S1, unofficial].
+    *   Set the culling mode based on the `m_bFront` flag:
+        *   If `m_bFront` is true, cull `GL_BACK` faces to capture only the front-facing intersections (entry points) [S1, unofficial].
+        *   If `m_bFront` is false, cull `GL_FRONT` faces to capture only the back-facing intersections (exit points) [S1, unofficial].
+    *   Set the depth function to `GL_LEQUAL` or `GL_LESS` to ensure the closest hit is recorded [S1, unofficial].
+3.  **Render Geometry:**
+    *   Bind the "hit shader" program. This shader consists of a Vertex Shader, a Geometry Shader, and a Fragment Shader.
+    *   Pass the MVP matrix as a uniform variable to the shader program [S1, unofficial].
+    *   Draw the cube geometry (typically 6 triangles or 12 triangles for a wireframe/box representation) using the hit shader program [S1, unofficial].
+4.  **Shader Execution:**
+    *   **Vertex Shader:** Passes vertex positions and normals to the geometry shader.
+    *   **Geometry Shader:** Receives the triangle vertices. For each triangle, it computes the intersection of the view ray (defined by the pixel's screen coordinates and the inverse projection matrix) with the triangle plane. It outputs the intersection point as a single point primitive. The position is transformed into clip space and written to `gl_FragCoord` (or equivalent) to ensure correct depth testing. The world-space intersection coordinates are passed to the fragment shader as varying/interpolated values.
+    *   **Fragment Shader:** Receives the interpolated world-space intersection coordinates. It writes these coordinates to the output color buffer (the hit texture). Since the depth test is enabled and the geometry shader outputs points at the correct depth, only the closest intersection (front or back) is written per pixel [S1, unofficial].
+5.  **Repeat:** Repeat steps 1-4 for the back hit texture by toggling the `m_bFront` flag to false.
+
+**Formulas:**
+*   **Ray Definition:** For a pixel at screen coordinates $(u, v)$, the view ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in world space are derived from the inverse projection and view matrices. The geometry shader typically computes the intersection of this ray with the triangle plane defined by vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$.
+*   **Plane Intersection:** Given a triangle plane with normal $\mathbf{n}$ and a point $\mathbf{p}_0$ on the plane, the intersection distance $t$ along the ray $\mathbf{o} + t\mathbf{d}$ is:
+    $$ t = \frac{(\mathbf{p}_0 - \mathbf{o}) \cdot \mathbf{n}}{\mathbf{d} \cdot \mathbf{n}} $$
+    The intersection point is $\mathbf{p}_{hit} = \mathbf{o} + t\mathbf{d}$.
+*   **Depth Writing:** The geometry shader must transform $\mathbf{p}_{hit}$ into clip space to set `gl_Position`, ensuring the depth buffer correctly resolves occlusions between front and back faces if they were rendered simultaneously (though they are rendered separately here) or between multiple triangles [S1, unofficial].
+
+**Parameters:**
+*   `m_bFront`: Boolean flag. `true` for entry points, `false` for exit points [S1, unofficial].
+*   `MVP`: Model-View-Projection matrix uniform [S1, unofficial].
+*   `Width`, `Height`: Resolution of the hit textures [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Depth Buffer Precision:** The depth buffer is cleared along with the color buffer, but the depth test is enabled, requiring correct depth writing from the geometry shader. Using `GL_DEPTH_COMPONENT16` may lead to precision issues for large bounding boxes or small depth differences. Higher precision depth buffers (e.g., `GL_DEPTH_COMPONENT32F`) are recommended if available [S1, unofficial].
+*   **Degenerate Triangles:** Ensure the cube geometry does not produce degenerate triangles that could cause undefined behavior in the geometry shader.
+*   **Ray-Box Tangency:** Rays that are tangent to the box edges or corners may produce unstable intersection results. The rasterization approach handles this via depth testing, but precision limits may cause flickering or missed hits.
+*   **Face Culling:** Incorrect culling configuration (e.g., culling both front and back) will result in empty hit textures. The culling mode must be explicitly set based on the desired hit type [S1, unofficial].
+*   **Shader Compilation:** Ensure the hit shader program is correctly compiled and linked. Shader compilation errors should be checked and reported [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_ray_box_hits(camera_origin, camera_direction, mvp_matrix, cube_vertices, width, height):
-    # Create FBOs and textures for front and back hits
-    front_fbo = create_fbo(width, height, format=GL_RGBA16F, depth_format=GL_DEPTH_COMPONENT16)
-    back_fbo = create_fbo(width, height, format=GL_RGBA16F, depth_format=GL_DEPTH_COMPONENT16)
+def render_hit_textures(cube_geometry, mvp_matrix, width, height, front_flag):
+    """
+    Renders the front or back hit textures for ray-box intersection.
     
-    front_texture = create_texture(width, height, format=GL_RGBA16F, type=GL_FLOAT)
-    back_texture = create_texture(width, height, format=GL_RGBA16F, type=GL_FLOAT)
+    Args:
+        cube_geometry: List of triangle indices or vertex data for a unit cube.
+        mvp_matrix: 4x4 Model-View-Projection matrix.
+        width: Width of the output texture.
+        height: Height of the output texture.
+        front_flag: Boolean, True for front (entry) hits, False for back (exit) hits.
     
-    attach_texture_to_fbo(front_fbo, front_texture, attachment=GL_COLOR_ATTACHMENT0)
-    attach_texture_to_fbo(back_fbo, back_texture, attachment=GL_COLOR_ATTACHMENT0)
+    Returns:
+        hit_texture: 2D texture containing the intersection points.
+    """
+    # 1. Create and configure FBO
+    fbo = create_fbo()
+    hit_texture = create_texture(width, height, format=GL_RGBA16F)
+    depth_buffer = create_renderbuffer(width, height, format=GL_DEPTH_COMPONENT16)
     
-    # Load shader program with geometry shader
-    shader_program = load_shader_program(vertex_shader_code, geometry_shader_code, fragment_shader_code)
+    bind_fbo(fbo)
+    attach_texture(fbo, hit_texture, attachment=GL_COLOR_ATTACHMENT0)
+    attach_renderbuffer(fbo, depth_buffer, attachment=GL_DEPTH_ATTACHMENT)
     
-    # Compute front hits (entry points)
-    bind_fbo(front_fbo)
-    gl_clear_color_buffer()
-    gl_clear_depth_buffer()
-    gl_enable(GL_CULL_FACE)
-    gl_enable(GL_DEPTH_TEST)
-    gl_cull_face(GL_BACK)  # Cull back faces to get front hits
+    # Check FBO completeness
+    if not is_fbo_complete(fbo):
+        raise RuntimeError("FBO is incomplete")
     
-    use_shader(shader_program)
-    set_uniform(shader_program, "mvp_matrix", mvp_matrix)
-    set_uniform(shader_program, "camera_origin", camera_origin)
-    draw_cube(cube_vertices)
+    # 2. Configure rasterization state
+    enable(GL_CULL_FACE)
+    enable(GL_DEPTH_TEST)
     
-    # Compute back hits (exit points)
-    bind_fbo(back_fbo)
-    gl_clear_color_buffer()
-    gl_clear_depth_buffer()
-    gl_cull_face(GL_FRONT)  # Cull front faces to get back hits
+    if front_flag:
+        set_cull_face(GL_BACK) # Cull back faces to get front hits
+    else:
+        set_cull_face(GL_FRONT) # Cull front faces to get back hits
     
-    use_shader(shader_program)
-    set_uniform(shader_program, "mvp_matrix", mvp_matrix)
-    set_uniform(shader_program, "camera_origin", camera_origin)
-    draw_cube(cube_vertices)
+    set_depth_func(GL_LEQUAL)
     
-    # Unbind FBOs
+    # 3. Clear buffers
+    clear_color_buffer()
+    clear_depth_buffer()
+    
+    # 4. Bind and use hit shader program
+    hit_shader = load_hit_shader_program() # Contains Vertex, Geometry, Fragment shaders
+    use_shader(hit_shader)
+    
+    # 5. Set uniforms
+    set_uniform(hit_shader, "mvp_matrix", mvp_matrix)
+    
+    # 6. Draw cube geometry
+    draw_geometry(cube_geometry, shader=hit_shader)
+    
+    # 7. Unbind FBO
     bind_fbo(0)
     
-    return front_texture, back_texture
+    return hit_texture
 ```
-
-**Geometry Shader Logic (Conceptual):**
-The geometry shader receives a triangle. For each vertex, it computes the ray direction from the camera origin to the vertex. It then performs a ray-box intersection test (using the slab method from [Ray-box intersection](776-ray-box-intersection.md)) to find the entry and exit points. The hit position is written to the output. The fragment shader then writes this position to the color attachment [S1, unofficial].
-
-**Parameters:**
-- `m_bFront`: Boolean flag determining whether to compute front (entry) or back (exit) hits [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-- The depth buffer is cleared along with the color buffer, but the depth test is enabled, requiring correct depth writing from the geometry shader [S1, unofficial].
-- Precision issues may arise from using 16-bit floating point textures for storing hit positions [S1, unofficial].
-- The method assumes the volume bounding box is axis-aligned and aligned with the world axes [S1, unofficial].
 
 ## Subtopics
 
 ### [Two-Pass Ray Entry/Exit Determination](2669-two-pass-ray-entry-exit-determination.md)
-This method determines the 3D volume texture coordinates for the entry and exit points of a ray passing through a volume's bounding box by rendering the box geometry to textures using OpenGL. It solves the problem of providing the fragment shader with the precise start and end texture coordinates required for volume traversal without complex CPU-side ray-box intersection calculations. It sets itself apart from sibling methods by using a two-pass rendering approach where the first pass stores exit coordinates in a separate Framebuffer Object (FBO), and the second pass retrieves them, whereas alternatives like [Ray-Box Intersection via OpenGL Geometry Shaders](1768-ray-box-intersection-via-opengl-geometry-shaders.md) compute these points in a single pass using geometry shaders.
+This method determines the 3D entry and exit points of view rays intersecting a volume’s bounding box by rasterizing the box geometry to textures, thereby avoiding procedural intersection calculations in the fragment shader. It sets apart from analytical ray-box intersection tests by leveraging the GPU's parallel rasterization pipeline to generate ray setup data (origins and directions) as a byproduct of rendering a simple color cube. Unlike the parent method which uses geometry shaders to output hit positions, this approach relies on standard vertex/fragment pipelines with face culling to separate front and back intersections.
 
 ## Operating characteristics
-- **Time Complexity:** O(N) where N is the number of pixels in the screen resolution, as each pixel requires a ray-box intersection computation in the geometry shader.
-- **Memory Complexity:** O(W * H) for storing the hit textures, where W and H are the screen dimensions.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Performance scales linearly with screen resolution.
-- **Strengths:** Offloads ray-box intersection computation to the GPU, reducing CPU overhead. Simple to implement using standard OpenGL features.
-- **Limitations:** Requires OpenGL geometry shaders, which may not be available on all hardware. Precision issues with 16-bit textures. Limited to axis-aligned bounding boxes.
-- **When to use:** When GPU-based ray-box intersection is desired and OpenGL geometry shaders are available.
-- **When not to use:** When high precision is required (use 32-bit textures or CPU-side computation) or when geometry shaders are not supported.
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels in the viewport. The cost is dominated by the rasterization of the cube geometry, which is constant per frame regardless of scene complexity.
+*   **Memory Complexity:** $O(W \times H)$ for the hit textures and depth buffer, where $W$ and $H$ are the viewport dimensions.
+*   **Measured Performance:** Performance depends on the GPU's rasterization speed and the resolution of the hit textures. For high-resolution viewports, the cost can be significant. However, it is generally faster than per-ray analytical intersection tests for large numbers of rays.
+*   **Scaling:** Scales linearly with viewport resolution. Does not scale with scene complexity (number of volumes) as it only renders the bounding box.
+*   **Strengths:**
+    *   Avoids complex ray-box intersection math in shaders.
+    *   Leverages GPU parallelism for ray setup.
+    *   Simple to implement using standard OpenGL features.
+*   **Limitations:**
+    *   Requires two passes (front and back) or a more complex single-pass approach.
+    *   Precision issues with depth buffer can affect accuracy.
+    *   Only works for axis-aligned boxes (or requires transformation to align with axes).
+    *   Dependent on OpenGL geometry shaders, which may not be available or performant on all hardware (e.g., mobile GPUs).
+*   **When to Use:** Suitable for volume rendering applications where ray-box intersection is a bottleneck and the bounding boxes are axis-aligned. Best for desktop GPUs with robust geometry shader support.
+*   **When Not to Use:** Not suitable for mobile GPUs without geometry shader support. Not ideal for non-axis-aligned boxes without additional transformation overhead.
 
 ## Background
-This method is described in the VRCUDA project, an unofficial implementation of volume rendering using CUDA and OpenGL [S1, unofficial]. It is used in the context of GPU-accelerated volume rendering to efficiently compute ray-box intersections for volume traversal.
+This method originates from the VRCUDA project, an unofficial implementation of volume rendering using CUDA and OpenGL interoperability [S1, unofficial]. It was developed to optimize the ray-box intersection step in volume rendering pipelines by offloading the computation to the GPU's rasterization hardware. The technique is particularly useful in real-time volume rendering applications where performance is critical.
 
 ## Sources
 [S1] franjaviersans/VRCUDA, https://github.com/franjaviersans/VRCUDA, fetched 2026-10-27 (unofficial)

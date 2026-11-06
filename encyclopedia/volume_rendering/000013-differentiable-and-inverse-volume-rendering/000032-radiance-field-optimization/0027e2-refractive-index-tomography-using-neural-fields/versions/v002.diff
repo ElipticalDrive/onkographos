@@ -1,0 +1,224 @@
+--- v001.md
++++ v002.md
+@@ -4,60 +4,75 @@
+ 
+ ## Overview
+-Refractive Index Tomography using Neural Fields (RNTF) is a method to recover a 3D refractive index field ($\eta$) and a luminance field from single-view refracted image measurements by optimizing neural fields that represent these quantities [S1, unofficial]. It differs from standard radiance-field optimization (e.g., [NeRF](4972-neural-radiance-fields.md)) by modeling light propagation through a medium with spatially varying refractive index rather than assuming straight-line rays in vacuum or constant-index media. This allows it to reconstruct transparent objects like gas flows or dark matter halos where ray bending is significant [S1, unofficial].
++Refractive Index Tomography using Neural Fields (RNTF) is a method to recover a 3D refractive index field ($\eta$) and a luminance field from single-view refracted image measurements by optimizing neural fields that represent these quantities [S1, unofficial]. It differs from standard NeRF-like methods by modeling the physical propagation of light through a medium with varying refractive index, requiring the integration of ray trajectories via Ordinary Differential Equations (ODEs) rather than fixed-step volumetric integration [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Inputs:** Single-view refracted image measurements (pixel intensities), camera parameters (field of view `fov_angle`, resolution `res`), and initial refractive index guess `n_init` [S1, unofficial].
+-- **Outputs:** A trained neural network predicting the refractive index $\eta(\mathbf{x})$ and its gradient $\nabla \eta(\mathbf{x})$, and optionally a luminance field $L(\mathbf{x})$ [S1, unofficial].
++*   **Inputs:** A single-view refracted image (or simulated measurement), camera parameters (field of view `fov_angle`, resolution `res`), and an initial refractive index guess `n_init` [S1, unofficial].
++*   **Outputs:** A trained neural network representing the refractive index field $\eta(\mathbf{x})$ and optionally a luminance field $L(\mathbf{x})$ [S1, unofficial].
+ 
+ **Data Structures:**
+-- **Ray Input Array:** Shape `[batch_size, 6 + num_aux]`. The first 3 elements are ray position $(x, y, z)$, the next 3 are ray direction $(dx, dy, dz)$, and remaining elements are auxiliary data [S1, unofficial].
+-- **ODE State $y$:** Shape `[batch_size, state_dim]`. `state_dim` is 6 for path-only tracing (position + direction) or 7 for luminance tracing (position + direction + luminance) [S1, unofficial].
+-- **Neural Field:** An MLP (e.g., `MLP_act`) with depth 4, width 256, and ELU activation, taking 3D coordinates as input and outputting $\eta$ and $\nabla \eta$ [S1, unofficial].
++*   **Ray Input Array:** Shape `[batch_size, 6 + num_aux]`. The first 3 elements are the ray position $(x, y, z)$, the next 3 are the ray direction $(dx, dy, dz)$, and the remaining elements are auxiliary data [S1, unofficial].
++*   **ODE State $y$:** Shape `[batch_size, state_dim]`.
++    *   For path-only tracing: `state_dim = 6` (position + direction) [S1, unofficial].
++    *   For luminance tracing: `state_dim = 7` (position + direction + luminance) [S1, unofficial].
++*   **Neural Field:** A Multi-Layer Perceptron (MLP) taking 3D coordinates as input and outputting the refractive index $\eta$ (and optionally its gradient $\nabla \eta$) [S1, unofficial].
+ 
+ **Numbered Steps:**
+-1.  **Ray Initialization:** Generate rays from camera parameters. For each ray, initialize the position $\mathbf{p}_0$ and direction $\mathbf{d}_0$. The initial direction magnitude must be scaled by the initial refractive index $n_{init}$ to ensure correct physical propagation, as the ODE uses $\mathbf{d}/\eta$ [S1, unofficial].
+-2.  **ODE Definition:** Define the ODE state $y = [\mathbf{p}, \mathbf{d}, L]$ (or $[\mathbf{p}, \mathbf{d}]$ if luminance is not tracked). The ODE function computes derivatives with respect to path length $s$:
+-    - $\frac{d\mathbf{p}}{ds} = \frac{\mathbf{d}}{\eta(\mathbf{p})}$
+-    - $\frac{d\mathbf{d}}{ds} = \nabla \eta(\mathbf{p})$
+-    - $\frac{dL}{ds} = L_{emission}(\mathbf{p})$ (or $\frac{L_{emission}}{\eta^2}$ for radiance adjustment) [S1, unofficial].
+-3.  **ODE Integration:** Integrate the ODE using a solver (e.g., `jax.experimental.ode.odeint`) over a set of path length values $s_{vals}$ [S1, unofficial]. The initial state $y_0$ is constructed by concatenating ray position, direction, and auxiliary data [S1, unofficial].
+-4.  **Rendering:** Extract the final ray positions (ray trace) and integrated luminance (ray lum) from the integration result [S1, unofficial]. The rendered image is compared to the ground-truth refracted image.
+-5.  **Optimization:** Optimize the neural field parameters using gradient descent via `jax.value_and_grad` and `apply_gradients`. The loss function includes a photometric term and a boundary regularization term weighted by $\lambda$ [S1, unofficial].
++
++1.  **Ray Initialization:** Initialize rays with starting positions (`ap_pts`) and directions (`rays_d`) derived from camera parameters (`fov_angle`, `res`) [S1, unofficial]. The ray direction is normalized and scaled by the initial refractive index $n_{init}$ at the starting position to ensure correct physical propagation, as the ODE uses `ray_dir / eta` [S1, unofficial].
++2.  **Define ODE State:** Construct the initial state $y_0$ by concatenating ray position, ray direction, and auxiliary data (e.g., initial luminance) [S1, unofficial].
++3.  **Define ODE Function:** Define the derivative function $f(y, s)$ which computes the derivatives with respect to path length $s$:
++    *   $\frac{d}{ds}\mathbf{r}_{pos} = \frac{\mathbf{r}_{dir}}{\eta(\mathbf{r}_{pos})}$
++    *   $\frac{d}{ds}\mathbf{r}_{dir} = \nabla \eta(\mathbf{r}_{pos})$
++    *   $\frac{d}{ds}L = L_{emission}(\mathbf{r}_{pos})$ (for luminance tracing) [S1, unofficial].
++    *   Note: For radiance adjustment, the luminance integrand is divided by $\eta^2$, i.e., $\frac{d}{ds}L = \frac{L_{emission}}{\eta^2}$ [S1, unofficial].
++4.  **Integrate ODE:** Integrate the ODE using an ODE solver (e.g., `jax.experimental.ode.odeint`) over specified path length values `s_vals` [S1, unofficial].
++5.  **Extract Results:** Extract the final ray positions (`ray_trace`) and integrated luminance (`ray_lum`) from the integration result $y$ [S1, unofficial].
++6.  **Optimize:** Optimize the neural field parameters using gradient descent via automatic differentiation (e.g., `jax.value_and_grad` and `apply_gradients`) to minimize the difference between rendered and target images [S1, unofficial].
+ 
+ **Formulas:**
+-- Ray direction derivative: $\frac{d\mathbf{d}}{ds} = \nabla \eta(\mathbf{p})$ [S1, unofficial].
+-- Position derivative: $\frac{d\mathbf{p}}{ds} = \frac{\mathbf{d}}{\eta(\mathbf{p})}$ [S1, unofficial].
+-- Luminance derivative (radiance adjustment): $\frac{dL}{ds} = \frac{L_{emission}}{\eta^2}$ [S1, unofficial].
++
++The ODE derivatives are defined as:
++$$
++\frac{d}{ds}\mathbf{r}_{pos} = \frac{\mathbf{r}_{dir}}{\eta}
++$$
++$$
++\frac{d}{ds}\mathbf{r}_{dir} = \nabla \eta
++$$
++$$
++\frac{d}{ds}L = \frac{L_{emission}}{\eta^2} \quad \text{(for radiance adjustment)}
++$$
++where $\mathbf{r}_{pos}$ is the ray position, $\mathbf{r}_{dir}$ is the ray direction, $\eta$ is the refractive index, $\nabla \eta$ is the gradient of the refractive index, $L$ is the luminance, and $L_{emission}$ is the local emission [S1, unofficial].
+ 
+ **Parameters:**
+-- `s_vals`: Path length values at which to evaluate the ray-traced path integral [S1, unofficial].
+-- `lam`: Regularization weight for the boundary term in the loss function (e.g., 0.1 for gas flow, 1.0 for smooth fields) [S1, unofficial].
+-- `res`: Resolution of the ray grid, determining the number of rays ($res^2$) [S1, unofficial].
+-- `fov_angle`: Field of view angle in degrees, used to calculate aperture points and ray directions [S1, unofficial].
+-- `n_init`: Initial refractive index guess (e.g., 1.0003 for air) [S1, unofficial].
++*   `s_vals`: Path length values at which to evaluate the ray-traced path integral [S1, unofficial].
++*   `lam`: Regularization weight for the boundary term in the loss function [S1, unofficial].
++*   `res`: Resolution of the ray grid, determining the number of rays ($res^2$) [S1, unofficial].
++*   `fov_angle`: Field of view angle in degrees, used to calculate the aperture points and ray directions [S1, unofficial].
++*   `n_init`: Initial refractive index at the starting position [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** For dark matter simulation, ODE integration requires tight tolerances (`rtol=1e-10`, `atol=1e-10`) to ensure precision [S1, unofficial].
+-- **Ray Direction Scaling:** The ray direction magnitude must be scaled by $n_{init}$ at initialization [S1, unofficial].
+-- **Radiance Adjustment:** When using `renderfn_rad`, luminance is adjusted by dividing by $\eta^2$, whereas `renderfn` does not [S1, unofficial].
++**Pitfalls:**
++*   Ray direction magnitude must be scaled by the initial refractive index $n_{init}$ to ensure correct physical propagation [S1, unofficial].
++*   For dark matter simulation, ODE integration uses tight tolerances (`rtol=1e-10`, `atol=1e-10`) to ensure precision [S1, unofficial].
++*   The luminance integrand must be adjusted by dividing by $\eta^2$ if radiance adjustment is required, which distinguishes `renderfn_rad` from `renderfn` [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+ import jax
+ import jax.numpy as jnp
+ 
+-def ode_fn_lum(y, s, predict_eta_grad, predict_lum):
++def ode_fn_lum(y, s, predict_eta_grad_fn, predict_lum):
+     """
+-    Computes the derivative of the ODE state for luminance tracing.
++    Computes the derivatives for the ODE state y.
+     
+     Args:
+         y: ODE state [batch_size, 7] (pos, dir, lum)
+-        s: Path length (unused in derivative calculation)
+-        predict_eta_grad: Function returning (eta, eta_grad) given positions
+-        predict_lum: Function returning luminance given positions
++        s: Path length (unused in autonomous ODE)
++        predict_eta_grad_fn: Function that takes positions and returns (eta, eta_grad)
++        predict_lum: Function that takes positions and returns luminance emission
+         
+     Returns:
+-        dy: Derivative of the state [batch_size, 7]
++        dy: Derivatives [batch_size, 7]
+     """
+     ray_pos = y[..., :3]
+@@ -65,52 +80,47 @@
+     
+     # Predict refractive index and its gradient
+-    eta, eta_grad = predict_eta_grad(jnp.reshape(ray_pos, [-1, 3]))
+-    eta = jnp.reshape(eta, ray_pos.shape[:-1])
+-    eta_grad = jnp.reshape(eta_grad, ray_pos.shape[:-1])
++    eta, eta_grad = predict_eta_grad_fn(jnp.reshape(ray_pos, [-1, 3]))
++    eta = jnp.reshape(eta, [-1, 1])
++    eta_grad = jnp.reshape(eta_grad, [-1, 3])
+     
+-    # Predict luminance
++    # Predict luminance emission
+     lum = predict_lum(jnp.reshape(ray_pos, [-1, 3]))
+-    lum = jnp.reshape(lum, ray_pos.shape[:-1])
++    lum = jnp.reshape(lum, [-1, 1])
+     
+     # Compute derivatives
+-    # d_pos/ds = dir / eta
+-    d_ds_ray_pos = ray_dir / eta[:, None]
++    d_ds_ray_pos = ray_dir / eta
++    d_ds_ray_dir = eta_grad
++    # Radiance adjustment: divide luminance by eta^2
++    d_ds_ray_lum = lum / (eta ** 2)
+     
+-    # d_dir/ds = grad(eta)
+-    d_ds_ray_dir = eta_grad
+-    
+-    # d_lum/ds = lum / eta^2 (radiance adjustment)
+-    d_ds_ray_lum = lum[:, None] / (eta[:, None]**2)
+-    
+-    # Concatenate derivatives
+     out = jnp.concatenate([d_ds_ray_pos, d_ds_ray_dir, d_ds_ray_lum], axis=-1)
+     return out
+ 
+-def renderfn_rad(rays, predict_eta_grad, predict_lum, s_vals):
++def renderfn_rad(rays, predict_eta_grad_fn, predict_lum, s_vals):
+     """
+-    Renders an image by integrating the ODE along rays.
++    Renders refracted images by integrating the ODE.
+     
+     Args:
+         rays: Ray input array [batch_size, 6 + num_aux]
+-        predict_eta_grad: Function predicting eta and grad(eta)
+-        predict_lum: Function predicting luminance
++        predict_eta_grad_fn: Function to predict eta and its gradient
++        predict_lum: Function to predict luminance emission
+         s_vals: Path length values for integration
+         
+     Returns:
+         ray_trace: Final ray positions [batch_size, 3]
+-        ray_lum: Integrated luminance [batch_size]
++        ray_lum: Integrated luminance [batch_size, 1]
+     """
+-    # Initialize ODE state
+-    # y = [ray_pos, ray_dir, ray_lum]
++    # Initialize ODE state y_0
++    # Assuming rays has shape [batch_size, 6 + num_aux]
++    # First 3: pos, Next 3: dir, Rest: aux
+     ray_pos = rays[..., :3]
+     ray_dir = rays[..., 3:6]
+-    ray_lum = jnp.zeros_like(ray_pos[..., 0]) # Initialize luminance to 0 or appropriate value
++    ray_lum_init = jnp.zeros_like(ray_pos[..., :1]) # Initialize luminance to 0 or appropriate value
+     
+-    # Concatenate to form initial state y_0
+-    y_0 = jnp.concatenate([ray_pos, ray_dir, ray_lum[:, None]], axis=-1)
++    y_0 = jnp.concatenate([ray_pos, ray_dir, ray_lum_init], axis=-1)
+     
+-    # Define ODE function
++    # Define the ODE function
+     def ode_fn(y, s):
+-        return ode_fn_lum(y, s, predict_eta_grad, predict_lum)
++        return ode_fn_lum(y, s, predict_eta_grad_fn, predict_lum)
+     
+     # Integrate ODE
+@@ -121,31 +131,19 @@
+     y_final = y[-1]
+     ray_trace = y_final[..., :3]
+-    ray_lum = y_final[..., 6] # Extract luminance from state_dim=7
++    ray_lum = y_final[..., 6:7]
+     
+     return ray_trace, ray_lum
+ ```
+ 
+-## Subtopics
+-
+-### Gas Flow Recovery
+-Application to reconstructing transparent gas flows using single-view measurements. Chosen when the medium has smooth refractive index variations. [S1, unofficial]
+-
+-### Smooth Refractive Field Recovery
+-Application to reconstructing smooth, continuous refractive index fields. Chosen for general transparent objects with smooth properties. [S1, unofficial]
+-
+-### Dark Matter Halo Recovery
+-Simulation-based application for recovering dark matter distributions. Chosen for scientific simulations requiring high-precision ODE integration. [S1, unofficial]
+-
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of ODE integration steps (determined by `s_vals` and solver tolerances) and the cost of evaluating the neural field at each step. Tight tolerances (e.g., `1e-10`) increase computation time [S1, unofficial].
+-- **Memory Complexity:** Proportional to the batch size and the number of integration steps, as the ODE solver stores intermediate states [S1, unofficial].
+-- **Measured Performance:** Tested on NVIDIA RTX A6000 GPU. Specific performance metrics (FPS, reconstruction error) are not provided in the sources [S1, unofficial].
+-- **Strengths:** Handles ray bending due to varying refractive index; recovers both geometry (via $\eta$) and appearance (via luminance) [S1, unofficial].
+-- **Limitations:** Requires single-view measurements; sensitive to ODE integration precision; computationally expensive due to ODE solving [S1, unofficial].
+-- **When to Use:** When reconstructing transparent objects where light refraction is significant (e.g., gas flows, dark matter halos) [S1, unofficial].
+-- **When Not to Use:** For opaque objects or scenes where light travels in straight lines (use [NeRF](4972-neural-radiance-fields.md) or [3D Gaussian Splatting](1795-3d-gaussian-splatting.md)) [S1, unofficial].
++*   **Time Complexity:** Depends on the number of ODE integration steps and the complexity of the neural network evaluation per step. Tight tolerances (e.g., `rtol=1e-10`) increase the number of steps and thus computation time [S1, unofficial].
++*   **Memory Complexity:** Requires storing intermediate states for ODE integration and gradients during backpropagation. JAX's automatic differentiation handles this, but memory usage can be high for large batches or fine-grained `s_vals` [S1, unofficial].
++*   **Strengths:** Physically accurate modeling of light propagation in refractive media; capable of recovering smooth refractive index fields and luminance fields from single views [S1, unofficial].
++*   **Limitations:** Requires careful tuning of ODE solver tolerances; sensitive to initial conditions and camera parameters; computationally expensive due to ODE integration [S1, unofficial].
++*   **When to use:** Gas flow recovery, smooth refractive field recovery, and dark matter halo recovery simulations [S1, unofficial].
++*   **When not to use:** Scenes with complex scattering or non-refractive media where standard volumetric rendering is sufficient.
+ 
+ ## Background
+-Refractive Index Tomography using Neural Fields was introduced by Brandon Zhao et al. in 2023 [S1, unofficial]. The method is based on the paper "Single-View Refractive Index Tomography using Neural Fields" (arXiv:2309.04437) [S1, unofficial]. It is used for gas flow recovery, smooth refractive field recovery, and dark matter halo recovery simulations [S1, unofficial].
++Refractive Index Tomography using Neural Fields was introduced by Brandon Zhao et al. in the paper "Single-View Refractive Index Tomography using Neural Fields" (arXiv:2309.04437) [S1, unofficial]. The method leverages JAX for automatic differentiation and efficient ODE integration to optimize neural fields representing the refractive index and luminance fields [S1, unofficial]. It is used for applications such as gas flow visualization, smooth refractive field reconstruction, and simulating dark matter halos [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,248 @@
+# Arbitrary Permutation Transformations for SVDAG
+
+Also called: Arbitrary Transformations, Permutation-aware SVDAG
+
+## Overview
+This method extends Symmetry-aware Sparse Voxel DAGs (SSVDAG) by supporting all $8!$ permutation transformations of child octants to maximize geometric redundancy removal [S1]. It differs from SSVDAG, which only supports mirror symmetries, by allowing arbitrary reordering of the eight child pointers, thereby capturing rotational symmetries and complex spatial redundancies that mirror operations alone miss [S1].
+
+## How it works
+The method operates recursively on the voxel graph, replacing nodes with canonical representations that account for all possible permutations of their children.
+
+### Inputs and Outputs
+*   **Input:** A Sparse Voxel Octree (SVO) or existing SVDAG structure.
+*   **Output:** A compressed SVDAG where nodes are canonicalized under arbitrary permutations, reducing the total node count.
+
+### Data Structures
+**Node Layout:**
+A node $N$ is a tuple of eight child pointers:
+$$N \doteq (c_0, \dots, c_7)$$
+Each child pointer $c_i$ consists of:
+1.  A memory address (or null pointer $\emptyset$ for empty octants).
+2.  A transformation $T$ applied to that child.
+
+**Leaf Layout:**
+Leaves at level $L=1$ are flattened into $2^3$ voxel grids. Each leaf is replaced by:
+1.  A **canonical-transform pointer**: Contains the canonical grid $g^\star$ and the transformation $T$ such that $T(g^\star) \equiv g$.
+2.  A **temporary bitmask**: Stores the invariance of $g^\star$ with respect to all possible transformations. Size: $8! = 40,320$ bits [S1].
+
+**Transformation Definition:**
+A permutation is a bijective function $T: \{0, \dots, 7\} \to \{0, \dots, 7\}$ [S1].
+A transformed child pointer $T(c_i)$ is the concatenation of $T$ and the transform stored in $c_i$ [S1].
+
+### Algorithm Steps
+
+#### 1. Leaf Canonicalization
+For each leaf node (level $L=1$):
+1.  Flatten the subtree into a voxel grid $g$.
+2.  Generate the set of all grids transformable to $g$:
+    $$\hat{G} = \{ \hat{g} \mid T(\hat{g}) \equiv g \}$$
+    where $T$ ranges over all $8!$ permutations [S1].
+3.  Compute the canonical representation $g^\star$ as the "highest-value" grid in $\hat{G}$:
+    $$g^\star = \arg\max_{\hat{g} \in \hat{G}} B(\hat{g})$$
+    where $B(g)$ is the binary number obtained by concatenating all voxels of grid $g$ [S1].
+4.  Compute the invariance bitmask for $g^\star$. For each permutation $T$, set the bit to 1 if $g^\star \equiv T(g^\star)$, else 0. This requires checking all $8!$ permutations [S1].
+5.  Store the pointer to $g^\star$ and the corresponding transformation $T$ such that $T(g^\star) = g$.
+
+#### 2. Inner Node Canonicalization
+Process nodes level by level from bottom to top. For a given level $L$:
+1.  **Clustering:** Group nodes that have the same set of child pointer addresses (ignoring order and child transformations). This reduces the search space [S1].
+2.  **Iteration:** Iterate through nodes $N_i$ in each cluster.
+3.  **Matching:** For each $N_i$, test if there exists a previous node $N_j$ ($j < i$) and a permutation $T$ such that:
+    $$N_i \equiv_T (N_j)$$
+    This is done via exhaustive search over all $T$ [S1].
+4.  **Equivalence Test:** To test $N_i \equiv_T (N_j)$:
+    a. Apply permutation $T$ to $N_j$, shuffling children and updating their stored transforms.
+    b. Two transformed child subtrees $T_i(c_k)$ and $T_j(c_k)$ are equivalent if:
+        i. They have the same canonical representation address (from Step 1).
+        ii. Their transformations result in the same geometry. This is tested by checking the invariance bitmask of the canonical representation for the composite transformation $T_i^{-1} \circ T_j$:
+        $$c_k \equiv_{T_i^{-1} \circ T_j} c_k$$
+    c. If all 8 children match, $N_i \equiv_T (N_j)$ [S1].
+5.  **Canonicalization:** If no match is found, $N_i$ is canonical. Compute its invariance bitmask (similar to leaves) and output it. If a match is found, replace $N_i$ with a pointer to $N_j$ and the transformation $T$ [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def canonicalize_leaf(grid):
+    """
+    Canonicalize a 2x2x2 voxel grid under all 8! permutations.
+    Returns (canonical_grid, canonical_transform, invariance_mask)
+    """
+    best_grid = None
+    best_val = -1
+    canonical_transform = None
+    invariance_mask = 0
+    
+    # Iterate over all permutations T of {0..7}
+    for T in all_permutations():
+        # Apply permutation T to grid to get transformed_grid
+        transformed_grid = apply_permutation(grid, T)
+        
+        # Calculate binary value B(transformed_grid)
+        val = binary_value(transformed_grid)
+        
+        # Update canonical if this is the highest value
+        if val > best_val:
+            best_val = val
+            best_grid = transformed_grid
+            canonical_transform = T
+            
+    # Compute invariance mask for best_grid
+    # Mask bit i is 1 if best_grid is invariant under permutation i
+    for i, T in enumerate(all_permutations()):
+        if is_equivalent(best_grid, apply_permutation(best_grid, T)):
+            invariance_mask |= (1 << i)
+            
+    return best_grid, canonical_transform, invariance_mask
+
+def is_equivalent(grid1, grid2):
+    """Check if two grids are geometrically identical."""
+    return grid1 == grid2
+
+def canonicalize_inner_node(node, child_canonicals):
+    """
+    Canonicalize an inner node given its children's canonical forms.
+    node: tuple of 8 child pointers (address, transform)
+    child_canonicals: dict mapping address -> (canonical_grid_or_node, transform, mask)
+    Returns (canonical_node, invariance_mask) or None if duplicate
+    """
+    # Cluster nodes by address set (handled externally)
+    # For this node, find if it matches any previous canonical node
+    
+    # Get canonical representations of children
+    child_reprs = []
+    for c_addr, c_trans in node:
+        if c_addr is None:
+            child_reprs.append(None)
+        else:
+            # Retrieve canonical info for this child
+            c_info = child_canonicals[c_addr]
+            child_reprs.append(c_info)
+            
+    # Try all permutations T
+    for T in all_permutations():
+        # Apply T to node: shuffle children and update their transforms
+        transformed_children = []
+        for idx in range(8):
+            original_idx = T(idx)
+            c_addr, c_trans = node[original_idx]
+            
+            # New transform is T composed with c_trans
+            # Note: T is applied to the child's geometry
+            new_trans = compose(T, c_trans)
+            
+            transformed_children.append((c_addr, new_trans))
+            
+        # Check if transformed_children match any existing canonical node
+        # This requires comparing the structure of transformed_children
+        # against previously stored canonical nodes.
+        # For simplicity, we assume we are comparing against a specific previous node N_j
+        # In practice, this is done via clustering and iteration.
+        
+        # Check equivalence of children
+        match = True
+        for i in range(8):
+            c1_addr, c1_trans = transformed_children[i]
+            c2_addr, c2_trans = node[i] # Compare against original node structure? 
+                                        # No, compare against N_j's structure.
+                                        # Let's assume we are testing against N_j.
+            
+            # Get canonical info for both
+            c1_info = child_canonicals[c1_addr]
+            c2_info = child_canonicals[c2_addr]
+            
+            # Check if addresses match
+            if c1_addr != c2_addr:
+                match = False
+                break
+                
+            # Check if transforms result in same geometry
+            # Use invariance mask of canonical representation
+            # c1_info is the canonical form of the child
+            # We need to check if c1_trans and c2_trans are equivalent relative to the canonical form
+            # The source says: ck == Ti^-1 o Tj ck
+            # Here, Ti is the transform applied to child i in the transformed node
+            # Tj is the transform applied to child i in the original node N_j
+            
+            # Let T_i be the transform in transformed_children[i]
+            # Let T_j be the transform in node[i] (from N_j)
+            # Check if c1_info.mask has bit set for T_i^-1 o T_j
+            
+            composite_trans = compose(inverse(c1_trans), c2_trans)
+            if not is_invariant(c1_info.mask, composite_trans):
+                match = False
+                break
+                
+        if match:
+            # Found a match, return None to indicate duplicate
+            return None
+            
+    # No match found, compute invariance for this node
+    node_invariance_mask = 0
+    for T in all_permutations():
+        # Check if node is invariant under T
+        # This requires checking if the permuted node is equivalent to the original
+        # This is complex and depends on the specific implementation of node equivalence
+        # For now, we assume it's computed similarly to leaves
+        if is_node_invariant(node, T):
+            node_invariance_mask |= (1 << T)
+            
+    return (node, node_invariance_mask)
+
+def is_invariant(mask, T):
+    """Check if bit T is set in mask."""
+    return (mask >> T) & 1
+
+def is_node_invariant(node, T):
+    """Check if node is invariant under permutation T."""
+    # Apply T to node
+    transformed_node = apply_permutation_to_node(node, T)
+    # Check if transformed_node is equivalent to node
+    # This involves comparing child pointers and transforms
+    return nodes_equivalent(node, transformed_node)
+
+def nodes_equivalent(n1, n2):
+    """Check if two nodes are equivalent."""
+    for i in range(8):
+        c1_addr, c1_trans = n1[i]
+        c2_addr, c2_trans = n2[i]
+        if c1_addr != c2_addr:
+            return False
+        # Check if transforms are equivalent
+        # This requires checking if the transforms result in the same geometry
+        # For inner nodes, this is recursive
+        # For simplicity, we assume addresses match implies equivalence if transforms are handled
+        # In reality, we need to check if c1_trans and c2_trans are equivalent
+        # relative to the canonical form of the child
+        c1_info = child_canonicals[c1_addr]
+        c2_info = child_canonicals[c2_addr]
+        # Check invariance
+        composite = compose(inverse(c1_trans), c2_trans)
+        if not is_invariant(c1_info.mask, composite):
+            return False
+    return True
+```
+
+### Parameters and Edge Cases
+*   **Mask Size:** The invariance bitmask for leaves is $8! = 40,320$ bits. This limits the practical scene size due to memory constraints [S1].
+*   **Canonical Selection:** The canonical grid is chosen as the one with the highest binary value $B(g)$ [S1]. This differs from SSVDAG, which assumed $T^{-1} = T$ [S1].
+*   **Edge Cases:** Empty octants use null pointers. The method assumes that the permutation $T$ is applied to all children, not a variable subset, for practical reasons [S1].
+
+## Subtopics
+
+### Practical Transformation Subset (Symmetry + Axis Permutation)
+A restricted subset of transformations used to achieve practical compression while maintaining most reuse [S1]. It includes mirror symmetries (flipping along primary axes) and axis permutations (swapping primary axes, e.g., $(x,y,z) \to (z,x,y)$) [S1]. The subset $\Omega$ must be closed under composition ($\forall T_i, T_j \in \Omega: T_i \circ T_j \in \Omega$) and contain inverses ($\forall T_i \in \Omega: T_i^{-1} \in \Omega$) [S1]. This subset accounts for almost all reuse, with only a small difference in node count compared to using all permutations (e.g., Bistro scene: 4.94M nodes with S+A vs 4.77M with All) [S1]. It represents any 90-degree rotation along primary axes, forming the symmetry group of the cube and octahedron [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The method involves an exhaustive search over all $8!$ permutations for each node, which is computationally expensive. The leaf canonicalization requires $8!$ operations per leaf, and inner node matching requires $8!$ comparisons per node pair [S1].
+*   **Memory Complexity:** The invariance bitmask for leaves is 40,320 bits, which is significant and limits the practical scene size [S1]. The use of a practical subset reduces this to a manageable size (e.g., 48 permutations for S+A) [S1].
+*   **Performance:** The method reduces the number of nodes significantly compared to SVDAG and SSVDAG. For example, the Bistro scene has 4.94M nodes with S+A, compared to 5.59M with SSVDAG and 6.74M with SVDAG [S1].
+*   **Strengths:** Maximizes geometric redundancy removal by capturing all permutation symmetries.
+*   **Limitations:** High computational cost and memory usage for the full permutation set. The practical subset is a compromise between compression and efficiency [S1].
+
+## Background
+This method extends the concept of SSVDAGs to support all transformations that can be described by reordering the children of the nodes [S1]. It was introduced to remove geometric redundancy that mirror symmetries alone cannot capture, such as rotations [S1]. The method builds on the work of Villanueva et al. (2016) on SSVDAGs [S1].
+
+## Sources
+[S1] Transform-Aware Sparse Voxel Directed Acyclic Graphs, https://publications.graphics.tudelft.nl/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBBdjBUIiwiZXhwIjpudWxsLCJwdXIiOiJibG9iX2lkIn19--3e9c1bfab97521b420d59c348403286749dcf70d/I3D_authors_version.pdf, fetched 2026-11-01

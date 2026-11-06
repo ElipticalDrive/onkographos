@@ -1,0 +1,238 @@
+Contribute to AI4EPS/ADLoc development by creating an account on GitHub.
+
+Follow-ups to #2: exact gradient, sacloc3d with RANSAC, script fixes by zhuwq0 · Pull Request #3 · AI4EPS/ADLoc · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+zhuwq0
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+These commits were pushed to the #2 branch after #2 was merged, so they are not on main yet.
+Exact travel-time gradient (81bce9e): the lookup returns the bilinear/trilinear interpolation of the table and its exact derivative. Outside the grid, the edge cell's form continues.
+The gradient tables are gone: tables take a third of the memory in 2-D and a quarter in 3-D.
+gradcheck passes (it failed before, about 2% off near stations), and the gradient matches float64 finite differences to 2e-9 s/km.
+Locations on the synthetic tests are unchanged.
+sacloc3d works with RANSAC (3deefac): picks are [station_index, phase_type, phase_weight], the weight enters the loss, and predict returns (n, 1). With 20% outlier picks, the median 3-D error is 0.41 km against 1.65 km for a plain fit.
+app.py (e3e975a): the config is copied per request, so client settings no longer leak between requests, and the eikonal tables are cached.
+docs/run_adloc_bootstrap.py runs again (a0a15c9). Seven bugs fixed: the import, single-process mode, the batch keys, the velocity keys, one projection for limits and stations, the plotting suffix, and the pandas 3 jackknife.
+Script fixes:
+run_adloc_ddp.py keeps its loaded config (195aa32);
+run_ransac.py uses x/y limits as a local range around each event's stations (195aa32, 3ed6309).
+One synthetic_picks.py (be26dea), with a flag for random station terms.
+The two scripts in the fifth item need regional data and were checked by reading the code. Everything else was run.
+🤖 Generated with Claude Code
+zhuwq0
+added 7 commits
+November 2, 2026 18:16
+Keep one synthetic_picks.py, with a flag for random station terms
+…
+be26dea
+```
+tests/synthetic_picks.py duplicated docs/synthetic_picks.py except for random station terms,
+and copied its output over docs/test_data/synthetic.
+```
+Make run_adloc_bootstrap.py run again
+…
+a0a15c9
+```
+- import PhaseDataset from adloc.data, and run single-process (the DDP set-up was in the
+  deleted root utils.py);
+- read the dataset's batch keys (idx_sta, idx_eve);
+- velocities keyed by phase 0/1, as TravelTime indexes them;
+- one projection for the region limits, the stations and the events (the limits were
+  projected about the config centre, the stations about their median);
+- plotting takes the suffix its callers pass;
+- the jackknife drops one pick per event directly (pandas 3 groupby.apply drops idx_eve).
+
+Runs on docs/synthetic_picks.py data with and without --eikonal and recovers the synthetic
+locations.
+```
+app.py: copy the config per request, and cache the eikonal tables
+…
+e3e975a
+```
+run_adloc updated the module-level config with each client's settings, which leaked into later
+requests and raced between threads; it now works on a copy. The tables are cached by station
+depths and grid (the last 8 sets), so repeated requests from one network reuse them.
+```
+Fix two old bugs in the run scripts
+…
+195aa32
+```
+run_adloc_ddp.py: when the config had no xlim/ylim/zlim, config = {} erased the loaded
+config, and the depth range came from the highest station and a fixed 20 km; it now keeps the
+config and uses mindepth/maxdepth, as run_adloc.py does.
+
+run_ransac.py: each event is located in its own projection (config["proj"] = None), but the
+BFGS x/y bounds were the region limits in the global frame, which clamp events far from the
+region centre; x and y are now unbounded, depth and time keep their bounds.
+```
+sacloc3d: work with RANSAC, as sacloc2d
+…
+3deefac
+```
+Picks are [station_index, phase_type, phase_weight] (RANSAC samples by the weight column)
+and the weight enters the loss; fit takes times as (n, 1) and predict returns (n, 1);
+score no longer prints on every call. With 20% outlier picks (+2 s) on synthetic events,
+RANSAC gives a median 3-D error of 0.45 km against 1.65 km for the plain fit, and its inlier
+mask matches the truth.
+```
+run_ransac.py: x/y limits as a local range around each event's stations
+…
+3ed6309
+```
+Each event is located in its own frame centred on its stations, so xlim_km/ylim_km are a local
+range: the region's size centred on 0 by default, or what the config sets (e.g. [-500, 500]
+km). The BFGS x/y bounds use it again instead of being dropped.
+```
+Exact travel-time gradient: differentiate the interpolation, drop the…
+…
+81bce9e
+```
+… gradient tables
+
+The gradient was interpolated from separate gradient tables, so it was not the derivative of
+the returned time (torch gradcheck failed, about 2% off at r = 4 km with h = 1 km), which can
+stall the strong-Wolfe line searches of LBFGS and L-BFGS-B.
+
+The lookup now returns the bilinear (2-D) or trilinear (3-D) interpolation of the table and
+its exact derivative. Outside the grid the edge cell's form continues (the cell index stops,
+the fraction does not), so the time stays continuous and the gradient is still its exact
+derivative, never zero. The gradient tables are gone: tables take a third (2-D) or a quarter
+(3-D) of the memory, and the 3-D lookup no longer allocates per pick.
+
+gradcheck passes; the gradient matches float64 finite differences to 2e-9 s/km; locations on
+the synthetic tests are unchanged (BFGS, torch, hypodd, sacloc3d, RANSAC).
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+November 3, 2026 02:39
+Copilot started reviewing on behalf of
+zhuwq0
+November 3, 2026 02:40
+View session
+Copilot
+AI
+reviewed
+Nov 3, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+Critical issues remain in cache synchronization and model selection, out-of-grid travel times, event bounds, and compatibility with existing RANSAC and unweighted callers.
+6 open issues
+Prevent negative travel times outside multiple grid axes · New
+Default missing weights to unit weights · New
+Match prediction and target shapes in RANSAC · New
+Include velocity models in the cache key · New
+Synchronize cache access and concurrent table construction · New
+Expand location bounds to cover events across the region · New
+What changed in this PR
+This PR brings follow-ups to #2 into ADLoc, refining travel-time gradients, adapting the 3-D locator for weighted RANSAC, and repairing supporting scripts.
+Changes:
+Compute derivatives directly from interpolated travel times and remove stored gradient tables.
+Add weighted 3-D fitting, column-shaped predictions, per-request configuration, and table caching.
+Repair bootstrap and regional scripts, and consolidate synthetic-pick generation.
+File
+Description
+tests/​synthetic_picks.py
+Remove the duplicate synthetic-pick generator.
+docs/​synthetic_picks.py
+Add optional random station terms.
+docs/​run_ransac.py
+Center local search bounds around participating stations.
+docs/​run_adloc_ddp.py
+Preserve loaded configuration and configured depth limits.
+docs/​run_adloc_bootstrap.py
+Repair imports, batch keys, projection, plotting, and jackknife sampling.
+app.py
+Isolate request configuration and cache eikonal tables.
+adloc/​sacloc3d.py
+Add weighted fitting and adapt target and prediction shapes.
+adloc/​eikonal3d.py
+Differentiate trilinear interpolation directly and remove gradient tables.
+adloc/​eikonal2d.py
+Differentiate bilinear interpolation directly and strengthen gradient checks.
+Review effort: Balanced
+Comment thread
+adloc/eikonal2d.py
+Comment on lines
++132
+to
++135
+fx, fy = x - i, y - j
+t00, t10, t01, t11 = tt[p, m, i, j], tt[p, m, i + 1, j], tt[p, m, i, j + 1], tt[p, m, i + 1, j + 1]
+c = t11 - t10 - t01 + t00
+t[k] = t00 + (t10 - t00) * fx + (t01 - t00) * fy + c * fx * fy
+Comment thread
+adloc/sacloc3d.py
+phase_type = X[:, 1]
+station_index = X[:, 0].astype(int)
+phase_type = X[:, 1].astype(int)
+w = X[:, 2]
+Comment thread
+adloc/sacloc3d.py
+)
+return tt
+return tt[:, np.newaxis]
+Comment thread
+app.py
+Comment on lines
++120
+to
++121
+key = (tuple(np.unique(np.round(np.asarray(station_z_km) / DZ_STA))), eikonal["h"],
+tuple(eikonal["xlim_km"]), tuple(eikonal["ylim_km"]), tuple(eikonal["zlim_km"]))
+Comment thread
+app.py
+Comment on lines
++122
+to
++126
+if key not in TABLES:
+if len(TABLES) >= 8:
+TABLES.pop(next(iter(TABLES)))
+TABLES[key] = init_eikonal2d({**eikonal, "station_z_km": station_z_km})
+return TABLES[key]
+Comment thread
+docs/run_ransac.py
+Comment on lines
++195
+to
++196
+config["xlim_km"] = (-(xmax - xmin) / 2, (xmax - xmin) / 2)
+config["ylim_km"] = (-(ymax - ymin) / 2, (ymax - ymin) / 2)
+Hide details
+View details
+zhuwq0
+merged commit 9659a7d
+into
+main
+Nov 3, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

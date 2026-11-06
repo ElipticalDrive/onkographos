@@ -1,0 +1,235 @@
+--- v002.md
++++ v003.md
+@@ -4,26 +4,27 @@
+ 
+ ## Overview
+-Empty Space Filtering is a preprocessing and runtime optimization strategy for dynamic neural volume rendering that accelerates training and rendering by restricting computation to the scene's active volume. It identifies empty space using alpha values from a coarse deformation feature grid and filters out sampled points that are recognized as empty, thereby reducing the number of queries to the light-weight MLP [S1]. Unlike static occupancy grids that rely on fixed voxel density, this method derives a dynamic bounding box from temporal alpha statistics, allowing it to adapt to moving objects while avoiding computation in regions that never contain significant geometry [S1].
++Empty Space Filtering is a preprocessing and runtime optimization technique used in dynamic neural volume rendering to accelerate training and inference by restricting computation to the spatial extent of the scene. It solves the problem of wasted computation in empty regions by constructing a coarse geometry prior (a bounding box) derived from alpha values of a coarse deformation feature grid, and then filtering out sampled points that fall outside this active region or have negligible alpha values [S1]. Unlike static volume rendering methods that use fixed bounds, this method adapts to the dynamic nature of the scene by aggregating object presence across all training time steps [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A coarse deformation feature grid sampled across all training time steps $t \in [0, T]$.
+-*   **Output:** A coarse geometry prior (axis-aligned bounding box) and a filtering mask for sampled points during ray marching.
++*   **Input:** A coarse deformation feature grid defined over a canonical space and its deformations; a predefined alpha threshold $\tau$; a set of training time steps $T$.
++*   **Output:** A coarse geometry prior (axis-aligned bounding box) enclosing the scene; a filtering mask for sampled points during ray marching.
+ 
+ **Data Structures:**
+-*   **Coarse Deformation Feature Grid:** A 3D grid storing deformation features. Each vertex $v$ has an associated alpha value $\alpha(v, t)$ at time $t$.
+-*   **Bounding Box:** Defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$ encompassing all object points.
++*   **Coarse Deformation Feature Grid:** A 3D grid storing deformation features. Each vertex $v$ in this grid has an associated alpha value $\alpha(v, t)$ at time step $t$.
++*   **Coarse Geometry Prior:** An axis-aligned bounding box (AABB) defined by minimum and maximum coordinates $(x_{min}, y_{min}, z_{min})$ and $(x_{max}, y_{max}, z_{max})$.
+ 
+ **Steps:**
+ 
+-1.  **Alpha Query:** Query all grid vertices of the coarse deformation feature grid for every training time step $t$. Retrieve the alpha value $\alpha(v, t)$ for each vertex $v$.
+-2.  **Classification:** Classify each grid vertex $v$ as an "object point" or "empty space" based on the alpha threshold. A point is considered an object point if:
+-    $$ \alpha(v, t) > \text{threshold} $$
+-    where $\text{threshold}$ is a predefined scalar value [S1].
+-3.  **Bounding Box Computation:** Compute the smallest axis-aligned bounding box that fully encloses all vertices classified as object points across all time steps $t \in [0, T]$. This defines the "coarse geometry prior" [S1].
+-4.  **Runtime Filtering (Deformation Module):** For sampled points in the deformation module, filter out points that are recognized as empty. Since empty points are assumed to be static, a sampled point is filtered if its alpha value is below the threshold during *all* training times:
+-    $$ \text{Keep } p \iff \exists t \in [0, T] : \alpha(p, t) > \text{threshold} $$
+-5.  **Runtime Filtering (Canonical Module):** For sampled points in the canonical module, filter out empty points only at the canonical time (typically $t=0$ or a reference time) [S1].
+-6.  **Grid Volume Reduction:** Use the coarse geometry prior to reduce the volume of the grid in the fine stage, initializing the fine model's deformation feature grid with the optimized feature grid from the coarse model via interpolation [S1].
++1.  **Query Alpha Values:** For every vertex $v$ in the coarse deformation feature grid, and for every training time step $t \in T$, retrieve the alpha value $\alpha(v, t)$. This represents the opacity or presence of the object at that vertex and time [S1].
++2.  **Classify Vertices:** A vertex $v$ is classified as an "object point" if its alpha value exceeds the threshold $\tau$ at any time step. Formally, a vertex is considered part of the scene if:
++    $$ \exists t \in T : \alpha(v, t) > \tau $$
++    Otherwise, it is classified as empty space [S1].
++3.  **Compute Bounding Box:** Determine the smallest axis-aligned bounding box that fully encloses all vertices classified as object points across all time steps. This box serves as the "coarse geometry prior" [S1].
++4.  **Filter Sampled Points (Deformation Module):** During training, for points sampled in the deformation module, filter out points that are recognized as empty. Since empty points are assumed to be static, a point is filtered if its alpha value is below the threshold for *all* training times:
++    $$ \forall t \in T : \alpha(v, t) \le \tau \implies \text{filter point} $$
++    This reduces the number of queries to the light-weight MLP [S1].
++5.  **Filter Sampled Points (Canonical Module):** For points sampled in the canonical module, filter out empty points only at the canonical time (typically $t=0$ or the reference frame). Points with $\alpha(v, t_{canonical}) \le \tau$ are filtered [S1].
++6.  **Apply Bounding Box Constraint:** Use the coarse geometry prior to restrict the volume of the grid in the fine stage. Points sampled outside this bounding box are discarded or not processed, avoiding empty space computation [S1].
+ 
+ **Pseudocode:**
+@@ -32,122 +33,108 @@
+ def compute_coarse_geometry_prior(coarse_grid, time_steps, alpha_threshold):
+     """
+-    Computes the bounding box of the dynamic scene using alpha values.
++    Computes the bounding box of the scene by aggregating object points
++    across all time steps.
+     
+     Args:
+-        coarse_grid: 3D grid of deformation features.
+-        time_steps: List of time indices t.
+-        alpha_threshold: Scalar threshold for object classification.
++        coarse_grid: 3D grid of vertices. Each vertex has a method get_alpha(t).
++        time_steps: List of time indices T.
++        alpha_threshold: Scalar threshold tau.
+         
+     Returns:
+-        bbox_min: Tuple (x_min, y_min, z_min)
+-        bbox_max: Tuple (x_max, y_max, z_max)
++        bbox: Tuple (min_coords, max_coords) defining the AABB.
+     """
+-    min_x, min_y, min_z = infinity
+-    max_x, max_y, max_z = -infinity
++    min_coords = [infinity, infinity, infinity]
++    max_coords = [-infinity, -infinity, -infinity]
+     
+-    # Iterate over all grid vertices and all time steps
+-    for v in coarse_grid.vertices:
++    # Iterate over all vertices in the coarse grid
++    for vertex in coarse_grid.vertices:
+         is_object = False
++        # Check alpha values across all time steps
+         for t in time_steps:
+-            alpha = coarse_grid.get_alpha(v, t)
++            alpha = vertex.get_alpha(t)
+             if alpha > alpha_threshold:
+                 is_object = True
+-                break # No need to check other times for this vertex
++                break
+         
++        # If vertex is part of the object, update bounding box
+         if is_object:
+-            # Update bounding box with vertex coordinates
+-            x, y, z = v.coordinates
+-            min_x = min(min_x, x)
+-            min_y = min(min_y, y)
+-            min_z = min(min_z, z)
+-            max_x = max(max_x, x)
+-            max_y = max(max_y, y)
+-            max_z = max(max_z, z)
+-            
+-    return (min_x, min_y, min_z), (max_x, max_y, max_z)
++            coords = vertex.position
++            for i in range(3):
++                if coords[i] < min_coords[i]:
++                    min_coords[i] = coords[i]
++                if coords[i] > max_coords[i]:
++                    max_coords[i] = coords[i]
++                    
++    return (min_coords, max_coords)
+ 
+-def filter_sampled_points(sampled_points, coarse_grid, time_steps, alpha_threshold, module_type):
++def filter_sampled_points(sampled_points, coarse_grid, time_steps, alpha_threshold, canonical_time):
+     """
+-    Filters out empty points from a ray's sampled points.
++    Filters out sampled points that are recognized as empty space.
+     
+     Args:
+-        sampled_points: List of 3D points sampled along rays.
+-        coarse_grid: Coarse deformation feature grid.
+-        time_steps: List of time indices t.
+-        alpha_threshold: Scalar threshold.
+-        module_type: 'deformation' or 'canonical'.
++        sampled_points: List of points to be processed.
++        coarse_grid: The coarse deformation feature grid for alpha lookup.
++        time_steps: List of time indices T.
++        alpha_threshold: Scalar threshold tau.
++        canonical_time: The reference time step for canonical module filtering.
+         
+     Returns:
+         filtered_points: List of points that are not empty.
+     """
+-    filtered = []
++    valid_points = []
+     
+-    for p in sampled_points:
+-        keep_point = False
++    for point in sampled_points:
++        # Determine which module the point belongs to based on context
++        # Note: In practice, this logic is applied separately for deformation vs canonical modules
++        # as per the source description. Here we implement the general logic.
+         
+-        if module_type == 'deformation':
+-            # Filter if alpha is below threshold for ALL times
+-            # Keep if alpha > threshold for AT LEAST ONE time
++        # Check if point is in the coarse geometry prior bounding box
++        if not is_inside_bbox(point.position, coarse_geometry_prior):
++            continue
++            
++        # For deformation module points: filter if alpha <= threshold for ALL times
++        # For canonical module points: filter if alpha <= threshold at canonical time only
++        # The source distinguishes these. We assume a flag or context indicates the module.
++        
++        is_empty = False
++        if point.module_type == 'deformation':
++            # Filter if always below threshold
++            always_below = True
+             for t in time_steps:
+-                alpha = coarse_grid.get_alpha_at_point(p, t)
++                alpha = coarse_grid.get_alpha_at_point(point.position, t)
+                 if alpha > alpha_threshold:
+-                    keep_point = True
++                    always_below = False
+                     break
+-        elif module_type == 'canonical':
+-            # Filter only at canonical time (assume t=0 for canonical)
+-            alpha = coarse_grid.get_alpha_at_point(p, 0)
+-            if alpha > alpha_threshold:
+-                keep_point = True
++            if always_below:
++                is_empty = True
+                 
+-        if keep_point:
+-            filtered.append(p)
++        elif point.module_type == 'canonical':
++            # Filter only at canonical time
++            alpha = coarse_grid.get_alpha_at_point(point.position, canonical_time)
++            if alpha <= alpha_threshold:
++                is_empty = True
++                
++        if not is_empty:
++            valid_points.append(point)
+             
+-    return filtered
++    return valid_points
+ ```
+ 
+ **Parameters:**
+-*   **Alpha Threshold:** A predefined scalar value used to distinguish object points from empty space [S1]. The exact value is not specified in the sources, but it must be chosen to balance sensitivity to low-density regions [S1].
++*   **Alpha Threshold ($\tau$):** A predefined scalar value used to distinguish object points from empty space. Typical values are not explicitly given in the sources, but it must be tuned to avoid filtering low-density regions [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Low-Density Regions:** Low-density regions (e.g., a white plate on a white background) may be incorrectly filtered out because the image reconstruction error is low even if the learned density is close to zero [S1]. This can result in missing geometry in the final render. This issue can be alleviated by using a background with a different color or disabling the filtering strategy for specific regions [S1].
+-*   **Static Assumption:** The method assumes empty points are static in the deformation module. If empty space varies significantly over time in a way that affects the background, this assumption may lead to artifacts [S1].
+-
+-## Subtopics
+-
+-### Distance Map Acceleration
+-*   **What it is:** Uses a distance map to skip empty space by checking if a ray is far from any surface.
+-*   **Difference:** Relies on geometric distance rather than alpha values from a feature grid.
+-*   **When to choose:** When explicit surface geometry is available or easily approximated.
+-*   **Link:** [Distance Map Acceleration](972-distance-map-acceleration.md)
+-
+-### Two-stage Ray Marching with Empty-Space Skipping
+-*   **What it is:** Uses a coarse stage to identify occupied regions and a fine stage for detailed rendering.
+-*   **Difference:** Explicitly separates the rendering into two distinct passes with different resolutions.
+-*   **When to choose:** When high-quality rendering is required for complex scenes with large empty spaces.
+-*   **Link:** [Two-stage Ray Marching with Empty-Space Skipping](2985-two-stage-ray-marching-with-empty-space-skipping.md)
+-
+-### Hierarchical Sampling with Occupancy Grid
+-*   **What it is:** Uses a hierarchical grid structure to efficiently skip empty voxels.
+-*   **Difference:** Uses a multi-resolution grid hierarchy rather than a single coarse grid with alpha-based filtering.
+-*   **When to choose:** When the scene has varying levels of detail and empty space distribution is complex.
+-*   **Link:** [Hierarchical Sampling with Occupancy Grid](3035-hierarchical-sampling-with-occupancy-grid.md)
++*   **Low-Density Regions:** Regions with low density (e.g., a white plate on a white background) may have alpha values close to zero even if they are part of the scene. If the image reconstruction error is low, these regions might be incorrectly filtered out as empty space [S1]. This can be alleviated by using a background with a different color or disabling the filtering strategy for such scenes [S1].
++*   **Dynamic Extent:** The bounding box must be computed over *all* training time steps to ensure the entire dynamic range of the object is captured. Failing to do so may result in parts of the object being filtered out during certain time steps [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training and rendering speed are significantly improved compared to models without filtering. The sources state that "NDGV(w/o filter)" has clearly worse training speed, render speed, and PSNR than the full model with filtering [S1].
+-*   **Memory Complexity:** Reduces the effective volume of the grid in the fine stage by using the coarse geometry prior, leading to lower memory usage for the fine model [S1].
+-*   **Strengths:**
+-    *   Accelerates training by reducing MLP queries [S1].
+-    *   Adapts to dynamic scenes by considering all time steps [S1].
+-    *   Simple to implement using existing coarse grid infrastructure [S1].
+-*   **Limitations:**
+-    *   May filter out low-density objects if the alpha threshold is not carefully tuned [S1].
+-    *   Requires a coarse grid to be trained first, adding a preprocessing step [S1].
+-*   **When to use:** When training dynamic neural volumes and computational efficiency is a priority, and the scene has significant empty space.
+-*   **When not to use:** When the scene contains low-density objects that are visually important but have low alpha values (e.g., transparent or low-contrast objects) [S1].
++*   **Time Complexity:** The preprocessing step (computing the bounding box) requires querying the coarse grid for all vertices and all time steps, which is $O(V \cdot T)$ where $V$ is the number of vertices in the coarse grid and $T$ is the number of time steps. Filtering during training reduces the number of MLP queries, improving training and rendering speed [S1].
++*   **Memory Complexity:** Requires storing the coarse deformation feature grid and the computed bounding box. The bounding box is a constant size structure [S1].
++*   **Performance:** The method significantly reduces training and rendering time compared to not using filtering. In experiments, the full model with filtering (NDGV full) outperformed the model without filtering (NDGV w/o filter) in training speed, render speed, and PSNR [S1].
++*   **Strengths:** Effective for dynamic scenes with significant empty space; reduces computational load on the MLP; adapts to the scene's geometry over time.
++*   **Limitations:** May filter out valid low-density objects if the threshold is not carefully chosen; requires a coarse grid to be trained first to generate the alpha values for filtering [S1].
+ 
+ ## Background
+-*   **Origin:** Proposed by X. Guo et al. in "Neural Deformable Voxel Grid for Fast Optimization of Dynamic View Synthesis" [S1].
+-*   **History:** The method is part of the Neural Deformable Voxel Grid (NDGV) framework, which aims to optimize dynamic view synthesis efficiently. It builds upon the concept of using coarse grids to guide fine-stage optimization [S1].
+-*   **Usage:** Used in dynamic view synthesis tasks, particularly for scenes with moving objects and large empty backgrounds [S1].
++The method was proposed in the context of Neural Deformable Voxel Grid (NDGV) for fast optimization of dynamic view synthesis. It was introduced by X. Guo et al. in 2022 [S1]. The technique builds upon the use of coarse deformation feature grids to accelerate the training of fine models by providing a geometry prior [S1].
+ 
+ ## Sources

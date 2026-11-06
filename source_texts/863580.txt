@@ -1,0 +1,162 @@
+Contribute to buttception/Meow2 development by creating an account on GitHub.
+
+[M3] Vertex packing and quantisation by buttception · Pull Request #128 · buttception/Meow2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+buttception
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #127
+Stack 11 of the M3 stack. This PR is based on #126 (rays). Merge order: #108 → #110 → … → #124 → #126 → this one.
+What
+Meow2/Math/Packing.h provides the vertex packing the renderer (M5/M7) will use. Each format has a tested error bound:
+half floats: toHalf / fromHalf, using the F16C instructions from [M3] SIMD: AVX2 baseline, CPU check at startup, batch helpers #106;
+normalised integers: UNORM/SNORM 8 and 16 bit, decoded exactly like the GPU does;
+octahedral normals: 4 bytes;
+tangent frames as one quaternion: normal + tangent + handedness in 8 bytes;
+positions quantised to 16 bits inside the mesh bounds: 6 bytes.
+How it works
+Halves use DirectXMath's XMConvertFloatToHalf / XMConvertHalfToFloat. With F16C (our AVX2 build), those are single instructions.
+Normalised integers: lround(clamp(x) × 255 / 65535 / 127 / 32767) to pack, v / max to unpack. SNORM decodes with max(v / 127, −1), the D3D12/Vulkan rule.
+Octahedral:
+packing projects the normal onto the octahedron |x|+|y|+|z| = 1, folds the lower half (z < 0) into the corners of the square, and stores x, y as SNORM16;
+unpacking reverses the fold and normalises.
+QTangent:
+the tangent is re-orthogonalised against the normal;
+the rows (tangent, normal × tangent, normal) form a rotation matrix, which is converted to a quaternion with w ≥ 0;
+w is kept at least one SNORM16 step above 0;
+the whole quaternion is negated for handedness −1;
+on unpacking, the sign of w is the handedness, and the axes are the rotated +X (tangent) and +Z (normal).
+Positions: (p − min) / size as UNORM16 per axis. A zero-size axis (a flat floor) stores 0 and decodes to its single value.
+Why it's done this way
+Concepts
+Why pack vertices:
+A GPU often waits on memory, not arithmetic. A 48-byte vertex that becomes 20 bytes means 2.4× fewer bytes fetched per vertex and smaller vertex caches misses.
+The hardware decodes R16G16_SNORM, R16G16B16A16_UNORM, R16_FLOAT etc. for free during the fetch, so packing costs nothing at draw time.
+Normalised integers: an integer interpreted as a fraction of its maximum. UNORM covers 0..1, SNORM −1..1. 8-bit SNORM has −128 and −127, both meaning −1; that keeps 0 exactly representable and the range symmetric. We never write −128, and we decode it like the GPU.
+Octahedral mapping: storing x, y and rebuilding z = √(1 − x² − y²) loses z's sign and is imprecise near the equator. Projecting the sphere onto an octahedron, then unfolding it flat, spreads the codes almost uniformly. With 2 × 16 bits the worst error is below 0.0001 rad; the test checks 10k random normals.
+QTangent: the tangent frame (tangent, bitangent, normal) is a rotation plus a mirror flag. A rotation fits in a quaternion (4 numbers instead of 9), and since q ≡ −q, the sign is free to carry the mirror flag. The catch is that when w is exactly 0 the sign would vanish, so w is clamped to at least one step. Crytek introduced this for skinned meshes, where tangent frames must also be interpolated and rotated cheaply.
+Position quantisation: inside a mesh's own bounds, 16 bits per axis give 65,536 steps. For a 2 m character that's 0.03 mm, far below a pixel. The bounds are applied back in the vertex shader or folded into the world matrix.
+Decisions
+Exact GPU decode rules, so CPU tests, CPU-side picking on packed meshes, and the shader all agree.
+Never write SNORM −128: the GPU rule makes it equal to −127 anyway, and leaving it out keeps the code symmetric.
+PackedTangentFrame and QuantizedPosition are plain arrays of integers: they're bytes for a vertex buffer, and the renderer defines the layouts.
+The re-orthogonalisation in packTangentFrame: importers give tangents that aren't quite perpendicular, and a non-orthonormal basis isn't a rotation.
+Alternatives rejected
+Option
+Why not
+Spherical coordinates for normals
+uneven precision (dense at the poles), trig to decode
+Normal + tangent as two octahedral values + a sign
+9 bytes, and the tangent isn't guaranteed perpendicular after decoding
+10:10:10:2 normals
+3 × 10 bits waste space on the third component; octahedral 2 × 16 is more precise in 32 bits
+meshoptimizer's codecs now
+a dependency (needs approval); worth it for whole-mesh compression later
+References:
+Cigolle et al., A Survey of Efficient Representations for Independent Unit Vectors
+Frey & Herzog, Spherical Skinning with Dual Quaternions and QTangents (Crytek)
+D3D data conversion rules
+Vulkan fixed-point conversion
+Files changed
+Meow2Engine/include/Meow2/Math/Packing.h (new).
+Meow2Engine/tests/Math/PackingTests.cpp (new); both CMakeLists list the new files.
+Docs: docs/wiki/Math.md (Vertex packing), techstack §10 and its changelog, milestones, CHANGELOG.
+Tests
+ID
+Test
+Result
+T1
+Math.Packing.HalfFloat
+✅
+T2
+Math.Packing.NormalisedIntegers (every 8-bit value exact)
+✅
+T3
+Math.Packing.OctahedralNormals (10k random, < 0.0001 rad)
+✅
+T4
+Math.Packing.TangentFrame (2k random, both handedness signs, w = 0)
+✅
+T5
+Math.Packing.QuantizedPositions (10k random, flat axis)
+✅
+Windows MSVC Debug, working folder: the Packing, Docs and Format tests pass.
+Clean-worktree check: done once, on the top of the stack.
+Wiki / docs
+docs/wiki/Math.md → Vertex packing. The milestones row is ✅.
+Follow-ups
+Vertex layouts and GPU formats (renderer, M5).
+The shader-side decode functions (HLSL, M4/M5).
+meshoptimizer for whole-mesh compression (needs approval).
+🤖 Generated with Claude Code
+Math: vertex packing and quantisation
+…
+758e2b5
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+buttception
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Agent code review
+Verdict: SOUND
+Checked
+matches the issue's scope
+naming (§16): the packed types are plain data with camelCase fields; Format.Check passes
+warnings: no new targets; all integer conversions are explicit
+interfaces: DirectXPackedVector.h is part of the DirectXMath exception
+no virtuals or globals
+thread safety: pure functions
+every public declaration documented; Docs.PublicApi.IsDocumented passes
+errors: inputs are clamped; flat bounds are handled; w = 0 is handled in QTangents
+tests: exhaustive 8-bit checks, random sweeps with error bounds, both handedness signs, the w = 0 case
+stacked on [M3] Rays and picking #126
+Findings
+Severity
+File:line
+Issue
+Action
+Low
+Packing.h packOctahedral
+A zero vector divides by 0.
+Documented precondition (unit normal). Importers normalise first.
+Low
+Packing.h quantizePosition
+Positions outside the bounds are clamped silently.
+Documented; the bounds come from the same mesh.
+Info
+QTangent
+Interpolating packed quaternions across a triangle needs consistent signs per triangle; that's a renderer concern.
+Noted for M5/M7.
+This was referenced Nov 5, 2026
+[M3] Transform hierarchy in the Scene
+#130
+Open
+[M3] Close M3: version 0.4.0
+#132
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

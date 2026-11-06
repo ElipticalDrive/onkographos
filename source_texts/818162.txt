@@ -1,0 +1,209 @@
+Notes on ray marching, signed distance functions, and the tricks that make them sing.
+
+Ray marching & signed distance fields · ./jerome{m}Skip to content
+~/Notes/Ray marching and SDFs.md · note · budding · 6 min · updated 2026-10-16
+Ray marching & SDFs
+// status: budding
+Ray marching is the technique I reach for when I want to render something implicit — fluids, fractals, blobs, volumes — without having to build a mesh first. The idea is old (used in CAD, medical imaging, demoscene work for decades), but pairing it with signed distance functions is what made it the shader-toy lingua franca. See Marching Cubes for the other family — the one that extracts a polygon mesh instead of marching the ray directly.
+The core loop
+For each pixel, shoot a ray from the camera. Advance it along its direction by some step size. At each step, ask the scene "how far am I from your nearest surface?". If the answer is (almost) zero, you hit something. If the ray exits your bounding region, the pixel is sky.
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11float march(vec3 ro, vec3 rd) {
+    float t = 0.0;
+    for (int i = 0; i < 128; i++) {
+        vec3 p = ro + rd * t;
+        float d = sceneSDF(p);        // distance to nearest surface
+        if (d < 0.001) return t;      // hit
+        if (t > 100.0) break;         // escape
+        t += d;                        // sphere-tracing step
+    }
+    return -1.0;
+}
+```
+The key move — the reason we use SDFs — is that a true or conservative distance bound gives a safe step size. This is sphere tracing, due to Hart (1994). A fixed step can overshoot or waste samples; stepping by a valid bound avoids tunnelling. An arbitrary implicit field does not provide that guarantee.
+click to interact
+raymarch · liveSphere tracing in 2D. Each circle is a safe step, the distance to the nearest surface. Aim with the mouse; drag the shapes.copy linkopen ↗
+Signed distance functions
+A signed distance function f : ℝ³ → ℝ returns the distance from a point to the nearest surface, signed (negative inside, positive outside). They compose beautifully:
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7float sdSphere(vec3 p, float r)           { return length(p) - r; }
+float sdBox(vec3 p, vec3 b)               { vec3 q = abs(p) - b; return length(max(q,0.0)) + min(max(q.x,max(q.y,q.z)),0.0); }
+float sdTorus(vec3 p, vec2 t)             { vec2 q = vec2(length(p.xz)-t.x, p.y); return length(q)-t.y; }
+
+float opUnion(float a, float b)           { return min(a, b); }
+float opSub(float a, float b)             { return max(-b, a); }
+float opIntersect(float a, float b)       { return max(a, b); }
+```
+The smooth union smin is where SDFs start to feel like clay:
+glslcopy
+```
+1
+2
+3
+4float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+}
+```
+Inigo Quilez's distance functions reference is the cheat sheet. Bookmark it and stop rederiving things.
+Space operators
+The neat trick: before you evaluate the SDF at p, transform p. This makes composition compact, though the extra operations still have a shader cost.
+Translate — subtract an offset from p.
+Rotate — multiply p by an inverse rotation matrix.
+Mirror — p.x = abs(p.x) reflects across a plane.
+Tile infinite copies — p = mod(p + c/2.0, c) - c/2.0. Careful: non-uniform scale breaks the "is-a-distance" property, so tile sizes should be larger than object bounds.
+Anything that isn't a rigid transform needs to be applied with a Lipschitz correction — otherwise your SDF lies about how far it is, and the marcher will tunnel or slow to a crawl.
+Normals, shading, tricks
+No explicit geometry means no stored normals. You recover them from the gradient of the field — a few extra SDF evaluations:
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9vec3 normal(vec3 p) {
+    const vec2 e = vec2(1.0, -1.0) * 0.001;
+    return normalize(
+        e.xyy * sceneSDF(p + e.xyy) +
+        e.yyx * sceneSDF(p + e.yyx) +
+        e.yxy * sceneSDF(p + e.yxy) +
+        e.xxx * sceneSDF(p + e.xxx)
+    );
+}
+```
+A few freebies fall out:
+Soft shadows — march a shadow ray from the hit point to the light and track the minimum SDF ratio along the way. One loop, pretty results.
+Ambient occlusion — sample the SDF a few small distances along the normal; if the field is smaller than those distances, you're in a crevice.
+Subsurface-ish effects — use the distance field as thickness.
+click to interact
+shader · liveA live fragment shader. terrain marches a heightfield with contour lines, crt bends a HUD through a tube, field is the dithered background of this site. Edits compile as you type; copy link shares what you wrote.copy linkopen ↗
+What goes wrong
+Non-distance fields — the moment you break the Lipschitz-1 property (non-uniform scale, aggressive min, poorly-bounded displacements), the marcher either overshoots or stutters. The symptom is holes or banding near edges.
+Step count explosion — grazing rays along near-parallel surfaces take forever. Use a coarse bounding volume or spatial structure first; an aggressive minimum step can reintroduce tunnelling.
+Precision near the surface — the epsilon that says "we hit" depends on distance from camera. Scale it with t.
+Huge scenes — pure SDF scenes don't scale like meshes. Use a BVH or grid of SDF bricks, or accept that this is mostly a small-scene technique.
+More primitives & fractals
+The Quilez reference lists the usual suspects: capsule, cylinder, cone, hexagonal prism, pyramid, capped torus, octahedron, rhombus — each with a clean closed form. A couple I reach for most often:
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9float sdCapsule(vec3 p, vec3 a, vec3 b, float r) {
+    vec3 pa = p - a, ba = b - a;
+    float h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
+    return length(pa - ba * h) - r;
+}
+
+float sdPlane(vec3 p, vec3 n, float h) {    // n normalised
+    return dot(p, n) + h;
+}
+```
+Beyond Euclidean, fractals use a distance estimator rather than a true SDF — a lower bound on the true distance, computed from the derivative of an escape-time iteration. The Mandelbulb is the canonical example:
+glslcopy
+```
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11float deMandelbulb(vec3 p) {
+    vec3 z = p; float dr = 1.0, r = 0.0;
+    for (int i = 0; i < 8; i++) {
+        r = max(length(z), 1e-8); if (r > 2.0) break;
+        float theta = acos(z.y / r) * 8.0;
+        float phi   = atan(z.z, z.x) * 8.0;
+        dr = pow(r, 7.0) * 8.0 * dr + 1.0;
+        z = pow(r, 8.0) * vec3(sin(theta)*cos(phi), cos(theta), sin(theta)*sin(phi)) + p;
+    }
+    return 0.5 * log(r) * r / dr;
+}
+```
+Sphere tracing still works as long as the estimate never overshoots; you just accept slower convergence.
+Displacement & domain warping
+Adding a small bounded function to the SDF displaces its surface — cheap bumps and wrinkles without extra geometry:
+glslcopy
+```
+1
+2
+3
+4
+5float sdRocky(vec3 p) {
+    float d = sdSphere(p, 1.0);
+    d += 0.05 * sin(8.0*p.x) * sin(8.0*p.y) * sin(8.0*p.z);
+    return d;
+}
+```
+The amplitude must stay below your Lipschitz headroom or you tunnel. For bigger displacements, dampen the step (t += 0.5 * d) or use an outer bounding SDF to get close before switching to the detailed one.
+Domain warping — passing p + fBm(p) to the SDF instead of p — produces the swirly organic look that's Quilez's trademark. The effective Lipschitz constant grows with the warp amplitude, so steps must shrink.
+Enhanced sphere tracing
+Vanilla sphere tracing steps by exactly d. Keinert et al. (2014) showed that over-relaxation can step by ω·d with ω > 1 when overshoots are detected and handled. Suitable values can reduce iteration counts on smooth scenes, but the gain depends on the field and view.
+Segment tracing is useful when sub-segments of the ray have known bounds — bound a segment's min/max by sampling a few points, skip empty segments entirely. Valuable for terrain heightmaps and volumes.
+Analytical normals & material IDs
+The finite-difference gradient is 4–6 SDF evaluations per normal. For primitives, a symbolic normal (sphere: normalize(p); plane: constant) is free. Composed scenes fall back to finite differences; the extra eval cost is almost always worth it for correct normals across smooth unions.
+Materials travel alongside distance. The idiomatic pattern:
+glslcopy
+```
+1
+2
+3
+4
+5vec2 scene(vec3 p) {                         // .x = dist, .y = material
+    vec2 a = vec2(sdSphere(p, 1.0), 1.0);
+    vec2 b = vec2(sdBox(p - vec3(2,0,0), vec3(0.5)), 2.0);
+    return a.x < b.x ? a : b;
+}
+```
+For smin unions, blend material parameters with the same h factor used for distance so shading transitions match geometry.
+Temporal reuse
+Real-time marchers don't need to start from scratch every frame. Reproject the previous frame with motion vectors, accept a pixel if a disocclusion test passes (depth delta, normal delta), and re-march otherwise. Combined with a denoiser, temporal reprojection can accumulate information across frames. Related techniques are widely used in real-time ray- and path-traced rendering, but disocclusion and ghosting still need careful handling.
+SDFs beyond 3D rendering
+SDFs are useful far outside shader-toy land:
+Font rendering — Valve's 2007 paper popularised 2D SDF glyphs sampled with smoothstep, allowing one atlas to remain useful across a practical range of sizes. MSDF (multi-channel) preserves sharp corners better.
+UI primitives — rounded rectangles, buttons, progress arcs — natural SDF shapes, one shader for all of them.
+Collision & physics — a suitable SDF makes nearest-surface and some collision queries convenient, though robust sweeps and contacts still need algorithms around it.
+Neural implicit fields — DeepSDF represents shape as a learned signed-distance function and can be sphere-traced. NeRF-style radiance fields and Instant-NGP use related implicit representations, but generally render through volumetric sampling rather than treating the network as an SDF.
+Where to go next
+Marching Cubes and Dual Contouring — extract a mesh from an SDF/scalar field instead of marching the ray.
+Sparse Voxel Octrees — a different flavour of ray-based rendering where the "field" is explicit occupancy.
+Voxel rendering techniques — survey of how voxels actually get to pixels.
+References
+Inigo Quilez — distance functions
+Inigo Quilez — raymarching distance fields
+Wikipedia — signed distance function
+Hart, J. — Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces (1994)
+Back to Notes · see also Designing Scalar Fields for Procedural Terrain · Normals for Implicit Surfaces · Home
+›Jump to a page
+enter openup/down moveesc close

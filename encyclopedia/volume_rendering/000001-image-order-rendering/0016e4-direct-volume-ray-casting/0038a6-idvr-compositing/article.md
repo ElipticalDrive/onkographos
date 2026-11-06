@@ -1,0 +1,106 @@
+# IDVR-Compositing
+
+Also called: Importance-Driven Volume Rendering Compositing
+
+## Overview
+IDVR-Compositing is a post-processing compositing step in Importance-Driven Volume Rendering (IDVR) that modulates the visual prominence of objects based on their importance and occlusion status [S1, unofficial]. It solves the problem of visual clutter in multi-object scenes by assigning a "sparseness" value to each object along each ray, making occluded or less important objects more transparent while keeping important objects dense [S1, unofficial]. Unlike standard front-to-back compositing which blends all samples equally, IDVR-Compositing introduces a view-dependent weighting factor before the final global blend [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of objects (or material classes) intersected by a ray, each with an assigned importance value $I_j$, and the standard optical properties (color $C_j$, opacity $\alpha_j$) derived from the local compositing step.
+*   **Output:** Modified color $C'_j$ and opacity $\alpha'_j$ values for each object, ready for global compositing.
+
+**Data Structures:**
+*   **Footprint:** A binary or weighted mask of the image plane indicating which pixels are occupied by which objects. This is view-dependent and must be recalculated when the view direction changes [S1, unofficial].
+*   **Sparseness Map:** A per-pixel, per-object value $s_j \in [0, 1]$ representing the sparseness of object $j$ at that pixel.
+
+**Parameters:**
+*   **Sparseness ($s$):** A value between 0 and 1. $s=0$ means the object is completely visible (dense), and $s=1$ means the object is almost completely transparent [S1, unofficial].
+
+**Steps:**
+1.  **Create Footprint:** Determine the spatial extent of each object in the current view. This defines the regions where objects are present on the screen [S1, unofficial].
+2.  **Assign Sparseness:** Calculate the sparseness value $s_j$ for each object $j$ along each ray. This is based on the object's importance relative to other objects intersecting the same ray and its occlusion status within the footprint [S1, unofficial].
+3.  **Modulate Properties:** Adjust the local color and opacity values using the sparseness value. The exact modulation formula is not explicitly detailed in the provided notes, but the intent is to reduce the contribution of high-sparseness objects [S1, unofficial].
+4.  **Global Compositing:** Blend the modified color and opacity values to produce the final image [S1, unofficial].
+
+**Pseudocode:**
+The following pseudocode illustrates the logic for assigning sparseness using the "Maximum Importance Projection" (MImP) strategy described in the source. Note that the source notes indicate MImP is a specific, simplified approach with disadvantages, but it is the only algorithmic detail provided for IDVR-Compositing.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def idvr_compositing(ray_intersections, image_footprint):
+    """
+    ray_intersections: List of objects intersected by the ray, 
+                       each with properties: {id, importance, color, opacity}
+    image_footprint:   Data structure tracking object presence per pixel (view-dependent)
+    
+    Returns: Modified list of objects with sparseness-modulated color/opacity
+    """
+    if not ray_intersections:
+        return []
+
+    # Step 1 & 2: Assign Sparseness based on Maximum Importance Projection
+    # Find the object with the maximum importance value along this ray
+    max_importance = -1
+    max_importance_obj = None
+    
+    for obj in ray_intersections:
+        if obj.importance > max_importance:
+            max_importance = obj.importance
+            max_importance_obj = obj
+
+    modified_intersections = []
+    
+    for obj in ray_intersections:
+        # MImP Logic: The most important object gets sparseness 0 (dense)
+        # All other objects get sparseness 1 (transparent)
+        if obj.id == max_importance_obj.id:
+            sparseness = 0.0
+        else:
+            sparseness = 1.0
+            
+        # Step 3: Modulate properties
+        # Note: The source does not provide the exact mathematical formula 
+        # for modulating C and alpha with sparseness. 
+        # [G] Assuming a linear modulation for opacity as a common implementation pattern:
+        # alpha_modulated = alpha * (1 - sparseness)
+        # color_modulated = color * (1 - sparseness)
+        # This is an implementation gap fill; the source only states values are "modified".
+        
+        alpha_modulated = obj.opacity * (1.0 - sparseness)
+        color_modulated = obj.color * (1.0 - sparseness)
+        
+        modified_intersections.append({
+            'id': obj.id,
+            'color': color_modulated,
+            'opacity': alpha_modulated,
+            'sparseness': sparseness
+        })
+        
+    return modified_intersections
+```
+
+**Edge Cases and Pitfalls:**
+*   **Occlusion Ambiguity:** If multiple objects have the same maximum importance, the source notes do not specify a tie-breaking rule [S1, unofficial].
+*   **Cylindrical Countersink Artifact:** The simple MImP approach results in a "cylindrical countersink" artifact where only the most important object is visible, and others are completely hidden, which is noted as a disadvantage [S1, unofficial].
+*   **View Dependency:** The footprint must be recalculated for every view change, adding computational overhead [S1, unofficial].
+
+## Subtopics
+
+### Maximum Importance Projection (MImP)
+A specific, fast strategy for IDVR-Compositing where the object with the highest importance along a ray is rendered densely (sparseness 0), and all others are rendered transparently (sparseness 1). It is chosen for speed but suffers from visibility artifacts. [IDVR-Compositing](1185-idvr-compositing.md)
+
+## Operating characteristics
+*   **Time Complexity:** The footprint creation is view-dependent and must be recalculated on view changes. The sparseness assignment is linear with respect to the number of objects per ray. [S1, unofficial]
+*   **Memory Complexity:** Requires storage for the footprint and sparseness map, which are view-dependent. [S1, unofficial]
+*   **Strengths:** Reduces visual clutter by emphasizing important objects. Fast (in the case of MImP). [S1, unofficial]
+*   **Limitations:** The simple MImP approach hides less important objects completely, leading to artifacts. The source notes that there are "several disadvantages" with the simple MImP approach, implying more complex sparseness assignment methods exist but are not detailed in the provided text. [S1, unofficial]
+*   **When to use:** When visualizing scenes with multiple objects of varying importance and the goal is to highlight the most significant structures without clutter. [S1, unofficial]
+*   **When not to use:** When all objects need to be visible simultaneously, or when the computational cost of recalculating the footprint is prohibitive. [S1, unofficial]
+
+## Background
+IDVR-Compositing was introduced by Thurner et al. in 2005 as part of the Importance-Driven Volume Rendering framework. The method aims to improve the interpretability of volume-rendered images by allowing users to control the visibility of objects based on their semantic importance. The concept of "sparseness" was proposed to address the issue of occlusion and visual dominance in multi-object volume datasets. [S1, unofficial]
+
+## Sources
+[S1] Implementation of Importance-Driven Volume Rendering, https://www.cg.tuwien.ac.at/research/publications/2005/Thurner-2005-IVR/Thurner-2005-IVR-paper.pdf, fetched 2026-10-29 (unofficial)

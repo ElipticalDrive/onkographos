@@ -1,0 +1,213 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Gaussian Splatting Volume Rendering is a differentiable rendering technique that synthesizes images by projecting 3D Gaussian distributions onto the image plane and alpha-compositing them along viewing rays [S1][S2, unofficial]. It solves the problem of high-fidelity, real-time novel view synthesis by replacing traditional triangle meshes with probabilistic volume primitives, allowing for efficient tile-based rasterization and differentiable optimization of scene parameters [S2, unofficial]. Unlike standard rasterization which uses geometric primitives, this method materializes smooth ellipses in 2D from 3D probability distributions, capturing view-dependent effects via spherical harmonics [S2, unofficial].
++Gaussian Splatting Volume Rendering is a differentiable rendering technique that synthesizes images by projecting 3D Gaussian distributions onto the image plane and alpha-compositing them along viewing rays [S1][S2, unofficial]. It reconstructs a 3D scene from a dataset of pictures by using Gaussian splats as primitives instead of triangles, rendering the scene, comparing it to ground truth images, and updating scene parameters to reduce the difference [S2, unofficial]. Unlike standard rasterization which uses geometric primitives, this method materializes smooth ellipses in 2D from 3D probability distributions, capturing view-dependent effects via spherical harmonics [S2, unofficial].
+ 
+ ## How it works
+@@ -18,15 +18,13 @@
+ ### Data Structures
+ The scene is stored as an array of Gaussian primitives. A typical layout for a single Gaussian splat is [S2, unofficial]:
+-
+-```cpp
++```python
+ struct GaussianSplat {
+-    glm::vec3 centroid;           // World-space position (3 floats)
+-    float opacity;                // Scalar opacity (1 float)
+-    std::array<float, 48> sphericalHarmonics; // SH coefficients: 16 coefficients * 3 channels (48 floats)
+-    std::array<float, 3> scale;   // Log-space scale factors (3 floats)
+-    std::array<float, 4> rotation;// Quaternion rotation (4 floats)
+-};
++    centroid: vec3          # World-space position (3 floats)
++    opacity: float          # Scalar opacity (1 float)
++    sphericalHarmonics: array<float, 48>  # SH coefficients: 16 coefficients * 3 channels (48 floats)
++    scale: array<float, 3>  # Log-space scale factors (3 floats)
++    rotation: array<float, 4> # Quaternion rotation (4 floats)
++}
+ ```
+-
+ *   **Scale:** Stored in log-space to ensure positivity. The diagonal scaling matrix $S$ is obtained by $S = \text{diag}(\exp(\text{scale}))$ [S2, unofficial].
+ *   **Rotation:** Stored as a unit quaternion $q$, converted to a rotation matrix $R$ [S2, unofficial].
+@@ -34,12 +32,9 @@
+ 
+ ### Numbered Steps
+-
+ 1.  **Load Scene:** Parse the Gaussian data (typically from a `.ply` file) into an array of `GaussianSplat` objects [S2, unofficial].
+-2.  **Project Gaussians:** For each Gaussian $i$, project its 3D centroid $\mu_i$ and covariance $\Sigma_i$ into 2D screen space.
+-    *   The 3D covariance is factorized as $\Sigma_i = R_i S_i S_i^T R_i^T$, where $R_i$ is the rotation matrix and $S_i$ is the diagonal scaling matrix [S2, unofficial].
+-    *   The 2D covariance $\tilde{\Sigma}_i$ is computed using the Jacobian of the projection transformation [S2, unofficial].
++2.  **Project Gaussians:** For each Gaussian $i$, project its 3D centroid $\boldsymbol{\mu}_i$ and covariance $\Sigma_i$ into 2D screen space. The 3D covariance is factorized as $\Sigma_i = R_i S_i S_i^\top R_i^\top$, where $R_i$ is the rotation matrix and $S_i$ is the diagonal scaling matrix [S2, unofficial]. The 2D covariance $\tilde{\Sigma}_i$ is computed using the Jacobian of the projection transformation [S2, unofficial].
+ 3.  **Sort Gaussians:** Sort all Gaussians that intersect the view frustum by their depth (distance from the camera) along each viewing ray [S1].
+ 4.  **Compute Color:** For each Gaussian $i$ and a viewing direction $\mathbf{v}$, compute the color $c_i$ using spherical harmonics:
+-    $$ c_i = \text{clamp}\left( \mathbf{0.5} + \sum_{k=0}^{15} \text{shCoeff}_{i,k} \cdot \text{SHBasis}_k(\mathbf{v}), 0.0, 1.0 \right) $$
++    $$ c_i = \text{clamp}\left( 0.5 + \sum_{k=0}^{15} \text{shCoeff}_{i,k} \cdot \text{SHBasis}_k(\mathbf{v}), 0.0, 1.0 \right) $$
+     where $\text{shCoeff}_{i,k}$ are the SH coefficients and $\text{SHBasis}_k$ are the basis functions evaluated at the viewing direction [S2, unofficial].
+ 5.  **Alpha-Composite:** For each pixel, iterate through the sorted Gaussians $i=1 \dots N$ and accumulate color and opacity using the emission-absorption model [S1]:
+@@ -52,67 +47,47 @@
+ 
+ ### Pseudocode
++```python
++import math
++import numpy as np
+ 
+-```python
+ def render_gaussian_splatting(scene, camera, width, height):
+     """
+     Renders a scene of 3D Gaussians using tile-based rasterization.
+     scene: List of GaussianSplat objects.
+-    camera: Object containing view and projection matrices.
++    camera: Object containing view_matrix, proj_matrix, position.
+     width, height: Image dimensions.
+     Returns: Image buffer of shape (height, width, 3).
+     """
+     image = np.zeros((height, width, 3), dtype=np.float32)
++    projected_gaussians = []
+     
+-    # 1. Project and Filter Gaussians
+-    # Project 3D Gaussians to 2D screen space
+-    projected_gaussians = []
+     for g in scene:
+-        # Project centroid
+         center_2d = project_point(g.centroid, camera.view_matrix, camera.proj_matrix, width, height)
+-        
+-        # Project covariance
+-        # Sigma_3d = R * diag(exp(scale)) * diag(exp(scale)) * R^T
+         S_diag = np.exp(g.scale)
+         R = quaternion_to_rotation_matrix(g.rotation)
+         Sigma_3d = R @ np.diag(S_diag**2) @ R.T
+-        
+-        # Compute 2D covariance using Jacobian of projection
+-        # J is the Jacobian of the perspective projection
+         J = compute_projection_jacobian(g.centroid, camera)
+         Sigma_2d = J @ Sigma_3d @ J.T
+         
+-        # Ensure positive semi-definite and valid
+         if is_valid_gaussian(Sigma_2d):
+             projected_gaussians.append({
+-                'center': center_2d,
+-                'cov': Sigma_2d,
+-                'opacity': g.opacity,
+-                'sh_coeffs': g.sphericalHarmonics,
+-                'depth': g.centroid.z # Depth in camera space
++                'center': center_2d, 'cov': Sigma_2d, 'opacity': g.opacity,
++                'sh_coeffs': g.sphericalHarmonics, 'depth': g.centroid.z
+             })
+             
+-    # 2. Sort by Depth
+     projected_gaussians.sort(key=lambda x: x['depth'])
+     
+-    # 3. Rasterize (Tile-based)
+-    # For each pixel, accumulate color
+     for y in range(height):
+         for x in range(width):
+-            color = np.array([0.5, 0.5, 0.5]) # Bias for SH
++            color = np.array([0.5, 0.5, 0.5])
+             transmittance = 1.0
+             
+             for g in projected_gaussians:
+-                # Check if Gaussian covers this pixel (e.g., within 3 sigma)
+                 if not covers_pixel(g['center'], g['cov'], x, y):
+                     continue
+                 
+-                # Evaluate 2D Gaussian at pixel
+                 dx = x - g['center'][0]
+                 dy = y - g['center'][1]
+-                # Mahalanobis distance
+                 dist_sq = np.array([dx, dy]) @ np.linalg.inv(g['cov']) @ np.array([dx, dy])
+-                
+-                # Gaussian value (unnormalized for efficiency, opacity handles scaling)
+-                # G(p) = exp(-0.5 * dist_sq)
+                 g_val = np.exp(-0.5 * dist_sq)
+                 
+@@ -120,15 +95,10 @@
+                     continue
+                 
+-                # Compute Color using SH
+-                # Direction vector from camera to centroid
+                 view_dir = normalize(g['centroid'] - camera.position)
+                 sh_color = spherical_harmonics_color(g['sh_coeffs'], view_dir)
+                 
+-                # Alpha compositing step
+                 alpha = g['opacity'] * g_val
+                 alpha = np.clip(alpha, 0, 1)
+                 
+-                # Update color and transmittance
+-                # I_f += c_i * sigma_i * G_i * Product(1 - sigma_j * G_j)
+                 color += sh_color * alpha * transmittance
+                 transmittance *= (1 - alpha)
+@@ -138,29 +108,41 @@
+             
+             image[y, x] = color
+-            
+     return image
+ 
++def project_point(point, view_mat, proj_mat, width, height):
++    # Standard MVP projection to screen coordinates. Not given in sources.
++    pass 
++
++def quaternion_to_rotation_matrix(q):
++    # Standard quaternion to 3x3 rotation matrix conversion. Not given in sources.
++    pass 
++
++def compute_projection_jacobian(point, camera):
++    # Jacobian of perspective projection. Not given in sources.
++    pass 
++
++def is_valid_gaussian(cov):
++    # Checks positive semi-definiteness. Not given in sources.
++    pass 
++
++def covers_pixel(center, cov, x, y):
++    # Bounding box check. Not given in sources.
++    pass 
++
++def normalize(v):
++    return v / np.linalg.norm(v)
++
+ def spherical_harmonics_color(sh_coeffs, direction):
+-    """
+-    Computes RGB color from SH coefficients and viewing direction.
+-    sh_coeffs: array of 48 floats (16 coeffs * 3 channels)
+-    direction: normalized 3D vector
+-    Returns: RGB vector in [0, 1]
+-    """
+-    # Bias is 0.5
+     rgb = np.array([0.5, 0.5, 0.5])
+-    
+-    # Evaluate SH basis functions for degree 3 (16 terms)
+-    # This is a simplified loop; in practice, explicit basis functions are used
+     for i in range(16):
+         basis_val = evaluate_sh_basis(i, direction)
+-        # Coefficients are stored as [R0, G0, B0, R1, G1, B1, ...]
+-        # Or interleaved? Standard 3DGS stores R, G, B separately or interleaved.
+-        # Assuming interleaved: coeff[3*i] is R, 3*i+1 is G, 3*i+2 is B
+         rgb[0] += sh_coeffs[3*i] * basis_val
+         rgb[1] += sh_coeffs[3*i+1] * basis_val
+         rgb[2] += sh_coeffs[3*i+2] * basis_val
+-        
+     return np.clip(rgb, 0.0, 1.0)
++
++def evaluate_sh_basis(i, direction):
++    # Evaluates i-th SH basis function. Not given in sources.
++    pass 
+ ```
+ 
+@@ -177,16 +159,4 @@
+ 
+ ## Subtopics
+-
+-### Volumetric Gaussian Splatting (AVIS)
+-A variant that treats Gaussians as volumetric primitives rather than surface emitters, allowing for the rendering of participating media and smoke [S3, unofficial]. It differs from standard 3DGS by integrating density and color fields into a volume grid, often requiring additional steps like bounding box calculation and volume clipping [S3, unofficial].
+-
+-### Gaussian Splatting for Microscopy
+-Adapts the splatting technique for microscopy data, often involving specific initialization policies and density control to handle the unique characteristics of biological samples [S3301].
+-
+-### Direct Gaussian Splatting
+-A variant that may alter the initialization or optimization pipeline to directly map input data to Gaussians without intermediate steps [S3555].
+-
+-### Efficiency Variants (EffGS, UltraGauss)
+-Methods designed to reduce the memory and computational cost of rendering large numbers of Gaussians, often through pruning, merging, or optimized data structures [S3365, S5170].
+ 
+ ### Surface Normal Rendering via External Channel

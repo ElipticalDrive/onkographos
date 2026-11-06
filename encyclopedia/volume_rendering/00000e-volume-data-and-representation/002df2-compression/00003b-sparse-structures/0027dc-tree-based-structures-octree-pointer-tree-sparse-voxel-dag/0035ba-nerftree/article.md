@@ -1,0 +1,108 @@
+# NerfTree
+
+Also called: Efficient-NeRF
+
+## Overview
+NerfTree is a two-level octree structure designed to accelerate Neural Radiance Fields (NeRF) by localizing surface geometry and refining radiance estimation only in relevant regions [S1]. Unlike standard NeRF which evaluates the network along the entire ray, NerfTree uses a coarse density volume to cache approximate geometry and fine sparse voxel grids for refinement, effectively skipping empty space to reduce MLP evaluations [S1]. It sets itself apart from other sparse structures by its specific two-level hierarchy optimized for the NeRF training pipeline, trading increased memory footprint for significant reductions in training time and inference latency [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of posed images for a static scene.
+*   **Output:** A trained NerfTree structure (coarse density volume + fine sparse voxel grids) and associated MLP parameters for radiance/geometry prediction.
+
+**Data Structures:**
+The structure consists of two distinct components:
+1.  **Coarse Density Voxel Volume:** A dense or semi-dense grid storing approximate density values. This acts as a geometry cache.
+2.  **Fine Sparse Voxel Grids:** A sparse structure (octree-based) localized around the surface regions identified by the coarse volume. These store high-frequency details for geometry and radiance.
+
+**Steps:**
+1.  **Initialization:** Initialize the coarse density voxel volume. The fine sparse voxel grids are initialized empty or with minimal data.
+2.  **Coarse Localization:** During training, use the coarse density voxel volume to identify regions containing geometry. This step approximates the object's surface location [S1].
+3.  **Refinement:** In regions identified by the coarse volume, use the fine sparse voxel grids to refine geometry and radiance estimation. The MLP is queried primarily within these surface-adjacent regions [S1].
+4.  **Progressive Update:** Progressively update the density voxel volumes during the training process. As the model learns, the coarse volume becomes more accurate, and the fine grids are populated or refined in corresponding areas [S1].
+5.  **Rendering:** For inference, traverse the structure. Use the coarse volume to quickly cull empty space. Sample rays only through the fine sparse voxel grids in relevant regions to compute color and density [S1].
+
+**Parameters:**
+*   **Coarse Resolution:** Not given in the sources.
+*   **Fine Resolution:** Not given in the sources.
+*   **Training Duration:** Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Memory vs. Precision Trade-off:** The voxel structure and density grid introduce an unavoidable trade-off between memory usage and precision. A larger memory footprint is required to achieve high precision [S1].
+*   **Empty Space Handling:** While effective, the method still requires managing the sparse structure overhead. If the coarse volume fails to localize geometry accurately, the fine grids may not be triggered correctly, leading to artifacts or wasted computation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class NerfTree:
+    def __init__(self, coarse_resolution, fine_resolution):
+        # Initialize coarse density voxel volume
+        self.coarse_volume = DenseGrid(coarse_resolution)
+        # Initialize fine sparse voxel grids (octree structure)
+        self.fine_grids = SparseOctree(fine_resolution)
+        # Initialize MLP for radiance/geometry prediction
+        self.mlp = MLP()
+
+    def train_step(self, rays, gt_colors):
+        # Step 1: Use coarse volume to localize surface
+        coarse_densities = self.coarse_volume.query(rays)
+        
+        # Identify rays passing through non-empty coarse regions
+        relevant_rays = rays[coarse_densities > threshold]
+        
+        # Step 2: Refine geometry and radiance in surface-adjacent regions
+        # Query fine grids for these rays
+        fine_samples = self.fine_grids.sample(relevant_rays)
+        
+        # Compute radiance using MLP and fine samples
+        predicted_colors = self.mlp.forward(fine_samples)
+        
+        # Compute loss
+        loss = compute_loss(predicted_colors, gt_colors[relevant_rays])
+        
+        # Step 3: Progressive update of coarse volume
+        # Update coarse density based on current predictions
+        self.coarse_volume.update(relevant_rays, predicted_colors)
+        
+        # Update fine grids and MLP parameters
+        self.fine_grids.update(relevant_rays, fine_samples)
+        self.mlp.update(loss)
+        
+        return loss
+
+    def render(self, rays):
+        # Query coarse volume for quick culling
+        coarse_densities = self.coarse_volume.query(rays)
+        
+        # Filter rays based on coarse density
+        active_rays = rays[coarse_densities > threshold]
+        
+        # Sample fine grids for active rays
+        fine_samples = self.fine_grids.sample(active_rays)
+        
+        # Compute final radiance
+        colors = self.mlp.forward(fine_samples)
+        
+        # Return rendered colors for active rays, background for others
+        return colors
+```
+
+## Subtopics
+
+### [Sparse spatial data structures for NeRF](8430-sparse-spatial-data-structures-for-nerf.md)
+This family encompasses methods that use sparse data structures (sparse grids, octrees, VDBs) to localize the surface interface and concentrate samples only in relevant regions, effectively skipping empty space to reduce MLP evaluations. Unlike standard NeRF which evaluates the network along the entire ray, these methods dynamically adapt the voxelization to the underlying scene structure, accelerating surface localization.
+
+## Operating characteristics
+*   **Time Complexity:** Training time is reduced by up to 88% compared to traditional NeRF [S1]. Inference speed is improved to more than 200 fps [S1].
+*   **Memory Complexity:** The method has a larger memory footprint compared to standard NeRF due to the voxel structure and density grid [S1].
+*   **Strengths:** Significant acceleration in both training and inference; effective localization of geometry.
+*   **Limitations:** Higher memory usage; trade-off between memory and precision [S1].
+*   **When to use:** When training time and inference speed are critical, and memory is not the primary constraint.
+*   **When not to use:** When memory usage must be minimized, or when the scene has very complex geometry that requires higher precision than the coarse/fine split can provide.
+
+## Background
+NerfTree, also known as Efficient-NeRF, was introduced by Hyan et al. [HLC* 22] as part of the broader effort to accelerate NeRF training and rendering [S1]. It builds on the concept of multistage, coarse-to-fine strategies seen in works like TNSVF [LGZL* 20] and others [SSC22, YLT* 21], but specifically implements a two-level octree structure [S1]. The approach is inspired by classical computer graphics techniques such as Bounding Volume Hierarchy (BVH) [RW80] and Sparse Voxel Octree (SVO) [LK10], which model scenes in a sparse hierarchical form to accelerate ray tracing [S1].
+
+## Sources
+[S1] Recent Advances and Trends in Learning‐Based 3D Representations, https://doi.org/10.1111/cgf.70530, fetched 2026-10-26

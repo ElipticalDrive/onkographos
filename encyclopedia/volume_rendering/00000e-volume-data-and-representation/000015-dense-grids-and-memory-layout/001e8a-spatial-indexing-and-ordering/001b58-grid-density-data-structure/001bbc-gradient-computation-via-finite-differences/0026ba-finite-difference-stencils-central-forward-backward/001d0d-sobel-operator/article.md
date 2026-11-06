@@ -1,157 +1,106 @@
 # Sobel Operator
 
-Also called: Sobel Gradient Estimation, Sobel edge detector, Sobel gradient operator
+Also called: Gradient Map (Sobel), Sobel Gradient Estimation, Sobel edge detector, Sobel gradient operator, Sobel3D Gradient Operator
 
 ## Overview
-The Sobel Operator is a gradient estimation method used in volume rendering to compute the spatial gradient vector for each voxel in a scalar volume [S1, S2, unofficial]. It solves the problem of determining the rate of change of data values to generate opacity functions and shading normals, emphasizing regions of high spatial frequency corresponding to edges [S1, unofficial]. Unlike general edge detection where spatial location is critical, in volume rendering opacity functions are applied uniformly regardless of position, so the goal is to locate boundaries in the data value domain rather than the spatial domain [S1, unofficial]. It is distinguished from its sibling [Gradient-based Diffuse Lighting with Alpha Blending](1257-gradient-based-diffuse-lighting-with-alpha-blending.md) by being a fundamental gradient computation primitive rather than a lighting model, and from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by using separable smoothing weights that make it less sensitive to noise than the Roberts Cross operator [S1, unofficial].
+The Sobel operator is a gradient estimation method used in volume rendering to approximate the spatial derivative of a scalar field at a voxel center [S1, S2, S3, unofficial]. It computes the gradient vector $\mathbf{G} = (G_x, G_y, G_z)$ by convolving the volume data with separable 3D kernels that combine differentiation in one axis with smoothing in the other two [S1, S3, unofficial]. Unlike the Central-Difference operator, which uses only immediate neighbors, the Sobel operator incorporates a wider stencil to provide better noise suppression and localization, making it suitable for opacity function generation and shading where accurate gradient magnitude and orientation are required [S1, S2, unofficial].
 
 ## How it works
-The method computes the gradient $\mathbf{G} = (G_x, G_y, G_z)$ at a voxel by convolving the local neighborhood with separable kernels that combine differentiation and smoothing [S2, unofficial].
-
 **Inputs and Outputs:**
-- Input: A scalar volume texture $V$, the current voxel coordinate $(x, y, z)$, and the voxel size $h$ [S2, unofficial].
-- Output: A 3D gradient vector $\mathbf{G}$ [S2, unofficial].
+*   **Input:** A 3D scalar volume $V$ defined on a regular grid with isotropic voxel spacing $h$. The volume is accessed via texture sampling or direct memory lookup.
+*   **Output:** A 3D gradient vector field $\mathbf{G}$, where each voxel contains $\mathbf{G} = (G_x, G_y, G_z)$.
 
 **Data Structures:**
-- Derivative weights $k$: A 1D array of size 3, $k = [-1.0, 0.0, 1.0]$ [S2, unofficial].
-- Smoothing weights $s$: A 1D array of size 3, $s = [1.0, 2.0, 1.0]$ [S2, unofficial].
-- Gradient accumulator: Three floating-point variables $G_x, G_y, G_z$, initialized to 0.0 [S2, unofficial].
+The method uses two 1D weight vectors of size 3:
+1.  **Derivative weights ($k$):** $[-1, 0, 1]$. These approximate the first derivative.
+2.  **Smoothing weights ($s$):** $[1, 2, 1]$. These approximate a Gaussian smoothing filter to reduce noise.
 
-**Steps:**
-1. Determine the voxel size $h$ from the texture properties [S2, unofficial].
-2. Initialize $G_x = 0.0$, $G_y = 0.0$, $G_z = 0.0$ [S2, unofficial].
-3. Iterate over the $3 \times 3 \times 3$ neighborhood defined by offsets $dx, dy, dz \in \{-1, 0, 1\}$ [S2, unofficial].
-4. For each offset, calculate the spatial offset vector $\mathbf{offset} = (dx \cdot h, dy \cdot h, dz \cdot h)$ [S2, unofficial].
-5. Sample the volume data at the offset position: $v = V(x + dx, y + dy, z + dz)$ [S2, unofficial].
-6. Calculate the separable weights for each axis based on the current indices $i_x, i_y, i_z$ (mapped from $\{-1, 0, 1\}$ to $\{0, 1, 2\}$) [S2, unofficial]:
-    - $w_x = k[i_x] \cdot s[i_y] \cdot s[i_z]$ [S2, unofficial]
-    - $w_y = s[i_x] \cdot k[i_y] \cdot s[i_z]$ [S2, unofficial]
-    - $w_z = s[i_x] \cdot s[i_y] \cdot k[i_z]$ [S2, unofficial]
-7. Accumulate the weighted contributions:
-    - $G_x \leftarrow G_x + w_x \cdot v$
-    - $G_y \leftarrow G_y + w_y \cdot v$
-    - $G_z \leftarrow G_z + w_z \cdot v$ [S2, unofficial]
-8. Normalize the accumulated gradients by multiplying by $\frac{1}{16.0}$ and a normalization constant $NORM$ [S2, unofficial].
-9. Return $\mathbf{G} = (G_x, G_y, G_z) \cdot NORM$ [S2, unofficial].
-
-**Formulas:**
-The separable weight calculation effectively implements the convolution with the Sobel kernels [S2, unofficial]. For a 2D slice, the horizontal gradient $E(H)$ and vertical gradient $E(V)$ are computed as [S1, unofficial]:
-
-$$ E(H) = (a_0 + 2a_1 + a_2) - (a_4 + 2a_5 + a_6) $$
-
-$$ E(V) = (a_2 + 2a_3 + a_4) - (a_0 + 2a_7 + a_6) $$
-
-Where $a_0 \dots a_7$ are the pixel intensities in the $3 \times 3$ window arranged around the current pixel [S1, unofficial].
-
-The diagonal kernels are defined as [S1, unofficial]:
-$$ E(DL) = (a_1 + 2a_2 + a_3) - (a_7 + 2a_6 + a_5) $$
-$$ E(DR) = (a_1 + 2a_0 + a_7) - (a_3 + 2a_4 + a_5) $$
-
-**Parameters:**
-- $NORM$: Not given in the sources. [S2, unofficial] applies a multiplication by $NORM$ after the $1/16.0$ scaling but does not define its value.
-- Isotropy: The operator aims for uniform response in all directions [S1, unofficial].
-- Localization: Good precision in edge positioning [S1, unofficial].
-- Signal-to-Noise: High resistance to noise due to smoothing [S1, unofficial].
+**Algorithm:**
+The gradient component for each axis is computed using a separable convolution over a $3 \times 3 \times 3$ neighborhood centered at the current voxel index $(i, j, k)$. The general formula for the $x$-component $G_x$ is:
+$$ G_x = \frac{1}{16} \sum_{dz=-1}^{1} \sum_{dy=-1}^{1} \sum_{dx=-1}^{1} k_{dx} \cdot s_{dy} \cdot s_{dz} \cdot V(i+dx, j+dy, k+dz) $$
+The components $G_y$ and $G_z$ are computed analogously by rotating the derivative weight $k$ to the $y$ and $z$ axes respectively, while keeping $s$ in the other two dimensions. The normalization factor $1/16$ arises from the product of the smoothing weights sum ($1+2+1=4$) for the two smoothing axes ($4 \times 4 = 16$).
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sobel_gradient(volume_texture, coord, voxel_size):
+def compute_sobel_gradient(V, h, x, y, z):
     """
-    Computes the 3D gradient at coord using the Sobel operator.
-    
-    Args:
-        volume_texture: Object with method sample_data(offset) returning scalar value.
-        coord: Tuple (x, y, z) of the current voxel.
-        voxel_size: Float scalar h.
-        
-    Returns:
-        Tuple (Gx, Gy, Gz) representing the gradient vector.
+    Computes the Sobel gradient at voxel (x, y, z).
+    V: Volume data structure supporting sample(x, y, z) with boundary handling.
+    h: Voxel spacing (isotropic).
+    x, y, z: Integer indices of the center voxel.
+    Returns: vec3(Gx, Gy, Gz)
     """
-    # Derivative weights k = [-1, 0, 1]
-    # Smoothing weights s = [1, 2, 1]
+    # Define 1D kernels
+    k = [-1.0, 0.0, 1.0]  # Derivative weights
+    s = [1.0, 2.0, 1.0]   # Smoothing weights
     
     Gx = 0.0
     Gy = 0.0
     Gz = 0.0
     
-    # Loop over the 3x3x3 neighborhood
-    for dz in [-1, 0, 1]:
-        for dy in [-1, 0, 1]:
-            for dx in [-1, 0, 1]:
-                # Map index -1,0,1 to array index 0,1,2
-                idx_x = dx + 1
-                idx_y = dy + 1
-                idx_z = dz + 1
-                
-                # Calculate spatial offset
-                offset_x = dx * voxel_size
-                offset_y = dy * voxel_size
-                offset_z = dz * voxel_size
-                
-                # Sample data at offset
-                # Boundary conditions (e.g., clamping, mirroring, zero-padding) 
-                # must be handled by sample_data if coord is near the volume edge [G].
-                v = volume_texture.sample_data(coord + (offset_x, offset_y, offset_z))
+    # Iterate over the 3x3x3 neighborhood
+    for dz in range(-1, 2):
+        for dy in range(-1, 2):
+            for dx in range(-1, 2):
+                # Sample the voxel value at the offset
+                # Boundary conditions (clamping, zero-padding, etc.) are handled by V.sample
+                v = V.sample(x + dx, y + dy, z + dz)
                 
                 # Calculate separable weights
-                # k = [-1.0, 0.0, 1.0], s = [1.0, 2.0, 1.0]
-                k_x = -1.0 if idx_x == 0 else (1.0 if idx_x == 2 else 0.0)
-                k_y = -1.0 if idx_y == 0 else (1.0 if idx_y == 2 else 0.0)
-                k_z = -1.0 if idx_z == 0 else (1.0 if idx_z == 2 else 0.0)
+                # wx uses k in x, s in y, s in z
+                wx = k[dx + 1] * s[dy + 1] * s[dz + 1]
+                # wy uses s in x, k in y, s in z
+                wy = s[dx + 1] * k[dy + 1] * s[dz + 1]
+                # wz uses s in x, s in y, k in z
+                wz = s[dx + 1] * s[dy + 1] * k[dz + 1]
                 
-                s_x = 1.0 if idx_x == 0 or idx_x == 2 else 2.0
-                s_y = 1.0 if idx_y == 0 or idx_y == 2 else 2.0
-                s_z = 1.0 if idx_z == 0 or idx_z == 2 else 2.0
-                
-                wx = k_x * s_y * s_z
-                wy = s_x * k_y * s_z
-                wz = s_x * s_y * k_z
-                
-                # Accumulate
+                # Accumulate gradients
                 Gx += wx * v
                 Gy += wy * v
                 Gz += wz * v
                 
-    # Normalize
-    # Source [S2, unofficial] specifies division by 16.0 and multiplication by NORM.
-    # NORM value not given in the sources [S2, unofficial].
-    NORM = 1.0  # Placeholder for implementation-specific normalization
+    # Normalize by the sum of smoothing weights product (4 * 4 = 16)
+    # Note: Some implementations may apply an additional global normalization factor NORM
+    # depending on the specific definition of the gradient magnitude scale.
+    Gx /= 16.0
+    Gy /= 16.0
+    Gz /= 16.0
     
-    scale = 1.0 / 16.0 * NORM
-    
-    return (Gx * scale, Gy * scale, Gz * scale)
+    return vec3(Gx, Gy, Gz)
 ```
 
+**Parameters:**
+*   **Voxel Spacing ($h$):** Assumed isotropic. If anisotropic, the weights must be scaled by $1/h_i$ for each axis $i$. Not given in the sources for the standard isotropic case, but implied by the parent article's general form.
+*   **Normalization:** The sources cite a division by 16.0 [S3, unofficial]. Source [S4, unofficial] (2D case) divides by 4.0, which is consistent with the 2D projection of the 3D Sobel (sum of smoothing weights in one axis is 4).
+
 **Edge Cases and Pitfalls:**
-- **Overflow:** Output values can overflow the maximum allowed pixel value for image types with small integer ranges (e.g., 8-bit). The standard practice is to clamp overflowing pixels to the maximum allowed value, or use a larger pixel value range [S1, unofficial].
-- **Edge Width:** Natural edges often result in output lines several pixels wide due to the smoothing effect of the Sobel operator [S1, unofficial].
-- **Boundary Conditions:** The method requires sampling neighbors. If the voxel is on the boundary of the volume, sampling must be handled (e.g., clamping, mirroring, or zero-padding) [G].
+*   **Boundary Conditions:** Voxels on the volume boundary lack full 3x3x3 neighborhoods. Standard practice is clamping, zero-padding, or extrapolation [G].
+*   **Overflow:** Output values can exceed the maximum representable value for integer image types (e.g., 8-bit). Clamping to the maximum value is the standard mitigation [S1, unofficial].
+*   **Edge Width:** The smoothing effect of the Sobel operator can result in gradient responses spanning several voxels wide, rather than a single-voxel sharp edge [S1, unofficial].
+*   **2D vs 3D:** Source [S4, unofficial] describes a 2D implementation using `torch.nn.functional.conv2d` with kernels normalized by 4. This is a subset of the 3D operator where the z-dimension is ignored or treated as a single slice.
 
 ## Subtopics
 
 ### [Sobel Gradient Magnitude Approximation](1429-sobel-gradient-magnitude-approximation.md)
-Approximates the Euclidean norm of the gradient vector using a linear combination of the maximum gradient component and the perpendicular component to avoid square root calculations. Choose this when performance is critical and exact magnitude is not required. It builds on the Sobel Operator by extracting the scalar magnitude.
+Approximates the Euclidean norm of the gradient vector using linear combinations of components to avoid square roots. Chosen when performance is critical and exact magnitude is not required.
+
+### [Sobel Operator (2D)](1416-sobel-operator.md)
+The 2D variant of the operator, typically used for surface rendering or slice-based analysis. Chosen when processing 2D images or single slices of a volume.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per voxel, as it involves a fixed $3 \times 3 \times 3 = 27$ sample convolution [G].
-- **Memory Complexity:** $O(1)$ auxiliary memory per voxel for the gradient vector [G].
-- **Performance:** The Sobel operator is slower to compute than the Roberts Cross operator [S1, unofficial].
-- **Strengths:**
-    - Less sensitive to noise than Roberts Cross or simple central differences due to the smoothing component [S1, unofficial].
-    - Produces considerably higher output values for similar edges, aiding in thresholding [S1, unofficial].
-    - Good localization and signal-to-noise characteristics [S1, unofficial].
-- **Limitations:**
-    - Slower than Roberts Cross [S1, unofficial].
-    - Edges may be wider than 1 pixel due to smoothing [S1, unofficial].
-    - Potential for overflow in fixed-point integer representations [S1, unofficial].
-- **When to use:** When noise reduction is important and a good balance between edge localization and smoothness is required for opacity function generation or shading [S1, unofficial].
-- **When not to use:** When maximum computational speed is the only constraint (use Roberts Cross) or when exact edge width is critical without post-processing [G].
+*   **Time Complexity:** $O(1)$ per voxel, requiring 27 samples and 27 multiplications/additions per gradient vector. It is slower than the Central-Difference operator (6 samples) but faster than higher-order stencils [S1, S2, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per voxel.
+*   **Performance:** Source [S2, unofficial] notes that the Sobel3D operator is significantly faster than the Zucker-Hummel operator (which requires 54 samples) while providing better gradient description than Central-Difference. Source [S1, unofficial] states it is slower than the Roberts Cross operator but less sensitive to noise due to smoothing.
+*   **Strengths:** Good localization, isotropic response, and superior noise reduction compared to simple difference operators [S1, unofficial].
+*   **Limitations:** Computationally more expensive than first-order central differences. The smoothing can blur sharp edges, resulting in wider gradient peaks [S1, unofficial].
 
 ## Background
-The Sobel operator is an efficient edge detecting operator used for gradient measurement in volume rendering, specifically for opacity function generation and shading [S1, unofficial]. It is a 2-D spatial gradient measurement operator that emphasizes regions of high spatial frequency corresponding to edges [S1, unofficial]. In the context of volume rendering, it is used to locate boundaries in the data value domain rather than the spatial domain, as opacity functions are applied uniformly [S1, unofficial]. It is one of several edge detection kernels, alongside Prewitt, Kirsch, and Robinson, which calculate the 1st derivative [S1, unofficial].
+The Sobel operator was introduced by Irwin Sobel as an efficient edge detection method [S1, unofficial]. In the context of volume rendering, it is used to estimate the gradient field for shading and opacity transfer functions. Source [S2, unofficial] compares it to the Central-Difference and Zucker-Hummel operators, highlighting its balance between computational cost and gradient accuracy. Source [S3, unofficial] implements it in a WebGL-based volume renderer, demonstrating its practical applicability in real-time rendering.
 
 ## Sources
 [S1] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)
-[S2] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S2] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
+[S3] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S4] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,98 @@
+# Depth-First Splat Sorting
+
+Also called: Pre-fragment depth sort, Sorting visible splats by depth
+
+## Overview
+Depth-First Splat Sorting is a preprocessing step for 3D Gaussian Splatting rendering that sorts visible Gaussian splats by camera-space depth before they are expanded into per-tile fragments [S1]. It solves the problem of high sorting overhead inherent in the original 3DGS pipeline, where fragments (one per tile a splat touches) are sorted using a combined 48-bit key [S1]. By sorting the smaller set of visible splats first, this method reduces the number of items to sort by a factor of 1.5 to 4, significantly lowering computational cost while maintaining correct depth ordering for subsequent rasterization [S1].
+
+## How it works
+The method operates on a list of "staged splats" (visible 3D Gaussians projected into screen space) [S1]. The goal is to produce a list of tile fragments that preserves the depth order of the original splats, allowing for efficient grouping by tile ID later [S1].
+
+**Inputs:**
+- `splat_list`: An array of $N$ visible splats. Each splat $i$ contains:
+  - `depth`: Camera-space depth value ($z_i$).
+  - `tile_ids`: A list of tile IDs touched by the splat.
+  - `tile_count`: The number of tiles touched ($k_i = \text{len}(tile\_ids)$).
+  - `index`: The original index in the unsorted list (used as the sort value) [S1].
+
+**Outputs:**
+- `fragment_list`: An array of tile fragments. The total size is $\sum_{i=0}^{N-1} k_i$. Fragments are stored such that fragments from splat $i$ occupy a contiguous block in the array, and these blocks are ordered by the depth of splat $i$ [S1].
+
+**Data Structures:**
+- **Splat Item**: Contains `depth` (float32), `tile_ids` (array of integers), `tile_count` (integer), `index` (integer) [S1].
+- **Fragment Item**: Contains `tile_id` (integer), `splat_index` (integer, referencing the original splat), and attributes copied from the splat (e.g., position, covariance, color) [G]. The exact layout depends on the downstream rasterizer but must include `tile_id` for grouping [S1].
+
+**Steps:**
+
+1. **Sort Splats by Depth**: Perform a stable 32-bit radix sort on the `splat_list` using `depth` as the key and `index` as the value [S1]. This produces a permutation of splats ordered from nearest to farthest.
+2. **Compute Exclusive Prefix Sum**: Calculate the exclusive prefix sum of the `tile_counts` from the sorted splats to determine storage offsets for fragments [S1]. Let $k_i$ be the number of tiles touched by the $i$-th splat in the sorted list. Let $O_i$ be the offset for the $i$-th splat's fragments.
+   $$ O_0 = 0 $$
+   $$ O_i = \sum_{j=0}^{i-1} k_j \quad \text{for } i > 0 $$
+3. **Create Fragments**: Iterate through the sorted splats and their corresponding offsets. For each splat $i$:
+   - Let $O_i$ be the computed offset.
+   - For each tile ID $t$ in `splat.tile_ids` at index $j$:
+     - Create a fragment object.
+     - Set `fragment.tile_id = t`.
+     - Set `fragment.splat_index = splat.index`.
+     - Copy necessary attributes from the splat to the fragment.
+     - Store the fragment at `fragment_list[O_i + j]` [S1].
+
+**Edge Cases and Pitfalls:**
+- **Precision**: Depth values must be compared consistently. Using 32-bit floats is standard, but ensure the radix sort handles the bit representation correctly for depth comparison [S1].
+- **Empty Splats**: If a splat touches no tiles (e.g., outside the screen), it should be filtered out before sorting or handled with a tile count of 0 [G].
+- **Stability**: The sort must be stable to preserve the relative order of splats with identical depths, which the prefix sum approach relies on to maintain depth ordering during fragment creation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def depth_first_splat_sort(splat_list):
+    # Step 1: Perform 32-bit radix sort on splats by depth, using index as value [S1]
+    sorted_splats = sorted(splat_list, key=lambda s: s['depth'])
+    
+    # Step 2: Compute exclusive prefix sum of tile counts
+    offsets = []
+    current_offset = 0
+    for splat in sorted_splats:
+        offsets.append(current_offset)
+        current_offset += splat['tile_count']
+        
+    total_fragments = current_offset
+    fragment_list = [None] * total_fragments
+    
+    # Step 3: Create fragments
+    for i, splat in enumerate(sorted_splats):
+        offset = offsets[i]
+        tile_ids = splat['tile_ids']
+        splat_index = splat['index']
+        
+        for j, tile_id in enumerate(tile_ids):
+            frag_index = offset + j
+            fragment_list[frag_index] = {
+                'tile_id': tile_id,
+                'splat_index': splat_index,
+                'depth': splat['depth']
+            }
+            # Copy attributes (position, covariance, color) from splat to fragment [G]
+            
+    return fragment_list
+```
+
+## Subtopics
+
+### Exclusive Prefix Sum Fragment Creation
+This variant emphasizes the use of an exclusive prefix sum to determine fragment storage offsets [S1]. It ensures that fragments from each splat are stored contiguously in the output array, inheriting the depth-sorted order of the splats [S1]. This allows for a subsequent stable sort by tile ID to group fragments per tile without breaking the depth order within each tile [S1]. The key advantage is that the initial depth sort is performed on $N$ splats rather than $M$ fragments ($M > N$), reducing sorting complexity [S1].
+
+## Operating characteristics
+- **Time Complexity**: Sorting $N$ splats takes $O(N)$ with a 32-bit radix sort [S1]. Prefix sum and fragment creation take $O(M)$, where $M$ is the total number of fragments [S1]. Since $M \approx 1.5-4N$, the dominant cost is the initial sort on $N$ items, which is significantly cheaper than sorting $M$ fragments [S1].
+- **Memory Complexity**: Requires $O(N)$ for the sorted splats and $O(M)$ for the fragment list [S1]. The prefix sum array requires $O(N)$ [G].
+- **Performance**: Reduces sorting overhead by a factor of 1.5 to 4 compared to the original 3DGS approach [S1]. This is particularly beneficial for scenes with high overlap where splats touch many tiles [S1].
+- **Strengths**: Lower sorting cost, simpler key generation (32-bit vs 48-bit), and easier implementation on CPU [S1].
+- **Limitations**: Requires a subsequent stable sort by tile ID to group fragments per tile for rendering [S1]. The fragment list is not yet grouped by tile immediately after this step [S1].
+
+## Background
+This method is described in the Splatshop paper [S1] as an optimization for the rendering pipeline that sorts splats by depth before creating fragments to reduce sorting costs [S1]. It addresses the inefficiency of the original 3DGS rendering pipeline, which sorts fragments after splitting splats into tiles [S1]. By sorting splats first, it reduces the number of items to sort, leveraging the fact that the number of fragments is typically 1.5 to 4 times the number of visible splats [S1].
+
+## Sources
+[S1] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31

@@ -1,0 +1,99 @@
+# Octahedral Normal Decoding
+## Overview
+Decodes a 2D octahedral coordinate into a 3D unit vector [S1, unofficial]. It serves as the inverse operation for octahedral normal encoding, mapping a compact 2D representation back to a 3D direction suitable for volume rendering or shading [S1, unofficial]. Unlike generic normalization which preserves arbitrary input magnitudes, this method specifically reconstructs the geometric distribution implied by octahedral projection [S1, unofficial].
+## How it works
+**Inputs:** A 2D vector `e` (typically derived from compressed texture data or integer indices representing the octahedral face).
+**Outputs:** A 3D unit vector `v`.
+
+**Data Structures:**
+- `e`: `vec2` containing the 2D octahedral coordinates.
+- `v`: `vec3` temporary storage for the reconstructed vector.
+
+**Steps:**
+1. Compute the initial 3D vector `v` using the formula:
+   $$v = \text{vec3}(e.x, e.y, 1.0 - |e.x| - |e.y|)$$
+2. Check if the z-component is negative. If $v.z < 0$:
+   - Compute the sign factors for x and y based on the original `e` components.
+   - Update `v.xy` using the formula:
+     $$v.xy = (1.0 - |e.yx|) \cdot \text{vec2}(\text{sign}(e.x), \text{sign}(e.y))$$
+     Where $\text{sign}(x)$ is $1$ if $x \ge 0$ and $-1$ if $x < 0$.
+3. Calculate the length of `v`:
+   $$len = \sqrt{v.x^2 + v.y^2 + v.z^2}$$
+4. Normalize `v`:
+   - If $len > 0$, return $v / len$.
+   - If $len = 0$ (degenerate case where $e$ results in a zero vector), return $\text{vec3}(0, 0, 1)$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def oct_decode(e_x, e_y):
+    # Step 1: Initial projection
+    v_x = e_x
+    v_y = e_y
+    v_z = 1.0 - abs(e_x) - abs(e_y)
+    
+    # Step 2: Handle negative z (folding)
+    if v_z < 0:
+        # Determine signs
+        sign_x = 1.0 if e_x >= 0 else -1.0
+        sign_y = 1.0 if e_y >= 0 else -1.0
+        
+        # Fold the coordinates
+        v_x = (1.0 - abs(e_y)) * sign_x
+        v_y = (1.0 - abs(e_x)) * sign_y
+        # v_z remains negative or is adjusted implicitly by the fold logic in some implementations,
+        # but the source [S1, unofficial] implies v.z is used in the length calculation.
+        # Note: The source formula for v.xy update does not explicitly change v.z,
+        # but geometrically, the vector lies on the octahedron surface.
+        # We keep v_z as calculated in step 1 for the length check, 
+        # though typically the folded vector lies on the opposite face.
+        # However, strictly following [S1, unofficial]:
+        # v.xy = (1.0 - abs(e.yx)) * vec2(sign(e.x), sign(e.y))
+        # v.z is not updated in the source snippet for the negative case.
+        
+    # Step 3: Length
+    length = sqrt(v_x**2 + v_y**2 + v_z**2)
+    
+    # Step 4: Normalize
+    if length > 0:
+        return (v_x / length, v_y / length, v_z / length)
+    else:
+        return (0.0, 0.0, 1.0)
+```
+
+**Parameters:**
+- None explicitly defined as tunable parameters in the source [S1, unofficial].
+
+**Edge Cases:**
+- If $e$ results in a zero vector (e.g., $e=(0,0)$ leads to $v=(0,0,1)$ which is valid, but if $e$ leads to $v=(0,0,0)$ due to precision or specific input), the function returns $\text{vec3}(0,0,1)$ [S1, unofficial].
+- Precision issues near the boundaries of the octahedron faces may cause slight deviations from unit length before normalization.
+
+## Subtopics
+
+### Octahedral Normal Encoding
+Packs a 3D normal vector into a single u8 representing one of 6 octahedral directions based on the dominant axis and sign [S2, unofficial].
+- **Definition:** Maps a 3D normal to a discrete index [S2, unofficial].
+- **Steps:**
+  1. If $n[0] > 0.5$, return 1.
+  2. Else if $n[0] < -0.5$, return 0.
+  3. Else if $n[1] > 0.5$, return 3.
+  4. Else if $n[1] < -0.5$, return 2.
+  5. Else if $n[2] > 0.5$, return 5.
+  6. (Implicitly, if none of the above, it likely falls into a default or unhandled case in the provided snippet, but the source [S2, unofficial] lists indices 0-5. Index 4 (-Z) is not explicitly handled in the provided snippet steps, suggesting it might be a fallback or handled by a different condition not shown. However, based strictly on the provided steps, only 0,1,2,3,5 are returned.)
+- **Parameters:** Normal indices: 0=-X, 1=+X, 2=-Y, 3=+Y, 4=-Z, 5=+Z [S2, unofficial].
+- **Comparison:** This is the inverse of Octahedral Normal Decoding but uses a discrete, axis-aligned quantization rather than a continuous 2D octahedral projection [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** O(1) per vector.
+- **Memory Complexity:** O(1).
+- **Strengths:** Efficiently reconstructs normals from compact 2D representations, useful for bandwidth-constrained rendering [S1, unofficial].
+- **Limitations:** The specific folding logic must be matched exactly with the encoding scheme. The source [S1, unofficial] does not specify the encoding scheme used to generate `e`, only the decoding.
+- **When to use:** When normals are stored in a compact 2D format derived from octahedral projection [S1, unofficial].
+
+## Background
+Originated in the context of Gaussian Splatting and volume rendering optimizations, specifically in the Godot Gaussian Splatting project [S1, unofficial]. It is used to decode normal vectors that have been compressed into a 2D octahedral coordinate system to save memory and bandwidth [S1, unofficial].
+
+## Sources
+[S1] ReconWorldLab/godot-gaussian-splatting, https://github.com/ReconWorldLab/godot-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S2] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)

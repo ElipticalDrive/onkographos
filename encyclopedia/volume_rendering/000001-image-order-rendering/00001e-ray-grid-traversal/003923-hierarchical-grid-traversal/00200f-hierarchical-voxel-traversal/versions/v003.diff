@@ -1,0 +1,118 @@
+--- v002.md
++++ v003.md
+@@ -19,15 +19,18 @@
+ 1. **World Access Entry:** Calculate world origin in float3. Compute current ray position in chunk-local space: $current = ray.origin \cdot (1.0 / self.world.scale) - origin$ [S1, unofficial]. Call the core `cast` function with the world access, ray, current position, direction, and max iterations 30 [S1, unofficial].
+ 2. **Voxel Check (World Access):** Validate coordinates within world bounds: $coord[i] \ge 0$ and $coord[i] < self.world.dims[i]$ [S1, unofficial]. Compute linear index $i = coord[0] + coord[1] \cdot dims[0] + coord[2] \cdot dims[0] \cdot dims[1]$ [S1, unofficial]. If the voxel exists and is visible, construct a local ray by applying scaling (`sc`) and translation (`coord * sc`) to the ray's transform, then recursively cast [S1, unofficial]. If the voxel is a detail voxel, return an `Intersection` with `inner` set to the sub-intersection, `index` set to the chunk index, and current position/normal [S1, unofficial]. If the voxel does not exist (empty chunk slot), return an `Intersection` with `inner: None`, `index: 0`, and current position/normal [S1, unofficial].
+-3. **Generic Voxel Entry:** Inverse the ray transform. Scale by `SUBDIV` ($2^{SUBDIV}$). Transform ray origin and direction into subvoxel space [S1, unofficial]. Move ray origin to the start of the bounding box (0 to scale) if not already inside. For each axis $i$: if $direction[i] > 0$, $t = (0.0 - current[i]) / direction[i]$; else if $direction[i] < 0$, $t = (scale - current[i]) / direction[i]$. If $t > 0$, advance $current$ [S1, unofficial]. Call core `cast` with the voxel, ray, current position, direction, and max iterations $6 \cdot T::WIDTH$ [S1, unofficial].
++3. **Generic Voxel Entry:** Inverse the ray transform. Scale by `SUBDIV` ($2^{SUBDIV}$). Transform ray origin and direction into subvoxel space [S1, unofficial]. Move ray origin to the start of the bounding box (0 to scale) if not already inside. For each axis $i$: if $direction[i] > 0$, $t = (0.0 - current[i]) / direction[i]$; else if $direction[i] < 0$, $t = (scale - current[i]) / direction[i]$ [S1, unofficial]. If $t > 0$, advance $current$ [S1, unofficial]. Call core `cast` with the voxel, ray, current position, direction, and max iterations $6 \cdot T::WIDTH$ [S1, unofficial].
+ 4. **Generic Voxel Check:** Validate coordinates within $T::WIDTH$ [S1, unofficial]. Compute linear index $i = coord[0] + coord[1] \cdot T::DY + coord[2] \cdot T::DZ$ [S1, unofficial]. If the voxel is visible and is detail, construct a local ray with scaling $T::SCALE$ and translation $coord \cdot T::SCALE$, recursively cast, and return an intersection with an inner sub-hit [S1, unofficial]. If the voxel is visible and not detail, return an intersection with `inner: None`, `index: i`, current position/normal [S1, unofficial].
+-5. **Core Cast Function:** Initialize integer coordinates `current_i` from `current` floor. Adjust `current_i` down by 1 if `current` is very close to an integer boundary and direction is negative [S1, unofficial]. Check starting position first using `raycast.check`; if hit, return immediately [S1, unofficial]. Loop up to `iterations`: calculate distance to next grid plane intersection for each axis using `intersect(current_i[i], current[i], direction[i])`. Find minimum distance $i[d]$. Advance `current` by $direction \cdot i[d]$ where $d$ is the axis with minimum intersection distance. Decrement `current_i[d]` if $direction[d] < 0$ [S1, unofficial].
++5. **Core Cast Function:** Initialize integer coordinates `current_i` from `current` floor. Adjust `current_i` down by 1 if `current` is very close to an integer boundary and direction is negative [S1, unofficial]. Check starting position first using `raycast.check`; if hit, return immediately [S1, unofficial]. Loop up to `iterations`: calculate distance to next grid plane intersection for each axis using `intersect(current_i[i], current[i], direction[i])` [S1, unofficial]. Find minimum distance $i[d]$ [S1, unofficial]. Advance `current` by $direction \cdot i[d]$ where $d$ is the axis with minimum intersection distance [S1, unofficial]. Decrement `current_i[d]` if $direction[d] < 0$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++def traverse_voxel_world(world_access, ray, origin, max_iterations=30):
++    # Step 1: World Access Entry
++    current = ray.origin * (1.0 / world_access.world.scale) - origin
++    return cast(world_access, ray, current, ray.direction, max_iterations)
++
+ def cast(world_access, ray, current, direction, max_iterations):
+-    return _cast_voxel(world_access, ray, current, direction, max_iterations)
+-
+-def _cast_voxel(world_access, ray, current, direction, max_iterations):
++    # Step 2: Voxel Check (World Access)
+     if not world_access.check(current):
+         return Intersection(inner=None, index=0, position=current, normal=vec3(0))
+@@ -37,28 +40,36 @@
+     if voxel.is_detail():
+         sc = world_access.scale
+-        local_ray_origin = (ray.origin - vec3(current) * sc) / sc
+-        local_ray_dir = ray.direction / sc
+-        sub_hit = cast(world_access, Ray(local_ray_origin, local_ray_dir, ray.transform, ray.length), vec3(0), local_ray_dir, 30)
++        coord = current
++        # Construct local ray by applying scaling (sc) and translation (coord * sc)
++        local_origin = (ray.origin - coord * sc) / sc
++        local_dir = ray.direction / sc
++        sub_hit = cast(world_access, Ray(local_origin, local_dir, ray.transform, ray.length), vec3(0), local_dir, 30)
+         return Intersection(inner=sub_hit, index=world_access.index(current), position=current, normal=vec3(0))
+     return Intersection(inner=None, index=world_access.index(current), position=current, normal=vec3(0))
+ 
+-def cast_generic(voxel, ray, current, direction, max_iterations):
++def traverse_generic_voxel(voxel, ray, origin, max_iterations=None):
++    if max_iterations is None:
++        max_iterations = 6 * voxel.WIDTH
++    # Step 3: Generic Voxel Entry
+     inv_transform = inverse(ray.transform)
+     subdiv = 2 ** voxel.SUBDIV
+-    ray.origin = inv_transform * (ray.origin * subdiv)
+-    ray.direction = inv_transform * (ray.direction * subdiv)
++    local_origin = inv_transform * (ray.origin * subdiv)
++    local_dir = inv_transform * (ray.direction * subdiv)
+     scale = voxel.SCALE
++    current = local_origin
++    # Move ray origin to the start of the bounding box (0 to scale) if not already inside
+     for i in range(3):
+-        if direction[i] > 0:
+-            t = (0.0 - current[i]) / direction[i]
+-        elif direction[i] < 0:
+-            t = (scale - current[i]) / direction[i]
++        if local_dir[i] > 0:
++            t = (0.0 - current[i]) / local_dir[i]
++        elif local_dir[i] < 0:
++            t = (scale - current[i]) / local_dir[i]
+         else:
+             t = float('inf')
+         if t > 0:
+-            current = [current[j] + direction[j] * t for j in range(3)]
+-    return _cast_generic_voxel(voxel, ray, current, direction, 6 * voxel.WIDTH)
++            current = [current[j] + local_dir[j] * t for j in range(3)]
++    return cast_generic(voxel, Ray(local_origin, local_dir, ray.transform, ray.length), current, local_dir, max_iterations)
+ 
+-def _cast_generic_voxel(voxel, ray, current, direction, max_iterations):
++def cast_generic(voxel, ray, current, direction, max_iterations):
++    # Step 4: Generic Voxel Check
+     if not voxel.check(current):
+         return Intersection(inner=None, index=0, position=current, normal=vec3(0))
+@@ -69,11 +80,22 @@
+     if voxel_data.is_detail():
+         sc = voxel.SCALE
+-        local_ray_origin = (ray.origin - vec3(current) * sc) / sc
+-        local_ray_dir = ray.direction / sc
+-        sub_hit = cast_generic(voxel_data, Ray(local_ray_origin, local_ray_dir, ray.transform, ray.length), vec3(0), local_ray_dir, 6 * voxel_data.WIDTH)
++        coord = current
++        local_origin = (ray.origin - coord * sc) / sc
++        local_dir = ray.direction / sc
++        sub_hit = cast_generic(voxel_data, Ray(local_origin, local_dir, ray.transform, ray.length), vec3(0), local_dir, 6 * voxel_data.WIDTH)
+         return Intersection(inner=sub_hit, index=index, position=current, normal=vec3(0))
+     return Intersection(inner=None, index=index, position=current, normal=vec3(0))
+ 
++def intersect(current_i_val, current_val, direction_val):
++    # Distance to next grid plane intersection for a single axis
++    if direction_val == 0.0:
++        return float('inf')
++    elif direction_val > 0.0:
++        return (current_i_val + 1.0 - current_val) / direction_val
++    else:
++        return (current_i_val - current_val) / direction_val
++
+ def core_cast(voxel, ray, current, direction, max_iterations):
++    # Step 5: Core Cast Function
+     current_i = [int(current[i]) if current[i] >= 0 else int(current[i]) - 1 for i in range(3)]
+     epsilon = 1e-6
+@@ -84,14 +106,5 @@
+         return voxel_hit(voxel, current, direction)
+     for _ in range(max_iterations):
+-        distances = []
+-        for i in range(3):
+-            if direction[i] == 0.0:
+-                distances.append(float('inf'))
+-            elif direction[i] > 0.0:
+-                next_plane = current_i[i] + 1.0
+-                distances.append((next_plane - current[i]) / direction[i])
+-            else:
+-                next_plane = float(current_i[i])
+-                distances.append((next_plane - current[i]) / direction[i])
++        distances = [intersect(current_i[i], current[i], direction[i]) for i in range(3)]
+         min_dist = float('inf')
+         d = -1

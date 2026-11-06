@@ -1,0 +1,2873 @@
+# VRDF-SDK  
+**Volume Rendering Data Format — Cross-Platform SDK for Encoding, Decoding, and Visualization**
+
+![License](https://img.shields.io/badge/license-Apache-blue.svg)
+![Language](https://img.shields.io/badge/languages-Python%20%7C%20C%23-orange)
+![Status](https://img.shields.io/badge/status-Active-brightgreen)
+![Format](https://img.shields.io/badge/file%20format-.vrdf-lightgrey)
+
+---
+
+## Overview
+
+**VRDF (Volume Rendering Data Format)** is a compact binary container for 3D medical or scientific volumes, designed for **real-time volume rendering** (raymarching / DVR).
+
+Each `.vrdf` file contains:
+
+- **Voxel data** (`float32`)  
+  - Memory order: `x-fast`, then `y`, then `z` (GPU scanline-friendly)
+- **Metadata**
+  - Dimensions (`dimX`, `dimY`, `dimZ`)
+  - Voxel spacing in millimeters (`spacing_mm`)
+  - 4×4 affine matrix (voxel→world, scanner alignment)
+  - Intensity min / max range
+  - Interpretation mode (continuous, labelmap, etc.)
+- **Transfer function (TF)**  
+  - Either a continuous LUT (intensity → color/alpha)
+  - Or a labelmap LUT (label → color/alpha/human name)
+- **Normalization info** (e.g. percentiles p1/p99)
+- (Optional) channel semantics if multi-channel data
+
+> Goal: one single self-contained file, readable in both **Python** and **Unity**, without separate `.raw`, `.json`, or `.lut` files.
+
+---
+
+## Why it’s useful
+
+- Avoids the usual “NIfTI + mask + colors.txt + custom alpha script” nightmare.  
+- Enables instant GPU raymarching visualization in Unity.  
+- Encapsulates both continuous anatomy (MRI/CT) and discrete segmentations (AI masks, tumor maps).
+
+---
+
+## Core Features
+
+### Self-contained container
+- Voxels + metadata + transfer function stored in a single binary `.vrdf` file.
+
+### Python Encoder
+- `encode.py` converts NIfTI / 3D or 4D volumes → `.vrdf`
+- Supports:
+  - Single **fused file** (recommended)
+  - Or multiple **legacy** specialized files
+
+### Unity Runtime (C# + URP Shader)
+- Loads `.vrdf` files directly
+- Automatically reconstructs GPU `Texture3D` objects
+- Builds LUTs (1D `Texture2D`) from the embedded TF
+- Feeds data into the **raymarching shader** (`VolumeDVR.shader`)
+- Handles transparency, label masking, and weight modulation at runtime
+
+### Supported Data Types
+- **continuous** — anatomical intensity (MRI/CT)
+- **labelmap** — discrete segmentation (organs, tissues, lesions)
+- **labelmap_weighted** — segmentation + confidence map per voxel
+- **multi-overlay** — multiple overlay channels (edema, necrosis, etc.)
+- **4D → split** — temporal or multi-channel volumes exported as multiple `.vrdf`
+
+### Customization
+- Simple JSON config for color, alpha, and name per label
+- Optional Unity UI (via `VolumeDVR`) for per-class visibility, transparency, recoloring
+
+### Cross-platform
+- Python (Windows / Linux / macOS)
+- Unity runtime (Windows / Linux / macOS builds)
+- No proprietary dependencies
+
+---
+
+## Repository Structure
+
+```text
+vrdf-sdk/
+│
+├── python/
+│   ├── encode.py              # CLI: NIfTI -> VRDF
+│   ├── read_vrdf.py           # Inspect/debug a .vrdf file
+│   ├── pyproject.toml
+│   └── examples/
+│       ├── config_custom_colors.json
+│       └── brain_demo.nii.gz
+│
+├── unity/
+│   ├── Scripts/
+│   │   ├── VRDFLoader.cs      # Binary parser for .vrdf, builds GPU textures
+│   │   └── VolumeDVR.cs       # Runtime component, shader setup, label UI
+│   ├── Shaders/
+│   │   └── VolumeDVR.shader   # Raymarching with weighted rendering
+│
+└── README.md
+```
+
+---
+
+## Export Modes (Python Side)
+
+The script `encode.py` accepts the `--mode` argument to define how to interpret and package a volume.
+
+### 1. `labelmap`
+- Input: discrete 3D volume (0 = background, 1 = tissue A, 2 = lesion B, …)
+- Output:
+  - `.vrdf` with `meta.mode = "labelmap"`
+  - TF type `"labelmap"` = `(label → [r,g,b], alpha, name)` list
+- Unity:
+  - Per-class rendering (no interpolation)
+  - Embedded per-label LUT
+
+### 2. `continuous4d`
+- Input: continuous 3D or 4D intensity volume (MRI, CT, PET, …)
+  - If 4D → each timepoint exported separately: `..._t00.vrdf`, `..._t01.vrdf`, etc.
+- Output:
+  - Percentile normalization (p1/p99 → [0..1])
+  - `meta.mode = "continuous"`
+  - TF `"continuous"` = intensity → RGBA/alpha curve
+- Unity:
+  - Anatomical grayscale/soft shading rendering
+
+### 3. `labelmap_weighted4d`
+Input: 4D `(X,Y,Z,C)` volume, each channel `C` representing a region of interest (e.g. BraTS components: enhancement, edema, necrosis).
+
+Automatically computes:
+- Majority label per voxel (argmax across channels)
+- Weight = normalized intensity (0–1)
+
+Two export strategies:
+
+#### a) Fused mode (default, recommended)
+- Produces **one file**: `scene_lw.vrdf`
+- For each voxel: two interleaved float32 values → `[label, weight01]`
+- Metadata:
+  - `meta.mode = "anatomy_label_weighted"`
+  - `meta.channels = 2`
+  - `meta.channel_meaning = ["labelmap","weight01"]`
+- TF: `"labelmap"` type (color, alpha, name per class)
+- Unity runtime:
+  - Builds two `Texture3D` objects:
+    - `_VolumeTexLabels` (point sampling)
+    - `_VolumeTexWeights` (bilinear sampling)
+  - `_VolumeTexWeights` modulates opacity → **weighted tumor rendering**
+
+#### b) Split mode (`--split-weight`)
+- Produces **two files**:
+  - `scene_labels.vrdf` (`mode="anatomy_label"`)
+  - `scene_weights.vrdf` (`mode="activity_weight"`)
+- Unity still supports this legacy format.
+
+### 4. `multi_overlay4d`
+- Input: 4D `(X,Y,Z,C)` volume where each channel is an independent structure (Enhancing, Core, Edema, etc.)
+- Output:
+  - One `.vrdf` per channel (`scene_ch0.vrdf`, `scene_ch1.vrdf`, …)
+  - Each with a simple `"continuous"` TF
+- Unity:
+  - Each overlay can be toggled independently
+
+---
+
+## Example Exports
+
+### Simple labelmap with custom colors
+```bash
+python encode.py --nifti brain_segmentation.nii.gz --mode labelmap --config examples/config_custom_colors.json --vrdf-out brain_labels.vrdf
+```
+
+### Weighted tumor (single fused file)
+```bash
+python encode.py --nifti brats_case_42_multichannel.nii.gz --mode labelmap_weighted4d --vrdf-out scene_lw.vrdf
+```
+
+### Weighted tumor (split legacy version)
+```bash
+python encode.py --nifti brats_case_42_multichannel.nii.gz --mode labelmap_weighted4d --split-weight --vrdf-out scene.vrdf
+# => scene_labels.vrdf + scene_weights.vrdf
+```
+
+---
+
+## Binary Layout
+
+All `.vrdf` files share a consistent little-endian layout:
+
+```text
+[8 bytes]    "VRDF0001"
+[8 bytes]    total_size (uint64)
+
+[8 bytes]    meta_len (uint64)
+[meta_len]   meta_json (UTF-8)
+
+[8 bytes]    tf_len (uint64)
+[tf_len]     tf_json (UTF-8)
+
+[8 bytes]    raw_len (uint64)
+[raw_len]    raw_bytes (float32 data)
+```
+
+### Example `meta_json`
+
+```json
+{
+  "dim": [240, 240, 155],
+  "spacing_mm": [1.0, 1.0, 1.0],
+  "dtype": "float32",
+  "mode": "anatomy_label_weighted",
+  "channels": 2,
+  "channel_meaning": ["labelmap", "weight01"],
+  "intensity_range": [0.0, 1.0],
+  "affine": [
+    [1.0,0.0,0.0,-120.0],
+    [0.0,1.0,0.0,-120.0],
+    [0.0,0.0,1.0,-75.0],
+    [0.0,0.0,0.0,1.0]
+  ],
+  "order": "x-fast,y-then,z-outer",
+  "endianness": "little"
+}
+```
+
+### Example `tf_json`
+
+```json
+{
+  "type": "labelmap",
+  "entries": [
+    {"label": 0, "name": "Background", "color": [0,0,0], "alpha": 0.0},
+    {"label": 1, "name": "Enhancing Tumor", "color": [1,0,0], "alpha": 0.4},
+    {"label": 2, "name": "Core Tumor", "color": [0,1,0], "alpha": 0.5},
+    {"label": 3, "name": "Edema", "color": [0,0,1], "alpha": 0.4}
+  ],
+  "origin": "labelmap_weighted4d_default"
+}
+```
+
+---
+
+## Unity Pipeline
+
+### 1. Place the files
+Put `.vrdf` files into:
+```text
+Assets/StreamingAssets/
+```
+Examples:
+- `scene_lw.vrdf` (fused label+weight)
+- `scene_labels.vrdf` and `scene_weights.vrdf` (split mode)
+- `t2_flair_t00.vrdf`, `t2_flair_t01.vrdf` (continuous4d)
+- `scene_ch0.vrdf`, `scene_ch1.vrdf` (multi_overlay4d)
+
+### 2. Scene setup
+- Create a cube with a `MeshRenderer`
+- Assign a `Material` using `VolumeDVR.shader`
+- Add the `VolumeDVR.cs` component and configure:
+  - `vrdfFusedFileName = "scene_lw.vrdf"` for fused mode
+  - Or fill `vrdfLabelsFileName` / `vrdfWeightsFileName` for split mode
+
+### 3. Runtime behavior
+`VolumeDVR` uses `VRDFLoader.LoadFromFileSmart()` to parse `.vrdf` files:  
+- Reads magic header `VRDF0001`
+- Parses JSON blocks (`meta`, `tf`)
+- Builds GPU textures:
+  - Label texture (`Texture3D`, point filter)
+  - Weight texture (`Texture3D`, bilinear filter)
+  - 1D LUT (`Texture2D`) for colors/alpha
+  - `_LabelCtrlTex` (256×1 RGBAFloat) for dynamic UI control
+
+Injected shader uniforms:
+```
+_VolumeTexLabels
+_VolumeTexWeights
+_HasWeights
+_TFTex
+_LabelCtrlTex
+```
+Plus affine matrices and volume dimensions.
+
+Result:  
+- Real-time 3D raymarched volume rendering  
+- Weight map drives transparency  
+- Fully dynamic per-label color and visibility
+
+### 4. Runtime Label Control API
+```csharp
+SetLabelVisible(int labelIndex, bool visible);
+SetLabelOpacity(int labelIndex, float alpha01);
+SetLabelTint(int labelIndex, Color tintRGB);
+SoloLabel(int labelIndex);
+ShowAll();
+```
+
+You can also query the TF labels dynamically:
+```csharp
+List<VolumeLabelInfoRuntime> infos = volumeDVR.GetLabelInfoList();
+```
+
+Each label entry provides:
+- `labelIndex`
+- `displayName`
+- `color`
+- `defaultVisible`
+
+Perfect for dynamic medical or research visualization UIs.
+
+---
+
+## Python Inspection
+
+To verify or debug a `.vrdf` export:
+
+```bash
+python read_vrdf.py scene_lw.vrdf
+```
+
+Output example:
+```
+[OK] Parsed scene_lw.vrdf
+  Magic: VRDF0001
+  Mode: anatomy_label_weighted
+  Dim: 240x240x155
+  Channels: 2 (labelmap, weight01)
+  TransferFunction: labelmap (per-label RGBA)
+  Labels present: [0,1,2,3,4]
+```
+
+---
+
+## Roadmap
+
+- [x] Self-contained `.vrdf` container (voxels + meta + TF)
+- [x] Export modes: `labelmap`, `continuous4d`, `labelmap_weighted4d`, `multi_overlay4d`
+- [x] Unity runtime supports fused `anatomy_label_weighted` mode
+- [ ] C++ reference parser
+- [ ] WebGL/WebGPU viewer
+- [ ] ZSTD / LZ4 voxel block compression
+- [ ] Streaming / bricking for >2GB datasets
+- [ ] Unity UI widgets (label toggles, alpha sliders, clipping planes, etc.)
+
+---
+
+## License
+
+**Apache 2.0 License**  
+© 2025 Guillaume Schneider and contributors.  
+Free for research, education, prototyping, and industrial visualization.
+
+### python/analyze.py
+```
+#!/usr/bin/env python3
+"""
+analyze.py
+Usage:
+    python analyze.py base_image.nii.gz [overlay_image.nii.gz]
+
+- Displays NIfTI metadata
+- Global voxel statistics
+- Multi-channel analysis for 4D data (one channel per "class/probability")
+- "Winner-takes-all" analysis (argmax) if 4D → simulates multi_label_channels mode
+- Labelmap analysis if 3D discrete volume
+- Mid-slices (axial/coronal/sagittal)
+- Optional overlay visualization
+"""
+
+import sys
+import numpy as np
+import nibabel as nib
+import matplotlib.pyplot as plt
+
+# ------------------------
+# Utilities
+# ------------------------
+
+def load_nifti(path):
+    img = nib.load(path)
+    data = img.get_fdata(dtype=np.float32)
+    return img, data
+
+def safe_filename(img):
+    try:
+        fm = getattr(img, "file_map", None)
+        if fm is None:
+            return "N/A"
+        fileholder = fm.get("image", None)
+        if fileholder is None:
+            return "N/A"
+        return getattr(fileholder, "filename", "N/A")
+    except Exception:
+        return "N/A"
+
+def describe_nifti(img, data, name="Image"):
+    header = img.header
+    affine = img.affine
+
+    print(f"=== {name} ===")
+    print(f"File             : {safe_filename(img)}")
+    print(f"NIfTI dtype      : {header.get_data_dtype()} (raw storage)")
+    print(f"Shape            : {data.shape} (X, Y, Z[, C/T])")
+    print(f"Num dimensions   : {data.ndim}")
+
+    try:
+        print(f"Voxel size (mm)  : {header.get_zooms()}")
+    except Exception as e:
+        print(f"Voxel size (mm)  : error -> {e}")
+
+    print("Affine 4x4 (voxel -> mm):")
+    print(affine)
+    print()
+
+    try:
+        ornt = nib.aff2axcodes(affine)
+        print(f"Axis orientation : {ornt} (X,Y,Z)")
+    except Exception as e:
+        print(f"Axis orientation : error -> {e}")
+    print()
+
+    finite_data = data[np.isfinite(data)]
+    if finite_data.size > 0:
+        print("Voxel statistics (finite values only):")
+        print(f"  min   : {np.min(finite_data):.4f}")
+        print(f"  max   : {np.max(finite_data):.4f}")
+        print(f"  mean  : {np.mean(finite_data):.4f}")
+        print(f"  std   : {np.std(finite_data):.4f}")
+        print(f"  non-zero voxels : {np.count_nonzero(finite_data)} / {finite_data.size}")
+    else:
+        print("Voxel stats: empty image / NaN only")
+    print()
+
+    print("Header key fields:")
+    keys_of_interest = [
+        "descrip", "datatype", "bitpix",
+        "scl_slope", "scl_inter",
+        "qform_code", "sform_code",
+        "xyzt_units", "toffset",
+        "intent_name", "intent_code",
+        "cal_min", "cal_max"
+    ]
+    for k in keys_of_interest:
+        if k in header:
+            print(f"  {k:12s}: {header[k]}")
+    print("-" * 60)
+    print()
+
+def describe_multichannel(data, name="Image"):
+    """
+    If data is 4D (X,Y,Z,C), show per-channel stats and center voxel debug info
+    to inspect class probabilities or activations.
+    """
+    if data.ndim != 4:
+        return
+
+    X, Y, Z, C = data.shape
+    print(f"--- Multi-channel analysis for {name} ---")
+    print(f"Detected 4D volume: {X}x{Y}x{Z} with {C} channels (last axis)")
+
+    cx, cy, cz = X // 2, Y // 2, Z // 2
+    center_vec = data[cx, cy, cz, :]
+
+    print(f"Central voxel index = ({cx},{cy},{cz})")
+    print("4D values at this voxel (all channels):")
+    print("  [" + ", ".join([f"{v:.4f}" for v in center_vec]) + "]")
+    print("Winning channel at center:", int(np.argmax(center_vec)), "(argmax)")
+    print()
+
+    for c in range(C):
+        ch = data[..., c]
+        finite_ch = ch[np.isfinite(ch)]
+        if finite_ch.size == 0:
+            print(f"[Channel {c}] (empty / NaN)")
+            continue
+
+        ch_min, ch_max = np.min(finite_ch), np.max(finite_ch)
+        ch_mean, ch_std = np.mean(finite_ch), np.std(finite_ch)
+        ch_nnz = np.count_nonzero(finite_ch)
+        ch_total = finite_ch.size
+        pct_nz = 100.0 * (ch_nnz / ch_total) if ch_total > 0 else 0.0
+
+        print(f"[Channel {c}]")
+        print(f"  min / max     : {ch_min:.4f} / {ch_max:.4f}")
+        print(f"  mean / std    : {ch_mean:.4f} / {ch_std:.4f}")
+        print(f"  non-zero vox. : {ch_nnz} / {ch_total}  (~{pct_nz:.2f}%)")
+        print(f"  value @ center[{cx},{cy},{cz}] : {data[cx, cy, cz, c]:.4f}")
+
+        sample = finite_ch[: min(finite_ch.size, 200000)]
+        uniq_vals = np.unique(sample)
+
+        if uniq_vals.size <= 6:
+            vals_preview = ", ".join([f"{v:.3f}" for v in uniq_vals[:6]])
+            print(f"  distinct values (sample): {vals_preview}")
+        else:
+            print(f"  distribution: seems continuous (not binary 0/1)")
+        print()
+
+    print("-" * 60)
+    print()
+
+def describe_multichannel_as_winner_map(data, name="Image"):
+    """
+    If data is 4D (X,Y,Z,C):
+    - Compute, for each voxel, which channel wins (argmax)
+    - Simulates multi_label_channels logic (without writing VRDF)
+    - Show global histogram of winning labels.
+    Useful to debug "everything is one class" issues.
+    """
+    if data.ndim != 4:
+        return
+
+    winner_channel = np.argmax(data, axis=3)
+    winner_value   = np.max(data, axis=3)
+
+    hard_labels = np.where(winner_value > 0,
+                           winner_channel.astype(np.int32) + 1,
+                           0).astype(np.int32)
+
+    flat = hard_labels.reshape(-1)
+    unique_lbls, counts = np.unique(flat, return_counts=True)
+    total_vox = flat.size
+
+    print(f"--- Winner-takes-all (argmax) analysis for {name} ---")
+    print("Simulated labelmap (class distribution):")
+    for lbl, cnt in zip(unique_lbls, counts):
+        pct = 100.0 * cnt / total_vox if total_vox > 0 else 0.0
+        print(f"  Label {lbl}: {cnt} voxels (~{pct:.3f}%)")
+    print("Interpretation:")
+    print("  - Label 0   = no active channel / background")
+    print("  - Label 1   = channel 0 dominant")
+    print("  - Label 2   = channel 1 dominant")
+    print("  - Label 3   = channel 2 dominant")
+    print("  - Label 4   = channel 3 dominant")
+    print("-" * 60)
+    print()
+
+def describe_labelmap(data, name="Image"):
+    """
+    If data is 3D and has few unique values,
+    show voxel count per label.
+    This corresponds to an already argmaxed volume.
+    """
+    if data.ndim != 3:
+        return
+
+    finite_data = data[np.isfinite(data)]
+    if finite_data.size == 0:
+        return
+
+    unique_vals = np.unique(finite_data)
+    if unique_vals.size > 32:
+        return
+
+    total_vox = finite_data.size
+    print(f"--- Labelmap analysis for {name} ---")
+    for lbl in np.sort(unique_vals):
+        count = int(np.sum(finite_data == lbl))
+        pct = (100.0 * count / total_vox) if total_vox > 0 else 0.0
+        print(f"  Label {lbl:.0f} : {count} voxels (~{pct:.3f}%)")
+    print("-" * 60)
+    print()
+
+def get_middle_slices(data):
+    """
+    Returns the 3 central slices (sagittal / coronal / axial) and indices.
+    Handles 4D volumes by using channel 0.
+    """
+    if data.ndim == 4:
+        vol = data[..., 0]
+    else:
+        vol = data
+
+    x_mid, y_mid, z_mid = vol.shape[0] // 2, vol.shape[1] // 2, vol.shape[2] // 2
+    sag, cor, axi = np.rot90(vol[x_mid, :, :]), np.rot90(vol[:, y_mid, :]), np.rot90(vol[:, :, z_mid])
+
+    return sag, cor, axi, (x_mid, y_mid, z_mid)
+
+def show_preview(base_data, overlay_data=None, alpha=0.4, thr=None):
+    """
+    Attempts to display sagittal/coronal/axial views with optional overlay.
+    On Windows without a GUI backend, plt.show() may fail → safely handled.
+    """
+    try:
+        sag, cor, axi, mids = get_middle_slices(base_data)
+        if overlay_data is not None:
+            sag_o, cor_o, axi_o, _ = get_middle_slices(overlay_data)
+        else:
+            sag_o = cor_o = axi_o = None
+
+        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+
+        def _draw(ax, base_slice, ov_slice, title):
+            ax.imshow(base_slice, cmap="gray", origin="lower")
+            if ov_slice is not None:
+                if thr is not None:
+                    tmp = ov_slice.copy()
+                    tmp[tmp < thr] = np.nan
+                    ax.imshow(tmp, cmap="hot", alpha=alpha, origin="lower")
+                else:
+                    ax.imshow(ov_slice, cmap="hot", alpha=alpha, origin="lower")
+            ax.set_title(title)
+            ax.axis("off")
+
+        _draw(axes[0], sag, sag_o, f"Sagittal mid (x={mids[0]})")
+        _draw(axes[1], cor, cor_o, f"Coronal  mid (y={mids[1]})")
+        _draw(axes[2], axi, axi_o, f"Axial    mid (z={mids[2]})")
+
+        plt.tight_layout()
+        plt.show()
+
+    except Exception as e:
+        print("⚠ Unable to display matplotlib preview (missing GUI backend).")
+        print(f"  Reason: {e}")
+        print("  → Text analysis above remains valid.")
+        print("-" * 60)
+        print()
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python analyze.py base_image.nii.gz [overlay_image.nii.gz]")
+        sys.exit(1)
+
+    base_path = sys.argv[1]
+    overlay_path = sys.argv[2] if len(sys.argv) > 2 else None
+
+    base_img, base_data = load_nifti(base_path)
+    describe_nifti(base_img, base_data, name="BASE IMAGE")
+    describe_multichannel(base_data, name="BASE IMAGE")
+    describe_multichannel_as_winner_map(base_data, name="BASE IMAGE")
+    describe_labelmap(base_data, name="BASE IMAGE")
+
+    overlay_img = None
+    overlay_data = None
+
+    if overlay_path is not None:
+        overlay_img, overlay_data = load_nifti(overlay_path)
+        describe_nifti(overlay_img, overlay_data, name="OVERLAY IMAGE")
+        describe_multichannel(overlay_data, name="OVERLAY IMAGE")
+        describe_multichannel_as_winner_map(overlay_data, name="OVERLAY IMAGE")
+        describe_labelmap(overlay_data, name="OVERLAY IMAGE")
+
+        same_shape = base_data.shape[:3] == overlay_data.shape[:3]
+        same_affine = np.allclose(base_img.affine, overlay_img.affine, atol=1e-3)
+
+        print("=== Overlay compatibility ===")
+        print(f"Same shape (XYZ)? {same_shape} -> {base_data.shape[:3]} vs {overlay_data.shape[:3]}")
+        print(f"Same affine (~mm space)? {same_affine}")
+        if not same_affine:
+            print("⚠ Warning: different affines → possible misalignment.")
+        print("-" * 60)
+
+    show_preview(base_data, overlay_data, alpha=0.4, thr=None)
+
+if __name__ == "__main__":
+    main()
+```
+
+### python/encode.py
+```
+import nibabel as nib
+import numpy as np
+import json
+import struct
+import numpy.linalg as LA
+import sys
+import argparse
+import os
+
+############################################
+# UTILITIES
+############################################
+
+def compute_spacing_mm(affine):
+    sx = LA.norm(affine[0:3, 0])
+    sy = LA.norm(affine[0:3, 1])
+    sz = LA.norm(affine[0:3, 2])
+    return [float(sx), float(sy), float(sz)]
+
+def write_raw_xyzC_order(data, raw_path):
+    dimX, dimY, dimZ = data.shape
+    with open(raw_path, "wb") as f:
+        for z in range(dimZ):
+            for y in range(dimY):
+                for x in range(dimX):
+                    v = float(data[x, y, z])
+                    f.write(struct.pack("<f", v))
+
+def save_meta_dict(shape_xyz, spacing_mm, affine, data_min, data_max,
+                   mode, endianness, extra=None):
+    dimX, dimY, dimZ = shape_xyz
+    meta = {
+        "dim": [int(dimX), int(dimY), int(dimZ)],
+        "spacing_mm": spacing_mm,
+        "dtype": "float32",
+        "intensity_range": [float(data_min), float(data_max)],
+        "affine": affine.tolist(),
+        "mode": mode,
+        "endianness": endianness,
+        "order": "x-fast,y-then,z-outer"
+    }
+    if extra is not None:
+        # merge extra fields (channels, channel_names, etc.)
+        for k, v in extra.items():
+            meta[k] = v
+    return meta
+
+def write_json(path, obj):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+    print(f"[OK] Wrote {path}")
+
+##########################################################
+# NORMALIZATION
+##########################################################
+
+def normalize_intensity_percentile(vol):
+    p1, p99 = np.percentile(vol, [1, 99])
+    if p99 - p1 < 1e-12:
+        vol_n = np.zeros_like(vol, dtype=np.float32)
+    else:
+        vol_n = (vol - p1) / (p99 - p1)
+        vol_n = np.clip(vol_n, 0, 1).astype(np.float32, copy=False)
+    return vol_n, float(p1), float(p99)
+
+def normalize_channel_sparse(ch_vol):
+    """
+    ch_vol: 3D float32 (often sparse)
+    Returns:
+      ch_norm [0..1],
+      p1, p99
+    """
+    ch_vol = ch_vol.astype(np.float32, copy=False)
+    mask = ch_vol > 0
+
+    if np.any(mask):
+        vals = ch_vol[mask]
+        if vals.size > 50:
+            p1, p99 = np.percentile(vals, [1, 99])
+        else:
+            p1 = np.min(vals)
+            p99 = np.max(vals)
+
+        if p99 - p1 < 1e-12:
+            ch_norm = np.zeros_like(ch_vol, dtype=np.float32)
+            ch_norm[mask] = 1.0
+            return ch_norm, float(p1), float(p99)
+
+        ch_norm = np.zeros_like(ch_vol, dtype=np.float32)
+        ch_norm[mask] = (ch_vol[mask] - p1) / (p99 - p1)
+        ch_norm = np.clip(ch_norm, 0, 1).astype(np.float32, copy=False)
+        return ch_norm, float(p1), float(p99)
+    else:
+        return np.zeros_like(ch_vol, dtype=np.float32), 0.0, 1.0
+
+##########################################################
+# TRANSFER FUNCTIONS
+##########################################################
+
+def build_transfer_function_continuous(vol_norm, p1, p99, user_tf=None):
+    """
+    Continuous TF (MRI/CT-style, or monochrome overlay).
+    """
+    preset = "grayscale_clinical"
+    if user_tf and "preset" in user_tf:
+        preset = user_tf["preset"]
+
+    curve = []
+    for i in range(256):
+        x = i / 255.0
+
+        if preset == "grayscale_clinical":
+            gray = x ** 0.8
+            if x < 0.15:
+                alpha = 0.0
+            elif x < 0.7:
+                alpha = 0.5 * (x - 0.15) / (0.7 - 0.15)
+            else:
+                alpha = 0.5 + 0.5 * (x - 0.7) / (0.3)
+                if alpha > 1.0:
+                    alpha = 1.0
+            color = [gray, gray, gray]
+
+        elif preset == "hot_edges":
+            r = min(1.0, x * 3.0)
+            g = min(1.0, max(0.0, (x - 0.33) * 3.0))
+            b = min(1.0, max(0.0, (x - 0.66) * 3.0))
+            alpha = x ** 1.5
+            color = [r, g, b]
+
+        else:  # spectrum_debug
+            if x < 0.25:
+                t = x / 0.25
+                r = 0.0; g = t;   b = 1.0
+            elif x < 0.5:
+                t = (x - 0.25) / 0.25
+                r = 0.0; g = 1.0; b = 1.0 - t
+            elif x < 0.75:
+                t = (x - 0.5) / 0.25
+                r = t;   g = 1.0; b = 0.0
+            else:
+                t = (x - 0.75) / 0.25
+                r = 1.0; g = 1.0 - 0.5 * t; b = 0.0
+
+            if x < 0.2:
+                alpha = 0.0
+            else:
+                alpha = 0.4 * (x - 0.2) / (0.8)
+                if alpha > 0.6:
+                    alpha = 0.6
+            color = [r, g, b]
+
+        curve.append({
+            "x": x,
+            "color": [float(color[0]), float(color[1]), float(color[2])],
+            "alpha": float(alpha)
+        })
+
+    return {
+        "type": "continuous",
+        "curve": curve,
+        "intensity_normalization": {
+            "p1": p1,
+            "p99": p99
+        },
+        "origin": "continuous_preset_" + preset
+    }
+
+def build_transfer_function_labelmap(seg_data, user_tf=None):
+    """
+    TF for discrete volumes.
+    Includes 'name', 'color', and 'alpha' per label.
+    """
+    labels_present = np.unique(seg_data).tolist()
+    print("Labels present:", labels_present)
+
+    def default_rgba_for_label(lbl_int):
+        if lbl_int == 0: return (0.0, 0.0, 0.0, 0.0)
+        if lbl_int == 1: return (0.8, 0.8, 0.8, 0.1)
+        if lbl_int == 2: return (0.0, 1.0, 0.0, 0.4)
+        if lbl_int == 3: return (0.0, 0.0, 1.0, 0.5)
+        if lbl_int == 4: return (1.0, 1.0, 0.0, 1.0)
+        rng = np.random.default_rng(int(lbl_int) % 123457)
+        r, g, b = rng.uniform(0.3, 1.0, 3)
+        a = 0.4
+        return (float(r), float(g), float(b), float(a))
+
+    entries = []
+    for lbl in labels_present:
+        lbl_int = int(lbl)
+        lbl_key = str(lbl_int)
+
+        if user_tf and "labels" in user_tf and lbl_key in user_tf["labels"]:
+            spec = user_tf["labels"][lbl_key]
+            color = spec.get("color", [1.0, 1.0, 1.0])
+            alpha = spec.get("alpha", 0.5)
+            name  = spec.get("name", f"label_{lbl_int}")
+        else:
+            rgba = default_rgba_for_label(lbl_int)
+            color = [rgba[0], rgba[1], rgba[2]]
+            alpha = rgba[3]
+            name  = f"label_{lbl_int}"
+
+        entries.append({
+            "label": float(lbl_int),
+            "color": [float(color[0]), float(color[1]), float(color[2])],
+            "alpha": float(alpha),
+            "name":  name
+        })
+
+    return {
+        "type": "labelmap",
+        "entries": entries
+    }
+
+##########################################################
+# VRDF WRITERS
+##########################################################
+
+def write_vrdf_like(vrdf_path, meta_dict, tf_dict, volume_array):
+    """
+    Write a single-channel VRDF (1 float32 per voxel).
+    """
+    meta_bytes = json.dumps(meta_dict, separators=(",",":")).encode("utf-8")
+    tf_bytes   = json.dumps(tf_dict,   separators=(",",":")).encode("utf-8")
+
+    X, Y, Z = volume_array.shape
+    raw_buf = bytearray()
+    for z in range(Z):
+        for y in range(Y):
+            for x in range(X):
+                v = float(volume_array[x, y, z])
+                raw_buf += struct.pack("<f", v)
+    raw_bytes = bytes(raw_buf)
+
+    block_meta_len = len(meta_bytes)
+    block_tf_len   = len(tf_bytes)
+    block_raw_len  = len(raw_bytes)
+
+    total_size = 16 + (8 + block_meta_len) + (8 + block_tf_len) + (8 + block_raw_len)
+
+    with open(vrdf_path, "wb") as f:
+        f.write(b"VRDF0001")
+        f.write(struct.pack("<Q", total_size))
+
+        f.write(struct.pack("<Q", block_meta_len))
+        f.write(meta_bytes)
+
+        f.write(struct.pack("<Q", block_tf_len))
+        f.write(tf_bytes)
+
+        f.write(struct.pack("<Q", block_raw_len))
+        f.write(raw_bytes)
+
+    print(f"[OK] Wrote {vrdf_path}")
+    print(f"     total_size={total_size} bytes")
+    print(f"     meta={block_meta_len} bytes, tf={block_tf_len} bytes, raw={block_raw_len} bytes")
+
+def write_vrdf_interleaved_label_weight(vrdf_path, meta_dict, tf_dict,
+                                        labelmap, weights_norm):
+    """
+    Write a two-channel interleaved VRDF with [label, weight] per voxel.
+    - labelmap: float32 (discrete class: 0,1,2,3..)
+    - weights_norm: float32 [0..1]
+
+    We interleave both channels per voxel (struct.pack two floats).
+    Unity reads meta["channels"]=2 and splits them on load.
+    """
+    assert labelmap.shape == weights_norm.shape
+    meta_bytes = json.dumps(meta_dict, separators=(",",":")).encode("utf-8")
+    tf_bytes   = json.dumps(tf_dict,   separators=(",",":")).encode("utf-8")
+
+    X, Y, Z = labelmap.shape
+    raw_buf = bytearray()
+    for z in range(Z):
+        for y in range(Y):
+            for x in range(X):
+                v_label  = float(labelmap[x, y, z])
+                v_weight = float(weights_norm[x, y, z])
+                raw_buf += struct.pack("<f", v_label)
+                raw_buf += struct.pack("<f", v_weight)
+    raw_bytes = bytes(raw_buf)
+
+    block_meta_len = len(meta_bytes)
+    block_tf_len   = len(tf_bytes)
+    block_raw_len  = len(raw_bytes)
+
+    total_size = 16 + (8 + block_meta_len) + (8 + block_tf_len) + (8 + block_raw_len)
+
+    with open(vrdf_path, "wb") as f:
+        f.write(b"VRDF0001")
+        f.write(struct.pack("<Q", total_size))
+
+        f.write(struct.pack("<Q", block_meta_len))
+        f.write(meta_bytes)
+
+        f.write(struct.pack("<Q", block_tf_len))
+        f.write(tf_bytes)
+
+        f.write(struct.pack("<Q", block_raw_len))
+        f.write(raw_bytes)
+
+    print(f"[OK] Wrote {vrdf_path}")
+    print(f"     total_size={total_size} bytes (interleaved label+weight)")
+    print(f"     meta={block_meta_len} bytes, tf={block_tf_len} bytes, raw={block_raw_len} bytes")
+
+##########################################################
+# EXPORT MODES
+##########################################################
+
+def export_labelmap_case(vol_full, affine, spacing_mm, user_tf,
+                         vrdf_out, debug_dump, raw_out, meta_out, tf_out):
+    # if 4D, take channel 0
+    if vol_full.ndim == 4:
+        ch = 0
+        print(f"[WARN] labelmap: 4D volume detected, using channel {ch} only.")
+        vol = vol_full[..., ch]
+    else:
+        vol = vol_full
+
+    export_data = vol.astype(np.float32, copy=False)
+    tf_json = build_transfer_function_labelmap(export_data, user_tf=user_tf)
+
+    data_min = float(export_data.min())
+    data_max = float(export_data.max())
+
+    meta_dict = save_meta_dict(
+        export_data.shape,
+        spacing_mm,
+        affine,
+        data_min,
+        data_max,
+        "labelmap",
+        sys.byteorder
+    )
+
+    write_vrdf_like(vrdf_out, meta_dict, tf_json, export_data)
+
+    if debug_dump:
+        write_raw_xyzC_order(export_data, raw_out)
+        write_json(meta_out, meta_dict)
+        write_json(tf_out, tf_json)
+
+    print("----- SUMMARY -----")
+    print("Mode: labelmap")
+    print("Shape:", export_data.shape)
+    print("dtype:", export_data.dtype)
+    print("min/max:", data_min, data_max)
+    print("-------------------")
+
+def export_continuous4d_case(vol_full, affine, spacing_mm, user_tf,
+                             vrdf_out, debug_dump, raw_out, meta_out, tf_out):
+    base_out = os.path.splitext(vrdf_out)[0]
+    ext_out  = os.path.splitext(vrdf_out)[1]
+
+    if vol_full.ndim == 3:
+        vols = [vol_full]
+    elif vol_full.ndim == 4:
+        T = vol_full.shape[3]
+        vols = [vol_full[..., t] for t in range(T)]
+    else:
+        raise ValueError("continuous4d expects 3D or 4D (X,Y,Z[,T]).")
+
+    for t, vol3d in enumerate(vols):
+        vol3d = vol3d.astype(np.float32, copy=False)
+        vol_norm, p1, p99 = normalize_intensity_percentile(vol3d)
+
+        tf_json = build_transfer_function_continuous(vol_norm, p1, p99, user_tf=user_tf)
+
+        data_min = float(vol_norm.min())
+        data_max = float(vol_norm.max())
+
+        meta_dict = save_meta_dict(
+            vol_norm.shape,
+            spacing_mm,
+            affine,
+            data_min,
+            data_max,
+            "continuous",
+            sys.byteorder
+        )
+
+        if len(vols) == 1:
+            out_path = vrdf_out
+            raw_dump_path = raw_out
+            meta_dump_path = meta_out
+            tf_dump_path = tf_out
+        else:
+            out_path = f"{base_out}_t{t:02d}{ext_out}"
+            raw_dump_path = f"{base_out}_t{t:02d}.raw"
+            meta_dump_path = f"{base_out}_t{t:02d}_meta.json"
+            tf_dump_path   = f"{base_out}_t{t:02d}_tf.json"
+
+        write_vrdf_like(out_path, meta_dict, tf_json, vol_norm)
+
+        if debug_dump:
+            write_raw_xyzC_order(vol_norm, raw_dump_path)
+            write_json(meta_dump_path, meta_dict)
+            write_json(tf_dump_path, tf_json)
+
+        print("----- SUMMARY -----")
+        print(f"Mode: continuous4d channel {t}")
+        print("Out:", out_path)
+        print("Shape:", vol_norm.shape)
+        print("dtype:", vol_norm.dtype)
+        print("min/max:", data_min, data_max)
+        print("-------------------")
+
+def export_labelmap_weighted_case(vol_full, affine, spacing_mm, user_tf,
+                                  vrdf_out, debug_dump,
+                                  split_weight=False):
+    """
+    labelmap_weighted4d
+    1. computes:
+       - discrete labelmap (argmax across channels)
+       - weights_norm [0..1] (value of the winning channel)
+    2. By default -> A SINGLE fused .vrdf:
+         <base>_lw.vrdf
+       - meta.mode = "anatomy_label_weighted"
+       - meta.channels = 2
+       - RAW block: [label, weight] per voxel (2 floats)
+       - TF = labelmap TF (color comes from label, weight modulates alpha)
+    3. Optional (--split-weight) -> 2 legacy files:
+         <base>_labels.vrdf     (labelmap only)
+         <base>_weights.vrdf    (weight [0..1] only, mode "activity_weight")
+    """
+
+    if vol_full.ndim != 4:
+        raise ValueError("labelmap_weighted4d expects a 4D volume (X,Y,Z,C).")
+
+    X, Y, Z, C = vol_full.shape
+    print(f"[INFO] labelmap_weighted4d: 4D volume detected: {vol_full.shape}")
+
+    winner_channel = np.argmax(vol_full, axis=3)
+    winner_value   = np.max(vol_full, axis=3)
+
+    channel_to_label = {
+        0: 1,
+        1: 2,
+        2: 3,
+        3: 4,
+    }
+
+    labelmap = np.vectorize(channel_to_label.get)(winner_channel).astype(np.float32)
+    labelmap[winner_value <= 0] = 0.0
+
+    # normalize weight
+    weights_raw = winner_value.astype(np.float32)
+    mask_pos = weights_raw > 0
+    if np.any(mask_pos):
+        p1, p99 = np.percentile(weights_raw[mask_pos], [1, 99])
+    else:
+        p1, p99 = (0.0, 1.0)
+
+    if p99 - p1 < 1e-12:
+        weights_norm = np.zeros_like(weights_raw, dtype=np.float32)
+    else:
+        weights_norm = (weights_raw - p1) / (p99 - p1)
+        weights_norm = np.clip(weights_norm, 0, 1)
+
+    weights_norm[labelmap == 0] = 0.0
+
+    tf_label = build_transfer_function_labelmap(labelmap, user_tf=user_tf)
+
+    base_noext, _ = os.path.splitext(vrdf_out)
+
+    if split_weight:
+        label_path  = base_noext + "_labels.vrdf"
+        weight_path = base_noext + "_weights.vrdf"
+
+        meta_label = save_meta_dict(
+            labelmap.shape,
+            spacing_mm,
+            affine,
+            float(labelmap.min()),
+            float(labelmap.max()),
+            "anatomy_label",
+            sys.byteorder
+        )
+
+        meta_weight = save_meta_dict(
+            weights_norm.shape,
+            spacing_mm,
+            affine,
+            0.0,
+            1.0,
+            "activity_weight",
+            sys.byteorder
+        )
+        tf_weight = {
+            "type": "none",
+            "description": "weight[0..1] used to modulate label alpha"
+        }
+
+        write_vrdf_like(label_path,  meta_label,  tf_label,  labelmap)
+        write_vrdf_like(weight_path, meta_weight, tf_weight, weights_norm)
+
+        if debug_dump:
+            write_raw_xyzC_order(labelmap,   base_noext + "_labels.raw")
+            write_json(base_noext + "_labels_meta.json",   meta_label)
+            write_json(base_noext + "_labels_tf.json",     tf_label)
+
+            write_raw_xyzC_order(weights_norm, base_noext + "_weights.raw")
+            write_json(base_noext + "_weights_meta.json",  meta_weight)
+            write_json(base_noext + "_weights_tf.json",    tf_weight)
+
+        print("----- SUMMARY -----")
+        print("Mode: labelmap_weighted4d (SPLIT)")
+        print("Labels :", label_path)
+        print("Weights:", weight_path)
+        print("-------------------")
+
+    else:
+        fused_path = base_noext + "_lw.vrdf"
+
+        meta_fused = save_meta_dict(
+            labelmap.shape,
+            spacing_mm,
+            affine,
+            0.0,
+            1.0,
+            "anatomy_label_weighted",
+            sys.byteorder,
+            extra={
+                "channels": 2,
+                "channel_meaning": ["labelmap", "weight01"]
+            }
+        )
+
+        write_vrdf_interleaved_label_weight(
+            fused_path,
+            meta_fused,
+            tf_label,
+            labelmap,
+            weights_norm
+        )
+
+        if debug_dump:
+            write_raw_xyzC_order(labelmap,   base_noext + "_lw_label.raw")
+            write_raw_xyzC_order(weights_norm, base_noext + "_lw_weight.raw")
+            write_json(base_noext + "_lw_meta.json",   meta_fused)
+            write_json(base_noext + "_lw_tf.json",     tf_label)
+
+        print("----- SUMMARY -----")
+        print("Mode: labelmap_weighted4d (FUSED)")
+        print("Fused :", fused_path)
+        print("Shape :", labelmap.shape, "(2 interleaved channels)")
+        print("-------------------")
+
+def export_multi_overlay4d_case(vol_full, affine, spacing_mm, user_tf,
+                                vrdf_out, debug_dump):
+    """
+    multi_overlay4d
+    - no argmax
+    - each channel C of the 4D volume (X,Y,Z,C) becomes <base>_chX.vrdf
+      (legacy .vrdfw no longer used)
+    - TF: fixed color + alpha ∝ normalized intensity
+    """
+    if vol_full.ndim != 4:
+        raise ValueError("multi_overlay4d expects a 4D volume (X,Y,Z,C).")
+
+    base_noext, _ = os.path.splitext(vrdf_out)
+
+    channel_defs = {
+        0: {"name": "Enhancing Tumor", "rgba": [1.0, 0.0, 0.0, 0.4]},
+        1: {"name": "Core Tumor",      "rgba": [0.0, 1.0, 0.0, 0.4]},
+        2: {"name": "Edema",           "rgba": [0.0, 0.0, 1.0, 0.4]},
+        3: {"name": "Necrosis",        "rgba": [1.0, 1.0, 0.0, 0.4]},
+    }
+
+    X, Y, Z, C = vol_full.shape
+    print(f"[INFO] multi_overlay4d: 4D volume detected: {vol_full.shape}")
+
+    for cid_check in range(C):
+        ch_tmp = vol_full[..., cid_check].astype(np.float32, copy=False)
+        nnz = np.count_nonzero(ch_tmp)
+        print(f"[DEBUG] channel {cid_check}: "
+              f"min={ch_tmp.min():.6f} max={ch_tmp.max():.6f} nnz={nnz} sum={float(ch_tmp.sum()):.6f}")
+
+    for cid in range(C):
+        ch_vol = vol_full[..., cid].astype(np.float32, copy=False)
+
+        ch_norm, p1, p99 = normalize_channel_sparse(ch_vol)
+        nnz_norm = np.count_nonzero(ch_norm)
+        print(f"[DEBUG] EXPORT channel {cid}: "
+              f"p1={p1:.6f}, p99={p99:.6f}, "
+              f"norm_min={ch_norm.min():.6f}, norm_max={ch_norm.max():.6f}, "
+              f"nnz_norm={nnz_norm}, sum_norm={float(ch_norm.sum()):.6f}")
+
+        ch_def = channel_defs.get(cid, {
+            "name": f"channel_{cid}",
+            "rgba": [1.0, 1.0, 1.0, 0.4]
+        })
+        r_base, g_base, b_base, a_base = ch_def["rgba"]
+
+        curve = []
+        for i in range(256):
+            x = i / 255.0
+            curve.append({
+                "x": x,
+                "color": [float(r_base), float(g_base), float(b_base)],
+                "alpha": float(a_base * x)
+            })
+
+        tf_json = {
+            "type": "continuous",
+            "curve": curve,
+            "origin": f"multi_overlay4d_channel_{cid}"
+        }
+
+        data_min = float(ch_norm.min())
+        data_max = float(ch_norm.max())
+
+        meta_dict = save_meta_dict(
+            ch_norm.shape,
+            spacing_mm,
+            affine,
+            data_min,
+            data_max,
+            "overlay_channel",
+            sys.byteorder
+        )
+
+        out_path = f"{base_noext}_ch{cid}.vrdf"
+        write_vrdf_like(out_path, meta_dict, tf_json, ch_norm)
+
+        if debug_dump:
+            write_raw_xyzC_order(ch_norm,     f"{base_noext}_ch{cid}.raw")
+            write_json(f"{base_noext}_ch{cid}_meta.json", meta_dict)
+            write_json(f"{base_noext}_ch{cid}_tf.json",   tf_json)
+
+        print(f"[OK] wrote overlay channel {cid} -> {out_path} ({ch_def['name']})")
+
+##########################################################
+# CLI
+##########################################################
+
+def load_user_config(path):
+    if path is None:
+        return None
+    with open(path, "r") as f:
+        return json.load(f)
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description=(
+            "Convert a NIfTI into a .vrdf for Unity DVR rendering.\n"
+            "Modes:\n"
+            " - labelmap : single discrete volume\n"
+            " - continuous4d : continuous volumes (MRI/CT), split along T\n"
+            " - labelmap_weighted4d : labels + tumor weights (fused or split)\n"
+            " - multi_overlay4d : one overlay .vrdf per channel\n"
+        )
+    )
+
+    p.add_argument("--nifti", required=True,
+                   help="Path to input .nii/.nii.gz")
+
+    p.add_argument("--mode", required=True,
+                   choices=["labelmap","continuous4d","labelmap_weighted4d","multi_overlay4d"],
+                   help="Export mode")
+
+    p.add_argument("--vrdf-out", default="scene.vrdf",
+                   help=("Output path/base. "
+                         "continuous4d: generates base_tXX.vrdf; "
+                         "labelmap_weighted4d: "
+                         "  - default <base>_lw.vrdf (2 interleaved channels)\n"
+                         "  - if --split-weight then <base>_labels.vrdf + <base>_weights.vrdf\n"
+                         "multi_overlay4d: generates base_chX.vrdf"))
+
+    p.add_argument("--config", default=None,
+                   help=(
+                        "Path to a user JSON.\n"
+                        "Example:\n"
+                        "{\n"
+                        "  \"transfer_function\": {\n"
+                        "    \"labels\": {\n"
+                        "      \"0\": {\"name\":\"Background\",\"color\":[0,0,0],\"alpha\":0.0},\n"
+                        "      \"1\": {\"name\":\"Brain\",\"color\":[0.8,0.8,0.8],\"alpha\":0.1},\n"
+                        "      \"2\": {\"name\":\"Enhancing tumor\",\"color\":[0,1,0],\"alpha\":0.4},\n"
+                        "      \"3\": {\"name\":\"Core tumor\",\"color\":[0,0,1],\"alpha\":0.5},\n"
+                        "      \"4\": {\"name\":\"Glioma\",\"color\":[1,1,0],\"alpha\":1.0}\n"
+                        "    }\n"
+                        "  }\n"
+                        "}\n"
+                   ))
+
+    p.add_argument("--split-weight", action="store_true",
+                   help=("(labelmap_weighted4d only) "
+                         "If set, export 2 separate files "
+                         "<base>_labels.vrdf and <base>_weights.vrdf "
+                         "instead of a single interleaved *_lw.vrdf."))
+
+    p.add_argument("--debug-dump", action="store_true",
+                   help="Also dump intermediate .raw/.json files")
+
+    p.add_argument("--raw-out", default="volume.raw",
+                   help="[debug only] base .raw path for simple modes")
+    p.add_argument("--meta-out", default="volume_meta.json",
+                   help="[debug only] base path for metadata JSON")
+    p.add_argument("--tf-out",   default="transfer_function.json",
+                   help="[debug only] base path for transfer function JSON")
+
+    args = p.parse_args()
+    return args
+
+def main():
+    args = parse_args()
+    user_cfg = load_user_config(args.config)
+
+    img = nib.load(args.nifti)
+    vol_full = img.get_fdata(dtype=np.float32)
+    affine = img.affine
+    spacing_mm = compute_spacing_mm(affine)
+
+    user_tf = None
+    if user_cfg is not None and "transfer_function" in user_cfg:
+        user_tf = user_cfg["transfer_function"]
+
+    print(f"[INFO] Original volume shape: {vol_full.shape}")
+    print(f"[INFO] MODE: {args.mode}")
+
+    if args.mode == "labelmap":
+        export_labelmap_case(
+            vol_full=vol_full,
+            affine=affine,
+            spacing_mm=spacing_mm,
+            user_tf=user_tf,
+            vrdf_out=args.vrdf_out,
+            debug_dump=args.debug_dump,
+            raw_out=args.raw_out,
+            meta_out=args.meta_out,
+            tf_out=args.tf_out
+        )
+
+    elif args.mode == "continuous4d":
+        export_continuous4d_case(
+            vol_full=vol_full,
+            affine=affine,
+            spacing_mm=spacing_mm,
+            user_tf=user_tf,
+            vrdf_out=args.vrdf_out,
+            debug_dump=args.debug_dump,
+            raw_out=args.raw_out,
+            meta_out=args.meta_out,
+            tf_out=args.tf_out
+        )
+
+    elif args.mode == "labelmap_weighted4d":
+        export_labelmap_weighted_case(
+            vol_full=vol_full,
+            affine=affine,
+            spacing_mm=spacing_mm,
+            user_tf=user_tf,
+            vrdf_out=args.vrdf_out,
+            debug_dump=args.debug_dump,
+            split_weight=args.split_weight
+        )
+
+    elif args.mode == "multi_overlay4d":
+        export_multi_overlay4d_case(
+            vol_full=vol_full,
+            affine=affine,
+            spacing_mm=spacing_mm,
+            user_tf=user_tf,
+            vrdf_out=args.vrdf_out,
+            debug_dump=args.debug_dump
+        )
+
+    else:
+        raise ValueError("Unknown MODE.")
+
+if __name__ == "__main__":
+    main()
+```
+
+### python/reader_vrdf.py
+```
+import struct
+import json
+import numpy as np
+
+MAGIC = b"VRDF0001"
+
+class VRDFVolume:
+    def __init__(self):
+        self.meta = None           # dict
+        self.tf = None             # dict
+        self.data = None           # np.ndarray (float32)
+        self.shape = None          # (X,Y,Z)
+        self.mode = None           # labelmap / continuous / etc.
+        self.spacing = None        # [sx,sy,sz]
+        self.affine = None         # 4x4
+        self.dtype = None
+        self.intensity_range = None
+
+    def summary(self):
+        print(f"[VRDF] mode={self.mode} shape={self.shape} dtype={self.dtype}")
+        if self.spacing is not None:
+            print(f"       spacing_mm={self.spacing}")
+        if self.intensity_range is not None:
+            print(f"       range={self.intensity_range}")
+        if self.tf is not None:
+            tf_type = self.tf.get('type', 'unknown')
+            print(f"       TF type={tf_type}, entries={len(self.tf.get('entries', []))}, curve={len(self.tf.get('curve', []))}")
+
+
+def read_uint64_le(f):
+    b = f.read(8)
+    if len(b) != 8:
+        raise EOFError("Unexpected EOF while reading uint64.")
+    return struct.unpack("<Q", b)[0]
+
+
+def read_vrdf(path):
+    """Lit un fichier .vrdf ou .vrdfw et renvoie un VRDFVolume"""
+    vol = VRDFVolume()
+
+    with open(path, "rb") as f:
+        magic = f.read(8)
+        if magic != MAGIC:
+            raise ValueError(f"Bad magic {magic}, expected {MAGIC}")
+
+        total_size = read_uint64_le(f)
+        meta_len = read_uint64_le(f)
+        meta_json = f.read(meta_len).decode("utf-8")
+
+        tf_len = read_uint64_le(f)
+        tf_json = f.read(tf_len).decode("utf-8")
+
+        raw_len = read_uint64_le(f)
+        raw_bytes = f.read(raw_len)
+
+    meta = json.loads(meta_json)
+    tf = json.loads(tf_json)
+
+    dim = meta.get("dim", [1,1,1])
+    sx, sy, sz = meta.get("spacing_mm", [1.0,1.0,1.0])
+    dtype = meta.get("dtype", "float32")
+    mode = meta.get("mode", "unknown")
+    intensity_range = meta.get("intensity_range", [0,1])
+    affine = np.array(meta.get("affine", np.eye(4))).reshape((4,4))
+
+    dimX, dimY, dimZ = [int(x) for x in dim]
+    expected_bytes = dimX * dimY * dimZ * 4
+    if len(raw_bytes) != expected_bytes:
+        raise ValueError(f"RAW size mismatch: got {len(raw_bytes)}, expected {expected_bytes}")
+
+    data = np.frombuffer(raw_bytes, dtype=np.float32)
+    data = data.reshape((dimX, dimY, dimZ), order="C")
+
+    vol.meta = meta
+    vol.tf = tf
+    vol.data = data
+    vol.shape = (dimX, dimY, dimZ)
+    vol.mode = mode
+    vol.spacing = [sx, sy, sz]
+    vol.affine = affine
+    vol.dtype = dtype
+    vol.intensity_range = intensity_range
+
+    return vol
+
+
+def dump_tf_summary(tf):
+    """Affiche un résumé simple de la TF"""
+    tf_type = tf.get("type", "unknown")
+    print(f"TF type: {tf_type}")
+
+    if tf_type == "labelmap":
+        entries = tf.get("entries", [])
+        for e in entries:
+            print(f"  label={e['label']:3.0f}  name={e.get('name','')}  "
+                  f"color={e['color']}  alpha={e['alpha']:.2f}")
+    elif tf_type == "continuous":
+        curve = tf.get("curve", [])
+        print(f"  {len(curve)} points in curve.")
+        if curve:
+            print("  First:", curve[0])
+            print("  Mid:", curve[len(curve)//2])
+            print("  Last:", curve[-1])
+    else:
+        print(json.dumps(tf, indent=2))
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python vrdf_reader.py <path_to_vrdf>")
+        sys.exit(1)
+
+    path = sys.argv[1]
+    vrdf = read_vrdf(path)
+    vrdf.summary()
+    dump_tf_summary(vrdf.tf)
+
+    print(f"\n[DATA] voxel min={vrdf.data.min():.4f}, max={vrdf.data.max():.4f}, mean={vrdf.data.mean():.4f}")
+```
+
+### unity/Assets/Scripts/DisplayVolume.cs
+```
+using UnityEngine;
+using System;
+using System.IO;
+
+public class DisplayVolume : MonoBehaviour
+{
+    [Header("Input files (in StreamingAssets)")]
+    public string jsonFileName = "volume_meta.json";
+    public string rawFileName  = "volume.raw";
+
+    [Header("Debug rendering")]
+    [Range(0f, 1f)]
+    public float intensityThreshold = 0.5f; // spawn only voxels above this
+    public float sphereRadius = 0.5f;        // in mm units before scaling below
+    public int maxSpheres = 5000;            // safety cap
+
+    [Header("Parent for spawned spheres")]
+    public Transform sphereParent; // assign an empty GameObject in the scene
+
+    [Serializable]
+    public class VolumeMetadata {
+        public int[] dim;              // [X,Y,Z]
+        public float[] spacing_mm;     // [sx,sy,sz]
+        public string dtype;           // "float32"
+        public float[] intensity_range;// [min,max] e.g. [0,1]
+        public float[][] affine;       // 4x4 matrix
+    }
+
+    void Start()
+    {
+        // 1. Load metadata
+        string metaPath = Path.Combine(Application.streamingAssetsPath, jsonFileName);
+        if (!File.Exists(metaPath)) {
+            Debug.LogError("Meta file not found: " + metaPath);
+            return;
+        }
+        string metaJson = File.ReadAllText(metaPath);
+        VolumeMetadata meta = JsonUtility.FromJson<VolumeMetadata>(metaJson);
+
+        if (meta == null || meta.dim == null || meta.dim.Length != 3) {
+            Debug.LogError("Invalid metadata JSON");
+            return;
+        }
+
+        int dimX = meta.dim[0];
+        int dimY = meta.dim[1];
+        int dimZ = meta.dim[2];
+
+        // 2. Load raw volume data
+        string rawPath = Path.Combine(Application.streamingAssetsPath, rawFileName);
+        if (!File.Exists(rawPath)) {
+            Debug.LogError("Raw file not found: " + rawPath);
+            return;
+        }
+
+        int voxelCount = dimX * dimY * dimZ;
+        float[] voxels = new float[voxelCount];
+
+        // Read float32 little-endian
+        using (BinaryReader br = new BinaryReader(File.Open(rawPath, FileMode.Open)))
+        {
+            for (int i = 0; i < voxelCount; i++)
+            {
+                // BinaryReader.ReadSingle() reads IEEE 754 float32 little-endian => matches our .raw
+                voxels[i] = br.ReadSingle();
+            }
+        }
+
+        // 3. Get affine (voxel -> world mm)
+        // meta.affine est float[4][4] (lignes).
+        // On l'emballe dans une Matrix4x4 Unity.
+        Matrix4x4 affine = Matrix4x4.identity;
+        if (meta.affine != null && meta.affine.Length == 4 &&
+            meta.affine[0].Length == 4 &&
+            meta.affine[1].Length == 4 &&
+            meta.affine[2].Length == 4 &&
+            meta.affine[3].Length == 4)
+        {
+            // attention: Json was row-major, Unity's Matrix4x4 is column-major internally,
+            // BUT Matrix4x4.SetRow lets us assign row-major safely.
+            affine.SetRow(0, new Vector4(meta.affine[0][0], meta.affine[0][1], meta.affine[0][2], meta.affine[0][3]));
+            affine.SetRow(1, new Vector4(meta.affine[1][0], meta.affine[1][1], meta.affine[1][2], meta.affine[1][3]));
+            affine.SetRow(2, new Vector4(meta.affine[2][0], meta.affine[2][1], meta.affine[2][2], meta.affine[2][3]));
+            affine.SetRow(3, new Vector4(meta.affine[3][0], meta.affine[3][1], meta.affine[3][2], meta.affine[3][3]));
+        }
+        else
+        {
+            Debug.LogWarning("No valid affine in metadata. Fallback to spacing only.");
+            // Fallback: diagonal affine from spacing
+            float sx = meta.spacing_mm[0];
+            float sy = meta.spacing_mm[1];
+            float sz = meta.spacing_mm[2];
+            affine = Matrix4x4.identity;
+            affine.m00 = sx;
+            affine.m11 = sy;
+            affine.m22 = sz;
+            affine.m03 = 0f;
+            affine.m13 = 0f;
+            affine.m23 = 0f;
+        }
+
+        // 4. Spawn spheres
+        // Mapping from linear index -> (x,y,z):
+        // We wrote data in x-fastest order:
+        // idx = x + dimX * (y + dimY * z)
+        int spawned = 0;
+
+        for (int z = 0; z < dimZ; z++)
+        {
+            for (int y = 0; y < dimY; y++)
+            {
+                for (int x = 0; x < dimX; x++)
+                {
+                    if (spawned >= maxSpheres) {
+                        Debug.Log($"Reached maxSpheres={maxSpheres}, stopping.");
+                        z = dimZ; y = dimY; break; // escape triple loop
+                    }
+
+                    int idx = x + dimX * (y + dimY * z);
+                    float val = voxels[idx];
+
+                    // Skip empty / low-intensity voxels
+                    if (val < intensityThreshold)
+                        continue;
+
+                    // Compute world position from voxel coords
+                    // We treat voxel coordinate as [x, y, z, 1] and multiply by affine
+                    Vector4 voxelCoord = new Vector4(x, y, z, 1f);
+                    Vector4 worldMM = affine * voxelCoord; // still in mm
+
+                    // Convert mm -> meters for Unity scale (1 Unity unit = 1 meter)
+                    Vector3 worldPos = new Vector3(worldMM.x, worldMM.y, worldMM.z) * 0.001f;
+
+
+                    // Create sphere
+                    GameObject sphere = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    sphere.transform.position = worldPos;
+                    sphere.transform.localScale = Vector3.one * (sphereRadius * 0.001f * 2f); 
+                    // *2f because Unity's default sphere has diameter 1 unit
+
+                    if (sphereParent != null)
+                        sphere.transform.SetParent(sphereParent, worldPositionStays:true);
+
+                    // Color it by intensity (optional)
+                    Color c = new Color(val, val, val, 1f);
+                    var renderer = sphere.GetComponent<Renderer>();
+                    renderer.material = new Material(renderer.material);
+                    renderer.material.color = c;
+
+                    spawned++;
+                }
+            }
+        }
+
+        Debug.Log($"Spawned {spawned} spheres.");
+    }
+}
+```
+
+### unity/Assets/Scripts/TransferFunctionLoader.cs
+```
+using System;
+using System.IO;
+using System.Linq;
+using UnityEngine;
+
+[Serializable]
+public class TFLabelEntry {
+    public float label;
+    public float[] color;
+    public float alpha;
+}
+
+[Serializable]
+public class TFLabelMap {
+    public string type;
+    public TFLabelEntry[] entries;
+}
+
+[Serializable]
+public class TFCurvePoint {
+    public float x;
+    public float[] color;
+    public float alpha;
+}
+
+[Serializable]
+public class TFContinuousInfo {
+    public float p1;
+    public float p99;
+}
+
+[Serializable]
+public class TFContinuous {
+    public string type;
+    public TFCurvePoint[] curve;
+    public TFContinuousInfo intensity_normalization;
+}
+
+public static class TransferFunctionLoader
+{
+    // Charge le JSON brut et renvoie:
+    // - la texture LUT (Texture2D)
+    // - des infos optionnelles comme p1/p99 pour le mode continuous
+    //
+    // Pour "labelmap":
+    //   On fabrique une 256x1 texture où l'index = valeur de classe
+    // Pour "continuous":
+    //   On fabrique une 256x1 texture où l'index = intensité normalisée * 255
+    //
+    public static Texture2D LoadTransferFunctionLUT(
+        string tfJsonPath,
+        out bool isLabelMap,
+        out float p1,
+        out float p99)
+    {
+        string jsonText = File.ReadAllText(tfJsonPath);
+
+        TFLabelMap tfLabel = null;
+        TFContinuous tfCont = null;
+
+        try {
+            tfLabel = JsonUtility.FromJson<TFLabelMap>(jsonText);
+        } catch {}
+
+        if (tfLabel == null || tfLabel.entries == null || tfLabel.entries.Length == 0)
+        {
+            tfCont = JsonUtility.FromJson<TFContinuous>(jsonText);
+        }
+
+        Texture2D lutTex = new Texture2D(256, 1, TextureFormat.RGBAFloat, false);
+        lutTex.wrapMode = TextureWrapMode.Clamp;
+        lutTex.filterMode = FilterMode.Bilinear;
+
+        Color[] pixels = new Color[256];
+        for (int i = 0; i < 256; i++)
+            pixels[i] = Color.clear;
+
+        if (tfLabel != null && tfLabel.entries != null && tfLabel.entries.Length > 0)
+        {
+            isLabelMap = true;
+
+            p1 = 0f;
+            p99 = 1f;
+
+            foreach (var e in tfLabel.entries)
+            {
+                int idx = Mathf.Clamp(Mathf.RoundToInt(e.label), 0, 255);
+                float r = e.color.Length > 0 ? e.color[0] : 0f;
+                float g = e.color.Length > 1 ? e.color[1] : 0f;
+                float b = e.color.Length > 2 ? e.color[2] : 0f;
+                float a = e.alpha;
+                pixels[idx] = new Color(r,g,b,a);
+            }
+        }
+        else
+        {
+            isLabelMap = false;
+
+            for (int i = 0; i < 256; i++)
+            {
+                var pt = tfCont.curve[i];
+                float r = pt.color[0];
+                float g = pt.color[1];
+                float b = pt.color[2];
+                float a = pt.alpha;
+                pixels[i] = new Color(r,g,b,a);
+            }
+
+            p1  = tfCont.intensity_normalization.p1;
+            p99 = tfCont.intensity_normalization.p99;
+        }
+
+        lutTex.SetPixels(pixels);
+        lutTex.Apply(false);
+
+        return lutTex;
+    }
+}
+```
+
+### unity/Assets/Scripts/VolumeDVR.cs
+```
+using UnityEngine;
+using System;
+using System.IO;
+using System.Collections.Generic;
+
+[Serializable]
+public class VolumeLabelInfoRuntime
+{
+    public int labelIndex;        // 0..255
+    public string displayName;    // "Tumeur", etc.
+    public Color color;           // couleur TF initiale
+    public bool defaultVisible;   // alpha > 0
+}
+
+[DisallowMultipleComponent]
+public class VolumeDVR : MonoBehaviour
+{
+        [Header("Input (.vrdf in StreamingAssets)")]
+    [Tooltip("Fichier fusionné anatomy_label_weighted (*_lw.vrdf). Si renseigné, on ignore les deux champs ci-dessous.")]
+    public string vrdfFusedFileName = "scene_lw.vrdf";
+
+    [Tooltip("Ancien mode: fichier labelmap (anatomy_label / labelmap TF). Ignoré si vrdfFusedFileName est renseigné.")]
+    public string vrdfLabelsFileName = "scene_labels.vrdf";
+
+    [Tooltip("Ancien mode: fichier weight (activity_weight / continuous TF). Peut être vide. Ignoré si vrdfFusedFileName est renseigné.")]
+    public string vrdfWeightsFileName = "scene_weights.vrdfw";
+
+    [Header("Raymarch material (must match shader)")]
+    public Material volumeMaterial;
+
+    [Header("Debug / Quality")]
+    [Tooltip("false = rendu clinique doux (soft LUT)\ntrue = rendu segmentation dure (hard LUT)")]
+    public bool useHardTF = false;
+
+    public bool verboseDebug = false;
+
+    // runtime GPU data
+    private Texture3D volumeTexLabels;   // label volume (ou labelTexture)
+    private Texture3D volumeTexWeights;  // weight volume (ou weightTexture)
+
+    private Texture2D tfTexCurrent;
+    private Texture2D _labelCtrlTex;
+    private Color[]   _labelCtrlPixels;
+
+    [NonSerialized] public List<VolumeLabelInfoRuntime> labelInfos = new List<VolumeLabelInfoRuntime>();
+
+    private VRDFVolumeData _labelsData;   // dans le cas fusionné: ceci contient label+weight
+    private VRDFVolumeData _weightsData;  // ancien mode uniquement
+
+    private static Texture3D _blackTex3D;
+    private static Texture3D BlackTex3D
+    {
+        get
+        {
+            if (_blackTex3D == null)
+            {
+                Color black = new Color(0, 0, 0, 0);
+                _blackTex3D = new Texture3D(1, 1, 1, TextureFormat.RFloat, false);
+                _blackTex3D.SetPixel(0, 0, 0, black);
+                _blackTex3D.Apply(false, false);
+            }
+            return _blackTex3D;
+        }
+    }
+
+    void Start()
+    {
+        if (!string.IsNullOrEmpty(vrdfFusedFileName))
+        {
+            // ===== Nouveau mode : un seul fichier lw.vrdf =====
+            string fusedPath = Path.Combine(Application.streamingAssetsPath, vrdfFusedFileName);
+            _labelsData = VRDFLoader.LoadFromFile(fusedPath);
+            VRDFLoader.BuildUnityTextures(_labelsData);
+
+            // Dans ce cas, _labelsData contient labelTexture + weightTexture
+            volumeTexLabels  = _labelsData.labelTexture;
+            volumeTexWeights = _labelsData.weightTexture;
+            _weightsData     = null; // pas besoin, tout est dans _labelsData
+
+            // LUT
+            tfTexCurrent = useHardTF ? _labelsData.tfLUTTextureHard
+                                     : _labelsData.tfLUTTextureSoft;
+        }
+        else
+        {
+            // ===== Ancien mode : deux fichiers séparés =====
+            string pathLabels = Path.Combine(Application.streamingAssetsPath, vrdfLabelsFileName);
+            _labelsData = VRDFLoader.LoadFromFile(pathLabels);
+            VRDFLoader.BuildUnityTextures(_labelsData);
+
+            volumeTexLabels = _labelsData.volumeTexture;
+
+            _weightsData = null;
+            volumeTexWeights = null;
+            if (!string.IsNullOrEmpty(vrdfWeightsFileName))
+            {
+                string pathWeights = Path.Combine(Application.streamingAssetsPath, vrdfWeightsFileName);
+                if (File.Exists(pathWeights))
+                {
+                    _weightsData = VRDFLoader.LoadFromFile(pathWeights);
+                    VRDFLoader.BuildUnityTextures(_weightsData);
+                    volumeTexWeights = _weightsData.volumeTexture;
+                }
+                else if (verboseDebug)
+                {
+                    Debug.LogWarning("[VolumeDVR] No weights file found at " + pathWeights + " (will render without modulation)");
+                }
+            }
+
+            tfTexCurrent = useHardTF ? _labelsData.tfLUTTextureHard
+                                     : _labelsData.tfLUTTextureSoft;
+        }
+
+        ApplyToMaterial();
+        InitLabelCtrlTexture();
+        BuildLabelInfosFromData();
+        FitVolumeScaleFromSpacing(_labelsData);
+
+        if (verboseDebug)
+        {
+            Debug.Log($"[VolumeDVR] Loaded main vol {DimToString(_labelsData.meta.dim)} mode={_labelsData.meta.mode} tf={_labelsData.tf.type}");
+
+            if (_weightsData != null)
+                Debug.Log($"[VolumeDVR] Loaded WEIGHT vol {DimToString(_weightsData.meta.dim)} mode={_weightsData.meta.mode} tf={_weightsData.tf.type}");
+
+            Debug.Log($"[VolumeDVR] worldPos={transform.position} worldScale={transform.lossyScale}");
+
+            string tfDescSoft = _labelsData.tfLUTTextureSoft ? (_labelsData.tfLUTTextureSoft.width + "x" + _labelsData.tfLUTTextureSoft.height + " soft") : "null";
+            string tfDescHard = _labelsData.tfLUTTextureHard ? (_labelsData.tfLUTTextureHard.width + "x" + _labelsData.tfLUTTextureHard.height + " hard") : "null";
+            Debug.Log($"[VolumeDVR] TF soft={tfDescSoft} hard={tfDescHard}, usingHard={useHardTF}");
+        }
+    }
+
+    private string DimToString(int[] d)
+    {
+        if (d == null || d.Length < 3) return "???";
+        return d[0] + "x" + d[1] + "x" + d[2];
+    }
+
+    public void SetTFMode(bool hard)
+    {
+        useHardTF = hard;
+        tfTexCurrent = useHardTF ? _labelsData.tfLUTTextureHard
+                                 : _labelsData.tfLUTTextureSoft;
+
+        if (volumeMaterial != null && tfTexCurrent != null)
+        {
+            volumeMaterial.SetTexture("_TFTex", tfTexCurrent);
+        }
+
+        BuildLabelInfosFromData();
+    }
+
+    private void ApplyToMaterial()
+    {
+        if (volumeMaterial == null)
+        {
+            Debug.LogError("[VolumeDVR] volumeMaterial not set.");
+            return;
+        }
+        if (_labelsData == null || _labelsData.meta == null)
+        {
+            Debug.LogError("[VolumeDVR] Missing labels data.");
+            return;
+        }
+
+        var d = _labelsData;
+
+        int dimX = d.meta.dim[0];
+        int dimY = d.meta.dim[1];
+        int dimZ = d.meta.dim[2];
+
+        // P1/P99 : pour continuous, mais dans notre pipeline labelmap_weighted4d
+        // on s'en fiche, donc ça restera (0,1)
+        float p1  = 0f;
+        float p99 = 1f;
+        if (d.tf.type == "continuous"
+            && d.meta.intensity_range != null
+            && d.meta.intensity_range.Length == 2)
+        {
+            p1  = d.meta.intensity_range[0];
+            p99 = d.meta.intensity_range[1];
+        }
+
+        // matrices
+        Matrix4x4 affine = Matrix4x4.identity;
+        Matrix4x4 invAffine = Matrix4x4.identity;
+        if (d.meta.affine != null)
+        {
+            affine.SetRow(0, new Vector4(d.meta.affine[0,0], d.meta.affine[0,1], d.meta.affine[0,2], d.meta.affine[0,3]));
+            affine.SetRow(1, new Vector4(d.meta.affine[1,0], d.meta.affine[1,1], d.meta.affine[1,2], d.meta.affine[1,3]));
+            affine.SetRow(2, new Vector4(d.meta.affine[2,0], d.meta.affine[2,1], d.meta.affine[2,2], d.meta.affine[2,3]));
+            affine.SetRow(3, new Vector4(d.meta.affine[3,0], d.meta.affine[3,1], d.meta.affine[3,2], d.meta.affine[3,3]));
+            invAffine = affine.inverse;
+        }
+
+        // Sélection de quelles textures envoyer au shader :
+        Texture3D texLbl = volumeTexLabels != null ? volumeTexLabels : (d.labelTexture != null ? d.labelTexture : BlackTex3D);
+        Texture3D texW   = volumeTexWeights != null ? volumeTexWeights : (d.weightTexture != null ? d.weightTexture : null);
+
+        volumeMaterial.SetTexture("_VolumeTexLabels", texLbl ? texLbl : BlackTex3D);
+
+        if (texW != null)
+        {
+            volumeMaterial.SetTexture("_VolumeTexWeights", texW);
+            volumeMaterial.SetInt("_HasWeights", 1);
+        }
+        else
+        {
+            volumeMaterial.SetTexture("_VolumeTexWeights", BlackTex3D);
+            volumeMaterial.SetInt("_HasWeights", 0);
+        }
+
+        volumeMaterial.SetTexture("_TFTex", tfTexCurrent != null ? tfTexCurrent : Texture2D.blackTexture);
+
+        // c'est un labelmap si la TF est de type "labelmap"
+        volumeMaterial.SetInt("_IsLabelMap", (d.tf.type == "labelmap") ? 1 : 0);
+
+        volumeMaterial.SetFloat("_P1",  p1);
+        volumeMaterial.SetFloat("_P99", p99);
+        volumeMaterial.SetVector("_Dim", new Vector4(dimX, dimY, dimZ, 1f));
+        volumeMaterial.SetMatrix("_Affine", affine);
+        volumeMaterial.SetMatrix("_InvAffine", invAffine);
+
+        var mr = GetComponent<MeshRenderer>();
+        if (mr && mr.sharedMaterial != volumeMaterial)
+            mr.sharedMaterial = volumeMaterial;
+    }
+
+    private void InitLabelCtrlTexture()
+    {
+        _labelCtrlTex = new Texture2D(256, 1, TextureFormat.RGBAFloat, false);
+        _labelCtrlTex.wrapMode   = TextureWrapMode.Clamp;
+        _labelCtrlTex.filterMode = FilterMode.Point;
+        _labelCtrlPixels = new Color[256];
+        for (int i = 0; i < 256; i++)
+            _labelCtrlPixels[i] = new Color(1f,1f,1f,1f);
+        _labelCtrlTex.SetPixels(_labelCtrlPixels);
+        _labelCtrlTex.Apply(false);
+
+        volumeMaterial.SetTexture("_LabelCtrlTex", _labelCtrlTex);
+    }
+
+    private void BuildLabelInfosFromData()
+    {
+        labelInfos.Clear();
+        if (_labelsData == null || _labelsData.tf == null)
+            return;
+
+        Color[] lutPixels = null;
+        int lutLen = 0;
+        if (tfTexCurrent != null)
+        {
+            lutPixels = tfTexCurrent.GetPixels();
+            lutLen = lutPixels.Length;
+        }
+
+        if (_labelsData.tf.entries != null && _labelsData.tf.entries.Count > 0)
+        {
+            foreach (var e in _labelsData.tf.entries)
+            {
+                int lbl = Mathf.RoundToInt(e.label);
+
+                string niceName = !string.IsNullOrEmpty(e.name) ? e.name : ("Label " + lbl);
+
+                Color baseCol = Color.clear;
+                bool gotFromLut = false;
+
+                if (lutPixels != null && lbl >= 0 && lbl < lutLen)
+                {
+                    baseCol = lutPixels[lbl];
+                    gotFromLut = true;
+                }
+
+                if (!gotFromLut)
+                {
+                    float r = (e.color != null && e.color.Length > 0) ? e.color[0] : 1f;
+                    float g = (e.color != null && e.color.Length > 1) ? e.color[1] : 1f;
+                    float b = (e.color != null && e.color.Length > 2) ? e.color[2] : 1f;
+                    float a = e.alpha;
+                    baseCol = new Color(r,g,b,a);
+                }
+
+                bool visibleDefault = baseCol.a > 0.001f;
+
+                var info = new VolumeLabelInfoRuntime {
+                    labelIndex     = lbl,
+                    displayName    = niceName,
+                    color          = baseCol,
+                    defaultVisible = visibleDefault
+                };
+                labelInfos.Add(info);
+            }
+        }
+        else if (lutPixels != null)
+        {
+            for (int lbl = 0; lbl < lutLen && lbl < 256; lbl++)
+            {
+                var c = lutPixels[lbl];
+                bool visibleDefault = c.a > 0.001f;
+
+                labelInfos.Add(new VolumeLabelInfoRuntime {
+                    labelIndex     = lbl,
+                    displayName    = "Label " + lbl,
+                    color          = c,
+                    defaultVisible = visibleDefault
+                });
+            }
+        }
+
+        if (verboseDebug)
+        {
+            Debug.Log($"[VolumeDVR] Built labelInfos ({labelInfos.Count}) using {(useHardTF ? "HARD":"SOFT")} LUT");
+            foreach (var li in labelInfos)
+            {
+                Debug.Log($"  idx={li.labelIndex} name={li.displayName} col={li.color} visDefault={li.defaultVisible}");
+            }
+        }
+    }
+
+    private void FitVolumeScaleFromSpacing(VRDFVolumeData data)
+    {
+        var meta = data.meta;
+        int dimX = meta.dim[0];
+        int dimY = meta.dim[1];
+        int dimZ = meta.dim[2];
+
+        float sx = (meta.spacing_mm != null && meta.spacing_mm.Length > 0) ? meta.spacing_mm[0] : 1f;
+        float sy = (meta.spacing_mm != null && meta.spacing_mm.Length > 1) ? meta.spacing_mm[1] : 1f;
+        float sz = (meta.spacing_mm != null && meta.spacing_mm.Length > 2) ? meta.spacing_mm[2] : 1f;
+
+        Vector3 sizeMeters = new Vector3(
+            dimX * sx * 0.001f,
+            dimY * sy * 0.001f,
+            dimZ * sz * 0.001f
+        );
+
+        transform.localScale = sizeMeters;
+        transform.localRotation = Quaternion.Euler(-90, 0, 0);
+    }
+
+    //==================== RUNTIME INTERACTION (identique sauf qu'on pousse _LabelCtrlTex déjà fait) ====================
+
+    public void SetLabelVisible(int labelIndex, bool visible)
+    {
+        if (!EnsureCtrlReady()) return;
+        if (labelIndex < 0 || labelIndex > 255) return;
+        var c = _labelCtrlPixels[labelIndex];
+        c.a = visible ? 1f : 0f;
+        _labelCtrlPixels[labelIndex] = c;
+        _labelCtrlTex.SetPixels(_labelCtrlPixels);
+        _labelCtrlTex.Apply(false);
+    }
+
+    public void SetLabelOpacity(int labelIndex, float opacity01)
+    {
+        if (!EnsureCtrlReady()) return;
+        if (labelIndex < 0 || labelIndex > 255) return;
+        var c = _labelCtrlPixels[labelIndex];
+        c.a = Mathf.Clamp01(opacity01);
+        _labelCtrlPixels[labelIndex] = c;
+        _labelCtrlTex.SetPixels(_labelCtrlPixels);
+        _labelCtrlTex.Apply(false);
+    }
+
+    public void SetLabelTint(int labelIndex, Color tintRGB)
+    {
+        if (!EnsureCtrlReady()) return;
+        if (labelIndex < 0 || labelIndex > 255) return;
+        var c = _labelCtrlPixels[labelIndex];
+        c.r = tintRGB.r;
+        c.g = tintRGB.g;
+        c.b = tintRGB.b;
+        _labelCtrlPixels[labelIndex] = c;
+        _labelCtrlTex.SetPixels(_labelCtrlPixels);
+        _labelCtrlTex.Apply(false);
+    }
+
+    public void SoloLabel(int soloIndex)
+    {
+        if (!EnsureCtrlReady()) return;
+        for (int i = 0; i < 256; i++)
+        {
+            var c = _labelCtrlPixels[i];
+            c.a = (i == soloIndex) ? 1f : 0f;
+            _labelCtrlPixels[i] = c;
+        }
+        _labelCtrlTex.SetPixels(_labelCtrlPixels);
+        _labelCtrlTex.Apply(false);
+    }
+
+    public void ShowAll()
+    {
+        if (!EnsureCtrlReady()) return;
+        for (int i = 0; i < 256; i++)
+            _labelCtrlPixels[i] = new Color(1f,1f,1f,1f);
+
+        _labelCtrlTex.SetPixels(_labelCtrlPixels);
+        _labelCtrlTex.Apply(false);
+    }
+
+    private bool EnsureCtrlReady()
+    {
+        if (_labelCtrlTex == null || _labelCtrlPixels == null)
+        {
+            Debug.LogWarning("[VolumeDVR] _labelCtrlTex not ready.");
+            return false;
+        }
+        return true;
+    }
+}
+```
+
+### unity/Assets/Scripts/VolumeVRDFLoader.cs
+```
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Generic;
+using UnityEngine;
+
+[Serializable]
+public class VRDFMeta
+{
+    public int[] dim;                  // [dimX, dimY, dimZ]
+    public float[] spacing_mm;         // [sx, sy, sz]
+    public string dtype;               // "float32"
+    public float[] intensity_range;    // [min, max]
+    public float[,] affine;            // 4x4
+    public string mode;                // "labelmap"|"continuous"|"anatomy_label"|"activity_weight"|"anatomy_label_weighted"
+    public string endianness;
+    public string order;
+
+    public int channels;                              // ex: 2
+    public List<string> channel_meaning;              // ex: ["labelmap","weight01"]
+}
+
+
+[Serializable]
+public class VRDFTFEntry
+{
+    public float label;
+    public float[] color;   // [r,g,b]
+    public float alpha;     // a
+    public string name;     // class name
+}
+
+[Serializable]
+public class VRDFTransferFunction
+{
+    [Serializable]
+    public class TFPoint
+    {
+        public float x;
+        public float[] color;
+        public float alpha;
+    }
+
+    public string type;  // "labelmap" | "continuous"
+    public List<VRDFTFEntry> entries;
+    public List<TFPoint> curve;
+    public string origin;
+    public List<string> channel_names_hint;
+}
+
+public class VRDFVolumeData
+{
+    public VRDFMeta meta;
+    public VRDFTransferFunction tf;
+
+    public float[] volumeData;
+    public float[] labelData; 
+    public float[] weightData;
+
+    public Texture3D volumeTexture;
+    public Texture3D labelTexture;
+    public Texture3D weightTexture;
+
+    public Texture2D tfLUTTextureSoft;
+    public Texture2D tfLUTTextureHard;
+}
+
+
+static class VRDFBinaryUtil
+{
+    public static ulong ReadUInt64LE(BinaryReader br)
+    {
+        byte[] b = br.ReadBytes(8);
+        if (b.Length != 8)
+            throw new EndOfStreamException("Unexpected EOF while reading uint64.");
+        if (!BitConverter.IsLittleEndian)
+            Array.Reverse(b);
+        return BitConverter.ToUInt64(b, 0);
+    }
+}
+
+public static class VRDFLoader
+{
+    [Serializable]
+    private class MetaWrapper
+    {
+        public int[] dim;
+        public float[] spacing_mm;
+        public string dtype;
+        public float[] intensity_range;
+        public float[][] affine;
+        public string mode;
+        public string endianness;
+        public string order;
+
+        public int channels;
+        public List<string> channel_meaning;
+    }
+
+    [Serializable]
+    private class TFWrapper
+    {
+        public string type;
+        public List<VRDFTFEntry> entries;
+        public List<VRDFTransferFunction.TFPoint> curve;
+        public string origin;
+        public List<string> channel_names_hint;
+    }
+
+    public static VRDFVolumeData LoadFromFile(string path)
+    {
+        if (!File.Exists(path))
+            throw new FileNotFoundException("VRDF file not found", path);
+
+        using (var fs = File.OpenRead(path))
+        using (var br = new BinaryReader(fs))
+        {
+            // ===== header commun =====
+            byte[] magicBytes = br.ReadBytes(8);
+            if (magicBytes.Length != 8) throw new Exception("File too short (no magic)");
+            string magic = Encoding.ASCII.GetString(magicBytes);
+            if (magic != "VRDF0001")
+                throw new Exception($"Bad magic '{magic}', expected 'VRDF0001'.");
+
+            ulong totalSize = VRDFBinaryUtil.ReadUInt64LE(br);
+
+            // meta block
+            ulong metaLen = VRDFBinaryUtil.ReadUInt64LE(br);
+            byte[] metaBytes = br.ReadBytes((int)metaLen);
+            if ((ulong)metaBytes.Length != metaLen)
+                throw new Exception("EOF in meta block");
+            string metaJson = Encoding.UTF8.GetString(metaBytes);
+
+            // tf block
+            ulong tfLen = VRDFBinaryUtil.ReadUInt64LE(br);
+            byte[] tfBytes = br.ReadBytes((int)tfLen);
+            if ((ulong)tfBytes.Length != tfLen)
+                throw new Exception("EOF in TF block");
+            string tfJson = Encoding.UTF8.GetString(tfBytes);
+
+            // raw block
+            ulong rawLen = VRDFBinaryUtil.ReadUInt64LE(br);
+            byte[] rawBytes = br.ReadBytes((int)rawLen);
+            if ((ulong)rawBytes.Length != rawLen)
+                throw new Exception("EOF in RAW block");
+
+            // ===== parse meta =====
+            MetaWrapper metaTemp = JsonUtility.FromJson<MetaWrapper>(metaJson);
+            if (metaTemp == null) throw new Exception("Failed to parse meta JSON");
+
+            VRDFMeta meta = new VRDFMeta();
+            meta.dim = metaTemp.dim;
+            meta.spacing_mm = metaTemp.spacing_mm;
+            meta.dtype = metaTemp.dtype;
+            meta.intensity_range = metaTemp.intensity_range;
+            meta.mode = metaTemp.mode;
+            meta.endianness = metaTemp.endianness;
+            meta.order = metaTemp.order;
+            meta.channels = metaTemp.channels;
+            meta.channel_meaning = metaTemp.channel_meaning ?? new List<string>();
+
+            meta.affine = new float[4,4];
+            if (metaTemp.affine != null && metaTemp.affine.Length == 4)
+            {
+                for (int r = 0; r < 4; r++)
+                {
+                    if (metaTemp.affine[r] != null && metaTemp.affine[r].Length == 4)
+                    {
+                        for (int c = 0; c < 4; c++)
+                            meta.affine[r,c] = metaTemp.affine[r][c];
+                    }
+                }
+            }
+
+            int dimX = meta.dim[0];
+            int dimY = meta.dim[1];
+            int dimZ = meta.dim[2];
+            int voxelCount = dimX * dimY * dimZ;
+
+            // ===== parse TF =====
+            TFWrapper tfTemp = JsonUtility.FromJson<TFWrapper>(tfJson);
+            if (tfTemp == null) throw new Exception("Failed to parse TF JSON");
+
+            VRDFTransferFunction tf = new VRDFTransferFunction();
+            tf.type = tfTemp.type;
+            tf.entries = tfTemp.entries ?? new List<VRDFTFEntry>();
+            tf.curve   = tfTemp.curve   ?? new List<VRDFTransferFunction.TFPoint>();
+            tf.origin  = tfTemp.origin;
+            tf.channel_names_hint = tfTemp.channel_names_hint ?? new List<string>();
+
+            // ===== dispatch selon mode =====
+            VRDFVolumeData result = new VRDFVolumeData();
+            result.meta = meta;
+            result.tf = tf;
+
+            if (meta.mode == "anatomy_label_weighted" && meta.channels == 2)
+            {
+                // RAW = [label(float32), weight(float32)] * voxelCount
+                int expectedBytes = voxelCount * 2 * 4;
+                if ((int)rawLen != expectedBytes)
+                {
+                    throw new Exception(
+                        $"RAW length mismatch for fused lw: got {rawLen} bytes but expected {expectedBytes}"
+                    );
+                }
+
+                // on sépare
+                result.labelData = new float[voxelCount];
+                result.weightData = new float[voxelCount];
+
+                // BlockCopy ne marche pas direct car c'est interleavé.
+                // On itère manuellement :
+                // rawBytes : [l0,w0,l1,w1,l2,w2,...] little-endian float32
+                // On lit via Buffer.BlockCopy en pas de 8? -> pas direct, donc BitConverter.
+                // Pour rester safe et clair, on fait un loop.
+                // (Si perfs critiques: compute shader/offline unpack. Là on vise la clarté.)
+                int stride = 8; // 2 * sizeof(float)
+                for (int i = 0; i < voxelCount; i++)
+                {
+                    int off = i * stride;
+                    float lbl = BitConverter.ToSingle(rawBytes, off + 0);
+                    float w   = BitConverter.ToSingle(rawBytes, off + 4);
+                    result.labelData[i]  = lbl;
+                    result.weightData[i] = w;
+                }
+            }
+            else
+            {
+                // Cas legacy : RAW = 1 float32 par voxel
+                int expectedBytes = voxelCount * 4;
+                if ((int)rawLen != expectedBytes)
+                {
+                    throw new Exception(
+                        $"RAW length mismatch: got {rawLen} bytes but expected {expectedBytes} ({dimX}x{dimY}x{dimZ} float32)"
+                    );
+                }
+
+                result.volumeData = new float[voxelCount];
+                Buffer.BlockCopy(rawBytes, 0, result.volumeData, 0, expectedBytes);
+            }
+
+            return result;
+        }
+    }
+
+    // Construction des Textures Unity selon le mode
+    public static void BuildUnityTextures(VRDFVolumeData data)
+    {
+        var dim = data.meta.dim;
+        int dimX = dim[0];
+        int dimY = dim[1];
+        int dimZ = dim[2];
+
+        if (data.meta.mode == "anatomy_label_weighted" && data.meta.channels == 2)
+        {
+            // labelTexture = RFloat (contient les labels discrets genre 0,1,2...)
+            Texture3D texLbl = new Texture3D(dimX, dimY, dimZ, TextureFormat.RFloat, false);
+            texLbl.wrapMode   = TextureWrapMode.Clamp;
+            texLbl.filterMode = FilterMode.Point; // nearest, important pour les labels
+            texLbl.SetPixelData(data.labelData, 0);
+            texLbl.Apply(false, false);
+            data.labelTexture = texLbl;
+
+            // weightTexture = RFloat [0..1]
+            Texture3D texW = new Texture3D(dimX, dimY, dimZ, TextureFormat.RFloat, false);
+            texW.wrapMode   = TextureWrapMode.Clamp;
+            texW.filterMode = FilterMode.Bilinear;
+            texW.SetPixelData(data.weightData, 0);
+            texW.Apply(false, false);
+            data.weightTexture = texW;
+
+            // LUT pour les labels (comme avant, à partir de tf.entries)
+            if (data.tf.type == "labelmap")
+            {
+                BuildLabelmapLUTs(data);
+            }
+            else
+            {
+                data.tfLUTTextureSoft = null;
+                data.tfLUTTextureHard = null;
+            }
+        }
+        else
+        {
+            // ancien cas: un seul volumeData -> volumeTexture
+            Texture3D tex3d = new Texture3D(dimX, dimY, dimZ, TextureFormat.RFloat, false);
+            tex3d.wrapMode   = TextureWrapMode.Clamp;
+            tex3d.filterMode = (data.tf != null && data.tf.type == "labelmap")
+                                 ? FilterMode.Point
+                                 : FilterMode.Bilinear;
+            tex3d.SetPixelData(data.volumeData, 0);
+            tex3d.Apply(false, false);
+            data.volumeTexture = tex3d;
+
+            if (data.tf.type == "labelmap")
+            {
+                BuildLabelmapLUTs(data);
+            }
+            else if (data.tf.type == "continuous")
+            {
+                Texture2D lut = BuildContinuousLUT(data.tf);
+                data.tfLUTTextureSoft = lut;
+                data.tfLUTTextureHard = null;
+            }
+            else
+            {
+                data.tfLUTTextureSoft = null;
+                data.tfLUTTextureHard = null;
+            }
+        }
+    }
+
+    private static Texture2D BuildContinuousLUT(VRDFTransferFunction tf)
+    {
+        if (tf.curve == null || tf.curve.Count == 0)
+        {
+            Debug.LogWarning("[VRDFLoader] TF curve empty for continuous volume");
+            return null;
+        }
+
+        int lutSize = tf.curve.Count;
+        Texture2D lut = new Texture2D(lutSize, 1, TextureFormat.RGBAFloat, false);
+        lut.wrapMode   = TextureWrapMode.Clamp;
+        lut.filterMode = FilterMode.Bilinear;
+
+        Color[] pixels = new Color[lutSize];
+        for (int i = 0; i < lutSize; i++)
+        {
+            var p = tf.curve[i];
+            float r = (p.color != null && p.color.Length > 0) ? p.color[0] : 0f;
+            float g = (p.color != null && p.color.Length > 1) ? p.color[1] : 0f;
+            float b = (p.color != null && p.color.Length > 2) ? p.color[2] : 0f;
+            float a = p.alpha;
+            pixels[i] = new Color(r, g, b, a);
+        }
+
+        lut.SetPixels(pixels);
+        lut.Apply(false, false);
+        return lut;
+    }
+
+    private static void BuildLabelmapLUTs(VRDFVolumeData data)
+    {
+        const int lutSize = 256;
+
+        Color[]   floatPixels = new Color[lutSize];
+        Color32[] bytePixels  = new Color32[lutSize];
+
+        for (int i = 0; i < lutSize; i++)
+        {
+            floatPixels[i] = new Color(0f, 0f, 0f, 0f);
+            bytePixels[i]  = new Color32(0, 0, 0, 0);
+        }
+
+        if (data.tf.entries != null)
+        {
+            foreach (var e in data.tf.entries)
+            {
+                int idx = Mathf.Clamp(Mathf.RoundToInt(e.label), 0, lutSize - 1);
+
+                float r = (e.color != null && e.color.Length > 0) ? e.color[0] : 0f;
+                float g = (e.color != null && e.color.Length > 1) ? e.color[1] : 0f;
+                float b = (e.color != null && e.color.Length > 2) ? e.color[2] : 0f;
+                float a = e.alpha;
+
+                floatPixels[idx] = new Color(r, g, b, a);
+
+                byte R = (byte)Mathf.Clamp(Mathf.RoundToInt(r * 255f), 0, 255);
+                byte G = (byte)Mathf.Clamp(Mathf.RoundToInt(g * 255f), 0, 255);
+                byte B = (byte)Mathf.Clamp(Mathf.RoundToInt(b * 255f), 0, 255);
+                byte A = (byte)Mathf.Clamp(Mathf.RoundToInt(a * 255f), 0, 255);
+                bytePixels[idx] = new Color32(R, G, B, A);
+            }
+        }
+
+        Texture2D lutSoft = new Texture2D(lutSize, 1, TextureFormat.RGBAFloat, false);
+        lutSoft.wrapMode   = TextureWrapMode.Clamp;
+        lutSoft.filterMode = FilterMode.Bilinear;
+        lutSoft.SetPixels(floatPixels);
+        lutSoft.Apply(false, false);
+
+        Texture2D lutHard = new Texture2D(lutSize, 1, TextureFormat.RGBA32, false);
+        lutHard.wrapMode   = TextureWrapMode.Clamp;
+        lutHard.filterMode = FilterMode.Point;
+        lutHard.SetPixels32(bytePixels);
+        lutHard.Apply(false, false);
+
+        data.tfLUTTextureSoft = lutSoft;
+        data.tfLUTTextureHard = lutHard;
+    }
+}
+```
+
+### unity/Assets/Shaders/DVR.shader
+```
+Shader "Custom/VolumeDVR"
+{
+    Properties
+    {
+        _VolumeTex   ("VolumeTex", 3D) = "" {}
+        _TFTex       ("Transfer LUT", 2D) = "" {}
+
+        _StepSize    ("Step Size", Range(0.0005, 0.02)) = 0.003
+        _Brightness  ("Brightness", Range(0,5)) = 1.5
+        _AlphaScale  ("Alpha Scale", Range(0,2)) = 0.5
+
+        _LightDir        ("Light Dir (world)", Vector) = (0,0,1,0)
+        _LightIntensity  ("Light Intensity", Range(0,5)) = 1.0
+        _Ambient         ("Ambient", Range(0,1)) = 0.2
+
+        _IsLabelMap ("Is LabelMap (1/0)", Int) = 1
+        _P1         ("P1 (cont)", Float) = 0.0
+        _P99        ("P99 (cont)", Float) = 1.0
+    }
+
+    SubShader
+    {
+        Tags { "Queue"="Transparent" "RenderType"="Transparent" }
+        Cull Front
+        ZWrite Off
+        Blend SrcAlpha OneMinusSrcAlpha
+
+        Pass
+        {
+            HLSLPROGRAM
+            #pragma target 3.0
+            #pragma vertex vert
+            #pragma fragment frag
+            #include "UnityCG.cginc"
+
+            // === Uniforms ===
+            sampler3D _VolumeTex;   // volume 3D RFloat
+            sampler2D _TFTex;       // LUT 1D (256x1 RGBAFloat)
+
+            float _StepSize;
+            float _Brightness;
+            float _AlphaScale;
+
+            float4 _LightDir;
+            float _LightIntensity;
+            float _Ambient;
+
+            int _IsLabelMap;
+            float _P1;
+            float _P99;
+
+            // === Structs ===
+            struct appdata
+            {
+                float4 vertex : POSITION;
+            };
+
+            struct v2f
+            {
+                float4 pos      : SV_POSITION;
+                float3 worldPos : TEXCOORD0;
+            };
+
+            // === Vertex shader ===
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.pos      = UnityObjectToClipPos(v.vertex);
+                o.worldPos = mul(unity_ObjectToWorld, v.vertex).xyz;
+                return o;
+            }
+
+            // === Utils ===
+
+            // Intersection rayon / box en espace objet (cube [-0.5,+0.5]^3)
+            bool RayBoxIntersect(float3 rayOrigin, float3 rayDir, out float tEnter, out float tExit)
+            {
+                float3 boxMin = float3(-0.5, -0.5, -0.5);
+                float3 boxMax = float3( 0.5,  0.5,  0.5);
+
+                float3 t0 = (boxMin - rayOrigin) / rayDir;
+                float3 t1 = (boxMax - rayOrigin) / rayDir;
+
+                float3 tmin = min(t0, t1);
+                float3 tmax = max(t0, t1);
+
+                tEnter = max(max(tmin.x, tmin.y), tmin.z);
+                tExit  = min(min(tmax.x, tmax.y), tmax.z);
+
+                return (tExit > max(tEnter, 0.0));
+            }
+
+            // Estimation du gradient local => pseudo-normale pour l'éclairage
+            float3 EstimateNormal(float3 pObj)
+            {
+                // eps en espace objet (cube ~1 unité de côté)
+                float eps = 0.002;
+
+                float3 uvw_xp = (pObj + float3(+eps,0,0)) + 0.5;
+                float3 uvw_xm = (pObj + float3(-eps,0,0)) + 0.5;
+                float3 uvw_yp = (pObj + float3(0,+eps,0)) + 0.5;
+                float3 uvw_ym = (pObj + float3(0,-eps,0)) + 0.5;
+                float3 uvw_zp = (pObj + float3(0,0,+eps)) + 0.5;
+                float3 uvw_zm = (pObj + float3(0,0,-eps)) + 0.5;
+
+                float vxp = tex3D(_VolumeTex, uvw_xp).r;
+                float vxm = tex3D(_VolumeTex, uvw_xm).r;
+                float vyp = tex3D(_VolumeTex, uvw_yp).r;
+                float vym = tex3D(_VolumeTex, uvw_ym).r;
+                float vzp = tex3D(_VolumeTex, uvw_zp).r;
+                float vzm = tex3D(_VolumeTex, uvw_zm).r;
+
+                float3 grad = float3(vxp - vxm, vyp - vym, vzp - vzm);
+
+                float len2 = max(dot(grad, grad), 1e-6);
+                return grad / sqrt(len2);
+            }
+
+            // Récupère la couleur+alpha pour la valeur du voxel selon la TF
+            // _IsLabelMap = 1 : 'val' est un label discret (0,1,2,4,..)
+            // _IsLabelMap = 0 : 'val' est une intensité continue (IRM/CT)
+            float4 SampleTF(float val)
+            {
+                if (_IsLabelMap == 1)
+                {
+                    // segmentation : val ≈ classe
+                    float idx = round(val);         // 0..255 possible
+                    idx = clamp(idx, 0.0, 255.0);
+                    float u = idx / 255.0;
+                    float4 tf = tex2D(_TFTex, float2(u, 0.5));
+                    return tf; // rgb, a
+                }
+                else
+                {
+                    // intensité continue : renormaliser avec P1..P99 en [0,1]
+                    float normVal = (val - _P1) / max((_P99 - _P1), 1e-6);
+                    normVal = saturate(normVal);
+                    float u = normVal;
+                    float4 tf = tex2D(_TFTex, float2(u, 0.5));
+                    return tf;
+                }
+            }
+
+            // === Fragment shader (raymarch DVR) ===
+            fixed4 frag (v2f i) : SV_Target
+            {
+                // reconstruire le rayon caméra -> fragment en ESPACE OBJET du cube
+                float3 camPosObj  = mul(unity_WorldToObject, float4(_WorldSpaceCameraPos,1)).xyz;
+                float3 fragPosObj = mul(unity_WorldToObject, float4(i.worldPos,1)).xyz;
+                float3 rayDirObj  = normalize(fragPosObj - camPosObj);
+
+                // intersection avec le volume
+                float tEnter, tExit;
+                if (!RayBoxIntersect(camPosObj, rayDirObj, tEnter, tExit))
+                    return float4(0,0,0,0);
+
+                float t = max(tEnter, 0.0);
+
+                // accumulation front-to-back
+                float3 accRGB = float3(0,0,0);
+                float  accA   = 0.0;
+
+                // direction de lumière en espace objet (projette la dir monde)
+                float3 Lobj = mul((float3x3)unity_WorldToObject, normalize(_LightDir.xyz));
+
+                // boucle de raymarch
+                const int MAX_STEPS = 2048;
+                [loop]
+                for (int step = 0; step < MAX_STEPS; step++)
+                {
+                    if (t > tExit) break;
+                    if (accA >= 0.9999) break; // laisse passer énormément de couches
+
+                    // position courante dans l'espace objet
+                    float3 pObj = camPosObj + rayDirObj * t;
+
+                    // coordonnées [0,1]^3 pour sampler la texture 3D
+                    float3 uvw = pObj + 0.5;
+                    if (any(uvw < 0.0) || any(uvw > 1.0))
+                        break;
+
+                    // valeur brute du voxel
+                    float voxelVal = tex3D(_VolumeTex, uvw).r;
+
+                    // couleur / alpha depuis la TF
+                    float4 tf = SampleTF(voxelVal);
+
+                    // on adoucit l'opacité locale via _AlphaScale
+                    float aSample = tf.a * _AlphaScale;
+
+                    if (aSample > 0.001)
+                    {
+                        // shading local basé sur le gradient du volume
+                        float3 N = EstimateNormal(pObj);
+                        float lambert = saturate(dot(normalize(N), normalize(Lobj)));
+                        float lighting = _Ambient + _LightIntensity * lambert;
+
+                        float3 litColor = tf.rgb * lighting;
+
+                        // intégration front-to-back
+                        float remain = 1.0 - accA;
+                        accRGB += remain * litColor * aSample;
+                        accA   += remain * aSample;
+                    }
+
+                    // avancer le long du rayon
+                    t += _StepSize;
+                }
+
+                // booster un peu la luminosité finale
+                accRGB *= _Brightness;
+
+                return float4(accRGB, accA);
+            }
+
+            ENDHLSL
+        }
+    }
+}
+```

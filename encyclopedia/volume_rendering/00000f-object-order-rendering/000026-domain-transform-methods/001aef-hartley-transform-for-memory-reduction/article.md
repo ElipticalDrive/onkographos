@@ -1,26 +1,28 @@
 # Hartley Transform for Memory Reduction
 
-Also called: Hartley Transform for Frequency Domain Volume Rendering, Hartley Transform for Real-Valued Spectra, Hartley transform, Hartley-based Volume Rendering, Real-valued Fourier Transform, Real-valued frequency domain rendering
+Also called: Hartley Transform for Frequency Domain Volume Rendering, Hartley Transform for Real-Valued Spectra, Hartley-based Volume Rendering, Real-valued Fourier Transform, Real-valued frequency domain rendering
 
 ## Overview
-The Hartley Transform for Memory Reduction is a technique for frequency-domain volume rendering that replaces the standard Fourier transform with the Hartley transform to map real-valued spatial data directly to real-valued spectral data [S1, S2, S3, S4, unofficial]. This eliminates the need for complex number arithmetic, thereby reducing memory requirements by half compared to storing a full complex spectrum, and by a factor of 16 compared to double-precision complex Fourier representations [S1, S4, unofficial]. It sets itself apart from standard Fourier-based frequency rendering by avoiding the complexity of handling Hermitian symmetry during slice extraction, which is required when dropping half the spectrum in Fourier methods [S1, S3, unofficial].
+Hartley Transform for Memory Reduction is a frequency-domain volume rendering technique that replaces the standard Discrete Fourier Transform (DFT) with the Discrete Hartley Transform (DHT) to map real-valued spatial data directly to real-valued spectra [S1, S2, S4, unofficial]. This eliminates the need for complex number arithmetic, thereby reducing memory requirements by half compared to storing a full complex spectrum, and by a factor of 16 compared to double-precision complex Fourier transforms [S1, S2, S4, unofficial]. It sets itself apart from standard Fourier-based frequency rendering by avoiding the complexity of handling Hermitian symmetry during slice extraction, which would otherwise be required to save memory in the Fourier domain [S1, S3, unofficial]. It builds on [Domain-transform methods](28-domain-transform-methods.md) by providing the specific spectral representation and memory optimization strategies.
 
 ## How it works
-The method operates by converting the volume data into the frequency domain using the Hartley transform, performing rendering operations (such as shading and depth cueing) in the frequency domain, and then converting back to the spatial domain for compositing.
+The method follows the three-stage pipeline of domain-transform methods: Global Transformation, Slice Extraction, and Inverse Transformation [S1, 824-fourier-projection-slice-volume-rendering.md, 895-hartley-transform-for-memory-reduction.md, 5396-dct-based-volume-rendering.md, unofficial].
 
 ### Inputs and Outputs
-- **Input**: A real-valued 3D volume $V$ of size $N_x \times N_y \times N_z$.
-- **Output**: A 2D rendered image (projection) with shading and depth cueing applied.
+*   **Input:** A 3D scalar volume $f(x, y, z)$ of size $N_x \times N_y \times N_z$.
+*   **Output:** A 2D projection image $I(u, v)$ for a given viewing direction.
 
 ### Data Structures
-- **Spectrum Storage**: The frequency domain data is stored as a real-valued array. To manage memory, a 16-bit floating-point format is used for the spectrum [S1, unofficial].
-- **Precision**: While 64-bit double precision is considered a safe choice for representing the spectrum of a $256^3$ volume due to its wide dynamic range, the 16-bit format is used to reduce memory cost [S1, unofficial].
+*   **Spectrum Array:** A 3D array of real-valued numbers.
+    *   **Format:** 16-bit floating point format is used to represent the spectrum to reduce memory cost [S1, S4, unofficial].
+    *   **Memory Reduction:** This format reduces the memory cost factor to 2 compared to the original volume size (assuming 1-byte voxels), whereas a 64-bit double precision format would occupy 8 times more memory than the original volume [S1, S4, unofficial].
+    *   **Precision:** 64-bit double precision is considered a safe choice for representing the spectrum of a $256^3$ volume due to its wide dynamic range, but 16-bit is used for efficiency [S1, S4, unofficial].
 
 ### Formulas
-The Hartley transform $H\{f\}(s)$ of a real function $f(x)$ is defined as [S1, S2, S3, S4, unofficial]:
+The continuous Hartley transform is defined as [S2, S3, S4, unofficial]:
 
 $$
-H\{f\}(s) = \int_{-\infty}^{+\infty} f(x) \text{cas}(2\pi s x) \, dx
+F_H(s) = \int_{-\infty}^{+\infty} f(x) \text{cas}(2\pi s x) dx
 $$
 
 where the kernel function $\text{cas}(\theta)$ is defined as:
@@ -29,103 +31,166 @@ $$
 \text{cas}(\theta) = \cos(\theta) + \sin(\theta)
 $$
 
-In the context of the 3D volume rendering pipeline, this transform is applied to the volume data to produce a real-valued spectrum $F_H(s)$ [S1, S2, S3, S4, unofficial].
+For the discrete case, the transform maps the real spatial domain volume to a real frequency domain spectrum [S1, S2, S4, unofficial].
 
 ### Parameters
-- **Memory Format**: 16-bit floating point format [S1, unofficial].
-- **Precision Choice**: 64-bit double precision is noted as a "safe choice" for $256^3$ volumes, but 16-bit is used for efficiency [S1, unofficial].
-- **Memory Reduction Factor**: The 16-bit Hartley spectrum reduces memory cost by a factor of 2 compared to the original volume size (assuming 1-byte voxels in spatial domain, the spectrum is 8x larger in double precision complex, but 2x larger in 16-bit real) [S1, unofficial]. Specifically, the text states the 16-bit format reduces the memory cost factor to two relative to the original volume size in the context of the comparison [S1, unofficial].
+*   **Floating Point Precision:** 16-bit floating point is the standard for memory reduction [S1, S4, unofficial].
+*   **Volume Size:** Examples include $128^3$ (human head CT) and $256^3$ (Utah teapot, turbine blade) [S1, S4, unofficial].
 
 ### Steps
-1. **Preprocessing (Forward Transform)**: Apply the Hartley transform to the spatial domain volume data to convert it into a real-valued frequency spectrum [S1, unofficial].
-2. **Frequency Domain Operations**: Perform interpolation and resampling on the frequency spectrum corresponding to the current view plane (slice extraction) [S1, unofficial]. Apply shading and depth cueing in the frequency domain [S1, unofficial].
-3. **Inverse Transform**: Apply the inverse Hartley transform to the extracted slice data to return to the spatial domain for compositing [S1, unofficial].
-4. **Format Conversion**: Convert between the 16-bit floating-point format and the machine's native format during the process [S1, unofficial].
+
+1.  **Preprocessing (Zero-Padding and Shifting):**
+    *   Apply zero-padding to the input volume to mitigate boundary artifacts and aliasing, as the transform assumes periodic boundary conditions [S3, 841-gpu-based-2d-fft.md, 952-frequency-domain-volume-rendering.md, unofficial].
+    *   Shift the origin of the spatial data to the center of the volume (via `fftshift` or multiplication by $(-1)^{x+y+z}$) to center the zero-frequency component in the spectrum [S12, 2288-fourier-transform.md, 952-frequency-domain-volume-rendering.md].
+
+2.  **Global Transformation (Forward Hartley Transform):**
+    *   Compute the 3D Hartley Transform of the preprocessed volume to obtain the real-valued frequency spectrum $F_H(\omega_1, \omega_2, \omega_3)$ [S1, S2, S4, unofficial].
+    *   Store the spectrum in the 16-bit floating point format [S1, S4, unofficial].
+
+3.  **Slice Extraction:**
+    *   Define a 2D plane passing through the origin of the frequency domain and perpendicular to the viewing direction vector $V$ [S3, 824-fourier-projection-slice-volume-rendering.md, 6324-hartley-transform.md, unofficial].
+    *   Resample the 3D spectrum onto this 2D plane to obtain a 2D slice $I(u, v)$ [S1, unofficial][S2, unofficial].
+    *   Since the slicing plane rarely coincides with the integer lattice of the discrete spectrum, interpolation is required [S3, 824-fourier-projection-slice-volume-rendering.md, 6324-hartley-transform.md, unofficial].
+    *   Common interpolation schemes include Nearest Neighbor, Trilinear, Tri-cubic, and Windowed Sinc [S2, 952-frequency-domain-volume-rendering.md, unofficial].
+    *   Adaptive filtering can be used to reduce interpolation cost; relative error was always below 40dB, a level at which image differences are not visible [S1, S4, unofficial].
+
+4.  **Inverse Transformation:**
+    *   Apply the Inverse Hartley Transform to the extracted 2D slice to return to the spatial domain [S1, 6324-hartley-transform.md, unofficial].
+    *   The Inverse Hartley Transform is identical to the forward transform scaled by $N^{-1}$ [G].
+    *   Scale the result by $N^{-1}$ where $N$ is the number of elements in the slice [S1, 952-frequency-domain-volume-rendering.md, unofficial].
+
+5.  **Post-processing:**
+    *   Convert the result from the 16-bit floating point format to the machine's native format for compositing [S1, S4, unofficial].
 
 ### Pseudocode
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hartley_transform_volume_rendering(volume_data, view_params):
+def hartley_transform_volume_rendering(volume, view_direction):
     """
-    Renders a volume using the Hartley transform for memory reduction.
+    Renders a volume using the Hartley Transform for Memory Reduction.
     
     Args:
-        volume_data: 3D array of real values (spatial domain).
-        view_params: Parameters defining the view plane and projection.
+        volume: 3D numpy array of shape (Nx, Ny, Nz), real-valued.
+        view_direction: 3D vector (vx, vy, vz) defining the viewing direction.
         
     Returns:
-        2D array: Rendered image.
+        2D numpy array of shape (width, height), the rendered image.
     """
-    # Step 1: Forward Hartley Transform
-    # Convert spatial domain volume to real-valued frequency spectrum
-    # Note: The specific algorithm for the discrete Hartley transform (DHT) 
-    # is not detailed in the source, but it maps real input to real output.
-    frequency_spectrum = hartley_transform(volume_data)
+    # 1. Preprocessing
+    # Zero-pad to mitigate boundary artifacts (periodic assumption)
+    # [G] Implementation detail: Pad volume to next power of 2 or sufficient size
+    padded_volume = zero_pad(volume)
     
-    # Step 2: Slice Extraction and Frequency Domain Processing
-    # Interpolate and resample the frequency spectrum for the current view
-    extracted_slice_spectrum = extract_slice(frequency_spectrum, view_params)
+    # Shift origin to center to center zero-frequency component
+    # [G] Implementation detail: Multiply by (-1)^(x+y+z)
+    shifted_volume = apply_shift(padded_volume)
     
-    # Apply shading and depth cueing in the frequency domain
-    # The source mentions these are applied, but does not give specific formulas
-    # for the shading/depth cueing operations in the frequency domain.
-    processed_slice_spectrum = apply_shading_and_depth_cueing(extracted_slice_spectrum, view_params)
+    # 2. Global Transformation
+    # Compute 3D Hartley Transform
+    # [G] Implementation detail: Use Fast Hartley Transform (FHT) algorithm
+    spectrum = fast_hartley_transform_3d(shifted_volume)
     
-    # Step 3: Inverse Hartley Transform
-    # Convert back to spatial domain for compositing
-    spatial_slice = inverse_hartley_transform(processed_slice_spectrum)
+    # Convert to 16-bit float for memory reduction
+    # [G] Implementation detail: Quantize to 16-bit float format
+    spectrum_16bit = quantize_to_16bit_float(spectrum)
     
-    # Step 4: Format Conversion and Compositing
-    # Convert from 16-bit float to native format and composite
-    rendered_image = composite(spatial_slice)
+    # 3. Slice Extraction
+    # Define 2D plane perpendicular to view_direction passing through origin
+    # [G] Implementation detail: Define grid coordinates (u, v) on the plane
+    u_coords, v_coords = define_slice_grid(view_direction, spectrum.shape)
     
-    return rendered_image
+    # Resample spectrum onto the 2D plane
+    # [G] Implementation detail: Use adaptive filtering or trilinear interpolation
+    slice_data = resample_spectrum(spectrum_16bit, u_coords, v_coords)
+    
+    # 4. Inverse Transformation
+    # Apply 2D Inverse Hartley Transform
+    # [G] Implementation detail: IHT is same as HT scaled by 1/N
+    N = slice_data.size
+    inverse_slice = fast_hartley_transform_2d(slice_data) / N
+    
+    # 5. Post-processing
+    # Convert back to native format
+    image = convert_to_native_format(inverse_slice)
+    
+    return image
 
-def hartley_transform(data):
+def fast_hartley_transform_3d(data):
     """
-    Computes the Hartley transform of real-valued data.
-    H{f}(s) = integral f(x) * cas(2*pi*s*x) dx
-    cas(theta) = cos(theta) + sin(theta)
+    Computes the 3D Fast Hartley Transform.
+    [G] Implementation detail: This is typically implemented via a sequence of 1D FHTs
+    along each dimension, similar to the FFT.
     """
-    # Implementation detail: This would typically use a Fast Hartley Transform (FHT)
-    # algorithm. The source does not provide the specific FHT butterfly structure,
-    # only the integral definition.
-    # [G] Standard FHT algorithms exist (e.g., Rader's algorithm), but specific
-    # implementation details are not in the source.
+    # Apply 1D FHT along axis 0
+    temp = apply_1d_fht_along_axis(data, axis=0)
+    # Apply 1D FHT along axis 1
+    temp = apply_1d_fht_along_axis(temp, axis=1)
+    # Apply 1D FHT along axis 2
+    result = apply_1d_fht_along_axis(temp, axis=2)
+    return result
+
+def apply_1d_fht_along_axis(data, axis):
+    """
+    Applies 1D Hartley Transform along a specific axis.
+    [G] Implementation detail: For each line along the axis, compute the DHT.
+    DHT of a signal x[n] of length N is defined as:
+    X[k] = sum_{n=0}^{N-1} x[n] * cas(2*pi*k*n/N)
+    where cas(theta) = cos(theta) + sin(theta).
+    """
+    # [G] Placeholder for actual FHT kernel implementation
+    # The core operation is the summation of x[n] * (cos(2*pi*k*n/N) + sin(2*pi*k*n/N))
     pass
 
-def inverse_hartley_transform(data):
+def quantize_to_16bit_float(data):
     """
-    Computes the inverse Hartley transform.
+    Quantizes 64-bit float data to 16-bit float format.
+    [G] Implementation detail: Map values to 16-bit float representation.
     """
-    # The source does not provide the explicit inverse formula, 
-    # but it is implied to be the inverse operation of the forward transform.
+    # [G] Placeholder for quantization logic
     pass
+
+def resample_spectrum(spectrum, u_coords, v_coords):
+    """
+    Resamples the 3D spectrum onto a 2D plane defined by u_coords and v_coords.
+    [G] Implementation detail: Use interpolation (e.g., trilinear) to sample values
+    from the 3D spectrum array at the specified 2D coordinates.
+    """
+    # [G] Placeholder for resampling logic
+    pass
+
+def convert_to_native_format(data):
+    """
+    Converts 16-bit float data to native floating point format.
+    """
+    return data.astype(float)
 ```
 
 ### Edge Cases and Pitfalls
-- **Hermitian Symmetry**: Unlike the Fourier transform, where real signals produce Hermitian symmetric spectra (allowing storage of only half the spectrum), the Hartley transform produces real spectra directly. Dropping half the Fourier spectrum complicates slice extraction, whereas the Hartley transform avoids this complexity [S1, S3, unofficial].
-- **Precision and Round-off Error**: Using 16-bit floating point format introduces round-off error. However, the relative difference compared to 64-bit double precision images is below 50dB, which is negligible [S1, unofficial].
-- **Dynamic Range**: The spectrum has a wide dynamic range, necessitating a floating-point format. 64-bit double precision is safe, but 16-bit is used for memory efficiency [S1, unofficial].
+*   **Precision:** Round-off error from using 16-bit floating point format resulted in a relative difference below 50dB compared to 64-bit double precision images, which is generally acceptable [S1, S4, unofficial].
+*   **Hermitian Symmetry:** Unlike the Fourier transform, the Hartley transform does not produce a Hermitian symmetric spectrum for real inputs, so no half-spectrum storage is needed, simplifying slice extraction [S1, S3, unofficial].
+*   **Boundary Artifacts:** The transform assumes periodic boundary conditions; failure to zero-pad or apply vignetting correction can lead to aliasing and boundary artifacts [S3, 841-gpu-based-2d-fft.md, 952-frequency-domain-volume-rendering.md, unofficial].
 
 ## Subtopics
 
 ### [Hartley Transform Volume Rendering](950-hartley-transform-volume-rendering.md)
-A complete rendering pipeline that builds on this method by providing adaptive filtering and format conversion details.
+Hartley Transform Volume Rendering is a frequency-domain technique that replaces spatial domain projection, shading, and depth cueing computations with frequency domain operations using the Hartley transform to reduce memory cost and computational complexity. It sets itself apart from standard Fourier-based frequency rendering by using real-valued kernels, which eliminates complex number arithmetic and simplifies slice extraction compared to handling Hermitian symmetry. It builds on [Hartley Transform for Memory Reduction](895-hartley-transform-for-memory-reduction.md) by providing the complete rendering pipeline, including adaptive filtering and format conversion.
 
 ### [GPU-based Fast Hartley Transform (FHT)](965-gpu-based-fast-hartley-transform-fht.md)
-A specific GPU implementation using double butterfly passes and dual lookup textures to accelerate the transform.
+The GPU-based Fast Hartley Transform (FHT) is a frequency-domain volume rendering method that replaces the Fourier transform with the Hartley transform to map real-valued input data directly to real-valued spectra. This reduces memory requirements by half compared to the standard GPU-based Fourier transform. It builds on [Hartley Transform for Memory Reduction](895-hartley-transform-for-memory-reduction.md) by providing a specific GPU shader implementation using double butterfly passes and dual lookup textures.
 
 ## Operating characteristics
-- **Memory Complexity**: The method reduces memory usage significantly. A double-precision complex Fourier transform consumes 16 times more memory than a spatial domain algorithm (assuming 1-byte voxels). The Hartley transform with 16-bit floating point reduces this factor to 2 relative to the original volume size [S1, S4, unofficial].
-- **Time Complexity**: The frequency domain method's projection computation grows at $O(n^2 \log n)$, while shading and depth cueing grow at $O(n^2)$. This is significantly slower growth than the spatial domain method, which grows at $O(n^3)$ [S1, unofficial].
-- **Performance**: Rendering times on an IRIS Crimson with a 50MHz R4000 processor showed significant speedups for frequency domain rendering compared to spatial domain rendering for volumes like $128^3$ and $256^3$ [S1, unofficial].
-- **Strengths**: Reduced memory footprint, avoidance of complex number arithmetic, simplified slice extraction compared to Hermitian-symmetric Fourier methods.
-- **Limitations**: Requires floating-point representation due to dynamic range, potential precision loss with 16-bit format (though negligible in practice).
+*   **Time Complexity:** The frequency domain method grows at $O(n^2 \log n)$ for projection, and $O(n^2)$ for shading/depth cueing, compared to $O(n^3)$ for spatial domain rendering [S1, S4, unofficial].
+*   **Memory Complexity:** The Hartley transform reduces memory requirements by half compared to storing a full complex spectrum, and by a factor of 16 compared to double-precision complex Fourier transforms [S1, S2, S4, unofficial]. Using 16-bit floating point format reduces the memory cost factor to 2 compared to the original volume size [S1, S4, unofficial].
+*   **Measured Performance:** Rendering times were measured on an IRIS Crimson with a 50Mhz R4000 processor using non-optimized code. For a $128^3$ volume, frequency domain rendering took 0.54 seconds compared to 1.77 seconds for spatial domain rendering. For a $256^3$ volume, frequency domain rendering took 2.03 seconds compared to 24.29 seconds for spatial domain rendering [S1, S4, unofficial].
+*   **Strengths:** Significant memory reduction, faster rendering for large volumes, simplified slice extraction compared to Fourier-based methods with half-spectrum storage [S1, S2, S3, S4, unofficial].
+*   **Limitations:** Requires preprocessing (transform and inverse transform), potential precision loss with 16-bit format (though generally acceptable), and assumes periodic boundary conditions [S1, S3, S4, unofficial].
+*   **When to Use:** Suitable for large volumes where memory is a constraint and real-time or near-real-time rendering is not strictly required, or when hardware supports efficient Hartley transforms [S1, S4, unofficial].
+*   **When Not to Use:** When complex number arithmetic is already optimized in hardware, or when the volume size is small enough that memory is not a bottleneck [S1, S4, unofficial].
 
 ## Background
-The Hartley transform for memory reduction was introduced by Takashi Totsuka and Marc Levoy in their 1993 paper "Frequency Domain Volume Rendering" [S1, S2, S3, S4, unofficial]. It was developed to address the explosion in memory cost associated with frequency-domain volume rendering, which typically requires storing complex spectra. The method leverages the Hartley transform, a direct relative of the Fourier transform, to map real functions to real spectra, thereby eliminating the need for complex numbers [S1, S2, S3, S4, unofficial]. The technique has been applied to render human head (CT data), Utah teapot, and turbine blade volumes with shading and depth cueing [S1, unofficial].
+The Hartley Transform for Memory Reduction was introduced by Takashi Totsuka and Marc Levoy in their 1993 paper "Frequency Domain Volume Rendering" [S1, S2, S4, unofficial]. The paper demonstrated the use of the Hartley transform to avoid complex number arithmetic in frequency domain volume rendering, thereby reducing memory requirements [S1, S2, S4, unofficial]. The method was tested on human head CT data, Utah teapot, and turbine blade volumes, showing significant performance improvements over spatial domain rendering [S1, S4, unofficial]. The Hartley transform is a direct relative of the Fourier transform, defined by the kernel $\text{cas}(\theta) = \cos(\theta) + \sin(\theta)$ [S2, S3, S4, unofficial].
 
 ## Sources
 [S1] Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)

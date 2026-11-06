@@ -1,0 +1,269 @@
+# Spherical Harmonics Evaluation
+
+Also called: SH Evaluation, Spherical Harmonics Color Computation, harmonic
+
+## Overview
+Spherical Harmonics (SH) Evaluation computes the view-dependent RGB color of a 3D Gaussian splat by projecting its stored SH coefficients onto a viewing direction vector [S2, S3, unofficial]. It solves the problem of efficiently representing and querying anisotropic, view-dependent appearance for millions of Gaussian primitives in real-time rendering [S2, unofficial]. It sets itself apart from general SH evaluation by using hardcoded polynomial constants and a fixed degree-3 basis (16 coefficients per color channel) optimized for the specific coordinate system and normalization conventions of 3D Gaussian Splatting, avoiding expensive trigonometric function calls [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** `spherical_harmonics`: A tensor of shape $(N, 48)$ containing SH coefficients for $N$ Gaussians. The coefficients are stored in row-major order, grouped by color channel (R, G, B), with each channel containing 16 coefficients (degree 0 to 3) [S3, unofficial].
+- **Input:** `dir`: A tensor of shape $(N, 3)$ containing normalized viewing direction vectors $(x, y, z)$ from the camera origin to each Gaussian [S3, unofficial].
+- **Output:** `color`: A tensor of shape $(N, 3)$ containing the computed RGB color values, typically in the range $[0, 1]$ after clamping [S2, S3, unofficial].
+
+**Data Structures:**
+The SH coefficients are stored as a flat array or tensor. For each Gaussian, the 48 coefficients are arranged as:
+- Indices 0–2: Degree 0 (DC) coefficients for R, G, B.
+- Indices 3–5: Degree 1 coefficients for R.
+- Indices 6–8: Degree 1 coefficients for G.
+- Indices 9–11: Degree 1 coefficients for B.
+- Indices 12–14: Degree 2 coefficients for R.
+- Indices 15–17: Degree 2 coefficients for G.
+- Indices 18–20: Degree 2 coefficients for B.
+- Indices 21–23: Degree 3 coefficients for R.
+- Indices 24–26: Degree 3 coefficients for G.
+- Indices 27–29: Degree 3 coefficients for B.
+- Indices 30–47: Unused/Zero (if degree 3 is not fully utilized or for padding) [S2, S3, unofficial]. Note: Some implementations store all 16 coefficients per channel contiguously (0-15 for R, 16-31 for G, 32-47 for B), but the standard 3DGS implementation interleaves or groups by degree. The provided notes [S3, unofficial] suggest a layout where coefficients are accessed by degree groups. We follow the explicit indexing from [S2, unofficial] and [S3, unofficial]:
+  - $c_0, c_1, c_2$: DC (indices 0, 1, 2)
+  - $c_3, c_4, c_5$: Degree 1 R (indices 3, 4, 5)
+  - $c_6, c_7, c_8$: Degree 1 G (indices 6, 7, 8)
+  - $c_9, c_{10}, c_{11}$: Degree 1 B (indices 9, 10, 11)
+  - $c_{12}..c_{16}$: Degree 2 R (indices 12, 13, 14, 15, 16? No, [S3, unofficial] says 12:15 for c4..c8? Let's re-read [S3, unofficial].
+  - [S3, unofficial] says: "Extract second-order coefficients c4 (12:15) through c8 (24:27)". This implies:
+    - c4: index 12
+    - c5: index 13
+    - c6: index 14
+    - c7: index 15
+    - c8: index 16? No, 24:27 is 4 indices. 12:15 is 4 indices. 24:27 is 4 indices.
+    - Let's look at [S2, unofficial]: "c4 (12:15) through c8 (24:27)". This is ambiguous.
+    - Let's look at [S1, unofficial]: It defines 16 coefficients.
+    - Standard 3DGS SH layout (from original paper and common implementations like `diff-gaussian-rasterization`):
+      - Coefficients are stored as $N \times 16 \times 3$ (H, W, C) or $N \times 48$.
+      - The order is usually: $Y_0^0, Y_{-1}^1, Y_0^1, Y_1^1, Y_{-2}^2, Y_{-1}^2, Y_0^2, Y_1^2, Y_2^2, Y_{-3}^3, Y_{-2}^3, Y_{-1}^3, Y_0^3, Y_1^3, Y_2^3, Y_3^3$ for each color channel.
+      - However, the notes [S3, unofficial] provide specific index mappings. We must follow the notes.
+      - [S3, unofficial] "Extract DC component c0 from indices 0:3". So $c_0$ is a vector of 3 values (R, G, B) at indices 0, 1, 2.
+      - [S3, unofficial] "Extract first-order coefficients c1 (3:6), c2 (6:9), c3 (9:12)". This implies $c_1, c_2, c_3$ are vectors of 3 values? No, the formula uses `c1`, `c2`, `c3` as scalars in the dot product?
+      - Let's look at the formula in [S3, unofficial]: `color = color - SH_C1 * y * c1 + SH_C1 * z * c2 - SH_C1 * x * c3`. Here `c1`, `c2`, `c3` are likely the coefficients for the three basis functions of degree 1. But there are 3 color channels.
+      - Actually, in 3DGS, the SH coefficients are stored per color channel. So for Degree 1, there are 3 basis functions ($Y_{-1}^1, Y_0^1, Y_1^1$) and 3 color channels. That's 9 coefficients.
+      - [S3, unofficial] says "c1 (3:6)". This is 3 indices. So $c_1$ is a vector of 3 coefficients? Or is it one coefficient per channel?
+      - Let's look at [S1, unofficial] code. It computes 16 coefficients.
+      - Let's look at [S2, unofficial] code. `color = color + SH_C2_0 * xy * c4 + ...`. Here `c4` is a scalar? Or a vector?
+      - In the standard implementation, the SH coefficients are stored as $N \times 16 \times 3$. The evaluation is done per channel.
+      - The notes [S3, unofficial] seem to describe a layout where coefficients are grouped by degree, not by channel.
+      - Let's assume the layout described in [S3, unofficial] is the one to implement:
+        - DC: indices 0, 1, 2 (R, G, B)
+        - Degree 1: indices 3, 4, 5 (R), 6, 7, 8 (G), 9, 10, 11 (B)? No, [S3, unofficial] says "c1 (3:6), c2 (6:9), c3 (9:12)". This suggests $c_1, c_2, c_3$ are vectors of 3 coefficients each?
+        - If $c_1$ is indices 3:6, it has 3 values. If $c_2$ is 6:9, it has 3 values. If $c_3$ is 9:12, it has 3 values.
+        - Then the formula `color = color - SH_C1 * y * c1 + ...` would be a vector operation.
+        - This matches the standard layout where coefficients are stored as $N \times 16 \times 3$ but flattened in a specific way?
+        - Actually, the most common layout in `diff-gaussian-rasterization` is $N \times 16 \times 3$.
+        - Let's stick to the explicit indices in [S3, unofficial] and [S2, unofficial].
+        - [S3, unofficial] "Extract second-order coefficients c4 (12:15) through c8 (24:27)".
+          - c4: 12, 13, 14, 15? No, 12:15 is 4 indices.
+          - c5: 16, 17, 18, 19?
+          - c6: 20, 21, 22, 23?
+          - c7: 24, 25, 26, 27?
+          - c8: 28, 29, 30, 31?
+          - But [S3, unofficial] says "c8 (24:27)". This is contradictory. 12:15 is 4 indices. 24:27 is 4 indices.
+          - Let's assume the indices are:
+            - c4: 12, 13, 14, 15
+            - c5: 16, 17, 18, 19
+            - c6: 20, 21, 22, 23
+            - c7: 24, 25, 26, 27
+            - c8: 28, 29, 30, 31
+          - But [S3, unofficial] says "c8 (24:27)". This might be a typo in the notes.
+          - Let's look at [S2, unofficial]: "c4 (12:15) through c8 (24:27)".
+          - If c4 is 12:15, c5 is 16:19, c6 is 20:23, c7 is 24:27, c8 is 28:31.
+          - This makes sense. 5 coefficients per degree 2, 3 channels = 15 coefficients.
+          - Degree 2 has 5 basis functions. 3 channels. 15 coefficients.
+          - Indices 12 to 26? 12 to 26 is 15 indices.
+          - So c4: 12-14? No, 12:15 is 4 indices.
+          - Let's assume the notes mean:
+            - c4: indices 12, 13, 14 (R, G, B for first basis function)
+            - c5: indices 15, 16, 17 (R, G, B for second basis function)
+            - c6: indices 18, 19, 20 (R, G, B for third basis function)
+            - c7: indices 21, 22, 23 (R, G, B for fourth basis function)
+            - c8: indices 24, 25, 26 (R, G, B for fifth basis function)
+          - This is 15 coefficients.
+          - But [S3, unofficial] says "c4 (12:15)". This is 4 indices.
+          - This is confusing. Let's look at [S1, unofficial] code. It computes 16 coefficients.
+          - Let's assume the standard layout: $N \times 16 \times 3$.
+          - The notes [S3, unofficial] are likely describing a flattened view where the coefficients are grouped by degree.
+          - Let's use the explicit formulas from [S1, unofficial] and [S3, unofficial] and map them to the indices.
+          - [S1, unofficial] defines 16 coefficients: $l0m0, l1m1, l1m0, l1p1, l2m2, l2m1, l2m0, l2p1, l2p2, l3m3, l3m2, l3m1, l3m0, l3p1, l3p2, l3p3$.
+          - These correspond to the 16 basis functions.
+          - For each color channel, there are 16 coefficients.
+          - Total 48 coefficients.
+          - The layout in [S3, unofficial] seems to be:
+            - DC: 0, 1, 2 (R, G, B)
+            - Degree 1: 3, 4, 5 (R), 6, 7, 8 (G), 9, 10, 11 (B)? No, [S3, unofficial] says "c1 (3:6), c2 (6:9), c3 (9:12)".
+            - If c1 is 3:6, it has 4 values? No, 3:6 in Python is 3, 4, 5. 3 values.
+            - So c1: 3, 4, 5. c2: 6, 7, 8. c3: 9, 10, 11.
+            - This is 9 coefficients for Degree 1.
+            - Degree 2: c4 (12:15), c5 (16:19), c6 (20:23), c7 (24:27), c8 (28:31).
+            - This is 20 coefficients? No, 5 * 4 = 20. But Degree 2 has 5 basis functions * 3 channels = 15 coefficients.
+            - So c4: 12, 13, 14. c5: 15, 16, 17. c6: 18, 19, 20. c7: 21, 22, 23. c8: 24, 25, 26.
+            - This is 15 coefficients.
+            - Degree 3: c9 (27:30), c10 (31:34), c11 (35:38), c12 (39:42), c13 (43:46), c14 (47:50), c15 (51:54).
+            - This is 21 coefficients. But Degree 3 has 7 basis functions * 3 channels = 21 coefficients.
+            - Total 3 + 9 + 15 + 21 = 48 coefficients.
+            - This matches the 48 coefficients.
+            - So the layout is:
+              - DC: 0, 1, 2
+              - Degree 1: 3-11 (9 coefficients)
+              - Degree 2: 12-26 (15 coefficients)
+              - Degree 3: 27-47 (21 coefficients)
+            - The notes [S3, unofficial] say "c9 (27:30) through c15 (45:48)".
+            - c9: 27, 28, 29. c10: 30, 31, 32. c11: 33, 34, 35. c12: 36, 37, 38. c13: 39, 40, 41. c14: 42, 43, 44. c15: 45, 46, 47.
+            - This is 21 coefficients.
+            - This matches.
+
+**Numbered Steps:**
+1. **Normalize Direction:** Normalize the input direction vector $\mathbf{dir} = (x, y, z)$ to unit length [S1, S3, unofficial].
+2. **Extract DC Color:** Initialize the output color $\mathbf{C}$ with the DC (degree 0) coefficients. Let $c_0 = [c_{0,R}, c_{0,G}, c_{0,B}]$ be the coefficients at indices 0, 1, 2. The DC term is constant: $Y_0^0 = \frac{1}{2\sqrt{\pi}} \approx 0.28209479177387814$ [S1, S4, unofficial].
+   $$ \mathbf{C} = c_0 \times 0.28209479177387814 $$
+3. **Add Degree 1 Terms:** Extract coefficients $c_1, c_2, c_3$ from indices 3-5, 6-8, 9-11 respectively. Each $c_i$ is a vector of 3 values (R, G, B). The degree 1 basis functions are:
+   - $Y_{-1}^1 \propto -y$
+   - $Y_0^1 \propto z$
+   - $Y_1^1 \propto -x$
+   The constant $SH\_C1 = -\frac{\sqrt{3}}{4\sqrt{\pi}} \approx -0.48860251190291987$ [S1, unofficial].
+   $$ \mathbf{C} = \mathbf{C} - SH\_C1 \times y \times c_1 + SH\_C1 \times z \times c_2 - SH\_C1 \times x \times c_3 $$
+   Note: The signs and constants are derived from [S1, unofficial] and [S3, unofficial]. [S1, unofficial] defines $l1m1 = -0.4886... \times y$, $l1m0 = 0.4886... \times z$, $l1p1 = -0.4886... \times x$. The coefficients $c_1, c_2, c_3$ correspond to these basis functions.
+4. **Add Degree 2 Terms:** Extract coefficients $c_4, c_5, c_6, c_7, c_8$ from indices 12-14, 15-17, 18-20, 21-23, 24-26 respectively. Compute squared and mixed terms: $xx=x^2, yy=y^2, zz=z^2, xy=xy, yz=yz, xz=xz$.
+   The constants are [S1, unofficial]:
+   - $SH\_C2\_0 = 1.0925484305920792$ (for $xy$)
+   - $SH\_C2\_1 = -1.0925484305920792$ (for $yz$)
+   - $SH\_C2\_2 = 0.94617469575755997$ (for $2zz - xx - yy$)
+   - $SH\_C2\_3 = -1.0925484305920792$ (for $xz$)
+   - $SH\_C2\_4 = 0.54627421529603959$ (for $xx - yy$)
+   $$ \mathbf{C} = \mathbf{C} + SH\_C2\_0 \times xy \times c_4 + SH\_C2\_1 \times yz \times c_5 + SH\_C2\_2 \times (2.0 \times zz - xx - yy) \times c_6 + SH\_C2\_3 \times xz \times c_7 + SH\_C2\_4 \times (xx - yy) \times c_8 $$
+5. **Add Degree 3 Terms:** If `sh_dim` > 27 (i.e., degree 3 is enabled), extract coefficients $c_9, c_{10}, c_{11}, c_{12}, c_{13}, c_{14}, c_{15}$ from indices 27-29, 30-32, 33-35, 36-38, 39-41, 42-44, 45-47 respectively.
+   The constants are [S1, unofficial]:
+   - $SH\_C3\_0 = 0.59004358992664352$ (for $y(3xx - yy)$? No, [S1, unofficial] says $y(-3xx + yy)$)
+   - $SH\_C3\_1 = 2.8906114426405538$ (for $xyz$)
+   - $SH\_C3\_2 = 0.45704579946446572$ (for $y(1 - 5zz)$)
+   - $SH\_C3\_3 = 0.3731763325901154$ (for $z(5zz - 3)$)
+   - $SH\_C3\_4 = 0.45704579946446572$ (for $x(1 - 5zz)$)
+   - $SH\_C3\_5 = 1.4453057213202769$ (for $z(xx - yy)$)
+   - $SH\_C3\_6 = 0.59004358992664352$ (for $x(-xx + 3yy)$)
+   $$ \mathbf{C} = \mathbf{C} + SH\_C3\_0 \times y \times (3.0 \times xx - yy) \times c_9 + SH\_C3\_1 \times xy \times z \times c_{10} + SH\_C3\_2 \times y \times (1.0 - 5.0 \times zz) \times c_{11} + SH\_C3\_3 \times z \times (5.0 \times zz - 3.0) \times c_{12} + SH\_C3\_4 \times x \times (1.0 - 5.0 \times zz) \times c_{13} + SH\_C3\_5 \times z \times (xx - yy) \times c_{14} + SH\_C3\_6 \times x \times (-xx + 3.0 \times yy) \times c_{15} $$
+   Note: The signs in [S1, unofficial] are specific. $l3m3 = 0.59... \times y \times (-3.0 \times xx + yy)$. This is equivalent to $-0.59... \times y \times (3.0 \times xx - yy)$. The formula in [S3, unofficial] uses $SH\_C3\_0 \times y \times (3.0 \times xx - yy) \times c_9$. This implies $c_9$ absorbs the sign or the constant is defined differently. We follow [S1, unofficial] constants and [S3, unofficial] structure.
+6. **Clamp and Return:** Add 0.5 to the color vector and clamp to $[0.0, 1.0]$ [S3, unofficial]. Some implementations use a sigmoid or different range, but [S3, unofficial] explicitly states "Add bias 0.5 to color and clip result to [0.0, 1.0] range".
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def eval_spherical_harmonics(spherical_harmonics: Tensor, dir: Tensor, sh_dim: int = 48) -> Tensor:
+    """
+    Evaluates spherical harmonics for 3D Gaussian Splatting.
+    
+    Args:
+        spherical_harmonics: Tensor of shape (N, 48) containing SH coefficients.
+        dir: Tensor of shape (N, 3) containing normalized viewing directions.
+        sh_dim: Number of SH coefficients. If > 27, degree 3 terms are evaluated.
+        
+    Returns:
+        Tensor of shape (N, 3) containing RGB colors.
+    """
+    # Normalize direction
+    dir = dir / dir.norm(dim=1, keepdim=True)
+    x, y, z = dir[:, 0], dir[:, 1], dir[:, 2]
+    
+    # Precompute squared and mixed terms
+    xx = x * x
+    yy = y * y
+    zz = z * z
+    xy = x * y
+    yz = y * z
+    xz = x * z
+    
+    # Constants
+    SH_C0 = 0.28209479177387814
+    SH_C1 = -0.48860251190291987
+    SH_C2_0 = 1.0925484305920792
+    SH_C2_1 = -1.0925484305920792
+    SH_C2_2 = 0.94617469575755997
+    SH_C2_3 = -1.0925484305920792
+    SH_C2_4 = 0.54627421529603959
+    SH_C3_0 = 0.59004358992664352
+    SH_C3_1 = 2.8906114426405538
+    SH_C3_2 = 0.45704579946446572
+    SH_C3_3 = 0.3731763325901154
+    SH_C3_4 = 0.45704579946446572
+    SH_C3_5 = 1.4453057213202769
+    SH_C3_6 = 0.59004358992664352
+    
+    # Extract DC
+    c0 = spherical_harmonics[:, 0:3]
+    color = c0 * SH_C0
+    
+    # Degree 1
+    c1 = spherical_harmonics[:, 3:6]
+    c2 = spherical_harmonics[:, 6:9]
+    c3 = spherical_harmonics[:, 9:12]
+    color = color - SH_C1 * y.unsqueeze(1) * c1 + SH_C1 * z.unsqueeze(1) * c2 - SH_C1 * x.unsqueeze(1) * c3
+    
+    # Degree 2
+    c4 = spherical_harmonics[:, 12:15]
+    c5 = spherical_harmonics[:, 15:18]
+    c6 = spherical_harmonics[:, 18:21]
+    c7 = spherical_harmonics[:, 21:24]
+    c8 = spherical_harmonics[:, 24:27]
+    color = color + SH_C2_0 * xy.unsqueeze(1) * c4 + SH_C2_1 * yz.unsqueeze(1) * c5 + SH_C2_2 * (2.0 * zz - xx - yy).unsqueeze(1) * c6 + SH_C2_3 * xz.unsqueeze(1) * c7 + SH_C2_4 * (xx - yy).unsqueeze(1) * c8
+    
+    # Degree 3
+    if sh_dim > 27:
+        c9 = spherical_harmonics[:, 27:30]
+        c10 = spherical_harmonics[:, 30:33]
+        c11 = spherical_harmonics[:, 33:36]
+        c12 = spherical_harmonics[:, 36:39]
+        c13 = spherical_harmonics[:, 39:42]
+        c14 = spherical_harmonics[:, 42:45]
+        c15 = spherical_harmonics[:, 45:48]
+        color = color + SH_C3_0 * y.unsqueeze(1) * (3.0 * xx - yy).unsqueeze(1) * c9 + SH_C3_1 * xy.unsqueeze(1) * z.unsqueeze(1) * c10 + SH_C3_2 * y.unsqueeze(1) * (1.0 - 5.0 * zz).unsqueeze(1) * c11 + SH_C3_3 * z.unsqueeze(1) * (5.0 * zz - 3.0).unsqueeze(1) * c12 + SH_C3_4 * x.unsqueeze(1) * (1.0 - 5.0 * zz).unsqueeze(1) * c13 + SH_C3_5 * z.unsqueeze(1) * (xx - yy).unsqueeze(1) * c14 + SH_C3_6 * x.unsqueeze(1) * (-xx + 3.0 * yy).unsqueeze(1) * c15
+        
+    # Clamp
+    color = torch.clamp(color + 0.5, 0.0, 1.0)
+    return color
+```
+
+**Parameters:**
+- `sh_dim`: The number of SH coefficients used. If > 27, Degree 3 terms are evaluated [S2, unofficial]. Typical value is 48 (degree 3).
+- `spherical_harmonics`: Tensor of shape $(N, 48)$ [S3, unofficial].
+- `dir`: Tensor of shape $(N, 3)$ [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Use float32 for performance. Double precision may be needed for very high dynamic range scenes, but standard 3DGS uses float32 [S2, unofficial].
+- **Boundaries:** The direction vector must be normalized. If not, the SH evaluation will be incorrect [S1, unofficial].
+- **Degenerate Input:** If the direction vector is zero, normalization will fail. Guard against this by checking the norm [G].
+
+## Subtopics
+
+### [Spherical Harmonics Rotation](3985-spherical-harmonics-rotation.md)
+Computes new SH coefficients after rotating the viewing coordinate system by $\pm \pi/2$ around the X-axis. Uses precomputed analytic tables for specific rotations, avoiding expensive matrix multiplications. Choose when view-dependent effects require efficient rotation of SH coefficients.
+
+### [Spherical Harmonics Encoder](4390-spherical-harmonics-encoder.md)
+Maps a 3D viewing direction vector into SH coefficients. Performs basis projection rather than dot product with coefficients. Choose when converting direction vectors to SH space for other operations.
+
+### [Spherical Harmonics Data Extraction](6960-spherical-harmonics-data-extraction.md)
+Parses SH coefficients from PLY files into structured GPU textures. Choose when loading pre-trained 3DGS models.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of Gaussians. The evaluation involves a fixed number of arithmetic operations per Gaussian (approx. 100-200 FLOPs for degree 3) [S1, unofficial].
+- **Memory Complexity:** $O(N)$ for storing the coefficients and intermediate results. The coefficients are stored as $N \times 48$ floats [S3, unofficial].
+- **Measured Performance:** On modern GPUs, evaluating degree 3 SH for millions of Gaussians can be done in real-time (30+ FPS) using optimized CUDA kernels [S2, unofficial].
+- **Scaling:** Scales linearly with the number of Gaussians. Parallelization is efficient due to the independent nature of each Gaussian's evaluation.
+- **Strengths:** Efficient, differentiable, and captures view-dependent appearance well up to degree 3.
+- **Limitations:** High-degree SH (beyond 3) becomes computationally expensive and may introduce ringing artifacts. The fixed basis functions may not capture very sharp specularities well.
+- **When to Use:** Real-time rendering of view-dependent scenes with millions of primitives.
+- **When Not to Use:** Scenes with extremely sharp specular highlights that require higher degrees or different representations.
+
+## Background
+Spherical Harmonics are a set of orthogonal functions defined on the sphere, commonly used in computer graphics for lighting and view-dependent effects [S4, unofficial]. In 3D Gaussian Splatting, SH coefficients are used to represent the view-dependent color of each Gaussian primitive [S2, unofficial]. The method was introduced in the original 3D Gaussian Splatting paper by Kerbl et al. (2023) [S2, unofficial]. The specific implementation details, such as the hardcoded constants and degree 3 basis, are derived from the reference implementation [S1, unofficial].
+
+## Sources
+[S1] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+[S2] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S3] Fhz2346/3D-Gaussian-Splatting, https://github.com/Fhz2346/3D-Gaussian-Splatting, fetched 2026-10-27 (unofficial)
+[S4] Total Internal Reflection, https://avishek.net/2022/12/05/pytorch-guide-plenoxels-nerf-part-2.html, fetched 2026-10-29 (unofficial)

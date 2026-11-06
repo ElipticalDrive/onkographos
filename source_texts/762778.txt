@@ -1,0 +1,1383 @@
+EGGHead: Efficient Generalizable Gaussian Heads from a Single Image
+Pilseo Park1 ,* Andrew Hou1 ,* Michel Sarkis2†, Ning Bi2 , Yiying Tong1 , Xiaoming Liu1,3
+1
+2
+Michigan State University
+Qualcomm Technologies, Inc.
+3
+University of North Carolina at Chapel Hill
+{parkpils, houandr1, ytong}@msu.edu, {msarkis, nbi}@qti.qualcomm.com,
+arXiv:2610.26898v1 [cs.CV] 16 Oct 2026
+liuxm@cs.unc.edu
+Allocate
+M Gaussians
+M = 12,000
+M = 8,000
+M = 4,000
+Rendered Gaussian Head
+Figure 1. We allocate a fixed Gaussian budget M for Gaussian head reconstruction. Even with a compact Gaussian budget, our method
+preserves representational power, highlighting the efficiency of our allocation strategy. The rendered head shown here uses M =12k.
+Abstract
+Creating photorealistic human heads typically involves
+trade-offs between representation power, efficiency, and
+generalizability. Traditional mesh-based solutions relying
+on 3DMMs generally sacrifice representation power but are
+efficient to render. On the other hand, NeRF-based methods
+improve representation power and fidelity while sacrificing
+efficiency. Gaussian splatting methods attempt to resolve
+these trade-offs by offering both high representation power
+and efficiency with real-time rendering. However, their efficiency nonetheless depends on the number of rasterized
+Gaussians, and the time needed to optimize and prepare the
+head (the enrollment time) is often high. In light of this, we
+propose EGGHead, which introduces a novel Gaussian allocation algorithm that efficiently assigns Gaussians to the
+head’s semantic regions given a fixed Gaussian budget. Our
+algorithm reduces the number of Gaussians needed while
+minimizing the impact on representation power. EGGHead
+operates in a single forward pass and outperforms previous single-image face modeling methods in reconstruction
+quality, novel view synthesis, and rendering speeds.
+1. Introduction
+Modeling photorealistic human heads has received
+widespread attention from the computer vision and
+* Equal contributions.
+† Formerly of Qualcomm Technologies.
+graphics communities. It has a wide array of applications, including movie production [31], digital humans
+in AR/VR [25, 70, 75, 90], and downstream tasks in
+the face domain [57, 58]. There are several important
+axes to consider when designing a head reconstruction
+method, including representation power, the efficiency of
+the 3D representation, and data requirements. An ideal
+method produces a high-quality head that captures fine
+identity details, enables real-time generation and novel
+view synthesis, and requires minimal data.
+Traditional head representation methods adopt meshbased approaches that rely on 3DMMs [10] to model the
+face. Although generally efficient to rasterize and render,
+and despite a plethora of single-image based methods [6,
+53, 83, 85, 86], these 3D representations generally lack high
+representation power due to reliance on PCA bases, carrying over artifacts from intrinsic decomposition into rendering. The follow-up methods [25, 37, 39, 70, 71, 97] relied
+instead on the implicit NeRF [65] representation, which allowed for higher representation power thanks to per-pixel
+raytracing, the ability to model view-specific texture variations, and the volumetric rendering design. However,
+NeRF-based methods sacrifice efficiency since the raytracing inference stage is often costly. More recently, the face
+modeling community has favored mesh-driven 3D Gaussian
+Splatting [45] (3D-GS): a hybrid explicit-implicit representation that allows for both high fidelity and real-time rendering.
+Gaussian Splatting, however, is not without limitations.
+While considered a representation that enables real-time
+rendering, the efficiency is still affected by the number of
+Gaussians used to represent the head. In practice, highquality Gaussian heads require a large number of Gaussians
+to capture fine geometric and appearance details. Reducing
+the number of Gaussians is thus an important priority, but if
+done naively will simply reduce the head’s fidelity. To address this trade-off between fidelity and efficiency, we propose a novel Gaussian Allocation Module (GAM), which
+efficiently allocates a fixed budget of M Gaussians while
+minimizing the impact on the head’s fidelity.
+Moreover, 3D-GS traditionally relies on monocular or
+multi-view image/video inputs, is trained per subject instead of being generalizable, and requires an expensive optimization for each subject ranging from a few minutes to
+one hour [16, 73, 90]. GPS-Gaussian [96] resolves some of
+these limitations by producing a generalizable method that
+takes a stereo pair of images as input and predicts Gaussian
+attributes. However, it requires a monocular video as input,
+since the method depends on the nearest-neighbor stereo
+pair for each queried viewpoint. Moreover, it makes the
+naive assumption of assigning one Gaussian to each pixel,
+which will naturally reduce the rendering speed. We instead reduce this requirement from a monocular video to a
+single image while also proposing a generalizable method
+given one image as input. Our novel GAM improves rendering speed by allocating Gaussians over semantic regions
+rather than on a per-pixel basis, achieving high fidelity with
+fewer Gaussians. In addition, we employ Voronoi tessellation [11] to guide Gaussian attribute computation in a
+single-view setting with sparse Gaussians. Finally, we introduce a lightweight, network-free Face Symmetry Module
+to render occluded face regions, avoiding expensive postprocessing networks and diffusion-based multi-view generation during inference.
+Our contributions are thus as follows:
+⋄ We propose EGGHead, a single-image and generalizable Gaussian head model that outperforms existing approaches in rendering quality and speed while achieving
+competitive enrollment time.
+⋄ We introduce a Gaussian Allocation Module (GAM)
+that allocates Gaussians under a fixed budget with minimal impact, employ Voronoi tessellation to guide Gaussian shape computation in a single-view setting with sparse
+Gaussians, and incorporate a lightweight Face Symmetry
+Module to improve head completeness without relying on
+additional networks.
+⋄ We demonstrate superior head representation capabilities and fidelity among single-image head reconstruction
+methods, both quantitatively and qualitatively.
+86], implicit NeRF-based [65] methods [5, 13, 25–27, 29,
+37, 39, 70, 71, 74, 89, 94, 97], diffusion models conditioned with 3D priors [21, 42], 3D-aware GANs that incorporate triplane representations [2, 14, 19, 22, 30, 34,
+52, 76, 79, 80, 91, 93], and 3D Gaussian Splatting (3DGS) [15–17, 45, 50, 64, 73, 75, 78, 81, 87, 90]. Mesh-based
+3DMMs [10] enable fast rendering but are limited in fidelity
+by their PCA basis. NeRF-based methods improve fidelity
+through view-dependent neural rendering, but require costly
+ray sampling. 3D-GS offers high-quality real-time rendering, yet its efficiency depends on the number of Gaussians
+and still requires seconds to minutes of per-subject enrollment. To address this, we introduce EGGHead, a generalizable model that effectively reduces the Gaussian budget.
+2. Related Work
+Problem Formulation. Given a single source image Is ,
+our goal is to reconstruct a photorealistic head of an unseen
+subject. To tackle this non-trivial task, we employ the 3D
+Gaussian Splatting (3D-GS) pipeline [45]. 3D-GS models
+Face Modeling. Existing 3D face representations include
+explicit mesh-based methods [6, 8, 9, 38, 53, 56–59, 77, 83–
+Generalizable Gaussian Splatting. Although 3D-GS is
+traditionally optimized per scene or subject, generalizable
+3D-GS methods have recently gained attention. GPSGaussian [96] synthesizes unseen identities but assigns one
+Gaussian per pixel, limiting efficiency. GAGAvatar [17]
+predicts Gaussians from a single image using FLAME [55]
+and dual lifting, but its additional neural renderer may
+compromise identity consistency. Diffusion-based methods [63, 82] achieve high quality but rely on costly multiview generation. In contrast, EGGHead uses GAM to
+merge Gaussians in fidelity-insensitive regions, avoiding
+dense per-pixel allocation, and multi-view generation.
+Efficient Gaussian Splatting. Several methods improve
+the efficiency of 3D-GS by compressing Gaussian parameters or pruning low-impact Gaussians. Compression methods [54, 66, 67] reduce storage and rendering costs by removing parameter redundancy, while pruning-based methods [23, 28, 69] reduce the Gaussian count. However, they
+still rely on costly multi-view optimization. In contrast, our
+GAM operates from a single image and directly allocates a
+compact set of Gaussians.
+Symmetry in Face Modeling. Face symmetry is a strong
+prior that preserves the naturally symmetrical structure of
+human faces, especially in the ill-posed single-image setting where occluded regions rely on face priors to be properly reconstructed. While previous methods [7, 20, 85] impose symmetry as a loss function to guide networks toward
+symmetric 3D face reconstruction, EGGHead introduces a
+lightweight Face Symmetry Module that directly mirrors
+visible Gaussians across the facial symmetry plane to complement occluded regions without additional networks.
+3. Method
+Sec. 3.1 Gaussian Allocation Module
+Sec. 3.3 Capturing 3D Shapes in Sparse Gaussians
+Region Covariance
+𝐂 = 𝐑 𝑑𝑖𝑎𝑔 𝜆!, 𝜆", 𝜆# 𝐑$
+Gaussian
+Allocation
+Module
+Scale Mapping
+𝑠! = 𝑘 𝜆! , 𝑠" = 𝑘 𝜆" , 𝑠# = 𝑘 𝜆#
+Rotation Mapping
+Allocate M Gaussians
+Voronoi Tessellation
+𝐑 → (𝐪! , 𝐪" , 𝐪# , 𝐪$ )
+Convert to quaternion
+Alpha Map
+Allocated Gaussians
+Depth Map
+Source Image
+Sec. 3.2 Gaussian Attribute Prediction
+Scale head
+ℎ+
+Encoder
+ℰ$%%&
+Encoder
+ℰ!"#
+Decoder
+𝒟$%%&
+concat
+Image Feature
+Sec. 3.4
+Refinement
+Network
+Opacity head
+ℎ*
+Gaussian Feature
+Color head
+ℎ)
+𝐌 = {𝐌' , 𝐌( , 𝐌) , 𝐌* , 𝐌+ }
+Sec. 3.5 Density-based Sampling
+Encoder
+ℰ'()
+Decoder
+𝒟'()
+ℒ!"# (
+Coarse
+output
+Refined
+output
+Convert to
+density map
+,
+)
+Allocated
+Gaussians
+Pred. Density Map GT Density Map
+Source Image
+Figure 2. Training Pipeline. We propose a single-image, generalizable, and lightweight Gaussian head model that adaptively allocates
+M Gaussians with minimal impact on rendering quality. Secs. 3.1–3.4 constitute the main reconstruction pipeline: GAM first allocates
+M Gaussians from the source image, Voronoi tessellation provides sparse geometric priors, and image/depth features are used to predict
+Gaussian attributes for rendering and refinement. Sec. 3.5 is trained in parallel to predict a density map supervised by the GAM-derived
+density map. It is independent of the main reconstruction pipeline during training and is used at inference time for density-based Gaussian
+allocation.
+a scene with a set of 3D Gaussians, each defined by a 3D
+covariance matrix Σ and a center (mean) position p:
+1
+T
+−1
+G(x) = e− 2 (x−p) Σ
+(x−p)
+.
+(1)
+Each Gaussian G is parameterized by G = {p, q, s, α, c}
+where p ∈ R3 is the center position, q ∈ R4 is the rotation
+quaternion, s ∈ R3 is the scaling factor, α ∈ R1 is the
+opacity, and c ∈ R3 is the color.
+Applying 3D-GS to our task is non-trivial, as we aim
+to render novel views under (1) a single-view setting, (2)
+a generalizable model without per-subject fine-tuning, and
+(3) a reduced number of Gaussians rather than a per-pixel
+allocation. We explain our solution in the following sections.
+Architecture. Fig. 2 illustrates our pipeline. Given a single source image, our approach generates a photorealistic
+head representation using a fixed Gaussian budget without
+per-subject optimization. During training, we introduce the
+Gaussian Allocation Module (GAM) to achieve an effective trade-off between the number of Gaussians and rendering quality (Sec. 3.1). We employ a Gaussian Attribute
+Regressor to predict Gaussian attribute maps (Sec. 3.2),
+guided by Voronoi tessellation [11] for more accurate shape
+computation (Sec. 3.3). The framework is trained to mini-
+mize the difference between the rendered and input images
+(Sec. 3.7). In inference, GAM is replaced with densitybased sampling for efficiency (Sec. 3.5), and a Face Symmetry Module completes the occluded regions (Sec. 3.6).
+3.1. Gaussian Allocation Module
+Our objective is to efficiently allocate a fixed Gaussian budget while preserving rendering quality. We begin by assigning one Gaussian per pixel, compute the error between
+adjacent Gaussian pairs based on their mean texture difference, and iteratively merge the pair with the lowest error
+until reaching the target number of Gaussians M . After
+each merge, all impacted neighboring Gaussians have their
+mean texture error updated with the newly merged Gaussian. To prevent oversized Gaussians and sparsely covered
+regions, we set a maximum threshold such that no Gaussian
+can occupy more than 5∗B
+M pixels, where B is the number
+of foreground pixels in the binary face mask.
+The resulting positions of these per-pixel Gaussians form
+a pseudo ground-truth position map in pixel coordinates.
+In practice, we convert these pseudo ground-truth position
+maps into continuous density maps and use them to train a
+network to directly predict a Gaussian position density map
+given a source image. We then sample our M Gaussians
+from the predicted density map (See Sec. 3.5). Using the
+predicted depth map D together with a scaling factor simg ,
+the sampled Gaussian centers (im , jm ) can be lifted from
+the image plane to 3D as:
+
+Mp = { simg (im − ci , jm − cj ), Dim ,jm }M
+(2)
+m=1 ,
+where (ci , cj ) is the center of the image.
+3.2. Gaussian Attribute Prediction
+We aim to model a generalizable function F (Is , D) =
+{Gm }M
+m=1 that estimates the attributes of M Gaussians conditioned on each subject.
+Following the allocated Gaussians introduced in
+Sec. 3.1, we formulate their attributes as pixel-wise maps,
+allowing a 2D CNN to aggregate neighboring information for local coherence and computational efficiency.
+Specifically, we compute pixel-wise attribute maps M =
+Mp , Mq , Ms , Mα , Mc for position, rotation, scale, opacity, and color, respectively.
+The position map Mp is constructed directly as described in Sec. 3.1, without regression. The rotation map
+Mq is obtained from covariance matrices computed by the
+Voronoi tessellation of sampled Gaussians (see Sec. 3.3).
+The scale map Ms is initialized by Voronoi tessellation and
+refined with the scale adjustment map Mγs . Similarly, RGB
+values are directly used as the color map for efficiency and
+further refined by the color adjustment map M∆
+c to improve
+quality. Therefore, only three attribute maps are regressed:
+to limited depth information [40]. To address this, we leverage Voronoi tessellation [11] to provide structural guidance. Given Gaussian centers in 3D coordinates P :=
+{p1 , . . . , pM } on a surface, a Voronoi tessellation divides
+the surface into M regions, each containing points closer to
+one center. Then, the covariance matrix of the resulting 3D
+polygon captures its spatial variance and orientation.
+However, such intrinsic tessellation has O(M 2 ) time
+complexity, which is prohibitively high for efficient processing. We therefore perform tessellation in 2D with
+O(M log M ) time complexity, and lift each region R to 3D
+using the depth. To compute its covariance matrix C, we
+partition it into N triangles Ti :
+R = T1 ∪ T2 ∪ · · · ∪ TN −1 ∪ TN ,
+(6)
+(3)
+where each triangle vertex is lifted to 3D using its corresponding depth value obtained via nearest-neighbor search.
+With the barycenter of the region R computed through
+an area-weighted average of the triangle centers for the
+constituent triangles, R’s covariance matrix can be assembled by the covariance matrices of the triangles. The resulting covariance matrix reliably represents the geometric
+structure of the Voronoi region, capturing its spatial distribution and orientation through its eigen decomposition
+C = R diag[λ1 , λ2 , λ3 ] RT , where λ1 , λ2 , and λ3 represent the eigenvalues in descending order and R is the rotation matrix assembled from the eigenvectors.
+We then assign the scale attributes of Gaussians as:
+p
+p
+p
+(7)
+s1 = k λ1 , s2 = k λ2 , s3 = k λ3 ,
+To predict the attribute maps, a source image Is ∈
+[0, 1]H×W ×3 is fed into an image encoder Eimg . The image
+feature Eimg (Is ) and the depth feature Eattr (D) are concatenated and then passed to the decoder Dattr that generates a
+pixel-wise Gaussian feature:
+where k denotes the confidence interval, which in our approach is the scale adjusting map Mγs . Thus, the final scale
+map Ms is represented as:
+√
+Ms = Mγs ⊙ { λ}M
+(8)
+m=1 .
+F = Dattr (Eimg (Is )||Eattr (D)),
+Next, the rotation matrix R is converted to its quaternion
+representation q ∈ R4 . The rotation map Mq is thus:
+M = {Mγs , Mα , M∆
+c }.
+(4)
+where F ∈ RH×W ×C and ·||· denotes concatenations across
+all feature levels. Note that we only regress the scale adjusting map Mγs , the opacity map Mα , and the color adjusting
+map M∆
+c , with corresponding prediction heads hs , hα and
+hc composed of two convolutional layers:
+Mγs = sigmoid(hs (F)),
+Mα = sigmoid(hα (F)),
+Mc = Is + M∆
+c = Is + tanh(hc (F)).
+(5)
+Details of the network architecture are provided in the supplementary materials.
+3.3. Capturing 3D Shapes in Sparse Gaussians
+In single-view and sparse Gaussian settings, accurately capturing 3D Gaussian shapes via regression is non-trivial due
+Mq = {(qw , qx , qy , qz )}M
+m=1 .
+(9)
+With all parameters of G = {p, q, s, α, c} defined, we render the reconstructed image Ir .
+3.4. Refinement Network
+High-fidelity facial rendering typically requires a large
+number of points to capture appearance details [17]. However, our approach reduces the number of Gaussians for efficiency, and to ensure robust generalization across a vast
+range of identities, we adopt a source-view reconstruction
+setting instead of video-based supervision. This inherently
+limits the ability to recover facial details during novel view
+synthesis. To address this, we introduce a refinement network. To maintain overall efficiency, we adopt a lightweight
+U-Net style module. The network takes the coarse output
+Ir and the alpha map Iα obtained via alpha blending of the
+Gaussians as input and generates the final output I′r . Please
+refer to the supplementary material for more details on the
+network architecture.
+3.5. Density-based Sampling
+(10)
+where Md is the predicted density map, Eden the density
+encoder, and Dden is the density decoder.
+Adaptive Sampling. From the predicted density map
+Md , we normalize its values to create a probability distribution P(i, j):
+Md (i, j)
+,
+P(i, j) = PH PW
+i=1
+j=1 Md (i, j)
+(11)
+where H and W denote the height and width of the density
+map. This distribution turns the density map into a likelihood surface, where larger values yield higher sampling
+probabilities. We then perform Monte Carlo sampling [33]
+S to obtain a final set of M Gaussian samples:
+{(im , jm )}M
+m=1 ∼ S(P(i, j)),
+Encoder
+ℰ!"#
+𝑆
+Decoder
+𝒟!"#
+Source Image
+Predicted Density Map
+Sampled Gaussians
+Sec. 3.6 Face Symmetry Module
+Density Map Prediction. During inference, we replace
+GAM with density-based sampling to improve computational efficiency. Since directly predicting the discrete coordinates of M Gaussians is sensitive to subtle variations,
+we learn a continuous density map instead. We generate the
+ground-truth density map MGT
+by placing Gaussian cend
+ters obtained from GAM on a binary map and smoothing it
+with a 5 × 5 Gaussian kernel.
+Using the resulting density map MGT
+as ground-truth,
+d
+we construct a density prediction network that takes an image Is as input and predicts the corresponding density map:
+Md = Dden (Eden (Is )),
+Sec. 3.5 Density-based Sampling
+(12)
+where (im , jm ) represents the coordinates of sampled Gaussian centers. This ensures that areas of higher density
+yield more samples, capturing regions of interest effectively
+while maintaining variability and robustness against noise.
+3.6. Face Symmetry Module
+While our method covers visible regions of the head from
+the input image well, occluded regions also need to be handled to improve the completeness of the reconstructed head.
+Human faces typically have sufficient bilateral symmetry to
+serve as a practical prior. We leverage this symmetry to generate the missing side of the head from a single input image.
+This design avoids the need for diffusion-based multi-view
+generation [63, 82] or an additional neural network [17, 51],
+making the method computationally lightweight.
+Splatting
+Face
+Symmetry
+Module
+Original + Mirrored
+Gaussians
+Original Gaussians
+Rendered
+Novel View
+Figure 3. Inference-time Pipeline. During inference, we replace
+GAM with density-based sampling to reduce computation, and incorporate a Face Symmetry Module to complete occluded regions.
+We introduce a Face Symmetry Module to leverage this
+prior. We first transform the Gaussians into a canonical
+view using the camera parameters estimated by DECA [24],
+where the symmetry plane is fixed as x = 0. We then mirror
+the Gaussians across this plane to create a complementary
+set for the partially occluded side. Directly combining the
+original and mirrored Gaussians leads to conflicts in overlapping regions, so we assign low opacity to mirrored Gaussians in overlapped regions and increase their opacity with
+distance. This yields a smooth transition between the two
+sets and avoids visible seams. Fig. 3 shows the processes
+described in Sec. 3.5 and Sec. 3.6.
+3.7. Training Objective
+Our training pipeline follows two parallel branches starting
+from the same input image Is , each with its own objective.
+3.7.1. Density Prediction Network.
+Given Is , the network predicts a density map Md , and is
+trained with L2 loss between Md and MGT
+d :
+2
+Lden = ∥Md − MGT
+d ∥2 .
+(13)
+3.7.2. Gaussian Attribute Regressor.
+We minimize the regressor loss:
+Lreg = λref Lref + λcoarse Lcoarse + λα Lα ,
+(14)
+which consists of a refinement loss Lref , a coarse loss
+Lcoarse and an alpha loss Lα . Further details on loss functions can be found in the supplementary material.
+4. Experiments
+4.1. Experimental Setup
+Datasets and Baselines. We train on 30, 000 FFHQ [44]
+images. For evaluation, we use a disjoint set of 1, 000
+FFHQ images and 1, 000 CelebA-HQ [43] images. To train
+Input
+E3DGE
+G-NeRF
+GAGAvatar
+Ours
+Figure 4. Novel View Synthesis. We qualitatively compare our novel view synthesis performance.
+Method
+FFHQ
+CelebA-HQ
+PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+E3DGE [52]
+23.43
+G-NeRF [98] 19.68
+GAGAvatar [17] 25.03
+Ours
+29.75
+0.598
+0.673
+0.888
+0.951
+0.133 23.64
+0.256 19.81
+0.110 25.06
+0.017 29.25
+0.589
+0.566
+0.874
+0.939
+0.128
+0.296
+0.119
+0.018
+Table 1. Reconstruction Quality. We quantitatively compare the
+reconstruction quality.
+Input
+(a)
+(b)
+(c)
+(d)
+Figure 5. Reconstruction Quality. We compare the reconstruction quality on the FFHQ and CelebA-HQ datasets. (a) E3DGE;
+(b) G-NeRF; (c) GAGAvatar; (d) Ours.
+our density prediction network, we generate pseudo groundtruth Gaussian center maps for all training images using our
+proposed GAM (Sec. 3.1).
+For the baselines, we compare EGGHead’s Gaussian representation quality against single-image head reconstruction methods, including the 3D-aware GANs
+E3DGE [52] and G-NeRF [98], as well as the 3D-GS based
+method GAGAvatar [17], using the same M =12k Gaussians
+setting where applicable.
+Implementation Details. Our networks are trained on
+a single RTX A6000 GPU using PyTorch [72] and the
+AdamW [62] optimizer with an input image size of 256 ×
+256. We train the density prediction network for 100 epochs
+and the Gaussian attribute regressor for 100k iterations. For
+depth estimation, we use Sapiens [46].
+4.2. Reconstruction Quality
+We first evaluate the reconstruction quality of all methods
+to assess how well each model reproduces the source view.
+This provides a direct measure of representation power and
+fidelity before novel-view synthesis. Specifically, we measure the reconstruction error using PSNR, SSIM [88], and
+LPIPS [95]. In this experiment, we set the number of Gaussians at M =12k for all test images. As shown in Tab. 1, our
+model achieves the best performance across all metrics. We
+also qualitatively compare reconstruction quality in Fig. 5.
+EGGHead captures the subject’s skin tone more accurately
+and improves the detail of the hair, mouth, and teeth, thanks
+to our GAM assigning more Gaussians to those regions.
+4.3. Novel View Synthesis
+We evaluate EGGHead’s novel view synthesis by rendering
+subjects under unseen viewpoints. Fig. 4 qualitatively compares our results with baselines. All methods produce visually plausible results. However, 3D-aware GANs [52, 98]
+struggle to maintain color fidelity, particularly in skin tones,
+hair, ears, and mouth regions, while GAGAvatar [17] suf-
+Method
+E3DGE [52]
+G-NeRF [98]
+GAGAvatar [17]
+Ours
+FFHQ
+CelebA-HQ
+ID↑
+FID↓
+ID↑
+FID↓
+0.7744
+0.6621
+0.8377
+0.8517
+41.60
+54.67
+32.55
+29.01
+0.7547
+0.6375
+0.8480
+0.8532
+40.87
+50.45
+30.01
+32.23
+Table 2. Novel View Synthesis. We compare novel view synthesis
+quality using pairwise multi-view identity consistency (ID) and
+Frechet Inception Distance (FID).
+Input
+GT
+(a)
+(b)
+(c)
+(d)
+Figure 6. NeRSemble NVS. (a) E3DGE; (b) G-NeRF; (c) GAGAvatar; (d) Ours.
+Method
+Enrollment time (sec) Render speed (FPS)
+E3DGE [52]
+G-NeRF [98]
+GAGAvatar [17]
+Ours
+8.63
+5.96
+0.06
+1.54
+5.26
+33.61
+43.43
+121.19
+Table 4. Efficiency. We compare efficiency in enrollment time
+and rendering speed.
+GPU with AMD EPYC 7713 CPU. One key component in
+the efficiency of head representations is the latency required
+to prepare them before rendering. As shown in Tab. 4, 3Daware GANs [52, 98] require several seconds, while ours
+reduces this cost to around one second. GAGAvatar [17] directly predicts Gaussian attributes during preparations and
+relies on a neural renderer in each frame, resulting in a short
+enrollment time. In contrast, our method uses slightly more
+computation during preparation to predict accurate Gaussian attributes and renders 3× faster, achieving the fastest
+rendering speed.
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+4.5. Ablation Studies
+E3DGE [52]
+G-NeRF [98]
+GAGAvatar [17]
+Ours
+20.60
+19.26
+21.43
+22.91
+0.777
+0.768
+0.832
+0.835
+0.136
+0.135
+0.101
+0.096
+We evaluate the effectiveness of our designs in more detail
+through ablations. All ablations are trained and evaluated
+on the aforementioned FFHQ dataset.
+Table 3. NeRSemble NVS. Quantitative comparison on the
+NeRSemble dataset.
+fers from identity inconsistencies due to weak constraints
+in occluded regions. In contrast, EGGHead preserves fine
+facial details through effective and efficient Gaussian allocation and better maintains subject identity, synthesizing
+novel views directly from subject-specific facial information without relying on additional networks.
+We also quantitatively evaluate novel view synthesis in
+Tab. 2. Similar to [14], we compute pairwise identity
+consistency (ID) across novel views using AdaFace [47]
+and FID [36] between the generated novel views and real
+FFHQ/CelebA-HQ images. EGGHead performs best on
+both metrics for FFHQ and achieves the best ID score for
+CelebA-HQ, demonstrating superior identity preservation,
+multi-view consistency, and overall face quality.
+We further evaluate on the multi-view NeRSemble
+dataset [49] to show the generalization capability of our
+approach. As shown in Fig. 6, our method best preserves
+identity while synthesizing novel views, whereas the baselines lose fine details (e.g., facial hair, eyes, earrings). We
+also achieve the best performance across all metrics quantitatively for NeRSemble novel view synthesis (See Tab. 3).
+4.4. Efficiency
+We compare model efficiency on two fronts: enrollment
+time and rendering speed, measured on a single RTX A6000
+Sampling Strategy. We compare our allocation strategy
+(adaptive sampling) with three alternative sampling strategies (uniform, landmark, and parsing-guided) in reconstruction quality across Gaussian budgets M . Uniform sampling
+uniformly samples the head region, and landmark sampling allocates more samples around facial landmarks [48].
+Parsing-guided sampling leverages face parsing [92] and allocates more Gaussians to targeted regions such as eyes and
+hair using fixed budgets for each semantic region. We evaluate under three settings of M : 12k, 8k, and 4k. As shown in
+Tab. 5, our adaptive sampling generally outperforms other
+strategies, with lower SSIM than uniform sampling. Fig. 7
+visualizes improvements in reconstruction quality. Our allocation algorithm captures fine details such as hair strands,
+eyes, and teeth more faithfully than uniform sampling. Although landmark sampling yields higher facial detail by allocating more samples around facial landmarks, it results in
+blurred regions elsewhere, such as hair. We also find that a
+fixed, deterministic budget for each facial semantic region
+cannot outperform our adaptive sampling that adjusts for
+each individual. Our method thus utilizes a limited Gaussian budget more effectively.
+Voronoi Tessellation. We found accurately capturing 3D
+Gaussian shapes in single-view and sparse-Gaussian settings inherently non-trivial. Thus, we leverage Voronoi tessellation to guide the prediction of Mq and Ms . To evaluate its influence, we remove this guidance and let the Gaussian attribute regressor directly predict Mq and Ms as well.
+GT
+(a)
+(b)
+(c)
+(d)
+Figure 7. Ablation on Sampling Strategy. M =12k. (a) Landmark; (b) Parsing; (c) Uniform; (d) Ours.
+M
+12k
+8k
+4k
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+Landmark
+Parsing
+Uniform
+Adaptive (Ours)
+28.64
+29.02
+29.13
+29.75
+0.936
+0.943
+0.953
+0.951
+0.024
+0.022
+0.019
+0.017
+Landmark
+Parsing
+Uniform
+Adaptive (Ours)
+28.06
+28.35
+28.43
+29.27
+0.918
+0.925
+0.938
+0.937
+0.032
+0.030
+0.026
+0.021
+Landmark
+Parsing
+Uniform
+Adaptive (Ours)
+27.03
+26.97
+27.64
+28.25
+0.887
+0.891
+0.914
+0.910
+0.045
+0.047
+0.036
+0.032
+Table 5. Ablation on Sampling Strategy. We evaluate whether
+our allocation strategy (adaptive) more effectively distributes
+Gaussians under a fixed budget M compared to uniform and landmark sampling. Our method achieves better reconstruction quality
+across M settings, with lower SSIM than uniform sampling.
+Input
+w/o VT
+w/ VT
+(M =12k)
+w/o VT
+w/ VT
+(M =4k)
+Figure 8. Ablation on Voronoi Tessellation. We show the impact
+of Voronoi tessellation (VT) on capturing 3D Gaussian shapes under single-view and sparse-Gaussian settings.
+As shown in Fig. 8, with the same training sets, directly
+regressing Gaussian attributes without tessellation leads to
+noticeable hole artifacts in the rendered results. Moreover,
+under sparser Gaussians (M =4k), scale attributes are overly
+enlarged, causing facial details to become blurred. Without
+tessellation, the model achieves a PSNR of 18.53 and 18.14
+at M =12k and M =4k, respectively. See Adaptive (Ours)
+in Tab. 5 for results with tessellation. This shows that tessellation greatly improves the robustness of the regressor in
+predicting Gaussian attributes.
+Mirroring Gaussians. We fill occluded regions by mirroring Gaussians without relying on diffusion-based multiview generation or an additional network to keep the model
+Input
+w/o mirroring
+w/ mirroring
+Figure 9. Ablation on Mirroring Gaussians. We show the effect of mirroring Gaussians for handling occluded regions. Our
+method naturally fills in the occluded areas.
+lightweight and efficient (see Fig. 9). As the mirrored Gaussians are exclusively added to the occluded regions, our face
+symmetry module generates novel views without modifying
+the visible region. Despite its simplicity, it effectively improves completeness under pose variations while preserving the fidelity of visible regions. This design choice aligns
+with our objective of achieving reliable head reconstruction
+while minimizing computational overhead.
+5. Conclusion
+We’ve proposed EGGHead, a single-image generalizable
+head modeling method that offers fast enrollment and rendering while maintaining high reconstruction quality. Our
+Gaussian allocation algorithm assigns appropriate numbers
+of Gaussians to different semantic head regions, preserving visual fidelity even with lower Gaussian budgets. Our
+feed-forward design combines a Gaussian allocation and
+density prediction network with a Gaussian attribute regressor, eliminating expensive per-subject optimization typically required in 3D-GS. In addition, Voronoi tessellationguided attribute prediction improves structural accuracy under sparse single-view settings, while the Face Symmetry
+Module enhances completeness without additional heavy
+networks. We hope our method encourages future work
+on efficient, high-quality, and generalizable Gaussian heads
+from single images.
+Limitations. Our model does not decompose texture into
+albedo and illumination and thus cannot support relighting.
+Moreover, pseudo-ground truth for Gaussian allocation is
+derived from single in-the-wild FFHQ images. Multi-view
+images of the same identity would provide more reliable
+supervision and higher-quality ground truth. Uneven lighting can also challenge the face symmetry assumption, causing incorrect reflection of shadows or overexposed regions
+under non-diffuse lighting. This can be mitigated by preprocessing the input image with an off-the-shelf delighting
+method [35, 60] during enrollment. Finally, fully frontal inputs may prevent complete reconstruction of the back of the
+head, as symmetry-based completion of occluded regions
+benefits from a partially visible face profile.
+EGGHead: Efficient Generalizable Gaussian Heads from a Single Image
+Supplementary Material
+6. Network Architecture
+Layer
+Filter Size
+Input channel
+Output channel
+Activation
+We describe the architectures of the Gaussian attribute regressor, the density prediction network, and the refinement
+network. Please refer to Tab. 6, Tab. 7 and Tab. 8 respectively.
+E1
+E2
+E3
+E4
+D3
+D2
+D1
+Conv
+3×3
+3×3
+3×3
+3×3
+2×2
+2×2
+2×2
+1×1
+3
+32
+64
+128
+256
+128
+64
+32
+32
+64
+128
+256
+128
+64
+32
+1
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+Sigmoid
+Gaussian Attribute Regressor. The image encoder Eimg
+and the attribute encoder Eattr share the same architecture,
+consisting of convolution, E1 , E2 , and E3 . Image and depth
+features are concatenated and passed to the attribute decoder Dattr through skip connections. Each E and D stage
+consists of two residual blocks. hs , hα , and hc denote the
+scale, opacity, and color heads, respectively, which operate
+on the decoded feature to predict the corresponding Gaussian attributes.
+Layer
+Filter Size
+Input Channel
+Output Channel
+Activation
+Conv
+E1
+E2
+E3
+D3
+D2
+D1
+Conv
+hs
+hα
+hc
+5×5
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3
+32
+32
+48
+192
+192
+128
+52
+32
+32
+32
+32
+32
+48
+96
+96
+64
+48
+32
+1
+1
+3
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+ReLU
+Sigmoid
+Sigmoid
+Tanh
+Table 6. Structure of Gaussian Attribute Regressor.
+Table 7. Structure of Density Prediction Network.
+stages, D1 –D3 , each restoring the spatial resolution with
+skip connections from the encoder. A final 1×1 convolution
+predicts a 3-channel residual image, which is multiplied by
+Iα and added to Ir to produce the refined output I′r .
+Layer
+Filter Size
+Input channel
+Output channel
+Activation
+E1
+E2
+E3
+E4
+M
+D3
+D2
+D1
+Conv
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+3×3
+1×1
+4
+48
+96
+192
+384
+576
+288
+144
+48
+48
+96
+192
+384
+384
+192
+96
+48
+3
+SiLU
+SiLU
+SiLU
+SiLU
+SiLU
+SiLU
+SiLU
+SiLU
+-
+Table 8. Structure of Refinement Network.
+7. Regressor Loss
+The regressor loss is defined as:
+Lreg = λref Lref + λcoarse Lcoarse + λα Lα ,
+Density Prediction Network. The network follows a Unet-based encoder decoder design. The encoder Eden consists of four layers, E1 –E4 , which increase the number of
+channels from 3 to 256 while downsampling via max pooling. The decoder Dden comprises three layers, D1 –D3 ,
+each upsampling with transposed convolutions and incorporating skip connections from the corresponding encoder
+layers. Each stage contains two residual blocks, and a final 1 × 1 convolution followed by Sigmoid generates the
+density map.
+Refinement Network. The input is constructed by concatenating the coarse image Ir and the alpha map Iα , producing a 4-channel input. The encoder consists of four
+stages, E1 –E4 , which increase the channel dimension from
+4 to 384 while reducing the spatial resolution. Each stage
+contains two 3 × 3 convolutions followed by group normalization and SiLU activation. A bottleneck layer M further
+processes the latent feature. The decoder comprises three
+(15)
+which consists of the refinement loss Lref , the coarse loss
+Lcoarse and the alpha loss Lα :
+Lref = λL1 L1 (I′r , Is ) + λssim Lssim (I′r , Is )
++ λperc Lperc (I′r , Is ),
+Lcoarse = λL1 L1 (Ir , Is ) + λssim Lssim (Ir , Is ),
+(16)
+Lα = Lbce (Iα , Imask ),
+where Imask denotes the foreground mask extracted from the
+input image Is . We set λref = 0.7, λcoarse = 0.3, λα =
+0.1, λL1 = 0.8, λssim = 0.2 and λperc = 0.05.
+8. Edge-aware Alignment
+In addition to Gaussian merging, we incorporate an edgeaware alignment to ensure smoother transitions near internal boundaries in GAM. Specifically, we extract internal
+edges from the source image using the Canny edge detector [12]. For each Gaussian center, we then compute its
+distance to the nearest internal edge and determine its symmetric position P̃ across the nearest edge.
+P̃ = 2 · proj(P ) − P,
+(17)
+where proj(P ) denotes the projection of P onto the nearest
+edge. We pair P and P̃ across the boundary while preserving the total budget M . This alignment produces smoother
+transitions along the edges and preserves overall rendering
+consistency while reducing discontinuities.
+Input
+Aligned positions w/o Alignment
+w/ Alignment
+Figure 10. Edge-aware alignment. Aligning Gaussian positions
+along the edges improves boundary consistency and reduces artifacts compared to the unaligned configuration.
+9. Density Prediction
+We visualize the predicted density maps that are used to
+sample Gaussian positions. As shown in Fig. 11, the predicted density maps are generally consistent with the GT
+density maps and assign higher density to detail-sensitive
+regions, indicating that the density prediction network
+learns an effective density distribution for adaptive Gaussian allocation. Notably, EGGHead’s density prediction
+network also handles more extreme expressions well such
+as “smiling with teeth” and “surprised with mouth open”.
+Input
+GT
+Predicted
+Gaussian budgets of 120k, 80k, and 40k, as summarized in
+Tab. 9. Even with 120k Gaussians, the pure rendering speed
+reaches 179.91 FPS, exceeding the 121.19 FPS of the full
+pipeline with M =12k. This shows that EGGHead maintains
+real-time rendering performance even with larger Gaussian
+budgets.
+Number of Gaussians (M)
+Rendering speed (FPS)
+120k
+80k
+40k
+12k
+8k
+4k
+179.91
+214.01
+240.24
+309.60
+316.62
+331.11
+Table 9. Rendering Speed. We report rendering speed for different numbers of Gaussians without additional refinement steps.
+11. Expression Editing
+Although our framework is trained for source-view reconstruction with static Gaussians, it enables expression editing at inference time by deforming Gaussians bound to the
+FLAME mesh [55]. Specifically, each Gaussian center is
+bound to its closest point on the source FLAME mesh and
+deformed using the displacement between the source and
+driving meshes. Compared to GAGAvatar [17], EGGHead
+is able to match the expression in the driving image more
+closely. For example, in the second driving image shown
+below, notice that GAGAvatar’s result still has an open
+mouth whereas EGGHead is able to appropriately close
+the lips. GAGAvatar also modifies the gaze direction incorrectly (See the first driving image). In terms of efficiency, we find that editing expressions has very little impact on the rendering speed (121.19 FPS → 119.21 FPS),
+and EGGHead remains real-time. The enrollment time increases from 1.54 seconds to 2.14 seconds due to binding
+and fitting Gaussians to the source mesh, but it remains
+shorter than those of E3DGE [52] and G-NeRF [98].
+Rendered
+Figure 11. Predicted Density Map. The predicted density maps
+align well with the GT density maps and assign higher density to
+fine detail regions which enables adaptive Gaussian allocation.
+10. Rendering Speed
+The 121.19 FPS reported in the main paper includes the
+refinement network and head mask generation [92] after
+splatting, and these steps make the final FPS nearly constant regardless of the number of Gaussians. To show
+the actual rendering efficiency, we measure pure rendering speed without these steps and further evaluate larger
+Source
+Driving
+GAGAvatar
+Ours
+Figure 12. Expression Editing. We show the expression from
+the driving image is properly transferred to the source identity by
+deforming Gaussians bound to the mesh.
+Input
+E3DGE
+G-NeRF
+GAGAvatar
+Ours
+Figure 13. Additional Comparisons. We show improvements in preserving facial details, hair texture, and eye structure/color, and also
+better reconstructing occluded face regions (e.g. recovering the subject’s occluded ear in the fourth row).
+12. Additional Gaussian Budget Comparison
+To further analyze the efficiency of our adaptive allocation
+strategy, we compare our method using 12k Gaussians with
+GAGAvatar [17] using 24k Gaussians, giving GAGAvatar
+twice the Gaussian budget. As shown in Table 10, our
+method achieves competitive or better performance while
+using only half the number of Gaussians. These results
+show that our adaptive allocation strategy provides a compact and efficient Gaussian representation by focusing the
+budget on semantically important facial regions.
+M
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+24k
+12k
+GAGAvatar [17]
+Ours
+21.72
+22.91
+0.837
+0.835
+0.100
+0.096
+Table 10. Additional NeRSemble NVS. Additional quantitative
+comparison on the NeRSemble dataset using 12k Gaussians for
+our method and 24k Gaussians for GAGAvatar.
+15. Licenses and Responsible Use of Human
+Data
+We use three existing datasets in our work: FFHQ [44],
+CelebA-HQ [43], and NeRSemble [49]. All datasets allow
+free use for non-commercial research purposes. Aside from
+the subject faces, none of them contains any additional personally identifiable information or offensive content.
+16. Potential Societal Impacts
+Creating photorealistic human heads always has the potential for generating malicious edited content of real subjects.
+We certainly do not condone such misuse. One potential way to address this problem is to train deepfake methods [1, 3, 4, 18, 32, 41, 61, 68] that can distinguish our
+generated heads from real images using some of our synthesized heads as part of training data.
+References
+13. Additional Qualitative Results
+We show more qualitative results for the novel view synthesis (See Fig. 13). Thanks to our GAM, EGGHead noticeably improves over the baselines in representing hair texture, eye structure and color, and other facial details such as
+creases, wrinkles, and dimples. Our face symmetry module
+further improves reconstruction quality in occluded regions
+(e.g. recovering the subject’s occluded ear in the fourth row
+of Fig. 13).
+14. Delighting Preprocessing
+As discussed in the main paper, uneven lighting can introduce artifacts when mirroring Gaussians across the facial
+symmetry plane. Fig. 14 illustrates the effect of applying an
+off-the-shelf delighting method to the input image during
+enrollment.
+Input
+Input (deshadowed)
+Novel View
+Figure 14. Delighting Preprocessing. We apply an off-the-shelf
+delighting method to the input image during enrollment to reduce
+asymmetric illumination artifacts.
+[1] Agil Aghasanli, Dmitry Kangin, and Plamen Angelov.
+Interpretable-through-prototypes deepfake detection for diffusion models. In ICCVW, 2023. 4
+[2] Sizhe An, Hongyi Xu, Yichun Shi, Guoxian Song, Umit Y.
+Ogras, and Linjie Luo. PanoHead: Geometry-aware 3D fullhead synthesis in 360deg. In IEEE Conf. Comput. Vis. Pattern Recog., 2023. 2
+[3] Vishal Asnani, Xi Yin, Tal Hassner, and Xiaoming Liu.
+MaLP: Manipulation localization using a proactive scheme.
+In IEEE Conf. Comput. Vis. Pattern Recog., 2023. 4
+[4] Vishal Asnani, Xi Yin, Tal Hassner, and Xiaoming Liu. Reverse engineering of generative models: Inferring model hyperparameters from generated images. IEEE Trans. Pattern
+Anal. Mach. Intell., 2023. 4
+[5] ShahRukh Athar, Zexiang Xu, Kalyan Sunkavalli, Eli
+Shechtman, and Zhixin Shu. RigNeRF: Fully controllable
+neural 3D portraits. In IEEE Conf. Comput. Vis. Pattern
+Recog., 2022. 2
+[6] Mallikarjun B R, Ayush Tewari, Tae-Hyun Oh, Tim Weyrich,
+Bernd Bickel, Hans-Peter Seidel, Hanspeter Pfister, Wojciech Matusik, Mohamed Elgharib, and Christian Theobalt.
+Monocular reconstruction of neural face reflectance fields. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2021. 1, 2
+[7] Haoran Bai, Di Kang, Haoxian Zhang, Jinshan Pan, and Linchao Bao. FFHQ-UV: Normalized facial UV-texture dataset
+for 3D face reconstruction. In IEEE Conf. Comput. Vis. Pattern Recog., 2023. 2
+[8] Ziqian Bai, Zhaopeng Cui, Jamal Ahmed Rahim, Xiaoming
+Liu, and Ping Tan. Deep facial non-rigid multi-view stereo.
+In IEEE Conf. Comput. Vis. Pattern Recog., 2020. 2
+[9] Ziqian Bai, Zhaopeng Cui, Xiaoming Liu, and Ping Tan.
+Riggable 3D face reconstruction via in-network optimization. In IEEE Conf. Comput. Vis. Pattern Recog., 2021. 2
+[10] Volker Blanz and Thomas Vetter. A morphable model for the
+synthesis of 3D faces. In ACM SIGGRAPH, 1999. 1, 2
+[11] M. Budninskiy, Beibei Liu, Fernando de Goes, Y. Tong,
+Pierre Alliez, and Mathieu Desbrun. Optimal voronoi tessellations with hessian-based anisotropy. ACM Trans. Graph.,
+2016. 2, 3, 4
+[12] John F. Canny. A computational approach to edge detection.
+IEEE Trans. Pattern Anal. Mach. Intell., 1986. 1
+[13] Eric Chan, Marco Monteiro, Petr Kellnhofer, Jiajun Wu, and
+Gordon Wetzstein. pi-GAN: Periodic implicit generative adversarial networks for 3D-aware image synthesis. In IEEE
+Conf. Comput. Vis. Pattern Recog., 2021. 2
+[14] Eric R. Chan, Connor Z. Lin, Matthew A. Chan, Koki
+Nagano, Boxiao Pan, Shalini De Mello, Orazio Gallo,
+Leonidas Guibas, Jonathan Tremblay, Sameh Khamis, Tero
+Karras, and Gordon Wetzstein. Efficient geometry-aware 3D
+generative adversarial networks. In IEEE Conf. Comput. Vis.
+Pattern Recog., 2022. 2, 7
+[15] Jianchuan Chen, Jingchuan Hu, GaiGe Wang, Zhonghua
+Jiang, TianSong Zhou, Zhiwen Chen, and Chengfei Lv.
+TaoAvatar: Real-time lifelike full-body talking avatars for
+augmented reality via 3D gaussian splatting. In IEEE Conf.
+Comput. Vis. Pattern Recog., 2025. 2
+[16] Yufan Chen, Lizhen Wang, Qijing Li, Hongjiang Xiao,
+Shengping Zhang, Hongxun Yao, and Yebin Liu. Monogaussianavatar: Monocular gaussian point-based head avatar. In
+ACM SIGGRAPH, 2024. 2
+[17] Xuangeng Chu and Tatsuya Harada. Generalizable and animatable gaussian head avatar. In Adv. Neural Inform. Process. Syst., 2024. 2, 4, 5, 6, 7
+[18] Riccardo Corvi, Davide Cozzolino, Giada Zingarini, Giovanni Poggi, Koki Nagano, and Luisa Verdoliva. On the detection of synthetic images generated by diffusion models.
+In ICASSP, 2023. 4
+[19] Yu Deng, Jiaolong Yang, Jianfeng Xiang, and Xin Tong.
+GRAM: Generative radiance manifolds for 3D-aware image generation. In IEEE Conf. Comput. Vis. Pattern Recog.,
+2022. 2
+[20] Rahul Dey and Vishnu Boddeti. 3DFaceFill: An analysisby-synthesis approach to face completion. In IEEE Winter
+Conf. Appl. Comput. Vis., 2022. 2
+[21] Zheng Ding, Cecilia Zhang, Zhihao Xia, Lars Jebe, Zhuowen
+Tu, and Xiuming Zhang. DiffusionRig: Learning personalized priors for facial appearance editing. In IEEE Conf.
+Comput. Vis. Pattern Recog., 2023. 2
+[22] Hoseok Do, EunKyung Yoo, Taehyeong Kim, Chul Lee, and
+Jin young Choi. Quantitative manipulation of custom attributes on 3D-aware image synthesis. In IEEE Conf. Comput. Vis. Pattern Recog., 2023. 2
+[23] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia
+Xu, and Zhangyang Wang. LightGaussian: Unbounded 3D
+Gaussian Compression with 15x Reduction and 200+ FPS.
+In Adv. Neural Inform. Process. Syst., 2024. 2
+[24] Yao Feng, Haiwen Feng, Michael J. Black, and Timo
+Bolkart. Learning an animatable detailed 3D face model
+from in-the-wild images. In ACM Trans. Graph., 2021. 5
+[25] Guy Gafni, Justus Thies, Michael Zollhöfer, and Matthias
+Nießner. Dynamic neural radiance fields for monocular 4D
+facial avatar reconstruction. In IEEE Conf. Comput. Vis. Pattern Recog., 2021. 1, 2
+[26] Stathis Galanakis, Baris Gecer, Alexandros Lattas, and Stefanos Zafeiriou. 3DMM-RF: Convolutional radiance fields
+for 3D face modeling. In IEEE Winter Conf. Appl. Comput.
+Vis., 2023.
+[27] Chen Gao, Yichang Shih, Wei-Sheng Lai, Chia-Kai Liang,
+and Jia-Bin Huang. Portrait neural radiance fields from a
+single image. arXiv preprint arXiv:2012.05903, 2020. 2
+[28] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. EAGLES: Efficient Accelerated 3D Gaussians with Lightweight
+EncodingS. In Eur. Conf. Comput. Vis., 2024. 2
+[29] Philip-William Grassal, Malte Prinzler, Titus Leistner,
+Carsten Rother, Matthias Nießner, and Justus Thies. Neural head avatars from monocular rgb videos. In IEEE Conf.
+Comput. Vis. Pattern Recog., 2022. 2
+[30] Jiatao Gu, Lingjie Liu, Peng Wang, and Christian Theobalt.
+StyleNeRF: A style-based 3D aware generator for highresolution image synthesis. In Int. Conf. Learn. Represent.,
+2022. 2
+[31] Kaiwen Guo, Peter Lincoln, Philip Davidson, Jay Busch,
+Xueming Yu, Matt Whalen, Geoff Harvey, Sergio OrtsEscolano, Rohit Pandey, Jason Dourgarian, Matthew DuVall, Danhang Tang, Anastasia Tkach, Adarsh Kowdle,
+Emily Cooper, Mingsong Dou, Sean Fanello, Graham Fyffe,
+Christoph Rhemann, Jonathan Taylor, Paul Debevec, and
+Shahram Izadi. The Relightables: Volumetric performance
+capture of humans with realistic relighting. In ACM Trans.
+Graph., 2019. 1
+[32] Xiao Guo, Xiaohong Liu, Zhiyuan Ren, Steven Grosz, Iacopo Masi, and Xiaoming Liu. Hierarchical fine-grained image forgery detection and localization. In IEEE Conf. Comput. Vis. Pattern Recog., 2023. 4
+[33] W. K. Hastings. Monte carlo sampling methods using
+markov chains and their applications. Biometrika, 1970. 5
+[34] Chengan He, Junxuan Li, Tobias Kirschstein, Artem Sevastopolsky, Shunsuke Saito, Qingyang Tan, Javier Romero,
+Chen Cao, Holly Rushmeier, and Giljoo Nam. 3DGH: 3D
+head generation with composable hair and face. In ACM
+Trans. Graph., 2025. 2
+[35] Yingqing He, Yazhou Xing, Tianjia Zhang, and Qifeng
+Chen. Unsupervised portrait shadow removal via generative
+priors. In ACM Int. Conf. Multimedia, 2021. 8
+[36] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner,
+Bernhard Nessler, Gunter Klambauer, and Sepp Hochreiter.
+GANs trained by a two time-scale update rule converge to
+a nash equilibrium. In Adv. Neural Inform. Process. Syst.,
+2017. 7
+[37] Yang Hong, Bo Peng, Haiyao Xiao, Ligang Liu, and Juyong Zhang. HeadNeRF: A real-time NeRF-based parametric
+head model. In IEEE Conf. Comput. Vis. Pattern Recog.,
+2022. 1, 2
+[38] Andrew Hou, Michel Sarkis, Ning Bi, Yiying Tong, and Xiaoming Liu. Face relighting with geometrically consistent
+shadows. In IEEE Conf. Comput. Vis. Pattern Recog., 2022.
+2
+[39] Andrew Hou, Feng Liu, Zhiyuan Ren, Michel Sarkis, Ning
+Bi, Yiying Tong, and Xiaoming Liu. INFAMOUS-NeRF:
+ImproviNg FAce MOdeling Using Semantically-Aligned
+Hypernetworks with Neural Radiance Fields. arXiv preprint
+arXiv:2312.16197, 2023. 1, 2
+[40] Liangxiao Hu, Hongwen Zhang, Yuxiang Zhang, Boyao
+Zhou, Boning Liu, Shengping Zhang, and Liqiang Nie.
+Gaussianavatar: Towards realistic human avatar modeling
+from a single video via animatable 3d gaussians. In IEEE
+Conf. Comput. Vis. Pattern Recog., 2024. 4
+[41] Sarthak Kamat, Shruti Agarwal, Trevor Darrell, and Anna
+Rohrbach. Revisiting generalizability in deepfake detection:
+Improving metrics and stabilizing transfer. In ICCVW, 2023.
+4
+[42] Yash Kant, Ethan Weber, Jin Kyu Kim, Rawal Khirodkar, Su Zhaoen, Julieta Martinez, Igor Gilitschenski, Shunsuke Saito, and Timur Bagautdinov. Pippo: High-resolution
+multi-view humans from a single image. In IEEE Conf. Comput. Vis. Pattern Recog., 2025. 2
+[43] Tero Karras, Timo Aila, Samuli Laine, and Jaakko Lehtinen.
+Progressive growing of gans for improved quality, stability,
+and variation. In Int. Conf. Learn. Represent., 2018. 5, 4
+[44] Tero Karras, Samuli Laine, and Timo Aila. A style-based
+generator architecture for generative adversarial networks. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2019. 5, 4
+[45] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3D gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph., 2023. 1, 2
+[46] Rawal Khirodkar, Timur Bagautdinov, Julieta Martinez,
+Zhaoen Su, Austin James, Peter Selednik, Stuart Anderson,
+and Shunsuke Saito. Sapiens: Foundation for human vision
+models. In Eur. Conf. Comput. Vis., 2024. 6
+[47] Minchul Kim, Anil K Jain, and Xiaoming Liu. AdaFace:
+Quality adaptive margin for face recognition. In IEEE Conf.
+Comput. Vis. Pattern Recog., 2022. 7
+[48] Davis E. King. Dlib-ml: A machine learning toolkit. Journal
+of Machine Learning Research, 10:1755–1758, 2009. 7
+[49] Tobias Kirschstein, Shenhan Qian, Simon Giebenhain, Tim
+Walter, and Matthias Nießner. Nersemble: Multi-view radiance field reconstruction of human heads. ACM Trans.
+Graph., 2023. 7, 4
+[50] Tobias Kirschstein, Simon Giebenhain, Jiapeng Tang,
+Markos Georgopoulos, and Matthias Nießner. GGHead: Fast
+and Generalizable 3D Gaussian Heads. In ACM SIGGRAPH
+Asia, 2024. 2
+[51] Youngjoong Kwon, Baole Fang, Yixing Lu, Haoye Dong,
+Cheng Zhang, Francisco Vicente Carrasco, Albert MosellaMontoro, Jianjin Xu, Shingo Takagi, Daeil Kim, Aayush
+Prakash, and Fernando De la Torre. Generalizable human
+gaussians for sparse view synthesis. In Eur. Conf. Comput.
+Vis., 2024. 5
+[52] Yushi Lan, Xuyi Meng, Shuai Yang, Chen Change Loy, and
+Bo Dai. E3DGE: Self-supervised geometry-aware encoder
+for style-based 3D GAN inversion. In IEEE Conf. Comput.
+Vis. Pattern Recog., 2023. 2, 6, 7
+[53] Gun-Hee Lee and Seong-Whan Lee. Uncertainty-aware
+mesh decoder for high fidelity 3D face reconstruction. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2020. 1, 2
+[54] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3D gaussian representation for
+radiance field. In IEEE Conf. Comput. Vis. Pattern Recog.,
+2024. 2
+[55] Tianye Li, Timo Bolkart, Michael J. Black, Hao Li, and
+Javier Romero. Learning a model of facial shape and expression from 4D scans. In ACM Trans. Graph., 2017. 2
+[56] Jiangke Lin, Yi Yuan, Tianjia Shao, and Kun Zhou. Towards
+high-fidelity 3D face reconstruction from in-the-wild images
+using graph convolutional networks. In IEEE Conf. Comput.
+Vis. Pattern Recog., 2020. 2
+[57] Feng Liu, Dan Zeng, Qijun Zhao, and Xiaoming Liu. Disentangling features in 3D face shapes for joint face reconstruction and recognition. In IEEE Conf. Comput. Vis. Pattern
+Recog., 2018. 1
+[58] Feng Liu, Qijun Zhao, Xiaoming Liu, and Dan Zeng. Joint
+face alignment and 3d face reconstruction with application
+to face recognition. IEEE Trans. Pattern Anal. Mach. Intell.,
+2018. 1
+[59] Feng Liu, Luan Tran, and Xiaoming Liu. 3D face modeling
+from diverse raw scan data. In Int. Conf. Comput. Vis., 2019.
+2
+[60] Yaojie Liu, Andrew Hou, Xinyu Huang, Liu Ren, and Xiaoming Liu. Blind removal of facial foreign shadows. In
+Brit. Mach. Vis. Conf., 2022. 8
+[61] Peter Lorenz, Ricard L. Durall, and Janis Keuper. Detecting
+images generated by deep diffusion models using their local
+intrinsic dimensionality. In ICCVW, 2023. 4
+[62] Ilya Loshchilov and Frank Hutter. Decoupled weight decay
+regularization. In Int. Conf. Learn. Represent., 2017. 6
+[63] Weijie Lyu, Yi Zhou, Ming-Hsuan Yang, and Zhixin Shu.
+Facelift: Learning generalizable single image 3d face reconstruction from synthetic heads. In Int. Conf. Comput. Vis.,
+2025. 2, 5
+[64] Shengjie Ma, Yanlin Weng, Tianjia Shao, and Kun Zhou. 3D
+gaussian blendshapes for head avatar animation. In ACM
+SIGGRAPH, 2024. 2
+[65] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing scenes as neural radiance fields for view synthesis. In Eur. Conf. Comput. Vis., 2020. 1, 2
+[66] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi
+Koohpayegani, and Hamed Pirsiavash. Compact3D: Smaller
+and faster gaussian splatting with vector quantization. arXiv
+preprint arXiv:2311.18159, 2023. 2
+[67] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D gaussian splatting for accelerated
+novel view synthesis. In IEEE Conf. Comput. Vis. Pattern
+Recog., 2024. 2
+[68] Utkarsh Ojha, Yuheng Li, and Yong Jae Lee. Towards universal fake image detectors that generalize across generative
+models. In IEEE Conf. Comput. Vis. Pattern Recog., 2023. 4
+[69] Panagiotis Papantonakis, Georgios Kopanas, Bernhard
+Kerbl, Alexandre Lanvin, and George Drettakis. Reducing
+the memory footprint of 3D gaussian splatting. Proceedings
+of the ACM on Computer Graphics and Interactive Techniques, 2024. 2
+[70] Keunhong Park, Utkarsh Sinha, Jonathan T. Barron, Sofien
+Bouaziz, Dan B Goldman, Steven M. Seitz, and Ricardo
+Martin-Brualla. Nerfies: Deformable neural radiance fields.
+In Int. Conf. Comput. Vis., 2021. 1, 2
+[71] Keunhong Park, Utkarsh Sinha, Peter Hedman, Jonathan T.
+Barron, Sofien Bouaziz, Dan B Goldman, Ricardo MartinBrualla, and Steven M. Seitz. HyperNeRF: A higherdimensional representation for topologically varying neural
+radiance fields. ACM Trans. Graph., 2021. 1, 2
+[72] Adam Paszke, Sam Gross, Soumith Chintala, Gregory
+Chanan, Edward Yang, Zachary DeVito, Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. Automatic
+differentiation in PyTorch. In NeurIPSW, 2017. 6
+[73] Shenhan Qian, Tobias Kirschstein, Liam Schoneveld, Davide
+Davoli, Simon Giebenhain, and Matthias Nießner. GaussianAvatars: Photorealistic head avatars with rigged 3D
+gaussians. In IEEE Conf. Comput. Vis. Pattern Recog., 2024.
+2
+[74] Daniel Rebain, Mark J. Matthews, Kwang Yi, Dmitry Lagun,
+and Andrea Tagliasacchi. LOLNeRF: Learn from one look.
+In IEEE Conf. Comput. Vis. Pattern Recog., 2022. 2
+[75] Shunsuke Saito, Gabriel Schwartz, Tomas Simon, Junxuan
+Li, and Giljoo Nam. Relightable gaussian codec avatars. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2024. 1, 2
+[76] Katja Schwarz, Yiyi Liao, Michael Niemeyer, and Andreas
+Geiger. GRAF: Generative radiance fields for 3D-aware image synthesis. In Adv. Neural Inform. Process. Syst., 2020.
+2
+[77] Jiaxiang Shang, Tianwei Shen, Shiwei Li, Lei Zhou, Mingmin Zhen, Tian Fang, and Long Quan. Self-supervised
+monocular 3D face reconstruction by occlusion-aware multiview geometry consistency. Eur. Conf. Comput. Vis., 2020.
+2
+[78] Zhijing Shao, Zhaolong Wang, Zhuang Li, Duotun Wang,
+Xiangru Lin, Yu Zhang, Mingming Fan, and Zeyu Wang.
+SplattingAvatar: Realistic Real-Time Human Avatars with
+Mesh-Embedded Gaussian Splatting. In IEEE Conf. Comput. Vis. Pattern Recog., 2024. 2
+[79] Zifan Shi, Yinghao Xu, Yujun Shen, Deli Zhao, Qifeng
+Chen, and Dit-Yan Yeung. Improving 3D-aware image synthesis with a geometry-aware discriminator. In Adv. Neural
+Inform. Process. Syst., 2022. 2
+[80] Zifan Shi, Yujun Shen, Yinghao Xu, Sida Peng, Yiyi Liao,
+Sheng Guo, Qifeng Chen, and Dit-Yan Yeung. Learning 3Daware image synthesis with unknown pose distribution. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2023. 2
+[81] Jiapeng Tang, Davide Davoli, Tobias Kirschstein, Liam
+Schoneveld, and Matthias Niessner. GAF: Gaussian avatar
+reconstruction from monocular videos via multi-view diffusion. In IEEE Conf. Comput. Vis. Pattern Recog., 2025. 2
+[82] Felix Taubner, Ruihang Zhang, Mathieu Tuli, and David B.
+Lindell. Cap4d: Creating animatable 4d portrait avatars
+with morphable multi-view diffusion models. In IEEE Conf.
+Comput. Vis. Pattern Recog., 2025. 2, 5
+[83] Luan Tran and Xiaoming Liu. Nonlinear 3D face morphable
+model. In IEEE Conf. Comput. Vis. Pattern Recog., 2018. 1,
+2
+[84] Luan Tran and Xiaoming Liu. On learning 3D face morphable model from in-the-wild images. IEEE Trans. Pattern
+Anal. Mach. Intell., 2019.
+[85] Luan Tran, Feng Liu, and Xiaoming Liu. Towards highfidelity nonlinear 3D face morphable model. In IEEE Conf.
+Comput. Vis. Pattern Recog., 2019. 1, 2
+[86] Lizhen Wang, Zhiyua Chen, Tao Yu, Chenguang Ma, Liang
+Li, and Yebin Liu. FaceVerse: a fine-grained and detailcontrollable 3D face morphable model from a hybrid dataset.
+In IEEE Conf. Comput. Vis. Pattern Recog., 2022. 1, 2
+[87] Shaofei Wang, Tomas Simon, Igor Santesteban, Timur
+Bagautdinov, Junxuan Li, Vasu Agrawal, Fabian Prada,
+Shoou-I Yu, Pace Nalbone, Matt Gramlich, Roman Lubachersky, Chenglei Wu, Javier Romero, Jason Saragih, Michael
+Zollhoefer, Andreas Geiger, Siyu Tang, and Shunsuke Saito.
+Relightable full-body gaussian codec avatars. In ACM SIGGRAPH, 2025. 2
+[88] Zhou Wang, Alan C Bovik, Hamid R Sheikh, and Eero P
+Simoncelli. Image quality assessment: from error visibility
+to structural similarity. In IEEE Trans. Image Process., 2004.
+6
+[89] Ziyan Wang, Timur Bagautdinov, Stephen Lombardi, Tomas
+Simon, Jason Saragih, Jessica Hodgins, and Michael Zollhofer. Learning compositional radiance fields of dynamic
+human heads. In IEEE Conf. Comput. Vis. Pattern Recog.,
+2021. 2
+[90] Yuelang Xu, Benwang Chen, Zhe Li, Hongwen Zhang,
+Lizhen Wang, Zerong Zheng, and Yebin Liu. Gaussian head
+avatar: Ultra high-fidelity head avatar via dynamic gaussians.
+In IEEE Conf. Comput. Vis. Pattern Recog., 2024. 1, 2
+[91] Yu Yin, Kamran Ghasedi, HsiangTao Wu, Jiaolong Yang,
+Xin Tong, and Yun Fu. NeRFInvertor: High fidelity NeRFGAN inversion for single-shot real image animation. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2023. 2
+[92] Changqian Yu, Jingbo Wang, Chao Peng, Changxin Gao,
+Gang Yu, and Nong Sang. Bisenet: Bilateral segmentation
+network for real-time semantic segmentation. In Eur. Conf.
+Comput. Vis., 2018. 7, 2
+[93] Zhengming Yu, Tianye Li, Jingxiang Sun, Omer Shapira,
+Seonwook Park, Michael Stengel, Matthew Chan, Xin Li,
+Wenping Wang, Koki Nagano, and Shalini De Mello. GAIA:
+Generative animatable interactive avatars with expressionconditioned gaussians. In ACM SIGGRAPH, 2025. 2
+[94] Jingbo Zhang, Xiaoyu Li, Ziyu Wan, Can Wang, and Jing
+Liao. FDNeRF: Few-shot dynamic neural radiance fields for
+face reconstruction and expression editing. In ACM SIGGRAPH Asia, 2022. 2
+[95] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman,
+and Oliver Wang. The unreasonable effectiveness of deep
+features as a perceptual metric. In IEEE Conf. Comput. Vis.
+Pattern Recog., 2018. 6
+[96] Shunyuan Zheng, Boyao Zhou, Ruizhi Shao, Boning Liu,
+Shengping Zhang, Liqiang Nie, and Yebin Liu. Gpsgaussian: Generalizable pixel-wise 3d gaussian splatting for
+real-time human novel view synthesis. In IEEE Conf. Comput. Vis. Pattern Recog., 2024. 2
+[97] Yiyu Zhuang, Hao Zhu, Xusen Sun, and Xun Cao. MoFaNeRF: Morphable facial neural radiance field. In Eur. Conf.
+Comput. Vis., 2022. 1, 2
+[98] Huang Zixiong, Chen Qi, Sun Libo, Yang Yifan, Wang
+Naizhou, Tan Mingkui, and Wu Qi. G-NeRF: Geometryenhanced novel view synthesis from single-view images. In
+IEEE Conf. Comput. Vis. Pattern Recog., 2024. 6, 7, 2

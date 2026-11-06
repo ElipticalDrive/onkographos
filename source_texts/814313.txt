@@ -1,0 +1,259 @@
+Like SMPL but for anything. Contribute to FabianPlum/Holotype development by creating an account on GitHub.
+
+scale_symmetry and scale_consistency regularisers (multi-view) by FabianPlum · Pull Request #125 · FabianPlum/Holotype · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+FabianPlum
+commented
+Oct 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+#120 has merged; this PR now targets master, with master merged in (no conflicts). The silhouette PR (#126) stacks on it. It needs no code from #119 or #120.
+The multi-view model predicts every frame's per-joint scales and mesh scale independently, and nothing in its loss ties them together: not the frames of one animal, nor its left and right limbs. In short mouse fine-tunes, the left and right femur scales drifted clearly apart. This PR adds two optional loss terms on the per-joint log scales, both off by default. scale_symmetry pulls paired _L / _R joints to the same scales. scale_consistency pulls each frame's scales toward a running mean of its session, since a session is one animal.
+Changes
+scale_symmetry (commit 1). _lr_joint_pairs pairs joints whose names differ only in an _L / _R token (femur_L / femur_R, Foot_L_tip / Foot_R_tip). The term is the mean squared difference of the paired per-joint log scales.
+scale_consistency (commit 1). _scale_consistency_loss keeps a running mean (EMA, momentum 0.99) of each session's per-joint log scales and, with mesh scaling on, of its log mesh scale, and penalises each frame's squared distance from it.
+The means are detached, move only in training mode, and live in the module's __dict__ (state_dict is unchanged). Validation measures against them, or its own batch mean for an unseen session.
+Frames with a non-finite scale, or |log| ≥ 10, are left out of the term and the mean, so one diverged prediction cannot poison the mean.
+The term and the means are computed in fp32. Under use_mixed_precision an MLP head's scales are fp16, where a 1% update rounds away and the mean stalls (at log scale 0.7 it closed 17% of a 0.05 gap in 500 updates instead of 99.3%). For fp32 inputs (the default transformer-decoder head, also under mixed precision) the term and the means are bit-identical to before.
+Session names in the targets (commit 1). SLEAPMultiViewDataset.__getitem__ adds session_name to y_data, since the loss only receives the targets. Merged HDF5s prefix each session with its source file.
+Start-up checks (commit 1). Both terms need per-joint scales (scale_trans_beta.mode "separate" without the PCA transformation): a positive weight anywhere in the curriculum without them stops training with a ValueError before the model is built. A positive scale_symmetry on a model without _L / _R pairs stops right after it is built. The joint-limit check's curriculum-max loop becomes _max_curriculum_weight(name), used by all three checks.
+Defaults. Both weights are 0.0 in base_weights and in the regressor's fallback weights.
+Tests (commits 2, 4 and 5), tests/test_scale_regularisers.py, on stand-in models: the _L / _R pairs; the scale_symmetry term of the full loss (positive for unequal paired scales, 0 for equal ones, and equal to the total when it is the only weight); _scale_consistency_loss (0 for constant scales, no mean moved or created in eval mode, diverged frames left out).
+Docs (commit 3, extended in review). Two rows in the configs README's loss table. scale_consistency: start it with a curriculum_stages entry once the scales have settled, at epoch 1 or later in a fine-tune (from epoch 0 it pins the initial checkpoint's mesh scale) and later in a from-scratch run (the combined run used epoch 20; not measured); from the epoch it starts, it is part of the validation loss, so best_model.pth compares epochs with and without it; keep it off for data with several animals per session_name, e.g. replicAnt HDF5s. scale_symmetry needs _L / _R joint names. The typical-range column shows the values of the pilots and runs below: 0.25 for scale_symmetry, 0.05 from a later epoch for scale_consistency.
+Checks
+Lint. ruff check and ruff format --check are clean (ruff 0.15.20) at each of the five commits, at the merge with master and with the review changes applied.
+Fast suite. On the merge with master (5b308c8), in a clean worktree: 172 passed, 6 skipped, 4 deselected (CPU, torch 2.1.1). The 6 skips need the untracked local SMILySTICKS_centred_reprojected_aug_test.h5. With the review changes: 172 passed, 6 skipped, 4 deselected (the fp32 check is an assert in an existing test). Committing the review changes on 1206841 and then merging master gives the same tree.
+New tests, red and green. All 3 pass in 1.7 s. Each mutation fails its test: moving the mean in eval mode; keeping diverged frames; in the symmetry term, comparing a side with itself, a sign flip or a shifted pair index (the pairs-only test passed those three); leaving the term out of the total loss. The review's fp32 assert fails without the cast (torch.float16 == torch.float32) and passes with it.
+CPU multi-view GETTING_STARTED training start (getting_started.json, 2 loader workers):
+Both weights 0: batch losses 0.054936, 0.058692 and 0.084916, as on Multi-view training: skip non-finite losses and gradients, average loss components per key across ranks #120; one optimizer step after batch 2, at the same gradient norm (21.1872).
+scale_consistency 0.05: before the first step each total is the run above plus 0.05 × the new term (to one float32 step), other components unchanged; after it the term rose to 0.0237 as the scales left the lagging mean. All finite.
+scale_symmetry 0.25 on the stick model stops at start-up (... no left/right joint pairs); scale_consistency with "entangled_with_betas" stops before the model is built.
+GPU checks (2026-11-02, before the master merge; at 1206841 unless a bullet names another tree):
+scripts/verify_large_change.sh: PASS (ruff, 174 tests including the slow ones, multi-view benchmark and inference, and the 60 s multi-view and single-view training runs).
+Same-seed stick A/B (1 GPU, 3 epochs, dataset_fraction 0.01, seed 42, both weights 0): epoch 2 train 0.0068 / val 0.0060. Master, master repeated, Multi-view training: skip non-finite losses and gradients, average loss components per key across ranks #120, Multi-view training: skip non-finite losses and gradients, average loss components per key across ranks #120 repeated and Validate multi-view models on every view; subsample views in training only #133 span train 0.0069–0.0073 / val 0.0056–0.0064. Train is 0.0001 below the band's bottom; val is inside it.
+Sticks with scale_consistency 0.05: 1 epoch, finite (train 0.0292, val 0.0122). With scale_symmetry 0.25: stops at start-up (no _L / _R pairs), as designed.
+2-GPU M103 smoke on Multi-view silhouette loss against a SAM 2 mask sidecar #126's head (from scratch; batch 4 × accumulation 2 × 2 GPUs; 2% of the data; 2 epochs; scale_symmetry 0.25 from epoch 0, scale_consistency 0.05 from epoch 1, silhouette 1e-4): replicas identical after both epochs, no non-finite messages.
+2-GPU M103 smoke with all open PRs merged (initialised from the M103 run's epoch 299, twist, scale and silhouette terms on): replicas identical, no non-finite messages.
+On Multi-view silhouette loss against a SAM 2 mask sidecar #126's final head 343b931, which contains this PR's final head 2fe5e49, master and both PRs' review changes (2026-11-03): verify_large_change.sh on the final head 343b931 passed (ruff, 189 tests including the slow ones, multi-view benchmark and inference, and the 60 s multi-view and single-view training runs, no non-finite losses). With master after joint_twist_regularization: a hinge on axial bone twist #124 (851a397) merged in: ruff clean, pytest -m "not slow" 191 passed. The 2-GPU M103 smoke: the 2-GPU M103 smoke initialised from the M103 run's epoch 299 (batch 4 × accumulation 2 × 2 GPUs, 2% of the data, 2 epochs; silhouette 1e-4, scale_symmetry 0.25 from epoch 0, scale_consistency 0.05 from epoch 1) ran out of GPU memory at batch 3 on the GPU that also drives the display, reproducibly. The cause is on master, not in these PRs: since init_checkpoint: weights-only starts for multi-view fine-tuning #122's review change the multi-view trainer keeps the init checkpoint (4.3 GB with its optimizer state) loaded on the GPU for the whole run (init_ckpt = torch.load(..., map_location=device) is never freed); the fix follows in a separate PR. With that fix applied locally (load on the CPU and free it after loading; not part of this PR), on this head merged with master 851a397: replicas identical after both epochs, no non-finite messages; silhouette train / val 0.318 / 0.271, then 0.268 / 0.266 (the numbers of the all-PRs smoke above); scale_symmetry 6e-6 / 3e-6, then 2e-6 / 1e-6; scale_consistency 1.4e-5 / 1.8e-5 in epoch 1. The start-up line read "label_flag recomputed from ...recal.h5's labels (> 25.0 px): 818 views with a mask flagged, 0 differ from the sidecar's stored flags".
+Tracked models. The 5 mouse models have 9 or 12 _L / _R pairs; the other 9, among them the stick insect and both OmniAnt models, have none. SMILy mouse v5 (limb fix) and v6 (proxy leaf joints), with build and remap tools #128's v6 mouse model has 16 pairs (v5: 12); 4 of them involve its locked proxy leaf joints.
+Merging. Master (5b308c8) merges into this branch without conflicts; this PR's change is +177/−4 with the review changes (+172/−4 before). The merged branch, with the review changes, merges cleanly with the open fix(antscan): adaptive weld distance, weld face-loss abort, island handling #102, smil_importer: recreate joint_limits as constraints on import (#116) #117, Sessions whose 3D lives on a shared timeline: per-camera frame map and static extra keypoints #123, joint_twist_regularization: a hinge on axial bone twist #124, train_sub_sampling (renamed from dataset_fraction) and per-source fractions for merged multi-view datasets #127, SMILy mouse v5 (limb fix) and v6 (proxy leaf joints), with build and remap tools #128 and Rebrand SMILify as Holotype #131 branches (git merge-tree).
+Evidence
+Short mouse fine-tuning pilots (1–2 epochs from an existing checkpoint; single pilots vary noticeably in validation loss, so small differences are noise):
+scale_symmetry 0.25 alone brought the femur scales close together, with no gain in 3D error;
+scale_consistency 0.05 from epoch 0 gave the largest 3D error: the mesh scale stayed at the initial checkpoint's and the forearms grew to about twice their label length;
+both terms, scale_consistency from epoch 1, gave the lowest 3D error of the pilots and nearly equal femurs.
+The combined Falkner + White + M103 run (full_combined_fk5_v6limits_twist, to epoch 102) and the White-only runs of 2026-11-02 use this implementation unchanged (scale_symmetry 0.25 from epoch 0, scale_consistency 0.05 from epoch 20; transformer-decoder head, mixed precision off).
+Notes (decided in review, 2026-11-03)
+Merge order. As stacked: this PR first (master merged in, retargeted to master, merge commit), then Multi-view silhouette loss against a SAM 2 mask sidecar #126 the same way.
+The means are per rank and not saved. The replicas stay identical (gradients are all-reduced; confirmed by the 2-GPU smokes above); a resume restarts the means. Kept that way: after a resume the means restart from the resumed model's first batch, and that model has already adapted, so the epoch-0 pinning does not recur. Saving them as buffers would need per-session buffers created as sessions appear, which DDP's buffer broadcast from rank 0 would not match across ranks.
+The scale_consistency design. The lagging mean resists any steady change of the scales and holds a state the model falls into: in a 10-epoch run a loss spike left the mesh scale markedly smaller, and the mean held it there. The mesh-scale part weighs as much as all per-joint entries together (3 × 51 = 153 for the mouse). Merged as is (off by default; the README says when to start it). A redesign (a warm-up, the within-batch spread only, or a mesh-scale weight like one joint-axis entry), decided with an A/B on an M103 fine-tune and a from-scratch run, is a planned follow-up issue; the current behaviour stays reachable, since the combined run's resume and the White-only runs use it.
+Side tokens. The stick insect and OmniAnt models end joint names in _l / _r (l_1_co_l) and get no pairs; matching the last token would give 24 pairs for each of them (21 for SMPL_STICK). Planned follow-up issue: _lr_joint_pairs also recognises lowercase _l / _r (the names stay, for replicAnt compatibility) and pairs only joints whose rest positions mirror across a model plane within a tolerance, with a clear message otherwise. The OmniAnt models are about symmetric; the stick insect model is not.
+One animal per session. replicAnt HDF5s use the batch file's name as session_name, so many synthetic individuals count as one session. The scale_consistency README row now says to keep it off for such data. Skipping samples with ground-truth shape instead would also switch it off for M103, whose rows all carry the Falkner stand-in betas.
+session_name in y_data. Every multi-view y_data now carries session_name. Nothing in neuralSMIL, multiview_common or sleap_data iterates over or serialises multi-view y_data (multiview_collate_fn passes the dicts through). Single-view samples carry session_name in x_data only; their y_data is unchanged.
+README. Added in review (see Docs): the typical values 0.25 and 0.05 from a later epoch, the best_model.pth sentence, the from-scratch rule and the replicAnt sentence.
+🤖 Generated with Claude Code
+FabianPlum
+and others
+added 5 commits
+October 31, 2026 18:52
+feat(multiview): scale_symmetry and scale_consistency regularisers
+…
+96bb424
+```
+Two optional multi-view loss terms on the per-joint log scales ('separate'
+scale mode without the PCA transformation), both off by default:
+
+- scale_symmetry: paired _L/_R joints share their per-joint log scales.
+- scale_consistency: each frame's per-joint log scales and log mesh scale
+  stay at a running per-session mean, since one animal per session has one
+  set of proportions. The mean is detached EMA state (momentum 0.99),
+  updated in training mode only and not saved with the model. Frames with
+  a non-finite or out-of-range scale are left out of the term and the mean.
+
+The dataset adds session_name to each sample's targets for this. At
+start-up the trainer stops when either weight is positive anywhere in the
+curriculum without per-joint scales, or when scale_symmetry is positive for
+a model without _L/_R joint pairs, instead of training without the terms.
+The joint-limit fail-fast loop becomes a shared _max_curriculum_weight
+helper.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(multiview): cover the left/right joint pairs and scale consistency
+…
+550c781
+```
+Three tests in the new tests/test_scale_regularisers.py, on the methods
+alone with a stand-in model:
+
+- _lr_joint_pairs pairs _L/_R names, including a token inside the name
+  (Foot_L_tip / Foot_R_tip), and leaves unpaired joints out.
+- _scale_consistency_loss is 0 for constant scales and positive for varying
+  ones; in eval mode it neither moves a session's mean nor creates one.
+- frames with an inf or overflowed scale, or a NaN mesh scale, are left out
+  of the term and of the mean, and the next batch stays finite.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+docs(multiview): document the scale_consistency and scale_symmetry we…
+…
+a034a85
+```
+…ights
+
+Two rows in the configs README loss table. They name the requirement by its
+JSON field (scale_trans_beta.mode "separate") and add two usage points:
+
+- In a fine-tune, start scale_consistency at epoch 1 or later through
+  curriculum_stages. Its running mean starts from the first predictions, so
+  from epoch 0 it pins the mesh scale at the initial checkpoint's value.
+- scale_symmetry needs _L/_R joint name pairs. Training stops at start-up
+  for a model without them, such as the stick insect and OmniAnt models,
+  whose lowercase _l/_r names are not paired.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(multiview): check the scale_symmetry term itself
+…
+a74ae1a
+```
+test_left_right_pairs_and_symmetry only checked _lr_joint_pairs. It
+now also runs compute_multiview_batch_loss on a bare regressor with
+only the scale_symmetry weight on: unequal left/right scales give a
+positive term, equal ones exactly 0. Comparing a side with itself, a
+sign flip and a shifted pair index each fail it; the old test passed
+all three.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test(multiview): the scale_symmetry test also checks the total loss
+…
+1206841
+```
+With only scale_symmetry on, the total loss equals the term. Without this assert, dropping the term from the total
+(total_loss = total_loss + w_sym * sym) passed all three tests.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+This was referenced Oct 31, 2026
+Multi-view silhouette loss against a SAM 2 mask sidecar
+#126
+Merged
+joint_twist_regularization: a hinge on axial bone twist
+#124
+Merged
+FabianPlum
+and others
+added 2 commits
+November 3, 2026 10:04
+Merge remote-tracking branch 'origin/master' into HEAD
+a1a96de
+fix(multiview): scale_consistency running mean in fp32; README guidan…
+…
+2fe5e49
+```
+…ce for the scale terms
+
+Review decisions on #125:
+- _scale_consistency_loss casts the scales to fp32: under autocast an MLP head's scales are fp16, where
+  a 1% EMA update rounds away and the mean stalls. Test: an fp16 input keeps an fp32 mean.
+- configs README: scale_consistency starts later in a from-scratch run (the combined run used epoch 20),
+  is part of the validation loss from the epoch it starts (best_model.pth compares epochs with and
+  without it), and stays off for data with several animals per session_name (e.g. replicAnt HDF5s).
+  Recommended values: scale_consistency 0.05 from a later epoch, scale_symmetry 0.25.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+FabianPlum
+changed the base branch from
+fix/multiview-nonfinite-guards
+to
+master
+November 3, 2026 09:16
+FabianPlum
+added a commit
+that referenced
+this pull request
+Nov 3, 2026
+Merge feature/scale-regularisers (review changes of #125) into featur…
+…
+4c5dfd8
+```
+…e/multiview-silhouette-loss
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+FabianPlum
+merged commit b025004
+into
+master
+Nov 3, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Nov 3, 2026
+scale_consistency: redesign the running-mean term
+#137
+Open
+scale_symmetry: pair lowercase _l / _r joints after a per-model mirror check
+#138
+Open
+SingleViewConfig.validate(): stop or warn on multi-view-only keys
+#142
+Open
+FabianPlum
+added a commit
+that referenced
+this pull request
+Nov 3, 2026
+chore(rebrand): README meaning sentence; post-rebase sweep finds no n…
+…
+cd99f1d
+```
+…ew mentions
+
+README intro: the sentence on what the name means now reads "the single
+specimen a species name is tied to", and fitting "estimates each new
+individual's shape and pose relative to it" instead of "registers new
+individuals to it" (review G8-Q1).
+
+The rebrand sweep from the PR body was re-run after rebasing onto master
+1462a99, which has #124, #123, #125, #126, #135, #127, #128, #117 and the
+v2.3.0 add-on bump since the trial rebase onto 5b308c8. It changed no
+file: those merges add no SMILify mention (git diff 5b308c8 1462a99
+has none). The leftovers are unchanged: the kept local clone paths, the
+implementation_history plans, the SMILIFY_DIST_TIMEOUT_S fallback and
+the two "Formerly SMILify" notes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+FabianPlum
+mentioned this pull request
+Nov 3, 2026
+Rebrand SMILify as Holotype
+#131
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

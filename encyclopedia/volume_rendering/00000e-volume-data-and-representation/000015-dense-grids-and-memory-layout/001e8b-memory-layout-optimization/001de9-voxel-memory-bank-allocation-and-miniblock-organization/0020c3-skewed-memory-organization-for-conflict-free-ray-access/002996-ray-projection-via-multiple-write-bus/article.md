@@ -7,8 +7,8 @@ The Ray Projection via Multiple-Write Bus (VMWB) is a hardware-accelerated mecha
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A full beam of $n$ voxels fetched from the CFB along a viewing direction. Each voxel contains a value (e.g., color/intensity) and a depth index.
-*   **Output:** Two values for the single closest non-transparent voxel: its value and its depth (distance). These are passed to the shading unit [S1, book].
+*   **Input:** A full beam of $n$ voxels fetched from the CFB along a viewing direction [S1, book]. Each voxel contains a value (e.g., color/intensity) and a depth index [S1, book].
+*   **Output:** Two values for the single closest non-transparent voxel: its value and its depth (distance) [S1, book]. These are passed directly to the shading unit [S1, book].
 
 **Data Structures and Layout:**
 The system consists of $n$ identical processing modules indexed $0, 1, \dots, n-1$ [S1, book].
@@ -20,7 +20,7 @@ The system consists of $n$ identical processing modules indexed $0, 1, \dots, n-
 1.  **Fetch:** Retrieve a full beam of $n$ voxels from the CFB along the current viewing direction [S1, book].
 2.  **Distribute:** Place each voxel into its corresponding processing unit ($0$ to $n-1$) [S1, book].
 3.  **Broadcast Parameters:** Broadcast transparency control parameters, interval control parameters, and depth control parameters to all modules [S1, book].
-4.  **Local Filtering:** Each module checks its voxel against the transparency and depth control parameters. If the voxel is transparent or outside the defined depth sections/slices (computed via local depth measures, e.g., Equation 3 in source), the unit is excluded from the race [S1, book].
+4.  **Local Filtering:** Units holding transparent voxels are excluded from the race [S1, book]. Interval and depth control parameters are broadcast and compared with locally computed depth measures to generate depth sections or slices [S1, book].
 5.  **Race for Bus:** All remaining units holding valid non-transparent voxels "race" for the VMWB [S1, book].
     *   The comparison is performed bit-by-bit, starting from the most significant bit (MSB) of the depth index [S1, book].
     *   This comparison proceeds for $\log n$ steps [S1, book].
@@ -31,88 +31,79 @@ The system consists of $n$ identical processing modules indexed $0, 1, \dots, n-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def vmwb_projection(beam: List[Voxel], n: int) -> Tuple[Value, Depth]:
+def vmwb_projection(beam, n):
     """
     Selects the closest non-transparent voxel from a beam of n voxels
     using the Voxel Multiple-Write Bus logic.
     
     Args:
-        beam: List of n Voxel objects, each with .value, .depth_index, .is_transparent.
+        beam: List of n voxel dicts/tuples with keys 'value', 'depth_index', 'is_transparent'.
         n: Number of voxels in the beam (and number of processing units).
         
     Returns:
-        Tuple of (value, depth) for the closest valid voxel.
+        Tuple of (value, depth) for the closest valid voxel, or (None, None) if none.
     """
-    # Step 1 & 2: Voxels are already in beam, associated with unit index i
+    # Step 1 & 2: beam contains n voxels, each assigned to unit index i
+    valid_units = []
+    
     # Step 3: Parameters are broadcast (assumed available globally)
     # transparency_params, interval_params, depth_params = get_broadcast_params()
-    
-    valid_units = []
     
     # Step 4: Local filtering
     for i, voxel in enumerate(beam):
         # Check transparency
-        if voxel.is_transparent:
+        if voxel['is_transparent']:
             continue
             
         # Check depth/interval controls
         # Local depth measure computation (Equation 3 from source)
-        local_depth_measure = compute_local_depth(voxel.depth_index, depth_params)
+        local_depth_measure = voxel['depth_index'] # Placeholder for Equation 3 logic [G]
         
-        if not is_within_depth_section(local_depth_measure, interval_params):
-            continue
-            
+        # The exact filtering logic for interval/depth parameters is not given in the sources [G]
+        # valid_units.append((i, voxel))
         valid_units.append((i, voxel))
         
     if not valid_units:
-        return None, None # No visible voxel
+        return None, None # No valid voxel found [G]
         
     # Step 5 & 6: Race for the bus
     # Compare depth indices bit-by-bit from MSB to LSB
-    # This takes log2(n) steps. We simulate the winner selection here.
-    
-    # Find the voxel with the minimum depth index among valid units
-    # In hardware, this is done via the VMWB comparator tree.
-    closest_unit_index, closest_voxel = min(valid_units, key=lambda x: x[1].depth_index)
+    # This takes log2(n) steps [S1, book]
+    closest_unit_index, closest_voxel = min(valid_units, key=lambda x: x[1]['depth_index'])
     
     # Step 7: Output
-    return closest_voxel.value, closest_voxel.depth_index
-
-def compute_local_depth(depth_index, params):
-    """Placeholder for Equation 3 logic defined in source."""
-    # Implementation depends on specific depth control parameters
-    return depth_index
+    return closest_voxel['value'], closest_voxel['depth_index']
 ```
 
 **Parameters:**
 *   **Transparency Control Parameters:** Thresholds for voxel opacity [S1, book].
-*   **Interval Control Parameters:** Define visible depth ranges [S1, book].
-*   **Depth Control Parameters:** Used to generate depth sections or slices [S1, book].
+*   **Interval Control Parameters:** Broadcast and compared with locally computed depth measures to generate depth sections or slices [S1, book].
+*   **Depth Control Parameters:** Broadcast and compared with locally computed depth measures to generate depth sections or slices [S1, book].
 *   **Typical Values:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-*   **All Transparent:** If all voxels in the beam are transparent or outside depth sections, no unit wins. The output is undefined or null [S1, book].
-*   **Precision:** The bit-by-bit comparison assumes fixed-point or integer depth indices. Floating-point depth comparisons require conversion or specialized hardware logic not detailed in the source [G].
-*   **Degenerate Input:** The method assumes a full beam of $n$ voxels. Partial beams (e.g., at boundaries) require padding or masking, which is not explicitly described [G].
+*   **All Transparent:** If all voxels in the beam are transparent or filtered out, no unit wins and the mechanism returns no output [G].
+*   **Precision:** The bit-by-bit comparison assumes fixed-point or integer depth indices [G].
+*   **Degenerate Input:** The method assumes a full beam of $n$ voxels [G].
 
 ## Subtopics
 
 ### Skewed Memory Organization for Conflict-Free Ray Access
-The memory layout that enables VMWB by ensuring each ray accesses one voxel per bank. [Link](2351-skewed-memory-organization-for-conflict-free-ray-access.md)
+A memory layout that enables VMWB by ensuring each ray accesses one voxel per bank. It sets apart from standard tiling by using linear skewing formulas to guarantee conflict-free access across 26 parallel directions. Choose it when orthographic or principal diagonal views are required on specialized hardware. [Skewed Memory Organization for Conflict-Free Ray Access](2351-skewed-memory-organization-for-conflict-free-ray-access.md)
 
 ### Cubic Frame Buffer (CFB)
-The underlying data structure for $n^3$ voxels. [Link](52-cubic-frame-buffer.md)
+The underlying data structure for $n^3$ voxels that VMWB operates upon [S1, book]. It sets apart from sparse representations by storing all voxels in a dense, banked grid [S1, book]. Choose it when hardware-accelerated parallel projection is needed [S1, book]. [Cubic Frame Buffer](52-cubic-frame-buffer.md)
 
 ## Operating characteristics
 *   **Time Complexity:** The selection of the closest voxel takes $O(\log n)$ time per beam due to the bit-by-bit comparison [S1, book]. The overall projection time for orthographic projections is $O(n^2 \log n)$ or effectively $O(n^2)$ with skewing optimization [S1, book]. Arbitrary parallel projections take $O(n^2 \log n)$ time [S1, book].
 *   **Memory Complexity:** Not given in the sources.
-*   **Strengths:** Conflict-free access; parallel selection; logarithmic selection time.
+*   **Strengths:** Conflict-free access; parallel selection; logarithmic selection time [S1, book].
 *   **Limitations:** Hardware complexity ($n$ modules, barrel shifter); distortion if rotation is used for non-orthographic views [S1, book].
-*   **When to Use:** High-performance volume rendering on specialized hardware (VP3) where $n$ is manageable and orthographic or principal diagonal views are required.
+*   **When to Use:** High-performance volume rendering on specialized hardware (VP3) where $n$ is manageable and orthographic or principal diagonal views are required [S1, book].
 *   **When Not to Use:** General-purpose CPUs without specialized bus logic; scenes requiring frequent arbitrary rotations (causes distortion) [S1, book].
 
 ## Background
-The VMWB projection mechanism was developed for the VP3 (Viewing and Rendering Processor) as part of a volume visualization system [S1, book]. It was presented in the late 1980s (EGGH '89) as a solution to the memory access conflicts in parallel volume rendering [S1, book]. The system uses a Cubic Frame Buffer (CFB) and relies on linear skewing schemes (e.g., $k = (5x + 2y + z) \bmod 517$) to provide conflict-free access to 26 parallel directions (6 orthographic, 8 corner, 12 edge projections) [S1, book].
+The VMWB projection mechanism was developed for the VP3 (Viewing and Rendering Processor) as part of a volume visualization system [S1, book]. The system uses a Cubic Frame Buffer (CFB) and relies on linear skewing schemes (e.g., $k = (5x + 2y + z) \bmod 517$) to provide conflict-free access to 26 parallel directions (6 orthographic, 8 corner, 12 edge projections) [S1, book]. Arbitrary parallel projections can be generated by first transforming (rotating) the scene and then viewing it through a principal orthographic direction [S1, book]. With this technique, however, the CFB image is distorted each time a rotation is performed [S1, book].
 
 ## Sources
 [S1] Viewing and Rendering Processor for a Volume Visualization System, https://doi.org/10.2312/eggh/eggh89/171-178, fetched 2026-10-26 (book)

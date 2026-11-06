@@ -1,0 +1,377 @@
+A game engine based on Hazel. Contribute to drsnuggles8/OloEngineBase development by creating an account on GitHub.
+
+fix(renderer): stop the volumetric shadow map claiming a cascade it c… · drsnuggles8/OloEngineBase@a06b362 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+OloEngine
+src/OloEngine/Renderer
+VolumetricShadowMap.cpp
+VolumetricShadowMap.h
+tests/Rendering
+VolumetricShadowMapMathTest.cpp
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎OloEngine/src/OloEngine/Renderer/VolumetricShadowMap.cpp‎
+Copy file name to clipboardExpand all lines: OloEngine/src/OloEngine/Renderer/VolumetricShadowMap.cpp
++53-6Lines changed: 53 additions & 6 deletions
+Original file line numberDiff line numberDiff line change
+@@ -282,6 +282,33 @@ namespace OloEngine
+282282
+const f32 froxelFar = std::clamp(fog.End, 20.0f, 500.0f) * kFrustumCornerReach;
+283283
+const f32 halfExtent = std::max(std::max(fog.VolumetricSelfShadowExtent, 4.0f) * 0.5f, froxelFar);
+284284
+285+
+// QUANTIZE THE CAMERA before deriving anything from it, or the
+286+
+// domain's EXTENT becomes a continuous function of camera position
+287+
+// and defeats FitCascade's snap entirely.
+288+
+//
+289+
+// The snap keeps the light-space ORIGIN on a grid whose cell size is
+290+
+// `raw / (cells - 1)` — derived from the extent. That is stable only
+291+
+// while the extent is. The XZ extent is fixed (+/- halfExtent) and a
+292+
+// box's projected width does not depend on where the box is, so XZ
+293+
+// was always fine. The Y extent is NOT: `bottom` follows
+294+
+// min(cameraY, HeightOffset), so once the camera drops below
+295+
+// HeightOffset every frame gets a slightly different cell size, the
+296+
+// floor() lands on a different grid, and samples slide sub-texel —
+297+
+// the exact shimmer the z-snap exists to prevent, fed straight into
+298+
+// the froxel scatter's 0.9-weight history. Clipping a partially
+299+
+// overlapping fog volume against a continuously moving window does
+300+
+// the same thing.
+301+
+//
+302+
+// One texel of the cascade's own XZ footprint is the natural
+303+
+// quantum: the window then moves in whole texels, exactly as
+304+
+// CloudShadowMap snaps its centre.
+305+
+const f32 quantum = std::max(2.0f * halfExtent / static_cast<f32>(VolumetricShadowMap::kResolution),
+306+
+1.0e-3f);
+307+
+const auto quantize = [quantum](f32 v)
+308+
+{ return std::floor(v / quantum) * quantum; };
+309+
+const glm::vec3 cameraSnapped(quantize(cameraPosAbsolute.x), quantize(cameraPosAbsolute.y),
+310+
+quantize(cameraPosAbsolute.z));
+311+
+285312
+Bounds domain;
+286313
+if (fog.Density > 0.0f)
+287314
+{
+@@ -290,18 +317,18 @@ namespace OloEngine
+290317
+// to fit — the window bounds that side.
+291318
+const f32 scaleHeights = (fog.HeightFalloff > 1.0e-4f) ? (5.0f / fog.HeightFalloff)
+292319
+: (halfExtent * 2.0f);
+293-
+const f32 top = fog.HeightOffset + std::clamp(scaleHeights, 5.0f, halfExtent * 2.0f);
+320+
+const f32 top = quantize(fog.HeightOffset + std::clamp(scaleHeights, 5.0f, halfExtent * 2.0f));
+294321
+// A QUARTER of the window below, not a whole one. Fog under the
+295322
+// camera has to be in the box — the light path to a low froxel
+296323
+// passes through it — but the box's extent along the light is
+297324
+// divided by kSlicesPerCascade, so every metre of empty depth
+298325
+// below the ground is paid for in march resolution everywhere
+299326
+// else. A quarter keeps the slices near the medium.
+300-
+const f32 bottom = std::min(cameraPosAbsolute.y, fog.HeightOffset) - halfExtent * 0.25f;
+327+
+const f32 bottom = quantize(std::min(cameraSnapped.y, fog.HeightOffset) - halfExtent * 0.25f);
+301328
+302-
+domain.Min = glm::vec3(cameraPosAbsolute.x - halfExtent, bottom, cameraPosAbsolute.z - halfExtent);
+303-
+domain.Max = glm::vec3(cameraPosAbsolute.x + halfExtent, std::max(top, bottom + 1.0f),
+304-
+cameraPosAbsolute.z + halfExtent);
+329+
+domain.Min = glm::vec3(cameraSnapped.x - halfExtent, bottom, cameraSnapped.z - halfExtent);
+330+
+domain.Max = glm::vec3(cameraSnapped.x + halfExtent, std::max(top, bottom + quantum),
+331+
+cameraSnapped.z + halfExtent);
+305332
+}
+306333
+307334
+// A distant volume may widen the cascade, but only so far: past
+@@ -319,7 +346,7 @@ namespace OloEngine
+319346
+const Bounds volumeBounds =
+320347
+FogVolumeWorldBounds(volume.WorldToLocal, static_cast<i32>(volume.ShapeAndFalloff.x + 0.5f),
+321348
+glm::vec3(volume.Extents));
+322-
+const Bounds clipped = ClampBoundsToWindow(volumeBounds, cameraPosAbsolute, volumeWindowHalf);
+349+
+const Bounds clipped = ClampBoundsToWindow(volumeBounds, cameraSnapped, volumeWindowHalf);
+323350
+domain = UnionBounds(domain, clipped);
+324351
+}
+325352
+@@ -361,6 +388,21 @@ namespace OloEngine
+361388
+362389
+s_Data.m_Cascades = {};
+363390
+391+
+// A latched creation failure disables both cascades AT THE SOURCE.
+392+
+// Without this the enable lane the caller uploads says "available"
+393+
+// while Dispatch() returns before it can ever publish the sampler, so
+394+
+// both consumers pass their `u_VsmParams[c].x < 0.5` gate and sample an
+395+
+// unbound texture unit — which reads (0,0,0,1) and therefore *happens*
+396+
+// to mean "no shadowing", but only by accident of what an incomplete GL
+397+
+// texture returns. The failure is sticky, so one frame can still slip
+398+
+// through (the one during which creation failed); everything after it
+399+
+// is honestly off. CloudShadowMap's `IsReady()` gate three lines below
+400+
+// the upload is the same idea.
+401+
+if (s_Data.m_CreationFailed)
+402+
+{
+403+
+return;
+404+
+}
+405+
+364406
+if (clouds.Enabled && clouds.VolumetricSelfShadow && cloudFieldReady)
+365407
+{
+366408
+s_Data.m_Cascades[static_cast<u32>(Cascade::Cloud)] =
+@@ -522,6 +564,11 @@ namespace OloEngine
+522564
+return s_Data.m_Ready;
+523565
+}
+524566
+567+
+bool VolumetricShadowMap::HasFailed()
+568+
+{
+569+
+return s_Data.m_CreationFailed;
+570+
+}
+571+
+525572
+RHI::ResourceHandle VolumetricShadowMap::GetTextureHandle()
+526573
+{
+527574
+return (s_Data.m_Ready && s_Data.m_Volume) ? s_Data.m_Volume->GetRHIHandle() : RHI::NullResource;
+Collapse file
+‎OloEngine/src/OloEngine/Renderer/VolumetricShadowMap.h‎
+Copy file name to clipboardExpand all lines: OloEngine/src/OloEngine/Renderer/VolumetricShadowMap.h
++7Lines changed: 7 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -258,6 +258,13 @@ namespace OloEngine
+258258
+/// @return true after the first successful Dispatch().
+259259
+[[nodiscard]] static bool IsReady();
+260260
+261+
+/// @return true once resource creation has failed and latched. The
+262+
+/// failure is sticky, so this is the honest input to "should the
+263+
+/// consumers be told a cascade is available?" — unlike IsReady(), which
+264+
+/// is false on the first frame purely because Dispatch() has not run
+265+
+/// yet (PrepareFrame precedes it by contract).
+266+
+[[nodiscard]] static bool HasFailed();
+267+
+261268
+/// @return Identity of the R32F volume; RHI::NullResource when not ready.
+262269
+[[nodiscard]] static RHI::ResourceHandle GetTextureHandle();
+263270
+Collapse file
+‎OloEngine/tests/Rendering/VolumetricShadowMapMathTest.cpp‎
+Copy file name to clipboardExpand all lines: OloEngine/tests/Rendering/VolumetricShadowMapMathTest.cpp
++60Lines changed: 60 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -532,6 +532,66 @@ namespace OloEngine::Tests
+532532
+EXPECT_FALSE(VolumetricShadowMap::AnyCascadeEnabled());
+533533
+}
+534534
+535+
+TEST(VolumetricShadowMapMath, FogCascadeHoldsStillUnderSubTexelCameraMotion)
+536+
+{
+537+
+// The end-to-end version of TexelSnappingAbsorbsSubTexelCameraMotion,
+538+
+// through the REAL domain builder — because the snap can be perfect and
+539+
+// still useless.
+540+
+//
+541+
+// FitCascade snaps the light-space origin to a grid whose cell size is
+542+
+// derived from the domain's EXTENT. That is stable only while the extent
+543+
+// is. The fog domain's vertical extent used to follow the camera
+544+
+// continuously (`bottom = min(cameraY, HeightOffset) - ...`), so once the
+545+
+// camera sat below HeightOffset every frame produced a slightly
+546+
+// different cell size, the floor() landed on a different grid, and every
+547+
+// sample slid sub-texel — straight into the froxel scatter's
+548+
+// 0.9-weight history, which is where it would have shown up as shimmer
+549+
+// rather than as anything pointing at this code.
+550+
+CloudscapeRenderState clouds; // disabled: fog cascade only
+551+
+FogSettings fog;
+552+
+fog.Enabled = true;
+553+
+fog.EnableVolumetric = true;
+554+
+fog.EnableVolumetricSelfShadow = true;
+555+
+const FogVolumesUBOData volumes{};
+556+
+const glm::vec3 renderOrigin(0.0f);
+557+
+const glm::vec3 towardLight = glm::normalize(glm::vec3(0.4f, 0.3f, 0.1f));
+558+
+559+
+// Below HeightOffset (0), which is the regime that used to slide.
+560+
+const glm::vec3 cameraBase(11.0f, -18.0f, -7.0f);
+561+
+VolumetricShadowMap::PrepareFrame(clouds, fog, volumes, cameraBase, renderOrigin, towardLight, false);
+562+
+const VolumetricShadowMap::CascadeState base =
+563+
+VolumetricShadowMap::GetCascade(VolumetricShadowMap::Cascade::Fog);
+564+
+ASSERT_TRUE(base.Enabled);
+565+
+566+
+// A camera drifting by centimetres, including vertically.
+567+
+for (const glm::vec3& nudge : { glm::vec3(0.03f, 0.02f, 0.01f), glm::vec3(-0.05f, 0.04f, 0.02f),
+568+
+glm::vec3(0.11f, -0.09f, 0.07f) })
+569+
+{
+570+
+VolumetricShadowMap::PrepareFrame(clouds, fog, volumes, cameraBase + nudge, renderOrigin,
+571+
+towardLight, false);
+572+
+const VolumetricShadowMap::CascadeState moved =
+573+
+VolumetricShadowMap::GetCascade(VolumetricShadowMap::Cascade::Fog);
+574+
+ASSERT_TRUE(moved.Enabled);
+575+
+576+
+// Identical transform means identical sampling: nothing slid.
+577+
+EXPECT_FLOAT_EQ(moved.StepLength, base.StepLength);
+578+
+for (u32 column = 0; column < 4u; ++column)
+579+
+{
+580+
+for (u32 row = 0; row < 4u; ++row)
+581+
+{
+582+
+EXPECT_FLOAT_EQ(moved.RelWorldToTex[column][row], base.RelWorldToTex[column][row])
+583+
+<< "RelWorldToTex[" << column << "][" << row << "] moved under a sub-texel nudge";
+584+
+EXPECT_FLOAT_EQ(moved.TexToAbsWorld[column][row], base.TexToAbsWorld[column][row])
+585+
+<< "TexToAbsWorld[" << column << "][" << row << "] moved under a sub-texel nudge";
+586+
+}
+587+
+}
+588+
+}
+589+
+590+
+// Leave the process-global snapshot clean.
+591+
+VolumetricShadowMap::PrepareFrame(CloudscapeRenderState{}, FogSettings{}, volumes, cameraBase,
+592+
+renderOrigin, towardLight, false);
+593+
+}
+594+
+535595
+TEST(VolumetricShadowMapMath, BoundsUnionAndWindowClampBehave)
+536596
+{
+537597
+const Bounds a = MakeBounds(glm::vec3(0.0f), glm::vec3(5.0f));
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

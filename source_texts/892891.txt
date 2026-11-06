@@ -1,0 +1,122 @@
+Checklist I have searched for similar issues. For Python issues, I have tested with the latest development wheel. I have checked the release documentation and the latest documentation (for main branch). Describe the issue ExtractTriangle...
+
+Release-mode CUDA context loss in VoxelBlockGrid::ExtractTriangleMesh — stale assert condition armed by #7360 · Issue #7535 · isl-org/Open3D · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Release-mode CUDA context loss in VoxelBlockGrid::ExtractTriangleMesh — stale assert condition armed by #7360 #7535
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Release-mode CUDA context loss in VoxelBlockGrid::ExtractTriangleMesh — stale assert condition armed by #7360#7535
+Copy link
+Labels
+bugNot a build issue, this is likely a bug.Not a build issue, this is likely a bug.
+Description
+Andyjk1406
+opened on Aug 15, 2026
+Issue body actions
+Checklist
+I have searched for similar issues.
+For Python issues, I have tested with the latest development wheel.
+I have checked the release documentation and the latest documentation (for main branch).
+Describe the issue
+ExtractTriangleMesh's marching-cubes pass 2 contains a device assert with an off-by-one condition:
+// cpp/open3d/t/geometry/kernel/VoxelBlockGridImpl.h (ExtractTriangleMeshCUDA, pass 2)
+OPEN3D_ASSERT_MSG(linear_idx_e > 0, "Internal error: GetVoxelAt returns nullptr.");
+linear_idx_e == 0 is a valid linear index - voxel (0,0,0) of the block stored in hash-map
+buffer slot 0. Since #7360 made OPEN3D_ASSERT trap on device unconditionally (independent of
+NDEBUG), this assert fires in Release builds whenever the extracted isosurface crosses an
+edge ending at that voxel. The trap kills the whole CUDA context: every subsequent CUDA call in
+the process returns cudaErrorLaunchFailure") and only a process
+restart recovers.
+Because the trigger depends on where the surface sits relative to buffer slot 0, it strikes
+intermittently — in our 3D-scanning applicata session, reproduced
+on three machines (RTX 5080 desktop, two mobile RTX laptops).
+History of the condition (why it's an off-by-one, not a safety check):
+47e2c7d1e (2021-06): assert added to the old pointer-based code as
+`OPEN3D_ASSERT(voxel_ptr_e != nullptr && "r.
+eb571f0ab (New voxel grid #4067, 2021-09): the rewrite replaced GetVoxelAt (pointer, null = missing) with
+GetLinearIdx (index, **-1 = missing, 0 =ried over as
+linear_idx_e > 0, keeping the pointer-era condition and even the "returns nullptr" message.
+Pass 0 guarantees the edge endpoint existsis >= 0.
+Dormant for ~5 years (OPEN3D_ASSERT was assert(), a no-op in Release device code) until
+Added assertion to guard against memory corruption #7360 armed device asserts.
+Steps to reproduce the bug
+```
+// Deterministic repro: block (0,0,0) activated FIRST lands in hash buffer slot 0; an
+// isosurface across its -x face must extract a vertex on the edge into its voxel
+// (0,0,0) = linear index 0.
+core::Device device("CUDA:0");
+t::geometry::VoxelBlockGrid grid({"tsdf", "weight"},
+                                 {core::Float32, core::Float32}, {{1}, {1}},
+                                 0.01f, 16, 1000, device);
+auto hashmap = grid.GetHashMap();
+core::Tensor buf, mask;
+hashmap.Activate(core::Tensor::Init<int>({{0, 0, 0}}, device), buf, mask);
+hashmap.Activate(core::Tensor::Init<int>({{-1, 0, 0}}, device), buf, mask);
+grid.GetAttribute("tsdf").Slice(0, 0, 1).Fill(-0.5f);   // slot 0: inside
+grid.GetAttribute("tsdf").Slice(0, 1, 2).Fill(0.5f);    // neighbour: outside
+grid.GetAttribute("weight").Slice(0, 0, 2).Fill(10.0f);
+auto mesh = grid.ExtractTriangleMesh(3.0f);             // <-- traps in Release
+```
+Error message
+Open3D CUDA assertion failed at block [0,0,0], thread [15,0,0]:
+Internal error: GetVoxelAt returns nullptr.
+[Open3D Error] ... MemoryManagerCUDA.cpp ... CUDA runtime error: unspecified launch failure
+With the one-character fix below, the same program extracts the expected 16x16 interface
+(256 vertices / 450 triangles) and the context stays healthy.
+Expected behavior
+linear_idx_e >= 0 — restoring the 2021 intent ("the endpoint voxel exists") rather than loosening a safety check.
+The message could also be modernised, e.g. "Internal error: edge endpoint voxel not found".
+Open3D, Python and System information
+```
+- Operating system: Windows 11 64-bit
+- Python version: n/a (C++ API)
+- Open3D version: 0.19.0+d7d057445, built from source (MSVC 19.44, CUDA 12.8, `BUILD_CUDA_MODULE=ON`, Release)
+- System: RTX 5080 / mobile RTX, NVIDIA driver 591.86
+- How did you install Open3D?: build from source
+```
+Additional information
+No response
+Activity
+Andyjk1406
+added
+bugNot a build issue, this is likely a bug.Not a build issue, this is likely a bug.
+on Aug 15, 2026
+ssheorey commented on Aug 21, 2026
+ssheorey
+on Aug 21, 2026
+Member
+More actions
+The fix was applied in commit aab533f ("Convert OpenMP parallelization to OneAPI TBB (#6626)"), which changed:
+OPEN3D_ASSERT_MSG(linear_idx_e > 0, ...) → OPEN3D_ASSERT_MSG(linear_idx_e >= 0, ...)
+Added comment: // DeviceGetLinearIdx returns -1 when the neighbour block is not allocated; 0 is a valid linear index.
+The root cause was a stale condition carried over from the 2021 pointer-based code (assert(voxel_ptr != nullptr)), where nullptr meant "not found". After the rewrite to index-based GetLinearIdx (which returns -1 for missing, 0 for valid), the condition should have been >= 0. PR #7360 later made device-side asserts unconditional, exposing the latent bug in Release builds.
+ssheorey
+closed this as completedon Aug 21, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+bugNot a build issue, this is likely a bug.Not a build issue, this is likely a bug.
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

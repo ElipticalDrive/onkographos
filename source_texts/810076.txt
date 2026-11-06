@@ -1,0 +1,242 @@
+Tool for automatic PS5 executables porting to Linux and Windows - feat(agc): implement overestimating conservative rasterization by Celegans12 · Pull Request #1112 · boykopovar/AnyPS5
+
+feat(agc): implement overestimating conservative rasterization by Celegans12 · Pull Request #1112 · boykopovar/AnyPS5 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Celegans12
+commented
+Oct 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+What
+A draw whose PA_SC_CONSERVATIVE_RASTERIZATION_CNTL (context 0x313) isn't the default 0x6000 is skipped (conservative rasterization is unsupported).
+0x6001 adds OVER_RAST_ENABLE (bit 0 in amdgpu's gc_10_3_0_sh_mask.h). It becomes VK_CONSERVATIVE_RASTERIZATION_MODE_OVERESTIMATE_EXT in the pipeline's rasterization state and key.
+VK_EXT_conservative_rasterization is enabled only if primitiveOverestimationSize is at most 1/256 pixel (the vertex grid of PA_SU_VTX_CNTL 0x2d) and degenerateTrianglesRasterized is set; otherwise the pipeline throws.
+Only triangles reaching the rasterizer are overestimated, read before the stage decode from VGT_GS_OUT_PRIM_TYPE (geometry shader), VGT_TF_PARAM (tessellation) or VGT_PRIMITIVE_TYPE.
+Still throws: points, lines, isolines, rect lists, per-stream GS types, other 0x313 values and centroid interpolation. One TechnicalDebt line.
+PPSA26344 v1.008: from about 250 s on, 2.2-2.4 draws per present are skipped this way: DRAW_INDEX_INDIRECT triangle strips with 0x313 = 0x6001 into a seven-target 3840x2160 G-buffer at 0x5050bc0000.
+feat(agc): single-sample sample masks as a per-quad-pixel discard #448 edits the sample-mask check that followed the 0x313 check in DecodeState.
+feat(agc): multisampled color and depth targets with CB resolves #419 adds multisampling; whichever lands second should keep conservative draws single-sample (per-sample overestimation isn't modelled).
+Tested
+Windows 11, MinGW-w64 GCC 15.2.0, based on main c81c2b3: configure -DBUILD_TESTING=ON, full build, --target libs, ctest:
+431/431 tests pass (ctest --output-on-failure)
+Same build on lavapipe (Mesa 26.2.4 llvmpipe, 8-wide subgroups, VK_DRIVER_FILES): 430/430 pass; agc_driver_flat_store is left out there because it takes several minutes on Windows llvmpipe
+New agc_driver_conservative_rasterization (GPU): three triangles write just the 6 pixels whose centres they cover, or with overestimation the 13 they touch; lavapipe (no extension) checks the throw and skips.
+Extended agc_driver_graphics, also with points, lines and triangles out of geometry shaders and tessellation. Both fail or do not build on main.
+PPSA26344 v1.008: a 2,700 s run with this change has no conservative rasterization is unsupported skips (a 1,500 s run without it had 1,432, 5-7 per present once the menus open), and no other error skips those DRAW_INDEX_INDIRECT draws.
+Not tested: Linux (CI), console behaviour.
+Checklist
+Based on current main; no other open PR implements the same functions
+One topic per PR; follow-ups go in a new PR
+No comments in code except technical debt
+Unimplemented paths throw (NotImplemented_nid_no_patch); silent stubs are listed in TechnicalDebt
+No notes, investigation .md files or images added to the repository (attach them to this PR)
+New third-party code is a submodule built from source
+Generic behaviour, not specific to one title
+Depends on: none
+AI-assisted: yes
+github-actions
+Bot
+commented
+Oct 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Other open pull requests touch the same code. Merging one will break the other, or both implement the same thing. If this one builds on them, list them in Depends on.
+Pull request
+Conflicting files (lines on main)
+Same exports
+Same new files
+#1184
+core/libs/prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp L163
+core/libs/prx/libSceAgcDriver/Execution/src/VulkanDevice.cpp L215, L2421, L2465
+core/libs/prx/libSceAgcDriver/Graphics/include/Context.hpp L127
+github-actions
+Bot
+mentioned this pull request
+Oct 7, 2026
+fix(libSceAgcDriver): retire a depth surface once another writer covers its memory
+#454
+Merged
+9 tasks done
+Celegans12
+mentioned this pull request
+Oct 7, 2026
+feat(agc): implement primitive-ordered pixel shaders with fragment shader interlock
+#1130
+Merged
+9 tasks done
+github-actions
+Bot
+mentioned this pull request
+Oct 7, 2026
+chore: adopt clang-format and pre-commit
+#1128
+Closed
+github-actions
+Bot
+added
+docs
+agc
+libSceAgc*
+labels
+Oct 7, 2026
+github-actions
+Bot
+mentioned this pull request
+Oct 7, 2026
+feat(recompiler): bindless image tables up to the device's sampled-image limit
+#1184
+Closed
+9 tasks done
+github-actions
+Bot
+added
+the
+needs rebase
+Conflicts with main, rebase needed
+label
+Oct 8, 2026
+Celegans12
+force-pushed
+the
+feat/agc-conservative-rasterization
+branch
+from
+4b26085 to
+e86533b
+Compare
+October 8, 2026 10:33
+github-actions
+Bot
+removed
+the
+needs rebase
+Conflicts with main, rebase needed
+label
+Oct 8, 2026
+adriadam10
+requested changes
+Oct 8, 2026
+View reviewed changes
+adriadam10
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Checked on current main: build + ctest green (441/441); agc_driver_conservative_rasterization runs on RADV with the extension (13 touched pixels vs 6 centres) and both new tests fail to build without the change.
+One thing to fix:
+State.cpp:506: the points/lines/rect-list rejection only applies when result.stages.path == ShaderPath::Vertex. On the Geometry, Tessellation and TessellationGeometry paths result.topology is the input topology (triangles or PATCH_LIST), but the GS or tessellation stage can emit points or lines, and those would get Vulkan's overestimation, which isn't modelled. Either throw for 0x6001 on non-vertex paths, or derive the rasterized primitive type from the GS output / tessellation mode and throw unless it is triangles. Add a case for it to ConservativeRasterizationTests.
+Everything else looks fine (TechnicalDebt line, key/sameDecode coverage, device gate).
+feat(agc): implement overestimating conservative rasterization
+…
+29c2244
+```
+A draw whose PA_SC_CONSERVATIVE_RASTERIZATION_CNTL (context 0x313) was
+not the default 0x6000 threw in DecodeState and the draw precheck.
+0x6001 sets OVER_RAST_ENABLE and now decodes to Vulkan's overestimation
+mode, chained to the pipeline's rasterization state and its key.
+
+The device enables VK_EXT_conservative_rasterization only when its
+primitiveOverestimationSize is at most 1/256 pixel and it rasterizes
+degenerate triangles; elsewhere the pipeline throws. Overestimation is
+accepted only when triangles reach the rasterizer: VGT_GS_OUT_PRIM_TYPE
+behind a geometry shader, VGT_TF_PARAM's output topology behind
+tessellation, VGT_PRIMITIVE_TYPE otherwise. Other 0x313 values and
+centroid interpolation still throw.
+
+Adds the agc_driver_conservative_rasterization GPU test and extends
+agc_driver_graphics.
+```
+Celegans12
+force-pushed
+the
+feat/agc-conservative-rasterization
+branch
+from
+e86533b to
+29c2244
+Compare
+October 8, 2026 12:12
+Celegans12
+commented
+Oct 8, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks for catching that the check only looked at the input topology. It now looks at the primitive that actually reaches the rasterizer, on every path.
+With GS_EN set (the Geometry and TessellationGeometry paths) it reads VGT_GS_OUT_PRIM_TYPE and only accepts a triangle strip with no per-stream types. With only HS_EN set it reads VGT_TF_PARAM: a triangle or quad domain with clockwise or counter-clockwise triangle output passes, while point mode, line output and isolines throw. Otherwise it reads VGT_PRIMITIVE_TYPE as before, so point, line and rect lists throw. Each rejection names the register and its value.
+One thing I found while writing the tests: on the old head these draws already threw, just not for this reason. DecodeShaderStages only lets VGT_GS_OUT_PRIM_TYPE 2 and clockwise triangle tessellation through, so nothing wrong could render with today's routings. That would have changed silently as soon as either one was widened, though. So the conservative decode now runs at the start of DecodeState, before the stage decode: it holds on its own, and the tests can see it.
+ConservativeRasterizationTests now has GS point, line and per-stream outputs, tessellation point mode, line output and isolines, and a combined tessellation and GS draw that emits lines. All of them must throw with the conservative reason. It also checks that triangle strips out of a GS (fed points, lines or triangles) and clockwise tessellated triangles still get overestimation. All ten rejection cases fail on e86533b, where they hit the stage-routing or old vertex-path messages instead, and pass now. The draw key and sameDecode didn't need changes: the key already hashes 0x29b, 0x2d5 and 0x2db, and the new check only decides between accepting and throwing.
+The new head is 29c2244.
+Details
+On e86533b with the new test: GS outputs 0x0, 0x1 and 0x80000002 throw VGT_SHADER_STAGES_EN=0x2020: unsupported geometry input or output assembly. VGT_TF_PARAM 0x9, 0x29 and 0x28 throw only triangular, fractional-odd, clockwise tessellation is supported by the reference path. The combined draw throws combined tessellation and geometry is unsupported. The vertex point list throws point-list vertex rendering requires point-size output support.
+On 29c2244 each case throws e.g. conservative rasterization of lines is unsupported (VGT_GS_OUT_PRIM_TYPE=0x1): only triangles are overestimated.
+Windows 11, MinGW-w64 GCC 15.2.0, merged with main b1c5f10: agc_driver, agc_driver_graphics and agc_driver_conservative_rasterization pass on the RTX 3080 Laptop and on lavapipe (Mesa 26.2.4 llvmpipe, where the GPU test checks the throw and skips).
+Full runs of 29c2244: Windows ctest 431/431 on NVIDIA and 430/430 on lavapipe; Linux (WSL Ubuntu 24.04, GCC 13.3, Mesa 25.2.8 llvmpipe, upstream's job config) merged with main 1081602, 454/454.
+adriadam10
+approved these changes
+Oct 8, 2026
+View reviewed changes
+adriadam10
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Checked the rework on current main: build + ctest green (451/451). agc_driver_graphics and agc_driver_conservative_rasterization pass on RADV with the extension, and both fail to build without the change. The rasterizer-primitive check (VGT_GS_OUT_PRIM_TYPE / VGT_TF_PARAM / VGT_PRIMITIVE_TYPE) covers every path now, register fields match gfx10.3, and the pipeline key and sameDecode include the mode. Merging once the Linux job is green.
+Hide details
+View details
+adriadam10
+merged commit 0b3cc73
+into
+boykopovar:main
+Oct 8, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Celegans12
+deleted the
+feat/agc-conservative-rasterization
+branch
+October 8, 2026 12:32
+Celegans12
+mentioned this pull request
+Oct 8, 2026
+feat(shader): implement triangle-patch tessellation
+#1491
+Merged
+9 tasks done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+agc
+libSceAgc*
+docs
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

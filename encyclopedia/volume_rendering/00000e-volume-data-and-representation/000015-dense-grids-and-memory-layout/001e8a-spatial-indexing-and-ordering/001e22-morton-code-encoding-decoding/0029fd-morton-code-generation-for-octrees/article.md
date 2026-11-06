@@ -5,27 +5,27 @@ Also called: Morton key construction, Z-order curve encoding
 This method generates unique integer keys for octree cells by recursively concatenating octant indices to a parent key, enabling efficient hierarchical spatial indexing and neighbor lookups [S1, unofficial]. It differs from its parent, [Morton Code Encoding/Decoding](1700-morton-code-encoding-decoding.md), which uses bit-interleaving of Cartesian coordinates, by constructing keys via path-based concatenation during tree traversal [S1, unofficial].
 
 ## How it works
-**Inputs:** Octree structure (nodes with children pointers and octant indices); Root node.
-**Outputs:** Dictionary or array mapping each node to its Morton key (integer).
+**Inputs:** Octree structure (nodes with children pointers and octant indices); Root node [S1, unofficial].
+**Outputs:** Dictionary or array mapping each node to its Morton key (integer) [S1, unofficial].
 
 **Data Structures:**
 - `Key`: Unsigned integer.
-- `OctantIndex`: 3-bit integer (0-7) representing the child's position relative to the parent.
+- `OctantIndex`: 3-bit integer (0-7) representing the child's position relative to the parent [S1, unofficial].
 
 **Steps:**
 1. Initialize the root node's key to 1 [S1, unofficial].
 2. For each child node of a parent with key $K_{parent}$:
-   a. Retrieve the child's octant index $O$ (0-7).
+   a. Retrieve the child's octant index $O$ (0-7) [S1, unofficial].
    b. Compute the child's key $K_{child}$ by shifting the parent key left by 3 bits and adding the octant index:
       $$ K_{child} = (K_{parent} \ll 3) + O $$
    c. This effectively concatenates the 3-bit binary representation of $O$ to the binary representation of $K_{parent}$ [S1, unofficial].
-3. Recursively apply Step 2 to all children until leaf nodes are reached.
+3. Recursively apply Step 2 to all children until leaf nodes are reached [S1, unofficial].
 
 **Parameters:**
 - Root Key: 1 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Key Size:** Each level adds 3 bits. For deep trees, keys may exceed standard integer widths (e.g., 64-bit). Use arbitrary-precision integers if depth > 21 [G].
+- **Key Size:** Each level adds exactly 3 bits to the key length [S1, unofficial]. For deep trees, keys may exceed standard integer widths (e.g., 64-bit) [G].
 - **Parent Lookup:** To find the parent key $K_{parent}$ from a child key $K_{child}$, perform a right shift by 3 bits:
   $$ K_{parent} = K_{child} \gg 3 $$
   This is valid because the last 3 bits always represent the octant index [S1, unofficial].
@@ -58,10 +58,7 @@ def generate_morton_keys(node, current_key):
 ## Subtopics
 
 ### [Edge-Octree Construction for Meta-Cell Adjacency](4701-edge-octree-construction-for-meta-cell-adjacency.md)
-Constructs a hierarchical adjacency structure by modifying Morton keys to embed meta-cell identity, resolving topological disconnections between cells in adaptive octrees.
-
-### [Meta-Cell Edge Octree Connection](4758-meta-cell-edge-octree-connection.md)
-Focuses on final mesh connectivity resolution using the adjacency graph built by its sibling.
+Constructs a hierarchical adjacency structure by modifying Morton keys to embed meta-cell identity, resolving topological disconnections between cells in adaptive octrees. It differs from its parent method by extending spatial keys to encode inter-meta-cell relationships rather than providing unique spatial keys alone. Choose it when boundary processing across meta-cell boundaries requires unified hierarchical adjacency.
 
 ## Operating characteristics
 - **Time Complexity:** $O(N)$ where $N$ is the number of nodes, as each node is visited once with $O(1)$ key computation [G].

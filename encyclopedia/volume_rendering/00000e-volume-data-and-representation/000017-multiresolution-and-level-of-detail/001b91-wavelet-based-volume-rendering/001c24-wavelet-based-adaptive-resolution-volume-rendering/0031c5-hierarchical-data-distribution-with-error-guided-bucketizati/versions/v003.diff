@@ -1,0 +1,487 @@
+--- v002.md
++++ v003.md
+@@ -4,254 +4,270 @@
+ 
+ ## Overview
+-A data distribution scheme for parallel volume rendering that partitions a wavelet hierarchy among processors to minimize inter-processor dependency and ensure load balancing [S1][S2]. It eliminates parent-child node wavelet reconstruction dependencies by using an 'Every-K' storage strategy and balances workload by distributing data along a hierarchical space-filling curve using error-guided bucketization [S1][S2]. It sets itself apart from naive tree partitioning by guaranteeing that distribution units are independent at runtime and by actively balancing the computational load based on the error tolerance of the data blocks rather than just their count [S1].
++Hierarchical Data Distribution with Error-Guided Bucketization is a data distribution scheme for parallel volume rendering that partitions a wavelet-based volume hierarchy among processors to minimize inter-processor communication dependencies and ensure balanced rendering workloads [S1][S2]. It solves the problem of parent-child node dependencies in wavelet reconstruction, which typically force processors to communicate during rendering, by pre-reconstructing data at specific intervals and grouping independent data into "distribution units" [S1]. Unlike standard space-filling curve distributions that only consider spatial locality, this method incorporates error-guided bucketization to ensure that nodes with similar reconstruction errors (and thus similar rendering costs) are distributed across different processors, preventing contention and load imbalance [S1][S2].
+ 
+ ## How it works
+-**Inputs:**
+-*   A pre-constructed wavelet tree of height $h$.
+-*   The number of processors $P$.
+-*   The error range $[err_{min}, err_{max}]$ derived from the representative nodes of all distribution units.
+-*   The number of error intervals (buckets) $B$.
+-
+-**Outputs:**
+-*   An assignment of each distribution unit to a specific processor $p \in \{0, \dots, P-1\}$.
+-
+-**Data Structures:**
+-1.  **Wavelet Tree:** Nodes contain wavelet coefficients. Some nodes are marked as `representative` (store pre-reconstructed low-resolution data blocks), others as `associated` (store only coefficients).
+-2.  **Distribution Unit:** A logical partition of the tree. Each unit contains exactly one `representative` node and all its descendant `associated` nodes that depend on it.
+-3.  **Bucket:** A container for distribution units. Defined by an error interval $[e_{start}, e_{end})$.
+-4.  **Processor Assignment Map:** Maps each distribution unit ID to a processor ID.
+-
+-**Steps:**
++
++### Inputs and Outputs
++*   **Inputs:**
++    *   A pre-constructed wavelet tree of height $h$.
++    *   The number of processors $P$.
++    *   A parameter $k$ (where $k < h$) defining the storage interval.
++    *   Error values $E_u$ for each distribution unit $u$, derived from the error of its representative node.
++*   **Outputs:**
++    *   A mapping of each distribution unit to a specific processor ID ($0 \dots P-1$).
++
++### Data Structures
++*   **Wavelet Tree:** A hierarchical structure where each node represents a data block. Nodes are classified as:
++    *   **Representative Node:** Stores a pre-reconstructed low-resolution data block.
++    *   **Associated Node:** Stores only wavelet coefficients.
++*   **Distribution Unit:** The minimum unit of assignment. Defined as the data at one representative node plus the wavelet coefficients of all its descendant associated nodes that depend on that representative node. Each unit contains exactly one representative node.
++*   **Bucket:** A container for distribution units, indexed by an error interval.
++
++### Algorithm Steps
+ 
+ 1.  **Apply EVERY-K Storage Strategy:**
+-    *   Select a parameter $k$ such that $k < h$.
+-    *   Identify nodes at levels $0, k, 2k, \dots$ starting from the root (level 0) as `representative` nodes.
+-    *   Mark all other nodes as `associated` nodes.
+-    *   Pre-reconstruct and store the low-resolution data blocks for all `representative` nodes.
+-    *   *Note:* By default, the root is a representative node and all leaf nodes are associated nodes [S1][S2].
+-
+-2.  **Define Distribution Units:**
+-    *   For each `representative` node $R$, create a distribution unit $U_R$.
+-    *   $U_R$ consists of $R$ and all descendant `associated` nodes whose reconstruction path leads to $R$ (i.e., they do not have another `representative` node as a closer ancestor).
+-    *   This ensures that all nodes within $U_R$ are independent of nodes in any other unit $U_{R'}$ ($R \neq R'$) [S1][S2].
++    *   Identify representative nodes at every $k$-th level starting from the root (level 0).
++    *   Reconstruct and store the low-resolution data block for these nodes.
++    *   All other nodes (leaves and intermediate nodes not at multiples of $k$) are associated nodes storing only wavelet coefficients.
++    *   By default, the root is a representative node, and all leaf nodes are associated nodes [S1][S2].
++
++2.  **Form Distribution Units:**
++    *   Partition the wavelet tree into distribution units.
++    *   For each representative node $R$, its distribution unit $U_R$ consists of $R$ and all associated nodes in its subtree that do not have a closer representative node ancestor.
++    *   Since reconstruction for any node in $U_R$ only requires data from $R$ (or ancestors of $R$ which are also representative), there are no data dependencies between different distribution units [S1][S2].
+ 
+ 3.  **Calculate Error Values:**
+-    *   For each distribution unit $U_R$, determine the error value $E_R$ of its representative node $R$.
+-    *   $err_{min} = \min_{R} (E_R)$ and $err_{max} = \max_{R} (E_R)$ [S1][S2].
+-
+-4.  **Initialize Buckets:**
+-    *   Create $B$ empty buckets.
+-    *   Partition the error range $[err_{min}, err_{max}]$ into $B$ initial intervals. The exact initial interval boundaries are not specified, but they cover the full range [S1][S2].
+-
+-5.  **Traverse Tree and Sort into Buckets:**
+-    *   Traverse the wavelet tree nodes level by level in a breadth-first search manner using a hierarchical space-filling curve (specifically the Hilbert curve) [S1][S2].
+-    *   For each distribution unit $U$ encountered during traversal:
+-        *   Determine its representative node's error $E_{rep}$.
+-        *   Identify the bucket $B_i$ whose error interval contains $E_{rep}$.
+-        *   Append $U$ to $B_i$ in the order of traversal [S1][S2].
+-
+-6.  **Adjust Bucket Intervals:**
+-    *   Adjust the boundaries of the error intervals for the buckets so that each bucket holds a similar number of distribution units.
+-    *   This step ensures that the buckets are balanced in terms of the *count* of units, which correlates to load balancing when combined with the space-filling curve's locality preservation [S1][S2].
+-
+-7.  **Distribute to Processors:**
+-    *   For each bucket $B_i$:
+-        *   Iterate through the distribution units in $B_i$ in the order they were added (traversal order).
+-        *   Assign the $j$-th unit in the bucket to processor $(j \mod P)$ in a round-robin manner [S1][S2].
+-
+-**Pseudocode:**
++    *   Compute an error metric $E_u$ for each distribution unit $u$. This is typically based on the reconstruction error of the representative node of that unit.
++    *   Determine the global error range $[err_{min}, err_{max}]$ across all distribution units [S1][S2].
++
++4.  **Traverse Using Hierarchical Space-Filling Curve:**
++    *   Traverse the wavelet tree nodes level by level in a breadth-first search manner.
++    *   Within each level, order the nodes according to a hierarchical space-filling curve (e.g., Hilbert curve) [S1][S2].
++    *   This traversal generates a sequence of distribution units that preserves spatial locality [S1].
++
++5.  **Error-Guided Bucketization:**
++    *   Partition the error range $[err_{min}, err_{max}]$ into $B$ buckets (intervals).
++    *   Initially, the intervals may be equal-width or equal-count.
++    *   Traverse the sequence of distribution units generated in Step 4.
++    *   For each unit $u$, determine its error $E_u$ and place $u$ into the bucket corresponding to the interval containing $E_u$.
++    *   **Adjustment:** Adjust the bucket boundaries so that each bucket holds a similar number of distribution units. This ensures that the "cost" (error magnitude often correlates with detail/complexity) is balanced across buckets [S1][S2].
++
++6.  **Round-Robin Distribution:**
++    *   For each bucket, distribute the contained distribution units to the $P$ processors in a round-robin fashion.
++    *   Because units with similar errors are in the same bucket, and they are distributed round-robin, neighboring units with similar errors are assigned to different processors. This balances the workload and minimizes cache contention [S1][S2].
++
++### Pseudocode
+ 
+ ```python
+-def distribute_wavelet_tree(wavelet_tree, num_processors, num_buckets, k):
+-    """
+-    Distributes wavelet tree nodes to processors using error-guided bucketization.
++def distribute_wavelet_tree(wavelet_tree, num_processors, k):
++    """
++    Distributes wavelet tree nodes to processors using Error-Guided Bucketization.
+     
+     Args:
+         wavelet_tree: The root of the wavelet tree.
+-        num_processors: Number of processors P.
+-        num_buckets: Number of error buckets B.
+-        k: Step size for EVERY-K storage strategy.
++        num_processors: Integer P, number of processors.
++        k: Integer, interval for EVERY-K storage strategy.
+         
+     Returns:
+-        A dictionary mapping distribution_unit_id to processor_id.
+-    """
+-    
+-    # Step 1: Apply EVERY-K Storage Strategy
+-    # Mark nodes as representative or associated
+-    for node in wavelet_tree.all_nodes():
+-        level = node.depth
+-        if level % k == 0:
+-            node.type = 'representative'
+-            # Pre-reconstruct and store data block for representative nodes
+-            node.data_block = reconstruct_low_res(node)
++        dict: Mapping from distribution_unit_id to processor_id.
++    """
++    
++    # Step 1: Identify Representative Nodes and Form Units
++    # Nodes at levels 0, k, 2k, ... are representative.
++    # All others are associated.
++    representative_nodes = []
++    distribution_units = []
++    
++    # Helper to traverse tree and identify structure
++    # Note: In a real implementation, this would traverse the tree
++    # to assign parent pointers and identify descendants.
++    nodes = wavelet_tree.breadth_first_search()
++    
++    for node in nodes:
++        if node.level % k == 0:
++            node.is_representative = True
++            representative_nodes.append(node)
+         else:
+-            node.type = 'associated'
++            node.is_representative = False
+             
+-    # Step 2: Define Distribution Units
+-    distribution_units = []
+-    # A distribution unit is defined by its representative node
+-    for node in wavelet_tree.all_nodes():
+-        if node.type == 'representative':
+-            # Collect all associated descendants that depend on this representative
+-            # This implies finding all associated nodes whose closest representative ancestor is this node
+-            associated_descendants = find_dependent_associated_nodes(node)
+-            unit = {
+-                'id': node.id,
+-                'representative': node,
+-                'associated_nodes': associated_descendants,
+-                'error': node.error_value # E_R
+-            }
+-            distribution_units.append(unit)
+-            
+-    # Step 3: Calculate Error Range
+-    if not distribution_units:
+-        return {}
+-        
+-    errors = [u['error'] for u in distribution_units]
++    # Form distribution units
++    # Each representative node starts a unit.
++    # Associated nodes belong to the nearest ancestor representative node.
++    for rep_node in representative_nodes:
++        unit = DistributionUnit(rep_node)
++        # Assign all associated descendants to this unit
++        # This requires traversing the subtree of rep_node
++        # and checking if the node has a closer representative ancestor.
++        # Since rep_node is at level L, and next rep is at L+k,
++        # all nodes in between are associated with rep_node.
++        assign_descendants_to_unit(rep_node, unit)
++        distribution_units.append(unit)
++        
++    # Step 2: Calculate Errors
++    # Error E_u is derived from the representative node's reconstruction error.
++    # err_min and err_max are global bounds.
++    errors = []
++    for unit in distribution_units:
++        e = calculate_error(unit.representative_node)
++        unit.error = e
++        errors.append(e)
++        
+     err_min = min(errors)
+     err_max = max(errors)
+     
+-    # Step 4 & 5: Traverse and Sort into Buckets
+-    # Initialize buckets with empty lists
+-    buckets = [[] for _ in range(num_buckets)]
+-    
+-    # Define initial error intervals for buckets
+-    # The source says intervals are adjusted later, so initial placement is based on error value
+-    # We assume equal-width intervals for initial sorting
+-    interval_width = (err_max - err_min) / num_buckets if num_buckets > 0 else 0
+-    
+-    # Traverse using Hilbert Curve
+-    # The traversal order is determined by the hierarchical space-filling curve
+-    traversal_order = get_hilbert_traversal_order(wavelet_tree, distribution_units)
+-    
+-    for unit in traversal_order:
+-        e = unit['error']
+-        # Determine initial bucket index based on error
+-        if interval_width == 0:
+-            bucket_idx = 0
+-        else:
+-            bucket_idx = int((e - err_min) / interval_width)
+-            # Clamp to valid range
+-            if bucket_idx >= num_buckets:
+-                bucket_idx = num_buckets - 1
++    # Step 3: Define Buckets
++    # Partition [err_min, err_max] into buckets.
++    # The goal is to have similar number of units per bucket.
++    # We can use equal-count binning or iterative adjustment.
++    num_buckets = len(distribution_units) # Or a fixed number based on P?
++    # The text says "several error intervals" and "adjust... so each bucket holds similar number".
++    # Let's assume we create enough buckets to balance, or fixed buckets and adjust boundaries.
++    # A simple approach: Sort units by error, then split into chunks.
++    # However, we must preserve the SFC order for the next step.
++    
++    # The algorithm described:
++    # 1. Partition range into intervals.
++    # 2. Sort units into buckets based on SFC order.
++    # 3. Adjust intervals so buckets have similar counts.
++    
++    # Implementation of adjustment:
++    # We can start with equal-width intervals, count units, and shift boundaries.
++    # Or, since we need to output a processor assignment, we can just:
++    # 1. Sort units by error to find quantiles.
++    # 2. Define bucket boundaries based on quantiles.
++    # 3. Re-assign units to buckets based on these boundaries.
++    
++    sorted_units_by_error = sorted(distribution_units, key=lambda u: u.error)
++    
++    # Determine bucket boundaries to ensure equal count
++    # If we want B buckets, we split the sorted list into B chunks.
++    # But we need to map back to the SFC order.
++    
++    # Let's define the number of buckets. The text doesn't specify B explicitly,
++    # but implies it's related to balancing. Often B >= P.
++    # Let's assume we create P buckets for direct mapping, or more.
++    # The text says "distributed among processors in a round-robin manner" per bucket.
++    # So if we have B buckets, and P processors, each bucket distributes to P processors.
++    
++    # To simplify, let's assume we create P buckets.
++    B = num_processors
++    
++    # Calculate boundaries
++    chunk_size = len(sorted_units_by_error) // B
++    boundaries = []
++    for i in range(1, B):
++        boundaries.append(sorted_units_by_error[i * chunk_size].error)
++        
++    # Define buckets
++    buckets = [[] for _ in range(B)]
++    
++    # Step 4: Traverse SFC and Sort into Buckets
++    # We need the SFC order of the distribution units.
++    sfc_order = get_hierarchical_sfc_order(wavelet_tree, k)
++    
++    for unit in sfc_order:
++        # Find which bucket this unit belongs to
++        bucket_idx = 0
++        for i, boundary in enumerate(boundaries):
++            if unit.error < boundary:
++                break
++            bucket_idx += 1
++            
+         buckets[bucket_idx].append(unit)
+         
+-    # Step 6: Adjust Bucket Intervals
+-    # The goal is to have similar number of distribution units in each bucket.
+-    # This is typically done by re-sorting the units based on error and redistributing them
+-    # into buckets with equal counts.
+-    
+-    # Flatten all units and sort by error
+-    all_units_sorted_by_error = sorted(distribution_units, key=lambda u: u['error'])
+-    
+-    # Redistribute into buckets to balance count
+-    new_buckets = [[] for _ in range(num_buckets)]
+-    units_per_bucket = len(all_units_sorted_by_error) // num_buckets
+-    remainder = len(all_units_sorted_by_error) % num_buckets
+-    
+-    current_unit_idx = 0
+-    for i in range(num_buckets):
+-        # Assign units to bucket i
+-        count = units_per_bucket + (1 if i < remainder else 0)
+-        for _ in range(count):
+-            if current_unit_idx < len(all_units_sorted_by_error):
+-                new_buckets[i].append(all_units_sorted_by_error[current_unit_idx])
+-                current_unit_idx += 1
+-                
+-    # Note: The source mentions "sorted into a bucket... intervals adjusted... finally distributed".
+-    # The adjustment step effectively re-partitions the sorted list.
+-    # The final distribution uses the balanced buckets.
+-    
+-    # Step 7: Distribute to Processors
++    # Step 5: Round-Robin Distribution
+     assignment = {}
+-    for bucket in new_buckets:
+-        for j, unit in enumerate(bucket):
+-            processor_id = j % num_processors
+-            assignment[unit['id']] = processor_id
++    for bucket in buckets:
++        for i, unit in enumerate(bucket):
++            proc_id = i % num_processors
++            assignment[unit.id] = proc_id
+             
+     return assignment
+ 
+-def find_dependent_associated_nodes(representative_node):
+-    """
+-    Finds all associated nodes that depend on the given representative node.
+-    These are associated nodes whose closest representative ancestor is the given node.
+-    """
+-    # This requires traversing the subtree rooted at representative_node
+-    # and collecting all associated nodes.
+-    # Since the tree structure is hierarchical, we can do a DFS/BFS from the representative node.
+-    dependent_nodes = []
+-    stack = [representative_node]
+-    while stack:
+-        current = stack.pop()
+-        for child in current.children:
+-            if child.type == 'associated':
+-                dependent_nodes.append(child)
+-                stack.append(child)
+-            # If a child is representative, it starts its own unit, so we don't traverse further
+-            # into its subtree for THIS unit.
+-    return dependent_nodes
+-
+-def get_hilbert_traversal_order(wavelet_tree, distribution_units):
+-    """
+-    Returns distribution units sorted by their traversal order along a hierarchical Hilbert curve.
+-    """
+-    # The Hilbert curve provides a spatial ordering.
+-    # For a wavelet tree, this is often implemented by mapping the spatial coordinates
+-    # of the data blocks to Hilbert indices.
+-    # The source specifies "level by level in a breadth-first search manner" using the curve.
+-    # This implies a specific traversal algorithm that respects the tree hierarchy and spatial locality.
+-    # For implementation, one would generate the Hilbert index for each representative node's spatial position
+-    # and sort the units by this index.
+-    
+-    # Simplified: Sort units by their Hilbert index
+-    units_with_index = []
+-    for unit in distribution_units:
+-        # Assuming each unit has a spatial position or can be mapped to a Hilbert index
+-        # This is a placeholder for the specific Hilbert curve generation logic
+-        hilbert_idx = calculate_hilbert_index(unit['representative'].spatial_position)
+-        units_with_index.append((hilbert_idx, unit))
+-        
+-    units_with_index.sort(key=lambda x: x[0])
+-    return [unit for _, unit in units_with_index]
+-
+-def calculate_hilbert_index(position):
+-    """
+-    Calculates the Hilbert curve index for a given 3D position.
+-    """
+-    # Implementation of 3D Hilbert curve mapping
+-    # This is a standard geometric operation
+-    return 0 # Placeholder for actual Hilbert calculation
++def get_hierarchical_sfc_order(wavelet_tree, k):
++    """
++    Returns distribution units in hierarchical space-filling curve order.
++    Traverses level by level (BFS). Within each level, uses Hilbert curve order.
++    """
++    levels = wavelet_tree.get_levels()
++    units_in_order = []
++    
++    for level in levels:
++        # Get nodes at this level
++        nodes_at_level = level.nodes
++        # Sort nodes by their Hilbert curve index at this level
++        sorted_nodes = sort_by_hilbert_index(nodes_at_level)
++        
++        # Add distribution units for representative nodes at this level
++        # Note: Not all nodes at level L*k are necessarily the start of a unit
++        # if the tree is not perfectly balanced or k doesn't divide evenly.
++        # But per EVERY-K, nodes at 0, k, 2k... are reps.
++        for node in sorted_nodes:
++            if node.level % k == 0:
++                # Find the unit this node represents
++                unit = find_unit_for_representative(node)
++                if unit:
++                    units_in_order.append(unit)
++                    
++    return units_in_order
++
++def sort_by_hilbert_index(nodes):
++    """
++    Sorts nodes based on their position in a Hilbert curve at their resolution level.
++    """
++    # Compute Hilbert index for each node's spatial position
++    # This requires mapping voxel coordinates to Hilbert indices.
++    hilbert_indices = []
++    for node in nodes:
++        idx = compute_hilbert_index(node.spatial_coordinates)
++        hilbert_indices.append((idx, node))
++    
++    hilbert_indices.sort(key=lambda x: x[0])
++    return [n for _, n in hilbert_indices]
+ ```
+ 
+-**Parameters:**
+-*   $k$: The step size for the EVERY-K strategy. $k < h$ (tree height). Default: Not explicitly given, but examples use $k=2$ [S1].
+-*   $h$: Height of the wavelet tree [S1].
+-*   $P$: Number of processors [S1].
+-*   $B$: Number of error buckets. Not given in the sources.
+-*   Space-filling curve: Hilbert curve [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Tree Height Not Multiple of $k$:** The source states this can be "easily handled" [S1][S2]. Implementation should ensure nodes at levels $0, k, 2k, \dots$ are marked as representative, even if the last level is not exactly a multiple of $k$.
+-*   **Error Range:** If all representative nodes have the same error, $err_{min} = err_{max}$, leading to a single bucket or division by zero in interval calculation. The pseudocode handles this by clamping or using a single bucket.
+-*   **Leaf Nodes:** By default, all leaf nodes are associated nodes [S1][S2]. This must be enforced during the EVERY-K step.
++### Parameters and Edge Cases
++*   **Parameter $k$:** Determines the granularity of pre-reconstruction. A smaller $k$ means more representative nodes, higher memory usage for stored data blocks, but potentially faster reconstruction (fewer steps up the tree). A larger $k$ saves memory but increases reconstruction cost. Default: Root is representative, leaves are associated [S1][S2].
++*   **Space-Filling Curve:** Hilbert curve is used [S1].
++*   **Edge Case: $h$ not a multiple of $k$:** The text states this can be "easily handled" [S1][S2]. Typically, this means the last interval may be smaller than $k$, or the final representative nodes are placed at the deepest level $\le h$ that satisfies the modulo condition.
++*   **Precision:** Error calculation can be expensive for large datasets. The MSE calculation becomes progressively more expensive as one traverses toward the root [S2].
+ 
+ ## Subtopics
+ 
+ ### [Parallel Multiresolution Volume Rendering with Error-Guided Load Balancing](6624-parallel-multiresolution-volume-rendering-with-error-guided-.md)
+-A two-stage parallel algorithm for visualizing large 3D datasets that uses a wavelet tree, error-guided bucketization, and on-the-fly reconstruction to enable interactive multiresolution rendering with minimal inter-processor communication and balanced workload. It builds on [Hierarchical Data Distribution with Error-Guided Bucketization](6597-hierarchical-data-distribution-with-error-guided-bucketizati.md) by adding a run-time traversal and rendering pipeline that selects nodes based on a user-specified error tolerance, reconstructs data blocks on the fly, and composites partial images via screen-space tiling. Unlike single-machine multiresolution rendering, it explicitly partitions the wavelet tree to eliminate inter-processor data dependencies at run-time and uses space-filling curves with error-guided bucketization to maintain load balance without redistribution.
++A two-stage parallel algorithm that builds on this distribution method by adding a run-time traversal and rendering pipeline. It uses the distribution to eliminate inter-processor dependencies and composites partial images via screen-space tiling.
++
++### [Hierarchical Space-Filling Curve Data Distribution](6918-hierarchical-space-filling-curve-data-distribution.md)
++A data distribution scheme that combines hierarchical space-filling curve traversal with error-guided bucketization. It differs by explicitly ensuring that blocks with similar spatial and temporal reconstruction errors are distributed to different processors to prevent contention.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Wavelet tree construction time is approximately one hour on a 2.0GHz Intel Pentium 4 processor with 1GB main memory [S1]. The distribution algorithm itself involves a tree traversal and sorting, which is generally $O(N \log N)$ or $O(N)$ depending on the Hilbert curve generation and sorting implementation, where $N$ is the number of distribution units.
+-*   **Memory Complexity:** Compressed data size was around 2.65GB for the tested dataset [S1]. Each processor allocated 256MB temporary disk space and 128MB main memory for run-time caching of reconstructed data blocks [S1].
+-*   **Performance:** The method achieves well-balanced workload among processors [S1]. The benchmark test results show a speed of 6.542MB/s, with $T_1=0.0286s$, $T_4=0.3563s$, $T_5=0.0018s$ (Table 2 in [S1]).
+-*   **Strengths:** Eliminates inter-processor dependency at runtime, balances workload based on error tolerance, preserves spatial locality, and minimizes communication overhead [S1].
+-*   **Limitations:** Requires pre-reconstruction of data at representative nodes, which increases storage and preprocessing time. The error calculation can be slow for large datasets [S2].
+-*   **When to Use:** Parallel volume rendering of large 3D datasets where load balancing and minimal communication are critical.
+-*   **When Not to Use:** Single-processor rendering, or when memory constraints are too tight to store pre-reconstructed data blocks.
++
++*   **Time Complexity:**
++    *   **Tree Construction:** Approximately one hour on a 2.0GHz Intel Pentium 4 with 1GB RAM for the tested dataset [S1].
++    *   **Distribution:** Linear in the number of distribution units, dominated by the SFC traversal and sorting.
++*   **Memory Complexity:**
++    *   **Storage:** Compressed data size was around 2.65GB for the tested dataset [S1].
++    *   **Runtime:** Requires temporary disk space (256MB) and main memory (128MB) per processor for caching reconstructed data blocks [S1].
++*   **Performance:**
++    *   Achieves well-balanced workload among processors [S1][S2].
++    *   Eliminates inter-processor communication dependencies during reconstruction [S1].
++    *   Minimizes run-time communication overhead [S1].
++*   **Strengths:**
++    *   Scalability due to minimized dependencies.
++    *   Load balancing via error-guided bucketization and SFC locality.
++*   **Limitations:**
++    *   Error computation can be slow for very large datasets [S2].
++    *   Requires pre-reconstruction of data blocks, increasing storage requirements compared to storing only coefficients.
+ 
+ ## Background
+-The method was introduced by C. Wang, J. Gao, and H. W. Shen in their papers "Parallel Multiresolution Volume Rendering of Large Data Sets with Error-Guided Load Balancing" (2004) and "A Parallel Multiresolution Volume Rendering Algorithm for Large Data Sets" (2005) [S1][S2]. It addresses the scalability issues in parallel volume rendering by minimizing dependencies and balancing workload through a novel tree partitioning and distribution scheme [S1].
++
++*   **Origin:** Proposed by C. Wang, J. Gao, and H. W. Shen.
++*   **Papers:**
++    *   "Parallel Multiresolution Volume Rendering of Large Data Sets with Error-Guided Load Balancing" (2004) [S2].
++    *   "A Parallel Multiresolution Volume Rendering Algorithm for Large Data Sets" (2005) [S1].
++*   **Context:** Developed to address the scalability issues in parallel volume rendering of large datasets using wavelet trees. Previous methods suffered from high communication overhead due to parent-child dependencies in wavelet reconstruction. This method introduces the EVERY-K storage strategy and error-guided bucketization to solve these issues [S1][S2].
+ 
+ ## Sources
++
+ [S1] A Parallel Multiresolution Volume Rendering Algorithm for Large Data ..., https://academicweb.nd.edu/~cwang11/papers/pc05-pmvr.pdf, fetched 2026-10-26
+ [S2] Parallel Multiresolution Volume Rendering of Large Data ..., https://academicweb.nd.edu/~cwang11/papers/pgv04-pmvr.pdf, fetched 2026-10-26

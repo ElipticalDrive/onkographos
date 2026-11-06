@@ -1,0 +1,135 @@
+--- v001.md
++++ v002.md
+@@ -4,10 +4,10 @@
+ 
+ ## Overview
+-The Normal Equations Solver addresses the overdetermined linear system $Ax = b$ arising in radiance-field optimization by forming and solving the symmetric positive semi-definite system $A^T A x = A^T b$ [S1, unofficial]. It is distinguished from sibling methods like the General Least Squares Solver by explicitly squaring the condition number to gain computational speed, making it the fastest alternative for well-conditioned systems but prone to numerical instability when the matrix is ill-conditioned [S1, unofficial].
++The Normal Equations Solver addresses the overdetermined linear system $Ax = b$ arising in radiance-field optimization by explicitly forming and solving the symmetric positive semi-definite system $A^T A x = A^T b$ [S1, unofficial]. It is distinguished from sibling methods like the General Least Squares Solver by squaring the condition number to gain computational speed, making it the fastest alternative for well-conditioned systems but prone to numerical instability when the matrix is ill-conditioned [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Sparse system matrix $A \in \mathbb{R}^{m \times n}$ (where $m \gg n$) and vector $b \in \mathbb{R}^m$.
+-- Output: Solution vector $x \in \mathbb{R}^n$.
++- Input: Sparse system matrix $A \in \mathbb{R}^{m \times n}$ (where $m \gg n$) and vector $b \in \mathbb{R}^m$ [S1, unofficial].
++- Output: Solution vector $x \in \mathbb{R}^n$ [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -17,8 +17,8 @@
+ 
+ **Steps:**
+-1. **Assemble $A^T A$ and $A^T b$:** Compute the sparse matrix-matrix product $A^T A$ and sparse matrix-vector product $A^T b$. This can be done using linear algebra libraries (e.g., Eigen on CPU, cuSPARSE on GPU) or custom matrix-free compute shaders [S1, unofficial].
++1. **Assemble $A^T A$ and $A^T b$:** Compute the sparse matrix-matrix product $A^T A$ and sparse matrix-vector product $A^T b$ using a linear algebra library (e.g., Eigen on CPU, cuSPARSE on GPU) or custom matrix-free compute shaders [S1, unofficial].
+ 2. **Matrix-Free Assembly (Vulkan Compute Example):** Iterate over all voxels $i$. For each voxel, determine the column indices $j(D_i)$ and $j(D_i)+1$ and the interpolation weight $w(i)$ [S1, unofficial]. Atomically add the following values to $A^T A$:
+-   - $(1-w(i))^2$ to entry $(j(D_i), j(D_i))$
+-   - $w(i)^2$ to entry $(j(D_i)+1, j(D_i)+1)$
++   - $(1-w(i))^2$ to entry $(j(D_i), j(D_i))$ [S1, unofficial].
++   - $w(i)^2$ to entry $(j(D_i)+1, j(D_i)+1)$ [S1, unofficial].
+    - $(1-w(i))w(i)$ to entry $(j(D_i)+1, j(D_i))$ [S1, unofficial].
+ 3. **Solve the System:** Use a dense or sparse linear least squares solver (e.g., QR, LLT, LDLT) on the assembled $A^T A$ and $A^T b$ [S1, unofficial].
+@@ -27,66 +27,45 @@
+ **Pseudocode:**
+ ```python
++def zeros(n):
++    return [0.0] * n
++
++def clip(x, lo, hi):
++    return [max(lo, min(hi, v)) for v in x]
++
++def solve_linear_system(ATA, ATb):
++    # [G] Standard dense linear algebra routine (e.g., LLT, LDLT, or QR with pivoting)
++    # for symmetric positive semi-definite systems.
++    pass
++
+ def solve_normal_equations(A_csr, b, num_voxels, get_voxel_indices_and_weight):
+     """
+     Solves Ax = b via normal equations A^T A x = A^T b.
+-    A_csr: CSR format matrix A.
++    A_csr: CSR format matrix A with attributes row_ptr, col_ind, values.
+     b: Right-hand side vector.
+-    num_voxels: Number of voxels (rows in A).
+-    get_voxel_indices_and_weight: Function returning (j, j_plus_1, w) for voxel i.
++    num_voxels: Number of voxels.
++    get_voxel_indices_and_weight: Returns (j, j_plus_1, w) for voxel i.
+     """
+     n = A_csr.num_columns
+-    # Initialize symmetric matrix A^T A and vector A^T b
+-    # Using a dense array for A^T A is feasible as it is typically small
+-    ATA = zeros((n, n))
++    ATA = zeros(n * n)  # Flattened 2D array for upper triangular storage
+     ATb = zeros(n)
+ 
+-    # Step 1: Assemble A^T A and A^T b
+-    # In a matrix-free GPU implementation, this loop runs in parallel over voxels
+-    # with atomic additions for ATA. Here we simulate the accumulation.
+     for i in range(num_voxels):
+         j, j_plus_1, w = get_voxel_indices_and_weight(i)
+         
+-        # Compute contributions to A^T A
+-        # Entry (j, j)
+-        val_jj = (1 - w) ** 2
+-        ATA[j, j] += val_jj
++        # Accumulate A^T A (upper triangular part only)
++        ATA[j * n + j] += (1.0 - w) ** 2
++        ATA[j_plus_1 * n + j_plus_1] += w ** 2
++        ATA[j * n + j_plus_1] += (1.0 - w) * w  # Symmetric entry stored in upper triangle
+         
+-        # Entry (j+1, j+1)
+-        val_jp1_jp1 = w ** 2
+-        ATA[j_plus_1, j_plus_1] += val_jp1_jp1
+-        
+-        # Entry (j+1, j) - symmetric, so also affects (j, j+1)
+-        val_jp1_j = (1 - w) * w
+-        ATA[j_plus_1, j] += val_jp1_j
+-        ATA[j, j_plus_1] += val_jp1_j  # Maintain symmetry explicitly in dense storage
+-        
+-        # Compute contribution to A^T b
+-        # Assuming A is tall and skinny, and b corresponds to the voxel values
+-        # The specific row of A for voxel i is needed to compute (A^T b)_k
+-        # However, the source notes imply A^T b is computed similarly or via library.
+-        # For completeness, if A is sparse CSR:
+-        # row_start = A_csr.row_ptr[i]
+-        # row_end = A_csr.row_ptr[i+1]
+-        # for k in range(row_start, row_end):
+-        #     col = A_csr.col_ind[k]
+-        #     val = A_csr.values[k]
+-        #     ATb[col] += val * b[i]
+-        # Note: The source emphasizes the atomic assembly of ATA for the specific
+-        # interpolation structure. A^T b assembly follows standard sparse mat-vec.
+-        pass
++        # Accumulate A^T b
++        row_start = A_csr.row_ptr[i]
++        row_end = A_csr.row_ptr[i + 1]
++        for k in range(row_start, row_end):
++            col = A_csr.col_ind[k]
++            val = A_csr.values[k]
++            ATb[col] += val * b[i]
+ 
+-    # Step 2: Solve the symmetric system ATA x = ATb
+-    # Using a dense solver like LLT or LDLT
+-    try:
+-        # LLT requires positive definite; LDLT handles semi-definite better
+-        # QR is also an option but pivoting may be needed for stability
+-        x = solve_linear_system(ATA, ATb, method='LDLT')
+-    except SingularMatrixError:
+-        # Fallback or error handling for rank deficiency
+-        x = solve_linear_system(ATA, ATb, method='QR')
+-
+-    # Step 3: Apply box constraints if not enforced by solver
+-    x = clip(x, min=0.0, max=1.0)
+-    
++    x = solve_linear_system(ATA, ATb)
++    x = clip(x, 0.0, 1.0)
+     return x
+ ```
+@@ -110,9 +89,9 @@
+ - **Strengths:** Fast assembly and solution for well-conditioned systems; leverages sparse matrix-matrix products efficiently [S1, unofficial].
+ - **Limitations:** Prone to stability issues if the matrix is ill-conditioned due to the squaring of the condition number [S1, unofficial]. May require pivoting or alternative solvers (like QR) to handle near-rank deficiency [S1, unofficial].
+-- **When to use:** When computational speed is prioritized and the system matrix $A$ is well-conditioned.
++- **When to use:** When computational speed is prioritized and the system matrix $A$ is well-conditioned [S1, unofficial].
+ - **When not to use:** When the matrix is ill-conditioned or nearly rank deficient, as numerical errors may be amplified [S1, unofficial].
+ 
+ ## Background
+-The normal equations approach is a standard technique in linear algebra for solving least squares problems. In the context of volume rendering, it was applied to transfer function optimization, where the goal is to optimize RGB*$\alpha$ values subject to box constraints [S1, unofficial]. The method was evaluated against other solvers like CGLS, noting that while normal equations are faster, they suffer from condition number squaring [S1, unofficial]. The specific implementation details, including matrix-free Vulkan compute shaders for assembly, were described in recent work on transfer function optimization for comparative volume rendering [S1, unofficial].
++In the context of volume rendering, the method was applied to transfer function optimization for radiance fields [S1, unofficial]. It was evaluated against sparse solvers like CGLS, noting that while normal equations are faster, they suffer from condition number squaring [S1, unofficial]. Implementation details include matrix-free Vulkan compute shaders for assembly [S1, unofficial].
+ 
+ ## Sources

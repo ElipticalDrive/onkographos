@@ -3,116 +3,79 @@
 Also called: Basic picker, Pick ray intersection for voxel selection, Voxel Picking with Bresenham's Algorithm
 
 ## Overview
-This method extracts spatial information from a 3D simulation or volume by determining which voxel corresponds to a user's screen coordinate click. It solves the problem of mapping 2D framebuffer coordinates to 3D volume grid indices for direct manipulation tasks such as segmentation or painting. It differs from [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md) by focusing on discrete voxel traversal (often via Bresenham's algorithm) rather than continuous geometric intersection for physics injection, and from [Linear Edge Intersection](868-linear-edge-intersection.md) by operating on the volume grid rather than mesh edges.
+This method extracts spatial information from a 3D simulation by determining which voxel corresponds to a user's screen coordinate click [S1, unofficial]. It computes the corresponding seed voxel from $(x, y)$ screen coordinates for direct manipulation segmentation [S2, unofficial]. It differs from [Ray-Box Intersection for Interaction](2638-ray-box-intersection-for-interaction.md) by focusing on discrete voxel traversal rather than continuous geometric intersection, and from [Linear Edge Intersection](868-linear-edge-intersection.md) by operating on the volume grid [G].
 
 ## How it works
-**Inputs:**
-- Screen coordinates $(x_s, y_s)$ of the mouse click.
-- Camera parameters defining the pick ray (origin $\mathbf{o}$ and direction $\mathbf{d}$).
-- Volume bounding box defined by minimum $\mathbf{b}_{min}$ and maximum $\mathbf{b}_{max}$ corners in world space.
-- Volume grid dimensions $(N_x, N_y, N_z)$ and physical spacing $(\Delta x, \Delta y, \Delta z)$.
-
-**Outputs:**
-- Voxel indices $(i, j, k)$ corresponding to the first voxel intersected by the pick ray.
-
-**Data Structures:**
-- **Pick Ray:** Defined by origin $\mathbf{o} = (o_x, o_y, o_z)$ and direction $\mathbf{d} = (d_x, d_y, d_z)$. The direction is normalized.
-- **Volume Bounds:** Axis-aligned bounding box (AABB) $\mathbf{B} = [\mathbf{b}_{min}, \mathbf{b}_{max}]$.
-- **Grid Parameters:** Step sizes in world units per voxel: $s_x = \Delta x, s_y = \Delta y, s_z = \Delta z$.
-
+**Inputs:** Screen coordinates $(x, y)$ of the mouse click [S2, unofficial].
+**Outputs:** Voxel indices $(i, j, k)$ corresponding to the first voxel intersected by the pick ray [S2, unofficial].
+**Data Structures:** Pick ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [G]. Volume bounding box $\mathbf{B}$ [G].
 **Steps:**
-1. **Ray Generation:** Construct the pick ray from the camera and screen coordinates. For orthographic projections, the ray origin is projected from the screen point along the view vector. For perspective, it passes through the camera center and the screen point [S1, S2, unofficial].
-2. **Ray-Box Intersection:** Compute the intersection of the pick ray with the volume bounding box $\mathbf{B}$. This determines the entry point $t_{enter}$ and exit point $t_{exit}$ along the ray parameter $t$ [S2, unofficial].
-   - For each axis $a \in \{x, y, z\}$:
-     $$ t_{min}^a = \frac{b_{min}^a - o^a}{d^a}, \quad t_{max}^a = \frac{b_{max}^a - o^a}{d^a} $$
-     $$ t_{enter} = \max(t_{min}^x, t_{min}^y, t_{min}^z) $$
-     $$ t_{exit} = \min(t_{max}^x, t_{max}^y, t_{max}^z) $$
-   - If $t_{enter} > t_{exit}$ or $t_{exit} < 0$, the ray does not intersect the volume.
-3. **Voxel Traversal:** Use a modified Bresenham's algorithm or Digital Differential Analyzer (DDA) to traverse the grid from the entry point to the exit point.
-   - Initialize current voxel indices $(i, j, k)$ based on the entry point.
-   - Determine step directions $\text{step}_x, \text{step}_y, \text{step}_z$ based on the sign of $\mathbf{d}$.
-   - Calculate initial t-values for crossing voxel boundaries.
-   - Iterate, advancing the voxel index in the dimension with the smallest next boundary crossing until the exit point is reached or a specific voxel is selected [S1, unofficial].
-4. **Index Conversion:** Convert the world-space intersection point or voxel index to logical grid coordinates $(i, j, k)$ using the volume origin and spacing.
-
+1. Generate the pick ray from screen coordinates. For orthographic projections, the ray origin is projected from the screen point along the view vector [S1, unofficial].
+2. Perform intersection tests similar to ray tracing to find the closest point of intersection of the pick ray with the rectangular solid [S2, unofficial].
+3. Traverse the voxel grid using a modified Bresenham's algorithm from the entry point [S1, unofficial].
+4. Return the voxel indices of the intersected voxel [S2, unofficial].
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def pick_voxel(screen_x, screen_y, camera, volume_bounds, grid_dims, voxel_size):
-    # 1. Generate Pick Ray
-    # Assuming orthographic projection for simplicity as per S1 limitation
-    # In perspective, ray_origin would be camera.position
-    ray_origin = camera.project_screen_to_world(screen_x, screen_y)
-    ray_direction = camera.view_direction # Normalized
-    
-    # 2. Ray-Box Intersection
-    t_min = (volume_bounds.min - ray_origin) / ray_direction
-    t_max = (volume_bounds.max - ray_origin) / ray_direction
-    
-    # Swap if necessary to ensure t_min <= t_max for each axis
-    t_min = min(t_min)
-    t_max = max(t_max)
-    
+import math
+
+def pick_voxel(screen_x, screen_y, ray_origin, ray_direction, bounds_min, bounds_max, voxel_size):
+    # 1. Ray-Box Intersection (Slab method)
+    t_min = []
+    t_max = []
+    for i in range(3):
+        if ray_direction[i] == 0:
+            if ray_origin[i] < bounds_min[i] or ray_origin[i] > bounds_max[i]:
+                return None
+            t_min.append(-math.inf)
+            t_max.append(math.inf)
+        else:
+            t1 = (bounds_min[i] - ray_origin[i]) / ray_direction[i]
+            t2 = (bounds_max[i] - ray_origin[i]) / ray_direction[i]
+            t_min.append(min(t1, t2))
+            t_max.append(max(t1, t2))
+
     t_enter = max(t_min)
     t_exit = min(t_max)
-    
+
     if t_enter > t_exit or t_exit < 0:
-        return None # No intersection
-        
-    # 3. Voxel Traversal (DDA/Bresenham)
-    # Start at the entry point
-    current_pos = ray_origin + ray_direction * t_enter
-    
-    # Initial voxel index
-    i = floor((current_pos.x - volume_bounds.origin.x) / voxel_size.x)
-    j = floor((current_pos.y - volume_bounds.origin.y) / voxel_size.y)
-    k = floor((current_pos.z - volume_bounds.origin.z) / voxel_size.z)
-    
-    # Step directions
-    step_x = 1 if ray_direction.x > 0 else -1
-    step_y = 1 if ray_direction.y > 0 else -1
-    step_z = 1 if ray_direction.z > 0 else -1
-    
-    # T-values for next boundary crossing
-    # Note: Exact implementation of DDA t-values depends on specific grid alignment
-    # This is a simplified representation of the traversal logic
-    t_delta_x = voxel_size.x / abs(ray_direction.x) if ray_direction.x != 0 else infinity
-    t_delta_y = voxel_size.y / abs(ray_direction.y) if ray_direction.y != 0 else infinity
-    t_delta_z = voxel_size.z / abs(ray_direction.z) if ray_direction.z != 0 else infinity
-    
-    # Initial t_max values (distance to next boundary)
-    # These need precise calculation based on current_pos and grid alignment
-    t_max_x = ( (i + (1 if step_x > 0 else 0)) * voxel_size.x + volume_bounds.origin.x - current_pos.x ) / ray_direction.x
-    t_max_y = ( (j + (1 if step_y > 0 else 0)) * voxel_size.y + volume_bounds.origin.y - current_pos.y ) / ray_direction.y
-    t_max_z = ( (k + (1 if step_z > 0 else 0)) * voxel_size.z + volume_bounds.origin.z - current_pos.z ) / ray_direction.z
-    
+        return None
+
+    # 2. Voxel Traversal (Modified Bresenham / DDA)
+    # Modified Bresenham traversal logic not given in sources [G]
+    entry_point = [ray_origin[i] + ray_direction[i] * t_enter for i in range(3)]
+    current_voxel = [int(math.floor((entry_point[i] - bounds_min[i]) / voxel_size)) for i in range(3)]
+
+    step = [1 if ray_direction[i] > 0 else -1 for i in range(3)]
+    t_delta = [voxel_size / abs(ray_direction[i]) if ray_direction[i] != 0 else math.inf for i in range(3)]
+
+    t_max_vals = []
+    for i in range(3):
+        boundary = (current_voxel[i] + (1 if step[i] > 0 else 0)) * voxel_size + bounds_min[i]
+        if ray_direction[i] != 0:
+            t_max_vals.append((boundary - entry_point[i]) / ray_direction[i])
+        else:
+            t_max_vals.append(math.inf)
+
     # Traverse until exit
     while t_enter < t_exit:
-        # Return current voxel
-        return (i, j, k)
-        
-        # Advance in the dimension with the smallest t_max
-        if t_max_x < t_max_y and t_max_x < t_max_z:
-            i += step_x
-            t_enter = t_max_x
-            t_max_x += t_delta_x
-        elif t_max_y < t_max_z:
-            j += step_y
-            t_enter = t_max_y
-            t_max_y += t_delta_y
-        else:
-            k += step_z
-            t_enter = t_max_z
-            t_max_z += t_delta_z
-            
+        return current_voxel
+
+        min_idx = 0
+        if t_max_vals[1] < t_max_vals[min_idx]: min_idx = 1
+        if t_max_vals[2] < t_max_vals[min_idx]: min_idx = 2
+
+        current_voxel[min_idx] += step[min_idx]
+        t_enter = t_max_vals[min_idx]
+        t_max_vals[min_idx] += t_delta[min_idx]
+
     return None
 ```
-
 **Edge Cases and Pitfalls:**
-- **Perspective Projection:** The implementation described in [S1, unofficial] only works for orthographic projections. Support for perspective projections requires correct ray origin calculation [S1, unofficial].
-- **Degenerate Rays:** If the ray direction component is zero, division by zero must be handled (e.g., by setting $t_{delta}$ to infinity) [G].
-- **Boundary Precision:** Floating-point errors at voxel boundaries can cause the ray to skip or double-count voxels. Epsilon adjustments may be needed [G].
+- **Perspective Projection:** The implementation only works for orthographic projections; it does not support perspective projections [S1, unofficial].
+- **Degenerate Rays:** If a ray direction component is zero, division by zero is avoided by checking `ray_direction[i] == 0` and using infinite t-values [G].
+- **Boundary Precision:** Floating-point errors at voxel boundaries can cause skipping or double-counting; epsilon adjustments may be needed [G].
 
 ## Subtopics
 
@@ -126,13 +89,13 @@ A CPU-side controller that uses DDA raycasting for brush position and normal cal
 Computes geometric intersections for injecting smoke and velocity, focusing on continuous physics interaction rather than discrete voxel selection.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for ray-box intersection. Voxel traversal is $O(L)$ where $L$ is the number of voxels along the ray segment within the volume. In practice, this is very fast for typical view distances.
-- **Memory Complexity:** $O(1)$ auxiliary space.
-- **Strengths:** Simple to implement, computationally inexpensive, suitable for real-time interaction [S1, unofficial].
-- **Limitations:** Limited to orthographic projections in the basic implementation [S1, unofficial]. Accuracy depends on the precision of the ray-box intersection and voxel traversal algorithm.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Simple to implement, suitable for extracting spatial information from the simulation live [S1, unofficial].
+- **Limitations:** Limited to orthographic projections in the basic implementation [S1, unofficial].
 
 ## Background
-The method originates from early voxel-based visualization and segmentation applications. It was notably used in the "Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration" system (SIV) for direct manipulation segmentation [S2, unofficial]. It also appears in homebrew voxel engine implementations as a basic picker for extracting spatial information [S1, unofficial]. The technique leverages the regular structure of voxel grids to simplify intersection tests compared to mesh-based ray tracing.
+The method originates from early voxel-based visualization and segmentation applications. It was notably used in the "Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration" system (SIV) for direct manipulation segmentation [S2, unofficial]. It also appears in homebrew voxel engine implementations as a basic picker for extracting spatial information [S1, unofficial]. The technique leverages the regular structure of voxel grids to simplify intersection tests compared to mesh-based ray tracing [G].
 
 ## Sources
 [S1] Homebrew Voxel Engine, http://weigert.vsos.ethz.ch/2019/10/27/homebrew-voxel-engine/, fetched 2026-10-26 (unofficial)

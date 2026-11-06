@@ -1,0 +1,266 @@
+--- v004.md
++++ v005.md
+@@ -4,157 +4,145 @@
+ 
+ ## Overview
+-Forplane Optimization Losses are a set of regularization terms designed to enforce structural priors and disentanglement in dynamic volumetric scene representations, specifically within the context of Neural Radiance Fields (NeRF) and deformable tissue reconstruction. They solve the problem of entangled static and dynamic features in 4D space-time volumes by penalizing spatial irregularities, temporal inconsistencies, and deviations from initial static states. What sets them apart from sibling methods like Total Variation Regularization is their specific application to orthogonal 2D planes (space-space and space-time) within a 3D+time grid, explicitly targeting the disentanglement of static and dynamic components via a dedicated "disentangle loss" [S1].
++Forplane Optimization Losses are a set of regularization terms designed to constrain the optimization of orthogonal neural planes in spatiotemporal volume rendering, specifically for deformable tissue reconstruction [S1]. They solve the problem of entanglement between static and dynamic scene components by enforcing structural priors on the learned feature planes [S1]. Unlike general smoothness regularizers, these losses operate on specific orthogonal projections (space-space and space-time planes) to enforce sparsity in dynamic components and smoothness in static components [S1].
+ 
+ ## How it works
+-The method operates on a volumetric representation divided into a static field and a dynamic field, each composed of multiple levels of orthogonal 2D planes. The optimization minimizes a total loss function comprising photometric error, depth consistency, and three specific Forplane regularization terms: Total Variation (TV), Temporal Smoothness (TS), and Disentangle (DE) [S1].
++**Inputs and Outputs:**
++*   **Inputs:** The set of learned feature planes $\mathbf{V}_{sd}^s$ (static space-space planes), $\mathbf{V}_{3d}^d$ (dynamic space-time planes), and $\mathbf{V}_{sd}^v$ (static space-time planes used for disentanglement); ground truth images $I_i$; ray samples $\mathbf{r}$; rendered colors $\hat{\boldsymbol{C}}(\mathbf{r})$.
++*   **Outputs:** Scalar loss values $\mathcal{L}_{TV}$, $\mathcal{L}_{TS}$, $\mathcal{L}_{DE}$, and the total loss $\mathcal{L}_{total}$.
+ 
+-### Inputs and Outputs
+-**Inputs:**
+-*   $\boldsymbol{\theta}, \boldsymbol{\phi}$: Network parameters (e.g., MLP weights for density/color and deformation fields).
+-*   $\mathbf{V}_{sd}^s$: Set of space-space planes for the static field, denoted as $\{G_{XY}, G_{YZ}, G_{XZ}\}$ [S1].
+-*   $\mathbf{V}_{3d}^d$: Set of space-time planes for the dynamic field, denoted as $\{G_{XT}, G_{YT}, G_{ZT}\}$ [S1].
+-*   $\mathbf{V}_{sd}^v$: Set of space-time planes used for the disentangle loss (context implies these are the dynamic field's space-time planes initialized to 1) [S1].
+-*   $I_i$: Ground truth images.
+-*   $\lambda_d, \lambda_{tv}, \lambda_{ts}, \lambda_{de}$: Hyperparameters weighting the respective loss terms.
++**Data Structures:**
++The method operates on 2D feature planes extracted from 3D or 4D fields.
++*   $\mathbf{V}_{sd}^s = \{G_{XY}, G_{YZ}, G_{XZ}\}$: Static space-space planes. Each plane $G$ has dimensions $H \times W$ corresponding to spatial resolution.
++*   $\mathbf{V}_{3d}^d = \{G_{XT}, G_{YT}, G_{ZT}\}$: Dynamic space-time planes. Each plane $G$ has dimensions $H \times T$ (or $W \times T$), representing a spatial axis and the time axis.
++*   $\mathbf{V}_{sd}^v$: Static space-time planes used for initialization and disentanglement.
+ 
+-**Outputs:**
+-*   $\mathcal{L}_{total}$: The scalar loss value to be minimized.
++**Numbered Steps:**
+ 
+-### Data Structures
+-The core data structure is the set of 2D planes stored in memory. Each plane $G$ corresponds to a specific coordinate pair (e.g., $X,Y$) and time or static state.
+-*   **Layout:** A plane $G$ is a 2D grid of values. For a resolution $R \times R$, it contains $R^2$ elements.
+-*   **Bit Packing:** Not specified in sources. Standard floating-point (FP32) is assumed for differentiable optimization [S1].
+-*   **Initialization:** The dynamic field planes $\mathbf{V}_{sd}^v$ are initialized to 1. The static field planes are initialized via standard NeRF initialization schemes (not detailed in the specific Forplane notes, but implied by the rendering procedure) [S1].
++1.  **Initialize Dynamic Fields:** Initialize the dynamic 3D field $\mathbf{V}_{d}^{3d}$ values to 1. This ensures that during the initial rendering steps, the dynamic field does not influence the feature aggregation, allowing the static field to model the scene first [S1].
++2.  **Compute Total Variation Loss ($\mathcal{L}_{TV}$):** This loss enforces smoothness on the static space-space planes.
++    *   For each plane $G \in \{G_{XY}, G_{YZ}, G_{XZ}\}$:
++    *   For each element $g$ in $G$:
++        *   Compute horizontal squared difference: $\Delta_h^2(G, g) = \frac{(G_{i,j} - G_{i+1,j})^2}{\text{resolution}}$.
++        *   Compute vertical squared difference: $\Delta_w^2(G, g) = \frac{(G_{i,j} - G_{i,j+1})^2}{\text{resolution}}$.
++    *   Sum the norms: $\mathcal{L}_{TV} = \sum_{G \in \mathbf{V}_{sd}^s} \sum_{g \in G} \|\Delta_h^2(G, g) + \Delta_w^2(G, g)\|$ [S1].
++3.  **Compute Total Smoothness Loss ($\mathcal{L}_{TS}$):** This loss enforces smoothness along the time axis for dynamic space-time planes.
++    *   For each plane $G \in \{G_{XT}, G_{YT}, G_{ZT}\}$:
++    *   For each element $g$ in $G$:
++        *   Compute temporal squared difference: $\Delta_t^2(G, g) = (G_{t} - G_{t+1})^2$.
++    *   Sum the norms: $\mathcal{L}_{TS} = \sum_{G \in \mathbf{V}_{3d}^d} \sum_{g \in G} \|\Delta_t^2(G, g)\|$ [S1].
++4.  **Compute Disentanglement Loss ($\mathcal{L}_{DE}$):** This loss encourages the static space-time planes to remain at their initial value of 1, maximizing the use of the static field for static scene parts and pushing dynamic elements to the dynamic field.
++    *   For each plane $G \in \mathbf{V}_{sd}^v$:
++    *   For each element $g$ in $G$:
++        *   Compute deviation from 1: $\|1 - g\|$.
++    *   Sum the norms: $\mathcal{L}_{DE} = \sum_{G \in \mathbf{V}_{sd}^v} \sum_{g \in G} \|1 - g\|$ [S1].
++5.  **Compute Photometric Loss ($\mathcal{L}_{rgb}$):** Standard mean squared error between rendered and ground truth colors.
++    *   $\mathcal{L}_{rgb}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \sum_i \mathbb{E}_{\mathbf{r} \sim I_i} \left[ \left\| \hat{\boldsymbol{C}}(\mathbf{r}) - \boldsymbol{C}_i^{\text{gt}}(\mathbf{r}) \right\|_2^2 \right]$ [S1].
++6.  **Compute Total Loss:** Combine all terms with weights.
++    *   $\mathcal{L}_{total}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \mathcal{L}_{rgb} + \lambda_d \mathcal{L}_D + \lambda_{tv} \mathcal{L}_{TV} + \lambda_{ts} \mathcal{L}_{TS} + \lambda_{de} \mathcal{L}_{DE}$ [S1].
+ 
+-### Formulas and Definitions
+-The total loss is defined as [S1]:
+-$$
+-\mathcal{L}_{total}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \mathcal{L}_{rgb} + \lambda_d \mathcal{L}_D + \lambda_{tv} \mathcal{L}_{TV} + \lambda_{ts} \mathcal{L}_{TS} + \lambda_{de} \mathcal{L}_{DE}
+-$$
++**Parameters:**
++*   $\lambda_d = 1$: Weight for depth loss $\mathcal{L}_D$ (Note: $\mathcal{L}_D$ is not defined in the provided notes, but included in the total loss formula) [S1].
++*   $\lambda_{tv} = 0.001$: Weight for Total Variation Loss [S1].
++*   $\lambda_{ts} = 0.05$: Weight for Total Smoothness Loss [S1].
++*   $\lambda_{de} = 0.001$: Weight for Disentanglement Loss [S1].
+ 
+-1.  **Photometric Loss ($\mathcal{L}_{rgb}$):**
+-    $$
+-    \mathcal{L}_{rgb}(\boldsymbol{\theta}, \boldsymbol{\phi}) = \sum_i \mathbb{E}_{\mathbf{r} \sim I_i} \left[ \left\| \hat{\boldsymbol{C}}(\mathbf{r}) - \boldsymbol{C}_i^{\text{gt}}(\mathbf{r}) \right\|_2^2 \right]
+-    $$
+-    Where $\hat{\boldsymbol{C}}(\mathbf{r})$ is the rendered color and $\boldsymbol{C}_i^{\text{gt}}(\mathbf{r})$ is the ground truth color for ray $\mathbf{r}$ in image $I_i$ [S1].
++**Pseudocode:**
+ 
+-2.  **Total Variation Loss ($\mathcal{L}_{TV}$):**
+-    Applied to the static space-space planes $\mathbf{V}_{sd}^s = \{G_{XY}, G_{YZ}, G_{XZ}\}$ [S1]:
+-    $$
+-    \mathcal{L}_{TV} = \sum_{G \in \mathbf{V}_{sd}^s} \sum_{g \in G} \|\Delta_h^2(G, g) + \Delta_w^2(G, g)\|
+-    $$
+-    Where $\Delta_h^2(G, g)$ is the squared difference between the value at grid index $g$ and its horizontal neighbor, normalized by resolution. $\Delta_w^2$ is the vertical counterpart [S1].
+-
+-3.  **Temporal Smoothness Loss ($\mathcal{L}_{TS}$):**
+-    Applied to the dynamic space-time planes $\mathbf{V}_{3d}^d = \{G_{XT}, G_{YT}, G_{ZT}\}$ [S1]:
+-    $$
+-    \mathcal{L}_{TS} = \sum_{G \in \mathbf{V}_{3d}^d} \sum_{g \in G} \|\Delta_t^2(G, g)\|
+-    $$
+-    Where $\Delta_t^2(G, g)$ represents the squared difference along the time axis for element $g$ in plane $G$ [S1].
+-
+-4.  **Disentangle Loss ($\mathcal{L}_{DE}$):**
+-    Applied to the dynamic field's space-time planes $\mathbf{V}_{sd}^v$ (initialized to 1) [S1]:
+-    $$
+-    \mathcal{L}_{DE} = \sum_{G \in \mathbf{V}_{sd}^v} \sum_{g \in G} \|1 - g\|
+-    $$
+-    This encourages the dynamic features to remain close to their initial value of 1, ensuring that static content is primarily modeled by the static field and dynamic content by the dynamic field [S1].
+-
+-### Parameters and Typical Values
+-*   $\lambda_d = 1$
+-*   $\lambda_{tv} = 0.001$
+-*   $\lambda_{ts} = 0.05$
+-*   $\lambda_{de} = 0.001$
+-These values were used in the experiments described in the source [S1].
+-
+-### Pseudocode
+ ```python
+-def compute_forplane_losses(
+-    static_planes: List[Plane], 
+-    dynamic_planes: List[Plane], 
+-    rendered_colors: List[Tensor], 
+-    gt_colors: List[Tensor],
+-    lambda_tv: float = 0.001,
+-    lambda_ts: float = 0.05,
+-    lambda_de: float = 0.001
+-) -> Tensor:
++def compute_forplane_losses(planes, gt_images, rendered_colors, resolution_h, resolution_w, time_steps):
+     """
+     Computes the Forplane optimization losses.
+     
+     Args:
+-        static_planes: List of 2D planes for static field (XY, YZ, XZ).
+-        dynamic_planes: List of 2D planes for dynamic field (XT, YT, ZT).
+-        rendered_colors: List of rendered color tensors.
+-        gt_colors: List of ground truth color tensors.
+-        lambda_tv: Weight for Total Variation loss.
+-        lambda_ts: Weight for Temporal Smoothness loss.
+-        lambda_de: Weight for Disentangle loss.
++        planes: Dictionary containing:
++            - 'static_ss': List of 2D tensors [G_XY, G_YZ, G_XZ] of shape (H, W)
++            - 'dynamic_st': List of 2D tensors [G_XT, G_YT, G_ZT] of shape (H, T) or (W, T)
++            - 'static_st': List of 2D tensors for disentanglement [G_XT, G_YT, G_ZT] of shape (H, T)
++        gt_images: List of ground truth color tensors for each image index i.
++        rendered_colors: List of rendered color tensors for each image index i.
++        resolution_h: Height of the spatial planes.
++        resolution_w: Width of the spatial planes.
++        time_steps: Number of time steps T.
+         
+     Returns:
+-        Total loss scalar.
++        total_loss: Scalar tensor.
+     """
++    
+     # 1. Photometric Loss (L_rgb)
+     l_rgb = 0.0
+-    for pred_c, gt_c in zip(rendered_colors, gt_colors):
+-        l_rgb += torch.mean((pred_c - gt_c) ** 2)
+-        
+-    # Note: L_D (Depth Loss) is part of the total loss formula but 
+-    # its specific definition is not provided in the Forplane notes.
+-    # It is assumed to be computed from depth outputs D_hat and GT depth.
+-    # l_d = compute_depth_loss(...) 
+-    l_d = 0.0 # Placeholder for missing definition in source context
++    for c_hat, c_gt in zip(rendered_colors, gt_images):
++        l_rgb += torch.mean((c_hat - c_gt) ** 2)
+     
+     # 2. Total Variation Loss (L_TV) on static space-space planes
+     l_tv = 0.0
+-    for plane in static_planes:
+-        # Compute horizontal squared differences
+-        # Shift plane left by 1, subtract from original, square
+-        h_diff = (plane[:, :-1] - plane[:, 1:]) ** 2
+-        # Shift plane up by 1, subtract from original, square
+-        v_diff = (plane[:-1, :] - plane[1:, :]) ** 2
++    for G in planes['static_ss']:
++        # G is (H, W)
++        # Horizontal difference: (i, j) vs (i+1, j)
++        # Vertical difference: (i, j) vs (i, j+1)
++        # Note: Source defines normalized squared difference. 
++        # Assuming standard finite differences for implementation.
+         
+-        # Normalize by resolution (assuming square resolution R)
+-        # Source says "normalized by resolution". 
+-        # Usually this means dividing by R or R^2. 
+-        # We assume division by number of elements or spatial dimension.
+-        # Given the formula structure, we sum the differences.
+-        l_tv += torch.sum(h_diff + v_diff)
++        # Shift for horizontal neighbor
++        G_shifted_h = G[1:, :]  # (H-1, W)
++        G_current_h = G[:-1, :] # (H-1, W)
++        diff_h = (G_current_h - G_shifted_h) ** 2
+         
+-    # 3. Temporal Smoothness Loss (L_TS) on dynamic space-time planes
++        # Shift for vertical neighbor
++        G_shifted_v = G[:, 1:]  # (H, W-1)
++        G_current_v = G[:, :-1] # (H, W-1)
++        diff_v = (G_current_v - G_shifted_v) ** 2
++        
++        # Normalize by resolution (Source says "normalized by resolution")
++        # Usually implies dividing by the number of pixels or a constant factor.
++        # We sum the squared differences.
++        l_tv += torch.sum(diff_h + diff_v) / (resolution_h * resolution_w)
++        
++    # 3. Total Smoothness Loss (L_TS) on dynamic space-time planes
+     l_ts = 0.0
+-    for plane in dynamic_planes:
+-        # Compute squared differences along the time axis (assumed last dim or specific dim)
+-        # Assuming plane shape is (H, W, T) or similar, but Forplane planes are 2D.
+-        # In space-time planes (e.g., X-T), one axis is space, one is time.
+-        # The source defines Delta_t^2 as difference along time axis.
+-        # If plane is (X, T), we diff along T.
+-        t_diff = (plane[:, :-1] - plane[:, 1:]) ** 2
+-        l_ts += torch.sum(t_diff)
++    for G in planes['dynamic_st']:
++        # G is (H, T) or (W, T). Assume last dim is time.
++        # Temporal difference: (t) vs (t+1)
++        G_shifted_t = G[:, 1:]  # Last dim - 1
++        G_current_t = G[:, :-1] # Last dim - 1
++        diff_t = (G_current_t - G_shifted_t) ** 2
++        l_ts += torch.sum(diff_t)
+         
+-    # 4. Disentangle Loss (L_DE) on dynamic planes initialized to 1
++    # 4. Disentanglement Loss (L_DE) on static space-time planes
+     l_de = 0.0
+-    for plane in dynamic_planes:
+-        # Encourage values to be close to 1
+-        l_de += torch.sum(torch.abs(1.0 - plane))
++    for G in planes['static_st']:
++        # Encourage values to be 1
++        diff_de = (1.0 - G) ** 2
++        l_de += torch.sum(diff_de)
+         
+-    # Total Loss
+-    total_loss = l_rgb + l_d + lambda_tv * l_tv + lambda_ts * l_ts + lambda_de * l_de
++    # 5. Total Loss
++    # Note: lambda_d * L_D is included in formula but L_D is not defined in notes.
++    # Assuming L_D is a depth loss computed elsewhere or zero if not provided.
++    lambda_d = 1.0
++    lambda_tv = 0.001
++    lambda_ts = 0.05
++    lambda_de = 0.001
++    
++    # Placeholder for L_D if not computed in this function
++    l_d = 0.0 
++    
++    total_loss = l_rgb + (lambda_d * l_d) + (lambda_tv * l_tv) + (lambda_ts * l_ts) + (lambda_de * l_de)
+     
+     return total_loss
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Initialization Sensitivity:** The Disentangle Loss relies on the dynamic planes being initialized to 1. If initialized differently, the loss will pull them to 1, potentially corrupting the dynamic signal [S1].
+-*   **Resolution Normalization:** The TV loss mentions normalization by resolution. Failure to normalize correctly can cause the TV term to dominate or vanish as grid resolution changes [S1].
+-*   **Monocular Inputs:** In endoscopic procedures with monocular cameras, the reliance on stereo depth can limit performance. The Forplane method attempts to mitigate this via regularization, but depth ambiguity remains a challenge [S1].
++**Edge Cases and Pitfalls:**
++*   **Boundary Conditions:** The finite difference operations ($\Delta_h^2, \Delta_w^2, \Delta_t^2$) reduce the effective resolution of the planes by 1 in the differenced dimension. Ensure tensor shapes are handled correctly to avoid index out-of-bounds errors [S1].
++*   **Initialization:** The dynamic field must be initialized to 1 to prevent it from interfering with the static field during early training stages [S1].
++*   **Normalization:** The source specifies normalization by resolution for $\mathcal{L}_{TV}$. The exact scaling factor (e.g., dividing by $H \times W$ or just $H$) should be consistent with the implementation to match the reported loss magnitudes [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The regularization losses scale linearly with the number of planes and the resolution of each plane ($O(N_{planes} \cdot R^2)$). The photometric loss scales with the number of rays sampled.
+-*   **Memory Complexity:** Requires storing the 2D planes for both static and dynamic fields. The memory footprint is proportional to the number of levels and planes in the Forplane representation.
+-*   **Strengths:** Explicitly encourages disentanglement of static and dynamic components, which is crucial for accurate reconstruction of deformable tissues [S1]. The use of orthogonal planes reduces memory compared to full 3D volumes.
+-*   **Limitations:** Requires careful tuning of hyperparameters ($\lambda$ values). The method is specific to the Forplane architecture and may not transfer directly to other NeRF variants without modification.
+-*   **When to use:** When reconstructing dynamic scenes with significant static backgrounds, particularly in medical imaging (e.g., endoscopy) where disentanglement is critical [S1].
++*   **Time Complexity:** The computation of these losses is linear with respect to the number of planes and the resolution of the planes ($O(N_{planes} \cdot H \cdot W)$ or $O(N_{planes} \cdot H \cdot T)$). It is lightweight compared to the rendering pass.
++*   **Memory Complexity:** Minimal additional memory is required as it operates on the existing feature planes.
++*   **Strengths:** Effectively disentangles static and dynamic components in deformable tissue reconstruction, preventing artifacts caused by entanglement [S1].
++*   **Limitations:** Relies on the assumption that static components are smooth in space and dynamic components are smooth in time, which may not hold for all types of motion or texture [S1].
++*   **When to use:** When optimizing orthogonal neural planes for spatiotemporal volume rendering, particularly in medical imaging (e.g., endoscopic procedures) where static anatomy and dynamic tissue deformation coexist [S1].
+ 
+ ## Background
+-Forplane Optimization Losses were introduced in the context of "Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane" [S1]. The method addresses limitations in previous NeRF-based approaches that struggled with dynamic deformable tissues, particularly in endoscopic procedures where monocular inputs are common [S1]. The approach builds on the idea of representing 4D scenes using orthogonal 2D planes (Forplanes) and introduces specific regularization terms to guide the optimization of these planes.
++Forplane Optimization Losses were introduced in the context of "Efficient Deformable Tissue Reconstruction via Orthogonal Neural Plane" [S1]. The method addresses limitations in stereo depth reliance for monocular endoscopic procedures by using orthogonal neural planes to represent 3D/4D scenes [S1]. The specific losses $\mathcal{L}_{TV}$, $\mathcal{L}_{TS}$, and $\mathcal{L}_{DE}$ are designed to regularize the learned features in these planes to ensure physical plausibility and disentanglement [S1].
+ 
+ ## Sources

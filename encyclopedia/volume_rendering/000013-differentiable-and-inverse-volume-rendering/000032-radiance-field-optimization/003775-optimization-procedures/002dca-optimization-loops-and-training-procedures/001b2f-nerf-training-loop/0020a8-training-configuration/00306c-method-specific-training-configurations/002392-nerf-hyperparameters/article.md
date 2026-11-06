@@ -1,0 +1,274 @@
+# NeRF Hyperparameters
+
+Also called: Blender Training Configuration, NeRF Model and Sampling Configuration, NeRF Training Hyperparameters, NeTF Training Configuration, TinyNeRF Training Setup, Training Loop Configuration
+
+## Overview
+NeRF Hyperparameters define the standard training configuration for the original Neural Radiance Fields (NeRF) method, establishing the baseline for network architecture, sampling strategies, and optimization routines in differentiable volume rendering [S1][S3, S4, unofficial]. Unlike variants that employ hierarchical sampling with proposal networks (e.g., [Mip-NeRF Optimization and Activation Details](3409-mip-nerf-optimization-and-activation-details.md)) or specialized transient fields for non-line-of-sight imaging ([DONeRF](4461-donerf.md)), the standard NeRF configuration typically relies on a single-pass stratified sampling approach or a simplified two-stage process with fixed sample counts, optimized for synthetic scenes like the Blender dataset [S1][S3, S4, unofficial].
+
+## How it works
+The training process minimizes the Mean Squared Error (MSE) between rendered images and ground truth by optimizing a multi-layer perceptron (MLP) that maps 3D coordinates and view directions to density ($\sigma$) and color ($c$) [S1][S3, S4, unofficial].
+
+### Inputs and Outputs
+*   **Inputs**: Camera poses (extrinsics), intrinsics (focal length, principal point), and RGB images from a dataset (e.g., Blender synthetic scenes) [S3, S4, unofficial].
+*   **Outputs**: Optimized MLP weights, rendered images, and metrics (PSNR, SSIM, LPIPS) [S1][S3, S4, unofficial].
+
+### Data Structures
+The model consists of two primary MLPs in the standard configuration (or one in simplified variants):
+1.  **NeRF MLP**:
+    *   **Input**: Concatenated positional encoding of position $(x,y,z)$ and view direction $(\theta, \phi)$ [S1][S3, S4, unofficial].
+    *   **Architecture**: $L$ hidden layers, each with $W$ units. A skip connection from the input to the $k$-th layer is common [S1][S3, S4, unofficial].
+    *   **Output**: Density $\sigma$ (from the final layer or an intermediate feature vector) and color $c$ (from a separate head or final layer) [S1][S3, S4, unofficial].
+2.  **Positional Encoding**:
+    *   Uses axis-aligned or standard sinusoidal positional encoding [S1][S3, S4, unofficial].
+    *   Frequencies for position: $F_p$ (default 10) [S3, unofficial].
+    *   Frequencies for direction: $F_d$ (default 4) [S3, unofficial].
+
+### Numbered Steps
+1.  **Data Loading**: Load dataset using a loader (e.g., `NeRFDatasetLoader`) specifying path and mode ('train' or 'test') [S4, unofficial]. Normalize image pixel values by dividing by 255.0 [S4, unofficial].
+2.  **Ray Generation**: For each batch of pixels, generate ray origins and directions using camera intrinsics and extrinsics [S4, unofficial].
+3.  **Sampling**:
+    *   **Stratified Sampling**: Divide the interval $[near, far]$ into $N$ bins. Draw one sample uniformly at random from each bin [S3, unofficial].
+    *   **Disparity Sampling**: Optionally, sample linearly in disparity ($1/depth$) by transforming $t$ values: $z = 1 / (1/near \cdot (1-t) + 1/far \cdot t)$ [S3, unofficial].
+    *   **Perturbation**: Add uniform noise within each bin to break symmetry [S3, unofficial].
+    *   **Hierarchical Sampling (Optional/Simplified)**: In some configurations, a coarse model samples $N_{coarse}$ points, and a fine model resamples $N_{fine}$ points around high-density regions using inverse CDF sampling [S3, S4, unofficial].
+4.  **Forward Pass**:
+    *   Query the MLP for $\sigma$ and $c$ at sampled points [S4, unofficial].
+    *   Process points in chunks of size `chunksize` to manage memory [S4, unofficial].
+5.  **Volume Rendering**:
+    *   Compute transmittance $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $\delta_i = t_{i+1} - t_i$ [S3, unofficial].
+    *   Render color $C = \sum_{i=1}^{N} T_i \alpha_i c_i$ [S3, unofficial].
+6.  **Loss Calculation**: Compute MSE loss between rendered color and ground truth image [S1][S3, S4, unofficial].
+7.  **Optimization**: Update model parameters using the Adam optimizer [S1, S2][S3, S4, unofficial].
+
+### Formulas
+*   **Transmittance**: $T(t) = \exp\left(-\int_{t_n}^{t} \sigma(r(s)) ds\right)$ [S3, unofficial].
+*   **Discrete Transmittance**: $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$ [S3, unofficial].
+*   **Alpha**: $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ [S3, unofficial].
+*   **Rendered Color**: $C(\mathbf{r}) = \sum_{i=1}^{N} T_i \alpha_i c_i$ [S3, unofficial].
+
+### Parameters and Typical Values
+*   **MLP Width ($W$)**: 256 or 512 hidden units [S1][S3, S4, unofficial].
+*   **MLP Depth ($L$)**: 8 layers (default) [S1][S3, S4, unofficial].
+*   **Samples per Ray**:
+    *   Coarse: 64 (default) [S3, unofficial].
+    *   Fine: 128 (default) [S3, unofficial].
+    *   Simplified (Blender): 128 coarse, 32 fine [S1].
+    *   Fixed: 32 depth samples per ray [S4, unofficial].
+*   **Batch Size**: 1024 rays per batch (default) [S3, unofficial]. In some implementations, batch size refers to transient samples (1-4) [S2].
+*   **Learning Rate**: $5 \times 10^{-4}$ (default) [S3, unofficial]. Starts at $1 \times 10^{-3}$ and decays exponentially to $1 \times 10^{-4}$ in some variants [S2].
+*   **Optimizer**: Adam with $\beta_1 = 0.9$, $\epsilon = 1 \times 10^{-7}$ [S2][S4, unofficial].
+*   **Clipping Planes**: Near: 2.0, Far: 6.0 (Blender dataset specific) [S4, unofficial].
+*   **Training Iterations**: 4096 (in some scripts) or up to 200k iterations [S3, S4, unofficial].
+*   **Display Frequency**: Every 100 iterations [S4, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Memory Overflow**: Large batches or high-resolution images can exceed GPU memory. Mitigated by processing points in chunks (`chunksize`) [S4, unofficial].
+*   **Precision**: Floating-point precision in transmittance calculation can lead to underflow/overflow. Use stable exponential implementations [S3, unofficial].
+*   **Degenerate Input**: Ensure camera poses and intrinsics are correctly formatted. Invalid near/far planes can cause sampling errors [S4, unofficial].
+*   **Overfitting**: Small datasets may require regularization or early stopping [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.optim as optim
+
+class NeRFModel(nn.Module):
+    def __init__(self, D=8, W=256, input_ch=3, input_ch_dir=3, 
+                 output_ch=4, skips=[4], use_pe=True, 
+                 freq_pos=10, freq_dir=4):
+        super(NeRFModel, self).__init__()
+        self.D = D
+        self.W = W
+        self.input_ch = input_ch
+        self.input_ch_dir = input_ch_dir
+        self.output_ch = output_ch
+        self.skips = skips
+        self.use_pe = use_pe
+        self.freq_pos = freq_pos
+        self.freq_dir = freq_dir
+        
+        # Positional Encoding functions
+        self.pos_enc = PositionalEncoding(freq_pos)
+        self.dir_enc = PositionalEncoding(freq_dir)
+        
+        # MLP Layers
+        self.layers = nn.ModuleList()
+        self.layers.append(nn.Linear(input_ch * (2 * freq_pos + 1) + 3, W))
+        for i in range(1, D):
+            if i in skips:
+                self.layers.append(nn.Linear(W + input_ch * (2 * freq_pos + 1) + 3, W))
+            else:
+                self.layers.append(nn.Linear(W, W))
+        
+        # Output layers
+        self.sigma_layer = nn.Linear(W, 1)
+        self.color_layer = nn.Linear(W + input_ch_dir * (2 * freq_dir + 1) + 3, 3)
+
+    def forward(self, x, d):
+        # x: [N, 3], d: [N, 3]
+        if self.use_pe:
+            x = self.pos_enc(x)
+            d = self.dir_enc(d)
+        
+        h = x
+        for i, layer in enumerate(self.layers):
+            h = torch.relu(layer(h))
+            if i in self.skips:
+                h = torch.cat([h, x], dim=-1)
+        
+        sigma = self.sigma_layer(h)
+        h_color = torch.cat([h, d], dim=-1)
+        color = torch.sigmoid(self.color_layer(h_color))
+        
+        return color, sigma
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, freq):
+        super(PositionalEncoding, self).__init__()
+        self.freq = freq
+    
+    def forward(self, x):
+        # Standard NeRF positional encoding
+        # x: [N, 3] -> [N, 3 * (2*freq + 1)]
+        scales = torch.tensor([2**i for i in range(self.freq)], dtype=x.dtype, device=x.device)
+        shaped = x.shape[0]
+        x = x.reshape(shaped, -1, 3)
+        emb = x * scales.view(1, -1, 1)
+        emb = torch.cat([emb.sin(), emb.cos()], dim=-1)
+        emb = torch.cat([x, emb], dim=-1)
+        return emb.reshape(shaped, -1)
+
+def stratified_sample(rays_o, rays_d, near, far, n_samples, perturb=True):
+    """
+    Stratified sampling along rays.
+    rays_o: [N_rays, 3]
+    rays_d: [N_rays, 3]
+    near: float
+    far: float
+    n_samples: int
+    """
+    N_rays = rays_o.shape[0]
+    device = rays_o.device
+    
+    # Evenly spaced t values
+    t_vals = torch.linspace(0.0, 1.0, steps=n_samples, device=device)
+    
+    # Linear sampling in depth
+    z_vals = near * (1.0 - t_vals) + far * t_vals
+    z_vals = z_vals.expand(N_rays, n_samples)
+    
+    if perturb:
+        mids = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
+        upper = torch.cat([mids, z_vals[..., -1:]], -1)
+        lower = torch.cat([z_vals[..., :1], mids], -1)
+        t_rand = torch.rand(z_vals.shape, device=device)
+        z_vals = lower + (upper - lower) * t_rand
+    
+    # Compute 3D points
+    pts = rays_o.unsqueeze(1) + rays_d.unsqueeze(1) * z_vals.unsqueeze(2)
+    
+    return pts, z_vals
+
+def volume_render(pts, sigma, rays_d, chunksize=4096):
+    """
+    Differentiable volume rendering.
+    pts: [N_rays, N_samples, 3]
+    sigma: [N_rays, N_samples]
+    rays_d: [N_rays, 3]
+    """
+    N_rays, N_samples = pts.shape[:2]
+    device = pts.device
+    
+    # Compute deltas
+    t_vals = torch.linspace(0.0, 1.0, steps=N_samples, device=device)
+    z_vals = pts[..., 0] # Assuming rays are aligned with x-axis for simplicity, or use dot product
+    # More generally:
+    # delta = torch.diff(pts, dim=1).norm(dim=2)
+    # But standard NeRF uses z_vals difference
+    # Let's use the standard z_vals approach from the source
+    # Re-calculate z_vals from pts and rays_d if not passed
+    # For simplicity, assume z_vals is passed or computed from pts
+    
+    # Compute alpha
+    # delta_i = t_{i+1} - t_i
+    # sigma_i * delta_i
+    # alpha_i = 1 - exp(-sigma_i * delta_i)
+    
+    # Simplified: assume z_vals is available
+    # delta = torch.diff(z_vals, dim=1, append=torch.zeros(N_rays, 1, device=device))
+    # alpha = 1 - torch.exp(-sigma * delta)
+    
+    # Transmittance
+    # T_i = prod_{j=1}^{i-1} (1 - alpha_j)
+    
+    # Rendered color
+    # C = sum T_i * alpha_i * c_i
+    
+    # Placeholder for actual implementation details from source [S3, unofficial]
+    # This is a high-level representation
+    pass
+
+def train_step(model, optimizer, rays_o, rays_d, near, far, gt_rgb, n_samples):
+    model.train()
+    optimizer.zero_grad()
+    
+    pts, z_vals = stratified_sample(rays_o, rays_d, near, far, n_samples)
+    
+    # Flatten for MLP
+    pts_flat = pts.reshape(-1, 3)
+    rays_d_flat = rays_d.unsqueeze(1).expand(-1, n_samples, -1).reshape(-1, 3)
+    
+    # Chunked forward pass
+    chunksize = 4096
+    all_rgb = []
+    all_sigma = []
+    
+    for i in range(0, pts_flat.shape[0], chunksize):
+        chunk_pts = pts_flat[i:i+chunksize]
+        chunk_dir = rays_d_flat[i:i+chunksize]
+        rgb, sigma = model(chunk_pts, chunk_dir)
+        all_rgb.append(rgb)
+        all_sigma.append(sigma)
+    
+    rgb = torch.cat(all_rgb, dim=0)
+    sigma = torch.cat(all_sigma, dim=0)
+    
+    # Reshape
+    rgb = rgb.reshape(rays_o.shape[0], n_samples, 3)
+    sigma = sigma.reshape(rays_o.shape[0], n_samples)
+    
+    # Volume rendering
+    rendered_rgb = volume_render(pts, sigma, rays_d)
+    
+    # Loss
+    loss = torch.mean((rendered_rgb - gt_rgb) ** 2)
+    loss.backward()
+    optimizer.step()
+    
+    return loss.item()
+```
+
+## Subtopics
+
+### [HashNeRF Parameters](3068-hashnerf-parameters.md)
+Configures HashNeRF, which replaces positional encoding with a multi-resolution hashed embedding table. It requires settings for hash map size and regularization, differing from NeRF's MLP-based approach.
+
+## Operating characteristics
+*   **Time Complexity**: Training time scales with the number of iterations, samples per ray, and model capacity. For the Blender dataset, training takes ~1.86–3.42 hours for the proposed model with 256/512 hidden units, compared to 2.89–7.03 hours for mip-NeRF [S1].
+*   **Memory Complexity**: Memory usage is dominated by the MLP weights and the intermediate activations during the forward pass. Chunking (`chunksize`) is used to manage GPU memory [S4, unofficial].
+*   **Performance**: On the Blender dataset, the standard NeRF configuration achieves PSNR ~32.96–33.25, SSIM ~0.960–0.962, and LPIPS ~0.039–0.043 [S1].
+*   **Scaling**: Training time quadruples when increasing sampling resolution from 32x32 to 64x64 samples [S2].
+*   **Strengths**: Simple to implement, robust for synthetic scenes, good baseline for comparison [S1][S3, S4, unofficial].
+*   **Limitations**: Slower than hierarchical sampling methods for high accuracy, sensitive to sampling density [S1, S2].
+
+## Background
+The NeRF Hyperparameters are derived from the original NeRF paper [S3, S4, unofficial] and subsequent implementations [S1, S2][S3, S4, unofficial]. The configuration was standardized for the Blender synthetic dataset, which features white backgrounds and bounded scenes [S1]. The use of positional encoding and MLPs was introduced to enable high-frequency learning in radiance fields [S1][S3, S4, unofficial].
+
+## Sources
+[S1] Mip-NeRF 360: Unbounded Anti-Aliased Neural Radiance Fields, https://doi.org/10.1109/cvpr52688.2022.00539, fetched 2026-10-26
+[S2] Non-line-of-Sight Imaging via Neural Transient Fields, https://doi.org/10.1109/tpami.2021.3076062, fetched 2026-10-26
+[S3] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S4] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)

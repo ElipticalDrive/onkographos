@@ -1,0 +1,113 @@
+# Gaussian Sorting
+
+Also called: Depth Sorting for Alpha Blending, Gaussian Depth Sorting
+
+## Overview
+Gaussian Sorting is the process of ordering 3D Gaussians by their distance from the camera to ensure correct alpha blending during rasterization [S1]. It solves the problem of rendering transparency correctly by establishing a front-to-back draw order, which is critical because Gaussians with non-zero opacity accumulate color based on their depth relative to the viewer [S1][S2, unofficial]. It sets itself apart from its parent [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) by focusing on the specific application of 3D Gaussian Splatting, where the sorting is performed on a global index buffer of Gaussian attributes rather than just projected splat depths, and it differs from [Fast Splat Sorting](2953-fast-splat-sorting.md) by relying on explicit compute-shader-based radix sorting of indices rather than optimized spatial partitioning heuristics.
+
+## How it works
+**Inputs:**
+- A list of $N$ Gaussians, each defined by a position $\mathbf{p}_i \in \mathbb{R}^3$, opacity $\alpha_i$, and other attributes (color, covariance, etc.).
+- A view matrix $\mathbf{V}$ transforming world space to camera space.
+- A regular buffer (not sparse residency) storing Gaussian attributes [S1].
+
+**Outputs:**
+- A sorted index buffer $\mathcal{I}$ of length $N$, where $\mathcal{I}[k]$ is the index of the $k$-th closest Gaussian to the camera.
+
+**Data Structures:**
+- **Gaussian Attribute Buffer:** A contiguous memory block (e.g., `std::vector` or GPU `StorageBuffer`) containing one entry per Gaussian. Each entry includes at least the 3D position $\mathbf{p}_i$ and opacity $\alpha_i$.
+- **Index Buffer:** An array of integers (e.g., `uint32_t`) of size $N$, initialized to $[0, 1, \dots, N-1]$.
+- **Depth Buffer (Temporary):** An array of floats or unsigned integers of size $N$ to store computed depths for sorting.
+
+**Steps:**
+1. **Transform to Camera Space:** For each Gaussian $i$, compute its camera-space position $\mathbf{p}'_i = \mathbf{V} \cdot \mathbf{p}_i$. The z-component $z_i = \mathbf{p}'_i.z$ represents the depth [S2, unofficial].
+2. **Compute Distances:** Calculate the distance from the camera for each Gaussian. In standard Gaussian Splatting, this is typically the z-coordinate in camera space $z_i$ [S1][S2, unofficial]. If using Euclidean distance, compute $d_i = \|\mathbf{p}'_i\|$. The sources specify using the z-component for sorting [S2, unofficial].
+3. **Radix Sort Indices:** Perform a radix sort on the index buffer $\mathcal{I}$ based on the computed depths. The sorting key for index $j$ is the depth of Gaussian $\mathcal{I}[j]$. The radix sort is implemented using compute shaders [S1].
+   - *Note:* The parent method [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md) describes a 2-pass 16-bit radix sort on `f32` bit patterns. Gaussian Sorting applies this or a similar radix sort to the global index buffer [S1].
+4. **Render:** Pass the sorted index buffer to the vertex shader. The vertex shader uses these indices to fetch Gaussian attributes from the storage buffer in the correct front-to-back order [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gaussian_sort(gaussians, view_matrix):
+    """
+    Sorts Gaussians by depth for alpha blending.
+    
+    Args:
+        gaussians: List of Gaussian objects with attributes:
+                   - pos: (x, y, z) in world space
+                   - opacity: float
+        view_matrix: 4x4 matrix transforming world to camera space.
+        
+    Returns:
+        sorted_indices: List of integers, indices into gaussians list, sorted front-to-back.
+    """
+    n = len(gaussians)
+    indices = list(range(n))
+    
+    # Step 1 & 2: Transform and compute depth
+    # Using z-coordinate in camera space as depth metric [S2, unofficial]
+    depths = []
+    for i in range(n):
+        p_world = gaussians[i].pos
+        # Transform to camera space
+        p_cam = transform_point(view_matrix, p_world)
+        depth = p_cam.z
+        depths.append(depth)
+        
+    # Step 3: Radix Sort indices based on depths
+    # This step delegates to the radix sort implementation described in 
+    # [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md)
+    # The sort is stable and sorts indices i, j such that depths[i] <= depths[j]
+    sorted_indices = radix_sort_by_key(indices, depths)
+    
+    return sorted_indices
+
+def transform_point(matrix, point):
+    """
+    Transforms a 3D point by a 4x4 matrix.
+    Assumes point is homogeneous (x, y, z, 1).
+    """
+    x, y, z = point
+    # Matrix multiplication: M * [x, y, z, 1]^T
+    w = matrix[3][0]*x + matrix[3][1]*y + matrix[3][2]*z + matrix[3][3]
+    x_cam = (matrix[0][0]*x + matrix[0][1]*y + matrix[0][2]*z + matrix[0][3]) / w
+    y_cam = (matrix[1][0]*x + matrix[1][1]*y + matrix[1][2]*z + matrix[1][3]) / w
+    z_cam = (matrix[2][0]*x + matrix[2][1]*y + matrix[2][2]*z + matrix[2][3]) / w
+    return (x_cam, y_cam, z_cam)
+```
+
+**Parameters:**
+- **Buffer Type:** Regular buffer is used instead of sparse residency buffers [S1].
+- **Sorting Algorithm:** Radix sort [S1].
+
+**Edge Cases and Pitfalls:**
+- **Sparse Residency Buffers:** Avoid using sparse residency buffers. They require indirection texture lookups for UV coordinates in virtual texturing, adding lookup overhead [S1]. Furthermore, support is limited: less than a third of desktop GPUs and just over 10% of Android devices support `sparseResidencyBuffer` [S1]. MoltenVK (Apple) generally lacks this feature [S1]. Even on hardware that supports it, performance may be unsatisfactory [S1].
+- **Precision:** The depth values must be compared accurately. Using the z-coordinate in camera space is standard [S2, unofficial].
+- **Degenerate Input:** If multiple Gaussians have identical depths, the sort must be stable to maintain consistent rendering order, or a secondary key (e.g., original index) must be used to impose a weak ordering [S3, unofficial][S1].
+
+## Subtopics
+
+### [Temporal Coherence Heuristic for Gaussian Sorting](7339-temporal-coherence-heuristic-for-gaussian-sorting.md)
+A method that introduces a temporal coherence heuristic into the tile sorting phase of 3D Gaussian Splatting rasterization, avoiding the computational cost of re-sorting Gaussians whose depth order has not changed between consecutive frames. It sets itself apart from standard per-frame sorting by leveraging the high degree of similarity between adjacent video frames to skip redundant sorting operations.
+
+### Front-to-Back Rendering for Alpha Blending
+An ordering technique that sorts draw calls front-to-back based on the dot product of the vector between chunk positions and the camera position, reducing z-buffer burden and increasing speed for alpha blending [S3, unofficial]. It is applied by calling `vertpool.order` with a lambda comparing two DAICs $a$ and $b$: if $\text{dot}(b.\text{pos} - a.\text{pos}, \text{cam}.\text{pos}) < 0$ return true; if $> 0$ return false; otherwise return $(a.\text{baseVert} < b.\text{baseVert})$ to impose a weak ordering [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \log N)$ for comparison-based sorts, but typically $O(N)$ for radix sort on fixed-width keys [S1][S2, unofficial]. The parent method uses a 2-pass radix sort, implying linear time complexity relative to the number of Gaussians $N$ [1207-radix-sort-for-splat-depth.md].
+- **Memory Complexity:** $O(N)$ for the index buffer and depth arrays [S1].
+- **Performance:** Using regular buffers avoids the overhead of indirection texture lookups required by sparse residency buffers, leading to better performance on supported hardware [S1].
+- **Strengths:** Ensures correct alpha blending for transparent Gaussians [S1]. Works on a wide range of hardware due to the avoidance of sparse residency features [S1].
+- **Limitations:** Sorting is required every frame unless temporal coherence is used [S1]. Sparse residency buffers, which might reduce memory bandwidth, are not recommended due to poor support and performance [S1].
+- **When to use:** When rendering 3D Gaussians with opacity that require correct alpha blending [S1].
+- **When not to use:** When Gaussians are opaque and depth sorting is not required for correctness, or when hardware lacks support for efficient compute shader radix sorts (though this is rare on modern GPUs).
+
+## Background
+Gaussian Sorting originated with the introduction of 3D Gaussian Splatting by Kerbl et al. [1], where Gaussians with opacity require alpha blending and must be sorted by distance from the camera [S1]. The method was further detailed in implementations such as "Virtual memory for 3D Gaussian Splatting" [S1], which highlighted the use of compute shaders for depth calculation and radix sorting of indices. The approach is also referenced in unofficial implementations like `thomasantony/splat` [S2, unofficial] and adapted in voxel engine contexts for front-to-back rendering of chunks [S3, unofficial].
+
+## Sources
+[S1] Virtual memory for 3D Gaussian Splatting, https://zenodo.org/records/19690968, fetched 2026-10-26
+[S2] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+[S3] High Performance Voxel Engine (2021), https://nickmcd.me/2021/04/04/high-performance-voxel-engine/, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,178 @@
+# Procedural Terrain Feature Generation
+
+Also called: Overhang Generation
+
+## Overview
+Procedural Terrain Feature Generation is a method for creating specific volumetric structures, primarily cliffs and overhangs, by approximating their topology as a bicubic Bézier surface combined with a parabolic plateau function [S1]. It produces local delta values (additive blending) applied directly to volumetric data, allowing for nondestructive editing where parameters can be adjusted and transformations applied before surface extraction [S1]. It differs from general noise-based terrain generation by focusing on explicit geometric primitives for sharp features rather than stochastic displacement [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `Fdim`: User-defined dimensions in voxels for the feature's bounding box (3D vector).
+    *   `G`: A 4x4 geometry matrix of vectors containing the control points of the surface. The second and third rows act as erosion parameters [S1].
+    *   `k`: User-defined exponent for the parabolic function to emulate realistic plateaus [S1].
+    *   `Vindex`: The unit cube coordinates of the current voxel within the feature's bounding box.
+    *   Optional transformation matrix (translation and rotation) applied to the feature before voxel submission [S1].
+*   **Outputs:**
+    *   `D_Cliff(u, v)`: A delta value (0 or 1) for the voxel, representing the presence of the feature [S1].
+
+**Data Structures:**
+*   **Geometry Matrix `G`**: A 4x4 matrix where each row is a 3D vector (control point).
+    *   Layout: `G[row][col]` where `row, col \in {0, 1, 2, 3}`.
+    *   Rows 1 and 2 (0-indexed) serve as erosion parameters [S1].
+*   **Bézier Basis Matrix `B`**: A constant 4x4 matrix defined as:
+    $$
+    B = \begin{bmatrix} 1 & 0 & 0 & 0 \\ -3 & 3 & 0 & 0 \\ 3 & -6 & 3 & 0 \\ -1 & 3 & -3 & 1 \end{bmatrix}
+    $$
+    [S1]
+
+**Steps:**
+1.  **Calculate Voxel Index:** Compute the normalized voxel index `I` within the feature's bounding box using the unit cube coordinates `Vindex` and feature dimensions `Fdim`:
+    $$
+    I = \frac{Vindex}{Fdim}
+    $$
+    [S1]
+2.  **Compute Parameters:** Derive parameters `u` and `v` from the normalized index `I`:
+    $$
+    u = I_z
+    $$
+    $$
+    v = 1 - I_y
+    $$
+    [S1]
+3.  **Compute Bézier Surface:** Calculate the surface value `S(u, v)` using the Bézier basis matrix `B`, the geometry matrix `G`, and the parameter vectors `U` and `V`:
+    $$
+    U = \begin{bmatrix} 1 & u & u^2 & u^3 \end{bmatrix}
+    $$
+    $$
+    V = \begin{bmatrix} 1 & v & v^2 & v^3 \end{bmatrix}
+    $$
+    $$
+    S(u, v) = U \cdot B \cdot G \cdot B^T \cdot V^T
+    $$
+    [S1]
+4.  **Compute Parabolic Function:** Calculate the plateau function `P(u)` using the exponent `k`:
+    $$
+    P(u) = (4u \cdot (1-u))^k
+    $$
+    [S1]
+5.  **Compute Delta Value:** Determine the final delta value `D_Cliff(u, v)` for the voxel based on the x-component of the normalized index `I_x`:
+    $$
+    D_{Cliff}(u, v) = \begin{cases} 1, & \text{if } I_X < \min(S(u, v), P(u)) \\ 0, & \text{otherwise} \end{cases}
+    $$
+    [S1]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_cliff_feature(Vindex, Fdim, G, k):
+    """
+    Generates a delta value for a voxel in a cliff/overhang feature.
+    
+    Args:
+        Vindex: Tuple (x, y, z) of voxel coordinates within the feature bounding box.
+        Fdim: Tuple (fx, fy, fz) of feature dimensions in voxels.
+        G: List of 4 lists, each containing 3 floats (4x3 control points).
+           Note: Source defines G as 4x4 geometry matrix of vectors. 
+           Assuming G is 4x3 for 3D space, or 4x4 with homogeneous coords.
+           Based on S1 "4x4 geometry matrix (G) of vectors", we treat G as 4x4.
+        k: Float exponent for parabolic function.
+        
+    Returns:
+        int: 1 if voxel is part of the feature, 0 otherwise.
+    """
+    # Step 1: Calculate normalized index I
+    I_x = Vindex[0] / Fdim[0]
+    I_y = Vindex[1] / Fdim[1]
+    I_z = Vindex[2] / Fdim[2]
+    
+    # Step 2: Compute parameters u and v
+    u = I_z
+    v = 1.0 - I_y
+    
+    # Step 3: Compute Bézier Surface S(u, v)
+    # Define Basis Matrix B
+    B = [
+        [1, 0, 0, 0],
+        [-3, 3, 0, 0],
+        [3, -6, 3, 0],
+        [-1, 3, -3, 1]
+    ]
+    
+    # Define U and V vectors
+    U = [1.0, u, u**2, u**3]
+    V = [1.0, v, v**2, v**3]
+    
+    # Matrix Multiplication: S(u,v) = U * B * G * B^T * V^T
+    # Intermediate: Temp1 = U * B (1x4)
+    Temp1 = [0.0, 0.0, 0.0, 0.0]
+    for j in range(4):
+        for k_idx in range(4):
+            Temp1[j] += U[k_idx] * B[k_idx][j]
+            
+    # Intermediate: Temp2 = Temp1 * G (1x4)
+    Temp2 = [0.0, 0.0, 0.0, 0.0]
+    for j in range(4):
+        for k_idx in range(4):
+            Temp2[j] += Temp1[k_idx] * G[k_idx][j]
+            
+    # Intermediate: Temp3 = B^T * V^T (4x1) -> Transpose of V is column vector
+    # B^T is 4x4. V^T is 4x1. Result is 4x1.
+    BT = [
+        [1, -3, 3, -1],
+        [0, 3, -6, 3],
+        [0, 0, 3, -3],
+        [0, 0, 0, 1]
+    ]
+    VT = [1.0, v, v**2, v**3] # Column vector
+    
+    Temp3 = [0.0, 0.0, 0.0, 0.0]
+    for i in range(4):
+        for k_idx in range(4):
+            Temp3[i] += BT[i][k_idx] * VT[k_idx]
+            
+    # Final S(u,v) = Temp2 * Temp3 (1x4 * 4x1 = 1x1 scalar)
+    S_uv = 0.0
+    for k_idx in range(4):
+        S_uv += Temp2[k_idx] * Temp3[k_idx]
+        
+    # Step 4: Compute Parabolic Function P(u)
+    P_u = (4.0 * u * (1.0 - u)) ** k
+    
+    # Step 5: Compute Delta Value
+    min_val = S_uv if S_uv < P_u else P_u
+    
+    if I_x < min_val:
+        return 1
+    else:
+        return 0
+```
+[G] The pseudocode assumes `G` is a 4x4 matrix as stated in the source ("4x4 geometry matrix"). If `G` represents 3D control points, it might be 4x3, but the matrix multiplication dimensions in the source formula $U \cdot B \cdot G \cdot B^T \cdot V^T$ require $G$ to be 4x4 to match the 4x4 basis matrices, or the vectors are homogeneous. The code implements the exact matrix multiplication order specified.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Floating-point precision in the Bézier calculation may cause artifacts at the boundaries of the feature bounding box.
+*   **Boundaries:** The formula relies on `I_x` being compared against `S(u,v)` and `P(u)`. If `I_x` is outside the range [0, 1], the behavior is undefined by the source, but typically clamped or treated as 0.
+*   **Degenerate Input:** If `k` is 0, `P(u)` becomes 1 for all `u` (except possibly boundaries), potentially creating a flat plateau. If `G` is degenerate (e.g., all control points identical), the surface will be flat.
+
+## Subtopics
+
+### Terrain Generation via Noise
+Uses stochastic noise functions to displace vertices. Choose when organic, non-geometric detail is needed. [2412-terrain-generation-via-noise.md]
+
+### Heightmap generation via circular displacements
+Uses circular patterns for displacement. Choose when radial symmetry or specific circular features are required. [5186-heightmap-generation-via-circular-displacements.md]
+
+## Operating characteristics
+*   **Time Complexity:** O(1) per voxel, as it involves fixed-size matrix multiplications and basic arithmetic.
+*   **Memory Complexity:** O(1) auxiliary memory, storing only the control points and basis matrices.
+*   **Strengths:** Nondestructive editing; explicit control over geometry via control points; efficient computation.
+*   **Limitations:** Limited to specific feature types (cliffs, overhangs); requires manual tuning of control points and parameters.
+*   **When to use:** When generating specific, sharp geological features like cliffs and arches in volumetric terrain.
+*   **When not to use:** For general terrain shaping or organic, noise-driven landscapes.
+
+## Background
+The method was introduced in the paper "Procedural feature generation for volumetric terrains" [S1]. It is part of a pipeline for generating volumetric terrains, where features are defined parametrically and then converted to voxel data for rendering. The technique is used in conjunction with other procedural methods to create complex terrain structures.
+
+## Sources
+[S1] Procedural feature generation for volumetric terrains, https://doi.org/10.1145/3102163.3102216, fetched 2026-10-26

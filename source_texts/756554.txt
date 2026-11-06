@@ -1,0 +1,1285 @@
+arXiv:2604.15017v1 [cs.CE] 16 Apr 2026
+F ULLY D IFFERENTIABLE U LTRASOUND S IMULATION U TILIZING
+R AY-T RACING
+L. River Spencer
+Department of Aerospace Engineering & Engineering Mechanics,
+The University of Texas at Austin,
+Austin, TX 78712
+Reagan A. Cardoza
+Department of Aerospace Engineering & Engineering Mechanics,
+The University of Texas at Austin,
+Austin, TX 78712
+Vijay K. Dubey
+Walker Department of Mechanical Engineering,
+The University of Texas at Austin,
+Austin, TX 78712
+Felix Kreidel
+Clinic for Cardiology,
+Asklepios Hospital Harburg,
+Hamburg, Germany
+Collin E. Haese
+Walker Department of Mechanical Engineering,
+The University of Texas at Austin,
+Austin, TX 78712
+Issam Moussa
+Carle Heart and Vascular Institute, Carle Health,
+University of Illinois Urbana-Champaign Carle Illinois College of Medicine,
+Urbana, IL 61801
+Manuel K. Rausch
+Department of Aerospace Engineering & Engineering Mechanics,
+The Oden Institute of Computational Science and Engineering,
+Department of Biomedical Engineering,
+Walker Department of Mechanical Engineering,
+The University of Texas at Austin,
+Austin, TX 78712
+Jan N. Fuhg
+Department of Aerospace Engineering & Engineering Mechanics,
+The Oden Institute of Computational Science and Engineering,
+The University of Texas at Austin,
+Austin, TX 78712
+April 17, 2026
+A BSTRACT
+Ultrasound imaging applications such as calibration, inverse parameter estimation, and acquisition
+design require computational models that are physically grounded, efficient, and differentiable
+with respect to meaningful material and system parameters. While full-wave solvers provide high
+physical fidelity, they are often prohibitively expensive for iterative optimization, and existing raybased simulators have largely been used only as forward models. In this work, we present a fully
+differentiable end-to-end ultrasound simulation framework based on full-path Monte Carlo ray
+A PREPRINT - A PRIL 17, 2026
+tracing. Building on the UltraRay formulation, the proposed method propagates gradients from
+image-space objectives back through acoustic transport, beamforming, and post-processing, enabling
+gradient-based optimization over scene and acquisition parameters.
+The framework combines differentiable ray transport in Mitsuba 3/Dr.Jit with a custom differentiable
+bridge through the ultrasound image-formation pipeline. To obtain stable sensitivities in the Monte
+Carlo setting, automatic differentiation is applied to fixed sampled ray realizations with respect to
+continuous parameters. The proposed approach is validated in both forward and inverse settings.
+Forward examples demonstrate reproduction of expected geometric image features and the ability
+to represent more complex anatomical structures. In a simulated-reference inverse problem, the
+method recovers known scene parameters from image-space supervision alone. In a simulation-to-real
+experiment, it identifies an effective set of parameters that improves agreement between simulated
+and experimentally acquired B-mode images. Finite-difference comparisons further support the
+consistency of the computed automatic-differentiation gradients. Overall, this work establishes a
+practical foundation for differentiable, physics-parameterized ultrasound simulation and optimization.
+1
+Introduction
+Ultrasound imaging plays a central role in modern clinical practice due to its safety, portability, real-time capability, and
+relatively low cost [1]. It is widely used across cardiology [2], obstetrics [3], oncology [4], and emergency medicine [5],
+where image quality directly affects diagnostic reliability and clinical decision making. The formation of ultrasound
+images depends on physical and acquisition parameters, including tissue properties, transducer geometry, beamforming
+strategies, and operating frequency [6]. Understanding and controlling these factors is essential for system design,
+calibration, and acquisition optimization, motivating the development of computational models that describe the image
+formation process. Once such models are available, they also enable the generation of synthetic ultrasound data
+under controlled conditions. This capability is increasingly important in machine learning workflows, where large,
+well-annotated clinical datasets are often difficult, costly, or impractical to obtain [7]. Synthetic data can supplement real
+acquisitions, provide controlled variations of physical parameters, and support training, validation, and benchmarking
+of data-driven methods, see recent review by Ref. [8]. Computational modeling, therefore, serves both as a tool for
+principled system analysis and as an enabler of modern machine learning applications in ultrasound imaging. Building
+on the availability of synthetic data and increasing computational power, data-driven approaches have emerged as an
+alternative means of modeling ultrasound images. Generative models, including adversarial networks and related neural
+architectures, have been used to synthesize realistic B-mode images for training and augmentation purposes [9, 10, 11].
+In addition, learned surrogate and rendering models have been proposed to approximate aspects of the ultrasound
+image formation process directly from data [12, 13]. Once trained, such models can produce visually convincing
+images at high computational speed, making them attractive for large-scale data generation and real-time applications.
+Despite these advantages, purely data-driven models exhibit structural limitations when the objective extends beyond
+image synthesis. Data-driven architectures are typically trained to approximate mappings from inputs to images and
+therefore rely on implicit representations learned from finite datasets. As a result, they do not explicitly parameterize
+physically meaningful quantities such as acoustic impedance, interface roughness, or transducer geometry [14]. This
+lack of explicit physical structure can limit interpretability and makes it difficult to directly manipulate or optimize
+acquisition and material parameters within the model. Furthermore, because these methods learn statistical mappings
+from data, their ability to generalize is inherently tied to the distribution of the training set [15]. As a result, they
+are typically not designed to support system calibration, parameter identification, or inverse problems that require
+recovering physical properties directly from measured images [16, 17]. Emerging applications in ultrasound imaging
+increasingly require models that go beyond visual realism and support direct interaction with underlying physical and
+acquisition parameters. Examples include optimization over material properties and probe settings [18, 19], system
+identification from measured image data [20], and task-aware acquisition design in which steering angles, frequencies,
+or array configurations are tuned for a specific diagnostic objective [21]. Addressing such problems naturally leads to
+optimization formulations in which losses defined on reconstructed images are minimized with respect to physically
+meaningful quantities [17]. This, in turn, requires computational models that are differentiable end-to-end with respect
+to material characteristics and acquisition parameters [22]. Taken together, these considerations highlight a fundamental
+modeling gap. On one hand, data-driven methods provide speed and visual realism but lack explicit control over
+physically meaningful parameters. On the other hand, emerging applications demand models that support calibration,
+parameter identification, and acquisition optimization directly in terms of material and system properties. Bridging this
+gap requires computational frameworks that are physically parameterized, computationally efficient, interpretable, and
+amenable to gradient-based optimization with respect to scene and acquisition characteristics.
+To address the need for physically grounded modeling, classical ultrasound simulation approaches solve the heterogeneous acoustic wave equation governing pressure propagation in media with spatially varying density and wave
+2
+A PREPRINT - A PRIL 17, 2026
+speed [23]. In diagnostic imaging settings, this typically involves discretizing either the linear second-order pressure
+formulation or an equivalent first-order pressure–velocity system using, for example, finite-difference [24, 25] or
+finite-element [26, 27] methods. Widely used open-source toolboxes such as k-Wave [28, 29] and mSOUND [30]
+provide practical implementations of these full-wave models for heterogeneous and absorbing media. Such formulations
+explicitly account for variable material parameters and enforce transmission conditions across interfaces where density
+or sound speed may exhibit jump discontinuities. These methods provide high physical fidelity and can capture complex
+wave phenomena, including diffraction, interference, multiple scattering, reflection, and refraction. However, this
+physical accuracy comes at a substantial computational and memory cost, particularly in three-dimensional settings or
+at clinically relevant frequencies that require fine spatial and temporal resolution. Large computational domains, small
+grid spacings, and long simulation times lead to high memory consumption and long runtimes. Consequently, while
+full-wave solvers are well-suited for detailed forward analysis, they are often impractical for large-scale parameter
+sweeps, real-time applications, or iterative inverse problems that require repeated forward evaluations. To alleviate the
+computational burden of full-wave simulations, geometric or ray-based approximations have been proposed as efficient
+alternatives for modeling ultrasound propagation [31, 32]. In these approaches, acoustic energy is modeled as traveling
+along discrete rays whose trajectories are governed by geometric optics principles. Interactions with tissue interfaces are
+treated explicitly through reflection and refraction laws derived from acoustic impedance contrasts, while attenuation
+and scattering effects are incorporated along ray paths [33]. By replacing the solution of a global wave equation with
+the tracing of independent propagation paths, ray-based methods substantially reduce computational cost compared to
+full-wave solvers. This reduction enables simulation over large domains, rapid parameter sweeps, and repeated forward
+evaluations that are often required in design and optimization settings. Recent work has advanced ray-based ultrasound
+simulation from simple ray casting to full path tracing. In particular, UltraRay [34] introduced a Monte Carlo full-path
+ray tracer for ultrasound built on the Mitsuba 3 rendering framework [35]. By explicitly modeling round-trip propagation
+and secondary reflections rather than injecting echoes directly at interaction points, UltraRay produces more physically
+consistent B-mode images while remaining computationally efficient. Although UltraRay is implemented within a
+differentiable rendering framework, its focus remains on forward ultrasound image synthesis rather than gradient-based
+inverse modeling. In many emerging applications, however, simulation serves not as an end in itself but as a component
+within a broader optimization framework. Tasks such as transducer calibration, adaptive beamforming, acquisition
+design, and inverse estimation of tissue properties from ultrasound images require differentiable end-to-end models that
+link physically meaningful scene and acquisition parameters to task-specific loss functions defined on reconstructed
+images. This setting necessitates the propagation of gradients from image-space objectives back to parameters such as
+acoustic impedance contrasts, interface roughness, probe geometry, center frequency, or transmission steering angles.
+In contrast, our work develops and validates a fully differentiable end-to-end pipeline that propagates gradients from
+image-space losses back to physically meaningful material and acquisition parameters and demonstrates gradient-based
+calibration and inverse recovery in practice. Building on the full-path ray tracing formulation implemented within
+Mitsuba 3, we construct an end-to-end auto-differentiable ultrasound simulation framework.
+We verify the correctness of the forward model through controlled numerical experiments and validate the simulator by
+comparing simulated B-mode images with experimentally acquired ultrasound data obtained under known imaging
+conditions. These comparisons demonstrate that the proposed framework captures salient image characteristics observed
+in real measurements while maintaining computational efficiency. We further validate the differentiable formulation
+through gradient-based calibration and inverse recovery experiments, showing that physically meaningful parameters
+can be identified directly from measured B-mode images and that gradients propagate consistently through the full
+imaging pipeline. The remainder of the paper is organized as follows. Section 2 reviews the underlying ray-tracing
+formulation and introduces our differentiable extensions to both the transport and image-formation pipeline. Section 3
+describes the implementation details, including parameterization strategies, micro-batching schemes, and loss design.
+Section 4 presents experimental evaluations covering forward validation, gradient-based parameter recovery, and
+acquisition optimization. Finally, Section 5 analyzes limitations and failure modes and outlines future directions,
+including the integration of learned components and more advanced tissue models.
+2
+Ray-tracing formulation
+In this section, we first review the ultrasound image-formation pipeline and the quantities it produces, namely channel
+data and B-mode images. We then summarize the full-path Monte Carlo ray-tracing formulation, including emission,
+boundary interactions, and the estimator used to accumulate element-wise time signals. Finally, we introduce our
+differentiable extensions, which expose key scene and acquisition parameters to automatic differentiation and enable
+gradients to propagate from image-space losses back through beamforming and ray transport.
+3
+A PREPRINT - A PRIL 17, 2026
+2.1
+Ultrasound Methodology
+In ultrasound imaging, the forward measurement consists of the received pressure time series at each transducer element.
+Let e index be a receiver element with surface Ae . For a given acquisition event, such as plane-wave transmission,
+the simulator produces channel data P (e, t), which is subsequently mapped to a B-mode image through a standard
+signal-processing chain including time-gain compensation, filtering, delay-and-sum beamforming, envelope detection,
+and log compression. Under a geometric acoustics approximation, we model returning wavefronts as a distribution
+of incoming pressure rays. The received pressure at element e and time t can be written as an integral of the incident
+directional pressure over the element surface and incoming directions:
+Z Z
+P (e, t) =
+Pi (x, t, ω i ) fd (ω i ) dω i dA,
+(1)
+Ae
+Ω+
+where x ∈ Ae denotes a point on the receiver surface, ω i is an incoming direction on the visible hemisphere Ω+ , Pi is
+the incident directional pressure amplitude reaching the receiver, and fd encodes the element’s receive directivity. To
+model the directional pressure field at a surface point x, we consider the redistribution of incident pressure into outgoing
+directions via a local scattering operator. We adopt a path-based viewpoint inspired by physically based rendering,
+treating ultrasound propagation as transport along rays and representing boundary interactions through a local scattering
+function that maps an incident direction ω i to an outgoing direction ω o . In rendering, light transport is described by the
+rendering equation
+Z
+Lo (x, ω o ) = Le (x, ω o ) +
+fs (x, ω i , ω o ) Li (x, ω i ) (n(x) · ω i ) dω i ,
+(2)
+Ω+
+where Lo and Li denote outgoing and incident radiance, Le is emitted radiance, fs is the bidirectional scattering
+distribution function (BSDF), and n(x) is the surface normal. For ultrasound, we adopt an analogous formulation by
+replacing radiance with a directional pressure amplitude evolving over time. The corresponding transport equation
+becomes
+Z
+Po (x, t, ω o ) = Pe (x, t, ω o ) +
+fs (x, ω i , ω o ) Pi (x, t, ω i ) (n(x) · ω i ) dω i .
+(3)
+Ω+
+where Pe represents the actively transmitted waveform and is nonzero on the transducer aperture. Direct evaluation
+of Eq. (3) at every interaction point, receive element, and time sample is computationally intractable due to the high
+dimensionality of the integral and the large number of required evaluations. We therefore employ a Monte Carlo
+ray-tracing strategy [36] in which ray paths are stochastically sampled and their weighted contributions accumulated
+into element-wise time signals. This yields an unbiased Monte Carlo estimator of the received pressure under the
+adopted geometric scattering model [37].
+2.2
+Monte-Carlo Ray Tracing
+To enable efficient ray tracing while maintaining physical realism, we adopt standard Monte Carlo ray-tracing (MCRT)
+strategies following [37, 38]. Starting from the directional and surface integrals defining the received pressure in Eq.
+(1), we write
+Z Z
+P (e, t) =
+Pi (x, t, ω) fd (ω) dω dA.
+(4)
+Ae
+Ω+
+Let
+g(x, t, ω) = Pi (x, t, ω) fd (ω)
+(5)
++
+denote the integrand, and let D = Ae × Ω be the domain of integration. We introduce a sampling probability density
+function pt (x, ω) on D (with respect to the measure dω dA) that is strictly positive wherever g(x, t, ω) is nonzero.
+Then Eq. (4) can be rewritten as
+
+
+g(x, t, ω)
+P (e, t) = E(x,ω)∼pt
+.
+(6)
+pt (x, ω)
+Approximating this expectation with a Monte Carlo average over N independent samples (xi , ω i ) ∼ pt yields the
+estimator
+N
+1 X Pi (xi , t, ω i ) fd (ω i )
+P̂ (e, t) =
+.
+(7)
+N i=1
+pt (xi , ω i )
+In practice, the sampling density is often factorized as pt (x, ω) = pA (x) pΩ (ω | x), where pA governs surface sampling
+and pΩ governs directional sampling [38]. The directional component is typically chosen to reflect the transducer
+4
+A PREPRINT - A PRIL 17, 2026
+directivity so that directions with larger expected contributions are sampled more frequently, reducing estimator variance
+through importance sampling. If surface sampling is handled deterministically, the estimator simplifies to
+N
+P̂ (e, t) =
+1 X Pi (xi , t, ω i ) fd (ω i )
+,
+N i=1
+pt (ω i )
+(8)
+where ω i ∼ pt (ω). Under the support condition on pt , this estimator is unbiased with respect to Eq. (4).
+Applying the same change-of-measure argument to the directional integral in the rendering-style transport equation (Eq.
+(3)) yields the Monte Carlo estimator
+
+N
+1 X fs (x, ω i , ω o ) Pi (x, ω i ) n(x) · ω i
+P̂o (x, ω o ) ≈ Pe (x, ω o ) +
+,
+(9)
+N i=1
+p(ω i )
+where ω i ∼ p(ω) are i.i.d. samples on Ω+ drawn from a probability density function p(ω). Each sampled direction
+contributes to the estimator, weighted by the inverse of its sampling probability, and the result is normalized by the
+number of samples N . In practice, p(ω) is often chosen for importance sampling, for example, proportional to the
+scattering function and/or the cosine term, in order to reduce variance.
+2.3
+Algorithmic Implementation of the Ray-Tracing Model
+In the following, we describe the mechanisms applied at each stage of the simulation and summarize the corresponding
+physics-based models described in Ref. [34].
+2.3.1
+Ray Emission
+The goal of the emission stage is to specify how acoustic energy is initialized at the transducer aperture A, including the
+spatial distribution of ray origins x0 ∈ A, their initial propagation directions ω 0 , transmit delays τtx (x0 ) associated
+with steering, and element directivity. In our ray-based formulation, each emitted ray is assigned an initial direction ω 0
+and a transmit delay τtx (x0 ) determined by the steering angle. Since geometric ray tracing does not model coherent
+wave interference, these delays serve as time stamps for accumulating contributions into element-wise time signals
+rather than simulating field superposition. The transducer is modeled as a discrete array of Ne elements with element
+pitch p, where p denotes the center-to-center spacing between adjacent elements. The pitch determines the spatial
+sampling of the aperture and thus controls the effective aperture width W = (Ne − 1)p, beam steering geometry, and
+lateral resolution. Changing p alters the distribution of ray emission locations x0 across the aperture and modifies
+the geometric delays used in beamforming, directly influencing the spatial focusing characteristics of the simulated
+image. To model element directivity, each emitted ray in direction ω 0 from a surface point with outward normal n(x0 )
+is weighted by
+
+fd (ω 0 ) = max 0, n(x0 ) · ω 0 ,
+(10)
+which favors directions near the element normal. In the Monte Carlo estimator, normalization is handled by the sampling
+density and the N1 factor rather than within fd .
+2.3.2
+Ray Traversal
+The goal of the traversal stage is to propagate emitted rays through the scene, determine their interactions with material
+interfaces, and update their direction, amplitude, and accumulated travel time according to acoustic transport physics.
+In the following, we refer to rays traced from the transducer into the scene and propagated through successive boundary
+interactions as primary rays. Rays cast from a surface interaction point toward a selected target point (e.g., a receiver
+element) are referred to as secondary rays [34]. After emitting a primary ray from an initial state (x0 , ω 0 ), we follow
+its path until it either escapes the scene without further intersections (and is terminated) or intersects a boundary at
+some point x. In the latter case, we (i) apply a transducer sampling strategy (described below) to account for paths that
+can contribute to the received signal, and (ii) evaluate the local acoustic scattering model at the intersection to sample
+the direction and weight (amplitude) of the next ray segment.
+Reflection and transmission at a planar tissue interface are determined by the acoustic impedance contrast between two
+media with impedances Z1 (incident medium) and Z2 (transmission medium). Let ω i denote the incident ray direction
+1
+and n the unit normal at the interface pointing into medium 2. The acoustic impedance ratio is defined as η = Z
+Z2 .
+Under geometric acoustics, the reflected direction follows specular reflection,
+ω r = ω i + 2(n · (−ω i )) n,
+5
+(11)
+A PREPRINT - A PRIL 17, 2026
+while the transmitted direction ω t is obtained from Snell’s law. The reflection amplitude is determined by the acoustic
+Fresnel coefficient
+Z1 cos θr − Z2 cos θt
+Ar =
+,
+(12)
+Z1 cos θr + Z2 cos θt
+where θr and θt denote the reflection and transmission angles. The squared magnitude (Ar )2 specifies the fraction of
+incident intensity reflected at the interface and therefore defines the probabilistic energy split between reflected and
+transmitted rays in the Monte Carlo scheme. Following Ref. [34], we model surface roughness using a microfacet
+distribution, allowing a continuous transition between specular and diffuse scattering. Instead of a single planar interface
+with uniform normal n, the boundary is represented as a distribution of microfacet normals whose normal distribution
+function is given by
+α2
+(13)
+D(h) =
+2,
+π ((n · h)2 (α2 − 1) + 1)
+where α is the roughness parameter, h = (ω i + ω o )/∥ω i + ω o ∥ is the half-vector, and n is the macroscopic surface
+normal. Smaller α values concentrate microfacet orientations near n and produce predominantly specular reflections,
+whereas larger α values yield broader orientation distributions and more diffuse scattering. Introducing a microfacetbased roughness description allows the boundary model to interpolate smoothly between mirror-like and diffuse
+scattering regimes, yielding a more realistic treatment of acoustic reflections at tissue interfaces. In the Monte Carlo
+estimator of Eq. (9), this microfacet formulation modifies both the scattering operator fs and the corresponding sampling
+distribution p(ω i ), thereby controlling the angular redistribution and weighting of reflected rays. For computational
+tractability, ray propagation is limited by enforcing a maximum number of successive interactions per path.
+2.3.3
+Transducer Sampling
+To improve the probability that simulated transport paths produce a nonzero receiver contribution, we use a receiverguided sampling strategy. After each surface interaction, we generate a receiver-directed secondary ray that is aimed
+at a point on the transducer. Concretely, we first choose a transducer element uniformly at random and set the aim
+point to that element’s center, we then trace the corresponding secondary ray through the scene, accumulating pressure
+attenuation terms in the same way as for primary rays. If the ray intersects another boundary, the BSDF at that
+interaction is evaluated and the path throughput is updated accordingly. Because this sampling explicitly enforces
+a direction that connects the interaction point to the receiver, we include the probability of selecting and continuing
+along this receiver-directed direction in the path weight. Operationally, this follows the same interaction/throughput
+bookkeeping as the primary transport model, but with the direction constrained to the sampled receiver point.
+We also model the receive directivity of each transducer element by applying a direction weight fd that depends on the
+incident direction ωi and the element normal n (mirroring the transmit-side treatment). Using a main-lobe angle αm
+and a cutoff angle αc , we define
+fd (ωi ) =
+
+
+0,
+αc −|α|
+,
+ αc −αm
+1,
+|α| > αc ,
+αm < |α| ≤ αc ,
+|α| ≤ αm ,
+(14)
+where α is the angle between ωi and n, computed as α = arccos(n · ωi ). This factor can be incorporated directly into
+Eq. (8).
+2.3.4
+Phase Calculation and Signal Processing
+When a simulated path intersects the transducer, the remaining pressure amplitude carried by that ray is deposited into
+the receive time series of the corresponding transducer element at the appropriate time-of-flight. To model the finite
+bandwidth of the transmit/receive chain and to introduce an oscillatory phase consistent with the center frequency, we
+filter this impulse-like contribution with a band-limited pulse. In our implementation, we use a sinusoid tapered by a
+Gaussian envelope, which approximates the axial pulse response (i.e., the axial point-spread function). The pulse shape
+is
+ 2
+t
+s(t) = sin(2πfc t) exp −
+,
+σ
+(15)
+where fc denotes the center frequency of the transducer and σ controls the envelope width. We choose σ to match the
+desired number of emitted wave cycles, thereby setting the effective bandwidth and axial resolution.
+6
+A PREPRINT - A PRIL 17, 2026
+After all ray contributions have been accumulated and filtered across the element-wise time series, the ray-tracing
+stage produces channel data for the full aperture. This channel data is then passed through a conventional ultrasound
+processing chain: plane-wave delay-and-sum beamforming, demodulation to baseband, and logarithmic compression.
+Finally, we apply dynamic-range limiting and convert the results to grayscale to form the B-mode image.
+3
+Automatic Differentiation and Optimization
+Our goal is to enable gradient-based calibration and inverse design over physically meaningful parameters of the
+ultrasound pipeline. Concretely, we optimize a parameter vector θ (e.g., interface roughness, acoustic impedance, probe
+pitch, center frequency) to minimize a scalar loss defined on the final B-mode image.
+3.1
+End-to-end objective
+Let P̂(θ) ∈ RNe ×Nt denote the simulated channel data (element-by-time pressure signals) produced by the full-path
+MCRT ray tracer, and let B(·) denote the beamforming and post-processing operator that maps channel data to a
+B-mode image (delay-and-sum beamforming, demodulation/envelope detection, log compression, and dynamic-range
+clipping), consistent with Ultra Ray’s imaging pipeline.
+Given a reference image Iref (synthetic or measured), we minimize
+min L(θ) = ℓ(I(θ), Iref ) ,
+θ
+
+
+I(θ) = B P̂(θ) ,
+(16)
+where ℓ(·, ·) is an image-space loss.
+3.2
+Differentiating through Monte Carlo ray transport
+The ray tracer produces P̂(θ) via a Monte Carlo estimator (Eq. (8)) built from sampled paths, scattering decisions, and
+continuous weights (BSDF terms, directivity, geometric factors).The Mitsuba 3 / Dr.Jit backend supports reverse-mode
+automatic differentiation of such estimators with respect to continuous scene parameters that influence intersection
+geometry and the BSDF (e.g., GGX roughness α and impedance Z via Fresnel terms), as long as the random numbers
+used to sample paths are treated as fixed during differentiation. This corresponds to a standard reparameterized Monte
+Carlo gradient estimator: we draw a set of random samples ξ (ray origins/directions, BSDF sampling decisions, etc.),
+hold ξ constant for the backwards pass, and differentiate the resulting deterministic computation graph with respect to θ.
+Denoting a single acquisition realization as P̂(θ; ξ), the gradient of Eq. (16) follows the chain rule
+!⊤
+∂ P̂
+∂L
+,
+∇θ L =
+∂θ
+∂ P̂
+(17)
+where ∂∂θP̂ is obtained by Dr.Jit reverse-mode AD through the ray tracing kernels, and ∂∂L
+is the adjoint of the
+P̂
+beamforming / post-processing chain (detailed in the next section).
+In practice, we reduce gradient noise by using common random numbers across optimization iterations: the sampler
+seeds and ray sampling sequences are kept fixed while θ changes. This decreases the variances of ∇θ L without biasing
+the gradient of the sampled objective (it effectively makes the optimization follow the gradient of a fixed Monte
+Carlo realization). Accordingly, the backward pass does not propagate derivatives through the stochastic sampling
+mechanism itself; instead, for fixed random samples, it differentiates the deterministic transport, beamforming, and
+image-processing operations with respect to the continuous optimization parameters.
+3.3
+Differentiating through beamforming and post-processing
+The beamforming operator B is not natively expressed in Dr.Jit: it involves a signal-processing chain (implemented
+using Ultraspy). We therefore treat beamforming as an external operator and provide its vector-Jacobian product (VJP)
+to Dr.Jit so that gradients can flow from image-space losses back to ray-traced channel data.
+A key observation is that most of the pipeline is either linear or composed of simple pointwise nonlinearities: (i) axial
+convolution (Eq. (15)) is linear, (ii) delay-and-sum (DAS) beamforming is linear in the channel data, (iii) envelope
+detection and log compression are pointwise nonlinear operations.
+7
+A PREPRINT - A PRIL 17, 2026
+Delay-and-sum as a linear operator. Let Irf (x, z) denote the beamformed RF image before demodulation/log
+compression at pixel (x, z). In DAS plane-wave imaging, a standard discrete form is
+Irf (x, z) =
+N
+e
+X
+we (x, z) P̂(e, τe (x, z)) ,
+(18)
+e=1
+where we are apodization/directivity weights and τe (x, z) is the sample time corresponding to the two-way travel time
+for the chosen transmit event and receive element geometry. Since τe (x, z) is generally not an integer sample index,
+P̂(e, τe ) is evaluated via linear interpolation, which preserves linearity in P̂.
+Because Eq. (18) is linear in P̂, its adjoint (backpropagation) is a backprojection that scatters image gradients back into
+the channel-time grid using the same interpolation weights:
+∂L
+∂ P̂(e, t)
+=
+X
+x,z
+we (x, z)
+∂L
+∂ P̂(e, τe (x, z))
+.
+∂Irf (x, z)
+∂ P̂(e, t)
+(19)
+The last factor is nonzero only for the neighboring samples used in the linear interpolation at τe (x, z), resulting in an
+efficient scatter-add implementation.
+Custom bridge between Dr.Jit and beamforming. We implement the mapping P̂ 7→ I = B(P̂) as a custom
+differentiable operator: the forward pass converts Dr.Jit arrays to the processing backend, runs B, and returns I; the
+∂L
+backward pass takes the upstream image gradient ∂L
+∂I , computes ∂ P̂ via the adjoint of B (Eq. (19) and Eq. (??)), and
+seeds Dr.Jit’s reverse-mode AD at the channel data tensor P̂. Dr.Jit then propagates this adjoint through the ray tracer to
+obtain ∇θ L. This design allows end-to-end differentiation while keeping the high-performance ray transport in Mitsuba
+and the signal processing in specialized kernels [34].
+3.4
+Parameterization and constraints
+We optimize a set of physically meaningful parameters (e.g., GGX roughness, acoustic impedance, transducer pitch,
+and center frequency) that must remain within prescribed admissible ranges. Rather than optimizing these quantities
+directly, we maintain unconstrained optimization variables θ̃ ∈ Rd and map them into normalized variables θn ∈ [0, 1]d ,
+which are then linearly scaled into physical parameter ranges.
+Normalization to [0, 1] and scaling to physical ranges. For each parameter j, we define a minimum and maximum
+admissible value (θjmin , θjmax ). We map the optimizer state θ̃j into a normalized variable by hard clipping:
+
+
+θn,j = clip θ̃j , 0, 1 ,
+(20)
+and then scale to the physical value used in the simulator by
+
+θj = θjmin + θn,j θjmax − θjmin .
+(21)
+This parameterization makes all optimization variables dimensionless and comparably scaled, which simplifies learningrate selection across heterogeneous parameters (e.g., roughness versus frequency).
+Hard clipping. We enforce feasibility by clamping θn,j to [0, 1] (Eq. (20)) at every iteration before running the
+forward simulation. When gradients are computed, the backward pass uses the local derivative of the clip operator:
+
+∂θn,j
+1, 0 < θ̃j < 1,
+=
+(22)
+0, θ̃j ≤ 0 or θ̃j ≥ 1,
+∂ θ̃j
+so parameters that saturate at a bound receive zero gradient until the optimizer updates move them back into the
+interior. In practice, this simple constraint handling proved sufficient for the calibration and inverse-design experiments
+considered in this work.
+Examples. Using this scheme, the simulator parameters are obtained as ρ = ρmin + θn,ρ (ρmax − ρmin ) for surface
+roughness, Z = Z min + θn,Z (Z max − Z min ) for acoustic impedance, and R = Rmin + θn,R (Rmax − Rmin ) for
+cylinder radius.
+8
+A PREPRINT - A PRIL 17, 2026
+3.5
+Micro-batched acquisition and gradient estimation
+Directly differentiating a full plane-wave acquisition with many steering angles and a large number of emitted rays per
+element can exceed memory due to AD tape storage and intermediate buffers. To make optimization tractable, we use
+micro-batching across both (i) transmit angles and (ii) subsets of emitted rays/elements. Each micro-batch produces a
+partial channel-data tensor P̂b (θ) and an associated image and loss. We accumulate losses across micro-batches:
+L(θ) ≈
+B
+X
+Lb (θ),
+ 
+
+
+Lb (θ) = ℓ B P̂b (θ) , Iref,b ,
+(23)
+b=1
+and backpropagate each Lb independently, accumulating gradients in ∇θ L. This is equivalent to full-batch optimization
+when the partitioning is exact (deterministic split of rays/angles) and provides a low-memory approximation otherwise
+(stochastic split), analogous to minibatch stochastic gradient descent.
+3.6
+Loss function
+All optimization experiments in this work use a weighted combination of ℓ1 and ℓ2 image losses defined directly on the
+final B-mode images. Let I(θ) = B(P̂(θ)) denote the simulated B-mode image produced by the end-to-end pipeline
+for parameters θ, and let Iref denote the reference B-mode image. The optimization objective is defined as
+2
+L(θ) = λ1 ∥I(θ) − Iref ∥1 + λ2 ∥I(θ) − Iref ∥2 ,
+(24)
+which may be written componentwise as
+L(θ) = λ1
+X
+|Iu (θ) − Iref,u | + λ2
+u
+X
+2
+(Iu (θ) − Iref,u ) ,
+(25)
+u
+where u indexes image pixels. The ℓ1 term promotes robustness to localized intensity mismatches, while the ℓ2 term
+penalizes larger deviations more strongly. In practice, we normalize this objective by the number of pixels to make the
+loss invariant to image resolution:
+"
+#
+X
+X
+1
+2
+Limg (θ) =
+λ1
+|Iu (θ) − Iref,u | + λ2
+(Iu (θ) − Iref,u ) .
+Npix
+u
+u
+Gradients are obtained by backpropagating through the image-formation chain:
+
+⊤
+∂L
+∂I
+∂L
+∂L
+=
+,
+= 2 (I(θ) − Iref ) ,
+∂I
+∂I
+∂ P̂
+∂ P̂
+(26)
+(27)
+after which Dr.Jit propagates the seeded adjoint through the ray-tracing computation to yield ∇θ L (Sec. 3.3).
+3.7
+Optimization procedure
+We optimize Eq. (16) using Adam with parameter groups to allow different learning rates for material (roughness/impedance) and acquisition (pitch/frequency/angles) parameters. Let θk be parameters at iteration k. Adam
+updates are
+mk = β1 mk−1 + (1 − β1 )∇θ L(θk ),
+m̂k
+θk+1 = θk − η √
+,
+v̂k + ϵ
+vk = β2 vk−1 + (1 − β2 )∇θ L(θk )2 ,
+(28)
+(29)
+with standard bias corrections m̂k , v̂k .
+We further apply gradient clipping for stability and keep Monte Carlo seeds fixed (common random numbers) unless
+explicitly stated (Sec. 3.3).
+Algorithm 1 summarizes one optimization iteration.
+9
+A PREPRINT - A PRIL 17, 2026
+1. Select micro-batch b: subset of steering angles and/or rays/elements.
+2. Ray trace with Mitsuba/Dr.Jit to obtain channel data P̂b (θ).
+3. Beamform and post-process to Ib = B(P̂b ); compute loss Lb = ℓ(Ib , Iref,b ).
+4. Backward differentiate through B to compute ∂Lb /∂ P̂b ; seed Dr.Jit adjoint at P̂b .
+5. Dr.Jit reverse-mode AD backpropagates through ray tracing to obtain ∇θ Lb .
+6. Accumulate gradients over micro-batches and update θ using Adam.
+Algorithm 1: One optimization iteration (micro-batched)
+4
+Results and Examples
+This section evaluates the proposed differentiable ultrasound simulation framework in both forward and inverse settings.
+The results are organized to assess three central capabilities of the method: first, its ability to generate physically
+plausible B-mode images from prescribed scene configurations; second, its ability to propagate meaningful gradients
+through the full imaging pipeline; and third, its ability to support gradient-based recovery of physically interpretable
+parameters from image-space supervision. Together, these experiments are intended to demonstrate that the framework
+functions not only as a forward simulator, but also as a practical tool for calibration and inverse analysis.
+We begin with forward examples that examine whether the ray-tracing formulation reproduces expected geometric
+image features in simple and more complex scenes. We then consider two optimization problems based on the hollowcylinder test case. The first is a simulated-reference experiment, which provides a controlled setting for evaluating
+parameter recovery and gradient consistency when the target image is generated by the same model. The second is a
+simulation-to-real experiment, in which the optimized simulation is matched to an experimentally acquired ultrasound
+image in order to assess the practical applicability of the framework under model mismatch and partial ground-truth
+uncertainty.
+4.1
+Forward Problems
+To assess the accuracy of the forward simulation, we consider two test cases. First, we render a hollow cylinder to
+confirm that the dimensions measured from the resulting B-mode image agree with the prescribed analytical geometry.
+The cylinder has a radius of 5 mm and is located 15 mm from the transducer. Figure 1a shows the full B-mode image,
+while Figure 1b shows a zoomed-in view.
+(a) Full cylinder B-mode image.
+(b) Zoomed-in B-mode image.
+Figure 1: B-mode images for the hollow cylinder test case. (a) The full image shows the overall simulated acquisition
+geometry. (b) The zoomed-in view highlights the dominant scattering features associated with the cylindrical interface.
+The observed image structure is consistent with the prescribed cylinder location and radius, supporting the ability of the
+forward model to reproduce the expected geometric response in a simple canonical configuration.
+10
+A PREPRINT - A PRIL 17, 2026
+The second test case considers a right atrioventricular valve [39] to demonstrate that the proposed simulation framework
+can capture more complex anatomical structures. Simulated B-mode scans are performed for both the open and closed
+valve states. The resulting images and corresponding valve models are shown in Figure 2. For additional details on the
+construction of the right atrioventricular valve model, we refer the reader to Mathur [40].
+(a) Top down view, t = 0 (fully open).
+(b) Side view, t = 0 (fully open).
+(c) Top down view, t = 0.5 (partly closed).
+(d) Side view, t = 0.5 (partly closed).
+(e) Top down view, t = 1.0 (fully closed).
+(f) Side view, t = 1.0 (fully closed).
+Figure 2: Evolution of the right atrioventricular valve from the open to the closed state, shown from top down [(a), (c),
+& (e)] and side views [(b), (d), & (f)] at three representative time instances. The sequence illustrates the progressive
+reduction of the valve opening and the associated leaflet motion during closure, providing a more anatomically complex
+test case for the forward ultrasound simulation framework.
+4.2
+Optimization Problems
+The optimization problems considered in this work are based on the hollow cylinder scene shown in Figure 1.
+Specifically, we consider two settings: optimization with respect to a simulated reference image and optimization with
+respect to a real-world ultrasound image.
+4.2.1
+Simulated to Simulated
+The first optimization setting considers a simulated-reference problem in which the target image is generated by the
+same forward model used in the optimization. This provides a controlled setting for assessing whether the proposed
+end-to-end differentiable pipeline can recover known scene parameters from image-space supervision alone.
+In this experiment, we optimize three parameters of the hollow cylinder scene: the cylinder radius R, acoustic impedance
+Z, and surface roughness ρ. These parameters were selected because they influence distinct aspects of the simulated
+B-mode image. The radius R primarily controls the geometric location and extent of the scattering interfaces, while Z
+and ρ affect echo strength and angular scattering behavior.
+The target image is a simulated B-mode image generated using known ground-truth parameters. Starting from an initial
+guess, the optimization minimizes the weighted image-space ℓ1 + ℓ2 objective introduced in Section 3.6, with gradients
+11
+A PREPRINT - A PRIL 17, 2026
+propagated through the full pipeline, including ray tracing, beamforming, and post-processing. Because the reference is
+synthetic and the underlying parameters are known, this experiment makes it possible to directly evaluate parameter
+recovery, loss convergence, and the consistency of the differentiable formulation.
+We report the evolution of the optimized parameters and the corresponding loss history (see Figure 3). We also compare
+automatic-differentiation gradients with finite-difference estimates to assess the consistency of the computed sensitivities
+with the underlying forward model; this comparison is discussed in more detail later in this section. In addition, we
+show the initial simulation, the optimized final simulation, and the reference image for qualitative comparison.
+Impedance vs. iteration
+Roughness vs. iteration
+0.52
+Impedance
+Target
+5.6
+Radius vs. iteration
+Roughness
+Target
+0.50
+5.5
+5.4
+0.0054
+0.48
+Radius (m)
+0.0053
+Roughness
+Impedance
+5.3
+0.0052
+0.46
+5.2
+5.1
+Radius
+Target
+0.0055
+0.0051
+0.44
+0.0050
+5.0
+0
+25
+50
+75
+100
+Iteration k
+125
+150
+175
+0
+(a) Evolution of impedance Z.
+25
+50
+75
+100
+Iteration k
+125
+150
+175
+0
+(b) Evolution of roughness ρ.
+25
+50
+75
+100
+Iteration k
+125
+150
+175
+(c) Evolution of radius R.
+Figure 3: Evolution of the optimized cylinder parameters in the simulated-reference experiment. The impedance Z,
+roughness ρ, and radius R progressively approach stable values consistent with the simulated target, demonstrating
+successful parameter recovery in the controlled inverse setting.
+/ 0 (semilogy)
+100
+/ 0
+/ 0
+10 1
+10 2
+0
+25
+50
+75
+100
+Iteration k
+125
+150
+175
+Figure 4: History of the weighted ℓ1 + ℓ2 image-space loss for the simulated-reference optimization problem. The loss
+decreases rapidly over the course of the optimization and approaches a near-plateau at a very low value, indicating that
+the differentiable pipeline successfully identifies a parameter set that closely reproduces the simulated reference image.
+From Figures 4 and 5, the radius exhibits the strongest influence on the loss, with gradient magnitudes that are orders of
+magnitude larger than those of the other parameters. The next most influential parameter is impedance, followed by
+roughness. This ordering persists in later examples and is also physically intuitive.
+The cylinder radius directly controls the target geometry, specifically the available reflecting surface area and the
+locations at which reflections and transmissions occur, so it naturally has the strongest effect on both the ℓ1 and ℓ2
+components of the loss. Impedance primarily modulates how energy is partitioned between reflected and transmitted
+components, strongly affecting echo amplitudes and the behavior of secondary paths. Finally, roughness governs
+angular scattering, so its effect on the loss is typically more indirect and therefore weaker by comparison.
+12
+A PREPRINT - A PRIL 17, 2026
+Impedance AD vs. FD
+8
+7
+Radius AD vs. FD
+Roughness AD vs. FD
+0
+FD x 2
+AD
+200
+6
+5
+4
+0
+dL/dRadius
+dL/dImpedance
+dL/dRoughness
+5
+FD x 2
+AD
+10
+15
+200
+400
+600
+20
+3
+10 2
+10 3
+Epsilon
+10 4
+10 2
+10 5
+(a) Z: FD and AD vs. ϵ.
+Impedance |FD - AD|
+Epsilon
+10 4
+800
+10 3
+10 5
+(b) ρ: FD and AD vs. ϵ.
+|FD x 2 - AD|
+3 × 100
+|FD x 2 - AD|
+10 4
+Epsilon
+10 5
+10 6
+(c) R: FD and AD vs. ϵ.
+Roughness |FD - AD|
+Radius |FD - AD|
+|FD x 2 - AD|
+101
+|FD AD|
+|FD AD|
+2 × 100
+100
+100
+10 2
+10 3
+|FD AD|
+4 × 100
+FD x 2
+AD
+102
+10 3
+Epsilon
+10 4
+(d) Z: ∥gFD − gAD ∥ vs. ϵ.
+10 5
+10 2
+10 3
+Epsilon
+10 4
+(e) ρ: ∥gFD − gAD ∥ vs. ϵ.
+10 5
+10 3
+10 4
+Epsilon
+10 5
+10 6
+(f) R: ∥gFD − gAD ∥ vs. ϵ.
+Figure 5: Automatic-differentiation (AD) and finite-difference (FD) gradient comparisons for the three optimized
+parameters in the simulated-reference cylinder problem. The top row reports the AD and FD gradient values for
+impedance Z, roughness ρ, and radius R as functions of the FD step size ϵ, and the bottom row reports the corresponding
+discrepancy ∥gFD − gAD ∥. The close agreement observed over an intermediate range of ϵ supports the consistency of
+the AD sensitivities with the underlying forward model, while the divergence at very small and very large perturbation
+sizes reflects the expected limitations of FD validation due to numerical cancellation and truncation error.
+The gradient comparisons in Figure 5 provide an additional verification of the differentiable formulation. For each
+parameter, we sweep the finite-difference step size ϵ and compare the resulting finite-difference estimate with the
+gradient obtained by automatic differentiation. In each case, the two approaches show close agreement for a suitable
+range of ϵ, indicating that the automatic-differentiation gradients are consistent with finite-difference calculations.
+Figure 6 shows the initial simulated image, the optimized final image, and the reference image. The optimized image is
+visually nearly indistinguishable from the reference image, further supporting the success of the optimization. This
+qualitative agreement is also consistent with the observed loss reduction and the recovery of parameters close to their
+ground-truth values.
+4.2.2
+Simulated to Real-World
+The second optimization setting considers a simulation-to-real inverse problem in which a simulated B-mode image is
+matched to an experimentally acquired ultrasound image. Figure 7 shows the experimental setup, the original target
+image, and the post-processed image used in the optimization. This post-processing is introduced to suppress noise and
+emphasize the dominant scattering features that can be represented more reliably by the simulation model.
+The goal of this experiment is to assess whether the proposed pipeline can identify an effective set of simulation
+parameters that reproduces the salient characteristics of an observed real measurement. As in the simulated-reference
+case, we optimize three parameters of the hollow-cylinder scene: the cylinder radius R, acoustic impedance Z, and
+surface roughness ρ. These parameters were selected because they influence complementary aspects of the simulated
+image: R primarily controls the interface geometry, while Z and ρ mainly affect echo amplitude and angular scattering
+behavior.
+The setup used to acquire the B-mode image of a cylinder is shown in the Figure 7(a). We placed a 12" x 9" gridded
+cutting mat in a 20" x 13" x 5" polypropylene tub, lined the tub with acoustic dampening foam (1.5" egg crate foam,
+WVOVW), and filled the tub with water. We 3D-printed a 40 mm diameter by 50 mm tall by 3 mm thick cylinder of
+"highly contractile myocardium" mimicking material on a Stratasys J750 Digital Anatomy 3D-printer (Stratasys, Eden
+13
+A PREPRINT - A PRIL 17, 2026
+(a) Initial simulated image.
+(b) Optimized simulated image.
+(c) Reference image.
+Figure 6: Comparison of the initial simulated image, the optimized simulated image, and the simulated reference image
+for the simulated-reference optimization problem. Relative to the initial configuration, the optimized result achieves
+near-complete agreement with the reference image, indicating that the differentiable pipeline successfully recovers a
+parameter set that reproduces the dominant geometric and intensity features of the target.
+Prairie, MN, USA, see [41] for details) in order to approximate the material properties of tissue. Next, we submerged
+and centered the cylinder on a 2 .25" 3D-printed stand in the water-filled tub, and similarly centered the ultrasound
+probe on a 2.25" 3D-printed stand placed 4 cm from the center of the cylinder. The cylinder and probe were raised to
+minimize acoustic reflections from the bottom of the tub. Lastly, 2D B-mode ultrasound images were captured through
+the cross-section of the cylinder using a Philips Lumify S4-1 probe (Philips Healthcare, Amsterdam, Netherlands),
+as shown in Figure 7(b). Unlike the simulated-reference case, the experimental target does not provide a complete
+ground-truth parameter set. The primary known geometric quantity is the physical ring radius, Rexp = 20 mm and
+finite ring thickness of texp = 3 mm. However, the surface roughness and and acoustic impedance of the cylinder are
+unknown.
+For image comparison, the experimental image was rescaled by a factor of 3.5/20 = 0.175, yielding an effective radius
+of Reff = 3.5 mm. This rescaling was performed to obtain improved cropping, image arrangement, and geometric
+agreement with the simulated image domain, thereby enabling a more consistent visual correspondence between the
+dominant experimental and simulated features. The rescaled image is therefore treated as an effective reference for the
+optimization. This comparison is further supported by the approximate scale-invariant behavior of the model when the
+scene geometry and acquisition settings are scaled consistently.
+At the same time, the experimental ring is not an ideal infinitesimally thin interface. Its nonzero thickness introduces
+additional scattering structure and broadens the observed boundary response, which can contribute to residual mismatch
+relative to the simplified simulated model. Moreover, because the experimental target does not uniquely determine
+all scene parameters, the recovered values of Z and ρ should be interpreted as effective parameters that reproduce
+the dominant observed image features rather than as uniquely identified physical material properties. Accordingly,
+evaluation in this setting focuses on reduction of the weighted image-space ℓ1 + ℓ2 objective together with qualitative
+agreement between the optimized simulation and the processed experimental target. We again report the evolution of
+the optimized parameters, the loss history, and the associated gradients.
+From Figures 8 and 9, the simulation-to-real optimization exhibits rapid early improvement followed by gradual
+stabilization. The weighted ℓ1 + ℓ2 loss remains near its initial level during the earliest iterations, then decreases sharply
+between approximately k ≈ 25 and k ≈ 45, indicating that the optimizer quickly enters a region of substantially
+improved agreement with the processed experimental target. After this transition, the loss continues to decrease overall,
+although with small oscillations, and approaches a near-plateau by roughly k ≈ 120–145. This behavior is consistent
+with practical convergence to a stable local optimum rather than continued large-scale parameter drift.
+The parameter histories show that the three optimized quantities converge on different timescales. The impedance Z
+and roughness ρ evolve smoothly and monotonically during the early stage of the optimization before leveling off,
+suggesting that these parameters are well-informed by the image-space objective. In contrast, the radius R exhibits a
+more non-monotone trajectory, with an initial increase followed by a small overshoot and subsequent relaxation toward
+its final value. This indicates that the geometric parameter is more strongly coupled to the other scene parameters and
+may be more sensitive to local tradeoffs in the loss landscape. Taken together, these results suggest that the optimizer is
+14
+A PREPRINT - A PRIL 17, 2026
+(a) Experimental Setup.
+(b) Raw experimental image.
+(c) Post-processed experimental image.
+Figure 7: (a) Experimental setup used to capture B-mode images of a 3D-printed cylinder. The cylinder and Philips
+Lumify S4-1 probe are submerged in an acoustic damping foam-lined tub of water, and raised 2.25" from the bottom to
+minimize acoustic reflections. Note, the ultrasound imaging plane is parallel to the image and water is removed for
+clarity. (b) Unprocessed experimental B-mode image of the Rexp = 20 mm by texp = 3 mm cylinder placed 4 cm from
+the probe. (c) The post-processed image used as the real-world target objective in the simulation-to-real optimization.
+We cropped the image to include only the main acoustic scattering effects of the cylinder and ignore noise from the
+surrounding fluid.
+Real-World Impedance vs. iteration
+0.80
+Impedance
+5.0
+Roughness
+Real-World Radius vs. iteration
+Real-World Roughness vs. iteration
+0.75
+4.0
+0.65
+0.0035
+0.0030
+Radius (m)
+0.70
+Impedance
+Roughness
+4.5
+0.60
+3.5
+3.0
+0.55
+2.5
+0.50
+0
+20
+40
+60
+80
+Iteration k
+100
+120
+0.45
+140
+(a) Evolution of impedance Z.
+Radius
+0.0025
+0.0020
+0
+20
+40
+60
+80
+100
+Iteration k
+120
+140
+0
+(b) Evolution of roughness ρ.
+20
+40
+60
+80
+Iteration k
+100
+120
+140
+(c) Evolution of radius R.
+Figure 8: Evolution of the optimized cylinder parameters in the simulation-to-real experiment. The impedance Z,
+roughness ρ, and radius R all move away from their initial values and progressively stabilize, indicating convergence
+toward an effective parameter set that improves agreement between the simulated and experimental B-mode images.
+/ 0 (semilogy)
+100
+/ 0
+/ 0
+10 1
+10 2
+0
+20
+40
+60
+80
+Iteration k
+100
+120
+140
+Figure 9: History of the weighted ℓ1 + ℓ2 image-space loss for the simulation-to-real optimization problem. The
+loss exhibits a pronounced decrease during the early iterations, followed by gradual stabilization, indicating that the
+optimizer identifies a parameter regime with substantially improved agreement between the simulated and experimental
+B-mode images.
+15
+A PREPRINT - A PRIL 17, 2026
+Impedance AD vs. FD
+4
+FD
+AD
+0.1
+0.0
+0
+2
+250
+200
+0.1
+0.2
+150
+0.3
+100
+0.4
+50
+0.5
+4
+0
+0.6
+10 2
+10 3
+10 4
+Epsilon
+10 5
+10 2
+10 6
+(a) Z: FD and AD vs. ϵ.
+Impedance |FD - AD|
+Radius AD vs. FD
+FD
+AD
+dL/dRadius
+2
+dL/dRoughness
+dL/dImpedance
+Roughness AD vs. FD
+FD
+AD
+10 3
+10 4
+Epsilon
+10 5
+10 2
+10 6
+(b) ρ: FD and AD vs. ϵ.
+Roughness |FD - AD|
+|FD - AD|
+10 3
+10 4
+Epsilon
+10 5
+10 6
+(c) R: FD and AD vs. ϵ.
+Radius |FD - AD|
+|FD - AD|
+|FD - AD|
+102
+|FD AD|
+|FD AD|
+|FD AD|
+100
+10 1
+101
+10 1
+10 2
+10 3
+10 4
+Epsilon
+10 5
+(d) Z: ∥gFD − gAD ∥ vs. ϵ.
+10 6
+10 2
+10 3
+10 4
+Epsilon
+10 5
+(e) ρ: ∥gFD − gAD ∥ vs. ϵ.
+10 6
+10 2
+10 3
+10 4
+Epsilon
+10 5
+10 6
+(f) R: ∥gFD − gAD ∥ vs. ϵ.
+Figure 10: Automatic-differentiation (AD) and finite-difference (FD) gradient comparisons for the three optimized
+parameters in the simulation-to-real cylinder problem. The top row reports the AD and FD gradient values for impedance
+Z, roughness ρ, and radius R as functions of the FD step size ϵ, and the bottom row reports the corresponding
+discrepancy ∥gFD − gAD ∥. The figure shows that FD agreement depends strongly on the perturbation size, with
+the closest correspondence occurring over an intermediate range of ϵ, thereby supporting the consistency of the AD
+sensitivities while also highlighting the limitations of FD validation at excessively small or large step sizes.
+able to identify a stable, effective parameter set that substantially improves agreement with the experimental target,
+while still reflecting the increased complexity and ambiguity of the simulation-to-real setting.
+Figure 10 compares automatic-differentiation (AD) and finite-difference (FD) gradients for the three optimized
+parameters over a range of FD step sizes ϵ. An important feature of this comparison is that the AD pipeline is not
+constructed to differentiate through the stochastic Monte Carlo sampling process itself. Instead, the random numbers
+used to generate ray paths, scattering events, and receiver-sampling decisions are held fixed during the backward pass,
+so AD differentiates only the deterministic computation induced by a given sampled realization of the transport and
+image-formation pipeline. The corresponding FD comparisons are interpreted in the same conditional sense, namely as
+sensitivities with respect to the continuous parameters for a fixed Monte Carlo realization.
+Overall, the results show that the agreement between AD and FD depends strongly on the chosen perturbation size,
+which is consistent with the expected tradeoff between truncation error at large ϵ and numerical cancellation at very
+small ϵ. For the impedance gradient, the FD estimate changes sign and magnitude across the tested range, and the
+discrepancy ∥gFD − gAD ∥ remains relatively large, indicating that the FD approximation is particularly sensitive to
+step-size selection for this parameter. The radius gradient shows comparatively better agreement at intermediate ϵ, but
+the discrepancy grows again for larger perturbations, suggesting that the local linear approximation deteriorates as
+the step size increases. The roughness gradient exhibits a similar trend, with the smallest mismatch occurring at an
+intermediate ϵ and larger discrepancies appearing at both extremes of the tested range.
+Taken together, these results support the consistency of the AD gradients in the simulation-to-real setting while also
+illustrating that FD-based validation is reliable only over a restricted range of perturbation sizes. More broadly,
+the figure highlights a central feature of the proposed differentiable formulation: the computed gradients represent
+sensitivities of the fixed-sample transport, beamforming, and post-processing pipeline with respect to continuous
+physical parameters, rather than derivatives of the underlying Monte Carlo randomness itself. This design avoids
+spurious gradient contributions from discrete sampling events and yields gradients that are substantially more stable
+and interpretable for optimization.
+16
+A PREPRINT - A PRIL 17, 2026
+Figure 11 presents the initial and final simulated images overlaid with the experimental target used in the optimization.
+The optimized radius converges to R = 3.61 mm, which is toward the upper end of the prescribed parameter range. This
+result is consistent with the geometric discrepancy between the simplified simulated model and the experimental target:
+the simulation represents an idealized zero-thickness interface, whereas the real ring has a finite physical thickness and
+therefore generates a broader reflected response in the measured B-mode image.
+The observed behavior is further influenced by the logarithmic scaling inherent to B-mode imaging. Because the
+image-space objective is evaluated on a log-compressed image, the optimization is dominated by alignment of the
+most intense and visually prominent features. In this case, the strongest contribution to the loss reduction is obtained
+when the first major simulated reflection aligns with the outermost high-intensity boundary in the experimental image.
+Consequently, the optimizer favors a larger effective radius, yielding improved agreement in the dominant image
+structure even though the simulated geometry remains an idealized approximation of the physical ring.
+(a) Initial comparison between the simulated and experimental
+images.
+(b) Final comparison between the optimized simulated and experimental images.
+Figure 11: Overlay comparison of the simulated image (green) and the experimental target (red) before and after
+optimization. The initial comparison shows a clear mismatch in the location and extent of the dominant scattering
+boundary, whereas the optimized result exhibits improved alignment with the experimental ring response, particularly
+along the outer high-intensity interface that dominates the image-space loss.
+5
+Conclusion
+In this work, we build on the existing UltraRay framework to develop a fully differentiable end-to-end ultrasound
+simulation pipeline based on full-path Monte Carlo ray tracing. The proposed formulation enables gradients to propagate
+from image-space objectives back through both the acoustic transport model and the downstream beamforming and
+post-processing stages, allowing optimization with respect to physically meaningful scene and acquisition parameters. In
+contrast to prior ray-based ultrasound simulators that have primarily been used as forward models, the present framework
+is designed explicitly for gradient-based calibration, inverse recovery, and acquisition optimization. A central feature of
+the approach is that, for fixed Monte Carlo samples, automatic differentiation is applied to the deterministic transport
+and image-formation pipeline with respect to continuous parameters, yielding stable and interpretable sensitivities for
+optimization.
+The numerical examples demonstrate both the forward and inverse capabilities of the proposed framework. In controlled
+forward problems, the model reproduces expected geometric image features and captures more complex anatomical
+structures. In the simulated-reference setting, the framework successfully recovers known scene parameters from
+image-space supervision alone, confirming the consistency of the differentiable formulation. In the simulation-to-real
+setting, the method identifies an effective set of parameters that substantially improves agreement between simulated and
+17
+A PREPRINT - A PRIL 17, 2026
+experimentally acquired B-mode images, while appropriately reflecting the ambiguity and model mismatch inherent in
+real-data inversion. In addition, comparisons between automatic-differentiation and finite-difference gradients support
+that the computed sensitivities are meaningful for optimization and consistent with the underlying forward model.
+It is important to note that, in the simulation-to-real setting, the recovered quantities should be interpreted as effective
+parameters rather than uniquely identified physical ground-truth properties. Because the experimental target only
+partially constrains the underlying scene and the simulation model remains intentionally simplified, multiple parameter
+combinations may produce similar image characteristics. The primary value of this experiment is therefore not the
+exact recovery of a unique physical parameter set, but rather the demonstration that the proposed framework can be
+meaningfully coupled to real experimental B-mode data and can identify simulation parameters that reproduce its
+dominant observed features.
+At the same time, several limitations of the present work should be acknowledged. The current framework is based
+on a geometric ray-tracing approximation rather than a full-wave acoustic simulation and therefore does not capture
+the complete range of wave phenomena present in ultrasound imaging. In addition, the scene representation relies on
+simplified interface models, and the differentiable formulation computes gradients for fixed Monte Carlo realizations
+rather than differentiating through the underlying sampling randomness itself. A further limitation is that, in the
+simulation-to-real experiment, the simulated target is modeled as an idealized zero-thickness cylindrical interface,
+whereas the experimental cylinder has a finite wall thickness. This mismatch can broaden or shift the observed
+boundary response in the measured B-mode image and may cause the recovered radius, roughness, and impedance
+to act as effective fitting parameters rather than uniquely identifiable physical quantities. While these design choices
+are important for tractability and optimization stability, they also define the current scope of the method. Future work
+will focus on extending the framework to more complex tissue and interface models, including finite-thickness and
+volumetric targets, incorporating attenuation and volumetric scattering effects, enabling optimization over a broader
+set of acquisition parameters, and validating the approach on a wider range of experimental and anatomical imaging
+scenarios.
+References
+[1] Timothy G Leighton. What is ultrasound? Progress in biophysics and molecular biology, 93(1-3):3–83, 2007.
+[2] Olivier Villemain, Jérôme Baranger, Mark K Friedberg, Clément Papadacci, Alexandre Dizeux, Emmanuel
+Messas, Mickael Tanter, Mathieu Pernot, and Luc Mertens. Ultrafast ultrasound imaging in pediatric and adult
+cardiology: techniques, applications, and perspectives. JACC: Cardiovascular Imaging, 13(8):1771–1791, 2020.
+[3] Joseph Woo. A short history of the development of ultrasound in obstetrics and gynecology. History of Ultrasound
+in Obstetrics and Gynecology, 3:1–25, 2002.
+[4] Arya Kadakia, Junhang Zhang, Xincheng Yao, Qifa Zhou, and Michael J Heiferman. Ultrasound in ocular
+oncology: Technical advances, clinical applications, and limitations. Experimental Biology and Medicine,
+248(5):371–379, 2023.
+[5] Joseph Osterwalder, Effie Polyzogopoulou, and Beatrice Hoffmann. Point-of-care ultrasound—history, current
+and evolving clinical concepts in emergency medicine. Medicina, 59(12):2179, 2023.
+[6] Pascal Laugier. Physical principles of ultrasound propagation and image formation. Echography of the Eye and
+Orbit, pages 1–13, 2024.
+[7] Bradley J Erickson, Panagiotis Korfiatis, Zeynettin Akkus, and Timothy L Kline. Machine learning for medical
+imaging. radiographics, 37(2):505–515, 2017.
+[8] Anthony Paproki, Olivier Salvado, and Clinton Fookes. Synthetic data for deep learning in computer vision &
+medical imaging: A means to reduce data bias. ACM Computing Surveys, 56(11):1–37, 2024.
+[9] B Peng, X Huang, S Wang, and J Jiang. A real-time medical ultrasound simulator based on a generative adversarial
+network model. In 2019 IEEE International Conference on Image Processing (ICIP), pages 4629–4633. IEEE,
+2019.
+[10] Grace Pigeau, Lydia Elbatarny, Victoria Wu, Abigael Schonewille, Gabor Fichtinger, and Tamas Ungi. Ultrasound
+image simulation with generative adversarial network. In Medical Imaging 2020: Image-Guided Procedures,
+Robotic Interventions, and Modeling, volume 11315, pages 54–60. SPIE, 2020.
+[11] Hadrien Reynaud, Alberto Gomez, Paul Leeson, Qingjie Meng, and Bernhard Kainz. Echoflow: a foundation
+model for cardiac ultrasound image and video generation. arXiv preprint arXiv:2503.22357, 2025.
+[12] Lin Zhang, Tiziano Portenier, and Orcun Goksel. Learning ultrasound rendering from cross-sectional model slices
+for simulated training. International journal of computer assisted radiology and surgery, 16(5):721–730, 2021.
+18
+A PREPRINT - A PRIL 17, 2026
+[13] Ziwen Guo, Zi Fang, and Zhuang Fu. Ulre-nerf: 3d ultrasound imaging through neural rendering with ultrasound
+reflection direction parameterization. arXiv preprint arXiv:2408.00860, 2024.
+[14] Ben Luijten, Nishith Chennakeshava, Yonina C Eldar, Massimo Mischi, and Ruud JG van Sloun. Ultrasound
+signal processing: From models to deep learning. Ultrasound in medicine & biology, 49(3):677–698, 2023.
+[15] Ian Goodfellow, Yoshua Bengio, Aaron Courville, and Yoshua Bengio. Deep learning, volume 1. MIT press
+Cambridge, 2016.
+[16] Simon Arridge, Peter Maass, Ozan Öktem, and Carola-Bibiane Schönlieb. Solving inverse problems using
+data-driven models. Acta numerica, 28:1–174, 2019.
+[17] Gregory Ongie, Ajil Jalal, Christopher A Metzler, Richard G Baraniuk, Alexandros G Dimakis, and Rebecca
+Willett. Deep learning techniques for inverse problems in imaging. IEEE Journal on Selected Areas in Information
+Theory, 1(1):39–56, 2020.
+[18] GT Clement and Kullervo Hynynen. Field characterization of therapeutic ultrasound phased arrays through
+forward and backward planar projection. The Journal of the Acoustical Society of America, 108(1):441–446, 2000.
+[19] M S Canney, M R Bailey, L A Crum, V A Khokhlova, and O A Sapozhnikov. Acoustic characterization of
+high intensity focused ultrasound fields: A combined measurement and modeling approach. The Journal of the
+Acoustical Society of America, 124(4):2406–2420, 2008.
+[20] Jørgen A Jensen. Ultrasound imaging and its modeling. In Imaging of complex media with acoustic and seismic
+waves, pages 135–166. Springer, 2002.
+[21] Johan Fredrik Synnevag, Andreas Austeng, and Sverre Holm. Adaptive beamforming applied to medical ultrasound
+imaging. IEEE transactions on ultrasonics, ferroelectrics, and frequency control, 54(8):1606–1613, 2007.
+[22] Ni Chen, Liangcai Cao, Ting-Chung Poon, Byoungho Lee, and Edmund Y Lam. Differentiable imaging: A new
+tool for computational optical imaging. Advanced Physics Research, 2(6):2200118, 2023.
+[23] Kristoffer Virta and Ken Mattsson. Acoustic wave propagation in complicated geometries and heterogeneous
+media. Journal of Scientific Computing, 61(1):90–118, 2014.
+[24] N Dai, A Vafidis, and ER Kanasewich. Wave propagation in heterogeneous, porous media; a velocity-stress,
+finite-difference method. Geophysics, 60(2):327–340, 1995.
+[25] Guillaume Chiavassa and Bruno Lombard. Wave propagation across acoustic/biot’s media: a finite-difference
+method. Communications in Computational Physics, 13(4):985–1012, 2013.
+[26] Anton Van Pamel, Gaofeng Sha, Stanislav I Rokhlin, and Michael JS Lowe. Finite-element modelling of elastic
+wave propagation and scattering within heterogeneous media. Proceedings of the Royal Society A: Mathematical,
+Physical and Engineering Sciences, 473(2197), 2017.
+[27] Anthony Royer. Efficient finite element methods for solving high-frequency time-harmonic acoustic wave problems
+in heterogeneous media. Universite de Liege (Belgium), 2022.
+[28] B E Treeby and B T Cox. k-wave: Matlab toolbox for the simulation and reconstruction of photoacoustic wave
+fields. Journal of Biomedical Optics, 15(2):021314–021314, 2010.
+[29] Bradley E Treeby, Jiri Jaros, Daniel Rohrbach, and BT Cox. Modelling elastic wave propagation using the k-wave
+matlab toolbox. In 2014 IEEE international ultrasonics symposium, pages 146–149. IEEE, 2014.
+[30] Juanjuan Gu and Yun Jing. msound: An open source toolbox for modeling acoustic wave propagation in
+heterogeneous media. IEEE transactions on ultrasonics, ferroelectrics, and frequency control, 68(5):1476–1486,
+2021.
+[31] Andrew S Glassner. An introduction to ray tracing. Morgan Kaufmann, 1989.
+[32] Jon Peddie. Ray tracing: a tool for all, volume 2. Springer, 2019.
+[33] Peter Shirley and R Keith Morley. Realistic ray tracing. AK Peters, Ltd., 2008.
+[34] Felix Duelmer, Mohammad Farid Azampour, Magdalena Wysocki, and Nassir Navab. Ultraray: Introducing
+full-path ray tracing in physics-based ultrasound simulation. In Medical Image Computing and Computer Assisted
+Intervention – MICCAI 2025, volume 15961 of Lecture Notes in Computer Science, pages 653–662. Springer,
+Cham, 2026.
+[35] Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini, Tizian Zeltner, Baptiste
+Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang. Mitsuba 3 renderer, 2022. https://mitsuba-renderer.org.
+[36] Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. Differentiable monte carlo ray tracing through
+edge sampling. ACM Transactions on Graphics (TOG), 37(6):1–11, 2018.
+19
+A PREPRINT - A PRIL 17, 2026
+[37] Eric Veach. Robust Monte Carlo methods for light transport simulation. Stanford University, 1998.
+[38] Matt Pharr, Wenzel Jakob, and Greg Humphreys. Physically based rendering: From theory to implementation.
+MIT Press, 2023.
+[39] M Skwarek, J Hreczecha, M Dudziak, and M Grzybiak. The morphology of the right atrioventricular valve in the
+adult human heart. Folia Morphologica, 65(3):200–208, 2006.
+[40] Mrudang Mathur, William D. Meador, Marcin Malinowski, Tomasz Jazwiec, Tomasz A. Timek, and Manuel K.
+Rausch. Texas TriValve 1.0 : a reverse-engineered, open model of the human tricuspid valve. Engineering with
+Computers, may 2022.
+[41] Grace N Bechtel, Colton J Kostelnik, and Manuel K Rausch. How well do 3d-printed tissue mimics represent
+the complex mechanics of biological soft tissues? an example study with stratasys’ cardiovascular tissuematrix
+materials. Journal of Biomedical Materials Research Part A, 113(1):e37787, 2025.
+20

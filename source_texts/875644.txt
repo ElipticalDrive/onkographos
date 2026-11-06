@@ -1,0 +1,532 @@
+Modular node graph based noise generation library using SIMD, C++17 and templates - feat: add fractaldamped node with analytic noise gradients by AndrzejKebab · Pull Request #1 · AndrzejKebab/FastNoise2
+
+feat: add fractaldamped node with analytic noise gradients by AndrzejKebab · Pull Request #1 · AndrzejKebab/FastNoise2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+AndrzejKebab
+commented
+Nov 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Adds FractalDamped, a fractal sum where each octave is damped by 1 / (1 + d·d). d is the sum of the earlier octaves' gradients (Inigo Quilez, "Value Noise Derivatives" and "Gradient Noise Derivatives"). It also adds analytic value-plus-gradient functions for Simplex, SuperSimplex, Perlin and Value in 2D, 3D and 4D, plus native builds from one commit.
+Commit built: 7e78eb50d63df97c85bf2a7662b0a848b23162bc, branched from upstream 721400f (project(FastNoise2 VERSION 1.1.1)). The binaries are in draft release fractaldamped-7e78eb5, which supersedes drafts fractaldamped-5d55103 and fractaldamped-cc98a3c.
+Base commit and metadata dump
+fnGetMetadataCount and every fnGetMetadataName(id) were read through the C API from three DLLs: the shipped v1.1.1 FastNoise.dll, the base 721400f build and the fork build.
+Shipped and base are identical: count 47, IDs 0–46 from 0 Constant to 46 DomainRotatePlane.
+The fork keeps those 47 entries unchanged and adds 47 FractalDamped (count 48).
+The regression tool's metadata mode uses the same C API calls, and RegressionCompareMetadata checks base against fork on every platform.
+Interpolants at 721400f
+Perlin uses InterpQuintic (include/FastNoise/Generators/Perlin.inl).
+Value uses InterpHermite (include/FastNoise/Generators/Value.inl).
+The analytic gradients use the matching derivatives, 30t²(t−1)² and 6t(1−t).
+Licence
+No code was copied from the articles. The functions are derived from FastNoise2's own generators.
+The node
+Member
+Default
+Notes
+Source, Gain, Weighted Strength, Octaves, Lacunarity
+inherited
+unchanged
+Rotation
+36.87
+degrees; turns the first two axes, also in 3D and 4D
+Mode
+Analytic
+Analytic, ApproximateFast, ApproximateAccurate
+Slope Formula
+Auto
+Auto, Simplex, Perlin, SuperSimplex, Value
+Slope Feature Scale
+100
+used by explicit formulas, and by the approximate modes on a source without a Feature Scale
+Slope Seed Offset
+0
+used by explicit formulas
+Analytic + Auto: one call to the source's GenGradient. A source without a gradient (an operator, a warp, a chain) uses ApproximateFast.
+Analytic + explicit formula: the value comes from the source's Gen and the slope from the formula at the Slope Feature Scale and Slope Seed Offset. This costs a second noise evaluation. It equals Auto only when both settings match the source's own.
+ApproximateFast: forward differences, ε = cell / 256, N extra samples per octave. A forward difference measures the slope half a step ahead of the sample, so its damping lands ε/2 = 1/512 of each octave's cell toward −x and −y (and −z, −w). Use ApproximateAccurate when the result has to line up with Analytic. The Mode tooltip says so.
+ApproximateAccurate: central differences, ε = cell / 64, 2N extra samples per octave.
+Both approximate modes divide by the realised step, (p + ε) − p. The Mode tooltip says both lose accuracy beyond about 1e5 cells of the highest octave.
+Implementation notes:
+DispatchClass<Generator, SIMD> gains GenGradient (2D/3D/4D; by default it returns false) and SlopeCellSize. There is no RTTI in Gen, and the public headers are unchanged apart from Fractal.h.
+Each override applies its own mSeedOffset, ScalePositions and ScaleOutput, and the gradient is per noise cell in output units.
+Gradient vectors are decoded once per vertex from the same hash bits and tables the dot products use.
+FractalDamped is registered last. The metadata vector sizes go to 48 / 102 / 100 / 33 / 61, and DebugCheckVectorStorageSize is quiet (tested).
+Deviations from the brief, all agreed
+1. Value vs Gen
+With relaxed floating point the compiler orders the same source differently in Gen and in the gradient function.
+GenGradient (the route the node uses): |value − Gen| ≤ 4 × ulp(max(|Output Min|, |Output Max|)) at every point, ±1e6 world included, with non-default seed offset, Feature Scale and Output Min/Max.
+Static functions: 4 range ulps + k × |∇n| × ulp(largest lattice coordinate). k counts the roundings from the input coordinate to the vertex offset: Simplex and SuperSimplex 8/10/12 (2D/3D/4D), Perlin and Value 2. GCC orders the skew additions differently in the test's separately compiled copy.
+Measured on GCC at ±1e6 under the plain 4-ulp bound: Simplex 2D 25458, Simplex 3D 19704, SuperSimplex 2D 14922 and SuperSimplex 3D 14987 range ulps.
+ClangCL and Apple Clang stay within 4 on both routes. Test 7 (Constant source equals FractalFBm) is exact.
+2. Approximate: ApproximateFast (forward, cell / 256) and ApproximateAccurate (central, cell / 64) in place of central differences at cell / 8
+Folding fix: fast-math folded (p + ε) − p back to ε in ApproximateFast. At 1e5 cells, where p + ε rounds (realised step 2.0 against ε = 1.5625), that put ApproximateFast 0.019 off a hand-built realised-step result. An XOR with a zero the compiler cannot see (a volatile read) now keeps the rounded position, in both modes.
+Proof on every compiler: the hand-built check at 1e5 cells matches to ≤ 1.2e-7 at every SIMD level, on every compiler (table below).
+Step floor: at ±1e6 cells a 1/64-cell ε is below float spacing, so the step is floored at |p| / 2²¹, a few ulps of the position.
+Accuracy
+ApproximateFast step size, both measured (worst over all compilers and SIMD levels)
+ApproximateFast vs Analytic
+ε = cell / 64
+ε = cell / 256 (kept)
+2D near, max / mean
+0.089 / 0.012
+0.0256 / 0.0032
+3D near, max / mean
+0.040 / 0.0040
+0.0119 / 0.0012
+2D 1e5 cells, max / mean (bounds 0.3 / 0.05)
+0.291 / 0.048
+0.291 / 0.048
+cell / 256 improves the near-origin max and mean on every compiler. At 1e5 cells the step floor (|p| / 2²¹) is larger than either ε, so both steps give the same result. Fast's bounds did not change.
+Analytic vs ApproximateFast | ApproximateAccurate, max / mean (Simplex, 3 octaves)
+Run
+Level
+Dims
+near
+1e5 cells
+1e6 cells (reported only)
+Windows local, ClangCL 22.1.3
+SSE2
+2D
+0.0255869 / 0.00318381 | 0.00383681 / 0.000306884
+0.23524 / 0.045311 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+Windows local, ClangCL 22.1.3
+SSE2
+3D
+0.00956547 / 0.00116381 | 0.00182296 / 0.000207913
+0.111238 / 0.0179872 | 0.0503548 / 0.00920528
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+Windows local, ClangCL 22.1.3
+SSE41
+2D
+0.0255869 / 0.00318381 | 0.00383681 / 0.000306882
+0.23524 / 0.045311 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+Windows local, ClangCL 22.1.3
+SSE41
+3D
+0.00955948 / 0.00116379 | 0.00182287 / 0.000207933
+0.111238 / 0.0179872 | 0.0503548 / 0.00920531
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+Windows local, ClangCL 22.1.3
+AVX2
+2D
+0.0255643 / 0.00318415 | 0.00383374 / 0.0003068
+0.235076 / 0.0452709 | 0.193625 / 0.0202687
+0.669282 / 0.114507 | 0.83648 / 0.170607
+Windows local, ClangCL 22.1.3
+AVX2
+3D
+0.00956628 / 0.00116411 | 0.00182319 / 0.000207935
+0.10815 / 0.0173373 | 0.078228 / 0.0103532
+0.325004 / 0.0671231 | 0.546259 / 0.145173
+Windows CI, ClangCL
+SSE2
+2D
+0.0255869 / 0.00318381 | 0.00383681 / 0.000306884
+0.23524 / 0.045311 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+Windows CI, ClangCL
+SSE2
+3D
+0.00956547 / 0.00116381 | 0.00182296 / 0.000207913
+0.111238 / 0.0179872 | 0.0503548 / 0.00920528
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+Windows CI, ClangCL
+SSE41
+2D
+0.0255869 / 0.00318381 | 0.00383681 / 0.000306882
+0.23524 / 0.045311 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+Windows CI, ClangCL
+SSE41
+3D
+0.00955948 / 0.00116379 | 0.00182287 / 0.000207933
+0.111238 / 0.0179872 | 0.0503548 / 0.00920531
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+Windows CI, ClangCL
+AVX2
+2D
+0.0255643 / 0.00318415 | 0.00383374 / 0.0003068
+0.235076 / 0.0452709 | 0.193625 / 0.0202687
+0.669282 / 0.114507 | 0.83648 / 0.170607
+Windows CI, ClangCL
+AVX2
+3D
+0.00956628 / 0.00116411 | 0.00182319 / 0.000207935
+0.10815 / 0.0173373 | 0.078228 / 0.0103532
+0.325004 / 0.0671231 | 0.546259 / 0.145173
+Linux CI, GCC 13.3
+SSE2
+2D
+0.0255753 / 0.00318064 | 0.00383145 / 0.000306642
+0.23524 / 0.0453111 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+Linux CI, GCC 13.3
+SSE2
+3D
+0.00957748 / 0.00116447 | 0.0018229 / 0.000207903
+0.111237 / 0.0179872 | 0.0503548 / 0.00920528
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+Linux CI, GCC 13.3
+SSE41
+2D
+0.0255753 / 0.00318064 | 0.00383145 / 0.000306642
+0.23524 / 0.0453111 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+Linux CI, GCC 13.3
+SSE41
+3D
+0.00957748 / 0.00116447 | 0.0018229 / 0.000207903
+0.111237 / 0.0179872 | 0.0503548 / 0.00920528
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+Linux CI, GCC 13.3
+AVX2
+2D
+0.025572 / 0.00318217 | 0.00384232 / 0.000306779
+0.244853 / 0.0468923 | 0.17613 / 0.0187944
+0.703977 / 0.111183 | 0.747862 / 0.168419
+Linux CI, GCC 13.3
+AVX2
+3D
+0.01186 / 0.00118804 | 0.00136182 / 0.000204032
+0.169629 / 0.0207438 | 0.0399268 / 0.00753068
+0.317631 / 0.0624421 | 0.50089 / 0.144712
+Linux CI, GCC 13.3
+AVX512
+2D
+0.025572 / 0.00318217 | 0.00384232 / 0.000306779
+0.244853 / 0.0468923 | 0.17613 / 0.0187944
+0.703977 / 0.111183 | 0.747862 / 0.168419
+Linux CI, GCC 13.3
+AVX512
+3D
+0.01186 / 0.00118804 | 0.00136181 / 0.000204032
+0.169629 / 0.0207438 | 0.0399269 / 0.00753068
+0.317631 / 0.0624421 | 0.50089 / 0.144712
+macOS CI arm64, Apple clang 21
+NEON
+2D
+0.0255583 / 0.0031832 | 0.0038332 / 0.000306836
+0.290996 / 0.04769 | 0.187284 / 0.0210841
+0.669281 / 0.112357 | 0.578835 / 0.169984
+macOS CI arm64, Apple clang 21
+NEON
+3D
+0.00956655 / 0.0011639 | 0.00182269 / 0.00020797
+0.111229 / 0.0182713 | 0.078228 / 0.0101375
+0.324008 / 0.0652931 | 0.546259 / 0.14351
+macOS CI arm64, Apple clang 21
+AARCH64
+2D
+0.0255583 / 0.0031832 | 0.00383314 / 0.000306835
+0.290996 / 0.04769 | 0.187284 / 0.0210841
+0.669281 / 0.112357 | 0.578835 / 0.169984
+macOS CI arm64, Apple clang 21
+AARCH64
+3D
+0.00956656 / 0.0011639 | 0.00182269 / 0.00020797
+0.111229 / 0.0182713 | 0.078228 / 0.0101375
+0.324008 / 0.0652931 | 0.546259 / 0.14351
+macOS CI x86_64 slice
+SSE2
+2D
+0.0255869 / 0.00318381 | 0.00383678 / 0.000306882
+0.23524 / 0.045311 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+macOS CI x86_64 slice
+SSE2
+3D
+0.00956546 / 0.00116381 | 0.00182296 / 0.000207912
+0.111238 / 0.0179872 | 0.0503548 / 0.00920528
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+macOS CI x86_64 slice
+SSE41
+2D
+0.0255869 / 0.00318381 | 0.00383675 / 0.00030688
+0.23524 / 0.045311 | 0.193836 / 0.0231594
+0.710119 / 0.107518 | 0.83648 / 0.174077
+macOS CI x86_64 slice
+SSE41
+3D
+0.00956549 / 0.00116381 | 0.00182296 / 0.000207914
+0.111238 / 0.0179872 | 0.0503548 / 0.00920528
+0.325004 / 0.0671278 | 0.598002 / 0.148587
+macOS CI x86_64 slice
+AVX2
+2D
+0.0255643 / 0.00318415 | 0.00383374 / 0.0003068
+0.235076 / 0.0452709 | 0.193625 / 0.0202687
+0.669282 / 0.114507 | 0.83648 / 0.170607
+macOS CI x86_64 slice
+AVX2
+3D
+0.00956629 / 0.00116411 | 0.0018232 / 0.000207935
+0.10815 / 0.0173373 | 0.078228 / 0.0103532
+0.325004 / 0.0671231 | 0.546259 / 0.145173
+Fold proof: one octave vs hand-built realised step at 1e5 cells, worst max diff
+Run
+ApproximateFast
+ApproximateAccurate
+Windows local, ClangCL 22.1.3
+6e-08
+7.5e-08
+Windows CI, ClangCL
+6e-08
+7.5e-08
+Linux CI, GCC 13.3
+1.2e-07
+6e-08
+macOS CI arm64, Apple clang 21
+6e-08
+6e-08
+macOS CI x86_64 slice
+9.3e-08
+7.5e-08
+Largest GenGradient value vs Gen difference, range ulps
+Windows local, ClangCL 22.1.3: SSE2 2 SSE41 2 AVX2 2.5 (426 checks, 0 failures)
+Windows CI, ClangCL: SSE2 2 SSE41 2 AVX2 2.5 (426 checks, 0 failures)
+Linux CI, GCC 13.3: SSE2 2 SSE41 3 AVX2 0.75 AVX512 0 (544 checks, 0 failures)
+macOS CI arm64, Apple clang 21: NEON 2.5 AARCH64 2.5 (308 checks, 0 failures)
+macOS CI x86_64 slice: SSE2 2 SSE41 2 AVX2 2 (426 checks, 0 failures)
+ApproximateAccurate has a lower maximum error than ApproximateFast in 2D and 3D, near the origin and at 1e5 cells, at every SIMD level on every compiler (checked by the test).
+Domain: near the origin (|pos| up to about 1900 at Feature Scale 100, 3 octaves) and around 1e5 cells, which is larger than the old documented domain (|p_i| ≤ 4000). The bounds are the largest measured value in the domain plus a stated margin:
+Mode
+Max
+Mean
+Largest measured (worst compiler)
+ApproximateAccurate
+0.3
+0.03
+max 0.194, mean 0.023 (2D, 1e5 cells)
+ApproximateFast (cell / 256)
+0.3
+0.05 in 2D, 0.03 in 3D/4D
+max 0.291 (Apple arm64), mean 0.0477 (2D, 1e5 cells); margins 0.009 and 0.0023
+At 1e6 cells every finite-difference variant, including the old central cell/8, measures about 2D max 0.84, mean 0.17. Positions there resolve only to 0.08–0.3 cells, so the step floor replaces ε and all variants sample the same rounded points. The test reports these values and fails only on a non-finite value.
+Performance
+tests/bench/compare_builds.py runs the before and after benchmarks in 7 alternating rounds, on one pinned core at high priority. Before is 9eee118: 4D added, before the gradient decoding and the approximate split. Medians, AVX2, Simplex source, 4096 points. The machine was running other software, and FractalFBm (unchanged code) moved 0.89–1.16× between the two builds, so treat ±15% as noise.
+5 octaves
+FractalFBm
+Analytic Auto
+Analytic + Simplex formula
+ApproximateFast
+ApproximateAccurate
+old Approximate (central, cell/8)
+2D
+38.5 µs
+56.2
+78.5
+120.0
+184.2
+176.5
+3D
+76.7
+107.4
+153.5
+267.9
+439.5
+427.2
+4D
+105.0
+214.8
+256.7
+470.9
+802.2
+836.7
+ApproximateFast is 1.47–1.78× faster than the old Approximate at 5 octaves, and 1.32–1.72× at 1 octave. Measured at cell / 64; the step size does not change the sample count. ApproximateAccurate is within noise of it (0.96–1.04×), including the cost of the XOR.
+The gradient-vector decoding measured 1.14–1.28× on Analytic 3D/4D in one A/B run; in this run Analytic moved 0.93–1.09×, inside the noise.
+1-octave numbers and all rows: benchmark-before-after.txt in the Windows archive.
+Tests
+tests/damped/FastNoiseDampedTests.cpp (brief tests 2–9) and tests/regression/FastNoiseRegressionDump.cpp (test 1) run through CTest; tests/damped/README.md explains every tolerance. Value, gradient and approximate checks run at every SIMD level the machine supports.
+No regression. Every existing node and 97 fixture trees (default and fully non-default trees for every node type, a mixed tree, the NodeEditor demo trees) are decoded, re-encoded and sampled by the base build and the fork. They are byte-identical on every platform.
+Values vs Gen in 2D/3D/4D: see above.
+Gradients vs differences of Gen, step 1e-3 cells, in 2D/3D/4D, through the static functions and GenGradient. Tolerance: 0.02 + 1% of the gradient length. On a kink, one side must match.
+Units: Feature Scale 100 vs 2000 at 20× the positions; Output Min/Max scales the gradient by exactly 4.
+Approximate modes vs Analytic: see Accuracy. One octave of each mode matches a hand-built realised-step difference.
+Auto equals explicit Perlin (2D/3D/4D) within 4 range ulps (measured 0).
+A Constant source equals FractalFBm exactly in all three modes; a Simplex source differs.
+One and two octaves built by hand through GenGradient match in 2D/3D/4D.
+Metadata: count 48, last ID, members, defaults, ranges, enum strings, tooltips, an encode/decode round-trip, and a decoded tree generating like a hand-built node.
+Platform
+Result
+Windows x64 local (Ryzen 7 5800X3D, ClangCL)
+5/5 CTest, 426 checks, 0 failures; SSE2, SSE41, AVX2
+Windows x64 CI (ClangCL)
+5/5 CTest, 426 checks, 0 failures; SSE2, SSE41, AVX2
+Linux x64 CI (GCC 13.3)
+5/5 CTest, 544 checks, 0 failures; SSE2, SSE41, AVX2, AVX512
+macOS universal CI, arm64 slice
+5/5 CTest, 308 checks, 0 failures; NEON, AARCH64
+macOS universal CI, x86_64 slice (same binaries, Intel runner)
+base vs fork identical, metadata passed, 426 checks, 0 failures; SSE2, SSE41, AVX2
+Platform limits
+Binary
+Measured
+Limit
+libFastNoise.so
+GLIBC_2.14, GLIBCXX_3.4.29
+≤ 2.14, ≤ 3.4.29
+libNodeEditorIpc.so
+GLIBC_2.34, GLIBCXX_3.4.21
+≤ 2.34, ≤ 3.4.21
+NodeEditor (Linux)
+GLIBC_2.38, GLIBCXX_3.4.32
+≤ 2.38, ≤ 3.4.32
+macOS, all three
+minos 11.0 on x86_64 and arm64
+11.0
+Windows
+dumpbin /dependents: a subset of the shipped v1.1.1 binaries' (VCRUNTIME140_1.dll no longer needed)
+no new dependency
+Linux and macOS: archives use upstream's install layout (bin/, lib/, rpath $ORIGIN/../lib / @loader_path/../lib), set at build time so the tested files are the shipped files. CI relocates them and checks that NodeEditor resolves its libraries.
+Headless servers: libFastNoise.so needs only libstdc++, libm, libgcc_s and libc.
+Build commands
+See BUILDING.md. Every binary comes from 7e78eb5, and each archive's PROVENANCE.txt names the machine or job, the compiler, the container (none) and the commands.
+Windows: local, ClangCL 22.1.3 (Visual Studio 2026 18.11), Ninja.
+Linux: CI run 41357632898, job linux, ubuntu-24.04 image 20261026.354.1, GCC 13.3.
+macOS: CI run 41357632898, job macos, macos26 image 20261026.0455.2, Apple clang 21, universal.
+MSVC
+These builds use ClangCL, as upstream's README recommends.
+x64 MSVC Release: in an earlier run, the gradient-vs-central-difference checks failed near the origin. MSVC Debug passed. Neither was re-measured at 7e78eb5.
+Win32 MSVC Release: compiling FastSIMD_FastNoise_AVX512.cpp takes 33 min 50 s at base 721400f. In the fork, CL.exe ran about 3 hours (200+ CPU-minutes) and exited with code 1 (MSB6006), with no diagnostic in the captured output, so the cause is unknown.
+Left
+Win32 MSVC compile time and exit (above): not addressed.
+NodeEditor hand checks (section 8). The owner checked the node on Windows: it is listed, the previews render, and the modes and formulas work. To finish on Windows, Linux and macOS:
+Fractal Damped is listed under Fractal, with every setting and its tooltip.
+The 2D and 3D previews render in Analytic, ApproximateFast and ApproximateAccurate, with each Slope Formula.
+A tree with the node survives save, load, copy as encoded and paste.
+An existing saved tree opens unchanged.
+No "Non-optimal metadata vector" error appears on start.
+AndrzejKebab
+added 18 commits
+November 1, 2026 17:13
+feat: add analytic value-plus-gradient for simplex, perlin and value
+…
+d3408a0
+```
+GenGradient on the SIMD generator base returns a node's value and its gradient per noise cell; Simplex, SuperSimplex, Perlin and Value implement it in 2D and 3D with their own hashing, gradient tables and interpolants. SlopeCellSize reports a generator's Feature Scale. Existing Gen bodies are unchanged.
+```
+feat: add fractaldamped node
+…
+8a93772
+```
+Fractal sum where each octave is damped by 1 / (1 + d.d), d being the sum of the earlier octaves' gradients (derivative-damped terrain, after Inigo Quilez). Registered after DomainRotatePlane so existing node IDs keep their values.
+```
+test: add fractaldamped tests and base regression dump
+…
+cf5a03c
+```
+FastNoiseDampedTests checks the gradient functions per SIMD level and the node's behaviour. FastNoiseRegressionDump samples every existing node and the fixture trees, built against both the base commit and the fork for a byte comparison.
+```
+test: benchmark fractaldamped against fractalfbm on a 64x64 grid
+3014e55
+test: cover tree identity, demo trees and range-ulp value bound
+…
+2e085fa
+```
+The regression dump re-encodes each decoded fixture so the byte comparison covers tree identity; fixtures gain the NodeEditor demo trees. Value checks use |fused - Gen| <= 4 ulp of the output range and report the largest per SIMD level. The probe reports a failed bind instead of crashing.
+```
+ci: build and test fractaldamped on linux, windows and macos
+…
+674ae0c
+```
+Each job builds the base regression dump and the fork on the same runner and compares them. Linux checks symbol versions against the shipped binaries, macOS checks minos 11.0 on both slices and reruns the tests on an Intel runner. BUILDING.md has the commands.
+```
+fix: match fractalfbm's multiply-add for a zero slope on every compiler
+…
+b8a8185
+```
+Apple clang on x86_64 split the sum differently from FractalFBm. The static value test now uses Feature Scale 100 and lattice positions scaled as ScalePositions does, so +-1e6 is in world units, and reports the worst point.
+```
+test: scale the static value bound by input precision
+…
+ccb93cb
+```
+Static ValueGradient values allow 4 range ulp + 2 * |grad| * ulp(largest lattice coordinate); GenGradient keeps 4 range ulp. GCC orders the skew additions differently in the test's copy, which at 1e4 cells moves the sample by one position ulp.
+```
+test: count rounding steps per formula in the static value bound
+…
+1981ef9
+```
+The bound is 4 range ulp + k * |grad| * ulp(largest lattice coordinate), k being the roundings from input coordinate to vertex offset in each formula's code. Every value check prints its worst point. BUILDING.md switches the developer shell to x64.
+```
+ci: ship install-layout binaries and dump metadata through the c api
+…
+aeaf3ea
+```
+Linux and macOS build with the install rpath ($ORIGIN/../lib, @loader_path/../lib) so the tested binaries are the shipped ones, packed as bin/ + lib/ tarballs and checked after relocation. The metadata dump reads fnGetMetadataCount and fnGetMetadataName. The probe force-inlines SIMD by-value helpers for 32-bit MSVC.
+```
+ci: match ldd's resolved path in the linux relocation check
+cc98a3c
+feat: add 4d analytic gradients for simplex, supersimplex, perlin and…
+…
+1b5d87c
+```
+… value
+
+4D Analytic no longer falls back to Approximate; explicit Slope Formulas work in 4D too. Tests 2, 3, 5, 6 and 8 cover 4D.
+```
+test: measure fractaldamped speed and output drift between builds
+…
+9eee118
+```
+The benchmark covers 1 and 5 octaves in 2D, 3D and 4D with Auto, an explicit formula and Approximate. FastNoiseRegressionDump gains 'damped' and 'compare' modes for before/after drift.
+```
+perf: decode gradient vectors from the hash once per vertex
+…
+975bf65
+```
+Select-based SIMD paths no longer run one full dot product per axis to read a gradient vector. Analytic 3D/4D is 1.14-1.28x faster on AVX2 (FBm moved 0.85-1.13x in the same runs); output is bit-identical except Perlin 4D (max 7e-8). tests/bench/compare_builds.py runs two benchmark builds in alternating rounds.
+```
+feat: split approximate mode into fast forward and accurate central d…
+…
+4fa64e1
+```
+…ifferences
+
+Mode is Analytic, ApproximateFast or ApproximateAccurate. Both approximate modes step cell / 64 and divide by the realised step; an opaque-zero XOR stops fast-math folding (p + eps) - p back to eps, which put ApproximateFast 0.019 off the hand-built result at 1e5 cells. Analytic sources without a gradient use ApproximateFast. Test 5 covers both modes near the origin and at 1e5 cells at every SIMD level, and reports 1e6 cells.
+```
+test: list benchmarks present in only one build when comparing
+5d55103
+feat: step approximatefast at cell / 256 and document its half-step bias
+…
+6f68fcf
+```
+Near the origin, 2D max/mean against Analytic drops from 0.089/0.012 to 0.026/0.0032 (3D 0.040/0.0040 to 0.0096/0.0012); at 1e5 cells the step floor sets the step, so results are unchanged. The Mode tooltip states the 1/512-cell shift toward -x, -y.
+```
+build: add a script that tests and packages the windows binaries
+7e78eb5
+Hide details
+View details
+AndrzejKebab
+merged commit 6a850b1
+into
+master
+Nov 2, 2026
+11 of 12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,77 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-The NerfAcc Rendering Pipeline is a modular, high-performance volumetric rendering framework implemented as a PyTorch library that decouples efficient sampling from the radiance field representation [S1]. It solves the computational bottleneck of neural volume rendering by using a **Transmittance Estimator** (such as an Occupancy Grid or Proposal Network) to generate non-uniform sample intervals along rays, which are then integrated via differentiable rendering [S1]. Unlike standard uniform sampling or sibling methods like [NeRF Importance Sampling](1565-nerf-importance-sampling.md) which may sample the entire space, NerfAcc combines occupancy grids to skip empty space and proposal networks to concentrate samples on surfaces, achieving speedups of 1.5× to 20× with minimal code changes [S1].
++The NerfAcc Rendering Pipeline is a modular, high-performance volumetric rendering framework implemented as a PyTorch library that decouples efficient sampling from the radiance field representation [S1]. It solves the computational bottleneck of neural volume rendering by using a Transmittance Estimator (such as an Occupancy Grid or Proposal Network) to generate non-uniform sample intervals along rays, which are then integrated via differentiable rendering [S1]. Unlike standard uniform sampling or sibling methods like [NeRF Importance Sampling](1565-nerf-importance-sampling.md) which may sample the entire space, NerfAcc combines occupancy grids to skip empty space and proposal networks to concentrate samples on surfaces, achieving speedups of 1.5× to 20× with minimal code changes [S1].
+ 
+ ## How it works
+@@ -18,5 +18,5 @@
+ ### Steps
+ 
+-1.  **Initialize Transmittance Estimator**: Create an estimator to guide sampling. This can be an Occupancy Grid (from Instant-NGP) or a Proposal Network (from Mip-NeRF 360) [S1].
++1.  **Initialize Transmittance Estimator**: Create an estimator to guide sampling, such as an Occupancy Grid or Proposal Network [S1].
+ 2.  **Initialize Coarse Samples**: Generate initial sample positions using log-space distribution, then map them to the $[near, far]$ range [S2, unofficial].
+ 3.  **Define Density Query Function**: Create a wrapper that queries the neural network for density given interval endpoints and ray indices [S1].
+@@ -24,5 +24,5 @@
+ 5.  **Define RGB/Density Query Function**: Create a wrapper that returns both color and density for the rendered intervals [S1].
+ 6.  **Differentiable Volumetric Rendering**: Integrate the samples to compute color, opacity, and depth [S1]. The internal rendering logic follows these formulas:
+-    *   **Deltas**: Compute interval lengths. For the last interval, use a fixed sample distance if needed [S2, unofficial].
++    *   **Deltas**: Compute interval lengths, appending a sample distance for the last interval [S2, unofficial].
+     *   **Alpha**: Convert density $\sigma$ to opacity $\alpha$ [S2, unofficial].
+     *   **Weights**: Compute rendering weights $w_i$ using the cumulative product of transmittance [S2, unofficial].
+@@ -30,5 +30,5 @@
+     *   **Depth**: Weighted mean of midpoints $z_{mid}$ [S2, unofficial].
+     *   **Depth Variance**: Weighted variance of depths [S2, unofficial].
+-7.  **Background Contribution**: If alpha is not premultiplied, add background color based on accumulated opacity [S2, unofficial].
++7.  **Background Contribution**: If alpha is premultiplied, add background color based on accumulated opacity [S2, unofficial].
+ 8.  **Update Transmittance Estimator**: Periodically update the estimator (e.g., every $n$ steps) using the sampled intervals and auxiliary data to improve future sampling [S1].
+ 9.  **Loss and Backpropagation**: Compute loss against ground truth and backpropagate [S1].
+@@ -66,8 +66,9 @@
+ 
+     # 8. Background Contribution & Normalization [S2, unofficial]
+-    if not alpha_premultiplied:
+-        weights_sum = opacity
++    weights_sum = opacity
++    if alpha_premultiplied:
++        color = color + (1 - weights_sum).unsqueeze(-1) * bg_color
++    else:
+         color = color / (weights_sum + 1e-9)
+-        color = color + (1 - weights_sum).unsqueeze(-1) * bg_color
+ 
+     # 9. Loss and Backpropagation [S1]
+@@ -77,11 +78,11 @@
+     return color, opacity, depth, aux
+ 
+-def volumetric_rendering(t0, t1, r_id, rgb_density_fn):
+-    # Query RGB and density for all intervals
++def volumetric_rendering(t0, t1, r_id, rgb_density_fn, sample_dist=0.01):
++    # Query RGB and density for all intervals [S2, unofficial]
+     rgbs, sigmas = rgb_density_fn(t0, t1, r_id)
+-    # Compute deltas (interval lengths)
++    # Compute deltas (interval lengths) [S2, unofficial]
+     deltas = t1 - t0
+-    # Append sample distance for the last interval if needed [S2, unofficial]
+-    # deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[:, :, :1])], dim=-1)
++    # Append sample distance for the last interval [S2, unofficial]
++    deltas = torch.cat([deltas, sample_dist * torch.ones_like(deltas[:, :, :1])], dim=-1)
+     # Compute opacity alpha [S2, unofficial]
+     alphas = 1.0 - torch.exp(-deltas * sigmas)
+@@ -122,12 +123,12 @@
+ 
+ ### NeRF Upsampling (Fine Sampling)
+-A variant that refines coarse samples by resampling around high-weight intervals. It computes deltas and alphas from coarse samples, derives weights for PDF sampling, calculates midpoints, and samples new $z$ values using `sample_pdf`. New points are queried for density and RGB, and results are gathered using sort indices to maintain order [S2, unofficial].
++A variant that refines coarse samples by resampling around high-weight intervals [S2, unofficial]. It computes deltas and alphas from coarse samples, derives weights for PDF sampling, calculates midpoints, and samples new $z$ values using `sample_pdf` [S2, unofficial]. New points are queried for density and RGB, and results are gathered using sort indices to maintain order [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Depends on the number of samples generated by the estimator. By skipping empty space (Occupancy Grid) and concentrating on surfaces (Proposal Network), it reduces the number of neural network queries compared to uniform sampling [S1].
+-*   **Memory Complexity**: Linear with respect to the number of active samples. The interval-based representation $(t_0, t_1, r)$ stores only interval endpoints and ray indices [S1].
++*   **Time Complexity**: Depends on the number of samples generated by the estimator [S1]. By skipping empty space (Occupancy Grid) and concentrating on surfaces (Proposal Network), it reduces the number of neural network queries compared to uniform sampling [S1].
++*   **Memory Complexity**: Linear with respect to the number of active samples [S1]. The interval-based representation $(t_0, t_1, r)$ stores only interval endpoints and ray indices [S1].
+ *   **Performance**: Reported speedups of 1.5× to 20× over baseline NeRF implementations with minor code modifications [S1].
+ *   **Strengths**: Modular design allows easy integration with various radiance fields (density-based or SDF-based, static or dynamic) [S1]. Combines the strengths of Occupancy Grids and Proposal Networks [S1].
+-*   **Limitations**: Requires careful tuning of the estimator parameters. The interval-based approach may complicate direct point-wise analysis if not handled correctly [S1].
++*   **Limitations**: Requires careful tuning of the estimator parameters [S1]. The interval-based approach may complicate direct point-wise analysis if not handled correctly [S1].
+ 
+ ## Background

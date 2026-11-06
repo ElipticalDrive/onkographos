@@ -1,0 +1,197 @@
+# Hierarchical DDA with Super-brick Skipping
+
+Also called: Exact shadow trace with super-brick skipping and occupied-box early-out
+
+## Overview
+This method accelerates ray tracing through sparse volumetric data by introducing a two-level occupancy hierarchy (super-bricks and bricks) to skip large empty regions, while maintaining pixel-identical output to the fine per-voxel DDA [S1, unofficial]. It solves the performance bottleneck of traversing empty space by verifying emptiness at a coarser granularity and using an axis-aligned bounding box (AABB) for early termination, ensuring exactness by only skipping verified empty blocks and terminating only when the ray definitively passes the occupied volume [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, volume header, brick masks, super-brick masks, and voxel data.
+- Output: Boolean indicating if the ray hits any occupied voxel, or the intersection details.
+
+**Data Structures:**
+The buffer layout consists of a header, bricks, brick mask, and super mask [S1, unofficial].
+- **Header:** 20 words (`HEADER_WORDS 20`) [S1, unofficial].
+  - Words 12-14: Occupied box minimum coordinates ($a_{min}$) [S1, unofficial].
+  - Words 16-18: Occupied box maximum coordinates ($a_{max}$) [S1, unofficial].
+  - Word 7: Super-mask offset [S1, unofficial].
+- **Super-bricks:** A grid of $4^3$ bricks, containing $32^3$ cells total [S1, unofficial]. Each super-brick has a nonempty bitset appended after the brick mask [S1, unofficial].
+- **Bricks:** The intermediate level between super-bricks and voxels.
+
+**Algorithm Steps:**
+1. **Initialize DDA:** Set up the standard Digital Differential Analyzer state for the ray $\mathbf{o}, \mathbf{d}$ within the volume bounds [S1, unofficial].
+2. **Iterate:** Loop while the ray is within the volume bounds and iteration count $< 768$ [S1, unofficial].
+3. **Check Super-brick Occupancy:**
+   - Determine the current super-brick index.
+   - Read the super-brick's nonempty bitset.
+   - If the bit is 0 (empty):
+     - Call `skip_box(32)` to advance the ray state by 32 units (the size of a super-brick) [S1, unofficial].
+     - Continue to the next iteration [S1, unofficial].
+   - If the bit is 1 (occupied):
+     - Proceed to step 4.
+4. **Check Brick Occupancy:**
+   - Determine the current brick index within the occupied super-brick.
+   - Read the brick's occupancy mask.
+   - If the brick is empty:
+     - Call `skip_box(8)` to advance the ray state by 8 units (the size of a brick) [S1, unofficial].
+     - Continue to the next iteration.
+   - If the brick is occupied:
+     - Proceed to step 5.
+5. **Fine DDA Traversal:**
+   - Perform the standard per-voxel DDA traversal for the current brick [S1, unofficial].
+   - Check individual voxels for occupancy.
+   - If an occupied voxel is found, return true (hit) [S1, unofficial].
+6. **Early-Out Check:**
+   - At each step, check if the ray has definitively passed the occupied volume.
+   - The ray is monotonic per axis. If the current cell index has passed the occupied box boundary on an axis it is moving toward, the ray can never hit the occupied volume [S1, unofficial].
+   - Condition: If $(step \ge 0 \land cell > a_{max}) \lor (step \le 0 \land cell < a_{min})$, return false immediately [S1, unofficial].
+7. **Termination:**
+   - If the iteration cap (768) is reached without a hit or early-out, return false [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trace_shadow(o, d, header, brick_masks, super_masks, voxel_data):
+    # Extract occupied box bounds from header
+    a_min = header[12:15]
+    a_max = header[16:19]
+    
+    # Initialize DDA state
+    t, cell, step = initialize_dda(o, d)
+    
+    # Iteration cap
+    max_iterations = 768
+    
+    for _ in range(max_iterations):
+        # Check early-out against occupied box
+        # Ray is monotonic per axis. If cell passed a_max in positive direction
+        # or passed a_min in negative direction, it can never hit.
+        for axis in range(3):
+            if step[axis] >= 0 and cell[axis] > a_max[axis]:
+                return False
+            if step[axis] <= 0 and cell[axis] < a_min[axis]:
+                return False
+        
+        # Determine current super-brick
+        super_idx = get_super_brick_index(cell)
+        
+        # Check super-brick occupancy
+        if not is_super_brick_occupied(super_idx, super_masks):
+            # Skip entire 32x32x32 super-brick
+            t, cell, step = skip_box(t, d, cell, step, 32)
+            continue
+        
+        # Determine current brick within super-brick
+        brick_idx = get_brick_index(cell)
+        
+        # Check brick occupancy
+        if not is_brick_occupied(brick_idx, brick_masks):
+            # Skip 8x8x8 brick
+            t, cell, step = skip_box(t, d, cell, step, 8)
+            continue
+        
+        # Fine per-voxel DDA
+        # Perform standard DDA steps within the brick
+        while is_within_brick(cell):
+            if is_voxel_occupied(cell, voxel_data):
+                return True
+            
+            # Advance DDA
+            t, cell, step = advance_dda(t, d, cell, step)
+            
+            # Check if we've left the brick
+            if not is_within_brick(cell):
+                break
+        
+        # If we exited the brick without a hit, advance to next brick/super-brick
+        # The skip_box logic handles the transition to the next occupied region
+        # or continues fine DDA if the next region is also occupied.
+        # Note: The source implies skip_box is used for empty regions.
+        # For occupied regions, we rely on the fine DDA loop above.
+        # If the fine DDA loop finishes without hit, we need to advance to the next
+        # super-brick or brick. The source says "skip_box(32)" for empty super-bricks.
+        # If the current super-brick is occupied but the current brick was empty,
+        # we skipped the brick. If the brick was occupied, we did fine DDA.
+        # If fine DDA finishes, we need to move to the next brick/super-brick.
+        # The source doesn't explicitly detail the transition after fine DDA exhausts
+        # the current brick. However, standard DDA traversal continues.
+        # We assume the DDA state (t, cell, step) is updated to the next cell.
+        # If the next cell is in a new brick/super-brick, the loop continues.
+        
+        # Advance to next cell (standard DDA step)
+        t, cell, step = advance_dda(t, d, cell, step)
+        
+        # Check if we've left the volume
+        if not is_within_volume(cell):
+            break
+            
+    return False
+
+def skip_box(t, d, cell, step, size):
+    """
+    Advances the ray state by 'size' units along the ray,
+    using the same crossing/tie logic as the fine DDA.
+    This ensures visited-cell decisions are identical.
+    """
+    # Calculate the new t value
+    t_new = t + size
+    
+    # Determine the new cell index
+    # This requires solving for the cell boundaries
+    # cell_new[axis] = floor((o[axis] + t_new * d[axis] - origin[axis]) / voxel_size)
+    # However, to maintain exactness, we use the DDA crossing logic.
+    # The source states skip_box uses the same crossing/tie logic.
+    # We simulate advancing the DDA by 'size' units.
+    
+    # Approximate implementation for clarity, assuming unit voxel size and origin 0
+    # In practice, this involves precise floating point arithmetic to match fine DDA
+    new_cell = [0, 0, 0]
+    for axis in range(3):
+        # Calculate the position at t_new
+        pos = d[axis] * t_new
+        # Determine which cell this position falls into
+        # This is a simplification; real implementation uses DDA crossing times
+        new_cell[axis] = int(pos) # Placeholder for precise DDA crossing logic
+        
+    # Update step direction
+    # The step direction remains the same unless we cross a boundary
+    # The source implies skip_box handles the transition correctly
+    
+    return t_new, new_cell, step
+```
+
+**Parameters:**
+- Iteration cap: 768 iterations per ray [S1, unofficial].
+- Super-brick size: $32^3$ cells [S1, unofficial].
+- Brick size: $8^3$ cells (implied by $32/4=8$) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Dense Scenes:** In dense scenes with no empty space (e.g., sponge1m), the extra super-mask read and early-out math can cause regression compared to the fine DDA [S1, unofficial].
+- **Precision:** The `skip_box` function must use the same crossing/tie logic as the fine DDA to ensure visited-cell decisions are identical between skipping and fine traversal [S1, unofficial].
+- **Early-Out Correctness:** The early-out condition must be checked carefully to ensure it only triggers when the ray has definitively passed the occupied volume, not just the current brick/super-brick [S1, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+- Time complexity is reduced for sparse volumes due to skipping empty regions. The iteration cap remains 768, but the average number of iterations per ray is lower [S1, unofficial].
+- Memory complexity increases slightly due to the super-brick and brick masks [S1, unofficial].
+
+**Measured Performance:**
+- On M2 Metal, for the `autumn/orbit_close` scene, GPU p50 decreased from 73.11 ms to 44.55 ms (-39.1%) [S1, unofficial].
+- On M2 Metal, for the `sponge1m/fit` scene, GPU p50 increased from 15.16 ms to 15.24 ms (+0.5%), showing neutral performance for dense scenes [S1, unofficial].
+- Visual regression tests on M2 Metal show 0% differing pixels and max delta 0 for all 9 stills, confirming exactness [S1, unofficial].
+
+**Strengths and Limitations:**
+- **Strengths:** Significant speedups in sparse scenes (e.g., autumn, terrain) by skipping empty regions [S1, unofficial]. Maintains exactness compared to fine DDA [S1, unofficial].
+- **Limitations:** Regression in dense scenes due to overhead of hierarchy checks [S1, unofficial].
+
+**When to Use:**
+- Use for sparse volumetric data where large empty regions are common.
+- Do not use for dense volumetric data where empty regions are rare, as the overhead may outweigh the benefits.
+
+## Background
+This method was introduced in a pull request for the `voxelite` voxel editor project by 0x63616c [S1, unofficial]. It is part of a performance plan to create a faster exact shadow trace [S1, unofficial]. The method builds on the principles of DDA traversal but adds a hierarchical occupancy check to optimize for sparsity [S1, unofficial].
+
+## Sources
+[S1] Exact shadow trace: skip empty 32³ super-bricks + occupied-box early-out, https://github.com/0x63616c/voxelite/pull/41, fetched 2026-10-27 (unofficial)

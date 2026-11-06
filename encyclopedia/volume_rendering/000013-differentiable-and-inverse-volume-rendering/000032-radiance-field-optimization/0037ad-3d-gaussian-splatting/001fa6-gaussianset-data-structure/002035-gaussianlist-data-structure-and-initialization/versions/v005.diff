@@ -1,0 +1,476 @@
+--- v004.md
++++ v005.md
+@@ -4,227 +4,246 @@
+ 
+ ## Overview
+-The GaussianList is the fundamental data structure for storing and managing a set of 3D Gaussians in differentiable volume rendering pipelines, specifically within the context of 3D Gaussian Splatting (3DGS). It solves the problem of efficiently organizing learnable parameters (means, covariances, opacities, and spherical harmonics) for batch processing during rendering and optimization. It is distinguished from its parent [GaussianSet Data Structure](2074-gaussianset-data-structure.md) by its explicit column-major memory layout and its role as the primary container for the initialization and subsequent population control of the Gaussian point cloud. It builds on [GaussianSet Data Structure](2074-gaussianset-data-structure.md) and is initialized via [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md).
++The `GaussianList` is a contiguous, column-major data structure that stores the attributes of a set of 3D Gaussians, enabling batched processing for differentiable volume rendering. It solves the problem of efficiently organizing learnable parameters (position, scale, rotation, opacity, and spherical harmonics coefficients) for GPU or CPU vectorization. It differs from its parent `GaussianSet` by explicitly defining the memory layout and initialization sequence required to compute the 3D covariance matrices from the raw parameters, serving as the foundational state before projection and rendering.
+ 
+ ## How it works
+-The GaussianList stores Gaussian attributes in column-major matrices to facilitate batch processing. The initialization process converts a vector of Gaussian objects into this structured format, computes 3D covariance matrices from rotation and scale parameters, and optionally centers the positions.
+-
+ ### Inputs and Outputs
+-- **Input**: A vector of Gaussian objects, each containing position (3D), scale (3D), opacity (scalar), rotation (quaternion), and spherical harmonic (SH) coefficients.
+-- **Output**: A `GaussianList` struct containing column-major matrices for positions, scales, rotations, SH coefficients, and pre-computed 3D covariance matrices, along with a vector of opacities.
++- **Input**: A vector of Gaussian objects, each containing position (3D), scale (3D), opacity (scalar), rotation (quaternion), and spherical harmonics (SH) coefficients.
++- **Output**: A `GaussianList` instance with pre-allocated matrices and computed 3D covariance matrices.
+ 
+ ### Data Structures
+-The `GaussianList` struct fields are defined as follows [S1, unofficial]:
+-- `positions`: `na::Matrix4xX<f32>`, 4 rows $\times$ $N$ columns. Stores 4D homogeneous coordinates $(x, y, z, 1.0)$.
+-- `scales`: `na::Matrix3xX<f32>`, 3 rows $\times$ $N$ columns. Stores scale components $(s_x, s_y, s_z)$.
+-- `opacities`: `na::DVector<f32>`, 1D vector of size $N$. Stores opacity values.
+-- `rotations`: `na::Matrix4xX<f32>`, 4 rows $\times$ $N$ columns. Stores quaternion components $(w, x, y, z)$ or similar ordering.
+-- `sh`: `Matrix48xX<f32>`, 48 rows $\times$ $N$ columns. Stores SH coefficients.
+-- `num_gaussians`: `usize`. The total number of Gaussians $N$.
+-- `cov3d`: `na::Matrix3xX<f32>`, 3 rows $\times$ $N$ columns. Pre-allocated zeros, filled with computed 3D covariance matrices.
+-
+-**Spherical Harmonics Layout**: The SH coefficients are stored in the columns of the `sh` matrix. Within a column, the layout is interleaved by RGB channel for each SH degree/order: $C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, C_{1,B}, C_{1,G}, \dots$ [S1, unofficial].
++The `GaussianList` struct stores attributes in column-major matrices to facilitate batch processing. The fields are:
++
++1.  **positions**: `na::Matrix4xX<f32>` (4 rows × N columns). Stores 4D homogeneous coordinates. The first three rows contain the $(x, y, z)$ components, and the fourth row is always $1.0$.
++2.  **scales**: `na::Matrix3xX<f32>` (3 rows × N columns). Stores the scale components $(s_x, s_y, s_z)$ for each Gaussian.
++3.  **opacities**: `na::DVector<f32>` (1D vector of size N). Stores the opacity scalar for each Gaussian.
++4.  **rotations**: `na::Matrix4xX<f32>` (4 rows × N columns). Stores the quaternion components $(q_w, q_x, q_y, q_z)$ for each Gaussian.
++5.  **sh**: `Matrix48xX<f32>` (48 rows × N columns). Stores the spherical harmonics coefficients. The layout within each column is interleaved by RGB channel for each degree/order: $C_{0,R}, C_{0,B}, C_{0,G}, C_{1,R}, C_{1,B}, C_{1,G}, \dots$.
++6.  **num_gaussians**: `usize`. The total number of Gaussians $N$.
++7.  **cov3d**: `na::Matrix3xX<f32>` (3 rows × N columns). Pre-allocated buffer of zeros, filled with the computed 3D covariance matrices.
+ 
+ ### Initialization Steps
+-The initialization from a vector of Gaussian objects proceeds as follows [S1, unofficial]:
+-
+-1.  **Set Count**: Set `num_gaussians` to the length of the input vector.
+-2.  **Construct Positions**: Iterate over all Gaussians. For each Gaussian $i$, clone its 3D position components $(x_i, y_i, z_i)$ and append $1.0$ to form a 4D homogeneous coordinate vector. Store this as the $i$-th column of `positions`.
+-3.  **Construct Scales**: Iterate over all Gaussians. Clone the 3D scale components $(s_{x,i}, s_{y,i}, s_{z,i})$ and store them as the $i$-th column of `scales`.
+-4.  **Construct Opacities**: Iterate over all Gaussians. Clone the opacity value $\alpha_i$ and store it in the $i$-th element of `opacities`.
+-5.  **Construct Rotations**: Iterate over all Gaussians. Clone the quaternion components and store them as the $i$-th column of `rotations`.
+-6.  **Construct SH Coefficients**: Iterate over all Gaussians. Clone the SH coefficients according to the defined layout and store them as the $i$-th column of `sh`.
+-7.  **Initialize Covariances**: Initialize `cov3d` with zeros of size $3 \times N$.
++The initialization process constructs the matrices and computes the covariances as follows:
++
++1.  **Set Count**: Set `num_gaussians` to the length of the input Gaussian vector.
++2.  **Construct Positions**: Iterate over the input Gaussians. For each Gaussian $i$, clone its position components $(x_i, y_i, z_i)$ into the first three rows of the $i$-th column of `positions`. Set the fourth row of the $i$-th column to $1.0$.
++3.  **Construct Scales**: Iterate over the input Gaussians. Clone the scale components $(s_{x,i}, s_{y,i}, s_{z,i})$ into the corresponding rows of the $i$-th column of `scales`.
++4.  **Construct Opacities**: Clone the opacity value $\alpha_i$ into the $i$-th element of the `opacities` vector.
++5.  **Construct Rotations**: Iterate over the input Gaussians. Clone the quaternion components $(q_{w,i}, q_{x,i}, q_{y,i}, q_{z,i})$ into the corresponding rows of the $i$-th column of `rotations`.
++6.  **Construct SH Coefficients**: Clone the spherical harmonics coefficients into the corresponding rows of the $i$-th column of the `sh` matrix, following the interleaved RGB layout.
++7.  **Initialize Cov3d**: Initialize the `cov3d` matrix with zeros of size $3 \times N$.
+ 8.  **Compute Covariances**: Call `compute_cov3d()` to calculate the 3D covariance matrices for all Gaussians.
+ 
+ ### Centering Positions
+-To center the Gaussian positions around the origin [S1, unofficial]:
+-1.  Initialize `avg_pos` as a zero Vector3.
++Before or after initialization, positions may be centered to the mean:
++1.  Initialize `avg_pos` as a zero vector $(0, 0, 0)$.
+ 2.  Iterate over all Gaussians, adding each position $(x_i, y_i, z_i)$ to `avg_pos`.
+-3.  Divide `avg_pos` by `num_gaussians` to obtain the mean position $\mu$.
+-4.  Iterate over all Gaussians again, subtracting $\mu$ from each position.
++3.  Divide `avg_pos` by `num_gaussians` to obtain the mean $(\bar{x}, \bar{y}, \bar{z})$.
++4.  Iterate over all Gaussians again, subtracting the mean from each position: $x_i \leftarrow x_i - \bar{x}$, $y_i \leftarrow y_i - \bar{y}$, $z_i \leftarrow z_i - \bar{z}$.
+ 
+ ### Computing 3D Covariance Matrices (`compute_cov3d`)
+-For each Gaussian $i$ [S1, unofficial]:
+-1.  Extract the rotation quaternion $q_i$ from the $i$-th column of `rotations`.
+-2.  Convert $q_i$ to a `UnitQuaternion`, then to a $3 \times 3$ rotation matrix $R_i$.
+-3.  Create a diagonal scale matrix $S_i = \text{diag}(s_{x,i}^2, s_{y,i}^2, s_{z,i}^2)$ using the squared scale components from `scales`.
+-4.  Compute the covariance matrix $\Sigma_i = R_i S_i R_i^T$.
+-5.  Copy the resulting $3 \times 3$ matrix into `cov3d` at offset $i \times 3$ (column-major).
++For each Gaussian $i$ from $0$ to `num_gaussians` - 1:
++1.  Extract the rotation quaternion from the $i$-th column of `rotations`.
++2.  Convert the quaternion to a `UnitQuaternion`, then to a $3 \times 3$ rotation matrix $R_i$.
++3.  Create a diagonal scale matrix $S_i$:
++    $$
++    S_i = \begin{bmatrix}
++    s_{x,i}^2 & 0 & 0 \\
++    0 & s_{y,i}^2 & 0 \\
++    0 & 0 & s_{z,i}^2
++    \end{bmatrix}
++    $$
++4.  Compute the covariance matrix $\Sigma_i$:
++    $$
++    \Sigma_i = R_i S_i R_i^T
++    $$
++5.  Copy the resulting $3 \times 3$ matrix $\Sigma_i$ into the `cov3d` buffer at offset $i \times 3$ (column-major).
+ 
+ ### Projecting 3D Covariance to 2D Screen Space (`project_cov3d_to_screen`)
+-This method computes the 2D covariance matrix for a single Gaussian given its 3D position and the camera view matrix [S1, unofficial].
+-
+-**Inputs**:
+-- `cov3d`: The $3 \times 3$ 3D covariance matrix for the Gaussian.
+-- `pos`: The 3D position of the Gaussian.
+-- `viewmatrix`: The $4 \times 4$ view matrix.
+-- `focal_x`, `focal_y`: Focal lengths in pixels.
+-- `htanfovxy`: Tangent of half the horizontal and vertical field of view.
+-
+-**Steps**:
+-1.  Convert `pos` to a homogeneous vector $p_w = (x, y, z, 1.0)^T$.
+-2.  Transform to camera space: $p_{cam} = \text{viewmatrix} \times p_w$.
+-3.  Compute tangents of the Gaussian center: $t_{xz} = p_{cam}.x / p_{cam}.z$, $t_{yz} = p_{cam}.y / p_{cam}.z$.
+-4.  Clamp tangents to limits:
+-    - $t_{clamp\_x} = \text{clamp}(t_{xz}, -1.3 \cdot \tan(\text{FOV}_x), 1.3 \cdot \tan(\text{FOV}_x))$
+-    - $t_{clamp\_y} = \text{clamp}(t_{yz}, -1.3 \cdot \tan(\text{FOV}_y), 1.3 \cdot \tan(\text{FOV}_y))$
+-    - Multiply back by $p_{cam}.z$ to get $t.x$ and $t.y$.
+-5.  Compute the Jacobian $J$ ($3 \times 3$ matrix) using $focal\_x, focal\_y, t.x, t.y, t.z$.
+-6.  Compute $W$ as the transpose of the top-left $3 \times 3$ submatrix of the view matrix.
+-7.  Compute $T = W \times J$.
+-8.  Compute the projected covariance: $\Sigma_{2d} = T^T \Sigma_{3d} T$.
+-9.  Extract the top-left $2 \times 2$ submatrix as `cov2d`.
+-10. Apply low-pass filter: Add $0.3$ to `cov2d[(0,0)]` and `cov2d[(1,1)]` to ensure the Gaussian is at least one pixel wide/high [S1, unofficial].
+-11. Return `cov2d`.
++Given a Gaussian index $i$, its 3D covariance $\Sigma_i$, and the camera view matrix $V$:
++1.  Get the Gaussian position $P_i$ from `positions` and the view matrix $V$.
++2.  Convert $P_i$ to a homogeneous vector $p_w = (x, y, z, 1.0)^T$.
++3.  Transform to camera space: $p_{cam} = V \cdot p_w$. Let $p_{cam} = (x_c, y_c, z_c, w_c)^T$.
++4.  Get the focal lengths $f_x, f_y$ and the tangent of the horizontal and vertical FOV ($\tan(\text{FOV}_x), \tan(\text{FOV}_y)$).
++5.  Compute the tangent of the Gaussian center in camera space:
++    $$
++    t_x = \frac{x_c}{z_c}, \quad t_y = \frac{y_c}{z_c}
++    $$
++6.  Clamp the tangents to the limits defined by $1.3 \times \tan(\text{FOV}_x)$ and $1.3 \times \tan(\text{FOV}_y)$:
++    $$
++    t_x = \text{clamp}(t_x, -1.3 \tan(\text{FOV}_x), 1.3 \tan(\text{FOV}_x))
++    $$
++    $$
++    t_y = \text{clamp}(t_y, -1.3 \tan(\text{FOV}_y), 1.3 \tan(\text{FOV}_y))
++    $$
++    Multiply back by $z_c$ to get the clamped screen-space coordinates relative to the center:
++    $$
++    t.x = t_x \cdot z_c, \quad t.y = t_y \cdot z_c
++    $$
++    Let $t.z = z_c$.
++7.  Compute the Jacobian $J$ ($3 \times 3$ matrix) using $f_x, f_y, t.x, t.y, t.z$:
++    $$
++    J = \begin{bmatrix}
++    f_x / t.z & 0 & -f_x \cdot t.x / (t.z)^2 \\
++    0 & f_y / t.z & -f_y \cdot t.y / (t.z)^2 \\
++    0 & 0 & 1
++    \end{bmatrix}
++    $$
++8.  Compute $W$ as the transpose of the top-left $3 \times 3$ submatrix of the view matrix $V$.
++9.  Compute the transformation matrix $T$:
++    $$
++    T = W \cdot J
++    $$
++10. Compute the projected 2D covariance $\Sigma_{2D}$:
++    $$
++    \Sigma_{2D} = T^T \cdot \Sigma_i \cdot T
++    $$
++11. Extract the top-left $2 \times 2$ submatrix of $\Sigma_{2D}$ as the final 2D covariance.
++12. Apply a low-pass filter by adding $0.3$ to the diagonal elements:
++    $$
++    \Sigma_{2D}[0,0] \leftarrow \Sigma_{2D}[0,0] + 0.3
++    $$
++    $$
++    \Sigma_{2D}[1,1] \leftarrow \Sigma_{2D}[1,1] + 0.3
++    $$
++13. Return $\Sigma_{2D}$.
+ 
+ ### Evaluating Color from Spherical Harmonics
+-To evaluate the color for a Gaussian [S1, unofficial]:
+-1.  Pass the SH coefficients column for the given index, the SH dimension, and the viewing direction to `eval_spherical_harmonics`.
+-2.  Return the resulting color vector and the Gaussian's opacity.
++1.  Pass the SH coefficients column for index $i$, the SH dimension, and the viewing direction vector $d$ to `eval_spherical_harmonics`.
++2.  Return the resulting color vector $C$ and the Gaussian's opacity $\alpha$.
+ 
+ ### Pseudocode
+-
+ ```python
+-import numpy as np
+-
+-def initialize_gaussian_list(gaussians: list) -> dict:
+-    """
+-    Initialize GaussianList from a vector of Gaussian objects.
+-    gaussians: list of dicts/objects with keys: position (3,), scale (3,), opacity (float), rotation (quat), sh (coeffs)
+-    """
+-    N = len(gaussians)
++def initialize_gaussian_list(input_gaussians):
++    """
++    input_gaussians: List of Gaussian objects with attributes:
++      - position: (x, y, z)
++      - scale: (sx, sy, sz)
++      - opacity: alpha
++      - rotation: (qw, qx, qy, qz)
++      - sh: list of coefficients
++    """
++    N = len(input_gaussians)
+     
+     # Initialize matrices
+-    positions = np.zeros((4, N))
+-    scales = np.zeros((3, N))
+-    opacities = np.zeros(N)
+-    rotations = np.zeros((4, N))
+-    sh = np.zeros((48, N))
+-    cov3d = np.zeros((3, N))
+-    
+-    for i, g in enumerate(gaussians):
+-        # 1. Positions
+-        positions[:3, i] = g['position']
++    positions = zeros((4, N))
++    scales = zeros((3, N))
++    opacities = zeros(N)
++    rotations = zeros((4, N))
++    sh = zeros((48, N))
++    cov3d = zeros((3, N))
++    
++    for i in range(N):
++        g = input_gaussians[i]
++        
++        # Positions: 4D homogeneous
++        positions[0, i] = g.position.x
++        positions[1, i] = g.position.y
++        positions[2, i] = g.position.z
+         positions[3, i] = 1.0
+         
+-        # 2. Scales
+-        scales[:, i] = g['scale']
+-        
+-        # 3. Opacities
+-        opacities[i] = g['opacity']
+-        
+-        # 4. Rotations
+-        rotations[:, i] = g['rotation']
+-        
+-        # 5. SH Coefficients (Layout: C0_R, C0_B, C0_G, C1_R, ...)
+-        sh[:, i] = g['sh']
+-        
+-        # 6. Covariance
+-        cov3d[:, i] = compute_cov3d(g['rotation'], g['scale'])
+-        
+-    return {
+-        'positions': positions,
+-        'scales': scales,
+-        'opacities': opacities,
+-        'rotations': rotations,
+-        'sh': sh,
+-        'num_gaussians': N,
+-        'cov3d': cov3d
+-    }
+-
+-def compute_cov3d(rotation: np.ndarray, scale: np.ndarray) -> np.ndarray:
+-    """
+-    Compute 3D covariance matrix from rotation quaternion and scale.
+-    rotation: (4,) quaternion
+-    scale: (3,) scale components
+-    """
+-    # Convert quaternion to rotation matrix R (3x3)
+-    R = quaternion_to_rotation_matrix(rotation)
+-    
+-    # Create diagonal scale matrix S (3x3) with squared scales
+-    S = np.diag(scale**2)
+-    
+-    # Covariance = R * S * R^T
+-    cov = R @ S @ R.T
+-    
+-    return cov.flatten() # Return as 1D array for column storage
+-
+-def project_cov3d_to_screen(cov3d: np.ndarray, pos: np.ndarray, viewmatrix: np.ndarray, 
+-                            focal_x: float, focal_y: float, htanfovxy: tuple) -> np.ndarray:
+-    """
+-    Project 3D covariance to 2D screen space.
+-    cov3d: (3,3) matrix
+-    pos: (3,) position
+-    viewmatrix: (4,4) matrix
+-    htanfovxy: (tan_fov_x, tan_fov_y)
+-    """
+-    # 1. Homogeneous position
+-    p_w = np.array([pos[0], pos[1], pos[2], 1.0])
+-    
+-    # 2. Camera space
+-    p_cam = viewmatrix @ p_w
+-    
+-    # 3. Tangents
+-    tz = p_cam[2]
+-    if tz == 0:
+-        tz = 1e-6 # Avoid division by zero
+-    tx = p_cam[0] / tz
+-    ty = p_cam[1] / tz
+-    
+-    # 4. Clamp tangents
+-    tan_fov_x, tan_fov_y = htanfovxy
+-    limit_x = 1.3 * tan_fov_x
+-    limit_y = 1.3 * tan_fov_y
+-    
+-    tx = np.clip(tx, -limit_x, limit_x)
+-    ty = np.clip(ty, -limit_y, limit_y)
+-    
+-    # 5. Jacobian J (3x3)
+-    # J = [[focal_x/tz, 0, -focal_x*tx/tz],
+-    #      [0, focal_y/tz, -focal_y*ty/tz],
+-    #      [0, 0, 1]]
+-    J = np.array([
+-        [focal_x / tz, 0, -focal_x * tx / tz],
+-        [0, focal_y / tz, -focal_y * ty / tz],
++        # Scales
++        scales[0, i] = g.scale.x
++        scales[1, i] = g.scale.y
++        scales[2, i] = g.scale.z
++        
++        # Opacities
++        opacities[i] = g.opacity
++        
++        # Rotations: Quaternion
++        rotations[0, i] = g.rotation.qw
++        rotations[1, i] = g.rotation.qx
++        rotations[2, i] = g.rotation.qy
++        rotations[3, i] = g.rotation.qz
++        
++        # SH Coefficients
++        sh[:, i] = g.sh
++        
++    # Compute Covariances
++    compute_cov3d(positions, scales, rotations, cov3d, N)
++    
++    return GaussianList(positions, scales, opacities, rotations, sh, N, cov3d)
++
++def compute_cov3d(positions, scales, rotations, cov3d, N):
++    for i in range(N):
++        # Extract quaternion
++        qw, qx, qy, qz = rotations[0, i], rotations[1, i], rotations[2, i], rotations[3, i]
++        
++        # Convert quaternion to rotation matrix R
++        R = quaternion_to_rotation_matrix(qw, qx, qy, qz)
++        
++        # Scale matrix S (squared)
++        sx2 = scales[0, i] ** 2
++        sy2 = scales[1, i] ** 2
++        sz2 = scales[2, i] ** 2
++        S = diag([sx2, sy2, sz2])
++        
++        # Covariance = R * S * R^T
++        cov = R @ S @ R.T
++        
++        # Store in cov3d
++        cov3d[0, i] = cov[0, 0]
++        cov3d[1, i] = cov[0, 1]
++        cov3d[2, i] = cov[0, 2]
++        cov3d[3, i] = cov[1, 0]
++        cov3d[4, i] = cov[1, 1]
++        cov3d[5, i] = cov[1, 2]
++        cov3d[6, i] = cov[2, 0]
++        cov3d[7, i] = cov[2, 1]
++        cov3d[8, i] = cov[2, 2]
++
++def project_cov3d_to_screen(cov3d_col, view_matrix, focal_x, focal_y, tan_fovx, tan_fovy):
++    """
++    cov3d_col: 3x3 covariance matrix for a single Gaussian
++    view_matrix: 4x4 view matrix
++    """
++    # Get position from positions matrix (assumed available in context)
++    # p_w = (x, y, z, 1)
++    p_w = get_position_homogeneous() 
++    
++    # Transform to camera space
++    p_cam = view_matrix @ p_w
++    xc, yc, zc, wc = p_cam[0], p_cam[1], p_cam[2], p_cam[3]
++    
++    # Compute tangents
++    tx = xc / zc
++    ty = yc / zc
++    
++    # Clamp tangents
++    limit_x = 1.3 * tan_fovx
++    limit_y = 1.3 * tan_fovy
++    tx = clamp(tx, -limit_x, limit_x)
++    ty = clamp(ty, -limit_y, limit_y)
++    
++    # Compute Jacobian J
++    tz = zc
++    J = [
++        [focal_x / tz, 0, -focal_x * tx / (tz ** 2)],
++        [0, focal_y / tz, -focal_y * ty / (tz ** 2)],
+         [0, 0, 1]
+-    ])
+-    
+-    # 6. W matrix (transpose of top-left 3x3 of view matrix)
+-    W = viewmatrix[:3, :3].T
+-    
+-    # 7. T = W * J
++    ]
++    
++    # Compute W (transpose of top-left 3x3 of view matrix)
++    W = view_matrix[0:3, 0:3].T
++    
++    # Compute T = W * J
+     T = W @ J
+     
+-    # 8. Cov2d = T^T * cov3d * T
+-    cov2d_full = T.T @ cov3d @ T
+-    
+-    # 9. Extract 2x2
+-    cov2d = cov2d_full[:2, :2]
+-    
+-    # 10. Low-pass filter
+-    cov2d[0, 0] += 0.3
+-    cov2d[1, 1] += 0.3
+-    
+-    return cov2d
+-
+-def quaternion_to_rotation_matrix(q: np.ndarray) -> np.ndarray:
+-    """
+-    Convert quaternion (w, x, y, z) to 3x3 rotation matrix.
+-    """
+-    w, x, y, z = q[0], q[1], q[2], q[3]
+-    # Standard conversion
+-    R = np.array([
+-        [1 - 2*(y**2 + z**2), 2*(x*y - w*z), 2*(x*z + w*y)],
+-        [2*(x*y + w*z), 1 - 2*(x**2 + z**2), 2*(y*z - w*x)],
+-        [2*(x*z - w*y), 2*(y*z + w*x), 1 - 2*(x**2 + y**2)]
+-    ])
+-    return R
++    # Compute cov2d = T^T * cov3d * T
++    cov2d = T.T @ cov3d_col @ T
++    
++    # Extract 2x2
++    cov2d_2x2 = cov2d[0:2, 0:2]
++    
++    # Low-pass filter
++    cov2d_2x2[0, 0] += 0.3
++    cov2d_2x2[1, 1] += 0.3
++    
++    return cov2d_2x2
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-- **Division by Zero**: In `project_cov3d_to_screen`, if $z$-coordinate in camera space is zero, division by zero occurs. A small epsilon should be added to $z$ [G].
+-- **FOV Clamping**: The clamping limit of $1.3 \times \tan(\text{FOV})$ is critical to prevent extreme distortions for Gaussians near the frustum boundaries [S1, unofficial].
+-- **Precision**: Using `f32` (single precision) for large scenes may lead to precision issues in covariance computation. Double precision may be required for high-accuracy optimization [G].
+-- **SH Dimension**: The SH matrix assumes a fixed dimension of 48 (degree 3). If higher degrees are used, the matrix size must be adjusted [S1, unofficial].
++- **Division by Zero**: In `project_cov3d_to_screen`, if $z_c \le 0$, the Gaussian is behind the camera. The sources do not explicitly state the handling, but standard practice is to discard or clamp $z_c$ to a small positive value [G].
++- **Precision**: The low-pass filter adds $0.3$ to the diagonal, ensuring the Gaussian is at least one pixel wide/high, preventing numerical instability from very small covariances [S1, unofficial].
++- **FOV Clamping**: The limit $1.3 \times \tan(\text{FOV})$ prevents extreme tangents that could cause artifacts at the screen edges [S1, unofficial].
+ 
+ ## Subtopics
+@@ -234,5 +253,5 @@
+ 
+ ### [Gaussian Splatting Initialization and Parameterization](2313-gaussian-splatting-initialization-and-parameterization.md)
+-This method establishes the initial state of the learnable 3D Gaussian point cloud for differentiable rendering training. It solves the problem of converting raw geometric data (typically from Structure-from-Motion pipelines like COLMAP) or random noise into a set of valid, differentiable parameters (means, covariances, opacities, and spherical harmonics) that can be optimized via gradient descent. It is distinguished from sibling methods like [LinPrim Population Control](2295-linprim-population-control.md) by focusing exclusively on the *creation* and *parameterization* of the initial set, rather than the dynamic modification of that set during training.
++This method establishes the initial state of the learnable 3D Gaussian parameters (position, scale, rotation, opacity, and color features) required to begin differentiable volume rendering optimization. It solves the problem of providing a valid, non-degenerate starting point for the optimizer, ensuring that initial opacities are in a trainable range and scales are geometrically meaningful relative to the input data density. It sets itself apart from [Spherical Harmonics Initialization](3163-spherical-harmonics-initialization.md) by handling full geometric and attribute seeding rather than just color parameterization, and from [Angle-pose Cuboid Uniform Initialization (ACUI)](4503-angle-pose-cuboid-uniform-initialization-acui.md) by relying on sparse reconstruction data rather than uniform volumetric sampling.
+ 
+ ### [Octree-GS / Scaffold-GS](6142-octree-gs-scaffold-gs.md)
+@@ -240,18 +259,16 @@
+ 
+ ### GaussianHair
+-#### Definition
+-A strand-aware hair method using strand + GS representation [S2, unofficial].
++GaussianHair is a strand-aware hair method using a strand + GS representation [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Initialization is $O(N)$ where $N$ is the number of Gaussians. Covariance computation is $O(N)$ with constant factor for matrix operations. Projection is $O(N)$ per Gaussian per view.
+-- **Memory Complexity**: $O(N)$ for storing positions, scales, rotations, opacities, SH coefficients, and covariances. The SH coefficients dominate memory if high degrees are used (48 floats per Gaussian for degree 3).
+-- **Performance**: Efficient batch processing due to column-major layout. Suitable for real-time rendering on GPU.
+-- **Strengths**: Simple data structure, easy to implement, efficient for dense scenes.
+-- **Limitations**: Memory usage grows linearly with $N$. No hierarchical structure for large scenes, leading to potential inefficiencies in sparse regions.
+-- **When to Use**: Small to medium scenes, real-time applications, baseline 3DGS.
+-- **When Not to Use**: Very large scenes requiring hierarchical culling, or scenes with extreme anisotropy requiring specialized primitives.
++- **Time Complexity**: Initialization is $O(N)$ where $N$ is the number of Gaussians. Covariance computation is $O(N)$ with constant factor for matrix operations. Projection is $O(N)$ per view.
++- **Memory Complexity**: $O(N)$ for storing positions, scales, rotations, opacities, SH coefficients, and covariances. The SH matrix dominates memory if high degrees are used.
++- **Strengths**: Column-major layout enables efficient batch processing on GPUs. Pre-computed covariances speed up rendering.
++- **Limitations**: Flat list structure does not support hierarchical culling or LOD natively, unlike Octree-GS.
++- **When to Use**: Standard 3DGS rendering where memory is not the primary constraint and scene complexity is moderate.
++- **When Not to Use**: Large-scale outdoor scenes or high-resolution assets where memory efficiency is critical; use Octree-GS instead.
+ 
+ ## Background
+-The GaussianList is a core component of the 3D Gaussian Splatting (3DGS) pipeline, introduced by Kerbl et al. in 2023 [S1, unofficial]. It provides a straightforward way to manage the learnable parameters of the Gaussian point cloud. The structure is designed for efficient GPU processing, leveraging column-major matrices for batch operations. It has been widely adopted in various 3DGS variants and applications, including avatar creation and autonomous driving [S2, unofficial].
++The `GaussianList` data structure and its initialization procedure originate from the implementation of 3D Gaussian Splatting in the `thomasantony/splat` repository [S1, unofficial]. It provides the foundational state for differentiable volume rendering optimization, enabling the computation of 3D covariance matrices from learnable parameters.
+ 
+ ## Sources

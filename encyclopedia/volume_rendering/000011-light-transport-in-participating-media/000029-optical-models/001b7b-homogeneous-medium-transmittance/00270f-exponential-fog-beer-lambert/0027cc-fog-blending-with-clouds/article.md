@@ -10,18 +10,19 @@ This method renders a cloud layer by mixing a fixed cloud color with the backgro
 *   **Inputs:**
     *   `cloud_color`: Fixed `vec3` color for the cloud layer (typically white, e.g., `vec3(1.0)`) [S1, unofficial].
     *   `bg_color`: Uniform `vec3` background (sky) color [S1, unofficial].
-    *   `gl_FragCoord`: Built-in fragment shader variable containing window-relative coordinates, where `z` is the clip-space depth and `w` is the clip-space w-component [S1, unofficial].
+    *   `clip_z`: Float representing clip-space depth [S1, unofficial].
+    *   `clip_w`: Float representing clip-space w-component [S1, unofficial].
 *   **Outputs:**
     *   `fragColor`: Output `vec4` containing the blended RGB color and a fixed alpha of 0.8 [S1, unofficial].
 
 **Data Structures:**
-No complex data structures are required. The method relies on standard fragment shader built-ins and uniform variables.
+No complex data structures are required. The method relies on standard fragment shader built-ins and uniform variables [S1, unofficial].
 
 **Steps:**
 1.  **Compute Fog Distance:** Calculate the linear fog distance from the clip-space depth.
-    $$ d = \frac{z_{clip}}{w_{clip}} $$
-    Where $z_{clip}$ is `gl_FragCoord.z` and $w_{clip}$ is `gl_FragCoord.w` [S1, unofficial].
-2.  **Calculate Weighted Average Depth (Optional/Optimization):** To optimize, calculate the weighted average depth of the ray passing through the cloud, using Transmittance as the weight. This allows sampling and blending fog only at this specific depth, avoiding per-sample fog calculations [S2, unofficial]. *Note: The basic implementation below uses the direct fragment depth.*
+    $$ d = \frac{\text{clip\_z}}{\text{clip\_w}} $$
+    Where $\text{clip\_z}$ is the clip-space depth and $\text{clip\_w}$ is the clip-space w-component [S1, unofficial].
+2.  **Calculate Weighted Average Depth (Optional/Optimization):** To optimize, calculate the weighted average depth of the ray passing through the cloud, using Transmittance as the weight [S2, unofficial]. This allows sampling and blending fog only at this specific depth, avoiding per-sample fog calculations [S2, unofficial]. *Note: The basic implementation below uses the direct fragment depth.*
 3.  **Compute Fog Factor:** Calculate the exponential fog factor using the squared distance.
     $$ f = 1.0 - e^{-k \cdot d^2} $$
     Where $k = 0.000001$ [S1, unofficial].
@@ -33,13 +34,12 @@ No complex data structures are required. The method relies on standard fragment 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Inputs: cloud_color (vec3), bg_color (vec3)
-# Built-in: gl_FragCoord (vec4)
+# Inputs: cloud_color (vec3), bg_color (vec3), clip_z (float), clip_w (float)
+# Standard operations: mix(a, b, t) returns a*(1-t) + b*t; exp(x) returns e^x
 
-def fog_blend_clouds(cloud_color, bg_color):
+def fog_blend_clouds(cloud_color, bg_color, clip_z, clip_w):
     # Step 1: Compute fog distance from clip-space depth
-    # gl_FragCoord.z is clip-space Z, gl_FragCoord.w is clip-space W
-    fog_dist = gl_FragCoord.z / gl_FragCoord.w
+    fog_dist = clip_z / clip_w
     
     # Step 2: Compute fog factor using exponential decay
     # k = 0.000001
@@ -57,20 +57,20 @@ def fog_blend_clouds(cloud_color, bg_color):
 *   `alpha`: $0.8$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** Using `gl_FragCoord.z` directly assumes a standard projection matrix. If non-standard projections are used, the depth calculation may be inaccurate [G].
-*   **Performance:** The basic implementation calculates fog per fragment. For large clouds, the weighted average depth optimization [S2, unofficial] is recommended to reduce overdraw and calculation cost.
+*   **Precision:** Using clip-space depth directly assumes a standard projection matrix; non-standard projections may yield inaccurate depth calculations [G].
+*   **Performance:** The basic implementation calculates fog per fragment; for large clouds, the weighted average depth optimization [S2, unofficial] is recommended to reduce calculation cost.
 *   **Artifacts:** The weighted average depth method may introduce artifacts in some cases if the transmittance distribution is highly non-uniform [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per fragment for the basic implementation. The weighted average depth approach requires additional passes or accumulation buffers but reduces the number of fog calculations.
-*   **Memory Complexity:** $O(1)$ additional memory for uniforms.
+*   **Time Complexity:** $O(1)$ per fragment for the basic implementation [G]. The weighted average depth approach requires additional passes or accumulation buffers but reduces the number of fog calculations [S2, unofficial].
+*   **Memory Complexity:** $O(1)$ additional memory for uniforms [G].
 *   **Strengths:** Simple to implement; computationally inexpensive for basic cloud layers; provides a smooth exponential fade to the sky [S1, unofficial].
-*   **Limitations:** Lacks volumetric detail (no in-scatter, no height variation); fixed alpha may not blend correctly with all background scenes; weighted average method can cause artifacts [S2, unofficial].
-*   **When to use:** Ideal for simple, distant cloud layers or skyboxes where volumetric accuracy is not required.
-*   **When not to use:** For detailed, close-up volumetric clouds requiring realistic lighting and scattering [S2, unofficial].
+*   **Limitations:** The weighted average method can cause artifacts in some cases [S2, unofficial].
+*   **When to use:** Ideal for simple, distant cloud layers or skyboxes where volumetric accuracy is not required [G].
+*   **When not to use:** For detailed, close-up volumetric clouds requiring realistic lighting and scattering [G].
 
 ## Background
-This method is derived from the exponential fog technique based on the Beer-Lambert law, as implemented in various real-time rendering contexts. The specific optimization of using a weighted average depth for fog blending in cloud rendering is attributed to Unreal Engine 4's approach, as described in industry articles [S2, unofficial]. The basic implementation is found in unofficial Minecraft shader repositories [S1, unofficial].
+This method is derived from the exponential fog technique based on the Beer-Lambert law, as implemented in real-time rendering contexts [G]. The specific optimization of using a weighted average depth for fog blending in cloud rendering is attributed to Unreal Engine 4's approach, as described in industry articles [S2, unofficial]. The basic implementation is provided in fragment shader code [S1, unofficial].
 
 ## Sources
 [S1] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)

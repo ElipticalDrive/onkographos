@@ -1,0 +1,266 @@
+--- v001.md
++++ v002.md
+@@ -1,8 +1,7 @@
+ # Procedural Flame Density & Color Shader
+ 
+-Also called: Helical Flame Shader, Ebert Flame Shader
+ 
+ ## Overview
+-This method computes the density and color of a procedural flame volume by deforming a base helical flow path with height-scaled turbulence and applying spatial attenuation ramps. It builds on [Smoke Column with Helical Displacement](2743-smoke-column-with-helical-displacement.md) by adding complex shaping via sine waves and a lookup table, while explicitly handling vertical fading and minimum density thresholds to create a realistic fire appearance. It differs from its parent by introducing a multi-stage attenuation process (horizontal and vertical) and a direct density-to-color mapping that shifts from yellow to red based on density values.
++This method computes the density and color of a procedural flame volume by deforming a base helical flow path with height-scaled turbulence and applying spatial attenuation ramps [S1, unofficial]. It builds on [Smoke Column with Helical Displacement](2743-smoke-column-with-helical-displacement.md) by adding complex shaping via sine waves and a lookup table, while explicitly handling vertical fading and minimum density thresholds to create a realistic fire appearance [S1, unofficial]. It differs from its parent by introducing a multi-stage attenuation process (horizontal and vertical) and a direct density-to-color mapping that shifts from yellow to red based on density values [S1, unofficial].
+ 
+ ## How it works
+@@ -11,99 +10,92 @@
+ - `pnt`: 3D sampling point in local space.
+ - `pnt_w`: 3D sampling point in world space.
+-- `vol`: Volume object containing shape metadata (`b_box.center`, `b_box.inv_rad`, `b_box.inv_rad_sq`, `inv_rad`, `rad`, `shapecenter`) and output color (`color`).
+-- `parms`: Array of parameters.
+-  - `parms[1]`: Base density scale / normalization factor.
+-  - `parms[2]`: Power exponent for the lookup table.
+-  - `parms[3]`: Offset magnitude for horizontal attenuation.
+-  - `parms[4]`: Minimum density threshold (below which density is zeroed).
+-  - `parms[6]`: Vertical range factor for minimum density area.
+-  - `parms[7]`: Minimum density value for the base area.
+-  - `parms[8]`: Frequency multiplier for sine shaping.
+-- `frame_num`: Current animation frame.
+-- `DOWN_FIRE`: Constant controlling vertical flow speed.
+-- `POW_TABLE_SIZE`: Size of the power lookup table.
+-- `OFFSET_SIZE`: Size of the offset lookup table (bitwise mask `OFFSET_SIZE - 1`).
++- `vol`: Volume object containing shape metadata (`shape.b_box.center`, `shape.b_box.inv_rad`, `shape.b_box.inv_rad_sq`, `shape.inv_rad`, `shape.rad`, `shapecenter`) and output color (`color`) [S1, unofficial].
++- `parms`: Array of parameters controlling density scaling, power exponent, offset magnitude, thresholds, and sine frequency [S1, unofficial].
++- `frame_num`: Current animation frame [S1, unofficial].
++- `DOWN_FIRE`: Constant controlling vertical flow speed [S1, unofficial].
++- `POW_TABLE_SIZE`: Size of the power lookup table [S1, unofficial].
++- `OFFSET_SIZE`: Size of the offset lookup table (bitwise mask `OFFSET_SIZE - 1`) [S1, unofficial].
++- `pow_table`, `ramp`, `offset`: Precomputed lookup arrays [S1, unofficial].
+ 
+ **Outputs:**
+-- `*density`: Computed scalar density value.
+-- `vol->color`: RGB color structure.
++- `*density`: Computed scalar density value [S1, unofficial].
++- `vol->color`: RGB color structure updated with computed flame color [S1, unofficial].
+ 
+ ### Data Structures
+-- `pow_table`: Array of floats of size `POW_TABLE_SIZE`. Precomputed values for the power function.
+-- `ramp`: Array of floats of size 200. Precomputed horizontal attenuation values.
+-- `offset`: Array of floats of size `OFFSET_SIZE`. Spatial offset values.
+-- `colr`: RGB structure with fields `r`, `g`, `b`.
++- `pow_table`: Array of floats of size `POW_TABLE_SIZE`. Precomputed values for the power function, indexed by `(tmp * 0.5 * (POW_TABLE_SIZE-1))` [S1, unofficial].
++- `ramp`: Array of floats of size 200. Precomputed horizontal attenuation values [S1, unofficial].
++- `offset`: Array of floats of size `OFFSET_SIZE`. Spatial offset values [S1, unofficial].
++- `colr`: RGB structure with fields `r`, `g`, `b` [S1, unofficial].
+ 
+ ### Pseudocode
+ ```python
+-def compute_flame(pnt, pnt_w, vol, parms, frame_num, DOWN_FIRE, POW_TABLE_SIZE, OFFSET_SIZE):
+-    # 1. Precompute constants for the frame
+-    theta_fire = 0.0  # Not given in sources; assumed constant or derived from context. 
+-                      # [G] In the source, theta_fire is used but not defined in the snippet. 
+-                      # We assume it is a constant or global variable.
+-    sin_theta = sin(theta_fire)
+-    cos_theta = cos(theta_fire)
++import math
++
++def ease(t, t0, t1):
++    """Linear easing clamped to [0, 1]."""
++    return max(0.0, min(1.0, (t - t0) / (t1 - t0)))
++
++def new_turbulence_three(v):
++    """[G] 3D turbulence noise function. Source does not specify implementation."""
++    return 0.0
++
++def fast_noise(v):
++    """[G] Fast noise function. Source does not specify implementation."""
++    return 0.0
++
++def norm_xyz(v):
++    return math.sqrt(v.x**2 + v.y**2 + v.z**2)
++
++def dot_xyz(a, b):
++    return a.x*b.x + a.y*b.y + a.z*b.z
++
++def compute_flame(pnt, pnt_w, vol, parms, frame_num, DOWN_FIRE, POW_TABLE_SIZE, OFFSET_SIZE, pow_table, ramp, offset):
++    # 1. Precompute frame constants
++    theta_fire = 0.0  # [G] Value not given in sources; assumed constant or global.
++    sin_theta = math.sin(theta_fire)
++    cos_theta = math.cos(theta_fire)
+     down = frame_num * DOWN_FIRE - 4.0
+-    
+     cos_theta2 = 0.09 * cos_theta + 2.0
+     sin_theta2 = 0.06 * sin_theta - 2.0
+-    
+-    # 2. Initialize Power Lookup Table (if not already done)
+-    # [G] This loop is typically done once per initialization or when parms[2] changes.
+-    # For a per-sample shader, this table is assumed pre-computed.
++
++    # 2. Power lookup table is assumed precomputed per source loop
+     # pow_table[i] = pow((i / (POW_TABLE_SIZE - 1)) * parms[1] * 2.0, parms[2])
+-    
+-    # 3. Calculate Turbulence Scaling
++
++    # 3. Height ratio for turbulence scaling
+     height_ratio = (pnt_w.y - vol.shape.b_box.center.y) * vol.shape.b_box.inv_rad.y
+-    
+     if height_ratio < 0:
+         height_ratio = 0.0
+     else:
+         height_ratio = ease(height_ratio, 0.4, 0.6)
+-        
+-    # 4. Perturb Sampling Coordinates
+-    pnt2_x = pnt.x * 1.75
+-    pnt2_y = pnt.y * 0.5
+-    pnt2_z = pnt.z * 0.75
+-    
+-    turb_amount = new_turbulence_three(Vector3(pnt2_x, pnt2_y, pnt2_z)) * height_ratio
+-    
+-    # 5. Compute Helical Path Direction
+-    # Note: 'tmp' is used here. In the source, 'tmp' was set to fast_noise(pnt) earlier.
+-    # [G] The source snippet shows 'tmp' being used in hel_path calculation before it is 
+-    # re-assigned later. We assume tmp = fast_noise(pnt) at this stage.
++
++    # 4. Perturb sampling coordinates
++    pnt2 = Vector3(pnt.x * 1.75, pnt.y * 0.5, pnt.z * 0.75)
++    turb_amount = new_turbulence_three(pnt2) * height_ratio
++
++    # 5. Helical path direction
+     tmp = fast_noise(pnt)
+-    
+-    hel_path_x = cos_theta2 + tmp + turb_amount
+-    hel_path_y = -down - tmp - turb_amount
+-    hel_path_z = sin_theta2 + tmp + turb_amount
+-    
+-    hel_len = norm_xyz(Vector3(hel_path_x, hel_path_y, hel_path_z))
+-    
+-    # Add helical path to point to get direction vector
+-    direction = Vector3(pnt.x, pnt.y, pnt.z) + Vector3(hel_path_x, hel_path_y, hel_path_z)
+-    
+-    # 6. Apply Flame Shaping
++    hel_path = Vector3(cos_theta2 + tmp + turb_amount, -down - tmp - turb_amount, sin_theta2 + tmp + turb_amount)
++    hel_len = norm_xyz(hel_path)  # Computed but unused in source
++    direction = Vector3(pnt.x + hel_path.x, pnt.y + hel_path.y, pnt.z + hel_path.z)
++
++    # 6. Flame shaping
+     tmp = new_turbulence_three(direction)
+-    
+-    term1 = (sin((direction.x + tmp) * parms[8]) + 1.25) * 0.4444444444444
+-    term2 = (sin((direction.z + tmp) * 2.0 * parms[8]) + 1.0) * 0.5
+-    
++    term1 = (math.sin((direction.x + tmp) * parms[8]) + 1.25) * 0.4444444444444
++    term2 = (math.sin((direction.z + tmp) * 2.0 * parms[8]) + 1.0) * 0.5
+     tmp = term1 * term2
+-    
+-    # 7. Lookup Density from Power Table
++
++    # 7. Lookup density
+     index = int(tmp * 0.5 * (POW_TABLE_SIZE - 1))
+-    # Clamp index to table bounds if necessary, though source implies valid range
++    index = max(0, min(index, POW_TABLE_SIZE - 1))  # Guard against out-of-bounds
+     density = pow_table[index]
+-    
+-    # 8. Horizontal Attenuation
++
++    # 8. Horizontal attenuation
+     center = vol.shapecenter
+     diff = Vector3(center.x - pnt_w.x, center.y - pnt_w.y, center.z - pnt_w.z)
+     dist_sq = dot_xyz(diff, diff)
+     density_max = dist_sq * vol.shape.b_box.inv_rad_sq.y
+-    
+     indx = int((pnt.x + pnt.y + pnt.z) * 100) & (OFFSET_SIZE - 1)
+     density_max += parms[3] * offset[indx]
+-    
++
+     if density_max >= 0.25:
+         i = int((density_max - 0.25) * 266.66)
+@@ -112,27 +104,24 @@
+         density_max = ramp[i]
+         density *= density_max
+-        
+-    # 9. Vertical Attenuation
++
++    # 9. Vertical attenuation
+     tmp2 = 2.0 * (pnt_w.y - center.y)
+-    
+     if tmp2 > 0.0:
+         tmp2 = (tmp2 + offset[indx] * parms[3]) * vol.shape.inv_rad.y
+         if tmp2 > 1.0:
+             tmp2 = 1.0
+-            
+         if tmp2 > 0.05:
+             offset3 = (tmp2 - 0.05) * 1.111111
+-            offset3 = 1.0 - (exp(offset3) - 1.0) / 1.718282
++            offset3 = 1.0 - (math.exp(offset3) - 1.0) / 1.718282
+             density = offset3 * parms[1]
+-            
++
+     # 10. Zero out density below threshold
+     if density < parms[4]:
+         density = 0.0
+-        
+-    # 11. Handle Minimum Density Area
++
++    # 11. Handle minimum density area
+     if density < parms[7]:
+         if pnt_w.y < center.y - parms[6] * vol.shape.rad.y:
+             begin_ramp = pnt_w.y - (center.y - parms[6] * vol.shape.rad.y * 0.5)
+-            
+             if begin_ramp > 0:
+                 begin_ramp = begin_ramp * (vol.shape.b_box.inv_rad.y * 2.0)
+@@ -141,18 +130,13 @@
+             else:
+                 density = parms[7] * density_max
+-                
+-    # 12. Calculate Flame Color
++
++    # 12. Calculate flame color
+     d_color = 1.0 - density * 1.5 / parms[1]
+     if d_color < 0.0:
+         d_color = 0.0
+-        
+     compl = 1.0 - d_color
+-    colr_r = 1.0
+-    colr_g = d_color * 0.2 + compl * 0.85
+-    colr_b = d_color * 0.2 + compl * 0.5
+-    
+-    vol.color = Color(colr_r, colr_g, colr_b)
+-    
+-    return density
++    colr = Color(1.0, d_color * 0.2 + compl * 0.85, d_color * 0.2 + compl * 0.5)
++
++    return density, colr
+ ```
+ 
+@@ -162,11 +146,11 @@
+ - `DOWN_FIRE`: Not given in the sources.
+ - `theta_fire`: Not given in the sources.
+-- `parms[1]`: Base density scale.
+-- `parms[2]`: Power exponent.
+-- `parms[3]`: Offset magnitude.
+-- `parms[4]`: Minimum density threshold.
+-- `parms[6]`: Vertical range factor.
+-- `parms[7]`: Minimum density value.
+-- `parms[8]`: Sine frequency multiplier.
++- `parms[1]`: Base density scale / normalization factor [S1, unofficial].
++- `parms[2]`: Power exponent for the lookup table [S1, unofficial].
++- `parms[3]`: Offset magnitude for horizontal attenuation [S1, unofficial].
++- `parms[4]`: Minimum density threshold (below which density is zeroed) [S1, unofficial].
++- `parms[6]`: Vertical range factor for minimum density area [S1, unofficial].
++- `parms[7]`: Minimum density value for the base area [S1, unofficial].
++- `parms[8]`: Frequency multiplier for sine shaping [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+@@ -178,13 +162,8 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** O(1) per sample, assuming lookup tables and noise functions are O(1).
+-- **Memory Complexity:** O(1) per sample, plus O(POW_TABLE_SIZE + OFFSET_SIZE) for precomputed tables.
+-- **Strengths:** Produces realistic flame shapes with natural turbulence and fading. Efficient due to lookup tables.
+-- **Limitations:** Relies on precomputed tables which may not adapt well to dynamic changes in parameters without regeneration. The `theta_fire` dependency is unclear.
+-- **When to use:** For procedural fire effects in volumetric rendering where performance is critical and static or slowly varying parameters are acceptable.
+-- **When not to use:** For physically based fire simulation requiring accurate heat transfer or chemical reaction modeling.
++Not given in the sources.
+ 
+ ## Background
+-This method originates from David Ebert's work on procedural modeling of gases and fluids. It is part of a series of techniques described in "Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures" [S1, unofficial]. The method builds upon earlier helical flow functions and smoke column models, adding complexity through turbulence and attenuation ramps to achieve visual realism.
++This method originates from David Ebert's work on procedural modeling of gases and fluids [S1, unofficial]. It is part of a series of techniques described in "Procedural Modeling, Animation, and Rendering of Gases, Fluids, and Textures" [S1, unofficial]. The method builds upon earlier helical flow functions and smoke column models, adding complexity through turbulence and attenuation ramps to achieve visual realism [S1, unofficial].
+ 
+ ## Sources

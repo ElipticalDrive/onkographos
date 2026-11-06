@@ -1,0 +1,120 @@
+# Quadratic Ray-Gaussian Intersection
+
+Also called: Gaussian Ellipsoid Intersection
+
+## Overview
+The Quadratic Ray-Gaussian Intersection approximates the intersection of a ray with a 3D Gaussian distribution by computing the intersection with the ellipsoid defined by one standard deviation of that Gaussian [S1]. This method is chosen to avoid the numerical instability inherent in the exact cubic solver while providing lower depth and mask errors than the linear approximation [S1]. It serves as a middle ground between the speed of the linear method and the accuracy of the cubic method, though it is slower than the linear approach [S1].
+
+## How it works
+The method models the Gaussian density boundary at the level of one standard deviation as a quadratic surface (an ellipsoid). The intersection of a ray with this ellipsoid is found by solving a quadratic equation.
+
+**Inputs:**
+*   Ray origin $\mathbf{r}$ (3D vector).
+*   Ray direction $\mathbf{v}$ (3D vector, assumed normalized).
+*   Gaussian mean $\boldsymbol{\mu}$ (3D vector).
+*   Gaussian covariance matrix $\Sigma$ (3x3 symmetric positive-definite matrix).
+
+**Outputs:**
+*   Intersection distance $t$ along the ray direction.
+*   Boolean indicating if an intersection exists within the valid range.
+
+**Data Structures:**
+*   $\Sigma^{-1}$: The inverse of the covariance matrix. Pre-computed or computed on the fly.
+*   Coefficients $a, b, c$: Scalars derived from the geometric parameters.
+
+**Steps:**
+1.  Compute the inverse covariance matrix $\Sigma^{-1}$.
+2.  Calculate the quadratic coefficients using the ray direction $\mathbf{v}$, the Gaussian mean $\boldsymbol{\mu}$, and $\Sigma^{-1}$:
+    $$ a = \mathbf{v}^T \Sigma^{-1} \mathbf{v} $$
+    $$ b = -2 \mathbf{v}^T \Sigma^{-1} \boldsymbol{\mu} $$
+    $$ c = \boldsymbol{\mu}^T \Sigma^{-1} \boldsymbol{\mu} - 1 $$
+    *Note: The equation solved is $a t^2 + b t + c = 0$, derived from setting the quadratic form of the Gaussian to 1 [S1].*
+3.  Compute the discriminant:
+    $$ \Delta = b^2 - 4ac $$
+4.  Handle numerical instability: If $\Delta < 0$, clip $\Delta$ to 0. This ensures a real solution is returned even when the ray misses the ellipsoid, producing "reasonable results" [S1].
+5.  Solve for $t$:
+    $$ t = \frac{-b - \sqrt{\Delta}}{2a} $$
+    *Note: The smaller root is typically selected for the front intersection, assuming $a > 0$ and the ray enters the ellipsoid [S1].*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def quadratic_ray_gaussian_intersection(ray_origin, ray_direction, gaussian_mean, covariance_matrix):
+    """
+    Computes the intersection of a ray with the 1-sigma ellipsoid of a Gaussian.
+    
+    Args:
+        ray_origin: 3D vector (r)
+        ray_direction: 3D vector (v), assumed normalized
+        gaussian_mean: 3D vector (mu)
+        covariance_matrix: 3x3 matrix (Sigma)
+        
+    Returns:
+        t: float, intersection distance
+        exists: bool, whether the intersection is valid
+    """
+    # Compute inverse covariance matrix
+    # [G] In practice, use a numerically stable inversion or Cholesky decomposition
+    # given Sigma is symmetric positive-definite.
+    inv_sigma = invert(covariance_matrix)
+    
+    # Calculate coefficients for at^2 + bt + c = 0
+    # a = v^T Sigma^-1 v
+    a = dot(ray_direction, mat_vec_mul(inv_sigma, ray_direction))
+    
+    # b = -2 * v^T Sigma^-1 mu
+    temp = mat_vec_mul(inv_sigma, gaussian_mean)
+    b = -2.0 * dot(ray_direction, temp)
+    
+    # c = mu^T Sigma^-1 mu - 1
+    c = dot(gaussian_mean, temp) - 1.0
+    
+    # Compute discriminant
+    discriminant = b * b - 4.0 * a * c
+    
+    # Clip negative discriminant to 0 to handle misses gracefully [S1]
+    if discriminant < 0.0:
+        discriminant = 0.0
+        
+    # Solve quadratic formula
+    sqrt_disc = sqrt(discriminant)
+    
+    # Select the smaller root (front intersection)
+    # [G] Assuming a > 0, -b - sqrt(D) gives the smaller t if b is positive,
+    # but generally we want the first hit.
+    t1 = (-b - sqrt_disc) / (2.0 * a)
+    t2 = (-b + sqrt_disc) / (2.0 * a)
+    
+    # Return the smallest positive t, or handle cases where ray starts inside
+    if t1 > 0:
+        return t1, True
+    elif t2 > 0:
+        return t2, True
+    else:
+        return 0.0, False
+```
+
+**Parameters:**
+*   Standard deviation threshold: Fixed at 1 (one standard deviation) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Missed Intersections:** When the ray misses the ellipsoid, the discriminant becomes negative. Clipping this to zero allows the algorithm to proceed without crashing, though the resulting $t$ may not represent a true geometric intersection [S1].
+*   **Precision:** While more stable than the cubic method, it is still subject to floating-point precision issues, though significantly fewer than the cubic solver [S1].
+
+## Subtopics
+
+### Cubic Ray-Gaussian Intersection Solver
+The Cubic Ray-Gaussian Intersection Solver finds the exact intersection by solving a cubic polynomial derived from the Gaussian's quadratic form [S1]. It provides the most accurate surface representation but suffers from severe numerical instability [S1]. The cubic equation is derived by setting the gradient of the Gaussian density to zero, leading to a polynomial in $t$ involving terms like $r^T r$, $v^T r$, $m^T m$, etc., where $m = \Sigma \mu$ and $r = \Sigma v$ [S1]. In 32-bit floating point precision, even numerically stable cubic solvers produce NaNs at a rate of approximately 1 in 1,000 pixels, which breaks backpropagation [S1]. Consequently, it is rarely used in differentiable rendering pipelines despite its accuracy [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The quadratic method takes approximately 50% longer than the linear method for a forward pass [S1]. The cubic method takes twice as long as the linear method [S1].
+*   **Accuracy:** In 3D evaluation on objects, the quadratic method achieves the lowest errors in depth and mask compared to both linear and cubic methods [S1]. The linear method produces smooth surfaces, while the quadratic method shows individual ellipsoids protruding from the object surface [S1]. The cubic method can show artifacts [S1].
+*   **Stability:** The quadratic method is numerically stable enough for differentiable rendering, unlike the cubic method which produces NaNs in 32-bit float [S1].
+*   **Usage:** Due to its stability and accuracy balance, it is a preferred choice when accuracy is critical and the performance overhead of the cubic method is unacceptable, though the linear method is often used in broader evaluations for its speed [S1].
+
+## Background
+The method originates from the work of Leonid Keselman and Martial Hebert in "Approximate Differentiable Rendering with Algebraic Surfaces" [S1]. The paper explores approximating differentiable rendering using algebraic surfaces, specifically comparing linear, quadratic, and cubic intersection methods for 3D Gaussians. The quadratic approach was introduced to mitigate the numerical instability of the cubic solver while maintaining higher accuracy than the linear approximation [S1].
+
+## Sources
+[S1] Approximate Differentiable Rendering with Algebraic Surfaces, https://doi.org/10.1007/978-3-031-19824-3_35, fetched 2026-10-26

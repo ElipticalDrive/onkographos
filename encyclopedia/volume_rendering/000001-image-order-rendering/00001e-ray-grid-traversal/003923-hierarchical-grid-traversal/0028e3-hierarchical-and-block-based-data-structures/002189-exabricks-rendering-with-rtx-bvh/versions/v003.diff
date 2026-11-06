@@ -1,0 +1,270 @@
+--- v002.md
++++ v003.md
+@@ -4,117 +4,147 @@
+ 
+ ## Overview
+-ExaBricks Rendering with RTX BVH is a hardware-accelerated volume rendering method for Adaptive Block-Refined (ABR) data that utilizes an RTX Bounding Volume Hierarchy (BVH) to traverse regions, perform volume integration, and skip empty space [S1]. It distinguishes itself from software-based k-d tree approaches (e.g., Kähler et al. [17]) by leveraging GPU hardware ray tracing to avoid non-trivial control flow and per-thread stacks in shaders, while supporting interactive transfer function editing and adaptive sampling [S1].
++ExaBricks Rendering with RTX BVH is a method for rendering Adaptive Block-Refined (ABR) volume data that leverages hardware-accelerated ray-tracing cores (RT Cores) to traverse a Bounding Volume Hierarchy (BVH) of data regions [S1]. It solves the problem of efficiently navigating hierarchical AMR structures by replacing software-based k-d tree traversal with dedicated hardware traversal, thereby avoiding complex control flow in shaders [S1]. It sets itself apart from sibling methods like [Ray-marching reference (min-max octree accelerated)](1554-ray-marching-reference-min-max-octree-accelerated.md) by using a BVH of pre-computed regions rather than an octree of voxels, and from [Hierarchical Data Structures](4133-hierarchical-data-structures.md) by offloading the traversal logic to GPU hardware [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Adaptive Block-Refined (ABR) data structure containing regions derived from AMR bricks; a transfer function defining scalar-to-opacity mapping; a maximum ray distance $t_{max}$.
+-*   **Output:** Final color and opacity for each pixel.
++**Inputs:**
++*   A set of Adaptive Block-Refined (ABR) regions derived from AMR data.
++*   A transfer function mapping scalar values to opacity.
++*   Ray origins and directions for the image plane.
++*   Maximum ray distance $t_{max}$.
++
++**Outputs:**
++*   Computed color and opacity for each pixel.
+ 
+ **Data Structures:**
+-*   **ABR Regions:** The spatial subdivision consists of regions. Each region has a precomputed scalar range $[min, max]$ and a bounding box.
+-*   **RTX BVH:** An acceleration structure built over the ABR regions. It contains one primitive per region.
+-    *   **Primitive Layout:** If a region is potentially visible (max opacity > 0), the primitive is the region's bounding box. If a region is fully transparent (max opacity = 0), the primitive is an empty box (discarded from traversal) [S1].
++*   **ABR Region:** Defined by its bounding box and a precomputed scalar range $[min\_val, max\_val]$ representing the minimum and maximum scalar values within that region [S1].
++*   **RTX BVH:** An acceleration structure containing one primitive per ABR region. Primitives are either the region's bounding box or an empty box (if the region is fully transparent) [S1].
+ 
+ **Algorithm Steps:**
+ 1.  **BVH Construction:**
+-    *   For each ABR region, determine its precomputed scalar range $[min, max]$.
+-    *   Evaluate the transfer function $TF$ over this range to find the maximum opacity: $opacity_{max} = \max_{s \in [min, max]} TF(s)$ [S1].
+-    *   If $opacity_{max} == 0$, return an empty box for the BVH primitive (effectively removing the region from the hierarchy) [S1].
+-    *   If $opacity_{max} > 0$, return the region's bounding box as the BVH primitive [S1].
++    *   For each ABR region, calculate the maximum opacity $\alpha_{max}$ achievable by the transfer function over the region's scalar range $[min\_val, max\_val]$ [S1].
++    *   If $\alpha_{max} == 0$, the region is fully transparent. Register an empty bounding box (or discard the primitive) in the BVH [S1].
++    *   If $\alpha_{max} > 0$, register the region's geometric bounding box as a primitive in the BVH [S1].
++    *   Build the BVH using the RTX hardware acceleration structure builder [S1].
+ 
+-2.  **Ray Traversal Loop:**
++2.  **Ray Traversal and Integration:**
+     *   Initialize a ray with origin $O$, direction $D$, and search interval $[0, t_{max})$ [S1].
+-    *   Perform hardware-accelerated ray traversal against the RTX BVH [S1].
+-    *   **Case 1: No Intersection.** If the BVH traversal returns no hit, the ray terminates [S1].
+-    *   **Case 2: Intersection.** If a region is intersected:
+-        1.  Compute the overlap interval $[t_{in}, t_{out}]$ between the ray and the intersected region's bounding box [S1].
+-        2.  Volume-integrate the samples within $[t_{in}, t_{out}]$ over the region using the ABR reconstruction filter [S1].
+-        3.  Check for early ray termination (if accumulated opacity is sufficiently high) [S1].
+-        4.  If the ray is not terminated, initiate a new ray traversal starting from $t_{out} + \epsilon$ to find the next ABR region [S1].
+-        5.  Repeat until the ray becomes opaque or no subsequent region is found [S1].
++    *   Perform hardware-accelerated ray traversal against the RTX BVH to find the first intersected region [S1].
++    *   If no region is intersected, terminate the ray [S1].
++    *   If a region is intersected, compute the intersection interval $[t_{in}, t_{out}]$ between the ray and the region's bounding box [S1].
++    *   Volume-integrate the samples within $[t_{in}, t_{out}]$ over the region using standard volume rendering techniques (e.g., ray marching within the region) [S1].
++    *   Update the current ray position to $t_{out} + \epsilon$ (where $\epsilon$ is a small epsilon to avoid self-intersection) [S1].
++    *   Repeat the traversal from the new position to find the next region.
++    *   Terminate the loop if:
++        *   The accumulated opacity reaches 1.0 (early ray termination) [S1].
++        *   No subsequent region is found within the remaining ray distance [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def render_ray(origin, direction, t_max, bvh, transfer_function):
++def render_exabricks_ray(ray_origin, ray_direction, t_max, transfer_function, bvh):
+     """
+-    Renders a single ray using ExaBricks RTX BVH traversal.
++    Renders a single ray using ExaBricks with RTX BVH.
++    
++    Args:
++        ray_origin: vec3, origin of the ray.
++        ray_direction: vec3, normalized direction of the ray.
++        t_max: float, maximum distance to trace.
++        transfer_function: function, maps scalar value to opacity.
++        bvh: RTXAccelerationStructure, the BVH of ABR regions.
++        
++    Returns:
++        vec4, final color and opacity.
+     """
+-    t_current = 0.0
+-    accumulated_color = (0.0, 0.0, 0.0)
++    current_t = 0.0
++    accumulated_color = vec3(0.0)
+     accumulated_opacity = 0.0
+     
+-    while t_current < t_max:
+-        # Hardware-accelerated BVH traversal
+-        # Returns the closest region hit and its intersection parameter t_hit
+-        hit_region, t_hit = bvh.traverse(origin, direction, t_start=t_current, t_end=t_max)
++    # Epsilon to prevent self-intersection after exiting a region
++    epsilon = 1e-6
++    
++    while current_t < t_max:
++        # Hardware-accelerated traversal to find next intersected region
++        # Returns intersection distance t_hit and region_id, or None if no hit
++        hit = bvh.intersect(ray_origin, ray_direction, current_t + epsilon, t_max)
+         
+-        if hit_region is None:
+-            # No more regions found
++        if hit is None:
+             break
+             
+-        # Compute overlap interval [tin, tout] with the region
+-        # Note: The BVH primitive is the region's bounding box
+-        tin = t_hit
+-        # Calculate the exit point from the region's bounding box
+-        tout = compute_exit_t(origin, direction, hit_region.bounding_box, t_start=tin)
++        t_hit, region_id = hit
++        
++        # Get the bounding box and scalar range of the region
++        bbox = bvh.get_primitive_bbox(region_id)
++        scalar_range = bvh.get_primitive_scalar_range(region_id)
++        
++        # Compute overlap interval [t_in, t_out] between ray and region bbox
++        t_in, t_out = compute_ray_bbox_overlap(ray_origin, ray_direction, bbox, t_hit)
+         
+         # Volume integrate within the region
+-        region_color, region_opacity = volume_integrate(
+-            origin, direction, tin, tout, hit_region
++        # This step involves sampling the underlying AMR data within the region
++        # and applying the transfer function.
++        region_color, region_opacity = volume_integrate_region(
++            ray_origin, ray_direction, t_in, t_out, region_id, transfer_function
+         )
+         
+         # Composite the result
+         # Standard front-to-back compositing
+-        alpha = 1.0 - accumulated_opacity
+-        accumulated_color += region_color * region_opacity * alpha
+-        accumulated_opacity += region_opacity * alpha
++        alpha = region_opacity * (1.0 - accumulated_opacity)
++        accumulated_color += region_color * alpha
++        accumulated_opacity += alpha
+         
+-        if accumulated_opacity >= 0.99: # Early termination threshold
++        if accumulated_opacity >= 1.0:
+             break
+             
+-        # Advance ray start to just after the current region
+-        # epsilon is a small value to prevent self-intersection
+-        t_current = tout + epsilon
++        # Advance ray to the end of the current region
++        current_t = t_out
+         
+-    return accumulated_color, accumulated_opacity
++    return vec4(accumulated_color, accumulated_opacity)
+ 
+-def build_bvh(regions, transfer_function):
++def compute_ray_bbox_overlap(origin, direction, bbox, t_start):
+     """
+-    Constructs the RTX BVH, pruning fully transparent regions.
++    Computes the intersection interval [t_in, t_out] of a ray with an axis-aligned bounding box.
++    Returns None if no intersection.
+     """
+-    primitives = []
+-    for region in regions:
+-        # Get precomputed scalar range for the region
+-        min_val, max_val = region.scalar_range
++    # Standard slab method for AABB intersection
++    t_min = -inf
++    t_max = inf
++    
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < bbox.min[i] or origin[i] > bbox.max[i]:
++                return None
++        else:
++            t1 = (bbox.min[i] - origin[i]) / direction[i]
++            t2 = (bbox.max[i] - origin[i]) / direction[i]
++            t_min = max(t_min, min(t1, t2))
++            t_max = min(t_max, max(t1, t2))
++            
++    if t_min > t_max or t_max < t_start:
++        return None
+         
+-        # Compute max opacity in this range
+-        max_opacity = 0.0
+-        # Evaluate transfer function over the range [min_val, max_val]
+-        # In practice, this might be a lookup or analytical max
+-        for s in sample_range(min_val, max_val):
+-            opacity = transfer_function(s)
+-            if opacity > max_opacity:
+-                max_opacity = opacity
+-                
+-        if max_opacity == 0:
+-            # Discard region: return empty box
+-            primitives.append(EmptyBox())
+-        else:
+-            # Keep region: return bounding box
+-            primitives.append(region.bounding_box)
+-            
+-    return BVH_build(primitives)
++    return (max(t_min, t_start), t_max)
++
++def volume_integrate_region(origin, direction, t_in, t_out, region_id, transfer_function):
++    """
++    Performs volume integration within a specific ABR region.
++    Implementation details depend on the specific AMR data access pattern.
++    """
++    # Placeholder for region-specific integration logic
++    # This would involve traversing the bricks within the ABR region
++    # and accumulating color/opacity.
++    pass
+ ```
+ 
+ **Parameters:**
+-*   $\epsilon$: Small offset to prevent re-intersecting the current region. Value not given in the sources [G].
+-*   Early termination threshold: Typically around 0.99 or 1.0. Value not given in the sources [G].
++*   $\epsilon$: Small value to prevent self-intersection. Value not given in the sources.
++*   Transfer Function: User-defined mapping from scalar to opacity.
+ 
+ **Edge Cases and Pitfalls:**
+-*   **BVH Rebuild Cost:** The BVH must be rebuilt whenever the transfer function or iso-value changes. On the Exajet dataset (656M cells), a full rebuild takes approximately 300ms on a Titan RTX or RTX 8000 GPU [S1]. Refitting the BVH is suggested as a potential optimization [S1].
+-*   **Empty Space:** Truly empty space (outside the AMR mesh) is automatically skipped as it generates no bricks or regions [S1].
+-*   **Transparent Regions:** Regions covered by cells with zero opacity under the current transfer function are excluded from the BVH during construction, avoiding traversal checks during rendering [S1].
++*   **BVH Rebuild Cost:** The BVH must be rebuilt whenever the transfer function or iso-value changes, as the pruning decision depends on the maximum opacity of the scalar range [S1]. On the Exajet dataset, a full rebuild takes approximately 300ms on a Titan RTX or RTX 8000 GPU [S1].
++*   **Empty Regions:** Regions with zero maximum opacity are excluded from the BVH during construction, so they are never encountered during traversal [S1].
+ 
+ ## Subtopics
++
++### [RTX BVH Ray Tracing](2957-rtx-bvh-ray-tracing.md)
++RTX BVH Ray Tracing is a rendering method for Adaptive Block-Refined (ABR) data that uses hardware-accelerated RTX BVH traversal to iterate through regions, performing volume integration within each region and skipping empty space. It sets itself apart from sibling methods like [Adaptive Sampling with Region Delimiters](3421-adaptive-sampling-with-region-delimiters.md) by leveraging dedicated hardware ray-tracing cores (RT Cores) for acceleration structure traversal, enabling interactive transfer function and iso-surface editing.
+ 
+ ### [Adaptive Sampling with Region Delimiters](3421-adaptive-sampling-with-region-delimiters.md)
+@@ -122,19 +152,33 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The method performs multiple hardware ray traversals per volume ray (one per region intersected). However, hardware support makes these traversals cheap, and the cost is amortized over multiple samples taken within each region [S1].
+-*   **Memory Complexity:** Depends on the number of ABR regions. The BVH stores one primitive per region [S1].
+-*   **Measured Performance:**
+-    *   **Hardware:** Titan RTX, RTX 8000 [S1].
+-    *   **Data Sets:**
+-        *   Wind: 411M cells, 24.6K regions, 689K bricks, 2.78x speedup, 1.72x memory reduction [S1].
+-        *   Gear: 262M cells, 26K regions, 792K bricks, 2.97x speedup, 1.20x memory reduction [S1].
+-        *   Exajet: 656M cells, 3.1M regions, 55.8M bricks, 3.18x speedup, 1.25x memory reduction [S1] [S1].
+-*   **Strengths:** Hardware-accelerated traversal avoids complex shader control flow; supports interactive transfer function editing; adaptive sampling keeps total sample counts tractable while adapting to finest cell sizes [S1].
+-*   **Limitations:** BVH rebuild cost on transfer function change (~300ms for Exajet) [S1].
+-*   **When to use:** Interactive direct volume rendering of large AMR datasets where hardware ray tracing is available and transfer functions change frequently [S1].
+-*   **When not to use:** If the hardware does not support RTX ray tracing or if the transfer function is static and BVH rebuild cost is prohibitive compared to refitting [S1].
++**Time Complexity:**
++*   Traversal is amortized over multiple samples taken within each region [S1].
++*   Each ray performs several hardware ray traversals, one per intersected region [S1].
++
++**Memory Complexity:**
++*   Requires storing the BVH structure for all ABR regions [S1].
++
++**Measured Performance:**
++*   BVH Rebuild Time: ~300ms on a Titan RTX or RTX 8000 for the Exajet dataset (656M cells, 3.1M regions, 55.8M bricks) [S1].
++*   Performance metrics for other datasets (Wind, Gear) are provided in the source table but specific rendering times are not detailed in the notes [S1].
++
++**Strengths:**
++*   Avoids non-trivial control flow in shaders by using hardware acceleration [S1].
++*   Efficiently skips empty space and fully transparent regions without additional checks during traversal [S1].
++
++**Limitations:**
++*   Requires BVH rebuild on transfer function or iso-value change [S1].
++*   Relies on RTX hardware support [S1].
++
++**When to Use:**
++*   When rendering large AMR datasets on GPUs with RTX hardware.
++*   When interactive transfer function editing is required.
++
++**When Not to Use:**
++*   On hardware without RTX support.
++*   When the transfer function is static and BVH rebuild cost is prohibitive (though refitting could mitigate this) [S1].
+ 
+ ## Background
+-The method was introduced in the paper "Ray Tracing Structured AMR Data Using ExaBricks" [S1]. It builds on the ExaBricks data structure, which uses a reconstruction filter to store which bricks influence each region, enabling fast basis reconstruction during rendering [S1]. The approach was developed to support interactive high-quality direct volume rendering with smooth AMR reconstruction filters, gradient-based volume shading, and surface shading from implicit isosurfaces [S1]. It replaces software k-d tree traversal (as used by Kähler et al. [17]) with hardware-accelerated RTX BVH traversal to improve performance and simplify shader code [S1].
++The method was introduced in the paper "Ray Tracing Structured AMR Data Using ExaBricks" [S1]. It was developed as an alternative to software-based k-d tree traversal methods, such as those used by Kähler et al. [17], which required per-thread stacks and complex control flow in shaders [S1]. The approach leverages the RTX hardware available on GPUs to enable efficient traversal of ABR regions [S1].
+ 
+ ## Sources

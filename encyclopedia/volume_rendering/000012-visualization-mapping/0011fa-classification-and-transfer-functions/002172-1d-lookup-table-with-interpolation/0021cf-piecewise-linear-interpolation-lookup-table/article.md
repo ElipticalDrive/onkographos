@@ -1,140 +1,164 @@
 # Piecewise Linear Interpolation (Lookup Table)
 
-Also called: Linear Interpolation on 1D LUT, Piecewise Linear Transfer Function Evaluation, 1D Transfer Function Control Point Interpolation, Linear Interpolation between Control Points, TFN Linear Interpolation
+Also called: 1D Transfer Function Control Point Interpolation, Linear Interpolation between Control Points, Linear Interpolation on 1D LUT, Piecewise Linear Transfer Function, Piecewise Linear Transfer Function Evaluation, TFN Linear Interpolation
 
 ## Overview
-Piecewise Linear Interpolation (Lookup Table) evaluates scalar-to-color and scalar-to-opacity transfer functions by linearly interpolating between adjacent control points [S1, S3, S4, unofficial]. It solves the problem of mapping discrete scalar values from a volume dataset to continuous RGBA output values for volume rendering [S4, unofficial]. Unlike [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md), which ensures $C^1$ continuity, this method produces $C^0$ continuous functions with sharp changes in derivative at control points, offering lower computational cost and simpler implementation [S4, unofficial]. It differs from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by explicitly supporting arbitrary control point placement and binary search for interval identification rather than fixed uniform grid indexing [S4, unofficial].
+
+Piecewise linear interpolation maps scalar volume data values to visual parameters (color and opacity) by constructing a continuous, non-smooth curve through a set of user-defined control points [S1, S3, S4, unofficial]. It solves the problem of defining a transfer function (TF) that is both intuitive to edit and computationally efficient to evaluate during ray casting [S5, unofficial]. Unlike cubic splines, it guarantees no overshoot or oscillation between control points, making it the standard choice for real-time volume rendering where stability and speed are prioritized over aesthetic smoothness [S3, S5, unofficial]. It differs from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by explicitly computing intermediate values via interpolation rather than assigning discrete classes, and from [Smoothstep Interpolation](3287-smoothstep-interpolation.md) by lacking derivative continuity at the knots [S1, S4, unofficial].
 
 ## How it works
-**Inputs:**
-- A list of control points sorted by position (scalar value). Each point contains a position $p$ and a value $v$. For color transfer functions, $v$ is a 4-component vector (RGBA); for scalar curves, $v$ is a scalar [S1, S3, S4, unofficial].
-- A query scalar value $P$ [S4, unofficial].
 
-**Outputs:**
-- Interpolated value $V$ (scalar or RGBA) at position $P$ [S1, S4, unofficial].
+**Inputs and Outputs**
+*   **Input:** A set of $N$ control points $P = \{p_0, p_1, \dots, p_{N-1}\}$, where each point $p_i$ contains a scalar position $pos_i$ and a visual value $val_i$. For color transfer functions, $val_i$ is a 4-component vector $(R, G, B, A)$ [S1, S4, unofficial]. The points must be sorted by $pos_i$ [S1, S5, unofficial].
+*   **Input:** A query scalar value $t$ (typically normalized to $[0, 1]$ or the data range) [S4, S5, unofficial].
+*   **Output:** An interpolated visual value $v$ (scalar or color vector) [S1, S4, unofficial].
 
-**Data Structures:**
-- `ControlPoint`: A struct or tuple containing:
-  - `position`: float, the scalar value where this control point is defined.
-  - `value`: float (for scalar curves) or `vec4` (for color/opacity curves).
-- The list of control points must be sorted by `position` in ascending order [S1, S4, unofficial].
+**Data Structures**
+*   **Control Point Array:** A contiguous array or list of structures.
+    *   `struct ControlPoint { float pos; float color[4]; }` [S1, S4, unofficial].
+    *   Alternatively, separate arrays for positions and colors are used for batched processing [S5, unofficial].
+*   **Lookup Table (LUT):** While the method is often called "LTP," it can be implemented by pre-computing a dense LUT indexed by quantized input values, where each entry is computed via this interpolation method [S4, S5, unofficial]. However, the core algorithm described here operates directly on control points without a pre-built LUT, which is more memory-efficient for sparse control point sets [S1, S5, unofficial].
 
-**Steps:**
+**Numbered Steps**
 
-1. **Boundary Clamping:** If the query value $P$ is less than the position of the first control point, return the value of the first control point. If $P$ is greater than the position of the last control point, return the value of the last control point [S1, S3, S4, unofficial].
-   - *Note:* Some implementations clamp $P$ to the range $[0.0, 1.0]$ or the min/max of control points before lookup [S3, unofficial].
+1.  **Edge Case Handling (Clamping):**
+    *   If the control point set is empty, return the default value (e.g., transparent black $\{0,0,0,0\}$) [S1, unofficial].
+    *   If $t \le p_0.pos$, return $p_0.val$ [S1, S4, unofficial].
+    *   If $t \ge p_{N-1}.pos$, return $p_{N-1}.val$ [S1, S4, unofficial].
+    *   *Note:* Some implementations clamp $t$ to $[0, 1]$ before lookup to prevent out-of-bounds access [S4, unofficial].
 
-2. **Interval Search:** Find the index $i$ such that $points[i].position \le P < points[i+1].position$ [S4, unofficial].
-   - This is typically done using binary search (e.g., `std::lower_bound` or a custom `nearestn` function) [S4, unofficial].
-   - *Pitfall:* Binary search implementations may return -1 if $P$ is below all control points; ensure boundary checks handle this [S4, unofficial]. If $P$ exactly equals a control point position, the interval starting at that point is selected [S4, unofficial].
+2.  **Interval Search:**
+    *   Find the index $i$ such that $p_i.pos \le t < p_{i+1}.pos$ [S1, S5, unofficial].
+    *   This is typically done using binary search (`std::lower_bound` or custom `nearestn`) [S5, unofficial].
+    *   *Pitfall:* If binary search returns an index indicating $t$ is below all points or above the last interval, handle via clamping or error checking [S5, unofficial].
 
-3. **Weight Calculation:** Compute the interpolation weight $w$ within the interval $[points[i].position, points[i+1].position]$ [S1, S4, unofficial]:
-   $$
-   w = \frac{P - points[i].position}{points[i+1].position - points[i].position}
-   $$
-   - Let $A = points[i].position$ and $B = points[i+1].position$. Then $w = \frac{P - A}{B - A}$ [S4, unofficial].
+3.  **Weight Calculation:**
+    *   Let $A = p_i.pos$ and $B = p_{i+1}.pos$ [S5, unofficial].
+    *   Compute the interpolation weight $\alpha$:
+        $$ \alpha = \frac{t - A}{B - A} $$
+    *   *Alternative Formula:* Some sources use a symmetric form for numerical stability:
+        $$ \alpha = \frac{t - p_i.pos}{p_{i+1}.pos - p_i.pos} $$
+        [S1, S4, S5, unofficial].
 
-4. **Value Interpolation:** Compute the interpolated value $V$ using linear interpolation between the values at $points[i]$ and $points[i+1]$ [S1, S4, unofficial]:
-   $$
-   V = (1 - w) \cdot points[i].value + w \cdot points[i+1].value
-   $$
-   - For color curves, this is applied independently to each RGB channel and the alpha channel [S4, unofficial].
-   - Alternative formula form: $V = \frac{(B - P) \cdot V_i + (P - A) \cdot V_{i+1}}{B - A}$, where $V_i$ and $V_{i+1}$ are the values at indices $i$ and $i+1$ [S3, unofficial].
+4.  **Interpolation:**
+    *   Let $V_1 = p_i.val$ and $V_2 = p_{i+1}.val$ [S5, unofficial].
+    *   Compute the result $v$:
+        $$ v = (1 - \alpha) V_1 + \alpha V_2 $$
+    *   For color values, this is applied component-wise to R, G, B, and A [S1, S4, S5, unofficial].
+    *   *Specific Color Formula:*
+        $$ R = \frac{(t - p_i.pos) R_{i+1} + (p_{i+1}.pos - t) R_i}{p_{i+1}.pos - p_i.pos} $$
+        [S4, unofficial].
 
-**Pseudocode:**
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def piecewise_linear_interpolate(control_points, query_value):
+def piecewise_linear_interpolate(control_points, t):
     """
     Interpolate a value from a sorted list of control points.
     
     Args:
-        control_points: List of tuples (position, value), sorted by position.
-        query_value: The scalar value to interpolate at.
+        control_points: List of tuples (pos, color), sorted by pos.
+                        color is a tuple/list of 4 floats (R, G, B, A).
+        t: Query scalar value.
         
     Returns:
-        The interpolated value (scalar or vec4).
+        Interpolated color tuple (R, G, B, A).
     """
-    if not control_points:
-        return 0.0  # [G] Default return for empty list; behavior may vary by implementation.
-
     n = len(control_points)
     
-    # Step 1: Boundary Clamping
-    if query_value <= control_points[0][0]:
-        return control_points[0][1]
-    if query_value >= control_points[n - 1][0]:
-        return control_points[n - 1][1]
+    # Edge case: empty list
+    if n == 0:
+        return (0.0, 0.0, 0.0, 0.0)
     
-    # Step 2: Interval Search (Binary Search)
-    # Find largest index i such that control_points[i].position <= query_value
+    # Edge case: t is before the first point
+    if t <= control_points[0][0]:
+        return control_points[0][1]
+    
+    # Edge case: t is after the last point
+    if t >= control_points[-1][0]:
+        return control_points[-1][1]
+    
+    # Binary search for the interval
+    # Find largest index i such that control_points[i].pos <= t
     left = 0
     right = n - 1
     i = 0
+    
     while left <= right:
         mid = (left + right) // 2
-        if control_points[mid][0] <= query_value:
+        if control_points[mid][0] <= t:
             i = mid
             left = mid + 1
         else:
             right = mid - 1
             
-    # Step 3: Weight Calculation
-    pos_left = control_points[i][0]
-    pos_right = control_points[i + 1][0]
+    # i is now the index of the left control point
+    # i+1 is the index of the right control point
+    p_left = control_points[i]
+    p_right = control_points[i + 1]
     
-    # Avoid division by zero if duplicate positions exist (though sorted list should prevent this)
+    pos_left = p_left[0]
+    pos_right = p_right[0]
+    color_left = p_left[1]
+    color_right = p_right[1]
+    
+    # Calculate weight
+    # Avoid division by zero if positions are identical (should not happen if sorted strictly)
     if pos_right == pos_left:
-        return control_points[i][1]
+        return color_left
         
-    w = (query_value - pos_left) / (pos_right - pos_left)
+    alpha = (t - pos_left) / (pos_right - pos_left)
     
-    # Step 4: Value Interpolation
-    val_left = control_points[i][1]
-    val_right = control_points[i + 1][1]
+    # Interpolate each color component
+    r = (1.0 - alpha) * color_left[0] + alpha * color_right[0]
+    g = (1.0 - alpha) * color_left[1] + alpha * color_right[1]
+    b = (1.0 - alpha) * color_left[2] + alpha * color_right[2]
+    a = (1.0 - alpha) * color_left[3] + alpha * color_right[3]
     
-    # Handle both scalar and vector values
-    if isinstance(val_left, (int, float)):
-        return (1.0 - w) * val_left + w * val_right
-    else:
-        # Assume val_left is a sequence (e.g., list or tuple of length 4)
-        return tuple((1.0 - w) * v_l + w * v_r for v_l, v_r in zip(val_left, val_right))
+    return (r, g, b, a)
 ```
 
-**Parameters:**
-- `control_points`: The set of scalar-to-value mappings. Typical number of points: 2–10 for simple transfer functions [S3, unofficial].
-- `query_value`: The scalar value from the volume data being sampled [S4, unofficial].
+**Parameters**
+*   **Control Point Density:** Not given in the sources. Typically, 2-10 points are used for simple TFs [S3, unofficial].
+*   **Precision:** Float32 is standard [S1, S4, S5, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Duplicate Positions:** If control points have identical positions, the denominator in weight calculation becomes zero. Sources do not specify a standard resolution; implementations should ensure unique positions or handle equality explicitly [S4, unofficial].
-- **Out-of-Bounds:** Binary search may fail if input is not sorted or if $P$ is outside the range without clamping [S4, unofficial].
-- **Exact Control Points:** If $P$ equals a control point position, the weight $w$ becomes 0 or 1, correctly returning the control point's value [S4, unofficial].
+**Edge Cases and Pitfalls**
+*   **Duplicate Positions:** If $p_i.pos == p_{i+1}.pos$, division by zero occurs in weight calculation. Sources imply points should be strictly increasing [S1, S5, unofficial]. [Transfer Function Control Point Management](2718-transfer-function-control-point-management.md) handles duplicate resolution [S1, unofficial].
+*   **Unsorted Input:** Binary search fails if points are not sorted. Manual sorting or a management layer is required [S1, S5, unofficial].
+*   **Out-of-Bounds:** If $t$ is outside $[p_0.pos, p_{N-1}.pos]$, clamping is necessary to prevent index errors or undefined behavior [S4, S5, unofficial].
+*   **Binary Search Ambiguity:** If $t$ exactly equals a control point position, standard binary search may return either the left or right interval. The result is identical due to continuity, but implementation must ensure $i$ and $i+1$ are valid indices [S5, unofficial].
 
 ## Subtopics
 
 ### [Transfer Function Control Point Management](2718-transfer-function-control-point-management.md)
-Manages transfer function control points with automatic sorting, duplicate handling, and LUT initialization based on scalar range [2718-transfer-function-control-point-management.md]. It ensures the control point list is sorted and handles edge cases like duplicate positions before interpolation is performed [2718-transfer-function-control-point-management.md]. Choose this when dynamic user interaction requires frequent addition, removal, or reordering of control points [2718-transfer-function-control-point-management.md].
+Manages the lifecycle of control points, enforcing sorting and duplicate resolution. Choose this when building a user interface for TF editing to ensure data integrity.
 
-### Blurring a Step Function
-An algorithm to convolve a step function with a rectangular pulse to yield a piecewise linear spline [S5]. It operates on input arrays $x$ and $y$ and uses a half-width parameter $r$ [S5]. It is useful for anti-aliasing transfer functions by smoothing sharp discontinuities [S5]. Choose this when a smooth, continuous derivative is desired without using cubic splines, particularly in neural radiance field contexts [S5].
+### [Blurring a Step Function](4383-blurring-a-step-function.md)
+Convolves step functions with a rectangular pulse to create continuous piecewise linear splines. Choose this for anti-aliased TFs in neural radiance fields (NeRFs) to prevent aliasing during optimization.
+
+### [Step Function Resampling](7924-step-function-resampling.md)
+Evaluates integrals of piecewise constant functions. Choose this when you need to preserve the exact mass of a step function rather than interpolating values.
 
 ## Operating characteristics
-**Time Complexity:** $O(\log N)$ for binary search interval lookup, where $N$ is the number of control points [S4, unofficial]. Interpolation is $O(1)$ [S4, unofficial].
-**Memory Complexity:** $O(N)$ to store control points [S4, unofficial].
-**Measured Performance:** Binary search is significantly faster than linear scan for $N > 10$ [S4, unofficial]. The method is extremely lightweight compared to cubic splines, requiring only basic arithmetic operations [S4, unofficial].
-**Strengths:** Simple to implement, fast evaluation, easy to understand and edit by artists [S1, S4, unofficial].
-**Limitations:** Discontinuous derivatives at control points can cause visual artifacts in gradient-based shading [S4, unofficial]. Not suitable for applications requiring smooth transitions without additional smoothing steps [S4, unofficial].
-**When to use:** Real-time volume rendering, simple transfer functions, interactive editing [S1, S4, unofficial].
-**When not to use:** When $C^1$ continuity is required, or when the transfer function needs to be differentiable for optimization [S4, unofficial].
+
+*   **Time Complexity:** $O(\log N)$ per query due to binary search, where $N$ is the number of control points [S5, unofficial]. If a dense LUT is pre-computed, lookup is $O(1)$ [S4, S5, unofficial].
+*   **Memory Complexity:** $O(N)$ for control points [S1, S5, unofficial]. $O(M)$ for a pre-computed LUT of size $M$ (e.g., 256 or 1024 entries) [S4, S5, unofficial].
+*   **Measured Performance:** Binary search is fast enough for real-time rendering on CPU [S5, unofficial]. GPU implementations often use texture lookups (LUT) for $O(1)$ performance [S4, unofficial].
+*   **Strengths:** Simple to implement, no overshoot, computationally cheap, intuitive for artists [S1, S3, S5, unofficial].
+*   **Limitations:** Not smooth (discontinuous derivatives), can appear "blocky" if control points are sparse [S3, S5, unofficial].
+*   **When to Use:** Real-time volume rendering, interactive TF editing, when stability is more important than aesthetic smoothness [S3, S5, unofficial].
+*   **When Not to Use:** When smooth gradients are required (use [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md)) [S1, unofficial].
 
 ## Background
-Originated from standard computer graphics techniques for transfer function definition in volume rendering [S1, S4, unofficial]. The method is widely used in visualization toolkits and research prototypes [S1, S3, S4, unofficial]. The "Blurring a Step Function" variant was introduced in Zip-NeRF for anti-aliased neural radiance fields [S5].
+
+Piecewise linear interpolation for transfer functions was used in early volume rendering systems for computational fluid dynamics in the early 1990s [S3, unofficial]. It remains a fundamental technique in modern visualization toolkits and game engines due to its simplicity and efficiency [S1, S4, S5, unofficial]. The method is often implemented as a lookup table (LUT) for performance, where the LUT entries are computed using this interpolation method [S4, S5, unofficial].
 
 ## Sources
+
 [S1] GitThirteen/vis-magnus-2018, https://github.com/GitThirteen/vis-magnus-2018, fetched 2026-10-26 (unofficial)
 [S2] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)
-[S3] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
-[S4] devangag558/parallel-3d-volume-rendering-mpi, https://github.com/devangag558/parallel-3d-volume-rendering-mpi, fetched 2026-10-27 (unofficial)
-[S5] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26
+[S3] [PDF] Volume Rendering for Computational Fluid Dynamics: Initial Results, https://www.nas.nasa.gov/assets/nas/pdf/techreports/1991/rnr-91-026.pdf, fetched 2026-10-26 (unofficial)
+[S4] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
+[S5] devangag558/parallel-3d-volume-rendering-mpi, https://github.com/devangag558/parallel-3d-volume-rendering-mpi, fetched 2026-10-27 (unofficial)

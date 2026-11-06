@@ -1,0 +1,153 @@
+# Volume Resampling
+
+Also called: Data Representation and Processing, Data Resampling, Volume Resampling Comparison
+
+## Overview
+Volume resampling is a technique that converts discrete particle data (such as SPH particles) into a structured 3D grid representation to enable efficient direct volume rendering [S1]. It solves the problem of rendering unstructured point clouds by discretizing the data onto a voxel grid, allowing the use of standard hardware-accelerated volume rendering pipelines [S1]. It differs from direct particle rendering by shifting computational cost to a long preprocessing phase, resulting in significantly faster per-frame rendering times [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Unstructured particle data (e.g., SPH particles with phase, attribute, and density values).
+*   **Output:** A 3D texture or volume grid containing preprocessed voxel data (phase, attribute, density) and derived surface normals.
+
+**Data Structures:**
+*   **3D Grid/Texture:** Stores voxel data.
+    *   **Fields:**
+        *   `phase`: Scalar or categorical value representing the material phase.
+        *   `attribute`: Optical or physical properties (e.g., color, opacity).
+        *   `density`: Scalar density value.
+        *   `normal`: 3D vector for surface normals, computed from density gradients.
+    *   **Layout:** Typically stored as a 3D texture object or sets of 2D texture slices [S2].
+    *   **Format:** Power-of-two dimensions are typically used to maximize rendering performance [S2].
+
+**Steps:**
+1.  **Grid Initialization:** Define a 3D grid resolution. If the data does not fit the target texture memory or format, pad the boundaries by placing data into a larger volume and filling empty regions with default values (e.g., zero or background) [S2].
+2.  **Particle Evaluation (Preprocessing):** For each voxel center in the grid, evaluate the particle data.
+    *   Compute the contribution of nearby particles to the voxel center.
+    *   Store the resulting `phase`, `attribute`, and `density` values at the voxel center [S1].
+3.  **Interpolation:** When rendering, probe the volume to compute interpolated data values at arbitrary sampling locations from voxel neighbors [S2].
+    *   **Attribute and Density:** Use hardware-accelerated trilinear interpolation [S1].
+    *   **Phase:** Use custom interpolation logic. Because phase often requires a "maximum operator" (to determine the dominant material at an interface), standard linear interpolation is insufficient [S1].
+4.  **Normal Computation:** Compute surface normals for the volume.
+    *   Calculate density gradients using central differences on the stored density field [S1].
+    *   Normalize the gradient vector to obtain the surface normal [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess_sph_to_volume(particles, grid_resolution, grid_bounds):
+    """
+    Preprocess SPH particles into a 3D volume grid.
+    """
+    # Initialize 3D arrays for density, attributes, and phase
+    # Dimensions: grid_resolution x grid_resolution x grid_resolution
+    density_grid = zeros(grid_resolution)
+    attribute_grid = zeros(grid_resolution)
+    phase_grid = zeros(grid_resolution)
+    
+    # Iterate over all voxels in the grid
+    for x in range(grid_resolution):
+        for y in range(grid_resolution):
+            for z in range(grid_resolution):
+                # Get voxel center position in world space
+                voxel_center = grid_bounds.min + (vec3(x, y, z) + 0.5) * grid_bounds.step
+                
+                # Evaluate particle data at this voxel center
+                # This involves finding nearby particles and aggregating their contributions
+                # [G]: Implementation of particle-to-voxel aggregation depends on the specific kernel
+                # used (e.g., SPH kernel). Here we assume a function that returns aggregated values.
+                local_density, local_attribute, local_phase = evaluate_particles_at_point(particles, voxel_center)
+                
+                density_grid[x, y, z] = local_density
+                attribute_grid[x, y, z] = local_attribute
+                phase_grid[x, y, z] = local_phase
+
+    return density_grid, attribute_grid, phase_grid
+
+def compute_normals(density_grid, grid_resolution):
+    """
+    Compute surface normals from density gradients using central differences.
+    """
+    normals = zeros((grid_resolution, grid_resolution, grid_resolution, 3))
+    
+    for x in range(grid_resolution):
+        for y in range(grid_resolution):
+            for z in range(grid_resolution):
+                # Central differences for gradient
+                # Handle boundary conditions by clamping indices or using one-sided differences
+                dx = density_grid[min(x+1, grid_resolution-1), y, z] - density_grid[max(x-1, 0), y, z]
+                dy = density_grid[x, min(y+1, grid_resolution-1), z] - density_grid[x, max(y-1, 0), z]
+                dz = density_grid[x, y, min(z+1, grid_resolution-1)] - density_grid[x, y, max(z-1, 0)]
+                
+                gradient = vec3(dx, dy, dz)
+                normals[x, y, z] = normalize(gradient)
+                
+    return normals
+
+def render_volume(volume_texture, normal_texture, ray_origin, ray_direction):
+    """
+    Render the volume using hardware trilinear interpolation for attributes/density
+    and custom interpolation for phase.
+    """
+    # Standard volume rendering loop (e.g., ray marching)
+    t = 0.0
+    accumulated_color = vec3(0.0)
+    accumulated_opacity = 0.0
+    
+    while t < max_distance and accumulated_opacity < 1.0:
+        sample_pos = ray_origin + ray_direction * t
+        
+        # Probe volume for density and attribute
+        # Uses hardware trilinear interpolation
+        density = texture3d(volume_texture.density, sample_pos)
+        attribute = texture3d(volume_texture.attribute, sample_pos)
+        
+        # Probe volume for phase
+        # Uses custom interpolation (e.g., maximum operator)
+        phase = custom_phase_interpolation(volume_texture.phase, sample_pos)
+        
+        # Compute normal from precomputed normal texture
+        normal = texture3d(normal_texture, sample_pos)
+        
+        # Compute optical properties (opacity, color) based on density, attribute, phase
+        # [G]: Specific transfer function logic is not detailed in sources
+        opacity = compute_opacity(density, attribute)
+        color = compute_color(attribute, phase, normal)
+        
+        # Composite
+        weight = opacity * (1.0 - accumulated_opacity)
+        accumulated_color += color * weight
+        accumulated_opacity += weight
+        
+        t += step_size
+        
+    return accumulated_color
+```
+
+**Parameters:**
+*   **Grid Resolution:** Determines the level of detail. High-quality stochastic sampling comparisons used a grid resolution of 1024 voxels along the longest dimension [S1].
+*   **Texture Format:** Power-of-two sizes are recommended for performance [S2].
+*   **Interpolation Method:** Trilinear for attributes/density; custom (maximum operator) for phase [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Phase Interface Reconstruction:** Resampling struggles with the precise reconstruction of phase interfaces due to discretization errors [S1].
+*   **Visual Artifacts:** Trilinear interpolation, while easy to implement, can introduce visual artifacts if high quality is required [S2].
+*   **Preprocessing Time:** The method requires evaluating a large number of SPH particles, leading to long preprocessing times (minutes per dataset) [S1].
+
+## Subtopics
+
+## Operating characteristics
+*   **Preprocessing Time:** Long. The sources report preprocessing times of several minutes per dataset (e.g., 269.896 seconds for the Turbine dataset) [S1]. This is orders of magnitude slower than direct particle rendering preprocessing (<30 ms) [S1].
+*   **Rendering Time:** Fast. Rendering times are in the millisecond range (e.g., 82 ms to 293 ms) [S1]. This is significantly faster than direct particle rendering (seconds per frame) [S1].
+*   **Memory:** Requires storing a 3D texture. Power-of-two textures are used to maximize performance, which may increase memory usage if the data does not naturally fit these dimensions [S2].
+*   **Quality:** Image quality for homogeneous volume materials is close to non-resampled renderings at high resolutions (1024 voxels) [S1]. However, precise reconstruction of phase interfaces is difficult due to discretization [S1].
+*   **When to use:** When rendering speed is critical and preprocessing time can be amortized or is acceptable. Suitable for homogeneous materials.
+*   **When not to use:** When precise phase interface reconstruction is required, or when preprocessing time is a bottleneck.
+
+## Background
+Volume resampling is a common approach in volume rendering, particularly for rendering Smoothed Particle Hydrodynamics (SPH) data [S1]. It involves evaluating particle data on a 3D grid in a preprocessing step, followed by direct volume rendering on the grid [S1]. The technique is discussed in the context of comparing direct SPH rendering to traditional volume resampling methods [S1]. The use of 3D textures and hardware interpolation is a standard practice in GPU volume rendering, as described in general graphics literature [S2].
+
+## Sources
+[S1] Stochastic Volume Rendering of Multi‐Phase SPH Data, https://doi.org/10.1111/cgf.14121, fetched 2026-10-27
+[S2] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29

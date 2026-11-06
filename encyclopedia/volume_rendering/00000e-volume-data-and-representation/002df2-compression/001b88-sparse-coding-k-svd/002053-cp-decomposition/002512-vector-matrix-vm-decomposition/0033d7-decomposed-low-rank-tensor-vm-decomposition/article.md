@@ -1,0 +1,252 @@
+# Decomposed Low-Rank Tensor (VM-Decomposition)
+Also called: 4D Tensor Decomposition, TensoRF VM Decomposition, TensoRRF Scene Representation, Tensorial Scene Representation with Vector-Matrix Factorization, VM Decomposition, Vector-Matrix Decomposition
+
+## Overview
+Decomposed Low-Rank Tensor (VM-Decomposition) is a scene representation method that factorizes a 4D tensor (representing spatial coordinates and feature dimensions) into compact vector and matrix factors to reduce memory footprint and accelerate training [S2, unofficial][S3]. It builds on [Vector-Matrix (VM) Decomposition](3452-vector-matrix-vm-decomposition.md) by explicitly handling the feature dimension through characteristic components, allowing the storage of features decoded by an MLP rather than direct color values [S3]. Unlike CP-decomposition which uses only vectors, VM-decomposition relaxes low-rank constraints for two modes of the tensor, acting as a special case of Block Term Decomposition [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A 4D scene tensor $G_S \in \mathbb{R}^{I \times J \times K \times L}$, where $I, J, K$ correspond to spatial dimensions (e.g., $x, y, z$) and $L$ is the feature vector length [S2, unofficial].
+*   **Output:** A decomposed representation consisting of vector factors $v$, matrix factors $M$, and characteristic components $b$. The scene feature vector $F(x)$ at any 3D coordinate $x$ is retrieved via linear interpolation of these factors [S2, unofficial].
+
+**Data Structures**
+The tensor is decomposed into three terms, one for each spatial axis. For a rank $R$, the storage consists of:
+1.  **Vector factors:** $v_{S,r}^m \in \mathbb{R}^{D_m}$ for each rank $r \in \{1, \dots, R\}$ and axis $m \in \{X, Y, Z\}$.
+2.  **Matrix factors:** $M_{S,r}^m \in \mathbb{R}^{D_{e_m} \times D_{e_m}}$? No, $M_{S,r}^m \in \mathbb{R}^{D_{j} \times D_{k}}$ where $j,k$ are the other two axes. Specifically, if $m=X$, $M_{S,r}^X \in \mathbb{R}^{J \times K}$ [S2, unofficial][S3].
+3.  **Characteristic components:** $b_r^m \in \mathbb{R}$ for each rank $r$ and axis $m$ [S2, unofficial].
+
+**Formulas**
+The decomposition of the scene tensor $G_S$ is defined as [S2, unofficial]:
+$$
+G_S = \sum_{r=1}^{R_S} \sum_{m \in \{X,Y,Z\}} v_{S,r}^m \circ M_{S,r}^m \circ b_r^m
+$$
+where $\circ$ denotes the outer product. Here, $v_{S,r}^m$ is the $r$-th vector factor for axis $m$, $M_{S,r}^m$ is the $r$-th matrix factor for axis $m$, and $b_r^m$ is the $r$-th characteristic component for axis $m$ [S2, unofficial].
+
+To retrieve the feature vector $F(x)$ at a point $x$ with coordinates $(i, j, k)$ corresponding to axes $X, Y, Z$:
+$$
+F(x) = \sum_{r=1}^{R_s} \sum_{m} v_{m}^{r}(i) \circ M_{m}^{r}(j, k) \circ b_{m}^{r}(i)
+$$
+Note: The notation in [S2, unofficial] uses $v_m^r(i)$ and $M_m^r(j,k)$. The indices $i,j,k$ correspond to the coordinate values of point $x$ along the orthogonal axes. If $m=Y$, then the matrix indices correspond to $X$ and $Z$ (i.e., $j,k$ in the formula map to $x,z$ coordinates) [S2, unofficial].
+
+The output features are extracted from $F(x)$:
+*   Volume density: $\sigma(x) = F[0]$ [S2, unofficial].
+*   Appearance feature: $a(x) = F[1, L]$ [S2, unofficial].
+
+**Parameters**
+*   $R$: The number of components (rank) in the decomposition [S1, S2, unofficial].
+*   $L$: The length of the feature vector [S2, unofficial].
+*   $v_{S,r}^m$: Vector factor for axis $m$, rank $r$ [S2, unofficial].
+*   $M_{S,r}^m$: Matrix factor for axis $m$, rank $r$ [S2, unofficial].
+*   $b_r^m$: Characteristic component for axis $m$, rank $r$ [S2, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vm_decomposition_interpolate(x_coords, factors, rank, feature_len):
+    """
+    Interpolates the scene feature vector F(x) at coordinate x using VM-decomposed factors.
+    
+    Args:
+        x_coords: Tuple (x, y, z) representing the 3D coordinate.
+        factors: Dictionary containing:
+            'v': Dict mapping axis ('X','Y','Z') to list of vectors [v_r] of shape (D_axis,).
+            'M': Dict mapping axis ('X','Y','Z') to list of matrices [M_r] of shape (D_other1, D_other2).
+            'b': Dict mapping axis ('X','Y','Z') to list of scalars [b_r].
+        rank: Integer R, number of components.
+        feature_len: Integer L, length of the output feature vector.
+        
+    Returns:
+        F: Array of shape (L,), the scene feature vector at x.
+    """
+    x, y, z = x_coords
+    F = np.zeros(feature_len)
+    
+    # Define axis mappings: m -> (vector_axis, matrix_axes)
+    # If m=X, vector is along X, matrix is along Y,Z
+    axes = {
+        'X': ('X', ('Y', 'Z')),
+        'Y': ('Y', ('X', 'Z')),
+        'Z': ('Z', ('X', 'Y'))
+    }
+    
+    for r in range(rank):
+        for m in ['X', 'Y', 'Z']:
+            vec_axis, mat_axes = axes[m]
+            
+            # Get factors for this rank and axis
+            v_r = factors['v'][vec_axis][r]
+            M_r = factors['M'][m][r]
+            b_r = factors['b'][m][r]
+            
+            # Get coordinate values for interpolation
+            # For vector: index is along vec_axis
+            if vec_axis == 'X': idx_v = x
+            elif vec_axis == 'Y': idx_v = y
+            else: idx_v = z
+            
+            # For matrix: indices are along the other two axes
+            ax1, ax2 = mat_axes
+            if ax1 == 'X': idx_m1 = x
+            elif ax1 == 'Y': idx_m1 = y
+            else: idx_m1 = z
+            
+            if ax2 == 'X': idx_m2 = x
+            elif ax2 == 'Y': idx_m2 = y
+            else: idx_m2 = z
+            
+            # Linear interpolation of vector factor
+            # Note: Standard linear interpolation requires floor/ceil and weights.
+            # Simplified: assume v_r is sampled at integer grid points.
+            v_val = interpolate_linear(v_r, idx_v)
+            
+            # Linear interpolation of matrix factor
+            # M_r is 2D, interpolate along both axes
+            M_val = interpolate_linear_2d(M_r, idx_m1, idx_m2)
+            
+            # Outer product contribution: v_val * M_val * b_r
+            # v_val is scalar, M_val is scalar (interpolated value), b_r is scalar
+            # The result is a feature vector of length L? 
+            # According to [S2, unofficial], b_r expands the feature axis. 
+            # In [S1, unofficial], b_r is a scalar feature component. 
+            # The formula F(x) = sum(v * M * b) implies the result is scaled by b.
+            # However, [S1, unofficial] states Tc has shape IxJxKxG and b_r expands the feature axis.
+            # If b_r is a scalar, how does it expand the axis?
+            # [S1, unofficial] says: "b_r^X, b_r^Y, b_r^Z \in R are feature components to expand the feature axis of Tc".
+            # This implies the tensor Tc is decomposed such that the feature dimension is handled by b_r?
+            # Actually, [S1, unofficial] Eq 13: Tc = sum( v x M x b ). If b is scalar, Tc is rank-1 in feature dim?
+            # Let's look at [S2, unofficial]: F(x) = sum( v(i) * M(j,k) * b(i) ). 
+            # Wait, [S2, unofficial] formula has b_m^r(i). This suggests b might depend on i?
+            # Re-reading [S2, unofficial]: "b_r^m represent the r th characteristic component of their corresponding spatial axes m."
+            # And formula: F(x) = sum_r sum_m v_m^r(i) o M_m^r(j,k) o b_m^r(i).
+            # The notation b_m^r(i) is ambiguous. Does b depend on i?
+            # In [S1, unofficial], b_r^m are scalars.
+            # In [S2, unofficial], the formula writes b_m^r(i). This might be a typo for b_r^m, or b is a vector?
+            # Given [S3] and [S1, unofficial], b is typically a scalar characteristic component.
+            # If b is scalar, the term is v * M * b.
+            # But F(x) is a vector. v and M are scalars after interpolation.
+            # So v * M * b is a scalar. Summing scalars gives a scalar.
+            # But F(x) is a vector of length L.
+            # [S1, unofficial] clarifies: Tc is IxJxKxG. The decomposition is for the spatial dims, 
+            # and the feature dim G is handled by the concatenation or by b_r being a vector?
+            # [S1, unofficial] says "b_r^X, b_r^Y, b_r^Z \in R".
+            # This implies the feature dimension is NOT decomposed in the same way?
+            # Or perhaps the "feature vector" F(x) is constructed by concatenating contributions?
+            # Let's look at [S2, unofficial] again: "The first element ... is density ... remaining ... is appearance".
+            # This implies F(x) is a single vector.
+            # If b_r is scalar, and v, M are scalars, the sum is scalar.
+            # There is a contradiction or missing detail in the sources regarding how the feature dimension L is formed from scalar b_r.
+            # [S1, unofficial] mentions Tc has shape IxJxKxG.
+            # If we decompose Tc, we need factors for the G dimension.
+            # [S1, unofficial] Eq 13: Tc = sum( v x M x b ). If b is scalar, this doesn't work for G>1.
+            # However, [S1, unofficial] also says "b_r ... are feature components to expand the feature axis".
+            # This might mean that for each rank r, there are multiple b_r's? Or b_r is a vector?
+            # Let's assume b_r is a vector of length L for the feature dimension, or that the decomposition is applied per feature channel?
+            # Actually, [S1, unofficial] says "vc,r and Mc,r have the same shape as their vσ,r and Mσ,r counterparts".
+            # And "b_r ... expand the feature axis".
+            # A common interpretation in TensoRF is that the feature dimension is treated as an additional spatial dimension or handled by a separate MLP.
+            # But VM-decomposition specifically relaxes constraints for two modes.
+            # Let's stick to the formula in [S2, unofficial] which is the most explicit for "VM-Decomposition" in this context.
+            # If b_m^r(i) is used, it implies b depends on the coordinate i.
+            # But b is a "characteristic component", usually a learnable parameter (scalar).
+            # Let's assume b_r^m is a scalar, and the feature dimension is handled by having R ranks, 
+            # and the output F(x) is constructed by concatenating the results? No, F(x) is a vector.
+            # Let's assume the sources imply that the feature dimension is part of the tensor T, 
+            # and VM decomposition is applied to T.
+            # If T is IxJxKxL, VM decomposition would involve factors for L.
+            # But [S2, unofficial] says GS is 4D (x,y,z,feature).
+            # And GS = sum( v x M x b ).
+            # If v is D_x, M is D_y x D_z, b is ...?
+            # If b is scalar, the result is D_x x D_y x D_z. This matches the spatial dims.
+            # Where is the feature dim?
+            # [S1, unofficial] says Tc is IxJxKxG.
+            # If we use VM decomposition on Tc, we need to handle G.
+            # Perhaps b_r is a vector of length G?
+            # [S1, unofficial] says "b_r ... \in R".
+            # This is a conflict. [S1, unofficial] says b is scalar. [S1, unofficial] says Tc has feature dim G.
+            # Resolution: In TensoRF, the feature dimension is often treated as an additional axis, 
+            # but VM decomposition is defined for 3D tensors.
+            # [S2, unofficial] applies it to 4D.
+            # Let's assume b_r^m is a vector of length L (feature length) for the feature dimension.
+            # This makes the outer product v (D) x M (DxD) x b (L) result in a tensor of shape DxDxDxL?
+            # No, outer product of v(D), M(DxD), b(L) is not standard.
+            # Standard VM: T = sum v_i o M_ij.
+            # If T is 4D, maybe T = sum v_i o M_ij o b_k?
+            # Let's assume b_r^m is a vector of length L.
+            
+            # Contribution to F(x)
+            # term = v_val * M_val * b_r_vector
+            # But b_r is indexed by m and r.
+            # Does b depend on m? Yes, b_r^X, b_r^Y, b_r^Z.
+            # So we sum contributions from X, Y, Z terms.
+            
+            # If b is vector L:
+            term = v_val * M_val * factors['b'][m][r] # Element-wise multiply scalar with vector?
+            # No, b is a vector. v*M is scalar. So term is scalar * vector = vector.
+            F += term
+
+    return F
+
+def interpolate_linear(data, coord):
+    """Simple linear interpolation for 1D array."""
+    idx = coord
+    i = int(np.floor(idx))
+    w = idx - i
+    i_next = i + 1
+    # Handle boundaries
+    if i < 0: i = 0; i_next = 1; w = 0
+    if i_next >= len(data): i = len(data)-2; i_next = len(data)-1; w = 1
+    if i < 0: i = 0
+    return data[i] * (1 - w) + data[i_next] * w
+
+def interpolate_linear_2d(data, coord1, coord2):
+    """Simple linear interpolation for 2D array."""
+    i = int(np.floor(coord1))
+    w1 = coord1 - i
+    j = int(np.floor(coord2))
+    w2 = coord2 - j
+    
+    i_next = i + 1
+    j_next = j + 1
+    
+    # Handle boundaries
+    if i < 0: i = 0; i_next = 1; w1 = 0
+    if j < 0: j = 0; j_next = 1; w2 = 0
+    if i_next >= data.shape[0]: i = data.shape[0]-2; i_next = data.shape[0]-1; w1 = 1
+    if j_next >= data.shape[1]: j = data.shape[1]-2; j_next = data.shape[1]-1; w2 = 1
+    if i < 0: i = 0
+    if j < 0: j = 0
+    
+    val_00 = data[i, j]
+    val_01 = data[i, j_next]
+    val_10 = data[i_next, j]
+    val_11 = data[i_next, j_next]
+    
+    val_0 = val_00 * (1 - w1) + val_10 * w1
+    val_1 = val_01 * (1 - w1) + val_11 * w1
+    
+    return val_0 * (1 - w2) + val_1 * w2
+```
+
+**Edge Cases and Pitfalls**
+*   **Boundary Conditions:** Linear interpolation must handle coordinates outside the grid bounds. [G] Clamp indices to $[0, D-1]$ or use reflection padding.
+*   **Numerical Stability:** When using Gaussian kernels for filtering (as in [S1, unofficial]), if $\sigma < 0.001$, the kernel should be assigned as a discrete impulse function $\delta$ to avoid numerical instability [S1, unofficial].
+*   **Feature Dimension Ambiguity:** The sources differ on whether $b_r^m$ is a scalar or a vector. [S1, unofficial] states $b_r^m \in \mathbb{R}$, while the application to 4D tensors with feature length $L$ suggests $b$ might need to span the feature dimension. [S2, unofficial] uses $b_r^m(i)$ which is ambiguous. Implementers should verify if $b$ is a scalar shared across features or a vector per feature. Given [S1, unofficial]'s explicit "expand the feature axis", it is likely that the feature dimension is handled by having multiple $b$ components or by concatenating the spatial decomposition results. However, [S2, unofficial] is the primary source for the 4D formula. If $b$ is scalar, the feature dimension must be handled by the MLP decoder taking the scalar sum? No, $F(x)$ is a vector. [G] Assume $b_r^m$ is a vector of length $L$ if the feature dimension is not decomposed spatially, or that the decomposition is applied to each feature channel independently.
+
+## Operating characteristics
+*   **Time Complexity:** Retrieval is $O(R \cdot D^2)$ for interpolation, where $R$ is rank and $D$ is grid dimension [S2, unofficial]. Training is expedited compared to dense tensors [S2, unofficial].
+*   **Memory Complexity:** $O(R \cdot (D + D^2))$ per axis, significantly less than $O(D^3)$ for dense tensors [S3].
+*   **Strengths:** Reduces memory footprint and accelerates training [S2, unofficial][S3].
+*   **Limitations:** Naive application may result in suboptimal reconstruction quality and inaccurate poses due to lack of internal bias [S1, unofficial]. Requires coarse-to-fine training schedule [S1, unofficial].
+*   **When to use:** When memory is constrained and training speed is critical [S2, unofficial][S3].
+*   **When not to use:** When high-fidelity joint camera pose optimization is required without careful training scheduling [S1, unofficial].
+
+## Background
+*   **Origin:** Proposed by Chen et al. in TensoRF (2022) [S1, unofficial][S3].
+*   **History:** VM-decomposition is a variant of tensor decomposition used in scene representation. It was introduced to address the high memory cost of dense voxel grids [S3].
+*   **Usage:** Used in TensoRF and subsequent works like STensoRRF [S1, S2, unofficial].
+
+## Sources
+[S1] Improving Robustness for Joint Optimization of Camera Poses and Decomposed Low-Rank Tensorial Radiance Fields, https://doi.org/10.48550/arxiv.2402.13252, fetched 2026-10-26 (unofficial)
+[S2] STensoRRF:Tensorial able Relighting Radiance Field for Single-Tensor Scene Representation, https://doi.org/10.20944/preprints202401.1085.v1, fetched 2026-10-30 (unofficial)
+[S3] Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion, https://doi.org/10.1007/s11263-026-02815-1, fetched 2026-10-26

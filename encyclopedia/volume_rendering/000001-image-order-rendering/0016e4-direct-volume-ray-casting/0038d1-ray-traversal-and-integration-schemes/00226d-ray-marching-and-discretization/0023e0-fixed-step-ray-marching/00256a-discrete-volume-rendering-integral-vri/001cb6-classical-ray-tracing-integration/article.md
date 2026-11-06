@@ -1,0 +1,127 @@
+# Classical Ray Tracing Integration
+
+Also called: Ray Tracing Integral, Volume Rendering Integral
+
+## Overview
+Classical Ray Tracing Integration is a global, image-order rendering approach that determines visible objects at the pixel level by searching for the nearest visible object from the eye point, contrasting with rasterization [S1, unofficial]. It solves the problem of rendering participating media by tracing a ray from the camera through the volume, computing illumination in small segments along the ray while attenuating light by the density between the camera and the segment [S6, unofficial]. What sets it apart from its siblings, such as [Volume Raycasting Discretization](831-volume-raycasting-discretization.md), is its explicit integration of the volume rendering integral using ray-object intersection logic and recursive secondary rays for global illumination effects, rather than relying solely on fixed-step discretization of a pre-defined volume boundary [S1, unofficial][S6, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Camera ray origin $\mathbf{o}$ and direction $\mathbf{d}$; volume data (density $\sigma$, color/scatter $C$); background color; intersection bounds $[t_{in}, t_{out}]$ where the ray enters and exits the volume.
+*   **Outputs:** Final pixel color $C_{final}$ and opacity $\alpha_{final}$.
+
+**Data Structures:**
+*   **Ray:** Struct containing `origin` (vec3), `direction` (vec3, normalized).
+*   **Volume Sample:** Struct containing `density` (float), `color` (vec3), `alpha` (float).
+*   **Accumulators:** `accumulated_color` (vec3, init 0), `accumulated_alpha` (float, init 0), `transmittance` (float, init 1).
+
+**Numbered Steps:**
+1.  **Ray Generation:** For each pixel, compute the viewing ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ with $t=0$ at the viewpoint [S3, unofficial].
+2.  **Intersection:** Intersect the ray against the volume boundary (e.g., voxel buffer or geometric primitive) to determine the integration interval $[t_{in}, t_{out}]$ [S6, unofficial]. If no intersection, return the background color [S2, unofficial].
+3.  **Initialization:** Initialize `accumulated_color` = 0, `accumulated_alpha` = 0, `transmittance` = 1.0 [S6, unofficial].
+4.  **Marching Loop:** Iterate along the ray from $t_{in}$ to $t_{out}$ in steps of $\Delta t$ (or fixed step size $\Delta x$) [S6, unofficial].
+    a.  **Sample:** Evaluate the volume density $\sigma(\mathbf{x})$ and color/scatter contribution $C(\mathbf{x})$ at the current position $\mathbf{x} = \mathbf{o} + t\mathbf{d}$ [S3, unofficial]. Density is often computed via tri-linear interpolation of neighbors [S3, unofficial].
+    b.  **Segment Transmittance:** Compute the transmittance through the current segment: $T_i = e^{-\sigma(\mathbf{x}) \Delta t}$ [S6, unofficial].
+    c.  **Total Transmittance:** Update the total transmittance from the camera to the current point: $T_{total} = T_{total} \times T_i$ [S6, unofficial].
+    d.  **Contribution:** Compute the light contribution of the segment: $C_i = T_{total} \cdot C(\mathbf{x}) \cdot \sigma(\mathbf{x}) \cdot \Delta t$ [S6, unofficial]. Note: Some formulations use a simplified approximation $I(x, w) = \int_{0}^{t_1} (1 - e^{-\int_{0}^{t} \sigma(s) ds}) C(t) dt$ to reduce computational cost [S3, unofficial].
+    e.  **Accumulation:**
+        *   `accumulated_color` = `accumulated_color` + $C_i$ [S6, unofficial].
+        *   `accumulated_alpha` = `accumulated_alpha` + $(1 - T_i) \cdot (1 - \text{accumulated\_alpha})$ [S6, unofficial].
+        *   Alternatively, using the iterative density formula: $ad(i+1) = a_i + (1 - ad(i))$ and $fd(i+1) = fd(i) + a_i c_i (1 - ad(i))$ [S3, unofficial].
+    f.  **Termination:** If `accumulated_alpha` exceeds a threshold (e.g., 0.99) or $t > t_{out}$, break the loop [S6, unofficial].
+5.  **Final Composition:** Combine the accumulated volume color with the background color attenuated by the final transmittance:
+    $$C_{final} = \text{background\_color} \times T_{total} + \text{accumulated\_color}$$
+    [S2, unofficial][S6, unofficial].
+
+**Formulas:**
+*   **Exact Intensity:** $I(x, w) = \int_{0}^{t_1} C(t) e^{-\int_{0}^{t} \sigma(s) ds} dt$, where $C(t)$ is the differential intensity scattered at $x+tw$, and $\sigma(s)$ is the differential attenuation at $x+sw$ [S3, unofficial].
+*   **Beer's Law (Transmission):** $T = e^{-\sigma_a d}$, where $\sigma_a$ is the absorption coefficient and $d$ is the distance traveled [S2, unofficial].
+*   **Simple Sphere Approximation:** For a uniform sphere, $C_{final} = \text{background\_color} \cdot e^{-\sigma_a (t_1 - t_0)} + \text{scatter} \cdot (1 - e^{-\sigma_a (t_1 - t_0)})$ [S2, unofficial].
+
+**Parameters:**
+*   $\sigma_a$: Absorption coefficient. Typical value: 0.1 [S2, unofficial].
+*   `scatter`: Scattered light color. Typical value: vec3(0.8, 0.1, 0.5) [S2, unofficial].
+*   `background_color`: Color if no intersection. Typical value: vec3(0.572, 0.772, 0.921) [S2, unofficial].
+*   $\Delta t$: Step size. Not given in the sources.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def classical_ray_tracing_integration(ray_origin, ray_direction, volume, background_color):
+    # 1. Intersection
+    t_in, t_out = intersect_volume_boundary(ray_origin, ray_direction, volume)
+    if t_in is None:
+        return background_color
+
+    # 2. Initialization
+    accumulated_color = vec3(0.0, 0.0, 0.0)
+    accumulated_alpha = 0.0
+    transmittance = 1.0
+    
+    # 3. Marching
+    t = t_in
+    step_size = volume.step_size # Not given in the sources, assumed available
+    
+    while t < t_out and accumulated_alpha < 0.99:
+        # Position
+        pos = ray_origin + ray_direction * t
+        
+        # Sample Volume
+        density = volume.sample_density(pos)
+        scatter_color = volume.sample_color(pos)
+        
+        # Segment Transmittance
+        # T_i = exp(-sigma * delta_t)
+        segment_transmittance = exp(-density * step_size)
+        
+        # Total Transmittance
+        transmittance = transmittance * segment_transmittance
+        
+        # Contribution
+        # C_i = T_total * C(x) * sigma(x) * delta_t
+        contribution = transmittance * scatter_color * density * step_size
+        
+        # Accumulation
+        accumulated_color = accumulated_color + contribution
+        accumulated_alpha = accumulated_alpha + (1.0 - segment_transmittance) * (1.0 - accumulated_alpha)
+        
+        t = t + step_size
+
+    # 4. Final Composition
+    final_color = background_color * transmittance + accumulated_color
+    return final_color
+```
+
+**Edge Cases and Pitfalls:**
+*   **Swapped Loops:** Swapping the inner and outer loops (objects then pixels) results in a basic rasterization algorithm, not ray tracing [S1, unofficial].
+*   **Distance Calculation:** Computing the distance between entry and exit points using vector difference $(p_2 - p_1).length()$ is correct but redundant if $t_0$ and $t_1$ are available; using $t_1 - t_0$ is faster [S2, unofficial].
+*   **Uniform Scattering Assumption:** The simple sphere model assumes uniform scattering, meaning scattered light color is constant regardless of position or direction, ignoring directional lighting [S2, unofficial].
+*   **Aliasing:** Intersection forced at grid locations produces aliasing effects that increase with recursive ray tracing depth [S8, unofficial].
+
+## Subtopics
+
+### Volumetric Ray Tracing with Global Illumination
+A rendering method for scenes containing both volumetric and geometric data that extends the standard ray tracing illumination equation to capture global illumination effects (shadows, reflections) and volume rendering effects (compositing, maximum-value projections) in a single image [S8, unofficial]. It sorts all objects along a ray according to distance and intersection classification before performing intersection calculations, then passes results to a shader evaluating the intensity equation [S8, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(P \cdot N \cdot S)$, where $P$ is the number of pixels, $N$ is the number of objects (for intersection), and $S$ is the number of samples per ray [S1, unofficial].
+*   **Memory Complexity:** $O(V)$ for volume storage, plus $O(R)$ for ray stack if recursion is used [S1, unofficial].
+*   **Performance:** Relatively slow compared to rasterization, especially for objects covering large regions in screen space, because it processes pixels individually [S1, unofficial].
+*   **Strengths:** Naturally supports volumetric data, easy integration of shadows, reflections, and refraction via secondary rays [S1, unofficial].
+*   **Limitations:** High computational cost; simplified physical processes may not account for directional lighting or varying scattering properties [S6, unofficial][S2, unofficial].
+*   **When to Use:** When global illumination effects (shadows, reflections) are critical and performance is secondary, or for scientific visualization requiring accurate density integration [S4, unofficial][S6, unofficial].
+*   **When Not to Use:** For real-time applications requiring high frame rates with large volumes, where rasterization or texture-based methods are preferred [S1, unofficial].
+
+## Background
+Classical Ray Tracing Integration was introduced by Kajiya and Von Herzen in 1984 in their SIGGRAPH paper "Ray Tracing Volume Densities" [S6, unofficial]. It was one of the first methods to apply ray tracing techniques to participating media, simplifying physical processes by attenuating illumination at each segment along the ray [S6, unofficial]. It is used in scientific visualization and offline rendering pipelines where accuracy of light transport in volumes is prioritized over speed [S4, unofficial][S6, unofficial].
+
+## Sources
+[S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S2] An Introduction to Volume Rendering, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/intro-volume-rendering.html, fetched 2026-10-25 (unofficial)
+[S3] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S4] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
+[S5] DTIC ADA193649: Rendering of Surfaces from Volume Data,, https://archive.org/details/DTIC_ADA193649, fetched 2026-10-26 (unofficial)
+[S6] Production Volume Rendering, https://cg.informatik.uni-freiburg.de/intern/seminar/volumeRenderingProductionFundamentals2011.pdf, fetched 2026-10-27 (unofficial)
+[S7] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S8] Volumetric Ray Tracing, https://www.cs.drexel.edu/~david/Classes/Papers/p11-sobierajski.pdf, fetched 2026-10-28 (unofficial)

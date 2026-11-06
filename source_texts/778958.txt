@@ -1,0 +1,92 @@
+WebGL-based viewer for volumetric data. Contribute to google/neuroglancer development by creating an account on GitHub.
+
+feat: volume rendering show value in layer bar by seankmartin · Pull Request #1007 · google/neuroglancer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+seankmartin
+commented
+May 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There is currently a bit of an odd interaction with the value reported for image layers with volume rendering activated.
+Because we can't really provide a single value for what is under the cursor for volume rendering ON (we can in max and min, since we have a single intensity), we instead always showed 0 as the value. However, because of how captureSelectionState works in the user layer, the following is happening fairly often in mixed scenes:
+The user has a multi-panel setup, at least one panel is a slice view and at least one is a projection view.
+The user hovers over a different object than the volume rendering in the scene as their picking result in the perspective panel. captureSelectionState is called on the image UserLayer.
+The pickedRenderLayer in captureSelectionState is therefore not the VolumeRenderingRenderLayer, and so it falls through the iterating through all renderLayers in the UserLayer to check if any return a valid result from renderLayer.getValueAt.
+The VolumeRenderingRenderLayer has no getValueAt function, but the ImageRenderLayer does. The image UserLayer has both a VolumeRenderingRenderLayer and an ImageRenderLayer since this is a multi-panel setup. The ImageRenderLayer perform a lookup on the chunk value even though the VolumeRenderingRenderLayer has no getValueAt function.
+This results in the user seeing the value in the volume from reprojecting the depth to world space when hovering non-volume rendering pick results, but does not see the value when hovering the volume rendering. This is in the layer bar. This feels odd and inconsistent.
+The changes here aim to make the above system consistent. You always see a value in the layer value indicator by reprojecting the value from the depth buffer at the cursor back to world space. In the case of only having volume rendering, that means the value seen is the min/max intensity along a ray under the cursor. This is done by essentially forcing Step 3 in the above description to always happen, if the pickedRenderLayer is the VolumeRenderingRenderLayer then we use transformPickedValue on the VolumeRenderingRenderLayer to ignore the picked state value (would be 0n) and return null instead to force iterating through all the renderLayers.
+Screencast.from.2026-05-22.12-31-08.webm
+I have this in draft at the moment because there is a bug with excluding the out of bounds information to avoid seeing "null" out of bounds (edit, I'm realising now the image render layer has no such protection, which means likely its not needed in the volume render layer either and the issue is from something else). The filtering works after a refresh but not before.
+UserLayer.captureSelectionState for reference:
+```
+  getValueAt(position: Float32Array, pickState: PickState) {
+    let result: any;
+    const { renderLayers } = this;
+    const { pickedRenderLayer } = pickState;
+    if (
+      pickedRenderLayer !== null &&
+      renderLayers.indexOf(pickedRenderLayer) !== -1
+    ) {
+      result = pickedRenderLayer.transformPickedValue(pickState);
+      result = this.transformPickedValue(result);
+      if (result != null) return result;
+    }
+    for (const layer of renderLayers) {
+      result = layer.getValueAt(position);
+      if (result != null) {
+        break;
+      }
+    }
+    return this.transformPickedValue(result);
+  }
+```
+seankmartin
+added 3 commits
+May 21, 2026 12:55
+refactor: save inverseModelView memory in volume layer
+…
+62847a4
+```
+this avoids recreating the memory each draw
+```
+fix: add getValueAt handler to volume rendering
+…
+0f32c55
+```
+previously with volume rendering on, you would sometimes see the value in the layer bar
+because the picking handling in the UserLayer would call getValueAt on all render
+layers, and the image render layer would pick up the value from the volume rendering max
+projection depth. Since this is the case, it is better for us to be consistent and
+always show this value. This requires explicitly mapping 0n picking values to null. And
+then adding a getValueAt to volume render layers. This getValueAt mimics the function in
+the sliceViewVolumeRenderLayer.
+
+This causes one bug, which is that null is reported outside the bounds very often. This
+will be addressed later.
+```
+fix: correct to detect OOB on volume render getValueAt
+12c57e6
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

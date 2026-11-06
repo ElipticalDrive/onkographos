@@ -1,0 +1,145 @@
+Milestone: 3D Globe I - basic global implementation Blocks: #2057 Relationship: Integration issue: depends on every container issue in phases 1-3. Depends on: #2043, #2045, #2046, #2047, #2048, #2049, #2050, #2051, #2052 Precedent: #1334...
+
+Top-level `assembly<dim3>` constructor from the globe mesh · Issue #2053 · PrincetonUniversity/SPECFEMPP · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Top-level assembly<dim3> constructor from the globe mesh #2053
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Top-level assembly<dim3> constructor from the globe mesh#2053
+Copy link
+Assignees
+Milestone
+3D Globe I - basic global implementation
+Description
+lsawade
+opened on Aug 17, 2026
+Issue body actions
+Milestone: 3D Globe I - basic global implementation
+Blocks: #2057
+Relationship: Integration issue: depends on every container issue in phases 1-3.
+Depends on: #2043, #2045, #2046, #2047, #2048, #2049, #2050, #2051, #2052
+Precedent: #1334 (same job for the Cartesian MESHFEM3D mesh)
+Context
+The final integration step: one constructor that turns a globe specfem::mesh<dim3> into a
+complete specfem::assembly<dim3>, ready for the time loop.
+The existing constructor (core/specfem/assembly/assembly/dim3/assembly.cpp) already establishes
+the container order, and most of it carries over unchanged. The real order is:
+```
+mesh(35) → element_types(45) → element_intersections(48) → jacobian_matrix(51)
+→ field_derivative_storage(53) → kernels(58) → sources(60) → receivers(64)
+→ boundaries(68) → conforming_interfaces(75) → fields(79) → mpi_interfaces(81)
+→ [boundary_values(91)] → check_jacobian_matrix()(95)
+→ attenuation(97) → properties(100) → [property_reader->read()(106)] → info(109)
+```
+Note element_types is built from this->mesh and mesh.tags, so it necessarily follows the
+mesh — an earlier draft of this issue had that backwards.
+The globe constraints are insertions into that order, not a reordering of it:
+element_types must carry the globe element context (issue Carry globe per-element context into assembly::element_types<dim3> #2037) by the time the oracle runs,
+since it supplies get_model_point's arguments. It is already built early enough.
+Reference coordinates (issue Reference (undeformed) GLL coordinate set for model sampling #2039) must exist before the property build, and the property build
+must sample those, not points.
+The oracle (issue specfem::io::globe_model — C++ binding and lifetime for the model oracle #2042) is initialized once, before the property loop, once MODEL_CONFIG is
+available.
+Properties (issue assembly::properties<dim3> from the oracle — isotropic elastic and acoustic #2043) → Love→cij (issue Love parameters → 21 cij at setup, with global↔radial tensor rotation #2045) → recompute() (issue Feed per-GLL Q from the oracle into the existing attenuation machinery #2046) → anisotropic shift
+(issue Anisotropic attenuation for dim3: container plus the radial-frame unrelaxed-moduli shift #2059). Each step mutates stored moduli, so running it out of order gives
+wrong-but-plausible material.
+attenuation at line 97 precedes properties at line 100, and that stays. The container is
+constructed without Q — it deliberately retains fc/band/tau_sigma for exactly this — and
+recompute() fills the state afterwards. Do not reorder these to "fix" the apparent inversion.
+check_jacobian_matrix() at line 95 depends only on geometry and stays where it is.
+The spherical coordinate cache (issue Spherical coordinate cache (r, θ, φ) per GLL point #2041) can be released after its last consumer, the
+anisotropic shift.
+Also note the existing property_reader != nullptr short-circuit: when a GLL model is
+supplied it wins, and the oracle must not run. That interaction needs to keep working.
+Task description
+Add the constructor overload taking a globe specfem::mesh<dim3>. Prefer extending the
+existing constructor with the globe-specific steps guarded on
+has_element_context() over duplicating 100 lines — a second near-identical constructor
+will drift.
+Encode the ordering constraints above as comments and as assertions where cheap:
+a "properties built" flag checked by the attenuation shift, a "shift applied" flag
+checked for double application (issue Feed per-GLL Q from the oracle into the existing attenuation machinery #2046 already asks for the latter).
+Carry PlanetConstants (issue Per-planet constants (specfem/constants/globe.hpp.in) and the SI-units contract #2035) onto the assembly.
+Release the spherical coordinate cache after the last consumer.
+Extend print() with the region breakdown from issue assembly::info<dim3> on the sphere: CFL, resolution, and the mesher cross-check #2052. Keep the existing
+"all elements accounted for" check — it sums per-medium counts against nspec and
+throws otherwise, which is exactly the kind of check a merged three-region mesh needs.
+Note mesh_to_compute_mapping.tpp:55 already performs the same accounting at construction
+(total_counted != nspec throws), so a mismatch is caught twice; that is fine and worth
+keeping, since the two checks cover different stages.
+Confirm fields, kernels, field_derivative_storage, boundary_values and
+conforming_interfaces build unchanged. Where they do, say so in the PR rather than
+touching them.
+Add the globe path to the specfem3d executable's configuration so a global run is
+launchable end to end, even if the time loop is not yet correct for the globe.
+Confirm the property_reader short-circuit still bypasses the oracle.
+Acceptance criteria
+assembly<dim3> constructs without error from dim3_globe/single_chunk_1D, and
+print() reports three regions with all elements accounted for.
+The same on the six-rank dim3_globe/global_small_6rank fixture.
+A test asserts the ordering assertions fire when the chain is deliberately run out of
+order.
+Add tests/unit-tests/assembly/dim3_globe/test_fixture.hpp following
+tests/unit-tests/assembly/dim3/test_fixture.hpp, so downstream issues have a fixture
+to build on.
+get_total_number_of_elements() and get_total_degrees_of_freedom() return sane values,
+and degrees of freedom exceed elements by the expected factor for the GLL count.
+Every existing Cartesian dim2 and dim3 assembly test still passes — this is the
+regression gate for the whole batch.
+A build with the globe option disabled still compiles and all non-globe tests pass.
+Activity
+lsawade
+added this to the 3D Globe I - basic global implementation milestone on Aug 17, 2026
+lsawade
+marked this as blocked by 9 issues on Aug 17, 2026
+assembly::properties<dim3> from the oracle — isotropic elastic and acoustic #2043
+Love parameters → 21 cij at setup, with global↔radial tensor rotation #2045
+Feed per-GLL Q from the oracle into the existing attenuation machinery #2046
+Free-surface, CMB, ICB and ocean-load face containers from the thin database #2047
+Fluid–solid conforming interface on the curved CMB and ICB #2048
+Sources on the sphere: location, depth resolution and moment-tensor rotation #2049
+assembly::mpi<dim3> from globe MPI interfaces #2051
+Receivers on the sphere and seismogram component rotation #2050
+assembly::info<dim3> on the sphere: CFL, resolution, and the mesher cross-check #2052
+lsawade
+marked this as blocking on Aug 17, 2026
+On-the-fly TISO: reduced-storage property layout (Love parameters + radial axis) #2057
+luet
+assigned
+icui
+on Sep 4, 2026
+icui commented on Sep 18, 2026
+icui
+on Sep 18, 2026
+Collaborator
+More actions
+globe ordering/state guarantees, region reporting, coordinate-cache cleanup, end-to-end geocentric source/receiver support
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+icui
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+3D Globe I - basic global implementationNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

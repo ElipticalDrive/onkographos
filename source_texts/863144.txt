@@ -1,0 +1,301 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - perf(viewer/gsplats): splat-texture append fast path — depth-sorting Phase 4 Stage 2 by royerloic · Pull Request #613 · royerlab/luxar
+
+perf(viewer/gsplats): splat-texture append fast path — depth-sorting Phase 4 Stage 2 by royerloic · Pull Request #613 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Jul 19, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Stage 2 of the depth-sorting Phase 4 partial-upload work (Stage 1 = #607, merged). A progressive-LOD commit that merely extends an already-committed prefix — the common 4D-timelapse ladder-refinement case — now writes & uploads only the new [prevCount, count) suffix of the splat texture instead of the whole capacity-sized RGBA32F image.
+Key design finding: no projection-kernel change needed
+My earlier notes assumed Stage 2 required changing the WASM/TS project_gsplats_nd_to_3d return contract to expose an outputPrefixCount (with parity-harness blast radius). It doesn't. The nD→3D projection is per-splat-independent and order-preserving, and the loader appends LOD levels in order, so under an unchanged view state the (k+1)-level projection's first prevCount visible outputs are byte-identical to the previous commit's entire output. Therefore outputPrefixCount === prevCount (the committed visibleSplatCount) is deducible, not measured — collapsing the blast radius entirely.
+The one genuine hole — truncate is a material uniform (uTruncate) outside viewStatesEqual — is closed by gating on a stamped committedTruncate.
+What changed
+types/gsplats-lineage.ts (new): a forward-chained prefix-lineage WeakMap, stamped in the loader's concatenateMemoized, checked in commit by identity against getCommittedData(mesh). Identity match proves same generation (a view change bumps the loader reset generation → no parent → append rejected), genuine extension, and that the GPU still holds that parent's projection.
+commit-gsplats-geometry.ts: the append gate — hadCommittedData && !attributesRebuilt && geometry === prevGeometry (in-place pool reuse, which also bounds count ≤ capacity) && gpuPrefixIntact && splatCount > prevCount && lineage === committedData && committedTruncate === readTruncate. Stamps committedTruncate + gpuPrefixIntact on every full commit (self-healing).
+gsplat-geometry.ts: writeSplatTexels(…, { fromSplat }) skips the prefix write loop and registers only the suffix dirty range; new writeSortedIndexIdentityRange extends aSortedIndex with identity for the appended range, preserving the prefix permutation.
+gsplats-adapter.ts / gpu-buffer-pool.ts: thread fromSplat through updateGeometry.
+node-factory.ts: rebuildAfterContextRestore now marks every splat texture + aSortedIndex full-dirty and clears gpuPrefixIntact, so a WebGL context restore never leaves a stale prefix under a following append (a dual mark+flag mechanism — the mark covers the no-commit case, the flag the following-commit case).
+Pixel-identical; classic WebGL only (WebGPU re-uploads the whole image, Stage 3). Points/Lines symmetry (writeInterleavedAttribute(…, fromInstance)) is a documented follow-up, pending independent verification of their projection order-preservation.
+Tests
+suffix write + writeSortedIndexIdentityRange + pool append branch (splat-texture-storage.test.ts)
+append gate: positive + 6 negatives — no lineage, context-restore, attribute rebuild, equal count, truncate mismatch (commit-gsplats-geometry.test.ts)
+lineage forward-chain / view-change reset / memoized-noop identity (gsplats-progressive-loader.test.ts)
+context-restore full-dirty (node-factory.test.ts)
+Full rendering + data unit suites green (179 files, 3282 tests); typecheck, eslint, check:layers clean.
+🤖 Generated with Claude Code
+royerloic
+and others
+added 2 commits
+July 19, 2026 12:34
+perf(viewer/gsplats): append fast path for splat-texture uploads — de…
+…
+1757767
+```
+…pth-sorting Phase 4 Stage 2
+
+A progressive-LOD commit that merely EXTENDS an already-committed prefix
+(the common 4D-timelapse streaming case) now writes & uploads only the new
+[prevCount, count) suffix instead of the whole capacity-sized texture.
+
+Key finding: no projection-kernel contract change is needed. The nD→3D
+projection is per-splat-independent and order-preserving, and the loader
+appends LOD levels in order, so under an unchanged view state the longer
+projection's first prevCount visible outputs are byte-identical to the
+previous commit's entire output — outputPrefixCount === the committed
+visibleSplatCount is deducible, not measured.
+
+- types/gsplats-lineage.ts: forward-chained prefix-lineage WeakMap, stamped
+  in the loader's concatenateMemoized, checked in commit by identity against
+  getCommittedData(mesh).
+- commit-gsplats-geometry.ts: append gate = in-place pool reuse
+  (!attributesRebuilt && geometry === prevGeometry) + gpuPrefixIntact +
+  splatCount > prevCount + lineage match + committedTruncate === readTruncate
+  (uTruncate is a material uniform outside viewStatesEqual). Stamps
+  committedTruncate + gpuPrefixIntact on every full commit.
+- gsplat-geometry.ts: writeSplatTexels({fromSplat}) writes/registers only the
+  suffix; new writeSortedIndexIdentityRange extends aSortedIndex with identity
+  for the appended range, preserving the prefix permutation.
+- gsplats-adapter.ts / gpu-buffer-pool.ts: thread fromSplat through updateGeometry.
+- node-factory.ts: rebuildAfterContextRestore now marks every splat texture +
+  aSortedIndex full-dirty and clears gpuPrefixIntact so a WebGL context restore
+  never leaves a stale prefix under an append.
+
+Points/Lines symmetry (writeInterleavedAttribute fromInstance) is a documented
+follow-up pending order-preservation verification. Pixel-identical; classic
+WebGL only (WebGPU re-uploads the whole image, Stage 3).
+
+Tests: suffix write + writeSortedIndexIdentityRange + pool append branch
+(splat-texture-storage), append gate positive + 6 negatives
+(commit-gsplats-geometry), lineage forward-chain/view-reset/memoized-noop
+(gsplats-progressive-loader), context-restore full-dirty (node-factory).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Merge branch 'main' into stage2-append-gsplats
+97fe110
+Hide details
+View details
+royerloic
+merged commit 2626892
+into
+main
+Jul 19, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+added a commit
+that referenced
+this pull request
+Jul 19, 2026
+Merge origin/main (splat-texture append fast path #613)
+55437d3
+royerloic
+mentioned this pull request
+Jul 19, 2026
+feat: 'volumetric' blending mode — emission–absorption compositing (Phase 1: gsplats + node-level κ)
+#614
+Merged
+royerloic
+deleted the
+stage2-append-gsplats
+branch
+July 20, 2026 06:58
+royerloic
+mentioned this pull request
+Jul 20, 2026
+perf(viewer): Points & Lines append fast path — depth-sorting Phase 4 Stage 2 (three-geometry symmetry)
+#617
+Merged
+royerloic
+added a commit
+that referenced
+this pull request
+Jul 20, 2026
+fix(viewer): cap prefix-lineage retention — depth-1 chain + consume-o…
+…
+1c1b84d
+```
+…n-commit
+
+Double-check finding (empirically proven with a FinalizationRegistry
+experiment): a WeakMap holds its VALUE strongly while the key is
+reachable, so the forward-chained prefix-parent map pinned EVERY
+intermediate concat of a generation for as long as the newest stayed
+committed — ~(n-1)/2 x the final CPU arrays on an n-level ladder,
+indefinitely on a static view (hundreds of MB on 10M-element datasets).
+Pre-existing: shipped with the gsplat Stage 2 in #613, inherited by
+Points/Lines here.
+
+- setPrefixParent now deletes the superseded parent's own entry when
+  linking a child (chain capped at depth 1); an in-flight older commit
+  reads undefined and degrades to a full rewrite (safe).
+- All three commits consume-and-clear the entry right after the gate
+  check, releasing the parent as soon as the append/full-write decision
+  is made; a retry after a throwing write full-rewrites.
+- New direct test suite for the shared module (chain cap, clear-on-null,
+  self-link guard) + consumption assertions in the three commit suites.
+- Docs: retention contract in the module header + spec §7 + CHANGELOG;
+  concatOptionalField now documents its coupling to the gates' presence
+  conjuncts.
+
+3512 unit tests green; typecheck/eslint/check:layers clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+royerloic
+added a commit
+that referenced
+this pull request
+Jul 20, 2026
+docs+test(viewer): pin the gsplat append-gate color-exactness invariant
+…
+e44e5d2
+```
+Third double-check (feature-wide: #613 + #617 as one unit) finding: the
+gsplat append gate has NO optional-field presence conjunct — unlike the
+points/lines gates added in this PR — and that asymmetry is correct but
+rested on an UNDOCUMENTED exactness invariant: a null→colored ladder
+transition re-fills the concat prefix with 255/65535/1.0 white fills
+whose coercion (fill × (1/fill)) is bit-identical to the colorless
+projection's fillColorsWhite 1.0 (verified: exact in f32 for both 255
+and 65535). Documented in the gsplat gate comment and pinned with a
+mutation-proof 'append-gate invariant' test in coerce-colors.test.ts —
+if a future normalization change breaks the exactness, the test fails
+and names the gate that then needs a presence conjunct.
+
+Full unit tree green (8936 tests); typecheck/eslint/check:layers clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+royerloic
+added a commit
+that referenced
+this pull request
+Jul 20, 2026
+perf(viewer): Points & Lines append fast path — depth-sorting Phase 4…
+…
+2134334
+```
+… Stage 2 (three-geometry symmetry) (#617)
+
+* wip: rename types/gsplats-lineage.ts -> types/prefix-lineage.ts (shared three-geometry lineage)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+* perf(viewer): Points & Lines append fast path — depth-sorting Phase 4 Stage 2, three-geometry symmetry
+
+A progressive-LOD commit that merely EXTENDS the committed prefix now
+writes & uploads only the new [prevCount, count) instance suffix for
+Points and Lines too (gsplats landed in #613):
+
+- types/gsplats-lineage.ts -> types/prefix-lineage.ts: the forward-chained
+  prefix-parent WeakMap is geometry-agnostic and now shared by all three
+  loaders/commits.
+- writeInterleavedAttribute(..., { fromInstance }): full-length source,
+  suffix-only copy, min-start/max-end dirty-range union; threaded through
+  writePooledAttribute, both pool adapters, and the pool facades.
+- Append gates in commit-points/lines-geometry mirror the gsplat one
+  (lineage identity vs committedData, in-place pool reuse, gpuPrefixIntact,
+  strict count increase) minus preserveOrdering/committedTruncate, plus an
+  optional-field presence conjunct: the all-or-nothing concatOptionalField
+  means a Float32<->absent flip re-fills a column with a constant the
+  committed prefix need not match (invisible to the pool's dtype matching).
+- Pre-existing fix: concatenateLinesData filled missing-part sharpness with
+  0.0 while the projection defaults null sharpness to 0.5 — mixed-sharpness
+  ladders popped razor-sharp; now fills 0.5 (mirrors the white color fill)
+  and makes the Lines prefix-identity contract hold.
+- NodeFactory.rebuildAfterContextRestore now marks points/lines interleaved
+  instance buffers (and plain attributes on the non-pool points layout)
+  full-dirty and clears gpuPrefixIntact, same dual mark+flag contract.
+
+Order-preservation verified for both projections: the Points zero-radius
+drop is a pre-concat per-level forward scan; Lines clipping is an
+order-preserving drop + in-place endpoint clip (never splits/reorders).
+
+Tests: 6 fromInstance writer tests, 6 gate tests each for points/lines,
+lineage forward-chain/view-reset/memoized-noop for both loaders, the
+mixed-sharpness 0.5-fill, and context-restore full-dirty for points/lines.
+Full data+rendering unit suites green (3356 tests); typecheck/eslint/
+check:layers clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+* test(viewer): cover the restore hook's plain-attribute branch (non-pool points layout)
+
+Double-check finding: the else-branch marking plain InstancedBufferAttributes
+full-dirty in rebuildAfterContextRestore had no test — a mutant deleting it
+survived. The points/lines restore test now carries a plain attribute
+alongside the interleaved buffer and asserts its ranges clear + version bumps.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+* fix(viewer): cap prefix-lineage retention — depth-1 chain + consume-on-commit
+
+Double-check finding (empirically proven with a FinalizationRegistry
+experiment): a WeakMap holds its VALUE strongly while the key is
+reachable, so the forward-chained prefix-parent map pinned EVERY
+intermediate concat of a generation for as long as the newest stayed
+committed — ~(n-1)/2 x the final CPU arrays on an n-level ladder,
+indefinitely on a static view (hundreds of MB on 10M-element datasets).
+Pre-existing: shipped with the gsplat Stage 2 in #613, inherited by
+Points/Lines here.
+
+- setPrefixParent now deletes the superseded parent's own entry when
+  linking a child (chain capped at depth 1); an in-flight older commit
+  reads undefined and degrades to a full rewrite (safe).
+- All three commits consume-and-clear the entry right after the gate
+  check, releasing the parent as soon as the append/full-write decision
+  is made; a retry after a throwing write full-rewrites.
+- New direct test suite for the shared module (chain cap, clear-on-null,
+  self-link guard) + consumption assertions in the three commit suites.
+- Docs: retention contract in the module header + spec §7 + CHANGELOG;
+  concatOptionalField now documents its coupling to the gates' presence
+  conjuncts.
+
+3512 unit tests green; typecheck/eslint/check:layers clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+* docs+test(viewer): pin the gsplat append-gate color-exactness invariant
+
+Third double-check (feature-wide: #613 + #617 as one unit) finding: the
+gsplat append gate has NO optional-field presence conjunct — unlike the
+points/lines gates added in this PR — and that asymmetry is correct but
+rested on an UNDOCUMENTED exactness invariant: a null→colored ladder
+transition re-fills the concat prefix with 255/65535/1.0 white fills
+whose coercion (fill × (1/fill)) is bit-identical to the colorless
+projection's fillColorsWhite 1.0 (verified: exact in f32 for both 255
+and 65535). Documented in the gsplat gate comment and pinned with a
+mutation-proof 'append-gate invariant' test in coerce-colors.test.ts —
+if a future normalization change breaks the exactness, the test fails
+and names the gate that then needs a presence conjunct.
+
+Full unit tree green (8936 tests); typecheck/eslint/check:layers clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Fable 5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

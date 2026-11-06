@@ -1,0 +1,107 @@
+# Photon Marching
+
+Also called: Discrete Photon Beam Generation
+
+## Overview
+Photon Marching is a method for generating "discrete photon beams" by depositing photons at uniform intervals along a ray originating from a light source, rather than propagating a single photon via a Markov random walk [S1]. It differs from standard photon tracing by distributing the power of a single photon among multiple deposited photons at fixed steps, analogous to how ray marching solves 1D integrals via Riemann sums compared to random-walk path tracing [S1]. It serves as the foundational geometric definition for photon beams in the Photon Beam Methods family, though in practice, beams are often still generated via random-walk sampling [S1].
+
+## How it works
+**Inputs:**
+*   Light source position $\mathbf{x}_b$ and direction $\tilde{\omega}_b$.
+*   Photon beam power $\Phi_b$ entering the medium.
+*   Medium scattering coefficient $\sigma_s$ and extinction coefficient $\sigma_t$.
+*   Uniform step size $\Delta t$.
+*   Random offset $\xi$ for the beam.
+
+**Outputs:**
+*   A list of deposited photons, each defined by position $\mathbf{x}_t$ and power $\Phi_{p_b}$.
+
+**Data Structures:**
+*   **Discrete Photon Beam:** A sequence of photon deposits. Each deposit stores:
+    *   Position $\mathbf{x}_t$ (3D vector).
+    *   Power $\Phi_{p_b}$ (scalar).
+    *   Step index $k$ (integer, implicit in position calculation).
+
+**Steps:**
+1.  **Initialize:** Set current position $\mathbf{x}_{curr} = \mathbf{x}_b$. Set step counter $k = 0$.
+2.  **Calculate Offset:** Compute the initial step parameter $t_0 = \xi$. [S1]
+3.  **Iterate Steps:** While the ray is within the medium extent:
+    a.  Compute current step parameter $t_k = t_0 + k \cdot \Delta t$. [S1]
+    b.  Compute position $\mathbf{x}_t = \mathbf{x}_b + t_k \tilde{\omega}_b$. [S1]
+    c.  Compute transmittance from ray origin to $\mathbf{x}_t$: $T = e^{-\sigma_t t_k}$. [S1]
+    d.  Compute distance from origin: $d = \|\mathbf{x}_b - \mathbf{x}_t\| = t_k$ (assuming unit direction). [S1]
+    e.  Calculate deposited photon power:
+        $$ \Phi_{p_b} = \sigma_s e^{-\sigma_t t_k} t_k \Phi_b \Delta t $$ [S1]
+    f.  Store photon $(\mathbf{x}_t, \Phi_{p_b})$.
+    g.  Increment $k$.
+4.  **Terminate:** Stop when $t_k$ exceeds the medium boundary or maximum length.
+
+**Parameters:**
+*   $\Delta t$: Uniform step size. Not given in the sources.
+*   $\xi$: Random offset to avoid aliasing. Specific value inconsequential for derivations [S1].
+
+**Edge Cases:**
+*   **Medium Extent:** The method assumes the medium has finite extent to determine the number of steps $N$ [S1].
+*   **Precision:** Transmittance $e^{-\sigma_t t_k}$ may underflow for large $t_k$ or high $\sigma_t$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def photon_march(x_b, omega_b, Phi_b, sigma_s, sigma_t, delta_t, xi, max_length):
+    """
+    Generates a discrete photon beam via photon marching.
+    
+    Args:
+        x_b: Origin vector (3D)
+        omega_b: Direction vector (3D, assumed unit length)
+        Phi_b: Input beam power (scalar)
+        sigma_s: Scattering coefficient (scalar)
+        sigma_t: Extinction coefficient (scalar)
+        delta_t: Uniform step size (scalar)
+        xi: Random offset (scalar)
+        max_length: Maximum ray length in medium (scalar)
+        
+    Returns:
+        List of tuples (position, power)
+    """
+    photons = []
+    k = 0
+    
+    # Initial step parameter
+    t_current = xi
+    
+    while t_current <= max_length:
+        # Position calculation
+        x_t = x_b + t_current * omega_b
+        
+        # Transmittance from origin
+        transmittance = exp(-sigma_t * t_current)
+        
+        # Distance from origin (assuming unit direction)
+        dist = t_current
+        
+        # Power calculation (Equation 15)
+        # Phi_pb = sigma_s * exp(-sigma_t * t) * ||x_b - x_t|| * Phi_b * delta_t
+        phi_pb = sigma_s * transmittance * dist * Phi_b * delta_t
+        
+        photons.append((x_t, phi_pb))
+        
+        # Next step
+        k += 1
+        t_current = xi + k * delta_t
+        
+    return photons
+```
+
+## Operating characteristics
+*   **Complexity:** Time complexity is linear with respect to the number of steps $N$, where $N \approx \text{Length} / \Delta t$. Memory complexity is linear with respect to $N$ to store the discrete photons.
+*   **Performance:** Not given in the sources.
+*   **Strengths:** Provides a mathematically rigorous definition of discrete photon beams as a Riemann sum approximation [S1].
+*   **Limitations:** The method is primarily used for derivation; in practice, photon beams are still created using a random-walk process [S1]. Uniform step size may be inefficient for heterogeneous media.
+
+## Background
+Photon Marching was introduced in the context of a comprehensive theory of volumetric radiance estimation using photon points and beams [S1]. It is analogous to the difference between synthesizing an image using random-walk volumetric path tracing and ray marching from the camera [S1]. The method distributes the power of a single photon among multiple photons deposited at uniform intervals, creating a "discrete photon beam" [S1].
+
+## Sources
+[S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

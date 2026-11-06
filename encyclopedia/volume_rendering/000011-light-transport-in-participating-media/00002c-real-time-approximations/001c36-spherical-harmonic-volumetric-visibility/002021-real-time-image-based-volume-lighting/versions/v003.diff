@@ -1,0 +1,84 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # Real-Time Image-Based Volume Lighting
+-
+-
+ ## Overview
+ Real-Time Image-Based Volume Lighting is a two-step, GPU-friendly technique for the real-time rendering of heterogeneous participating media under distant environment lighting [S1]. It estimates spherical scattered radiance at discrete points in the medium, projects this function into spherical harmonics (SH), and uses this cached information to compute single scattering via ray-marching [S1]. It sets itself apart from its parent [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by explicitly splitting the scattered radiance integral into a volume-independent factor and a volume-dependent factor to reduce the computational cost of the triple product inherent in SH-based scattering to a simple dot product [S1]. Unlike [Spherical Harmonics Irradiance Encoding](4336-spherical-harmonics-irradiance-encoding.md), which typically encodes irradiance at surface points, this method encodes scattered radiance within the volume itself to handle self-shadowing and heterogeneous density [S1].
+@@ -149,27 +147,33 @@
+ 
+ def intersect_ray_box(origin, direction, bbox_min, bbox_max):
+-    tmin = (bbox_min[0] - origin[0]) / direction[0] if direction[0] != 0 else -float('inf')
+-    tmax = (bbox_max[0] - origin[0]) / direction[0] if direction[0] != 0 else float('inf')
+-    if tmin > tmax: tmin, tmax = tmax, tmin
+-    for i in range(1, 3):
+-        tymin = (bbox_min[i] - origin[i]) / direction[i] if direction[i] != 0 else -float('inf')
+-        tymax = (bbox_max[i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf')
+-        if tymin > tymax: tymin, tymax = tymax, tymin
+-        if tmin > tymax or tmax < tymin: return None, None
+-        if tmin < tymin: tmin = tymin
+-        if tmax > tymax: tmax = tymax
+-    return origin + direction * tmin, origin + direction * tmax
++    tmin = -float('inf')
++    tmax = float('inf')
++    for i in range(3):
++        if direction[i] == 0:
++            if origin[i] < bbox_min[i] or origin[i] > bbox_max[i]:
++                return None, None
++        else:
++            t1 = (bbox_min[i] - origin[i]) / direction[i]
++            t2 = (bbox_max[i] - origin[i]) / direction[i]
++            if t1 > t2: t1, t2 = t2, t1
++            if t1 > tmin: tmin = t1
++            if t2 < tmax: tmax = t2
++            if tmin > tmax: return None, None
++    if tmax < 0: return None, None
++    t_enter = max(tmin, 0.0)
++    t_exit = tmax
++    return origin + direction * t_enter, origin + direction * t_exit
+ 
+ def compute_transmittance(p_start, p_end, medium, steps=10):
+-    t = 0.0
+-    dt = 1.0 / steps
+-    for _ in range(steps):
+-        p = p_start + (p_end - p_start) * t
++    total_sigma_t = 0.0
++    dist = (p_end - p_start).length()
++    dt = dist / steps
++    for i in range(steps):
++        p = p_start + (p_end - p_start) * (i / steps)
+         sigma_t = medium.extinction(p)
+-        t += dt
+-        t *= math.exp(-sigma_t * (p_end - p_start).length() / steps)
+-    return t
+-
+-def precompute_records(medium, bounding_box, grid_resolution, env_map):
++        total_sigma_t += sigma_t * dt
++    return math.exp(-total_sigma_t)
++
++def precompute_records(medium, bounding_box, grid_resolution, env_radiance_func):
+     healpix_samples = generate_healpix_samples()
+     grid = {}
+@@ -191,6 +195,6 @@
+     return grid
+ 
+-def render(medium, bounding_box, grid, env_map, camera):
+-    f_ind_coeffs = project_to_sh(generate_healpix_samples(), env_map.sample)
++def render(medium, bounding_box, grid, grid_resolution, cell_size, env_radiance_func, camera):
++    f_ind_coeffs = project_to_sh(generate_healpix_samples(), [env_radiance_func(omega) for omega in generate_healpix_samples()])
+     image_width, image_height = camera.resolution
+     output_image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
+@@ -207,6 +211,10 @@
+                 t = i * step_size
+                 p_n = p_in + ray_dir * t
+-                cell_idx = grid.get_cell_index(p_n)
+-                if cell_idx is not None:
++                cell_idx = (
++                    int((p_n[0] - bounding_box.min[0]) / cell_size),
++                    int((p_n[1] - bounding_box.min[1]) / cell_size),
++                    int((p_n[2] - bounding_box.min[2]) / cell_size)
++                )
++                if cell_idx in grid:
+                     g_coeffs = grid[cell_idx]['coeffs']
+                     r_s = sh_dot(f_ind_coeffs, g_coeffs)

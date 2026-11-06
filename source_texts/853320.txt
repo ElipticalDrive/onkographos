@@ -1,0 +1,231 @@
+Parent: #7254 Historical correctness fix: #1596 / PR #1736 Production exact-bit oracle: #7449 Task Migrate the already-correct production u64 -> f32/f64 low/high sequence from assembly-string construction into typed post-register-allocat...
+
+backend: migrate u64-to-float high-half cast records · Issue #7353 · JoNil-Botta/typelisp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+backend: migrate u64-to-float high-half cast records #7353
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+backend: migrate u64-to-float high-half cast records#7353
+Copy link
+Labels
+backendIR, optimizer, codegenIR, optimizer, codegenblockedBlocked by an unresolved dependencyBlocked by an unresolved dependencycompilerCore compiler pipelineCore compiler pipelineoptimizationOptimizer passes and pipelineOptimizer passes and pipelineself-hostingWork toward the self-hosted compilerWork toward the self-hosted compilertestingTests and CITests and CI
+Description
+JoNil
+opened on Sep 1, 2026
+Issue body actions
+Parent: #7254
+Historical correctness fix: #1596 / PR #1736
+Production exact-bit oracle: #7449
+Task
+Migrate the already-correct production u64 -> f32/f64 low/high sequence from
+assembly-string construction into typed post-register-allocation machine
+records consumed by both assembly and object serializers.
+This issue owns only the integer-to-float direction. It does not wait for or
+modify the independent float -> u64 correctness fix #7251, and it does not
+retire the global direct-object Cast gate.
+Current findings
+Audit baseline: main@f55be174, 2026-09-02.
+compiler-backend-u64-to-float-cast-asm implements the full unsigned range:
+test the sign bit; use signed cvtsi2s{s,d}q on the low path; otherwise copy
+the low bit, shift a destructive working copy right, restore the sticky low
+bit with OR, convert, and double with adds{s,d}.
+Selection already interns deterministic high/done i64 label IDs from the
+containing IR block label, SSA destination, and suffix. Assembly rendering
+then combines the function identity with each label and immediately flattens
+the branch, definitions, and operands into one String. The migration should
+preserve those IDs as function-scoped local identities; it need not invent a
+second label allocator, and it must not treat an IR-label ID as globally
+unique across functions.
+Regalloc reports two GP scratch requirements for every u64 -> float cast:
+FloatCastValueGp receives the destructive working copy and
+FloatCastScratchGp preserves the low bit. A spilled result additionally
+uses FloatCastValueXmm. The migration must consume those planned, distinct
+homes exactly.
+The production fixture now contains tests: lock exact u64-to-float runtime rounding bits #7449 exact f32/f64 bit-payload checks at precision and high-path tie boundaries; that reviewed oracle landed through PR tests: lock exact u64-to-float rounding #7724 before this record migration.
+Linux/Windows assembly checks assert textual label, js, andq, shrq,
+orq, addsd, and addss shapes. Windows force-selects assembly for this
+fixture, and the authoritative direct-object semantic gate rejects all
+Cast instructions.
+backend: record source-located scalar fault blocks in shared machine programs #7345 owns the generic stable-local-label and fixed-width local-transfer API
+inside its fault-block slice. backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 owns final GP/XMM register/spill operands,
+backend: migrate full-width scalar integer materialization to shared machine records #7202 full-width integer materialization, and backend: migrate branch-free scalar float conversions to machine records #7253 checked scalar conversion
+opcodes.
+The sequence also needs register test/mov/or, immediate-one and/shr,
+and precision-matched scalar add. Reuse common checked primitive
+descriptors from backend: migrate checked scalar shifts to shared machine records #7204/backend: migrate scalar SSE2 expressions to shared machine records #7205 if available; otherwise publish the narrow rows
+from this issue for those consumers. Do not create a cast-private encoder and
+do not wait for either broad migration.
+Focused issue/PR searches found no duplicate implementation or claiming PR.
+Landing shape
+Consume tests: lock exact u64-to-float runtime rounding bits #7449's reviewed exact-bit production oracle.
+Preserve the existing function-scoped high/done identities and emit the
+selected test/branch/low-convert/jump/high-transform/convert/double sequence
+as checked records using final physical homes.
+Serialize the same records to existing Linux/Windows assembly and through
+the common x86 encoder/local-layout pass into ELF/COFF bytes.
+Do not extend the broad object-only Cast-as-move placeholder. Leave its
+deletion, whole-program Cast eligibility, and source-level no-assembler
+matrix enforcement to backend: retire Cast object fallback after full scalar matrix parity #7355 after every scalar cast producer lands.
+Likely files/modules
+machine-program/model, builder, assembly serializer, and x86 encoder from
+backend: establish the typed machine-program core and migrate one scalar leaf #7055
+local label/branch API from backend: record source-located scalar fault blocks in shared machine programs #7345
+scalar physical operands from backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301, materialization from backend: migrate full-width scalar integer materialization to shared machine records #7202, and
+conversion opcodes from backend: migrate branch-free scalar float conversions to machine records #7253
+src/compiler_backend.tl production cast selection/serialization
+src/compiler_regalloc.tl float-cast roles and destructive-copy constraints
+src/compiler_backend_tests.tl
+tests/integration/u64_float_casts.tl, tests: lock exact u64-to-float runtime rounding bits #7449's oracle, and focused Linux/
+Windows object byte/execution tests
+Acceptance criteria
+Production selection emits one checked typed sequence for u64 -> f32 and
+u64 -> f64: test/sign branch, low conversion, jump, high-path copy/low-bit/
+shift/OR, conversion, and precision-matched doubling.
+Results match tests: lock exact u64-to-float runtime rounding bits #7449 and SPEC §3.8 over the full u64 range under the hosted
+default round-to-nearest, ties-to-even environment, including zero, precision
+boundaries, 2^63-1, 2^63, high-path tie-adjacent values, and u64::MAX.
+Do not broaden this into a new non-default MXCSR guarantee.
+Preserve the existing high/done semantic IDs once in production selection
+and scope them by function in the machine program. Assembly and bytes consume
+the same label IDs, fixed-width branch records, layout, and local fixups; no
+serializer reconstructs names from function/block/destination text.
+FloatCastValueGp, FloatCastScratchGp, and optional FloatCastValueXmm
+name final physical homes. Value and low-bit GP homes are distinct, the
+destructive shift always targets the working copy, and the live source is
+never modified.
+Invalid scratch aliasing, wrong register class/width, missing or duplicate
+function-local label, cross-function target, unsupported precision, or
+incomplete sequence fails deterministically before serialization with
+bounded cast/function context.
+Assembly serialization is byte-for-byte text identical to current Linux/
+Windows output, including label placement and instruction order. Any
+intentional normalization is separately justified and measured.
+Exact ELF/COFF byte and local-layout goldens cover testq, js, both
+cvtsi2s{s,d}q forms, jmp, register movq/orq, immediate-one
+andq/shrq, adds{s,d}, short/near boundary policy, low/extended GP and
+XMM registers, REX/prefix order, and direct/spilled input/result plans.
+Focused shared-record object tests execute or otherwise prove the selected
+sequence independently of the old object-IR selector. tests: lock exact u64-to-float runtime rounding bits #7449's source oracle
+may remain assembly-backed here; final source-level direct-object parity and
+assembler-fatal enforcement belong to backend: retire Cast object fallback after full scalar matrix parity #7355 after its observation
+dependencies are available.
+Do not remove the whole-program Cast exclusion or claim the public fixture
+no-assembler here. The final matrix/eligibility gate is backend: retire Cast object fallback after full scalar matrix parity #7355.
+Report record bytes/allocations, backend time, generated instruction/code
+size, and peak memory before/after. Run typelisp fmt, focused tests under
+the repository cap, bootstrap/fixpoint, and hosted Linux/Windows CI.
+Assumptions / blockers
+Blocked on #7055, #7202, #7253, #7301, and #7345; #7449 landed through PR #7724 and supplies the exact-bit production oracle. It is not blocked on
+#7251, #7204, #7205, completion of broad #7028/#7029, general calls, runtime
+helpers, or unwind work. After the remaining named prerequisites land, remove blocked
+and add ready-for-implementation.
+Coordinate reusable primitive opcode tables with #7204/#7205 and the
+shared-core/target-adapter boundary with #5347.
+Activity
+JoNil
+added
+backendIR, optimizer, codegenIR, optimizer, codegen
+compilerCore compiler pipelineCore compiler pipeline
+testingTests and CITests and CI
+optimizationOptimizer passes and pipelineOptimizer passes and pipeline
+self-hostingWork toward the self-hosted compilerWork toward the self-hosted compiler
+blockedBlocked by an unresolved dependencyBlocked by an unresolved dependency
+on Sep 1, 2026
+JoNil commented on Sep 2, 2026
+JoNil
+on Sep 2, 2026
+CollaboratorAuthor
+More actions
+Research refreshed against main@f55be174 (2026-09-02).
+The production algorithm and regalloc contract are unchanged and the focused
+fixture exits 0 under the repository's 2 GiB process-tree cap. The migration
+remains blocked, but its implementation boundary is now more precise:
+selection already interns deterministic high/done IR-label IDs; the shared
+program must preserve them as function-scoped identities instead of
+reminting or flattening them to text;
+two distinct planned GP homes remain mandatory, with an optional XMM result
+home for spills;
+the selected stream owns/reuses the narrow test/mov/and/shr/or,
+conversion, branch, and scalar-add records without waiting for broad shift or
+SSE-expression migrations;
+the broad object-only Cast-as-move placeholder remains untouched here and
+is deleted only by final matrix gate backend: retire Cast object fallback after full scalar matrix parity #7355.
+The existing runtime assertions proved only that high-half outputs stayed
+large, not that they rounded correctly. I created ready issue #7449 to land an
+exact f32/f64 payload oracle now. A temporary runtime-opaque TypeLisp check
+confirmed the issue's tie and u64::MAX expected payloads on current main.
+#7449 is therefore a new direct prerequisite for #7353.
+The other blockers remain #7055, #7202, #7253, #7301, and #7345. #7055 and
+#7449 are ready; the remaining machine-foundation issues are still blocked, so
+keep this issue blocked. It has no priority label to propagate, no duplicate
+issue, and no claiming open PR. Handoffs were added to #7345, #7355, and closed
+tracker #7254.
+JoNil commented on Sep 3, 2026
+JoNil
+on Sep 3, 2026
+CollaboratorAuthor
+More actions
+Revalidated against main@54182dba, SPEC §3.8, and merged PR #7573.
+backend: fix high-half float-to-u64 runtime casts #7573 / backend: fix high-half float-to-u64 runtime casts #7251 fixed only the reverse f32/f64 -> u64 direction. The selected u64 -> f32/f64 production path here is unchanged: compiler-backend-u64-to-float-cast-asm still creates function-scoped high/done IDs and immediately flattens the test/js, signed conversion, sticky-low-bit shift/OR, second conversion, and precision-matched doubling sequence into String.
+The two FloatCastValueGp / FloatCastScratchGp roles and optional FloatCastValueXmm remain present in the production scratch plan. The legacy object-only Cast arm still copies by from-ty, while the authoritative semantic gate remains Cast => false; no typed-machine migration landed incidentally.
+backend: fix high-half float-to-u64 runtime casts #7573 expanded the shared fixture with exact reverse-direction cases and added parallel textual labels, threshold rodata, branches, and scratch needs. Those belong to backend: migrate float-to-u64 high-half cast records #7354 and do not merge the two directional producer issues.
+tests: lock exact u64-to-float runtime rounding bits #7449 is still open and ready. The u64 -> float half of tests/integration/u64_float_casts.tl still checks only broad ranges, so the exact-bit rounding oracle has not been superseded.
+Direct prerequisites remain: ready tests: lock exact u64-to-float runtime rounding bits #7449 and backend: establish the typed machine-program core and migrate one scalar leaf #7055; blocked backend: migrate full-width scalar integer materialization to shared machine records #7202, backend: migrate branch-free scalar float conversions to machine records #7253, backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301, and backend: record source-located scalar fault blocks in shared machine programs #7345. Each blocked foundation still waits on backend: establish the typed machine-program core and migrate one scalar leaf #7055 as documented. No claiming PR or duplicate owner exists.
+Focused bounded verification on the checked-in stage0 compiler passed at opt0/1/2, all exit 0:
+opt0: 111,987,917-byte peak, 190 ms;
+opt1: 111,778,202-byte peak, 190 ms;
+opt2: 111,778,202-byte peak, 180 ms.
+Keep #7353 blocked. After #7449 and all five machine-record prerequisites close, replace blocked with ready-for-implementation. No code changed.
+JoNil commented on Sep 5, 2026
+JoNil
+on Sep 5, 2026
+CollaboratorAuthor
+More actions
+Revalidated against main@554c4096 and SPEC §3.8 on 2026-09-05.
+Current production state still matches this issue:
+compiler-backend-u64-to-float-cast-asm still mints function-scoped high/done IDs and immediately flattens testq/js, signed conversion, jump, sticky-low-bit mov/and/shr/or, second conversion, and precision-matched addss/addsd into an assembly String.
+Regalloc still plans FloatCastValueGp, FloatCastScratchGp, and optional FloatCastValueXmm; the spill backend tests still pin distinct planned homes and reject fallback %rax/%xmm0 use.
+tests/integration/u64_float_casts.tl still checks only broad numeric ranges for the u64 -> f32/f64 direction. It does not use math.f32-to-bits / math.f64-to-bits, so tests: lock exact u64-to-float runtime rounding bits #7449 remains the necessary exact rounding oracle.
+Linux/Windows assembly checks still require both cast label families and the high-half instruction shape. Windows still force-selects assembly for this case, and compiler-backend-object-semantic-instr-supported? still returns false for every Cast; backend: retire Cast object fallback after full scalar matrix parity #7355 remains the final matrix gate.
+The reverse float -> u64 correction from backend: fix high-half float-to-u64 runtime casts #7251/backend: fix high-half float-to-u64 runtime casts #7573 remains independent and does not satisfy this producer.
+Dependency audit:
+Ready now: tests: lock exact u64-to-float runtime rounding bits #7449 (exact-bit production oracle) and backend: establish the typed machine-program core and migrate one scalar leaf #7055 (typed machine-program core).
+Still blocked: backend: migrate full-width scalar integer materialization to shared machine records #7202 (full-width materialization), backend: migrate branch-free scalar float conversions to machine records #7253 (scalar conversion opcodes), backend: migrate scalar physical moves, float rodata, and RIP-relative fixups #7301 (physical operands/float data/fixups), and backend: record source-located scalar fault blocks in shared machine programs #7345 (local labels/branches). Their existing tickets remain the focused implementation owners.
+backend: migrate checked scalar shifts to shared machine records #7204/backend: migrate scalar SSE2 expressions to shared machine records #7205 remain coordination consumers, not direct blockers. No duplicate or claiming open PR exists, and there is no priority label to propagate.
+Focused bounded Linux runs of the current fixture all exited 0 under the checked 2 GiB process-tree cap:
+opt0: 115,657,933-byte peak, 200 ms
+opt1: 114,923,930-byte peak, 200 ms
+opt2: 114,923,930-byte peak, 210 ms
+The remaining implementation is actionable as written once the six named prerequisites close. Keep blocked; replace it with ready-for-implementation only after #7449, #7055, #7202, #7253, #7301, and #7345 are all complete. No code changed.
+JoNil commented on Sep 12, 2026
+JoNil
+on Sep 12, 2026
+CollaboratorAuthor
+More actions
+Dependency update at origin/main@1254fef7 (2026-09-12): #7449 landed via merged PR #7724, and tests/integration/u64_float_casts.tl now asserts exact f32-to-bits/f64-to-bits payloads across precision/tie/high-path boundaries. I removed #7449 from the direct blocker list and refreshed the fixture finding. Remaining blockers are #7055, #7202, #7253, #7301, and #7345; the production cast is still assembly-string selection and the whole-program object Cast gate still belongs to #7355. Keep #7353 blocked; no new split or duplicate is needed. No tests rerun for this dependency correction (the oracle was verified during #7724 review).
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+backendIR, optimizer, codegenIR, optimizer, codegenblockedBlocked by an unresolved dependencyBlocked by an unresolved dependencycompilerCore compiler pipelineCore compiler pipelineoptimizationOptimizer passes and pipelineOptimizer passes and pipelineself-hostingWork toward the self-hosted compilerWork toward the self-hosted compilertestingTests and CITests and CI
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

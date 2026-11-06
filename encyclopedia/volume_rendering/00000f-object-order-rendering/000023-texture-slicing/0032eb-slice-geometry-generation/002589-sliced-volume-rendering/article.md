@@ -1,0 +1,165 @@
+# Sliced Volume Rendering
+
+Also called: Sliced Volume Rendering with Transfer Functions and Lighting, vl::SlicedVolume
+
+## Overview
+Sliced Volume Rendering is a technique that renders volumetric data by dynamically generating slice geometry on the fly, supporting real-time lighting (up to 4 lights) and transfer functions via GLSL, or precomputed illumination [S1, unofficial]. It differs from its siblings by tightly coupling the geometry generation with a specific rendering pipeline (GLSL or legacy fixed-function) that handles lighting and transfer function evaluation either per-pixel in the fragment shader or via precomputed textures, rather than relying solely on the generic hardware compositing described in [Slice Geometry Generation](6883-slice-geometry-generation.md).
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D volume image (scalar field), typically in `IF_LUMINANCE` format.
+- Input: A bounding box (AABB) defining the volume extent.
+- Input: A slice count determining the number of parallel planes.
+- Output: A rendered image with lighting and transfer function applied.
+
+**Data Structures:**
+- `vl::SlicedVolume`: An object that generates the geometry for the actor.
+- `vl::Actor`: The rendering entity to which the sliced volume is bound.
+- `vl::Effect` / `vl::Shader`: Holds the GLSL program or fixed-function states.
+- Textures:
+  - Volume Data: Bound to texture unit 0.
+  - Transfer Function: Bound to texture unit 1 (in GLSL mode).
+  - Gradient Normals: Bound to texture unit 2 (optional, in GLSL mode).
+
+**Steps:**
+1. **Initialization and Validation:**
+   - Check for hardware support. The method requires either 3D texture support (`Has_Texture_3D`) or GLSL support (`Has_GLSL`). If neither is available, the application must exit [S1, unofficial].
+   - Initialize the `vl::SlicedVolume` object and bind it to an `Actor` [S1, unofficial].
+   - Set the slice count (e.g., 1000) and define the volume's bounding box (AABB) [S1, unofficial].
+
+2. **Texture Coordinate Generation:**
+   - Generate texture coordinates for the sliced volume geometry based on the input image dimensions (width, height, depth) [S1, unofficial]. This maps the 3D position of the polygon vertices to 3D texture coordinates for sampling the scalar field.
+
+3. **Configuration based on Mode (GLSL vs. Non-GLSL):**
+
+   **A. GLSL Mode (Dynamic Lighting and Transfer Function):**
+   - Attach the volume fragment shader (e.g., `volume_luminance_light.fs`) and vertex shader (e.g., `volume_luminance_light.vs`) to the GLSL program [S1, unofficial].
+   - Bind the volume data as a 3D texture to texture unit 0. Set the `volume_texunit` uniform to 0 [S1, unofficial].
+   - **Transfer Function:**
+     - Create a transfer function texture (e.g., using `vl::makeColorSpectrum`).
+     - Bind it to texture unit 1. Set the `trfunc_texunit` uniform to 1.
+     - Set the `trfunc_delta` uniform to $0.5f / \text{trfunc\_width}$ [S1, unofficial].
+   - **Lighting and Gradients:**
+     - If `PRECOMPUTE_GRADIENT` is true:
+       - Generate gradient normals using `vl::genGradientNormals(img)` [S1, unofficial].
+       - Bind this gradient texture to texture unit 2 (format `TF_RGBA8`).
+       - Set `precomputed_gradient` uniform to 1 and `gradient_texunit` to 2 [S1, unofficial].
+     - If `PRECOMPUTE_GRADIENT` is false:
+       - Set `precomputed_gradient` uniform to 0.
+       - Set `gradient_delta` uniform to $fvec3(0.5f/\text{img->width()}, 0.5f/\text{img->height()}, 0.5f/\text{img->depth()})$ for on-the-fly normal computation [S1, unofficial].
+     - Add up to 4 lights as render states to the shader [S1, unofficial].
+   - **Alpha Testing:**
+     - Disable alpha testing (`EN_ALPHA_TEST`) because fragment discarding is handled inside the fragment shader [S1, unofficial].
+   - **Threshold:**
+     - Set the `val_threshold` uniform (range 0.0 to 1.0) to control the alpha bias/threshold level [S1, unofficial].
+
+   **B. Non-GLSL Mode (Precomputed Illumination):**
+   - Precompute the volume with transfer function and lighting using `vl::genRGBAVolume` [S1, unofficial].
+   - Bind the resulting RGB volume texture to unit 0 [S1, unofficial].
+   - Enable alpha testing with a `FU_GEQUAL` threshold [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_sliced_volume(volume_img, volume_box, slice_count=1000, use_glsl=True, precompute_gradient=False):
+    # 1. Check hardware support
+    if not has_texture_3d and not has_glsl:
+        raise RuntimeError("Requires 3D texture or GLSL support")
+
+    # 2. Setup Actor and SlicedVolume
+    actor = Actor()
+    sliced_vol = SlicedVolume()
+    sliced_vol.bind_actor(actor)
+    sliced_vol.set_slice_count(slice_count)
+    sliced_vol.set_box(volume_box)
+
+    # 3. Generate Texture Coordinates
+    img_dims = ivec3(volume_img.width, volume_img.height, volume_img.depth)
+    sliced_vol.generate_texture_coordinates(img_dims)
+
+    # 4. Configure Rendering Pipeline
+    shader = actor.effect().shader()
+    shader.set_uniform_set(None)
+    
+    # Bind Volume Data
+    vol_texture = Texture(volume_img)
+    shader.goc_texture_sampler(0).set_texture(vol_texture)
+    shader.goc_uniform("volume_texunit").set_uniform_i(0)
+
+    if use_glsl:
+        # GLSL Mode
+        shader.attach_shader(GLSLFragmentShader("/glsl/volume_luminance_light.fs"))
+        shader.attach_shader(GLSLVertexShader("/glsl/volume_luminance_light.vs"))
+        
+        # Transfer Function
+        trfunc_img = make_color_spectrum(128, white, white) # Simplified spectrum
+        trfunc_texture = Texture(trfunc_img)
+        shader.goc_texture_sampler(1).set_texture(trfunc_texture)
+        shader.goc_uniform("trfunc_texunit").set_uniform_i(1)
+        shader.goc_uniform("trfunc_delta").set_uniform_f(0.5f / trfunc_img.width)
+
+        # Gradient/Lighting Setup
+        if precompute_gradient:
+            gradient_img = gen_gradient_normals(volume_img)
+            gradient_texture = Texture(gradient_img, format=TF_RGBA8)
+            shader.goc_texture_sampler(2).set_texture(gradient_texture)
+            shader.goc_uniform("precomputed_gradient").set_uniform_i(1)
+            shader.goc_uniform("gradient_texunit").set_uniform_i(2)
+        else:
+            shader.goc_uniform("precomputed_gradient").set_uniform_i(0)
+            grad_delta = fvec3(0.5f/volume_img.width, 0.5f/volume_img.height, 0.5f/volume_img.depth)
+            shader.goc_uniform("gradient_delta").set_uniform(grad_delta)
+
+        # Add Lights (up to 4)
+        # shader.set_render_state(light0, 0)
+        # shader.set_render_state(light1, 1)
+        # ...
+
+        # Disable Alpha Testing
+        shader.disable(EN_ALPHA_TEST)
+        
+        # Set Threshold
+        actor.goc_uniform("val_threshold").set_uniform_f(0.5f)
+        
+    else:
+        # Non-GLSL Mode
+        rgb_volume_img = gen_rgba_volume(volume_img)
+        rgb_texture = Texture(rgb_volume_img)
+        shader.goc_texture_sampler(0).set_texture(rgb_texture)
+        shader.enable(EN_ALPHA_TEST)
+        shader.set_alpha_test_func(FU_GEQUAL)
+        # Threshold value would be set here
+
+    # 5. Render
+    # The SlicedVolume generates geometry on the fly when the actor is drawn
+    draw_actor(actor)
+```
+
+**Parameters:**
+- `SLICE_COUNT`: Number of slices. Typical value: 1000 [S1, unofficial].
+- `PRECOMPUTE_GRADIENT`: Boolean flag. If true, generates a separate 3D texture with precomputed gradient normals [S1, unofficial].
+- `val_threshold`: Shader uniform controlling alpha bias/threshold. Range: 0.0 to 1.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Hardware Support:** If neither 3D texture nor GLSL support is present, the method cannot proceed [S1, unofficial].
+- **Gradient Computation Cost:** Precomputing gradients (`vl::genGradientNormals`) can take significant time [S1, unofficial].
+- **Alpha Testing:** In GLSL mode, alpha testing must be disabled to allow the fragment shader to handle discarding [S1, unofficial].
+
+## Subtopics
+
+### [Interactive Slice and Point-Based Volume Rendering](4591-interactive-slice-and-point-based-volume-rendering.md)
+This method renders a 3D segmentation volume by dynamically extracting a 2D slice from the volume data, uploading it to a 2D texture, and drawing a slice plane that samples it, while overlaying segmentation labels as 3D points at voxel coordinates. It differs from standard texture slicing by decoupling the volumetric intensity visualization (the slice) from the discrete label visualization (the points), allowing for distinct rendering pipelines and per-label coloring.
+
+## Operating characteristics
+- **Time Complexity:** Rendering time scales with the number of slices (`SLICE_COUNT`). Higher slice counts yield better quality but slower rendering [S1, unofficial]. Precomputing gradients adds an upfront cost but speeds up per-pixel lighting [S1, unofficial].
+- **Memory Complexity:** Requires memory for the volume texture, transfer function texture, and optionally a gradient texture (if `PRECOMPUTE_GRADIENT` is true) [S1, unofficial].
+- **Performance:** GLSL mode supports real-time lighting with up to 4 lights [S1, unofficial]. Non-GLSL mode is limited to precomputed lighting.
+- **Strengths:** Real-time lighting and transfer functions in GLSL mode; flexible geometry generation.
+- **Limitations:** Requires OpenGL 3D texture or GLSL support; precomputed gradients consume additional memory and time [S1, unofficial].
+
+## Background
+The method is implemented in the Visualization Library (`vl::SlicedVolume`) and demonstrated in tutorials for rendering volumes with transfer functions and lighting [S1, unofficial]. It builds upon the general principles of slice geometry generation, adding specific support for dynamic lighting and transfer function evaluation via shaders or precomputation.
+
+## Sources
+[S1] Sliced Volume Rendering with Transfer Functions and Lighting Tutorial, https://visualizationlibrary.org/documentation/pag_guide_sliced_volume.html, fetched 2026-10-27 (unofficial)

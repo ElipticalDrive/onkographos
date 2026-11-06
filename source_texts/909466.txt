@@ -1,0 +1,180 @@
+C++ HFEM integrator. Contribute to eXplorationLogisticsControl/campanella-cpp development by creating an account on GitHub.
+
+Spherical harmonics implemented by Yuricst · Pull Request #9 · eXplorationLogisticsControl/campanella-cpp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Yuricst
+commented
+Oct 29, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Summary
+Adds the gravity field of the central body (BODIES[0]) as spherical harmonics of arbitrary degree and order, following the HighFidelityEphemerisModel.jl formulation.
+It is available in every N-body propagator:
+Propagator
+Acceleration
+Gradient (STM)
+PropagatorNbody.solve_ivp
+✓
+–
+PropagatorNbody.solve_ivp_stm
+✓
+added to the gravity gradient
+PropagatorNbodySrp.solve_ivp
+✓
+–
+PropagatorGve.solve_ivp / solve_ivp_stm / eval_jacobian
+✓
+added to G in gve_mee.md §5.5
+The field is off unless sh_file is given. Without it, results are bit-identical to before this change: the output was compared with the previous commit by SHA-256 for all propagators.
+Full documentation is in docs/spherical_harmonics.md.
+Usage
+```
+prop = campanella.PropagatorNbody(
+    GM=[4.902800582147760e+03, 398600.432896939, 132712197035.766],
+    BODIES=["MOON", "EARTH", "SUN"], frame="J2000", LU=1.0, TU=1.0,
+    sh_file="gggrx_1200a_sha.tab",  # PDS .tab or ICGEM .gfc
+    sh_nmax=50, sh_mmax=-1,          # -1: min(nmax, order of the file)
+    frame_bf="MOON_PA",              # body-fixed frame of the coefficients
+    sh_rho_min=1.0,                  # smallest |r|/R allowed
+)
+```
+PropagatorNbodySrp and PropagatorGve take the same keyword arguments, and so do the matching C++ constructors in include/campanella.hpp.
+Implementation
+Recursion (src/perturbations/spherical_harmonics.{h,cpp}): fully normalized Cunningham / Montenbruck–Gill V/W recursion.
+It works in Cartesian coordinates, so nothing breaks at the poles.
+One table to degree nmax+2 gives the potential, the acceleration and the 3×3 gradient.
+Recursion factors are precomputed when the file loads, and each propagation allocates its workspace once, so an RHS evaluation allocates nothing.
+Coefficient files: the format is detected from the content.
+PDS SHADR .tab: GRAIL GRGM1200A, GL0660B.
+ICGEM .gfc: EGM2008, EGM96.
+The loader truncates to nmax/mmax, accepts Fortran D exponents and converts m to km. It rejects truncated files, non-finite values, non-normalized files and duplicate header keywords.
+Loaded models are cached, keyed on path, nmax, mmax and the file's size, timestamps and inode.
+Frames: T = pxform(frame, frame_bf, et), then r_bf = T r, a = Tᵀ a_bf, G = Tᵀ G_bf T.
+Moon: MOON_PA, with moon_pa_de440_200625.bpc and moon_de440_250416.tf.
+Earth: ITRF93, with earth_latest_high_prec.bpc.
+GM and units:
+The harmonic terms use the file's GM and radius, scaled to LU/TU. The point mass keeps using GM[0].
+Setup raises if GM[0]·LU³/TU² and the file's GM differ by more than 1e-5 relative.
+Degrees 0 and 1 are not evaluated.
+Inside the reference sphere: positions with |r|/R below sh_rho_min are refused.
+A rejected trial step makes the integrator retry with a smaller one.
+If the trajectory itself goes below the limit, a ValueError (C++: std::domain_error) is raised instead of returning a truncated trajectory.
+Other integration failures behave as before.
+Python helpers for testing: load_spherical_harmonics, sh_accel_bf, sh_accel_inertial.
+Other changes:
+examples/solve_sh.cpp: a 100 km lunar orbit, with the STM checked against finite differences.
+test-python/data/: degree-10 heads of the four coefficient files. .gitattributes keeps the CRLF line endings of the .tab files.
+CI downloads the Moon and Earth PCK/FK kernels and runs solve_sh.
+README, docs/basic_usage_python.md and docs/gve_mee.md §5.5 are updated.
+Validation
+test-python/test_spherical_harmonics.py adds 51 tests. All 100 tests pass locally, and all six examples run.
+The checks were independent of the implementation:
+Check
+Result
+Direct 70-digit mpmath Legendre sum, degree ≤ 50, including both poles
+≤ 1.5e-13 relative
+pyshtools on synthetic Kaula-rule fields, degree 1200
+≤ 9e-14 relative
+J2 closed form
+≤ 9e-16
+Separate scipy + spiceypy propagation over 1 day, all five propagator paths (100 km lunar orbit, 400 km Earth orbit)
+≤ 7e-7 km (the harmonics shift these orbits by 16 km and 546 km)
+Cartesian and GVE STMs vs finite-differenced propagation
+≤ 8e-7
+GVE STM vs Cartesian STM mapped through the MEE Jacobians
+4e-10 (1 day)
+Parsed coefficients vs raw file lines (all four files)
+bit-exact
+AddressSanitizer + UndefinedBehaviorSanitizer (degree ≤ 1200, poles, 8 threads sharing the cache)
+clean
+Also in this PR (from gve-mee)
+c1d5177: renames src/perturbations/perturbations.{h,cpp} to thirdbody.{h,cpp}. The include guard and the includes are updated; nothing else changes.
+ee5b123: Moon-canonical-unit tests and example. Every Moon-centred propagator is run with LU = 100000 km and TU = LU/sqrt(MU_MOON/LU), and checked against the same run in km and seconds.
+Files: test-python/test_canonical_moon.py, examples/solve_moon_canonical.cpp (run in CI), and a canonical-unit recipe in docs/basic_usage_python.md.
+Limitations
+nmax ≤ 1200. EGM2008's full degree 2190 would need extra rescaling.
+The cost grows as nmax². With the default build (no CMAKE_BUILD_TYPE), degree 50 adds about 75 µs to each GVE RHS + Jacobian evaluation.
+No full-size coefficient file was tested. Degree 50 was tested with the first 200 kB of GRGM1200A (degree 56).
+The Earth inertial-frame test uses a tolerance of 1e-9. New releases of earth_latest_high_prec.bpc move the ITRF93 rotation by about 1e-10.
+ThreadSanitizer could not be linked here. Thread safety was checked by reading the code and by an AddressSanitizer run with 8 threads.
+Yuricst
+and others
+added 3 commits
+October 28, 2026 23:04
+Rename perturbations to thirdbody
+c1d5177
+Add Moon-canonical-unit tests and example
+…
+ee5b123
+```
+Run every Moon-centred propagator (Nbody state and STM, NbodySrp, GVE state
+and STM, GVE Jacobian) with LU = 100000 km and TU = LU / sqrt(MU_MOON / LU),
+and check each against the same run in km and seconds.
+
+- test-python/test_canonical_moon.py
+- examples/solve_moon_canonical.cpp, built with CAMPANELLA_BUILD_CPP and run in CI
+- docs/basic_usage_python.md: canonical-unit recipe, including MEE and STM scaling
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Add central-body spherical-harmonics gravity of arbitrary degree and …
+…
+4ef5a11
+```
+…order
+
+Adds the gravity field of BODIES[0] to the N-body, N-body SRP, Cartesian
+STM, GVE and GVE-STM propagators, with the analytic gradient for both STMs.
+
+- src/perturbations/spherical_harmonics.{h,cpp}: fully normalized
+  Cunningham / Montenbruck-Gill V/W recursion (Cartesian, no pole
+  singularity) for potential, acceleration and 3x3 gradient; loader for
+  PDS SHADR .tab (GRAIL) and ICGEM .gfc (EGM2008, EGM96) with format
+  detection, nmax/mmax truncation and a file-keyed model cache.
+- Body-fixed frame via pxform_c (MOON_PA, ITRF93): a = T^T a_bf,
+  G = T^T G_bf T. SH terms use the file GM and radius, checked against
+  GM[0] to 1e-5. Degrees 0 and 1 are excluded.
+- Optional sh_file, sh_nmax, sh_mmax, frame_bf, sh_rho_min arguments on
+  the propagators and bindings; results are bit-identical when unset.
+  Going below sh_rho_min * R raises instead of truncating silently.
+- Python helpers load_spherical_harmonics, sh_accel_bf, sh_accel_inertial.
+- examples/solve_sh.cpp, degree-10 test fields in test-python/data/,
+  test-python/test_spherical_harmonics.py, CI downloads of the Moon/Earth
+  PCK and FK kernels.
+- docs/spherical_harmonics.md, plus updates to README, basic_usage_python
+  and gve_mee section 5.5.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Hide details
+View details
+Yuricst
+merged commit 309b7f0
+into
+main
+Oct 29, 2026
+0 of 4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,148 @@
+--- v003.md
++++ v004.md
+@@ -4,17 +4,24 @@
+ 
+ ## Overview
+-The Beta Distribution Prior on Exit Opacity is a regularization technique used in differentiable volume rendering to enforce solid, less transparent material appearance by penalizing intermediate opacity values. It addresses the problem of "floaters" and noisy, semi-transparent artifacts common in neural volume rendering by encouraging rays to either fully strike an object or pass through to the background, rather than grazing surfaces or terminating in mid-air. It sets itself apart from sibling methods like the Entropy prior by consistently producing more solid material with less noise, whereas the Entropy prior tends to cause material loss (e.g., losing thin structures like tails) [S1, S2].
++The Beta Distribution Prior on Exit Opacity is a regularization technique applied during the optimization of differentiable volume rendering fields to enforce solid, less transparent materials in the rendered output [S1, S2]. It addresses the problem of "floaters" or noisy, semi-transparent artifacts that often arise when neural volume representations are under-constrained by image data alone [S1, S2]. Unlike sibling methods such as the Entropy prior, which can cause material loss (e.g., thin structures disappearing), the Beta prior consistently produces images with more solid material and reduced noise by penalizing intermediate opacity values [S1].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** The rendered exit opacity image $\mathbf{I}_\alpha$, where $\mathbf{I}_\alpha(\mathbf{p})$ is the total opacity at pixel $\mathbf{p}$, computed from the standard emission-absorption model.
+-*   **Output:** A scalar regularization loss value $J_B$ used to update the scene parameters (density $\sigma$) via gradient descent.
++The method operates on the final rendered image opacities, treating them as random variables distributed according to a Beta distribution. The goal is to minimize the negative log-likelihood of this distribution, which effectively pushes the exit opacity of each ray toward either 0 (transparent/background) or 1 (opaque/object) [S2].
+ 
+-**Data Structures**
+-*   $\mathbf{I}_\alpha$: A 2D tensor or array of size $H \times W$ (or $P$ pixels), containing values in the range $[0, 1]$.
+-*   $P$: The total number of pixels in the image.
++### Inputs and Outputs
++*   **Input:** The rendered exit opacity map $\mathbf{I}_\alpha$, where $\mathbf{I}_\alpha(\mathbf{p})$ is the accumulated opacity at pixel $\mathbf{p}$.
++*   **Output:** A scalar regularization loss value $J_B$ used in the gradient descent update of the volume representation parameters.
+ 
+-**Formulas**
+-The regularization term is derived from the negative log-likelihood of a Beta distribution with parameters $\alpha=0.5$ and $\beta=0.5$ applied to the exit opacities [S2]:
++### Data Structures
++*   $\mathbf{I}_\alpha$: A 2D tensor or array of shape $(H, W)$ containing the exit opacity for each pixel. Values are in the range $[0, 1]$.
++*   $P$: The total number of pixels, $H \times W$.
++*   $\lambda_B$: The scalar weight for the Beta prior loss.
++
++### Parameters
++*   **Beta Distribution Parameters:** Fixed at $\alpha_{beta} = 0.5$ and $\beta_{beta} = 0.5$ [S2]. This specific choice corresponds to the arcsine distribution, which has singularities at 0 and 1, strongly encouraging binary opacity outcomes [S2].
++*   **Weight $\lambda_B$:** The scaling factor for the loss term. Typical values are dataset-dependent. A value of $0.02$ works well for many standard datasets (e.g., Bonsai, Head), while delicate or sparse structures (e.g., "fossil") may require a lower weight of $0.001$ [S1].
++
++### Formulas
++The regularization term is defined as the negative log-likelihood of the Beta(0.5, 0.5) distribution over the exit opacities [S2]:
+ 
+ $$
+@@ -23,70 +30,74 @@
+ 
+ Where:
+-*   $\mathbf{I}_\alpha(\mathbf{p})$ is the exit opacity at pixel $\mathbf{p}$.
+-*   $P$ is the number of pixels.
+-*   $\lambda_B$ is the weight of the Beta prior regularization.
+-*   The term $\log(\mathbf{I}_\alpha(\mathbf{p})) + \log(1 - \mathbf{I}_\alpha(\mathbf{p}))$ is equivalent to $\log(\mathbf{I}_\alpha(\mathbf{p})(1 - \mathbf{I}_\alpha(\mathbf{p})))$. This function is concave and reaches its maximum at $\mathbf{I}_\alpha(\mathbf{p}) = 0.5$. By minimizing the negative log-likelihood (or maximizing the likelihood), the optimizer is pushed away from $0.5$ towards $0$ or $1$ [S2].
++*   $\mathbf{p}$ iterates over all pixels in the image.
++*   $P$ is the total number of pixels.
++*   $\lambda_B$ is the loss weight.
++*   $\log$ denotes the natural logarithm.
+ 
+-**Parameters**
+-*   **Beta Distribution Parameters:** Fixed at $\alpha=0.5, \beta=0.5$ [S2].
+-*   **Weight $\lambda_B$:** Data-dependent. Typical values range from $0.001$ to $0.02$. A value of $0.02$ works well for many datasets, but specific cases like the "fossil" image require $0.001$ [S1].
++### Steps
++1.  Render the volume using the current neural field parameters to obtain the exit opacity map $\mathbf{I}_\alpha$ for the current camera view [S2].
++2.  For each pixel $\mathbf{p}$, compute the term $\log(\mathbf{I}_\alpha(\mathbf{p})) + \log(1 - \mathbf{I}_\alpha(\mathbf{p}))$ [S2].
++3.  Sum these terms over all pixels and divide by $P$ to get the mean [S2].
++4.  Multiply by the weight $\lambda_B$ to obtain the final loss $J_B$ [S2].
++5.  Backpropagate the gradient of $J_B$ with respect to the volume representation parameters [S2].
+ 
+-**Pseudocode**
++### Pseudocode
+ ```python
+-def beta_prior_loss(exit_opacity_image, lambda_b):
++def beta_prior_loss(exit_opacity_map, weight_lambda_B):
+     """
+     Computes the Beta Distribution Prior loss on exit opacities.
+     
+     Args:
+-        exit_opacity_image (Tensor): 2D array of shape (H, W) with values in [0, 1].
+-        lambda_b (float): Weight for the regularization term.
++        exit_opacity_map (Tensor): 2D tensor of shape (H, W) with values in [0, 1].
++        weight_lambda_B (float): The scaling factor for the loss.
+         
+     Returns:
+         Tensor: Scalar loss value.
+     """
+-    # Ensure values are within valid range for log to avoid NaNs
+-    # [G] Clamp to a small epsilon to prevent log(0)
++    # Clamp values to avoid log(0) singularities during gradient computation.
++    # The theoretical distribution has singularities at 0 and 1, but numerical
++    # stability requires clamping. [G]
+     eps = 1e-7
+-    alpha_clamped = torch.clamp(exit_opacity_image, min=eps, max=1.0 - eps)
++    alpha_clamped = torch.clamp(exit_opacity_map, min=eps, max=1.0 - eps)
+     
+-    # Compute the log-likelihood term for Beta(0.5, 0.5)
+-    # The PDF of Beta(0.5, 0.5) is proportional to 1/sqrt(x(1-x))
+-    # Log PDF is proportional to -0.5 * log(x) - 0.5 * log(1-x)
+-    # The source formula uses log(x) + log(1-x), which corresponds to 
+-    # minimizing the negative log-likelihood of the distribution shape 
+-    # that peaks at 0 and 1.
+-    log_term = torch.log(alpha_clamped) + torch.log(1.0 - alpha_clamped)
++    # Compute the negative log-likelihood terms for Beta(0.5, 0.5)
++    # The constant terms of the Beta PDF (log(Beta(0.5, 0.5))) are omitted
++    # as they do not affect gradients.
++    log_alpha = torch.log(alpha_clamped)
++    log_one_minus_alpha = torch.log(1.0 - alpha_clamped)
+     
+-    # Average over all pixels
+-    mean_log_term = torch.mean(log_term)
++    # Sum over all pixels and average
++    P = exit_opacity_map.numel()
++    mean_loss = torch.mean(log_alpha + log_one_minus_alpha)
+     
+-    # Scale by weight
+-    loss = lambda_b * mean_log_term
++    # Apply weight
++    loss = weight_lambda_B * mean_loss
+     
+     return loss
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Logarithm Domain:** The exit opacity $\mathbf{I}_\alpha(\mathbf{p})$ must be strictly between 0 and 1 for the log terms to be defined. In practice, values exactly at 0 or 1 will cause NaN gradients. Clamping to $[\epsilon, 1-\epsilon]$ is required [G].
+-*   **Weight Sensitivity:** If $\lambda_B$ is too small, materials remain transparent and noisy. If too large, it may over-constrain the optimization, potentially distorting geometry or causing convergence issues [S1].
++### Edge Cases and Pitfalls
++*   **Singularities:** The Beta(0.5, 0.5) distribution has infinite density at 0 and 1. In practice, $\log(0)$ is undefined. Implementations must clamp opacity values away from exact 0 and 1 before taking the logarithm to ensure numerical stability [G].
++*   **Weight Sensitivity:** The optimal weight $\lambda_B$ is highly data-dependent. Too high a weight may oversimplify the geometry, while too low a weight fails to suppress noise [S1].
++*   **Material Loss:** While the Beta prior is robust, it is distinct from the Entropy prior. The Entropy prior can cause thin materials to vanish entirely, whereas the Beta prior tends to preserve material solidity [S1].
+ 
+ ## Subtopics
+ 
+ ### Entropy Prior
+-Uses an entropy-based penalty on exit opacities. It also encourages binary opacities but tends to lose thin materials (e.g., hair tails) compared to the Beta prior [S1]. See [Entropy Prior](link).
++Uses an entropy-based regularization to encourage binary opacity. It tends to lose thin materials (e.g., flow tails) more aggressively than the Beta prior. See [Entropy Prior](2962-entropy-prior.md).
+ 
+ ### Dream Field Prior
+-Applies a prior on mean transmittance. Changes are less clear visually compared to Beta or Entropy priors [S1]. See [Dream Field Prior](link).
++Applies a prior on the mean transmittance. Changes in visual quality are less distinct compared to Beta or Entropy priors. See [Dream Field Prior](2963-dream-field-prior.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(P)$, where $P$ is the number of pixels, as it requires a single pass over the rendered opacity image.
+-*   **Memory Complexity:** $O(P)$ to store the exit opacity image. No additional large buffers are needed.
+-*   **Strengths:** Consistently produces images with more solid material and less noise compared to training without a prior or using the Entropy prior [S1]. Effective at reducing "floaters" and semi-transparent artifacts.
+-*   **Limitations:** The optimal weight $\lambda_B$ is highly data-dependent and requires manual tuning or experimentation [S1]. May cause loss of delicate details if the weight is too high.
+-*   **When to Use:** When the rendered volume appears too transparent, noisy, or contains significant floaters, and when preserving thin structures is less critical than achieving solid, coherent material appearance.
+-*   **When Not to Use:** When the scene contains very thin, semi-transparent structures that should be preserved (e.g., smoke, hair) and the Entropy prior is insufficient, as the Beta prior may also suppress these features if not carefully tuned.
++*   **Time Complexity:** $O(P)$, where $P$ is the number of pixels, as it requires a single pass over the rendered opacity map.
++*   **Memory Complexity:** $O(P)$ to store the intermediate log terms if not computed in-place.
++*   **Strengths:** Consistently produces solid materials with less noise compared to training without a prior [S1]. It is more stable than the Entropy prior regarding material preservation [S1].
++*   **Limitations:** Requires careful tuning of the weight $\lambda_B$ per dataset [S1]. The singularities of the Beta distribution require numerical clamping [G].
++*   **When to Use:** When the rendered volume exhibits excessive transparency, floaters, or noise, and when preserving thin but important material structures is critical.
++*   **When Not to Use:** When the scene naturally contains significant semi-transparent regions that should not be forced to binary opacity, or if computational budget is extremely tight (though the cost is low).
+ 
+ ## Background
+-The Beta Distribution Prior was introduced by Lombardi et al. in the context of neural volume rendering [S1, S2]. It was one of the first density priors applied to this domain, followed by the Dream Field prior (prior on mean transmittance) and the Entropy prior [S1]. The method is based on the intuition that rays should primarily strike the object or the background, rather than terminating in mid-air, thus reducing the entropy of the exit opacity distribution [S2].
++The Beta Distribution Prior was introduced by Lombardi et al. in the context of Neural Volumes [S2]. It was one of the first density priors applied to neural volume rendering, followed by the Dream Field prior (prior on mean transmittance) and the Entropy prior [S1]. The method is based on the intuition that rays in a well-posed volume rendering problem should either strike the object or the background, rather than grazing surfaces with intermediate opacities [S2].
+ 
+ ## Sources

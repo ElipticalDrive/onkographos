@@ -1,0 +1,231 @@
+# Discrete Ray Tracing
+
+Also called: 3D DDA Voxel Traversal, 3D raster ray tracing, Discrete Ray Casting, Naive Voxel-Raycasting, Raycasting ohne Beschleunigungsstruktur
+
+## Overview
+Discrete Ray Tracing is a volume rendering technique that traverses a voxel grid along a ray using a three-dimensional form of Digital Differential Analysis (DDA) [S1, S4, unofficial]. It solves the problem of efficiently sampling scalar data in a regular grid without requiring complex geometric intersection tests or acceleration structures [S2, unofficial]. Unlike [Exponential Approximation Method](2079-exponential-approximation-method.md) which approximates transmittance, or [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) which uses uniform steps, Discrete Ray Tracing guarantees that the first intersection found is the closest by traversing voxels in the exact order the ray intersects them, limiting intersection tests to Pythagorean complexity rather than cubic [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D voxel grid (scalar field), camera parameters (position, view vectors, screen dimensions), and a transfer function mapping scalar values to color and opacity.
+*   **Output:** A 2D image where each pixel contains the composited color and opacity of the ray traversing the volume.
+
+**Data Structures:**
+*   **Voxel Grid:** An axis-aligned 3D array of scalar values. A voxel is defined as an index in this grid, not a geometric cube with independent position [S1, unofficial].
+*   **Ray:** Defined by an origin point and a direction vector.
+*   **Screen Buffer:** 2D array storing final pixel colors.
+
+**Algorithm Steps:**
+
+1.  **Camera Setup:**
+    *   Calculate the view port vectors for the four corners of the screen: `upperLeft`, `upperRight`, `lowerLeft`, `lowerRight` [S1, unofficial].
+    *   If these vectors depend on camera position, subtract the camera position before normalizing [S1, unofficial].
+    *   Normalize these vectors to get `upperLeftNormal`, `upperRightNormal`, `lowerLeftNormal`, `lowerRightNormal` [S1, unofficial].
+    *   Calculate inverse screen dimensions: `invHeight = 1.0 / screen_height`, `invWidth = 1.0 / screen_width` [S1, unofficial].
+    *   Calculate Y-direction interpolation deltas for the left and right normals:
+        $$ \Delta_{leftY} = (lowerLeftNormal - upperLeftNormal) \times invHeight $$
+        $$ \Delta_{rightY} = (rightNormal - leftNormal) \times invHeight $$
+    *   Initialize interpolation variables: `leftNormal = upperLeftNormal`, `rightNormal = upperRightNormal` [S1, unofficial].
+    *   Initialize ray origin: `ray.origin = camera.position` [S1, unofficial].
+
+2.  **Screen Scan (Image-Order Loop):**
+    *   Iterate `y` from 0 to `screen_height - 1`:
+        *   Set `ray.direction = leftNormal` [S1, unofficial].
+        *   Calculate X-direction interpolation delta:
+            $$ \Delta_{X} = (rightNormal - leftNormal) \times invWidth $$
+        *   Iterate `x` from 0 to `screen_width - 1`:
+            *   **Ray Tracing:** Call `TraceRay(ray, volume)` to compute the pixel color.
+            *   **Render:** Set `screen.pixel(x, y) = color` [S1, unofficial].
+            *   **Interpolate X:** `ray.direction += \Delta_{X}` [S1, unofficial].
+        *   **Interpolate Y:** `leftNormal += \Delta_{leftY}`, `rightNormal += \Delta_{rightY}` [S1, unofficial].
+
+3.  **Ray Tracing (Volume Traversal):**
+    *   **Initialization:**
+        *   Initialize accumulated color `pixel_color = [0.0, 0.0, 0.0, 0.0]` and opacity `accumulated_opacity = 0.0` [S3, unofficial].
+        *   Determine the ray's entry and exit points into the volume bounding box. For orthographic projection along Z, the ray direction is fixed (e.g., `[0, 0, 1]`) [S3, unofficial].
+        *   Convert the ray origin to voxel coordinates: `voxel_coord = floor((ray.origin * volume_dimensions) - 0.5).astype(int)` [S3, unofficial]. The `-0.5` centers the sampling at voxel centers [S3, unofficial].
+    *   **Traversal Loop:**
+        *   Use 3D DDA to step through voxel indices in the order the ray intersects them [S1, unofficial]. The algorithm stops and tests a voxel index at exactly one of the x, y, or z dividing planes [S1, unofficial].
+        *   For each voxel visited along the ray path:
+            *   **Sample:** Get scalar value `s = volume[voxel_coord]` using nearest-neighbor sampling (no interpolation) [S3, unofficial].
+            *   **Transfer Function:** Apply transfer function $TF(s)$ to get color $C = (r, g, b)$ and opacity $a$ [S3, unofficial].
+                *   Example Gaussian Mixture TF [S3, unofficial]:
+                    $$ r = 1.0 \cdot e^{-\frac{(s - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(s - 3.0)^2}{0.1}} + 0.1 \cdot e^{-\frac{(s + 3.0)^2}{0.5}} $$
+                    $$ g = 1.0 \cdot e^{-\frac{(s - 9.0)^2}{1.0}} + 1.0 \cdot e^{-\frac{(s - 3.0)^2}{0.1}} + 0.1 \cdot e^{-\frac{(s + 3.0)^2}{0.5}} $$
+                    $$ b = 0.1 \cdot e^{-\frac{(s - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(s - 3.0)^2}{0.1}} + 1.0 \cdot e^{-\frac{(s + 3.0)^2}{0.5}} $$
+                    $$ a = 0.6 \cdot e^{-\frac{(s - 9.0)^2}{1.0}} + 0.1 \cdot e^{-\frac{(s - 3.0)^2}{0.1}} + 0.01 \cdot e^{-\frac{(s + 3.0)^2}{0.5}} $$
+            *   **Compositing (Front-to-Back):**
+                $$ pixel\_color[0:3] = pixel\_color[0:3] + (1 - pixel\_color[3]) \times C \times a $$
+                $$ pixel\_color[3] = pixel\_color[3] + (1 - pixel\_color[3]) \times a $$
+            *   **Step:** Advance `voxel_coord` to the next voxel in the DDA sequence [S1, unofficial].
+    *   **Finalization:**
+        *   Clip `pixel_color` to $[0, 255]$ and convert to `uint8` [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def discrete_ray_tracing(volume, camera, screen_width, screen_height):
+    """
+    Renders a volume using Discrete Ray Tracing (3D DDA).
+    
+    Args:
+        volume: 3D numpy array of scalar values.
+        camera: Object with get_position(), get_upper_left_vector(), etc.
+        screen_width: int
+        screen_height: int
+        
+    Returns:
+        2D numpy array of RGB colors.
+    """
+    # 1. Camera Setup
+    # Calculate normalized view port vectors
+    upper_left = normalize(camera.get_upper_left_vector())
+    upper_right = normalize(camera.get_upper_right_vector())
+    lower_left = normalize(camera.get_lower_left_vector())
+    lower_right = normalize(camera.get_upper_right_vector()) # Note: Source uses upper_right for lower_right in delta calc? 
+    # Correction based on S1 text: "lowerRightNormal" is calculated. 
+    # Assuming standard camera setup:
+    lower_right = normalize(camera.get_lower_right_vector())
+    
+    inv_height = 1.0 / screen_height
+    inv_width = 1.0 / screen_width
+    
+    # Y deltas
+    left_y_delta = (lower_left - upper_left) * inv_height
+    right_y_delta = (lower_right - upper_right) * inv_height
+    
+    # Interpolation variables
+    left_normal = upper_left
+    right_normal = upper_right
+    
+    # Ray origin (constant for all pixels)
+    ray_origin = camera.get_position()
+    
+    image = np.zeros((screen_height, screen_width, 3), dtype=np.uint8)
+    
+    # 2. Screen Loops
+    for y in range(screen_height):
+        ray_direction = left_normal
+        
+        # X delta for this row
+        normal_x_delta = (right_normal - left_normal) * inv_width
+        
+        for x in range(screen_width):
+            # Trace ray
+            color = trace_ray(ray_origin, ray_direction, volume)
+            
+            # Set pixel
+            image[y, x] = color
+            
+            # Interpolate X
+            ray_direction = ray_direction + normal_x_delta
+            
+        # Interpolate Y
+        left_normal = left_normal + left_y_delta
+        right_normal = right_normal + right_y_delta
+        
+    return image
+
+def trace_ray(origin, direction, volume):
+    """
+    Traces a ray through the volume using 3D DDA.
+    """
+    # Initialize accumulation
+    acc_color = np.array([0.0, 0.0, 0.0])
+    acc_opacity = 0.0
+    
+    # Determine volume bounds and ray entry/exit
+    # For simplicity, assume volume is unit cube [0,1]^3 or scaled appropriately
+    # In practice, compute t_min and t_max for the AABB intersection
+    # This step is implementation-specific regarding coordinate systems.
+    # We assume the ray is already in voxel space or will be converted.
+    
+    # Convert origin to voxel coordinates
+    # Assuming volume dimensions are D_x, D_y, D_z
+    # voxel_coord = floor((origin * dims) - 0.5)
+    # This requires knowing the volume's world-to-voxel transform.
+    # For this generic implementation, we assume 'origin' and 'direction' 
+    # are already in a coordinate system where voxel indices are accessible.
+    
+    # Start at the first voxel
+    # Note: Exact DDA initialization requires calculating t_max for x, y, z planes.
+    # See S1 for the 2D DDA logic extended to 3D.
+    
+    # Pseudocode for 3D DDA step (simplified from S1 description):
+    # 1. Calculate step direction (1 or -1) for x, y, z based on ray direction.
+    # 2. Calculate t_max_x, t_max_y, t_max_z (distance to next plane).
+    # 3. Calculate t_delta_x, t_delta_y, t_delta_z (distance between planes).
+    
+    # Initialize voxel index
+    # voxel_idx = floor(origin) # Placeholder for exact initialization logic
+    # Since exact 3D DDA initialization code is not fully provided in sources,
+    # we describe the loop structure.
+    
+    # Loop until ray exits volume
+    while ray_is_inside_volume(origin, direction):
+        # Sample voxel
+        # scalar_val = volume[voxel_idx]
+        
+        # Apply Transfer Function
+        # r, g, b, a = transfer_function(scalar_val)
+        
+        # Composite
+        # acc_color = acc_color + (1 - acc_opacity) * [r, g, b] * a
+        # acc_opacity = acc_opacity + (1 - acc_opacity) * a
+        
+        # Advance to next voxel using DDA
+        # Determine which plane is closest (min t_max)
+        # Advance t_max for that axis by t_delta
+        # Increment/decrement voxel index for that axis
+        pass
+        
+    # Finalize
+    final_color = np.clip(acc_color * 255, 0, 255).astype(np.uint8)
+    return final_color
+
+def transfer_function(scalar):
+    """
+    Example Gaussian Mixture Transfer Function from S3.
+    """
+    x = scalar
+    r = 1.0 * np.exp(-((x - 9.0)**2) / 1.0) + 0.1 * np.exp(-((x - 3.0)**2) / 0.1) + 0.1 * np.exp(-((x + 3.0)**2) / 0.5)
+    g = 1.0 * np.exp(-((x - 9.0)**2) / 1.0) + 1.0 * np.exp(-((x - 3.0)**2) / 0.1) + 0.1 * np.exp(-((x + 3.0)**2) / 0.5)
+    b = 0.1 * np.exp(-((x - 9.0)**2) / 1.0) + 0.1 * np.exp(-((x - 3.0)**2) / 0.1) + 1.0 * np.exp(-((x + 3.0)**2) / 0.5)
+    a = 0.6 * np.exp(-((x - 9.0)**2) / 1.0) + 0.1 * np.exp(-((x - 3.0)**2) / 0.1) + 0.01 * np.exp(-((x + 3.0)**2) / 0.5)
+    return r, g, b, a
+
+def normalize(v):
+    return v / np.linalg.norm(v)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** The method uses nearest-neighbor sampling (`floor`), which can result in aliasing or blocky artifacts at low resolutions [S3, unofficial].
+*   **Performance:** High number of texture accesses and multiplications per ray leads to low frame rates for large or sparse volumes [S2, unofficial].
+*   **Voxel Definition:** Voxels are indices, not moving geometric cubes [S1, unofficial].
+*   **Coordinate Centering:** Subtracting 0.5 from scaled coordinates is required to center sampling at voxel centers (0.5, 0.5, 0.5) [S3, unofficial].
+
+## Subtopics
+
+### [Cube-3 Hybrid Ray-Casting](3143-cube-3-hybrid-ray-casting.md)
+A highly parallel, pipelined hardware architecture and hybrid ray-casting algorithm designed for real-time visualization of high-resolution volumetric datasets. It processes all sample values belonging to a ray simultaneously, exploiting spatial coherency to achieve the largest possible degree of parallelism, unlike standard image-order methods that process single samples per stage.
+
+## Operating characteristics
+*   **Time Complexity:** $O(n)$, where $n$ is the number of voxels traversed by the ray [S2, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory per ray, plus storage for the volume data [S2, unofficial].
+*   **Performance:** Suitable for small, dense voxel entities (e.g., $50^3$ or $100^3$ voxels) where modifications are visible immediately without updating acceleration structures [S2, unofficial]. Not recommended for large or sparse volumes due to high memory access costs [S2, unofficial].
+*   **Strengths:** No preprocessing or acceleration structure maintenance required; simple implementation; guarantees closest intersection first [S1, S2, unofficial].
+*   **Limitations:** Low frame rates for large datasets; aliasing artifacts from nearest-neighbor sampling [S2, S3, unofficial].
+
+## Background
+Discrete Ray Tracing, also known as 3D DDA Voxel Traversal, is a basic volume rendering technique that traverses a ray through a voxel grid [S3, unofficial]. It is based on the algorithm presented by Lode Vandevenne for Wolfenstein 3D-style renderers, extended to 3D [S1, unofficial]. It is also referred to as "Raycasting ohne Beschleunigungsstruktur" (Raycasting without acceleration structure) in German literature [S2, unofficial]. The method is valid for rendering voxellized datasets and is often used in hybrid models mixing sampled data with geometric models [S4, S5, unofficial].
+
+## Sources
+[S1] Casting Rays: Voxel Rendering Using Discrete Ray Tracing, https://castingrays.blogspot.com/2014/01/voxel-rendering-using-discrete-ray.html, fetched 2026-10-24 (unofficial)
+[S2] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S3] SREESUBBARAYUDU/Parallel_Volume_Rendering, https://github.com/SREESUBBARAYUDU/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
+[S4] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+[S5] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

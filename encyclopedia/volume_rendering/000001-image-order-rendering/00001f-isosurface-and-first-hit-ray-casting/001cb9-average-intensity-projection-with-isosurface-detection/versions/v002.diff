@@ -1,0 +1,278 @@
+--- v001.md
++++ v002.md
+@@ -4,154 +4,163 @@
+ 
+ ## Overview
+-Average Intensity Projection with IsoSurface Detection is a hybrid volume rendering technique that computes the mean density of all voxels along a ray within a valid range and renders that mean value with lighting based on the mean position [S2, unofficial]. It differs from standard Maximum Intensity Projection (MIP) by averaging values rather than taking the maximum, and from pure isosurface rendering by incorporating background density information into the final color and lighting calculation [S2, unofficial].
++Average Intensity Projection with IsoSurface Detection is a volume rendering technique that computes the mean density of all voxels along a ray that fall within a valid density range, while simultaneously detecting the first isosurface crossing to enable surface-based shading [S2, unofficial]. Unlike standard Maximum Intensity Projection (MIP) which highlights only the brightest voxel, or standard Volume Ray Casting which accumulates opacity, this method averages the internal structure's density while using the detected surface position for lighting calculations [S2, unofficial]. It distinguishes itself from siblings like [Exact Projection First Contact](1897-exact-projection-first-contact.md) by incorporating a global average of the ray's valid samples rather than stopping at the first hit, and from [Isosurface Display via Opacity Mapping](6053-isosurface-display-via-opacity-mapping.md) by explicitly calculating a mean position for normal estimation [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Ray origin `startPos` and direction `rayDir`.
+-- Ray near `tNear` and far `tFar` bounds.
+-- 3D volume texture `texVol` containing scalar density values.
+-- 1D transfer function texture `tf` (or `colorMap`) mapping density to color.
+-- Isosurface threshold `isoSurf`.
+-- Number of steps `num_steps` (fixed at 256) [S1, unofficial].
+-- Boolean flag `enableLighting` [S1, unofficial].
+-
+-**Outputs:**
+-- Fragment color `FragColor`.
++**Inputs and Outputs:**
++*   **Input:** A 3D volume texture `texVol` containing scalar density values; a 1D transfer function texture `tf` (or `colorMap`) mapping density to RGBA color; an isosurface threshold `iso`; a sensitivity factor `sens` (typically 10); the number of steps `num_steps` (fixed at 256); and ray parameters `startPos`, `rayDir`, `tNear`, `tFar` [S1, unofficial][S2, unofficial].
++*   **Output:** A fragment color `FragColor` representing the shaded average intensity projection [S2, unofficial].
+ 
+ **Data Structures:**
+-- `meanSum`: `float`, accumulates density values.
+-- `validSamples`: `int`, count of samples within valid density range.
+-- `meanPos`: `vec3`, accumulates positions for mean position calculation.
+-- `color`: `vec4`, accumulates color contributions.
+-- `cnt`: `int`, counter initialized to 1 to avoid division by zero in compensation logic [S1, unofficial].
++*   `texVol`: 3D texture, sampled via `texture(texVol, texPos).x` or `.r` [S1, unofficial][S2, unofficial].
++*   `tf`: 1D texture, sampled via `texture(tf, meanValue)` [S1, unofficial].
++*   `meanSum`: Float accumulator for density values [S1, unofficial].
++*   `validSamples`: Integer counter for samples within the valid range [S1, unofficial].
++*   `meanPos`: 3D vector accumulator for sample positions [S1, unofficial].
++*   `color`: 4D vector accumulator for color values [S1, unofficial].
+ 
+-**Steps:**
+-1. Initialize `meanSum = 0.0`, `validSamples = 0`, `meanPos = vec3(0.0)`, `color = vec4(0.0)`, `cnt = 1` [S1, unofficial].
+-2. Loop `i` from 0 to `num_steps - 1`:
+-    a. Calculate current position `curPos` along the ray.
+-    b. Transform `curPos` to texture coordinates:
+-       $$tmp = (curPos.x, curPos.y, curPos.z \times 2.3486238532110093)$$
+-       $$texPos = \frac{1 + tmp}{2}$$
+-       $$texPos.y = 1 - texPos.y$$ [S1, unofficial]
+-    c. Sample density `iso1 = texture(texVol, texPos).x` [S1, unofficial].
+-    d. Advance position to `nextPos` and transform to `texPosNext` similarly [S1, unofficial].
+-    e. Sample density `iso2 = texture(texVol, texPosNext).x` [S1, unofficial].
+-    f. Check for isosurface crossing: if `iso1 < isoSurf` and `iso2 > isoSurf`:
+-        i. Use binary search `isoSurface(texPos, texPosNext, isoSurf, texIso)` to find exact surface intersection [S1, unofficial].
+-        ii. Sample value at intersection: `value = texture(texVol, texIso).x` [S1, unofficial].
+-        iii. Add to color accumulator: `color = color + value` [S1, unofficial].
+-        iv. Note: The source code does not explicitly add the isosurface sample to `meanSum` or `validSamples` in the provided snippet, but the definition states average density of all voxels is calculated. The provided pseudocode below follows the explicit code structure [S1, unofficial].
+-    g. If no crossing detected:
+-        i. If `iso1` is within valid range (implied by context of averaging, though explicit check `minDensityThreshold` is in [S2, unofficial] but not [S1, unofficial]), add to mean. The source [S1, unofficial] decrements `cnt` if no crossing, implying this step is excluded from the average if it hits the surface? No, `cnt--` is in the "no crossing" branch. This logic is ambiguous. However, [S2, unofficial] defines it as averaging all voxels in valid range. We follow [S1, unofficial]'s explicit code flow:
+-        ii. If no crossing, `cnt--` [S1, unofficial].
+-        iii. Add `iso1` to `meanSum` and `curPos` to `meanPos`? The source [S1, unofficial] code snippet is incomplete regarding the accumulation inside the loop for non-surface samples. It only shows `color = color + value` for surface hits. However, [S2, unofficial] states "calculates the average density of all voxels along the ray". We must reconcile. The source [S1, unofficial] code has `meanSum` and `validSamples` initialized but not clearly updated in the "no crossing" branch in the provided text. We will assume standard averaging logic applies to non-surface samples as per [S2, unofficial] definition, while surface samples are handled separately or included. Given the instruction to implement from text, and [S1, unofficial] is the primary code source, we note the ambiguity. However, [S1, unofficial] explicitly calculates `meanValue = meanSum / float(validSamples)` after the loop. We will assume `iso1` is added to `meanSum` and `curPos` to `meanPos` if it is a valid sample, and `cnt` decrement is a specific compensation mechanism [S1, unofficial].
+-    h. *Correction based on [S1, unofficial] code structure*: The provided code for [S1, unofficial] is fragmented. It initializes `meanSum` etc., but the loop body shown focuses on surface detection. The definition [S2, unofficial] is clear. We will implement the averaging as described in [S2, unofficial] and the surface detection as in [S1, unofficial].
+-    i. *Refined Step 2g*: If no crossing, add `iso1` to `meanSum`, `curPos` to `meanPos`, increment `validSamples`. Decrement `cnt` [S1, unofficial].
++**Algorithm Steps:**
+ 
+-3. After loop, if `validSamples > 0`:
+-    a. `meanValue = meanSum / float(validSamples)` [S1, unofficial].
+-    b. `meanPos /= float(validSamples)` [S1, unofficial].
++1.  **Initialization:**
++    *   Set `meanSum = 0.0`, `validSamples = 0`, `meanPos = vec3(0.0)`, and `color = vec4(0.0)` [S1, unofficial].
++    *   Define the effective isovalue: `iso_eff = iso / sens` [S1, unofficial].
++    *   Define the step size: `dt = (tFar - tNear) / num_steps` [G].
+ 
+-4. Map `meanValue` to color: `color = texture(colorMap, meanValue)` [S1, unofficial].
++2.  **Ray Marching Loop:**
++    *   Iterate `i` from 0 to `num_steps - 1` [S1, unofficial]:
++        *   Calculate current position: `curPos = startPos + rayDir * (tNear + i * dt)` [G].
++        *   Transform `curPos` to texture coordinates:
++            *   `tmp = vec3(curPos.xy, curPos.z * 2.3486238532110093)` [S1, unofficial].
++            *   `texPos = (1.0 + tmp) / 2.0` [S1, unofficial].
++            *   `texPos.y = 1.0 - texPos.y` [S1, unofficial].
++        *   Sample density: `iso1 = texture(texVol, texPos).x` [S1, unofficial].
++        *   Calculate next position: `nextPos = startPos + rayDir * (tNear + (i + 1) * dt)` [G].
++        *   Transform `nextPos` to texture coordinates `texPosNext` using the same transformation as `texPos` [S1, unofficial].
++        *   Sample next density: `iso2 = texture(texVol, texPosNext).x` [S1, unofficial].
+ 
+-5. If lighting enabled:
+-    a. Calculate normal `normal = calculateNormal(meanPos)` [S1, unofficial].
+-    b. Calculate lit color `litColor = calculateLighting(normal, -rayDir, meanPos, color.rgb)` [S1, unofficial].
+-    c. Output `FragColor = vec4(litColor, 1.0)` [S1, unofficial].
++3.  **Isosurface Detection and Accumulation:**
++    *   Check for isosurface crossing: If `iso1 < iso_eff` and `iso2 > iso_eff` [S1, unofficial]:
++        *   Perform binary search to find the exact intersection point `texIso` between `texPos` and `texPosNext` using the threshold `iso_eff` [S1, unofficial].
++        *   Sample the color at the intersection: `value = vec4(texture(texVol, texIso).x)` [S1, unofficial].
++        *   Add to color accumulator: `color = color + value` [S1, unofficial].
++        *   Note: The source notes do not explicitly state whether to add to `meanSum` or `validSamples` upon crossing, but implies the crossing point is treated as a valid sample for the projection [S1, unofficial].
++    *   If no crossing is detected:
++        *   Check if `iso1` is within the valid range (implied by the context of "valid range" in [S2, unofficial], though specific min/max thresholds are not provided in the code snippets, the logic `if (val < minDensityThreshold || val > maxDensityThreshold) continue;` from [S2, unofficial] suggests a range check). For the purpose of this implementation based on [S1, unofficial], we assume the sample is valid if it contributes to the average.
++        *   If the sample is considered valid (e.g., within implicit bounds or always valid in the simplified [S1, unofficial] version):
++            *   `meanSum = meanSum + iso1` [G, inferred from "average density"].
++            *   `validSamples = validSamples + 1` [G, inferred].
++            *   `meanPos = meanPos + curPos` [G, inferred].
++        *   *Correction based on [S1, unofficial] specific logic:* The source [S1, unofficial] uses a counter `cnt` initialized to 1, decrementing if no crossing. This logic is contradictory to the `validSamples` approach in [S2, unofficial]. We follow the explicit accumulation logic from [S2, unofficial] which is more robust: accumulate all valid samples. If following [S1, unofficial] strictly: `cnt--` if no crossing [S1, unofficial]. However, [S1, unofficial] also says "calculate the average density of all voxels along the ray within the valid range". We will use the `validSamples` approach as it is standard for "Average Intensity Projection" [S2, unofficial].
+ 
+-6. If lighting disabled:
+-    a. Output `FragColor = color` [S1, unofficial].
++4.  **Final Calculation:**
++    *   If `validSamples > 0`:
++        *   Calculate mean density: `meanValue = meanSum / float(validSamples)` [S1, unofficial].
++        *   Calculate mean position: `meanPos = meanPos / float(validSamples)` [S1, unofficial].
++        *   Map mean value to color: `baseColor = texture(tf, meanValue)` [S1, unofficial].
++        *   Apply compensation factor: `compensate = 1.0 / (iso_eff + 0.5)` [S1, unofficial].
++        *   `finalColor = baseColor * compensate` [S1, unofficial].
++    *   Else:
++        *   `finalColor = vec4(0.0)` [S1, unofficial].
+ 
+-7. Compensation: Apply compensation factor `compensate = 1 / (isoSurf + 0.5)` to `color`? The source [S1, unofficial] says `color *= compensate`. This seems to apply to the final color or the accumulated color? The code snippet places it after the loop. It likely applies to the final rendered color to adjust for the isosurface threshold influence [S1, unofficial].
++5.  **Lighting (Optional):**
++    *   If lighting is enabled:
++        *   Calculate normal at `meanPos`: `normal = calculateNormal(meanPos)` [S1, unofficial]. This typically involves finite differences or tri-cubic filtering of the gradient $\nabla f$ at `meanPos` [Parent].
++        *   Calculate lit color: `litColor = calculateLighting(normal, -rayDir, meanPos, finalColor.rgb)` [S1, unofficial].
++        *   Output `FragColor = vec4(litColor, 1.0)` [S1, unofficial].
++    *   Else:
++        *   Output `FragColor = finalColor` [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def average_intensity_projection_with_isosurface(startPos, rayDir, tNear, tFar, texVol, colorMap, isoSurf, num_steps=256, enableLighting=True):
++def average_intensity_projection_with_isosurface(startPos, rayDir, tNear, tFar, num_steps, iso, sens, texVol, tf, enableLighting):
++    iso_eff = iso / sens
+     meanSum = 0.0
+     validSamples = 0
+     meanPos = vec3(0.0)
+-    color = vec4(0.0)
+-    cnt = 1
++    colorAccum = vec4(0.0)
++    
++    dt = (tFar - tNear) / num_steps
+     
+     for i in range(num_steps):
+-        # Calculate current position
+-        t = tNear + (tFar - tNear) * (i / num_steps)
+-        curPos = startPos + rayDir * t
++        # Current position
++        curPos = startPos + rayDir * (tNear + i * dt)
++        texPos = transform_to_texture(curPos)
+         
+-        # Transform to texture coordinates
+-        tmp = vec3(curPos.x, curPos.y, curPos.z * 2.3486238532110093)
+-        texPos = (1.0 + tmp) / 2.0
+-        texPos.y = 1.0 - texPos.y
++        # Next position
++        nextPos = startPos + rayDir * (tNear + (i + 1) * dt)
++        texPosNext = transform_to_texture(nextPos)
+         
+-        # Sample current density
++        # Sample densities
+         iso1 = texture(texVol, texPos).x
+-        
+-        # Calculate next position
+-        t_next = tNear + (tFar - tNear) * ((i + 1) / num_steps)
+-        nextPos = startPos + rayDir * t_next
+-        tmp_next = vec3(nextPos.x, nextPos.y, nextPos.z * 2.3486238532110093)
+-        texPosNext = (1.0 + tmp_next) / 2.0
+-        texPosNext.y = 1.0 - texPosNext.y
+-        
+-        # Sample next density
+         iso2 = texture(texVol, texPosNext).x
+         
+-        # Check for isosurface crossing
+-        if iso1 < isoSurf and iso2 > isoSurf:
+-            # Binary search for exact surface position
+-            texIso = iso_surface_binary_search(texPos, texPosNext, isoSurf)
+-            value = texture(texVol, texIso).x
+-            color = color + value
++        # Isosurface detection
++        if iso1 < iso_eff and iso2 > iso_eff:
++            # Binary search for exact intersection
++            texIso = binary_search_intersection(texPos, texPosNext, iso_eff, texVol)
++            # Accumulate color at intersection
++            value = vec4(texture(texVol, texIso).x)
++            colorAccum = colorAccum + value
++            
++            # Also count as a valid sample for the average?
++            # Source [S1, unofficial] is ambiguous, but [S2, unofficial] implies averaging valid samples.
++            # We assume the intersection point is a valid sample.
++            meanSum = meanSum + iso_eff # Use iso_eff as the value at surface
++            validSamples = validSamples + 1
++            meanPos = meanPos + get_world_position(texIso) # Approximate
+         else:
+-            # No crossing, add to average
+-            meanSum += iso1
+-            meanPos += curPos
+-            validSamples += 1
+-            cnt -= 1
++            # Check if within valid range (assuming no explicit min/max thresholds in [S1, unofficial])
++            # If [S2, unofficial] min/max thresholds were used, they would be checked here.
++            # For [S1, unofficial] implementation, we assume all non-crossing samples are valid for average.
++            meanSum = meanSum + iso1
++            validSamples = validSamples + 1
++            meanPos = meanPos + curPos
+             
+     if validSamples > 0:
+         meanValue = meanSum / float(validSamples)
+         meanPos = meanPos / float(validSamples)
++        
++        baseColor = texture(tf, meanValue)
++        compensate = 1.0 / (iso_eff + 0.5)
++        finalColor = baseColor * compensate
++        
++        if enableLighting:
++            normal = calculate_normal(meanPos, texVol)
++            litColor = calculate_lighting(normal, -rayDir, meanPos, finalColor.rgb)
++            return vec4(litColor, 1.0)
++        else:
++            return finalColor
+     else:
+-        meanValue = 0.0
+-        meanPos = vec3(0.0)
+-        
+-    # Map mean value to color
+-    baseColor = texture(colorMap, meanValue)
+-    
+-    if enableLighting:
+-        normal = calculate_normal(meanPos)
+-        litColor = calculate_lighting(normal, -rayDir, meanPos, baseColor.rgb)
+-        finalColor = vec4(litColor, 1.0)
+-    else:
+-        finalColor = baseColor
+-        
+-    # Compensation factor
+-    compensate = 1.0 / (isoSurf + 0.5)
+-    finalColor = finalColor * compensate
+-    
+-    return finalColor
++        return vec4(0.0)
++
++def transform_to_texture(pos):
++    tmp = vec3(pos.xy, pos.z * 2.3486238532110093)
++    texPos = (1.0 + tmp) / 2.0
++    texPos.y = 1.0 - texPos.y
++    return texPos
+ ```
+ 
+ **Parameters:**
+-- `num_steps`: 256 [S1, unofficial].
+-- `isoSurf`: Isosurface threshold, fractional part used for comparison [S1, unofficial].
++*   `num_steps`: Fixed at 256 [S1, unofficial].
++*   `iso`: Isosurface threshold [S1, unofficial].
++*   `sens`: Sensitivity factor, typically 10 [S1, unofficial].
++*   `iso_eff`: Effective isovalue, `iso / sens` [S1, unofficial].
+ 
+-**Pitfalls:**
+-- Hardcoded multiplier `2.3486238532110093` for Z-axis implies specific data layout or aspect ratio [S1, unofficial].
+-- Y-axis inversion `1 - texPos.y` required for correct image orientation [S1, unofficial].
+-- Division by zero avoided by initializing `cnt` to 1, but `validSamples` check is primary for mean calculation [S1, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Division by Zero:** If `validSamples` is 0, the mean cannot be calculated. The algorithm outputs black `vec4(0.0)` [S1, unofficial].
++*   **Texture Coordinate Transformation:** The Z-axis uses a hardcoded multiplier `2.3486238532110093`, implying a specific non-uniform aspect ratio or data layout assumption [S1, unofficial]. Using this method with differently scaled data will distort the volume [S1, unofficial].
++*   **Y-Axis Inversion:** The Y-axis texture coordinate is inverted (`1.0 - texPos.y`) to correct for image orientation [S1, unofficial].
++*   **Compensation Factor:** The factor `1/(iso_eff + 0.5)` scales the final color based on the isovalue, which may lead to darkening if `iso_eff` is high [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is `num_steps` per ray. Binary search adds logarithmic overhead if surface is hit.
+-- **Memory Complexity:** $O(1)$ per ray for accumulators.
+-- **Strengths:** Provides a holistic view of density distribution while highlighting isosurface boundaries. Lighting on mean position can reduce noise compared to MIP.
+-- **Limitations:** Blurs fine details due to averaging. Sensitive to the hardcoded texture coordinate transformation. Compensation factor may distort colors if not tuned.
+-- **When to use:** When both internal density structure and surface boundaries are important.
+-- **When not to use:** When maximum intensity is desired (use MIP) or when only surface geometry is needed (use pure isosurface raycasting).
++*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of steps (`num_steps`). The binary search adds a logarithmic factor for each isosurface crossing, but crossings are typically sparse [S1, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per pixel, plus the storage for the volume and transfer function textures [S1, unofficial].
++*   **Strengths:** Provides a smooth representation of internal density structures while retaining surface shading cues from the isosurface [S2, unofficial]. It avoids the "blooming" effect of MIP by averaging [S2, unofficial].
++*   **Limitations:** The hardcoded texture coordinate transformation limits its applicability to specific data layouts [S1, unofficial]. The compensation factor is arbitrary and may require tuning [S1, unofficial]. It does not handle multiple isosurfaces or complex lighting effects like shadows or ambient occlusion as described in the source [S1, unofficial].
++*   **When to use:** When the goal is to visualize the average density of a structure while still benefiting from surface-like shading, and the data layout matches the hardcoded transformation [S2, unofficial].
++*   **When not to use:** For data with varying aspect ratios, or when accurate surface normals from the first hit are required without averaging [S1, unofficial].
+ 
+ ## Background
+-The method is implemented in the "Ray" project by ShashwatC [S1, unofficial] and described in the context of "VisualNifty" by viljanvr [S2, unofficial]. It combines concepts from average intensity projection and isosurface raycasting.
++The method is described in the context of a ray casting implementation using OpenGL and GLSL [S1, unofficial]. It is also referenced in a project named "VisualNifty" which discusses density thresholds and primary object detection [S2, unofficial]. The specific implementation details, including the hardcoded multiplier and compensation factor, appear in a GitHub repository "ShashwatC/Ray" [S1, unofficial]. The technique combines elements of volume averaging and isosurface rendering, likely developed for interactive visualization of medical or scientific data where both internal structure and surface appearance are important [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

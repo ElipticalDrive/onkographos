@@ -1,0 +1,128 @@
+# Pre-classification Shading Pipeline
+
+Also called: Pre-Classification, Pre-DVRI, Pre-shaded DVR, Pre-shaded DVRI
+
+## Overview
+The Pre-classification Shading Pipeline (also known as Pre-DVRI) is a volume rendering method where voxel values are mapped to optical properties (color and opacity) and shaded *before* ray sample interpolation occurs [S1, unofficial][S2]. Unlike the Post-classification Shading Pipeline, which interpolates raw density values first, this approach classifies and shades the discrete grid samples, then composites them along the ray [S2]. It is distinct from post-classification primarily in its handling of partial voluming and its susceptibility to blurring at high image resolutions [S1, unofficial][S2].
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A scalar volume grid $V$ where each voxel $v$ has a scalar value $s_v$. Optionally, a segmented volume with material indices and probabilities [S1, unofficial].
+*   **Output:** A 2D image where each pixel represents the integrated light $I_\lambda(x, r)$ along the viewing ray $r$ [S2].
+
+### Data Structures
+The core data structure for a pre-classified voxel is a vector of four components, often stored as a 4-component texture or memory block [S1, unofficial]:
+$$ \text{Voxel} = (R\alpha, G\alpha, B\alpha, \alpha) $$
+This is referred to as **associated color** or **opacity-weighted color** [S1, unofficial]. Let $\tilde{C}$ denote the associated color vector, where $\tilde{C} = C\alpha$ [S1, unofficial].
+
+### Steps
+1.  **Classification and Shading (Pre-processing):**
+    For each voxel $v$ in the volume grid with scalar value $s_v$:
+    a.  Determine material properties using a transfer function $T(s_v)$. If segmentation is available, use material indices and probabilities to resolve partial voluming [S1, unofficial].
+    b.  Compute the unassociated color $C_v$ and opacity $\alpha_v$ [S1, unofficial].
+    c.  Compute the associated color $\tilde{C}_v = C_v \cdot \alpha_v$ [S1, unofficial].
+    d.  Store the tuple $(\tilde{C}_v, \alpha_v)$ in the pre-classified volume [S1, unofficial].
+
+2.  **Ray Casting and Interpolation:**
+    For each pixel, cast a ray $r$ through the volume.
+    a.  Sample the pre-classified volume at positions $s_i$ along the ray.
+    b.  Interpolate the associated color $\tilde{C}$ and opacity $\alpha$ from the grid.
+    c.  **Critical Constraint:** One must interpolate the pre-computed product $\tilde{C} = C\alpha$ directly. It is incorrect to interpolate $C$ and $\alpha$ separately and then multiply them, because tri-linear interpolation is non-linear [S1, unofficial][S2].
+
+3.  **Compositing:**
+    Compute the final pixel color using the standard volume rendering integral, discretized as [S2]:
+    $$ I_\lambda(x,r) = \sum_{i=0}^{L/\Delta s} \tilde{C}_\lambda(s_i) \prod_{j=0}^{i-1} (1 - \alpha(s_j)) $$
+    Where:
+    *   $L$ is the length of the ray [S2].
+    *   $\Delta s$ is the step size [S2].
+    *   $\tilde{C}_\lambda(s_i)$ is the associated color (pre-multiplied) at sample $i$ [S2].
+    *   $\alpha(s_j)$ is the opacity at sample $j$ [S2].
+    *   The term $\prod_{j=0}^{i-1} (1 - \alpha(s_j))$ represents the transmittance from the start of the ray to sample $i$ [S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pre_classification_shading_pipeline(volume_grid, transfer_function, ray_origin, ray_direction, image_width, image_height):
+    # Pre-processing: Classify and shade the entire volume grid
+    # Output: pre_classified_volume where each voxel is (R_alpha, G_alpha, B_alpha, alpha)
+    pre_classified_volume = []
+    for voxel in volume_grid:
+        scalar_value = voxel.value
+        # Get color and opacity from transfer function
+        color, opacity = transfer_function(scalar_value)
+        
+        # Pre-multiply color by opacity to get associated color
+        # This must be done BEFORE interpolation
+        associated_color = color * opacity
+        
+        pre_classified_volume.append({
+            'associated_color': associated_color,
+            'opacity': opacity
+        })
+
+    # Ray Casting
+    image = empty_image(image_width, image_height)
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            ray = get_ray_for_pixel(x, y, ray_origin, ray_direction)
+            pixel_color = [0.0, 0.0, 0.0, 0.0]
+            transmittance = 1.0
+            
+            # Sample along the ray
+            num_samples = calculate_num_samples(ray, volume_grid.resolution)
+            for i in range(num_samples):
+                # Interpolate from pre-classified volume
+                # Note: Interpolate associated_color and opacity separately
+                # Do NOT interpolate color and opacity then multiply
+                sample_pos = ray.origin + ray.direction * (i * step_size)
+                
+                # Trilinear interpolation of pre-classified data
+                # This interpolates the pre-multiplied values
+                associated_color_sample = trilinear_interpolate(pre_classified_volume, sample_pos, field='associated_color')
+                opacity_sample = trilinear_interpolate(pre_classified_volume, sample_pos, field='opacity')
+                
+                # Composite
+                # I = sum( C_alpha * product(1 - alpha) )
+                contribution = associated_color_sample * transmittance
+                pixel_color += contribution
+                
+                # Update transmittance for next sample
+                transmittance *= (1.0 - opacity_sample)
+                
+                # Early ray termination optimization
+                if transmittance < epsilon:
+                    break
+            
+            # Convert to display format if necessary
+            image[y, x] = pixel_color / (1.0 - transmittance + epsilon) # Normalize if needed, or just use accumulated color
+            
+    return image
+```
+
+### Parameters and Edge Cases
+*   **Step Size ($\Delta s$):** Must be small enough to avoid aliasing but large enough for performance. Not given in the sources.
+*   **Partial Voluming:** A major source of error where a single voxel represents multiple materials. This is mitigated by using segmented volumes with material indices and probabilities during the pre-classification step [S1, unofficial].
+*   **Blurring:** Pre-classification tends to cause excessive blurring when the image resolution exceeds the volume resolution (e.g., zoomed viewing or wide perspectives) [S2].
+*   **Interpolation Error:** Interpolating color and opacity separately and then multiplying them introduces artifacts because interpolation is a linear operation and the product is non-linear [S1, unofficial][S2].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot R)$, where $N$ is the number of voxels (for pre-processing) and $R$ is the number of rays/samples. The pre-processing step is $O(V)$ where $V$ is the number of voxels.
+*   **Memory Complexity:** $O(V)$ for storing the pre-classified volume (4 components per voxel instead of 1 or 2).
+*   **Strengths:**
+    *   Handles segmented anatomical parts effectively in medical imaging [S1, unofficial].
+    *   Prevents partial voluming errors when segmentation data is available [S1, unofficial].
+    *   Compatible with pre-integration techniques [S1, unofficial].
+*   **Limitations:**
+    *   Prone to excessive blurring at high image resolutions or wide perspectives [S2].
+    *   Harder to implement than post-classification due to the requirement of pre-multiplying color and opacity [S1, unofficial].
+    *   Cannot easily re-classify data without re-processing the entire volume [S1, unofficial].
+
+## Background
+The concept of pre-classification was introduced by Drebin et al. in 1988, who defined associated color (opacity-weighted color) [S1, unofficial]. Wittenbrink et al. (1998) further analyzed the pipeline, highlighting the necessity of pre-multiplying color and opacity before interpolation to avoid artifacts [S1, unofficial][S2]. The term Pre-DVRI (Pre-shaded Direct Volume Rendering Integration) was used to distinguish this pipeline from post-shaded variants [S2]. It remains a critical tool in medical imaging for handling segmented data [S1, unofficial].
+
+## Sources
+[S1] Hardware-Accelerated Volume Rendering, https://vcg.seas.harvard.edu/publications/20040101-hardware-accelerated-volume-rendering/paper, fetched 2026-10-27 (unofficial)
+[S2] A Practical Evaluation of Popular Volume Rendering ..., https://courses.cs.duke.edu/spring03/cps296.8/papers/PracticalEvaluationofVolumeRenderingAlgorithms.pdf, fetched 2026-10-29

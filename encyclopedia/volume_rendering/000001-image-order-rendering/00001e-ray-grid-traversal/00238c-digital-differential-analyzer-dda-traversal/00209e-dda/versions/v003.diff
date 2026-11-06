@@ -1,0 +1,96 @@
+--- v002.md
++++ v003.md
+@@ -10,5 +10,5 @@
+ **Inputs:**
+ *   `ray_origin`: 3D vector $(o_x, o_y, o_z)$ specifying the ray start point [S4, S7, S10, unofficial].
+-*   `ray_direction`: 3D vector $(d_x, d_y, d_z)$ specifying the ray direction. Source [S10, unofficial] states the direction does not need to be normalized, while [S4, unofficial] requires normalization; the algorithm works with unnormalized directions by using reciprocal components for scaling [S10, unofficial].
++*   `ray_direction`: 3D vector $(d_x, d_y, d_z)$ specifying the ray direction [S10, unofficial]. Source [S10, unofficial] states the direction does not need to be normalized, while [S4, unofficial] requires normalization; the algorithm works with unnormalized directions by using reciprocal components for scaling [S10, unofficial].
+ *   `grid_bounds`: Optional bounding box $(grid_{min}, grid_{max})$ or resolution $grid_{res}$ to limit traversal [S10, unofficial].
+ *   `max_time`: Maximum parameter $t$ along the ray to traverse [S2][S9, unofficial].
+@@ -19,5 +19,5 @@
+ 
+ ### Data structures
+-The DDA state maintains fields that vary by implementation. The branchless GPU variant maintains [S3, unofficial]:
++The DDA state maintains fields that vary by implementation [S2][S3, S8, unofficial]. The branchless GPU variant maintains [S3, unofficial]:
+ *   `pos`: Integer vector $(i, j, k)$ representing the current voxel index [S3, unofficial].
+ *   `side_dist`: Floating-point vector representing the distance along the ray to the next grid boundary in each dimension [S3, unofficial].
+@@ -61,8 +61,8 @@
+ 
+ ### Edge cases and pitfalls
+-*   **Zero Direction Components**: If a ray component is zero, the ray is parallel to the grid lines in that dimension. The reciprocal is infinite, and the distance to the next grid line is infinite, effectively disabling stepping in that axis [S10, S11, unofficial].
+-*   **Ray on Grid Boundary**: If the ray origin lies exactly on a grid line, the initial distance calculation may yield zero. A guard `dt > 0` prevents processing zero-length segments or double-counting cells [S10, S7, unofficial].
+-*   **GPU Branching**: Standard implementations using `if` statements for axis selection cause branch divergence on GPUs. The branchless mask-based approach avoids this penalty [S3, unofficial].
+-*   **Negative Directions**: The initial distance calculation must account for the direction of travel. If $d_x < 0$, the next boundary is at the lower integer coordinate, not the upper [S4, unofficial].
++*   **Zero Direction Components**: If a ray component is zero, the ray is parallel to the grid lines in that dimension [S10, S11, unofficial]. The reciprocal is infinite, and the distance to the next grid line is infinite, effectively disabling stepping in that axis [S10, S11, unofficial].
++*   **Ray on Grid Boundary**: If the ray origin lies exactly on a grid line, the initial distance calculation may yield zero [S10, S7, unofficial]. A guard `dt > 0` prevents processing zero-length segments or double-counting cells [S10, S7, unofficial].
++*   **GPU Branching**: Standard implementations using `if` statements for axis selection cause branch divergence on GPUs [S3, unofficial]. The branchless mask-based approach avoids this penalty [S3, unofficial].
++*   **Negative Directions**: The initial distance calculation must account for the direction of travel [S4, unofficial]. If $d_x < 0$, the next boundary is at the lower integer coordinate, not the upper [S4, unofficial].
+ 
+ ### Pseudocode
+@@ -71,5 +71,5 @@
+     # 1. Initialization
+     # Compute reciprocal direction, handling zeros safely [S11, unofficial]
+-    rcp_d = vec3(1.0)
++    rcp_d = [0.0, 0.0, 0.0]
+     for i in range(3):
+         if abs(ray_direction[i]) < 1e-8:
+@@ -78,11 +78,11 @@
+             rcp_d[i] = 1.0 / ray_direction[i]
+ 
+-    abs_rcp_d = abs(rcp_d)
+-    pos = floor(ray_origin)
+-    step_dir = sign(ray_direction)
+-    p0 = ray_origin - vec3(floor(ray_origin))
++    abs_rcp_d = [abs(rcp_d[i]) for i in range(3)]
++    pos = [int(ray_origin[i]) for i in range(3)] # floor
++    step_dir = [1 if ray_direction[i] >= 0 else -1 for i in range(3)]
++    p0 = [ray_origin[i] - pos[i] for i in range(3)]
+ 
+     # Initial distances to next grid boundaries [S4, S10, unofficial]
+-    side_dist = vec3(0.0)
++    side_dist = [0.0, 0.0, 0.0]
+     for i in range(3):
+         if ray_direction[i] > 0:
+@@ -94,4 +94,5 @@
+ 
+     delta_dist = abs_rcp_d
++    t_current = 0.0
+ 
+     # 2. Stepping Loop
+@@ -103,14 +104,24 @@
+         min_val = min(side_dist)
+         # Cyclic comparison for tie-breaking [S3, unofficial]
+-        mask = vec3(side_dist <= min(side_dist.yzx, side_dist.zxy))
++        mask = [
++            side_dist[0] <= min(side_dist[1], side_dist[2]),
++            side_dist[1] <= min(side_dist[2], side_dist[0]),
++            side_dist[2] <= min(side_dist[0], side_dist[1])
++        ]
+ 
+         # Update distances and position [S3, unofficial]
+-        side_dist += mask * delta_dist
+-        pos += mask * step_dir
++        for i in range(3):
++            if mask[i]:
++                side_dist[i] += delta_dist[i]
++                pos[i] += step_dir[i]
++
++        # Update accumulated time [G]
++        t_current += min_val
+ 
+         # Check bounds and termination [S10, unofficial]
+-        if not (0 <= pos.x < grid_res.x and 0 <= pos.y < grid_res.y and 0 <= pos.z < grid_res.z):
++        if not (0 <= pos[0] < grid_res[0] and 0 <= pos[1] < grid_res[1] and 0 <= pos[2] < grid_res[2]):
+             break
+-        # Optional: break if max_time reached based on accumulated distance [S10, unofficial]
++        if t_current >= max_time:
++            break
+ 
+     return pos
+@@ -132,5 +143,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(K)$, where $K$ is the number of visited cells. The algorithm visits each intersected cell exactly once [S2].
++*   **Time Complexity**: $O(K)$, where $K$ is the number of visited cells [S2]. The algorithm visits each intersected cell exactly once [S2].
+ *   **Memory Complexity**: $O(1)$ auxiliary space, storing only the current state (position, distances, deltas) [S3, S8, unofficial].
+ *   **Performance**: Highly efficient on GPUs due to branchless execution. The mask-based update avoids divergence [S3, S10, unofficial].

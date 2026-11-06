@@ -1,0 +1,403 @@
+--- v004.md
++++ v005.md
+@@ -4,303 +4,124 @@
+ 
+ ## Overview
+-Cube Rasterization via SSBO renders a set of voxels as explicit geometric cubes by issuing a single `glDrawElementsInstanced` call, where each instance is transformed and colored using data fetched from a Shader Storage Buffer Object (SSBO) [S1, S2, unofficial]. Unlike point-sprite or ray-marched approaches, this method generates actual triangle geometry for the visible faces of each voxel, allowing for standard rasterization-based lighting and exact geometric culling [S2, unofficial]. It distinguishes itself from sibling methods like [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md) by relying on a large, pre-allocated index buffer and a dense SSBO layout rather than procedural generation or sparse data structures.
++Cube Rasterization via SSBO renders $N$ voxels as instances of a base unit cube geometry using a single `glDrawElementsInstanced` draw call, where each instance is transformed by an offset and colored via a palette texture lookup [S1, unofficial]. It rasterizes exactly 3 faces of each cube per voxel to optimize for front-face visibility, using a single large index buffer (18 indices per instance) and a large SSBO containing voxel data [S2, unofficial]. It sets itself apart from sibling methods like [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md) by using explicit triangle geometry per voxel rather than point sprites or ray-marched quads, providing exact cube geometry and explicit face culling logic in the vertex shader [S2, unofficial].
+ 
+ ## How it works
++**Inputs and Outputs:**
++*   **Input:** A list of $N$ voxels, each defined by integer coordinates $(x, y, z)$ and material properties (albedo, metalness, roughness, etc.).
++*   **Output:** A rasterized image of the voxel scene.
+ 
+-### Inputs and Outputs
+-*   **Input:** A list of occupied voxels, each defined by integer grid coordinates $(x, y, z)$ and material properties (albedo, metalness, roughness, etc.).
+-*   **Output:** A rasterized image of the voxel scene, with depth buffer updated per triangle.
++**Data Structures:**
+ 
+-### Data Structures
++1.  **Instance Buffer (SSBO):**
++    *   Bound as a `std430` buffer (GLSL) or `StructuredBuffer` (HLSL).
++    *   Layout: An array of `uvec2` per voxel.
++    *   `data.x` (32-bit): Packed position.
++        *   Bits 0-10: X coordinate (11 bits).
++        *   Bits 11-20: Y coordinate (10 bits).
++        *   Bits 21-31: Z coordinate (11 bits).
++    *   `data.y` (32-bit): Packed material properties.
++        *   Bits 0-15: ALBEDO (16 bits, R5G6B5 format).
++        *   Bits 16-19: METAL (4 bits).
++        *   Bits 20-23: ROUGH (4 bits).
++        *   Bits 24-27: INTENSITY (4 bits).
++        *   Bits 28-31: TYPE (4 bits).
++    *   [S2, unofficial]
+ 
+-#### SSBO Layout (Instance Data)
+-Voxel data is stored in a single `GL_SHADER_STORAGE_BUFFER` bound at binding point 0. Each voxel instance consumes 2 `uint` values (`uvec2`), packed as follows [S2, unofficial]:
++2.  **Index Buffer (EBO):**
++    *   Static buffer containing indices for 3 faces of a cube.
++    *   Total indices: $N \times 18$ (3 faces $\times$ 2 triangles/face $\times$ 3 vertices/triangle).
++    *   Indices are generated at startup by replicating a base 18-index pattern with offsets: `indices[i] = cube_indices[cube_local] + cube * num_cube_vertices`, where `num_cube_vertices = 8`.
++    *   [S2, unofficial]
+ 
+-*   **`data[0]` (Position):**
+-    *   Bits 0–10 (11 bits): X coordinate.
+-    *   Bits 11–20 (10 bits): Y coordinate.
+-    *   Bits 21–31 (11 bits): Z coordinate.
+-*   **`data[1]` (Material):**
+-    *   Bits 0–15 (16 bits): Albedo, packed as R5G6B5 (5 bits Red, 6 bits Green, 5 bits Blue).
+-    *   Bits 16–19 (4 bits): Metalness.
+-    *   Bits 20–23 (4 bits): Roughness.
+-    *   Bits 24–27 (4 bits): Intensity.
+-    *   Bits 28–31 (4 bits): Type.
++3.  **Vertex Buffer (VBO):**
++    *   Stride: `CubeGeometry.FLOATS_PER_VERTEX * 4` bytes.
++    *   Layout:
++        *   `[0:3]` `aLocalPosition` (`vec3`, float): Local vertex position.
++        *   `[3:6]` `aNormal` (`vec3`, float): Local vertex normal.
++    *   [S1, unofficial]
+ 
+-#### Index Buffer (Geometry)
+-A static `GL_ELEMENT_ARRAY_BUFFER` is created at startup containing indices for **3 faces** of a unit cube. This reduces the vertex count per instance from 24 (6 faces) to 12 vertices, and the index count to 18 indices per instance [S2, unofficial]. The indices are defined relative to a local cube vertex buffer of 8 vertices.
+-
+-#### Vertex Buffer (Base Geometry)
+-A `GL_ARRAY_BUFFER` defines the base unit cube geometry. Each vertex contains [S1, unofficial]:
+-*   `aLocalPosition` (`vec3`): Local position of the vertex.
+-*   `aNormal` (`vec3`): Normal vector of the face.
+-
+-### Numbered Steps
++**Numbered Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Create the SSBO and populate it with voxel data packed into `uvec2` arrays.
+-    *   Create the static index buffer with 18 indices representing 3 faces of a cube (6 triangles).
+-    *   Create the vertex buffer with 8 vertices representing the unit cube corners.
++    *   Create and bind the static index buffer with 18 indices per voxel instance.
++    *   Create and bind the SSBO containing the packed voxel data.
++    *   Create the VAO with the cube vertex/normal attributes and instance offset/UV attributes. Set vertex attribute divisors for instance attributes to 1.
++    *   [S1, unofficial]
+ 
+-2.  **Setup Draw Call:**
+-    *   Bind the VAO containing the vertex attributes.
+-    *   Set the vertex attribute divisor for instance attributes (position/UV or SSBO fetch) to 1.
+-    *   Bind the element buffer.
+-    *   Call `glDrawElementsInstanced(GL_TRIANGLES, indexCount, GL_UNSIGNED_SHORT, 0, instanceCount)`.
++2.  **Draw Call:**
++    *   Bind the VAO and EBO.
++    *   Call `glDrawElementsInstanced` with `GL_TRIANGLES`, index count ($N \times 18$), `GL_UNSIGNED_SHORT`, offset 0, and `instanceCount` ($N$).
++    *   [S1, unofficial]
+ 
+-3.  **Vertex Shader Execution (Per Vertex):**
+-    *   Determine the instance index from `gl_VertexID`:
+-        $$
+-        \text{instance} = \lfloor \text{gl\_VertexID} / 3 \rfloor
+-        $$
+-        *(Note: Source [S2, unofficial] uses bit shift `gl_VertexID >> 3` which implies a different vertex packing or stride; however, standard instancing with 18 indices per instance implies `gl_VertexID / 3` if processing triangles, or `gl_VertexID / 18` if processing the whole instance. The source code snippet `uint uvec3 xyz = uvec3(gl_VertexID & 0x1, (gl_VertexID & 0x2) >> 1, (gl_VertexID & 0x4) >> 2);` suggests `gl_VertexID` is used to decode a local vertex index 0-7. This implies the shader processes vertices, not triangles directly, or the index buffer is used to map to these local indices. The source code snippet actually shows a vertex shader that computes `xyz` from `gl_VertexID` directly using bitmasks, implying `gl_VertexID` ranges 0-7 per instance, or the index buffer is not used in the traditional sense but rather a full draw of vertices. However, the text says "single large index buffer... 18 indices". The code snippet `xyz` calculation `gl_VertexID & 0x1` etc. works for vertex indices 0-7. If 18 indices are used, `gl_VertexID` goes up to 17. The code snippet likely corresponds to a specific optimization where the index buffer maps to these 8 vertices, or the shader logic assumes a specific vertex ordering. We follow the source code logic for the transformation.)*
+-        
+-        *Correction based on Source [S2, unofficial] Code Snippet:* The provided GLSL code calculates `xyz` from `gl_VertexID` using bitmasks `& 0x1`, `& 0x2`, `& 0x4`. This logic is valid for vertex indices 0 through 7. If the index buffer has 18 indices, `gl_VertexID` will exceed 7. The source text states "18 indices per instance". The code snippet might be from a variant or assumes the index buffer maps to these 8 vertices repeatedly. For implementation, we assume the standard instancing flow where `gl_VertexID` is the attribute index. If using the index buffer, `gl_VertexID` is the index into the EBO. The EBO contains 18 indices. The shader code provided in [S2, unofficial] seems to assume `gl_VertexID` is a local vertex index 0-7. This is a contradiction in the source notes between "18 indices" and the shader logic. We will describe the method as using the index buffer to select faces, and the shader logic to determine orientation.
+-        
+-        *Re-evaluating Source [S2, unofficial] Code:* The code `uint uvec3 xyz = uvec3(gl_VertexID & 0x1, (gl_VertexID & 0x2) >> 1, (gl_VertexID & 0x4) >> 2);` is inside a vertex shader. If `gl_VertexID` comes from an index buffer of size 18, this logic is incorrect for indices 8-17. However, the source explicitly links this code to the `MODE_CUBE` description. It is possible the "18 indices" refers to a specific culling strategy where only 3 faces are drawn, but the vertex shader logic provided is for a full cube or a specific subset. Given the instruction to be implementable, we must resolve this. The most likely interpretation is that the index buffer contains indices that map to the 8 vertices, and the shader logic is specific to the vertex index. If the index buffer has 18 entries, `gl_VertexID` will be 0..17. The bitmasks only work for 0..7. Therefore, the source code snippet might be incomplete or from a different mode. However, the text says "rasterizes 3 faces... 18 indices". 3 faces * 2 tris/face * 3 verts/tri = 18 indices. The vertices are shared. The 8 vertices of a cube can be indexed. The shader code provided in [S2, unofficial] is likely for a *different* part of the experiment or assumes `gl_VertexID` is remapped. 
+-        *Decision:* We will describe the standard approach implied by the text: 3 faces are drawn. The vertex shader determines the face orientation based on the camera. The source code snippet for `xyz` calculation is likely for a point-sprite or a different vertex ordering. We will rely on the textual description: "Determine cube face orientation based on camera position... Flip xyz components based on sign of local_camera_pos". This implies the vertex shader receives a vertex index or position and adjusts it.
+-        
+-        *Implementation Detail from Source [S2, unofficial] Text:* "In the vertex shader, determine instance index from gl_VertexID: instance = (gl_VertexID >> uint(3));". This shift by 3 implies 8 vertices per instance are processed directly, or the index buffer is not used for vertex selection but for something else? No, `gl_VertexID` is the vertex index. If `instance = gl_VertexID >> 3`, then `gl_VertexID` ranges 0..N*8-1. This implies **no index buffer** is used for vertex selection, but rather a full draw of vertices? But the text says "single large index buffer... 18 indices". This is a direct contradiction in the source [S2, unofficial].
+-        
+-        *Resolution:* The source [S2, unofficial] notes contain conflicting information. One part says "18 indices per instance" and "index buffer". Another part says `instance = gl_VertexID >> 3` (which implies 8 vertices per instance, no index buffer needed for vertex selection, or the index buffer is trivial). The code snippet `xyz` calculation also implies 8 vertices. The "18 indices" might refer to a *different* optimization or a mistake in the notes. However, the prompt asks to implement from the article. We will prioritize the **SSBO and Instancing** mechanism. We will describe the vertex shader logic that determines the face.
+-        
+-        *Corrected Step 3 Logic:*
+-        a. Fetch instance data from SSBO using `instance` index.
+-        b. Unpack position and material properties.
+-        c. Compute world position: $P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})$ [S4, unofficial].
+-        d. Compute local camera position: $L_{cam} = C_{eye} - P_{world}$.
+-        e. Determine visible faces. For each vertex, if the face normal points towards the camera, render it. The source [S2, unofficial] suggests flipping coordinates based on the sign of $L_{cam}$ to cull back faces.
+-        f. Transform vertex: $V_{clip} = M_{VP} \times (V_{local} \times S + P_{world})$.
++3.  **Vertex Shader Execution:**
++    *   Determine instance index from `gl_VertexID`:
++        $$ \text{instance} = \lfloor \text{gl\_VertexID} / 8 \rfloor $$
++        (Note: Source [S2, unofficial] uses `gl_VertexID >> uint(3)`, which is equivalent to division by 8, assuming 8 vertices per cube face selection logic, though the index buffer has 18 indices. The source code snippet implies `gl_VertexID` is used to derive both the instance and the local face vertex. Specifically, `instance = gl_VertexID >> 3` suggests 8 vertices per instance in the shader's view, but the index buffer has 18. The source code snippet for `MODE_CUBE` uses `gl_VertexID` to determine the face orientation and local vertex. Let's follow the source code snippet exactly.)
++    *   Fetch instance record from SSBO: `voxel_data = ssbo[instance]`.
++    *   Unpack position and albedo using bitmasks.
++        *   Position: Extract X, Y, Z from `voxel_data.x`.
++        *   Albedo: Extract R, G, B from `voxel_data.y` (R5G6B5).
++            $$ u\_red = (voxel\_data.y \ \& \ 0x1F) \ll 3 $$
++            $$ u\_green = (voxel\_data.y \ \& \ 0x7E0) \gg 2 $$
++            $$ u\_blue = (voxel\_data.y \ \& \ 0xF800) \gg 8 $$
++            $$ \text{albedo} = \text{vec3}(u\_red/255.0, u\_green/255.0, u\_blue/255.0) $$
++            (Note: Source [S2, unofficial] uses specific bitmasks `0x1`, `0x2016`, `0x63488` and divisors `32.0`, `64.0`, `32.0` for R5G6B5. We will use the source's exact logic.)
++    *   Compute world position from unpacked coordinates.
++    *   Determine cube face orientation based on camera position relative to voxel:
++        $$ \text{local\_camera\_pos} = \text{camera\_origin} - \text{world\_position} $$
++        $$ \text{xyz} = \text{uvec3}(\text{gl\_VertexID} \ \& \ 0x1, (\text{gl\_VertexID} \ \& \ 0x2) \gg 1, (\text{gl\_VertexID} \ \& \ 0x4) \gg 2) $$
++        If `local_camera_pos.x > 0.0`, `xyz.x = 1 - xyz.x`.
++        If `local_camera_pos.y > 0.0`, `xyz.y = 1 - xyz.y`.
++        If `local_camera_pos.z > 0.0`, `xyz.z = 1 - xyz.z`.
++    *   Transform local cube vertex:
++        $$ \text{uvw} = \text{vec3}(\text{xyz}) $$
++        $$ \text{position} = \text{view\_projection\_matrix} \times \text{vec4}(\text{uvw} \times \text{vec3}(2.0) - \text{vec3}(1.0) \times 0.05 + \text{world\_position}, 1.0) $$
++    *   Set `gl_Position` and output color.
++    *   [S2, unofficial]
+ 
+-4.  **Fragment Shader:**
+-    *   Interpolate color/albedo.
+-    *   Apply lighting (Ambient, Diffuse, Specular) using constants [S1, unofficial].
++**Parameters:**
++*   `num_cube_indices`: Total indices for all instances, calculated as `no_of_instances * 3 * 2 * 3` [S2, unofficial].
++*   `MIN_ZOOM`: 0.3f [S1, unofficial].
++*   `MAX_ZOOM`: 3.0f [S1, unofficial].
++*   `ROTATION_SENSITIVITY`: 0.4f [S1, unofficial].
++*   `AMBIENT_INTENSITY`: 0.35f [S1, unofficial].
++*   `SPECULAR_INTENSITY`: 0.5f [S1, unofficial].
++*   `SHININESS`: 32f [S1, unofficial].
++*   `LIGHT_POS_WORLD`: {10f, 15f, 10f} [S1, unofficial].
++*   `cameraDistance`: 5f [S1, unofficial].
+ 
+-### Formulas
+-
+-*   **World Position:**
+-    $$
+-    P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})
+-    $$
+-    Where $I_{voxel}$ is the integer voxel coordinate, $N_{dim}$ is the grid dimension, and $P_{min}, P_{max}$ are the world-space bounds [S4, unofficial].
+-
+-*   **Face Culling/Orientation:**
+-    Compute local camera vector:
+-    $$
+-    L_{cam} = C_{eye} - P_{world}
+-    $$
+-    For a vertex at local coordinate $v \in \{-1, 1\}^3$, the face is visible if the dot product of the face normal and view vector is positive. The source [S2, unofficial] implements this by flipping the vertex coordinate based on the sign of $L_{cam}$ components:
+-    ```glsl
+-    if (local_camera_pos.x > 0.0) xyz.x = 1 - xyz.x;
+-    if (local_camera_pos.y > 0.0) xyz.y = 1 - xyz.y;
+-    if (local_camera_pos.z > 0.0) xyz.z = 1 - xyz.z;
+-    ```
+-    This effectively selects the face closest to the camera [S2, unofficial].
+-
+-*   **Vertex Transformation:**
+-    $$
+-    V_{clip} = M_{VP} \times (V_{local} \times 0.05 + P_{world})
+-    $$
+-    Where $V_{local}$ is the unit cube vertex (scaled by 0.05 in the source [S2, unofficial]) and $M_{VP}$ is the Model-View-Projection matrix [S2, unofficial].
+-
+-*   **Albedo Unpacking (R5G6B5):**
+-    ```glsl
+-    uint u_red = (u_albedo & uint(31));
+-    uint u_green = (u_albedo & uint(2016)) >> uint(5);
+-    uint u_blue = (u_albedo & uint(63488)) >> uint(11);
+-    vec3 albedo = vec3(float(u_red)/32.0, float(u_green)/64.0, float(u_blue)/32.0);
+-    ```
+-    [S2, unofficial]
+-
+-### Parameters
+-*   **Lighting Constants:** Ambient Intensity = 0.35f, Specular Intensity = 0.5f, Shininess = 32f [S1, unofficial].
+-*   **Light Position:** World-space light position at {10f, 15f, 10f} [S1, unofficial].
+-*   **Zoom Clamping:** MIN_ZOOM = 0.3f, MAX_ZOOM = 3.0f [S1, unofficial].
+-*   **Rotation Sensitivity:** 0.4f degrees per pixel [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **VAO Availability:** On Android OpenGL ES 3.0, VAOs are not universally supported; explicit VBO/EBO binding may be required every frame, though overhead is negligible due to single draw call [S1, unofficial].
+-*   **Zoom Artifacts:** Extreme zoom levels cause scaling artifacts; zoom factor must be clamped [S1, unofficial].
+-*   **Rotation Direction:** Drag direction across screen halves affects rotation direction, handled naturally by the sign of the delta x [S1, unofficial].
+-*   **Precision:** Bit-packing in SSBO requires careful bitmasks to avoid data corruption [S2, unofficial].
+-
+-### Pseudocode
+-
+-```python
+-# Initialization
+-def init_voxel_renderer(voxels):
+-    # 1. Create SSBO
+-    ssbo_data = []
+-    for v in voxels:
+-        # Pack position into uvec2[0]
+-        pos_x = v.x & 0x7FF  # 11 bits
+-        pos_y = v.y & 0x3FF  # 10 bits
+-        pos_z = v.z & 0x7FF  # 11 bits
+-        packed_pos = pos_x | (pos_y << 11) | (pos_z << 21)
+-        
+-        # Pack material into uvec2[1]
+-        # Albedo R5G6B5
+-        r = (v.albedo.r * 31) & 0x1F
+-        g = (v.albedo.g * 63) & 0x3F
+-        b = (v.albedo.b * 31) & 0x1F
+-        albedo_packed = r | (g << 5) | (b << 11)
+-        
+-        # Other properties (4 bits each)
+-        metal = v.metal & 0xF
+-        rough = v.rough & 0xF
+-        intensity = v.intensity & 0xF
+-        type_val = v.type & 0xF
+-        
+-        packed_mat = albedo_packed | (metal << 16) | (rough << 20) | (intensity << 24) | (type_val << 28)
+-        
+-        ssbo_data.append((packed_pos, packed_mat))
+-    
+-    bind_ssbo(ssbo_data)
+-    
+-    # 2. Create Index Buffer (18 indices for 3 faces)
+-    # Define 3 faces: +X, +Y, +Z (or cullable faces)
+-    # Each face is 2 triangles, 6 indices. 3 faces = 18 indices.
+-    # Vertices are 0-7.
+-    indices = []
+-    # Face +X (x=1): vertices 5, 7, 1 and 1, 7, 3 (example mapping)
+-    # This depends on the specific vertex layout in the VBO.
+-    # Assuming standard cube: 0:(-1,-1,-1), 1:(1,-1,-1), 2:(-1,1,-1), 3:(1,1,-1), 4:(-1,-1,1), 5:(1,-1,1), 6:(-1,1,1), 7:(1,1,1)
+-    # Face +X (x=1): 1, 3, 7 and 1, 7, 5
+-    indices.extend([1, 3, 7, 1, 7, 5])
+-    # Face +Y (y=1): 2, 6, 7 and 2, 7, 3
+-    indices.extend([2, 6, 7, 2, 7, 3])
+-    # Face +Z (z=1): 4, 5, 7 and 4, 7, 6
+-    indices.extend([4, 5, 7, 4, 7, 6])
+-    
+-    bind_index_buffer(indices)
+-    
+-    # 3. Create Vertex Buffer (8 vertices)
+-    vertices = [
+-        (-1, -1, -1), (1, -1, -1), (-1, 1, -1), (1, 1, -1),
+-        (-1, -1, 1), (1, -1, 1), (-1, 1, 1), (1, 1, 1)
+-    ]
+-    bind_vertex_buffer(vertices)
+-
+-# Rendering
+-def render_voxels(vp_matrix, camera_pos):
+-    bind_program()
+-    set_uniform("vp_matrix", vp_matrix)
+-    set_uniform("camera_origin", camera_pos)
+-    
+-    # Bind SSBO at binding point 0
+-    bind_ssbo_to_binding_point(0)
+-    
+-    # Draw
+-    # instance_count = number of voxels
+-    # index_count = 18
+-    gl_draw_elements_instanced(
+-        primitive_type=GL_TRIANGLES,
+-        index_count=18,
+-        type=GL_UNSIGNED_SHORT,
+-        offset=0,
+-        instance_count=len(voxels)
+-    )
+-```
+-
+-### Vertex Shader Logic (GLSL-like)
+-
+-```glsl
+-#version 460
+-
+-layout(location = 0) in vec3 aLocalPosition;
+-layout(location = 1) in vec3 aNormal;
+-
+-layout(binding = 0) buffer VoxelData {
+-    uvec2 data[];
+-};
+-
+-uniform mat4 view_projection_matrix;
+-uniform vec3 camera_origin;
+-
+-out vec3 color;
+-out vec3 clip_pos;
+-out vec3 world_pos;
+-
+-void main() {
+-    // Determine instance index
+-    // Note: Source [S2, unofficial] uses gl_VertexID >> 3, implying 8 vertices per instance.
+-    // If using index buffer with 18 indices, gl_VertexID goes 0..17.
+-    // The source code snippet uses gl_VertexID & 0x1 etc., which implies gl_VertexID < 8.
+-    // This suggests the index buffer might not be used for vertex selection in the shader logic provided,
+-    // or the shader logic is for a specific vertex ordering.
+-    // We follow the source code snippet for the transformation logic.
+-    
+-    uint instance = gl_VertexID >> 3; // Assuming 8 vertices per instance for this logic
+-    
+-    // Fetch data
+-    uvec2 voxel_data = data[instance];
+-    uint packed_pos = voxel_data.x;
+-    uint packed_mat = voxel_data.y;
+-    
+-    // Unpack position
+-    uint x = packed_pos & 0x7FF;
+-    uint y = (packed_pos >> 11) & 0x3FF;
+-    uint z = (packed_pos >> 21) & 0x7FF;
+-    
+-    // Convert to float world position (assuming unit voxels for simplicity, or scale)
+-    vec3 world_position = vec3(float(x), float(y), float(z)) * 0.05; // Scale factor from source
+-    
+-    // Unpack albedo
+-    uint u_red = packed_mat & uint(31);
+-    uint u_green = (packed_mat & uint(2016)) >> uint(5);
+-    uint u_blue = (packed_mat & uint(63488)) >> uint(11);
+-    vec3 albedo = vec3(float(u_red)/32.0, float(u_green)/64.0, float(u_blue)/32.0);
+-    
+-    // Determine face orientation
+-    vec3 local_camera_pos = camera_origin - world_position;
+-    
+-    // Use gl_VertexID to determine local vertex index (0-7)
+-    // This assumes gl_VertexID is 0-7. If index buffer is used, this logic needs adjustment.
+-    // Source [S2, unofficial] code:
+-    uvec3 xyz = uvec3(gl_VertexID & 0x1, (gl_VertexID & 0x2) >> 1, (gl_VertexID & 0x4) >> 2);
+-    
+-    // Flip coordinates based on camera position to cull back faces
+-    if (local_camera_pos.x > 0.0) {
+-        xyz.x = 1 - xyz.x;
+-    }
+-    if (local_camera_pos.y > 0.0) {
+-        xyz.y = 1 - xyz.y;
+-    }
+-    if (local_camera_pos.z > 0.0) {
+-        xyz.z = 1 - xyz.z;
+-    }
+-    
+-    vec3 uvw = vec3(xyz);
+-    vec4 position = vec4(uvw * vec3(2.0) - vec3(1.0), 1.0);
+-    
+-    // Transform
+-    position = view_projection_matrix * vec4(position.xyz * 0.05 + world_position, 1.0);
+-    
+-    clip_pos = position.xyz;
+-    world_pos = world_position;
+-    gl_Position = position;
+-    color = albedo;
+-}
+-```
++**Edge Cases and Pitfalls:**
++*   **VAO Availability:** VAOs are not universally available via pure GLES30 on Android; explicit VBO/EBO binding is performed every frame, though overhead is negligible due to the single draw call [S1, unofficial].
++*   **Zoom Clamping:** Zoom factor is clamped to `[MIN_ZOOM, MAX_ZOOM]` to prevent extreme scaling artifacts [S1, unofficial].
++*   **Rotation Direction:** Rotation direction depends on drag direction across screen halves (right/left), handled naturally by the sign of `dx` [S1, unofficial].
++*   **Precision:** Bit-packing coordinates into `uvec2` limits the maximum grid size. X and Z are limited to 2048 (11 bits), Y to 1024 (10 bits) [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Procedural Instancing for Voxel Blocks
+-Generates geometry on the fly without large index buffers, suitable for sparse data. [Link](1637-procedural-instancing-for-voxel-blocks.md)
++*   **What it is:** Renders voxel blocks by generating geometry procedurally in the vertex shader, often using point sprites or instanced quads.
++*   **Difference:** Uses point sprites or quads instead of explicit cube faces. Simpler geometry but less precise face culling.
++*   **When to choose:** When hardware supports efficient point sprite rasterization and exact cube geometry is not critical.
++*   **Link:** [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md)
+ 
+ ### Instanced Voxel Renderer
+-Uses point sprites and ray-marching in the fragment shader, faster on dedicated GPUs but less geometrically precise. [Link](4102-instanced-voxel-renderer.md)
++*   **What it is:** A general term for rendering voxels using instancing techniques, often involving complex culling and LOD.
++*   **Difference:** May use various primitive types (points, quads, cubes) and culling strategies.
++*   **When to choose:** When a more general or optimized rendering pipeline is needed.
++*   **Link:** [Instanced Voxel Renderer](4102-instanced-voxel-renderer.md)
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) draw call overhead plus O(N) vertex processing for N instances [S1, unofficial].
+-*   **Memory Complexity:** O(N) for SSBO and index buffer storage [S2, unofficial].
+-*   **Performance:** On dedicated graphics cards, `MODE_CUBE` is approximately twice as slow as `MODE_QUAD` (point sprite/ray-marched) [S2, unofficial]. On Intel Integrated graphics, performance is similar [S2, unofficial].
+-*   **Strengths:** Exact cube geometry, explicit face culling, standard rasterization lighting.
+-*   **Limitations:** Higher memory bandwidth usage due to index buffer and SSBO; slower on dedicated GPUs compared to point-sprite methods.
+-*   **When to Use:** When geometric precision and standard lighting are required, and hardware supports efficient instancing.
+-*   **When Not to Use:** When maximum performance on dedicated GPUs is critical and approximate geometry is acceptable.
++*   **Time Complexity:** $O(1)$ draw call overhead plus $O(N)$ vertex processing for $N$ instances [S1, unofficial].
++*   **Memory Complexity:** $O(N)$ for the SSBO and EBO. The SSBO uses 8 bytes per voxel (2 `uvec2` components? No, 2 `uvec2` is 8 bytes? No, `uvec2` is 8 bytes. So 16 bytes per voxel? Source [S2, unofficial] says "1 uvec2 per voxel" but then describes `data.x` and `data.y`. `uvec2` is 2 components. So 2 `uvec2` would be 16 bytes. Or is it 1 `uvec2` for position and 1 `uvec2` for material? The source says "1 uvec2 per voxel" but then lists `data.x` and `data.y`. This is contradictory. `uvec2` has 2 components. If `data.x` and `data.y` are components, then it's 1 `uvec2`. But `data.x` contains position and `data.y` contains material. So it's 1 `uvec2` per voxel. 8 bytes per voxel. [S2, unofficial].
++*   **Performance:** On Intel Integrated graphics, `MODE_CUBE` performs similarly to `MODE_QUAD`. On dedicated graphics cards, `MODE_QUAD` is about twice as fast as `MODE_CUBE` [S2, unofficial].
++*   **Strengths:** Exact cube geometry, explicit face culling, single draw call.
++*   **Limitations:** Higher memory bandwidth usage due to index buffer and instance buffer. Slower on dedicated GPUs compared to point sprite methods.
++*   **When to use:** When exact cube geometry is required and face culling is important.
++*   **When not:** When maximum performance on dedicated GPUs is needed and point sprites are acceptable.
+ 
+ ## Background
+-Cube Rasterization via SSBO was implemented in Android OpenGL ES 3.0 voxel visualization [S1, unofficial] and experimented with in high-performance voxel rendering contexts [S2, unofficial]. It builds on the principles of instanced rendering and SSBO data binding to efficiently transfer voxel data to the GPU. The method is inspired by techniques described by Sebastian Aaltonen for efficient voxel rendering [S2, unofficial].
++*   **Origin:** The method is implemented in Android OpenGL ES 3.0 voxel visualization via the `VoxelRenderer` class [S1, unofficial]. It is also described in the `voxel-renderer` project by Clay John, referencing Sebastian Aaltonen's technique [S2, unofficial].
++*   **History:** The technique was popularized by Sebastian Aaltonen's tweet describing the 3-face rasterization method [S2, unofficial].
++*   **Usage:** Used in voxel visualization tools and games requiring efficient voxel rendering.
+ 
+ ## Sources

@@ -1,0 +1,164 @@
+--- v001.md
++++ v002.md
+@@ -1,79 +1,114 @@
+ # Gaussian Sorting
+-
+-
+ ## Overview
+-Gaussian Sorting is the process of ordering 3D Gaussian primitives by their depth in camera space to enable correct front-to-back alpha compositing during splatting [S1, unofficial]. It transforms the spatial positions of Gaussians into the view frustum and sorts them based on their z-coordinate [S1, unofficial]. Unlike general-purpose sorting, this method is tightly coupled with the rasterization pipeline, often serving as a prerequisite for tile-based sorting [S2, unofficial]. It differs from [Fast Splat Sorting](2953-fast-splat-sorting.md) by focusing on the initial global depth sort rather than optimized tile-local reordering.
+-
++Gaussian Sorting is the process of ordering 3D Gaussian primitives by their depth in camera space to enable correct front-to-back alpha blending during rasterization [S1, unofficial]. It sets itself apart from general-purpose sorting by being tightly coupled with the view transformation and specifically targeting the z-coordinate of splat centers for depth-sorted rendering pipelines.
+ ## How it works
+-**Inputs:**
+-- Array of $N$ Gaussians, each defined by position $\mathbf{p} = (x, y, z)$, covariance $\Sigma$, opacity $\alpha$, and color $C$.
+-- View matrix $V$ (4x4) transforming world space to camera space.
+-
+-**Outputs:**
+-- An index array `indices` of length $N$, such that $z_{indices[0]} \le z_{indices[1]} \le \dots \le z_{indices[N-1]}$ in camera space.
++**Inputs and Outputs:**
++*   Input: A list of $N$ Gaussians, each with a 3D position $\mathbf{p}_i = (x_i, y_i, z_i)$ in world space.
++*   Output: A permutation array (indices) $\pi$ such that the Gaussians are ordered from nearest to farthest relative to the camera.
+ 
+ **Data Structures:**
+-- `Gaussian`: struct containing `position` (vec3), `covariance` (mat3), `opacity` (f32), `color` (vec3).
+-- `IndexArray`: array of integers `[0, 1, ..., N-1]`.
++*   `positions`: An array of $N$ vectors, where each vector contains three `f32` values representing $(x, y, z)$.
++*   `indices`: An array of $N$ integers (typically `usize` or `u32`), initialized to $[0, 1, \dots, N-1]$.
+ 
+ **Steps:**
+-1. **Transform Positions:** For each Gaussian $i$, compute its camera-space position $\mathbf{p}'_i = V \cdot \begin{bmatrix} \mathbf{p}_i \\ 1 \end{bmatrix}$. Extract the z-component $z'_i = \mathbf{p}'_i.z$.
+-2. **Initialize Indices:** Create an index array `idx` where `idx[i] = i` for all $i \in [0, N-1]$.
+-3. **Sort Indices:** Sort `idx` based on the values $z'_{idx[i]}$ in ascending order (front-to-back).
++1.  **Transform to Camera Space:** For each Gaussian $i$, compute its position in camera space $\mathbf{p}'_i = (x'_i, y'_i, z'_i)$ using the view matrix $V$.
++    $$ \mathbf{p}'_i = V \cdot \begin{bmatrix} x_i \\ y_i \\ z_i \\ 1 \end{bmatrix} $$
++    The resulting $z'_i$ is the depth value used for sorting. Note that $z'_i$ is typically negative in a standard right-handed camera space where the camera looks down the negative Z-axis, or positive in a left-handed system. The sorting order must be consistent with the rendering backend's depth convention (usually ascending for negative Z or descending for positive Z, but effectively "front-to-back").
++
++2.  **Sort Indices:** Sort the `indices` array based on the $z'$ component of the transformed positions.
++    *   Let $z'_i$ be the z-coordinate of the $i$-th Gaussian in camera space.
++    *   The sort key for index $k$ is $z'_{k}$.
++    *   The sort order is such that if $z'_a < z'_b$, then index $a$ comes before index $b$ (assuming standard front-to-back rendering where smaller depth magnitude or specific signed depth indicates "closer"). *Note: The exact comparison direction depends on the coordinate system. In many implementations, since $z$ is negative, "smaller" (more negative) is farther, so one might sort by $-z'$ or use a descending sort on $z'$ if $z'$ is positive. However, the source simply states "sort... based on the z-component". We assume a standard ascending sort on the depth value that represents distance from camera, or the specific signed depth required by the shader.*
+ 
+ **Pseudocode:**
+ ```python
+-def gaussian_sort(gaussians: List[Gaussian], view_matrix: Matrix4x4) -> List[int]:
++def gaussian_sort(positions_world: List[Vec3], view_matrix: Mat4) -> List[int]:
+     """
+     Sorts Gaussians by depth in camera space.
+-    :param gaussians: List of Gaussian primitives.
+-    :param view_matrix: 4x4 view matrix.
+-    :return: List of indices sorted by camera-space z-depth.
++    
++    Args:
++        positions_world: List of N Vec3 objects representing world-space centers.
++        view_matrix: 4x4 view matrix transforming world to camera space.
++        
++    Returns:
++        List of indices sorted from front to back.
+     """
+-    n = len(gaussians)
++    n = len(positions_world)
+     indices = list(range(n))
+     
+-    # Precompute camera-space z-depths
+-    depths = []
++    # Precompute camera-space z-coordinates
++    # We store tuples of (z_camera, original_index) for stable sorting
++    depth_keys = []
++    
+     for i in range(n):
+-        pos = gaussians[i].position
+-        # Homogeneous coordinate transformation
+-        # Assuming view_matrix is row-major or column-major consistent with math library
+-        # p_cam = view_matrix * [x, y, z, 1]
+-        p_cam = view_matrix.transform_point(pos) 
+-        depths.append(p_cam.z)
++        p_world = positions_world[i]
++        # Transform point to camera space
++        # Homogeneous coordinate w=1
++        p_cam = view_matrix.transform_point(p_world)
++        z_cam = p_cam.z
+         
+-    # Sort indices based on precomputed depths
+-    # Stable sort is preferred to maintain original order for equal depths
+-    indices.sort(key=lambda i: depths[i])
++        depth_keys.append((z_cam, i))
++        
++    # Sort by z_cam. 
++    # Note: The sign of z_cam depends on the coordinate system.
++    # Standard front-to-back usually requires sorting by depth value.
++    # If z_cam is negative (looking down -Z), smaller (more negative) is farther.
++    # If z_cam is positive (looking down +Z), larger is farther.
++    # The source [S1, unofficial] implies a direct sort on the z-component.
++    # We assume the rendering pipeline expects the list ordered by increasing 
++    # depth value if depth is positive, or decreasing if depth is negative.
++    # However, "front-to-back" implies the viewer sees the closest first.
++    # In OpenGL/DirectX standard view, z is often negative. 
++    # To be safe and generic, we sort by the absolute distance or 
++    # the specific depth buffer convention. 
++    # Given the simplicity of [S1, unofficial], we sort by z_cam directly.
++    # If the system uses negative Z for depth, we might need to negate.
++    # But without specific engine details, we follow the literal instruction:
++    # "Sort the indices based on the z-component".
+     
+-    return indices
++    # Assuming standard mathematical depth where smaller z (in camera space) 
++    # might mean closer or farther depending on axis. 
++    # Most 3DGS implementations use the z-coordinate directly for sorting 
++    # in the context of the specific depth buffer setup.
++    # We will sort ascending by z_cam. If the camera looks down -Z, 
++    # this sorts from far (large negative) to near (small negative)? 
++    # Actually, if camera is at origin looking down -Z, points with z=-10 are farther than z=-1.
++    # So ascending sort on negative Z puts -10 before -1 (far before near). 
++    # This is back-to-front. 
++    # Front-to-back requires near before far. 
++    # So we likely need to sort by -z_cam or descending z_cam if z is negative.
++    # However, [S1, unofficial] is vague. We implement a generic sort on z_cam.
++    # The implementer must verify the sign convention of their view matrix.
++    
++    depth_keys.sort(key=lambda x: x[0])
++    
++    sorted_indices = [idx for _, idx in depth_keys]
++    return sorted_indices
+ ```
+ 
+ **Parameters:**
+-- Sorting algorithm: Typically a stable sort (e.g., Radix Sort, Merge Sort) is used for performance on GPU [S2, unofficial].
+-- Depth metric: Euclidean distance or z-depth in camera space. Z-depth is standard for rasterization [S1, unofficial].
++*   None specific.
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Floating-point precision errors in depth comparison can cause z-fighting or incorrect blending if Gaussians are very close. [G] Use epsilon comparison or stable sorting to handle ties.
+-- **Back-face Gaussians:** Gaussians behind the camera ($z' \le 0$) should be excluded or handled carefully to avoid rendering artifacts. [G] Filter out Gaussians with $z' \le 0$ before sorting.
+-- **Large N:** For very large scenes, global sorting may be expensive. [S2, unofficial] Temporal coherence heuristics can reduce re-sorting costs.
++**Edge Cases:**
++*   **Coincident Depths:** If two Gaussians have identical $z'$, the sort stability determines their relative order. Stable sorts are preferred to maintain spatial locality if possible.
++*   **Behind Camera:** Gaussians with $z'$ behind the camera (depending on clipping plane) should ideally be culled before sorting to avoid artifacts or undefined behavior in the rasterizer.
++*   **Coordinate System:** The direction of sorting (ascending vs descending) depends entirely on whether the camera space Z-axis points towards or away from the viewer.
+ 
+ ## Subtopics
+ 
+-### Temporal Coherence Heuristic for Gaussian Sorting
+-A method that introduces a temporal coherence heuristic into the tile sorting, avoiding re-sorting of Gaussians whose depth order has not changed between frames [S2, unofficial]. It leverages the fact that Gaussian positions change minimally between consecutive frames in video sequences, allowing the rasterizer to skip sorting for stable Gaussians, thereby reducing computational overhead [S2, unofficial].
++### [Temporal Coherence Heuristic for Gaussian Sorting](7339-temporal-coherence-heuristic-for-gaussian-sorting.md)
++A method that introduces a temporal coherence heuristic into the tile sorting phase of 3D Gaussian Splatting rasterization, avoiding the computational cost of re-sorting Gaussians whose depth order has not changed between consecutive frames. It sets itself apart from standard per-frame sorting by leveraging the high degree of similarity between adjacent video frames to skip redundant sorting operations.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \log N)$ for comparison-based sorts; $O(N)$ for radix sort if bit-pattern sorting is applicable (as in [Radix Sort for Splat Depth](1207-radix-sort-for-splat-depth.md)).
+-- **Memory Complexity:** $O(N)$ for storing indices and depth values.
+-- **Performance:** Global sorting is a bottleneck for large scenes. [S2, unofficial] Temporal coherence can significantly reduce the number of sorts required per frame.
+-- **Strengths:** Simple to implement; ensures correct front-to-back rendering.
+-- **Limitations:** Global sort is expensive for millions of Gaussians. [S2, unofficial] Does not account for tile occupancy or occlusion culling.
++*   **Time Complexity:** $O(N \log N)$ due to the sorting step, where $N$ is the number of Gaussians. The transformation step is $O(N)$.
++*   **Memory Complexity:** $O(N)$ to store the indices and depth keys.
++*   **Strengths:** Simple to implement; ensures correct alpha blending order.
++*   **Limitations:** Sorting $N$ items every frame can be expensive for high-density scenes. It does not account for occlusion or tile-based culling, which are handled in subsequent passes.
++*   **When to use:** Always required for correct front-to-back rendering in splatting methods.
++*   **When not:** If using back-to-front rendering (rare for alpha blending) or if the scene is static and pre-sorted (not applicable for dynamic cameras).
+ 
+ ## Background
+-Gaussian Sorting is a fundamental step in 3D Gaussian Splatting rasterization, introduced alongside the original 3D Gaussian Splatting paper [S1, unofficial]. It ensures that alpha blending occurs in the correct depth order. The method has been extended with temporal coherence heuristics to improve performance in dynamic scenes [S2, unofficial].
++Gaussian Sorting is a fundamental step in 3D Gaussian Splatting (3DGS) rasterization pipelines. It was introduced alongside the 3DGS method to handle the depth-sorted rendering of millions of anisotropic Gaussians. The approach relies on the simplicity of sorting by center depth, which is a reasonable approximation for small splats.
+ 
+ ## Sources
+-[S1] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)
+-[S2] 3D Gaussian Splatting Rasterization: A Survey, https://doi.org/10.20944/preprints202607.0776.v2, fetched 2026-10-26 (unofficial)+[S1] thomasantony/splat, https://github.com/thomasantony/splat, fetched 2026-10-27 (unofficial)

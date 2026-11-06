@@ -1,0 +1,625 @@
+--- v001.md
++++ v002.md
+@@ -1,290 +1,352 @@
+ # Domain Search Isosurface Extraction
+ 
+-Also called: Domain Search
++Also called: Tetrahedral Domain Search, Case-based Tetrahedral Marching
+ 
+ ## Overview
+-Domain Search Isosurface Extraction is a tetrahedral marching method that extracts an isosurface from a volumetric scalar field by decomposing the domain into tetrahedra and determining intersection points via linear interpolation [S1, unofficial]. It differs from cubic grid methods like Marching Cubes by operating directly on tetrahedral cells, avoiding the ambiguity issues associated with cubic cell configurations, while maintaining a straightforward lookup-table-based topology determination [S1, unofficial].
++Domain Search Isosurface Extraction is a surface extraction method that operates on a volumetric grid decomposed into tetrahedra. It determines the isosurface by evaluating the scalar field at the four vertices of each tetrahedron, classifying the cell into one of 16 topological cases based on which vertices lie below a specified isovalue, and generating intersection points via linear interpolation. It differs from standard Marching Cubes by using a tetrahedral decomposition, which avoids the ambiguity issues associated with cube cells, and from dual contouring by producing a triangulated mesh directly from interpolation rather than optimizing vertex positions via quadratic error functions.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: A volumetric scalar field defined on a grid of dimensions $x_{axis} \times y_{axis} \times z_{axis}$ (typical: $256 \times 256 \times 256$) [S1, unofficial]. The field values are stored in an integer vector `col` for the current tetrahedron vertices [S1, unofficial].
+-- **Output**: A list of 3D vertices representing the isosurface, stored in an array `newvert` of type `Vector3f` [S1, unofficial].
+-
+-**Data Structures**
+-- `Vertices`: An array of 8 `Vector3f` elements representing the 8 corners of the source cubic cell, which is decomposed into tetrahedra [S1, unofficial].
+-- `col`: A vector of 4 integers storing the scalar field values at the 4 vertices of the current tetrahedron being processed [S1, unofficial].
+-- `newvert`: An array of `Vector3f` with a maximum size of $256 \times 256 \times 400$ (or dynamically sized based on `ind`) to store the generated isosurface vertices [S1, unofficial].
+-- `index`: An unsigned char (8-bit integer) used to store the topological configuration of the tetrahedron relative to the isovalue [S1, unofficial].
+-- `p`: An integer index tracking the current position in the `newvert` array [S1, unofficial].
+-- `ind`: A constant defining the maximum capacity of the `newvert` array [S1, unofficial].
+-
+-**Algorithm Steps**
+-1. **Tetrahedron Decomposition**: The volumetric grid is decomposed into tetrahedra. For each tetrahedron, identify its 4 vertices and their corresponding scalar field values.
+-2. **Index Calculation**: Compute the cell index by comparing each vertex's scalar value ($col[i]$) against the target isovalue (`isolevel`). If $col[i] < isolevel$, set the $i$-th bit of the index:
+-   $$ index = \sum_{i=0}^{3} (col[i] < isolevel) \cdot 2^i $$
+-   [S1, unofficial]
+-3. **Boundary Check**: Before processing the case, check if the current vertex buffer pointer `p` allows for safe writing. If $p < (ind - 20)$, proceed; otherwise, skip vertex generation to prevent buffer overflow [S1, unofficial].
+-4. **Case Handling**: Based on the calculated `index` (0x00 to 0x0F), determine the intersection points:
+-   - **Case 0x00 (0000)**: All vertices are outside ($col[i] \ge isolevel$). No intersection.
+-   - **Case 0x0F (1111)**: All vertices are inside ($col[i] < isolevel$). No intersection.
+-   - **Case 0x01 (0001)**: Only vertex 0 is inside. Generate 3 vertices by interpolating between vertex 0 and vertices 1, 3, and 2 respectively. Increment `p` by 3.
+-   - **Case 0x02 (0010)**: Only vertex 1 is inside. Generate 3 vertices by interpolating between vertex 1 and vertices 0, 2, and 3 respectively. Increment `p` by 3.
+-   - **Case 0x04 (0100)**: Only vertex 2 is inside. Generate 3 vertices by interpolating between vertex 2 and vertices 0, 3, and 1 respectively. Increment `p` by 3.
+-   - **Case 0x08 (1000)**: Only vertex 3 is inside. Generate 3 vertices by interpolating between vertex 3 and vertices 1, 2, and 0 respectively. Increment `p` by 3.
+-   - **Case 0x03 (0011)**: Vertices 0 and 1 are inside. Generate 6 vertices forming two triangles. Interpolate edges (0,3), (0,2), (1,3), (0,2), (2,1), (1,3). Increment `p` by 6.
+-   - **Case 0x05 (0101)**: Vertices 0 and 2 are inside. Generate 6 vertices. Interpolate edges (0,1), (0,3), (1,2), (2,1), (0,3), (3,2). Increment `p` by 6.
+-   - **Case 0x09 (1001)**: Vertices 0 and 3 are inside. Generate 6 vertices. Interpolate edges (0,1), (1,3), (0,2), (3,1), (2,3), (0,2). Increment `p` by 6.
+-   - **Case 0x06 (0110)**: Vertices 1 and 2 are inside. Generate 6 vertices. Interpolate edges (0,1), (1,3), (0,2), (0,2), (1,3), (3,2). Increment `p` by 6.
+-   - **Case 0x0C (1100)**: Vertices 2 and 3 are inside. Generate 6 vertices. Interpolate edges (3,1), (0,3), (0,2), (0,2), (1,3), (1,2). Increment `p` by 6.
+-   - **Case 0x0A (1010)**: Vertices 1 and 3 are inside. Generate 6 vertices. Interpolate edges (0,1), (0,3), (1,2), (2,3), (0,1), (3,2). Increment `p` by 6.
+-   - **Other Cases**: Cases 0x0B, 0x0D, 0x0E, 0x07, 0x01, etc., follow similar logic where the number of generated vertices depends on the number of inside vertices and the specific topology of the tetrahedron cut. The source code explicitly handles cases with 1 or 2 inside vertices, generating 3 or 6 vertices respectively. Cases with 3 inside vertices are topologically equivalent to cases with 1 outside vertex (complement), and cases with 3 outside vertices are equivalent to 1 inside vertex. The source code implies handling all 16 cases, but explicit code snippets are provided for specific configurations. For implementation completeness, the complement cases (e.g., 0x0E for 3 inside) should mirror the 1-inside cases by interpolating the outside vertex with the three inside vertices.
+-
+-**Interpolation Formula**
+-To find the intersection point on an edge between two vertices with positions $P_a, P_b$ and scalar values $a, b$:
+-1. If $a == b$, the intersection is the midpoint:
+-   $$ P = \frac{P_a + P_b}{2} $$
+-   [S1, unofficial]
+-2. Otherwise, calculate the interpolation parameter $t$:
+-   $$ t = \left| \frac{isolevel - a}{b - a} \right| $$
+-   $$ P = P_a \cdot (1 - t) + P_b \cdot t $$
+-   [S1, unofficial]
+-
+-**Pseudocode**
++
++### Inputs and Outputs
++**Inputs:**
++*   `x_axis`, `y_axis`, `z_axis`: Integer dimensions of the volumetric grid. Typical value: 256, 256, 256 [S1, unofficial].
++*   `scalar_field`: A data structure providing scalar values for grid vertices. In the reference implementation, this is accessed via an array `col` storing values for the current tetrahedron's 4 vertices [S1, unofficial].
++*   `Vertices`: An array of `Vector3f` containing the 3D coordinates of the grid vertices. The reference implementation uses a global array `Vertices` indexed by vertex ID [S1, unofficial].
++*   `isolevel`: The scalar threshold value defining the surface [S1, unofficial].
++
++**Outputs:**
++*   `newvert`: An array of `Vector3f` storing the extracted isosurface vertices. Size: $256 \times 256 \times 400$ in the reference implementation [S1, unofficial].
++*   `index`: A buffer index (integer `p`) tracking the current write position in `newvert` [S1, unofficial].
++
++### Data Structures
++*   **`col`**: A vector or array of 4 integers/floats storing the scalar field values for the four vertices of the current tetrahedron being processed [S1, unofficial].
++*   **`Vertices`**: An array of `Vector3f` (x, y, z coordinates) representing the spatial positions of the grid vertices. The reference implementation defines a maximum size of $2^{24}$ (16,777,216) vertices [S1, unofficial].
++*   **`newvert`**: An array of `Vector3f` where generated surface vertices are stored sequentially. The reference implementation pre-allocates this with size $256 \times 256 \times 400$ [S1, unofficial].
++*   **`index`**: An 8-bit unsigned integer (mask) representing the topology case of the current tetrahedron. Bit $i$ is set if vertex $i$ is inside the isosurface (value < isolevel) [S1, unofficial].
++
++### Algorithm Steps
++
++1.  **Tetrahedron Processing**: Iterate through the volume, processing each tetrahedron defined by four vertices with indices $a, b, c, d$ and corresponding scalar values $col[0], col[1], col[2], col[3]$.
++2.  **Case Classification**: Compute the case index `index` by checking each vertex's scalar value against the `isolevel`.
++    *   Initialize `index = 0`.
++    *   For $i$ from 0 to 3: if $col[i] < isolevel$, set bit $i$ in `index`: `index |= (1 << i)` [S1, unofficial].
++3.  **Boundary Check**: Before generating vertices, check if the current output buffer pointer `p` allows for the maximum possible vertex generation for the current case. The reference implementation uses a guard: `if p < (ind - 20)` [S1, unofficial]. If this condition fails, skip vertex generation to prevent buffer overflow.
++4.  **Case Handling and Vertex Generation**: Execute the logic corresponding to the 16 possible values of `index` (0x00 to 0x0F).
++    *   **Empty (0x00) and Full (0x0F)**: No surface intersects the tetrahedron. Do nothing [S1, unofficial].
++    *   **Single Vertex Inside (0x01, 0x02, 0x04, 0x08)**: Generate 3 new vertices. Each new vertex is the intersection of the isosurface with an edge connecting the single inside vertex to one of the three outside vertices.
++        *   Example (0x01, vertex 0 inside): Interpolate edges $(0,1)$, $(0,3)$, and $(0,2)$. Store results in `newvert[p]`, `newvert[p+1]`, `newvert[p+2]`. Increment `p` by 3 [S1, unofficial].
++    *   **Two Vertices Inside (0x03, 0x05, 0x06, 0x09, 0x0A, 0x0C)**: Generate 6 new vertices forming two triangles. The edges intersected depend on the specific pair of inside vertices.
++        *   Example (0x03, vertices 0,1 inside): Interpolate edges $(0,3)$, $(0,2)$, $(1,3)$, $(0,2)$, $(2,1)$, $(1,3)$. Note: The reference implementation generates 6 vertices for these cases, effectively creating two triangles. Increment `p` by 6 [S1, unofficial].
++    *   **Three Vertices Inside (0x07, 0x0B, 0x0D, 0x0E)**: These are the complements of the single-vertex cases. The reference implementation notes "code continues in next part" for some cases, implying symmetry or explicit handling. Generally, these generate 3 vertices by intersecting the single outside vertex with the three inside vertices.
++5.  **Interpolation**: For each edge intersection, calculate the position using linear interpolation between the two endpoint vertices.
++
++### Interpolation Formula
++Given two vertices with positions $P_1=(x_1, y_1, z_1)$ and $P_2=(x_2, y_2, z_2)$, and scalar values $a$ and $b$ respectively, the intersection point $P$ at `isolevel` is calculated component-wise. For a component $x$:
++
++$$
++\text{if } a == b: \quad x = \frac{x_1 + x_2}{2.0}
++$$
++
++$$
++\text{else}: \quad \text{interp} = \left| \frac{\text{isolevel} - a}{b - a} \right|, \quad \text{oneMinusInterp} = 1 - \text{interp}
++$$
++
++$$
++x = x_1 \cdot \text{oneMinusInterp} + x_2 \cdot \text{interp}
++$$
++
++The same logic applies to $y$ and $z$ components [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-def interpolate(x_a, x_b, isolevel, val_a, val_b):
++def interpolate(x1, y1, z1, x2, y2, z2, val1, val2, isolevel):
+     """
+-    Interpolate the position along an edge between two vertices.
+-    x_a, x_b: Scalar coordinate (x, y, or z) of the two vertices.
+-    isolevel: The target isovalue.
+-    val_a, val_b: Scalar field values at the two vertices.
++    Calculates the intersection point of the isosurface with the edge
++    connecting (x1,y1,z1) with value val1 and (x2,y2,z2) with value val2.
+     """
+-    if val_a == val_b:
+-        return (x_a + x_b) / 2.0
+-    else:
+-        # Calculate interpolation factor t
+-        # Using absolute value as per source, though standard linear interpolation
+-        # might not require abs if order is consistent. Source uses abs.
+-        t = abs((isolevel - val_a) / (val_b - val_a))
+-        return x_a * (1 - t) + x_b * t
+-
+-def domain_search_isosurface_extraction(vertices, scalar_field, isolevel, newvert, ind):
++    if val1 == val2:
++        # Guard against division by zero; use midpoint
++        return (x1 + x2) / 2.0, (y1 + y2) / 2.0, (z1 + z2) / 2.0
++    
++    # Linear interpolation factor
++    # Note: Source uses abs(), though standard linear interpolation 
++    # typically uses (isolevel - val1) / (val2 - val1). 
++    # The source code: interp = abs((isolevel - a) / (b - a))
++    interp = abs((isolevel - val1) / (val2 - val1))
++    one_minus_interp = 1.0 - interp
++    
++    x = x1 * one_minus_interp + x2 * interp
++    y = y1 * one_minus_interp + y2 * interp
++    z = z1 * one_minus_interp + z2 * interp
++    
++    return x, y, z
++
++def process_tetrahedron(vertices, col, isolevel, newvert, p, ind):
+     """
+-    Extract isosurface from a tetrahedral decomposition of a cubic grid.
+-    
+-    vertices: List of 8 Vector3f objects representing the 8 corners of a cubic cell.
+-    scalar_field: 2D/3D array of scalar values at grid points.
+-    isolevel: The isovalue to extract.
+-    newvert: List to store extracted vertices.
+-    ind: Maximum size of newvert buffer.
++    Processes a single tetrahedron defined by 4 vertex indices in 'vertices'
++    and their scalar values in 'col'.
++    
++    vertices: list of 4 Vector3f objects (or tuples)
++    col: list of 4 scalar values
++    isolevel: float
++    newvert: list of Vector3f (output buffer)
++    p: integer (current index in newvert)
++    ind: integer (total capacity of newvert)
++    
++    Returns: new_p (updated index)
+     """
+-    p = 0 # Current index in newvert
+-    
+-    # Decompose the cubic cell into tetrahedra.
+-    # A standard cube can be decomposed into 5 or 6 tetrahedra.
+-    # The source code implies a specific decomposition where each tetrahedron
+-    # uses 4 of the 8 cube vertices.
+-    # Example decomposition (indices of cube vertices):
+-    # Tetra 1: 0, 1, 2, 3 (bottom face + one top? No, standard decomposition varies)
+-    # The source code uses 'a, b, c, d' as indices into the cube vertices array.
+-    # We assume a standard decomposition exists.
+-    
+-    tetrahedra = [
+-        (0, 1, 2, 3), # Example tetrahedron
+-        (0, 1, 3, 4), # Example tetrahedron
+-        # ... other tetrahedra covering the cube
+-    ]
+-    
+-    for (a, b, c, d) in tetrahedra:
+-        # Get scalar values for the 4 vertices of the current tetrahedron
+-        col = [
+-            scalar_field[vertices[a]],
+-            scalar_field[vertices[b]],
+-            scalar_field[vertices[c]],
+-            scalar_field[vertices[d]]
+-        ]
+-        
+-        # Calculate index
+-        index = 0
+-        for i in range(4):
+-            if col[i] < isolevel:
+-                index |= (1 << i)
+-        
+-        # Boundary check
+-        if p < (ind - 20):
+-            # Handle cases based on index
+-            # Note: The source code handles specific cases explicitly.
+-            # We implement the logic for 1 and 2 inside vertices as per source.
+-            # For 3 inside vertices, it is the complement of 1 outside.
+-            # For 0 or 4 inside, do nothing.
++    # 1. Case Classification
++    index = 0
++    for i in range(4):
++        if col[i] < isolevel:
++            index |= (1 << i)
+             
+-            inside_count = bin(index).count('1')
+-            
+-            if inside_count == 0 or inside_count == 4:
+-                continue # No intersection
+-            
+-            elif inside_count == 1:
+-                # Find the index of the inside vertex
+-                inside_idx = -1
+-                for i in range(4):
+-                    if (index >> i) & 1:
+-                        inside_idx = i
+-                        break
+-                
+-                # Map inside_idx to the corresponding vertex and its neighbors
+-                # The source code maps specific cases (0x01, 0x02, 0x04, 0x08)
+-                # to specific interpolation pairs.
+-                # Vertex indices in tetrahedron: 0->a, 1->b, 2->c, 3->d
+-                
+-                if inside_idx == 0: # 0x01
+-                    # Interpolate (0,1), (0,3), (0,2)
+-                    newvert[p] = Vector3f(interpolate(vertices[a].x, vertices[b].x, isolevel, col[0], col[1]),
+-                                          interpolate(vertices[a].y, vertices[b].y, isolevel, col[0], col[1]),
+-                                          interpolate(vertices[a].z, vertices[b].z, isolevel, col[0], col[1]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[a].x, vertices[d].x, isolevel, col[0], col[3]),
+-                                          interpolate(vertices[a].y, vertices[d].y, isolevel, col[0], col[3]),
+-                                          interpolate(vertices[a].z, vertices[d].z, isolevel, col[0], col[3]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[a].x, vertices[c].x, isolevel, col[0], col[2]),
+-                                          interpolate(vertices[a].y, vertices[c].y, isolevel, col[0], col[2]),
+-                                          interpolate(vertices[a].z, vertices[c].z, isolevel, col[0], col[2]))
+-                    p += 1
+-                    
+-                elif inside_idx == 1: # 0x02
+-                    # Interpolate (1,0), (1,2), (1,3)
+-                    newvert[p] = Vector3f(interpolate(vertices[b].x, vertices[a].x, isolevel, col[1], col[0]),
+-                                          interpolate(vertices[b].y, vertices[a].y, isolevel, col[1], col[0]),
+-                                          interpolate(vertices[b].z, vertices[a].z, isolevel, col[1], col[0]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[b].x, vertices[c].x, isolevel, col[1], col[2]),
+-                                          interpolate(vertices[b].y, vertices[c].y, isolevel, col[1], col[2]),
+-                                          interpolate(vertices[b].z, vertices[c].z, isolevel, col[1], col[2]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[b].x, vertices[d].x, isolevel, col[1], col[3]),
+-                                          interpolate(vertices[b].y, vertices[d].y, isolevel, col[1], col[3]),
+-                                          interpolate(vertices[b].z, vertices[d].z, isolevel, col[1], col[3]))
+-                    p += 1
+-                    
+-                elif inside_idx == 2: # 0x04
+-                    # Interpolate (2,0), (2,3), (2,1)
+-                    newvert[p] = Vector3f(interpolate(vertices[c].x, vertices[a].x, isolevel, col[2], col[0]),
+-                                          interpolate(vertices[c].y, vertices[a].y, isolevel, col[2], col[0]),
+-                                          interpolate(vertices[c].z, vertices[a].z, isolevel, col[2], col[0]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[c].x, vertices[d].x, isolevel, col[2], col[3]),
+-                                          interpolate(vertices[c].y, vertices[d].y, isolevel, col[2], col[3]),
+-                                          interpolate(vertices[c].z, vertices[c].z, isolevel, col[2], col[3]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[c].x, vertices[b].x, isolevel, col[2], col[1]),
+-                                          interpolate(vertices[c].y, vertices[b].y, isolevel, col[2], col[1]),
+-                                          interpolate(vertices[c].z, vertices[b].z, isolevel, col[2], col[1]))
+-                    p += 1
+-                    
+-                elif inside_idx == 3: # 0x08
+-                    # Interpolate (3,1), (3,2), (3,0)
+-                    newvert[p] = Vector3f(interpolate(vertices[d].x, vertices[b].x, isolevel, col[3], col[1]),
+-                                          interpolate(vertices[d].y, vertices[b].y, isolevel, col[3], col[1]),
+-                                          interpolate(vertices[d].z, vertices[b].z, isolevel, col[3], col[1]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[d].x, vertices[c].x, isolevel, col[3], col[2]),
+-                                          interpolate(vertices[d].y, vertices[c].y, isolevel, col[3], col[2]),
+-                                          interpolate(vertices[d].z, vertices[c].z, isolevel, col[3], col[2]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[d].x, vertices[a].x, isolevel, col[3], col[0]),
+-                                          interpolate(vertices[d].y, vertices[a].y, isolevel, col[3], col[0]),
+-                                          interpolate(vertices[d].z, vertices[a].z, isolevel, col[3], col[0]))
+-                    p += 1
+-
+-            elif inside_count == 2:
+-                # Find the indices of the two inside vertices
+-                inside_indices = [i for i in range(4) if (index >> i) & 1]
+-                i1, i2 = inside_indices
+-                
+-                # The source code handles specific pairs: 0,1 (0x03); 0,2 (0x05); 0,3 (0x09); 1,2 (0x06); 2,3 (0x0C); 1,3 (0x0A)
+-                # We need to map these to the interpolation logic.
+-                # The source code generates 6 vertices for these cases, forming two triangles.
+-                
+-                if i1 == 0 and i2 == 1: # 0x03
+-                    # Interpolate edges (0,3), (0,2), (1,3), (0,2), (2,1), (1,3) -- Note: Source has some redundancy/typos in description, code is authoritative
+-                    # Code: (0,3), (0,2), (1,3), (0,2), (2,1), (1,3) -> Wait, code says:
+-                    # newvert[p] = interp(0,3)
+-                    # newvert[p] = interp(0,2)
+-                    # newvert[p] = interp(1,3)
+-                    # newvert[p] = interp(0,2) -- Duplicate? Source code snippet might be truncated or specific.
+-                    # Let's follow the source code's explicit calls for 0x03:
+-                    # (0,3), (0,2), (1,3), (0,2), (2,1), (1,3) is not what the code shows.
+-                    # Code for 0x03:
+-                    # interp(0,3), interp(0,2), interp(1,3), interp(0,2), interp(2,1), interp(1,3) -- This seems to be a pattern.
+-                    # Actually, looking at 0x03 code:
+-                    # newvert[p] = interp(Vertices[a], Vertices[d]) -> (0,3)
+-                    # newvert[p] = interp(Vertices[a], Vertices[c]) -> (0,2)
+-                    # newvert[p] = interp(Vertices[b], Vertices[d]) -> (1,3)
+-                    # newvert[p] = interp(Vertices[a], Vertices[c]) -> (0,2) -- Duplicate?
+-                    # newvert[p] = interp(Vertices[b], Vertices[c]) -> (1,2) -- Wait, code says (0,2) again?
+-                    # Let's re-read 0x03 code carefully:
+-                    # newvert[p] = interp(a,d) [0,3]
+-                    # newvert[p] = interp(a,c) [0,2]
+-                    # newvert[p] = interp(b,d) [1,3]
+-                    # newvert[p] = interp(a,c) [0,2] -- This is likely a typo in the source or a specific triangulation.
+-                    # newvert[p] = interp(b,c) [1,2] -- The snippet cuts off.
+-                    # Given the ambiguity, we will implement the standard tetrahedron cut for 2 inside vertices.
+-                    # Standard cut: The plane cuts 3 edges.
+-                    # If 0,1 are inside, the plane cuts edges (0,2), (0,3), (1,2), (1,3), (2,3)? No.
+-                    # Edges connected to outside vertices (2,3) are cut.
+-                    # Edges (0,2), (0,3), (1,2), (1,3) are cut. That's 4 points.
+-                    # The source generates 6 points. This suggests a specific triangulation or handling of the tetrahedron geometry.
+-                    # We will follow the source's explicit interpolation pairs for the cases provided.
+-                    
+-                    # For 0x03:
+-                    newvert[p] = Vector3f(interpolate(vertices[a].x, vertices[d].x, isolevel, col[0], col[3]),
+-                                          interpolate(vertices[a].y, vertices[d].y, isolevel, col[0], col[3]),
+-                                          interpolate(vertices[a].z, vertices[d].z, isolevel, col[0], col[3]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[a].x, vertices[c].x, isolevel, col[0], col[2]),
+-                                          interpolate(vertices[a].y, vertices[c].y, isolevel, col[0], col[2]),
+-                                          interpolate(vertices[a].z, vertices[c].z, isolevel, col[0], col[2]))
+-                    p += 1
+-                    newvert[p] = Vector3f(interpolate(vertices[b].x, vertices[d].x, isolevel, col[1], col[3]),
+-                                          interpolate(vertices[b].y, vertices[d].y, isolevel, col[1], col[3]),
+-                                          interpolate(vertices[b].z, vertices[d].z, isolevel, col[1], col[3]))
+-                    p += 1
+-                    # The source code continues with more interpolations. Due to truncation in the source snippet,
+-                    # we assume the pattern continues for the remaining 3 vertices to form two triangles.
+-                    # Standard tetrahedron cut for 2 inside vertices produces a quadrilateral, which is split into 2 triangles (4 vertices).
+-                    # The source generates 6 vertices. This is unusual.
+-                    # We will note that the source code generates 6 vertices for 2-inside cases.
+-                    # For implementation, one would need the full source code.
+-                    # Here, we provide the first 3 as per the snippet.
+-                    pass # Placeholder for remaining 3 vertices as per source logic
+-
+-                # Similar logic for other 2-inside cases (0x05, 0x09, 0x06, 0x0C, 0x0A)
+-                # would follow the specific interpolation pairs listed in the source.
+-                
+-            # Cases with 3 inside vertices are complements of 1 inside vertex.
+-            # The outside vertex is interpolated with the 3 inside vertices.
+-            # This is not explicitly coded in the snippet but is topologically required.
+-            
+-    return newvert[:p]
+-```
+-
+-**Parameters**
+-- `isolevel`: The scalar value defining the isosurface.
+-- `x_axis, y_axis, z_axis`: Dimensions of the volumetric grid. Typical value: $256 \times 256 \times 256$ [S1, unofficial].
+-
+-**Edge Cases and Pitfalls**
+-- **Division by Zero**: If the scalar values at the two endpoints of an edge are equal ($a == b$), linear interpolation is undefined. The method uses the midpoint formula $(x+y)/2$ in this case [S1, unofficial].
+-- **Buffer Overflow**: The algorithm checks if the current vertex index `p` is within bounds ($p < ind - 20$) before writing to the `newvert` array to prevent out-of-bounds access [S1, unofficial].
+-- **Tetrahedron Decomposition**: The correctness of the method depends on the specific decomposition of the cubic grid into tetrahedra. The source code implies a specific decomposition, and the vertex indices (a, b, c, d) must map correctly to the cube vertices [S1, unofficial].
++    # 2. Boundary Check
++    # Reference uses p < (ind - 20) to prevent overflow
++    if p >= (ind - 20):
++        return p
++        
++    # Helper to get vertex coordinates
++    def get_coords(idx):
++        return vertices[idx].x, vertices[idx].y, vertices[idx].z
++
++    # 3. Case Handling
++    # Note: The reference implementation explicitly lists cases 0x00, 0x0F, 
++    # 0x01-0x08, 0x03, 0x05, 0x09, 0x06, 0x0C. 
++    # Cases 0x07, 0x0B, 0x0D, 0x0E (3 vertices inside) and 0x0A (1,3 inside) 
++    # are partially shown or implied. 
++    # We implement the explicit cases shown in the source.
++    
++    if index == 0x00 or index == 0x0F:
++        # All inside or all outside
++        pass
++        
++    elif index == 0x01:
++        # Only vertex 0 inside
++        # Interpolate edges (0,1), (0,3), (0,2)
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, col[0], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v3.x, v3.y, v3.z, col[0], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x02:
++        # Only vertex 1 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v0.x, v0.y, v0.z, col[1], col[0], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, col[1], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x04:
++        # Only vertex 2 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        x, y, z = interpolate(v2.x, v2.y, v2.z, v0.x, v0.y, v0.z, col[2], col[0], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v2.x, v2.y, v2.z, v3.x, v3.y, v3.z, col[2], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v2.x, v2.y, v2.z, v1.x, v1.y, v1.z, col[2], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x08:
++        # Only vertex 3 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v1.x, v1.y, v1.z, col[3], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v2.x, v2.y, v2.z, col[3], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v0.x, v0.y, v0.z, col[3], col[0], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x03:
++        # Vertices 0, 1 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        # Edges: (0,3), (0,2), (1,3), (0,2), (2,1), (1,3)
++        # Note: Source generates 6 vertices.
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v3.x, v3.y, v3.z, col[0], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v2.x, v2.y, v2.z, v1.x, v1.y, v1.z, col[2], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x05:
++        # Vertices 0, 2 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        # Edges: (0,1), (0,3), (1,2), (2,1), (0,3), (3,2)
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, col[0], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v3.x, v3.y, v3.z, col[0], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, col[1], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v2.x, v2.y, v2.z, v1.x, v1.y, v1.z, col[2], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v3.x, v3.y, v3.z, col[0], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v2.x, v2.y, v2.z, col[3], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x09:
++        # Vertices 0, 3 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        # Edges: (0,1), (1,3), (0,2), (3,1), (2,3), (0,2)
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, col[0], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v1.x, v1.y, v1.z, col[3], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v2.x, v2.y, v2.z, v3.x, v3.y, v3.z, col[2], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x06:
++        # Vertices 1, 2 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        # Edges: (0,1), (1,3), (0,2), (0,2), (1,3), (3,2)
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v1.x, v1.y, v1.z, col[0], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v2.x, v2.y, v2.z, col[3], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    elif index == 0x0C:
++        # Vertices 2, 3 inside
++        v0 = vertices[0]
++        v1 = vertices[1]
++        v2 = vertices[2]
++        v3 = vertices[3]
++        
++        # Edges: (3,1), (0,3), (0,2), (0,2), (1,3), (1,2)
++        
++        x, y, z = interpolate(v3.x, v3.y, v3.z, v1.x, v1.y, v1.z, col[3], col[1], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v3.x, v3.y, v3.z, col[0], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v0.x, v0.y, v0.z, v2.x, v2.y, v2.z, col[0], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v3.x, v3.y, v3.z, col[1], col[3], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++        x, y, z = interpolate(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, col[1], col[2], isolevel)
++        newvert[p] = Vector3f(x, y, z); p += 1
++        
++    # Cases 0x07, 0x0B, 0x0D, 0x0E, 0x0A are not fully detailed in the provided source snippet.
++    # In a complete implementation, these would be handled similarly, 
++    # typically by symmetry or explicit edge intersection lists.
++    
++    return p
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Linear with respect to the number of tetrahedra in the domain. Each tetrahedron is processed in constant time.
+-- **Memory Complexity**: Linear with respect to the number of tetrahedra, as the output vertex buffer size is proportional to the surface area. The source uses a fixed-size buffer `newvert` of size $256 \times 256 \times 400$ [S1, unofficial].
+-- **Strengths**: Avoids the topological ambiguities of Marching Cubes by using tetrahedra. Simple implementation using lookup tables.
+-- **Limitations**: Requires tetrahedral decomposition of the grid. The source code's handling of 2-inside cases generating 6 vertices is non-standard and may require verification against the full source code. Buffer overflow protection is manual.
++
++**Time Complexity**: $O(N)$, where $N$ is the number of tetrahedra in the volume. Each tetrahedron is processed in constant time.
++**Memory Complexity**: $O(V + E)$, where $V$ is the number of grid vertices and $E$ is the number of generated surface vertices. The reference implementation pre-allocates `newvert` with size $256 \times 256 \times 400$ [S1, unofficial].
++**Performance**: The method is straightforward to implement and parallelize. However, the reference implementation uses a fixed-size buffer and explicit case handling, which may lead to memory inefficiency if the buffer is over-allocated or overflow if under-allocated.
++**Strengths**:
++*   Avoids the topological ambiguities of Marching Cubes by using tetrahedral decomposition.
++*   Simple logic based on linear interpolation.
++**Limitations**:
++*   Requires tetrahedral decomposition of the grid, which adds preprocessing overhead.
++*   The reference implementation's buffer management is rigid (`ind-20` guard) and may not scale well to arbitrary volumes without dynamic resizing.
++*   Linear interpolation may result in less smooth surfaces compared to methods using higher-order interpolation or optimization.
++*   The use of `abs()` in the interpolation factor calculation is non-standard for linear interpolation and may produce incorrect results if the isolevel is not between `a` and `b` (though the case classification ensures one vertex is inside and one is outside, so `isolevel` is between `a` and `b` if `a < isolevel <= b` or `b < isolevel <= a`). However, if `a` and `b` are on the same side, the case would not trigger an intersection. The `abs()` might be a safeguard or a specific design choice in the source [S1, unofficial].
+ 
+ ## Background
+-Domain Search Isosurface Extraction is presented in an unofficial GitHub repository [S1, unofficial]. It appears to be a custom implementation or educational example rather than a widely cited academic method. The source code includes a GNU General Public License header, indicating it is open-source software [S1, unofficial].
++
++The method is documented in an unofficial GitHub repository [S1, unofficial]. The source code includes a GNU General Public License header, indicating it is open-source software. The implementation appears to be a student or hobbyist project demonstrating tetrahedral isosurface extraction. The specific case handling and buffer management suggest a focus on correctness for a specific test case (e.g., a teapot, as hinted by `teapotColour` in the source) rather than a general-purpose library.
+ 
+ ## Sources
++
+ [S1] yashwanth850/Domain-search-isosurface-extraction, https://github.com/yashwanth850/Domain-search-isosurface-extraction, fetched 2026-10-27 (unofficial)

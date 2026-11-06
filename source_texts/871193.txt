@@ -1,0 +1,158 @@
+Summary Accumulate what the camera actually saw, per sample, so a render can carry a real matte. Decide how that coverage is stored, under a binding budget that is already fully spent, and settle the alpha convention the rest of the epic...
+
+Primary-ray coverage in the accumulator · Issue #310 · marko-koljancic/solarxy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Primary-ray coverage in the accumulator #310
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Primary-ray coverage in the accumulator#310
+Copy link
+Labels
+area: rendererRender passes, shaders, pipelines, lighting, capture.Render passes, shaders, pipelines, lighting, capture.level: taskOne unit of work with its own acceptance criteria.One unit of work with its own acceptance criteria.
+Milestone
+0.9.0 Path-traced rendering
+Description
+marko-koljancic
+opened on Sep 1, 2026
+Issue body actions
+Summary
+Accumulate what the camera actually saw, per sample, so a render can carry a real matte.
+Decide how that coverage is stored, under a binding budget that is already fully spent, and
+settle the alpha convention the rest of the epic writes.
+Parent epic: #297
+Acceptance criteria
+Coverage counts camera rays that found a surface, and is accumulated per sample, so a
+silhouette produces a fractional value and improves as the sample count rises.
+A mirrored surface against the sky reads as fully covered, because the camera found a
+surface. This is the case that distinguishes real coverage from the count already in
+the accumulator, and it is the first test to write.
+A surface seen through glass is covered, and the convention for what a transmissive
+surface contributes is stated rather than falling out of the implementation.
+The accumulator still requests no more storage bindings than core limits grant, and
+device creation still asks for default limits on both shells.
+The auxiliary mean stays exact across chunks. Whatever the existing count is doing for
+it, it continues to do.
+Coverage is exact rather than drifting: a render that reaches its sample count in one
+chunk and the same render reaching it in many produce the same coverage.
+Coverage is produced unassociated, as a plain fraction of camera rays that found a
+surface, so that either convention can be derived from it downstream without the
+accumulator having to know which format it is destined for.
+An ordinary opaque render is bit-identical to what it produces today, with the goldens
+unmoved.
+Design considerations
+The binding budget is the problem. The accumulator is four storage textures and core limits
+grant four per stage, and this release's definition of done requires both shells to keep
+asking for default limits, so a fifth is not available. Every lane of the four is already
+carrying something.
+The colour target's alpha lane already holds a count, and it is not the count needed here.
+It counts samples that found a surface rough enough to describe itself, which is what steers
+the denoiser and deliberately skips a mirror, because a mirror's own colour and normal would
+steer the filter toward an edge that is not there. Coverage has to count the camera ray
+regardless of what it hit. The two agree on most pixels and disagree on the ones people
+look at.
+One candidate that needs no binding is to carry both counts in the existing lane, since
+both are bounded by the sample count and their combination stays exactly representable in a
+single-precision mantissa at the sample counts this renderer offers. It is a candidate
+rather than the decision; whatever is chosen must preserve the exactness the current count
+provides, and must be tested at the largest sample count offered rather than at a
+convenient one.
+Transmission needs an explicit answer. Glass is a surface the camera found, so the
+straightforward reading is that it is covered, but that makes a window opaque in the matte
+when a compositor may well want to see through it. The answer is a decision, and an
+undecided one will be discovered by whoever composites first.
+Coverage is accumulated unassociated and stays that way. The two output formats carry
+different conventions by ratified decision, so the accumulator producing a plain fraction
+is what lets each encoder apply its own without a second accumulation or a mode flag
+reaching this far down.
+Technical plan
+The accumulation lives in the traced path's kernel and its store, under
+crates/solarxy-renderer/src/shaders/pathtrace/. The store site is where the running mean is
+written; whatever carries coverage is written in the same place and read back by the resolve.
+If the chosen representation changes what the alpha lane means, that meaning is documented at
+the store site, and the crate's own architecture notes are updated, because the current
+meaning is written down as a load-bearing invariant and a silent change to it is exactly the
+kind of thing that is discovered a release later.
+The uniform layout guard covers the records this touches; any record that grows or changes
+shape needs its case kept in step rather than allowed to drift.
+Notes
+This is the task the epic is sized around and the one with a real chance of not working as
+planned. If the representation cannot be made exact, the honest outcome is to descope the
+traced engine's matte for this release and ship the rasterized one, rather than to ship a
+matte that is subtly wrong, because a wrong matte is worse than none: a compositor will trust
+it.
+Future considerations and out of scope
+The compositing pass set in a later release wants this same coverage as its alpha pass, so it
+should be reachable rather than private to the resolve. Holdout and shadow-catcher surfaces,
+which would read this rather than replace it.
+Verification
+cargo test -p solarxy-renderer, driving the real kernel bindings through the existing probe
+mechanism rather than reasoning about the shader. Specific cases: a mirror against sky, a
+silhouette at several sample counts, a transmissive surface, and a chunked-versus-single-pass
+comparison for exactness. The golden captures must not move.
+Activity
+marko-koljancic
+added this to the 0.9.0 Path-traced rendering milestone on Sep 1, 2026
+marko-koljancic
+added
+level: taskOne unit of work with its own acceptance criteria.One unit of work with its own acceptance criteria.
+area: rendererRender passes, shaders, pipelines, lighting, capture.Render passes, shaders, pipelines, lighting, capture.
+on Sep 1, 2026
+marko-koljancic
+added a parent issue on Sep 1, 2026
+[0.9.0] Render with a transparent background #297
+github-project-automation
+added this to Solarxyon Sep 1, 2026
+github-project-automation
+moved this to Backlog in Solarxyon Sep 1, 2026
+marko-koljancic
+moved this from Backlog to To Do in Solarxyon Sep 1, 2026
+marko-koljancic
+moved this from To Do to In Progress in Solarxyon Sep 2, 2026
+marko-koljancic
+moved this from In Progress to In Testing in Solarxyon Sep 2, 2026
+marko-koljancic commented on Sep 2, 2026
+marko-koljancic
+on Sep 2, 2026
+OwnerAuthor
+More actions
+Landed on release/0.9.0. The lane-packing candidate was rejected on arithmetic: two counts to 8192 need base-8193 packing, whose maximum passes f32's exact-integer bound of 2^24, so it corrupts the low field once the described count passes about 2047, and the auxiliary lane's octahedral pack already spends 2^24 - 1 by design. Coverage is instead a u32 count in its own read-write storage buffer at target binding 4, written by the path kernel itself under a new flags word on the per-dispatch uniform (the struct's former padding, so the layout did not move). That spends the compute stage's eighth and last storage buffer, the reserved ninth-array slot; the recorded fallback that would free it is a primary-only replay kernel with its own r32float texture.
+Semantics as ratified, with one refinement found in the code: a walk that reaches a transmissive surface and only then runs out of transmissive budget is covered, because the surface's own direct response is already in the colour and coverage must tell the same story; the uncovered exhaustion case is a walk that spends its budgets while still passing through alpha coverage, which contributes exactly black. Glass and area lights are covered, mask holes are not, blended panes matte by their own probability, sample for sample with the shading.
+Verified by tests/pathtrace_coverage.rs against the real kernel bindings: mirror against sky fully covered with a described count of zero (the decisive pair), chunked versus one-shot coverage bit-identical at 8192 samples, glass covered, fully covered pixels lit bit-identically with the flag on and off, uncovered pixels exactly zero, and described never exceeding covered. The final goldens check rides the pull request's CI gate as always; with the flag off no arithmetic changes anywhere and the full workspace suite is green.
+marko-koljancic
+added a commit that references this issue on Sep 2, 2026
+feat(renderer): the traced still learns what the camera actually saw
+...
+5cea1fe
+marko-koljancic
+closed this as completedon Sep 3, 2026
+github-project-automation
+moved this from In Testing to Done in Solarxyon Sep 3, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area: rendererRender passes, shaders, pipelines, lighting, capture.Render passes, shaders, pipelines, lighting, capture.level: taskOne unit of work with its own acceptance criteria.One unit of work with its own acceptance criteria.
+Projects
+Solarxy
+Status
+Done
+Show more project fields
+Milestone
+0.9.0 Path-traced rendering
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

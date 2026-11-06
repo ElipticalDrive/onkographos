@@ -1,0 +1,181 @@
+--- v002.md
++++ v003.md
+@@ -1,96 +1,116 @@
+ # Raycasting Step Size & Aspect Ratio Normalization
+ 
+-Also called: Aspect Ratio Normalized Ray Marching, Normalized Step Size Calculation
++Also called: Aspect Ratio Normalized Ray Marching, Fixed-Step Ray Marching Setup, Normalized Step Size Calculation
+ 
+ ## Overview
+-This method computes a normalized step size and a scaling factor to map arbitrary volume dimensions and aspect ratios into a unit cube coordinate system for uniform ray marching [S1, unofficial]. It ensures that the sampling density remains consistent across axes regardless of the volume's physical aspect ratio, preventing anisotropic artifacts in the rendered output [S1, unofficial]. It differs from [Adaptive Step Size Calculation](4671-adaptive-step-size-calculation.md) by using a fixed, geometry-derived step size rather than one determined by local density gradients.
++This method establishes a uniform step size for volume rendering by normalizing the volume dataset's physical dimensions to a unit cube, ensuring consistent sampling density regardless of the volume's resolution or aspect ratio [S1, S2, unofficial]. It differs from adaptive methods by using a fixed step derived from the maximum dimension, which prevents aliasing artifacts like concentric "sampling rings" in Line-of-Sight (LOS) integral visualization [S2, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `dimensions`: `vec3` representing the volume's dimensions in world units or voxel counts.
+-- `aspectRatios`: `vec3` defining the relative scaling of volume axes.
+-- `stepScale`: A multiplier for the base step size, controlling the trade-off between rendering speed and quality.
++*   Volume dimensions: $W$ (width), $H$ (height), $D$ (depth) in voxels [S1, S2, unofficial].
++*   Optional aspect ratios: $\mathbf{a} = (a_x, a_y, a_z)$ defining relative scaling of axes [S2, unofficial].
++*   Step scale multiplier: $s_{scale}$ [S2, unofficial].
+ 
+ **Outputs:**
+-- `stepSize`: The normalized distance between samples along the ray.
+-- `scaleFactor`: A `vec3` used to transform coordinates into the normalized unit cube space.
++*   Normalized step size: $\Delta$ [S1, S2, unofficial].
++*   Scaling factor: $\mathbf{f}$ (used to map volume to unit cube) [S2, unofficial].
+ 
+ **Data Structures:**
+-- `maxSize`: A scalar float representing the maximum value among `dimensions.x`, `dimensions.y`, and `dimensions.z`.
+-- `scaleFactor`: A `vec3` initialized to `vec3(1) / ((vec3(1) * maxSize) / (dimensions * aspectRatios))`.
+-
+-**Parameters:**
+-- `stepScale`: Clamped to a minimum of `0.1f` [S1, unofficial].
+-- `aspectRatios`: Clamped to a minimum of `vec3(0)` [S1, unofficial].
++*   `dimensions`: Vector or tuple of three integers $(W, H, D)$.
++*   `aspectRatios`: Vector of three floats $(a_x, a_y, a_z)$.
++*   `stepScale`: Single float.
+ 
+ **Steps:**
+-1. Calculate `maxSize` as the maximum of the volume's x, y, and z dimensions:
+-   $$ maxSize = \max(dimensions.x, dimensions.y, dimensions.z) $$
+-2. Compute the `scaleFactor` to map the volume into a unit cube. This accounts for aspect ratios:
+-   $$ scaleFactor = \frac{1}{\frac{maxSize}{dimensions \cdot aspectRatios}} $$
+-   Where the division is component-wise. Specifically:
+-   $$ scaleFactor_i = \frac{1}{\frac{maxSize}{dimensions_i \cdot aspectRatios_i}} = \frac{dimensions_i \cdot aspectRatios_i}{maxSize} $$
+-3. Compute the base `stepSize` for each axis. The source describes this as:
+-   $$ stepSize_i = \frac{1.0f}{dimensions_i \cdot (\frac{maxSize}{dimensions_i})} $$
+-   Simplifying the term in the denominator:
+-   $$ stepSize_i = \frac{1.0f}{maxSize} $$
+-   Thus, the base step size is uniform across all axes and inversely proportional to the largest dimension of the volume.
+-4. Apply the `stepScale` multiplier to the base step size:
+-   $$ finalStepSize = stepSize \cdot stepScale $$
+-5. Clamp `stepScale` to a minimum of `0.1f` to prevent excessively small steps that could cause performance issues or precision errors [S1, unofficial].
++1.  **Calculate Max Dimension:** Determine the largest dimension of the volume.
++    $$ M = \max(W, H, D) $$
++    [S1, S2, unofficial]
++
++2.  **Compute Base Step Size:** Calculate the inverse of the maximum dimension.
++    $$ \Delta_{base} = \frac{1}{M} $$
++    [S1, unofficial]
++
++3.  **Handle Aspect Ratios (Optional/Advanced):** If aspect ratios are provided to handle non-cubic volumes explicitly:
++    *   Clamp aspect ratios to a minimum of $\mathbf{0}$ [S2, unofficial].
++    *   Compute the scaling factor $\mathbf{f}$ to map the volume into a unit cube coordinate system:
++        $$ \mathbf{f} = \frac{\mathbf{1}}{\left(\mathbf{1} \cdot M\right) / (\mathbf{d} \cdot \mathbf{a})} $$
++        Where $\mathbf{1} = (1,1,1)$, $\mathbf{d} = (W,H,D)$, and $\mathbf{a} = (a_x, a_y, a_z)$. Division is component-wise [S2, unofficial].
++    *   Note: Some implementations simply use $\Delta_{base}$ directly if aspect ratio normalization is handled via the scaling factor in the ray origin/direction rather than the step size itself [S1, S2, unofficial]. The source [S2, unofficial] suggests computing `stepSize` for each axis as $1.0 / (d_i \cdot (M/d_i))$, which simplifies to $1/M$, implying the aspect ratio adjustment primarily affects the spatial mapping (scale factor) rather than the step count itself in the simplest case. However, the explicit `scaleFactor` calculation is critical for correct coordinate mapping [S2, unofficial].
++
++4.  **Apply Step Scale:** Multiply the base step size by the user-defined scale factor, clamped to a minimum of $0.1$ [S2, unofficial].
++    $$ \Delta = \max(\Delta_{base} \cdot s_{scale}, 0.1) $$
++    [S2, unofficial]
++
++5.  **Pass to Shader:** Upload $\Delta$ (and $\mathbf{f}$ if used) as uniform variables to the ray marching shader [S1, S2, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_step_size_and_scale(dimensions, aspect_ratios, step_scale):
+-    # Clamp inputs as per source requirements
+-    aspect_ratios = max(aspect_ratios, vec3(0))
+-    step_scale = max(step_scale, 0.1f)
++def compute_step_size_and_scale(width, height, depth, aspect_ratios=None, step_scale=1.0):
++    """
++    Computes the normalized step size and scaling factor for volume ray marching.
+     
+-    # Calculate maxSize
+-    max_size = max(dimensions.x, dimensions.y, dimensions.z)
++    Args:
++        width (int): Volume width in voxels.
++        height (int): Volume height in voxels.
++        depth (int): Volume depth in voxels.
++        aspect_ratios (tuple): Optional (ax, ay, az). Defaults to (1, 1, 1).
++        step_scale (float): Multiplier for the base step size.
++        
++    Returns:
++        tuple: (step_size, scale_factor)
++    """
++    # 1. Calculate max dimension
++    max_dim = max(width, height, depth)
+     
+-    # Compute scaleFactor
+-    # Formula: vec3(1) / ((vec3(1) * maxSize) / (dimensions * aspectRatios))
+-    # Component-wise: scaleFactor[i] = 1.0 / (max_size / (dimensions[i] * aspect_ratios[i]))
+-    # Which simplifies to: scaleFactor[i] = (dimensions[i] * aspect_ratios[i]) / max_size
+-    scale_factor = vec3(
+-        (dimensions.x * aspect_ratios.x) / max_size,
+-        (dimensions.y * aspect_ratios.y) / max_size,
+-        (dimensions.z * aspect_ratios.z) / max_size
+-    )
++    if max_dim == 0:
++        return 1.0, (1.0, 1.0, 1.0) # Guard against division by zero [G]
++
++    # 2. Base step size
++    base_step = 1.0 / max_dim
+     
+-    # Compute base stepSize
+-    # Formula: 1.0f / (dimensions[i] * (maxSize / dimensions[i]))
+-    # Simplifies to: 1.0f / maxSize
+-    base_step_size = 1.0f / max_size
++    # 3. Aspect ratio handling
++    if aspect_ratios is None:
++        aspect_ratios = (1.0, 1.0, 1.0)
++        
++    # Clamp aspect ratios to minimum 0 [S2, unofficial]
++    ax, ay, az = max(aspect_ratios[0], 0.0), max(aspect_ratios[1], 0.0), max(aspect_ratios[2], 0.0)
+     
+-    # Apply stepScale
+-    final_step_size = base_step_size * step_scale
++    dimensions = (float(width), float(height), float(depth))
+     
+-    return final_step_size, scale_factor
++    # Compute scale factor: vec3(1) / ((vec3(1) * maxSize) / (dimensions * aspectRatios)) [S2, unofficial]
++    # Component-wise division
++    scale_x = 1.0 / ((1.0 * max_dim) / (dimensions[0] * ax))
++    scale_y = 1.0 / ((1.0 * max_dim) / (dimensions[1] * ay))
++    scale_z = 1.0 / ((1.0 * max_dim) / (dimensions[2] * az))
++    
++    scale_factor = (scale_x, scale_y, scale_z)
++    
++    # 4. Apply step scale and clamp to min 0.1 [S2, unofficial]
++    final_step = max(base_step * step_scale, 0.1)
++    
++    return final_step, scale_factor
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- If `maxSize` is zero, division by zero occurs. This implies a zero-volume input, which is degenerate [G].
+-- If `aspectRatios` contains zeros, the corresponding `scaleFactor` component becomes zero, effectively collapsing that axis in the normalized space [S1, unofficial].
+-- The simplification of the step size formula assumes `dimensions[i]` is non-zero [G].
++**Edge Cases:**
++*   **Zero Dimensions:** If any dimension is 0, the step size calculation fails. A guard clause should return a default step size (e.g., 1.0) or handle the empty volume case [G].
++*   **Zero Aspect Ratios:** Clamping to 0 prevents division by zero in the scale factor calculation but may result in infinite scaling if not handled by the renderer's coordinate mapping logic [S2, unofficial].
++*   **Precision:** Using `float` for step size is standard in shaders. Ensure the host-side calculation matches the shader precision [S1, S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Uniform Ray Marching](4810-uniform-ray-marching.md)
+-Uniform Ray Marching generates 3D sample positions along rays within an Axis-Aligned Bounding Box (AABB) using a fixed spacing between samples. It serves as a dense uniform sampler for Line-of-Sight (LOS) integral visualization, replacing coarse sampling to avoid aliasing artifacts such as concentric 'sampling rings' caused by steep gradients near inner radius cuts. It is often used as a fallback strategy in hardware or environments that do not support specialized libraries like nerfacc.
++Generates 3D sample positions using fixed spacing within an AABB. Chosen when dense uniform sampling is required to avoid aliasing artifacts like sampling rings, or as a fallback in environments lacking specialized libraries.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ for the calculation of step size and scale factor per frame or volume change. The ray marching itself is $O(N)$ where $N$ is the number of samples, determined by the step size.
+-- **Memory Complexity:** $O(1)$ for the auxiliary variables (`maxSize`, `scaleFactor`).
+-- **Performance:** The method is computationally inexpensive. The primary cost is in the ray marching loop, which is influenced by `stepScale`. Smaller `stepScale` values increase accuracy but reduce performance.
+-- **Strengths:** Ensures consistent sampling density across different volume aspect ratios. Simple to implement.
+-- **Limitations:** Does not adapt to local scene complexity. May over-sample empty space or under-sample high-frequency details if `stepScale` is not tuned appropriately.
+-- **When to use:** When rendering volumes with non-cubic aspect ratios and uniform sampling is desired.
+-- **When not to use:** When the volume has highly varying density gradients that require adaptive sampling for efficiency [S2, unofficial].
++*   **Time Complexity:** $O(1)$ for step size calculation. Ray marching itself is $O(N)$ where $N$ is the number of steps, determined by the volume depth and step size.
++*   **Memory Complexity:** $O(1)$ for the step size and scale factor variables.
++*   **Performance:** Provides consistent rendering speed as step count is predictable. However, it may be less efficient than adaptive methods in sparse volumes because it samples empty space uniformly [S2, unofficial].
++*   **Strengths:** Simple to implement; prevents aliasing artifacts associated with non-uniform sampling densities; robust across different volume resolutions [S1, S2, unofficial].
++*   **Limitations:** Does not adapt to local detail; may over-sample in empty regions or under-sample in high-detail regions compared to adaptive methods [S2, unofficial].
++*   **When to Use:** When consistent sampling density is critical (e.g., medical imaging, scientific visualization) or when hardware/software constraints prevent adaptive stepping [S2, unofficial].
+ 
+ ## Background
+-This method is derived from the implementation in the `VolumeRendering` project by Jose Villegas [S1, unofficial]. It is used in the context of GPU-based volume rendering, specifically within the raycasting step, to normalize the coordinate system for uniform ray marching.
++This method is derived from practical implementations in open-source volume rendering projects, specifically `qt-viewer-pro` and `VolumeRendering` [S1, S2, unofficial]. It addresses the common problem of visual artifacts (such as concentric rings) that arise when ray marching through volumes with varying aspect ratios or resolutions using naive fixed steps [S2, unofficial].
+ 
+ ## Sources
+-[S1] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)+[S1] wpop/qt-viewer-pro, https://github.com/wpop/qt-viewer-pro, fetched 2026-10-27 (unofficial)
++[S2] jose-villegas/VolumeRendering, https://github.com/jose-villegas/VolumeRendering, fetched 2026-10-27 (unofficial)

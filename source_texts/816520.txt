@@ -1,0 +1,1052 @@
+code game. Contribute to TToscurk/Gansokoy development by creating an account on GitHub.
+
+Material & terrain quality upgrade: PBR textures, triplanar mapping, procedural noise by TToscurk · Pull Request #2 · TToscurk/Gansokoy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+TToscurk
+commented
+Aug 2, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Comprehensive visual quality upgrade implementing physically-based rendering (PBR) for environments while maintaining cel-shaded character aesthetics. Introduces procedural noise generation, triplanar terrain mapping, and environment ambience systems across all maps.
+Key Changes
+Texture & Material System
+New src/world/texgen.js: Auto-generate normal maps and roughness maps from canvas textures using Sobel filtering
+New src/world/noise.js: Procedural noise toolkit (fBm, ridged, Worley, value noise) with tileable support for texture generation
+New src/world/terraintex.js: Shared rock texture generation for consistent cross-map appearance
+Enhanced texMaps() function to bundle color, normal, and roughness maps together
+Terrain Rendering
+New src/world/triplanar.js: Triplanar texture mapping to eliminate stretching on steep slopes by sampling from three world axes instead of UV projection
+Automatic material blending based on slope angle (grass on flat terrain, rock on steep slopes)
+Quality-aware: triplanar only applies at medium/high quality settings; low quality reverts to single-axis UV
+Environment & Ambience
+New src/world/ambience.js: Four cheap idle animations (smoke, birds, drifting leaves, banner flutter) using instanced meshes
+New src/world/midground.js: Mid-distance scenery layer (terraces, hamlets) to bridge gap between playable area and distant silhouettes
+New src/world/imperfect.js: Subtle object perturbation to break up repetitive placement patterns
+Color Grading
+New src/world/lut.js: Procedural color lookup table generation with temperature, lift/gamma/gain, shadow/highlight tinting, and saturation controls
+Per-map color grading without external assets
+Character Model Enhancements
+New texture-based eye system in src/entities/model.js: Replaces sphere-based eyes with 2D textured planes supporting blink animation
+Detailed iris rendering with radial fibers, limbal rings, and dual-layer specular highlights
+System Integration
+Updated all 8 map files to use new texture and material systems
+Enhanced src/entities/villagers.js with schedule-based AI using attractors (markets, lanterns)
+Extended src/core/GameCore.js with LUT support and full post-FX chain configuration
+Updated src/combat/combat.js and src/world/environment.js for extended functionality
+Documentation
+Added comprehensive upgrade guides:
+專案書/材質與畫質升級書.md: Material system and PBR implementation details
+專案書/地圖品質升級書.md: Map quality improvements (7 upgrades)
+專案書/角色模型精緻化升級書.md: Character model refinement roadmap
+專案書/共用系統整合書V2.md: GameCore unification architecture
+專案書/效能優化任務清單.md: Performance optimization priorities
+Implementation Details
+Procedural generation: All textures generated at load time with deterministic seeding (no external assets)
+Performance: Triplanar mapping disabled at low quality; ambience uses fixed-size instanced meshes with object pooling
+Compatibility: Canvas texture context now uses { willReadFrequently: true } for better performance
+Tileable noise: All noise functions use modulo wrapping for seamless texture tiling
+Material consistency: Shared texture generation ensures visual coherence across all 8 maps
+Visual Impact
+Terrain surfaces now show proper depth and detail at all viewing angles
+Character eyes significantly more expressive with procedural iris detail
+Environment feels lived-in with subtle ambient motion and mid-distance scenery
+Consistent color grading per map region enhances atmosphere
+Reduced "tiling" artifacts through multi-octave noise and world-space sampling
+https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+TToscurk
+and others
+added 30 commits
+August 2, 2026 10:56
+描述這次改了什麼
+5270811
+材質升級書第 1 章推到其餘七張圖（法線強度定案 1.0）
+…
+d2cd94f
+```
+第 1 章原本只做了神社在等強度定案。採用預設值 1.0（三版 A/B 截圖的中間
+值），`?nstr=` 留著當之後調校的口子。
+
+- main.js 的私有 NORMAL_STRENGTH / texMaps 提到 src/world/texgen.js，
+  八張圖共用同一個查詢參數 —— 各圖各讀一份的話比 A/B 時強度會對不上
+- 七張圖各自的 canvasTex() 補上 willReadFrequently（texgen 要把畫好的
+  內容 getImageData 讀回來；這個旗標只在第一次 getContext 時生效）
+- 21 個帶 canvas 貼圖的材質換成 ...texMaps(tex, [lo, hi])，roughness 純量
+  一律歸 1（有 roughnessMap 之後兩者相乘，留在原值會把整體壓暗一階），
+  範圍以原本的純量為中心往兩邊開
+- 法線依 texture 物件快取：里的 wood 與 darkWood 共用同一張 woodTex，
+  重算一次就白白多一張 GPU 貼圖。鍵不用底下的 canvas —— 同一張 canvas
+  可能被兩個 repeat 不同的 CanvasTexture 包起來，共用會被後者覆寫
+
+生效材質：神社 8（不變）、里 5、香霖堂 5、永遠亭 3、竹林／無名之丘／
+花田／獸道各 2。
+
+驗證：八張圖逐一開起來 console 全 0 error / 0 warn；每張都程式化檢查
+normalMap.repeat 與 map.repeat 完全一致（錯開一格就會紋路對不上凹凸），
+全數通過；神社仍是 16 張資料貼圖、62 張 GPU 貼圖，與遷移前基準相同。
+里的 A/B 截圖見 shots2/ch1-village-{before,after}.png 與 -cu- 近距離版，
+牆面從平坦噪點變成有凹凸的灰泥。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+材質升級書第 2 章：canvas 貼圖從白噪音改成分層 fBm（神社）
+…
+5e5c24f
+```
+新檔 src/world/noise.js —— value noise / fBm / ridged / Worley，全部平鋪安全。
+舊的 noise() 是逐像素白噪音，每個像素跟鄰居無關，放大看是「顆粒」不是
+「材質」。fBm 有尺度，才像表面。
+
+實作上踩到的兩個坑（都有數值驗證）：
+
+1. hash2 裡寫 `h >> 13` —— 帶號位移會把符號位灌進 bit31，XOR 之後 bit31
+   永遠是 0，整個雜湊的值域只剩 0~0.5（實測平均 0.2498、直方圖後半段全空）。
+   改成 >>> 之後平均 0.5031、十等分直方圖平坦。
+2. period 只決定「在哪重複」，拉長條紋要靠取樣座標的格數不同。
+   valueNoise 的 period 因此擴充成可以給 [px, py]，木紋才做得出直向長條
+   （實測橫向變化是縱向的 5.16 倍，且貼圖邊界誤差仍為 0）。
+
+各材質依升級書 §2 逐項升級：
+- 木 512²：ridged fBm 拉長成年輪、三個節疤把座標往外推成同心圓、
+  縱向細裂紋用 2D API 畫（noise 做出來會糊）
+- 石 512²：fBm 斑駁 ＋ Worley 顆粒（「一顆一顆」fBm 做不出來）
+- 疊石牆 512²：底色改成縫的顏色、磚砌在上面、圓角、每塊磚色調微差
+- 瓦 512²：一列之內用 sin 做弧面明暗 ＋ 上緣壓瓦陰影 ＋ 苔痕只長在瓦溝
+- 草地 512²：補一層大尺度乾濕斑塊，平鋪時才不會看出一格一格
+- 玉砂利：Worley 把散點收成砂礫；榻榻米：藺草粗細不均；
+  障子紙：透光不均 ＋ 兩向纖維交織
+- 畫法一律改用 rng(seed) 而非 Math.random()，A/B 才有意義
+
+亮度校正（這是重點，用程式讀 canvas 平均亮度比對，不靠眼睛）：
+新畫法本身會偏移基準亮度，木 +8.9%、漆 +9.4%、疊石牆 −7.7%。
+係數各自乘回去之後三張都回到與修改前**完全相同**的平均亮度
+（66.6 / 81.5 / 141.8），其餘五張本來就在 1% 內。
+疊石牆的對比同時從 102 拉到 158 —— 縫更深，整面牆卻沒變暗。
+
+效能：modulate 加 step 選項，512² 只在半解析度粗網格上算 fBm 再雙線性
+補回（最後一排取樣 size＝下一塊的 0，平鋪處才不會留縫）。
+載入成本從 +2.3s 降到 +0.9s。GPU 貼圖總數維持 62 張。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+材質升級書第 3 章：地形三平面貼圖（七張位移地形圖）
+…
+f418377
+```
+問題：地面是 PlaneGeometry 位移出來的高度場，UV 從正上方投影。平地沒事，
+陡坡上一格 UV 要拉過好幾公尺斜面，貼圖就糊成一條一條 —— 而這是畫面
+佔比最大的一塊。
+
+新檔 src/world/triplanar.js：用 onBeforeCompile 注入 MeshStandardMaterial，
+只換掉「怎麼取樣貼圖」那三段（map_fragment / roughnessmap_fragment /
+normal_fragment_maps），光照、陰影、霧、tone mapping 全部沿用 three.js 自己的
+—— 自己寫 ShaderMaterial 的話這些都要重寫，而且一升版就得跟著改。
+
+- 世界座標三軸取樣（XY / ZY / XZ），權重＝法線分量的 4 次方後正規化
+- 法線用 whiteout blend：把取樣到的 xy 加到幾何法線的切線分量上，
+  比重建三組 TBN 便宜得多，視覺上分不出來；最後轉回視圖空間給光照用
+- 依坡度混第二套材質（新檔 terraintex.js 的 rockTexture：層理＋Worley
+  顆粒＋風化斑），陡坡自動露岩，地形改了不用重刷頂點色
+- customProgramCacheKey 讓注入過的材質跟沒注入的分開快取
+
+兩個實作重點：
+- scale 一律用「原本的 repeat / GRID.size」換算。三平面吃的是世界座標，
+  留著 map.repeat 會被乘兩次；不換算則等於順便把草皮放大或縮小。
+  非等向的 repeat（如竹林 16×36）取幾何平均。
+- 低畫質檔位不套，退回原本的單軸 UV（每像素多採樣兩次，低階機划不來）。
+  GameCore 在建構時就跑過 syncQuality()，那時地圖還沒註冊 listener，
+  所以初始狀態要自己補呼叫一次，不能等下一次切畫質。
+
+驗證：七張圖逐一開起來，customProgramCacheKey 確認注入生效、console
+全 0 error / 0 warn、readPixels 讀地面像素都是合理顏色（沒有爆白或全黑）。
+無名之丘做了執行期 A/B：關掉注入後草皮明顯被拉成模糊長條，開啟後每叢草
+大小均勻，坡上尤其明顯（shots2/ch3-hill-{before,after}.png）。
+
+註：無名之丘在無頭 swiftshader 下 rAF 會卡住 —— 1 萬株鈴蘭 314 萬個
+三角形，軟體渲染跑不動，跟這次的改動無關（暫時隱藏 InstancedMesh 後
+畫面正常）。真機有 GPU 不會有這個問題。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+材質升級書 4.4 LUT 色調分級 ＋ 4.3 凹陷 AO 貼圖
+…
+605dc9e
+```
+【4.4 LUT】新檔 src/world/lut.js
+不讀 .cube（專案不下載外部資產），改用一組看得懂的參數（色溫、
+lift/gamma/gain、飽和、陰影／高光染色）程序烘出查找表。八個地區的
+預設值集中在 LUT_PRESETS，改的時候看得到彼此的關係 —— 分散在各張圖裡
+的話，調完這張忘了那張，整個世界的色調就散了。
+
+用 2D 條狀 LUT 而不是 Data3DTexture：sampler3D 要 GLSL3，而後製鏈那支
+ShaderPass 是 GLSL1。條狀圖用 texture2D 就能取樣，代價只是自己做一次
+藍色軸內插。查表時紅色軸要內縮半個像素，否則會滲到隔壁切片，畫面上
+會出現一格一格的色塊。
+
+GameCore.gradePass 加 tLut / lutSize / lutMix 三個 uniform 與 core.setLUT()。
+gradePass 接在 OutputPass 之後，所以確實是「ACESFilmic 之後再套一層」。
+
+關鍵驗證：**中性 LUT 必須與關閉 LUT 逐像素相同** —— 這是條狀查表寫對了
+沒有的唯一硬證據。實測兩者都是 (8,17,28)，完全一致；神社預設則位移到
+(11,17,24)（偏暖、藍減少），符合設計。
+
+【4.3 aoMap】texgen.js 新增 aoFromCanvas()
+把高度場模糊一次當「周圍的平均高度」，比周圍低的就是凹陷（磚縫、木紋
+的溝、瓦楞的谷）。跟 GTAO 互補：GTAO 算幾何之間的遮蔽，這張算表面自己
+的細微凹凸，尺度小到 GTAO 的取樣半徑看不到。
+
+兩個必要的細節：
+- aoMap.channel = 0。three.js 預設 aoMap 讀 uv1，這個專案的幾何沒有第二組
+  UV，不指定的話整張圖會是黑的。
+- 依各自的凹陷分佈正規化（取 98 百分位當最深）。原本用固定係數，亮度
+  梯度小的貼圖（木、漆）算出來平均 253/255 幾乎全白等於沒做，梯度大的
+  （疊石牆）又過頭。正規化後每張都用滿同樣的動態範圍，最暗一致落在
+  115，木從 252.9 降到 228.7。
+
+驗證：神社 8 個材質全部掛上 aoMap 且 channel 全對；資料貼圖 16→24 張、
+GPU 貼圖 62→71 張，載入時間沒有可測得的變化。aoMap 只影響間接光（three.js
+的定義），所以日照處差 1~2、陰影處明顯：強度 0/1/2 分別是
+(28,44,56)/(25,39,50)/(21,35,45)。
+
+注意：LUT 目前只在 postFX:'full' 的兩張圖生效（神社、太陽花田），其餘
+六張是 basic 沒有 composer，setLUT 會安靜回傳 false。要全圖生效得先決定
+postFX 天空色那件事。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+README 補上材質管線的五個新模組
+…
+0d558f8
+```
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+方案 A：天空 shader 補回 tonemapping / colorspace 兩個 chunk
+…
+a798b6e
+```
+天空球是裸 ShaderMaterial，fragment 只有 gl_FragColor = vec4(c,1.0)。
+three.js 只把 tonemapping / colorspace 兩段自動注入**內建材質**，裸的
+一律照寫的輸出 —— 於是 basic 那條路（直接畫上畫布）的天空既沒被 tone map
+也沒被 linear→sRGB 編碼，永遠比色表寫的更暗更濃。這是漏了一段，不是設計。
+
+證據：修正前 basic 正午天頂是 #011064，正好等於色表值 #0d47a8 的
+sRGB→linear 解碼值（0.051→0.0040、0.278→0.0630、0.659→0.3915，
+×255 = 1、16、100，三個通道全中）。
+
+補上之後同一份程式碼在兩條路徑都正確 —— 畫進 EffectComposer 的
+render target 時 three.js 會把 toneMapping 設成 None，chunk 自動變 no-op，
+OutputPass 照舊負責；直接畫上畫布時則由這裡負責。
+
+實測（正午 12.5、鏡頭朝天頂）：
+  basic              #011064 → #003db2
+  full 關 bloom/grade #003db2 → #003db2（完全沒動，證明 no-op 成立）
+
+兩條路徑至此在 tone mapping 與色彩空間這一層對齊，剩下的差異只有
+bloom 與分級 —— 那是 full 本來就該多的東西。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+八張圖全部翻成 postFX:'full'，LUT 至此全圖生效
+…
+8b61280
+```
+方案 A 把天空的 tone mapping / 色彩空間對齊之後，翻過來不會突然變色 ——
+這是先做方案 A 再翻的原因。
+
+- 六張原本 basic 的圖（里、竹林、永遠亭、香霖堂、無名之丘、獸道）加上
+  postFX:'full'，畫質雙標到此為止：高檔有 GTAO 的接觸陰影與 Bloom，
+  低檔（FULL_QUALITY[0]）自動全關，跟原本的 basic 一樣輕
+- 竹林／永遠亭／香霖堂的 NPCManager 原本只傳 scene。名牌是 depthTest:false
+  的 sprite，進了 GTAO 會被塗成黑方塊 —— 改成 core.plateScene，有 composer
+  時會回獨立的 overlay 場景。里本來就用 core.labelScene，不動。
+
+驗證：八張圖逐一乾淨載入，composer 都在（RenderPass / GTAO / Bloom /
+OutputPass / grade / SMAA 六個 pass）、LUT 都掛上、主場景裡的 sprite 數量
+都是 0（名牌確實住在 overlay 場景）、console 全 0 error / 0 warn。
+里另外拍了完整畫面確認光照正常。
+
+過程中一個誤判記下來免得再犯：在執行期把 GTAOPass.enabled 改成 false 之後
+畫面近處會整片死黑 —— 那是它的深度／法線 prepass 留下的髒狀態，不是翻
+full 的問題。乾淨載入完全正常。要驗畫質檔位請用 core.quality.set()，
+不要直接動 pass 的 enabled。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+第 2 章推到其餘七張圖：地面與路面補上大尺度 fBm 斑塊
+…
+5b094e8
+```
+散點畫法只有高頻，貼圖平鋪時會看得出一格一格 —— 改成世界座標三平面之後
+尤其明顯（第 3 章讓平鋪邊界跟地形無關，反而更容易讀出重複）。七張圖的
+地面與路面各補一層低頻 fBm，係數讓平均倍率落在 1.0 附近，只加結構不改
+整體亮度。
+
+里的 noise() helper（隨機撒 n 個 2×2 暗點的白噪音）改用 grain()，介面保留
+所以呼叫端一行都不用改。強度往下讓一階 —— grain 是乘法且以 1 為中心，
+而舊版只會變暗，照原值換會把整體推亮。
+
+亮度驗證（里，逐張讀 canvas 平均亮度）：
+  地面 101.1 → 103.1  (+2.0%)
+  石板路 145.9 → 148.9 (+2.1%)
+  灰泥 218.5 → 220.0  (+0.7%)
+  木   78.3 → 79.3    (+1.3%)
+全部在 2.1% 以內，不需要像神社那次那樣回頭校正係數。
+
+八張圖逐一開起來 console 全 0 error / 0 warn；全專案語法掃描通過。
+材質與畫質升級書 §5 的七個項目至此全部完成。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+角色書第 1 章：圓柱段數與球體解析度（繼國緣一先做）
+…
+fd0a134
+```
+tapered() 預設 10 → 18；呼叫端顯式段數 14→24、10→20、8→14。
+手指（5）、翼骨（6）、羽毛（7）維持不動 —— 那是一公分級的零件，
+加段數只是白花面數。球體 18×12→24×16、16×10→20×14、12×8→16×12、
+10×8→14×10；8×6 的小飾件維持。裙子圓柱 16→24，滾邊環的徑向 6→10。
+
+沒有呼叫 computeVertexNormals()：CylinderGeometry 的側面法線本來就是
+沿圓周平滑、頂底面是硬邊，這正是升級書要的「側面平滑、頂底硬邊」。
+整顆重算反而會把頂底也磨平，變成書上說的軟糖。段數才是稜線的唯一來源。
+
+實測（人間之里，玩家模型）：
+  三角形 10320 → 15528（+50.5%，升級書預估 +60~80%，在預算內）
+  網格數 18 → 18（optimizeRig 的合併不受影響，draw call 不變）
+  全場三角形 247982 → 284384（+14.7%）
+
+A/B 截圖 shots2/char-ch1-{before,after}.png（同機位、同時刻、同姿勢）。
+遊戲距離下差異溫和，肩、臂的圓弧比較明顯 —— 這一章本來就是
+「最便宜的一刀」，不是最有感的一刀。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+角色書第 2 章：關節填縫（球半徑改成依實際肢體半徑推算）
+…
+f85e824
+```
+原本的關節球是寫死的數字，而且**比它要銜接的肢體還細** —— 球根本填不滿
+接縫，一彎就露出楔形空隙。這是升級書第 2 章要治的正是這件事：
+
+  膝  0.058  → 0.074 × 1.05 = 0.0777   （大腿底端就是 0.074，原本短了 0.016）
+  肘  0.046  → 0.056 × 1.05 = 0.0588   （上臂底端 0.056，原本短了 0.010）
+
+補上原本完全沒有的三顆：
+  腕  0.048（前臂底端，×1.0 —— 大了會看起來腫），掛在 fore 節點
+  踝  0.06（小腿底端，×1.0），掛在 leg 節點
+  頸  0.05 × 1.1，壓在領口裡，看不到球本身，只補掉頭轉動時的縫
+
+節點歸屬照升級書：肘球掛 arm（上臂）而不是 fore，膝球掛 leg（大腿）而不是
+小腿 —— 掛錯邊彎曲時會露餡。這兩顆本來就掛對，只有半徑錯。
+
+面數：玩家模型 15528 → 16600（+6.9%），距第 1 章前的 10320 共 +60.9%，
+落在升級書預估的 +60~80% 內。網格數維持 18 —— optimizeRig 的節點歸屬
+沒有被打亂（新增的球都掛在已存在的節點上）。
+
+驗證方式說明：這一章的效果只在肢體彎曲時看得出來，而這個無頭環境跑
+完整後製鏈只有約 2fps，每幀再多畫一次就湊不出可用的截圖。所以改用
+量化驗證 —— 缺陷本身是「球比它要銜接的肢體細」，那是可以直接算的，
+現在每一顆都 >= 對應的肢體半徑。真機上的彎曲外觀還沒目視確認。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+品質升級書・升級 3（前半）：路人避障與卡死偵測
+…
+21599c3
+```
+現況是節點之間直線走，路上有東西就頂著建築磨蹭 —— 升級書列的第一個症狀。
+
+- _avoid()：往前探 2 公尺，撞到就沿障礙切線偏轉。用圓查詢而不是 raycast，
+  colliders 本來就是圓柱／方盒的參數，直接算便宜得多。
+  兩個實作重點：
+  * 只處理「最擋路的那一個」障礙。同時對三個求平均方向的話，夾在兩棟房子
+    中間時兩邊的偏轉會互相抵銷，人就直直撞上去。
+  * 兩個切線方向挑跟原方向夾角較小的那邊繞 —— 挑錯邊整個人會往回走。
+  PAD 用 0.55 而不是 _unstick 的 0.3：提早繞開，而不是貼到牆才被推出來。
+- 卡死偵測：連續 2 秒位移不到 0.3 公尺就放棄目標，回到最近的路網節點
+  重新選路（被兩面牆夾住、或切線方向又是另一個障礙時的兜底）。
+
+驗收（人間之里 64 位路人，純模擬 update() 跑 60 秒，同一組起始狀態）：
+
+  磨蹭超過一半時間的人數    10 → 1     -90%
+  平均磨蹭幀比例          0.166 → 0.029  -83%
+  60 秒位移中位數        44.4 → 59.5 公尺  +34%
+
+「磨蹭」的判定＝該幀不在發呆狀態、但位移不到該走的四分之一。
+位移中位數變大是同一件事的另一面：不再把時間花在頂牆上，就真的走得到地方。
+
+剩下的一位是路網本身的問題（某個節點對就落在建築後面），屬於圖的資料而
+不是 AI，之後單獨處理。日程 AI（清晨聚市集／黃昏點燈／夜晚回家）還沒做。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+效能基準寫進 journal（跨機器可比的幾何預算）
+…
+e299660
+```
+真機幀時間我這邊量不到 —— 無頭環境是 swiftshader 軟體渲染，八張圖翻成
+postFX:'full' 之後只剩約 2fps，那個數字跟使用者的機器毫無關係。所以記的是
+場景圖靜態統計（也不受 renderer.info 被後製鏈最後一個 pass 重置的影響 ——
+那是這次踩到的坑，神社直接讀 info.render.triangles 會得到 0）。
+
+  博麗神社   226 網格 / 105,178 三角形 / 71 張 GPU 貼圖
+  人間之里   739 網格 / 506,362 三角形 / 50 張 GPU 貼圖（16 位路人時）
+
+另外把本輪每一項改動的實測代價列成表，並明確標出兩件**只有真機能確認**
+的事：34 位 NPC 同框的幀時間是否劣化超過 15%（角色書第 7 章的效能守則），
+以及低階機上翻成 full 之後的表現。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+角色書 4.3：眼睛改用貼圖（升級書執行順序第 3 步）
+…
+d270c90
+```
+原本一隻眼是「眼白球 + 高光球」兩顆球。改成一片微凸面片 + 程序生成的
+眼睛貼圖，虹膜、瞳孔、眼線、兩個高光全在貼圖裡。
+
+貼圖內容（都是「少了就不像眼睛」的東西）：
+- 杏仁形眼型，上緣弧度大、下緣平 —— 不然只是個圓孔
+- 上眼瞼投影漸層：眼球是球，上半本來就該暗
+- 虹膜的放射狀纖維：少了它虹膜像一塊色紙
+- 虹膜外緣的深色環（limbal ring）：少了它眼睛沒有精神
+- 主高光在左上、補光在右下 —— 兩個才有濕潤感
+- 沿上緣的眼線：卡通臉的眼睛全靠這條撐
+
+貼圖做成上下兩格（上＝睜眼、下＝閉眼），眨眼只要把 map.offset.y 從 0.5
+切到 0，不用動幾何 —— 之後要加眨眼動畫時直接可用。
+
+兩隻眼的幾何先合併成一個 mesh 再掛上去：共用同一份材質，分成兩個的話
+每個角色多兩個 draw call，34 位 NPC 同框就是多 68 個。
+
+alphaTest 0.35 而不是純 transparent —— 省掉排序，也不會被描邊蓋掉。
+
+實測：玩家模型三角形 16600 → 15368（-7.4%，如升級書所說「更便宜」），
+網格數 18 → 19（眼睛有自己的貼圖材質，不能併進膚色那份）。
+近照見 shots2/char-eyes-after.png。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+角色書 4.1/4.2/4.5 頭型與耳朵 ＋ 第 6 章 描邊調校（順序第 4、6 步）
+…
+59748cc
+```
+【頭型】正圓球是「娃娃感」的主因，三件事一起做，全部用逐頂點變形
+（比多加幾何便宜）：
+- 略拉長成橢球（y 1.05、z 1.02），段數 18×14 → 24×18
+- 下顎收窄：只作用在下半，越往下縮越多，但留一點不然會變尖錐
+- 臉正面壓平：只壓 +z 側，且越靠中線壓越多 —— 側臉維持圓，
+  但五官有平面可以安放（全球面會讓眼睛浮在弧上）
+
+【耳朵】球面的一小塊而不是平面片 —— 平的從正面看會變成一條線。
+
+  這裡踩了一個坑：第一版半徑用 HEAD_R × 0.30，結果變成頭上兩隻角。
+  原因有兩個，缺一不可：尺寸太大，加上**描邊的外擴黑殼把這麼小的
+  一片撐大了一圈**。改成 0.19 並標 noOutline 之後才像耳廓。
+
+【描邊】0.02 → 0.014；head 節點再乘 0.62 —— 臉的描邊太粗會把五官糊掉。
+刀身的 ×0.45 特例保留。
+
+面數：15368 → 16448（+7%，頭部段數與耳朵），距第 1 章前的 10320 共 +59.4%，
+仍在升級書預估的 +60~80% 內。網格數維持 19。
+近照見 shots2/char-head-after.png。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+角色書第 3 章：肢體有機化（順序第 5 步）
+…
+23fd156
+```
+新增 limb(profile, h, seg, flat)：吃一組沿長度的半徑控制點長出紡錘形剖面。
+tapered() 是線性收縮的圓錐台，真實肢體是中段粗、兩端細（肌肉）。
+用 LatheGeometry 而不是自己疊 BufferGeometry —— 它會沿輪廓線自動生出正確
+的側面法線（跟 CylinderGeometry 同一套），不必再處理接縫。
+
+flat < 1 把橫截面壓成橢圓。正圓的四肢是「這是圓柱不是手」的第二個來源：
+  大腿 [0.070, 0.082, 0.079, 0.068] flat 0.94  髖略粗 → 股四頭肌 → 膝上收
+  小腿 [0.058, 0.068, 0.056, 0.044] flat 0.88  腓腸肌在上三分之一最鼓
+  上臂 [0.056, 0.060, 0.055, 0.050] flat 0.95  三角肌 → 二頭肌 → 肘上收
+  前臂 [0.050, 0.052, 0.044, 0.036] flat 0.86  全身最扁的一段
+
+**剖面抽成具名常數，關節球的半徑直接讀端點推導** —— 寫死數字的話剖面
+一改關節就腫，那正是第 2 章修掉的那個 bug 的成因。這次讓它不可能再漂。
+
+面數上踩到一個坑：RINGS 一開始給 12，角色面數直接衝到 +90.4%，超出
+升級書預估的 +60~80%。Lathe 的每一圈都是實打實的一圈三角形，而剖面
+只有 4 個控制點，12 圈是白給的。改成 6 圈起伏一樣順：
+
+  10320（第 1 章前）→ 17728  ＝ +71.8%，回到預算內
+  網格數維持 19，console 0 error。
+
+註：繼國緣一穿袴，走的是 hakama 分支，所以大腿／小腿的剖面在他身上
+看不到 —— 那是給沒穿袴的角色用的。手臂兩段則所有角色都吃得到。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+角色書第 5 章：髮束收尖（順序第 7 步，本書完成）
+…
+1efdca6
+```
+原本髮束是 tapered 圓柱 —— 末端是一個平的圓形切面，頭髮不會有平的斷面，
+這在剪影上非常明顯（升級書第 5 章的第一句）。改用 limb() 的剖面：
+
+- 末端收到 12% 而不是 0：完全歸零會在尖端擠出一圈退化三角形，法線會亂
+- 橫截面壓扁 flat 0.82 —— 一束頭髮是扁的，不是圓棍
+- 沿長度用平方曲線輕微內彎，髮尾往內收（直棍最假）
+
+面數 17728 → 18080（+2%），距第 1 章前共 +75.2%，仍在升級書預估的
++60~80% 內。網格數 19，console 0 error，全專案語法掃描通過。
+
+沒做的兩項與理由：
+- 髮片改薄的彎曲面片：現況的瀏海分片已經 scale.z = 0.55 壓扁過，
+  改成真正的面片要重做每個髮型的分片座標，風險遠大於收益
+- 髮色根部到髮尾的漸層：要開 vertexColors，而頭髮材質是所有髮片共用的，
+  一開就得替每一塊髮片都寫頂點色，否則沒寫的會變黑
+
+角色模型精緻化升級書七個項目至此全部處理完畢。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+品質升級書・升級 3（後半）：路人日程 AI
+…
+984b39b
+```
+清晨聚市集、白天遊走、黃昏往燈籠、夜晚大半回家。時間直接吃 env.hour。
+
+做法：每個路點先預算「離市集多近」「離燈籠多近」（節點與吸引點都是靜態的，
+每次現算太浪費），選下一個路點時照時段加權。**不是直接挑最高分的鄰居** ——
+那樣所有人會走同一條路排成一列，到了市集就再也離不開；改成分數轉權重的
+輪盤，仍有隨機性，只是重心偏過去。
+
+光靠選路加權不夠，人會從市集穿過去而不是留下。所以到站時若該點的吸引分數
+夠高，就拉長逗留時間 —— 這才是升級書要的「攤販定點」與「黃昏站定點燈」。
+
+燈籠座標直接取 lanternGlows（streetLantern() 建的時候就記了），不另外維護
+第二份清單 —— 維護兩份一定會不同步。
+
+人數用現有的路人池淡入淡出，每 0.8 秒才調整一位；誰留下是照索引固定的，
+不是每次隨機挑（隨機挑會讓同一個人在門口反覆出現消失）。隱形的人不參與
+互推、推出牆壁與位置同步 —— 否則會把在場的人從一個看不見的身體旁邊推開。
+
+兩個參數是量出來的，不是猜的：
+- 市集 falloff 26 → 38。市集只有兩個廣場，範圍收太緊時高分節點少到推不動人
+  （實測清晨的市集人數只從 8 變 10）。
+- 燈籠 falloff 12 → 8。五十幾盞沿街鋪滿，12 公尺的話幾乎每個路點都算
+  「在燈籠旁」，於是全街的人同時停下來逗留、互相卡住。
+
+驗收（每個條件各自重新載入、只取前 45 秒；64 位路人）：
+
+  時刻    在場   市集30m   燈籠6m
+   7 點    54      31%      31%
+  13 點    64      14%      20%
+  18 點    58      19%      41%
+  22 點    12       0%      25%
+
+清晨的市集密度是白天的 2.2 倍、黃昏的燈籠密度是白天的 2.05 倍，
+夜裡只剩 12 人 —— 升級書要的「切換清晨/黃昏，街上人流分布肉眼可見地不同」。
+
+塞車沒有變差（同協定）：13 點 0.037 → 0.025、18 點 0.046 → 0.036。
+
+驗證方法上踩到一個坑，記下來：一開始我在同一次載入裡連續跑多個時段，
+黃昏的數字明顯比白天差 —— 但**無日程的基準版也一樣**（0.03→0.056→0.083
+遞增）。那是模擬時間累積造成的劣化，不是時段造成的；先跑的條件永遠占便宜。
+改成每個條件各自重新載入之後結論才反過來。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+修人間之里的四個缺陷：樹長在房子裡、邊界破圖、遠山切地、路口閃爍
+…
+09e9069
+```
+【樹長在房子裡】撒樹的四個迴圈只有粗略的矩形排除，完全沒有跟建築的碰撞盒
+比對。新增 spotFree()／freeSpot()：建物在樹之前就建好，碰撞盒都已經進
+colliders，直接查它就行（不必另外維護一份建物清單，維護兩份一定會不同步）。
+半徑給樹冠而不是樹幹 —— 樹幹在牆外、樹冠穿進二樓一樣是穿模。
+街心那四棵櫻是手挑的座標，但也過檢查：被擋到就沿主街找最近空位而不是
+整棵丟掉（那是地標）。
+實測：落在建築內的樹 8 → 0。
+
+【邊界破圖】地面網格只有 460×460（±230），但玩家 bounds 給到 hx 240 /
+hz 300，南門更是蓋在 z=250、里外的林子撒到 z≈276。走到里的南邊時腳下的
+地面網格已經結束 —— GroundGrid.sample() 超出範圍會退回解析高度，所以人
+不會掉下去，但畫面上什麼都沒有，直接看到天空球。
+地面放大到 700×700，seg 跟著 120 → 183 以維持格距（3.83 公尺）——
+格距變粗的話貼地物件會重新開始閃，GroundGrid 的整個用意就沒了。
+另外把貼圖密度抽成 GROUND_TILE 常數，三平面與單軸 UV 兩條路都讀它，
+放大地面時草皮不會跟著被放大。
+八張圖逐一核對過地面半徑 vs bounds，只有里是錯的。
+
+【遠山切進草地】18 座錐形山的山腳固定在 y = -4，但里的外圍是二次上升的
+矮丘，同一個半徑上不同方位的地面高度差到 30 公尺 —— 有些方位的山埋進
+地裡、有些懸空切出一道硬邊。改成逐座問 heightAt 貼地。
+試過改用 ridgeRing（升級 1 的遠景系統）但退回來了：里的可走範圍 240×300
+遠大於里本身（橢圓半徑 175），稜線環放在還看得到的距離會變成一堵連續的
+牆；離散的錐形山之間透得出天空，反而對。理由寫進註解免得之後又有人改。
+
+【路口閃爍】主街、六條橫街、四條縱巷的貼地層 lift 全部是預設的 0.05，
+在每個路口完全共面、polygonOffset 也一樣 —— 深度測試分不出前後，整片閃。
+錯開 1.2 公分（同無名之丘支徑、永遠亭參道的既有做法）：主街 0.050、
+橫街 0.062、小巷 0.074，西南門的兩段路 0.086 / 0.098。
+其餘七張圖都已經有錯開，只有里漏掉。
+
+全專案語法掃描通過；里 735 網格 / 522,106 三角形 / 640 碰撞盒，console 0 error。
+註：chrome-devtools MCP 這輪斷線，改用 Playwright 直接驅動（/tmp/pw/）。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+品質升級書・升級 4：河道加寬＋橋重做
+…
+ec0cc09
+```
+原本河半寬 9、深 1.6 —— 升級書說得對，那是水溝不是河。
+
+【參數化】河的尺度抽成 RIVER_HW（17）與 RIVER_DEPTH（2.5），另外給
+eastBankX()／offRiver() 兩個 helper。所有跟河有關的東西一律從它們推導 ——
+原本有 11 處各自寫死數字（9 / 10.7 / 11 / 13 / 14 / 8.5 / 7.5 …），
+改河寬就注定漏掉幾個。蜿蜒幅度也加大（16/7 → 22/10），不然變寬後太直。
+
+【橋重做】長度由 RIVER_HW 推導：半長 = RIVER_HW + 6，跨過整條河再各上岸
+6 公尺（實測跨距 46.0、兩端各超出河緣 6.0）。拱高從 0.35 提到 1.35 讓橋下
+看得穿，加兩根橋墩把「有淨空」講清楚，橋面加寬到 9.2。
+  這裡改壞過一次：SPAN 同時被當成板長與間距，跨距變成 97.8 公尺。
+  拆成 HALF_LEN / L 兩個量之後才對。
+
+【河裡】淺灘石與蘆葦各一個 InstancedMesh（近千個物件，一個個 mesh 會直接
+吃掉靜態合併省下的 draw call）。石頭只放在離河心 0.55~0.95 半寬的環帶 ——
+放在河心會變成踏腳石，那是「可以過河」的地形語彙，跟「要走橋」打架。
+
+【東岸】沿河緣鋪一條堤道（ribbonOnGrid，矩形 decal 貼不出蜿蜒），串起三座
+橋頭與對岸農家，lift 0.086 跟里內三層街道錯開。
+東岸六棟建物的座標改用 eastBankX() 從河緣推 —— 原本是寫死的 x，而河是蜿蜒
+的：kura(126, 4) 的 x 正好是 z=4 處的河心（riverX(4) ≈ 125.6），倉庫本來
+就蓋在河裡。水車小屋同理：屋心移到河緣外 1 公尺，屋子踏在岸上、水輪伸進
+水裡 2.6 公尺（原本整棟壓在水面上）。
+
+驗收：
+- 站在河裡的建物 24 → 0（排除橋的 walk 平台與欄杆後）
+- 三座橋逐一讓控制器實際走過去：全部過河成功，過程最低 y 分別
+  0.26 / 0.23 / 0.14，沒有任何一座會掉進河裡
+- 里 730 網格 / 551,728 三角形，console 0 error
+- 截圖 shots2/up4-river.png、up4-bridge.png（橋下那張看得到橋墩與淨空）
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+品質升級書・升級 6（前四項）：迷途竹林重做
+…
+77e4157
+```
+【1 拆掉路面視覺】PathNet 的每一段原本都用 ribbonOnGrid 鋪一條看得見的
+土徑 —— 於是「迷途竹林」照著顏色走就出去了，名不副實。現在地面全圖統一
+材質，PathNet 只留作內部資料（竹子疏密、兔子與 NPC 移動、出入口判定）。
+
+【5 竹子多樣化】驗收標準是「截圖裡找不到兩根一模一樣的竹子」，所以每一項
+都真的分開擲：
+- 粗細 0.075~0.12 → 0.06~0.22（原本範圍太窄，看起來像複製貼上）
+- 高度 8~16，且**粗的傾向高**：獨立亂數會擲出又粗又矮的樁子跟又細又高
+  的麵條，兩種都不像竹子
+- 顏色改成三種綠按 6:3:1 分群（升級書指定的比例）。原本是連續漸變 ——
+  連續色階在一片竹林裡會糊成同一種綠，分群反而看得出根與根不同
+- 2% 攔腰折斷的枯竹（只留下半截、沒有葉叢、更黃更淡）
+
+【5 筍株】原本是單根散落的小圓錐，改成「一個基座冒出 3~6 根不等高的
+筍/幼竹」，而且用 fbm 決定聚落中心 —— 均勻亂撒的話每個角落都一樣，
+走過去沒有「這裡不一樣」的感覺。一株之內高度差很大（0.5~3 公尺），
+才像正在長。全部合進一個 InstancedMesh。
+
+【2 地標引導系統】路面拆掉之後認路全靠地標，四種各自負責不同訊息：
+- 紅布條竹：沿主徑約每 36 公尺一根，布條做小（0.5×0.34），遠看只是
+  一點紅，走近才讀得出來 → 「這是正解路徑」
+- 石燈籠：密度往南（永遠亭方向）遞增；三成是傾倒的 —— 全部立正會變成
+  路燈，那又變回一條看得見的路 → 「離終點還有多遠」
+- 地藏：擺在每條支徑的岔路口，面朝 +z（正解方向）→ 「往這邊」
+- 竹筍叢：死路端的軟性阻擋（scatter 的聚落）→ 「此路不通」
+
+【3 方向感干擾】minimap.js 新增 lost 回呼：回傳 true 時不畫玩家位置，
+改畫一個「？」。竹林在離邊界 > 60 公尺時啟用。
+底圖（邊界、傳送點）照畫 —— 玩家還是知道「這張圖長怎樣、出口在哪」，
+只是不知道自己在哪。整張蓋掉等於關掉小地圖，就沒有「我大概往南走」的
+推理空間了。小地圖也不再傳 paths：世界裡的路拆了，地圖上再畫等於還給玩家。
+
+驗收：離邊界 18 / 150 / 150 / 10 公尺四個點，問號分別 否/是/是/否。
+竹林 214 網格 / 238 InstancedMesh / 395,634 三角形，console 0 error。
+截圖 shots2/up6-bamboo.png。
+
+未做：第 4 項「可砍的竹子」（每株 HP、斷竹動畫、5 分鐘長回、砍竹開捷徑）。
+那是一套要接進戰鬥判定與 instance 狀態管理的玩法系統，不是這輪的視覺
+重做能順帶做掉的，單獨一個階段處理。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+竹林加厚樹冠遮天、地面鋪枯葉
+…
+01d7e5e
+```
+【樹冠】原本葉叢只長在竹竿頂端，而走道附近**刻意種得疏**（不然走不動）
+—— 路的正上方是空的，從地面抬頭仍然一片藍。兩件事一起做：
+
+1. 葉叢本身加厚：三層 18 片 → 五層 34 片，最外圈從攤到 0.30 加到 0.62，
+   葉片加寬 0.15 → 0.21，整叢尺度 0.85+h*0.055 → 1.15+h*0.085。
+   一根竹子的葉叢要碰得到鄰居的，天蓋才連得起來。
+2. 另鋪一層**跟竹竿無關的天蓋**：沿路網撒、高度 9~15 公尺、每片是一把
+   六葉的大葉扇（幾乎攤平 —— 攤平才遮得到天）。它不需要對應到任何一根
+   竹子，玩家看到的是「上面被葉子蓋住」，不會去數哪片葉子長在哪根竹上。
+   空地上方留空（那是休息點，該有天光）。castShadow 關掉：四千片各投一次
+   陰影會壓垮陰影貼圖，而且底下該是均勻的暗，不是四千個葉子形狀的影子。
+
+【地面枯葉】4200 片實體葉片貼地（一片 2 個三角形，比多一根竹子還便宜）。
+只靠地面貼圖畫葉子，走近看還是一張平的圖。反照率上限壓到 0.20 ——
+留在 0.30 的話穿過天蓋的光斑打上去會爆成刺眼的白片。
+
+【修一個 bug】紅布條竹的竹竿用了 MAT.culm，但那是 InstancedMesh 專用的
+「白底＋instanceColor」材質，一般網格拿去用就是一根純白的柱子，在暗林子裡
+亮得像螢光棒。新增 MAT.culmSolid 給一般網格用，並在註解裡寫明差別。
+順手把 bambooBridge 裡「先傳 MAT.culm 再覆寫 material」的寫法改成直接傳
+MAT.wood —— 結果一樣，但會讓人以為那裡真的用得到白底材質。
+
+【一個誤判記下來】排查時我把林地上的亮片當成破圖，射線打下去才發現那是
+**有貼圖的地面**（256² + normalMap，就是三平面化的 MAT.soil）——
+也就是穿過天蓋的光斑。竹林裡有光柱是對的，不是要修的東西。
+
+【試了又退回】一度用 onEnvApply 壓暗陽光、提高環境光來配合天蓋，結果
+env.fill 是藍色補光，提高之後整個林地泛藍，比原本更糟。改成只壓枯葉的
+反照率，光照維持原樣 —— 斑駁的暖光本來就是對的。
+
+成本：竹林三角形 395,634 → 609,548（+54%），InstancedMesh 238 → 320。
+console 0 error，全專案語法掃描通過。截圖 shots2/up6-bamboo.png、up6-canopy.png。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+品質升級書・升級 6 第 4 項：可砍的竹子
+…
+4c7db4f
+```
+架構照 mobcore 的思路：**渲染歸 instance、狀態歸陣列**。竹子一千多根不可能
+一根一個 Mesh，但砍下去要記血量、單獨倒下、五分鐘後長回，所以每根在生成時
+就記住自己住在哪個 InstancedMesh 的第幾格（b.mesh / b.idx），砍中直接改
+那一格的矩陣。
+
+沒有塞進 Combat 的 mobs 系統：那套是給會動、會反擊、有 AI 的怪用的，
+一千多根靜止的竹子塞進去每幀都要跑 AI 與分離，純浪費。
+
+【Combat 加一條清單制掛勾】mods 只有一個位子而且已被技能系統佔走
+（skills.js 直接 combat.mods = this），地圖想在揮刀時做自己的事沒地方掛。
+新增 combat.onSwing(fn) 清單 —— 專案先前為了同樣的問題把 env 的三個回呼
+改成清單制，這裡照做。
+
+【掛載時機】cuttable() 跑在 installKit() 之前（竹子要先長出來），那時
+core.kit 還不存在；而且換角色時 kit.rebuild() 會換掉整個 Combat 實例，
+開場註冊一次的話換完角色就失效。改成每幀檢查實例有沒有換，換了就重掛。
+
+【行為】三刀斷 → 上半段繞斷點傾倒 0.8 秒（先快後慢再輕彈，純線性看起來
+像被推倒的紙板）→ 落地後 2 秒淡出；下半段留斷茬，五分鐘後從斷茬長回全高。
+命中判定用 cells 當空間索引只掃周圍九格 —— 全掃的話每一刀要跑一千次距離。
+
+【砍竹開路】竹叢原本有一顆擋人的碰撞盒。整叢砍光就把半徑歸零解除 ——
+這是迷宮「可被玩家改寫」的地方：死路砍得穿，捨得花時間就有捷徑。
+
+【新增 ?regrow= 參數】五分鐘的重生時間沒辦法自動化驗證，加一個查詢參數
+可以縮短（同 ?nstr= 的用意）。
+
+驗收（Playwright 實跑，非推論）：
+  三刀斷      hp 3→2→1→0、dead=true、砍擊高度 1.6m（原高 11.2m）
+  斷茬        instance 矩陣的 Y 縮放 = 1.6，葉叢縮放 = 0
+  傾倒        上半段在場、1.5 秒後轉了 0.39 rad
+  砍竹開路    竹叢 4 根全砍光後 blocker.r 由 1 變 0
+  重生        ?regrow=0.3 下斷茬由 1.6 長到 4.54m（動畫進行中）
+  console     0 error
+
+驗證過程記兩件事：
+- 手寫的假 form 會讓刀光特效算出 NaN（computeBoundingSphere 報錯）。
+  那是測試腳本的問題不是產品的 —— 改用 cb.currentForm 之後 console 全乾淨。
+- h.frame() 在同步迴圈裡連呼叫，時鐘幾乎不前進，動畫的 dt 是 0；
+  要驗動畫得讓真實時間過去。而且主迴圈會夾住 dt，這個無頭環境約 2fps，
+  55 秒牆鐘只推進幾秒模擬時間 —— 所以重生門檻要調到 0.3 才測得到。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+品質升級書・升級 7 第 2 點：環境生命（八張圖）
+…
+0bb1b4a
+```
+「像關卡不像地方」的一大來源是所有東西都不動 —— 佈置得再滿，靜止不動
+就是佈景。原本只有里的水車與竹林的落葉，其餘六張圖零 idle 動態。
+
+新檔 src/world/ambience.js，四種便宜的動態：
+  smoke()   炊煙 —— 「有人在煮飯」最省的表達
+  birds()   飛鳥剪影 —— 天空不再只是一張貼圖
+  drift()   落葉／花瓣 —— 空氣在動
+  banner()  晾曬的布幔 —— 風在吹
+
+共通做法是**循環重用固定數量的 instance**，粒子不生不滅 —— 每幀 new 一批
+再丟掉會讓 GC 在遊玩中抽動。幾個實作上的判斷：
+
+- 煙：越高越大越淡。煙散開是體積擴散，不是原地淡出。
+- 鳥：拍翅用 Y 縮放做，不動頂點。一隻鳥就兩片三角形的 V 字，
+  側面看是一條線 —— 剪影本來就該是這樣。
+- 落葉：落到地面就換一個**新的水平位置**再回到頂端。原地重生會讓粒子
+  排成一根根柱子。
+- 布幔：逐頂點正弦波，上緣固定、越往下擺幅越大。一塊布幾十個頂點，
+  比骨骼或物理便宜太多，看起來一樣。標 noMerge —— 頂點每幀在動，
+  被靜態合併吃掉就永遠不動了。
+- 粒子一律 frustumCulled = false：每幀都在動，包圍盒沒有意義。
+
+每張圖挑跟那個地方相稱的兩種以上：
+  神社      社務所炊煙 ＋ 紅葉飄落 ＋ 繞山頭的鳥
+  人間之里  四戶炊煙 ＋ 盆地上空的鳥 ＋ 後院三塊晾曬的布（刻意不等高）
+  迷途竹林  竹葉飄落（跟地上剛鋪的枯葉是同一組語彙）＋ 高處掠過的鳥
+  永遠亭    院內炊煙 ＋ 竹葉
+  香霖堂    店裡炊煙 ＋ 森林邊緣的落葉
+  無名之丘  草原的鳥 ＋ 風吹過的花瓣
+  太陽花田  花田上空的鳥 ＋ 飄散的花瓣
+  獸道      林道落葉 ＋ 山頭掠過的鳥
+
+驗收：八張圖逐一實跑，讀第一顆粒子的 instance 矩陣、等 2.5 秒再讀一次，
+確認位移 > 0：
+  神社 0.055 / 里 0.055 / 竹林 0.107 / 永遠亭 0.055 / 香霖堂 0.063 /
+  無名之丘 0.778 / 花田 0.975 / 獸道 0.089 —— 全部有在動，console 全 0 error。
+
+註：神社第一次量到位移 0，那不是 bug —— 它的 tick 被 tickWhen 擋著
+（標題畫面本來就凍結時間），選角之後就會動。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+中景層：八張圖都補上走不到但看得清的一層（升級 7 第 1 點）
+…
+c8d8034
+```
+三層景深的中間那層。以前每張圖只有玩法層與遠景剪影 —— 走到邊界，
+眼前從「有細節的世界」直接跳成「一排色塊」，那個斷層就是「像關卡
+不像地方」的來源。
+
+新增 src/world/midground.js：
+  terraces()  坡地梯田 —— 選它是因為水平線一條一條，在遠處仍讀得出
+              形狀；同樣距離擺一片樹林就只是一團綠
+  hamlet()    遠處的小聚落 —— 只有量體與屋頂，走不到就不需要門窗
+
+兩者都不投影、無碰撞、合併成單一網格，一張圖多不到四個 draw call。
+全部標上 userData.midground，驗證腳本分得出中景與一般佈景。
+
+梯田做對之前踩到的三個坑（都是實測畫面才看得出來）：
+
+1. 階梯的進深不能給死。田面是平的，所以一階的落差 = 進深 × 坡度；
+   人間之里西坡坡度約 0.8，給死 depth = 7 就是每階落差 5.6 公尺 ——
+   那不是田埂，是比房子還高的擋土牆，畫面上整片是一堵牆。改成反過來：
+   先定落差（1.8 公尺，人爬得上去），再往外掃到地形剛好升這麼多的位置
+   當作下一階的界線。坡陡階窄、坡緩階寬，depth 退化成寬度上限。
+
+2. 田面高度要取階梯的**後緣**。取中心的話前半截整片翹出坡面浮在空中；
+   取前緣的話除了最前面那條，田面全埋進山裡只剩埂露出來。取後緣才會
+   後緣貼坡、田面浮出、前緣落差正好給土埂填。
+
+3. 埂不能用裸土色，而且埂頂要跟田面齊平。坡陡時從坡下往上望是掠射角，
+   看到的幾乎全是埂面 —— 裸土色會讓整座山變成褐色的牆。真的梯田埂上
+   也是長草的。
+
+順帶修掉八張圖共通的擺放錯誤：facing 全部反了（階梯往可走範圍裡面退，
+一路蓋到玩家頭上），獸道還把基準取成 MAP_R 而不是 bounds（bounds 是
+MAP_R + 30，梯田因此伸進玩家走得到的地方 15 公尺）。
+
+驗證腳本原本也是錯的 —— 它比的是包圍盒**最遠**那一角有沒有出界，
+所以一半侵入可走範圍照樣通過。改成比最近那一角之後才抓到獸道那筆。
+八張圖現在都是「中景沒有任何一點落在 bounds 內」。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+人間之里：里門框景 + 三處看得見的破綻（升級 7 第 3、4 點）
+…
+45b153f
+```
+視線設計（第 3 點）：兩個入口都改成出生在**門外**。
+
+原本兩個入口都出生在門內 9 公尺處 —— 冠木門在背後，第一眼是一條
+兩側有房子的空街，沒有任何框景。冠木門有 8.8 公尺開口、6 公尺高，
+本來就是這張圖現成的取景框，站在門外往裡看，街景才會被它框起來。
+出生點退到傳送點觸發半徑之外（北門 4.2、西南門 4.6），不然一進來
+畫面就掛著「按 E 回獸道」。傳送要按 E 才會走，所以出生在傳送點附近
+是安全的。
+
+不對稱與不完美（第 4 點），照升級書列的三個例子各做一處：
+
+  圍牆缺一段  北門東側緊鄰門口的土牆塌了，兩端剩半截殘牆、斷口是斜的，
+              中間用一排高矮不齊的竹籬笆頂著，地上散著還沒收走的瓦。
+              碰撞盒照樣封住（籬笆也是牆），只是矮一截。
+  燈籠是歪的  水井廣場北口那一盞石燈籠往一邊倒 12 度、笠石滑下來斜靠在
+              柱腳。支點取**基座頂面**而不是地面 —— 沉下去的是基座底下的
+              土，基座沒動；用地面當支點柱腳會整個偏出基座，看起來不是
+              倒了而是插錯位置。
+  屋頂在補瓦  北門進來第一排的馬宿正在換茅草：屋頂缺一塊露出桷木、
+              補了一小條顏色較新的茅草、正面搭著竹鷹架（含斜撐與踏板）、
+              地上堆著還沒鋪的草束。挑茅草頂而不是瓦頂 —— 換茅草看得出
+              「換到一半」，瓦頂缺一塊只會像破圖。
+
+破綻的位置是量出來的不是猜的：站在門外 13 公尺、66 度視角，畫面左右
+各只吃得下 8 公尺，所以塌牆放最靠門的那一段（k=0）；放到 k=1（37 公尺外）
+就永遠不在畫面裡。
+
+新增 src/world/imperfect.js 的第一層（看不見的那層）：
+  scuff()  抽一部分物件做細微擾動 —— 主街店家 rate 0.34、攤位 0.7
+  tint()   每個物件複製一份材質各自偏色（數量少、看得近的東西才用）
+
+rate 刻意不給到 1：全部都歪就變成均勻的雜訊，讀起來是「這個世界在抖」，
+不是「這裡有人住」。真實的地方是大部分東西整齊、少數幾樣明顯壞掉。
+
+實測 scuff（seed 21、rate 0.34、22 個物件）：動到 8 個、最大偏轉 1.44 度、
+最大傾斜 0.68 度、最大沉降 2.2 公分、最大縮放偏差 1.67%，同 seed 可重現，
+userData.noScuff 有效。碰撞盒不跟著轉 —— 8.5 公尺寬的房子轉 1.44 度角落
+只差 11 公分，走過去感覺不出來。
+
+整張圖的代價：網格 851 → 856（+5），三角形 526,884 → 529,364（+0.47%）。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+迷途竹林：入口的紅布條門 + 三處竹林才有的破綻（升級 7 第 3、4 點）
+…
+8bd39e6
+```
+視線設計（第 3 點）：三個口的正前方各立一組「門」。
+
+竹林的問題是它**到處長得一樣** —— 一整片等距的垂直線，眼睛沒有地方
+可以落。實測從獸道走進來的第一眼就是滿畫面的竹竿，最近的紅布條竹在
+三十幾公尺外，小成一個紅點。
+
+所以每個口立兩根往內傾 6 度的竹子，中間橫一根竹竿掛大布幔，底下再垂
+兩條窄的。往內傾是必要的 —— 兩根平行的竹子讀起來是柵欄，微微內傾才是
+「門」。布幔 2.6×0.75，比沿途路標用的 0.5×0.34 大得多：沿途那些是走近
+才讀得出的路標，這一組是隔著距離就要看得見的焦點，工作不一樣。
+
+用的還是林子裡本來就有的語彙（竹子＋紅布條），不是憑空多一座牌樓。
+擺在出生點前方 9 公尺，玩家會朝著它走進去。
+
+不對稱與不完美（第 4 點）：挑的都是**竹林才會有**的破法，換成別的林子
+就不成立 —— 那才叫這個地方的痕跡，不是通用的裝飾。
+
+  折斷的竹子  五處。從半腰折斷、斷面縱向撕開（竹子是縱裂的，不是切平的），
+              上半截倒下去卡在別的竹子上沒有落地 —— 竹子太細太密，
+              斷了也倒不下來，這是竹林最典型的樣子。
+  砍過的痕跡  一小片留著斜切殘樁的空地，切口斜、高度不一（人一刀一刀砍的，
+              不是機器裁的），旁邊擱著綁好還沒扛走的竹束與紅繩。
+  倒下的地藏  台座還在原位，身子橫躺在旁邊，紅前掛攤在地上。路口的地藏是
+              「往這邊」的指示 —— 倒了的那一尊是「這裡曾經有人指路，現在
+              沒人維護了」，比多放一尊立正的更有訊息。碰撞盒縮到只剩台座。
+
+第一層（細微擾動）這張圖不用另外加：landmarks() 的石燈籠本來就有隨機
+朝向、三成傾倒，地藏也帶隨機偏移 —— 再套一次 scuff 只是重複。
+
+代價：三角形 609,548 → 611,536（+0.33%），網格 555。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+人間之里地面貼圖查證：同點南北/東西向對比截圖
+…
+38f8e26
+```
+查證結論（程式碼無改動）：
+- groundTex 有傳 rx/ry（village.js:152 的 26, 26，自 acf872d 即存在），
+  且地面 repeat 由畫質開關顯式接管 —— 三平面世界座標 17.7m/塊、
+  低畫質 UV repeat 39.57（= 700/17.7，同密度），兩條路 runtime 實測皆正確。
+- heightAt 的 0.09/0.07 異頻是全專案慣例（獸道/竹林同樣異頻＋相位差），
+  同頻會疊出規則蛋盒格紋；振幅 8cm 對貼圖無可見影響。
+- 兩張截圖為同一點 (-150,-60) 往南與往東的現況對比：兩方向貼磚密度一致。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+人間之里/香霖堂：修使用者實測抓到的五個問題（路面、空曠、擋路、斷路、壓橋）
+…
+1541376
+```
+1+4. 石板路的密度與斷頭 ——
+   三種街道 + 東岸堤道全部共用一份 repeat (3,22) 的石板貼圖，而
+   decalOnGrid 的 UV 是 0..1 跨全幅：11×470 的主街石板被拉成 21 公尺長
+   （看起來像木板）、196×8 的橫街被壓成 0.36 公尺（看起來像條紋），
+   路口交界一眼就是兩種材質。
+   修法：decalOnGrid / ribbonOnGrid 加可選的 uvTile 參數（UV 改用
+   「公尺 ÷ uvTile」，不給則行為不變，其他地圖不受影響），貼圖 repeat
+   改 (1,1)，全部路面統一 4.6 公尺一塊（一塊石板 0.92×0.66）。
+   另外兩個讓路面「看起來像平板」的幫兇：貼圖 anisotropy 預設 1，
+   掠射角下 mip 把接縫全部平均掉 —— 開到 8；接縫 2px 太細 —— 加到 3px。
+   ※ 過程中抓到 village.js 的 groundDecal 包裝函式沒把 uvTile 轉傳，
+   第一輪截圖完全沒變才發現 —— 參數是從包裝一路傳到底才生效的。
+
+   橫街東端不再一律鋪到 x=98 斷在空地中間：有橋的三條（BRIDGE_Z）鋪到
+   橋頭跟橋接上，沒橋的收在最東的小巷（x=76）成 T 字路口 ——
+   路的盡頭都是「某個東西」。小地圖的橫街線同步改。
+
+2. 太空曠 ——
+   街廓（±105）到水田（原本從 128 起）之間有一圈 20 多公尺的純空草地；
+   水田本身又只是貼地色塊。三個修法：
+   - 水田從 112 起鋪、44 格加到 60 格，每格加 15 公分高的田埂框
+     （6 公尺一段逐段貼地、下半截埋進土 —— 斜坡上一整條直盒子會浮空）
+   - 每幾格田角落一座稻草堆
+   - 巷邊民家「留些空隙當菜園」原本只是 continue，菜園從來沒種下去 ——
+     補上真的菜園：翻土地 + 三壟菜 + 三邊竹垣（缺口朝巷）
+   西南門引道與河道照舊留空。
+
+3. 香霖堂入口被貨堆封死 ——
+   路旁雜物堆寫死 pz=12.5±2.4，而主徑在那一帶中心線 z≈8~11.5、半寬 2.5：
+   一半貨堆壓在路面上，加上每堆尾端半徑 2 公尺的擋人柱，東口進來整段
+   被封死。改成問 PATH_SEGMENTS 的實際中心線，貨堆中心放在
+   路緣 + 擋人柱 + 餘裕（5.7 公尺）之外，左右交錯。
+
+5. 建築壓在堤道上 ——
+   東岸堤道外緣 = 河緣 + 8.1 公尺，而倉庫 [4, off=7] 的中心在河緣 + 24、
+   堤道正中間；農家 [46, off=10]、[122, off=12] 的邊也伸進路面。
+   off 全部按「建物半寬 + 堤道外緣」重算（倉庫 ≥12.5、農家 ≥16）。
+
+代價：網格 856 → 945（+89，田埂/菜園/稻草堆）、三角形 +0.4%。
+console 零錯誤。截圖 shots2/fix-*.png：路口、平視路面、夜景路面、
+橋接、東岸、T 字路口、田圈、菜園、香霖堂入口。
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01FeNY5UdomG87uD9Wt6SkTi
+```
+加入 mattpocock 工程技能
+b43c4c3
+TToscurk
+merged commit b43c4c3
+into
+main
+Aug 2, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

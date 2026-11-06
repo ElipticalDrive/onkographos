@@ -22,10 +22,10 @@ No specific data structures are required beyond the scalar values returned by in
 4. Return $d_{smooth}$ as the distance to the nearest object in the blended scene [S1, unofficial].
 
 **Parameters:**
-- $k$: Blending factor. Controls the width of the transition zone. Larger $k$ approaches the hard minimum; smaller $k$ creates a smoother, wider blend. Typical value: $0.5$ [S1, unofficial].
+- $k$: Blending factor. Controls the width of the transition zone [G]. Larger $k$ approaches the hard minimum; smaller $k$ creates a smoother, wider blend [G]. Typical value: $0.5$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- If $k=0$, the formula involves division by zero. In practice, if $k$ is very small, the result approaches the arithmetic mean or requires a fallback to the standard minimum [G].
+- If $k=0$, the formula involves division by zero [G]. In practice, if $k$ is very small, the result approaches the arithmetic mean or requires a fallback to the standard minimum [G].
 - Precision issues may arise if $d_1$ and $d_2$ differ significantly in magnitude, causing one exponential term to dominate and underflow/overflow [G].
 
 **Pseudocode:**
@@ -60,13 +60,13 @@ def evaluate_scene_sdf(primitives, k):
 Computes the minimum signed distance from a point to any primitive in the scene, effectively performing a union operation. It differs from [Smooth SDF Composition](2685-smooth-sdf-composition.md) by aggregating multiple distinct primitives into a single scene-level distance field rather than composing a single smooth blend of shapes.
 
 ## Operating characteristics
-- Time Complexity: Not given in the sources.
-- Memory Complexity: Not given in the sources.
+- Time Complexity: Not given in the sources [G].
+- Memory Complexity: Not given in the sources [G].
 - Strengths: Enables organic, fluid merging of shapes without sharp edges [S1, unofficial].
 - Limitations: The smooth transition zone can obscure the true boundary of objects, potentially causing ray marching artifacts if the step size is not adjusted for the gradient changes in the blend region [G].
 
 ## Background
-Not given in the sources.
+Not given in the sources [G].
 
 ## Sources
 [S1] Sample - Ray Marching and Signed Distance Functions, https://github.com/ComputeNode/cyfra/pull/13, fetched 2026-10-27 (unofficial)

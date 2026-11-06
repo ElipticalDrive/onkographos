@@ -1,0 +1,221 @@
+--- v002.md
++++ v003.md
+@@ -13,14 +13,11 @@
+ **Data Structures:**
+ 1.  **Subblock:** A dense 3D grid of voxels. Default size is $8 \times 8 \times 8$ voxels, with parametric support for other sizes [S1, unofficial]. Voxel data is RGBA 8-bit; no transfer function is applied during preprocessing [S1, unofficial].
+-2.  **Block:** Contains indices of active Subblocks.
+-    -   **Index Storage:** Subblock addresses are stored as unsigned 8-bit integers inside blocks. This limits the maximum number of subblocks per block to $6^3 = 216$ (since $6^3 \le 256$) [S1, unofficial].
++2.  **Block:** Contains indices of active Subblocks [S1, unofficial].
++    -   **Index Storage:** Subblock addresses are stored as unsigned 8-bit integers inside blocks [S1, unofficial]. This limits the maximum number of subblocks per block to $6^3 = 216$ (since $6^3 \le 256$) [S1, unofficial].
+     -   **Adjacency:** Stores indices of neighboring blocks to enable block walking [S1, unofficial].
+     -   **Culling Mask:** A bitfield representing the quantized density range of the block [S1, unofficial].
+ 3.  **Acceleration Structure:** Built from Block AABBs. Blocks are passed as top-level primitives to the acceleration structure [S1, unofficial].
+ 
+-**Parameters:**
+--   **Quantization Divider ($q$):** Used to bin density ranges into culling mask bits. Calculated by dividing the maximum possible density value by the maximum number of bits the API allows for acceleration structure annotation. For Vulkan (8-bit mask) and 8-bit density data (max 256), the source divides 256 by 32 to represent the density range as a bitfield, yielding $q = 256 / 32 = 8$ [S1, unofficial].
+-
+-**Steps:**
++**Numbered Steps:**
+ 1.  **Build Blocks and Subblocks:** Group voxels into uniform-sized subblocks. Group subblocks into blocks. Store indices of active subblocks in each block [S1, unofficial].
+ 2.  **Compute Adjacency Information:** For each block, compute and store indices of neighboring blocks in the BVH node's corresponding field [S1, unofficial].
+@@ -35,8 +32,21 @@
+     1.  **First Hit:** Use hardware ray tracing query to find the first intersection of the ray against the blocks (closest hit AABB) [S1, unofficial].
+     2.  **Block Processing:** Process the hit block immediately. Use two-level DDA to traverse the voxel data within the subblocks of the block [S1, unofficial].
+-    3.  **Block Walking (Subsequent Hits):** After finishing a block, calculate the parametric $t$ after Half-Disk Distance Approximation (HDDA).
++    3.  **Block Walking (Subsequent Hits):** After finishing a block, calculate the parametric $t$ after Half-Disk Distance Approximation (HDDA) [S1, unofficial].
+         -   If $t$ is inside a neighboring block (checked via stored adjacency), start HDDA directly into the adjacent block without launching a new ray-tracing query [S1, unofficial].
+         -   If no adjacent block exists or $t$ is not in a neighbor, launch a ray query to find the next closest block [S1, unofficial].
+     4.  **Termination:** Repeat until exiting the volume, reaching alpha=1 (opaque), or first hit, depending on rendering mode [S1, unofficial].
++
++**Formulas:**
++-   **Quantization Divider ($q$):** $q = \frac{\text{max\_density}}{\text{max\_annotation\_bits}}$ [S1, unofficial].
++-   **Culling Mask Indices:** $idx_{min} = \lfloor \min(\text{density}) / q \rfloor$, $idx_{max} = \lfloor \max(\text{density}) / q \rfloor$ [S1, unofficial].
++-   **Subblock Address:** $\text{addr} = \text{base\_addr} + \text{index} \times (\text{SUBBLOCK\_SIZE}^3 \times \text{VoxelBytes})$ [S1, unofficial].
++
++**Parameters:**
++-   **Quantization Divider ($q$):** Used to bin density ranges into culling mask bits [S1, unofficial]. Calculated by dividing the maximum possible density value by the maximum number of bits the API allows for acceleration structure annotation [S1, unofficial]. For Vulkan (8-bit mask) and 8-bit density data (max 256), the source divides 256 by 32 to represent the density range as a bitfield, yielding $q = 256 / 32 = 8$ [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++-   **API Overhead:** Repeatedly accessing the spatial acceleration structure maintained by the driver via ray-tracing queries reduces efficiency, especially as data size scales [S1, unofficial].
++-   **Sparse Data Unpredictability:** Data shape is unpredictable, with dense and sparse regions, and user-controlled filtering further reduces predictability, making simple traversal inefficient without acceleration [S1, unofficial].
++-   **Index Limit:** Unsigned 8-bit index storage restricts blocks to a maximum of $6^3 = 216$ subblocks [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -44,14 +54,14 @@
+ # Constants
+ SUBBLOCK_SIZE = 8
+-MAX_SUBBLOCKS_PER_BLOCK = 216  # 6^3
+-Q = 8                          # Quantization divider for 8-bit density and 32-bit mask range
+-VoxelBytes = 4                 # RGBA 8-bit
++MAX_SUBBLOCKS = 216  # 6^3
++Q = 8                # Quantization divider for 8-bit density and 32-bit mask range
++VoxelBytes = 4       # RGBA 8-bit
+ 
+ class Subblock:
+-    voxels: list  # Flat list of RGBA tuples, length 8*8*8
++    voxels: list  # Flat RGBA 8-bit, size 8*8*8*4
+ 
+ class Block:
+-    subblock_indices: list  # uint8, active subblock indices
+-    adjacency: list         # list of Block references
++    subblock_indices: list  # uint8
++    adjacency: list         # list of Block
+     culling_mask: int       # bitfield
+     aabb_min: tuple         # (x, y, z)
+@@ -63,5 +73,5 @@
+     max_t: float
+ 
+-def get_subblock(base_addr, index):
++def get_subblock_addr(base_addr, index):
+     return base_addr + index * (SUBBLOCK_SIZE ** 3 * VoxelBytes)
+ 
+@@ -77,40 +87,40 @@
+     t_min, t_max = 0.0, ray.max_t
+     for i in range(3):
+-        inv_d = 1.0 / ray.direction[i]
++        inv_d = 1.0 / ray.direction[i] if ray.direction[i] != 0 else 1e8
+         t1 = (aabb_min[i] - ray.origin[i]) * inv_d
+         t2 = (aabb_max[i] - ray.origin[i]) * inv_d
+         t_min = max(t_min, min(t1, t2))
+         t_max = min(t_max, max(t1, t2))
+-    return t_min if t_min < t_max else -1.0
++    return t_min, t_max if t_min < t_max else (-1.0, -1.0)
+ 
+ def traverse_block(block, ray, t_start, t_end, base_addr):
+-    accumulated_color = [0.0, 0.0, 0.0]
+-    accumulated_alpha = 0.0
++    color = [0.0, 0.0, 0.0]
++    alpha = 0.0
++    inv_dir = [1.0 / ray.direction[i] if ray.direction[i] != 0 else 1e8 for i in range(3)]
++    step = [1 if ray.direction[i] > 0 else -1 for i in range(3)]
++    t_delta = [abs(inv_dir[i]) for i in range(3)]
++
+     for idx in block.subblock_indices:
+-        if idx == 0: break  # Null index terminator
+-        subblock_addr = get_subblock(base_addr, idx)
+-        # Standard 3D DDA through subblock voxels
+-        inv_dir = [1.0 / d if d != 0 else 1e8 for d in ray.direction]
++        if idx == 0: break
++        subblock_addr = get_subblock_addr(base_addr, idx)
++        # Standard 3D DDA initialization [G]
+         start_voxel = [int((ray.origin[i] - block.aabb_min[i]) * inv_dir[i]) for i in range(3)]
+-        step = [1 if ray.direction[i] > 0 else -1 for i in range(3)]
+-        t_delta = [abs(inv_dir[i]) for i in range(3)]
+         t_max_voxel = [t_delta[i] * (step[i] * (SUBBLOCK_SIZE - 1 - max(0, start_voxel[i])) if step[i] > 0 else t_delta[i] * max(0, -start_voxel[i])) for i in range(3)]
+-        
++
+         t = t_start
+         while t <= t_end:
+-            # Check if current voxel is within subblock bounds
+             if all(0 <= start_voxel[i] < SUBBLOCK_SIZE for i in range(3)):
+-                voxel_idx = start_voxel[0] * 64 + start_voxel[1] * 8 + start_voxel[2]
+-                r, g, b, density = subblock_addr[voxel_idx]
++                voxel_idx = (start_voxel[0] * SUBBLOCK_SIZE + start_voxel[1]) * SUBBLOCK_SIZE + start_voxel[2]
++                offset = voxel_idx * VoxelBytes
++                r, g, b, density = subblock_addr[offset], subblock_addr[offset+1], subblock_addr[offset+2], subblock_addr[offset+3]
+                 density /= 255.0
+                 if density > 0:
+-                    weight = (1.0 - accumulated_alpha) * density
+-                    accumulated_color[0] += weight * r / 255.0
+-                    accumulated_color[1] += weight * g / 255.0
+-                    accumulated_color[2] += weight * b / 255.0
+-                    accumulated_alpha += weight
+-                    if accumulated_alpha >= 1.0:
+-                        return accumulated_color, True
+-            # Advance DDA
++                    weight = (1.0 - alpha) * density
++                    color[0] += weight * r / 255.0
++                    color[1] += weight * g / 255.0
++                    color[2] += weight * b / 255.0
++                    alpha += weight
++                    if alpha >= 1.0:
++                        return color, alpha
+             t_next = t
+             for i in range(3):
+@@ -119,50 +129,57 @@
+                     start_voxel[i] += step[i]
+             t = t_next
+-    return accumulated_color, accumulated_alpha >= 1.0
++    return color, alpha
+ 
+-def render_ray(ray, config, accel, base_addr):
+-    accumulated_color = [0.0, 0.0, 0.0]
+-    accumulated_alpha = 0.0
++def hardware_ray_query(ray, blocks, cull_mask, t_min=0.0):
++    # Simulates hardware ray query: finds closest block AABB hit respecting cull mask [G]
++    best_t, best_block = ray.max_t, None
++    for block in blocks:
++        if (block.culling_mask & cull_mask) == 0: continue
++        t_enter, t_exit = intersect_aabb(ray, block.aabb_min, block.aabb_max)
++        if t_enter >= t_min and t_enter < best_t:
++            best_t = t_enter
++            best_block = block
++    return best_block, best_t
++
++def render_ray(ray, config, blocks, base_addr):
++    color = [0.0, 0.0, 0.0]
++    alpha = 0.0
+     t_current = 0.0
+-    
+-    # 1. First Hit Query
+-    hit = accel.ray_query(ray, cull_mask=config.culling_mask)
+-    if not hit.hit:
++
++    block, t_hit = hardware_ray_query(ray, blocks, config.culling_mask)
++    if block is None:
+         return config.background_color
+ 
+-    current_block = hit.block
+-    t_current = hit.t_hit
+-
+     while t_current < ray.max_t:
+-        # 2. Process Current Block
+-        color, terminated = traverse_block(current_block, ray, t_current, ray.max_t, base_addr)
+-        accumulated_color = [accumulated_color[i] + (1.0 - accumulated_alpha) * color[i] for i in range(3)]
+-        accumulated_alpha += (1.0 - accumulated_alpha) * 0.0  # Placeholder for block-level alpha contribution
+-        if terminated or accumulated_alpha >= 1.0:
++        block_color, block_alpha = traverse_block(block, ray, t_current, ray.max_t, base_addr)
++        weight = (1.0 - alpha) * block_alpha
++        color[0] += weight * block_color[0]
++        color[1] += weight * block_color[1]
++        color[2] += weight * block_color[2]
++        alpha += weight
++        if alpha >= 1.0:
+             break
+ 
+-        # 3. Block Walking
+-        # Compute exit t from current block's AABB along ray
+-        t_exit = intersect_aabb(ray, current_block.aabb_min, current_block.aabb_max)
++        t_enter, t_exit = intersect_aabb(ray, block.aabb_min, block.aabb_max)
+         if t_exit < 0 or t_exit > ray.max_t:
+             break
+-            
++
+         next_block = None
+-        for neighbor in current_block.adjacency:
+-            if intersect_aabb(ray, neighbor.aabb_min, neighbor.aabb_max) >= t_exit:
++        for neighbor in block.adjacency:
++            n_enter, n_exit = intersect_aabb(ray, neighbor.aabb_min, neighbor.aabb_max)
++            if n_enter >= t_exit:
+                 next_block = neighbor
+                 break
+-        
++
+         if next_block:
+-            current_block = next_block
++            block = next_block
+             t_current = t_exit
+         else:
+-            hit = accel.ray_query(ray, cull_mask=config.culling_mask, t_min=t_exit)
+-            if not hit.hit:
++            block, t_hit = hardware_ray_query(ray, blocks, config.culling_mask, t_min=t_exit)
++            if block is None:
+                 break
+-            current_block = hit.block
+-            t_current = hit.t_hit
++            t_current = t_hit
+ 
+-    return accumulated_color
++    return color
+ ```
+ 

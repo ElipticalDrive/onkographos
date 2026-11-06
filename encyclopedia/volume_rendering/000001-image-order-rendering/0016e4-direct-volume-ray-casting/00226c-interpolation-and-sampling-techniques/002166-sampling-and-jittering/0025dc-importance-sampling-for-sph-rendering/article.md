@@ -3,7 +3,7 @@
 Also called: Non-uniform particle sampling, Stochastic Sampling for SPH Rendering, Stochastic sampling
 
 ## Overview
-Importance Sampling for SPH Rendering is a technique to increase rendering performance by reducing the number of particles used during rendering, using a non-uniform sampling strategy based on data importance and view-dependent criteria [S1]. It solves the problem of high computational cost when rendering large, unstructured Smoothed Particle Hydrodynamics (SPH) datasets by ensuring that particles in complex regions (e.g., phase interfaces, vortices) are sampled more densely than those in homogeneous areas [S1]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by avoiding equal-time high-error trade-offs, and from [Stochastic Jittering](924-stochastic-jittering.md) by using precomputed data-driven probabilities rather than simple spatial jittering to guide particle selection [S1].
+Importance Sampling for SPH Rendering is a technique to increase rendering performance by reducing the number of particles used during rendering, using a non-uniform sampling strategy based on data importance and view-dependent criteria [S1]. It solves the problem of high computational cost when rendering large, unstructured Smoothed Particle Hydrodynamics (SPH) datasets by ensuring that particles in complex regions (e.g., phase interfaces, vortices) are sampled more densely than those in homogeneous areas [S1]. It differs from [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by avoiding equal-time high-error trade-offs [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -17,12 +17,12 @@ Importance Sampling for SPH Rendering is a technique to increase rendering perfo
 
 **Parameters:**
 *   $p_{min}$: Minimal sampling probability. Controls render time significantly. Recommended value is 0.01 to avoid high sampling error at phase interfaces [S1].
-*   $p_{max}$: Maximal sampling probability. Controls rendering error with least effect on render times. Should be assigned to high values to increase the range of sampling probabilities [S1].
+*   $p_{max}$: Maximal sampling probability. Controls rendering error with least effect on render times [S1]. Should be assigned to high values to increase the range of sampling probabilities [S1].
 
 **Steps:**
-1.  **Precompute Data Importance ($p_i$):** Calculate a static importance value for each particle. This value is low for homogeneous areas and high for complex regions like phase interfaces and vortices [S1]. This step is fast (<30ms) compared to volume resampling preprocessing [S1].
-2.  **Determine Sampling Probability ($p$):** For each ray marching step, combine the precomputed data importance $p_i$ with the view-dependent criterion $p_t$ to determine the per-pixel particle access probability $p$. The specific combination formula is not provided, but it results in varying probabilities [S1].
-3.  **Stochastic Particle Selection:** Based on the calculated probability $p$, randomly decide whether to access and render the current particle. If accessed, use the particle's attributes for shading [S1].
+1.  **Precompute Data Importance ($p_i$):** Calculate a static importance value for each particle [S1]. This value is low for homogeneous areas and high for complex regions like phase interfaces and vortices [S1]. This step is fast (<30ms) compared to volume resampling preprocessing [S1].
+2.  **Determine Sampling Probability ($p$):** For each ray marching step, combine the precomputed data importance $p_i$ with the view-dependent criterion $p_t$ to determine the per-pixel particle access probability $p$ [S1]. The specific combination formula is not provided, but it results in varying probabilities [S1].
+3.  **Stochastic Particle Selection:** Based on the calculated probability $p$, randomly decide whether to access and render the current particle [S1]. If accessed, use the particle's attributes for shading [S1].
 4.  **Handle Phase Interfaces and Shading:**
     *   If a phase transition leading to surface shading is detected during ray marching, use a constant sampling probability of one ($p=1$) for the iterative search for the surface position $x_s$ and the resampling of SPH attributes at $x_s$ for shading [S1].
     *   For single scattering occlusion rays cast from a sampling point in a volumetric area, reduce the particle sampling probability by a factor of 10% (i.e., $p_{new} = 0.9 \times p_{old}$) [S1].
@@ -33,92 +33,75 @@ Importance Sampling for SPH Rendering is a technique to increase rendering perfo
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import random
+
 def render_sph_importance_sampling(particles, camera, p_min, p_max):
-    # Precompute static data importance p_i for each particle
-    # This is done once per frame or when data changes
-    p_i = compute_data_importance(particles)
-    
-    image = create_empty_image()
-    
-    for each pixel (u, v):
-        ray = camera.generate_ray(u, v)
-        color = vec3(0.0)
-        transmittance = 1.0
-        
-        while transmittance > 0.001 and ray.t < max_distance:
-            # Find relevant particles near the current ray position
-            relevant_particles = find_particles_near_ray(ray, particles)
-            
-            if not relevant_particles:
-                break
-                
-            # Select a particle based on importance and view-dependent criteria
-            # p_t is derived from view-dependent factors (e.g., current opacity)
-            # The exact combination of p_i and p_t is not specified, 
-            # but it must be bounded by p_min and p_max
-            selected_particle = None
-            for particle in relevant_particles:
-                # Calculate view-dependent criterion p_t
-                # Example: p_t could be related to the accumulated opacity so far
-                p_t = calculate_view_dependent_criterion(ray, transmittance)
-                
-                # Combine p_i and p_t to get sampling probability p
-                # Formula not given, but must respect bounds
-                p = combine_probabilities(p_i[particle.id], p_t)
-                p = clamp(p, p_min, p_max)
-                
-                # Stochastic selection
-                if random() < p:
-                    selected_particle = particle
+    # Precompute static data importance p_i for each particle [S1]
+    # Not given in the sources. Typically involves analyzing local attribute variance and phase interfaces.
+    p_i = [0.0] * len(particles)
+
+    image = [[0.0, 0.0, 0.0] for _ in range(camera.height)]
+
+    for u in range(camera.width):
+        for v in range(camera.height):
+            ray = camera.generate_ray(u, v)
+            color = [0.0, 0.0, 0.0]
+            transmittance = 1.0
+
+            while transmittance > 0.001 and ray.t < camera.max_distance:
+                # Find relevant particles near the current ray position
+                # Not given in the sources. Typically uses spatial hashing or kd-tree.
+                relevant_particles = find_particles_near_ray(ray, particles)
+
+                if not relevant_particles:
+                    ray.t += ray.step_size
+                    continue
+
+                selected_particle = None
+                for particle in relevant_particles:
+                    # Calculate view-dependent criterion p_t
+                    # Not given in the sources. Typically relates to accumulated opacity or depth.
+                    p_t = 1.0 - transmittance
+
+                    # Combine p_i and p_t to get sampling probability p
+                    # Formula not provided in the sources [S1]
+                    p = p_i[particle.id] * p_t
+                    p = max(p_min, min(p_max, p))
+
+                    # Stochastic selection
+                    if random.random() < p:
+                        selected_particle = particle
+                        break
+
+                if selected_particle is None:
+                    ray.t += ray.step_size
+                    continue
+
+                # Check for phase transition
+                if is_phase_transition(selected_particle, ray):
+                    # Use constant probability 1 for surface shading search [S1]
+                    surface_pos = find_surface_position(selected_particle, ray)
+                    attributes = resample_sph_attributes(surface_pos, particles)
+                    color = shade_surface(attributes, ray)
+                    transmittance = 0.0
                     break
-            
-            if selected_particle is None:
-                # No particle sampled, advance ray
-                ray.t += step_size
-                continue
-            
-            # Check for phase transition
-            if is_phase_transition(selected_particle, ray):
-                # Use constant probability 1 for surface shading search
-                surface_pos = find_surface_position(selected_particle, ray)
-                # Resample attributes at surface position
-                attributes = resample_sph_attributes(surface_pos, particles)
-                # Shade surface
-                color += shade_surface(attributes, ray)
-                transmittance = 0.0 # Surface is opaque
-                break
-            else:
-                # Volumetric shading
-                attributes = get_particle_attributes(selected_particle)
-                # Calculate single scattering
-                # If this is a secondary ray for occlusion, reduce probability
-                if is_secondary_occlusion_ray(ray):
-                    # Reduce probability for subsequent steps if cast from volumetric area
-                    # This affects the next iteration's selection
-                    pass 
-                
-                # Shade volume
-                volume_color = shade_volume(attributes, ray)
-                color += volume_color * transmittance
-                transmittance *= 1.0 - selected_particle.opacity # Simplified
-                
-            # Advance ray
-            ray.t += step_size
-            
-        image[u, v] = color
-        
+                else:
+                    attributes = get_particle_attributes(selected_particle)
+
+                    # Reduce probability for secondary occlusion rays from volumetric areas [S1]
+                    if is_secondary_occlusion_ray(ray):
+                        # Probability reduction factor of 10% applied to subsequent steps
+                        pass
+
+                    volume_color = shade_volume(attributes, ray)
+                    color = [c + v * transmittance for c, v in zip(color, volume_color)]
+                    transmittance *= (1.0 - selected_particle.opacity)
+
+                ray.t += ray.step_size
+
+            image[v][u] = color
+
     return image
-
-def combine_probabilities(p_i, p_t):
-    # Specific formula not provided in sources
-    # Must return a value between 0 and 1
-    # Heuristic: weighted average or product
-    return p_i * p_t
-
-def calculate_view_dependent_criterion(ray, transmittance):
-    # Example implementation: higher probability if transmittance is low (dark regions)
-    # or if ray is near camera
-    return 1.0 - transmittance
 ```
 
 **Edge Cases and Pitfalls:**
@@ -129,16 +112,16 @@ def calculate_view_dependent_criterion(ray, transmittance):
 ## Subtopics
 
 ### [SPH Attribute Entropy for Importance Sampling](3626-sph-attribute-entropy-for-importance-sampling.md)
-SPH Attribute Entropy for Importance Sampling is a precomputation technique that assigns sampling probabilities to SPH particles based on the local information complexity of their attributes and the presence of phase interfaces. It solves the problem of high-frequency shading errors and subsampling artifacts at phase boundaries by ensuring that regions with high attribute variation or discontinuous phase transitions are sampled more densely. It differs from naive random discarding by using a structured, data-driven importance grid that accounts for the spatial support of the SPH kernel, and it differs from its sibling [Stochastic Volume Rendering of Multi-Phase SPH Data](3638-stochastic-volume-rendering-of-multi-phase-sph-data.md) by explicitly computing entropy to quantify attribute variation rather than relying solely on stochastic selection heuristics.
+SPH Attribute Entropy for Importance Sampling is a precomputation technique that assigns sampling probabilities to SPH particles based on the local information complexity of their attributes and the presence of phase interfaces. It solves the problem of high-frequency shading errors and subsampling artifacts at phase boundaries by ensuring that regions with high attribute variation or discontinuous phase transitions are sampled more densely. It differs from naive random discarding by using a structured, data-driven importance grid that accounts for the spatial support of the SPH kernel, and it differs from its sibling [Stochastic Volume Rendering of Multi-Phase SPH Data](3638-stochastic-volume-rendering-of-multi-phase-sph-data.md) by explicitly computing entropy to quantify attribute variation rather than relying solely on stochastic selection heuristics [G].
 
 ### [Stochastic Volume Rendering of Multi-Phase SPH Data](3638-stochastic-volume-rendering-of-multi-phase-sph-data.md)
-A direct volume rendering technique for large, unstructured smoothed-particle hydrodynamics (SPH) data that avoids intermediate grid representations by stochastically sampling a subset of particles during ray marching. It differs from standard DVR by using view-dependent and spatial-complexity-based probabilities to select particles, enabling continuous scaling from interactive previews to high-quality renders. It specifically addresses multi-phase flows by reconstructing interfaces between different fluid types (e.g., gas and liquid) using a combined volumetric and surface shading model.
+A direct volume rendering technique for large, unstructured smoothed-particle hydrodynamics (SPH) data that avoids intermediate grid representations by stochastically sampling a subset of particles during ray marching. It differs from standard DVR by using view-dependent and spatial-complexity-based probabilities to select particles, enabling continuous scaling from interactive previews to high-quality renders. It specifically addresses multi-phase flows by reconstructing interfaces between different fluid types using a combined volumetric and surface shading model.
 
 ### [Particle-Wise Higher-Order SPH Field Approximation for DVR](4956-particle-wise-higher-order-sph-field-approximation-for-dvr.md)
-This method approximates Smoothed Particle Hydrodynamics (SPH) scalar fields along viewing rays using piecewise polynomial functions of higher order, rather than constant or linear approximations. It solves the problem of efficiently rendering SPH data, which consists of individual particle contributions with varying spatial resolution, by approximating each particle's contribution individually and summing the results. It sets itself apart from [Importance Sampling for SPH Rendering](3624-importance-sampling-for-sph-rendering.md) by focusing on the geometric accuracy of the field representation along rays via higher-order polynomials, and from [SPH Attribute Entropy for Importance Sampling](3626-sph-attribute-entropy-for-importance-sampling.md) by using a deterministic polynomial approximation strategy rather than entropy-based sampling.
+This method approximates Smoothed Particle Hydrodynamics (SPH) scalar fields along viewing rays using piecewise polynomial functions of higher order, addressing the challenge of rendering SPH data which has highly varying spatial resolution. It sets itself apart from linear or constant approximations by minimizing the $L^2$ distance between the approximation and the exact particle kernel contribution for each particle individually, allowing the representation resolution to adapt to the data resolution. Unlike sibling methods that focus on sampling strategies or entropy-based selection, this technique focuses on the mathematical fidelity of the field representation along the ray.
 
 ### Adaptive Sampling for Surface Shading and Single Scattering
-This variant adapts sampling probabilities based on the type of shading being performed. If a phase transition leading to surface shading is detected during ray marching, it uses a constant sampling probability of one for the iterative search for the surface position $x_s$ and the resampling of SPH attributes at $x_s$ for shading [S1]. For single scattering occlusion, it reduces particle sampling probability by a factor of 10% if an occlusion ray is cast from a sampling point in a volumetric area [S1]. However, it does not reduce the probability if an occlusion ray stems from a ray segment containing surface shading, because surfaces have higher opacity and use irradiance influenced by occlusion for shading [S1]. Single scattering occlusion is low frequency and impervious to subsampling compared to surface shading, allowing reduced sampling probability for secondary rays which perform the majority of SPH approximations [S1].
+This variant adapts sampling probabilities based on the type of shading being performed [S1]. If a phase transition leading to surface shading is detected during ray marching, it uses a constant sampling probability of one for the iterative search for the surface position $x_s$ and the resampling of SPH attributes at $x_s$ for shading [S1]. For single scattering occlusion, it reduces particle sampling probability by a factor of 10% if an occlusion ray is cast from a sampling point in a volumetric area [S1]. However, it does not reduce the probability if an occlusion ray stems from a ray segment containing surface shading, because surfaces have higher opacity and use irradiance influenced by occlusion for shading [S1]. Single scattering occlusion is low frequency and impervious to subsampling compared to surface shading, allowing reduced sampling probability for secondary rays which perform the majority of SPH approximations [S1].
 
 ## Operating characteristics
 *   **Time Complexity:** Rendering time is linearly dependent on the number of particle accesses [S1]. By reducing particle accesses through non-uniform sampling, performance is significantly improved [S1].
@@ -154,7 +137,7 @@ This variant adapts sampling probabilities based on the type of shading being pe
 *   **When Not to Use:** When temporal consistency is critical and preprocessing for temporal coherence is not implemented; when the dataset is very small and preprocessing overhead dominates [S1].
 
 ## Background
-Originating from the paper "Stochastic Volume Rendering of Multi-Phase SPH Data" [S1], this method was developed to address the challenges of rendering large, unstructured SPH data without the need for expensive intermediate grid representations. It builds on the principles of direct volume ray casting and importance sampling, adapting them to the specific characteristics of SPH data, such as varying particle densities and multi-phase interfaces [S1]. The method has been applied to various SPH datasets, including spray nozzles, bubble flows, and turbine simulations, demonstrating significant performance improvements over uniform sampling and volume resampling [S1].
+Originating from the paper "Stochastic Volume Rendering of Multi-Phase SPH Data" [S1], this method was developed to address the challenges of rendering large, unstructured SPH data without the need for expensive intermediate grid representations [S1]. It builds on the principles of direct volume ray casting and importance sampling, adapting them to the specific characteristics of SPH data, such as varying particle densities and multi-phase interfaces [S1]. The method has been applied to various SPH datasets, including spray nozzles, bubble flows, and turbine simulations, demonstrating significant performance improvements over uniform sampling and volume resampling [S1].
 
 ## Sources
 [S1] Stochastic Volume Rendering of Multi‐Phase SPH Data, https://doi.org/10.1111/cgf.14121, fetched 2026-10-27

@@ -1,0 +1,209 @@
+GPU-optimized version of the MuJoCo physics simulator, designed for NVIDIA hardware. - Store body, inertia, geom and site orientations as quaternions by adenzler-nvidia · Pull Request #1868 · google-deepmind/mujoco_warp
+
+Store body, inertia, geom and site orientations as quaternions by adenzler-nvidia · Pull Request #1868 · google-deepmind/mujoco_warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+adenzler-nvidia
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+Follow-up to #902, which was closed because it was out of date and the MuJoCo C refactor didn't happen. One open question there was how the change would interact with memory alignment work in Warp. I reran the idea on current main with a narrower approach and measured each field separately; the gains are larger and cleaner than in #902, so I'd like to restart the discussion here.
+Data stores xiquat, geom_xquat and site_xquat (MuJoCo's (w, x, y, z) convention) instead of ximat, geom_xmat and site_xmat, and drops xmat, which was only ever quat_to_mat(xquat). The producers in kinematics no longer expand the quaternions, and consumers call quat_to_mat where they read the field, so their matrix math is unchanged. For xmat the results are bitwise identical; for the other fields matrix entries can differ in the last bit because the quaternion is rounded before the conversion. put_data and make_data convert from mjData and get_data_into converts back, so code that only goes through mjData is unaffected. One consumer needed care: the nxn broadphase filter would convert both quaternions for every pair, so it now converts only after the bounding sphere test, which makes it slightly faster than on main. There is one commit per field, so any subset is easy to split out.
+Steps per second, RTX 5090 (exclusive node), Warp nightly 1.20.0.dev20261028, MuJoCo 3.17.1.dev1007121963, benchmark definitions from benchmarks/, 5 alternating rounds, each configuration compared with the previous one in the same round (median). The base varies by 0.5 to 0.7% between rounds.
+benchmark
+xmat
+ximat
+geom_xmat
+site_xmat
+all
+humanoid
++1.2%
++1.2%
++0.8%
+0.0%
++3.4%
+franka_emika_panda
++3.1%
++2.5%
++4.7%
+0.0%
++10.7%
+aloha_pot
++0.6%
++0.3%
++2.8%
++0.4%
++4.1%
+myoarm
++0.5%
++0.3%
++1.2%
++4.1%
++6.1%
+unitree_g1_flat
++1.0%
++0.8%
++1.4%
++0.1%
++3.4%
+unitree_g1_hfield
++0.5%
++0.4%
++0.9%
+0.0%
++2.4%
+three_humanoids
++0.7%
++0.7%
++0.6%
+0.0%
++2.1%
+aloha_clutter
++0.1%
++0.1%
++1.7%
+-0.2%
++1.9%
+The gain comes from the producer kernels: _compute_body_matrices disappears and _compute_body_inertial_frames, _geom_local_to_global and _site_local_to_global get 60 to 75% cheaper, which matches the steps/s numbers. Consumers converting locally cost nothing measurable. The hot ones (_cinert, _cdof, GJK/EPA, tendon wrapping) need the full matrix anyway, and where only one column is read the compiler drops the rest of the conversion. Rendering doesn't regress (render megakernel on an RTX PRO 6000: -0.5% on franka, -2% on aloha_pot, within noise). Yuval's intuition about sites holds for most models: site_xmat only matters for site-heavy models like myoarm (+4.1%) and is neutral elsewhere.
+On the alignment question from #902: these gains are on the current Warp nightly without any pending Warp changes. I also tried the wide vector stores proposed in NVIDIA/warp#2132, and they make no further difference for the quaternion producers, so the result doesn't depend on them.
+The cost is API. Removing the four Data fields breaks direct users of mjw.Data: MJX's warp backend passes geom_xmat and friends by name into mujoco_warp (generated code in mjx/mujoco/mjx/warp), Newton writes geom_xmat and site_xmat for static geoms and sites, and mjlab reads geom_xmat/site_xmat but converts them to quaternions right away. The Apollo notebook in contrib now builds xmat from xquat. Options I see:
+Replace all four fields at once and update MJX and Newton alongside.
+Phase it in: add the quaternion fields, move MJX and Newton over, then remove the matrices.
+Go field by field. Dropping xmat alone is +0.5% to +3.1% and adds no field since xquat already exists; site_xmat could stay if the site-heavy case isn't worth the churn.
+Two tests fail on this branch for reasons that are already present on main. test_mesh_mesh_common_translation fails because GJK/EPA on main loses a deep contact for about 5% of tiny orientation perturbations (one ulp up to 1e-3 rad), and the quaternion path happens to hit one of them; I'll file that separately with a reproducer. test_tree_discrete_cg compares deterministic and atomic runs of a chaotic CG scene against a 1e-3 tolerance; on main, perturbing the density by 1e-5 to 1e-3 already spreads that difference from 3e-5 to 2.2e-3, and two of eight such perturbations fail there too. The plane-mesh selection test now accepts the hull starting at another vertex tied for deepest, since rounding picks the other one of two equally deep corners.
+Which route would you prefer?
+adenzler-nvidia
+added 9 commits
+October 28, 2026 14:23
+Drop Data.xmat in favor of xquat
+…
+e592142
+```
+xmat was only ever quat_to_mat(xquat), written by its own kernel and
+read back as 36 bytes per body by every consumer. Consumers now
+convert the 16-byte xquat where they need a matrix, which computes the
+same values the producer stored. get_data_into still fills mjData.xmat.
+```
+Replace Data.ximat by xiquat
+…
+dca221f
+```
+Store the body inertia orientation as a 16-byte quaternion instead of
+a 36-byte matrix. The producer no longer expands it, and consumers
+convert where they need a matrix. Because the quaternion is now
+rounded before the conversion, matrix entries can differ from before
+in the last bit. put_data and make_data convert mjData.ximat, and
+get_data_into converts back.
+```
+Let xiquat take ximat's place in the field order test
+…
+ba4f046
+```
+xiquat replaces mjData.ximat, so it keeps that slot among the fields
+shared with MuJoCo rather than moving to the warp-only fields, which
+would also reorder every kernel signature that reads it.
+```
+Replace Data.geom_xmat by geom_xquat
+…
+8913baf
+```
+Store geom orientations as 16-byte quaternions instead of 36-byte
+matrices. The producer no longer expands them, and the collision, ray,
+render, sensor and tendon code converts where it needs a matrix. Static
+geoms get their quaternion from mjData.geom_xmat in make_data and
+put_data, and get_data_into converts back.
+```
+Replace Data.site_xmat by site_xquat
+…
+3abc4f0
+```
+Store site orientations as 16-byte quaternions instead of 36-byte
+matrices. The producer no longer expands them, and sensors and
+transmissions convert where they need a matrix. put_data converts
+mjData.site_xmat, and get_data_into converts back.
+```
+Expand geom quaternions after the broadphase sphere filter
+…
+57b9817
+```
+The pair filter converted both geom quaternions to matrices before the
+sphere test, which rejects most pairs, making the nxn broadphase pay
+two conversions per pair. Convert only on the paths that use the
+matrices, so rejected pairs read no orientation at all.
+```
+Merge remote-tracking branch 'upstream/main' into adenzler/quat-frames
+51c43a3
+Accept a rotated hull start among depth-tied plane-mesh contacts
+…
+d93f147
+```
+The tilted plate has two bottom corners at the same depth. hull4f starts at the deepest vertex, so which of the two Warp picks depends on float32 rounding of the geom orientation, and the quaternion path picks the other one than MuJoCo. The four contacts and their cyclic order are unchanged, so compare after rotating Warp's contacts to MuJoCo's start, and still require that Warp's start vertex is as deep as MuJoCo's.
+```
+Build xmat from xquat in the Apollo locomotion notebook
+…
+90ba0c0
+```
+Data no longer stores xmat. The notebook's JAX step still returns body rotation matrices for its observations and torso z-axis, so it now computes them from xquat with a small kernel instead of copying d.xmat.
+```
+thowell
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Collaborator
+@adenzler-nvidia
+this is a great optimization! the question is how this refactor could work with mujoco where the c implementation is expected to have better performance (i think) using rotation matrices. ideally the implementations match without sacrificing performance.
+@yuvaltassa what do we think?
+thowell
+requested a review
+from yuvaltassa
+October 30, 2026 16:26
+yuvaltassa
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Collaborator
+Let me try it in C, will circle back
+yuvaltassa
+commented
+Oct 31, 2026
+Copy link
+Copy Markdown
+Collaborator
+As expected, it doesn't do much for C. It's a tiny improvement there but an improvement nonetheless. Will try to get this change in.
+Merge remote-tracking branch 'upstream/main' into adenzler/quat-frames
+5376754
+adenzler-nvidia
+mentioned this pull request
+Nov 2, 2026
+Do not treat the GJK initial guess as a stall
+#1878
+Merged
+yuvaltassa
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+@adenzler-nvidia the quats are now at head in MuJoCo C. As expected it didn't do much.
+I did not make the corresponding change in MJWarp since, IIUC correctly, you are getting the speedup not just by adding the quats but by actually deleting the xmats, which I don't intend to do. Feel free to update this PR but I think we're now waiting on @thowell to return from vacation and chart the path forward.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

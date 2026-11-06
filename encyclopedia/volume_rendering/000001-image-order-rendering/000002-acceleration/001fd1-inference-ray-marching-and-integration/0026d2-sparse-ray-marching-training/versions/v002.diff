@@ -1,0 +1,291 @@
+--- v001.md
++++ v002.md
+@@ -1,9 +1,7 @@
+ # Sparse Ray Marching (Training)
+-
+-
+ ## Overview
+-Sparse Ray Marching (Training) is a GPU-accelerated kernel designed to sample points along rays for the training phase of neural volume rendering, specifically within the Instant Neural Graphics Primitives (NGP) framework. It solves the problem of efficiently traversing a sparse, hashed density grid to identify occupied regions while minimizing global memory traffic. It distinguishes itself from inference marchers by supporting adaptive step sizes and perturbation for gradient-based optimization, and from static allocators by dynamically managing sample buffers based on occupancy thresholds [S1, unofficial].
+-
++Sparse Ray Marching (Training) is a GPU-accelerated kernel designed to sample points along rays for the training phase of neural volume rendering (e.g., Instant Neural Graphics Primitives). It solves the problem of efficiently traversing a sparse hashed density grid to identify occupied regions while adapting step sizes to maintain sampling quality. It differs from inference marchers by prioritizing training stability and memory efficiency through adaptive step sizing and perturbation, and from static allocation methods by dynamically managing sample buffers based on occupancy.
+ ## How it works
++### Inputs and Outputs
+ **Inputs:**
+ - `rays_alive`: Array of active ray indices.
+@@ -11,128 +9,152 @@
+ - `ox, oy, oz`: Ray origins.
+ - `dx, dy, dz`: Ray directions.
+-- `grid`: Hashed density grid (resolution $H \times H \times H$).
+-- `density_thresh`: Threshold for occupancy.
+-- `bound`: Spatial extent of the grid.
+-- `perturb`: Boolean flag for jittering.
+-- `dt_min, dt_max`: Step size bounds.
++- `far`: Far plane distance.
++- `bound`: Spatial extent of the grid (half-width).
++- `rbound`: Inverse of `bound` ($1/bound$).
++- `H`: Resolution of the cubic density grid ($H \times H \times H$).
++- `density_thresh`: Threshold for considering a voxel occupied.
++- `dt_min`, `dt_max`: Minimum and maximum step sizes.
+ - `dt_gamma`: Step size scaling factor.
++- `perturb`: Boolean flag for random jittering.
++- `mean_density`: Average grid density (fallback threshold).
++- `n_alive`: Number of active rays.
+ - `n_step`: Maximum steps per ray.
+-- `n_alive`: Number of active rays.
+-- `N_THREAD`: Threads per CUDA block (typically 256) [S1, unofficial].
++- `grid`: Hashed density grid data structure.
+ 
+ **Outputs:**
+-- `xyz`: Sampled coordinates.
++- `xyz`: Sampled 3D coordinates.
+ - `dir`: Ray directions at samples.
+ - `delta`: Step sizes and cumulative distances.
+ 
+-**Data Structures:**
+-- The density grid is stored as a 1D array of size $H^3$ (or hashed equivalent, but accessed via clamped indices in this specific implementation variant).
+-- Ray state is maintained in parallel arrays.
++### Data Structures
++- **Density Grid**: A 1D array representing a 3D grid of size $H^3$. Accessed via linear index $idx = nx \cdot H^2 + ny \cdot H + nz$.
++- **Ray State**: Managed per-thread or per-batch, tracking current $t$, step count, and alive status.
+ 
+-**Steps:**
+-1. Initialize thread index $n$. If $n \ge n\_alive$, return.
+-2. Load ray index from `rays_alive[n]` and current distance $t$ from `rays_t[n]`.
+-3. If `perturb` is true, initialize a PCG32 random number generator with seed $(n, \text{perturb})$ and add $dt\_min \times \text{rng.next\_float()}$ to $t$ [S1, unofficial].
+-4. Loop while $t < \text{far}$ and step count $< n\_step$:
+-   a. Calculate current point $(x,y,z)$ by clamping $ox + t \cdot dx$, $oy + t \cdot dy$, $oz + t \cdot dz$ to $[-\text{bound}, \text{bound}]$ [S1, unofficial].
+-   b. Map $(x,y,z)$ to grid indices $(nx, ny, nz)$ by clamping $0.5 \cdot (\text{coord} \cdot rbound + 1) \cdot H$ to $[0, H-1]$, where $rbound = 1/\text{bound}$ [S1, unofficial].
+-   c. Query grid density at index $nx \cdot H^2 + ny \cdot H + nz$ [S1, unofficial].
+-   d. If density $> \text{density\_thresh}$:
+-      i. Write $xyz$, `dir`, and `delta` to output buffers.
+-      ii. Calculate $dt = \text{clamp}(t \cdot dt\_gamma, dt\_min, dt\_max)$ [S1, unofficial].
+-      iii. Update $t \leftarrow t + dt$.
+-      iv. Record `delta[0] = dt` and `delta[1] = t - last_t`.
+-      v. Update `last_t = t`.
+-      vi. Increment step and pointers.
+-   e. Else (empty space):
+-      i. Calculate distance to next voxel boundary in $x, y, z$ using $\text{signf}(dx), \text{signf}(dy), \text{signf}(dz)$ [S1, unofficial].
+-      ii. Compute $tt = t + \max(0, \min(tx, ty, tz))$ [S1, unofficial].
+-      iii. Advance $t$ in a do-while loop until $t \ge tt$, using the same $dt$ calculation as occupied space [S1, unofficial].
++### Algorithm Steps
++1. **Initialization**:
++   - Assign thread index $n$. If $n \ge n\_alive$, terminate.
++   - Load ray index from `rays_alive[n]` and current distance $t$ from `rays_t[n]`.
++   - If `perturb` is true:
++     - Initialize a PCG32 random number generator with seed $(n, \text{perturb})$.
++     - Add $dt\_min \cdot \text{rng.next\_float()}$ to $t$.
+ 
+-**Pseudocode:**
++2. **Marching Loop**:
++   - While $t < \text{far}$ and step count $< n\_step$:
++     - **Coordinate Clamping**:
++       - Calculate current point $(x, y, z)$ by clamping:
++         $$ x = \text{clamp}(ox + t \cdot dx, -\text{bound}, \text{bound}) $$
++         $$ y = \text{clamp}(oy + t \cdot dy, -\text{bound}, \text{bound}) $$
++         $$ z = \text{clamp}(oz + t \cdot dz, -\text{bound}, \text{bound}) $$
++     - **Grid Index Mapping**:
++       - Map coordinates to grid indices $(nx, ny, nz)$:
++         $$ nx = \text{clamp}\left( \lfloor 0.5 \cdot (x \cdot \text{rbound} + 1) \cdot H \rfloor, 0, H-1 \right) $$
++         $$ ny = \text{clamp}\left( \lfloor 0.5 \cdot (y \cdot \text{rbound} + 1) \cdot H \rfloor, 0, H-1 \right) $$
++         $$ nz = \text{clamp}\left( \lfloor 0.5 \cdot (z \cdot \text{rbound} + 1) \cdot H \rfloor, 0, H-1 \right) $$
++     - **Density Query**:
++       - Compute linear index $idx = nx \cdot H^2 + ny \cdot H + nz$.
++       - Query density $d = \text{grid}[idx]$.
++     - **Occupancy Check**:
++       - If $d > \text{density\_thresh}$:
++         - Write $x, y, z$ to `xyz` buffer.
++         - Write $dx, dy, dz$ to `dir` buffer.
++         - Calculate step size $dt = \text{clamp}(t \cdot dt\_gamma, dt\_min, dt\_max)$.
++         - Store $dt$ in `delta[0]` and cumulative distance in `delta[1]`.
++         - Update $t \leftarrow t + dt$.
++         - Increment step counter and output pointers.
++       - Else (empty space):
++         - Calculate distance to next voxel boundary in $x, y, z$ using $\text{signf}(dx), \text{signf}(dy), \text{signf}(dz)$.
++         - Compute $tt = t + \max(0, \min(tx, ty, tz))$.
++         - Advance $t$ in a do-while loop until $t \ge tt$, using the same $dt$ calculation as occupied space.
++
++### Pseudocode
+ ```python
+-def sparse_ray_marching_train(rays_alive, rays_t, ox, oy, oz, dx, dy, dz, grid, H, bound, density_thresh, perturb, dt_min, dt_max, dt_gamma, n_step, n_alive, N_THREAD):
+-    rbound = 1.0 / bound
+-    for n in range(N_THREAD):
+-        if n >= n_alive:
+-            break
+-        
+-        ray_idx = rays_alive[n]
+-        t = rays_t[n]
+-        last_t = t
+-        
+-        if perturb:
+-            rng = PCG32(seed=(n, perturb))
+-            t += dt_min * rng.next_float()
++def sparse_ray_marching_train(
++    rays_alive, rays_t, ox, oy, oz, dx, dy, dz,
++    far, bound, rbound, H, density_thresh,
++    dt_min, dt_max, dt_gamma, perturb, mean_density,
++    n_alive, n_step, grid
++):
++    # Assume this runs in a parallel context where 'n' is the thread ID
++    n = get_thread_index()
++    if n >= n_alive:
++        return
++
++    ray_idx = rays_alive[n]
++    t = rays_t[n]
++    last_t = t
++
++    # Perturbation
++    if perturb:
++        rng = PCG32(seed=(n, perturb))
++        t += dt_min * rng.next_float()
++
++    step = 0
++    while t < far and step < n_step:
++        # Clamp coordinates to grid bounds
++        x = clamp(ox + t * dx, -bound, bound)
++        y = clamp(oy + t * dy, -bound, bound)
++        z = clamp(oz + t * dz, -bound, bound)
++
++        # Map to grid indices
++        nx = clamp(floor(0.5 * (x * rbound + 1) * H), 0, H - 1)
++        ny = clamp(floor(0.5 * (y * rbound + 1) * H), 0, H - 1)
++        nz = clamp(floor(0.5 * (z * rbound + 1) * H), 0, H - 1)
++
++        # Query density
++        idx = nx * H * H + ny * H + nz
++        density = grid[idx]
++
++        if density > density_thresh:
++            # Occupied: sample and advance
++            write_xyz(x, y, z)
++            write_dir(dx, dy, dz)
+             
+-        step = 0
+-        while t < far and step < n_step:
+-            # Clamp point to bound
+-            x = clamp(ox[ray_idx] + t * dx[ray_idx], -bound, bound)
+-            y = clamp(oy[ray_idx] + t * dy[ray_idx], -bound, bound)
+-            z = clamp(oz[ray_idx] + t * dz[ray_idx], -bound, bound)
++            dt = clamp(t * dt_gamma, dt_min, dt_max)
++            write_delta(dt, t - last_t)
+             
+-            # Map to grid indices
+-            nx = clamp(int(0.5 * (x * rbound + 1) * H), 0, H - 1)
+-            ny = clamp(int(0.5 * (y * rbound + 1) * H), 0, H - 1)
+-            nz = clamp(int(0.5 * (z * rbound + 1) * H), 0, H - 1)
++            last_t = t
++            t += dt
++            step += 1
++            advance_output_pointers()
++        else:
++            # Empty: skip to next voxel boundary
++            # Calculate distances to next boundaries
++            tx = signf(dx) / dx if dx != 0 else float('inf')
++            ty = signf(dy) / dy if dy != 0 else float('inf')
++            tz = signf(dz) / dz if dz != 0 else float('inf')
+             
+-            # Query density
+-            density = grid[nx * H * H + ny * H + nz]
++            # Note: signf returns 1 or -1. The distance to boundary is derived from grid spacing.
++            # Simplified logic based on source:
++            tt = t + max(0, min(tx, ty, tz))
+             
+-            if density > density_thresh:
+-                # Write outputs
+-                write_xyz(x, y, z)
+-                write_dir(dx[ray_idx], dy[ray_idx], dz[ray_idx])
+-                
+-                # Calculate step
++            # Advance t until it reaches or exceeds the boundary
++            while t < tt:
+                 dt = clamp(t * dt_gamma, dt_min, dt_max)
+                 t += dt
+-                
+-                # Record deltas
+-                delta_0 = dt
+-                delta_1 = t - last_t
+-                write_delta(delta_0, delta_1)
+-                
+-                last_t = t
+-                step += 1
+-            else:
+-                # Empty space traversal
+-                # Calculate distances to next voxel boundaries
+-                # Note: signf returns -1, 0, or 1
+-                tx = (signf(dx[ray_idx]) * bound - (ox[ray_idx] + t * dx[ray_idx])) / dx[ray_idx] if dx[ray_idx] != 0 else float('inf')
+-                ty = (signf(dy[ray_idx]) * bound - (oy[ray_idx] + t * dy[ray_idx])) / dy[ray_idx] if dy[ray_idx] != 0 else float('inf')
+-                tz = (signf(dz[ray_idx]) * bound - (oz[ray_idx] + t * dz[ray_idx])) / dz[ray_idx] if dz[ray_idx] != 0 else float('inf')
+-                
+-                # This logic assumes standard AABB traversal; simplified based on notes
+-                # The notes specify: tt = t + max(0, min(tx, ty, tz))
+-                # However, tx, ty, tz here are likely relative distances to boundaries
+-                # Re-reading notes: "Calculate distance to next voxel boundary... Compute tt = t + max(0, min(tx, ty, tz))"
+-                # We assume tx, ty, tz are pre-calculated relative distances to the next grid plane intersection
+-                
+-                # Placeholder for exact boundary calculation logic not fully detailed in notes
+-                # Typically involves DDA (Digital Differential Analyzer) steps
+-                tt = t + max(0, min(tx, ty, tz))
+-                
+-                while t < tt:
+-                    dt = clamp(t * dt_gamma, dt_min, dt_max)
+-                    t += dt
++            
++            # Ensure we don't infinite loop if dt is very small
++            if t == last_t:
++                break
++            last_t = t
++
++    rays_t[n] = t
+ ```
+ 
+-**Parameters:**
+-- `N_THREAD`: 256 [S1, unofficial].
+-- `perturb`: Boolean, enables jittering [S1, unofficial].
+-- `bound`: Spatial extent, inverse is `rbound` [S1, unofficial].
+-- `H`: Grid resolution [S1, unofficial].
+-- `mean_density`: Fallback threshold if specific function returns lower value [S1, unofficial].
++### Parameters
++- `N_THREAD`: 256 (CUDA block size).
++- `perturb`: `uint32_t` boolean.
++- `bound`: Spatial extent.
++- `H`: Grid resolution.
++- `mean_density`: Fallback threshold.
+ 
+-**Edge Cases:**
+-- Precision issues in boundary calculations for empty space traversal [S1, unofficial].
+-- Degenerate rays (zero direction) require handling to avoid division by zero in boundary calculations [G].
++### Edge Cases and Pitfalls
++- **Precision**: Floating-point errors in boundary calculations can cause infinite loops or missed samples. The do-while loop for empty space ensures progress.
++- **Boundaries**: Clamping prevents out-of-bounds memory access in the grid.
++- **Degenerate Input**: Zero-length rays or directions with zero components require careful handling of boundary distances (e.g., using infinity).
+ 
+ ## Subtopics
+ 
+ ### [CUDA Ray Marching (IDDR-NGP Backend)](5788-cuda-ray-marching-iddr-ngp-backend.md)
+-A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation. It serves as the core computational unit for the IDDR-NGP backend, enabling differentiable rendering by computing gradients alongside radiance accumulation. It distinguishes itself by organizing computation per-warp for spherical harmonic (SH) evaluation and using shared memory for ray specification caching to minimize global memory traffic.
++A GPU-accelerated ray marching kernel that samples points along rays using a hashed density grid, supporting adaptive step sizes and perturbation. It builds on [Sparse Ray Marching (Training)](3890-sparse-ray-marching-training.md) [G].
+ 
+ ### [Training Ray Marching (Forward Only)](6205-training-ray-marching-forward-only.md)
+@@ -140,14 +162,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Linear with respect to the number of active rays and the number of steps per ray. Empty space traversal is accelerated by skipping to the next voxel boundary.
+-- **Memory Complexity:** Depends on the number of samples generated. The kernel itself uses minimal shared memory for ray specification caching [S1, unofficial].
+-- **Performance:** Optimized for GPU execution with 256 threads per block [S1, unofficial].
+-- **Strengths:** Efficient handling of sparse data, reduced memory traffic via shared memory, adaptive step sizes.
+-- **Limitations:** Requires careful tuning of `density_thresh` and `dt_gamma`. Perturbation adds computational overhead.
+-- **When to use:** Training phase of neural volume rendering where gradients are needed and data is sparse.
+-- **When not to use:** Inference where deterministic output is preferred without jitter, or when memory allocation overhead is prohibitive.
++- **Time Complexity**: Linear with respect to the number of active rays and the number of steps per ray. Sparse traversal reduces the number of density queries in empty space.
++- **Memory Complexity**: Depends on the number of samples generated. The grid memory is $O(H^3)$.
++- **Performance**: Optimized for GPU execution with 256 threads per block. Perturbation reduces banding artifacts but adds RNG overhead.
++- **Strengths**: Efficient handling of sparse scenes, adaptive step sizes, reduced memory usage compared to uniform sampling.
++- **Limitations**: Performance degrades if the grid is dense or if the step size parameters are poorly tuned.
++- **When to Use**: Training phase of neural volume rendering where memory efficiency and sampling quality are critical.
++- **When Not to Use**: Inference scenarios requiring deterministic, fixed-step sampling or when the grid is extremely dense.
+ 
+ ## Background
+-Originating from the Instant Neural Graphics Primitives (NGP) framework by NVIDIA, this method was developed to enable fast training of neural radiance fields. It builds on [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md) by adding training-specific features like perturbation and adaptive memory management. It is used in modern neural rendering pipelines for real-time training of high-quality 3D scenes.
++Originating from the Instant Neural Graphics Primitives (NGP) framework, this method was developed to enable fast training of neural radiance fields. It leverages hashed encoding and sparse ray marching to achieve real-time performance on consumer hardware. The method is widely used in modern neural rendering pipelines for training.
+ 
+ ## Sources

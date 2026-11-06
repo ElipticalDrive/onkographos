@@ -1,0 +1,123 @@
+# Discrete Volume Rendering Integral (VRI)
+Also called: Pass 2 Fragment Shader VRI Evaluation
+
+## Overview
+The Discrete Volume Rendering Integral (VRI) is the core accumulation step in fixed-step ray marching, computing the final pixel color by discretizing the continuous volume rendering equation into a Riemann sum [S1, unofficial]. It solves the problem of projecting a 3D scalar field onto a 2D image by iterating along a ray segment, sampling density and color, and compositing results front-to-back [S1, unofficial]. What sets it apart from [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md) and [Ray Evaluation Stepping DVR](3461-ray-evaluation-stepping-dvr.md) is its specific implementation as a "Pass 2" fragment shader operation that relies on pre-computed entry/exit texture coordinates and a strict fixed-step $\Delta s$ derived from world-space slice spacing, rather than adaptive stepping or varying integration strategies [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Entry texture coordinate $s_{in}$, exit texture coordinate $s_{out}$, slice spacing in world coordinates $\Delta x$, 3D volume texture (attenuation), optional 1D transfer function, optional gradient texture, backlight color $L_{backlight}$.
+*   **Output:** Final pixel color $L_{out}$.
+
+**Data Structures:**
+*   **3D Volume Texture:** Stores attenuation values $\tau(s)$ at 3D texture coordinates.
+*   **1D Transfer Function (Optional):** Maps attenuation $\tau$ to opacity $\tau'$ and color coefficient $k_d$.
+*   **Gradient Texture (Optional):** Stores volume gradients for shading.
+
+**Parameters:**
+*   $\Delta x$: Slice spacing in world coordinates (typical value depends on volume resolution and bounding box size; Not given in the sources).
+*   $L_{backlight}$: Light coming from behind the volume (typical value: black $(0,0,0)$ or environment map color; Not given in the sources).
+
+**Steps:**
+1.  **Compute $\Delta s$:** Calculate the texture coordinate step size $\Delta s$ corresponding to the world-space step $\Delta x$.
+    *   Determine the spatial locations of $s_{in}$ and $s_{out}$ using the bounding box dimensions $x_{dim}, y_{dim}, z_{dim}$ [S1, unofficial].
+    *   Calculate the total spatial length of the ray segment inside the volume.
+    *   Divide this length by $\Delta x$ to find the number of steps.
+    *   $\Delta s$ is the difference in texture coordinates corresponding to one $\Delta x$ step [S1, unofficial].
+2.  **Initialize Accumulators:**
+    *   $L_{out} \leftarrow (0, 0, 0)$
+    *   $t \leftarrow 1$ (accumulated transmittance)
+3.  **Iterate along Ray:** For $s$ from $s_{in}$ to $s_{out}$ with step $\Delta s$:
+    *   **Sample Attenuation:** Lookup $\tau(s)$ from the 3D volume texture at coordinate $s$ [S1, unofficial].
+    *   **Apply Transfer Function (Optional):** If a transfer function exists, lookup $\tau'$ (opacity) and $k_d$ (color coefficient) using $\tau(s)$ [S1, unofficial]. Otherwise, $\tau' = \tau(s)$ and $k_d = 1$.
+    *   **Compute Opacity:** $\alpha = \tau' \cdot \Delta x$ [S1, unofficial].
+    *   **Compute Color Contribution $C(s)$:**
+        *   If using gradient-based shading (e.g., Phong), lookup gradient from gradient texture and compute $C(s)$ using $k_d$ and lighting equations [S1, unofficial].
+        *   Otherwise, $C(s)$ is derived directly from the transfer function or volume color [S1, unofficial].
+    *   **Accumulate Color:** $L_{out} \leftarrow L_{out} + t \cdot C(s) \cdot \alpha$ [S1, unofficial].
+    *   **Update Transmittance:** $t \leftarrow t \cdot (1 - \alpha)$ [S1, unofficial].
+4.  **Add Backlight:** $L_{out} \leftarrow L_{out} + t \cdot L_{backlight}$ [S1, unofficial].
+5.  **Return:** $L_{out}$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_vri(s_in, s_out, delta_x, volume_texture, transfer_function, gradient_texture, backlight_color):
+    # Step 1: Compute delta_s
+    # Determine spatial bounds of the volume (x_dim, y_dim, z_dim)
+    # Convert s_in and s_out to spatial positions p_in, p_out
+    # Calculate spatial distance D = |p_out - p_in|
+    # Number of steps N = D / delta_x
+    # delta_s = (s_out - s_in) / N
+    # Note: Exact conversion from texture coords to spatial coords depends on bounding box alignment [S1, unofficial]
+    
+    L_out = (0.0, 0.0, 0.0)
+    t = 1.0
+    
+    # Step 3: Iterate
+    # Note: Iteration count is determined by delta_s
+    num_steps = int(round((s_out - s_in) / delta_s))
+    
+    for i in range(num_steps):
+        s = s_in + i * delta_s
+        
+        # Sample attenuation
+        tau = volume_texture.sample_3d(s)
+        
+        # Apply transfer function if present
+        if transfer_function is not None:
+            tau_prime, k_d = transfer_function.sample_1d(tau)
+        else:
+            tau_prime = tau
+            k_d = 1.0
+            
+        # Compute opacity
+        alpha = tau_prime * delta_x
+        
+        # Compute color contribution C(s)
+        # This part depends on shading model (Phong, etc.)
+        # For simplicity, assume C(s) is derived from k_d and lighting
+        # If gradient texture is used, compute normal from gradient_texture.sample_3d(s)
+        # Then compute C(s) using Phong equation with k_d
+        C_s = compute_color_contribution(s, tau_prime, k_d, gradient_texture)
+        
+        # Accumulate
+        L_out = L_out + t * C_s * alpha
+        
+        # Update transmittance
+        t = t * (1.0 - alpha)
+        
+    # Step 4: Add backlight
+    L_out = L_out + t * backlight_color
+    
+    return L_out
+```
+
+**Edge Cases and Pitfalls:**
+*   **Computing $\Delta s$:** A common pitfall is using a fixed texture coordinate step instead of deriving it from the world-space slice spacing $\Delta x$ [S1, unofficial]. $\Delta s$ must be calculated by dividing the spatial segment into pieces of length $\Delta x$ and finding the corresponding texture coordinate difference [S1, unofficial].
+*   **Precision:** Accumulating small $\alpha$ values over many steps can lead to precision issues. Using high-precision accumulators is recommended [G].
+*   **Boundary Conditions:** Ensure $s_{in}$ and $s_{out}$ are correctly clamped to the volume bounds to avoid sampling outside the texture [G].
+
+## Subtopics
+
+### [Volume Raycasting Discretization](831-volume-raycasting-discretization.md)
+A direct volume rendering technique that approximates the continuous VRI by tracing parallel rays and compositing front-to-back. It uses fixed-step marching and zero-order approximation. Choose this for general-purpose volume rendering where computational efficiency is prioritized over adaptive accuracy.
+
+### [Classical Ray Tracing Integration](1334-classical-ray-tracing-integration.md)
+A global rendering approach that uses ray-object intersection and recursive secondary rays for global illumination. Choose this when global illumination effects (like light shafts or shadows within the volume) are required, rather than simple direct lighting.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of steps along the ray. $N$ is determined by the volume thickness and $\Delta x$.
+*   **Memory Complexity:** $O(1)$ per pixel for accumulation, plus storage for the 3D volume texture and optional transfer/gradient textures.
+*   **Measured Performance:** Performance depends heavily on the number of steps $N$ and the cost of texture lookups. Fixed-step marching is predictable but may oversample empty space or undersample dense regions if $\Delta x$ is not chosen carefully [S1, unofficial].
+*   **Strengths:** Simple to implement in a fragment shader; predictable memory access patterns; efficient for uniform volumes.
+*   **Limitations:** Fixed step size may lead to aliasing or inaccurate results in regions with high frequency changes; does not handle global illumination effects natively.
+*   **When to Use:** Suitable for real-time rendering of fog, clouds, or medical volumes where direct lighting is sufficient.
+*   **When Not to Use:** Unsuitable for scenes requiring complex light transport, shadows, or reflections within the volume.
+
+## Background
+The Discrete Volume Rendering Integral (VRI) formulation described here originates from GPU-based volume rendering techniques, specifically as implemented in fragment shaders for direct volume rendering [S1, unofficial]. It is a discretization of the continuous volume rendering equation, adapted for efficient rasterization-based rendering pipelines. The method is widely used in medical imaging and scientific visualization for real-time exploration of 3D scalar fields.
+
+## Sources
+[S1] CISC/CMPE 454, GPU Volume Rendering, https://watkins.cs.queensu.ca/~jstewart/454/notes/44/44-gpu-volume-rendering.html, fetched 2026-10-30 (unofficial)

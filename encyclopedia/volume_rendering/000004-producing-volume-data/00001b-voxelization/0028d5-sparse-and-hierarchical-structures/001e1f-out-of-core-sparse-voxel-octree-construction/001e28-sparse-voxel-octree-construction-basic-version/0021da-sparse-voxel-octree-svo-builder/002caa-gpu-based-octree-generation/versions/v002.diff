@@ -1,0 +1,83 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-This method generates a Sparse Voxel Octree (SVO) data structure directly on the GPU by partitioning the input volume into fixed-size cubes of $32 \times 32 \times 32$ voxels [S1, unofficial]. Unlike standard SVO builders that only subdivide non-empty regions, this approach subdivides the entire volume space uniformly down to the minimum node size, which simplifies the compute shader logic by avoiding dynamic branching for empty regions [S1, unofficial]. It solves the problem of constructing a hierarchical acceleration structure for raycasting by mapping every non-empty voxel to a path in a pre-allocated array-based octree [S1, unofficial].
++This method generates a hierarchical octree data structure directly on the GPU by partitioning the input volume into fixed-size cubes of $32 \times 32 \times 32$ voxels [S1, unofficial]. Unlike standard Sparse Voxel Octrees that only subdivide non-empty regions, this approach uniformly subdivides the entire volume space down to the minimum node size, which simplifies compute shader logic by avoiding dynamic branching for empty regions [S1, unofficial]. It constructs a pre-allocated array-based octree by mapping every non-empty voxel to a hierarchical path [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D voxel grid of size $n \times n \times n$, where each voxel contains a density or occupancy value.
+-*   **Output:** A flat array of `OctreeEntry` structures representing the octree. The array simulates a linked list where each node points to its children [S1, unofficial].
++*   **Input:** A 3D voxel grid of size $n \times n \times n$, where each voxel contains a density or occupancy value [S1, unofficial].
++*   **Output:** A flat array of `OctreeEntry` structures representing the octree, simulating a linked list where each node points to its children [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **OctreeEntry:** A 64-bit structure consisting of two integers (32-bit each) [S1, unofficial].
++*   **OctreeEntry:** A 64-bit structure consisting of two 32-bit integers [S1, unofficial].
+     *   `data`: A bitmask where the least significant bit indicates the presence of data (non-empty children or leaf data) [S1, unofficial].
+     *   `childrenStartIndex`: The index in the output array where the children of this node begin [S1, unofficial].
+@@ -18,9 +18,9 @@
+     *   `size`: The dimension of the volume $n$ [S1, unofficial].
+     *   `minNodeSize` ($\epsilon$): The minimum side length of a node, set to 32 [S1, unofficial].
+-    *   `maxDepth`: Derived from `size` and `minNodeSize`. Specifically, $maxDepth = \log_2(\frac{size}{minNodeSize})$ [S1, unofficial].
++    *   `maxDepth`: Derived from `size` and `minNodeSize` as $\log_2(\frac{size}{minNodeSize})$ [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 1.  **Dispatch:** Launch a compute shader with a thread group size of $4 \times 4 \times 4$ (64 threads per group) [S1, unofficial]. The total number of threads dispatched equals the number of voxels in the volume ($n^3$) [S1, unofficial].
+-2.  **Empty Check:** Each thread identifies its voxel coordinate `currentVoxel` via `SV_DispatchThreadID`. It samples the voxel data. If the value is less than 1 (empty), the thread returns immediately [S1, unofficial].
++2.  **Empty Check:** Each thread identifies its voxel coordinate `currentVoxel` via `SV_DispatchThreadID` and samples the voxel data [S1, unofficial]. If the value is less than 1 (empty), the thread returns immediately [S1, unofficial].
+ 3.  **Update Path:** If the voxel is non-empty, call `updateOctree(currentVoxel)` [S1, unofficial].
+ 4.  **Traverse and Mark:** Inside `updateOctree`:
+@@ -58,7 +58,11 @@
+ 
+ # Helper Functions
++def get_data(pos: int3) -> int:
++    # Reads voxel density/occupancy at pos from the input volume grid [G]
++    return volume[pos.x][pos.y][pos.z]
++
+ def calculate_relative_index(v: int, d: int) -> int:
+-    # Division by power of two is implemented as bit shift
+-    return v >> d
++    # Source divides by (size >> d), not just v >> d
++    return v // (SIZE >> d)
+ 
+ def calculate_octant(pos: int3, d: int) -> int:
+@@ -76,5 +80,5 @@
+     return calculate_octant(relative_pos, d)
+ 
+-def update_octree(current_voxel: int3, output_octree: list[OctreeEntry]):
++def update_octree(current_voxel: int3, output_octree: list[OctreeEntry]) -> None:
+     # Calculate relative octant at depth 1
+     relative_index = calculate_relative_octant(current_voxel, 1)
+@@ -101,5 +105,5 @@
+ 
+ # Compute Shader Entry Point
+-def CS(current_voxel: int3):
++def CS(current_voxel: int3) -> None:
+     # Check if voxel is empty
+     if get_data(current_voxel) < 1:
+@@ -111,14 +115,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Division Cost:** The algorithm performs divisions with remainders (modulo operations). Although divisions by powers of two are optimized to bit shifts, the modulo operations remain expensive on GPU hardware [S1, unofficial].
+-*   **False Positives:** The fixed-partition approach may create nodes for empty regions if the partitioning boundaries do not align perfectly with sparse data, leading to potential false positives during ray traversal if not handled carefully [S1, unofficial].
+-*   **Initialization:** The `childrenStartIndex` for all nodes must be initialized to 0 or a valid offset before the shader runs, as the shader only sets the `data` bit and traverses existing indices. The source implies a pre-allocated array structure where indices are calculated based on the octant position, but does not explicitly detail the initialization of `childrenStartIndex` for internal nodes in the provided snippet [G].
++*   **Division Cost:** The algorithm performs divisions with remainders (modulo operations), which are expensive on GPU hardware even though divisions by powers of two are replaced by bit shifts [S1, unofficial].
++*   **False Positives:** The fixed-partition approach minimizes false positives during ray traversal by ensuring only non-empty partitions are examined, avoiding the diagonal-empty-voxel worst-case of unpartitioned traversal [S1, unofficial].
++*   **Initialization:** The `childrenStartIndex` for all nodes must be initialized to valid offsets before the shader runs, as the shader only sets the `data` bit and traverses existing indices; the source does not specify the exact initialization routine [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(n^3)$, where $n$ is the volume dimension. This is considered inefficient for large volumes because every voxel is processed by a thread, regardless of sparsity [S1, unofficial].
+-*   **Memory Complexity:** The array size is determined by the fixed partitioning. For a $512^3$ volume with a minimum node size of 32, the array contains 4681 elements, occupying approximately 37 KB [S1, unofficial].
+-*   **Strengths:** Simplifies GPU implementation by avoiding complex dynamic memory allocation or branching for empty regions. The fixed partitioning makes the traversal logic predictable [S1, unofficial].
+-*   **Limitations:** High computational cost due to $O(n^3)$ complexity and expensive modulo operations. It is not suitable for dynamic updates; the entire octree must be reconstructed if the volume changes significantly [S1, unofficial].
+-*   **When to use:** Initial construction of the octree for static volumes. It is recommended to use this method only for initial build, and then potentially switch to a more efficient traversal or update strategy for dynamic scenes [S1, unofficial].
++*   **Time Complexity:** $O(n^3)$, where $n$ is the volume dimension, which is considered inefficient for large volumes [S1, unofficial].
++*   **Memory Complexity:** The array size is determined by the fixed partitioning; for a $512^3$ volume with a minimum node size of 32, the array contains 4681 elements, occupying approximately 37 KB [S1, unofficial].
++*   **Strengths:** Simplifies GPU implementation by avoiding complex dynamic memory allocation or branching for empty regions, making the traversal logic predictable [S1, unofficial].
++*   **Limitations:** High computational cost due to $O(n^3)$ complexity and expensive modulo operations [S1, unofficial].
++*   **When to use:** Initial construction of the octree for static volumes; the source recommends running this algorithm only at initialization, while partial updates can be performed if only specific volume regions are modified [S1, unofficial].
+ 
+ ## Background

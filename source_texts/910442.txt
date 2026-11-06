@@ -1,0 +1,266 @@
+Simplify your onnx model. Contribute to onnxsim/onnxsim development by creating an account on GitHub.
+
+Add Einsum, Sin/Cos and GridSample coverage for NeRF-shaped exports by take-cheeze · Pull Request #2067 · onnxsim/onnxsim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+take-cheeze
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Adds the three op families a NeRF / novel-view-synthesis graph is built from, all of which every hand-written exporter here previously refused.
+Op
+Backend
+Before
+After
+Einsum
+Core ML, TFLite, WebNN
+unsupported
+decomposed to Transpose/MatMul
+Sin, Cos
+TFLite
+unsupported
+added to the unary table
+GridSample
+Core ML
+unsupported
+gather_nd corner taps + elementwise weighting
+TFLite goes 60 → 65 supported ops, Core ML 74 → 75.
+Why Einsum is decomposed rather than lowered per-exporter
+Einsum was absent from all four hand-written backends, and it is most of what an attention, MLP or NeRF graph is made of — PyTorch emits it for linear layers, attention projections and ray/sample contractions. Teaching three translators the op would mean three copies of the same logic.
+Instead onnxsim/einsum_decompose.py rewrites it once, at the ONNX level, on the way into each exporter:
+```
+Einsum(bnc,cd->bnd)  ->  MatMul              # already in matmul order
+Einsum(bij,bjk->bik) ->  MatMul              # shared batch axis
+Einsum(mj,nj->mn)    ->  Transpose, MatMul
+```
+The rewrite is exact: ONNX MatMul computes A[batch,m,k] @ B[batch,k,n], which is by construction the einsum's own output order, so no output-side transpose or reshape is ever needed, and an operand already in matmul order contributes no Transpose.
+It is deliberately narrower than a general einsum optimizer. Traces, diagonals, outer products, scalar reductions and per-axis broadcasts (a batch axis only one operand carries) are left exactly as they were, so the exporter still raises its usual "unsupported op" error naming the op — never a silently wrong model, which is the property these exporters are built on.
+Two implementation notes worth reviewing
+MIL's gather_nd does not match ONNX's GatherND on NCHW. It indexes the tensor's leading axes and moves the trailing (non-indexed) axis to the end. The Core ML GridSample therefore samples through a channel-last view of x; the result comes back (N, flat, C) and is restored to ONNX's NCHW order with one transpose and one reshape, both pure metadata. Core ML's MIL has no native grid-sample op.
+Core ML GridSample requires a compile-time-constant grid and static output dims, since MIL ops carry static shapes. It raises a clear error rather than guessing when those don't hold.
+Verification
+Einsum — 7 lowered and 10 refused equations, each numerically compared against onnxruntime (max_abs_diff = 0).
+GridSample — the emitted MIL graph is replayed op-by-op in numpy and compared against ONNX's own reference across 7 configurations: 2-D and 3-D, bilinear and nearest, zeros and border padding, and both align_corners settings. Grids deliberately sample outside [-1, 1] so the padding path is exercised.
+No regressions — the full non-hardware suite was run with and without this change; the failure sets are byte-identical. The pre-existing failures are missing optional deps in this environment (onnxscript, onnxruntime extras) plus a coremltools build missing libmilstoragepython, and are unaffected by this PR.
+Known limitation (deliberate)
+Per-axis broadcast einsums (bnc,cd->bnd) are refused even though MatMul would broadcast them correctly. This follows the vendored optimizer's existing behavior and keeps the rewrite to equal-rank operands, which the exporters' matmul paths are best tested on. Happy to relax it if you'd rather have the extra coverage.
+🤖 Generated with CommandCode
+Add Einsum, Sin/Cos and GridSample coverage for NeRF-shaped exports
+…
+6a06a39
+```
+A NeRF / novel-view-synthesis graph is dominated by three op families that
+every hand-written exporter here refused: the `Einsum` torch emits for
+linear layers and ray/sample contractions, the sine/cosine
+positional-encoding head, and `GridSample` for sampling and warping.
+
+`Einsum` was absent from all four hand-written backends (Core ML, TFLite,
+WebNN, XNNPACK), and it is most of what an attention, MLP or NeRF graph is
+made of. Rather than teach three translators the op, rewrite it once at the
+ONNX level in `onnxsim/einsum_decompose.py`, on the way into each of them:
+
+    Einsum(bnc,cd->bnd)  ->  MatMul
+    Einsum(bij,bjk->bik) ->  MatMul
+    Einsum(mj,nj->mn)    ->  Transpose, MatMul
+
+The rewrite is exact: ONNX MatMul computes A[batch,m,k] @ B[batch,k,n],
+which is by construction the einsum's own output order, so no output-side
+transpose or reshape is needed and an operand already in matmul order
+contributes no Transpose at all.
+
+It is deliberately narrower than a general einsum optimizer. Traces,
+diagonals, outer products, scalar reductions and per-axis broadcasts
+(a batch axis only one operand carries) are left exactly as they were, so
+the exporter still raises its usual "unsupported op" error naming the op --
+never a silently wrong model, which is the property these exporters are
+built on.
+
+`Sin`/`Cos` join TFLite's unary table, and Core ML gains a `GridSample`
+lowered to `gather_nd` corner taps plus elementwise weighting, mirroring
+the TFLite exporter (Core ML's MIL has no native grid-sample op).
+
+Verified against onnxruntime for every lowered and every refused einsum
+equation, and -- for GridSample -- by replaying the emitted MIL graph
+op-by-op and comparing to ONNX's own reference across 2-D/3-D, bilinear
+and nearest, zeros and border padding, and both `align_corners` settings.
+The full non-hardware suite has an unchanged failure set before and after.
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
+```
+take-cheeze
+enabled auto-merge
+October 3, 2026 22:53
+github-actions
+Bot
+added
+the
+automerge
+Auto-merge is enabled for this PR
+label
+Oct 3, 2026
+Share one GridSample plan between the Core ML and TFLite exporters
+…
+6c8cba0
+```
+The Core ML GridSample lowering added for NeRF-shaped graphs recomputed, from
+scratch, exactly the arithmetic the TFLite exporter already had: mapping
+normalized grid coordinates to source pixels, picking the neighbouring
+corners, and weighting them. Two copies of the same numerics, free to drift
+apart and to disagree with ONNX's own reference implementation.
+
+Neither target has a native grid-sample kernel -- Core ML's MIL has no such op
+and TFLite's converter has no ONNX translation for one -- so both lower it
+themselves as corner `gather`/`gather_nd` taps plus elementwise weighting.
+That arithmetic is pure numpy and target-independent; only the emission
+differs. Lift it into `onnxsim/gridsample_plan.py`, which reduces a GridSample
+to the list of taps (gather indices, bilinear weight, out-of-range mask), and
+have both exporters lower that one plan:
+
+- Core ML now emits MIL ops straight from the plan and no longer derives
+  coordinates or corners itself.
+- TFLite's `_numpy_grid_sample` -- the reference used for const-folding and
+  for the numeric tests -- becomes a thin evaluator over the same plan.
+
+The rewrite is behaviour-preserving: `_numpy_grid_sample` still matches ONNX's
+GridSample across 2-D/3-D, bilinear/nearest, zeros/border and both
+`align_corners`, now from the shared plan, and the plan itself is additionally
+checked against ONNX applied independently of either consumer. Four new tests
+cover the plan directly and assert the two exporters keep sharing it.
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
+```
+take-cheeze
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Follow-up to #2067: the Core ML GridSample lowering duplicated the sampling arithmetic the TFLite exporter already had.
+Neither target has a native grid-sample kernel — Core ML's MIL has no such op, and TFLite's converter has no ONNX translation for one — so both lower it as corner gather/gather_nd taps plus elementwise weighting. That arithmetic is pure numpy and target-independent; only the emission differs.
+That part is now lifted into onnxsim/gridsample_plan.py, which reduces a GridSample to the list of taps (gather indices, bilinear weight, out-of-range mask):
+Core ML emits MIL ops straight from the plan and no longer derives coordinates or corners itself.
+TFLite's _numpy_grid_sample — the reference used for const-folding and for the numeric tests — is now a thin evaluator over the same plan.
+Behaviour-preserving: _numpy_grid_sample still matches ONNX's GridSample across 2-D/3-D, bilinear/nearest, zeros/border, and both align_corners. The plan is additionally checked against ONNX applied independently of either consumer, so a bug in the plan or in one consumer can't cancel out against the other.
+Four new tests: two plan-level, one structural guard asserting both exporters keep routing through the shared plan, one rejection test.
+Full non-hardware suite: failure set byte-identical to the pre-change baseline (27 pre-existing failures from missing optional deps in this environment — onnxscript, onnxruntime extras — plus a coremltools build without libmilstoragepython).
+🤖 Generated with CommandCode
+Fix lint on the new files, and add real torch -> ONNX export integration
+…
+3b72330
+```
+Two things.
+
+**Lint.** The Lint workflow (ruff format --check, ruff check, mypy) failed on
+the files added in the previous two commits. All three now pass locally with the
+versions CI pins:
+
+- `ruff format`: reformat `einsum_decompose.py`, `gridsample_plan.py` and
+  `test_exporter_nerf_ops.py` (this is what actually failed the job).
+- `ruff check`: drop an unused variable and sort a function-local import block
+  in the test file.
+- `mypy`: `frac` in `grid_sample_plan` was typed `Optional` implicitly (`None`
+  for the nearest path) and then indexed under a `bilinear` guard, which
+  mypy cannot narrow. It is now an empty list on the nearest path, so its type
+  is plain `List[np.ndarray]`.
+
+**Integration tests.** `tests/test_exporter_nerf_ops.py` checks each rewrite
+against hand-built graphs, which is not the shape a user actually gets: torch's
+exporter picks its own opset, folds and reorders nodes, and introduces its own
+constants. `tests/test_nerf_onnx_integration.py` closes that gap with real
+`torch.nn.Module`s -- a sine/cosine positional encoding, a ray sampler, a small
+NeRF (sample -> encode -> MLP density head -> softmax -> RGB), and an
+attention-like einsum head -- exported with `torch.onnx.export`, run through
+`onnxsim.simplify`, and checked against onnxruntime for numeric equivalence.
+
+Two behaviours are pinned that the hand-built tests could not express:
+
+- `simplify()` deliberately leaves `Einsum` alone; the decomposition runs on
+  the way into each exporter. That split is what keeps a non-rewritable
+  equation a hard "unsupported op" error rather than a silently wrong graph, so
+  the attention test asserts both halves separately.
+- torch's legacy ONNX exporter passes the operand of a broadcast elementwise op
+  in as a graph input named `onnx::<Op>_<n>` (`Add`/`Mul`/`Reshape`/`Unsqueeze`),
+  leaving the exported model with inputs no caller can supply. The tests pass
+  `input_names` explicitly, as the repo's other exporter tests do, and the
+  modules take pre-shaped `(B, 1, 3)` rays to avoid the unsqueeze.
+
+Full non-hardware suite: failure set unchanged from baseline.
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
+```
+take-cheeze
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Two follow-ups.
+1. CI fix. The ruff + mypy (Python) job was failing on the files added in the previous commits. All three gates now pass locally with the versions the Lint workflow pins (ruff==0.14.0, mypy==1.18.2):
+ruff format --check — the actual failure; reformatted einsum_decompose.py, gridsample_plan.py, test_exporter_nerf_ops.py.
+ruff check — an unused variable and a function-local import block in the test file.
+mypy — frac in grid_sample_plan was implicitly optional (None on the nearest path) and then indexed under a bilinear guard that mypy can't narrow. It's now an empty list on that path, so the type is plain List[np.ndarray].
+2. Real ONNX export integration. test_exporter_nerf_ops.py checks each rewrite against hand-built graphs — which isn't the shape a user actually gets. torch's exporter picks its own opset, folds and reorders nodes, and adds its own constants. tests/test_nerf_onnx_integration.py closes that gap with real torch.nn.Modules (sine/cosine positional encoding, ray sampler, a small NeRF: sample → encode → MLP density head → softmax → RGB, plus an attention-like einsum head), exported via torch.onnx.export, simplified, and checked against onnxruntime for numeric equivalence.
+Two behaviours got pinned that the hand-built tests couldn't express:
+simplify() deliberately leaves Einsum alone — the decomposition runs on the way into each exporter. That split is what keeps a non-rewritable equation a hard "unsupported op" error rather than a silently wrong graph, so the attention test now asserts both halves separately instead of assuming simplification does the rewrite.
+torch's legacy exporter leaks pseudo-inputs. It passes the operand of a broadcast elementwise op in as a graph input named onnx::<Op>_<n> (Add/Mul/Reshape/Unsqueeze), leaving the exported model with inputs no caller can supply. The tests pass input_names explicitly, matching the repo's other exporter tests (test_gan.py, test_fireredaudio.py), and the modules take pre-shaped (B, 1, 3) rays to avoid the unsqueeze entirely.
+One finding worth flagging: torch emits bsf,fc->bsc for a NeRF-style RGB projection, and that form is refused by the decomposer — operand 2 carries no batch axis. It's left as Einsum, so an exporter still reports it as unsupported rather than mis-lowering it. The test asserts that refusal explicitly so it's a documented decision rather than a silent gap. Relaxing it would mean broadcasting a weight matrix against a per-sample tensor, which the exporters' matmul paths are least well tested on.
+Tests: 45 pass in the two NeRF files (38 unit + 3 integration + 4 plan). Full non-hardware suite unchanged from baseline.
+🤖 Generated with CommandCode
+Format test_nerf_onnx_integration.py for the Lint workflow
+…
+9254eda
+```
+The previous commit added this file already formatted in the worktree but
+staged it before that formatting, so the blob the Lint workflow checks was
+the unformatted one and `ruff format --check` kept failing on it.
+
+Two differences, both cosmetic: a dict literal split across lines that fits on
+one, and a missing trailing newline. Verified against the staged blobs (what
+CI actually checks out) rather than the worktree, which is what let the
+mismatch through in the first place.
+
+Co-authored-by: CommandCodeBot <noreply@commandcode.ai>
+```
+Hide details
+View details
+take-cheeze
+merged commit 828c1d9
+into
+master
+Oct 4, 2026
+42 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+take-cheeze
+deleted the
+codex/nerf-exporter-ops
+branch
+October 4, 2026 01:03
+This was referenced Oct 4, 2026
+Document nerfstudio nerfacto ONNX export coverage and the bitwise_xor boundary
+#2068
+Merged
+Add an exact BitwiseXor rewrite for NeRF hash grids, plus the Android demo plan
+#2070
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+automerge
+Auto-merge is enabled for this PR
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

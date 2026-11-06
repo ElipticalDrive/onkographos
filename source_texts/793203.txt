@@ -1,0 +1,125 @@
+This article explains how to implement GPU-driven stream compaction in GLSL to filter visible draw candidates into a contiguous array for indirect rendering. In modern graphics pipelines, compute shaders test thousands of objects against the view frustum
+
+Compacting Draw Indices with Atomic Adds in GLSL - glsl
+Compacting
+Draw Indices with Atomic Adds in GLSL
+This article explains how to implement GPU-driven stream compaction
+in GLSL to filter visible draw candidates into a contiguous array for
+indirect rendering. In modern graphics pipelines, compute shaders test
+thousands of objects against the view frustum or occlusion data
+simultaneously. By utilizing atomic addition operations
+(atomicAdd) on shared counter buffers, the GPU dynamically
+calculates contiguous write indices for passing objects, avoiding sparse
+memory layouts and eliminating costly CPU readbacks.
+The Problem of Sparse
+Visibility
+In GPU-driven pipelines, a compute shader processes thousands of
+bounding volumes in parallel to determine visibility. When an object
+passes the visibility check, its index or indirect draw command must be
+placed into a command buffer consumed by functions like
+glMultiDrawElementsIndirect.
+Because GPU threads execute concurrently and only an unpredictable
+subset of objects will pass, threads cannot inherently know where to
+write their output. Leaving the array sparse results in wasted memory
+and requires rendering loops to skip empty slots. Stream compaction
+resolves this by transforming an arbitrary set of passing results into a
+tightly packed, contiguous sequence.
+Implementing
+Stream Compaction via Atomic Addition
+The simplest and most common method for stream compaction in GLSL
+relies on a global atomic counter stored in a Shader Storage Buffer
+Object (SSBO).
+1. Buffer Setup
+Three primary buffers are typically defined:
+Input Buffer: Contains the full list of draw
+commands, object matrices, or bounding volume metadata.
+Output Buffer: Stores the compacted draw commands
+or instance indices that passed culling.
+Counter/Indirect Parameter Buffer: Holds the total
+number of visible items, which also serves as the write-head pointer and
+draw-count parameter.
+```
+#version 460 core
+
+layout(local_size_x = 64) in;
+
+struct DrawCommand {
+    uint count;
+    uint instanceCount;
+    uint firstIndex;
+    int  baseVertex;
+    uint baseInstance;
+};
+
+layout(std430, binding = 0) readonly buffer InputCommands {
+    DrawCommand inCommands[];
+};
+
+layout(std430, binding = 1) writeonly buffer OutputCommands {
+    DrawCommand outCommands[];
+};
+
+layout(std430, binding = 2) buffer DrawCounter {
+    uint visibleCount;
+};
+```
+2. The Visibility
+Check and Atomic Allocation
+Each invocation of the compute shader evaluates one object. If the
+object passes the visibility test, the shader reserves a single slot in
+the output buffer by invoking atomicAdd on the global
+counter.
+```
+bool IsVisible(uint index);
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= inCommands.length()) return;
+
+    if (IsVisible(index)) {
+        // Reserve an index in the contiguous output array
+        uint writeIndex = atomicAdd(visibleCount, 1);
+        
+        // Write the valid command into the reserved slot
+        outCommands[writeIndex] = inCommands[index];
+    }
+}
+```
+The atomicAdd function takes two arguments: the variable
+to modify and the value to add. It returns the original value
+of the counter prior to the addition. This returned value serves as the
+unique, zero-based index where the thread is safely permitted to write
+its data. Because the hardware guarantees serialization of the addition,
+no two threads receive the same write index, preventing race
+conditions.
+Feeding Indirect Draw Calls
+Before executing the compute shader, the visibleCount in
+the counter buffer must be reset to zero via
+glClearBufferData or a separate utility compute
+dispatch.
+Once compaction finishes, the counter buffer contains the exact count
+of visible objects. In an indirect rendering setup, this buffer can be
+bound as a GL_PARAMETER_BUFFER to control
+glMultiDrawElementsIndirectCountARB, or the compute shader
+can write the counter directly into the instanceCount field
+of a singular indirect command structure.
+Optimizing High-Contention
+Atomicity
+While a single global atomicAdd is easy to implement,
+thousands of threads writing to a single memory address can cause memory
+serialization bottlenecks.
+To mitigate this, high-performance implementations leverage GLSL
+subgroup extensions (e.g., GL_KHR_shader_subgroup_ballot
+and GL_KHR_shader_subgroup_arithmetic):
+Threads within a SIMD wave determine visibility collectively.
+A subgroup-level ballot counts how many total invocations within the
+wave passed.
+A single designated lane in the subgroup performs one
+atomicAdd on the global counter for the entire subgroup's
+count.
+Each passing thread adds its local subgroup offset to the base index
+returned by the atomic operation before writing to memory.
+This subgroup optimization reduces memory traffic to the global
+counter by a factor equal to the hardware's warp or wavefront size,
+preserving the same contiguous output array while significantly
+improving execution speed.

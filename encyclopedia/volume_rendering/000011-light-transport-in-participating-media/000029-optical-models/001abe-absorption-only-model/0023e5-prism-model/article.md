@@ -3,15 +3,15 @@
 Also called: Smoke Surface (Prism Model), Surface-based thin volume model
 
 ## Overview
-The Prism Model is a surface-based optical model that simulates a thin participating volume by assigning an approximated depth to each triangle based on its orientation relative to the camera [S1, unofficial]. It solves the problem of rendering volumetric effects (specifically absorption) on dynamic, non-volumetric triangle meshes without requiring explicit voxelization or ray-marching through a 3D grid [S1, unofficial]. It differs from its parent, the Absorption-only model, by replacing the physical particle density assumption with a geometric approximation where density is inversely proportional to triangle area and path length is projected via the viewing angle [S1, unofficial].
+The Prism Model is a surface-based optical model that simulates a thin participating volume by assigning an approximated depth to each triangle based on its orientation relative to the camera [S1, unofficial]. It solves the problem of rendering volumetric effects (specifically absorption) on dynamic, non-volumetric triangle meshes without requiring explicit voxelization or ray-marching through a 3D grid [S1, unofficial]. It differs from its parent, the Absorption-only model, by replacing the physical particle density assumption with a geometric approximation where density is inversely proportional to triangle area and penetration depth is projected via the viewing angle [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A triangle mesh $T$ representing the smoke surface; a viewing ray $r$; a design parameter $k$ controlling initial density; an opacity multiplier function $m_{fade}$; and a shape modifier function $m_{shape}$.
-*   **Output:** The final absorption coefficient $\alpha_{final}$ for the pixel covered by the triangle.
+*   **Input:** A triangle mesh $T$ representing the smoke surface; a viewing ray $r$; a design parameter $k$ controlling initial density; an opacity multiplier function $m_{fade}$; and a shape modifier function $m_{shape}$ [S1, unofficial].
+*   **Output:** The final absorption coefficient $\alpha_{final}$ for the pixel covered by the triangle [S1, unofficial].
 
 **Data Structures:**
-*   **Ring Buffer:** A data structure maintaining the topology of the mesh. It stores rows of vertices. The buffer operates by removing the last (oldest) row of vertices and reusing it as the new first (newest) row to simulate flow [S1, unofficial].
+*   **Ring Buffer:** A data structure maintaining the topology of the mesh. It operates by removing the last (i.e., oldest) row of vertices from the visualization and reusing it as the new first (i.e., newest) row to simulate flow [S1, unofficial].
 *   **Triangle Attributes:** Each triangle $t$ stores its vertices, computed normal $n$, area $A(t)$, and current state for degeneration and fading [S1, unofficial].
 
 **Formulas:**
@@ -27,7 +27,7 @@ The Prism Model is a surface-based optical model that simulates a thin participa
     $$ \alpha_{final} = \alpha(t) \cdot m_{fade}(t) \cdot m_{shape}(t) $$
 
 **Numbered Steps:**
-1.  **Topology Update:** At each frame, update the mesh topology using the ring buffer. Remove the oldest row of vertices and append it as the newest row [S1, unofficial].
+1.  **Topology Update:** At each frame, update the mesh topology using the ring buffer. Remove the last (oldest) row of vertices and reuse it as the new first (newest) row [S1, unofficial].
 2.  **Ray Intersection:** For each pixel, cast a ray $r$ and determine intersection with triangle $t$ at point $p$ [S1, unofficial].
 3.  **Geometry Calculation:**
     *   Compute the triangle normal $n$ [S1, unofficial].
@@ -63,26 +63,24 @@ def compute_prism_absorption(triangle, ray_direction, k, fade_factor, shape_fact
     
     # 2. Compute cosine of angle between normal and view ray
     # cos(gamma) = dot(normal, view_dir)
-    # Note: Assuming normal points towards camera or is consistent with view direction
     cos_gamma = dot(normal, view_dir)
     
     # Guard against division by zero or negative depth (back-facing)
-    # If back-facing, absorption is typically 0 or handled by culling
     if cos_gamma <= 0:
         return 0.0
-        
+            
     # 3. Compute base absorption alpha(t)
     # Formula: alpha(t) = 1 - exp(-k / (cos(gamma) * area(t)))
     denominator = cos_gamma * area
     if denominator == 0:
         return 0.0 # Avoid division by zero
-        
+            
     exponent = -k / denominator
     alpha_base = 1.0 - exp(exponent)
     
     # 4. Apply modifiers
     alpha_final = alpha_base * fade_factor * shape_factor
-    
+        
     return alpha_final
 
 def compute_triangle_area(vertices):
@@ -90,16 +88,33 @@ def compute_triangle_area(vertices):
     v0 = vertices[0]
     v1 = vertices[1]
     v2 = vertices[2]
-    
+        
     # Vector cross product magnitude / 2
     v01 = v1 - v0
     v02 = v2 - v0
     cross = cross_product(v01, v02)
     return length(cross) * 0.5
+
+def cross_product(a, b):
+    """Returns the cross product of two 3D vectors."""
+    return [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]]
+
+def dot(a, b):
+    """Returns the dot product of two 3D vectors."""
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def length(v):
+    """Returns the Euclidean length of a 3D vector."""
+    return (v[0]**2 + v[1]**2 + v[2]**2) ** 0.5
+
+def exp(x):
+    """Returns e raised to the power of x."""
+    import math
+    return math.exp(x)
 ```
 
 **Parameters:**
-*   $k$: Design parameter steering initial density. Typical values are not specified in the sources [S1, unofficial].
+*   $k$: Design parameter steering initial density. Typical values: Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Jagged Behavior (Fade In/Out):** Sudden removal of vertices in the ring buffer causes entire rows of triangles to disappear instantly [S1, unofficial]. This must be handled by modifying $\alpha(t)$ with an opacity multiplier $m_{fade}$ to gently fade out triangles before they are removed from the buffer [S1, unofficial].
@@ -107,12 +122,12 @@ def compute_triangle_area(vertices):
 *   **Back-facing Triangles:** If $\cos(\gamma) \le 0$, the ray does not penetrate the "prism" in the expected direction. Standard culling or zero absorption should be applied [G].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per triangle for absorption calculation, assuming area and normal are precomputed or cheaply computed. The ring buffer update is $O(1)$ if implemented as a circular buffer with pointer manipulation [S1, unofficial].
-*   **Memory Complexity:** $O(N)$ where $N$ is the number of vertices in the mesh. The ring buffer stores a fixed number of rows [S1, unofficial].
+*   **Time Complexity:** $O(1)$ per triangle for absorption calculation, assuming area and normal are precomputed or cheaply computed [G].
+*   **Memory Complexity:** $O(N)$ where $N$ is the number of vertices in the mesh. The ring buffer stores a fixed number of rows [G].
 *   **Strengths:** Real-time capable; avoids expensive volume ray-marching; simple implementation on standard graphics pipelines [S1, unofficial].
 *   **Limitations:** Approximate depth; artifacts from topology changes (jaggedness, degeneration) require manual tuning of fade/shape modifiers; not physically accurate for complex scattering [S1, unofficial].
 *   **When to use:** Real-time visualization of vector fields or smoke-like effects on dynamic surfaces where performance is critical and physical accuracy of scattering is not required [S1, unofficial].
-*   **When not to use:** When accurate volumetric scattering, emission, or complex density variations are needed [S1, unofficial].
+*   **When not to use:** Not given in the sources.
 
 ## Background
 The Prism Model is a surface-based model that serves as the conceptual predecessor to smoke volume rendering [S1, unofficial]. It was presented by Funck et al. [11] in the context of smoke surface rendering [S1, unofficial]. The model interprets triangles as thin prisms to approximate volume information, allowing the use of optical absorption models on 2D surfaces [S1, unofficial]. It is used for the exploration and analysis of unknown vector fields [S1, unofficial].

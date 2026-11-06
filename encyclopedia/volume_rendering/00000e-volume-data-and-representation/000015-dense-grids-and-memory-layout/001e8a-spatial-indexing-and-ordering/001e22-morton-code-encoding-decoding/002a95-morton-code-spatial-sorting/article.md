@@ -3,47 +3,47 @@
 Also called: 3D Morton code sorting, Z-order curve sorting
 
 ## Overview
-Morton Code Spatial Sorting reorders a set of 3D points (typically Gaussian splats) by their Morton codes to improve spatial locality. This ordering enhances compression ratios when quantizing and saving data as images, such as PNGs [S1, unofficial]. It differs from sibling methods by focusing on the global reordering of a flat list of parameters rather than constructing a hierarchical tree structure or optimizing lookup tables for index generation.
+Morton Code Spatial Sorting reorders a set of 3D points (typically Gaussian splats) by their Morton codes to improve spatial locality [S1, unofficial]. This ordering enhances compression ratios when quantizing and saving data as images, such as PNGs [S1, unofficial]. It differs from sibling methods by focusing on the global reordering of a flat list of parameters rather than constructing a hierarchical tree structure or optimizing lookup tables for index generation [G].
 
 ## How it works
-**Inputs:** A dictionary of splat parameters where each value is an array of shape $[N, D]$ (e.g., `means` is $[N, 3]$).
-**Outputs:** A dictionary with the same keys, but each array is reordered according to the sorted Morton codes.
+**Inputs:** A dictionary of splat parameters where each value is an array of shape $[N, D]$ (e.g., `means` is $[N, 3]$) [S1, unofficial].
+**Outputs:** A dictionary with the same keys, but each array is reordered according to the sorted Morton codes [S1, unofficial].
 
 **Data Structures:**
-- `means_np`: NumPy array of shape $[N, 3]$ containing 3D coordinates.
-- `morton`: NumPy array of shape $[N]$ containing 32-bit unsigned integers.
-- `order`: NumPy array of shape $[N]$ containing indices that sort `morton`.
+- `means_np`: NumPy array of shape $[N, 3]$ containing 3D coordinates [S1, unofficial].
+- `morton`: NumPy array of shape $[N]$ containing 32-bit unsigned integers [S1, unofficial].
+- `order`: NumPy array of shape $[N]$ containing indices that sort `morton` [S1, unofficial].
 
 **Steps:**
-1.  **Extract and Normalize:**
-    Let $N$ be the number of splats. Extract the mean positions `means_np` of shape $[N, 3]$.
-    Calculate the bounding box:
-    $$ \text{mins} = \min_{i}(\text{means\_np}_i) $$
-    $$ \text{maxs} = \max_{i}(\text{means\_np}_i) $$
-    $$ \text{ranges} = \text{maxs} - \text{mins} $$
-    If any component of `ranges` is less than $10^{-8}$, set it to $1.0$ [G] to avoid division by zero.
-    Normalize coordinates to $[0, 1]$:
-    $$ \text{normalised} = \frac{\text{means\_np} - \text{mins}}{\text{ranges}} $$
+1. **Extract and Normalize:**
+   Let $N$ be the number of splats. Extract the mean positions `means_np` of shape $[N, 3]$ [S1, unofficial].
+   Calculate the bounding box:
+   $$ \text{mins} = \min_{i}(\text{means\_np}_i) $$
+   $$ \text{maxs} = \max_{i}(\text{means\_np}_i) $$
+   $$ \text{ranges} = \text{maxs} - \text{mins} $$
+   If any component of `ranges` is less than $10^{-8}$, set it to $1.0$ [S1, unofficial] to avoid division by zero.
+   Normalize coordinates to $[0, 1]$:
+   $$ \text{normalised} = \frac{\text{means\_np} - \text{mins}}{\text{ranges}} $$
 
-2.  **Quantize:**
-    Quantize the normalized coordinates to a 10-bit grid ($0$ to $1023$):
-    $$ \text{quantised} = \text{clip}\left( \lfloor \text{normalised} \times 1023 \rfloor, 0, 1023 \right) $$
-    The result is an array of shape $[N, 3]$ with `uint32` values.
+2. **Quantize:**
+   Quantize the normalized coordinates to a 10-bit grid ($0$ to $1023$):
+   $$ \text{quantised} = \text{clip}\left( \lfloor \text{normalised} \times 1023 \rfloor, 0, 1023 \right) $$
+   The result is an array of shape $[N, 3]$ with `uint32` values [S1, unofficial].
 
-3.  **Compute Morton Codes:**
-    For each splat $i$, compute the Morton code $M_i$ from its quantized coordinates $(x_i, y_i, z_i)$ using bit interleaving. The standard implementation uses a bitwise spread function `spread(v)` which maps 10 bits into a 32-bit integer by placing them in every third bit position:
-    $$ \text{spread}(v) = \left( \left( \left( \left( (v \ll 16) \mid v \right) \& 0x030000FF \right) \mid \left( (v \ll 8) \& 0x0300F00F \right) \right) \mid \left( (v \ll 4) \& 0x030C30C3 \right) \right) \mid \left( (v \ll 2) \& 0x09249249 \right) $$
-    $$ M_i = \text{spread}(x_i) \mid (\text{spread}(y_i) \ll 1) \mid (\text{spread}(z_i) \ll 2) $$
-    *Note: The bitwise operations are performed on `uint64` to prevent overflow during shifts, though the final result fits in 32 bits.*
+3. **Compute Morton Codes:**
+   For each splat $i$, compute the Morton code $M_i$ from its quantized coordinates $(x_i, y_i, z_i)$ using bit interleaving [S1, unofficial]. The implementation uses a bitwise spread function `spread(v)` which maps 10 bits into a 32-bit integer by placing them in every third bit position:
+   $$ \text{spread}(v) = \left( \left( \left( \left( (v \ll 16) \mid v \right) \& 0x030000FF \right) \mid \left( (v \ll 8) \& 0x0300F00F \right) \right) \mid \left( (v \ll 4) \& 0x030C30C3 \right) \right) \mid \left( (v \ll 2) \& 0x09249249 \right) $$
+   $$ M_i = \text{spread}(x_i) \mid (\text{spread}(y_i) \ll 1) \mid (\text{spread}(z_i) \ll 2) $$
+   The bitwise operations are performed on `uint64` to prevent overflow during shifts [S1, unofficial].
 
-4.  **Sort:**
-    Compute the sort order indices:
-    $$ \text{order} = \text{argsort}(\text{morton}) $$
-    Convert `order` to the target framework's array type (e.g., MLX).
+4. **Sort:**
+   Compute the sort order indices:
+   $$ \text{order} = \text{argsort}(\text{morton}) $$
+   Convert `order` to the target framework's array type (e.g., MLX) [S1, unofficial].
 
-5.  **Reorder:**
-    For each key $k$ and value array $v$ in the input splats dictionary:
-    $$ \text{sorted\_splats}[k] = v[\text{order}] $$
+5. **Reorder:**
+   For each key $k$ and value array $v$ in the input splats dictionary:
+   $$ \text{sorted\_splats}[k] = v[\text{order}] $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -76,7 +76,7 @@ def sort_by_morton(splats: dict) -> dict:
     mins = means_np.min(axis=0)
     maxs = means_np.max(axis=0)
     ranges = maxs - mins
-    # Guard against zero range [G]
+    # Guard against zero range [S1, unofficial]
     ranges = np.where(ranges < 1e-8, 1.0, ranges)
     
     normalised = (means_np - mins) / ranges
@@ -90,6 +90,8 @@ def sort_by_morton(splats: dict) -> dict:
     
     # 4. Sort
     order = np.argsort(morton).astype(np.uint32)
+    # Convert to target framework array (e.g., MLX) [S1, unofficial]
+    # order_mx = mx.array(order)
     
     # 5. Reorder all parameters
     sorted_splats = {}
@@ -100,13 +102,13 @@ def sort_by_morton(splats: dict) -> dict:
 ```
 
 **Parameters:**
-- **Grid Resolution:** 10-bit (1024 levels per axis). This is a typical value used in the source implementation [S1, unofficial].
-- **Quantization:** Floor operation followed by clipping.
+- **Grid Resolution:** 10-bit (1024 levels per axis) [S1, unofficial].
+- **Quantization:** Floor operation followed by clipping [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Zero Range:** If all points have the same coordinate in one dimension, `ranges` becomes 0. The implementation sets this to 1.0 [G].
-- **Precision:** Floating-point normalization errors can cause points on the boundary to quantize incorrectly. Clipping to $[0, 1023]$ handles this.
-- **Bit Overflow:** The `spread` function uses `uint64` intermediates. If coordinates were larger than 10 bits, the final Morton code would overflow 32 bits or collide.
+- **Zero Range:** If all points have the same coordinate in one dimension, `ranges` becomes 0. The implementation sets this to 1.0 [S1, unofficial].
+- **Precision:** Floating-point normalization errors can cause points on the boundary to quantize incorrectly. Clipping to $[0, 1023]$ handles this [S1, unofficial].
+- **Bit Overflow:** The `spread` function uses `uint64` intermediates. If coordinates were larger than 10 bits, the final Morton code would overflow 32 bits or collide [G].
 
 ## Subtopics
 
@@ -120,16 +122,17 @@ An alternative encoding method using precomputed tables for speed. Use this when
 Generates Morton codes specifically for octree node traversal. Use this when building hierarchical spatial structures.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \log N)$ due to the sorting step. The Morton code computation is $O(N)$.
-- **Memory Complexity:** $O(N)$ to store the Morton codes and sort indices.
-- **Performance:** The method is efficient for moderate $N$. The bitwise operations are fast. Sorting dominates the cost.
-- **Strengths:** Improves spatial locality for subsequent compression or rendering passes. Simple to implement.
-- **Limitations:** Sorting is not stable by default (though `argsort` is typically stable in NumPy). The 10-bit quantization limits precision.
-- **When to use:** When preparing data for texture-based storage (e.g., PNG) or when spatial locality improves cache performance in subsequent steps.
-- **When not to use:** If exact coordinate precision is required without quantization, or if $N$ is very large and sorting becomes a bottleneck.
+- **Time Complexity:** $O(N \log N)$ due to the sorting step. The Morton code computation is $O(N)$ [G].
+- **Memory Complexity:** $O(N)$ to store the Morton codes and sort indices [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Improves spatial locality for subsequent compression or rendering passes [S1, unofficial].
+- **Limitations:** The 10-bit quantization limits precision [S1, unofficial].
+- **When to use:** When preparing data for texture-based storage (e.g., PNG) or when spatial locality improves cache performance in subsequent steps [S1, unofficial].
+- **When not to use:** If exact coordinate precision is required without quantization, or if $N$ is very large and sorting becomes a bottleneck [G].
 
 ## Background
-This method is used in the context of 3D Gaussian Splatting, specifically in implementations like `gsplat-mlx` [S1, unofficial]. It was introduced to optimize the storage and retrieval of Gaussian splat parameters by leveraging the Z-order curve properties of Morton codes.
+This method is used in the context of 3D Gaussian Splatting, specifically in implementations like `gsplat-mlx` [S1, unofficial]. It was introduced to optimize the storage and retrieval of Gaussian splat parameters by leveraging the Z-order curve properties of Morton codes [S1, unofficial].
 
 ## Sources
 [S1] RobotFlow-Labs/gsplat-mlx, https://github.com/RobotFlow-Labs/gsplat-mlx, fetched 2026-10-27 (unofficial)

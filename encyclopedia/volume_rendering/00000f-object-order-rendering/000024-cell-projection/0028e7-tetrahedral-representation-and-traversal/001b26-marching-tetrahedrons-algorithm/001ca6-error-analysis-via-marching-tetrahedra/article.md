@@ -3,65 +3,27 @@
 Also called: Isosurface Error Evaluation
 
 ## Overview
-Error Analysis via Marching Tetrahedra is a geometric error metric used to determine whether two child tetrahedra in a hierarchical volume representation can be fused into a single parent tetrahedron without exceeding a specified approximation tolerance [S1]. It solves the problem of balancing mesh simplification against geometric fidelity during isosurface extraction. Unlike sibling methods that may rely on algebraic residuals or view-dependent projections, this method explicitly evaluates the displacement of the isosurface intersection points along specific segments within the tetrahedron using the Marching Tetrahedra topology [S1]. It is chosen when a physically meaningful, viewpoint-independent error bound is required for multiresolution isosurface rendering [S1].
+Error Analysis via Marching Tetrahedra is a geometric error metric that determines whether two child tetrahedra in a hierarchical volume representation can be fused into a single parent tetrahedron [S1]. It measures the geometric and topological changes in the isosurface when the fusion occurs, using the Marching Tetrahedra algorithm to evaluate approximation error [S1]. Unlike sibling methods that rely on algebraic residuals or view-dependent projections, this method explicitly evaluates the displacement of isosurface intersection points along specific segments within the tetrahedron [S1]. It is chosen when a physically meaningful, viewpoint-independent error bound is required for multiresolution isosurface rendering [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Two adjacent child tetrahedra (or a single tetrahedron context for error calculation), the scalar field data (densities) at all vertices, the isosurface threshold value $T$, and the maximum allowable error $\epsilon_{max}$.
-*   **Output:** A boolean indicating if fusion is allowed, and if so, the calculated approximation error $\epsilon$.
+*   **Input:** Tetrahedron vertices $v_0, v_1, v_2, v_3$, scalar densities $d_0, d_1, d_2, d_3$ at each vertex, isosurface threshold $T$, dividing point $p_{div}$, dividing density $d_{div}$, and the indices of the two vertices forming the bisected edge $L$ [S1].
+*   **Output:** Approximation error $\epsilon$ (or $\infty$ if fusion is forbidden) [S1].
 
 **Data Structures:**
-The method operates on the geometry of a single tetrahedron $V$ with vertices $v_0, v_1, v_2, v_3$. Each vertex $v_i$ has an associated scalar density value $d_i$. The method assumes a trilinear interpolation model for density within the tetrahedron, consistent with the underlying volume data structure [S1].
+The method operates on a single tetrahedron context where each vertex $v_i$ holds a position and a scalar density value $d_i$ [S1]. Density within the tetrahedron is evaluated via trilinear interpolation of vertex densities [S1].
 
 **Steps:**
-
-1.  **Sign Assignment:**
-    Assign a sign $s_i$ to each vertex $v_i$ based on the isosurface threshold $T$:
-    $$
-    s_i = \begin{cases} 
-    +1 & \text{if } d_i > T \\
-    -1 & \text{if } d_i \le T 
-    \end{cases}
-    $$
-    [S1]
-
-2.  **Topological Change Check:**
-    Identify the edge $L$ that is bisected when the two child tetrahedra are conceptually merged or subdivided. Let the endpoints of edge $L$ be $v_a$ and $v_b$, and let $p_{div}$ be the dividing point (typically the midpoint or the point where the isosurface intersects the edge in the finer resolution).
-    
-    If the signs of the endpoints of edge $L$ are the same ($s_a = s_b$) AND the sign of the dividing point $p_{div}$ is opposite to them ($s_{div} \neq s_a$), a topological change occurs in the isosurface configuration (specifically corresponding to Cases a2, b2, or c3 in the source figures) [S1].
-    
-    In this case, return an error value $\epsilon = \infty$ (or a value $> \epsilon_{max}$) to forbid fusion [S1].
-
-3.  **Geometric Error Calculation:**
-    If no topological change is detected, calculate the geometric error by examining four segments connecting the dividing point $p_{div}$ to the four vertices $v_0, v_1, v_2, v_3$ of the tetrahedron [S1].
-    
-    For each segment $k$ (where $k \in \{0, 1, 2, 3\}$) connecting $p_{div}$ to vertex $v_k$:
-    
-    a.  Determine the sign of the vertex $v_k$ ($s_k$) and the sign of the dividing point $p_{div}$ ($s_{div}$).
-    
-    b.  Calculate the position of the isosurface intersection point $I_{avg}$ assuming the density along the segment is interpolated using the average density of the edge endpoints (the "coarse" approximation).
-    
-    c.  Calculate the position of the isosurface intersection point $I_{div}$ assuming the density at $p_{div}$ is used (the "fine" approximation) [S1].
-    
-    d.  If the endpoints of the segment (specifically $p_{div}$ and $v_k$) have different signs under *either* density assumption, the isosurface intersects the segment. The distance $d_k$ is the Euclidean distance between $I_{avg}$ and $I_{div}$ [S1].
-    
-    e.  If the endpoints have the same sign under both assumptions, the distance $d_k = 0$ [S1].
-
-4.  **Final Error Metric:**
-    The approximation error $\epsilon$ for the tetrahedron is the maximum of the distances calculated in Step 3:
-    $$
-    \epsilon = \max_{k=0}^{3} (d_k)
-    $$
-    [S1]
-    
-    If $\epsilon \le \epsilon_{max}$, fusion is allowed. The method uses physical distance rather than projected (viewpoint-dependent) distance, as experiments showed physical distance to be efficient and sufficient [S1].
+1.  **Sign Assignment:** Assign a sign $s_i$ to each vertex $v_i$ based on the threshold $T$: $s_i = +1$ if $d_i > T$, otherwise $s_i = -1$ [S1].
+2.  **Topological Change Check:** Identify the endpoints of edge $L$ ($v_a, v_b$) and the sign of the dividing point $s_{div}$ [S1]. If $s_a = s_b$ and $s_{div} \neq s_a$, the isosurface topology changes after fusion (Cases a2, b2, c3) [S1]. Return $\epsilon = \infty$ to forbid fusion [S1].
+3.  **Geometric Error Calculation:** For each vertex $v_k$ ($k \in \{0, 1, 2, 3\}$), examine the segment connecting $p_{div}$ to $v_k$ [S1]. Calculate the average density of edge $L$ endpoints: $d_{avg} = (d_a + d_b)/2$ [G]. Determine the sign at $p_{div}$ under both assumptions: $s_{div}$ (using $d_{div}$) and $s_{avg}$ (using $d_{avg}$) [G]. If the segment endpoints have different signs under *either* assumption, the isosurface intersects the segment [S1]. Calculate the Euclidean distance $d_k$ between the intersection point using $d_{div}$ and the intersection point using $d_{avg}$ [S1]. If the endpoints have the same sign under *either* assumption, set $d_k = 0$ [S1].
+4.  **Final Error Metric:** The approximation error is the maximum distance across all four segments: $\epsilon = \max_{k=0}^{3} (d_k)$ [S1]. If $\epsilon \le \epsilon_{max}$, fusion is allowed [S1].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def calculate_marching_tetrahedra_error(vertices, densities, threshold, dividing_point, dividing_density):
+def calculate_mt_error(vertices, densities, threshold, dividing_point, dividing_density, edge_indices):
     """
     Calculates the isosurface approximation error for a tetrahedron context.
     
@@ -71,177 +33,53 @@ def calculate_marching_tetrahedra_error(vertices, densities, threshold, dividing
         threshold: The isosurface threshold T
         dividing_point: Position of the dividing point p_div
         dividing_density: Density value at the dividing point
+        edge_indices: Tuple of two indices (a, b) for the bisected edge L
         
     Returns:
         float: The approximation error. Returns infinity if topological change occurs.
     """
-    # Step 1: Sign Assignment
-    signs = []
-    for d in densities:
-        if d > threshold:
-            signs.append(1)
-        else:
-            signs.append(-1)
-            
-    # Determine sign of dividing point
-    if dividing_density > threshold:
-        sign_div = 1
-    else:
-        sign_div = -1
-        
-    # Step 2: Topological Change Check
-    # Identify edge L endpoints. In the context of fusing two children, 
-    # the source implies checking the edge bisected by the division.
-    # Assuming the dividing point lies on an edge between two vertices, 
-    # we need to identify which edge. For a general tetrahedron error check 
-    # as described, we look for the specific case where endpoints of the 
-    # relevant edge have same sign and dividing point has opposite.
-    # The source specifies "endpoints of edge L". Let's assume the dividing 
-    # point is on the edge between v_a and v_b. 
-    # Note: The source does not explicitly define how to map 'dividing_point' 
-    # to specific vertices v_a, v_b in the general function signature without 
-    # knowing the subdivision geometry. However, the logic is:
-    # If there exists an edge (v_a, v_b) such that sign[v_a] == sign[v_b] 
-    # AND sign_div != sign[v_a], then topological change.
-    
-    # We must identify which edge the dividing point belongs to.
-    # This requires geometric proximity check or pre-defined topology.
-    # For the purpose of this self-contained pseudocode, we assume 
-    # 'edge_indices' provides the indices of the two vertices forming edge L.
-    # If not provided, this step cannot be fully implemented without 
-    # additional context from the parent subdivision structure.
-    # [G] Assuming edge_indices is passed or derived from geometry.
-    # Here we simulate the check for a generic edge (v0, v1) for demonstration,
-    # but in practice, the specific edge L bisected by the fusion boundary must be known.
-    
-    # Let's assume the dividing point is on the edge between v0 and v1 for this example.
-    # In a real implementation, the caller would specify the edge.
-    edge_v0_idx = 0
-    edge_v1_idx = 1
-    
-    sign_v0 = signs[edge_v0_idx]
-    sign_v1 = signs[edge_v1_idx]
-    
-    if sign_v0 == sign_v1 and sign_div != sign_v0:
-        return float('inf') # Topological change, forbid fusion
+    a, b = edge_indices
+    d_avg = (densities[a] + densities[b]) / 2.0
 
-    # Step 3: Geometric Error Calculation
+    # Step 1: Sign Assignment
+    signs = [1 if d > threshold else -1 for d in densities]
+    sign_div = 1 if dividing_density > threshold else -1
+    sign_avg = 1 if d_avg > threshold else -1
+
+    # Step 2: Topological Change Check
+    if signs[a] == signs[b] and sign_div != signs[a]:
+        return float('inf')
+
     max_dist = 0.0
-    
     for k in range(4):
-        v_k = vertices[k]
         sign_vk = signs[k]
         
-        # Segment connects dividing_point to v_k
-        # Check if isosurface intersects this segment under both assumptions
-        
-        # Assumption 1: Using dividing_density (Fine)
-        # Interpolate between dividing_density and densities[k]
-        # We need to find the intersection point I_div
-        # Linear interpolation along the segment from p_div to v_k
-        # Let t be the parameter from 0 (p_div) to 1 (v_k)
-        # Density(t) = dividing_density + t * (densities[k] - dividing_density)
-        # Find t such that Density(t) == threshold
-        
-        # Check signs to see if intersection exists
-        # Sign at p_div is sign_div
-        # Sign at v_k is sign_vk
-        
-        # If signs are different, intersection exists for the "Fine" model
-        has_intersection_fine = (sign_div != sign_vk)
-        
-        # Assumption 2: Using average density of edge endpoints (Coarse)
-        # The source says "average density value of edge L endpoints".
-        # This phrasing is slightly ambiguous for segments not on edge L.
-        # However, the source states: "if two endpoints of a segment hold 
-        # different signs when using either the dividing point density or 
-        # the average density...".
-        # For the segment connecting p_div to v_k, the "endpoints" are p_div and v_k.
-        # The "average density" likely refers to the density used in the 
-        # coarser representation. In the context of the source, the "average 
-        # density of edge L endpoints" is used to define the topology of the 
-        # coarse tetrahedron. 
-        # Let's assume the "Coarse" density at p_div is the average of the 
-        # original edge endpoints (v_a, v_b). Let's call this d_avg.
-        # But wait, the source says "average density value of edge L endpoints".
-        # If the segment is NOT edge L, what is the reference?
-        # Re-reading: "For a segment, if two endpoints hold different signs, 
-        # a change of the position of the iso-point occurs when the dividing 
-        # point density instead of the average density value of edge L endpoints is used."
-        # This implies the comparison is between:
-        # 1. Iso-point calculated using dividing_density at p_div.
-        # 2. Iso-point calculated using d_avg (average of edge L endpoints) at p_div.
-        # The other endpoint of the segment is v_k. Its density is fixed.
-        
-        # So, for the segment p_div -> v_k:
-        # Model A (Fine): Density at p_div is dividing_density.
-        # Model B (Coarse): Density at p_div is d_avg.
-        
-        # We need d_avg. This is a parameter of the specific edge L.
-        # [G] d_avg must be passed or computed from the parent edge L.
-        # Let's assume d_avg is passed.
-        
-        # Check intersection for Model A (Fine)
-        # Signs: sign_div and sign_vk
-        # If different, intersection I_div exists.
-        
-        # Check intersection for Model B (Coarse)
-        # Density at p_div is d_avg.
-        # Sign at p_div (Coarse) = 1 if d_avg > threshold else -1
-        sign_coarse_div = 1 if dividing_density > threshold else -1 # Wait, source says "average density of edge L endpoints"
-        # Correction: The coarse model uses the average density of the edge L endpoints 
-        # for the entire region or specifically at the dividing point?
-        # The source says "when the dividing point density instead of the average 
-        # density value of edge L endpoints is used". This implies replacing 
-        # dividing_density with d_avg.
-        
-        # Let's define d_avg explicitly.
-        # [G] d_avg is the average of densities at the endpoints of edge L.
-        
-        sign_coarse_div_val = 1 if d_avg > threshold else -1
-        
-        has_intersection_coarse = (sign_coarse_div_val != sign_vk)
-        
-        # If either has no intersection, distance is 0?
-        # Source: "If two endpoints of a segment hold the same sign when using 
-        # either the dividing point density or the average density, the distance 
-        # is regarded as zero."
-        # This means if (sign_div == sign_vk) OR (sign_coarse_div_val == sign_vk),
-        # then distance is 0.
-        
-        if (sign_div == sign_vk) or (sign_coarse_div_val == sign_vk):
+        # Step 3: Geometric Error Calculation
+        # If endpoints have the same sign under either assumption, distance is zero
+        if sign_div == sign_vk or sign_avg == sign_vk:
             dist = 0.0
         else:
-            # Both have intersections. Calculate positions.
-            # Position I_div (Fine)
-            # t_div = (threshold - dividing_density) / (densities[k] - dividing_density)
-            # I_div = p_div + t_div * (v_k - p_div)
+            # Linear interpolation parameter t where density(t) == threshold
+            denom_div = densities[k] - dividing_density
+            t_div = (threshold - dividing_density) / denom_div if denom_div != 0 else 0.0
             
-            # Position I_coarse (Coarse)
-            # t_coarse = (threshold - d_avg) / (densities[k] - d_avg)
-            # I_coarse = p_div + t_coarse * (v_k - p_div)
+            denom_avg = densities[k] - d_avg
+            t_avg = (threshold - d_avg) / denom_avg if denom_avg != 0 else 0.0
             
-            # Distance is Euclidean distance between I_div and I_coarse
-            # Since they lie on the same line segment, distance = |t_div - t_coarse| * |v_k - p_div|
+            # Clamp t to [0, 1] to stay on the segment [G]
+            t_div = max(0.0, min(1.0, t_div))
+            t_avg = max(0.0, min(1.0, t_avg))
             
-            denom_fine = densities[k] - dividing_density
-            denom_coarse = densities[k] - d_avg
+            # Calculate intersection positions
+            v_k = vertices[k]
+            p_div = dividing_point
+            diff = [v_k[i] - p_div[i] for i in range(3)]
+            pos_div = [p_div[i] + t_div * diff[i] for i in range(3)]
+            pos_avg = [p_div[i] + t_avg * diff[i] for i in range(3)]
             
-            # Avoid division by zero if density equals vertex density
-            if denom_fine == 0 or denom_coarse == 0:
-                dist = 0.0
-            else:
-                t_div = (threshold - dividing_density) / denom_fine
-                t_coarse = (threshold - d_avg) / denom_coarse
-                
-                # Clamp t to [0, 1] if necessary, though sign check ensures intersection is within segment
-                # Actually, sign check ensures t is in [0,1] if we assume linear interpolation
-                # between the two endpoints.
-                
-                diff_t = abs(t_div - t_coarse)
-                segment_length = vector_length(v_k - dividing_point)
-                dist = diff_t * segment_length
-        
+            # Euclidean distance between the two iso-points
+            dist = ((pos_div[0]-pos_avg[0])**2 + (pos_div[1]-pos_avg[1])**2 + (pos_div[2]-pos_avg[2])**2)**0.5
+
         if dist > max_dist:
             max_dist = dist
             
@@ -249,57 +87,41 @@ def calculate_marching_tetrahedra_error(vertices, densities, threshold, dividing
 ```
 
 **Parameters:**
-*   **Error Metric:** Physical Euclidean distance between iso-points [S1].
-*   **Typical Values:** Error thresholds vary by dataset. For the Box dataset ($129^3$), an error of 4.0 resulted in 93.04% fusion [S1]. For the CT Head dataset ($129^3$), an error of 4.0 resulted in 94.35% fusion [S1].
+*   **Error Metric:** Physical Euclidean distance between iso-points [S1]. Projected (viewpoint-dependent) distance is an alternative but was found less efficient [S1].
+*   **Typical Values:** Error thresholds vary by dataset [S1]. For the Box dataset ($129^3$), an error of 4.0 resulted in 93.04% fusion [S1]. For the CT Head dataset ($129^3$), an error of 4.0 resulted in 94.35% fusion [S1].
 
 **Edge Cases and Pitfalls:**
-*   **Topological Changes:** The method explicitly forbids fusion if the sign configuration indicates a topological change (Cases a2, b2, c3). Ignoring this leads to incorrect isosurface topology [S1].
-*   **Precision:** The calculation relies on the assumption that the finest resolution mesh is the most accurate [S1]. Numerical precision in calculating the intersection points $I_{avg}$ and $I_{div}$ can affect the error value, particularly when densities are close to the threshold.
-*   **Boundary Conditions:** The method assumes a trilinear interpolation model. If the data does not conform to this, the error metric may not accurately reflect the true geometric deviation [S1].
+*   **Topological Changes:** The method explicitly forbids fusion if the sign configuration indicates a topological change (Cases a2, b2, c3) [S1].
+*   **Accuracy Assumption:** The error evaluation assumes the finest resolution tetrahedra mesh is the most accurate [S1].
+*   **Interpolation Model:** The method relies on trilinear interpolation of vertex densities [S1].
 
-## Subtopics
-
-### Regularised Marching Tetrahedra
-A variant that addresses the topological inconsistencies of standard Marching Tetrahedra by regularizing the configuration. Choose this when topological correctness is more critical than the specific error metric of fusion. [Link](1301-regularised-marching-tetrahedra.md)
-
-### Subgrid Pipeline
-A method for extracting surfaces from subgrid data. Choose this when working with structured subgrid representations rather than tetrahedral hierarchies. [Link](1640-subgrid-pipeline.md)
-
-### McGrids
-A method using grid-based structures for efficient surface extraction. Choose this for regular grid data where tetrahedral subdivision is not the primary representation. [Link](2289-mcgrids.md)
-
-### BCC Marching Tetrahedra with Permutation-Based Lookup
-Uses a Body-Centered Cubic lattice. Choose this for potentially better isotropy in surface extraction compared to standard cubic-to-tetrahedral decomposition. [Link](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md)
-
-### Exact Fiber Surface Extraction
-Focuses on fiber-like structures. Choose this when the data consists of thin, tubular structures where general isosurface error metrics may be insufficient. [Link](3445-exact-fiber-surface-extraction.md)
-
-### Marching Tetrahedra Reconstruction
-Focuses on reconstructing the mesh from extracted data. Choose this when the goal is reconstruction rather than hierarchical simplification. [Link](3516-marching-tetrahedra-reconstruction.md)
-
-### Marching Tetrahedra 3 (DLC-Plane)
-Uses a different plane configuration for the isosurface. Choose this for specific rendering artifacts or performance characteristics associated with the DLC-plane approach. [Link](3632-marching-tetrahedra-3-dlc-plane.md)
-
-### Raster Algorithm for Fiber Surface Extraction
-A rasterization-based approach. Choose this for hardware-accelerated rendering of fiber data rather than geometric error analysis. [Link](4960-raster-algorithm-for-fiber-surface-extraction.md)
+### Subtopics
+*   **Regularised Marching Tetrahedra** [Link](1301-regularised-marching-tetrahedra.md): Not given in the sources.
+*   **Subgrid Pipeline** [Link](1640-subgrid-pipeline.md): Not given in the sources.
+*   **McGrids** [Link](2289-mcgrids.md): Not given in the sources.
+*   **BCC Marching Tetrahedra with Permutation-Based Lookup** [Link](3414-bcc-marching-tetrahedra-with-permutation-based-lookup.md): Not given in the sources.
+*   **Exact Fiber Surface Extraction** [Link](3445-exact-fiber-surface-extraction.md): Not given in the sources.
+*   **Marching Tetrahedra Reconstruction** [Link](3516-marching-tetrahedra-reconstruction.md): Not given in the sources.
+*   **Marching Tetrahedra 3 (DLC-Plane)** [Link](3632-marching-tetrahedra-3-dlc-plane.md): Not given in the sources.
+*   **Raster Algorithm for Fiber Surface Extraction** [Link](4960-raster-algorithm-for-fiber-surface-extraction.md): Not given in the sources.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-The subdivision time is constant with respect to data values, depending only on the resolution (e.g., 90 seconds for $129^3$ datasets) [S1]. The fusion time varies based on data complexity and the error threshold, as it depends on the error evaluation for each tetrahedron (e.g., 19 seconds for Box, 55 seconds for CT Head at $129^3$) [S1]. Memory usage is reduced by the fusion process, with up to 94% of tetrahedra removed at higher error thresholds [S1].
+Subdivision time is constant with respect to data values, depending only on resolution (e.g., 90 seconds for $129^3$ datasets) [S1]. Fusion time varies based on data complexity and error threshold, as it depends on error evaluation per tetrahedron (e.g., 19 seconds for Box, 55 seconds for CT Head at $129^3$) [S1]. Memory usage is reduced by the fusion process, with up to 94% of tetrahedra removed at higher error thresholds [S1].
 
 **Measured Performance:**
 *   **Box Dataset ($129^3$):** Initial mesh: 1,646,568 tetrahedra, 182,376 triangles. With error=4.0: 114,556 tetrahedra, 51,490 triangles (93.04% fusion) [S1].
 *   **CT Head Dataset ($129^3$):** Initial mesh: 5,390,896 tetrahedra, 255,256 triangles. With error=4.0: 304,468 tetrahedra, 89,300 triangles (94.35% fusion) [S1].
 
 **Strengths and Limitations:**
-*   **Strengths:** Provides a physically meaningful error bound; viewpoint-independent; effectively reduces mesh complexity while preserving topology (when topological checks are enforced) [S1].
-*   **Limitations:** Computationally expensive fusion phase dependent on data complexity; relies on trilinear interpolation assumption; physical distance may not always correlate with visual error in all viewing angles (though projected distance was found less efficient) [S1].
+*   **Strengths:** Provides a physically meaningful error bound; viewpoint-independent; effectively reduces mesh complexity while preserving topology when topological checks are enforced [S1].
+*   **Limitations:** Computationally expensive fusion phase dependent on data complexity; relies on trilinear interpolation assumption; physical distance may not always correlate with visual error in all viewing angles [S1].
 
 **When to Use:**
 Use this method when performing multiresolution isosurface extraction from regular volume data where geometric accuracy and topological correctness are paramount, and where a hierarchical tetrahedral representation is already in place [S1].
 
 ## Background
-The method was introduced in the paper "Multiresolution tetrahedral framework for visualizing regular volume data" [S1]. It is part of a framework that uses a tetrahedral subdivision to create a multiresolution representation of volume data, allowing for efficient visualization through adaptive simplification. The error analysis specifically leverages the Marching Tetrahedra algorithm [ZCT95] to quantify the geometric deviation introduced by simplifying the mesh.
+The method was introduced in the paper "Multiresolution tetrahedral framework for visualizing regular volume data" [S1]. It is part of a framework that uses tetrahedral subdivision to create a multiresolution representation of volume data, allowing for efficient visualization through adaptive simplification [S1]. The error analysis specifically leverages the Marching Tetrahedra algorithm [ZCT95] to quantify the geometric deviation introduced by simplifying the mesh [S1].
 
 ## Sources
 [S1] Multiresolution tetrahedral framework for visualizing regular volume data, https://doi.org/10.5555/266989.267040, fetched 2026-10-30

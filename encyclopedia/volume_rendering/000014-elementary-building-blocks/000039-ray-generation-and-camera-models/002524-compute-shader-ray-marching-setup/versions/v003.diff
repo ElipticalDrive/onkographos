@@ -1,0 +1,197 @@
+--- v002.md
++++ v003.md
+@@ -4,100 +4,116 @@
+ 
+ ## Overview
+-This method initializes the compute shader environment for volumetric ray marching by generating camera rays per pixel and configuring the necessary data structures for density accumulation. It differs from standard ray generation by explicitly handling the dispatch dimensions relative to screen resolution (often downsampled) and managing the specific render texture formats required for high-precision density storage. It serves as the foundational setup for the ray marching kernel, bridging the gap between camera parameters and the voxel grid traversal logic.
++This method initializes the compute shader pipeline for volumetric ray marching, specifically handling camera ray reconstruction and dispatch parameters for a voxel-based smoke renderer. It differs from general ray generation by explicitly detailing the reconstruction of world-space rays from screen coordinates via inverse projection matrices and the two-stage marching logic (empty-space skipping vs. density accumulation) [S1, unofficial]. It serves as the computational core that bridges the camera model and the voxel data structures.
+ 
+ ## How it works
+-**Inputs:**
+-- Screen resolution ($W_{screen}, H_{screen}$).
+-- Camera matrices: World-to-View inverse (or View-to-World) and Projection inverse ($\mathbf{M}_{invProj}$).
+-- Camera position in world space ($\mathbf{p}_{cam}$).
+-- Voxel grid occupancy data (ComputeBuffer).
+-- Noise texture (RWTexture2D or Texture2D).
+-
+-**Outputs:**
+-- A render texture (e.g., `smokeTexture`) storing accumulated density or color.
+-- Dispatch parameters for the compute shader.
++**Inputs and Outputs:**
++*   **Inputs:** Screen resolution (`Screen.width`, `Screen.height`), camera transform (`cam.transform.position`), camera matrices (`_CamToWorldMatrix`, `_invProjectionMatrix`), voxel grid data (accessed via `getSmokeVoxel`), noise texture (`_NoiseTexture`), and parameters (`_RayMaxLength`, `smoothing`, `densityMUlt`) [S1, unofficial].
++*   **Outputs:** A `RenderTexture` (`smokeTexture`) with format `ARGB64` (linear) storing the accumulated smoke density/composite result [S1, unofficial].
+ 
+ **Data Structures:**
+-1. **Render Texture (`smokeTexture`)**:
+-   - Dimensions: $W_{tex} = \lceil W_{screen} / 8 \rceil$, $H_{tex} = \lceil H_{screen} / 8 \rceil$ [S1, unofficial].
+-   - Format: `ARGB64` (32-bit float per channel) to support high dynamic range density values [S1, unofficial].
+-   - Usage: Random write (`RWTexture2D<float4>`).
+-2. **Shader Constants**:
+-   - `_RayMaxLength`: Maximum distance to march. Default: $50.0$ [S1, unofficial].
+-   - `smoothing`: Density smoothing factor [S1, unofficial].
+-   - `densityMult`: Density multiplier [S1, unofficial].
++*   **Ray:** Defined by origin $\mathbf{o}$ (camera position) and direction $\mathbf{d}$ (normalized world-space vector) [S1, unofficial].
++*   **Voxel Grid:** Flattened 3D array accessed via index $z \cdot (X \cdot Y) + y \cdot X + x$, where $X, Y$ are grid dimensions. Out-of-bounds returns `-1` [S1, unofficial].
++*   **Noise Texture:** `RWTexture2D` storing Worley noise values, sampled per pixel [S1, unofficial].
+ 
+ **Steps:**
+-1. **Calculate Dispatch Dimensions**:
+-   Compute the number of thread groups based on the screen resolution divided by a downscale factor (typically 8).
+-   $$ W_{dispatch} = \lceil W_{screen} / 8 \rceil $$
+-   $$ H_{dispatch} = \lceil H_{screen} / 8 \rceil $$
+-   [S1, unofficial].
++1.  **Calculate Resolution:** Determine render width and height by dividing screen dimensions by 8 and rounding up:
++    $$ W = \lceil \text{Screen.width} / 8 \rceil, \quad H = \lceil \text{Screen.height} / 8 \rceil $$
++    [S1, unofficial]
++2.  **Initialize Texture:** Create `smokeTexture` with dimensions $W \times H$, format `ARGB64`, linear color space [S1, unofficial].
++3.  **Set Matrices:** Pass `_CamToWorldMatrix` and `_invProjectionMatrix` to the compute shader [S1, unofficial].
++4.  **Set Camera Position:** Extract world-space camera position $\mathbf{o}$ from `cam.transform.position` [S1, unofficial].
++5.  **Dispatch Shader:** Launch compute shader kernel with thread groups:
++    $$ \text{threadsX} = \lceil W / 8 \rceil, \quad \text{threadsY} = \lceil H / 8 \rceil, \quad \text{threadsZ} = 1 $$
++    [S1, unofficial]
++6.  **Per-Pixel Ray Reconstruction (Compute Shader):**
++    For each thread $(id.x, id.y)$:
++    a.  Compute UV coordinates:
++        $$ u = \frac{id.x}{W}, \quad v = \frac{id.y}{H} $$
++        [S1, unofficial]
++    b.  Convert to Normalized Device Coordinates (NDC):
++        $$ \text{ndc} = (2u - 1, 2v - 1, 0, 1) $$
++        [S1, unofficial]
++    c.  Transform to View Space:
++        $$ \mathbf{v}_{\text{dir}} = \text{normalize}(\text{mul}(\_invProjectionMatrix, \text{ndc}).xyz) $$
++        [S1, unofficial]
++    d.  Transform to World Space:
++        $$ \mathbf{d} = \text{normalize}(\text{mul}(\_CamToWorldMatrix, (0, 0, \mathbf{v}_{\text{dir}}, 0)).xyz) $$
++        [S1, unofficial]
++7.  **Two-Stage Marching:**
++    a.  **Stage 1 (Empty-Space Skipping):** Step along ray with fixed `stepSize` until smoke voxel is found or `_RayMaxLength` is exceeded.
++        $$ \text{while } (\text{smokeValue} \le 0 \land \text{length} < \_RayMaxLength) $$
++        [S1, unofficial]
++    b.  **Stage 2 (Density Accumulation):** Once inside volume, accumulate density over fixed 40 steps (note: ignores volume bounds, potentially causing bleed) [S1, unofficial].
++8.  **Noise Sampling (Bug Note):** Current implementation samples noise using screen UV, causing pattern to swim with camera. Fix requires 3D world-position sampling [S1, unofficial].
+ 
+-2. **Configure Render Texture**:
+-   Allocate a `RenderTexture` with width $W_{tex}$, height $H_{tex}$, 0 depth buffer, `ARGB64` format, and linear color space [S1, unofficial].
+-
+-3. **Set Shader Matrices**:
+-   Pass the inverse projection matrix ($\mathbf{M}_{invProj}$) and the camera-to-world matrix ($\mathbf{M}_{camToWorld}$) to the compute shader [S1, unofficial].
+-
+-4. **Set Camera Position**:
+-   Pass the camera's world-space position ($\mathbf{p}_{cam}$) to the shader [S1, unofficial].
+-
+-5. **Dispatch Compute Shader**:
+-   Launch the ray marching kernel with dimensions $(W_{dispatch}, H_{dispatch}, 1)$ [S1, unofficial].
+-
+-**Pseudocode (C# Setup Logic):**
++**Pseudocode:**
+ ```python
+-# Calculate dimensions
+-width = ceil(screen_width / 8)
+-height = ceil(screen_height / 8)
+-
+-# Create render texture
+-smoke_texture = RenderTexture(width, height, 0, RenderTextureFormat.ARGB64, RenderTextureReadWrite.Linear)
+-
+-# Set shader properties
+-shader.set_matrix("_invProjectionMatrix", camera.inverse_projection_matrix)
+-shader.set_matrix("_CamToWorldMatrix", camera.world_to_world_matrix) # Identity or actual transform
+-shader.set_float("_RayMaxLength", 50.0)
+-shader.set_float("smoothing", 0.5) # Example default
+-shader.set_float("densityMult", 1.0) # Example default
+-
+-# Dispatch
+-shader.dispatch(kernel_index, width, height, 1)
++# Compute Shader Kernel (simplified)
++def ray_marching_kernel(id_x, id_y, width, height, cam_pos, cam_to_world, inv_proj, noise_tex, voxel_grid, ray_max_length, step_size):
++    # 1. Ray Reconstruction
++    u = id_x / width
++    v = id_y / height
++    ndc = (2 * u - 1, 2 * v - 1, 0, 1)
++    
++    # Inverse projection to view space
++    view_dir = normalize(multiply_matrix_vector(inv_proj, ndc).xyz)
++    
++    # Camera to world space (direction only)
++    ray_dir = normalize(multiply_matrix_vector(cam_to_world, (0, 0, view_dir, 0)).xyz)
++    
++    # 2. Stage 1: Empty Space Skipping
++    length = 0.0
++    position = cam_pos
++    while length < ray_max_length:
++        # Check voxel occupancy
++        smoke_val = get_smoke_voxel(voxel_grid, position)
++        if smoke_val > 0:
++            break
++        length += step_size
++        position = cam_pos + length * ray_dir
++        
++    # 3. Stage 2: Density Accumulation
++    color = (0, 0, 0, 0)
++    if length < ray_max_length:
++        # Fixed 40 steps for accumulation (known issue: ignores bounds)
++        for i in range(40):
++            # Sample density and noise
++            # Note: Current bug uses screen UV for noise
++            noise_val = noise_tex[id_x, id_y].r 
++            density = sample_density(position, noise_val)
++            color = accumulate_color(color, density)
++            length += step_size
++            position = cam_pos + length * ray_dir
++            
++    return color
+ ```
+ 
+-**Ray Reconstruction (Inside Compute Shader):**
+-Each thread corresponds to a pixel. It reconstructs the world-space ray:
+-1. **UV to NDC**:
+-   $$ u = \frac{thread\_id.x}{W_{tex}} $$
+-   $$ v = \frac{thread\_id.y}{H_{tex}} $$
+-   $$ \mathbf{ndc} = (2u - 1, 2v - 1, 0, 1) $$
+-   [S1, unofficial].
+-
+-2. **View Space Direction**:
+-   $$ \mathbf{view\_dir} = \mathbf{M}_{invProj} \times \mathbf{ndc} $$
+-   $$ \mathbf{view\_dir} = \text{normalize}(\mathbf{view\_dir}.xyz) $$
+-   [S1, unofficial].
+-
+-3. **World Space Direction**:
+-   $$ \mathbf{ray\_vec} = \text{normalize}(\mathbf{M}_{camToWorld} \times (0, \mathbf{view\_dir}.xyz, 0).xyz) $$
+-   [S1, unofficial].
++**Parameters:**
++*   `_RayMaxLength`: Maximum ray length. Default: 50.0 [S1, unofficial].
++*   `smoothing`: Density smoothing factor [S1, unofficial].
++*   `densityMUlt`: Density multiplier [S1, unofficial].
++*   `stepSize`: Fixed step size for marching (value not explicitly given, implied by loop) [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Noise Sampling Bug**: If the noise texture is sampled using screen-space UV coordinates (`uv`) instead of world-space positions, the noise pattern will appear pinned to the screen and "swim" as the camera moves, rather than being attached to the volume [S1, unofficial]. The fix is to sample noise using the 3D world position of the ray sample [S1, unofficial].
+-- **Volume Bounds**: The accumulation loop may ignore volume bounds, running a fixed number of steps (e.g., 40) even after the ray exits the voxel grid, causing smoke to bleed [S1, unofficial].
+-- **Precision**: Using `ARGB64` is critical for density accumulation to prevent banding and overflow during integration [S1, unofficial].
++*   **Noise Sampling Bug:** Sampling noise by screen UV instead of world position causes the noise pattern to drift relative to the volume as the camera moves [S1, unofficial].
++*   **Volume Bounds:** Stage 2 accumulation runs for a fixed 40 steps regardless of whether the ray has exited the voxel grid, leading to smoke bleeding [S1, unofficial].
++*   **Color Reassignment:** The color variable `col` is reassigned every iteration in the accumulation loop, which may overwrite previous contributions if not handled correctly (implementation detail) [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Compute Shader Ray Generation](3508-compute-shader-ray-generation.md)
++Generates initial camera rays per pixel using a pinhole model, deferring orientation to later steps. Choose when explicit UV-to-ray conversion is needed without full camera matrix overhead.
++
+ ## Operating characteristics
+-- **Time Complexity**: $O(W \times H \times N)$, where $W, H$ are the dispatch dimensions and $N$ is the number of march steps. The two-stage march (empty-space skipping) reduces $N$ for rays that do not intersect the volume, but worst-case remains linear with resolution and depth.
+-- **Memory Complexity**: $O(W \times H)$ for the output texture, plus $O(V)$ for the voxel grid and noise texture, where $V$ is the voxel count.
+-- **Performance**: The downscale factor (8x) significantly reduces pixel shader/compute load, making real-time rendering feasible on consumer hardware. The `ARGB64` format increases memory bandwidth usage compared to 8-bit formats.
+-- **Strengths**: Flexible camera setup, efficient empty-space skipping, high-precision output.
+-- **Limitations**: Screen-space noise sampling bug if not implemented correctly; fixed-step accumulation can waste cycles outside the volume.
++*   **Time Complexity:** $O(P \cdot (S_{skip} + S_{acc}))$, where $P$ is pixel count, $S_{skip}$ is steps for empty-space skipping, and $S_{acc}$ is accumulation steps (fixed at 40) [S1, unofficial].
++*   **Memory Complexity:** $O(W \cdot H)$ for the output texture, plus voxel grid storage [S1, unofficial].
++*   **Performance:** Resolution is downsampled by 8x ($W = \lceil W_{screen}/8 \rceil$), reducing pixel shader load [S1, unofficial].
++*   **Strengths:** Efficient empty-space skipping avoids unnecessary density calculations; procedural noise generation on GPU avoids texture loading [S1, unofficial].
++*   **Limitations:** Fixed step count in Stage 2 causes artifacts; noise sampling bug affects visual quality; downsampled resolution may appear blurry [S1, unofficial].
++*   **When to Use:** Real-time volumetric effects where performance is critical and visual fidelity can tolerate downscaling and procedural noise artifacts.
++*   **When Not to Use:** High-fidelity offline rendering or when accurate 3D noise integration is required.
+ 
+ ## Background
+-This setup is derived from practical implementations of GPU-based volumetric rendering, specifically those using Unity's Compute Shader infrastructure. The specific pipeline (Voxeliser → CS_Noise → CSRaytrace → Combiner) and the associated bugs/fixes are documented in the unofficial repository by Schokolasbotter [S1, unofficial].
++Originated in the open-source project `volumetric-smoke-raymarching` by Schokolasbotter, demonstrating a real-time smoke rendering pipeline using Unity Compute Shaders [S1, unofficial]. The method combines voxel occupancy grids with procedural Worley noise to simulate smoke density, composited over a camera feed.
+ 
+ ## Sources

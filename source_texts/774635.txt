@@ -1,0 +1,64 @@
+The current rendering implementation is naive. It looks up the visibility cluster based on the player's viewpoint, enumerates faces-per-leaf for each leaf in a cluster, and draws each cluster visible from the player's view sequentially; ...
+
+Rendering overhaul · Issue #6 · little-meow-meow/scythe · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Rendering overhaul #6
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Rendering overhaul#6
+Copy link
+Description
+little-meow-meow
+opened on Sep 29, 2026
+Issue body actions
+The current rendering implementation is naive. It looks up the visibility cluster based on the player's viewpoint, enumerates faces-per-leaf for each leaf in a cluster, and draws each cluster visible from the player's view sequentially; all of this is done during GM:PreDrawOpaqueRenderables.
+The engine of course does much more than this. It has to determine which order faces should be drawn, draws translucent faces after opaque faces, draws the 2D and 3D skybox, decals, overlays, shadows & projected textures, and so on.
+However we don't necessarily have access to enough hooks to implement all graphical details. Thus for the sake of rendering accuracy it is necessary to completely stub the engine's rendering (with GM:RenderScene) and replicate everything from Lua.
+The following analysis is based on leaked TF2 source code leak from 2017 and reverse engineering of the GMod x86-64 Linux branch.
+Source rendering is kind of a mess. First I will provide an overview of the general sections before diving into specifics. Note that section 3 is nested within section 2 in terms of execution.
+Overview
+Section 1: Pre-rendering
+This is where rendering officially starts. There are a lot of function boundaries and occasional stage prep but it's not at all interesting. The main menu, debug console, loading screen, and so on are all rendered here. It ends when V_RenderView calls into the client module and the next section begins.
+Section 2: CViewRender
+This class in the client module renders the actual game. It accomplishes this by calling frequently into engine API code and it does much of this in one ~450 line method. Lots of stuff proximate to this call site is redundant, documented completely erroneously, excessively labyrinthine, named with some not so-descriptive combination of the words "view" and "render" -- I needn't say more. You have been warned!
+V_RenderView calls CHLClient::View_Render( vrect_t *rect ). Here the GM:PreRender() hook is called. If the hook returns true, the function ends early. Otherwise move to CViewRender::Render( vrect_t *rect ).
+CViewRender::Render has yet more stage prep. Some VR pre- and post-prep here, a little view model FOV enforcement there. Something about saving screenshots. It's difficult to tell how much of this even matters due to the overall breadth of redundancies and dead ends. The important part is that it calls CViewRender::RenderView and GM:PostRender shortly after.
+CViewRender::RenderView( CViewSetup&, ClearFlags_t, RenderViewInfo_t ) is the longest function in rendering. It's responsible for drawing the world, area portals, light sprites, post-processing, view models, VGui panels, freeze frames, monitors, viewport upscaling... almost everything.
+Beside the major method calls (R_DrawPortals, PerformScreenSpaceEffects, etc.) it abstracts world rendering into a series of chained "views". CSkyboxView comes first and handles drawing the 3D skybox where applicable. Other views are chained together depending on the visibility of reflected surfaces and water volumes. With the exception of CSkyboxView, the rest of the views are dispatched from RenderView's call to void CViewRender::ViewDrawScene.
+Section 3: Views
+Because this is still an overview and I'm almost out of breath, I'll explain how views generally work using CSimpleWorldView as an example. This view is selected when real time surface reflections aren't used.
+Views generally have two methods, Setup and Draw. CSimpleWorldView::Setup is a glorified constructor. CSimpleWorldView::Draw calls CBaseWorldView::DrawSetup then CBaseWorldView::DrawExecute.
+DrawSetup builds render lists for world surfaces (R_BuildWorldLists) and render lists for entities (IClientLeafSystem::ClientLeafSystem()->BuildRenderablesList). The point of these lists is to figure out what's visible from a certain point, to separate opaque things from translucent things, and to sort renderables back-to-front so they're layered onto the frame buffer in the right order. We also figure out which light map pages need to be updated for brush models and dynamic lights.
+DrawExecute draws stuff from the lists. Start by updating shadows with IClientShadowMgr::ComputeShadowTextures, then draw everything in the correct order. For example: world, opaque renderables, translucent renderables, and finally translucent renderables without depth (e.g. sprites).
+Views
+Note
+Encapsulated base classes for rendering views have a narrow inheritance tree. CBase3dView is the most basic view class and CRendering3dView directly inherits it; they're often used almost interchangeably.
+Rendering logic in game/client/viewrender.cpp is encapsulated into separate 'views', each of which are subclasses of CBase3dView. These views are executed by CSimpleRenderExecutor, an object with a circular dependency on CViewRender with no other purpose than its virtual method AddView( CRendering3dView *pView ). CSimpleRenderExecutor::AddView takes a view object, tracks it as the active view in CViewRender, calls pView->Draw();, then restores the previous active view. Thus any calls to AddView are closely equivalent to directly calling the draw method on the view. CViewRender::AddViewToScene also just calls m_SimpleExecutor.AddView. There are no other executor implementations.
+Activity
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

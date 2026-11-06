@@ -1,0 +1,97 @@
+🤖 Written by Claude (AI), checked by @BimingtonBill. I'd like to rework how the engine streams the world, so that loading gets faster by making each stage cheaper and running it on worker threads, rather than by capping how much loads pe...
+
+Faster world streaming: cheaper, parallel loading stages instead of per-frame caps · Issue #117 · Mudcrab-Team/mudcrab · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Faster world streaming: cheaper, parallel loading stages instead of per-frame caps #117
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Faster world streaming: cheaper, parallel loading stages instead of per-frame caps#117
+Copy link
+Assignees
+Labels
+area: enginecrates/enginecrates/engineenhancementNew feature or requestNew feature or request
+Description
+BimingtonBill
+opened on Oct 1, 2026
+Issue body actions
+🤖 Written by Claude (AI), checked by @BimingtonBill.
+I'd like to rework how the engine streams the world, so that loading gets faster by making each stage cheaper and running it on worker threads, rather than by capping how much loads per frame. I'm opening this first so it can line up with the LOD and door-preloading work.
+Why
+Today the engine protects frame time with fixed counts per frame: 1 cell commit, 2 unloads, 4 model spawns and 16 MiB of GPU uploads (the last three are mine, from #57). They never look at how long a frame actually took, so a cheap frame wastes its spare time, and a dense cell with 500+ references still lands in one frame. They smooth the worst frame, but each stage still costs what it cost, so loading is slower than the hardware allows.
+Three examples from the current code and timing runs:
+Order: cells are requested in hash-set order and models are placed oldest-first, so when flying, far models can arrive before near ones. In a fly-through at 5,000 units/s, up to 2,744 models were still waiting, 4-5 s behind the camera.
+Main thread: terrain meshes, terrain colliders and every reference of a cell are built in one main-thread call. The worst game-logic phase in a crossing run was 14.7 ms.
+Gates: the screenshot and settle checks can't see uploads still held back by the cap, so screenshots taken under load can miss objects.
+Proposal
+Six steps, one PR each, each measured before the next starts:
+Measure where load time goes: a benchmark for a full load at a new place and a fast fly-through, with per-stage costs beside frame times. This also tests whether building graphics pipelines (shader linking) causes the render-side spikes.
+Terrain and colliders on worker threads; the main thread only inserts the results.
+References prepared off the main thread and inserted in batches; only models that just finished loading are checked for readiness, instead of rescanning all of them every frame.
+Nearest and needed first for every queue: ground and colliders under the player, then where the camera is heading, then what's on screen.
+Graphics pipelines built ahead of time if step 1 confirms they cause spikes; more database workers.
+One main-thread time budget replaces the fixed counts, plus one "world is ready" signal for the screenshot, settle and benchmark gates.
+Success is measured as load speed and smoothness together: time to a fully loaded view, nothing waiting near the camera at 5,000 units/s, and a worst frame within 16.7 ms. A change that smooths frames by slowing loads counts as a failure.
+Overlap
+LOD (feat(lod): initial native terrain LOD and verified asset reuse #105, LOD Phase 2: conservative static-object chunks and drawable handoff #106, @TaylorTurnerIT): LOD blocks stream terrain too, so they could use the same queues and ordering once both land. I'd keep step 2 clear of the LOD code until feat(lod): initial native terrain LOD and verified asset reuse #105 has merged.
+Door preloading (Pre-load destination cell assets when approaching a door #112): preloading the cell behind a door is a "where the player is heading" case for step 4's ordering.
+Questions
+Any objection to starting with step 1, which only adds measurement?
+@TaylorTurnerIT: would you rather LOD blocks join the shared queues, or keep their own?
+Activity
+BimingtonBill
+self-assigned this
+on Oct 1, 2026
+BimingtonBill
+added
+enhancementNew feature or requestNew feature or request
+on Oct 1, 2026
+github-project-automation
+added this to Mudcrab Projecton Oct 1, 2026
+TaylorTurnerIT commented on Oct 2, 2026
+TaylorTurnerIT
+on Oct 2, 2026
+Member
+More actions
+No objection to starting with step 1. Measurement first is the right order.
+On your question: LOD should join the shared queues and the single time budget from step 6, not keep its own. #105 currently shares the existing count cap with cells, with LOD alternating priority and reserving a slot when work is waiting. That was the smallest change that left the accepted budgets intact; it isn't meant to outlast step 6. When step 6 lands, LOD chunk commits should draw from the same main-thread time budget and the same nearest-and-needed ordering as cell work. Coverage should come first: ground under the player, then LOD replacing missing full detail, then refinement.
+Two constraints from the LOD side, so the shared design keeps them:
+Handoff is readiness-based, per quadrant. A LOD patch hides only when the matching full-detail terrain is drawable, and a coarser ready tier is the fallback. Any "world is ready" signal must count LOD coverage, or screenshots will catch holes during handoff.
+Reach now comes from Skyrim's INI keys (uGridsToLoad, fBlockLevel*Distance, fSplitDistanceMult) and defaults to Skyrim's own values, so terrain LOD reaches 12/25/91 cells. That's far more LOD work in flight than before, which makes the nearest-first ordering in step 4 matter for LOD too. Queue ordering should use the configured reach, not chunk size.
+#105 is up to date with main again; I'd keep step 2 clear of streaming/lod.rs until it merges, as you suggested.
+BimingtonBill
+added
+area: enginecrates/enginecrates/engine
+on Oct 12, 2026
+BimingtonBill
+moved this from To do to In progress in Mudcrab Projecton Oct 19, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+BimingtonBill
+Labels
+area: enginecrates/enginecrates/engineenhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+Mudcrab Project
+Status
+In progress
+Show more project fields
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

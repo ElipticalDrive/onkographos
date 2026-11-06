@@ -1,0 +1,110 @@
+Paleogeographic map compilation desktop workbench. Contribute to WindWang2/paleo-workbench development by creating an account on GitHub.
+
+feat(seismic): VramTextureCache (L2) — 1 GiB global budget + all-type LRU (#1078) by WindWang2 · Pull Request #1104 · WindWang2/paleo-workbench · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+WindWang2
+commented
+Aug 28, 2026
+Copy link
+Copy Markdown
+Owner
+Implements #1078 — 补齐双级缓存的显存层。
+What
+geoviz_seismic/vram_cache.py — process-wide VramTextureCache singleton (VRAM): all texture types in one byte ledger, default 1 GiB, clamped 512 MiB–2 GiB (GEOVIZ_VRAM_BUDGET_MB env or set_budget()), global-LRU eviction with explicit GPU release (direct glDeleteTextures / deferred queue) via owner callbacks that leave the item re-uploadable. Paint-time touch() keeps on-screen textures MRU. stats() exposes hits/misses/evictions/releases, bytes_now/peak, per-kind breakdown.
+Registered kinds: slice2d (2D profile Indexed8 content), ortho3d (3D orthogonal/stratal R8 index textures + content), overlay/lut (volume + wiggle LUTs), horizon (sculpt R32F), volume/normal (3D bricks), wiggle (R32F slices — mock-GL path counts identically), curtain (arbitrary-line RGBA planes).
+L2-hit fast path: ProfileVD.render_indexed + SeismicView caching keyed on (segy_generation, slice_type, position, attr, clip) — colormap excluded by design, so a colormap switch is an O(1) recolour that never re-reads L1 nor rebuilds L2 content. Renderer3D._slice_index_l2 does the same for 3D planes (slider revisit skips the normalize pass).
+SEG-Y 直读路径受益（L1 = RamSliceCache 未动）；不依赖 zarr 链路。
+Acceptance criteria
+重复浏览已见切片 < 16 ms（L2 命中） — benchmarks/vram_l2_hit_benchmark.py: hit path 2.1–4.3 ms (cold 44–88 ms, 18–28×) at 0.56M/1.6M/4M-sample slices; widget-level median assertions in tests.
+VRAM 有界 + 最久未用释放（诊断计数可验证） — eviction tests assert LRU order, release invocation, bytes_now ≤ budget, counters; paint-time keepalive and oversized-single-entry rules covered.
+预算可配置；切换 colormap 不触发 L1 重读 — default/clamp/env tests; SeismicView toolbar colormap switch asserts zero renormalize calls, L2 entry retained (same key), L1 .get never invoked.
+多视图共享同一全局预算 — two SeismicViews share the singleton; identical slices dedup across views (entries don't grow with view count); cross-view global LRU eviction.
+Verification
+New suite tests/test_vram_texture_cache.py — 18 passed.
+Seismic regression subset (cache/LUT, 2D3D consistency, view panel, attribute panel, workflow, well-seismic scene, preview cache, prediction flow …) — all green.
+Full-suite failures in mapping/canvas tests (unified_map*, scalar_raster_mirror, …) reproduce identically on clean main baseline — environmental (native C++ extensions fail to load in this sandbox), unrelated to this change.
+Contains a geo-viz-engine submodule bump to feat/1078-vram-texture-cache (engine commit 2b9eee68).
+Antigravity Agent
+added 2 commits
+August 28, 2026 10:20
+feat(seismic): VramTextureCache (L2) acceptance suite + hit-path benc…
+…
+80eb4fd
+```
+…hmark (#1078)
+
+Bumps geo-viz-engine to the L2 VRAM texture-cache commit and adds the
+acceptance evidence:
+
+- tests/test_vram_texture_cache.py covers all four criteria: repeated
+  slice browsing < 16 ms on the L2-hit path (widget-level, median of
+  repeats), bounded VRAM with globally-LRU eviction verified through the
+  diagnostic counters (including the paint-time keepalive and the
+  oversized-single-entry rule), configurable budget (default 1 GiB,
+  512 MiB–2 GiB clamp, GEOVIZ_VRAM_BUDGET_MB env) with colormap switches
+  that never renormalize nor re-read L1, and multi-view coexistence on
+  one shared budget (identical slices dedup across views).
+- benchmarks/vram_l2_hit_benchmark.py measures cold vs L2-hit display at
+  0.56M/1.6M/4M-sample slices; on this machine the hit path runs at
+  2.1–4.3 ms (18–28x over cold), well under the 16 ms bar.
+```
+test(seismic): L2 cache review response — collision + shape-guard reg…
+…
+3efc8a9
+```
+…ressions
+
+Bumps geo-viz-engine to the review-fix commit. Adds the two regression
+tests for the cross-view key collision found by the two-axis review
+(different SEGY paths never share entries; each panel's colours match
+its own survey) and for the shape-mismatch guard on the hit path.
+The normalize-spy scaffold moves into a shared count_normalize fixture,
+the vacuous l1_reads assertion is dropped, and the benchmark now times
+the full SeismicView revisit pipeline (2.2–6.2 ms at 0.56M–4M samples)
+alongside the renderer-level numbers.
+```
+WindWang2
+commented
+Aug 28, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Two-axis review response (f6fbd3c4 + 3efc8a9)
+Ran the repo's /code-review (Standards + Spec, parallel reviewers). Findings addressed:
+Spec — cross-view key collision (real bug): _l2_texture_key carried only the per-view SEGY generation (both views start at 0), so two views on different files could collide keys and serve each other's index textures. Keys now carry a volume identity (SEGY path for surveys; CPU preview array id for demo volumes) — same-file views still dedup into one entry, different-file views never cross-serve. _render_l2_hit also refuses shape-mismatched entries. Two regression tests added.
+Spec — benchmark scope: the script now also times the end-to-end SeismicView revisit pipeline (key build + VRAM.get + panel refresh), not just the renderer half: 2.2–6.2 ms at 0.56M–4M-sample slices. The structurally vacuous l1_reads == [] assertion was dropped.
+Standards: hit-or-store dance extracted into _render_profile_with_l2 (3 sites); the four identical wiggle VRAM.put blocks collapsed to one per method; dead API surface removed (register alias, resident_kinds, touch_count); test spy scaffold deduped into a count_normalize fixture.
+Left as-is (explicit > clever): the seven per-texture eviction hooks in renderer_3d.py and the cache.py re-export (the latter follows the design doc's §4.1 single-import-site intent and is contract-tested).
+All 20 L2 tests + seismic regression subset green after the fixes.
+Hide details
+View details
+WindWang2
+merged commit af92f59
+into
+main
+Aug 28, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+WindWang2
+deleted the
+feat/1078-vram-texture-cache
+branch
+August 31, 2026 09:51
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

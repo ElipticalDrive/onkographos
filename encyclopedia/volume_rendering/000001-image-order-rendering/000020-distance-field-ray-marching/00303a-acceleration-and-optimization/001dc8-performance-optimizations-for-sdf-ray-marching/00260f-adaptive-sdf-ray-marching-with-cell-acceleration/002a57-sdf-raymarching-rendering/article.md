@@ -1,0 +1,117 @@
+# SDF Raymarching & Rendering
+
+Also called: SDFRenderer, unlit SDF fragment shader
+
+## Overview
+SDF Raymarching & Rendering is a technique for rendering signed distance field (SDF) scenes by marching a ray through the field to find surface intersections and computing lighting at the hit point. It differs from volume rendering by treating the SDF as a boundary representation (implicit surface) rather than a volumetric density, and from standard rasterization by avoiding geometry primitives in favor of procedural distance queries. This method builds on [Adaptive SDF Ray Marching with Cell Acceleration](3714-adaptive-sdf-ray-marching-with-cell-acceleration.md) by performing the final surface refinement, shading, and texturing after the acceleration structure has narrowed the search space.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Vertex shader outputs world position and view direction; SDF texture or procedural function; scene parameters (light position, shadow settings, AO settings).
+*   **Output:** Fragment color with shading, shadows, and ambient occlusion.
+
+**Data Structures:**
+*   `v2f` (Vertex Output):
+    *   `vertex : SV_POSITION` (clip space position, float4)
+    *   `worldVertex : TEXCOORD0` (world space vertex position, float3)
+    *   `vectorToSurface : TEXCOORD1` (direction from camera to vertex, float3)
+*   **Uniforms:**
+    *   `_sphereRadius` (float): Radius of the SDF bounding sphere.
+    *   `_sdfRadius` (float): Radius used for ray-sphere intersection start point.
+    *   `_maxRaymarchSteps` (int): Maximum number of steps per ray.
+    *   `_shadowIntensity` (float), `_shadowSoftness` (float): Shadow parameters.
+    *   `_aoSamples` (int), `_aoKernelSize` (float): Ambient occlusion parameters.
+    *   `_planetTex` (sampler2D): Texture for base color.
+    *   `_sunPos` (float3): Light source position.
+
+**Numbered Steps:**
+1.  **Vertex Shader:** Compute world position `o.worldVertex` and view direction `o.vectorToSurface = o.worldVertex - _WorldSpaceCameraPos`.
+2.  **Fragment Shader - Ray Initialization:** Set `rayOrigin = i.worldVertex`. Compute `rayDirection = normalize(i.worldVertex - _WorldSpaceCameraPos)`.
+3.  **Ray-Sphere Intersection:** Calculate distance `dist` from `rayOrigin` to the SDF bounding sphere using `raySphereIntersect(rayOrigin, rayDirection, float3(0.0, 0.0, 0.0), _sdfRadius)`. Advance `rayOrigin` by `dist + 0.01` to start inside or just outside the field.
+4.  **Ray Marching:** Call `worldRayMarch(rayOrigin, rayDirection, 16.0, res, hitPos, colAtHit)`. This function iteratively samples the SDF, stepping forward by the sampled distance until a surface is hit or max steps are exceeded. It returns `hit > 0.0` if a surface is found.
+5.  **Shading:** If `hit > 0.0`:
+    *   Compute surface normal `normal = worldNormal(hitPos)`.
+    *   Compute shadow: Cast a shadow ray from `hitPos + normal * 0.001` towards `_sunPos`. Use `_shadowIntensity` and `_shadowSoftness` to modulate the result.
+    *   Compute Ambient Occlusion (AO): Sample the SDF along the normal in multiple directions using `_aoSamples` and `_aoKernelSize`.
+    *   Compute base color: Sample `_planetTex` using UVs derived from `uv` and `_sphereRadius`.
+    *   Combine lighting, shadow, AO, and base color to produce final `col`.
+6.  **Debug Mode:** If `_debugMode == 1`, skip raymarching. Compute `d = worldSample(rayOrigin, c)`. Color based on signed distance `d` using exponential falloff and cosine modulation.
+
+**Formulas:**
+*   **Ray-Sphere Intersection:** Standard quadratic solution for $|rayOrigin + t \cdot rayDirection - center|^2 = radius^2$.
+*   **Shadow Ray:** $shadow = 1.0 - \text{smoothstep}(0.0, \_shadowSoftness, \text{distanceToLight}) \cdot \_shadowIntensity$.
+*   **AO:** $ao = 1.0 - \frac{\sum_{i=0}^{\_aoSamples} \text{clamp}(0.0, 1.0, \text{sdf}(hitPos + normal \cdot i \cdot \_aoKernelSize))}{\_aoSamples}$.
+*   **Debug Coloring:** $col = (1.0 - e^{-5.0 |d|}) \cdot (0.8 + 0.2 \cos(512.0 |d|)) \cdot \text{step}(0.0, d) + \dots$
+
+**Parameters:**
+*   `_maxRaymarchSteps`: Not given in the sources.
+*   `_aoSamples`: Not given in the sources.
+*   `_aoKernelSize`: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Small offsets (`0.001`) are used to prevent self-intersection in shadow rays.
+*   **Boundaries:** Ray-sphere intersection ensures the ray starts within the SDF volume, preventing infinite loops in empty space.
+*   **Degenerate Input:** If `_debugMode` is enabled, the raymarching logic is bypassed, which may lead to incorrect lighting if not handled separately.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def raymarch_render(world_vertex, world_camera_pos, sdf_function, params):
+    ray_origin = world_vertex
+    ray_direction = normalize(world_vertex - world_camera_pos)
+    
+    # Ray-sphere intersection
+    dist = ray_sphere_intersect(ray_origin, ray_direction, float3(0,0,0), params.sdf_radius)
+    ray_origin += ray_direction * (dist + 0.01)
+    
+    # Ray marching
+    hit, hit_pos, col_at_hit = world_ray_march(ray_origin, ray_direction, 16.0)
+    
+    if hit:
+        normal = world_normal(hit_pos)
+        
+        # Shadow
+        shadow_ray_origin = hit_pos + normal * 0.001
+        shadow = compute_shadow(shadow_ray_origin, params.sun_pos, params.shadow_intensity, params.shadow_softness)
+        
+        # AO
+        ao = compute_ao(hit_pos, normal, params.ao_samples, params.ao_kernel_size)
+        
+        # Color
+        uv = float2(0.5, length(uv) / params.sphere_radius)
+        base_color = sample_texture(params.planet_tex, uv)
+        
+        # Final color
+        final_color = base_color * shadow * ao
+        return final_color
+    else:
+        return float3(0.8, 0.8, 0.8)
+```
+
+## Subtopics
+
+### Debug SDF Visualization
+Renders the signed distance field directly as a 2D cross-section or 3D volume, using color to indicate sign and magnitude. Useful for debugging SDF generation. [Debug SDF Visualization](debug-sdf-visualization.md)
+
+### Ray-Sphere Intersection
+Optimized function to find the entry point of a ray into a bounding sphere, used to initialize the raymarch. [Ray-Sphere Intersection](ray-sphere-intersection.md)
+
+### World Normal Computation
+Computes the surface normal from the SDF gradient at a given point. [World Normal Computation](world-normal-computation.md)
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of raymarch steps. Each step involves an SDF query.
+*   **Memory Complexity:** $O(1)$ per ray, plus storage for the SDF texture.
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with resolution and the number of rays (pixels). SDF query cost depends on texture size or procedural complexity.
+*   **Strengths:** No geometry required; infinite detail; easy to modify shapes.
+*   **Limitations:** No occlusion culling beyond the acceleration structure; high computational cost per pixel; no support for transparent surfaces without additional logic.
+*   **When to Use:** Real-time rendering of simple, smooth, or procedural shapes.
+*   **When Not to Use:** Complex scenes with many objects, or when high precision is required for thin structures.
+
+## Background
+Originated from the use of signed distance fields in real-time graphics, popularized by tools like Unity and Unreal Engine. The specific implementation described here is from an unofficial GitHub repository by Samuel Bigos, demonstrating a practical approach to SDF rendering in Unity.
+
+## Sources
+[S1] samuelbigos/signed_distance_fields_in_unity, https://github.com/samuelbigos/signed_distance_fields_in_unity, fetched 2026-10-27 (unofficial)

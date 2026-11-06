@@ -1,0 +1,1249 @@
+DuckDB is an analytical in-process SQL database management system - Make the DICT_FSST size estimate account for the block-local dictionary by krleonid · Pull Request #73 · krleonid/duckdb
+
+Make the DICT_FSST size estimate account for the block-local dictionary by krleonid · Pull Request #73 · krleonid/duckdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+krleonid
+commented
+Sep 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Problem
+DictFSSTAnalyzeState::FinalAnalyze() was a single line:
+```
+return LossyNumericCast<idx_t>((double)total_string_length / 2.0);
+```
+DICT_FSST reported "half the raw bytes" for any input — never looking at the cardinality of the data, never accounting for the dictionary being rebuilt for every block, not even using total_count. Compression selection picks the method with the lowest estimate, so DICT_FSST could win with a size it cannot deliver.
+Two shapes of data hit this:
+Duplicates spread further apart than one block's dictionary can reach. Every block re-stores the values it sees, so almost nothing is deduplicated.
+Large unique values. Only one or two fit per block, so each block is mostly empty.
+Both end up needing far more blocks than the estimate suggests, and a block a large dictionary leaves mostly empty still costs a full block. A ratio of the raw size cannot express that. The dictionary compression this superseded could: it charges segment_count * block_size.
+Reproduction
+300k rows, 300 distinct values of 5760 bytes, scattered, 16KB block size:
+```
+ATTACH 'repro.db' AS db (BLOCK_SIZE 16384);
+USE db;
+CREATE TABLE t AS
+WITH vals AS (
+    SELECT g AS grp,
+           (SELECT string_agg(md5(g::VARCHAR||'-'||x::VARCHAR),'') FROM range(180) x) AS txt
+    FROM range(300) t2(g)
+)
+SELECT vals.txt AS description
+FROM (SELECT (hash(i) % 300) AS grp FROM range(300000) t(i)) i
+JOIN vals USING(grp);
+CHECKPOINT db;
+```
+method
+estimate
+actually produced
+DICT_FSST
+864 MB
+~1.5 GB
+ZSTD
+~865 MB
+good
+Uncompressed
+~1.73 GB
+1.73 GB
+DICT_FSST wins by roughly 1 MB on an estimate it cannot honor, producing ~150k segments of about two rows each.
+The unique variant, same block size, 2000 unique values of 5760 bytes: estimated at half the raw size, selected, and produces 1000 segments of two rows and 15.7 MB.
+Fix
+Both layouts DICT_FSST can produce are now estimated per block, and neither can bypass block accounting:
+Dictionary layout — simulate the block packing, the way the dictionary analyze state already does, and charge for the blocks it needs. Memory during analyze stays bounded to one simulated block's distinct values: the hash set and its backing heap are both reset at each simulated block boundary.
+FSST_ONLY layout — it stores every value encoded, with a symbol table per block and no selection buffer, so the values that fit a block follow from their encoded length. Whole blocks are charged. Only estimated where the mode is reachable: it requires every value in a segment to be unique, and a segment holds one block worth of values, so "no simulated block held a value twice" is exactly that condition.
+FinalAnalyze returns the cheaper of the two.
+Measured, 16KB blocks:
+case
+before
+after
+300 distinct x 5760 B, scattered, 300k rows
+DICT_FSST, 1.5 GB
+ZSTD, 401 MB
+2000 unique x 5760 B
+DICT_FSST, 15.7 MB
+ZSTD, 0.1 MB
+4 distinct short values, 20k rows
+DICT_FSST
+DICT_FSST (unchanged)
+50k unique 96 B values
+DICT_FSST
+DICT_FSST (unchanged)
+Sorting the scattered input still selects DICT_FSST and still produces 2.5 MB, so the case DICT_FSST is good at is unaffected.
+Test plan
+New test/sql/storage/compression/dict_fsst/dict_fsst_size_estimate.test_slow, covering scattered large duplicates, large unique values, and a small dictionary that must still select DICT_FSST. The unique case is built from concatenated hashes rather than a repeated string, so ZSTD cannot win the comparison on internal repetition alone.
+test/sql/storage/compression/dict_fsst/* — 215 assertions
+test/sql/storage/compression/dictionary/* — 57 assertions
+compression_selection_dict_fsst.test, default_storage_dict_fsst.test
+make allunit not run. This changes which compression every string column receives, so it can shift expected results in unrelated tests. It needs to run before this is considered ready.
+make test_configs, make test_vector, FORCE_DEBUG=1 FORCE_ASSERT=1 build not run.
+Notes for review
+No storage format change and no version gate; this only affects which compression method is chosen.
+No MINIMUM_COMPRESSION_RATIO factor, unlike the dictionary and FSST estimates which use 1.2. Left out deliberately to keep this to "make the estimate honest" rather than also changing how competitive DICT_FSST is against its siblings.
+The dictionary simulation does not account for the FSST symbol table, so the estimate stays slightly pessimistic once the dictionary is encoded — the safe direction for selection.
+A follow-up exists that lets a DICT_FSST segment hold a dictionary larger than one block, by storing it on blocks owned by the segment. It takes the scattered reproduction from 401 MB to 5.4 MB, and a real 1.5 GB table from 1519 MB to 30.7 MB. It is a storage format change and deliberately not part of this PR.
+🤖 Generated with Claude Code
+krleonid
+commented
+Sep 15, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Thanks — the blocking issue is real and now fixed in f933135. You identified exactly the assumption the PR description called out as most worth challenging, and your reproduction was reproducible here as written.
+The FSST_ONLY escape hatch
+Confirmed the diagnosis: has_duplicates is a per-block property, so a column of large unique values keeps it false and the estimate skipped block accounting altogether. Reproduced on the previous commit at 16KB blocks with 2000 unique 5760 byte values:
+compression
+segments
+size
+before
+DICT_FSST
+1000
+15.7 MB
+after
+ZSTD
+1
+0.1 MB
+Rather than discount the raw size, the FSST_ONLY layout is now estimated on its own terms: it stores every value encoded, with a symbol table per block and no selection buffer, so the number of values that fit a block follows from their encoded length and whole blocks are charged. FinalAnalyze returns the cheaper of the two layouts, and neither can bypass block accounting now.
+has_duplicates is removed, since it only existed to guard that early return.
+Checked the case this could have regressed — genuinely FSST friendly unique text still selects DICT_FSST, because charging blocks costs it very little when many values fit per block (~6.5 MB estimated versus ~12.8 MB uncompressed for 122880 unique 100 byte values at the default block size).
+Regression test
+Added to dict_fsst_size_estimate.test_slow: 2000 unique 5760 byte values must not select DICT_FSST. Deliberately built from concatenated hashes rather than a repeated string, so ZSTD cannot win the comparison on internal repetition alone and the assertion reflects the estimate rather than the data being trivially compressible.
+Your smaller notes
+allunit — running now, will report. Agreed this is the real gate; the change can flip compression choice in unrelated string tests.
+MINIMUM_COMPRESSION_RATIO — deliberately left out to keep this change to "make the estimate honest" rather than also altering how competitive DICT_FSST is against its siblings. Happy to add the 1.2 factor if you would rather it match the others; it is a one line change but it shifts selection well beyond the case this PR is about.
+RequiredSpace omits the symbol table — agreed, and it is now included in the FSST_ONLY path where the table is actually written. The unencoded fill path still omits it, so it stays slightly pessimistic once encoding kicks in, which as you say is the safe direction for selection.
+Comment length — trimmed the multi line comments in the touched code.
+🤖 Generated with Claude Code
+krleonid
+commented
+Sep 15, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+All three addressed in e069451 (plus the description rewrite).
+PR description — rewritten. It now describes both failure shapes (scattered duplicates and large unique values), both per-block estimates, and no longer mentions total/2 or has_duplicates as current behaviour.
+FSST_ONLY gating — you are right, and it clarified my own thinking. FSST_ONLY needs every value in a segment to be unique, and a segment holds one block worth of values, so "no simulated block held a value twice" is precisely the reachability condition rather than a proxy for it. That check now gates FSSTOnlyEstimate again.
+Worth being explicit about what the original bug was, since it involved the same flag: the flag was never wrong as a reachability test. The bug was that when it passed, the code returned total/2 instead of a block-aware number and skipped block accounting entirely. It is now only a reachability test, and both layouts are charged per block.
+Verified the gate does not cost the legitimate FSST_ONLY win — 50k unique 96 byte values still select DICT_FSST (2.56 MB), since the gate passes there and the FSST_ONLY estimate is genuinely the cheaper layout.
+per_value accounting — fixed. Counting in bits, since the lengths buffer is not byte aligned per value:
+```
+const idx_t bits_per_value = encoded_length * 8 + BitpackingPrimitives::MinimumBitWidth(max_string_length);
+const idx_t values_per_block = ((block_size - block_overhead) * 8) / bits_per_value;
+```
+Rounding each length up to a whole byte was overstating the cost (width 13 charged 2 bytes instead of 1.625), which as you say only mattered for small values. Group rounding still adds up to 31 values' worth of lengths to the final block, which I left out as noise against a whole block.
+Current behaviour across the four shapes, 16KB blocks, auto selection:
+data
+compression
+size
+2000 unique x 5760 B
+ZSTD
+5.76 MB
+50 distinct x 5760 B scattered over 5000 rows
+ZSTD
+0.57 MB
+4 distinct short values, 20k rows
+DICT_FSST
+0.04 MB
+50k unique 96 B values
+DICT_FSST
+2.56 MB
+make allunit is still not run and remains the open item on the test plan.
+🤖 Generated with Claude Code
+lnkuiper
+and others
+added 28 commits
+October 26, 2026 11:00
+Share indexed Boolean selection across dictionary filters
+…
+ec1c440
+```
+Use the shared compactor for dense Parquet dictionary filtering and remove native dictionary match staging. Keep lookup IDs separate from emitted logical positions and preserve existing validation, NULL handling and sparse fallbacks.
+```
+Retrigger CI
+157ee79
+Merge branch 'hot_loops' of github.com:lnkuiper/duckdb into hot_loops
+200ba0f
+Consolidate Boolean selection into one public API
+1647f98
+Restore vectorized Boolean selection writes
+e3566f1
+Merge branch 'main' of https://github.com/duckdb/duckdb into hot_loops
+27795d7
+Compact build-side join matches without per-row branches
+780bc3d
+Retrigger CI
+f1e2319
+revert unrelated changes and commit the actual change
+583b4b3
+revert unrelated change
+681a074
+Retrigger CI again
+13fa0b1
+Retrigger CI again
+db68256
+Skip redundant selection counting in final scan segments
+2083d2a
+Do not run the quadratic-planning benchmark in the regression suite
+32e0694
+Merge remote-tracking branch 'origin/main' into remote-copy-no-exists…
+…
+f34eb59
+```
+…-check
+```
+Merge remote-tracking branch 'origin/main' into database-lifecycle-fixes
+84ed67f
+Merge remote-tracking branch 'origin/main' into timestamp-rendering-f…
+…
+63c3a04
+```
+…ixes
+```
+Replace Catalog::PrefetchEntries With A Pre-Bind Planner Extension Hook
+84e6a92
+Grow the DICT_FSST analyze set on demand instead of sizing it for a f…
+…
+58a6b11
+```
+…ull block
+
+The analyze state sized its PrimitiveDictionary for the most distinct strings a
+block can hold, which is 6 MiB for the default block size, allocated through the
+buffer allocator the moment the state is created. Any VARCHAR checkpoint under a
+memory limit below that failed, which broke two tests with small limits across
+all CI configurations.
+
+The set now starts at 1024 entries and doubles whenever it fills up, re-inserting
+the existing entries, up to the previous bound. FinalAnalyze releases the set and
+its string heap, so they no longer overlap with the dictionary the compression
+state allocates. A new test case packs 5000 distinct values into one block so the
+set has to grow; a set that stops growing trips the full-set assertion there.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Filter Bloom matches directly when rejecting nulls
+5e7e823
+Inline floating-point comparison operators
+f0d9674
+Restrict recursive partitions of CTE-decorrelated lateral joins (fixes …
+…
+c3c49ba
+```
+…duckdb#27072)
+
+The CTE join filter pusher only recognized join conditions whose sides were
+bare column references and whose key domain was another materialized delim
+CTE. Selective queries that fell outside this pattern materialized and
+processed every recursive partition, a regression against the 1.5.x delim
+join plans. This generalizes the pass:
+
+- Keys may be deterministic single-column expressions (e.g. struct fields),
+  composed through projections and aggregate groups on both the source and
+  target paths.
+- The key domain may also be a plain copy-safe subtree (base table scans,
+  filters, projections), duplicated via LogicalOperatorDeepCopy, so a
+  selective scan restricts partitions even when no delim CTE survives
+  flattening.
+- Sources are narrowed through joins to the smallest copy-safe subtree, and
+  target keys translate transitively across inner-join equality conditions,
+  so restrictions propagate through nested lateral joins.
+- Filters are also collected from semi joins (correlated EXISTS) and the
+  left side of left joins.
+
+Keys whose expressions can throw (e.g. overflow-checked arithmetic or lossy
+casts) are still not pushed, matching filter pushdown conservatism.
+```
+Narrow the CTE join filter pusher for the bugfix release
+…
+f927c06
+```
+Per review, restrict the pass to what the v2.0.1 release needs and leave
+broader placement to the cost-based domain placement work planned for v2.1:
+
+- Remove the transitive key translation across inner join conditions and
+  the descent to the smallest copyable subtree. Key domains are now either
+  a materialized delim CTE or a direct scan/filter/projection join child.
+- Collect from inner joins only.
+- Gate copied sources on the unfiltered scan estimate. The previous 25%
+  check bounded only the filtered output, so it could admit a second scan
+  of a large table that filters down to a few rows.
+
+The deferred shapes (nested laterals, multiple independent laterals,
+correlated EXISTS) keep their result assertions with partition counts
+reverted to the unrestricted values, marked for re-tightening. A new test
+asserts that a large filtered source is scanned only once.
+```
+Merge origin/main
+1129b36
+Preserve row mappings when partitioning filter selections
+4c0c4a5
+Match the scanned table by suffix in the key domain copy test
+…
+d7f4714
+```
+The storage engine test config runs against a persistent database, where
+the catalog is not named memory.
+```
+Update deep json_structure test for iterative implementation
+9452f0b
+Merge remote-tracking branch 'upstream/main' into refactor/unify-part…
+…
+d5b9737
+```
+…ial-blocks
+```
+Mytherin
+and others
+added 30 commits
+October 28, 2026 08:18
+Fix check_constraints view, VARIANT C API type and GeoJSON write_bbox (…
+…
+be29474
+```
+…duckdb#27768)
+
+Fixes smaller catalog, API and extension problems: one row per
+constraint in `information_schema.check_constraints`, creating a VARIANT
+logical type through the C API, and requiring a constant `write_bbox` in
+the GeoJSON writer.
+
+Combines the PRs labeled `Ready To Merge` in
+https://github.com/duckdb-bot/duckdb/pulls below, on top of the current
+head of `main`. The changes of each PR are applied as one squashed
+commit.
+
+## Changes applied (3 PRs)
+
+- duckdb-bot#206: One row per constraint in
+information_schema.check_constraints
+- duckdb-bot#126: Create a VARIANT logical type with its type
+info in duckdb_create_logical_type
+- duckdb-bot#164: Require a constant write_bbox in the internal
+GeoJSON writer, instead of evaluating any expression while binding
+
+## Original descriptions
+
+<details><summary>duckdb-bot#206: One row per constraint in
+information_schema.check_constraints</summary>
+
+`information_schema.check_constraints` listed a `CHECK` once per
+referenced column: `CHECK (a > 0 AND b > 0)` appeared twice, while
+`CHECK (1 = 1)` was missing entirely (duckdb#26343). DuckDB 1.5.6
+behaves the same.
+
+The view unnested `constraint_column_names` from `duckdb_constraints()`
+to get the column for `NOT NULL` constraints. This also expanded each
+`CHECK` into one row per referenced column and dropped checks without
+column references.
+
+The view now returns one row per `CHECK` or `NOT NULL` constraint,
+taking the `NOT NULL` column from `constraint_column_names[1]` and
+leaving constraint text unchanged. asxvi’s open duckdb#26357
+makes the same view change. New cases in
+`test/sql/table_function/information_schema.test` cover distinct and
+repeated checks on the same two columns, constant checks, `NOT NULL` on
+either column, `UNIQUE` exclusion and attached databases; they fail on
+`main`. The table function, PostgreSQL catalog, constraint and catalog
+suites pass in reldebug and assertion builds, except for the Quack exit
+leak assertion also seen on `main`. The full unit suite passes apart
+from failures reproduced on `main`.
+
+Fixes duckdblabs/bot-issue-tracker#209
+Related: duckdb#26343
+
+</details>
+
+<details><summary>duckdb-bot#126: Create a VARIANT logical type
+with its type info in duckdb_create_logical_type</summary>
+
+The C API type returned by
+`duckdb_create_logical_type(DUCKDB_TYPE_VARIANT)` could not be used.
+Calling `duckdb_create_vector` with it or registering a table function
+with a VARIANT parameter of that type caused a segmentation fault on
+`main`. The reporter of duckdb#24680 saw `duckdb_create_vector`
+return NULL instead. `DUCKDB_TYPE_GEOMETRY` and `DUCKDB_TYPE_INTEGER`
+work.
+
+`duckdb_create_logical_type` in `src/main/capi/v1/logical_types-c.cpp`
+builds every accepted type from its bare type id. VARIANT is physically
+a STRUCT and needs the child type information that only
+`LogicalType::VARIANT()` sets. Without it, `VectorStructBuffer` tried to
+read children from a type that had none.
+
+`duckdb_create_logical_type` now returns `LogicalType::VARIANT()` for
+`DUCKDB_TYPE_VARIANT`. A probe over all type ids found no other type
+created this way with the same failure; ANY and literal types still
+produce NULL vectors. A new case in
+`test/api/capi/v1/test_capi_variant.cpp` creates the type and a vector,
+registers a table function with a VARIANT parameter, and calls it with
+an integer, a nested value and a string. It crashes on `main` and passes
+with the change. The `[capi]` tests pass on relassert with sanitizers.
+All unit tests pass on reldebug except failures also seen on `main` on
+this machine (HTTP logging, external resource logging, thread and memory
+settings, an eviction queue test) and `test_variables.test`, which
+passes alone on both. No benchmark was run because only C API VARIANT
+type creation changes. Earlier pull request duckdb#24713 made the
+same change and was closed by its author without merging.
+Fixes duckdblabs/bot-issue-tracker#197
+Related: duckdb#24680
+
+</details>
+
+<details><summary>duckdb-bot#164: Require a constant write_bbox
+in the internal GeoJSON writer, instead of evaluating any expression
+while binding</summary>
+
+Direct calls to `__internal_json_copy_to_geojson`, the scalar function
+behind `COPY ... TO ... (FORMAT GEOJSON)`, could fail when `write_bbox`
+was not constant. In assertion builds, `SELECT
+__internal_json_copy_to_geojson({'id': 1}, NULL, NULL, '', '', random()
+> 0)` failed with `INTERNAL Error: Assertion triggered ...
+allow_unfoldable || expr.IsFoldable()`. In release builds, `PREPARE j AS
+SELECT __internal_json_copy_to_geojson({'id': 1}, NULL, NULL, '', '',
+nextval('s') > 0)` failed with `INTERNAL Error: Attempting to commit a
+transaction that is read-only but has made changes` and invalidated the
+database; running the `SELECT` directly advanced the sequence once more
+during binding. A NULL `write_bbox` read an uninitialized boolean,
+reported by UBSan. Only direct calls reach this because `COPY` passes a
+constant. The function is new on `main`; v1.5.6 does not have it.
+
+`JSONCopyToGeoJSONBind` in
+`extension/json/json_functions/json_create.cpp` evaluated the last
+argument, `write_bbox`, during binding with
+`ExpressionExecutor::EvaluateScalar` and read it with
+`BooleanValue::Get`. It lacked the `IsFoldable` check already used for
+column and date format options, and did not handle NULL.
+
+The change reads `write_bbox` with `BindFunctionInput::GetConstant`,
+rejecting nonconstant arguments with a Binder Error (`... must be a
+constant expression`) and deferring an unresolved prepared parameter to
+`EXECUTE`. NULL means the option was not given, as for column options,
+and writes no bounding box. `COPY` is unchanged.
+`test/sql/json/copy_geojson_write_bbox_constant.test` covers `random()`,
+`nextval` directly and in a `PREPARE` with the sequence unchanged, a
+column, NULL, false and a prepared parameter; it fails on `main`. All
+unit tests pass on reldebug except failures also present on `main` on
+this machine and a parquet memory limit test that failed under load but
+passes when run alone, on `main` too. The JSON tests pass on relassert
+with sanitizers, without UBSan reports. No benchmark was run because the
+change is in binding only. This issue was found while working on
+duckdb-bot#30, which handles folds through
+`Binder::FoldExpression`; this bind callback evaluated the argument
+itself.
+
+Fixes duckdblabs/bot-issue-tracker#603
+
+</details>
+```
+Skip the existence checks of COPY outputs on remote paths (duckdb#27774)
+…
+e5af3fa
+```
+Ports duckdb-bot#223 to `main`. The patch applies cleanly.
+
+Partitioned `COPY ... TO 's3://...'` sends two blocking `HEAD` requests
+before each output file's `PUT` (#26268). Both checks came from cleanup
+of failed queries (duckdb#24840): `CopyOutputLifecycle::GetOwnership` calls
+`FileExists`, and the Parquet and CSV writers call it to decide whether
+to use `FILE_FLAGS_EXCLUSIVE_CREATE`. On S3 neither changes the outcome:
+`DirectoryExists` always returns true, so failed queries already keep
+every output, and `httpfs` ignores `FILE_FLAGS_EXCLUSIVE_CREATE`.
+
+For paths recognized by `FileSystem::IsRemoteFile`, this skips both
+checks, returns `PRESERVE` from `GetOwnership`, and opens outputs
+without `FILE_FLAGS_EXCLUSIVE_CREATE`. Local checks and cleanup are
+unchanged. Other remote filesystems, such as Azure, now also keep failed
+`COPY` outputs.
+
+Per the original PR, with a local S3 endpoint delaying every response by
+50 ms, writing 180 partitions dropped from 18.3 s to 3.4 s (Parquet) and
+4.5 s (CSV), with zero `HEAD` requests.
+
+Tests in `test/api/test_copy_output_lifecycle.cpp` count existence
+checks and exclusive-create opens for partitioned and single-file
+copies, and check that a failed remote copy removes nothing.
+
+Original PR: duckdb-bot#223
+
+CC @lnkuiper
+```
+Preserve fractional SEMI and ANTI fallback estimates during costing
+…
+664e879
+```
+Keep fractional fallback cardinalities when composing join costs so rounding small preserved inputs does not bias equivalent selectivities. Preserve empty-input behavior and the existing nonempty floor, add regression coverage, and update the affected plan estimate.
+```
+Merge upstream/main into parser-performance-5
+…
+8db07cb
+```
+The only conflict was matcher_stack.cpp: upstream's SuppressSuggestions
+helper (rule-level suppression is ignored for memoizable suggestion walks)
+now applies in the structured list stepping (constructor, StepNextChild and
+DiscardSuggestions), and upstream's old inline child loop has no counterpart
+here. The trampoline and rule ids were regenerated with the merged grammar.
+```
+Read-ahead: prune row groups a late Top-N boundary excludes, log the …
+…
+7f7e35b
+```
+…budget and benchmark delayed file scans (duckdb#27227)
+
+Follow-up to duckdb#25183. This PR started as the headroom fix for the
+automatic read-ahead reservation (`ScanReadAhead::PushJob` asking the
+governor for `pending_io_bytes + MINIMUM_JOB_IO_CHARGE`); main has that
+line since 417308b, so after merging main this PR is down to what
+the growing reservation exposed, and to making the budget observable and
+measured.
+
+### Table scan: re-check a settled read-ahead job's row group before
+decoding it
+
+A job's zonemap checks run when the job is produced. With the
+reservation growing to its cap even a single-threaded scan runs several
+row groups ahead, so a Top-N boundary set after a job was produced no
+longer pruned the row groups already in flight: they were decoded and
+emitted. `CollectionScanState::RecheckPreparedRowGroup` re-runs the
+row-group zonemap check once per settled job, before its prepared vector
+is decoded; a row group pruned since then is dropped (its prepared rows
+leave `rows_scanned`, it is not counted as scanned). The I/O has already
+happened at that point, the decode and the downstream work are saved.
+
+Test `test/sql/topn/top_n_pruning_read_ahead.test` (from the review):
+`threads=1`, `storage_block_prefetch='debug_force_always'`, `ORDER BY i
+LIMIT 8193` over five row groups plus three all-NULL ones. The table
+scan reads 16,384 rows on main and 10,240 rows here.
+
+### Parquet: main's recheck misses NULLS FIRST boundaries
+
+main already re-checks dynamic filters before decoding a queued Parquet
+row group (3c7d7c9, `ParquetReader::DynamicFiltersExcludeRowGroup`),
+but it found the filter through `GetOptionalDynamicFilterData`, which
+matches only a bare `dynamic_filter(i)`. `ORDER BY i NULLS FIRST` pushes
+`i IS NULL OR dynamic_filter(i)`, so all eight queued row groups were
+still decoded. It now uses `ExpressionFilter::ContainsInternalFunction`,
+as `ColumnData::CheckZonemap` does. Test
+`readahead_dynamic_pruning_nulls_first.test`: 8 decoded groups on main,
+1 here.
+
+The earlier revision's multi-file `RecheckRowGroupFilters` hook and its
+plumbing are gone: the review found that it returned the scan state to
+the pool without `FinishRowGroup`, so a pruned group's prefetch ranges
+leaked into the next group's prefetch log. `recheck_prefetch_log.test`
+(from the review) pins that down; it passes on main and here.
+
+### `ReadAheadBudget` log and the SQL-level test for the headroom line
+
+A `ReadAheadBudget` DEBUG log type (one entry per pushed job:
+`pending_bytes`, `budget_bytes`, `active_jobs`, written under the push
+lock next to the `AsyncTaskSchedule` entry) and
+`readahead_budget_growth.test`: 64 small Parquet files, `threads=16`,
+`memory_limit='8GB'`, `debug_local_file_system_delay_ms=5`;
+`max(budget_bytes)` must exceed four times the 8 MB x threads minimum,
+and `pending_bytes <= budget_bytes + 16 x 16 MB` for every entry.
+Without the headroom line the budget stays at the minimum and the first
+assertion fails. Skipped under `force_external` (every reservation is
+pinned at its minimum) and the restart configs (logging state is lost),
+like the sibling log tests.
+
+### Benchmark
+
+`benchmark/micro/parquet/read_ahead_delayed_files.benchmark`, listed in
+`.github/regression/micro.csv` (from the review): 64 Parquet files,
+`debug_local_file_system_delay_ms=10` on every file operation, a
+filtered `count(*)`. It measures the throughput the headroom line
+protects; CI runs the micro suite at 2 threads.
+`scripts/regression/test_runner.py --samples 5` on this box:
+
+| threads | main without the headroom line | this branch |
+|---|---:|---:|
+| 4 | 4.5 s | 1.7 s |
+| 16 | 520 ms | 508 ms |
+
+### Checks
+
+Release build, no new warnings. `test/sql/copy/parquet/read_ahead/*` (20
+files), `topn`, `storage/prefetch` and `parallelism` pass under the
+default and `prefetch_all_storage` configs; the two new pruning tests
+fail on upstream main as described above and pass here; the logging
+tests are skipped under `force_storage_restart`, `wal_verification` and
+`disable_optimizer` like `readahead_dynamic_pruning.test`.
+
+Note: this PR was generated by an AI coding agent and reviewed by the
+author.
+```
+Make HTTP PUT requests own their content type (duckdb#27967)
+…
+ad952e5
+```
+Fixes duckdb#27966.
+
+`PutRequestInfo` stores its content type as a reference to the caller's
+string. Changing that string after constructing the request changes the
+request's content type; passing a temporary can leave a dangling
+reference.
+
+For example:
+
+```cpp
+string content_type = "application/json";
+PutRequestInfo request(url, headers, params, buffer, size, content_type);
+content_type = "text/plain";
+```
+
+Before this change, `request.content_type` becomes `"text/plain"`. With
+this change, it remains `"application/json"`.
+
+Store an owned string while retaining the existing constructor
+signature. The regression test changes a live caller-owned string, so it
+detects the old behavior without reading a dangling reference or making
+a network request. This requires a C++ test because SQL does not expose
+the request object.
+
+Validation: Amazon Linux 2023/aarch64, Clang 15.0.7, Release build. All
+25 HTTP transport and retry test cases pass (810 assertions). The
+regression also fails with the unmodified HTTP request definition from
+`1641475ef1`, which is identical to the definition on this PR's base
+(`0ccee9a0870`). Repository formatting and whitespace checks pass.
+
+This changes the C++ layout of `PutRequestInfo`; native providers using
+this struct must be rebuilt with matching headers and engine binaries.
+
+This PR targets `main`. Please have the DuckDB team backport the merged
+fix to the v2.0 release branch (`v2.0-cyanoptera`), accounting for the
+C++ layout change.
+```
+Merge OR Select Results Instead Of Sorting Them (duckdb#27974)
+…
+f1e648b
+```
+When DuckDB filters rows with `OR`, it checks one condition at a time.
+Each condition picks out the rows that pass it, and those rows are added
+to the result. The rows from each condition are in order, but adding
+them one list after another leaves the combined list out of order. So
+today, after the last condition, DuckDB sorts that list again, for every
+batch of rows. That sort is most of the cost of an `OR` filter.
+
+This PR merges each condition's rows into the result in order as they
+arrive, the way you would combine two sorted lists, so nothing needs to
+be sorted at the end. If a condition's own rows are ever out of order,
+which a nested `AND` can cause, they are sorted first. The rows returned
+are exactly the same as before.
+
+To measure it, I ran each query below five times on thirty million rows
+with one thread and took the median. I turned off filter pushdown so the
+filter is evaluated by the code this PR changes, rather than inside the
+table scan:
+
+```sql
+SET threads = 1;
+CREATE TABLE m AS SELECT
+    (hash(i) % 1000)::INT AS v,
+    hash(i * 3) % 2 = 0 AS x,
+    hash(i * 5) % 2 = 0 AS y
+FROM range(30000000) r(i);
+
+SET disabled_optimizers = 'filter_pushdown';
+SELECT count(*) FROM m WHERE v < 250 OR v >= 750;
+SELECT count(*) FROM m WHERE x OR y;
+SELECT sum(CASE WHEN v < 250 OR v >= 750 THEN 1 ELSE 0 END) FROM m;
+```
+
+```
+query                            main     this PR
+WHERE v < 250 OR v >= 750        0.451s   0.218s
+WHERE x OR y                     0.516s   0.230s
+CASE WHEN v < 250 OR v >= 750    0.478s   0.246s
+```
+
+These numbers are from an aarch64 machine with sixteen cores (GCC 11.5).
+The new test checks that `OR` filters, including ones containing `AND`,
+return rows in their original order, and the same rows as evaluating the
+condition in a projection.
+```
+Merge remote-tracking branch 'upstream/main' into late-materializatio…
+…
+706e472
+```
+…n-filter-type
+```
+Preserve thread caps at the sink and aggregate states across repeated…
+…
+e3b1fc1
+```
+… finalization (duckdb#27770)
+
+**Sink thread caps.** `Pipeline::TryGetMaxThreads` accumulates a
+pipeline's parallelism cap from left to right: the source's
+`MaxThreads()`, each parallel operator folded in with `MinValue`, then a
+clamp to the scheduler's thread count. The sink is the exception. Its
+callback receives the accumulated value, but the return value is
+assigned directly, so a sink returning more than its input raises a cap
+that the source or an operator has already lowered. Every stage should
+only be able to lower the accumulated cap, never raise it.
+
+No in-tree sink currently returns more than its input, and
+`PhysicalBatchCopyToFile` composes its memory-based limit with
+`MinValue` itself. The defect is reachable through the C++ operator API
+and surfaced with a sink that reported the scheduler count: the source's
+single-thread requirement was silently discarded and the pipeline was
+scheduled wide. The fix composes the sink's answer with `MinValue`,
+matching the operator loop, and removes the trailing scheduler clamp
+that the pre-sink clamp already makes redundant. The added API test
+builds a minimal source/operator/sink pipeline with configurable limits
+and checks the composed result and the callback's input for caps below,
+at, and above the scheduler count. SQL cannot replace a sink's
+`MaxThreads` callback or observe the composed value deterministically,
+so the reproducer uses the C++ API.
+
+**Aggregate state across repeated finalization.** A USING KEY recursive
+CTE finalizes the same aggregate states repeatedly: every recurring scan
+and direct key probe of an iteration reads them, later iterations update
+them, and the final drain reads them once more. A finalizer must leave
+the state valid for further reads and updates. Two finalizers changed
+the state they exported.
+
+`MinMaxNOperation::Finalize` sorted its heap in place with `sort_heap`,
+so the next iteration inserted into an array that no longer was a heap:
+
+```sql
+WITH RECURSIVE t(k, v, iter) USING KEY (k, min(v, 3), max(iter)) AS (
+    SELECT 0, i, 0 FROM range(1, 4) r(i)
+    UNION ALL
+    SELECT n.k, 2, 1 FROM t n JOIN recurring.t r USING (k) WHERE n.iter = 0
+)
+SELECT v FROM t;
+```
+
+returns `[2, 3, 1]` instead of `[1, 2, 2]` after a single update. The
+finalizer now sorts an index array over the slots as a heap, which
+yields the same order including ties, and leaves the heap untouched.
+`BignumIntermediate::ToBignum` trimmed the intermediate before copying.
+It now computes the trimmed range and copies from it, so the conversion
+is const. The trim is value-preserving and every finalize of the keyed
+state is currently serialized, so this part is not observable through
+SQL today, but it violates the same lifecycle contract.
+
+The new tests cover the read-then-update lifecycle for the n-variants of
+min, max, arg_min and arg_max, the holistic aggregates, owned string
+states and BIGNUM sums, at several thread counts and with operator
+caching on and off.
+```
+Restrict known join domains after finite key filters
+…
+af32d14
+```
+Use existing filter bounds to restrict INNER equality-class denominators after all input domains are initialized. Require reported or min/max domains on every member so unknown-NDV scan selectivities are not amplified.
+```
+Cap UNION group estimates using per-arm domains
+…
+0069141
+```
+Bound grouping combinations within each UNION arm before combining them. Reuse the statistics extractor without storing per-arm state, and cap domain products by input cardinality without applying another occupancy discount.
+```
+Reduce Windows CI matrix on pull requests
+1ea9724
+Fix deserialization reinterpreting genuine argument aliases as named-…
+…
+8482a57
+```
+…argument names (duckdb#27468)
+
+`FunctionSerializer::Deserialize` can reinterpret a genuine expression
+alias as a named-argument name. The exposure is not specific to one
+function: every varargs function receives an automatic `*args` +
+`**kwargs` signature (`SimpleFunction` constructors), and any
+kwargs-capable function whose trailing argument carries an alias is
+affected. Scalars, aggregates and window functions all deserialize
+through this shared path. `least` is the repro, with round-trip
+verification over scalar subqueries:
+
+```sql
+SET debug_verify_serializer=true;
+SELECT least((SELECT 41), (SELECT 42), (SELECT 43));
+-- Serialization Error: Error during bind of function in deserialization:
+-- Duplicate named argument "SUBQUERY" in function call to '"least"'
+```
+
+With exactly one trailing subquery the round trip succeeds, but the
+argument is silently rebound as a named argument through the `**kwargs`
+catch-all:
+
+```sql
+SELECT least(10, 20, (SELECT 3));  -- round-trips as least(10, 20, SUBQUERY := ...)
+```
+
+In-tree varargs functions fold the kwargs back into the argument list,
+so the value comes out right today. The deserialized plan is still not
+the plan that was serialized, and any function whose bind inspects
+argument names would see different arguments after a round trip.
+
+### Mechanism
+
+Subquery flattening replaces a `BoundSubqueryExpression` with a
+`BoundColumnRefExpression` whose alias comes from
+`Expression::GetName()`. Without an explicit alias that falls back to
+`BoundSubqueryExpression::ToString()`, the literal string `SUBQUERY`.
+That is the one in-tree producer of such trailing aliases, but the
+deserializer would misread an alias from any producer.
+
+`FunctionSerializer::Deserialize` has a compatibility heuristic,
+`RestoreNamesFromAliases`, for plans serialized before argument names
+were written (fields 508 and 509). Those fields were only written when a
+call had named arguments, so a freshly serialized all-positional call
+was indistinguishable from an old plan whose trailing arguments were
+named. The heuristic consumed genuine aliases of trailing children of
+any kwargs-capable function as argument names. Two trailing children
+aliased `SUBQUERY` collide as duplicate names, and a single one becomes
+a keyword argument.
+
+### Fix
+
+The ambiguity is on the wire, so current plans are made self-describing.
+`SerializeNamedArguments` now always writes the positional count (field
+508) when serializing for v2.0.0, including for all-positional calls,
+and the deserializer runs `RestoreNamesFromAliases` only when the field
+is absent. Fields 508 and 509 are gated on the v2.0.0 storage version
+and no released reader predates them within that format, so the
+unconditional write affects no released reader. Plans written by older
+releases keep taking the heuristic path. Fixing the shared serializer
+covers all function classes and all alias producers at once.
+
+Pre-v2.0.0 compatibility mode has no such fields, and named arguments
+genuinely travel in child aliases there. For that path the heuristic is
+narrowed to functions without a `*args` parameter. The pre-v2.0.0 writer
+folds the `**kwargs` of a `*args` function into the positional list, and
+no released version could bind named arguments to such functions, so a
+trailing alias on a `*args` function is always a genuine alias.
+Functions that take only keyword arguments (`struct_pack`,
+`struct_insert`, `struct_update`, `union_value`) keep restoring names
+from aliases, the case the heuristic was written for and the one shape
+where the alias is the name by the legacy convention.
+
+Stopping the aliasing of machine-generated subquery column references in
+`plan_subquery.cpp` was rejected: it hides one producer of trailing
+aliases while leaving the deserializer ready to misread any other
+genuine alias.
+
+### Tests
+
+`test/sql/serialization/function_argument_names.test` covers the
+multi-subquery failure for `least`, `greatest` and `concat`, the silent
+single-subquery reinterpretation, subqueries in non-trailing positions,
+nested kwargs-capable calls, a zero-argument call, and genuine named
+arguments (`least(3, x := 2)`, `struct_pack`, `struct_insert`,
+`union_value`, the legacy positional `struct_pack` alias capture,
+table-function keyword arguments). The struct results are returned
+directly because `typeof` folds to a constant at bind time and would not
+see the deserialized plan. A second section repeats the key cases under
+`SET storage_compatibility_version='v1.4.4'`, where only the heuristic
+narrowing applies: subquery cases must read back positionally while
+`struct_pack` field names are still restored from aliases.
+
+Result assertions alone cannot distinguish the unconditional field write
+from the heuristic narrowing, since in-tree varargs functions produce
+the same values either way.
+`test/sql/serialization/function_argument_metadata.test` therefore pins
+the serialized metadata through `json_serialize_plan`: an all-positional
+call must record its positional count, a named call its argument names,
+and the legacy positional `struct_pack` call its captured names. The
+all-positional assertion fails if the unconditional write of field 508
+is reverted while every result-level test stays green.
+```
+Add ZIP artifacts for Windows CLI
+087e96d
+Fix ZIP packaging with relative Python path
+559ba00
+Allow valid cardinality-driven plan variants in optimizer tests
+…
+7ede55b
+```
+Keep SEMI/ANTI conversion and ordinary CTE plan checks independent of build orientation and join algorithm. Allow persisted NDV variation while checking that selected-child refinement leaves the ancestor estimate intact.
+```
+Allow batch limits in current-domain estimate test
+73489f7
+Look up filter column types via GetColumnType in late materialization (…
+…
+673ced7
+```
+…duckdb#27877)
+
+Fixes: duckdb#27743
+Fixes: duckdb#27853
+
+When late materialization creates the LHS scan, it copies the RHS scan's
+table filters and looks up each filtered column's type with
+`returned_types[column_ids[i].GetPrimaryIndex()]`. That lookup is wrong
+for virtual columns and for a pushed-down struct field. This PR uses
+`LogicalGet::GetColumnType`, which handles both virtual columns and
+pushed-down field types.
+```
+Reduce Windows CI matrix on pull requests (duckdb#28010)
+…
+f888907
+```
+Reduce Windows PR CI:
+
+- Regular PRs run only Windows 64-bit.
+- PRs changing extension configs or patches run the full matrix: 64-bit,
+32-bit, ARM64, and MinGW.
+- Full windows job matrix remains enabled on (alpha) releases.
+```
+Add ZIP artifacts for Windows CLI (duckdb#28011)
+…
+93ed7ea
+```
+Also upload zip files for the Windows CLI releases so WinGet can install
+them.
+
+Fixes duckdblabs/duckdb-internal#10876.
+```
+Unify PartialBlock management (duckdb#27305)
+…
+f3f24c8
+```
+This PR removes the specialized `PartialBlock` implementations
+`PartialBlockForIndex`, `PartialBlockForCheckpoint` and
+`InMemoryPartialBlock` by introducing a new interface `BlockPackable`.
+This interface acts both as a capability, where implementers are able to
+be moved through the `PartialBlockManager`, as well as a generic
+container within `PartialBlockManager` itself. The only required
+function to implement the interface is a `Finalize` step, which acts as
+a callback to inform the packable object where it resides on disk.
+
+In addition, we've removed `PartialBlockState` and
+`PartialBlockAllocation` which were passing around blobs of information
+through callers and internals of `PartialBlockManager`. Instead we now
+offer a single entrypoint `Write(BlockPackable, BufferHandle,
+byte_size)` that handles block creation, allocation and registration
+internally. In `FULL_CHECKPOINT` mode it returns the corresponding block
+pointer which is set eagerly (because metadata needs to know up front
+where we will be placing the data), and a `nullptr` otherwise.
+
+Hopefully the internal flow should be easier to follow:
+- First acquire a partial block, either through creation or reuse (this
+does not allocate memory).
+- Then copy the data into a buffer backed by the partial block, or reuse
+the source buffer if able.
+- Then check if we want to do an intermediate flush in case the partial
+block is almost full, if we do not flush add it back to the internal
+registry for reuse.
+
+Alignment zeroing is now inlined which allowed us to remove
+`UninitializedRegion`, and the inline zeroing itself can perhaps be
+completely removed depending on the solution to
+duckdblabs/duckdb-internal#11200.
+
+Note this does not pack column segments and index buffers together, it
+does make this behavioral change easier afterwards.
+```
+Parser performance 5/N (duckdb#27874)
+…
+3c3387f
+```
+This is the next slice of the parser performance work, following duckdb#27527.
+It takes the matcher from "one frame per grammar level" to "one frame
+per *interesting* level" in the two places that dominate the frame
+count: the expression precedence ladder and rules that start with a
+choice.
+
+### What changes
+
+**Prepared list groups** (commits 1 and 4). Most of `expression.gram` is
+a ladder of collapsible lists of the shape `X <- Y Tail?` where every
+element after the first is an optional with a literal-only FIRST set.
+Those chains are now prepared as a *group* when the grammar is compiled,
+with the merged FIRST set of all their tails. A list frame that enters a
+group jumps straight to the innermost member, and when that member
+completes and the merged tail set rejects the next token,
+the whole group collapses to the result in one step instead of
+completing one frame per level. The last commit lets a member with an
+optional prefix join the group too, when its FIRST set proves the prefix
+absent at the current token.
+
+**Leading choices and choice regions** (commit 3). A list whose first
+element is a choice now matches the choice in place: the alternatives
+are tried with the list frame's own speculative cursor and the chosen
+result simply becomes the list's first child, so no choice frame is
+pushed. When the alternative is itself a plain list, the frame enters it
+as a *choice region* (a small arena record remembers the enclosing list,
+alternative index and arena mark) and keeps going; if the region fails,
+it is resumed and the choice continues with the next alternative. Custom
+selectors and the public single-step execution stay on their existing
+paths.
+
+**Smaller stuff** (commit 2). Generated transforms size their output
+vectors from the parse tree instead of first collecting list items into
+a temporary vector, and a list frame appends child references directly
+into a span of the result arena that it hands to the `ListParseResult`,
+instead of filling an arena vector and copying it on completion.
+
+### Numbers
+
+Per-run instructions on the parser micro benchmarks against current
+`main`:
+
+| | TPC-DS | TPC-H | Keyword | WideSelect | Statements |
+|---|---|---|---|---|---|
+| groups | −0.4% | +0.1% | +0.2% | +0.2% | −1.6% |
+| list elements / arena children | −2.5% | −2.2% | −0.9% | −2.3% | −2.8%
+|
+| leading choices + regions | −14.1% | −15.0% | −17.3% | −13.0% | −12.3%
+|
+| groups across prefixes | −4.8% | −4.9% | −6.6% | −3.3% | −4.8% |
+| **total** | **−20.7%** | **−20.9%** | **−23.3%** | **−17.7%** |
+**−20.1%** |
+```
+Preserve empty grouping set multiplicity and GROUPING() in correlated…
+…
+5a99010
+```
+… subqueries (duckdb#27958)
+
+A correlated subquery whose aggregate repeats an empty grouping set
+returns wrong results, and the default optimizer pipeline raises an
+internal error:
+
+```sql
+SELECT o.k, a.c
+FROM (VALUES (7), (8)) AS o(k),
+LATERAL (
+    SELECT count(*) AS c
+    FROM (VALUES (1)) AS i(k)
+    WHERE i.k = o.k
+    GROUP BY GROUPING SETS ((), ())
+) AS a
+ORDER BY ALL;
+```
+
+The expected bag has `(7, 0)` and `(8, 0)` twice each. Default settings
+raised `INTERNAL Error: Attempted to access index 2 within vector of
+size 2`. With `PRAGMA disable_optimizer` each pair appeared once.
+Investigating this exposed four independent defects.
+
+**Recovery multiplicity and GROUPING() in decorrelation.**
+`FlattenDependentJoins::PushDownAggregate` adds the delim keys to every
+grouping set, so each originally empty set emits one row per present
+key. Keys without inner rows are recovered by a LEFT join against the
+delim scan, which null-extends exactly once, while n empty sets need n
+recovered rows. The recovery now joins recovered rows against an n-row
+constant table on the count(*) marker, so aggregate rows still
+null-extend once and recovered rows multiply. GROUPING() on recovered
+rows produced NULL instead of the empty-set mask. The existing
+marker/CASE replacement machinery now also maps grouping-function
+bindings to constant masks projected next to the empty-input aggregate
+values. The INNER shortcut that drops missing keys entirely is
+restricted to the only equivalent case, a single empty set without
+grouping functions under NULL-propagating consumers. Previously a
+sum-only subquery over `GROUPING SETS ((), ())` lost a row and its
+scalar variant lost the cardinality error.
+
+**The NULL-propagation shortcut flag crossed row-observing operators.**
+The INNER shortcut consumes `propagate_null_values`, whose contract is
+that nothing above the aggregate can distinguish one all-NULL row from
+no row. Several descents forwarded or reset the flag across operators
+that do observe row presence: aggregates, windows, cross products, set
+operations, DISTINCT, and ORDER BY. A `row_number()` over a correlated
+ungrouped sum returned NULL instead of 1, a DISTINCT under an INNER
+lateral returned zero rows, and cross-product and UNION ALL shapes lost
+the scalar cardinality error. Every descent now either clears the flag
+or documents why forwarding is sound. Filters and projections keep the
+existing volatile/throw/becomes-NULL screening.
+
+**Aggregate deduplication vs positional consumers.** The internal error
+is an optimizer interaction. The grouping-sets rewrite materializes the
+aggregate directly as a materialized CTE definition, whose readers are
+positional. `CommonAggregateOptimizer` merged the identical marker
+count(*) into the user's count(*), shrinking the CTE's column count
+while consumers kept reading the old position. Binding remaps cannot
+reach positional consumers. The optimizer now tracks whether the current
+chain's column count is positionally constrained (set-operation
+children, materialized and recursive CTE children) and skips
+deduplication there. Projections and aggregates reset the constraint
+because their parents consume them by binding. Plain projected
+duplicates still merge.
+
+**Single-join uniqueness proofs.** Both deliminators convert a SINGLE
+join to LEFT when the aggregate's groups are covered by the join keys.
+That proves at most one row per key only for a single grouping set. With
+multiple sets the scalar subquery cardinality error was silently lost on
+both delim paths. `Deliminator::TrySwitchSingleToLeft` and the CTE
+rewriter's `SingleJoinRHSIsDeduplicated` now bail out when the aggregate
+has more than one grouping set.
+
+All wrong behaviors above reproduce on main before this change. Nested
+shapes may now plan a LEFT recovery join where the INNER shortcut
+previously applied, a plan-only effect of the conservative flag audit.
+
+Known limitations: the CTE definition keeps the redundant marker
+aggregate state instead of merging it, and the consumer side of a
+materialized CTE is protected conservatively although its bindings pass
+through. The same positional hazard class exists in principle for
+projection maps populated by `ColumnLifetimeAnalyzer`, but no reachable
+shape was found. Independent of decorrelation, the binder drops
+all-empty grouping-set lists when no aggregate is present, which will be
+reported separately.
+```
+Size partitioned COPY batches from the written columns (duckdb#27943)
+…
+ac28683
+```
+A partitioned Parquet COPY with a 4 MiB `ROW_GROUP_SIZE_BYTES` target
+can repeatedly flush batches below that target. A query producing three
+million rows with two BIGINT payload columns and four integer partition
+values produces forced batches of about 2.6 MiB even while more rows
+remain in each partition.
+
+Batch planning counts storage for partition columns omitted from the
+writer and tuple headers. This overestimates written bytes and closes
+batches too early.
+
+Use the written columns' fixed width and cached heap sizes for direct
+groups. An omitted variable-length partition key is sized once per group
+and deducted from the heap estimate. Sorted groups track per-column
+allocations while appending and sum only the written columns. Row sizing
+refines estimates near a byte boundary, retaining approximate planning
+without scanning every payload chunk.
+```
+Better cardinality estimation for SEMI/ANTI joins and GROUP BY (d…
+…
+6287a4e
+```
+…uckdb#28013)
+
+We only had the notion of "total domain", but this PR introduces the
+notion of "current domain" to estimate the cardinality of `SEMI`/`ANTI`
+joins and `GROUP BY` more accurately.
+```
+Make the DICT_FSST analyze simulation cheaper per row
+…
+88837aa
+```
+Review follow-ups for the block simulation in DictFSSTAnalyzeState:
+
+The hash of a value was computed twice on a miss, once by Lookup and again by
+Insert. PrimitiveDictionary gained Lookup and Insert overloads that take the
+hash, so the analyze step computes it once per value and reuses it, also after
+a block flush or a set growth, where only the probe is redone.
+
+The string heap was destroyed after every simulated block, so every block
+started by allocating again. It is now reset, which keeps the current chunk,
+and destroyed once in FinalAnalyze.
+
+The layout size was recomputed from scratch for every row. The block now caches
+its required space and index width. A tuple that reuses a dictionary index,
+a repeated value or a NULL, can only grow the index buffer, and only when it
+starts a new 32-value packing group, so it adds that group or nothing. A new
+value still recomputes, since it changes the dictionary size and with it the
+alignment of the sections after it. A debug assertion compares the cached size
+with the full calculation after every update.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Merge remote-tracking branch 'upstream/main' into fix/dict-fsst-size-…
+…
+3d4fc9a
+```
+…estimate
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Charge DICT_FSST analyze segments the way the partial block manager s…
+…
+1ed7c0e
+```
+…tores them
+
+The size estimate billed every simulated segment as a full physical block. The
+writer hands a finished segment to the partial block manager at its exact size,
+which packs segments of up to 80% of a block together with other segments and
+only gives larger ones a block of their own. Large values in small blocks leave
+every segment well below that limit, so DICT_FSST was charged for space it does
+not use.
+
+A flushed segment now costs its 8-byte aligned size when it is within the
+compaction flush limit, the same limit the partial block manager and the other
+string writers use, and a whole block above it. The final partial segment and
+the FSST_ONLY blocks follow the same rule.
+
+On its own the rule does not change the selection among the current candidates,
+so a Catch test drives the analyze state directly with values that fill a 16 KiB
+block to about 55% and 86% and checks both charges.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Model the phases of the DICT_FSST writer in the analyze simulation
+…
+9cd3895
+```
+The estimate charged the raw dictionary of every simulated block and decided
+once per row group whether FSST_ONLY was reachable. The writer does neither:
+it fills a segment with room for a symbol table reserved, then decides for that
+segment whether to FSST encode its dictionary, and continues in the layout it
+chose. A dictionary that compresses well was therefore estimated at several
+times its size, and a single repeated value anywhere ruled out FSST_ONLY for
+all segments.
+
+Each simulated block now has a mode, mirroring DictFSSTCompressionState:
+unencoded with the symbol table reserved, then unencoded, DICT_FSST or
+FSST_ONLY once it fills up, decided the way TryEncode decides. FSST_ONLY is
+therefore per block, and its blocks do not hash or remember their values.
+
+The size of an encoded dictionary and of its symbol table are measured by FSST
+encoding the first 16 KB of the values of a block, at the first decision and
+every fourth after it. Two behaviours of the writer are modelled so the
+estimate matches what it produces: FSST only encodes a string while the output
+buffer holds twice its length plus 7 bytes, and the writer is given a buffer
+as large as the dictionary, so a dictionary of few large strings stays
+unencoded. And a value added in DICT_FSST mode reserves twice its length until
+it is encoded.
+
+The set of a block grows by a factor of four, as blocks hold more values now.
+
+The encode threshold and the check for an encoded state move to the shared
+header so the writer and the simulation use the same ones.
+
+Tests: a Catch test requires the estimate to be within 15% of the bytes the
+writer produces for five kinds of data, which the previous estimate was off by
+a factor of 8 to 30 for compressible data. Two SQL cases cover the selection of
+DICT_FSST for an encoded dictionary and for unique values with one duplicate.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+Keep the full check of PrimitiveDictionary::Insert ahead of the hash
+…
+289c386
+```
+The overload that reuses a hash moved the check for a full dictionary behind
+the hash computation for callers that pass only the value. The Parquet writer
+keeps inserting into a dictionary after it has filled up, so it hashed every
+remaining value of a row group for nothing. The check comes first again.
+
+Reset also releases the offsets of the filled slots, since the dictionary is
+not used after it.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+18 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

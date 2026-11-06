@@ -1,0 +1,140 @@
+# Minimal Signed Distance Function Object pure python renderer
+
+This repo was mostly done as an **exercise** to understand Signed-Distance-Function-based rendering.
+
+It provides basic utilities to render silhouettes and normals of objects represented by their Signed Distance Function.
+
+`demo.py` shows an example on a sphere.
+
+No parallelization is operated, and (this is no surprise! :) ) the computation is **slow!** (~5seconds for the minimal sphere-rendering example)
+
+Very simple ray-marching is used (for more details see [ray-marching-signed-distance-functions](http://jamie-wong.com/2016/07/15/ray-marching-signed-distance-functions/))
+
+## Renderings
+
+(Obtained by running `demo.py`)
+
+### Sphere silhouette rendering
+
+![silhouette sphere](results/sphere_silhouette.png)
+
+
+### Sphere normals rendering
+
+![silhouette sphere](results/sphere_normal.png)
+
+(Normal coordinates are x,y,z are scaled to be in [0, 1], and respectively mapped to the R, G and B channels.
+
+### demo.py
+```
+import time
+
+from matplotlib import pyplot as plt
+import torch
+
+from pyrender import render, testutils
+
+p_xmax, p_ymax = 200, 120
+f_x, f_y = 600, 600
+c_x, c_y = int(p_xmax / 2), int(p_ymax / 2)
+sphere = testutils.Sphere(z_offset=10, radius=0.5)
+
+# Render silhouette
+start = time.time()
+image = render.render_silhouette(f_x, f_y, c_x, c_y, p_xmax=p_xmax, p_ymax=p_ymax, obj=sphere, max_dist=12)
+end = time.time()
+print('Rendering silhouette took {:.03f} seconds for image of size {}x{}'.format((end - start) * 1, p_xmax, p_ymax))
+plt.imshow(image.permute(1, 0))
+plt.show()
+plt.imshow(image.permute(1, 0))
+plt.savefig('results/sphere_silhouette.png')
+
+# Render normals
+start = time.time()
+image = render.render_normals(f_x, f_y, c_x, c_y, p_xmax=p_xmax, p_ymax=p_ymax, obj=sphere, max_dist=12)
+end = time.time()
+print('Rendering normals took {:.03f} seconds for image of size {}x{}'.format((end - start) * 1, p_xmax, p_ymax))
+plt.imshow((image.permute(2, 1, 0) + 1) / 2)
+plt.show()
+plt.imshow((image.permute(2, 1, 0) + 1) / 2)
+plt.savefig('results/sphere_normal.png')
+```
+
+### pyrender/rayutils.py
+```
+import torch
+
+def create_ray(f_x, f_y, c_x, c_y, p_x, p_y):
+    direction = torch.Tensor([f_y * (p_x  - c_x), f_x * (p_y - c_y), f_x * f_y])
+    direction = direction / torch.norm(direction)
+    origin = torch.Tensor([0, 0, 0])
+    return origin, direction
+
+def shoot_ray(origin, direction, obj, stop_epsilon=0.01, max_dist=100):
+    stop = False
+    intersect = False
+    point = origin
+    step_nb = 0
+    while not stop:
+        obj_dist = obj.eval_sdf(point)
+        if torch.norm(point - origin) > max_dist:
+            stop = True
+        elif obj_dist < 0:
+            warnings.warn('Origin inside object !!')
+        elif obj_dist < stop_epsilon:
+            stop = True
+            intersect = True
+        else:
+            point = point + obj_dist * direction
+            step_nb = step_nb + 1
+    return intersect, point, step_nb
+```
+
+### pyrender/render.py
+```
+import torch
+import numpy as np
+
+from pyrender import rayutils
+
+def render_silhouette(f_x, f_y, c_x, c_y, obj, p_xmax=112, p_ymax=112, max_dist=100):
+    image = torch.zeros(p_xmax, p_ymax)
+    for p_x in range(p_xmax):
+        for p_y in range(p_ymax):
+            ray_or, ray_dir = rayutils.create_ray(f_x, f_y, c_x, c_y, p_x, p_y)
+            intersect, inter_point, step_nb = rayutils.shoot_ray(ray_or, ray_dir, obj, max_dist=max_dist)
+            if intersect:
+                image[p_x, p_y] = 1
+    return image
+
+def render_normals(f_x, f_y, c_x, c_y, obj, p_xmax=112, p_ymax=112, max_dist=100):
+    image = torch.zeros(3, p_xmax, p_ymax)
+    for p_x in range(p_xmax):
+        for p_y in range(p_ymax):
+            ray_or, ray_dir = rayutils.create_ray(f_x, f_y, c_x, c_y, p_x, p_y)
+            intersect, inter_point, step_nb = rayutils.shoot_ray(ray_or, ray_dir, obj, max_dist=max_dist)
+            if intersect:
+                normal = obj.eval_sdf_grad(inter_point)
+                image[:, p_x, p_y] = normal
+    return image
+```
+
+### pyrender/testutils.py
+```
+import numpy as np
+import torch
+
+class Sphere():
+    def __init__(self, z_offset=200, radius=1):
+        self.radius = radius
+        self.offset = torch.Tensor([0, 0, z_offset])
+
+    def eval_sdf(self, xyz):
+        sdf = torch.sqrt(((xyz - self.offset) ** 2).sum()) - self.radius
+        return sdf
+
+    def eval_sdf_grad(self, xyz):
+        denum = torch.sqrt(((xyz - self.offset) ** 2).sum())
+        sdf_grad = (xyz - self.offset) / denum
+        return sdf_grad
+```

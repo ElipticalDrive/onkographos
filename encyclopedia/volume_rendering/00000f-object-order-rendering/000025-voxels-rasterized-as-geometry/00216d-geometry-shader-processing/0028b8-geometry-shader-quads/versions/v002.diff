@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -1,50 +1,52 @@
+ # Geometry Shader (Quads)
++
+ Also called: GS Quads, Geometry Shader quads generated each frame from faces
+ 
+ ## Overview
+-This method renders voxels by generating one quad per face rather than one primitive per voxel, where each input `GL_POINT` represents a single face [S1, S2, unofficial]. It differs from [Geometry Shader Processing](2524-geometry-shader-processing.md) by outputting exactly 4 vertices per primitive instead of 12, reducing buffer space and improving GPU architecture compatibility at the cost of requiring one input point per face rather than per voxel [S1, S2, unofficial].
++This method renders volumetric data by generating exactly one quad per input primitive, where each primitive represents a single visible face of a voxel rather than the entire voxel [S1, S2, unofficial]. It extends the Geometry Shader Voxels technique by breaking voxels down into their constituent faces, allowing for finer-grained control over visibility and reducing the vertex output count from 12 to 4 per primitive [S1, S2, unofficial]. This approach trades increased input data density (one point per face vs. one per voxel) for better GPU architecture compatibility and reduced buffer space requirements [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A stream of `GL_POINT` primitives. Each point contains the face's center position, color, and a face index.
+-- Output: A stream of `GL_TRIANGLE_STRIP` primitives, each consisting of 4 vertices forming a quad.
++### Inputs and Outputs
++- **Input:** A stream of `GL_POINTS`. Each point carries the position of a specific voxel face, its color, and an index indicating which of the 6 possible voxel faces it represents.
++- **Output:** A stream of `GL_TRIANGLE_STRIP` primitives, each consisting of 4 vertices forming a single quad [S1, S2, unofficial].
+ 
+-**Data Structures:**
++### Data Structures
+ The input vertex structure is defined as [S1, S2, unofficial]:
+ ```cpp
+ struct PointQuad {
+-    vec3 position;      // Center of the face in world/local space
++    vec3 position;      // Center position of the voxel
+     uint32_t packedColor; // Color data
+-    uint8_t faceIdx;    // Index 0-5 indicating which of the 6 voxel faces to generate
++    uint8_t faceIdx;    // Index 0-5 indicating which face to generate
+ };
+ ```
++The `faceIdx` maps to one of the 6 standard axis-aligned faces. The geometry shader uses two constant arrays, `dxs` and `dys`, to define the local offset vectors for each face orientation [S1, S2, unofficial]:
+ 
+-**Constants:**
+-Two constant arrays define the local axis vectors for the 6 possible face orientations [S1, S2, unofficial]:
+-- `dxs[6]`: `[(0,1,0), (0,0,1), (0,0,1), (1,0,0), (1,0,0), (0,1,0)]`
+-- `dys[6]`: `[(0,0,1), (0,1,0), (1,0,0), (0,0,1), (0,1,0), (1,0,0)]`
++| Index | Face Orientation | `dxs` (vec3) | `dys` (vec3) |
++| :--- | :--- | :--- | :--- |
++| 0 | +Y | (0, 1, 0) | (0, 0, 1) |
++| 1 | +Z | (0, 0, 1) | (0, 1, 0) |
++| 2 | -Z | (0, 0, 1) | (0, 1, 0) |
++| 3 | +X | (1, 0, 0) | (0, 0, 1) |
++| 4 | -X | (1, 0, 0) | (0, 1, 0) |
++| 5 | -Y | (0, 1, 0) | (1, 0, 0) |
+ 
+-**Parameters:**
+-- `voxSize`: The side length of a single voxel.
+-- `mvp`: The Model-View-Projection matrix uniform.
++*Note: The source tables for `dxs` and `dys` in [S1, unofficial] and [S2, unofficial] are identical. The mapping implies that `dx` and `dy` are orthogonal vectors lying in the plane of the face, scaled by half the voxel size.*
+ 
+-**Algorithm:**
+-1. Retrieve the center position from `gl_in[0].gl_Position` [S1, S2, unofficial].
+-2. Retrieve the face index `gFaceIdx[0]` from the input vertex attributes [S2, unofficial].
+-3. Calculate the offset vectors `dx` and `dy` in clip space:
+-   $$ dx = mvp \times vec4(dxs[gFaceIdx[0]] \times \frac{voxSize}{2.0}, 0) $$
+-   $$ dy = mvp \times vec4(dys[gFaceIdx[0]] \times \frac{voxSize}{2.0}, 0) $$
+-4. Call `AddQuad(center, dx, dy)` to emit the 4 vertices of the quad [S1, S2, unofficial].
++### Parameters
++- `voxSize`: The physical size of a single voxel.
++- `mvp`: The Model-View-Projection matrix, used to transform local offsets into clip space [S1, S2, unofficial].
+ 
+-**Pseudocode:**
++### Algorithm
++1.  **Retrieve Input:** Read the center position from `gl_in[0].gl_Position` and the face index from the input attributes [S1, S2, unofficial].
++2.  **Select Vectors:** Use `faceIdx` to select the corresponding `dx` and `dy` vectors from the constant arrays `dxs` and `dys` [S1, S2, unofficial].
++3.  **Transform Offsets:** Calculate the clip-space offset vectors by multiplying the local vectors by `voxSize / 2.0` and the `mvp` matrix [S1, S2, unofficial]:
++    $$ \vec{D_x} = \text{mvp} \times \text{vec4}(\vec{dxs}[faceIdx] \times \frac{voxSize}{2.0}, 0) $$
++    $$ \vec{D_y} = \text{mvp} \times \text{vec4}(\vec{dys}[faceIdx] \times \frac{voxSize}{2.0}, 0) $$
++4.  **Generate Vertices:** Call `AddQuad` with the center position and the two offset vectors. The `AddQuad` function emits 4 vertices forming a quad centered at the transformed center, with corners at $\pm \vec{D_x} \pm \vec{D_y}$ [S1, S2, unofficial].
++
++### Pseudocode
+ ```python
+-# Vertex Shader (pass-through)
+-# Outputs PointQuad structure to Geometry Shader
+-
+-# Geometry Shader
+-uniform mat4 mvp;
+-uniform float voxSize;
+-
+-const vec3 dxs[6] = [
++# Constants defined in the shader
++dxs = [
+     vec3(0, 1, 0),
+     vec3(0, 0, 1),
+@@ -53,7 +55,7 @@
+     vec3(1, 0, 0),
+     vec3(0, 1, 0)
+-];
++]
+ 
+-const vec3 dys[6] = [
++dys = [
+     vec3(0, 0, 1),
+     vec3(0, 1, 0),
+@@ -62,60 +64,63 @@
+     vec3(0, 1, 0),
+     vec3(1, 0, 0)
+-];
++]
+ 
+-void AddQuad(vec4 center, vec4 dx, vec4 dy) {
+-    gl_Position = center + (-dx - dy);
+-    EmitVertex();
+-    gl_Position = center + (dx + dy);
+-    EmitVertex();
+-    gl_Position = center + (-dx + dy);
+-    EmitVertex();
+-    gl_Position = center + (dx - dy);
+-    EmitVertex();
+-    EndPrimitive();
+-}
++def AddQuad(center, dx, dy):
++    """
++    Emits 4 vertices for a quad.
++    center: vec4, center position in clip space
++    dx: vec4, x-axis offset in clip space
++    dy: vec4, y-axis offset in clip space
++    """
++    # Vertex 1: center - dx - dy
++    gl_Position = center - dx - dy
++    EmitVertex()
++    
++    # Vertex 2: center + dx + dy
++    gl_Position = center + dx + dy
++    EmitVertex()
++    
++    # Vertex 3: center - dx + dy
++    gl_Position = center - dx + dy
++    EmitVertex()
++    
++    # Vertex 4: center + dx - dy
++    gl_Position = center + dx - dy
++    EmitVertex()
++    
++    EndPrimitive()
+ 
+-void main() {
+-    vec4 center = gl_in[0].gl_Position;
++def main():
++    # Retrieve input data
++    center = gl_in[0].gl_Position
++    face_idx = get_face_index_from_input() # From PointQuad structure
+     
+-    # Get face index from input attributes
+-    # Note: Exact attribute binding depends on driver/implementation
+-    uint faceIdx = gl_in[0].gl_VertexID; # Placeholder for actual attribute fetch
+-    # [G] In practice, faceIdx is retrieved from the vertex attribute array bound to the PointQuad struct.
++    # Select local offset vectors based on face index
++    local_dx = dxs[face_idx]
++    local_dy = dys[face_idx]
+     
+-    vec4 dx = mvp * vec4(dxs[faceIdx] / 2.0 * voxSize, 0.0);
+-    vec4 dy = mvp * vec4(dys[faceIdx] / 2.0 * voxSize, 0.0);
++    # Transform to clip space
++    # Note: mvp is a mat4, voxSize is a float
++    clip_dx = mvp * vec4(local_dx / 2.0 * voxSize, 0.0)
++    clip_dy = mvp * vec4(local_dy / 2.0 * voxSize, 0.0)
+     
+-    AddQuad(center, dx, dy);
+-}
++    # Generate the quad
++    AddQuad(center, clip_dx, clip_dy)
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- The method assumes `faceIdx` is valid (0-5). Invalid indices will access out-of-bounds memory in the constant arrays [S1, S2, unofficial].
+-- Unlike the voxel-based approach which generates up to 6 quads per primitive, this method generates exactly one quad per primitive [S1, S2, unofficial].
+-
+-## Subtopics
+-
+-### [Geometry Shader Cube Expansion](1074-geometry-shader-cube-expansion.md)
+-Generates a full cube from a single point. Choose when volumetric opacity requires full cube geometry rather than surface faces.
+-
+-### [Velocity Visualization via Geometry Shader Extrusion](1581-velocity-visualization-via-geometry-shader-extrusion.md)
+-Extrudes geometry based on velocity vectors. Choose for flow visualization, not static voxel rendering.
+-
+-### [Geometry Shader Triangle Slicing (Z-Pass)](1681-geometry-shader-triangle-slicing-z-pass.md)
+-Slices triangles for depth-based effects. Choose for post-processing or specific depth effects, not voxel face generation.
+-
+-### [GPU Particle Rendering via Geometry Shader](4444-gpu-particle-rendering-via-geometry-shader.md)
+-Billboards particles. Choose for particle systems, not structured voxel grids.
++### Edge Cases and Pitfalls
++- **Vertex Limit:** The output is strictly limited to 4 vertices per primitive. This is a significant reduction from the 12 vertices output by the parent "Geometry Shader Voxels" method, which improves compatibility with GPU architectures that have strict vertex output limits [S1, S2, unofficial].
++- **Input Density:** Because each primitive generates only one face, the input buffer must contain one point for every visible face. This increases the input data volume compared to generating all 6 faces from a single voxel point [S2, unofficial].
++- **Culling:** The source [S1, unofficial] mentions a `IsCulled` function and back-face culling logic (`normal.z > 0`) in the context of the *previous* technique (generating 6 quads per voxel). In this specific "Quads" technique, culling is handled by the fact that only visible faces are passed as input points. If the input generation step does not filter faces, the shader will generate quads for hidden faces, which may be culled by the rasterizer but waste processing.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ where $N$ is the number of faces. Each face is processed in constant time.
+-- **Memory Complexity:** Lower than voxel-based GS because it outputs 4 vertices per primitive instead of 12, reducing intermediate buffer space and improving cache efficiency [S1, S2, unofficial].
+-- **Performance:** Frame times are close to display lists and VAOs after optimization, though display lists may still win in raw render time [S1, S2, unofficial].
+-- **Strengths:** Reduced vertex output count (4 vs 12) improves compatibility with GPU architectures that have limits on vertices emitted per primitive [S1, S2, unofficial]. Low memory usage compared to static geometry [S1, unofficial].
+-- **Limitations:** Requires more input data (one point per face vs one per voxel), increasing the size of the input vertex buffer [S2, unofficial].
++- **Time Complexity:** Linear with respect to the number of visible faces. The geometry shader work per primitive is constant and minimal (array lookup and 4 vertex emissions).
++- **Memory Complexity:** Input memory usage is higher than voxel-based GS methods because it requires one point per face rather than one point per voxel. Output memory usage is lower (4 vertices vs 12) [S2, unofficial].
++- **Performance:** Offers a close second in render time to display lists, with significantly lower memory usage and setup time [S1, S2, unofficial]. The reduced vertex output count (4 vs 12) generally plays better with current GPU architectures [S2, unofficial].
++- **Strengths:** Low memory usage, dynamic generation, good GPU compatibility due to low vertex output count.
++- **Limitations:** Requires pre-processing to determine which faces are visible and generate the input points. Not suitable for dynamic voxel changes without regenerating the input buffer.
+ 
+ ## Background
+-This technique is an extension of the geometry shader voxel rendering method, breaking voxels down into individual faces [S1, S2, unofficial]. It was presented as a way to optimize the previous technique which generated up to 6 quads per voxel primitive [S1, S2, unofficial].
++This technique is an extension of the Geometry Shader Voxels method, designed to optimize the vertex output count. It was presented by Caleb Leak in "Quads All the Way Down: Simple Voxel Rendering" [S1, S2, unofficial]. The work compares geometry shader techniques against display lists and VAOs, highlighting the trade-offs between memory usage, setup time, and render time.
+ 
+ ## Sources

@@ -1,0 +1,106 @@
+# Mesh Transformation
+
+
+## Overview
+Applies a 4x4 transformation matrix to all vertices and normals of a mesh, updating the source mesh data in place while preserving the original positions in the source buffer [S1, unofficial]. It differs from its parent [Mesh Transformation via Embree RTC](5669-mesh-transformation-via-embree-rtc.md) by operating directly on the mesh vertex array rather than maintaining a separate Embree geometry buffer with internal transformation matrices.
+
+## How it works
+**Inputs and outputs:**
+- Input: `mesh` (containing `vertices` array of size $N$, optional `normals` array of size $N$), `xf` (4x4 transformation matrix).
+- Output: Updated `mesh->vertices` and `mesh->normals`.
+
+**Data structures:**
+- `mesh->vertices`: Array of $N$ 3D vectors (or homogeneous 4D vectors if the matrix is 4x4).
+- `mesh->normals`: Array of $N$ 3D vectors.
+
+**Steps:**
+1. Iterate over all vertices $i$ from $0$ to $N-1$.
+2. Transform vertex position:
+   $$ v'_i = xf \cdot v_i $$
+   where $v_i$ is the original vertex position and $v'_i$ is the transformed position.
+3. If normals exist:
+   a. Compute the normal transformation matrix $nxf$ from $xf$. This is typically the inverse transpose of the upper-left 3x3 submatrix of $xf$ [G].
+   b. Iterate over all normals $i$ from $0$ to $N-1$.
+   c. Transform and renormalize normal:
+      $$ n'_i = \text{normalize}(nxf \cdot n_i) $$
+      where $n_i$ is the original normal and $n'_i$ is the transformed normal.
+4. Invalidate and recompute bounding box/sphere if they were valid [S1, unofficial].
+
+**Parameters:**
+- `xf`: 4x4 transformation matrix.
+
+**Edge cases and pitfalls:**
+- If normals are not present, skip normal transformation.
+- Precision issues may arise if the transformation matrix contains large scaling factors; renormalization is critical for normals.
+- Bounding box/sphere invalidation is necessary because the mesh geometry has changed.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def apply_xform(mesh, xf):
+    """
+    Applies a 4x4 transformation matrix to mesh vertices and normals.
+    
+    Args:
+        mesh: Object with vertices (list of vec3/vec4) and optionally normals (list of vec3).
+        xf: 4x4 transformation matrix (list of lists or matrix object).
+    """
+    nv = len(mesh.vertices)
+    
+    # Transform vertices
+    for i in range(nv):
+        # Assuming vertices are homogeneous 4D vectors for 4x4 matrix multiplication
+        # If vertices are 3D, extract upper 3x3 part of xf
+        v = mesh.vertices[i]
+        # Homogeneous transformation: v' = xf * v
+        # Assuming v is vec4 (x, y, z, 1)
+        mesh.vertices[i] = xf @ v
+        
+    # Transform normals if they exist
+    if hasattr(mesh, 'normals') and mesh.normals is not None:
+        # Compute normal transformation matrix (inverse transpose of upper 3x3)
+        # Extract upper 3x3 submatrix
+        m33 = [[xf[j][i] for i in range(3)] for j in range(3)]
+        # Compute inverse transpose
+        # For simplicity, assume a helper function for inverse transpose of 3x3 matrix
+        nxf = inverse_transpose(m33)
+        
+        for i in range(nv):
+            n = mesh.normals[i]
+            # Transform normal
+            n_transformed = nxf @ n
+            # Renormalize
+            mesh.normals[i] = normalize(n_transformed)
+            
+    # Invalidate and recompute bounding box/sphere
+    # This step depends on the specific mesh implementation
+    # [G] Assuming a method to recompute bounds exists
+    mesh.invalidate_bounds()
+    mesh.recompute_bounds()
+```
+
+## Subtopics
+
+### Mesh Transformation for Printable Volume
+Computes a transformation matrix to scale and rotate a mesh to fit within a printable volume, aligning the largest dimension with the z-axis [S2, unofficial]. It differs from the standard method by automatically deriving the transformation matrix based on the mesh's bounding box and the target print volume dimensions.
+
+**Steps:**
+1. Load mesh and get bounding box (bbox). Compute `ext_max = max(bbox.extents())`. If size is None, scale object to fit grid tightly.
+2. Find axis of max extent: `axis_max = select(bbox.extents() == ext_max, 1., 0.)`. If `axis_max` is not `(0,0,1)`, compute rotation axis `rot_axis = cross(axis_max, (0,0,1))` and rotation matrix `rot_mat = rotate(rot_axis, 90.)`.
+3. Find enclosing circle of object in XY plane. Get vertex positions, mask non-z dimensions, compute miniball center and radius `r`. Compute translation to center.
+4. Compute scale factors: `scale.z = print_size.z / ext_max`. `scale.xy = 0.5 * print_size.xy / r`. Take min scale factor. `to_world = scale @ rot_mat @ tr`.
+5. If size is provided, check if `size > print_size`. If so, raise error. Compute center `c = 0.5 * (bbox.min + bbox.max)`. `to_world = scale(size/ext_max) @ translate(-c)`.
+
+## Operating characteristics
+- **Time complexity:** $O(N)$ for vertex and normal transformation, where $N$ is the number of vertices.
+- **Memory complexity:** $O(1)$ additional memory, as the transformation is applied in place.
+- **Strengths:** Simple, efficient, and directly modifies the mesh data.
+- **Limitations:** Requires manual handling of bounding box updates. Not suitable for dynamic transformations where the original mesh needs to be preserved.
+
+## Background
+Originated in the context of high-resolution sparse voxel DAGs for volume rendering, where mesh transformations are necessary for preprocessing geometry before voxelization [S1, unofficial]. The variant for printable volumes is used in tomographic volumetric additive manufacturing to prepare meshes for 3D printing [S2, unofficial].
+
+## Sources
+[S1] prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, https://github.com/prateekchandan/Advanced-CG-High-Resolution-Sparse-Voxel-DAGs, fetched 2026-10-26 (unofficial)
+[S2] Dr. TVAM – Inverse Rendering for Tomographic Volumetric Additive Manufacturing, https://github.com/rgl-epfl/drtvam, fetched 2026-10-26 (unofficial)

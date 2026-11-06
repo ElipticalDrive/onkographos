@@ -1,0 +1,86 @@
+# Normal Smoothness Loss
+Also called: Normal Continuity Loss, Normal Smoothness
+## Overview
+A regularization loss that encourages consecutive surface normals along a viewing ray to be similar, enforcing spatial smoothness in the estimated geometry [S1, unofficial]. It sets itself apart from [Surface Curvature Regularization](6510-surface-curvature-regularization.md) by operating on discrete sample points along a ray rather than computing differential geometric invariants like mean or Gaussian curvature from a continuous field [S1, unofficial][S2, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: Normal vector at the current sample point $\mathbf{n}_p$, normal vector at the previous sample point along the ray $\mathbf{n}_{prev}$, and a scalar weight $w$.
+- Output: Scalar loss value $L$.
+
+**Data Structures:**
+- $\mathbf{n}_p$: 3D unit vector representing the surface normal at the current integration sample.
+- $\mathbf{n}_{prev}$: 3D unit vector representing the surface normal at the immediately preceding integration sample along the same ray.
+
+**Steps:**
+1. Compute the dot product between the current normal and the previous normal: $d = \mathbf{n}_p \cdot \mathbf{n}_{prev}$.
+2. Calculate the raw loss as one minus the dot product: $L_{raw} = 1.0 - d$.
+3. Scale the loss by the weight parameter: $L = w \cdot L_{raw}$.
+
+**Formula:**
+$$L = w \cdot (1 - \mathbf{n}_p \cdot \mathbf{n}_{prev})$$
+
+Where:
+- $L$ is the computed loss.
+- $w$ is the weight scalar.
+- $\mathbf{n}_p$ is the normal at the current sample.
+- $\mathbf{n}_{prev}$ is the normal at the previous sample along the ray.
+
+**Parameters:**
+- $w$: Float scalar multiplying the loss term. Typical value: 1.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Requires tracking adjacent sample normals along a ray. This state is not natively supported by standard differentiable volume rendering integrators, which typically process samples independently or only accumulate opacity/color [S1, unofficial].
+- Implementation requires modifying the integrator loop to store the previous sample's normal, which may not be available in off-the-shelf libraries [S1, unofficial].
+- If normals are not normalized, the dot product range varies, affecting the loss magnitude. Normals should be normalized before computation [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normal_smoothness_loss(n_p, n_prev, weight=1.0):
+    """
+    Compute normal smoothness loss between consecutive samples along a ray.
+    
+    Args:
+        n_p: Tensor of shape (..., 3), normal at current sample.
+        n_prev: Tensor of shape (..., 3), normal at previous sample.
+        weight: Float, scalar weight for the loss.
+        
+    Returns:
+        Tensor of shape (...), scalar loss per sample.
+    """
+    # Ensure normals are normalized to prevent scale issues
+    n_p = n_p / (torch.norm(n_p, dim=-1, keepdim=True) + 1e-8)
+    n_prev = n_prev / (torch.norm(n_prev, dim=-1, keepdim=True) + 1e-8)
+    
+    # Compute dot product
+    dot_product = torch.sum(n_p * n_prev, dim=-1)
+    
+    # Compute loss: 1 - dot_product
+    # Note: dot_product is 1 if normals are identical, -1 if opposite.
+    # Loss is 0 if identical, 2 if opposite.
+    loss = 1.0 - dot_product
+    
+    # Scale by weight
+    loss = weight * loss
+    
+    return loss
+```
+## Subtopics
+
+### Jacobian-based Normal Regularization
+A regularization term that uses the Jacobian of the map of normals to regularize scene geometry, derived from differential geometry principles [S2, unofficial]. It computes the Frobenius norm of the Jacobian of the projected normal map $\tilde{n}$, defined as $L_{normals} = \sum \|\tilde{n}(x, y)\|_F^2$ [S2, unofficial]. This approach is significantly slower than depth regularization, processing ~1100 rays/s compared to ~5000 rays/s for depth regularization on NVIDIA V100 hardware [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not explicitly given for the basic dot-product version, but Jacobian-based variants are much slower than depth regularization [S2, unofficial].
+- **Memory Complexity:** Requires storing the previous sample's normal for each ray, adding minimal overhead per sample [S1, unofficial].
+- **Performance:** Jacobian-based normal regularization processes ~1100 rays/s on NVIDIA V100, compared to ~5000 rays/s for depth regularization [S2, unofficial].
+- **Strengths:** Enforces local geometric smoothness, helping to avoid noisy or jagged surfaces in novel view synthesis [S1, unofficial].
+- **Limitations:** Requires custom integrator modifications to track previous normals [S1, unofficial]. Jacobian-based variants are computationally expensive [S2, unofficial].
+- **When to use:** When surface smoothness is critical and computational budget allows for custom integrator changes or slower Jacobian-based methods [S1, unofficial][S2, unofficial].
+- **When not to use:** When using standard off-the-shelf differentiable renderers that do not expose previous sample normals [S1, unofficial].
+## Background
+Originated as a regularization technique in differentiable volume rendering and NeRF optimization to improve geometric consistency [S1, unofficial][S2, unofficial]. The basic form is described in the `tlir` codebase [S1, unofficial], while the Jacobian-based differential geometry formulation is detailed in "Regularization of NeRFs using differential geometry" [S2, unofficial].
+## Sources
+[S1] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
+[S2] Regularization of NeRFs using differential geometry, https://doi.org/10.48550/arxiv.2206.14938, fetched 2026-10-29 (unofficial)

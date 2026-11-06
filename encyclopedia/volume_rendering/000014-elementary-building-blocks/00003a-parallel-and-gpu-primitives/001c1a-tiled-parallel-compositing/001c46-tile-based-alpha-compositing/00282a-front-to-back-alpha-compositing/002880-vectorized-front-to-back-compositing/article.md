@@ -104,12 +104,12 @@ def vectorized_front_to_back_compositing(splats, H, W, background_color):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Alpha = 1.0:** If $\alpha$ reaches exactly 1.0, $T$ becomes 0, stopping further contributions. This is acceptable for forward rendering but causes vanishing gradients during backpropagation. Clamping to 0.999 prevents this [S1, unofficial].
-- **Low Alpha:** Effective alpha below $1/255 \approx 0.004$ contributes nothing to 8-bit pixels. Evaluating these splats wastes computation and gradient traffic. Real implementations skip these [S1, unofficial].
-- **No Early Termination:** Unlike GPU implementations, this vectorized approach cannot break the loop early when $T < \epsilon$ for specific pixels. All pixels process all splats regardless of opacity [S1, unofficial].
+- **Alpha = 1.0:** If $\alpha$ reaches exactly 1.0, $T$ becomes 0, stopping further contributions. This is acceptable for forward rendering but causes vanishing gradients during backpropagation [S1, unofficial]. Clamping to 0.999 prevents this [S1, unofficial].
+- **Low Alpha:** Effective alpha below $1/255 \approx 0.004$ contributes nothing to 8-bit pixels [S1, unofficial]. Evaluating these splats wastes computation and gradient traffic [S1, unofficial]. Real implementations skip these [S1, unofficial].
+- **No Early Termination:** Unlike GPU implementations, this vectorized approach cannot break the loop early when $T < \epsilon$ for specific pixels [S1, unofficial]. All pixels process all splats regardless of opacity [S1, unofficial].
 
 ## Operating characteristics
-Time and memory complexity, measured performance, scaling, strengths, limitations, and usage guidelines are Not given in the sources. The method processes all splats for all pixels without per-pixel early termination, unlike GPU implementations [S1, unofficial].
+Time and memory complexity, measured performance, scaling, strengths, limitations, and usage guidelines are Not given in the sources [S1, unofficial]. The method processes all splats for all pixels without per-pixel early termination, unlike GPU implementations [S1, unofficial].
 
 ## Background
 Described in an unofficial GitHub repository "3DGS-101" by Chamud [S1, unofficial]. The underlying tiled sorting and compositing pipeline is implemented in the reference CUDA rasterizer for 3D Gaussian Splatting and libraries like gsplat [S1, unofficial].

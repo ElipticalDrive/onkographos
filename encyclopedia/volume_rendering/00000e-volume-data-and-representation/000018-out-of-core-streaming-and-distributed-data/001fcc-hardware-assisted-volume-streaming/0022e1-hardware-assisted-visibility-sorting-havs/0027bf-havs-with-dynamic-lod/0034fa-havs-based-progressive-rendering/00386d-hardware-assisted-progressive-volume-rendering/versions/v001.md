@@ -1,0 +1,58 @@
+# Hardware-Assisted Progressive Volume Rendering
+
+Also called: Client-server isosurface extraction, Progressive volume rendering with HAVS
+
+## Overview
+Hardware-Assisted Progressive Volume Rendering is a client-server architecture for visualizing large volumetric datasets by transmitting isosurface geometry incrementally [S1, unofficial]. It minimizes client-side storage by sending only the necessary mesh triangles in progressive depth ranges, allowing the client to accumulate and refine the image until full quality is achieved [S1, unofficial]. Unlike full-volume streaming methods, this approach extracts unique triangle faces and vertices, relying on Hardware-Assisted Visibility Sorting (HAVS) to manage the composition of these surfaces in both object-space and image-space [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset (implicitly processed into an isosurface mesh), camera parameters, and client requests for geometry packets.
+*   **Output:** A progressively refined image displayed on the client, culminating in a saved full-quality copy.
+
+**Data Structures:**
+*   **Binary Mesh Format:** Unique triangle faces and vertices are stored in a binary format readable by the server [S1, unofficial].
+*   **Octree:** A geometric partition of mesh faces based on their centroids, constructed server-side [S1, unofficial].
+*   **Boundary Triangles:** Stored on the client to maintain interactivity and serve as the base for progressive refinement [S1, unofficial].
+
+**Steps:**
+1.  **Preprocessing:** Extract unique triangle faces and vertices from the volume data. Store them in a binary format [S1, unofficial].
+2.  **Server-Side Octree Construction:** Process the mesh faces into an octree. The partitioning is determined by the centroids of the faces [S1, unofficial].
+3.  **HAVS Sorting Setup:** Configure Hardware-Assisted Visibility Sorting (HAVS) to operate in two spaces:
+    *   **Object-Space (CPU):** Handles initial sorting and culling logic [S1, unofficial].
+    *   **Image-Space (GPU):** Performs fragment-level sorting completely on the GPU [S1, unofficial].
+4.  **Progressive Transmission Loop:**
+    *   The server traverses the octree by depth ranges from front to back relative to the camera [S1, unofficial].
+    *   When the client requests a packet, the server culls faces outside the current depth range [S1, unofficial].
+    *   The server sends the remaining faces to the client [S1, unofficial].
+    *   The depth range is incremented for future steps [S1, unofficial].
+5.  **Client-Side Rendering:**
+    *   The client accumulates incoming geometry [S1, unofficial].
+    *   It keeps boundary triangles to maintain an interactive mode [S1, unofficial].
+    *   The client refines the image using the results of previous progressive steps [S1, unofficial].
+    *   Upon completion, the client saves a copy of the image for later browsing [S1, unofficial].
+6.  **Interaction Handling:** If viewing changes (rotation, pan, zoom) occur during progressive rendering, the renderer stops and returns to interactive mode [S1, unofficial].
+7.  **Compression:** Vertex arrays are compressed using Open Source ZLIB before transmission [S1, unofficial].
+
+**Parameters:**
+*   **Hardware Requirement:** A graphics card with at least 128 MB RAM is necessary [S1, unofficial].
+*   **Compression:** ZLIB is used for vertex array compression [S1, unofficial].
+
+**Pitfalls:**
+*   **Depth Complexity:** High depth complexity and specific dataset structures require more culling and sorting passes, which can negatively affect geometry processing performance [S1, unofficial].
+*   **Central Features:** For datasets where important features are located in the center, the boundary-based rendering approximation may not provide a good visual result [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not explicitly defined in terms of Big-O notation. Performance is heavily influenced by depth complexity and dataset structure, requiring multiple culling and sorting passes [S1, unofficial].
+*   **Memory Complexity:** Client-side memory is minimized by storing only boundary triangles and accumulating incoming geometry [S1, unofficial]. Server-side memory includes the full binary mesh and the octree structure [S1, unofficial].
+*   **Performance:** The method allows for interactive display while transmitting data over internet protocols [S1, unofficial]. However, high depth complexity can degrade performance due to increased sorting overhead [S1, unofficial].
+*   **Strengths:** Minimizes client-side data size; allows progressive refinement; leverages GPU for fragment-level sorting [S1, unofficial].
+*   **Limitations:** Requires significant hardware (128 MB GPU RAM), making it unsuitable for mobile devices; less effective for datasets with central features; performance degrades with high depth complexity [S1, unofficial].
+*   **When to use:** Interactive exploration of large volumetric datasets where network bandwidth is limited and client storage is constrained, provided the hardware requirements are met [S1, unofficial].
+*   **When not to use:** Mobile devices (insufficient GPU RAM); datasets with critical central features; scenarios requiring high performance with high depth complexity [S1, unofficial].
+
+## Background
+This method was developed by P. Callahan et al. [S1, unofficial]. It is part of a broader effort to enable visualization of large datasets in a client-server architecture, specifically targeting hardware-assisted progressive volume rendering [S1, unofficial]. The technique is often cited in the context of volumetric medical image visualization on mobile devices, although it is noted that the hardware requirements make it difficult to deploy on current mobile phones [S1, unofficial]. It builds upon the principles of Hardware-Assisted Visibility Sorting (HAVS) and is related to other client-server visualization techniques such as those by Lamberti et al., which focus on transmitting images rather than geometry [S1, unofficial].
+
+## Sources
+[S1] Volumetric Medical Images Visualization on Mobile Devices, http://hdl.handle.net/2099.1/11308, fetched 2026-10-26 (unofficial)

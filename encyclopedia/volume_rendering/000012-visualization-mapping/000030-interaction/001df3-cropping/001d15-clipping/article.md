@@ -2,46 +2,39 @@
 Also called: Front Clipping for Perspective Projection, Near-plane clipping, Viewpoint-relative slab clipping
 
 ## Overview
-Clipping is a technique to enable correct perspective projection in sliced-based volume rendering by defining a near clipping boundary relative to the viewpoint [S1, unofficial]. It solves the problem of incorrect depth impression in inside views, where parallel projection fails to provide accurate spatial cues [S1, unofficial]. Unlike general cropping which cuts along volume faces, this method clips against the camera's near plane and active clipping planes to ensure only relevant slabs are processed [S2, unofficial].
+Clipping is a technique to enable correct perspective projection in sliced-based volume rendering by defining a near clipping boundary relative to the viewpoint [S1, unofficial]. It solves the problem of incorrect depth impression in inside views, where parallel projection fails to provide accurate spatial cues [S1, unofficial]. Unlike general cropping [Cropping](1648-cropping.md) which cuts along volume faces, this method clips against the camera's near/far planes and active clipping planes to ensure only relevant slabs are processed [S2, unofficial].
 
 ## How it works
 **Inputs and outputs:**
 - **Inputs:**
-  - `ren`: A renderer pointer providing camera state (viewpoint, orientation, near plane distance) and active clipping plane definitions [S2, unofficial].
-  - `worldBounds[6]`: A double array containing the unclipped world-space bounding box coordinates of the volume [S2, unofficial].
-  - `vol`: A volume pointer providing the volume's transformation matrix and clipping state flags [S2, unofficial].
+  - `ren`: A `vtkRenderer` pointer providing camera and clipping plane state [S2, unofficial].
+  - `worldBounds[6]`: A double array containing the unclipped world-space bounding box coordinates [S2, unofficial].
+  - `vol`: A `vtkVolume` pointer providing volume transformation and clipping state [S2, unofficial].
 - **Outputs:**
-  - A set of slabs (or primitives) that lie within the valid viewing frustum and beyond the near clipping plane.
+  - A set of slabs/primitives that pass the clipping tests against the camera near/far planes and active clipping planes [S2, unofficial].
 
 **Data structures:**
-- **Bounding Box:** Represented as an array of 6 doubles: `[minX, maxX, minY, maxY, minZ, maxZ]` in world coordinates [S2, unofficial].
-- **Clipping Planes:** Defined by the renderer's state, typically as plane equations $ax + by + cz + d = 0$ [S2, unofficial].
+- **Bounding Box:** Represented as `worldBounds[6]`, a double array containing the unclipped world-space bounding box coordinates [S2, unofficial].
+- **Clipping Planes:** Defined by the renderer's state (`ren`) [S2, unofficial].
 
 **Steps:**
-1. Retrieve the camera's near plane distance $d_{near}$ and the world-space bounding box `worldBounds` [S2, unofficial].
-2. Transform the volume's bounding box into the camera's view space using the volume's transformation matrix and the camera's view matrix [S2, unofficial].
-3. Clip the transformed bounding box against the camera's near plane. The near plane is defined by the distance from the viewpoint along the view direction [S1, unofficial].
-4. Clip the resulting box against any additional active clipping planes defined in `ren` [S2, unofficial].
-5. Determine the first slab to be processed. The user specifies or the system calculates the distance from the viewpoint to this first slab, ensuring it is $\ge d_{near}$ [S1, unofficial].
-6. Render only slabs beyond this defined distance to ensure correct depth impression for inside views [S1, unofficial].
+1. Retrieve the camera state and active clipping planes from `ren`, and the unclipped world-space bounding box from `worldBounds[6]` [S2, unofficial].
+2. Clip the volume bounding box against all active clipping planes and the camera near/far planes [S2, unofficial].
+3. The user specifies the distance from the viewpoint to the first slab to be processed [S1, unofficial].
+4. Only slabs beyond this defined distance are rendered, ensuring correct depth impression for inside views [S1, unofficial].
 
 **Formulas:**
-- Let $P_{view}$ be a point in view space. The near plane condition is:
-  $$ P_{view} \cdot \mathbf{v}_{dir} \ge d_{near} $$
-  where $\mathbf{v}_{dir}$ is the normalized view direction vector [S1, unofficial].
-- For a slab at distance $d_{slab}$ from the viewpoint, it is rendered if:
-  $$ d_{slab} \ge d_{near} $$
-  [S1, unofficial].
+- Let $d_{\text{slab}}$ be the distance from the viewpoint to a slab. The slab is processed if $d_{\text{slab}} \ge d_{\text{first}}$, where $d_{\text{first}}$ is the user-specified distance to the first slab [S1, unofficial].
 
 **Parameters:**
-- `ren`: VTK renderer pointer [S2, unofficial].
-- `worldBounds`: Array of 6 doubles [S2, unofficial].
-- `vol`: VTK volume pointer [S2, unofficial].
+- `ren`: `vtkRenderer` pointer [S2, unofficial].
+- `worldBounds[6]`: Double array of unclipped world-space bounding box coordinates [S2, unofficial].
+- `vol`: `vtkVolume` pointer [S2, unofficial].
 
 **Edge cases and pitfalls:**
 - **Inside Views:** Without front clipping, perspective projection artifacts occur because slabs behind the viewpoint might be rendered or ordered incorrectly [S1, unofficial].
-- **Precision:** Ensure that the near plane distance is not set to zero or negative values, which can cause division by zero or incorrect clipping logic [G].
-- **Degenerate Input:** If the volume is entirely behind the near plane, no slabs are rendered [G].
+- **Precision:** Not given in the sources.
+- **Degenerate Input:** Not given in the sources.
 
 ## Subtopics
 
@@ -53,19 +46,14 @@ Clipping is a technique to enable correct perspective projection in sliced-based
 
 ## Operating characteristics
 **Time and memory complexity:**
-- Time complexity is linear with respect to the number of slabs/primitives, as each is tested against the clipping planes [S2, unofficial].
-- Memory complexity is minimal, requiring only the bounding box and plane definitions [S2, unofficial].
-
+- Not given in the sources.
 **Measured performance:**
 - Not given in the sources.
-
 **Scaling:**
-- Scales well with the number of clipping planes, as each plane adds a constant-time test per slab [S2, unofficial].
-
+- Not given in the sources.
 **Strengths and limitations:**
 - **Strengths:** Enables correct perspective projection for inside views, which is mandatory for accurate depth impression [S1, unofficial].
 - **Limitations:** Does not handle partial occlusion or attenuation at the clipping boundary, leading to artifacts if primitives straddle the plane [S3, unofficial].
-
 **When to use it and when not:**
 - Use when correct perspective projection is required, especially for inside views [S1, unofficial].
 - Do not use when smooth attenuation at the clipping boundary is needed, in which case Moment-Matched or analytic clipping is preferred [S3, unofficial].
@@ -74,13 +62,11 @@ Clipping is a technique to enable correct perspective projection in sliced-based
 **Origin:**
 - The concept of front clipping for perspective projection was introduced to address limitations in sliced-based volume rendering systems like VolumePro, which lacked perspective projection support [S1, unofficial].
 - The term "Front Clipping" was used in the Shear-Warp Factorization Volume Rendering System to solve the problem of incorrect depth impression in inside views [S1, unofficial].
-
 **History and development:**
 - Early volume rendering systems like VolumePro supported only parallel projection and back-to-front compositing [S1, unofficial].
 - The SWF VRS improved this by introducing perspective projection and front clipping [S1, unofficial].
 - Modern implementations, such as those in VTK, integrate clipping with camera and volume state to handle complex scenes [S2, unofficial].
 - In the context of Gaussian Splatting, Hard Cull was isolated as a binary operator to analyze the effects of clipping without learned components [S3, unofficial].
-
 **Where it is used:**
 - Medical volume rendering, where inside views are common [S1, unofficial].
 - General volume rendering systems that support perspective projection [S1, unofficial].

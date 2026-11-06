@@ -1,0 +1,251 @@
+Expected behavior and actual behavior. When using gdal.Warp and warping via GEOLOCATION arrays and setting VRT as output format, large parts of the resampled output are blurred. This happens with bilinear, cubic, cubicspline, and lanczos...
+
+Blurry output of gdal.Warp when warping via GEOLOCATION arrays and output format is VRT · Issue #7750 · OSGeo/gdal · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Blurry output of gdal.Warp when warping via GEOLOCATION arrays and output format is VRT #7750
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Blurry output of gdal.Warp when warping via GEOLOCATION arrays and output format is VRT#7750
+Copy link
+Description
+danschef
+opened on May 11, 2023
+Issue body actions
+Expected behavior and actual behavior.
+When using gdal.Warp and warping via GEOLOCATION arrays and setting VRT as output format, large parts of the resampled output are blurred. This happens with bilinear, cubic, cubicspline, and lanczos resampling, not with nearest neighbor or rms resampling (I did not test the others).
+Steps to reproduce the problem.
+Here is a minimal example to reproduce the issue:
+```
+p_lons = '/path/longitude.tif'
+p_lats = '/path/latitude.tif'
+p_data = '/path/testdata.tif'
+p_data_mapgeo = '/path/testout.vrt'
+
+# add geolocation information to input metadata
+ds_data = gdal.Open(p_data)
+ds_data.SetMetadata(
+    dict(
+        SRS='EPSG:4326',
+        X_DATASET=p_lons,
+        Y_DATASET=p_lats,
+        X_BAND='1',
+        Y_BAND='1',
+        PIXEL_OFFSET='0',
+        LINE_OFFSET='0',
+        PIXEL_STEP='1',
+        LINE_STEP='1'
+    ),
+    'GEOLOCATION'
+)
+del ds_data
+
+# warp from geolocation arrays and read the result
+warpOptions = gdal.WarpOptions(
+    format='VRT',
+    srcSRS='EPSG:4326',
+    dstSRS='EPSG:32633',
+    geoloc=True,
+    resampleAlg='bilinear',
+    dstNodata=1
+)
+gdal.Warp(p_data_mapgeo, p_data, options=warpOptions)
+```
+The input testdata.tif (501x501) looks like this:
+The resampled testout.vrt looks like this:
+Expected output (when I use GTiff instead of VRT as output format):
+Please find the used data attached: data.zip.
+This might also be related to #4918.
+Also note that ds_data.SetMetadata(dict(SRS='EPSG:4326') causes the warning ERROR 1: missing [ wherin this works at gdal.WarpOptions(srcSRS='EPSG:4326'). However, this is not related to the actual issue as using ds_data.SetMetadata(dict(SRS=osr.GetUserInputAsWKT('WGS84')) does not change anything.
+Operating system
+Ubuntu 22.04 64 bit
+GDAL version and provenance
+gdal 3.6.2 from conda-forge
+Activity
+piyushrpt commented on May 11, 2023
+piyushrpt
+on May 11, 2023
+Last edited by piyushrpt
+Contributor
+More actions
+What would be the ratio between the width of the line and pixel spacing? Are the lines single pixels or multiple pixels? And you try setting error threshold to 0.0
+danschef commented on May 11, 2023
+danschef
+on May 11, 2023
+Last edited by danschef
+Author
+More actions
+What would be the ratio between the width of the line and pixel spacing?
+Not entirely sure what you mean but the input dataset was created like this:
+```
+import numpy as np
+arr = np.ones((501, 501))
+ind = np.arange(0, 501, 10)
+arr[ind, :] = 0
+arr[:, ind] = 0
+```
+However, I also have the issue with a satellite image in the same image dimension.
+I tried to set the error threshold to 0.0 but it does not change anything.
+danschef commented on May 11, 2023
+danschef
+on May 11, 2023
+Author
+More actions
+Just noted that there was warpOptions = gdal.WarpOptions(format='GTIFF') in the code snippet above (which works) but it should be warpOptions = gdal.WarpOptions(format='VRT'). I updated the description.
+piyushrpt commented on May 11, 2023
+piyushrpt
+on May 11, 2023
+Last edited by piyushrpt
+Contributor
+More actions
+I think the problem is that the VRT specifies a blocksize of 512 x 128 and the blurry boundary lines up with the xblocksize and looking at the magnitude of the resampled data - this may be a half-pixel shift between blocks only in the X direction
+danschef commented on May 12, 2023
+danschef
+on May 12, 2023
+Author
+More actions
+Ok, sounds reasonable to me.
+Is this something which I could fix on my side, e.g., by providing additional warpOptions or creationOptions?
+danschef commented on May 12, 2023
+danschef
+on May 12, 2023
+Author
+More actions
+Here is the output for a 1001x1001 input image (bilinear resampling) with some different blurry boundaries:
+Input data: testdata_large.zip
+piyushrpt commented on May 12, 2023
+piyushrpt
+on May 12, 2023
+Last edited by piyushrpt
+Contributor
+More actions
+I suspect its a bug in the warpedVRT and needs further digging into. One way to estimate the magnitude of the shift, which I suspect is 0.5 pixels, is to use one of latitude.tif or longitude.tif itself instead of testdata.tif and warp it to EPSG:4326. The difference between the value in the final raster and location estimated by geotransform will tell you if there is a systematic shift.
+Another thing to check is if this still happens if you process the whole image as one block. VRT creation options might allow you to set block size.
+rouault commented on May 13, 2023
+rouault
+on May 13, 2023
+Member
+More actions
+You want to add warpOptions = ['XSCALE=1', 'YSCALE=1'], as an argument of gdal.WarpOptions()
+Those are undocumented options for now, mostly because this is an area not judged fully satisfactory and they are considered as temporary means pending finding something better. They define respectively the ratio of the output width / input width and output height / input height, which is evaluated for each warping chunk, and such ratio is used to modulate the radius of the resampling kernel (when the ratio is for example 0.5, the effective radius of the bilinear resampling will go from its nominal 1 value to 2) . When using warped VRT, the warping chunk is by default 512 x 128 (can be overriden with the BLOCKXSIZE and BLOCKYSIZE creation options), and given the "rotation" implied by your geolocation array, and the fact that the geoloc array transformer errors out when going outside of the longitude/latitude arrays, and that the chunking logic of the warper splits warping chunks when there are too many coordinate transformation issues, the warping ends up processing a lot of small chunks that have odd shapes, and where the computed ratios output dim / input dim are significantly below 1, not super representative of the whole raster, and causing much source pixels to be averaged together
+```
+0GDAL: GDALDatasetCopyWholeRaster(): 641*512 swaths, bInterleave=0
+GDAL: GDALWarpOperation::ComputeSourceWindow() 325 out of 529 points failed to transform.
+GDAL: GDALWarpKernel()::GWKRealCase() Src=0,120,145x381 Dst=0,0,512x128
+GDAL: GDALWarpOperation::ComputeSourceWindow() 506 out of 529 points failed to transform.
+GDAL: GDALWarpKernel()::GWKRealCase() Src=0,84,20x62 Dst=512,0,129x128
+..GDAL: GDALWarpOperation::ComputeSourceWindow() 119 out of 529 points failed to transform.
+GDAL: GDALWarpKernel()::GWKRealCase() Src=0,80,286x421 Dst=0,128,512x128
+GDAL: GDALWarpOperation::ComputeSourceWindow() 113 out of 529 points failed to transform.
+GDAL: GDALWarpKernel()::GWKRealCase() Src=0,0,144x141 Dst=512,128,129x128
+.10.GDAL: GDALWarpOperation::ComputeSourceWindow() 80 out of 529 points failed to transform.
+GDAL: GDALWarpKernel()::GWKRealCase() Src=123,0,295x501 Dst=0,256,512x128
+GDAL: GDALWarpOperation::ComputeSourceWindow() 214 out of 529 points failed to transform.
+GDAL: GDALWarpKernel()::GWKRealCase() Src=92,0,177x101 Dst=512,256,129x128
+..GDAL: GDALWarpOperation::ComputeSourceWindow() 76 out of 529 points failed to transform.
+[...]
+```
+Given that you operate on a small extent and none of your warping parameters involve explicit subsampling or oversampling, setting XSCALE = YSCALE = 1 is reasonable.
+danschef commented on May 16, 2023
+danschef
+on May 16, 2023
+Author
+More actions
+Thanks @rouault for the explanation. Setting creationOptions=['BLOCKXSIZE=1000', 'BLOCKYSIZE=1000'] has no effect (@piyushrpt) but adding warpOptions = ['XSCALE=1', 'YSCALE=1'] as an argument of gdal.WarpOptions() indeed fixes the issue.
+However, I guess this should be handled internally by GDAL rather than on the user's side, at least as long as this is not documented.
+Kirill888 commented on May 26, 2023
+Kirill888
+on May 26, 2023
+More actions
+Coming over from rasterio issue linked above.
+Setting XSCALE=1,YSCALE=1 works in there too.
+Looking through these messages and linked code, I think that this logic is a culprit:
+gdal/alg/gdalwarpkernel.cpp
+Lines 1041 to 1042
+in
+7af1d36
+dfXScale = static_cast<double>(nDstXSize) / (nSrcXSize - dfSrcXExtraSize);
+dfYScale = static_cast<double>(nDstYSize) / (nSrcYSize - dfSrcYExtraSize);
+Scenario that triggers issues for us is
+Projection change has significant rotation component (due to CRS, source and destination images are axis aligned)
+Input and output images have the same ground sampling distance in CRS units, so no scale change at all
+Destination image has aspect ratio far away from 1:1 (tall narrow strip or short wide strip)
+Bilinear/cubic/lanczos resampling is used
+As a result you end up with input image being way more "square", while destination image is a rotated narrow strip when viewed in pixel space of the source.
+In those cases, approximation to figure out scale change along X/Y axis, used in the code above, completely breaks down as it ignores rotational component introduced by the transform. Were one to fit affine transform for the CRS change and then compute decomposition into A=R(a)*W(w)*Scale(sx,sy)*Translation(tx,ty) one would see that Scale matrix is almost identity, while approximation computed from src/dst image dimensions is completely off.
+```
+    R [ca -sa]  W [1, w]  S [sx,  0]
+      [sa  ca]    [0, 1]    [ 0, sy]
+```
+```
+A_fit_from_transform = Affine(
+    0.9986044561305774, -0.16384673492630283, 7107.210647841869,
+    0.1610342108759008, 0.9759913763262058, 5148.585880821804),
+
+R_and_t = Affine(
+    0.9872459417826623, -0.1592025453115125, 7107.210647841869,
+    0.1592025453115125, 0.9872459417826625, 5148.585880821804),
+W = Affine(
+    1.0, -0.006443543037071972, 0.0,
+    0.0, 1.0, 0.0),
+S  = Affine(
+    1.0115052530146693, 0.0, 0.0,
+    0.0, 0.9896283427341699, 0.0)))
+
+A_fit_from_transform = R_and_t*W*S
+```
+While scale change estimated from image dimensions gives:
+```
+Y: 268 -> 269 == 1.0037313432835822
+X:  61 ->  14 == 0.22950819672131148
+```
+resulting in extreme data loss along X axis, equivalent to shrinking source image to 1/5 of it's width then expanding it back to do sampling.
+❤️React with ❤️2Reacted by Vincent Sarago and Michael Sumner
+snowman2 commented on Jun 29, 2023
+snowman2
+on Jun 29, 2023
+Contributor
+More actions
+Should GDAL default to XSCALE=1 & YSCALE=1? Or, is there a better solution?
+This is what has been done for datacube (opendatacube/datacube-core#1456).
+snowman2 commented on Jun 29, 2023
+snowman2
+on Jun 29, 2023
+Contributor
+More actions
+From #1620 (comment)
+When using a non-nearest resampling kernel, the resampler must take into account the ratio of number_of_target_pixels / number_of_souce_pixels to appropriately take into account the weight of source pixels. Currently this value is computed for each warping chunk. Given that the size of the rasters and the default warping memory, a single chunk is used to reproject the mosaic or the single tile. So when working with the VRT mosaic or the single tile, you'll get very subtle differences in those ratios due to non-linearity of reprojection effects and/or raster dimensions being integer values. The value of the scale factors I've selected are the ones that applies for the single tile.... Ideally the warper should probably compute those scale factor for each target pixel, instead of each warping chunk, but that would have computational cost.
+Jarrrrrrrrrrr commented on Mar 1, 2024
+Jarrrrrrrrrrr
+on Mar 1, 2024
+Last edited by Jarrrrrrrrrrr
+More actions
+@rouault , could you please confirm, that if I specify target resolution in gdalwarp with -tr Xres Yres, I can also calculate XSCALE = Xres/source_Xres , YSCALE = Yres/source_Yres, and that would be correct?
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,213 @@
+# HAVS-based Progressive Rendering
+
+Also called: Progressive Volume Rendering, Progressive Volume Rendering of Unstructured Grids
+
+## Overview
+HAVS-based Progressive Rendering is a level-of-detail framework for the interactive exploration of large unstructured tetrahedral datasets that exceed the memory or rendering capacity of conventional direct volume rendering techniques [S1]. It solves the problem of visualizing massive meshes (e.g., ~14 million tetrahedra) by incrementally streaming portions of the mesh geometry to a hardware-assisted renderer, displaying approximations that increase in quality until a full-quality image is achieved [S1]. Unlike full-volume streaming methods that transmit all geometry, this approach extracts unique triangle faces and relies on Hardware-Assisted Visibility Sorting (HAVS) to manage surface composition in both object-space and image-space, allowing the client to accumulate and refine the image progressively [S1]. It builds on [HAVS with Dynamic LOD](4110-havs-with-dynamic-lod.md) by providing a reduced representation during interaction and refining the image during idle frames.
+
+## How it works
+The method combines object-space sorting, GPU-based image-space sorting via a k-buffer, and iterative compositing to generate a progressive image.
+
+**Inputs and Outputs**
+*   **Input:** A large tetrahedral mesh (unstructured grid) defined by vertices and tetrahedra.
+*   **Output:** A sequence of increasingly accurate 2D image approximations displayed to the user.
+
+**Data Structures**
+1.  **Sorted Triangle List:** The triangles composing the tetrahedral mesh are pre-sorted by their centroid distance from the viewpoint in object-space [S1].
+2.  **K-buffer:** A fixed-size A-buffer implemented using GPU textures. It stores fragments sorted by depth in image-space [S1].
+3.  **Off-screen Framebuffer:** A texture buffer storing the composited result of the two closest fragments (scalar values and distance) for generating the current approximation [S1].
+4.  **3D Pre-integrated Table:** A 3D texture containing volume integral data used to composite fragments into the framebuffer based on scalar values and distances [S1].
+
+**Parameters**
+*   **Batch Size:** The number of internal triangles streamed and rasterized in each iteration. Not given in the sources.
+*   **K-buffer Size:** The fixed capacity of the A-buffer. Not given in the sources.
+
+**Algorithm Steps**
+
+1.  **Initialization:**
+    *   Clear the off-screen framebuffer and the k-buffer.
+    *   Sort all triangles of the tetrahedral mesh by centroid distance from the current viewpoint [S1].
+
+2.  **Boundary Rendering (Initial State):**
+    *   Identify the boundary triangles of the mesh.
+    *   Rasterize the boundary triangles.
+    *   Insert the front and back fragments of the boundary triangles into the k-buffer [S1].
+
+3.  **Iterative Refinement Loop:**
+    *   While the full-quality image is not achieved and the user is not interacting:
+        a.  **Stream Geometry:** Select the next batch of internal triangles from the sorted list.
+        b.  **Rasterization:** Rasterize the batch of internal triangles.
+        c.  **Image-Space Sorting:** Insert the resulting fragments into the k-buffer, maintaining the sorted order [S1].
+        d.  **Fragment Selection:** Retrieve the two fragments closest to the viewpoint from the k-buffer (front-most and second-front-most) [S1].
+        e.  **Compositing to Off-screen Buffer:**
+            *   Let $F_1$ be the front-most fragment and $F_2$ be the second-front-most fragment.
+            *   Let $s_1, s_2$ be their scalar values and $d_1, d_2$ be their distances from the viewpoint.
+            *   Use the 3D pre-integrated table to composite $F_1$ and $F_2$ into the off-screen framebuffer. The compositing accounts for the scalar values and the distance between them ($d_2 - d_1$) [S1].
+        f.  **K-buffer Update:**
+            *   Discard the front-most fragment ($F_1$) from the k-buffer.
+            *   Store the remaining fragments (including $F_2$ and any new fragments) back into the k-buffer [S1].
+        g.  **Approximation Generation:**
+            *   Create an approximation for the current rasterized portion by compositing the off-screen framebuffer with the contribution of the gap between the front and back fragments still residing in the k-buffer [S1].
+        h.  **Display:** Display the generated approximation.
+        i.  **State Maintenance:** Keep the off-screen framebuffer and the updated k-buffer for the subsequent iteration [S1].
+
+4.  **Interaction Reset:**
+    *   If the user changes the view or interacts with the scene:
+        *   Clear the off-screen framebuffer and the k-buffer.
+        *   Reset the triangle stream to the beginning.
+        *   Restart the process from Step 2 [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def havs_progressive_render(mesh, viewpoint, k_buffer_capacity, pre_integrated_table):
+    """
+    Renders a large tetrahedral mesh progressively using HAVS.
+    
+    Args:
+        mesh: Tetrahedral mesh object with get_triangles() and is_boundary() methods.
+        viewpoint: 3D vector representing the camera position.
+        k_buffer_capacity: Integer size of the k-buffer.
+        pre_integrated_table: 3D texture for compositing.
+    """
+    # 1. Initialization
+    k_buffer = KBuffer(capacity=k_buffer_capacity)
+    offscreen_fb = TextureBuffer()
+    
+    # Sort triangles by centroid distance from viewpoint
+    all_triangles = mesh.get_all_triangles()
+    sorted_triangles = sort_by_centroid_distance(all_triangles, viewpoint)
+    
+    # 2. Boundary Rendering
+    boundary_triangles = [t for t in all_triangles if mesh.is_boundary(t)]
+    boundary_fragments = rasterize(boundary_triangles, viewpoint)
+    k_buffer.insert_sorted(boundary_fragments)
+    
+    # Stream index for internal triangles
+    internal_stream_index = 0
+    
+    while not is_full_quality_reached():
+        # 3a. Stream Geometry
+        batch = sorted_triangles[internal_stream_index : internal_stream_index + BATCH_SIZE]
+        internal_stream_index += BATCH_SIZE
+        
+        # 3b. Rasterization
+        new_fragments = rasterize(batch, viewpoint)
+        
+        # 3c. Image-Space Sorting
+        k_buffer.insert_sorted(new_fragments)
+        
+        # 3d. Fragment Selection
+        # Get the two closest fragments to the viewpoint
+        f1 = k_buffer.get_front_fragment()
+        f2 = k_buffer.get_second_front_fragment()
+        
+        if f1 is None or f2 is None:
+            continue
+            
+        # 3e. Compositing to Off-screen Buffer
+        # Composite f1 and f2 using scalar values and distance
+        # Let s1, s2 be scalar values, d1, d2 be distances
+        # Use pre-integrated table with (s1, s2, d2 - d1)
+        composite_result = composite_fragments(f1, f2, pre_integrated_table)
+        offscreen_fb.write(composite_result)
+        
+        # 3f. K-buffer Update
+        # Discard front-most fragment, keep the rest
+        k_buffer.remove_front_fragment()
+        
+        # 3g. Approximation Generation
+        # Composite offscreen_fb with the gap contribution from remaining k-buffer fragments
+        # The gap is between the new front (f2) and the back of the k-buffer
+        approximation = generate_approximation(offscreen_fb, k_buffer, pre_integrated_table)
+        
+        # 3h. Display
+        display_image(approximation)
+        
+        # 3i. State Maintenance
+        # Buffers are maintained for next iteration
+        
+        # Check for interaction reset
+        if user_interacted():
+            k_buffer.clear()
+            offscreen_fb.clear()
+            internal_stream_index = 0
+            # Restart boundary rendering
+            boundary_fragments = rasterize(boundary_triangles, viewpoint)
+            k_buffer.insert_sorted(boundary_fragments)
+            break # Restart loop from beginning
+
+def rasterize(triangles, viewpoint):
+    """
+    Rasterizes triangles and returns fragments with depth and scalar value.
+    """
+    fragments = []
+    for tri in triangles:
+        # Project triangle to screen space
+        screen_coords = project_to_screen(tri, viewpoint)
+        # Generate fragments for covered pixels
+        for pixel in screen_coords:
+            # Interpolate scalar value from tetrahedra vertices
+            scalar = interpolate_scalar(tri, pixel)
+            # Calculate depth
+            depth = calculate_depth(tri, pixel, viewpoint)
+            fragments.append(Fragment(depth=depth, scalar=scalar, pixel=pixel))
+    return fragments
+
+def composite_fragments(f1, f2, table):
+    """
+    Composites two fragments using the pre-integrated table.
+    """
+    distance = f2.depth - f1.depth
+    # Lookup in 3D pre-integrated table
+    # Inputs: scalar_f1, scalar_f2, distance
+    result = table.lookup(f1.scalar, f2.scalar, distance)
+    return result
+
+def generate_approximation(offscreen_fb, k_buffer, table):
+    """
+    Generates the final approximation by compositing the offscreen buffer
+    with the remaining gap in the k-buffer.
+    """
+    # The offscreen_fb contains the composite of the top 2 fragments.
+    # The k-buffer contains the rest.
+    # We need to composite the offscreen result with the contribution
+    # of the gap between the current front of k-buffer and the back.
+    # This step implies a final compositing pass over the stored state.
+    # Since the exact formula for the "gap contribution" is not detailed
+    # beyond "compositing... with the contribution of the gap", we assume
+    # a standard volume integration over the remaining depth range.
+    
+    # Pseudocode representation of the conceptual step:
+    # final_image = offscreen_fb
+    # for each remaining fragment in k_buffer:
+    #     final_image = composite(final_image, fragment, table)
+    # return final_image
+    
+    # Note: The source states "compositing the off-screen framebuffer with 
+    # the contribution of the gap between the front and back fragments still in the k-buffer".
+    # This suggests an efficient approximation rather than full re-compositing.
+    return offscreen_fb # Placeholder for the specific gap compositing logic not fully detailed in sources
+```
+
+## Subtopics
+
+### [Hardware-Assisted Progressive Volume Rendering](8241-hardware-assisted-progressive-volume-rendering.md)
+A client-server architecture that minimizes client-side storage by transmitting only necessary mesh triangles in progressive depth ranges. It differs by focusing on network transmission and client accumulation, whereas HAVS-based Progressive Rendering focuses on GPU-side incremental refinement and state maintenance.
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm renders each triangle in the mesh only once per viewpoint, leading to an efficient LOD algorithm that quickly converges to a full-quality image [S1].
+*   **Memory Complexity:** The method maintains only a light-weight image representation of the volume between rendering steps, storing state in the k-buffer and off-screen framebuffer [S1].
+*   **Measured Performance:** Demonstrated on the SF1 dataset consisting of about 14 million tetrahedra [S1].
+*   **Strengths:** Provides a reduced representation during interaction and incrementally refines the progressive image during idle frames, allowing for interactive exploration of datasets too large for conventional approaches [S1].
+*   **Limitations:** The incremental state is invalid upon user interaction; the view change requires clearing buffers and restarting, which may cause a temporary drop in frame rate or quality until the new view is re-established [S1].
+*   **When to use:** Interactive exploration of large tetrahedral datasets in scientific computing domains like computational fluid dynamics and structural mechanics [S1].
+*   **When not to use:** When the user requires immediate full-quality rendering without progressive refinement, or when the dataset is small enough to be rendered conventionally.
+
+## Background
+The method was developed by S. P. Callahan, L. Bavov, V. Pascucci, and C. T. Silva. It is based on the Hardware-Assisted Visibility Sorting (HAVS) algorithm [Callahan et al. 2005] and extends it to handle larger datasets through progressive rendering [Callahan et al. 2006]. The work was performed under the auspices of the U.S. DOE by LLNL and supported by NSF, DOE, IBM, and ARO [S1].
+
+## Sources
+[S1] Progressive Volume Rendering of Unstructured Grids on ..., https://www.sci.utah.edu/~csilva/papers/siggraph2006b.pdf, fetched 2026-10-27

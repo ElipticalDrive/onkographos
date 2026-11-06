@@ -1,0 +1,204 @@
+# Automatic Transfer Function Assignment based on Region Size and Occlusion
+
+Also called: Occlusion-aware TF Assignment, Region-based TF Assignment
+
+## Overview
+This method automatically assigns opacity and color to volumetric regions (clusters) by analyzing their spatial size and occlusion relationships, ensuring that smaller or interior structures remain visible despite being hidden by larger ones [S1, unofficial]. Unlike standard classification methods that rely on scalar intensity thresholds, this approach uses geometric properties of segmented clusters to dynamically adjust visual parameters, addressing the common problem of large structures obscuring diagnostically or analytically important small details [S1, unofficial]. It builds on [Classification and transfer functions](38-classification-and-transfer-functions.md) by providing an automated, data-driven strategy for parameter assignment rather than manual tuning.
+
+## How it works
+The method operates on a set of segmented regions (clusters) $R_i$ derived from the volume data. It assumes the volume has been pre-processed into convex hulls or clusters, typically via region growing in a feature space (e.g., Local Histogram space) [S1, unofficial].
+
+**Inputs:**
+*   A set of voxels partitioned into $N$ regions $R_1, \dots, R_N$.
+*   For each region $R_i$, the set of constituent voxels $V_i$.
+*   The scalar intensity value $f_v$ for each voxel $v$.
+*   The gradient magnitude $\|\nabla v\|$ for each voxel $v$ [S1, unofficial].
+
+**Outputs:**
+*   For each voxel $v \in R_i$: an opacity $\alpha_v$ and a color $c_v$.
+
+**Data Structures:**
+*   **Region Statistics:** For each region $R_i$, store:
+    *   $N_i$: Number of voxels in $R_i$.
+    *   $\mu_i = (\mu_{ix}, \mu_{iy}, \mu_{iz})$: Mean position of voxels in $R_i$.
+    *   $\sigma_i$: Standard deviation of voxel positions in $R_i$ (representing region size/spread).
+    *   $S_i$: Number of other regions occluded by $R_i$.
+    *   $c_i$: Base color for the region.
+    *   $F_{max, i} = \max_{u \in R_i} f_u$: Maximum intensity in the region.
+    *   $G_{max, i} = \max_{u \in R_i} \|\nabla u\|$: Maximum gradient magnitude in the region.
+
+**Parameters:**
+*   $k_d$: Pre-defined occlusion comparison factor, typically $1$ [S1, unofficial].
+*   $k_s$: Adjustable opacity scaling factor, typically $0.1$ or $0.3$ [S1, unofficial].
+*   $\alpha_{min}, \alpha_{max}$: Target opacity range, e.g., $[0, 1]$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Compute Region Statistics:**
+    For each region $R_i$:
+    *   Calculate mean position $\mu_i = \frac{1}{N_i} \sum_{v_j \in R_i} v_j$ [S1, unofficial].
+    *   Calculate size metric $\sigma_i = \sqrt{\frac{1}{N_i} \sum_{v_j \in R_i} (v_j - \mu_i)^2}$ [S1, unofficial].
+    *   Find max intensity $F_{max, i}$ and max gradient $G_{max, i}$ within $R_i$.
+
+2.  **Determine Occlusion Relationships:**
+    For each pair of regions $(R_i, R_j)$:
+    *   Calculate Euclidean distance between means:
+        $$ D(R_i, R_j) = \sqrt{(\mu_{ix} - \mu_{jx})^2 + (\mu_{iy} - \mu_{jy})^2 + (\mu_{iz} - \mu_{jz})^2} $$
+    *   Region $R_i$ occludes $R_j$ if:
+        $$ \sigma_i > \sigma_j \quad \text{AND} \quad \sigma_i > k_d \cdot D(R_i, R_j) $$
+    *   Count $S_i$, the number of regions $R_j$ occluded by $R_i$ [S1, unofficial].
+
+3.  **Assign Base Opacity ($\alpha^*_i$):**
+    Map the region size $\sigma_i$ linearly to the target opacity range. Smaller regions (smaller $\sigma_i$) receive higher base opacity to counteract occlusion:
+    $$ \alpha^*_i = \frac{\max_j(\sigma_j) - \sigma_i}{\max_j(\sigma_j) - \min_j(\sigma_j)} (\alpha_{max} - \alpha_{min}) + \alpha_{min} $$
+    This ensures large structures are rendered more transparently than small ones [S1, unofficial].
+
+4.  **Calculate Final Region Opacity ($\alpha_i$):**
+    Adjust base opacity by the number of occluded regions:
+    $$ \alpha_i = \frac{\alpha^*_i}{k_s (S_i + 1)} $$
+    This further reduces opacity for large regions that occlude many others, enhancing visibility of internal structures [S1, unofficial].
+
+5.  **Assign Base Color ($c_i$):**
+    Map the region size $\sigma_i$ to a color spectrum. Small regions are assigned "hot" colors (e.g., red/yellow), and large regions are assigned "cool" colors (e.g., blue/cyan). This can be done via a linear mapping to HSV hue or a pre-defined color array [S1, unofficial].
+
+6.  **Compute Voxel-Level Opacity ($\alpha_{i,v}$):**
+    For each voxel $v \in R_i$, modulate the region opacity by its local gradient magnitude to enhance boundaries:
+    $$ \alpha_{i,v} = \alpha_i \cdot \frac{\|\nabla v\|}{G_{max, i}} $$
+    Voxels with higher gradients (edges) become more opaque [S1, unofficial].
+
+7.  **Compute Voxel-Level Color ($c_{i,v}$):**
+    For each voxel $v \in R_i$, scale the base color $c_i$ by its intensity relative to the region's max intensity. This scaling is applied only to the **Brightness** component in the HSV color space to preserve hue and saturation:
+    $$ c_{i,v} = c_i \cdot \frac{f_v}{F_{max, i}} $$
+    (Applied to the V channel of $c_i$) [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_tf_parameters(regions, k_d=1.0, k_s=0.3, alpha_min=0.0, alpha_max=1.0):
+    """
+    regions: List of Region objects.
+    Each Region has:
+      - voxels: List of Voxel objects (with pos, intensity, gradient_mag)
+      - id: Unique identifier
+    """
+    
+    # Step 1: Compute Region Statistics
+    for region in regions:
+        voxels = region.voxels
+        n = len(voxels)
+        
+        # Mean position
+        mean_pos = [0.0, 0.0, 0.0]
+        for v in voxels:
+            mean_pos[0] += v.pos[0]
+            mean_pos[1] += v.pos[1]
+            mean_pos[2] += v.pos[2]
+        mean_pos = [m / n for m in mean_pos]
+        region.mean_pos = mean_pos
+        
+        # Size metric (standard deviation of positions)
+        sum_sq_diff = 0.0
+        for v in voxels:
+            diff = [v.pos[i] - mean_pos[i] for i in range(3)]
+            sum_sq_diff += sum(d*d for d in diff)
+        region.sigma = (sum_sq_diff / n) ** 0.5
+        
+        # Max intensity and gradient
+        region.max_intensity = max(v.intensity for v in voxels)
+        region.max_gradient = max(v.gradient_mag for v in voxels)
+        
+    # Step 2: Determine Occlusion
+    # Initialize occlusion counts
+    for region in regions:
+        region.occluded_count = 0
+        
+    for i, region_i in enumerate(regions):
+        for j, region_j in enumerate(regions):
+            if i == j:
+                continue
+            
+            # Distance between means
+            dist_sq = sum((region_i.mean_pos[k] - region_j.mean_pos[k])**2 for k in range(3))
+            dist = dist_sq ** 0.5
+            
+            # Check occlusion condition
+            # Ri occludes Rj if sigma_i > sigma_j AND sigma_i > k_d * D(Ri, Rj)
+            if (region_i.sigma > region_j.sigma) and (region_i.sigma > k_d * dist):
+                region_i.occluded_count += 1
+                
+    # Step 3 & 4: Assign Opacity
+    # Find global min/max sigma
+    all_sigmas = [r.sigma for r in regions]
+    min_sigma = min(all_sigmas)
+    max_sigma = max(all_sigmas)
+    
+    # Avoid division by zero if all sigmas are equal
+    sigma_range = max_sigma - min_sigma
+    if sigma_range == 0:
+        sigma_range = 1.0
+        
+    for region in regions:
+        # Linear mapping of sigma to alpha*
+        # Note: Formula maps max_sigma to alpha_min, min_sigma to alpha_max
+        # (Smaller sigma -> Higher alpha)
+        alpha_star = ((max_sigma - region.sigma) / sigma_range) * (alpha_max - alpha_min) + alpha_min
+        
+        # Final alpha with occlusion scaling
+        # alpha_i = alpha*_i / (k_s * (S_i + 1))
+        region.alpha = alpha_star / (k_s * (region.occluded_count + 1))
+        
+    # Step 5: Assign Base Color
+    # Map sigma to Hue (0=Red/Hot, 240=Blue/Cold)
+    for region in regions:
+        # Normalize sigma to [0, 1]
+        norm_sigma = (region.sigma - min_sigma) / sigma_range
+        # Map to Hue: Small sigma (0) -> Hot (0), Large sigma (1) -> Cool (240)
+        hue = norm_sigma * 240.0
+        region.base_color_hsv = (hue, 1.0, 1.0) # S=1, V=1 initially
+        
+    # Step 6 & 7: Compute Voxel-Level Properties
+    for region in regions:
+        for voxel in region.voxels:
+            # Voxel Opacity
+            # alpha_v = alpha_i * (grad_v / max_grad_i)
+            if region.max_gradient > 0:
+                voxel.alpha = region.alpha * (voxel.gradient_mag / region.max_gradient)
+            else:
+                voxel.alpha = region.alpha * 0.0 # Or handle edge case
+            
+            # Voxel Color (Scale Brightness in HSV)
+            # c_v = c_i * (f_v / max_f_i) applied to V channel
+            if region.max_intensity > 0:
+                intensity_ratio = voxel.intensity / region.max_intensity
+                # Convert HSV to RGB, scale V, convert back? 
+                # Or just store HSV with scaled V
+                h, s, v = region.base_color_hsv
+                voxel.color_hsv = (h, s, v * intensity_ratio)
+            else:
+                voxel.color_hsv = region.base_color_hsv
+
+    return regions
+```
+
+## Subtopics
+
+### Automated Visibility-Based TF Parameter Optimization
+An automated process that adjusts TF parameters to ensure specific Structures of Interest (SOIs) prioritize visibility in the resulting Direct Volume Rendering (DVR), avoiding manual fine-tuning [S2, unofficial]. It assigns visibility thresholds (VT) to SOIs based on clinical or analytical priority (e.g., bones VT=0.7, lungs VT=0.3) and optimizes TF parameters to enforce these priorities [S2, unofficial]. This is often used in conjunction with knowledge-base retrieval methods [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The occlusion determination step requires comparing every pair of regions, resulting in $O(N^2)$ complexity where $N$ is the number of regions. Computing region statistics is $O(V)$ where $V$ is the total number of voxels. Voxel-level assignment is $O(V)$.
+*   **Memory Complexity:** Requires storing statistics for each region and per-voxel properties. $O(N + V)$.
+*   **Performance:** In experiments on 256x256x128 volumes, pre-processing (clustering and statistics) took ~150-210 seconds on a CPU, while GPU-based ray marching achieved real-time frame rates at 512x512 resolution [S1, unofficial].
+*   **Strengths:** Effectively reveals small, interior structures that would otherwise be occluded by large, opaque structures. Automates the difficult task of color and opacity assignment.
+*   **Limitations:** Relies on accurate segmentation/clustering. If clusters are poorly defined, the size and occlusion metrics may be misleading. The $O(N^2)$ occlusion check can be slow for very large numbers of small clusters.
+*   **When to use:** When the primary goal is to visualize internal structures within larger volumes, or when manual TF tuning is too time-consuming.
+*   **When not to use:** When precise intensity-based classification is required, or when the number of regions is extremely large (thousands), making the pairwise occlusion check prohibitive.
+
+## Background
+This method was introduced in a paper on automatic transfer function design using clustering on Local Histogram (LH) space [S1, unofficial]. It addresses the difficulty of assigning visual parameters to clusters based on size and relative distance to ensure visibility of smaller/interior structures [S1, unofficial]. The approach is particularly relevant for medical imaging (CT/MRI) where material true-colors are unknown and small pathologies may be hidden by large anatomical structures [S1, unofficial].
+
+## Sources
+[S1] Automatic Transfer Function Design for Volumetric Data Visualization using Clustering on LH Space, https://www.researchgate.net/publication/265318052_Automatic_Transfer_Function_Design_for_Volumetric_Data_Visualization_using_Clustering_on_LH_Space, fetched 2026-10-28 (unofficial)
+[S2] A Transfer Function Design Using A Knowledge Database based on Deep Image and Primitive Intensity Profile Features Retrieval, https://arxiv.org/abs/2209.06421v1, fetched 2026-10-26 (unofficial)

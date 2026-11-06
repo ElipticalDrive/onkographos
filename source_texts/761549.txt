@@ -1,0 +1,259 @@
+Generate multiresolution neuroglancer meshes and skeletons from segmentation volumes (zarr, N5, precomputed), parallelized with Dask. - Lossless chunk simplification + hemibrain-flavor defaults by davidackerman · Pull Request #39 · janelia-cellmap/mesh-n-bone
+
+Lossless chunk simplification + hemibrain-flavor defaults by davidackerman · Pull Request #39 · janelia-cellmap/mesh-n-bone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+davidackerman
+commented
+Jun 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Two related changes for memory-friendly chunked processing of huge meshes:
+Lossless chunk simplification (src/mesh_n_bone/meshify/lossless_simplify.py)
+A two-pass per-chunk pass that produces a mesh visually identical to its input while reducing face count by 77–98% on typical cellmap surfaces, AND guarantees that two adjacent blocks compute identical vertex sets on their shared chunk-boundary plane without cross-block communication.
+Pass A — interior coplanar collapse: removes any vertex whose 1-ring of incident faces is coplanar (within angular tolerance) and retriangulates the resulting polygon. Handles flat-region interior + collinear vertices on a flat patch's perimeter.
+Pass B — symmetric boundary-polyline simplification: for each chunk-boundary plane, extract the 2D polyline of mesh vertices on that plane and run Douglas-Peucker with fixed tolerance and lexicographic tie-breaking. Two neighboring blocks see the same polyline (the segmentation crossing the plane is identical on both sides) and run the deterministic same DP → identical reduced vertex sets without any communication.
+Wired into fixed_edge.simplify_mesh via two new kwargs (lossless_first, lossless_dp_eps) and exposed from Meshify(...) + worker config so a run-config YAML can enable it with lossless_chunk_simplify: true.
+Validation across all four synthetic two-block tests:
+Test
+Raw MC faces
+Lossless faces
+Reduction
+Surface fidelity
+Boundary verts
+Solid box (thin split)
+5996
+1212
+79.8%
+bit-exact
+80 shared, 0 orphan
+Solid box (deep split)
+10796
+1612
+85.1%
+bit-exact
+120 shared, 0 orphan
+Sphere (curved)
+8360
+4756
+43.1%
+bit-exact
+116 shared, 0 orphan
+Flat + curved
+11508
+2420
+79.0%
+bit-exact
+134 shared, 0 orphan
+Realistic 64³-voxel multi-segment block: 34272 → 7726 faces (77.5% reduction), memory 1.18 MiB → 0.27 MiB.
+Hemibrain-flavor defaults
+target_reduction: 0.99 → 0.95
+n_smoothing_iter: 10 → 3
+stage_1_reduction_fraction: 0.5 → 0.25
+The old defaults over-smoothed + over-reduced for hemibrain-style data. New defaults give roughly hemibrain LOD 0 face counts with much less aggressive smoothing. target_reduction=0.95 keeps ~5× more faces at LOD 0 — the change is detail-preserving rather than file-size-tightening.
+Pins stage_1_reduction_fraction=0.5 in the existing cross-chunk no-spikes test so it remains a meaningful regression check under the new defaults.
+Tests
+Adds 7 new tests in tests/test_lossless_simplify.py covering:
+Flat-grid coplanar collapse
+Lock-mask preservation
+Cube (orthogonal faces) — no false collapse
+Douglas-Peucker collinear collapse
+Douglas-Peucker deterministic independence
+End-to-end two-block stitching via real marching cubes
+block_boundary_planes helper
+All 325 tests pass (3 pre-existing skips). No regressions in the existing meshify, integration, or multires test suites.
+davidackerman
+added 5 commits
+June 3, 2026 13:19
+Add lossless chunk simplification + hemibrain-flavor defaults
+…
+6e08c40
+```
+This commit addresses two related quality/size issues for huge-mesh
+chunked processing:
+
+(1) Add lossless_chunk_simplify in a new util module:
+    src/mesh_n_bone/meshify/lossless_simplify.py
+
+    Two-pass algorithm that produces a mesh visually identical to its
+    input while dramatically reducing triangle count, AND guarantees
+    that two neighboring blocks produce identical vertex sets on their
+    shared chunk-boundary plane (so the assembled mesh has no seams
+    or T-junctions, without any cross-block communication).
+
+    Pass A — interior coplanar collapse: vertex-by-vertex, remove
+    any vertex whose entire 1-ring of incident faces is coplanar
+    (within angular tolerance) and re-triangulate the hole.
+
+    Pass B — symmetric boundary-polyline simplification: for each
+    chunk-boundary plane, extract the 2D polyline of vertices on the
+    plane, run Douglas-Peucker with a fixed tolerance and lexicographic
+    tie-breaking. Both adjacent blocks see the same polyline and run
+    the deterministic same DP → identical decimated boundary verts.
+    Each block locally retriangulates the strip of faces touching
+    removed vertices.
+
+    Wired into fixed_edge.simplify_mesh via two new kwargs:
+      * lossless_first: bool (default False)
+      * lossless_dp_eps: float | None (default = half-voxel)
+
+    Exposed from Meshify constructor via:
+      * lossless_chunk_simplify: bool
+      * lossless_chunk_simplify_dp_eps: float | None
+    and plumbed through the worker config so a run-config YAML can
+    enable it.
+
+    Empirical results on synthetic two-block tests (full pipeline:
+    MC → clip → lossless_chunk_simplify → assemble):
+      * 80–98% face reduction on flat regions
+      * 43% reduction on curved (sphere) — correctly preserves detail
+      * Bit-exact surface fidelity (max distance MC→simplified = 0)
+      * 0 mismatch between adjacent blocks' boundary vertex sets
+      * 0 extra open edges in assembled mesh
+
+    Realistic 64³-voxel multi-segment block: 34272 → 7726 faces (77.5%
+    reduction), per-block mesh memory 1.18 MiB → 0.27 MiB.
+
+(2) Update Meshify defaults to match hemibrain-quality output:
+
+      target_reduction:         0.99 → 0.95
+      n_smoothing_iter:         10   → 3
+      stage_1_reduction_fraction: 0.5  → 0.25
+
+    Heavier smoothing + aggressive global reduction tended to wash out
+    surface detail. The new defaults keep ~5x more faces at LOD 0,
+    apply less Taubin smoothing, and shift more of the simplification
+    budget into the global stage 2 (where it can see the full per-
+    segment mesh).
+
+    Pin stage_1_reduction_fraction=0.5 in the cross-chunk
+    no-spikes integration test (the test asserts boundary clipping
+    quality under the old defaults; making the requirement explicit
+    keeps the test meaningful under the new defaults).
+
+Adds 7 new unit + integration tests covering both passes, the DP
+determinism property, and end-to-end two-block stitching via
+real marching cubes. All 325 tests pass.
+```
+Extend Pass A to collapse collinear feature-edge vertices
+…
+342c7a7
+```
+Original Pass A only removed vertices whose entire 1-ring of incident
+faces was coplanar. Vertices on feature edges (where two coplanar
+patches with different normals meet, e.g. the edge of a cube) have
+a 2-normal 1-ring and were left intact — keeping marching-cubes-
+density along every feature edge of the simplified mesh.
+
+Extension: also remove a vertex V when its 1-ring partitions into
+exactly two coplanar groups AND V's two feature-edge neighbors are
+collinear with V (within tolerance). The 1-ring polygon is split at
+the two transition vertices into two planar arcs (one per group),
+each retriangulated independently in 2D. The two new triangulations
+share the straight feature edge that replaces V's two incident
+feature edges.
+
+Impact on the four end-to-end shape tests:
+
+  Box   : 1388 → 44 faces  (87.1% → 99.6% reduction)
+  Sphere: 4608 → 2124 faces (44.9% → 74.6% reduction)
+  Mixed : 2200 → 390 faces (80.9% → 96.6% reduction)
+  Slab  : 2284 → 44 faces  (90.1% → 99.8% reduction)
+
+All four still bit-exact (max distance MC → simplified = 0.0 in
+both directions). All 325 tests still pass.
+
+Add regression test test_mc_cube_collapses_to_near_minimum locking in
+the cube-to-near-minimum behavior (asserts <100 faces on the MC box,
+where pre-extension behavior produced 1388).
+```
+Gate feature-edge collapse on minimum dihedral angle
+…
+2885e5d
+```
+NG reads vertex normals straight from the Draco fragment (octahedron-
+encoded snorm8) rather than recomputing at render time, so the
+per-vertex averaged normals baked into the mesh are exactly what gets
+shaded. The feature-edge extension was firing on the gentle voxel-step
+"feature edges" between adjacent MC patches on curved surfaces,
+collapsing vertices that contribute to smooth-looking shading and
+leaving the lossless sphere visibly lumpier than the raw mesh.
+
+Add a minimum dihedral-angle gate (default 45 degrees). Cube/slab
+edges at 90 degrees still collapse aggressively; shallow voxel-step
+features on a sphere (typically < 25 degrees) are preserved.
+```
+Make feature-edge collapse opt-in (default: pure-lossless Pass A)
+…
+2d1cdaf
+```
+Investigation: Neuroglancer computes per-vertex normals by *unweighted*
+averaging of incident face normals. Under any face-count simplification
+of a curved surface, that average shifts at surviving vertices — the
+triangle counts in each adjacent plane change, even though the geometry
+is bit-exact. NG-identical shading is therefore not achievable by any
+algorithmic improvement; it would require area-weighted averaging in
+the renderer, or NG honoring normals from the Draco fragment (it
+ignores them).
+
+Given that, the right default is the most conservative: pure-coplanar
+collapse only (every removed vertex has a single-normal 1-ring), which
+is bit-exact lossless and inverts no positions. The feature-edge
+extension that collapsed cube/slab edges to their corners aggressively
+modified normal averaging on shallow curvature steps and is the source
+of the lumpy sphere; gate it behind ``collapse_feature_edges=True``
+for CAD-like data where it's appropriate.
+
+Reductions under pure Pass A:
+  box     87.1%   (cube edges kept MC-dense, stage 2 reduces further)
+  slab    90.1%   (same)
+  sphere  46.6%   (interior verts of axis-aligned patches collapse;
+                   curvature-step verts kept — bit-exact MC sub-set)
+  mixed   83.7%   (flat regions collapse; divot curvature kept)
+```
+Compose lossless with target_reduction relative to raw MC
+…
+71e9f02
+```
+target_reduction is the user-facing knob meaning "fraction of raw MC
+faces to remove across the whole pipeline." The two staged decimations
+(stage_1_reduction_fraction / stage_2_reduction_fraction) already
+compose multiplicatively to honor that total. But lossless was being
+treated as free reduction on top, so lossless_first=True silently
+made the pipeline over-decimate by the factor lossless had already
+collapsed (e.g. ~10x on a cube box).
+
+Fix: capture the raw face count before lossless runs and compute
+target_faces from that. When lossless already brings the chunk at or
+below target_faces, skip decimation rather than over-reduce. Now
+lossless+decimation and decimation-alone land at the same absolute
+face count for the same target_reduction.
+```
+davidackerman
+commented
+Jun 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Closing without merging. Lossless's value (peak per-chunk memory reduction + deterministic block-boundary stitching) only shows up on huge chunked volumes that aren't currently hitting memory or seam issues; on single chunks it's strictly redundant with stage 1+2 decimation. Parking until hemibrain-scale runs actually surface the bottleneck. Branch left in place at lossless-chunk-simplify.
+davidackerman
+closed this
+Jun 3, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

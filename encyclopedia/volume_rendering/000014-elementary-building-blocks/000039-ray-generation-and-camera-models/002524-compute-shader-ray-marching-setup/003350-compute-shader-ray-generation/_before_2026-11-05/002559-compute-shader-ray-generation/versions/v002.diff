@@ -1,0 +1,218 @@
+--- v001.md
++++ v002.md
+@@ -4,119 +4,134 @@
+ 
+ ## Overview
+-This method generates initial camera rays for volume rendering by launching a compute shader where each thread corresponds to one pixel. It converts thread indices into normalized UV coordinates and computes a normalized direction vector based on the focal length. It differs from sibling methods by explicitly defining the dispatch grid structure (8x8 blocks) and the specific coordinate transformation from integer pixel indices to the $[-1, 1]$ UV space used for ray direction calculation [S1, unofficial][S2].
++This method generates initial camera rays for a frame by launching a compute shader with one thread per pixel. It converts thread indices into normalized UV coordinates and computes ray directions using a pinhole camera model defined by a focal length. It differs from standard perspective projection implementations by explicitly detailing the normalization to $[-1, 1]$ and the specific focal length derivation from the field of view, while deferring camera orientation (rotation) to subsequent transformation steps [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs:**
+-- Window width $W$ and height $H$ [S1, unofficial][S2].
+-- Field of view angle $\alpha$ (in radians) [S1, unofficial].
+-- Camera orientation angles $\phi, \theta$ (optional, for final orientation) [S2].
++*   Window width $W$ and height $H$ (integers).
++*   Field of view angle $\alpha$ (radians).
++*   Camera orientation angles $\phi$ (yaw) and $\theta$ (pitch) [S2].
+ 
+ **Outputs:**
+-- Ray origin $\vec{o}$ [S1, unofficial][S2].
+-- Ray direction $\vec{d}$ (normalized) [S1, unofficial][S2].
++*   Ray origin $\vec{o}$ (world space).
++*   Ray direction $\vec{rd}$ (world space, normalized).
+ 
+ **Data Structures:**
+-- Thread ID: Provided by the hardware register `DispatchThreadID` (or equivalent). It is a 3D vector $(tx, ty, tz)$ [S1, unofficial][S2].
+-- Block ID: Provided by the hardware register `GroupID` (or equivalent). It is a 3D vector $(bx, by, bz)$ [S1, unofficial][S2].
+-- Block Dimensions: Fixed at $8 \times 8$ threads per block in the X and Y dimensions [S1, unofficial][S2].
++*   No persistent data structures are required for ray generation itself. The compute shader state relies on the hardware-provided `DispatchThreadID` (global thread ID) and `GroupThreadID`/`GroupID` for coordinate mapping [S1, unofficial][S2].
+ 
+ **Parameters:**
+-- Focal length $f$: Calculated as $f = \frac{1}{\tan(\alpha/2)}$ [S1, unofficial][S2].
+-- Thread group size: 64 threads (8x8) [S1, unofficial].
+-- Dispatch arguments: $(\lceil W/8 \rceil, \lceil H/8 \rceil, 1)$ [S1, unofficial].
++*   Thread block size: $8 \times 8$ threads (64 threads per group) [S1, unofficial][S2].
++*   Focal length $f$: Derived from $\alpha$.
++*   Near plane width $v_{nearPlaneWidth}$: Set to $1$ [S1, unofficial].
+ 
+ **Steps:**
+-1. **Thread Identification:** Determine the global thread ID $(tx, ty, tz)$ from the `DispatchThreadID` register [S1, unofficial][S2].
+-2. **Pixel Coordinate Calculation:** Calculate the integer pixel coordinates $(px, py)$ from the thread ID and block ID [S2]:
+-   $$ px = tx + bx \times 8 $$
+-   $$ py = ty + by \times 8 $$
+-   [S1, unofficial][S2]
+-3. **Normalization:** Scale the pixel coordinates to the range $[0, 1]$ [S1, unofficial]:
+-   $$ u_{scaled} = \frac{px}{W} $$
+-   $$ v_{scaled} = \frac{py}{H} $$
+-   [S1, unofficial]
+-4. **Centering:** Center the coordinates around the origin to obtain UV coordinates in the range $[-1, 1]$, where the top-left pixel is $[-1, 1]$ and the bottom-right is $[1, -1]$ [S1, unofficial][S2]:
+-   $$ u = u_{scaled} \times 2 - 1 $$
+-   $$ v = v_{scaled} \times 2 - 1 $$
+-   [S1, unofficial][S2]
+-5. **Direction Vector Calculation:** Compute the unoriented ray direction vector $\vec{rd}^0$ using the UV coordinates and focal length $f$ [S2]:
+-   $$ \vec{rd}^0 = \begin{bmatrix} u \\ v \\ f \end{bmatrix} $$
+-   [S2]
+-6. **Normalization:** Normalize $\vec{rd}^0$ to get the initial direction $\vec{d}_{local}$ [S2]:
+-   $$ \vec{d}_{local} = \frac{\vec{rd}^0}{\|\vec{rd}^0\|} = \frac{[u, v, f]^T}{\sqrt{u^2 + v^2 + f^2}} $$
+-   [S2]
+-7. **Origin Calculation:** Set the ray origin $\vec{o}$ at the camera position. In the local coordinate system defined by [S1, unofficial], the origin is:
+-   $$ \vec{o} = \begin{bmatrix} 0 \\ 0 \\ -f \end{bmatrix} $$
+-   [S1, unofficial]
+-   [Note: [S2] implies a pinhole camera at the origin looking towards $[0,0,1]$ before rotation, but [S1, unofficial] explicitly places the origin at $-f$ on the z-axis. The direction calculation in [S2] assumes the camera is at the origin looking down the Z-axis, while [S1, unofficial] assumes the camera is at $-f$ looking down the Z-axis. The resulting ray geometry is equivalent. We use the [S2] formulation for direction as it is more standard for "ray generation programs" that apply rotation matrices later, but the origin must be consistent. If the direction is $[u, v, f]$, the camera is at $(0,0,0)$ looking towards positive Z. If the direction is derived from $[u, v, 0] - [0, 0, -f]$, the camera is at $(0,0,-f)$. [S1, unofficial] and [S2] describe slightly different local coordinate setups. [S2] is more general for arbitrary camera orientations via rotation matrices. We follow [S2]'s direction formula and assume the origin is at the camera center $(0,0,0)$ in the local space before rotation, or adjust the direction to match [S1, unofficial]'s geometry. However, [S2] explicitly states the direction formula (1). We will use [S2]'s direction formula and note the origin depends on the camera model. For a standard pinhole camera where rays originate from the center of projection, $\vec{o} = [0,0,0]^T$ in the local space is consistent with direction $[u, v, f]$ if the image plane is at $z=f$. [S1, unofficial] uses a different setup where the origin is at $-f$. To implement from [S2] (which is the "Ray Generation Program" section), we use the direction formula (1). The origin is typically the camera position. In the local space of [S2], the camera is at the origin.]
+-   [G] Standard pinhole camera model: Origin at $(0,0,0)$, looking down $+Z$. Direction $[u, v, f]$. This is consistent with [S2]. [S1, unofficial] is a specific implementation detail where the origin is shifted. We prioritize [S2] for the general "Ray Generation Program" definition.]
+-8. **Orientation (Optional):** If the camera has orientation angles $\phi, \theta$, apply rotation matrices to $\vec{d}_{local}$ to get the final world-space direction $\vec{d}$ [S2].
++
++1.  **Thread Identification:**
++    Determine the pixel coordinates $(x, y)$ from the thread ID.
++    *   $x = \text{GroupID}_x \times 8 + \text{GroupThreadID}_x$
++    *   $y = \text{GroupID}_y \times 8 + \text{GroupThreadID}_y$
++    *   [S2]
++
++2.  **Normalization to [0, 1]:**
++    Scale the integer pixel coordinates to the range $[0, 1]$.
++    $$ \vec{v}_{scaledPixelCoord} = \left( \frac{x}{W}, \frac{y}{H} \right) $$
++    *   [S1, unofficial]
++
++3.  **Centering to [-1, 1]:**
++    Shift the coordinates so the center of the screen is $(0,0)$. The top-left pixel maps to $[-1, 1]$ and the bottom-right to $[1, -1]$.
++    $$ \vec{uv} = \vec{v}_{scaledPixelCoord} \cdot 2 - \vec{1} $$
++    Let $u = \vec{uv}_x$ and $v = \vec{uv}_y$.
++    *   [S1, unofficial][S2]
++
++4.  **Focal Length Calculation:**
++    Calculate the focal length $f$ based on the field of view $\alpha$.
++    $$ f = \frac{1}{\tan(\alpha / 2)} $$
++    *   [S1, unofficial]
++
++5.  **Ray Direction Calculation (Local Space):**
++    Compute the initial unoriented ray direction $\vec{rd}^0$ in a local coordinate system where the camera looks along the positive Z-axis.
++    $$ \vec{rd}^0 = \frac{[u, v, f]^T}{\sqrt{u^2 + v^2 + f^2}} $$
++    *   [S2]
++    
++    *Note: Source [S1, unofficial] describes an equivalent vector subtraction method where the origin is $\vec{o}_{origin} = [0, 0, -f]^T$ and the direction is $\vec{p}_{direction} = [u, v, 0]^T - [0, 0, -f]^T = [u, v, f]^T$, which yields the same direction vector before normalization.*
++
++6.  **Ray Origin Calculation:**
++    The ray origin is fixed at the camera center in the local coordinate system.
++    $$ \vec{o}_{origin} = [0, 0, -f]^T $$
++    *   [S1, unofficial]
++
++7.  **Orientation (Rotation):**
++    Transform $\vec{rd}^0$ and $\vec{o}_{origin}$ into world space using rotation matrices defined by camera angles $\phi$ and $\theta$.
++    $$ \vec{rd} = R(\phi, \theta) \cdot \vec{rd}^0 $$
++    $$ \vec{o} = R(\phi, \theta) \cdot \vec{o}_{origin} $$
++    *   [S2]
++    *   [G] The specific rotation matrix $R(\phi, \theta)$ is not provided in the sources. Typically, this involves composing yaw and pitch rotations. The implementer must define the rotation convention (e.g., intrinsic vs. extrinsic axes).
+ 
+ **Pseudocode:**
++
+ ```python
+-# Inputs: W, H, alpha, phi, theta (optional)
+-# Outputs: ray_origin, ray_direction
++# Compute Shader Entry Point
++# Inputs: DispatchThreadID (uint3), GroupID (uint3), GroupThreadID (uint3)
++# Constants: W (int), H (int), alpha (float), phi (float), theta (float)
+ 
+-# Pre-calculate focal length
+-f = 1.0 / tan(alpha / 2.0)
++struct Ray {
++    float3 origin;
++    float3 direction;
++};
+ 
+-# Get thread and block IDs from hardware registers
+-tx, ty, tz = DispatchThreadID
+-bx, by, bz = GroupID
++Ray generate_ray(uint3 thread_id, uint3 group_id, uint3 group_thread_id) {
++    // 1. Determine pixel coordinates
++    uint x = group_id.x * 8 + group_thread_id.x;
++    uint y = group_id.y * 8 + group_thread_id.y;
+ 
+-# Calculate integer pixel coordinates
+-px = tx + bx * 8
+-py = ty + by * 8
++    // 2. Normalize to [0, 1]
++    float u_scaled = (float)x / (float)W;
++    float v_scaled = (float)y / (float)H;
+ 
+-# Normalize to [0, 1]
+-u_scaled = px / W
+-v_scaled = py / H
++    // 3. Center to [-1, 1]
++    // Top-left: [-1, 1], Bottom-right: [1, -1]
++    float u = u_scaled * 2.0 - 1.0;
++    float v = v_scaled * 2.0 - 1.0;
+ 
+-# Center to [-1, 1]
+-u = u_scaled * 2.0 - 1.0
+-v = v_scaled * 2.0 - 1.0
++    // 4. Calculate focal length
++    float f = 1.0 / tan(alpha / 2.0);
+ 
+-# Calculate unoriented direction vector
+-rd_x = u
+-rd_y = v
+-rd_z = f
++    // 5. Calculate local direction vector [u, v, f]
++    float3 rd_local_unnormalized = float3(u, v, f);
++    
++    // 6. Normalize direction
++    float3 rd_local = normalize(rd_local_unnormalized);
+ 
+-# Normalize direction
+-length = sqrt(rd_x**2 + rd_y**2 + rd_z**2)
+-d_local_x = rd_x / length
+-d_local_y = rd_y / length
+-d_local_z = rd_z / length
++    // 7. Set local origin
++    float3 origin_local = float3(0.0, 0.0, -f);
+ 
+-# Set origin (Local space: Camera at origin, looking down +Z)
+-o_x = 0.0
+-o_y = 0.0
+-o_z = 0.0
++    // 8. Apply rotation matrices for camera orientation
++    // Note: Rotation matrix construction depends on specific convention (e.g., Z-Y-X Euler)
++    // This step is marked [G] as the exact matrix composition is not in sources
++    float3 rd_world = rotate(rd_local, phi, theta);
++    float3 origin_world = rotate(origin_local, phi, theta);
+ 
+-# Apply rotation if needed (Placeholder for rotation matrix application)
+-# If phi, theta are provided, rotate d_local to get final ray_direction
+-# If not, ray_direction = d_local
+-ray_origin = (o_x, o_y, o_z)
+-ray_direction = (d_local_x, d_local_y, d_local_z)
++    return Ray(origin_world, rd_world);
++}
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Division by Zero:** If $W$ or $H$ is 0, the shader should not be dispatched.
+-- **Precision:** Using single-precision floats is standard for GPU ray generation. Ensure $f$ is not too small to avoid numerical instability in normalization.
+-- **Boundary Conditions:** The UV coordinates range from $-1$ to $1$. Pixels at the very edge of the window will have coordinates close to $\pm 1$.
++*   **Division by Zero:** If $W$ or $H$ is zero, normalization fails. [G] Ensure $W, H > 0$.
++*   **Precision:** Using integer arithmetic for thread ID calculation is safe. Floating point precision for $u, v$ depends on the window size. For very large resolutions, $u^2 + v^2 + f^2$ may suffer from precision loss if $f$ is very small or very large.
++*   **Boundary Pixels:** The mapping ensures all pixels from $(0,0)$ to $(W-1, H-1)$ are covered. The $8 \times 8$ block size must divide $W$ and $H$ evenly, or the dispatch arguments must be calculated as $\lceil W/8 \rceil$ and $\lceil H/8 \rceil$, with threads checking bounds against $W, H$ to avoid out-of-bounds memory access in subsequent steps [S1, unofficial][S2].
+ 
+ ## Subtopics
+ 
+ ### [Compute Shader Voxel Raycasting with Corner Ray Interpolation](4215-compute-shader-voxel-raycasting-with-corner-ray-interpolatio.md)
+-Uses bilinear interpolation of corner rays instead of direct UV-to-direction mapping. Chosen when higher accuracy at the frustum edges is needed or when the camera model is more complex than a simple pinhole.
++Generates view rays by bilinearly interpolating four pre-computed world-space corner rays of the camera's view frustum. It avoids per-pixel matrix-vector multiplication for ray direction generation, relying instead on spatial interpolation of boundary vectors. Choose this when minimizing arithmetic intensity per pixel is critical and the camera is static or moves slowly.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per pixel. The computation is constant time relative to the scene, depending only on the number of pixels $W \times H$.
+-- **Memory Complexity:** $O(1)$ per thread. No significant memory allocation is required for ray generation itself.
+-- **Performance:** Highly parallelizable. The 8x8 block size aligns with GPU warp/wavefront sizes (32 threads), ensuring efficient SIMD execution [S2].
+-- **Strengths:** Simple, fast, and hardware-friendly. Direct mapping from thread ID to pixel.
+-- **Limitations:** Assumes a simple pinhole camera model. Does not handle complex camera movements or non-pinhole models without additional transformation steps [S2].
++*   **Time Complexity:** $O(1)$ per pixel. The computation involves a constant number of arithmetic operations (normalization, trigonometry, normalization).
++*   **Memory Complexity:** $O(1)$ per thread. No additional memory is allocated for ray generation.
++*   **Performance:** Highly parallelizable. The $8 \times 8$ thread block size aligns with typical GPU warp/wavefront sizes (32 or 64 threads), ensuring efficient SIMD execution [S2].
++*   **Strengths:** Simple, deterministic, and low overhead. Suitable for real-time applications where ray generation is a small fraction of the total rendering cost.
++*   **Limitations:** Assumes a pinhole camera model. Does not account for lens effects (bokeh, distortion) without extension. Requires explicit rotation handling for non-axis-aligned cameras [S2].
+ 
+ ## Background
+-This method is a fundamental building block for GPU-based ray marching and ray casting. It is described in the context of voxel rendering implementations, specifically in the work of Enes Hergül [S1, unofficial] and in CUDA-based raymarching tutorials [S2]. The 8x8 thread block size is a common optimization for NVIDIA GPUs to align with warp boundaries.
++This method originates from implementations of GPU-based raycasting and raymarching, specifically those utilizing compute shaders for general-purpose rendering tasks. It is detailed in works on CUDA-based distance field raymarching [S2] and voxel raycasting implementations [S1, unofficial][S2]. The approach of mapping thread IDs to pixel coordinates and generating rays via a pinhole model is a standard technique in GPU ray tracing pipelines.
+ 
+ ## Sources

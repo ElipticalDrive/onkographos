@@ -1,0 +1,158 @@
+# Extended Cube Architecture for Arbitrary Parallel Projection
+
+Also called: Arbitrary Parallel Viewing Architecture
+
+## Overview
+The Extended Cube Architecture is a special-purpose computer architecture designed to enable real-time arbitrary parallel projection of volumetric data, overcoming the distortion limitations of rotating the Cubic Frame Buffer (CFB) for non-orthographic views [S1]. It extends the original Cube architecture, which only supported orthographic projection, by introducing a 2D Skewed Buffer (2DSB) and a Ray Projection Tree (RPT) to fetch and process slanted planes of projection rays without pre-processing [S1]. Unlike the original Cube, which accesses axial beams directly, this method handles arbitrary viewing directions by shearing the data into a 2D memory structure, aligning rays, and projecting them in parallel [S1].
+
+## How it works
+The method transforms arbitrary parallel projection rays into a format suitable for parallel hardware processing [S1]. It operates on a dataset stored in a Cubic Frame Buffer (CFB) and produces a 2D projected image [S1].
+
+### Inputs and Outputs
+*   **Input:** A volumetric dataset of size $n \times n \times n$ voxels stored in the CFB. The viewing direction is arbitrary (parallel projection) [S1].
+*   **Output:** A 2D image where each pixel corresponds to a projection ray passing through the volume [S1].
+
+### Data Structures
+
+**1. Cubic Frame Buffer (CFB)**
+*   **Layout:** A 3D modular memory organization [S1].
+*   **Size:** For a $512^3$ dataset, the CFB holds 128M voxels [S1].
+*   **Access:** Supports conflict-free access to full beams of $n$ voxels in any orthographic direction [S1].
+
+**2. 2D Skewed Buffer (2DSB)**
+*   **Purpose:** Stores the slanted Projection Ray Plane (PRP) and performs de-skewing [S1].
+*   **Layout:** Physically divided into $n$ modules, diagonally skewed to allow conflict-free writing of horizontal beams and reading of vertical rays [S1].
+*   **Dimensions:** Width is at least $2n-1$ columns to accommodate parallel rays entering the slanted PRP [S1].
+*   **Modules:** Contains $n$ modules. Each module connects to neighbors via conveyors (barrel shifters) with 256 lines (16 bits $\times$ 16 shift places) [S1].
+*   **Pipelining:** Uses multiple planes (e.g., 4 planes) to allow concurrent loading of the next PRP while processing the current one [S1].
+
+**3. Ray Projection Tree (RPT)**
+*   **Purpose:** Parallel processing of viewing rays to compute pixel values [S1].
+*   **Layout:** A hierarchical binary tree of $n-1$ Voxel Combination Units (VCUs) [S1].
+*   **Leaves:** Accept $n$ voxels along a viewing ray [S1].
+*   **Root:** Produces the final color for the corresponding pixel [S1].
+
+**4. Voxel Combination Unit (VCU)**
+*   **Input:** Two voxel values [S1].
+*   **Operation:** Combines inputs into an output voxel value [S1].
+*   **Latency:** 7 time units per combination [S1].
+
+### Steps
+
+1.  **Retrieve Projection Ray Plane (PRP):** Identify the set of projection rays belonging to the same scan line of the projected 2D frame buffer. These rays form a slanted plane (PRP) within the CFB [S1].
+2.  **Fetch Beams:** Retrieve the PRP from the CFB as $n$ beams parallel to a primary axis. This takes $O(n)$ cycles [S2, book].
+3.  **Store in 2DSB:** Store the slanted PRP into the 2DSB one beam at a time, from closest to furthest [S1].
+4.  **De-skew (Shear):** Shift each beam left or right within the 2DSB to align all viewing rays vertically (parallel to a 2D axis). This is performed using a barrel shifter (Conveyor) [S1]. The 2DSB width ($2n-1$) accommodates the shear [S1].
+5.  **Retrieve Rays:** Retrieve vertical viewing rays from the 2DSB in parallel [S1].
+6.  **Transfer to RPT:** Transfer rays to the RPT. Shift rays during transfer to ensure the closest voxel appears at the desired position in the tree [S1].
+7.  **Process Rays:** Process rays in parallel through the RPT [S1]. Each VCU combines two voxels in 7 time units. The tree processes $\log n$ rays simultaneously in a pipeline fashion after initialization [S1]. For algorithms requiring a 27-voxel neighborhood (central voxel + 26 neighbors), use multiple parallel 2DSBs. Extract the 27-voxel cube and transfer it to the RPT in parallel [S1].
+8.  **Pipeline:** Use a fourth plane in the 2DSB to load the next slanted PRP while three planes are used for extracting the 27-voxel cube for concurrent projection [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extended_cube_projection(volume, view_dir, n):
+    """
+    Perform arbitrary parallel projection using Extended Cube Architecture.
+    volume: 3D list of voxels [z][y][x]
+    view_dir: (dx, dy, dz) normalized vector defining parallel projection rays
+    n: Dataset dimension size
+    """
+    pixel_values = []  # Initialize to prevent UnboundLocalError
+    dsb_width = 2 * n - 1
+    dsb_height = n
+    num_planes = 4
+    dsb = [[[None for _ in range(dsb_width)] for _ in range(dsb_height)] for _ in range(num_planes)]
+
+    # Process each scan line (Projection Ray Plane)
+    for scan_y in range(n):
+        current_plane = scan_y % num_planes
+        
+        # 1. Fetch PRP as n beams parallel to primary axis (Z)
+        beams = []
+        for beam_x in range(n):
+            beam = []
+            for z in range(n):
+                x = beam_x + int(view_dir[0] * z)
+                y = scan_y + int(view_dir[1] * z)
+                if 0 <= x < n and 0 <= y < n:
+                    beam.append(volume[z][y][x])
+                else:
+                    beam.append(0)
+            beams.append(beam)
+
+        # 2. Store and De-skew in 2DSB
+        for beam_idx, beam in enumerate(beams):
+            shift = int(beam_idx * view_dir[0])
+            col_start = (dsb_width // 2) + shift
+            for z, val in enumerate(beam):
+                col = col_start + z
+                if 0 <= col < dsb_width:
+                    dsb[current_plane][z][col] = val
+
+        # 3. Retrieve vertical viewing rays from 2DSB
+        rays = []
+        for col in range(dsb_width):
+            ray = []
+            for z in range(n):
+                val = dsb[current_plane][z][col]
+                if val is not None:
+                    ray.append(val)
+            rays.append(ray)
+
+        # 4. Transfer to RPT and Process
+        for ray in rays:
+            # Shift ray during transfer to ensure closest voxel is at index 0
+            # (Handled by hardware conveyor during transfer)
+            
+            # Process through RPT (VCU tree)
+            current_level = ray[:]
+            while len(current_level) > 1:
+                next_level = []
+                for i in range(0, len(current_level), 2):
+                    v1 = current_level[i]
+                    v2 = current_level[i+1] if i+1 < len(current_level) else 0
+                    # VCU combines two voxels in 7 time units
+                    combined = v1 * 0.5 + v2 * 0.5  # Standard compositing [G]
+                    next_level.append(combined)
+                current_level = next_level
+            pixel_values.append(current_level[0])
+
+    return pixel_values
+```
+
+### Parameters and Typical Values
+*   **CFB Size:** 128M voxels for a $512^3$ dataset [S1].
+*   **2DSB Width:** At least $2n-1$ columns [S1].
+*   **2DSB Modules:** $n$ modules [S1].
+*   **VCU Latency:** 7 time units [S1].
+*   **Intermodule Communication:** Each conveyor connects to neighbors by 256 lines (16 bits $\times$ 16 shift places) [S1].
+
+### Edge Cases and Pitfalls
+*   **Implementation Scale:** A $512^3$ system requires 512 parallel processing units, 512 memory modules, ~18,000 lines of information operating in parallel, and up to 1,024 chips for memory alone [S1].
+*   **Routing Difficulties:** Module data lines are grouped by module, while conveyor data lines are grouped by bit position, creating complex routing requirements [S1].
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** The 2DSB width ($2n-1$) must be sufficient to handle the shear of the slanted PRP [S1].
+
+## Subtopics
+
+### Extended Viewing Architecture for Arbitrary Projections
+An architecture variant using three additional 2D buffers to accommodate arbitrary parallel and perspective projections [S2, book]. Unlike the rotation technique which distorts the CFB image, this method generates arbitrary projections without distortion but requires fetching a whole projection ray plane and rearranging it [S2, book]. It fetches $n$ beams in $O(n)$ cycles, stores them in a 2D temporary buffer, and rearranges them into 26-connected discrete ray representations using a $O(\log n)$ barrel shifter twice [S2, book]. Each ray is fed into the VMWB for selection of the first opaque voxel in $O(\log n)$ time [S2, book]. Total time is $O(n^2 \log n)$, allowing real-time arbitrary projection [S2, book].
+
+## Operating characteristics
+*   **Time Complexity:** $O(n^2 \log n)$ for arbitrary parallel projection, same as orthographic projection in the original Cube architecture, compared to conventional $O(n^3)$ [S1].
+*   **Memory Complexity:** High. Requires significant hardware resources (e.g., 1,024 chips for memory in a $512^3$ system) [S1].
+*   **Performance:** Enables interactive rendering rates for $512^3$ datasets [S1].
+*   **Strengths:** Supports real-time arbitrary parallel projection without image distortion; conflict-free access to beams and rays; pipeline-friendly [S1][S2, book].
+*   **Limitations:** Extremely high hardware complexity and intermodule communication requirements; difficult routing; not suitable for perspective projection without more complex architecture [S1].
+*   **When to Use:** When real-time arbitrary parallel projection of high-resolution volumes is required and hardware resources are available [S1].
+*   **When Not to Use:** When hardware simplicity is preferred, or for perspective projection (requires more complex architecture) [S1].
+
+## Background
+The Extended Cube Architecture was developed as an extension of the original Cube architecture, which was a special-purpose computer architecture for volume visualization supporting only orthographic projection [S1]. The original Cube used a Cubic Frame Buffer (CFB) and beam projection mechanisms [S1]. Arbitrary parallel projections were previously created by rotating the scene and viewing it through a principal orthographic direction, but this distorted the CFB image [S1]. The extended architecture was presented to support real-time arbitrary viewing without distortion [S1]. It builds on the Cube-3 Hybrid Ray-Casting method [3143-cube-3-hybrid-ray-casting.md] [S1].
+
+## Sources
+[S1] An Extended Volume Visualization System for Arbitrary Parallel Projection, https://doi.org/10.2312/eggh/eggh92/064-069, fetched 2026-10-29
+[S2] Viewing and Rendering Processor for a Volume Visualization System, https://doi.org/10.2312/eggh/eggh89/171-178, fetched 2026-10-26 (book)

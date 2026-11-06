@@ -1,0 +1,6143 @@
+# HelloVoxel
+
+HelloVoxel is a C++ voxel engine focused on **creator-friendly building** and practical workflows for making games.
+
+<img width="400" height="225" alt="engine_demo" src="https://github.com/Linirby/HelloVoxel/blob/main/assets/demo/demo.png" />
+
+## What you can do
+
+- Explore a 3D voxel world
+- Switch movement modes:
+  - **Physical**: gravity, collision, jump, sprint
+  - **Spectator**: free-fly movement
+  - **Builder**: creative movement + place/remove blocks
+- Cycle the selected block with the mouse wheel (Builder)
+- See an on-screen FPS counter
+- See the selected block ID HUD (Builder)
+- Save your edited map (`Ctrl+S` -> `custom_map.json`)
+- Reload current resources/map (`R`)
+
+## Quick start
+
+### Requirements
+
+- CMake 3.16+
+- C++23-capable compiler
+- SDL3 (`SDL3::SDL3`)
+- SDL3_image (`SDL3_image::SDL3_image`)
+- `glslc` (optional for users, needed when shaders must be recompiled)
+
+### 1) Build the engine
+
+## Build and run
+
+### Requirements
+
+- CMake 3.16+
+- C++ toolchain compatible with your local SDL3 packages
+- SDL3 (CMake package: `SDL3::SDL3`)
+- SDL3_image (CMake package: `SDL3_image::SDL3_image`)
+
+### Build
+
+```bash
+sh build.sh
+```
+
+or manually:
+
+```bash
+cmake -B build
+cmake --build build
+```
+
+### Run
+
+```bash
+./build/HelloVoxel
+```
+
+Run with a specific map file:
+
+```bash
+./build/HelloVoxel assets/maps/test_01.json
+```
+
+### Clean
+
+```bash
+sh clean.sh
+```
+
+### Rebuild
+
+```bash
+sh rebuild.sh
+```
+
+or:
+
+```bash
+sh clean.sh && sh build.sh
+```
+
+## Architecture (big picture)
+
+### 2) Build shaders (only if missing or outdated)
+
+If `.spv` shader files are already committed and up to date, you can skip this
+step.
+
+```bash
+make -C shader
+```
+
+### 3) Run
+
+```bash
+./build/HelloVoxel
+```
+
+Run with a specific map:
+
+```bash
+./build/HelloVoxel assets/maps/test_01.json
+```
+
+## Using the API (code-first)
+
+HelloVoxel is code-first: the engine is exposed as C++ modules you compose.
+`src/app.cpp` is a reference wiring for core pieces like:
+
+- `Window`, `Renderer`, `WorldRuntime`
+- `BlockRegistry` / `MaterialRegistry`
+- Input wrappers (`Event`, `Keyboard`, `Mouse`) plus `Player` and `Camera`
+
+If you want to embed or extend the engine, start from that wiring and replace
+the example logic with your own gameplay or tools. `src/main.cpp` shows how the
+example app is launched with an optional map path.
+
+Clean / rebuild:
+
+```bash
+sh clean.sh
+sh rebuild.sh
+```
+
+## Controls
+
+| Input | Action |
+| --- | --- |
+| Mouse | Look around |
+| `Tab` | Toggle relative mouse mode |
+| `W` / `S` | Move forward / backward |
+| `A` / `D` | Strafe left / right |
+| `Space` | Jump (Physical) / Move up (Spectator, Builder) |
+| `Left Shift` | Sprint forward (Physical) / Move down (Spectator, Builder) |
+| `P` | Toggle Spectator mode |
+| `B` | Toggle Builder mode |
+| `Left Click` | Remove targeted block (Builder) |
+| `Right Click` | Place block on targeted surface (Builder) |
+| Mouse Wheel | Cycle selected block (Builder) |
+| `Ctrl` + `S` | Save map to `custom_map.json` |
+| `R` | Reset player position |
+| `Esc` | Exit |
+
+## Technical snapshot
+
+Under the hood, HelloVoxel uses SDL3 GPU + Vulkan/SPIR-V shaders with a modular
+C++ architecture (world, meshing, render, entity, physics). Rendering currently
+uses a directional light with vertex ambient occlusion.
+
+### shader/ui.frag
+```
+#version 450
+
+layout(location = 0) in vec2 v_uv;
+layout(location = 2) flat in uint v_material_id;
+
+layout(set = 2, binding = 0) uniform sampler2D u_albedo_map;
+struct MaterialGPU {
+	vec4 color_tint;
+	float roughness;
+	float metallic;
+	float emission;
+	float padding;
+};
+layout(std430, set = 2, binding = 1) readonly buffer MaterialBuffer {
+	MaterialGPU materials[];
+} u_materials;
+
+layout(location = 0) out vec4 out_color;
+
+void main() {
+	vec4 tex_color = texture(u_albedo_map, v_uv);
+	MaterialGPU mat = u_materials.materials[v_material_id];
+	out_color = tex_color * mat.color_tint;
+}
+```
+
+### shader/ui.vert
+```
+#version 450
+
+layout(location = 0) in vec3 in_pos;
+layout(location = 2) in vec2 in_uv;
+layout(location = 3) in float in_material_id;
+
+layout(location = 0) out vec2 v_uv;
+layout(location = 2) flat out uint v_material_id;
+
+layout(set = 1, binding = 0) uniform UniformBlock {
+	mat4 matrix;
+} ubo;
+
+void main() {
+	gl_Position = ubo.matrix * vec4(in_pos, 1.0);
+	v_uv = in_uv;
+	v_material_id = uint(in_material_id + 0.5);
+}
+```
+
+### shader/world.frag
+```
+#version 450
+
+layout(location = 0) in vec3 v_normal;
+layout(location = 1) in vec2 v_uv;
+layout(location = 2) flat in uint v_material_id;
+layout(location = 3) in float v_ao;
+
+layout(set = 2, binding = 0) uniform sampler2D u_albedo_map;
+
+struct MaterialGPU {
+	vec4 color_tint;
+	float roughness;
+	float metallic;
+	float emission;
+	float padding;
+};
+layout(std430, set = 2, binding = 1) readonly buffer MaterialBuffer {
+	MaterialGPU materials[];
+} u_materials;
+
+layout(set = 3, binding = 0) uniform LightData {
+	vec4 direction;
+	vec4 color;
+	vec4 ambient;
+} u_light;
+
+layout(location = 0) out vec4 out_color;
+
+void main() {
+	vec4 tex_color = texture(u_albedo_map, v_uv);
+	MaterialGPU material = u_materials.materials[v_material_id];
+
+	vec3 albedo = tex_color.rgb * material.color_tint.rgb;
+	vec3 emissive = albedo * material.emission;
+
+	vec3 normal = normalize(v_normal);
+	vec3 light_dir = normalize(-u_light.direction.xyz);
+	float diff_factor = max(dot(normal, light_dir), 0.0);
+	vec3 diffuse_light = diff_factor * u_light.color.rgb * u_light.color.a;
+
+	float ao_multiplier = 1.0 - (v_ao / 3.0) * 0.8;
+
+	vec3 final_lighting = (u_light.ambient.rgb + diffuse_light) * ao_multiplier;
+	vec3 final_color = tex_color.rgb * final_lighting;
+
+	out_color = vec4(final_color, tex_color.a);
+}
+```
+
+### shader/world.vert
+```
+#version 450
+
+layout(location = 0) in vec3 in_pos;
+layout(location = 1) in vec3 in_normal;
+layout(location = 2) in vec2 in_uv;
+layout(location = 3) in float in_material_id;
+layout(location = 4) in float in_ao;
+
+layout(location = 0) out vec3 v_normal;
+layout(location = 1) out vec2 v_uv;
+layout(location = 2) flat out uint v_material_id;
+layout(location = 3) out float v_ao;
+
+layout(set = 1, binding = 0) uniform CameraMVP {
+	mat4 matrix;
+} u_camera;
+
+void main() {
+	gl_Position = u_camera.matrix * vec4(in_pos, 1.0);
+
+	v_normal = in_normal;
+	v_uv = in_uv;
+	v_material_id = uint(in_material_id + 0.5);
+	v_ao = uint(in_ao + 0.5);
+}
+```
+
+### src/app.cpp
+```
+#include "app.hpp"
+
+#include <iostream>
+
+#include "world/block.hpp"
+#include "world/material.hpp"
+
+void App::run(const std::string &map_path) {
+	this->map_path = map_path;
+	init_core();
+	init_resources();
+	mainloop();
+}
+
+void App::init_core() {
+	sdl_sys = std::make_unique<lili::SDLSystem>();
+
+	window = std::make_unique<lili::Window>();
+	window->set_title("Voxel Template");
+	window->set_size(1280, 720);
+	window->set_resizable(true);
+	window->set_relative_mouse_mode(true);
+
+	renderer = std::make_unique<lili::Renderer>();
+	lili::Vec3 light_dir = { -0.3f, -1.0f, -0.5f };
+	lili::Vec4 light_color = { 1.0f, 0.9f, 0.8f, 0.75f };
+	lili::Vec4 light_ambient = { 0.3f, 0.3f, 0.3f, 1.0f };
+	renderer->set_directional_light(light_dir, light_color, light_ambient);
+
+	is_running = true;
+}
+
+void App::init_resources() {
+	clock.set_fixed_dt(1.0f / 20.0f);
+
+	lili::MaterialRegistry &material_registry = lili::MaterialRegistry::get();
+	lili::Material custom_log_mat;
+	custom_log_mat.properties.color_tint = { 0.9f, 1.0f, 0.8f, 1.0f };
+	material_registry.register_material("custom:log_mat", custom_log_mat);
+
+	world_atlas_props = { .cols = 8, .rows = 8 };
+
+	lili::BlockRegistry &block_registry = lili::BlockRegistry::get();
+	uint16_t log_top = world_atlas_props.get_index_from_pos({ 0, 1 });
+	uint16_t log_side = world_atlas_props.get_index_from_pos({ 1, 1 });
+	uint16_t log_mat = material_registry.get_material_id("custom:log_mat");
+
+	uint16_t id_log_y = block_registry.register_block("custom:log_y", {
+		.top_texture = log_top,
+		.bottom_texture = log_top,
+		.front_texture = log_side,
+		.right_texture = log_side,
+		.back_texture = log_side,
+		.left_texture = log_side,
+		.material_id = log_mat
+	});
+	uint16_t id_log_x = block_registry.register_block("custom:log_x", {
+		.top_texture = log_side,
+		.bottom_texture = log_side,
+		.front_texture = log_side,
+		.right_texture = log_top,
+		.back_texture = log_side,
+		.left_texture = log_top,
+		.material_id = log_mat
+	});
+	uint16_t id_log_z = block_registry.register_block("custom:log_z", {
+		.top_texture = log_side,
+		.bottom_texture = log_side,
+		.front_texture = log_top,
+		.right_texture = log_side,
+		.back_texture = log_top,
+		.left_texture = log_side,
+		.material_id = log_mat
+	});
+	block_registry.set_rotation_variants(
+		id_log_y, id_log_x, id_log_y, id_log_z
+	);
+	block_registry.set_rotation_variants(
+		id_log_x, id_log_x, id_log_y, id_log_z
+	);
+	block_registry.set_rotation_variants(
+		id_log_z, id_log_x, id_log_y, id_log_z
+	);
+
+	block_registry.register_block("custom:grass", {
+		.top_texture = world_atlas_props.get_index_from_pos({ 0, 2 }),
+		.bottom_texture = world_atlas_props.get_index_from_pos({ 1, 2 }),
+		.front_texture = world_atlas_props.get_index_from_pos({ 2, 2 }),
+		.right_texture = world_atlas_props.get_index_from_pos({ 2, 2 }),
+		.back_texture = world_atlas_props.get_index_from_pos({ 2, 2 }),
+		.left_texture = world_atlas_props.get_index_from_pos({ 2, 2 }),
+		.material_id = 0
+	});
+	// After window is linked to the register no material can be add without a
+	// new pass to update material list for the GPU
+	renderer->set_window(window.get());
+
+	camera = lili::Camera();
+	camera.set_rotation(-90.0f, 0.0f);
+	camera.set_fov(90.0f);
+
+	player = lili::Player();
+	player.set_position({ 0.5f, 3.0f, 0.5f });
+	player.set_camera(camera);
+	player.set_selected_block(block_registry.get_block_id("custom:log_y"));
+
+	world = std::make_unique<lili::WorldRuntime>();
+	world->set_atlas_map(
+		renderer.get(),
+		"assets/cube_atlas.png",
+		world_atlas_props.cols,
+		world_atlas_props.rows
+	);
+	world->load_map(map_path);
+	
+	crosshair = std::make_unique<lili::Sprite>();
+	crosshair->set_texture(renderer.get(), "assets/crosshair.png");
+	crosshair->set_position({ win_w / 2.0f, win_h / 2.0f, 0.0f });
+	crosshair->set_scale({ 18.0f, 18.0f, 1.0f });
+	crosshair->set_rotation({ 0.0f, 0.0f, 0.0f });
+
+	font = std::make_unique<lili::BitmapFont>();
+	font->set_atlas_map(renderer.get(), "assets/lili_font.png");
+	font->set_size(16, 6);
+
+	block_id_text = std::make_unique<lili::UIText>(
+		renderer.get(),
+		font.get(),
+		"Block ID:" + std::to_string(player.get_selected_block())
+	);
+}
+
+void App::handle_inputs() {
+	while (event.poll()) {
+		if (event.type() == lili::EventType::QUIT) is_running = false;
+
+		if (event.type() == lili::EventType::WINDOW_RESIZED) {
+			std::array<int, 2> win_size = window->get_size();
+			win_w = win_size[0];
+			win_h = win_size[1];
+			renderer->on_window_resized(win_w, win_h);
+			crosshair->set_position({ win_w / 2.0f, win_h / 2.0f, 0.0f });
+		}
+
+		if (event.type() == lili::EventType::MOUSE_WHEEL) {
+			lili::MouseWheelEvent mouse_wheel = event.mouse_wheel();
+			uint16_t block = player.get_selected_block();
+			const lili::BlockRegistry &block_reg = lili::BlockRegistry::get();
+			uint16_t num_blocks = block_reg.get_size();
+			if (mouse_wheel.dy > 0) {
+				if (block + 1 >= num_blocks)
+					block = num_blocks - 1;
+				else
+					block += 1;
+			} else if (mouse_wheel.dy < 0) {
+				if (block - 1 < block_reg.get_block_id("core:debug"))
+					block = 1;
+				else
+					block -= 1;
+			}
+			player.set_selected_block(block);
+			block_id_text->set_text(
+				"Block ID:" + std::to_string(player.get_selected_block())
+			);
+		}
+	}
+	
+	if (keyboard.pressed(SDL_SCANCODE_ESCAPE))
+		is_running = false;
+	if (keyboard.pressed(SDL_SCANCODE_TAB)) {
+		bool is_relative = window->is_relative_mouse_mode();
+		window->set_relative_mouse_mode(!is_relative);
+	}
+	if (keyboard.pressed(SDL_SCANCODE_P))
+		player.toggle_spectator();
+	if (keyboard.pressed(SDL_SCANCODE_B))
+		player.toggle_builder();
+
+	if (keyboard.pressed(SDL_SCANCODE_R)) {
+		if (renderer) SDL_WaitForGPUIdle(renderer->get_device());
+		player.set_position({ 0.5f, 3.0f, 0.5f });
+		camera = lili::Camera();
+		camera.set_rotation(-90.0f, 0.0f);
+		camera.set_fov(90.0f);
+		player.set_camera(camera);
+	}
+	if (
+		keyboard.held(SDL_SCANCODE_LCTRL) &&
+		keyboard.pressed(SDL_SCANCODE_S)
+	) {
+		world->save_map("custom_map.json");
+		std::cout << "Map saved at: `custom_map.json`\n";
+	}
+
+    if (player.get_mode() == lili::PlayerMode::Builder)
+		player.process_mouse(mouse, world.get());
+
+    player.process_keys(keyboard);
+}
+
+void App::update(float dt) {
+	if (window->is_relative_mouse_mode())
+		camera.process_mouse(mouse.get_dx(), mouse.get_dy());
+}
+
+void App::fixed_update(float dt) {
+    player.update_physics(dt, world->get_map());
+}
+
+void App::render(float alpha) {
+	camera.position = player.get_interpolated_position(alpha);
+	camera.position.y += 1.6f;
+
+	if (!renderer->begin_frame(camera)) return;
+
+	world->draw_map(camera, (float)win_w / (float)win_h);
+	crosshair->draw(renderer.get());
+
+	clock.draw_fps(renderer.get(), font.get(), { 16.0f, win_h - 16.0f, 0.0f });
+
+	if (player.get_mode() == lili::PlayerMode::Builder)
+		block_id_text->draw({ 16.0f, win_h - 48.0f, 0.0f });
+
+	renderer->end_frame();
+}
+
+void App::mainloop() {
+	while (is_running) {
+		clock.update();
+		keyboard.update();
+		mouse.update();
+
+		handle_inputs();
+		while (clock.step()) {
+			fixed_update(clock.get_fixed_dt()); 
+		}
+		update(clock.get_dt());
+		render(clock.get_alpha());
+	}
+}
+```
+
+### src/app.hpp
+```
+#pragma once
+
+#include <memory>
+#include <SDL3/SDL.h>
+
+#include "core/sdl_system.hpp"
+#include "core/window.hpp"
+#include "core/clock.hpp"
+#include "core/event.hpp"
+#include "core/keyboard.hpp"
+#include "core/mouse.hpp"
+
+#include "physics/collision.hpp"
+
+#include "render/renderer.hpp"
+#include "render/scene/camera.hpp"
+#include "render/scene/model.hpp"
+#include "render/scene/sprite.hpp"
+#include "render/scene/ui_text.hpp"
+
+#include "entity/player.hpp"
+
+#include "runtime/world_runtime.hpp"
+
+struct ChunkRenderData {
+	std::unique_ptr<lili::GPUMesh> mesh = nullptr;
+	std::unique_ptr<lili::Model> model = nullptr;
+	lili::Mat4 transform;
+};
+
+class App {
+public:
+	void run(const std::string &map_path = "assets/maps/test_01.json");
+
+private:
+	std::unique_ptr<lili::SDLSystem> sdl_sys = nullptr;
+	std::unique_ptr<lili::Window> window = nullptr;
+	std::unique_ptr<lili::Renderer> renderer = nullptr;
+
+	lili::Clock clock;
+	lili::Event event;
+	lili::Keyboard keyboard;
+	lili::Mouse mouse;
+
+	bool is_running = false;
+
+	int win_w = 1280;
+	int win_h = 720;
+	float fov_y = 90.0f;
+
+	lili::AtlasProperties world_atlas_props;
+	
+	lili::Camera camera;
+	lili::Player player;
+	lili::RaycastResult player_raycast;
+
+	std::string map_path = "assets/maps/test_01.json";
+	std::unique_ptr<lili::Texture> atlas = nullptr;
+	std::unique_ptr<lili::WorldRuntime> world = nullptr;
+
+	std::unique_ptr<lili::Sprite> crosshair = nullptr;
+	std::unique_ptr<lili::BitmapFont> font = nullptr;
+
+	std::unique_ptr<lili::UIText> block_id_text = nullptr;
+
+	void init_core();
+	void init_resources();
+
+	void place_block(uint8_t new_block);
+	void break_block();
+
+	void handle_inputs();
+	void handle_keyboard();
+	void update(float dt);
+	void fixed_update(float dt);
+	void render(float alpha);
+	void mainloop();
+};
+```
+
+### src/main.cpp
+```
+#include <iostream>
+#include <cstdlib>
+#include "app.hpp"
+
+int main(int argc, char *argv[]) {
+	App app;
+
+	try {
+		if (argc > 1) app.run(argv[1]);
+		else app.run();
+	} catch (std::exception &e) {
+		std::cerr << "ERR: " << e.what() << '\n';
+		return EXIT_FAILURE;
+	}
+	return EXIT_SUCCESS;
+}
+```
+
+### src/core/clock.cpp
+```
+#include "core/clock.hpp"
+
+namespace lili {
+
+Clock::Clock() {
+	last = SDL_GetTicks();
+	now = 0;
+
+	fixed_dt = 1.0f / 60.0f;
+	dt = 0.0f;
+	accumulator = 0.0f;
+	second_counter = 0.0f;
+
+	fps = 0;
+	temp_fps = 0;
+	fps_text = nullptr;
+}
+
+void Clock::set_fixed_dt(const float value) {
+	fixed_dt = value;
+}
+
+void Clock::update() {
+	now = SDL_GetTicks();
+	dt = (now - last) / 1000.0f;
+	last = now;
+	if (dt > 0.25f) {
+		dt = 0.25f;
+	}
+	accumulator += dt;
+	if (second_counter <= 1.0f) {
+		second_counter += dt;
+		temp_fps++;
+	} else {
+		fps = temp_fps;
+		second_counter = 0.0f;
+		temp_fps = 0;
+	}
+}
+
+bool Clock::step() {
+	if (accumulator >= fixed_dt) {
+		accumulator -= fixed_dt;
+		return true;
+	}
+	return false;
+}
+
+const float Clock::get_fixed_dt() const {
+	return fixed_dt;
+}
+
+const float Clock::get_dt() const {
+	return dt;
+}
+
+const float Clock::get_alpha() const {
+	return accumulator / fixed_dt;
+}
+
+void Clock::draw_fps(Renderer *renderer, BitmapFont *font, const Vec3 pos) {
+	if (!fps_text)
+		fps_text = std::make_unique<UIText>(
+			renderer, font, "FPS:"
+		);
+	fps_text->set_text("FPS:" + std::to_string(fps));
+	fps_text->draw(pos);
+}
+
+}  // namespace lili
+```
+
+### src/core/clock.hpp
+```
+/// Fixed-timestep clock with FPS tracking.
+#pragma once
+
+#include <memory>
+
+#include "render/renderer.hpp"
+#include "render/scene/ui_text.hpp"
+
+namespace lili {
+
+class Clock {
+public:
+	/// Create a fixed-timestep clock.
+	Clock();
+	/// Destroy the clock.
+	~Clock() = default;
+
+	/// Set the fixed timestep duration in seconds.
+	void set_fixed_dt(float value);
+
+	/// Update internal timers for the current frame.
+	void update();
+	/// Advance fixed steps while available.
+	bool step();
+	/// Get the fixed timestep duration in seconds.
+	const float get_fixed_dt() const;
+	/// Get the last frame delta time in seconds.
+	const float get_dt() const;
+	/// Get the interpolation alpha between fixed steps.
+	const float get_alpha() const;
+	/// Draw the current FPS counter.
+	void draw_fps(Renderer *renderer, BitmapFont *font, const Vec3 pos);
+
+private:
+	uint64_t last;
+	uint64_t now;
+
+	float fixed_dt;
+	float dt;
+	float accumulator;
+	float second_counter;
+
+	int fps;
+	int temp_fps;
+	std::unique_ptr<UIText> fps_text;
+};
+
+}  // namespace lili
+```
+
+### src/core/event.cpp
+```
+#include "core/event.hpp"
+
+namespace lili {
+
+Event::Event() {
+	sdl_event = SDL_Event();
+	current_type = EventType::NONE;
+}
+
+bool Event::poll() {
+	if (SDL_PollEvent(&sdl_event)) {
+		current_type = resolve_type();
+		return true;
+	}
+	return false;
+}
+
+EventType Event::type() const {
+	return current_type;
+}
+
+bool Event::key_just_pressed(const KeyboardEvent &keyboard) const {
+	return keyboard.action == KeyAction::PRESSED && !keyboard.repeat;
+}
+
+bool Event::mouse_button_pressed(const MouseButtonEvent &mouse_button) const {
+	return mouse_button.action == MouseAction::PRESSED;
+}
+
+const KeyboardEvent Event::keyboard() const {
+	return {
+		.key = sdl_event.key.key,
+		.scancode = sdl_event.key.scancode,
+		.action = (sdl_event.type == SDL_EVENT_KEY_DOWN) ?
+			KeyAction::PRESSED : KeyAction::RELEASED,
+		.repeat = sdl_event.key.repeat
+	};
+}
+
+const MouseButtonEvent Event::mouse_button() const {
+	MouseButton button;
+	switch (sdl_event.button.button) {
+		case SDL_BUTTON_LEFT:
+			button = MouseButton::LEFT;
+			break;
+		case SDL_BUTTON_MIDDLE:
+			button = MouseButton::MIDDLE;
+			break;
+		case SDL_BUTTON_RIGHT:
+			button = MouseButton::RIGHT;
+			break;
+		default:
+			button = MouseButton::UNKNOWN;
+			break;
+	}
+	return {
+		.button = button,
+		.action = (sdl_event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) ?
+			MouseAction::PRESSED : MouseAction::RELEASED,
+		.x = sdl_event.button.x,
+		.y = sdl_event.button.y
+	};
+}
+
+const MouseMotionEvent Event::mouse_motion() const {
+	return {
+		.x = sdl_event.motion.x,
+		.y = sdl_event.motion.y,
+		.dx = sdl_event.motion.xrel,
+		.dy = sdl_event.motion.yrel
+	};
+}
+
+const MouseWheelEvent Event::mouse_wheel() const {
+	return {
+		.dx = sdl_event.wheel.x,
+		.dy = sdl_event.wheel.y
+	};
+}
+
+EventType Event::resolve_type() const {
+	switch (sdl_event.type) {
+		case SDL_EVENT_QUIT: return EventType::QUIT;
+		case SDL_EVENT_WINDOW_RESIZED: return EventType::WINDOW_RESIZED;
+
+		case SDL_EVENT_KEY_DOWN:
+		case SDL_EVENT_KEY_UP: return EventType::KEYBOARD;
+
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		case SDL_EVENT_MOUSE_BUTTON_UP: return EventType::MOUSE_BUTTON;
+
+		case SDL_EVENT_MOUSE_MOTION: return EventType::MOUSE_MOTION;
+		case SDL_EVENT_MOUSE_WHEEL: return EventType::MOUSE_WHEEL;
+		default: return EventType::NONE;
+	}
+}
+
+}  // namespace lili
+```
+
+### src/core/event.hpp
+```
+/// SDL event wrapper with typed accessors.
+#pragma once
+
+#include "SDL3/SDL_events.h"
+
+using Keycode = SDL_Keycode;
+using Scancode = SDL_Scancode;
+
+namespace lili {
+
+enum class EventType {
+	NONE,
+	QUIT,
+	WINDOW_RESIZED,
+	KEYBOARD,
+	MOUSE_BUTTON,
+	MOUSE_MOTION,
+	MOUSE_WHEEL
+};
+
+enum class KeyAction {
+	PRESSED,
+	RELEASED
+};
+
+enum class MouseButton {
+	UNKNOWN,
+	LEFT,
+	MIDDLE,
+	RIGHT
+};
+
+enum class MouseAction {
+	PRESSED,
+	RELEASED
+};
+
+struct KeyboardEvent {
+	Keycode key;
+	Scancode scancode;
+	KeyAction action;
+	bool repeat;
+};
+
+struct MouseButtonEvent {
+	MouseButton button;
+	MouseAction action;
+	float x;
+	float y;
+};
+
+struct MouseMotionEvent {
+	float x;
+	float y;
+	float dx;
+	float dy;
+};
+
+struct MouseWheelEvent {
+	float dx;
+	float dy;
+};
+
+class Event {
+public:
+	/// Create an event wrapper.
+	Event();
+	/// Destroy the event wrapper.
+	~Event() = default;
+
+	/// Poll the next SDL event and update cached state.
+	bool poll();
+	/// Get the current event type.
+	EventType type() const;
+
+	/// Check if a keyboard event is a fresh press.
+	bool key_just_pressed(const KeyboardEvent &keyboard) const;
+	/// Check if a mouse button event is a press.
+	bool mouse_button_pressed(const MouseButtonEvent &keyboard) const;
+
+	/// Get the current keyboard event.
+	const KeyboardEvent keyboard() const;
+	/// Get the current mouse button event.
+	const MouseButtonEvent mouse_button() const;
+	/// Get the current mouse motion event.
+	const MouseMotionEvent mouse_motion() const;
+	/// Get the current mouse wheel event.
+	const MouseWheelEvent mouse_wheel() const;
+
+private:
+	SDL_Event sdl_event;
+	EventType current_type;
+
+	EventType resolve_type() const;
+};
+
+}  // namespace lili
+```
+
+### src/core/keyboard.cpp
+```
+#include "core/keyboard.hpp"
+
+#include <cstring>
+
+namespace lili {
+
+Keyboard::Keyboard() {
+	current = nullptr;
+	std::memset(previous, 0, sizeof(previous));
+	key_count = 0;
+}
+
+void Keyboard::update() {
+	if (current)
+		std::memcpy(previous, current, key_count * sizeof(bool));
+	current = SDL_GetKeyboardState(&key_count);
+	if (key_count > SDL_SCANCODE_COUNT)
+		key_count = SDL_SCANCODE_COUNT;
+}
+
+bool Keyboard::held(Scancode key) const {
+	return current && key < key_count && current[key];
+}
+
+bool Keyboard::pressed(Scancode key) const {
+	return current && key < key_count && current[key] && !previous[key];
+}
+
+bool Keyboard::released(Scancode key) const {
+	return current && key < key_count && !current[key] && previous[key];
+}
+
+}  // namespace lili
+```
+
+### src/core/keyboard.hpp
+```
+/// Keyboard input state wrapper.
+#pragma once
+
+#include <SDL3/SDL_events.h>
+
+namespace lili {
+
+using Scancode = SDL_Scancode;
+
+class Keyboard {
+public:
+	/// Create a keyboard input tracker.
+	Keyboard();
+	/// Destroy the keyboard tracker.
+	~Keyboard() = default;
+
+	/// Update keyboard state for the current frame.
+	void update();
+	/// Check if a key is currently held.
+	bool held(Scancode key) const;
+	/// Check if a key was pressed this frame.
+	bool pressed(Scancode key) const;
+	/// Check if a key was released this frame.
+	bool released(Scancode key) const;
+
+private:
+	const bool *current;	
+	bool previous[SDL_SCANCODE_COUNT];
+	int key_count;
+};
+
+}  // namespace lili
+```
+
+### src/core/mouse.cpp
+```
+#include "core/mouse.hpp"
+
+namespace lili {
+
+Mouse::Mouse() {
+	current = 0;
+	previous = 0;
+	current_x = 0.0f;
+	current_y = 0.0f;
+	current_dx = 0.0f;
+	current_dy = 0.0f;
+}
+
+void Mouse::update() {
+	previous = current;
+	current_dx = 0.0f;
+	current_dy = 0.0f;
+	current = SDL_GetMouseState(&current_x, &current_y);
+	SDL_GetRelativeMouseState(&current_dx, &current_dy);
+}
+
+bool Mouse::held(MouseButton button) const {
+	if (button == MouseButton::LEFT)
+		return current & SDL_BUTTON_LMASK;
+	else if (button == MouseButton::MIDDLE)
+		return current & SDL_BUTTON_MMASK;
+	else if (button == MouseButton::RIGHT)
+		return current & SDL_BUTTON_RMASK;
+	else
+		return false;
+}
+
+bool Mouse::pressed(MouseButton button) const {
+	if (button == MouseButton::LEFT)
+		return (current & SDL_BUTTON_LMASK) && !(previous & SDL_BUTTON_LMASK);
+	else if (button == MouseButton::MIDDLE)
+		return (current & SDL_BUTTON_MMASK) && !(previous & SDL_BUTTON_MMASK);
+	else if (button == MouseButton::RIGHT)
+		return (current & SDL_BUTTON_RMASK) && !(previous & SDL_BUTTON_RMASK);
+	else
+		return false;
+}
+
+bool Mouse::released(MouseButton button) const {
+	if (button == MouseButton::LEFT)
+		return !(current & SDL_BUTTON_LMASK) && (previous & SDL_BUTTON_LMASK);
+	else if (button == MouseButton::MIDDLE)
+		return !(current & SDL_BUTTON_MMASK) && (previous & SDL_BUTTON_MMASK);
+	else if (button == MouseButton::RIGHT)
+		return !(current & SDL_BUTTON_RMASK) && (previous & SDL_BUTTON_RMASK);
+	else
+		return false;
+}
+
+float Mouse::get_x() const {
+	return current_x;
+}
+
+float Mouse::get_y() const {
+	return current_y;
+}
+
+float Mouse::get_dx() const {
+	return current_dx;
+}
+
+float Mouse::get_dy() const {
+	return current_dy;
+}
+
+}  // namespace lili
+```
+
+### src/core/mouse.hpp
+```
+/// Mouse input state wrapper.
+#pragma once
+
+#include "core/event.hpp"
+
+namespace lili {
+
+class Mouse {
+public:
+	/// Create a mouse input tracker.
+	Mouse();
+	/// Destroy the mouse tracker.
+	~Mouse() = default;
+
+	/// Update mouse state for the current frame.
+	void update();
+
+	/// Check if a mouse button is currently held.
+	bool held(MouseButton button) const;
+	/// Check if a mouse button was pressed this frame.
+	bool pressed(MouseButton button) const;
+	/// Check if a mouse button was released this frame.
+	bool released(MouseButton button) const;
+
+	/// Get the current mouse X position.
+	float get_x() const;
+	/// Get the current mouse Y position.
+	float get_y() const;
+	/// Get the mouse X delta for this frame.
+	float get_dx() const;
+	/// Get the mouse Y delta for this frame.
+	float get_dy() const;
+
+private:
+	uint32_t current;
+	uint32_t previous;
+	float current_x;
+	float current_y;
+	float current_dx;
+	float current_dy;
+};
+
+}  // namespace lili
+```
+
+### src/core/sdl_system.cpp
+```
+#include <SDL3/SDL_init.h>
+#include <stdexcept>
+
+#include "core/sdl_system.hpp"
+
+namespace lili {
+
+SDLSystem::SDLSystem() {
+	if (!SDL_Init(SDL_INIT_VIDEO))
+		throw std::runtime_error(SDL_GetError());
+}
+
+SDLSystem::~SDLSystem() {
+	SDL_QuitSubSystem(SDL_INIT_VIDEO);
+	SDL_Quit();
+}
+
+}  // namespace lili
+```
+
+### src/core/sdl_system.hpp
+```
+/// SDL system initialization wrapper.
+#pragma once
+
+namespace lili {
+
+struct SDLSystem {
+	/// Initialize SDL systems.
+	SDLSystem();
+	/// Shut down SDL systems.
+	~SDLSystem();
+};
+
+}  // namespace lili
+```
+
+### src/core/window.cpp
+```
+#include <stdexcept>
+#include "core/window.hpp"
+
+namespace lili {
+
+Window::Window() {
+	window = nullptr;
+	resizable = false;
+	borderless = false;
+	fullscreen = false;
+	window = SDL_CreateWindow(
+		"HelloVoxel - made by Lili (aka. Linirby)", 640, 480, 0
+	);
+}
+
+Window::~Window() {
+	if (window) SDL_DestroyWindow(window);
+}
+
+void Window::set_title(const std::string &title) {
+	if (!SDL_SetWindowTitle(window, title.c_str()))
+		throw std::runtime_error(
+			"Failed to change window name: " + std::string(SDL_GetError())
+		);
+}
+
+void Window::set_size(int width, int height) {
+	if (!SDL_SetWindowSize(window, width, height))
+		throw std::runtime_error(
+			"Failed to change window size: " + std::string(SDL_GetError())
+		);
+}
+
+void Window::set_resizable(bool activate) {
+	if (!SDL_SetWindowResizable(window, activate))
+		throw std::runtime_error(
+			"Failed to change window to resizable: " +
+			std::string(SDL_GetError())
+		);
+	resizable = activate;
+}
+
+void Window::set_borderless(bool activate) {
+	if (!SDL_SetWindowBordered(window, !activate))
+		throw std::runtime_error(
+			"Failed to change window to borderless: " +
+			std::string(SDL_GetError())
+		);
+	borderless = activate;
+}
+
+void Window::set_fullscreen(bool activate) {
+	if (!SDL_SetWindowFullscreen(window, activate))
+		throw std::runtime_error(
+			"Failed to change window to fullscreen mode: " +
+			std::string(SDL_GetError())
+		);
+	fullscreen = activate;
+}
+
+void Window::set_relative_mouse_mode(bool activate) {
+	if (!SDL_SetWindowRelativeMouseMode(window, activate))
+		throw std::runtime_error(
+			"Failed to change window to relative mouse mode: " +
+			std::string(SDL_GetError())
+		);
+}
+
+const std::string Window::get_title() {
+	return std::string(SDL_GetWindowTitle(window));
+}
+
+std::array<int, 2> Window::get_size() {
+	int w, h = 0;
+	if (!SDL_GetWindowSize(window, &w, &h))
+		throw std::runtime_error(
+			"Failed to get window size: " + std::string(SDL_GetError())
+		);
+	return {w, h};
+}
+
+bool Window::is_resizable() {
+	return resizable;
+}
+
+bool Window::is_borderless() {
+	return borderless;
+}
+
+bool Window::is_fullscreen() {
+	return fullscreen;
+}
+
+bool Window::is_relative_mouse_mode() {
+	return SDL_GetWindowRelativeMouseMode(window);
+}
+
+SDL_Window *Window::get_sdl_window() {
+	return window;
+}
+
+}  // namespace lili
+```
+
+### src/core/window.hpp
+```
+/// Window wrapper around SDL windowing.
+#pragma once
+
+#include <string>
+#include <array>
+#include <SDL3/SDL.h>
+
+namespace lili {
+
+class Window {
+public:
+	/// Create a window.
+	Window();
+	/// Destroy the window.
+	~Window();
+
+	/// Set the window title.
+	void set_title(const std::string &title);
+	/// Set the window size.
+	void set_size(int width, int height);
+	/// Enable or disable resizing.
+	void set_resizable(bool activate);
+	/// Enable or disable borderless mode.
+	void set_borderless(bool activate);
+	/// Enable or disable fullscreen mode.
+	void set_fullscreen(bool activate);
+	/// Enable or disable relative mouse mode.
+	void set_relative_mouse_mode(bool activate);
+
+	/// Get the current window title.
+	const std::string get_title();
+	/// Get the current window size.
+	std::array<int, 2> get_size();
+	/// Check if resizing is enabled.
+	bool is_resizable();
+	/// Check if borderless mode is enabled.
+	bool is_borderless();
+	/// Check if fullscreen mode is enabled.
+	bool is_fullscreen();
+	/// Check if relative mouse mode is enabled.
+	bool is_relative_mouse_mode();
+
+	/// Get the raw SDL window pointer.
+	SDL_Window *get_sdl_window();
+
+private:
+	SDL_Window *window;
+	bool resizable, borderless, fullscreen;
+};
+
+}  // namespace lili
+```
+
+### src/entity/player.cpp
+```
+#include "entity/player.hpp"
+
+#include <SDL3/SDL.h>
+#include <cmath>
+
+#include "physics/collision.hpp"
+#include "world/block.hpp"
+
+namespace lili {
+
+Player::Player() {
+	camera = nullptr;
+
+	previous_position = {};
+	position = {};
+	velocity = {};
+	direction = {};
+
+	jump_input = false;
+	is_running = false;
+	
+	walk_speed = 5.0f;
+	run_speed = 7.0f;
+	current_speed = 0.0f;
+	builder_speed = 8.0f;
+	spectator_speed = 15.0f;
+
+	ground_control = 15.0f;
+	air_control = 4.0f;
+
+	jump_power = 8.0f;
+	gravity = -25.0f;
+	is_grounded = false;
+
+	width = 0.8f;
+	height = 1.8f;
+
+	build_range = 12.0f;
+	selected_block = 1;
+
+	mode = PlayerMode::Physical;
+}
+
+void Player::set_position(const Vec3 &pos) {
+	position = pos;
+}
+
+void Player::set_camera(Camera &camera) {
+	this->camera = &camera;
+}
+
+void Player::set_selected_block(uint16_t block) {
+	selected_block = block;
+}
+
+Vec3 Player::get_position() const {
+	return position;
+}
+
+Vec3 Player::get_interpolated_position(float alpha) const {
+	return previous_position.lerp(position, alpha);
+}
+
+float Player::get_build_range() const {
+	return build_range;
+}
+
+uint16_t Player::get_selected_block() const {
+	return selected_block;
+}
+
+PlayerMode Player::get_mode() const {
+	return mode;
+}
+
+void Player::process_keys(const Keyboard &keyboard) {
+	direction = {};
+	is_running = false;
+	jump_input = false;
+	if (camera == nullptr) return;
+
+	if (mode == PlayerMode::Spectator) {
+		if (keyboard.held(SDL_SCANCODE_W)) direction += camera->front;
+		if (keyboard.held(SDL_SCANCODE_S)) direction -= camera->front;
+		if (keyboard.held(SDL_SCANCODE_D)) direction += camera->right;
+		if (keyboard.held(SDL_SCANCODE_A)) direction -= camera->right;
+		if (keyboard.held(SDL_SCANCODE_SPACE)) direction += camera->up;
+		if (keyboard.held(SDL_SCANCODE_LSHIFT)) direction -= camera->up;
+		return;
+	}
+
+	if (mode == PlayerMode::Builder) {
+		Vec3 front = Vec3{
+			camera->front.x, 0.0f, camera->front.z
+		}.normalized();
+		Vec3 right = Vec3{
+			camera->right.x, 0.0f, camera->right.z
+		}.normalized();
+		Vec3 up = Vec3{ 0.0f, camera->up.y, 0.0f }.normalized();
+
+		if (keyboard.held(SDL_SCANCODE_W)) direction += front;
+		if (keyboard.held(SDL_SCANCODE_S)) direction -= front;
+		if (keyboard.held(SDL_SCANCODE_D)) direction += right;
+		if (keyboard.held(SDL_SCANCODE_A)) direction -= right;
+		if (keyboard.held(SDL_SCANCODE_SPACE)) direction += up;
+		if (keyboard.held(SDL_SCANCODE_LSHIFT)) direction -= up;
+		return;
+	}
+
+	Vec3 flat_front = Vec3{
+		camera->front.x, 0.0f, camera->front.z
+	}.normalized();
+	Vec3 flat_right = Vec3{
+		camera->right.x, 0.0f, camera->right.z
+	}.normalized();
+
+	if (keyboard.held(SDL_SCANCODE_W)) direction += flat_front;
+	if (keyboard.held(SDL_SCANCODE_S)) direction -= flat_front;
+	if (keyboard.held(SDL_SCANCODE_D)) direction += flat_right;
+	if (keyboard.held(SDL_SCANCODE_A)) direction -= flat_right;
+	direction = (Vec3){ direction.x, 0.0f, direction.z }.normalized();
+
+	is_running = (
+		keyboard.held(SDL_SCANCODE_LSHIFT) && keyboard.held(SDL_SCANCODE_W)
+	);
+	jump_input = keyboard.held(SDL_SCANCODE_SPACE);
+}
+
+void Player::process_mouse(const Mouse &mouse, WorldRuntime *world) {
+	BlockRegistry &block_registry = BlockRegistry::get();
+
+	if (mouse.pressed(lili::MouseButton::LEFT)) {
+		RaycastResult raycast = lili::raycast_voxel(
+			camera->position,
+			camera->front,
+			get_build_range(),
+			world->get_map()
+		);
+		if (raycast.hit) {
+			world->remove_block({
+				static_cast<float>(raycast.hit_x),
+				static_cast<float>(raycast.hit_y),
+				static_cast<float>(raycast.hit_z)
+			});
+		}
+	}
+	else if (mouse.pressed(lili::MouseButton::RIGHT)) {
+		RaycastResult raycast = lili::raycast_voxel(
+			camera->position,
+			camera->front,
+			get_build_range(),
+			world->get_map()
+		);
+		if (raycast.hit) {
+			uint16_t place_block = selected_block;
+
+			const BlockDefinition &def = block_registry.get_block(
+				static_cast<uint8_t>(selected_block)
+			);
+			if (def.rotatable) {
+				int dx = raycast.adj_x - raycast.hit_x;
+				int dz = raycast.adj_z - raycast.hit_z;
+
+				if (std::abs(dx) == 1) {
+					place_block = def.x_variant;
+				} else if (std::abs(dz) == 1) {
+					place_block = def.z_variant;
+				} else {
+					place_block = def.y_variant;
+				}
+			}
+
+			world->add_block(place_block, {
+				static_cast<float>(raycast.adj_x),
+				static_cast<float>(raycast.adj_y),
+				static_cast<float>(raycast.adj_z)
+			});
+		}
+	}
+}
+
+void Player::update_physics(float dt, const Map &map) {
+	previous_position = position;
+
+	if (mode == PlayerMode::Spectator) {
+		position += direction * spectator_speed * dt;
+		return;
+	}
+
+	if (mode == PlayerMode::Builder) {
+		position += direction * builder_speed * dt;
+		return;
+	}
+
+	float speed = is_running ? run_speed : walk_speed;
+	float control = is_grounded ? ground_control : air_control;
+	velocity.x += (direction.x * speed - velocity.x) * control * dt;
+	velocity.z += (direction.z * speed - velocity.z) * control * dt;
+
+	if (jump_input && is_grounded) {
+		velocity.y = jump_power;
+		is_grounded = false;
+	}
+	velocity.y += gravity * dt;
+	
+	Vec3 next_x = position;
+	next_x.x += velocity.x * dt;
+	if (!check_collision(next_x, map))
+		position.x = next_x.x;
+	else
+		velocity.x = 0.0f;
+
+	Vec3 next_y = position;
+	next_y.y += velocity.y * dt;
+	is_grounded = false;
+	if (!check_collision(next_y, map))
+		position.y = next_y.y;
+	else {
+		if (velocity.y < 0.0f) {
+			is_grounded = true;
+			position.y = std::floor(position.y);
+		}
+		velocity.y = 0.0f;
+	}
+
+	Vec3 next_z = position;
+	next_z.z += velocity.z * dt;
+	if (!check_collision(next_z, map))
+		position.z = next_z.z;
+	else
+		velocity.z = 0.0f;
+}
+
+void Player::toggle_spectator() {
+	if (mode != PlayerMode::Spectator) {
+		mode = PlayerMode::Spectator;
+		position.y += 0.5f;
+		velocity = Vec3{ 0.0f, 0.0f, 0.0f };
+	} else
+		mode = PlayerMode::Physical;
+}
+
+void Player::toggle_builder() {
+	if (mode != PlayerMode::Builder) {
+		mode = PlayerMode::Builder;
+		velocity = Vec3{ 0.0f, 0.0f, 0.0f };
+	} else
+		mode = PlayerMode::Physical;
+}
+
+bool Player::check_collision(const Vec3 &test_pos, const Map &map) const {
+	float pad = 0.05f;
+
+	Vec3 min = {
+		test_pos.x - (width / 2.0f) + pad,
+		test_pos.y,
+		test_pos.z - (width / 2.0f) + pad
+	};
+	Vec3 max = {
+		test_pos.x + (width / 2.0f) - pad,
+		test_pos.y + height,
+		test_pos.z + (width / 2.0f) - pad
+	};
+
+	for (int x = std::floor(min.x); x <= std::floor(max.x); ++x) {
+		for (int y = std::floor(min.y); y <= std::floor(max.y); ++y) {
+			for (int z = std::floor(min.z); z <= std::floor(max.z); ++z) {
+				if (map.get_block_global(x, y, z) != 0)
+					return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+}  // namespace lili
+```
+
+### src/entity/player.hpp
+```
+/// Player controller and movement modes.
+#pragma once
+
+#include "geometry/vec3.hpp"
+#include "world/map.hpp"
+#include "render/scene/camera.hpp"
+#include "core/keyboard.hpp"
+#include "core/mouse.hpp"
+#include "runtime/world_runtime.hpp"
+
+namespace lili {
+
+enum class PlayerMode {
+	Physical,
+	Spectator,
+	Builder
+};
+
+class Player {
+public:
+	/// Create a player controller.
+	Player();
+	/// Destroy the player controller.
+	~Player() = default;
+
+	/// Set the player world position.
+	void set_position(const Vec3 &pos);
+	/// Attach a camera to the player.
+	void set_camera(Camera &camera);
+	/// Set the currently selected block ID.
+	void set_selected_block(uint16_t block);
+
+	/// Get the current position.
+	Vec3 get_position() const;
+	/// Get the interpolated position for rendering.
+	Vec3 get_interpolated_position(float alpha) const;
+	/// Get the build range in blocks.
+	float get_build_range() const;
+	/// Get the selected block ID.
+	uint16_t get_selected_block() const;
+	/// Get the current movement mode.
+	PlayerMode get_mode() const;
+
+	/// Process keyboard input to update movement intent.
+	void process_keys(const Keyboard &keyboard);
+	/// Process mouse input for block interactions.
+	void process_mouse(const Mouse &mouse, WorldRuntime *world);
+	/// Update movement physics for the current frame.
+	void update_physics(float dt, const Map &map);
+	/// Toggle spectator mode.
+	void toggle_spectator();
+	/// Toggle builder mode.
+	void toggle_builder();
+
+private:
+	Camera *camera;
+
+	Vec3 previous_position;
+	Vec3 position;
+	Vec3 velocity;
+	Vec3 direction;
+
+	bool jump_input;
+	bool is_running;
+	
+	float walk_speed;
+	float run_speed;
+	float current_speed;
+	float builder_speed;
+	float spectator_speed;
+
+	float ground_control;
+	float air_control;
+
+	float jump_power;
+	float gravity;
+	bool is_grounded;
+
+	float width;
+	float height;
+
+	float build_range;
+	uint8_t selected_block;
+
+	PlayerMode mode;
+
+	bool check_collision(const Vec3 &test_pos, const Map &map) const;
+};
+
+}  // namespace lili
+```
+
+### src/geometry/mat4x4.cpp
+```
+#include <cmath>
+#include "geometry/mat4x4.hpp"
+
+namespace lili {
+
+Mat4 Mat4::operator*(const Mat4 &other) const {
+	Mat4 result;
+
+	for (int col = 0; col < 4; ++col) {
+		for (int row = 0; row < 4; ++row) {
+			result.m[col * 4 + row] = (
+				m[0 * 4 + row] * other.m[col * 4 + 0] +
+				m[1 * 4 + row] * other.m[col * 4 + 1] +
+				m[2 * 4 + row] * other.m[col * 4 + 2] +
+				m[3 * 4 + row] * other.m[col * 4 + 3]
+			);
+		}
+	}
+	return result;
+}
+
+Mat4 Mat4::identity() {
+	Mat4 result = {};
+
+	result.m[0] = 1.0f;
+	result.m[5] = 1.0f;
+	result.m[10] = 1.0f;
+	result.m[15] = 1.0f;
+	return result;
+}
+
+Mat4 Mat4::look_at(const Vec3 &eye, const Vec3 &center, const Vec3 &up) {
+	Vec3 f = (center - eye).normalized();
+	Vec3 s = f.cross(up).normalized();
+	Vec3 u = s.cross(f);
+	Mat4 result = identity();
+
+	// X axis
+	result.m[0] = s.x;
+	result.m[1] = u.x;
+	result.m[2] = -f.x;
+	// Y axis
+	result.m[4] = s.y;
+	result.m[5] = u.y;
+	result.m[6] = -f.y;
+	// Z axis
+	result.m[8] = s.z;
+	result.m[9] = u.z;
+	result.m[10] = -f.z;
+	// Camera translation
+	result.m[12] = -s.dot(eye);
+	result.m[13] = -u.dot(eye);
+	result.m[14] = f.dot(eye);
+	result.m[15] = 1.0f;
+	return result;
+}
+
+Mat4 Mat4::perspective(
+	float fovy_rad, float aspect, float near, float far
+) {
+	Mat4 result = {};
+
+	float tan_half_fovy = std::tan(fovy_rad * 0.5f);
+	result.m[0] = 1.0f / (aspect * tan_half_fovy);
+	result.m[5] = 1.0f / tan_half_fovy;
+	result.m[10] = -far / (far - near);
+	result.m[11] = -1.0f;
+	result.m[14] = -(far * near) / (far - near);
+	return result;
+}
+
+Mat4 Mat4::orthographic(
+	float left, float right, float bottom, float top, float near, float far
+) {
+	Mat4 result = {};
+
+	result.m[0] = 2.0f / (right - left);
+	result.m[5] = 2.0f / (bottom - top);
+	result.m[10] = -1.0f / (far - near);
+	result.m[12] = -(right + left) / (right - left);
+	result.m[13] = -(bottom + top) / (bottom - top);
+	result.m[14] = -near / (far - near);
+	result.m[15] = 1.0f;
+	return result;
+}
+
+Mat4 Mat4::translate(const Vec3 &pos) {
+	Mat4 result = identity();
+
+	result.m[12] = pos.x;
+	result.m[13] = pos.y;
+	result.m[14] = pos.z;
+	return result;
+}
+
+Mat4 Mat4::rotation_x(float radian) {
+	Mat4 result = identity();
+	float c = std::cos(radian);
+	float s = std::sin(radian);
+
+	result.m[5] = c;
+	result.m[6] = s;
+	result.m[9] = -s;
+	result.m[10] = c;
+	return result;
+}
+
+Mat4 Mat4::rotation_y(float radian) {
+	Mat4 result = identity();
+	float c = std::cos(radian);
+	float s = std::sin(radian);
+
+	result.m[0] = c;
+	result.m[2] = -s;
+	result.m[8] = s;
+	result.m[10] = c;
+	return result;
+}
+
+Mat4 Mat4::rotation_z(float radian) {
+	Mat4 result = identity();
+	float c = std::cos(radian);
+	float s = std::sin(radian);
+
+	result = Mat4::identity();
+	result.m[0] = c;
+	result.m[1] = s;
+	result.m[4] = -s;
+	result.m[5] = c;
+	return result;
+}
+
+Mat4 Mat4::rotation_xyz(Vec3 radians) {
+	return (
+		rotation_x(radians.x) * rotation_y(radians.y) * rotation_z(radians.z)
+	);
+}
+
+Mat4 Mat4::scale(const Vec3 &v) {
+	Mat4 result = identity();
+
+	result.m[0] = v.x;
+	result.m[5] = v.y;
+	result.m[10] = v.z;
+	return result;
+}
+
+}  // namespace lili
+```
+
+### src/geometry/mat4x4.hpp
+```
+/// 4x4 matrix math type.
+#pragma once
+
+#include "geometry/vec3.hpp"
+
+namespace lili {
+
+struct Mat4 {
+	float m[16] = { 0.0f };
+
+	/// Multiply by another matrix.
+	Mat4 operator*(const Mat4 &other) const;
+
+	/// Create an identity matrix.
+	static Mat4 identity();
+	/// Create a look-at view matrix.
+	static Mat4 look_at(const Vec3 &eye, const Vec3 &center, const Vec3 &up);
+	/// Create a perspective projection matrix.
+	static Mat4 perspective(
+		float fovy_rad, float aspect, float near, float far
+	);
+	/// Create an orthographic projection matrix.
+	static Mat4 orthographic(
+		float left, float right, float bottom, float top, float near, float far
+	);
+	/// Create a translation matrix.
+	static Mat4 translate(const Vec3 &pos);
+	/// Create a rotation matrix around X axis.
+	static Mat4 rotation_x(float radian);
+	/// Create a rotation matrix around Y axis.
+	static Mat4 rotation_y(float radian);
+	/// Create a rotation matrix around Z axis.
+	static Mat4 rotation_z(float radian);
+	/// Create a rotation matrix from XYZ Euler angles.
+	static Mat4 rotation_xyz(Vec3 radians);
+	/// Create a scale matrix.
+	static Mat4 scale(const Vec3 &v);
+};
+
+}  // namespace lili
+```
+
+### src/geometry/point3.cpp
+```
+#include "geometry/point3.hpp"
+namespace lili {
+
+Point3 Point3::operator=(const Point3 &o) {
+	x = o.x;
+	y = o.y;
+	z = o.z;
+	return *this;
+}
+
+}  // namespace lili
+```
+
+### src/geometry/point3.hpp
+```
+/// 3D point type.
+#pragma once
+
+namespace lili {
+
+struct Point3 {
+	int x, y, z;
+
+	/// Assign from another point.
+	Point3 operator=(const Point3 &o);
+};
+
+}  // namespace lili
+```
+
+### src/geometry/utils.hpp
+```
+/// Geometry helper functions.
+#pragma once
+
+namespace lili {
+
+/// Convert degrees to radians.
+inline float deg_to_rad(float degrees) {
+	return degrees * 3.14159265359f / 180.0f;
+}
+
+}  // namespace lili
+```
+
+### src/geometry/vec2.cpp
+```
+#include "geometry/vec2.hpp"
+#include <math.h>
+
+namespace lili {
+
+Vec2 Vec2::operator=(const Vec2 &o) {
+	x = o.x;
+	y = o.y;
+	return *this;
+}
+
+Vec2 Vec2::operator-(const Vec2 &o) const {
+	return { x - o.x, y - o.y };
+}
+
+Vec2 Vec2::operator-=(const Vec2 &o) {
+	x = x - o.x;
+	y = y - o.y;
+	return *this;
+}
+
+Vec2 Vec2::operator+(const Vec2 &o) const {
+	return { x + o.x, y + o.y };
+}
+
+Vec2 Vec2::operator+=(const Vec2 &o) {
+	x = x + o.x;
+	y = y + o.y;
+	return *this;
+}
+
+Vec2 Vec2::operator*(const float scalar) const {
+	return { x * scalar, y * scalar };
+}
+
+Vec2 Vec2::operator*=(const float scalar) {
+	x = x * scalar;
+	y = y * scalar;
+	return *this;
+}
+
+float Vec2::dot(const Vec2 &o) const {
+	return x * o.x + y * o.y;
+}
+
+float Vec2::cross(const Vec2 &o) const {
+	return x * o.y - y * o.x;
+}
+
+Vec2 Vec2::normalized() const {
+	float sq_len = x*x + y*y;
+	if (sq_len == 0.0f) {
+		return { 0.0f, 0.0f };
+	}
+	return *this * (1 / std::sqrt(sq_len));
+}
+
+float Vec2::length() const {
+	return std::sqrt(x * x + y * y);
+}
+
+}  // namespace lili
+```
+
+### src/geometry/vec2.hpp
+```
+/// 2D vector math type.
+#pragma once
+
+namespace lili {
+
+struct Vec2 {
+	float x, y;
+
+	/// Assign from another vector.
+	Vec2 operator=(const Vec2 &o);
+	/// Subtract another vector.
+	Vec2 operator-(const Vec2 &o) const;
+	/// Subtract another vector in place.
+	Vec2 operator-=(const Vec2 &o);
+	/// Add another vector.
+	Vec2 operator+(const Vec2 &o) const;
+	/// Add another vector in place.
+	Vec2 operator+=(const Vec2 &o);
+	/// Multiply by a scalar.
+	Vec2 operator*(const float scalar) const;
+	/// Multiply by a scalar in place.
+	Vec2 operator*=(const float scalar);
+
+	/// Dot product with another vector.
+	float dot(const Vec2 &o) const;
+	/// 2D cross product (returns scalar).
+	float cross(const Vec2 &o) const;
+	/// Return a normalized copy of this vector.
+	Vec2 normalized() const;
+	/// Linearly interpolate toward another vector.
+	Vec2 lerp(const Vec2 &o) const;
+	/// Get the vector length.
+	float length() const;
+};
+
+}  // namespace lili
+```
+
+### src/geometry/vec3.cpp
+```
+#include "geometry/vec3.hpp"
+#include <math.h>
+
+namespace lili {
+
+Vec3 Vec3::operator=(const Vec3 &o) {
+	x = o.x;
+	y = o.y;
+	z = o.z;
+	return *this;
+}
+
+Vec3 Vec3::operator-(const Vec3 &o) const {
+	return { x - o.x, y - o.y, z - o.z };
+}
+
+Vec3 Vec3::operator-=(const Vec3 &o) {
+	x = x - o.x;
+	y = y - o.y;
+	z = z - o.z;
+	return *this;
+}
+
+Vec3 Vec3::operator+(const Vec3 &o) const {
+	return { x + o.x, y + o.y, z + o.z };
+}
+
+Vec3 Vec3::operator+=(const Vec3 &o) {
+	x = x + o.x;
+	y = y + o.y;
+	z = z + o.z;
+	return *this;
+}
+
+Vec3 Vec3::operator*(const float scalar) const {
+	return { x * scalar, y * scalar, z * scalar };
+}
+
+Vec3 Vec3::operator*=(const float scalar) {
+	x = x * scalar;
+	y = y * scalar;
+	z = z * scalar;
+	return *this;
+}
+
+float Vec3::dot(const Vec3 &o) const {
+	return x * o.x + y * o.y + z * o.z;
+}
+
+Vec3 Vec3::cross(const Vec3 &o) const {
+	return {
+		y * o.z - z * o.y,
+		z * o.x - x * o.z,
+		x * o.y - y * o.x
+	};
+}
+
+Vec3 Vec3::normalized() const {
+	float sq_len = x*x + y*y + z*z;
+	if (sq_len == 0.0f) {
+		return { 0.0f, 0.0f, 0.0f };
+	}
+	return *this * (1 / std::sqrt(sq_len));
+}
+
+Vec3 Vec3::lerp(const Vec3 &o, float t) const {
+	return {
+		std::lerp(x, o.x, t),
+		std::lerp(y, o.y, t),
+		std::lerp(z, o.z, t)
+	};
+}
+
+float Vec3::length() const {
+	return std::sqrt(x * x + y * y + z * z);
+}
+
+}  // namespace lili
+```
+
+### src/geometry/vec3.hpp
+```
+/// 3D vector math type.
+#pragma once
+
+namespace lili {
+
+struct Vec3 {
+	float x, y, z;
+
+	/// Assign from another vector.
+	Vec3 operator=(const Vec3 &o);
+	/// Subtract another vector.
+	Vec3 operator-(const Vec3 &o) const;
+	/// Subtract another vector in place.
+	Vec3 operator-=(const Vec3 &o);
+	/// Add another vector.
+	Vec3 operator+(const Vec3 &o) const;
+	/// Add another vector in place.
+	Vec3 operator+=(const Vec3 &o);
+	/// Multiply by a scalar.
+	Vec3 operator*(const float scalar) const;
+	/// Multiply by a scalar in place.
+	Vec3 operator*=(const float scalar);
+
+	/// Dot product with another vector.
+	float dot(const Vec3 &o) const;
+	/// Cross product with another vector.
+	Vec3 cross(const Vec3 &o) const;
+	/// Return a normalized copy of this vector.
+	Vec3 normalized() const;
+	/// Linearly interpolate toward another vector.
+	Vec3 lerp(const Vec3 &o, float t) const;
+	/// Get the vector length.
+	float length() const;
+};
+
+}  // namespace lili
+```
+
+### src/geometry/vec4.cpp
+```
+#include "geometry/vec4.hpp"
+#include <math.h>
+
+namespace lili {
+
+Vec4 Vec4::operator=(const Vec4 &o) {
+	x = o.x;
+	y = o.y;
+	z = o.z;
+	w = o.w;
+	return *this;
+}
+
+Vec4 Vec4::operator-(const Vec4 &o) const {
+	return { x - o.x, y - o.y, z - o.z, w - o.w };
+}
+
+Vec4 Vec4::operator-=(const Vec4 &o) {
+	x = x - o.x;
+	y = y - o.y;
+	z = z - o.z;
+	w = w - o.w;
+	return *this;
+}
+
+Vec4 Vec4::operator+(const Vec4 &o) const {
+	return { x + o.x, y + o.y, z + o.z, w + o.w };
+}
+
+Vec4 Vec4::operator+=(const Vec4 &o) {
+	x = x + o.x;
+	y = y + o.y;
+	z = z + o.z;
+	w = w + o.w;
+	return *this;
+}
+
+Vec4 Vec4::operator*(const float scalar) const {
+	return { x * scalar, y * scalar, z * scalar, w * scalar };
+}
+
+Vec4 Vec4::operator*=(const float scalar) {
+	x = x * scalar;
+	y = y * scalar;
+	z = z * scalar;
+	w = w * scalar;
+	return *this;
+}
+
+float Vec4::dot(const Vec4 &o) const {
+	return x * o.x + y * o.y + z * o.z + w * o.w;
+}
+
+Vec4 Vec4::cross(const Vec4 &o) const {
+	return {
+		y * o.z - z * o.y,
+		z * o.x - x * o.z,
+		x * o.y - y * o.x,
+		0.0f
+	};
+}
+
+Vec4 Vec4::normalized() const {
+	float sq_len = x*x + y*y + z*z + w*w;
+	if (sq_len == 0.0f) {
+		return { 0.0f, 0.0f, 0.0f, 0.0f };
+	}
+	return *this * (1 / std::sqrt(sq_len));
+}
+
+float Vec4::length() const {
+	return std::sqrt(x * x + y * y + z * z + w * w);
+}
+
+}  // namespace lili
+```
+
+### src/geometry/vec4.hpp
+```
+/// 4D vector math type.
+#pragma once
+
+namespace lili {
+
+struct Vec4 {
+	float x, y, z, w;
+
+	/// Assign from another vector.
+	Vec4 operator=(const Vec4 &o);
+	/// Subtract another vector.
+	Vec4 operator-(const Vec4 &o) const;
+	/// Subtract another vector in place.
+	Vec4 operator-=(const Vec4 &o);
+	/// Add another vector.
+	Vec4 operator+(const Vec4 &o) const;
+	/// Add another vector in place.
+	Vec4 operator+=(const Vec4 &o);
+	/// Multiply by a scalar.
+	Vec4 operator*(const float scalar) const;
+	/// Multiply by a scalar in place.
+	Vec4 operator*=(const float scalar);
+
+	/// Dot product with another vector.
+	float dot(const Vec4 &o) const;
+	/// Cross product with another vector (XYZ components).
+	Vec4 cross(const Vec4 &o) const;
+	/// Return a normalized copy of this vector.
+	Vec4 normalized() const;
+	/// Get the vector length.
+	float length() const;
+};
+
+}  // namespace lili
+```
+
+### src/meshing/ao_data.hpp
+```
+/// Ambient occlusion lookup data for voxel meshing.
+#pragma once
+
+namespace lili {
+
+inline constexpr int ao_neighbors[6][4][3][3]{
+	// Top +Y (side axes X and Z)
+	{
+		{ { -1, 0, 0 }, { 0, 0, -1 }, { -1, 0, -1 } },
+		{ {  1, 0, 0 }, { 0, 0, -1 }, {  1, 0, -1 } },
+		{ {  1, 0, 0 }, { 0, 0,  1 }, {  1, 0,  1 } },
+		{ { -1, 0, 0 }, { 0, 0,  1 }, { -1, 0,  1 } },
+	},
+	// Bottom -Y
+	{
+		{ { -1, 0, 0 }, { 0, 0,  1 }, { -1, 0,  1 } },
+		{ {  1, 0, 0 }, { 0, 0,  1 }, {  1, 0,  1 } },
+		{ {  1, 0, 0 }, { 0, 0, -1 }, {  1, 0, -1 } },
+		{ { -1, 0, 0 }, { 0, 0, -1 }, { -1, 0, -1 } },
+	},
+	// Right +X (side axes Y and Z)
+	{
+		{ { 0,  1, 0 }, { 0, 0,  1 }, { 0,  1,  1 } },
+		{ { 0,  1, 0 }, { 0, 0, -1 }, { 0,  1, -1 } },
+		{ { 0, -1, 0 }, { 0, 0, -1 }, { 0, -1, -1 } },
+		{ { 0, -1, 0 }, { 0, 0,  1 }, { 0, -1,  1 } },
+	},
+	// Left -X
+	{
+		{ { 0,  1, 0 }, { 0, 0, -1 }, { 0,  1, -1 } },
+		{ { 0,  1, 0 }, { 0, 0,  1 }, { 0,  1,  1 } },
+		{ { 0, -1, 0 }, { 0, 0,  1 }, { 0, -1,  1 } },
+		{ { 0, -1, 0 }, { 0, 0, -1 }, { 0, -1, -1 } },
+	},
+	// Front +Z (side axes X and Y)
+	{
+		{ { -1, 0, 0 }, { 0,  1, 0 }, { -1,  1, 0 } },
+		{ {  1, 0, 0 }, { 0,  1, 0 }, {  1,  1, 0 } },
+		{ {  1, 0, 0 }, { 0, -1, 0 }, {  1, -1, 0 } },
+		{ { -1, 0, 0 }, { 0, -1, 0 }, { -1, -1, 0 } },
+	},
+	// Front -Z
+	{
+		{ { -1, 0, 0 }, { 0,  1, 0 }, { -1,  1, 0 } },
+		{ {  1, 0, 0 }, { 0,  1, 0 }, {  1,  1, 0 } },
+		{ {  1, 0, 0 }, { 0, -1, 0 }, {  1, -1, 0 } },
+		{ { -1, 0, 0 }, { 0, -1, 0 }, { -1, -1, 0 } },
+	},
+};
+
+}  // namespace lili
+```
+
+### src/meshing/ao_helper.cpp
+```
+#include "meshing/ao_helper.hpp"
+#include "meshing/ao_data.hpp"
+
+namespace lili {
+
+bool is_solid(const ChunkNeighborhood &neighborhood, int x, int y, int z) {
+	return neighborhood.get_block(x, y, z) != 0;
+}
+
+uint8_t vertex_ao(bool s1, bool s2, bool corner) {
+	if (s1 && s2) return 3;
+	return (uint8_t)s1 + (uint8_t)s2 + (uint8_t)corner;
+}
+
+uint8_t sample_vertex_ao(
+	const ChunkNeighborhood &neighborhood,
+	int fx, int fy, int fz, int face, int corner
+) {
+	const int *s1 = ao_neighbors[face][corner][0];
+	const int *s2 = ao_neighbors[face][corner][1];
+	const int *c = ao_neighbors[face][corner][2];
+
+	return vertex_ao(
+		is_solid(
+			neighborhood,
+			fx + s1[0], fy + s1[1], fz + s1[2]
+		),
+		is_solid(
+			neighborhood,
+			fx + s2[0], fy + s2[1], fz + s2[2]
+		),
+		is_solid(
+			neighborhood,
+			fx + c[0], fy + c[1], fz + c[2]
+		)
+	);
+}
+
+void sample_face_ao(
+	const ChunkNeighborhood &neighborhood,
+	int fx, int fy, int fz, int face, uint8_t ao[4]
+) {
+	for (int corner = 0; corner < 4; ++corner)
+		ao[corner] = sample_vertex_ao(
+			neighborhood, fx, fy, fz, face, corner
+		);
+}
+
+}  // namespace lili
+```
+
+### src/meshing/ao_helper.hpp
+```
+/// Helpers for ambient occlusion calculations during meshing.
+#pragma once
+
+#include <cstdint>
+#include "meshing/chunk_neighborhood.hpp"
+
+namespace lili {
+
+bool is_solid(const ChunkNeighborhood &neighborhood, int x, int y, int z);
+uint8_t vertex_ao(bool s1, bool s2, bool corner);
+uint8_t sample_vertex_ao(
+	const ChunkNeighborhood &neighborhood,
+	int fx, int fy, int fz, int face, int corner
+);
+void sample_face_ao(
+	const ChunkNeighborhood &neighborhood,
+	int fx, int fy, int fz, int face, uint8_t ao[4]
+);
+
+}  // namespace lili
+```
+
+### src/meshing/chunk_neighborhood.cpp
+```
+#include "meshing/chunk_neighborhood.hpp"
+
+namespace lili {
+
+uint16_t ChunkNeighborhood::get_block(int x, int y, int z) const {
+	int cx = 1;
+	int cy = 1;
+	int cz = 1;
+
+	if (x < 0) {
+		cx = 0;
+		x += Chunk::SIZE;
+	} else if (x >= Chunk::SIZE) {
+		cx = 2;
+		x -= Chunk::SIZE;
+	}
+	if (y < 0) {
+		cy = 0;
+		y += Chunk::SIZE;
+	} else if (y >= Chunk::SIZE) {
+		cy = 2;
+		y -= Chunk::SIZE;
+	}
+	if (z < 0) {
+		cz = 0;
+		z += Chunk::SIZE;
+	} else if (z >= Chunk::SIZE) {
+		cz = 2;
+		z -= Chunk::SIZE;
+	}
+
+	const Chunk *neighbor = chunks[cx][cy][cz];
+	if (!neighbor)
+		return 0;
+
+	return neighbor->get_block(x, y, z);
+}
+
+}  // namespace lili
+```
+
+### src/meshing/chunk_neighborhood.hpp
+```
+/// Neighborhood data used when meshing chunks.
+#pragma once
+
+#include <cstdint>
+#include "world/chunk.hpp"
+
+namespace lili {
+
+struct ChunkNeighborhood {
+	const Chunk *chunks[3][3][3];
+	
+	/// Get a block from neighborhood space.
+	uint16_t get_block(int x, int y, int z) const;
+};
+
+}  // namespace lili
+```
+
+### src/meshing/mesher.cpp
+```
+#include "meshing/mesher.hpp"
+
+#include <stdexcept>
+
+#include "meshing/voxel_data.hpp"
+#include "world/block.hpp"
+#include "meshing/ao_helper.hpp"
+
+namespace lili {
+
+float AtlasProperties::get_u() const { return 1.0f / cols; }
+float AtlasProperties::get_v() const { return 1.0f / rows; }
+
+uint16_t AtlasProperties::get_index_from_pos(Vec2 pos) {
+	if (pos.x > cols - 1)
+		throw std::runtime_error("x is out of atlas map");
+	if (pos.y > rows - 1)
+		throw std::runtime_error("y is out of atlas map");
+	return pos.x + pos.y * cols;
+}
+
+static uint16_t get_face_texture(const BlockDefinition &def, int face) {
+	switch (face) {
+		case 0: return def.top_texture;
+		case 1: return def.bottom_texture;
+		case 2: return def.right_texture;
+		case 3: return def.left_texture;
+		case 4: return def.front_texture;
+		case 5: return def.back_texture;
+		default: return 0;
+	}
+}
+
+ChunkMesher::ChunkMesher(
+	const ChunkNeighborhood &neighborhood, AtlasProperties atlas_props
+) : neighborhood(neighborhood), atlas_props(atlas_props) {}
+
+MeshData ChunkMesher::generate_mesh() {
+	for (int x = 0; x < Chunk::SIZE; ++x)
+		for (int y = 0; y < Chunk::SIZE; ++y)
+			for (int z = 0; z < Chunk::SIZE; ++z)
+				process_block(x, y, z);
+	return mesh;
+}
+
+void ChunkMesher::process_block(int x, int y, int z) {
+	if (neighborhood.get_block(x, y, z) == 0)
+		return;
+	for (int face = 0; face < 6; ++face)
+		emit_face(x, y, z, face);
+}
+
+void ChunkMesher::emit_face(int x, int y, int z, int face) {
+	int cx = x + face_normals[face][0];
+	int cy = y + face_normals[face][1];
+	int cz = z + face_normals[face][2];
+
+	if (neighborhood.get_block(cx, cy, cz) != 0)
+		return;
+
+	const BlockDefinition &def = BlockRegistry::get().get_block(
+		static_cast<uint8_t>(neighborhood.get_block(x, y, z))
+	);
+
+	uint16_t tex_idx = get_face_texture(def, face);
+	float u_off = (tex_idx % atlas_props.cols) * atlas_props.get_u();
+	float v_off = (int)(tex_idx / atlas_props.cols) * atlas_props.get_v();
+	float mat_id = static_cast<float>(def.material_id);
+	float nx = static_cast<float>(face_normals[face][0]);
+	float ny = static_cast<float>(face_normals[face][1]);
+	float nz = static_cast<float>(face_normals[face][2]);
+
+	uint8_t ao[4];
+	sample_face_ao(neighborhood, cx, cy, cz, face, ao);
+
+	uint32_t start = static_cast<uint32_t>(mesh.vertices.size());
+
+	for (int v = 0; v < 4; ++v) {
+		mesh.vertices.push_back({
+			x + face_vertices[face][v][0],
+            y + face_vertices[face][v][1],
+            z + face_vertices[face][v][2],
+            nx, ny, nz,
+            u_off + face_uvs[v][0] * atlas_props.get_u(),
+            v_off + face_uvs[v][1] * atlas_props.get_v(),
+            mat_id,
+            static_cast<float>(ao[v])
+		});
+	}
+	emit_indices(start, ao);
+}
+
+void ChunkMesher::emit_indices(uint32_t start, const uint8_t ao[4]) {
+	bool flip = (ao[0] + ao[2]) > (ao[1] + ao[3]);
+
+	if (flip) {
+		mesh.indices.insert(mesh.indices.end(), {
+			static_cast<uint16_t>(start),
+			static_cast<uint16_t>(start + 1),
+			static_cast<uint16_t>(start + 3),
+			static_cast<uint16_t>(start + 1),
+			static_cast<uint16_t>(start + 2),
+			static_cast<uint16_t>(start + 3),
+		});
+	} else {
+		mesh.indices.insert(mesh.indices.end(), {
+			static_cast<uint16_t>(start),
+			static_cast<uint16_t>(start + 1),
+			static_cast<uint16_t>(start + 2),
+			static_cast<uint16_t>(start + 2),
+			static_cast<uint16_t>(start + 3),
+			static_cast<uint16_t>(start),
+		});
+	}
+}
+
+}  // namespace lili
+```
+
+### src/meshing/mesher.hpp
+```
+/// Chunk mesher interface.
+#pragma once
+
+#include "meshing/primitives.hpp"
+#include "meshing/chunk_neighborhood.hpp"
+#include "geometry/vec2.hpp"
+
+namespace lili {
+
+struct AtlasProperties {
+	int cols;
+	int rows;
+
+	/// Get the normalized U size of a tile.
+	float get_u() const;
+	/// Get the normalized V size of a tile.
+	float get_v() const;
+	
+	/// Convert atlas grid position to a tile index.
+	uint16_t get_index_from_pos(Vec2 pos);
+};
+
+class ChunkMesher {
+public:
+	/// Create a mesher for a chunk neighborhood.
+	ChunkMesher(const ChunkNeighborhood &neighborhood, AtlasProperties atlas_props);
+	/// Generate mesh data for the neighborhood.
+	MeshData generate_mesh();
+
+private:
+	const ChunkNeighborhood neighborhood;
+	AtlasProperties atlas_props;
+	MeshData mesh;
+
+	void process_block(int x, int y, int z);
+	void emit_face(int x, int y, int z, int face);
+	void emit_indices(uint32_t start, const uint8_t ao[4]);
+};
+
+}  // namespace lili
+```
+
+### src/meshing/primitives.cpp
+```
+#include "meshing/primitives.hpp"
+
+namespace lili {
+
+MeshData create_unit_quad() {
+	MeshData quad;
+
+	quad.vertices = {
+		(Vertex){
+			.x = -0.5f, .y = -0.5f, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = 0.0f, .v = 0.0f,
+			.material_id = 0.0f
+		},
+		(Vertex){
+			.x = 0.5f, .y = -0.5f, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = 1.0f, .v = 0.0f,
+			.material_id = 0.0f
+		},
+		(Vertex){
+			.x = 0.5f, .y = 0.5f, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = 1.0f, .v = 1.0f,
+			.material_id = 0.0f
+		},
+		(Vertex){
+			.x = -0.5f, .y = 0.5f, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = 0.0f, .v = 1.0f,
+			.material_id = 0.0f
+		}
+	};
+	quad.indices = {
+		0, 1, 2,
+		2, 3, 0
+	};
+	return quad;
+}
+
+}  // namespace lili
+```
+
+### src/meshing/primitives.hpp
+```
+/// Voxel face primitives for mesh generation.
+#pragma once
+
+#include <vector>
+#include <cstdint>
+
+namespace lili {
+
+struct Vertex {
+	float x, y, z;
+	float nx, ny, nz;
+	float u, v;
+	float material_id;
+	float ao;
+};
+
+struct MeshData {
+	std::vector<Vertex> vertices;
+	std::vector<uint32_t> indices;
+};
+
+MeshData create_unit_quad();
+
+}  // namespace lili
+```
+
+### src/meshing/voxel_data.hpp
+```
+/// Voxel mesh data structures used by the mesher.
+#pragma once
+
+namespace lili {
+
+inline constexpr int face_checks[6][3]{
+	{  0,  1,  0 },  // Top
+	{  0, -1,  0 },  // Bottom
+	{  1,  0,  0 },  // Right
+	{ -1,  0,  0 },  // Left
+	{  0,  0,  1 },  // Front
+	{  0,  0, -1 }   // Back
+};
+
+inline constexpr float face_normals[6][3]{
+	{  0.0f,  1.0f,  0.0f },  // Top
+	{  0.0f, -1.0f,  0.0f },  // Bottom
+	{  1.0f,  0.0f,  0.0f },  // Right
+	{ -1.0f,  0.0f,  0.0f },  // Left
+	{  0.0f,  0.0f,  1.0f },  // Front
+	{  0.0f,  0.0f, -1.0f },  // Back
+};
+
+inline constexpr float face_uvs[4][2]{
+	{ 0.0f, 0.0f },  // Top-left
+	{ 1.0f, 0.0f },  // Top-right
+	{ 1.0f, 1.0f },  // Bottom-right
+	{ 0.0f, 1.0f }   // Bottom-left
+};
+
+inline constexpr float face_vertices[6][4][3]{
+	// Top (+Y)
+	{
+		{ 0.0f, 1.0f, 0.0f },
+		{ 1.0f, 1.0f, 0.0f },
+		{ 1.0f, 1.0f, 1.0f },
+		{ 0.0f, 1.0f, 1.0f }
+	},
+	// Bottom (-Y)
+	{
+		{ 0.0f, 0.0f, 1.0f },
+		{ 1.0f, 0.0f, 1.0f },
+		{ 1.0f, 0.0f, 0.0f },
+		{ 0.0f, 0.0f, 0.0f }
+	},
+	// Right (+X)
+	{
+		{ 1.0f, 1.0f, 1.0f },
+		{ 1.0f, 1.0f, 0.0f },
+		{ 1.0f, 0.0f, 0.0f },
+		{ 1.0f, 0.0f, 1.0f }
+	},
+	// Left (-X)
+	{
+		{ 0.0f, 1.0f, 0.0f },
+		{ 0.0f, 1.0f, 1.0f },
+		{ 0.0f, 0.0f, 1.0f },
+		{ 0.0f, 0.0f, 0.0f }
+	},
+	// Front (+Z)
+	{
+		{ 0.0f, 1.0f, 1.0f },
+		{ 1.0f, 1.0f, 1.0f },
+		{ 1.0f, 0.0f, 1.0f },
+		{ 0.0f, 0.0f, 1.0f }
+	},
+	// Back (-Z)
+	{
+		{ 1.0f, 1.0f, 0.0f },
+		{ 0.0f, 1.0f, 0.0f },
+		{ 0.0f, 0.0f, 0.0f },
+		{ 1.0f, 0.0f, 0.0f }
+	},
+};
+
+}  // namespace lili
+```
+
+### src/physics/collision.cpp
+```
+#include "physics/collision.hpp"
+
+#include <cmath>
+#include "physics/world_interface.hpp"
+
+namespace lili {
+
+bool AABB::intersect(const AABB &other) const {
+	return (
+		(min.x <= other.max.x && max.x >= other.min.x) &&
+		(min.y <= other.max.y && max.y >= other.min.y) &&
+		(min.z <= other.max.z && max.z >= other.min.z)
+	);
+}
+
+bool check_voxel_collision(const AABB &box, const IVoxelWorld &world) {
+	float eps = 0.01f;
+
+	int x = std::floor(box.min.x + eps);
+	for (; x <= std::floor(box.max.x - eps); ++x) {
+
+		int y = std::floor(box.min.y + eps);
+		for (; y <= std::floor(box.max.y - eps); ++y) {
+
+			int z = std::floor(box.min.z + eps);
+			for (; z <= std::floor(box.max.z - eps); ++z) {
+				if (world.is_solid_at(x, y, z)) return true;
+			}
+		}
+	}
+	return false;
+}
+
+RaycastResult raycast_voxel(
+	const Vec3 &origin,
+	const Vec3 &dir,
+	float max_dist,
+	const IVoxelWorld &world
+) {
+	RaycastResult result;
+
+	int x = std::floor(origin.x);
+	int y = std::floor(origin.y);
+	int z = std::floor(origin.z);
+
+	int step_x = (dir.x > 0) - (dir.x < 0);
+	int step_y = (dir.y > 0) - (dir.y < 0);
+	int step_z = (dir.z > 0) - (dir.z < 0);
+
+	Vec3 t_delta{
+		std::numeric_limits<float>::infinity(),
+		std::numeric_limits<float>::infinity(),
+		std::numeric_limits<float>::infinity()
+	};
+	if (step_x != 0) t_delta.x = std::abs(1.0f / dir.x);
+	if (step_y != 0) t_delta.y = std::abs(1.0f / dir.y);
+	if (step_z != 0) t_delta.z = std::abs(1.0f / dir.z);
+
+	Vec3 t_max{
+		(origin.x - x) * t_delta.x,
+		(origin.y - y) * t_delta.y,
+		(origin.z - z) * t_delta.z
+	};
+	if (step_x > 0) t_max.x = (x + 1.0f - origin.x) * t_delta.x;
+	if (step_y > 0) t_max.y = (y + 1.0f - origin.y) * t_delta.y;
+	if (step_z > 0) t_max.z = (z + 1.0f - origin.z) * t_delta.z;
+
+	float distance = 0.0f;
+	int last_step = 0;  // X: 0 | Y: 1 | Z: 2
+
+	while (distance <= max_dist) {
+		if (world.is_solid_at(x, y, z)) {
+			result.hit = true;
+
+			result.hit_x = x;
+			result.hit_y = y;
+			result.hit_z = z;
+
+			result.adj_x = x;
+			result.adj_y = y;
+			result.adj_z = z;
+
+			if (last_step == 0) result.adj_x -= step_x;
+			else if (last_step == 1) result.adj_y -= step_y;
+			else if (last_step == 2) result.adj_z -= step_z;
+
+			return result;
+		}
+		if (t_max.x < t_max.y) {
+			if (t_max.x < t_max.z) {
+				x += step_x;
+				distance = t_max.x;
+				t_max.x += t_delta.x;
+				last_step = 0;
+			} else {
+				z += step_z;
+				distance = t_max.z;
+				t_max.z += t_delta.z;
+				last_step = 2;
+			}
+		} else {
+			if (t_max.y < t_max.z) {
+				y += step_y;
+				distance = t_max.y;
+				t_max.y += t_delta.y;
+				last_step = 1;
+			} else {
+				z += step_z;
+				distance = t_max.z;
+				t_max.z += t_delta.z;
+				last_step = 2;
+			}
+		}
+	}
+	return result;
+}
+
+}  // namespace lili
+```
+
+### src/physics/collision.hpp
+```
+/// Collision helpers for voxel maps.
+#pragma once
+
+#include "geometry/vec3.hpp"
+
+namespace lili {
+
+class IVoxelWorld;
+
+struct AABB {
+	Vec3 min;
+	Vec3 max;
+
+	/// Check intersection with another AABB.
+	bool intersect(const AABB &other) const;
+};
+
+struct RaycastResult {
+	bool hit = false;
+	int hit_x, hit_y, hit_z;
+	int adj_x, adj_y, adj_z;
+};
+
+bool check_voxel_collision(const AABB &box, const IVoxelWorld &world);
+RaycastResult raycast_voxel(
+	const Vec3 &origin,
+	const Vec3 &dir,
+	float max_dist,
+	const IVoxelWorld &world
+);
+
+}  // namespace lili
+```
+
+### src/physics/world_interface.hpp
+```
+/// Physics interface for voxel worlds.
+#pragma once
+
+namespace lili {
+
+class IVoxelWorld {
+public:
+	/// Destroy the voxel world interface.
+	virtual ~IVoxelWorld() = default;
+
+	/// Return whether a voxel is solid at the given coordinates.
+	virtual bool is_solid_at(int x, int y, int z) const = 0;
+};
+
+}  // namespace lili
+```
+
+### src/render/renderer.cpp
+```
+#include <string>
+#include <stdexcept>
+
+#include "render/renderer.hpp"
+#include "render/scene/model.hpp"
+
+#include "geometry/mat4x4.hpp"
+#include "geometry/utils.hpp"
+
+namespace lili {
+
+Renderer::Renderer() {
+	device = nullptr;
+	depth_texture = nullptr;
+	current_swapchain_texture = nullptr;
+	current_cmd_buffer = nullptr;
+	world_shader = nullptr;
+	ui_shader = nullptr;
+	world_pipeline = nullptr;
+	ui_pipeline = nullptr;
+	world_pass = nullptr;
+	ui_pass = nullptr;
+	directional_light = {
+		{ 0.5f, -1.0f, 0.3f, 0.0f },
+		{ 1.0f, 0.9f, 0.8f, 0.6f },
+		{ 0.3f, 0.3f, 0.3f, 1.0f }
+	};
+}
+
+Renderer::~Renderer() {
+	SDL_WaitForGPUIdle(device);
+
+	if (ui_pass) delete ui_pass;
+	if (world_pass) delete world_pass;
+	if (ui_pipeline) delete ui_pipeline;
+	if (world_pipeline) delete world_pipeline;
+	if (ui_shader) delete ui_shader;
+	if (world_shader) delete world_shader;
+	if (depth_texture) SDL_ReleaseGPUTexture(device, depth_texture);
+	if (device) SDL_DestroyGPUDevice(device);
+}
+
+void Renderer::set_window(Window *window) {
+	this->window = window;
+	init_device();
+	init_depth_texture();
+	init_shaders();
+	init_pipelines();
+	init_passes();
+}
+
+void Renderer::on_window_resized(int new_width, int new_height) {
+	SDL_ReleaseGPUTexture(device, depth_texture);
+
+	SDL_GPUTextureCreateInfo depth_info{
+		.type = SDL_GPU_TEXTURETYPE_2D,
+		.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+		.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+		.width = static_cast<uint32_t>(new_width),
+		.height = static_cast<uint32_t>(new_height),
+		.layer_count_or_depth = 1,
+		.num_levels = 1
+	};
+	depth_texture = SDL_CreateGPUTexture(device, &depth_info);
+	if (!depth_texture)
+		throw std::runtime_error("Failed to create depth texture");
+}
+
+SDL_GPUDevice *Renderer::get_device() const {
+	return device;
+}
+
+void Renderer::set_directional_light(Vec3 direction, Vec4 color, Vec4 ambient) {
+	directional_light = {
+		{ direction.x, direction.y, direction.z, 0.0f },
+		color,
+		ambient
+	};
+}
+
+bool Renderer::begin_frame(Camera camera) {
+	current_cmd_buffer = SDL_AcquireGPUCommandBuffer(device);
+	if (!current_cmd_buffer)
+		throw std::runtime_error("Failed to acquire command buffer!");
+
+	uint32_t width = 0;
+	uint32_t height = 0;
+	bool success = SDL_WaitAndAcquireGPUSwapchainTexture(
+		current_cmd_buffer,
+		window->get_sdl_window(),
+		&current_swapchain_texture,
+		&width,
+		&height
+	);
+	if (!success)
+		throw std::runtime_error("Failed to acquire swapchain texture!");
+	if (!current_swapchain_texture) {
+		SDL_SubmitGPUCommandBuffer(current_cmd_buffer);
+		current_cmd_buffer = nullptr;
+		return false;
+	}
+
+	int win_w, win_h;
+	SDL_GetWindowSize(window->get_sdl_window(), &win_w, &win_h);
+
+	Mat4 view = camera.get_view_matrix();
+	Mat4 proj = Mat4::perspective(
+		deg_to_rad(camera.fov_y),
+		(float)win_w / (float)win_h,
+		camera.near_dist,
+		camera.far_dist
+	);
+	projection_view_3d = proj * view;
+	projection_2d = Mat4::orthographic(
+		0.0f, static_cast<float>(win_w),
+		static_cast<float>(win_h), 0.0f,
+		-1.0f, 1.0f
+	);
+	return true;
+}
+
+void Renderer::submit(const Model &model, Mat4 transform, RenderLayer layer) {
+	if (layer == RenderLayer::World3D) {
+		world_queue.push_back({ model, transform });
+	} else if (layer == RenderLayer::UI2D) {
+		ui_queue.push_back({ model, transform });
+	}
+}
+
+void Renderer::end_frame() {
+	SDL_GPUColorTargetInfo color_target_info{
+		.texture = current_swapchain_texture,
+		.clear_color = SDL_FColor{ 0.5f, 0.8f, 1.0f, 1.0f },
+		.load_op = SDL_GPU_LOADOP_CLEAR,
+		.store_op = SDL_GPU_STOREOP_STORE,
+	};
+	SDL_GPUDepthStencilTargetInfo depth_target_info{
+		.texture = depth_texture,
+		.clear_depth = 1.0f,
+		.load_op = SDL_GPU_LOADOP_CLEAR,
+		.store_op = SDL_GPU_STOREOP_DONT_CARE,
+		.stencil_load_op = SDL_GPU_LOADOP_DONT_CARE,
+		.stencil_store_op = SDL_GPU_STOREOP_DONT_CARE,
+		.cycle = false,
+		.clear_stencil = 0
+	};
+	SDL_GPURenderPass *main_pass = SDL_BeginGPURenderPass(
+		current_cmd_buffer,
+		&color_target_info,
+		1,
+		&depth_target_info
+	);
+
+	world_pass->render(
+		main_pass,
+		current_cmd_buffer,
+		projection_view_3d,
+		directional_light,
+		world_queue
+	);
+	ui_pass->render(
+		main_pass, current_cmd_buffer, projection_2d, ui_queue
+	);
+
+	world_queue.clear();
+	ui_queue.clear();
+	SDL_EndGPURenderPass(main_pass);
+	SDL_SubmitGPUCommandBuffer(current_cmd_buffer);
+	current_cmd_buffer = nullptr;
+}
+
+void Renderer::init_device() {
+	device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_SPIRV, true, nullptr);
+	if (!device) {
+		throw std::runtime_error(
+			"Device creation failed!\n-> " + std::string(SDL_GetError())
+		);
+	}
+	if (!SDL_ClaimWindowForGPUDevice(device, window->get_sdl_window())) {
+		throw std::runtime_error(
+			"SDL_ClaimWindowForGPUDevice() failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+	if (!SDL_SetGPUSwapchainParameters(
+		device,
+		window->get_sdl_window(),
+		SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+		SDL_GPU_PRESENTMODE_MAILBOX
+	)) {
+		SDL_SetGPUSwapchainParameters(
+			device,
+			window->get_sdl_window(),
+			SDL_GPU_SWAPCHAINCOMPOSITION_SDR,
+			SDL_GPU_PRESENTMODE_IMMEDIATE
+		);
+	}
+}
+
+void Renderer::init_depth_texture() {
+	int win_w, win_h;
+	SDL_GetWindowSize(window->get_sdl_window(), &win_w, &win_h);
+	SDL_GPUTextureCreateInfo depth_info{
+		.type = SDL_GPU_TEXTURETYPE_2D,
+		.format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+		.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET,
+		.width = static_cast<uint32_t>(win_w),
+		.height = static_cast<uint32_t>(win_h),
+		.layer_count_or_depth = 1,
+		.num_levels = 1,
+		.sample_count = SDL_GPU_SAMPLECOUNT_1,
+		.props = 0
+	};
+	depth_texture = SDL_CreateGPUTexture(device, &depth_info);
+	if (!depth_texture) {
+		throw std::runtime_error(
+			"Depth texture creation failed!\n-> " + std::string(SDL_GetError())
+		);
+	}
+}
+
+void Renderer::init_shaders() {
+	world_shader = new Shader(
+		device, "shader/world.vert.spv", "shader/world.frag.spv",
+		(ShaderInfo){
+			.num_uniform_buffers = 1
+		},
+		(ShaderInfo){
+			.num_samplers = 1,
+			.num_storage_buffers = 1,
+			.num_uniform_buffers = 1
+		}
+	);
+	ui_shader = new Shader(
+		device, "shader/ui.vert.spv", "shader/ui.frag.spv",
+		(ShaderInfo){
+			.num_uniform_buffers = 1
+		},
+		(ShaderInfo){
+			.num_samplers = 1,
+			.num_storage_buffers = 1
+		}
+	);
+}
+
+void Renderer::init_pipelines() {
+	world_pipeline = new WorldPipeline(
+		device, window->get_sdl_window(), world_shader
+	);
+	ui_pipeline = new UIPipeline(
+		device, window->get_sdl_window(), ui_shader
+	);
+}
+
+void Renderer::init_passes() {
+	world_pass = new WorldPass(device, world_pipeline->get_sdl_pipeline());
+	ui_pass = new UIPass(device, ui_pipeline->get_sdl_pipeline());
+}
+
+}  // namespace lili
+```
+
+### src/render/renderer.hpp
+```
+/// Renderer interface for world and UI passes.
+#pragma once
+
+#include <SDL3/SDL.h>
+
+#include "core/window.hpp"
+
+#include "render/core/shader.hpp"
+
+#include "render/scene/camera.hpp"
+#include "render/scene/model.hpp"
+
+#include "render/passes/pass_types.hpp"
+#include "render/passes/world_pass.hpp"
+#include "render/passes/ui_pass.hpp"
+
+#include "render/pipelines/world_pipeline.hpp"
+#include "render/pipelines/ui_pipeline.hpp"
+
+namespace lili {
+
+class Renderer {
+public:
+	/// Create a renderer.
+	Renderer();
+	/// Destroy renderer resources.
+	~Renderer();
+
+	/// Bind a window to the renderer.
+	void set_window(Window *window);
+	/// Resize swapchain resources on window resize.
+	void on_window_resized(int new_width, int new_height);
+
+	/// Get the underlying GPU device.
+	SDL_GPUDevice *get_device() const;
+
+	/// Set the scene directional light.
+	void set_directional_light(Vec3 direction, Vec4 color, Vec4 ambient);
+
+	/// Begin a new frame with the given camera.
+	bool begin_frame(Camera camera);
+	/// Submit a draw call to the renderer queue.
+	void submit(const Model &model, Mat4 transform, RenderLayer layer);
+	/// End the current frame and present.
+	void end_frame();
+
+private:
+	Window *window;
+	SDL_GPUDevice *device;
+
+	SDL_GPUTexture *depth_texture;
+
+	SDL_GPUTexture *current_swapchain_texture;
+	SDL_GPUCommandBuffer *current_cmd_buffer;
+
+	Shader *world_shader;
+	Shader *ui_shader;
+
+	WorldPipeline *world_pipeline;
+	UIPipeline *ui_pipeline;
+
+	WorldPass *world_pass;
+	UIPass *ui_pass;
+
+	std::vector<DrawCommand> world_queue;
+	std::vector<DrawCommand> ui_queue;
+
+	Mat4 projection_view_3d;
+	Mat4 projection_2d;
+	DirectionalLightGPU directional_light;
+
+	void init_device();
+	void init_depth_texture();
+	void init_shaders();
+	void init_pipelines();
+	void init_passes();
+};
+
+}  // namespace lili
+```
+
+### src/runtime/world_runtime.cpp
+```
+#include "runtime/world_runtime.hpp"
+
+#include "world/map_manager.hpp"
+#include "meshing/mesher.hpp"
+
+namespace lili {
+
+static ChunkNeighborhood build_chunk_neighborhood(
+	const Map &map, int chunk_x, int chunk_y, int chunk_z
+) {
+	ChunkNeighborhood neighborhood{};
+	for (int dx = -1; dx <= 1; ++dx) {
+		for (int dy = -1; dy <= 1; ++dy) {
+			for (int dz = -1; dz <= 1; ++dz) {
+				const uint64_t key = map.get_chunk_key(
+					chunk_x + dx, chunk_y + dy, chunk_z + dz
+				);
+				auto it = map.chunks.find(key);
+				neighborhood.chunks[dx + 1][dy + 1][dz + 1] =
+					(it != map.chunks.end()) ? &it->second : nullptr;
+			}
+		}
+	}
+	return neighborhood;
+}
+
+WorldRuntime::WorldRuntime() {
+	renderer = nullptr;
+	albedo_map = nullptr;
+	world_atlas_props = { .cols = 1, .rows = 1 };
+	world_material = std::make_unique<Material>();
+	map = {};
+}
+
+void WorldRuntime::set_atlas_map(
+	Renderer *renderer, const std::string &file_path, int n_cols, int n_rows
+) {
+	this->renderer = renderer;
+	if (!world_material)
+		world_material = std::make_unique<Material>();
+	albedo_map = std::make_unique<Texture>(
+		renderer->get_device(), file_path
+	);
+	world_atlas_props.cols = n_cols;
+	world_atlas_props.rows = n_rows;
+	world_material->albedo_map = albedo_map.get();
+}
+
+void WorldRuntime::load_map(const std::string &map_path) {
+	map = lili::load_map(map_path);
+	load_chunks();
+}
+
+void WorldRuntime::save_map(const std::string &file_name) {
+	lili::save_map(file_name, map);
+}
+
+void WorldRuntime::draw_map(const Camera &camera, float aspect_ratio) {
+	lili::Frustum frustum = camera.get_frustum(aspect_ratio);
+	for (const auto &data : chunk_models) {
+		if (!frustum.contains(data.second.bounds))
+			continue;
+		renderer->submit(
+			*data.second.model,
+			data.second.transform,
+			RenderLayer::World3D
+		);
+	}
+}
+
+void WorldRuntime::clear_map() {
+	chunk_models.clear();
+}
+
+Map WorldRuntime::get_map() const {
+	return map;
+}
+
+void WorldRuntime::add_block(uint8_t block_id, const Vec3 &pos) {
+	uint8_t old_block = map.get_block_global(pos.x, pos.y, pos.z);
+	if (old_block == 0) {
+		map.set_block_global(block_id, pos.x, pos.y, pos.z);
+		remesh_chunks_affected_by_block(pos.x, pos.y, pos.z);
+	}
+}
+
+void WorldRuntime::remove_block(const Vec3 &pos) {
+	uint8_t old_block = map.get_block_global(pos.x, pos.y, pos.z);
+	if (old_block != 0) {
+		map.set_block_global(0, pos.x, pos.y, pos.z);
+		remesh_chunks_affected_by_block(pos.x, pos.y, pos.z);
+	}
+}
+
+void WorldRuntime::load_chunks() {
+	if (!renderer)
+		throw std::runtime_error("Renderer not bind in WorldRuntime");
+	if (map.chunks.empty())
+		throw std::runtime_error("Map don't have chunks");
+	for (const auto &pair : map.chunks)
+		load_unique_chunk(pair.first);
+}
+
+void WorldRuntime::load_unique_chunk(uint64_t key) {
+	if (!renderer)
+		throw std::runtime_error("Renderer not bind in WorldRuntime");
+	if (!world_material)
+		throw std::runtime_error("World material not initialized in WorldRuntime");
+	if (!world_material->albedo_map)
+		throw std::runtime_error("World material albedo map not initialized in WorldRuntime");
+
+	auto chunk_it = map.chunks.find(key);
+	if (chunk_it == map.chunks.end()) {
+		chunk_models.erase(key);
+		return;
+	}
+	int chunk_x = static_cast<int16_t>(key >> 32);
+	int chunk_y = static_cast<int16_t>(key >> 16);
+	int chunk_z = static_cast<int16_t>(key);
+	ChunkNeighborhood neighborhood = build_chunk_neighborhood(
+		map, chunk_x, chunk_y, chunk_z
+	);
+	ChunkMesher chunk_mesher = ChunkMesher(neighborhood, world_atlas_props);
+	MeshData chunk_data = chunk_mesher.generate_mesh();
+	if (chunk_data.vertices.empty()) {
+		chunk_models.erase(key);
+		return;
+	}
+	std::unique_ptr<GPUMesh> chunk_mesh = std::make_unique<GPUMesh>(
+		renderer->get_device(), chunk_data
+	);
+	if (!chunk_mesh)
+		throw std::runtime_error("Failed to create chunk GPUMesh");
+	std::unique_ptr<Model> chunk_model = std::make_unique<Model>(
+		chunk_mesh.get(), world_material.get()
+	);
+	if (!chunk_model)
+		throw std::runtime_error("Failed to create chunk model");
+
+	Mat4 transform = Mat4::translate({
+		static_cast<float>(chunk_x * Chunk::SIZE),
+		static_cast<float>(chunk_y * Chunk::SIZE),
+		static_cast<float>(chunk_z * Chunk::SIZE)
+	});
+	chunk_models[key] = ChunkRenderData{
+		std::move(chunk_mesh),
+		std::move(chunk_model),
+		transform,
+		chunk_it->second.get_bounds(chunk_x, chunk_y, chunk_z)
+	};
+}
+
+void WorldRuntime::remesh_chunks_affected_by_block(int x, int y, int z) {
+	const int chunk_x = x >> 4;
+	const int chunk_y = y >> 4;
+	const int chunk_z = z >> 4;
+	const int local_x = x & 15;
+	const int local_y = y & 15;
+	const int local_z = z & 15;
+
+	std::vector<uint64_t> keys;
+	auto push_unique_key = [&](int cx, int cy, int cz) {
+		const uint64_t key = map.get_chunk_key(cx, cy, cz);
+		for (const uint64_t existing_key : keys)
+			if (existing_key == key)
+				return;
+		keys.push_back(key);
+	};
+
+	int dx_min = (local_x == 0) ? -1 : 0;
+	int dx_max = (local_x == 15) ? 1 : 0;
+	int dy_min = (local_y == 0) ? -1 : 0;
+	int dy_max = (local_y == 15) ? 1 : 0;
+	int dz_min = (local_z == 0) ? -1 : 0;
+	int dz_max = (local_z == 15) ? 1 : 0;
+
+	for (int dx = dx_min; dx <= dx_max; ++dx)
+		for (int dy = dy_min; dy <= dy_max; ++dy)
+			for (int dz = dz_min; dz <= dz_max; ++dz)
+				push_unique_key(chunk_x + dx, chunk_y + dy, chunk_z + dz);
+
+	for (const uint64_t key : keys) {
+		load_unique_chunk(key);
+	}
+}
+
+}  // namespace lili
+```
+
+### src/runtime/world_runtime.hpp
+```
+/// Runtime API for loading, drawing, and editing voxel worlds.
+#pragma once
+
+#include <unordered_map>
+#include <memory>
+
+#include "geometry/mat4x4.hpp"
+
+#include "meshing/mesher.hpp"
+
+#include "render/renderer.hpp"
+#include "render/core/gpu_mesh.hpp"
+#include "render/scene/model.hpp"
+
+#include "world/map.hpp"
+
+namespace lili {
+
+struct ChunkRenderData {
+	std::unique_ptr<GPUMesh> mesh = nullptr;
+	std::unique_ptr<Model> model = nullptr;
+	Mat4 transform;
+	AABB bounds;
+};
+
+class WorldRuntime {
+public:
+	/// Create a world runtime.
+	WorldRuntime();
+	/// Destroy the world runtime.
+	~WorldRuntime() = default;
+
+	/// Set the atlas texture and grid size.
+	void set_atlas_map(
+		Renderer *renderer, const std::string &file_path, int n_cols, int n_rows
+	);
+
+	/// Load a map from disk.
+	void load_map(const std::string &map_path);
+	/// Save the current map to disk.
+	void save_map(const std::string &file_name);
+	/// Submit all chunks for rendering.
+	void draw_map(const Camera &camera, float aspect_ratio);
+	/// Clear chunk render data.
+	void clear_map();
+
+	/// Get a copy of the current map.
+	Map get_map() const;
+
+	/// Add a block at the given position.
+	void add_block(uint8_t block_id, const Vec3 &pos);
+	/// Remove a block at the given position.
+	void remove_block(const Vec3 &pos);
+
+private:
+	Renderer *renderer;
+
+	std::unique_ptr<Texture> albedo_map;
+	AtlasProperties world_atlas_props;
+	std::unique_ptr<Material> world_material;
+	Map map;
+	std::unordered_map<uint64_t, ChunkRenderData> chunk_models;
+
+	void load_chunks();
+
+	void load_unique_chunk(uint64_t key);
+	void remesh_chunks_affected_by_block(int x, int y, int z);
+};
+
+}  // namespace lili
+```
+
+### src/world/block.cpp
+```
+#include "world/block.hpp"
+
+#include <stdexcept>
+#include "world/material.hpp"
+
+namespace lili {
+
+BlockRegistry &BlockRegistry::get() {
+	static BlockRegistry instance;
+	return instance;
+}
+
+uint16_t BlockRegistry::register_block(
+	const std::string &key, const BlockDefinition &block
+) {
+	auto it = key_to_id.find(key);
+	if (it != key_to_id.end()) {
+		id_to_block[it->second] = block;
+		return it->second;
+	}
+
+	if (id_to_block.size() >= UINT16_MAX)
+		throw std::runtime_error("Block registry reached uint16_t capacity.");
+
+	uint16_t new_id = static_cast<uint16_t>(id_to_block.size());
+	key_to_id[key] = new_id;
+	id_to_block.push_back(block);
+	return new_id;
+}
+
+void BlockRegistry::set_rotation_variants(uint16_t block_id, uint16_t x, uint16_t y, uint16_t z) {
+	if (block_id < id_to_block.size()) {
+		id_to_block[block_id].rotatable = true;
+		id_to_block[block_id].x_variant = x;
+		id_to_block[block_id].y_variant = y;
+		id_to_block[block_id].z_variant = z;
+	}
+}
+
+bool BlockRegistry::has_block(const std::string &key) const {
+	return key_to_id.contains(key);
+}
+
+uint16_t BlockRegistry::get_size() const {
+	return id_to_block.size();
+}
+
+uint16_t BlockRegistry::get_block_id(const std::string &key) const {
+	auto it = key_to_id.find(key);
+	if (it == key_to_id.end())
+		throw std::runtime_error("Block key not found: " + key);
+	return it->second;
+}
+
+const BlockDefinition &BlockRegistry::get_block(const std::string &key) const {
+	return get_block(get_block_id(key));
+}
+
+const BlockDefinition &BlockRegistry::get_block(uint16_t block_id) const {
+	if (block_id >= id_to_block.size())
+		throw std::runtime_error("Block ID out of range.");
+	return id_to_block[block_id];
+}
+
+const BlockDefinition &BlockRegistry::get_block(uint8_t block_id) const {
+	return get_block(static_cast<uint16_t>(block_id));
+}
+
+BlockRegistry::BlockRegistry() {
+	MaterialRegistry &material_reg = MaterialRegistry::get();
+
+	register_block("core:air", {
+		.top_texture = 0,
+		.bottom_texture = 0,
+		.front_texture = 0,
+		.right_texture = 0,
+		.back_texture = 0,
+		.left_texture = 0,
+		.material_id = material_reg.get_material_id("core:none")
+	});
+	register_block("core:debug", {
+		.top_texture = 0,
+		.bottom_texture = 1,
+		.front_texture = 2,
+		.right_texture = 3,
+		.back_texture = 4,
+		.left_texture = 5,
+		.material_id = material_reg.get_material_id("core:debug")
+	});
+}
+
+}  // namespace lili
+```
+
+### src/world/block.hpp
+```
+/// Block registry and block definitions.
+#pragma once
+
+#include <cstdint>
+#include <unordered_map>
+#include <string>
+#include <vector>
+
+namespace lili {
+
+struct BlockDefinition {
+	uint16_t top_texture = 0;
+	uint16_t bottom_texture = 0;
+	uint16_t front_texture = 0;
+	uint16_t right_texture = 0;
+	uint16_t back_texture = 0;
+	uint16_t left_texture = 0;
+	uint16_t material_id = 0;
+
+	// Rotation properties
+	bool rotatable = false;
+	uint16_t x_variant = 0;
+	uint16_t y_variant = 0;
+	uint16_t z_variant = 0;
+};
+
+class BlockRegistry {
+public:
+	/// Non-copyable.
+	BlockRegistry(const BlockRegistry&) = delete;
+	/// Non-copyable.
+	BlockRegistry& operator=(const BlockRegistry&) = delete;
+	/// Get the global block registry instance.
+	static BlockRegistry &get();
+
+	/// Register a block definition and return its ID.
+	uint16_t register_block(const std::string &key, const BlockDefinition &block);
+
+	/// Set rotation variants for a block after registration.
+	void set_rotation_variants(uint16_t block_id, uint16_t x, uint16_t y, uint16_t z);
+
+	/// Check if a block key is registered.
+	bool has_block(const std::string &key) const;
+	/// Get the number of registered blocks.
+	uint16_t get_size() const;
+	/// Get a block ID by key.
+	uint16_t get_block_id(const std::string &key) const;
+	/// Get a block definition by key.
+	const BlockDefinition &get_block(const std::string &key) const;
+	/// Get a block definition by ID.
+	const BlockDefinition &get_block(uint16_t block_id) const;
+	/// Get a block definition by ID (uint8 overload).
+	const BlockDefinition &get_block(uint8_t block_id) const;
+
+private:
+	std::unordered_map<std::string, uint16_t> key_to_id;
+	std::vector<BlockDefinition> id_to_block;
+
+	BlockRegistry();
+};
+
+}  // namespace lili
+```
+
+### src/world/chunk.cpp
+```
+#include "world/chunk.hpp"
+
+namespace lili {
+
+void Chunk::set_block(uint8_t id, int x, int y, int z) {
+	blocks[x + y * SIZE + z * SIZE * SIZE] = id;
+}
+
+uint8_t Chunk::get_block(int x, int y, int z) const {
+	return blocks[x + y * SIZE + z * SIZE * SIZE];
+}
+
+AABB Chunk::get_bounds(int chunk_x, int chunk_y, int chunk_z) const {
+	Vec3 world_pos = {
+		(float)chunk_x * SIZE, (float)chunk_y * SIZE, (float)chunk_z * SIZE
+	};
+	return { world_pos, world_pos + (Vec3){ SIZE, SIZE, SIZE } };
+}
+
+}  // namespace lili
+```
+
+### src/world/chunk.hpp
+```
+/// Voxel chunk data structure.
+#pragma once
+
+#include <cstdint>
+#include "physics/collision.hpp"
+
+namespace lili {
+
+struct Chunk {
+	static constexpr int SIZE = 16;
+	uint8_t blocks[SIZE * SIZE * SIZE] = { 0 };
+
+	/// Set a block in local chunk coordinates.
+	void set_block(uint8_t id, int x, int y, int z);
+	/// Get a block in local chunk coordinates.
+	uint8_t get_block(int x, int y, int z) const;
+	/// Return the box that represent the bound of the chunk.
+	AABB get_bounds(int chunk_x, int chunk_y, int chunk_z) const;
+};
+
+}  // namespace lili
+```
+
+### src/world/map.cpp
+```
+#include "world/map.hpp"
+
+namespace lili {
+
+Map::~Map() {
+	chunks.clear();
+}
+
+void Map::set_block_global(uint8_t id, int x, int y, int z) {
+	int chunk_x = x >> 4;
+	int chunk_y = y >> 4;
+	int chunk_z = z >> 4;
+
+	int local_x = x & 15;
+	int local_y = y & 15;
+	int local_z = z & 15;
+	
+	uint64_t key = get_chunk_key(chunk_x, chunk_y, chunk_z);
+	chunks[key].set_block(id, local_x, local_y, local_z);
+}
+
+uint8_t Map::get_block_global(int x, int y, int z) const {
+	int chunk_x = x >> 4;
+	int chunk_y = y >> 4;
+	int chunk_z = z >> 4;
+
+	uint64_t key = get_chunk_key(chunk_x, chunk_y, chunk_z);
+	auto it = chunks.find(key);
+
+	if (it == chunks.end()) return 0;
+
+	int local_x = x & 15;
+	int local_y = y & 15;
+	int local_z = z & 15;
+	return it->second.get_block(local_x, local_y, local_z);
+}
+
+uint64_t Map::get_chunk_key(int x, int y, int z) const {
+	return (
+		(static_cast<uint64_t>(static_cast<uint16_t>(x)) << 32) |
+		(static_cast<uint64_t>(static_cast<uint16_t>(y)) << 16) |
+		(static_cast<uint64_t>(static_cast<uint16_t>(z)))
+	);
+}
+
+void Map::get_chunk_coordinates(uint64_t key, int &x, int &y, int &z) const {
+	x = static_cast<int16_t>((key >> 32) & 0xFFFF);
+	y = static_cast<int16_t>((key >> 16) & 0xFFFF);
+	z = static_cast<int16_t>(key & 0xFFFF);
+}
+
+bool Map::is_solid_at(int x, int y, int z) const {
+	return get_block_global(x, y, z) != 0;
+}
+
+}  // namespace lili
+```
+
+### src/world/map.hpp
+```
+/// Voxel map container.
+#pragma once
+
+#include <unordered_map>
+
+#include "physics/world_interface.hpp"
+#include "world/chunk.hpp"
+
+namespace lili {
+
+struct Map : public IVoxelWorld {
+	/// Destroy the map and its chunks.
+	~Map();
+
+	std::unordered_map<uint64_t, Chunk> chunks;
+
+	/// Set a block by global coordinates.
+	void set_block_global(uint8_t id, int x, int y, int z);
+	/// Get a block by global coordinates.
+	uint8_t get_block_global(int x, int y, int z) const;
+	/// Compute a chunk key from chunk coordinates.
+	uint64_t get_chunk_key(int x, int y, int z) const;
+	/// Get chunk coordinates in world.
+	void get_chunk_coordinates(uint64_t key, int &x, int &y, int &z) const;
+
+	/// Check if a voxel is solid at the given coordinates.
+	bool is_solid_at(int x, int y, int z) const override;
+};
+
+}  // namespace lili
+```
+
+### src/world/map_manager.cpp
+```
+#include <fstream>
+#include <nlohmann/json.hpp>
+
+#include "world/map_manager.hpp"
+#include "world/map.hpp"
+
+namespace lili {
+
+void save_map(
+	const std::string &file_path,
+	const Map &game_map
+) {
+    nlohmann::json map_data;
+
+    map_data["blocks"] = nlohmann::json::array();
+    for (const auto &[key, chunk] : game_map.chunks) {
+        int16_t chunk_x = static_cast<int16_t>(key >> 32);
+        int16_t chunk_y = static_cast<int16_t>(key >> 16);
+        int16_t chunk_z = static_cast<int16_t>(key);
+
+        for (int lx = 0; lx < lili::Chunk::SIZE; ++lx) {
+            for (int ly = 0; ly < lili::Chunk::SIZE; ++ly) {
+                for (int lz = 0; lz < lili::Chunk::SIZE; ++lz) {
+                    uint8_t block_id = chunk.get_block(lx, ly, lz);
+                    if (block_id != 0) {
+                        int global_x = (chunk_x * lili::Chunk::SIZE) + lx;
+                        int global_y = (chunk_y * lili::Chunk::SIZE) + ly;
+                        int global_z = (chunk_z * lili::Chunk::SIZE) + lz;
+                        map_data["blocks"].push_back({
+                            {"id", block_id},
+                            {"x", global_x},
+                            {"y", global_y},
+                            {"z", global_z}
+                        });
+                    }
+                }
+            }
+        }
+    }
+    std::ofstream file(file_path);
+    if (!file.is_open()) {
+        throw std::runtime_error(
+			"Failed to open map file for saving: " + file_path
+		);
+    }
+    file << map_data.dump(4); 
+}
+
+Map load_map(const std::string &file_path) {
+	Map game_map;
+
+	std::ifstream file(file_path);
+	if (!file.is_open()) {
+		throw std::runtime_error("Failed to open map file: " + file_path);
+	}
+	nlohmann::json map_data;
+	file >> map_data;
+	if (map_data.contains("spawn")) {
+		if (!map_data["spawn"].contains("x"))
+			throw std::runtime_error("Spawn does not contains X coordinate");
+		if (!map_data["spawn"].contains("y"))
+			throw std::runtime_error("Spawn does not contains Y coordinate");
+		if (!map_data["spawn"].contains("z"))
+			throw std::runtime_error("Spawn does not contains Z coordinate");
+		if (!map_data["spawn"].contains("rotation"))
+			throw std::runtime_error("Spawn does not contatins a rotation");
+	}
+	if (map_data.contains("blocks")) {
+		for (const auto &block : map_data["blocks"]) {
+			if (!block.contains("id"))
+				throw std::runtime_error("Block is missing the id");
+			if (!block.contains("x"))
+				throw std::runtime_error("Block is missing the X coordinate");
+			if (!block.contains("y"))
+				throw std::runtime_error("Block is missing the Y coordinate");
+			if (!block.contains("z"))
+				throw std::runtime_error("Block is missing the Z coordinate");
+			game_map.set_block_global(
+				block["id"],
+				block["x"],
+				block["y"],
+				block["z"]
+			);
+		}
+	}
+	return game_map;
+}
+
+}  // namespace lili
+```
+
+### src/world/map_manager.hpp
+```
+/// Map load/save helpers.
+#pragma once
+
+#include <string>
+
+#include "world/map.hpp"
+
+namespace lili {
+
+void save_map(
+	const std::string &file_path,
+	const Map &game_map
+);
+Map load_map(const std::string &map_path);
+
+}  // namespace lili
+```
+
+### src/world/material.cpp
+```
+#include "world/material.hpp"
+
+#include <stdexcept>
+
+namespace lili {
+
+Material::Material(Texture *texture) {
+	albedo_map = texture;
+}
+
+MaterialRegistry &MaterialRegistry::get() {
+	static MaterialRegistry instance;
+	return instance;
+}
+
+uint16_t MaterialRegistry::register_material(
+	const std::string &key, const Material &material
+) {
+	auto it = key_to_id.find(key);
+	if (it != key_to_id.end()) {
+		id_to_material[it->second] = material;
+		return it->second;
+	}
+
+	if (id_to_material.size() >= UINT16_MAX)
+		throw std::runtime_error(
+			"Material registry reached uint16_t capacity."
+		);
+
+	uint16_t new_id = static_cast<uint16_t>(id_to_material.size());
+	key_to_id[key] = new_id;
+	id_to_material.push_back(material);
+	return new_id;
+}
+
+bool MaterialRegistry::has_material(const std::string &key) const {
+	return key_to_id.contains(key);
+}
+
+uint16_t MaterialRegistry::get_material_id(const std::string &key) const {
+	auto it = key_to_id.find(key);
+	if (it == key_to_id.end())
+		throw std::runtime_error("Material key not found: " + key);
+	return it->second;
+}
+
+const Material &MaterialRegistry::get_material(const std::string &key) const {
+	return get_material(get_material_id(key));
+}
+
+const Material &MaterialRegistry::get_material(uint16_t material_id) const {
+	if (material_id >= id_to_material.size())
+		throw std::runtime_error("Material ID out of range.");
+	return id_to_material[material_id];
+}
+
+const Material &MaterialRegistry::get_material(uint8_t material_id) const {
+	return get_material(static_cast<uint16_t>(material_id));
+}
+
+MaterialRegistry::MaterialRegistry() {
+	register_material("core:none", Material());
+
+	Material debug_mat;
+	debug_mat.properties.color_tint = { 1.0f, 0.9f, 0.8f, 1.0f };
+	register_material("core:debug", debug_mat);
+}
+
+size_t MaterialRegistry::material_count() const {
+	return id_to_material.size();
+}
+
+const Material *MaterialRegistry::material_data() const {
+	return id_to_material.data();
+}
+
+}  // namespace lili
+```
+
+### src/world/material.hpp
+```
+/// Material registry and material definitions.
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "geometry/vec4.hpp"
+#include "render/core/texture.hpp"
+
+namespace lili {
+
+struct MaterialProps {
+	Vec4 color_tint = { 1.0f, 1.0f, 1.0f, 1.0f };
+	float roughness = 1.0f;
+	float metallic = 0.0f;
+	float emission = 0.0f;
+	float padding = 0.0f;
+};
+
+struct Material {
+	MaterialProps properties;
+	Texture *albedo_map = nullptr;
+
+	/// Create a default material.
+	Material() = default;
+	/// Create a material with a given albedo texture.
+	Material(Texture *texture);
+};
+
+class MaterialRegistry {
+public:
+	/// Non-copyable.
+	MaterialRegistry(const MaterialRegistry&) = delete;
+	/// Non-copyable.
+	MaterialRegistry& operator=(const MaterialRegistry&) = delete;
+	/// Get the global material registry instance.
+	static MaterialRegistry &get();
+
+	/// Register a material and return its ID.
+	uint16_t register_material(const std::string &key, const Material &material);
+
+	/// Check if a material key is registered.
+	bool has_material(const std::string &key) const;
+	/// Get a material ID by key.
+	uint16_t get_material_id(const std::string &key) const;
+	/// Get a material by key.
+	const Material &get_material(const std::string &key) const;
+	/// Get a material by ID.
+	const Material &get_material(uint16_t material_id) const;
+	/// Get a material by ID (uint8 overload).
+	const Material &get_material(uint8_t material_id) const;
+
+	/// Get the number of registered materials.
+	size_t material_count() const;
+	/// Get a pointer to the contiguous material data.
+	const Material *material_data() const;
+
+private:
+	std::unordered_map<std::string, uint16_t> key_to_id;
+	std::vector<Material> id_to_material;
+
+	MaterialRegistry();
+};
+
+}  // namespace lili
+```
+
+### src/world/texture_registry.cpp
+```
+#include "world/texture_registry.hpp"
+
+#include <stdexcept>
+
+namespace lili {
+
+TextureRegistry &TextureRegistry::get() {
+	static TextureRegistry instance;
+	return instance;
+}
+
+uint16_t TextureRegistry::register_texture(
+	const std::string &key, Texture *texture
+) {
+	if (!texture)
+		throw std::runtime_error("Cannot register a null texture.");
+
+	auto it = key_to_id.find(key);
+	if (it != key_to_id.end()) {
+		id_to_texture[it->second] = texture;
+		return it->second;
+	}
+
+	if (id_to_texture.size() >= UINT16_MAX)
+		throw std::runtime_error("Texture registry reached uint16_t capacity.");
+
+	uint16_t new_id = static_cast<uint16_t>(id_to_texture.size());
+	key_to_id[key] = new_id;
+	id_to_texture.push_back(texture);
+	return new_id;
+}
+
+bool TextureRegistry::has_texture(const std::string &key) const {
+	return key_to_id.contains(key);
+}
+
+uint16_t TextureRegistry::get_texture_id(const std::string &key) const {
+	auto it = key_to_id.find(key);
+	if (it == key_to_id.end())
+		throw std::runtime_error("Texture key not found: " + key);
+	return it->second;
+}
+
+Texture *TextureRegistry::get_texture(const std::string &key) const {
+	return get_texture(get_texture_id(key));
+}
+
+Texture *TextureRegistry::get_texture(uint16_t texture_id) const {
+	if (texture_id >= id_to_texture.size())
+		throw std::runtime_error("Texture ID out of range.");
+	return id_to_texture[texture_id];
+}
+
+TextureRegistry::TextureRegistry() {
+	id_to_texture.push_back(nullptr);
+	key_to_id["core:missing"] = 0;
+}
+
+}  // namespace lili
+```
+
+### src/world/texture_registry.hpp
+```
+/// Texture registry for world materials.
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "render/core/texture.hpp"
+
+namespace lili {
+
+class TextureRegistry {
+public:
+	/// Get the global texture registry instance.
+	static TextureRegistry &get();
+
+	/// Register a texture and return its ID.
+	uint16_t register_texture(const std::string &key, Texture *texture);
+
+	/// Check if a texture key is registered.
+	bool has_texture(const std::string &key) const;
+	/// Get a texture ID by key.
+	uint16_t get_texture_id(const std::string &key) const;
+	/// Get a texture by key.
+	Texture *get_texture(const std::string &key) const;
+	/// Get a texture by ID.
+	Texture *get_texture(uint16_t texture_id) const;
+
+private:
+	std::unordered_map<std::string, uint16_t> key_to_id;
+	std::vector<Texture *> id_to_texture;
+
+	TextureRegistry();
+};
+
+}  // namespace lili
+```
+
+### src/render/core/gpu_mesh.cpp
+```
+#include <cstring>
+#include <stdexcept>
+
+#include "render/core/gpu_mesh.hpp"
+
+namespace lili {
+
+GPUMesh::GPUMesh(SDL_GPUDevice *device, MeshData &mesh) {
+	this->device = device;
+	index_count = static_cast<uint32_t>(mesh.indices.size());
+
+	uint32_t vertices_buffer_size = (
+		mesh.vertices.size() * sizeof(lili::Vertex)
+	);
+	SDL_GPUBufferCreateInfo vertices_buffer_create_info{
+		.usage = SDL_GPU_BUFFERUSAGE_VERTEX,
+		.size = vertices_buffer_size,
+		.props = 0
+	};
+	vertex_buffer = SDL_CreateGPUBuffer(
+		this->device, &vertices_buffer_create_info
+	);
+	if (!vertex_buffer) {
+		throw std::runtime_error(
+			"vertex_buffer creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+	transfer_to_gpu(mesh.vertices.data(), vertex_buffer, vertices_buffer_size);
+
+	uint32_t indices_buffer_size = mesh.indices.size() * sizeof(uint32_t);
+	SDL_GPUBufferCreateInfo indices_buffer_create_info{
+		.usage = SDL_GPU_BUFFERUSAGE_INDEX,
+		.size = indices_buffer_size,
+		.props = 0
+	};
+	index_buffer = SDL_CreateGPUBuffer(
+		device, &indices_buffer_create_info
+	);
+	if (!index_buffer) {
+		throw std::runtime_error(
+			"index_buffer creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+	transfer_to_gpu(
+		mesh.indices.data(),
+		index_buffer,
+		indices_buffer_size
+	);
+}
+
+GPUMesh::~GPUMesh() {
+	if (index_buffer)
+		SDL_ReleaseGPUBuffer(device, index_buffer);
+	if (vertex_buffer)
+		SDL_ReleaseGPUBuffer(device, vertex_buffer);
+}
+
+SDL_GPUBuffer *GPUMesh::get_vertex() const {
+	return vertex_buffer;
+}
+
+SDL_GPUBuffer *GPUMesh::get_index() const {
+	return index_buffer;
+}
+
+uint32_t GPUMesh::get_index_count() const {
+	return index_count;
+}
+
+void GPUMesh::transfer_to_gpu(void *data, SDL_GPUBuffer *buffer, uint32_t size) {
+	SDL_GPUTransferBufferCreateInfo transfer_buffer_info{
+		.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+		.size = size,
+		.props = 0
+	};
+	SDL_GPUTransferBuffer *transfer_buffer = SDL_CreateGPUTransferBuffer(
+		device, &transfer_buffer_info
+	);
+	void *map = SDL_MapGPUTransferBuffer(device, transfer_buffer, false);
+	std::memcpy(map, data, size);
+	SDL_UnmapGPUTransferBuffer(device, transfer_buffer);
+	SDL_GPUCommandBuffer *upload_cmd = SDL_AcquireGPUCommandBuffer(device);
+	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(upload_cmd);
+	SDL_GPUTransferBufferLocation src{
+		.transfer_buffer = transfer_buffer,
+		.offset = 0
+	};
+	SDL_GPUBufferRegion dst{
+		.buffer = buffer,
+		.offset = 0,
+		.size = size
+	};
+	SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
+	SDL_EndGPUCopyPass(copy_pass);
+	SDL_SubmitGPUCommandBuffer(upload_cmd);
+	SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+}
+
+}  // namespace lili
+```
+
+### src/render/core/gpu_mesh.hpp
+```
+/// GPU mesh wrapper.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+
+#include "meshing/primitives.hpp"
+
+namespace lili {
+
+class GPUMesh {
+public:
+	/// Create GPU buffers from mesh data.
+	GPUMesh(SDL_GPUDevice *device, MeshData &mesh);
+	/// Destroy GPU buffers.
+	~GPUMesh();
+
+	/// Get the vertex buffer.
+	SDL_GPUBuffer *get_vertex() const;
+	/// Get the index buffer.
+	SDL_GPUBuffer *get_index() const;
+	/// Get the index count.
+	uint32_t get_index_count() const;
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_GPUBuffer *vertex_buffer = nullptr;
+	SDL_GPUBuffer *index_buffer = nullptr;
+	uint32_t index_count = 0;
+
+	void transfer_to_gpu(void *data, SDL_GPUBuffer *buffer, uint32_t size);
+};
+
+}  // namespace lili
+```
+
+### src/render/core/shader.cpp
+```
+#include <fstream>
+
+#include "render/core/shader.hpp"
+
+namespace lili {
+
+Shader::Shader(
+	SDL_GPUDevice *device,
+	const std::string &vert_path,
+	const std::string &frag_path,
+	ShaderInfo vert_infos,
+	ShaderInfo frag_infos
+) {
+	this->device = device;
+	CodeInfo vertex_code_info = get_code_info(vert_path);
+	SDL_GPUShaderCreateInfo vertex_create_info{
+		.code_size = vertex_code_info.size,
+		.code = reinterpret_cast<uint8_t *>(vertex_code_info.buffer.data()),
+		.entrypoint = "main",
+		.format = SDL_GPU_SHADERFORMAT_SPIRV,
+		.stage = SDL_GPU_SHADERSTAGE_VERTEX,
+		.num_samplers = vert_infos.num_samplers,
+		.num_storage_textures = vert_infos.num_storage_textures,
+		.num_storage_buffers = vert_infos.num_storage_buffers,
+		.num_uniform_buffers = vert_infos.num_uniform_buffers,
+		.props = 0
+	};
+	vertex_shader = SDL_CreateGPUShader(this->device, &vertex_create_info);
+	if (!vertex_shader) {
+		throw std::runtime_error(
+			"vertex_shader creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+
+	CodeInfo fragment_code_info = get_code_info(frag_path);
+	SDL_GPUShaderCreateInfo fragment_create_info{
+		.code_size = fragment_code_info.size,
+		.code = reinterpret_cast<uint8_t *>(fragment_code_info.buffer.data()),
+		.entrypoint = "main",
+		.format = SDL_GPU_SHADERFORMAT_SPIRV,
+		.stage = SDL_GPU_SHADERSTAGE_FRAGMENT,
+		.num_samplers = frag_infos.num_samplers,
+		.num_storage_textures = frag_infos.num_storage_textures,
+		.num_storage_buffers = frag_infos.num_storage_buffers,
+		.num_uniform_buffers = frag_infos.num_uniform_buffers,
+		.props = 0
+	};
+	fragment_shader = SDL_CreateGPUShader(this->device, &fragment_create_info);
+	if (!fragment_shader) {
+		throw std::runtime_error(
+			"fragment_shader creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+}
+
+Shader::~Shader() {
+	if (fragment_shader)
+		SDL_ReleaseGPUShader(device, fragment_shader);
+	if (vertex_shader)
+		SDL_ReleaseGPUShader(device, vertex_shader);
+}
+
+SDL_GPUShader *Shader::get_vertex() const {
+	return vertex_shader;
+}
+
+SDL_GPUShader *Shader::get_fragment() const {
+	return fragment_shader;
+}
+
+CodeInfo Shader::get_code_info(const std::string &code_path) {
+	CodeInfo code_info;
+
+	std::ifstream file(
+		code_path, std::ios::ate | std::ios::binary
+	);
+	if (!file.is_open()) {
+		throw std::runtime_error("Failed to open file! \"" + code_path + "\"");
+	}
+	code_info.size = file.tellg();
+	file.seekg(0);
+	code_info.buffer.resize(code_info.size);
+	file.read(code_info.buffer.data(), code_info.size);
+	file.close();
+	return code_info;
+}
+
+}  // namespace lili
+```
+
+### src/render/core/shader.hpp
+```
+/// GPU shader wrapper.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+#include <vector>
+#include <string>
+
+namespace lili {
+
+struct CodeInfo {
+	size_t size;
+	std::vector<char> buffer;
+};
+
+struct ShaderInfo {
+	uint32_t num_samplers = 0;
+	uint32_t num_storage_textures = 0;
+	uint32_t num_storage_buffers = 0;
+	uint32_t num_uniform_buffers = 0;
+};
+
+class Shader {
+public:
+	/// Create a shader from vertex and fragment SPIR-V paths.
+	Shader(
+		SDL_GPUDevice *device,
+		const std::string &vert_path,
+		const std::string &frag_path,
+		ShaderInfo vert_infos = {},
+		ShaderInfo frag_infos = {}
+	);
+	/// Destroy shader resources.
+	~Shader();
+
+	/// Get the compiled vertex shader.
+	SDL_GPUShader *get_vertex() const;
+	/// Get the compiled fragment shader.
+	SDL_GPUShader *get_fragment() const;
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_GPUShader *vertex_shader = nullptr;
+	SDL_GPUShader *fragment_shader = nullptr;
+
+	CodeInfo get_code_info(const std::string &code_path);
+};
+
+}  // namespace lili
+```
+
+### src/render/core/texture.cpp
+```
+#include <stdexcept>
+#include <cstring>
+#include <SDL3_image/SDL_image.h>
+
+#include "render/core/texture.hpp"
+
+namespace lili {
+
+Texture::Texture(SDL_GPUDevice *device, const std::string &img_path) {
+	this->device = device;
+	SDL_Surface *temp_surface = IMG_Load(img_path.c_str());
+	if (!temp_surface) {
+		throw std::runtime_error("Failed to load image " + img_path);
+	}
+	SDL_Surface *surface = SDL_ConvertSurface(
+		temp_surface, SDL_PIXELFORMAT_ABGR8888
+	);
+	SDL_DestroySurface(temp_surface);
+	SDL_GPUTextureCreateInfo texture_create_info{
+		.type = SDL_GPU_TEXTURETYPE_2D,
+		.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM,
+		.usage = SDL_GPU_TEXTUREUSAGE_SAMPLER,
+		.width = static_cast<uint32_t>(surface->w),
+		.height = static_cast<uint32_t>(surface->h),
+		.layer_count_or_depth = 1,
+		.num_levels = 1,
+		.sample_count = SDL_GPU_SAMPLECOUNT_1,
+		.props = 0
+	};
+	texture = SDL_CreateGPUTexture(this->device, &texture_create_info);
+	transfer_to_gpu(surface);
+
+	SDL_GPUSamplerCreateInfo sampler_info{
+		.min_filter = SDL_GPU_FILTER_NEAREST,
+		.mag_filter = SDL_GPU_FILTER_NEAREST,
+		.mipmap_mode = SDL_GPU_SAMPLERMIPMAPMODE_NEAREST,
+		.address_mode_u = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
+		.address_mode_v = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
+		.address_mode_w = SDL_GPU_SAMPLERADDRESSMODE_REPEAT,
+		.props = 0
+	};
+	sampler = SDL_CreateGPUSampler(this->device, &sampler_info);
+	if (!sampler) {
+		throw std::runtime_error(
+			"res.texture_sampler creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+}
+
+Texture::~Texture() {
+	if (sampler) SDL_ReleaseGPUSampler(device, sampler);
+	if (texture) SDL_ReleaseGPUTexture(device, texture);
+}
+
+SDL_GPUTexture *Texture::get_texture() const {
+	return texture;
+}
+
+SDL_GPUSampler *Texture::get_sampler() const {
+	return sampler;
+}
+
+void Texture::transfer_to_gpu(SDL_Surface *surface) {
+	uint32_t image_size = surface->w * surface->h * 4;
+	SDL_GPUTransferBufferCreateInfo transfer_buffer_info{
+		.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+		.size = image_size,
+		.props = 0
+	};
+	SDL_GPUTransferBuffer *transfer_buffer = SDL_CreateGPUTransferBuffer(
+		device, &transfer_buffer_info
+	);
+	void *map = SDL_MapGPUTransferBuffer(device, transfer_buffer, false);
+	std::memcpy(map, surface->pixels, image_size);
+	SDL_UnmapGPUTransferBuffer(device, transfer_buffer);
+	SDL_GPUCommandBuffer *cmd = SDL_AcquireGPUCommandBuffer(device);
+	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(cmd);
+	SDL_GPUTextureTransferInfo src{
+		.transfer_buffer = transfer_buffer,
+		.offset = 0
+	};
+	SDL_GPUTextureRegion dst{
+		.texture = texture,
+		.w = static_cast<uint32_t>(surface->w),
+		.h = static_cast<uint32_t>(surface->h),
+		.d = 1
+	};
+	SDL_UploadToGPUTexture(copy_pass, &src, &dst, false);
+	SDL_EndGPUCopyPass(copy_pass);
+	SDL_SubmitGPUCommandBuffer(cmd);
+	SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+	SDL_DestroySurface(surface);
+}
+
+}  // namespace lili
+```
+
+### src/render/core/texture.hpp
+```
+/// GPU texture wrapper.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+#include <string>
+
+namespace lili {
+
+class Texture {
+public:
+	/// Create a texture from an image path.
+	Texture(SDL_GPUDevice *device, const std::string &img_path);
+	/// Destroy texture resources.
+	~Texture();
+
+	/// Get the underlying GPU texture.
+	SDL_GPUTexture *get_texture() const;
+	/// Get the sampler used for this texture.
+	SDL_GPUSampler *get_sampler() const;
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_GPUTexture *texture = nullptr;
+	SDL_GPUSampler *sampler = nullptr;
+
+	void transfer_to_gpu(SDL_Surface *surface);
+};
+
+}  // namespace lili
+```
+
+### src/render/passes/pass_types.hpp
+```
+/// Render layer and pass type enums.
+#pragma once
+
+#include "render/scene/model.hpp"
+#include "geometry/mat4x4.hpp"
+
+namespace lili {
+
+enum class RenderLayer {
+	World3D,
+	UI2D
+};
+
+struct DrawCommand {
+	const Model &model;
+	Mat4 transform;
+};
+
+}  // namespace lili
+```
+
+### src/render/passes/ui_pass.cpp
+```
+#include "render/passes/ui_pass.hpp"
+
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "render/scene/model.hpp"
+
+namespace lili {
+
+namespace {
+
+struct MaterialGPU {
+	float color_tint[4];
+	float roughness;
+	float metallic;
+	float emission;
+	float padding;
+};
+
+SDL_GPUBuffer *create_materials_buffer(SDL_GPUDevice *device) {
+	const MaterialRegistry &registry = MaterialRegistry::get();
+	const size_t material_count = registry.material_count();
+	if (material_count == 0) {
+		throw std::runtime_error("Material registry is empty.");
+	}
+
+	std::vector<MaterialGPU> gpu_materials;
+	gpu_materials.reserve(material_count);
+	for (size_t i = 0; i < material_count; ++i) {
+		const MaterialProps &props = registry.get_material(
+			static_cast<uint16_t>(i)
+		).properties;
+		gpu_materials.push_back({
+			{
+				props.color_tint.x,
+				props.color_tint.y,
+				props.color_tint.z,
+				props.color_tint.w
+			},
+			props.roughness,
+			props.metallic,
+			props.emission,
+			props.padding
+		});
+	}
+
+	const uint32_t size = static_cast<uint32_t>(
+		gpu_materials.size() * sizeof(MaterialGPU)
+	);
+	SDL_GPUBufferCreateInfo materials_buffer_createinfo{
+		.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+		.size = size,
+		.props = 0
+	};
+	SDL_GPUBuffer *materials_buffer = SDL_CreateGPUBuffer(
+		device, &materials_buffer_createinfo
+	);
+	if (!materials_buffer) {
+		throw std::runtime_error(
+			"Materials storage buffer creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+
+	SDL_GPUTransferBufferCreateInfo transfer_buffer_info{
+		.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+		.size = size,
+		.props = 0
+	};
+	SDL_GPUTransferBuffer *transfer_buffer = SDL_CreateGPUTransferBuffer(
+		device, &transfer_buffer_info
+	);
+	if (!transfer_buffer) {
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+		throw std::runtime_error(
+			"Materials transfer buffer creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+
+	void *map = SDL_MapGPUTransferBuffer(device, transfer_buffer, false);
+	if (!map) {
+		SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+		throw std::runtime_error(
+			"Failed to map materials transfer buffer!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+	std::memcpy(map, gpu_materials.data(), size);
+	SDL_UnmapGPUTransferBuffer(device, transfer_buffer);
+
+	SDL_GPUCommandBuffer *upload_cmd = SDL_AcquireGPUCommandBuffer(device);
+	if (!upload_cmd) {
+		SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+		throw std::runtime_error(
+			"Failed to acquire command buffer for materials upload!"
+		);
+	}
+	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(upload_cmd);
+	SDL_GPUTransferBufferLocation src{
+		.transfer_buffer = transfer_buffer,
+		.offset = 0
+	};
+	SDL_GPUBufferRegion dst{
+		.buffer = materials_buffer,
+		.offset = 0,
+		.size = size
+	};
+	SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
+	SDL_EndGPUCopyPass(copy_pass);
+	SDL_SubmitGPUCommandBuffer(upload_cmd);
+	SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+
+	return materials_buffer;
+}
+
+}  // namespace
+
+UIPass::UIPass(
+	SDL_GPUDevice *device, SDL_GPUGraphicsPipeline *pipeline
+) {
+	this->device = device;
+	this->pipeline = pipeline;
+	this->materials_buffer = create_materials_buffer(device);
+}
+
+UIPass::~UIPass() {
+	if (materials_buffer) {
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+	}
+}
+
+void UIPass::render(
+	SDL_GPURenderPass *pass,
+	SDL_GPUCommandBuffer *cmd,
+	const Mat4 &proj_view,
+	const std::vector<DrawCommand> &queue
+) {
+	if (queue.empty()) return;
+
+	SDL_BindGPUGraphicsPipeline(pass, pipeline);
+	SDL_BindGPUFragmentStorageBuffers(pass, 0, &materials_buffer, 1);
+
+	for (const DrawCommand &draw_cmd : queue) {
+		if (!draw_cmd.model.mesh)
+			throw std::runtime_error("UIPass received draw command without mesh.");
+		if (!draw_cmd.model.material)
+			throw std::runtime_error("UIPass received draw command without material.");
+		if (!draw_cmd.model.material->albedo_map) {
+			throw std::runtime_error(
+				"UIPass received draw command with material missing albedo map."
+			);
+		}
+
+		Mat4 mvp = proj_view * draw_cmd.transform;
+		SDL_PushGPUVertexUniformData(cmd, 0, &mvp, sizeof(Mat4));
+
+		SDL_GPUBufferBinding vertex_binding{
+			.buffer = draw_cmd.model.mesh->get_vertex(),
+			.offset = 0
+		};
+		SDL_BindGPUVertexBuffers(pass, 0, &vertex_binding, 1);
+
+		SDL_GPUBufferBinding index_binding{
+			.buffer = draw_cmd.model.mesh->get_index(),
+			.offset = 0
+		};
+		SDL_BindGPUIndexBuffer(
+			pass, &index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT
+		);
+
+		SDL_GPUTextureSamplerBinding texture_sampler_binding{
+			.texture = draw_cmd.model.material->albedo_map->get_texture(),
+			.sampler = draw_cmd.model.material->albedo_map->get_sampler()
+		};
+		SDL_BindGPUFragmentSamplers(pass, 0, &texture_sampler_binding, 1);
+
+		SDL_DrawGPUIndexedPrimitives(
+			pass, draw_cmd.model.mesh->get_index_count(), 1, 0, 0, 0
+		);
+	}
+}
+
+}  // namespace lili
+```
+
+### src/render/passes/ui_pass.hpp
+```
+/// UI render pass interface.
+#pragma once
+
+#include "render/passes/pass_types.hpp"
+
+namespace lili {
+
+class UIPass {
+public:
+	/// Create a UI render pass.
+	UIPass(SDL_GPUDevice *device, SDL_GPUGraphicsPipeline *pipeline);
+	/// Destroy UI pass resources.
+	~UIPass();
+
+	/// Render the UI draw queue.
+	void render(
+		SDL_GPURenderPass *pass,
+		SDL_GPUCommandBuffer *cmd,
+		const Mat4 &proj_view,
+		const std::vector<DrawCommand> &queue
+	);
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_GPUGraphicsPipeline *pipeline = nullptr;
+	SDL_GPUBuffer *materials_buffer = nullptr;
+};
+
+}  // namespace lili
+```
+
+### src/render/passes/world_pass.cpp
+```
+#include "render/passes/world_pass.hpp"
+
+#include <cstring>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "render/scene/model.hpp"
+
+namespace lili {
+
+WorldPass::WorldPass(
+	SDL_GPUDevice *device,
+	SDL_GPUGraphicsPipeline *pipeline
+) {
+	this->device = device;
+	this->pipeline = pipeline;
+	create_materials_buffer(device);
+}
+
+WorldPass::~WorldPass() {
+	if (materials_buffer) {
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+	}
+}
+
+void WorldPass::render(
+	SDL_GPURenderPass *pass,
+	SDL_GPUCommandBuffer *cmd,
+	const Mat4 &cam_proj_view,
+	const DirectionalLightGPU &light,
+	const std::vector<DrawCommand> &queue
+) {
+	if (queue.empty()) return;
+	
+	SDL_BindGPUGraphicsPipeline(pass, pipeline);
+	SDL_BindGPUFragmentStorageBuffers(pass, 0, &materials_buffer, 1);
+
+	SDL_PushGPUFragmentUniformData(cmd, 0, &light, sizeof(DirectionalLightGPU));
+
+	for (const DrawCommand &draw_cmd : queue) {
+		if (!draw_cmd.model.mesh)
+			throw std::runtime_error(
+				"WorldPass received draw command without mesh."
+			);
+		if (!draw_cmd.model.material)
+			throw std::runtime_error(
+				"WorldPass received draw command without material."
+			);
+		if (!draw_cmd.model.material->albedo_map) {
+			throw std::runtime_error(
+				"WorldPass received draw command with material "
+				"missing albedo map."
+			);
+		}
+
+		Mat4 cam_mvp = cam_proj_view * draw_cmd.transform;
+		SDL_PushGPUVertexUniformData(cmd, 0, &cam_mvp, sizeof(Mat4));
+
+		SDL_GPUBufferBinding vertex_binding{
+			.buffer = draw_cmd.model.mesh->get_vertex(),
+			.offset = 0
+		};
+		SDL_BindGPUVertexBuffers(pass, 0, &vertex_binding, 1);
+		SDL_GPUBufferBinding index_binding{
+			.buffer = draw_cmd.model.mesh->get_index(),
+			.offset = 0
+		};
+		SDL_BindGPUIndexBuffer(
+			pass, &index_binding, SDL_GPU_INDEXELEMENTSIZE_32BIT
+		);
+
+		SDL_GPUTextureSamplerBinding albedo_bind{
+			.texture = draw_cmd.model.material->albedo_map->get_texture(),
+			.sampler = draw_cmd.model.material->albedo_map->get_sampler()
+		};
+		SDL_BindGPUFragmentSamplers(pass, 0, &albedo_bind, 1);
+
+		SDL_DrawGPUIndexedPrimitives(
+			pass, draw_cmd.model.mesh->get_index_count(), 1, 0, 0, 0
+		);
+	}
+}
+
+void WorldPass::create_materials_buffer(SDL_GPUDevice *device) {
+	const MaterialRegistry &registry = MaterialRegistry::get();
+	const size_t material_count = registry.material_count();
+	if (material_count == 0) {
+		throw std::runtime_error("Material registry is empty.");
+	}
+
+	std::vector<MaterialGPU> gpu_materials;
+	gpu_materials.reserve(material_count);
+	for (size_t i = 0; i < material_count; ++i) {
+		const MaterialProps &props = registry.get_material(
+			static_cast<uint16_t>(i)
+		).properties;
+		gpu_materials.push_back({
+			{
+				props.color_tint.x,
+				props.color_tint.y,
+				props.color_tint.z,
+				props.color_tint.w
+			},
+			props.roughness,
+			props.metallic,
+			props.emission,
+			props.padding
+		});
+	}
+
+	const uint32_t size = static_cast<uint32_t>(
+		gpu_materials.size() * sizeof(MaterialGPU)
+	);
+	SDL_GPUBufferCreateInfo materials_buffer_createinfo{
+		.usage = SDL_GPU_BUFFERUSAGE_GRAPHICS_STORAGE_READ,
+		.size = size,
+		.props = 0
+	};
+	materials_buffer = SDL_CreateGPUBuffer(
+		device, &materials_buffer_createinfo
+	);
+	if (!materials_buffer) {
+		throw std::runtime_error(
+			"Materials storage buffer creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+
+	SDL_GPUTransferBufferCreateInfo transfer_buffer_info{
+		.usage = SDL_GPU_TRANSFERBUFFERUSAGE_UPLOAD,
+		.size = size,
+		.props = 0
+	};
+	SDL_GPUTransferBuffer *transfer_buffer = SDL_CreateGPUTransferBuffer(
+		device, &transfer_buffer_info
+	);
+	if (!transfer_buffer) {
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+		throw std::runtime_error(
+			"Materials transfer buffer creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+
+	void *map = SDL_MapGPUTransferBuffer(device, transfer_buffer, false);
+	if (!map) {
+		SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+		throw std::runtime_error(
+			"Failed to map materials transfer buffer!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+	std::memcpy(map, gpu_materials.data(), size);
+	SDL_UnmapGPUTransferBuffer(device, transfer_buffer);
+
+	SDL_GPUCommandBuffer *upload_cmd = SDL_AcquireGPUCommandBuffer(device);
+	if (!upload_cmd) {
+		SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+		SDL_ReleaseGPUBuffer(device, materials_buffer);
+		throw std::runtime_error(
+			"Failed to acquire command buffer for materials upload!"
+		);
+	}
+	SDL_GPUCopyPass *copy_pass = SDL_BeginGPUCopyPass(upload_cmd);
+	SDL_GPUTransferBufferLocation src{
+		.transfer_buffer = transfer_buffer,
+		.offset = 0
+	};
+	SDL_GPUBufferRegion dst{
+		.buffer = materials_buffer,
+		.offset = 0,
+		.size = size
+	};
+	SDL_UploadToGPUBuffer(copy_pass, &src, &dst, false);
+	SDL_EndGPUCopyPass(copy_pass);
+	SDL_SubmitGPUCommandBuffer(upload_cmd);
+	SDL_ReleaseGPUTransferBuffer(device, transfer_buffer);
+}
+
+}  // namespace lili
+```
+
+### src/render/passes/world_pass.hpp
+```
+/// World render pass interface.
+#pragma once
+
+#include "render/passes/pass_types.hpp"
+
+namespace lili {
+
+struct MaterialGPU {
+	float color_tint[4];
+	float roughness;
+	float metallic;
+	float emission;
+	float padding;
+};
+
+struct DirectionalLightGPU {
+	Vec4 direction;
+	Vec4 color;
+	Vec4 ambient;
+};
+
+class WorldPass {
+public:
+	/// Create a world render pass.
+	WorldPass(SDL_GPUDevice *device, SDL_GPUGraphicsPipeline *pipeline);
+	/// Destroy world pass resources.
+	~WorldPass();
+
+	/// Render the world draw queue.
+	void render(
+		SDL_GPURenderPass *pass,
+		SDL_GPUCommandBuffer *cmd,
+		const Mat4 &cam_proj_view,
+		const DirectionalLightGPU &light,
+		const std::vector<DrawCommand> &queue
+	);
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_GPUGraphicsPipeline *pipeline = nullptr;
+	SDL_GPUBuffer *materials_buffer = nullptr;
+
+	void create_materials_buffer(SDL_GPUDevice *device);
+};
+
+}  // namespace lili
+```
+
+### src/render/pipelines/ui_pipeline.cpp
+```
+#include "render/pipelines/ui_pipeline.hpp"
+
+#include <vector>
+#include <stdexcept>
+
+#include "render/core/shader.hpp"
+
+namespace lili {
+
+UIPipeline::UIPipeline(
+	SDL_GPUDevice *device, SDL_Window *window, Shader *shader
+) {
+	this->device = device;
+	this->window = window;
+	this->shader = shader;
+
+	SDL_GPUVertexBufferDescription vertex_buffer_desc{
+		.slot = 0,
+		.pitch = sizeof(float) * 10,
+		.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
+		.instance_step_rate = 0
+	};
+	std::vector<SDL_GPUVertexAttribute> vertex_attributes{
+		(SDL_GPUVertexAttribute){
+			.location = 0,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+			.offset = 0
+		},
+		(SDL_GPUVertexAttribute){
+			.location = 2,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+			.offset = sizeof(float) * 6
+		},
+		(SDL_GPUVertexAttribute){
+			.location = 3,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,
+			.offset = sizeof(float) * 8
+		}
+	};
+	SDL_GPUColorTargetDescription color_target_desc{
+		.format = SDL_GetGPUSwapchainTextureFormat(device, window),
+		.blend_state = {
+			.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+			.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+			.color_blend_op = SDL_GPU_BLENDOP_ADD,
+			.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_ALPHA,
+			.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+			.alpha_blend_op = SDL_GPU_BLENDOP_ADD,
+			.color_write_mask = SDL_GPU_COLORCOMPONENT_R |
+				SDL_GPU_COLORCOMPONENT_G |
+				SDL_GPU_COLORCOMPONENT_B |
+				SDL_GPU_COLORCOMPONENT_A,
+			.enable_blend = true,
+			.enable_color_write_mask = true,
+		}
+	};
+	SDL_GPUGraphicsPipelineCreateInfo create_info{
+		.vertex_shader = shader->get_vertex(),
+		.fragment_shader = shader->get_fragment(),
+		.vertex_input_state = {
+			.vertex_buffer_descriptions = &vertex_buffer_desc,
+			.num_vertex_buffers = 1,
+			.vertex_attributes = vertex_attributes.data(),
+			.num_vertex_attributes = static_cast<uint32_t>(
+				vertex_attributes.size()
+			)
+		},
+		.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+		.rasterizer_state = {
+			.fill_mode = SDL_GPU_FILLMODE_FILL,
+			.cull_mode = SDL_GPU_CULLMODE_NONE,
+			.front_face = SDL_GPU_FRONTFACE_CLOCKWISE,
+		},
+		.multisample_state = {
+			.sample_count = SDL_GPU_SAMPLECOUNT_1,
+		},
+		.depth_stencil_state = {
+			.compare_op = SDL_GPU_COMPAREOP_ALWAYS,
+			.back_stencil_state = { SDL_GPU_STENCILOP_ZERO },
+			.front_stencil_state = { SDL_GPU_STENCILOP_ZERO },
+			.compare_mask = 0,
+			.write_mask = 0,
+			.enable_depth_test = false,
+			.enable_depth_write = false,
+			.enable_stencil_test = false
+		},
+		.target_info = {
+			.color_target_descriptions = &color_target_desc,
+			.num_color_targets = 1,
+			.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+			.has_depth_stencil_target = true
+		},
+		.props = 0
+	};
+	pipeline = SDL_CreateGPUGraphicsPipeline(device, &create_info);
+	if (!pipeline) {
+		throw std::runtime_error(
+			"UI graphics pipeline creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+}
+
+UIPipeline::~UIPipeline() {
+	if (pipeline) SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+}
+
+SDL_GPUGraphicsPipeline *UIPipeline::get_sdl_pipeline() {
+	return pipeline;
+}
+
+}  // namespace lili
+```
+
+### src/render/pipelines/ui_pipeline.hpp
+```
+/// UI pipeline setup.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+
+namespace lili {
+
+class Shader;
+
+class UIPipeline {
+public:
+	/// Create a UI graphics pipeline.
+	UIPipeline(SDL_GPUDevice *device, SDL_Window *window, Shader *shader);
+	/// Destroy the pipeline.
+	~UIPipeline();
+
+	/// Get the SDL graphics pipeline handle.
+	SDL_GPUGraphicsPipeline *get_sdl_pipeline();
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_Window *window = nullptr;
+	Shader *shader = nullptr;
+
+	SDL_GPUGraphicsPipeline *pipeline = nullptr;
+};
+
+}  // namespace lili
+```
+
+### src/render/pipelines/world_pipeline.cpp
+```
+#include "render/pipelines/world_pipeline.hpp"
+
+#include <vector>
+#include <stdexcept>
+
+#include "render/core/shader.hpp"
+
+namespace lili {
+
+WorldPipeline::WorldPipeline(
+	SDL_GPUDevice *device, SDL_Window *window, Shader *shader
+) {
+	this->device = device;
+	this->window = window;
+	this->shader = shader;
+
+	SDL_GPUVertexBufferDescription vertex_buffer_desc{
+		.slot = 0,
+		.pitch = sizeof(float) * 10,
+		.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX,
+		.instance_step_rate = 0
+	};
+	std::vector<SDL_GPUVertexAttribute> vertex_attributes{
+		(SDL_GPUVertexAttribute){
+			.location = 0,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+			.offset = 0
+		},
+		(SDL_GPUVertexAttribute){
+			.location = 1,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3,
+			.offset = sizeof(float) * 3
+		},
+		(SDL_GPUVertexAttribute){
+			.location = 2,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2,
+			.offset = sizeof(float) * 6
+		},
+		(SDL_GPUVertexAttribute){
+			.location = 3,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,
+			.offset = sizeof(float) * 8
+		},
+		(SDL_GPUVertexAttribute){
+			.location = 4,
+			.buffer_slot = 0,
+			.format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT,
+			.offset = sizeof(float) * 9
+		}
+	};
+	SDL_GPUColorTargetDescription color_target_desc{
+		.format = SDL_GetGPUSwapchainTextureFormat(device, window),
+		.blend_state = {
+			.src_color_blendfactor = SDL_GPU_BLENDFACTOR_SRC_COLOR,
+			.dst_color_blendfactor = SDL_GPU_BLENDFACTOR_DST_COLOR,
+			.color_blend_op = SDL_GPU_BLENDOP_ADD,
+			.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_SRC_COLOR,
+			.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_DST_COLOR,
+			.alpha_blend_op = SDL_GPU_BLENDOP_ADD,
+			.color_write_mask = SDL_GPU_COLORCOMPONENT_R |
+				SDL_GPU_COLORCOMPONENT_G |
+				SDL_GPU_COLORCOMPONENT_B |
+				SDL_GPU_COLORCOMPONENT_A,
+			.enable_blend = false,
+			.enable_color_write_mask = true,
+		}
+	};
+	SDL_GPUGraphicsPipelineCreateInfo create_info{
+		.vertex_shader = shader->get_vertex(),
+		.fragment_shader = shader->get_fragment(),
+		.vertex_input_state = {
+			.vertex_buffer_descriptions = &vertex_buffer_desc,
+			.num_vertex_buffers = 1,
+			.vertex_attributes = vertex_attributes.data(),
+			.num_vertex_attributes = static_cast<uint32_t>(
+				vertex_attributes.size()
+			)
+		},
+		.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST,
+		.rasterizer_state = {
+			.fill_mode = SDL_GPU_FILLMODE_FILL,
+			.cull_mode = SDL_GPU_CULLMODE_BACK,
+			.front_face = SDL_GPU_FRONTFACE_CLOCKWISE,
+		},
+		.multisample_state = {
+			.sample_count = SDL_GPU_SAMPLECOUNT_1,
+		},
+		.depth_stencil_state = {
+			.compare_op = SDL_GPU_COMPAREOP_LESS_OR_EQUAL,
+			.back_stencil_state = { SDL_GPU_STENCILOP_ZERO },
+			.front_stencil_state = { SDL_GPU_STENCILOP_ZERO },
+			.compare_mask = 0,
+			.write_mask = 0,
+			.enable_depth_test = true,
+			.enable_depth_write = true,
+			.enable_stencil_test = false
+		},
+		.target_info = {
+			.color_target_descriptions = &color_target_desc,
+			.num_color_targets = 1,
+			.depth_stencil_format = SDL_GPU_TEXTUREFORMAT_D32_FLOAT,
+			.has_depth_stencil_target = true
+		},
+		.props = 0
+	};
+	pipeline = SDL_CreateGPUGraphicsPipeline(device, &create_info);
+	if (!pipeline) {
+		throw std::runtime_error(
+			"Chunk graphics pipeline creation failed!\n-> " +
+			std::string(SDL_GetError())
+		);
+	}
+}
+
+WorldPipeline::~WorldPipeline() {
+	if (pipeline) SDL_ReleaseGPUGraphicsPipeline(device, pipeline);
+}
+
+SDL_GPUGraphicsPipeline *WorldPipeline::get_sdl_pipeline() {
+	return pipeline;
+}
+
+}  // namespace lili
+```
+
+### src/render/pipelines/world_pipeline.hpp
+```
+/// World pipeline setup.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+
+namespace lili {
+
+class Shader;
+
+class WorldPipeline {
+public:
+	/// Create a world graphics pipeline.
+	WorldPipeline(SDL_GPUDevice *device, SDL_Window *window, Shader *shader);
+	/// Destroy the pipeline.
+	~WorldPipeline();
+
+	/// Get the SDL graphics pipeline handle.
+	SDL_GPUGraphicsPipeline *get_sdl_pipeline();
+
+private:
+	SDL_GPUDevice *device = nullptr;
+	SDL_Window *window = nullptr;
+	Shader *shader = nullptr;
+
+	SDL_GPUGraphicsPipeline *pipeline = nullptr;
+};
+
+}  // namespace lili
+```
+
+### src/render/scene/camera.cpp
+```
+#include <cmath>
+#include "render/scene/camera.hpp"
+#include "geometry/utils.hpp"
+
+namespace lili {
+
+bool Frustum::contains(const AABB &box) const {
+	for (const auto& plane : planes) {
+		Vec3 positive = {
+			plane.x >= 0 ? box.max.x : box.min.x,
+			plane.y >= 0 ? box.max.y : box.min.y,
+			plane.z >= 0 ? box.max.z : box.min.z,
+		};
+		if (plane.x*positive.x + plane.y*positive.y + plane.z*positive.z + plane.w < 0)
+			return false;
+	}
+	return true;
+}
+
+Camera::Camera() {
+	this->yaw = -90.0f;
+	this->pitch = 0.0f;
+	update_vectors();
+	this->fov_y = 70.0f;
+}
+
+void Camera::set_rotation(float new_yaw, float new_pitch) {
+	yaw = new_yaw;
+	pitch = new_pitch;
+	update_vectors();
+}
+
+void Camera::set_fov(float degree) {
+	fov_y = degree;
+}
+
+void Camera::process_mouse(float x_offset, float y_offset) {
+	yaw += x_offset * mouse_sensitivity;
+	pitch -= y_offset * mouse_sensitivity;
+
+	if (pitch > 89.0f) pitch = 89.0f;
+	if (pitch < -89.0f) pitch = -89.0f;
+
+	update_vectors();
+}
+
+Mat4 Camera::get_view_matrix() const {
+	return Mat4::look_at(position, position + front, up);
+}
+
+static Frustum extract_frustum(const Mat4 &view_projection) {
+	Frustum frustum;
+
+	frustum.planes[0] = (Vec4){
+		view_projection.m[3] + view_projection.m[0],
+		view_projection.m[7] + view_projection.m[4],
+		view_projection.m[11] + view_projection.m[8],
+		view_projection.m[15] + view_projection.m[12]
+	}.normalized();
+	frustum.planes[1] = (Vec4){
+		view_projection.m[3] - view_projection.m[0],
+		view_projection.m[7] - view_projection.m[4],
+		view_projection.m[11] - view_projection.m[8],
+		view_projection.m[15] - view_projection.m[12]
+	}.normalized();
+	frustum.planes[2] = (Vec4){
+		view_projection.m[3] + view_projection.m[1],
+		view_projection.m[7] + view_projection.m[5],
+		view_projection.m[11] + view_projection.m[9],
+		view_projection.m[15] + view_projection.m[13]
+	}.normalized();
+	frustum.planes[3] = (Vec4){
+		view_projection.m[3] - view_projection.m[1],
+		view_projection.m[7] - view_projection.m[5],
+		view_projection.m[11] - view_projection.m[9],
+		view_projection.m[15] - view_projection.m[13]
+	}.normalized();
+	frustum.planes[4] = (Vec4){
+		view_projection.m[3] + view_projection.m[2],
+		view_projection.m[7] + view_projection.m[6],
+		view_projection.m[11] + view_projection.m[10],
+		view_projection.m[15] + view_projection.m[14]
+	}.normalized();
+	frustum.planes[5] = (Vec4){
+		view_projection.m[3] - view_projection.m[2],
+		view_projection.m[7] - view_projection.m[6],
+		view_projection.m[11] - view_projection.m[10],
+		view_projection.m[15] - view_projection.m[14]
+	}.normalized();
+
+	return frustum;
+}
+
+Mat4 Camera::get_projection(float aspect_ratio) const {
+	return Mat4::perspective(fov_y, aspect_ratio, near_dist, far_dist);
+}
+
+Frustum Camera::get_frustum(float aspect_ratio) const {
+	Mat4 vp = get_projection(aspect_ratio) * get_view_matrix();
+	return extract_frustum(vp);
+}
+
+void Camera::update_vectors() {
+	Vec3 new_front;
+
+	new_front.x = std::cos(deg_to_rad(pitch)) * std::cos(deg_to_rad(yaw));
+	new_front.y = std::sin(deg_to_rad(pitch));
+	new_front.z = std::cos(deg_to_rad(pitch)) * std::sin(deg_to_rad(yaw));
+
+	front = new_front.normalized();
+	right = front.cross({ 0.0f, 1.0f, 0.0f }).normalized();
+	up = right.cross(front).normalized();
+}
+
+}  // namespace lili
+```
+
+### src/render/scene/camera.hpp
+```
+/// Camera data and controls.
+#pragma once
+
+#include "geometry/vec3.hpp"
+#include "geometry/vec4.hpp"
+#include "geometry/mat4x4.hpp"
+#include "physics/collision.hpp"
+
+namespace lili {
+
+struct Frustum {
+	Vec4 planes[6];
+
+	/// Check box intersection with the frustum.
+	bool contains(const AABB &box) const;
+};
+
+class Camera {
+public:
+	/// Create a camera with default orientation.
+	Camera();
+	/// Destroy the camera.
+	~Camera() = default;
+
+	Vec3 position = { 0.0f, 0.0f, 0.0f };
+	Vec3 front = { 0.0f, 0.0f, -1.0f };
+	Vec3 right = { 1.0f, 0.0f,  0.0f };
+	Vec3 up    = { 0.0f, 1.0f,  0.0f };
+
+	float yaw = -90.0f;
+	float pitch = 0.0f;
+	float mouse_sensitivity = 0.1f;
+
+	float fov_y = 90.0f;
+	float near_dist = 0.3f;
+	float far_dist = 100.0f;
+
+	/// Set camera yaw and pitch.
+	void set_rotation(float new_yaw, float new_pitch);
+	/// Set vertical field of view in degrees.
+	void set_fov(float degree);
+	/// Update camera orientation from mouse deltas.
+	void process_mouse(float offset_x, float offset_y);
+	/// Build the view matrix.
+	Mat4 get_view_matrix() const;
+	/// Get projection
+	Mat4 get_projection(float aspect_ratio) const;
+	/// Get the frustum faces.
+	Frustum get_frustum(float aspect_ratio) const;
+
+private:
+	void update_vectors();
+};
+
+}  // namespace lili
+```
+
+### src/render/scene/directional_light.cpp
+```
+#include "render/scene/directional_light.hpp"
+
+namespace lili {
+
+DirectionalLight::DirectionalLight() {
+	direction = Vec3{ -0.5f, -1.0f, -0.3f }.normalized();
+	color = { 1.0f, 1.0f, 0.9f, 0.75f };
+	shadow_distance = 100.0f;
+	orthogonal_half = 50.0f;
+	update_focus({ 0.0f, 0.0f, 0.0f });
+}
+
+void DirectionalLight::set_direction(const Vec3 &dir) {
+	direction = dir.normalized();
+}
+
+void DirectionalLight::set_color(const Vec4 &rgba) {
+	color = rgba;
+}
+
+void DirectionalLight::set_shadow_distance(float value) {
+	shadow_distance = value;
+}
+
+void DirectionalLight::set_orthogonal_half(float value) {
+	orthogonal_half = value;
+}
+
+void DirectionalLight::update_focus(const Vec3 &target_point) {
+	focus_point = target_point;
+	position = focus_point - direction * shadow_distance;
+
+	Vec3 up_vector = (direction.y > 0.0f) ?
+		Vec3{ 0.0f, -1.0f, 0.0f } : Vec3{ 0.0f, 1.0f, 0.0f };
+
+	view = Mat4::look_at(position, focus_point, up_vector);
+	projection = Mat4::orthographic(
+		-orthogonal_half, orthogonal_half,
+		orthogonal_half, -orthogonal_half,
+		0.1f, shadow_distance * 2.0f
+	);
+	projection_view = projection * view;
+}
+
+Vec3 DirectionalLight::get_direction() const {
+	return direction;
+}
+
+Vec4 DirectionalLight::get_color() const {
+	return color;
+}
+
+Mat4 DirectionalLight::get_projection_view() const {
+	return projection_view;
+}
+
+}  // namespace lili
+```
+
+### src/render/scene/directional_light.hpp
+```
+/// Directional light parameters.
+#pragma once
+
+#include "geometry/vec3.hpp"
+#include "geometry/vec4.hpp"
+#include "geometry/mat4x4.hpp"
+
+namespace lili {
+
+class DirectionalLight {
+public:
+	/// Create a directional light with defaults.
+	DirectionalLight();
+	/// Destroy the directional light.
+	~DirectionalLight() = default;
+
+	/// Set the light direction.
+	void set_direction(const Vec3 &dir);
+	/// Set the light color and intensity.
+	void set_color(const Vec4 &rgba);
+	/// Set the shadow distance for the light volume.
+	void set_shadow_distance(float value);
+	/// Set the orthographic half-size of the light volume.
+	void set_orthogonal_half(float value);
+	/// Recenter the light on a target point.
+	void update_focus(const Vec3 &target_point);
+
+	/// Get the light direction.
+	Vec3 get_direction() const;
+	/// Get the light color.
+	Vec4 get_color() const;
+	/// Get the light projection-view matrix.
+	Mat4 get_projection_view() const;
+
+private:
+	Vec3 direction;
+	Vec4 color;
+	float shadow_distance;
+	float orthogonal_half;
+	Vec3 focus_point;
+	Vec3 position;
+
+	Mat4 view;
+	Mat4 projection;
+	Mat4 projection_view;
+};
+
+}  // namespace lili
+```
+
+### src/render/scene/model.cpp
+```
+#include "render/scene/model.hpp"
+
+namespace lili {
+
+Model::Model() {
+	mesh = nullptr;
+	material = nullptr;
+}
+
+Model::Model(GPUMesh *mesh, Material *material) {
+	this->mesh = mesh;
+	this->material = material;
+}
+
+}  // namespace lili
+```
+
+### src/render/scene/model.hpp
+```
+/// Model scene object.
+#pragma once
+
+#include "render/core/gpu_mesh.hpp"
+#include "world/material.hpp"
+
+namespace lili {
+
+struct Model {
+	GPUMesh *mesh;
+	Material *material;
+
+	/// Create an empty model.
+	Model();
+	/// Create a model from mesh and material.
+	Model(GPUMesh *mesh, Material *material);
+};
+
+}  // namespace lili
+```
+
+### src/render/scene/sprite.cpp
+```
+#include "render/scene/sprite.hpp"
+
+namespace lili {
+
+Sprite::Sprite() {
+	texture = nullptr;
+	material = nullptr;
+	mesh = nullptr;
+	model = {};
+	position = {};
+	scale = {};
+	rotation = {};
+}
+
+void Sprite::set_texture(Renderer *renderer, const std::string &path) {
+	texture = std::make_unique<Texture>(renderer->get_device(), path);
+	material = std::make_unique<Material>(texture.get());
+	material->properties.color_tint = { 1.0f, 1.0f, 1.0f, 1.0f };
+
+	MeshData mesh_data = create_unit_quad();
+	mesh = std::make_unique<GPUMesh>(renderer->get_device(), mesh_data);
+	model = Model(mesh.get(), material.get());
+}
+
+void Sprite::set_position(Vec3 position) {
+	this->position = position;
+}
+
+void Sprite::set_scale(Vec3 scale) {
+	this->scale = scale;
+}
+
+void Sprite::set_rotation(Vec3 rotation) {
+	this->rotation = rotation;
+}
+
+void Sprite::draw(Renderer *renderer) {
+	Mat4 mat_transform = (
+		Mat4::translate(position) *
+		Mat4::scale(scale) *
+		Mat4::rotation_xyz(rotation)
+	);
+	renderer->submit(model, mat_transform, RenderLayer::UI2D);
+}
+
+}  // namespace lili
+```
+
+### src/render/scene/sprite.hpp
+```
+/// Sprite scene object.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+#include <string>
+#include <memory>
+
+#include "render/renderer.hpp"
+#include "render/core/texture.hpp"
+#include "world/material.hpp"
+
+namespace lili {
+
+class Sprite {
+public:
+	/// Create a sprite.
+	Sprite();
+	/// Destroy the sprite.
+	~Sprite() = default;
+
+	/// Set the sprite texture from a file path.
+	void set_texture(Renderer *renderer, const std::string &path);
+	/// Set the sprite position.
+	void set_position(Vec3 position);
+	/// Set the sprite scale.
+	void set_scale(Vec3 scale);
+	/// Set the sprite rotation.
+	void set_rotation(Vec3 rotation);
+	/// Draw the sprite.
+	void draw(Renderer *renderer);
+
+private:
+	std::unique_ptr<Texture> texture = nullptr;
+	std::unique_ptr<Material> material = nullptr;
+	std::unique_ptr<GPUMesh> mesh = nullptr;
+	Model model;
+
+	Vec3 position;
+	Vec3 scale;
+	Vec3 rotation;
+};
+
+}  // namespace lili
+```
+
+### src/render/scene/ui_text.cpp
+```
+#include "render/scene/ui_text.hpp"
+
+namespace lili {
+
+BitmapFont::BitmapFont() {
+	texture = nullptr;
+	cols = 16;
+	rows = 16;
+}
+
+void BitmapFont::set_atlas_map(Renderer *renderer, const std::string &path) {
+	texture = std::make_unique<Texture>(renderer->get_device(), path);
+}
+
+void BitmapFont::set_size(uint8_t cols, uint8_t rows) {
+	this->cols = cols;
+	this->rows = rows;
+}
+
+Texture *BitmapFont::get_texture() const {
+	return texture.get();
+}
+
+GlyphUV BitmapFont::glyph_uv(char c) const {
+	const int ascii = static_cast<unsigned char>(c);
+	const int first = static_cast<unsigned char>(' ');
+	int idx = ascii - first;
+	if (ascii < first || ascii > 126)
+		idx = '?' - first;
+	const int current_x = idx % cols;
+	const int current_y = idx / cols;
+	const float delta_u = 1.0f / static_cast<float>(cols);
+	const float delta_v = 1.0f / static_cast<float>(rows);
+
+	return (GlyphUV){
+		current_x * delta_u,
+		current_y * delta_v,
+		(current_x + 1) * delta_u,
+		(current_y + 1) * delta_v
+	};
+}
+
+UIText::UIText(
+	Renderer *renderer, BitmapFont *font, const std::string &text
+) {
+	this->renderer = renderer;
+	this->font = font;
+	this->text = text;
+	material = std::make_unique<Material>(font->get_texture());
+	material->properties.color_tint = { 1.0f, 1.0f, 1.0f, 1.0f };
+	rebuild_mesh();
+}
+
+void UIText::set_text(const std::string &value) {
+	if (value == text) return;
+	text = value;
+	rebuild_mesh();
+}
+
+void UIText::draw(const Vec3 &position) {
+	if (!mesh) return;
+	Mat4 translation = Mat4::translate(position);
+	Mat4 scaling = Mat4::scale({ scale, scale, 1.0f });
+	Mat4 transform = translation * scaling;
+	renderer->submit(model, transform, RenderLayer::UI2D);
+}
+
+void UIText::rebuild_mesh() {
+	MeshData mesh_data;
+	mesh_data.vertices.reserve(text.size() * 4);
+	mesh_data.indices.reserve(text.size() * 6);
+
+	float offset_x = 0.0f;
+	float offset_y = 0.0f;
+	uint32_t base = 0;
+
+	for (char c : text) {
+		if (c == '\n') {
+			offset_x = 0.0;
+			offset_y += glyph_h;
+			continue;
+		}
+
+		GlyphUV uv = font->glyph_uv(c);
+
+		mesh_data.vertices.push_back((Vertex){
+			.x = offset_x, .y = offset_y, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = uv.u0, .v = uv.v0,
+			.material_id = 0
+		});
+		mesh_data.vertices.push_back((Vertex){
+			.x = offset_x + glyph_w, .y = offset_y, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = uv.u1, .v = uv.v0,
+			.material_id = 0
+		});
+		mesh_data.vertices.push_back((Vertex){
+			.x = offset_x + glyph_w, .y = offset_y - glyph_h, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = uv.u1, .v = uv.v1,
+			.material_id = 0
+		});
+		mesh_data.vertices.push_back((Vertex){
+			.x = offset_x, .y = offset_y - glyph_h, .z = 0.0f,
+			.nx = 0.0f, .ny = 0.0f, .nz = 0.0f,
+			.u = uv.u0, .v = uv.v1,
+			.material_id = 0
+		});
+
+		mesh_data.indices.push_back(base + 0);
+		mesh_data.indices.push_back(base + 1);
+		mesh_data.indices.push_back(base + 2);
+		mesh_data.indices.push_back(base + 2);
+		mesh_data.indices.push_back(base + 3);
+		mesh_data.indices.push_back(base + 0);
+		base += 4;
+
+		offset_x += advance;
+	}
+
+	mesh = std::make_unique<GPUMesh>(renderer->get_device(), mesh_data);
+	model = Model(mesh.get(), material.get());
+}
+
+}  // namespace lili
+```
+
+### src/render/scene/ui_text.hpp
+```
+/// UI text scene object.
+#pragma once
+
+#include <SDL3/SDL_gpu.h>
+#include <string>
+#include <memory>
+
+#include "render/core/texture.hpp"
+#include "world/material.hpp"
+#include "render/core/gpu_mesh.hpp"
+#include "render/scene/model.hpp"
+#include "geometry/vec3.hpp"
+#include "render/renderer.hpp"
+
+namespace lili {
+
+struct GlyphUV {
+	float u0, v0, u1, v1;
+};
+
+class BitmapFont {
+public:
+	/// Create a bitmap font.
+	BitmapFont();
+	/// Destroy the bitmap font.
+	~BitmapFont() = default;
+
+	/// Set the font atlas texture from a file path.
+	void set_atlas_map(Renderer *renderer, const std::string &path);
+	/// Set the atlas grid size (columns/rows).
+	void set_size(uint8_t cols, uint8_t rows);
+
+	/// Get the atlas texture.
+	Texture *get_texture() const;
+	/// Get UV coordinates for a glyph.
+	GlyphUV glyph_uv(char c) const;
+
+private:
+	std::unique_ptr<Texture> texture;
+	int cols;
+	int rows;
+};
+
+class UIText {
+public:
+	/// Create a UI text object.
+	UIText(Renderer *renderer, BitmapFont *font, const std::string &text);
+
+	float scale = 3.0f;
+	float glyph_w = 5.0f;
+	float glyph_h = 8.0f;
+	float advance = 6.0f;
+
+	/// Set the displayed text.
+	void set_text(const std::string &value);
+	/// Draw the text at a world-space position.
+	void draw(const Vec3 &position);
+
+private:
+	Renderer *renderer = nullptr;
+	BitmapFont *font = nullptr;
+	std::string text;
+
+	std::unique_ptr<Material> material;
+	std::unique_ptr<GPUMesh> mesh;
+	Model model;
+
+	void rebuild_mesh();
+};
+
+}  // namespace lili
+```

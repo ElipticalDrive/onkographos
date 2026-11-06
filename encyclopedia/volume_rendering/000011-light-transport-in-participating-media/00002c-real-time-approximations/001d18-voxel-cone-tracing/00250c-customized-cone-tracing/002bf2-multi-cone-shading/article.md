@@ -1,0 +1,151 @@
+# Multi-Cone Shading
+
+Also called: Multi-Directional Cone Shading
+
+## Overview
+Multi-Cone Shading is a real-time approximation technique for diffuse interreflection in participating media, specifically designed to improve the quality of indirect lighting computed via Voxel Cone Tracing. While standard cone tracing samples a single direction (typically the surface normal), Multi-Cone Shading casts five cones in distinct directions from a surface point and averages the results to approximate diffuse lighting from multiple angles [S1, unofficial]. It distinguishes itself from its sibling [Two-Bounce Indirect Illumination](4558-two-bounce-indirect-illumination.md) by focusing on the angular distribution of the initial diffuse bounce rather than simulating secondary bounces, and from [Diffuse Cone Distribution](5677-diffuse-cone-distribution.md) by using a fixed, discrete set of five directions rather than a continuous distribution model.
+
+## How it works
+The method extends the standard Voxel Cone Tracing algorithm by introducing multi-directional sampling. It operates by defining a local coordinate system aligned with the surface geometry, generating five base cone directions within this local space, rotating them to world space, and accumulating the radiance from each direction.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `pp`: The 3D position of the surface point in world space.
+    *   `direction`: The surface normal vector at `pp` (or view direction, depending on implementation context, but typically normal for diffuse shading) [S1, unofficial].
+    *   `coneAngle`: The half-angle of the cone used for tracing, passed to the underlying `voxelConeTracing` function [S1, unofficial].
+    *   `coneRotation`: A uniform float representing the rotation angle in radians, used to offset the cone directions to avoid symmetry artifacts [S1, unofficial].
+*   **Outputs**:
+    *   `color`: A 4-component vector (RGBA) representing the accumulated diffuse indirect lighting.
+
+### Data Structures
+No complex data structures are required beyond standard 3D vectors and 3x3 rotation matrices. The core data is the set of five direction vectors.
+
+### Steps
+1.  **Calculate Trigonometric Values**: Compute the sine and cosine of the `coneRotation` angle.
+    $$ s = \sin(\text{coneRotation}) $$
+    $$ c = \cos(\text{coneRotation}) $$
+2.  **Define Base Directions**: Construct five base direction vectors in a local coordinate system where the Z-axis is the primary reference. The directions are defined as follows [S1, unofficial]:
+    $$ \text{dir}_1 = (0, 0, 1) $$
+    $$ \text{dir}_2 = (s, 0, c) $$
+    $$ \text{dir}_3 = (-s, 0, c) $$
+    $$ \text{dir}_4 = (0, s, c) $$
+    $$ \text{dir}_5 = (0, -s, c) $$
+    *Note: Some implementations may define these relative to a different local axis, but the relative geometry remains a spread around the primary axis.*
+3.  **Construct Rotation Matrix**: Build a 3x3 rotation matrix `rot` that transforms vectors from the local space (where `dir_1` is aligned with Z) to world space, aligning the local Z-axis with the `direction` (surface normal).
+    *   Let `zAxis` = `direction` (normalized).
+    *   Let `UP` = $(0, 1, 0)$.
+    *   Check for gimbal lock: If $|\text{dot}(\text{UP}, \text{zAxis})| < 0.9$, proceed with standard cross products. Otherwise, switch `UP` to $(0, 0, 1)$ to avoid numerical instability [S1, unofficial].
+    *   Calculate `xAxis` = $\text{normalize}(\text{cross}(\text{UP}, \text{zAxis}))$.
+    *   Calculate `yAxis` = $\text{cross}(\text{zAxis}, \text{xAxis})$.
+    *   The rotation matrix `rot` is formed by these basis vectors:
+        $$ \text{rot} = \begin{bmatrix} \text{xAxis}_x & \text{yAxis}_x & \text{zAxis}_x \\ \text{xAxis}_y & \text{yAxis}_y & \text{zAxis}_y \\ \text{xAxis}_z & \text{yAxis}_z & \text{zAxis}_z \end{bmatrix} $$
+4.  **Transform Directions**: Rotate each base direction into world space:
+    $$ \text{dir}_i^{\text{world}} = \text{rot} \times \text{dir}_i \quad \text{for } i \in \{1, 2, 3, 4, 5\} $$
+5.  **Accumulate Cone Tracing Results**: Initialize an accumulator and cast a cone for each direction using the `voxelConeTracing` function (as defined in [Customized Cone Tracing](3447-customized-cone-tracing.md)).
+    $$ \text{color} = \text{voxelConeTracing}(pp, \text{dir}_1^{\text{world}}, \text{coneAngle}) $$
+    $$ \text{color} += \text{voxelConeTracing}(pp, \text{dir}_2^{\text{world}}, \text{coneAngle}) $$
+    $$ \text{color} += \text{voxelConeTracing}(pp, \text{dir}_3^{\text{world}}, \text{coneAngle}) $$
+    $$ \text{color} += \text{voxelConeTracing}(pp, \text{dir}_4^{\text{world}}, \text{coneAngle}) $$
+    $$ \text{color} += \text{voxelConeTracing}(pp, \text{dir}_5^{\text{world}}, \text{coneAngle}) $$
+6.  **Average**: Divide the accumulated color by 5 to get the final result.
+    $$ \text{color} = \text{color} / 5.0 $$
+7.  **Return**: Output the averaged `color`.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_cone_shading(pp, direction, cone_angle, cone_rotation):
+    """
+    Approximates diffuse interreflection by casting 5 cones in different directions.
+    
+    Args:
+        pp: vec3, surface position.
+        direction: vec3, surface normal.
+        cone_angle: float, half-angle of the cone.
+        cone_rotation: float, rotation angle in radians.
+        
+    Returns:
+        vec4, accumulated and averaged diffuse color.
+    """
+    # 1. Calculate sine and cosine of cone rotation
+    s = sin(cone_rotation)
+    c = cos(cone_rotation)
+    
+    # 2. Define base directions in local space
+    dir1 = vec3(0.0, 0.0, 1.0)
+    dir2 = vec3(s, 0.0, c)
+    dir3 = vec3(-s, 0.0, c)
+    dir4 = vec3(0.0, s, c)
+    dir5 = vec3(0.0, -s, c)
+    
+    # 3. Construct rotation matrix from world normal
+    z_axis = normalize(direction)
+    up = vec3(0.0, 1.0, 0.0)
+    
+    # Handle gimbal lock
+    if abs(dot(up, z_axis)) < 0.9:
+        x_axis = normalize(cross(up, z_axis))
+        y_axis = cross(z_axis, x_axis)
+    else:
+        up = vec3(0.0, 0.0, 1.0)
+        x_axis = normalize(cross(up, z_axis))
+        y_axis = cross(z_axis, x_axis)
+        
+    # Build rotation matrix (columns are x, y, z axes)
+    rot = mat3(x_axis, y_axis, z_axis)
+    
+    # 4. Transform base directions to world space
+    w_dir1 = rot * dir1
+    w_dir2 = rot * dir2
+    w_dir3 = rot * dir3
+    w_dir4 = rot * dir4
+    w_dir5 = rot * dir5
+    
+    # 5. Cast cones and accumulate
+    # voxelConeTracing is assumed to be defined in [Customized Cone Tracing](3447-customized-cone-tracing.md)
+    color = voxel_cone_tracing(pp, w_dir1, cone_angle)
+    color += voxel_cone_tracing(pp, w_dir2, cone_angle)
+    color += voxel_cone_tracing(pp, w_dir3, cone_angle)
+    color += voxel_cone_tracing(pp, w_dir4, cone_angle)
+    color += voxel_cone_tracing(pp, w_dir5, cone_angle)
+    
+    # 6. Average
+    color = color / 5.0
+    
+    return color
+```
+
+### Parameters and Typical Values
+*   `coneAngle`: Controlled by the user or derived from the voxel grid resolution. Typical values depend on the voxel size; larger voxels require larger cone angles to capture sufficient light [S1, unofficial].
+*   `coneRotation`: A small random or fixed offset to break symmetry. Not given in the sources.
+*   `pp`: Varies per pixel.
+*   `direction`: Varies per pixel (surface normal).
+
+### Edge Cases and Pitfalls
+*   **Gimbal Lock**: When the surface normal is parallel to the up vector (e.g., top/bottom of a sphere), the cross product for the X-axis becomes zero. The algorithm explicitly checks $|\text{dot}(\text{UP}, \text{zAxis})| < 0.9$ and switches the up vector to $(0,0,1)$ to maintain numerical stability [S1, unofficial].
+*   **Precision**: Floating-point precision errors in the rotation matrix construction can lead to non-orthogonal basis vectors. Normalization of axes is critical.
+*   **Boundary Conditions**: If the surface point is outside the voxel grid, `voxelConeTracing` should return black or zero.
+
+## Subtopics
+
+### [Two-Bounce Indirect Illumination](4558-two-bounce-indirect-illumination.md)
+Simulates secondary bounces of light. Choose when global illumination depth is more important than angular resolution of the first bounce.
+
+### [Diffuse Cone Distribution](5677-diffuse-cone-distribution.md)
+Uses a continuous distribution of cone directions. Choose when smoother angular sampling is needed and performance allows for more complex integration.
+
+## Operating characteristics
+*   **Time Complexity**: $O(5 \cdot N)$, where $N$ is the cost of a single `voxelConeTracing` call. It is 5 times more expensive than single-direction cone tracing.
+*   **Memory Complexity**: $O(1)$ additional memory per pixel, as it reuses the same voxel data structure.
+*   **Performance**: Measured performance depends heavily on the underlying `voxelConeTracing` implementation. On modern GPUs, 5 samples per pixel for indirect lighting can be significant. [S1, unofficial] does not provide specific frame rates, but notes it is used in real-time WebGPU contexts.
+*   **Strengths**: Significantly improves the visual quality of diffuse interreflection compared to single-direction tracing by reducing shadowing artifacts and providing a more isotropic appearance.
+*   **Limitations**: 5x the computational cost of single-direction tracing. Still an approximation; does not capture complex indirect lighting paths beyond the first bounce.
+*   **When to use**: When high-quality diffuse interreflection is required in real-time applications and single-direction cone tracing produces overly dark or shadowed results.
+*   **When not to use**: When performance is critical and single-direction tracing is sufficient, or when full global illumination is required.
+
+## Background
+Multi-Cone Shading is an informal technique implemented in the open-source project [WebGPUVoxelConeTracing](https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing) by Hector Arellano [S1, unofficial]. It builds upon the principles of Voxel Cone Tracing, a technique popularized by Matt Pettineo for real-time global illumination. The specific multi-directional approach is a heuristic to improve the approximation of the diffuse integral without resorting to more expensive methods like spherical harmonics or light propagation volumes. It is not attributed to a specific peer-reviewed paper in the provided sources.
+
+## Sources
+[S1] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)

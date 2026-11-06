@@ -1,0 +1,118 @@
+# Nonlinear Conductivity Filter
+
+Also called: Proposed Nonlinear Conductivity Filter, Signed Difference Conductivity
+
+## Overview
+The Nonlinear Conductivity Filter is a variation of nonlinear diffusion used in scale-space computation for volume rendering to improve scale detection [S1, unofficial]. Unlike the standard Perona-Malik filter which stops diffusion at edges (causing false maxima), this method controls diffusion direction to favor movement towards the medial axis and prevent edge crossing [S1, unofficial]. It achieves this by using signed forward differences instead of gradient magnitude to compute conductivity [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- Input: A scalar field $L$ defined on a regular grid.
+- Output: A diffused scalar field $L'$ at a new scale $t+\Delta t$.
+
+**Data Structures**
+- The field $L$ is stored as a 3D array of floating-point values.
+- Neighbors $N$ are defined by a discretization stencil (e.g., 6-, 18-, or 26-point neighborhood) [S1, unofficial].
+
+**Parameters**
+- $\lambda$: Sensitivity parameter for boundaries.
+  - Small values ($\lambda \in (0.01, 0.1)$) lead to better localized scale maxima, useful for convoluted structures [S1, unofficial].
+  - Large values ($\lambda > 1$) make diffusion linear [S1, unofficial].
+- $\Delta t$: Time step for integration. Stability requires $\Delta t \le 1$ [S1, unofficial].
+- $\alpha_{ijk}$: Normalizing coefficients for neighbors [S1, unofficial].
+
+**Algorithm**
+The filter computes the scale space iteratively using forward Euler integration of the diffusion equation [S1, unofficial].
+
+1. For each point $x$ in the grid:
+2. Initialize the change $\Delta L = 0$.
+3. For each neighbor index $ijk \in N$:
+    a. Let $L_{neighbor} = L(x_{ijk})$ and $L_{center} = L(x)$.
+    b. Compute the signed difference $d = L_{neighbor} - L_{center}$.
+    c. Compute the conductivity $C(d)$:
+       $$
+       C(d) = \begin{cases} 
+       \frac{\lambda^2}{\lambda^2 + d^2} & \text{if } d > 0 \\
+       1 & \text{otherwise}
+       \end{cases}
+       $$
+    d. Compute the flow contribution: $\phi = d \cdot C(d)$.
+    e. Add to change: $\Delta L \leftarrow \Delta L + \alpha_{ijk} \cdot \phi$.
+4. Update the field: $L'(x) = L(x) + \Delta t \cdot \Delta L$.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nonlinear_conductivity_filter(L, neighbors, alpha, lambda_param, dt):
+    """
+    Applies the Nonlinear Conductivity Filter to a volume L.
+    
+    Args:
+        L: 3D array of scalar values.
+        neighbors: List of relative coordinate offsets (ijk) for the stencil.
+        alpha: List of normalizing coefficients corresponding to neighbors.
+        lambda_param: Sensitivity parameter lambda.
+        dt: Time step (must be <= 1 for stability).
+        
+    Returns:
+        L_new: Diffused 3D array.
+    """
+    L_new = L.copy()
+    num_neighbors = len(neighbors)
+    
+    # Pre-calculate lambda squared
+    lambda_sq = lambda_param * lambda_param
+    
+    for x in indices_of(L):
+        L_center = L[x]
+        change = 0.0
+        
+        for i in range(num_neighbors):
+            neighbor_idx = x + neighbors[i]
+            L_neighbor = L[neighbor_idx]
+            
+            # Signed forward difference
+            d = L_neighbor - L_center
+            
+            # Compute conductivity C(d)
+            if d > 0:
+                c = lambda_sq / (lambda_sq + d * d)
+            else:
+                c = 1.0
+            
+            # Flow function Phi(x) = x * C(x)
+            phi = d * c
+            
+            # Accumulate weighted flow
+            change += alpha[i] * phi
+            
+        # Update with time step
+        L_new[x] = L_center + dt * change
+        
+    return L_new
+```
+
+**Edge Cases and Pitfalls**
+- The problem is ill-posed in the continuous case [S1, unofficial].
+- In the discrete case, finite difference discretization acts as a regularizer, but stability requires $\Delta t \le 1$ [S1, unofficial].
+- Small $\lambda$ values may result in slight deviations of scale maxima but are more robust to noise [S1, unofficial].
+
+## Subtopics
+
+### Iterative Nonlinear Diffusion
+This is the general framework used to apply the Nonlinear Conductivity Filter. It computes the scale space iteratively using forward Euler integration of the diffusion equation [S1, unofficial]. The update rule is $L(x;t+\Delta t) = L(x;t) + \Delta t \sum_{ijk \in N} \alpha_{ijk} \Phi(L(x_{ijk};t) - L(x;t))$ where $\Phi(x) = x \cdot C(x)$ [S1, unofficial]. For the standard Perona-Malik variant, $C(||\nabla L||) = \frac{\lambda^2}{\lambda^2 + ||\nabla L||^2}$ [S1, unofficial]. As $\lambda$ grows, $C$ approaches 1 (linear diffusion). Small $\lambda$ favors homogeneous regions and preserves edges [S1, unofficial]. The pitfall remains that non-linear diffusion with variable conductivity is ill-posed in the continuous case, requiring $\Delta t \le 1$ for stability in the discrete case [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of voxels and the size of the neighborhood stencil per iteration.
+- **Memory Complexity**: Requires storage for the current and next scale field, plus neighbor lookups.
+- **Strengths**: Better localized scale maxima for convoluted structures compared to linear diffusion; more robust to noise than Perona-Malik which creates false maxima [S1, unofficial].
+- **Limitations**: The continuous problem is ill-posed; requires careful tuning of $\Delta t$ for stability; slight deviations in scale maxima localization [S1, unofficial].
+- **When to use**: When accurate scale detection is needed for complex, convoluted structures in volume rendering, and edge-crossing diffusion towards the medial axis is desired [S1, unofficial].
+- **When not to use**: When linear diffusion is sufficient (large $\lambda$) or when strict edge preservation without any crossing is required (Perona-Malik may be preferred despite false maxima) [S1, unofficial].
+
+## Background
+The method was proposed in the context of size-based transfer functions for volume exploration [S1, unofficial]. It was developed to address the limitations of the Perona-Malik filter, which stops diffusion at edges and generates false maxima responses [S1, unofficial]. The authors derived this variation to control diffusion direction towards the medial axis, similar to applying smoothing and erosion filters progressively [S1, unofficial].
+
+## Sources
+[S1] Size-based Transfer Functions: A New Volume Exploration Technique, https://www.researchgate.net/publication/23456199_Size-based_Transfer_Functions_A_New_Volume_Exploration_Technique, fetched 2026-10-30 (unofficial)

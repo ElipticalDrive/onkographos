@@ -1,0 +1,367 @@
+--- v001.md
++++ v002.md
+@@ -4,143 +4,201 @@
+ 
+ ## Overview
+-Spiral Camera Path Generation creates a sequence of camera poses along a helical trajectory around a scene centroid, designed for novel view synthesis (NVS) and fly-through rendering [S1, S2, S3, unofficial]. Unlike static camera models or simple circular orbits, this method introduces vertical oscillation to cover 3D volume more effectively, making it suitable for forward-facing scenes and 360° video generation [S2, S3, unofficial]. It differs from [Circular Camera Path Generation](2734-circular-camera-path-generation.md) by adding a sinusoidal vertical component to the radius, preventing the camera from staying in a single horizontal plane [S1, unofficial].
++Spiral Camera Path Generation creates a smooth, helical sequence of camera poses around a scene centroid for novel view synthesis and fly-through rendering [S1, S2, S3, S5, unofficial]. It solves the problem of generating consistent, continuous viewpoints that cover 360-degree horizontal rotation while introducing vertical oscillation, avoiding the static nature of fixed-height orbits [S1, S2, S3, S5, unofficial]. It differs from [Circular Camera Path Generation](2734-circular-camera-path-generation.md) by adding a vertical sine-wave component to the trajectory, resulting in a helical rather than planar orbit [S1, S2, S3, S5, unofficial].
+ 
+ ## How it works
+-The method generates a list of $4 \times 4$ camera-to-world transformation matrices. It relies on an initial set of training poses to estimate the scene's spatial extent, center, and scale.
+-
+-### Inputs and Outputs
++The method generates a sequence of 4x4 camera-to-world transformation matrices ($c2w$) defining a spiral trajectory. The trajectory is centered around the average position and orientation of the input training poses.
++
+ **Inputs:**
+-*   `poses`: Array of training camera poses, shape $(N, 4, 4)$, where each pose is a camera-to-world matrix [S2, S5, unofficial].
+-*   `n_frames` ($N$): Number of output poses to generate [S2, unofficial].
+-*   `n_rots` ($R$): Number of full rotations around the scene [S2, unofficial].
+-*   `z_rate` ($Z_r$): Vertical oscillation rate [S2, unofficial].
+-*   `rads_scale` ($S_r$): Scale factor for the spiral radius [S2, unofficial].
+-*   `c2w`: Optional specific center pose to use as the origin reference; if not provided, the average of `poses` is computed [S2, S3, unofficial].
+-*   `up`: Optional up vector; if not provided, the mean of training pose up vectors is used [S2, unofficial].
+-*   `shift`: Optional $(x, y, z)$ shift applied to the centroid [S5, unofficial].
++- `poses`: Array of training camera poses, shape $(N_{train}, 4, 4)$, where each $c2w$ matrix maps camera coordinates to world coordinates.
++- `N`: Number of output views (frames) to generate.
++- `n_rots`: Number of full horizontal rotations (multiples of $2\pi$) to complete over the sequence.
++- `z_rate`: Vertical oscillation rate (frequency of the sine wave relative to horizontal rotation).
++- `rads_scale`: Scaling factor for the spiral radius relative to the scene size.
++- `focal`: Focal length used to determine the viewing direction.
++- `up`: Up vector for camera orientation (optional; if not provided, computed from training poses).
++- `shift`: Optional 3D vector $(shift_x, shift_y, shift_z)$ to offset the centroid.
++- `pitch_deg`: Optional pitch angle in degrees to tilt the camera up/down.
++- `flip_up_vec`: Boolean to flip the up vector direction.
+ 
+ **Outputs:**
+-*   `render_poses`: List of $N$ camera-to-world matrices, shape $(N, 4, 4)$ [S1, S2, unofficial].
+-
+-### Data Structures
+-*   **Pose Matrix**: A $4 \times 4$ matrix. The upper-left $3 \times 3$ is the rotation basis $[\mathbf{r}, \mathbf{u}, \mathbf{z}]$ (right, up, forward). The rightmost column is the translation $\mathbf{t}$ (camera center in world space) [S3, unofficial].
+-*   **Radii Vector**: $\mathbf{rads} = [r_x, r_y, r_z]$. If input has fewer than 3 elements, it is padded with $1.0$ [S1, unofficial].
+-
+-### Algorithm Steps
+-1.  **Estimate Scene Properties**:
+-    *   Compute the centroid $\mathbf{c}_{avg}$ as the mean of all training camera positions: $\mathbf{c}_{avg} = \frac{1}{N_{train}} \sum_{i=1}^{N_{train}} \mathbf{poses}_i[:3, 3]$ [S5, unofficial].
+-    *   Apply optional shifts: $\mathbf{c}_{avg} \leftarrow \mathbf{c}_{avg} + \mathbf{shift}$ [S5, unofficial].
+-    *   Compute the average up vector $\mathbf{up}_{avg}$ from training poses: $\mathbf{up}_{avg} = \frac{1}{N_{train}} \sum_{i=1}^{N_{train}} \mathbf{poses}_i[:3, 1]$ [S2, unofficial].
+-    *   Compute the focal length $f$. A common heuristic is the mean norm of camera positions relative to the centroid, or derived from intrinsics if available [S2, S3, unofficial].
+-    *   Compute the base radius scale. This is often the 90th percentile of the absolute distances of training cameras from the centroid, scaled by `rads_scale` [S2, unofficial]. Let this base radius be $r_{base}$.
+-
+-2.  **Define Spiral Parameters**:
+-    *   Calculate the radii vector $\mathbf{rads}$. In many implementations (e.g., NeRF), $\mathbf{rads}$ is derived from the scene extent. If not explicitly provided, it may be assumed isotropic or derived from the bounding box of training cameras [S1, S2, unofficial].
+-    *   Ensure $\mathbf{rads}$ has 3 components $[r_x, r_y, r_z]$ [S1, unofficial].
+-
+-3.  **Generate Poses**:
+-    *   Initialize empty list `render_poses`.
+-    *   For $i$ from $0$ to $N-1$:
+-        *   Calculate normalized time $t = i / N$.
+-        *   Calculate angle $\theta = 2 \pi R t$.
+-        *   Calculate vertical offset $z_{offset} = \sin(2 \pi R t \cdot Z_r)$ [S4, unofficial].
+-        *   Calculate the offset vector in the local spiral frame:
+-            $$ \mathbf{c}_{offset} = [r_x \cos(\theta), -r_y \sin(\theta), -r_z \sin(\theta \cdot Z_r)] $$
+-            *(Note: Signs and axis assignments vary by implementation; S2 uses this specific mapping)* [S2, unofficial].
+-        *   Determine the camera center $\mathbf{c}$:
+-            $$ \mathbf{c} = \mathbf{c}_{avg} + \mathbf{c}_{offset} $$
+-            *(If a specific `c2w` center is used, $\mathbf{c}$ is computed relative to that center's basis)* [S2, unofficial].
+-        *   Determine the forward vector $\mathbf{z}$. This is typically the normalized vector from the camera center $\mathbf{c}$ towards the scene center (or a focal point). A common definition is:
+-            $$ \mathbf{z} = \text{normalize}(\mathbf{c}_{avg} - \mathbf{c}) $$
+-            *(Some implementations use a fixed focal point or the average pose's look-at direction)* [S2, S3, unofficial].
+-        *   Construct the right vector $\mathbf{r}$:
+-            $$ \mathbf{r} = \text{normalize}(\text{cross}(\mathbf{z}, \mathbf{up}_{avg})) $$
+-        *   Construct the up vector $\mathbf{u}$:
+-            $$ \mathbf{u} = \text{cross}(\mathbf{r}, \mathbf{z}) $$
+-        *   Assemble the pose matrix $P$:
+-            $$ P = \begin{bmatrix} r_x & r_y & r_z & t_x \\ u_x & u_y & u_z & t_y \\ z_x & z_y & z_z & t_z \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
+-            where $\mathbf{t} = \mathbf{c}$ [S1, S3, unofficial].
+-        *   Append $P$ to `render_poses`.
+-
+-4.  **Return** `render_poses`.
+-
+-### Pseudocode
++- `render_poses`: Array of shape $(N, 4, 4)$ containing the generated camera poses.
++
++**Data Structures:**
++- `c2w`: 4x4 matrix. Columns 0-2 are the right, up, and forward (negative) basis vectors. Column 3 is the translation (camera center). Row 3 is $[0, 0, 0, 1]$.
++- `rads`: 3-element array $[r_x, r_y, r_z]$ defining the amplitude of the spiral along each axis.
++
++**Steps:**
++
++1. **Compute Scene Statistics:**
++   - Calculate the centroid $C$ as the mean of all training camera positions:
++     $$ C = \frac{1}{N_{train}} \sum_{i=0}^{N_{train}-1} poses[i, :3, 3] $$
++   - Calculate the average up vector $U_{avg}$ from training poses:
++     $$ U_{avg} = \frac{1}{N_{train}} \sum_{i=0}^{N_{train}-1} poses[i, :3, 1] $$
++   - Calculate the focal length $f$. If not provided, compute as the mean norm of camera positions relative to the centroid, or use the mean norm of all camera positions [S2, S3, unofficial]:
++     $$ f = \text{mean}(\|poses[:, :3, 3]\|) $$
++   - Calculate the radius scale factor. Compute the 90th percentile of the absolute distances of camera positions from the centroid along each axis, then scale by `rads_scale` [S2, unofficial]:
++     $$ rads_{base} = \text{percentile}_{90}(|poses[:, :3, 3] - C|, \text{axis}=0) $$
++     $$ rads = rads_{base} \times \text{rads\_scale} $$
++     If `rads` does not have 3 elements, append 1.0 to ensure dimensionality [S1, unofficial].
++
++2. **Apply Optional Shifts:**
++   - Update centroid $C$:
++     $$ C \leftarrow C + [shift_x, shift_y, shift_z] $$
++
++3. **Generate Poses:**
++   - Initialize empty list `render_poses`.
++   - For each frame index $i$ from $0$ to $N-1$:
++     - Calculate normalized time $t = i / N$.
++     - Calculate angle $\theta = 2\pi \cdot \text{n\_rots} \cdot t$.
++     - Calculate vertical offset $z_{offset}$ using a sine wave:
++       $$ z_{offset} = \text{height\_range} \cdot \sin(2\pi \cdot \text{n\_rots} \cdot \text{z\_rate} \cdot t) $$
++       *Note: If `height_range` is not explicitly provided, it is often derived from `rads[2]` or set to a small fraction of the scene size. In many implementations, the vertical component of the offset vector is simply $-rads[2] \cdot \sin(\theta \cdot \text{z\_rate})$ [S2, S3, unofficial].*
++     - Construct the offset vector $v_{offset}$ in the local frame of the center camera:
++       $$ v_{offset} = [\cos(\theta) \cdot rads[0], -\sin(\theta) \cdot rads[1], -\sin(\theta \cdot \text{z\_rate}) \cdot rads[2]] $$
++     - Compute the camera center $c$ in world space. Use the center camera pose $c2w_{center}$ (usually the average pose or the first training pose) to transform the offset:
++       $$ c = c2w_{center, :3, 3} + c2w_{center, :3, :3} \cdot v_{offset} $$
++       *Note: Some implementations use the centroid $C$ directly as the base for the offset if a specific center pose is not defined, effectively orbiting around $C$ [S5, unofficial].*
++     - Compute the viewing direction $z_{axis}$. The target point is typically the centroid $C$ or a point along the optical axis of the center camera. A common definition is:
++       $$ z_{axis} = \text{normalize}(C - c) $$
++       *Alternative: If using a focal point defined by the center camera's intrinsic parameters:*
++       $$ \text{target} = c2w_{center, :3, 3} + c2w_{center, :3, 2} \cdot (-f) $$
++       $$ z_{axis} = \text{normalize}(\text{target} - c) $$
++     - Determine the up vector $U$. If `up` is provided, use it. Otherwise, use $U_{avg}$. If `flip_up_vec` is true, negate $U$.
++     - Handle pitch: If `pitch_deg` is non-zero, adjust the up vector or the target point. A common approach is to compute a target offset $y_{target}$:
++       $$ \text{new\_up\_rad} = \text{pitch\_deg} \cdot \frac{\pi}{180} $$
++       $$ y_{target} = rads_{circle} \cdot \tan(\text{new\_up\_rad}) $$
++       Adjust the target point's y-coordinate by $y_{target}$ before computing $z_{axis}$ [S5, unofficial].
++     - Construct the camera basis vectors:
++       $$ z = \text{normalize}(z_{axis}) $$
++       $$ x = \text{normalize}(\text{cross}(U, z)) $$
++       $$ y = \text{cross}(z, x) $$
++       *Note: Ensure $x$ and $y$ are orthogonal to $z$. If $U$ is parallel to $z$, use a default up vector.*
++     - Construct the $c2w$ matrix:
++       $$ c2w = \begin{bmatrix} x & y & z & c \\ 0 & 0 & 0 & 1 \end{bmatrix} $$
++     - Append $c2w$ to `render_poses`.
++
++4. **Return:**
++   - `render_poses`.
++
++**Pseudocode:**
++
+ ```python
+ import numpy as np
+ 
+-def generate_spiral_path(poses, n_frames=120, n_rots=2, z_rate=0.5, rads_scale=1.0, shift=None):
++def generate_spiral_path(poses, N, n_rots=2, z_rate=0.5, rads_scale=1.0, focal=None, up=None, shift=[0,0,0], pitch_deg=0, flip_up_vec=False):
+     """
+-    Generates a spiral camera path for novel view synthesis.
++    Generate a spiral camera path.
+     
+     Args:
+-        poses: (N, 4, 4) array of training camera-to-world matrices.
+-        n_frames: Number of poses to generate.
+-        n_rots: Number of full rotations.
++        poses: (N_train, 4, 4) array of training camera poses.
++        N: Number of frames to generate.
++        n_rots: Number of horizontal rotations.
+         z_rate: Vertical oscillation rate.
+         rads_scale: Scale factor for radius.
+-        shift: Optional (3,) array to shift the centroid.
++        focal: Focal length. If None, computed from poses.
++        up: Up vector. If None, computed from poses.
++        shift: (x, y, z) shift for centroid.
++        pitch_deg: Pitch angle in degrees.
++        flip_up_vec: Whether to flip the up vector.
+         
+     Returns:
+-        render_poses: (n_frames, 4, 4) array of generated poses.
++        render_poses: (N, 4, 4) array of camera poses.
+     """
+-    # 1. Estimate scene properties
+-    # Centroid: mean of camera positions
+-    centroids = poses[:, :3, 3]
+-    centroid = np.mean(centroids, axis=0)
+-    
+-    if shift is not None:
+-        centroid += shift
+-        
++    # 1. Compute Scene Statistics
++    # Centroid
++    centroid = np.mean(poses[:, :3, 3], axis=0)
++    
+     # Average up vector
+-    up_vectors = poses[:, :3, 1]
+-    up = np.mean(up_vectors, axis=0)
+-    up = up / np.linalg.norm(up)
+-    
+-    # Focal length estimation (mean distance from centroid)
+-    # This is a heuristic; some implementations use intrinsic K if available
+-    focal = np.mean(np.linalg.norm(centroids - centroid, axis=1))
+-    
+-    # Radius estimation: 90th percentile of distances from centroid
+-    dists = np.linalg.norm(centroids - centroid, axis=1)
+-    base_radius = np.percentile(dists, 90) * rads_scale
+-    
+-    # Radii vector [rx, ry, rz]
+-    # Often assumed isotropic in simple spirals, but S2 implies distinct scaling
+-    # If not provided, we use base_radius for all axes
+-    rads = np.array([base_radius, base_radius, base_radius])
+-    
+-    # 2. Generate poses
++    if up is None:
++        avg_up = np.mean(poses[:, :3, 1], axis=0)
++        up = avg_up / np.linalg.norm(avg_up)
++    else:
++        up = up / np.linalg.norm(up)
++        
++    # Focal length
++    if focal is None:
++        # Mean norm of camera positions
++        focal = np.mean(np.linalg.norm(poses[:, :3, 3], axis=1))
++        
++    # Radius calculation
++    # Distance of each camera from centroid
++    dists = np.linalg.norm(poses[:, :3, 3] - centroid, axis=1)
++    # 90th percentile of distances along each axis? 
++    # Source [S2, unofficial] says "90th percentile of absolute camera positions ... along each axis"
++    # This likely means per-axis percentile of the coordinates relative to centroid
++    rel_pos = poses[:, :3, 3] - centroid
++    rads_base = np.percentile(np.abs(rel_pos), 90, axis=0)
++    rads = rads_base * rads_scale
++    
++    # Ensure rads has 3 elements
++    if len(rads) < 3:
++        rads = np.append(rads, 1.0)
++        
++    # Apply shift
++    centroid = centroid + np.array(shift)
++    
++    # Center pose for transformation (use average pose or first pose)
++    # Using average pose for c2w_center
++    c2w_center = np.mean(poses, axis=0)
++    
+     render_poses = []
+     
+-    for i in range(n_frames):
+-        t = i / n_frames
++    for i in range(N):
++        t = i / N
+         theta = 2 * np.pi * n_rots * t
+         
+-        # Calculate offset vector
+-        # S2: c_offset = [cos(theta)*rads[0], -sin(theta)*rads[1], -sin(theta*z_rate)*rads[2]]
+-        c_offset = np.array([
++        # Vertical offset
++        # Using z_rate for vertical oscillation
++        z_offset_val = -rads[2] * np.sin(theta * z_rate)
++        
++        # Offset vector in local frame
++        # Note: The sign of sin(theta) for x and y depends on coordinate system convention.
++        # Source [S2, unofficial] uses: [cos(theta)*rads[0], -sin(theta)*rads[1], -sin(theta*z_rate)*rads[2]]
++        offset_local = np.array([
+             np.cos(theta) * rads[0],
+             -np.sin(theta) * rads[1],
+-            -np.sin(theta * z_rate) * rads[2]
++            z_offset_val
+         ])
+         
+         # Camera center
+-        c = centroid + c_offset
+-        
+-        # Forward vector (look at centroid)
+-        z = centroid - c
+-        z = z / np.linalg.norm(z)
+-        
+-        # Right vector
+-        r = np.cross(z, up)
+-        r = r / np.linalg.norm(r)
+-        
+-        # Up vector
+-        u = np.cross(r, z)
+-        
+-        # Construct pose matrix
++        c = c2w_center[:3, 3] + c2w_center[:3, :3] @ offset_local
++        
++        # Viewing direction
++        # Target is centroid
++        target = centroid.copy()
++        
++        # Handle pitch
++        if pitch_deg != 0:
++            new_up_rad = pitch_deg * np.pi / 180
++            # Estimate radius for pitch calculation
++            # Source [S5, unofficial] uses radcircle * tan(pitch)
++            # radcircle can be approximated by mean radius
++            radcircle = np.mean(rads)
++            target_y_offset = radcircle * np.tan(new_up_rad)
++            target[1] += target_y_offset
++            
++        z_axis = target - c
++        z = z_axis / np.linalg.norm(z_axis)
++        
++        # Up vector handling
++        if flip_up_vec:
++            up = -up
++            
++        # Compute x and y
++        x = np.cross(up, z)
++        x_norm = np.linalg.norm(x)
++        if x_norm < 1e-6:
++            # Fallback if up is parallel to z
++            x = np.array([1.0, 0.0, 0.0])
++            x = np.cross(up, z)
++            x_norm = np.linalg.norm(x)
++        x = x / x_norm
++        
++        y = np.cross(z, x)
++        
++        # Construct pose
+         pose = np.eye(4)
+-        pose[:3, 0] = r
+-        pose[:3, 1] = u
++        pose[:3, 0] = x
++        pose[:3, 1] = y
+         pose[:3, 2] = z
+         pose[:3, 3] = c
+@@ -151,35 +209,29 @@
+ ```
+ 
+-### Parameters and Typical Values
+-*   `n_frames`: 120–200 [S2, S5, unofficial].
+-*   `n_rots`: 2–4 rotations [S2, unofficial].
+-*   `z_rate`: 0.5 (vertical oscillation frequency relative to horizontal rotation) [S2, unofficial].
+-*   `rads_scale`: 1.0 (multiplier for the estimated scene radius) [S2, unofficial].
+-*   `shift`: $(0, 0, 0)$ by default [S5, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Degenerate Up Vector**: If the training cameras are all aligned such that their up vectors are parallel or zero, the cross product for $\mathbf{r}$ may fail. A default up vector (e.g., $[0, 1, 0]$) should be used as a fallback [S3, unofficial].
+-*   **Precision**: Using single-precision floats for large coordinate systems can cause jitter in the camera path. Double precision is recommended for path generation if the scene coordinates are large [G].
+-*   **Boundary Conditions**: The spiral should not start or end at a discontinuity. Using `linspace` excluding the last element ensures the path does not repeat the start pose exactly, avoiding a visible jump if looped [S1, S3, unofficial].
++**Edge Cases and Pitfalls:**
++- **Parallel Up and Z:** If the camera looks directly up or down, the cross product for the right vector ($x$) becomes zero. A fallback up vector (e.g., $[1, 0, 0]$) must be used [G].
++- **Precision:** Use float32 or float64 consistently. Small errors in normalization can accumulate in long spirals.
++- **Boundary Conditions:** The spiral should not include the endpoint of the full rotation range to avoid duplicate poses if $N$ is small and $n\_rots$ is integer [S1, S3, unofficial].
++- **Focal Length:** Incorrect focal length leads to incorrect viewing directions, causing the camera to look away from the scene.
+ 
+ ## Subtopics
+ 
+ ### [Circular Camera Path Generation](2734-circular-camera-path-generation.md)
+-Circular Camera Path Generation creates a sequence of camera poses arranged in a 360-degree circular trajectory around a central origin at a fixed height and radius. It solves the problem of generating consistent, orbiting viewpoints for novel view synthesis or 360-degree visualization. It is a degenerate case of Spiral Camera Path Generation where the vertical offset rate is zero, resulting in a planar orbit rather than a helical one. Choose this when the scene is flat or when vertical parallax is not required.
++Circular Camera Path Generation creates a sequence of camera poses arranged in a 360-degree circular trajectory around a central origin at a fixed height and radius. It solves the problem of generating consistent, orbiting viewpoints for novel view synthesis or 360-degree visualization. It is a degenerate case of Spiral Camera Path Generation where the vertical offset rate is zero, resulting in a planar orbit rather than a helical one.
+ 
+ ### Spiral Camera Pose Generation
+-This variant (often found in PyTorch-based NVS pipelines like [S6, unofficial]) generates poses using a circular path with optional pitch rotation. It computes the eye position based on a radius and angle, then constructs a `PerspectiveCameras` object using a `look_at_view_transform` function. It differs from the standard NeRF spiral by explicitly handling the camera's intrinsic parameters (focal length, principal point) within the pose generation step and supporting an optional pitch angle to tilt the camera up or down [S6, unofficial]. Choose this when integrating with differentiable renderers that require explicit camera intrinsics in the pose object.
++Spiral Camera Pose Generation (as implemented in [S6, unofficial]) generates camera poses in a circle with optional up-vector handling and perspective camera setup using PyTorch3D. It differs by explicitly constructing a `PerspectiveCameras` object and handling up-vector flips based on the y-component of the up vector. It is chosen when using PyTorch3D for differentiable rendering. The eye position is computed as $[\cos(\theta + \pi/2) \cdot \text{radius}, 0, -\sin(\theta + \pi/2) \cdot \text{radius}]$ if $|up_y| > 0$, else $[\cos(\theta + \pi/2) \cdot \text{radius}, \sin(\theta + \pi/2) \cdot \text{radius}, 2.0]$. The camera is created using `look_at_view_transform` and `PerspectiveCameras` with specified focal length.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$, where $N$ is the number of frames. The computation involves basic trigonometric functions and vector operations per frame.
+-*   **Memory Complexity**: $O(N)$ to store the resulting pose matrices.
+-*   **Performance**: Generation is instantaneous for typical $N < 1000$. The cost is negligible compared to the rendering cost.
+-*   **Strengths**: Provides smooth, continuous motion; covers 3D volume better than circular orbits; easy to implement.
+-*   **Limitations**: The path is fixed and does not adapt to scene content; may pass through empty space or occluded regions if the scene is not convex or well-distributed [S3, unofficial].
+-*   **When to use**: Novel view synthesis for forward-facing scenes (e.g., LLFF, Tanks and Temples) where a smooth fly-through is desired [S2, S3, unofficial].
+-*   **When not to use**: Scenes with significant vertical structure where a fixed spiral might miss details; interactive applications requiring user-defined paths.
++- **Time Complexity:** $O(N)$, where $N$ is the number of frames. Each pose is computed in constant time.
++- **Memory Complexity:** $O(N)$ to store the output poses.
++- **Performance:** Generating 200 poses takes negligible time (<1ms) on modern CPUs [S5, unofficial].
++- **Strengths:** Smooth, continuous motion; covers 360 degrees; introduces vertical variation for better scene coverage.
++- **Limitations:** Assumes a roughly spherical or isotropic scene distribution. May not fit elongated or planar scenes well without adjustment [S2, S3, unofficial].
++- **When to Use:** Novel view synthesis for forward-facing scenes, fly-through videos, 360-degree visualization.
++- **When Not to Use:** Scenes with strong directional bias (e.g., landscapes) where a linear or elliptical path is more appropriate.
+ 
+ ## Background
+-Spiral camera paths were popularized by the NeRF (Neural Radiance Fields) paper and its accompanying codebase for rendering novel views of forward-facing scenes [S1, S3, unofficial]. They are particularly effective for datasets like LLFF and Tanks & Temples, where the camera distribution is roughly circular or spiral-like [S2, unofficial]. The method has become a standard baseline for evaluating novel view synthesis algorithms [S2, S3, unofficial].
++Spiral camera paths are commonly used in NeRF (Neural Radiance Fields) novel view synthesis pipelines [S1, S2, S3, unofficial]. The method was popularized by the original NeRF paper and subsequent implementations in repositories like `bmild/nerf` and `emmanueladutwum123/nerf-from-scratch` [S1, S2, unofficial]. It is a standard technique for evaluating and visualizing NeRF models, providing a smooth fly-through experience [S5, unofficial].
+ 
+ ## Sources

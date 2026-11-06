@@ -3,13 +3,13 @@
 Also called: Heidelberg ray tracing model, Kajiya and Von Herzen model, Single Scattering Radiance Transport, Single-Scattering Participating Media Rendering, Two-Pass Single Scattering
 
 ## Overview
-The Single Scattering Model approximates light transport in participating media by accounting only for light that undergoes zero or exactly one scattering event, ignoring multiple scattering and emitted radiance [S1, S2][S3, unofficial]. It solves the problem of rendering volumetric effects like smoke or fluids efficiently by decomposing the outgoing radiance into direct transmission and a single-scattering term [S2]. It is distinguished from the [Absorption-only model](839-absorption-only-model.md) by including scattering phase functions and from the [Standard volume rendering equation](1165-standard-volume-rendering-equation.md) by truncating the infinite series of scattering events to the first order [S1, S2].
+The Single Scattering Model approximates light transport in participating media by accounting only for light that undergoes zero or exactly one scattering event, ignoring multiple scattering and emitted radiance [S1, S2][S3, unofficial]. It solves the problem of rendering volumetric effects like smoke or fluids efficiently by decomposing the outgoing radiance into direct transmission and a single-scattering term [S2]. It is distinguished from the [Absorption-only model](839-absorption-only-model.md) by including scattering phase functions and from the [Emission-Absorption Volume Rendering](4040-emission-absorption-volume-rendering.md) by explicitly modeling the redirection of light via a phase function and scattering albedo [S2][S3, unofficial].
 
 ## How it works
 **Inputs:**
 *   Viewpoint position $x$.
-*   Viewing direction $\omega$.
-*   Volume density field $\rho(x)$ (or directly extinction coefficients).
+*   Viewing direction $\omega$ (unit vector).
+*   Volume density field $\rho(x)$ or directly extinction coefficients.
 *   Optical properties: Absorption coefficient $\kappa_a(x)$, Scattering coefficient $\kappa_s(x)$, Extinction coefficient $\kappa_t(x) = \kappa_a(x) + \kappa_s(x)$, Scattering albedo $\Omega(x) = \kappa_s(x)/\kappa_t(x)$ [S2].
 *   Phase function $p(\omega, \omega')$ depending on the angle between viewing direction $\omega$ and light direction $\omega'$ [S2][S3, unofficial].
 *   Incident ambient radiance $L_{in}(\omega)$ from the environment or light sources [S2].
@@ -23,8 +23,8 @@ The Single Scattering Model approximates light transport in participating media 
 *   **Illumination Field:** A 3D grid storing the incoming illumination $I(X)$ at each voxel $X$, computed in Pass 1 [S3, unofficial].
 
 **Formulas:**
-1.  **Transmittance:** The transmittance $\tau(x_a, x_b)$ between two points $x_a$ and $x_b$ along a ray is the exponential of the negative integral of the extinction coefficient along the path [S2]:
-    $$ \tau(x_a, x_b) = e^{-\int_{D_b}^{D_a} \kappa_t(x_u) du} $$
+1.  **Transmittance:** The transmittance $\tau(t_1, t_2)$ between two points at distances $t_1$ and $t_2$ along a ray is the exponential of the negative integral of the extinction coefficient along the path [S2]:
+    $$ \tau(t_1, t_2) = e^{-\int_{t_1}^{t_2} \kappa_t(x_u) du} $$
     where $x_u$ is a point along the ray at distance $D_u$ from the viewpoint [S2].
 
 2.  **Outgoing Radiance Decomposition:**
@@ -32,12 +32,12 @@ The Single Scattering Model approximates light transport in participating media 
     where $L_{ri}$ is the reduced incident radiance (direct transmission) and $L_{ss}$ is the single-scattering radiance [S1, S2].
 
 3.  **Reduced Incident Radiance:**
-    $$ L_{ri}(x, \omega) = L_{in}(\omega) \tau(x_a, x) \quad (2) $$
+    $$ L_{ri}(x, \omega) = L_{in}(\omega) \tau(D_a, 0) \quad (2) $$
     This represents ambient light arriving directly at the viewpoint after passing through the volume boundary $x_a$ [S2].
 
 4.  **Single-Scattering Radiance:**
-    $$ L_{ss}(x, \omega) = \int_{D_b}^{D_a} \tau(x_u, x) \kappa_s(x_u) \int_{S^2} p(\omega, \omega') L_{in}(\omega') \tau(x_b, x_u) d\omega' du \quad (3) $$
-    This integral sums contributions from all points $x_u$ along the ray, weighted by the transmittance from the light source to $x_u$, the scattering coefficient, the phase function, and the transmittance from $x_u$ to the viewpoint [S2][S3, unofficial].
+    $$ L_{ss}(x, \omega) = \int_{D_a}^{D_b} \tau(D_u, 0) \kappa_s(x_u) I(x_u) du \quad (3) $$
+    This integral sums contributions from all points $x_u$ along the ray, weighted by the transmittance from the viewpoint to $x_u$, the scattering coefficient, and the illumination $I(x_u)$ reaching $x_u$ from light sources [S2][S3, unofficial].
 
 **Algorithm (Two-Pass Method):**
 The model is often implemented using a two-pass approach, particularly for complex lighting or when precomputing illumination [S3, unofficial].
@@ -46,9 +46,7 @@ The model is often implemented using a two-pass approach, particularly for compl
 Compute the illumination $I(X)$ reaching each point $X$ in the volume from the light source(s). This involves propagating flux from the light source through the volume, accounting for the transparency (attenuation) of each layer [S3, unofficial].
 *   For simple point or parallel lights, $I(X)$ can be calculated directly [S1].
 *   For environment map lighting, $I(X)$ is estimated using importance sampling over the unit sphere $S^2$ [S1].
-*   Mathematically, for a point $X$ at distance $D_X$ from the light source (or along the light ray), the illumination is:
-    $$ I(X) = \int_{S^2} L_{in}(\omega') p_{light}(\omega') \tau_{light}(X) d\omega' $$
-    where $\tau_{light}(X)$ is the transmittance from the light source to $X$ [S3, inferred from context, unofficial].
+*   Mathematically, for a point $X$, the illumination is attenuated by the transmittance from the light source to $X$ [S3, inferred from context, unofficial].
 
 **Pass 2: Gather Scattered Radiance**
 Reflect or scatter the precomputed illumination $I(X)$ to the viewpoint using a shading rule $g(X)$ [S3, unofficial].
@@ -56,161 +54,95 @@ Reflect or scatter the precomputed illumination $I(X)$ to the viewpoint using a 
     $$ g(X) = r(X, \omega, \omega') I(X) $$
     where $r(X, \omega, \omega') = a \tau(X) p(\omega, \omega')$ [S3, unofficial]. Here $a$ is the albedo (fraction of extinction representing scattering), $\tau(X)$ is the transmittance from $X$ to the viewpoint, and $p$ is the phase function [S3, unofficial].
 *   Gather the reflected intensity $g(X)$ along viewing rays:
-    $$ L_{ss}(x, \omega) = \int_{D_b}^{D_a} g(x_u) du $$
+    $$ L_{ss}(x, \omega) = \int_{D_a}^{D_b} g(x_u) du $$
     This corresponds to integrating the scattered contribution along the viewing ray [S3, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def single_scattering_render(viewpoint, viewing_direction, volume_grid, light_source, phase_function):
+import math
+
+def single_scattering_render(viewpoint, direction, kappa_t_grid, kappa_s_grid, light_radiance, light_direction, phase_function):
     """
     Renders a volume using the single scattering model.
-    
-    Args:
-        viewpoint: 3D point x
-        viewing_direction: 3D vector omega
-        volume_grid: 3D array of extinction coefficients kappa_t
-        light_source: Object providing incident radiance L_in(omega')
-        phase_function: Function p(omega, omega')
-        
-    Returns:
-        L_out: Float, outgoing radiance
+    direction and light_direction must be normalized 3D vectors.
+    kappa_t_grid and kappa_s_grid are 3D arrays with a sample(pos) method.
     """
     # 1. Find volume boundaries along the viewing ray
-    # Ray: R(t) = viewpoint + t * viewing_direction
-    # Find t_a (entry) and t_b (exit) where volume density > 0
-    t_a, t_b = find_volume_boundaries(viewpoint, viewing_direction, volume_grid)
+    t_near = None
+    t_far = None
+    t = 0.0
+    search_step = 0.1
+    max_ray_length = 100.0
+    while t < max_ray_length:
+        pos = [viewpoint[i] + t * direction[i] for i in range(3)]
+        if kappa_t_grid.sample(pos) > 0.0:
+            if t_near is None:
+                t_near = t
+            t_far = t
+        elif t_near is not None:
+            break
+        t += search_step
     
-    if t_b <= t_a:
-        return 0.0 # No volume intersection
+    if t_near is None:
+        return 0.0
 
-    # 2. Pass 1: Compute Illumination Field I(X) for all voxels in volume
-    # This is often precomputed or cached.
-    # For each voxel X in the volume:
-    illumination_field = compute_illumination_field(volume_grid, light_source)
+    # 2. Compute direct transmission (Reduced Incident Radiance)
+    # L_ri = L_in(omega) * tau(t_near, 0)
+    L_in_ambient = light_radiance # Simplified: assume uniform ambient or pass as arg
+    optical_depth_to_entry = 0.0
+    t = 0.0
+    while t < t_near:
+        pos = [viewpoint[i] + t * direction[i] for i in range(3)]
+        optical_depth_to_entry += kappa_t_grid.sample(pos) * 0.05
+        t += 0.05
+    tau_entry = math.exp(-optical_depth_to_entry)
+    L_ri = L_in_ambient * tau_entry
 
-    # 3. Pass 2: Integrate along viewing ray
-    # L_out = L_ri + L_ss
-    
-    # L_ri: Direct transmission of ambient light
-    # L_ri = L_in(omega) * tau(x_a, x)
-    # Note: L_in(omega) is the ambient light coming from direction omega
-    # If light_source provides environment map, sample it
-    L_in_ambient = light_source.sample(viewing_direction)
-    
-    # Transmittance from entry point x_a to viewpoint x
-    # tau(x_a, x) = exp(- integral from x to x_a of kappa_t)
-    # Distance from viewpoint to x_a is t_a * |viewing_direction|
-    # Assuming normalized direction, distance is t_a
-    tau_entry_to_view = exp(-integrate_extinction(viewpoint, t_a, volume_grid))
-    
-    L_ri = L_in_ambient * tau_entry_to_view
-
-    # L_ss: Single scattering contribution
-    # L_ss = integral from t_b to t_a of [ tau(x_u, x) * kappa_s(x_u) * I(x_u) ] dt
-    # where I(x_u) is the illumination at x_u from Pass 1
-    # tau(x_u, x) is transmittance from scattering point x_u to viewpoint
-    
+    # 3. Compute single-scattering radiance via ray marching
     L_ss = 0.0
-    num_samples = 100 # Resolution for ray marching
-    dt = (t_a - t_b) / num_samples
-    
-    for i in range(num_samples):
-        t = t_b + i * dt
-        x_u = viewpoint + t * viewing_direction
+    optical_depth = 0.0
+    t = t_near
+    march_step = 0.05
+    while t < t_far:
+        pos = [viewpoint[i] + t * direction[i] for i in range(3)]
+        kappa_s = kappa_s_grid.sample(pos)
         
-        # Get extinction and scattering coefficients at x_u
-        kappa_t = volume_grid.sample(x_u)
-        # Albedo Omega = kappa_s / kappa_t => kappa_s = Omega * kappa_t
-        # If albedo is not stored, assume a default or derive from density
-        # For smoke, albedo might be constant or derived from density
-        # Let's assume kappa_s is stored or derived. 
-        # If only kappa_t and density rho are stored, we need a model.
-        # Standard assumption: kappa_s = Omega * kappa_t. 
-        # If Omega is not given, we might assume a constant or derive from kappa_a + kappa_s = kappa_t.
-        # Let's assume kappa_s is available or computed from albedo.
-        # For this generic implementation, we assume kappa_s is part of the volume data or derived.
-        # If only kappa_t is available, we cannot compute L_ss without albedo.
-        # Let's assume volume_grid also provides kappa_s or albedo.
-        kappa_s = volume_grid.sample_scattering(x_u) # [G] Assuming grid provides kappa_s
+        # Transmittance from current point to viewpoint
+        tau_to_view = math.exp(-optical_depth)
         
-        # Illumination at x_u from Pass 1
-        I_xu = illumination_field.sample(x_u)
+        # Illumination at pos from light source
+        # Transmittance from light to pos is pre-integrated or approximated for directional lights [G]
+        light_transmittance = math.exp(-integrate_extinction_along_ray([viewpoint[i] + 1000.0 * light_direction[i] for i in range(3)], pos, kappa_t_grid))
+        I_xu = light_radiance * light_transmittance
         
-        # Transmittance from x_u to viewpoint
-        tau_u_to_view = exp(-integrate_extinction(viewpoint, t, volume_grid))
+        # Phase function for scattering from light_direction to viewing direction
+        p_val = phase_function(direction, light_direction)
         
-        # Contribution: tau(x_u, x) * kappa_s(x_u) * I(x_u)
-        # Note: The phase function and angular integration are typically absorbed into I(x_u) 
-        # if I(x_u) is the "irradiance" or "incident radiance integrated over hemisphere".
-        # However, the formula (3) in [S2] shows explicit phase function integration.
-        # In the two-pass method [S3, unofficial], I(X) is the illumination reaching X.
-        # The shading rule g(X) = a * tau(X) * p(omega, omega') * I(X) suggests I(X) is incident radiance from a specific direction or integrated.
-        # If I(X) is the result of Pass 1 (integration over light directions), then the phase function for the *viewing* direction must still be applied?
-        # Actually, [S3, unofficial] says: "The first pass computes the illumination i(X) reaching X... In the second pass, this illumination is reflected or scattered to the viewpoint by a shading rule."
-        # And g(X) = r(X, omega, omega') I(X).
-        # If I(X) is the total incident radiance (integrated over all incoming directions), then the phase function p(omega, omega') depends on the specific incoming direction omega'.
-        # This implies I(X) should be directional, or the phase function is approximated.
-        # For simplicity, if we assume isotropic scattering or that I(X) is pre-integrated with the phase function for the dominant light direction:
+        # Contribution: tau * kappa_s * I_xu * p_val
+        L_ss += tau_to_view * kappa_s * I_xu * p_val * march_step
         
-        # Let's stick to the integral form from [S2] for clarity in a single pass implementation, 
-        # or use the two-pass structure if I(X) is precomputed.
-        # Here, we assume I(x_u) is the incident radiance from the light source direction omega' that contributes to scattering.
-        # If light is directional (sun), omega' is fixed.
-        
-        # For a general environment map, I(x_u) in the two-pass method usually refers to the irradiance or the result of the light transport pass.
-        # Let's assume the two-pass method where I(X) is the "irradiance" or "incident light field" at X.
-        # The term p(omega, omega') is handled in the shading rule.
-        
-        # Simplified contribution for a single dominant light direction omega_l:
-        omega_l = light_source.direction
-        p_val = phase_function(viewing_direction, omega_l)
-        
-        # Albedo a = kappa_s / kappa_t
-        if kappa_t > 0:
-            a = kappa_s / kappa_t
-        else:
-            a = 0.0
-            
-        # Shading rule g(X) = a * tau(X) * p(omega, omega') * I(X)
-        # But I(X) here is the illumination reaching X.
-        # If I(X) is the incident radiance from the light, then:
-        # Contribution = tau_u_to_view * kappa_s * p * I_light_direction
-        
-        # Let's use the direct integral form from [S2] which is more self-contained for a single ray:
-        # L_ss = integral [ tau(x_u, x) * kappa_s(x_u) * (integral over S^2 p(omega, omega') L_in(omega') tau(light, x_u) domega') du ]
-        
-        # If we assume a single directional light L_sun with direction omega_sun:
-        L_sun = light_source.intensity
-        tau_sun_to_xu = exp(-integrate_extinction(light_source.position, x_u, volume_grid)) # [G] Distance from light to x_u
-        
-        # Phase function for scattering from omega_sun to viewing_direction
-        p_val = phase_function(viewing_direction, omega_sun)
-        
-        # Scattered radiance at x_u towards viewpoint
-        L_scattered_at_xu = L_sun * tau_sun_to_xu * p_val
-        
-        # Attenuation from x_u to viewpoint
-        L_ss += tau_u_to_view * kappa_s * L_scattered_at_xu * dt
+        optical_depth += kappa_t_grid.sample(pos) * march_step
+        t += march_step
 
-    L_out = L_ri + L_ss
-    return L_out
+    return L_ri + L_ss
 
-def integrate_extinction(viewpoint, t_max, volume_grid):
-    """Integrates kappa_t along the ray from viewpoint to t_max."""
-    # Simple midpoint rule
-    num_samples = 50
-    dt = t_max / num_samples
-    integral = 0.0
-    for i in range(num_samples):
-        t = viewpoint + (i + 0.5) * dt * viewing_direction # [G] Assuming viewing_direction is normalized
-        # Correction: t is distance, so point is viewpoint + t * direction
-        # In the loop, we need the point at distance t
-        point = viewpoint + (i + 0.5) * dt * viewing_direction
-        kappa_t = volume_grid.sample(point)
-        integral += kappa_t * dt
-    return integral
+def integrate_extinction_along_ray(start, end, kappa_t_grid):
+    """Computes optical depth from start to end."""
+    direction = [end[i] - start[i] for i in range(3)]
+    dist = math.sqrt(sum(d**2 for d in direction))
+    if dist < 1e-6:
+        return 0.0
+    direction = [d / dist for d in direction]
+    optical_depth = 0.0
+    t = 0.0
+    step = 0.05
+    while t < dist:
+        pos = [start[i] + t * direction[i] for i in range(3)]
+        optical_depth += kappa_t_grid.sample(pos) * step
+        t += step
+    return optical_depth
 ```
 
 ## Subtopics
@@ -222,9 +154,9 @@ Models light transport with zero or exactly one scattering event, serving as the
 A model for participating media with low albedo, considering only one secondary ray traversing the material towards the light source [4581-single-scattering-blinn-model.md].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of samples along the viewing ray and the number of voxels traversed [S1, S2]. The two-pass method adds a precomputation step proportional to the volume size and light complexity [S3, unofficial].
+*   **Time Complexity:** Linear with respect to the number of samples along the viewing ray and the volume size [G]. The two-pass method adds a precomputation step proportional to the volume size and light complexity [S3, unofficial].
 *   **Memory Complexity:** Requires storage for the volume density/extinction field and potentially an illumination field if precomputed [S1][S3, unofficial].
-*   **Performance:** Significantly faster than full multiple scattering models (e.g., [Standard volume rendering equation](1165-standard-volume-rendering-equation.md)) because it avoids iterative solutions or deep path tracing for multiple bounces [S1, S2].
+*   **Performance:** Significantly faster than full multiple scattering models because it avoids iterative solutions or deep path tracing for multiple bounces [S1, S2].
 *   **Strengths:** Physically plausible for low-density media (smoke, fog, fluids) where single scattering dominates [S2]. Enables efficient differentiable rendering for reconstruction tasks [S1, S2].
 *   **Limitations:** Invalid for high-density or high-albedo media where multiple scattering is significant [S3, unofficial]. Does not account for emitted radiance (e.g., fire, glowing plasma) unless added separately [S1].
 *   **When to use:** Smoke reconstruction, fluid visualization, medical imaging (e.g., CT/MRI volume rendering with scattering approximation) [S2][S3, unofficial].

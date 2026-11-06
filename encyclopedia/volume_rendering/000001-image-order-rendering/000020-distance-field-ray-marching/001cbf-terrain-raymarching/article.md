@@ -1,0 +1,83 @@
+# Terrain Raymarching
+
+Also called: Heightmap Raymarching
+
+## Overview
+Terrain Raymarching renders 2D heightmap terrains by casting rays through each pixel and stepping along the ray until the ray's height drops below the terrain surface defined by the heightmap value at the ray's xz position [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Camera ray generation parameters.
+- Heightmap data (texture sampler or procedural function) $H(x, z)$, returning the terrain height at world coordinates $x, z$ [S1, unofficial].
+
+**Outputs:**
+- Color buffer with terrain shading [S1, unofficial].
+
+**Data Structures:**
+- Heightmap: 2D array or texture mapping $(x, z) \rightarrow h$ [S1, unofficial].
+
+**Steps:**
+1. For each pixel $(u, v)$ in the image, construct a ray origin $\mathbf{o}$ and direction $\mathbf{d}$ from the camera [G].
+2. Initialize ray position $\mathbf{p} = \mathbf{o}$ [G].
+3. Loop for a maximum number of steps or until a maximum distance is reached [G]:
+   a. Sample the terrain height at the ray's current xz coordinates: $h_{\text{terrain}} = H(p_x, p_z)$ [S1, unofficial].
+   b. Get the ray's current height: $h_{\text{ray}} = p_y$ [G].
+   c. If $h_{\text{ray}} \le h_{\text{terrain}}$, the ray has hit the terrain [S1, unofficial]. Break loop.
+   d. Advance the ray: $\mathbf{p} = \mathbf{p} + \mathbf{d} \cdot \Delta s$ [S1, unofficial].
+4. If a hit was found, determine the color based on the height $h_{\text{terrain}}$ (e.g., white for snow at high altitudes, green for grass at lower altitudes) [S1, unofficial].
+5. Shade the hit point by raymarching towards a light source to compute lighting [S1, unofficial].
+
+**Parameters:**
+- Step size $\Delta s$: Not given in the sources.
+- Maximum steps $N_{\text{max}}$: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- If the step size is too large, the ray may skip over the terrain surface, resulting in no hit or incorrect depth [G].
+- Precision issues may occur if the terrain height and ray height are very close but the step size causes overshooting [G].
+- Procedural heightmaps must be consistent with the coordinate system used for ray sampling [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def terrain_raymarching(camera, heightmap, step_size, max_steps, image_width, image_height):
+    for u in range(image_width):
+        for v in range(image_height):
+            ray_origin = camera.get_origin(u, v)
+            ray_direction = camera.get_direction(u, v)
+            
+            p = ray_origin
+            hit = False
+            
+            for i in range(max_steps):
+                terrain_h = heightmap.sample(p.x, p.z)
+                
+                if p.y <= terrain_h:
+                    hit = True
+                    break
+                
+                p = p + ray_direction * step_size
+            
+            if hit:
+                # Determine color based on height (e.g., white for snow, green for grass) [S1, unofficial]
+                color = WHITE if terrain_h > threshold_snow else GREEN
+                
+                # Shade the point by raymarching towards a light source [S1, unofficial]
+                # Lighting calculation details are not given in the sources.
+                pass
+```
+
+## Subtopics
+
+### Horizon Mapping
+Horizon Mapping is a technique to describe the self-occlusion of a heightfield by calculating visibility [S2, unofficial]. Visibility is calculated by determining the altitude or horizon angle for a set of azimuth directions for every point in the surface [S2, unofficial]. This data is stored into a horizon map [S2, unofficial].
+
+## Operating characteristics
+The method fits perfectly on the GPU, as each pixel can be calculated independently [S1, unofficial]. By using distance fields, we can accelerate the rendering to real-time speeds, and still maintain a high level of detail [S1, unofficial].
+
+## Background
+Terrain Raymarching is a general application of raymarching techniques, which have been used to render a variety of complex scenes [S1, unofficial]. The specific application to terrain rendering using heightmaps is discussed in the context of distance field raymarching [S1, unofficial].
+
+## Sources
+[S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)
+[S2] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,362 @@
+### Summary
+
+Add a physically‑plausible, configurable sky that animates through the day/night cycle, drives sun direction and scene lighting, and supports *zone‑local weather overrides*. This is the basis for a full weather system (later phases: clouds, precipitation, storms).
+
+We’ll start with an analytic clear‑sky model (Hosek–Wilkie) for visual quality + speed, drive a directional light from the sun position, compute ambient sky lighting (Spherical Harmonics L2) for “fill,” and expose settings so designers can scrub time‑of‑day and author per‑zone weather. Hosek–Wilkie is widely used and robust at low sun elevations; it improves upon Preetham at sunset/turbid skies. ([[Computer Graphics Group](https://cgg.mff.cuni.cz/projects/SkylightModelling/HosekWilkie_SkylightModel_SIGGRAPH2012_Preprint.pdf?utm_source=chatgpt.com)][1])
+
+---
+
+## Goals (Phase 1)
+
+* **Dynamic sky** rendered as a background pass (fullscreen triangle) or skydome using an **analytic model**.
+* **Sun motion** over time with **configurable time‑of‑day** (pause/speed/scrub).
+* **Scene lighting driven by the sun:**
+
+  * Directional light from sun vector.
+  * Optional single‑cascade shadow map (CSM in Phase 2).
+  * **Ambient skylight** via SH‑L2 (9 coefficients) generated from the sky model each update. ([[Computer Science](https://cseweb.ucsd.edu/~ravir/papers/envmap/envmap.pdf?utm_source=chatgpt.com)][2])
+* **Per‑zone weather overrides** (turbidity/haze, fog density/color, cloud coverage placeholder).
+* **Designer controls:** debug UI + data‑driven JSON in `data/`.
+* **Tooling:** sky visible in `tools/model-viewer` for quick iteration.
+
+### Non‑Goals (defer to later phases)
+
+* Volumetric clouds, aerial perspective with multiple scattering LUTs, precipitation, moon/stars parallax, HDR pipeline polish (tone‑mapping can be basic in Phase 1; ACES fit optional). For reference, Hillaire/UE Sky Atmosphere and Bruneton LUTs are strong paths for future phases. ([[sebh.github.io](https://sebh.github.io/publications/egsr2020.pdf?utm_source=chatgpt.com)][3])
+
+---
+
+## High‑level Approach
+
+1. **Sky model (CPU coefficients, GPU evaluation).**
+   Use the Rust crate **`hw-skymodel`** (pure Rust Hosek–Wilkie) to compute per‑frame coefficients (RGB) and sun radiance. Upload compact params to a `@group(…)` WGSL uniform and evaluate the sky color per pixel in `sky.wgsl`. ([[Docs.rs](https://docs.rs/hw-skymodel?utm_source=chatgpt.com)][4])
+
+2. **Sun position & time‑of‑day.**
+   Provide two drivers:
+
+   * **Game‑relative** (simple azimuth/elevation from [0..1] day fraction), and
+   * **Geographic** (optional, uses **`solar-positioning`** SPA/Grena3 or `suncalc` for latitude/longitude/calendar inputs). Expose both; default to game‑relative. ([[Crates](https://crates.io/crates/solar-positioning/0.3.0?utm_source=chatgpt.com)][5])
+
+3. **Lighting the world.**
+
+   * **Directional light**: feed `sun_dir`, `sun_illuminance_lux` (or normalized intensity) to `gfx/shader.wgsl` and apply a **Lambert** term on existing materials (start simple; PBR later).
+   * **Ambient skylight**: sample the sky model on CPU (e.g., 64–196 directions) and project to **SH‑L2** (9×RGB). Upload `sh_coeffs[9]` to shaders for diffuse ambient. ([[Computer Science](https://cseweb.ucsd.edu/~ravir/papers/envmap/envmap.pdf?utm_source=chatgpt.com)][2])
+
+4. **Shadows.**
+   Phase 1: single directional shadow map (1×2k).
+   Phase 2: **Cascaded Shadow Maps (CSM)** (3–4 cascades) following common practice. ([[Learn OpenGL](https://learnopengl.com/Guest-Articles/2021/CSM?utm_source=chatgpt.com)][6])
+
+5. **Fog / aerial perspective (starter).**
+   Height‑ and distance‑based exponential fog (parameters come from zone weather). (Advanced aerial perspective and multi‑scattering later; see Hillaire for future work.) ([[sebh.github.io](https://sebh.github.io/publications/egsr2020.pdf?utm_source=chatgpt.com)][3])
+
+6. **Tone mapping (optional toggle).**
+   Basic Reinhard by default; optional **ACES filmic fit** (K. Narkowicz) for nicer sunsets. ([[Krzysztof Narkowicz](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?utm_source=chatgpt.com)][7])
+
+7. **Zones & weather.**
+   Add `WeatherZone` components with AABB/sphere volumes. On camera/actor inside a zone, blend defaults with zone overrides (turbidity, fog density/color, ambient tint, wind, cloud coverage placeholder).
+
+---
+
+## Proposed Code & File Layout
+
+```
+src/
+├─ gfx/
+│  ├─ mod.rs                     // wire new passes/resources
+│  ├─ pipeline.rs                // add sky pass + shadow pipeline
+│  ├─ shader.wgsl                // add directional + SH ambient
+│  ├─ sky.rs                     // NEW: Sky resources, SH proj, uploads
+│  ├─ sky.wgsl                   // NEW: Hosek–Wilkie evaluation, background
+│  ├─ shadows.rs                 // NEW: directional shadow (Phase 1)
+│  ├─ fog.wgsl                   // NEW: simple exp(height) fog
+│  └─ types.rs                   // extend Globals/Sun/Sky structs
+├─ ecs/
+│  ├─ components/
+│  │  ├─ environment.rs          // NEW: TimeOfDay, SunLight, SkyConfig
+│  │  └─ weather_zone.rs         // NEW: WeatherZone (AABB/sphere), WeatherProfile
+│  └─ systems/
+│     ├─ environment_sys.rs      // NEW: advance time, compute sun, emit uniforms
+│     └─ weather_zone_sys.rs     // NEW: resolve active zone & blend params
+├─ core/
+│  └─ data/
+│     ├─ environment.rs          // NEW: serde types for env config
+│     └─ loader.rs               // hook: load env JSON
+├─ sim/
+│  └─ state.rs                   // extend Environment (time rate, flags)
+└─ tools/
+   └─ model-viewer/
+      └─ main.rs                 // add sky preview + day scrub
+data/
+└─ environment/
+   ├─ defaults.json              // global baseline
+   └─ zones.json                 // list of zones w/ profiles + transforms
+```
+
+### Key Rust types (sketch)
+
+```rust
+// ecs/components/environment.rs
+#[derive(Clone, Copy)]
+pub struct TimeOfDay {
+    /// 0.0..1.0 across a 24h cycle (designers can drive directly)
+    pub day_frac: f32,
+    pub rate_scale: f32, // 1.0 = realtime, 60.0 = 1 minute == 1 hour
+    pub paused: bool,
+}
+
+#[derive(Clone, Copy)]
+pub struct SunLight {
+    pub dir_ws: glam::Vec3,
+    pub illuminance_lux: f32, // or normalized and let exposure/tone-map handle range
+    pub color: glam::Vec3,    // usually white; slight tint optional
+}
+
+#[derive(Clone)]
+pub struct SkyConfig {
+    pub turbidity: f32,        // [1..10]
+    pub ground_albedo: glam::Vec3,
+    pub exposure: f32,         // if tone mapping enabled
+    pub fog_density: f32,
+    pub fog_height_falloff: f32,
+    pub ambient_boost: f32,    // multiply SH ambient
+    pub model: SkyModelKind,   // HosekWilkie | Preetham (fallback)
+}
+
+// ecs/components/weather_zone.rs
+pub struct WeatherZone {
+    pub aabb_min: glam::Vec3,
+    pub aabb_max: glam::Vec3,
+    pub profile: WeatherProfile,
+}
+pub struct WeatherProfile {
+    pub turbidity: Option<f32>,
+    pub fog_density: Option<f32>,
+    pub fog_color: Option<glam::Vec3>,
+    pub ambient_tint: Option<glam::Vec3>,
+    pub exposure: Option<f32>,
+    pub cloud_coverage: Option<f32>, // placeholder for Phase 2
+}
+```
+
+### GPU interfaces
+
+Extend `gfx/types.rs` `Globals` and add sky uniforms:
+
+```rust
+#[repr(C)] #[derive(Copy, Clone)]
+pub struct Globals {
+    pub view_proj: Mat4,
+    pub camera_ws: Vec3,
+    pub time_seconds: f32,
+    pub sun_dir_ws: Vec3,
+    pub sun_illuminance: f32,
+    pub sh9_ambient: [Vec3; 9], // L2 SH for diffuse ambient
+    pub fog_density: f32,
+    pub fog_height_falloff: f32,
+    pub exposure: f32, // if enabled
+}
+```
+
+### Shaders (snippets)
+
+**`gfx/sky.wgsl`** (evaluate Hosek–Wilkie with CPU‑computed params):
+
+```wgsl
+struct SkyParams {
+    // Packed HW coefficients (RGB) + sun dir; prepared on CPU
+    a: vec3<f32>; b: vec3<f32>; c: vec3<f32>;
+    d: vec3<f32>; e: vec3<f32>; f: vec3<f32>;
+    g: vec3<f32>; h: vec3<f32>; i: vec3<f32>;
+    z: vec3<f32>; // zenith luminance
+    sun_dir_ws: vec3<f32>;
+    ground_albedo: vec3<f32>;
+};
+@group(0) @binding(0) var<uniform> sky : SkyParams;
+
+fn hosek_radiance(view_dir_ws: vec3<f32>) -> vec3<f32> {
+    // Standard HW eval using precomputed coefficients (omitted here for brevity)
+    // Return HDR radiance (linear).
+    // ...
+}
+
+@fragment
+fn fs_sky(@location(0) dir_ws: vec3<f32>) -> @location(0) vec4<f32> {
+    let L = hosek_radiance(normalize(dir_ws));
+    return vec4<f32>(L, 1.0);
+}
+```
+
+**`gfx/shader.wgsl`** (directional + SH ambient):
+
+```wgsl
+fn sh_irradiance_L2(normal_ws: vec3<f32>, sh9: array<vec3<f32>, 9>) -> vec3<f32> {
+    // Evaluate 9‑coef irradiance; coefficients are pre‑convolved for Lambert.
+    // ...
+}
+
+@fragment
+fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.normal_ws);
+    let Ld = max(dot(n, -globals.sun_dir_ws), 0.0);
+    let diffuse = material.base_color * (Ld * globals.sun_illuminance);
+    let ambient = material.base_color * sh_irradiance_L2(n, globals.sh9_ambient);
+    let color = fog_apply(diffuse + ambient, in.world_pos);
+    return tonemap(color, globals.exposure);
+}
+```
+
+---
+
+## Data
+
+`data/environment/defaults.json`
+
+```json
+{
+  "time": { "day_frac": 0.25, "rate_scale": 60.0, "paused": false },
+  "sky": {
+    "turbidity": 3.0,
+    "ground_albedo": [0.2, 0.2, 0.2],
+    "exposure": 1.0,
+    "fog_density": 0.002,
+    "fog_height_falloff": 1.2,
+    "ambient_boost": 1.0,
+    "model": "HosekWilkie"
+  }
+}
+```
+
+`data/environment/zones.json`
+
+```json
+{
+  "zones": [
+    {
+      "name": "Swamp",
+      "aabb_min": [-200, 0, -200],
+      "aabb_max": [200, 20, 200],
+      "profile": {
+        "turbidity": 8.0,
+        "fog_density": 0.01,
+        "fog_color": [0.35, 0.45, 0.35],
+        "ambient_tint": [0.8, 1.0, 0.8]
+      }
+    }
+  ]
+}
+```
+
+---
+
+## Editor/Debug UX
+
+* **Keyboard:** `K/J` = time scrub ±, `L` = pause, `;`/`'` = rate ×/÷.
+* **Debug panel:** show sun azimuth/elevation, turbidity, exposure, fog sliders; dropdown to switch model (Hosek–Wilkie / Preetham), toggle ACES/Reinhard.
+* **Overlay:** current zone name + blended params.
+
+---
+
+## Integration Notes
+
+* **Model choice:** Hosek–Wilkie handles sunsets and high turbidity better than Preetham; good “Phase 1” target. Keep interfaces abstract so we can swap in Hillaire or Bruneton later for volumetrics/aerial perspective. ([[Computer Graphics Group](https://cgg.mff.cuni.cz/projects/SkylightModelling/HosekWilkie_SkylightModel_SIGGRAPH2012_Preprint.pdf?utm_source=chatgpt.com)][1])
+* **Sun computation:** Support both lightweight day‑fraction math and real solar position via `solar-positioning` (SPA/Grena3) or `suncalc`. ([[Crates](https://crates.io/crates/solar-positioning/0.3.0?utm_source=chatgpt.com)][5])
+* **Ambient lighting:** Use SH‑L2 (9 coeffs) from the sky model for diffuse fill (classic technique). ([[Computer Science](https://cseweb.ucsd.edu/~ravir/papers/envmap/envmap.pdf?utm_source=chatgpt.com)][2])
+* **Shadows:** Start with single map; plan CSM next (common approach; LearnOpenGL article for splits/filtering rationale). ([[Learn OpenGL](https://learnopengl.com/Guest-Articles/2021/CSM?utm_source=chatgpt.com)][6])
+* **Tone mapping:** Optional ACES filmic fit curve by Narkowicz; otherwise Reinhard. ([[Krzysztof Narkowicz](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?utm_source=chatgpt.com)][7])
+
+---
+
+## Tasks
+
+**A. ECS & Data**
+
+* [ ] Add `TimeOfDay`, `SunLight`, `SkyConfig` components.
+* [ ] Add `WeatherZone` + `WeatherProfile` components and blending rules.
+* [ ] Extend `core/data/loader.rs` to read `data/environment/*.json` into runtime resources.
+
+**B. Sun & Time Systems**
+
+* [ ] `environment_sys`: advance `day_frac` (respect pause/rate), compute sun azimuth/elevation, set `SunLight`.
+* [ ] Optional: geographic driver using `solar-positioning` or `suncalc`. ([[Crates](https://crates.io/crates/solar-positioning/0.3.0?utm_source=chatgpt.com)][5])
+
+**C. Sky Rendering**
+
+* [ ] Add `gfx/sky.rs` to build/update HW coefficients via `hw-skymodel`. ([[Docs.rs](https://docs.rs/hw-skymodel?utm_source=chatgpt.com)][4])
+* [ ] Create `gfx/sky.wgsl` and a background **sky pass** (fullscreen triangle).
+* [ ] Wire render order in `gfx/mod.rs`: sky → shadows → opaque → transparent/particles → UI.
+
+**D. Lighting**
+
+* [ ] Extend `gfx/types.rs::Globals` and update uniform writes.
+* [ ] In `gfx/shader.wgsl`, add directional sun diffuse and **SH‑L2 ambient**.
+* [ ] Add simple exponential fog (distance/height).
+
+**E. Shadows**
+
+* [ ] Implement single directional shadow map (2k) and sample in main pass.
+* [ ] (Phase 2 ticket) Implement **CSM** with 3–4 cascades and PCF filtering. ([[Learn OpenGL](https://learnopengl.com/Guest-Articles/2021/CSM?utm_source=chatgpt.com)][6])
+
+**F. Tools & Debug**
+
+* [ ] `tools/model-viewer`: sky preview and time scrub controls.
+* [ ] In‑game debug panel & hotkeys.
+
+**G. QA / Perf**
+
+* [ ] Validate banding—add blue‑noise dithering in tonemap if needed.
+* [ ] Profile sky eval vs. cubemap bake (we expect per‑pixel eval to be fine on mid‑range GPUs).
+
+---
+
+## Acceptance Criteria
+
+* [ ] Setting `day_frac` from 0.00 → 1.00 moves the sun smoothly from dawn → noon → dusk → night; the sky color changes accordingly.
+* [ ] The sun direction **lights geometry** (Lambert) and **casts shadows** (single shadow map).
+* [ ] Ambient **skylight** visibly fills shadowed faces (SH‑L2), matching sky tint at different times.
+* [ ] Designers can **pause**, **scrub**, and **speed up** time and see lighting/sky update live.
+* [ ] Entering a `WeatherZone` **blends** turbidity/fog/ambient tint within 0.5–2.0s (configurable).
+* [ ] `tools/model-viewer` shows the sky and allows time scrub.
+* [ ] All new code is behind `gfx.sky` feature flags and passes CI: `cargo clippy --all-targets -D warnings`, unit tests for SH projection/math and sun position.
+
+---
+
+## Open Questions
+
+* Do we want **HDR pipeline** immediately (float scene color + ACES fit + auto‑exposure), or keep LDR with conservative intensities for now? (ACES option is implemented in many engines for better highlight handling.) ([[Krzysztof Narkowicz](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?utm_source=chatgpt.com)][7])
+* Should zone blending be **priority‑based** or **weighted by volume distance** when volumes overlap?
+
+---
+
+## References / Prior Art
+
+* **Hosek–Wilkie sky model** (analytic clear‑sky; robust at low sun angles). ([[Computer Graphics Group](https://cgg.mff.cuni.cz/projects/SkylightModelling/HosekWilkie_SkylightModel_SIGGRAPH2012_Preprint.pdf?utm_source=chatgpt.com)][1])
+* **Preetham daylight model** (classic analytic baseline). ([[Duke Computer Science](https://courses.cs.duke.edu/cps124/fall02/resources/p91-preetham.pdf?utm_source=chatgpt.com)][8])
+* **Bruneton & Neyret** (precomputed atmospheric scattering; future aerial perspective). ([[Wiley Online Library](https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2008.01245.x?utm_source=chatgpt.com)][9])
+* **Hillaire (EGSR 2020)** (production sky/atmosphere, UE implementation; Phase 3 candidate). ([[sebh.github.io](https://sebh.github.io/publications/egsr2020.pdf?utm_source=chatgpt.com)][3])
+* **`hw-skymodel` crate** (pure Rust HW implementation). ([[Docs.rs](https://docs.rs/hw-skymodel?utm_source=chatgpt.com)][4])
+* **Solar position** crates (`solar-positioning` SPA, `suncalc`). ([[Crates](https://crates.io/crates/solar-positioning/0.3.0?utm_source=chatgpt.com)][5])
+* **SH irradiance (L2) for ambient** (9 coefficients). ([[Computer Science](https://cseweb.ucsd.edu/~ravir/papers/envmap/envmap.pdf?utm_source=chatgpt.com)][2])
+* **CSM overview** (Phase 2 shadows). ([[Learn OpenGL](https://learnopengl.com/Guest-Articles/2021/CSM?utm_source=chatgpt.com)][6])
+* **ACES filmic fit** (optional tonemapper). ([[Krzysztof Narkowicz](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?utm_source=chatgpt.com)][7])
+
+---
+
+### Notes for Implementation Order (suggested)
+
+1. Sky pass + simple sun dir from `day_frac`.
+2. Directional light in material shader + SH ambient.
+3. Fog.
+4. Single shadow map.
+5. Zones + blending.
+6. Tooling + polish (tonemap toggle, sliders).
+
+If you want, I can also prep the initial PR scaffold (stubs for the new modules, uniforms, and a minimal `sky.wgsl` that compiles) and a small `defaults.json` so the sky shows up immediately.
+
+[1]: https://cgg.mff.cuni.cz/projects/SkylightModelling/HosekWilkie_SkylightModel_SIGGRAPH2012_Preprint.pdf?utm_source=chatgpt.com "An Analytic Model for Full Spectral Sky-Dome Radiance"
+[2]: https://cseweb.ucsd.edu/~ravir/papers/envmap/envmap.pdf?utm_source=chatgpt.com "An Efficient Representation for Irradiance Environment Maps"
+[3]: https://sebh.github.io/publications/egsr2020.pdf?utm_source=chatgpt.com "Production Ready Atmosphere Rendering - Sébastien Hillaire"
+[4]: https://docs.rs/hw-skymodel?utm_source=chatgpt.com "hw_skymodel - Rust"
+[5]: https://crates.io/crates/solar-positioning/0.3.0?utm_source=chatgpt.com "solar-positioning - crates.io: Rust Package Registry"
+[6]: https://learnopengl.com/Guest-Articles/2021/CSM?utm_source=chatgpt.com "Cascaded Shadow Maps"
+[7]: https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/?utm_source=chatgpt.com "ACES Filmic Tone Mapping Curve | Krzysztof Narkowicz"
+[8]: https://courses.cs.duke.edu/cps124/fall02/resources/p91-preetham.pdf?utm_source=chatgpt.com "A Practical Analytic Model for Daylight"
+[9]: https://onlinelibrary.wiley.com/doi/10.1111/j.1467-8659.2008.01245.x?utm_source=chatgpt.com "Precomputed Atmospheric Scattering - Bruneton - 2008"

@@ -1,0 +1,430 @@
+A refreshingly simple data-driven game engine built in Rust - Add option to compress vertex normal tangent to axis angle by beicause · Pull Request #24535 · bevyengine/bevy
+
+Add option to compress vertex normal tangent to axis angle by beicause · Pull Request #24535 · bevyengine/bevy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+beicause
+commented
+Jun 5, 2026
+Copy link
+Copy Markdown
+Member
+Objective
+Followup to #21926. Adds option to compress vertex normal tangent into axis angle which saves 4 bytes per vertex.
+Solution
+Add a new MeshAttributeCompressionFlags::PACKED_AXIS_ANGLE_TBN flag. If it's enabled and position, normal and tangent are all need to be compressed, we convert TBN to axis angle representation - octahedral encoded Snorm16x2 axis in normal location + Snorm16 angle in position.w.
+Compared to oct encoded normal + oct encoded tangent, byte usage is reduced by 2, but it utilizes the unused w component in compressed position so the actual reduction is 4 bytes, considering most users don't fill position.w with custom data.
+Testing
+I modified the deferred_rendering example to use axis-angle compression for the cube with parallax mapping.
+beicause
+force-pushed
+the
+vertex-compression-axis-angle
+branch
+from
+e8ca3c0 to
+2b8020e
+Compare
+June 5, 2026 09:27
+Add option to compress vertex normal tangent to axis angle
+951b232
+beicause
+force-pushed
+the
+vertex-compression-axis-angle
+branch
+from
+2b8020e to
+951b232
+Compare
+June 5, 2026 09:32
+ickshonpe
+added
+A-Rendering
+Drawing game state to the screen
+C-Performance
+A change motivated by improving speed, memory usage or compile times
+labels
+Jun 5, 2026
+github-project-automation
+Bot
+added this to Rendering
+Jun 5, 2026
+github-project-automation
+Bot
+moved this to Needs SME Triage
+in Rendering
+Jun 5, 2026
+ickshonpe
+added
+the
+S-Needs-Review
+Needs reviewer attention (from anyone!) to move forward
+label
+Jun 5, 2026
+alice-i-cecile
+commented
+Jun 7, 2026
+Copy link
+Copy Markdown
+Member
+Do you have any rough benchmarks to show the frame time and memory changes when this feature is enabled? Do various programs output vertex normals in this format?
+beicause
+commented
+Jun 8, 2026
+Copy link
+Copy Markdown
+Member
+Author
+I didn't see an improvement in FPS (but no drop either) in stress tests. This is more about reducing memory and bandwidth, especially for mobile.
+AFAIK Godot compresses vertices like this.
+Simplify axis_angle_to_normal_tangent
+2389341
+greeble-dev
+reviewed
+Jun 8, 2026
+View reviewed changes
+greeble-dev
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Added some comments. Also going to tag as X-Contentious because I think there's a few different ways to approach this. I've given my two cents, but the PR could do with more reviews from rendering experts.
+Comment thread
+crates/bevy_mesh/src/vertex.rs
+/// Convert the axis-angle representation back to normal and tangent.
+/// The range of angle is [-2pi, 2pi], where the sign represents the handedness of the tangent.
+pub fn axis_angle_to_normal_tangent(axis: Vec3, angle: f32) -> (Vec3, Vec4) {
+greeble-dev
+Jun 8, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+If I'm reading this right, it's doing normal = rotation * vec3(0.0, 0.0, 1.0) and tangent = rotation * vec3(1.0, 0.0, 0.0), where the rotation is axis/angle? If so, a downside of that approach is that the accuracy is pretty unevenly distributed - it will be less accurate the closer the angle is to 180.
+I'm not an expert on this stuff, but I believe the more common approach is to create an orthogonal basis from the axis and then rotate it by the angle. Depending on how the basis is constructed the accuracy will be more evenly distributed. This blog post has a survey of different approaches, although it focuses on 4 byte encodings rather than this PR's 6 bytes: https://zeux.io/2026/04/30/quantizing-tangent-frames/
+Should this PR use the orthogonal basis? I'm not sure - it's more complicated and costs more ALU, so maybe the extra accuracy isn't worth it.
+A spicier option is to encode a quaternion with an octahedral projection - this is simple to decode and has reasonably distributed accuracy. However, I haven't seen this approach described publicly, and I haven't tested if it's better than the approaches mentioned in the above blog post, so it would be a bit of a gamble. Will also need one bit stolen from a component to store the tangent.w.
+```
+// Encodes to a Vec3 with range [-1, 1].
+fn encode(q: Quat) -> Vec3 {
+    let s = 1.0 / (q.xyz().abs().max_element() + q.w.abs());
+    q.xyz() * s * q.w.signum()
+}
+
+fn decode(v: Vec3) -> Quat {
+    let w = 1.0 - v.abs().max_element();
+    Quat::from_xyzw(v.x, v.y, v.z, w).normalize()
+}
+```
+TLDR: There's more accurate options but they have trade-offs. I don't think that should block this PR - other options could be explored later.
+beicause
+Jun 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+https://zeux.io/2026/04/30/quantizing-tangent-frames Good article, which mentions many approaches If using 32bits for normal tangent.
+If we want to use 48bits for normal tangent, I think this PR (oct16x2+a15, orientation is stolen from angle) might be the best choice. Diamond encoding avoids sin()/cos() but I don't think it's much faster/more precise than angle.
+To utilize the unused position.w, another choice is quantizing position to uint21x3 then packing 16x3+5x3 bits into Uint16x4 to improve position precision, but unpacking it has overhead. I'm not sure if it's worth doing.
+beicause
+Jun 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+PS: The tangent angle encoding in the article constructs an orthogonal basis from the normal and then rotates by an angle, which differs from the axis-angle representation of TBN matrix in this PR.
+Constructing basis from the normal allows the normal encoding/decoding to be independent of the tangent, but I suspect the precision will be lower.
+greeble-dev
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Yes, I worded that poorly. I mentioned creating the basis from the axis, but that's nonsense - there's no axis, just the normal.
+My intuition is that the basis method would be more accurate. Axis/angle is similar to latitude/longitude encodings - a lot of bits are wasted near the poles where the normal is close to (0, 0, 1) or (0, 0, -1). I've tested this for a different case - using axis/angle to encode quaternions - and axis/angle clearly lost to cubic/octahedral projections (which are kinda similar to basis construction in dividing up space). But I haven't tested it for TBN, so maybe my intuition is wrong.
+Comment thread
+crates/bevy_mesh/src/mesh.rs
+///
+/// In addition, if [`PACKED_AXIS_ANGLE_TBN`] is enabled:
+/// - Position, normal and tangent compression flags must be enabled, otherwise it won't be applied.
+/// - Normal and tangent will be compressed to axis-angle representation. Axis is octahedral encoded Snorm16x2 in normal location (Note the axis isn't equal to normal). Angle is a Snorm16 in the w component of position. See also [`normal_tangent_to_axis_angle`] and [`normal_tangent_to_axis_angle`]. The tangent attribute will be removed with its location in shaders left empty.
+greeble-dev
+Jun 8, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Might be worth noting that PACKED_AXIS_ANGLE_TBN only supports perpendicular normal and tangent.
+Comment thread
+crates/bevy_mesh/src/mesh.rs
+/// If the corresponding attribute compression is enabled:
+/// - Position will be Snorm16x4 relative to the mesh's AABB. The w component is unused.
+/// - Normal and tangent will be Snorm16x2 with octahedral encoding, using [`octahedral_encode_signed`](crate::vertex::octahedral_encode_signed) and [`octahedral_encode_tangent`](crate::vertex::octahedral_encode_tangent).
+/// - Position will be Snorm16x4 relative to the mesh's AABB. The w component is unused unless [`PACKED_AXIS_ANGLE_TBN`] is enabled.
+greeble-dev
+Jun 8, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This bitfield is starting to get fairly complicated. I don't think it needs to be explored in this PR, but maybe a future PR could consider switching to enums where only valid cases are representable? Maybe that turns out to be just as complicated in practice.
+Comment thread
+crates/bevy_mesh/src/vertex.rs
+let tangent = tangent_signed.xyz();
+let bitangent = normal.cross(tangent);
+let (axis, angle) =
+Quat::from_mat3(&Mat3::from_cols(tangent, bitangent, normal)).to_axis_angle();
+greeble-dev
+Jun 8, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I don't think this will handle cases where the normal and tangent are scaled or not perpendicular? Maybe scaled doesn't need to be handled if they're normalized elsewhere - I didn't check. For non-perpendicular the glam docs vaguely say that Quat::from_mat3 is "ill-defined".
+beicause
+Jun 8, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+They are normalized in create_compressed_axis_angle_attribute_values, though the perpendicularity is unchecked.
+Comment thread
+crates/bevy_mesh/src/mesh.rs
+new_compression.remove(MeshAttributeCompressionFlags::PACKED_AXIS_ANGLE_TBN);
+}
+self.attribute_compression |= attribute_compression;
+self.attribute_compression |= new_compression;
+greeble-dev
+Jun 8, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I think that trying to handle an already compressed mesh is adding too much complication and making testing harder. I'd argue that it should simply return an error if anything on the mesh has already been compressed.
+beicause
+Jun 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+If flags can be partially applied, should an error be returned?
+greeble-dev
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+You mean if the user passes in COMPRESS_UV_1 but there's no UV1 attribute? I don't think that should be an error.
+So the error cases would be:
+!self.attribute_compression.is_empty().
+PACKED_AXIS_ANGLE_TBN is set but any of COMPRESS_NORMAL/TANGENT/POSITION are not.
+Comment thread
+examples/3d/deferred_rendering.rs
+Comment on lines
++236
+to
++239
+let cube = cube.compressed_mesh(
+MeshAttributeCompressionFlags::all_with_color_float16(),
+true,
+);
+greeble-dev
+Jun 8, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Was this intentionally left in? I don't think the example should have it.
+beicause
+Jun 8, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+For testing, and this example can test both the prepass and forward paths.
+The meshes in our stress tests don't seem to have tangents.
+greeble-dev
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I still disagree on adding it. In my view examples are for demonstrating how to use a feature, and they shouldn't include any test code that conflicts with that goal.
+I've filed a PR that adds mesh compression to the scene viewer: #24570. If that lands then it gives a way to test mesh compression with the prepass (via --deferred or --depth-prepass).
+beicause
+Jun 9, 2026
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I still disagree on adding it. In my view examples are for demonstrating how to use a feature, and they shouldn't include any test code that conflicts with that goal.
+I've filed a PR that adds mesh compression to the scene viewer: #24570. If that lands then it gives a way to test mesh compression with the prepass (via --deferred or --depth-prepass).
+Do any of the models in the repo have use normal maps or depth maps?
+greeble-dev
+Jun 9, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Flight helmet (the default scene viewer model) has normal maps. There's also AnisotropyBarnLamp which will make any normal/tangent issues more obvious due to anisotropic lighting with high specular. I don't know of any model that uses depth maps.
+greeble-dev
+added
+the
+X-Contentious
+There are nontrivial implications that should be thought through
+label
+Jun 8, 2026
+This was referenced Jun 9, 2026
+Refactor mesh compression methods
+#24572
+Merged
+Add tangent angle encoding to mesh compression
+#24616
+Open
+Zeophlite
+added
+the
+S-Merge-Conflicts
+Merge conflicts :( Add this label on top of other S- labels.
+label
+Aug 22, 2026
+pull Bot
+pushed a commit
+to VitalyAnkh/bevy
+that referenced
+this pull request
+Sep 8, 2026
+Refactor mesh compression methods (bevyengine#24572)
+…
+8fbd173
+```
+# Objective
+
+bevyengine#24535 (comment)
+Refactor part of the mesh compression code to improve maintainability.
+
+## Solution
+
+1. Split `create_compressed_attribute_values` into separate
+`Mesh::compress_*` methods, each independently callable and returning an
+error if compression fails
+2. Replace color and joint weight compression with the more generic
+`quantize_float32_attribute`, instead of being limited to unorm8/float16
+for color and unorm16 for joint weight
+3. Change the parameters of the `compressed_mesh` function to
+`MeshCompressionArgs`
+4. Split the tests into separate tests for each `Mesh::compress_*`
+
+## Testing
+
+The unit tests and `many_foxes` and `many_morph_targets` still work
+```
+joelawm
+pushed a commit
+to joelawm/bevy
+that referenced
+this pull request
+Sep 8, 2026
+Refactor mesh compression methods (bevyengine#24572)
+…
+bddd44a
+```
+# Objective
+
+bevyengine#24535 (comment)
+Refactor part of the mesh compression code to improve maintainability.
+
+## Solution
+
+1. Split `create_compressed_attribute_values` into separate
+`Mesh::compress_*` methods, each independently callable and returning an
+error if compression fails
+2. Replace color and joint weight compression with the more generic
+`quantize_float32_attribute`, instead of being limited to unorm8/float16
+for color and unorm16 for joint weight
+3. Change the parameters of the `compressed_mesh` function to
+`MeshCompressionArgs`
+4. Split the tests into separate tests for each `Mesh::compress_*`
+
+## Testing
+
+The unit tests and `many_foxes` and `many_morph_targets` still work
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+A-Rendering
+Drawing game state to the screen
+C-Performance
+A change motivated by improving speed, memory usage or compile times
+S-Merge-Conflicts
+Merge conflicts :( Add this label on top of other S- labels.
+S-Needs-Review
+Needs reviewer attention (from anyone!) to move forward
+X-Contentious
+There are nontrivial implications that should be thought through
+5 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -16,7 +16,7 @@ Malan-Inspired Adaptive Blending is a temporal anti-aliasing technique for froxe
 
 **Steps:**
 1.  **Color Space Transformation:** Retrieve the current-frame samples for the neighborhood and transform them into a chosen color space (e.g., CoCg, YCrCb) [S1, unofficial].
-2.  **Compute Extent ($r_{i,t}$):** Determine the minimum ($c_{min}$) and maximum ($c_{max}$) color values within the transformed neighborhood [S1, unofficial]. Calculate the extent $r_{i,t}$ as the Euclidean length of the difference vector between these bounds:
+2.  **Compute Extent ($r_{i,t}$):** Determine the component-wise minimum ($c_{min}$) and maximum ($c_{max}$) color values within the transformed neighborhood [S1, unofficial]. Calculate the extent $r_{i,t}$ as the Euclidean length of the difference vector between these bounds:
     $$r_{i,t} = |c_{max} - c_{min}|$$
     where $c_{min}$ and $c_{max}$ are vectors in the chosen color space [S1, unofficial].
 3.  **Compute Scaling Factor ($k$):** Map the extent $r_{i,t}$ to a scaling factor $k$ using a linear mapping bounded by $r_{min}$ and $r_{max}$:
@@ -43,12 +43,11 @@ def clamp(value, min_val, max_val):
     return max(min_val, min(max_val, value))
 
 def transform_to_space(color, space):
-    # The source mentions CoCg and YCrCb were evaluated.
-    # The exact transformation matrix is implementation-specific [G].
+    # Exact color space transformation matrices not given in sources [G].
     return color
 
 def transform_from_space(color, space):
-    # Inverse transformation back to RGB [G].
+    # Exact inverse color space transformation matrices not given in sources [G].
     return color
 
 def malan_adaptive_blending(current_froxel, history_froxel, neighborhood_samples,
@@ -107,16 +106,16 @@ def malan_adaptive_blending(current_froxel, history_froxel, neighborhood_samples
 ## Subtopics
 
 ### [Adaptive Blending](1983-adaptive-blending.md)
-A method that reduces ghosting by allowing the history to be modified by a maximum blend factor per frame. A maximum blend factor of 50% was tested. This variant modifies the history value itself, whereas Malan-Inspired Adaptive Blending only modifies the blend factor.
+A temporal anti-aliasing technique that reduces ghosting artifacts in volumetric rendering by constraining the maximum amount the historical buffer can be updated per frame. Unlike methods that modify history validity or reject stale data, this approach limits the blend factor itself, ensuring gradual convergence rather than instant replacement. It is distinct from variance clipping, which reduces ghosting more effectively while exhibiting similar temporal instability. Choose this variant when you need to balance ghosting with temporal stability on a per-scene basis without altering the stored history values.
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Performance:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
+*   **Performance:** Not given in the sources [S1, unofficial].
 *   **Strengths:** Effectively reduces ghosting in flat areas by allowing higher current frame contribution, and provides temporal stability in noisy regions by reducing current frame contribution [S1, unofficial].
 *   **Limitations:** Does not correct stale history values directly, only weights them less [S1, unofficial].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **When to use:** Not given in the sources [S1, unofficial].
+*   **When not to use:** Not given in the sources [S1, unofficial].
 
 ## Background
 The method is inspired by the work of Malan [15], as cited in the source [S1, unofficial]. It was implemented and evaluated in the context of temporal anti-aliasing for real-time froxel-based volumetric rendering [S1, unofficial]. The specific implementation details, including the linear mapping formula and parameter values, are derived from a thesis or report on advances in volumetric temporal anti-aliasing [S1, unofficial].

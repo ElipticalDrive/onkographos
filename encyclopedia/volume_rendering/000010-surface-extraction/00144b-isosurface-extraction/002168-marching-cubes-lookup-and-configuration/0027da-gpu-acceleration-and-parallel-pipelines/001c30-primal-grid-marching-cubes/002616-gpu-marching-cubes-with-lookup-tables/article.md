@@ -3,68 +3,84 @@
 Also called: Compute Shader Marching Cubes, GPU Marching Cubes with Fixed-Size Buffer, MC GPU, Marching Cubes GPU Implementation, Marching Cubes GPU Mesh Reconstruction
 
 ## Overview
-GPU Marching Cubes with Lookup Tables is a surface extraction technique that generates a triangle mesh from a 3D scalar field (voxels) entirely on the GPU using compute shaders [S2, S3, unofficial]. It differs from CPU implementations by offloading voxel processing and triangle generation to the GPU, and from other GPU variants by using pre-computed lookup tables stored in textures or structured buffers to determine edge intersections and triangle configurations [S1, S2, unofficial]. It builds on [Primal Grid Marching Cubes](1211-primal-grid-marching-cubes.md) by operating on a primal grid where cubes are formed by adjacent sample points [S2, unofficial].
+A GPU-based implementation of the Marching Cubes algorithm that uses pre-computed lookup tables stored in 2D textures or structured buffers to determine edge intersections and triangle configurations for a voxel grid [S1, S2, S3, unofficial]. It generates a triangle mesh from a 3D scalar field (voxels) using compute shaders, processing each voxel independently to determine surface intersections and outputting vertex data (position and normal) into a structured buffer [S2, S3, unofficial]. Unlike CPU-based implementations, this method leverages massive parallelism to process voxels simultaneously, often outputting geometry directly to structured buffers or append buffers for subsequent rendering [S1, S2, unofficial]. It builds on [Primal Grid Marching Cubes](1211-primal-grid-marching-cubes.md) by utilizing compute shaders for the core extraction logic rather than fragment shaders or texture-based lookups alone.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D scalar field (voxels) of dimensions $N \times N \times N$ (or $W \times H \times D$), an isovalue threshold ($\text{Isovalue}$ or $\text{Target}$), and pre-computed lookup tables for edge intersections and triangle configurations [S2, S3, unofficial].
-*   **Output:** A fixed-size buffer containing vertex data (position and normal) for the generated mesh [S2, unofficial].
+- **Input:** A 3D scalar field (voxel grid) of dimensions $N_x \times N_y \times N_z$, typically generated via procedural noise or loaded from a texture. A target isovalue $\tau$ (default 0.0) [S2, unofficial].
+- **Output:** A structured buffer containing vertex data (position and normal) for the extracted mesh. The buffer size is fixed to the maximum possible vertex count: $N_x N_y N_z \times 15$ vertices (5 triangles per voxel $\times$ 3 vertices per triangle) [S2, unofficial].
 
 **Data Structures:**
-1.  **Voxel Buffer (`_Voxels`):** A structured buffer or texture3D storing scalar values. Accessed via linear index $idx = x + y \cdot W + z \cdot W \cdot H$ [S2, unofficial].
-2.  **Normals Buffer (`_Normals`):** A texture3D (e.g., `ARGBHalf`) storing pre-computed gradients/normals for each voxel [S2, unofficial].
-3.  **Edge Table (`_CubeEdgeFlags`):** A lookup table mapping the 8-bit vertex flag index (0-255) to a 12-bit edge intersection mask. Each bit corresponds to one of the 12 edges of the cube [S2, unofficial]. Stored in a 2D texture `edge_table_tex` (size 256x1, `GL_R16I`) or structured buffer [S1, S2, unofficial].
-4.  **Triangle Connection Table (`_TriangleConnectionTable`):** A lookup table storing up to 16 vertex indices (defining up to 5 triangles) for each of the 256 cube configurations. Stored in a 2D texture `tri_table_tex` (size 16x256, `GL_R16I`) or structured buffer [S1, S2, unofficial].
-5.  **Output Buffer (`_Buffer`):** A `RWStructuredBuffer<Vert>` of size $N \cdot N \cdot N \cdot 15$ (where 15 is the max vertices per voxel: 5 triangles $\times$ 3 vertices). Each `Vert` struct contains `float4 position` (w=1.0) and `float3 normal` [S2, unofficial].
-6.  **Edge Geometry Constants:**
-    *   `edgeConnection[12]`: Array of 12 `int2` pairs defining the vertex indices for each edge. Order: bottom face (0-3), top face (4-7), vertical edges (8-11) [S2, unofficial].
-        ```python
-        edgeConnection = [
-            (0,1), (1,2), (2,3), (3,0), # Bottom
-            (4,5), (5,6), (6,7), (7,4), # Top
-            (0,4), (1,5), (2,6), (3,7)  # Vertical
-        ]
-        ```
-    *   `edgeDirection[12]`: Array of 12 `float3` vectors indicating the direction of each edge [S2, unofficial].
-    *   `vertexOffset[8]`: Array of 8 `float3` vectors for the 8 corners of a unit cube [S2, unofficial].
+1.  **Voxel Grid (`_Voxels`):** A 1D structured buffer or 3D texture storing scalar values. Accessed via linear index $idx = x + y \cdot N_x + z \cdot N_x \cdot N_y$ [S2, unofficial].
+2.  **Normal Field (`_Normals`):** A 3D texture (e.g., `Tex3D<float3>`) storing pre-computed gradients/normals at voxel centers or vertices [S2, unofficial].
+3.  **Edge Table (`_CubeEdgeFlags`):** A lookup table mapping the 8-bit vertex configuration index (0–255) to a 12-bit edge intersection mask. Each bit corresponds to one of the 12 edges of the cube [S2, unofficial]. Stored in a `ComputeBuffer<int>` of size 256 or a 2D texture `edge_table_tex` of size $256 \times 1$ with format `GL_R16I` [S1, S2, unofficial].
+4.  **Triangle Connection Table (`_TriangleConnectionTable`):** A lookup table defining the triangles for each of the 256 cube configurations. Each configuration stores up to 16 vertex indices (defining up to 5 triangles). Stored in a `ComputeBuffer<int>` of size $256 \times 16$ or a 2D texture `tri_table_tex` of size $16 \times 256$ with format `GL_R16I` [S1, S2, unofficial].
+5.  **Output Buffer (`_Buffer`):** A `RWStructuredBuffer<Vert>` where `Vert` contains `float4 position` (w=1.0) and `float3 normal` [S2, unofficial]. Indexed by $idx \cdot 15 + (3 \cdot i + j)$, where $idx$ is the voxel linear index, and $3 \cdot i + j$ is the vertex index within the triangle list for that voxel [S2, unofficial].
+6.  **Cube Geometry Constants:**
+    -   `vertexOffset[8]`: Offsets of the 8 cube corners relative to the cube origin.
+    -   `edgeDirection[12]`: Direction vectors for the 12 edges.
+    -   `edgeConnection[12]`: Pairs of vertex indices for each edge (e.g., `int2(0,1)` for the edge between vertex 0 and 1) [S2, unofficial].
 
 **Algorithm Steps:**
 
 1.  **Initialization:**
-    *   Initialize the output `_Buffer` with a marker value (e.g., -1.0f in position.w) to indicate unused vertices [S2, unofficial].
-    *   Dispatch a compute shader to generate the voxel scalar values (e.g., using Perlin noise) if not pre-computed [S2, unofficial].
-    *   Dispatch a compute shader to generate voxel normals/gradients [S2, unofficial].
+    -   Initialize the output `_Buffer` with a marker value (e.g., position.w = -1.0) to indicate unused vertices [S2, unofficial].
+    -   Set up lookup tables (`_CubeEdgeFlags`, `_TriangleConnectionTable`) and ensure texture filtering is `NEAREST` and wrapping is `CLAMP_TO_EDGE` to prevent interpolation artifacts in integer lookups [S1, S2, unofficial].
 
-2.  **Voxel Processing (Compute Shader):**
-    *   Each thread processes one voxel cube, identified by `SV_DispatchThreadID` $(id_x, id_y, id_z)$ [S3, unofficial].
-    *   **Boundary Check:** If any coordinate of $(id + 1)$ is greater than or equal to the grid dimensions $(W, H, D)$, or if coordinates exceed $W-1-\text{Border}$, return immediately to avoid out-of-bounds access [S2, S3, unofficial].
-    *   **Sample Vertices:** Sample the scalar value and gradient at the 8 vertices of the current cube. Store in `samples[8]` where `xyz` is gradient and `w` is scalar value. Clamp indices to $[1, Dims-1]$ if necessary [S3, unofficial].
-    *   **Compute Configuration Selector:** For each vertex $i \in [0, 7]$, if `samples[i].w < Isovalue`, set bit $i$ in the selector integer `flagIndex` [S2, S3, unofficial]:
-        $$ \text{flagIndex} = \sum_{i=0}^{7} (\text{samples}[i].w < \text{Isovalue}) \cdot 2^i $$
-    *   **Empty/Filled Check:** If `flagIndex` is 0 or 255 (0xff), return immediately (no intersection) [S3, unofficial].
-    *   **Edge Intersections:** For each of the 12 edges $i \in [0, 11]$:
-        *   Check if bit $i$ is set in the edge flags for `flagIndex` (retrieved from `_CubeEdgeFlags` or `edge_table_tex`) [S2, S3, unofficial].
-        *   If set, get the two vertex indices $v_1, v_2$ from `edgeConnection[i]`.
-        *   Get scalar values $val_1 = \text{samples}[v_1].w$, $val_2 = \text{samples}[v_2].w$.
-        *   Compute interpolation parameter:
-            $$ \text{param} = \frac{\text{Isovalue} - val_1}{val_2 - val_1} \quad \text{if } val_2 \neq val_1, \text{ else } 0.5 $$
-        *   Compute intersection position in local space:
-            $$ \text{pos}_{edge} = \text{vertexOffset}[v_1] + \text{param} \cdot (\text{vertexOffset}[v_2] - \text{vertexOffset}[v_1]) $$
-        *   Transform to world space: $\text{pos}_{world} = \text{chunkCenter} + \text{pos}_{edge} \cdot \text{gridSize} + \text{HalfVoxelOffset}$ [S3, unofficial].
-        *   Compute normal: Interpolate gradient using `param` and normalize, or sample from `_Normals` buffer at the intersection UV [S2, S3, unofficial].
-        *   Store the resulting vertex (position, normal) in a temporary array `edgeVertex[12]` [S2, unofficial].
-    *   **Emit Triangles:**
-        *   Retrieve triangle data for `flagIndex` from `_TriangleConnectionTable` [S2, S3, unofficial].
-        *   Iterate through the table in steps of 3 to get edge indices for each triangle.
-        *   If the first edge index is 15 (or -1, depending on table encoding), stop processing this cube [S3, unofficial].
-        *   For each valid triangle (up to 5), get the three edge indices $e_a, e_b, e_c$.
-        *   Retrieve the pre-computed vertex positions and normals from `edgeVertex` for these edges.
-        *   Write the vertex data to the output buffer `_Buffer` at index $idx \cdot 15 + (3 \cdot t + v)$, where $idx$ is the linear voxel index, $t$ is the triangle index (0-4), and $v$ is the vertex index (0-2) [S2, unofficial].
-        *   If flat shading is used, calculate the face normal via cross product of two edges and assign it to all three vertices [S3, unofficial].
+2.  **Dispatch Compute Shader:**
+    -   Dispatch a compute shader with thread groups of size $4 \times 4 \times 4$ or $8 \times 8 \times 8$ [S2, S3, unofficial].
+    -   Each thread processes one voxel cube identified by `SV_DispatchThreadID` $(id_x, id_y, id_z)$ [S3, unofficial].
+    -   The grid dimension $N$ must be divisible by the thread group size [S2, unofficial].
 
-3.  **Rendering:**
-    *   Render the `_Buffer` using `Graphics.DrawProceduralNow` with `MeshTopology.Triangles` and total vertex count `SIZE` [S2, unofficial].
-    *   The vertex shader runs for each vertex. Vertices with zero area (unused, zero-filled) generate no fragments [S2, unofficial].
+3.  **Boundary Check:**
+    -   If any coordinate of $(id + 1)$ is greater than or equal to the grid dimensions $(N_x, N_y, N_z)$, or if the voxel is within the `_Border` distance of the grid edge, return immediately to avoid out-of-bounds access [S2, S3, unofficial].
+
+4.  **Sample Voxel Data:**
+    -   Sample the scalar values and gradients at the 8 vertices of the current cube.
+    -   Store them in an array `samples[8]`, where `samples[k]` contains the gradient (xyz) and scalar value (w) [S3, unofficial].
+    -   Clamp indices to $[1, N-1]$ if necessary to handle boundaries [S3, unofficial].
+
+5.  **Compute Cube Configuration Selector:**
+    -   Initialize an integer `selector` to 0.
+    -   For each vertex $k \in [0, 7]$, if `samples[k].w < Isovalue`, set the $k$-th bit: `selector |= (1 << k)` [S3, unofficial].
+
+6.  **Handle Empty/Fully-Filled Cubes:**
+    -   If `selector == 0` or `selector == 0xff` (255), return immediately as there is no intersection with the isosurface [S3, unofficial].
+
+7.  **Compute Edge Intersections:**
+    -   Retrieve the edge mask `edgeFlags` from `_CubeEdgeFlags[selector]` [S2, unofficial].
+    -   For each edge index $i \in [0, 11]$:
+        -   If the $i$-th bit is set in `edgeFlags` (`(edgeFlags & (1 << i)) != 0`):
+            -   Get the two vertex indices $v_1, v_2$ from `edgeConnection[i]` [S2, unofficial].
+            -   Get the scalar values $val_1 = samples[v_1].w$ and $val_2 = samples[v_2].w$ [S2, unofficial].
+            -   Compute the interpolation parameter:
+                $$
+                offset = \begin{cases} 
+                \frac{\tau - val_1}{val_2 - val_1} & \text{if } val_2 \neq val_1 \\
+                0.5 & \text{otherwise}
+                \end{cases}
+                $$
+                [S2, unofficial]
+            -   Calculate the intersection position in local cube space:
+                $$
+                pos_{intersect} = pos_{v_1} + offset \cdot (pos_{v_2} - pos_{v_1})
+                $$
+                [S2, unofficial]
+            -   Transform to world space and compute the normal by interpolating the gradients or sampling from `_Normals` [S3, unofficial].
+            -   Store the result in `edgeVertex[i]` [S2, unofficial].
+
+8.  **Emit Triangles:**
+    -   Retrieve the triangle configuration data from `_TriangleConnectionTable[selector * 16 + 3 * i]` for $i = 0, 1, \dots, 4$ [S2, unofficial].
+    -   For each triangle $i$:
+        -   If the first edge index is 15 (or -1, depending on table encoding), stop processing this cube [S3, unofficial].
+        -   Extract the three vertex indices $idx_1, idx_2, idx_3$ from the table [S2, unofficial].
+        -   For each vertex index, retrieve the corresponding `edgeVertex` position and normal [S2, unofficial].
+        -   Create a `Vert` struct with the world-space position and normal [S2, unofficial].
+        -   Write the vertex to `_Buffer[idx * 15 + (3 * i + j)]` where $j \in \{0, 1, 2\}$ [S2, unofficial].
+
+9.  **Rendering:**
+    -   Render the mesh using `Graphics.DrawProceduralNow` with `MeshTopology.Triangles` and the total buffer size [S2, unofficial].
+    -   The vertex shader runs for each vertex in the buffer. Triangles with zero area (unused vertices) generate no fragments [S2, unofficial].
 
 **Pseudocode:**
 
@@ -72,144 +88,120 @@ GPU Marching Cubes with Lookup Tables is a surface extraction technique that gen
 
 ```python
 # Compute Shader Main Function
-[numthreads(4, 4, 4)]
+[numthreads(8, 8, 8)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     int x = id.x;
     int y = id.y;
     int z = id.z;
     
     // Boundary check
-    if (x >= _Width - 1 - _Border || y >= _Height - 1 - _Border || z >= _Depth - 1 - _Border) {
+    if (x >= Width - 1 - Border || y >= Height - 1 - Border || z >= Depth - 1 - Border) {
         return;
     }
 
     // 1. Sample 8 vertices of the cube
     float4 samples[8];
-    for (int i = 0; i < 8; i++) {
-        // Map local vertex index i to global grid coordinates
-        int vx = x + vertexOffset[i].x;
-        int vy = y + vertexOffset[i].y;
-        int vz = z + vertexOffset[i].z;
-        
-        // Clamp or handle boundary as per VoxelValueWithGradient
-        samples[i] = VoxelValueWithGradient(vx, vy, vz); 
+    for (int k = 0; k < 8; k++) {
+        int3 vPos = GetVertexPosition(x, y, z, k); // Helper to get grid coords of corner k
+        samples[k] = VoxelValueWithGradient(vPos); // Returns float4(gradient, scalar)
     }
 
-    // 2. Compute configuration selector
-    int flagIndex = 0;
-    for (int i = 0; i < 8; i++) {
-        if (samples[i].w < _Target) {
-            flagIndex |= (1 << i);
+    // 2. Compute selector
+    int selector = 0;
+    for (int k = 0; k < 8; k++) {
+        if (samples[k].w < Isovalue) {
+            selector |= (1 << k);
         }
     }
 
-    // 3. Early exit for empty/filled cubes
-    if (flagIndex == 0 || flagIndex == 255) {
+    // 3. Early exit for empty/full cubes
+    if (selector == 0 || selector == 255) {
         return;
     }
 
-    // 4. Compute edge intersections
-    float3 edgeVertexPos[12];
-    float3 edgeVertexNorm[12];
+    // 4. Get edge flags
+    int edgeFlags = CubeEdgeFlags[selector];
 
+    // 5. Compute edge intersections
+    float3 edgeVertex[12];
+    float3 edgeNormal[12];
+    
     for (int i = 0; i < 12; i++) {
-        // Get edge flags for this configuration
-        int edgeFlags = _CubeEdgeFlags[flagIndex];
-        
         if ((edgeFlags & (1 << i)) != 0) {
-            int v1 = edgeConnection[i].x;
-            int v2 = edgeConnection[i].y;
+            int2 vPair = EdgeConnection[i];
+            float v1 = samples[vPair.x].w;
+            float v2 = samples[vPair.y].w;
             
-            float val1 = samples[v1].w;
-            float val2 = samples[v2].w;
-            
-            float param = 0.5;
-            float delta = val2 - val1;
-            if (delta != 0.0) {
-                param = (_Target - val1) / delta;
+            float offset = 0.5f;
+            float delta = v2 - v1;
+            if (delta != 0.0f) {
+                offset = (Isovalue - v1) / delta;
             }
             
-            // Interpolate position
-            float3 pos1 = vertexOffset[v1];
-            float3 pos2 = vertexOffset[v2];
-            float3 localPos = pos1 + param * (pos2 - pos1);
+            // Linear interpolation of position
+            float3 p1 = GetWorldPosition(x, y, z, vPair.x);
+            float3 p2 = GetWorldPosition(x, y, z, vPair.y);
+            edgeVertex[i] = p1 + offset * (p2 - p1);
             
-            // Transform to world space
-            float3 worldPos = chunkCenter + localPos * gridSize + HalfVoxelOffset;
-            edgeVertexPos[i] = worldPos;
-            
-            // Interpolate normal
-            float3 norm1 = samples[v1].xyz;
-            float3 norm2 = samples[v2].xyz;
-            float3 localNorm = normalize(norm1 + param * (norm2 - norm1));
-            edgeVertexNorm[i] = localNorm;
+            // Interpolate normal or sample from normal texture
+            edgeNormal[i] = Normalize(samples[vPair.x].xyz + offset * (samples[vPair.y].xyz - samples[vPair.x].xyz));
         }
     }
 
-    // 5. Emit triangles
-    int linearIdx = x + y * _Width + z * _Width * _Height;
-    int bufferOffset = linearIdx * 15; // 15 vertices max per voxel
+    // 6. Emit triangles
+    int baseIdx = (x + y * Width + z * Width * Height) * 15;
     
-    // Read triangle table for this flagIndex
-    // Table structure: 256 entries, each 16 ints (3 ints per triangle, up to 5 triangles)
-    int tableBase = flagIndex * 16;
-    
-    for (int t = 0; t < 5; t++) {
-        int e1 = _TriangleConnectionTable[tableBase + 3 * t];
-        if (e1 == 15) break; // End of list
+    for (int i = 0; i < 5; i++) {
+        int triOffset = selector * 16 + 3 * i;
+        int e1 = TriangleConnectionTable[triOffset];
+        if (e1 == 15) break; // End of triangle list
         
-        int e2 = _TriangleConnectionTable[tableBase + 3 * t + 1];
-        int e3 = _TriangleConnectionTable[tableBase + 3 * t + 2];
+        int e2 = TriangleConnectionTable[triOffset + 1];
+        int e3 = TriangleConnectionTable[triOffset + 2];
         
         // Emit 3 vertices
-        for (int v = 0; v < 3; v++) {
-            int edgeIdx = (v == 0) ? e1 : (v == 1) ? e2 : e3;
+        for (int j = 0; j < 3; j++) {
+            int edgeIdx = (j == 0) ? e1 : ((j == 1) ? e2 : e3);
+            int vertIdx = baseIdx + 3 * i + j;
             
-            Vert vert;
-            vert.position = float4(edgeVertexPos[edgeIdx], 1.0);
-            vert.normal = edgeVertexNorm[edgeIdx];
+            Vert v;
+            v.position = float4(edgeVertex[edgeIdx], 1.0f);
+            v.normal = edgeNormal[edgeIdx];
             
-            // Optional: Flat shading
-            // if (useFlatNormals) {
-            //     float3 n1 = edgeVertexNorm[e1];
-            //     float3 n2 = edgeVertexNorm[e2];
-            //     float3 n3 = edgeVertexNorm[e3];
-            //     vert.normal = normalize(cross(n2 - n1, n3 - n1));
-            // }
+            // Adjust position relative to center if required by rendering pipeline
+            // v.position.xyz -= Centre;
             
-            _Buffer[bufferOffset + 3 * t + v] = vert;
+            Buffer[vertIdx] = v;
         }
     }
 }
+
+// Helper to get grid coordinates of a vertex corner k (0-7)
+int3 GetVertexPosition(int x, int y, int z, int k) {
+    // Mapping based on standard MC vertex ordering:
+    // 0:(0,0,0), 1:(1,0,0), 2:(1,1,0), 3:(0,1,0)
+    // 4:(0,0,1), 5:(1,0,1), 6:(1,1,1), 7:(0,1,1)
+    int dx = (k & 1);
+    int dy = (k & 2) >> 1;
+    int dz = (k & 4) >> 2;
+    return int3(x + dx, y + dy, z + dz);
+}
 ```
-
-**Parameters:**
-*   `N`: Grid dimension (e.g., 64 or 40). Must be divisible by 8 for thread group alignment [S2, unofficial].
-*   `_Target`: Isovalue threshold (default 0.0f) [S2, unofficial].
-*   `_Border`: Border width to exclude (default 1) [S2, unofficial].
-*   `gridSize`: Physical size of a single voxel cube in world units [S1, unofficial].
-*   `SIZE`: Output buffer size = $N \cdot N \cdot N \cdot 15$ [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Division by Zero:** If $val_2 - val_1 = 0$, `param` defaults to 0.5 to handle flat regions [S2, unofficial].
-*   **Boundary Access:** Explicit boundary checks prevent out-of-bounds sampling. Normals at borders may require special handling or clamping [S2, S3, unofficial].
-*   **Fixed-Size Buffer:** The output buffer is pre-allocated to the maximum possible size. Unused entries are zero-filled, which is inefficient for sparse fields but avoids atomic operations [S2, unofficial].
-*   **Texture Filtering:** Lookup tables must use `NEAREST` filtering and `CLAMP_TO_EDGE` wrapping to prevent interpolation artifacts [S1, unofficial].
 
 ## Subtopics
 
 ### [Marching Cubes on GPU](3767-marching-cubes-on-gpu.md)
-A GPU-based surface extraction technique that constructs an isosurface mesh from a 3D scalar volume using compute shaders. It differs from this method by using structured buffers for data storage rather than render textures/lookup tables, which is noted as slower but functional.
+A technique to extract an isosurface from a 3D scalar field by executing the Marching Cubes algorithm within a GPU compute shader. It generates triangle geometry for each voxel where the isosurface passes, using a lookup table for topology and linear interpolation for vertex positions. Unlike CPU-based implementations, this method leverages massive parallelism to process voxels simultaneously, often outputting geometry directly to structured buffers or append buffers for subsequent rendering. It builds on [GPU Marching Cubes with Lookup Tables](3690-gpu-marching-cubes-with-lookup-tables.md) by utilizing compute shaders for the core extraction logic rather than fragment shaders or texture-based lookups alone.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N^3)$, where $N$ is the grid dimension. Each voxel is processed by one thread group [S2, unofficial].
-*   **Memory Complexity:** $O(N^3)$ for the voxel buffer and output buffer. The output buffer is fixed at $15 \cdot N^3$ vertices [S2, unofficial].
-*   **Performance:** Rendering performance is comparable to converting the buffer to a standard Unity mesh, though unused vertices cause unnecessary vertex shader invocations. For complex scenes, an append buffer or counter buffer might be more efficient [S2, unofficial].
-*   **Strengths:** Fully GPU-based, no CPU-GPU synchronization for mesh generation, parallelizable [S2, unofficial].
-*   **Limitations:** Fixed-size buffer wastes memory and processing power on empty space. No dynamic resizing or culling of empty voxels within the shader [S2, unofficial].
+-   **Time Complexity:** $O(N^3)$, where $N$ is the grid dimension. Each voxel is processed independently in parallel.
+-   **Memory Complexity:** $O(N^3)$ for the voxel grid and output buffer. The output buffer is fixed at $15 \cdot N^3$ vertices, which is an upper bound [S2, unofficial].
+-   **Performance:** Rendering performance is comparable to converting the buffer to a normal mesh, as the vertex shader runs for all vertices but generates no fragments for unused ones [S2, unofficial]. For complex scenes, an append buffer or counter buffer might be more efficient to avoid processing zero-area triangles [S2, unofficial].
+-   **Strengths:** Massive parallelism, no dynamic allocation during extraction, simple rendering pipeline integration via `DrawProcedural` [S2, unofficial].
+-   **Limitations:** Fixed-size buffer leads to memory waste if the surface area is small. Boundary handling requires explicit checks or padding [S2, unofficial]. Precision issues may arise if `delta` is zero, requiring a fallback to 0.5 [S2, unofficial].
 
 ## Background
-This method is a GPU implementation of the Marching Cubes algorithm, originally developed for CPU-based surface extraction. The specific implementation using compute shaders and fixed-size buffers with `DrawProcedural` was popularized in open-source projects such as "Marching-Cubes-On-The-GPU" by Scrawk [S2, unofficial]. It leverages modern GPU compute capabilities to parallelize the voxel processing and triangle generation steps [S2, S3, unofficial].
+The method is a GPU adaptation of the classic Marching Cubes algorithm [S1, S2, S3, unofficial]. It was popularized in the context of real-time procedural generation, such as in the "Marching-Cubes-On-The-GPU" project by Scrawk, which demonstrated generating voxels and mesh entirely on the GPU using compute shaders and Unity's `DrawProcedural` [S2, unofficial]. Variations exist in academic and open-source repositories, often optimizing for specific hardware features like texture lookups for lookup tables [S1, unofficial] or structured buffers for direct memory access [S3, unofficial].
 
 ## Sources
 [S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)

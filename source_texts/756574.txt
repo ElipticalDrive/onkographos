@@ -1,0 +1,1390 @@
+AEGIR: M ODELING A REA E MITTERS FOR I NDOOR I NVERSE
+R ENDERING USING G AUSSIAN S PLATTING
+arXiv:2606.28635v2 [cs.CV] 30 Jun 2026
+A P REPRINT
+Mohamed Shawky Sabae
+Philipp Langsteiner
+mohamed.sabae@uni-tuebingen.de
+philipp.langsteiner@uni-tuebingen.de
+Jan-Niklas Dihlmann
+Hendrik Lensch
+jan-niklas.dihlmann@uni-tuebingen.de
+hendrik.lensch@uni-tuebingen.de
+University of Tübingen
+June 2026
+A BSTRACT
+Inverse rendering requires separating illumination from surface materials, which is highly
+ambiguous due to their tight coupling in observed images. While Gaussian Splatting is
+efficient for novel view synthesis, existing relightable methods approximate scene lighting
+using discrete point lights, global environment maps, or implicit representations. By ignoring
+the physical spatial extent of real-world emitters, these approaches produce incorrect light
+attenuation and unrealistic shadows. We present AEGIR (Area Emitters for Gaussian Inverse
+Rendering), a framework that explicitly models local area emitters within a relightable
+Gaussian Splatting representation. Joint optimization of emitters, materials, and geometry
+is challenging due to flexible emitter parameterization, which increases both the number
+of parameters and the ambiguity between illumination and materials. We address this by
+introducing a differentiable deferred rendering pipeline that integrates multiple importance
+sampling with targeted regularization. As a result, AEGIR accurately simulates local light
+transport and achieves more consistent decomposition. Experiments show that explicit area
+emitters improve illumination reconstruction and enhance downstream tasks, including novel
+view synthesis, controlled relighting, and virtual object insertion, particularly in scenes with
+complex local lighting. Project page: https://darkgeekms.github.io/projects/aegir.
+1
+Introduction
+Reconstructing 3D environments from 2D images has advanced rapidly using Neural Radiance Fields (NeRF)
+[1] and 3D Gaussian Splatting (3DGS) [2]. Although highly effective for novel view synthesis, extending these
+representations to inverse rendering remains a challenge. Inverse rendering seeks to decompose a scene into
+geometry, materials, and illumination, but this problem is inherently ill-posed because appearance depends on
+the combined effects of surface material and lighting. This decomposition is essential for downstream tasks,
+such as scene editing and relighting.
+A core limitation in existing inverse rendering approaches lies in the representation of illumination. Existing
+approaches typically rely on global environment maps [3, 4], discrete point lights [5, 6], or implicit neural
+representations [7, 8]. These models struggle in bounded indoor environments because real-world emitters,
+such as lamps and ceiling panels, have finite spatial extents and close proximity to the scene. Environment
+maps assume infinite distance, and point lights lack the physical dimensions to cast soft shadows. Although
+implicit light fields capture spatial position, their lack of explicit geometry makes it difficult to enforce strict
+physical constraints like attenuation over distance. By ignoring the physical dimensions of local emitters, these
+approximations produce incorrect light attenuation, unrealistic illumination patterns, and inaccurate shadow
+boundaries. Consequently, the optimization often absorbs residual lighting effects directly into the albedo.
+We address these limitations with AEGIR (Figure 1), a framework that explicitly models area light emitters
+within a GS representation. AEGIR parameterizes lighting as localized 3D primitives with spatial positions,
+AEGIR
+Scene Reconstruction with Explicit Local Area Emitters
+AEGIR
+Input Multi-view Images
+A P REPRINT
+Applications
+Novel View Synthesis
+Controlled Relighting
+Recovered Direct Illumination
+Recovered Local
+Area Emitter
+Recovered Local
+Area Emitter
+Virtual Object Insertion
+Recovered Intrinsic Properties
+Normals
+Localized, physically
+grounded lights
+Albedo
+Roughness
+Metallic
+Key Advantages of Local Area Emitters
+Modeling complex
+indoor lighting patterns
+Accurate soft shadows
+and highlights
+Figure 1: AEGIR Overview. From multi-view images, AEGIR jointly models local area emitters, 3D geometry,
+and materials. These explicit emitters provide localized, physically grounded lighting, capturing accurate
+shadows and complex lighting patterns for realistic novel view synthesis, scene relighting, and virtual object
+insertion.
+shapes, and angular emission profiles. Leveraging anisotropic scaling and Super-Gaussian angular falloff
+distributions, our representation mathematically adapts to reconstruct a wide range of emitters. This flexibility
+allows a single primitive to seamlessly transition from compact point light sources to elongated fluorescent
+tubes, providing a more expressive and physically meaningful approximation of real illumination.
+However, area emitters are difficult to optimize due to their high-dimensional parameterization, which amplifies
+the ambiguity between material and illumination. By enforcing radiometric and geometric constraints and
+introducing a physically grounded, fully differentiable parameterization, our model enables stable optimization
+while accurately capturing localized light transport. AEGIR jointly optimizes these area emitters alongside scene
+geometry and physically based (PBR) material parameters, specifically diffuse albedo, roughness, and metallic,
+directly from multi-view images. Experiments demonstrate that our emitter representation improves illumination
+estimation and downstream tasks, including novel view synthesis and editing in scenes with complex local
+lighting.
+In summary, our core contributions are:
+• A novel explicit area emitter formulation that parameterizes localized 3D primitives with shapes
+and emission profiles. By combining anisotropic scaling with a Super-Gaussian angular falloff, this
+representation enables flexible modeling of diverse real-world emitters.
+• A joint optimization GS framework that simultaneously recovers these explicit light sources, scene
+geometry, and PBR materials directly from multi-view images, achieving proper disentanglement
+between material and lighting using radiometric and geometric constraints.
+• A physically grounded rendering model that evaluates illumination directly from area emitters, enabling
+physically consistent downstream applications such as novel view synthesis, controlled scene relighting,
+and virtual object insertion.
+2
+Related Work
+2.1
+Inverse Rendering and Intrinsic Decomposition
+Data-Driven Inverse Rendering. Data-driven approaches learn priors from large-scale datasets to predict
+intrinsic scene properties from images. Early neural methods [9, 10, 11] have been increasingly replaced by
+2
+AEGIR
+A P REPRINT
+diffusion-based models such as IntrinsicDiffusion [12], RGB↔X [13], and DiffusionRenderer [14], which
+estimate intrinsic attributes including albedo, roughness, and surface normals. To improve multi-view consistency,
+recent methods such as IDArb [15] and MatSpray [16] leverage diffusion priors, while MVInverse [17] adopts a
+feed-forward architecture with explicit consistency constraints. Although these approaches produce high-quality
+intrinsic predictions, they often lack explicit physically accurate modeling of light transport.
+Optimization-Based Inverse Rendering. Optimization-based methods enforce multi-view consistency by
+minimizing photometric error using differentiable rendering. NeRF-based approaches such as NeRD [18],
+NeRFactor [19], Neural-PIL [20], NeILF [7], and NeILF++ [8] jointly estimate geometry, materials, and
+illumination, but are computationally expensive. More recent 3DGS formulations, including Relightable 3D
+Gaussian [3], GS-IR [21], SVG-IR [22], IRGS [4], GeoSplatting [23], and GS-ID [6], integrate physically based
+rendering (PBR) for efficient relighting. Methods such as FIPT [24] and IRIS [25] improve the decomposition
+of indoor scenes by using structured lighting representations and stronger geometric and material priors.
+Existing methods rely on simplified illumination models, such as environment maps [26, 27, 3, 28, 4], discrete
+point lights (often modeled as Spherical Gaussians) [5, 6, 29], and implicit representations [7, 8, 30, 31],
+which ignore the physical spatial extent of real-world emitters. These approaches introduce ambiguity in
+inverse rendering, often leading to residual lighting effects being absorbed into the albedo. Motivated by this,
+AEGIR explicitly models localized geometric area lights within Gaussian Splatting, enabling more accurate and
+physically grounded illumination decomposition.
+2.2
+Illumination Modeling in 3D Environments
+Accurate illumination modeling is essential for inverse rendering and realistic image synthesis, as it governs how
+light interacts with scene materials. A common representation is to model lighting using global environment
+maps, often parameterized by Spherical Gaussians [32]. While effective for distant illumination, these models
+assume spatially uniform lighting and struggle to capture localized variation and distance attenuation in indoor
+scenes. Nevertheless, environment maps remain widely used, estimated using feedforward neural networks
+[33, 34] or, more recently, latent diffusion models [35, 36, 37]. To introduce spatial locality, methods such as
+Deep Parametric Indoor Lighting [38] regress discrete 3D light sources from a single image. Although they
+provide spatially localized illumination, they model emitters as isotropic area lights, which cannot represent
+the spatial structure of real light sources and lack temporal consistency. Hybrid approaches, such as GS-ID
+[6] and SGS-Intrinsic [29], model illumination by combining global environment maps with localized point
+lights represented as Spherical Gaussians. Alternatively, recent generative methods such as LumiNet [39] and
+LuxRemix [40] leverage diffusion models to decompose complex indoor lighting into editable components for
+relighting. Despite these differences, both families of methods lack explicit modeling of spatially extended
+emitters, which limits their ability to model physically accurate lighting effects.
+In contrast, AEGIR explicitly parameterizes the spatial extents, shapes, and angular emission profiles of light
+emitters under proper optimization constraints. This physically grounded formulation enables more accurate
+illumination decomposition and improves disentanglement between materials and lighting compared to prior
+global, point-based, hybrid, and purely generative approaches.
+3
+Methodology
+To model complex spatially varying illumination, we propose a unified area emitter representation that explicitly
+parameterizes light shape and emission profile to simulate realistic attenuation and soft occlusions. As illustrated
+in Figure 2, by coupling these emitters with relightable 2D Gaussians and evaluating illumination through a
+deferred rendering framework with multiple importance sampling, we jointly optimize illumination and intrinsic
+materials under carefully designed constraints. This results in physically grounded illumination and consistent
+material disentanglement.
+3.1
+Preliminaries: Relightable Gaussian Splatting
+Standard Gaussian Splatting [2] reconstructs scenes by optimizing volumetric primitives whose colors are
+baked into view-dependent Spherical Harmonics (SH). To enable dynamic relighting, Relightable Gaussian
+Splatting [3] decouples illumination from appearance, replacing SH coefficients with explicit microfacet
+3
+AEGIR
+Emitter Parametrization
+Scene with Local Area Emitters
+Center
+A P REPRINT
+Optimization Loop
+Albedo
+Normals
+Metallic
+Roughness
+Axes
+Scales
+Color
+Spread
+Falloff Power
+Input
+Multi-View
+Images
+Emitter
+Initialization
+Deferred
+Shading
+Identify
+Bright
+Regions
+Unproject
+to 3D
+DBSCAN
+Clustering
++ PCA
+Seed
+Emitters
+Figure 2: AEGIR Optimization Framework. Parameterized area emitters are initialized from multi-view inputs
+and jointly optimized with 2D Gaussian geometry and PBR materials within a deferred rendering framework,
+enabling physically grounded scene decomposition.
+Bidirectional Reflectance Distribution Function (BRDF) parameters (typically diffuse albedo and roughness)
+that physically respond to novel lighting conditions. However, computing accurate physically based shading
+requires precise surface normals. Therefore, we rely on 2D Gaussian Splatting (2DGS) [41], whose planar
+Gaussian representation produces more reliable surface geometry and normals than volumetric splatting. This
+makes 2DGS well-suited for stable physically based shading.
+3.2
+Explicit Local Area Emitters
+Anisotropic Super-Gaussian Emitter Formulation. We propose representing explicit area emitters as a
+dynamic collection of anisotropic 3D ellipsoids with a Super-Gaussian angular falloff distribution. Each
+emitter e is parameterized by its spatial center pe ∈ R3 , local orthonormal axes {ue , ve , we }, physical scales
+Se = (Se,u , Se,v , Se,w ) ∈ R3+ , RGB emission color Ee ∈ R3+ , axis-aligned angular spread coefficients
+σ e = (σe,u , σe,v , σe,w ) ∈ R3+ , and a Super-Gaussian angular falloff power ρe ∈ R+ . For compact notation, ke
+denotes the corresponding emitter axis for k ∈ {u, v, w}, i.e., ue , ve , or we .
+For a given surface point x, let ωie denote the incident light direction pointing from the surface toward emitter
+e. We formulate the radiance Lie (x, ωie ) from an explicit emitter as an anisotropic Super-Gaussian angular
+emission profile:
+ 
+ρe 
+X (ωie · ke )2
+ 
+(1)
+Lie (x, ωie ) = Ee exp − 
+2
+σe,k
+k∈{u,v,w}
+We model light transport using the Monte Carlo estimator in Equation 8 (Appendix A), combining BRDF
+samples with samples drawn from the explicit emitters. Light samples are generated by mapping unit sphere
+samples to the surface of each anisotropic ellipsoid, as shown in Equation 10. The corresponding BRDF
+Probability Distribution Function (PDF) and light sampling surrogate are given in Equations 9 and 11, and are
+combined using the Multiple Importance Sampling (MIS) balance heuristic in Equation 13. Because the light
+sampling surrogate depends on the distance between the surface point and the sampled emitter point, distance
+attenuation is captured in the direct shading estimate.
+To understand how Equation 1 achieves both complex anisotropy and variable sharpness, we can decompose the
+angular spread mechanism into two primary components (illustrated in Figure 3a):
+1. Axis-Aligned Anisotropic Spread: Rather than uniform angular spread, we project the incident light
+direction ωie onto the emitter’s local coordinate frame {ue , ve , we }. By weighting these projections
+with independent learnable angular spread coefficients σe,u , σe,v , and σe,w , we decouple light spread
+4
+AEGIR
+Anisotropic Scale (s)
+Omnidirectional
+Point Lights
+Broad, Soft Emitter
+Angular Spread (σ)
+A P REPRINT
+e)
+er
+ac
+itt rf
+m Su
+E
+t on
+X
+gh s
+Li int
+X
+ea Po
+r
+A ed
+l
+X
+p
+am
+X
+(S
+Directional
+Elongated Fixtures
+Ray Sampling
+Emitter
+Visible
+Light Ray
+d
+clu
+Oc
+Occluder
+Occluded
+Light Ray
+Diffuse Ray
+er
+So
+ft
+Narrow, Hard Emitter
+Sh
+ad
+ow
+Surface Point (x)
+ρ = 1.0
+(Gaussian)
+Softer Falloff
+ρ < 1.0
+Super-Gaussian Falloff (ρ)
+ur
+eS
+Sharper Falloff
+ρ >> 1.0
+e
+fac
+en
+Sc
+(a) Effect of area emitter parameters.
+(b) Area emitter sampling and visibility tracing.
+Figure 3: Area Emitter Formulation and Evaluation. (a) Emitters use scales (Se ), angular spread (σ e ), and
+Super-Gaussian angular falloff (ρe ). (b) Illumination is evaluated using emitter surface sampling and visibility
+tracing. This physically grounded ray-tracing approach resolves complex occlusions and generates accurate soft
+shadows.
+across different axes. This anisotropic scaling allows a single primitive to represent a wide range of
+physical light sources, spanning from near-isotropic point lights to the directional elongated footprints
+of fixtures such as fluorescent tubes.
+2. Super-Gaussian Angular Falloff: The inclusion of a learnable power parameter ρe elevates the
+standard Gaussian distribution to a Super-Gaussian distribution. While a standard formulation (ρe = 1)
+results in smooth bell-curved falloff with soft penumbras, raising the anisotropic angular distance to the
+power of ρe allows the model to manipulate the light source falloff. For rays emitted near the central
+axis, a high ρe maintains a near-uniform intensity. However, as the emission angle increases, the high
+exponent causes the radiance to drop abruptly, creating a sharper falloff. This enables the model to
+differentiate between bare, omnidirectional bulbs (low ρe ) and sharply housed, directional spotlights
+(high ρe ).
+Emitter Initialization and Adaptive Control. To constrain the ill-posed joint optimization, we initialize area
+emitters by unprojecting high-intensity RGB pixels into a 3D point cloud. These points are clustered using
+DBSCAN [42] to identify physical light fixtures, with each cluster used to set the initial center, scale, and axes
+of an emitter using Principal Component Analysis (PCA). During optimization, we update all parameters and
+dynamically manage the emitter count. The adaptive controller uses the perceptual emitter energy Φe defined in
+Equation 23 (Appendix C). Lights with negligible energy or those drifting out of bounds are pruned, while those
+exceeding the energy or scale thresholds in Appendix C are split along their largest-scale axis to refine localized
+illumination. Let ke⋆ = arg maxk∈{u,v,w} Se,k and let k⋆e ∈ {ue , ve , we } denote the corresponding axis. For a
+split, the centers of the children pe,a and pe,b are translated from the parent center pe as:
+1
+pe,a , pe,b = pe ± Se,ke⋆ k⋆e
+2
+3.3
+(2)
+Deferred Rendering of Relightable Gaussians and Area Emitters
+AEGIR utilizes deferred rendering to decouple geometry and material rasterization from lighting evaluation. We
+rasterize 2D Gaussians into a G-buffer containing albedo, roughness, metallic, and surface normals, and then
+evaluate the rendering equation with a microfacet BRDF using the Monte Carlo estimator in Equation 8. To
+reduce variance, we employ MIS, illustrated in Figure 3b, combining cosine-weighted hemisphere sampling for
+diffuse transport (Equation 9) with direct light sampling for high frequency shadows and specular highlights.
+For direct lighting, we sample each explicit emitter using the ellipsoid surface mapping in Equation 10, then
+combine these samples with BRDF samples using the light sampling surrogate and MIS weights in Equations
+11 and 13. Rays are then traced through the 2D Gaussian scene, as shown in Figure 3b, to compute a soft
+differentiable visibility term Vi (x, ωi ):
+Vi (x, ωi ) = 1 − αtrace · sigmoid (dlight − ϵ − dtrace )
+(3)
+where αtrace is the accumulated opacity along the ray, dlight is the distance from the surface to the sampled
+emitter point, dtrace is the traced occlusion distance, and ϵ is a bias term for stability. Subsequently, the total
+5
+AEGIR
+A P REPRINT
+incident light is obtained by weighting direct emission Ldirect
+(x, ωi ) and a single-bounce indirect approximation
+i
+Lbounce
+(x,
+ω
+):
+i
+i
+Li (x, ωi ) = Vi (x, ωi ) · Ldirect
+(x, ωi ) + (1 − Vi (x, ωi )) · Lbounce
+(x, ωi )
+i
+i
+(4)
+We model indirect illumination with a single secondary bounce. During training, Lbounce
+is approximated with
+i
+the SH/color features of the secondary Gaussian hit for faster and more stable optimization. However, during
+inference, we sample a diffuse direction at the secondary hit, trace it through the scene, and evaluate emission
+only if the ray reaches one of the recovered explicit emitters, otherwise the bounce contribution is zero. This
+gives a cheap one-bounce estimate rather than a full multi-bounce path tracer. Finally, the total incident light
+Li (x, ωi ) gathered from all samples is integrated against the microfacet BRDF to evaluate the final pixel color.
+Detailed mathematical formulations for the microfacet BRDF model and the deferred rendering pipeline are
+provided in Appendix A.
+3.4
+Joint Optimization and Training Curriculum
+Decomposing observed radiance into geometry, materials, and lighting is a highly ambiguous problem. This
+difficulty increases when modeling area light emitters, as they introduce more unknown variables. Without
+strict constraints, the optimization tends to bake lighting effects, such as shadows or specular highlights, into
+the material representation, degrading both disentanglement and illumination estimation. To resolve these
+ambiguities, AEGIR employs a progressive curriculum. We first establish a geometric baseline using DNSplatter [43]. This phase computes a dense 2D Gaussian geometry and initial Spherical Harmonics (SH), which
+are retained only as a training-time proxy for secondary-bounce illumination in the subsequent joint optimization
+step. Once the baseline is established, we jointly optimize the Gaussian geometry, microfacet materials, and
+area emitters. This phase is driven by a combined objective function consisting of photometric, material, and
+emitter-specific constraints:
+Ltotal = Lphoto + Lprior + LT V + Llight
+(5)
+Contrast-Aware Photometric Loss (Lphoto ): We introduce a focus map Wf that upweights pixels with high
+local contrast. This forces the optimization to prioritize the reconstruction of high-frequency lighting cues that
+standard losses often blur.
+Diffusion Priors (Lprior ): To resolve global ambiguities such as distinguishing a white wall in shadow from a
+dark wall, we supervise materials with pseudo-ground truth from a pretrained DiffusionRenderer [14]. This
+prevents the model from erroneously adjusting the albedo to compensate for complex lighting.
+Edge-Aware Total Variation (LT V ): To mitigate noise in the diffusion priors, we apply a total variation (TV)
+loss on the material maps guided by ground-truth image gradients. This encourages piecewise constant materials
+on flat surfaces while preserving sharp structural boundaries, forcing the emitters rather than the material to
+explain illumination patterns.
+Emitter Regularization (Llight ): To keep explicit lights physically plausible, we penalize excessive spatial
+scaling, encourage color neutrality to prevent illumination from bleeding into the albedo, and enforce bounds on
+the spatial position to keep emitters within the observable scene.
+Detailed mathematical formulations for all loss components are provided in Appendix B. Finally, we freeze
+the scene geometry and materials, optimizing only the area emitters. This forces the lighting representation to
+resolve any remaining discrepancies, allowing us to refine soft shadows and structured highlights without baking
+illumination into the albedo.
+4
+Results and Discussion
+4.1
+Experimental Setup and Datasets
+We evaluate our method on synthetic environments with complex illumination (Hypersim [44], FIPT [24]) and
+real-world indoor scans (Replica [45], ScanNet++ [46]). We compare against GS-ID [6], IRGS [4], IRIS [25],
+and NeILF++ [8]. Since the official GS-ID implementation is not publicly available, we reproduce their hybrid
+illumination formulation and deshadowing model for evaluation. After geometry initialization, we optimize
+AEGIR’s deferred shading stage for 20,000 iterations using the Adam optimizer on a single NVIDIA RTX 4090
+6
+AEGIR
+A P REPRINT
+GPU, which takes approximately 40 minutes. Unless otherwise stated, quantitative image metrics are computed
+on the raw rendered outputs before any denoising. The OptiX denoiser [47] is used only when saving final
+visualization images to reduce Monte Carlo noise. Detailed dataset splits, hyperparameters, sampling counts,
+and regularization weights are provided in Appendix C.
+4.2
+Core Contribution: Explicit Local Area Emitters
+AEGIR (Ours)
+GS-ID [6]
+IRGS [4]
+Environment
+Indoor
+Reference
+Figure 4: Qualitative comparison of pure lighting estimation. All images are rendered with Mitsuba [48]
+using ground-truth geometry and materials. The reference image is rendered using the ground-truth scene
+lighting, while the remaining columns use the lighting estimated by each respective method. The bottom-left
+insets show the corresponding direct illumination (shading) maps. AEGIR uses explicit local area emitters,
+GS-ID combines point lights with an environment map, and IRGS relies solely on environment maps.
+Table 1: Quantitative evaluation of pure lighting estimation. Metrics
+are computed by re-rendering each scene in Mitsuba [48] using the light
+sources estimated by each method and comparing the resulting images
+against renderings under ground-truth light sources. We report metrics
+for indoor local lighting and external environment lighting separately.
+Indoor Lighting
+Method
+Environment Lighting
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+GS-ID [6]
+IRGS [4]
+28.35
+11.26
+0.92
+0.49
+0.11
+0.25
+26.35
+28.98
+0.86
+0.88
+0.15
+0.14
+AEGIR (Ours)
+31.42
+0.94
+0.06
+30.22
+0.92
+0.07
+Figure 5: Disentanglement plot on
+synthetic datasets. Albedo vs. render PSNR shows that AEGIR improves both material accuracy and
+novel view synthesis.
+To rigorously evaluate the estimated lighting, we use a controlled Mitsuba [48] pipeline that isolates illumination
+errors from geometry and materials. Using synthetic scenes from Bitterli’s rendering resources [49], we first
+render ground-truth training images with a simplified BRDF that is consistent with all evaluated methods. After
+training, we import each method’s estimated lighting back into Mitsuba: explicit area emitters for AEGIR,
+point lights with an environment map for GS-ID, and an environment map alone for IRGS. We then re-render
+each scene with fixed ground-truth geometry and materials, so the metrics reflect lighting errors only rather
+than NVS, material, or denoising artifacts. Table 1 and Figure 4 show that the lighting representation strongly
+affects performance. For indoor lighting, IRGS fails to localize the ceiling light and instead places energy at the
+windows, causing severe underexposure (11.26 dB PSNR). GS-ID improves localization (28.35 dB) but produces
+overly concentrated lighting. AEGIR best matches the ground truth (31.42 dB), recovering smoother indoor
+shading. For environment lighting, IRGS performs better (28.98 dB) since environment maps naturally capture
+window illumination. GS-ID performs worse (26.35 dB) because its added point lights introduce localized bright
+spots. AEGIR again performs best (30.22 dB), with smoother window illumination closest to the ground truth.
+Across both settings, AEGIR achieves the best PSNR, SSIM, and LPIPS. Additional qualitative evaluations of
+our estimated lighting are provided in Appendix D.
+7
+AEGIR
+4.3
+A P REPRINT
+Other Contributions: Novel View Synthesis and Intrinsic Disentanglement
+Table 2: Quantitative evaluation on Hypersim and FIPT-Synthetic datasets. We report the performance of
+novel view synthesis, intrinsic material decomposition, and the optimization time (in minutes) for each method
+across both synthetic benchmarks.
+Hypersim
+Method
+FIPT-Synthetic
+Novel View Synthesis
+Albedo
+Novel View Synthesis
+Albedo
+Roughness
+MSE ↓
+Time (m)
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+IRIS [25]
+GS-ID [6]
+IRGS [4]
+NeILF++ [8]
+20.01
+19.47
+21.22
+20.95
+0.68
+0.75
+0.80
+0.79
+0.36
+0.25
+0.23
+0.15
+11.29
+17.67
+11.78
+14.95
+0.43
+0.73
+0.66
+0.66
+0.52
+0.31
+0.37
+0.28
+22.89
+18.26
+22.27
+18.05
+0.87
+0.78
+0.82
+0.73
+0.18
+0.21
+0.20
+0.26
+14.51
+15.04
+11.39
+12.08
+0.77
+0.76
+0.67
+0.70
+0.23
+0.26
+0.31
+0.29
+0.096
+0.124
+0.149
+0.163
+60.0
+55.0
+50.0
+180.0
+AEGIR (Ours)
+21.50
+0.84
+0.12
+20.55
+0.78
+0.19
+22.83
+0.86
+0.19
+17.33
+0.80
+0.21
+0.092
+55.0
+Table 3: Quantitative evaluation on real-world datasets. We report the performance of novel view synthesis
+and optimization times (in minutes) across the ScanNet++, Replica, and FIPT-Real benchmarks.
+ScanNet++
+Method
+Replica
+FIPT-Real
+Time (m)
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+IRIS [25]
+GS-ID [6]
+IRGS [4]
+NeILF++ [8]
+15.22
+18.02
+17.48
+17.54
+0.80
+0.82
+0.82
+0.83
+0.23
+0.21
+0.39
+0.22
+17.41
+17.05
+13.64
+17.79
+0.75
+0.73
+0.63
+0.77
+0.27
+0.29
+0.34
+0.25
+21.96
+20.31
+21.23
+20.67
+0.84
+0.82
+0.81
+0.82
+0.19
+0.21
+0.26
+0.21
+60.0
+55.0
+50.0
+180.0
+AEGIR (Ours)
+18.55
+0.83
+0.20
+21.34
+0.84
+0.22
+24.98
+0.87
+0.19
+55.0
+Reference
+N/A
+AEGIR (Ours)
+GS-ID [6]
+IRGS [4]
+N/A
+N/A
+N/A
+N/A
+IRIS [25]
+NeILF++ [8]
+N/A
+N/A
+N/A
+N/A
+Figure 6: Qualitative comparison of novel view synthesis and intrinsic decomposition. Each block shows a
+2 × 2 grid of the final render (top-left), albedo (top-right), roughness (bottom-left), and metallic (bottom-right)
+maps. “N/A” in the reference column indicates missing annotations in the dataset, while “N/A” in the results
+indicates outputs not produced by the corresponding method.
+As shown in Table 3, AEGIR achieves the best novel view synthesis (NVS) performance across ScanNet++,
+Replica, and FIPT-Real, matching or leading the best score in PSNR, SSIM, and LPIPS. Our method remains
+efficient with a total optimization time of 55 minutes (including geometry initialization), making it approximately
+three times faster than NeILF++ and comparable to other baselines. On synthetic datasets (Table 2), our
+method achieves the best overall performance on the Hypersim benchmark in both NVS and albedo recovery,
+outperforming the next best method by nearly 3 dB in albedo PSNR. On FIPT-Synthetic, our method remains
+competitive with IRIS, which achieves slightly higher NVS scores on this dataset by baking residual illumination
+into the surface albedo. In contrast, our approach maintains better material recovery without relying on such
+artifacts. This trade-off is further illustrated in Figure 5, which shows that baseline methods often trade material
+8
+AEGIR
+A P REPRINT
+accuracy for rendering quality, while our method balances both. These quantitative results are supported by
+the visual comparisons in Figure 6. Our pipeline produces sharper renderings and cleaner intrinsic maps,
+avoiding the blur and baked-in illumination artifacts common in other approaches. This strong performance
+comes from effective physical disentanglement. Explicit geometric area emitters reduce ambiguity between
+lighting and materials, while emitter surface sampling and differentiable visibility ensure accurate light transport.
+Combined with diffusion priors and material–lighting regularization, this produces a stable, physically plausible
+decomposition. As shown in Figure 8, this high-quality factorization also enables downstream applications such
+as virtual object insertion and controlled relighting through direct manipulation of individual geometric light
+sources.
+4.4
+Ablation Study
+Table 4: Quantitative ablation study. NVS metrics are averaged over Replica and FIPT-Synthetic, while albedo
+metrics are measured on FIPT-Synthetic.
+NVS
+(Replica + FIPT-Synthetic avg.)
+Configuration
+Reference
+Albedo
+(FIPT-Synthetic)
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+PSNR ↑
+SSIM ↑
+LPIPS ↓
+W/o Focus Map (Wf )
+W/o Diffusion Priors (Lprior )
+W/o Material TV (LT V )
+W/o Light Regularization (Llight )
+W/o Adaptive Control
+W/o Emitter Initialization
+17.47
+19.59
+19.05
+18.19
+17.83
+20.18
+0.74
+0.80
+0.78
+0.76
+0.74
+0.82
+0.24
+0.21
+0.23
+0.23
+0.24
+0.21
+17.25
+15.11
+15.96
+17.24
+17.21
+17.30
+0.78
+0.74
+0.75
+0.79
+0.77
+0.79
+0.23
+0.26
+0.25
+0.23
+0.24
+0.22
+AEGIR (Full Method)
+22.08
+0.85
+0.20
+17.33
+0.80
+0.21
+Full Method
+W/o Focus Map
+W/o Diff. Prior
+W/o Mat. TV
+W/o Light Reg.
+W/o Ada. Control W/o Emitter Init.
+Figure 7: Qualitative ablation study. The top row shows novel view renders; the bottom row shows estimated
+albedo (left) and direct illumination (right). Removing key components embeds illumination artifacts in the
+albedo and degrades illumination estimation.
+Render
+Relight
+Insertion
+Render
+Relight
+Insertion
+Figure 8: Downstream applications. By factorizing illumination into explicit area emitters, our framework
+supports controlled scene relighting and virtual object insertion.
+We evaluate the contribution of each component to novel view synthesis and albedo accuracy (Table 4), as well
+as qualitative illumination estimation and intrinsic disentanglement (Figure 7) in scenes with complex indoor
+lighting from the Replica and FIPT-Synthetic datasets. Removing the focus multiplier weakens the detection of
+localized lighting patterns. Meanwhile, disabling diffusion priors causes a severe drop in the quantitative albedo
+metrics, as illumination effects become incorrectly embedded into the estimated albedo. Omitting the material
+TV loss leads to noisy textures due to inconsistencies in DiffusionRenderer outputs. For illumination estimation,
+removing light regularization or adaptive control results in degenerate solutions, where extra light sources are
+introduced and area light sizes are overestimated. Ablating emitter initialization causes the smallest degradation
+among the lighting-control ablations, especially for albedo, but still reduces NVS quality and slows convergence.
+This indicates its role as a useful photometric prior and demonstrates that our method can accurately estimate
+illumination from shading cues only, without requiring light sources to be directly visible in the input images. As
+supported by the quantitative metrics in Table 4 and the visual results in Figure 7, the full AEGIR model achieves
+the best balance between rendering quality, albedo accuracy, and stable illumination estimation, demonstrating
+the necessity of each component.
+9
+AEGIR
+5
+A P REPRINT
+Conclusion and Future Work
+We present AEGIR, an inverse rendering framework that models explicit local area emitters for physically
+grounded illumination estimation. By modeling the spatial extent, shape, and anisotropic emission of realworld light sources within a 2D Gaussian Splatting representation, AEGIR bridges neural scene modeling with
+physically based rendering. Combined with differentiable soft shadow tracing, multiple importance sampling,
+and regularization for materials and lighting, our approach reduces inverse rendering ambiguity and prevents
+illumination from being baked into albedo. This results in a more consistent decomposition of geometry,
+materials, and lighting, with strong performance in material recovery, illumination estimation, and novel view
+synthesis.
+Finally, several technical limitations remain. First, shading artifacts can arise from noisy normals. Second,
+the cost of shadow tracing increases with the number of emitters, motivating more efficient sampling methods
+such as ReSTIR [50]. Finally, our current material model does not handle mirror-like or transparent materials.
+More broadly, photorealistic manipulation of real environments carries risks of misuse in the generation of
+deceptive media, highlighting the need for robust methods to detect synthetic media. Despite these challenges,
+AEGIR provides a reliable approach for recovering illumination under complex lighting conditions. By explicitly
+factorizing illumination together with material properties, it enables flexible and realistic scene editing.
+References
+[1] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik, Jonathan T. Barron, Ravi Ramamoorthi, and Ren
+Ng. Nerf: Representing scenes as neural radiance fields for view synthesis. In ECCV, 2020.
+[2] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for
+real-time radiance field rendering. ACM Transactions on Graphics, 42(4), July 2023.
+[3] Jian Gao, Chun Gu, Youtian Lin, Zhihao Li, Hao Zhu, Xun Cao, Li Zhang, and Yao Yao. Relightable 3d
+gaussians: Realistic point cloud relighting with brdf decomposition and ray tracing, 2023.
+[4] Chun Gu, Xiaofei Wei, Zixuan Zeng, Yuxuan Yao, and Li Zhang. Irgs: Inter-reflective gaussian splatting
+with 2d gaussian ray tracing. In CVPR, 2025.
+[5] Peter Kocsis, Vincent Sitzmann, and Matthias Nießner. Intrinsic image diffusion for indoor single-view
+material estimation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2024.
+[6] Kang Du, Zhihao Liang, Yulin Shen, and Zeyu Wang. Gs-id: Illumination decomposition on gaussian
+splatting via adaptive light aggregation and diffusion-guided material priors, 2025.
+[7] Yao Yao, Jingyang Zhang, Jingbo Liu, Yihang Qu, Tian Fang, David McKinnon, Yanghai Tsin, and Long
+Quan. Neilf: Neural incident light field for physically-based material estimation. In European Conference
+on Computer Vision (ECCV), 2022.
+[8] Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu, Tian Fang, David McKinnon, Yanghai Tsin, and Long
+Quan. Neilf++: Inter-reflectable light fields for geometry and material estimation. International Conference
+on Computer Vision (ICCV), 2023.
+[9] Ye Yu and William A. P. Smith. Inverserendernet: Learning single image inverse rendering. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2019.
+[10] Zhengqin Li, Mohammad Shafiei, Ravi Ramamoorthi, Kalyan Sunkavalli, and Manmohan Chandraker.
+Inverse rendering for complex indoor scenes: Shape, spatially-varying lighting and svbrdf from a single
+image. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+2020.
+[11] Rui Zhu, Zhengqin Li, Janarbek Matai, Fatih Porikli, and Manmohan Chandraker. Irisformer: Dense
+vision transformers for single-image inverse rendering in indoor scenes. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2022.
+[12] Jundan Luo, Duygu Ceylan, Jae Shin Yoon, Nanxuan Zhao, Julien Philip, Anna Frühstück, Wenbin Li,
+Christian Richardt, and Tuanfeng Y. Wang. IntrinsicDiffusion: Joint intrinsic layers from latent diffusion
+models. In SIGGRAPH 2024 Conference Papers, 2024.
+10
+AEGIR
+A P REPRINT
+[13] Zheng Zeng, Valentin Deschaintre, Iliyan Georgiev, Yannick Hold-Geoffroy, Yiwei Hu, Fujun Luan, LingQi Yan, and Miloš Hašan. Rgb↔x: Image decomposition and synthesis using material- and lighting-aware
+diffusion models. In ACM SIGGRAPH 2024 Conference Papers, SIGGRAPH ’24, New York, NY, USA,
+2024. Association for Computing Machinery.
+[14] Ruofan Liang, Zan Gojcic, Huan Ling, Jacob Munkberg, Jon Hasselgren, Zhi-Hao Lin, Jun Gao, Alexander
+Keller, Nandita Vijaykumar, Sanja Fidler, and Zian Wang. Diffusionrenderer: Neural inverse and forward
+rendering with video diffusion models. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), June 2025.
+[15] Zhibing Li, Tong Wu, Jing Tan, Mengchen Zhang, Jiaqi Wang, and Dahua Lin. IDArb: Intrinsic decomposition for arbitrary number of input views and illuminations. In The Thirteenth International Conference
+on Learning Representations, 2025.
+[16] Philipp Langsteiner, Jan-Niklas Dihlmann, and Hendrik P. A. Lensch. Matspray: Fusing 2d material world
+knowledge on 3d geometry, 2025.
+[17] Xiangzuo Wu, Chengwei Ren, Jun Zhou, Xiu Li, and Yuan Liu. Mvinverse: Feed-forward multi-view
+inverse rendering in seconds, 2025.
+[18] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P.A. Lensch. Nerd:
+Neural reflectance decomposition from image collections. In IEEE International Conference on Computer
+Vision (ICCV), 2021.
+[19] Xiuming Zhang, Pratul P. Srinivasan, Boyang Deng, Paul Debevec, William T. Freeman, and Jonathan T.
+Barron. Nerfactor: Neural factorization of shape and reflectance under an unknown illumination. ACM
+Trans. Graph., 40(6), dec 2021.
+[20] Mark Boss, Varun Jampani, Raphael Braun, Ce Liu, Jonathan T. Barron, and Hendrik P.A. Lensch. Neuralpil: Neural pre-integrated lighting for reflectance decomposition. In Advances in Neural Information
+Processing Systems, 2021.
+[21] Zhihao Liang, Qi Zhang, Ying Feng, Ying Shan, and Kui Jia. Gs-ir: 3d gaussian splatting for inverse
+rendering, 2023.
+[22] Hanxiao Sun, YuPeng Gao, Jin Xie, Jian Yang, and Beibei Wang. Svg-ir: Spatially-varying gaussian
+splatting for inverse rendering, 2025.
+[23] Kai Ye, Chong Gao, Guanbin Li, Wenzheng Chen, and Baoquan Chen. Geosplatting: Towards geometry
+guided gaussian splatting for physically-based inverse rendering. In Proceedings of the IEEE/CVF
+International Conference on Computer Vision, pages 28991–29000, 2025.
+[24] Liwen Wu, Rui Zhu, Mustafa B Yaldiz, Yinhao Zhu, Hong Cai, Janarbek Matai, Fatih Porikli, Tzu-Mao Li,
+Manmohan Chandraker, and Ravi Ramamoorthi. Factorized inverse path tracing for efficient and accurate
+material-lighting estimation. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision, pages 3848–3858, 2023.
+[25] Chih-Hao Lin, Jia-Bin Huang, Zhengqin Li, Zhao Dong, Christian Richardt, Tuotuo Li, Michael Zollhöfer,
+Johannes Kopf, Shenlong Wang, and Changil Kim. IRIS: Inverse rendering of indoor scenes from low
+dynamic range images. In Conference on Computer Vision and Pattern Recognition (CVPR), 2025.
+[26] Jacob Munkberg, Jon Hasselgren, Tianchang Shen, Jun Gao, Wenzheng Chen, Alex Evans, Thomas Müller,
+and Sanja Fidler. Extracting Triangular 3D Models, Materials, and Lighting From Images. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 8280–8290,
+June 2022.
+[27] Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg. Shape, Light, and Material Decomposition from
+Images using Monte Carlo Rendering and Denoising. arXiv:2206.03380, 2022.
+[28] Yuxuan Yao, Zixuan Zeng, Chun Gu, Xiatian Zhu, and Li Zhang. Reflective gaussian splatting. In ICLR,
+2025.
+[29] Jiahao Niu, Rongjia Zheng, Wenju Xu, Wei-Shi Zheng, and Qing Zhang. Sgs-intrinsic: Semantic-invariant
+gaussian splatting for sparse-view indoor inverse rendering, 2026.
+[30] Arno Coomans, Edoardo Alberto Dominici, Christian Döring, Joerg H. Mueller, Jozef Hladky, and Markus
+Steinberger. Real-time Neural Rendering of Dynamic Light Fields. Computer Graphics Forum, 2024.
+11
+AEGIR
+A P REPRINT
+[31] Jingsen Zhu, Fujun Luan, Yuchi Huo, Zihao Lin, Zhihua Zhong, Dianbing Xi, Rui Wang, Hujun Bao, Jiaxiang Zheng, and Rui Tang. Learning-based inverse rendering of complex indoor scenes with differentiable
+monte carlo raytracing. In SIGGRAPH Asia 2022 Conference Papers. ACM, 2022.
+[32] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and Noah Snavely. PhySG: Inverse rendering with
+spherical gaussians for physics-based material editing and relighting. In The IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2021.
+[33] Mathieu Garon, Kalyan Sunkavalli, Sunil Hadap, Nathan Carr, and Jean-François Lalonde. Fast spatiallyvarying indoor lighting estimation. In The IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR), June 2019.
+[34] Zhengqin Li, Li Yu, Mikhail Okunev, Manmohan Chandraker, and Zhao Dong. Spatiotemporally consistent
+hdr indoor lighting estimation, 2023.
+[35] Pakkapon Phongthawee, Worameth Chinchuthakun, Nontaphat Sinsunthithet, Amit Raj, Varun Jampani,
+Pramook Khungurn, and Supasorn Suwajanakorn. Diffusionlight: Light probes for free by painting a
+chrome ball. In ArXiv, 2023.
+[36] Mutian Tong, Rundi Wu, and Changxi Zheng. Spatiotemporally consistent indoor lighting estimation
+with diffusion priors. In Proceedings of the Special Interest Group on Computer Graphics and Interactive
+Techniques Conference Conference Papers, SIGGRAPH Conference Papers ’25, New York, NY, USA,
+2025. Association for Computing Machinery.
+[37] Ruofan Liang, Kai He, Zan Gojcic, Igor Gilitschenski, Sanja Fidler, Nandita Vijaykumar, and Zian Wang.
+Luxdit: Lighting estimation with video diffusion transformer. arXiv preprint arXiv:2509.03680, 2025.
+[38] Marc-André Gardner, Yannick Hold-Geoffroy, Kalyan Sunkavalli, Christian Gagné, and Jean-François
+Lalonde. Deep parametric indoor lighting estimation. In The IEEE International Conference on Computer
+Vision (ICCV), October 2019.
+[39] Xiaoyan Xing, Konrad Groh, Sezer Karaoglu, Theo Gevers, and Anand Bhattad. Luminet: Latent intrinsics
+meets diffusion models for indoor scene relighting. In Proceedings of the Computer Vision and Pattern
+Recognition Conference, pages 442–452, 2025.
+[40] Ruofan Liang, Norman Müller, Ethan Weber, Duncan Zauss, Nandita Vijaykumar, Peter Kontschieder, and
+Christian Richardt. Luxremix: Lighting decomposition and remixing for indoor scenes, 2026.
+[41] Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for
+geometrically accurate radiance fields. In SIGGRAPH 2024 Conference Papers. Association for Computing
+Machinery, 2024.
+[42] Martin Ester, Hans-Peter Kriegel, Jörg Sander, and Xiaowei Xu. A density-based algorithm for discovering
+clusters in large spatial databases with noise. In Proceedings of the Second International Conference on
+Knowledge Discovery and Data Mining, KDD’96, pages 226–231. AAAI Press, 1996.
+[43] Matias Turkulainen, Xuqian Ren, Iaroslav Melekhov, Otto Seiskari, Esa Rahtu, and Juho Kannala. Dnsplatter: Depth and normal priors for gaussian splatting and meshing. In Proceedings of the IEEE/CVF
+Winter Conference on Applications of Computer Vision (WACV), 2025.
+[44] Mike Roberts, Jason Ramapuram, Anurag Ranjan, Atulit Kumar, Miguel Angel Bautista, Nathan Paczan,
+Russ Webb, and Joshua M. Susskind. Hypersim: A photorealistic synthetic dataset for holistic indoor
+scene understanding. In International Conference on Computer Vision (ICCV) 2021, 2021.
+[45] Julian Straub, Thomas Whelan, Lingni Ma, Yufan Chen, Erik Wijmans, Simon Green, Jakob J. Engel, Raul
+Mur-Artal, Carl Ren, Shobhit Verma, Anton Clarkson, Mingfei Yan, Brian Budge, Yajie Yan, Xiaqing Pan,
+June Yon, Yuyang Zou, Kimberly Leon, Nigel Carter, Jesus Briales, Tyler Gillingham, Elias Mueggler,
+Luis Pesqueira, Manolis Savva, Dhruv Batra, Hauke M. Strasdat, Renzo De Nardi, Michael Goesele,
+Steven Lovegrove, and Richard Newcombe. The Replica dataset: A digital replica of indoor spaces. arXiv
+preprint arXiv:1906.05797, 2019.
+[46] Chandan Yeshwanth, Yueh-Cheng Liu, Matthias Nießner, and Angela Dai. Scannet++: A high-fidelity
+dataset of 3d indoor scenes. In Proceedings of the IEEE/CVF International Conference on Computer
+Vision, pages 12–22, 2023.
+[47] Steven G. Parker, James Bigler, Andreas Dietrich, Heiko Friedrich, Jared Hoberock, David Luebke, David
+McAllister, Morgan McGuire, Keith Morley, Austin Robison, and Martin Stich. Optix: a general purpose
+ray tracing engine. ACM Trans. Graph., 29(4), July 2010.
+12
+AEGIR
+A P REPRINT
+[48] Wenzel Jakob, Sébastien Speierer, Nicolas Roussel, Merlin Nimier-David, Delio Vicini, Tizian Zeltner,
+Baptiste Nicolet, Miguel Crespo, Vincent Leroy, and Ziyi Zhang. Mitsuba 3 renderer, 2022. https://mitsubarenderer.org.
+[49] Benedikt Bitterli. Rendering resources, 2016. https://benedikt-bitterli.me/resources/.
+[50] Benedikt Bitterli, Chris Wyman, Matt Pharr, Peter Shirley, Aaron Lefohn, and Wojciech Jarosz. Spatiotemporal reservoir resampling for real-time ray tracing with dynamic direct lighting. ACM Trans. Graph.,
+39(4), August 2020.
+[51] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable
+effectiveness of deep features as a perceptual metric. In CVPR, 2018.
+A
+Deferred Rendering Details
+This section provides a detailed mathematical description of the deferred rendering pipeline of AEGIR, including
+the microfacet BRDF, light transport integration, differentiable visibility, and final pixel evaluation.
+A.1
+Microfacet BRDF Model
+To model the interaction between light and surfaces, AEGIR uses a standard microfacet BRDF. The reflectance
+fr (v, ω) for view direction v and light direction ω is decomposed as fr = fd + fs into diffuse and specular
+lobes. The diffuse component is:
+c(1 − m)
+fd =
+(6)
+π
+where c is albedo and m is metallic. The specular component follows the GGX model:
+fs =
+D(h, αr ) · G(v, ω, αr ) · F (v, h)
+4(n · v)+ (n · ω)+ + ϵ
+(7)
+where h is the half-vector and αr = r2 is derived from the surface roughness r. D is the GGX normal
+distribution, G is the Smith visibility term, and F is computed using Schlick’s approximation. The base
+reflectance is defined as F0 = 0.04(1 − m) + cm.
+A.2
+Monte Carlo Sampling and MIS Approximation
+AEGIR estimates the outgoing radiance Lo (x, v) at surface point x using two sampling strategies: cosineweighted BRDF sampling and explicit emitter sampling. Let Nbrdf be the number of BRDF samples. For emitter
+sampling, we allocate the same number of samples to each of the Ne active emitters. We use K = ⌊Nlight /Ne ⌋
+′
+′
+samples per emitter, giving Nlight
+= Ne K light samples and N = Nbrdf + Nlight
+total samples. The Monte
+Carlo estimate is:
+N
+1 X fr (v, ωj )Li (x, ωj )(n · ωj )+
+Lo (x, v) ≈
+.
+(8)
+N j=1
+µ̃mix (ωj , x)
+For BRDF samples drawn from the cosine-weighted hemisphere, the solid-angle PDF is:
+µbrdf (ω) =
+(n · ω)+
+,
+π
+(9)
+where (a)+ = max(a, 0).
+For explicit emitter samples, we define the emitter frame as Re = [ue ve we ]. A point on emitter e is sampled
+by stretching a unit-sphere sample ζ by the emitter scales Se , then rotating and translating it into the scene:
+qe (ζ) = pe + Re (Se ⊙ ζ) ,
+∥ζ∥2 = 1.
+(10)
+This gives a sampled point qe on the ellipsoidal emitter surface. For a light sample, we first sample a point qj
+on an emitter and then form the direction ωj = (qj − x)/∥qj − x∥2 . For a BRDF sample, we first sample the
+13
+AEGIR
+A P REPRINT
+direction ωj and then intersect the ray with the explicit emitters. If the ray reaches emitter ej at point qj , we
+evaluate the light sampling surrogate. Otherwise, the light sampling term is set to zero:
+
+2
+
+ 1 ∥qj − x∥2 , if ωj reaches emitter ej at qj ,
+µ̃light (ωj , x) = Ne Aej + ϵ
+(11)
+
+
+0,
+otherwise,
+with the effective area proxy:
+Aej = 4π Sej ,u Sej ,v Sej ,w
+2/3
+.
+(12)
+The factor 1/Ne accounts for the uniform mixture over active emitters. The term µ̃light is not an exact normalized
+solid-angle PDF, but a stable surrogate for MIS weighting. Distance attenuation is captured through the actual
+emitter point qj and its distance to the shaded point x.
+The combined MIS weighting term is:
+µ̃mix (ωj , x) =
+A.3
+′
+Nbrdf µbrdf (ωj ) + Nlight
+µ̃light (ωj , x)
+.
+′
+Nbrdf + Nlight
+(13)
+Differentiable Shadow Tracing and Illumination
+To determine the visibility of area emitters, AEGIR traces shadow rays through the 2D Gaussian geometry.
+Visibility is evaluated as a soft and differentiable mask by comparing the distance to the light against the depth
+of the intersected geometry. Note that the sigmoid in Equation 3 depends on the scale of the scene. In practice,
+we normalize scenes before optimization and use fixed visibility parameters in normalized coordinates, but a
+scene-dependent steepness parameter is an equivalent implementation choice.
+The total incident light Li (x, ωi ) is computed as the visibility-weighted sum in Equation 4. We explicitly restrict
+this term to direct emitter lighting plus a single secondary bounce, rather than attempting full multi-bounce
+global illumination. During training, the secondary-bounce term Lbounce
+(x, ωi ) is approximated by tracing
+i
+to the first secondary Gaussian hit and querying its color features, represented as Spherical Harmonics (SH),
+following the efficient proxy used in IRGS [4]. This SH query provides a cheap approximation for occluded or
+residual indirect illumination while the optimization learns the explicit emitters and materials.
+At inference time, we disable the SH proxy. Instead, for the same single-bounce term, we sample a diffuse
+hemisphere direction at the secondary hit, trace it through the 2D Gaussian scene, and evaluate the recovered
+area-emitter radiance if the ray reaches an explicit emitter. If the secondary ray does not reach an emitter, the
+bounce contribution is set to zero. Thus, final rendering uses the optimized emitter representation for both
+direct lighting and the cheap one-bounce indirect estimate, with SH used only during training for stability.
+Subsequently, the total incident light Li (x, ωi ) is aggregated using the Monte Carlo integration defined in
+Equation 8 to compute the outgoing high dynamic range (HDR) radiance Lo (x, v) at the surface point. This
+linear HDR radiance is then mapped to low dynamic range (LDR) to be used for loss calculation.
+B
+Loss and Regularization Details
+This section presents the optimization objectives used in AEGIR. Inverse rendering is highly ill-posed, as
+different combinations of geometry, material, and illumination can produce the same image, so carefully
+designed losses are needed to guide the solution toward physically consistent results. This becomes even more
+challenging with explicit area emitters, which introduce additional degrees of freedom in shape, size, and
+emission, making optimization more difficult. The total optimization loss is defined in Equation 5.
+B.1
+Contrast-Aware Photometric Loss
+Standard photometric losses often blur high-frequency details. We introduce a local contrast-aware focus map
+Wf to prioritize the reconstruction of sharp lighting patterns. We define ∆I as the absolute difference between
+the grayscale ground-truth image Igray and its local average:
+∆I = |Igray − AvgPool(Igray )|
+14
+(14)
+AEGIR
+Wf = 1 + λf ocus
+A P REPRINT
+∆I
+max(∆I) + ϵ
+(15)
+The final objective combines this weighted L1 loss with the Structural Similarity Index Measure (SSIM):
+ˆ I))
+Lphoto = ∥Wf ⊙ (Iˆ − I)∥1 + λdssim (1 − SSIM(I,
+(16)
+where Iˆ is the rendered image and I is the ground-truth image.
+B.2
+Material Supervision with Diffusion Priors
+To resolve ambiguities, such as distinguishing a white wall in shadow from a dark wall, we use pseudo-ground
+truth maps (Pprior ) for base color c, roughness r, and metallic m extracted using DiffusionRenderer [14]. We
+apply L1 regularization between our rendered G-buffer maps and these priors:
+X
+Lprior =
+λP ∥Prender − Pprior ∥1
+(17)
+P ∈{c,r,m}
+B.3
+Edge-Aware Material Total Variation (TV)
+To mitigate multi-view noise introduced by the diffusion priors, we apply an edge-aware Total Variation (TV)
+loss. This loss encourages materials to remain constant across flat surfaces while preserving sharp transitions
+at structural boundaries. By smoothing the material textures, we prevent them from absorbing illumination
+gradients, which forces the light emitters to correctly account for these lighting effects:
+X
+X
+∥∇Pa,b ∥ exp (−β∥∇Ia,b ∥)
+(18)
+LT V = λT V
+γP
+P ∈{c,r,m}
+a,b
+where ∇Pa,b represents the spatial gradient of the material parameter P at pixel (a, b), γP is the material-specific
+TV weight, and β controls the sensitivity to the visual edges ∇I in the ground-truth image.
+B.4
+Area Emitter Regularization
+To keep the lighting realistic, we apply three constraints to the explicit emitters. First, an area loss (Larea ) keeps
+the emitters from growing too large by penalizing the scale si of each of the N emitters:
+N
+Larea =
+1 X
+∥si ∥2
+N i=1
+(19)
+Second, a soft white-light prior (Lwhite ) penalizes differences across the color channels c of the emitter intensity
+Ei . This prevents the optimization from explaining material colors with unrealistic lighting tints, while still
+allowing the recovery of actual colored light sources:
+N
+Lwhite =
+
+1 X
+max(Ei,c ) − min(Ei,c )
+c
+c
+N i=1
+(20)
+Third, a bounding loss (Lbounds ) keeps the emitters inside the scene. It ensures the position pi of each emitter
+remains within the allowed boundaries [bmin , bmax ] across all spatial dimensions d ∈ {x, y, z}:
+N
+Lbounds =
+1 X
+N i=1
+X
+(max(0, bmin,d − pi,d ) + max(0, pi,d − bmax,d ))
+(21)
+d∈{x,y,z}
+Finally, the total lighting regularization loss is a weighted sum of these three constraints:
+Llight = λarea Larea + λwhite Lwhite + λbounds Lbounds
+15
+(22)
+AEGIR
+C
+A P REPRINT
+Implementation and Optimization Details
+This section details the experimental setup used to evaluate the AEGIR pipeline, including the selected datasets,
+evaluation metrics, training schedules, dynamic emitter control strategies, and hyperparameter configurations, to
+support reproducibility.
+Datasets and Splits. We evaluate our method on a diverse collection of synthetic environments and real-world
+indoor scans. For synthetic data, we use the FIPT [24] dataset, which contains 4 synthetic and 2 real-world
+scenes, and select 6 scenes from Hypersim [44] featuring complex indoor illumination patterns: ai_001_004,
+ai_004_002, ai_010_006, ai_015_003, ai_032_001, and ai_034_002. For real-world data, we evaluate
+on 8 indoor scans from the Replica [45] dataset and 4 indoor scenes from ScanNet++ [46]: 0a7cc12c0e,
+8b5caf3398, a24858e51e, and be0ed6b33c. Additionally, for our explicit lighting evaluation, we use the
+same synthetic scenes used in FIPT, which are originally from Benedikt Bitterli’s rendering resources [49].
+Table 5 summarizes the shared evaluation protocol used across methods.
+Table 5: Evaluation protocol. All methods are evaluated on the same train/test camera splits for each dataset.
+Dataset
+Hypersim
+FIPT-Synthetic
+FIPT-Real
+Replica
+ScanNet++
+Bitterli’s Scenes
+Scenes
+6
+4
+2
+8
+4
+4
+Scene identifiers / source
+Evaluation target
+ai_001_004, ai_004_002, ai_010_006, ai_015_003, ai_032_001, ai_034_002
+FIPT synthetic split
+FIPT real split
+Replica indoor scans
+0a7cc12c0e, 8b5caf3398, a24858e51e, be0ed6b33c
+FIPT synthetic lighting scenes
+NVS, albedo
+NVS, albedo, roughness, ablations
+NVS
+NVS, ablations
+NVS
+Mitsuba lighting-only evaluation
+Metrics. To evaluate output quality, we use Peak Signal-to-Noise Ratio (PSNR) for pixel-wise accuracy,
+the Structural Similarity Index Measure (SSIM) for structural fidelity, and Learned Perceptual Image Patch
+Similarity (LPIPS) for deep perceptual similarity [51].
+Initialization and Training Setup. We initialize the scene geometry from a DN-Splatter [43] checkpoint
+pretrained for 10,000 iterations. For physically based materials, all 2D Gaussians are initialized with a roughness
+of 0.6 and a metallic value of 0.2. Following this initialization, we run our deferred shading optimization for
+a total of 20,000 steps using the Adam optimizer. The initial learning rates are set to 1 × 10−3 for material
+and lighting parameters, and 1 × 10−5 for geometry. Between steps 5,000 and 15,000, the learning rates for
+geometry and materials decay to zero, effectively freezing them. During this same period, the emitter learning
+rate decays to 1 × 10−4 , allowing the lighting to continue refining exclusively for the final 5,000 steps.
+For rendering, we employ the 2D Gaussian tracer from IRGS [4], implemented in OptiX [47]. To support
+dynamic geometry updates, the bounding volume hierarchy (BVH) is rebuilt at every iteration, requiring about 3
+ms. Ray marching terminates when transmittance falls below 0.05. During optimization, we sample 216 rays
+per iteration. For the rendering equation evaluation, we use Nbrdf = 128 samples for diffuse transport and
+Nlight = 128 samples for explicit area emitters. The SH feature query is used only during training as a proxy for
+the single secondary bounce; final inference disables this proxy and evaluates the bounce by diffuse sampling
+and tracing to the recovered emitters.
+In total, training takes about 55 minutes on a single NVIDIA RTX 4090 GPU: 15 minutes for the geometry
+initialization and 40 minutes for the deferred shading optimization. For a fair comparison, AEGIR and our GS-ID
+reproduction use the same DN-Splatter geometry initialization. For baselines whose public implementations
+require a different scene representation or geometry pipeline, we follow the authors’ recommended setup and
+evaluate on the same train/test views.
+Adaptive Emitter Control. To efficiently represent complex lighting without excessive memory consumption
+or over-exposure, we dynamically adapt the set of area emitters through splitting and pruning. These updates
+occur every 1,000 iterations between training steps 5,000 and 15,000. We evaluate each emitter e based on its
+parameters, including scale Se , center pe , and a perceptual energy measure Φe . Given a linear RGB emission
+Ee = (Ee,R , Ee,G , Ee,B ), this energy is defined as:
+
+1/2.2
+Ee,R + Ee,G + Ee,B
+Φe =
+.
+(23)
+3
+16
+AEGIR
+A P REPRINT
+• Pruning: We remove an emitter if its contribution becomes negligible (Φe < 0.1) or physically
+implausible (drifting outside valid scene bounds).
+• Splitting: To increase sampling resolution around dominant light sources, we split an emitter if it
+becomes excessively bright (Φe > 5.0) or if its largest scale exceeds 20% of the maximum scene scale.
+The emitter is divided along its major axis into two children, with each inheriting half the intensity and
+half the spatial scale of the parent.
+Regularization Weights.
+tuned loss weights:
+We balance accurate image reconstruction with realistic physics using the following
+• Photometric Loss: We apply a focus multiplier of λf ocus = 5.0 to the local contrast within the image
+reconstruction loss, and set the structural dissimilarity weight to λdssim = 0.2.
+• Material Regularization: For the material guidance from the pretrained DiffusionRenderer, we apply
+equal weighting to the base color, roughness, and metallic components (λc = λr = λm = 1.0).
+We regularize these materials using a total variation (TV) loss (λT V = 1.0), scaling the individual
+components by γc = 0.5, γr = 0.25, and γm = 0.25, respectively. Finally, we set β = 1.0.
+• Emitter Regularization: The light regularization terms λarea and λbounds use a weight of 0.5.
+However, λwhite is set to a lower value of 0.1 to allow the optimization enough flexibility to recover
+colored light sources.
+Statistical Significance. Due to the significant computational cost of optimization-based inverse rendering,
+we follow standard practices in neural rendering and report metrics from single optimization runs. However, to
+evaluate optimization stability, we conduct multiple runs with different seeds on the four synthetic scenes in the
+FIPT dataset and observe low standard deviations across seeds (±0.14 PSNR, ±0.014 SSIM, ±0.022 LPIPS).
+D
+Additional Qualitative Results
+This section presents additional qualitative results that highlight the performance of AEGIR from multiple
+perspectives. The first two figures provide additional qualitative evaluations of lighting estimation. In Figure
+9, we render environment maps from the area emitters estimated by AEGIR at multiple spatial locations and
+compare them to ground-truth environment maps rendered in Mitsuba [48]. This directly evaluates whether
+the recovered emitters reproduce the spatial variation of scene illumination. We also compare against LuxDiT
+[37], a state-of-the-art diffusion-based method that estimates environment maps from single or multiple inputs.
+Despite using image sequences, LuxDiT predicts a single global environment map and therefore cannot capture
+spatial variation or localized lighting. In contrast, AEGIR more faithfully reproduces how the environment map
+changes across different spatial locations. Figure 10 provides a second qualitative lighting evaluation through
+direct illumination (shading) maps, showing that explicit area emitters recover the spatial extent of illumination
+more accurately than the discrete point light representation used in GS-ID [6]. For material recovery, Figures
+11 and 12 provide extended intrinsic evaluations, showing novel-view renderings and albedo, roughness, and
+metallic maps across real and synthetic indoor scans against baseline methods. Finally, Figure 13 highlights
+the multi-view inconsistencies of 2D generative priors such as DiffusionRenderer [14], and shows how AEGIR
+produces more consistent material estimates.
+E
+Limitations and Future Work
+Despite its strong performance in recovering physically grounded scene illumination, AEGIR still has several
+limitations that suggest directions for future work.
+Geometric limitations. Our deferred shading pipeline relies on 2D Gaussian geometry. In textureless or heavily
+occluded regions, this can produce noisy or ambiguous surface normals, leading to visible artifacts during
+illumination. Future work could address this by incorporating stronger monocular geometric priors together
+with spatial smoothness constraints to improve normal stability in these regions.
+Scalability of explicit area light sampling. The computational cost increases with the number of explicit area
+light sources. Since ray tracing and Monte Carlo integration scale with the emitter count, modeling complex
+17
+AEGIR
+A P REPRINT
+illumination in large scenes can become a performance bottleneck. This could be addressed by integrating
+scalable light sampling methods such as ReSTIR [50], which reuse samples over space and time to maintain low
+variance at lower cost.
+Limitations in transparent and specular materials. Our opaque microfacet BRDF limits the accurate modeling
+of mirrors and transparent materials such as glass. Extending the representation to a full BSDF with transmission
+components, combined with differentiable refraction tracing, would enable physically accurate simulation of
+light transport through transmissive materials and expand the range of reconstructible scenes.
+Reference View
+AEGIR (ours)
+GT Environment Map
+LuxDiT [37]
+Figure 9: Qualitative environment map comparison. Environment maps are extracted at two spatial locations
+per lighting condition. LuxDiT [37] does not produce spatially varying maps, failing to capture localized lighting.
+AEGIR successfully models this spatial variation and anisotropic light sources, closely matching the ground
+truth.
+18
+AEGIR
+Reference
+AEGIR
+A P REPRINT
+GS-ID [6]
+Figure 10: Qualitative comparison of illumination representations. Unlike GS-ID [6], which relies on
+discrete point lights, AEGIR’s explicit area emitters accurately recover the spatial extent and physical structure
+of light sources in direct illumination (shading) maps.
+19
+AEGIR
+AEGIR (Ours)
+GS-ID [6]
+IRGS [4]
+IRIS [25]
+NeILF++ [8]
+Albedo
+Roughness
+N/A
+N/A
+N/A
+Albedo
+Roughness
+N/A
+N/A
+N/A
+Metallic Roughness Albedo
+Render
+N/A
+Metallic
+Render
+N/A
+Metallic
+Render
+Reference
+A P REPRINT
+N/A
+N/A
+N/A
+N/A
+Figure 11: Additional qualitative comparison of novel view synthesis and intrinsic decomposition on indoor
+scenes. The reference column follows the same row layout as the method outputs, showing the render/RGB
+image, albedo, roughness, and metallic maps when available. The remaining columns compare the estimated
+properties and renderings across methods. “N/A” indicates properties not produced by a given method.
+20
+AEGIR
+AEGIR (Ours)
+GS-ID [6]
+IRGS [4]
+IRIS [25]
+NeILF++ [8]
+N/A
+N/A
+Roughness
+N/A
+N/A
+Albedo
+N/A
+Roughness
+N/A
+Metallic
+Render
+N/A
+Metallic
+Albedo
+Render
+Metallic Roughness Albedo
+Render
+Reference
+A P REPRINT
+N/A
+N/A
+Figure 12: Additional qualitative comparison of novel view synthesis and intrinsic decomposition on indoor
+scenes. This figure extends the appendix comparison with two newly added scenes and one additional real-world
+scan. The reference column follows the same row layout as the method outputs, showing the render/RGB image,
+albedo, roughness, and metallic maps when available. “N/A” indicates properties not produced by a given
+method.
+21
+A P REPRINT
+AEGIR (ours)
+Diff. Rend. [14]
+GT RGB
+AEGIR (ours)
+Diff. Rend. [14]
+GT RGB
+AEGIR
+Figure 13: Material multi-view consistency. Top to bottom: Ground-truth RGB, DiffusionRenderer [14]
+albedo, and our AEGIR albedo. Unlike 2D generative priors that suffer from occasional illumination leakage
+and multi-view inconsistencies, AEGIR ensures robust and consistent material estimation across all viewpoints.
+22

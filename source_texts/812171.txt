@@ -1,0 +1,1506 @@
+Preprint.
+M E RO PE: M ETRIC ROTARY P OSITION E MBEDDING
+FOR C AMERA -C ONTROLLED V IDEO G ENERATION
+Zhijian Qiao1 , Xinjiang Wang2 , Jiajie Chen2 , Haoming Huang2 , Meng Li2 , Chih-Chung Chou2 ,
+Jing Wang2 , and Shaojie Shen1,†
+arXiv:2609.01252v1 [cs.CV] 1 Sep 2026
+1
+The Hong Kong University of Science and Technology
+2
+Zhuoyu Technology
+†
+Corresponding author: eeshaojie@ust.hk
+Project page: qiaozhijian.github.io/merope
+A BSTRACT
+In camera-controlled video generation, geometry-aware positional encodings condition tokens on camera extrinsics and per-token viewing rays. Existing schemes,
+however, have a scale-dependent failure mode on real-world metric camera trajectories: homogeneous projective encodings cause attention logits and feature norms
+to grow unbounded with physical translation baselines. We propose MeRoPE
+(Metric Rotary Position Embedding), a norm-preserving relative camera encoding for attention. MeRoPE encodes relative orientations between calibrated viewing rays with orthogonal rotation blocks, maps raw metric displacements into
+multi-frequency rotary phases, and adds a disparity-anchored correspondence
+prior along the epipolar arc. This design strictly preserves feature norms, bounds
+pre-softmax attention logits regardless of the physical translation scale, and maintains exact invariance to global rigid coordinate changes. Across nuScenes and
+PanShot, which cover large-baseline trajectories and diverse camera optics, respectively, MeRoPE achieves stronger camera control than prior encodings, with
+the best consistency between generated camera motion and conditioning poses in
+both rotation and translation. Code will be made publicly available.
+1
+I NTRODUCTION
+Geometry-aware positional encodings (PEs) enable camera-controlled video generation by making
+attention sensitive to camera poses and token-level viewing geometry. However, representing realworld metric translation within these encodings remains challenging: raw physical displacements
+can destabilize attention, whereas normalization discards physical scale.
+Existing relative camera encodings based on homogeneous projective matrices (Miyato et al., 2024;
+Li et al., 2025; Zhang et al., 2026a) jointly encode rotation and translation in non-orthogonal attention operators. In these formulations, physical translation enters as an unnormalized inner product,
+causing attention logits and feature norms to grow unbounded with the baseline length. Over large
+displacements, translational terms artificially dominate attention scores and suppress visual content,
+degrading trajectory control.
+This tension yields three task-driven desiderata for camera positional encodings: (A) depthindependent full metric relative-pose dependence on Ti−1 Tj , which retains both motion direction
+and physical translation scale without coupling translation to an assumed scene depth; (B) strict pertoken factorization, which permits independent query/key transformations compatible with standard
+attention; and (C) norm-preserving actions, which prevent baseline-dependent amplification of logits
+and features. However, Theorem 1 shows that no continuous finite-dimensional encoding can satisfy all three while remaining sensitive to metric translation. Because camera control requires both
+metric fidelity (A) and scale stability (C), we prioritize (A+C) and relax (B) through query-camera
+grouping.
+We therefore introduce MeRoPE (Metric Rotary Position Embedding), a norm-preserving encoding with full metric relative-pose dependence. MeRoPE constructs a minimum-rotation (MinRot)
+1
+Preprint.
+local frame for each calibrated 3D ray, represents relative ray orientation with orthogonal blocks,
+and maps query-frame metric displacements into multi-frequency rotary phases. Together, these
+operators retain raw metric camera motion while bounding attention logits across arbitrary physical
+baselines.
+Because this pose operator is scene-independent, it does not identify potential static-scene correspondences across views. MeRoPE therefore encodes correspondence hypotheses as disparityanchored rotations along spherical epipolar arcs. Unlike CamCo (Xu et al., 2024), this design uses
+epipolar geometry to express relative cross-view relations without restricting which token pairs can
+interact. Its angular disparity anchors span a bounded spherical arc, avoiding the dataset-specific
+metric-depth intervals of URoPE (Xie et al., 2026a) and the learned depth estimation of RayRoPE (Wu et al., 2026).
+Contributions.
+• We identify baseline-dependent logit and feature-norm growth in homogeneous projective
+camera encodings and formalize a trilemma among full metric relative-pose dependence,
+strict per-token factorization, and norm preservation.
+• We propose MeRoPE, which resolves this trade-off through query-camera grouping and
+combines a norm-preserving metric-pose operator with disparity-anchored spherical rotations for cross-view relations.
+• We demonstrate improved camera control on large-baseline nuScenes and camera-diverse
+PanShot, with MeRoPE achieving the best joint rotation–translation consistency on both
+benchmarks.
+2
+R ELATED W ORK
+Camera conditioning pathways in video generation. Camera trajectories control viewpoint in
+video synthesis for applications such as autonomous driving and robotic simulation. Existing approaches implement this control through several broad pathways. Feature fusion and adapters integrate compact pose or ray representations into generative backbones: MotionCtrl (Wang et al.,
+2024) concatenates camera extrinsics with temporal features, CameraCtrl (He et al., 2025) adds
+multi-scale features encoded from per-pixel Plücker rays, ReCamMaster (Bai et al., 2025) additively embeds target extrinsics into transformer features, and CamCo (Xu et al., 2024) combines
+Plücker-conditioned feature fusion with epipolar attention. These mechanisms provide lightweight
+control but do not by themselves encode relative viewpoint relations in attention. Explicit 3D guidance and rendering instead derives structural conditions from estimated geometry: Gen3C (Ren
+et al., 2025) renders point-cloud caches, Lyra 2.0 (Shen et al., 2026) combines depth-based warping
+with geometry-aware memory, and ViewCrafter (Yu et al., 2025b) and TrajectoryCrafter (Yu et al.,
+2025a) condition generation on point-cloud renderings. They provide direct spatial guidance, but
+errors in estimated depth, pose, or scene motion can produce holes, distortions, or misaligned conditions. Adaptive modulation injects camera-dependent affine transformations rather than directly
+fusing conditions: BulletTime (Wang et al., 2026b) combines Camera-AdaLN with camera-aware
+positional encoding, while CompoSIA (Zhan et al., 2026) couples AdaLN-style residual ego-motion
+modulation with global projective attention. Geometry-aware positional encodings incorporate camera relations directly into attention without constructing an external 3D proxy at inference time.
+Evolution of geometry-aware positional encodings. Within this family, early formulations operated on camera-level extrinsic transformations (Kong et al., 2024; Miyato et al., 2024) and projective
+viewing frustums (Li et al., 2025). Specifically, CaPE (Kong et al., 2024) applies block-diagonal
+relative pose matrices to queries and keys in multi-view attention, GTA (Miyato et al., 2024) generalizes this to group representations of SE(3) × SO(2) × SO(2) acting on queries, keys, and
+values, and PRoPE (Li et al., 2025) incorporates intrinsics to model projective viewing frustums.
+Subsequent methods construct per-token 3D ray representations: UCPE (Zhang et al., 2026a) builds
+token-level ray-local rigid frames from calibrated pixel-to-ray mappings to support diverse camera
+optics, and RayNova (Xie et al., 2026b) applies multi-axis RoPE to Plücker coordinates in a fixed
+world frame. Recent efforts further incorporate depth cues: URoPE (Xie et al., 2026a) lifts tokens to discrete depth anchors and reprojects them onto the query pixel plane, RayRoPE (Wu et al.,
+2
+Preprint.
+2026) computes expected rotary phases from predicted depth segments, and CRePE (Jin et al., 2026)
+models curved rays with pseudo-depth expectation distributions.
+Taxonomy under the trilemma and MeRoPE. Table 1: Taxonomy under three properties:
+Table 1 organizes camera positional encodings by (A) depth-independent full metric relative pose,
+three properties: (A) depth-independent full met- (B) strict per-token factorization, and
+ric relative-pose dependence on Ti−1 Tj , (B) strict (C) norm-preserving attention action.
+per-token factorization, and (C) norm-preserving
+attention actions. Homogeneous and projective
+Method
+(A) (B) (C)
+encodings (CaPE, GTA, PRoPE, UCPE) preserve
+CaPE (Kong et al., 2024)
+Yes Yes No
+(A+B) but violate (C), as non-orthogonal transGTA (Miyato et al., 2024)
+Yes Yes No
+lation blocks cause attention logits to scale unPRoPE (Li et al., 2025)
+Yes Yes No
+bounded with physical baselines. World-frame
+UCPE (Zhang et al., 2026a)
+Yes Yes No
+ray models such as RayNova and direction-only
+encodings such as ViewRope (Xiang et al., 2026)
+RayNova (Xie et al., 2026b)
+No Yes Yes
+ViewRope (Xiang et al., 2026) No Yes Yes
+preserve (B+C) but sacrifice (A): RayNova depends on the chosen global coordinate frame,
+URoPE (Xie et al., 2026a)
+No No Yes
+whereas ViewRope omits metric translation.
+RayRoPE (Wu et al., 2026)
+No No No
+Query-frame reprojection approaches (Xie et al.,
+CRePE (Jin et al., 2026)
+No No No
+2026a; Wu et al., 2026; Jin et al., 2026) relax (B)
+MeRoPE (Ours)
+Yes No Yes
+and do not satisfy (A), because their attention relations are defined in pixel coordinates. Under
+central projection, jointly scaling camera translation and scene depth leaves projected coordinates
+unchanged, so pixel-space relations identify translation only up to a depth scale—the same projective ambiguity underlying monocular scale ambiguity. Fixed or predicted depths select a scale but
+do not make the pixel-space relation intrinsically metric. URoPE preserves (C), while the expected
+phasors used by RayRoPE and CRePE are not strictly norm-preserving. MeRoPE retains (A+C) by
+relaxing (B) via query-camera grouping; Section 3 verifies (A+C), and Theorem 1 establishes why
+(B) must be relaxed.
+3
+M ETHOD
+This section presents MeRoPE (Metric Rotary Position Embedding), a norm-preserving relative
+camera positional encoding for video generation. Section 3.1 formalizes geometry-aware attention
+and analyzes the scale-dependent instability of homogeneous relative-pose operators. Section 3.2
+encodes ray-frame rotation and raw metric translation with orthogonal blocks, while Section 3.3
+introduces disparity-anchored spherical rotations for potential static-scene correspondences.
+3.1
+G EOMETRY-AWARE ATTENTION AND M ETRIC -S CALE L IMITATION
+We formalize how camera positional encodings act within a geometry-aware attention layer. Let
+a = (i, p) denote patch p from query camera i, and let b = (j, q) denote patch q from key camera
+j, with corresponding query, key, and value vectors qa , kb , vb ∈ Rd . Geometry-aware attention
+modulates query-key comparison and value aggregation through a pairwise transformation operator
+Uab ∈ Rd×d :
+X
+q⊤ Uab kb
+exp(sab )
+sab = a √
+,
+αab = P
+,
+ya =
+αab Uab vb .
+(1)
+′
+d
+b′ exp(sab )
+b
+L cam
+In GTA (Miyato et al., 2024), the camera component of Uab is a direct sum
+Uij of 4 × 4
+homogeneous relative-pose blocks:
+
+
+Rij ∆oj|i
+cam
+Rij := Ri⊤ Rj ,
+∆oj|i := Ri⊤ (oj − oi ),
+Uij
+:= ⊤
+,
+(2)
+0
+1
+where Ri ∈ SO(3) and oi ∈ R3 denote the rotation and optical center of camera i. Decomposing
+the 4D feature segments of qa and kb into 3D vectors and scalar coordinates, [uq ; hq ] and [uk ; hk ],
+the resulting attention score contribution is:
+ q ⊤
+ 
+k
+u
+cam u
+Uij
+= (uq )⊤ Rij uk + hk (uq )⊤ ∆oj|i + hq hk .
+(3)
+hq
+hk
+3
+Preprint.
+Figure 1 empirically illustrates this limitation on a
+trained baseline model. Evaluating temporal attention
+allocations along a forward-driving trajectory, we measure the cross-frame attention mass from the center
+query token of the final frame across all key frames.
+UCPE assigns an increasing share of attention to distant
+early frames as the translation baseline grows, reducing
+the mass on adjacent frames despite their greater crossview co-visibility. MeRoPE bounds the positional contribution and avoids this baseline-driven shift.
+Frame attention mass
+Because the second term hk (uq )⊤ ∆oj|i is an unnormalized linear inner product, it scales linearly
+with the physical translation baseline ∥oj − oi ∥2 . In large-baseline settings, this translational term
+numerically dominates the attention logits, suppressing both rotational geometry and semantic visual
+cam
+content. Similarly, because Uij
+is non-orthogonal, the aligned value features also scale unbounded
+with the baseline:
+ v 2
+2
+cam u
+(4)
+= Rij uv + hv ∆oj|i 2 + h2v .
+Uij
+hv 2
+UCPE
+MeRoPE
+uniform 1/N
+0.5
+0.4
+0.3
+0.2
+0.1
+0.0
+0
+4
+8
+12
+Key latent frame
+Figure 1: Temporal attention under
+large baselines. Cross-frame attention
+mass from the center query token of the fi⊤
+The intrinsic relative camera pose (Ri Rj , ∆oj|i ) connal frame across all preceding key frames
+sists of relative rotation and metric displacement. To
+along a straight trajectory. As the baseline
+prevent the norm and logit explosion of homogeneous
+grows, UCPE (red) allocates more mass
+matrices, we decompose relative pose into two deto distant early frames, whereas MeRoPE
+coupled orthogonal operators: a ray-local minimum(blue) avoids this shift.
+rot
+rotation (MinRot) block Uab and a query-frame metric
+trans
+translation RoPE block Uij .
+3.2
+O RTHOGONAL M ETRIC P OSE E NCODING
+Ray-local coordinate framing via MinRot. Each image patch p from camera i is mapped to a
+calibrated unit viewing ray dci,p ∈ S2 in the camera coordinate frame, providing a camera-modelagnostic representation across heterogeneous optics. To make attention sensitive to individual viewing directions rather than whole-camera poses alone, each token ray is assigned a local coordinate
+frame (Ai,p and Aj,q in Figure 2). We construct this ray-local rotation matrix Ai,p ∈ SO(3) via the
+Rodrigues minimum-rotation formula, carrying the optical axis ez directly onto dci,p :
+Ai,p = I + [vi,p ]× +
+[vi,p ]2×
+,
+1 + ci,p
+c
+where vi,p = ez × dci,p , ci,p = e⊤
+z di,p .
+(5)
+Unlike UCPE (Zhang et al., 2026a), whose cross-product frame degenerates when a token’s vertical
+ray angle reaches ±90◦ (equivalently, as the vertical field of view approaches 180◦ ), Ai,p is singular
+only at the backward direction dci,p = −ez (−180◦ ). Transforming ray p from camera i into world
+ray
+coordinates yields the ray-local frame Ri,p
+= Ri Ai,p . The pairwise relative rotation between query
+⊤
+ray (i, p) and key ray (j, q) is then Ai,p Ri⊤ Rj Aj,q . In attention, this relative rotation is embedded
+as a direct sum over m repeated 3D rotation blocks:
+m
+M
+
+rot
+⊤
+Uab
+:=
+A⊤
+(6)
+i,p Ri Rj Aj,q ,
+k=1
+which strictly preserves feature norms while capturing the 3D relative orientation between rays.
+Query-frame metric translation RoPE. To encode the query-frame metric displacement
+∆oj|i = Ri⊤ (oj − oi ) illustrated in Figure 2 without baseline-dependent logit growth, we map each
+translation coordinate into multi-frequency rotary phases. Following RoPE frequency construction
+and position-interpolation principles (Su et al., 2024; Chen et al., 2023), given predefined minimum
+and maximum wavelengths [λmin , λmax ], we construct K logarithmically spaced wavelengths and
+their corresponding angular frequencies:
+
+k/(K−1)
+2π
+λmax
+ωk =
+,
+λk = λmin
+,
+k = 0, . . . , K − 1.
+(7)
+λk
+λmin
+4
+Preprint.
+For each Cartesian axis c ∈ {x, y, z}, the 1D displacement [∆oj|i ]c rotates a 2D feature subspace by
+angle ωk [∆oj|i ]c . The translation operator is then the direct sum over all 3 axes and K frequencies:
+
+
+M K−1
+M
+
+cos θ − sin θ
+trans
+Uij
+:=
+Rot ωk [∆oj|i ]c ,
+where Rot(θ) =
+,
+(8)
+sin θ cos θ
+c∈{x,y,z} k=0
+which is strictly orthogonal, preserving feature norms and preventing attention logits from scaling
+with the physical translation baseline.
+3.3
+u∞
+D ISPARITY-A NCHORED S PHERICAL E NCODING
+Potential static-scene correspondences add geometric guidance beyond the scene-independent relative camera framing
+provided by the orthogonal metric pose operator. Existing
+methods either restrict attention strictly to 2D pixel epipolar
+lines (Xu et al., 2024) or project metric depth anchors back
+into the query image plane (Xie et al., 2026a). However,
+pixel-plane reprojections break the camera-model-agnostic
+ray interface, and unbounded metric depth ranges require
+heuristic, dataset-specific anchor choices.
+Ai, q
+Ai, u∞
+oi
+ey
+query
+ray
+ez
+Ai, e
+ex
+Δoj ∣ i
+We instead construct correspondence anchors in spherical
+ray space using bounded angular disparity fractions (Figure 2). Let u∞ = Ri⊤ Rj dcj,q be the key ray direction
+in the query camera frame; for a nonzero baseline, let
+e = ∆oj|i /∥∆oj|i ∥2 be the epipole unit vector. As 3D
+scene depth varies from ∞ to 0, points along key ray (j, q)
+sweep a great-circle arc on the unit sphere connecting u∞
+and e. We sample L discrete disparity anchors along this
+epipolar arc at angular fractions ρℓ ∈ [0, 1]:
+Aj, k
+key ray
+e
+key oj
+Figure 2: Geometric construction.
+Blue marks the query/key ray-local
+frames Ai,q and Aj,k used by rotation
+PE; green marks the query-frame metric displacement ∆oj|i used by translation PE; purple marks disparity PE,
+ui,βℓ = cos(ρℓ βmax ) u∞ + sin(ρℓ βmax ) t̂,
+whose great-circle arc runs from the
+e − (e⊤ u∞ )u∞
+⊤
+where t̂ =
+, βmax = arccos(e u∞ ). transformed key-ray direction u∞ to
+∥e − (e⊤ u∞ )u∞ ∥2
+the epipole e, with endpoint frames
+(9) Ai,u∞ and Ai,e and sampled anchor
+For each anchor ℓ, the Rodrigues rotation Ai,βℓ carries the directions ui,βℓ in between.
+query-camera optical axis ez onto the query-frame direction ui,βℓ . The disparity encoding computes the relative
+c
+rotation A⊤
+i,p Ai,βℓ from query ray di,p to candidate direction ui,βℓ , repeated across n coordinate
+triplets:
+L M
+n
+M
+
+disp
+(10)
+U(i,p),(j,q)
+:=
+A⊤
+i,p Ai,βℓ .
+ℓ=1 k=1
+|
+{z
+n times
+}
+These anchors act as fixed geometric knots rather than predictions of mutually exclusive correspondences. Together, their rotation blocks encode the query ray relative to several fixed directions along
+the continuous arc, while leaving the network to determine from visual content whether a valid 3D
+correspondence exists.
+Degenerate configurations make the construction in Eq. (9) undefined: the epipole e is undefined
+when the camera centers coincide, while the great-circle direction t̂ is undefined when e is parallel
+or antiparallel to u∞ . In either case, we collapse all anchor directions to u∞ to avoid division by
+zero.
+The complete pairwise MeRoPE operator Uab is assembled by the block-diagonal direct sum:
+disp
+rot
+trans
+Uab = U(i,p),(j,q)
+⊕ U(i,p),(j,q)
+⊕ Uij
+⊕ U native ,
+(11)
+where U native retains the backbone’s native spatio-temporal RoPE over the temporal and imageplane (x, y) coordinate bands (Figure 3). Thus, MeRoPE satisfies (A+C): it uses the full metric
+5
+Preprint.
+⊤
+Ti−1 Tj without scale normalization, while Uab
+Uab = I ensures norm preservation and baselineindependent logits.
+Integration into Diffusion Transformers. Following the adapter scheme in UCPE (Zhang et al., 2026a),
+we integrate MeRoPE into pretrained video Diffusion Transformers through a lightweight parallel attention branch. The base model retains its original selfattention and spatio-temporal representations, while the
+parallel branch evaluates camera-conditioned attention
+modulated by Uab . The resulting features are mapped
+back through a zero-initialized linear projection and
+added residually to the backbone stream, so the pretrained backbone features remain unchanged at initialization.
+4
+E XPERIMENTS
+We evaluate MeRoPE on two benchmarks: largebaseline driving video generation on nuScenes (Caesar
+et al., 2020) (Section 4.2) and multi-lens camera control
+on PanShot (Zhang et al., 2026a;b) (Section 4.3).
+4.1
+ab
+qa
+disp
+kb
+0
+
+rot
+trans
+0
+native
+Figure 3: Block-diagonal structure of
+Uab . Pairwise attention query-key modulation q⊤
+a Uab kb , assembled as the orthogonal direct sum of disparity MinRot
+U disp , ray-local MinRot U rot , translation
+RoPE U trans , and native RoPE U native .
+E XPERIMENTAL S ETUP
+100
+World Engine (Synthetic)
+nuScenes (Real Driving)
+Ego Origin (0,0)
+Forward X (m) [Ahead ↑ ]
+Datasets and training recipe. For driving video gener80
+ation, training data combines real clips from the nuScenes
+80m
+training set (103.6k clips) with synthetic trajectories rendered in 3D Gaussian environments by World Engine (Li
+60
+60m
+et al., 2026b) (244.1k clips), totaling 347.7k unique training
+sequences (Figure 4). Candidate trajectories are grouped
+40
+40m
+using k-means and filtered by non-maximum suppression
+(NMS) with a Fréchet distance threshold of 1 m to obtain
+representative motion prototypes. During training, class20m
+20
+balanced sampling draws mini-batches uniformly across
+trajectory clusters. All models are trained at 288 × 512
+0
+resolution with 49 frames, conditioned on the first 9 RGB
+−40
+−20
+0
+20
+40
+frames, commanded camera trajectory parameters, and text
+Lateral Y (m) [Left ← | → Right]
+prompts. Training uses the AdamW optimizer in bfloat16
+mixed precision on 64 × NVIDIA H20 GPUs for 20k it- Figure 4: Training trajectory diserations with a global batch size of 64 (details in Ap- tribution. Bird’s-eye view (BEV)
+of motion patterns in the training
+pendix B.1).
+mixture: forward-dominant corridors
+Evaluation protocols. We evaluate driving scenes on 128 from nuScenes (blue, 103.6k) and
+representative sequences selected from the nuScenes vali- wide lateral/turning maneuvers from
+dation and test sets to cover diverse trajectory geometries. World Engine (orange, 244.1k).
+Each base trajectory is augmented with left-turn and rightturn variations, yielding 384 test trajectories in total. Following standard visual odometry evaluation,
+camera poses are extracted from generated frames using VGGT-Ω (Wang et al., 2026a). Quantitative
+metrics report geodesic rotation error (rot◦ ), scale-aligned relative translation error (tr%), pairwise
+joint-pose AUC (AUC@3, AUC@10), and camera motion consistency (CamMC). Visual quality
+is evaluated separately on 512 nuScenes clips using FID over 20,480 predicted frames and FVD
+over 512 generated videos after excluding the 9-frame conditioning prefix. Appendix B.2 defines all
+metrics mathematically.
+Matched-backbone baselines. For a matched-backbone comparison, all methods share the same
+Wan2.2 TI2V-5B backbone (Team Wan et al., 2025; Wan Team, 2025), initialization, training mixture, optimization schedule, and attention head dimension (d = 128). All camera-conditioned meth6
+Preprint.
+Table 2: Camera pose controllability on the nuScenes driving benchmark. Camera-conditioned
+methods are ordered by CamMC from highest to lowest. Best in bold; second-best is underlined.
+Method
+rot◦ ↓ tr% ↓ AUC@3↑ AUC@10↑ CamMC↓
+FID↓
+FVD↓
+No camera PE
+5.57
+5.94
+17.21
+52.05
+7.96
+21.06
+153.31
+RayRoPE (Wu et al., 2026)
+PRoPE (Li et al., 2025)
+RayNova (Xie et al., 2026b)
+CameraCtrl-style (He et al., 2025)
+URoPE (Xie et al., 2026a)
+GTA (Miyato et al., 2024)
+UCPE (Zhang et al., 2026a)
+MeRoPE
+1.83
+1.53
+1.56
+1.54
+1.66
+1.44
+1.39
+1.37
+2.97
+3.10
+3.02
+3.07
+2.67
+3.03
+2.95
+2.84
+36.56
+42.11
+41.19
+42.57
+44.41
+40.53
+41.21
+42.11
+76.62
+78.58
+78.42
+78.90
+79.92
+77.72
+78.38
+79.47
+2.78
+2.67
+2.66
+2.63
+2.53
+2.49
+2.45
+2.32
+21.21
+20.40
+20.15
+20.13
+19.98
+20.00
+20.20
+19.82
+150.26
+142.16
+144.91
+142.23
+135.63
+141.84
+136.40
+134.15
+Table 3: Ablation of camera-encoding components on nuScenes. Best in bold; second-best is
+underlined.
+Components
+Method
+MeRoPE
+Rot. + trans.
+Disparity + trans.
+Disparity + rot.
+Disparity only
+Rotation only
+Translation only
+Overall Metrics
+◦
+camera rot. metric trans. disparity anchor rot ↓ tr% ↓ AUC@3↑ AUC@10↑ CamMC↓
+✓
+✓
+✓
+✓
+✓
+✓
+1.37
+1.36
+1.66
+1.48
+1.59
+1.41
+2.59
+✓
+✓
+✓
+✓
+✓
+✓
+2.84
+3.09
+2.88
+4.31
+4.01
+4.01
+3.09
+42.11
+38.82
+40.60
+44.42
+43.19
+42.52
+30.64
+79.47
+77.50
+78.82
+79.78
+79.53
+78.33
+73.50
+2.32
+2.40
+2.56
+3.66
+3.56
+3.35
+3.50
+ods are retrained with the same 15-block alternating injection schedule. GTA, PRoPE, and UCPE
+use a common fixed global translation scale estimated solely from training-set motion statistics. We
+compare against: (i) the backbone without camera PE, (ii) GTA (Miyato et al., 2024), (iii) PRoPE (Li
+et al., 2025), (iv) UCPE (Zhang et al., 2026a), (v) RayNova (Xie et al., 2026b), (vi) RayRoPE (Wu
+et al., 2026), (vii) URoPE (Xie et al., 2026a), and (viii) a CameraCtrl-style baseline (He et al., 2025),
+adapted to the DiT backbone by adding ray features before the query and key projections following
+Lyra 2.0 (Shen et al., 2026).
+4.2
+P OSE -C ONTROLLED V IDEO G ENERATION ON D RIVING B ENCHMARKS
+Main comparison on driving benchmarks. Table 2 compares camera control across methods.
+We use CamMC as the primary metric because it jointly evaluates rotation and translation trajectories, whereas thresholded AUC is less stable and less sensitive to translation magnitude. MeRoPE
+records the lowest CamMC (2.32); UCPE is the strongest baseline at 2.45. It also achieves the
+best rotation accuracy and ranks second on both tr% and AUC@10. URoPE leads tr% and the two
+AUC metrics, while the CameraCtrl-style baseline ranks second on AUC@3. The weaker pose results without camera PE show the benefit of explicit camera geometry for controllable generation.
+MeRoPE also attains the lowest FID and FVD point estimates, so its control gains do not coincide
+with worse measured visual quality. Figure 5 compares the commanded and recovered paths under
+three camera controls together with the corresponding generated frames. Appendices D.1 and D.2
+provide matched-backbone comparisons and additional nuScenes scenes, respectively.
+Ablation of encoding components. Table 3 shows that MeRoPE’s three sub-blocks play distinct,
+complementary roles while keeping d = 128 fixed through identity padding. Removing metric
+translation degrades translation fidelity: all variants without it have substantially worse tr% and
+CamMC, even though Disparity + rot. attains the highest AUC because AUC evaluates translation
+direction but not magnitude. Ray-local rotation primarily controls orientation: adding it to Disparity
++ trans. reduces rotation error from 1.66◦ to 1.37◦ . Disparity anchors instead refine cross-view
+tracking: adding them to Rot. + trans. improves both AUC metrics and lowers tr% and CamMC
+while leaving rotation essentially unchanged. Together, these complementary gains yield the full
+model’s lowest tr% and CamMC.
+7
+Preprint.
+Figure 5: Qualitative video generation under camera pose control. Visual results on two representative nuScenes scenes under three commanded trajectories (original, left turn, right turn). In
+each row, the leftmost plot displays the bird’s-eye view of the commanded path (solid) and the path
+recovered from the generated video by VGGT-Ω (dashed), followed by generated video frames sampled at t ∈ {0, 16, 32, 48}.
+Appendices C.1 and C.3 analyze adapter capacity, injection strategies, layer-wise modulation, and
+real-world grounding with retrieved history.
+4.3
+C AMERA -D IVERSE E VALUATION ON PAN S HOT
+To complement the fixed-intrinsic nuScenes setting, we evaluate MeRoPE on the PanShot benchmark (Zhang et al., 2026a;b), which spans pinhole, wide-angle, and fisheye lenses under the unified
+camera model. Following the matched protocol, we retrain every compared method from the same
+Wan2.1-T2V-1.3B backbone for 10k steps on 8 × NVIDIA H20 GPUs with identical spatial attention adapters and evaluate them on the official jitter-filtered test split (272 clips). We compare
+camera-conditioning poses with near-depth normalization (a) enabled or (b) disabled; the latter preserves raw physical displacements during training and inference, while evaluation still applies the
+per-trajectory translation normalization in Appendix B.2. Poses are extracted using VGGT-Ω (Wang
+et al., 2026a).
+Table 4 shows that MeRoPE’s advantage on PanShot lies in translation control rather than rotation.
+Across both conditioning-pose settings, it achieves the lowest TransErr and CamMC, while UCPE
+and MeRoPE remain close on RotErr. The wider separation between UCPE and PRoPE than on
+fixed-intrinsic nuScenes is consistent with the benefit of calibrated ray representations when camera
+optics vary. Using raw conditioning displacements during training and generation increases TransErr
+and CamMC for all methods, but MeRoPE retains the lowest errors and the smallest increase. Figure 6 shows generated sequences across varying fields of view and lens distortions.
+8
+Preprint.
+Table 4: Camera pose control on PanShot across diverse camera optics. Evaluated on 272 test
+clips under the unified camera model (C = 8, 1 × 192, VGGT-Ω). (a) Conditioning-pose near-depth
+normalization enabled. (b) Conditioning-pose near-depth normalization disabled. GTA and PRoPE
+retain the latitude-up map; UCPE and MeRoPE do not. Lower is better. Best in each panel in bold;
+second-best is underlined.
+(a) Conditioning norm. on
+(b) Conditioning norm. off
+Method
+RotErr↓ TransErr↓ CamMC↓
+Method
+RotErr↓ TransErr↓ CamMC↓
+GTA
+PRoPE
+UCPE
+MeRoPE
+5.14
+5.10
+4.22
+4.57
+GTA
+PRoPE
+UCPE
+MeRoPE
+5.30
+5.11
+4.40
+4.82
+19.85
+20.38
+15.15
+10.99
+22.59
+23.02
+17.50
+13.88
+22.70
+23.04
+17.91
+12.66
+25.34
+25.58
+20.13
+15.56
+Figure 6: PanShot generations across camera optics. Rows 1–4 span (FoV, ξ) from (97◦ , 0.00)
+to (173◦ , 1.66), covering pinhole through fisheye cameras.
+5
+C ONCLUSION
+We introduced MeRoPE, a norm-preserving relative camera encoding for camera-controlled video
+generation under real-world metric motion. Our analysis identifies baseline-dependent logit and
+feature-norm growth in homogeneous projective encodings and formalizes a three-way trade-off:
+retaining the complete metric relative pose, factorizing strictly per token, and preserving feature
+norms cannot be achieved simultaneously. MeRoPE resolves this trade-off by relaxing per-token
+factorization through query-camera grouping, representing relative ray orientation and raw metric
+translation with orthogonal blocks, and adding disparity-anchored spherical rotations as geometric
+knots for cross-view relations.
+Across large-baseline nuScenes and camera-diverse PanShot, MeRoPE achieves the lowest CamMC
+among the compared encodings; it also attains the lowest nuScenes FID/FVD point estimates and the
+lowest PanShot TransErr under both conditioning settings. These results support norm-preserving
+metric camera encoding as a stable basis for camera control across physical baselines and camera optics. Query-camera grouping introduces additional local camera-attention cost; reducing this
+overhead while retaining metric sensitivity is an important direction for future work.
+AI USE STATEMENT
+Generative AI tools assisted code implementation and language editing. All outputs were reviewed
+and verified by the authors, who take full responsibility for this paper.
+9
+Preprint.
+R EFERENCES
+Jianhong Bai, Menghan Xia, Xiao Fu, Xintao Wang, Lianrui Mu, Jinwen Cao, Zuozhu Liu, Haoji
+Hu, Xiang Bai, Pengfei Wan, and Di Zhang. ReCamMaster: Camera-controlled generative
+rendering from a single video. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision, pp. 14834–14844, 2025. doi: 10.1109/ICCV51701.2025.01376. URL
+https://arxiv.org/abs/2503.11647.
+Holger Caesar, Varun Bankiti, Alex H. Lang, Sourabh Vora, Venice Erin Liong, Qiang Xu, Anush
+Krishnan, Yu Pan, Giancarlo Baldan, and Oscar Beijbom. nuscenes: A multimodal dataset for
+autonomous driving. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition, pp. 11621–11631, 2020. doi: 10.1109/CVPR42600.2020.01164. URL
+https://arxiv.org/abs/1903.11027.
+Shouyuan Chen, Sherman Wong, Liangjian Chen, and Yuandong Tian. Extending context window
+of large language models via positional interpolation. arXiv preprint arXiv:2306.15595, 2023.
+URL https://arxiv.org/abs/2306.15595.
+Gene Chou, Charles Herrmann, Kyle Genova, Boyang Deng, Songyou Peng, Bharath Hariharan,
+Jason Y. Zhang, Noah Snavely, and Philipp Henzler. CityRAG: Stepping into a city via spatiallygrounded video generation. arXiv preprint arXiv:2604.19741, 2026. URL https://arxiv.
+org/abs/2604.19741.
+Gerald B. Folland. A Course in Abstract Harmonic Analysis. CRC Press, 2nd edition, 2016.
+Hao He, Yinghao Xu, Yuwei Guo, Gordon Wetzstein, Bo Dai, Hongsheng Li, and Ceyuan Yang.
+CameraCtrl: Enabling camera control for video diffusion models. In International Conference on
+Learning Representations, 2025. URL https://arxiv.org/abs/2404.02101.
+Roger A. Horn and Charles R. Johnson. Matrix Analysis. Cambridge University Press, 2nd edition,
+2012.
+Seonghyun Jin, Youngmin Kim, Sunwoo Park, and Jong Chul Ye. CRePE: Curved ray expectation positional encoding for unified-camera-controlled video generation. arXiv preprint
+arXiv:2605.12938, 2026. URL https://arxiv.org/abs/2605.12938.
+Xin Kong, Shikun Liu, Xiaoyang Lyu, Marwan Taher, Xiaojuan Qi, and Andrew J. Davison. EscherNet: A generative model for scalable view synthesis. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition, pp. 9503–9513, 2024. doi: 10.1109/CVPR52733.
+2024.00908. URL https://arxiv.org/abs/2402.03908.
+Chunyang Li, Yuanbo Yang, Jiahao Shao, Hongyu Zhou, Katja Schwarz, and Yiyi Liao. ReRoPE:
+Repurposing RoPE for relative camera control. In ACM SIGGRAPH 2026 Conference Papers,
+pp. 1–11, 2026a. doi: 10.1145/3799902.3811226. URL https://arxiv.org/abs/2602.
+08068.
+Ruilong Li, Brent Yi, Junchen Liu, Hang Gao, Yi Ma, and Angjoo Kanazawa. Cameras as relative
+positional encoding. In Advances in Neural Information Processing Systems, pp. 18020–18045,
+2025. doi: 10.52202/085713-0540. URL https://arxiv.org/abs/2507.10496.
+Tianyu Li, Li Chen, Caojun Wang, Haochen Liu, Kashyap Chitta, Zhenjie Yang, Yuhang Lu,
+Naisheng Ye, Yihang Qiu, Yufei Wang, Luoxi Zou, Jiaxin Peng, Jin Pan, Zhaoyu Su, Andrei
+Bursuc, Shengbo Eben Li, Andreas Geiger, Peng Su, and Hongyang Li. World Engine: Towards
+the era of post-training for autonomous driving. arXiv preprint arXiv:2606.19836, 2026b. URL
+https://arxiv.org/abs/2606.19836.
+Takeru Miyato, Bernhard Jaeger, Max Welling, and Andreas Geiger. GTA: A geometry-aware attention mechanism for multi-view transformers. In International Conference on Learning Representations, 2024. URL https://arxiv.org/abs/2310.10375.
+Xuanchi Ren, Tianchang Shen, Jiahui Huang, Huan Ling, Yifan Lu, Merlin Nimier-David, Thomas
+Müller, Alexander Keller, Sanja Fidler, and Jun Gao. Gen3C: 3d-informed world-consistent video
+generation with precise camera control. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 6121–6132, 2025. doi: 10.1109/CVPR52734.2025.
+00574. URL https://arxiv.org/abs/2503.03751.
+10
+Preprint.
+Junyoung Seo, Hyunwook Choi, Minkyung Kwon, Jinhyeok Choi, Siyoon Jin, Gayoung Lee, Junho
+Kim, JoungBin Lee, Geonmo Gu, Dongyoon Han, Sangdoo Yun, Seungryong Kim, and Jin-Hwa
+Kim. Grounding world simulation models in a real-world metropolis. In European Conference on
+Computer Vision, 2026. URL https://arxiv.org/abs/2603.15583. Spotlight; Seoul
+World Model.
+Tianchang Shen, Sherwin Bahmani, Kai He, Sangeetha Grama Srinivasan, Tianshi Cao, Jiawei
+Ren, Ruilong Li, Zian Wang, Nicholas Sharp, Zan Gojcic, Sanja Fidler, Jiahui Huang, Huan
+Ling, Jun Gao, and Xuanchi Ren. Lyra 2.0: Explorable generative 3D worlds. arXiv preprint
+arXiv:2604.13036, 2026. URL https://arxiv.org/abs/2604.13036.
+Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. RoFormer: Enhanced transformer with rotary position embedding. Neurocomputing, 568:127063, 2024. doi:
+10.1016/j.neucom.2023.127063. URL https://arxiv.org/abs/2104.09864.
+Team Wan, Ang Wang, Baole Ai, Bin Wen, Chaojie Mao, Chen-Wei Xie, et al. Wan: Open and
+advanced large-scale video generative models. arXiv preprint arXiv:2503.20314, 2025. URL
+https://arxiv.org/abs/2503.20314.
+Wan Team. Wan2.2: Open-source video generation models. Official GitHub repository, 2025. URL
+https://github.com/Wan-Video/Wan2.2.
+Jianyuan Wang, Minghao Chen, Shangzhan Zhang, Nikita Karaev, Johannes L. Schönberger, Patrick
+Labatut, Piotr Bojanowski, David Novotny, Andrea Vedaldi, and Christian Rupprecht. VGGT-Ω.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp.
+21486–21499, 2026a.
+Yiming Wang, Qihang Zhang, Shengqu Cai, Tong Wu, Jan Ackermann, Zhengfei Kuang, Yang
+Zheng, Frano Rajič, Siyu Tang, and Gordon Wetzstein. BulletTime: Decoupled control of time
+and camera pose for video generation. In Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition, pp. 18319–18330, 2026b.
+Zhouxia Wang, Ziyang Yuan, Xintao Wang, Yaowei Li, Tianshui Chen, Menghan Xia, Ping Luo,
+and Ying Shan. MotionCtrl: A unified and flexible motion controller for video generation. In
+ACM SIGGRAPH Conference Papers, pp. 1–11, 2024. doi: 10.1145/3641519.3657518. URL
+https://arxiv.org/abs/2312.03641.
+Yu Wu, Minsik Jeon, Jen-Hao Rick Chang, Oncel Tuzel, and Shubham Tulsiani. RayRoPE: Projective ray positional encoding for multi-view attention. In European Conference on Computer
+Vision, 2026. URL https://arxiv.org/abs/2601.15275. Spotlight.
+Chendong Xiang, Jiajun Liu, Jintao Zhang, Xiao Yang, Zhengwei Fang, Shizun Wang, Zijun Wang,
+Yingtian Zou, Hang Su, and Jun Zhu. Geometry-aware rotary position embedding for consistent
+video world model. arXiv preprint arXiv:2602.07854, 2026. URL https://arxiv.org/
+abs/2602.07854.
+Yichen Xie, Depu Meng, Chensheng Peng, Yihan Hu, Quentin Herau, Masayoshi Tomizuka, and
+Wei Zhan. URoPE: Universal relative position embedding across geometric spaces. In European
+Conference on Computer Vision, 2026a. URL https://arxiv.org/abs/2604.18747.
+Spotlight.
+Yichen Xie, Chensheng Peng, Mazen Abdelfattah, Yihan Hu, Jiezhi Yang, Eric Higgins, Ryan Brigden, Masayoshi Tomizuka, and Wei Zhan. RayNova: Scale-temporal autoregressive world modeling in ray space. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition, pp. 25426–25437, 2026b.
+Dejia Xu, Weili Nie, Chao Liu, Sifei Liu, Jan Kautz, Zhangyang Wang, and Arash Vahdat. CamCo:
+Camera-controllable 3D-consistent image-to-video generation. arXiv preprint arXiv:2406.02509,
+2024. URL https://arxiv.org/abs/2406.02509.
+Mark Yu, Wenbo Hu, Jinbo Xing, and Ying Shan. TrajectoryCrafter: Redirecting camera trajectory
+for monocular videos via diffusion models. In Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 100–111, 2025a. doi: 10.1109/ICCV51701.2025.00017. URL
+https://arxiv.org/abs/2503.05638.
+11
+Preprint.
+Wangbo Yu, Jinbo Xing, Li Yuan, Wenbo Hu, Xiaoyu Li, Zhipeng Huang, Xiangjun Gao, TienTsin Wong, Ying Shan, and Yonghong Tian. ViewCrafter: Taming video diffusion models for
+high-fidelity novel view synthesis. IEEE Transactions on Pattern Analysis and Machine Intelligence, 2025b. doi: 10.1109/TPAMI.2025.3613256. URL https://arxiv.org/abs/
+2409.02048.
+Yifan Zhan, Zhengqing Chen, Qingjie Wang, Zhuo He, Muyao Niu, Xiaoyang Guo, Wei Yin,
+Weiqiang Ren, Qian Zhang, and Yinqiang Zheng. Composing driving worlds through disentangled control for adversarial scenario generation. In European Conference on Computer Vision,
+2026. URL https://arxiv.org/abs/2603.12864.
+Cheng Zhang, Boying Li, Meng Wei, Yan-Pei Cao, Camilo Cruz Gambardella, Dinh Phung, and
+Jianfei Cai. Unified camera positional encoding for controlled video generation. In Proceedings
+of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 38027–38037,
+2026a.
+Cheng Zhang, Boying Li, Meng Wei, Yan-Pei Cao, Camilo Cruz Gambardella, Dinh Phung, and
+Jianfei Cai. UCPE: Official implementation and PanShot dataset. GitHub repository and Hugging Face dataset, 2026b. URL https://github.com/chengzhag/UCPE. Commit
+d992f1807803ba99331e807e8f018ed552886afd.
+A
+I MPOSSIBILITY OF U NITARY R ELATIVE P ER -T OKEN E NCODINGS FOR
+M ETRIC T RANSLATION
+We show that no strictly per-token, unitary (or orthogonal) positional operator can completely capture metric relative translation. This result formalizes the trilemma introduced in Section 1 and
+motivates MeRoPE’s use of query-camera grouping.
+A.1
+P ROBLEM F ORMULATION AND H YPOTHESES
+Let Ti = (Ri , oi ) ∈ SE(3) denote the camera-to-world pose of view i, where Ri ∈ SO(3) and
+oi ∈ R3 . The intrinsic relative pose between views i and j, invariant to any global coordinate
+change G ∈ SE(3), is given by
+
+Ti−1 Tj = Ri⊤ Rj , Ri⊤ (oj − oi ) .
+(12)
+We examine the existence of a matrix-valued positional embedding operator U : SE(3) → Cd×d
+(or Rd×d ) satisfying four standard axioms of relative positional attention:
+(H1) Multiplicative per-token factorization: The camera positional operator acts independently on each query and key token via its own pose:
+ei = U (Ti )qi ,
+q
+ej = U (Tj )kj ,
+k
+sij =
+q∗i U (Ti )∗ U (Tj )kj
+√
+.
+d
+(13)
+(H2) Exact relative-pose dependence: The pairwise interaction depends strictly and exclusively on the relative pose Ti−1 Tj :
+U (Ti )∗ U (Tj ) = U (Ti−1 Tj ),
+∀Ti , Tj ∈ SE(3).
+(14)
+(H3) Norm preservation (unitarity): U (T ) is unitary (or orthogonal in the real case), so that
+∥U (T )x∥2 = ∥x∥2 for all x ∈ Cd , i.e.,
+U (T )∗ U (T ) = Id ,
+∀T ∈ SE(3).
+(15)
+(H4) Finite-dimensional continuity: The feature dimension is finite (d < ∞), and the mapping
+T 7→ U (T ) is continuous with respect to the standard Lie group topology on SE(3).
+12
+Preprint.
+A.2
+T HE I MPOSSIBILITY T HEOREM
+Theorem 1 (Translation Blindness of Unitary Relative Per-Token Encodings). Let U : SE(3) →
+U(d) be any continuous map satisfying hypotheses (H1)–(H4). Then for every pure metric translation t ∈ R3 ,
+U (I3 , t) = Id .
+(16)
+Consequently, for any arbitrary camera pose (R, t) ∈ SE(3),
+U (R, t) = U (R, 0).
+(17)
+The positional operator U is identically trivial on metric translations, failing to distinguish any
+non-zero relative translation ∆oj|i = Ri⊤ (oj − oi ) ̸= 0.
+Proof. Step 1: Homomorphism deduction. First, we show that (H2) and (H3) enforce U to be a
+group representation of SE(3), i.e., U (gh) = U (g)U (h) for all g, h ∈ SE(3):
+• Setting Ti = Tj = I in Eq. (14) yields U (I)∗ U (I) = U (I). On the other hand, Eq. (15)
+with T = I gives U (I)∗ U (I) = Id . The two right-hand sides must coincide, so U (I) = Id .
+• Setting Tj = I in Eq. (14) yields U (Ti )∗ U (I) = U (Ti−1 ). Since U (I) = Id from the
+first item, the left-hand side reduces to U (Ti )∗ , and by unitarity (U (Ti )−1 = U (Ti )∗ ) we
+conclude U (Ti−1 ) = U (Ti )∗ = U (Ti )−1 .
+• For any g, h ∈ SE(3), set Ti = g and Tj = gh. Substituting into Eq. (14) gives:
+U (g)∗ U (gh) = U (g −1 (gh)) = U (h).
+(18)
+Multiplying on the left by U (g) and using U (g)U (g)∗ = Id , we conclude that
+U (gh) = U (g)U (h),
+∀g, h ∈ SE(3).
+(19)
+Step 2: Commutativity of the translation subgroup. Let Utr (t) := U (I3 , t) denote the pure
+translation operator for t ∈ R3 . In SE(3), pure translations commute: (I3 , s)(I3 , t) = (I3 , s + t) =
+(I3 , t)(I3 , s). Applying the homomorphism in Eq. (19):
+
+
+Utr (s)Utr (t) = U (I3 , s)(I3 , t) = U (I3 , s + t) = U (I3 , t)(I3 , s) = Utr (t)Utr (s) = Utr (s + t).
+(20)
+Thus, {Utr (t) : t ∈ R3 } is a family of mutually commuting unitary matrices.
+Step 3: Simultaneous unitary diagonalization. Every unitary matrix is normal (U ∗ U = U U ∗ =
+I). Step 2 shows that the operators {Utr (t) : t ∈ R3 } pairwise commute, and each is unitary
+by (H3), hence normal. The spectral theorem for commuting families of normal operators (Horn &
+Johnson, 2012, Theorem 2.5.5), which applies to families of arbitrary cardinality, then guarantees a
+single, t-independent unitary change-of-basis matrix V ∈ U(d) that simultaneously diagonalizes all
+Utr (t):
+
+V ∗ Utr (t)V = diag χ1 (t), χ2 (t), . . . , χd (t) .
+(21)
+By (H4), for each a ∈ {1, . . . , d}, the diagonal entry χa : R3 → C is continuous. By (H3),
+|χa (t)| = 1. It remains to show that each entry is multiplicative in t. Conjugating Eq. (20) by V
+and inserting V V ∗ = Id between Utr (s) and Utr (t):
+
+
+V ∗ Utr (s + t)V = V ∗ Utr (s)V V ∗ Utr (t)V .
+(22)
+
+By Eq. (21), the left-hand side equals diag
+ χ1 (s + t), . . . , χd (s + t) , and the right-hand side
+equals diag χ1 (s)χ1 (t), . . . , χd (s)χd (t) . Comparing diagonal entries, each entry satisfies the
+multiplicative Cauchy character equation:
+χa (s + t) = χa (s)χa (t),
+∀s, t ∈ R3 .
+(23)
+Step 4: Character form and finite spatial spectrum. Fixing an index a and dropping it, we classify
+the continuous maps χ : (R3 , +) → T, where T = {z ∈ C : |z| = 1}, satisfying the multiplicative
+character equation
+χ(s + t) = χ(s)χ(t),
+|χ| = 1,
+(24)
+13
+Preprint.
+whose only solutions are spatial plane waves; this is the classical classification of continuous characters of (R3 , +) (Folland, 2016, Theorem 4.6 and Corollary 4.8):
+χa (t) = exp(iωa⊤ t),
+for a unique frequency vector ωa ∈ R3 .
+(25)
+This classification enables the spherical-orbit contradiction below. Consequently, in the eigenbasis
+of V , every translation operator takes the standard multi-frequency phase form:
+
+V ∗ Utr (t)V = diag exp(iω1⊤ t), . . . , exp(iωd⊤ t) .
+(26)
+Because the feature dimension is finite (d < ∞), the active frequency spectrum
+Ω := {ω1 , ω2 , . . . , ωd } ⊂ R3
+(27)
+contains at most d discrete frequency vectors (|Ω| ≤ d).
+Step 5: Semi-direct product conjugation and spherical orbit contradiction.
+A lemma on rotation invariance. If a finite set Ω ⊂ R3 is SO(3)-invariant, i.e. RΩ = Ω for all
+R ∈ SO(3), then Ω = {0}. Indeed, the orbit of any non-zero ω ∈ Ω under SO(3) is the entire
+sphere {u ∈ R3 : ∥u∥2 = ∥ω∥2 }, an uncountably infinite set; invariance forces this whole sphere
+into Ω, which finiteness forbids.
+Let Urot (R) := U (R, 0) denote the pure rotation operator for R ∈ SO(3). In SE(3), rotations and
+translations obey the semi-direct product conjugation:
+(I3 , Rt) = (R, 0)(I3 , t)(R, 0)−1 ,
+∀R ∈ SO(3), t ∈ R3 .
+(28)
+Applying the homomorphism U to Eq. (28) gives the operator-level conjugation
+Utr (Rt) = Urot (R)Utr (t)Urot (R)−1 .
+(29)
+Since t is a free variable ranging over R3 , replacing it by R−1 t and then multiplying both sides
+on the right by Urot (R) (the factors Urot (R)−1 Urot (R) = Id cancel) recasts the same fact in the
+commutation form
+Utr (t)Urot (R) = Urot (R)Utr (R−1 t),
+(30)
+which is the form we use below to push Urot (R) past Utr (t) when acting on an eigenvector. For any
+frequency ω ∈ Ω, define its joint eigenspace, and set Eω = {0} for ω ∈
+/ Ω:
+
+Eω = v ∈ Cd : Utr (t)v = exp(iω ⊤ t)v, ∀t ∈ R3 , Eω = {0} if ω ∈
+/ Ω.
+(31)
+For any non-zero v ∈ Eω , we apply Eq. (30) to evaluate the translation action on Urot (R)v:
+
+Utr (t) Urot (R)v = Urot (R)Utr (R−1 t)v
+= Urot (R) exp(iω ⊤ R−1 t)v
+⊤
+(32)
+
+= exp(i(Rω) t) Urot (R)v .
+Here the second equality uses that v ∈ Eω is an eigenvector of Utr (R−1 t); the last uses that
+the (unit-modulus) eigenvalue exp(iω ⊤ R−1 t) is a complex scalar, hence commutes with Urot (R)
+and can be pulled out of the product, together with ω ⊤ R−1 t = (Rω)⊤ t. Thus, Urot (R)v is an
+eigenvector of Utr (t) with spatial frequency Rω, meaning Urot (R)Eω = ERω . This necessitates
+that the frequency spectrum Ω must be invariant under all continuous 3D rotations:
+RΩ = Ω,
+∀R ∈ SO(3).
+(33)
+By Eq. (33) and the finiteness |Ω| ≤ d < ∞ from Step 4, Ω is a finite SO(3)-invariant subset of R3 ;
+the lemma therefore forces Ω = {0}.
+Substituting ωa = 0 back into the diagonalized form yields
+Utr (t) = V Id V ∗ = Id ,
+∀t ∈ R3 .
+(34)
+Finally, decomposing any arbitrary pose as (R, t) = (I3 , t)(R, 0) and applying the homomorphism
+yields U (R, t) = Utr (t)Urot (R) = U (R, 0). This completes the proof.
+14
+Preprint.
+B
+I MPLEMENTATION AND E VALUATION D ETAILS
+B.1
+A RCHITECTURE AND T RAINING C ONFIGURATIONS
+Head partition. In our primary implementation based on the Wan2.2 TI2V-5B backbone (d =
+128), the channel budget is partitioned into four orthogonal sub-blocks: d = ddisp + drot + dtrans +
+dnative = 36 + 36 + 24 + 32. Specifically, ddisp = 36 encodes L = 6 non-uniform angular disparity
+fractions ρℓ ∈ {0, 0.05, 0.15, 0.4, 0.7, 1} with n = 2 triplets each (6 × 2 × 3); drot = 36 allocates
+m = 12 coordinate triplets for ray-local MinRot; dtrans = 24 covers 3 spatial axes over K = 4 logspaced metric wavelengths (λ ∈ [0.5, 200] m); and dnative = 32 applies standard RoPE to temporal
+(16D) and image-plane x/y (8D each) coordinate bands.
+Optimization details. All driving models are trained with AdamW (β1 = 0.9, β2 = 0.999, ϵ =
+10−8 , weight decay 0.01) using a constant learning rate of 1 × 10−5 and no warmup. Training uses
+bfloat16 mixed precision on 64 × NVIDIA H20 GPUs for 20k iterations with a global batch size of
+64. PanShot models are trained on 8 × NVIDIA H20 GPUs for 10k iterations.
+B.2
+E VALUATION M ETRICS AND M ATHEMATICAL F ORMULATIONS
+Estimated camera poses are recovered from generated frames by VGGT-Ω (Wang et al., 2026a).
+Let T denote the number of frames in an evaluated sequence, and let Tt = (Rt , ot ) ∈ SE(3) and
+bt , o
+bt ) ∈ SE(3) denote the commanded and estimated camera-to-world poses at frame
+Tbt = (R
+t ∈ {1, . . . , T }. To remove the absolute SE(3) gauge, all poses are expressed relative to the first
+frame,
+
+
+Ttrel = T1−1 Tt = R1⊤ Rt , R1⊤ (ot − o1 ) =: Rtrel , orel
+,
+(35)
+t
+btrel , o
+brel
+with Tbtrel = (R
+t ) constructed analogously. The geodesic rotation error in degrees is
+!!
+tr(R⊤ b
+R) − 1
+180◦
+b
+∠(R, R) = arccos clamp
+, −1, 1
+×
+.
+(36)
+2
+π
+Reported driving scores average equally over the 384 test clips; PanShot scores average over the 272
+jitter-filtered clips. The pairwise AUC below is a micro-average over all within-clip frame pairs.
+Monocular pose recovery leaves a global scale ambiguity. On driving evaluations we therefore apply
+a single least-squares scale to the estimated camera centers, leaving rotations unchanged:
+PT
+brel⊤
+orel
+o
+t
+t
+et = s⋆ o
+brel
+s⋆ = Pt=1
+,
+o
+(37)
+t .
+T
+rel ∥2
+∥b
+o
+t
+2
+t=1
+Following the official PanShot evaluation code (Zhang et al., 2026b), CamMC and PanShot translation metrics instead normalize the ground-truth and recovered trajectories independently by their
+respective maximum translation norms,
+ōt =
+orel
+t
+,
+max1≤τ ≤T ∥orel
+τ ∥2 + ϵ0
+¯t =
+b
+o
+brel
+o
+t
+,
+max1≤τ ≤T ∥b
+orel
+τ ∥2 + ϵ0
+(38)
+with ϵ0 = 10−9 . The two scale treatments are not interchangeable: tr% uses s⋆ , whereas CamMC
+and TransErr use Eq. (38); both rotation metrics are invariant to translation scaling.
+Rotation Error (rot◦ ). Used on driving evaluations. The first-frame relative pose is the identity,
+so the mean excludes t = 1:
+T
+
+1 X
+◦
+btrel .
+rot =
+∠ Rtrel , R
+(39)
+T − 1 t=2
+Relative Translation Error (tr%). Used on driving evaluations. After the scale alignment in
+Eq. (37), the mean center error is normalized by the ground-truth endpoint displacement (chord
+length):
+PT
+1
+rel
+et ∥2
+t=2 ∥ot − o
+T −1
+tr% =
+× 100%.
+(40)
+∥orel
+∥
+T 2
+15
+Preprint.
+Pairwise Joint Pose AUC (AUC@τ ). Used on driving evaluations. Let P = {(i, j) : 1 ≤ i < j ≤
+T } denote within-clip frame pairs, pooled over the evaluation set. For each pair, form the relative
+motions Ti→j = (Tirel )−1 Tjrel and Tbi→j = (Tbirel )−1 Tbjrel , and define the unoriented translationdirection error
+!!
+bi→j
+o⊤
+180◦
+i→j o
+t
+eij = arccos clamp
+, 0, 1
+×
+,
+(41)
+∥oi→j ∥2 ∥b
+oi→j ∥2
+π
+with etij set to a large sentinel when either translation vanishes. The joint pair error is eij =
+
+bi→j ), et . Because et depends only on direction, this metric does not apply s⋆ .
+max ∠(Ri→j , R
+ij
+ij
+With integer thresholds τ ∈ {3, 10} (degrees), the discrete threshold average is
+AUC@τ =
+τ
+1X 1 X
+I(eij < k ◦ ) × 100%.
+τ
+|P|
+k=1
+(42)
+(i,j)∈P
+¯ t ] be the 3 × 4
+btrel | o
+b
+Camera Motion Consistency (CamMC). Let Pt = [Rtrel | ōt ] and Pbt = [R
+relative pose matrices after Eq. (38). Following UCPE, CamMC is the sum of per-frame Frobenius
+errors, then averaged over videos:
+CamMC =
+T
+X
+∥Pt − Pbt ∥F .
+(43)
+t=1
+PanShot Rotation Error (RotErr). PanShot sums per-frame geodesic errors in radians, following
+its official evaluation code (Zhang et al., 2026b):
+
+
+ 
+
+btrel − 1
+T
+tr (Rtrel )⊤ R
+X
+RotErr =
+arccosclamp
+, −1, 1 .
+(44)
+2
+t=1
+Translation Error (TransErr). Used on PanShot evaluations, after the same per-trajectory maxnorm as CamMC (not the driving scale s⋆ ):
+TransErr =
+T
+X
+¯ t ∥2 .
+b
+∥ōt − o
+(45)
+t=1
+C
+A DDITIONAL E XPERIMENTAL A NALYSES
+C.1
+A RCHITECTURAL D ESIGN AND L AYER -W ISE M ODULATION
+Table 5 varies four design axes around the default MeRoPE configuration. The Comp. rows vary
+only the adapter compression ratio C. The Design rows fix C = 4 and vary one design factor at
+a time: translation frequency, injection schedule, or integration style; check marks denote active
+mechanisms and blank cells denote inactive ones.
+Adapter compression. The Wan2.2 backbone has width 3072 with 24 attention heads, and the
+ratio C sets the parallel camera-attention branch to width 3072/C with 24/C heads while preserving
+the 128-dimensional head size. Thus, C = 2, 4, and 8 use widths 1536, 768, and 384, with 12, 6,
+and 3 heads, respectively. Although C = 2 gives the strongest pose scores, the default C = 4 retains
+similar CamMC with half the adapter capacity.
+Translation frequencies. The Multi-f column indicates whether metric translation uses multiple
+wavelength bands; the Single-f variant keeps the same 128-dimensional channel allocation and
+changes only the translation frequency. It leaves directional AUC nearly unchanged but degrades
+tr% and CamMC, showing that one wavelength does not provide reliable translation control across
+the evaluated trajectories.
+16
+Preprint.
+Table 5: Architecture and injection ablations on nuScenes. Best in bold; second-best is underlined within each group.
+Configuration
+Overall Metrics
+C Injection CamSA ReRoPE Multi-f rot◦ ↓ tr% ↓ AUC@3↑ AUC@10↑ CamMC↓
+C=2
+Comp. C=4 (ours)
+C=8
+2
+4
+8
+15 blks
+15 blks
+15 blks
+✓
+✓
+✓
+Single f
+Every block
+Design Peak 11, 13
+ReRoPE (Li et al., 2026a)
+Default (ours)
+4
+4
+4
+4
+4
+15 blks
+30 blks
+2 blks
+15 blks
+15 blks
+✓
+✓
+✓
+✓
+✓
+Injection schedule. The Injection column
+compares three compute levels: Peak 11,13 uses
+two blocks, the default uses 15 alternating blocks,
+and Every block uses all 30. Figure 7 shows that
+camera modulation concentrates in the middle
+layers, with Blocks 11 and 13 contributing over
+half of the residual amplitude, motivating the
+Peak 11,13 variant. This variant preserves rotation accuracy and strong directional AUC while
+increasing CamMC only modestly from 2.32
+to 2.43, and reduces camera-branch executions
+by 87% relative to the default. The default uses
+half as many camera-branch executions as Every
+block and has a similar CamMC (2.32 versus
+2.27).
+‖gate ⋅ acam ‖2 / ‖h0‖2 (%)
+Variant
+✓
+✓
+✓
+1.37 2.68
+1.37 2.84
+1.47 2.83
+45.28
+42.11
+41.85
+80.62
+79.47
+79.11
+2.26
+2.32
+2.42
+✓
+✓
+✓
+✓
+1.49
+1.38
+1.37
+1.67
+1.37
+43.34
+43.60
+45.00
+42.98
+42.11
+79.61
+79.90
+80.27
+79.71
+79.47
+3.01
+2.27
+2.43
+2.53
+2.32
+3.58
+2.65
+2.97
+2.67
+2.84
+20
+Peak blocks (11, 13)
+Odd blocks (stride=2)
+Mean (2.0%)
+17.4%
+16.2%
+15
+10
+5
+0
+0
+2
+4
+6
+8
+10
+12
+14
+16
+18
+20
+22
+24
+26
+28
+DiT block index (30 blocks total)
+Figure 7: Per-block camera modulation amplitude. Relative camera-attention residual
+norm across 30 DiT blocks; red marks the two
+largest blocks and blue marks alternating-block
+injection.
+Integration style. A check in CamSA denotes the dedicated parallel camera self-attention branch;
+a check in ReRoPE (Li et al., 2026a) denotes carving low-frequency camera rotary channels into the
+backbone’s native self-attention without that branch. ReRoPE improves tr% but weakens rotation
+and CamMC, so the parallel CamSA design provides the better overall balance.
+C.2
+C OST OF R ELAXING P ER -T OKEN FACTORIZATION
+Strictly per-token encodings transform each token once, whereas MeRoPE expresses metric translation and disparity anchors in each query-camera frame and therefore constructs query-dependent
+key/value representations. Table 6 measures the resulting cost at both the operator and full-model
+levels.
+Evaluation protocol. The Single CamSA Block columns time one complete camera self-attention
+(CamSA) block, including positional modulation, attention, and output projection, while fixing the
+block dimensions and input tokens across methods. This isolated benchmark uses one H20 because it
+excludes the backbone and distributed model sharding. The Training and Latent Denoising columns
+instead measure full training steps and the complete denoising loop on four H20 GPUs under the
+production four-way HSDP setup.
+Matched comparison. For the full-model benchmark, GTA, UCPE, and MeRoPE inject CamSA
+into the same 15 alternating transformer blocks (Blocks 1, 3, . . . , 29), yielding 5.14B parameters
+for each camera-conditioned model; the backbone-only baseline contains 5.00B parameters. This
+controls both the injection schedule and model size across the three camera encodings.
+Results. Query-camera grouping is more expensive within a single CamSA block, but the full
+backbone amortizes much of this local overhead. Relative to UCPE, MeRoPE requires about 2.5×
+the isolated-block latency and 3× the peak memory, whereas full-model throughput decreases by
+17
+Preprint.
+Table 6: Computational cost of query-camera grouping. Single-block results use one H20; fullmodel results use four H20 GPUs with a matched 15-block injection schedule.
+Single CamSA Block
+Training
+Latent Denoising
+Method
+Factorization
+Latency Peak Mem. Throughput Peak Mem. Throughput Peak Mem.
+(ms)↓
+(GiB)↓
+(clips/s)↑ (GiB/GPU)↓ (clips/s)↑ (GiB/GPU)↓
+Wan2.2 base
+GTA (Miyato et al., 2024)
+UCPE (Zhang et al., 2026a)
+MeRoPE
+No CamSA
+Per-token
+Per-token
+Query-grouped
+4.97
+5.03
+12.47
+N/A
+0.38
+0.40
+1.21
+5.30
+4.89
+4.86
+4.70
+35.80
+36.58
+36.58
+37.57
+0.197
+0.188
+0.188
+0.177
+29.65
+31.03
+31.03
+31.13
+Table 7: Real-world grounding with retrieved history on nuScenes. Best in bold; second-best is
+underlined.
+Method
+rot◦ ↓ tr% ↓ AUC@3↑ AUC@10↑ CamMC↓
+MeRoPE (no history)
+0.82 2.21
+MeRoPE + History CA 0.78 2.13
+MeRoPE + History SA 0.74 2.11
+48.76
+52.01
+51.65
+83.24
+84.17
+84.22
+1.60
+1.52
+1.48
+FID↓
+FVD↓
+19.82 134.15
+19.59 130.27
+18.21 104.41
+3.3% for training and 5.9% for denoising, with peak-memory increases of 2.7% and 0.3%, respectively. GTA and UCPE have nearly identical system costs under the matched schedule.
+Source of overhead and future work. The extra local cost comes from constructing and storing
+separate transformed K/V tensors for each query-camera group rather than from additional attention
+dot products. Processing query-camera groups in smaller batches can reduce peak memory, while
+a fused grouped-attention kernel could avoid expanded K/V tensors and reduce both memory and
+latency.
+C.3
+R EAL -W ORLD G ROUNDING WITH R ETRIEVED H ISTORY
+To test grounding beyond the current field of view, we encode calibrated same-location images
+with the video VAE and inject their patch tokens through two pathways. History CA follows
+CityRAG (Chou et al., 2026): video tokens attend to retrieved-reference K/V through standard crossattention. History SA follows Seoul World Model (Seo et al., 2026): retrieved reference tokens are
+concatenated with the current video tokens and jointly processed by self-attention across successive
+DiT blocks; only the generated video tokens are decoded.
+Training signals. Current-image dropout randomly removes the entire clean conditioning prefix
+when usable history is available, so the model must predict from retrieved observations rather than
+copy the current clip; evaluation retains the full prefix. Standard training retrieves history close to the
+ground-truth camera path, but left/right test commands often have only history with a larger relative
+pose, creating a train–test mismatch. Lateral-conflict training simulates this case by substituting
+a spatially overlapping donor from a neighboring lane while leaving the target video and camera
+command unchanged, teaching the model to use off-trajectory history without weakening camera
+control.
+Temporal tagging. Both pathways add 100 to the matched history-frame time coordinates, placing
+retrieved tokens in a dedicated temporal region so the model can distinguish historical context from
+current video tokens.
+Both history variants provide modest pose-control gains, while History SA achieves the best
+CamMC, FID, and FVD in Table 7. The VAE latents are optimized for pixel reconstruction rather
+than semantic alignment, so they provide no explicit high-level interface for retrieval fusion. History
+SA repeatedly mixes retrieved and future tokens across successive DiT blocks, whereas History CA
+exposes the retrieved latents only as cross-attention K/V; this difference may explain History SA’s
+stronger visual anchoring. Figure 8 illustrates this pattern: History CA follows the no-history layout
+at late timesteps, while History SA preserves retrieval-supported geometry in both selected scenes.
+18
+Preprint.
+(a) Tree-lined corridor
+Ground truth
+Retrieved history
+Ground truth
+Retrieved history
+No history
+History CA
+History SA
+t=0
+t = 32
+t = 48
+(b) Cross-weather street corner
+No history
+History CA
+History SA
+t=0
+t = 32
+t = 48
+Figure 8: Qualitative comparison of history injection. Across the same scenes and timesteps,
+History SA preserves retrieval-supported late-frame geometry, whereas History CA follows the nohistory layout.
+D
+A DDITIONAL Q UALITATIVE R ESULTS
+D.1
+M ATCHED -BACKBONE C OMPARISON WITH P RIOR C AMERA E NCODINGS
+Figure 9 presents three fixed clips separately for readability; Table 2 reports the aggregate evaluation.
+In these clips, MeRoPE preserves more coherent late-frame geometry.
+19
+Preprint.
+Figure 9: Matched-backbone qualitative comparison (1/3). Each row shows commanded and
+VGGT-Ω-recovered paths with frames at t ∈ {0, 16, 32, 48}.
+Figure 9: Matched-backbone qualitative comparison (2/3). The same protocol is shown for the
+second scene.
+20
+Preprint.
+Figure 9: Matched-backbone qualitative comparison (3/3). The same protocol is shown for the
+third scene.
+D.2
+A DDITIONAL C AMERA -P OSE -C ONTROLLED G ENERATIONS
+Figure 10 extends the main qualitative comparison to three additional nuScenes scenes.
+21
+Preprint.
+Figure 10: Additional nuScenes camera-control results. For each scene, the left plot compares
+commanded (yellow solid) and VGGT-Ω-recovered (cyan dashed) paths; the remaining columns
+show frames at t ∈ {0, 16, 32, 48}.
+22

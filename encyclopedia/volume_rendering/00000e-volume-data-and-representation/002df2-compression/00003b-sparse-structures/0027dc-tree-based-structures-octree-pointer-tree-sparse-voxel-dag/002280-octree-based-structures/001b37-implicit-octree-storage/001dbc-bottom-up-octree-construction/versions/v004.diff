@@ -1,0 +1,436 @@
+--- v003.md
++++ v004.md
+@@ -1,245 +1,216 @@
+ # Bottom-up Octree Construction
+ 
+-Also called: Bottom-up Octree Building, Lossless/Lossy Octree Compression, Octree Volume Build, Octree Volume Construction, Octree Volume Construction via Variance Consolidation
++Also called: Author's octree construction approach, Bottom-up Octree Building, BottomUpParallel, Hierarchical Octree Encoding, Parallel Bottom-Up Octree Construction, Parallel Octree Construction
+ 
+ ## Overview
+-Bottom-up Octree Construction is a method for compressing a 3D scalar array into an adaptive-resolution octree by recursively grouping 8 voxels into a parent node if they are identical (lossless) or have combined variance below a threshold (lossy), storing the average value at the parent [S1][S3, unofficial]. It solves the problem of efficiently storing and rendering large scalar fields by reducing memory footprint while enabling accelerated ray traversal via a simultaneously built min/max tree [S4, unofficial]. It differs from top-down approaches by starting from the finest grid and merging up, and from static structures by integrating compression and acceleration data (min/max) into a single cohesive build process [S2][S3, unofficial].
++Bottom-up octree construction is a spatial domain compression technique that organizes quantized volume data into an adaptive-resolution octree by recursively fusing neighboring voxels with identical values (lossless) or low variance (lossy) into macro voxels [S1, S2, unofficial][S4, S5][S6, S7, unofficial][S8][S9, unofficial]. It solves the problem of storing and rendering large 3D scalar arrays on memory-constrained systems by converting dense grids into sparse hierarchical structures [S1, S2, S7, S9, unofficial]. Unlike top-down approaches that visit data multiple times, this method visits each voxel exactly once, making it approximately two times faster [S1, unofficial]. It sets itself apart from sibling methods like [Packed Tensor Representation](1611-packed-tensor-representation.md) by focusing on structural consolidation of actual voxels rather than cell encapsulation, and from [Octree Volume Structure](1978-octree-volume-structure.md) by its specific iterative grouping algorithm [S1, S2, S9, unofficial].
+ 
+ ## How it works
+-
+-### Inputs and Outputs
+-*   **Input:** A 3D scalar array of rectilinear grid data [S4, unofficial].
+-*   **Output:** An octree volume structure containing interior nodes, cap nodes, and scalar leaves, along with an embedded min/max tree for acceleration [S3, unofficial].
+-
+-### Data Structures
+-To avoid explicitly storing a full node for each leaf, the method stores nodes corresponding to the parent [S4, unofficial]. The layout is as follows:
+-
+-1.  **Interior Node (Depth $< d_{max}-1$):**
+-    *   Contains pointers to 8 children [S4, unofficial].
+-    *   Contains min/max pairs for each of the 8 children [S4, unofficial].
+-    *   Contains scalar values for children that are leaves (scalar leaves) [S4, unofficial].
+-    *   **Pointer Storage:** Rather than full pointers, the structure uses a 32-bit `child_start` index and a single-byte offset per child [S4, unofficial].
+-    *   **Leaf Indicator:** An array indicates the offset of each child; a value of $-1$ indicates that child is a leaf (scalar leaf) [S4, unofficial].
+-    *   **Scalar Storage:** A second array, `child_scalars`, contains the value of each child [S4, unofficial].
+-
+-2.  **Cap Node (Depth $d_{max}-1$):**
+-    *   Consists simply of 8 scalar values [S4, unofficial].
+-    *   These correspond to the finest available data resolution [S2].
+-    *   Caps are not separate structures but contain eight scalars at the maximal depth [S3, unofficial].
+-
+-3.  **Scalar Leaf:**
+-    *   Not a separate structure, but a single value embedded inside its parent interior node [S3, unofficial].
+-    *   Indicated by a null child pointer (offset $-1$) [S4, unofficial].
+-
+-### Parameters
+-*   **$N$:** The smallest power of 2 that encompasses the largest dimension of the input 3D volume [S3, S4, unofficial].
+-*   **$d_{max}$:** Maximum depth of the octree, calculated as $\log_2(N)$ [S3, S4, unofficial].
+-*   **Variance Threshold:** Used for lossy compression to determine if 8 voxels should be consolidated. If variance is below this threshold, voxels are merged [S1, S2]. Typical value: Not specified in sources [S2].
+-*   **Isovalue Clamping Range:** A user-specified range of isovalues; data outside this range is clamped to reduce memory footprint (e.g., 64-127) [S5].
+-
+-### Algorithm Steps
+-
+-1.  **Initialization:**
+-    *   Determine $N$, the smallest power of 2 encompassing the largest dimension of the input volume [S3, S4, unofficial].
+-    *   Set maximum depth $d_{max} = \log_2(N)$ [S3, S4, unofficial].
+-    *   Assign groups of 8 voxels from the original structured grid to the caps at depth $d_{max}-1$ [S3, S4, unofficial].
+-
+-2.  **Bottom-Up Consolidation:**
+-    *   Proceed from the bottom-up (from depth $d_{max}-1$ towards the root) [S3, S4, unofficial].
+-    *   For each group of 8 voxels (or child nodes) nested within a parent:
+-        *   Check if the voxels are identical (lossless) or have combined variance below the threshold (lossy) [S1, S2].
+-        *   If the condition is met:
+-            *   Compute the average of the 8 values.
+-            *   Consolidate them into a single scalar leaf at the parent's depth level [S1, S2].
+-            *   Remove the corresponding child nodes [S3, S4, unofficial].
+-        *   If the condition is not met:
+-            *   Keep the 8 children as distinct nodes (pointers are filled) [S3, S4, unofficial].
+-    *   Recursively repeat this process at the parent level until the root node is completed [S1][S4, unofficial].
+-    *   **Constraint:** Only scalar children (leaves) may be consolidated [S4, unofficial].
+-
+-3.  **Min/Max Tree Construction:**
+-    *   The min/max tree is computed simultaneously alongside bottom-up consolidation [S3, S4, unofficial].
+-    *   **Voxel-Cell Duality:** The volume data consists of voxels, but the isosurface is defined within cells of 8 voxels. To avoid 8x storage expansion, the method retrieves the 7 forward neighbors of a voxel at intersection time [S4, unofficial].
+-    *   **Leaf Min/Max:** For leaf nodes (caps), compute the min/max pair based on the 27 voxel values (the 8 voxels of the cell plus their forward neighbors) [S3, S4, unofficial].
+-        *   To save storage, min/max pairs are not stored at the leaf level (depth $d_{max}$). Instead, computation is deferred to neighbor-finding during traversal [S4, unofficial].
+-        *   Min/max storage begins at depth $d_{max}-1$ [S4, unofficial].
+-    *   **Interior Min/Max:** For each parent node, compute the minimum and maximum based on the min/max pairs of its 8 children [S4, unofficial].
+-        *   Store these min/max values within the parent node, not the child nodes, to allow rejection of children without traversal [S3, S4, unofficial].
+-    *   **Overhead:** This approach entails an overhead of approximately 22% additional footprint on top of raw scalar octree-compressed data [S4, unofficial].
+-
+-4.  **Point Location and Neighbor Finding (Runtime/Traversal Prep):**
+-    *   **Coordinate System:** Octree cells are defined on the interval $[0, 2^{d_{max}}]$ [S4, unofficial].
+-    *   **Point Location:** Given a vector, cast components to integers and perform top-down search from the root [S4, unofficial].
+-    *   **Optimization:** Precompute `child_bit_depth[d] = 1 << (max_depth - depth - 1)`. Compute the target child octant using binary `&` and integer inequality operations. Mask with destination coordinates and bit-shift by constants for X, Y, Z components to yield the 0-7 octant offset [S4, unofficial].
+-    *   **Neighbor Finding:** To retrieve forward neighbors for cell intersection, use neighbor-finding techniques. Worst-case complexity is $O(\log(N))$, but best-case is $O(1)$ when neighbors lie within the same parent [S4, unofficial].
+-
+-### Pseudocode
+-
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar array of size $R \times R \times R$ (where $R$ is a power of 2, or padded to the smallest power of 2, $N$) [S6, S7, unofficial]. Optional: a variance threshold $\tau$ for lossy compression [S4][S6, S9, unofficial].
++*   **Output:** An octree structure where leaf nodes store scalar values (or caps storing 8 scalars at max depth) and interior nodes store pointers to children and optionally min/max bounds [S2, S7, S9, unofficial].
++
++**Data Structures:**
++The core node structure varies by implementation but generally includes:
++1.  **Octree Node:** Contains metadata such as position, size, and a pointer to children [S2, unofficial].
++2.  **OctreeChildren:** A struct containing:
++    *   `field`: A `uint8_t` bitmask indicating which of the 8 children exist (bit $i$ set if child $i$ is present) [S2, unofficial].
++    *   `children`: An array of 8 pointers to child `Octree` nodes [S2, unofficial].
++3.  **Leaf/Cap Representation:** At maximum depth $d_{max}$, nodes may not have children pointers. Instead, they may store a "cap" of 8 scalar values directly, or a single scalar value if consolidated [S7, S9, unofficial]. Interior nodes store min/max pairs for acceleration [S7, unofficial].
++
++**Algorithm Steps:**
++1.  **Initialization:** Determine $N$, the smallest power of 2 encompassing the volume dimensions. Set maximum depth $d_{max} = \log_2(N)$ [S6, S7, unofficial]. Initialize two arrays of node containers: `currentSizeNodes` and `parentSizeNodes`, both initialized to null pointers, sized according to the number of nodes at the current and next coarser levels [S2, unofficial].
++2.  **Iterative Consolidation (Bottom-Up):** Loop through depth levels from finest ($cubeSize = R$) to coarsest ($cubeSize = N$) [S2, unofficial].
++    *   For each group of 8 voxels (or child nodes) at the current level:
++        *   **Lossless Check:** If all 8 values are identical, consolidate them into a single scalar leaf at the parent level [S4, S5][S7, S9, unofficial].
++        *   **Lossy Check:** If the combined variance of the 8 values is below threshold $\tau$, compute their average and consolidate into a single node at the parent level [S4, S5][S6, S9, unofficial].
++        *   **No Consolidation:** If criteria are not met, keep the 8 children as distinct nodes.
++    *   **Parent Construction:** Create parent nodes for the consolidated groups. Update the `field` bitmask in the parent's `OctreeChildren` to reflect which children are present [S2, unofficial].
++    *   **Pointer Management:** Move `parentSizeNodes` to `currentSizeNodes` for the next iteration, resetting `parentSizeNodes` to nulls [S2, unofficial].
++3.  **Min/Max Tree Construction (Optional but common):** Simultaneously with consolidation, compute min/max bounds for each node. For leaf nodes, this requires fetching forward neighbors (27 voxels total) to define the cell bounds [S7, unofficial][S8]. For interior nodes, the min/max is the aggregate of the children's min/max pairs [S7, unofficial]. This allows early-out ray traversal [S7, unofficial].
++4.  **Completion:** The process stops when the root node is reached [S8].
++
++**Pseudocode:**
+ ```python
+-import math
+-
+-def build_octree(volume_data, variance_threshold):
++def build_octree_bottom_up(volume_data, resolution, threshold=None):
+     """
+-    Builds a bottom-up octree from a 3D scalar array.
+-    volume_data: 3D list of lists of lists of scalars.
+-    variance_threshold: float, max variance for lossy consolidation.
+-    Returns: Root node of the octree.
++    volume_data: 3D array of shape (R, R, R)
++    resolution: R (must be power of 2)
++    threshold: float, variance threshold for lossy compression. None for lossless.
+     """
+-    # 1. Determine dimensions and max depth
+-    dims = (len(volume_data), len(volume_data[0]), len(volume_data[0][0]))
+-    max_dim = max(dims)
+-    N = 1
+-    while N < max_dim:
+-        N *= 2
++    N = resolution
+     d_max = int(math.log2(N))
+     
+-    # Pad volume to N^3 with zeros
+-    padded_volume = [[[0 for _ in range(N)] for _ in range(N)] for _ in range(N)]
+-    for z in range(dims[0]):
+-        for y in range(dims[1]):
+-            for x in range(dims[2]):
+-                padded_volume[z][y][x] = volume_data[z][y][x]
+-                
+-    # 2. Initialize Caps at depth d_max - 1
+-    current_level_nodes = []
+-    for z in range(0, N, 2):
+-        for y in range(0, N, 2):
+-            for x in range(0, N, 2):
+-                voxels = [
+-                    padded_volume[z][y][x], padded_volume[z][y][x+1],
+-                    padded_volume[z][y+1][x], padded_volume[z][y+1][x+1],
+-                    padded_volume[z+1][y][x], padded_volume[z+1][y][x+1],
+-                    padded_volume[z+1][y+1][x], padded_volume[z+1][y+1][x+1]
+-                ]
+-                current_level_nodes.append({'type': 'cap', 'scalars': voxels})
+-                
+-    # 3. Bottom-Up Consolidation
+-    current_depth = d_max - 1
+-    while current_depth >= 0:
+-        next_level_nodes = []
+-        for i in range(0, len(current_level_nodes), 8):
+-            children = current_level_nodes[i:i+8]
+-            
+-            # Check if all children are scalar leaves (caps or scalar leaves)
+-            all_leaves = all(child['type'] in ('cap', 'scalar_leaf') for child in children)
+-            
+-            if all_leaves:
+-                scalars = []
+-                for child in children:
+-                    if child['type'] == 'cap':
+-                        scalars.extend(child['scalars'])
+-                    elif child['type'] == 'scalar_leaf':
+-                        scalars.append(child['value'])
+-                
+-                mean = sum(scalars) / 8.0
+-                variance = sum((s - mean)**2 for s in scalars) / 8.0
+-                
+-                if variance <= variance_threshold:
+-                    # Consolidate into a single scalar leaf
+-                    next_level_nodes.append({
+-                        'type': 'interior',
+-                        'child_start': 0,
+-                        'child_offsets': [-1] * 8,
+-                        'child_scalars': [mean],
+-                        'child_mins': [mean],
+-                        'child_maxs': [mean],
+-                        'value': mean
+-                    })
+-                else:
+-                    # Keep as 8 children
+-                    child_mins = []
+-                    child_maxs = []
+-                    child_offsets = []
+-                    child_scalars = []
+-                    for idx, child in enumerate(children):
+-                        if child['type'] == 'cap':
+-                            c_min = min(child['scalars'])
+-                            c_max = max(child['scalars'])
+-                            child_mins.append(c_min)
+-                            child_maxs.append(c_max)
+-                            child_offsets.append(i + idx)
+-                            child_scalars.append(None)
+-                        elif child['type'] == 'scalar_leaf':
+-                            val = child['value']
+-                            child_mins.append(val)
+-                            child_maxs.append(val)
+-                            child_offsets.append(i + idx)
+-                            child_scalars.append(val)
+-                    next_level_nodes.append({
+-                        'type': 'interior',
+-                        'child_start': 0,
+-                        'child_offsets': child_offsets,
+-                        'child_scalars': child_scalars,
+-                        'child_mins': child_mins,
+-                        'child_maxs': child_maxs,
+-                        'value': None
+-                    })
+-            else:
+-                # Mixed types: cannot consolidate, treat as non-consolidated interior node
+-                child_mins = []
+-                child_maxs = []
+-                child_offsets = []
+-                child_scalars = []
+-                for idx, child in enumerate(children):
+-                    if child['type'] == 'cap':
+-                        c_min, c_max = min(child['scalars']), max(child['scalars'])
+-                    elif child['type'] == 'scalar_leaf':
+-                        c_min = c_max = child['value']
++    # Initialize node containers for the finest level (leaves)
++    # current_size_nodes holds nodes at the current cube size
++    current_size_nodes = [None] * (N * N * N)
++    
++    # Populate leaves
++    for x in range(N):
++        for y in range(N):
++            for z in range(N):
++                val = volume_data[x, y, z]
++                # Create leaf node. Structure depends on implementation.
++                # For simplicity, assume a leaf node stores the value.
++                current_size_nodes[index(x, y, z, N)] = create_leaf_node(val, x, y, z)
++
++    cube_size = resolution
++    while cube_size < N:
++        parent_size_nodes = [None] * ((N // cube_size) ** 3)
++        child_count_per_axis = N // cube_size
++        parent_count_per_axis = child_count_per_axis // 2
++        
++        # Iterate over 2x2x2 blocks
++        for xi in range(0, N, cube_size):
++            for yi in range(0, N, cube_size):
++                for zi in range(0, N, cube_size):
++                    # Indices of the 8 children
++                    child_indices = []
++                    for dx in [0, 1]:
++                        for dy in [0, 1]:
++                            for dz in [0, 1]:
++                                cx = xi + dx * (cube_size // 2)
++                                cy = yi + dy * (cube_size // 2)
++                                cz = zi + dz * (cube_size // 2)
++                                child_indices.append(index(cx, cy, cz, child_count_per_axis))
++                    
++                    children = [current_size_nodes[idx] for idx in child_indices]
++                    
++                    # Check consolidation criteria
++                    if are_consolidatable(children, threshold):
++                        # Consolidate: compute average/representative value
++                        avg_val = compute_average(children)
++                        # Create a single parent node representing the 8 voxels
++                        parent_node = create_consolidated_node(avg_val, xi, yi, zi, cube_size * 2)
++                        
++                        # Find parent index
++                        px = xi // (cube_size * 2)
++                        py = yi // (cube_size * 2)
++                        pz = zi // (cube_size * 2)
++                        parent_idx = index(px, py, pz, parent_count_per_axis)
++                        
++                        parent_size_nodes[parent_idx] = parent_node
+                     else:
+-                        c_min = child['child_mins'][0]
+-                        c_max = child['child_maxs'][0]
+-                    child_mins.append(c_min)
+-                    child_maxs.append(c_max)
+-                    child_offsets.append(i + idx)
+-                    child_scalars.append(None)
+-                next_level_nodes.append({
+-                    'type': 'interior',
+-                    'child_start': 0,
+-                    'child_offsets': child_offsets,
+-                    'child_scalars': child_scalars,
+-                    'child_mins': child_mins,
+-                    'child_maxs': child_maxs,
+-                    'value': None
+-                })
+-        current_level_nodes = next_level_nodes
+-        current_depth -= 1
+-        
+-    return current_level_nodes[0]
++                        # Do not consolidate. Create a parent node with pointers to children.
++                        # This parent node acts as a container.
++                        parent_node = create_internal_node(xi, yi, zi, cube_size * 2)
++                        
++                        # Update parent's children bitmask and pointers
++                        for dx in [0, 1]:
++                            for dy in [0, 1]:
++                                for dz in [0, 1]:
++                                    cx = xi + dx * (cube_size // 2)
++                                    cy = yi + dy * (cube_size // 2)
++                                    cz = zi + dz * (cube_size // 2)
++                                    child_idx = index(cx, cy, cz, child_count_per_axis)
++                                    corner_idx = index(dx, dy, dz, 2)
++                                    add_child(parent_node, children[child_idx], corner_idx)
++                        
++                        px = xi // (cube_size * 2)
++                        py = yi // (cube_size * 2)
++                        pz = zi // (cube_size * 2)
++                        parent_idx = index(px, py, pz, parent_count_per_axis)
++                        
++                        # Handle case where parent already exists (if not consolidating all 8)
++                        if parent_size_nodes[parent_idx] is None:
++                            parent_size_nodes[parent_idx] = parent_node
++                        else:
++                            # Merge children into existing parent
++                            merge_children(parent_size_nodes[parent_idx], parent_node)
++
++        # Move to next level
++        current_size_nodes = parent_size_nodes
++        cube_size *= 2
++
++    return current_size_nodes[0] # Root node
++
++def index(x, y, z, dim):
++    return x + y * dim + z * dim * dim
++
++def octree_index(x, y, z):
++    """Maps 3D child coordinates (0 or 1) to 0-7 integer index."""
++    return x | (y << 1) | (z << 2)
++
++def are_consolidatable(children, threshold):
++    if threshold is None:
++        # Lossless: all identical
++        first_val = children[0].value
++        return all(c.value == first_val for c in children)
++    else:
++        # Lossy: variance below threshold
++        vals = [c.value for c in children]
++        mean = sum(vals) / 8.0
++        variance = sum((v - mean) ** 2 for v in vals) / 8.0
++        return variance < threshold
++
++def compute_average(children):
++    return sum(c.value for c in children) / 8.0
++
++def add_child(parent, child, corner_idx):
++    parent.children[corner_idx] = child
++    parent.field |= (1 << corner_idx)
++
++def merge_children(parent, new_parent):
++    # Merge the children of new_parent into parent
++    for i in range(8):
++        if new_parent.children[i] is not None:
++            parent.children[i] = new_parent.children[i]
++            parent.field |= (1 << i)
+ ```
+ 
++**Parameters:**
++*   **Variance Threshold ($\tau$):** Used for lossy compression. No specific numerical value is given in the sources, but it determines the granularity of compression [S4][S6, S9, unofficial].
++*   **Resolution ($R$):** The dimension of the input volume. Must be a power of 2 for standard implementation [S6, S7, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **8-bit Data Precision:** Fusing voxels based on error tolerance (lossy) for 8-bit data often produces images unacceptable for visualization [S1, unofficial].
++*   **Memory Leaks:** In pointer-based implementations, destructors must manually delete children to avoid leaks [S2, unofficial].
++*   **Thread Safety:** Parallel implementations (e.g., splitting into 8 corner tasks) must defer setting the `field` bitmask to the main thread or use atomic operations, as direct concurrent modification is not thread-safe [S2, unofficial].
++*   **Neighbor Lookup Cost:** Computing min/max bounds for leaf nodes requires accessing forward neighbors. While worst-case complexity is $O(\log N)$ for point location, neighbor-finding techniques skew toward $O(1)$ in practice [S7, unofficial].
++
+ ## Subtopics
+ 
+ ### [Min/Max Tree Construction](1623-min-max-tree-construction.md)
+-A min/max tree stored within the octree structure to accelerate ray traversal by skipping cells where the isovalue is outside the node's min/max scalar range. It is computed simultaneously with the bottom-up consolidation. For leaf nodes, min/max is based on 27 voxels (cell + forward neighbors). For interior nodes, min/max is derived from the min/max pairs of the 8 children. This adds ~22% overhead but allows rejection of children without traversal.
++Min/Max Tree Construction builds a hierarchical acceleration structure embedded within an octree to accelerate ray traversal by storing the minimum and maximum scalar values for each node. It solves the problem of inefficient traversal in sparse or large-volume rendering by allowing the renderer to reject entire subtrees when the target isovalue falls outside the node's computed extrema. Unlike sibling methods that focus on structural compression or partitioning, this method specifically optimizes traversal speed by embedding scalar bounds directly into the tree topology, enabling early-out checks during ray casting.
+ 
+ ### [Octree Construction from Structured Volumes](1854-octree-construction-from-structured-volumes.md)
+-Generation of an octree from a 3D grid by consolidating voxels with zero inter-voxel variance, extending the principle of quadtree generation from 2D grids by consolidating pixels with zero inter-pixel variance. It uses a 3D array of rectilinear grid data as input and determines $N$ and $d_{max}$ based on the largest dimension.
++This method compresses large structured scalar volumes into an adaptive-resolution octree to reduce memory footprint while serving as an acceleration structure for ray tracing. It solves the problem of storing and rendering large 3D array volumes on commodity machines with limited memory by converting a dense 3D grid into a sparse structure. Unlike Velasco and Torres, who encapsulate eight-voxel cells, this technique encapsulates actual individual voxels, allowing for finer granularity in compression. It extends the principle of quadtree generation from 2D grids (consolidating pixels with zero inter-pixel variance) to 3D octrees by consolidating voxels with zero inter-voxel variance.
++
++### [Hierarchical Partition Optimization](1953-hierarchical-partition-optimization.md)
++Hierarchical Partition Optimization is an offline preprocessing algorithm that constructs an optimal adaptive-resolution hierarchical partition and assigns extraction methods to its nodes, balancing memory consumption against expected extraction time. It solves the problem of finding a partition that minimizes a global Lagrangian cost function under a memory constraint.
+ 
+ ### [Omnitree Refinement](2222-omnitree-refinement.md)
+-Omnitrees partition a d-dimensional Cartesian domain $\Omega \subset \mathbb{R}^d$ into N nonoverlapping subdomains $Q_i$, where boundaries occur at dyadic rationals (multiples of $2^{-k}$). An omnitree node $v$ is characterized by a binary splitting label $b(v) \in \{0, 1\}^d$, where $b_j = 1$ indicates bisection in dimension $j$, yielding $2^{|\sigma(v)|}$ children. The all-zero label $b = 0$ is reserved for leaf nodes. Normalization enforces that splits are gathered as high in the tree as possible, guaranteeing a unique, shallowest representation.
+-
+-### Hierarchical Partition Optimization
+-A method to optimize the octree structure for memory and extraction time trade-offs. It uses a global Lagrangian cost function $J_\lambda(P, A) := E[T(P, A, t)] + \lambda \cdot M(P, A)$, where $E[T]$ is expected extraction time and $M$ is memory [S6, unofficial]. It builds a full partitioning tree $P_{max}$ and runs bottom-up Lagrangian optimization for a sequence of $\lambda_i$ values to find optimal partitions and method assignments for each node [S6, unofficial].
++Omnitree refinement transforms an initial hierarchical dyadic partition of a $d$-dimensional Cartesian domain into a target partition with higher resolution in specific dimensions. It solves the problem of anisotropically increasing the granularity of a sparse voxel representation by attaching refinement markers to nodes and propagating them through the tree structure. The method explicitly supports per-dimension refinement levels ($\vec{m} \in \mathbb{N}^d$), allowing for non-cubic, rectangular subdomains. It builds on [Bottom-up Octree Construction](1590-bottom-up-octree-construction.md) by providing the mechanism to adjust the topology of the resulting tree after initial construction or during dynamic updates.
++
++### [Octree Compaction & Construction](2857-octree-compaction-construction.md)
++This method converts a dynamically allocated, pointer-heavy octree into a dense, cache-friendly contiguous memory layout. It solves the problem of poor spatial locality and high memory overhead associated with traditional pointer-based tree structures by computing relative offsets for children and siblings. It sets itself apart from sibling methods like [Min/Max Tree Construction](1623-min-max-tree-construction.md) by focusing specifically on the binary encoding of validity/filled masks and the compact storage of child pointers, rather than just hierarchical aggregation.
++
++### [Octree Encoding](5851-octree-encoding.md)
++Spatial domain compression technique where neighboring voxels with similar values are fused into macro voxels.
++
++### DMC Octree Build
++Builds the DMC octree from a scalar field, using a QEF solver and various split policies [S10, unofficial]. It validates that the root size is a power of two, initializes build arguments with a seeded RNG, and collapses the root node before recursively building nodes [S10, unofficial]. The epsilon parameter is scaled according to the QEF scale: $\text{scaled\_epsilon} = \epsilon / (\text{m\_globalScale} \times \text{m\_globalScale})$ [S10, unofficial].
+ 
+ ## Operating characteristics
+-
+-*   **Time Complexity:** The build process is bottom-up and recursive [S3, S4, unofficial]. Point location is $O(\log(N))$ in the worst case, but neighbor-finding skews heavily toward $O(1)$ in practice [S4, unofficial].
+-*   **Memory Complexity:** The structure stores min/max pairs and pointers [S4, unofficial]. The min/max tree adds approximately 22% overhead to the raw scalar octree-compressed data [S4, unofficial].
+-*   **Performance:** Accelerates ray tracing by allowing rejection of children whose min/max range does not contain the isovalue [S3, S4, unofficial].
+-*   **Strengths:** Adaptive resolution, lossless/lossy compression, integrated acceleration structure [S1][S3, unofficial].
+-*   **Limitations:** Neighbor-finding overhead for cell intersection; potential for looser min/max tree if leaf min/max is omitted (mitigated by runtime computation) [S4, unofficial].
++*   **Time Complexity:** The bottom-up build algorithm is $O(N)$ with respect to the total number of voxels [S9, unofficial]. It is approximately two times faster than top-down construction because it visits each data value only once [S1, unofficial].
++*   **Memory Complexity:** Space overhead is generally acceptable if large macro voxels are created. Maximum overhead is approximately $v \times b$, where $v$ is the total number of voxels and $b$ is the number of bytes used to store information about each internal tree node [S1, unofficial]. However, building an expanded full octree structure can occupy a footprint of four times the raw volume size, requiring significant memory (e.g., nearly 40 GB for Richtmyer-Meshkov data) [S9, unofficial].
++*   **Measured Performance:** On a single core of a 16-core 2.4 GHz Opteron workstation, building a single timestep of a $30^3$ heptane volume requires 8 seconds with negligible memory footprint [S9, unofficial]. Building a timestep of Richtmyer-Meshkov data requires 45 minutes [S9, unofficial].
++*   **Strengths:** High compression ratio for coherent data; fast construction time; supports both lossless and lossy modes; integrates well with ray tracing via min/max bounds [S1, S7, unofficial].
++*   **Limitations:** Lossy compression can degrade image quality for 8-bit data [S1, unofficial]; parallel implementation requires careful synchronization [S2, unofficial]; memory footprint can be high for uncompressed or partially compressed data [S9, unofficial].
++*   **When to Use:** Suitable for large, coherent volume datasets where compression and fast traversal are priorities, and where the data can tolerate some lossiness or is naturally quantized [S1, S9, unofficial].
++*   **When Not to Use:** Not suitable for data requiring high-fidelity visualization with small error tolerances (e.g., 8-bit medical data) [S1, unofficial], or when memory is extremely constrained and the volume is highly heterogeneous [S9, unofficial].
+ 
+ ## Background
+-
+-*   **Origin:** The method was introduced in "Interactive Isosurface Ray Tracing of Large Octree Volumes" by Knoll et al. (2006) [S1][S3, unofficial].
+-*   **Development:** It extends the principle of quadtree generation from 2D grids to 3D octrees [S2]. It builds on voxel-cell duality concepts and neighbor-finding techniques from prior work [S4, unofficial].
+-*   **Usage:** Used in interactive isosurface ray tracing of large scalar fields [S1][S3, unofficial].
++Bottom-up octree construction was developed as part of techniques for efficient encoding and rendering of time-varying volume data [S1, unofficial]. It is closely associated with the work of Wald et al. on interactive isosurface ray tracing of large octree volumes [S4, S5][S6, S7, S9, unofficial]. The method extends the principle of quadtree generation from 2D grids to 3D octrees [S1, S2, unofficial][S4][S6, unofficial][S8]. It is used in volume rendering systems that require adaptive resolution and fast traversal, such as those employing ray casting with empty-space skipping [S3, S7, unofficial].
+ 
+ ## Sources
+-
+-[S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+-[S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
+-[S3] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
+-[S4] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+-[S5] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://pdfs.semanticscholar.org/aef9/6e0dd17920d0c70cbf0dd43f494cab1c0bcc.pdf, fetched 2026-10-28
+-[S6] Optimal hybrid memory constrained isosurface extraction, http://nbn-resolving.de/urn:nbn:de:bsz:352-130091, fetched 2026-10-30 (unofficial)+[S1] DTIC ADA349761: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)
++[S2] Tsarpf/procgen, https://github.com/Tsarpf/procgen, fetched 2026-10-26 (unofficial)
++[S3] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
++[S4] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
++[S5] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
++[S6] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
++[S7] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
++[S8] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://pdfs.semanticscholar.org/aef9/6e0dd17920d0c70cbf0dd43f494cab1c0bcc.pdf, fetched 2026-10-28
++[S9] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
++[S10] Svenny/isomesh, https://github.com/Svenny/isomesh, fetched 2026-10-27 (unofficial)

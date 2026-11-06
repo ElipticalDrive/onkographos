@@ -1,0 +1,178 @@
+Train, inspect, edit, automate, and export 3D Gaussian Splatting scenes from a single native application. - Fix RAD LOD decoding and rendering in 3DGUT by francescofugazzi · Pull Request #3675 · MrNeRF/LichtFeld-Studio
+
+Fix RAD LOD decoding and rendering in 3DGUT by francescofugazzi · Pull Request #3675 · MrNeRF/LichtFeld-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+francescofugazzi
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Fix RAD splats rendering as flat, opaque, tile-shaped regions in the 3DGUT Vulkan viewer. The same source splats render correctly from PLY and through the 3DGS path, but the RAD/LOD 3DGUT raster pass was reading geometry using the wrong storage layout and index space.
+Cause
+Projection already decodes the canonical quantized RAD page pool and resolves LOD indices correctly. The 3DGUT raster pass independently reloads geometry to evaluate pixel rays, but previously:
+Read packed half-precision rotations, log-scales and opacity as ordinary fp32 arrays.
+Used projected/sorted slot IDs directly as source geometry and transform indices.
+Applied sigmoid opacity activation to Spark RAD opacity values and omitted LOD fade weights.
+Used the ordinary Gaussian alpha kernel for high-density LOD parents.
+This made the ray-evaluated splat disagree with the footprint used for tile binning, producing flat color regions with visible tile boundaries.
+Changes
+Decode both ordinary fp32 attributes and the existing quantized RAD pool through byte-addressed buffers. Match projection's scale clamp and safe quaternion normalization.
+Resolve physical geometry indices through the same CPU/GPU LOD index streams used by projection. Use logical indices for node transforms while keeping projected colors indexed by render slot.
+Bind the existing LOD indices, logical indices and fade weights to both 3DGUT raster variants, including the path with selection overlays disabled.
+Pass the existing quantized-pool page-size field to rasterization instead of introducing another storage format or uniform flag.
+Decode Spark RAD opacity, apply LOD fade weights, and evaluate high-density parent opacity with the existing Spark alpha function.
+Match the expanded GUT/Spark parent support between projection and tile-key generation so parent kernels are not clipped at tile boundaries.
+The fix reuses existing GPU buffers. It adds no per-splat allocation, scene copy or CPU readback to the rendering path. No export formats or UI/preferences are changed.
+Reproduction and regression coverage
+The new generated-fixture GPU test imports anisotropic colored splats from PLY, converts them to RAD through the application CLI, then compares actual viewport pixels at the same camera position.
+Coverage includes:
+One splat and three splats with distinct colors, rotations and opacity values.
+Native and Portal rendering profile settings for RAD.
+Selection overlays enabled and disabled.
+Coarse LOD cuts with high-density parent kernels, compared with the existing 3DGS path.
+4097 leaf splats in an 8112-node RAD hierarchy spanning four resident pages, exercising geometry indices beyond the first page and odd/even packed opacity entries.
+On the previous build, the single-splat comparison fails with a mean absolute RGB error of 29.8695/255; the three-splat case fails at 8.5101/255. After this fix:
+Comparison
+Mean absolute RGB error, 0-255 scale
+Single RAD splat vs source PLY
+0.01293
+Three RAD splats vs source PLY
+0.05414
+4097 RAD leaves vs source PLY
+0.01004
+Coarse RAD cut, 3DGUT vs 3DGS
+0.21781
+The PLY/RAD test permits a mean error below 1.5 and fewer than 1.5% of color channels differing by more than 12 levels, allowing RAD quantization while rejecting the original artifact. Coarse-cut comparisons permit the finite-distance difference between ray evaluation and EWA.
+Validation
+Executed locally on Windows:
+Full Release application build with the project toolchain, including committed/generated Python stub consistency.
+All 9 generated GPU cases: the eight profile/overlay combinations and the additional multi-page case.
+All 18 existing renderer contracts covering overlay storage, orthographic support and output lifetime.
+Compilation and SPIR-V validation of 14 relevant shader variants, including plain/overlay rasterization, GUT projection, quantized GUT projection, tile generation and banded export variants.
+The four 3DGS compositing shader binaries remain byte-identical to the base revision.
+Project clang-format check, locale completeness, hardcoded UI checks, localization contracts, error-debt gate/tests, Windows source preflight/contracts, Windows path boundaries, I/O discipline and CUDA log-format checks.
+Linux GPU runtime validation has not been performed. The production changes are in the shared Vulkan/Slang path; the test supports the existing isolated Linux/Xvfb runner and an explicitly supplied disposable Windows MCP instance.
+To run the new GPU regression on the Linux GUI runner:
+```
+LFS_EXECUTABLE=/path/to/LichtFeld-Studio \
+  python -m pytest tests/python/test_gut_rad_render_runtime.py -q
+```
+On Windows, set LFS_EXECUTABLE, LFS_GUT_TEST_ENDPOINT and, when authentication is enabled, LFS_GUT_TEST_TOKEN_FILE for a disposable test instance before running the same pytest command. The test clears that instance's scene and uses generated fixtures only.
+The existing headless contracts can be run with:
+```
+python -m pytest tests/python/test_vksplat_overlay_storage.py \
+  tests/python/test_vksplat_orthographic_regressions.py \
+  tests/python/test_vksplat_output_lifetime_regressions.py -q
+```
+Fix RAD LOD decoding in 3DGUT rasterization
+…
+fb91b70
+```
+Read quantized attributes through physical LOD indices while preserving projected color slots and logical transform indices. Honor LOD fades, Spark parent opacity and matching GUT tile support. Add generated GPU regressions for rendering profiles, overlays, coarse cuts and multiple RAD pages.
+
+Validated with a full Windows Release build, nine GPU cases, eighteen renderer contracts, fourteen SPIR-V variants and the project localization, debt and Windows source gates. Local only.
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+October 18, 2026 12:37
+Copilot
+AI
+reviewed
+Oct 18, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+francescofugazzi
+mentioned this pull request
+Oct 18, 2026
+Add optional selection outlines for splat objects
+#3689
+Merged
+Keep the Spark RAD kernel out of the ordinary 3DGUT raster loop
+…
+ca57959
+```
+The per-pixel choice between the Spark RAD and ordinary evaluators made
+ordinary 3DGUT scenes 3.9% slower to rasterize, even as a uniform branch.
+Spark RAD scenes now get their own 3DGUT raster variants, and a single
+evaluator shares the ray math: RAD leaves blend like ordinary splats and
+only LOD parents (opacity > 1) take the Spark kernel.
+
+3DGUT raster, mean over 3 x 500 frames on a 5M-splat PLY: 8.23 ms on
+master, 8.55 ms before, 7.86 ms after, images bit-identical to master.
+1M-splat RAD: 2.15 ms before, 1.75 ms after, images bit-identical to before.
+```
+MrNeRF
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+Thanks a lot, Francesco! This fixes the RAD tile artifacts in 3DGUT properly. I verified it on Linux (RTX 4080, Release):
+The new GPU test fails on the base (mean error ~25/255), and all 9 cases pass on the branch. The 18 renderer contract tests pass too.
+Viewport captures of a garden scene (1M splats, converted to RAD with the CLI), 3 views:
+RAD in 3DGUT used to render as flat tile blocks, at 14 dB PSNR against the source PLY. It is now at 32–35 dB.
+It is also 35–38 dB from RAD in 3DGS with the same LOD cut, and the difference image shows no tile structure.
+Ordinary PLYs in 3DGUT and RAD in 3DGS are bit-identical to master.
+I found one speed cost for ordinary scenes: choosing between the Spark and ordinary evaluators inside the inner raster loop made 3DGUT rasterization 3.9% slower on a 5M-splat PLY with no RAD loaded (8.23 → 8.55 ms, mean of 3 × 500 frames). Reverting just that line restored the time. A [branch] hint did not help, so the cost comes from compiling the Spark kernel into the ordinary loop.
+I hope you don't mind that I pushed a follow-up commit to your branch (ca57959) so we can merge:
+Separate RAD variants: Spark RAD scenes get their own 3DGUT raster variants (rasterize_forward_3dgut_rad, rasterize_forward_3dgut_plain_rad), chosen when the Spark opacity LOD flag is set. The ordinary variant compiles without the RAD path.
+One shared evaluator:
+The ray math is computed once.
+RAD leaves (opacity ≤ 1) blend like ordinary splats, because there the Spark cutoff only removes alpha below the blend threshold.
+Only LOD parents take the Spark kernel.
+Results (3DGUT raster):
+Case
+Before this commit
+After
+Ordinary 5M-splat PLY
+8.55 ms (master: 8.23 ms)
+7.86 ms, 4.5% faster than master
+1M-splat RAD
+2.15 ms
+1.75 ms
+Images are bit-identical to master for PLYs and to your branch for RAD. All 27 Python cases and the renderer gtests pass.
+Thanks again for tracking this down!
+Hide details
+View details
+MrNeRF
+merged commit 74098cd
+into
+MrNeRF:master
+Oct 18, 2026
+7 of 9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Oct 18, 2026
+2026-10-19｜PlayCanvas/GSL SH4、LichtFeld 跨应用拖拽与 OOOSplat 四格式导出
+Shuang-su/gaussian-splatting-daily#77
+Closed
+2026-10-19｜PlayCanvas/GSL SH4、LichtFeld 跨应用拖拽与 OOOSplat 四格式导出
+Shuang-su/gaussian-splatting-daily#78
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

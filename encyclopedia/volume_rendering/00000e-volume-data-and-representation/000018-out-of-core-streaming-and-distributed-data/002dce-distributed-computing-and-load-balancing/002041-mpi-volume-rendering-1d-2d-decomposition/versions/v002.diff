@@ -1,0 +1,263 @@
+--- v001.md
++++ v002.md
+@@ -58,5 +58,5 @@
+     *   Rank 0 scatters the appropriate sub-volumes to each process using `MPI_Send`/`MPI_Recv` or `MPI_Scatterv` [S1, S2, S4, unofficial].
+ 4.  **Local Ray Casting:** Each process $p$ renders its assigned sub-domain:
+-    *   Iterate over local pixels $(x, y)$ in the sub-domain [S1, S2, S4, unofficial].
++    *   Iterate over local pixels $(i, j)$ in the sub-domain [S2, S4, unofficial].
+     *   For each pixel, initialize accumulated color $C' = (0,0,0)$ and accumulated opacity $A' = 0$ [S1, S2, unofficial].
+     *   March along the Z-axis from $z=0$ to $z=Z$ with step `step_size`:
+@@ -90,20 +90,16 @@
+ from mpi4py import MPI
+ import bisect
+-
+-def interpolate_1d(keys, values, target):
+-    """Linear interpolation using sorted keys and values."""
++import sys
++
++def interpolate_tf(keys, values, target):
+     if target <= keys[0]:
+         return values[0]
+     if target >= keys[-1]:
+         return values[-1]
+-    
+     idx = bisect.bisect_right(keys, target) - 1
+-    # Clamp index to valid range
+     if idx >= len(keys) - 1:
+         idx = len(keys) - 2
+-        
+     k1, k2 = keys[idx], keys[idx+1]
+     v1, v2 = values[idx], values[idx+1]
+-    
+     if k2 == k1:
+         return v1
+@@ -111,20 +107,22 @@
+     return (1 - alpha) * v1 + alpha * v2
+ 
+-def ray_cast_subdomain(local_data, opacity_keys, opacity_values, color_keys, color_values, step_size, x_start, y_start):
+-    """
+-    Renders a sub-domain of the volume.
+-    local_data: numpy array of shape (H_local, W_local, Z)
+-    Returns: sub_image (H_local, W_local, 3), sub_opacity (H_local, W_local), early_terminations
+-    """
++def find_best_split(num_processes):
++    best_split = (1, num_processes)
++    for i in range(1, int(np.sqrt(num_processes)) + 1):
++        if num_processes % i == 0:
++            j = num_processes // i
++            if i <= j:
++                best_split = (j, i)
++    return best_split
++
++def ray_cast_subdomain(local_data, opacity_keys, opacity_values, color_keys, color_values, step_size):
+     H, W, Z = local_data.shape
+     sub_image = np.zeros((H, W, 3), dtype=np.float32)
+     sub_opacity = np.zeros((H, W), dtype=np.float32)
+     early_terminations = 0
+-    
+     for i in range(H):
+         for j in range(W):
+             acc_r, acc_g, acc_b = 0.0, 0.0, 0.0
+             acc_a = 0.0
+-            
+             z_sample = 0.0
+             while z_sample < Z - 1:
+@@ -132,15 +130,8 @@
+                 z_ceil = z_floor + 1
+                 alpha_z = z_sample - z_floor
+-                
+-                # Interpolate volume value
+                 v1 = local_data[i, j, z_floor]
+                 v2 = local_data[i, j, z_ceil]
+                 v_sample = (1 - alpha_z) * v1 + alpha_z * v2
+-                
+-                # Evaluate Transfer Functions
+-                op = interpolate_1d(opacity_keys, opacity_values, v_sample)
+-                
+-                # Interpolate Color
+-                # Find index for color keys
++                op = interpolate_tf(opacity_keys, opacity_values, v_sample)
+                 idx_c = bisect.bisect_right(color_keys, v_sample) - 1
+                 if idx_c >= len(color_keys) - 1:
+@@ -149,40 +140,28 @@
+                 c1 = color_values[idx_c]
+                 c2 = color_values[idx_c+1]
+-                
+                 if k2 == k1:
+                     alpha_c = 0
+                 else:
+                     alpha_c = (v_sample - k1) / (k2 - k1)
+-                    
+                 r_sample = (1 - alpha_c) * c1[0] + alpha_c * c2[0]
+                 g_sample = (1 - alpha_c) * c1[1] + alpha_c * c2[1]
+                 b_sample = (1 - alpha_c) * c1[2] + alpha_c * c2[2]
+-                
+-                # Front-to-Back Compositing
+                 one_minus_acc_a = 1.0 - acc_a
+                 factor = one_minus_acc_a * op
+-                
+                 acc_r += factor * r_sample
+                 acc_g += factor * g_sample
+                 acc_b += factor * b_sample
+                 acc_a += factor
+-                
+-                # Early Termination
+-                if acc_a >= 0.97: # Threshold from [S1, unofficial]
++                if acc_a >= 0.97:
+                     early_terminations += 1
+                     break
+-                
+-                # Clamping
+                 if acc_a > 1.0:
+                     acc_a = 0.999
+                     break
+-                    
+                 z_sample += step_size
+-            
+             sub_image[i, j, 0] = acc_r
+             sub_image[i, j, 1] = acc_g
+             sub_image[i, j, 2] = acc_b
+             sub_opacity[i, j] = acc_a
+-            
+     return sub_image, sub_opacity, early_terminations
+ 
+@@ -192,22 +171,17 @@
+     size = comm.Get_size()
+     
+-    # 1. Parse Arguments (Rank 0)
+     if rank == 0:
+         filename = sys.argv[1]
+         partitioning = int(sys.argv[2])
+         step_size = float(sys.argv[3])
+-        # ... parse bounding box ...
+-        
+-        # Load TFs
++        x_min, x_max, y_min, y_max = int(sys.argv[4]), int(sys.argv[5]), int(sys.argv[6]), int(sys.argv[7])
++        
+         opacity_dict = load_opacity_tf("opacity_TF.txt")
+         color_dict = load_color_tf("color_TF.txt")
+-        
+         opacity_keys = np.array(sorted(opacity_dict.keys()))
+         opacity_values = np.array([opacity_dict[k] for k in opacity_keys])
+-        
+         color_keys = np.array(sorted(color_dict.keys()))
+         color_values = np.array([color_dict[k] for k in color_keys])
+         
+-        # Broadcast TFs
+         comm.bcast(opacity_keys, root=0)
+         comm.bcast(opacity_values, root=0)
+@@ -215,65 +189,55 @@
+         comm.bcast(color_values, root=0)
+         
+-        # Load Volume
+         volume = np.fromfile(filename, dtype=np.float32)
+-        # ... reshape and transpose to (X, Y, Z) ...
+-        
+-        # Decompose
++        z_dim, y_dim, x_dim = 400, 2000, 2000
++        volume = volume.reshape((z_dim, y_dim, x_dim))
++        volume = np.transpose(volume, (2, 1, 0))
++        volume = volume[x_min:x_max+1, y_min:y_max+1, :]
++        volume = np.ascontiguousarray(volume)
++        
+         if partitioning == 1:
+-            # 1D Decomposition
+             chunk_size = volume.shape[0] // size
+             remainder = volume.shape[0] % size
+-            # Calculate start/end for each rank
+-            # ...
+-        elif partitioning == 2:
+-            # 2D Decomposition
+-            # Find best split Nx, Ny
+-            # ...
++            sendcounts = [chunk_size + 1 if i < remainder else chunk_size for i in range(size)]
++            displs = [sum(sendcounts[:i]) for i in range(size)]
++        else:
++            num_splits_x, num_splits_y = find_best_split(size)
++            chunk_x = volume.shape[0] // num_splits_x
++            chunk_y = volume.shape[1] // num_splits_y
++            sendcounts = [chunk_x * chunk_y * volume.shape[2] for _ in range(size)]
++            displs = [i * sendcounts[0] for i in range(size)]
+             
+-        # Scatter Volume Data
+-        # ...
++        local_data = np.empty(0, dtype=np.float32)
++        comm.Scatterv([volume, sendcounts, displs, MPI.FLOAT], local_data, root=0)
+     else:
+-        # Receive TFs
+         opacity_keys = comm.bcast(None, root=0)
+         opacity_values = comm.bcast(None, root=0)
+         color_keys = comm.bcast(None, root=0)
+         color_values = comm.bcast(None, root=0)
+-        
+-        # Receive Volume Data
+-        # ...
+-
+-    # 2. Local Rendering
++        local_data = np.empty(0, dtype=np.float32)
++        comm.Scatterv(None, [local_data, MPI.FLOAT], root=0)
++
+     start_time = MPI.Wtime()
+-    sub_image, sub_opacity, early_terms = ray_cast_subdomain(
+-        local_data, opacity_keys, opacity_values, color_keys, color_values, step_size, x_start, y_start
+-    )
++    sub_image, sub_opacity, early_terms = ray_cast_subdomain(local_data, opacity_keys, opacity_values, color_keys, color_values, step_size)
+     end_time = MPI.Wtime()
+     local_time = end_time - start_time
+     
+-    # 3. Gather Results
+     if rank == 0:
+-        final_image = np.zeros((global_H, global_W, 3), dtype=np.float32)
++        final_image = np.zeros((x_max - x_min + 1, y_max - y_min + 1, 3), dtype=np.float32)
+         max_time = local_time
+-        
+-        # Place own sub-image
+-        # ...
+-        
++        total_early = early_terms
++        # Assembly of local sub_image into final_image would follow decomposition bounds
++        # Not given in the sources for the exact indexing loop, so omitted.
+         for r in range(1, size):
+             recv_data = comm.recv(source=r, tag=0)
+             recv_sub_image, recv_early_terms, recv_time = recv_data
+-            
+-            # Place recv_sub_image into final_image at correct location
+-            # ...
+-            
++            # Place recv_sub_image into final_image at correct location based on decomposition
++            # Not given in the sources for the exact indexing loop, so omitted.
+             max_time = max(max_time, recv_time)
+-            
+-        # Save final_image
++            total_early += recv_early_terms
+         save_image(final_image, "output.png")
+-        print(f"Max Time: {max_time}, Early Terminations: {total_early_terms}")
++        print(f"Max Time: {max_time}, Early Terminations: {total_early}")
+     else:
+         comm.send((sub_image, early_terms, local_time), dest=0, tag=0)
+-
+-if __name__ == "__main__":
+-    main()
+ ```
+ 
+@@ -286,5 +250,5 @@
+ ### Edge Cases and Pitfalls
+ *   **Index Clamping:** When using binary search (`bisect`) for transfer function interpolation, if the index equals the length of the keys array, it must be clamped to the last valid index to prevent out-of-bounds access [S2, S4, unofficial].
+-*   **Non-Divisible Dimensions:** When dividing volume dimensions among processes, the last process in a dimension receives the remainder of the division to ensure all data is covered [S2, S4, unofficial].
++*   **Non-Divisible Dimensions:** When dividing volume dimensions among processes, the first processes in a dimension receive the remainder of the division to ensure all data is covered [S4, unofficial].
+ *   **Opacity Clamping:** If accumulated opacity exceeds 1.0, it is clamped to 0.999 and the ray loop breaks to prevent over-saturation [S3, unofficial].
+ *   **RGB Clamping:** RGB channels are clamped to 1.0 if they exceed this value [S3, S4, unofficial].
+@@ -313,5 +277,5 @@
+ ## Operating characteristics
+ 
+-*   **Time Complexity:** $O(N \cdot P^{-1})$ for rendering, where $N$ is the number of voxels/rays and $P$ is the number of processes, assuming perfect load balancing [S2, S4, unofficial].
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** $O(V/P)$ per process, where $V$ is the volume size [S2, S4, unofficial].
+ *   **Performance:** Early ray termination can reduce execution time by up to 15% [S1, unofficial]. Performance scales with the number of processes, but communication overhead for gathering results can become a bottleneck on the root process [S3, S4, unofficial].
+@@ -319,5 +283,5 @@
+ *   **Limitations:** Static decomposition may lead to load imbalance if the volume has varying density [S2, unofficial]. Root process bottleneck for image assembly [S3, unofficial].
+ *   **When to Use:** Large static volumes on distributed memory clusters where load balancing is relatively uniform [S2, S4, unofficial].
+-*   **When Not to Use:** Highly dynamic scenes or volumes with extreme density variations requiring dynamic load balancing [S2, unofficial].
++*   **When Not to Use:** Not given in the sources.
+ 
+ ## Background

@@ -1,0 +1,118 @@
+--- v001.md
++++ v002.md
+@@ -8,26 +8,26 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A triangle mesh (vertices and indices), voxel grid dimensions ($Width, Height, Depth$), and voxel unit size.
++*   **Input:** A triangle mesh (vertices and indices), voxel grid dimensions ($Width, Height, Depth$), and voxel unit size [S1].
+ *   **Output:** A `GPUVoxelData` object containing the populated voxel buffer and grid metadata [S1].
+ 
+ **Data Structures:**
+-*   **Voxel Buffer:** A 1D array or structured buffer representing the 3D grid. Access is performed via a helper function `get_voxel_index(x, y, z)` which maps 3D coordinates to the buffer offset [S1].
++*   **Voxel Buffer:** A 1D array or structured buffer representing the 3D grid [S1]. Access is performed via a helper function `get_voxel_index(x, y, z)` which maps 3D coordinates to the buffer offset [S1].
+ *   **Mesh Buffers:** Vertex and triangle buffers (`vertBuffer`, `triBuffer`) are bound to the compute shader context before dispatch and released afterward [S1].
+ 
+ **Parameters:**
+-*   **Thread Group Size:** 8x8x1 threads per group ($ThreadX=8, ThreadY=8, ThreadZ=1$) [S1].
++*   **Thread Group Size:** 8×8×1 threads per group ($ThreadX=8, ThreadY=8, ThreadZ=1$) [S1].
+ *   **Grid Limits:** `_Width`, `_Height`, and `_Depth` define the maximum bounds of the voxel grid [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Create a compute shader kernel named "Volume" and bind the voxel buffer to it using a set buffer command (e.g., `SetBuffer`) [S1].
+-2.  **Dispatch Calculation:** Calculate the number of thread groups to dispatch. The X and Y group counts are derived from dividing the grid width and height by the thread group dimensions ($ThreadX, ThreadY$), adding 1 to each to handle remainders (ceiling division). The Z group count is typically 1 or derived from $ThreadZ$ [S1].
++1.  **Initialization:** Create a compute shader kernel named "Volume" and bind the voxel buffer to it using a set buffer command [S1].
++2.  **Dispatch Calculation:** Calculate the number of thread groups to dispatch. The X and Y group counts are derived from dividing the grid width and height by the thread group dimensions, adding 1 to each to handle remainders (ceiling division). The Z group count uses the thread group size or 1 [S1].
+     *   $GroupsX = \lfloor Width / ThreadX \rfloor + 1$
+     *   $GroupsY = \lfloor Height / ThreadY \rfloor + 1$
+-    *   $GroupsZ = \lfloor Depth / ThreadZ \rfloor$ (or 1 if Z is handled in the loop) [S1].
++    *   $GroupsZ = ThreadZ$ (or 1) [S1].
+ 3.  **Kernel Execution:** Dispatch the compute shader with the calculated group counts [S1].
+ 4.  **Per-Thread Processing (Inside Kernel):**
+     *   Retrieve the global thread ID $(x, y, z)$ from `SV_DispatchThreadID` [S1].
+     *   Clamp or check bounds: If $x \ge Width$ or $y \ge Height$, return immediately [S1].
+-    *   Iterate through all Z depths from $0$ to $Depth - 1$ [S1].
++    *   Iterate through all Z depths from 0 to $Depth - 1$ [S1].
+     *   For each Z, calculate the voxel index and retrieve the voxel data from the buffer [S1].
+     *   Perform the voxelization logic (triangle-voxel intersection) similar to the CPU implementation [S1].
+@@ -41,12 +41,10 @@
+ # groups_x = (width // 8) + 1
+ # groups_y = (height // 8) + 1
+-# groups_z = 1 (assuming depth loop is inside kernel)
++# groups_z = 1
+ 
+-[numthreads(8, 8, 1)]
+-void Volume(uint3 id : SV_DispatchThreadID):
+-    x = int(id.x)
+-    y = int(id.y)
+-    
+-    # Boundary check
++def Volume(id_x, id_y, id_z, _Width, _Height, _Depth, _VoxelBuffer, get_voxel_index):
++    x = int(id_x)
++    y = int(id_y)
++
+     if x >= _Width:
+         return
+@@ -54,40 +52,33 @@
+         return
+ 
+-    # Iterate through Z depth
+-    for z in range(0, _Depth):
+-        # Get voxel reference
++    for z in range(_Depth):
+         voxel_index = get_voxel_index(x, y, z)
+         voxel = _VoxelBuffer[voxel_index]
+-        
+-        # Perform triangle-voxel intersection logic
+-        # This part mirrors the CPU implementation's core logic
+-        # [G] Specific intersection algorithm (e.g., slab method) is not detailed in source,
+-        # but is implied to be executed here per voxel.
++        # [G] The source states processing continues "Almost the same as in CPUVoxelizer.Voxelize",
++        # but does not provide the specific intersection algorithm details.
+         process_voxel(voxel)
+ 
+-# Host-side setup (C#/Unity-like syntax)
+-def run_gpu_voxelization(mesh, width, height, depth, unit):
++def run_gpu_voxelization(mesh, width, height, depth, unit, voxel_buffer, vert_buffer, tri_buffer):
+     # 1. Initialize kernel and bind buffers
+-    volume_ker = new Kernel(voxelizer, "Volume")
+-    voxelizer.SetBuffer(volume_ker.Index, "_VoxelBuffer", voxelBuffer)
+-    
++    volume_ker = create_compute_kernel("Volume")
++    bind_buffer(volume_ker, "_VoxelBuffer", voxel_buffer)
++
+     # 2. Dispatch
+-    # Thread group size is 8x8x1
+     thread_x = 8
+     thread_y = 8
+     thread_z = 1
+-    
++
+     groups_x = (width // thread_x) + 1
+     groups_y = (height // thread_y) + 1
+-    groups_z = 1 # Or (depth // thread_z) + 1 if Z was not looped, but source loops Z
+-    
+-    voxelizer.Dispatch(volume_ker.Index, groups_x, groups_y, groups_z)
+-    
++    groups_z = 1
++
++    dispatch_compute_shader(volume_ker, groups_x, groups_y, groups_z)
++
+     # 3. Cleanup
+-    vertBuffer.Release()
+-    triBuffer.Release()
+-    
++    release_buffer(vert_buffer)
++    release_buffer(tri_buffer)
++
+     # 4. Return result
+-    return GPUVoxelData(voxelBuffer, width, height, depth, unit)
++    return GPUVoxelData(voxel_buffer, width, height, depth, unit)
+ ```
+ 
+@@ -102,5 +93,5 @@
+ *   **Strengths:** Significant speedup for real-time applications; leverages GPU parallelism for the XY iteration loop [S1].
+ *   **Limitations:** Coloring/texture application is more difficult compared to rendering-based methods; the method relies on explicit triangle-voxel intersection which can be computationally intensive per voxel [S1].
+-*   **When to use:** When real-time voxelization of complex meshes is required and the primary bottleneck is the iteration over the voxel grid rather than the intersection calculation itself.
++*   **When to use:** When real-time voxelization of complex meshes is required and the primary bottleneck is the iteration over the voxel grid rather than the intersection calculation itself [S1].
+ *   **When not to use:** When accurate texture mapping or coloring of voxels is a primary requirement, as rendering-based methods (projecting to 3D texture) are easier for coloring [S1].
+ 

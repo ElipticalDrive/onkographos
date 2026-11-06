@@ -1,0 +1,162 @@
+# Volumetric Cloud Raymarching
+
+Also called: Cloud Raymarching, Real-Time Volumetric Clouds, Sky Cloud Raymarching, Volumetric Cloud Rendering
+
+## Overview
+Volumetric Cloud Raymarching renders cumulus and stratiform clouds by tracing rays through a 3D procedural density field, integrating light attenuation via Beer's Law and scattering using phase functions [S1, S2, S3, S4, S8, unofficial]. Unlike solid geometry raymarching which terminates on hit, this method accumulates color and transmittance over fixed or adaptive steps, allowing for soft self-shadowing and god rays [S2, S8, unofficial]. It differs from its parent [Weather & Cloud Parameterization](3617-weather-cloud-parameterization.md) by implementing the actual radiative transfer integration, and from [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by focusing on the real-time fragment shader traversal rather than just the noise generation [S7, S8, unofficial].
+
+## How it works
+**Inputs:** Camera position ($\mathbf{c}$), ray direction ($\mathbf{d}$), cloud layer bounds (bottom/top altitudes or bounding box), sun direction ($\mathbf{s}$), sun color, ambient color, and noise textures (shape/detail) [S3, S4, S7, S8, unofficial].
+**Outputs:** Final pixel color ($\mathbf{C}_{out}$) and alpha ($\alpha_{out}$) [S4, S8, unofficial].
+
+**Data Structures:**
+*   **Cloud Config:** Struct containing `cloudBottom` (float, e.g., 1500.0m), `cloudTop` (float, e.g., 4000.0m), `maxSteps` (int, e.g., 64), `lightSteps` (int, e.g., 6), `stepSize` (float, e.g., 45.0m), `coverage` (float, e.g., 0.5), `densityMultiplier` (float) [S4, unofficial].
+*   **Noise Textures:** 3D textures for shape (e.g., $128^3$) and detail (e.g., $32^3$) noise, sampled via trilinear interpolation [S3, S5, S7, unofficial].
+*   **Uniforms:** `sunDirection` (vec3), `sunColor` (vec3), `ambientColor` (vec3), `time` (float) [S4, unofficial].
+
+**Steps:**
+
+1.  **Ray Initialization:**
+    *   Compute ray origin $\mathbf{r}_o$ from camera position and ray direction $\mathbf{r}_d$ from screen coordinates (NDC) using inverse view-projection matrix [S5, S9, unofficial].
+    *   If rendering a sky dome, $\mathbf{r}_o = \mathbf{c}$ and $\mathbf{r}_d$ points to the horizon [S9, unofficial].
+    *   Check if $\mathbf{r}_d$ points below the horizon (e.g., $\mathbf{r}_d.y \le 0.001$). If so, return sky color with full transmittance [S4, S5, unofficial].
+
+2.  **Intersection with Cloud Volume:**
+    *   **Slab Method:** Calculate entry $t_{near}$ and exit $t_{far}$ distances for the ray intersecting the horizontal slab defined by `cloudBottom` and `cloudTop` [S4, unofficial]:
+        $$ t_{near} = \max(0.0, \frac{h_{bottom} - r_{o,y}}{r_{d,y}}) $$
+        $$ t_{far} = \frac{h_{top} - r_{o,y}}{r_{d,y}} $$
+        If $t_{far} \le t_{near}$, the ray misses the cloud layer; return sky color [S4, unofficial].
+    *   **Box/Sphere Method:** Alternatively, intersect with a bounding box or spherical shell to determine $t_{entry}$ and $t_{exit}$ [S2, S3, S11, unofficial]. Clamp $t_{entry}$ to 0 if the camera is inside the volume [S11, unofficial].
+
+3.  **Marching Loop:**
+    *   Initialize `transmittance` $T = 1.0$, `accumulated_color` $\mathbf{C} = \mathbf{0}$ [S2, S4, S6, unofficial].
+    *   Calculate `stepSize` $\Delta t = \min(\text{config.stepSize}, \frac{t_{far} - t_{near}}{\text{config.maxSteps}})$ [S4, unofficial].
+    *   Loop $i$ from 0 to `maxSteps`:
+        *   If $T < 0.01$ (or $0.005$ in some implementations), break loop (early exit) [S2, S3, S4, S5, S7, unofficial].
+        *   Current position $\mathbf{p} = \mathbf{r}_o + \mathbf{r}_d \cdot (t_{near} + i \cdot \Delta t)$ [S4, S8, unofficial].
+        *   **Density Sampling:** Compute density $D(\mathbf{p})$ using procedural noise (Perlin/Worley FBM) [S2, S7, S8, unofficial].
+            *   Example: $D = \max(0, (\text{ShapeNoise}(\mathbf{p}) - \text{threshold}) \cdot \text{multiplier})$ [S7, unofficial].
+            *   Apply height falloff and edge falloff if using box bounds [S3, unofficial].
+        *   If $D > 0.001$:
+            *   **Light Marching (Self-Shadowing):**
+                *   Initialize `lightOpticalDepth` $\tau_{sun} = 0.0$ [S4, unofficial].
+                *   Loop $l$ from 1 to `lightSteps`:
+                    *   $\mathbf{p}_l = \mathbf{p} + l \cdot \text{lightStep} \cdot \mathbf{s}$ [S4, unofficial].
+                    *   $\tau_{sun} += D(\mathbf{p}_l) \cdot \text{lightStep}$ [S4, unofficial].
+                *   Calculate light transmittance $T_{light}$:
+                    *   Simple Beer's Law: $T_{light} = e^{-\tau_{sun} \cdot 0.035}$ [S4, unofficial].
+                    *   Or Powder Sugar Effect: $T_{light} = e^{-\tau_{sun} \cdot 0.04} (1 - e^{-\tau_{sun} \cdot 0.08})$ [S4, unofficial].
+            *   **Phase Function:** Calculate scattering angle cosine $\cos\theta = \mathbf{r}_d \cdot \mathbf{s}$ [S4, unofficial].
+                *   Henyey-Greenstein: $P(\cos\theta, g) = \frac{1}{4\pi} \frac{1-g^2}{(1+g^2-2g\cos\theta)^{1.5}}$ [S4, unofficial].
+                *   Dual-lobe model blends forward ($g \approx 0.82$) and backward ($g \approx -0.22$) scattering [S4, S10, unofficial].
+            *   **Accumulation:**
+                *   Ambient factor based on height: $A = 0.6 + 0.4 \frac{p_y - h_{bottom}}{h_{top} - h_{bottom}}$ [S4, unofficial].
+                *   Sun contribution: $\mathbf{C}_{sun} = \mathbf{C}_{sun} \cdot T_{light} \cdot P(\cos\theta) \cdot D \cdot \Delta t \cdot T$ [S4, S8, unofficial].
+                *   Ambient contribution: $\mathbf{C}_{amb} = \mathbf{C}_{amb} \cdot A \cdot D \cdot \Delta t \cdot T$ [S4, unofficial].
+                *   $\mathbf{C} += \mathbf{C}_{sun} + \mathbf{C}_{amb}$ [S4, unofficial].
+                *   Update transmittance: $T \leftarrow T \cdot e^{-D \cdot \Delta t \cdot \sigma_t}$, where $\sigma_t$ is extinction coefficient (e.g., 0.035) [S4, S8, unofficial].
+
+4.  **Final Compositing:**
+    *   $\mathbf{C}_{out} = \mathbf{C} + \mathbf{C}_{sky} \cdot T$ [S4, S9, unofficial].
+    *   $\alpha_{out} = 1 - T$ [S2, S4, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_clouds(ray_origin, ray_dir, config, time):
+    # 1. Horizon Check
+    if ray_dir.y <= 0.001:
+        return sky_color, 1.0
+
+    # 2. Slab Intersection
+    t_near = max(0.0, (config.cloud_bottom - ray_origin.y) / ray_dir.y)
+    t_far = (config.cloud_top - ray_origin.y) / ray_dir.y
+    
+    if t_far <= t_near:
+        return sky_color, 1.0
+
+    # 3. Initialization
+    step_size = min(config.step_size, (t_far - t_near) / config.max_steps)
+    transmittance = 1.0
+    accumulated_color = vec3(0.0)
+    
+    # 4. Marching
+    for i in range(config.max_steps):
+        if transmittance < 0.01:
+            break
+            
+        current_t = t_near + i * step_size
+        pos = ray_origin + ray_dir * current_t
+        
+        # Density Sampling
+        density = sample_cloud_density(pos, time, config) * config.density_multiplier
+        
+        if density > 0.001:
+            # Light Marching
+            light_optical_depth = 0.0
+            for l in range(1, config.light_steps + 1):
+                light_pos = pos + config.sun_direction * (l * config.light_step)
+                light_optical_depth += sample_cloud_density(light_pos, time, config) * config.light_step
+            
+            # Light Transmittance (Beer's Law variant)
+            light_trans = exp(-light_optical_depth * 0.035)
+            
+            # Phase Function
+            cos_theta = dot(ray_dir, config.sun_direction)
+            phase = henyey_greenstein(cos_theta, config.g_forward)
+            
+            # Ambient Factor
+            height_factor = (pos.y - config.cloud_bottom) / (config.cloud_top - config.cloud_bottom)
+            ambient_factor = 0.6 + 0.4 * height_factor
+            
+            # Accumulation
+            sun_term = config.sun_color * light_trans * phase
+            amb_term = config.ambient_color * ambient_factor
+            contrib = (sun_term + amb_term) * density * step_size * transmittance
+            accumulated_color += contrib
+            
+            # Update Transmittance
+            transmittance *= exp(-density * step_size * 0.035)
+
+    # 5. Final Color
+    final_color = accumulated_color + sky_color * transmittance
+    alpha = 1.0 - transmittance
+    return final_color, alpha
+```
+
+## Subtopics
+
+### Cloud Layer Geometry Definition
+Models the cloud boundary as a spherical shell between an inner radius (cloud base, e.g., 1,500m) and an outer radius (cloud top, e.g., 4,000m) around the planet center [S11, unofficial]. Rays are intersected with the inner and outer spheres, and those pointing away from the boundary volume are discarded [S11, unofficial]. The ray start is clamped to the camera position if inside the layer [S11, unofficial].
+
+### Secondary Light-Cone Self-Shadowing
+A technique where, at every primary ray step with non-zero density, secondary ray samples march along the direct sun vector to integrate optical shadow depth [S4, unofficial]. This generates self-shadowing effects. The optical depth is accumulated by adding `sampled_density * lightStep` for each step [S4, unofficial]. Light transmittance is calculated as $T_{\text{light}} = e^{-\tau_{\text{sun}} \times 0.035}$ [S4, unofficial].
+
+### Smoke Rendering
+Borrows volumetric cloud literature, multiplying the end result by smoke color for realism [S12, unofficial]. Uses a density $d$, precipitation constant $p$ (unused), angle $\theta$, and eccentricity $g$ (default 0.2) [S12, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of primary ray steps and $M$ is the number of light march steps per occupied voxel [S4, S8, unofficial].
+*   **Memory Complexity:** $O(1)$ per pixel for the shader, plus texture memory for noise volumes ($128^3$ or $32^3$) [S3, S5, S7, unofficial].
+*   **Performance:** Real-time on modern GPUs. AAA games often render at quarter resolution with TAA upscale [S8, unofficial]. Optimizations include early exit on low transmittance, fixed step sizes, and low-resolution shape noise sampling with high-resolution detail fallback (windback logic) [S3, unofficial].
+*   **Strengths:** Photorealistic, infinite resolution, dynamic lighting, soft shadows [S6, S8, unofficial].
+*   **Limitations:** Computationally expensive due to nested loops (light marching); prone to horizon artifacts if not faded [S5, S8, unofficial]; requires careful tuning of noise scales and thresholds [S7, S9, unofficial].
+
+## Background
+Originating from production techniques for games like *Horizon Zero Dawn* (Schneider & Vos, SIGGRAPH 2015), this method models clouds as continuous participating media [S4, unofficial]. It has been adapted for WebGPU, Unity, and OpenGL, often using GPU-computed noise textures to reduce generation time from minutes to seconds [S7, S4, unofficial].
+
+## Sources
+[S1] mstampfli/voxelG, https://github.com/mstampfli/voxelG, fetched 2026-10-24 (unofficial)
+[S2] Delyc/rayMarched-volumetric-rendering, https://github.com/Delyc/rayMarched-volumetric-rendering, fetched 2026-10-26 (unofficial)
+[S3] OskarSchramm/Volumetric-Clouds, https://github.com/OskarSchramm/Volumetric-Clouds, fetched 2026-10-26 (unofficial)
+[S4] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)
+[S5] harkawataryan/Volumetric-Cloud-Renderer, https://github.com/harkawataryan/Volumetric-Cloud-Renderer, fetched 2026-10-27 (unofficial)
+[S6] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)
+[S7] Volumetric Clouds - GitHub Pages, https://mextrin.github.io/Clouds.html, fetched 2026-10-29 (unofficial)
+[S8] Real‐Time Volumetric Cloud Rendering in Unity Using Raymarching, http://unityqueen.com/2026/08/29/real-time-volumetric-cloud-rendering-in-unity-using-raymarching/, fetched 2026-10-29 (unofficial)
+[S9] Real Time Volumetric Clouds, GLSL and Three - The Front Dev, https://www.thefrontdev.co.uk/real-time-volumetric-clouds-glsl-and-three/, fetched 2026-10-29 (unofficial)
+[S10] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)
+[S11] Volumetric Clouds with 3D Perlin-Worley Noise in OpenGL, https://salivity.github.io/opengl/article/volumetric-clouds-with-3-d-perlin-worley-noise-in-open-gl, fetched 2026-10-29 (unofficial)
+[S12] Fire Simulation and Rendering - GitHub Pages, https://cs184-firesim.github.io/final-report/, fetched 2026-10-27 (unofficial)

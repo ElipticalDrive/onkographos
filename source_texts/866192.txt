@@ -1,0 +1,156 @@
+BabylonJS Editor for Touch Devices. Contribute to hideoutgames/BabylonSlate development by creating an account on GitHub.
+
+Cull a world view's meshes hidden behind occluders, behind a test flag by hideoutgames · Pull Request #1409 · hideoutgames/BabylonSlate · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hideoutgames
+commented
+Oct 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Occlusion culling, step 2: the wiring. It is off by default; setSceneOcclusionCulling(scene, true) is the only switch until the setting, console command and docs land in the next PR.
+What changes
+ViewOcclusion (packages/render/src/view-occlusion.ts): one per world view.
+It runs inside CameraOutputCullTask, after the frustum cull and leaveOutHidden, and before worldObjectList.
+It rasterises the occluders in the list into the CPU buffer from Add a CPU occlusion buffer for conservative box culling #1403, then replaces the cull's output with its own list without the meshes wholly behind them. This is copy-on-write: the input list and Babylon's state are untouched.
+The colour pass, its blended depth pre-pass, the geometry tasks, the water split and Screen-Space Shadows draw the filtered list.
+Shadow casters, captures, mirrors, probes, picking and outline masks build their own lists, so a hidden mesh still casts its shadow.
+Readiness probes walk the cull's input, so hidden meshes still compile.
+Which views: only SceneRenderCoordinator with occlusion. create-engine passes it for the editor's, Play's and the player's world view. Previews, Scene Layers and auxiliary captures never get it.
+Occluders: meshes with a registered convex inner shape. createPrimitiveMesh registers shapes for box, sphere and cylinder primitives (inscribed), and for planes (single-sided, so they occlude only with back-face culling off).
+An occluder only counts while it is opaque, not deforming, not a helper, in the world rendering group, and at least 16 texels in radius on screen.
+Occluders are ranked by screen size up to OCCLUDER_TRIANGLE_BUDGET (3000 triangles).
+A box draws only its front faces. The winding comes from the parity of the world matrix and the view, so mirrored meshes and right-handed scenes work.
+Never culled:
+always-drawn meshes (keepsDrawingOutsideView, alwaysSelectAsActiveMesh)
+editor helpers
+rendering groups after the world's (a later group may clear depth first)
+materials with their own depth function
+meshes in non-perspective cameras, and frames drawn under skipFrustumClipping
+First-draw rule: on WebGL2, a mesh whose colour pass Effect has not drawn yet (effectDrawnOn === false) is kept, so its first draw never waits for it to come into view.
+WebGPU warm draws do not depend on the cull list. warmRequestedPipelines walks the meshes the probes requested, after the main pass's draws every frame. The gate's webgpu case below shows it: no pipelines waited on, and none created when the hidden receiver reappears.
+Diagnostics: occlusionDiagnostics() (tested, culled, occluders, triangles, ms) and occludedMeshes() on the graph and the coordinator.
+Changes to occlusion-raster.ts (from Add a CPU occlusion buffer for conservative box culling #1403):
+Box test: a box is now tested against at most 8×8 texels at its mip level, instead of 2×2. At a coarse level, the 2×2 blocks reached past an occluder's edge, so boxes behind a wall were almost never culled.
+Row spans: a triangle fills each row's span between its edge crossings. A crossing is computed from the edge's endpoints in a fixed order, so two triangles sharing an edge leave no seam.
+Erosion: the per-occluder erosion is now separable.
+Cost
+The first CI run timed out in the gate's occlusion case under coverage instrumentation, which exposed the real cost: 200 crates behind a wall and a floor took 4 ms a frame natively.
+With front faces only, the span fill, separable erosion and the 16-texel minimum, the same scene takes 0.76 ms with the same 194 meshes culled. Under coverage, the gate's occlusion case now takes about 1.2 s, in line with the other cases. Adaptive back-off and tuning on device stay in PR 5.
+Tests
+view-occlusion.test.ts:
+copy-on-write behaviour
+each exemption
+occluder materials that hide nothing
+single-sided planes
+instances (culled by their own bounds; an instance of an occluder occludes)
+the first-draw rule, on a tracked and an untracked Engine
+front faces only for plain, mirrored and right-handed views (each parity factor pinned by a failing mutation)
+the triangle budget
+Lighting CI gate (compile-hold-acceptance.test.ts): a new case with occlusion forced on and the crate (the lights' receiver) hidden behind a wall.
+The whole lighting script compiles nothing and waits on no pipeline.
+The crate is culled, and it compiles nothing when the wall moves away and it reappears.
+It runs on the sync, parallel and webgpu driver models.
+This PR also gives the Screen-Space Shadows case the painter that Add the engine's unlit Material, first drawn by Painter 2D #1405's script needs; Give the gate's Screen-Space Shadows case the script's painter #1410 carries that fix alone.
+e2e/occlusion-culling.spec.ts, on WebGL2 and WebGPU:
+The image is byte-identical with culling off and on.
+Draws fall from 37 to 12, and 25 of the 31 crates behind the wall are culled. The ones whose boxes reach the wall's edge on screen are kept, as the conservative test intends. Nothing in view is culled.
+A hidden caster is culled, and its shadow still draws: removing that caster changes the image.
+Raster fuzz test: still finds no false "occluded" box, and the erosion, farthest-depth and rectangle mutations still fail it.
+Checks run: the vitest babylon config on the new tests, the gate (also under coverage), framegraph-forward-scene, play-view-culling, scene-render-coordinator and create-engine.play; tsc --noEmit for packages/render and tsc -b for apps/editor; eslint on the changed files; the e2e spec on desktop-chrome.
+Cull a world view's meshes hidden behind occluders, behind a test flag
+…
+23104fd
+```
+ViewOcclusion filters the camera cull's output after the frustum cull,
+copy-on-write, so the colour pass, geometry tasks, water split and
+Screen-Space Shadows skip meshes wholly behind primitive occluders while
+shadows, captures, mirrors, probes, picking and outline masks keep their
+own lists. Exemptions cover always-drawn meshes, helpers, later rendering
+groups, own depth functions and, on WebGL2, meshes whose colour Effect
+has not drawn. Off unless setSceneOcclusionCulling turns it on.
+
+The box test now reads up to 8x8 texels at its level: a 2x2 test at a
+coarse level reached past occluder edges and culled almost nothing.
+```
+hideoutgames
+marked this pull request as ready for review
+October 30, 2026 22:09
+claude
+added 5 commits
+October 30, 2026 22:12
+Merge remote-tracking branch 'origin/main' into agent/occlusion-wirin…
+…
+0c03a07
+```
+…g-sq
+```
+Give the gate's screen-shadow and occlusion cases the script's painter
+…
+113a3e6
+```
+#1405 made the lighting gate's script repaint a Painter 2D surface it is
+passed, while #1397 added a case calling it without one, which leaves
+main's typecheck red. Both cases now place the painter as the first one
+does.
+```
+Merge remote-tracking branch 'origin/main' into agent/occlusion-wirin…
+…
+80ae4d5
+```
+…g-sq
+```
+Bring a world view's occlusion pass from 4 ms to under 1 ms
+…
+ec5577d
+```
+The lighting gate's occlusion case timed out under CI's coverage run:
+200 crates took 4 ms a frame natively. A box occluder now draws only its
+front faces (winding from the world and view parity), triangles fill each
+row's span from edge crossings adjacent triangles share (no seam), the
+per-occluder erosion is separable, and occluders under 16 texels in radius
+are skipped: 0.76 ms with the same culling.
+```
+Merge remote-tracking branch 'origin/main' into agent/occlusion-wirin…
+…
+e17bdfd
+```
+…g-sq
+```
+Hide details
+View details
+hideoutgames
+merged commit e3e4a01
+into
+main
+Oct 31, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+hideoutgames
+mentioned this pull request
+Oct 31, 2026
+Add the Occlusion Culling quality setting
+#1414
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,248 @@
+# Null-Scattering Path Integral Framework
+
+Also called: Generalized Path Space for Volume Rendering, Path Integral with Null Scattering
+
+## Overview
+The Null-Scattering Path Integral Framework formulates light transport in participating media as a Monte Carlo integration problem over a generalized path space that explicitly includes null-scattering vertices [S1]. It solves the problem of defining a rigorous measure for path integrals in heterogeneous media where standard delta tracking or majorant sampling does not naturally fit into a path-space summation, enabling the application of variance reduction techniques like multiple importance sampling and bidirectional integrators [S1]. It differs from standard path tracing by treating null-scattering events as distinct vertex types in the path configuration, allowing the path throughput to be decomposed into majorant transmittance and scattering terms that can be sampled independently [S1].
+
+## How it works
+The framework defines a path space over sequences of vertices that can be of three types: surface locations ($A$), real scattering positions in the medium ($V$), and null-scattering positions in the medium ($V_\emptyset$) [S1].
+
+### Inputs and Outputs
+*   **Inputs**: Scene geometry (surfaces $A$), participating media properties (extinction $\sigma_t$, scattering $\sigma_s$, absorption $\sigma_a$, scattering phase function $p$), majorant extinction $\sigma_{maj}$, and a configuration vector $\mathbf{c}$ defining the vertex types.
+*   **Outputs**: The path contribution estimator $\hat{P}(\bar{p}_n)$ and the throughput weight $\beta(\bar{p}_n)$ for a path $\bar{p}_n$ of length $n$ [S1].
+
+### Data Structures
+The path $\bar{p}_n$ is a sequence of $n$ vertices $p_1, \dots, p_n$. Each vertex $p_i$ has a type determined by the configuration vector $\mathbf{c} \in \{0, 1, 2\}^n$:
+*   $c_i = 0$: Surface vertex ($p_i \in A$).
+*   $c_i = 1$: Real scattering vertex ($p_i \in V$).
+*   $c_i = 2$: Null-scattering vertex ($p_i \in V_\emptyset$) [S1].
+
+The subset of vertices representing real scattering is denoted $r_i$. Note that the index of a real-scattering vertex in the full path $\bar{p}_n$ may differ from its index in the subset $r$ [S1].
+
+### Formulas
+The set of paths for a specific configuration $\mathbf{c}$ is the Cartesian product:
+$$
+\mathcal{P}_n^{\mathbf{c}} = \prod_{i=1}^{n} \begin{cases} A & \text{if } c_i = 0 \\ V & \text{if } c_i = 1 \\ V_\emptyset & \text{if } c_i = 2 \end{cases}
+$$
+The set of all paths of length $n$ is the union over all configuration vectors:
+$$
+\mathcal{P}_n = \bigcup_{\mathbf{c} \in \{0, 1, 2\}^n} \mathcal{P}_n^{\mathbf{c}}
+$$
+The measure $\mu_n$ for a domain $D \subseteq \mathcal{P}_n$ sums over configurations $\mathbf{c} \in \{0, 1\}^n$ (note: the source text specifies $\{0,1\}^n$ for the measure summation, but implies handling of $V_\emptyset$ via the Dirac delta in the differential form) [S1]:
+$$
+\mu_n(D) = \sum_{\mathbf{c} \in \{0, 1\}^n} \mu_n^{\mathbf{c}}(D \cap \mathcal{P}_n^{\mathbf{c}})
+$$
+where the differential measure $d\mu_n^{\mathbf{c}}$ uses $dA(p_i)$ if $c_i=0$, $dV(p_i)$ if $c_i=1$, and $dV_\emptyset(p_i)$ if $c_i=2$. The measure $dV_\emptyset$ incorporates a Dirac delta distribution to restrict integration to the line segment between successive real-scattering vertices [S1].
+
+The generalized path contribution function is:
+$$
+\hat{P}(\bar{p}_n) = \int_{\mathcal{P}_{n-1}} \hat{L}_e(p_n \to p_{n-1}) \hat{T}(\bar{p}_n) d\mu_{n-1}(p_2, \dots, p_n)
+$$
+where the emitted radiance term $\hat{L}_e$ is:
+$$
+\hat{L}_e(p_n \to p_{n-1}) = \begin{cases} L_e(\dots) & \text{if } p_n \in A \\ \sigma_a(p_n) L_e(\dots) & \text{if } p_n \in V \end{cases}
+$$
+The generalized path throughput $\hat{T}(\bar{p}_n)$ is:
+$$
+\hat{T}(\bar{p}_n) = \left( \prod_{i=1}^{n-1} \hat{f}(p_{i+1} \to p_i \to p_{i-1}) \right) \left( \prod_{i=0}^{n-1} T_{maj}(p_i \to p_{i+1}) \right) \left( \prod_{i=1}^{m-1} \hat{G}(r_i \leftrightarrow r_{i+1}) \right)
+$$
+where $m$ is the number of real-scattering vertices [S1].
+
+The generalized scattering distribution $\hat{f}$ is:
+$$
+\hat{f}(p_{i+1} \to p_i \to p_{i-1}) = \begin{cases} f(\dots) & \text{if } p_i \in A \\ \sigma_s(p_i) p(\dots) & \text{if } p_i \in V \\ \sigma_n(p_i) H((p_i - p_{i+1}) \cdot (p_i - p_{i-1})) & \text{if } p_i \in V_\emptyset \end{cases}
+$$
+where $\sigma_n$ is the null-scattering coefficient, $H$ is the Heaviside function, and $p(\dots)$ is the phase function [S1].
+
+The generalized geometric term $\hat{G}$ is:
+$$
+\hat{G}(p \leftrightarrow p') = V(p \leftrightarrow p') \frac{C_p(p, p') C_{p'}(p', p)}{\|p - p'\|}
+$$
+where $C_p(p, p') = |n_p \cdot \frac{p - p'}{\|p - p'\|}|$ if $p \in A$, and $1$ if $p \in V$. Note that $C_p$ is only evaluated for real-scattering vertices $r_i$ [S1].
+
+The Monte Carlo estimator is:
+$$
+\hat{P}(\bar{p}_n) = \frac{\hat{T}(\bar{p}_n) \hat{L}_e(p_n \to p_{n-1})}{p(\bar{p}_n)}
+$$
+where $p(\bar{p}_n)$ is the probability density of sampling the path with respect to the generalized measure [S1].
+
+The volumetric path throughput weight is:
+$$
+\beta(\bar{p}_n) = \frac{\hat{T}(\bar{p}_n)}{p(\bar{p}_n)}
+$$
+[S1].
+
+### Pseudocode
+The following pseudocode outlines the evaluation of the path throughput and weight for a given path $\bar{p}_n$ and its configuration $\mathbf{c}$. It assumes access to scene queries for $\sigma_a, \sigma_s, \sigma_{maj}, T_{maj}$, and surface normals.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_null_scattering_path_integral(path, config):
+    """
+    Evaluates the path contribution estimator for a path in the null-scattering framework.
+    
+    Args:
+        path: List of vertices p_1, ..., p_n.
+        config: List of integers c_1, ..., c_n (0: Surface, 1: Real Volume, 2: Null Volume).
+        
+    Returns:
+        path_contribution: The estimated radiance contribution.
+        throughput_weight: The path throughput weight beta.
+    """
+    n = len(path)
+    if n < 2:
+        return 0.0, 0.0
+
+    # 1. Calculate Emitted Radiance Term L_hat_e
+    # p_n is the last vertex, p_{n-1} is the previous one
+    p_n = path[-1]
+    p_prev = path[-2]
+    c_n = config[-1]
+    
+    if c_n == 0: # Surface
+        L_e_hat = get_emitted_radiance(p_n, p_prev)
+    elif c_n == 1: # Real Volume
+        sigma_a = get_absorption_coefficient(p_n)
+        L_e_hat = sigma_a * get_emitted_radiance(p_n, p_prev)
+    else: # Null Volume (c_n == 2)
+        # Null scattering vertices do not emit. 
+        # Based on the formula, L_e_hat is defined for p_n in A or V.
+        # If p_n is V_empty_set, the contribution is 0 unless it connects to an emitter.
+        # The framework implies the integral sums over paths ending in emission.
+        # If the path ends in null scattering, it contributes 0 directly as an endpoint.
+        L_e_hat = 0.0
+
+    # 2. Calculate Generalized Path Throughput T_hat
+    T_hat = 1.0
+    
+    # Product 1: Generalized Scattering Distribution f_hat
+    for i in range(1, n - 1):
+        p_prev_prev = path[i-1]
+        p_curr = path[i]
+        p_next = path[i+1]
+        c_curr = config[i]
+        
+        if c_curr == 0: # Surface
+            f_hat = get_surface_scattering(p_next, p_curr, p_prev)
+        elif c_curr == 1: # Real Volume
+            sigma_s = get_scattering_coefficient(p_curr)
+            phase = get_phase_function(p_next, p_curr, p_prev)
+            f_hat = sigma_s * phase
+        elif c_curr == 2: # Null Volume
+            sigma_n = get_null_scattering_coefficient(p_curr)
+            # Heaviside function H checks if the direction is consistent (forward)
+            # H(x) = 1 if x >= 0 else 0
+            dir_in = normalize(p_curr - p_prev)
+            dir_out = normalize(p_next - p_curr)
+            # The formula uses (p_i - p_{i+1}) . (p_i - p_{i-1})
+            # p_i - p_{i+1} is -dir_out * dist
+            # p_i - p_{i-1} is -dir_in * dist
+            # Dot product of incoming and outgoing directions reversed?
+            # Actually, the formula is H((p_i - p_{i+1}) . (p_i - p_{i-1}))
+            # This is equivalent to H(cos_theta_in * cos_theta_out) roughly, 
+            # ensuring the path doesn't double back on itself in the null step.
+            dot_product = dot(p_curr - p_next, p_curr - p_prev)
+            H = 1.0 if dot_product >= 0 else 0.0
+            f_hat = sigma_n * H
+        else:
+            f_hat = 0.0
+            
+        T_hat *= f_hat
+
+    # Product 2: Majorant Transmittance T_maj
+    for i in range(0, n - 1):
+        p_curr = path[i]
+        p_next = path[i+1]
+        T_maj = get_majorant_transmittance(p_curr, p_next)
+        T_hat *= T_maj
+
+    # Product 3: Generalized Geometric Term G_hat for real scattering vertices
+    # Identify indices of real scattering vertices
+    real_scatter_indices = [i for i, c in enumerate(config) if c == 1]
+    m = len(real_scatter_indices)
+    
+    for j in range(0, m - 1):
+        idx_curr = real_scatter_indices[j]
+        idx_next = real_scatter_indices[j+1]
+        p_curr = path[idx_curr]
+        p_next = path[idx_next]
+        
+        G_hat = get_generalized_geometric_term(p_curr, p_next)
+        T_hat *= G_hat
+
+    # 3. Calculate Path Probability p(bar_p_n)
+    # This depends on the specific sampling strategy used to generate the path.
+    # The framework allows various sampling methods (not just incremental path tracing).
+    # For a standard null-scattering path tracer, p is the product of:
+    # - Distance sampling PDF (majorant)
+    # - Interaction type PDF (sigma_s / sigma_maj, sigma_a / sigma_maj, sigma_n / sigma_maj)
+    # - Direction sampling PDF (phase function)
+    # Since the specific sampler is not defined in the general framework definition,
+    # we return the weight beta which is T_hat / p.
+    # If p is not provided by the caller, we cannot compute the final estimator.
+    # However, the framework defines beta = T_hat / p.
+    
+    # For the purpose of this implementation, we assume p is passed or calculated by the caller.
+    # Here we return T_hat and L_e_hat. The caller must divide by p to get P_hat.
+    # Or return beta if p is known.
+    
+    # Let's assume the function returns the components needed for the estimator.
+    # The estimator is P_hat = (T_hat * L_e_hat) / p.
+    
+    return T_hat, L_e_hat
+
+def get_generalized_geometric_term(p, p_prime):
+    """
+    Computes G_hat(p <-> p').
+    """
+    dist = distance(p, p_prime)
+    if dist == 0:
+        return 0.0
+    
+    # C_p is only evaluated for real-scattering vertices.
+    # In the context of the product over real vertices, p and p_prime are real vertices.
+    # So C_p = 1 and C_p_prime = 1.
+    C_p = 1.0
+    C_p_prime = 1.0
+    
+    # V(p <-> p') is the visibility (0 or 1).
+    V = get_visibility(p, p_prime)
+    
+    return V * (C_p * C_p_prime) / dist
+
+def get_majorant_transmittance(p1, p2):
+    """
+    Computes T_maj(p1 -> p2).
+    """
+    dist = distance(p1, p2)
+    sigma_maj = get_majorant_extinction(p1) # Or constant if homogeneous majorant
+    return exp(-dist * sigma_maj)
+```
+
+### Parameters and Edge Cases
+*   **Majorant Extinction ($\sigma_{maj}$)**: Must be $\ge \sigma_t(x)$ for all $x$ in the medium. If $\sigma_{maj}$ significantly overestimates $\sigma_t$, variance increases due to many null-scattering events [S1].
+*   **Dirac Delta**: The measure $dV_\emptyset$ restricts null-scattering vertices to the line between real-scattering vertices. This ensures that null-scattering vertices do not contribute to the geometric term in the same way as real vertices, avoiding singularities [S1].
+*   **Heaviside Function**: Ensures that null-scattering directions are consistent with the path direction (no backtracking) [S1].
+*   **Configuration Vector**: The framework handles arbitrary sequences of surface, real, and null vertices. The measure summation in the source text specifies $\mathbf{c} \in \{0, 1\}^n$, but the path space definition includes $V_\emptyset$ ($c_i=2$). The measure for $c_i=2$ is handled via the Dirac delta in $dV_\emptyset$ [S1].
+
+## Subtopics
+
+### [Null-Scattering Volumetric Path Tracing](3829-null-scattering-volumetric-path-tracing.md)
+An unbiased algorithm that uses the framework to sample distances from the majorant distribution and explicitly maintains the majorant transmittance factor, ensuring unbiased estimates even with significant majorant overestimation.
+
+### [Surrounding Path Contribution (WKB Expansion)](1300-surrounding-path-contribution-wkb-expansion.md)
+A sibling method that uses a WKB expansion to approximate the path contribution, differing in its approach to handling multiple scattering and variance reduction.
+
+## Operating characteristics
+*   **Complexity**: The complexity depends on the sampling strategy. The framework itself is a formulation, not a specific sampler. The number of path vertices $n$ and the number of real-scattering vertices $m$ affect the cost of evaluating $\hat{T}$ [S1].
+*   **Performance**: The framework enables variance reduction techniques like MIS, which can significantly improve performance in complex scenes with heterogeneous media [S1].
+*   **Strengths**: Rigorous path-space formulation allows for bidirectional and multi-bounce integrators in participating media. Handles heterogeneous media via the majorant and null-scattering terms [S1].
+*   **Limitations**: Requires the computation of a majorant, which can be expensive for highly heterogeneous media. High majorant values lead to many null-scattering events, increasing variance [S1].
+
+## Background
+The framework was introduced in the context of the Path Tracing book (PBR Book), specifically in Section 14.1.4, to express the null-scattering integral equation of transfer as a sum over paths [S1]. It builds on the surface path space formulation from Section 13.1.4 and extends it to include volume and null-scattering vertices [S1].
+
+## Sources
+[S1] Light Transport II: Volume Rendering / The Equation of Transfer, https://pbr-book.org/4ed/Light_Transport_II_Volume_Rendering/The_Equation_of_Transfer.html, fetched 2026-10-27

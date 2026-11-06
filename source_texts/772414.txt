@@ -1,0 +1,103 @@
+Summary ReSTIR DI (Reservoir-based Spatio-Temporal Importance Resampling for Direct Illumination) — the modern technique that makes 1-spp path tracing work with hundreds of lights. Replaces "pick a light uniformly + shadow ray" with "bui...
+
+renderer: ReSTIR DI (and GI) for 1-spp many-light sampling · Issue #78 · havokentity/demont-engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+renderer: ReSTIR DI (and GI) for 1-spp many-light sampling #78
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+renderer: ReSTIR DI (and GI) for 1-spp many-light sampling#78
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+havokentity
+opened on May 16, 2026
+Issue body actions
+Summary
+ReSTIR DI (Reservoir-based Spatio-Temporal Importance Resampling for Direct Illumination) — the modern technique that makes 1-spp path tracing work with hundreds of lights. Replaces "pick a light uniformly + shadow ray" with "build a reservoir of weighted samples, resample across screen + time, then shadow-test the survivor". The single largest visual upgrade we can make.
+Used by NVIDIA Falcor, AMD GPUOpen Capsaicin, Cyberpunk 2077 RT mode, Portal RTX, Quake II RTX.
+Why
+Without ReSTIR, our light primitives (#73) cap at the dozen-lights regime before NEE picks the wrong light and noise dominates the denoised output. ReSTIR lets us scale to hundreds or thousands of lights at 1 spp with denoiser-friendly variance — the same 1-spp infrastructure (MetalFX, NRD, SVGF) starts producing AAA-quality images.
+Scope — Phase A: ReSTIR DI
+Per-pixel reservoir with WRS (Weighted Reservoir Sampling) over candidate lights.
+Temporal reuse: previous-frame reservoir reprojected via motion vectors (we already have those for MetalFX).
+Spatial reuse: borrow neighbouring reservoirs in a small radius, MIS-combined.
+Final visibility test on the resampled survivor.
+Bias control: keep the unbiased mode (full MIS) selectable via cvar even though the biased mode is the default.
+Scope — Phase B (later): ReSTIR GI
+Same idea applied to indirect bounces (one-bounce indirect first, generalise later).
+Massive convergence win on caustic-adjacent + global-illumination-heavy scenes.
+Plan
+Add a per-pixel Reservoir SSBO sized (W*H). One slot per pixel, double-buffered for temporal reuse.
+In PathTrace.slang: replace single-light NEE with WRS over K=8-32 candidate lights → store the chosen reservoir.
+Temporal pass: reproject prev-frame reservoir via motion vectors, MIS-combine with current.
+Spatial pass (separable compute): N=3-5 spatial neighbours, MIS-combine.
+Shadow test on the final survivor + apply contribution.
+Cvars: r_restir 1, r_restir_temporal 1, r_restir_spatial 1, r_restir_k_candidates 8, r_restir_bias unbiased|biased.
+Acceptance
+A 100-light scene with r_restir 1 + r_denoiser metalfx produces a clean 1-spp image; same scene without ReSTIR is grainy noise.
+Temporal coherence under camera motion (no boiling).
+Matched cross-backend (Mac-Metal vs Mac-Vulkan vs Linux-Vulkan) within tolerance.
+Per-frame cost ≤ 3 ms at 1080p on M4 Max.
+Cross-links
+Required for: light primitives at scale (renderer: light source primitives (mesh emissives + area lights with importance sampling) #73 — drops the dozen-light cap)
+Synergy: textured emissives (renderer: textured materials (albedo / normal / roughness via image-based sampling) #74 each emissive triangle becomes a light)
+Architecture: wavefront PT (renderer: wavefront path tracing variant (split megakernel) #76) hosts ReSTIR more efficiently than megakernel; not blocking, but if megakernel pressure becomes an issue this is one of the techniques that motivates wavefront
+Engine vision: [Roadmap] Engine vision: soft-body + voxel destruction (post-P11) #52
+Estimate
+Phase A: ~7-10 dev-days. Phase B: ~5-7 dev-days. File Phase B as a separate sub-issue once Phase A is in.
+Activity
+havokentity
+added
+enhancementNew feature or requestNew feature or request
+on May 16, 2026
+havokentity
+added 2 commits that reference this issue on May 18, 2026
+merge: ReSTIR DI Phase A (#78, PR #155) into integration-batch-1
+8c5d8e2
+merge: smoke density emitters Phase 1 (#136, PR #156) into integratio…
+...
+3c688e9
+havokentity
+added a commit that references this issue on Jul 13, 2026
+fix(rhi_metal): bind AS/push/SSBOs at Slang's real per-pipeline MSL i…
+...
+12ac608
+havokentity commented on Aug 26, 2026
+havokentity
+on Aug 26, 2026
+OwnerAuthor
+More actions
+Triage 2026-08-26: Phase A (DI) has landed; leaving this open for the gaps below.
+Landed: r_restir / r_restir_temporal / r_restir_spatial / r_restir_k_candidates (8) / r_restir_bias (biased|unbiased) all registered CVAR_ARCHIVE at src/engine/Engine.cpp:1180-1220. shaders/RestirReservoir.slang (shared WRS module) + RestirTemporal / RestirSpatial / RestirFinal kernels, per-pixel double-buffered reservoir SSBO via src/renderer/RestirReservoir.h, dispatch chain gated at Engine.cpp:8153-8162.
+Remaining, specifically:
+Phase B (ReSTIR GI) not started. Engine.cpp:1170 states the scope outright: "Phase A scope: DI only (no GI / indirect bounce reservoirs)." The issue's own plan says to file Phase B as a sub-issue once Phase A is in - either do that and close this, or keep this as the Phase B tracker.
+Acceptance criterion 1 is not currently reachable. It asks for r_restir 1 + r_denoiser metalfx to produce a clean 1-spp image, but the engine force-disables the whole ReSTIR chain on the MetalFX family (Engine.cpp:8163-8196) because MTLFXTemporalDenoisedScaler's TAA neighbourhood clamp rejects the WRS survivor spikes - see denoiser-on regression: red-screen / broken output during interactive denoiser toggle #164. Today ReSTIR only engages under SVGF / NRD / OptiX.
+Cross-backend match not met. The Restir compute kernels are Metal-only: src/rhi_vulkan/CMakeLists.txt:85 compiles RestirReservoir.slang as a module for PathTrace's initial WRS pass but explicitly notes "The Restir compute kernels themselves are Metal-only" - RestirTemporal / RestirSpatial / RestirFinal appear only in src/rhi_metal/CMakeLists.txt.
+ReSTIR additionally requires denoiser_active_, so it is inert with r_denoiser off. No golden cell exercises the ReSTIR path today.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

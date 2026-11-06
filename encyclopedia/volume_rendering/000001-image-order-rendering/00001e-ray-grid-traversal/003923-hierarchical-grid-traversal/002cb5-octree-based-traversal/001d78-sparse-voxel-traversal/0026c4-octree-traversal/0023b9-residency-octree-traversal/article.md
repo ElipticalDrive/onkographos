@@ -1,0 +1,111 @@
+# Residency Octree Traversal
+
+Also called: Author's residency octree traversal, Ray-Guided Volume Rendering with Residency Octree, Single Channel Residency Traversal
+
+## Overview
+Residency Octree Traversal is a ray-guided method for sparse voxel volume rendering that determines which data bricks to load from a server into a local cache based on the current viewing ray [S1, unofficial]. It solves the problem of efficient memory management and bandwidth reduction in large-scale volume visualization by skipping empty or homogeneous regions and only requesting bricks that are actually needed for rendering [S1, unofficial]. It sets itself apart from standard octree traversal by integrating residency metadata directly into the traversal logic, allowing the renderer to decide whether to skip a node, use its aggregate value, or request specific voxel data based on cache status and resolution requirements [S1, unofficial].
+
+## How it works
+The method traverses a residency octree for each pixel's viewing ray to determine the sampling strategy and data requirements [S1, unofficial]. It relies on leaf node metadata to identify empty, homogeneous, or unmapped regions, and uses residency information to manage brick caching [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Viewing ray (origin, direction), current pixel coordinates, current sampling step size, desired resolution level (determined by viewing parameters like distance to camera), maximum traversal depth (derived from step size to prevent skipping over samples smaller than the step) [S1, unofficial].
+*   **Output:** A decision for each ray sample: skip (empty), use node value (homogeneous), request brick (needed but not resident), or advance to next sample [S1, unofficial].
+
+**Data Structures:**
+*   **Residency Octree:** A hierarchical structure where each node contains metadata [S1, unofficial].
+*   **Node Metadata:** Includes flags for empty, homogeneous, and partially mapped states, as well as residency status of child bricks [S1, unofficial]. The metadata for newly added bricks is set by the bit-wise OR of their child nodes’ bitmasks [S1, unofficial].
+*   **Brick Cache:** Stores resident voxel data bricks [S1, unofficial].
+*   **Page-Table Hierarchy:** Maps nodes and resolution levels to cached brick pages [S1, unofficial].
+
+**Parameters:**
+*   **Desired Resolution Level (`resolutionLevel`):** Chosen based on viewing parameters (e.g., distance to camera) [S1, unofficial].
+*   **Maximum Traversal Depth (`traversalDepth`):** Chosen based on the current sampling step size to ensure the ray does not skip a distance smaller than the distance to the next ray sample [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Initialize:** For each pixel, march along the viewing ray [S2]. Determine the desired resolution level and maximum traversal depth [S1, unofficial].
+2.  **Traverse:** Start at the root node (assumed to have metadata) [S1, unofficial]. Traverse the tree until the maximum traversal depth is reached or a terminal condition is met [S1, unofficial].
+3.  **Check Node State:** At the current node, check the metadata:
+    *   **Empty:** If the node is empty, skip all samples along the ray that would fall into this node. Advance the ray to the next relevant node or sample [S1, unofficial].
+    *   **Homogeneous:** If the node is homogeneous (all voxels hold approximately the same value), use the node's value directly for rendering for all samples falling into the node. Advance the ray to the next node [S2].
+    *   **Not Partially Mapped:** If the node is not even partially mapped, stop traversal for this ray segment and report a brick request [S1, unofficial].
+    *   **Refinement Needed:** If the current subtree is not deep enough to reach the target traversal depth AND culling information does not allow skipping the current node, refine the residency octree by requesting a new node [S1, unofficial].
+4.  **Retrieve Brick:** If the target traversal depth is reached and the current node is non-empty and inhomogeneous:
+    *   Attempt to retrieve the brick of the chosen resolution level from the brick cache [S1, unofficial].
+    *   **Cache Miss:** If the brick is not resident, report a brick request. Try to load a brick from an alternative resolution level where the node is partially mapped [S2].
+    *   **No Brick Found:** If no brick is found in alternative resolutions, advance the ray to the next sample [S1, unofficial].
+5.  **Adjust Sampling:** Depending on the resolution level of the retrieved brick, potentially increase the sampling distance along the ray [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def residency_octree_traversal(ray, step_size, root_node):
+    resolution_level = choose_resolution_level(ray.depth)  # [G] View-dependent LOD
+    traversal_depth = choose_traversal_depth(step_size)    # [G] Step-to-depth mapping
+    node = root_node
+    for i in range(traversal_depth + 1):
+        if node.is_empty():
+            ray = skip_node(node, ray)
+            break
+        if node.is_homogeneous():
+            ray = render_and_skip_node(node, ray)
+            break
+        if not node.is_partially_mapped():
+            report_brick_request(node, ray, resolution_level)
+            ray = skip_node(node, ray)
+            break
+        if i < traversal_depth:
+            next_node = get_child_node(node, ray)
+            if next_node is None or next_node.culling_info_missing:
+                report_node_request(next_node)
+                # Child missing culling info implies whole subtree lacks it;
+                # treat as if max depth reached and proceed to page lookup
+            else:
+                node = next_node
+                continue
+        page = get_page(node, ray, resolution_level)
+        if page.is_unmapped:
+            report_brick_request(node, ray, resolution_level)
+            page = get_alternative_page(node, ray, resolution_level)
+        if page.is_unmapped:
+            skip_brick(node, ray)
+        else:
+            render_until_next_boundary(page.brick, node, ray)
+        break
+    if i == traversal_depth:  # Fixed from source typo (i > traversal_depth)
+        report_brick_request(node, ray, resolution_level)
+        ray = skip_node(node, ray)
+
+# [G] Helper definitions (standard operations not detailed in sources)
+def choose_resolution_level(depth): return max(0, depth)
+def choose_traversal_depth(step_size): return max(1, step_size)
+def skip_node(node, ray): return ray.advance_past_bounding_box(node)
+def render_and_skip_node(node, ray): return ray.advance_past_bounding_box(node)
+def get_child_node(node, ray): return node.children[ray.child_index(node)]
+def get_page(node, ray, resolution): return page_table.lookup(node, ray, resolution)
+def get_alternative_page(node, ray, resolution): return page_table.lookup_alternative(node, ray, resolution)
+def report_brick_request(node, ray, resolution): pass
+def report_node_request(node): pass
+def skip_brick(node, ray): return ray.advance_past_bounding_box(node)
+def render_until_next_boundary(brick, node, ray): return ray.advance_to_boundary(brick, node)
+```
+
+## Subtopics
+
+### [Residency-octree traversal for multiple channels](5041-residency-octree-traversal-for-multiple-channels.md)
+Extends the method to handle multiple volume channels simultaneously within a single ray. It solves the problem of efficient empty-space and homogeneous-node skipping in multi-volume rendering by requiring that a node be empty or homogeneous for all active channels before it can be skipped. Unlike single-channel traversal, which skips a node as soon as it is empty for that specific channel, this algorithm continues traversing deeper levels for non-empty channels until they also reach an empty or homogeneous state, ensuring no visible data is skipped.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources [S1, unofficial]. Traversal stops early for empty or homogeneous nodes, reducing the number of cache lookups and server requests [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial]. Memory usage depends on the number of resident bricks and stored metadata [S1, unofficial].
+*   **Performance:** Efficient for large-scale volumes with significant empty or homogeneous regions, as it minimizes data transfer and processing for irrelevant data [S1, unofficial]. Performance degrades if the cache misses are frequent or if the volume is dense and inhomogeneous [S1, unofficial].
+*   **Strengths:** Reduces bandwidth and memory usage by only loading necessary data. Supports mixed-resolution rendering for different channels [S1, unofficial].
+*   **Limitations:** Requires maintaining residency metadata. Complex to implement for multi-channel scenarios where traversal must continue until all channels are processed [S1, unofficial].
+
+## Background
+The method was introduced in the paper "Residency Octree: A Hybrid Approach for Scalable Web Volume Rendering" [S2]. It is part of a broader effort to enable scalable volume rendering on the web, leveraging ray-guided techniques to manage data residency efficiently [S1, unofficial]. The algorithm shares with SparseLeap the incremental construction of the underlying tree structure [S1, unofficial].
+
+## Sources
+[S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)
+[S2] Residency Octree: A Hybrid Approach for Scalable Web ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC10840607/, fetched 2026-10-29

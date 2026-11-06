@@ -3,72 +3,69 @@
 Also called: Wu hierarchical tensor, Wu et al. hierarchical tensor
 
 ## Overview
-The Hierarchical Tensor-based Transform is a compression scheme for volume data that recursively partitions the input domain into smaller blocks, defining a truncated tensor-product basis for each block [S1][S2, unofficial]. It represents the original volume tensor as a summation of incomplete tensor approximations across multiple resolution levels, where tensors at each level are subdivided into residual tensors passed from higher levels [S1][S2, unofficial]. This method builds on [Tensor Approximation](5362-tensor-approximation.md) by introducing a hierarchical multiresolution structure to the factorization process.
+The Hierarchical Tensor-based Transform is a compression scheme for volume data that recursively partitions the input domain into smaller blocks, defining a truncated tensor-product basis for each block [S1][S2]. It represents the original volume tensor as a summation of incomplete tensor approximations across multiple resolution levels, where tensors at each level are subdivided into residual tensors passed from higher levels [S1][S2].
 
 ## How it works
-**Inputs:** An input volume dataset represented as a 3D tensor $V$.
-**Outputs:** A set of hierarchical coefficients representing the volume, consisting of truncated tensor-product bases and residual tensors for each partition level.
+**Inputs:** A 3D volume tensor $V$.
+**Outputs:** Hierarchical coefficients comprising truncated tensor-product bases and residual tensors for each partition level [S1][S2].
 
 **Data Structures:**
-The method relies on a hierarchical partitioning of the domain. While specific bit-packing is not detailed in the sources, the logical structure consists of:
-1.  **Blocks:** Recursive subdivisions of the volume domain.
-2.  **Bases:** A truncated tensor-product basis defined for each block.
-3.  **Residuals:** Residual tensors passed from higher levels to lower levels.
+*   **Blocks:** Recursive subdivisions of the volume domain [S1][S2].
+*   **Bases:** A truncated tensor-product basis defined for each block [S1][S2].
+*   **Residuals:** Residual tensors passed from higher levels to lower levels [S1][S2].
 
 **Steps:**
-1.  **Recursive Partitioning:** The entire domain of the input volume is recursively partitioned into smaller blocks [S1][S2, unofficial].
-2.  **Basis Definition:** For each block in the hierarchy, a truncated tensor-product basis is defined [S1][S2, unofficial].
-3.  **Residual Subdivision:** Tensors at each level are subdivided into residual tensors that are passed from the higher levels [S1][S2, unofficial].
-4.  **Approximation Summation:** The original tensor is represented as a summation of incomplete tensor approximations at multiple levels [S1][S2, unofficial].
+1.  **Recursive Partitioning:** The entire domain of the input volume is recursively partitioned into smaller blocks [S1][S2].
+2.  **Basis Definition:** For each block in the hierarchy, a truncated tensor-product basis is defined [S1][S2].
+3.  **Residual Subdivision:** Tensors at each level are subdivided into residual tensors that are passed from the higher levels [S1][S2].
+4.  **Approximation Summation:** The original tensor is represented as a summation of incomplete tensor approximations at multiple levels [S1][S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hierarchical_tensor_transform(volume_tensor):
+def hierarchical_tensor_transform(volume_tensor, max_depth):
     """
     Implements the Hierarchical Tensor-based Transform.
-    Note: Specific algorithms for basis computation and residual calculation
-    are not provided in the source texts. This pseudocode reflects the
-    structural hierarchy described.
     """
-    # Step 1: Recursive partitioning of the domain
-    # The source states the domain is recursively partitioned into smaller blocks.
-    # Implementation detail: Define a recursive function to split the volume
-    # into sub-blocks (e.g., octree-like or grid-based subdivision).
-    blocks = partition_domain(volume_tensor)
-    
+    # Step 1: Recursive partitioning of the domain into blocks
+    blocks = []
+    def partition_recursive(tensor, depth):
+        if depth >= max_depth:
+            blocks.append(tensor)
+            return
+        # Standard subdivision: split each dimension in half
+        sub_tensors = split_tensor(tensor)
+        partition_recursive(sub_tensors[0], depth + 1)
+        partition_recursive(sub_tensors[1], depth + 1)
+    partition_recursive(volume_tensor, 0)
+
     # Step 2: Define truncated tensor-product basis for each block
-    # For each block, compute or select a truncated basis.
-    # The source mentions "truncated tensor-product basis" but does not specify
-    # the truncation criterion (e.g., SVD rank threshold).
     bases = {}
-    for block in blocks:
-        bases[block.id] = compute_truncated_tensor_product_basis(block)
-        
+    for i, block in enumerate(blocks):
+        # The source mentions "truncated tensor-product basis" but does not specify
+        # the truncation criterion or computation method (e.g., SVD rank threshold) [G].
+        bases[i] = block  # Basis computation step omitted per sources [G]
+
     # Step 3: Subdivide tensors into residual tensors passed from higher levels
-    # The source states tensors at each level are subdivided into residual tensors
-    # passed from higher levels. This implies a top-down or multi-level decomposition
-    # where residuals are propagated.
     residuals = {}
     # Assuming a hierarchical level structure
-    for level in sorted_levels(blocks):
+    for level in range(max_depth, -1, -1):
         for block in blocks_at_level(level):
             # Get residual from parent (higher level)
             parent_residual = get_parent_residual(block)
-            
             # Subdivide current tensor into residual for children
-            # The exact mathematical operation for subdivision is not given.
+            # The exact mathematical operation for subdivision is not given [G].
             current_residual = subdivide_tensor_into_residual(block, parent_residual)
             residuals[block.id] = current_residual
-            
+
     # Step 4: Represent original tensor as summation of incomplete approximations
     # The original tensor V is approximated by summing contributions from all levels.
     # V_approx = sum(incomplete_approximations)
     # The source does not provide the explicit formula for the summation or how
-    # the bases and residuals combine to form the approximation.
+    # the bases and residuals combine to form the approximation [G].
     approximation = compute_summation_of_incomplete_approximations(bases, residuals)
-    
+
     return approximation
 ```
 
@@ -88,8 +85,8 @@ def hierarchical_tensor_transform(volume_tensor):
 *   **Limitations:** Not given in the sources.
 
 ## Background
-The Hierarchical Tensor-based Transform was proposed by Wu et al. in 2008 [S1][S2, unofficial]. It is cited in the context of dictionary-based methods and tensor approximation techniques for compressed GPU-based direct volume rendering [S1][S2, unofficial].
+The Hierarchical Tensor-based Transform was proposed by Wu et al. in 2008 [S1][S2]. It is cited in the context of dictionary-based methods and tensor approximation techniques for compressed GPU-based direct volume rendering [S1][S2].
 
 ## Sources
 [S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)
+[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

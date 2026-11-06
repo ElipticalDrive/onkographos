@@ -3,32 +3,32 @@
 Also called: Bit Interleaving, Coordinate Bit Interleaving
 
 ## Overview
-Volume Interleaving is a memory layout optimization designed to reduce cache misses during volume rendering by decomposing the volume into small blocks and interleaving the bits of voxel coordinates [S1]. It maps 3D spatial coordinates to a linear memory address such that spatially adjacent voxels are stored contiguously in memory, improving spatial locality for ray-casting algorithms [S1]. Unlike standard row-major or column-major layouts, which suffer from poor cache performance when traversing 3D volumes along arbitrary ray directions, interleaving ensures that consecutive samples along a ray are closer in memory [S1].
+Volume Interleaving is a memory layout optimization designed to reduce cache misses during volume rendering by decomposing the volume into small blocks and interleaving the bits of voxel coordinates [S1]. It maps 3D spatial coordinates to a linear memory address such that spatially adjacent voxels are stored contiguously in memory [S1]. Unlike standard row-major or column-major layouts, which suffer from poor cache performance when traversing 3D volumes along arbitrary directions, interleaving ensures that consecutive samples along a traversal path are closer in memory [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   Input: 3D voxel coordinates $(X, Y, Z)$ within a block of size $32^3$.
-*   Output: A linear memory address (index) in the interleaved buffer.
+*   Input: 3D voxel coordinates $(X, Y, Z)$ within a block of size $32^3$ [S1].
+*   Output: A linear memory address (index) in the interleaved buffer [S1].
 
 **Data Structures:**
-*   A 32-entry lookup table for bit manipulation.
+*   A 32-entry lookup table for bit manipulation [S1].
 *   32-bit unsigned integers for coordinate storage and address generation [S1].
 
 **Method:**
-The volume is decomposed into small blocks containing $32^3$ samples (32x32x32 voxels) [S1]. Within each block, the bits of the coordinates are interleaved to generate the memory address. The mapping preserves the most significant bits (MSBs) grouped by dimension while interleaving the five least significant bits (LSBs) across dimensions [S1].
+The volume is decomposed into small blocks containing $32^3$ samples (32x32x32 voxels) [S1]. Within each block, the bits of the coordinates are interleaved to generate the memory address [S1]. The mapping preserves the most significant bits (MSBs) grouped by dimension while interleaving the five least significant bits (LSBs) across dimensions [S1].
 
 The bit interleaving mapping is defined as:
-$$ (X_{n \dots 0}, Y_{n \dots 0}, Z_{n \dots 0}) \implies Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5} Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0 $$
+$$ (X_{n \dots 0}, Y_{n \dots 0}, Z_{n \dots 0}) \implies Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5} Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0 $$ [S1].
 
 Where:
-*   $n$ is the index of the most significant bit of the coordinate.
-*   The bits from index $n$ down to 5 are grouped by dimension ($Z$, then $Y$, then $X$).
+*   $n$ is the index of the most significant bit of the coordinate [S1].
+*   The bits from index $n$ down to 5 are grouped by dimension ($Z$, then $Y$, then $X$) [S1].
 *   The bits from index 4 down to 0 are interleaved across dimensions ($Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0$) [S1].
 
 **Algorithm Steps:**
 1.  Decompose the volume into $32 \times 32 \times 32$ blocks [S1].
 2.  For a given voxel at coordinates $(X, Y, Z)$:
-    a. Extract the five lower bits of $X$, $Y$, and $Z$ (bits 0–4).
+    a. Extract the five lower bits of $X$, $Y$, and $Z$ (bits 0–4) [S1].
     b. Use a 32-entry lookup table and binary operators to interleave these five lower bits [S1].
     c. Combine the interleaved lower bits with the upper bits ($n$ down to 5), which are kept grouped by dimension ($Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5}$) [S1].
 3.  The resulting bit pattern forms the linear memory address [S1].
@@ -37,22 +37,7 @@ Where:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def interleave_bits(val, table):
-    """
-    Interleaves the 5 lower bits of a 32-bit integer using a lookup table.
-    Assumes val is a 32-bit unsigned integer.
-    """
-    # Extract the 5 lower bits
-    lower_5 = val & 0x1F
-    
-    # Use lookup table to interleave these 5 bits into a 15-bit pattern
-    # The table maps each 5-bit input to its interleaved 15-bit output
-    # (Implementation detail: the table size is 32 entries)
-    interleaved_lower = table[lower_5]
-    
-    return interleaved_lower
-
-def volume_interleave_address(x, y, z, n, lookup_table):
+def volume_interleave_address(x, y, z, n):
     """
     Generates the linear memory address for a voxel at (x, y, z)
     using volume interleaving.
@@ -60,135 +45,49 @@ def volume_interleave_address(x, y, z, n, lookup_table):
     Args:
         x, y, z: 32-bit unsigned integer coordinates
         n: Index of the most significant bit of the coordinates
-        lookup_table: 32-entry list/array for interleaving 5 bits
     
     Returns:
         Linear memory address (32-bit unsigned integer)
     """
     # Extract upper bits (from n down to 5)
-    # Mask to keep bits from n down to 5, shift to LSB position for grouping
-    # Note: The exact bit manipulation for upper bits depends on n.
-    # The formula groups them as Z_upper, Y_upper, X_upper.
-    
-    # Create mask for upper bits (bits 5 to n)
-    # Assuming n >= 5. If n < 5, upper part is 0.
     if n < 5:
         x_upper = 0
         y_upper = 0
         z_upper = 0
     else:
-        # Mask for bits 5 to n
-        # Example: if n=7, mask is 0b1111100000 (bits 5-7 set)
+        # Mask for bits 5 to n, then shift right by 5 to align to LSB
         mask = ((1 << (n + 1)) - 1) ^ ((1 << 5) - 1)
-        
         x_upper = (x & mask) >> 5
         y_upper = (y & mask) >> 5
         z_upper = (z & mask) >> 5
-        
-    # Interleave the lower 5 bits
-    x_lower_interleaved = interleave_bits(x, lookup_table)
-    y_lower_interleaved = interleave_bits(y, lookup_table)
-    z_lower_interleaved = interleave_bits(z, lookup_table)
-    
-    # Combine: Z_upper, Y_upper, X_upper, then interleaved lower bits
-    # The interleaved lower bits are 15 bits long (5 bits * 3 dimensions)
-    # They are interleaved as Z_4 Y_4 X_4 ... Z_0 Y_0 X_0
-    
-    # Construct the final address
-    # Upper bits are shifted to the top
-    # Lower bits are in the bottom 15 bits
-    
-    address = (z_upper << 15) | (y_upper << 10) | (x_upper << 5)
-    
-    # The interleaved lower bits need to be combined correctly.
-    # The lookup table output for each dimension is 15 bits.
-    # However, the formula implies a single interleaved sequence for all 3 dimensions' lower bits.
-    # The lookup table approach described in [S1] likely handles the 5 bits of one dimension
-    # into a specific pattern, but the final address requires interleaving Z, Y, X lower bits together.
-    
-    # Re-reading [S1]: "A 32-entry table and binary operators are used to interleave the five lower bits"
-    # This suggests the table might map the 5 bits of (X,Y,Z) combined? 
-    # Or it interleaves each dimension's 5 bits into a 15-bit slot?
-    # The formula shows Z_4 Y_4 X_4 ... Z_0 Y_0 X_0.
-    # This is a 15-bit sequence.
-    
-    # Let's assume the table interleaves the 5 bits of a single coordinate into a 15-bit pattern
-    # where the bits are spaced out. Then we combine them.
-    # But the formula shows them interleaved across dimensions.
-    
-    # Alternative interpretation: The table maps the 5 bits of X, Y, Z into a single 15-bit interleaved value?
-    # No, the table is 32 entries, so it takes 5 bits.
-    
-    # Most likely: The table interleaves the 5 bits of ONE dimension into a 15-bit field with gaps.
-    # Then we OR them together.
-    # If X_lower is interleaved into positions 0, 3, 6, 9, 12 (for example)
-    # Y_lower into 1, 4, 7, 10, 13
-    # Z_lower into 2, 5, 8, 11, 14
-    # Then ORing them gives the interleaved sequence.
-    
-    # Let's assume the lookup table returns a 15-bit value where the input bits are placed
-    # at specific positions. For X, positions 0,3,6,9,12. For Y, 1,4,7,10,13. For Z, 2,5,8,11,14.
-    
-    # However, the source says "interleave the five lower bits" using a table.
-    # It does not specify the exact bit positions.
-    # We will assume a standard bit interleaving where the table handles the permutation.
-    
-    # To be precise and implementable, we need the exact table or formula.
-    # Since the source only mentions a 32-entry table, we will use a placeholder for the table content
-    # but describe the combination logic.
-    
-    # Let's assume the table `interleave_5_to_15` maps a 5-bit value to a 15-bit value
-    # with bits at positions 0, 3, 6, 9, 12.
-    
-    # Then we need similar tables for Y and Z, or shift the result.
-    
-    # Given the constraint of "no placeholders", and the source's vagueness on the exact table content,
-    # we must rely on the formula structure.
-    
-    # The formula is: Z_4 Y_4 X_4 ... Z_0 Y_0 X_0
-    # This is equivalent to:
-    # bit 0: X_0
-    # bit 1: Y_0
-    # bit 2: Z_0
-    # bit 3: X_1
-    # bit 4: Y_1
-    # bit 5: Z_1
-    # ...
-    
-    # So, X_lower_interleaved should have X_0 at bit 0, X_1 at bit 3, etc.
-    # Y_lower_interleaved should have Y_0 at bit 1, Y_1 at bit 4, etc.
-    # Z_lower_interleaved should have Z_0 at bit 2, Z_1 at bit 5, etc.
-    
-    # The lookup table likely performs this spacing.
-    
-    # We will define the table usage as:
-    # table_x = lookup_table[x_lower] -> places X bits at 0,3,6,9,12
-    # table_y = lookup_table[y_lower] -> places Y bits at 1,4,7,10,13 (requires shifting or separate table)
-    # table_z = lookup_table[z_lower] -> places Z bits at 2,5,8,11,14 (requires shifting or separate table)
-    
-    # Since the source says "A 32-entry table", it implies one table is used for all.
-    # So we likely shift the result of the table lookup.
-    
-    x_lower_spaced = lookup_table[x_lower]
-    y_lower_spaced = lookup_table[y_lower] << 1
-    z_lower_spaced = lookup_table[z_lower] << 2
-    
-    # Combine lower bits
-    lower_combined = x_lower_spaced | y_lower_spaced | z_lower_spaced
-    
-    # Final address
+
+    # Extract lower 5 bits
+    x5 = x & 0x1F
+    y5 = y & 0x1F
+    z5 = z & 0x1F
+
+    # Interleave lower 5 bits into 15 bits: Z4 Y4 X4 ... Z0 Y0 X0
+    # Place X bits at positions 0, 3, 6, 9, 12
+    x_spaced = (x5 << 0) | (x5 << 3) | (x5 << 6) | (x5 << 9) | (x5 << 12)
+    # Place Y bits at positions 1, 4, 7, 10, 13
+    y_spaced = (y5 << 1) | (y5 << 4) | (y5 << 7) | (y5 << 10) | (y5 << 13)
+    # Place Z bits at positions 2, 5, 8, 11, 14
+    z_spaced = (z5 << 2) | (z5 << 5) | (z5 << 8) | (z5 << 11) | (z5 << 14)
+
+    lower_combined = x_spaced | y_spaced | z_spaced
+
+    # Combine upper and lower parts
     address = (z_upper << 15) | (y_upper << 10) | (x_upper << 5) | lower_combined
-    
     return address
 ```
+*(Note: The 32-entry lookup table mentioned in the source implements this exact 5-bit to 15-bit permutation [G].)*
 
 **Parameters:**
 *   Block size: $32^3$ samples (32x32x32 voxels) [S1].
 
 **Edge Cases and Pitfalls:**
-*   The method assumes coordinates are within the defined block.
-*   Precision issues may arise if the number of bits $n$ is large, requiring careful handling of upper bits [S1].
-*   The source mentions that code running on MMX-only processors may not allow line equation tests, leading to minor artifacts, but this is related to the rendering algorithm, not the interleaving itself [S1].
+*   The method assumes coordinates are within the defined block [G].
+*   The source notes that code running on MMX-only processors may not allow line equation tests, leading to minor artifacts, but this relates to the rendering algorithm rather than the interleaving itself [S1].
 
 ## Subtopics
 
@@ -198,9 +97,9 @@ A parallel technique to reorder two integers containing 4-bit groups representin
 ## Operating characteristics
 *   **Time Complexity:** The address calculation involves bitwise operations and a table lookup, which is $O(1)$ per voxel [S1].
 *   **Memory Complexity:** The layout is dense, storing $32^3$ samples per block [S1].
-*   **Performance:** The method reduces cache misses by ensuring spatially adjacent voxels are stored contiguously in memory [S1]. This improves performance for ray-casting algorithms that traverse the volume along rays [S1].
+*   **Performance:** The method reduces cache misses by ensuring spatially adjacent voxels are stored contiguously in memory [S1].
 *   **Strengths:** Improved cache locality for 3D volume traversal [S1].
-*   **Limitations:** The complexity of address calculation may offset gains on hardware with very fast cache access or specific SIMD optimizations [S1]. The method is specific to block sizes of $32^3$ [S1].
+*   **Limitations:** The method is specific to block sizes of $32^3$ [S1].
 
 ## Background
 Volume Interleaving was introduced in the context of object-order ray-casting algorithms to optimize memory access patterns [S1]. The technique is described in "A new object-order ray-casting algorithm" [S1]. It is particularly useful for rendering large volumes on hardware where cache misses are a significant performance bottleneck [S1].

@@ -1,0 +1,136 @@
+# Local Solver
+
+Also called: Block-based Solver, Block-based gradient solver, Block-wise CG Solver, Compressive Rendering (Local Solver), Local Conjugate Gradient Solver, Tiled CG Solver, Tiled Solver
+
+## Overview
+The Local Solver is a parallel optimization technique for compressive volume rendering that partitions the reconstruction image into smaller, mutually exclusive blocks to solve the inverse problem locally on each block [S1, unofficial]. It solves the same regularized normal equations as the Global Solver but operates on reduced vector sizes ($blockWidth \times blockHeight$ instead of $imageWidth \times imageHeight$) [S1, unofficial]. It is distinguished from its sibling [Global Solver](4281-global-solver.md) by processing blocks independently, which allows for different numbers of iterations per block based on local convergence and significantly reduces global memory traffic by leveraging CUDA shared memory [S1, unofficial].
+
+## How it works
+The method solves the regularized normal equation $(S^T S + \lambda H)x = S^T y$ using a Conjugate Gradient (CG) solver, but applies it to tiled regions of the image rather than the entire image at once [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** The sampling matrix $S$, the convolution filter $H$, the regularization parameter $\lambda$, and the observed image with missing pixels $y$ [S1, unofficial].
+*   **Output:** The reconstructed volume density field, merged from individual block solutions [S1, unofficial].
+
+**Data Structures:**
+*   **Shared Memory:** Used per block to store intermediate vectors for the CG solver (residual, direction, etc.) [S1, unofficial].
+    *   **Layout:** Limited to approximately 48 KB per block [S1, unofficial].
+    *   **Constraint:** Variables are copied for each individual block; threads from one block cannot access shared memory from another [S1, unofficial].
+*   **Ghost Elements:** A padded region surrounding each block containing known pixels from neighboring blocks to provide neighborhood information for convolution [S1, unofficial].
+
+**Parameters:**
+*   **Thread Configuration:** $16 \times 16$ threads per block produces the best performance [S1, unofficial].
+*   **Padding Size ($P$):** $P = kernelWidth / 2$, where $kernelWidth$ is the width of the convolution filter [S1, unofficial].
+
+**Number of Blocks:**
+The number of blocks in the x and y dimensions is calculated as [S1, unofficial]:
+$$
+blockNumber_x = \frac{imageWidth - P}{threadSize_x + P}
+$$
+$$
+blockNumber_y = \frac{imageHeight - P}{threadSize_y + P}
+$$
+
+**Algorithm Steps:**
+1.  **Partition:** Divide the image data into mutually exclusive blocks of size $blockWidth \times blockHeight$ [S1, unofficial].
+2.  **Pad:** For each block, create a padded region of size $P$ around the block boundaries. Fill this region with "ghost elements" (known pixels) from the neighboring blocks in the original image $y$ [S1, unofficial]. This ensures the convolution filter has access to neighborhood data, eliminating boundary artifacts [S1, unofficial].
+3.  **Load:** Copy the block data (including ghost elements) into the block's shared memory [S1, unofficial].
+4.  **Solve Locally:** Run the standard Conjugate Gradient algorithm (as defined in the Global Solver) on the data within the shared memory [S1, unofficial].
+    *   Because the solver runs locally, each block maintains its own state variables.
+    *   Each block can converge independently, potentially requiring a different number of iterations [S1, unofficial].
+5.  **Reduce:** Perform block-wise vector dot product reductions using parallel reduction (complexity $O(\log n)$) to compute scalar products required by the CG algorithm [S1, unofficial].
+6.  **Merge:** Combine the reconstructed solutions from all blocks to form the final output image [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def local_solver(image_width, image_height, sampling_matrix_S, convolution_filter_H, lambda_reg, observed_image_y):
+    # Parameters
+    thread_size_x = 16
+    thread_size_y = 16
+    kernel_width = convolution_filter_H.width
+    padding_size = kernel_width / 2
+    
+    # Calculate block dimensions
+    # Note: blockWidth and blockHeight are derived from thread configuration and padding
+    # In a typical tiling scheme, the block data size processed is (threadSize + 2*Padding)
+    # However, the solver operates on the core block, using padding for convolution context.
+    block_width = thread_size_x
+    block_height = thread_size_y
+    
+    # Calculate number of blocks
+    num_blocks_x = (image_width - padding_size) / (thread_size_x + padding_size)
+    num_blocks_y = (image_height - padding_size) / (thread_size_y + padding_size)
+    
+    reconstructed_image = zeros((image_height, image_width))
+    
+    for block_y in range(num_blocks_y):
+        for block_x in range(num_blocks_x):
+            # 1. Extract block and ghost elements
+            # Define coordinates for the padded region
+            start_x = block_x * (thread_size_x + padding_size)
+            start_y = block_y * (thread_size_y + padding_size)
+            
+            # Extract the core block and surrounding ghost pixels
+            # The padded region includes the core block plus the padding on all sides
+            padded_block = extract_padded_region(observed_image_y, start_x, start_y, 
+                                                 thread_size_x, thread_size_y, padding_size)
+            
+            # 2. Load into Shared Memory (Simulated here as local variable for logic)
+            shared_mem_data = padded_block
+            
+            # 3. Run Local Conjugate Gradient Solver
+            # The solver operates on the reduced system for this block
+            # Inputs: Local sampling matrix S_block, Local H_block, Local y_block
+            # Note: S and H must be restricted to the block's domain including ghost effects
+            local_S = restrict_matrix(S, start_x, start_y, thread_size_x, thread_size_y)
+            local_H = restrict_matrix(H, start_x, start_y, thread_size_x, thread_size_y)
+            local_y = extract_core_block(padded_block, padding_size)
+            
+            # Solve (S^T S + lambda H) x = S^T y locally
+            block_solution = conjugate_gradient_solve(local_S, local_H, lambda_reg, local_y)
+            
+            # 4. Merge result
+            reconstructed_image[start_y:start_y+thread_size_y, 
+                                start_x:start_x+thread_size_x] = block_solution
+
+    return reconstructed_image
+
+def extract_padded_region(image, start_x, start_y, width, height, padding):
+    # Extract a region larger than the block to include ghost elements
+    # Ensure bounds checking is handled by the caller or this function
+    y_start = max(0, start_y - padding)
+    y_end = min(image.height, start_y + height + padding)
+    x_start = max(0, start_x - padding)
+    x_end = min(image.width, start_x + width + padding)
+    
+    return image[y_start:y_end, x_start:x_end]
+
+def extract_core_block(padded_block, padding):
+    # Extract the central part of the padded block (the actual block data)
+    return padded_block[padding:-padding, padding:-padding]
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Artifacts:** Without padding with ghost elements, the local solver generates incoherent results and boundary artifacts around the border of each block because the convolution lacks neighborhood information [S1, unofficial].
+*   **Shared Memory Limits:** The limited shared memory (48 KB) restricts the maximum block size [S1, unofficial].
+*   **Race Conditions:** Uncontrolled execution of threads within a block may lead to race conditions if multiple threads read/write the same memory location; `syncthreads()` must be used appropriately to maintain execution order [S1, unofficial].
+
+## Subtopics
+
+### [GMRES Solver](8254-gmres-solver.md)
+The GMRES Solver is an iterative Krylov subspace method used to solve the regularized normal equations arising from least-squares Computed Tomography (CT) reconstruction. It minimizes the residual between the forward-projected reconstruction and the observed sinogram data while applying Tikhonov regularization to enforce smoothness. Unlike direct solvers that explicitly construct the large, sparse system matrix $A^TA$, GMRES operates in a matrix-free manner, computing matrix-vector products on the fly to reduce memory overhead. It is distinguished from its sibling [Local Solver](4294-local-solver.md) by solving the global inverse problem rather than partitioning the image into independent blocks.
+
+## Operating characteristics
+*   **Performance:** The Local Solver is significantly faster than the Global Solver. In measurements using 60% pixel coverage, the Local Solver took 5.6 milliseconds, compared to 119 milliseconds for the Global Solver, a 24-fold speedup [S1, unofficial].
+*   **Complexity:** The computational complexity of the parallel reduction operation is $O(\log n)$, compared to $O(n)$ for sequential summation [S1, unofficial]. The reduction in matrix size from $imageWidth \times imageHeight$ to $blockWidth \times blockHeight$ significantly reduces the computational cost per iteration [S1, unofficial].
+*   **Memory:** Reduces global memory access bottlenecks by utilizing fast shared memory (48 KB per block) [S1, unofficial].
+*   **Strengths:** Enables interactive frame rates (e.g., ~10 fps) by reducing reconstruction time; allows adaptive sampling strategies where each block can have independent sampling rates (e.g., 12.5% or 32 rays per block) to reduce warp divergence [S1, unofficial].
+*   **Limitations:** Requires careful management of shared memory and synchronization; performance is sensitive to thread configuration (multiples of 16 are optimal) [S1, unofficial].
+
+## Background
+The Local Solver was proposed as an optimization for GPU-based compressive volume rendering to address the poor performance and high data transfer costs of global reconstruction methods [S1, unofficial]. It builds on the conjugate gradient solver framework but introduces a tiling strategy to leverage CUDA's blocking scheme and shared memory [S1, unofficial]. The method was developed to achieve interactivity in volume rendering, which was previously hindered by the computational cost of solving the large global system [S1, unofficial].
+
+## Sources
+[S1] GPU-based Compressive Volume Rendering, https://doi.org/10.11575/prism/5366, fetched 2026-10-26 (unofficial)

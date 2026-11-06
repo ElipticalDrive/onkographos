@@ -1,0 +1,168 @@
+# TGorillaVolumetricNoise
+
+Also called: Volumetric Noise, cloud / smoke / fog body
+
+## Overview
+TGorillaVolumetricNoise is a procedural volumetric component that generates 3D fractal noise to create physically based emission-absorption media, such as clouds, smoke, or fog [S1]. It distinguishes itself from sibling methods by baking a smooth 0–1 density gradient into the voxel data while applying opacity via a Beer-Lambert absorption model at render time, thereby eliminating the "terracing" or hard saturation shells that occur when density is baked directly into linear blend values [S1]. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) for the underlying noise synthesis.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** 3D spatial coordinates $(x, y, z)$, noise parameters (Frequency, Octaves, Persistence, Lacunarity, Seed), shaping parameters (Coverage, EdgeFalloff, Billowy), and animation offset.
+*   **Outputs:** A 3D texture (voxel grid) storing a smooth density gradient in the range $[0, 1]$, and a render-time absorption coefficient derived from the `Density` parameter.
+
+**Data Structures:**
+The component maintains a 3D voxel grid. The resolution is configurable, with a default of $64^3$ and a performance preset of $32^3$ [S1]. Each voxel stores a single scalar value representing the normalized density gradient. The data is regenerated on the CPU and uploaded to the GPU upon calling `Regenerate` [S1].
+
+**Parameters:**
+*   `Frequency` (Single): Base noise scale. Higher values increase the number of noise cycles spanning the volume [S1].
+*   `Octaves` (Integer): Number of FBM octaves summed. More octaves produce finer detail but increase generation cost [S1].
+*   `Persistence` (Single): Amplitude falloff per octave, range $[0, 1]$. Lower values yield smoother noise; higher values yield rougher noise [S1].
+*   `Lacunarity` (Single): Frequency growth factor per octave. Typically $\approx 2.0$ [S1].
+*   `Coverage` (Single): Soft threshold for carving the body, range $[0, 1]$. A value of 1 keeps the whole body; lower values separate it into puffs [S1].
+*   `EdgeFalloff` (Single): Radial fade toward the volume border, range $[0, 1]$. Creates a rounded blob shape instead of a cube [S1].
+*   `Billowy` (Boolean): If true, applies `abs()` to the noise value to create puffy cumulus/smoke shapes; if false, produces smooth haze [S1].
+*   `Density` (Single): Overall opacity/absorption strength. Applied at render time, not baked into voxels [S1].
+*   `RenderInside` (Boolean): Default `True`. Allows the camera to move inside the volume with correct compositing [S1].
+*   `UseLighting` (Boolean): Default `False`. The medium is emission-absorption, not a lit surface [S1].
+*   `Offset` (Point3D): Translation vector for animation [S1].
+*   `Seed` (LongWord): Random seed for the Perlin generator [S1].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Create the instance, set the parent viewport, and assign `FrontFaceRenderPass` and `BackFaceRenderPass`. Set `RenderInside` to `True` and `UseLighting` to `False` by default [S1].
+2.  **Noise Sampling:** For each voxel at position $\mathbf{p}$ in the grid:
+    a.  Apply the animation offset: $\mathbf{p}' = \mathbf{p} + \text{Offset}$.
+    b.  Compute the base Perlin noise value $N$ at $\mathbf{p}' \times \text{Frequency}$ using the specified `Seed` [S1].
+    c.  If `Billowy` is true, set $N = |N|$ [S1].
+    d.  Compute the Fractal Brownian Motion (FBM) value $V_{fbm}$ by summing octaves:
+        $$ V_{fbm} = \sum_{i=0}^{\text{Octaves}-1} \text{Persistence}^i \cdot N(\mathbf{p}' \times \text{Frequency} \times \text{Lacunarity}^i) $$
+        [S1]
+    e.  Apply `Coverage` as a soft threshold. The documentation describes this as carving the body, implying a thresholding operation on $V_{fbm}$ [S1].
+    f.  Apply `EdgeFalloff` as a radial fade. Let $\mathbf{c}$ be the center of the volume and $\mathbf{b}$ be the boundary. Calculate a radial factor $R$ based on the distance from the center relative to the boundary. The final density $D$ is:
+        $$ D = V_{fbm} \times (1 - \text{EdgeFalloff} \times R) $$
+        [S1]
+    g.  Clamp $D$ to the range $[0, 1]$.
+3.  **Storage:** Store $D$ in the voxel grid. This value is a smooth gradient, not the final opacity [S1].
+4.  **Rendering:** When rendering, use the stored $D$ as the density for an emission-absorption blend. The absorption coefficient $\alpha$ is derived from $D$ and the `Density` parameter using the Beer-Lambert law [S1].
+5.  **Animation:** To animate, update `Offset` and call `Regenerate` to re-sample the volume on the CPU and upload the new data [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_volumetric_noise(width, height, depth, frequency, octaves, persistence, lacunarity, seed, coverage, edge_falloff, billowy, offset):
+    """
+    Generates the 3D density texture for TGorillaVolumetricNoise.
+    Returns a 3D array of floats in [0, 1].
+    """
+    # Initialize Perlin noise generator with seed
+    perlin_gen = PerlinNoiseGenerator(seed)
+    
+    # Precompute inverse dimensions for normalized coordinates
+    inv_w = 1.0 / width
+    inv_h = 1.0 / height
+    inv_d = 1.0 / depth
+    
+    # Center of the volume for edge falloff
+    center_x = 0.5
+    center_y = 0.5
+    center_z = 0.5
+    
+    density_grid = [[[0.0 for _ in range(depth)] for _ in range(height)] for _ in range(width)]
+    
+    for x in range(width):
+        for y in range(height):
+            for z in range(depth):
+                # 1. Normalized spatial coordinates
+                nx = x * inv_w
+                ny = y * inv_h
+                nz = z * inv_d
+                
+                # 2. Apply offset
+                ox = nx + offset.x
+                oy = ny + offset.y
+                oz = nz + offset.z
+                
+                # 3. Base FBM Noise
+                fbm_value = 0.0
+                amp = 1.0
+                freq = frequency
+                
+                for i in range(octaves):
+                    # Sample Perlin noise at scaled coordinates
+                    # Note: PerlinNoiseGenerator.sample expects 3D coordinates
+                    noise_val = perlin_gen.sample(ox * freq, oy * freq, oz * freq)
+                    
+                    if billowy:
+                        noise_val = abs(noise_val)
+                        
+                    fbm_value += amp * noise_val
+                    amp *= persistence
+                    freq *= lacunarity
+                
+                # 4. Apply Coverage (Soft Threshold)
+                # The documentation implies Coverage carves the body.
+                # A common implementation for "coverage" in this context is a threshold.
+                # If Coverage is 1, no carving. If lower, values below a threshold are zeroed.
+                # Assuming a linear threshold mapping where 1.0 = no threshold, 0.0 = hard cut at 0.
+                # However, "soft threshold" suggests a smoothstep or similar.
+                # Given the lack of explicit formula, we assume a simple thresholding for carving.
+                # Let's assume Coverage acts as a minimum value retention or a threshold.
+                # Standard interpretation: values below (1 - Coverage) are suppressed.
+                threshold = 1.0 - coverage
+                if fbm_value < threshold:
+                    fbm_value = 0.0
+                else:
+                    # Soften the transition if needed, but "carve" implies separation.
+                    # We keep the value as is for now, assuming the threshold creates the separation.
+                    pass
+
+                # 5. Apply Edge Falloff
+                # Radial fade from center to border
+                dx = nx - center_x
+                dy = ny - center_y
+                dz = nz - center_z
+                dist_sq = dx*dx + dy*dy + dz*dz
+                max_dist_sq = 0.75 # Distance from center to corner in normalized coords (sqrt(3)/2)^2
+                dist = sqrt(dist_sq)
+                max_dist = sqrt(max_dist_sq)
+                
+                # Normalized distance from center [0, 1]
+                norm_dist = dist / max_dist if max_dist > 0 else 0
+                
+                # Fade factor: 1 at center, 0 at edge
+                edge_factor = 1.0 - (norm_dist * edge_falloff)
+                edge_factor = max(0.0, edge_factor)
+                
+                # 6. Final Density
+                density = fbm_value * edge_factor
+                
+                # Clamp to [0, 1]
+                density = max(0.0, min(1.0, density))
+                
+                density_grid[x][y][z] = density
+                
+    return density_grid
+```
+
+**Edge Cases and Pitfalls:**
+*   **Terracing Artifacts:** Baking density directly into voxel data and using linear blending causes hard saturation "shells" or step terraces when viewed from inside. This is avoided by storing a smooth 0–1 gradient and applying opacity at render time via emission-absorption blend [S1].
+*   **Resolution Independence:** The `Density` parameter is resolution-independent. A cloud at $32^3$ resolution looks comparably dense to one at $64^3$ for the same `Density` value [S1].
+*   **Performance:** `Regenerate` is expensive as it re-samples the whole volume on the CPU. For animation, use a smaller resolution ($32^3$) and update on a timer (e.g., ~100 ms) rather than every frame [S1].
+*   **Lighting:** `UseLighting` should remain `False` for standard volumetric noise. Lit clouds require a separate "light-marching" feature [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Generation is $O(N)$ where $N$ is the number of voxels ($W \times H \times D$). Each voxel requires $O(\text{Octaves})$ noise evaluations.
+*   **Memory Complexity:** $O(N)$ to store the 3D texture. Default $64^3$ voxels; performance preset $32^3$ [S1].
+*   **Measured Performance:** Regenerating the volume on the CPU is the bottleneck. Updating `Density` is cheap as it only rebuilds the blend function [S1].
+*   **Strengths:** Physically based emission-absorption model prevents internal artifacts; resolution-independent density; easy-to-use presets; fly-through capability [S1].
+*   **Limitations:** CPU-bound generation makes high-resolution animation expensive; no built-in lighting (requires separate feature); grayscale density by default [S1].
+*   **When to Use:** Static or slowly drifting clouds, smoke, and fog where physical accuracy and fly-through are required.
+*   **When Not to Use:** High-speed animation requiring high resolution; scenes requiring direct surface lighting on the volume (use light-marching instead) [S1].
+
+## Background
+TGorillaVolumetricNoise is part of the Gorilla3D Framework [S1]. It is designed to provide a ready-to-use cloud, smoke, or fog body without requiring external data files or custom shader code [S1]. It is a subclass of `TGorillaVolumetricMesh` [S1].
+
+## Sources
+[S1] Volumetric Noise - Gorilla3D Framework - Documentation, https://gorilla3d.de/doc/v3/version/v1.4/page/Core/Volumetric/Volumetric-Noise.md, fetched 2026-10-29

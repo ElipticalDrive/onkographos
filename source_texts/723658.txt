@@ -1,0 +1,1046 @@
+StochasticSplats:
+Stochastic Rasterization for Sorting-Free 3D Gaussian Splatting
+arXiv:2503.24366v1 [cs.CV] 31 Mar 2025
+Shakiba Kheradmand*1,2 , Delio Vicini*3 , George Kopanas†3,4 ,
+Dmitry Lagun1 , Kwang Moo Yi2 , Mark Matthews1 , Andrea Tagliasacchi1,5,6
+1
+Google DeepMind, 2 University of British Columbia, 3 Google, 4 Runway ML,
+5
+Simon Fraser University, 6 University of Toronto,
+*equal contribution, † work done at Google
+1 SPP, 2.7 ms
+MSE: 0.0211
+2 SPP, 2.9 ms
+MSE: 0.0154
+4 SPP, 3.3 ms
+MSE: 0.0072
+8 SPP, 5.6 ms
+MSE: 0.0048
+16 SPP, 6.5 ms
+MSE: 0.0020
+Figure 1. Teaser – We render a 3DGS radiance field using an unbiased Monte Carlo estimator of the volume rendering equation. Unlike
+prior radiance field approaches, our method does not require sorted back-to-front rendering. This results in fast, portable, and pop-free
+rendering that is easy to implement. The number of Monte Carlo samples per pixel allows a trade-off between interactivity and visual
+quality, similar to physically-based rendering. From left to right, we increase the number of samples per pixel, which increases visual
+fidelity at a predictable increase in rendering cost. We report the mean square error (MSE) and render time on an NVIDIA RTX 4090.
+Abstract
+stochastic rasterization. Concretely, we leverage an unbiased Monte Carlo estimator of the volume rendering equation. This removes the need for sorting, and allows for accurate 3D blending of overlapping Gaussians. The number
+of Monte Carlo samples further imbues 3DGS with a way to
+trade off computation time and quality. We implement our
+method using OpenGL shaders, enabling efficient rendering
+on modern GPU hardware. At a reasonable visual quality,
+our method renders more than four times faster than sorted
+rasterization.
+3D Gaussian splatting (3DGS) is a popular radiance field
+method, with many application-specific extensions. Most
+variants rely on the same core algorithm: depth-sorting of
+Gaussian splats then rasterizing in primitive order. This
+ensures correct alpha compositing, but can cause rendering artifacts due to built-in approximations. Moreover, for
+a fixed representation, sorted rendering offers little control over render cost and visual fidelity. For example,
+and counter-intuitively, rendering a lower-resolution image is not necessarily faster. In this work, we address the
+above limitations by combining 3D Gaussian splatting with
+1
+1. Introduction
+Recent advances in novel view synthesis have been driven
+by the success of neural radiance fields (NeRF) [29] and
+3D Gaussian splatting (3DGS) [18]. The former produced
+high-quality visuals at a low rendering speed, while the
+latter enabled efficient rendering with comparable visual
+quality. 3DGS represents a scene as a set of anisotropic
+3D Gaussians that can be “splatted” [56] in rasterization
+pipelines, enabling real-time viewing and efficient training.
+In 3DGS, 3D Gaussians are flattened onto cameraoriented billboards that not only prevent accurate volumetric intermixing [25], but must also be depthwise sorted for
+rasterization [57]. This global sorting operation is computationally expensive and introduces popping artifacts [36],
+as the sort order is view-dependent: small camera movements can result in temporal discontinuities in the rendered
+images. Further, there is no straightforward way to balance rendering cost vs. visual fidelity. One might assume
+that reducing the rendering resolution would lead to faster
+rasterization... yet, we observe the opposite in our experiments. Overall, this limits 3DGS’s use on low-end hardware and in latency-critical applications, such as robotics
+and autonomous driving. Finally, most implementation use
+custom software rasterizers or GPGPU frameworks such as
+CUDA. Software rasterizers are notoriously hard to optimize, and often cannot match the performance of the hardware stack [23]. Additionally, many GPGPU frameworks
+are vendor-specific, reducing portability.
+Several previous works address popping artifacts, rendering performance, and portability, but typically improve
+only one, at the expense of the others. Popping can be alleviated by per-pixel depth sorting, but this introduces extra
+computational demands. While this cost can be amortized
+using clever spatial biases [36], per-pixel sorting cannot
+fully solve volumetric intermixing of 3D Gaussians. Constant density ellipsoids allow analytical intermixing [25],
+but are slow to render because they replace sorting with expensive ray tracing. Other methods [15] reduce the rendering cost and the popping artifacts by using a mix of per-pixel
+sorted lists and weighted order-independent transparency,
+but this comes at a cost in terms of portability since they
+need to implement complicated GPGPU kernels hindering
+cross-platform adoption. An orthogonal route to reduce render cost is to reduce the number of Gaussians [20]. Finally,
+packages such as Splatapult [41] implement an OpenGLbased rasterization pipeline, but do not outperform the original CUDA 3DGS implementation.
+We instead propose to render 3D Gaussians using
+stochastic transparency (ST) [8]; see Figure 2. Stochastic transparency replaces sorted alpha blending by an unbiased Monte Carlo estimator. Practically, transparency is
+rendered by probabilistically selecting individual, opaque,
+samples that are averaged together with multi-sampling [6].
+Alpha blending
+Stochastic transparency (4 SPP)
+Figure 2. Blending vs. stochastic – We visualize a 1D and 3D
+example of the different ways to compute transparency. Two foreground Gaussians are composited on a white background.
+Individual samples are rendered using order-independent Zbuffering, without sorting. We provide unbiased MonteCarlo estimators of both the forward alpha blending and the
+gradient computation. The reverse-mode gradient estimator also permits sorting-free training and is largely agnostic to the primitive type and could be used for other semitransparent representations (e.g., triangle soups). We also
+do an early analysis on proper volumetric intermixing of
+3D Gaussians by extending the theory of stochastic transparency. Critically, all of the above is naturally compatible with the hardware rasterization pipeline, allowing us a
+portable OpenGL implementation of our method.
+At one sample per pixel (SPP), our OpenGL implementation renders up to 4× faster than the original CUDA implementation, enabling latency-critical applications, such
+as open-vocabulary 3D object localization [19], which we
+demonstrate. Higher SPP increase quality and render time,
+approaching the PSNR of alpha-blended 3DGS. One key
+advantage is that downstream applications can dynamically
+adjust sampling at rendering time, allowing them to tradeoff latency against quality; see Figure 1.
+2. Related Work
+Order-independent transparency. While current 3DGS
+methods rely on sorted alpha blending, there is a rich literature on order-independent transparency for rasterizationbased real-time rendering. Prior work can be classified
+into: (1) stochastic methods [8, 21, 48], that probabilistically discard fragments based on their opacity to create
+Monte Carlo estimators of the alpha blending equation and
+(2) non-stochastic methods that avoid sorting by using perpixel linked lists [49], depth peeling [9], weighted blending [27], moments [30], or deep learning [43] to (approximately) composite transparent fragments.
+Given the success of order-independent transparency in
+2
+3. Method
+real-time graphics, it becomes desirable to incorporate these
+techniques with 3DGS. Recent pre-prints [15, 17] combine
+3DGS with non-stochastic order-independent transparency,
+but stochastic variants remain unexplored. We bridge this
+gap by extensively studying stochastic transparency with
+3DGS, both in terms of rendering and training, enabled by
+our novel stochastic gradient estimator.
+Kerbl et al. [18] represents a 3D scene in 3DGS as a collection of anisotropic 3D Gaussians G={gi }. Given a set
+of posed images {In }, we optimize the parameters of the
+3D Gaussians G to photometrically reconstruct the scene.
+Each gi is parameterized as θ={µ, Σ, α, c}, where µ is the
+mean, Σ is the covariance matrix, α is the opacity, and c is
+the view-dependent color modeled using spherical harmonics [37]. We start by reviewing the classical alpha-blending
+based rendering of 3DGS in Section 3.1, and then introduce
+our stochastic transparency algorithm in Section 3.2.
+Popping artifacts. Real-time graphics eschew sorting
+primitives due to both the computational cost and the inexistence of a consistent global ordering of non-trivial primitives. In 3DGS this is overlooked, because most primitives have a relatively small spatial extent. This introduces artifacts often dubbed as “popping”, where a small
+motion of the camera forces a change in the order of the
+primitives introducing a sharp discontinuity in the alpha
+blending equation. These artifacts are particularly noticeable in immersive contexts like virtual reality. Radl et al.
+[36] address this using per-pixel sorting based on the maximal Gaussian response. While this eliminates popping artifacts, it introduces prohibitive computational costs, necessitating complex approximate sorting through a multi-stage
+hierarchical renderer. EVER [25] addresses popping artifacts by ray tracing constant density ellipsoids to compute the full volume rendering equation, rather than approximate alpha-blending. However, this approach is significantly slower than rasterization. In contrast, stochastic
+transparency uniquely eliminates popping by trading sorting for some noise in the final image.
+3.1. Sorted alpha blending
+To calculate the radiance C at a given pixel, we aggregate
+the radiances emitted by L primitives that intersect the associated ray, blending them in depth (z) order [34]:
+C=
+L
+X
+i=1
+ci αi
+Y
+(1 − αk )
+(1)
+zk <zi
+where zk <zi denotes all primitives in front of primitive i.
+While it can be shown that this expression derives from volume rendering [40], the product of terms in (1) requires
+sorting the primitives along z, then blend radiances in either
+back-to-front or front-to-back order. As sorting is independent of how many pixels one needs to render, we simply
+lose the ability to trade off accuracy with speed.
+Sorting is done with respect to the z coordinates of the
+Gaussian means µk remapped to the coordinate frame of
+the current camera, and the covariance is projected via a
+linear approximation of the non-linear projection process
+to the camera’s view point, as proposed by Zwicker et al.
+[57]. This effectively treats each Gaussian as a billboard,
+flattening it parallel to the camera’s imaging plane.
+Fast 3DGS rendering and training. While 3DGS [18] offered a significant speedup over NeRF-based methods, subsequent works have further improved performance. Numerous improvements have been made to the implementation
+of training and rendering routines [14, 15, 26, 50]. Further
+speedups can be made by reducing the number of Gaussians
+and compressing their attributes. This is covered in an extensive literature review [3]. Any approach that reduces the
+number of primitives readily complements our work and is
+likely to improve rendering performance.
+3.2. Stochastic transparency
+Stochastic transparency (ST) [8] avoids sorting by stochastically estimating alpha blending in (1). Avoiding sorting when rendering transparent elements is critical, because
+(i) primitives often do not have a global unique sorting order
+across all pixels, (ii) sorting can be computationally expensive, and (iii) in the context of volume rendering the 3D
+extent of primitives influences the intermixing of colors.
+Stochastic transparency approximates transparency by
+randomly assigning a number of fully opaque samples per
+pixel proportional to a fragment’s opacity, and averaging
+these samples to produce the final pixel color without sorting.1 In our context, the opacity of a fragment is proportional to the opacity of the Gaussian α, and to its distance
+from the mean µ, as measured by the projected covariance
+Differentiable Monte Carlo methods. We introduce a
+novel Monte Carlo gradient estimator for stochastic transparency. Such differentiable Monte Carlo estimators are
+commonly used in physically-based inverse rendering [12,
+22, 31, 45, 53, 55]. Various works propose differentiable
+Monte Carlo methods for neural radiance fields [24, 44] or
+surface reconstruction [16], and Condor et al. [5] differentiate physically-based Monte Carlo ray tracing of 3D Gaussian primitives. Deliot et al. [7] applied stochastic simultaneous perturbation gradients to real-time rendering algorithms, including standard 3DGS. Beyond rendering, differentiable Monte Carlo methods find application in nuclear
+engineering [28], finance [11], atmospheric physics [42]
+and inverse partial differential equation problems [51].
+1 Note that as we do not use multi-sampling anti-aliasing, making fragments synonymous with pixels.
+3
+3.3. Differentiable stochastic transparency
+z ← ∞ , C ← cbackground
+for each Gaussian i in unsorted order do
+Compute αi and depth zi
+Sample u ∼ U(0, 1)
+if u < αi and zi < z then
+C ← ci
+z ← zi
+end if
+end for
+Applying stochastic transparency to inverse rendering problems requires computing the gradient of the photometric
+loss L with respect to the primitive parameters θ. Primarily, we require gradients with respect to color ∂L/∂c, and
+gradients with respect to opacity ∂L/∂α.
+Gradient estimator. We take inspiration from the differentiable rendering literature [45], and use a detached gradient
+estimator [45, 52] to correctly differentiate the binary sampling decision in Listing 1. We derive this estimator by applying the gradient operator to the alpha blending equation:
+"
+#
+L
+Y
+X
+∇θ C =
+∇θ ci αi
+(1 − αk ) .
+(5)
+Listing 1. Pseudocode for stochastic transparency.
+matrix Σ. Stochastic transparency can also be interpreted
+as a randomized extension of classical screen-door transparency [10, Chapter 16], where, instead of a randomized
+selection, a fixed pattern is employed to discard fragments.
+Simple example. As a simple example, consider a single
+3D Gaussian g covering pixel p with opacity α=0.5; in this
+case, if we sample x∼U(0, 1) and accept g only when x>α,
+approximately 50% of the pixel’s samples will randomly select this Gaussian. We next formalize this idea to generalize
+to rendering an arbitrary number of Gaussians.
+Formalization. Formally, stochastic transparency is a
+Monte Carlo estimator of (1). It estimates the radiance C by
+randomly sampling a summand i (i.e., the i-th Gaussian):
+C≈
+Y
+1
+ci αi
+(1 − αk ),
+P (i)
+z <z
+k
+i=1
+We then form an unbiased Monte Carlo gradient estimator
+by again sampling a summand according to P (i). Crucially,
+we explicitly do not differentiate P (i) itself and obtain:
+"
+#
+Y
+1
+∇θ ci αi
+(1 − αk ) .
+(6)
+∇θ C ≈
+P (i)
+z <z
+k
+Y
+∂L
+∂L
+=
+∂ci
+∂C
+∂L
+∂L ci
+=
+∂αi
+∂C αi
+(2)
+i
+(1 − αk ).
+(3)
+The division by this probability mass function cancels out
+part of the sample weight, leading to a simple estimator:
+for
+i ∼ P.
+∂L
+=0
+∂czk <zi
+∂L
+∂L
+−ci
+=
+,
+∂αzk <zi
+∂C 1 − αzk <zi
+(7)
+(8)
+where subscript i denotes the sampled primitive, and
+∂L/∂C is the photometric loss gradient, dependent upon
+the loss formulation (L1, SSIM, ...). Note how in (7) only
+the i-th Gaussian receives gradients with respect to its color,
+while the others have a zero gradient. Meanwhile, (8) shows
+how the i-th Gaussian, and ones closer to the camera receive
+a gradient with respect to their opacity. The Gaussians behind the sampled one do not receive any gradient. Finally,
+our derivation is not specific to 3DGS, and applies to any
+representation rendered with stochastic transparency.
+Decorrelated loss gradient. A well-known challenge for
+differentiable Monte Carlo methods is that the derivative of
+the loss function is a product of two terms that are corrupted
+by noise (i.e., they are both random variables):
+zk <zi
+C ≈ ci
+i
+Substituting the definition of P (i) from (3) and differentiating L with respect to c and α, we get:
+where P (i) is the probability mass function of the random
+index i. This estimator is unbiased, as long as P (i)>0 for
+any non-zero summand. The standard approach is to use:
+P (i) = αi
+zk <zi
+(4)
+Thus, a pixel has the probability P (C=ci )=P (i) to pick
+color ci . In practice, we average multiple independent samples per pixel to reduce estimator noise.
+Pseudocode. Listing 1 provides pseudocode for the above
+estimator. By testing that the depth of the current sample
+is smaller than the previously selected one, we sample exactly according to P (i) [8]. In the fragment shader, this
+is implemented by using standard depth testing and calling
+discard on samples where u≥αi . This only requires access to the current Gaussian’s opacity and works for any
+primitive ordering. Figure 2 further shows a toy example of
+using this estimator on two Gaussians.
+∂L
+∂L ∂C
+=
+.
+(9)
+∂θ
+∂C ∂θ
+where θ are the geometry parameters. If the noise in both
+terms is correlated, we get biased gradients, which harm
+optimization. Following [2, 12], we use different random
+samples to evaluate the two factors above. If L is the L2
+loss, the decorrelated evaluation results in unbiased gradients. For other loss functions, it at least reduces bias. Unbiased gradient estimation for arbitrary loss functions applied
+to a Monte Carlo estimator is an open problem.
+4
+Alpha blending
+Ours (128 SPP)
+Alpha blending
+Pop-free
+Our full intermixing
+Figure 5. Fully volumetric intermixing – While alpha blending
+(left) suffers from popping and “pop-free” variants (middle) show
+discontinuities, our full volumetric intermixing (right) accurately
+composes overlapping Gaussians.
+Ours (512 SPP)
+Figure 3. Gradient validation – We compare alpha blending gradients to our stochastic estimator with 128 and 512 SPP. Red and
+blue colors encode positive and negative values, respectively. Our
+estimator accurately approximates the alpha blending gradients.
+3DGS
+3.4. Removing popping artifacts
+A naive implementation of stochastic transparency re-uses
+the billboard geometry of 3DGS, and consequently, to compute the depths zi , the means of the Gaussians. As we
+will see in Section 4.2, at low sample count this provides
+high rendering efficiency, as we do not require a global sort.
+However, popping artifacts still exist, as the computation
+of zi is analogous to the one in 3DGS, small changes in
+the camera rotation can therefore change the order of primitives, and cause visible video artifacts; see Figure 4.
+The stop-the-pop way. Radl et al. [36] overcome the popping problem by computing the per-fragment (vs. perGaussian) depth. Their core idea is to compute the location
+of the peak of the Gaussian density along the ray. When
+coupled with a (computationally expensive) per-pixel sorting of Gaussians, this can provide a pop-free rendering.
+This can be interpreted as finding “maximum density surface” of the Gaussian, visualized in 2D in Figure 4, and using it to define fragment depths. However, per-fragment updates of depth are not particularly efficient, as early-discard
+mechanisms implemented in hardware [13] can only execute for fragments whose depth has not been modified by a
+shader. While in our setting we can forego sorting, the inability to early-discard fragments still affects us, which lead
+us to propose a different approach, described next.
+Our simplified way. We propose to avoid this inefficiency
+by foregoing per-fragment depth changes. Instead, we orient our billboards to linearly approximate the maximum
+density surface. If the ray associated with a pixel has origin
+o, the plane can be defined as:
+
+
+n⊤ x − µ = 0, where n = Σ−1 µ − o
+(10)
+StopThePop [36] vs. ours
+Figure 4. Popping in 3DGS – (left) As sorting in 3DGS is done
+with respect to the z distance of the Gaussian mean from the
+camera, a small camera rotation can cause visible “popping” artifacts (i.e., sudden pixel color changes). (right) StopThePop [36]
+corrects for this behavior by associating a surface with each Gaussian, and determining the depth z per-fragment (dashed line),
+rather than per-Gaussian. Our solution leads to visually comparable results, but approximates this surface linearly (solid line), so
+that per-fragment depth z can be computed efficiently in hardware.
+Practical algorithm. The presence of ci in (8) implies that
+we need access to the result of the forward pass to compute
+gradients. We therefore follow path replay backpropagation [45] and compute gradients in three passes:
+1. In a first pass, we render an image and evaluate ∂L/∂C.
+2. We then render a decorrelated image using a different
+random seed, giving us ci
+3. Finally, we replay the second pass by re-rendering using
+the same random seed and using the stored ci to compute
+parameter gradients.
+By approximating this surface with a plane, we can easily
+use the interpolation kernels within the hardware rasterizer
+to compute the splat’s depth. This approach adds no extra
+time to the render process and gives us popping-free rendering with a similar PSNR to [36] at higher sample counts.
+Fully volumetric intermixing. If maximum rendering fidelity is desired and the cost of per-fragment depth modification is acceptable, stochastic transparency can naturally
+support full volumetric intermixing. The key insight is that
+Validation. We validate our estimator by comparing to the
+gradients of the sorted alpha blending implementation. For
+easier visual interpretation, we use our reverse-mode gradient implementation to compute a gradient image. We
+do this by backpropagating an L1 loss separately for each
+pixel, and visualizing the sum of the x-component of the
+positional gradients of all Gaussians affecting a given pixel.
+As shown in Figure 3, our method produces noisy gradients
+that closely match those of alpha blending in structure.
+5
+this can be achieved by replacing the fixed depth of a Gaussian by a sampled free-flight distance. For this, we first express the total contribution of a single
+ RGaussian using
+ the
+R∞
+t
+Beer-Lambert law: 0 σi (xt ) exp − 0 σi (xs ) ds ci dt,
+where the opacity of a Gaussian is reparametrized using a
+spatially-varying extinction function σi and xa :=o+a·d for
+a ray (o, d). We follow [5] and sample a free-flight disRt
+tance t proportional to p(t) = σi (xt ) exp(− 0 σi (xs ) ds).
+To handle overlapping Gaussians, we adapt decomposition
+tracking [32]: If two Gaussians overlap, we sample a freeflight distance according to each and take the minimum.
+This accurately resolves overlap of an arbitrary number of
+Gaussians without additional data structures, sorting, or ray
+tracing, and readily fits into the stochastic transparency algorithm. We simply need to replace the computation of zi
+by a probabilistic sampling zi ∼ p(t). We show an example
+rendering of two overlapping Gaussians in Fig. 5. See the
+supplemental for the full free-flight sampling routine.
+Frame t
+Frame t+1
+FLIP error
+Figure 6. Popping artifact – The top row displays two consecutive frames, fine-tuned and rendered using our StochasticSplats,
+along with their corresponding FLIP error map [1]. The bottom
+row presents the same frames processed with standard 3DGS. The
+foreground error indicates popping while the background errors
+are due to the camera motion.
+4. Experiments
+We evaluate rendering performance on the real-world
+scenes from the MipNerf360 [4] dataset. For demonstrating semantic object localization with single-sample rendering we use the LERF dataset [19] – it consists of complex
+in-the-wild scenes, designed for 3D object localization.
+PSNR
+SSIM
+LPIPS
+3DGS
+StopThePop
+1
+4
+28.99
+0.869
+0.185
+28.79
+0.870
+0.181
+17.95
+0.285
+0.611
+22.81
+0.512
+0.493
+Ours (SPP)
+16
+64
+256
+1024
+26.25
+0.714
+0.351
+28.50
+0.856
+0.178
+28.66
+0.867
+0.168
+27.93
+0.819
+0.235
+Table 1. Novel view synthesis – quantitative results of different methods on MipNerf360 scenes. StochasticSplats is finetuned
+on StopThePop-trained scenes using 128 SPP, and rendered using
+varying number of samples.
+Baselines. For rendering baselines, we compare the performance of our method against the original 3DGS implementation [18] that uses CUDA, as well as Splatapult [41], an
+equivalent OpenGL implementation. We also compare with
+StopThePop [36], a pop-free method for 3DGS rendering.
+4.1. Rendering quality
+Metrics. We compute the standard metrics of peak signalto-noise ratio (PSNR), structural similarity index metric (SSIM) [46], and learned perceptual image patch similarity (LPIPS) [54]. We report the average per-frame processing time for all methods on the MipNerf360 scenes.
+Qualitative results – Figs. 6 and 7. We show two
+scenes (Room and Kitchen) in Figure 7 from the MipNerf360 dataset. As shown, our method allows a trade-off
+between quality and rendering time. Figure 6 further highlights that popping is handled properly. Note that, due to
+the sorting-free nature of our method, any popping free formulations can be easily integrated into our method.
+Implementation details. To demonstrate portability, we
+implement our method in both CUDA and OpenGL. Our
+CUDA implementation builds on the existing 3DGS framework by Kerbl et al. [18] and our OpenGL implementation
+builds upon Splatapult [41]. We evaluate on a Windows laptop equipped with an NVIDIA Quadro T1000 Max-Q GPU,
+and Linux desktops with an NVIDIA RTX 3090 and RTX
+4090.
+Rather than training from scratch, we fine-tune a
+trained 3DGS scene with the CUDA implementation of our
+method for 1000 iterations. As we are fine-tuning, we do
+not apply densification or pruning, and we optimize positions using a learning rate of 5×10−5 with 128 samples. We
+keep all other hyperparameters the same. On average, the
+finetuning process requires approximately 14 minutes on an
+NVIDIA RTX 3090 GPU for scenes from MipNerf360.
+Quantitative results – Tab. 1. We report the PSNR values
+of our fine-tuned scenes rendered with varying numbers of
+samples, alongside comparisons to 3DGS and StopThePop.
+We use our pop compensation from Section 3.4. By increasing the number of samples per pixel, our method approaches
+the quality of alpha blending. While the Monte Carlo noise
+affects metric, i.i.d. noise is visually often less distracting
+than structured artifacts. Additionally, as we show in Section 4.4 and Section 4.4, this can be mitigated via temporal anti-aliasing, and even without any mitigation, does not
+harm downstream perception tasks.
+6
+1 SPP
+4 SPP
+16 SPP
+128 SPP
+Alpha blending
+Figure 7. Qualitative results – for the Room and Kitchen scenes from the MipNerf360 dataset are shown in Fig. 7. We compare
+StochasticSplats using 1, 4, and 16 samples per pixel against the standard alpha blending approach. Even with just 1 sample per pixel, our
+method produces reasonable renderings, and with 16 samples, the results closely match the quality of alpha blending.
+3DGS-CUDA 3DGS-OpenGL StopThePop
+T1000
+RTX3090
+RTX4090
+65.08
+8.14
+5.60
+100.28
+32.15
+20.70
+75.91
+9.48
+-
+1
+Ours-OpenGL (SPP)
+2
+4
+8
+StopThePop [36] on CUDA. We report timings with a varying number of samples per pixel, exercising our method’s
+ability to trade off performance and quality. With a single
+sample, our method achieves 2× to 4× lower latency compared to alpha-blended 3DGS, depending on the hardware;
+see Table 2. For higher sample counts, we employ supersampling: render at a higher resolution and then downsample to the target display resolution.
+16
+16.23 18.95 24.71 37.51 61.25
+3.25 4.18 6.42 15.31 18.48
+1.85 2.05 2.86 6.71 8.00
+Table 2. Forward pass time – in milliseconds for different techniques on MipNerf360-trained scenes on three different GPUs.
+The values are averaged over all scenes and all views.
+3DGS
+StopThePop
+1
+23.06
+25.77
+18.10
+Ours (SPP)
+8
+128
+33.19
+478.93
+4.2. Computation time
+Our method is unique at being fast, portable and popfree at the same time. The portability of our method is only
+comparable with the 3DGS-OpenGL variant, that has popping artifacts and is relatively slow. StopThePop cannot be
+easily ported to standard graphics frameworks, and 3DGSCUDA slows down significantly when ported to OpenGL.
+This is because the CUDA radix sort routines utilize platform specific optimizations [33].
+Forward pass timings – Tab. 2. We compare the forward
+rendering time of our method implemented in OpenGL,
+against 3DGS on both CUDA and OpenGL, as well as
+Backward pass timings – Tab. 3. We further report the
+computation time for a single backward pass, this time with
+the CUDA implementation for all methods, as training typ-
+Table 3. Backward pass time – in milliseconds of the CUDA
+code for StochasticSplats (as we vary SPP), 3DGS [18], StopThePop [36], averaged over test views of the MipNerf360 scenes on
+an RTX 3090 GPU.
+7
+Figure 8. Timings at lower resolution – Render timings (milliseconds) at different downsampled resolutions for our method
+(OpenGL) and alpha blending (CUDA) with different tile sizes on
+an NVIDIA RTX 3090.
+(a) Green apple (AB)
+(b) Green apple (ours)
+(c) Chopsticks (AB)
+(d) Chopsticks (ours)
+Figure 10. Open vocabulary localization – Qualitative comparison of open-vocabulary 3D object localization on the LERF
+dataset using alpha blending vs. StochasticSplats at 1 SPP.
+AB
+Ours
+Teatime
+Ramen
+Waldo-Kitchen
+Figurines
+Mean
+88.1
+88.1
+73.2
+73.2
+95.5
+86.4
+80.4
+80.4
+84.3
+82.0
+Table 4. Open vocabulary localization – accuracy on the LERF
+dataset using alpha blending (AB) and StochasticSplats at 1 SPP.
+A common strategy to further reduce variance is to average pixel values across frames by reusing information
+from previous renderings [39]. We employ temporal antialiasing (TAA) to not only mitigate aliasing artifacts, but
+also accumulate samples over time, achieving an effectively higher sample count at minimal cost. Frame-to-frame
+consistency is maintained by warping previously rendered
+frames according to per-pixel depth whenever the camera
+moves. As shown in Figure 9, this greatly reduces rendering noise, while maintaining low latency. We provide implementation details in the appendix, and our supplemental
+video demonstrates TAA applied to 1-SPP frames.
+Semantic localization – Fig. 10 and Tab. 4. We further
+show that while the single-sample render has low PSNR, it
+is still useful. Specifically, we use LangSplat [35] and replace their alpha blending renderer with our method, and
+follow their pipeline to localize objects. As shown in Figure 10, while our renders are noisy, it still properly renders
+semantics such that the localizer can correctly identify its
+location. There is a moderate reduction in accuracy (Tab. 4),
+but we achieve 4× faster rendering speed.
+Figure 9. Temporal anti-aliasing – StochasticSplats at 1 SPP
+without (left) and with (right) TAA after moving along a trajectory for 70 frames. TAA introduces a negligible latency increase.
+Video examples can be found in the supplementary.
+ically is done on CUDA devices.
+4.3. Lowering resolution does not enhance speed
+Our method inherently offers a performance vs. quality
+trade-off. Attempting to naively integrate such a trade-off
+into 3DGS, such as reducing rendering resolution, does not
+work well. Simply lowering the rendering resolution does
+not speed up rasterization – the same number of Gaussians
+must be processed, and the view frustum for each pixel increases. In short, more Gaussians contribute to each pixel,
+increasing the computation time per pixel. Figure 8 reports
+rendering times for our method (OpenGL) and alpha blending (AB-CUDA) with various tile sizes. While AB render
+time decreases to some degree, it starts to increase after a
+point, as the Gaussian count per-tile increases. No configuration can reach the rendering speed of our method (1 SPP).
+4.4. Making the most out of a single sample
+5. Conclusion
+We now practically demonstrate that even a single-sample
+rendering strategy can be useful.
+Temporal anti-aliasing – Fig. 9. In interactive applications, multiple frames are rendered in rapid succession.
+We proposed a sorting-free stochastic rendering method
+for 3D Gaussian splatting, that is, technically, compatible
+with any semi-transparent representation. We derive both
+the forward (rendering) and backward (gradient) passes for
+8
+stochastic rendering, allowing a quality vs. cost trade off,
+and renders without popping artifacts. Our OpenGL implementation renders 2× – 4× faster with reasonable quality,
+demonstrating high portability.
+Limitations and future works. While we obtain reasonable quality when rendering with low sample counts, our
+results are noisy. Future work could focus on reducing
+the variance of both forward and backward estimators,
+for example using importance sampling, stratified sampling [21] or control variates. Moreover, quality could
+further be improved by leveraging lightweight (neural)
+denoising algorithms, similar to how diffusion models are
+used in conjunction with rough 3D renderings [38, 47].
+[12] Ioannis Gkioulekas, Anat Levin, and Todd Zickler. An evaluation of computational imaging techniques for heterogeneous inverse scattering. In European Conference on Computer Vision (ECCV), pages 685–701. Springer International
+Publishing, 2016. 3, 4
+[13] Khronos Group. Early Fragment Test. https://www.
+khronos.org/opengl/wiki/Early_Fragment_
+Test, 2025. 5
+[14] Hao Gui, Lin Hu, Rui Chen, Mingxiao Huang, Yuxin Yin,
+Jin Yang, and Yong Wu. Balanced 3DGS: Gaussian-wise
+parallelism rendering with fine-grained tiling. arXiv preprint
+arXiv:2412.17378, 2024. 3
+[15] Florian Hahlbohm, Fabian Friederichs, Tim Weyrich, Linus Franke, Moritz Kappel, Susana Castillo, Marc Stamminger, Martin Eisemann, and Marcus Magnor. Efficient perspective-correct 3D Gaussian splatting using hybrid
+transparency. arXiv preprint arXiv:2410.08129, 2024. 2, 3
+[16] Jon Hasselgren, Nikolai Hofmann, and Jacob Munkberg.
+Shape, Light, and Material Decomposition from Images using Monte Carlo Rendering and Denoising. Advances in
+Neural Information Processing Systems (NeurIPS), 2022. 3
+[17] Qiqi Hou, Randall Rauwendaal, Zifeng Li, Hoang Le, Farzad
+Farhadzadeh, Fatih Porikli, Alexei Bourd, and Amir Said.
+Sort-free gaussian splatting via weighted sum rendering.
+arXiv preprint arXiv:2410.18931, 2024. 3
+[18] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3D gaussian splatting for real-time
+radiance field rendering. ACM Trans. Graph. (Proc. SIGGRAPH), 42(4), 2023. 2, 3, 6, 7
+[19] Justin Kerr, Chung Min Kim, Ken Goldberg, Angjoo
+Kanazawa, and Matthew Tancik. Lerf: Language embedded
+radiance fields. In IEEE Conference on Computer Vision and
+Pattern Recognition (CVPR), pages 19729–19739, 2023. 2,
+6
+[20] Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Yang-Che Tseng, Hossam Isack, Abhishek Kar,
+Andrea Tagliasacchi, and Kwang Moo Yi. 3D gaussian splatting as markov chain monte carlo. In Advances in Neural
+Information Processing Systems (NeurIPS), 2024. Spotlight
+Presentation. 2
+[21] Samuli Laine and Tero Karras. Stratified sampling for
+stochastic transparency. In Comp. Graph. Forum (Proc.
+EGSR), pages 1197–1204, 2011. 2, 9
+[22] Tzu-Mao Li, Miika Aittala, Frédo Durand, and Jaakko Lehtinen. Differentiable monte carlo ray tracing through edge
+sampling. ACM Trans. Graph. (Proc. SIGGRAPH Asia), 37
+(6):222:1–222:11, 2018. 3
+[23] Shichen Liu, Tianye Li, Weikai Chen, and Hao Li. Soft
+Rasterizer: A Differentiable Renderer for Image-Based 3D
+Reasoning. In IEEE International Conference on Computer
+Vision (ICCV), pages 7708–7717, 2019. 2
+[24] Alexander Mai, Dor Verbin, Falko Kuester, and Sara
+Fridovich-Keil. Neural microfacet fields for inverse rendering. In IEEE International Conference on Computer Vision
+(ICCV), 2023. 3
+[25] Alexander Mai, Peter Hedman, George Kopanas, Dor
+Verbin, David Futschik, Qiangeng Xu, Falko Kuester,
+References
+[1] Pontus Andersson, Jim Nilsson, Tomas Akenine-Möller,
+Magnus Oskarsson, Kalle Åström, and Mark D. Fairchild.
+FLIP: A Difference Evaluator for Alternating Images. Proceedings of the ACM on Computer Graphics and Interactive
+Techniques, 3(2):15:1–15:23, 2020. 6
+[2] Dejan Azinovic, Tzu-Mao Li, Anton Kaplanyan, and
+Matthias Nießner. Inverse path tracing for joint material and
+lighting estimation. In IEEE Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 2442–2451, 2019. 4
+[3] Milena T Bagdasarian, Paul Knoll, Yi-Hsin Li, Florian
+Barthel, Anna Hilsmann, Peter Eisert, and Wieland Morgenstern. 3dgs. zip: A survey on 3d gaussian splatting compression methods. arXiv preprint arXiv:2407.09510, 2024. 3
+[4] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+Anti-Aliased Neural Radiance Fields. In IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR), 2022.
+6
+[5] Jorge Condor, Sebastien Speierer, Lukas Bode, Aljaz Bozic,
+Simon Green, Piotr Didyk, and Adrian Jarabo. Don’t splat
+your gaussians: Volumetric ray-traced primitives for modeling and rendering scattering and emissive media. ACM
+Trans. Graph., 44(1), 2025. 3, 6, 1, 2
+[6] Franklin C. Crow. The aliasing problem in computergenerated shaded images. Commun. ACM, 20(11):799–805,
+1977. 2
+[7] Thomas Deliot, Eric Heitz, and Laurent Belcour. Transforming a non-differentiable rasterizer into a differentiable one
+with stochastic gradient estimation. Proc. Symposium on Interactive 3D Graphics and Games (I3D), 2024. 3
+[8] Eric Enderton, Erik Sintorn, Peter Shirley, and David Luebke. Stochastic transparency. In Proc. Symposium on Interactive 3D Graphics and Games (I3D), pages 157–164, 2010.
+2, 3, 4
+[9] Cass Everitt. Interactive order-independent transparency.
+White paper, NVIDIA, 2(6):7, 2001. 2
+[10] James D Foley. Computer graphics: principles and practice.
+Addison-Wesley Professional, 1996. 4
+[11] Michael B. Giles. Monte carlo evaluation of sensitives in
+computational finance. Technical report, Oxford-Man Institute of Quantitative Finance, 2007. 3
+9
+[39] Daniel Scherzer, Lei Yang, Oliver Mattausch, Diego Nehab, Pedro V. Sander, Michael Wimmer, and Elmar Eisemann. Temporal Coherence Methods in Real-Time Rendering. Comp. Graph. Forum, 31(8):2378–2408, 2012. 8
+[40] Andrea Tagliasacchi and Ben Mildenhall. Volume rendering
+digest (for nerf). arXiv preprint arXiv:2209.02417, 2022. 3
+[41] Anthony J. Thibault. Splatapult. https://github.
+com/hyperlogic/splatapult, 2023. Accessed January 2, 2025. 2, 6
+[42] JM Tregan, S Blanco, J Dauchet, M Hafi, R Fournier, L Ibarrart, P Lapeyre, and N Villefranque. Convergence issues in
+derivatives of Monte Carlo null-collision integral formulations: a solution. arXiv preprint arXiv:1903.06508, 2019.
+3
+[43] Grigoris Tsopouridis, Andreas A Vasilakis, and Ioannis Fudos. Deep and fast approximate order independent transparency. In Comp. Graph. Forum, 2024. 2
+[44] Dor Verbin, Ben Mildenhall, Peter Hedman, Jonathan T. Barron, Todd Zickler, and Pratul P. Srinivasan. Eclipse: Disambiguating illumination and materials using unintended shadows. IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2024. 3
+[45] Delio Vicini, Sébastien Speierer, and Wenzel Jakob. Path replay backpropagation: Differentiating light paths using constant memory and linear time. ACM Trans. Graph. (Proc.
+SIGGRAPH), 40(4):108:1–108:14, 2021. 3, 4, 5
+[46] Zhou Wang, A.C. Bovik, H.R. Sheikh, and E.P. Simoncelli.
+Image quality assessment: from error visibility to structural
+similarity. IEEE Trans. Image Proc., 13(4), 2004. 6
+[47] Jay Zhangjie Wu, Yuxuan Zhang, Haithem Turki, Xuanchi
+Ren, Jun Gao, Mike Zheng Shou, Sanja Fidler, Zan Gojcic,
+and Huan Ling. Difix3D+: Improving 3d reconstructions
+with single-step diffusion models. In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2025. 9
+[48] Chris Wyman. Stochastic layered alpha blending. In ACM
+SIGGRAPH 2016 Talks, pages 1–2. 2016. 2
+[49] Jason C Yang, Justin Hensley, Holger Grün, and Nicolas Thibieroz. Real-time concurrent linked list construction on the
+gpu. In Comp. Graph. Forum (Proc. EGSR), 2010. 2
+[50] Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen,
+Brent Yi, Zhuoyang Pan, Otto Seiskari, Jianbo Ye, Jeffrey
+Hu, Matthew Tancik, and Angjoo Kanazawa. gsplat: An
+open-source library for Gaussian splatting. arXiv preprint
+arXiv:2409.06765, 2024. 3
+[51] Ekrem Fatih Yilmazer, Delio Vicini, and Wenzel Jakob.
+Solving inverse pde problems using monte carlo estimators.
+ACM Trans. Graph. (Proc. SIGGRAPH Asia), 43, 2024. 3
+[52] Tizian Zeltner, Sébastien Speierer, Iliyan Georgiev, and
+Wenzel Jakob. Monte carlo estimators for differential light
+transport. Transactions on Graphics (Proceedings of SIGGRAPH), 40(4), 2021. 4
+[53] Cheng Zhang, Lifan Wu, Changxi Zheng, Ioannis
+Gkioulekas, Ravi Ramamoorthi, and Shuang Zhao. A differential theory of radiative transfer. ACM Trans. Graph. (Proc.
+SIGGRAPH Asia), 38(6), 2019. 3
+[54] Richard Zhang, Phillip Isola, Alexei A Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+Jonathan T Barron, and Yinda Zhang. EVER: Exact volumetric ellipsoid rendering for real-time view synthesis. arXiv
+preprint arXiv:2410.01804, 2024. 2, 3
+[26] Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl,
+Markus Steinberger, Francisco Vicente Carrasco, and Fernando De La Torre. Taming 3dgs: High-quality radiance
+fields with limited resources. In SIGGRAPH Asia Conference Papers, pages 1–11, 2024. 3
+[27] Morgan McGuire and Louis Bavoil. Weighted blended orderindependent transparency. Journal of Computer Graphics
+Techniques (JCGT), 2(2):122–141, 2013. 2
+[28] Guennady A. Mikhailov. On the calculation of nuclear reactor disturbances by the monte carlo method. USSR Computational Mathematics and Mathematical Physics, 6(2):268–
+273, 1966. 3
+[29] Ben Mildenhall, Pratul Srinivasan, Matthew Tancik,
+Jonathan Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing Scenes as Neural Radiance Fields for View
+Synthesis. In European Conference on Computer Vision
+(ECCV), pages 405–421. Springer, 2020. 2
+[30] Cedrick Münstermann, Stefan Krumpen, Reinhard Klein,
+and Christoph Peters. Moment-based order-independent
+transparency. Proc. Symposium on Interactive 3D Graphics
+and Games (I3D), 1(1):1–20, 2018. 2
+[31] Merlin Nimier-David, Delio Vicini, Tizian Zeltner, and Wenzel Jakob. Mitsuba 2: A retargetable forward and inverse
+renderer. ACM Trans. Graph. (Proc. SIGGRAPH Asia), 38
+(6), 2019. 3
+[32] Jan Novák, Andrew Selle, and Wojciech Jarosz. Residual ratio tracking for estimating attenuation in participating media.
+ACM Trans. Graph. (Proc. SIGGRAPH Asia), 33(6):179:1–
+179:11, 2014. 6
+[33] Lukas Polok, Viorela Ila, and Pavel Smrz. Fast radix sort for
+sparse linear algebra on gpu. In SpringSim (HPS), page 11,
+2014. 7
+[34] Thomas Porter and Tom Duff. Compositing digital images.
+In Computer Graphics (Proc. SIGGRAPH), page 253–259.
+ACM, 1984. 3
+[35] Minghan Qin, Wanhua Li, Jiawei Zhou, Haoqian Wang, and
+Hanspeter Pfister. Langsplat: 3d language gaussian splatting. In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), pages 20051–20060, 2024. 8
+[36] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+Stopthepop: Sorted gaussian splatting for view-consistent
+real-time rendering.
+ACM Trans. Graph. (Proc. SIGGRAPH), 43(4):1–17, 2024. 2, 3, 5, 6, 7, 1
+[37] Ravi Ramamoorthi and Pat Hanrahan. An efficient representation for irradiance environment maps. In ACM Trans.
+Graph. (Proc. SIGGRAPH), 2001. 3
+[38] Xuanchi Ren, Tianchang Shen, Jiahui Huang, Huan Ling,
+Yifan Lu, Merlin Nimier-David, Thomas Müller, Alexander
+Keller, Sanja Fidler, and Jun Gao. GEN3C: 3d-informed
+world-consistent video generation with precise camera control. In IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR), 2025. 9
+10
+deep features as a perceptual metric. In IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), 2018. 6
+[55] Shuang Zhao, Lifan Wu, Frédo Durand, and Ravi Ramamoorthi. Downsampling scattering parameters for rendering anisotropic media. ACM Trans. Graph. (Proc. SIGGRAPH Asia), 35(6), 2016. 3
+[56] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and
+Markus Gross. Surface splatting. In ACM Trans. Graph.
+(Proc. SIGGRAPH), 2001. 2
+[57] Matthias Zwicker, Hanspeter Pfister, Jeroen Van Baar, and
+Markus Gross. Ewa volume splatting. In Proceedings Visualization (VIS), pages 29–538. IEEE, 2001. 2, 3
+11
+StochasticSplats:
+Stochastic Rasterization for Sorting-Free 3D Gaussian Splatting
+Supplementary Material
+1. Per-scene results
+Table 5 and Table 6 show the times for different scenes and
+different rendering techniques.
+2. Tighter image-space bounding box
+As our method requires rasterizing all Gaussians without
+an early termination transmittance threshold, any reduction in the number of Gaussians within each tile helps in
+our CUDA implementation. 3DGS projects a 3D Gaussian onto the image plane, resulting in a 2D Gaussian from
+which an axis-aligned bounding box around its center is
+computed in screen space. 3DGS uses a fix σ=3 to cutoff the Gaussian contribution.
+We follow Radl et al. [36]
+p
+approach and use tO = 2 log(α/ϵO ) with ϵo = 1/255 in
+all our results, including 3DGS.
+Given a 2D screen-space Gaussian, 3DGS computes
+the major and minor eigenvectors and their corresponding
+eigenvalues, λ1 and λ2 . The larger eigenvalue provides a
+bound on the Gaussian’s radius in screen space, scaled by
+tO . The radius is then used to form an axis-aligned square
+bounding box around the center of the projected Gaussian.
+However, for elongated Gaussians, this square approximation introduces unnecessary overhead in a tile-based implementation, increasing the number of per-tile-Gaussians.
+Instead, a tighter bounding box can be derived by accounting for both eigenvalues and their associated eigenvectors.
+Specifically, in each eigenvector direction vi , we set
+p
+∆i =
+tO λi , i = 1, 2,
+(11)
+ST@1
+ST@2
+ST@4
+ST@8
+ST@16
+AB-GL
+AB-CUDA
+Room
+Bonsai
+Counter
+Kitchen
+Stump
+Bicycle
+Garden
+1.91
+1.55
+2.08
+2.83
+4.12
+5.13
+5.13
+3.14
+2.47
+3.62
+4.51
+4.42
+5.48
+5.62
+5.70
+4.43
+6.70
+7.96
+5.09
+6.27
+6.83
+16.24
+12.58
+19.39
+22.33
+8.98
+11.89
+13.77
+20.49
+15.64
+24.10
+27.28
+10.72
+14.00
+16.11
+13.73
+10.13
+12.24
+17.86
+35.80
+64.14
+73.19
+5.92
+4.50
+5.75
+7.41
+8.90
+12.44
+12.07
+Average
+3.25
+4.18
+6.42
+15.31
+18.48
+32.16
+8.14
+Table 5. Average rendering time on 3090 GPU
+ST@1
+ST@2
+ST@4
+ST@8
+ST@16
+AB-GL
+AB-CUDA
+Room
+Bonsai
+Counter
+Kitchen
+Stump
+Bicycle
+Garden
+0.99
+0.83
+1.03
+1.42
+2.15
+2.71
+2.79
+1.40
+1.16
+1.59
+2.05
+2.29
+2.88
+3.01
+2.33
+1.89
+2.75
+3.41
+2.64
+3.35
+3.66
+6.98
+5.40
+8.33
+9.60
+4.26
+5.63
+6.78
+8.35
+6.39
+9.84
+11.20
+5.09
+6.50
+7.62
+8.87
+6.42
+8.20
+11.36
+24.15
+41.17
+44.74
+3.76
+2.89
+3.83
+4.89
+6.32
+9.08
+8.46
+Average
+1.85
+2.05
+2.86
+6.71
+8.00
+20.70
+5.60
+Table 6. Average rendering time on 4090 GPU
+and µt−1 be the accumulated warped average from previous
+frames. We update the color in the current frame by:
+c̄t =
+1
+Nt−1
+µt−1 +
+ct ,
+Nt−1 + 1
+Nt−1 + 1
+(12)
+where Nt−1 represents the number of accumulated samples
+up to frame t − 1. The same operation applies to the 3D
+coordinates.
+We note this average position is well defined for surfaces, but poorly approximated in less confident
+“volumetric” regions. We define new samples that are further from the warped mesh by more than a threshold τ to be
+occluded, and reset accumulation for those pixels.
+In our OpenGL implementation, we also compute the
+bounding-box corners as described above, which yields a
+tighter fit, without requiring them to be axis-aligned. Moreover, by increasing the number of corner samples, we can
+further refine this bounding region with minimal additional
+effort.
+4. Free-flight distance sampling
+3. Temporal anti-aliasing
+For completeness, we describe the free-flight distance sampling we use for volumetric intermixing in detail. Following [5], we define a volumetric density for a 3D Gaussian:
+At the first frame, we record each pixel’s world-space position x and color. For each subsequent frame, these 3D
+points are projected into the new view to produce a warped
+version of the previous average frame’s image. We then
+compare the warped 3D coordinates with those computed
+for the current frame. If they closely match, we blend both
+the color and the x values. Otherwise, the sample count for
+that pixel is reset. Let ct denote the color image at time t,
+
+
+1
+σ(x) = σt exp − (x − µ)T Σ−1 (x − µ) ,
+2
+(13)
+where σt scales the density of the entire Gaussian uniformly
+and x is a 3D position. The integral of this density along a
+1
+ray (o, d) can be analytically computed:
+√
+Z t
+
+π
+σ(xt ) dt =σt √ exp (a2 − b)/2
+2c
+0
+ 
+ √ 
+√ 
+· erf (a + tc)/ 2 − erf a/ 2
+(14)
+where t is the distance along the ray and we define:
+(o − µ)T Σ−1 d
+c
+√
+T
+−1
+c = d Σ d.
+a=
+b = (o − µ)T Σ−1 (o − µ)
+In turn, this enables the analyticalRcomputation of the
+t
+free-flight PDF p(t) = σ(xt ) exp(− 0 σ(xs ) ds) and its
+Rt
+CDF, which is simply 1 − exp(− 0 σ(xs ) ds). This allows
+to derive an analytical inverse CDF sampling routine [5]:
+√  r 2
+
+d = erf
+cσ −1 exp (b − a2 )/2 log(1 − u)
+2a −
+π t
+(
+
+1
+−a + erf −1 (d)/d if d ∈ (−1, 1)
+c
+t=
+∞
+otherwise,
+where u ∼ U(0, 1). The distance t computed using this
+routine is distributed proportional to p(t).
+2

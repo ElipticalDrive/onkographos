@@ -1,0 +1,1833 @@
+EGIC: Enhanced Low-Bit-Rate Generative Image
+Compression Guided by Semantic Segmentation
+Nikolai Körber1,2 , Eduard Kromer2 , Andreas Siebert2 ,
+Sascha Hauke2 , Daniel Mueller-Gritschneder3 , and Björn Schuller1
+Technical University of Munich, Munich, Germany
+{nikolai.koerber, schuller}@tum.de
+2
+University of Applied Sciences Landshut, Landshut, Germany
+{eduard.kromer, andreas.siebert, sascha.hauke}@haw-landshut.de
+3
+TU Wien, Vienna, Austria
+daniel.mueller-gritschneder@tuwien.ac.at
+Abstract. We introduce EGIC, an enhanced generative image compression method that allows traversing the distortion-perception curve efficiently from a single model. EGIC is based on two novel building blocks:
+i) OASIS-C, a conditional pre-trained semantic segmentation-guided discriminator, which provides both spatially and semantically-aware gradient feedback to the generator, conditioned on the latent image distribution, and ii) Output Residual Prediction (ORP), a retrofit solution
+for multi-realism image compression that allows control over the synthesis process by adjusting the impact of the residual between an MSEoptimized and GAN-optimized decoder output on the GAN-based reconstruction. Together, EGIC forms a powerful codec, outperforming stateof-the-art diffusion and GAN-based methods (e.g., HiFiC, MS-ILLM,
+and DIRAC-100), while performing almost on par with VTM-20.0 on
+the distortion end. EGIC is simple to implement, very lightweight, and
+provides excellent interpolation characteristics, which makes it a promising candidate for practical applications targeting the low bit range.
+Keywords: Generative Image Compression · Transformer · GANs
+CLIC 2020 (~0.094bpp)
+30.5
+Ours ( = 0.0)
+DIRAC-1 (1.11 × bpp)
+MRIC ( = 0.0, 0.98 × bpp)
+VTM-20.0 (0.96 × bpp)
+BPG-0.9.8 (1.19 × bpp)
+Ours ( = 1.0)
+HiFiC (1.38 × bpp) JPEG (4.62 × bpp)
+MS-ILLM (1.29 × bpp)
+MRIC ( = 2.56, 0.98 × bpp)
+30.0
+DIRAC-100 (1.11 × bpp)
+29.5 0
+HFD/DDPM (0.98 × bpp)
+32.0
+Distortion | PSNR
+arXiv:2309.03244v3 [eess.IV] 16 Jul 2024
+1
+31.5
+31.0
+10
+20
+30
+40
+Perception | FID/256
+50
+60
+Fig. 1: Distortion-perception comparison (top left is best)
+2
+N. Körber et al.
+1
+Introduction
+Neural image compression methods incorporating generative models (e.g., Generative Adversarial Networks, short GANs [18]) have been able to achieve comparable perceptual quality at considerably lower bit-rates [3, 37], hence being
+a promising direction for storage-efficient and bandwidth-constrained applications. Their underlying principle is that missing information can be realistically
+synthesized (e.g., textures), therefore allowing more control over highly-sensitive
+information. Formally, these methods fall into the category of lossy compression
+with high perception [7, 65, 69], i.e., we are interested in the lowest possible distortion for a given bit-rate with the constraint that the reconstructions follow
+the underlying data distribution. Note that this definition implies that low distortion alone does not per se yield good perceptual quality. In fact, it has been
+shown that perception and distortion are at odds with each other [7].
+With the rise of diffusion models [14], there has been increasing efforts to
+rival GANs in the context of generative image compression [17, 24, 57, 66]. While
+these models have garnered attention for their better training dynamics and
+for their competitive or even higher image sample quality, they often come at
+considerably increased computational cost and inference latency. For example,
+the denoising network DIRAC-n [17] requires additional 108.4M parameters and
+up to n = 100 sampling steps compared to the base codec. In HFD/DDPM [24],
+Hoogeboom et al . even considered a larger setup, using more than 1B additional
+model parameters and up to 250 sampling steps. In this work, we challenge the
+prevailing belief in the superiority of diffusion models over GANs for generative
+image compression.
+We propose EGIC, an Enhanced Generative Image Compression method.
+EGIC is based on a novel conditional pre-trained semantic segmentation-guided
+discriminator (OASIS-C), which provides both spatially and semantically-aware
+gradient feedback to the generator, conditioned on the latent image distribution. Semantic segmentation-guided discriminators have been originally proposed
+for semi-supervised semantic segmentation [56] and later been adopted for the
+task of semantic image synthesis [54]. Both fields have played an important role
+for generative image compression early on. For example, the extreme learned
+image compression method GC (D+ ) [3] largely builds upon the success of
+pix2pixHD [25, 60], a powerful image-to-image translation method. In [3], (D+ )
+further refers to a specific configuration, in which the discriminator D is presented with semantic labels as additional side information. Back then, however,
+only restrictive image domains were considered (the Cityscapes dataset [12]). In
+this work, we go one step further and demonstrate that semantic segmentationguided discriminators, through careful design, can also considerably boost the
+generative compression performance across the image domain.
+A common criticism of generative image compression methods is the lack of
+transparency in the underlying generation process. As pointed out by Agustsson et al . [1], users might worry that the reconstructions deviate too much
+from the original image. Multi-realism image compression algorithms try to address this by providing the user with a choice: from a single compressed repre-
+EGIC
+3
+sentation, we can either obtain a reconstruction that resembles more the traditional compression setting (low distortion), a visually appealing reconstruction (high perception), or anything in between. Unfortunately, existing solutions [1, 15, 17, 26, 27, 61, 69] typically come at the expense of considerably increased model size, decoding latency and/ or reduced overall performance.
+We propose Output Residual Prediction (ORP), an efficient retrofit solution
+for multi-realism image compression. ORP is inspired by recent theoretical findings that simple image interpolation between an MSE-optimized decoder and a
+perfect perceptual decoder is sufficient to achieve any point on the distortionperception (D-P) curve [69]. The main idea is to (implicitly) predict the residual
+R between an MSE-optimized and GAN-optimized decoder output, which allows control over the synthesis process by adjusting the impact of the residual
+(α ∈ [0, 1]) on the GAN-based reconstruction, see Fig. 1. Compared to existing
+solutions, ORP only requires a fraction of additional model parameters (e.g.,
+0.15× compared to MRIC [1]) and only requires a single inference-cycle (as opposed to DIRAC-n [17]), revealing that more sophisticated methods may in fact
+be unnecessary. In summary our contributions are:
+1. We introduce EGIC, a novel generative image compression method that allows traversing the D-P curve efficiently from a single model. EGIC is based
+on two core building blocks (Sec. 4): i) OASIS-C, a conditional pre-trained semantic segmentation-guided discriminator, and ii) ORP, a lightweight retrofit
+solution for multi-realism image compression.
+2. We conduct a thorough study to identify suitable discriminator architectures/ GAN formulations for the task of generative compression (Sec. 5).
+3. We empirically evaluate the effectiveness of our method on both convolutional (HiFiC [37]) and transformer-based (SwinT-ChARM [72]) backbones,
+on three challenging benchmark datasets (Sec. 6). We find that EGIC is particularly well-suited for the low bit range. On the perception end, EGIC outperforms a wide-variety of diffusion and GAN-based methods (e.g., HiFiC,
+MS-ILLM, DIRAC-100), while being considerably more storage-efficient (e.g.,
+0.03× model parameters compared to HFD/DDPM). On the distortion end,
+EGIC almost matches VTM-20.0, the state-of-the-art for non-learned image
+codecs, while providing excellent interpolation characteristics for all other
+operating modes in between.
+2
+Related Work
+Generative image compression. Agustsson et al . [3] demonstrated that an
+extreme learned image compression method combined with a multi-scale PatchGAN discriminator [25] can achieve compression rates far beyond the prior stateof-the-art while maintaining similar perceptual quality. Their work was later
+refined and extended by a hyper-prior [6], formally known as HiFiC [37]. In
+MRIC [1], the authors further pushed the rate-distortion-perception frontier by
+incorporating more powerful building blocks into their system [20, 38].
+4
+N. Körber et al.
+Yan et al . [65] proposed an allegedly optimal training framework that achieves
+the lowest possible distortion under the perfect perception constraint for a given
+bit-rate. Essentially, the authors state that a perceptual decoder can be trained
+using solely a GAN conditioned on an encoder optimized under the traditional
+rate-distortion objective. In [65], WGAN-GP [5,19] is employed using the vanilla
+concatenation-based conditioning scheme presented in [39]. While theoretically
+appealing, the authors have only been able to demonstrate superior performance
+on the MNIST dataset. Their ideas were later refined in [69], but still did not
+reach the performance of HiFiC. From both works, it appears that their success is
+highly dependent on the underlying conditional GAN framework; it is interesting
+to note that most current works [1, 21, 37, 41, 65, 69] use a concatenation-based
+conditioning scheme, which is known to be inferior to projection [40].
+Although there are numerous other works [7,21,26,48,51,59,65,69], we argue
+that the fundamental GAN principles have barely changed4 . For example, in
+PO-ELIC, a recent work, He et al . [21] use the same PatchGAN discriminator
+architecture as in HiFiC and MRIC, but with hinge-loss. Recent advances in
+the field of generative image compression can therefore mainly be attributed to
+improved building blocks, but not to more powerful generative models.
+An exception to this line of work are diffusion-based methods [17, 24, 57, 66].
+Diffusion models have recently rivaled GANs [14], often achieving competitive
+or higher image sample quality. While this direction is promising, their practical
+use is currently hindered by the high computational cost.
+Finally, a common criticism of generative image compression methods is the
+lack of transparency in the underlying generation process. As pointed out by
+Agustsson et al . [1], users might worry that the reconstructions deviate too much
+from the original image. However, this concern is not a limitation in general and
+can be addressed via universal rate-distortion-perception representations [70].
+Existing solutions have considered image/ weight interpolation [26, 61, 64, 69],
+denoising diffusion probabilistic models for residual prediction [17] and lossconditional training [1, 15, 27].
+Semantic image synthesis/ generative models. Semantic image synthesis has played an important role in generative image compression from the very
+beginning [3, 60]. While its use has been primarily advertised for constrained
+application domains with semantic label maps available (e.g., the Cityscapes
+dataset [12]), recent work [4, 45, 54] as well as better semantic segmentation
+models [10, 11, 63], show its generation ability across the image domain. Of particular importance to us are semantic segmentation-guided discriminators, which
+have been originally proposed for semi-supervised semantic segmentation [56]
+and later been adopted for the task of semantic image synthesis [54]. The general idea is to convert the discriminator to a multi-class classifier, where the
+additional classes correspond to regular semantic labels.
+Other promising candidates we consider in this work are the SESAME [42],
+the U-Net [53], and the projected discriminators [52]. The SESAME discrimina4
+An exception is MS-ILLM [41], a concurrent work which we became aware of only
+during the completion of this work. We provide a short comparison in Sec. 4.
+EGIC
+5
+tor has been introduced as a multi-scale and improved variant of the PatchGAN
+discriminator, while the use of U-Net and projected discriminators have led to
+significant advances over BigGAN [8] and StyleGAN [29], respectively, arguably
+the two most popular GAN families.
+Another interesting line of work are frequency-aware GANs [16,28,55]. These
+methods are based on the observation that the statistics of GAN-generated images often differ considerably from real images in the frequency domain. In this
+work, we use the Focal Frequency Loss (FFL) [28] as a tool to quantify the
+frequency awareness of each method.
+3
+Background
+Traditional rate-distortion trade-off. We follow the same notation as in
+previous works [37]: a neural image compression method consists of three components, an encoder E, a decoder G (hereafter referred to as generator) and an
+entropy model P . Specifically, E encodes x to a quantized latent representation
+y = E(x), while G creates a reconstruction of the original image x′ = G(y). The
+learning objective is to minimize the rate-distortion trade-off [13], with λ > 0:
+\label {eq:rd_objective} \mathcal {L}_{RD}=\mathop {\mathbb {E}_{x\sim p_X}}[\lambda r(y) + d(x, x')].
+(1)
+In Eq. (1), the bit-rate is estimated using the cross entropy r(y) = − log P (y),
+where P represents a probability model of y and d(x, x′ ) is a full-reference metric.
+In practice, an entropy coding method based on P is used to obtain the final
+bit representation, e.g., using adaptive arithmetic coding. For a more general
+overview of neural compression, we refer the interested reader to [68].
+Rate-distortion-perception trade-off. In Mentzer et al . [37], a discriminator D is further added to navigate the triple trade-off [7] using the nonsaturating loss [18]:
+\label {eq:generator_objective} \mathcal {L}_{RDP}=\mathop {\mathbb {E}_{x\sim p_X}}[\lambda r(y) + d(x, x') - \beta \log (D(x', y))],
+(2)
+\label {eq:discriminator_objective} \mathcal {L}_{disc}=\mathop {\mathbb {E}_{x\sim p_X}}[-\log (1-D(x', y))] + \mathop {\mathbb {E}_{x\sim p_X}}[-\log (D(x, y))].
+(3)
+′
+In Eq. (2), d(x, x ) is decomposed into d = kM MSE + kP LPIPS [71], where
+kM and kP are hyper-parameters. We keep this formulation to make use of the
+same hyper-parameters as in HiFiC. It is worth noting that the discriminator
+D is conditioned on y, identical to the formulation under the optimal training framework [65]. In both lines of work, a concatenation-based conditioning
+scheme [39] is chosen to model PX|Y . We will study this design decision later on.
+4
+Our Approach
+Learning objective. Inspired by recent advances in the field of semi-supervised
+semantic segmentation/ semantic image synthesis [54, 56], we redesign the discriminator to a (N +1)-class semantic segmentation task:
+6
+N. Körber et al.
+\label {eq:generator_objective_ours} \mathcal {L}_{ours}=\mathop {\mathbb {E}_{x\sim p_{X}}}[\lambda r(y) + d(x, x') + \beta \mathcal {L}_{wce}(x', y)],
+(4)
+\label {eq:discriminator_objective_ours} \mathcal {L}_{seg}=\mathop {\mathbb {E}_{x\sim p_{X}}}[\mathcal {L}_{wce}(x, y)] + \mathop {\mathbb {E}_{x\sim p_{X}}}[-\sum _{i,j}^{H\times W}\log D(x', y)_{i,j,c_{ij}=N{+1}}].
+(5)
+In our formulation, D ∈ RH×W ×N +1 represents a probability distribution
+over all semantic classes {1, .., N +1}, with N +1 being the fake label. Note that
+D is conditioned on y following theoretical and empirical results in [37, 65].
+PH×W
+Lwce (x, y) = − i,j
+wij log D(x, y)i,j,cij denotes the weighted (N +1)-class
+cross entropy loss over all pixel locations (i, j) ∈ H ×W , where cij is the index of
+the prediction for the correct semantic class and wij is a pixel weighting scheme.
+Different from the approach in [54], however, we employ the more commonly
+used pixel loss weighting scheme presented in [67], which puts more emphasis
+on small instances (wij = 3 for area size smaller than 64 × 64 px, wij = 1
+everywhere else). This change is primarily due to practical considerations which
+will be motivated later on.
+Similar to the non-saturating loss, G tries to fool D by generating realistic and
+semantically correct reconstructions, whereas D tries to differentiate between x
+and x′ . This is essentially achieved by assigning the fake label as correct semantic
+class (cij = N +1).
+We additionally regularize the discriminator in Eq. (5) with the LabelMix
+(LM) consistency loss [54], adapted to the compression setting:
+\label {eq:label_mix} \mathcal {L}_{cons}=\|D_{\text {logits}}(\text {LM}(x, x', M), y) - \text {LM}(D_{\text {logits}}(x, y), D_{\text {logits}}(x', y), M)\|_{2}^{2}, (6)
+with LM(x, x′ , M ) = M ⊙ x + (1 − M ) ⊙ x′ . In Eq. (6), M is a randomly generated binary mask that respects the underlying semantic boundaries of x and
+LM(x, x′ , M ) corresponds to the resulting mixed real-fake image. The discriminator predictions are constrained to be equivariant under the LM operation, i.e.,
+the discriminator prediction of the mixed image (Dlogits (LM(x, x′ , M ), y)) should
+be identical to the mixed discriminator predictions of the real and fake images,
+respectively (LM(Dlogits (x, y), Dlogits (x′ , y), M )), thus forcing the discriminator
+to focus more on content and structure. This is essentially achieved by applying
+the L2 norm on the unnormalized discriminator predictions Dlogits . We use a
+fixed LM coefficient of 10 for all experiments.
+Our approach shares some similarities with the discriminator presented in
+MS-ILLM [41], with the main difference being the labels. We directly employ
+human-annotated semantic labels, whereas Muckley et al . propose to replace
+these with codebook indices from a pre-trained VQ-VAE [44,47] model. Our work
+is motivated by recent findings that pixel-level supervision of the discriminator
+is crucial in obtaining artifact-free images [55]. Codebook entries of VQ-VAEs
+on the other hand refer to patch-based supervision (32 × 32); the codebook size
+also typically exceeds the number of semantic labels by at least one order of
+magnitude (e.g., 134 vs 1024), which can be more challenging to train. Both
+EGIC
+7
+Fig. 2: Schematic comparison between PatchGAN (l.) and OASIS-C (r.)
+approaches do not require labels during inference and can thus be considered as
+an enhanced version of the GC (D+ )-variant introduced in [3].
+Training strategies. We employ a two-stage training strategy. In the first
+stage, we use Eq. (4) without adversarial supervision (i.e., LRD = Ex∼pX [λr(y)+
+d(x, x′ )]), using the same configuration as in the original work [37]. For the second
+stage, we consider two variants: strategy-I denotes the full learning objective as
+described in Eq. (4) and Eq. (5), whereas strategy-II is based on pure adversarial
+supervision inspired by [65]. In both cases, we only fine-tune G and fix the pretrained E, P from stage one. The latter is motivated by the observation that an
+encoder trained under the traditional rate-distortion optimization is also wellsuited for the perceptual compression task [65]. The outputs of our training
+procedure are shared weights for E, P , G1 , and G2 , from stages one and two.
+OASIS-C. In this section, we introduce OASIS-C, our novel conditional pretrained semantic segmentation-guided discriminator. The name OASIS-C encapsulates both its origin (we base our work on the U-Net architecture [49] presented
+in OASIS [54]) and its target (Compression). We provide a visual comparison
+to the widely adopted PatchGAN discriminator (HiFiC [37]) in Fig. 2.
+In HiFiC y is pre-processed by a 3×3 Convolution-SpectralNorm-LeakyReLU
+layer with 12 filters and stride 1, upsampled and concatenated with x and subsequently fed into a PatchGAN discriminator [25]. In OASIS-C, i) we use the
+same latent pre-processing blocks (highlighted gray) but instead employ a pixelwise projection-based conditioning scheme. ii) We replace spectral norm with
+weight norm, which increases the overall model capacity. iii) We pre-train the
+(unconditional) discriminator using DeepLab2 [62] to accelerate training (highlighted orange); the projection layers are initialized randomly. Note that this
+is motivated by the fact that we also start from a pre-trained E, G1 , P state
+(training stage two). Our formulation shares some characteristics with projected
+GANs [52], which projects samples to a pre-trained feature space, prior to classification. While in [52] the pre-trained feature space is fixed, we fine-tune the
+whole model to learn the conditional distribution PX|Y . We justify all our design
+decisions in more detail in Sec. 5.
+Output residual prediction (ORP). We start by discussing existing solutions for multi-realism image compression, see Fig. 3 for an overview.
+8
+N. Körber et al.
+DDPM
+Fig. 3: DIRAC-n [17] vs Beta Conditioning (MRIC) [1] vs ORP
+Dirac-n [17] uses a conditional denoising probabilistic model [23] (DDPM)
+for residual prediction R, conditioned on an initial reconstruction xM SE (e.g.,
+JPEG or learned codec). By adjusting the number of sampling steps, n ∈
+[1, 100], DIRAC-n smoothly interpolates the D-P curve. Despite good performance, Dirac-n has two main drawbacks: parameter overhead and speed (up to
+100 sampling steps), caused by the additional denoising network.
+MRIC [1] proposes a variant of loss-conditional training [15] (in their paper
+referred to as Beta conditioning) to target different operating modes. Intuitively,
+the idea is to train on a distribution of losses, rather than on some specific configuration. At test time, the trained model can then be conditioned to generate
+outputs based on user-preferences (β). In order to work well, loss-conditional
+training requires a sophisticated conditioning mechanism. In practice, it also
+may be difficult to cover the whole spectrum of learning objectives.
+ORP on the other hand is a lightweight retrofit solution that is inspired by
+recent theoretical findings, that simple image interpolation between an MSEoptimized decoder and a perfect perceptual decoder is sufficient to achieve any
+point on the D-P curve [69]. The main idea is to (implicitly) predict the residual
+R between a MSE-optimized and GAN-optimized decoder output:
+\label {eq:orp1} x' = G_{2}(x) + (1-\alpha ) R,
+(7)
+\label {eq:orp2} \mathcal {L}_{ORP}=\mathop {\mathbb {E}_{x\sim p_{X}}}[MSE(x,x')]
+(8)
+with R = GORP (F ), where F are feature maps extracted from G2 (x). During
+training α = 0, which constraints x’ to the traditional MSE-optimized decoder
+output. During inference, α ∈ [0, 1] allows traversing any point on the D-P curve
+using an implicitly encoded variant of image interpolation [26, 69]. Compared
+to existing solutions, ORP has several key advantages: i) The ORP is model
+agnostic and can be added to any pre-trained generative image compression
+method. ii) For α = 1, we always get the regular GAN-based output (R is
+canceled out), which in practice is more difficult to obtain. iii) We only need
+to finetune GORP (we keep E, P , G2 frozen), which considerably speeds up
+training.
+EGIC
+5
+9
+Exploring GANs for Compression
+In this section, we study and compare suitable discriminator architectures/ GAN
+formulations for the task of generative image compression. We consider PatchGAN [25], SESAME [42], U-Net [53], projected [52], and OASIS [54] discriminators. We employ training strategy-II for most parts, motivated by the observation
+that a perceptual decoder can be trained using solely a GAN conditioned on an
+encoder optimized under the traditional rate-distortion objective [65]. Intuitively,
+a good candidate should be able to generate high-fidelity reconstructions based
+on pure adversarial supervision.
+Setup. For a fair comparison, we base our experiments on the official code
+base of HiFiC [37] and DeepLab2 [62], a TensorFlow library for deep labeling5 .
+We use the same encoder, decoder, and entropy architecture as in [37], and only
+change the discriminator/ GAN learning objective. The latter is motivated by
+recent theoretical arguments that the critic is decisive in matching the distribution of the training data [52]. All our experiments start from stage two, using the
+same pre-trained E, G1 , and P . As a baseline, we use the official training configuration from [37], i.e., we use adversarial supervision+distortion terms, however
+with fixed E and P to enable identical bit-rates across all experiments.
+Datasets. We use the Coco2017 panoptic dataset [35] with 118,287 training
+images and 133 semantic classes for stage one and our main experiments. To
+evaluate the generalization ability across the image domain, we use the following
+benchmarks: DIV2K [2], CLIC 2020 [58], and Kodak [31]. DIV2K and CLIC 2020
+are both high-resolution image datasets, which contain 100 and 428 images,
+respectively (see [37, A.9]); Kodak contains 24 images and is widely used as
+an image compression benchmark. For our preliminary study, we additionally
+consider a down-sized (factor 2) version of Cityscapes [12], which contains 19
+semantic classes, 2975 training, and 500 validation images, respectively.
+Training and evaluation. Again, for a fair comparison, we use the same
+hyper-parameters as in HiFiC, except the learning rate, which we fix to 1e−5 for
+stage two. For strategy-II, we set β = 1 to rebalance G and D. We further reduce
+the number of optimization steps on Cityscapes from 1M to 150k, considering the
+reduced size and complexity. We use PSNR and the FID-score [22] as a measure
+for distortion and perception, following recent work [1, 37]. For our preliminary
+experiments, we compute the patched FID-score (FID/256 [37, A.7]) based on
+the clean-FID implementation [46]; for our main experiments, we have switched
+to torch-fidelity [43] to ease comparison to recent methods, where a recalculation
+based on clean-FID is prevented due to restrictive data access. As common in
+the literature, we pad all images and crop the resulting reconstructions.
+5.1
+Comparing GAN Approaches
+Fairly comparing discriminator architectures/ GAN formulations for generative
+image compression is difficult due to the large variety in model design, condi5
+We partially translate DeepLab2 to TensorFlow 1.15 to directly integrate the code
+base into HiFiC.
+10
+N. Körber et al.
+Table 1: Comparing GAN approaches on Cityscapes (0.092bpp)
+Method Disc. (D)
+Cond. GAN objective
+Distortion
+Perception
+PSNR ↑ rel-PSNR FID ↓ rel-FID
+baseline PatchGAN [25]
+cat
+non-saturating 32.71
+-
+conf-a
+conf-b
+conf-c
+conf-d
+conf-e
+conf-f
+PatchGAN
+cat
+SESAME [42]
+cat
+U-Net [53]
+cat
+Projected [52]
+cat
+OASIS [54]
+cat
+DeepLabV3+ [11] cat
+non-saturating 24.32
+hinge
+29.43
+non-saturating 29.46
+hinge
+29.64
+CE (N +1)
+30.03
+CE (N +1)
+21.53
+-25.6%
+-10.0%
+-9.9%
+-9.5%
+-8.2%
+-34.2%
+conf-c
+conf-e
+U-Net
+OASIS
+proj. non-saturating 29.38
+proj. CE (N +1)
+29.79
+-10.2% 30.80 +190.0%
+-8.9% 13.54 +27.5%
+conf-e
+OASIS
+impl. CE (N +1)
+-8.6%
+29.90
+10.62
+-
+112.29 +957.3%
+75.65 +612.3%
+87.02 +719.4%
+50.66 +377.0%
+16.50 +55.4%
+20.61 +94.1%
+15.30
++44.1%
+tioning scheme and regularization terms. It is also important to note that these
+methods were primarily co-designed with their respective generator structures,
+while we consider them in isolation. We make no claim to the superiority of one
+method over another, but rather are interested in their general suitability for
+generative image compression.
+We consider the low bit range (HiFiC-lo), where the influence of generative
+models is arguably greatest. For each method, we use the best configuration
+following the original work, including regularization terms (see supplementary
+material). We start our experiments by applying the same HiFiC-based conditioning scheme in all model variants, if possible. We make the following observations: unsurprisingly, no pure GAN-based configuration exceeds the performance
+of the baseline method (32.71dB PSNR, 10.62 FID-score). The performance gaps
+range from −34.2% to −8.2% and +957.3% to +94.1% decrease in PSNR and
+FID-score, respectively. The PatchGAN discriminator performs worst, which
+is to be expected since it was designed primarily to penalize high-frequency
+structure in addition to the commonly used L1/L2 loss functions [25]. Indeed,
+when paired with an additional distortion loss, this formulation works remarkably well as demonstrated by the baseline configuration as well as by previous
+work [1, 3, 21, 26, 37].
+We find that both the SESAME, U-Net, and projected discriminators produce similar strong PSNR values (29.43 − 29.64dB), with varying degrees of artifacts (see Fig. 4). The SESAME discriminator improves upon the PatchGAN
+variant due to its inherent multi-scale nature as well as access to additional semantic side information. For projected GANs, we find that the perceptual quality
+largely depends on the image resolution of the efficientnet-lite feature extractors.
+We suppose that the (well hidden) gridding artifacts are due to a resolution mis-
+EGIC
+input
+conf-a [25]/
+PatchGAN
+conf-b [42]/
+SESAME
+conf-c [53]/
+U-Net
+conf-d [52]/
+Projected
+11
+conf-e [54]/
+OASIS
+Fig. 4: Comparing various purely adversarially optimized generative image compression methods at low bit-rate (HiFiC-lo). Rows one and three show examples of reconstructed cropped images (256 × 256), while rows two and four show the corresponding
+spectra of the images. Best viewed electronically.
+match; i.e., the efficientnet-lite variants are based on low resolutions images, e.g.,
+224 × 224px for efficientnet-lite0, whereas HiFiC mostly targets high-resolution
+images up to 2000 × 2000px.
+The best purely adversarial method is achieved by OASIS, which considerably exceeds all its competitors in terms of perception (FID-score of 16.50). We
+attribute its better performance to the spatially and semantically-aware pixellevel supervision, which implicitly provides a strong conditioning mechanism
+(see Tab. 1, conf-e/ impl. conditioning). Note that a stronger semantic segmentation model (e.g., DeeplabV3+ [11]) does not per se lead to better performance
+(conf-f). This finding is consistent with the observation that a stronger feature
+extractor does not necessarily lead to lower FID scores [52].
+5.2
+Investigating the Conditioning Scheme
+We use the same setup as before, but now replace the vanilla concatenationbased conditioning scheme with projection [40] for some selected methods. For
+OASIS and U-Net, we employ a pixel-wise projection-based conditioning scheme;
+for U-Net we use an additional projection for the global output.
+12
+N. Körber et al.
+Table 2: Improving OASIS [54] step-by-step
+Method
+PSNR ↑ FID ↓
+OASIS [54]
+29.90
++ pre-trained
+30.01
++ weight norm [50]
+30.20
++ projection [40] (ours w/o d) 29.97
+15.30
+9.75
+7.96
+7.74
+ours w/ d
+6.36
+32.24
+It can be observed that all projection-based configurations improve their base
+configurations while largely reducing image artifacts (see supplementary material). For optimization strategies with distortion, these considerations probably
+play a minor role, since d already provides for a strong implicit conditioning
+mechanism. However, for approaches based on pure adversarial optimization,
+such as in the case of the optimal training framework [65, 69], our findings shed
+some light on the lack of generalizability beyond the MNIST dataset.
+5.3
+Improving OASIS
+A major concern we had prior to the adoption was the tremendous amount of
+hardware resources required for training OASIS. Specifically, Schönfeld et al .
+trained their model on COCO-stuff for 4 weeks, in a multi-GPU environment
+(4× Tesla V100 GPUs). Instead, we target a single-GPU setup.
+We attribute the slow training process to the spectral norm in its default
+configuration, which we have found to severely hinder learning progress. We
+note that similar observations have been reported recently, e.g., Lee et al . [32]
+proposed to multiply the normalized weight matrix with the spectral norm at
+initialization, which increases the often untuned Lipschitz constant and hence
+the overall model capacity. For our specific use case, we have found that weight
+normalization [50] combined with a pre-trained discriminator produces a good
+training speed/ stability/ compression performance trade-off (Tab. 2). In the
+supplementary material we further show that simply replacing the PatchGAN
+discrimiantor with OASIS alone is not sufficient to improve over the state-of-theart. This is especially true for highly complex learning tasks (Coco2017), where
+OASIS exhibits sever training instabilities.
+6
+Comparison to the State-of-the-Art
+For our main experiments, we use SwinT-ChARM [72] as backbone architecture
+with an additional prediction head (we clone the last Swin-transformer block [36]
+of the pre-trained G2 , which corresponds to GORP in Sec. 4). Exact model configurations as well as extended experiments on HiFiC and additional datasets
+(Kodak and DIV2K) are summarized in the supplementary material.
+EGIC
+50
+FID/256 [CLIC 2020]
+40
+40
+PSNR [CLIC 2020]
+38
+30
+36
+20
+34
+10
+32
+0 0.1
+13
+0.2
+0.3
+bpp
+0.4
+0.5
+30 0.1
+Ours ( = 0.0)
+Ours ( = 1.0)
+DIRAC-100
+DIRAC-1
+HiFiC (official)
+HFD/DDPM
+MS-ILLM
+MRIC ( = 2.56)
+MRIC ( = 0.0)
+SwinT-ChARM (reimpl)
+VTM-20.0
+BPG-0.9.8
+JPEG
+0.2
+0.3
+bpp
+0.4
+0.5
+Fig. 5: Comparison to the state-of-the-art on CLIC 2020
+Baselines. We consider both diffusion (SwinT-ChARM/ DIRAC-100, short
+DIRAC-100 [17], HFD/DDPM [24]) and GAN-based (HiFiC [37], MS-ILLM [41],
+MRIC (β = 2.56)) methods for perception, i.e., Ours (α = 1.0). Similarly,
+we consider VTM-20.0, BPG-0.9.8, JPEG, SwinT-ChARM/ DIRAC-1, short
+DIRAC-1 [17], and MRIC (β = 0.0) [1] for distortion, i.e., Ours (α = 0.0).
+We further add SwinT-ChARM (reimpl), our TensorFlow-reimplementation of
+SwinT-ChARM, which can be considered an upper bound for distortion.
+We provide objective and subjective comparisons on CLIC 2020 in Figs. 1, 5
+and 6. We observe that Ours (α = 1.0) is most effective in the low to medium bit
+range, being competitive or outperforming strong baselines (HiFiC, MS-ILLM,
+MRIC (β = 2.56), DIRAC-100, HFD/DDPM) in terms of FID, while having considerably better PSNR-scores in all cases. This becomes even more pronounced
+on DIV2K, where Ours (α = 1.0) dominates MS-ILLM in terms of perception.
+Noteworthy, EGIC outperforms HiFiC-lo, the long standing previous state-ofthe-art, even when using 30% fewer bits. For Ours (α = 0.0), we find that ORP is
+surprisingly effective. In terms of distortion, our method outperforms MRIC and
+DIRAC, while (almost) matching VTM-20.0, the state-of-the-art for non-learned
+codecs. This is despite using only a fraction of additional model parameters (e.g.,
+0.15× compared to Beta conditioning in MRIC [1]) and only requiring a single
+inference-cycle (as opposed to DIRAC-n [17]), revealing that more sophisticated
+methods may in fact be unnecessary. In the supplementary material we further
+discuss other formulations for ORP and provide a detailed comparison to more
+involved image and weight interpolation techniques.
+Finally, it is worth mentioning that EGIC is considerably more storageefficient compared to all other methods. EGIC only requires a fraction of the
+number of model parameters compared to HFD/DDPM (0.03×), HiFiC/ MSILLM (0.18×), DIRAC (0.24×), and MRIC (0.55×); in contrast to DIRAC and
+HFD/DDPM, EGIC also only requires a single inference cycle.
+14
+N. Körber et al.
+Original: 1ac06
+EGIC (α=0.0): 0.159bpp
+EGIC (α=1.0): 0.159bpp
+BPG-0.9.8: 0.177bpp (1.11x)
+JPEG: 0.260bpp (1.64x)
+DIRAC-100: 0.157bpp (0.99x)
+MS-ILLM: 0.164bpp (1.03x)
+Original: 1ac06
+EGIC (α=1.0): 0.159bpp
+HiFiC: 0.172bpp (1.08x)
+Fig. 6: Visual comparison of EGIC (α ∈ {0.0, 1.0}) with state-of-the-art distortionoriented (l.) and perception-oriented (r.) codecs. Please visit the supplementary material for more impressions. Best viewed electronically.
+7
+Conclusion
+We have developed EGIC, a novel generative image compression method that
+allows traversing the D-P curve efficiently from a single model on the receiver
+side. We find that EGIC is highly competitive, outperforming a wide-variety of
+diffusion and GAN-based methods (e.g., HiFiC, MS-ILLM, DIRAC-100), while
+operating almost on par with VTM-20.0 on the distortion-oriented end. EGIC
+enjoys a simple and lightweight design with excellent interpolation characteristics, which makes it a promising candidate for practical applications targeting
+the low bit range. Our code will be made publicly available6 upon publication
+to facilitate further research.
+Limitations. Gradient feedback from OASIS-C is currently applied to the
+whole image, which in some cases might lead to sub-optimal preservation of
+small faces and text. This can be addressed via content-weighted learning mechanisms [33, 34]. Furthermore, EGIC at this stage requires large labeled training
+data, which can be alleviated by switching to semi-supervised approaches or by
+incorporating a powerful prior for semantic segmentation tasks, e.g., SAM [9,30].
+Finally, despite promising quantitative results, we find that HFD/DDPM and
+DIRAC-100 produce in some cases more pleasing (not necessarily more accurate)
+reconstructions. Whether this can be attributed to the superiority of diffusion
+models in general, or simply to the substantial difference in model sizes (1B in
+the case of HFD/DDPM), remains an open subject of debate.
+6
+https://github.com/Nikolai10/EGIC
+EGIC
+15
+Acknowledgements
+This work was supported by the German Federal Ministry of Education and
+Research under the funding program Forschung an Fachhochschulen - FKZ
+13FH019KI2. The authors would further like to thank Auke Wiggers, Matthew
+Muckley, Eirikur Agustsson and Lucas Theis for providing evaluation data.
+References
+1. Agustsson, E., Minnen, D., Toderici, G., Mentzer, F.: Multi-realism image compression with a conditional generator. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR) (2023)
+2. Agustsson, E., Timofte, R.: Ntire 2017 challenge on single image super-resolution:
+Dataset and study. In: The IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR) Workshops (2017)
+3. Agustsson, E., Tschannen, M., Mentzer, F., Timofte, R., Gool, L.V.: Generative
+adversarial networks for extreme learned image compression. In: Proceedings of
+the IEEE International Conference on Computer Vision (2019)
+4. Arad Hudson, D., Zitnick, L.: Compositional transformers for scene generation. In:
+Advances in Neural Information Processing Systems. vol. 34 (2021)
+5. Arjovsky, M., Chintala, S., Bottou, L.: Wasserstein generative adversarial networks. In: Proceedings of the 34th International Conference on Machine Learning.
+Proceedings of Machine Learning Research, vol. 70 (2017)
+6. Ballé, J., Minnen, D., Singh, S., Hwang, S.J., Johnston, N.: Variational image
+compression with a scale hyperprior. In: International Conference on Learning
+Representations (2018)
+7. Blau, Y., Michaeli, T.: Rethinking Lossy Compression: The Rate-DistortionPerception Tradeoff. In: Proceedings of the 36th International Conference on Machine Learning (2019)
+8. Brock, A., Donahue, J., Simonyan, K.: Large scale GAN training for high fidelity
+natural image synthesis. In: International Conference on Learning Representations
+(2019)
+9. Chen, J., Yang, Z., Zhang, L.: Semantic segment anything. https://github.com/
+fudan-zvg/Semantic-Segment-Anything (2023)
+10. Chen, L.C., Zhu, Y., Papandreou, G., Schroff, F., Adam, H.: Encoder-decoder with
+atrous separable convolution for semantic image segmentation. In: ECCV (2018)
+11. Cheng, B., Collins, M.D., Zhu, Y., Liu, T., Huang, T.S., Adam, H., Chen, L.C.:
+Panoptic-deeplab: A simple, strong, and fast baseline for bottom-up panoptic segmentation. In: CVPR (2020)
+12. Cordts, M., Omran, M., Ramos, S., Rehfeld, T., Enzweiler, M., Benenson, R.,
+Franke, U., Roth, S., Schiele, B.: The cityscapes dataset for semantic urban scene
+understanding. In: Proc. of the IEEE Conference on Computer Vision and Pattern
+Recognition (CVPR) (2016)
+13. Cover, T.M., Thomas, J.A.: Elements of information theory. John Wiley & Sons
+(2012)
+14. Dhariwal, P., Nichol, A.: Diffusion models beat gans on image synthesis. In: Advances in Neural Information Processing Systems. vol. 34 (2021)
+15. Dosovitskiy, A., Djolonga, J.: You only train once: Loss-conditional training of
+deep networks. In: International Conference on Learning Representations (2020)
+16
+N. Körber et al.
+16. Gal, R., Hochberg, D.C., Bermano, A., Cohen-Or, D.: Swagan: A style-based
+wavelet-driven generative model. ACM Trans. Graph. 40(4) (2021)
+17. Ghouse, N.F., Petersen, J., Wiggers, A., Xu, T., Sautière, G.: A Residual Diffusion
+Model for High Perceptual Quality Codec Augmentation. arXiv: 2301.05489 (2023)
+18. Goodfellow, I., Pouget-Abadie, J., Mirza, M., Xu, B., Warde-Farley, D., Ozair,
+S., Courville, A., Bengio, Y.: Generative adversarial nets. In: Advances in Neural
+Information Processing Systems. vol. 27 (2014)
+19. Gulrajani, I., Ahmed, F., Arjovsky, M., Dumoulin, V., Courville, A.C.: Improved
+training of wasserstein gans. In: Advances in Neural Information Processing Systems. vol. 30 (2017)
+20. He, D., Yang, Z., Peng, W., Ma, R., Qin, H., Wang, Y.: Elic: Efficient learned image compression with unevenly grouped space-channel contextual adaptive coding.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR) (2022)
+21. He, D., Yang, Z., Yu, H., Xu, T., Luo, J., Chen, Y., Gao, C., Shi, X., Qin, H., Wang,
+Y.: Po-elic: Perception-oriented efficient learned image coding. In: Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)
+Workshops (2022)
+22. Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., Hochreiter, S.: Gans trained
+by a two time-scale update rule converge to a local nash equilibrium. In: Advances
+in Neural Information Processing Systems (2017)
+23. Ho, J., Jain, A., Abbeel, P.: Denoising diffusion probabilistic models. In: Advances
+in Neural Information Processing Systems. vol. 33 (2020)
+24. Hoogeboom, E., Agustsson, E., Mentzer, F., Versari, L., Toderici, G., Theis, L.:
+High-Fidelity Image Compression with Score-based Generative Models. arXiv:
+2305.18231 (2023)
+25. Isola, P., Zhu, J.Y., Zhou, T., Efros, A.A.: Image-to-image translation with conditional adversarial networks. CVPR (2017)
+26. Iwai, S., Miyazaki, T., Sugaya, Y., Omachi, S.: Fidelity-controllable extreme image compression with generative adversarial networks. In: 2020 25th International
+Conference on Pattern Recognition (ICPR). Los Alamitos, CA, USA (2021)
+27. Iwai, S., Miyazaki, T., Omachi, S.: Controlling rate, distortion, and realism: Towards a single comprehensive neural image compression model. In: Proceedings of
+the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV).
+pp. 2900–2909 (January 2024)
+28. Jiang, L., Dai, B., Wu, W., Loy, C.C.: Focal frequency loss for image reconstruction
+and synthesis. In: ICCV (2021)
+29. Karras, T., Aittala, M., Hellsten, J., Laine, S., Lehtinen, J., Aila, T.: Training generative adversarial networks with limited data. In: Advances in Neural Information
+Processing Systems. vol. 33 (2020)
+30. Kirillov, A., Mintun, E., Ravi, N., Mao, H., Rolland, C., Gustafson, L., Xiao, T.,
+Whitehead, S., Berg, A.C., Lo, W.Y., Dollar, P., Girshick, R.: Segment anything.
+In: Proceedings of the IEEE/CVF International Conference on Computer Vision
+(ICCV) (2023)
+31. Kodak, E.: Kodak lossless true color image suite (PhotoCD PCD0992)
+32. Lee, K., Chang, H., Jiang, L., Zhang, H., Tu, Z., Liu, C.: ViTGAN: Training GANs
+with vision transformers. In: International Conference on Learning Representations
+(2022)
+33. Li, M., Gao, S., Feng, Y., Shi, Y., Wang, J.: Content-oriented learned image compression. In: Computer Vision – ECCV 2022 (2022)
+EGIC
+17
+34. Li, M., Zuo, W., Gu, S., Zhao, D., Zhang, D.: Learning convolutional networks for
+content-weighted image compression. In: Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR) (2018)
+35. Lin, T.Y., Maire, M., Belongie, S.J., Hays, J., Perona, P., Ramanan, D., Dollár,
+P., Zitnick, C.L.: Microsoft coco: Common objects in context. In: ECCV (2014)
+36. Liu, Z., Lin, Y., Cao, Y., Hu, H., Wei, Y., Zhang, Z., Lin, S., Guo, B.: Swin
+transformer: Hierarchical vision transformer using shifted windows. In: Proceedings
+of the IEEE/CVF International Conference on Computer Vision (ICCV) (2021)
+37. Mentzer, F., Toderici, G.D., Tschannen, M., Agustsson, E.: High-fidelity generative
+image compression. Advances in Neural Information Processing Systems (2020)
+38. Minnen, D., Singh, S.: Channel-wise autoregressive entropy models for learned
+image compression. In: 2020 IEEE International Conference on Image Processing
+(ICIP) (2020)
+39. Mirza, M., Osindero, S.: Conditional generative adversarial nets. arXiv: 1411.1784
+(2014)
+40. Miyato, T., Koyama, M.: cGANs with projection discriminator. In: International
+Conference on Learning Representations (2018)
+41. Muckley, M.J., El-Nouby, A., Ullrich, K., Jegou, H., Verbeek, J.: Improving statistical fidelity for neural image compression with implicit local likelihood models.
+In: Proceedings of the 40th International Conference on Machine Learning. Proceedings of Machine Learning Research, vol. 202 (2023)
+42. Ntavelis, E., Romero, A., Kastanis, I., Van Gool, L., Timofte, R.: SESAME: Semantic Editing of Scenes by Adding, Manipulating or Erasing Objects. In: Computer
+Vision – ECCV 2020. Cham (2020)
+43. Obukhov, A., Seitzer, M., Wu, P.W., Zhydenko, S., Kyl, J., Lin, E.Y.J.: Highfidelity performance metrics for generative models in pytorch (2020)
+44. van den Oord, A., Vinyals, O., kavukcuoglu, k.: Neural discrete representation
+learning. In: Advances in Neural Information Processing Systems. vol. 30 (2017)
+45. Park, T., Liu, M.Y., Wang, T.C., Zhu, J.Y.: Semantic image synthesis with
+spatially-adaptive normalization. In: Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (2019)
+46. Parmar, G., Zhang, R., Zhu, J.Y.: On aliased resizing and surprising subtleties in
+gan evaluation. In: CVPR (2022)
+47. Razavi, A., van den Oord, A., Vinyals, O.: Generating diverse high-fidelity images
+with vq-vae-2. In: Advances in Neural Information Processing Systems. vol. 32
+(2019)
+48. Rippel, O., Bourdev, L.: Real-time adaptive image compression. In: Proceedings
+of the 34th International Conference on Machine Learning (2017)
+49. Ronneberger, O., P.Fischer, Brox, T.: U-net: Convolutional networks for biomedical image segmentation. In: Medical Image Computing and Computer-Assisted
+Intervention (MICCAI). LNCS, vol. 9351 (2015)
+50. Salimans, T., Kingma, D.P.: Weight normalization: A simple reparameterization
+to accelerate training of deep neural networks. In: Advances in Neural Information
+Processing Systems. vol. 29 (2016)
+51. Santurkar, S., Budden, D., Shavit, N.: Generative compression. In: 2018 Picture
+Coding Symposium (PCS) (2018)
+52. Sauer, A., Chitta, K., Müller, J., Geiger, A.: Projected gans converge faster. In:
+Advances in Neural Information Processing Systems (NeurIPS) (2021)
+53. Schonfeld, E., Schiele, B., Khoreva, A.: A u-net based discriminator for generative
+adversarial networks. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (2020)
+18
+N. Körber et al.
+54. Schönfeld, E., Sushko, V., Zhang, D., Gall, J., Schiele, B., Khoreva, A.: You only
+need adversarial supervision for semantic image synthesis. In: International Conference on Learning Representations (2021)
+55. Schwarz, K., Liao, Y., Geiger, A.: On the frequency bias of generative models. In:
+Advances in Neural Information Processing Systems. vol. 34 (2021)
+56. Souly, N., Spampinato, C., Shah, M.: Semi supervised semantic segmentation using generative adversarial network. In: 2017 IEEE International Conference on
+Computer Vision (ICCV) (2017)
+57. Theis, L., Salimans, T., Hoffman, M.D., Mentzer, F.: Lossy compression with gaussian diffusion (2023)
+58. Toderici, G., Theis, L., Johnston, N., Agustsson, E., Mentzer, F., Ballé, J., Shi,
+W., Timofte, R.: Clic 2020: Challenge on learned image compression (2020)
+59. Tschannen, M., Agustsson, E., Lucic, M.: Deep generative models for distributionpreserving lossy compression. In: Advances in Neural Information Processing Systems. vol. 31 (2018)
+60. Wang, T.C., Liu, M.Y., Zhu, J.Y., Tao, A., Kautz, J., Catanzaro, B.: Highresolution image synthesis and semantic manipulation with conditional gans. In:
+Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(2018)
+61. Wang, X., Yu, K., Dong, C., Tang, X., Loy, C.C.: Deep network interpolation for
+continuous imagery effect transition. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR) (2019)
+62. Weber, M., Wang, H., Qiao, S., Xie, J., Collins, M.D., Zhu, Y., Yuan, L., Kim, D.,
+Yu, Q., Cremers, D., Leal-Taixe, L., Yuille, A.L., Schroff, F., Adam, H., Chen, L.C.:
+DeepLab2: A TensorFlow Library for Deep Labeling. arXiv: 2106.09748 (2021)
+63. Xie, E., Wang, W., Yu, Z., Anandkumar, A., Alvarez, J.M., Luo, P.: Segformer:
+Simple and efficient design for semantic segmentation with transformers. In: Advances in Neural Information Processing Systems (2021)
+64. Xu, T., Zhang, Q., Li, Y., He, D., Wang, Z., Wang, Y., Qin, H., Wang, Y., Liu, J.,
+Zhang, Y.: Conditional perceptual quality preserving image compression. arXiv:
+2308.08154 (2023)
+65. Yan, Z., Wen, F., Ying, R., Ma, C., Liu, P.: On perceptual lossy compression: The
+cost of perceptual reconstruction and an optimal training framework. In: Proceedings of the 38th International Conference on Machine Learning (2021)
+66. Yang, R., Mandt, S.: Lossy image compression with conditional diffusion models.
+arXiv: 2209.06950 (2023)
+67. Yang, T.J., Collins, M.D., Zhu, Y., Hwang, J.J., Liu, T., Zhang, X., Sze, V., Papandreou, G., Chen, L.C.: Deeperlab: Single-shot image parser. arXiv: 1902.05093
+(2019)
+68. Yang, Y., Mandt, S., Theis, L.: An introduction to neural data compression. arXiv:
+2202.06533 (2022)
+69. Zeyu Yan, Fei Wen, P.L.: Optimally controllable perceptual lossy compression. In:
+Proceedings of the International Conference on Machine Learning (ICML) (2022)
+70. Zhang, G., Qian, J., Chen, J., Khisti, A.J.: Universal rate-distortion-perception
+representations for lossy compression. In: Advances in Neural Information Processing Systems (2021)
+71. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The unreasonable
+effectiveness of deep features as a perceptual metric. In: CVPR (2018)
+72. Zhu, Y., Yang, Y., Cohen, T.: Transformer-based transform coding. In: International Conference on Learning Representations (2022)
+EGIC
+A
+Supplementary Material
+A.1
+OASIS-C Architecture
+19
+We summarize our discriminator architecture in Tab. 3. Our architecture is split
+into two parts. The first part is identical to OASIS (Schönfeld et al ., 2021), except
+that we replace spectral norm with weight norm. The output out is a 256×256×
+N + 1 prediction map. In the second part, we adopt a pixel-wise projectionbased conditioning scheme. We use a similar latent pre-processing block as in
+HiFiC, but use 64 instead of 12 filters. The pre-processed latent feature map
+y_prep has an identical shape as out and is subsequently incorporated into the
+discriminator, using projection (element-wise multiplication and sum across the
+channel dimension). The projected feature map proj is finally replicated and
+added back to out.
+Table 3: OASIS-C Architecture
+Operation
+Input
+ResBlock-Down image (x)
+ResBlock-Down d1
+ResBlock-Down d2
+ResBlock-Down d3
+ResBlock-Down d4
+ResBlock-Down d5
+ResBlock-Up
+d6
+ResBlock-Up
+cat(u1, d5)
+ResBlock-Up
+cat(u2, d4)
+ResBlock-Up
+cat(u3, d3)
+ResBlock-Up
+cat(u4, d2)
+ResBlock-Up
+cat(u5, d1)
+Conv2D
+u6
+Size
+Output Size
+256 × 256 × 3
+128 × 128 × 128
+64 × 64 × 128
+32 × 32 × 256
+16 × 16 × 256
+8 × 8 × 512
+4 × 4 × 512
+8 × 8 × 1024
+16 × 16 × 512
+32 × 32 × 512
+64 × 64 × 256
+128 × 128 × 256
+256 × 256 × 64
+d1
+d2
+d3
+d4
+d5
+d6
+u1
+u2
+u3
+u4
+u5
+u6
+out
+128 × 128 × 128
+64 × 64 × 128
+32 × 32 × 256
+16 × 16 × 256
+8 × 8 × 512
+4 × 4 × 512
+8 × 8 × 512
+16 × 16 × 256
+32 × 32 × 256
+64 × 64 × 128
+128 × 128 × 128
+256 × 256 × 64
+256 × 256 × N + 1
+Conv2D, Resize latent (y) 16 × 16 × Cy
+y_prep 256 × 256 × 64
+Projection
+(u6, y_prep) 256 × 256 × 64
+proj
+256 × 256 × 1
+Add
+(out, proj) 256 × 256 × N + 1 Dout
+256 × 256 × N + 1
+A.2
+Pre-trained Semantic Segmentation Performance
+We pre-train the first discriminator block (Fig. 2, highlighted orange) using
+DeepLab27 . The resulting semantic segmentation performance measured by the
+mean intersection over union (mIoU) is summarized in Tab. 4.
+7
+We base our experiments on the panoptic configurations presented in https://
+github.com/google-research/deeplab2/blob/main/g3doc/projects/panoptic_
+deeplab.md (ResNet-50).
+20
+N. Körber et al.
+Table 4: Pre-trained Semantic Segmentation Performance
+Dataset
+Crop Size Batch Size Steps mIoU ↑
+Cityscapes (Cordts et al ., 2016) 256 × 256
+Coco2017 (Lin et al ., 2014) 256 × 256
+A.3
+16
+16
+320k
+1M
+0.67
+0.41
+Additional Experimental Details
+Preliminary study. We use the official implementation for PatchGAN and
+translate the SESAME, U-Net, projected and OASIS discriminators carefully
+to TensorFlow, based on the official PyTorch implementations. For projected
+GANs, we use the efficientnet-lite4-variant (Tan et al ., 2019) as a pre-trained
+feature network, which we have found to produce the best results.
+To maintain the advantages of having pre-trained feature extractors, we have
+used a slightly different concatenation-based conditioning scheme for conf-d and
+conf-f; for conf-d, we pre-process and concatenate the latent features with the
+efficientnet-lite4-based feature maps at each scale separately. For conf-f, we integrate y using a similar HiFiC-based concatenation scheme (see Fig. 12).
+For conf-c (projection), we use two separate latent pre-processing blocks with
+channel dimensions 64 and 4, corresponding to the local and global outputs,
+respectively. We use no resize operation for the latter to match the feature dimension prior to classification (16 ∗ 16 ∗ 4 = 1024).
+Main study. We train six models for 2+1M optimization steps, using λ ∈
+{2, 1.5, 1, 0.5, 0.25, 0.1}, a crop size of 256 and a batch size of 16 and 8 for stage
+one and two, respectively. We use the Adam optimizer with default settings
+(β1 = 0.9, β2 = 0.999). For stage one, we use a learning rate of 1e−4 for the
+first 1.8M steps and subsequently decay the learning rate to 1e−5, similar to
+previous work. For stage two, we use the same settings as in Ours w/ d (HiFiC),
+i.e., training strategy-I with a fixed learning rate of 1e−5, except for β (Eq. (4)),
+which we increase from 0.15 to 0.30.
+ORP. We finetune GORP for additional 2M steps. In practice we have found
+it slightly more efficient to directly predict the MSE-optimized decoder output
+M SEpred and to calculate R = M SEpred − G2 (x).
+Note that ORP is a general formulation for multi-realim image compression,
+which allows for different model parameterizations. By increasing the model
+capacity of GORP up to G2 , we can approach the performance of traditional
+image/ weight interpolation techniques (see Appendix A.13).
+A.4
+Comparing Normalization Strategies
+We summarize some of the normalization methods we tried for OASIS in Tab. 5
+and Fig. 16. For spectral normalization, we have found that tuning the Lipschitz constant is indeed helpful. However, we did not find a configuration that
+EGIC
+21
+Table 5: The effect of different normalization strategies on the semantic segmentation
+and its resulting compression performance.
+Method
+mIoU ↑ PSNR ↑ FID ↓ Batch Size
+Spectral norm (Miyato et al ., 2018) 0.49
+Weight norm (Salimans et al ., 2016) 0.67
+Layer norm (Ba et al ., 2016)
+0.68
+30.01
+30.20
+29.49
+9.75
+7.96
+9.00
+16
+16
+8
+exceeded the performance of weight normalization and hence omit it here. For
+layer normalization we had to reduce the batch size to 8, due to out-of-memory
+issues.
+A.5
+LabelMix Regularization
+As mentioned in the main paper (Eq. (6)), we regularize the discriminator with
+the LabelMix consistency loss (Schönfeld et al ., 2021), tailored to the compression setting. We provide additional intuition in Figs. 17 and 18.
+A.6
+Performance on DIV2K
+In Fig. 7 we provide an extended comparison to the state-of-the-art on DIV2K.
+We observe similar trends as discussed for CLIC 2020, except that our method
+outperforms MS-ILLM in terms of FID in the low bit range.
+FID/256 [DIV2K]
+50
+40
+36
+30
+34
+20
+32
+10
+30
+00.1
+0.2
+0.3
+0.4
+bpp
+0.5
+PSNR [DIV2K]
+38
+0.6
+0.7 280.1
+0.2
+0.3
+Ours ( = 0.0)
+Ours ( = 1.0)
+SwinT-ChARM (reimpl)
+MS-ILLM
+HiFiC (official)
+VTM-20.0
+BPG-0.9.8
+JPEG
+0.4
+0.5
+0.6
+0.7
+bpp
+Fig. 7: Comparison to the state-of-the-art on DIV2K
+22
+N. Körber et al.
+PSNR [Kodak]
+38
+36
+Ours ( = 0.0)
+Ours ( = 1.0)
+DIRAC-100
+DIRAC-1
+HiFiC (official)
+MS-ILLM
+MRIC ( = 2.56)
+MRIC ( = 0.0)
+SwinT-ChARM (official)
+SwinT-ChARM (reimpl)
+ELIC
+VTM-20.0
+BPG-0.9.8
+JPEG
+34
+32
+30
+28
+26
+0.2
+0.4
+bpp
+0.6
+0.8
+1.0
+Fig. 8: Kodak rate-distortion plot
+A.7
+Performance on Kodak
+In Fig. 8 we provide the rate-distortion performance for the Kodak dataset. We
+add the official values of SwinT-ChARM (Zhu et al ., 2022) and ELIC (He et al .,
+2022) for reference. Exact configurations for JPEG, BPG-0.9.8, and VTM-20.0
+can be found in Appendices A.16 to A.18.
+Note that SwinT-ChARM is almost on par with the current state-of-the-art
+method ELIC in terms of PSNR and thus represents a good base model for
+our work. The marginal gap is due to ELIC’s more powerful entropy model.
+We emphasize that both EGIC, MRIC, and DIRAC rely on some variant of the
+ChARM-entropy model (Minnen et al ., 2020).
+Similar to MRIC, we observe that introducing higher perception results in a
+1 − 1.5dB PSNR decrease.
+A.8
+SwinT-ChARM Reimplementation
+In Fig. 8, we compare the compression performance of our SwinT-ChARM reimplementation (reimpl) to the official values, measured on the Kodak dataset. We
+optimized the reimplemented version for 2M optimization steps on the CLIC
+2020 training set, using λ ∈ {0.01, 0.003, 0.001, 0.0003} and a batch size of 8. We
+used a learning rate of 1e−4 for the first 1.8M steps and subsequently decayed
+the learning rate to 1e−5. We find that our reimplementation closely matches
+the official values (up to 0.1dB tolerance), despite being trained from scratch
+and using less than two-thirds of the optimization steps.
+EGIC
+12
+10
+8
+6
+4
+FID/256 [DIV2K]
+0.2
+8FID/256
+0.4
+bpp
+PSNR [DIV2K]
+34
+32
+30
+28
+0.6 26
+[CLIC 2020]
+36
+6
+34
+4
+32
+2
+30
+23
+Ours w/ d (HiFiC)
+HiFiC (official)
+HiFiC (reproduced)
+0.2
+0.4
+bpp
+0.6
+PSNR [CLIC 2020]
+Ours w/ d (HiFiC)
+HiFiC (official)
+HiFiC (reproduced)
+0 0.1 0.2 0.3 0.4 0.5 28 0.1 0.2 0.3 0.4 0.5
+bpp
+bpp
+Fig. 9: Relative comparison to HiFiC
+A.9
+Experiments on HiFiC
+In Fig. 9, we compare Ours w/ d (HiFiC) to HiFiC (reproduced). Note that
+HiFiC (official) was trained on an internal dataset is therefore only visualized
+for transparency reasons. We observe that Ours w/ d (HiFiC) is most effective in the low to medium bit range, which is the key focus of our work. For
+HiFiC-lo, we achieve an improvement of up to 2 FID points with slightly better
+PSNR (+0.2dB), suggesting that our method is particularly well suited for the
+extremely low bit range < 0.1bpp.
+For HiFiC-hi, we experience a slight decrease in performance. We suspect that
+this is due to misaligned hyper-parameters; indeed recent work suggests that a
+separate set of hyper-parameters is required for various bit-rates (Muckley et
+al ., 2023).
+A.10
+Comparing Training Dynamics
+In Fig. 10, we compare the training dynamics of OASIS w/ d and Ours w/ d.
+We find that OASIS with weight norm greatly increases model capacity, while
+pre-training accelerates training, resulting in superior compression performance.
+Note that our method provides robust and stable training across different compression rates, while OASIS w/ d exhibits training instabilities that are particularly evident on complex datasets (Coco2017).
+In Fig. 11, we provide further performance insights into the training dynamics
+of Ours w/ d (HiFiC) and HiFiC (reproduced) for stage two. We report the means
+and standard deviations of BPP, PSNR, and FID as a function of the number of
+optimization steps across two test runs. Note that HiFiC’s training procedure is
+divided into 3 phases: warm-up (0 − 50k), training with a learning rate of 1e−4
+24
+4.0
+3.5
+3.0
+2.5
+2.0
+1.5 0
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5 0
+N. Körber et al.
+G adversarial loss (Coco2017)
+D adversarial loss (Coco2017)
+4.5
+4.0
+3.5
+3.0
+2.5
+1 M 2.0 0
+Ours w/ d (HiFiC-lo)
+Ours w/ d (HiFiC-hi)
+OASIS w/ d (HiFiC-lo)
+200 k
+400 k 600 k 800 k
+Optimization steps
+Ours w/ d (HiFiC-lo)
+Ours w/ d (HiFiC-hi)
+OASIS w/ d (HiFiC-lo)
+200 k
+400 k 600 k 800 k
+Optimization steps
+G adversarial loss (Cityscapes)
+D adversarial loss (Cityscapes)
+25 k
+25 k
+3.5
+3.0
+2.5
+2.0
+1.5
+50 k 75 k 100 k 125 k 150 k 1.0 0
+Optimization steps
+Ours w/ d (HiFiC-lo)
+OASIS w/ d (HiFiC-lo)
+1M
+Ours w/ d (HiFiC-lo)
+OASIS w/ d (HiFiC-lo)
+50 k 75 k 100 k 125 k 150 k
+Optimization steps
+Fig. 10: Comparing the training dynamics of OASIS w/ d and Ours w/ d. "G adversarial" corresponds to the (N +1)-cross entropy loss and hence gives an idea of how
+realistic and semantically correct the resulting reconstructions are (lower is better). "D
+adversarial" includes regularization terms (lower is better).
+(50 − 500k) and 1e−5 (500k-1M), respectively, whereas, Ours w/ d (HiFiC) uses
+the same learning rate and λ-schedule across all training steps.
+We find that our method considerably accelerates training progress, similar
+to projected GANs (Sauer et al ., 2021). As can be seen, our method exceeds the
+performance of HiFiC after only 300k optimization steps. The large deviations
+at the beginning of the training phase can be attributed to a sort of calibration
+phase in which the variables for the projection-based conditioning mechanism
+are learned from scratch.
+A.11
+Impact of the Focal Frequency Loss
+In Tab. 6, we summarize the effect of the focal frequency loss (FFL, Jiang et al .,
+2021) on the concat base configurations. For that, we finetune all base models
+for additional 50k steps. We find that the FFL has the greatest impact on conf-a
+and conf-d, whereas it has little impact on the discriminators based on pixellevel supervision (conf-c and conf-e). We also find that the FFL cannot further
+improve ours w/o d, which reinforces the design decisions made in our work.
+A.12
+Computational/ Model Complexity
+In Tab. 7, we compare the storage-efficiency of each model in terms of model
+parameters (in millions). For the generator, we further differentiate between
+the base model size and additional parameters required for traversing the D-P
+curve (denoted by +). The calculation for P includes the hyper-analysis and
+EGIC
+BPP
+0.20
+[DIV2K]
+0.18
+0.16
+0.14
+0.12 0
+250 k 500 k 750 k 1 M
+Optimizations steps
+BPP
+0.14
+0.12
+0.10
+0
+[CLIC 2020]
+18
+16
+14
+12
+10
+FID/256 [DIV2K]
+29.5
+29.0
+25
+PSNR [DIV2K]
+Ours w/ d (HiFiC)
+HiFiC (reproduced)
+28.5
+28.0
+8
+250 k 500 k 750 k 1 M 27.5 0 250 k 500 k 750 k 1 M
+Optimizations steps
+Optimizations steps
+FID/256 [CLIC 2020] 31.5
+PSNR [CLIC 2020]
+7
+31.0
+6
+30.5
+5
+30.0
+0
+250 k 500 k 750 k 1 M 4 0
+Optimizations steps
+250 k 500 k 750 k 1 M 29.5 0
+Optimizations steps
+Ours w/ d (HiFiC)
+HiFiC (reproduced)
+250 k 500 k 750 k 1 M
+Optimizations steps
+Fig. 11: BPP, FID, and PSNR vs optimization steps for the second stage of Ours w/
+d (HiFiC) and HiFiC (reproduced). We show the mean and standard deviation across
+2 runs per setting. Values at step 0 correspond to the output values from stage one.
+We additionally show the values at step 50k (warm-up phase in HiFiC).
+hyper-synthesis transforms, as well as additional slice transforms in the case of
+ChARM.
+It is worth noting that EGIC during inference is identical to SwinT-ChARM
+(neglecting ORP); latency numbers can be found in Zhu et al ., 2022 (Tab. 3 and
+Sec. D.3). GPU-memory overhead only incurs during training.
+A.13
+Image/ Weight Interpolation
+Image and weight interpolation (Wang et al . 2019, Iwai et al . 2021, Yan et al .
+2022) can be achieved using
+\label {eq:image_interpol} x' = (1-\alpha ) G_{1}(y)+\alpha G_{2}(y),
+(9)
+\label {eq:weight_interpol} x' = G_{\theta }(y); \theta = (1-\alpha ) \theta _{G_1}+\alpha \theta _{G_2},
+(10)
+where θ and α correspond to the model parameters and interpolation weight,
+respectively. For our ablation study, we fine-tune the generator weights from
+stage one G1 (= GORP ) for additional 500k optimization steps. We use α ∈
+{0.0, 0.17, 0.33, 0.5, 0.67, 0.83, 1.0}, resulting in seven points per bit-rate.
+Our results8 are summarized in Fig. 13 and Fig. 14. As can be seen, both
+methods work reasonably well; for weight interpolation, we observe skewed interpolation characteristics in some cases (e.g., CLIC 2020 at low bit-rate). Notewor8
+The results are based on an early stage of EGIC, which produces a slightly different
+D-P trade-off. The overall logic remains however the same.
+26
+N. Körber et al.
+Table 6: Which method benefits the most from the FFL? The relative change (relPSNR, rel-FID) is here denoted over their respective concat-base configurations.
+Method
+Distortion
+Perception
+PSNR ↑ rel-PSNR FID ↓ rel-FID
+conf-a w/ FFL 32.53
+conf-b w/ FFL 29.17
+conf-c w/ FFL 29.23
+conf-d w/ FFL 29.89
+conf-e w/ FFL 30.25
++33.8%
+-0.9%
+-0.8%
++1.7%
++0.7%
+40.64
+79.55
+89.73
+21.85
+15.93
+ours w/o d
+-1.4%
+8.73 +12.8%
+29.56
+-63.8%
++5.2%
++3.1%
+-29.1%
+-3.5%
+Table 7: Model size comparison in millions of parameters (M)
+Method
+E
+G
+P
+Total (M)
+HiFiC (Mentzer et al ., 2020)
+7.4 156.8
+17.3 181.5
+MS-ILLM (Muckley et al ., 2023)
+7.4 156.8
+17.3 181.5
+DIRAC (Ghouse et al ., 2023)
+7.0 7.0 + 108.4 14.3 136.8
+HFD/DDPM (Hoogeboom et al ., 2023) 10.7 10.7 + 1033.9 36.4 1091.7
+MRIC (Agustsson et al ., 2023)
+10.7 10.7 + 2.65 36.4 60.45
+EGIC (Ours)
+9.1 9.1 + 0.4
+14.4 33
+thy, Ours | interpol (α = 0.0) almost matches the performance of SwinT-ChARM
+(reimpl), which can be considered an upper bound.
+A.14
+Visual Comparison: Concat vs Projection
+In Fig. 15, we provide additional visual impressions of the effect of various conditioning strategies. We find that projection greatly helps to reduce image artifacts.
+A.15
+Pixel Weighting Schemes
+Pixel weighting schemes have played a minor role in our work. As mentioned
+earlier, we use the simple instance size-based weighting scheme introduced in
+Yang et al . (2019), whereas, in Schönfeld et al . (2021), each semantic class is
+weighted by its inverse per-pixel frequency, computed over a batch of images.
+In Tab. 8, we show that this method is indeed effective and performs comparably
+to the more sophisticated approach of Schönfeld et al . (2021). In Fig. 19, we
+provide additional visual comparisons.
+EGIC
+27
+Table 8: Comparing different pixel weighting schemes
+Method
+PSNR ↑ FID ↓
+OASIS (instance size-oriented) 29.90 15.30
+OASIS (class-oriented)
+29.90 15.56
+A.16
+Comparison to VVC-intra
+The evaluation of the VVC standard (current state-of-the-art for non-learned image compression codecs) is based on VTM-20.0, a reference software provided by
+https://vcgit.hhi.fraunhofer.de/jvet/VVCSoftware_VTM/- /releases/
+VTM-20.0. Similar to previous work, we first convert the PNG images to YCbCrformat using ffmpeg https://www.ffmpeg.org/:
+ffmpeg
+-i $PNGPATH -pix_fmt yuv444p $YUVPATH
+To compress/ decompress the images, we use:
+# Encode
+EncoderAppStatic
+-c encoder_intra_vtm.cfg -i $YUVPATH -q $Q,
+-o /dev/null -b $OUTPUT
+--SourceWidth=$WIDTH
+--SourceHeight=$HEIGHT
+--FrameRate=1 --FramesToBeEncoded=1
+--InputBitDepth=8
+--InputChromaFormat=444
+--ConformanceWindowMode=1
+# Decode
+DecoderAppStatic
+-b $OUTPUT -o $RECON -d 8
+To convert the outputs back to PNG-format, we use:
+ffmpeg
+-f rawvideo -s $WIDTHx$HEIGHT
+-pix_fmt yuv444p -i $RECON $RECON_PNG
+PSNR is measured on the 8bit-decoded images and not on the floating point
+reconstructions, which is consistent with all our comparisons.
+28
+N. Körber et al.
+1x1 Conv
+1/16
+5x5 Conv
+Upsample
+Upsample
+256
+1/8
+256
+128
+1x1 Conv
+To decoder
+1/4
+5x5 Conv
+Upsample
+256
+64
+1x1 Conv
+1/4
+5x5 Conv
+256
+32
+Semantic Prediction (N+1)
+1/32
+res2
+res3
+Encoder (OS=32)
+Semantic Multi-Scale Context
+Conditional Semantic Decoder
+256
+1x1 Conv
+HiFiC Latent
+Representation y
+Fig. 12: Conditional panoptic DeepLab-based semantic decoder (conf-f)
+A.17
+Comparison to BPG
+The evaluation of BPG-0.9.8 is based on the HEVC open video compression
+standard, provided by https://bellard.org/bpg/:
+# Encode
+bpgenc -o $OUTPUT -q $Q
+-f 444 -e x265 -b 8 $INPUT
+# Decode
+bpgdec -o $RECON $OUTPUT
+A.18
+Comparison to JPEG
+We use the Python Imaging Library (PIL) to obtain the JPEG encoded/ decoded
+images; (chroma) subsampling is set to 0, which corresponds to 4 : 4 : 4, the
+highest quality setting.
+tmp = io.BytesIO()
+img.save(tmp, format=’jpeg’,
+subsampling=0,
+quality=Q)
+tmp.seek(0)
+filesize = tmp.getbuffer().nbytes
+bpp = filesize * float(8)/
+img.size[0] * img.size[1]
+rec = Image.open(tmp)
+EGIC
+FID/256 [DIV2K]
+50
+36
+30
+34
+20
+32
+10
+30
+00.1
+50
+0.2
+0.3
+0.4
+bpp
+0.5
+0.7 280.1
+0.6
+FID/256 [CLIC 2020]
+40
+40
+38
+30
+36
+20
+34
+10
+32
+0 0.1
+0.2
+0.3
+bpp
+0.4
+PSNR [DIV2K]
+38
+40
+0.5
+30 0.1
+29
+Ours | interpol ( = 0.0)
+Ours | interpol ( = 1.0)
+SwinT-ChARM (reimpl)
+MS-ILLM
+HiFiC (official)
+VTM-20.0
+BPG-0.9.8
+JPEG
+0.2
+0.3
+0.4
+bpp
+0.5
+0.6
+0.7
+PSNR [CLIC 2020]
+Ours | interpol ( = 0.0)
+Ours | interpol ( = 1.0)
+DIRAC-100
+DIRAC-1
+HiFiC (official)
+MS-ILLM
+MRIC ( = 2.56)
+MRIC ( = 0.0)
+SwinT-ChARM (reimpl)
+VTM-20.0
+BPG-0.9.8
+JPEG
+0.2
+0.3
+bpp
+0.4
+0.5
+Fig. 13: Traversing the rate-distortion-perception plane using image interpolation
+A.19
+Visual Comparison
+We provide extensive visual comparison to JPEG, BPG-0.9.8 and VTM.20.0
+in Figs. 20 and 21, to HiFiC and MS-ILLM in Figs. 22 to 25, to MRIC (β = 2.56)
+and DIRAC-100 in Figs. 26 and 27, to PO-ELIC in Fig. 28 and to HFD/DDPM
+in Figs. 29 and 30.
+30
+N. Körber et al.
+FID/256 [DIV2K]
+50
+40
+36
+30
+34
+20
+32
+10
+30
+00.1
+50
+0.2
+0.3
+0.4
+bpp
+0.5
+0.7 280.1
+0.6
+FID/256 [CLIC 2020]
+40
+40
+Ours | interpol ( = 0.0)
+Ours | interpol ( = 1.0)
+SwinT-ChARM (reimpl)
+MS-ILLM
+HiFiC (official)
+VTM-20.0
+BPG-0.9.8
+JPEG
+0.2
+0.3
+0.4
+bpp
+0.5
+0.6
+0.7
+PSNR [CLIC 2020]
+38
+30
+36
+20
+34
+10
+32
+0 0.1
+PSNR [DIV2K]
+38
+0.2
+0.3
+bpp
+0.4
+0.5
+30 0.1
+Ours | interpol ( = 0.0)
+Ours | interpol ( = 1.0)
+DIRAC-100
+DIRAC-1
+HiFiC (official)
+MS-ILLM
+MRIC ( = 2.56)
+MRIC ( = 0.0)
+SwinT-ChARM (reimpl)
+HiFiC (official)
+VTM-20.0
+BPG-0.9.8
+JPEG
+0.2
+0.3
+bpp
+0.4
+0.5
+Fig. 14: Traversing the rate-distortion-perception plane using weight interpolation
+EGIC
+input
+conf-c/
+concat
+31
+conf-c/
+projection
+Fig. 15: Comparing U-Net (conf-c w/ concat) vs U-Net (conf-c w/ projection). Note
+that projection considerably reduces image artifacts.
+32
+N. Körber et al.
+Input
+Semantic Prediction
+Error Map
+OASIS w/ weight norm
+OASIS w/ spectral norm
+Fig. 16: Comparing the semantic segmentation performance of OASIS w/ weight normalization and OASIS w/ spectral normalization. Black pixels in the error map correspond to perfect prediction, white pixels highlight deviations from the ground truth.
+EGIC
+33
+input x
+rec x′
+LM(x,x′ ,M )
+Mask M
+pixel weights w
+label map
+D(x,y)
+D(x′ ,y)
+D(LM(x,x′ ,M ),y)
+LMdisc
+input x
+rec x′
+LM(x,x′ ,M )
+Mask M
+pixel weights w
+label map
+D(x,y)
+D(x′ ,y)
+D(LM(x,x′ ,M ),y)
+LMdisc
+Fig. 17: Visualizing the discriminator loss components at step 33.5k (top row) and
+35.2k (bottom row) on the Cityscapes dataset. We use an abbreviated notation
+in some cases due to space constraints; D(LM(x,x′ ,M ),y) and LMdisc correspond to
+Dlogits (LM(x, x′ , M ), y) and LM(Dlogits (x, y), Dlogits (x′ , y), M ) in Eq. (6). We additionally visualize the pixel weight masks w introduced in Sec. 4 that highlight small object
+instances, as well as the corresponding label maps and the discriminator predictions
+for (x, y) and (x′ , y), respectively. The colorized discriminator predictions are obtained
+by arg max(D). The black color corresponds to the fake class.
+34
+N. Körber et al.
+input x
+rec x′
+LM(x,x′ ,M )
+Mask M
+pixel weights w
+label map
+D(x,y)
+D(x′ ,y)
+D(LM(x,x′ ,M ),y)
+LMdisc
+input x
+rec x′
+LM(x,x′ ,M )
+Mask M
+pixel weights w
+label map
+D(x,y)
+D(x′ ,y)
+D(LM(x,x′ ,M ),y)
+LMdisc
+Fig. 18: Visualizing the discriminator loss components at step 1M (top row) and at
+an early training stage (160k, bottom row) on the Coco2017 dataset. See Fig. 17 for a
+detailed description.
+EGIC
+input x
+label map
+pixel weights w
+(Yang et al .)
+35
+pixel weights w
+(Schönfeld et al .)
+Fig. 19: Comparing pixel weighting schemes based on instance size (third column,
+Yang et al ., 2019) and class imbalance (fourth column, Schönfeld et al ., 2021). We map
+the pixel weights w to a pre-defined color map for better visualization; the brighter
+the color, the larger the weight. Note that in Schönfeld et al . (2021) identical class
+segments share the same pixel weights (same color).
+36
+N. Körber et al.
+JPEG
+BPG-0.9.8
+VTM-20.0
+0.296bpp
+(1.05×)
+0.333bpp
+(1.18×)
+0.292bpp
+(1.04×)
+EGIC
+Ours (α = 0.0)
+0.282bpp
+EGIC
+Ours (α = 1.0)
+0.282bpp
+Fig. 20: Visual comparison of EGIC (α = {0.0, 1.0}) with JPEG, BPG-0.9.8 and
+VTM-20.0 on the Kodak dataset (kodim13).
+EGIC
+JPEG
+BPG-0.9.8
+VTM-20.0
+0.254bpp
+(2.0×)
+0.126bpp
+(0.99×)
+0.143bpp
+(1.13×)
+EGIC
+Ours (α = 0.0)
+0.127bpp
+37
+EGIC
+Ours (α = 1.0)
+0.127bpp
+Fig. 21: Visual comparison of EGIC (α = {0.0, 1.0}) with JPEG, BPG-0.9.8 and
+VTM-20.0 on the Kodak dataset (kodim22).
+38
+N. Körber et al.
+input x
+kodim20
+EGIC
+Ours (α = 1.0)
+0.077bpp
+HiFiC
+(Mentzer et al .)
+MS-ILLM
+(Muckley et al .)
+0.121bpp (1.57×)
+0.094bpp (1.22×)
+Fig. 22: Visual comparison of EGIC (α = 1.0) with HiFiC and MS-ILLM on the
+Kodak dataset (kodim20). Note that our method better preserves textual information
+and texture (grass), despite using less bpp.
+EGIC
+input x
+kodim14
+EGIC
+Ours (α = 1.0)
+0.184bpp
+HiFiC
+(Mentzer et al .)
+MS-ILLM
+(Muckley et al .)
+0.235bpp (1.28×)
+0.185bpp
+39
+Fig. 23: Visual comparison of EGIC (α = 1.0) with HiFiC and MS-ILLM on the Kodak
+dataset (kodim14). Note that our method better preserves small faces.
+40
+N. Körber et al.
+input x
+kodim11
+EGIC
+Ours (α = 1.0)
+0.134bpp
+HiFiC
+(Mentzer et al .)
+MS-ILLM
+(Muckley et al .)
+0.186bpp (1.39×)
+0.151bpp (1.13×)
+Fig. 24: Visual comparison of EGIC (α = 1.0) with HiFiC and MS-ILLM on the Kodak
+dataset (kodim11). Note that our method better preserves small details (e.g., the rope
+in the left image), despite using less bpp.
+EGIC
+input x
+kodim21
+EGIC
+Ours (α = 1.0)
+0.157bpp
+HiFiC
+(Mentzer et al .)
+MS-ILLM
+(Muckley et al .)
+0.173bpp (1.1×)
+0.157bpp
+41
+Fig. 25: Visual comparison of EGIC (α = 1.0) with HiFiC and MS-ILLM on the
+Kodak dataset (kodim21). Note that our method better preserves small details (e.g.,
+the people in the left image).
+42
+N. Körber et al.
+input x
+MRIC (β = 2.56)
+(Agustsson et al .)
+DIRAC-100
+(Ghouse et al .)
+EGIC
+Ours (α = 1.0)
+1ac06
+0.166bpp (1.04×)
+0.157bpp (0.99×)
+0.159bpp
+Fig. 26: Visual comparison of EGIC (α = 1.0) with MRIC and DIRAC-100 on the
+CLIC dataset (1ac06). Note that EGIC has less artifacts (compared to MRIC) and
+better retrains color (compared to DIRAC).
+EGIC
+input x
+MRIC (β = 2.56)
+(Agustsson et al .)
+DIRAC-100
+(Ghouse et al .)
+EGIC
+Ours (α = 1.0)
+46c18
+0.219bpp (1.08×)
+0.217bpp (1.07×)
+0.202bpp
+43
+Fig. 27: Visual comparison of EGIC (α = 1.0) with MRIC and DIRAC-100 on the
+CLIC dataset (46c18). Note that we use less bpp.
+44
+N. Körber et al.
+input x
+PO-ELIC
+(He et al .)
+EGIC
+Ours (α = 1.0)
+732bf
+0.068bpp (0.95×)
+0.0716bpp
+Fig. 28: Visual comparison of EGIC (α = 1.0) with PO-ELIC, the winning solution of
+the CLIC 2022 competition, using our lowest bit-rate setting.
+EGIC
+input x
+kodim24
+EGIC
+Ours (α = 1.0)
+0.197bpp
+HFD/DDPM (ELIC)
+(Hoogeboom et al .)
+0.196bpp
+HFD/DDPM (250 steps)
+(Hoogeboom et al .)
+0.196bpp
+45
+Fig. 29: Visual comparison of EGIC (α = 1.0) with HFD/DDPM on the Kodak dataset
+(kodim24). Note that the quality of HFD/DDPM (250 steps) largely depends on the
+base reconstruction HFD/DDPM (ELIC).
+46
+N. Körber et al.
+input x
+2ff70
+EGIC
+Ours (α = 1.0)
+0.092bpp
+HFD/DDPM (ELIC)
+(Hoogeboom et al .)
+HFD/DDPM (250 steps)
+(Hoogeboom et al .)
+0.106bpp (1.15×)
+0.106bpp (1.15×)
+Fig. 30: Visual comparison of EGIC (α = 1.0) with HFD/DDPM on the CLIC 2022
+dataset (2ff70). We leave the assessment to the reader.

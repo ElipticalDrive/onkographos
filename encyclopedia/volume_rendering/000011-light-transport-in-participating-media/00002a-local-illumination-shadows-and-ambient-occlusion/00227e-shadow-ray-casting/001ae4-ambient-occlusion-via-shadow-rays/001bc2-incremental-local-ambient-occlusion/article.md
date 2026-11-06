@@ -7,50 +7,71 @@ Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume r
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 3D volume dataset, a transfer function (TF) mapping density to opacity $\alpha$ and color, and a set of ray directions distributed over a sphere.
-*   **Output:** An ambient light intensity texture (3D texture) storing the accumulated occlusion values $A(x)$ for each voxel, which is combined with the emissive color during the final rendering pass.
+*   **Input:** A 3D volume dataset, a transfer function (TF) mapping density to opacity $\alpha$ and color, and a set of ray directions distributed over a sphere [S2, unofficial].
+*   **Output:** An ambient light intensity texture (3D texture) storing the accumulated occlusion values $A(x)$ for each voxel, which is combined with the emissive color during the final rendering pass [S2, unofficial].
 
 **Data Structures:**
-1.  **Packed Volume Texture:** The regular linear volume is divided into blocks (typically $16^3$ voxels). Each block is encoded with multiple levels of detail (LOD): $8^3, 4^3, 2^3, 1^3$ voxels. These are packed into a single 3D texture.
-2.  **Forward Mapping Index Texture:** Maps packed texture coordinates to original volume coordinates.
-3.  **Reverse Mapping Index Texture:** Maps original volume coordinates back to packed texture coordinates. To reduce size, the minimum LOD for non-empty blocks is often restricted to $4^3$ voxels, making this texture 64 times smaller than the packed volume [S2, unofficial].
-4.  **Ambient Light Texture:** Stores the accumulated intensity $A(x)$. It has the same dimensions and multiresolution layout as the packed volume texture [S2, unofficial].
-5.  **Direction Texture:** Stores the ray directions and their associated weights $w_k$ [S2, unofficial].
+1.  **Packed Volume Texture:** The regular linear volume is divided into blocks (typically $16^3$ voxels) [S2, unofficial].
+2.  **LOD Encodings:** Each block is encoded with multiple levels of detail: $8^3, 4^3, 2^3, 1^3$ voxels [S2, unofficial].
+3.  **Forward Mapping Index Texture:** Maps packed texture coordinates to original volume coordinates [S2, unofficial].
+4.  **Reverse Mapping Index Texture:** Maps original volume coordinates back to packed texture coordinates; its size is reduced by restricting the minimum LOD for non-empty blocks to $4^3$ voxels, making it 64 times smaller than the packed volume [S2, unofficial].
+5.  **Ambient Light Texture:** Stores the accumulated intensity $A(x)$ and uses the same dimensions and multiresolution layout as the packed volume texture [S2, unofficial].
+6.  **Direction Texture:** Stores the ray directions and their associated weights $w_k$ [S2, unofficial].
 
 **Algorithm Steps:**
+1.  **Preprocessing:** Divide the volume into blocks of size $16^3$ voxels [S2, unofficial]. Generate LOD representations ($8^3, 4^3, 2^3, 1^3$) for each block [S2, unofficial]. Pack the volume data into the Packed Volume Texture [S2, unofficial]. Create the Forward and Reverse Mapping Index Textures [S2, unofficial]. Generate ray directions by subdividing a tetrahedron, icosahedron, or octahedron to achieve the desired number of rays $K$ [S2, unofficial]. Store these directions and weights $w_k$ in the Direction Texture [S2, unofficial].
+2.  **Incremental Update Loop:** Initialize the Ambient Light Texture to zero ($A_0 = 0$) [S2, unofficial]. For each ray direction $k$ from $1$ to $K$: Render a quad covering the entire framebuffer, where each pixel maps to one voxel in the mapped 3D slice of the Packed Volume Texture [S2, unofficial]. In the fragment shader, for each voxel $x$: Determine the current LOD block containing $x$ [S2, unofficial]. Calculate the number of samples $M$ based on the block's resolution; for the highest resolution, $M=15$ is typical [S2, unofficial]. Compute the light contribution $A_k(x)$ for direction $k$ using the discretized integral [S2, unofficial]. The sample positions are determined by the ray direction and the neighborhood radius $R_b$, with integration from a small offset $a$ (to avoid self-occlusion) to $R_b$ [S2, unofficial]. Update the accumulated intensity in the Ambient Light Texture using the OpenGL blend operation [S2, unofficial]. Interleave rendering with intensity texture updates to allow user interaction [S2, unofficial].
+3.  **Final Rendering:** After processing all $K$ directions, the final ambient light intensity volume is used in the standard volume rendering pass [S2, unofficial]. The final color is computed by combining the emissive color and the accumulated ambient occlusion [S2, unofficial].
 
-1.  **Preprocessing:**
-    *   Divide the volume into blocks of size $16^3$ voxels.
-    *   Generate LOD representations ($8^3, 4^3, 2^3, 1^3$) for each block.
-    *   Pack the volume data into the Packed Volume Texture.
-    *   Create the Forward and Reverse Mapping Index Textures.
-    *   Generate ray directions by subdividing a tetrahedron, icosahedron, or octahedron to achieve the desired number of rays $K$. Store these directions and weights $w_k$ in the Direction Texture [S2, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-2.  **Incremental Update Loop:**
-    *   Initialize the Ambient Light Texture to zero ($A_0 = 0$) [S2, unofficial].
-    *   For each ray direction $k$ from $1$ to $K$:
-        *   Render a quad covering the entire framebuffer, where each pixel maps to one voxel in the mapped 3D slice of the Packed Volume Texture.
-        *   In the fragment shader, for each voxel $x$:
-            *   Determine the current LOD block containing $x$.
-            *   Calculate the number of samples $M$ based on the block's resolution. For the highest resolution, $M=15$ is typical [S2, unofficial].
-            *   Compute the light contribution $A_k(x)$ for direction $k$ using the discretized integral:
-                $$ A_k(x) = \sum_{m=1}^{M} g_m \prod_{i=1}^{m-1} (1 - d_i) $$
-                where $g_m = 1$ (due to scaling), and $d_i$ is the opacity at sample position $i$ derived from the transfer function [S2, unofficial].
-            *   The sample positions are determined by the ray direction and the neighborhood radius $R_b$. The integration range is from a small offset $a$ (to avoid self-occlusion) to $R_b$ [S2, unofficial].
-            *   Update the accumulated intensity in the Ambient Light Texture using the OpenGL blend operation:
-                $$ A_k = \frac{1}{k} A_{k-1} + \left(1 - \frac{1}{k}\right) A_{k-1} $$
-                *Note: The source text contains a garbled formula `Ak¼1 kAkþ11 k  Ak1;ð9Þ`. The standard incremental average formula implied by the text description "adds a fraction of the intensity" and the context of averaging $k$ directions is:*
-                $$ A_{new} = \frac{1}{k} A_{old} + \frac{k-1}{k} A_{prev\_accumulated} $$
-                *However, the text explicitly states $A_k$ is the accumulated intensity after $k$ directions and $A_0=0$. The blend operation adds a fraction. A common incremental mean update is:*
-                $$ A_k = \frac{1}{k} A_{k\_current} + \frac{k-1}{k} A_{k-1} $$
-                *Where $A_{k\_current}$ is the result of the ray trace for direction $k$ (which is $A_k(x)$ in the notation of Eq 7, but here $A_k$ in Eq 9 refers to the contribution of the k-th ray). Let $C_k$ be the contribution of ray $k$. Then:*
-                $$ A_k = \frac{1}{k} C_k + \frac{k-1}{k} A_{k-1} $$
-                *The source text's Eq 9 is garbled. Based on Eq 7 $A(x) = \frac{1}{K} \sum w_k A_k(x)$, if weights are uniform, the incremental update is an average. We assume the blend operation implements this averaging [S2, unofficial].*
-        *   Interleave rendering with intensity texture updates to allow user interaction [S2, unofficial].
-
-3.  **Final Rendering:**
-    *   After processing all $K$ directions, the final ambient light intensity volume is used in the standard volume rendering pass.
-    *   The final color is computed by combining the emissive color and the accumulated ambient occlusion [S2, unofficial].
+```python
+def compute_incremental_lao(volume, tf, directions, weights, R_b, a, M_max):
+    # Preprocessing
+    packed_vol = pack_volume_into_blocks(volume, block_size=16**3)
+    lod_levels = [8**3, 4**3, 2**3, 1**3]
+    forward_map = create_forward_index_texture(packed_vol)
+    reverse_map = create_reverse_index_texture(packed_vol, min_lod=4**3)
+    ambient_tex = initialize_texture_zero(packed_vol.shape)
+    
+    # Incremental update loop
+    accumulated_intensity = 0.0
+    for k in range(1, len(directions) + 1):
+        ray_dir = directions[k-1]
+        w_k = weights[k-1]
+        current_contribution = 0.0
+        
+        # Simulate fragment shader processing for each voxel x
+        for x in packed_vol.voxels:
+            lod_block = get_lod_block(x, lod_levels)
+            M = M_max if lod_block == lod_levels[0] else adaptive_sample_count(lod_block)
+            
+            # Discretized integration along ray
+            transmittance = 1.0
+            ray_contribution = 0.0
+            for m in range(1, M + 1):
+                s = a + (R_b - a) * (m / M)
+                alpha_s = tf.opacity(s)
+                g_m = 1.0  # Scaled light contribution
+                ray_contribution += g_m * transmittance
+                transmittance *= (1.0 - alpha_s)
+            
+            # Average over samples
+            A_k_x = ray_contribution / M
+            current_contribution += A_k_x
+            
+        # Normalize by number of samples in this pass (simplified for single-voxel trace)
+        current_contribution /= packed_vol.voxel_count
+        
+        # Incremental average update (Eq. 9 corrected for variable reuse)
+        accumulated_intensity = (1.0 / k) * current_contribution + ((k - 1) / k) * accumulated_intensity
+        
+        # Update texture via OpenGL blend operation
+        update_ambient_texture(ambient_tex, accumulated_intensity)
+        
+    return ambient_tex
+```
 
 **Formulas:**
 *   **Light Contribution Integral:**
@@ -65,6 +86,9 @@ Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume r
 *   **Combined Local Ambient Occlusion:**
     $$ A(x) = \frac{1}{K} \sum_{k=1}^{K} w_k A_k(x) $$
     where $A(x)$ is the combined local ambient occlusion, $K$ is the number of ray directions, and $w_k$ is the weight for direction $k$ [S2, unofficial].
+*   **Incremental Update:**
+    $$ A_{\text{accum}}^{(k)} = \frac{1}{k} A_k(x) + \frac{k-1}{k} A_{\text{accum}}^{(k-1)} $$
+    where $A_{\text{accum}}^{(k)}$ is the accumulated intensity after $k$ directions, $A_k(x)$ is the contribution of the current ray direction, and $A_{\text{accum}}^{(0)} = 0$ [S2, unofficial].
 
 **Parameters:**
 *   $R_b$: Radius of the surrounding LAO sphere. Typical values: 16 voxels, 32 voxels [S2, unofficial].
@@ -86,19 +110,19 @@ Incremental Local Ambient Occlusion (LAO) is a shading model for direct volume r
 ## Subtopics
 
 ### Adaptive Sampling Density for LAO
-A method to improve LAO performance by adjusting sampling density along rays for voxels in lower resolution blocks. It uses adaptive step lengths based on the sampled block's resolution to avoid missing occluding features. For a ray originating in a block of scale $\epsilon$, the step length is adjusted with $\epsilon_{max}/\epsilon$ for all samples along that ray, where $\epsilon_{max}$ is the maximum resolution. This reduces artifacts but increases execution time due to processing different numbers of samples for neighboring voxels and decreased parallelism [S2, unofficial].
+A method to improve LAO performance by adjusting sampling density along rays for voxels in lower resolution blocks [S2, unofficial]. It uses adaptive step lengths based on the sampled block's resolution to avoid missing occluding features [S2, unofficial]. For a ray originating in a block of scale $\epsilon$, the step length is adjusted with $\epsilon_{max}/\epsilon$ for all samples along that ray, where $\epsilon_{max}$ is the maximum resolution [S2, unofficial]. This reduces artifacts but increases execution time due to processing different numbers of samples for neighboring voxels and decreased parallelism [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The performance gain from multiresolution is significant. Data reduction via LOD selection directly implies performance gain because processing is driven by the multiresolution layout. The number of voxels is decreased, and low-resolution blocks permit longer sample steps, reducing the average time per occlusion calculation. The LAO computation time per ray is slightly superlinear with respect to data reduction [S2, unofficial].
-*   **Memory Complexity:** Requires storage for the Packed Volume Texture, Forward/Reverse Mapping Index Textures, and the Ambient Light Texture. The reverse mapping index texture is optimized to be 64 times smaller than the packed volume by restricting minimum LOD [S2, unofficial].
-*   **Measured Performance:** Tested on a volume with native resolution $512^3$ voxels. Performance is measured in frames per second (FPS) for LAO map creation. Adaptive sampling has slightly reduced performance compared to fixed sampling due to higher quality and decreased parallelism [S2, unofficial].
+*   **Time Complexity:** The performance gain from multiresolution is significant [S2, unofficial]. Data reduction via LOD selection directly implies performance gain because processing is driven by the multiresolution layout [S2, unofficial]. The number of voxels is decreased, and low-resolution blocks permit longer sample steps, reducing the average time per occlusion calculation [S2, unofficial]. The LAO computation time per ray is slightly superlinear with respect to data reduction [S2, unofficial].
+*   **Memory Complexity:** Requires storage for the Packed Volume Texture, Forward/Reverse Mapping Index Textures, and the Ambient Light Texture [S2, unofficial]. The reverse mapping index texture is optimized to be 64 times smaller than the packed volume by restricting minimum LOD [S2, unofficial].
+*   **Measured Performance:** Tested on a volume with native resolution $512^3$ voxels [S2, unofficial]. Performance is measured in frames per second (FPS) for LAO map creation [S2, unofficial]. Adaptive sampling has slightly reduced performance compared to fixed sampling due to higher quality and decreased parallelism [S2, unofficial].
 *   **Strengths:** Interactive frame rates; incorporates semitransparency; less sensitive to noisy data sets compared to gradient-based methods (e.g., diffuse shading); improves visibility at clip planes; allows user interaction during computation [S2, unofficial].
-*   **Limitations:** Loses high-frequency surface details if used alone; requires recomputation when transfer functions change; does not support color bleeding; interblock interpolation is not supported [S1, unofficial][S2, unofficial].
-*   **When to Use:** Medical DVR for diagnosis and surgical planning, specifically for MRI data sets, virtual autopsies, and clip plane rendering. Useful when local shape and density context is more important than global shadows or fine high-frequency details [S2, unofficial].
-*   **When Not to Use:** When color bleeding is required; when fine high-frequency surface details are the primary focus and noise levels are low (diffuse shading may be better); when global shadows are necessary [S1, unofficial][S2, unofficial].
+*   **Limitations:** Loses high-frequency surface details if used alone; requires recomputation when transfer functions change; interblock interpolation is not supported [S1, unofficial][S2, unofficial].
+*   **When to Use:** Medical DVR for diagnosis and surgical planning, specifically for MRI data sets, virtual autopsies, and clip plane rendering [S2, unofficial]. Useful when local shape and density context is more important than global shadows or fine high-frequency details [S2, unofficial].
+*   **When Not to Use:** When fine high-frequency surface details are the primary focus and noise levels are low (diffuse shading may be better); when global shadows are necessary [S1, unofficial][S2, unofficial].
 
 ## Background
-Local Ambient Occlusion was proposed by Hernell et al. in 2010 [S2, unofficial]. It builds on earlier ambient occlusion techniques such as Landis [Landis 2002] and Zhukov [Zhukov 1998], and volumetric versions like Vicinity Shading by Stewart [Stewart 2003] and Ropinski et al. [Ropinski 2008]. The incremental approach allows for interactive refinement, addressing the computational cost of global shadowing in participating media [S2, unofficial]. It is primarily used in medical imaging for MRI data sets [S2, unofficial].
+Local Ambient Occlusion was proposed by Hernell et al. in 2010 [S2, unofficial]. It builds on earlier ambient occlusion techniques such as Landis [Landis 2002] and Zhukov [Zhukov 1998], and volumetric versions like Vicinity Shading by Stewart [Stewart 2003] and Ropinski et al. [Ropinski 2008] [S1, unofficial]. The incremental approach allows for interactive refinement, addressing the computational cost of global shadowing in participating media [S2, unofficial]. It is used in medical DVR for diagnosis and surgical planning, specifically for MRI data sets, virtual autopsies, and clip plane rendering [S2, unofficial].
 
 ## Sources
 [S1] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,179 @@
+# Plug-and-Play Ray Marching and Rendering
+
+Also called: Differentiable Volumetric Rendering Pipeline, nerfacc pipeline
+
+## Overview
+This method provides a modular interface for efficient ray marching and differentiable volumetric rendering, allowing users to plug any user-defined radiance field into a standardized acceleration pipeline [S1, unofficial]. It distinguishes itself from specialized implementations like Instant-NGP by offering a Python API built on PyTorch, which facilitates easier extension to dynamic and unbounded scenes while maintaining high performance [S1, unofficial].
+
+## How it works
+The method separates the radiance field query logic from the rendering loop. The user defines two callback functions that the pipeline calls to sample the scene, while the pipeline handles the optimization of sample selection (skipping empty/occluded regions) and the accumulation of color and opacity.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `rays_o`: Tensor of ray origins, shape `(n_rays, 3)`.
+    *   `rays_d`: Tensor of normalized ray directions, shape `(n_rays, 3)`.
+    *   `radiance_field`: A user-defined model (e.g., MLP, grid) capable of querying density and RGB at 3D positions.
+*   **Outputs**:
+    *   `color`: Rendered RGB image, shape `(n_rays, 3)`.
+    *   `opacity`: Accumulated opacity, shape `(n_rays, 1)`.
+    *   `depth`: Accumulated depth, shape `(n_rays, 1)`.
+
+### Data Structures
+The pipeline manages sample intervals along rays.
+*   `t_starts`: Tensor of start distances for each sample interval.
+*   `t_ends`: Tensor of end distances for each sample interval.
+*   `ray_indices`: Tensor mapping each sample interval to its parent ray index.
+*   `packed_info`: Internal structure returned by `ray_marching` containing metadata for efficient batched processing (e.g., offsets, valid counts). [S1, unofficial]
+
+### Formulas
+The volumetric rendering equation accumulates color contributions:
+$$
+C(\mathbf{r}) = \sum_{i=1}^N T_i \alpha_i \mathbf{c}_i
+$$
+where:
+*   $\mathbf{c}_i$ is the RGB color at sample $i$.
+*   $\alpha_i$ is the opacity of sample $i$, defined as $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$.
+*   $\sigma_i$ is the volume density at sample $i$.
+*   $\delta_i$ is the distance between sample $i$ and $i+1$ (or end of ray).
+*   $T_i$ is the transmittance up to sample $i$, defined as $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$. [S1, unofficial]
+
+### Parameters
+*   `near_plane`: Starting distance for ray marching. Typical value: 0.2 [S1, unofficial].
+*   `far_plane`: Ending distance for ray marching. Typical value: 1.0 [S1, unofficial].
+*   `early_stop_eps`: Threshold for early stopping based on transmittance. Typical value: $1e-4$ [S1, unofficial].
+*   `alpha_thre`: Threshold for skipping samples with low opacity. Typical value: $1e-2$ [S1, unofficial].
+
+### Pseudocode
+The following Python-like pseudocode implements the pipeline using PyTorch conventions. It assumes `nerfacc` is available and `radiance_field` is a user-defined module.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+from torch import Tensor
+from typing import Tuple
+import nerfacc
+
+def run_pipeline(rays_o: Tensor, rays_d: Tensor, radiance_field, optimizer):
+    """
+    Execute the plug-and-play ray marching and rendering pipeline.
+    
+    Args:
+        rays_o: Ray origins (n_rays, 3)
+        rays_d: Ray directions (n_rays, 3)
+        radiance_field: User-defined radiance field model
+        optimizer: PyTorch optimizer for the radiance field
+    """
+    # 1. Define the density query function
+    def sigma_fn(t_starts: Tensor, t_ends: Tensor, ray_indices: Tensor) -> Tensor:
+        """
+        Query density values from the radiance field.
+        
+        Args:
+            t_starts: Start of sample intervals (n_samples,)
+            t_ends: End of sample intervals (n_samples,)
+            ray_indices: Indices of rays for each sample (n_samples,)
+            
+        Returns:
+            sigmas: Density values (n_samples, 1)
+        """
+        # Gather ray origins and directions for the specific samples
+        t_origins = rays_o[ray_indices]  # (n_samples, 3)
+        t_dirs = rays_d[ray_indices]     # (n_samples, 3)
+        
+        # Compute sample positions at the midpoint of intervals
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        
+        # Query density from the user-defined field
+        sigmas = radiance_field.query_density(positions)
+        return sigmas  # (n_samples, 1)
+
+    # 2. Define the RGB and density query function
+    def rgb_sigma_fn(t_starts: Tensor, t_ends: Tensor, ray_indices: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Query RGB and density values from the radiance field.
+        
+        Args:
+            t_starts: Start of sample intervals (n_samples,)
+            t_ends: End of sample intervals (n_samples,)
+            ray_indices: Indices of rays for each sample (n_samples,)
+            
+        Returns:
+            rgbs: RGB colors (n_samples, 3)
+            sigmas: Density values (n_samples, 1)
+        """
+        t_origins = rays_o[ray_indices]  # (n_samples, 3)
+        t_dirs = rays_d[ray_indices]     # (n_samples, 3)
+        
+        # Compute sample positions
+        positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+        
+        # Query RGB and density from the user-defined field
+        # Note: The field may require direction for view-dependent shading
+        rgbs, sigmas = radiance_field(positions, condition=t_dirs)
+        return rgbs, sigmas  # (n_samples, 3), (n_samples, 1)
+
+    # 3. Efficient Ray Marching
+    # This step skips empty and occluded regions to optimize GPU utilization
+    packed_info, t_starts, t_ends = nerfacc.ray_marching(
+        rays_o=rays_o,
+        rays_d=rays_d,
+        sigma_fn=sigma_fn,
+        near_plane=0.2,
+        far_plane=1.0,
+        early_stop_eps=1e-4,
+        alpha_thre=1e-2
+    )
+    
+    # 4. Differentiable Volumetric Rendering
+    # Accumulates color, opacity, and depth using the rendering equation
+    color, opacity, depth = nerfacc.rendering(
+        rgb_sigma_fn=rgb_sigma_fn,
+        packed_info=packed_info,
+        t_starts=t_starts,
+        t_ends=t_ends
+    )
+    
+    # 5. Optimization Step (Example)
+    # Assuming 'color_gt' is the ground truth image tensor
+    # loss = F.mse_loss(color, color_gt)
+    # optimizer.zero_grad()
+    # loss.backward()
+    # optimizer.step()
+    
+    return color, opacity, depth
+```
+
+### Edge Cases and Pitfalls
+*   **Precision**: The transmittance calculation involves exponentials of negative sums. Ensure densities are non-negative to avoid numerical instability in $T_i$. [S1, unofficial]
+*   **Boundaries**: The `near_plane` and `far_plane` parameters define the marching bounds. If the scene extends beyond these bounds, parts of the scene will be clipped. [S1, unofficial]
+*   **Empty Regions**: The pipeline automatically skips samples with low opacity ($\alpha_i < \text{alpha\_thre}$) or low transmittance ($T_i < \text{early\_stop\_eps}$). If the scene is mostly empty, this optimization is critical for performance. [S1, unofficial]
+
+## Subtopics
+
+### Differentiable Volumetric Rendering
+*   **What it is**: The core accumulation step that computes the final pixel color, opacity, and depth by integrating samples along rays using the volumetric rendering equation.
+*   **What sets it apart**: It is differentiable with respect to the radiance field parameters, enabling gradient-based optimization (e.g., via backpropagation) for training neural radiance fields.
+*   **When to choose it**: When training a NeRF or similar implicit representation where gradients need to flow from the image loss to the scene representation.
+*   **Link**: [Differentiable Volumetric Rendering](1318-volume-rendering-pipeline.md)
+
+### Efficient Ray Marching
+*   **What it is**: The process of selecting which sample intervals along each ray are relevant for rendering, specifically by skipping empty or occluded regions.
+*   **What sets it apart**: It uses density queries to dynamically prune the search space, significantly reducing the number of samples processed compared to uniform sampling.
+*   **When to choose it**: When rendering scenes with large empty spaces or when computational efficiency is a priority.
+*   **Link**: [Efficient Ray Marching](1318-volume-rendering-pipeline.md)
+
+## Operating characteristics
+*   **Time Complexity**: Depends on the number of valid samples after pruning. In sparse scenes, it is significantly faster than uniform sampling due to the skipping of empty/occluded regions. [S1, unofficial]
+*   **Memory Complexity**: Proportional to the number of valid samples. The `packed_info` structure allows for efficient batched processing on the GPU. [S1, unofficial]
+*   **Measured Performance**: On a single NVIDIA TITAN RTX GPU, training an 8-layer MLP NeRF to better quality (+0.5 PSNR) takes approximately 1 hour, compared to 1-2 days in the original paper. Instant-NGP NeRF training takes 4.5 minutes in Python, comparable to the official CUDA implementation. [S1, unofficial]
+*   **Strengths**: High performance, easy to integrate with existing PyTorch models, supports dynamic and unbounded scenes. [S1, unofficial]
+*   **Limitations**: Requires the user to implement the radiance field query logic. Performance is dependent on the efficiency of the user-defined `sigma_fn` and `rgb_sigma_fn`. [S1, unofficial]
+*   **When to use it**: When accelerating existing NeRF methods or developing new radiance field representations that need efficient rendering and differentiability. [S1, unofficial]
+*   **When not to use it**: When a pure CUDA implementation is required for maximum low-level control, or when the scene representation is not compatible with the assumed input/output formats of the callback functions. [S1, unofficial]
+
+## Background
+The method originates from the NerfAcc toolbox, which focuses on efficient volumetric rendering of radiance fields. It builds on techniques from Instant-NGP but extends them to support dynamic and unbounded scenes. The toolbox provides a user-friendly Python API written with PyTorch, designed to accelerate most NeRF methods. [S1, unofficial]
+
+## Sources
+[S1] NerfAcc: A General NeRF Acceleration Toolbox, https://doi.org/10.48550/arxiv.2210.04847, fetched 2026-10-26 (unofficial)

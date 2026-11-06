@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -11,14 +11,14 @@
+ 
+ **Data Structures:**
+-1.  **Voxel Triad ($t_{i,j,k}$):** An 8-bit unsigned char associated with each voxel cell $v_{i,j,k}$. It stores 5 bits of classification information:
++1.  **Voxel Triad ($t_{i,j,k}$):** An 8-bit unsigned char associated with each voxel cell $v_{i,j,k}$ [S1, unofficial]. It stores 5 bits of classification information:
+     *   1 bit: Scalar classification (inside labeled region $L$ or background $B$) [S1, unofficial].
+     *   3 bits: Whether the x, y, and z voxel edges emanating from the cell origin intersect the isosurface [S1, unofficial].
+     *   1 bit: Whether the voxel cell produces an output point (PRODUCE POINT bit) [S1, unofficial].
+     *   The volume of triads is padded by one triad in each $\pm x, \pm y, \pm z$ direction, resulting in dimensions $(M+2) \times (N+2) \times (O+2)$ for a volume of size $M \times N \times O$ [S1, unofficial].
+-2.  **Volume X-Edge Metadata:** A 2D array of size $(N+2) \times (O+2)$ allocated for each padded volume x-edge $E_{j,k}$. It stores five values:
+-    *   Number of output points.
+-    *   Number of quadrilaterals.
+-    *   Number of smoothing stencil edges.
+-    *   IDs controlling output write positions (after prefix sum).
++2.  **Volume X-Edge Metadata:** A 2D array of size $(N+2) \times (O+2)$ allocated for each padded volume x-edge $E_{j,k}$ [S1, unofficial]. It stores five values:
++    *   Number of output points [S1, unofficial].
++    *   Number of quadrilaterals [S1, unofficial].
++    *   Number of smoothing stencil edges [S1, unofficial].
++    *   IDs controlling output write positions (after prefix sum) [S1, unofficial].
+     *   Edge trim (starting and ending voxels along the row) [S1, unofficial].
+ 
+@@ -27,6 +27,6 @@
+ **Pass 1: Process Volume X-Edges**
+ For each volume x-edge $E_{j,k}$, process independently and in parallel:
+-1.  Visit all voxel x-edges $e_{i,j,k}$ composing $E_{j,k}$.
+-2.  Mark edges where the interval intersects the isosurface $Q_i$.
++1.  Visit all voxel x-edges $e_{i,j,k}$ composing $E_{j,k}$ [S1, unofficial].
++2.  Mark edges where the interval intersects the isosurface $Q_i$ [S1, unofficial].
+ 3.  Determine the left and right trim positions $x_{L_{j,k}}$ and $x_{R_{j,k}}$, and the number of x-intersections along $E_{j,k}$ [S1, unofficial].
+ 4.  Gather classification information for each triad (whether $s_{i,j,k} \in L$ or $s_{i,j,k} \in B$) [S1, unofficial].
+@@ -35,5 +35,5 @@
+ For each volume cell row $V_{j,k}$, process independently and in parallel:
+ 1.  Visit triads between the trim interval $[x_{L_{j,k}}, x_{R_{j,k}})$ [S1, unofficial].
+-2.  Intersect y- and z-triad edges against $Q_i$.
++2.  Intersect y- and z-triad edges against $Q_i$ [S1, unofficial].
+ 3.  Adjust the trim interval to produce a final trim interval $[\bar{x}_{L_{j,k}}, \bar{x}_{R_{j,k}})$ based on classification [S1, unofficial].
+ 4.  Use classification from Pass 1 to accelerate checks: if voxel edge endpoints $s_0, s_1$ are both in background $B$, no edge intersection exists [S1, unofficial].
+@@ -76,110 +76,107 @@
+ ```python
+ def parallel_surfacenets(volume, labels, isovalue):
+-    # volume: 3D array of scalars
+-    # labels: set of scalar values representing labeled regions L
+-    # isovalue: scalar value for isosurface extraction (subset of L)
+-    
+     M, N, O = volume.shape
+-    # Pad dimensions for triads and metadata
+-    padded_M, padded_N, padded_O = M + 2, N + 2, O + 2
+-    
+-    # Initialize data structures
+-    # Triads: (M+2)x(N+2)x(O+2) uint8
+-    triads = np.zeros((padded_M, padded_N, padded_O), dtype=np.uint8)
+-    
+-    # X-Edge Metadata: (N+2)x(O+2) array of 5 integers
+-    # Fields: [num_points, num_quads, num_stencils, write_id, trim_start, trim_end]
+-    # Note: trim_start/end are part of the 5 values mentioned in source, 
+-    # source says "five values... IDs... and edge trim". 
+-    # We assume metadata stores counts initially, then IDs after prefix sum.
+-    metadata = np.zeros((padded_N, padded_O, 5), dtype=np.int64)
++    PM, PN, PO = M + 2, N + 2, O + 2
++    
++    # Initialize triads: (M+2)x(N+2)x(O+2) uint8
++    triads = [0] * (PM * PN * PO)
++    
++    # X-Edge Metadata: (N+2)x(O+2) array of 6 integers
++    # [num_points, num_quads, num_stencils, write_id, trim_start, trim_end]
++    metadata = [[0]*6 for _ in range(PN * PO)]
+     
+     # Pass 1: Process Volume X-Edges
+-    # Parallel loop over j, k
+-    for j, k in parallel_edges():
+-        # Process x-edges along Ej,k
+-        trim_start, trim_end, x_intersections = process_x_edges(volume, j, k, labels)
+-        metadata[j, k, 4] = trim_start
+-        metadata[j, k, 5] = trim_end # Assuming index 4,5 for trim if 5 fields are counts+ids
+-        # Note: Source says 5 values. Let's map: 
+-        # 0: num_points, 1: num_quads, 2: num_stencils, 3: write_id (post-prefix), 4: trim_start, 5: trim_end?
+-        # Source: "five values: number of points, number of quadrilaterals, number of smoothing stencil edges (initially), 
+-        # IDs controlling output write positions in Pass 4 (after prefix sum), and edge trim (starting and ending voxels)"
+-        # This implies 6 slots or combined trim. We'll store trim as two ints or a tuple.
+-        # For simplicity in pseudocode, we store trim indices.
+-        metadata[j, k, 4] = trim_start
+-        metadata[j, k, 5] = trim_end # Adjusting array size to 6 if needed, or packing trim.
+-        # Let's assume metadata is (N+2, O+2, 6) to be safe, or source implies 5 total fields including trim as one?
+-        # "five values... and edge trim". It lists 4 specific counts/IDs and then "edge trim".
+-        # We will assume metadata[j,k] has 6 elements: [pts, quads, stencils, id, trim_l, trim_r]
+-        
++    for j in range(PN):
++        for k in range(PO):
++            trim_l, trim_r = -1, -1
++            for i in range(M):
++                s0, s1 = volume[i, j, k], volume[i+1, j, k]
++                if s0 != s1 and (s0 not in labels or s1 not in labels):
++                    if trim_l == -1: trim_l = i
++                    trim_r = i + 1
++                    triads[i*PN*PO + j*PO + k] |= 0x02
++            metadata[j*PO + k] = [0, 0, 0, 0, trim_l, trim_r]
++
+     # Pass 2: Process Y- and Z-Voxel-Cell Edges
+-    for j, k in parallel_rows():
+-        trim_l = metadata[j, k, 4]
+-        trim_r = metadata[j, k, 5]
+-        # Adjust trim interval based on y/z intersections
+-        new_trim_l, new_trim_r = process_yz_edges(volume, j, k, labels, trim_l, trim_r, triads)
+-        metadata[j, k, 4] = new_trim_l
+-        metadata[j, k, 5] = new_trim_r
++    for j in range(PN):
++        for k in range(PO):
++            trim_l, trim_r = metadata[j*PO + k][4], metadata[j*PO + k][5]
++            new_trim_l, new_trim_r = trim_l, trim_r
++            for i in range(trim_l, trim_r):
++                s0, s1 = volume[i, j, k], volume[i, j+1, k]
++                if s0 != s1 and (s0 not in labels or s1 not in labels):
++                    triads[i*PN*PO + j*PO + k] |= 0x04
++                    if trim_l == -1: new_trim_l = i
++                    new_trim_r = i + 1
++                s0, s1 = volume[i, j, k], volume[i, j, k+1]
++                if s0 != s1 and (s0 not in labels or s1 not in labels):
++                    triads[i*PN*PO + j*PO + k] |= 0x08
++                    if trim_l == -1: new_trim_l = i
++                    new_trim_r = i + 1
++            metadata[j*PO + k][4], metadata[j*PO + k][5] = new_trim_l, new_trim_r
+ 
+     # Pass 3: Configure Output
+-    # Checkerboard pattern to avoid races
+-    for parity in [0, 1]:
+-        for j, k in parallel_rows_parity(parity):
+-            # Combine 8 triads to form edge case
+-            edge_case = compute_edge_case(volume, j, k, triads)
+-            
+-            # Determine if point is produced
+-            if edge_case != 0:
+-                # Set PRODUCE POINT bit in relevant triads
+-                # This is safe due to checkerboard processing
+-                set_produce_point_bit(triads, j, k)
+-                
+-                # Count primitives
+-                metadata[j, k, 0] += 1 # Point
+-                metadata[j, k, 1] += num_quads(edge_case)
+-                metadata[j, k, 2] += num_stencils(edge_case)
+-
+-    # Prefix Sum to allocate memory and compute write IDs
+-    # Apply prefix sum along the x-dimension for each row/col
+-    for j, k in parallel_rows():
+-        prefix_sum(metadata[j, k, :3])
+-        # Store write IDs in metadata[j, k, 3]
+-        compute_write_ids(metadata[j, k])
+-
+-    # Allocate output arrays based on prefix sums
+-    total_points = sum(metadata[:, :, 0])
+-    total_quads = sum(metadata[:, :, 1])
+-    output_points = np.zeros((total_points, 3))
+-    output_quads = np.zeros((total_quads, 4), dtype=np.int64)
+-    output_stencils = [] # List of lists or flattened array
+-
++    for parity in range(2):
++        for j in range(PN):
++            for k in range(PO):
++                if (j + k) % 2 != parity: continue
++                edge_case = 0
++                for di in range(2):
++                    for dj in range(2):
++                        for dk in range(2):
++                            idx = ((j+dj)*PO + (k+dk))
++                            edge_case |= triads[idx]
++                if edge_case != 0:
++                    for di in range(2):
++                        for dj in range(2):
++                            for dk in range(2):
++                                idx = ((j+dj)*PO + (k+dk))
++                                triads[idx] |= 0x20
++                    metadata[j*PO + k][0] += 1
++                    metadata[j*PO + k][1] += 1
++                    metadata[j*PO + k][2] += 1
++                    
++    # Prefix sum along x for each row/col
++    for j in range(PN):
++        for k in range(PO):
++            acc = 0
++            for i in range(M):
++                idx = j*PO + k
++                metadata[idx][3] = acc
++                acc += metadata[idx][0]
++            metadata[j*PO + k][0] = acc
++
++    total_points = sum(m[0] for m in metadata)
++    total_quads = sum(m[1] for m in metadata)
++    output_points = []
++    output_quads = []
++    output_stencils = []
++    
+     # Pass 4: Generate Output
+-    for j, k in parallel_rows():
+-        trim_l = metadata[j, k, 4]
+-        trim_r = metadata[j, k, 5]
+-        write_ptr = metadata[j, k, 3]
+-        
+-        # 3x3 kernel iteration
+-        for di in range(-1, 2):
+-            for dj in range(-1, 2):
+-                for dk in range(-1, 2):
+-                    # Iterate over triads in the kernel
+-                    # Use iterator to advance point IDs
+-                    # Generate points, quads, stencils
+-                    generate_output(volume, j, k, di, dj, dk, 
+-                                    trim_l, trim_r, write_ptr,
+-                                    output_points, output_quads, output_stencils)
++    for j in range(PN):
++        for k in range(PO):
++            trim_l, trim_r = metadata[j*PO + k][4], metadata[j*PO + k][5]
++            write_ptr = metadata[j*PO + k][3]
++            for di in range(-1, 2):
++                for dj in range(-1, 2):
++                    for dk in range(-1, 2):
++                        # Generate points, quads, stencils using 3x3 kernel
++                        pass
+ 
+     # Smoothing
+     P0 = output_points.copy()
+-    P1 = np.zeros_like(P0)
++    P1 = [None] * len(P0)
+     for iteration in range(25):
+-        compute_smoothing_step(P0, P1, output_stencils)
+-        # Double buffer swap
++        for i in range(len(P0)):
++            neighbors = get_neighbors(P0, output_stencils, i)
++            delta = sum((p - P0[i]) for p in neighbors) / len(neighbors)
++            P1[i] = P0[i] + lambda_val * delta
+         P0, P1 = P1, P0
+         
+     # Triangulation
+-    triangles = triangulate_quads(output_quads)
++    triangles = []
++    for quad in output_quads:
++        triangles.append([quad[0], quad[1], quad[2]])
++        triangles.append([quad[0], quad[2], quad[3]])
+     
+     return triangles
+@@ -198,5 +195,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Scalar classification is $O(1)$ for a single label ($N=1$) using cache, $O(N)$ for intermediate labels, and $O(\log(N))$ for large $N$ using a set [S1, unofficial]. The overall algorithm is parallelized over volume edges.
++*   **Time Complexity:** Scalar classification is $O(1)$ for a single label ($N=1$) using cache, $O(N)$ for intermediate labels, and $O(\log(N))$ for large $N$ using a set [S1, unofficial]. The overall algorithm is parallelized over volume edges [S1, unofficial].
+ *   **Memory Complexity:** Requires pre-allocation of output arrays based on prefix sums. Memory usage scales with the number of output primitives. Large volumes may require significant RAM [S1, unofficial].
+ *   **Performance:** PSN is typically one to two orders of magnitude faster than sequential algorithms like MC on commodity CPU hardware [S1, unofficial].

@@ -1,0 +1,76 @@
+# Interaction
+
+
+## Overview
+Interaction in volume rendering refers to the mechanisms by which users manipulate the visualization parameters, data subsets, or view geometry to guide the rendering process and explore the dataset. It solves the problem of static, pre-computed images by allowing real-time exploration of complex volumetric data. This family is distinct from [Classification and transfer functions](38-classification-and-transfer-functions.md) (which map data to visual properties) and [Illustrative and non-photorealistic volume rendering](40-illustrative-and-non-photorealistic-volume-rendering.md) (which stylize the output); instead, it focuses on the *control* loop between the user and the renderer. It differs from [Multi-field, vector and tensor volume visualization](39-multi-field-vector-and-tensor-volume-visualization.md) by addressing the general interaction paradigm rather than specific data types.
+
+## Shared principles
+The core mechanism of interaction in volume rendering involves a feedback loop where user input (mouse, keyboard, touch, or gaze) modifies a set of parameters that influence the rendering pipeline. These parameters typically fall into three categories:
+1.  **Geometric/View Parameters:** Camera position, orientation, and clipping planes (e.g., cropping).
+2.  **Data/Selection Parameters:** Subsets of the volume to render or modify (e.g., selection, brushing).
+3.  **Visual/Mapping Parameters:** Transfer function values, deformation fields, or LOD levels.
+
+Mathematically, interaction is often modeled as a function $I: \mathcal{U} \rightarrow \mathcal{P}$, where $\mathcal{U}$ is the user input space and $\mathcal{P}$ is the parameter space of the renderer. The renderer then computes the image $V = R(D, P)$, where $D$ is the data and $P$ is the current parameter set. A key challenge in implementation is maintaining consistency across multiple coordinated views (e.g., linking selection in a 2D overview to the 3D volume), which requires a shared state management system.
+
+## Subtopics
+
+### [Cropping](1648-cropping.md)
+Cropping restricts volume rendering to a specific region of interest by cutting off the volume along planes parallel to its faces. It solves visual clutter and performance overhead by allowing users to see inside a volume without altering data. Unlike [Clipping plane for volume suppression](887-clipping-plane-for-volume-suppression.md), which uses arbitrary-angle planes, cropping is strictly axis-aligned relative to the volume's object coordinates. It differs from [Clipping](1444-clipping.md) by defining a bounded region of visibility via slabs rather than a half-space relative to the camera.
+
+### [3D Cursor](1655-3d-cursor.md)
+A feature that inserts a hardware-generated, software-controlled cursor into the volume data set to explore spatial relationships.
+
+### [Focus+Context Visualization via Deformation](3001-focus-context-visualization-via-deformation.md)
+Focus+Context Visualization via Deformation is an interactive technique that magnifies regions of interest within a high-resolution volume dataset while shrinking less important areas to fit within the original display boundary. It solves the problem of inspecting detailed features on low-resolution displays by leveraging transfer function color boundaries to automatically identify features, allowing for varying extents of magnification unlike binary focus/context methods or lens-based techniques.
+
+### [Frustum Culling for Hierarchical Navigation](5370-frustum-culling-for-hierarchical-navigation.md)
+A technique to reduce visual clutter during hierarchical navigation by culling nodes outside the viewing frustum from the rendering window and deactivating them from selection in overview/treemap views, while still drawing context lines/regions.
+
+### [Dynamic Focus+Context Framework](5844-dynamic-focus-context-framework.md)
+A framework for dynamic focus+context visualization in volume rendering that uses user interaction to guide enhancements of the visualization via animation modules.
+
+### User Interaction-Based Illustration
+#### definition
+- [S1, unofficial] A system that monitors user interaction with virtual text to infer viewer intent and generate supporting graphics dynamically.
+#### step
+- [S1, unofficial] Monitor user interaction with virtual text to infer intent.
+- [S1, unofficial] Generate supporting graphics dynamically based on user interaction according to a set of heuristics.
+- [S1, unofficial] Render surface models and display with OpenGL (extendable to voxel models).
+
+### Direct Selection and Deletion
+#### definition
+- [S2] An approach where users instantly highlight all splats that intersect with the brush during selection, contrasting with indirect approaches that compute intersections after brushing.
+#### step
+- [S2] Selection/deletion brushes may be either circular (screen space) or spherical (world space).
+- [S2] Users may choose selections based on splat centers or their border.
+- [S2] In case of circular brushes and splat-border intersection tests, apply an approximation that checks whether the center of the brush circle is inside an ellipse that is enlarged by the radius of the brush.
+- [S2] Sort all splats by their deletion flag, putting the deleted splats towards the end of the buffer.
+- [S2] Unmap and release physical allocations at the buffer's end in steps of the GPU's granularity.
+#### pitfall
+- [S2] Using radix sort is not required; developers may implement this functionality with GPU-friendly stream compaction.
+
+### Brushing and Linking Interface
+#### definition
+- [S3] A technique allowing users to select a subset of nodes from the current LOD for operations like join or split, with dynamic linking across three views (rendering window, overview map, treemap).
+#### step
+- [S3] Brushing in the overview map allows joining or splitting all nodes at particular levels in the tree hierarchy.
+- [S3] Brushing in the treemap allows changing resolutions of blocks in a local vicinity according to error values. Users click a node or specify a rectangular region to select multiple nodes simultaneously.
+- [S3] Brushing in the rendering window allows direct interaction with the data set. Users identify 3D blocks of interest and link selection forward to other views.
+- [S3] Provide sliders in the rendering window to specify brush coverage in data space as a 1D point, a 2D plane, or a 3D box.
+- [S3] Allow brushing by specifying coverage in color space using two sliders in range [0, 1] to set minimum and maximum color values. Select all nodes in the current LOD within this color (and error) range.
+- [S3] Use color space brushing to select nodes from a certain error range in a fuzzy manner, allowing resolution changes without degrading image quality too much.
+
+### Selection Interaction States
+#### definition
+- [S4] Integrated: Selection acts as fully belonging to the 3D scene. Movement depends on distance to origin; can move out of viewport or be occluded.
+- [S4] Decoupled: Selection fully decoupled from scene. Independently manipulated, not affected by viewing transformation. Useful for fixed orientation.
+- [S4] Pinned: Hybrid mode. Object pinned to current image space position. On-screen location static, but affected by rotations (same relative rotation as viewpoint).
+
+## Background
+The concept of interaction in volume rendering evolved from early direct volume visualization (DVV) systems in the late 1980s and early 1990s, which primarily focused on rendering algorithms like ray casting and texture mapping. Early interaction was limited to camera navigation and simple transfer function adjustment. As datasets grew larger and more complex, the need for advanced interaction techniques such as cropping, focus+context, and hierarchical navigation became apparent. The integration of interaction with non-photorealistic illustration (NPR) and multi-view coordinated interfaces (like brushing and linking) has been a significant area of research, particularly in medical and scientific visualization. Key developments include the introduction of direct selection methods for splat-based rendering and the use of deformation fields for focus+context visualization.
+
+## Sources
+[S1] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+[S2] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31
+[S3] PDF Hierarchical Navigation Interface: Leveraging Multiple Coordinated ..., https://academicweb.nd.edu/~cwang11/papers/iv05-hni.pdf, fetched 2026-10-30
+[S4] VolumeShop: An Interactive System for Direct Volume Illustration, https://doi.org/10.1109/vis.2005.135, fetched 2026-10-26

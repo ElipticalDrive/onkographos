@@ -1,0 +1,293 @@
+# Progressive Sparse Voxels Optimization
+
+Also called: Progressive Sparse Voxels
+
+## Overview
+Progressive Sparse Voxels Optimization is a coarse-to-fine training procedure for optimizing 3D radiance fields represented as sparse voxel grids [S1]. It solves the problem of initializing and maintaining an efficient voxel structure that adapts to scene complexity during training, preventing overfitting in unobserved regions while refining detail where needed [S1]. It sets itself apart from static grid methods by dynamically pruning low-visibility voxels and subdividing high-error voxels based on gradient signals, building on the general framework of [Coarse-to-Fine Optimization with Pruning](1153-coarse-to-fine-optimization-with-pruning.md).
+
+## How it works
+**Inputs:** A set of training images with known camera parameters (position, orientation, intrinsics including horizontal FOV $\theta_{\text{fov-x}}$ and image width $W$).
+**Outputs:** An optimized sparse voxel grid containing Spherical Harmonic (SH) coefficients for color and density values at grid points.
+
+### Data Structures
+The scene is represented as an Octree.
+*   **Voxel:** Contains SH coefficients (view-dependent color) and references to grid points.
+*   **Grid Point:** Stores raw density values. Grid points are shared among adjacent voxels (8 corners per voxel).
+*   **Layout:** Only leaf nodes are stored in the final Octree structure. Source voxels are removed upon subdivision.
+
+### Parameters
+*   $h_{lv}$: Number of levels for the dense grid initialization in bounded scenes or the main region of unbounded scenes [S1].
+*   $h_{out}$: Number of background shell levels for unbounded scenes [S1].
+*   $h_{ratio}$: Target ratio of background voxels to main region voxels after initialization [S1].
+*   $h_{geo}$: Negative initial raw density value to ensure near-zero activated density ($\exp(h_{geo}) \approx 0$) [S1].
+*   $h_{prune}$: Threshold for maximum blending weight to prune voxels [S1].
+*   $h_{every}$: Number of training iterations between adaptive pruning and subdivision operations [S1].
+*   $h_{rate}$: Threshold for sampling rate; if $v_{rate} < 2h_{rate}$, subdivision priority is set to zero [S1].
+*   $h_{percent}$: Percentage of voxels with highest priority selected for subdivision [S1].
+*   $\lambda_{\text{ssim}}, \lambda_{\text{T}}, \lambda_{\text{dist}}, \lambda_{\text{R}}, \lambda_{\text{tv}}$: Weights for SSIM, Total Transmittance, Distortion, Regularization, and Total Variation losses [S1].
+
+### Step 1: Scene Initialization
+Initialization depends on whether the scene is bounded or unbounded. All voxels start with raw density $h_{geo}$ and SH coefficients set to zero, except the zero-degree SH component which is set to yield gray color (intensity 0.5) [S1].
+
+**1.1 Bounded Scenes**
+1.  Initialize a dense grid with $h_{lv}$ levels.
+2.  Remove voxels that are not observed by any training image.
+3.  The total number of voxels is $\le (2^{h_{lv}})^3$ [S1].
+
+**1.2 Unbounded Scenes**
+1.  Define the **Main Region**: A cuboid centered at the average camera position, with radius equal to the median distance from the center to the cameras. Initialize a dense grid with $h_{lv}$ levels within this cuboid [S1].
+2.  Define the **Background Region**: Allocate $h_{out}$ levels of background shells enclosing the main region. The radius of the entire scene is $2^{h_{out}}$ times the radius of the main region [S1].
+3.  Initialize background shells with the coarsest voxel size. Each shell level starts with $4^3 - 2^3 = 56$ voxels [S1].
+4.  Iteratively subdivide background shell voxels with the highest sampling rate and remove unobserved voxels.
+5.  Repeat step 4 until the ratio of the number of background voxels to main region voxels equals $h_{ratio}$.
+6.  The total number of voxels is $\le (1 + h_{ratio})(2^{h_{lv}})^3$ [S1].
+
+### Step 2: Optimization Loop
+The optimization proceeds in iterations. Every $h_{every}$ iterations, perform Adaptive Pruning and Subdivision. The total loss function is:
+$$
+\mathcal{L} = \mathcal{L}_{\text{mse}} + \lambda_{\text{ssim}} \mathcal{L}_{\text{ssim}} + \lambda_{\text{T}} \mathcal{L}_{\text{T}} + \lambda_{\text{dist}} \mathcal{L}_{\text{dist}} + \lambda_{\text{R}} \mathcal{L}_{\text{R}} + \lambda_{\text{tv}} \mathcal{L}_{\text{tv}}
+$$
+where $\mathcal{L}_{\text{mse}}$ and $\mathcal{L}_{\text{ssim}}$ are photometric losses, $\mathcal{L}_{\text{T}}$ encourages binary transmittance, $\mathcal{L}_{\text{dist}}$ is distortion loss, $\mathcal{L}_{\text{R}}$ is per-point RGB loss, and $\mathcal{L}_{\text{tv}}$ is total variation loss on the sparse density grid [S1].
+
+### Step 3: Adaptive Pruning
+1.  For each voxel, compute the maximum blending weight ($T_i \alpha_i$) across all training cameras. $T_i$ is the transmittance before the voxel, and $\alpha_i$ is the opacity of the voxel, derived from the volume rendering equation (Eq. 1 in [S1]) [S1].
+2.  Remove voxels where the maximum blending weight is lower than $h_{prune}$ [S1].
+3.  Update SH coefficients and grid points:
+    *   SH coefficients are pruned along with the voxels [S1].
+    *   Grid points are removed only if they do not belong to the corners of any remaining voxel [S1].
+
+### Step 4: Subdivision
+1.  **Compute Sampling Rate:** For each voxel, calculate the maximum sampling rate $v_{rate}$ to estimate the number of rays hitting the voxel along the image's horizontal axis [S1]:
+    $$
+    v_{rate} = \max_{i}^{N_{cam}} \frac{v_s}{v_{interval}^i}
+    $$
+    $$
+    v_{interval}^{(i)} = (v_c - r_o^{(i)}) \cdot T \cdot \ell^{(i)} \cdot \tan\left(0.5 \cdot \theta_{\text{fov-x}}^{(i)}\right)
+    $$
+    Where:
+    *   $v_s$: Voxel size (side length) [S1].
+    *   $v_c$: Center of the voxel [S1].
+    *   $r_o^{(i)}$: Origin of camera $i$ [S1].
+    *   $T$: Rotation matrix of camera $i$ [S1].
+    *   $\ell^{(i)}$: Camera lookat vector of camera $i$ [S1].
+    *   $\theta_{\text{fov-x}}^{(i)}$: Horizontal field of view of camera $i$ [S1].
+    *   $N_{cam}$: Number of training cameras [S1].
+    *   Note: The source text mentions $W$ (image width) in the variable list but does not explicitly use it in the formula for $v_{interval}$ or $v_{rate}$ [S1].
+
+2.  **Compute Priority:** Accumulate subdivision priority $v_{priority}$ for each voxel by summing over all training pixel rays $r \in R$ observed over the last $h_{every}$ iterations:
+    $$
+    v_{priority} = \sum_{r \in R} \left\| \alpha(r) \cdot \frac{\partial \mathcal{L}(r)}{\partial \alpha(r)} \right\|
+    $$
+    Where:
+    *   $\alpha(r)$: Opacity contribution of the voxel to ray $r$ [S1].
+    *   $\mathcal{L}(r)$: Training loss of ray $r$ [S1].
+    *   The gradient is weighted by the alpha values [S1].
+
+3.  **Filter Overfitting:** If a voxel's maximum sampling rate $v_{rate} < 2h_{rate}$, set its $v_{priority}$ to zero to prevent overfitting to few pixels [S1].
+
+4.  **Select Voxels:** Select voxels with priority above the top $h_{percent}$ percentile.
+    *   The total number of voxels increases by $h_{percent} \cdot (8 - 1)$ percent [S1].
+
+5.  **Subdivide and Update:**
+    *   Subdivide selected voxels into 8 children.
+    *   Remove the source voxel from the Octree (only leaf nodes are kept) [S1].
+    *   **SH Coefficients:** Duplicate the parent's SH coefficients to the 8 children [S1].
+    *   **Grid Points:**
+        *   Compute densities of new grid points using trilinear interpolation of the parent's corner grid points [S1].
+        *   Merge duplicated grid points (shared between children or neighbors) and average their densities [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def initialize_scene(cameras, is_bounded, h_lv, h_out, h_ratio, h_geo):
+    """
+    Initialize the sparse voxel grid.
+    cameras: List of camera objects with pos, rot, fov_x, width.
+    is_bounded: Boolean indicating if scene is bounded.
+    """
+    voxels = []
+    
+    if is_bounded:
+        # Bounded scene: Dense grid h_lv levels
+        grid = create_dense_grid(levels=h_lv)
+        # Remove unobserved voxels
+        for v in grid:
+            if not is_observed(v, cameras):
+                remove_voxel(v)
+    else:
+        # Unbounded scene
+        # Main region
+        center = average_camera_position(cameras)
+        radius = median_distance_to_cameras(center, cameras)
+        main_grid = create_dense_grid_in_cuboid(center, radius, levels=h_lv)
+        
+        # Background region
+        bg_radius = radius * (2 ** h_out)
+        bg_shells = create_background_shells(center, radius, bg_radius, levels=h_out)
+        
+        # Iteratively subdivide background based on sampling rate
+        while ratio_bg_to_main(bg_shells, main_grid) < h_ratio:
+            # Find shell voxels with highest sampling rate
+            candidates = get_shell_voxels(bg_shells)
+            for v in candidates:
+                v_rate = compute_sampling_rate(v, cameras)
+                # Subdivide highest rate voxels
+                if is_observed(v, cameras):
+                    subdivide_voxel(v)
+                else:
+                    remove_voxel(v)
+        
+        voxels = main_grid + bg_shells
+    
+    # Initialize parameters
+    for v in voxels:
+        v.density_raw = h_geo
+        v.sh_coeffs = zeros()
+        v.sh_coeffs[0] = 0.5 # Zero-degree SH for gray color
+        
+    return voxels
+
+def compute_sampling_rate(voxel, cameras):
+    """
+    Compute max sampling rate v_rate for a voxel.
+    """
+    v_s = voxel.size # Side length
+    v_c = voxel.center
+    max_rate = 0
+    
+    for cam in cameras:
+        # v_interval = (v_c - r_o) * T * l * tan(0.5 * fov_x)
+        # Note: Source uses T * l. Assuming T is rotation matrix, l is lookat vector.
+        # The term (v_c - r_o) is a vector. T is likely applied to the lookat or the vector.
+        # Based on Eq 7b: (v_c - r_o^(i)) T l^(i). This implies dot product or projection.
+        # Standard interpretation: distance along view direction.
+        # Let's assume the formula implies the z-distance in camera space.
+        
+        # Vector from camera origin to voxel center
+        vec = v_c - cam.origin
+        # Project onto camera lookat vector (transformed by camera rotation?)
+        # Source: (v_c - r_o) T l. If T is rotation matrix of camera, T*l might be identity if l is in camera space?
+        # Or T transforms the vector. Let's assume standard camera space projection.
+        # l is lookat vector. In camera space, lookat is (0,0,1).
+        # Let's assume the term represents the depth of the voxel in the camera's view.
+        
+        # Re-reading Eq 7b: (v_c - r_o^(i)) T l^(i).
+        # If l is the lookat vector in world space, and T is the camera rotation matrix (world to cam),
+        # then T * l is the lookat in camera space (0,0,1).
+        # Then (v_c - r_o) dot (T * l) is the depth.
+        # However, the source writes it as a product. Let's assume it's a dot product or the text implies projection.
+        # "Voxel z-distance" label suggests depth.
+        
+        depth = dot(vec, cam.rotation_matrix @ cam.lookat_vector)
+        
+        # Unit-distance pixel size
+        pixel_size = tan(0.5 * cam.fov_x)
+        
+        v_interval = depth * pixel_size
+        
+        rate = v_s / v_interval
+        if rate > max_rate:
+            max_rate = rate
+            
+    return max_rate
+
+def optimize_step(voxels, cameras, iteration, h_every, h_prune, h_rate, h_percent, h_geo):
+    """
+    Perform pruning and subdivision every h_every iterations.
+    """
+    if iteration % h_every != 0:
+        return
+        
+    # 1. Adaptive Pruning
+    pruned_voxels = []
+    for v in voxels:
+        max_blending_weight = 0
+        for cam in cameras:
+            # Compute T_i * alpha_i using volume rendering equation (Eq 1 in S1)
+            # T_i is transmittance before voxel, alpha_i is voxel opacity
+            # This requires rendering the ray or tracking transmittance
+            blending_weight = compute_blending_weight(v, cam)
+            if blending_weight > max_blending_weight:
+                max_blending_weight = blending_weight
+                
+        if max_blending_weight < h_prune:
+            pruned_voxels.append(v)
+            
+    # Remove pruned voxels and update grid points
+    for v in pruned_voxels:
+        remove_voxel(v)
+        
+    # 2. Subdivision
+    # Collect rays from last h_every iterations
+    rays = get_recent_training_rays(h_every)
+    
+    priorities = {}
+    for v in voxels:
+        # Compute v_rate
+        v_rate = compute_sampling_rate(v, cameras)
+        
+        # Compute priority
+        priority = 0
+        for r in rays:
+            if r.hits(v):
+                alpha = r.alpha_contribution(v)
+                grad = r.gradient_loss_wrt_alpha(v)
+                priority += norm(alpha * grad)
+                
+        # Prevent overfitting
+        if v_rate < 2 * h_rate:
+            priority = 0
+            
+        priorities[v] = priority
+        
+    # Select top h_percent
+    sorted_voxels = sort_by_priority(priorities, descending=True)
+    num_to_subdivide = int(len(sorted_voxels) * h_percent / 100)
+    voxels_to_subdivide = sorted_voxels[:num_to_subdivide]
+    
+    # Subdivide
+    new_voxels = []
+    for v in voxels_to_subdivide:
+        children = subdivide_voxel(v)
+        # Duplicate SH
+        for child in children:
+            child.sh_coeffs = v.sh_coeffs
+            child.density_raw = interpolate_density(v) # Trilinear interpolation of corners
+        new_voxels.extend(children)
+        
+    # Remove source voxels (keep only leaves)
+    for v in voxels_to_subdivide:
+        remove_voxel(v)
+        
+    # Add new voxels
+    voxels.extend(new_voxels)
+    
+    # Merge grid points
+    merge_grid_points(voxels)
+
+def interpolate_density(parent_voxel):
+    """
+    Trilinear interpolation of parent voxel's corner grid points.
+    """
+    # Get the 8 corner grid points of the parent
+    corners = parent_voxel.grid_corners
+    # Interpolate to find densities for the 8 new corners of each child
+    # This is a standard trilinear interpolation step
+    return interpolated_values
+```
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of voxels and training iterations. Subdivision increases the voxel count by $h_{percent} \cdot 7$ percent per step [S1]. Pruning reduces it. The cost of computing sampling rates and priorities scales with the number of voxels and rays [S1].
+*   **Memory Complexity:** Scales with the number of active voxels. The initialization bounds the voxel count to $(1 + h_{ratio})(2^{h_{lv}})^3$ for unbounded scenes [S1].
+*   **Strengths:** Adapts resolution to scene complexity; prevents overfitting in unobserved regions via pruning and sampling rate thresholds; handles unbounded scenes effectively with background shells [S1].
+*   **Limitations:** Requires careful tuning of hyperparameters ($h_{lv}, h_{out}, h_{ratio}, h_{prune}, h_{rate}, h_{percent}$) [S1]. The subdivision process can be computationally intensive if many voxels are selected [S1].
+*   **When to use:** When optimizing radiance fields from sparse or unstructured camera views where static grids are inefficient or when scene bounds are unknown (unbounded) [S1].
+*   **When not to use:** For bounded scenes with known tight bounds where a fixed dense grid might be simpler and faster, or when computational resources are extremely limited and dynamic subdivision overhead is prohibitive [S1].
+
+## Background
+Progressive Sparse Voxels Optimization was introduced in the paper "Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering" [S1]. It is part of the SVRaster framework, designed for real-time rendering of high-fidelity radiance fields. The method addresses the limitations of static voxel grids by introducing a progressive optimization strategy that adapts the voxel structure during training [S1].
+
+## Sources
+[S1] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26

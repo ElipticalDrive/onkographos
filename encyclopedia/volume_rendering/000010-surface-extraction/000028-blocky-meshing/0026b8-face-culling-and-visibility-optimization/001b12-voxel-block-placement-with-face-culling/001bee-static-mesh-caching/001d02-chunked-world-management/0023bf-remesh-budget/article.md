@@ -1,112 +1,176 @@
 # Remesh Budget
 
-Also called: RemeshQueue
+Also called: RemeshQueue, VoxelBodyRendererBudgetedRemeshing
 
 ## Overview
-Remesh Budget is a rendering optimization for chunked voxel worlds that limits the computational cost of mesh regeneration per frame by processing only the most visually significant dirty chunks [S1]. It solves the problem of frame-time spikes caused by rebuilding geometry for distant or less important chunks by enforcing a strict time budget, ensuring that mesh updates are prioritized based on camera proximity [S1]. It differs from sibling methods like [Chunk-Based Parallel Voxel Culling & Rendering](3994-chunk-based-parallel-voxel-culling-rendering.md) by focusing on temporal budgeting and spatial prioritization of rebuilds rather than parallel culling strategies [G].
+Remesh Budget is a rendering optimization that processes dirty chunks nearest the camera first within a strict time budget per frame [S1]. It prevents main-thread stalls by limiting the number of sub-chunks remeshed per frame and capping the total time spent on geometry generation [S2, unofficial]. Unlike immediate synchronous rebuilding, which causes frame drops during rapid block placement, this method decouples modification detection from geometry generation [S1].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A list of dirty chunks requiring mesh regeneration [S1].
-- Input: The current camera position [S1].
-- Input: The frame time budget allocated for remeshing [S1].
-- Output: A set of chunks whose meshes have been regenerated and prepared for rendering [S1].
-- Output: The remaining frame time budget [G].
+- **Input:** A set of "dirty" chunks (sub-chunks containing modified voxel data) and the current camera position.
+- **Output:** Updated GPU mesh data for a subset of dirty chunks, marked as "clean" in the world state.
 
 **Data Structures:**
-- `RemeshQueue`: A priority queue storing dirty chunks, ordered by distance to the camera [S1].
-- `Chunk`: Represents a sub-world section containing geometric data and a dirty flag [S1].
-- Exact field layouts, sizes, and bit packing are not given in the sources. [G]
-
-**Steps:**
-1. Identify all chunks marked as dirty [S1].
-2. Insert all dirty chunks into the `RemeshQueue`, ordered by distance to the camera, with the nearest chunk at the front [S1].
-3. Initialize the time budget for remeshing to 3 ms per frame [S1].
-4. While the `RemeshQueue` is not empty and the time spent on remeshing is less than the budget: dequeue the nearest chunk, generate its mesh, upload the mesh data, and mark the chunk as clean [S1].
-5. Constraint: Always mesh at least one chunk per frame, even if the budget is exhausted immediately after the first chunk [S1].
+- **RemeshQueue:** A collection of chunk indices ordered by distance to the camera (nearest first) [S1].
+- **ChunkMeshData:** Contains `Vertices` (span of vertices), `Indices` (span of indices), `VertexCount`, and `IndexCount` [S2, unofficial].
+- **GpuMesh:** Constructed from `data[i].Vertices` and `data[i].Indices` [S2, unofficial].
+- **Frame State:**
+  - `_rebuildsThisFrame`: Integer counter for chunks processed in the current frame [S2, unofficial].
+  - `_frameStarted`: Timestamp recorded at the start of the frame using `System.Diagnostics.Stopwatch.GetTimestamp()` [S2, unofficial].
+  - `MaxRebuildsPerFrame`: Constant integer limit (typically 24) [S2, unofficial].
+  - `RebuildBudgetMs`: Constant double limit (typically 6.0 ms) [S2, unofficial].
+  - `FrameBudget`: Time budget for remeshing per frame (typically 3 ms) [S1].
 
 **Parameters:**
-- `Frame Budget`: 3 ms per frame [S1]. This is a fixed value in the reference implementation [S1].
+- `MaxRebuildsPerFrame`: 24 [S2, unofficial].
+- `RebuildBudgetMs`: 6.0 ms [S2, unofficial].
+- `FrameBudget`: 3 ms [S1].
+- **Note:** One sub-chunk always goes through even if the budget is exceeded [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-- Budget Exhaustion: If the budget is exhausted after processing one chunk, the remaining dirty chunks are left for subsequent frames [S1].
-- No Dirty Chunks: If there are no dirty chunks, no remeshing occurs, and the full budget is unused [G].
-- Precision: Time measurement should use high-resolution timers to accurately track the 3 ms budget [G].
+**Steps:**
+1. **BeginFrame:** Reset `_rebuildsThisFrame` to 0 and record `_frameStarted` timestamp [S2, unofficial].
+2. **Prepare:**
+   - If a pending task exists and is not complete, return false [S2, unofficial].
+   - If the pending task is complete, call `FinishPending` [S2, unofficial].
+   - Collect indices of all dirty chunks [S2, unofficial].
+   - If no dirty chunks exist, return true [S2, unofficial].
+   - Create a task on a worker thread to build meshes for dirty chunks using a local `MeshBuilder` [S2, unofficial].
+   - Return false [S2, unofficial].
+3. **RebuildWithinBudget:**
+   - Iterate through all chunk indices in the `RemeshQueue` (ordered nearest to camera first) [S1].
+   - For each chunk:
+     - If the chunk is dirty:
+       - Check if `RebuildAllowed` is true.
+       - If allowed:
+         - Increment `_rebuildsThisFrame` [S2, unofficial].
+         - Call `Rebuild` for the chunk [S2, unofficial].
+         - Mark the chunk as clean [S2, unofficial].
+       - If not allowed:
+         - Set `complete` to false and continue [S2, unofficial].
+     - If the chunk is not dirty, skip [S2, unofficial].
+   - Return true if all dirty chunks were processed [S2, unofficial].
+4. **RebuildAllowed:**
+   - Returns true if `_rebuildsThisFrame` < `MaxRebuildsPerFrame` AND (`_rebuildsThisFrame` == 0 OR elapsed time since `_frameStarted` < `RebuildBudgetMs`) [S2, unofficial].
+5. **FinishPending:**
+   - If the pending task is not completed, return false [S2, unofficial].
+   - If completed, clear the pending task [S2, unofficial].
+   - If the pending mode differs from the current mode, return true (meshes are useless) [S2, unofficial].
+   - Otherwise, upload each chunk's data and mark chunks clean [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import time
+class RemeshBudget:
+    def __init__(self, max_rebuilds_per_frame=24, rebuild_budget_ms=6.0, frame_budget_ms=3.0):
+        self.max_rebuilds_per_frame = max_rebuilds_per_frame
+        self.rebuild_budget_ms = rebuild_budget_ms
+        self.frame_budget_ms = frame_budget_ms
+        self.rebuilds_this_frame = 0
+        self.frame_started = 0
+        self.pending_task = None
+        self.dirty_chunks = []
 
-def remesh_budget(dirty_chunks, camera_position, frame_time_budget_ms=3.0):
-    """
-    Remesh chunks within a time budget, prioritizing proximity to the camera.
-    
-    Args:
-        dirty_chunks: List of Chunk objects that need remeshing.
-        camera_position: Vector3 representing the camera's position.
-        frame_time_budget_ms: Time budget in milliseconds for remeshing.
+    def begin_frame(self):
+        self.rebuilds_this_frame = 0
+        self.frame_started = get_timestamp()
+
+    def is_rebuild_allowed(self):
+        if self.rebuilds_this_frame >= self.max_rebuilds_per_frame:
+            return False
+        if self.rebuilds_this_frame > 0:
+            elapsed_ms = get_elapsed_ms(self.frame_started)
+            if elapsed_ms >= self.rebuild_budget_ms:
+                return False
+        return True
+
+    def prepare(self):
+        if self.pending_task is not None:
+            if not self.pending_task.is_complete():
+                return False
+            self.finish_pending()
         
-    Returns:
-        List of Chunk objects that were successfully remeshed.
-    """
-    if not dirty_chunks:
-        return []
+        self.dirty_chunks = collect_dirty_chunk_indices()
+        if len(self.dirty_chunks) == 0:
+            return True
+        
+        # Sort by distance to camera
+        self.dirty_chunks.sort(key=lambda c: distance_to_camera(c))
+        
+        self.pending_task = create_worker_task(build_meshes, self.dirty_chunks)
+        return False
 
-    # Step 2: Sort by proximity to camera (nearest first)
-    sorted_chunks = sorted(dirty_chunks, key=lambda c: distance(c.center, camera_position))
+    def rebuild_within_budget(self):
+        if self.pending_task is None:
+            return True
+        
+        if not self.pending_task.is_complete():
+            return False
+        
+        self.finish_pending()
+        return True
 
-    remeshed_chunks = []
-    time_spent_ms = 0.0
+    def finish_pending(self):
+        if self.pending_task is None:
+            return
+        
+        if not self.pending_task.is_complete():
+            return False
+        
+        # Check mode switch
+        if self.pending_task.mode != current_mode:
+            self.pending_task = None
+            return True
+        
+        # Upload data
+        for chunk_index in self.pending_task.chunk_indices:
+            upload_chunk_data(chunk_index)
+            mark_chunk_clean(chunk_index)
+        
+        self.pending_task = None
+        return True
 
-    # Step 4 & 5: Process Queue, ensuring at least one chunk is processed
-    for i, chunk in enumerate(sorted_chunks):
-        # Always process at least one chunk; break if budget exceeded for subsequent chunks
-        if i > 0 and time_spent_ms >= frame_time_budget_ms:
-            break
-
-        start_time = time.time()
-        generate_chunk_mesh(chunk)
-        upload_mesh_to_gpu(chunk.mesh)
-        time_spent_ms += (time.time() - start_time) * 1000
-        chunk.dirty = False
-        remeshed_chunks.append(chunk)
-
-    return remeshed_chunks
-
-def distance(pos1, pos2):
-    """Calculate Euclidean distance between two points."""
-    dx = pos1.x - pos2.x
-    dy = pos1.y - pos2.y
-    dz = pos1.z - pos2.z
-    return (dx*dx + dy*dy + dz*dz) ** 0.5
-
-def generate_chunk_mesh(chunk):
-    # Mesh generation logic (panels, strips, triangles, caps) not specified in sources [G]
-    pass
-
-def upload_mesh_to_gpu(mesh):
-    # Standard GPU buffer upload operation not specified in sources [G]
-    pass
+    def process_frame(self):
+        self.begin_frame()
+        
+        # Always process at least one chunk if there are dirty chunks
+        if len(self.dirty_chunks) > 0:
+            self.prepare()
+        
+        # Process chunks within budget
+        while len(self.dirty_chunks) > 0 and self.is_rebuild_allowed():
+            chunk_index = self.dirty_chunks.pop(0)
+            if is_chunk_dirty(chunk_index):
+                rebuild_chunk(chunk_index)
+                mark_chunk_clean(chunk_index)
+                self.rebuilds_this_frame += 1
+        
+        return self.pending_task is None or self.pending_task.is_complete()
 ```
+
+**Edge Cases and Pitfalls:**
+- **Mode Switch:** Changing `TerrainMode` from Blocks to Smooth or vice versa marks all bodies dirty, triggering full remeshing over subsequent frames [S2, unofficial].
+- **Precision:** Timestamps should use high-resolution counters (e.g., `Stopwatch.GetTimestamp()`) to accurately measure sub-millisecond budgets [S2, unofficial].
+- **Boundaries:** The first chunk is always processed regardless of budget limits to ensure responsiveness [S2, unofficial].
 
 ## Subtopics
 
 ### [Chunk Mesh Rebuild Queue](3911-chunk-mesh-rebuild-queue.md)
-A queue-based system to batch and process chunk mesh rebuilds asynchronously or on tick. It differs from its parent [Remesh Budget](3119-remesh-budget.md) by providing the specific data structures and step-by-step logic for managing the dirty chunk list, while the parent provides the scheduling constraints (time budget and distance priority) [G].
+A queue-based system to batch and process chunk mesh rebuilds asynchronously or on tick. It solves the problem of redundant mesh regeneration by ensuring each modified chunk is processed exactly once per frame or tick cycle. Unlike immediate synchronous rebuilding, which can cause frame drops during rapid block placement, this method decouples modification detection from geometry generation.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources. [G]
-- **Memory Complexity:** Not given in the sources. [G]
-- **Measured Performance:** In the "Outpost" scene, which consists of 4 chunks and 10k triangles, the method ensures that remeshing stays within the 3 ms budget [S1]. The scene results in 37 draws and 200k triangles on Low quality, 114 draws and 879k triangles on Balanced, and 153 draws and 1.87M triangles on Ultra quality [S1].
-- **Strengths:** Guarantees frame rate stability by limiting remeshing time [S1]. Prioritizes visual fidelity for chunks near the camera [S1].
-- **Limitations:** Not given in the sources. [G]
-- **When to Use:** Not given in the sources. [G]
-- **When Not to Use:** Not given in the sources. [G]
+- **Time Complexity:** O(N) where N is the number of dirty chunks, but bounded by the time budget [S1].
+- **Memory Complexity:** O(M) where M is the number of chunks in the remesh queue [S1].
+- **Measured Performance:** In the Outpost scene (4 chunks, 10k triangles), the system handles 37 draws/200k triangles on Low, 114 draws/879k on Balanced, and 153 draws/1.87M on Ultra [S1].
+- **Scaling:** Performance scales with the number of dirty chunks and the time budget [S1].
+- **Strengths:** Prevents main-thread stalls, ensures smooth frame rates during rapid block placement [S2, unofficial].
+- **Limitations:** May leave some dirty chunks unprocessed in a single frame if the budget is exceeded [S2, unofficial].
+- **When to Use:** Ideal for dynamic voxel worlds with frequent block placement/removal [S2, unofficial].
+- **When Not to Use:** Not suitable for static worlds where all meshes can be generated upfront [S2, unofficial].
 
 ## Background
-Remesh Budget was introduced in the "Claude Survivor Builder" project by Austin Bryan Price [S1]. It is part of Phase 2c of the project's development, focusing on optimizing the rendering of beveled chunk meshes with tiered tiles and ambient occlusion [S1]. The method is implemented in the `remesh-queue.ts` file within the project's source code [S1].
+Remesh Budget originated in the context of voxel-based sandbox games, specifically in projects like *Survivor Builder* and *VoxelTerraformer* [S1][S2, unofficial]. It was developed to address the performance issues associated with synchronous mesh generation in dynamic voxel environments [S1][S2, unofficial]. The method is used in games that feature real-time terrain modification and require consistent frame rates [S1][S2, unofficial].
 
 ## Sources
 [S1] Draw the blocks: beveled chunk meshing, tier tiles, remesh budget (Phase 2c), https://github.com/austinbryanprice-droid/Claude-Survivor-Builder/pull/8, fetched 2026-10-26
+[S2] GhostlyActive/VoxelTerraformer, https://github.com/GhostlyActive/VoxelTerraformer, fetched 2026-10-27 (unofficial)

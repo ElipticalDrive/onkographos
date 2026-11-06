@@ -1,0 +1,170 @@
+# Dual Marching Cubes
+
+Also called: Dual MC, Nielson 2004 Dual MC, Nielson's Dual Marching Cubes, Regular Octree Dual Vertex Placement
+
+## Overview
+Dual Marching Cubes (DMC) is an isosurface extraction algorithm that generates a topological manifold quadrilateral mesh by constructing a dual grid from a primal scalar field [S2, unofficial]. Unlike standard Marching Cubes, which outputs a triangle mesh with vertices on grid edges, DMC creates a dual mesh where each vertex corresponds to a connected polygonal patch of the standard MC surface, and each face corresponds to a grid edge [S2, unofficial]. This approach yields meshes with fewer vertices, better-shaped elements, and full connectivity, avoiding the "primitive soup" output of standard parallel MC implementations [S2, unofficial]. It is particularly suited for regular grids and procedural terrain modeling where smooth subdivision surfaces are desired [S2, unofficial].
+
+## How it works
+**Inputs and Outputs**
+- **Input**: A 3D scalar field $F$ defined on a primal grid of lattice points $(x_i, y_j, z_k)$ [S8, unofficial]. The field values $F_{ijk}$ represent the signed distance or scalar value at each voxel corner.
+- **Output**: A quadrilateral mesh (or triangle mesh if quads are split) where vertices lie in the interior of primal voxels (or on dual grid points) and faces connect adjacent dual vertices [S2, unofficial].
+
+**Data Structures**
+- **Dual Grid**: A grid of dimensions $(X-1) \times (Y-1) \times (Z-1)$ relative to the primal grid of size $X \times Y \times Z$ [S7, unofficial]. Each cell in the dual grid corresponds to a primal voxel [S9, unofficial].
+- **Dual Point**: A structure storing the position (Vec3), validity flag (bool), and gradient (Vec3) for each dual vertex [S7, unofficial].
+- **Lookup Table**: A table of 256 entries (derived from 23 canonical configurations) mapping an 8-bit key (from primal vertex signs) to the set of bipolar edges that must be used to calculate the dual vertex position [S3, unofficial].
+
+**Steps**
+
+1. **Initialization**:
+   - Determine grid dimensions from the bounding box and cell width [S1, unofficial].
+   - Initialize a dual grid structure. If using a hierarchical tree (as in [S1, unofficial]), initialize branch and leaf nodes. If using a regular grid, allocate a dual point array of size $(X-1)(Y-1)(Z-1)$ [S7, unofficial].
+   - Initialize counters for vertices and quads [S6, unofficial].
+
+2. **Classification**:
+   - For each primal voxel (or cell), identify the scalar values at its 8 vertices [S3, unofficial].
+   - Construct an 8-bit key $K$ where the $i$-th bit is 1 if $F_i \ge \text{IsoValue}$ and 0 otherwise [S3, unofficial].
+   - Access the lookup table using $K$ to determine which edges intersect the isosurface [S3, unofficial].
+
+3. **Dual Vertex Placement**:
+   - For each intersecting edge, associate it with the four primal voxels sharing that edge [S2, unofficial].
+   - Calculate the position of the dual vertex for each of these four voxels.
+     - **Simple Mode**: Place the dual vertex at the center of the voxel (offset 0.5) [S7, unofficial].
+     - **Smooth Mode**: Use Hermite interpolation or a simplified Quadratic Error Function (QEF) minimization. If normals are available, solve the overdetermined linear system $A x = b$ using SVD, where rows 0-7 correspond to the 8 corners (gradient components and -1), and rows 8-10 are regularization terms with weight `nominal_weight` [S1, unofficial]. The solution $x$ gives the offset from the box center [S1, unofficial]. If no normals are available, use the centroid of the edge intersection points [S5, unofficial].
+     - **Gradient Calculation**: Compute the gradient at the intersection point using central differences on the scalar field: $n_x = (F(x+1) - F(x-1)) \cdot 0.5$, etc. [S7, unofficial].
+
+4. **Mesh Construction**:
+   - For each primal edge that intersects the isosurface, four dual vertices (one from each adjacent voxel) are generated [S2, unofficial].
+   - Connect these four dual vertices to form two triangles (or one quadrilateral) [S3, unofficial].
+   - Handle ambiguous configurations (2B or 3B) where a cell shares an ambiguous face with another cell of the same type. In these cases, return an alternative edge configuration to prevent non-manifold edges [S3, unofficial].
+
+5. **Enumeration**:
+   - Iterate over all cells in a shuffled order for parallel processing [S1, unofficial].
+   - For each cell, if it is not on the boundary, process triangles on shared faces, edges, and vertices with neighboring cells to ensure connectivity [S1, unofficial].
+   - Store vertices and indices in output arrays [S6, unofficial].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_marching_cubes(grid, iso_value, smooth=False):
+    """
+    Extract isosurface using Dual Marching Cubes.
+    grid: 3D array of scalar values.
+    iso_value: Threshold for surface extraction.
+    smooth: If True, use Hermite/QEF for vertex placement; else use voxel centers.
+    """
+    X, Y, Z = grid.shape
+    # Dual grid dimensions are (X-1) x (Y-1) x (Z-1)
+    dual_points = []
+    for z in range(Z - 1):
+        for y in range(Y - 1):
+            for x in range(X - 1):
+                # Get 8 corners of the primal voxel
+                corners = get_voxel_corners(grid, x, y, z)
+                # Calculate dual vertex position
+                if smooth:
+                    pos = calculate_smooth_dual_vertex(corners, grid, x, y, z)
+                else:
+                    pos = (corners[0] + corners[7]) / 2.0 # Center of voxel
+                dual_points.append({'pos': pos, 'valid': True})
+    
+    vertices = []
+    indices = []
+    
+    # Iterate over primal edges to form quads
+    # Each primal edge is shared by 4 voxels. 
+    # We iterate over all voxels and for each intersecting edge, 
+    # we generate the quad connecting the 4 dual vertices.
+    
+    for z in range(Z - 1):
+        for y in range(Y - 1):
+            for x in range(X - 1):
+                corners = get_voxel_corners(grid, x, y, z)
+                key = 0
+                for i in range(8):
+                    if corners[i] >= iso_value:
+                        key |= (1 << i)
+                
+                # Lookup table gives edges intersected by this key
+                intersecting_edges = lookup_table[key]
+                
+                for edge in intersecting_edges:
+                    # Get the 4 voxels sharing this edge
+                    neighbor_voxels = get_voxels_sharing_edge(x, y, z, edge)
+                    
+                    # Collect dual vertices from these 4 voxels
+                    quad_verts = []
+                    for nv in neighbor_voxels:
+                        # Find index of dual point for this voxel
+                        idx = get_dual_point_index(nv.x, nv.y, nv.z)
+                        quad_verts.append(dual_points[idx]['pos'])
+                    
+                    # Add two triangles for the quad
+                    # Assuming quad_verts are ordered correctly around the edge
+                    indices.append([quad_verts[0], quad_verts[1], quad_verts[2]])
+                    indices.append([quad_verts[0], quad_verts[2], quad_verts[3]])
+                    
+    return vertices, indices
+
+def calculate_smooth_dual_vertex(corners, grid, x, y, z):
+    # Simplified QEF or Hermite average
+    # If normals are available, solve A*x = b
+    # Otherwise, average of edge intersections
+    return average_edge_intersections(corners, grid, x, y, z)
+```
+
+**Parameters**
+- `IsoValue`: The scalar threshold. Default 0.0 [S7, unofficial].
+- `smooth`: Boolean flag. If false, dual points are at voxel centers. If true, dual points are averaged from Hermite points [S7, unofficial].
+- `nominal_weight`: Scalar weight for regularization in QEF [S1, unofficial].
+- `tolerance`: Error threshold for leaf node creation in hierarchical implementations [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Ambiguous Configurations**: Cells with configurations 2B or 3B sharing an ambiguous face with another such cell can lead to non-manifold edges. These require alternative edge configurations [S3, unofficial].
+- **Boundary Conditions**: The cube callback is only invoked if $x>0, y>0, z>0$ to ensure valid indices when accessing previous dual grid cells [S4, unofficial]. The resulting mesh ends half a cell short of the grid boundary [S5, unofficial].
+- **Normal Orientation**: The geometric normal might be inverted relative to the field gradient. Resolve by comparing the geometric normal with the average gradient of the four vertices. If the dot product is negative, flip the normal [S7, unofficial].
+- **WebGPU Alignment**: Volumes with width not divisible by 256 must be padded to 256 bytes for 3D texture rows [S9, unofficial].
+
+## Subtopics
+
+### [Dual Mesh Building](1423-dual-mesh-building.md)
+Dual Mesh Building constructs the dual mesh for the Dual Marching Cubes (DMC) surface extraction method. It converts iso-surface intersection topology within a hexahedral grid into a consistent, manifold, quad-only mesh. Unlike standard Marching Cubes, which outputs a triangle mesh with vertices on grid edges, Dual Mesh Building creates a dual mesh where each vertex corresponds to a face (MC polygon) of the standard algorithm, and each face corresponds to a grid edge. This approach typically yields meshes with fewer vertices and better-shaped elements than standard MC. The method is distinguished by its ability to generate watertight, quad-only meshes without relying on large lookup tables for topology, instead using sampling and hash-based vertex sharing.
+
+### [Parallel Dual Marching Cube](2131-parallel-dual-marching-cube.md)
+Parallel Dual Marching Cube (PDMC) is an intersection-free isosurface extraction method that processes a 3D signed distance field (SDF) grid on the GPU to produce a triangle or quadrilateral mesh. It extends Dual Marching Cubes by parallelizing the cell processing and using a dual mesh topology where connected patches of triangulation in a cell become single vertices, and crossed grid edges yield quads connecting adjacent cells' patch vertices. Unlike standard Marching Cubes which produces triangles, this method produces quadrilaterals, offering better surface quality for smooth fields while maintaining topological correctness in most cases. It is implemented as a CUDA kernel accessible via a PyTorch C++ extension, designed for differentiable rendering pipelines like PaMO.
+
+### [Dual Marching Cubes Vertex Processing](3688-dual-marching-cubes-vertex-processing.md)
+Processes a dual cell (8 nodes) to generate mesh vertices and triangles using Marching Cubes on the dual vertices.
+
+### Generalized Symmetric Dual Marching Cubes
+A method for extracting constant-wind-speed isosurfaces from 3D wind-field data (e.g., ERA5, WRF) stored in 3D NetCDF format [S11, unofficial]. It computes case-index for all cells simultaneously using vectorised 8-bit computation. For each active cell, it performs QEF (Quadratic Error Function) minimisation to determine the dual vertex position, using edge intersection points and finite-difference gradient normals. Tikhonov regularisation is applied to the QEF minimisation towards the mass point for rank-deficient cases. The dual mesh is assembled by finding active primal edges using `np.where`, forming quads from four adjacent-cell dual vertices, and splitting them into triangles with correct outward winding [S11, unofficial]. It supports QEF minimisation mode and average-point mode for dual vertex placement [S11, unofficial].
+
+### Novel Interpolation for Dual Marching Cubes on Octree Volume Fraction Data
+A surface extraction method for volume fraction data stored on an octree. It modifies the computation of mesh vertex positions in dual marching cubes to be more appropriate for volume fraction data by approximating octant shapes as spheres rather than cubes [S12]. It computes the dual grid from the input octree grid, then computes a surface mesh vertex on each dual edge that crosses the object's surface using the novel interpolation scheme. Unlike Dual Contouring, this method does not require gradient vectors, making it suitable for volume fraction data where only scalar values are available. Unlike Poisson surface reconstruction, this method does not require Hermite data (normals), which are not always available for X-ray CT volumes [S12]. Conventional linear interpolation on octrees causes severe artifacts (ripples/deformations) because volume fraction values vary steeply at boundaries and cell sizes are non-uniform [S12].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of voxels, as each voxel is processed once [S2, unofficial]. Parallel implementations can achieve near-linear speedup on GPUs [S2, unofficial].
+- **Memory Complexity**: $O(N)$ for storing the dual grid and output mesh [S2, unofficial].
+- **Performance**: Generates topological manifold surfaces with full connectivity, allowing for efficient smoothing and subdivision [S2, unofficial]. Avoids the memory overhead of duplicate vertices in "primitive soup" outputs [S2, unofficial].
+- **Strengths**: Produces smoother specular reflections and better shape information than standard MC [S8, unofficial]. Suitable for procedural terrain modeling and medical imaging [S2, unofficial][S7, unofficial].
+- **Limitations**: May produce non-manifold edges in ambiguous configurations if not handled [S3, unofficial]. The mesh ends half a cell short of the grid boundary [S5, unofficial].
+
+## Background
+Dual Marching Cubes was introduced by Gregory Nielson in 2004 [Nie04] [S2, unofficial]. It was designed to address the topological ambiguities and poor mesh quality of standard Marching Cubes and Dual Contouring. The method unifies MC surface fragments into polygonal patches, creating a dual surface that is always a topological manifold [S2, unofficial]. It is used for rendering enumerated volumes from segmented medical data (e.g., MRI) where original field function values are irrelevant and no threshold exists [S8, unofficial].
+
+## Sources
+[S1] planaria/dmc, https://github.com/planaria/dmc, fetched 2026-10-26 (unofficial)
+[S2] Generating Smooth High-Quality Isosurfaces for Interactive Modeling and Visualization of Complex Terrains, https://doi.org/10.2312/pe/vmv/vmv12/079-086, fetched 2026-10-26 (unofficial)
+[S3] EXTRAÇÃO DE ISOSUPERFÍCIES DE DOMOS DE SAL EM VOLUMES BINÁRIOS MASSIVOS, https://doi.org/10.17771/pucrio.acad.51290, fetched 2026-10-26 (unofficial)
+[S4] https://github.com/swiftcoder/isosurface, https://github.com/swiftcoder/isosurface, fetched 2026-10-26 (unofficial)
+[S5] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)
+[S6] chrisj/dual-marching-cubes, https://github.com/chrisj/dual-marching-cubes, fetched 2026-10-27 (unofficial)
+[S7] 2453852330/VoxelHelper, https://github.com/2453852330/VoxelHelper, fetched 2026-10-27 (unofficial)
+[S8] PDF Dual Marching Cubes - ResearchGate, https://www.researchgate.net/profile/Gregory-Nielson-2/publication/4112407_Dual_Marching_Cubes/links/55ac374e08ae481aa7ff4def/Dual-Marching-Cubes.pdf, fetched 2026-10-30 (unofficial)
+[S9] Twinklebear/webgpu-isosurface-raycaster, https://github.com/Twinklebear/webgpu-isosurface-raycaster, fetched 2026-10-29 (unofficial)
+[S10] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+[S11] Implement GSDMC wind-speed isosurface extraction from 3D NetCDF wind-field data, https://github.com/maroone718/GSDMC-WindField-Iso/pull/1, fetched 2026-10-27 (unofficial)
+[S12] A novel interpolation scheme for dual marching cubes on octree volume fraction data, https://doi.org/10.1016/j.cag.2017.05.021, fetched 2026-10-27

@@ -1,0 +1,149 @@
+# Wavelet Transform
+
+Also called: Fast Wavelet Transform, Discrete Wavelet Transform, Morlet Wavelet Transform
+
+## Overview
+The Wavelet Transform provides a sparse representation for highly detailed functions by decomposing signals into dilated and translated versions of a unique basis function [S2, unofficial]. It solves the limitation of windowed Fourier transforms, which suffer from fixed spatial and frequency resolution, by allowing variable resolution analysis suitable for signals with features of vastly different scales [S1, unofficial]. Unlike the Discrete Cosine Transform (DCT) used in JPEG, which requires image fragmentation due to global basis support, the Wavelet Transform has local support in both the spatial and frequency domains, eliminating the need for block-based processing [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A signal or image data array $I$ of size $N \times M$ (or $N \times M \times P$ for 3D volumes) [S3].
+*   **Output:** A set of wavelet coefficients partitioned into approximation coefficients (low-pass) and detail coefficients (high-pass) across multiple resolution levels [S3].
+
+**Data Structures:**
+The transform produces a hierarchical structure of sub-bands [S2, unofficial]. In 2D, a single level of decomposition splits the input into four sub-bands: $LL$ (low-pass in both directions, approximation), $LH$ (low-pass in x, high-pass in y, horizontal details), $HL$ (high-pass in x, low-pass in y, vertical details), and $HH$ (high-pass in both directions, diagonal details) [S2, unofficial]. The $LL$ sub-band is recursively decomposed in subsequent levels, creating a tree structure (e.g., $LLL$, $LLH$, etc.) [S2, unofficial]. The detail bands ($LH$, $HL$, $HH$) are not further decomposed in standard 2D pyramids [S2, unofficial].
+
+**Parameters:**
+*   **Compression Ratio:** Lossy compression can achieve ratios in the order of 64:1 with almost invisible artifacts [S2, unofficial].
+*   **Wavelet Basis:** The specific choice of the mother wavelet $\psi(x)$ determines the filter coefficients [S2, unofficial]. The sources reference linear spline wavelets and the lifting scheme for construction [S2, unofficial], but do not provide specific filter coefficients for a standard basis (e.g., Daubechies) [G]. Implementers must select a standard orthogonal wavelet filter bank or use the lifting scheme coefficients defined in the chosen library or standard [G].
+
+**Algorithm Steps:**
+1.  **Decomposition (Analysis):** The process recursively separates high-frequency details from lower frequencies [S2, unofficial].
+    a. Apply low-pass filtering and high-pass filtering to the input signal in the x-direction [S3].
+    b. Downsample the results by a factor of 2 in the x-direction [S1, unofficial].
+    c. Apply low-pass filtering and high-pass filtering to the results from step (b) in the y-direction [S3].
+    d. Downsample the results by a factor of 2 in the y-direction [S1, unofficial].
+    e. This yields the four sub-bands: $LL$, $LH$, $HL$, $HH$ [S2, unofficial].
+    f. If further decomposition is required, apply steps (a) through (e) recursively to the $LL$ sub-band [S2, unofficial].
+2.  **Reconstruction (Synthesis):** The inverse process assembles details from the coefficients [S2, unofficial].
+    a. Upsample the sub-bands by a factor of 2 in the respective directions [G].
+    b. Apply synthesis low-pass and high-pass filters [G].
+    c. Sum the filtered results to reconstruct the signal at the current resolution [G].
+    d. Recursively reconstruct higher-resolution levels until the original signal size is reached [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dwt_1d(signal, filter_coeffs):
+    """
+    Computes c^1_k = sum_n h(n - 2k) c^0_n exactly as defined in [S1, unofficial].
+    Implements convolution followed by downsampling by 2.
+    """
+    out_len = (len(signal) + len(filter_coeffs) - 1) // 2
+    result = [0.0] * out_len
+    for k in range(out_len):
+        val = 0.0
+        for n in range(len(signal)):
+            idx = n - 2 * k
+            if 0 <= idx < len(filter_coeffs):
+                val += filter_coeffs[idx] * signal[n]
+        result[k] = val
+    return result
+
+def dwt_2d(signal, h, g):
+    """
+    Performs a 2D discrete wavelet transform using separable 1D transforms.
+    h: low-pass filter, g: high-pass filter.
+    Returns (ll, lh, hl, hh) sub-bands.
+    """
+    # 1D transform along rows (x-direction)
+    low_x = [dwt_1d(row, h) for row in signal]
+    high_x = [dwt_1d(row, g) for row in signal]
+    
+    # 1D transform along columns (y-direction) on the downsampled row results
+    ll = dwt_2d_transpose(low_x, h)
+    lh = dwt_2d_transpose(low_x, g)
+    hl = dwt_2d_transpose(high_x, h)
+    hh = dwt_2d_transpose(high_x, g)
+    
+    return ll, lh, hl, hh
+
+def dwt_2d_transpose(data, filter_coeffs):
+    """Applies 1D transform to columns by transposing, transforming, and transposing back."""
+    rows = len(data)
+    cols = len(data[0])
+    transposed = [[data[i][j] for i in range(rows)] for j in range(cols)]
+    transformed = [dwt_1d(col, filter_coeffs) for col in transposed]
+    result = [[transformed[j][i] for j in range(len(transformed))] for i in range(len(transformed[0]))]
+    return result
+
+def idwt_2d(ll, lh, hl, hh, h_syn, g_syn):
+    """
+    Reconstructs the signal from 2D wavelet coefficients.
+    h_syn: synthesis low-pass filter, g_syn: synthesis high-pass filter.
+    """
+    # Inverse 1D transform along columns (y-direction)
+    ll_y = idwt_2d_transpose(ll, h_syn)
+    lh_y = idwt_2d_transpose(lh, g_syn)
+    hl_y = idwt_2d_transpose(hl, h_syn)
+    hh_y = idwt_2d_transpose(hh, g_syn)
+    
+    # Sum column results
+    ll_y = [[ll_y[i][j] + lh_y[i][j] + hl_y[i][j] + hh_y[i][j] for j in range(len(ll_y[0]))] for i in range(len(ll_y))]
+    
+    # Inverse 1D transform along rows (x-direction)
+    reconstructed = idwt_2d_transpose(ll_y, h_syn)
+    detail_x = idwt_2d_transpose([[lh_y[i][j] + hl_y[i][j] + hh_y[i][j] for j in range(len(lh_y[0]))] for i in range(len(lh_y))], g_syn)
+    
+    # Sum row results
+    result = [[reconstructed[i][j] + detail_x[i][j] for j in range(len(reconstructed[0]))] for i in range(len(reconstructed))]
+    return result
+
+def idwt_2d_transpose(data, filter_coeffs):
+    """Applies inverse 1D transform to columns."""
+    rows = len(data)
+    cols = len(data[0])
+    transposed = [[data[i][j] for i in range(rows)] for j in range(cols)]
+    transformed = [idwt_1d(col, filter_coeffs) for col in transposed]
+    result = [[transformed[j][i] for j in range(len(transformed))] for i in range(len(transformed[0]))]
+    return result
+
+def idwt_1d(signal, filter_coeffs):
+    """
+    Inverse 1D transform: upsampling by 2 followed by synthesis filtering.
+    Matches the inverse of the analysis step.
+    """
+    upsampled = [0.0] * (len(signal) * 2)
+    for k in range(len(signal)):
+        upsampled[2 * k] = signal[k]
+    
+    out_len = len(upsampled) + len(filter_coeffs) - 1
+    result = [0.0] * out_len
+    for n in range(len(upsampled)):
+        for m in range(len(filter_coeffs)):
+            result[n + m] += upsampled[n] * filter_coeffs[m]
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+*   **Quantization Error:** In lossy compression, quantization errors are introduced during the transform range and are smoothly distributed across the image domain by the inverse transform, making them often unrecognizable to the human eye [S2, unofficial].
+*   **Boundary Conditions:** The sources do not specify boundary handling for finite signals [G]. Implementers must choose a strategy (e.g., periodic, symmetric, zero-padding) which affects the transform's energy compaction properties [G].
+*   **Degenerate Input:** The recursive nature requires the data dimensions to be divisible by $2^L$ where $L$ is the number of levels, or appropriate boundary handling must be implemented to manage non-power-of-two sizes [G].
+
+## Operating characteristics
+*   **Time Complexity:** The discrete wavelet transform is computed in linear time, $O(N)$, where $N$ is the number of data points [S2, unofficial].
+*   **Memory Complexity:** The transform is typically performed in-place or requires storage proportional to the input size for the coefficient tree [G].
+*   **Performance:** Lossy compression achieves high compression rates in the order of 64:1 with almost invisible artifacts [S2, unofficial].
+*   **Strengths:** Local support in both image domain and frequency space eliminates the need for image fragmentation (unlike DCT) [S2, unofficial]. It provides a sparse representation for highly detailed functions [S2, unofficial].
+*   **Limitations:** The main drawback of the related windowed Fourier transform (Gabor) is constant spatial and frequency resolution, which is not acceptable for signals with features of very different sizes; the wavelet transform avoids this [S1, unofficial].
+*   **When to use:** Ideal for multiresolution volume visualization, compressed direct volume rendering, and progressive transmission where spatial locality and hierarchical detail refinement are required [S3].
+*   **When not to use:** Avoid when global frequency analysis without spatial localization is needed, or when strict block-based DCT compatibility is required for legacy pipelines [S2, unofficial].
+
+## Background
+The wavelet transform was defined by Monet Morlet to avoid the fixed resolution limit of windowed Fourier transforms [S1, unofficial]. It decomposes the signal into a family of functions, which are the translation and dilation of a unique function $\psi(x)$ [S1, unofficial]. The transform has roots in signal processing and pure mathematics [S2, unofficial]. It is used in image compression, solving partial differential equations, and integrating radiosity kernels [S2, unofficial]. The lifting scheme is used to construct wavelets for efficiently modeling massive volumetric data sets [S2, unofficial]. DWT was introduced for compressed volume rendering by Muraki [Mur93] and is used in block-wise hierarchical decomposition (octree) with entropy encoding, block caching, and projective classification [S3].
+
+## Sources
+[S1] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S2] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)
+[S3] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

@@ -1,0 +1,198 @@
+--- v004.md
++++ v005.md
+@@ -4,99 +4,111 @@
+ 
+ ## Overview
+-Early Ray Termination (ERT) is an acceleration technique for front-to-back volume ray casting that terminates ray traversal when the accumulated opacity exceeds a predefined threshold, based on the observation that ray color stabilizes once sufficient opacity is accumulated [S1][S4, unofficial][S10, book]. It sets itself apart from siblings like [Empty-space skipping](1002-empty-space-skipping.md) (which skips transparent regions) and [Bounding Volume Culling](1239-bounding-volume-culling.md) (which skips occluded objects) by exploiting the optical property that opaque surfaces obscure everything behind them, allowing the renderer to skip redundant samples in the rear of the volume [S8, unofficial][S11, unofficial]. Unlike [Russian Roulette](1371-russian-roulette.md), which preserves unbiasedness through probabilistic termination, ERT is a deterministic optimization that introduces systematic bias [S4, unofficial][S12, unofficial].
++Early Ray Termination (ERT) is an acceleration technique for image-order volume rendering that terminates ray traversal when the accumulated opacity exceeds a predefined threshold, based on the observation that ray color stabilizes once sufficient opacity is accumulated [S1][S4, unofficial][S10, book]. It sets itself apart from siblings like [Empty-space skipping](1002-empty-space-skipping.md) (which skips transparent regions) and [Russian Roulette](1371-russian-roulette.md) (which probabilistically terminates unbiasedly) by deterministically stopping computation when the remaining contribution is deemed negligible, introducing a systematic bias in exchange for significant performance gains [S4, S12, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset (voxels with density/opacity), a transfer function mapping density to color $C_{sample}$ and opacity $\alpha_{sample}$, a ray origin $\mathbf{o}$ and direction $\mathbf{d}$, and a termination threshold $\tau$ (typically $0.95 \le \tau \le 1.0$) [S1][S10, book].
+-*   **Output:** The final pixel color $C_{acc}$ and accumulated opacity $\alpha_{acc}$.
++*   **Input:** Ray origin $\mathbf{o}$, direction $\mathbf{d}$, volume data $V$, transfer function $T$, opacity threshold $\tau$ (typically $0.95 \le \tau \le 1.0$) [S1][S10, book].
++*   **Output:** Final pixel color $C_{final}$ and accumulated opacity $\alpha_{acc}$ [S1][S12, unofficial].
+ 
+ **Data Structures:**
+-*   **Accumulated Color:** $C_{acc}$, initialized to $(0, 0, 0, 0)$ or background color.
+-*   **Accumulated Opacity:** $\alpha_{acc}$, initialized to $0.0$.
+-*   **Ray Position:** $\mathbf{p}$, initialized to $\mathbf{o}$.
+-*   **Step Size:** $\Delta t$, determined by volume resolution or adaptive stepping.
++*   **Accumulated Color ($C_{out}$):** A 3-component vector (RGB), initialized to $(0, 0, 0)$ [S7, S12, unofficial].
++*   **Accumulated Opacity ($\alpha_{acc}$):** A scalar, initialized to $0.0$ [S1][S12, unofficial].
++*   **Current Ray Position ($\mathbf{r}$):** A 3D vector, initialized to $\mathbf{o}$ [S5].
++*   **Step Size ($\Delta t$):** A scalar, determined by the sampling rate or hierarchical structure [S12, unofficial].
+ 
+ **Numbered Steps:**
+-1.  Initialize $C_{acc} = (0, 0, 0, 0)$ and $\alpha_{acc} = 0.0$.
+-2.  While the ray is within the volume bounds and $\alpha_{acc} < \tau$:
+-    a. Sample the volume at current position $\mathbf{p}$ to get sample color $C_{sample}$ and sample opacity $\alpha_{sample}$.
+-    b. Compute the contribution of the current sample using front-to-back compositing:
+-       $$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-       $$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-    c. Advance the ray position: $\mathbf{p} = \mathbf{p} + \mathbf{d} \cdot \Delta t$.
+-    d. Check termination condition: if $\alpha_{acc} \ge \tau$, break the loop [S1][S5].
+-3.  Return $C_{acc}$.
++1.  Initialize $C_{out} = (0, 0, 0)$, $\alpha_{acc} = 0.0$, and $\mathbf{r} = \mathbf{o}$ [S1][S12, unofficial].
++2.  While $\mathbf{r}$ is within the volume bounding box AND $\alpha_{acc} < \tau$:
++    a. Sample the volume density $\rho$ at $\mathbf{r}$ [S12, unofficial].
++    b. Compute sample opacity $\alpha_s$ using the transfer function: $\alpha_s = T(\rho)$ [S12, unofficial].
++    c. Compute sample color $C_s$ using the transfer function: $C_s = T_{color}(\rho)$ [S12, unofficial].
++    d. Compute transmittance of the current sample: $T_s = 1 - \alpha_s$ [S12, unofficial].
++    e. Update accumulated color using front-to-back compositing:
++       $$ C_{out} = C_{out} + C_s \cdot (1 - \alpha_{acc}) $$
++       $$ C_{out} = C_{out} + C_s \cdot (1 - \alpha_{acc}) $$
++       *Note: The standard front-to-back formula is $C_{out} = C_{out} + C_s \cdot (1 - \alpha_{acc})$ and $\alpha_{acc} = \alpha_{acc} + \alpha_s \cdot (1 - \alpha_{acc})$ [S12, unofficial][S13].*
++    f. Update accumulated opacity:
++       $$ \alpha_{acc} = \alpha_{acc} + \alpha_s \cdot (1 - \alpha_{acc}) $$
++    g. Advance ray position: $\mathbf{r} = \mathbf{r} + \mathbf{d} \cdot \Delta t$ [S5].
++3.  Return $C_{out}$ and $\alpha_{acc}$ [S12, unofficial].
+ 
+ **Formulas:**
+-The compositing equations are standard front-to-back:
+-$$ C_{acc}^{new} = C_{acc}^{old} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}^{old}) $$
+-$$ \alpha_{acc}^{new} = \alpha_{acc}^{old} + \alpha_{sample} \cdot (1 - \alpha_{acc}^{old}) $$
+-The termination condition is:
+-$$ \alpha_{acc} \ge \tau $$
+-where $\tau$ is the threshold [S1][S10, book]. Some implementations use a color-difference check for adaptive termination, stopping when $|C_{out} - C_{in}| \le \epsilon$ or $\alpha_{acc} \ge 1 - \epsilon$ [S7, unofficial].
++*   **Compositing:**
++    $$ C_{out}^{new} = C_{out}^{old} + C_s (1 - \alpha_{acc}^{old}) $$
++    $$ \alpha_{acc}^{new} = \alpha_{acc}^{old} + \alpha_s (1 - \alpha_{acc}^{old}) $$
++    [S12, unofficial][S13]
++*   **Termination Condition:**
++    $$ \alpha_{acc} \ge \tau $$
++    [S1][S12, unofficial]
++*   **Significant Color Change (Alternative Criterion):**
++    Some implementations check if the color change $|C_{out} - C_{in}| > \epsilon$ before terminating, or terminate when $\alpha_{acc} > 1 - \epsilon$ [S7, unofficial].
+ 
+ **Parameters:**
+-*   **Threshold ($\tau$):** Typically $1.0$ (full opacity) [S2, unofficial][S5] or $0.95$ (95% opacity) [S10, book]. A value of $0.95$ is often chosen because contributions beyond 5% transparency are visually negligible [S10, book].
+-*   **Epsilon ($\epsilon$):** In adaptive variants, a small positive constant for color difference checks [S7, unofficial].
++*   **Opacity Threshold ($\tau$):** Typically $1.0$ [S2, unofficial][S5] or $0.95$ (95% opacity) [S10, book]. Higher values reduce artifacts but increase time; lower values increase speed but may cause artifacts [S7, unofficial].
++*   **Epsilon ($\epsilon$):** A small positive constant for color change detection or opacity thresholding (e.g., $1 - \epsilon$) [S7, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Systematic Bias:** ERT introduces a systematic bias because rays are terminated before they fully traverse the volume, ignoring contributions from behind the threshold [S4, unofficial][S12, unofficial].
+-*   **Order Dependency:** It requires front-to-back compositing order. Back-to-front rendering cannot use this optimization because samples from the back contribute to the front [S12, unofficial][S13].
+-*   **Hardware Limitations:** In hardware-accelerated blending (e.g., OpenGL blend functions), the accumulated opacity is stored in the frame buffer, making it difficult to check the threshold without reading back from the frame buffer, which stalls the pipeline [S13].
+-*   **Parallel Rendering:** In object-parallel rendering, ERT is localized per processor. A processor may terminate its local ray segment early, but fail to skip voxels that are locally visible but globally occluded by other processors' rays [S12, unofficial].
++*   **Bias:** ERT introduces systematic bias because it ignores the tail of the ray [S4, S12, unofficial].
++*   **Order Dependency:** Requires front-to-back compositing order [S4, unofficial][S13].
++*   **Surface Detection:** Surfaces are not explicitly detected; they appear as a by-product of accumulation. Works best for scenes with opaque/semi-transparent surfaces where voxels away from surfaces have zero opacity [S1].
++*   **Parallelism:** In object-parallel rendering, ERT is localized per processor, failing to skip voxels that are locally visible but globally occluded [S12, unofficial].
++*   **Hardware Limitations:** In hardware blend methods, transparency is stored in the frame buffer, making it difficult to implement ERT directly without reading back the frame buffer [S13].
+ 
+ **Pseudocode:**
+ ```python
+-def early_ray_termination(ray_origin, ray_direction, volume, transfer_function, threshold=1.0):
++def early_ray_termination(ray_origin, ray_direction, volume_data, transfer_function, threshold=1.0):
+     """
+     Renders a single ray using Early Ray Termination.
+     
+     Args:
+-        ray_origin: vec3, origin of the ray.
++        ray_origin: vec3, starting point of the ray.
+         ray_direction: vec3, normalized direction of the ray.
+-        volume: Volume object providing sample_at_point(point) -> (color, opacity).
+-        transfer_function: Function mapping density to (color, opacity).
+-        threshold: float, accumulated opacity threshold for termination (default 1.0).
++        volume_data: function, samples density at a 3D point.
++        transfer_function: function, returns (color, opacity) from density.
++        threshold: float, opacity threshold for termination (default 1.0).
+         
+     Returns:
+-        vec4, final composited color and opacity.
++        vec3, final accumulated color.
+     """
+     # Initialize accumulators
+-    acc_color = vec4(0.0, 0.0, 0.0, 0.0)
+-    acc_opacity = 0.0
++    accumulated_color = vec3(0.0, 0.0, 0.0)
++    accumulated_opacity = 0.0
+     
+-    # Current position on the ray
++    # Current ray position
+     current_pos = ray_origin
+     
+-    # Step size (simplified; in practice, determined by volume resolution or space-leaping)
+-    step_size = 0.01 
++    # Step size (simplified; in practice, determined by grid or hierarchy)
++    step_size = 0.1 
+     
+-    # Volume bounds check (example: unit cube [0,1]^3)
+-    # In practice, this involves ray-box intersection logic
+-    def is_inside_volume(pos):
+-        return all(0.0 <= pos[i] <= 1.0 for i in range(3))
+-
+-    while is_inside_volume(current_pos):
++    # Volume bounds (example: unit cube [0,1]^3)
++    min_bound = vec3(0.0, 0.0, 0.0)
++    max_bound = vec3(1.0, 1.0, 1.0)
++    
++    while True:
++        # Check if ray is within volume bounds
++        if not (all(current_pos >= min_bound) and all(current_pos <= max_bound)):
++            break
++            
++        # Check termination condition
++        if accumulated_opacity >= threshold:
++            break
++            
+         # Sample volume
+-        # Note: In a real implementation, volume sampling might return density,
+-        # which is then passed to the transfer function.
+-        density = volume.sample_density(current_pos)
++        density = volume_data(current_pos)
++        
++        # Get color and opacity from transfer function
+         sample_color, sample_opacity = transfer_function(density)
+         
+         # Front-to-back compositing
+-        # Weight of the current sample relative to the background
+-        weight = sample_opacity * (1.0 - acc_opacity)
++        # Weight of the current sample relative to the remaining transmittance
++        weight = sample_opacity * (1.0 - accumulated_opacity)
+         
+-        acc_color = acc_color + sample_color * weight
+-        acc_opacity = acc_opacity + weight
++        accumulated_color = accumulated_color + sample_color * weight
++        accumulated_opacity = accumulated_opacity + weight
+         
+-        # Early termination check
+-        if acc_opacity >= threshold:
+-            break
+-            
+         # Advance ray
+         current_pos = current_pos + ray_direction * step_size
+         
+-    return acc_color
++    return accumulated_color
+ ```
+ 
+@@ -104,15 +116,19 @@
+ 
+ ### [Early Termination for Gaussian Splatting](4764-early-termination-for-gaussian-splatting.md)
+-An acceleration mechanism for Gaussian Splatting that selectively omits computations for Gaussians with negligible impact on the final output by leveraging physically grounded transmittance. It allows rendering to halt when remaining contribution is below a threshold, achieving speedups comparable to vanilla 3DGS without requiring explicit Gaussian ordering.
++An acceleration mechanism for Gaussian Splatting that selectively omits computations for Gaussians with negligible impact on the final output by leveraging physically grounded transmittance. It allows the rendering process to halt when the remaining contribution is below a threshold, enabling speedups comparable to vanilla 3DGS without requiring an explicit Gaussian order.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Reduces the number of samples per ray significantly in scenes with opaque or semi-transparent surfaces. For opaque-only environments, it eliminates dependence on depth complexity, making cost nearly linear with image size [S6, unofficial].
+-*   **Memory Complexity:** No additional memory overhead beyond standard accumulators.
+-*   **Performance:** Can reduce execution time by a factor of 5 to 11 in suitable datasets [S12, unofficial]. Savings are proportional to the area of the volume intersected by 3D objects and their closeness to the camera [S5].
+-*   **Strengths:** Simple to implement, high performance gain for opaque/semi-transparent data, reduces redundant shading/compositing [S13].
+-*   **Limitations:** Introduces systematic bias [S4, unofficial][S12, unofficial]. Requires front-to-back order [S13]. Inefficient for purely transparent or highly translucent volumes where opacity rarely reaches the threshold [S3, unofficial].
++*   **Time Complexity:** Reduces the dependence on depth complexity. For opaque-only environments, it eliminates dependence on depth complexity entirely, making the cost nearly linear with image size [S6, unofficial].
++*   **Performance:** Can reduce execution time by a factor of 5 to 11 [S12, unofficial]. Savings are proportional to the area of the volume intersected by 3D objects and their closeness to the camera [S5].
++*   **Memory Complexity:** No additional memory overhead beyond standard ray casting accumulators [S12, unofficial].
++*   **Strengths:** Significant speedup for scenes with opaque or semi-transparent surfaces; simple to implement; works well with hierarchical data structures [S1][S12, unofficial].
++*   **Limitations:** Introduces systematic bias; requires front-to-back ordering; less effective in object-parallel rendering due to localized visibility [S4, S12, unofficial].
++*   **When to Use:** When visual quality is prioritized over strict unbiasedness, and the scene contains opaque or semi-transparent surfaces [S1].
++*   **When Not to Use:** When unbiased rendering is required (use Russian Roulette instead) or in object-parallel rendering where global occlusion information is not available [S12, unofficial].
+ 
+ ## Background
+-The idea of adaptively terminating ray tracing was first proposed in [34] (Levoy 1988) [S1]. Many medical data algorithms stopped after the first surface or opaque voxel [S1]. The specific term "Early Ray Termination" and its formalization as an $\alpha$-acceleration technique is attributed to Krüger and Westermann in 2003 [S5][S12, unofficial]. It is widely used in medical visualization and real-time volume rendering on GPUs [S15, unofficial].
++*   **Origin:** The idea of adaptively terminating ray tracing was first proposed in [34] (Levoy 1988) [S1]. Many medical data algorithms stopped after the first surface or opaque voxel, reported in [15, 30, 32] [S1].
++*   **Development:** Introduced as a specific acceleration technique by Krüger and Westermann in 2003 [S5]. It is often combined with empty-space skipping and supersampling for further optimization [S9, S15, unofficial].
++*   **Usage:** Widely used in direct volume rendering, particularly in medical visualization and real-time rendering on GPUs [S1][S15, unofficial].
+ 
+ ## Sources

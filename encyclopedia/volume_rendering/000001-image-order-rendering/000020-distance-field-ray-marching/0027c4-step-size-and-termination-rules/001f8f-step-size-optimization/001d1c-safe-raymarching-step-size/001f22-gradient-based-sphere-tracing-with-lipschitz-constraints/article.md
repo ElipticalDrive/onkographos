@@ -36,8 +36,6 @@ Gradient-based Sphere Tracing with Lipschitz Constraints is an optimization for 
 - Precision issues may arise when $f(p)$ is very small near the surface [G].
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def gradient_based_sphere_trace(O, D, f, grad_f, L2_bound, max_steps=100):
     p = O

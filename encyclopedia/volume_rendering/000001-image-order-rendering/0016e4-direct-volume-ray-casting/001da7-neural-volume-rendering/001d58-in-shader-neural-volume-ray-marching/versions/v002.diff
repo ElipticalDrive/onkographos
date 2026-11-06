@@ -1,0 +1,370 @@
+--- v001.md
++++ v002.md
+@@ -4,99 +4,142 @@
+ 
+ ## Overview
+-In-Shader Neural Volume Ray Marching is a direct volume rendering technique where the neural network (MLP) is evaluated directly inside the CUDA kernel for each sample point, rather than pre-decoding the volume into a 3D texture or using sample-streaming [S1, unofficial]. It supports multiple shading modes including gradient shading and single-shade heuristics [S1, unofficial]. Unlike [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md) which often relies on hierarchical sampling strategies, this method performs a uniform or jittered march through the volume bounding box, evaluating the neural field on-the-fly to determine density and color at each step.
++In-Shader Neural Volume Ray Marching is a direct volume rendering technique where the neural network (MLP) is evaluated directly inside the CUDA kernel for each sample point, rather than pre-decoding the volume into a 3D texture or using sample-streaming [S1, unofficial]. It supports multiple shading modes including gradient shading and single-shade heuristics [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A trained neural volume model (MLP), camera parameters (position, orientation, field of view), transfer function, and rendering parameters (shading mode, step size, gradient step).
+-- **Output:** A 2D image (framebuffer) with accumulated color and alpha.
++- **Input:** A trained neural volume model (MLP), camera parameters (position, orientation, field of view), transfer function, and rendering parameters (shading mode, step size, gradient step) [S1, unofficial].
++- **Output:** A 2D image (framebuffer) with accumulated color and alpha [S1, unofficial].
+ 
+ **Data Structures:**
+-The neural volume is wrapped in a CUDA device class. Two primary implementations are supported [S1, unofficial]:
+-1.  `TcnnDeviceVolume<N, N_FEATURES_PER_LEVEL>`: Wraps a standard tiny-cuda-nn MLP. Template parameters define network width ($N \in \{16, 32, 64\}$) and features per level. Provides `init()`, `launch2D()`, and `sample(p)` methods.
+-2.  `FvsrnDeviceVolume<N>`: Used when `N_FEATURES_PER_LEVEL == -2` (indicating fV-SRN networks). Supports widths from $16 \times 1$ to $16 \times 8$. Provides `init()`, `launch()`, and `sample(p)` methods.
++The neural volume is wrapped in a CUDA device class [S1, unofficial]. Two primary implementations are supported [S1, unofficial]:
++1. `TcnnDeviceVolume<N, N_FEATURES_PER_LEVEL>`: Wraps a standard tiny-cuda-nn MLP. Template parameters define network width ($N \in \{16, 32, 64\}$) and features per level. Provides `init()`, `launch2D()`, and `sample(p)` methods [S1, unofficial].
++2. `FvsrnDeviceVolume<N>`: Used when `N_FEATURES_PER_LEVEL == -2` (indicating fV-SRN networks). Supports widths from $16 \times 1$ to $16 \times 8$. Provides `init()`, `launch()`, and `sample(p)` methods [S1, unofficial].
+ 
+ **Parameters:**
+--   `params.mode`: Shading mode. Values include `GRADIENT_SHADING` and `SINGLE_SHADE_HEURISTIC` [S1, unofficial].
+--   `params.scivis_shading_scale`: Scalar float controlling interpolation between raw sample color and shaded color in gradient mode [S1, unofficial].
+--   `params.grad_step`: Step size for numerical gradient estimation via finite differences [S1, unofficial].
+--   `sampling_rate`: Controls the density of samples along the ray [S1, unofficial].
+--   `density_scale`: Scales the output density from the neural network [S1, unofficial].
++- `params.mode`: Shading mode. Values include `GRADIENT_SHADING` and `SINGLE_SHADE_HEURISTIC` [S1, unofficial].
++- `params.scivis_shading_scale`: Scalar float controlling interpolation between raw sample color and shaded color in gradient mode [S1, unofficial].
++- `params.grad_step`: Step size for numerical gradient estimation via finite differences [S1, unofficial].
++- `sampling_rate`: Controls the density of samples along the ray [S1, unofficial].
++- `density_scale`: Scales the output density from the neural network [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-
+-1.  **Ray Initialization:**
+-    Initialize the ray origin and direction in world space.
+-    -   Transform camera position to world space: `ray.org = xfmPoint(wto, camera.position)`.
+-    -   Construct ray direction from camera forward, horizontal, and vertical vectors, shifted by normalized screen position $(screen.x - 0.5f)$ and $(screen.y - 0.5f)$, then normalized.
+-
+-2.  **Volume Intersection:**
+-    Intersect the ray with the volume bounding box using `intersectVolume(t0, t1, ray.org, ray.dir, self)`.
+-    -   If no intersection is found (`!block_any(...)`), return the background color and alpha.
+-    -   Otherwise, the ray segment of interest is $[t0, t1]$.
+-
+-3.  **Ray Marching Loop:**
+-    Iterate through the ray using an iterator `network_raymarching_iterator`. For each step interval $[t.x, t.y]$:
+-    -   **Sample Position:** Compute position $p$ using jittered linear interpolation:
+-        $$ p = \text{ray.org} + \text{lerp}(\text{jitter}, t.x, t.y) \times \text{ray.dir} $$
+-    -   **Neural Inference:** Sample the neural volume at $p$:
+-        $$ \text{value} = \text{neuralvolume.sample}(p) $$
+-        This replaces traditional texture lookups with neural network inference [S1, unofficial].
+-    -   **Gradient Estimation (Optional):** If `params.mode == GRADIENT_SHADING`, estimate the volume gradient numerically:
+-        $$ \nabla \text{value} = \text{sampleGradient}(p, \text{value}, \text{grad\_step}, \text{sampler}) $$
+-        Negate the gradient for shading purposes. Otherwise, gradient is zero.
+-    -   **Transfer Function:** Apply the transfer function to `value` to get `sampleColor` and `sampleAlpha`:
+-        $$ (\text{sampleColor}, \text{sampleAlpha}) = \text{sampleTransferFunction}(\text{tfn}, \text{value}) $$
+-        Apply opacity correction for the step size $\Delta t = t.y - t.x$.
+-    -   **Shading (Optional):**
+-        -   If `GRADIENT_SHADING`: Transform gradient to world space $N_w = \text{xfmNormal}(otw, \nabla \text{value})$ and ray direction to world space. Compute shaded color using `shade_scivis_light` with ambient and directional lights. Interpolate:
+-            $$ \text{finalSampleColor} = \text{lerp}(\text{shadingScale}, \text{sampleColor}, \text{shadedColor}) $$
+-        -   If `SINGLE_SHADE_HEURISTIC`: Track the point with the highest density (`highestOrg`, `highestAlpha`) encountered so far.
+-    -   **Compositing:** Accumulate color and alpha using front-to-back blending:
+-        $$ \text{tr} = 1.0 - \text{alpha} $$
+-        $$ \text{color} += \text{tr} \times \text{finalSampleColor} \times \text{sampleAlpha} $$
+-        $$ \text{alpha} += \text{tr} \times \text{sampleAlpha} $$
+-    -   **Termination:** Continue while `alive` is true and `alpha < nearly_one`. The iterator callback returns `alive && (alpha < nearly_one)` [S1, unofficial].
+-
+-4.  **Single Shade Heuristic (Post-March):**
+-    If `params.mode == SINGLE_SHADE_HEURISTIC` and `highestAlpha > 0.f`:
+-    -   Calculate transmittance from the highest density point (`highestOrg`) to the light source using a secondary ray march `network_raymarching_transmittance` towards the light direction.
+-    -   Apply the heuristic result by interpolating the final color:
+-        $$ \text{color} = \text{lerp}(\text{shadingScale}, \text{color}, \text{highestColor} \times \text{alpha} \times \text{transmittance}) $$
++1. **Ray Initialization:** Initialize the ray origin and direction in world space [S1, unofficial].
++   - Transform camera position to world space: `ray.org = xfmPoint(wto, camera.position)` [S1, unofficial].
++   - Construct ray direction from camera forward, horizontal, and vertical vectors, shifted by normalized screen position $(screen.x - 0.5f)$ and $(screen.y - 0.5f)$, then normalized [S1, unofficial].
++2. **Volume Intersection:** Intersect the ray with the volume bounding box using `intersectVolume(t0, t1, ray.org, ray.dir, self)` [S1, unofficial].
++   - If no intersection is found (`!block_any(...)`), return the background color and alpha [S1, unofficial].
++   - Otherwise, the ray segment of interest is $[t0, t1]$ [S1, unofficial].
++3. **Ray Marching Loop:** Iterate through the ray using an iterator `network_raymarching_iterator` [S1, unofficial]. For each step interval $[t.x, t.y]$:
++   - **Sample Position:** Compute position $p$ using jittered linear interpolation:
++     $$ p = \text{ray.org} + \text{lerp}(\text{jitter}, t.x, t.y) \times \text{ray.dir} $$ [S1, unofficial].
++   - **Neural Inference:** Sample the neural volume at $p$:
++     $$ \text{value} = \text{neuralvolume.sample}(p) $$ [S1, unofficial].
++   - **Gradient Estimation (Optional):** If `params.mode == GRADIENT_SHADING`, estimate the volume gradient numerically:
++     $$ \nabla \text{value} = \text{sampleGradient}(p, \text{value}, \text{grad\_step}, \text{sampler}) $$ [S1, unofficial].
++     Negate the gradient for shading purposes [S1, unofficial]. Otherwise, gradient is zero.
++   - **Transfer Function:** Apply the transfer function to `value` to get `sampleColor` and `sampleAlpha`:
++     $$ (\text{sampleColor}, \text{sampleAlpha}) = \text{sampleTransferFunction}(\text{tfn}, \text{value}) $$ [S1, unofficial].
++     Apply opacity correction for the step size $\Delta t = t.y - t.x$ [S1, unofficial].
++   - **Shading (Optional):**
++     - If `GRADIENT_SHADING`: Transform gradient to world space $N_w = \text{xfmNormal}(otw, \nabla \text{value})$ and ray direction to world space [S1, unofficial]. Compute shaded color using `shade_scivis_light` with ambient and directional lights [S1, unofficial]. Interpolate:
++       $$ \text{finalSampleColor} = \text{lerp}(\text{shadingScale}, \text{sampleColor}, \text{shadedColor}) $$ [S1, unofficial].
++     - If `SINGLE_SHADE_HEURISTIC`: Track the point with the highest density (`highestOrg`, `highestAlpha`) encountered so far [S1, unofficial].
++   - **Compositing:** Accumulate color and alpha using front-to-back blending:
++     $$ \text{tr} = 1.0 - \text{alpha} $$
++     $$ \text{color} += \text{tr} \times \text{finalSampleColor} \times \text{sampleAlpha} $$
++     $$ \text{alpha} += \text{tr} \times \text{sampleAlpha} $$ [S1, unofficial].
++   - **Termination:** Continue while `alive` is true and `alpha < nearly_one` [S1, unofficial].
++4. **Single Shade Heuristic (Post-March):** If `params.mode == SINGLE_SHADE_HEURISTIC` and `highestAlpha > 0.f`:
++   - Calculate transmittance from the highest density point (`highestOrg`) to the light source using a secondary ray march `network_raymarching_transmittance` towards the light direction [S1, unofficial].
++   - Apply the heuristic result by interpolating the final color:
++     $$ \text{color} = \text{lerp}(\text{shadingScale}, \text{color}, \text{highestColor} \times \text{alpha} \times \text{transmittance}) $$ [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
++import math
++import random
++
++def vec3(x, y, z):
++    return [x, y, z]
++
++def zeros(shape):
++    return [[0.0 for _ in range(shape[1])] for _ in range(shape[0])]
++
++def lerp(a, b, t):
++    return a + t * (b - a)
++
++def normalize(v):
++    mag = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
++    return [v[0]/mag, v[1]/mag, v[2]/mag]
++
++def intersect_volume_bounding_box(origin, direction, bbox):
++    # Slab intersection for axis-aligned box [G]
++    t0 = max((bbox[0][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
++    t1 = min((bbox[1][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
++    return max(t0, t1), min(t1, float('inf'))
++
++def random_float(min_val, max_val):
++    return random.uniform(min_val, max_val)
++
++def transform_normal(matrix, normal):
++    # Standard normal matrix transformation (inverse transpose) [G]
++    return [
++        matrix[0][0]*normal[0] + matrix[1][0]*normal[1] + matrix[2][0]*normal[2],
++        matrix[0][1]*normal[0] + matrix[1][1]*normal[1] + matrix[2][1]*normal[2],
++        matrix[0][2]*normal[0] + matrix[1][2]*normal[1] + matrix[2][2]*normal[2]
++    ]
++
++def transform_vector(matrix, vector):
++    return [
++        matrix[0][0]*vector[0] + matrix[1][0]*vector[1] + matrix[2][0]*vector[2],
++        matrix[0][1]*vector[0] + matrix[1][1]*vector[1] + matrix[2][1]*vector[2],
++        matrix[0][2]*vector[0] + matrix[1][2]*vector[1] + matrix[2][2]*vector[2]
++    ]
++
++def shade_scivis_light(normal, ray_dir, params):
++    # Simple Phong-like shading with ambient and directional light [G]
++    ambient = 0.2
++    light_dir = normalize([0.0, 1.0, 0.5])
++    diffuse = max(0.0, sum(n * l for n, l in zip(normal, light_dir)))
++    return vec3(ambient + 0.8 * diffuse, ambient + 0.8 * diffuse, ambient + 0.8 * diffuse)
++
++def compute_transmittance_to_light(origin, ray_dir, neural_volume, params):
++    # Secondary ray march towards light [G]
++    transmittance = 1.0
++    t = 0.0
++    step = 0.01
++    while t < 10.0:
++        p = [origin[i] + t * ray_dir[i] for i in range(3)]
++        val = neural_volume.sample(p) * params['density_scale']
++        alpha = val * step
++        transmittance *= (1.0 - alpha)
++        t += step
++    return transmittance
++
+ def in_shader_neural_volume_ray_marching(camera, neural_volume, transfer_function, params):
+     """
+     Renders a frame using in-shader neural volume ray marching.
+-    
+-    Args:
+-        camera: Camera object with position, forward, horizontal, vertical vectors.
+-        neural_volume: Object with sample(p) method.
+-        transfer_function: Object mapping value to (color, alpha).
+-        params: Dict with 'mode', 'scivis_shading_scale', 'grad_step', 'sampling_rate', 'density_scale'.
+-        
+-    Returns:
+-        framebuffer: 2D array of (color, alpha).
+     """
+     width, height = camera.framebuffer_size
+-    framebuffer = zeros((width, height, 4)) # RGBA
++    framebuffer = zeros((height, width, 4))
+     
+-    # Pre-compute world-to-camera and camera-to-world matrices if needed
+-    # wto = world_to_object(camera.transform)
+-    # otw = object_to_world(camera.transform)
++    # World-to-object and object-to-world matrices for transformations [G]
++    wto = camera.world_to_object_matrix
++    otw = camera.object_to_world_matrix
+     
+     for y in range(height):
+         for x in range(width):
+             # 1. Ray Initialization
+-            # Normalize screen coordinates to [-0.5, 0.5]
+             nx = (x + 0.5) / width - 0.5
+             ny = (y + 0.5) / height - 0.5
+             
+-            # Construct ray direction in camera space, then transform to world space
+-            # Assuming camera vectors are already in world space or transformed appropriately
+-            ray_dir_cam = camera.forward + nx * camera.horizontal + ny * camera.vertical
++            ray_dir_cam = [
++                camera.forward[0] + nx * camera.horizontal[0] + ny * camera.vertical[0],
++                camera.forward[1] + nx * camera.horizontal[1] + ny * camera.vertical[1],
++                camera.forward[2] + nx * camera.horizontal[2] + ny * camera.vertical[2]
++            ]
+             ray_dir = normalize(ray_dir_cam)
+-            ray_org = camera.position # Transformed to world space if necessary
++            ray_org = camera.position # Already in world space or transformed via xfmPoint [S1, unofficial]
+             
+             # 2. Volume Intersection
+@@ -104,62 +147,47 @@
+             
+             if t0 > t1:
+-                # No intersection, return background
+-                framebuffer[y, x] = (0.0, 0.0, 0.0, 0.0)
++                framebuffer[y][x] = [0.0, 0.0, 0.0, 0.0]
+                 continue
+             
+             # 3. Ray Marching
+-            accumulated_color = vec3(0.0)
++            accumulated_color = vec3(0.0, 0.0, 0.0)
+             accumulated_alpha = 0.0
+             tr = 1.0
+             highest_density = 0.0
+             highest_org = ray_org
+-            highest_color = vec3(0.0)
+-            
+-            # Determine step size based on sampling_rate
+-            # Note: The exact iteration logic depends on the specific iterator implementation
+-            # Here we simulate a loop over intervals [t.x, t.y]
++            highest_color = vec3(0.0, 0.0, 0.0)
++            
+             t_current = t0
+-            step_size = (t1 - t0) * params['sampling_rate'] # Simplified step logic
+-            
+-            while t_current < t1 and accumulated_alpha < 0.999: # nearly_one
++            step_size = (t1 - t0) * params['sampling_rate']
++            
++            while t_current < t1 and accumulated_alpha < 0.999:
+                 t_next = min(t_current + step_size, t1)
+                 
+-                # Jittered interpolation
+                 jitter = random_float(0.0, 1.0)
+-                p = lerp(ray_org, ray_org + ray_dir * t_next, jitter) # Approximation of lerp(jitter, t.x, t.y)
+-                # More accurately: p = ray_org + (t_current + jitter * (t_next - t_current)) * ray_dir
+-                p = ray_org + (t_current + jitter * (t_next - t_current)) * ray_dir
+-                
+-                # Neural Inference
++                # p = ray.org + lerp(jitter, t.x, t.y) * ray.dir
++                p = [ray_org[i] + (t_current + jitter * (t_next - t_current)) * ray_dir[i] for i in range(3)]
++                
+                 value = neural_volume.sample(p)
+-                value *= params['density_scale'] # Apply density scale
+-                
+-                # Transfer Function
++                value *= params['density_scale']
++                
+                 sample_color, sample_alpha = transfer_function.apply(value)
+-                
+-                # Opacity correction for step size
+-                # sample_alpha *= (t_next - t_current) # Depending on TF definition
+-                
+-                # Shading
++                sample_alpha *= (t_next - t_current) # Opacity correction for step size [S1, unofficial]
++                
+                 if params['mode'] == 'GRADIENT_SHADING':
+-                    # Numerical Gradient
+                     grad_step = params['grad_step']
+-                    eps = vec3(grad_step, 0, 0)
++                    eps = vec3(grad_step, 0.0, 0.0)
+                     grad = vec3(
+-                        neural_volume.sample(p + eps) - neural_volume.sample(p - eps),
+-                        neural_volume.sample(p + vec3(0, grad_step, 0)) - neural_volume.sample(p - vec3(0, grad_step, 0)),
+-                        neural_volume.sample(p + vec3(0, 0, grad_step)) - neural_volume.sample(p - vec3(0, 0, grad_step))
++                        neural_volume.sample([p[i] + (eps[i] if i==0 else 0) for i in range(3)]) - neural_volume.sample([p[i] - (eps[i] if i==0 else 0) for i in range(3)]),
++                        neural_volume.sample([p[i] + (eps[i] if i==1 else 0) for i in range(3)]) - neural_volume.sample([p[i] - (eps[i] if i==1 else 0) for i in range(3)]),
++                        neural_volume.sample([p[i] + (eps[i] if i==2 else 0) for i in range(3)]) - neural_volume.sample([p[i] - (eps[i] if i==2 else 0) for i in range(3)])
+                     )
+-                    grad = -grad # Negate for shading
++                    grad = vec3(-grad[0], -grad[1], -grad[2]) # Negate gradient [S1, unofficial]
+                     
+-                    # Transform to world space
+                     Nw = transform_normal(otw, grad)
+-                    Rw = transform_vector(otw, ray_dir) # Ray direction in world space
+-                    
+-                    # Shade
++                    Rw = transform_vector(otw, ray_dir)
+                     shaded_color = shade_scivis_light(Nw, Rw, params)
+-                    
+-                    # Interpolate
+-                    sample_color = lerp(params['scivis_shading_scale'], sample_color, shaded_color)
++                    sample_color = [
++                        lerp(params['scivis_shading_scale'], sample_color[i], shaded_color[i]) for i in range(3)
++                    ]
+                     
+                 elif params['mode'] == 'SINGLE_SHADE_HEURISTIC':
+@@ -169,6 +197,5 @@
+                         highest_color = sample_color
+                 
+-                # Composite
+-                accumulated_color += tr * sample_color * sample_alpha
++                accumulated_color = [accumulated_color[i] + tr * sample_color[i] * sample_alpha for i in range(3)]
+                 accumulated_alpha += tr * sample_alpha
+                 tr *= (1.0 - sample_alpha)
+@@ -178,46 +205,27 @@
+             # 4. Single Shade Heuristic Post-Processing
+             if params['mode'] == 'SINGLE_SHADE_HEURISTIC' and highest_density > 0.0:
+-                # Secondary ray march to light
+                 transmittance = compute_transmittance_to_light(highest_org, ray_dir, neural_volume, params)
+-                final_shaded_color = highest_color * transmittance
+-                
+-                accumulated_color = lerp(params['scivis_shading_scale'], accumulated_color, final_shaded_color * accumulated_alpha)
+-            
+-            framebuffer[y, x] = (accumulated_color.x, accumulated_color.y, accumulated_color.z, accumulated_alpha)
++                final_shaded_color = [highest_color[i] * transmittance for i in range(3)]
++                accumulated_color = [
++                    lerp(params['scivis_shading_scale'], accumulated_color[i], final_shaded_color[i] * accumulated_alpha) for i in range(3)
++                ]
++            
++            framebuffer[y][x] = [accumulated_color[0], accumulated_color[1], accumulated_color[2], accumulated_alpha]
+             
+     return framebuffer
+ ```
+ 
+-## Subtopics
+-
+-### NeRF Volumetric Rendering (Coarse/Fine Sampling)
+-Uses hierarchical sampling with coarse and fine passes to optimize computational cost. Choose when scene complexity varies significantly and adaptive sampling is beneficial. [Link](979-nerf-volumetric-rendering-coarse-fine-sampling.md)
+-
+-### Iterative Ray Marching with Neural Volume Inference
+-Iteratively refines the ray marching path or density estimates. Choose when high-frequency details require adaptive refinement. [Link](1494-iterative-ray-marching-with-neural-volume-inference.md)
+-
+-### DVGO Volume Rendering Forward Pass
+-Uses a differentiable voxel grid (DVGO) representation instead of a pure MLP. Choose for faster inference at the cost of memory. [Link](2363-dvgo-volume-rendering-forward-pass.md)
+-
+-### MLP with Positional Encoding
+-The underlying neural network architecture used by the in-shader method. [Link](2416-mlp-with-positional-encoding.md)
+-
+-### Volumetric Primitive Radiance Field Integrator
+-Integrates radiance fields using volumetric primitives. [Link](2536-volumetric-primitive-radiance-field-integrator.md)
+-
+-### Neural Volume Raycasting Debug Visualization
+-Tools for visualizing the ray marching process and neural network outputs. [Link](2646-neural-volume-raycasting-debug-visualization.md)
+-
+-### Neural Network Volume Classification
+-Classifies volume data using neural networks. [Link](5271-neural-network-volume-classification.md)
++**Edge Cases and Pitfalls:**
++- Unsupported MLP Width: If the network width is not 16, 32, or 64 for standard networks, or not a multiple of 16 (16*1 to 16*8) for fV-SRN, the renderer prints an error and returns without rendering [S1, unofficial].
++- Incorrect Encoding Method: If `N_FEATURES_PER_LEVEL` is -1, the renderer prints an error indicating an incorrect encoding method for in-shader rendering [S1, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray. Each sample requires a neural network inference, which is significantly more expensive than a texture lookup.
+--   **Memory Complexity:** Depends on the neural network size. `TcnnDeviceVolume` and `FvsrnDeviceVolume` store the MLP weights in GPU memory.
+--   **Measured Performance:** Performance is heavily dependent on the MLP width and the hardware's FP32/FP16 throughput. Standard widths (16, 32, 64) are optimized. fV-SRN supports widths up to $16 \times 8$.
+--   **Strengths:** High-quality rendering with continuous representations; supports complex shading (gradient, single-shade) directly in the shader; no need for pre-computed 3D textures.
+--   **Limitations:** Computationally expensive due to per-sample neural inference; limited by MLP capacity for high-frequency details; requires specific network widths (16, 32, 64 or multiples of 16 for fV-SRN) [S1, unofficial].
+--   **When to Use:** When high-quality, continuous volume rendering is required and computational resources allow for per-pixel neural inference. Suitable for scientific visualization and high-fidelity rendering.
+--   **When Not to Use:** When real-time performance is critical and the scene is simple enough for texture-based rendering; when memory is constrained and the MLP is large.
++- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of samples per ray. Each sample requires a neural network inference, which is significantly more expensive than a texture lookup [S1, unofficial].
++- **Memory Complexity:** Depends on the neural network size. `TcnnDeviceVolume` and `FvsrnDeviceVolume` store the MLP weights in GPU memory [S1, unofficial].
++- **Measured Performance:** Performance is heavily dependent on the MLP width and the hardware's FP32/FP16 throughput. Standard widths (16, 32, 64) are optimized. fV-SRN supports widths up to $16 \times 8$ [S1, unofficial].
++- **Strengths:** High-quality rendering with continuous representations; supports complex shading (gradient, single-shade) directly in the shader; no need for pre-computed 3D textures [S1, unofficial].
++- **Limitations:** Computationally expensive due to per-sample neural inference; limited by MLP capacity for high-frequency details; requires specific network widths (16, 32, 64 or multiples of 16 for fV-SRN) [S1, unofficial].
++- **When to Use:** When high-quality, continuous volume rendering is required and computational resources allow for per-pixel neural inference. Suitable for scientific visualization and high-fidelity rendering [S1, unofficial].
++- **When Not to Use:** When real-time performance is critical and the scene is simple enough for texture-based rendering; when memory is constrained and the MLP is large [S1, unofficial].
+ 
+ ## Background

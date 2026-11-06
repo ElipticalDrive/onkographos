@@ -49,11 +49,7 @@ def greedy_mesh_binary_plane(data, lod_size):
             if y >= lod_size:
                 continue
             shifted = data[row] >> y
-            h = 0
-            temp = shifted
-            while temp & 1:
-                h += 1
-                temp >>= 1
+            h = (shifted ^ (shifted + 1)).bit_length() - 1
             h_as_mask = (1 << h) - 1 if h < 32 else 0xFFFFFFFF
             mask = h_as_mask << y
             w = 1
@@ -74,26 +70,17 @@ def greedy_mesh_binary_plane(data, lod_size):
 ### [Binary Greedy Meshing with Transparency Support](4839-binary-greedy-meshing-with-transparency-support.md)
 Extends this method to handle transparent blocks by generating face masks that include transparent voxels adjacent to solid ones, preserving geometry for depth-tested rendering pipelines.
 
-### [Binary Greedy Voxel Meshing with Ambient Occlusion](4536-binary-greedy-voxel-meshing-with-ambient-occlusion.md)
-Adds AO computation by packing AO values into the vertex index, providing shading information.
-
-### [Streaming Binary Greedy Meshing](4535-streaming-binary-greedy-meshing.md)
-Optimizes memory usage by processing chunks in a streaming fashion.
-
-### [Multi-Block Binary Meshing with AO](4534-multi-block-binary-meshing-with-ao.md)
-The parent method that handles multiple block types and axes with AO support.
-
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Performance:** Not given in the sources.
-- **Strengths:** Not given in the sources.
-- **Limitations:** Not given in the sources.
-- **When to use:** Not given in the sources.
-- **When not to use:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Performance:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
+- **When to use:** Not given in the sources. [S1, unofficial]
+- **When not to use:** Not given in the sources. [S1, unofficial]
 ## Background
-- **Origin:** Not given in the sources.
-- **History and development:** Not given in the sources.
-- **Usage:** Not given in the sources.
+- **Origin:** Not given in the sources. [S1, unofficial]
+- **History and development:** Not given in the sources. [S1, unofficial]
+- **Usage:** Not given in the sources. [S1, unofficial]
 ## Sources
 [S1] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)

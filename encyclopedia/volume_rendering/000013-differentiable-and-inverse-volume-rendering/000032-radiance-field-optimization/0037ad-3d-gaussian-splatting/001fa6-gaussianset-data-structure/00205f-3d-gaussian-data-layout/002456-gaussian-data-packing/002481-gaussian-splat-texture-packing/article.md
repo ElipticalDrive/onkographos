@@ -1,0 +1,108 @@
+# Gaussian Splat Texture Packing
+
+Also called: Texture Packing
+
+## Overview
+Gaussian Splat Texture Packing is a method for storing 3D Gaussian Splat attributes (position, scale, rotation, color, and spherical harmonics) into a dense 2D texture array or single texture to optimize GPU memory bandwidth and cache locality during rasterization [S1, unofficial]. It packs 8 unsigned integers (representing 4 components of two `uvec4` values) per Gaussian into a `GL_RGBA32UI` texture, arranging 1024 Gaussians per row [S1, unofficial]. This layout differs from SPZ Packed Format by using a fixed-width texture with a specific row-major bit-packing scheme rather than a variable-length or sparse format, and from PNG-based compression by using raw integer textures rather than lossy or lossless image codecs [S1, unofficial][S2, unofficial].
+
+## How it works
+**Inputs:** A list of $N$ Gaussians, where each Gaussian $i$ has 8 packed integer attributes (typically derived from position, scale, rotation, color, and SH coefficients, quantized to 32-bit integers).
+**Outputs:** A 2D texture `textureData` of format `GL_RGBA32UI` with dimensions $W \times H$.
+
+**Data Structures:**
+*   `packedData`: A flat array of $N \times 8$ unsigned 32-bit integers. Each Gaussian $i$ occupies indices $[i \times 8, i \times 8 + 7]$.
+*   `textureData`: A 2D texture buffer.
+*   Texture Dimensions:
+    *   Width $W = 2048$.
+    *   Height $H = \lceil N / 1024 \rceil$.
+
+**Layout:**
+Each Gaussian $i$ is mapped to two horizontal texels (columns) in the texture.
+*   Row index: $r = \lfloor i / 1024 \rfloor$.
+*   Column index: $c = (i \pmod{1024}) \times 2$.
+*   The first `uvec4` of Gaussian $i$ is stored at texture coordinates $(c, r)$.
+*   The second `uvec4` of Gaussian $i$ is stored at texture coordinates $(c+1, r)$.
+
+**Parameters:**
+*   Texture Internal Format: `GL_RGBA32UI`.
+*   Texture Type: `GL_RGBA_INTEGER`.
+*   Data Type: `GL_UNSIGNED_INT`.
+*   Min/Mag Filter: `GL_NEAREST`.
+*   Wrap Mode: `GL_CLAMP_TO_EDGE` for both S and T axes.
+
+**Steps:**
+1.  Initialize `textureData` with dimensions $2048 \times \lceil N / 1024 \rceil$.
+2.  For each Gaussian $i$ from $0$ to $N-1$:
+    a. Calculate row $r = i / 1024$.
+    b. Calculate column $c = (i \% 1024) \times 2$.
+    c. Calculate base index for the first texel: $idx1 = (r \times 2048 + c) \times 4$.
+    d. Calculate base index for the second texel: $idx2 = (r \times 2048 + c + 1) \times 4$.
+    e. Copy `packedData[i*8+0..3]` to `textureData[idx1..idx1+3]`.
+    f. Copy `packedData[i*8+4..7]` to `textureData[idx2..idx2+3]`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pack_gaussians_to_texture(packed_data: list, splat_count: int) -> list:
+    """
+    packed_data: List of uint32, length splat_count * 8.
+    Returns: List of uint32 representing the RGBA32UI texture data.
+    """
+    texture_width = 2048
+    texture_height = (splat_count + 1023) // 1024  # ceil(splat_count / 1024)
+    total_texels = texture_width * texture_height
+    total_components = total_texels * 4
+    
+    # Initialize texture data with zeros
+    texture_data = [0] * total_components
+    
+    for i in range(splat_count):
+        # Calculate row and column
+        row = i // 1024
+        col = (i % 1024) * 2
+        
+        # Calculate indices in the flat texture array (RGBA order)
+        idx1 = (row * texture_width + col) * 4
+        idx2 = (row * texture_width + col + 1) * 4
+        
+        # Copy first uvec4 (indices 0-3)
+        for k in range(4):
+            texture_data[idx1 + k] = packed_data[i * 8 + k]
+            
+        # Copy second uvec4 (indices 4-7)
+        for k in range(4):
+            texture_data[idx2 + k] = packed_data[i * 8 + 4 + k]
+            
+    return texture_data
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** If $N$ is not a multiple of 1024, the last row contains unused texels. These must be initialized to zero or ignored during unpacking to prevent garbage data from affecting rendering [S1, unofficial].
+*   **Precision:** The use of `GL_RGBA32UI` ensures no quantization loss during texture storage, assuming the input `packedData` is already quantized appropriately [S1, unofficial].
+*   **Memory Usage:** The texture size is fixed at $2048 \times \lceil N/1024 \rceil \times 16$ bytes. For large $N$, this can be memory-intensive compared to compressed formats [S1, unofficial].
+
+## Subtopics
+
+### Texture-Based Splat Storage Preprocessing
+A variant used in Unreal Engine Niagara rendering, which preprocesses Gaussian splat data into 8 separate `RGBA32F` textures (Position, Scale, Rotation, Color, HarmonicsL1, HarmonicsL2, HarmonicsL31, HarmonicsL32) [S2, unofficial]. Unlike the standard packed format which interleaves data in a single texture, this variant separates attributes into distinct textures for on-demand loading by Niagara [S2, unofficial].
+*   **Definition:** Preprocesses parsed Gaussian splat data into 8 separate RGBA32F textures [S2, unofficial].
+*   **Steps:** CreateAndSaveTexture function creates a UTexture2D asset. It sets SRGB=false, MipGenSettings=TMGS_NoMipmaps, CompressionNone=true, Filter=TF_Nearest. It initializes the source with ETextureSourceFormat::TSF_RGBA32F, locks mip 0, copies InPixelData (FLinearColor array) via FMemory::Memcpy, unlocks, and updates resources [S2, unofficial].
+*   **Parameters:** Texture format is TSF_RGBA32F (32-bit floating point RGBA) [S2, unofficial].
+*   **Layout:** FGaussianSplattingTextureData struct fields: PositionTextureData (TArray<FLinearColor>), ScaleTextureData (TArray<FLinearColor>), RotationTextureData (TArray<FLinearColor>), ColorTextureData (TArray<FLinearColor>), harmonicsL1TextureData (TArray<FLinearColor>), harmonicsL2TextureData (TArray<FLinearColor>), harmonicsL31TextureData (TArray<FLinearColor>), harmonicsL32TextureData (TArray<FLinearColor>) [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Packing is $O(N)$, where $N$ is the number of Gaussians, as each Gaussian requires a constant number of memory writes [S1, unofficial].
+*   **Memory Complexity:** The texture requires $2048 \times \lceil N/1024 \rceil \times 16$ bytes. For $N=10^6$, this is approximately $32$ MB [S1, unofficial].
+*   **Performance:** The fixed-width layout allows for efficient coalesced memory access during rasterization, as Gaussians in a row are stored contiguously [S1, unofficial].
+*   **Strengths:** High bandwidth efficiency, simple indexing logic, no compression artifacts [S1, unofficial].
+*   **Limitations:** High memory usage for large scenes, not suitable for streaming large models without additional compression [S1, unofficial].
+*   **When to Use:** Real-time rendering where memory bandwidth is a bottleneck and scene size is moderate [S1, unofficial].
+*   **When Not to Use:** Mobile devices with limited memory or very large scenes requiring streaming [S1, unofficial].
+
+## Background
+The method originates from implementations of 3D Gaussian Splatting in OpenGL, specifically the `gsplat-opengl` project, which aims to provide a high-performance, real-time renderer for 3D Gaussians [S1, unofficial]. It is designed to integrate with standard graphics pipelines by leveraging texture-based storage for efficient GPU access [S1, unofficial].
+
+## Sources
+[S1] liaozhangsheng/gsplat-opengl, https://github.com/liaozhangsheng/gsplat-opengl, fetched 2026-10-28 (unofficial)
+[S2] JI20/unreal-splat, https://github.com/JI20/unreal-splat, fetched 2026-10-27 (unofficial)

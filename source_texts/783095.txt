@@ -1,0 +1,879 @@
+NeILF: Neural Incident Light Field
+for Physically-based Material Estimation
+Yao Yao1 , Jingyang Zhang2(B) , Jingbo Liu1 , Yihang Qu1 , Tian Fang1 ,
+David McKinnon1 , Yanghai Tsin1 , and Long Quan1
+1
+Apple,Cupertino, USA
+{yaoyao,jingbo,yihang,fangtian,dmckinnon,quan long}@apple.com
+2
+HKUST,Clear Water Bay, Hong Kong
+jzhangbs@cse.ust.hk
+Abstract. We present a diﬀerentiable rendering framework for material and lighting estimation from multi-view images and a reconstructed
+geometry. In the framework, we represent scene lightings as the Neural Incident Light Field (NeILF) and material properties as the surface BRDF modelled by multi-layer perceptrons. Compared with recent
+approaches that approximate scene lightings as the 2D environment map,
+NeILF is a fully 5D light ﬁeld that is capable of modelling illuminations
+of any static scenes. In addition, occlusions and indirect lights can be
+handled naturally by the NeILF representation without requiring multiple bounces of ray tracing, making it possible to estimate material
+properties even for scenes with complex lightings and geometries. We
+also propose a smoothness regularization and a Lambertian assumption to reduce the material-lighting ambiguity during the optimization.
+Our method strictly follows the physically-based rendering equation, and
+jointly optimizes material and lighting through the diﬀerentiable rendering process. We have intensively evaluated the proposed method on
+our in-house synthetic dataset, the DTU MVS dataset, and real-world
+BlendedMVS scenes. Our method outperforms previous methods by a
+signiﬁcant margin in terms of novel view rendering quality, setting a new
+state-of-the-art for image-based material and lighting estimation.
+Keywords: Diﬀerentiable rendering · Physically-based rendering ·
+BRDF estimation · Incident light ﬁeld
+1
+Introduction
+Material estimation from a set of sparse images is a challenging task in both
+computer vision and computer graphics. The problem is usually approached by
+inverse rendering, where the spatially-varying bidirectional reﬂectance distribution functions (SV-BRDFs) and lightings of the scene are jointly optimized by
+minimizing the rendering loss. However, the problem is hard to solve due to
+Supplementary Information The online version contains supplementary material
+available at https://doi.org/10.1007/978-3-031-19821-2 40.
+c
+ The Author(s), under exclusive license to Springer Nature Switzerland AG 2022
+S. Avidan et al. (Eds.): ECCV 2022, LNCS 13691, pp. 700–716, 2022.
+https://doi.org/10.1007/978-3-031-19821-2_40
+NeILF
+701
+the complex form of the BRDF and the high-dimensional nature of scene illuminations. To mitigate the problem, previous methods usually apply simpliﬁed
+material and lighting models. For example, non-spatially varying BRDF [46]
+is applied for certain types of objects; approximated illuminations, such as colocated ﬂash lights [3,4,25,31] and environment maps [5,6,24,46,48], are applied
+to reduce the complexity of the scene lighting. In most scenarios, special capturing devices or environments are required to assist the estimation, limiting these
+methods to real-world applications. As the result, a practical material estimator
+is still missing.
+On the other hand, recent progress on neural representation has shown
+promising results for lighting modelling. NeRF [22] jointly optimizes a neural
+radiance ﬁeld and a density ﬁeld, which has demonstrated great success for
+novel view synthesis. The surface light ﬁeld is applied to model the outgoing
+light from the surface, which has been widely applied to neural surface reconstructions [41,45]. Other methods further decompose observed lights into neural
+material properties and environmental lightings. However, similar to classical
+methods, they either use simpliﬁed lighting representations [3,5,6,24], or apply
+approximated occlusion and indirect light handling [33,48]. Until now, lighting
+modelling is still an open problem in image-based material estimation.
+In this work, we address this long-standing problem by representing scene
+lightings as the neural incident light ﬁeld. Without losing generality, the proposed NeILF is capable of modelling lighting conditions of any static scenes.
+Also, occlusions and indirect lights could be naturally handled in the proposed
+framework without tracing multiple bounces of rays. For material properties, we
+consider a simpliﬁed Disney BRDF model [7] consisting of base color, roughness
+and metallic. Implementation-wise, we use multi-layer perceptrons (MLPs) to
+represent both the incident light ﬁeld and the BRDF. The NeILF network takes
+a 5D vector of location and incident direction as inputs, and returns as output
+a RGB value of the incident light; the material network takes a 3D location
+as input, and outputs a 5D vector of surface BRDF properties. Meanwhile, to
+reduce the ambiguity between the material and the scene lighting, we propose
+two regularization terms, namely the bilateral smoothness and the Lambertian
+assumption, to constrain the optimization of roughness and metallic. Finally, we
+analyze similarities between NeILF for material estimation and NeRF for novel
+view synthesis [22], providing readers an intuitive explanation of the complexity
+and solvability of the problem.
+We demonstrate in several datasets that our method signiﬁcantly outperforms previous SOTA methods in terms of novel view rendering accuracy. Our
+method is able to recover the surface BRDF even for scenes with complex lightings and geometries, which cannot be handled by previous environment map
+based methods. To summarize, main contributions of the paper include:
+– Representing scene lightings by the neural incident light ﬁeld, where occlusions and indirect lights of the scene can be naturally handled.
+– A diﬀerentiable framework for joint material and lighting estimation,
+which signiﬁcantly outperforms previous state-of-the-art methods in various
+datasets.
+702
+Y. Yao et al.
+– A bilateral smoothness and a Lambertian assumption to constrain the roughness and the metallic, reducing the material-lighting ambiguity during the
+network optimization.
+2
+Related Works
+2.1
+The Rendering Equation
+The rendering equation [13] computes the emitted radiance from a surface point
+x along a viewing direction ωo :
+
+Lo (ωo , x) =
+f (ωo , ωi , x)Li (ω i , x)(ω i · n)dω i ,
+(1)
+Ω
+where n is the normal of the surface, Li is the incoming light from direction ω i ,
+and f is the BRDF function to describe the reﬂectance property, which is usually
+decomposed into a diﬀuse term and a specular term f = fd + fs . The integration
+is performed over all incident direction ω i on the hemisphere Ω where ω i · n > 0.
+The goal of material estimation is to recover continuous functions of the
+scene lighting Li and the BRDF property f in the above equation. Due to the
+complex form of the scene lighting and the material property, it is crucial to
+select suitable representations for Li and f . In this paper, we propose to use a
+neural incident light ﬁeld to model Li (Sect. 3.1), and apply a simpliﬁed Disney
+BRDF [7] model to approach the BRDF f (Sect. 3.2). Below we give a brief
+review on the physically-based material estimation from multi-view images.
+2.2
+Diﬀerentiable Rendering
+Unlike classical approaches that recover 3D scene parameters in a forward reconstruction manner, diﬀerentiable rendering [2,14] inverses the rendering process
+in graphics, and optimizes all parameters by minimizing the diﬀerence between
+rendered and input images.
+Recently, the technique has been combined with neural representations and
+has shown promising results for image-based 3D problems. NeRF [22] and followup works [18,21,47] decouple a 3D scene into a density ﬁeld and a radiance ﬁeld.
+Other methods also apply implicit functions to model diﬀerent geometry [19,20,
+45] and appearance representations [26,41]. In another line of works, the received
+radiance is further decomposed into BRDF properties and input light sources [5,
+33,46,48]. Our method follows this practice and applies a neural BRDF model
+to approach the material property of the surface.
+2.3
+Material and Lighting Estimation
+Due to the diﬃculty of joint material and lighting estimation, previous methods
+usually apply additional sensors or controlled lightings to facilitate the optimization process. For example, additional sensors [2,11,29], co-located ﬂash
+NeILF
+703
+Fig. 1. Illustrations of the proposed method and our material and lighting estimation
+results. NeILF is capable of modelling the joint illumination of direct/indirect lights
+from diﬀerent sources. Estimated incident lights at point x1 and point x2 well explain
+the mixed lighting of the scene, including an environment map with high-radiance sun
+light, two near-range point lights, and two near-range area lights.
+lights [3,4,25,31], or turn-table settings [10,38] are applied to capture images
+or scene lightings. Moreover, simpliﬁed material and lighting models, e.g., the
+non-spatially varying BRDF [46] or approximated illuminations of environment
+maps [5,8,46,48], are applied to reduce the complexity of the problem. NeRV [33]
+introduces the visibility ﬁeld to model indirect lights. However, it requires environmental lightings to be known in advance. Nevertheless, such mitigations will
+inevitably limit these methods to real-world applications. Nimier-David et al.
+proposed a method [27] for joint illumination and material estimation. However, the method requires to trace the ray of multiple bounces. In contrast, our
+method applies a uniﬁed incident light ﬁeld to represent diﬀerent light sources
+in the scene, and is capable of estimating material under any lighting conditions
+without the need of multi-bounce raytracing.
+3
+Method
+3.1
+Neural Incident Light Field
+One of the keys to invert the rendering equation is to model the incoming light
+Li in a correct way. Ideally, Li should take into account 1) direct lights from light
+sources in the scene, 2) occlusions that block the surface point from receiving
+direct lights, and 3) indirect lights that are reﬂected from other surface points.
+However, each of the three components is hard to model. Previous methods [5,
+17,46,48] usually approximate direct lights as an environment map and hardly
+handle indirect lights as they require multi-bounce raytracing.
+In contrast, we formulate incoming lights in the scene directly as a neural
+incident light ﬁeld, where an MLP takes a point location x and an incident
+direction ω as inputs, and returns an incident light radiance L as output:
+704
+Y. Yao et al.
+L : {x, ω} → L.
+(2)
+Without losing generality, the proposed NeILF representation is capable of
+modelling the joint illumination eﬀect of direct/indirect lights and occlusions of
+any static scenes. An illustration is shown in Fig. 1. Compared with the commonly used environment map, NeILF is able to handle the spatially-varying
+illumination eﬀect, making it possible to estimate material for scenes with complex geometries and lightings.
+3.2
+Simpliﬁed Disney BRDF
+In this section, we describe the BRDF representation used in the proposed framework. We apply a simpliﬁed Disney principled BRDF model, where the BRDF
+of a surface point x is parameterized by a base color b(x) ∈ [0, 1]3 , a roughness
+r(x) ∈ [0, 1] and a metallic m(x) ∈ [0, 1], which is a subset of the full Disney
+model [7]. Similar to the neural incident lighting ﬁeld, BRDF parameters are
+also stored using multi-layer perceptrons:
+B : x → {b, r, m},
+(3)
+where the MLP takes a 3D surface point x as input, and returns the 5-channel
+BRDF parameters as output. Note that other representations, e.g. UV atlas or
+per-vertex BRDF parameters, can also be applied. Here we choose the neural
+representation because it has been proven to be eﬀective for modelling continuous
+functions in 3D space [22,46], and its derivative can be easily and analytically
+derived for our regularization computation (Sect. 3.3).
+The Rendering Equation. Given the BRDF parameterization, we now
+describe the concrete formulation of f in Eq. 1. In the following equations, we
+omit notations of surface point x and normal n as the geometry of the scene is
+assumed to be given. The diﬀuse term can be calculated as fd = 1−m
+π · b, and
+the specular term as:
+fs (ω o , ω i ) =
+D(h; r) · F (ω o , h; b, m) · G(ω i , ω o , h; r)
+,
+4 · (n · ω i ) · (n · ω o )
+(4)
+where h is the half vector between the incident direction ω i and the viewing
+direction ω o . The ﬁrst term D is the normal distribution function of the microfacets in the surface. It is related to the roughness r and we use Spherical Gaussians to model this function as in previous methods [35,46]. The second Fresnel
+term F models the portion of light that can be reﬂected from the surface, which
+is determined by the surface metallic m and the base color b. The ﬁnal geometry
+term G handles the shadow and occlusion of the microfacets, which is parameterized on the roughness r and is approximated using the GGX distribution [34].
+Details of D, F and G are provided in the supplementary material.
+3.3
+Material-Lighting Ambiguity and Regularizations
+While the Disney BRDF and incident light ﬁeld are capable of representing materials and lightings of diﬀerent scenes, jointly optimizing both would inevitably
+NeILF
+705
+lead to ambiguous solutions between them. One degenerate case could be that
+we can force a pure reﬂective BRDF to all surface points, and then only optimize the incident lights to adjust the input image. Theoretically, we can still
+ﬁnd a perfect solution that ﬁts the given BRDF and input images: for each 3D
+point, whenever there is a visible camera, we set its mirror symmetric incident
+light equal to the viewing out-going light, and set other incident lights equal to
+zero. It is also reported in previous work [30] that even human observers cannot
+distinguish the two confounded components from only image observations.
+In the proposed framework, we can still manage to recover reasonable material and lighting results as MLPs can implicitly enforce a spatial smoothness
+constraint [47] on the two components. However, for robust material and lighting estimation, additional regularizations are desired. In this paper, we propose
+two regularizations for roughness r and metallic m:
+Bilateral Smoothness. We encourage r and m not to change rapidly in space,
+and the gradient of the input image I can be used as a hint to guide the smoothing
+process. Thus, we deﬁne the bilateral smoothness cost of r and m as:
+lsmooth =
+1 
+(∇x r(xp ) + ∇x m(xp ))e−∇p I(p) ,
+|SI |
+(5)
+p∈SI
+where SI is the set of all sampled pixels and xp is the corresponding 3D point
+of the sampled pixel p. The image gradient ∇p I(p) can be pre-calculated from
+the input image, and the roughness gradient ∇x r(xp ) and metallic gradient
+∇x m(xp ) can be derived analytically by back-propagating the neural network.
+Lambertian Assumption. We also assume that all surfaces tend to be Lambertian if no view-dependent lighting is observed, which leads to high roughness
+and low metallic, and we deﬁne the Lambertian cost as:
+llambertian =
+1 
+(|r(xp ) − 1| + |m(p)|).
+|SI |
+(6)
+p∈SI
+The proposed two regularizations will be minimized during network training.
+It is noteworthy that the two losses may not necessarily improve quantitative
+results as they are heuristically deﬁned for robust material and lighting estimation. We show in a later ablation study that the bilateral smoothness will lead
+to visually much more pleasing results for real-world reconstructions.
+3.4
+Loss
+Similar to other diﬀerentiable rendering frameworks, we compute the L1 loss
+between the rendered image and the input image:
+limage =
+1 
+I(p) − Lo (xp , ω o )1 .
+|SI |
+p∈SI
+(7)
+706
+Y. Yao et al.
+The ﬁnal loss of the proposed system is a weighted sum of the image loss and the
+two regularization losses: l = limage + ws lsmooth + wl llambertian , where the two
+weights are empirically set to ws = 10−4 and wl = 10−3 in all our experiments.
+4
+Implementations
+4.1
+Sphere Sampling
+To compute Lo using
+ a ﬁnite number of incident lights, we need to discretize Eq. 1
+as: Lo (ωo , x) = i∈SL f (ωo , ωi , x)Li (ω i , x)(ω i ·n)·A(ω i ), where SL is the set of
+incident lights sampled for point x and A(ω i ) is the solid angle that corresponds
+to the incident light. In computer graphics, randomized Monto-Carlo Samplings
+are usually applied in ray-tracing, and the solid angle A(ω i ) is approximated by
+the probability distribution P (ω i ) of ray samples.
+However, in diﬀerentiable rendering, it is critical to accurately compute the
+solid angle A(ω i ) for each light sample as we need to correctly pass loss gradients
+to network parameters. We found that using random sampling and approximating A(ω i ) as the probability distribution P (ω i ) will lead to erroneous BRDF
+results. Thus, we apply a ﬁxed Fibonacci sampling over the half sphere to get
+all samples. In this case, A(ω i ) = |S2πL | and the rendering equation becomes:
+Lo (ωo , x) =
+2π 
+f (ωo , ωi , x)Li (ω i , x)(ω i · n).
+|SL |
+(8)
+i∈SL
+4.2
+Learned HDR-LDR Mapping
+For real-world datasets with low dynamic range (LDR) images, we need to convert the high dynamic range (HDR) output from our renderer to LDR before
+computing the image loss. As such transformation is unavailable in previous
+MVS datasets, we apply a learned HDR-LDR mapping to mimic the conversion
+in our network. Note that linear transformations, including exposure and white
+balance, can be embedded into the incident light. Thus, we only explicitly model
+the gamma correction with a learnable parameter:
+= (LHDR
+)γ .
+LLDR
+o
+o
+4.3
+(9)
+Training Details
+We use an 8-layer Siren [32] with feature size of 512 and a skip connection in
+the middle to represent the BRDF MLP. Also, the positional encoding [21] is
+applied to further strengthen the network. The NeILF MLP shares the same
+implementation as BRDF, except that 1) the feature size is downsized to 128 to
+reduce the VRAM usage and 2) the last layer activation function is changed from
+tanh to exp in order to guarantee non-negative and unbounded light intensities.
+In the experiment, we use |SL | = 128 incident lights to compute the output
+radiance during training, and use |SL | = 256 incident lights to evaluate the
+NeILF
+707
+rendered image during testing. For each training iteration, we randomly sample
+16000 pixels from all images, and the network is optimized for a total of 15000
+−3
+is
+iterations. The Adam optimizer [16] with an initial learning rate
+√ of 10
+applied in our network, and the learning rate is scaled down by 0.1 at 5000
+and 10000 iterations. The training process takes around 1.5 h to ﬁnish on a Tesla
+V100 GPU and the VRAM consumption is around 30 GB.
+5
+Experiments
+5.1
+Baseline Methods
+We compare our method with the following baselines:
+PhySG ∗ Firstly, we consider the recent PhySG [46] for material estimation. The
+original PhySG jointly optimizes the non-spatially varying BRDF, the environment map, and the geometry of the object. To fairly compare with the method,
+we ﬁx the given geometry and optimize only the uniform BRDF and the environment map.
+SG-Env This baseline is another variant of PhySG [46]. Compared with
+PhySG∗ , SG-Env applies a SV-BRDF model and a slightly diﬀerent rendering formulation (the same fd , D and G as ours). We use this baseline to directly
+compare NeILF with the SG environment map representation.
+NeRFactor ∗ This baseline is a variant of NeRFactor [48] with the ground truth
+geometry input. In the setting, we follow NeRFactor to represent the scene lighting as a 2D environment map of resolution 32 × 16. The ground truth geometry
+are ﬁxed during the training and we use the online raytracing to compute the
+ground truth visibilities of each ray.
+Ne-Env Lastly, we compare our method with the neural environment map representation. This baseline shares the same implementation of the proposed NeILF,
+except that the positional input in the incident light ﬁeld is omitted such that
+the incident light is only related to the incoming direction: {ω} → L.
+5.2
+Benchmark on Synthetic Scenes
+To quantitatively evaluate our method under diﬀerent lighting conditions, we
+generate a set of synthetic data and compare our method with the above baselines.
+Data Preparation. The synthetic dataset contains three objects and their
+combinations: a single rough metallic sphere, a single rough metallic cube, and
+a helmet with spatially variant materials. The objects are placed on a plane to
+model the real-world object capture. We also create six lighting conditions to lit
+the objects, including three environment maps and three mixed lightings:
+– Env-city: an environment map of a city;
+– Env-studio: an environment map of a studio;
+708
+Y. Yao et al.
+Fig. 2. Comparative results on BRDF estimation and novel view synthesis on the
+synthetic dataset. From left to right are images of base color, roughness, metallic and
+synthesized testing views. Our method is able to generate high-quality BRDF and novel
+view synthesis results under diﬀerent lighting conditions. In contrast, the environment
+map based SG-ENV [46] produces noisy BRDF outputs especially in occluded regions.
+And also, highlights are wrongly recovered in novel view renderings if mixed lightings
+occur.
+NeILF
+709
+Table 1. Quantitative results on Synthetic scenes. We compare the proposed NeILF
+with four baseline methods described in Sect. 5.1 using PSNR scores. Our method
+generates consistently the best novel view rendering for all scenes. Also, our method
+produces signiﬁcantly better BRDF results than other methods if multiple objects and
+mixed lightings are given.
+Scene Geometry
+Single-helmet
+Scene Lighting
+Env-city Env-studio Env-castel Env-city Env-studio Env-castel Mix-city Mix-studio Mix-castel
+Base Color PhySG∗ [46]
+SG-ENV [46]
+NeRFactor∗ [48]
+Ne-ENV
+Ours
+13.43
+20.61
+13.02
+13.43
+16.36
+14.87
+18.45
+11.73
+12.65
+16.36
+13.95
+15.99
+11.98
+12.45
+18.28
+15.01
+22.38
+8.09
+11.68
+15.59
+16.96
+20.74
+13.60
+11.98
+15.48
+16.13
+22.21
+7.37
+7.66
+12.95
+14.16
+16.92
+8.64
+11.87
+17.39
+12.43
+13.16
+11.63
+10.90
+16.88
+14.29
+16.69
+8.03
+9.54
+17.37
+PhySG∗ [46]
+SG-ENV [46]
+NeRFactor∗ [48]
+Ne-ENV
+Ours
+7.57
+21.19
+12.88
+9.31
+17.79
+7.48
+21.31
+17.39
+17.40
+18.52
+7.83
+21.79
+16.78
+6.15
+16.82
+8.72
+17.01
+12.38
+15.86
+18.22
+7.97
+16.40
+13.43
+16.10
+19.11
+8.35
+16.39
+11.98
+11.42
+10.29
+8.67
+15.44
+11.77
+15.43
+18.42
+8.95
+14.25
+11.88
+15.35
+18.43
+8.76
+14.49
+11.95
+15.49
+17.34
+Roughness PhySG∗ [46]
+SG-ENV [46]
+NeRFactor∗ [48]
+Ne-ENV
+Ours
+6.91
+14.77
+12.84
+11.95
+16.13
+11.88
+15.87
+11.59
+14.84
+16.19
+6.75
+9.64
+12.89
+9.26
+17.16
+6.62
+9.61
+9.21
+15.56
+17.48
+11.29
+17.64
+17.95
+14.48
+18.30
+6.22
+9.74
+9.02
+12.94
+13.40
+6.27
+8.77
+9.12
+16.20
+17.05
+6.83
+12.58
+12.62
+14.43
+16.27
+6.14
+9.14
+8.54
+14.14
+16.44
+PhySG∗ [46]
+SG-ENV [46]
+NeRFactor∗ [48]
+Ne-ENV
+Ours
+24.59
+29.73
+29.30
+28.60
+31.57
+24.77
+29.86
+28.78
+29.56
+30.84
+26.52
+32.13
+30.58
+29.76
+34.43
+24.82
+31.01
+29.31
+30.75
+33.77
+25.65
+29.46
+30.10
+29.07
+31.07
+27.24
+32.34
+30.66
+32.05
+35.28
+24.38
+27.20
+27.50
+28.07
+31.11
+24.04
+25.88
+27.00
+26.01
+28.59
+25.81
+27.70
+28.11
+28.33
+32.11
+Metallic
+Rendering
+Combined-objects
+– Env-castel : an environment map of a castel;
+– Mix-city: Env-city plus two point lights and two area lights;
+– Mix-studio: Env-studio plus two point lights and two area lights;
+– Mix-castel : Env-castel plus two point lights and two area lights.
+Each scene contains 96 images, where images {9, 18, 30, 41, 50, 62, 73, 82, 94} are
+used for evaluation and the remaining 87 images are used for training. The image
+resolution is set to 1600 × 1200. We use Blender [9] to render the HDR images
+by ray tracing. Position maps and normal maps at all viewpoints are rendered to
+serve as the geometry input for the system. Meanwhile, per-view ground truth
+base color, metallic and roughness maps are provided for quantitative evaluation.
+Results. We use the PSNR score as our evaluation metric. Quantitative comparisons on 1) base color, 2) metallic, 3) roughness and 4) novel view synthesis
+are shown in Table 1. Our method consistently outperforms other methods with
+a large margin in terms of the novel view rendering quality. For material estimation, we found that if single objects and environment map light sources are
+given, SG-Env [46] is able to generate comparable results with ours. However, in
+the case of multiple objects or mixed light sources, the estimation quality of SGEnv will drop signiﬁcantly. This is because the environment map representation
+cannot model mixed light sources of point and area lights. Also, indirect lights
+and occlusions within multiple objects are not handled by SG-Env. In contrast,
+710
+Y. Yao et al.
+Table 2. Quantitative results on DTU [12] and BlendedMVS [39] Datasets. The table
+shows PSNR scores of novel view renderings of test images. Our method consistently
+outperforms the other methods in terms of the rendering quality.
+DTU [12]
+BlendedMVS [39]
+scan-1 scan-11 scan-37 scan-75 scan-97 bull
+cam
+dog
+gold
+statue stone
+PhySG∗ [46]
+20.40
+20.78
+20.30
+16.03
+19.86
+21.64
+18.11
+20.70
+19.06
+19.74
+21.22
+SG-ENV [46]
+22.18
+21.56
+21.71
+18.06
+21.09
+22.51
+20.14
+22.06
+19.44
+20.79
+22.31
+NeRFactor∗ [48] 23.68
+23.43
+23.86
+19.89
+22.10
+21.87
+20.03
+21.54
+19.47
+20.51
+22.98
+Ne-ENV
+23.77
+23.79
+22.87
+19.52
+21.51
+22.17
+20.17
+21.73
+19.66
+20.55
+23.08
+NeILF (Ours)
+24.79 24.33
+24.44
+23.46
+23.96
+24.93 22.10 22.36 20.80 21.51 24.22
+Fig. 3. Qualitative results on the real-world DTU and BlendedMVS datasets. Our
+method successfully removes high lights in the base color and produces visually plausible results of roughness and metallic.
+our NeILF representation can robustly deal with mixed lightings and complex
+scene geometries. Qualitative results are shown in Fig. 2.
+5.3
+Test on Real-world Scenes
+We then test our method on two real-world datasets, namely DTU [12] and
+BlendedMVS [39] datasets. DTU dataset is captured in a lab setting with a ﬁxed
+lighting and camera trajectory, while BlendedMVS contains a variety of indoor
+and outdoor scenes captured by diﬀerent users. As the two datasets provide only
+LDR images, the learned HDR-LDR mapping described in Sect. 4.2 is applied
+for the loss computation. For each scene, we select 5 images {2, 12, 17, 30, 34} for
+testing and the rest of the images for training.
+NeILF
+Input image
+Base color
+Roughness
+With Smoothness
+Metallic
+Base color
+Roughness
+711
+Metallic
+Without Smoothness
+Fig. 4. Qualitative comparisons on with and without the proposed bilateral smoothness
+regularization.
+It is noteworthy that unlike in the synthetic dataset, here we use multi-view
+stereo methods to generate the geometry input rather than directly using the
+ground truth. For DTU datatset, we use Vis-MVSNet [44] to generate the dense
+3D point cloud and SPSR [15] to recover the mesh surface. For BlendedMVS
+dataset, we use original images and the provided reference mesh geometry as
+our inputs. By doing so, our method can be viewed as an extension to nowadays
+3D reconstruction pipelines.
+Quantitative results are shown in Table 2 and qualitative results compared
+with SG-ENV are shown in Fig. 3. The proposed method produces both the best
+rendering PSNR and the most visually pleasing BRDF in all selected scenes. We
+believe the proposed method can be integrated into traditional 3D reconstruction
+pipelines for relightable mesh model reconstruction.
+5.4
+Ablation Study
+In this section, we analyze several design choices of the proposed framework.
+The ablation studies are conducted on the synthetic dataset, and we report the
+average scores over all scenes to compare diﬀerent settings.
+Ray Sample Number. We ﬁrst study the inﬂuence of the ray sample number
+for material estimation quality. The ray sample number is decreased from SL =
+128 to SL = 64 and SL = 32. As shown in Table 3, higher sampling number will
+lead to better reconstruction results. In our default setting, we choose SL = 128
+to better balance the quality and the VRAM/runtime consumption.
+712
+Y. Yao et al.
+Random Sample. Next, we compare the ﬁxed Fibonacci sample described in
+Sect. 4.1 with the random uniform sample commonly used in computer graphics.
+It is shown in Table 3 that the random sample would lead to worse results,
+showing that it is crucial to precisely discretize the rendering equation in the
+diﬀerentiable rendering.
+Regularizations. We also study the eﬀectiveness of the two regularizations proposed in Sect. 3.3. We ﬁnd that the bilateral smoothness is essential for material
+estimation of real-world scenes, where the roughness and metallic will be significantly improved if the smoothness is applied (Fig. 4).
+Learned Gamma. Lastly, we compare the proposed learned gamma in Sect. 4.2
+1
+. In BlendedMVS dataset, the learned gamma produces
+with the ﬁxed γ = 2.2
+a mean PSNR score of 22.65, which slightly outperforms the score of the ﬁxed
+gamma (22.51), showing that the learned adjustment might be a better choice.
+On the other hand, we also ﬁnd that Table 3. Ablation studies. Average
+the two heuristics have limited inﬂu- scores among all synthetic scenes are
+ence to quantitative results of the syn- reported.
+Base
+Meta
+Roug Rend
+thetic dataset. We believe this is because
+16.30 17.22 16.49 32.09
+the vanilla NeILF already produces high- S = 128
+15.20 16.47 18.88 31.40
+quality estimations for synthetic scenes. In S = 64
+S = 32
+13.40 16.27 19.49 30.57
+our default setting, we keep the two regu- Rand. Samp 12.45 15.11 18.10 29.73
+larizations for all scenes but we encourage
+users to selectively apply the two terms depending on diﬀerent characteristics of
+input scenes.
+6
+Discussions
+6.1
+Comparison with NeRF Optimization
+In this section, we compare the proposed NeILF with the neural radiance
+ﬁeld [21]. We show that the two frameworks share similarities in many aspects,
+and thus provide readers an intuitive explanation of why NeILF can successfully
+disentangle the complex material and lighting in the joint optimization.
+Lighting Representations. NeRF [21] represents the scene appearance as the
+neural radiance ﬁeld. While the radiance is physically diﬀerent with the incident
+light, their complexities are completely the same: both NeILF and NeRF take a
+3D position x and a direction ω as inputs, and returns a RGB value as output.
+Spatially-varying Properties. NeILF aims to recover surface materials as
+BRDF properties, while NeRF jointly optimizes the scene geometry as a density
+ﬁeld. Both our BRDF and NeRF’s density MLPs take only a 3D position x
+NeILF
+713
+as input, and return diﬀerent spatial properties as outputs. Implementationwise, the only diﬀerence is that our BRDF is consist of a 5D parameter vector,
+while the density value is a 1D scalar. Nevertheless, the two spatially-varying
+properties are very similar and their complexities are comparable.
+Rendering Formulations. Our method applies the surface rendering to compute the reﬂected light from a surface point, while NeRF adopts the volume
+rendering to get the accumulated color along a viewing ray. On the one hand,
+NeILF requires the incident light integration over the hemisphere; on the other
+hand, NeRF requires alpha composition along the ray. To render a pixel, NeILF
+needs to sample the BRDF MLP once and the incident light MLP for multiple
+times, while NeRF does the same on the density and radiance MLPs.
+Reconstruction Ambiguities. The geometry-appearance ambiguity is
+addressed in NeRF++ [47]. Similarly, we analyze the material-lighting ambiguity in the NeILF optimization. It has been reported that with proper geometry regularizations [28,36,40], NeRF is able to produce high-quality geometry
+outputs. In contrast, we also show that the proposed bilateral smoothness can
+signiﬁcantly improve the roughness and metallic quality for real-world scenes
+(Fig. 4).
+6.2
+Limitations and Future Works
+While the proposed method has already shown promising results for material
+estimation, the current pipeline still contains several limitations that could be
+further addressed in future works.
+Geometry Optimization. The major limitation of our method is that the
+geometry is required to be given in advance. Although we have shown that
+meshes from 3D reconstruction pipelines are qualiﬁed for real-world DTU and
+BlendedMVS scenes, it is still desired that we can jointly optimize the scene
+geometry during training. Possible directions include displacement/normal map
+estimation and the diﬀerentiable surface reﬁnement [41,43,45,46].
+High-intensity Singularities in Light Sources. Rippled noises would sometimes occur in our estimation if direct lights contain high-intensity singularities.
+One example is the metallic result of Mix-studio in Fig. 2. It is worth investigating better training losses/strategies to mitigate this problem in the future.
+Running Speed. Similar to NeRF, our method requires frequent MLP samplings and the training process is time consuming. Our current implementation
+takes around 1.5 h to estimate the BRDF of a given scene (details in Sect. 4.3).
+We hope that in the future, explicit Octree [42], spherical harmonics [1,37] or
+neural hashing [23] can be applied to speed up the NeILF optimization.
+714
+Y. Yao et al.
+7
+Conclusions
+We have presented a diﬀerentiable rendering framework for material and lighting
+estimation. Compared with the environment map approximation, the proposed
+neural incident light ﬁeld is capable of modelling the lighting condition of any
+static scenes, making it possible to estimate qualiﬁed material properties even for
+scenes with complex lightings and geometries. The proposed method strictly follows the physically-based rendering equation, and jointly optimizes material and
+lighting through the diﬀerentiable rendering process. We have intensively evaluated our method on our in-house synthetic dataset, the DTU MVS dataset, and
+the real-world BlendedMVS scenes. Our method is able to outperform previous
+methods by a signiﬁcant margin in terms of the novel view rendering quality,
+setting a new state-of-the-art for image-based material and lighting estimation.
+References
+1. Yu, A., Fridovich-Keil, S., Tancik, M., Chen, Q., Recht, B., Kanazawa, A.: Plenoxels: radiance ﬁelds without neural networks. arXiv:2112.05131 (2021)
+2. Azinovic, D., Li, T.M., Kaplanyan, A., Niessner, M.: Inverse path tracing for joint
+material and lighting estimation. In: CVPR (2019)
+3. Bi, S., et al.: Deep reﬂectance volumes: relightable reconstructions from multi-view
+photometric images. In: ECCV (2020)
+4. Bi, S., Xu, Z., Sunkavalli, K., Kriegman, D., Ramamoorthi, R.: Deep 3D capture:
+geometry and reﬂectance from sparse multi-view images. In: CVPR (2020)
+5. Boss, M., Braun, R., Jampani, V., Barron, J.T., Liu, C., Lensch, H.: Nerd: neural
+reﬂectance decomposition from image collections. In: ICCV (2021)
+6. Boss, M., Jampani, V., Braun, R., Liu, C., Barron, J., Lensch, H.P.: Neural-pil:
+neural pre-integrated lighting for reﬂectance decomposition. In: NeurIPS (2021)
+7. Burley, B., Studios, W.D.A.: Physically-based shading at disney. In: ACM SIGGRAPH (2012)
+8. Chen, W., et al.: DIB-R++: learning to predict lighting and material with a hybrid
+diﬀerentiable renderer. In: NeurIPS (2021)
+9. Community, B.O.: Blender - a 3D modelling and rendering package. Blender Foundation, Stichting Blender Foundation, Amsterdam (2018). http://www.blender.org
+10. Dong, Y., Chen, G., Peers, P., Zhang, J., Tong, X.: Appearance-from-motion: recovering spatially varying surface reﬂectance under unknown lighting. ACM Trans.
+Graph. 33(6), 1–12 (2014)
+11. Guo, K., et al.: The relightables: volumetric performance capture of humans with
+realistic relighting. ACM Trans. Graph. 38(6), 1–19 (2019)
+12. Jensen, R., Dahl, A., Vogiatzis, G., Tola, E., Aanæs, H.: Large scale multi-view
+stereopsis evaluation. In: CVPR (2014)
+13. Kajiya, J.T.: The rendering equation. In: Proceedings of the 13th Annual Conference on Computer Graphics and Interactive Techniques (1986)
+14. Kato, H., et al.: Diﬀerentiable rendering: a survey. arXiv preprint arXiv:2006.12057
+(2020)
+15. Kazhdan, M., Hoppe, H.: Screened poisson surface reconstruction. ACM Trans.
+Graph. 32(3), 1–13 (2013)
+16. Kingma, D.P., Ba, J.: Adam: a method for stochastic optimization. In: ICLR (2015)
+NeILF
+715
+17. Li, Z., Xu, Z., Ramamoorthi, R., Sunkavalli, K., Chandraker, M.: Learning to reconstruct shape and spatially-varying reﬂectance from a single image. ACM Trans.
+Graph. 37(6), 1–11 (2018)
+18. Liu, L., Gu, J., Lin, K.Z., Chua, T.S., Theobalt, C.: Neural sparse voxel ﬁelds. In:
+NeurIPS (2020)
+19. Liu, S., Zhang, Y., Peng, S., Shi, B., Pollefeys, M., Cui, Z.: Dist: rendering deep
+implicit signed distance function with diﬀerentiable sphere tracing. In: CVPR
+(2020)
+20. Liu, S., Saito, S., Chen, W., Li, H.: Learning to infer implicit surfaces without 3D
+supervision. arXiv preprint arXiv:1911.00767 (2019)
+21. Martin-Brualla, R., Radwan, N., Sajjadi, M.S., Barron, J.T., Dosovitskiy, A., Duckworth, D.: Nerf in the wild: neural radiance ﬁelds for unconstrained photo collections. In: CVPR (2021)
+22. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: representing scenes as neural radiance ﬁelds for view synthesis. In: ECCV
+(2020)
+23. Müller, T., Evans, A., Schied, C., Keller, A.: Instant neural graphics primitives
+with a multiresolution hash encoding. arXiv preprint arXiv:2201.05989 (2022)
+24. Munkberg, J., et al.: Extracting triangular 3D models, materials, and lighting from
+images. arXiv preprint arXiv:2111.12503 (2021)
+25. Nam, G., Lee, J.H., Gutierrez, D., Kim, M.H.: Practical svbrdf acquisition of 3D
+objects with unstructured ﬂash photography. ACM Trans. Graph. 37(6), 1–12
+(2018)
+26. Niemeyer, M., Mescheder, L., Oechsle, M., Geiger, A.: Diﬀerentiable volumetric
+rendering: learning implicit 3D representations without 3D supervision. In: CVPR
+(2020)
+27. Nimier-David, M., Dong, Z., Jakob, W., Kaplanyan, A.: Material and lighting
+reconstruction for complex indoor scenes with texture-space diﬀerentiable rendering (2021)
+28. Oechsle, M., Peng, S., Geiger, A.: Unisurf: unifying neural implicit surfaces and
+radiance ﬁelds for multi-view reconstruction. In: ICCV (2021)
+29. Park, J.J., Holynski, A., Seitz, S.M.: Seeing the world in a bag of chips. In: CVPR
+(2020)
+30. Pont, S.C., Te Pas, S.F.: Material-illumination ambiguities and the perception of
+solid objects. Perception 35(10), 1331–1350 (2006)
+31. Schmitt, C., Donne, S., Riegler, G., Koltun, V., Geiger, A.: On joint estimation of
+pose, geometry and svbrdf from a handheld scanner. In: CVPR (2020)
+32. Sitzmann, V., Martel, J., Bergman, A., Lindell, D., Wetzstein, G.: Implicit neural
+representations with periodic activation functions. In: NeurIPS (2020)
+33. Srinivasan, P.P., Deng, B., Zhang, X., Tancik, M., Mildenhall, B., Barron, J.T.:
+Nerv: neural reﬂectance and visibility ﬁelds for relighting and view synthesis. In:
+CVPR (2021)
+34. Walter, B., Marschner, S., Li, H., Torrance, K.: Microfacet models for refraction
+through rough surfaces. In: EGSR (2007)
+35. Wang, J., Ren, P., Gong, M., Snyder, J., Guo, B.: All-frequency rendering of
+dynamic, spatially-varying reﬂectance. In: ACM SIGGRAPH Asia (2009)
+36. Wang, P., Liu, L., Liu, Y., Theobalt, C., Komura, T., Wang, W.: Neus: learning
+neural implicit surfaces by volume rendering for multi-view reconstruction (2021)
+37. Wizadwongsa, S., Phongthawee, P., Yenphraphai, J., Suwajanakorn, S.: Nex: realtime view synthesis with neural basis expansion. In: CVPR (2021)
+716
+Y. Yao et al.
+38. Xia, R., Dong, Y., Peers, P., Tong, X.: Recovering shape and spatially-varying
+surface reﬂectance under unknown illumination. ACM Trans. Graph. 35(6), 1–12
+(2016)
+39. Yao, Y., et al.: Blendedmvs: a large-scale dataset for generalized multi-view stereo
+networks. In: CVPR (2020)
+40. Yariv, L., Gu, J., Kasten, Y., Lipman, Y.: Volume rendering of neural implicit
+surfaces. arXiv preprint arXiv:2106.12052 (2021)
+41. Yariv, L., et al.: Multiview neural surface reconstruction by disentangling geometry
+and appearance. In: NeurIPS (2020)
+42. Yu, A., Li, R., Tancik, M., Li, H., Ng, R., Kanazawa, A.: PlenOctrees for real-time
+rendering of neural radiance ﬁelds. In: ICCV (2021)
+43. Zhang, J., et al.: Critical regularizations for neural surface reconstruction in the
+wild. In: CVPR (2022)
+44. Zhang, J., Yao, Y., Li, S., Luo, Z., Fang, T.: Visibility-aware multi-view stereo
+network. In: BMVC (2020)
+45. Zhang, J., Yao, Y., Quan, L.: Learning signed distance ﬁeld for multi-view surface
+reconstruction. In: ICCV (2021)
+46. Zhang, K., Luan, F., Wang, Q., Bala, K., Snavely, N.: Physg: inverse rendering with
+spherical gaussians for physics-based material editing and relighting. In: CVPR
+(2021)
+47. Zhang, K., Riegler, G., Snavely, N., Koltun, V.: Nerf++: analyzing and improving
+neural radiance ﬁelds. arXiv preprint arXiv:2010.07492 (2020)
+48. Zhang, X., Srinivasan, P.P., Deng, B., Debevec, P., Freeman, W.T., Barron, J.T.:
+NeRFactor: neural factorization of shape and reﬂectance under an unknown illumination. ACM Trans. Graph. 40(6), 1–18 (2021)

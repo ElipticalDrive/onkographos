@@ -1,0 +1,568 @@
+Contribute to taojin-6/volumetric_kit_recon development by creating an account on GitHub.
+
+feat(volume,tsdf): a triangle mesh into the TSDF volume, signed or as a shell by taojin-6 · Pull Request #81 · taojin-6/volumetric_kit_recon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Aug 31, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Mesh → TSDF, rebased onto main after #95/#96. #93 (S1) was reviewed and merged into this branch, so the PR now carries both stages. #94, the ground-truth round trip, was merged here too, but its test is dropped in the last commit (below). This description replaces S0's.
+Nothing on main depends on this. The codec runs on fused RGB-D without it. What it adds is a second way into the grid the codec encodes: a mesh, or a mesh sequence converted frame by frame, the way the research codec's e2e_obj fed its encoder.
+What lands
+S0: VoxelHashMap::allocate_from_triangles (the 2026-08-31 decision)
+A block is allocated when its centre lies within trunc_dist + its half-diagonal of some triangle.
+The work unit is the candidate block, not the triangle, so one lane can't own a 250 000-block quad.
+The host count is public, volume::triangle_candidate_offsets. The decode and band test are volume/shaders/triangle_candidates.glsl, so S1 bins over exactly what S0 allocates.
+S1: tsdf::MeshIntegrator (the 2026-09-27 decision)
+Shell: d − σ, for any mesh.
+Signed: ±d, signed by the closest triangle's face normal (the research codec's rule). It has no topology pass, since the field is the codec's input, not a reconstruction.
+What Signed gives up, stated on MeshSdfMode::Signed:
+edges under 90°
+a skirt past an open rim
+meshes wound inside out
+90° edges off the grid's axes (see the last commit)
+Binning: triangles are binned per block, a count and then a fill over S0's work items. The fill replays the count's slots, bins are bounded, and the write splits into bounded dispatches.
+Refusal: a missing band block is refused before anything is written.
+Determinism: ties break on the triangle index, so the same mesh writes the same bytes.
+Cost: on an 81 920-triangle sphere at scan density (M5 Max, Release), 12.8 ms to write in either mode, 10.8 ms of it on the GPU, after 14.2 ms to allocate.
+Since the stacked PRs merged
+The rebase. Only CHANGELOG.md, CLAUDE.md and DECISIONS.md conflicted, at four stops. Both sides were kept at each, in date order, and main's rewritten On sensor paragraph was taken over the stale copy. No code conflicted.
+The round-trip test is dropped (47e405c). codec_decoder_test already takes the codec end to end against ground truth: an analytic sphere, the observed set exactly, the field within the transform's bound, and the decoded mesh against the sphere. recon_tsdf_mesh_integrate covers the conversion. So the round trip added little, and cost about five minutes under the sanitizers.
+Before dropping it, I ported it onto Encoder / Decoder and eval to check it against current main. It passed, and its figures at #95's defaults were 0.7% of raw and 0.42 mm RMS on a 0.3 m sphere. The port isn't kept.
+Two of its findings stay in the decision entry:
+Signed's second limit: past a corner of a cube turned off the axes, a tied face's normal is perpendicular to the offset and rounding picks the side. That extracted 72 stray vertices, up to 26 mm off.
+The research codec's published figures appear to score its output against its own uncompressed conversion, while Draco was scored against the source meshes.
+eval's TODO(eval) about the test's copy of the metric goes with it.
+The ubuntu-26.04 failure, and its fix (dcc8588)
+The first CI run failed both 26.04 legs. recon_tsdf_mesh_integrate's divided sheet (320 000 triangles) hit NVIDIA Xid 8 / 109, the driver's 7-second watchdog, on taojin-home-desktop's RTX 5090. It reproduced alone on the idle GPU, so it wasn't load.
+Per-dispatch timers on that GPU found the culprit: S0's allocation. The hash table's bucket spin locks lived in host-visible memory, like every buffer the map owns, so on a discrete GPU each spin was an atomic across PCIe. Apple's unified memory hides this entirely.
+sheet (triangles)
+RTX 5090, locks host-visible
+locks device-local
+M5 Max
+5 000
+1 969 ms
+3.4 ms
+8.6 ms
+80 000
+10 861 ms
+14.7 ms
+17.7 ms
+320 000
+past the watchdog
+24.4 ms
+19.4 ms
+The fix: bucket_mutex is now allocated device-local through a new core::device_storage_buffer, hoisted from the integrator, which already used it. Only hash_init and the kernels touch the locks, so they need no staging. Every allocation path gains, not just triangles.
+Verified on the RTX 5090, in the ubuntu:26.04 CI image: 37/37 pass, and recon_tsdf_mesh_integrate takes 1.34 s (it was 14–22 s, then the hang).
+Still open: S1's per-slot bin counters are the same pattern at a smaller scale, 115 / 143 ms on the RTX 5090 against ~5 ms on the Mac. They're recorded as a TODO(tsdf).
+Docs: a measured lesson and a key gotcha in CLAUDE.md record all of this.
+Verification
+macOS, M5 Max, Release: 37/37. RTX 5090 in the ubuntu:26.04 CI image, Release: 37/37.
+recon_volume_allocate_triangles, recon_tsdf_mesh_integrate and recon_eval_mesh_distance pass under ASan + UBSan (halting on the first error).
+Pre-commit hooks pass.
+The decision entries, CLAUDE.md and the CHANGELOG carry the rest, including #93's review findings and mutation list.
+🤖 Generated with Claude Code
+taojin-6
+self-assigned this
+Aug 31, 2026
+taojin-6
+force-pushed
+the
+feat/volume-allocate-triangles
+branch
+from
+5cd2c50 to
+aa97186
+Compare
+September 2, 2026 23:11
+taojin-6
+force-pushed
+the
+feat/volume-allocate-triangles
+branch
+from
+aa97186 to
+c058df2
+Compare
+September 28, 2026 01:18
+This was referenced Sep 28, 2026
+feat(tsdf): write a mesh's distance field, signed or as a shell
+#93
+Merged
+test(codec): round-trip a mesh-derived volume against its source mesh
+#94
+Merged
+taojin-6
+force-pushed
+the
+feat/volume-allocate-triangles
+branch
+from
+ca827a1 to
+47e405c
+Compare
+September 28, 2026 05:18
+taojin-6
+changed the title
+feat(volume): allocate blocks from a triangle mesh
+feat(volume,tsdf): a triangle mesh into the TSDF volume, signed or as a shell
+Sep 28, 2026
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+fix(volume): keep the hash table's bucket locks in device memory
+…
+dcc8588
+```
+Every buffer the map owned was host-visible, the locks included. On a
+discrete GPU each spin was then an atomic across PCIe. On an RTX 5090,
+allocating a 5 000-triangle sheet took 1.97 s against 3.4 ms device-local,
+and the tsdf test's 320 000-triangle divided sheet ran past the driver's
+7-second watchdog (NVIDIA Xid 8 / 109). That failed #81's ubuntu-26.04
+legs, and it reproduced alone on an idle GPU, so it was never load. Apple's
+unified memory hides the difference entirely.
+
+Only hash_init and the kernels touch the locks, so they need no staging.
+core gains device_storage_buffer, hoisted from the mesh integrator, which
+already used it for its device-only buffers. On the RTX 5090, in the CI
+image, recon_tsdf_mesh_integrate now takes 1.34 s, and all 37 tests pass.
+
+The bin counters are the next instance of the same cost (115 / 143 ms for
+the sheet, ~5 ms on an M5 Max). They are recorded in TODO(tsdf), and as a
+measured lesson with a key gotcha.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+and others
+added 6 commits
+September 28, 2026 02:38
+feat(volume): allocate blocks from a triangle mesh
+…
+457251d
+```
+The codec's first stage needs the blocks a mesh's truncation band covers.
+allocate_from_points over the vertices looks like it already does this and
+does not: it dilates each point into the (2*tb+1)^3 cube, one block (40 mm)
+wide at the defaults, so any triangle wider than that leaves an unallocated
+hole through its middle -- which is most triangles in any mesh that is not a
+dense scan.
+
+allocate_from_triangles allocates a block when its centre lies within
+trunc_dist plus the block's half-diagonal of some triangle. Conservative, so
+no block holding a voxel in the band is missed; measured rather than dilated,
+so a large slanted triangle allocates a sheet instead of the solid interior
+of its bounding box.
+
+The work unit is the candidate BLOCK, not the triangle. One thread per
+triangle is unusable because triangle size is unbounded -- a 20 m floor quad
+at 5 mm voxels covers ~250k blocks, so one lane would own a quarter-million
+bucket-locked inserts, the dispatch shape that hung an M5 iPad in the
+2026-08-08 entry. The host counts each triangle's candidate blocks into an
+exclusive prefix sum; a work item binary-searches it and handles exactly one
+block, whatever the mesh looks like.
+
+That host pass is also the only place two other things can happen: an index
+is bounds-checked (the kernel indexes vertices directly and
+robustBufferAccess is enabled nowhere here), and zero-area triangles are
+dropped -- the one input that would divide by zero in the closest-point
+solve, which is what lets the GLSL carry no per-lane guard. Non-finite
+triangles go with them. Neither is an error; a mesh file routinely carries a
+few.
+
+The closest-point primitive lands in core/shaders/triangle_common.glsl rather
+than volume, for the reason core/math/vector_types.hpp is there: it carries no
+tier's concepts, and mesh-to-SDF will evaluate the field with the same
+function, so the blocks allocated here and the voxels written there cannot
+drift apart.
+
+Tested against a host brute force over every voxel of every candidate block,
+using an independent closest-point formulation. Verified by mutation: dropping
+the distance prune, not growing the band, and transposing the work-item decode
+each fail the suite.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AcpQBQFfBZzUE3AYku1GwG
+```
+docs(volume): stop framing triangle allocation as the codec's input
+…
+4edb08e
+```
+The 2026-09-26 codec decision has the codec encode a fused grid, so the
+entry's opening claim that the codec needs a mesh in the volume no longer
+holds. The motivation is the mesh-to-SDF pass that consumes these blocks.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+refactor(volume): share the triangle candidate decomposition
+…
+50dc259
+```
+allocate_from_triangles counted each triangle's candidate blocks on the
+host and decoded and pruned them in its kernel. Both halves are now
+shared, so the mesh integrator can bin triangles into exactly the blocks
+this allocates:
+
+- volume::triangle_candidate_offsets (public) is the host count, with its
+  bounds check and its degenerate / non-finite drop.
+- volume/shaders/triangle_candidates.glsl is the binary search, the
+  work-item decode and the band test.
+
+core's closest-point routine also reports which vertex, edge or face the
+point lies on (vrClosestPointOnTriangleFeature), for the signed pass.
+vrClosestPointOnTriangle wraps it, with the same arithmetic, so no
+allocation changes.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+feat(tsdf): write a mesh's distance field, signed or as a shell
+…
+5a2aa20
+```
+tsdf::MeshIntegrator writes a triangle mesh's truncated distance field
+into a grid's tsdf and weight, in one of two modes:
+
+- Signed: +-distance, signed by the angle-weighted pseudonormal of the
+  closest feature (Baerentzen & Aanaes), not the nearest face's normal
+  the prior engine used, which signs sharp edges wrongly. For a closed,
+  manifold, consistently wound mesh. The host welds a soup by exact
+  position and refuses non-manifold edges and vertices and flipped
+  winding. A voxel nearest an open rim is left unobserved.
+- Shell: distance minus a half-thickness, for any mesh. This is the
+  unsigned offset field of Xu & Barbic (GI 2014).
+
+Every voxel of every band block is overwritten: weight 1 within
+trunc_dist, and the codec inverse's fresh zeros elsewhere. The band must
+be allocated by allocate_from_triangles; a missing block is refused
+before anything is written. Triangles are binned per block by a count
+and a fill dispatch over the allocation's own work items, so no voxel
+measures the whole mesh, and ties break on the triangle index so the
+same mesh writes the same bytes.
+
+The test checks every written voxel against a brute-force host
+reference: an independent closest point, and the winding number for
+inside/outside. 14 of 16 planted bugs are caught; the tie-break and one
+equivalent mutant are not.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+docs(tsdf): record what mesh integration costs on a scan-dense mesh
+…
+286cb19
+```
+Measured once on an 81 920-triangle sphere 1 m across (M5 Max, Release):
+8.6 ms to allocate, 12.9 ms to write as a shell, 22.3 ms signed. The GPU
+half is ~11 ms either way; signed's extra host time is the topology pass.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+fix(tsdf): replay the count pass's slots, bound the bins, and close f…
+…
+d16358c
+```
+…our holes in signed topology
+
+Addresses the fourteen findings of the PR 93 review; DECISIONS.md records
+each under the 2026-09-27 entry.
+
+- mesh_bin: the count pass records each work item's slot and each binned
+  slot's coordinate, and the fill replays them, so every bin fills exactly
+  and the integrate pass never reads an unwritten entry as a triangle
+  index. That also drops the fill's repeated probe, the whole-map
+  compaction and the host's copy of the counts.
+- A bin past MeshIntegrator::kMaxBinTriangles is refused, and the write is
+  split into dispatches of at most kMaxDispatchBinEntries bin entries
+  (MeshIntegrateStats::dispatches).
+- triangle_common: the face-interior guard is against zero, not 1e-12 m^4,
+  which collapsed every sub-millimetre triangle onto a corner; the
+  barycentrics are clamped onto the triangle.
+- Signed topology: a zero-length double normal contributes nothing rather
+  than a NaN; zero-area triangles keep their adjacency, so a sliver closing
+  a T-junction is not three rim edges; a rim vertex is not a pinch; and a
+  closed mesh with negative enclosed volume is refused as inside out.
+- The missing-block message counts triangle-block pairs, the O(1) binding
+  checks run first, triangle_candidate_offsets refuses a null mesh before
+  allocating and takes a null `who`, the bins and item slots are
+  device-local, and voxel_hash_map.cpp drops two dead includes.
+- The class notes that the blocks it writes are not reported as dirty.
+
+New fixtures for each fix; eight of nine planted reversions fail them.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+test(sensor): keep the GPU tests off the hash map's lock watchdog on …
+…
+c347c23
+```
+…NVIDIA
+
+recon_sensor_gpu_frame_prep's fusion check allocated from a 320x240
+flat wall, and on the RTX 5090 CI host its bucket locks, host-visible
+until PR #81, contended past the driver's 7 s watchdog: Xid 109 CTX
+SWITCH TIMEOUT, a failed test on 24.04 Release and a lost runner on
+22.04 Debug. It now fuses an 80x60 depth camera beside the 320x240
+colour one, a tilted surface, and both device-input tests retry rounds
+that only lost lock races, as fuse_frame.hpp does. Five runs on that
+host passed with no Xid.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+and others
+added 7 commits
+September 28, 2026 02:38
+refactor(tsdf): sign by the closest triangle's normal, and drop the t…
+…
+bdc1add
+```
+…opology pass
+
+The mesh-to-TSDF conversion feeds the codec (a block's SDF, DCT, drop the
+high frequencies, quantize, entropy-code); it is not a reconstruction of the
+mesh to be measured against it. The research codec produced its results with
+the closest-face rule and no topology, so Signed now uses that rule too.
+
+Removed: the host topology pass (weld, edge adjacency, fans, angle-weighted
+pseudonormals in double), its refusals (non-manifold edges and vertices,
+flipped winding, inside-out), MeshIntegrateStats::boundary_edges, the
+pseudonormal bindings, and the feature-reporting closest point. Signed now
+costs what Shell does: 12.8 ms wall against 22.6 on the 82k-triangle sphere.
+
+What it gives up, stated on MeshSdfMode::Signed: past an edge sharper than
+90 degrees the lowest-indexed of the tied faces decides the sign, an open
+mesh grows a skirt past its rim, and an inside-out mesh comes back inside
+out. The test checks the sign wherever the tied faces agree and the distance
+everywhere.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+test(codec): round-trip a mesh-derived volume against its source mesh
+…
+a5befec
+```
+A mesh goes through tsdf::MeshIntegrator, the forward DCT, v1 frame bytes
+and back, the inverse DCT and marching cubes. The decoded surface is then
+measured against the source mesh, for accuracy (vertex to source) and
+coverage (source to decoded surface, where a hole shows). The
+uncompressed volume's surface gets the same measurement, as the floor.
+A fused scan cannot be measured this way, since room0 has no
+ground-truth mesh beside it.
+
+At the default parameters, on a 0.3 m sphere (667 blocks), the frame is
+21.7 KB, 0.8% of the raw tsdf + weight. The decoded surface is 0.39 mm
+RMS and 1.42 mm at worst from the source, against 0.018 / 0.155 mm
+uncompressed. The bounds sit at about twice those figures (M5 Max,
+Release).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+docs(codec): record the ground-truth round trip's figures
+…
+b3abce2
+```
+The round trip gives the codec a fixture with ground truth. At the
+default parameters a 0.3 m sphere's frame is 0.8% of the raw tsdf +
+weight and decodes to 0.39 mm RMS from the source mesh, against 0.018 mm
+uncompressed.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+test(codec): check the frame decodes losslessly, and sample coverage …
+…
+8cd9662
+```
+…finely enough to see a hole
+
+Addresses the review of the ground-truth round trip.
+
+- The decoded frame is compared with the one written: coefficients,
+  masks, params and trunc_dist. A surface cannot see a field scaled as a
+  whole, so a reader that doubled every coefficient passed; it now fails
+  at the coefficient comparison.
+- Coverage samples every half voxel, not every two. With one surface
+  voxel's mask bit cleared on the sphere, the old lattice passed 3 of 12
+  placements; the new one reads at least 4.27 mm in all 12, against the
+  2.5 mm bound.
+- The cube's bounds were 1.4-1.6x its figures and are now about 2x, with
+  kReach raised to 4 cm to stay above them. K = 512 is bounded on its own
+  rather than against K = 32, which is not a property of this metric.
+- The integrator's stats are checked (every triangle took part, blocks
+  written == blocks coded), a NaN vertex is refused before a sort or a hash cell
+  sees it, and a missing decoded coord is a FAIL line rather than a throw.
+- Each mesh is fused and its source hashed once, then coded at every
+  params; the ring search stops at the exact distance to the unvisited
+  cells. 0.58 s in Release and 43 s under ASan + UBSan, from 128 s with
+  the finer lattice alone.
+- Mesh, corner, closest_point, orient_outward and dented_cube move to
+  tests/test_meshes.hpp, shared with the volume and tsdf triangle tests.
+  This test's copy of closest_point returned NaN for a zero-length edge.
+- grid_params() starts from VoxelGridParams::defaults(), the raw size is
+  named once, the printed voxels are coverage's, the header says coverage
+  is measured to triangles, and a TODO(codec) marks the move onto
+  Encoder / Decoder.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+test(codec): measure a plain cube, which closest-face signing handles
+…
+6b36c77
+```
+Rebased onto #93, whose Signed now takes each voxel's sign from the
+closest face. The dented cube is outside that rule: part of the region
+past its 56-degree edges reads the wrong side, and its uncompressed
+surface grew stray sheets up to 40 mm off the source, failing the floor
+bound. The sphere's figures are unchanged.
+
+A plain cube turned off the grid's axes fails too, more quietly. Beyond
+a corner, on the line continuing an edge, two tied faces' normals are
+perpendicular to the offset and rounding picks the sign: 72 stray
+vertices up to 26 mm off. So the fixture is the plain cube, axis-aligned
+and off the voxel lattice, split out of dented_cube in test_meshes.hpp.
+It measures 0.57 / 2.70 mm decoded rms / max against a 0.14 / 1.10 mm
+floor, in a 13.5 KB frame (0.5% of raw), and its bounds are reset to
+about 2x those figures.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+test(codec): drop the mesh round trip, which codec_decoder_test covers
+…
+1d02511
+```
+codec_decoder_test already takes the codec end to end against ground
+truth: an analytic sphere, the observed set exactly, the field within
+the transform's bound, and the decoded mesh against the sphere.
+recon_tsdf_mesh_integrate covers the conversion. That left the round
+trip adding little, at about five minutes under the sanitizers.
+
+Two of its findings stay:
+- Signed's second limit, at 90 degrees off the grid's axes, is now on
+  MeshSdfMode::Signed and in the decision entry.
+- The note that the research codec scored its figures against its own
+  uncompressed conversion stays in the entry.
+
+eval's TODO about the test's copy of the metric goes with the test.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+fix(volume): keep the hash table's bucket locks in device memory
+…
+436e277
+```
+Every buffer the map owned was host-visible, the locks included. On a
+discrete GPU each spin was then an atomic across PCIe. On an RTX 5090,
+allocating a 5 000-triangle sheet took 1.97 s against 3.4 ms device-local,
+and the tsdf test's 320 000-triangle divided sheet ran past the driver's
+7-second watchdog (NVIDIA Xid 8 / 109). That failed #81's ubuntu-26.04
+legs, and it reproduced alone on an idle GPU, so it was never load. Apple's
+unified memory hides the difference entirely.
+
+Only hash_init and the kernels touch the locks, so they need no staging.
+core gains device_storage_buffer, hoisted from the mesh integrator, which
+already used it for its device-only buffers. On the RTX 5090, in the CI
+image, recon_tsdf_mesh_integrate now takes 1.34 s, and all 37 tests pass.
+
+The bin counters are the next instance of the same cost (115 / 143 ms for
+the sheet, ~5 ms on an M5 Max). They are recorded in TODO(tsdf), and as a
+measured lesson with a key gotcha.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+mentioned this pull request
+Sep 28, 2026
+feat(sensor): undistort and convert frames on the GPU, and fuse them unregistered
+#99
+Merged
+taojin-6
+force-pushed
+the
+feat/volume-allocate-triangles
+branch
+from
+dcc8588 to
+436e277
+Compare
+September 28, 2026 06:39
+Hide details
+View details
+taojin-6
+merged commit 82f681f
+into
+main
+Sep 28, 2026
+12 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+taojin-6
+deleted the
+feat/volume-allocate-triangles
+branch
+September 28, 2026 06:44
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+test(sensor): keep the GPU tests off the hash map's lock watchdog on …
+…
+67d399a
+```
+…NVIDIA
+
+recon_sensor_gpu_frame_prep's fusion check allocated from a 320x240
+flat wall, and on the RTX 5090 CI host its bucket locks, host-visible
+until PR #81, contended past the driver's 7 s watchdog: Xid 109 CTX
+SWITCH TIMEOUT, a failed test on 24.04 Release and a lost runner on
+22.04 Debug. It now fuses an 80x60 depth camera beside the 320x240
+colour one, a tilted surface, and both device-input tests retry rounds
+that only lost lock races, as fuse_frame.hpp does. Five runs on that
+host passed with no Xid.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+taojin-6
+added a commit
+that referenced
+this pull request
+Sep 28, 2026
+docs(sensor): record the lock watchdog as fixed by #81
+…
+ab61b61
+```
+PR #81 moved the hash map's bucket locks into device memory, so the
+Xid 109 the first GPU test hit is history, not an open risk. The test
+keeps its 80x60 depth frame, which also covers depth and colour at
+different sizes.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

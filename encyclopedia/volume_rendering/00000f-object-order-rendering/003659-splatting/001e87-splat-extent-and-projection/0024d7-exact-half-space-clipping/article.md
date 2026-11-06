@@ -1,0 +1,186 @@
+# Exact Half-Space Clipping
+
+Also called: Exact Clipping, Ours, XClipGS (eXact Clipping), XClipGS Exact Half-Space Clipping
+
+## Overview
+Exact Half-Space Clipping (implemented as XClipGS) is a differentiable operator for interactive volume rendering that computes the exact retained ray integral of a 3D Gaussian primitive when intersected by a clipping plane [S1, unofficial]. It solves the problem of binary keep/drop decisions (Hard Cull) and approximate moment-matching, which cause aliasing, popping artifacts, and silhouette errors when clipping planes expose hidden anatomy [S1, unofficial]. It sets itself apart from [ClipGS](1082-clipgs.md) by avoiding learned binary decisions and MLP deformations, and from [RaRa](1082-rara.md) by providing a closed-form backward pass for clip-aware training, all without auxiliary networks [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   Primitive parameters: mean $\boldsymbol{\mu} \in \mathbb{R}^3$, covariance $\boldsymbol{\Sigma} \in \mathbb{R}^{3 \times 3}$ (positive definite), opacity $\alpha \in [0, 1]$.
+*   Camera parameters: projected center $\hat{\boldsymbol{p}} \in \mathbb{R}^2$, projection Jacobian $\mathbf{J} \in \mathbb{R}^{2 \times 3}$, world-to-camera rotation $\mathbf{W} \in \mathbb{R}^{3 \times 3}$.
+*   Clipping plane: unit normal $\mathbf{n} \in \mathbb{R}^3$, offset $\tau \in \mathbb{R}$.
+*   Pixel coordinate: $\mathbf{p} \in \mathbb{R}^2$.
+
+**Outputs:**
+*   Clipped contribution: $C_{\text{clip}}(\mathbf{p}) = \alpha K_G(\boldsymbol{\delta}; \mathbf{A}) \Phi(\mathbf{k}^\top \boldsymbol{\delta} + h)$, where $K_G$ is the Gaussian kernel, $\Phi$ is the standard normal CDF, and $\boldsymbol{\delta} = \hat{\boldsymbol{p}} - \mathbf{p}$.
+
+**Data Structures:**
+*   Primitive: Stores $\boldsymbol{\mu}, \boldsymbol{\Sigma}, \alpha$.
+*   Precomputed Clip Coefficients (for straddling primitives): $\mathbf{k} \in \mathbb{R}^2$, $h \in \mathbb{R}$.
+*   Transient Buffer: 16 bytes per primitive per view to store clip coefficients [S1, unofficial].
+
+**Steps:**
+
+1.  **Preprocessing (Culling):**
+    Compute the standardized signed distance to the plane:
+    $$ \sigma_n^2 = \mathbf{n}^\top \boldsymbol{\Sigma} \mathbf{n} $$
+    $$ a = \frac{\tau - \mathbf{n}^\top \boldsymbol{\mu}}{\sigma_n} $$
+    If $\Phi(a) \le 10^{-6}$, discard the primitive [S1, unofficial].
+
+2.  **Affine Projection Setup:**
+    Compute the screen-space covariance matrix $\mathbf{A}$ and the projection matrix $\mathbf{M}$:
+    $$ \mathbf{M} = \mathbf{J} \mathbf{W} $$
+    $$ \mathbf{A} = \mathbf{M} \boldsymbol{\Sigma} \mathbf{M}^\top $$
+    Compute the cross-covariance vector $\mathbf{b}$:
+    $$ \mathbf{b} = \mathbf{M} \boldsymbol{\Sigma} \mathbf{n} $$
+
+3.  **Clip Coefficient Calculation (for straddling primitives):**
+    Compute the conditional variance $s^2$ (Schur complement):
+    $$ s^2 = \sigma_n^2 - \mathbf{b}^\top \mathbf{A}^{-1} \mathbf{b} $$
+    Apply variance floor to avoid division by zero:
+    $$ s^2_{\text{impl}} = \max(s^2, 10^{-8}) $$
+    Compute the affine coefficients $\mathbf{k}$ and $h$:
+    $$ \mathbf{k} = \mathbf{A}^{-1} \mathbf{b} / s_{\text{impl}} $$
+    $$ h = (\tau - \mathbf{n}^\top \boldsymbol{\mu}) / s_{\text{impl}} $$
+    Store $\mathbf{k}$ and $h$ in the transient buffer [S1, unofficial].
+
+4.  **Rasterization (Forward Pass):**
+    For each pixel $\mathbf{p}$ covered by the primitive's footprint:
+    Compute the unclipped Gaussian weight:
+    $$ K_G(\boldsymbol{\delta}; \mathbf{A}) = \exp(-\boldsymbol{\delta}^\top \mathbf{A}^{-1} \boldsymbol{\delta}) $$
+    Compute the clipping factor using the precomputed coefficients:
+    $$ \text{clip\_factor} = \Phi(\mathbf{k}^\top \boldsymbol{\delta} + h) $$
+    Compute the final contribution:
+    $$ C_{\text{clip}}(\mathbf{p}) = \alpha \cdot K_G(\boldsymbol{\delta}; \mathbf{A}) \cdot \text{clip\_factor} $$
+    Composite front-to-back [S1, unofficial].
+
+5.  **Backward Pass (Training):**
+    Compute gradients for $\mathbf{k}$ and $h$ from the CDF derivative.
+    Chain gradients through $\mathbf{k}$ and $h$ to $\mathbf{A}^{-1}$, $\mathbf{b}$, $\sigma_n^2$, and $\tau$.
+    Chain through $\mathbf{A}$ and $\mathbf{b}$ to $\boldsymbol{\Sigma}$ and $\mathbf{M}$.
+    Chain through $\mathbf{M}$ to $\boldsymbol{\mu}$ (via $\hat{\boldsymbol{p}}$) and camera parameters.
+    If $s^2_{\text{impl}}$ is active (i.e., $s^2 < 10^{-8}$), set the derivative through $s^2$ to zero [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def standard_normal_cdf(x):
+    """Approximation of the standard normal CDF."""
+    # Using a standard approximation for demonstration
+    # In practice, use a high-precision library or lookup table
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+def exact_half_space_clipping(mu, Sigma, alpha, p_hat, J, W, n, tau, p):
+    """
+    Computes the clipped contribution of a Gaussian primitive to a pixel.
+    
+    Args:
+        mu: (3,) array, primitive mean
+        Sigma: (3,3) array, primitive covariance
+        alpha: float, primitive opacity
+        p_hat: (2,) array, projected center
+        J: (2,3) array, projection Jacobian
+        W: (3,3) array, world-to-camera rotation
+        n: (3,) array, clipping plane normal
+        tau: float, clipping plane offset
+        p: (2,) array, pixel coordinate
+        
+    Returns:
+        float: Clipped contribution
+    """
+    # 1. Preprocessing: Check if primitive is entirely outside
+    sigma_n_sq = n.T @ Sigma @ n
+    if sigma_n_sq <= 0:
+        # Degenerate case: variance along normal is zero or negative (numerical error)
+        # Treat as point mass or handle via floor
+        sigma_n_sq = 1e-8
+        
+    a = (tau - n.T @ mu) / math.sqrt(sigma_n_sq)
+    if standard_normal_cdf(a) <= 1e-6:
+        return 0.0
+
+    # 2. Affine Projection Setup
+    M = J @ W
+    A = M @ Sigma @ M.T
+    
+    # Compute A inverse (2x2 matrix)
+    det_A = A[0,0]*A[1,1] - A[0,1]*A[1,0]
+    if abs(det_A) < 1e-12:
+        # Singular matrix, fallback or error
+        return 0.0
+    A_inv = np.array([
+        [A[1,1]/det_A, -A[0,1]/det_A],
+        [-A[1,0]/det_A, A[0,0]/det_A]
+    ])
+    
+    b = M @ Sigma @ n
+    
+    # 3. Clip Coefficients
+    # Conditional variance s^2
+    s_sq = sigma_n_sq - b.T @ A_inv @ b
+    
+    # Variance floor
+    s_sq_impl = max(s_sq, 1e-8)
+    s_impl = math.sqrt(s_sq_impl)
+    
+    # Coefficients k and h
+    k = (A_inv @ b) / s_impl
+    h = (tau - n.T @ mu) / s_impl
+    
+    # 4. Rasterization
+    delta = p_hat - p
+    exponent = -delta.T @ A_inv @ delta
+    K_G = math.exp(exponent)
+    
+    clip_arg = k.T @ delta + h
+    clip_factor = standard_normal_cdf(clip_arg)
+    
+    return alpha * K_G * clip_factor
+```
+
+**Parameters:**
+*   Retained-mass cutoff: $\Phi(a) \le 10^{-6}$ [S1, unofficial].
+*   Variance floor: $10^{-8}$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Degenerate Case ($s^2 = 0$):** Occurs when the clip coordinate is an affine function of the pixel coordinate (plane contains the viewing-ray direction). The conditional law collapses to a point mass. The implementation uses a variance floor of $10^{-8}$ and sets the derivative through $s^2$ to zero when the floor is active [S1, unofficial].
+*   **Precision:** The CDF is evaluated in fp32. Gradients are validated against fp64 autograd to $10^{-6}$ relative error [S1, unofficial].
+
+## Subtopics
+
+### Sharp Feature Rendering via Clip Lines
+A technique to render sharp features (edges, corners) in point-sampled surfaces by explicitly representing features as clip lines in local tangent planes [S2, unofficial]. It sets itself apart by discarding parts of reconstruction kernels to prevent blurring, rather than integrating restricted densities. It is chosen when rendering point-sampled objects like cubes to avoid geometric artifacts. It uses clip lines defined by two homogeneous points $c_h, d_h$ in the local tangent plane, projected to image space as $c', d'$. A direction vector $v$ perpendicular to the line is computed. The kernel is evaluated at $x$ if $(x - c') \cdot v > 0$ [S2, unofficial]. Parameter: Fg (cutoff value, e.g., 0.5) [S2, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Memory:** Requires one transient 16-byte per-view buffer per primitive [S1, unofficial].
+*   **Time:** Adds one scalar fp32 CDF evaluation per straddling sample [S1, unofficial].
+
+**Measured Performance:**
+*   On an A100 at 800x800 with 300k Gaussians and active oblique clip, the forward-backward step reduces from 5.47 ms to 3.50 ms (1.6x speedup) relative to legacy per-pixel backward [S1, unofficial].
+*   Renders at over 650 FPS, versus 278 FPS for ClipGS [S1, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** Exact closed-form operator; no learned clipping parameters or auxiliary networks; differentiable for training; high PSNR (33.56 dB vs 32.34 dB for ClipGS) and SSIM (0.860 vs 0.809) on medical volumes; 41x less leakage than ClipGS [S1, unofficial].
+*   **Limitations:** Relies on the local affine approximation of EWA splatting; global image metrics may dilute errors near the clipping plane (addressed by paired clipped/unclipped cut-face protocol) [S1, unofficial].
+
+**When to Use:**
+*   Interactive volume rendering of medical scans where clipping planes expose hidden anatomy.
+*   Training scenarios requiring clip-aware supervision.
+
+**When Not to Use:**
+*   When binary keep/drop is sufficient and performance is critical (Hard Cull is faster).
+*   When sharp feature rendering via clip lines is the primary goal (use Sharp Feature Rendering via Clip Lines).
+
+## Background
+XClipGS was introduced by Gao et al. in 2026 [S1, unofficial]. It is built on the N-DGS backbone [S1, unofficial]. It addresses the limitations of prior clipping methods like ClipGS (which uses trainable binary decisions and MLP deformations) and RaRa (which lacks a backward pass for clip-aware training) [S1, unofficial]. The method is used for interactive rendering of volumetric medical scans, enabling users to inspect hidden anatomy via clipping planes without retraining [S1, unofficial].
+
+## Sources
+[S1] XClipGS: Exact Half-Space Clipping for Medical Volume Gaussian Splatting, https://doi.org/10.48550/arxiv.2608.07760, fetched 2026-10-26 (unofficial)
+[S2] Perspective Accurate Splatting, http://infoscience.epfl.ch/record/149345, fetched 2026-10-26 (unofficial)

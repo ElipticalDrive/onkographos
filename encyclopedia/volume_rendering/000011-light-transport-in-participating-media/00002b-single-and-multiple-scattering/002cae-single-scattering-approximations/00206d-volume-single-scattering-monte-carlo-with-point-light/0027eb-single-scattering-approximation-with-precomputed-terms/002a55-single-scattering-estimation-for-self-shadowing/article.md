@@ -1,0 +1,199 @@
+# Single Scattering Estimation for Self-Shadowing
+
+Also called: Estimating self-shadowing, Single scattering estimation
+
+## Overview
+This method corrects the self-shadowing probability in a low-resolution voxel representation after an initial transparency matching step, which preserves macroscopic attenuation but fails to preserve the microscopic self-shadowing effects [S1]. It estimates the mean amount of single scattering energy leaving a block of input voxels and matches it to the low-resolution voxel by scaling the density and albedo parameters [S1]. It is a refinement step within the [Single Scattering Approximation with Precomputed Terms](4188-single-scattering-approximation-with-precomputed-terms.md) pipeline, specifically addressing the loss of self-shadowing detail during downsampling.
+
+## How it works
+**Inputs:**
+- A block of high-resolution input voxels with spatial extent $[x_{\min}, x_{\max}]$.
+- Precomputed parameters for the low-resolution voxel: pre-filtering distribution $D$, base density $\rho_0$, and base directional albedo $A_0(\omega)$.
+- The extinction coefficient $\sigma_t(s, \omega)$ and scattering coefficient $\sigma_s(x, \omega)$ for the input block.
+- The phase function $f(x, \omega_r \rightarrow \omega)$.
+- Number of rays $N_{ray}$ (typically aligned with main axes of the voxel grid) [S1].
+
+**Outputs:**
+- A scaling factor $\gamma \in (0, 1]$ [S1].
+- Final density $\rho = \rho_0 \gamma$ and final directional albedo $A(\omega) = \gamma A_0(\omega)$ for the low-resolution voxel [S1].
+
+**Data Structures:**
+- The input block is treated as a volume defined by its spatial bounds and per-voxel coefficients.
+- The low-resolution voxel is defined by the scalar $\rho_0$, the function $A_0(\omega)$, and the distribution $D(m)$ [S1].
+
+**Steps:**
+
+1. **Define Transmittance:**
+   Compute the transmittance between two points $x_1$ and $x_2$ in direction $\omega$ as [S1]:
+   $$ O(x_1, \omega, x_2) = \exp\left(-\int_{x_1}^{x_2} \sigma_t(s, \omega) ds\right) $$
+   Let $O(x_1, \omega)$ denote the transmittance from $x_1$ to the limit of the input block in direction $\omega$ [S1].
+
+2. **Estimate Single Scattering for a Single Ray:**
+   For an incoming ray $r$ with direction $\omega_r$ intersecting the input block at $x_{\min}$ and $x_{\max}$, compute the amount of single scattering $P_{SS}(r)$ as [S1]:
+   $$ P_{SS}(r) = \int_{x_{\min}}^{x_{\max}} \sigma_s(x, \omega_r) O(x_{\min}, \omega_r, x) \left[ \int_{S^2} f(x, \omega_r \rightarrow \omega) O(x, \omega) d\omega \right] dx $$
+   This quantity is dimensionless but wavelength-dependent [S1].
+
+3. **Estimate Mean Single Scattering in Input Block:**
+   Cast $N_{ray}$ rays in directions parallel to the main axes of the voxel grid. For each ray $r_i$, compute $P_{SS}(r_i)$. Average these values to obtain the mean single scattering of the input block [S1]:
+   $$ M_{ss}^{\text{input}} = \frac{1}{N_{ray}} \sum_{\text{rays}} P_{SS}(r_i) $$
+
+4. **Estimate Mean Single Scattering in Low-Res Voxel:**
+   Compute $M_{ss}$ for the low-resolution voxel using the same integral form as Eq. 7.10, but substituting the input block's $\sigma_s$ and $f$ with the low-res voxel's $\sigma_{ss}$ and $f_{ss}$, which are derived from $\rho_0$, $A_0(\omega)$, and $D$ [S1].
+
+5. **Compute Scaling Factor $\gamma$:**
+   The scaling factor $\gamma$ is chosen to minimize the error between the estimated single scattering of the input block and the scaled low-res voxel across wavelengths. Using RGB albedos (wavelengths $\lambda_i$), compute [S1]:
+   $$ \gamma = \arg \max_g \sum_{\lambda_i} \left\| M_{SS}^{\text{input}}(\lambda_i) - g M_{SS}(\lambda_i) \right\|^2 $$
+   where $g$ is the trial scaling factor [S1].
+
+6. **Apply Final Parameters:**
+   Set the final density and albedo for the low-resolution voxel as [S1]:
+   $$ \rho = \rho_0 \gamma $$
+   $$ A(\omega) = \gamma A_0(\omega) $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_transmittance(x1, x2, direction, sigma_t_func):
+    """
+    Computes O(x1, direction, x2) = exp(-integral_{x1}^{x2} sigma_t(s, direction) ds)
+    Assumes a simple quadrature or analytical integration for sigma_t along the ray.
+    """
+    # Placeholder for numerical integration of sigma_t along the ray segment
+    # In practice, this involves sampling sigma_t at points along the segment
+    integral_sigma_t = numerical_integral(sigma_t_func, x1, x2, direction)
+    return math.exp(-integral_sigma_t)
+
+def compute_single_scattering_ray(ray_start, ray_end, ray_direction, 
+                                  sigma_s_func, sigma_t_func, phase_func, 
+                                  block_limits):
+    """
+    Computes P_SS(r) for a single ray intersecting the block.
+    """
+    # Determine intersection bounds x_min and x_max
+    x_min, x_max = intersect_ray_with_block(ray_start, ray_end, block_limits)
+    
+    # Integral over x from x_min to x_max
+    # Inner integral over omega (directions)
+    def integrand(x):
+        # Transmittance from entry point to current x
+        o_entry_to_x = compute_transmittance(x_min, x, ray_direction, sigma_t_func)
+        
+        # Scattering coefficient at x
+        sigma_s = sigma_s_func(x, ray_direction)
+        
+        # Inner integral: integral_{S^2} f(x, omega_r -> omega) * O(x, omega) domega
+        # This is approximated by sampling directions omega on the sphere
+        inner_integral = 0.0
+        num_samples = 100 # Sufficient for Monte Carlo or quadrature
+        for omega in sample_sphere_uniform(num_samples):
+            # Transmittance from x to infinity (or block limit) in direction omega
+            o_x_to_limit = compute_transmittance(x, None, omega, sigma_t_func)
+            # Phase function
+            f = phase_func(x, ray_direction, omega)
+            inner_integral += f * o_x_to_limit
+        
+        # Average over sphere
+        inner_integral /= num_samples
+        
+        return sigma_s * o_entry_to_x * inner_integral
+
+    # Numerical integration over x
+    p_ss = numerical_integral(integrand, x_min, x_max)
+    return p_ss
+
+def estimate_mean_single_scattering_input(block_voxels, num_rays=3):
+    """
+    Estimates M_ss^input by casting rays parallel to main axes.
+    """
+    total_p_ss = 0.0
+    # Directions parallel to main axes (e.g., X, Y, Z)
+    directions = [get_axis_direction(i) for i in range(3)]
+    
+    for direction in directions:
+        # Cast ray through the block
+        ray_start, ray_end = get_ray_through_block(block_voxels, direction)
+        p_ss = compute_single_scattering_ray(
+            ray_start, ray_end, direction,
+            block_voxels.sigma_s, block_voxels.sigma_t, block_voxels.phase_func,
+            block_voxels.limits
+        )
+        total_p_ss += p_ss
+        
+    return total_p_ss / num_rays
+
+def estimate_mean_single_scattering_lowres(lowres_voxel, num_rays=3):
+    """
+    Estimates M_ss for the low-res voxel using precomputed terms.
+    """
+    total_p_ss = 0.0
+    directions = [get_axis_direction(i) for i in range(3)]
+    
+    for direction in directions:
+        # For low-res voxel, the geometry is simple (unit or normalized box)
+        # sigma_ss and f_ss are derived from rho0, A0, D
+        sigma_ss = compute_sigma_ss(lowres_voxel.rho0, lowres_voxel.A0, lowres_voxel.D, direction)
+        f_ss = compute_phase_func_ss(lowres_voxel.A0, lowres_voxel.D)
+        
+        # Simplified integration for low-res voxel
+        # The integral form is the same, but coefficients are constant or analytically defined
+        p_ss = compute_single_scattering_ray(
+            lowres_voxel.start, lowres_voxel.end, direction,
+            lambda x, d: sigma_ss, # Constant sigma_ss
+            lambda x, d: lowres_voxel.sigma_t(d), # Precomputed sigma_t
+            f_ss,
+            lowres_voxel.limits
+        )
+        total_p_ss += p_ss
+        
+    return total_p_ss / num_rays
+
+def compute_gamma(input_m_ss, lowres_m_ss, wavelengths):
+    """
+    Computes gamma by minimizing error over wavelengths.
+    """
+    best_gamma = 1.0
+    min_error = float('inf')
+    
+    # Search for gamma in (0, 1]
+    # In practice, this might be solved analytically or via simple optimization
+    for g in linspace(0.01, 1.0, 100):
+        error = 0.0
+        for lam in wavelengths:
+            # M_ss_input and M_ss_lowres are wavelength-dependent
+            m_input = input_m_ss[lam]
+            m_lowres = lowres_m_ss[lam] * g # Scaled by g
+            
+            error += norm(m_input - m_lowres) ** 2
+            
+        if error < min_error:
+            min_error = error
+            best_gamma = g
+            
+    return best_gamma
+```
+
+**Edge Cases and Pitfalls:**
+- The transmittance calculation $O(x_1, \omega, x_2)$ requires accurate integration of $\sigma_t$. If $\sigma_t$ varies rapidly, coarse sampling will introduce errors [S1].
+- The inner integral over $S^2$ for the phase function and outgoing transmittance is computationally expensive. Approximations or fewer samples may be needed, but this affects accuracy [S1].
+- The scaling factor $\gamma$ is constrained to $(0, 1]$. If the optimal $g$ exceeds 1, it is clamped to 1, potentially under-correcting self-shadowing [S1].
+- The method assumes the low-resolution voxel's geometry and distribution $D$ are fixed from the previous step [S1].
+
+## Subtopics
+
+### Self-Shadowing Parameter Scaling
+This variant describes the mathematical mechanism for adjusting the low-resolution voxel's parameters to match the estimated self-shadowing. It scales the density $\rho$ and directional albedo $A(\omega)$ by a factor $\gamma \in (0, 1]$ [S1]. This scaling preserves the attenuation coefficient $\sigma_t(\omega)$ because the product $\rho A(\omega)$ remains constant relative to the initial state ($\rho_0 A_0(\omega)$), but it multiplies the single scattering coefficient $\sigma_{ss}(\omega)$ by $\gamma$ [S1]. The single scattering coefficient becomes $\sigma_{ss}(\omega) = \gamma \rho_0 A_0(\omega) \int A_0(\omega) D(m) \langle \omega \cdot m \rangle dm$ [S1]. The value of $\gamma$ is computed by minimizing the error between the estimated single scattering of the input block and the scaled low-res voxel across wavelengths (using RGB albedos) [S1].
+
+## Operating characteristics
+- **Time Complexity:** The method requires casting $N_{ray}$ rays through the input block and the low-res voxel. Each ray requires a numerical integration over the block length and an integration over the sphere $S^2$ for the phase function. This is significantly more expensive than the initial transparency matching step.
+- **Memory Complexity:** Requires storing the input block's coefficients and the low-res voxel's precomputed terms. No additional large data structures are needed.
+- **Strengths:** Accurately preserves self-shadowing effects that are lost during downsampling. It is physically based and ensures consistency between the high-res and low-res representations.
+- **Limitations:** Computationally intensive due to the multiple integrals. The accuracy depends on the number of rays and samples used in the integrals.
+- **When to use:** When accurate self-shadowing is critical and the computational cost of the full single scattering estimation is acceptable. It is used in the context of volume downsampling for efficient rendering.
+
+## Background
+This method is part of the "new microflake model with microscopic self-shadowing for accurate volume downsampling" [S1]. It addresses the issue that standard downsampling techniques preserve macroscopic transparency but fail to preserve microscopic self-shadowing, leading to visually incorrect results [S1]. The approach is detailed in Section 7.4 of the source paper [S1].
+
+## Sources
+[S1] A new microflake model with microscopic self-shadowing for accurate volume downsampling, https://doi.org/10.1111/cgf.13346, fetched 2026-10-26

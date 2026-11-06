@@ -1,0 +1,150 @@
+# Sparse Voxel Octree Attribute Encoding (Neighbor)
+
+
+## Overview
+This method encodes the attribute values of a sparse voxel octree by computing deltas relative to the attributes of neighboring voxels, and decodes them by reconstructing values from these neighbors and deltas [S1, unofficial]. It differs from [Sparse Voxel Octree Attribute Encoding (Parent)](2705-svo-node-encoding.md) by using spatial neighbors rather than the hierarchical parent node for prediction, which is particularly effective for spatially smooth attribute fields [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `coord`: A tensor of shape $[N, 3]$ containing the integer coordinates of each occupied sparse voxel [S1, unofficial].
+- `res`: The resolution of the sparse voxel grid (typically a scalar or 3D vector defining the grid bounds) [S1, unofficial].
+- `attr`: A tensor of shape $[N, C]$ containing the original attribute values for each voxel [S1, unofficial].
+
+**Outputs:**
+- `delta`: A tensor of shape $[N, C]$ containing the encoded delta values [S1, unofficial].
+
+**Data Structures:**
+The method operates on the coordinate tensor `coord` and attribute tensor `attr`. No explicit neighbor lookup table is stored; neighbors are identified by coordinate arithmetic.
+
+**Steps:**
+1. **Neighbor Identification:** For each voxel $i$ at coordinate $c_i = (x_i, y_i, z_i)$, identify its existing neighbors within the sparse voxel set. The neighbors are typically the 6 face-adjacent voxels (up, down, left, right, front, back) or potentially all 26 adjacent voxels, depending on the specific implementation variant. A neighbor $j$ exists if $c_j$ is present in `coord` [S1, unofficial].
+2. **Delta Computation:** For each voxel $i$ and each attribute channel $k$, compute the delta $\delta_{i,k}$ as the difference between the voxel's attribute $a_{i,k}$ and the attribute of a selected neighbor $j$ (or an aggregate of neighbors). A common simple form is:
+   $$ \delta_{i,k} = a_{i,k} - a_{j,k} $$
+   where $j$ is a predefined neighbor (e.g., the voxel with the smallest coordinate index, or the first found neighbor) [S1, unofficial]. If no neighbor exists, the delta may be set to the attribute value itself or a special flag [G].
+3. **Output:** The resulting $\delta$ tensor is returned.
+
+**Parameters:**
+- `res`: Defines the grid boundaries. Used to validate neighbor coordinates [S1, unofficial].
+
+**Edge Cases:**
+- **Boundary Voxels:** Voxels on the edge of the grid may have fewer than 6 neighbors. The implementation must handle missing neighbors, either by skipping the delta calculation for that direction or using a default value [G].
+- **No Neighbors:** If a voxel has no occupied neighbors, the delta encoding may be less effective. The source notes do not specify a fallback, but typically the attribute itself is stored or a zero delta is used if the attribute is zero [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def encode_sparse_voxel_octree_attr_neighbor_cpu(coord, res, attr):
+    """
+    Encode sparse voxel octree attributes using neighbor deltas.
+    
+    Args:
+        coord: [N, 3] tensor of voxel coordinates.
+        res: Resolution of the grid (not directly used in delta calc but defines bounds).
+        attr: [N, C] tensor of attribute values.
+        
+    Returns:
+        delta: [N, C] tensor of delta values.
+    """
+    N = coord.shape[0]
+    C = attr.shape[1]
+    delta = torch.zeros_like(attr)
+    
+    # Create a set for fast neighbor lookup
+    coord_set = set(map(tuple, coord.tolist()))
+    
+    # Define neighbor offsets (6-connected)
+    offsets = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1)
+    ]
+    
+    for i in range(N):
+        x, y, z = coord[i]
+        found_neighbor = False
+        
+        # Try to find a neighbor to compute delta against
+        # Using the first found neighbor for simplicity
+        for dx, dy, dz in offsets:
+            nx, ny, nz = x + dx, y + dy, z + dz
+            if (nx, ny, nz) in coord_set:
+                # Find the index of the neighbor
+                # In a real implementation, a hash map from coord to index would be used
+                neighbor_idx = list(coord_set).index((nx, ny, nz)) # [G] Placeholder for efficient lookup
+                # Compute delta
+                delta[i] = attr[i] - attr[neighbor_idx]
+                found_neighbor = True
+                break
+        
+        if not found_neighbor:
+            # No neighbor found: store original attribute or zero?
+            # Source does not specify. [G] Assuming original attribute is stored as delta for decoding
+            delta[i] = attr[i]
+            
+    return delta
+
+def decode_sparse_voxel_octree_attr_neighbor_cpu(coord, res, delta):
+    """
+    Decode sparse voxel octree attributes from neighbor deltas.
+    
+    Args:
+        coord: [N, 3] tensor of voxel coordinates.
+        res: Resolution of the grid.
+        delta: [N, C] tensor of delta values.
+        
+    Returns:
+        attr: [N, C] tensor of reconstructed attribute values.
+    """
+    N = delta.shape[0]
+    C = delta.shape[1]
+    attr = torch.zeros_like(delta)
+    
+    coord_set = set(map(tuple, coord.tolist()))
+    offsets = [
+        (1, 0, 0), (-1, 0, 0),
+        (0, 1, 0), (0, -1, 0),
+        (0, 0, 1), (0, 0, -1)
+    ]
+    
+    # Build a map from coordinate to index for fast lookup
+    coord_to_idx = {tuple(c): i for i, c in enumerate(coord.tolist())}
+    
+    for i in range(N):
+        x, y, z = coord[i]
+        found_neighbor = False
+        
+        for dx, dy, dz in offsets:
+            nx, ny, nz = x + dx, y + dy, z + dz
+            if (nx, ny, nz) in coord_to_idx:
+                neighbor_idx = coord_to_idx[(nx, ny, nz)]
+                # Reconstruct attribute
+                attr[i] = delta[i] + attr[neighbor_idx]
+                found_neighbor = True
+                break
+        
+        if not found_neighbor:
+            # If no neighbor, delta was the original attribute
+            attr[i] = delta[i]
+            
+    return attr
+```
+
+## Subtopics
+
+### Sparse Voxel Octree Attribute Encoding (Parent)
+This variant encodes attributes using the parent node in the octree hierarchy rather than spatial neighbors [S1, unofficial]. It requires the octree structure (`uint8` tensor) and depth as additional inputs, and the delta is stored as a `uint8` tensor [S1, unofficial]. It is chosen when the octree structure is already available and parent-child relationships are strong predictors of attribute values [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Encoding and decoding require $O(N \cdot K)$ operations, where $N$ is the number of voxels and $K$ is the number of neighbors checked (typically 6 or 26). Neighbor lookup can be optimized to $O(1)$ with a hash map, making the overall complexity $O(N)$.
+- **Memory Complexity:** The delta tensor has the same size as the attribute tensor, $O(N \cdot C)$. No additional large data structures are required beyond the coordinate set for lookup.
+- **Strengths:** Effective for spatially smooth data where adjacent voxels have similar attributes. Does not require hierarchical structure information.
+- **Limitations:** Performance depends on the spatial distribution of voxels. Voxels with no neighbors may not compress well. Lookup overhead can be significant if not optimized.
+- **When to use:** When spatial correlation is high and the octree structure is not needed for attribute prediction.
+- **When not to use:** When the data is not spatially smooth or when the octree hierarchy provides better prediction (use Parent variant).
+
+## Background
+This method is part of the `o-voxel-gpu` library, which provides efficient sparse voxel octree operations [S1, unofficial]. It is designed for GPU and CPU acceleration of sparse voxel attribute encoding.
+
+## Sources
+[S1] quantaji/o-voxel-gpu, https://github.com/quantaji/o-voxel-gpu, fetched 2026-10-29 (unofficial)

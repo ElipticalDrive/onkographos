@@ -1,0 +1,136 @@
+What component does this affect? SurrealDB Server Is this feature related to a problem? (AI disclosure: This issue has been written with AI assistance (research, POC implementation, draft, advisory), but with full human review and in-dep...
+
+Add atomic compound primitives to Surrealism KV (fetch_add, compare_and_swap) · Issue #7299 · surrealdb/surrealdb · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add atomic compound primitives to Surrealism KV (fetch_add, compare_and_swap) #7299
+New issue
+Copy link
+New issue
+Copy link
+Open
+Feature
+Open
+Add atomic compound primitives to Surrealism KV (fetch_add, compare_and_swap)#7299
+Feature
+Copy link
+Labels
+topic:functions and extensionsBuilt-in and custom functions, closures, scripting and Surrealism extensionsBuilt-in and custom functions, closures, scripting and Surrealism extensions
+Description
+septagram
+opened on May 2, 2026
+Issue body actions
+What component does this affect?
+SurrealDB Server
+Is this feature related to a problem?
+(AI disclosure: This issue has been written with AI assistance (research, POC implementation, draft, advisory), but with full human review and in-depth human guidance. Claude has been invaluable, as usual, but I tried my best to do my due diligence in order to respect the maintainers' time, effort and sanity.)
+Plugin invocations execute concurrently — each call gets its own Controller in its own OS thread (see surrealdb/core/src/expr/module.rs). The Surrealism KV trait shipped in #7082 is pure get/set/del/scan/batch, with no atomic compound operations. That means any plugin doing read-then-write on a shared key — counters, dedup sets, accumulators, last-N caches — silently races between independent SurrealDB clients invoking the same plugin function.
+Concretely: a plugin sequence counter implemented as kv::set(seq, kv::get(seq).unwrap_or(0) + 1) will lose updates under any non-trivial concurrent load, with no error or warning. The races are silent and reproducible.
+The deliberately-minimalist KV trait is consistent with #7082's design philosophy ("simple façade, not transactional"), so this isn't an oversight — but it leaves a usability cliff for any stateful plugin pattern. Adjacent context: discussion #6708 ("Surrealism Persistant Memory") asked about plugin state across calls; #7082 answered that with the volatile KV; this issue is the next gap that closes for compound state correctness.
+Suggest a solution
+Add the smallest set of primitives that make compound operations correct, without expanding scope into transactions or a closure-across-FFI DSL.
+kv-fetch-add(key, delta: s64) -> s64
+Mirrors std::sync::atomic::AtomicI64::fetch_add semantics. Returns the value before the add. Initialised to 0 on absent key. checked_add for both overflow directions. Errors on non-integer existing values.
+i64-only by deliberate design:
+Float fetch_add is non-associative under rounding, so concurrent calls yield interleave-dependent results — Rust stdlib has no AtomicF64::fetch_add for the same reason.
+Decimal is well-defined and a clean additive follow-up, but is considered a very uncommon case, with a trivial i64 workaround; YAGNI for now, but open to having it implemented as well.
+kv-compare-and-swap(key, expected, new) -> SwapResult
+Universal CAS over arbitrary Value types (not just primitives — String, Object, etc. — relying on deep-value PartialEq). Option<Value> on both sides expresses:
+expected = None → set-if-absent
+new = None → delete-if-equals
+```
+pub enum SwapResult {
+    Swapped,
+    Mismatched(Option<Value>),
+}
+```
+SwapResult::Mismatched(actual) returns the current value, so CAS retry loops are 1 round-trip rather than 2 (no separate kv-get needed).
+Why these two together
+fetch_add is the common case (counters) — single round-trip, lock held briefly. compare_and_swap is the universal building block for everything else (set-if-absent, conditional update, list-append-with-bound). Together they cover the realistic compound-atomicity surface for a non-transactional KV.
+Architectural fit
+Same parking_lot::RwLock<BTreeMap> lock as every other write primitive — no new locking discipline.
+No new dependencies (parking_lot is already a workspace dep). BTreeMapStore is currently the only KVStore impl in the workspace, so the trait additions are contained.
+Backwards-compatible — existing 0.2.0 plugins continue working unchanged.
+WIT-additive — older guests don't import the new functions, so they still link cleanly against newer hosts.
+Prior art / references
+Discussion Surrealism Persistant Memory #6708 — adjacent (state persistence) ask, no replies, implicitly answered by Overhaul Surrealism internals #7082 shipping the volatile KV. This issue is the next gap.
+PR Overhaul Surrealism internals #7082 — current BTreeMapStore + KVStore trait shape.
+PR WIP: Upgrade Surrealism to wasi-p2 & cleanup #7025 — the precursor WIP that established the WIT/FlatBuffers architecture.
+Rust stdlib precedent: std::sync::atomic::AtomicI64::fetch_add and compare_exchange (modulo memory-ordering parameters that don't apply under our RwLock-mediated synchronization).
+Implementation status
+A working implementation across all three layers (WIT, runtime, SDK) exists on a fork branch with 13 new unit tests including two concurrency tests that supposedly demonstrate the lost-update race is closed end-to-end. Happy to polish and open a PR if the team is interested in this direction — otherwise glad to discuss alternative shapes first.
+Alternative methods
+A. Push the compound op into SurrealQL via surrealism::sql()
+Atomic via SurrealQL transactions, works today — but pays parser + tx overhead per call and forces hot-path counters through durable storage. Right tool for transactional state, wrong layer for what KV is for.
+B. Static AtomicI64 / Arc<Mutex> inside WASM
+Each controller has its own WASM linear memory, so static atomics or Mutex exist in N independent per-pool copies. The host KV is the only cross-controller shared state.
+C. Expose kv::lock(key) -> LockGuard instead of named atomics
+Add a single primitive: acquire an exclusive lock on a key, do arbitrary read-modify-write logic with kv::get / kv::set, release. One mechanism covers any compound op including ones we have not enumerated.
+Pros:
+Maximum expressiveness. fetch_add, CAS, set-if-absent, list-push-with-cap, multi-step accumulators — all expressible by holding the lock around whatever sequence of get/set the plugin needs.
+Single primitive instead of N named atomics. Less API surface to grow over time.
+Cons:
+WIT resource type required. A LockGuard has a lifetime that must cross the WASM/host boundary; in WIT terms that is a resource type. The component model supports this, but it is a meaningfully bigger contract than two new functions returning scalars.
+Lock leakage on trap. If the plugin traps while holding the lock, the lock has to be released. Wasmtime drops the controller on trap (which drops the resource), but the host needs to verify that path is reliable for held locks. Atomics have no analog — there is nothing to leak.
+Long-held locks block other invocations. If plugin A locks key K then calls sql() which takes 500ms, plugin B's lock attempt on K blocks for 500ms. With named atomics, the lock on the underlying BTreeMap is held for nanoseconds.
+Deadlock potential. Plugin A locks K, calls sql() that re-enters the same module via a hook, the re-entrant call tries to lock K — deadlock. Atomics are never re-entrant; they cannot deadlock.
+Timeout semantics. What is the lock-acquisition timeout? What if the plugin holds the lock past the module's epoch deadline? Each of these is a real design question that atomics do not have.
+Bigger PR, higher risk. WIT resource types, runtime lifecycle management, eviction-on-trap correctness, deadlock detection (or explicit timeout). Even if lock() is the better long-term primitive, it is not the right first primitive to ship.
+Verdict: a reasonable additive future for compound transactional patterns that span multiple keys (which fetch_add + compare_and_swap cannot express). For the dominant single-key compound use cases, named atomics are smaller, safer, and easier to maintain. Worth revisiting if a real multi-key transactional use case shows up.
+SurrealDB version
+3.0.5 for Windows on amd64
+Contact Details
+discord:septagraam or email:septagramm@gmail.com
+Is there an existing issue for this?
+I have searched the existing issues
+Code of Conduct
+I agree to follow this project's Code of Conduct
+Activity
+septagram
+added
+triageThis issue is newThis issue is new
+on May 2, 2026
+septagram
+added the
+Feature
+issue type on May 2, 2026
+Dhghomon
+added
+extensionsThis topic is related to Surrealism extensions.This topic is related to Surrealism extensions.
+and removed
+triageThis issue is newThis issue is new
+on May 8, 2026
+septagram
+added a commit that references this issue on Jul 25, 2026
+Retire in-repo SurrealDB plugin
+...
+0165cda
+Dhghomon
+added
+topic:functions and extensionsBuilt-in and custom functions, closures, scripting and Surrealism extensionsBuilt-in and custom functions, closures, scripting and Surrealism extensions
+and removed
+extensionsThis topic is related to Surrealism extensions.This topic is related to Surrealism extensions.
+on Oct 29, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+topic:functions and extensionsBuilt-in and custom functions, closures, scripting and Surrealism extensionsBuilt-in and custom functions, closures, scripting and Surrealism extensions
+Type
+Feature
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,340 +1,233 @@
 # 3D Grid Rasterization
 
-Also called: Grid-Snapped Voxelization, Surface Voxelize, Mesh Voxelizer, CPU Voxelization, CPUVoxelizer, CPU Intersect Scanline Voxelization, Voxelization from Triangle Mesh
+Also called: Grid-Snapped Voxelization
 
 ## Overview
-3D Grid Rasterization converts a triangular mesh into a discrete 3D occupancy grid (voxel array) by mapping mesh geometry to a fixed-resolution integer lattice [S1, S2, unofficial][S3][S6, unofficial]. It solves the problem of representing continuous surface geometry as a volume suitable for ray marching or other volume rendering techniques [G]. Builds on [Voxelization](12-voxelization.md).
+3D Grid Rasterization is a CPU-based algorithm that determines which voxels in a fixed-resolution 3D grid are intersected by a triangle mesh, producing a binary occupancy grid or a grid with interpolated colors [S1, unofficial][S5, unofficial]. It solves the problem of converting continuous polygonal geometry into a discrete volumetric representation without performing surface reconstruction (such as QEF or dual vertex solving) [S1, unofficial]. It differs from full o-voxel implementations by omitting the face QEF, boundary QEF, and dual vertex solve steps, focusing solely on the intersect scanline to find occupied voxels [S1, unofficial]. It differs from GPU-based siblings like [GPU Volume Kernel Voxelization](1496-gpu-volume-kernel-voxelization.md) by relying on CPU-side scanline filling and hash-table deduplication rather than parallel fragment shaders.
 
 ## How it works
-The method typically follows one of two primary implementations: a **Triangle-AABB Sampling** approach (common in C++ libraries like `voxelizer`) or a **Slice-and-Rasterize** approach (common in Python libraries like `mesh_vox`) [S2, S6, unofficial]. Both produce a 3D grid where each cell indicates occupancy and optionally color [S2, S6, unofficial].
-
-### Inputs and Outputs
 **Inputs:**
-- A triangular mesh defined by vertices $V$ and indices $I$ [S2, unofficial][S3][S6, unofficial].
-- Target grid dimensions: width $W$, height $H$, depth $D$ (or a single resolution $R$ for the largest dimension) [S2, unofficial][S3, S5][S6, unofficial].
-- Optional: Vertex colors (RGB or RGBA) [S2, S4, unofficial].
-- Optional: STL file path (for direct reading) [S3][S6, unofficial].
+*   Triangle mesh: Array of vertices $V$ (float3) and indices $I$ (int3, forming triangles). Optional vertex colors $C$ (float4).
+*   Grid resolution: Integer $N$ (for cubic grids) or dimensions $W, H, D$ (for non-cubic).
+*   Grid bounds: Optional min/max coordinates. Default is often $[0, 1]^3$ or derived from mesh AABB.
 
 **Outputs:**
-- A 3D array `voxels` of shape $(D, W, H)$ or $(Z, X, Y)$ [S3][S6, unofficial].
-- Data type: Boolean (occupancy) or 32-bit integer (packed ABGR color) [S2, S6, unofficial].
+*   Occupancy grid: A 3D array (or hash set) of occupied voxel coordinates.
+*   Optional: Color grid: A 3D array of ABGR colors or interpolated vertex colors.
 
-### Data Structures
+**Data Structures:**
+*   `VoxelCoord`: Struct with fields `x`, `y`, `z` (int).
+*   `Hash Table`: Maps `VoxelCoord` to an index or boolean. Uses a custom hash function for `VoxelCoord`:
+    $$ H(v) = (v.x \cdot 73856093) \oplus (v.y \cdot 19349663) \oplus (v.z \cdot 83492791) $$
+    [S1, unofficial]
+*   `Vec2d`/`Vec3d`: Floating-point vectors for geometric calculations.
 
-**1. AABB (Axis-Aligned Bounding Box)**
-Used to cull triangles.
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+**Parameters:**
+*   `voxel_size`: Size of one voxel in world units. Calculated as $1.0 / \text{grid\_size}$ for normalized grids [S1, unofficial].
+*   `grid_min`, `grid_max`: Integer bounds for voxel indices. Typically $\{0,0,0\}$ and $\{\text{grid\_size}, \text{grid\_size}, \text{grid\_size}\}$ [S1, unofficial].
+*   `surface_only`: Boolean. If true, only marks voxels intersected by triangle surfaces; if false, fills interior (requires ray casting or flood fill, not covered in basic rasterization) [S6].
 
-```python
-class AABB:
-    min: Vector3  # Minimum coordinates (x, y, z)
-    max: Vector3  # Maximum coordinates (x, y, z)
-```
+**Algorithm Steps:**
 
-**2. Triangle**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+1.  **Initialization:**
+    *   Allocate a hash table for unique voxel coordinates.
+    *   Initialize an empty list `voxels` to store occupied `VoxelCoord` structures.
+    *   If colors are present, initialize a color buffer or blend logic.
 
-```python
-class Triangle:
-    p1: Vector3
-    p2: Vector3
-    p3: Vector3
-    color: Optional[Vector4]  # RGBA, if present
-```
+2.  **Triangle Iteration:**
+    *   Iterate through each triangle in the mesh, defined by vertices $p_1, p_2, p_3$.
 
-**3. Voxel Grid (C++ Style)**
-Flat array of unsigned integers (ABGR packed) [S2, unofficial].
-Layout: `index = x + y * W + z * (W * H)`.
-Size: $W \times H \times D$.
+3.  **Scanline Projection (Intersect Scanline):**
+    *   For each triangle, iterate through three axes $ax2 \in \{0, 1, 2\}$ (representing X, Y, Z). Let $ax0 = (ax2 + 1) \% 3$ and $ax1 = (ax2 + 2) \% 3$.
+    *   **Project:** Extract 2D coordinates of the triangle vertices onto the plane perpendicular to $ax2$. Store in `t[0..2]` using components $ax0$ and $ax1$.
+    *   **Sort:** Sort `t[0..2]` by their $ax1$ coordinate in ascending order.
+    *   **Calculate Rows:** Compute voxel row indices for the sorted vertices:
+        $$ \text{start} = \lfloor t[0].ax1 / \text{voxel\_size}[ax1] \rfloor $$
+        $$ \text{mid} = \lfloor t[1].ax1 / \text{voxel\_size}[ax1] \rfloor $$
+        $$ \text{end} = \lfloor t[2].ax1 / \text{voxel\_size}[ax1] \rfloor $$
+        Clamp these indices to $[\text{grid\_min}[ax1], \text{grid\_max}[ax1] - 1]$.
+    *   **Fill Halves:**
+        *   Call `scan_line_half(row_start=start, row_end=mid, t0=t[0], t1=t[1], t2=t[2])`.
+        *   Call `scan_line_half(row_start=mid, row_end=end, t0=t[2], t1=t[1], t2=t[0])`. Note the vertex order swap to maintain consistent winding/edge orientation.
 
-**4. Voxel Grid (Python Style)**
-Boolean array [S6, unofficial].
-Shape: `(Z, X, Y)`.
-Addressed as `voxels[z][x][y]`.
+4.  **Scanline Half Logic (`scan_line_half`):**
+    *   Input: `row_start`, `row_end`, vertices `t0, t1, t2`.
+    *   Iterate $y\_idx$ from `row_start` to `row_end - 1`.
+    *   Calculate world $y$ coordinate: $y = (y\_idx + 1) \cdot \text{voxel\_size}[ax1]$.
+    *   **Interpolate Edges:**
+        *   Calculate intersection of the scanline $y$ with edge $t0-t1$ ($t3$) and $t0-t2$ ($t4$).
+        *   $t3 = \text{lerp}(t0, t1, \frac{y - t0.ax1}{t1.ax1 - t0.ax1})$
+        *   $t4 = \text{lerp}(t0, t2, \frac{y - t0.ax1}{t2.ax1 - t0.ax1})$
+        *   Ensure $t3.ax0 \le t4.ax0$ by swapping if necessary.
+    *   **Calculate Columns:**
+        *   Compute voxel column indices:
+            $$ \text{line\_start} = \lfloor t3.ax0 / \text{voxel\_size}[ax0] \rfloor $$
+            $$ \text{line\_end} = \lfloor t4.ax0 / \text{voxel\_size}[ax0] \rfloor $$
+        *   Clamp to $[\text{grid\_min}[ax0], \text{grid\_max}[ax0] - 1]$.
+    *   **Mark Voxels:**
+        *   Iterate $x\_idx$ from `line_start` to `line_end - 1`.
+        *   Calculate world $x$: $x = (x\_idx + 1) \cdot \text{voxel\_size}[ax0]$.
+        *   Interpolate $z$ (component $ax2$) at $x$:
+            $$ z = \text{lerp}(t3.ax0, t4.ax0, \frac{x - t3.ax0}{t4.ax0 - t3.ax0}) $$
+            *Note: The source uses `lerp(t3.x, t4.x, x, Vec2d{t3.y, 0.0}, Vec2d{t4.y, 0.0})` effectively mapping the 2D line interpolation to the third dimension.*
+        *   Calculate voxel index $z\_idx = \lfloor z / \text{voxel\_size}[ax2] \rfloor$.
+        *   If $z\_idx$ is within $[\text{grid\_min}[ax2], \text{grid\_max}[ax2])$, mark the 2x2 block of voxels centered at $(x\_idx, y\_idx, z\_idx)$ as occupied. Specifically, set coordinates $(x\_idx+dx, y\_idx+dy, z\_idx)$ for $dx, dy \in \{0, 1\}$.
+        *   *Color Interpolation (Optional):* If colors are present, compute barycentric weights or area-weighted interpolation of vertex colors for the voxel center and store in the grid.
 
-**5. STL Binary Record (for input parsing)**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+5.  **Deduplication:**
+    *   For each marked voxel coordinate, check if it exists in the hash table.
+    *   If not present, add to `voxels` list and insert into hash table.
 
-```python
-stl_record_dtype = [
-    ('normals', np.float32, (3,)),
-    ('Vertex1', np.float32, (3,)),
-    ('Vertex2', np.float32, (3,)),
-    ('Vertex3', np.float32, (3,)),
-    ('atttr', np.int16, (1,))
-]
-```
-
-### Algorithm: Slice-and-Rasterize (Python Style)
-This method slices the mesh at each height $z$, computes 2D intersection lines, and rasterizes them into a 2D grid [S6, unofficial].
-
-**Steps:**
-
-1.  **Read Mesh:** Load STL file (binary or ASCII) [S6, unofficial].
-2.  **Scale and Shift:**
-    - Find min/max coordinates of all vertices [S6, unofficial].
-    - Compute `xyscale = (resolution - 1) / max(width, depth)` [S6, unofficial].
-    - `shift = -min`.
-    - `scale = [xyscale, xyscale, xyscale]`.
-    - Transform vertices: $v' = (v + shift) \times scale$ [S6, unofficial].
-    - Filter degenerate triangles (fewer than 3 unique points after transformation) [S6, unofficial].
-3.  **Initialize Voxel Array:** Boolean array `voxels` of shape `(bounding_box[2], bounding_box[0], bounding_box[1])` [S6, unofficial].
-4.  **Iterate Height $z$:**
-    a. **Find Intersecting Triangles:** Filter triangles that cross the plane $z$ [S6, unofficial].
-       - A triangle crosses if:
-         - It has vertices both above ($z_v > z$) and below ($z_v < z$) [S6, unofficial].
-         - OR it has 2 or 3 vertices exactly on the plane ($z_v == z$) [S6, unofficial].
-       - Exclude triangles lying entirely on the plane [S6, unofficial].
-    b. **Compute Intersection Lines:**
-       - For each valid triangle, compute the intersection line segment with the plane $z$ [S6, unofficial].
-       - Cases:
-         - 2 vertices on plane: Return those 2 vertices [S6, unofficial].
-         - 1 vertex on plane: Compute intersection point on the edge between the above/below vertex and the on-plane vertex [S6, unofficial]. Return (intersection, on-plane vertex).
-         - 0 vertices on plane: Compute intersection points on the two edges crossing the plane [S6, unofficial]. Return those 2 points.
-       - Intersection point calculation:
-         - Ensure $p_1.z < p_2.z$.
-         - If $p_1.z == p_2.z$, distance = 0.
-         - Else, $t = \frac{z - p_1.z}{p_2.z - p_1.z}$ [S6, unofficial].
-         - $point = p_1 + t \times (p_2 - p_1)$ [S6, unofficial].
-    c. **Rasterize Lines to 2D Grid:**
-       - Initialize `prepixel` grid of size `(bounding_box[0], bounding_box[1])` to False [S6, unofficial].
-       - For each $x$ column:
-         - Find relevant lines crossing this $x$. A line is relevant if it spans across $x$ (vertices on both sides) or one vertex is on $x$ and another is above [S6, unofficial].
-         - Compute target $y$ coordinates for each line at this $x$:
-           - If vertical ($x_0 == x_1$), return -1 (skip) [S6, unofficial].
-           - Else, $ratio = \frac{x - x_0}{x_1 - x_0}$ [S6, unofficial].
-           - $y_{new} = y_0 + ratio \times (y_1 - y_0)$ [S6, unofficial].
-         - For each $y$ row:
-           - If `isBlack` is True, set `prepixel[x][y] = True` [S6, unofficial].
-           - If $y$ matches a target $y$ coordinate AND the point lies on the line segment (checked by integer comparison and range checks), toggle `isBlack` and set `prepixel[x][y] = True` [S6, unofficial].
-       - Assign `prepixel` to `voxels[z]` [S6, unofficial].
-5.  **Padding (Optional):** If padding is enabled, expand dimensions by 2 in each axis and shift data by 1 [S6, unofficial].
-
-**Pseudocode (Slice-and-Rasterize):**
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import numpy as np
+import math
 
-def voxelize_slice_and_rasterize(mesh_triangles, resolution):
-    # 1. Scale and Shift
-    all_points = [pt for tri in mesh_triangles for pt in tri]
-    mins = np.min(all_points, axis=0)
-    maxs = np.max(all_points, axis=0)
-    max_dim = max(maxs[0] - mins[0], maxs[1] - mins[1])
-    if max_dim == 0: max_dim = 1e-9
-    xyscale = (resolution - 1) / max_dim
-    shift = -mins
-    scale = np.array([xyscale, xyscale, xyscale])
+def voxelize_mesh(vertices, faces, grid_size):
+    """
+    Voxelize a mesh into a 3D grid of occupied voxel coordinates.
+    vertices: (N, 3) float array
+    faces: (M, 3) int array
+    grid_size: int
+    """
+    voxel_size = 1.0 / grid_size
+    grid_min = 0
+    grid_max = grid_size
     
-    scaled_triangles = []
-    for tri in mesh_triangles:
-        new_tri = [(np.array(pt) + shift) * scale for pt in tri]
-        if len(set(map(tuple, new_tri))) == 3: # Filter degenerate
-            scaled_triangles.append(new_tri)
-            
-    z_max = int(np.ceil((maxs[2] - mins[2]) * xyscale))
-    x_max, y_max = resolution, resolution
-    voxels = np.zeros((z_max, x_max, y_max), dtype=bool)
+    occupied = set()
     
-    # 2. Iterate Height
-    for z in range(z_max):
-        # Find crossing triangles
-        crossing_tris = []
-        for tri in scaled_triangles:
-            zs = [pt[2] for pt in tri]
-            has_above = any(z_v > z for z_v in zs)
-            has_below = any(z_v < z for z_v in zs)
-            on_plane = sum(1 for z_v in zs if abs(z_v - z) < 1e-9)
-            if (has_above and has_below) or on_plane >= 2:
-                crossing_tris.append(tri)
-                
-        # Compute intersection lines
-        lines = []
-        for tri in crossing_tris:
-            p1, p2, p3 = tri
-            pts = [p1, p2, p3]
-            above = [p for p in pts if p[2] > z]
-            below = [p for p in pts if p[2] < z]
-            same = [p for p in pts if abs(p[2] - z) < 1e-9]
+    # Helper: Lerp between two Vec2d based on scalar t
+    def lerp_2d(a, b, t_val, a_val, b_val):
+        if a == b:
+            return a_val
+        alpha = (t_val - a) / (b - a)
+        return (1 - alpha) * a_val + alpha * b_val
+
+    # Helper: Scanline half fill
+    def scan_line_half(row_start, row_end, t0, t1, t2):
+        for y_idx in range(row_start, row_end):
+            # World Y coordinate for the row
+            y = (y_idx + 1) * voxel_size
             
-            if len(same) == 2:
-                lines.append((same[0], same[1]))
-            elif len(same) == 1:
-                if above and below:
-                    side = where_line_crosses_z(above[0], below[0], z)
-                    lines.append((side, same[0]))
+            # Intersect edges t0-t1 and t0-t2 with y
+            # t0, t1, t2 are Vec2d (x, z) in the projection plane
+            # We need to lerp the x and z components
+            
+            # Edge t0-t1
+            if t1[1] != t0[1]:
+                t3_xz = lerp_2d(t0[1], t1[1], y, 
+                                (t0[0], t0[2]), (t1[0], t1[2]))
             else:
-                for i in range(3):
-                    pa, pb = pts[i], pts[(i+1)%3]
-                    if (pa[2] > z) != (pb[2] > z):
-                        inter = where_line_crosses_z(pa, pb, z)
-                        lines.append(inter)
-                        
-        # Rasterize to 2D grid
-        prepixel = np.zeros((x_max, y_max), dtype=bool)
-        for x in range(x_max):
-            is_black = False
-            for y in range(y_max):
-                if is_black:
-                    prepixel[x, y] = True
-                for line in lines:
-                    if on_line_at_x(line, x, y):
-                        is_black = not is_black
-                        prepixel[x, y] = True
-            if is_black:
-                raise ValueError(f"Unbalanced edge crossings at z={z}, x={x}")
-        voxels[z] = prepixel
-    return voxels
+                t3_xz = (t0[0], t0[2])
+                
+            # Edge t0-t2
+            if t2[1] != t0[1]:
+                t4_xz = lerp_2d(t0[1], t2[1], y, 
+                                (t0[0], t0[2]), (t2[0], t2[2]))
+            else:
+                t4_xz = (t0[0], t0[2])
+            
+            # Ensure t3.x <= t4.x
+            if t3_xz[0] > t4_xz[0]:
+                t3_xz, t4_xz = t4_xz, t3_xz
+                
+            # Calculate column indices
+            line_start = max(grid_min, math.floor(t3_xz[0] / voxel_size))
+            line_end = min(grid_max - 1, math.floor(t4_xz[0] / voxel_size))
+            
+            for x_idx in range(line_start, line_end):
+                # World X coordinate
+                x = (x_idx + 1) * voxel_size
+                
+                # Interpolate Z (the third dimension component) at this X
+                # Using the x-coordinates of t3 and t4 to lerp their z-values
+                if t4_xz[0] != t3_xz[0]:
+                    z = lerp_2d(t3_xz[0], t4_xz[0], x,
+                                (t3_xz[1], 0), (t4_xz[1], 0))[0] # Take first component (z)
+                else:
+                    z = t3_xz[1]
+                    
+                z_idx = math.floor(z / voxel_size)
+                
+                if grid_min <= z_idx < grid_max:
+                    # Mark 2x2 block
+                    for dx in [0, 1]:
+                        for dy in [0, 1]:
+                            coord = (x_idx + dx, y_idx + dy, z_idx)
+                            occupied.add(coord)
 
-def where_line_crosses_z(p1, p2, z):
-    if p1[2] > p2[2]: p1, p2 = p2, p1
-    dist = 0 if abs(p2[2] - p1[2]) < 1e-9 else (z - p1[2]) / (p2[2] - p1[2])
-    return (p1[0] - dist * (p1[0] - p2[0]), p1[1] - dist * (p1[1] - p2[1]))
+    # Process each triangle
+    for i in range(0, len(faces), 3):
+        p1 = vertices[faces[i]]
+        p2 = vertices[faces[i+1]]
+        p3 = vertices[faces[i+2]]
+        
+        # Iterate 3 axes
+        for ax2 in range(3):
+            ax0 = (ax2 + 1) % 3
+            ax1 = (ax2 + 2) % 3
+            
+            # Project to 2D (ax0, ax1)
+            t = [
+                (p1[ax0], p1[ax1], p1[ax2]),
+                (p2[ax0], p2[ax1], p2[ax2]),
+                (p3[ax0], p3[ax1], p3[ax2])
+            ]
+            
+            # Sort by ax1 (index 1 in tuple)
+            t.sort(key=lambda v: v[1])
+            
+            # Calculate row indices
+            start = max(grid_min, math.floor(t[0][1] / voxel_size))
+            mid = max(grid_min, math.floor(t[1][1] / voxel_size))
+            end = min(grid_max - 1, math.floor(t[2][1] / voxel_size))
+            
+            # Fill lower and upper halves
+            if start < mid:
+                scan_line_half(start, mid, t[0], t[1], t[2])
+            if mid < end:
+                scan_line_half(mid, end, t[2], t[1], t[0])
 
-def on_line_at_x(line, x, y):
-    p1, p2 = line
-    if p1[0] == p2[0]: return False # Vertical lines skip
-    ratio = (x - p1[0]) / (p2[0] - p1[0])
-    newy = p1[1] + ratio * (p2[1] - p1[1])
-    return int(newy) == y and min(p1[0],p2[0]) <= x <= max(p1[0],p2[0]) and min(p1[1],p2[1]) <= y <= max(p1[1],p2[1])
+    return list(occupied)
 ```
 
-### Algorithm: Triangle-AABB Sampling (C++ Style)
-This method iterates over triangles, computes their bounding box in voxel space, and tests each voxel in that box for intersection [S2, unofficial][S5].
-
-**Steps:**
-
-1.  **Initialize Grid:** Allocate a flat array `data` of size $W \times H \times D$, initialized to 0 [S2, S4, unofficial].
-2.  **Compute Mesh AABB:** Iterate over all triangles to compute the global bounding box `meshaabb` of the mesh [S2, S4, unofficial].
-3.  **Compute Resolution per Axis:**
-    $$
-    res_x = \frac{meshaabb.max.x - meshaabb.min.x}{W}
-    $$
-    $$
-    res_y = \frac{meshaabb.max.y - meshaabb.min.y}{H}
-    $$
-    $$
-    res_z = \frac{meshaabb.max.z - meshaabb.min.z}{D}
-    $$
-4.  **Voxelize Points (Optional Pre-step):** Some implementations first convert the mesh to a point cloud using `vx_voxelize_pc` with the computed resolutions, then map points to the grid [S2, unofficial].
-5.  **Iterate Triangles:** For each triangle $T$ with vertices $v_1, v_2, v_3$:
-    a. Compute $T$'s AABB in world space.
-    b. Map the AABB min/max to voxel grid indices [S2, unofficial].
-       - Compute offset: $ox = \text{tri\_min}.x + \text{fabs}(aabb.min.x)$ [S2, unofficial].
-       - Index: $ix = \frac{ox}{ax} \times (W - 1)$ where $ax = aabb.max.x - aabb.min.x$ [S2, unofficial].
-       - Clamp indices to $[0, W-1]$ [S5].
-    c. Iterate over voxel indices $(x, y, z)$ within the mapped AABB range [S2, unofficial][S5].
-    d. **Intersection Test:** For each voxel, construct its AABB (centered at grid point, size $res_x, res_y, res_z$) [S2, unofficial]. Test for intersection with triangle $T$ using `vx__triangle_box_overlap` [S4, unofficial].
-    e. **Color Interpolation (if colors present):**
-       If intersecting, compute the color at the voxel center $C_{voxel}$ using barycentric interpolation [S4, unofficial].
-       - Create sub-triangles $t_1(v_1, v_2, C_{voxel})$, $t_2(v_2, v_3, C_{voxel})$, $t_3(v_3, v_1, C_{voxel})$ [S4, unofficial].
-       - Compute areas $A_1, A_2, A_3$.
-       - Total Area $A = A_1 + A_2 + A_3$.
-       - Weighted Color $C = \frac{C_1 A_2 + C_2 A_3 + C_3 A_1}{A}$ [S4, unofficial].
-    f. **Insertion:**
-       - Compute flat index $idx = x + y \cdot W + z \cdot (W \cdot H)$ [S2, unofficial].
-       - If `data[idx]` is 0, set `data[idx] = Color` [S2, unofficial].
-       - If `data[idx]` is non-zero, blend: `data[idx] = mix(data[idx], Color)` (average of existing and new color) [S2, unofficial].
-
-**Pseudocode (Triangle-AABB Sampling):**
-
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-import numpy as np
-
-def voxelize_aabb_sampling(vertices, indices, width, height, depth, colors=None):
-    grid = np.zeros((width, height, depth), dtype=np.uint32)
-    
-    # Compute mesh AABB
-    min_v = np.min(vertices, axis=0)
-    max_v = np.max(vertices, axis=0)
-    ax, ay, az = max_v - min_v
-    
-    # Handle zero dimensions
-    res_x = ax[0] / width if ax[0] > 0 else 1e-9
-    res_y = ax[1] / height if ax[1] > 0 else 1e-9
-    res_z = ax[2] / depth if ax[2] > 0 else 1e-9
-    
-    for i in range(0, len(indices), 3):
-        i1, i2, i3 = indices[i], indices[i+1], indices[i+2]
-        p1, p2, p3 = vertices[i1], vertices[i2], vertices[i3]
-        
-        tri_min = np.minimum(np.minimum(p1, p2), p3)
-        tri_max = np.maximum(np.maximum(p1, p2), p3)
-        
-        # Map to voxel indices (S2 formula)
-        ox = tri_min[0] + abs(min_v[0])
-        ix_min = int((ox / ax[0]) * (width - 1)) if ax[0] > 0 else 0
-        ix_max = int(((tri_max[0] + abs(min_v[0])) / ax[0]) * (width - 1)) if ax[0] > 0 else 0
-        # Clamp
-        ix_min = max(0, min(ix_min, width - 1))
-        ix_max = max(0, min(ix_max, width - 1))
-        # Similar for y, z...
-        
-        for z in range(z_min, z_max + 1):
-            for y in range(y_min, y_max + 1):
-                for x in range(x_min, x_max + 1):
-                    # Intersection test placeholder [G]
-                    intersects = True 
-                    if intersects:
-                        # Color interpolation (S4)
-                        if colors is not None:
-                            c1, c2, c3 = colors[i1], colors[i2], colors[i3]
-                            center = np.array([x, y, z]) * np.array([res_x, res_y, res_z]) + min_v
-                            a1 = tri_area(p1, p2, center)
-                            a2 = tri_area(p2, p3, center)
-                            a3 = tri_area(p3, p1, center)
-                            total = a1 + a2 + a3
-                            if total > 0:
-                                r = (c1[0]*a2 + c2[0]*a3 + c3[0]*a1) / total
-                                g = (c1[1]*a2 + c2[1]*a3 + c3[1]*a1) / total
-                                b = (c1[2]*a2 + c2[2]*a3 + c3[2]*a1) / total
-                            else: r,g,b = 0,0,0
-                        else: r,g,b = 1,1,1
-                        
-                        color_int = ((int(255)&0xff)<<24) | ((int(b*255)&0xff)<<16) | ((int(g*255)&0xff)<<8) | ((int(r*255)&0xff)<<0)
-                        idx = x + y * width + z * (width * height)
-                        if grid[idx] == 0: grid[idx] = color_int
-                        else:
-                            # Blend
-                            old = grid[idx]
-                            new_r = ((old>>0)&0xff + int(r*255))//2
-                            new_g = ((old>>8)&0xff + int(g*255))//2
-                            new_b = ((old>>16)&0xff + int(b*255))//2
-                            grid[idx] = (255<<24) | (new_b<<16) | (new_g<<8) | new_r
-    return grid
-```
-
-### Parameters
-- **Resolution:** Number of voxels for the largest dimension. Typical value: 100 [S6, unofficial].
-- **Width, Height, Depth:** Explicit grid dimensions [S2, S4, unofficial].
-- **Padding:** Boolean flag (default True). Adds a 1-voxel border of empty space by expanding dimensions by 2 in each axis [S6, unofficial].
-
-### Edge Cases and Pitfalls
-- **Degenerate Triangles:** Triangles with collinear or duplicate vertices are filtered out during scaling [S6, unofficial].
-- **Division by Zero:** Grid dimensions of zero are handled by ternary checks (e.g., `ax == 0.0 ? 0 : ...`) [S2, unofficial].
-- **Vertical Lines:** In slice rasterization, vertical lines ($x_0 == x_1$) return $Y=-1$, which skips them in scanline fill [S6, unofficial].
-- **Unbalanced Edges:** If `isBlack` is still True after processing all $y$ rows, an error is printed, indicating unbalanced edge crossings [S6, unofficial].
-- **Precision:** Floating-point comparisons for "on plane" or "on line" should use a small epsilon to avoid missing intersections due to precision errors [G].
+**Edge Cases and Pitfalls:**
+*   **Degenerate Triangles:** Triangles with collinear or duplicate vertices are filtered out during transformation or yield empty scanlines [S8, unofficial].
+*   **Division by Zero:** When calculating resolution or lerp factors, check for zero denominators (e.g., if a grid dimension is 0) [S5, unofficial].
+*   **Boundary Overlap:** If the mesh bounding box exactly overlaps voxel surfaces, intersection determination may fail if the box is not expanded by half a voxel unit [S6].
+*   **Vertical Lines:** In scanline fill, vertical lines ($x_0 = x_1$) return $Y=-1$ from interpolation, effectively skipping them [S8, unofficial].
 
 ## Subtopics
 
 ### [A-Buffer Solid Voxelization](1189-a-buffer-solid-voxelization.md)
-A GPU-based solid voxelization technique that outputs a linked list of starting and ending voxels for each row and column in the voxel grid. It uses an A-buffer approach to handle multiple fragments per pixel by building and sorting linked lists of fragment data. Choose this when you need depth-sorted solid voxels for accurate interior rendering.
+Uses an A-buffer linked list to retain all depth intersections per pixel, allowing output of starting and ending voxels for each row/column. Choose when watertightness and depth ordering are required.
+
+### [Adaptive Sparse Voxelization with Bounding Box Thickness Cases](1686-adaptive-sparse-voxelization-with-bounding-box-thickness-cas.md)
+Classifies triangle AABBs into 1D, 2D, or 3D thickness cases to optimize overlap testing. Choose for high-resolution scenes with many thin primitives.
+
+### [Geometry Shader Voxelization](2566-geometry-shader-voxelization.md)
+Rasterizes triangles directly into a 3D texture using an OpenGL Geometry Shader, testing 3D spatial overlap per voxel index. Choose for GPU-accelerated, explicit 3D overlap testing without framebuffer depth buffers.
 
 ## Operating characteristics
-Not given in the sources.
+*   **Time Complexity:** $O(F \cdot R^2)$, where $F$ is the number of faces and $R$ is the average number of voxels spanned by a triangle in the projection plane. The hash table operations are $O(1)$ on average.
+*   **Memory Complexity:** $O(N^3)$ for the output grid, or $O(V)$ for the hash table of occupied voxels, where $V$ is the number of occupied voxels.
+*   **Performance:** On a PegInsertionSide-v1 mesh (281K verts, 561K faces) at 1024³ resolution, the CPU implementation takes 1.35s, while the GPU variant (A100) takes 0.56s (including transfer), a 3x speedup with 99.99% IoU [S1, unofficial].
+*   **Strengths:** Simple to implement on CPU; produces identical voxel sets to full o-voxel for occupancy purposes; fast for sparse grids.
+*   **Limitations:** Does not produce surface reconstruction (dual vertices); CPU version is slower than GPU variants for high resolutions; memory intensive for dense grids.
+*   **When to use:** When only voxel occupancy is needed for 3D convolution or sparse representations, and surface geometry reconstruction is handled separately.
+*   **When not to use:** When high-fidelity surface reconstruction (QEF/dual vertices) is required, or when real-time GPU performance is critical and CPU overhead is unacceptable.
 
 ## Background
-3D Grid Rasterization is a fundamental technique in voxelization, originating from early computer graphics research on converting polygonal models to volume data. It is widely used in volume rendering pipelines, particularly in differentiable rendering and medical imaging. The specific implementations cited here are from open-source libraries: `differentiable_volumetric_rendering` [S1, unofficial], `voxelizer` [S2, unofficial], and `mesh_vox` [S6, unofficial].
+The method originates from the o-voxel library by Jianfeng Xiang, part of the TRELLIS.2 project [S1, unofficial]. It implements the first step of o-voxel's `mesh_to_flexible_dual_grid` pipeline: the intersect scanline. The full o-voxel pipeline includes Face QEF, Boundary QEF, and Dual Vertex Solve steps, which are omitted in this specific rasterization-only variant [S1, unofficial]. The algorithm was extracted and adapted for standalone CPU/GPU use in the `mesh-voxelize` library [S1, unofficial].
 
 ## Sources
 [S1] yuyujunjun/mesh-voxelize, https://github.com/yuyujunjun/mesh-voxelize, fetched 2026-10-26 (unofficial)
-[S2] mesh voxelizer library, https://github.com/karimnaaji/voxelizer, fetched 2026-10-26 (unofficial)
+[S2] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)
 [S3] Voxelization — Open3D 0.12.0 documentation, https://www.open3d.org/docs/0.12.0/tutorial/geometry/voxelization.html, fetched 2026-10-26
-[S4] mesh voxelizer library, https://github.com/karimnaaji/voxelizer, fetched 2026-10-26 (unofficial)
-[S5] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27
-[S6] GitHub - Septaris/mesh_vox: Convert 3D models to voxels, https://github.com/Septaris/mesh_vox, fetched 2026-10-30 (unofficial)
+[S4] latencyhiding/voxel_cone_tracing, https://github.com/latencyhiding/voxel_cone_tracing, fetched 2026-10-26 (unofficial)
+[S5] mesh voxelizer library, https://github.com/karimnaaji/voxelizer, fetched 2026-10-26 (unofficial)
+[S6] Real-Time GPU-Based Voxelizer - GitHub Pages, https://freder.github.io/UnityGraphicsProgrammingBook1/html-translated/vol2/Chapter%201%20_%20Real-Time%20GPU-Based%20Voxelizer.html, fetched 2026-10-27
+[S7] voxelizer-rs, https://github.com/lhemerly/voxelizer-rs, fetched 2026-10-28 (unofficial)
+[S8] GitHub - Septaris/mesh_vox: Convert 3D models to voxels, https://github.com/Septaris/mesh_vox, fetched 2026-10-30 (unofficial)

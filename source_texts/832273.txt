@@ -1,0 +1,432 @@
+A General NeRF Acceleration Toolbox.
+
+nerfacc · PyPI
+Skip to main content
+Switch to mobile version
+nerfacc 0.3.2
+A General NeRF Acceleration Toolbox.
+pip install nerfacc==0.3.2
+Copy PIP instructions
+https://www.nerfacc.com/
+NerfAcc is a PyTorch Nerf acceleration toolbox for both training and inference. It focuses on efficient volumetric rendering of radiance fields, which is universal and plug-and-play for most of the NeRFs.
+Using NerfAcc,
+The vanilla NeRF model with 8-layer MLPs can be trained to better quality (+~0.5 PNSR)
+in 1 hour rather than days as in the paper.
+The Instant-NGP NeRF model can be trained to equal quality in 4.5 minutes,
+comparing to the official pure-CUDA implementation.
+The D-NeRF model for dynamic objects can also be trained in 1 hour
+rather than 2 days as in the paper, and with better quality (+~2.5 PSNR).
+Both bounded and unbounded scenes are supported.
+And it is a pure Python interface with flexible APIs!
+Installation
+```
+pip install nerfacc
+```
+Usage
+The idea of NerfAcc is to perform efficient ray marching and volumetric rendering. So NerfAcc can work with any user-defined radiance field. To plug the NerfAcc rendering pipeline into your code and enjoy the acceleration, you only need to define two functions with your radiance field.
+sigma_fn: Compute density at each sample. It will be used by nerfacc.ray_marching() to skip the empty and occluded space during ray marching, which is where the major speedup comes from.
+rgb_sigma_fn: Compute color and density at each sample. It will be used by nerfacc.rendering() to conduct differentiable volumetric rendering. This function will receive gradients to update your network.
+A simple example is like this:
+```
+import torch
+from torch import Tensor
+import nerfacc 
+
+radiance_field = ...  # network: a NeRF model
+rays_o: Tensor = ...  # ray origins. (n_rays, 3)
+rays_d: Tensor = ...  # ray normalized directions. (n_rays, 3)
+optimizer = ...  # optimizer
+
+def sigma_fn(
+    t_starts: Tensor, t_ends:Tensor, ray_indices: Tensor
+) -> Tensor:
+    """ Query density values from a user-defined radiance field.
+    :params t_starts: Start of the sample interval along the ray. (n_samples, 1).
+    :params t_ends: End of the sample interval along the ray. (n_samples, 1).
+    :params ray_indices: Ray indices that each sample belongs to. (n_samples,).
+    :returns The post-activation density values. (n_samples, 1).
+    """
+    t_origins = rays_o[ray_indices]  # (n_samples, 3)
+    t_dirs = rays_d[ray_indices]  # (n_samples, 3)
+    positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+    sigmas = radiance_field.query_density(positions) 
+    return sigmas  # (n_samples, 1)
+
+def rgb_sigma_fn(
+    t_starts: Tensor, t_ends: Tensor, ray_indices: Tensor
+) -> Tuple[Tensor, Tensor]:
+    """ Query rgb and density values from a user-defined radiance field.
+    :params t_starts: Start of the sample interval along the ray. (n_samples, 1).
+    :params t_ends: End of the sample interval along the ray. (n_samples, 1).
+    :params ray_indices: Ray indices that each sample belongs to. (n_samples,).
+    :returns The post-activation rgb and density values. 
+        (n_samples, 3), (n_samples, 1).
+    """
+    t_origins = rays_o[ray_indices]  # (n_samples, 3)
+    t_dirs = rays_d[ray_indices]  # (n_samples, 3)
+    positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+    rgbs, sigmas = radiance_field(positions, condition=t_dirs)  
+    return rgbs, sigmas  # (n_samples, 3), (n_samples, 1)
+
+# Efficient Raymarching: Skip empty and occluded space, pack samples from all rays.
+# ray_indices: (n_samples,). t_starts: (n_samples, 1). t_ends: (n_samples, 1).
+with torch.no_grad():
+    ray_indices, t_starts, t_ends = nerfacc.ray_marching(
+        rays_o, rays_d, sigma_fn=sigma_fn, near_plane=0.2, far_plane=1.0, 
+        early_stop_eps=1e-4, alpha_thre=1e-2, 
+    )
+
+# Differentiable Volumetric Rendering.
+# colors: (n_rays, 3). opaicity: (n_rays, 1). depth: (n_rays, 1).
+color, opacity, depth = nerfacc.rendering(
+    t_starts, t_ends, ray_indices, n_rays=rays_o.shape[0], rgb_sigma_fn=rgb_sigma_fn
+)
+
+# Optimize: Both the network and rays will receive gradients
+optimizer.zero_grad()
+loss = F.mse_loss(color, color_gt)
+loss.backward()
+optimizer.step()
+```
+Examples:
+Before running those example scripts, please check the script about which dataset it is needed, and download the dataset first.
+```
+# clone the repo with submodules.
+git clone --recursive git://github.com/KAIR-BAIR/nerfacc/
+```
+```
+# Instant-NGP NeRF in 4.5 minutes with reproduced performance!
+# See results at here: https://www.nerfacc.com/en/latest/examples/ngp.html
+python examples/train_ngp_nerf.py --train_split train --scene lego
+```
+```
+# Vanilla MLP NeRF in 1 hour with better performance!
+# See results at here: https://www.nerfacc.com/en/latest/examples/vanilla.html
+python examples/train_mlp_nerf.py --train_split train --scene lego
+```
+```
+# D-NeRF for Dynamic objects in 1 hour with better performance!
+# See results at here: https://www.nerfacc.com/en/latest/examples/dnerf.html
+python examples/train_mlp_dnerf.py --train_split train --scene lego
+```
+```
+# Instant-NGP on unbounded scenes in 20 minutes!
+# See results at here: https://www.nerfacc.com/en/latest/examples/unbounded.html
+python examples/train_ngp_nerf.py --train_split train --scene garden --auto_aabb --unbounded --cone_angle=0.004
+```
+Used by:
+nerfstudio: A collaboration friendly studio for NeRFs.
+instant-nsr-pl: NeuS in 10 minutes.
+Citation
+```
+@article{li2022nerfacc,
+  title={NerfAcc: A General NeRF Accleration Toolbox.},
+  author={Li, Ruilong and Tancik, Matthew and Kanazawa, Angjoo},
+  journal={arXiv preprint arXiv:2210.04847},
+  year={2022}
+}
+```
+Project links
+documentation
+homepage
+repository
+Key dates
+PyPI data
+Data sourced directly from PyPI's database.
+Released: Dec 30, 2022
+Newer release available (0.5.3)
+2 maintainers
+PyPI data
+Data sourced directly from PyPI's database.
+ruilongli
+tancik
+Credits
+Author:
+Ruilong
+License
+MIT
+Requires
+Python >=3.7
+AWS is a Maintaining sponsor of the Python Software Foundation.
+PSF Sponsor · Served ethically
+Metadata
+Project links
+documentation
+homepage
+repository
+Key dates
+PyPI data
+Data sourced directly from PyPI's database.
+Released: Dec 30, 2022
+Newer release available (0.5.3)
+2 maintainers
+PyPI data
+Data sourced directly from PyPI's database.
+ruilongli
+tancik
+Credits
+Author:
+Ruilong
+License
+MIT
+Requires
+Python >=3.7
+SerpApi is a Maintaining sponsor of the Python Software Foundation.
+PSF Sponsor · Served ethically
+Release files for nerfacc 0.3.2
+For a detailed explanation of source distributions (sdists) and built distributions (wheels), please see the package formats documentation.
+Source distribution (sdist)
+Source distribution for nerfacc 0.3.2
+File
+Size
+Uploaded
+Provenance
+Actions
+nerfacc-0.3.2.tar.gz
+36.7 kB
+Dec 30, 2022
+Without provenance
+Details for nerfacc-0.3.2.tar.gz
+Built distribution (wheel)
+Table of built distributions (wheels) for nerfacc 0.3.2
+File
+Interpreter
+ABI
+Platform
+Actions
+Reset
+nerfacc-0.3.2-py3-none-any.whl
+45.1 kB
+Dec 30, 2022
+Without provenance
+Python 3
+none
+any
+Details for nerfacc-0.3.2-py3-none-any.whl
+Total release size: 81.8 kB
+Release files
+/ nerfacc-0.3.2.tar.gz
+Download URL
+nerfacc-0.3.2.tar.gz
+Size
+36.7 kB
+Tags
+Source
+SHA-256 checksum
+How to use checksums
+8eb45a2e8010d612f8fa03d4aa30ec3f946681e7a2b2daf2d27823e96cee3a45
+Copy SHA-256 checksum
+BLAKE2b-256 checksum
+How to use checksums
+2d7e51cf68e359a6929970f0d1d8c46bb8790428694c18624490b862b67e9781
+Copy BLAKE2b-256 checksum
+Upload date
+Dec 30, 2022
+Uploaded using Trusted Publishing?
+What is trusted publishing?
+No
+Uploaded via
+twine/4.0.2 CPython/3.7.15
+Release files
+/ nerfacc-0.3.2-py3-none-any.whl
+Download URL
+nerfacc-0.3.2-py3-none-any.whl
+Size
+45.1 kB
+Tags
+Python 3
+SHA-256 checksum
+How to use checksums
+fed2b455ea3fe773725c25ea50e6486046bec012053ef3d24a693f57206313cb
+Copy SHA-256 checksum
+BLAKE2b-256 checksum
+How to use checksums
+6f96acf61d0e23efcf694e0558b6214f2c7e08142981fcb634e71078ff2776bd
+Copy BLAKE2b-256 checksum
+Upload date
+Dec 30, 2022
+Uploaded using Trusted Publishing?
+What is trusted publishing?
+No
+Uploaded via
+twine/4.0.2 CPython/3.7.15
+Security for nerfacc 0.3.2
+Report project as malware
+Provenance
+Provenance describes where a file came from. On PyPI, provenance is shared via attestations, which provide a verifiable record of the build or publishing details. View details, limitations and caveats.
+No provenance found
+None of the files in this release were uploaded with provenance metadata.
+A note on package security
+PyPI is a repository for distributing packages, not a service for auditing them. While third-party security researchers and our staff do their best to detect and remove malicious packages, PyPI cannot guarantee the quality, security or suitability of any given package.
+To learn more about protecting yourself from malicious actors, visit our package security documentation.
+Release history
+Release notifications |
+RSS feed
+0.5.3
+May 31, 2023
+2 release files
+No provenance
+0.5.2
+Apr 24, 2023
+2 release files
+No provenance
+0.5.1
+Apr 9, 2023
+2 release files
+No provenance
+0.5.0
+Apr 4, 2023
+2 release files
+No provenance
+0.4.0
+Apr 2, 2023
+2 release files
+No provenance
+0.3.5
+Feb 23, 2023
+2 release files
+No provenance
+0.3.4
+Jan 31, 2023
+2 release files
+No provenance
+0.3.3
+Jan 17, 2023
+2 release files
+No provenance
+This release
+0.3.2
+This release
+Dec 30, 2022
+2 release files
+No provenance
+0.3.1
+Nov 8, 2022
+2 release files
+No provenance
+0.3.0
+Nov 6, 2022
+2 release files
+No provenance
+0.2.4
+Nov 1, 2022
+2 release files
+No provenance
+0.2.3
+Nov 1, 2022
+2 release files
+No provenance
+0.2.2
+Oct 31, 2022
+2 release files
+No provenance
+0.2.1
+Oct 18, 2022
+2 release files
+No provenance
+0.2.0
+Oct 9, 2022
+2 release files
+No provenance
+Yanked
+0.1.8
+Oct 7, 2022
+2 release files
+No provenance
+Yanked reason: Bug
+0.1.7
+Oct 7, 2022
+2 release files
+No provenance
+0.1.6
+Oct 6, 2022
+2 release files
+No provenance
+0.1.5
+Oct 5, 2022
+2 release files
+No provenance
+0.1.4.post1
+Oct 3, 2022
+2 release files
+No provenance
+Yanked
+0.1.4
+Oct 3, 2022
+1 release file
+No provenance
+Yanked reason: bug exists
+0.1.3
+Oct 2, 2022
+2 release files
+No provenance
+0.1.2
+Sep 30, 2022
+2 release files
+No provenance
+0.1.1
+Sep 28, 2022
+2 release files
+No provenance
+0.1.0
+Sep 27, 2022
+2 release files
+No provenance
+0.0.9
+Sep 19, 2022
+2 release files
+No provenance
+0.0.8
+Sep 17, 2022
+2 release files
+No provenance
+0.0.7
+Sep 17, 2022
+2 release files
+No provenance
+0.0.6
+Sep 16, 2022
+2 release files
+No provenance
+0.0.5
+Sep 16, 2022
+2 release files
+No provenance
+0.0.4
+Sep 15, 2022
+2 release files
+No provenance
+0.0.3
+Sep 14, 2022
+2 release files
+No provenance
+Anthropic, PBC
+Visionary sponsor
+Bloomberg
+Visionary sponsor
+Hudson River Trading
+Visionary sponsor
+Meta
+Visionary sponsor
+NVIDIA
+Visionary sponsor
+Microsoft
+Sustainability sponsor
+Depot
+Continuous Integration
+AWS
+Cloud computing and Security Sponsor
+Datadog
+Monitoring
+Fastly
+CDN
+Google
+Download Analytics
+Sentry
+Error logging
+StatusPage
+Status page
+"PyPI", "Python Package Index", and the blocks logos are registered trademarks of the Python Software Foundation.
+© 2026 Python Software Foundation
+Site map
+Deployed from 0fac805

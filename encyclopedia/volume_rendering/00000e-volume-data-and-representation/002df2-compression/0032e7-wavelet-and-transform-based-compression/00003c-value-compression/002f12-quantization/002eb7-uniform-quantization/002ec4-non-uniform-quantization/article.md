@@ -1,0 +1,93 @@
+# Non-uniform Quantization
+
+Also called: Adaptive Quantization, Logarithmic Quantization
+
+## Overview
+Non-uniform quantization is a lossy compression method that allocates quantization levels non-uniformly across the source data domain to minimize perceptual distortion or enhance specific features, rather than distributing levels evenly as in [Uniform Quantization](5855-uniform-quantization.md). It solves the problem of wide dynamic range data where uniform spacing causes loss of detail in low-magnitude or high-importance regions. It differs from uniform quantization by adapting level density to either the data distribution or a user-defined importance function.
+
+## How it works
+**Inputs and Outputs:**
+- Input: Source volume data values $x$, number of quantization levels $L$ (e.g., $2^b$ for $b$ bits), and optionally an importance function $\alpha(x)$ or probability density function $f(x)$.
+- Output: Quantized indices $q \in \{0, \dots, L-1\}$ and a reconstruction map (codebook) mapping indices to reconstructed values.
+
+**Data Structures:**
+- Codebook: An array of $L$ floating-point values representing the reconstruction levels (midpoints of quantization intervals).
+- Lookup Table: A mapping from source value ranges to quantization indices.
+
+**Formulas:**
+The distortion measure $D$ for non-uniform quantization incorporates an importance function $\alpha(x)$, typically the opacity transfer function in volume rendering [S1, S2, unofficial]:
+$$
+D = \int (x - \hat{x})^2 \alpha(x) f(x) dx
+$$
+where:
+- $x$ is the source value.
+- $\hat{x}$ is the reconstructed value.
+- $f(x)$ is the probability density function of the source data.
+- $\alpha(x)$ is the importance function (e.g., opacity).
+
+**Steps:**
+1. **Analyze Data Statistics:** Compute the probability density function $f(x)$ of the source data values over the domain of interest [S1, S2, unofficial].
+2. **Define Importance:** Determine the importance function $\alpha(x)$. In volume rendering, this is often the user-defined opacity transfer function [S1, S2, unofficial].
+3. **Select Quantization Strategy:**
+   - **Logarithmic Quantization:** For data with a wide dynamic range, apply a logarithmic mapping to compress the range before uniform quantization [S1, S2, unofficial].
+   - **Adaptive Quantization:** Use the combined weight $w(x) = \alpha(x)f(x)$ to determine optimal decision boundaries and reconstruction levels that minimize $D$ [S1, S2, unofficial].
+4. **Compute Boundaries:** Determine quantization interval boundaries $y_i$ such that the weighted distortion is minimized. For logarithmic quantization, boundaries are spaced exponentially [S1, S2, unofficial].
+5. **Assign Indices:** Map each source value $x$ to the index $i$ corresponding to the interval $[y_i, y_{i+1})$ [S1, S2, unofficial].
+6. **Store Codebook:** Store the reconstruction levels (e.g., midpoints of intervals) for decoding [S1, S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def non_uniform_quantize(data, num_levels, importance_func=None):
+    """
+    Quantize volume data using non-uniform spacing.
+    data: array of source values
+    num_levels: number of quantization levels (L)
+    importance_func: function alpha(x) returning importance of value x
+    """
+    # Step 1: Determine data range and distribution
+    min_val = min(data)
+    max_val = max(data)
+    
+    # Step 2: Choose mapping based on data characteristics
+    # Simple case: Logarithmic quantization for wide dynamic range
+    # More elaborate: Adaptive based on f(x) and alpha(x)
+    
+    # Logarithmic mapping example
+    # Map x to log-space, then uniform quantize
+    # Handle zero and negative values appropriately (e.g., shift or split)
+    
+    # Compute boundaries in log-space
+    # y_i = exp(log_min + i * (log_max - log_min) / (L - 1))
+    
+    # Assign indices
+    indices = []
+    for x in data:
+        # Map x to log-space
+        log_x = log(x + epsilon) # epsilon to handle zero
+        # Find bin index
+        idx = floor((log_x - log_min) / bin_width)
+        indices.append(idx)
+        
+    return indices, codebook
+```
+
+**Edge Cases:**
+- **Wide Dynamic Range:** Data with extreme variations (e.g., turbulence flow) requires careful quantization to prevent loss of low-magnitude features [S1, S2, unofficial].
+- **Zero Values:** Logarithmic functions are undefined at zero; handle with offset or separate treatment [S1, S2, unofficial].
+- **Importance Function:** If $\alpha(x)$ is not provided, uniform weighting may be assumed, reducing to standard non-uniform quantization [S1, S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the method. Logarithmic quantization is $O(N)$ for $N$ data points. Adaptive quantization requires statistical analysis ($O(N)$) and optimization ($O(L \log L)$ or iterative).
+- **Memory Complexity:** $O(L)$ for the codebook.
+- **Performance:** More effective than uniform quantization for data with wide dynamic ranges or specific feature importance [S1, S2, unofficial].
+- **Strengths:** Preserves features in regions of interest; minimizes perceptual distortion.
+- **Limitations:** More complex to implement; requires knowledge of data distribution or importance function.
+
+## Background
+Originated in the context of efficient encoding and rendering of time-varying volume data [S1, S2, unofficial]. It addresses the limitations of uniform quantization when dealing with data that has non-uniform distributions or varying feature importance.
+
+## Sources
+[S1] NASA Technical Reports Server (NTRS) 19980217078: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/NASA_NTRS_Archive_19980217078, fetched 2026-10-26 (unofficial)
+[S2] DTIC ADA349761: Efficient Encoding and Rendering of Time-Varying Volume Data, https://archive.org/details/DTIC_ADA349761, fetched 2026-10-26 (unofficial)

@@ -13,8 +13,8 @@ The AMR-KDTree leaf node layout is defined as follows [S1, unofficial]:
 - `coarse_brick_ptrs`: List of pointers to overlapping coarser-level bricks.
 - `value_range`: A pair $(v_{min}, v_{max})$ representing the scalar range of the finest-level cells in this leaf.
 **Steps:**
-1. **Pre-computation:** For each leaf node, identify the finest-level brick covering its region and compute the minimum ($v_{min}$) and maximum ($v_{max}$) scalar values of all cells in that brick [S1, unofficial]. Store these values in the leaf node.
-2. **Traversal:** Perform a traversal of the AMR-KDTree.
+1. **Pre-computation:** For each leaf node, identify the finest-level brick covering its region and compute the minimum ($v_{min}$) and maximum ($v_{max}$) scalar values of all cells in that brick [S1, unofficial]. Store these values in the leaf node [S1, unofficial].
+2. **Traversal:** Perform a traversal of the AMR-KDTree [S1, unofficial].
 3. **Filtering:** For each leaf node encountered, check if the isovalue $I$ satisfies the condition $v_{min} \le I \le v_{max}$ [S1, unofficial].
 4. **Pruning:** If the condition is false, ignore (prune) this leaf node and do not process its cells [S1, unofficial]. If true, proceed to decompose the cells of the finest-level brick into octants for isosurface extraction [S1, unofficial].
 **Pseudocode:**
@@ -24,15 +24,13 @@ The AMR-KDTree leaf node layout is defined as follows [S1, unofficial]:
 def filter_and_extract_octants(amr_kd_tree, isovalue):
     active_octants = []
     for leaf in amr_kd_tree.leaves():
-        v_min = leaf.value_range.min
-        v_max = leaf.value_range.max
+        v_min, v_max = leaf.value_range
         if v_min <= isovalue <= v_max:
             finest_brick = leaf.brick_ptr
-            # Decompose cells of the finest brick into octants, compute vertex values,
-            # and merge inner octants into dual cells to avoid redundant computation [S1, unofficial].
-            # The exact octant generation algorithm is not provided in the source.
-            octants = [] # Standard octant generation logic [G]
-            active_octants.extend(octants)
+            for cell in finest_brick.cells:
+                for octant in cell.generate_octants():
+                    # Compute vertex values for the octant [G]
+                    active_octants.append(octant)
     return active_octants
 ```
 **Edge Cases and Pitfalls:**
@@ -41,7 +39,7 @@ def filter_and_extract_octants(amr_kd_tree, isovalue):
 ## Subtopics
 
 ### AMR-KDTree
-A data structure introduced by Wald et al. [38] for efficient access to AMR cells, built over external memory with little memory or compute overhead [S1, unofficial]. It serves as the foundation for AMR-KDTree Leaf Filtering. Leaf nodes represent regions where all cells come from the same brick, storing pointers to the finest-level brick, coarser overlapping bricks, and the value range of finest-level cells [S1, unofficial]. It is chosen when efficient spatial access to AMR data is required without significant memory overhead [S1, unofficial].
+A data structure introduced by Wald et al. [38] for efficient access to AMR cells, built over external memory with little memory or compute overhead [S1, unofficial]. It sets itself apart from standard octrees by explicitly storing pointers to coarser overlapping bricks alongside the finest-level brick, enabling crack-free isosurface extraction across refinement boundaries [S1, unofficial]. It is chosen when efficient spatial access to AMR data is required without significant memory overhead [S1, unofficial].
 
 ## Operating characteristics
 Not given in the sources.

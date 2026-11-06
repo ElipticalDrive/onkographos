@@ -1,0 +1,126 @@
+# Ray Structure
+
+Also called: Ray Data Structure, Ray Representation, Ray3D
+
+## Overview
+The Ray Structure is a fundamental data container in volume rendering that represents a geometric ray in 3D space, defined by an origin point and a direction vector [S1, S2, S3, unofficial]. It serves as the primary query object for ray marching and intersection tests against volume data, bridging the gap between camera generation and the sampling payload [S1, S2, S3, unofficial]. Unlike sibling structures that manage batches ([Ray Bundle](2179-ray-bundle.md), [RayBatch container](4187-raybatch-container.md)) or store intersection results ([Hit Record Structure](4953-hit-record-structure.md)), the Ray Structure focuses on the single-ray geometric definition and its parametric evaluation [S1, S2, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Origin point $\mathbf{o} \in \mathbb{R}^3$, Direction vector $\mathbf{d} \in \mathbb{R}^3$.
+*   **Output:** A ray object capable of evaluating points at parameter $t$ and providing access to origin and direction.
+
+**Data Structures:**
+The ray is stored as a class or struct with two primary fields [S2, S3, unofficial]:
+1.  `orig`: The origin point, typically a 3D vector (`point3` or `vec3`) [S2, S3, unofficial].
+2.  `dir`: The direction vector, typically a 3D vector (`vec3`) [S2, S3, unofficial].
+
+**Parameters:**
+*   `RAY_MIN_T`: The minimum valid parameter $t$ for the ray. Default value is $10^{-5}$ [S3, unofficial].
+*   `RAY_MAX_T`: The maximum valid parameter $t$ for the ray. Default value is $10^{30}$ [S3, unofficial].
+
+**Steps:**
+1.  **Initialization:**
+    *   The default constructor initializes `orig` to $(0, 0, 0)$ and `dir` to $(0, 0, -1)$ [S1, unofficial].
+    *   Alternatively, the default constructor may initialize `orig` and `dir` to zero vectors, with `range_min` set to `RAY_MIN_T` and `range_max` set to `RAY_MAX_T` [S3, unofficial].
+2.  **Construction:**
+    *   A parameterized constructor accepts an origin $\mathbf{o}$ and a direction $\mathbf{d}$ [S2, S3, unofficial].
+    *   The direction vector is normalized to unit length and scaled by a specified length (if provided) [S2, S3, unofficial]. Specifically: $\mathbf{d}_{normalized} = \frac{\mathbf{d}}{\|\mathbf{d}\|} \times \text{length}$ [S2, S3, unofficial].
+    *   The range parameters `range_min` and `range_max` are set to their default values ($10^{-5}$ and $10^{30}$) unless explicitly overridden [S3, unofficial].
+3.  **Point Evaluation:**
+    *   The method `getPoint(t)` or `at(t)` computes the point on the ray at distance $t$ using the parametric equation:
+        $$ P(t) = \mathbf{o} + t \cdot \mathbf{d} $$
+        where $\mathbf{o}$ is the origin, $\mathbf{d}$ is the direction, and $t$ is the scalar parameter [S1, S2, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Ray:
+    def __init__(self, origin=None, direction=None, length=1.0):
+        # Default initialization if no arguments provided
+        if origin is None:
+            self.orig = [0.0, 0.0, 0.0]
+        else:
+            self.orig = list(origin)
+            
+        if direction is None:
+            self.dir = [0.0, 0.0, -1.0]
+        else:
+            self.dir = list(direction)
+            
+        # Normalize direction and apply length
+        self._normalize_and_scale(length)
+        
+        # Set ray range parameters
+        self.range_min = 1e-5
+        self.range_max = 1e30
+
+    def _normalize_and_scale(self, length):
+        # Calculate magnitude
+        mag = (self.dir[0]**2 + self.dir[1]**2 + self.dir[2]**2)**0.5
+        if mag > 0:
+            # Normalize
+            self.dir[0] /= mag
+            self.dir[1] /= mag
+            self.dir[2] /= mag
+            # Scale by length
+            self.dir[0] *= length
+            self.dir[1] *= length
+            self.dir[2] *= length
+
+    def at(self, t):
+        # Compute point on ray: origin + t * direction
+        return [
+            self.orig[0] + t * self.dir[0],
+            self.orig[1] + t * self.dir[1],
+            self.orig[2] + t * self.dir[2]
+        ]
+
+    def set_ray_length(self, length):
+        # Re-normalize direction and apply new length
+        mag = (self.dir[0]**2 + self.dir[1]**2 + self.dir[2]**2)**0.5
+        if mag > 0:
+            self.dir[0] /= mag
+            self.dir[1] /= mag
+            self.dir[2] /= mag
+            self.dir[0] *= length
+            self.dir[1] *= length
+            self.dir[2] *= length
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Direction:** If the input direction vector is zero, normalization fails. The implementation must handle this, either by keeping the zero vector or raising an error [G].
+*   **Precision:** Using `double` for coordinates and parameters is recommended to avoid precision issues during ray marching, especially for large scenes or small step sizes [S2, S3, unofficial].
+*   **Range Clipping:** The `range_min` and `range_max` parameters are used to clip the valid range of $t$. Intersections or samples outside this range should be ignored [S3, unofficial].
+
+## Subtopics
+
+### [Ray Bundle](2179-ray-bundle.md)
+A Ray Bundle is a container data structure that groups ray origins, directions, and associated sampling parameters (sample points and lengths) into a single object, typically implemented as a collection of aligned tensors. It solves the problem of managing batched ray data for volume rendering and neural rendering pipelines, allowing efficient vectorized operations and memory transfers. It differs from a [RayBatch container](4187-raybatch-container.md) by explicitly bundling sampling metadata (sample points/lengths) alongside geometric ray data, and from a [Hit Record Structure](4953-hit-record-structure.md) by focusing on input ray generation rather than output intersection results [2179-ray-bundle.md].
+
+### [RayBatch container](4187-raybatch-container.md)
+The RayBatch container is a NumPy-style data structure designed for efficient storage, indexing, and sampling of ray batches during neural volume rendering training. It serves as an intermediate representation that bridges raw NumPy arrays and differentiable rendering engine tensors (specifically Mitsuba 3), enabling batched ray generation and color sampling. It distinguishes itself from the generic [Ray Structure](4026-ray-structure.md) by providing batch-level operations (slicing, random sampling) and explicit conversion logic to Mitsuba tensor types, while differing from the [Ray Bundle](2179-ray-bundle.md) by focusing on training-time batch management rather than just spatial grouping [4187-raybatch-container.md].
+
+### [Hit Record Structure](4953-hit-record-structure.md)
+The Hit Record Structure is a data container used in ray tracing to store the geometric and material properties of a ray-surface intersection. It solves the problem of passing intersection details (position, normal, distance, and material) from the intersection test phase to the shading phase. It is distinguished from the [Ray Structure](4026-ray-structure.md) by storing the *result* of the intersection rather than the *query* parameters, and from sibling containers like [Ray Bundle](2179-ray-bundle.md) by focusing on single-ray per-hit state rather than batched ray state [4953-hit-record-structure.md].
+
+#### Plücker Ray Embedding
+Plücker Ray Embedding embeds a ray defined by origin $\mathbf{o}$ and direction $\mathbf{v}$ into a 16-dimensional multivector using Plücker coordinates $(\mathbf{v}, \mathbf{o} \times \mathbf{v})$. The input tensor has shape `[..., 6]` and the output has shape `[..., 16]` [S4, unofficial]. The process involves initializing a zero tensor `mv` of shape `[..., 16]` with the same device and dtype as the input `pluecker_ray` [S4, unofficial]. The direction vector $\mathbf{v}$ (indices 3:6 of input) is assigned to multivector indices 5:8 [S4, unofficial]. The cross product component $\mathbf{o} \times \mathbf{v}$ is assigned to multivector indices 8, 9, 10. Specifically: index 8 gets input index 2; index 9 gets negative input index 1; index 10 gets input index 0 [S4, unofficial]. The Plücker ray is extracted from the multivector by concatenating: multivector index 10, negative multivector index 9, multivector index 8, and multivector indices 5:8 [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Point evaluation is $O(1)$ [S1, S2, S3, unofficial].
+*   **Memory Complexity:** $O(1)$ per ray, storing 6 floating-point values (3 for origin, 3 for direction) [S2, S3, unofficial].
+*   **Strengths:** Simple, efficient, and fundamental for all ray-based rendering techniques [S1, S2, S3, unofficial].
+*   **Limitations:** Does not handle batched operations or intersection results directly; requires additional structures for complex pipelines [S1, S2, S3, unofficial].
+*   **When to use:** When representing a single ray for marching or intersection testing [S1, S2, S3, unofficial].
+*   **When not to use:** When managing large batches of rays (use [Ray Bundle](2179-ray-bundle.md) or [RayBatch container](4187-raybatch-container.md)) or storing intersection results (use [Hit Record Structure](4953-hit-record-structure.md)) [S1, S2, S3, unofficial].
+
+## Background
+The Ray Structure is a basic building block in computer graphics, originating from the fundamental need to represent rays in 3D space for rendering and intersection testing [S1, S2, S3, unofficial]. It is widely used in CPU and GPU-based volume renderers, ray tracers, and neural rendering pipelines [S1, S2, S3, S4, unofficial].
+
+## Sources
+[S1] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)
+[S2] kuvsamja/lidar-sphere-tracing, https://github.com/kuvsamja/lidar-sphere-tracing, fetched 2026-10-26 (unofficial)
+[S3] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
+[S4] NorahCadeJS/GAI-GS, https://github.com/NorahCadeJS/GAI-GS, fetched 2026-10-27 (unofficial)

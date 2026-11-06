@@ -1,0 +1,149 @@
+# JAOCC Shading
+Also called: Jaocc Occlusion
+
+## Overview
+JAOCC Shading is a voxel-based ambient occlusion technique that computes a depth-weighted dimming factor by counting non-empty neighbors in a cubic neighborhood [S3, unofficial]. It addresses the problem of hard, physically implausible lighting transitions at voxel boundaries (AABB edges) by replacing fixed geometric normals with a dynamic occlusion factor derived from local density [S1, unofficial]. Unlike methods that rely on signed distance fields or explicit surface normals, JAOCC operates directly on the occupancy grid, making it suitable for volumetric data where surface extraction is not performed [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3D occupancy grid (voxel array) where each voxel has an associated RGB color and a boolean occupancy status.
+- Output: A shaded voxel array where the RGB values are modulated by an ambient occlusion factor.
+- Parameters:
+  - `count`: The radius of the cubic neighborhood to sample (integer). Determines the size of the sampling box from $-count$ to $+count$ [S3, unofficial].
+  - `depth`: A float parameter controlling the intensity of the occlusion effect, typically in the range $[0.01, 1.0]$ [S3, unofficial].
+
+**Data Structures:**
+- The voxel grid is stored as a 1D array or 3D array indexed by $(x, y, z)$.
+- Each voxel contains:
+  - `occupied`: Boolean flag indicating if the voxel is non-empty.
+  - `color`: RGB tuple or vector.
+
+**Algorithm Steps:**
+
+1. **Precompute Normalization Constant (`max_dim`):**
+   Calculate the maximum possible weighted neighbor count for a fully occupied neighborhood. This is used to normalize the occlusion value.
+   Iterate $xn$ from $-count$ to $count$, $yn$ from $-count$ to $count$, and $zn$ from $-count$ to $count$.
+   For each neighbor offset $(xn, yn, zn)$:
+   - Let $yk1 = 1$ if $yn > 0$, else $0$.
+   - Let $yk2 = 1$ if $yn < 0$, else $0$.
+   - Add $(1 + yk1 - yk2)$ to `max_dim`.
+   
+   *Note: The weight depends only on the Y-coordinate relative to the center. Neighbors above ($yn>0$) contribute 2, neighbors below ($yn<0$) contribute 0, and neighbors at the same level ($yn=0$) contribute 1. This creates a directional bias, simulating overhead lighting or sky occlusion.* [S3, unofficial]
+
+2. **Iterate Over Voxels:**
+   Loop through all voxels in the volume. To avoid boundary checks, the iteration range for $x$ is $[count, xsize - count - 1]$, for $y$ is $[count, ysize - count - 1]$, and for $z$ is $[count, zsize - count - 1]$ [S3, unofficial].
+   - Skip voxels that are empty (`occupied == false`).
+
+3. **Compute Occlusion Dimension (`dim`):**
+   Initialize `dim` to 0.
+   Iterate $xn$ from $-count$ to $count$, $yn$ from $-count$ to $count$, and $zn$ from $-count$ to $count$.
+   - Check the occupancy status of the neighbor at $(x+xn, y+yn, z+zn)$.
+   - If the neighbor is occupied:
+     - Let $yk1 = 1$ if $yn > 0$, else $0$.
+     - Let $yk2 = 1$ if $yn < 0$, else $0$.
+     - Add $(1 + yk1 - yk2)$ to `dim`.
+
+4. **Calculate Shading Factor (`dim_factor`):**
+   Normalize the computed `dim` by `max_dim` and apply the `depth` parameter.
+   $$ \text{normalized\_dim} = \frac{\text{clamp}(\text{dim}, 0, \text{max\_dim})}{\text{max\_dim}} $$
+   $$ \text{dim\_factor} = \text{clamp}\left( (1.0 - \text{normalized\_dim}) \cdot \text{depth} + (1 - \text{depth}), 0, 1 \right) $$
+   
+   *Interpretation:* When `dim` is 0 (no neighbors), `dim_factor` is 1.0 (fully lit). When `dim` is `max_dim` (fully surrounded), `dim_factor` is `1 - depth`. The `depth` parameter controls the contrast; higher values result in darker shadows in occluded areas [S3, unofficial].
+
+5. **Apply Shading:**
+   Multiply the voxel's RGB components by `dim_factor`.
+   $$ R_{new} = \text{clamp}(R_{old} \cdot \text{dim\_factor}, 0, 255) $$
+   $$ G_{new} = \text{clamp}(G_{old} \cdot \text{dim\_factor}, 0, 255) $$
+   $$ B_{new} = \text{clamp}(B_{old} \cdot \text{dim\_factor}, 0, 255) $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def jaocc_shade(voxel_grid, count, depth):
+    """
+    voxel_grid: 3D array of objects with attributes .occupied (bool) and .color (tuple of 3 ints 0-255)
+    count: int, radius of neighborhood
+    depth: float, occlusion intensity [0.01, 1.0]
+    """
+    xsize, ysize, zsize = voxel_grid.shape
+    
+    # Step 1: Precompute max_dim
+    max_dim = 0
+    for xn in range(-count, count + 1):
+        for yn in range(-count, count + 1):
+            for zn in range(-count, count + 1):
+                yk1 = 1 if yn > 0 else 0
+                yk2 = 1 if yn < 0 else 0
+                max_dim += (1 + yk1 - yk2)
+    
+    # Step 2: Iterate and shade
+    for x in range(count, xsize - count):
+        for y in range(count, ysize - count):
+            for z in range(count, zsize - count):
+                voxel = voxel_grid[x, y, z]
+                
+                # Skip empty voxels
+                if not voxel.occupied:
+                    continue
+                
+                # Step 3: Compute dim
+                dim = 0
+                for xn in range(-count, count + 1):
+                    for yn in range(-count, count + 1):
+                        for zn in range(-count, count + 1):
+                            # Check bounds just in case, though loop ranges should prevent it
+                            if 0 <= x+xn < xsize and 0 <= y+yn < ysize and 0 <= z+zn < zsize:
+                                neighbor = voxel_grid[x+xn, y+yn, z+zn]
+                                if neighbor.occupied:
+                                    yk1 = 1 if yn > 0 else 0
+                                    yk2 = 1 if yn < 0 else 0
+                                    dim += (1 + yk1 - yk2)
+                
+                # Step 4: Calculate dim_factor
+                # Clamp dim to [0, max_dim] to handle potential boundary issues or errors
+                clamped_dim = max(0, min(dim, max_dim))
+                normalized_dim = clamped_dim / max_dim
+                
+                # Formula: (1 - normalized_dim) * depth + (1 - depth)
+                # This simplifies to: 1 - normalized_dim * depth
+                dim_factor = 1.0 - (normalized_dim * depth)
+                dim_factor = max(0.0, min(1.0, dim_factor))
+                
+                # Step 5: Apply shading
+                r, g, b = voxel.color
+                voxel.color = (
+                    max(0, min(255, int(r * dim_factor))),
+                    max(0, min(255, int(g * dim_factor))),
+                    max(0, min(255, int(b * dim_factor)))
+                )
+```
+
+**Edge Cases and Pitfalls:**
+- **Thin Objects:** The algorithm produces errors with thin objects because the neighborhood sampling may not accurately represent the local geometry, leading to incorrect occlusion values [S3, unofficial].
+- **Boundary Conditions:** The iteration skips voxels within `count` distance of the boundary. Voxels near the edge are not shaded or require special handling (e.g., clamping or padding) which is not defined in the source [S3, unofficial].
+- **Performance:** The method is computationally expensive due to the nested loops over the neighborhood for every voxel [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot (2 \cdot count + 1)^3)$, where $N$ is the number of occupied voxels in the interior of the volume. The cubic neighborhood size grows cubically with `count`.
+- **Memory Complexity:** $O(1)$ auxiliary space if shading is done in-place. The input grid is modified.
+- **Measured Performance:** Described as "slow" in the source [S3, unofficial]. No specific hardware or resolution metrics are provided.
+- **Strengths:**
+  - Produces smooth results for higher neighbor counts [S3, unofficial].
+  - Avoids hard lighting transitions at voxel edges by using local density rather than fixed normals [S1, unofficial].
+  - Simple to implement as it relies only on occupancy checks.
+- **Limitations:**
+  - Slow performance for large volumes or large `count` values.
+  - Inaccurate for thin structures.
+  - Directional bias (Y-axis) may not be desirable for all lighting scenarios.
+- **When to use:** Suitable for voxel-based environments where surface normals are not available or expensive to compute, and where a simple, fast-to-implement ambient occlusion effect is acceptable.
+- **When not to use:** For high-fidelity rendering requiring accurate shadowing, or for scenes with thin geometry.
+
+## Background
+JAOCC Shading originates from voxel rendering techniques aimed at improving the visual quality of voxel landscapes. The primary motivation was to overcome the limitations of Axis-Aligned Bounding Box (AABB) normals, which cause hard, physically implausible lighting effects where light rays strike voxel faces perpendicularly versus grazing angles [S1, unofficial]. The method was implemented in open-source voxel engines and demos, such as the "doommy" project, which provided a concrete implementation of the algorithm [S3, unofficial]. It is part of a broader family of local illumination techniques for participating media and voxel grids.
+
+## Sources
+[S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S2] StanislavPetrovV/Minecraft, https://github.com/StanislavPetrovV/Minecraft, fetched 2026-10-26 (unofficial)
+[S3] jabberx/doommy, https://github.com/jabberx/doommy, fetched 2026-10-27 (unofficial)

@@ -1,89 +1,114 @@
 # Jacobian Estimation via Central Differences
+
 Also called: Central Difference Jacobian, Finite Difference Jacobian
+
 ## Overview
-Estimates the 3x3 Jacobian matrix of a deformation field by computing central differences of the `simpleBrush` function [S1, unofficial]. It differs from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by returning the full matrix of partial derivatives rather than a single gradient vector, and from [Sobel Operator](1416-sobel-operator.md) by using isotropic central differences on the raw function rather than convolution kernels on sampled data [G].
+This method estimates the $3 \times 3$ Jacobian matrix of a vector-valued deformation field by computing central differences of the field's component functions. It differs from sibling methods like the [Sobel Operator](1416-sobel-operator.md) or [Forward Difference Gradient](3362-forward-difference-gradient.md) by providing a full matrix of partial derivatives rather than just a gradient vector, and by using symmetric sampling which yields second-order accuracy compared to the first-order accuracy of forward/backward differences. It builds on [Finite Difference Stencils (Central/Forward/Backward)](3858-finite-difference-stencils-central-forward-backward.md).
+
 ## How it works
-**Inputs and outputs:**
-- Input: A position vector $pos$ and a force/deformation parameter $force$ passed to the deformation function `simpleBrush` [S1, unofficial].
-- Output: A 3x3 matrix $J$ where columns are the partial derivatives with respect to $x, y, z$ [S1, unofficial].
+**Inputs and Outputs:**
+- Input: A position vector $\mathbf{p} = (x, y, z)$ and a deformation field function $f(\mathbf{p})$ returning a 3D vector.
+- Output: A $3 \times 3$ Jacobian matrix $\mathbf{J}$.
 
-**Data structures:**
-- `mat3`: A 3x3 matrix stored as three column vectors `grad_x`, `grad_y`, `grad_z` [G].
-- `vec3`: 3D vectors for positions and differences [G].
-
-**Parameters:**
-- `EPSILON`: The step size for finite differences [S1, unofficial].
+**Data Structures:**
+- The Jacobian $\mathbf{J}$ is a $3 \times 3$ matrix where the $i$-th column is the gradient of the $i$-th component of the deformation field with respect to the spatial coordinates.
+- $\mathbf{J} = [\mathbf{g}_x, \mathbf{g}_y, \mathbf{g}_z]$, where $\mathbf{g}_x = \frac{\partial f}{\partial x}$, etc.
 
 **Steps:**
-1. Define the difference vectors along each axis: [S1, unofficial]
-   $$diff\_x = (\epsilon, 0, 0)$$
-   $$diff\_y = (0, \epsilon, 0)$$
-   $$diff\_z = (0, 0, \epsilon)$$
-2. Compute the partial derivative with respect to $x$ by evaluating the deformation function at $pos + diff\_x$ and $pos - diff\_x$: [S1, unofficial]
-   $$grad\_x = \frac{simpleBrush(pos + diff\_x, force) - simpleBrush(pos - diff\_x, force)}{2 \cdot \epsilon}$$
-3. Compute the partial derivative with respect to $y$: [S1, unofficial]
-   $$grad\_y = \frac{simpleBrush(pos + diff\_y, force) - simpleBrush(pos - diff\_y, force)}{2 \cdot \epsilon}$$
-4. Compute the partial derivative with respect to $z$: [S1, unofficial]
-   $$grad\_z = \frac{simpleBrush(pos + diff\_z, force) - simpleBrush(pos - diff\_z, force)}{2 \cdot \epsilon}$$
-5. Construct and return the Jacobian matrix $J$ using these vectors as columns: [S1, unofficial]
-   $$J = \begin{bmatrix} | & | & | \\ grad\_x & grad\_y & grad\_z \\ | & | & | \end{bmatrix}$$
+1. Define a small step size $\epsilon$ (EPSILON).
+2. Compute the perturbation vectors:
+   - $\mathbf{d}_x = (\epsilon, 0, 0)$
+   - $\mathbf{d}_y = (0, \epsilon, 0)$
+   - $\mathbf{d}_z = (0, 0, \epsilon)$
+3. Evaluate the deformation field at perturbed positions:
+   - $\mathbf{v}_{x+} = f(\mathbf{p} + \mathbf{d}_x)$
+   - $\mathbf{v}_{x-} = f(\mathbf{p} - \mathbf{d}_x)$
+   - $\mathbf{v}_{y+} = f(\mathbf{p} + \mathbf{d}_y)$
+   - $\mathbf{v}_{y-} = f(\mathbf{p} - \mathbf{d}_y)$
+   - $\mathbf{v}_{z+} = f(\mathbf{p} + \mathbf{d}_z)$
+   - $\mathbf{v}_{z-} = f(\mathbf{p} - \mathbf{d}_z)$
+4. Compute the gradient columns using central differences:
+   - $\mathbf{g}_x = \frac{\mathbf{v}_{x+} - \mathbf{v}_{x-}}{2\epsilon}$
+   - $\mathbf{g}_y = \frac{\mathbf{v}_{y+} - \mathbf{v}_{y-}}{2\epsilon}$
+   - $\mathbf{g}_z = \frac{\mathbf{v}_{z+} - \mathbf{v}_{z-}}{2\epsilon}$
+5. Construct the matrix $\mathbf{J}$ using $\mathbf{g}_x, \mathbf{g}_y, \mathbf{g}_z$ as columns.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-class vec3:
-    def __init__(self, x, y, z): self.x, self.y, self.z = x, y, z
-    def __add__(self, other): return vec3(self.x + other.x, self.y + other.y, self.z + other.z)
-    def __sub__(self, other): return vec3(self.x - other.x, self.y - other.y, self.z - other.z)
-    def __truediv__(self, scalar): return vec3(self.x / scalar, self.y / scalar, self.z / scalar)
-
-class mat3:
-    def __init__(self, c1, c2, c3): self.c1, self.c2, self.c3 = c1, c2, c3
-
-def simpleBrush(pos, force):
-    # Computes the 3D displacement vector for a given position and force parameter.
-    # Implementation is external to this method.
-    return vec3(0.0, 0.0, 0.0)
-
-def estimate_jacobian(pos, force, epsilon):
-    diff_x = vec3(epsilon, 0.0, 0.0)
-    diff_y = vec3(0.0, epsilon, 0.0)
-    diff_z = vec3(0.0, 0.0, epsilon)
-    disp_plus_x = simpleBrush(pos + diff_x, force)
-    disp_minus_x = simpleBrush(pos - diff_x, force)
-    disp_plus_y = simpleBrush(pos + diff_y, force)
-    disp_minus_y = simpleBrush(pos - diff_y, force)
-    disp_plus_z = simpleBrush(pos + diff_z, force)
-    disp_minus_z = simpleBrush(pos - diff_z, force)
-    grad_x = (disp_plus_x - disp_minus_x) / (2.0 * epsilon)
-    grad_y = (disp_plus_y - disp_minus_y) / (2.0 * epsilon)
-    grad_z = (disp_plus_z - disp_minus_z) / (2.0 * epsilon)
-    return mat3(grad_x, grad_y, grad_z)
+def estimate_jacobian_central(f, p, epsilon):
+    """
+    Estimate the 3x3 Jacobian matrix of vector field f at position p.
+    
+    Args:
+        f: Function taking a 3D vector and returning a 3D vector.
+        p: 3D position vector (x, y, z).
+        epsilon: Step size for finite differences.
+        
+    Returns:
+        J: 3x3 Jacobian matrix (list of lists or 2D array).
+    """
+    # Define perturbation vectors
+    dx = [epsilon, 0.0, 0.0]
+    dy = [0.0, epsilon, 0.0]
+    dz = [0.0, 0.0, epsilon]
+    
+    # Evaluate field at perturbed positions
+    p_plus_x = [p[0] + dx[0], p[1] + dx[1], p[2] + dx[2]]
+    p_minus_x = [p[0] - dx[0], p[1] - dx[1], p[2] - dx[2]]
+    p_plus_y = [p[0] + dy[0], p[1] + dy[1], p[2] + dy[2]]
+    p_minus_y = [p[0] - dy[0], p[1] - dy[1], p[2] - dy[2]]
+    p_plus_z = [p[0] + dz[0], p[1] + dz[1], p[2] + dz[2]]
+    p_minus_z = [p[0] - dz[0], p[1] - dz[1], p[2] - dz[2]]
+    
+    v_plus_x = f(p_plus_x)
+    v_minus_x = f(p_minus_x)
+    v_plus_y = f(p_plus_y)
+    v_minus_y = f(p_minus_y)
+    v_plus_z = f(p_plus_z)
+    v_minus_z = f(p_minus_z)
+    
+    # Compute gradient columns
+    # g_x = (f(p + dx) - f(p - dx)) / (2 * epsilon)
+    g_x = [(v_plus_x[i] - v_minus_x[i]) / (2.0 * epsilon) for i in range(3)]
+    
+    # g_y = (f(p + dy) - f(p - dy)) / (2 * epsilon)
+    g_y = [(v_plus_y[i] - v_minus_y[i]) / (2.0 * epsilon) for i in range(3)]
+    
+    # g_z = (f(p + dz) - f(p - dz)) / (2 * epsilon)
+    g_z = [(v_plus_z[i] - v_minus_z[i]) / (2.0 * epsilon) for i in range(3)]
+    
+    # Construct Jacobian matrix with columns g_x, g_y, g_z
+    J = [g_x, g_y, g_z]
+    
+    return J
 ```
 
-**Edge cases and pitfalls:**
-- If `EPSILON` is too small, numerical precision errors may dominate the subtraction [G].
-- If `EPSILON` is too large, the approximation deviates from the true derivative due to non-linearity [G].
-- Boundary conditions for `simpleBrush` must handle positions outside the valid domain [G].
+**Parameters:**
+- $\epsilon$ (EPSILON): The step size for finite differences. Typical values depend on the scale of the deformation field and the precision of the floating-point representation. [S1, unofficial]
+
+**Edge Cases and Pitfalls:**
+- If $\epsilon$ is too small, numerical cancellation errors may dominate.
+- If $\epsilon$ is too large, the approximation error (truncation error) increases.
+- Boundary conditions: If $\mathbf{p} \pm \mathbf{d}_i$ falls outside the domain of $f$, the behavior is undefined unless $f$ handles out-of-bounds queries (e.g., via clamping or extrapolation) [G].
 
 ## Subtopics
 
 ### [Jacobian Normalization for ODE Step](2946-jacobian-normalization-for-ode-step.md)
-Evaluates the derivative for the ODE solver by normalizing the inverse Jacobian times the direction vector $w$ [G]. It is chosen when a normalized direction is required for integration steps [G]. The formula is: [G]
-$$ \text{result} = \text{normalize}(\text{inverse}(J) \cdot w) $$
-where $J$ is the Jacobian estimated by the parent method [G].
+This method computes the normalized direction vector for an Ordinary Differential Equation (ODE) solver by applying the inverse of an estimated Jacobian matrix to a base direction vector. It differs from raw Jacobian estimation by performing the matrix inversion and vector normalization required for stable stepping [G].
 
 ## Operating characteristics
-- **Time complexity:** $O(1)$ per evaluation, requiring 6 calls to `simpleBrush` [G].
-- **Memory complexity:** $O(1)$, storing only temporary vectors and the resulting matrix [G].
-- **Strengths:** Simple to implement; isotropic accuracy for small steps [G].
-- **Limitations:** Requires the deformation function to be differentiable; sensitive to step size choice [G].
-- **When to use:** When the full deformation gradient is needed for physics or ray marching adjustments [G].
-- **When not to use:** When the function is not smooth or when performance is critical and approximate gradients suffice [G].
+- **Time Complexity:** $O(1)$ per evaluation, requiring 6 evaluations of the deformation field $f$.
+- **Memory Complexity:** $O(1)$, storing only a few vectors and the resulting matrix.
+- **Accuracy:** Second-order accurate ($O(\epsilon^2)$) for smooth fields.
+- **Strengths:** Simple to implement, symmetric sampling reduces bias.
+- **Limitations:** Requires the deformation field to be differentiable. Sensitive to the choice of $\epsilon$. Not suitable for non-differentiable or noisy fields without smoothing.
+- **When to use:** When the full Jacobian matrix is needed for tasks like inverse deformation, ray marching step size adaptation, or normal estimation from implicit surfaces.
+- **When not to use:** When only the gradient vector is needed (use [Forward Difference Gradient](3362-forward-difference-gradient.md) or [Sobel Operator](1416-sobel-operator.md) for efficiency), or when the field is not differentiable.
 
 ## Background
-Not given in the sources.
+This method is a standard application of central finite differences to vector fields. It is commonly used in computer graphics for estimating normals from implicit surfaces, for deformation field analysis, and in physics-based simulations. The specific implementation cited here is from the `ntsl-graphics` project, which uses it for deformation field estimation in the context of marching cubes and ray marching [S1, unofficial].
 
 ## Sources
 [S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)

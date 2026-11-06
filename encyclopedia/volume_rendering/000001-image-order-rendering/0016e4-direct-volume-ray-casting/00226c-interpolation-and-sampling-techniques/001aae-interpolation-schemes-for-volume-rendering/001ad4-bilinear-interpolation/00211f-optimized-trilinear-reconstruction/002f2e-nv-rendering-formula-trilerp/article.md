@@ -1,0 +1,169 @@
+# NV Rendering Formula (Trilerp)
+Also called: Trilerp, Volume Ray Tracing with Trilinear Interpolation
+## Overview
+The NV rendering formula is a direct volume ray casting method that resamples volume data at evenly spaced locations along rays and composites the results using trilinear interpolation [S1]. It is implemented in modern frameworks (e.g., svox2) as `volume_render_nvol` and its variants, building on the optimized trilinear reconstruction techniques [2437-optimized-trilinear-reconstruction.md] by providing a standard differentiable interface for forward, backward, and fused execution modes.
+## How it works
+### Inputs and Outputs
+**Inputs:**
+1. `SparseGridSpec`: Defines the sparse volume grid structure (dimensions, spacing, data layout).
+2. `RaysSpec`: Defines the ray origins and directions for the current view.
+3. `RenderOptions`: Configuration parameters (e.g., step size, near/far clipping).
+4. `Tensor` (for backward/fused): The upstream gradient tensor with respect to the output image.
+
+**Outputs:**
+1. `Tensor`: The rendered image (color/opacity).
+2. `GridOutputGrads`: Gradients with respect to the volume grid data (for backward pass).
+
+### Data Structures
+*   **SparseGridSpec**: Contains metadata for the sparse voxel grid. Exact internal layout is implementation-specific to the sparse storage format (e.g., hash table or octree), but logically represents a 3D field $V(x,y,z)$.
+*   **RaysSpec**: Contains arrays of ray origins $\mathbf{o}_i$ and normalized direction vectors $\mathbf{d}_i$ for each pixel $i$.
+*   **RenderOptions**: Includes step size $\Delta s$, number of samples $N$, and clipping distances $t_{min}, t_{max}$.
+
+### Algorithm Steps
+The method proceeds in three variants: Forward, Backward, and Fused.
+
+1.  **Ray Marching (Forward):**
+    For each ray $i$:
+    a. Generate sample positions $\mathbf{p}_k = \mathbf{o}_i + t_k \mathbf{d}_i$ for $k = 0 \dots N-1$, where $t_k$ are evenly spaced depths within $[t_{min}, t_{max}]$.
+    b. For each sample position $\mathbf{p}_k$, perform trilinear interpolation on the volume grid $V$ to obtain color $C_k$ and opacity $\alpha_k$.
+       $$
+       \text{Trilerp}(\mathbf{p}_k) \rightarrow (C_k, \alpha_k)
+       $$
+    c. Composite the samples using standard volume integration (e.g., front-to-back compositing):
+       $$
+       C_{out} = \sum_{k=0}^{N-1} C_k \alpha_k \prod_{j=0}^{k-1} (1 - \alpha_j)
+       $$
+       $$
+       \alpha_{out} = 1 - \prod_{k=0}^{N-1} (1 - \alpha_k)
+       $$
+
+2.  **Backward Pass:**
+    Given the output gradient $\frac{\partial L}{\partial C_{out}}$ and $\frac{\partial L}{\partial \alpha_{out}}$:
+    a. Compute gradients for each sample $k$ using the chain rule through the compositing equation.
+    b. Propagate gradients through the trilinear interpolation kernel to compute gradients with respect to the voxel values in the sparse grid.
+    c. Accumulate gradients into `GridOutputGrads`.
+
+3.  **Fused Pass:**
+    Combines forward and backward operations in a single kernel launch to reduce memory bandwidth overhead, typically used during training.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_render_nvol_forward(grid, rays, options):
+    """
+    Forward pass: Renders image from sparse grid using trilinear interpolation.
+    """
+    # Initialize output image
+    image = zeros_like(rays.pixel_indices)
+    
+    for each ray in rays:
+        origin = ray.origin
+        direction = ray.direction
+        
+        # Precompute sample depths
+        depths = linspace(options.t_min, options.t_max, options.num_samples)
+        
+        accumulated_color = 0.0
+        accumulated_alpha = 0.0
+        
+        for t in depths:
+            # Sample position
+            pos = origin + t * direction
+            
+            # Trilinear interpolation from sparse grid
+            # Note: Sparse grid lookup handles boundary checks and sparsity
+            color, alpha = trilinear_interpolate(grid, pos)
+            
+            # Volume compositing
+            weight = alpha * exp(-accumulated_alpha) # Simplified if alpha is small, else use product
+            # Standard front-to-back:
+            # weight = alpha * (1 - accumulated_alpha)
+            
+            accumulated_color += color * weight
+            accumulated_alpha += weight * (1 - accumulated_alpha) # Approximation for small alpha
+            
+            # Early termination if fully opaque
+            if accumulated_alpha > 1.0 - 1e-4:
+                break
+        
+        image[ray.pixel_index] = accumulated_color
+        
+    return image
+
+def volume_render_nvol_backward(grid, rays, options, grad_output):
+    """
+    Backward pass: Computes gradients w.r.t. grid values.
+    """
+    # Initialize grid gradients
+    grid_grads = zeros_like(grid.values)
+    
+    for each ray in rays:
+        origin = ray.origin
+        direction = ray.direction
+        depths = linspace(options.t_min, options.t_max, options.num_samples)
+        
+        # Forward pass values needed for gradient computation
+        # In practice, these are cached or recomputed
+        sample_colors = []
+        sample_alphas = []
+        accumulated_alpha = 0.0
+        
+        for t in depths:
+            pos = origin + t * direction
+            color, alpha = trilinear_interpolate(grid, pos)
+            sample_colors.append(color)
+            sample_alphas.append(alpha)
+            accumulated_alpha += alpha * (1 - accumulated_alpha) # Simplified tracking
+            
+        # Backpropagate through compositing
+        grad_color = grad_output[ray.pixel_index]
+        
+        for k in reversed(range(len(depths))):
+            color_k = sample_colors[k]
+            alpha_k = sample_alphas[k]
+            
+            # Gradient w.r.t. sample k
+            # dL/dC_k = alpha_k * exp(-sum_{j<k} alpha_j) * dL/dC_out
+            # dL/dAlpha_k = ... (complex chain rule)
+            
+            # Propagate to grid via trilinear interpolation gradient
+            # dL/dVoxel = dL/dSample * dSample/dVoxel
+            grid_grads += trilinear_interpolate_gradient(grid, pos, grad_sample)
+            
+    return grid_grads
+```
+*Note: The pseudocode above simplifies the compositing math for clarity. The actual implementation must use the exact differentiable compositing formula consistent with the forward pass [S2, unofficial].*
+
+### Parameters
+*   `num_samples`: Number of steps per ray. Typical values: 64–256.
+*   `t_min`, `t_max`: Near and far clipping planes.
+*   `step_size`: Distance between samples. Often derived from `num_samples` and view frustum depth.
+
+### Edge Cases and Pitfalls
+*   **Sparse Grid Boundaries**: Trilinear interpolation requires 8 neighboring voxels. If a sample falls outside the sparse grid's active region, the value is typically treated as zero (transparent) [S1].
+*   **Precision**: Floating-point precision errors in accumulation can cause artifacts in deep volumes. Use higher precision for accumulation if available [G].
+*   **Degenerate Rays**: Rays parallel to grid axes may cause sampling alignment issues. Ensure robust coordinate mapping [G].
+
+## Subtopics
+
+### Optimized Trilinear Reconstruction
+Uses SIMD extensions (MMX, SSE, 3DNow!) to accelerate memory copying and interpolation. Choose when hardware supports these extensions and performance is critical. [2437-optimized-trilinear-reconstruction.md]
+
+### Bilinear Interpolation
+2D interpolation. Choose for texture maps or 2D slices, not 3D volumes. [1234-bilinear-interpolation.md]
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \cdot R)$, where $N$ is samples per ray and $R$ is number of rays. Sparse grid lookup adds overhead proportional to the sparsity structure.
+*   **Memory Complexity**: $O(V)$ for the sparse grid, where $V$ is the number of active voxels.
+*   **Performance**: The fused variant reduces memory bandwidth usage by ~30-50% compared to separate forward/backward passes [S2, unofficial].
+*   **Strengths**: Simple, differentiable, and easy to implement. Good quality for moderate resolutions.
+*   **Limitations**: Trilinear interpolation causes blurring compared to higher-order schemes. Sparse grid lookup can be cache-unfriendly.
+*   **When to Use**: Real-time or near-real-time rendering where simplicity and differentiability are prioritized over maximum visual fidelity.
+
+## Background
+The base algorithm of ray casting with trilinear interpolation was described in early volume rendering literature, such as the work by Nieh and Levoy [S1]. The specific "NV" naming and fused differentiable implementations appear in modern deep learning frameworks like svox2 [S2, unofficial], adapting the classic technique for neural volume rendering.
+
+## Sources
+[S1] Volume rendering on scalable shared-memory MIMD architectures, https://doi.org/10.1145/147130.147141, fetched 2026-10-25
+[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

@@ -3,22 +3,20 @@
 Also called: Homogeneous Volume, Homogeneous volume representation, Uniform Participating Medium
 
 ## Overview
-Homogeneous Media is a specific optical model for participating media where volumetric properties (density, absorption, scattering) are constant throughout a defined geometric boundary [S1, S2, unofficial]. It simplifies the general Emission-Absorption Model by removing spatial variation, allowing for closed-form transmittance calculations [S1, unofficial]. Unlike the Particle Model or Point-Sampled Spectrum Model, which handle discrete or sparse data, this method assumes a continuous, uniform medium [S2, unofficial].
+Homogeneous Media is an optical model for participating media where volumetric properties are uniform at every point within a defined geometric boundary [S1, S2, unofficial]. It simplifies the [Emission-Absorption Model](927-emission-absorption-model.md) by assuming constant density, enabling closed-form transmittance calculations [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - Ray origin $x_o$ and direction $\vec{d}$.
 - Geometric boundary defining the medium's extent [S2, unofficial].
-- Constant extinction coefficient $\sigma_t$ [S1, unofficial].
-- Constant scattering coefficient $\sigma_s$ [S1, unofficial].
-- Constant absorption coefficient $\sigma_a$ [S1, unofficial].
+- Uniform scattering factor $\sigma_s$ [S1, unofficial].
+- Uniform absorption factor $\sigma_a$ [S1, unofficial].
 
 **Outputs:**
-- Transmittance $T_r$ from a point to another along the ray [S1, unofficial].
-- Hit point and accumulated radiance [S2, unofficial].
+- Transmittance $T_r$ along a ray segment [S1, unofficial].
 
 **Data Structures:**
-The medium is represented by a class `HomogeneousVolume` which inherits from `Object` [S2, unofficial].
+The medium is represented by a class `HomogeneousVolume` inheriting from `Object` [S2, unofficial].
 - Fields:
   - `Object *boundary_`: Pointer to the enclosing geometric boundary [S2, unofficial].
   - `double density_`: Constant density value used in intersection and scattering calculations [S2, unofficial].
@@ -49,15 +47,10 @@ The medium is represented by a class `HomogeneousVolume` which inherits from `Ob
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for transmittance calculation given intersection points [S1, unofficial]. Intersection with boundary depends on the geometry type [S2, unofficial].
-- **Memory Complexity:** $O(1)$ per volume instance, storing only boundary pointer, density, and material [S2, unofficial].
-- **Strengths:** Simple implementation, fast evaluation due to constant properties [S1, S2, unofficial].
-- **Limitations:** Cannot represent spatial variations in density or material properties [S1, unofficial].
-- **When to use:** For simple, uniform fog, smoke, or clouds where spatial variation is negligible [S1, unofficial].
-- **When not to use:** For complex volumetric effects requiring density gradients or anisotropic scattering [S1, unofficial].
+Not given in the sources.
 
 ## Background
-The homogeneous media model is a fundamental concept in volume rendering, often introduced in educational contexts such as CMU's 15-468 course [S1, unofficial]. It serves as a baseline for understanding light transport in participating media before introducing more complex spatial variations [S1, unofficial].
+The homogeneous media model is a fundamental concept in volume rendering, documented in educational materials such as CMU's 15-468 course slides [S1, unofficial].
 
 ## Sources
 [S1] l0exy1h/VolumetricPathTracing-public, https://github.com/l0exy1h/VolumetricPathTracing-public, fetched 2026-10-26 (unofficial)

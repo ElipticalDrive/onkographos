@@ -1,0 +1,91 @@
+# Fenwick Tree (Binary Indexed Tree)
+
+Also called: Fenwick tree variant, Half-tree, Hierarchical Integration (Partial Sum Tree), Partial Sum Tree
+
+## Overview
+The Fenwick Tree (also known as the Half-tree or Partial Sum Tree) is a compact data structure that stores partial sums to enable $O(\log n)$ point updates and prefix-sum queries [S1]. It solves the problem of efficiently maintaining cumulative sums in dynamic environments, such as the incremental integration of light transport in volume rendering [S1]. Unlike a standard complete binary tree which requires $2n$ nodes for $n$ leaves, the Fenwick Tree variant exploits the fact that prefix-sum queries starting from index 0 never require the right child of any node, storing only $1.5n$ elements [S1]. This reduces memory usage and the number of nodes modified during updates by half compared to the full tree representation [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An array of $n$ values (e.g., light ray contributions $b[\gamma]$).
+*   **Output:** A compact tree structure supporting `UPDATE(index, value)` and `QUERY(index)` operations.
+*   **Parameters:** $n$ is the number of data elements (light rays).
+
+**Data Structures and Layout:**
+The tree is stored as a contiguous array of size $1.5n$ [S1].
+*   **Lowest Level (Leaves):** The complete lowest level of the tree is stored fully, containing $n$ elements [S1]. This allows direct access to the "next element" for interpolation queries without a full tree traversal [S1].
+*   **Internal Levels:** All higher levels store only half the nodes of a complete binary tree, totaling $0.5n$ elements [S1].
+*   **Total Size:** $1.5n$ elements [S1].
+
+**Algorithms:**
+
+1.  **BUILD-TREE:** Construct the tree from the input array. Start with the input array at the leaves. Recursively sum children to compute parent values up to the root. This can be done in linear time $O(n)$ [S1].
+
+2.  **UPDATE:** Modify a leaf node and propagate changes to the root.
+    *   Set the leaf node at the specified index to the new value (or zero).
+    *   Recursively update each parent node up to the root by recomputing the sum of its children [S1].
+    *   **Complexity:** $O(\log n)$ [S1].
+
+3.  **QUERY:** Compute the prefix sum $\sum_{k=0}^{q} b[k]$.
+    *   Check if the query index $q$ is within the interval represented by the current node.
+    *   If $q$ is within the interval, the result is the value of the left child plus the recursive prefix sum of the right child [S1].
+    *   If $q$ is outside the interval range, terminate recursion and return the value of the current node [S1].
+    *   **Complexity:** $O(\log n)$ [S1].
+
+**Pseudocode:**
+The following pseudocode illustrates the usage of the Fenwick Tree in the context of incremental hierarchical integration for volume rendering [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# D contains lengths of view rays along gamma
+# S contains lengths of light rays along beta
+def INTEGRATE_SLICE(D, S):
+    # Mark where light rays terminate
+    termination_depths = empty_list
+    for each light_ray gamma in S:
+        APPEND(termination_depths[S[gamma]], gamma)
+    
+    # Initialize the incremental counter, tree, and result
+    # Gamma_i represents the set of light rays
+    tree = BUILD_TREE(Gamma_i)
+    results = ZEROS
+    
+    # Walk over view rays
+    for each view_ray beta:
+        # Set the counter to zero for light rays that terminate at this beta
+        for all light_ray gamma in termination_depths[beta]:
+            UPDATE_TREE(tree, gamma) # sets the gamma node to zero
+        
+        # Query two nearest results for interpolation
+        # floor(D[beta]) and ceil(D[beta])
+        res_1 = QUERY_TREE(tree, floor(D[beta]))
+        res_2 = QUERY_TREE(tree, ceil(D[beta]))
+        
+        # Lerp results and multiply by SVD factors Bi
+        # D[beta] - floor(D[beta]) is the fractional part
+        results[beta] = Bi[beta] * LERP(res_1, res_2, D[beta] - floor(D[beta]))
+        
+    return results
+```
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing Artifacts:** Discretization can cause aliasing artifacts. To mitigate this, the depth $D[\beta]$ is stored as a float. The algorithm queries the tree at $\lfloor D[\beta] \rfloor$ and $\lceil D[\beta] \rceil$, then linearly interpolates the results [S1].
+*   **Interpolation Access:** The query for $\lceil D[\beta] \rceil$ accesses the next element in the complete lowest level of the tree. This requires storing the complete lowest level (unlike other levels which are halved) to allow direct lookup of the next element rather than performing a full tree query [S1].
+
+## Operating characteristics
+*   **Time Complexity:**
+    *   Update: $O(\log n)$ [S1].
+    *   Query: $O(\log n)$ [S1].
+    *   Total for Integration: $O(s(r + d) \log d)$, where $s$ is the number of slices, $r$ is the number of view samples per slice, and $d$ is the number of light rays [S1].
+*   **Memory Complexity:** $1.5n$ elements, where $n$ is the number of data elements (light rays) [S1].
+*   **Performance:** The $sr \log d$ term represents the number of queries, and $sd \log d$ represents the number of updates. These terms dominate the $O(s(r + d))$ rectification cost [S1].
+*   **Comparison:** Brute force ray marching requires $O(srd)$ time [S1]. The Fenwick Tree approach is significantly faster when $d$ is large, as $\log d \ll d$.
+*   **Strengths:** Reduced memory footprint ($1.5n$ vs $2n$) and reduced update cost (half the nodes modified on average) compared to a standard partial sum tree [S1].
+*   **Limitations:** Requires careful handling of floating-point depths to avoid aliasing; relies on the assumption that prefix sums always start from index 0 (the eye) [S1].
+
+## Background
+The Fenwick Tree, also known as the Half-tree, was introduced by Fenwick in 1994 [S1]. The observation that an efficient data structure is possible with only half of the tree nodes stems from the fact that recursive prefix-sum queries starting from index 0 never use the right child of any node (leaf or internal) [S1]. This structure is used in hierarchical volumetric shadow algorithms for single scattering to optimize the integration of light transport [S1].
+
+## Sources
+[S1] A hierarchical volumetric shadow algorithm for single scattering, https://doi.org/10.1145/1866158.1866200, fetched 2026-11-03

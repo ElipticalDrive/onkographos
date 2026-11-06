@@ -1,0 +1,221 @@
+Hello, The current implementation of computeAABB gives a worst case AABB when the collision object is rotated. Example: Consider a Cylinder of 0.1 radius and 1 height, and it's local aabb : Now, let's rotate the Cylinder by 90°, the comp...
+
+The AABB of a rotated collision object is not very efficient · Issue #509 · flexible-collision-library/fcl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+The AABB of a rotated collision object is not very efficient #509
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+The AABB of a rotated collision object is not very efficient#509
+Copy link
+Description
+ali-zakaria
+opened on Nov 15, 2020
+Issue body actions
+Hello,
+The current implementation of computeAABB gives a worst case AABB when the collision object is rotated.
+Example: Consider a Cylinder of 0.1 radius and 1 height, and it's local aabb :
+Now, let's rotate the Cylinder by 90°, the computed AABB is a Cube, its side length is equal to cylinder's height:
+Same thing if we rotate it by 360° :(
+Activity
+ali-zakaria commented on Nov 15, 2020
+ali-zakaria
+on Nov 15, 2020
+Author
+More actions
+This implementation of computeAABB gives an accurate AABB
+```
+  void computeAABB()
+  {
+    if(t.getQuatRotation().isIdentity())
+    {
+      aabb = translate(cgeom->aabb_local, t.getTranslation());
+    }
+    else
+    {
+      Vec3f trans = t.getTranslation();
+      Matrix3f rot = t.getRotation();
+      
+      // For all three axes
+      for (int i = 0; i < 3; i++)
+      {
+        // Start by adding in translation
+        aabb.min_[i] = aabb.max_[i] = trans[i];
+        
+        // Form extent by summing smaller and larger terms respectively
+        for (int j = 0; j < 3; j++)
+        {
+          FCL_REAL e = rot(i, j) * cgeom->aabb_local.min_[j];
+          FCL_REAL f = rot(i, j) * cgeom->aabb_local.max_[j];
+          
+          aabb.min_[i] += (e < f) ? e : f;
+          aabb.max_[i] += (e < f) ? f : e;
+        }
+      }
+    }
+  }
+```
+See: https://stackoverflow.com/a/58630206/9545638
+SeanCurtis-TRI commented on Nov 16, 2020
+SeanCurtis-TRI
+on Nov 16, 2020
+Contributor
+More actions
+This is known.
+Every geometry AABB has a "radius". It is, essentially, the radius of a circumscribing sphere on that AABB. When the geometry's rotation is the identity, the AABB directly fit to the geometry is used. When the geometry is rotated at all, it produces an AABB that bounds the circumscribing sphere. See here. That is what you're observing. A 90-degree rotation of your cylinder could produce an AABB that is as good as the original if the cylinder were fit directly -- but using the algorithm described above, you end up with the large box you observe.
+This design decision predates me by multiple years, I'm sure. However, I can easily speculate that this was decided as a performance optimization; it's very cheap to create an AABB for a sphere. But your observation is correct, it can very quickly lead to a ridiculous bound.
+This is a decision that is certainly worth revisiting. Is this causing you a problem (beyond the surprise that your rotated cylinder isn't being culled by the broadphase the way you expected it to be)?
+ali-zakaria commented on Nov 17, 2020
+ali-zakaria
+on Nov 17, 2020
+Author
+More actions
+Well, the main reason why I need a tight AABB is performance optimization... but not for the same reason.
+Before computing the distance between two collision objects, I first compute the distance between their AABBs and if they are far enough I stop the computation.
+Here is the implementation for distance:
+```
+FCL_REAL Model::checkDistance(const CollisionObjectPtr& obj1, const CollisionObjectPtr& obj2, 
+                              const DistanceRequest& request, DistanceResult& result, 
+                              FCL_REAL maxDistance=0.0)
+{
+    FCL_REAL dist = maxDistance;
+    
+    if (maxDistance != 0.0)
+    {
+        AABB aabb1 = obj1->object->getAABB();
+        AABB aabb2 = obj2->object->getAABB();
+        
+        if (aabb1.distance(aabb2) < maxDistance)
+        {
+            dist = distance(obj1->object.get(), obj2->object.get(), request, result);
+        }
+    }
+    else
+    {
+        dist = distance(obj1->object.get(), obj2->object.get(), request, result);
+    }
+    
+    return dist;
+}
+```
+And collision checking
+```
+bool Model::checkCollision(const CollisionObjectPtr& obj1, const CollisionObjectPtr& obj2, 
+                           const CollisionRequest& request, CollisionResult& result)
+{
+    bool collision = false;
+    
+    AABB aabb1 = obj1->object->getAABB();
+    AABB aabb2 = obj2->object->getAABB();
+
+    if (aabb1.overlap(aabb2))
+    {
+        collision = collide(obj1->object.get(), obj2->object.get(), request, result) > 0;
+    }
+    
+    return collision;
+}
+```
+I understand the performance optimization of the current implementation of computeAABB VS a straight-forward solution where we rotate the 8 corners of the AABB, but a 2 rotation solutions can be acceptable.
+Or maybe the two implementations can coexist.
+SeanCurtis-TRI commented on Nov 18, 2020
+SeanCurtis-TRI
+on Nov 18, 2020
+Contributor
+More actions
+I agree, there are some unfortunate implications of this design. It assumes that the net benefit of a cheap broadphase update is justified. However, badly fitting bounding volumes lead to more false positives (and more narrowphase tests that produce false results). As long as your narrowphase tests have very fast failure conditions, that can be a reasonable move. As the narrowphase cost increases, the benefit of this extra cheap broadphase optimization disappears quickly.
+In a case where you have objects that are in close proximity (close with respect to whatever threshold you care about), such that the difference between a tightly-fit BV and this coarse approximation marks the difference between invoking the narrowphase algorithm or not, then this is definitely a losing proposition.
+When it comes to updating an object's bounding box, we have several options (with definitely increasing cost and possibly improving fit):
+Bound the circumscribing sphere of the geometry AABB (what the code currently does).
+Bound the rotated geometry AABB (as you suggest).
+Bound the rotated geometry itself.
+I'd recommend trying strategy 2 in your code. Instead of using the collision object's AABB (via obj1->object->getAABB()), you could access the underlying geometry's AABB via (obj1->object->collisionGeometry()->aabb_local) and the collision objects transform (obj1->object->getTransform()) to compute your test AABB directly. You could then count the number of times you call the narrowphase using the two approaches and see how much it improves your culling. Doing this means you might compute that AABB multiple times if it's involved with multiple class to your checkCollision, checkDistance calls. You could compute it once per collision object and stash it in that objects user_data (forgoing all calls to computeAABB() and getAABB()). Or, of course, you could fork FCL locally and simply change the implementation of CollisionObject::computeAABB(). :)
+I advocate testing it locally because it's best to have data before making a change to FCL that will affect everyone. Right now, we both have an intuition that in many cases this cheap AABB update can be terrible for culling efficiency. But we have no idea how much that impacts things in the real world. Data would provide a strong argument that FCL has made the wrong trade off.
+It's worth noting, if we can provide enough data to argue that the current optimization is harmful, the true solution might be to add a new virtual method to collision geometry. For example, Sphere should always be simple and cheap for a perfect fit. Boxes and Cylinders should be quite cheap for a perfect fit. But other shapes (like Convex or BVHModel) would be more expensive for the perfect fit, so might choose to do a faster, less optimal fit. By pushing it down into the geometry, we can pay the right price for the right primitive, rather than the single CollisionObject-level, one-size-doesn't-quite-fit-anyone solution.
+ali-zakaria commented on Dec 23, 2020
+ali-zakaria
+on Dec 23, 2020
+Author
+More actions
+I did some tests as you suggested, and here are the results:
+Nb of calls to the narrowphae with option 1 (current FCL implementation): 854
+Nb of calls to the narrowphae with option 2 (my suggestion): 116
+In term of computing time, I don't see a big difference in my case: a gain of 2%, but, I guess this depends a lot on the collisions objects: whether it's Boxes, Spheres, Capsules or Convex objects or complicated BVHModel. I am only using simple primitives and cheap Convex Objects and no BVHModels.
+I can do more tests with complex Convex objects or BVHModels to emphasize the gain in term of computing time.
+Here is my implementation of DefaultDistanceFunction
+```
+template <typename S>
+bool DefaultDistanceFunction(CollisionObject<S>* o1, CollisionObject<S>* o2,
+                             void* data, S& dist) {
+  assert(data != nullptr);
+  auto* cdata = static_cast<DefaultDistanceData<S>*>(data);
+  const DistanceRequest<S>& request = cdata->request;
+  DistanceResult<S>& result = cdata->result;
+
+  if (cdata->done) {
+    dist = result.min_distance;
+    return true;
+  }
+  
+  // Using max_distance as a threshold will save computing time
+  if (cdata->max_distance != 0.0)
+  {
+      AABB<S> aabb1 = o1->getAABB();
+      AABB<S> aabb2 = o2->getAABB();
+      
+      if (aabb1.distance(aabb2) < cdata->max_distance)
+      {
+          dist = distance(o1, o2, request, result);
+          cdata->count += 1;
+      }
+      else
+      {
+          result.min_distance = std::min(cdata->max_distance, result.min_distance);
+          result.o1 = o1->collisionGeometry().get();
+          result.o2 = o2->collisionGeometry().get();
+          
+          dist = std::min(cdata->max_distance, dist);
+      }
+  }
+  else
+  {
+      dist = distance(o1, o2, request, result);
+      cdata->count += 1;
+  }
+  
+  if (dist <= cdata->min_distance) return true;  // o1 and o2 are close enough to stop broadphase evaluation
+
+  return cdata->done;
+}
+```
+I agree that having a virtual method to collision geometry should be the best solution, but I don't understand why Convex or BVHModel would be more expensive for the perfect fit VS Boxes for example (for option 2) ? To me, aabb_local is computed one time at the creation of the object (this can be more expensive in case of Convex or BVHModel VS Boxes, but one shot), and at runtime, the complexity is the same, as in both cases, we deal with an AABB.
+For the moment, I am forking FCL, but this can be also useful for the community.
+About the impact of this change, it seems to be ok for DynamicAABBTreeCollisionManager as we always prefer a perfect fit of the AABB, but I don't know if it is true for the others BroadPhaseCollisionManagers (even if it seems to be more sensible)
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

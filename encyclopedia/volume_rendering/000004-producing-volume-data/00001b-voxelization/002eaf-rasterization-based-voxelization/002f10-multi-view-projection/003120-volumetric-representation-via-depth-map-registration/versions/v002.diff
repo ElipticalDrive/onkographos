@@ -1,0 +1,340 @@
+--- v001.md
++++ v002.md
+@@ -4,148 +4,214 @@
+ 
+ ## Overview
+-This method constructs a 3D volume from multi-view images by registering estimated depth maps into a voxel grid, specifically handling non-Lambertian reflections by using individual minimum cost per view rather than a global threshold [S1]. It represents scene geometry as a sparse voxel cloud where voxel values indicate the number of views mapping to that location, distinguishing it from sibling methods that may rely on global thresholds or simple occupancy accumulation [S1].
++This method constructs a 3D volume from a set of multi-view images by registering estimated depth maps into a voxel grid. It solves the problem of non-Lambertian reflections by using individual minimum cost per view rather than a global threshold, and represents the scene geometry as a sparse voxel cloud where voxel values indicate the number of views mapping to that location. It differs from [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md) by explicitly handling non-Lambertian surfaces through per-view depth estimation costs and by refining the volume shape iteratively to remove scattering voxels and smooth sharp corners, which [Single 2D Projection Voxelization](3482-single-2d-projection-voxelization.md) does not address.
+ 
+ ## How it works
+-**Inputs:** A set of $N$ reference views (images and camera parameters) and a target 3D bounding box.
+-**Outputs:** A 3D voxel grid where each voxel $(i, j, k)$ holds an integer weight $\delta_{ijk}$ representing the count of views mapping to it, and a refined depth map for each reference view.
++**Inputs:** A set of $N$ reference views (images and camera parameters), estimated depth maps for each view.
++**Outputs:** A 3D voxel grid where each voxel $(i, j, k)$ has a weight $\delta_{ijk}$ representing the count of views mapping to it, and optionally refined geometry.
+ 
+ **Data Structures:**
+-*   **Voxel Grid:** A 3D array indexed by $(i, j, k)$. Each element stores an integer $\delta_{ijk} \in \{0, 1, \dots, N\}$.
+-*   **Depth Map:** A 2D array for each reference view, storing a single depth value $d$ per pixel.
++*   **Voxel Grid:** A 3D array or sparse hash map.
++*   **Voxel Value:** Integer $\delta_{ijk} \in \{0, 1, \dots, N\}$.
++*   **Depth Cluster:** For each pixel in a reference view, a list of candidate depths $(d_k, \delta_k)$ from the initial registration.
+ 
+ **Steps:**
+ 
+-1.  **Depth Estimation:** For each reference view, search along its geometry to estimate a depth map. Use an individual minimum cost function for each view to compensate for non-Lambertian reflections, avoiding a global threshold [S1].
+-2.  **Volume Initialization (Registration):** Register the estimated depth maps into the 3D volume. For each voxel at location $(i, j, k)$, calculate its value $\delta_{ijk}$:
+-    $$
+-    \delta_{ijk} = \begin{cases} 
+-    n & \text{if registering depth} \\
+-    0 & \text{otherwise}
+-    \end{cases}
+-    $$
+-    where $n$ is the number of views that map to voxel $\vec{x}$, and $n \in \{1, 2, \dots, N\}$ [S1].
+-3.  **Noise Removal and Refinement:**
+-    *   Detect isolated voxels with no neighbors.
+-    *   Project the volume back to the reference view geometry to build new depth maps. This step removes errors from the previous registration by incorporating depth information from other views [S1].
+-    *   If multiple depth values exist for a pixel in the projected view, consider only the front cluster of depths. The proper depth value $d$ for a pixel is calculated as:
+-        $$
+-        d = \begin{cases} 
+-        d_n & \text{if only one depth has } \delta_n = \max(\delta_K) \\
+-        \left(\sum_{k=1}^K \delta_k d_k\right) / \left(\sum_{k=1}^K \delta_k\right) & \text{otherwise}
+-        \end{cases}
+-        $$
+-        where $K$ is the number of depth values in the front cluster, $d_k$ is the depth value, and $\delta_k$ is the voxel weight. The depth value projected from the voxel containing the maximum $\delta$ is selected. If the maximum $\delta$ appears in two or more depth values, the fit depth value is calculated from the weighted average of all depth values in the front cluster [S1].
+-4.  **Volume Reconstruction:** Reconstruct the volume again using the refined depth maps. Interpolate voxels to connect the surface of the volume among near voxels [S1].
++1.  **Volume Initialization:**
++    For each reference view, estimate a depth map by searching along the view's geometry. Compensate for non-Lambertian reflection by exploiting the individual minimum cost for that view instead of a global threshold. Register these depth maps into the 3D volume. For each voxel at location $(i, j, k)$, set its value $\delta_{ijk}$ to $n$ if a depth is registered to it, where $n$ is the count of views mapping to that voxel; otherwise set it to 0 [S1].
++    $$
++    \delta_{ijk} = \begin{cases} n, & \text{if registering depth} \\ 0, & \text{otherwise} \end{cases}
++    $$
++    where $n \in \{1, 2, \dots, N\}$ and $N$ is the total number of reference views [S1].
++
++2.  **Isolated Voxel Removal and Depth Selection:**
++    Detect isolated voxels with no neighbors. Project the volume back to the reference view geometry to build new depth maps, removing errors from the previous step. If multiple depth values exist for a pixel, consider the front cluster of depths. The proper depth value $d$ of a particular pixel is determined by [S1]:
++    $$
++    d = \begin{cases} d_n, & \text{if only one depth has } \delta_n = \max(\delta_K) \\ \left(\sum_{k=1}^K \delta_k d_k\right) / \left(\sum_{k=1}^K \delta_k\right), & \text{otherwise} \end{cases}
++    $$
++    where $K$ is the number of depth values in the front cluster, $d_k$ is the depth value, and $\delta_k$ is the voxel weight. The depth value projected from the voxel that contains the maximum $\delta$ is selected. If the maximum $\delta$ appears in two or more depth values, the fit depth value is calculated from the average of all depth values of the front cluster with weighted coefficient $\delta$ [S1].
++
++3.  **Surface Interpolation:**
++    Reconstruct the volume again. Interpolate voxels to connect the surface of the volume among the near voxels [S1].
++
++4.  **Iterative Volume Refinement:**
++    Refine the shape of the volume by removing scattering voxels and smoothing sharp corners to increase coding gain. Compare reconstructed views against original reference images to identify and correct geometry errors [S1].
++    *   **Step 1:** Temporarily define voxel colors by taking the median of color values from all visible views [S1].
++    *   **Step 2:** Iterate through reference views (e.g., from furthest left to furthest right). For each view, calculate the Mean Square Error (MSE) between the reconstructed view and the original reference image [S1].
++    *   **Step 3:** If the MSE exceeds a threshold, remove the old depth and its associated voxel. Investigate a new depth derived from neighboring pixels based on a smooth surface assumption [S1].
++    *   **Step 4:** If the new depth value meets color constraints for all visible views, generate the new associated voxel. Use a window-based computation (e.g., 3x3 pixels) for error calculation to handle inaccurate camera calibration and unequal resolutions [S1].
++    *   **Step 5:** Iteratively reconstruct images if voxels are removed or generated, as voxel position changes affect visibility. Repeat until no new voxels are generated and no old voxels are removed [S1].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def volumetric_representation_via_depth_map_registration(reference_views, bounding_box, resolution):
+-    """
+-    reference_views: List of view objects containing image, camera matrix, and intrinsic parameters.
+-    bounding_box: 3D bounding box defining the volume extent.
+-    resolution: Tuple (X, Y, Z) defining the voxel grid dimensions.
+-    """
+-    N = len(reference_views)
+-    # Initialize voxel grid with zeros
+-    # Dimensions: (Z, Y, X) or (i, j, k) as per source notation
+-    voxel_grid = zeros((resolution[0], resolution[1], resolution[2]), dtype=int)
++def register_depth_maps(depth_maps, camera_matrices, voxel_grid_resolution, bounding_box):
++    """
++    Step 1: Volume Initialization
++    depth_maps: List of 2D arrays, one per view.
++    camera_matrices: List of projection matrices for each view.
++    """
++    voxel_grid = SparseVoxelGrid(voxel_grid_resolution, bounding_box)
+     
+-    # Step 1: Depth Estimation
+-    estimated_depth_maps = []
+-    for view in reference_views:
++    for view_idx, depth_map in enumerate(depth_maps):
+         # Estimate depth map using individual minimum cost per view
+-        # This handles non-Lambertian reflections
+-        depth_map = estimate_depth_map_individual(view)
+-        estimated_depth_maps.append(depth_map)
+-        
+-    # Step 2: Volume Initialization
+-    for view_idx, depth_map in enumerate(estimated_depth_maps):
++        # This step is assumed to be completed by the input depth_maps
++        # which already compensate for non-Lambertian reflection.
++        
++        # Register depth map into 3D volume
+         for y in range(depth_map.height):
+             for x in range(depth_map.width):
+-                d = depth_map[y, x]
+-                if d is not None:
+-                    # Project 2D pixel (x, y) and depth d to 3D voxel (i, j, k)
+-                    i, j, k = project_to_voxel(x, y, d, view.camera_matrix, bounding_box, resolution)
+-                    if is_inside_bounds(i, j, k, resolution):
+-                        voxel_grid[i, j, k] += 1
++                depth_value = depth_map[y, x]
++                if depth_value is not None:
++                    # Project 2D pixel + depth to 3D voxel coordinate
++                    voxel_coord = project_to_voxel(x, y, depth_value, camera_matrices[view_idx], bounding_box)
++                    voxel_grid.increment_weight(voxel_coord)
++                    
++    return voxel_grid
++
++def select_front_cluster_depth(voxel_grid, camera_matrices, resolution):
++    """
++    Step 2: Isolated Voxel Removal and Depth Selection
++    Returns refined depth maps for each view.
++    """
++    refined_depth_maps = []
++    
++    for view_idx, camera_matrix in enumerate(camera_matrices):
++        depth_map = np.zeros((resolution.height, resolution.width))
++        
++        for y in range(resolution.height):
++            for x in range(resolution.width):
++                # Project pixel back to 3D rays and query voxel grid
++                # Get all voxels along the ray that have weight > 0
++                candidate_depths = []
++                for voxel in voxel_grid.query_ray(camera_matrix, x, y):
++                    if voxel.weight > 0:
++                        candidate_depths.append((voxel.depth, voxel.weight))
++                
++                if not candidate_depths:
++                    continue
++                    
++                # Sort by depth (front to back)
++                candidate_depths.sort(key=lambda k: k[0])
++                
++                # Identify front cluster (contiguous depths with high weights)
++                # Note: The exact definition of "front cluster" from noise dispersion
++                # is heuristic. We assume the first K depths with significant weight.
++                front_cluster = []
++                for d, w in candidate_depths:
++                    # Heuristic: include if weight is significant relative to max
++                    if w > 0: 
++                        front_cluster.append((d, w))
++                    else:
++                        break # Stop at first zero weight or gap
++                
++                K = len(front_cluster)
++                if K == 0:
++                    continue
++                
++                # Find max weight in cluster
++                max_weight = max(w for _, w in front_cluster)
++                max_weight_count = sum(1 for _, w in front_cluster if w == max_weight)
++                
++                if max_weight_count == 1:
++                    # Only one depth has max weight
++                    d_n = next(d for d, w in front_cluster if w == max_weight)
++                    depth_map[y, x] = d_n
++                else:
++                    # Weighted average of all depths in front cluster
++                    numerator = sum(w * d for d, w in front_cluster)
++                    denominator = sum(w for _, w in front_cluster)
++                    if denominator > 0:
++                        depth_map[y, x] = numerator / denominator
++                    else:
++                        depth_map[y, x] = front_cluster[0][0]
+                         
+-    # Step 3: Noise Removal and Refinement
+-    # Detect isolated voxels and project back to build new depth maps
+-    refined_depth_maps = []
+-    for view_idx, view in enumerate(reference_views):
+-        # Project volume back to view geometry
+-        projected_depths = project_volume_to_view(voxel_grid, view.camera_matrix, resolution, bounding_box)
+-        
+-        # Handle multiple depth values per pixel using front cluster
+-        new_depth_map = zeros((view.height, view.width))
+-        for y in range(view.height):
+-            for x in range(view.width):
+-                depths_in_cluster = get_front_cluster_depths(projected_depths[y, x])
+-                if not depths_in_cluster:
+-                    continue
+-                    
+-                # Calculate weighted average or select max delta depth
+-                # depths_in_cluster is a list of (depth_value, voxel_weight)
+-                max_delta = max(w for _, w in depths_in_cluster)
+-                max_delta_depths = [d for d, w in depths_in_cluster if w == max_delta]
+-                
+-                if len(max_delta_depths) == 1:
+-                    new_depth_map[y, x] = max_delta_depths[0]
+-                else:
+-                    # Weighted average of all depths in the front cluster
+-                    total_weight = sum(w for _, w in depths_in_cluster)
+-                    weighted_sum = sum(d * w for d, w in depths_in_cluster)
+-                    new_depth_map[y, x] = weighted_sum / total_weight
+-        refined_depth_maps.append(new_depth_map)
+-        
+-    # Step 4: Volume Reconstruction
+-    # Re-initialize grid to zero before re-registration
+-    voxel_grid = zeros((resolution[0], resolution[1], resolution[2]), dtype=int)
+-    for view_idx, depth_map in enumerate(refined_depth_maps):
+-        for y in range(depth_map.height):
+-            for x in range(depth_map.width):
+-                d = depth_map[y, x]
+-                if d is not None:
+-                    i, j, k = project_to_voxel(x, y, d, reference_views[view_idx].camera_matrix, bounding_box, resolution)
+-                    if is_inside_bounds(i, j, k, resolution):
+-                        voxel_grid[i, j, k] += 1
+-                        
+-    # Interpolate voxels to connect surface
+-    voxel_grid = interpolate_voxels(voxel_grid)
+-    
+-    return voxel_grid, refined_depth_maps
+-
+-def estimate_depth_map_individual(view):
+-    # [G] Placeholder for specific depth estimation algorithm.
+-    # Must use individual minimum cost per view.
+-    pass
+-
+-def project_to_voxel(x, y, d, camera_matrix, bounding_box, resolution):
+-    # [G] Standard inverse projection and voxel index mapping.
+-    pass
+-
+-def project_volume_to_view(voxel_grid, camera_matrix, resolution, bounding_box):
+-    # [G] Rasterize the voxel grid weights into a depth buffer.
+-    pass
+-
+-def get_front_cluster_depths(depth_buffer):
+-    # [G] Extract depths from the front surface cluster.
+-    pass
+-
+-def interpolate_voxels(voxel_grid):
+-    # [G] Interpolate to connect near voxels.
+-    pass
++        refined_depth_maps.append(depth_map)
++        
++    return refined_depth_maps
++
++def interpolate_and_reconstruct(voxel_grid):
++    """
++    Step 3: Surface Interpolation
++    """
++    # Interpolate voxels to connect surface among near voxels
++    # This is a placeholder for specific interpolation logic
++    # [G] Typically involves checking neighbors and filling empty voxels
++    # if surrounded by occupied ones.
++    voxel_grid.interpolate_surface()
++    return voxel_grid
++
++def refine_volume_iteratively(voxel_grid, reference_images, camera_matrices, threshold=0.01, window_size=3):
++    """
++    Step 4: Iterative Volume Refinement
++    """
++    max_iterations = 100
++    for iteration in range(max_iterations):
++        changed = False
++        
++        # Step 1: Temporarily define voxel colors
++        voxel_colors = {}
++        for voxel in voxel_grid:
++            visible_colors = []
++            for view_idx, camera_matrix in enumerate(camera_matrices):
++                # Check if voxel is visible in this view
++                if is_visible(voxel, camera_matrix, voxel_grid):
++                    # Sample color from reference image
++                    color = sample_color(voxel, reference_images[view_idx], camera_matrix)
++                    visible_colors.append(color)
++            if visible_colors:
++                voxel_colors[voxel] = median(visible_colors)
++            else:
++                voxel_colors[voxel] = None
++                
++        # Step 2: Iterate through views
++        for view_idx in range(len(reference_images)):
++            # Calculate MSE between reconstructed view and original
++            reconstructed_view = reconstruct_view(voxel_grid, voxel_colors, camera_matrices[view_idx])
++            mse = calculate_mse(reconstructed_view, reference_images[view_idx], window_size=window_size)
++            
++            # Step 3: If error exceeds threshold, remove old depth/voxel
++            if mse > threshold:
++                # Remove old depth and associated voxel
++                # [G] Identify which voxels contribute to the high error region
++                # and remove them.
++                voxels_to_remove = identify_error_contributors(voxel_grid, reconstructed_view, reference_images[view_idx])
++                for v in voxels_to_remove:
++                    voxel_grid.remove(v)
++                    changed = True
++                    
++                # Investigate new depth from neighboring pixels (smooth surface assumption)
++                # [G] This requires a local neighborhood search in the depth map
++                # to find a plausible new depth.
++                new_depth = estimate_smooth_depth(view_idx, mse_region)
++                
++                # Step 4: If new depth meets color constraints, generate new voxel
++                if meets_color_constraints(new_depth, reference_images, camera_matrices):
++                    new_voxel = create_voxel(new_depth, camera_matrices[view_idx])
++                    voxel_grid.add(new_voxel)
++                    changed = True
++                    
++        # Step 5: Iteratively reconstruct if changes occurred
++        if not changed:
++            break
++            
++    return voxel_grid
+ ```
+ 
++## Subtopics
++
++### Iterative Volume Refinement
++An iterative algorithm to refine the shape of the volume by removing scattering voxels and smoothing sharp corners to increase coding gain. It compares reconstructed views against original reference images to identify and correct geometry errors. It is chosen when the initial volume contains significant noise or sharp corners that reduce coding gain. It differs from the basic initialization by actively optimizing the volume structure based on view synthesis error.
++
+ ## Operating characteristics
+-*   **Time Complexity:** Dominated by depth estimation and projection steps. Registration is $O(N \cdot H \cdot W)$ where $H, W$ are image dimensions. Refinement involves re-projection and interpolation.
+-*   **Memory Complexity:** $O(X \cdot Y \cdot Z)$ for the voxel grid, where $X, Y, Z$ are resolution dimensions. Sparse representation is implied by the weight-based storage.
+-*   **Strengths:** Handles non-Lambertian reflections effectively via per-view cost minimization. Provides a good representation for natural scenery. Simple and fast registration.
+-*   **Limitations:** May produce isolated voxels requiring refinement. Sharp corners may reduce coding gain in compression applications, requiring smoothing [S1].
+-*   **When to use:** When multi-view images are available and non-Lambertian effects are significant. Suitable for volume initialization in view synthesis pipelines.
++*   **Time Complexity:** The initialization step is $O(N \cdot H \cdot W)$ where $N$ is the number of views and $H, W$ are image dimensions. The refinement step is iterative and depends on the number of voxels and views, potentially $O(I \cdot N \cdot V)$ where $I$ is iterations and $V$ is voxels.
++*   **Memory Complexity:** Proportional to the number of voxels in the sparse grid.
++*   **Performance:** The method is simple and fast for initialization. Refinement improves accuracy but increases computational cost.
++*   **Strengths:** Handles non-Lambertian reflections well. Removes isolated noise. Smooths sharp corners.
++*   **Limitations:** Requires accurate initial depth maps. Iterative refinement can be slow. Sensitive to camera calibration errors (mitigated by window-based MSE).
++*   **When to use:** When non-Lambertian surfaces are present and high-quality volume initialization is needed for view synthesis.
++*   **When not to use:** When real-time performance is critical and iterative refinement is too slow.
+ 
+ ## Background
+-The method was proposed in "Colour volumetric compression for realistic view synthesis applications" [S1]. It addresses the challenge of constructing accurate 3D volumes from multi-view images, particularly in the presence of non-Lambertian reflections. The approach builds on the principle that depth registration methods provide a good representation for natural scenery [S1]. It is used in the context of volume initialization for view synthesis applications.
++Originated in the context of color volumetric compression for realistic view synthesis applications. The method was proposed to address issues with non-Lambertian reflections and scattering voxels in multi-view volume construction. It builds on the principle that depth registration methods provide a good representation for natural scenery.
+ 
+ ## Sources

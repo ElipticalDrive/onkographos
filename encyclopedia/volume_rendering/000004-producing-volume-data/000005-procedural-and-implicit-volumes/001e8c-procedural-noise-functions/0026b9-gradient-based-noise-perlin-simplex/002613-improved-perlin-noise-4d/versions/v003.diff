@@ -1,0 +1,602 @@
+--- v002.md
++++ v003.md
+@@ -1,286 +1,308 @@
+ # Improved Perlin Noise (4D)
++
+ Also called: 4D Perlin Noise
+ 
+ ## Overview
+-Improved Perlin Noise (4D) is a procedural noise function that generates smooth, continuous random values in four dimensions by interpolating dot products of gradient vectors at the corners of a 4D hypercube [S1, unofficial]. It extends the 3D Improved Perlin Noise algorithm to support time-varying texture generation and 4D volume data synthesis [S1, unofficial]. What sets it apart from its 3D sibling is the handling of 16 hypercube corners and the use of 2D permutation textures to optimize hash lookups on the GPU, avoiding branching and improving performance over traditional array-based lookups [S2, unofficial].
++Improved Perlin Noise (4D) is a procedural noise function that generates smooth, continuous random values in four dimensions by interpolating dot products of gradient vectors at the corners of a 4D hypercube [S1, S2, unofficial]. It extends the 3D Improved Perlin Noise method to support time-varying texture generation and volumetric animation by treating the fourth dimension as time or an additional spatial axis [S1, S2, unofficial]. Unlike the original Perlin noise which used cubic interpolation, this variant employs a quintic fade function to eliminate directional artifacts and ensure C2 continuity [S1, S2, unofficial]. It is distinct from Simplex Noise in that it retains the orthogonal grid structure but optimizes the permutation lookup for GPU execution using texture-based tables [S2, unofficial].
+ 
+ ## How it works
+ ### Inputs and Outputs
+-**Inputs:**
+-- `p`: A 4D input coordinate vector `float4(x, y, z, w)` [S1, unofficial].
+-- `_Frequency`: Scaling factor for the input coordinate (default 1.0 or 0.02f depending on context) [S1, S2, unofficial].
+-- `_Lacunarity`: Frequency multiplier between octaves (default 2.0) [S1, S2, unofficial].
+-- `_Gain`: Amplitude multiplier between octaves (default 0.5) [S1, S2, unofficial].
+-- `_NoiseStyle`: Selector for fractal combination (0=fBm, 1=turbulence, 2=ridgedmf) [S1, unofficial].
+-- `_Time`: Optional time variable for animation, often passed as the `w` component of `p` [S1, unofficial].
+-
+-**Outputs:**
+-- A scalar noise value, typically in the range [-1.0, 1.0] for fBm, or [0.0, 1.0] for turbulence/ridgedmf [S1, unofficial].
++- **Input:** A 4D query point $P = (x, y, z, w)$, typically representing spatial coordinates $(x, y, z)$ and time $(w)$, or four spatial dimensions.
++- **Output:** A scalar noise value $V \in [-1, 1]$ (for standard fBm) or $[0, 1]$ (for turbulence/ridged multifractal).
+ 
+ ### Data Structures
+-The implementation relies on GPU textures to store permutation and gradient data, replacing CPU arrays for branchless sampling [S2, unofficial].
+-
+-1.  **`_PermTable1D`**: `Texture2D` of size `SIZE x 1` (e.g., 256x1). Format `Alpha8`. Stores 1D permutation indices normalized to [0, 1] in the alpha channel. Accessed via `float2(x, 0)` [S1, S2, unofficial].
+-2.  **`_PermTable2D`**: `Texture2D` of size `SIZE x SIZE` (e.g., 256x256). Format `ARGB32`. Stores precomputed 2D permutation sums. Each pixel `(x, y)` contains `(AA, AB, BA, BB)` where:
+-    - `AA = perm(perm(x) + y)`
+-    - `AB = perm(perm(x) + y + 1)`
+-    - `BA = perm(perm(x + 1) + y)`
+-    - `BB = perm(perm(x + 1) + y + 1)`
+-    Values are normalized to [0, 1] [S1, S2, unofficial].
+-3.  **`_Gradient4D`**: `Texture2D` of size `SIZE x 1` (e.g., 32x1 or 256x1 depending on gradient count). Format `ARGB32`. Stores 32 (or more) 4D gradient vectors. Each texel contains one gradient vector in RGBA channels, normalized to [0, 1]. The standard implementation uses 32 gradients [S1, S2, unofficial].
++The implementation relies on precomputed lookup tables stored in 2D textures to optimize GPU sampling and avoid branching [S1, S2, unofficial].
++
++1.  **Permutation Table 1D (`_PermTable1D`)**:
++    -   Format: `Texture2D` of size $256 \times 1$.
++    -   Layout: Stores 256 permutation indices in the Alpha channel. The Red, Green, and Blue channels are unused or zero.
++    -   Access: Sampled at `float2(x, 0)` where $x$ is the integer coordinate index [S1, S2, unofficial].
++
++2.  **Permutation Table 2D (`_PermTable2D`)**:
++    -   Format: `Texture2D` of size $256 \times 256$.
++    -   Layout: Stores precomputed 2D permutation sums in RGBA channels. Each texel at $(u, v)$ contains:
++        -   $R = \text{perm}(\text{perm}(u) + v)$
++        -   $G = \text{perm}(\text{perm}(u) + v + 1)$
++        -   $B = \text{perm}(\text{perm}(u + 1) + v)$
++        -   $A = \text{perm}(\text{perm}(u + 1) + v + 1)$
++    -   Purpose: Accelerates the hashing of 2D coordinates by combining two 1D permutation lookups into one texture fetch [S1, S2, unofficial].
++
++3.  **Gradient Table 4D (`_Gradient4D`)**:
++    -   Format: `Texture2D` of size $32 \times 1$ (or similar small width, height 1).
++    -   Layout: Stores 32 gradient vectors in RGBA channels. Each texel contains one 4D gradient vector $(g_x, g_y, g_z, g_w)$.
++    -   Values: Gradient vectors are normalized or scaled to fit within $[0, 1]$ in the texture, then mapped to $[-1, 1]$ during sampling [S1, S2, unofficial].
++    -   Note: The specific set of 32 gradients is not explicitly listed in the sources, but they are standard unit vectors or permutations thereof typical for Perlin noise [S1, S2, unofficial].
++
++### Parameters
++-   `_Frequency`: Scaling factor for the input coordinate. Default: $1.0$ or $0.02$ depending on context (e.g., marching cubes scale) [S1, S2, unofficial].
++-   `_Lacunarity`: Multiplier for frequency between octaves. Default: $2.0$ [S1, S2, unofficial].
++-   `_Gain`: Multiplier for amplitude between octaves. Default: $0.5$ [S1, S2, unofficial].
++-   `_NoiseStyle`: Selector for fractal combination method (0=fBm, 1=Turbulence, 2=Ridged Multifractal) [S1, S2, unofficial].
++-   `_Time`: Optional uniform for the $w$ coordinate in time-varying noise [S1, S2, unofficial].
+ 
+ ### Algorithm Steps
+-The core function `inoise(float4 p)` computes the noise value for a single point.
+-
+-1.  **Grid Location**: Compute the integer coordinates of the unit hypercube containing `p`.
+-    $$ P = \text{fmod}(\lfloor p \rfloor, 256.0) $$
+-    Compute the relative position within the hypercube.
+-    $$ p_{rel} = p - \lfloor p \rfloor $$
+-    [S1, S2, unofficial]
+-
+-2.  **Fade Curves**: Compute the quintic fade curve for each dimension to ensure $C^2$ continuity.
++
++1.  **Grid Localization**:
++    Compute the integer coordinates of the unit hypercube containing $P$ and the relative position within that hypercube.
++    $$ P_{int} = \text{fmod}(\lfloor P \rfloor, 256.0) $$
++    $$ P_{frac} = P - \lfloor P \rfloor $$
++    The modulo 256 ensures indices fit within the permutation table size [S1, S2, unofficial].
++
++2.  **Fade Curve Calculation**:
++    Compute the quintic fade function for each component of $P_{frac}$ to ensure smooth derivatives.
+     $$ f(t) = 6t^5 - 15t^4 + 10t^3 $$
+-    Applied component-wise to $p_{rel}$ to get $f = [f_x, f_y, f_z, f_w]$ [S1, S2, unofficial].
+-
+-3.  **Normalization**: Normalize $P$ for texture lookup.
+-    $$ P_{norm} = P / 256.0 $$
+-    Define a small offset for incrementing coordinates in texture space.
+-    $$ \text{one} = 1.0 / 256.0 $$
+-    [S1, unofficial]
+-
+-4.  **Hashing Corners**: Hash the 16 corners of the 4D hypercube using the permutation textures.
+-    -   Hash XY to get Z-offsets:
+-        $$ AA = \text{perm2d}(P_{norm}.xy) + P.z $$
+-        Here, `perm2d` returns a `float4` containing the precomputed sums for the 2x2 square in the XY plane.
+-    [S1, unofficial]
+-
+-    -   Compute the 16 corner hash indices by adding the W coordinate and incrementing X, Y, Z, W components by `one` (for the +1 faces).
+-        $$
+-        \begin{aligned}
+-        AAA &= \text{perm}(AA.x) + P.w, & AAB &= \text{perm}(AA.x + \text{one}) + P.w \\
+-        ABA &= \text{perm}(AA.y) + P.w, & ABB &= \text{perm}(AA.y + \text{one}) + P.w \\
+-        BAA &= \text{perm}(AA.z) + P.w, & BAB &= \text{perm}(AA.z + \text{one}) + P.w \\
+-        BBA &= \text{perm}(AA.w) + P.w, & BBB &= \text{perm}(AA.w + \text{one}) + P.w
+-        \end{aligned}
+-        $$
+-        The `+one` variants correspond to the corners at $x+1, y+1, z+1, w+1$. The base variants correspond to $x, y, z, w$.
+-        [S1, S2, unofficial]
+-
+-5.  **Gradient Contributions**: For each corner, retrieve the gradient vector and compute the dot product with the relative position vector offset to that corner.
+-    -   Gradient retrieval:
+-        $$ g = \text{Sample}(\_Gradient4D, \text{float2}(x, 0)) \times 2.0 - 1.0 $$
+-        This unpacks the gradient from [0, 1] to [-1, 1].
+-    [S1, unofficial]
+-
+-    -   Dot product function:
+-        $$ \text{gradperm}(x, p) = \text{dot}(g, p) $$
+-    [S1, unofficial]
+-
+-    -   Compute contributions for all 16 corners. The relative position $p$ is adjusted for each corner (e.g., $p + (-1, 0, 0, 0)$ for the corner at $x-1$).
+-        [S1, S2, unofficial]
+-
+-6.  **Interpolation**: Interpolate the 16 gradient contributions using nested `lerp` operations with the fade values $f_x, f_y, f_z, f_w$.
++    Applied component-wise: $F = \text{fade}(P_{frac})$ [S1, S2, unofficial].
++
++3.  **Hashing Corners**:
++    Map the 16 corners of the 4D hypercube to gradient indices using the permutation tables.
++    -   Normalize integer coordinates for texture lookup: $P_{norm} = P_{int} / 256.0$.
++    -   Compute base 2D hash: $AA = \text{perm2d}(P_{norm}.xy) + P_{norm}.z$.
++    -   Compute 1D hashes for the 16 corners by adding the $w$ component ($P_{norm}.w$) and incrementing $x, y, z, w$ by $1/256.0$ (represented as `one`) where appropriate.
++    
++    Let $one = 1.0 / 256.0$. The 16 corner indices are:
++    -   $AAA = \text{perm}(AA.x) + P_{norm}.w$
++    -   $AAB = \text{perm}(AA.x + one) + P_{norm}.w$
++    -   $ABA = \text{perm}(AA.y) + P_{norm}.w$
++    -   $ABB = \text{perm}(AA.y + one) + P_{norm}.w$
++    -   $BAA = \text{perm}(AA.z) + P_{norm}.w$
++    -   $BAB = \text{perm}(AA.z + one) + P_{norm}.w$
++    -   $BBA = \text{perm}(AA.w) + P_{norm}.w$
++    -   $BBB = \text{perm}(AA.w + one) + P_{norm}.w$
++    
++    And the same set incremented by `one` in the final permutation lookup (representing the $+1$ offset in the $x$ dimension of the permutation table, effectively covering the 16 corners of the hypercube in the hash space) [S1, S2, unofficial].
++    
++    *Correction based on code*: The code shows `perm(AA.x)+P.w` and `perm(AA.x+one)+P.w`. The `perm` function samples `_PermTable1D`. The `perm2d` function samples `_PermTable2D`. The indices `AA.x`, `AA.y`, etc., are the results of the 2D permutation lookup. The `+ P.w` adds the time/space dimension offset. The `+ one` inside the `perm` call increments the index for the next cell in the permutation table. The 16 corners correspond to the combinations of $\pm 1$ offsets in $x, y, z, w$ relative to the base corner $(0,0,0,0)$ of the hypercube. The code explicitly lists 16 `gradperm` calls with offsets like `float4(-1, 0, 0, 0)` etc. [S1, S2, unofficial].
++
++4.  **Gradient Evaluation**:
++    For each corner index $I$, retrieve the gradient vector $G$ and compute the dot product with the relative position vector from the corner to the query point.
++    $$ G = (\text{Sample}(\text{\_Gradient4D}, I) \times 2.0 - 1.0) $$
++    $$ \text{Contribution} = \text{dot}(G, P_{frac} - C) $$
++    where $C$ is the corner coordinate offset (e.g., $(0,0,0,0), (1,0,0,0), \dots$) [S1, S2, unofficial].
++
++5.  **Interpolation**:
++    Interpolate the 16 gradient contributions using the fade values $F = (f_x, f_y, f_z, f_w)$ via nested linear interpolations (lerp) along the $x, y, z, w$ axes.
++    $$ V = \text{lerp}_w( \text{lerp}_z( \text{lerp}_y( \text{lerp}_x( \text{Corner}_{0000}, \text{Corner}_{1000}, f_x), \dots ), \dots ), f_w ) $$
++    The specific nesting order in the source code is:
++    ```python
++    # Pseudocode for interpolation structure
++    # Lerp along X first for each Z,W plane
++    v000 = lerp(gradperm(C000, P), gradperm(C100, P + (-1,0,0,0)), f.x)
++    v001 = lerp(gradperm(C001, P + (0,0,-1,0)), gradperm(C101, P + (-1,0,-1,0)), f.x)
++    v010 = lerp(gradperm(C010, P + (0,-1,0,0)), gradperm(C110, P + (-1,-1,0,0)), f.x)
++    v011 = lerp(gradperm(C011, P + (0,-1,-1,0)), gradperm(C111, P + (-1,-1,-1,0)), f.x)
++    v100 = lerp(gradperm(C000+1, P + (0,0,0,-1)), gradperm(C100+1, P + (-1,0,0,-1)), f.x)
++    v101 = lerp(gradperm(C001+1, P + (0,0,-1,-1)), gradperm(C101+1, P + (-1,0,-1,-1)), f.x)
++    v110 = lerp(gradperm(C010+1, P + (0,-1,0,-1)), gradperm(C110+1, P + (-1,-1,0,-1)), f.x)
++    v111 = lerp(gradperm(C011+1, P + (0,-1,-1,-1)), gradperm(C111+1, P + (-1,-1,-1,-1)), f.x)
++
++    # Lerp along Y
++    v00 = lerp(v000, v001, f.y) # Note: Source code structure is complex, see below
++    # Actually, the source code nests lerp(z, lerp(y, lerp(x, ...)))
++    # Let's follow the source code's exact nesting:
++    # lerp( lerp( lerp( lerp(C000, C100, fx), lerp(C010, C110, fx), fy ), lerp(C001, C101, fx), fz ), lerp(...), fw )
++    ```
++    The exact nesting from the source code [S1, S2, unofficial]:
+     $$
+     \begin{aligned}
+-    n = \text{lerp}( & \text{lerp}( \text{lerp}( \text{lerp}(\text{gradperm}(AAA, p), \text{gradperm}(BAA, p+(-1,0,0,0)), f_x), \\
+-                   & \quad \text{lerp}(\text{gradperm}(ABA, p+(0,-1,0,0)), \text{gradperm}(BBA, p+(-1,-1,0,0)), f_x), f_y), \\
+-                   & \text{lerp}( \text{lerp}(\text{gradperm}(AAB, p+(0,0,-1,0)), \text{gradperm}(BAB, p+(-1,0,-1,0)), f_x), \\
+-                   & \quad \text{lerp}(\text{gradperm}(ABB, p+(0,-1,-1,0)), \text{gradperm}(BBB, p+(-1,-1,-1,0)), f_x), f_y), f_z), \\
+-    & \text{lerp}( \text{lerp}( \text{lerp}(\text{gradperm}(AAA+\text{one}, p+(0,0,0,-1)), \text{gradperm}(BAA+\text{one}, p+(-1,0,0,-1)), f_x), \\
+-                   & \quad \text{lerp}(\text{gradperm}(ABA+\text{one}, p+(0,-1,0,-1)), \text{gradperm}(BBA+\text{one}, p+(-1,-1,0,-1)), f_x), f_y), \\
+-                   & \text{lerp}( \text{lerp}(\text{gradperm}(AAB+\text{one}, p+(0,0,-1,-1)), \text{gradperm}(BAB+\text{one}, p+(-1,0,-1,-1)), f_x), \\
+-                   & \quad \text{lerp}(\text{gradperm}(ABB+\text{one}, p+(0,-1,-1,-1)), \text{gradperm}(BBB+\text{one}, p+(-1,-1,-1,-1)), f_x), f_y), f_z), f_w)
++    &\text{lerp}( \\
++    &\quad \text{lerp}( \text{lerp}( \text{lerp}( \text{gradperm}(AAA, P), \text{gradperm}(BAA, P+(-1,0,0,0)), f.x), \\
++    &\quad \quad \text{lerp}( \text{gradperm}(ABA, P+(0,-1,0,0)), \text{gradperm}(BBA, P+(-1,-1,0,0)), f.x), f.y), \\
++    &\quad \text{lerp}( \text{lerp}( \text{gradperm}(AAB, P+(0,0,-1,0)), \text{gradperm}(BAB, P+(-1,0,-1,0)), f.x), \\
++    &\quad \quad \text{lerp}( \text{gradperm}(ABB, P+(0,-1,-1,0)), \text{gradperm}(BBB, P+(-1,-1,-1,0)), f.x), f.z), f.w), \\
++    &\quad \text{lerp}( \text{lerp}( \text{lerp}( \text{gradperm}(AAA+1, P+(0,0,0,-1)), \text{gradperm}(BAA+1, P+(-1,0,0,-1)), f.x), \\
++    &\quad \quad \text{lerp}( \text{gradperm}(ABA+1, P+(0,-1,0,-1)), \text{gradperm}(BBA+1, P+(-1,-1,0,-1)), f.x), f.y), \\
++    &\quad \quad \text{lerp}( \text{lerp}( \text{gradperm}(AAB+1, P+(0,0,-1,-1)), \text{gradperm}(BAB+1, P+(-1,0,-1,-1)), f.x), \\
++    &\quad \quad \quad \text{lerp}( \text{gradperm}(ABB+1, P+(0,-1,-1,-1)), \text{gradperm}(BBB+1, P+(-1,-1,-1,-1)), f.x), f.z), f.w)
+     \end{aligned}
+     $$
+-    [S1, S2, unofficial]
++    *Note: The source code's nesting is `lerp( lerp( lerp( lerp( C000, C100, fx ), lerp( C010, C110, fx ), fy ), lerp( C001, C101, fx ), fz ), lerp( ... ), fw )`. This implies the interpolation order is X, then Y, then Z, then W.* [S1, S2, unofficial].
+ 
+ ### Pseudocode
++
+ ```python
+-# Constants
+-SIZE = 256
+-ONE = 1.0 / SIZE
+-
+-# Helper: Quintic fade curve
+ def fade(t):
+-    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+-
+-# Helper: 1D Permutation lookup from texture
+-# perm_table_1d is a texture of size [SIZE, 1], format Alpha8
++    """Quintic fade function."""
++    return t * t * t * (t * (t * 6 - 15) + 10)
++
+ def perm(x):
+-    # Sample texture at (x, 0), get alpha, normalize to [0, 255] if needed, 
+-    # but here we assume the texture stores normalized indices or we handle scaling.
+-    # Based on source: returns value in [0, 1] range representing index/255?
+-    # Source says: tex2D(_PermTable1D, float2(x,0)).a
+-    # And later: perm(AA.x) + P.w. P.w is in [0,1]. 
+-    # Actually, perm() returns the permutation INDEX. 
+-    # In the source code: perm(x) returns the alpha channel value.
+-    # The alpha channel stores the permutation index normalized to [0,1]?
+-    # No, usually permutation tables store integers 0-255.
+-    # If stored as float in [0,1], we must multiply by 255 to get index?
+-    # Source code: float AAA = perm(AA.x)+P.w;
+-    # AA.x comes from perm2d which returns float4.
+-    # perm2d samples _PermTable2D.
+-    # Let's assume the textures store the values directly as floats in [0,1] 
+-    # representing the permutation index / 255.0? 
+-    # Or does the shader handle the integer math?
+-    # Source: "perm(x) = tex2D... .a". 
+-    # In C# generation: m_perm[m_perm[x]+y] is an int.
+-    # If stored in texture, it's likely normalized.
+-    # However, the addition `perm(AA.x) + P.w` implies they are in the same domain.
+-    # P.w is in [0,1]. AA.x is a permutation index.
+-    # If AA.x is an index (0-255), adding P.w (0-1) makes no sense for hashing.
+-    # Re-reading source: "perm2d(uv) = tex2D...". 
+-    # "AA = perm2d(P.xy) + P.z". P.z is in [0,1].
+-    # This implies perm2d returns values in [0,1] range?
+-    # If perm2d returns indices 0-255, adding P.z (0-1) is weird.
+-    # BUT: P is normalized to [0,1] for texture lookup.
+-    # The permutation table lookup needs integer indices.
+-    # The source code does: float4 AA = perm2d(P.xy) + P.z;
+-    # If P.xy is normalized [0,1], perm2d samples the texture.
+-    # The texture _PermTable2D stores precomputed sums.
+-    # If the texture stores indices 0-255, sampling returns 0-255.
+-    # Adding P.z (0-1) to an index 0-255 is valid for hashing?
+-    # No, the hash should be an integer index into the gradient table.
+-    # The gradient table is sampled with `float2(x, 0)`.
+-    # If x is 255.5, it samples near the end.
+-    # So the hash value DOES NOT need to be an integer. It just needs to be unique.
+-    # The permutation table maps coordinates to a pseudo-random value.
+-    # So, perm() returns a float in [0, 1] (or [0, 255] if not normalized).
+-    # Source says: "stores perm values normalized to [0,1]".
+-    # So perm() returns [0,1].
+-    # Then AA = perm2d(P.xy) + P.z.
+-    # perm2d returns [0,1] (or [0,255]?).
+-    # If perm2d returns [0,1], adding P.z [0,1] results in [0,2].
+-    # Then perm(AA.x) samples _PermTable1D.
+-    # If AA.x is 1.5, it samples between index 1 and 2.
+-    # This is a valid hashing strategy using texture interpolation.
+-    
+-    # Implementation detail:
+-    # We assume the textures store the permutation values normalized to [0, 1].
+-    # The "index" is effectively the float value.
+-    return perm_table_1d.sample(x, 0) # Returns float in [0,1]
+-
+-# Helper: 2D Permutation lookup
++    """Lookup 1D permutation from texture."""
++    # Assumes _PermTable1D is a texture2D with permutation in alpha channel
++    return _PermTable1D.sample(x, 0).a
++
+ def perm2d(uv):
+-    # Returns float4 (AA, AB, BA, BB)
+-    return perm_table_2d.sample(uv)
+-
+-# Helper: Gradient retrieval
++    """Lookup 2D permutation from texture."""
++    # Assumes _PermTable2D is a texture2D with precomputed 2D perms in RGBA
++    return _PermTable2D.sample(uv, 0)
++
+ def gradperm(x, p):
+-    # x is the hash value (float in [0,1] or [0,255]?)
+-    # Source: _Gradient4D.SampleLevel(..., float2(x, 0), 0)
+-    # If x is [0,1], it samples the first texel?
+-    # Source: "Gradient 4D table: Texture2D SIZE x 1 ... stores 32 gradient vectors"
+-    # If SIZE=32, and x is [0,1], we need to scale x by 32?
+-    # Source code: float4 g = _Gradient4D.SampleLevel(..., float2(x, 0), 0) * 2.0 - 1.0;
+-    # It does NOT scale x.
+-    # This implies x is treated as a texture coordinate.
+-    # If the gradient table has 32 vectors in a 256x1 texture, 
+-    # then x must be in [0, 255] to access different gradients?
+-    # Or the gradient table is 32x1 and x is in [0, 31]?
+-    # Source: "perm values normalized to [0,1]".
+-    # If perm returns [0,1], and we use it as texture coord for a 32-wide texture,
+-    # we are always sampling the same region unless we scale.
+-    # However, the source code does NOT scale x in gradperm.
+-    # This suggests the permutation table might store indices 0-255, 
+-    # OR the gradient texture is 256x1 with repeated gradients?
+-    # "stores 32 gradient vectors".
+-    # If the texture is 256x1, and we have 32 gradients, each gradient occupies 8 texels?
+-    # Or the texture is 32x1?
+-    # If texture is 32x1, and x is [0,1], we only sample the first gradient.
+-    # This is a contradiction in the source notes vs standard practice.
+-    # Let's look at 2D: "x*8.0". This scales x.
+-    # 4D: "float2(x, 0)". No scaling.
+-    # This implies x is already in the correct range for the texture width.
+-    # If _PermTable1D stores values in [0,1], and _Gradient4D is 256x1,
+-    # then x must be in [0, 255].
+-    # But perm() returns [0,1].
+-    # Therefore, the permutation table MUST store values in [0, 255] (integers).
+-    # Note [S2, unofficial] says "normalized to [0,1]". This might be an error in the note 
+-    # or it implies the texture format is such that sampling returns the integer value.
+-    # Given "x*8.0" in 2D, it's likely 4D also requires scaling if the table is small.
+-    # But the code doesn't show it.
+-    # We will follow the code: no scaling.
+-    # We assume the permutation values are in the range [0, Width_of_Gradient_Texture - 1].
+-    
+-    g = gradient_4d.sample(x, 0)
+-    g = g * 2.0 - 1.0 # Map [0,1] to [-1,1]
++    """Compute gradient contribution."""
++    # Assumes _Gradient4D is a texture2D with 4D gradients in RGBA
++    g = _Gradient4D.sample(x, 0) * 2.0 - 1.0
+     return dot(g, p)
+ 
+-# Main Noise Function
+ def inoise(p):
+-    # 1. Grid Location
+-    P = fmod(floor(p), 256.0)
+-    p_rel = p - floor(p)
+-    
+-    # 2. Fade Curves
+-    f = fade(p_rel)
++    """
++    Compute 4D Improved Perlin Noise.
++    p: float4 (x, y, z, w)
++    """
++    # 1. Find unit hypercube
++    P_int = fmod(floor(p), 256.0)
++    p_frac = p - floor(p)
++    
++    # 2. Compute fade curves
++    f = fade(p_frac)
+     
+     # 3. Normalize for texture lookup
+-    P_norm = P / 256.0
+-    
+-    # 4. Hash Corners
+-    AA = perm2d(P_norm.xy) + P.z
+-    
+-    AAA = perm(AA.x) + P.w
+-    AAB = perm(AA.x + ONE) + P.w
+-    ABA = perm(AA.y) + P.w
+-    ABB = perm(AA.y + ONE) + P.w
+-    BAA = perm(AA.z) + P.w
+-    BAB = perm(AA.z + ONE) + P.w
+-    BBA = perm(AA.w) + P.w
+-    BBB = perm(AA.w + ONE) + P.w
+-    
+-    # 5. Interpolation
+-    # We need to compute gradperm for all 16 corners.
+-    # The p vector is adjusted for each corner.
+-    
+-    # w=0 plane
+-    n000 = gradperm(AAA, p_rel)
+-    n100 = gradperm(BAA, p_rel + float4(-1, 0, 0, 0))
+-    n010 = gradperm(ABA, p_rel + float4(0, -1, 0, 0))
+-    n110 = gradperm(BBA, p_rel + float4(-1, -1, 0, 0))
+-    n001 = gradperm(AAB, p_rel + float4(0, 0, -1, 0))
+-    n101 = gradperm(BAB, p_rel + float4(-1, 0, -1, 0))
+-    n011 = gradperm(ABB, p_rel + float4(0, -1, -1, 0))
+-    n111 = gradperm(BBB, p_rel + float4(-1, -1, -1, 0))
+-    
+-    # w=1 plane (using +ONE offsets)
+-    n000_w1 = gradperm(AAA + ONE, p_rel + float4(0, 0, 0, -1))
+-    n100_w1 = gradperm(BAA + ONE, p_rel + float4(-1, 0, 0, -1))
+-    n010_w1 = gradperm(ABA + ONE, p_rel + float4(0, -1, 0, -1))
+-    n110_w1 = gradperm(BBA + ONE, p_rel + float4(-1, -1, 0, -1))
+-    n001_w1 = gradperm(AAB + ONE, p_rel + float4(0, 0, -1, -1))
+-    n101_w1 = gradperm(BAB + ONE, p_rel + float4(-1, 0, -1, -1))
+-    n011_w1 = gradperm(ABB + ONE, p_rel + float4(0, -1, -1, -1))
+-    n111_w1 = gradperm(BBB + ONE, p_rel + float4(-1, -1, -1, -1))
+-    
+-    # Lerp X
+-    n00 = lerp(n000, n100, f.x)
+-    n01 = lerp(n010, n110, f.x)
+-    n10 = lerp(n001, n101, f.x)
+-    n11 = lerp(n011, n111, f.x)
+-    
+-    n00_w1 = lerp(n000_w1, n100_w1, f.x)
+-    n01_w1 = lerp(n010_w1, n110_w1, f.x)
+-    n10_w1 = lerp(n001_w1, n101_w1, f.x)
+-    n11_w1 = lerp(n011_w1, n111_w1, f.x)
+-    
+-    # Lerp Y
+-    n0 = lerp(n00, n01, f.y)
+-    n1 = lerp(n10, n11, f.y)
+-    
+-    n0_w1 = lerp(n00_w1, n01_w1, f.y)
+-    n1_w1 = lerp(n10_w1, n11_w1, f.y)
+-    
+-    # Lerp Z
+-    n0_z = lerp(n0, n1, f.z)
+-    n1_z = lerp(n0_w1, n1_w1, f.z)
+-    
+-    # Lerp W
+-    return lerp(n0_z, n1_z, f.w)
+-
+-# Fractal Brownian Motion
++    P_norm = P_int / 256.0
++    one = 1.0 / 256.0
++    
++    # 4. Hash coordinates of the 16 corners
++    AA = perm2d(P_norm.xy) + P_norm.z
++    
++    # Corner indices
++    AAA = perm(AA.x) + P_norm.w
++    AAB = perm(AA.x + one) + P_norm.w
++    ABA = perm(AA.y) + P_norm.w
++    ABB = perm(AA.y + one) + P_norm.w
++    BAA = perm(AA.z) + P_norm.w
++    BAB = perm(AA.z + one) + P_norm.w
++    BBA = perm(AA.w) + P_norm.w
++    BBB = perm(AA.w + one) + P_norm.w
++    
++    # Corners with +1 offset in the permutation index (for the +1 side of the hypercube)
++    AAA1 = AAA + 1 # Note: perm function handles the +1 via 'one' in the source code logic? 
++                   # Source code: perm(AA.x+one). 
++                   # The 'one' is added to the index passed to perm.
++                   # So AAA1 corresponds to perm(AA.x+one) which is AAB? 
++                   # No, the source code defines AAA, AAB etc as the indices for the 0-side.
++                   # The 1-side indices are AAA+1, AAB+1 etc in the lerp calls.
++                   # Wait, the source code uses:
++                   # lerp( gradperm(AAA, p), gradperm(BAA, p+(-1,0,0,0)), f.x )
++                   # This implies AAA and BAA are the indices for the 0-side corners.
++                   # The 1-side corners are AAA+1, BAA+1 etc.
++                   # But the source code also uses 'one' inside the perm call for the 1-side?
++                   # Let's re-read carefully:
++                   # float AAA = perm(AA.x)+P.w
++                   # float AAB = perm(AA.x+one)+P.w
++                   # ...
++                   # lerp( gradperm(AAA, p), gradperm(BAA, p+(-1,0,0,0)), f.x )
++                   # This lerp is along X. AAA is corner (0,0,0,0). BAA is corner (1,0,0,0).
++                   # So BAA should be the index for the +1 X corner.
++                   # In the source code, BAA = perm(AA.z) + P.w.
++                   # This seems to map the Z component of the 2D perm to the X offset?
++                   # This is a specific optimization/hashing scheme.
++                   # We will follow the source code's variable names and lerp structure exactly.
++    
++    # 5. Interpolate
++    # Lerp along X
++    v0000 = gradperm(AAA, p)
++    v1000 = gradperm(BAA, p + float4(-1, 0, 0, 0))
++    v0001 = lerp(v0000, v1000, f.x)
++    
++    v0010 = gradperm(ABA, p + float4(0, -1, 0, 0))
++    v1010 = gradperm(BBA, p + float4(-1, -1, 0, 0))
++    v0011 = lerp(v0010, v1010, f.x)
++    
++    v0100 = lerp(v0001, v0011, f.y) # Lerp along Y
++    
++    v0101 = gradperm(AAB, p + float4(0, 0, -1, 0))
++    v1101 = gradperm(BAB, p + float4(-1, 0, -1, 0))
++    v0111 = lerp(v0101, v1101, f.x)
++    
++    v0110 = gradperm(ABB, p + float4(0, -1, -1, 0))
++    v1110 = gradperm(BBB, p + float4(-1, -1, -1, 0))
++    v0111_lerp = lerp(v0110, v1110, f.x)
++    
++    v0111_final = lerp(v0111, v0111_lerp, f.y) # Lerp along Y
++    
++    v0112 = lerp(v0111, v0111_final, f.z) # Lerp along Z? 
++    # The source code nesting is:
++    # lerp( lerp( lerp( lerp(C000, C100, fx), lerp(C010, C110, fx), fy ), lerp(C001, C101, fx), fz ), ... )
++    # This means:
++    # Step 1: Lerp X for Z=0, W=0 plane
++    # Step 2: Lerp X for Z=1, W=0 plane
++    # Step 3: Lerp Y for W=0 plane (combining Z=0 and Z=1 results)
++    # Step 4: Lerp X for Z=0, W=1 plane
++    # Step 5: Lerp X for Z=1, W=1 plane
++    # Step 6: Lerp Y for W=1 plane
++    # Step 7: Lerp Z for W=0 plane (combining W=0 Y-lerped results)
++    # Step 8: Lerp Z for W=1 plane
++    # Step 9: Lerp W (combining W=0 and W=1 Z-lerped results)
++    
++    # Let's rewrite the pseudocode to match the source's nesting exactly.
++    
++    # X-lerps for W=0, Z=0
++    c000 = gradperm(AAA, p)
++    c100 = gradperm(BAA, p + float4(-1, 0, 0, 0))
++    x000 = lerp(c000, c100, f.x)
++    
++    # X-lerps for W=0, Z=1
++    c010 = gradperm(ABA, p + float4(0, -1, 0, 0))
++    c110 = gradperm(BBA, p + float4(-1, -1, 0, 0))
++    x010 = lerp(c010, c110, f.x)
++    
++    # Y-lerp for W=0
++    y00 = lerp(x000, x010, f.y)
++    
++    # X-lerps for W=1, Z=0
++    c001 = gradperm(AAB, p + float4(0, 0, -1, 0))
++    c101 = gradperm(BAB, p + float4(-1, 0, -1, 0))
++    x001 = lerp(c001, c101, f.x)
++    
++    # X-lerps for W=1, Z=1
++    c011 = gradperm(ABB, p + float4(0, -1, -1, 0))
++    c111 = gradperm(BBB, p + float4(-1, -1, -1, 0))
++    x011 = lerp(c011, c111, f.x)
++    
++    # Y-lerp for W=1
++    y01 = lerp(x001, x011, f.y)
++    
++    # Z-lerp for W=0
++    z0 = lerp(y00, lerp(x001, x011, f.y), f.z) # Wait, source code: lerp( lerp( lerp( lerp( C000, C100, fx ), lerp( C010, C110, fx ), fy ), lerp( C001, C101, fx ), fz )
++    # The source code structure:
++    # lerp( 
++    #   lerp( lerp( lerp( C000, C100, fx ), lerp( C010, C110, fx ), fy ), 
++    #         lerp( C001, C101, fx ), fz ), 
++    #   lerp( lerp( lerp( C000+1, C100+1, fx ), lerp( C010+1, C110+1, fx ), fy ), 
++    #         lerp( C001+1, C101+1, fx ), fz ), fw )
++    
++    # Let's map the variables:
++    # C000 = AAA
++    # C100 = BAA
++    # C010 = ABA
++    # C110 = BBA
++    # C001 = AAB
++    # C101 = BAB
++    # C011 = ABB
++    # C111 = BBB
++    
++    # Inner X-lerps
++    v000 = lerp(gradperm(AAA, p), gradperm(BAA, p + float4(-1, 0, 0, 0)), f.x)
++    v001 = lerp(gradperm(ABA, p + float4(0, -1, 0, 0)), gradperm(BBA, p + float4(-1, -1, 0, 0)), f.x)
++    v010 = lerp(gradperm(AAB, p + float4(0, 0, -1, 0)), gradperm(BAB, p + float4(-1, 0, -1, 0)), f.x)
++    v011 = lerp(gradperm(ABB, p + float4(0, -1, -1, 0)), gradperm(BBB, p + float4(-1, -1, -1, 0)), f.x)
++    
++    # Y-lerps
++    v00 = lerp(v000, v001, f.y)
++    v01 = lerp(v010, v011, f.y)
++    
++    # Z-lerp
++    v0 = lerp(v00, v01, f.z)
++    
++    # Repeat for +1 side (AAA+1, etc.)
++    v100 = lerp(gradperm(AAA+1, p + float4(0, 0, 0, -1)), gradperm(BAA+1, p + float4(-1, 0, 0, -1)), f.x)
++    v101 = lerp(gradperm(ABA+1, p + float4(0, -1, 0, -1)), gradperm(BBA+1, p + float4(-1, -1, 0, -1)), f.x)
++    v110 = lerp(gradperm(AAB+1, p + float4(0, 0, -1, -1)), gradperm(BAB+1, p + float4(-1, 0, -1, -1)), f.x)
++    v111 = lerp(gradperm(ABB+1, p + float4(0, -1, -1, -1)), gradperm(BBB+1, p + float4(-1, -1, -1, -1)), f.x)
++    
++    v10 = lerp(v100, v101, f.y)
++    v11 = lerp(v110, v111, f.y)
++    v1 = lerp(v10, v11, f.z)
++    
++    # W-lerp
++    return lerp(v0, v1, f.w)
++
+ def fBm(p, octaves):
++    """Fractal Brownian Motion."""
+     freq = _Frequency
+     amp = 0.5
+@@ -293,24 +315,20 @@
+ ```
+ 
+-### Parameters
+--   `_Frequency`: Controls the scale of the noise. Typical value: 1.0 [S2, unofficial]. In marching cubes context, 0.02f [S1, unofficial].
+--   `_Lacunarity`: Multiplier for frequency in each octave. Typical value: 2.0 [S1, S2, unofficial].
+--   `_Gain`: Multiplier for amplitude in each octave. Typical value: 0.5 [S1, S2, unofficial].
+--   `_NoiseStyle`: Integer selector (0=fBm, 1=turbulence, 2=ridgedmf) [S1, unofficial].
+-
+ ### Edge Cases and Pitfalls
+--   **Gradient Scaling**: Gradient vectors must be normalized or scaled appropriately to ensure consistent noise amplitude [S2, unofficial]. The source code scales sampled gradients from [0, 1] to [-1, 1] [S1, unofficial].
+--   **Texture Coordinates**: The permutation and gradient tables are accessed as textures. Care must be taken to ensure the hash values passed to `gradperm` are in the correct range for the texture dimensions [S1, unofficial].
+--   **Precision**: Using floating-point texture lookups for permutation hashing avoids branching but relies on the texture filtering mode (typically `Point` or `Clamp`) to prevent interpolation between distinct permutation values [S2, unofficial].
++-   **Gradient Normalization**: Gradient vectors must be normalized or scaled appropriately to ensure consistent noise amplitude across the range $[-1, 1]$ [S2, unofficial].
++-   **Precision**: Using `fmod` with large coordinates can lead to precision loss. It is recommended to keep input coordinates within a reasonable range or use periodic hashing [S1, S2, unofficial].
++-   **Boundary Conditions**: The modulo 256 operation ensures periodicity, but discontinuities can occur if the permutation table is not correctly sized or if the input coordinates are not handled with floating-point precision [S1, S2, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(1)$ per sample for a single octave. $O(O)$ for $O$ octaves of FBM.
+--   **Memory Complexity**: Depends on the size of the permutation and gradient textures. Typically $O(1)$ if textures are fixed size (e.g., 256x256).
+--   **Performance**: GPU-based implementation using texture lookups is significantly faster than CPU-based array lookups due to cache coherence and branchless execution [S2, unofficial].
+--   **Strengths**: Smooth, continuous noise; supports 4D (time); optimized for GPU via texture-based hashing [S2, unofficial].
+--   **Limitations**: Requires pre-computed permutation and gradient textures; 4D computation is more expensive than 3D due to 16 corners vs 8 [S1, unofficial].
++-   **Time Complexity**: $O(1)$ per noise evaluation, with a constant number of texture lookups (16 gradient samples, 2 permutation table lookups) and arithmetic operations.
++-   **Memory Complexity**: $O(1)$ for the algorithm state, plus $O(N)$ for the permutation and gradient tables (where $N=256$ for permutation, $N=32$ for gradients).
++-   **Performance**: GPU-optimized implementations using texture-based lookups avoid branching and improve performance over traditional array-based lookup [S2, unofficial].
++-   **Strengths**: Smooth C2 continuity, no directional artifacts, suitable for time-varying volumetric data.
++-   **Limitations**: Higher computational cost than Simplex Noise due to the orthogonal grid and 16-corner interpolation. Not given in the sources: specific FPS metrics.
++-   **When to use**: When time-varying noise is required, or when the orthogonal grid structure is preferred for compatibility with existing 3D Perlin noise pipelines.
++-   **When not to use**: When performance is critical and Simplex Noise is an acceptable alternative, or when 3D-only noise is sufficient.
+ 
+ ## Background
+-Improved Perlin Noise (4D) is based on Ken Perlin's Improved Noise algorithm, which uses a quintic fade curve to ensure $C^2$ continuity [S1, unofficial]. The 4D extension allows for time-varying textures and volumetric noise generation [S1, unofficial]. The specific GPU-optimized implementation using 2D permutation textures and texture-based gradient lookup is described in the context of GPU-based marching cubes and procedural noise generation [S1, S2, unofficial].
++Improved Perlin Noise (4D) is based on Ken Perlin's Improved Noise, which replaced the cubic interpolation of the original Perlin noise with a quintic fade function to reduce directional artifacts [S1, S2, unofficial]. The 4D extension allows for the generation of time-varying textures and volumetric animations by treating the fourth dimension as time [S1, S2, unofficial]. The GPU-based implementation using texture-based permutation and gradient tables was popularized in open-source projects such as "Marching Cubes On The GPU" [S1, S2, unofficial].
+ 
+ ## Sources

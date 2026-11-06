@@ -1,0 +1,266 @@
+# Gaussian Splatting for Microscopy
+
+Also called: Gaussian Splatting for Microscopy Volumes, nD Gaussian splatting, Gaussian splats
+
+## Overview
+Gaussian Splatting for Microscopy decomposes an $n$-dimensional fluorescence microscopy volume into a mixture of oriented, anisotropic Gaussian primitives, enabling interactive web visualization and efficient storage [S1, unofficial]. It solves the problem of data transfer and viewing of large $n$-dimensional datasets by representing images as fitted geometry that the GPU rasterizes directly, avoiding the need for intermediate voxel grids [S1, unofficial]. Unlike standard 3D Gaussian Splatting which relies on Structure-from-Motion (SfM) points, this method initializes splats from voxel data and uses blind-spot cross-validation to determine the optimal splat count, preventing overfitting to noise [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A preprocessed $n$-dimensional microscopy volume $V: \mathbb{R}^D \rightarrow \mathbb{R}_{\ge 0}$, typically normalized to $[0, 1]$.
+*   **Output:** A set of $K$ Gaussian splats, each defined by position, amplitude, and covariance, stored in a format suitable for streaming (e.g., Zarr archives).
+
+**Data Structures**
+Each Gaussian splat $k$ is parameterized by:
+*   $\mu_k \in \mathbb{R}^D$: The center position.
+*   $a_k \in \mathbb{R}_{\ge 0}$: The amplitude (intensity).
+*   $L_k \in \mathbb{R}^{D \times D}$: The lower-triangular Cholesky factor of the covariance matrix $\Sigma_k$, such that $\Sigma_k = L_k L_k^\top$. This parameterization stores $D(D+1)/2$ elements per splat (6 for 3D) and guarantees positive-definite covariance by construction [S1, unofficial].
+
+**Preprocessing**
+1.  **Registration and Fusion:** Multi-view images (e.g., light-sheet) are registered and fused. Deconvolution (e.g., 10 iterations against the point-spread function) may be applied to produce a single fused volume per timepoint [S1, unofficial].
+2.  **Normalization:** Source volumes (stored as 16-bit integers or float32) are normalized to $[0, 1]$ using an affine map of the intensity range [S1, unofficial].
+3.  **Clipping:** Outlier voxels are clipped based on dataset-specific percentiles to stabilize optimization [S1, unofficial]:
+    *   Plain min-max (no clipping): Kidney, Cells3D, Blastocyst, Tribolium, Mouse heart.
+    *   1st–99.5th percentiles: OpenCell.
+    *   1st–99.999th percentiles: C. elegans.
+    *   0th–99.999th percentiles: Sparse Fly brain.
+    *   0th–99.9th percentiles: Zebrafish, Drosophila.
+    *   Neuromast channels: Background floors (e.g., 105.99 and 103.89 grey levels) are subtracted, then clipped to 0th–99.9th percentiles [S1, unofficial].
+4.  **Background Floor Handling:** For quality benchmarks, no floor suppression is applied. For compression benchmarks, automatic floor suppression subtracts a constant background pedestal before fitting [S1, unofficial].
+
+**Initialization**
+Initial positions are seeded automatically from the volume using gradient-weighted samples of the volume’s edges, complemented by a coarse uniform grid [S1, unofficial].
+
+**Optimization**
+The parameters are optimized using the Adam optimizer with an L1 loss function and regularization on splat amplitudes and extents [S1, unofficial]. The model prediction at voxel $x$ is:
+$$ \hat{V}(x) = \sum_{k=1}^{K} a_k \exp\left(-\frac{1}{2} \|L_k^{-1} (x - \mu_k)\|^2\right) $$
+where $a_k$ is the amplitude (enforced non-negative via softplus activation) and $L_k$ is the Cholesky factor [S1, unofficial].
+
+To maintain a constant optimizer tensor shape, a fixed-pool strategy is used: periodically, the least informative splats are relocated to regions of high reconstruction residual, acting as an analogue to pruning-and-seeding [S1, unofficial].
+
+**Stopping Criterion (Blind-Spot Cross-Validation)**
+The number of splats $K$ is determined by blind-spot cross-validation to balance PSNR and overfitting [S1, unofficial]:
+1.  Mask 5% of voxels.
+2.  Replace masked voxels with donut-median neighbourhood values.
+3.  Score reconstruction on the held-out voxels.
+4.  Stop fitting at the held-out PSNR peak. If the peak is interior or cull-limited, use the peak or the point where cull holds count constant [S1, unofficial].
+
+**Viewer Evaluation**
+The viewer uses a truncated Gaussian to ensure compact support:
+$$ \hat{V}_{viewer}(x) = \sum_{k=1}^{K} a_k \max\left(0, \exp\left(-\frac{1}{2} \|L_k^{-1} (x - \mu_k)\|^2\right) - \frac{c_T}{1 - c_T}\right) $$
+where $c_T = \exp(-T/2)$ at $T = 2.75$ standard deviations [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def preprocess_volume(volume, dataset_name):
+    """
+    Preprocess a microscopy volume for Gaussian Splatting fitting.
+    volume: np.ndarray, raw intensity data.
+    dataset_name: str, identifier for clipping strategy.
+    """
+    # Step 1: Normalization to [0, 1]
+    # Apply dataset-specific outlier clipping
+    if dataset_name in ['Kidney', 'Cells3D', 'Blastocyst', 'Tribolium', 'Mouse heart']:
+        # Plain min-max
+        v_min, v_max = np.min(volume), np.max(volume)
+    elif dataset_name == 'OpenCell':
+        v_min = np.percentile(volume, 1)
+        v_max = np.percentile(volume, 99.5)
+    elif dataset_name == 'C_elegans':
+        v_min = np.percentile(volume, 1)
+        v_max = np.percentile(volume, 99.999)
+    elif dataset_name == 'Fly_brain_sparse':
+        v_min = np.percentile(volume, 0)
+        v_max = np.percentile(volume, 99.999)
+    elif dataset_name in ['Zebrafish', 'Drosophila']:
+        v_min = np.percentile(volume, 0)
+        v_max = np.percentile(volume, 99.9)
+    elif dataset_name == 'Neuromast':
+        # Subtract background floors
+        floor1, floor2 = 105.99, 103.89
+        # Assuming multi-channel or specific channel handling; 
+        # here we assume a generic floor subtraction for the example
+        volume = np.maximum(volume - floor1, 0) 
+        v_min = np.percentile(volume, 0)
+        v_max = np.percentile(volume, 99.9)
+    else:
+        v_min, v_max = np.min(volume), np.max(volume)
+        
+    # Clip outliers
+    volume_clipped = np.clip(volume, v_min, v_max)
+    
+    # Affine map to [0, 1]
+    if v_max == v_min:
+        return np.zeros_like(volume_clipped)
+    normalized = (volume_clipped - v_min) / (v_max - v_min)
+    return normalized
+
+def initialize_splats(volume, num_splats):
+    """
+    Initialize Gaussian splats from volume gradients and uniform grid.
+    """
+    # Compute gradients to find edges
+    gradients = np.gradient(volume)
+    gradient_magnitude = np.sqrt(np.sum([g**2 for g in gradients], axis=0))
+    
+    # Sample positions weighted by gradient magnitude
+    # This is a simplified representation of "gradient-weighted samples"
+    flat_grad = gradient_magnitude.flatten()
+    flat_grad /= flat_grad.sum()
+    
+    # Sample indices
+    indices = np.random.choice(flat_grad.size, size=num_splats // 2, p=flat_grad)
+    positions_gradient = np.unravel_index(indices, volume.shape)
+    positions_gradient = np.stack(positions_gradient, axis=1)
+    
+    # Coarse uniform grid for remaining splats
+    # Assuming 3D for simplicity, extend to D dimensions as needed
+    dim = volume.ndim
+    grid_size = int(np.ceil(num_splats** (1.0/dim)))
+    grid_coords = np.meshgrid(*[np.linspace(0, s-1, grid_size) for s in volume.shape], indexing='ij')
+    grid_coords = np.stack([g.flatten() for g in grid_coords], axis=1)
+    
+    # Combine and trim to num_splats
+    all_positions = np.vstack([positions_gradient, grid_coords])
+    if all_positions.shape[0] > num_splats:
+        all_positions = all_positions[:num_splats]
+    else:
+        # Pad with zeros if not enough gradient samples
+        padding = np.zeros((num_splats - all_positions.shape[0], dim))
+        all_positions = np.vstack([all_positions, padding])
+        
+    return all_positions
+
+def fit_gaussian_splats(volume, num_splats, max_iterations=20000, patience=500):
+    """
+    Fit Gaussian splats to a volume using blind-spot cross-validation.
+    """
+    # Initialize parameters
+    # mu: positions (num_splats, D)
+    # a: amplitudes (num_splats,)
+    # L: Cholesky factors (num_splats, D, D)
+    
+    D = volume.ndim
+    mu = initialize_splats(volume, num_splats)
+    a = np.ones(num_splats) # Initial amplitudes
+    L = np.zeros((num_splats, D, D))
+    for k in range(num_splats):
+        # Initialize with small isotropic covariance
+        # Sigma = sigma_min^2 * I
+        # L = sigma_min * I
+        sigma_min = 1.0 / np.sqrt(12) # Standard deviation of uniform voxel
+        L[k] = sigma_min * np.eye(D)
+        
+    # Optimizer state (Adam)
+    m_a = np.zeros_like(a)
+    v_a = np.zeros_like(a)
+    m_mu = np.zeros_like(mu)
+    v_mu = np.zeros_like(mu)
+    m_L = np.zeros_like(L)
+    v_L = np.zeros_like(L)
+    
+    beta1, beta2, eps = 0.9, 0.999, 1e-8
+    lr = 1e-3 # Learning rate
+    
+    best_held_out_psnr = -np.inf
+    best_params = (mu.copy(), a.copy(), L.copy())
+    patience_counter = 0
+    
+    # Masking ratio for cross-validation
+    mask_ratio = 0.05
+    
+    for iteration in range(max_iterations):
+        # 1. Create masked volume for cross-validation
+        # Select random voxels to mask
+        flat_vol = volume.flatten()
+        num_masked = int(len(flat_vol) * mask_ratio)
+        mask_indices = np.random.choice(len(flat_vol), num_masked, replace=False)
+        
+        # Replace with donut-median (simplified as median of neighbors)
+        # In practice, this requires a sliding window median
+        masked_vol = flat_vol.copy()
+        # Placeholder for donut-median calculation
+        # masked_vol[mask_indices] = donut_median(volume, mask_indices)
+        # For implementation, assume a function `compute_donut_median` exists
+        # masked_vol[mask_indices] = compute_donut_median(volume, mask_indices)
+        
+        # 2. Forward pass: Compute reconstruction
+        # Reconstruct volume from current splats
+        # This is computationally expensive; usually done on GPU
+        # Here we outline the logic
+        reconstructed = np.zeros_like(volume)
+        for k in range(num_splats):
+            # Compute Gaussian value at each voxel
+            # dist_sq = || L_k^{-1} (x - mu_k) ||^2
+            # This loop is inefficient; in practice, use vectorized GPU kernels
+            # For pseudocode clarity:
+            diff = volume - mu[k] # Broadcasting
+            # Solve L_k * y = diff for y
+            # y = np.linalg.solve(L[k], diff.T).T 
+            # dist_sq = np.sum(y**2, axis=1)
+            # val = a[k] * np.exp(-0.5 * dist_sq)
+            # reconstructed += val
+            pass # Placeholder for efficient GPU kernel call
+        
+        # 3. Compute Loss on held-out voxels
+        # loss = L1(reconstructed[mask_indices], volume[mask_indices])
+        # Plus regularization on a and L
+        
+        # 4. Backpropagation and Update
+        # Compute gradients d_loss/d_mu, d_loss/d_a, d_loss/d_L
+        # Update Adam states
+        # mu -= lr * m_mu
+        # a -= lr * m_a
+        # L -= lr * m_L
+        
+        # 5. Relocate least informative splats
+        # Identify splats with low contribution to loss
+        # Move their mu to regions of high reconstruction residual
+        pass
+        
+        # 6. Check stopping criterion
+        # Compute PSNR on held-out voxels
+        # held_out_psnr = compute_psnr(reconstructed[mask_indices], volume[mask_indices])
+        
+        # if held_out_psnr > best_held_out_psnr:
+        #     best_held_out_psnr = held_out_psnr
+        #     best_params = (mu.copy(), a.copy(), L.copy())
+        #     patience_counter = 0
+        # else:
+        #     patience_counter += 1
+            
+        # if patience_counter >= patience:
+        #     break
+            
+    return best_params
+
+def evaluate_viewer(mu, a, L, T=2.75):
+    """
+    Evaluate the truncated Gaussian model for viewer rendering.
+    """
+    c_T = np.exp(-T / 2)
+    threshold = c_T / (1 - c_T)
+    
+    # For each voxel x in the view frustum:
+    # value = sum_k a_k * max(0, exp(-0.5 * ||L_k^{-1} (x - mu_k)||^2) - threshold)
+    pass
+```
+
+## Operating characteristics
+*   **Time Complexity:** Fitting is the expensive side, taking minutes per volume on a single GPU (e.g., median 2.4 minutes at 32K budget on NVIDIA RTX 3070) [S1, unofficial]. Convergence is rapid; training PSNR is within 0.5 dB of the final value at 2,000 iterations for most volumes [S1, unofficial].
+*   **Memory Complexity:** The representation is compact. Compression ratios range from 6× to 340× (median 99.3×) across 17 volumes [S1, unofficial].
+*   **Performance:** On an RTX 3070 at 720p HDR, Gaussian splats maintain 60 FPS (16.7 ms budget) through $10^6$ elements [S1, unofficial].
+*   **Strengths:** Direct GPU rasterization without voxel grids; efficient streaming for web browsers; automatic determination of model complexity via cross-validation; high compression ratios [S1, unofficial].
+*   **Limitations:** Structures thinner than the local Gaussian scale (e.g., individual microtubules) blur; the representation is for visualization, not quantitative measurement; blind-spot cross-validation assumes independent noise, which may not hold for fused/deconvolved volumes [S1, unofficial].
+*   **When to use:** Interactive web visualization of large microscopy datasets; sharing data via static file hosting; scenarios where bandwidth and client-side memory are constrained [S1, unofficial].
+*   **When not to use:** Quantitative analysis, segmentation, or tracking tasks that require the original voxel data; datasets with highly correlated noise where blind-spot cross-validation may fail to identify the optimal splat count [S1, unofficial].
+
+## Background
+Gaussian Splatting for Microscopy is part of the Luxar framework, an open-source Python system for scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. It adapts the 3D Gaussian Splatting technique, originally developed for novel view synthesis, to $n$-dimensional microscopy volumes [S1, unofficial]. The method was validated on 17 volumes from 12 datasets spanning spinning-disk, confocal, light-sheet, and structured-illumination modalities [S1, unofficial]. It complements desktop tools like napari and Fiji, and voxel-pyramid web viewers like Neuroglancer, by representing images as fitted geometry [S1, unofficial].
+
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

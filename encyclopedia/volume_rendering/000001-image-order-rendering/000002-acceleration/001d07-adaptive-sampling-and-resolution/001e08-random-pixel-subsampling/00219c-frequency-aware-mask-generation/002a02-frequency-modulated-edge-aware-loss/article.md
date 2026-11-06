@@ -3,28 +3,28 @@
 Also called: DoG-based frequency loss
 
 ## Overview
-Frequency-Modulated Edge-Aware Loss is a training objective term that uses a Difference of Gaussians (DoG) filter to create an edge-aware mask, focusing optimization on specific frequency bands to tune the shape parameter $\beta$ and improve high-frequency detail reconstruction in Generalized Exponential Splatting (GES) [S1]. It differs from standard pixel-wise losses by spatially weighting the error based on the spectral content of the ground truth image, allowing the model to prioritize low-frequency structures early in training and high-frequency details later [S1].
+Frequency-Modulated Edge-Aware Loss is a training objective term that uses a Difference of Gaussians (DoG) filter to create an edge-aware mask, focusing optimization on specific frequency bands to tune the shape parameter $\beta$ and improve high-frequency detail reconstruction in Generalized Exponential Splatting (GES) [S1]. It builds on [Frequency-aware Mask Generation](2537-frequency-aware-mask-generation.md) by spatially weighting the error based on the spectral content of the ground truth image, allowing the model to prioritize low-frequency structures early in training and high-frequency details later [S1].
 
 ## How it works
-The method computes a frequency-specific binary mask from the ground truth image and applies an L1 loss weighted by this mask. The mask generation relies on a band-pass filter defined by the target normalized frequency $\omega$.
+The method computes a frequency-specific binary mask from the ground truth image and applies an L1 loss weighted by this mask [S1]. The mask generation relies on a band-pass filter defined by the target normalized frequency $\omega$ [S1].
 
 **Inputs and Outputs:**
 *   **Inputs:**
-    *   $I_{\text{gt}}$: Ground truth image (normalized to $[0, 1]$ or similar range suitable for Gaussian filtering).
-    *   $I$: Reconstructed/rendered image from the current model iteration.
+    *   $I_{\text{gt}}$: Ground truth image [S1].
+    *   $I$: Reconstructed/rendered image from the current model iteration [S1].
     *   $\omega$: Target normalized frequency, a scalar in $[0, 1]$ (0% for low frequencies, 100% for high frequencies) [S1].
     *   $\epsilon_\omega$: Threshold for mask generation, typically 0.5 [S1].
 *   **Outputs:**
-    *   $\mathcal{L}_\omega$: The scalar loss value for the current iteration.
+    *   $\mathcal{L}_\omega$: The scalar loss value for the current iteration [S1].
 
 **Data Structures:**
-*   Images $I$ and $I_{\text{gt}}$ are treated as 2D arrays of floating-point values.
-*   Mask $M_\omega$ is a binary 2D array of the same spatial dimensions as the images.
+*   Images $I$ and $I_{\text{gt}}$ are treated as 2D arrays of floating-point values [G].
+*   Mask $M_\omega$ is a binary 2D array of the same spatial dimensions as the images [G].
 
 **Parameters:**
 *   $\sigma_2 = 0.1 + 10\omega$: Base standard deviation for the Gaussian filters [S1].
 *   $\sigma_1 = 2\sigma_2$: Standard deviation for the wider Gaussian in the DoG filter [S1].
-*   $\epsilon_\omega = 0.5$: Default threshold value [S1]. Range: $0 \le \epsilon_\omega \le 1$.
+*   $\epsilon_\omega = 0.5$: Default threshold value [S1]. Range: $0 \le \epsilon_\omega \le 1$ [S1].
 
 **Step-by-Step Method:**
 
@@ -46,7 +46,7 @@ The method computes a frequency-specific binary mask from the ground truth image
     [S1]
 
 4.  **Normalize DoG Response:**
-    Normalize the DoG response to the range $[0, 1]$ (or $[-1, 1]$ mapped to $[0, 1]$) to prepare for thresholding. Let $\text{norm}(\cdot)$ denote this normalization operation [S1].
+    Normalize the DoG response to a range compatible with the threshold $\epsilon_\omega \in [0, 1]$ to prepare for thresholding [S1]. Let $\text{norm}(\cdot)$ denote this normalization operation [G].
     $$ R = \text{norm}(\text{DoG}_\omega(I_{\text{gt}})) $$
     [S1]
 
@@ -74,19 +74,19 @@ The method computes a frequency-specific binary mask from the ground truth image
 import numpy as np
 
 def gaussian_blur(image, sigma):
-    """
-    Applies a Gaussian blur to a 2D image.
-    Note: Implementation details of Gaussian kernel generation and convolution
-    are assumed to be available via standard image processing libraries.
-    """
-    # Placeholder for actual Gaussian convolution implementation
-    # Returns blurred image of same shape
-    pass
+    """Applies a separable 2D Gaussian blur to a 2D image [G]."""
+    kernel_size = int(6 * sigma + 1)
+    if kernel_size % 2 == 0:
+        kernel_size += 1
+    x = np.arange(kernel_size)
+    kernel_1d = np.exp(-0.5 * (x - kernel_size // 2)**2 / sigma**2)
+    kernel_1d /= kernel_1d.sum()
+    # Apply separable convolution
+    temp = np.dot(image, kernel_1d)
+    return np.dot(kernel_1d, temp)
 
 def normalize_to_0_1(image):
-    """
-    Normalizes image values to [0, 1].
-    """
+    """Normalizes image values to [0, 1] using min-max scaling [G]."""
     min_val = np.min(image)
     max_val = np.max(image)
     if max_val == min_val:
@@ -118,9 +118,7 @@ def frequency_modulated_edge_aware_loss(I, I_gt, omega, epsilon=0.5):
     dog_response = I_smooth_1 - I_smooth_2
     
     # Step 4: Normalize DoG Response
-    # Note: The source [S1] mentions normalization but does not specify the exact
-    # normalization function (e.g., min-max, L2 norm scaling). 
-    # Standard practice for DoG masks often uses min-max to [0,1].
+    # Min-max normalization to [0, 1] [G]
     R = normalize_to_0_1(dog_response)
     
     # Step 5: Generate Binary Mask
@@ -143,14 +141,14 @@ def frequency_modulated_edge_aware_loss(I, I_gt, omega, epsilon=0.5):
 **Edge Cases and Pitfalls:**
 *   **Frequency Band Inversion:** For $\omega > 50\%$, the mask must be inverted ($1 - M_\omega$) to maintain correct focus on high-frequency details and ensure all image parts are covered across the training schedule [S1].
 *   **Filter Stability:** The choice of $\sigma_2 = 0.1 + 10\omega$ is critical for filter stability and reasonable mask generation [S1].
-*   **Normalization:** The exact normalization method for the DoG response is not explicitly detailed in the source beyond "normalized" [S1]. Implementers must ensure the normalization maps the DoG response to a range compatible with the threshold $\epsilon_\omega \in [0, 1]$.
+*   **Normalization:** The exact normalization method for the DoG response is not explicitly detailed in the source beyond "normalized" [S1]. Implementers must ensure the normalization maps the DoG response to a range compatible with the threshold $\epsilon_\omega \in [0, 1]$ [G].
 
 ## Operating characteristics
-*   **Time Complexity:** The dominant cost is the application of two Gaussian blurs on the ground truth image per iteration. Gaussian blur complexity is $O(N \cdot K^2)$ where $N$ is the number of pixels and $K$ is the kernel size (determined by $\sigma$). This is computed per iteration but only on the static ground truth image, so it can be precomputed or cached if $\omega$ changes slowly.
-*   **Memory Complexity:** Requires storage for the ground truth image, two blurred versions, the DoG response, and the binary mask. This is $O(N)$ additional memory per image resolution.
-*   **Performance:** The method provides an "almost free 9% reduction in memory" for the overall GES system by improving the efficiency of the shape parameter $\beta$ tuning [S1].
-*   **Strengths:** Focuses optimization on relevant frequency bands, improving high-frequency detail reconstruction without requiring explicit high-frequency loss terms that might be noisy.
-*   **Limitations:** Relies on the ground truth image, which may not be available in all unsupervised or self-supervised settings. The mask generation is sensitive to the normalization and threshold choices.
+*   **Time Complexity:** Not given in the sources [S1].
+*   **Memory Complexity:** Not given in the sources [S1].
+*   **Measured Performance:** The method provides an almost free 9% reduction in memory for the overall GES system by improving the efficiency of the shape parameter $\beta$ tuning [S1].
+*   **Strengths and Limitations:** Not given in the sources [S1].
+*   **When to Use:** Not given in the sources [S1].
 
 ## Background
 The Frequency-Modulated Edge-Aware Loss was introduced in the context of Generalized Exponential Splatting (GES) for efficient radiance field rendering [S1]. It is designed to optimize the shape parameter $\beta$ of GES components by selectively pruning them based on shape attributes, eliminating the need for variable density mechanisms [S1]. The method uses a linear schedule for $\omega$ during optimization, starting with low frequencies and progressing to high frequencies [S1].

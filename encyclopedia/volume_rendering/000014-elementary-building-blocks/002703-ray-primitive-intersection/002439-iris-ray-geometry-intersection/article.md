@@ -1,0 +1,135 @@
+# IRIS Ray-Geometry Intersection
+
+Also called: OptiX-based Gaussian Intersection, Proxy Geometry Intersection
+
+## Overview
+IRIS Ray-Geometry Intersection is an intersection-aware ray-based sampling method for implicit editable scenes that determines samples as the maximum response points of Gaussians intersected by each ray [S1]. It solves the problem of efficiently sampling 3D Gaussians in large-scale or bounded scenes by leveraging hardware-accelerated ray-triangle intersection tests via proxy geometry [S1]. Unlike direct Gaussian intersection methods, it maps each Gaussian to a convex polyhedral proxy (an affine-transformed icosahedron) to utilize RT cores, setting it apart from siblings like [Ray-Splat Intersection](6816-ray-splat-intersection.md) which may use different primitive approximations or software-based tests [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Inputs**: Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (typically normalized); a set of 3D Gaussians defined by mean $\boldsymbol{\mu}$ and covariance $\Sigma$; a target sample quota (hyperparameter, e.g., 128 or 256 intersections per ray); a Mahalanobis distance threshold $\lambda$ for proxy sizing.
+*   **Outputs**: A list of samples, where each sample consists of an intersection parameter $t_{\text{sample}}$ and the index of the intersected Gaussian.
+
+**Data Structures**
+1.  **Canonical Proxy Geometry**: A single regular icosahedron defined by its vertex positions and triangle indices. This geometry is stored once to minimize memory footprint [S1].
+2.  **Instance Buffer**: A buffer storing affine transformation matrices. Each entry maps the canonical icosahedron to the specific Gaussian's confidence ellipsoid [S1].
+3.  **Hit Buffer**: A fixed-size buffer storing 2-tuples of $(t_{\text{sample}}, \text{Gaussian Index})$. The size is typically 16 entries during the accumulation phase [S1].
+4.  **Output Buffer**: The final collection of samples for the ray, sized according to the target quota (e.g., 128 for bounded scenes, 256 for unbounded) [S1].
+
+**Parameters**
+*   **Mahalanobis Threshold ($\lambda$)**: Defines the size of the proxy geometry.
+    *   Bounded scenes (e.g., NeRF Synthetic): $\lambda = 6.25$, covering ~90% of Gaussian probability mass [S1].
+    *   Unbounded scenes (e.g., Mip-NeRF 360): $\lambda = 11.3449$, covering ~99% of Gaussian probability mass [S1].
+*   **Hit Buffer Capacity**: 16 entries [S1].
+*   **Target Quota**: 128 intersections per ray (IPR) for bounded scenes; 256 IPR for unbounded scenes [S1].
+
+**Steps**
+1.  **Proxy Generation**: For each Gaussian, compute the affine transformation matrix that maps the canonical regular icosahedron to a proxy geometry bounding the Gaussian's confidence ellipsoid. The size of this ellipsoid is determined by the squared Mahalanobis distance threshold $\lambda$ corresponding to the $\chi^2$ distribution with 3 degrees of freedom [S1]. Store these matrices in the instance buffer [S1].
+2.  **Ray Generation**: For each ray, initiate the intersection test using a hardware-accelerated ray-tracing API (e.g., OptiX) [S1].
+3.  **Any-Hit Shader Execution**:
+    *   The hardware performs ray-triangle intersection tests against the affine-transformed icosahedrons [S1].
+    *   Upon a hit, compute the intersection parameter $t_{\text{sample}}$ in the object coordinate frame of the underlying Gaussian using the formula:
+        $$t_{\text{sample}} = -\frac{\langle O_{\text{obj}}, V_{\text{obj}} \rangle}{\langle V_{\text{obj}}, V_{\text{obj}} \rangle}$$
+        where $O_{\text{obj}}$ is the ray origin and $V_{\text{obj}}$ is the ray direction transformed into the object coordinate frame of the Gaussian [S1].
+    *   Accumulate the pair $(t_{\text{sample}}, \text{Gaussian Index})$ into the 16-entry hit buffer. Sort the buffer to maintain order or manage capacity [S1].
+4.  **Buffer Management**:
+    *   If the hit buffer is full (16 entries), transfer the accumulated samples to the output buffer in the Ray Generation Shader [S1].
+    *   Clear or reset the hit buffer for subsequent intersections [S1].
+5.  **Iteration**: Repeat steps 3-4 until the total number of gathered samples in the output buffer reaches the predefined target sample quota (hyperparameter) [S1].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_proxy_matrix(gaussian_mean, gaussian_cov, lambda_threshold):
+    """
+    Computes the affine transformation matrix mapping a canonical icosahedron
+    to the Gaussian's confidence ellipsoid defined by lambda_threshold.
+    """
+    # Compute the square root of the covariance matrix (Cholesky or SVD)
+    # Scale the basis vectors by sqrt(lambda_threshold) to match the chi-squared quantile
+    # Construct the 4x4 affine matrix from the scaled basis and translation (mean)
+    # Note: Exact linear algebra implementation details for the specific icosahedron mapping
+    # are assumed to be handled by the CUDA kernel populating the instance buffer [S1].
+    pass
+
+def ray_geometry_intersection(ray_origin, ray_direction, gaussians, lambda_threshold, target_quota):
+    """
+    Simulates the IRIS ray-geometry intersection logic.
+    """
+    # 1. Pre-compute proxy matrices for all Gaussians
+    instance_matrices = []
+    for g in gaussians:
+        mat = compute_proxy_matrix(g.mean, g.cov, lambda_threshold)
+        instance_matrices.append(mat)
+    
+    # 2. Initialize buffers
+    hit_buffer = [] # Max size 16
+    output_samples = [] # Max size target_quota
+    
+    # 3. Iterate until quota is reached
+    # In a real GPU implementation, this is handled by the RT core traversal and shaders.
+    # Here we simulate the logic flow.
+    
+    while len(output_samples) < target_quota:
+        # Simulate hardware ray-triangle intersection against all proxy icosahedrons
+        # This part is hardware-accelerated [S1]
+        hits = hardware_ray_trace(ray_origin, ray_direction, instance_matrices)
+        
+        for hit in hits:
+            # hit contains: triangle_index, instance_index, hit_point
+            
+            # Transform ray to object space of the hit Gaussian
+            # O_obj = inverse(instance_matrices[hit.instance_index]) * ray_origin
+            # V_obj = inverse(instance_matrices[hit.instance_index]) * ray_direction
+            # Note: Direction transformation requires handling of affine vs projective transforms.
+            # Assuming standard affine transformation for the proxy mapping [S1].
+            
+            O_obj = transform_inverse(ray_origin, instance_matrices[hit.instance_index])
+            V_obj = transform_direction_inverse(ray_direction, instance_matrices[hit.instance_index])
+            
+            # Compute t_sample using the specific formula [S1]
+            numerator = -dot(O_obj, V_obj)
+            denominator = dot(V_obj, V_obj)
+            
+            if denominator == 0:
+                continue # Degenerate direction
+                
+            t_sample = numerator / denominator
+            
+            # Add to hit buffer
+            hit_buffer.append((t_sample, hit.instance_index))
+            
+            # Sort hit buffer if necessary to manage capacity or priority
+            # The source mentions sorting to reduce optixTrace calls [S1]
+            hit_buffer.sort(key=lambda x: x[0])
+            
+            # If buffer full, flush to output
+            if len(hit_buffer) >= 16:
+                output_samples.extend(hit_buffer)
+                hit_buffer.clear()
+                
+            # Check if we have enough samples
+            if len(output_samples) >= target_quota:
+                break
+        
+        # If no hits were found in this traversal pass, break to avoid infinite loop
+        if not hits:
+            break
+            
+    return output_samples[:target_quota]
+```
+
+## Operating characteristics
+*   **Time Complexity**: Dominated by the hardware-accelerated ray-triangle intersection tests. The number of `optixTrace` calls is reduced by aggregating samples in the Any-hit shader [S1].
+*   **Memory Complexity**: Low memory footprint due to geometry instancing (storing only one canonical icosahedron) [S1]. The instance buffer size scales linearly with the number of Gaussians.
+*   **Performance**: On an NVIDIA RTX 5090 GPU, increasing the intersection quota from 16 to 128 IPR improves Avg. PSNR from 29.87 to 32.65 on the NeRF Synthetic dataset [S1].
+*   **Strengths**: Leverages dedicated RT cores for high-performance intersection testing; reduces software overhead by offloading logic to shaders; conservatively bounds Gaussians to ensure coverage [S1].
+*   **Limitations**: The proxy geometry (icosahedron) is a conservative approximation; the Mahalanobis threshold $\lambda$ must be tuned for scene type (bounded vs. unbounded) [S1].
+*   **When to use**: Suitable for implicit editable scenes requiring efficient sampling of 3D Gaussians, particularly in large-scale or bounded environments where hardware acceleration is beneficial [S1].
+
+## Background
+The method was introduced in the paper "IRIS: Intersection-aware Ray-based Implicit Editable Scenes" (2026) [S1]. It builds upon the 3DGRT OptiX API-based approach [S1] and is implemented within the Nerfstudio ecosystem using PyTorch [S1]. The approach addresses the bottleneck of ray-geometry intersection tests in OptiX pipelines by employing proxy geometry and shader-based aggregation [S1].
+
+## Sources
+[S1] IRIS: Intersection-aware Ray-based Implicit Editable Scenes, https://doi.org/10.48550/arXiv.2603.15368, fetched 2026-10-29

@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,3 @@
+ # Multi-Texture Performance Enhancement
+-
+-
+ ## Overview
+ Multi-Texture Performance Enhancement is a technique to reduce the number of triangles by mapping textures of multiple slice images onto a single polygon using $n$ independent multi-texture units [S1]. It achieves this by combining $n$ texture images by multi-texturing hardware in one clock cycle and blending the resulting fragment into the frame buffer, theoretically reducing rendering time and frame buffer reads for back-to-front alpha blending by a factor of $1/n$ [S1]. It builds on [Multi-Texture Interpolation](2200-multi-texture-interpolation.md) and differs from [Multi-Texture Pipeline Rendering](4945-multi-texture-pipeline-rendering.md) by focusing on simultaneous combination on a single geometry rather than pipelined stages [G].
+@@ -21,14 +19,14 @@
+ 1.  **Polygon Scaling:** Increase the width $w$ and height $h$ of the slice polygon by $2 \cdot d \cdot (n-1)$ to create a bounding area that covers the maximum possible perspective displacement of the $n$ slices [S1].
+ 2.  **Texture Coordinate Calculation:** For each texture unit $k$ (representing slice $i+k$), calculate the texture coordinates for the four vertices of the polygon [S1].
+-    *   Identify the corner $\tilde{b}$ of the slice image that corresponds to the polygon vertex.
++    *   Identify the corner $\tilde{b}$ of the slice image that corresponds to the polygon vertex [S1].
+     *   Calculate the view vector $\tilde{v} = (v_x, v_y, v_z)^T = \tilde{c} - \tilde{b}$, where $\tilde{c}$ is the camera position [S1].
+-    *   Calculate the projected width $w'$ and height $h'$ of the slice at the polygon's depth.
++    *   Calculate the projected width $w'$ and height $h'$ of the slice at the polygon's depth [S1].
+     *   Compute the displacement in $s$ and $t$ directions:
+         $$ \Delta s = d \frac{v_x}{v_z} $$
+-        $$ \Delta t = d \frac{v_y}{v_z} $$
++        $$ \Delta t = d \frac{v_y}{v_z} $$ [S1].
+     *   The texture coordinates $(s, t)$ at the vertex are given by:
+         $$ s = \frac{w'}{w} \left( 1 + \frac{h'}{d} + \frac{h' v_y}{d v_z} \right) $$
+         $$ t = \frac{h'}{h} \left( 1 + \frac{w'}{d} + \frac{w' v_x}{d v_z} \right) $$ [S1].
+-3.  **Hardware Combination:** Configure the multi-texture hardware combiners to combine the $n$ textures in a single clock cycle. The specific combiner setup depends on the desired blending behavior (see [Multi-Texture Correct Blending](4767-multi-texture-correct-blending.md) for the correct alpha blending setup) [S1].
++3.  **Hardware Combination:** Configure the multi-texture hardware combiners to combine the $n$ textures in a single clock cycle [S1].
+ 4.  **Rendering:** Draw the single polygon. The hardware samples the $n$ textures, combines them, and blends the resulting fragment into the frame buffer [S1].
+ 5.  **Edge Handling:** Ensure that texture coordinates outside the range $[0, 1]$ result in zero texel values. Since hardware-specific extensions like `SGIS_texture_edge_clamp` may not be supported (e.g., on GeForce 256), use standard OpenGL clamping and initialize the texture borders with zero values [S1].
+@@ -36,5 +34,5 @@
+ **Pseudocode:**
+ ```python
+-def render_multi_texture_slices(camera_pos, slice_spacing, base_width, base_height, num_slices, textures):
++def render_multi_texture_slices(camera_pos, d, w, h, n, textures):
+     """
+     Renders n slices onto a single polygon using multi-texturing.
+@@ -42,16 +40,16 @@
+     Args:
+         camera_pos: (cx, cy, cz) tuple, camera position in world space.
+-        slice_spacing: float, distance between slices (d).
+-        base_width: float, original width of a slice polygon (w).
+-        base_height: float, original height of a slice polygon (h).
+-        num_slices: int, number of slices to combine (n).
++        d: float, slice spacing.
++        w: float, original width of a slice polygon.
++        h: float, original height of a slice polygon.
++        n: int, number of slices to combine.
+         textures: list of n texture objects, each containing slice data and border.
+     
+     Returns:
+-        None (renders directly to frame buffer).
++        list of lists of (s, t) tuples, one list per texture unit.
+     """
+     # Step 1: Scale polygon dimensions
+-    polygon_width = base_width + 2 * slice_spacing * (num_slices - 1)
+-    polygon_height = base_height + 2 * slice_spacing * (num_slices - 1)
++    polygon_width = w + 2 * d * (n - 1)
++    polygon_height = h + 2 * d * (n - 1)
+     
+     # Define the four vertices of the scaled polygon in world space
+@@ -66,10 +64,9 @@
+     texture_coords = [] 
+     
+-    for k in range(num_slices):
++    for k in range(n):
+         coords_for_texture = []
+         for vertex in vertices_world:
+-            # Approximate slice corner b based on vertex and slice index k
+-            # In practice, b is the corner of the k-th slice corresponding to the vertex.
+-            z_slice = k * slice_spacing
++            # Identify the corner b of the slice image corresponding to the vertex
++            z_slice = k * d
+             b = (vertex[0], vertex[1], z_slice)
+             
+@@ -78,23 +75,20 @@
+             vx, vy, vz = v
+             
+-            # Projected width and height (simplified as base dimensions for this example)
+-            w_prime = base_width
+-            h_prime = base_height
++            # Calculate projected width w' and height h' of the slice at the polygon's depth
++            # (Computed via perspective projection; base dimensions used here as reference)
++            w_prime = w
++            h_prime = h
+             
+             # Compute texture coordinates
+-            s = (w_prime / base_width) * (1 + h_prime / slice_spacing + h_prime * vy / (slice_spacing * vz))
+-            t = (h_prime / base_height) * (1 + w_prime / slice_spacing + w_prime * vx / (slice_spacing * vz))
++            s = (w_prime / w) * (1 + h_prime / d + h_prime * vy / (d * vz))
++            t = (h_prime / h) * (1 + w_prime / d + w_prime * vx / (d * vz))
+             
+             coords_for_texture.append((s, t))
+         texture_coords.append(coords_for_texture)
+     
+-    # Step 3: Configure multi-texture hardware
+-    # Bind textures to n independent multi-texture units.
+-    # Configure combiners to combine textures in one clock cycle.
+-    # See [Multi-Texture Correct Blending](4767-multi-texture-correct-blending.md) for alpha blending setup.
+-    
+-    # Step 4: Render the polygon
+-    # Set texture coordinates for each unit and draw the polygon.
+-    # Ensure texture borders are zero and use standard OpenGL clamping.
++    # Step 3: Configure multi-texture hardware combiners to combine n textures in one clock cycle
++    # Step 4: Render the single polygon with the calculated texture coordinates
++    # Step 5: Ensure texture borders are zero-initialized and use standard OpenGL clamping for coordinates outside [0, 1]
++    return texture_coords
+ ```
+ 
+@@ -105,7 +99,7 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Texture Coordinates > 1:** Perspective displacement can cause texture coordinates to exceed $[0, 1]$. Texel values outside this range must be zero [S1].
+-*   **Clamping:** Hardware-specific extensions like `SGIS_texture_edge_clamp` may not be supported (e.g., on GeForce 256). Use standard OpenGL clamping and initialize texture borders with zero values [S1].
+-*   **Perspective Displacement:** If not compensated, slices will appear shifted. The polygon width and height must be increased by $2 \cdot d \cdot (n-1)$ [S1].
++*   **Texture Coordinates > 1:** Perspective displacement can cause texture coordinates to exceed $[0, 1]$ [S1].
++*   **Clamping:** Hardware-specific extensions like `SGIS_texture_edge_clamp` may not be supported (e.g., on GeForce 256) [S1].
++*   **Perspective Displacement:** If not compensated, slices will appear shifted [S1].
+ 
+ ## Subtopics
+@@ -118,6 +112,6 @@
+ *   **Memory Complexity:** Reduces frame buffer reads for back-to-front alpha blending by a factor of $1/n$ [S1].
+ *   **Performance:** The actual speedup depends on the hardware's ability to combine $n$ textures in one clock cycle. Not given in the sources.
+-*   **Strengths:** Significant reduction in draw calls and frame buffer accesses.
+-*   **Limitations:** Requires $n$ independent multi-texture units. Perspective displacement compensation adds complexity. Clamping limitations on some hardware.
++*   **Strengths:** Significant reduction in draw calls and frame buffer accesses [S1].
++*   **Limitations:** Requires $n$ independent multi-texture units. Compensating for perspective displacement requires polygon scaling and coordinate adaptation [S1]. Clamping limitations exist on some hardware [S1].
+ *   **When to Use:** When $n$ multi-texture units are available and performance is critical [G].
+ *   **When Not to Use:** When correct alpha blending is required and the hardware does not support the necessary combiner setup (use [Multi-Texture Correct Blending](4767-multi-texture-correct-blending.md) instead) [G].

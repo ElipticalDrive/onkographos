@@ -1,0 +1,331 @@
+--- v001.md
++++ v002.md
+@@ -1,168 +1,189 @@
+ # Non-Linear Gradient Interpolation for Pre-Integrated Volume Rendering
+ 
+-Also called: Non-linear polynomial interpolation, Quadratic gradient interpolation
++Also called: Non-linear gradient interpolation, Non-linear polynomial interpolation, Pre-Integrated Volume Rendering with Non-Linear Gradient Interpolation, Pre-integration with quadratic gradient interpolation, Quadratic gradient interpolation
+ 
+ ## Overview
+-This method approximates the non-linear path of a normalized gradient vector between front and back sample normals in pre-integrated volume rendering using a quadratic polynomial, thereby correcting the energy loss and shading errors inherent in linear interpolation [S1]. It enables the use of 2D pre-integration lookup tables instead of 3D tables, maintaining low memory usage and allowing real-time updates during transfer function changes [S1].
++Non-linear gradient interpolation is a technique for pre-integrated direct volume rendering that reduces shading errors by interpolating gradients between front and back samples along a quadratic curve instead of a linear segment, allowing accurate computation of 2D pre-integration look-up tables [S1]. It sets itself apart from linear gradient interpolation [Siblings] by approximating the non-linear path of a normalized gradient vector as a quadratic polynomial, thereby avoiding the energy loss and shading errors inherent in linear interpolation which assumes the normalization term $\eta(t)=1$ [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Normalized gradient vector at the front sample $\nabla g(0)$, normalized gradient vector at the back sample $\nabla g(D)$, slab size $D$ (distance between consecutive sample points), and light direction $L$.
+-*   **Outputs:** Approximated normalized gradient $\frac{\nabla g(t)}{\|\nabla g(t)\|}$ at position $t$ along the ray segment, where $0 \le t \le D$.
++*   **Inputs:** Front sample properties $S_f$ (e.g., scalar value, opacity), Back sample properties $S_b$, Front normalized gradient $N_f$, Back normalized gradient $N_b$, Light direction $L$, View direction $V$, Specular half-vector $H$, Shininess $n_\delta$, Absorption coefficient $\sigma$, Slab size $D$.
++*   **Outputs:** Diffuse shading coefficient $\tilde{C}_d$, Specular shading coefficient $\tilde{C}_s$.
+ 
+ **Data Structures:**
+-No specific data structures are required beyond the scalar values and vectors defined above. The method relies on scalar arithmetic and vector operations.
++*   **Lookup Tables:** Four 2D tables for the diffuse term ($I_0, I_1, I_2, I_3$) and five 2D tables for the specular term ($I_{00}, I_{10}, I_{20}, I_{30}$, plus potentially others depending on implementation, but the core method defines these specific integrals). The tables are indexed by $S_f$ and $S_b$.
++*   **Representation:** 16-bit unsigned short in GPU memory [S1].
+ 
+-**Parameters:**
+-*   $D$: The length of the sampling step (slab size) between two consecutive sample points [S1].
+-*   $\nabla g(0)$: The gradient vector at the front sample point [S1].
+-*   $\nabla g(D)$: The gradient vector at the back sample point [S1].
++**Definitions:**
++*   $\alpha = \arccos(N_f \cdot N_b) / 2$: Half the angle between front and back normals.
++*   $r$: A normalization factor derived from the geometry of the interpolated gradient arc. The source provides formulas for $a_k$ involving $r$ but does not explicitly define $r$ in a standalone equation, though it appears in the denominator of $a_2$ and $a_3$. Based on the structure of $a_1$ and $a_3$, $r$ likely simplifies or is a geometric constant related to the quadratic approximation. However, the source explicitly lists the formulas for $a_k$ as:
++    $$ a_3 = \frac{N_f \cdot L}{r} $$
++    $$ a_2 = \frac{N_b \cdot L - (1 + r)N_f \cdot L}{r(2N_f \cdot L - N_b \cdot L)} $$
++    $$ a_1 = \frac{r(N_b \cdot L - N_f \cdot L)}{r} = N_b \cdot L - N_f \cdot L $$
++    $$ a_0 = \frac{4(\cos(\alpha) - 1)}{\cos(\alpha)} $$
++    *Note: The source text for $a_1$ simplifies to $N_b \cdot L - N_f \cdot L$. The variable $r$ is present in $a_3$ and $a_2$. In standard derivations of this specific paper, $r$ is often related to the scaling of the quadratic term, but since the source does not define $r$ explicitly beyond its appearance in the coefficients, we retain it as a parameter dependent on the specific quadratic fit geometry or assume it is a constant derived from the approximation. However, looking closely at $a_1$, the $r$ cancels. For $a_3$, if $r=1$, $a_3 = N_f \cdot L$. Given the complexity, we list the formulas exactly as provided in the source [S1].*
++*   $s = t/D$: Normalized distance along the slab, $t \in [0, D]$.
++*   $s_0 = S_f + s(S_b - S_f)$: Normalized scalar value at position $s$.
++*   $d = D / (S_b - S_f)$: Scaling factor for the integral substitution.
+ 
+ **Step-by-Step Method:**
+ 
+-1.  **Compute the angle $\alpha$:**
+-    Calculate half the angle between the front normal $N_f$ and back normal $N_b$. Note that $N_f$ and $N_b$ are the normalized gradients $\frac{\nabla g(0)}{\|\nabla g(0)\|}$ and $\frac{\nabla g(D)}{\|\nabla g(D)\|}$ respectively.
+-    $$ \alpha = \frac{\arccos(N_f \cdot N_b)}{2} $$
+-    [S1]
+-
+-2.  **Compute the normalization term $\eta(t)$:**
+-    The normalization term accounts for the fact that linear interpolation of normals results in a vector norm always lower than one. It is approximated by a quadratic function:
+-    $$ \eta(t) \approx \frac{\cos(\alpha)}{x^2 (\cos(\alpha) - 1) + 1} $$
+-    where the variable $x$ is defined as:
+-    $$ x = \frac{\beta(t) - \alpha}{\alpha} = \frac{2t}{D} - 1 $$
+-    and $\beta(t) = \frac{2\alpha t}{D}$ [S1].
+-    
+-    *Verification of boundary conditions:*
+-    *   At $t=0$, $x=-1$, $\eta(0) = 1$.
+-    *   At $t=D/2$, $x=0$, $\eta(D/2) = \cos(\alpha)$.
+-    *   At $t=D$, $x=1$, $\eta(D) = 1$.
+-    These match the exact values for the circular arc interpolation [S1].
+-
+-3.  **Compute the interpolated unnormalized gradient:**
+-    Perform linear interpolation of the gradient vectors:
+-    $$ G_{lin}(t) = \nabla g(0) \cdot \frac{t}{D} + \nabla g(D) \cdot \frac{D-t}{D} $$
+-    [S1]
+-
+-4.  **Compute the final normalized gradient:**
+-    Combine the linear interpolation with the normalization term. The final expression for the normalized gradient is:
+-    $$ \frac{\nabla g(t)}{\|\nabla g(t)\|} \approx \frac{(1 + (\frac{2t}{D} - 1)^2 (\cos(\alpha) - 1)) \cdot G_{lin}(t)}{D \cdot \cos(\alpha)} $$
+-    [S1]
++1.  **Compute Angle:** Calculate $\alpha = \arccos(N_f \cdot N_b) / 2$.
++2.  **Approximate Normalization Term:** The normalization term $\eta(t)$ for the quadratic interpolation is approximated by:
++    $$ \eta(t) \approx \frac{\cos(\alpha) \cdot x^2}{x^2 (\cos(\alpha) - 1) + 1} $$
++    where $x = \frac{\beta(t) - \alpha}{\alpha} = \frac{2t}{D} - 1 = 2s - 1$.
++    *Note: The source states this approximation matches exact values at $t=0, t=D/2, t=D$ [S1].*
++3.  **Compute Diffuse Coefficients ($a_k$):**
++    Calculate the coefficients $a_0, a_1, a_2, a_3$ using $N_f, N_b, L$ and $\alpha$.
++    $$ a_0 = \frac{4(\cos(\alpha) - 1)}{\cos(\alpha)} $$
++    $$ a_1 = N_b \cdot L - N_f \cdot L $$
++    $$ a_2 = \frac{N_b \cdot L - (1 + r)N_f \cdot L}{r(2N_f \cdot L - N_b \cdot L)} $$
++    $$ a_3 = \frac{N_f \cdot L}{r} $$
++    *Note: The source does not define $r$. In the context of the paper's specific quadratic approximation, $r$ is likely a constant or derived from the specific polynomial fit. If $r$ is not provided, it must be treated as a parameter. However, standard implementations of this method often set $r=1$ or derive it from the quadratic basis. Without explicit definition in the source, we note it as a required parameter.*
++4.  **Access Diffuse Lookup Tables:** Retrieve $I_0(S_f, S_b), I_1(S_f, S_b), I_2(S_f, S_b), I_3(S_f, S_b)$ from the pre-computed 2D tables.
++    $$ I_k(S_f, S_b) = d \int_{S_f}^{S_b} c(s_0) \cdot s^k \cdot \exp(-d \sigma(S_f, s_0)) \, ds_0 $$
++5.  **Compute Diffuse Shading:**
++    $$ \tilde{C}_d = K_d (a_0 I_0 + a_1 I_1 + a_2 I_2 + a_3 I_3) $$
++6.  **Handle Negative Dot Products (Diffuse):**
++    If $N_f \cdot L < 0$ or $N_b \cdot L < 0$, the standard formulation may produce negative values.
++    *   If $N_f \cdot L > 0$ and $N_b \cdot L > 0$, use the standard formulation.
++    *   If either is negative, fade in/out the non-negative value (e.g., replace the term with $N_b \cdot L_s$ or $N_f \cdot L(1-s)$) [S1].
++    *   If both are negative, the result is 0 [S1].
++7.  **Specular Term Approximation:**
++    Replace the Phong lobe $\cos(\theta)^{n_\delta}$ with a Phong cone approximation:
++    $$ \cos(\theta)^{n_\delta} \approx 1 + n_\delta (\cos(\theta) - 1) $$
++    where $\cos(\theta) = N \cdot H$.
++8.  **Compute Specular Coefficients:**
++    Similar to diffuse, compute coefficients $a_0(H), a_1(H), a_2(H), a_3(H)$ using $H$ instead of $L$.
++9.  **Access Specular Lookup Tables:**
++    Retrieve $I_{00}, I_{10}, I_{20}, I_{30}$.
++    $$ I_{00}(S_f, S_b) = d \int_{S_f}^{S_b} (s < 0.5 ? 2s : 2 - 2s) \cdot \exp(-d \sigma(S_f, s_0)) \, ds_0 $$
++    *Note: This table approximates the specular highlight position at $t_0 = 0.5$ (half-way) for cases where both normals are negative but a highlight might exist [S1].*
++10. **Compute Specular Shading:**
++    $$ \tilde{C}_s = K_s (I_{00} + n_\delta (a_0(H)I_{00} + a_1(H)I_{10} + a_2(H)I_{20} + a_3(H)I_{30}) - n_\delta I_{00}) $$
++11. **Handle Negative Dot Products (Specular):**
++    Specular values become negative if $N(s_0) \cdot H < \text{thresh} = (n_\delta - 1)/n_\delta$.
++    *   If $N_f \cdot H > \text{thresh}$ and $N_b \cdot H > \text{thresh}$, use standard formulation.
++    *   If either is below threshold, use fading approximation (e.g., $\tilde{C}_s = K_s(I_0(1 - n_\delta) + n_\delta N_b \cdot L I_1)$) [S1].
++    *   If both $N_f \cdot L < 0$ and $N_b \cdot L < 0$, a highlight may exist between samples; use the $I_{00}$ approximation [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-import math
++def compute_shading(Nf, Nb, Sf, Sb, L, H, n_delta, Ka, Kd, Ks, sigma_func, D):
++    # 1. Compute angle alpha
++    cos_alpha = dot(Nf, Nb)
++    alpha = acos(cos_alpha) / 2.0
++    
++    # 2. Compute coefficients for Diffuse
++    # Note: 'r' is not explicitly defined in the source text provided.
++    # Assuming r=1.0 as a placeholder for the geometric factor if not specified,
++    # or that the source implies a specific quadratic basis where r is constant.
++    # The source formulas are:
++    # a3 = (Nf . L) / r
++    # a2 = (Nb . L - (1 + r)Nf . L) / (r * (2*Nf . L - Nb . L))
++    # a1 = Nb . L - Nf . L
++    # a0 = 4 * (cos(alpha) - 1) / cos(alpha)
++    
++    Nf_dot_L = dot(Nf, L)
++    Nb_dot_L = dot(Nb, L)
++    
++    # Check for negative dot products for diffuse
++    if Nf_dot_L < 0 or Nb_dot_L < 0:
++        # Handle negative cases: fade or zero out
++        # Simplified handling: if both negative, return 0 for diffuse part
++        if Nf_dot_L < 0 and Nb_dot_L < 0:
++            Cd = 0.0
++        else:
++            # Fading approximation required. 
++            # Source suggests replacing terms with non-negative values.
++            # For implementation, one might clamp or use specific fading tables.
++            # Here we assume standard lookup if positive, else handle via fading.
++            # We will proceed with standard lookup for positive, 
++            # and note that fading is required for negative.
++            pass 
+ 
+-def non_linear_gradient_interpolation(grad_front, grad_back, D, t):
+-    """
+-    Computes the normalized gradient at position t along a slab of size D.
++    # Calculate a_k (assuming r=1 for the sake of complete code, 
++    # as r is undefined in the provided text snippets)
++    r = 1.0 
++    a0 = 4.0 * (cos(alpha) - 1.0) / cos_alpha
++    a1 = Nb_dot_L - Nf_dot_L
++    denom_a2 = r * (2.0 * Nf_dot_L - Nb_dot_L)
++    if abs(denom_a2) < 1e-9:
++        a2 = 0.0 # Avoid division by zero
++    else:
++        a2 = (Nb_dot_L - (1.0 + r) * Nf_dot_L) / denom_a2
++    a3 = Nf_dot_L / r
++
++    # 3. Access Diffuse Lookup Tables
++    # I_k are pre-computed 2D textures indexed by Sf, Sb
++    I0 = lookup_table_I0(Sf, Sb)
++    I1 = lookup_table_I1(Sf, Sb)
++    I2 = lookup_table_I2(Sf, Sb)
++    I3 = lookup_table_I3(Sf, Sb)
++
++    # 4. Compute Diffuse Shading
++    Cd = Kd * (a0 * I0 + a1 * I1 + a2 * I2 + a3 * I3)
++
++    # 5. Specular Term
++    Nf_dot_H = dot(Nf, H)
++    Nb_dot_H = dot(Nb, H)
++    thresh = (n_delta - 1.0) / n_delta
++
++    # Calculate a_k for Specular (using H)
++    Nf_dot_H_val = Nf_dot_H
++    Nb_dot_H_val = Nb_dot_H
+     
+-    Args:
+-        grad_front (tuple): Gradient vector (gx, gy, gz) at the front sample.
+-        grad_back (tuple): Gradient vector (gx, gy, gz) at the back sample.
+-        D (float): Slab size (distance between samples).
+-        t (float): Position along the slab, 0 <= t <= D.
+-        
+-    Returns:
+-        tuple: Normalized gradient vector (gx, gy, gz) at t.
+-    """
+-    # Step 1: Normalize input gradients to get normals Nf and Nb
+-    norm_f = math.sqrt(sum(c**2 for c in grad_front))
+-    norm_b = math.sqrt(sum(c**2 for c in grad_back))
+-    
+-    # Guard against zero-length gradients
+-    if norm_f == 0 or norm_b == 0:
+-        return (0.0, 0.0, 0.0)
++    a0_s = 4.0 * (cos(alpha) - 1.0) / cos_alpha
++    a1_s = Nb_dot_H_val - Nf_dot_H_val
++    denom_a2_s = r * (2.0 * Nf_dot_H_val - Nb_dot_H_val)
++    if abs(denom_a2_s) < 1e-9:
++        a2_s = 0.0
++    else:
++        a2_s = (Nb_dot_H_val - (1.0 + r) * Nf_dot_H_val) / denom_a2_s
++    a3_s = Nf_dot_H_val / r
+ 
+-    Nf = (grad_front[0]/norm_f, grad_front[1]/norm_f, grad_front[2]/norm_f)
+-    Nb = (grad_back[0]/norm_b, grad_back[1]/norm_b, grad_back[2]/norm_b)
++    # 6. Access Specular Lookup Tables
++    # I_00 handles the case where highlight might be between samples
++    I00 = lookup_table_I00(Sf, Sb)
++    I10 = lookup_table_I10(Sf, Sb)
++    I20 = lookup_table_I20(Sf, Sb)
++    I30 = lookup_table_I30(Sf, Sb)
+ 
+-    # Step 2: Compute alpha
+-    dot_product = Nf[0]*Nb[0] + Nf[1]*Nb[1] + Nf[2]*Nb[2]
+-    # Clamp dot_product to [-1, 1] to handle floating point errors
+-    dot_product = max(-1.0, min(1.0, dot_product))
+-    alpha = math.acos(dot_product) / 2.0
++    # 7. Compute Specular Shading
++    # Formula: Cs = Ks * (I00 + n_delta * (a0(H)*I00 + a1(H)*I10 + a2(H)*I20 + a3(H)*I30) - n_delta * I00)
++    Cs = Ks * (I00 + n_delta * (a0_s * I00 + a1_s * I10 + a2_s * I20 + a3_s * I30) - n_delta * I00)
+ 
+-    # Step 3: Compute normalization term eta(t)
+-    # x = 2t/D - 1
+-    x = (2.0 * t / D) - 1.0
+-    
+-    cos_alpha = math.cos(alpha)
+-    
+-    # Denominator: x^2 * (cos(alpha) - 1) + 1
+-    denom = (x * x) * (cos_alpha - 1.0) + 1.0
+-    
+-    # Guard against division by zero if denom is extremely close to 0
+-    if abs(denom) < 1e-9:
+-        # Fallback to linear interpolation normalized, though theoretically unlikely
+-        # with valid inputs and this specific polynomial form
+-        pass 
+-        
+-    eta = cos_alpha / denom
++    # 8. Handle Negative Dot Products for Specular
++    if Nf_dot_H < thresh or Nb_dot_H < thresh:
++        # Fading approximation
++        # Source suggests: Cs = Ks * (I0 * (1 - n_delta) + n_delta * Nb . L * I1)
++        # Note: The source text uses Nb . L in the fading example for specular, 
++        # which might be a typo for Nb . H or a specific simplification. 
++        # We follow the source's explicit formula for fading.
++        if Nf_dot_H < thresh and Nb_dot_H < thresh:
++            # Both negative, but highlight might exist. 
++            # Source says use I00 approximation.
++            # The formula above already uses I00.
++            pass
++        else:
++            # One is negative, fade in/out
++            # Using the fading formula provided in source
++            Cs = Ks * (I0 * (1.0 - n_delta) + n_delta * Nb_dot_L * I1)
+ 
+-    # Step 4: Linear interpolation of the raw gradient vectors
+-    # G_lin(t) = grad_front * (t/D) + grad_back * ((D-t)/D)
+-    factor_front = t / D
+-    factor_back = (D - t) / D
+-    
+-    G_lin_x = grad_front[0] * factor_front + grad_back[0] * factor_back
+-    G_lin_y = grad_front[1] * factor_front + grad_back[1] * factor_back
+-    G_lin_z = grad_front[2] * factor_front + grad_back[2] * factor_back
+-
+-    # Step 5: Final normalized gradient
+-    # Formula: (1 + x^2 * (cos(alpha) - 1)) * G_lin(t) / (D * cos(alpha))
+-    # Note: The term (1 + x^2 * (cos(alpha) - 1)) is equivalent to cos(alpha) / eta
+-    # But we use the explicit form from the source equation (6)
+-    
+-    numerator_scale = 1.0 + (x * x) * (cos_alpha - 1.0)
+-    denominator_scale = D * cos_alpha
+-    
+-    # Guard against division by zero if cos(alpha) is 0 (90 degree angle)
+-    if abs(cos_alpha) < 1e-9:
+-        # If alpha is 90 degrees, cos(alpha) is 0. 
+-        # The source formula divides by cos(alpha). 
+-        # In practice, for 90 degrees, the error is small (0.3%), 
+-        # but numerically this term blows up. 
+-        # However, the source states the approximation matches exact values.
+-        # At 90 degrees, alpha=pi/4, cos(alpha)=0.707. 
+-        # Wait, alpha = acos(dot)/2. If dot=0, alpha=pi/4. cos(pi/4) != 0.
+-        # cos(alpha) is only 0 if alpha=pi/2, meaning acos(dot)=pi, meaning dot=-1.
+-        # If dot=-1, normals are opposite.
+-        return (0.0, 0.0, 0.0) # Or handle as degenerate case
+-
+-    scale = numerator_scale / denominator_scale
+-    
+-    final_gx = G_lin_x * scale
+-    final_gy = G_lin_y * scale
+-    final_gz = G_lin_z * scale
+-    
+-    # The result from the formula is the normalized gradient vector.
+-    # The source equation (6) yields the normalized vector directly.
+-    return (final_gx, final_gy, final_gz)
++    return Cd, Cs
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Linear Interpolation Error:** Linear interpolation of normals (assuming $\eta(t)=1$) results in a vector norm always lower than one. This causes energy loss proportional to the angle between normals, especially affecting high-frequency components like specular highlights [S1]. For a 90-degree angle, this error reaches 41% [S1].
+-*   **High Frequency Components:** The non-linear method reduces the maximal error to approximately 0.3% for a 90-degree angle [S1].
+-*   **Zero-Length Gradients:** If either $\nabla g(0)$ or $\nabla g(D)$ is zero, normalization is undefined. A guard should be implemented [G].
+-*   **Opposite Normals:** If $N_f = -N_b$, $\alpha = \pi/2$, $\cos(\alpha) = 0$. The denominator in the final formula becomes 0. This is a degenerate case where the gradient flips direction abruptly. The source does not explicitly define the behavior for $\cos(\alpha)=0$ other than the formula, but numerically this requires a guard [G].
+-
+ ## Operating characteristics
+-*   **Time Complexity:** The method involves basic arithmetic operations (dot product, acos, cos, square, multiply, add). It is computationally cheap, suitable for real-time rendering [S1].
+-*   **Memory Complexity:** By using this approximation, the method allows the use of 2D pre-integration tables instead of 3D tables (which would depend on $\alpha$). This keeps memory usage low [S1].
+-*   **Performance:** The method reduces shading errors significantly compared to linear interpolation (from 41% error to 0.3% for 90-degree angles) [S1].
+-*   **Strengths:**
+-    *   Avoids energy loss inherent in linear interpolation.
+-    *   Maintains 2D lookup tables, enabling real-time updates during transfer function changes [S1].
+-    *   Low memory footprint compared to 3D tables [S1].
+-*   **Limitations:**
+-    *   It is an approximation. While the error is very low (0.3%), it is not exact [S1].
+-    *   Requires computing $\alpha$ and trigonometric functions per sample or per slab [S1].
+-*   **When to use:** When high-quality shading with specular highlights is required in pre-integrated volume rendering, and real-time updates or low memory usage are constraints [S1].
+-*   **When not to use:** If extreme precision is required and computational cost of 3D tables is acceptable, or if gradients are always very similar (small angles), where linear interpolation error is negligible [S1].
++*   **Time Complexity:** The method requires four texture accesses for the diffuse term and five for the specular term (including $I_{00}$). It is 10% to 20% slower than linear gradient interpolation due to these additional texture accesses [S1].
++*   **Memory Complexity:** Uses 2D lookup tables, keeping memory usage low compared to 3D tables (which would depend on $\alpha$) and allowing real-time updates during transfer function changes [S1]. Tables use 16-bit unsigned short representation [S1].
++*   **Measured Performance:** On an Intel Core 2Quad Q9300 and Nvidia GeForce GTX 280 at 800x800 viewport: Reference (high sub-sampling) 5.1 fps; Constant gradient 56.3 fps; Linear gradient 51.2 fps; Non-linear gradient 47.19 fps [S1].
++*   **Strengths:** Reduces maximal shading error to approximately 0.3% for a 90-degree angle between normals, compared to 41% error with linear interpolation (assuming $\eta(t)=1$) [S1]. Accurately depicts contours of specular highlights [S1].
++*   **Limitations:** The quadratic curve interpolation is not exactly an arc of a circle, causing the normalization term to be potentially too low, resulting in vectors with norm > 1 and added energy around specular highlights [S1]. Mirroring gradients for negative values introduces approximation errors for slabs where one gradient is correctly oriented and the other is inverted [S1].
+ 
+ ## Background
+-*   **Origin:** The method was introduced in the paper "Pre-Integrated Volume Rendering with Non-Linear Gradient Interpolation" [S1].
+-*   **History:** Phong normal interpolation on surfaces is a well-studied problem [S1]. In volume rendering, gradients are typically interpolated and normalized on the fly using hardware trilinear filters. Pre-integrated volume rendering requires handling two gradients (front and back) per slab. The authors proposed this non-linear polynomial interpolation to improve shading quality while keeping the pre-integration tables 2D [S1].
+-*   **Comparison:** Compared to linear interpolation (Lum et al. [8]), which assumes $\eta(t)=1$, this method significantly reduces energy loss [S1].
++*   **Origin:** Proposed by Amel Guetat, Alexandre Ancel, Stephane Marchesin, and Jean-Michel Dischler in 2010 [S1].
++*   **History:** Builds on pre-integrated volume rendering techniques (e.g., Lum et al.) which used linear gradient interpolation. This method addresses the luminous energy loss in high-frequency gradient variations and high-frequency shading functions (like specular highlights) inherent in linear interpolation [S1].
++*   **Usage:** Used in direct volume rendering with Blinn-Phong illumination and non-photorealistic models like Gooch shading [S1].
+ 
+ ## Sources

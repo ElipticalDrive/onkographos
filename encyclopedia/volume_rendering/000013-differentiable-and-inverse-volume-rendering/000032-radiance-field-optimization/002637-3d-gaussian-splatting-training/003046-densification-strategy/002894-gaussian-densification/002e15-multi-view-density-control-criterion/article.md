@@ -1,0 +1,72 @@
+# Multi-View Density Control Criterion
+
+Also called: Absolute-gradient split proxy, FastGS criterion
+
+## Overview
+The Multi-View Density Control Criterion is a heuristic used during the densification phase of 3D Gaussian Splatting training to control the number and distribution of Gaussian primitives [S1, S2, unofficial]. It addresses the problem of over-densification by evaluating gradient magnitudes across multiple views, ensuring that new Gaussians are only spawned in regions with significant multi-view reconstruction error [S1, unofficial]. It sets itself apart from standard positional-gradient rules by requiring consistency across views, which yields higher rendering quality with significantly fewer primitives [S1, unofficial].
+
+## How it works
+The criterion operates during the teacher training phase to manage primitive count [S1, unofficial]. It evaluates the absolute gradient of the loss with respect to the Gaussian parameters, aggregated across multiple camera views, to decide whether to split or clone a Gaussian [S1, S2, unofficial].
+
+**Inputs:**
+- Gradient magnitude $|\nabla|$ for a specific Gaussian from each view in the current batch.
+- A threshold parameter $T$ (DSTH) [S2, unofficial].
+
+**Data Structures:**
+- The gradient magnitude is typically a scalar value derived from the L1 or L2 loss gradient with respect to the Gaussian's position or scale [S2, unofficial].
+
+**Steps:**
+1. For each Gaussian $g$ in the scene, compute the absolute gradient magnitude $|\nabla_i|$ for each view $i$ in the current training batch.
+2. Aggregate these gradients. The standard positional-gradient rule often uses a single view or a simple average [S1, unofficial]. The Multi-View criterion requires the gradient to be significant across multiple views to trigger densification [S1, unofficial].
+3. Compare the aggregated gradient against the threshold $T$ [S2, unofficial].
+4. If the gradient exceeds $T$, initiate split or clone operations [S1, S2, unofficial].
+
+**Parameters:**
+- **DSTH (Threshold):** The hyperparameter controlling densification constraints. Default value is 30 [S2, unofficial]. For the playroom scene in the DeepBlending dataset, it is set to 60; other scenes use 30 [S2, unofficial]. Increasing DSTH imposes stricter constraints, reducing the number of Gaussians (NGS), rendering quality, and training time [S2, unofficial].
+
+**Edge Cases:**
+- If the gradient is below the threshold in all views, no densification occurs, potentially leading to under-reconstruction in complex areas if the threshold is too high [S2, unofficial].
+- Precision issues may arise if gradient magnitudes are very small; however, the sources do not specify a minimum epsilon guard [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_view_density_control(gaussian, gradients_from_views, threshold):
+    """
+    gaussian: The Gaussian primitive being evaluated.
+    gradients_from_views: List of absolute gradient magnitudes for this Gaussian from each view in the batch.
+    threshold: The DSTH hyperparameter.
+    Returns: Boolean indicating if densification (split/clone) should occur.
+    """
+    # Aggregate gradients across views. 
+    # Note: The exact aggregation function (e.g., max, mean) is not explicitly defined in the sources.
+    # We assume a conservative approach where significant gradient in any view contributes,
+    # but the criterion implies multi-view consistency. 
+    # Based on [S1, unofficial], it contrasts with single-view positional gradients.
+    # A common implementation for "multi-view" criteria is to check if the gradient 
+    # exceeds the threshold in a sufficient number of views or if the max gradient exceeds it.
+    # Given the alias "Absolute-gradient split proxy", we use the max gradient magnitude.
+    
+    max_gradient = max(gradients_from_views)
+    
+    if max_gradient > threshold:
+        return True
+    else:
+        return False
+```
+
+## Subtopics
+
+### DS Threshold (DSTH)
+A hyperparameter threshold that controls the densification constraints of Gaussians; increasing it imposes stricter constraints, reducing NGS, rendering quality, and training time [S2, unofficial]. Default value is 30. Set to 60 for the playroom scene in the DeepBlending dataset. Other scenes use 30 [S2, unofficial].
+
+## Operating characteristics
+The Multi-View Density Control Criterion yields 0.67 dB and 0.028 LPIPS improvement on average, while using 28% fewer primitives at the same time [S1, unofficial]. In the garden scene, the standard positional-gradient rule produces 240,075 primitives with a PSNR of 26.83 and LPIPS of 0.1303, whereas the multi-view criterion produces 148,658 primitives with a PSNR of 27.06 and LPIPS of 0.1247 [S1, unofficial]. It is applied during the teacher training phase [S1, unofficial].
+
+## Background
+The method is associated with the FastGS approach and is cited in the context of ultrafast spatial texture-atlas splatting [S1, S2, unofficial]. It was developed to improve the efficiency of Gaussian Splatting training by reducing the number of primitives without sacrificing quality [S1, unofficial].
+
+## Sources
+[S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)
+[S2] Loss-Guided Density Control and Efficient Backward Optimisation for Compact Gaussian Splatting, https://doi.org/10.21203/rs.3.rs-10572680/v1, fetched 2026-10-26 (unofficial)

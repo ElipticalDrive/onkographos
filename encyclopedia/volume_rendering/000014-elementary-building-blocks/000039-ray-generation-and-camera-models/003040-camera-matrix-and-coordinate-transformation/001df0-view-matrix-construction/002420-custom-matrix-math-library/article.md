@@ -1,68 +1,64 @@
 # Custom Matrix Math Library
 Also called: Native JavaScript Matrix Operations
 ## Overview
-A custom implementation of 3D transformation matrices in JavaScript, providing native handling of translation, scaling, perspective projection, and look-at operations without external dependencies [S1, unofficial]. It distinguishes itself by offering explicit, unoptimized implementations for small fixed-size matrices, prioritizing clarity and correctness over performance, serving as the computational core for view matrix construction and ray generation logic [S1, unofficial].
+A custom implementation of 3D transformation matrices in JavaScript, providing native handling of translation, scaling, perspective projection, and look-at operations without external dependencies [S1, unofficial]. It serves as the computational core for view matrix construction and ray generation logic within the project [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- Input: Camera parameters (eye position, center, up vector), projection parameters (field of view, aspect ratio, near/far planes), and scaling factors.
-- Output: 4x4 transformation matrices stored in `Float32Array` (column-major order).
+- Input: Camera parameters (eye position, center, up vector), projection parameters (field of view, aspect ratio, near/far planes), and scaling factors [S1, unofficial][S2, unofficial].
+- Output: 4x4 transformation matrices stored in `Float32Array` (column-major order) [S1, unofficial].
 
 **Data Structures:**
-- Matrices are represented as `Float32Array` of length 16.
+- Matrices are represented as `Float32Array` of length 16 [S1, unofficial].
 - Index mapping (column-major):
   - Column 0: `out[0]`, `out[1]`, `out[2]`, `out[3]`
   - Column 1: `out[4]`, `out[5]`, `out[6]`, `out[7]`
   - Column 2: `out[8]`, `out[9]`, `out[10]`, `out[11]`
-  - Column 3: `out[12]`, `out[13]`, `out[14]`, `out[15]`
+  - Column 3: `out[12]`, `out[13]`, `out[14]`, `out[15]` [S1, unofficial].
 
 **Steps:**
 
 1. **Identity Initialization:**
    Create a 4x4 identity matrix:
-   $$ \text{out} = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] $$
+   $$ \text{out} = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] $$ [S1, unofficial].
 
 2. **Perspective Projection:**
    Given `fov` (vertical field of view in radians), `aspect`, `near`, `far`:
-   - Calculate $f = 1.0 / \tan(\text{fov} / 2)$.
+   - Calculate $f = 1.0 / \tan(\text{fov} / 2)$ [S1, unofficial].
    - Zero out the array.
    - Set elements:
      $$ \text{out}[0] = f / \text{aspect} $$
      $$ \text{out}[5] = f $$
      $$ \text{out}[10] = (\text{far} + \text{near}) / (\text{near} - \text{far}) $$
      $$ \text{out}[11] = -1 $$
-     $$ \text{out}[14] = (2 \times \text{far} \times \text{near}) / (\text{near} - \text{far}) $$
-   - Return `out` [S1, unofficial].
+     $$ \text{out}[14] = (2 \times \text{far} \times \text{near}) / (\text{near} - \text{far}) $$ [S1, unofficial].
 
 3. **LookAt Matrix:**
    Given `eye` (camera position), `center` (target), `up` (up vector):
    - Calculate forward vector $z$:
      $$ z_0 = \text{eye}[0] - \text{center}[0] $$
      $$ z_1 = \text{eye}[1] - \text{center}[1] $$
-     $$ z_2 = \text{eye}[2] - \text{center}[2] $$
-     Normalize $z$: $len = 1 / \sqrt{z_0^2 + z_1^2 + z_2^2}$, then $z_i = z_i \times len$.
+     $$ z_2 = \text{eye}[2] - \text{center}[2] $$ [S1, unofficial].
+   - Normalize $z$: $len = 1 / \sqrt{z_0^2 + z_1^2 + z_2^2}$, then $z_i = z_i \times len$ [S1, unofficial].
    - Calculate right vector $x$ (cross product of `up` and $z$):
      $$ x_0 = \text{up}[1] \times z_2 - \text{up}[2] \times z_1 $$
      $$ x_1 = \text{up}[2] \times z_0 - \text{up}[0] \times z_2 $$
-     $$ x_2 = \text{up}[0] \times z_1 - \text{up}[1] \times z_0 $$
-     Normalize $x$: $len = 1 / \sqrt{x_0^2 + x_1^2 + x_2^2}$, then $x_i = x_i \times len$.
+     $$ x_2 = \text{up}[0] \times z_1 - \text{up}[1] \times z_0 $$ [S1, unofficial].
+   - Normalize $x$: $len = 1 / \sqrt{x_0^2 + x_1^2 + x_2^2}$, then $x_i = x_i \times len$ [S1, unofficial].
    - Calculate up vector $y$ (cross product of $z$ and $x$):
      $$ y_0 = z_1 \times x_2 - z_2 \times x_1 $$
      $$ y_1 = z_2 \times x_0 - z_0 \times x_2 $$
-     $$ y_2 = z_0 \times x_1 - z_1 \times x_0 $$
+     $$ y_2 = z_0 \times x_1 - z_1 \times x_0 $$ [S1, unofficial].
    - Fill matrix columns with basis vectors and translation:
      $$ \text{out}[0]=x_0, \text{out}[1]=y_0, \text{out}[2]=z_0, \text{out}[3]=0 $$
      $$ \text{out}[4]=x_1, \text{out}[5]=y_1, \text{out}[6]=z_1, \text{out}[7]=0 $$
      $$ \text{out}[8]=x_2, \text{out}[9]=y_2, \text{out}[10]=z_2, \text{out}[11]=0 $$
-     $$ \text{out}[12]=-(x \cdot \text{eye}), \text{out}[13]=-(y \cdot \text{eye}), \text{out}[14]=-(z \cdot \text{eye}), \text{out}[15]=1 $$
-   - Return `out` [S1, unofficial].
+     $$ \text{out}[12]=-(x \cdot \text{eye}), \text{out}[13]=-(y \cdot \text{eye}), \text{out}[14]=-(z \cdot \text{eye}), \text{out}[15]=1 $$ [S1, unofficial].
 
 4. **Scaling Matrix Construction:**
    Given a 4x4 matrix `mat` and scaling factor `s` (scalar or 3D vector):
-   - Initialize `mat` to identity.
-   - If `s` is a number:
-     $$ \text{mat}[0][0] = s, \text{mat}[1][1] = s, \text{mat}[2][2] = s $$
-   - If `s` is a 3D vector `[sx, sy, sz]`:
-     $$ \text{mat}[0][0] = sx, \text{mat}[1][1] = sy, \text{mat}[2][2] = sz $$
+   - Initialize `mat` to identity [S2, unofficial].
+   - If `s` is a number: set `mat[0]=s`, `mat[5]=s`, `mat[10]=s` [S2, unofficial].
+   - If `s` is a 3D vector `[sx, sy, sz]`: set `mat[0]=sx`, `mat[5]=sy`, `mat[10]=sz` [S2, unofficial].
    - Else throw error [S2, unofficial].
 
 **Pseudocode:**
@@ -71,52 +67,50 @@ A custom implementation of 3D transformation matrices in JavaScript, providing n
 ```python
 import math
 
-def create_identity():
-    return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
-
 def perspective(out, fov, aspect, near, far):
     f = 1.0 / math.tan(fov / 2)
-    out = [0] * 16
+    out = [0.0] * 16
     out[0] = f / aspect
     out[5] = f
     out[10] = (far + near) / (near - far)
-    out[11] = -1
-    out[14] = (2 * far * near) / (near - far)
+    out[11] = -1.0
+    out[14] = (2.0 * far * near) / (near - far)
     return out
 
 def look_at(out, eye, center, up):
     z0 = eye[0] - center[0]
     z1 = eye[1] - center[1]
     z2 = eye[2] - center[2]
-    len_z = 1.0 / math.sqrt(z0**2 + z1**2 + z2**2)
+    len_z = 1.0 / math.hypot(z0, z1, z2)
     z0 *= len_z
     z1 *= len_z
     z2 *= len_z
-    
+
     x0 = up[1] * z2 - up[2] * z1
     x1 = up[2] * z0 - up[0] * z2
     x2 = up[0] * z1 - up[1] * z0
-    len_x = 1.0 / math.sqrt(x0**2 + x1**2 + x2**2)
+    len_x = 1.0 / math.hypot(x0, x1, x2)
     x0 *= len_x
     x1 *= len_x
     x2 *= len_x
-    
+
     y0 = z1 * x2 - z2 * x1
     y1 = z2 * x0 - z0 * x2
     y2 = z0 * x1 - z1 * x0
-    
-    out = [0] * 16
-    out[0] = x0; out[1] = y0; out[2] = z0; out[3] = 0
-    out[4] = x1; out[5] = y1; out[6] = z1; out[7] = 0
-    out[8] = x2; out[9] = y2; out[10] = z2; out[11] = 0
+
+    out = [0.0] * 16
+    out[0] = x0; out[1] = y0; out[2] = z0; out[3] = 0.0
+    out[4] = x1; out[5] = y1; out[6] = z1; out[7] = 0.0
+    out[8] = x2; out[9] = y2; out[10] = z2; out[11] = 0.0
     out[12] = -(x0 * eye[0] + x1 * eye[1] + x2 * eye[2])
     out[13] = -(y0 * eye[0] + y1 * eye[1] + y2 * eye[2])
     out[14] = -(z0 * eye[0] + z1 * eye[1] + z2 * eye[2])
-    out[15] = 1
+    out[15] = 1.0
     return out
 
 def scale(mat, s):
-    # mat is assumed to be initialized to identity or modified in place
+    # Initialize to identity as per source logic
+    mat = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
     if isinstance(s, (int, float)):
         mat[0] = s
         mat[5] = s
@@ -131,24 +125,22 @@ def scale(mat, s):
 ```
 
 **Edge Cases and Pitfalls:**
-- Division by zero in normalization if `eye` equals `center` or `up` is parallel to `z` [S1, unofficial].
-- Precision issues with very small or large `near`/`far` values in perspective projection [S1, unofficial].
-- Column-major vs row-major confusion: The implementation uses column-major storage, where the first four elements represent the first column [S1, unofficial].
+- Not given in the sources.
 
 ## Subtopics
 
 ### [Matrix Norms & Utilities](3938-matrix-norms-utilities.md)
-Provides fundamental linear algebra operations for 3x3 and 4x4 matrices, including norms, transposition, and multiplication variants. It serves as the computational core for [Custom Matrix Math Library](3216-custom-matrix-math-library.md), enabling the construction of view matrices and ray generation logic without external dependencies. It distinguishes itself by offering explicit, unoptimized implementations for small fixed-size matrices, prioritizing clarity and correctness over performance.
+Provides fundamental linear algebra operations for 3x3 and 4x4 matrices, including norms, transposition, and multiplication variants. It serves as the computational core for [Custom Matrix Math Library](3216-custom-matrix-math-library.md), enabling the construction of view matrices and ray generation logic without external dependencies [G]. It distinguishes itself by offering explicit, unoptimized implementations for small fixed-size matrices, prioritizing clarity and correctness over performance [G].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for all operations as matrix size is fixed at 4x4.
-- **Memory Complexity:** $O(1)$, using fixed-size `Float32Array` of 16 elements.
-- **Performance:** Unoptimized, prioritizing clarity. Suitable for educational purposes or low-frequency updates. Not suitable for high-performance real-time rendering of large scenes without further optimization [S1, unofficial].
-- **Strengths:** No external dependencies, clear implementation, easy to debug.
-- **Limitations:** Lack of optimization, potential numerical instability if not handled carefully.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Not given in the sources.
+- **Strengths:** No external dependencies, clear implementation, easy to debug [S1, unofficial].
+- **Limitations:** Lack of optimization [S1, unofficial].
 
 ## Background
-Originated from the [CubeWorld-Canyon](https://github.com/evjapont-hash/CubeWorld-Canyon) project, which utilizes WebGL 2 hardware instancing to render large numbers of cubes efficiently [S1, unofficial]. The custom math library was developed to handle 3D transformations natively in JavaScript, bypassing the need for external libraries like gl-matrix or math.js. This approach allows for greater control over the rendering pipeline and reduces overhead associated with external dependencies.
+Originated from the [CubeWorld-Canyon](https://github.com/evjapont-hash/CubeWorld-Canyon) project, which utilizes WebGL 2 hardware instancing to render large numbers of cubes efficiently [S1, unofficial]. The custom math library was developed to handle 3D transformations natively in JavaScript, bypassing the need for external libraries like gl-matrix or math.js [S1, unofficial].
 
 ## Sources
 [S1] evjapont-hash/CubeWorld-Canyon, https://github.com/evjapont-hash/CubeWorld-Canyon, fetched 2026-10-26 (unofficial)

@@ -3,22 +3,21 @@
 Also called: Implicit to Mesh Conversion, Marching Cubes from SDF
 
 ## Overview
-This method converts a scalar field defined on a 3D grid (typically a Signed Distance Field or SDF) into a polygonal mesh file (PLY) by sampling the implicit function and applying the Marching Cubes algorithm [S1, S2, unofficial]. It bridges the gap between continuous implicit representations and discrete surface outputs required for rendering or simulation. Unlike direct mesh generation techniques, this approach relies on the topological guarantees of Marching Cubes to extract the zero-level set, with specific attention to memory management during the evaluation phase [S2, unofficial].
+This method converts an implicit function (SDF) defined on a 3D grid into a polygonal mesh file (PLY) by sampling the scalar field and applying the Marching Cubes algorithm [S2, unofficial]. It extracts the zero-level set of the field to produce an explicit surface representation suitable for rendering or simulation [S2, unofficial]. The pipeline prioritizes memory management during the implicit function evaluation phase to support high-resolution grids [S2, unofficial].
 
 ## How it works
-The process involves three main phases: grid construction, implicit function evaluation, and mesh extraction.
+The conversion proceeds in three phases: grid construction, implicit function evaluation, and mesh extraction.
 
 ### Inputs and Outputs
 **Inputs:**
-- `implicit_fn`: A callable or object that computes the scalar value (distance) for any given 3D coordinate.
+- `implicit_fn`: A callable that computes the scalar distance value for any given 3D coordinate.
 - `grid_size`: Integer resolution of the grid per dimension (default: 128) [S2, unofficial].
 - `scale`: Spatial extent of the grid, defining the range `[-scale, scale]` for each axis (default: 0.5) [S2, unofficial].
 - `thresh`: The isovalue threshold for extraction (default: 0.0) [S1, S2, unofficial].
 - `chunk_size`: Number of points to evaluate per batch to limit memory usage (default: 262144) [S2, unofficial].
-- `voxel_grid_origin`: Optional offset to transform voxel coordinates to world space [S1, unofficial].
 
 **Outputs:**
-- A PLY file containing vertex positions and face indices.
+- A PLY file containing vertex positions and face indices [S1, unofficial].
 
 ### Data Structures
 1.  **Grid Tensor**: A 3D array of shape `(grid_size + 1, grid_size + 1, grid_size + 1)` storing the sampled SDF values [S1, S2, unofficial].
@@ -26,13 +25,13 @@ The process involves three main phases: grid construction, implicit function eva
 3.  **Face Array**: A NumPy structured array with field `vertex_indices` of type `int32` ('i4') and shape `(3,)` [S1, unofficial].
 
 ### Steps
-1.  **Grid Construction**: Generate linearly spaced coordinates for X, Y, and Z axes from `-scale` to `scale` with `grid_size + 1` points. Stack these to form a coordinate grid [S1, S2, unofficial].
+1.  **Grid Construction**: Generate linearly spaced coordinates for X, Y, and Z axes from `-scale` to `scale` with `grid_size + 1` points. Stack these to form a coordinate grid [S2, unofficial].
 2.  **SDF Evaluation**: Evaluate the `implicit_fn` at each grid point. To manage memory, process the grid points in chunks of size `chunk_size` [S2, unofficial].
 3.  **Reshaping**: Reshape the flat array of evaluated SDF values into a 3D volume of shape `(grid_size + 1, grid_size + 1, grid_size + 1)` [S2, unofficial].
-4.  **Marching Cubes**: Run the Marching Cubes algorithm (e.g., `skimage.measure.marching_cubes_lewiner`) on the 3D volume with `level=thresh` and `spacing` equal to the voxel size [S1, unofficial]. This yields vertices, faces, normals, and values.
+4.  **Marching Cubes**: Run the Marching Cubes algorithm (e.g., `skimage.measure.marching_cubes_lewiner`) on the 3D volume with `level=0.0` and `spacing` equal to the voxel size [S1, unofficial]. This yields vertices, faces, normals, and values.
 5.  **Coordinate Transformation**: Transform vertex coordinates from voxel grid space to world/camera space by adding `voxel_grid_origin` to each vertex coordinate [S1, unofficial]. Alternatively, normalize vertices to the range `[-scale, scale]` using the formula:
     $$ v_{world} = \left( \frac{v_{voxel}}{grid\_size} - 0.5 \right) \times 2 \times scale $$
-    [S2, unofficial]. Note: Sources differ on whether to use an explicit origin offset or this normalization formula; implementers should verify the coordinate system of their specific `implicit_fn` [S1, S2, unofficial].
+    [S2, unofficial].
 6.  **PLY Construction**: Create PLY elements for vertices and faces using a PLY library (e.g., `plyfile.PlyElement.describe`) and write the data to the output file [S1, unofficial].
 
 ### Pseudocode
@@ -44,11 +43,9 @@ import torch
 from skimage import measure
 import plyfile
 
-def sdf_to_ply(implicit_fn, grid_size=128, scale=0.5, thresh=0.0, chunk_size=262144, output_path="mesh.ply"):
+def sdf_to_ply(implicit_fn, grid_size=128, scale=0.5, chunk_size=262144, output_path="mesh.ply"):
     # Step 1: Create 3D grid of points
-    # Generate linspace from -scale to scale with grid_size + 1 points
     coords = torch.linspace(-scale, scale, grid_size + 1)
-    # Create meshgrid and stack into (N, 3) tensor
     x, y, z = torch.meshgrid(coords, coords, coords, indexing='ij')
     grid_points = torch.stack([x, y, z], dim=-1).reshape(-1, 3)
     
@@ -59,34 +56,31 @@ def sdf_to_ply(implicit_fn, grid_size=128, scale=0.5, thresh=0.0, chunk_size=262
     for start in range(0, num_points, chunk_size):
         end = min(start + chunk_size, num_points)
         chunk = grid_points[start:end]
-        # Evaluate implicit function. Assumes implicit_fn returns a tensor/array of distances
-        # [G] implicit_fn.get_distance should handle batched input and return shape (chunk_size,)
         sdfs[start:end] = implicit_fn.get_distance(chunk).cpu().numpy()
         
     # Step 3: Reshape to 3D grid
     sdfs_3d = sdfs.reshape(grid_size + 1, grid_size + 1, grid_size + 1)
     
     # Step 4: Run Marching Cubes
-    # spacing is the distance between grid points. 
-    # Total range is 2*scale, number of intervals is grid_size.
-    voxel_size = (2 * scale) / grid_size
-    spacing = [voxel_size, voxel_size, voxel_size]
+    # skimage expects array indexed as (z, y, x). Transpose to match.
+    sdfs_3d = sdfs_3d.transpose(2, 1, 0)
     
-    # [G] skimage.measure.marching_cubes_lewiner returns (verts, faces, normals, values)
+    voxel_size = (2 * scale) / grid_size
+    spacing = (voxel_size, voxel_size, voxel_size)
+    
+    # level=0.0 matches the SDF zero-crossing convention [S1, unofficial]
     verts, faces, normals, values = measure.marching_cubes_lewiner(
         sdfs_3d, 
-        level=thresh, 
+        level=0.0, 
         spacing=spacing
     )
     
     # Step 5: Transform coordinates
-    # Method A: Normalize to [-scale, scale] based on voxel indices
-    # verts are in voxel coordinates (0 to grid_size). 
-    # Formula: v_world = (v_voxel / grid_size - 0.5) * 2 * scale
-    verts = (verts / grid_size - 0.5) * 2 * scale
+    # skimage scales vertices by spacing starting from 0. 
+    # Apply the offset to center the mesh in [-scale, scale].
+    verts = verts - scale
     
     # Step 6: Construct PLY
-    # Create structured arrays
     vertices = np.zeros(verts.shape[0], dtype=[('x', 'f4'), ('y', 'f4'), ('z', 'f4')])
     vertices['x'] = verts[:, 0]
     vertices['y'] = verts[:, 1]
@@ -95,11 +89,9 @@ def sdf_to_ply(implicit_fn, grid_size=128, scale=0.5, thresh=0.0, chunk_size=262
     faces_struct = np.zeros(faces.shape[0], dtype=[('vertex_indices', 'i4', (3,))])
     faces_struct['vertex_indices'] = faces
     
-    # Create PLY elements
     v_element = plyfile.PlyElement.describe(vertices, 'vertex')
     f_element = plyfile.PlyElement.describe(faces_struct, 'face')
     
-    # Write to file
     plyfile.PlyData([v_element, f_element]).write(output_path)
 ```
 
@@ -110,20 +102,20 @@ def sdf_to_ply(implicit_fn, grid_size=128, scale=0.5, thresh=0.0, chunk_size=262
 - `chunk_size`: Number of points to evaluate per chunk. Default 262144 [S2, unofficial].
 
 ### Edge Cases and Pitfalls
-- **Memory Overflow**: Evaluating the SDF on the entire grid at once can exceed GPU/CPU memory for large `grid_size`. The chunking strategy is essential [S2, unofficial].
-- **Coordinate System Mismatch**: Source [S1, unofficial] suggests adding a `voxel_grid_origin`, while Source [S2, unofficial] suggests normalization. If the `implicit_fn` expects world coordinates but the Marching Cubes output is in voxel coordinates, the mesh will be misplaced or scaled incorrectly. Verify the coordinate space of `implicit_fn` [S1, S2, unofficial].
+- **Memory Overflow**: Evaluating the SDF on the entire grid at once can exceed GPU/CPU memory for large `grid_size`. Chunking limits peak memory usage during evaluation [S2, unofficial].
+- **Coordinate System Mismatch**: Source [S1, unofficial] suggests adding a `voxel_grid_origin`, while Source [S2, unofficial] suggests normalization. Implementers must verify the coordinate system expected by their specific `implicit_fn` [S1, S2, unofficial].
 - **Precision**: Using `float32` for vertices and SDF values is standard but may introduce artifacts in high-precision requirements. `float64` can be used for evaluation but increases memory usage [S1, unofficial].
 
 ## Operating characteristics
 - **Time Complexity**: $O(N)$ where $N$ is the number of grid points ($grid\_size^3$). The dominant cost is the evaluation of the implicit function [S2, unofficial].
 - **Memory Complexity**: $O(N)$ for storing the SDF grid and grid points. Chunking reduces peak memory usage for the evaluation phase [S2, unofficial].
-- **Strengths**: Simple to implement using standard libraries (`skimage`, `numpy`); robust topological extraction [S1, S2, unofficial].
+- **Strengths**: Simple to implement using standard libraries (`skimage`, `numpy`); robust topological extraction [G].
 - **Limitations**: Resolution is limited by `grid_size`; high resolution leads to large meshes and high memory usage [S2, unofficial]. The resulting mesh may be noisy if the SDF is not smooth [S2, unofficial].
-- **When to use**: When a quick, resolution-dependent mesh is needed from a known implicit function.
-- **When not to use**: When high-fidelity, smooth surfaces are required without post-processing (consider QEF optimization [S3831]) or when memory is extremely constrained (consider Sparse Marching Cubes [S3825]).
+- **When to use**: When a quick, resolution-dependent mesh is needed from a known implicit function [G].
+- **When not to use**: When high-fidelity, smooth surfaces are required without post-processing (consider QEF optimization [G]) or when memory is extremely constrained (consider Sparse Marching Cubes [G]).
 
 ## Background
-This method is a standard pipeline in computer graphics for converting implicit representations (like SDFs) to explicit polygonal meshes. It relies on the Marching Cubes algorithm, originally developed by Lorensen and Cline (1987). The specific implementation details regarding chunking and PLY formatting are derived from practical implementations in neural surface reconstruction pipelines [S1, S2, unofficial].
+This method is a standard pipeline in computer graphics for converting implicit representations (like SDFs) to explicit polygonal meshes [S2, unofficial]. It relies on the Marching Cubes algorithm, originally developed by Lorensen and Cline (1987) [G]. The specific implementation details regarding chunking and PLY formatting are derived from practical implementations in neural surface reconstruction pipelines [S1, S2, unofficial].
 
 ## Sources
 [S1] B1ueber2y/DIST-Renderer, https://github.com/B1ueber2y/DIST-Renderer, fetched 2026-10-26 (unofficial)

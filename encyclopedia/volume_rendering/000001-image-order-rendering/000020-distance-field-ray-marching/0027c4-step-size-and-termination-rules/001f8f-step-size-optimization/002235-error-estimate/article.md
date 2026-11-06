@@ -1,0 +1,113 @@
+# Error Estimate
+
+Also called: Relative Error Metric, Adaptive Stepping Error Metric
+
+## Overview
+Error Estimate calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting interpolation error based on the distance to a user-specified isovalue $v_{iso}$ [S1, unofficial]. It solves the problem of uniform sampling inefficiency by refining the step size only in regions where the scalar field values are close to the isosurface, significantly reducing computation time in areas far from the surface [S1, unofficial]. It sets itself apart from siblings like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by introducing data-dependence on the exploration parameter ($v_{iso}$) rather than relying solely on geometric properties or field-range statistics [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: The current sample value $y$ (a vector of scalar field values, typically at the current ray position and potentially neighbors or previous steps), a constant $k$ representing a threshold or scaling factor, and a small `threshold` value to prevent division by zero.
+*   Output: A scalar error metric $E$ used to determine the next step size.
+
+**Data Structures:**
+*   $y$: A vector (e.g., `vec3` or similar) containing scalar field values. In the source implementation, this appears to be derived from the volume data at the current ray position [S1, unofficial].
+*   $k$: A constant parameter. The source code does not explicitly define the derivation of $k$, but it acts as a scaling factor for the error [S1, unofficial].
+*   `threshold`: A small positive float value to ensure numerical stability in the denominator [S1, unofficial].
+
+**Steps:**
+1.  Compute the absolute value of the input vector components: $|y|$.
+2.  Determine the maximum absolute value in the vector: $y_{max} = \max(|y.x|, |y.y|, |y.z|)$.
+3.  Calculate the denominator: $D = \max(y_{max}, \text{threshold})$.
+4.  Compute the relative error vector $r_v$:
+    $$ r_v = \frac{k}{D} $$
+    *(Note: The source code `abs(k / max(abs(y), threshold))` implies $k$ is divided by the max magnitude. If $k$ is a scalar, $r_v$ is a scalar. If $k$ is a vector, it is element-wise. The return statement `max(r_v.x, ...)` suggests $r_v$ might be treated as a vector or the operation is element-wise before reduction. Given `k` is likely a scalar threshold in this context, $r_v$ is a scalar. However, the return statement `max(r_v.x, max(r_v.y, r_v.z))` strongly implies $r_v$ is a vector. This suggests $k$ might be a vector of thresholds or the operation is applied per-component. Let's assume the standard interpretation where $k$ is a scalar and the division is scalar, but the return statement in the source `max(r_v.x, ...)` is a specific implementation detail where $r_v$ is constructed as a vector of identical values or the source code snippet implies a vectorized operation. A safer interpretation for implementation: Calculate the scalar error $E = k / \max(\|y\|_\infty, \text{threshold})$. The source return `max(r_v.x, ...)` is likely a copy-paste artifact or specific to a vectorized `k`. We will implement the scalar version as it is mathematically consistent with "relative error".)*
+    *Correction based on source code `max(r_v.x, max(r_v.y, r_v.z))`:* The source code explicitly returns the max of components. This implies $r_v$ is a vector. If $k$ is a scalar, $r_v$ would be a vector of identical scalars. If $k$ is a vector, $r_v$ is element-wise. We will assume $k$ is a scalar and the vectorization is trivial, or $k$ is a vector of thresholds. Let's stick to the code logic:
+    $$ r_v = \left[ \frac{k}{\max(|y.x|, \text{threshold})}, \frac{k}{\max(|y.y|, \text{threshold})}, \frac{k}{\max(|y.z|, \text{threshold})} \right] $$
+    *(This interpretation fits the return statement best if $k$ is a scalar and the division is applied per component of a hypothetical vector $y$ that has been expanded, or if $y$ is a vector of values from different points. However, the most robust interpretation of `abs(k / max(abs(y), threshold))` in GLSL/C++ where `max` takes a vector and scalar is that `max(abs(y), threshold)` returns a vector. Thus $k$ must be a scalar, and the division is scalar-vector, resulting in a vector.)*
+5.  Compute the final error metric $E$:
+    $$ E = \max(r_v.x, \max(r_v.y, r_v.z)) + \text{FLOAT\_MIN} $$
+    where `FLOAT_MIN` is the smallest positive normalized value of the floating-point type to prevent zero errors [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_error_estimate(y: list, k: float, threshold: float) -> float:
+    """
+    Calculate relative error metric for adaptive stepping.
+    
+    Args:
+        y: List of scalar field values (e.g., [y_x, y_y, y_z]).
+        k: Scaling constant/threshold.
+        threshold: Minimum value for denominator to prevent division by zero.
+        
+    Returns:
+        Error metric E.
+    """
+    # Step 1 & 2: Compute max absolute value per component, clamped by threshold
+    # Note: The source code `max(abs(y), threshold)` suggests element-wise max
+    # if y is a vector. We assume y is a list/array of values.
+    
+    r_v = []
+    for val in y:
+        abs_val = abs(val)
+        denom = max(abs_val, threshold)
+        # Step 3 & 4: Compute r_v component
+        # If k is scalar, this produces a vector of identical values if y has identical magnitudes,
+        # or different values if y components differ.
+        r_v.append(k / denom)
+        
+    # Step 5: Return max of r_v components + FLOAT_MIN
+    if not r_v:
+        return float('min') # Handle empty input
+        
+    max_r_v = max(r_v)
+    FLOAT_MIN = 1.1754943508222875e-38 # Smallest positive normalized 32-bit float
+    return max_r_v + FLOAT_MIN
+```
+
+**Parameters:**
+*   $k$: Scaling factor. Not given in the sources.
+*   `threshold`: Small positive value. Not given in the sources.
+*   `FLOAT_MIN`: Smallest positive normalized value of the floating-point type (e.g., $1.175 \times 10^{-38}$ for 32-bit float) [S1, unofficial].
+
+**Edge Cases:**
+*   **Zero Values:** If all components of $y$ are zero, the denominator becomes `threshold`, preventing division by zero [S1, unofficial].
+*   **Numerical Precision:** `FLOAT_MIN` is added to ensure the error is never exactly zero, which might cause infinite step sizes or division by zero in subsequent step size calculations [S1, unofficial].
+
+## Subtopics
+
+### [Data-Dependent Error Metric for Scalar Fields](6981-data-dependent-error-metric-for-scalar-fields.md)
+This method calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting the interpolation error based on the distance to a user-specified isovalue $v_{iso}$. Unlike uniform error metrics that treat all regions equally, this approach refines the mesh only in regions where the scalar field values are close to $v_{iso}$, significantly reducing computation time in areas far from the isosurface. It sets itself apart from its sibling [Error Estimate](2768-error-estimate.md) by introducing data-dependence on the exploration parameter ($v_{iso}$) rather than relying solely on geometric or field-range properties.
+
+### Stepsize Annealing
+**Definition:** A training strategy that varies the sampling rate $s$ in a range $[s_l, s_h]$ across epochs to benefit from fast convergence at low sampling rates and refinement at high sampling rates [S2, unofficial]. It is a training acceleration method for raymarching models that starts with a high rendering step size in early epochs and decreases it over time to achieve similar performance as training with a constant small step size [S2, unofficial].
+
+**Formula:**
+$$ s(e) = s_l \left(1 - \left(\frac{e}{E}\right)^2\right) + \left(\frac{e}{E}\right)^2 s_h $$
+where $s(e)$ is the sampling rate at epoch $e$, $s_l$ is the lower bound, $s_h$ is the upper bound, $e$ is the current epoch, and $E$ is the total number of epochs [S2, unofficial].
+
+**Parameters:**
+*   $s_l$: Lower bound of sampling rate range. Typical value: 0.1 [S2, unofficial].
+*   $s_h$: Upper bound of sampling rate range. Typical value: 2.0 [S2, unofficial].
+
+**Comparison:**
+Stepsize annealing produces visual results comparable to training with a fixed sampling rate of $s=2.0$ but reduces training time by 33.4% on average compared to constant $s=2.0$ [S2, unofficial]. Compared to training with a constant small step size, stepsize annealing achieves similar performance but with accelerated training time [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The error calculation itself is $O(1)$ per sample. The adaptive nature reduces the total number of samples required for isosurface extraction in sparse or complex fields, leading to faster rendering times in those regions [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary memory for the error metric calculation [S1, unofficial].
+*   **Strengths:** Significantly reduces computation time in areas far from the isosurface by avoiding unnecessary refinement [S1, unofficial].
+*   **Limitations:** Performance depends heavily on the choice of $v_{iso}$ and the constant $k$. If $v_{iso}$ is not well-chosen, the error metric may not accurately reflect the visual importance of regions [S1, unofficial].
+*   **When to use:** When rendering scalar volumes with a specific isosurface of interest and significant empty or uniform regions [S1, unofficial].
+*   **When not to use:** When the entire volume field is of interest or when the isosurface is not well-defined [S1, unofficial].
+
+## Background
+The Error Estimate method was introduced in the context of adaptive ray marching for scalar volume rendering. It is described in the source [S1, unofficial] as a way to calculate a relative error metric for adaptive stepping. The method is part of a broader effort to optimize volume rendering by adapting step sizes based on local data properties.
+
+Sources:
+[S1, unofficial] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26
+[S2, unofficial] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26

@@ -1,0 +1,123 @@
+# Diffuse Lighting for Volume Ray Casting
+
+Also called: Gradient Normal Lighting, Gradient-based Lighting in MRT Raycasting
+
+## Overview
+Diffuse Lighting for Volume Ray Casting is a shading technique that approximates surface illumination in volumetric data by deriving normal vectors from the spatial gradient of the scalar field. It solves the problem of flat, unlit volume rendering by providing geometric cues that allow standard diffuse lighting models to interact with the volume's internal structure. Unlike parent methods that may rely on pre-computed or analytic normals, this approach computes normals on-the-fly using finite differences, making it applicable to any discrete scalar field without additional preprocessing. It is distinct from specular or environment-based shading models by focusing solely on the Lambertian component of light interaction.
+
+## How it works
+The method operates during the ray casting loop, specifically at the shading stage for each sampled voxel. It requires access to the scalar field values of the current sample and its immediate neighbors along the three principal axes.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   `scalar`: The scalar value $V(x, y, z)$ at the current ray position $tr$.
+    *   `tr`: The current 3D texture coordinate (ray position) in the volume.
+    *   `voxelJump`: A uniform vector $(dx, dy, dz)$ representing the physical or normalized distance between adjacent voxels.
+    *   `lightDir`: A uniform vector representing the direction to the light source in eye space.
+    *   `diffColor`: A uniform vector representing the diffuse color (intensity) of the light.
+    *   `samp`: The current sample color (RGB) and potentially alpha, derived from the transfer function.
+*   **Outputs**:
+    *   Updated `samp` color, modulated by the diffuse lighting contribution.
+
+### Data Structures
+No complex data structures are required beyond the volume texture itself. The method relies on random access reads from the scalar field texture.
+
+### Steps
+1.  **Sample Neighbors**: Calculate the scalar values at the six immediate neighbors of the current position $(x, y, z)$. Specifically, samples are taken at $(x+dx, y, z)$, $(x, y+dy, z)$, and $(x, y, z-dz)$ [S1]. Note: The source code uses a backward difference for the Z-axis ($z-dz$) while using forward differences for X and Y [S1].
+2.  **Compute Gradient**: Calculate the gradient vector components by subtracting the current scalar value from the neighbor values. This approximates the partial derivatives of the scalar field.
+3.  **Normalize**: Normalize the resulting gradient vector to obtain the surface normal $N$.
+4.  **Calculate Diffuse Factor**: Compute the dot product between the normalized normal $N$ and the light direction $L$. Clamp the result to $[0, 1]$ to ensure only positive illumination contributes.
+5.  **Modulate Color**: Multiply the sample's color components by the diffuse factor and the light's diffuse color.
+
+### Formulas
+Let $V(x, y, z)$ be the scalar value at position $(x, y, z)$. Let $dx, dy, dz$ be the voxel jumps.
+
+The gradient components are calculated as [S1]:
+$$ n_x = V(x+dx, y, z) - V(x, y, z) $$
+$$ n_y = V(x, y+dy, z) - V(x, y, z) $$
+$$ n_z = V(x, y, z-dz) - V(x, y, z) $$
+
+The normal vector $N$ is:
+$$ N = \text{normalize}(n_x, n_y, n_z) $$
+
+The diffuse factor $D$ is:
+$$ D = \max(\text{dot}(L, N), 0.0) $$
+
+The final output color $C_{out}$ (RGB part of the sample) is:
+$$ C_{out} = C_{in} \times D \times C_{light} $$
+
+Where $C_{in}$ is the original sample color and $C_{light}$ is `diffColor` [S1].
+
+### Parameters
+*   `lightDir`: Uniform vector for the light direction in eye space [S1].
+*   `diffColor`: Uniform vector for the diffuse color of the light [S1].
+*   `voxelJump`: Uniform vector representing the distance between voxels, used to offset sampling positions for finite differences [S1].
+
+### Pseudocode
+The following Python-like pseudocode implements the logic described in the source [S1]. It assumes a function `texture_sample` that retrieves the scalar value from the volume at a given coordinate.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_diffuse_lighting(samp_color, tr, scalar, light_dir, diff_color, voxel_jump):
+    """
+    Calculates diffuse lighting for a volume ray casting sample.
+    
+    Args:
+        samp_color (vec3): Current sample color (RGB).
+        tr (vec3): Current ray position/texture coordinate.
+        scalar (float): Scalar value V(tr.x, tr.y, tr.z).
+        light_dir (vec3): Light direction vector.
+        diff_color (vec3): Diffuse light color vector.
+        voxel_jump (vec3): Distance between voxels (dx, dy, dz).
+        
+    Returns:
+        vec3: Illuminated sample color.
+    """
+    # 1. Calculate Gradient Components using Finite Differences
+    # X-axis: Forward difference
+    # Sample at (x + dx, y, z)
+    val_right = texture_sample(tr + vec3(voxel_jump.x, 0.0, 0.0))
+    n_x = val_right - scalar
+    
+    # Y-axis: Forward difference
+    # Sample at (x, y + dy, z)
+    val_up = texture_sample(tr + vec3(0.0, voxel_jump.y, 0.0))
+    n_y = val_up - scalar
+    
+    # Z-axis: Backward difference (as per source code)
+    # Sample at (x, y, z - dz)
+    val_back = texture_sample(tr + vec3(0.0, 0.0, -voxel_jump.z))
+    n_z = val_back - scalar
+    
+    # 2. Normalize the Gradient to get the Normal
+    normal = normalize(vec3(n_x, n_y, n_z))
+    
+    # 3. Calculate Diffuse Factor
+    # Dot product of Light Direction and Normal, clamped to 0
+    diffuse_factor = max(dot(light_dir, normal), 0.0)
+    
+    # 4. Modulate Sample Color
+    # Multiply sample color by diffuse factor and light color
+    illuminated_color = samp_color * diffuse_factor * diff_color
+    
+    return illuminated_color
+```
+
+### Edge Cases and Pitfalls
+*   **Boundary Conditions**: The method requires sampling neighbors. If the ray position is near the volume boundary, neighbor samples may fall outside the valid volume range. The source code does not explicitly show boundary checks, implying that texture filtering or clamping modes should handle out-of-bounds access, or that the ray casting loop should avoid shading at the immediate boundaries [S1].
+*   **Transparent Transfer Functions**: The technique was tested only with opaque transfer functions. When used with transparent transfer functions, the rendering yields incoherent visual effects. This is likely because the gradient normal represents the local scalar field gradient, which may not correspond to a meaningful surface orientation in regions of varying density/opacity [S1].
+*   **Noise Sensitivity**: Finite differences are sensitive to noise in the scalar field. Noisy data will result in noisy normals, leading to flickering or speckled lighting artifacts. Smoothing the scalar field prior to ray casting or using larger voxel jumps (if resolution permits) may mitigate this, though the source does not specify mitigation strategies [S1].
+
+## Operating characteristics
+*   **Time Complexity**: The method adds a constant number of texture lookups (3 additional samples) and basic vector operations per shaded voxel. It increases the computational cost of the shading step but does not change the overall complexity of the ray casting loop.
+*   **Memory Complexity**: No additional memory is required beyond the volume texture and standard uniforms.
+*   **Performance**: The source notes that fetching data from neighbor voxels and performing extra calculations "could end up in some performance" impact, implying a measurable slowdown compared to unlit rendering [S1]. The exact performance penalty is not quantified in the sources.
+*   **Strengths**: Simple to implement; works with any scalar field; provides immediate visual improvement in depth perception and shape definition.
+*   **Limitations**: Incoherent results with transparent transfer functions; sensitive to scalar field noise; boundary handling requires care.
+
+## Background
+This technique is described in the context of comparing GPU-based volume ray casting implementations across different programming models (Fragment Shader, Compute Shader, OpenCL, and CUDA) [S1]. It is presented as a standard method for adding illumination to volume rendering by leveraging the gradient of the scalar field as a proxy for surface normals. The approach is attributed to general practices in GPU-based volume rendering, with specific implementation details provided in the cited paper [S1].
+
+## Sources
+[S1] A Comparison between GPU-based Volume Ray Casting Implementations: Fragment Shader, Compute Shader, OpenCL and CUDA, https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26

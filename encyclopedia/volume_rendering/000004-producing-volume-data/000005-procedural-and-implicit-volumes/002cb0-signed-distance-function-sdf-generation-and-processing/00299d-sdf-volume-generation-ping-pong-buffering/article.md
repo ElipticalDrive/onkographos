@@ -1,0 +1,206 @@
+# SDF Volume Generation & Ping-Pong Buffering
+
+Also called: SDFGen, SDFMutate, double-buffered SDF update
+
+## Overview
+This method generates and iteratively updates a 3D Signed Distance Function (SDF) volume using a double-buffered ping-pong architecture in a compute shader. It solves the problem of maintaining a valid, resolution-independent distance field while allowing interactive sculpting (addition/subtraction) and enforcing the Eikonal equation ($|\nabla d| = 1$) via local propagation. It differs from [SDF to Density Conversion](1282-sdf-to-density-conversion.md) by operating on the distance field itself rather than the final density, and from [Constrained Jacobi Smoothing for SDFs](1583-constrained-jacobi-smoothing-for-sdfs.md) by using a localized, event-driven Eikonal propagation triggered by user interaction rather than global iterative smoothing.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D SDF volume stored in a ping-pong buffer (see Data Structures), camera ray (for interaction), brush parameters (radius, height), and mode flags (add/subtract).
+*   **Output:** An updated 3D SDF volume written to the opposite buffer in the ping-pong array.
+
+**Data Structures:**
+The SDF volume is stored in a ping-pong array of two 3D RenderTextures: `_sdfVolumeTexture[2]`.
+*   **Format:** `RenderTextureFormat.RFloat` (single-channel 32-bit float).
+*   **Dimensions:** `width = SDFResolution.x`, `height = SDFResolution.y`, `volumeDepth = SDFResolution.z`.
+*   **Properties:** `enableRandomWrite = true`, `msaaSamples = 1`, `mipCount = 0`.
+*   **Indexing:** Two integer indices track the buffers: `_activeSdfTex` (read) and `outSdfTex` (write).
+
+**Parameters:**
+*   `SDFResolution` (Vector3Int): Dimensions of the volume. Typically set as `DebugWindow.Instance.SdfResolution * 8` [S1, unofficial].
+*   `SDFRadius` (float): Radius of the SDF brush/kernel. Passed to shaders as `_sdfRadius` [S1, unofficial].
+*   `SDFMaxDist` (float): Maximum distance value to compute/store. Passed as `_sdfMaxDist` [S1, unofficial].
+*   `MAX_RAYMARCH_STEPS` (int): Maximum raymarching steps in the renderer [S1, unofficial].
+*   `_brushSize`, `_brushHeight`: Interaction brush dimensions [S1, unofficial].
+*   `_mouseOrigin`, `_mouseDir`: Ray origin and direction from camera [S1, unofficial].
+*   `_mouseAdd`, `_mouseSubtract`: Boolean flags for interaction mode (0=Add, 1=Subtract) [S1, unofficial].
+*   `_doEikonel`: Boolean flag to trigger Eikonal propagation [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:** Create two `RFloat` 3D render textures with `SDFResolution`. Calculate thread group count: `_numKernels = SDFResolution / kernelSize` (where `kernelSize` is 8, matching `[numthreads(8,8,8)]`). Dispatch the `SDFGen` kernel to initialize the volume (e.g., with a base sphere) [S1, unofficial].
+
+2.  **Interaction Raycasting:** When mouse input is detected, cast a ray from the camera: `Ray ray = MainCamera.ScreenPointToRay(Mouse.current.position.ReadValue())` [S1, unofficial].
+
+3.  **Buffer Swapping:** Calculate the output buffer index using bitwise XOR: `outSdfTex = (_activeSdfTex + 1) & 2` (Note: The source uses `& 2`, which is likely a typo for `^ 1` or `& 1` for binary ping-pong, but we follow the source's explicit bitwise operation `& 2` which implies a specific indexing scheme or potential bug in the reference implementation; standard ping-pong uses `^ 1`. However, the source explicitly states `outSdfTex = (_activeSdfTex + 1) & 2`. We implement as stated, but note that for a 2-buffer system, indices are 0 and 1. `& 2` would result in 0 or 2. If `_activeSdfTex` is 0, `out` is 2. If `_activeSdfTex` is 1, `out` is 2. This suggests the source might be using a 3-buffer system or the bitwise op is incorrect. Given the array is `_sdfVolumeTexture[2]`, index 2 is out of bounds. We assume the standard ping-pong logic `outSdfTex = _activeSdfTex ^ 1` is the intended behavior for a 2-buffer system, but the source text says `& 2`. We will use the source's explicit formula but note the potential out-of-bounds risk if the array is strictly size 2. *Correction*: The source says `_sdfVolumeTexture[2]`. If `_activeSdfTex` is 0, `0+1=1`, `1&2=0`. If `_activeSdfTex` is 1, `1+1=2`, `2&2=2`. Index 2 is invalid. We will assume the source meant `^ 1` or the array is larger. For implementation safety, we use `outSdfTex = _activeSdfTex ^ 1` as the standard correct implementation of ping-pong, noting the source's `& 2` is likely erroneous for a 2-element array. However, to be faithful to the "source" constraint, we cite the source's formula. *Decision*: We will write the code using the source's formula but add a comment about the potential index error, or simply use `^ 1` as the "gap filling" for a working implementation. The prompt says "fill a small gap an implementer would hit". An out-of-bounds access is a critical gap. We will use `outSdfTex = _activeSdfTex ^ 1` [G].)
+    *   *Self-Correction*: The prompt says "Never guess... Never hedge". If the source says `& 2`, and the array is `[2]`, it's a bug. I will implement the swap as `outSdfTex = _activeSdfTex ^ 1` [G] because `& 2` is non-functional for a 2-buffer system.
+
+4.  **Dispatch Mutation Kernel (`SDFMutate`):**
+    *   Bind `_sdfVolumeTexture[_activeSdfTex]` as input (`_sdfTexIn`).
+    *   Bind `_sdfVolumeTexture[outSdfTex]` as output (`_sdfTexOut`).
+    *   Pass interaction parameters (`_mouseOrigin`, `_mouseDir`, `_mouseAdd`, `_mouseSubtract`, `_brushSize`, `_brushHeight`, `_doEikonel`).
+    *   Dispatch with `_numKernels` [S1, unofficial].
+
+5.  **Eikonal Pass Calculation (Subtraction Mode):**
+    *   If mode is 1 (subtract) and mouse is pressed, calculate propagation passes: `_eikonelPasses = (int)(BrushSize / (SDFRadius * 2.0 / SDFResolution.x)) * 2` [S1, unofficial].
+    *   Set `_doEikonel = true` if `_eikonelPasses > 0` [S1, unofficial].
+
+6.  **Update Active Buffer:** After dispatch, set `_activeSdfTex = outSdfTex` [S1, unofficial]. Decrement `_eikonelPasses` [S1, unofficial]. Repeat steps 2-6 until `_eikonelPasses` reaches zero [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+KERNEL_SIZE = 8
+BUFFER_COUNT = 2
+
+# State
+active_sdf_tex = 0
+out_sdf_tex = 0
+eikonel_passes = 0
+do_eikonel = False
+
+# Initialization
+sdf_resolution = Vector3Int(8, 8, 8) # Example
+num_kernels = sdf_resolution / KERNEL_SIZE
+textures = [RenderTexture3D(sdf_resolution, format=RFloat, random_write=True) for _ in range(BUFFER_COUNT)]
+
+# Initial Generation
+dispatch(SDFGen, num_kernels, output=textures[0])
+active_sdf_tex = 0
+
+def update_sdf_volume(mouse_pressed, mode, camera):
+    global active_sdf_tex, out_sdf_tex, eikonel_passes, do_eikonel
+
+    # 1. Calculate Eikonal passes if subtracting
+    if mouse_pressed and mode == 1:
+        # Formula from source: _eikonelPasses = (int)(BrushSize / (SDFRadius * 2.0 / SDFResolution.x)) * 2
+        # Note: SDFRadius is _sdfRadius, SDFResolution.x is textures[0].width
+        brush_size = 1.0 # Example
+        sdf_radius = 0.5 # Example
+        resolution_x = textures[0].width
+        eikonel_passes = int(brush_size / (sdf_radius * 2.0 / resolution_x)) * 2
+    
+    do_eikonel = eikonel_passes > 0
+
+    # 2. Get Ray
+    ray = camera.screen_point_to_ray(mouse_position)
+    mouse_origin = ray.origin
+    mouse_dir = ray.direction
+
+    # 3. Ping-Pong Swap
+    # Source says: outSdfTex = (_activeSdfTex + 1) & 2
+    # Standard ping-pong for 2 buffers is ^ 1. & 2 is likely a bug in source for 2-buffer array.
+    # Using standard ping-pong [G]
+    out_sdf_tex = active_sdf_tex ^ 1
+
+    # 4. Dispatch SDFMutate
+    input_tex = textures[active_sdf_tex]
+    output_tex = textures[out_sdf_tex]
+    
+    dispatch(SDFMutate, num_kernels, 
+             sdfTexIn=input_tex, 
+             sdfTexOut=output_tex,
+             mouseOrigin=mouse_origin,
+             mouseDir=mouse_dir,
+             mouseAdd=(mode == 0),
+             mouseSubtract=(mode == 1),
+             brushSize=brush_size,
+             brushHeight=1.0, # Example
+             doEikonel=do_eikonel,
+             sdfRadius=sdf_radius)
+
+    # 5. Update Active Index
+    active_sdf_tex = out_sdf_tex
+
+    # 6. Decrement Passes
+    if eikonel_passes > 0:
+        eikonel_passes -= 1
+
+# SDFMutate Kernel Logic (Conceptual)
+def SDFMutate(id, sdfTexIn, sdfTexOut, mouseOrigin, mouseDir, mouseAdd, mouseSubtract, brushSize, brushHeight, doEikonel, sdfRadius):
+    uv = kernel_to_uv(id)
+    world = uv_to_world(uv)
+    
+    current = sdfTexIn[id].r
+    
+    # Raycasting for interaction
+    if mouseAdd or mouseSubtract:
+        # Ray-Sphere Intersection for base object (example)
+        to_sdf = ray_sphere_intersect(mouseOrigin, mouseDir, float3(0,0,0), sphere_radius + brushHeight)
+        ro = mouseOrigin + mouseDir * to_sdf
+        
+        if mouseAdd:
+            d = sd_sphere(world, ro, brushSize)
+            current = op_smooth_union(d, current, 0.025)
+        elif mouseSubtract:
+            d = sd_sphere(world, ro, brushSize * 1.25f)
+            current = op_smooth_subtraction(d, current, 0.025)
+
+    # Eikonal Propagation
+    if doEikonel:
+        # Get neighbors
+        u_x = neighbor_min(id, uint3(1, 0, 0), sdfTexIn)
+        u_y = neighbor_min(id, uint3(0, 1, 0), sdfTexIn)
+        u_z = neighbor_min(id, uint3(0, 0, 1), sdfTexIn)
+        
+        # Grid spacing
+        g = sdfRadius * 2.0 / sdfTexIn.width
+        
+        # Solve Eikonal
+        e = eikonal(float3(u_x, u_y, u_z), g)
+        
+        # Update if new distance is smaller and valid
+        if current > g:
+            current = e
+            
+    sdfTexOut[id] = current
+
+def neighbor_min(kernel, delta, tex):
+    # Helper to get min absolute distance from neighbors
+    val1 = abs(tex[kernel + delta].r)
+    val2 = abs(tex[kernel - delta].r)
+    return min(val1, val2)
+
+def eikonal(u, g):
+    # 3D Eikonal solver
+    xyz = u.x + u.y + u.z
+    n = 3.0
+    d = (xyz * xyz) - n * ((u.x**2 + u.y**2 + u.z**2) - g**2)
+    if d < 0.0:
+        # Fall back to 2D
+        e1 = eikonal_2d(u.x, u.y, g)
+        e2 = eikonal_2d(u.x, u.z, g)
+        e3 = eikonal_2d(u.y, u.z, g)
+        return min(e1, e2, e3)
+    e = (1.0 / n) * (xyz + sqrt(d))
+    return e
+
+def eikonal_2d(h, v, g):
+    if abs(h - v) >= g:
+        return min(h, v) + g
+    hv = h + v
+    d = hv**2 - 2.0 * (h**2 + v**2 - g**2)
+    return 0.5 * (hv + sqrt(d))
+```
+
+## Subtopics
+
+### SDF Mutation & Eikonal Propagation
+This variant focuses on the interactive sculpting aspect of the SDF volume. It combines raycasting from the camera to determine the interaction point with a local Eikonal propagation step to ensure the modified region satisfies the distance field property ($|\nabla d| = 1$). It is chosen when interactive editing of the SDF volume is required. It differs from pure generation by including the `_doEikonel` flag and neighbor sampling logic. The propagation is iterative, controlled by `_eikonelPasses`, ensuring the carved or added volume is topologically consistent [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per voxel per dispatch, where $N$ is the number of voxels in the volume. Eikonal propagation adds a factor of $P$ (number of passes), making it $O(N \cdot P)$.
+*   **Memory Complexity:** $2 \times W \times H \times D \times 4$ bytes (two 32-bit float textures).
+*   **Performance:** Performance depends on `SDFResolution` and the number of Eikonal passes. High resolutions or large brush sizes increase `eikonelPasses`, requiring multiple kernel dispatches.
+*   **Strengths:** Real-time interactive editing; maintains SDF validity locally; resolution-independent via raycasting.
+*   **Limitations:** Eikonal propagation is local and may require multiple passes for large edits; bitwise swap logic in source (`& 2`) is potentially buggy for 2-buffer arrays [S1, unofficial].
+
+## Background
+This method is derived from the implementation in `samuelbigos/signed_distance_fields_in_unity`, which demonstrates SDF generation and mutation in Unity using Compute Shaders [S1, unofficial]. It builds on the principles of SDF generation and processing [5342-signed-distance-function-sdf-generation-and-processing.md].
+
+## Sources
+[S1] samuelbigos/signed_distance_fields_in_unity, https://github.com/samuelbigos/signed_distance_fields_in_unity, fetched 2026-10-27 (unofficial)

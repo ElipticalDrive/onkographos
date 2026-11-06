@@ -1,0 +1,113 @@
+A Claude test program to implement low-level programming in a 3D modeling environment that is similar to Unity 3D - Throughput the suite ranked: binary mesh chunks in the scene file, the exporters and importers on every core, the Edit Mode cage (round 417, task 0393, ADR 0111) by EmilianoManaloIV · Pull Request #315 · EmilianoManaloIV/blendity
+
+Throughput the suite ranked: binary mesh chunks in the scene file, the exporters and importers on every core, the Edit Mode cage (round 417, task 0393, ADR 0111) by EmilianoManaloIV · Pull Request #315 · EmilianoManaloIV/blendity · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+EmilianoManaloIV
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Pass 16's seventh round (the plan: rounds 411-420): the throughput rows the suite ranked behind Blender - a big mesh's save and open, the PLY / OBJ / STL writers, the PLY and OBJ readers, and the frame that enters Edit Mode at 500k faces with the views on the CPU. Stacked on #314 (round 416) and the rounds before it; merging this merges those.
+What it does
+A big mesh in the scene file is one binary chunk (ADR 0111): a mesh of 4096 vertices and corners or more is written as mesh <id> <name> <smooth> <nv> <nf> bin <bytes> + its arrays as they are in memory (positions, face offsets, corners, UVs, face materials / smoothing / groups, the mask, seams, sharp and wire edges, vertex groups, custom normals, sparse shape keys) inside the text; everything else - objects, components, materials, small meshes - stays text, and the loader reads both forms. Scenes without a big mesh are byte-identical to before; a scene saved with one needs this build or newer (the header stays blendity_scene 1; said in the ADR, the CHANGELOG, the lesson). The asset-path retarget edits the text around the chunks. No compression of the chunk on its own (Scene > Compress still compresses the whole file).
+The exporters and importers on every core, without per-element allocation: the PLY reader (binary vertices and faces in parallel; ASCII lines in parallel; the records-across-lines reader kept as the fallback; the weld on an open-addressed table), the PLY writer (split vertices through each vertex's own chain, flat faces, the bytes at once), the STL writer (triangles counted, written in place), the OBJ writer (lines in pieces on every core - each face piece writes the usemtl / s lines from the face before it, so the text is what one thread writes; one vt and one vn per distinct value at a vertex), the OBJ reader (a flat vertex table, integers parsed in place).
+The Edit Mode cage on the CPU: the overlay record built and replayed on every core; a big overlay batch drawn in 8-row bands with its band sort counted and filled on every core.
+tests_round417 (test_assets.cpp): the chunk against the text form bit for bit with every attribute set, a small mesh kept text, a cut-short chunk / an out-of-range corner / a chunk longer than the file refused, the retarget leaving the chunk alone; the overlay record's order and the replayed picture identical to the one-at-a-time path; PLY binary / ASCII / big-endian / extra elements and properties / records across lines / truncated; OBJ's one vn per vertex and its usemtl / s lines at exactly the faces that change over 40,000 faces; STL's n - 2 triangles a face, each inside one face; OBJ negative indices and a second object.
+Measured (this machine; blendity_stress --only parity, the responsiveness row; Blender 5.2 LTS headless from the Pass 15 table)
+Row
+Round 416
+Now
+Blender 5.2 (Pass 15)
+Now against Blender
+Save a scene: a 500k-face mesh
+122.7 ms (76.2 MB)
+26.5 ms (30.6 MB)
+21.6 ms (48.6 MB written)
+1.2x behind
+Open it: a 500k-face mesh
+134.0 ms
+33.3 ms
+26.7 ms
+1.2x behind
+Export the 50k sphere as OBJ
+120.8 ms (16.2 MB)
+33.8 ms (8.2 MB)
+44.7 ms (7.4 MB)
+1.3x ahead
+Import the 50k sphere from OBJ
+44.7 ms
+24.5 ms
+36.7 ms
+1.5x ahead
+Export the 50k sphere as STL
+26.7 ms (4.8 MB)
+11.7 ms (4.8 MB)
+12.4 ms (5.0 MB)
+1.1x ahead
+Import the 50k sphere from STL
+25.5 ms
+15.9 ms
+20.5 ms
+1.3x ahead
+Export the 50k sphere as PLY
+39.8 ms (3.0 MB)
+12.8 ms (3.0 MB)
+7.2 ms (1.9 MB)
+1.8x behind
+Import the 50k sphere from PLY
+28.7 ms
+10.9 ms
+6.0 ms
+1.8x behind
+Enter Edit Mode (500k faces), caches cold
+100.4 ms
+102.7 ms
+182.0 ms
+1.8x ahead
+Select all (500k faces)
+27.9 ms
+30.9 ms
+23.1 ms
+1.3x behind
+The responsiveness row: Enter Edit Mode on the 500k sphere, the longest frame
+132-158 ms (OVER)
+116.7 ms
+-
+ADR 0105's one-frame limit is 100
+The probe (times printed): entering Edit Mode on the 500k sphere with the views on the CPU 137 -> 112 ms a frame (its overlays 80 -> 55; the benchmark's cold render mesh 35 unchanged); the 500k save 88 + 48 ms -> 18 + 22, the open 66 + 71 -> 30 + 6. Honest: the responsiveness row for that frame stays over ADR 0105's 100 ms (acceptance criterion 3 not met); PLY import and export are about 2x behind Blender (from 4.8x and 5.5x), the other rows within 1.5x or ahead.
+Not done (honest negatives, in the spec)
+Playback in parallel (already 2.8x ahead of Blender), image filters (already parallel), the flat component lookup on load (the 10,000-cube open is 8x ahead), LSCM (no row ranks it); Boolean union (2x, Manifold on both sides), Bevel (1.2x), Merge by distance (1.2-1.3x), Select All in Edit Mode (1.2-1.4x) untouched, their rows kept.
+Checked
+tests_round417; both suites green - with Blender's libraries 16167 checks in 1580 tests, 0 failed; dependency-free 15426 (Windows) and 15432 (Linux, WSL) checks, 0 failed; the audits. The Opus review's fixes: an ASCII PLY face's indices decoded once into a flat array (re-parsing the record per index was quadratic in a face's corners: a hang on a big n-gon), a vertex element with more than 64 properties read by the serial reader, a binary vertex element with a list property read from the scalars met in the record scan, a binary face element cut short keeping the faces read, the OBJ and PLY split chains hashed past 16 entries (a fan's apex), the chunk's face_smooth and face_material normalised as the text form's, groups and shape keys accepted only after the positions (a small chunk can't ask for gigabytes), the chunk written straight into the text (no 32 MB copy), a decreasing face offset with its own message, the retargeter's shadowed name, the OBJ reader's integer parser refusing more than 18 digits as strtol did, the ADR's claims on byte order, git diff, non-finite values and unknown sections stated as they hold, tests for an unknown section, a 2^62 count, a group before the positions, the 3,000-corner ASCII face, 70 properties, a binary vertex with a list and the 8-row band path, the round-230 scene test pinned to the text form, the retarget's folder removed, the lesson given its Try-it step and question. The suites then caught a crash the review had not: a second object's PLY split chains indexed by ids that count the first object's splits (fixed; a two-object PLY and OBJ export test).
+🤖 Generated with Claude Code
+Throughput the suite ranked: binary mesh chunks in the scene file, th…
+…
+cf45264
+```
+…e exporters and importers on every core, the Edit Mode cage (round 417, task 0393, ADR 0111): Pass 16's seventh round - the rows Pass 16's suite ranked behind Blender after the viewport rounds. A mesh of 4096 vertices and corners or more goes into the scene file as one binary chunk inside the text ("mesh <id> <name> <smooth> <nv> <nf> bin <bytes>", the bytes, then the mesh's remaining text lines): its positions, face offsets, corners, UVs, face materials / smoothing / groups, mask, seams, sharp and wire edges, vertex groups, custom normals and sparse shape keys as Mesh holds them, little-endian, in tagged sections closed by an end mark; everything else text as before, smaller meshes text, the loader reading both (mesh_saved_binary, kBinaryMeshFrom, write_mesh_binary / read_mesh_binary - every section checked as the text lines are -, scene_binary_spans so retarget_scene_files edits the text around the chunks, set_scene_text_meshes_for_test); a scene saved with such a mesh needs this build or newer, scenes without one are byte-identical, Scene > Compress still compresses the whole file. The writers and readers on every core without per-element allocation: the PLY reader (a binary file's vertex records decoded in parallel, its face records found in one pass and decoded in parallel; an ASCII file's lines parsed in parallel with the one-number-after-another reader kept for records across lines or a line that fails; the arrays filled directly; weld_exact on an open-addressed table), the PLY writer (split vertices through each mesh vertex's own chain by a bitwise compare, flat face lists, the bytes reserved and written at once), the STL writer (triangles counted per face, found and written in place on every core; ASCII in pieces), the OBJ writer (append_lines_parallel: the v / vt / vn / f lines in pieces on every core, each face piece writing the usemtl / s lines from the face before it; dedupe_corner_values: one vt and one vn per distinct value at a vertex, as Blender writes; append_num / append_uint formatting in place), the OBJ reader (a flat global-to-local vertex table cleared by its entries, integers parsed in place). The Edit Mode cage on the CPU: Renderer3D::lines / points record in pieces on every core appended in order (record_ops), replay prepares the lines and dots between outlines through record_many, record_many prepares into one array and compacts on every core, end_overlay_batch draws a batch of 200,000 commands or more in 8-row bands with its band sort counted and filled on every core. ADR 0111; spec 0393; the lesson "Where the Time Goes"; CHANGELOG, ARCHITECTURE, USABILITY, PERFORMANCE; tests_round417 (the probe with its times printed; the chunk against the text form bit for bit with every attribute set, a small mesh kept text, a cut-short chunk / an out-of-range corner / a chunk longer than the file refused, the retarget leaving the chunk's bytes alone; the overlay record's order and the replayed picture identical to the one-at-a-time path; PLY binary / ASCII / big-endian / extra elements and properties / records across lines / truncated; the OBJ's one vn per vertex and its usemtl and s lines at exactly the faces that change over 40,000 faces; STL's n - 2 triangles a face each inside one face of the mesh; OBJ negative indices and a second object). Honest negatives kept in the suite's table: playback (already ahead), image filters (already parallel), the 10,000-cube open (8x ahead), LSCM (no row), Boolean union, Bevel, Merge by distance and Select All in Edit Mode untouched. The Opus review's fixes: an ASCII PLY face's indices decoded once into a flat array (re-parsing the record per index was quadratic in a face's corners: a hang on a big n-gon), a vertex element with more than 64 properties read by the serial reader, a binary vertex element with a list property read from the scalars met in the record scan, a binary face element cut short keeping the faces read, the OBJ and PLY split chains hashed past 16 entries (a fan's apex), the chunk's face_smooth and face_material normalised as the text form's, groups and shape keys accepted only after the positions (a small chunk can't ask for gigabytes), the chunk written straight into the text (no 32 MB copy), a decreasing face offset with its own message, the retargeter's shadowed name, the OBJ reader's integer parser refusing more than 18 digits as strtol did, the ADR's claims on byte order, git diff, non-finite values and unknown sections stated as they hold, tests for an unknown section, a 2^62 count, a group before the positions, the 3,000-corner ASCII face, 70 properties, a binary vertex with a list and the 8-row band path, the round-230 scene test pinned to the text form, the retarget's folder removed, the lesson given its Try-it step and question. The suites then caught a crash the review had not: a second object's PLY split chains indexed by ids that count the first object's splits (fixed; a two-object PLY and OBJ export test). Measured: Save a scene: a 500k-face mesh 122.7 -> 26.5 ms (Blender 21.6); Open it: a 500k-face mesh 134.0 -> 33.3 ms (Blender 26.7); the 50k sphere's OBJ 120.8 -> 33.8 ms (Blender 44.7); the 50k sphere's import from OBJ 44.7 -> 24.5 ms (Blender 36.7); the 50k sphere's STL 26.7 -> 11.7 ms (Blender 12.4); the 50k sphere's import from STL 25.5 -> 15.9 ms (Blender 20.5); the 50k sphere's PLY 39.8 -> 12.8 ms (Blender 7.2); the 50k sphere's import from PLY 28.7 -> 10.9 ms (Blender 6.0); Enter Edit Mode 100.4 -> 102.7 ms (Blender 182.0); Select all 27.9 -> 30.9 ms (Blender 23.1); the Edit Mode entry frame on the CPU 137 -> 112 ms in the probe (overlays 80 -> 55), the responsiveness row still over the 100 ms limit at 116.7 ms (said in the spec). Both suites green - with Blender's libraries 16167 checks in 1580 tests, 0 failed; dependency-free 15426 (Windows) and 15432 (Linux, WSL) checks, 0 failed; the audits.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+EmilianoManaloIV
+mentioned this pull request
+Nov 5, 2026
+Every operation the sweep ranked: the Materials window, Modeling Tools on big scenes, materials by name, screenshots and new meshes off the frame (round 418, task 0394)
+#316
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

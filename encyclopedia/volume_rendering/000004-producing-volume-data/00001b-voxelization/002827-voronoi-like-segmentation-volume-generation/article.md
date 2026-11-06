@@ -1,0 +1,156 @@
+# Voronoi-like Segmentation Volume Generation
+
+Also called: Synthetic Segmentation Volume Generation, Voronoi-like volume creation
+
+## Overview
+Voronoi-like Segmentation Volume Generation creates a 3D volume where each voxel is assigned a label corresponding to the index of its nearest neighbor in a synthetic, Poisson-distributed point set [S1, unofficial]. It solves the problem of generating structured, spatially coherent segmentation labels for volume data without relying on input geometry, effectively creating a "Voronoi-like" partitioning of space [S1, unofficial]. Unlike [Soft Voronoi Decomposition](7634-soft-voronoi-decomposition.md), which produces differentiable, soft boundaries for gradient-based optimization, this method produces hard, discrete segmentations suitable for texture synthesis or parameter initialization [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Grid dimensions: $W, H, D$ (width, height, depth in voxels).
+- `points_per_million_voxels`: Density of seed points (default: 100) [S1, unofficial].
+- `candidate_count`: Number of random candidates evaluated per seed point (default: 16) [S1, unofficial].
+
+**Outputs:**
+- A 1D array `m_data` of size $W \times H \times D$, storing integer labels (indices of the nearest seed point) [S1, unofficial].
+
+**Data Structures:**
+- `points`: A list of 3D coordinates $(x, y, z)$ representing the generated seed points.
+- `m_data`: A flat array indexed by voxel position. The index for voxel $(x, y, z)$ is calculated as:
+  $$ idx = z \cdot (W \cdot H) + y \cdot W + x $$
+
+**Steps:**
+
+1.  **Calculate Point Count**: Determine the total number of seed points $M$ to generate:
+    $$ M = \left\lfloor \frac{W \cdot H \cdot D}{1,000,000} \cdot \text{points\_per\_million\_voxels} \right\rfloor $$
+    [S1, unofficial]
+
+2.  **Generate Poisson-like Point Set**: Construct a set of $M$ points using a rejection-sampling approach to maximize spacing:
+    - Initialize an empty list `points`.
+    - For $i$ from 0 to $M - 1$:
+        - Initialize `max_min_sq_dist` to $-\infty$ and `best_candidate` to null.
+        - For $c$ from 0 to `candidate_count` - 1:
+            - Generate a random candidate point $p_c = (x_c, y_c, z_c)$ where $x_c \in [0, W)$, $y_c \in [0, H)$, $z_c \in [0, D)$ [S1, unofficial].
+            - Compute the squared Euclidean distance from $p_c$ to all existing points $p_j \in \text{points}$ (where $j < i$).
+            - Find the minimum squared distance $d_{min}^2 = \min_{j < i} \| p_c - p_j \|^2$.
+            - If $d_{min}^2 > \text{max\_min\_sq\_dist}$:
+                - Set `max_min_sq_dist` = $d_{min}^2$.
+                - Set `best_candidate` = $p_c$.
+        - Add `best_candidate` to `points` [S1, unofficial].
+
+3.  **Assign Voxel Labels**: For each voxel in the grid:
+    - For each voxel $(x, y, z)$:
+        - Compute the squared Euclidean distance from $(x, y, z)$ to all points $p_k \in \text{points}$.
+        - Find the index $k$ of the point with the minimum squared distance.
+        - Set `m_data[z * (W * H) + y * W + x]` = $k$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import random
+import math
+
+def generate_voronoi_segmentation_volume(W, H, D, points_per_million=100, candidate_count=16):
+    """
+    Generates a Voronoi-like segmentation volume.
+    
+    Args:
+        W, H, D: Grid dimensions.
+        points_per_million: Density of seed points.
+        candidate_count: Number of candidates per point generation step.
+        
+    Returns:
+        m_data: List of integer labels for each voxel.
+        points: List of 3D coordinates for the seed points.
+    """
+    # Step 1: Calculate total point count
+    total_voxels = W * H * D
+    point_count = int((total_voxels / 1_000_000.0) * points_per_million)
+    
+    points = []
+    
+    # Step 2: Generate Poisson-like point set
+    for i in range(point_count):
+        max_min_sq_dist = -1.0
+        best_candidate = None
+        
+        for _ in range(candidate_count):
+            # Generate random candidate within bounds
+            cx = random.uniform(0, W)
+            cy = random.uniform(0, H)
+            cz = random.uniform(0, D)
+            candidate = (cx, cy, cz)
+            
+            # Compute squared distance to all existing points
+            min_sq_dist = float('inf')
+            for px, py, pz in points:
+                dx = cx - px
+                dy = cy - py
+                dz = cz - pz
+                sq_dist = dx*dx + dy*dy + dz*dz
+                if sq_dist < min_sq_dist:
+                    min_sq_dist = sq_dist
+            
+            # Select candidate with maximum minimum distance
+            if min_sq_dist > max_min_sq_dist:
+                max_min_sq_dist = min_sq_dist
+                best_candidate = candidate
+        
+        if best_candidate is not None:
+            points.append(best_candidate)
+            
+    # Step 3: Assign voxel labels
+    m_data = [0] * total_voxels
+    
+    for z in range(D):
+        for y in range(H):
+            for x in range(W):
+                # Find nearest point
+                min_sq_dist = float('inf')
+                nearest_idx = -1
+                
+                for k, (px, py, pz) in enumerate(points):
+                    dx = x - px
+                    dy = y - py
+                    dz = z - pz
+                    sq_dist = dx*dx + dy*dy + dz*dz
+                    
+                    if sq_dist < min_sq_dist:
+                        min_sq_dist = sq_dist
+                        nearest_idx = k
+                
+                # Store label in flat array
+                idx = z * (W * H) + y * W + x
+                m_data[idx] = nearest_idx
+                
+    return m_data, points
+```
+
+**Edge Cases and Pitfalls:**
+- **Performance**: The point generation step has complexity $O(M^2 \cdot C)$ where $M$ is point count and $C$ is candidate count, due to checking distances to all existing points for every candidate [S1, unofficial]. The label assignment step has complexity $O(W \cdot H \cdot D \cdot M)$, which becomes prohibitive for large volumes and high point densities [S1, unofficial].
+- **Precision**: Using squared Euclidean distance avoids square roots and floating-point inaccuracies during comparison, but coordinates should be handled with sufficient precision to avoid boundary artifacts [S1, unofficial].
+- **Empty Grids**: If `point_count` is 0 (e.g., very small volume), the loop for point generation is skipped, and label assignment may fail or produce undefined results if not guarded [G].
+
+## Subtopics
+
+### [Voronoi-based Customization Volume Generation](5278-voronoi-based-customization-volume-generation.md)
+Generates a low-resolution 3D customization volume by computing a discrete Voronoi diagram on the GPU, assigning each voxel to its nearest seed point, and subsequently deriving customization parameters via natural neighbor interpolation. It solves the performance bottleneck of calculating position-dependent transfer function parameters for large volume datasets by decoupling the customization resolution from the input data size. Unlike its sibling [Soft Voronoi Decomposition](7634-soft-voronoi-decomposition.md), which likely handles boundary softness or probabilistic assignments, this method produces a hard segmentation where each voxel belongs exclusively to one Voronoi cell, enabling interactive frame rates through trilinear interpolation of the low-resolution result during rendering.
+
+### [Soft Voronoi Decomposition](7634-soft-voronoi-decomposition.md)
+Soft Voronoi Decomposition is a differentiable spatial partitioning method that decomposes a scene into $N$ regions (Voronoi cells) defined by a set of $N$ sites $\phi \in \mathbb{R}^{N \times 3}$. It solves the problem of creating a smooth, differentiable approximation of a hard Voronoi diagram, allowing gradients to flow to the site positions $\phi$ during training. Unlike MLP-based decomposition methods which rely on softmax activations and suffer from random memory access patterns during integration, Soft Voronoi provides spatial coherence and cache-friendly memory access, enabling efficient acceleration as the number of decomposition heads increases.
+
+## Operating characteristics
+- **Time Complexity**: The naive implementation is $O(N^2)$ for point generation (where $N$ is the number of seed points) and $O(V \cdot N)$ for label assignment (where $V$ is the number of voxels) [S1, unofficial]. The source notes that "A better implementation would use an acceleration structure to speed up the nearest neighbor search" and that the label assignment "can take a long time for large volumes" [S1, unofficial].
+- **Memory Complexity**: $O(V + N)$ to store the volume labels and the seed points [S1, unofficial].
+- **Strengths**: Simple to implement; produces spatially uniform, non-overlapping regions without requiring input geometry; suitable for synthetic data generation or initialization [S1, unofficial].
+- **Limitations**: Extremely slow for large volumes or high point densities due to brute-force nearest neighbor search; does not scale well without acceleration structures like KD-trees or spatial hashing [S1, unofficial].
+- **When to use**: Small to medium volumes where geometry-independent segmentation is needed; prototyping; scenarios where $N$ is small relative to $V$.
+- **When not to use**: Large-scale production volumes; real-time applications requiring immediate label assignment; scenes requiring precise geometric alignment.
+
+## Background
+The method originates from the `compressed-segmentation-volumes` repository by max-pio, which provides tools for generating and compressing segmentation volumes [S1, unofficial]. It is used in contexts requiring synthetic, structured label maps for volume data, such as testing compression algorithms or initializing parameter fields for volume rendering customization [S1, unofficial]. The approach mimics Poisson disk sampling to ensure seed points are well-distributed, avoiding clustering artifacts common in purely random distributions [S1, unofficial].
+
+## Sources
+[S1] max-pio/compressed-segmentation-volumes, https://github.com/max-pio/compressed-segmentation-volumes, fetched 2026-10-26 (unofficial)

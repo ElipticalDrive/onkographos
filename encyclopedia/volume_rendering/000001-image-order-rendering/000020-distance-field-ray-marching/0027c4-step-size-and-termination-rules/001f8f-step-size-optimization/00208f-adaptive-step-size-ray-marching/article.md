@@ -3,7 +3,7 @@
 Also called: DDVR, DDVR Raymarching Shader, Ray Marching with Adaptive Step Size and Temporal Accumulation, Adaptive Step Size Volume Rendering
 
 ## Overview
-Adaptive Step Size Ray Marching is a GPU-based direct volume rendering technique that reduces computational cost by varying the ray marching step size based on local density and distance, combined with temporal accumulation to manage noise [S1][S2, S3, unofficial]. Unlike linear sampling which uses a fixed interval, this method uses fine steps inside cloud density and coarse steps outside, optimizing the trade-off between performance and rendering quality [S1][S3, unofficial]. It distinguishes itself from siblings like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by explicitly using a noise buffer to drive step size variation and temporal reprojection, and from [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md) by its continuous adaptive scaling rather than discrete gap skipping [S2, S3, unofficial].
+Adaptive Step Size Ray Marching is a GPU-based direct volume rendering technique that reduces computational cost by varying the ray marching step size based on local density and distance, combined with temporal accumulation to manage noise [S1][S2, unofficial]. Unlike linear sampling which uses a fixed interval, this method uses fine steps inside cloud density and coarse steps outside, optimizing the trade-off between performance and rendering quality [S1][S3, unofficial]. It distinguishes itself from [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by explicitly using a noise buffer to drive step size variation and temporal reprojection [S2, unofficial], and from [Gap-Limited Ray Marching](4412-gap-limited-ray-marching.md) by its continuous adaptive scaling rather than discrete gap skipping [S3, unofficial]. The sampling density follows a non-linear function $f(x)$ where $x$ is the distance from the eye, simulating photographic depth of field where distant objects are sampled coarsely and close objects finely [S1].
 
 ## How it works
 ### Inputs and Outputs
@@ -121,8 +121,12 @@ GAMMA = 2.2
 def ray_march_pixel(pixel_coord, cam, config, textures, buffers):
     # 1. Ray Initialization
     ray_origin = cam.transform[3].xyz
-    ray_dir = calculate_ray_direction(pixel_coord, cam.proj, cam.camView)
+    # Standard inverse projection + view matrix to get direction from pixel UV
+    uv = pixel_coord / config.dimensions.xy
+    ray_dir = inverse(cam.proj) @ inverse(cam.camView) @ vec4(uv, 0.0, 1.0)
+    ray_dir = normalize(ray_dir.xyz)
     
+    # Standard slab AABB intersection
     t_entry, t_exit = ray_box_intersect(ray_origin, ray_dir, config.bbmin, config.bbmax)
     
     if t_entry is None:
@@ -136,11 +140,7 @@ def ray_march_pixel(pixel_coord, cam, config, textures, buffers):
     first_hit = False
     
     noise_offset = buffers.noiseImage[pixel_coord]
-    if noise_offset.r == 0.0:
-        m_step_size = config.stepSize
-    else:
-        m_step_size = noise_offset.r
-        
+    m_step_size = config.stepSize if noise_offset.r == 0.0 else noise_offset.r
     step_offset = noise_offset.g
     step_dir = ray_dir * m_step_size
     pos = ray_origin + t_entry * ray_dir
@@ -156,8 +156,10 @@ def ray_march_pixel(pixel_coord, cam, config, textures, buffers):
     # 4. Ray Marching Loop
     t = t_entry + step_offset
     while t < t_exit:
-        # Coordinate Calculation
-        uvw = calculate_uvw(pos, config.bbmin, config.bbmax, config.rotationAngles)
+        # Coordinate Calculation: map to [0,1] volume space, apply rotation
+        uvw = (pos - config.bbmin) / (config.bbmax - config.bbmin)
+        rot_mat = rotation_matrix(config.rotationAngles)
+        uvw = rot_mat @ uvw
         
         # Density Sampling
         if config.bVolume4D == 1:
@@ -213,9 +215,11 @@ def ray_march_pixel(pixel_coord, cam, config, textures, buffers):
             buffers.motionVectorImage[pixel_coord] = vec4(0.0, 0.0, 0.0, 1.0)
         else:
             depth = pos_data.w
-            prev_ray_origin, prev_ray_dir = calculate_prev_ray(cam.previousCam, pixel_coord)
-            prev_pos = reproject_position(pos_data.xyz, depth, cam, cam.previousCam)
-            motion_uv = calculate_motion_uv(prev_pos, pos_data.xyz, pixel_coord)
+            # Reproject current world position to previous frame screen space
+            prev_ndc = cam.previousCam.proj @ cam.previousCam.camView @ vec4(pos_data.xyz, 1.0)
+            prev_screen_uv = (prev_ndc.xy / prev_ndc.w) * 0.5 + 0.5
+            curr_screen_uv = pixel_coord / config.dimensions.xy
+            motion_uv = prev_screen_uv - curr_screen_uv
             buffers.motionVectorImage[pixel_coord] = vec4(motion_uv, 0.0, 1.0)
 
     # 6. Noise Offset Update
@@ -229,6 +233,39 @@ def ray_march_pixel(pixel_coord, cam, config, textures, buffers):
 
     # 7. Store Output
     buffers.outputImage[pixel_coord] = final_color
+
+# Helper: Standard slab AABB intersection
+def ray_box_intersect(origin, dir, bbmin, bbmax):
+    tmin = (bbmin - origin) / dir
+    tmax = (bbmax - origin) / dir
+    t1 = min(tmin, tmax)
+    t2 = max(tmin, tmax)
+    t_enter = max(max(t1.x, t1.y), t1.z)
+    t_exit = min(min(t2.x, t2.y), t2.z)
+    if t_enter > t_exit or t_exit < 0:
+        return None, None
+    return t_enter, t_exit
+
+# Helper: Trilinear texture sampling
+def sample_3d_texture(tex, uvw):
+    # Standard trilinear interpolation on normalized [0,1] coordinates
+    return tex.sample(uvw)
+
+# Helper: Linear texture sampling
+def sample_1d_texture(tex, coord):
+    return tex.sample(coord)
+
+# Helper: Rotation matrix from angles
+def rotation_matrix(angles):
+    # Standard rotation matrix combining Y and X rotations
+    cy, cx = cos(angles.x), cos(angles.y)
+    sy, sx = sin(angles.x), sin(angles.y)
+    return mat4x4(
+        cy, sy*sx, sy*cx, 0.0,
+        0.0, cx, -sx, 0.0,
+        -sy, cy*sx, cy*cx, 0.0,
+        0.0, 0.0, 0.0, 1.0
+    )
 ```
 
 ### Parameters
@@ -252,6 +289,7 @@ def ray_march_pixel(pixel_coord, cam, config, textures, buffers):
 -   **Zero Position:** If position is zero during motion vector calculation, store zero motion vector to avoid division by zero or invalid reprojection [S2, unofficial].
 -   **Color Banding:** Minimized by applying a random offset to the ray start point based on fragment coordinates [S3, unofficial].
 -   **Transmittance Approximation:** Some implementations use a Taylor approximation for `exp(-density * cloudLightAbsorptionMult * dt)` instead of the exponential function [S3, unofficial].
+-   **Volume Scaling:** Volumetric data is scaled into a cube where the longest side is 2 to standardize coordinate calculations [S1].
 
 ## Operating characteristics
 -   **Time Complexity:** Reduces sampling points compared to linear sampling, improving efficiency [S1]. The exact complexity depends on the adaptive step size function and early termination [S1][S3, unofficial].

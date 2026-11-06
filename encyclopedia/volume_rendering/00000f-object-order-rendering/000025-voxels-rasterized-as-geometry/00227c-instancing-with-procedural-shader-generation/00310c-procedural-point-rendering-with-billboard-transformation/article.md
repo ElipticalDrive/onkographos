@@ -1,0 +1,125 @@
+# Procedural Point Rendering with Billboard Transformation
+
+Also called: GPU Instancing Setup, Procedural Instancing Configuration
+
+## Overview
+A rendering technique using Unity procedural instancing to render surface points as billboards. It transforms a grid-based point cloud into world space, orients each point to face the camera, and scales them based on a step size. It differs from [Surface-based Instancing with Noise Modulation](1582-surface-based-instancing-with-noise-modulation.md) by using explicit point positions rather than noise-driven displacement, and from [3D Gaussian Splatting via Instancing](1586-3d-gaussian-splatting-via-instancing.md) by using simple spherical billboards instead of anisotropic splats.
+
+## How it works
+**Inputs:**
+- `_SurfacePoints`: A structured buffer of `float4` containing point data. The `xyz` components are the point position, and the `w` component is the alpha value [S1, unofficial].
+- `_GridToWorld`: A 4x4 matrix used to transform point indices from grid space to world space [S1, unofficial].
+- `_ViewDir`: The view direction vector used to orient the billboards towards the camera [S1, unofficial].
+- `_Step`: A scalar value used to scale the object's local axes [S1, unofficial].
+- `_PointSize`: A scalar subtracted from `BASE_POINTSIZE` to determine the scaling factor [S1, unofficial].
+- `BASE_POINTSIZE`: Constant value 4.0 [S1, unofficial].
+- `BASE_BRIGHTNESS`: Constant value for brightness scaling [S1, unofficial].
+- `_IsoVals`: Array of isovalue colors indexed by instance ID [S1, unofficial].
+
+**Outputs:**
+- Rendered billboards representing surface points.
+
+**Data Structures:**
+- `DrawCallArgBuffer`: Structured buffer for indirect draw calls.
+  - `vertexCountPerInstance`: int
+  - `instanceCount`: int
+  - `startVertexLocation`: int
+  - `startInstanceLocation`: int
+
+**Steps:**
+1. **Retrieve Point Data:** In the `ConfigureProcedural` phase, retrieve the point position from `_SurfacePoints` using `unity_InstanceID`. Transform this position to world space using `_GridToWorld`. Extract the alpha value into `_Alpha` [S1, unofficial].
+2. **Calculate World Position:** Map the instance ID to a 3D grid coordinate using `oneDToThreeD`. Calculate the world position of the voxel center by shifting the grid coordinate to origin, scaling by `_Step`, and adding a half-step offset. Transform this position using `_GridToWorld` [S1, unofficial].
+3. **Set Translation:** Set the translation part of `unity_ObjectToWorld` to the calculated world position `pos` [S1, unofficial].
+4. **Set Scale:** Set the scale part of `unity_ObjectToWorld` (diagonal elements `m00`, `m11`, `m22`) to `_Step` divided by `(BASE_POINTSIZE - _PointSize)` [S1, unofficial].
+5. **Orient Billboard:** Construct a look-at matrix using the eye position as `pos`, the target as `pos - _ViewDir * 1000`, and up vector `(0, 1, 0)`. Multiply `unity_ObjectToWorld` by this matrix to orient the billboard [S1, unofficial].
+6. **Set Color:** Set the instance color based on the isovalue. The color is derived from `_IsoVals[unity_InstanceID]` scaled by `(BASE_BRIGHTNESS - _PointBrightness)` [S1, unofficial].
+7. **Discard Invalid Points:** Points with alpha less than 1.0 are discarded in the `clip_float` function to hide invalid or empty points [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for procedural instancing setup in Unity shader/graph context
+
+# Constants
+BASE_POINTSIZE = 4.0
+BASE_BRIGHTNESS = 1.0 # Assumed based on typical usage, not explicitly given in sources
+
+# Inputs
+SurfacePoints: StructuredBuffer<float4>
+GridToWorld: float4x4
+ViewDir: float3
+Step: float
+PointSize: float
+IsoVals: Array<float4>
+PointBrightness: float
+
+# Per-Instance Data
+InstanceID: uint
+WorldPos: float3
+Alpha: float
+Color: float4
+
+# Step 1: Retrieve Point Data
+PointData = SurfacePoints[InstanceID]
+WorldPos = mul(GridToWorld, float4(PointData.xyz, 1.0)).xyz
+Alpha = PointData.w
+
+# Step 7: Discard Invalid Points
+if Alpha < 1.0:
+    discard
+
+# Step 2: Calculate World Position (Alternative/Complementary to Step 1)
+# Note: Sources mention both retrieving from buffer and mapping ID to grid.
+# Implementation likely uses one or the other, or combines them.
+# Using buffer retrieval as primary source of position.
+# If grid mapping is used:
+# GridCoord = oneDToThreeD(InstanceID)
+# WorldPos = mul(GridToWorld, float4(GridCoord * Step + 0.5 * Step, 1.0)).xyz
+
+# Step 3: Set Translation
+unity_ObjectToWorld._m03_m13_m23 = WorldPos
+
+# Step 4: Set Scale
+ScaleFactor = Step / (BASE_POINTSIZE - PointSize)
+unity_ObjectToWorld._m00 = ScaleFactor
+unity_ObjectToWorld._m11 = ScaleFactor
+unity_ObjectToWorld._m22 = ScaleFactor
+
+# Step 5: Orient Billboard
+EyePos = WorldPos
+TargetPos = WorldPos - ViewDir * 1000.0
+UpVec = float3(0, 1, 0)
+LookAtMatrix = LookAt(EyePos, TargetPos, UpVec)
+unity_ObjectToWorld = mul(unity_ObjectToWorld, LookAtMatrix)
+
+# Step 6: Set Color
+Color = IsoVals[InstanceID] * (BASE_BRIGHTNESS - PointBrightness)
+```
+
+**Parameters:**
+- `_PointBrightness`: Range 0.0 to 0.99, default 0.99 [S1, unofficial].
+- `shapeFunction`: Enum, default Sphere [S1, unofficial].
+- `surfacePointsFunc`: Enum (QEF, Centroid, Block), default Centroid [S1, unofficial].
+- `renderMode`: Enum (Shaded, Wireframe), default Shaded [S1, unofficial].
+- `showGrid`, `showVolume`, `showSurface`, `showMesh`: Booleans [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Points with alpha less than 1.0 are discarded [S1, unofficial].
+- Precision issues may arise if `BASE_POINTSIZE - _PointSize` is close to zero.
+- Boundary conditions for grid coordinate mapping need careful handling to avoid out-of-bounds access.
+
+## Operating characteristics
+- **Time Complexity:** O(N) for N points, where each point undergoes constant-time transformations.
+- **Memory Complexity:** O(N) for storing point data in `_SurfacePoints`.
+- **Performance:** Efficient for large point clouds due to instancing. Indirect draw calls reduce CPU overhead.
+- **Strengths:** Simple implementation, flexible point positioning, good for visualizing isosurfaces.
+- **Limitations:** Limited to point-based representation, no depth sorting for transparent points (requires additional handling).
+- **When to Use:** Visualizing surface points, isosurfaces, or particle systems where billboarding is sufficient.
+- **When Not to Use:** When detailed geometry or complex shading is required.
+
+## Background
+Originated in Unity procedural instancing workflows for visualizing isosurfaces and surface points. Developed by vinceniko as part of the Isosurface project [S1, unofficial].
+
+## Sources
+[S1] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)

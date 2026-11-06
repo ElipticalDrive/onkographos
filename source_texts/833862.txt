@@ -1,0 +1,222 @@
+Render engine goal GodotGS should be a production-realistic Gaussian Splatting renderer for Godot: explicit stage contracts, deterministic GPU resource ownership, debuggable route/fallback behavior, and performance claims backed by repea...
+
+Audit P2: decide world-file streaming semantics and cache ownership · Issue #358 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Audit P2: decide world-file streaming semantics and cache ownership #358
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Audit P2: decide world-file streaming semantics and cache ownership#358
+Copy link
+Labels
+area:streamingStreaming and memory managementStreaming and memory managementauditFound during architecture auditFound during architecture auditdata-integrityData corruption or validation gapData corruption or validation gappriority:P2Medium priorityMedium priority
+Milestone
+Audit P2: Architecture Ownership Cleanup
+Description
+klausi3D
+opened on May 19, 2026
+Issue body actions
+Render engine goal
+GodotGS should be a production-realistic Gaussian Splatting renderer for Godot: explicit stage contracts, deterministic GPU resource ownership, debuggable route/fallback behavior, and performance claims backed by repeatable GPU/runtime evidence. The target is reliable rendering under real projects, not happy-path screenshots or green checks that hide skipped coverage.
+Issue goal
+Make .gsplatworld residency, staged payload, compression, save, and cache cleanup semantics boringly explicit so large-scene asset behavior is predictable.
+Problem
+The live implementation has a reasonable distinction between compressed resident-only files and uncompressed staged-file sources, but that contract needs to be elevated into docs, tests, importer behavior, and cache cleanup. Otherwise users will unknowingly choose a file format mode that defeats streaming.
+Evidence from audit
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:326-329 says compressed layout has no per-chunk random-access blocks and is resident-only.
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:495-506 attaches StagedFileChunkPayloadSource only for uncompressed, non-forced-resident loads.
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:552-564 materializes source-backed worlds before save when needed.
+Related existing issues: Make uncompressed .gsplatworld truly metadata/file-backed for streaming #318, import: orphan cleanup for stale .gsplatcache files #202, Optimize staged file chunk reads and avoid sparse indexed over-read #319, Remove repeated full-payload checksum hashing from streaming upload hot path #317.
+Done when
+Docs and importer UI explain which .gsplatworld modes are streamable and which are resident-only.
+Tests assert compressed files do not advertise file-backed chunk streaming unless the format gains random-access blocks.
+Save/load round trips preserve the intended residency contract.
+Stale .gsplatcache cleanup has deterministic ownership and tests.
+Out of scope
+Designing a new compressed random-access format unless this issue first proves current semantics are insufficient.
+Activity
+klausi3D
+added this to the Audit P2: Architecture Ownership Cleanup milestone on May 19, 2026
+klausi3D
+added
+priority:P2Medium priorityMedium priority
+area:streamingStreaming and memory managementStreaming and memory management
+auditFound during architecture auditFound during architecture audit
+data-integrityData corruption or validation gapData corruption or validation gap
+on May 19, 2026
+klausi3D commented on May 19, 2026
+klausi3D
+on May 19, 2026
+OwnerAuthor
+More actions
+Proposal: World File Streaming Semantics and Cache Ownership
+Render engine goal
+GodotGS should behave like a production renderer: world-file IO needs explicit contracts, deterministic CPU/GPU resource lifetime, real runtime/GPU evidence for streaming claims, and maintainable ownership boundaries so users can reason about large Gaussian Splatting worlds without reverse-engineering loader side effects.
+Current code reality
+Issue context: Audit P2: decide world-file streaming semantics and cache ownership #358 has no prior comments and links Make uncompressed .gsplatworld truly metadata/file-backed for streaming #318, import: orphan cleanup for stale .gsplatcache files #202, Optimize staged file chunk reads and avoid sparse indexed over-read #319, and Remove repeated full-payload checksum hashing from streaming upload hot path #317. Those divide the work into metadata/file-backed world loading, .gsplatcache cleanup, staged-read performance, and upload hot-path integrity overhead.
+Default .gsplatworld load is now metadata/file-backed for uncompressed files, not resident-plus-file-backed. should_materialize_resident_payload is only true for compressed data or explicit load_resident() (modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:319-323), GaussianData is only created under that condition (.../gaussian_splat_world_io.cpp:438-442), and uncompressed non-forced loads attach StagedFileChunkPayloadSource (.../gaussian_splat_world_io.cpp:495-506). Confidence: high.
+Compressed .gsplatworld is intentionally resident-only. The loader comment states compressed layout has no per-chunk random-access blocks (modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:326-329), and the file source is skipped when kFlagCompressed is present (.../gaussian_splat_world_io.cpp:495-498). Confidence: high.
+Explicit resident compatibility exists. ResourceFormatLoaderGaussianSplatWorld::load() calls the non-resident default path, while load_resident() forces materialization (modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:522-533). Confidence: high.
+Save currently mutates source-backed worlds into resident worlds before writing. ResourceFormatSaverGaussianSplatWorld::save() calls world->materialize_resident_gaussian_data() when the world has only a chunk payload source (modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:557-563). materialize_resident_gaussian_data() reads the full source into GaussianData and stores it back on the same resource (modules/gaussian_splatting/core/gaussian_splat_world.cpp:197-219). Confidence: high.
+The biggest user-facing footgun is save compression. The saver reads global rendering/gaussian_splatting/import/gsplatworld_compression_enabled (modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:137-142), attempts gzip when enabled (.../gaussian_splat_world_io.cpp:608-623), and writes compressed payload bytes (.../gaussian_splat_world_io.cpp:660-672). A load-save round trip of a streamable uncompressed world can therefore become resident-only if the project setting is enabled. Confidence: high.
+Renderer handoff supports file-backed streaming. GaussianSplatWorld3D submits both gaussian_data and payload_source, plus a route-policy-derived residency hint (modules/gaussian_splatting/nodes/gaussian_splat_world_3d.cpp:391-415). The renderer accepts file-backed payloads (modules/gaussian_splatting/renderer/render_data_orchestrator.cpp:245-260), initializes an empty streaming system for file-backed payloads and attaches the source (.../render_data_orchestrator.cpp:422-429), and chunk packing prefers payload source reads over resident data (modules/gaussian_splatting/core/gaussian_streaming.cpp:3594-3618). Confidence: high.
+Staged source IO is already better than the linked Optimize staged file chunk reads and avoid sparse indexed over-read #319 body describes. StagedFileChunkPayloadSource caches per-thread FileAccess handles and exposes byte/open counters (modules/gaussian_splatting/core/streaming_chunk_payload_source.h:97-140; .../streaming_chunk_payload_source.cpp:108-124), and sparse indexed reads avoid full min/max-span reads when the span is too sparse (.../streaming_chunk_payload_source.cpp:253-320). Confidence: high.
+Tests already cover part of the intended contract. test_gaussian_splat_world_io.h asserts default uncompressed loads have no resident GaussianData, do have a payload source, can materialize, and can explicitly load resident (modules/gaussian_splatting/tests/test_gaussian_splat_world_io.h:269-330). It also asserts compressed worlds remain resident-only (.../test_gaussian_splat_world_io.h:452-494) and validates staged source byte/open counters (.../test_gaussian_splat_world_io.h:139-204). Confidence: high.
+Cache ownership is only partial. PLY cache is enabled by default and world compression disabled by default (modules/gaussian_splatting/core/gaussian_splat_manager.cpp:1013-1016). PLYLoader writes sibling .gsplatcache files with source path/size/mtime/version metadata (modules/gaussian_splatting/io/ply_loader.cpp:324-349) and reloads them through the resident loader (.../ply_loader.cpp:267-321). ResourceImporterPLY registers the cache as a generated file when it exists (modules/gaussian_splatting/io/resource_importer_ply.cpp:526-532), but import: orphan cleanup for stale .gsplatcache files #202 is still real because there is no scanner/manual cleanup path and AssetDependencyManager::cleanup_orphaned_assets() is unimplemented (modules/gaussian_splatting/asset_management/asset_dependency_manager.cpp:751-753). Confidence: high.
+Docs and importer UX are behind the code. docs/features/streaming.md still says uncompressed .gsplatworld is “Resident GaussianData plus file-backed” (docs/features/streaming.md:20-26), while the current default code is source-backed without resident data. docs/workflows/GSPLATWORLD_BAKE.md lists bake options but does not warn that compressed output is resident-only (docs/workflows/GSPLATWORLD_BAKE.md:17-25). The .gsplatworld importer exposes no options and just validates/copies the binary (modules/gaussian_splatting/io/resource_importer_gsplatworld.cpp:222-227, .../resource_importer_gsplatworld.cpp:247-256). Confidence: high.
+Proposed solution
+Define the contract in code and docs as two first-class modes:
+streamable_uncompressed: uncompressed .gsplatworld, default ResourceLoader::load(), no resident GaussianData, valid ChunkPayloadSource, eligible for out-of-core chunk reads. This is the only current mode that should be marketed as file-backed streaming.
+resident_only: compressed .gsplatworld, explicit load_resident(), .gsplatcache, or direct PLY/SPZ asset import. This may still use the streaming system for GPU residency/LOD, but it is not out-of-core source streaming.
+Make save/load round trips preserve intent. A source-backed streamable world must resave as uncompressed unless the caller explicitly asks for resident_only_compressed_export. Do not let the global compression setting silently convert a streamable world into a resident-only world. If save needs materialization, keep it local to the write operation or restore the source-backed ownership afterward; avoid leaving the in-memory resource resident as a side effect unless an explicit resident materialization API was called.
+Add an explicit save/import policy surface. Add a small enum/policy object around world save/import such as WorldPayloadMode::Preserve, StreamableUncompressed, ResidentUncompressed, ResidentCompressed. Default should be Preserve for existing resources and StreamableUncompressed for bake/export flows that feed GaussianSplatWorld3D streaming. Compression should require an explicit resident-only choice with a warning string.
+Make .gsplatworld importer UX refuse ambiguity. Import metadata and inspector text should show payload_mode, streamable=yes/no, resident_only_reason, compressed=yes/no, chunk_count, and whether static chunk metadata is present. If a user chooses streaming route policy with a compressed world, the editor/runtime should report “compressed world is resident-only; export uncompressed for out-of-core streaming” instead of silently degrading.
+Own .gsplatcache as PLY importer-private cache. .gsplatcache should never be presented as a streamable world format. Its owner is the sibling PLY source plus metadata tuple (source_path, size, mtime, cache_version). Cleanup should live in the import/editor cache lane: on PLY reimport remove obsolete sibling caches for that source, and provide a manual “Clean Gaussian Splat Caches” action that scans .gsplatcache, validates metadata, and deletes files whose source is missing or mismatched. Do not put this ownership on runtime GaussianSplatWorld resources.
+Likely PR slices:
+PR A: docs + diagnostics contract (payload_mode, docs correction, importer/runtime warning strings).
+PR B: save policy + non-mutating/preserve-streamability round trip.
+PR C: .gsplatcache cleanup owner and editor/manual cleanup.
+PR D: runtime proof/benchmark gates and memory assertions for large uncompressed worlds.
+Implementation invariants:
+ResourceLoader::load(uncompressed.gsplatworld) must not allocate resident GaussianData by default.
+ResourceLoader::load(compressed.gsplatworld) must never attach StagedFileChunkPayloadSource until a random-access compressed block format exists.
+load_resident() must always produce resident data and no file-backed source.
+A streamable world save/load/save round trip must stay streamable unless an explicit resident-only export was requested.
+Streaming route policy must not imply out-of-core streaming unless the world payload mode is streamable.
+.gsplatcache lifetime is owned by the importer/editor cache system, not by runtime world resources.
+Tests, benchmarks, and docs
+Add C++ tests for streamable_uncompressed -> save -> load preserving has_chunk_payload_source()==true and has_resident_gaussian_data()==false, including the case where the global compression setting is true.
+Add C++ tests for explicit resident/compressed export producing has_resident_gaussian_data()==true and has_chunk_payload_source()==false.
+Add a regression test that saving a source-backed world does not permanently mutate the source resource into resident ownership unless the explicit materialization API is called.
+Add importer tests for .gsplatworld metadata classification: compressed resident-only, uncompressed streamable, uncompressed resident-forced load.
+Add .gsplatcache cleanup tests: missing PLY source, mismatched source mtime/size, valid cache preserved, cache registered as generated artifact during PLY import.
+Add runtime diagnostics assertions using get_render_stats(): route policy, backend selection reason, payload mode, file-backed source active, resident payload present/absent, bytes requested/read from StagedFileChunkPayloadSource.
+Add a large uncompressed world runtime benchmark that proves startup memory does not scale with total splat count before first chunk uploads, and that chunk uploads read through payload-source counters.
+Update docs/features/streaming.md, docs/workflows/GSPLATWORLD_BAKE.md, docs/workflows/importing.md, and docs/api/gaussian_splat_world3d.md to separate “GPU residency streaming” from “out-of-core source streaming”.
+Risks and unknowns
+A random-access compressed format is out of scope unless this issue is expanded; current gzip payload cannot provide chunk-level reads.
+The existing ResourceSaver API may make per-call save policy awkward; if so, add a dedicated GaussianSplatWorldIO::save_world(path, policy) helper and keep the generic saver on safe Preserve semantics.
+Windows file-handle lifetime needs proof: per-thread cached FileAccess handles are good for hot-path reads, but cleanup/delete flows must not fight live staged sources.
+Static chunk metadata quality matters. File-backed worlds without valid static layout can fall back to contiguous chunk partitioning; that may be correct but should be diagnosed because it can change streaming granularity.
+Existing project assets may depend on the current save side effect that leaves worlds resident after saving. If so, preserve that behavior only behind an explicit materialize/resident save path, not the default streaming-safe path.
+Go / no-go recommendation
+Go for implementation in narrow PRs. The core source-backed/uncompressed vs compressed/resident split is already mostly implemented and tested, so this is not a design-blocked issue. The prerequisite is to accept the strict contract above: users must not be able to choose or round-trip into a world-file mode that defeats out-of-core streaming without an explicit resident-only warning. The first implementation PR should fix docs/diagnostics and lock the save/load invariants before touching cache cleanup or broader importer UI.
+klausi3D commented on May 19, 2026
+klausi3D
+on May 19, 2026
+OwnerAuthor
+More actions
+Review: World File Streaming Semantics Proposal
+Verdict
+APPROVE WITH REQUIRED CHANGES
+What is strong
+The proposal matches the current world-file split: default uncompressed loads are source-backed and do not create resident GaussianData, while compressed loads and load_resident() are resident-only.
+It identifies the highest user-facing footgun correctly: ResourceSaver can materialize a source-backed world and the global compression setting can turn a streamable round trip into a resident-only compressed file.
+The cache ownership direction is production-oriented: .gsplatcache should remain PLY-importer/editor cache data, not a user-facing streaming world format.
+The test plan is aimed at the right invariants: source-backed load, compressed resident-only load, save/load preservation, non-mutating save behavior, importer classification, cache cleanup, and runtime proof counters.
+Required changes before implementation
+Make the save-contract change explicit in the first PR, not just as additive coverage. The current test suite deliberately expects save(loaded_source_backed_world) to leave resident GaussianData behind, so implementation must replace that old contract with the new preserve-streamability contract and update any dependent load-edit-save assumptions.
+Define the exact default for generic ResourceSaver::save() before coding the enum surface. For user safety, source-backed GaussianSplatWorld resources should preserve streamability even when rendering/gaussian_splatting/import/gsplatworld_compression_enabled=true; resident/compressed export needs an explicit API or option, not an ambient project-setting side effect.
+Treat runtime/editor diagnostics as a required acceptance gate, not polish. Route policy alone is not enough; diagnostics must expose actual payload mode/source state so a compressed world under a streaming route policy reports resident-only behavior clearly.
+Include cache_source_path in the .gsplatcache ownership validation/cleanup contract if the proposal keeps naming (source_path, size, mtime, cache_version) as the identity tuple. Current cache-hit validation checks size/mtime/version but not the stored source path.
+Implementation risks to watch
+Existing tests and possibly tools may rely on the current save side effect that materializes the in-memory resource after save; removing it without an explicit resident-save path can break editor workflows.
+.gsplatcache is written through the same world saver as .gsplatworld; if compression remains global and ambient, cache files may become compressed resident-only payloads. That is acceptable for cache reads but must not leak into streamable-world semantics or docs.
+The .gsplatworld importer currently copies and validates binary payloads cheaply. Adding classification metadata should not accidentally force full resident materialization for large uncompressed worlds.
+Cached FileAccess handles in staged payload sources improve hot-path IO, but cleanup/delete tooling must avoid racing live staged sources, especially on Windows.
+Static chunk metadata quality remains a hidden dependency. If diagnostics only say “streaming” but not whether chunk layout/source-backed reads are active, users will still misread resident GPU streaming as out-of-core source streaming.
+Reviewer evidence
+Issue Audit P2: decide world-file streaming semantics and cache ownership #358 defines the goal: make .gsplatworld residency, staged payload, compression, save, and cache cleanup semantics explicit so users do not pick modes that defeat streaming.
+Proposal reviewed: Audit P2: decide world-file streaming semantics and cache ownership #358 (comment)
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:319-323 gates resident materialization on compressed data or forced resident load; modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:438-442 only creates GaussianData on that path.
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:326-329 documents compressed layout as resident-only, and modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:495-505 attaches StagedFileChunkPayloadSource only for uncompressed non-forced loads.
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:522-533 keeps default load and explicit load_resident() separate.
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:557-563 materializes source-backed worlds before save, and modules/gaussian_splatting/core/gaussian_splat_world.cpp:197-219 stores the materialized GaussianData back on the same resource.
+modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:137-142, modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:608-623, and modules/gaussian_splatting/io/gaussian_splat_world_io.cpp:660-672 show compression is currently driven by the global project setting and writes compressed payload bytes.
+modules/gaussian_splatting/tests/test_gaussian_splat_world_io.h:269-330 covers source-backed default load and explicit resident load, but modules/gaussian_splatting/tests/test_gaussian_splat_world_io.h:314-318 currently asserts that saving a source-backed world materializes it.
+modules/gaussian_splatting/tests/test_gaussian_splat_world_io.h:452-494 covers compressed resident-only load behavior.
+modules/gaussian_splatting/core/streaming_chunk_payload_source.h:97-140 and modules/gaussian_splatting/core/streaming_chunk_payload_source.cpp:108-124 show per-thread file handle caching and IO counters; modules/gaussian_splatting/core/streaming_chunk_payload_source.cpp:253-320 shows sparse indexed reads avoid full-span over-read.
+modules/gaussian_splatting/nodes/gaussian_splat_world_3d.cpp:391-415, modules/gaussian_splatting/renderer/render_data_orchestrator.cpp:245-260, modules/gaussian_splatting/renderer/render_data_orchestrator.cpp:422-429, and modules/gaussian_splatting/core/gaussian_streaming.cpp:3594-3618 confirm renderer handoff and chunk packing can use file-backed payload sources.
+modules/gaussian_splatting/io/ply_loader.cpp:267-321 loads .gsplatcache through the resident loader and validates size/mtime/version; modules/gaussian_splatting/io/ply_loader.cpp:339-344 writes cache metadata including cache_source_path.
+modules/gaussian_splatting/io/resource_importer_ply.cpp:526-532 registers .gsplatcache as a generated artifact when present, while modules/gaussian_splatting/asset_management/asset_dependency_manager.cpp:751-753 still leaves broad orphan cleanup unimplemented.
+modules/gaussian_splatting/io/resource_importer_gsplatworld.cpp:222-227 exposes no import options, and modules/gaussian_splatting/io/resource_importer_gsplatworld.cpp:275-280 returns only source/resource path metadata today.
+docs/features/streaming.md:20-26 still describes uncompressed .gsplatworld as resident plus file-backed, which conflicts with current default load behavior. docs/workflows/GSPLATWORLD_BAKE.md:17-25 lists bake options without warning that compressed output is resident-only.
+klausi3D commented on May 19, 2026
+klausi3D
+on May 19, 2026
+OwnerAuthor
+More actions
+Opened draft PR #365 for the first implementation slice: #365
+Scope:
+Defines streamable vs resident-only payload semantics in code and docs.
+Keeps generic uncompressed/preserving for streamable worlds.
+Adds explicit resident compressed export helpers.
+Adds payload-mode diagnostics in and renderer stats.
+Adds source-path validation.
+Adds regression coverage for save/load streamability, compressed resident-only import, cache source mismatch, and payload stats.
+Validation run locally:
+[module-tests] Tracked backup-file guard passed.
+[module-tests] Tracked artifact hygiene guard passed.
+[module-tests] History artifact guard mode: warn (env: GS_CI_HISTORY_ARTIFACT_GUARD_MODE).
+[module-tests] Missing history artifact audit script: scripts/repo/history_artifact_audit.py; skipping history audit in warn mode.
+[module-tests] [build-metadata-check] PASSED
+[module-tests] [build-metadata-check] SCsub/CMake/doc metadata contracts are aligned.
+[module-tests] [shader-dependency-check] PASSED
+[module-tests] [shader-dependency-check] Shader include/build graph contracts are intact.
+[module-tests] [gaussian-layout-check] PASSED
+[module-tests] [gaussian-layout-check] PackedGaussian and PackedGaussianQuantized host/mirror field signatures, offsets, and size are aligned.
+[module-tests] [benchmark-asset-guard] passed
+[module-tests] Renderer guard checks passed.
+[module-tests] Static format safety guards passed (3 checks).
+[module-tests] Guard-only mode complete.
+Targeted SCons object checks for touched world IO/import/diagnostics files and .
+klausi3D commented on May 19, 2026
+klausi3D
+on May 19, 2026
+OwnerAuthor
+More actions
+Opened draft PR #365 for the first implementation slice: #365
+Scope:
+Defines streamable vs resident-only .gsplatworld payload semantics in code and docs.
+Keeps generic ResourceSaver::save() uncompressed/preserving for streamable worlds.
+Adds explicit resident compressed export helpers.
+Adds payload-mode diagnostics in GaussianSplatWorld and renderer stats.
+Adds .gsplatcache source-path validation.
+Adds regression coverage for save/load streamability, compressed resident-only import, cache source mismatch, and payload stats.
+Validation run locally:
+git diff --check
+python3 tests/ci/run_module_tests.py --guard-only --base-ref origin/master
+Targeted SCons object checks for touched world IO/import/diagnostics files and test_main.
+klausi3D commented on Jul 22, 2026
+klausi3D
+on Jul 22, 2026
+OwnerAuthor
+More actions
+Completed by #365 — defines .gsplatworld payload/residency semantics on io/gaussian_splat_world_io.{cpp,h} with tests asserting the residency contract (payload_mode=='streamable_uncompressed', is_streamable_payload, compressed files don't advertise streaming, source-backed round-trip). Verified: #365 touched the world_io files + docs + test_gaussian_importer.h.
+klausi3D
+closed this as completedon Jul 22, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+area:streamingStreaming and memory managementStreaming and memory managementauditFound during architecture auditFound during architecture auditdata-integrityData corruption or validation gapData corruption or validation gappriority:P2Medium priorityMedium priority
+Projects
+No projects
+Milestone
+Audit P2: Architecture Ownership CleanupNo due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

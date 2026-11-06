@@ -1,0 +1,135 @@
+--- v001.md
++++ v002.md
+@@ -1,22 +1,42 @@
+ # Direct Volume Rendering
+ 
+-Also called: D2VR, Direct Direct Volume Rendering, Direct Volume Visualization, Direct Volumetric Rendering, Non-thresholding direct volume visualization, di: skweed vi: a:
++Also called: DVR, Direct Volume Visualization, Direct Volumetric Rendering
+ 
+ ## Overview
+-Direct Volume Rendering (DVR) generates images of 3D volumetric data sets without explicitly extracting geometric surfaces or creating intermediate polygonal representations [S1, S3, S5, S7, unofficial][S9]. It treats the volume as a transparent gel, simulating light transmission through the medium by mapping scalar data values directly to optical properties (color and opacity) via a transfer function [S1, S2, S7, unofficial]. Unlike indirect methods that require preprocessing to generate isosurfaces, DVR preserves all information in the original dataset and allows weak or ill-defined structures to remain visible [S3, S7, unofficial]. It is distinguished from its siblings by its direct projection of voxel data onto the image plane using front-to-back compositing, avoiding the lossy resampling steps associated with grid-based intermediate representations [S6][S7, unofficial].
++Direct Volume Rendering (DVR) visualizes 3D scalar data by treating the volume as a translucent gel or gas, simulating light transmission through the medium without extracting intermediate geometric surfaces [S1, S2, S9, unofficial]. Unlike [Indirect Volume Rendering](3314-indirect-volume-rendering.md), which converts data into polygonal meshes, DVR processes the entire dataset directly, preserving all information and allowing weak or ill-defined structures to remain visible [S4, S9, unofficial]. It differs from [Back-face rasterized volume rendering](1296-back-face-rasterized-volume-rendering.md) by using ray casting rather than rasterization primitives, and from [Neural volume rendering](1576-neural-volume-rendering-techniques.md) by relying on explicit optical models rather than learned latent representations.
+ 
+ ## How it works
+-The method relies on the volume rendering integral, discretized into a summation over sample points along a ray [S3, S5, unofficial]. The ray $r$ is parameterized by $r(t) = O + tD$, entering the volume at $t_{start}$ and exiting at $t_{end}$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md). The data model is sampled using $s(t)$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md).
++The method implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating absorption and self-emission along a ray through the scalar volume [S5][S7, unofficial].
+ 
+-The compositing is performed front-to-back [S2, S3, S8, S9, S11, S14, S16, S20, S23, S26, unofficial]. Let $C'_i$ be the accumulated color and $\alpha'_i$ be the accumulated opacity after sample $i$, with initial conditions $C'_0 = 0$ and $\alpha'_0 = 0$ [S9]. For each sample $i$ along the ray:
+-1.  Sample the volume at the current ray position to get a scalar value $d_i$ [S2, S5, unofficial].
+-2.  Apply a transfer function to map the scalar value to color $C_i$ and opacity $\alpha_i$ [S2, S5, unofficial].
+-3.  Update accumulated color:
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar volume $V$ defined on a rectilinear grid, a camera configuration (origin $O$, direction $D$), a transfer function $T$ mapping scalar values to color and opacity, and volume bounds.
++*   **Output:** A 2D image where each pixel contains the accumulated color $C$ and opacity $\alpha$.
++
++**Data Structures:**
++*   **Volume Data:** A 3D array of scalar values $V_{i,j,k}$ representing density at grid vertices [S3, unofficial][S5].
++*   **Transfer Function:** A mapping $T: [\min, \max] \rightarrow [0,1]^4$ (RGB$\alpha$), typically discretized into regularly spaced bins with linear interpolation [S2, unofficial][S5].
++*   **Ray:** Parameterized as $r(t) = O + tD$, where $t$ is the distance along the ray [S3, unofficial].
++
++**Steps:**
++
++1.  **Ray Casting:** For each pixel, cast a ray from the camera origin through the pixel center into the volume [S3, S9, unofficial].
++2.  **Ray Initialization:** Determine the entry point $t_{start}$ and exit point $t_{end}$ of the ray within the volume bounds [Volume Raycasting Discretization](831-volume-raycasting-discretization.md). Apply a fixed random offset $t_o \sim U(0, \Delta t)$ to the start position to prevent banding artifacts caused by regular sampling [S7, S18, unofficial].
++3.  **Sampling:** Discretize the ray segment $[t_{start}, t_{end}]$ into $N$ equidistant samples with step size $\Delta t$. The position of sample $i$ is $x_i = O + (t_{start} + i\Delta t + t_o)D$ [S7, unofficial][S13].
++4.  **Interpolation:** For each sample position $x_i$, retrieve the scalar density value $d_i$ from the volume data using trilinear interpolation [S2, unofficial][S5, S13].
++    $$ d_i = \text{TrilinearInterpolate}(V, x_i) $$
++5.  **Classification (Transfer Function):** Map the scalar density $d_i$ to an emitted color $C_i$ and opacity $\alpha_i$ using the transfer function [S2, S9, unofficial].
++    $$ C_i, \alpha_i = T(d_i) $$
++    The opacity is often derived from the absorption coefficient $\kappa$ using the Beer-Lambert model: $\alpha_i = 1 - \exp(-\Delta t \cdot \kappa(d_i))$ [S2, unofficial][S5].
++6.  **Shading (Optional but common):** Estimate the gradient $\nabla f$ at $x_i$ using central differences to compute surface normals for illumination [S9, S18, unofficial].
++    $$ \nabla f(x_i, y_j, z_k) \approx \frac{1}{2} \begin{bmatrix} f(x_{i+1}, y_j, z_k) - f(x_{i-1}, y_j, z_k) \\ f(x_i, y_{j+1}, z_k) - f(x_i, y_{j-1}, z_k) \\ f(x_i, y_j, z_{k+1}) - f(x_i, y_j, z_{k-1}) \end{bmatrix} $$
++    To avoid normal discontinuities, a two-voxel offset is sometimes used instead of one [S18, unofficial]. The gradient is used to modulate the color $C_i$ via a shading model (e.g., Phong) [S4, S9, unofficial].
++7.  **Compositing:** Accumulate the color and opacity from front to back using alpha blending [S2, S3, S9, unofficial]. Let $C'_{i-1}$ and $\alpha'_{i-1}$ be the accumulated color and opacity after sample $i-1$. Initialize $C'_0 = 0, \alpha'_0 = 0$.
+     $$ C'_i = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i $$
+-4.  Update accumulated opacity:
+     $$ \alpha'_i = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i $$
+-5.  If $\alpha' \ge 1$ or a threshold (typically 0.99) [S2, S18, unofficial], terminate the ray (early ray termination) [S2, S3, unofficial][S4].
++8.  **Early Ray Termination:** If $\alpha'_i \ge 1$ or a threshold (typically 0.99), terminate the ray early to save computation [S2, S3, S4, S18, unofficial].
++9.  **Gamma Correction:** Apply gamma correction (typically $\gamma = 2.2$) to the final accumulated color [S9, unofficial].
++    $$ C_{final} = (C'_N)^{1/2.2} $$
+ 
+-Rays are cast from the eyepoint, one for each pixel [S1, unofficial][S4]. The volume is typically represented as a 3D texture [S4][S3, unofficial]. Gradients for shading are calculated using a central difference operator [S6]. To avoid normal discontinuities that cause visible rings on smooth surfaces, the gradient is computed using a two-voxel offset rather than a one-voxel offset [S18, unofficial]. Sampling is performed using trilinear interpolation [S1, unofficial][S5, unofficial]. A fixed random offset is applied to each ray's start position to prevent sample layers from appearing as bands [S18, unofficial]. The final accumulated color is typically corrected with gamma 2.2 [S9].
++**Pseudocode:**
+ 
+ ```python
+@@ -82,11 +102,11 @@
+                 # Compute current position in texture space [0,1]
+                 pos = [(ray_origin[i] + t * ray_direction[i]) for i in range(3)]
+-                # Sample volume at current position using trilinear interpolation [S1, unofficial][S5, unofficial]
++                # Sample volume at current position using trilinear interpolation [S1, unofficial][S5]
+                 scalar_value = trilinear_interpolate(volume_data, pos, volume_dims)
+                 
+-                # Apply transfer function to get color and opacity [S2, S5, unofficial]
++                # Apply transfer function to get color and opacity [S2, unofficial][S5]
+                 color, opacity = transfer_function(scalar_value)
+                 
+-                # Front-to-back compositing [S2, S5, unofficial]
++                # Front-to-back compositing [S2, unofficial][S5]
+                 accumulated_color[0] += (1.0 - accumulated_opacity) * opacity * color[0]
+                 accumulated_color[1] += (1.0 - accumulated_opacity) * opacity * color[1]
+@@ -96,5 +116,5 @@
+                 t += step_size
+                 
+-            # Gamma correction [S9]
++            # Gamma correction [S9, unofficial]
+             image[y][x] = pow_vec3(accumulated_color, 1.0/2.2)
+             
+@@ -102,23 +122,48 @@
+ ```
+ 
++**Parameters:**
++*   **Step Size ($\Delta t$):** Typically chosen relative to voxel size $d_v$ as $\Delta t = d_v / s$, where $s$ is the sampling rate [S7, unofficial][S13].
++*   **Threshold:** Early termination threshold, typically 0.99 [S2, S18, unofficial].
++*   **Jitter Magnitude:** Usually equal to $\Delta t$ [S7, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Aliasing:** Fixed sampling rates cause aliasing artifacts. Mitigated by ray jittering [S7, unofficial].
++*   **Band Artifacts:** Regular sampling can cause visible bands. Mitigated by random offset [S18, unofficial].
++*   **Normal Discontinuities:** One-voxel central differences can cause rings on smooth surfaces. Use two-voxel offsets [S18, unofficial].
++*   **Undersampling:** If the transfer function and data are undersampled, artifacts appear [S12, unofficial].
++*   **Information Loss:** Traditional grid-based resampling loses information due to approximation of ideal reconstruction filters. Direct methods from projections (D2VR) avoid this [S8].
++
+ ## Subtopics
+ 
+ ### [Indirect Volume Rendering](3314-indirect-volume-rendering.md)
+-Indirect Volume Rendering (IVR) is a technique where volume data is converted into an intermediate traditional computer graphics representation, usually an isosurface or iso-contour, which is then rendered using standard hardware. Unlike [Direct Volume Rendering](1184-direct-volume-rendering.md), which treats the volume as a transparent gel and processes voxels directly without intermediate steps, IVR generates an explicit geometric representation (such as a triangular mesh) in a preprocessing step. This separation allows the use of highly optimized, standard rasterization pipelines for the final image generation.
++Converts volume to intermediate geometry (isosurfaces) for rasterization. Choose when hardware rasterization performance is critical and explicit surfaces are desired.
++
++### [Volumetric Normal Mapping](6594-volumetric-normal-mapping.md)
++Perturbs gradients with a 3D normal texture to add high-frequency detail without mesh extraction. Choose when visualizing multiple attributes or adding surface detail to smooth volumes.
+ 
+ ## Operating characteristics
+-The number of operations $k$ is proportional to the overall number of samples along the rays [S4]. The sampling rate $s$, inversely proportional to the distance between samples $l$, greatly influences the accuracy of approximation and the quality of rendering [S9]. DVR is efficient for structured volume data due to fast GPU texture access and interpolation [S8, unofficial]. However, GPU DVR algorithms for unstructured data are nontrivial [S8, unofficial]. It produces artifacts when the convolution of the transfer function and underlying data set is undersampled [S8, unofficial]. Unlike surface-based models, it eliminates the extensive preprocessing step and preserves all information in the original data set [S3, unofficial]. It allows weak or ill-defined surfaces to appear because classification constraints can be more relaxed than when using geometric primitives [S3, unofficial].
++*   **Time Complexity:** Proportional to the number of pixels $W \times H$ and the number of samples $N$ per ray ($O(W \cdot H \cdot N)$) [S5].
++*   **Memory Complexity:** $O(V)$ for the volume data, plus $O(W \cdot H)$ for the image buffer [S5].
++*   **Performance:** Software implementations are slow; hardware acceleration using 3D texture mapping on GPUs is standard for rectilinear grids [S11].
++*   **Strengths:** Preserves all data information; no preprocessing required; handles transparency and internal structures naturally; allows relaxed classification constraints [S4, S9, unofficial].
++*   **Limitations:** Computationally expensive for high-resolution data; sensitive to transfer function quality; aliasing if not jittered; non-trivial for unstructured data [S12, unofficial].
++*   **When to Use:** When transparency, internal structures, and data fidelity are important, and sufficient compute resources (GPU) are available.
++*   **When Not to Use:** When explicit surface meshes are required (use [Indirect Volume Rendering](3314-indirect-volume-rendering.md)) or when real-time performance on low-end hardware is critical without acceleration techniques.
+ 
+ ## Background
+-The term direct volume visualization was coined by Mark Levoy [S3, unofficial]. His algorithm is based on directly shading each data sample and projecting it on to the image plane [S3, unofficial]. The technique used in some research is a modified version of the direct volume visualization rendering method developed at PIXAR [S3, unofficial].
++Direct Volume Rendering was coined by Mark Levoy [S4, unofficial]. It emerged as an alternative to surface-based rendering (like Marching Cubes) to avoid the loss of information associated with binary classification and surface extraction [S4, S9, unofficial]. The technique is widely used in medical imaging and scientific visualization to visualize complex internal structures [S1, S9, unofficial]. It relies on the volume rendering integral, discretized into a summation over sample points along a ray [S3, unofficial][S5].
+ 
+ ## Sources
+ [S1] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)
+ [S2] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)
+-[S3] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+-[S4] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
+-[S5] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+-[S6] D2VR: High-Quality Volume Rendering of Projection-based Volumetric Data, https://doi.org/10.2312/vissym/eurovis06/211-218, fetched 2026-10-26
+-[S7] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
+-[S8] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
+-[S9] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29+[S3] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
++[S4] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
++[S5] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
++[S6] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
++[S7] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)
++[S8] D2VR: High-Quality Volume Rendering of Projection-based Volumetric Data, https://doi.org/10.2312/vissym/eurovis06/211-218, fetched 2026-10-26
++[S9] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
++[S10] PDF Direct Volume Rendering, https://www.cs.unh.edu/~cs880/lectureNotes/DVR.pdf, fetched 2026-10-28 (unofficial)
++[S11] Interactive Volume Visualization, https://web.cs.ucdavis.edu/~okreylos/ResDev/VolVis/MainPage.html, fetched 2026-10-28
++[S12] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)
++[S13] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29

@@ -48,8 +48,6 @@ This method extends distance-field ray marching to simulate transparent dielectr
     This offset prevents floating-point inaccuracies at sharp angles from causing immediate re-intersection [S1, unofficial].
 
 **Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def render_refraction(ro, rd, max_refractions=4):
     color = vec3(0.0)

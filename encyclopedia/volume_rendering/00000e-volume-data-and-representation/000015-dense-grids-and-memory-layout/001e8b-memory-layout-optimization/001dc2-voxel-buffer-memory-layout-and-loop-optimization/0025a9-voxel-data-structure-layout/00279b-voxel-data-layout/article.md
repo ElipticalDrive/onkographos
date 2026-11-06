@@ -3,133 +3,147 @@
 Also called: Input Data Format, Node Data Layout, Voxel Cube, Voxel Data Structure (Naive), World Tensor
 
 ## Overview
-Voxel Data Layout organizes a dense 3D grid into contiguous memory for efficient spatial indexing during volume rendering [S4, S6, unofficial]. Unlike sparse structures that skip empty space with pointers, this layout allocates fixed memory per voxel, prioritizing predictable linear access and cache locality [S6, unofficial].
+Voxel Data Layout refers to the fundamental memory organization of voxel data in a dense 3D grid, typically implemented as a contiguous array or tensor indexed by world coordinates $[x, y, z]$. It solves the problem of mapping 3D spatial positions to linear memory addresses for efficient access during rendering or processing. Unlike hierarchical structures (e.g., [Voxel Data Structure](3982-voxel-data-structure.md)) which use pointers or bitmasks to skip empty space, this layout stores every voxel in a fixed-size slot, making it simple to implement but potentially memory-inefficient for sparse scenes. It serves as the base layer for optimizations like [Voxel Material Packing](4907-voxel-material-packing.md) and [Voxel Renderer with Top-Level Grid and Bricks](8114-voxel-renderer-with-top-level-grid-and-bricks.md).
 
 ## How it works
 ### Inputs and Outputs
-- **Input**: 3D integer coordinates $(x, y, z)$ within bounds $[0, \text{Width}-1] \times [0, \text{Height}-1] \times [0, \text{Depth}-1]$ [S6, unofficial].
-- **Output**: A voxel data structure (e.g., a 32-bit integer, a struct, or a tensor) containing material/color/opacity information [S1, S4, S7, unofficial].
+- **Input**: 3D dimensions ($W, H, D$) defining the volume bounds, and a stream of voxel data (type, color, opacity, etc.).
+- **Output**: A linear memory buffer (array) where each voxel is stored at a specific index calculated from its $(x, y, z)$ coordinates.
 
-### Data Structures and Layout
-The layout varies by implementation goal, but common patterns include:
+### Data Structures
+The layout is a contiguous 1D array. The specific field composition varies by implementation:
 
-1.  **Naive Tensor (World Tensor)**: A 3D array or flattened 1D array where each voxel stores opacity $\sigma$ and an RGB triplet [S4, unofficial].
-    -   **Fields**: $\sigma$ (float), $R$ (float), $G$ (float), $B$ (float).
-    -   **Size**: 4 numbers per voxel [S4, unofficial].
-    -   **Indexing**: $Index = x + y \cdot \text{Width} + z \cdot \text{Width} \cdot \text{Height}$ [S6, unofficial].
+1.  **Naive Tensor Layout [S4, unofficial]**:
+    -   Structure: A 3D tensor indexed by `world[x, y, z]`.
+    -   Entry: A tensor containing 4 numbers: opacity $\sigma$ followed by an RGB triplet $(R, G, B)$.
+    -   Total: 4 floating-point values per voxel (typically 32-bit floats, though not explicitly stated, implied by "numbers ranging from 0.0 to 1.0").
 
-2.  **Packed 32-bit Integer**: Used for performance-critical or limited-memory contexts [S7, unofficial].
-    -   **Bits [31..24]**: 8-bit Material ID (max 256 materials) [S7, unofficial].
-    -   **Bits [23..16]**: Red channel [S7, unofficial].
-    -   **Bits [15..8]**: Green channel [S7, unofficial].
-    -   **Bits [7..0]**: Blue channel [S7, unofficial].
-    -   *Alternative Packing*: 8 bits Type, 16 bits Color, 8 bits Auxiliary [S1, unofficial].
+2.  **Fixed-Width Bit-Packed Layout [S1, unofficial]**:
+    -   Storage: 32-bit storage buffer per voxel.
+    -   Layout:
+        -   Bits 0-7: Voxel type (8 bits).
+        -   Bits 8-23: Color (16 bits).
+        -   Bits 24-31: Auxiliary data (8 bits).
+    -   Scaling: Voxels are scaled such that edges are $1/8$ unit in length [S1, unofficial].
 
-3.  **Binary Index Format**: Stored in files or buffers.
-    -   **Order**: Left-to-right, bottom-to-top, back-to-front [S2, unofficial].
-    -   **Precision**: 8-bit or 16-bit indices [S2, unofficial].
+3.  **Binary Index Layout [S2, unofficial]**:
+    -   Format: Binary file composed of 8-bit or 16-bit indices.
+    -   Order: Left-to-right, bottom-to-top, back-to-front.
 
-### Numbered Steps for Access
-1.  **Validate Bounds**: Check if $0 \le x < \text{Width}$, $0 \le y < \text{Height}$, and $0 \le z < \text{Depth}$ [S6, unofficial].
-2.  **Compute Linear Index**:
-    $$ \text{index} = x + y \cdot \text{Width} + z \cdot \text{Width} \cdot \text{Height} $$
-    [S6, unofficial]
+4.  **Gaussian Lobe Layout [S5]**:
+    -   Fields per voxel:
+        1.  Average vector $D$ (direction).
+        2.  Standard deviation $\sigma$ (encoded via $|D|$).
+        3.  Visibility/Occlusion (single average value).
+        4.  Material color (opacity-weighted, alpha pre-multiplied).
+        5.  Normal (pre-multiplied by opacity).
+
+### Index Calculation
+For a contiguous 1D array `_voxelData` of generic type `T`, 3D coordinates $(x, y, z)$ are mapped to a 1D index using row-major ordering (implied by "left-to-right, bottom-to-top, back-to-front" [S2, unofficial] and standard C-style array flattening [S6, unofficial]):
+
+$$
+\text{Index}(x, y, z) = x + y \cdot W + z \cdot W \cdot H
+$$
+
+Where:
+-   $W$ is Width.
+-   $H$ is Height.
+-   $D$ is Depth (used for bounds checking).
+
+### Steps for Access
+1.  **Compute Index**: Calculate the linear index from $(x, y, z)$ using the formula above.
+2.  **Bounds Check**: Verify $0 \le \text{Index} < W \cdot H \cdot D$.
 3.  **Retrieve Data**:
-    -   If using a contiguous array `voxel_data` of type `T`:
-        ```python
-        voxel_data = voxel_data[index]
-        ```
-    -   If using a packed 32-bit integer `raw`:
-        ```python
-        material_id = (raw >> 24) & 0xFF
-        r = (raw >> 16) & 0xFF
-        g = (raw >> 8) & 0xFF
-        b = raw & 0xFF
-        ```
-    [S6, S7, unofficial]
-4.  **Handle Out-of-Bounds**: If the coordinate is invalid, return a default value.
-    -   For the Naive Tensor: Return $[0, 0, 0, 0]$ (zero opacity, black color) [S4, unofficial].
-    -   For Safe Access Methods: Return `false` and set output to `default` (e.g., 0 for bytes) [S6, unofficial].
-
-### Formulas
--   **Index Calculation**:
-    $$ I(x, y, z) = x + y \cdot W + z \cdot W \cdot H $$
-    Where $W$ is Width, $H$ is Height [S6, unofficial].
-
--   **Variance Encoding (for Gaussian Lobes)**:
-    $$ \sigma^2 = \frac{1 - |D|}{|D|} $$
-    Where $|D|$ is the norm of the average direction vector $D$. This encoding eases interpolation [S5].
-
-### Parameters
--   **Width, Height, Depth**: Integer dimensions defining the volume bounds [S6, unofficial]. Typical values: Not given in the sources.
--   **Voxel Scale**: In some implementations, voxel edges are scaled to $1/8$ unit length to increase geometric detail [S1, unofficial].
--   **Max Materials**: 256, determined by 8-bit material ID [S7, unofficial].
-
-### Edge Cases and Pitfalls
--   **Out-of-Bounds Access**: Direct array access without bounds checking throws an `IndexOutOfRangeException` (or equivalent segfault) [S6, unofficial]. Always use a safe accessor (e.g., `TryGetVoxelData`) that checks $0 \le \text{index} < \text{Length}$ [S6, unofficial].
--   **Default Return Value**: Addressing a non-existent voxel position must consistently return a defined default (e.g., $[0,0,0,0]$) to prevent rendering artifacts or crashes [S4, unofficial].
--   **Memory Contiguity**: The layout assumes a single contiguous native array. Strided or interleaved layouts require different indexing logic [S6, unofficial].
+    -   If valid, return `_voxelData[Index]`.
+    -   If invalid, return a default value (e.g., $[0,0,0,0]$ for RGBA [S4, unofficial] or `default(T)` [S6, unofficial]).
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_voxel(x, y, z, width, height, depth, voxel_data):
-    """
-    Returns voxel data. If out of bounds, returns default value.
-    For packed 32-bit integers, returns a dict with material, r, g, b.
-    For tensors, returns the raw tensor.
-    """
-    # 1. Validate bounds
-    if not (0 <= x < width and 
-            0 <= y < height and 
-            0 <= z < depth):
-        return [0, 0, 0, 0]
+class VoxelGrid:
+    def __init__(self, width, height, depth, data_type=float):
+        self.width = width
+        self.height = height
+        self.depth = depth
+        self.volume_size = width * height * depth
+        # Initialize contiguous array with default values (e.g., 0.0 or 0)
+        self._voxel_data = [data_type(0)] * self.volume_size
 
-    # 2. Compute linear index
-    index = x + y * width + z * width * height
+    def set_voxel(self, x, y, z, value):
+        """
+        Sets the voxel at (x, y, z) to value.
+        Raises IndexError if out of bounds.
+        """
+        index = self._xyz_to_index(x, y, z)
+        if 0 <= index < self.volume_size:
+            self._voxel_data[index] = value
+        else:
+            raise IndexError(f"Voxel ({x}, {y}, {z}) out of bounds for grid {self.width}x{self.height}x{self.depth}")
 
-    # 3. Retrieve data
-    raw = voxel_data[index]
+    def get_voxel(self, x, y, z):
+        """
+        Gets the voxel at (x, y, z).
+        Returns default value (0) if out of bounds.
+        """
+        index = self._xyz_to_index(x, y, z)
+        if 0 <= index < self.volume_size:
+            return self._voxel_data[index]
+        else:
+            # Out-of-bounds access returns [0,0,0,0] or default [S4, S6, unofficial]
+            return self._voxel_data[0] # Assuming default is 0 or first element
 
-    # 4. Unpack if necessary (example for 32-bit packed layout)
-    if isinstance(raw, int):
-        material_id = (raw >> 24) & 0xFF
-        r = (raw >> 16) & 0xFF
-        g = (raw >> 8) & 0xFF
-        b = raw & 0xFF
-        return {"material": material_id, "r": r, "g": g, "b": b}
-    
-    # If raw is a tensor/struct (e.g., [sigma, r, g, b]):
-    return raw
+    def try_get_voxel(self, x, y, z):
+        """
+        Safe access method. Returns (True, value) if valid, (False, default) if invalid.
+        """
+        index = self._xyz_to_index(x, y, z)
+        if 0 <= index < self.volume_size:
+            return True, self._voxel_data[index]
+        else:
+            return False, self._voxel_data[0]
+
+    def _xyz_to_index(self, x, y, z):
+        """
+        Maps 3D coordinates to 1D index using row-major order.
+        Order: Left-to-right (x), Bottom-to-top (y), Back-to-front (z) [S2, unofficial].
+        """
+        return x + y * self.width + z * self.width * self.height
 ```
+
+### Parameters and Edge Cases
+-   **Invalid Node/Out-of-Bounds**: Addressing a voxel position not in the world returns $[0,0,0,0]$ [S4, unofficial]. Direct access via raw index without bounds checking throws `IndexOutOfRangeException` [S6, unofficial].
+-   **Root Node**: In hierarchical variants, `ROOT_NODE` is often 0 [S3, unofficial].
+-   **Invalid Node Ref**: `INVALID_NODE` is `0xFFFFFFFF` [S3, unofficial].
+-   **Precision**: Using 32-bit floats for RGB/Opacity allows full range $[0.0, 1.0]$ [S4, unofficial]. Bit-packed formats (8/16/8 bits) reduce precision but save memory [S1, unofficial].
 
 ## Subtopics
 
+### [Voxel Material Packing](4907-voxel-material-packing.md)
+Voxel Material Packing is a memory layout optimization that encodes a voxel's material ID and RGB color into a single 32-bit integer. This approach allows a renderer to fetch material properties and color data in a single memory access, reducing bandwidth and simplifying the ray-marching loop. It differs from [Voxel Data Layout](4076-voxel-data-layout.md) by strictly binding material identity and color to the voxel value itself, rather than storing them in separate structures or using indirect indexing for color.
+
+### [Voxel Renderer with Top-Level Grid and Bricks](8114-voxel-renderer-with-top-level-grid-and-bricks.md)
+This method renders voxel data using a two-level grid structure (top-level grid containing 8x8x8 voxel bricks) to optimize memory transfer and cache locality. It solves the bottleneck of transferring large voxel datasets to the GPU by synchronizing only changed bricks and leveraging high internal GPU bandwidth for staging. It differs from flat dense grid renderers by introducing spatial tiling for cache efficiency and dynamic update budgets.
+
 ### Voxel Representation with Gaussian Lobes
-A variant where each voxel stores directional light information rather than just static color. It uses an average direction vector $D$ and a standard deviation $\sigma$ (encoded via $|D|$) to model isotropic Gaussian lobes [S5]. Fields include: 1. Average vector $D$, 2. Standard deviation $\sigma$, 3. Visibility/Occlusion (single average value), 4. Material color (opacity-weighted, alpha pre-multiplied), 5. Normal (pre-multiplied by opacity) [S5]. Chosen for compactness compared to storing arbitrary distributions, though it lacks view-dependency for thin objects [S5].
-
-### Voxel Data Volume Storage and Access
-Focuses on the software interface for accessing the contiguous array. It emphasizes safe access methods (`TryGetVoxelData`) that prevent `IndexOutOfRangeException` by validating indices against `Width`, `Height`, and `Depth` before accessing `voxel_data` [S6, unofficial]. This is a critical implementation detail for robustness in C#/C++ environments [S6, unofficial].
-
-### Voxel Material Packing
-A specific 32-bit integer layout optimization that packs Material ID (8 bits), Red (8 bits), Green (8 bits), and Blue (8 bits) into a single integer [S7, unofficial]. This allows managing up to 256 distinct materials via a `MaterialManager` while minimizing memory bandwidth during ray traversal [S7, unofficial].
+This variant stores directional information using isotropic Gaussian lobes characterized by an average vector $D$ and standard deviation $\sigma$. The variance is encoded via the norm $|D|$ such that $\sigma^2 = \frac{1 - |D|}{|D|}$ to ease interpolation [S5]. Fields include $D$, $\sigma$, visibility/occlusion, pre-multiplied material color, and opacity-pre-multiplied normal. This is more accurate than single values for representing light behavior but requires more complex interpolation logic [S5].
 
 ## Operating characteristics
--   **Time Complexity**: $O(1)$ for voxel access given coordinates, assuming contiguous memory and no hashing [S6, unofficial].
--   **Memory Complexity**: $O(W \cdot H \cdot D)$, where $W, H, D$ are dimensions. Memory usage is high for sparse scenes as empty space is allocated [S4, unofficial].
--   **Measured Performance**: Not given in the sources.
--   **Scaling**: Not given in the sources.
--   **Strengths and Limitations**: High cache locality due to contiguous storage [S6, unofficial]. Inefficient for sparse volumes; out-of-bounds checks are mandatory to prevent crashes [S6, unofficial]. The naive tensor layout (RGB + $\sigma$) is less expressive than spherical harmonic variants (28 numbers/voxel) but faster to compute [S4, unofficial].
--   **When to use it and when not**: Use for dense scenes requiring predictable linear access and simple ray marching [S1, S4, unofficial]. Avoid for highly sparse volumes where sparse structures would save memory [S4, unofficial].
+-   **Time Complexity**: Access is $O(1)$ given coordinates, requiring only arithmetic for index calculation.
+-   **Memory Complexity**: $O(W \cdot H \cdot D)$. Memory usage is proportional to the volume of the bounding box, regardless of sparsity.
+-   **Performance**: High cache locality for contiguous traversal (e.g., ray marching along axes) if data is stored in row-major order [S2, S6, unofficial]. However, for sparse scenes, it wastes memory and bandwidth on empty voxels.
+-   **Strengths**: Simple implementation, no pointer chasing, predictable memory access patterns.
+-   **Limitations**: Poor scalability for large, sparse volumes. Fixed resolution requires full grid allocation.
+-   **When to Use**: Dense volumes, small scenes, or as a base for hierarchical structures.
+-   **When Not to Use**: Large open-world scenes with sparse objects, where hierarchical methods like [Voxel Data Structure](3982-voxel-data-structure.md) are preferred.
 
 ## Background
-The concept of a dense voxel grid is foundational in volume rendering. Early implementations used simple 3D tensors indexed by world coordinates, storing opacity and RGB triplets for demonstration purposes before evolving to more complex representations like spherical harmonics [S4, unofficial]. The "naive" structure is often the starting point for implementing ray marchers, where equidistant steps sample the grid [S1, unofficial]. Binary formats for storage often use specific scan orders (left-to-right, bottom-to-top, back-to-front) to facilitate file I/O [S2, unofficial].
+The naive tensor layout is a foundational concept in voxel rendering, often used in initial implementations and educational contexts. It appears in early voxel simulation projects [S1, unofficial] and tutorials on neural radiance fields (NeRF) and plenoxels, where it serves as a baseline before introducing spherical harmonics or hierarchical structures [S4, unofficial]. The binary index format with specific ordering (left-to-right, bottom-to-top, back-to-front) is used in surface reconstruction tools like SurfaceNets [S2, unofficial]. The Gaussian lobe representation was introduced in the context of voxel cone tracing for indirect illumination [S5].
 
 ## Sources
 [S1] Ray-Marched Voxel Simulation, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)
 [S2] SurfaceNets for Multi-Label Segmentations with Preservation of Sharp Boundaries., https://europepmc.org/article/MED/36325473, fetched 2026-10-26 (unofficial)
+[S3] marceline-cramer/svo-cpu, https://github.com/marceline-cramer/svo-cpu, fetched 2026-10-27 (unofficial)
 [S4] Total Internal Reflection, https://avishek.net/2022/12/05/pytorch-guide-plenoxels-nerf-part-2.html, fetched 2026-10-29 (unofficial)
 [S5] PDF Interactive Indirect Illumination Using Voxel Cone Tracing, https://research.nvidia.com/sites/default/files/publications/GIVoxels-pg2011-authors.pdf, fetched 2026-10-27
 [S6] Eldemarkki/Marching-Cubes-Terrain, https://github.com/Eldemarkki/Marching-Cubes-Terrain, fetched 2026-10-26 (unofficial)
-[S7] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)

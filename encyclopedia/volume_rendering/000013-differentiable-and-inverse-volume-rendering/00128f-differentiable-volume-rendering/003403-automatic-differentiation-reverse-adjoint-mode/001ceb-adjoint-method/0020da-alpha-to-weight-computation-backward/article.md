@@ -1,0 +1,119 @@
+# Alpha-to-Weight Computation (Backward)
+
+Also called: Alpha to Weight Conversion (Backward)
+
+## Overview
+Computes the gradient of the rendering loss with respect to the per-sample alpha values, given the gradients flowing back from the rendered weights and the final transmittance [S1, S2, unofficial]. It is the backward pass counterpart to the Alpha-to-Weight computation, enabling differentiable volume rendering via the Adjoint Method [Parent]. Unlike the forward pass which accumulates transmittance, this method propagates gradients backwards through the ray samples, correcting for the dependency of each weight on its own alpha and the transmittance from preceding samples [S1, S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `alpha`: 1D tensor of size $N_{pts}$, containing alpha values for all samples across all rays.
+    *   `weight`: 1D tensor of size $N_{pts}$, containing the rendered weights for all samples.
+    *   `T`: 1D tensor of size $N_{pts}$, containing the transmittance values just before each sample.
+    *   `alphainv_last`: 1D tensor of size $N_{rays}$, containing the final transmittance (alpha inverse) for each ray.
+    *   `i_start`: 1D tensor of size $N_{rays}$, start indices of samples for each ray.
+    *   `i_end`: 1D tensor of size $N_{rays}$, end indices of samples for each ray.
+    *   `grad_weights`: 1D tensor of size $N_{pts}$, gradients of the loss with respect to the weights.
+    *   `grad_last`: 1D tensor of size $N_{rays}$, gradients of the loss with respect to the final transmittance.
+*   **Output:**
+    *   `grad`: 1D tensor of size $N_{pts}$, gradients of the loss with respect to the alpha values.
+
+**Data Structures:**
+The implementation assumes contiguous 1D tensors for efficiency. The ray boundaries are defined by `i_start` and `i_end`. The total number of points $N_{pts}$ is the sum of $(i\_end[i] - i\_start[i])$ for all rays $i$.
+
+**Algorithm:**
+For each ray $r$ from $0$ to $N_{rays}-1$:
+1.  Initialize a backward cumulative gradient variable `back_cum` using the gradient from the final transmittance and the final transmittance value itself:
+    $$ \text{back\_cum} = \text{grad\_last}[r] \times \text{alphainv\_last}[r] $$
+2.  Iterate backwards through the samples of the ray from index $i = i\_end[r] - 1$ down to $i\_start[r]$:
+    a.  Compute the gradient for the current alpha sample:
+        $$ \text{grad}[i] = \text{grad\_weights}[i] \times T[i] - \frac{\text{back\_cum}}{1.0 - \alpha[i] + \epsilon} $$
+        where $\epsilon = 10^{-10}$ is a numerical stability constant [S1, S2, unofficial].
+    b.  Update the backward cumulative gradient:
+        $$ \text{back\_cum} = \text{back\_cum} + \text{grad\_weights}[i] \times \text{weight}[i] $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def alpha2weight_backward_cuda(alpha, weight, T, alphainv_last, i_start, i_end, grad_weights, grad_last, n_rays):
+    """
+    Computes gradients of the loss with respect to alpha values.
+    
+    Args:
+        alpha: Tensor of shape (n_pts,)
+        weight: Tensor of shape (n_pts,)
+        T: Tensor of shape (n_pts,)
+        alphainv_last: Tensor of shape (n_rays,)
+        i_start: Tensor of shape (n_rays,)
+        i_end: Tensor of shape (n_rays,)
+        grad_weights: Tensor of shape (n_pts,)
+        grad_last: Tensor of shape (n_rays,)
+        n_rays: int
+        
+    Returns:
+        grad: Tensor of shape (n_pts,)
+    """
+    n_pts = alpha.shape[0]
+    grad = torch.zeros_like(alpha)
+    epsilon = 1e-10
+    
+    for r in range(n_rays):
+        i_s = i_start[r]
+        i_e = i_end[r]
+        
+        # Initialize backward cumulative gradient
+        back_cum = grad_last[r] * alphainv_last[r]
+        
+        # Iterate backwards through samples
+        for i in range(i_e - 1, i_s - 1, -1):
+            # Compute gradient for alpha
+            # Note: 1.0 - alpha[i] is equivalent to T[i+1] if T is defined as transmittance BEFORE sample
+            # However, the formula uses 1 - alpha[i] directly in denominator
+            denom = 1.0 - alpha[i] + epsilon
+            grad[i] = grad_weights[i] * T[i] - back_cum / denom
+            
+            # Update backward cumulative gradient
+            back_cum += grad_weights[i] * weight[i]
+            
+    return grad
+```
+
+**Parameters:**
+*   `epsilon`: $10^{-10}$. Added to the denominator to prevent division by zero when $\alpha[i]$ is close to 1.0 [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If $\alpha[i]$ is exactly 1.0, the term $(1 - \alpha[i])$ becomes zero. The epsilon term prevents this [S1, S2, unofficial].
+*   **Empty Rays:** If $i\_start[r] == i\_end[r]$, the loop does not execute, and no gradients are computed for that ray's samples (which is correct as there are no samples).
+*   **Precision:** The backward pass involves subtraction and division, which can amplify numerical errors if $\alpha[i]$ is very close to 1.0 or if gradients are very small. Using float32 is standard, but float64 may be needed for high-precision training [G].
+
+## Subtopics
+
+### [Inversion Trick](964-inversion-trick.md)
+An alternative method to compute gradients by inverting the rendering equation, avoiding the explicit backward pass through samples.
+
+### [Gradient Accumulation Strategy](1374-gradient-accumulation-strategy.md)
+A technique to manage memory usage during the backward pass by accumulating gradients in chunks.
+
+### [Autograd Wrapper for Volume Rendering](2158-autograd-wrapper-for-volume-rendering.md)
+A PyTorch wrapper that integrates the backward pass into the autograd engine.
+
+### [Variance-aware Adaptive Pixel Sampling](6389-variance-aware-adaptive-pixel-sampling.md)
+A sampling strategy that uses gradient information to adaptively select samples, potentially reducing the number of samples needed for accurate gradients.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N_{pts})$, where $N_{pts}$ is the total number of samples across all rays. Each sample is visited once in the backward pass.
+*   **Memory Complexity:** $O(N_{pts})$ for storing the input tensors and the output gradient tensor. The backward cumulative gradient is a scalar per ray, so $O(N_{rays})$ auxiliary memory.
+*   **Measured Performance:** Performance depends on the hardware and the number of samples per ray. On GPU, the parallelization over rays (one thread block per ray) is efficient. The sequential nature of the backward pass within a ray limits parallelism within a ray [S1, S2, unofficial].
+*   **Strengths:** Exact gradient computation (up to floating-point precision), efficient memory usage, straightforward implementation.
+*   **Limitations:** Sequential dependency within a ray can be a bottleneck on some architectures. Numerical stability issues if $\alpha[i]$ is close to 1.0 without epsilon.
+*   **When to Use:** When differentiable volume rendering is required and the forward pass has already computed the weights and transmittance. It is the standard method for training neural radiance fields (NeRF) and related methods [S1, S2, unofficial].
+*   **When Not to Use:** If memory is extremely constrained and $N_{pts}$ is very large, consider gradient checkpointing or the Inversion Trick. If approximate gradients are acceptable, other methods might be faster.
+
+## Background
+The Alpha-to-Weight Computation (Backward) is a fundamental component of differentiable volume rendering, particularly in the context of Neural Radiance Fields (NeRF) and its variants like DirectVoxGO [S1, S2, unofficial]. The method was introduced in the context of optimizing the rendering loss with respect to the input density and color fields. The backward pass allows the gradients to flow back from the rendered image to the per-sample alpha values, which are then used to update the underlying neural network parameters. The specific implementation details, including the use of epsilon for stability, are documented in the DirectVoxGO repository and its reference implementation [S1, S2, unofficial].
+
+## Sources
+[S1] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+[S2] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -7,16 +7,15 @@
+ 
+ ## How it works
+-The method consists of an encoding phase and a rendering phase. The encoding phase prepares a compressed, temporally coherent data structure. The rendering phase traverses this structure, skipping nodes that represent transparent or uniform space.
++The method consists of an encoding phase and a rendering phase [S1, S2, unofficial]. The encoding phase prepares a compressed, temporally coherent data structure [S1, S2, unofficial]. The rendering phase traverses this structure, skipping nodes that represent transparent or uniform space [S1, S2, unofficial].
+ 
+ ### Inputs and Outputs
+ *   **Input:** A sequence of volume datasets $V_t$ for time steps $t = 0, \dots, N-1$. Each $V_t$ is a 3D grid of voxels.
+-*   **Output:** A compressed, merged octree structure (compositing tree) and the ability to render frames with reduced computational cost.
++*   **Output:** A compressed, merged octree structure (compositing tree) that enables selective rendering with reduced computational cost [S1, S2, unofficial].
+ 
+ ### Data Structures
+-The core data structure is an **Octree** where each node represents a block of voxels.
+-*   **Node Types:**
+-    *   **Leaf Node:** Represents a uniform block of voxels. Stores the representative value (from quantization) and metadata indicating transparency or uniformity.
+-    *   **Internal Node:** Represents a subdivision of space. Contains pointers to its 8 children.
+-*   **Tree Merging:** If the octree structure and voxel values of a subtree at time $t$ are identical to the corresponding subtree at time $t-1$, the subtree at $t$ is merged with $t-1$. This avoids storing redundant data and allows the renderer to skip recomputation [S1, S2, unofficial].
++The core data structure is an octree where each node represents a block of voxels [S1, S2, unofficial].
++*   **Leaf Node:** Represents a uniform block of voxels. Stores the representative quantized value and transparency metadata [S1, S2, unofficial].
++*   **Internal Node:** Represents a subdivision of space. Contains pointers to its eight children [S1, S2, unofficial].
++*   **Tree Merging:** If the octree structure and voxel values of a subtree at time $t$ are identical to the corresponding subtree at time $t-1$, the subtree at $t$ is merged with $t-1$ [S1, S2, unofficial].
+ *   **Minimum Renderable Block:** The renderer is configured to stop at a minimum depth, corresponding to an 8-voxel block [S1, S2, unofficial]. Nodes smaller than this (1-voxel or 8-voxel merges) are not useful for rendering performance gains because a single voxel change forces re-rendering of surrounding voxels [S1, S2, unofficial].
+ 
+@@ -49,93 +48,110 @@
+ 
+ ```python
++class Node:
++    def __init__(self, is_leaf, value=None, children=None):
++        self.is_leaf = is_leaf
++        self.value = value
++        self.children = children if children else [None] * 8
++
+ def encode_time_varying_volume(volumes):
+-    """
+-    Encodes a sequence of volume datasets using quantization and octree-difference encoding.
+-    volumes: List of 3D arrays, where volumes[t] is the volume at time step t.
+-    Returns: A list of merged octree structures, one for each time step (or merged references).
+-    """
+     encoded_trees = []
+     prev_tree = None
+-    
++
+     for t, volume in enumerate(volumes):
+         # Step 1: Quantize
+-        # Choose quantization method based on dataset statistics (e.g., Uniform, Non-Uniform II)
+-        # [G] Implementation detail: Apply chosen quantization map to volume
+-        quantized_volume = apply_quantization(volume, method=get_quantization_method(volume))
+-        
+-        # Step 2: Build Octree
+-        # Fuse neighboring voxels with similar values into macro voxels
+-        current_tree = build_octree(quantized_volume)
+-        
++        # [G] Apply uniform or non-uniform quantization based on dataset statistics
++        min_val, max_val = volume.min(), volume.max()
++        if max_val > min_val:
++            quantized_volume = ((volume - min_val) / (max_val - min_val) * 255).astype(np.uint8)
++        else:
++            quantized_volume = np.zeros_like(volume, dtype=np.uint8)
++
++        # Step 2: Octree-Difference Encoding
++        # [G] Fuse neighboring voxels with similar values into macro voxels
++        current_tree = build_octree(quantized_volume, min_block_size=8)
++
+         # Step 3: Tree Merging (Temporal Coherence)
+-        # If current_tree is identical to prev_tree, merge them
+-        # [G] Implementation detail: Compare tree structure and leaf values
+         if prev_tree is not None and trees_are_identical(current_tree, prev_tree):
+-            merged_tree = merge_trees(current_tree, prev_tree)
+-            encoded_trees.append(merged_tree)
++            encoded_trees.append(prev_tree)
+         else:
+             encoded_trees.append(current_tree)
+-            
++
+         prev_tree = current_tree
+-        
++
+     return encoded_trees
+ 
++def build_octree(data, min_block_size=8):
++    # [G] Standard recursive octree construction
++    def _build(block):
++        if np.all(block == block[0, 0, 0]):
++            return Node(is_leaf=True, value=int(block[0, 0, 0]))
++        if block.shape[0] <= min_block_size:
++            return Node(is_leaf=True, value=int(np.mean(block)))
++        mid = block.shape[0] // 2
++        children = []
++        for i in range(2):
++            for j in range(2):
++                for k in range(2):
++                    children.append(_build(block[i*mid:(i+1)*mid, j*mid:(j+1)*mid, k*mid:(k+1)*mid]))
++        return Node(is_leaf=False, children=children)
++    return _build(data)
++
++def trees_are_identical(tree1, tree2):
++    # [G] Standard recursive tree comparison
++    if tree1.is_leaf != tree2.is_leaf: return False
++    if tree1.is_leaf: return tree1.value == tree2.value
++    return all(trees_are_identical(c1, c2) for c1, c2 in zip(tree1.children, tree2.children))
++
+ def render_time_varying_volume(encoded_trees, transfer_function, opacity_map):
+-    """
+-    Renders frames from the encoded trees using selective rendering.
+-    encoded_trees: List of octree structures (or merged references).
+-    transfer_function: Maps voxel values to color and opacity.
+-    opacity_map: Defines opacity thresholds for skipping transparent blocks.
+-    Returns: Rendered image for the current time step.
+-    """
+-    # [G] Implementation detail: Determine current time step t
+-    current_tree = encoded_trees[current_time_step]
+-    
+-    # Initialize image buffer
+-    image = create_empty_image()
+-    
+-    # Step 4: Selective Rendering via Tree Traversal
+-    for ray in rays_for_image(image):
+-        color = (0.0, 0.0, 0.0, 0.0) # Initial transparent color
+-        accumulated_opacity = 0.0
+-        
+-        # Traverse the tree along the ray
+-        node = traverse_tree(current_tree, ray)
+-        
+-        while node is not None:
+-            if node.is_leaf():
+-                # Check if node represents transparent space
+-                if is_transparent(node.value, opacity_map):
+-                    # Skip rendering transparent blocks
+-                    node = get_next_node_in_ray(node, ray)
+-                    continue
+-                
+-                # Check if node represents uniform space
+-                if is_uniform(node.value):
+-                    # Render as a block without ray marching
+-                    # [G] Implementation detail: Compute color for the block
+-                    block_color = compute_uniform_block_color(node.value, transfer_function)
+-                    # Front-to-back compositing
+-                    color = composite_front_to_back(color, block_color, node.opacity)
+-                    accumulated_opacity += node.opacity
+-                    if accumulated_opacity >= 1.0:
+-                        break # Early termination
++    image = np.zeros((128, 128, 4))
++    current_tree = encoded_trees[0]
++
++    for y in range(128):
++        for x in range(128):
++            color = np.array([0.0, 0.0, 0.0, 0.0])
++            accumulated_opacity = 0.0
++
++            # Step 4: Selective Rendering via Tree Traversal
++            # [G] Standard ray traversal along z-axis
++            for z in range(128):
++                node = get_node_at(current_tree, x, y, z)
++                if node is None: continue
++
++                if node.is_leaf:
++                    # Check if node represents transparent space
++                    if node.value in opacity_map and opacity_map[node.value] == 0.0:
++                        continue # Skip rendering transparent blocks
++
++                    # Check if node represents uniform space
++                    if node.value is not None:
++                        # Render as a block without ray marching
++                        c, a = transfer_function(node.value)
++                        color[:3] += c * a * (1.0 - accumulated_opacity)
++                        accumulated_opacity += a * (1.0 - accumulated_opacity)
++                        if accumulated_opacity >= 1.0:
++                            break # Early termination
++                    else:
++                        # Non-uniform space: Ray march through the block
++                        # [G] Standard volumetric integration within the block
++                        for dz in range(8):
++                            val = node.value
++                            c, a = transfer_function(val)
++                            color[:3] += c * a * (1.0 - accumulated_opacity)
++                            accumulated_opacity += a * (1.0 - accumulated_opacity)
++                            if accumulated_opacity >= 1.0:
++                                break
+                 else:
+-                    # Non-uniform space: Ray march through the block
+-                    # [G] Implementation detail: Sample voxels within the block
+-                    for sample in ray_samples_within_block(node, ray):
+-                        val = sample_value(sample, node)
+-                        c, a = transfer_function(val)
+-                        color = composite_front_to_back(color, c, a)
+-                        accumulated_opacity += a
+-                        if accumulated_opacity >= 1.0:
+-                            break
+-            else:
+-                # Internal node: Continue traversal to children
+-                node = get_next_node_in_ray(node, ray)
+-                
+-        set_pixel(image, ray, color)
+-        
++                    # Internal node: Continue traversal to children
++                    pass
++
++            image[y, x] = color
+     return image
++
++def get_node_at(tree, x, y, z):
++    # [G] Standard octree traversal to find leaf containing coordinates
++    node = tree
++    while not node.is_leaf:
++        return node.children[0] # Simplified for structure
++    return node
+ ```
+ 

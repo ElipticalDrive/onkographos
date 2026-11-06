@@ -1,0 +1,128 @@
+# SDF Optimization via Finite Differences
+
+Also called: Finite Difference SDF Optimization, Mesh-Difference SDF Training
+
+## Overview
+This method optimizes Signed Distance Field (SDF) values and learnable deformation weights (beta, alpha, gamma) to minimize the geometric difference between a mesh extracted from the SDF and a target reference mesh [S1, S2, unofficial]. It distinguishes itself from gradient-based neural SDF training by computing optimization gradients via finite differences on the extracted mesh loss rather than backpropagating through a differentiable renderer or network [S1, S2, unofficial]. It is chosen when the SDF representation involves complex, non-differentiable extraction pipelines (such as FlexiCubes) or when direct analytical gradients are unavailable [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- `sdf`: 1D array of SDF values at voxel centers, size $N$.
+- `target_mesh`: Reference mesh geometry for loss computation.
+- `beta`: Learnable weights, shape $(N, 12)$, initial values zeroed with noise [S1, unofficial].
+- `alpha`: Learnable weights, shape $(N, 8)$, initial values zeroed with noise [S1, unofficial].
+- `gamma`: Learnable weights, shape $(N,)$, initial values zeroed with noise [S1, unofficial].
+- `eps`: Finite difference step size, default $10^{-4}$ [S1, unofficial].
+- `max_updates`: Number of SDF values to update per iteration, default 100 [S1, unofficial].
+
+**Outputs:**
+- Optimized `sdf`, `beta`, `alpha`, `gamma`.
+
+**Data Structures:**
+- `beta`: Matrix<double, Dynamic, 12, RowMajor>, size $N \times 12$ [S1, unofficial].
+- `alpha`: Matrix<double, Dynamic, 8, RowMajor>, size $N \times 8$ [S1, unofficial].
+- `gamma`: VectorXd, size $N$ [S1, unofficial].
+
+**Steps:**
+1. **Initialization:** Set `beta`, `alpha`, `gamma` to zero. Add random noise scaled by 0.1 to each parameter:
+   $$ \beta_{i,j} \leftarrow \beta_{i,j} + \text{noise}(rng) \times 0.1 $$
+   $$ \alpha_{i,j} \leftarrow \alpha_{i,j} + \text{noise}(rng) \times 0.1 $$
+   $$ \gamma_{i} \leftarrow \gamma_{i} + \text{noise}(rng) \times 0.1 $$
+   for all $i, j$ [S1, unofficial].
+
+2. **Gradient Estimation:** For each iteration:
+   a. Select up to `max_updates` indices from `sdf` to perturb.
+   b. For each selected index $i$:
+      i. Store `sdf[i]`.
+      ii. Perturb forward: `sdf[i] += eps`.
+      iii. Extract mesh `mesh_plus` using the current SDF and weights [S1, unofficial].
+      iv. Compute loss `loss_plus` against `target_mesh` [S1, unofficial].
+      v. Perturb backward: `sdf[i] -= 2*eps` (resulting in `sdf[i] = original - eps`).
+      vi. Extract mesh `mesh_minus` [S1, unofficial].
+      vii. Compute loss `loss_minus` [S1, unofficial].
+      viii. Reset `sdf[i]` to original value.
+      ix. Compute gradient:
+          $$ \text{sdf\_grad}[i] = \frac{\text{loss\_plus} - \text{loss\_minus}}{2 \times \text{eps}} $$
+
+3. **Optimization Step:**
+   a. Apply gradient update: `optimizer.step(sdf, sdf_grad)` [S1, unofficial].
+   b. Clamp `sdf` values to $[-1.0, 1.0]$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def optimize_sdf_finite_diff(sdf, target_mesh, beta, alpha, gamma, eps=1e-4, max_updates=100, optimizer=None):
+    """
+    Optimizes SDF and learnable weights using finite difference gradients.
+    Assumes extract_mesh() computes mesh from sdf, beta, alpha, gamma.
+    Assumes compute_loss(mesh, target_mesh) returns scalar loss.
+    """
+    # Initialization with noise
+    beta += random_noise_like(beta) * 0.1
+    alpha += random_noise_like(alpha) * 0.1
+    gamma += random_noise_like(gamma) * 0.1
+    
+    num_cubes = sdf.shape[0]
+    
+    for iteration in range(num_iterations): # Number of iterations not specified in sources [G]
+        # Select indices to update
+        indices = random_sample(range(num_cubes), min(max_updates, num_cubes))
+        
+        sdf_grad = np.zeros_like(sdf)
+        
+        for i in indices:
+            original_val = sdf[i]
+            
+            # Forward perturbation
+            sdf[i] = original_val + eps
+            mesh_plus = extract_mesh(sdf, beta, alpha, gamma)
+            loss_plus = compute_loss(mesh_plus, target_mesh)
+            
+            # Backward perturbation
+            sdf[i] = original_val - eps
+            mesh_minus = extract_mesh(sdf, beta, alpha, gamma)
+            loss_minus = compute_loss(mesh_minus, target_mesh)
+            
+            # Reset SDF
+            sdf[i] = original_val
+            
+            # Central difference gradient
+            sdf_grad[i] = (loss_plus - loss_minus) / (2.0 * eps)
+            
+        # Apply optimizer step
+        if optimizer is not None:
+            optimizer.step(sdf, sdf_grad)
+            
+        # Clamp SDF values
+        sdf = np.clip(sdf, -1.0, 1.0)
+        
+    return sdf, beta, alpha, gamma
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The finite difference step `eps` must be small enough to approximate the derivative but large enough to avoid numerical noise in mesh extraction [S1, unofficial].
+- **Boundaries:** SDF values are clamped to $[-1.0, 1.0]$ to prevent extreme values during optimization [S1, unofficial].
+- **Degenerate Input:** If the target mesh is empty or invalid, loss computation will fail [G].
+- **Performance:** Updating only a subset of SDF values per iteration (default 100) is a speed optimization; updating all values is computationally prohibitive due to repeated mesh extraction [S1, unofficial].
+
+## Subtopics
+
+### Gradient-Based Mesh Optimization
+A workflow to reconstruct unknown meshes by optimizing a randomly initialized SDF to minimize geometric difference (multiview mask and depth losses) against a reference mesh [S2, unofficial]. It initializes the SDF randomly and optimizes it using gradient descent [S2, unofficial]. It optionally adds a developability regularizer ($L_{dev}$) to encourage fabricability from panels [S2, unofficial]. Regularization weights are initially low to avoid hindering convergence and incremented if artifacts appear [S2, unofficial]. An L1 regularizer on flexible weights has generally low impact for single shapes but stabilizes generative pipelines like GET3D [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** High. Each gradient estimate requires two full mesh extractions and loss computations per perturbed SDF value. With `max_updates=100`, this is 200 extractions per iteration [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of cubes and the size of the extracted meshes. The learnable parameters `beta`, `alpha`, `gamma` add $N \times (12+8+1)$ doubles [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Works with non-differentiable extraction pipelines (e.g., FlexiCubes) [S1, S2, unofficial]. Simple to implement if mesh extraction and loss functions are available [S1, S2, unofficial].
+- **Limitations:** Computationally expensive due to repeated mesh extractions [S1, unofficial]. Noisy gradients due to finite difference approximation [S1, S2, unofficial].
+- **When to use:** When analytical gradients are unavailable or the extraction process is complex [S1, S2, unofficial].
+- **When not to use:** When real-time performance is required or the SDF extraction is differentiable (use backpropagation instead) [S1, S2, unofficial].
+
+## Background
+Originated from the FlexiCubes project, which provides a differentiable and flexible finite element-based mesh extraction method [S1, S2, unofficial]. The finite difference optimization approach was developed to handle the non-differentiable aspects of the mesh extraction process or to optimize SDF values directly when neural network backpropagation is not feasible [S1, S2, unofficial]. It is used in 3D reconstruction and mesh optimization tasks [S1, S2, unofficial].
+
+## Sources
+[S1] ddiakopoulos/flexicubes_cpp, https://github.com/ddiakopoulos/flexicubes_cpp, fetched 2026-10-27 (unofficial)
+[S2] GitHub - nv-tlabs/FlexiCubes, https://github.com/nv-tlabs/FlexiCubes, fetched 2026-10-27 (unofficial)

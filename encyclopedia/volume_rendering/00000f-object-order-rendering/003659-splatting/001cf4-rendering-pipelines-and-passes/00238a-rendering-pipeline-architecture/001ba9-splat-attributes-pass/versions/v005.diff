@@ -1,0 +1,203 @@
+--- v004.md
++++ v005.md
+@@ -4,120 +4,112 @@
+ 
+ ## Overview
+-The Splat Attributes Pass computes the visible surface contribution of point-sampled primitives (splats) by combining geometric depth testing with attribute accumulation into a G-Buffer. It solves the problem of correctly occluding the back faces of spherical splats while accumulating weighted color and normal data for subsequent shading passes. It differs from the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) by decoupling the final color composition from the attribute accumulation, and from the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) by explicitly performing per-fragment depth comparisons against a pre-written depth buffer to determine visibility before accumulating attributes [S1, unofficial].
++The Splat Attributes Pass is a fragment-shader-driven stage in object-order volume rendering that computes per-fragment visibility and accumulates weighted geometric and photometric attributes into a G-buffer. It solves the problem of correctly occluding the back faces of spherical splats while simultaneously preparing data for subsequent shading or compositing stages. It differs from the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md) by separating visibility determination and attribute accumulation into a distinct pass that writes to intermediate textures, and from the [Three-Pass GPU Point Rendering Pipeline](2837-three-pass-gpu-point-rendering-pipeline.md) by explicitly calculating depth offsets to handle spherical geometry rather than treating splats as simple billboards.
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of splats, each defined by a center position, radius, color, and optionally a normal vector. The depth buffer (`g_depth`) from the [Splat Depth Pass](1078-splat-depth-pass.md) is available for occlusion testing.
+-*   **Output:** G-Buffer textures: `g_normal` (vec4, location 0) storing accumulated weighted normals, and `g_color` (vec4, location 1) storing accumulated weighted RGB color in the RGB channels and accumulated scalar weight in the Alpha channel.
++*   **Input:** A stream of splat primitives, each defined by a center position, radius, color, and linear depth in view space. The current depth buffer (`g_depth`) is read to determine occlusion.
++*   **Output:** Two G-buffer textures: `g_normal` (vec4, location 0) storing weighted normals, and `g_color` (vec4, location 1) storing weighted RGB color in RGB channels and accumulated weight in the Alpha channel.
+ 
+ **Data Structures:**
+-*   `g_depth`: Depth texture, format `GL_DEPTH_COMPONENT`, sampled at `tex_coords = gl_FragCoord.xy / viewport_size`.
+-*   `g_normal`: Texture, format `GL_RGBA32F` (or equivalent float), location 0.
+-*   `g_color`: Texture, format `GL_RGBA32F` (or equivalent float), location 1.
++*   `g_depth`: Depth texture sampled at `tex_coords = gl_FragCoord.xy / viewport_size`.
++*   `g_normal`: `vec4` texture. `xyz` stores the accumulated weighted normal vector.
++*   `g_color`: `vec4` texture. `rgb` stores the accumulated weighted color; `a` stores the accumulated scalar weight.
+ 
+ **Parameters:**
+-*   `epsilon`: Small constant for depth-proximity falloff. Typical value: `0.25` [S1, unofficial].
++*   `epsilon`: A small constant for depth-proximity falloff. Typical value: `0.25` [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Screen-Space Distance Calculation:** For each fragment covered by the splat, calculate the squared distance from the center in screen space using `gl_PointCoord`.
+-    $$ \text{from\_center\_pt\_spc} = \text{gl\_PointCoord} - \begin{bmatrix} 0.5 \\ 0.5 \end{bmatrix} $$
++1.  **Fragment Position:** Calculate the distance of the current fragment from the center of the splat in screen space:
++    $$ \text{from\_center\_pt\_spc} = \text{gl\_PointCoord} - \text{vec2}(0.5, 0.5) $$
++2.  **Circular Mask:** Calculate the squared magnitude:
+     $$ \text{mag\_sq} = \text{dot}(\text{from\_center\_pt\_spc}, \text{from\_center\_pt\_spc}) $$
+-2.  **Discard Outside Circle:** If $\text{mag\_sq} > 0.25$, discard the fragment [S1, unofficial].
+-3.  **World-Space Offset Conversion:** Convert the screen-space offset to world-space offset using the splat's radius $r$.
+-    $$ \text{from\_center\_wld\_spc} = \text{from\_center\_pt\_spc} \times 2 \times r $$
+-4.  **Depth Offset Calculation:** Calculate the depth offset from the sphere surface along the view direction.
+-    $$ \text{depth\_offset} = \sqrt{r^2 - \text{dot}(\text{from\_center\_wld\_spc}, \text{from\_center\_wld\_spc})} $$
+-5.  **Fragment Depth in View Space:** Calculate the fragment's depth in view space by subtracting the depth offset from the linear depth of the splat center.
++    Discard the fragment if $\text{mag\_sq} > 0.25$ (outside the unit circle).
++3.  **World-Space Offset:** Convert the screen-space offset to a world-space offset using the splat's radius:
++    $$ \text{from\_center\_wld\_spc} = \text{from\_center\_pt\_spc} \times 2 \times i.\text{radius} $$
++4.  **Depth Offset:** Calculate the depth offset from the sphere surface to the fragment plane:
++    $$ \text{depth\_offset} = \sqrt{i.\text{radius}^2 - \text{dot}(\text{from\_center\_wld\_spc}, \text{from\_center\_wld\_spc})} $$
++5.  **Fragment Depth:** Calculate the fragment depth in view space by subtracting the depth offset from the linear depth of the splat center:
+     $$ \text{depth} = \text{linearDepth}(\text{gl\_FragCoord.z}) - \text{depth\_offset} $$
+-6.  **Surface Depth Retrieval:** Sample the depth buffer to get the depth of the visible surface at this pixel.
+-    $$ \text{tex\_coords} = \frac{\text{gl\_FragCoord.xy}}{\text{viewport\_size}} $$
++6.  **Occlusion Test:** Sample the depth buffer to get the surface depth at the current fragment coordinates:
++    $$ \text{tex\_coords} = \text{gl\_FragCoord.xy} / \text{viewport\_size} $$
+     $$ \text{surface\_depth} = \text{linearDepth}(\text{texture}(g\_depth, \text{tex\_coords}).x) $$
+-7.  **Occlusion Test:** If the splat fragment is behind the visible surface ($\text{depth} > \text{surface\_depth}$), discard the fragment [S1, unofficial].
+-8.  **Weight Calculation:**
+-    *   Radial falloff weight $w_1$:
++    Discard the fragment if $\text{depth} > \text{surface\_depth}$ (splat is behind existing geometry).
++7.  **Weight Calculation:**
++    *   Radial falloff weight:
+         $$ w_1 = 1 - \frac{\sqrt{\text{mag\_sq}}}{0.5} $$
+-    *   Depth-proximity falloff weight $w_2$:
++    *   Depth-proximity falloff weight:
+         $$ w_2 = \frac{\text{surface\_depth} - \text{depth}}{\epsilon} $$
+     *   Combined weight:
+         $$ \text{weight} = w_1 \times w_2 $$
+-9.  **Normal Calculation:** Compute the view-space normal from the geometry.
+-    $$ \text{normal} = \text{normalize}\left( \begin{bmatrix} \text{from\_center\_wld\_spc} \\ \text{depth\_offset} \end{bmatrix} \right) $$
+-10. **Accumulation:** Accumulate weighted attributes into the G-Buffer.
+-    *   Normal: $\text{g\_normal.xyz} += \text{weight} \times \text{normal}$
+-    *   Color: $\text{g\_color.rgb} += \text{weight} \times \text{color}$
+-    *   Weight: $\text{g\_color.a} += \text{weight}$
++8.  **Normal Computation:** Calculate the view-space normal from the geometry:
++    $$ \text{normal} = \text{normalize}(\text{vec3}(\text{from\_center\_wld\_spc}, \text{depth\_offset})) $$
++9.  **Accumulation:**
++    *   Accumulate weighted normal into `g_normal.xyz`:
++        $$ g\_normal.xyz = \text{weight} \times \text{normal} $$
++    *   Accumulate weighted color into `g_color.rgb`:
++        $$ \text{color} = \text{weight} \times i.\text{color} $$
++        $$ g\_color.rgb = \text{color} $$
++    *   Accumulate weight into `g_color.a`:
++        $$ g\_color.a = \text{weight} $$
+ 
+ **Pseudocode:**
+ ```python
+-# Fragment Shader Logic for Splat Attributes Pass
+-# Inputs:
+-#   gl_PointCoord: vec2, coordinates within the point sprite [0,1]
+-#   gl_FragCoord: vec4, window-relative coordinates (z is depth)
+-#   i.radius: float, radius of the splat
+-#   i.color: vec3, color of the splat
+-#   g_depth: sampler2D, depth buffer from Splat Depth Pass
+-#   viewport_size: vec2, resolution of the viewport
+-#   epsilon: float, depth proximity constant (default 0.25)
+-# Outputs:
+-#   g_normal: out vec4, accumulated weighted normal
+-#   g_color: out vec4, accumulated weighted color (RGB) and weight (A)
+-
+-vec2 from_center_pt_spc = gl_PointCoord - vec2(0.5, 0.5);
+-float mag_sq = dot(from_center_pt_spc, from_center_pt_spc);
+-
+-if (mag_sq > 0.25) {
+-    discard;
+-}
+-
+-vec2 from_center_wld_spc = from_center_pt_spc * 2.0 * i.radius;
+-float depth_offset = sqrt(i.radius * i.radius - dot(from_center_wld_spc, from_center_wld_spc));
+-
+-float linear_center_depth = linearDepth(gl_FragCoord.z);
+-float depth = linear_center_depth - depth_offset;
+-
+-vec2 tex_coords = gl_FragCoord.xy / viewport_size;
+-float surface_depth = linearDepth(texture(g_depth, tex_coords).x);
+-
+-if (depth > surface_depth) {
+-    discard;
+-}
+-
+-float w1 = 1.0 - (sqrt(mag_sq) / 0.5);
+-float w2 = (surface_depth - depth) / epsilon;
+-float weight = w1 * w2;
+-
+-vec3 normal = normalize(vec3(from_center_wld_spc, depth_offset));
+-
+-// Accumulate into G-Buffer
+-// Note: In a real implementation, these would be atomic adds or stored in a local variable 
+-// if multiple splats hit the same pixel, but the source implies direct accumulation 
+-// assuming the G-Buffer is cleared and blending is handled or additive writes are used.
+-// Based on [S1, unofficial], it accumulates into g_normal and g_color.
+-g_normal.xyz += weight * normal;
+-g_color.rgb += weight * i.color;
+-g_color.a += weight;
++def splat_attributes_pass(splat, viewport_size, epsilon=0.25):
++    # 1. Fragment position relative to center
++    from_center_pt_spc = gl_PointCoord - vec2(0.5, 0.5)
++    
++    # 2. Circular mask
++    mag_sq = dot(from_center_pt_spc, from_center_pt_spc)
++    if mag_sq > 0.25:
++        discard()
++        
++    # 3. World-space offset
++    from_center_wld_spc = from_center_pt_spc * 2.0 * splat.radius
++    
++    # 4. Depth offset
++    depth_offset = sqrt(splat.radius * splat.radius - dot(from_center_wld_spc, from_center_wld_spc))
++    
++    # 5. Fragment depth
++    linear_center_depth = linearDepth(gl_FragCoord.z)
++    depth = linear_center_depth - depth_offset
++    
++    # 6. Occlusion test
++    tex_coords = gl_FragCoord.xy / viewport_size
++    surface_depth = linearDepth(texture(g_depth, tex_coords).x)
++    
++    if depth > surface_depth:
++        discard()
++        
++    # 7. Weight calculation
++    w1 = 1.0 - (sqrt(mag_sq) / 0.5)
++    w2 = (surface_depth - depth) / epsilon
++    weight = w1 * w2
++    
++    # 8. Normal computation
++    normal = normalize(vec3(from_center_wld_spc, depth_offset))
++    
++    # 9. Accumulation
++    # Note: In a real implementation, these would be atomic adds or 
++    # read-modify-write operations on the G-buffer textures.
++    g_normal.xyz += weight * normal
++    g_color.rgb += weight * splat.color
++    g_color.a += weight
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Linear depth conversion must be consistent between the depth pass and this pass to avoid z-fighting artifacts in occlusion testing [S1, unofficial].
+-*   **Boundary:** The radial falloff $w_1$ goes to 0 at the edge of the splat, ensuring smooth blending. The depth falloff $w_2$ depends on $\epsilon$; if $\epsilon$ is too small, numerical instability may occur near the surface [S1, unofficial].
+-*   **Degenerate Input:** If a splat is completely behind the depth buffer, it is discarded entirely, which is correct for front-face rendering but may hide valid back-face contributions if the application requires them (though standard splatting assumes front-face visibility) [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Front-to-Back Blending Setup
+-This configuration sets up the rendering state for the Splat Attributes Pass to ensure correct accumulation of weighted attributes. It involves clearing the color buffer with `RGBA(0,0,0,0)` to ensure zero initial alpha, disabling depth testing, and enabling blending with separate blend factors: RGB uses `GL_ONE_MINUS_DST_ALPHA` / `GL_ONE`, and Alpha uses `GL_ONE_MINUS_DST_ALPHA` / `GL_ONE`. The blend equation is set to `GL_FUNC_ADD` for both RGB and Alpha [S2, unofficial]. It draws instanced quads using `GL_TRIANGLE_FAN` with 4 vertices per instance, passing `splatCount` instances. Vertex attributes include 'position' (2 floats) and 'index' (1 unsigned int, instanced with divisor 1) [S2, unofficial]. Uniforms passed to the shader include projection (`mat4`), view (`mat4`), focal (`vec2`: fx, fy), viewport (`vec2`: width, height), and `u_texture` (`sampler2D` at unit 0) [S2, unofficial].
++This variant configures the rendering state for the compositing phase that follows the attribute accumulation. It clears the color buffer with RGBA(0,0,0,0) to ensure zero initial alpha and disables depth testing. It enables blending with separate blend factors: RGB uses `GL_ONE_MINUS_DST_ALPHA` / `GL_ONE`, and Alpha uses `GL_ONE_MINUS_DST_ALPHA` / `GL_ONE`. The blend equation is set to `GL_FUNC_ADD` for both RGB and Alpha. It draws instanced quads using `GL_TRIANGLE_FAN` with 4 vertices per instance, passing `splatCount` instances. Vertex attributes include 'position' (2 floats) and 'index' (1 unsigned int, instanced with divisor 1). Uniforms passed to the shader include projection (mat4), view (mat4), focal (vec2: fx, fy), viewport (vec2: width, height), and `u_texture` (sampler2D at unit 0) [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of fragments covered by splats. The per-fragment cost is constant, involving a few arithmetic operations and texture lookups [S1, unofficial].
+-*   **Memory Complexity:** $O(1)$ per fragment, plus the storage for the G-Buffer textures (`g_normal`, `g_color`) which scale with viewport resolution [S1, unofficial].
+-*   **Performance:** Performance is heavily dependent on the fill rate and the efficiency of the depth buffer sampling. The explicit depth comparison in the fragment shader can be more expensive than hardware depth testing but allows for the complex visibility logic required for spherical splats [S1, unofficial].
+-*   **Strengths:** Correctly handles occlusion of spherical splats, allowing for accurate alpha blending order. Decouples attribute accumulation from final color, enabling deferred shading techniques [S1, unofficial].
+-*   **Limitations:** Requires two passes (Depth Pass and Attributes Pass) plus a final compositing pass, increasing memory bandwidth usage. The explicit depth comparison in the fragment shader may be slower than hardware depth testing for simple opaque geometry [S1, unofficial].
+-*   **When to Use:** When rendering point-based geometry with spherical splats where correct occlusion and attribute accumulation (normals, colors) are required for subsequent deferred shading passes.
+-*   **When Not to Use:** For simple opaque point rendering where depth testing alone suffices, or when memory bandwidth is a critical bottleneck and a single-pass solution is preferred [S1, unofficial].
++*   **Time Complexity:** $O(N \cdot F)$, where $N$ is the number of splats and $F$ is the number of fragments covered by the splats. The depth test and texture sampling add constant overhead per fragment.
++*   **Memory Complexity:** $O(W \cdot H)$ for the G-buffer textures (`g_normal`, `g_color`, `g_depth`), where $W$ and $H$ are the viewport dimensions.
++*   **Strengths:** Correctly handles spherical geometry occlusion via depth offset calculation. Separates visibility logic from shading, allowing for flexible downstream processing.
++*   **Limitations:** Requires multiple texture reads/writes (depth buffer, G-buffers). The depth-proximity falloff ($w_2$) can introduce artifacts if $\epsilon$ is not tuned correctly relative to scene depth ranges.
++*   **When to use:** When accurate spherical splat rendering is required and subsequent passes need access to normals or accumulated weights.
++*   **When not to use:** For simple billboard rendering where depth offsets are unnecessary, or when memory bandwidth is a critical bottleneck and a single-pass approach is preferred.
+ 
+ ## Background
+-The Splat Attributes Pass is part of a rendering pipeline for point-cloud rendering, specifically designed for object-order splatting. It builds on the principles of decomposing rendering into distinct stages for depth testing and attribute accumulation. The method is implemented in the `PointCloudRendering` repository by arminkz, which uses an octree for point cloud aggregation and a custom rendering pipeline for splatting [S1, unofficial]. The pipeline architecture is also referenced in the `gsplat-opengl` project by liaozhangsheng, which implements Gaussian Splatting techniques [S2, unofficial].
++The Splat Attributes Pass originates from object-order volume rendering techniques that use point-sampled primitives to represent volumetric data. It is implemented in the [PointCloudRendering](https://github.com/arminkz/PointCloudRendering) project [S1, unofficial] and adapted in [gsplat-opengl](https://github.com/liaozhangsheng/gsplat-opengl) for Gaussian splatting applications [S2, unofficial]. The method builds on the principle of stage separation, where geometric projection and compositing are handled independently to allow for optimized intermediate storage [S1, S3, unofficial].
+ 
+ ## Sources

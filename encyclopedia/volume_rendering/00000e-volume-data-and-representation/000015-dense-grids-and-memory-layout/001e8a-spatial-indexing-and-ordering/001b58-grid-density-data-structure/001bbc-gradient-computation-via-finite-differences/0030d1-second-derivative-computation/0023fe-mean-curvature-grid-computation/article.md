@@ -1,108 +1,128 @@
 # Mean Curvature Grid Computation
 
-Also called: Mean Curvature via BoxStencil, Divergence of Normal Field
+Also called: Mean Curvature via BoxStencil, Divergence of Normalized Gradient
 
 ## Overview
-Computes the mean curvature $\kappa = \nabla \cdot (\frac{\nabla f}{|\nabla f|})$ for every active voxel in a scalar volume grid [S1, unofficial]. It differs from sibling methods by calculating this second-order differential quantity directly in a single pass using a `BoxStencil`, avoiding the creation of intermediate gradient or normal grids [S1, unofficial]. This builds on [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by extending finite difference operations to the divergence of the normalized gradient field [G].
+Computes the mean curvature $\kappa$ of a scalar field $f$ at every active voxel by evaluating the divergence of the normalized gradient vector field, $\kappa = \nabla \cdot (\frac{\nabla f}{|\nabla f|})$. Unlike sibling methods that compute intermediate derivatives (Laplacian, Divergence) in separate passes, this method calculates all required first and second derivatives within a single `BoxStencil` pass, avoiding the memory overhead of intermediate grids [S1, unofficial]. It is distinct from [Laplacian Grid Computation](3160-laplacian-grid-computation.md) which sums second derivatives directly, and [Divergence Grid Computation](3151-divergence-grid-computation.md) which operates on vector fields rather than deriving them from a scalar field's gradient.
 
 ## How it works
-**Inputs:** A scalar volume grid containing the function values $f$ [S1, unofficial].
-**Outputs:** A new grid of the same topology and voxel size, containing the mean curvature $\kappa$ at each active voxel, with background values set to zero [S1, unofficial].
+**Inputs:** A scalar field grid $f$ with active voxel topology.
+**Outputs:** A new scalar grid containing the mean curvature $\kappa$ at each active voxel, with inactive voxels set to zero.
 
 **Data Structures:**
-*   **Input Grid:** Scalar values $f(x,y,z)$ [S1, unofficial].
-*   **BoxStencil:** A temporary structure holding values of $f$ at the current voxel and its neighbors (up to distance 1 in each axis) [S1, unofficial].
-*   **Output Grid:** Float array storing $\kappa$ [S1, unofficial].
+The method relies on the `BoxStencil` structure provided by the underlying grid library (e.g., Lyr.jl). The stencil provides access to voxel values at relative integer offsets $(dx, dy, dz)$ from a center coordinate.
+- `value_at(s, dx, dy, dz)`: Returns the scalar value at the stencil's center plus offset.
+- `center_value(s)`: Returns the scalar value at the current center coordinate.
 
 **Parameters:**
-*   `eps(T)`: Machine epsilon for the data type $T$ (e.g., `Float32` or `Float64`) [S1, unofficial].
-*   Multipliers: `0.5` for first derivatives, `0.25` for cross second derivatives, `1.0` (implicit) for diagonal second derivatives [S1, unofficial].
+- `eps(T)`: Machine epsilon for the data type $T$ (e.g., `Float64`), used to prevent division by zero.
+- `half`: Scalar multiplier $0.5$ for first derivatives.
+- `quarter`: Scalar multiplier $0.25$ for mixed second derivatives.
 
 **Algorithm Steps:**
-1.  Initialize a `BoxStencil` with the input grid tree [S1, unofficial].
-2.  Iterate over all active voxels in the grid. Let the current coordinate be $c$ [S1, unofficial].
-3.  Move the stencil to coordinate $c$ [S1, unofficial].
-4.  Retrieve the center value $f_{center} = \text{value\_at}(s, 0, 0, 0)$ [S1, unofficial].
-5.  Compute first derivatives (gradient components) using central differences with multiplier $0.5$:
-    $$ f_x = (f(1,0,0) - f(-1,0,0)) \times 0.5 $$
-    $$ f_y = (f(0,1,0) - f(0,-1,0)) \times 0.5 $$
-    $$ f_z = (f(0,0,1) - f(0,0,-1)) \times 0.5 $$
-6.  Compute the squared gradient magnitude:
-    $$ \text{grad\_sq} = f_x^2 + f_y^2 + f_z^2 $$
-7.  **Edge Case:** If $\text{grad\_sq} < \text{eps}(T)$, set $\kappa(c) = 0$ and continue to the next voxel [S1, unofficial]. This avoids division by zero in flat regions or noise [S1, unofficial].
-8.  Compute second derivatives:
-    *   Diagonal ($f_{xx}, f_{yy}, f_{zz}$) using multiplier $1.0$ (implicit in formula):
-        $$ f_{xx} = f(1,0,0) + f(-1,0,0) - 2 f_{center} $$
-        $$ f_{yy} = f(0,1,0) + f(0,-1,0) - 2 f_{center} $$
-        $$ f_{zz} = f(0,0,1) + f(0,0,-1) - 2 f_{center} $$
-    *   Cross ($f_{xy}, f_{xz}, f_{yz}$) using multiplier $0.25$:
-        $$ f_{xy} = (f(1,1,0) - f(-1,1,0) - f(1,-1,0) + f(-1,-1,0)) \times 0.25 $$
-        $$ f_{xz} = (f(1,0,1) - f(-1,0,1) - f(1,0,-1) + f(-1,0,-1)) \times 0.25 $$
-        $$ f_{yz} = (f(0,1,1) - f(0,-1,1) - f(0,1,-1) + f(0,-1,-1)) \times 0.25 $$
-9.  Compute the numerator of the mean curvature formula:
-    $$ \text{numer} = f_x^2(f_{yy} + f_{zz}) + f_y^2(f_{xx} + f_{zz}) + f_z^2(f_{xx} + f_{yy}) - 2(f_x f_y f_{xy} + f_x f_z f_{xz} + f_y f_z f_{yz}) $$
-10. Compute the final curvature:
-    $$ \kappa = \frac{\text{numer}}{\text{grad\_sq} \times \sqrt{\text{grad\_sq}}} $$
-11. Store $\kappa$ in the output grid at $c$ [S1, unofficial].
-12. After iteration, build the result grid using the computed data, a background value of $0$, and the original grid's voxel size [S1, unofficial].
+1. Initialize a `BoxStencil` with the input grid tree.
+2. Iterate over all active voxels $(c, \_)$ in the grid tree.
+3. Move the stencil to the current coordinate $c$.
+4. Retrieve the center value of the stencil.
+5. Compute first derivatives $f_x, f_y, f_z$ using central differences with the `half` multiplier.
+6. Compute the squared gradient magnitude: $grad\_sq = f_x^2 + f_y^2 + f_z^2$.
+7. If $grad\_sq < \text{eps}(T)$, set the output value at $c$ to zero and continue to the next voxel.
+8. Compute second pure derivatives $f_{xx}, f_{yy}, f_{zz}$ using the center value and the `two` multiplier (implied by the formula $f(x+1) - 2f(x) + f(x-1)$).
+9. Compute mixed second derivatives $f_{xy}, f_{xz}, f_{yz}$ using the `quarter` multiplier.
+10. Compute the numerator of the curvature formula.
+11. Compute the final curvature $\kappa = \frac{\text{numerator}}{grad\_sq \cdot \sqrt{grad\_sq}}$ and store in the output grid at $c$.
+12. Build the result grid using the computed data, a background value of zero, and the original grid's voxel size.
+
+**Formulas:**
+First derivatives (central difference, unit spacing):
+$$ f_x = (f(x+1, y, z) - f(x-1, y, z)) \cdot 0.5 $$
+$$ f_y = (f(x, y+1, z) - f(x, y-1, z)) \cdot 0.5 $$
+$$ f_z = (f(x, y, z+1) - f(x, y, z-1)) \cdot 0.5 $$
+
+Squared gradient magnitude:
+$$ |\nabla f|^2 = f_x^2 + f_y^2 + f_z^2 $$
+
+Second pure derivatives:
+$$ f_{xx} = f(x+1, y, z) + f(x-1, y, z) - 2f(x, y, z) $$
+$$ f_{yy} = f(x, y+1, z) + f(x, y-1, z) - 2f(x, y, z) $$
+$$ f_{zz} = f(x, y, z+1) + f(x, y, z-1) - 2f(x, y, z) $$
+
+Mixed second derivatives:
+$$ f_{xy} = (f(x+1, y+1, z) - f(x-1, y+1, z) - f(x+1, y-1, z) + f(x-1, y-1, z)) \cdot 0.25 $$
+$$ f_{xz} = (f(x+1, y, z+1) - f(x-1, y, z+1) - f(x+1, y, z-1) + f(x-1, y, z-1)) \cdot 0.25 $$
+$$ f_{yz} = (f(x, y+1, z+1) - f(x, y-1, z+1) - f(x, y+1, z-1) + f(x, y-1, z-1)) \cdot 0.25 $$
+
+Mean Curvature $\kappa$:
+$$ \kappa = \frac{f_x^2(f_{yy} + f_{zz}) + f_y^2(f_{xx} + f_{zz}) + f_z^2(f_{xx} + f_{yy}) - 2(f_x f_y f_{xy} + f_x f_z f_{xz} + f_y f_z f_{yz})}{|\nabla f|^3} $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def compute_mean_curvature(grid):
-    """
-    Computes mean curvature kappa = div(grad(f)/|grad(f)|) for all active voxels.
-    grid: object with active_voxels(), value_at(c, dx, dy, dz), dtype, and voxel_size.
-    """
-    output_data = {}
-    for c, _ in grid.active_voxels():
-        # BoxStencil: fetch neighborhood values
-        f_center = grid.value_at(c, 0, 0, 0)
-        fx = (grid.value_at(c, 1, 0, 0) - grid.value_at(c, -1, 0, 0)) * 0.5
-        fy = (grid.value_at(c, 0, 1, 0) - grid.value_at(c, 0, -1, 0)) * 0.5
-        fz = (grid.value_at(c, 0, 0, 1) - grid.value_at(c, 0, 0, -1)) * 0.5
-        grad_sq = fx**2 + fy**2 + fz**2
-        eps = math.finfo(grid.dtype).eps  # [G]
-        if grad_sq < eps:
-            output_data[c] = 0.0
+def compute_mean_curvature_grid(input_grid):
+    # Initialize output grid with same topology, background 0
+    output_grid = Grid(input_grid.topology, background=0.0)
+    
+    # Initialize stencil for the input grid
+    stencil = BoxStencil(input_grid)
+    
+    # Iterate over all active voxels
+    for coord in input_grid.active_voxels():
+        stencil.move_to(coord)
+        
+        # Retrieve center value (not strictly needed for formula but good for debugging)
+        center_val = stencil.center_value()
+        
+        # Compute first derivatives
+        fx = (stencil.value_at(1, 0, 0) - stencil.value_at(-1, 0, 0)) * 0.5
+        fy = (stencil.value_at(0, 1, 0) - stencil.value_at(0, -1, 0)) * 0.5
+        fz = (stencil.value_at(0, 0, 1) - stencil.value_at(0, 0, -1)) * 0.5
+        
+        # Compute squared gradient magnitude
+        grad_sq = fx*fx + fy*fy + fz*fz
+        
+        # Handle near-zero gradient to avoid division by zero
+        if grad_sq < eps(Float64):
+            output_grid.set_value(coord, 0.0)
             continue
-        fxx = grid.value_at(c, 1, 0, 0) + grid.value_at(c, -1, 0, 0) - 2.0 * f_center
-        fyy = grid.value_at(c, 0, 1, 0) + grid.value_at(c, 0, -1, 0) - 2.0 * f_center
-        fzz = grid.value_at(c, 0, 0, 1) + grid.value_at(c, 0, 0, -1) - 2.0 * f_center
-        fxy = (grid.value_at(c, 1, 1, 0) - grid.value_at(c, -1, 1, 0) - grid.value_at(c, 1, -1, 0) + grid.value_at(c, -1, -1, 0)) * 0.25
-        fxz = (grid.value_at(c, 1, 0, 1) - grid.value_at(c, -1, 0, 1) - grid.value_at(c, 1, 0, -1) + grid.value_at(c, -1, 0, -1)) * 0.25
-        fyz = (grid.value_at(c, 0, 1, 1) - grid.value_at(c, 0, -1, 1) - grid.value_at(c, 0, 1, -1) + grid.value_at(c, 0, -1, -1)) * 0.25
-        numer = fx**2 * (fyy + fzz) + fy**2 * (fxx + fzz) + fz**2 * (fxx + fyy) - 2.0 * (fx * fy * fxy + fx * fz * fxz + fy * fz * fyz)
-        denom = grad_sq * math.sqrt(grad_sq)
-        output_data[c] = numer / denom
-    # Build result grid using computed data, background zero, and original voxel size [S1, unofficial]
-    return {"data": output_data, "background": 0.0, "voxel_size": grid.voxel_size}
+            
+        # Compute second pure derivatives
+        fxx = stencil.value_at(1, 0, 0) + stencil.value_at(-1, 0, 0) - 2 * center_val
+        fyy = stencil.value_at(0, 1, 0) + stencil.value_at(0, -1, 0) - 2 * center_val
+        fzz = stencil.value_at(0, 0, 1) + stencil.value_at(0, 0, -1) - 2 * center_val
+        
+        # Compute mixed second derivatives
+        fxy = (stencil.value_at(1, 1, 0) - stencil.value_at(-1, 1, 0) - 
+               stencil.value_at(1, -1, 0) + stencil.value_at(-1, -1, 0)) * 0.25
+        fxz = (stencil.value_at(1, 0, 1) - stencil.value_at(-1, 0, 1) - 
+               stencil.value_at(1, 0, -1) + stencil.value_at(-1, 0, -1)) * 0.25
+        fyz = (stencil.value_at(0, 1, 1) - stencil.value_at(0, -1, 1) - 
+               stencil.value_at(0, 1, -1) + stencil.value_at(0, -1, -1)) * 0.25
+        
+        # Compute numerator of curvature formula
+        numerator = (fx*fx * (fyy + fzz) + 
+                     fy*fy * (fxx + fzz) + 
+                     fz*fz * (fxx + fyy) - 
+                     2 * (fx*fy*fxy + fx*fz*fxz + fy*fz*fyz))
+        
+        # Compute final curvature: numerator / |grad|^3
+        # |grad|^3 = (grad_sq) * sqrt(grad_sq)
+        curvature = numerator / (grad_sq * sqrt(grad_sq))
+        
+        output_grid.set_value(coord, curvature)
+        
+    return output_grid
 ```
 
-## Subtopics
-
-### Sobel Operator
-Uses separable 3x3x3 kernels for gradient estimation. Simpler but less accurate for curvature than the full BoxStencil approach. Choose when memory is constrained and high-order accuracy is not required. [Sobel Operator](1416-sobel-operator.md)
-
-### Analytic Gradient Computation
-Computes gradients from explicit mathematical functions rather than sampled grids. Choose when the volume is defined analytically. [Analytic Gradient Computation](2167-analytic-gradient-computation.md)
-
-### Divergence Grid Computation
-Computes $\nabla \cdot \mathbf{V}$ for a vector field. Mean curvature is a specific case where $\mathbf{V} = \nabla f / |\nabla f|$. [Divergence Grid Computation](3151-divergence-grid-computation.md)
-
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ where $N$ is the number of active voxels [G]. Each voxel requires a fixed number of memory accesses (13 values for the stencil) and arithmetic operations [G].
-*   **Memory Complexity:** $O(N)$ for the output grid [G]. The `BoxStencil` uses constant extra memory per voxel [G].
-*   **Strengths:** Single-pass computation avoids intermediate grid allocations [S1, unofficial]. High accuracy for smooth surfaces [G].
-*   **Limitations:** Sensitive to noise in the input grid due to second-order derivatives [G]. Requires careful handling of zero-gradient regions [S1, unofficial].
-*   **When to use:** When surface curvature is needed for shading, filtering, or feature extraction in volume rendering [G].
-*   **When not to use:** If the input data is very noisy, pre-smoothing is required [G]. If only first-order gradients are needed, use [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md).
+**Time Complexity:** $O(N)$, where $N$ is the number of active voxels. Each voxel requires a fixed number of memory accesses (1 center, 6 axial neighbors, 12 diagonal neighbors for mixed derivatives) and arithmetic operations.
+**Memory Complexity:** $O(N)$ for the output grid. The method avoids intermediate grids, storing only the input and output data structures.
+**Performance:** The single-pass nature reduces memory bandwidth pressure compared to chaining multiple derivative computations. Performance is limited by memory access patterns to the grid tree and the arithmetic intensity of the curvature formula.
+**Strengths:** Memory efficient due to lack of intermediate buffers; numerically stable via epsilon check.
+**Limitations:** Sensitive to noise in the input field due to second-order differentiation; requires active voxel iteration logic.
 
 ## Background
-The method is implemented in the Lyr.jl library by Tobias Osborne [S1, unofficial]. It leverages the `BoxStencil` abstraction to efficiently access neighborhood data in sparse grid structures like VDB [S1, unofficial]. The formula for mean curvature is a standard differential geometry result applied to discrete grid data [G].
+The method is implemented in the Lyr.jl library, a Julia-based volume rendering and processing toolkit. It leverages the library's `BoxStencil` abstraction to provide a concise, high-performance implementation of differential geometry operators on sparse or dense grids. The approach follows standard numerical analysis techniques for approximating the mean curvature of a level set or scalar field.
 
 ## Sources
 [S1] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)

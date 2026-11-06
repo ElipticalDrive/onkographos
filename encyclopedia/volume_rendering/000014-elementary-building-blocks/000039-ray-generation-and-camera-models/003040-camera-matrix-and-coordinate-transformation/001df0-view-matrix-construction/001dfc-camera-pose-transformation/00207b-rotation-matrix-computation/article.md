@@ -3,25 +3,25 @@
 Also called: Rodrigues' Rotation Formula
 
 ## Overview
-Computes a 3x3 rotation matrix given a rotation axis and an angle using Rodrigues' rotation formula components [S1, unofficial]. It differs from [RotateY](1720-rotatey.md) and [Rotation Transformation](2279-rotation-transformation.md) by accepting an arbitrary axis vector rather than fixed coordinate axes, and from [Camera Matrix Decomposition](3164-camera-matrix-decomposition.md) by constructing the matrix directly from geometric parameters rather than decomposing an existing matrix.
+Computes a 3x3 rotation matrix from a rotation axis and angle using Rodrigues' rotation formula [S1, unofficial]. It differs from [RotateY](1720-rotatey.md) and [Rotation Transformation](2279-rotation-transformation.md) by accepting an arbitrary axis vector rather than fixed coordinate axes [G]. It constructs the matrix directly from geometric parameters rather than decomposing an existing matrix like [Camera Matrix Decomposition](3164-camera-matrix-decomposition.md) [G].
 
 ## How it works
 **Inputs:**
-- Axis vector $\mathbf{n} = [n_x, n_y, n_z]^T$, normalized such that $\|\mathbf{n}\| = 1$.
-- Rotation angle $\theta$ in radians.
+- Axis vector $\mathbf{n} = [n_x, n_y, n_z]^T$, normalized such that $\|\mathbf{n}\| = 1$ [S1, unofficial].
+- Rotation angle $\theta$ in radians [S1, unofficial].
 
 **Outputs:**
-- 3x3 rotation matrix $R$.
+- 3x3 rotation matrix $R$ [S1, unofficial].
 
 **Data Structures:**
-- $R$: A 3x3 matrix stored as a flat array of 9 floats or a 2D tensor.
+- $R$: A 3x3 array of floats [G].
 
 **Steps:**
-1. Compute $c = \cos(\theta)$ and $s = \sin(\theta)$.
-2. Compute the outer product term $n_i n_j (1 - c)$ for each element $(i, j)$.
-3. Compute the skew-symmetric cross-product matrix term $\epsilon_{ijk} n_k s$. Here $\epsilon_{ijk}$ is the Levi-Civita symbol.
-4. Compute the identity term $\delta_{ij} c$. Note: The source formula uses $\delta_{ij} c$ for the identity part, but standard Rodrigues' formula is $R = I + (\sin\theta)K + (1-\cos\theta)K^2$. The source formula $R_{ij} = n_i n_j (1 - c) + \epsilon_{ijk} n_k s + \delta_{ij} c$ appears to be a specific variant or potentially contains a typo regarding the identity term (usually $\delta_{ij}$ is multiplied by 1, not $c$, or the formula is $R_{ij} = \cos\theta \delta_{ij} + (1-\cos\theta)n_i n_j + \sin\theta \epsilon_{ijk}n_k$). We follow the source formula exactly [S1, unofficial].
-5. Sum the terms to get $R_{ij}$.
+1. Compute $c = \cos(\theta)$ and $s = \sin(\theta)$ [S1, unofficial].
+2. Compute the outer product term $n_i n_j (1 - c)$ for each element $(i, j)$ [S1, unofficial].
+3. Compute the skew-symmetric cross-product matrix term $\epsilon_{ijk} n_k s$ [S1, unofficial].
+4. Compute the identity term $\delta_{ij} c$ [S1, unofficial].
+5. Sum the terms to get $R_{ij}$ [S1, unofficial].
 
 **Formula:**
 $$R_{ij} = n_i n_j (1 - \cos\theta) + \epsilon_{ijk} n_k \sin\theta + \delta_{ij} \cos\theta$$
@@ -29,9 +29,12 @@ $$R_{ij} = n_i n_j (1 - \cos\theta) + \epsilon_{ijk} n_k \sin\theta + \delta_{ij
 Where:
 - $c = \cos(\theta)$
 - $s = \sin(\theta)$
-- $n$ is the normalized axis vector.
-- $\epsilon_{ijk}$ is the Levi-Civita symbol ($1$ if $(i,j,k)$ is even permutation of $(1,2,3)$, $-1$ if odd, $0$ otherwise).
-- $\delta_{ij}$ is the Kronecker delta ($1$ if $i=j$, $0$ otherwise).
+- $n$ is the normalized axis vector
+- $\epsilon_{ijk}$ is the Levi-Civita symbol ($1$ if $(i,j,k)$ is even permutation of $(1,2,3)$, $-1$ if odd, $0$ otherwise) [S1, unofficial]
+- $\delta_{ij}$ is the Kronecker delta ($1$ if $i=j$, $0$ otherwise) [S1, unofficial]
+
+**Parameters:**
+- Typical values: Not given in the sources.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -40,68 +43,32 @@ Where:
 import math
 
 def rotation_matrix_from_axis_angle(axis, angle):
-    """
-    Computes a 3x3 rotation matrix using the formula from [S1, unofficial].
-    
-    Args:
-        axis: List or tuple of 3 floats [nx, ny, nz]. Must be normalized.
-        angle: Float, rotation angle in radians.
-        
-    Returns:
-        List of lists representing the 3x3 matrix.
-    """
     nx, ny, nz = axis
     c = math.cos(angle)
     s = math.sin(angle)
-    
-    # Precompute terms
     one_minus_c = 1.0 - c
-    
-    # Initialize 3x3 matrix
-    R = [[0.0, 0.0, 0.0],
-         [0.0, 0.0, 0.0],
-         [0.0, 0.0, 0.0]]
-         
-    # Indices mapping for clarity: 0->x, 1->y, 2->z
-    # n vector
     n = [nx, ny, nz]
-    
+    R = [[0.0] * 3 for _ in range(3)]
     for i in range(3):
         for j in range(3):
-            # Term 1: n_i * n_j * (1 - c)
             term1 = n[i] * n[j] * one_minus_c
-            
-            # Term 2: epsilon_ijk * n_k * s
-            # Sum over k
             term2 = 0.0
             for k in range(3):
-                # Levi-Civita symbol epsilon_ijk
-                # Permutation (i, j, k)
                 if i == j or j == k or i == k:
                     eps = 0
                 elif (i, j, k) in [(0, 1, 2), (1, 2, 0), (2, 0, 1)]:
                     eps = 1
-                elif (i, j, k) in [(0, 2, 1), (2, 1, 0), (1, 0, 2)]:
-                    eps = -1
                 else:
-                    eps = 0 # Should be covered by above
-                
+                    eps = -1
                 term2 += eps * n[k] * s
-                
-            # Term 3: delta_ij * c
-            if i == j:
-                term3 = c
-            else:
-                term3 = 0.0
-                
+            term3 = c if i == j else 0.0
             R[i][j] = term1 + term2 + term3
-            
     return R
 ```
 
 **Edge Cases:**
-- If the axis is not normalized, the result will be incorrect. The implementer must normalize $\mathbf{n}$ before use [G].
-- If $\theta = 0$, $R$ should be the identity matrix. The formula yields $R_{ij} = 0 + 0 + \delta_{ij} = \delta_{ij}$, which is correct.
+- If the axis is not normalized, the result will be incorrect; the implementer must normalize $\mathbf{n}$ before use [G].
+- If $\theta = 0$, $R$ should be the identity matrix; the formula yields $R_{ij} = 0 + 0 + \delta_{ij} = \delta_{ij}$, which is correct [S1, unofficial].
 
 ## Subtopics
 
@@ -109,15 +76,15 @@ def rotation_matrix_from_axis_angle(axis, angle):
 Computes a 3x3 rotation matrix that rotates a source vector to align with a target vector using Rodrigues' rotation formula components.
 
 ## Operating characteristics
-Time complexity: $O(1)$ for fixed 3x3 matrix.
-Memory complexity: $O(1)$.
-Strengths: Direct computation from axis-angle representation.
-Limitations: Requires normalized axis. Precision issues may arise for very small angles if not handled carefully [G].
+Time complexity: $O(1)$ for fixed 3x3 matrix [G].
+Memory complexity: $O(1)$ [G].
+Strengths: Direct computation from axis-angle representation [G].
+Limitations: Requires normalized axis [G]. Precision issues may arise for very small angles if not handled carefully [G].
 
 ## Background
-Origin: Rodrigues' rotation formula is a classical result in linear algebra and geometry.
-History: Named after Olinde Rodrigues.
-Usage: Common in computer graphics, robotics, and physics simulations for representing rotations.
+Origin: Rodrigues' rotation formula is a classical result in linear algebra and geometry [G].
+History: Named after Olinde Rodrigues [G].
+Usage: Common in computer graphics, robotics, and physics simulations for representing rotations [G].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

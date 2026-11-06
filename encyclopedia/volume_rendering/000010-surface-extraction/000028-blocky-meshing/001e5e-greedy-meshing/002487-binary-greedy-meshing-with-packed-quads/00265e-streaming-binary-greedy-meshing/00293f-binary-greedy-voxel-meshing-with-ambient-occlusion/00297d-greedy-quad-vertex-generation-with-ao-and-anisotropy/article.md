@@ -1,0 +1,104 @@
+# Greedy Quad Vertex Generation with AO and Anisotropy
+
+Also called: Anisotropy flip logic, Triangulation and Anisotropy Correction
+
+## Overview
+This method converts a greedy mesh quad into four vertex indices while applying ambient occlusion (AO) blending and correcting for interpolation anisotropy [S1, S2, unofficial]. It solves the problem where vertex-based AO values create visible seams or inconsistent shading gradients across a quad face due to the arbitrary direction of the splitting diagonal [S2, unofficial]. It differs from its parent [Binary Greedy Voxel Meshing with Ambient Occlusion](4465-binary-greedy-voxel-meshing-with-ambient-occlusion.md) by actively rotating the vertex order to ensure the diagonal connects vertices with higher combined occlusion, thereby smoothing the gradient [S2, unofficial].
+
+## How it works
+**Inputs:**
+- `GreedyQuad`: Struct containing `x` (u32), `y` (u32), `w` (u32), `h` (u32) [S1, unofficial].
+- `ao`: u32 bitmask representing the solidity of surrounding voxels [S1, unofficial].
+- `face_dir`: Face direction object with method `world_to_sample(axis, x, y, lod)` [S1, unofficial].
+- `lod`: Level of detail object with method `jump_index()` [S1, unofficial].
+- `normal_index`: Integer index for the vertex normal [S1, unofficial].
+- `block_type`: Integer identifier for the block type [S1, unofficial].
+
+**Outputs:**
+- A sequence of four vertex indices (packed as u32) appended to the output vertex list [S1, unofficial].
+
+**Data Structures:**
+- `GreedyQuad`:
+  - `x`: u32, horizontal position [S1, unofficial].
+  - `y`: u32, vertical position [S1, unofficial].
+  - `w`: u32, width [S1, unofficial].
+  - `h`: u32, height [S1, unofficial].
+
+**Steps:**
+
+1. **Calculate AO Values for Corners:**
+   Extract specific bits from the `ao` parameter to compute discrete shading tiers (0–3) for each corner [S1, S2, unofficial]. The bits correspond to the immediate neighbors and diagonals of the voxel face [S1, unofficial].
+   - $v1_{ao} = ((ao \gg 0) \& 1) + ((ao \gg 1) \& 1) + ((ao \gg 3) \& 1)$
+   - $v2_{ao} = ((ao \gg 3) \& 1) + ((ao \gg 6) \& 1) + ((ao \gg 7) \& 1)$
+   - $v3_{ao} = ((ao \gg 5) \& 1) + ((ao \gg 8) \& 1) + ((ao \gg 7) \& 1)$
+   - $v4_{ao} = ((ao \gg 1) \& 1) + ((ao \gg 2) \& 1) + ((ao \gg 5) \& 1)$
+
+2. **Generate Vertex Indices:**
+   Create four vertex indices using a helper `make_vertex_u32`. The world position is calculated by mapping the quad's local coordinates to the world space using the face direction and LOD jump [S1, unofficial].
+   - $v1 = \text{make\_vertex\_u32}(\text{face\_dir}.\text{world\_to\_sample}(\text{axis}, x, y, \text{lod}) \times \text{lod}.\text{jump\_index}(), v1_{ao}, \text{normal\_index}, \text{block\_type})$
+   - $v2 = \text{make\_vertex\_u32}(\text{face\_dir}.\text{world\_to\_sample}(\text{axis}, x + w, y, \text{lod}) \times \text{lod}.\text{jump\_index}(), v2_{ao}, \text{normal\_index}, \text{block\_type})$
+   - $v3 = \text{make\_vertex\_u32}(\text{face\_dir}.\text{world\_to\_sample}(\text{axis}, x + w, y + h, \text{lod}) \times \text{lod}.\text{jump\_index}(), v3_{ao}, \text{normal\_index}, \text{block\_type})$
+   - $v4 = \text{make\_vertex\_u32}(\text{face\_dir}.\text{world\_to\_sample}(\text{axis}, x, y + h, \text{lod}) \times \text{lod}.\text{jump\_index}(), v4_{ao}, \text{normal\_index}, \text{block\_type})$
+   *(Note: The exact mapping of quad corners to $v1..v4$ assumes a standard counter-clockwise or clockwise winding order starting from bottom-left. The source implies $v1$ is at $(x,y)$, $v2$ at $(x+w,y)$, etc., based on the bit extraction logic relative to the voxel grid [S1, unofficial].)*
+
+3. **Anisotropy Correction (Flip Logic):**
+   Determine if the diagonal split should be flipped to ensure smooth shading [S2, unofficial].
+   - Calculate diagonal sums: $S_{00} = v1_{ao} + v3_{ao}$ and $S_{10} = v2_{ao} + v4_{ao}$ [S2, unofficial].
+   - If $S_{00} > S_{10}$, the diagonal connecting $v1$ and $v3$ has higher combined occlusion. To ensure the shared interior edge connects the two vertices with the *higher* combined occlusion values (minimizing the gradient across the lower-occlusion diagonal), the vertex order may need rotation or swapping [S2, unofficial].
+   - Specifically, if the anisotropy condition $(v1_{ao} > 0) \oplus (v3_{ao} > 0)$ is true, rotate the vertex array right by one (move $v1$ to the end) [S1, unofficial]. This effectively changes the diagonal from $(v1, v3)$ to $(v2, v4)$ or similar, depending on the initial winding [S1, unofficial].
+   *(Note: The source [S1, unofficial] specifies a rotation if $(v1_{ao} > 0) \oplus (v3_{ao} > 0)$, while [S2, unofficial] describes flipping based on sum comparison. The rotation in [S1, unofficial] is the implemented heuristic for this correction.)*
+
+4. **Append to Output:**
+   Create a deque from $[v1, v2, v3, v4]$ and append the final sequence to the output vertices vector [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_quad_vertices(quad: GreedyQuad, ao: u32, face_dir: FaceDir, lod: Lod, normal_index: int, block_type: int) -> List[u32]:
+    # 1. Calculate AO values for corners
+    v1_ao = ((ao >> 0) & 1) + ((ao >> 1) & 1) + ((ao >> 3) & 1)
+    v2_ao = ((ao >> 3) & 1) + ((ao >> 6) & 1) + ((ao >> 7) & 1)
+    v3_ao = ((ao >> 5) & 1) + ((ao >> 8) & 1) + ((ao >> 7) & 1)
+    v4_ao = ((ao >> 1) & 1) + ((ao >> 2) & 1) + ((ao >> 5) & 1)
+
+    # 2. Generate vertex indices
+    # Assuming quad corners are: v1=(x,y), v2=(x+w,y), v3=(x+w,y+h), v4=(x,y+h)
+    pos1 = face_dir.world_to_sample(axis=0, x=quad.x, y=quad.y, lod=lod) * lod.jump_index()
+    pos2 = face_dir.world_to_sample(axis=0, x=quad.x + quad.w, y=quad.y, lod=lod) * lod.jump_index()
+    pos3 = face_dir.world_to_sample(axis=0, x=quad.x + quad.w, y=quad.y + quad.h, lod=lod) * lod.jump_index()
+    pos4 = face_dir.world_to_sample(axis=0, x=quad.x, y=quad.y + quad.h, lod=lod) * lod.jump_index()
+
+    v1 = make_vertex_u32(pos1, v1_ao, normal_index, block_type)
+    v2 = make_vertex_u32(pos2, v2_ao, normal_index, block_type)
+    v3 = make_vertex_u32(pos3, v3_ao, normal_index, block_type)
+    v4 = make_vertex_u32(pos4, v4_ao, normal_index, block_type)
+
+    # 3. Anisotropy Correction
+    # Check if v1 and v3 have different non-zero AO states
+    if (v1_ao > 0) ^ (v3_ao > 0):
+        # Rotate right: v1 moves to end
+        vertices = [v2, v3, v4, v1]
+    else:
+        vertices = [v1, v2, v3, v4]
+
+    return vertices
+```
+
+**Edge Cases and Pitfalls:**
+- If vertices with identical AO values are placed across the wrong diagonal, the quad renders with a visible visual seam or inconsistent shading gradient [S2, unofficial].
+- The XOR condition $(v1_{ao} > 0) \oplus (v3_{ao} > 0)$ handles cases where one diagonal has occlusion and the other does not, but may not fully resolve all anisotropy cases described by the sum comparison in [S2, unofficial]. The implementation in [S1, unofficial] uses the XOR rotation as the primary correction.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per quad, as it involves a fixed number of bitwise operations and vertex creations.
+- **Memory Complexity:** $O(1)$ additional memory per quad for the vertex indices.
+- **Strengths:** Reduces visual artifacts (seams) in AO shading without adding geometry [S2, unofficial]. Integrates seamlessly with greedy meshing by preserving quad topology [S1, unofficial].
+- **Limitations:** The correction heuristic (XOR rotation) may not perfectly match the theoretical optimal diagonal flip based on AO sums [S1, S2, unofficial]. Relies on discrete AO tiers, which can lead to banding if not smoothed [S2, unofficial].
+
+## Background
+This method is part of the binary greedy mesher implementation [S1, unofficial]. It addresses the conflict between greedy meshing (which merges faces) and ambient occlusion (which varies per voxel) by baking AO into vertex data and correcting interpolation artifacts [S2, unofficial]. The anisotropy flip logic is a specific optimization to ensure smooth shading across merged quads [S2, unofficial].
+
+## Sources
+[S1] Binary Greedy Voxel Meshing Algorithm, https://github.com/TanTanDev/binary_greedy_mesher_demo, fetched 2026-10-26 (unofficial)
+[S2] Baking Dynamic Ambient Occlusion in Procedural Voxels, https://salivity.github.io/game-development/article/baking-dynamic-ambient-occlusion-in-procedural-voxels, fetched 2026-10-29 (unofficial)

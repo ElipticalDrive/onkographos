@@ -1,0 +1,82 @@
+# Soft Pruning
+
+Also called: Hessian-aware pruning, L1 loss pruning
+
+## Overview
+Soft Pruning is a density control method for 3D Gaussian Splatting that removes redundant Gaussian primitives to accelerate training and rendering while preserving visual fidelity [S1, S2]. It differs from sibling methods by timing its execution immediately before opacity resets, leveraging the state of the L1 loss to maintain a robust Hessian approximation [S1]. Unlike Hard Pruning, which occurs after densification, Soft Pruning is integrated directly into the densification stage [S2].
+
+## How it works
+**Inputs and Outputs:**
+- Input: The current set of 3D Gaussians $\mathcal{G}$, the current training iteration $t$, and the accumulated L1 loss metric.
+- Output: A reduced set of Gaussians $\mathcal{G}'$ with primitives removed based on an efficiency score.
+
+**Data Structures:**
+Each Gaussian $g_i \in \mathcal{G}$ retains its standard attributes: position $\mathbf{p}_i$, covariance $\Sigma_i$ (scale $\mathbf{s}_i$, rotation $\mathbf{q}_i$), opacity $\alpha_i$, and spherical harmonics coefficients $\mathbf{c}_i$ [S2]. The method computes an "Efficient Pruning Score" for each Gaussian [S2]. The exact mathematical formulation of this score is not provided in the sources [G: The score likely incorporates gradient magnitude or opacity, but the specific formula is not given].
+
+**Steps:**
+1. **Check Iteration:** Determine if the current iteration $t$ matches a predefined pruning schedule. The sources specify iterations 6000, 9000, and 12000 [S1].
+2. **Evaluate Loss:** Observe that the L1 loss is small and stable at these points, except immediately after an opacity reset [S1].
+3. **Compute Scores:** Calculate the Efficient Pruning Score for all Gaussians in $\mathcal{G}$ [S2].
+4. **Rank and Select:** Sort Gaussians by their pruning score. Select the bottom $R$ percent of Gaussians for removal, where $R$ is the pruning ratio [S1].
+5. **Remove:** Delete the selected Gaussians from $\mathcal{G}$ to form $\mathcal{G}'$ [S1, S2].
+6. **Proceed:** Continue with the standard densification pipeline (cloning/splitting) on the remaining Gaussians [S2].
+
+**Parameters:**
+- **Pruning Ratio ($R$):** The percentage of Gaussians to remove. A ratio of 80% is used in experiments, preserving visual fidelity [S1].
+- **Schedule:** Pruning occurs at iterations 6000, 9000, and 12000 [S1].
+
+**Edge Cases:**
+- **Opacity Resets:** Pruning is timed to occur *before* opacity resets to ensure the Hessian approximation remains robust [S1].
+- **Precision:** High pruning ratios (e.g., 80%) are safe, but excessive pruning before convergence may degrade quality [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def soft_pruning(gaussians, current_iteration, pruning_ratio=0.8):
+    # Schedule defined in [S1]
+    pruning_iterations = [6000, 9000, 12000]
+    
+    if current_iteration not in pruning_iterations:
+        return gaussians
+    
+    # Compute pruning scores for all Gaussians [S2]
+    # Note: Exact score formula not provided in sources [G]
+    scores = compute_efficient_pruning_score(gaussians)
+    
+    # Sort Gaussians by score (ascending, assuming lower score = more prunable)
+    # Note: Sorting direction depends on score definition [G]
+    sorted_indices = argsort(scores)
+    
+    # Calculate number of Gaussians to remove
+    num_to_remove = int(len(gaussians) * pruning_ratio)
+    
+    # Select indices to remove
+    indices_to_remove = set(sorted_indices[:num_to_remove])
+    
+    # Filter out removed Gaussians
+    pruned_gaussians = [g for i, g in enumerate(gaussians) if i not in indices_to_remove]
+    
+    return pruned_gaussians
+```
+
+## Subtopics
+
+### [Hard Pruning](5591-hard-pruning.md)
+A pruning method that reduces model size by a constant ratio every 3000 iterations after the densification stage, allowing subsequent iterations to refine the model.
+
+## Operating characteristics
+- **Time Complexity:** Adds a sorting step $O(N \log N)$ where $N$ is the number of Gaussians, executed only at specific iterations [S1, S2].
+- **Memory Complexity:** Reduces memory usage by approximately 90% by removing Gaussians [S2].
+- **Performance:** Increases rendering and training speed while maintaining image quality [S2].
+- **Strengths:** Maintains robust Hessian approximation by timing with L1 loss convergence [S1]. High pruning ratios (80%) are effective [S1].
+- **Limitations:** Timing is rigid (specific iterations) [S1]. Requires careful integration with opacity resets [S1].
+- **When to use:** When training 3D Gaussian Splatting models and seeking significant speedups without quality loss, particularly when integrating with densification pipelines [S2].
+- **When not to use:** If dynamic, iteration-independent pruning is required, or if the L1 loss behavior deviates significantly from the assumed convergence pattern [S1].
+
+## Background
+Soft Pruning was introduced in the context of "Speedy-Splat," a method for fast 3D Gaussian Splatting [S1, S2]. It was developed to address the computational cost of large Gaussian sets by integrating pruning into the densification stage, leveraging the observation that L1 loss converges quickly [S2]. The method was shown to achieve compression ratios similar to PUP 3D-GS but with faster rendering speeds [S1].
+
+## Sources
+[S1] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse Primitives, https://doi.org/10.1109/cvpr52734.2025.02006, fetched 2026-10-26
+[S2] Speedy-Splat: Fast 3D Gaussian Splatting with Sparse Pixels and Sparse ..., https://speedysplat.github.io/, fetched 2026-10-28

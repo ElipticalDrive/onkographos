@@ -1,0 +1,168 @@
+# Orbit Camera Basis Computation
+
+Also called: Orbit Camera, Orbit Camera Position Calculation, Spinny Camera
+
+## Overview
+Computes an orthonormal camera basis (eye position, forward, right, and up vectors) for an orbit camera that looks at a fixed target center from a specified distance, oriented by spherical yaw and pitch angles [S1, unofficial]. It solves the problem of determining the viewing direction and position for navigation in 3D space based on user input angles [S1, unofficial]. It sets itself apart from full 3-axis Euler rotation by excluding roll, and from quaternion-based approaches by using explicit trigonometric vector construction [S3, S4, unofficial].
+
+## How it works
+**Inputs:**
+- `target`: 3D vector representing the center point the camera orbits around.
+- `yaw`: Angle in radians around the Y-axis (horizontal rotation).
+- `pitch`: Angle in radians from the horizontal plane (vertical rotation).
+- `distance`: Scalar distance from `target` to the camera eye position.
+
+**Outputs:**
+- A structure containing four 3D vectors: `eye`, `forward`, `right`, `up`.
+
+**Data Structures:**
+- `vec3`: A 3-component vector type with fields `x`, `y`, `z`.
+- `CameraBasis`: A struct with fields `eye: vec3`, `forward: vec3`, `right: vec3`, `up: vec3`.
+
+**Steps:**
+
+1.  **Clamp Pitch:** Clamp the `pitch` angle to the range `[-PITCH_LIMIT, PITCH_LIMIT]` to prevent gimbal lock or inversion artifacts. The standard limit is approximately 1.5533430342749535 radians (~89 degrees) [S1, unofficial].
+    $$ p = \text{clamp}(\text{pitch}, -1.5533430342749535, 1.5533430342749535) $$
+
+2.  **Calculate Offset Vector:** Compute the offset from the target to the eye position using spherical coordinates.
+    $$ \cos P = \cos(p) $$
+    $$ \text{offset}_x = \text{distance} \cdot \cos P \cdot \sin(\text{yaw}) $$
+    $$ \text{offset}_y = \text{distance} \cdot \sin(p) $$
+    $$ \text{offset}_z = \text{distance} \cdot \cos P \cdot \cos(\text{yaw}) $$
+    $$ \text{offset} = [\text{offset}_x, \text{offset}_y, \text{offset}_z] $$ [S1, unofficial]
+
+3.  **Calculate Eye Position:** Add the offset to the target.
+    $$ \text{eye} = \text{target} + \text{offset} $$ [S1, unofficial]
+
+4.  **Calculate Forward Vector:** Compute the normalized vector from the eye to the target.
+    $$ \text{forward} = \text{normalize}(\text{target} - \text{eye}) $$ [S1, unofficial]
+
+5.  **Calculate Right Vector:** Use the world up vector `[0, 1, 0]` to compute the right vector via cross product.
+    $$ \text{worldUp} = [0, 1, 0] $$
+    $$ \text{right} = \text{cross}(\text{forward}, \text{worldUp}) $$
+    
+    **Pitfall Handling:** If the forward vector is parallel to the world up vector, the cross product magnitude becomes zero. Check if `length(right) < 1e-6`. If so, set `right = [1, 0, 0]` [S1, unofficial]. Otherwise, normalize `right`.
+    $$ \text{right} = \text{normalize}(\text{right}) $$ [S1, unofficial]
+
+6.  **Calculate Up Vector:** Compute the true up vector by crossing the right and forward vectors.
+    $$ \text{up} = \text{normalize}(\text{cross}(\text{right}, \text{forward})) $$ [S1, unofficial]
+
+7.  **Return Basis:** Return the structure containing `eye`, `forward`, `right`, and `up`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def orbit_camera_basis(target, yaw, pitch, distance):
+    # Step 1: Clamp pitch to prevent gimbal lock
+    PITCH_LIMIT = 1.5533430342749535  # ~89 degrees
+    p = max(-PITCH_LIMIT, min(PITCH_LIMIT, pitch))
+    
+    # Step 2: Calculate offset vector
+    cos_p = math.cos(p)
+    sin_p = math.sin(p)
+    sin_yaw = math.sin(yaw)
+    cos_yaw = math.cos(yaw)
+    
+    offset_x = distance * cos_p * sin_yaw
+    offset_y = distance * sin_p
+    offset_z = distance * cos_p * cos_yaw
+    
+    # Step 3: Calculate eye position
+    eye_x = target[0] + offset_x
+    eye_y = target[1] + offset_y
+    eye_z = target[2] + offset_z
+    
+    # Step 4: Calculate forward vector
+    fwd_x = target[0] - eye_x
+    fwd_y = target[1] - eye_y
+    fwd_z = target[2] - eye_z
+    
+    fwd_len = math.sqrt(fwd_x**2 + fwd_y**2 + fwd_z**2)
+    if fwd_len == 0:
+        # Degenerate case: eye is at target
+        forward = [0, 0, -1] # Arbitrary default forward
+    else:
+        forward = [fwd_x / fwd_len, fwd_y / fwd_len, fwd_z / fwd_len]
+        
+    # Step 5: Calculate right vector
+    world_up = [0, 1, 0]
+    right_x = forward[1] * world_up[2] - forward[2] * world_up[1]
+    right_y = forward[2] * world_up[0] - forward[0] * world_up[2]
+    right_z = forward[0] * world_up[1] - forward[1] * world_up[0]
+    
+    right_len = math.sqrt(right_x**2 + right_y**2 + right_z**2)
+    
+    if right_len < 1e-6:
+        # Forward is parallel to world up; use arbitrary stable right vector
+        right = [1, 0, 0]
+    else:
+        right = [right_x / right_len, right_y / right_len, right_z / right_len]
+        
+    # Step 6: Calculate up vector
+    up_x = right[1] * forward[2] - right[2] * forward[1]
+    up_y = right[2] * forward[0] - right[0] * forward[2]
+    up_z = right[0] * forward[1] - right[1] * forward[0]
+    
+    up_len = math.sqrt(up_x**2 + up_y**2 + up_z**2)
+    if up_len == 0:
+        up = [0, 1, 0] # Fallback
+    else:
+        up = [up_x / up_len, up_y / up_len, up_z / up_len]
+        
+    return {
+        "eye": [eye_x, eye_y, eye_z],
+        "forward": forward,
+        "right": right,
+        "up": up
+    }
+```
+
+**Parameters:**
+- `PITCH_LIMIT`: 1.5533430342749535 radians (~89 degrees) [S1, unofficial].
+- `distance`: Not given in the sources.
+- `yaw`: Not given in the sources.
+- `pitch`: Not given in the sources.
+- `target`: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Gimbal Lock / Pitch Limiting:** If pitch exceeds ~89 degrees, the camera may invert. Clamping to `[-1.5533430342749535, 1.5533430342749535]` prevents this [S1, unofficial].
+- **Parallel Vectors:** If the forward vector is parallel to the world up vector `[0, 1, 0]`, the cross product for the right vector becomes zero. This is handled by checking if the magnitude of the right vector is less than `1e-6` and setting it to `[1, 0, 0]` [S1, unofficial].
+
+## Subtopics
+
+### [Arcball Camera View & Projection Matrix Computation](2210-arcball-camera-view-projection-matrix-computation.md)
+Computes the view and perspective projection matrices for an arcball-style camera, handling rotation around a pivot point and avoiding pitch flip artifacts. It differs from standard look-at methods by explicitly managing the camera position via sequential yaw and pitch rotations around a fixed target.
+
+### [Camera Look-at Computation via Rotation](2696-camera-look-at-computation-via-rotation.md)
+This method computes a camera's look-at point by rotating a forward vector around the camera's local X and Z axes using spherical coordinate angles (yaw and pitch), then adding the result to the camera position. It solves the problem of determining the viewing direction for an orbit camera based on user input angles, enabling navigation in 3D space. It sets itself apart from full 3-axis Euler rotation by excluding roll, and from quaternion-based approaches by using explicit trigonometric vector construction.
+
+### [Orbit Camera Controls](3262-orbit-camera-controls.md)
+An interactive camera controller that manipulates a camera's pose using spherical coordinates (distance, yaw, pitch) relative to a target center, enabling orbiting, panning, and zooming operations. It differs from [Arcball Camera View & Projection Matrix Computation](2210-arcball-camera-view-projection-matrix-computation.md) by using explicit spherical angles rather than quaternion-based rotation from mouse vectors, and from [Camera Look-at Computation via Rotation](2696-camera-look-at-computation-via-rotation.md) by maintaining a persistent target center that can be panned independently of the orbit angles. It builds on [Orbit Camera Basis Computation](1749-orbit-camera-basis-computation.md) to derive the final view matrix from the computed pose.
+
+### [Spherical Camera Path Generation](3934-spherical-camera-path-generation.md)
+Generates a smooth circular camera path looking at a target for 360° orbit video rendering. It differs from [Arcball Camera View & Projection Matrix Computation](2210-arcball-camera-view-projection-matrix-computation.md) by producing a continuous temporal sequence of poses rather than a single interactive view, and from [Orbit Camera Controls](3262-orbit-camera-controls.md) by automating the trajectory generation for offline video export rather than providing user input handling [G].
+
+### [Volume Visualization Camera](4116-volume-visualization-camera.md)
+A camera controller for volume visualization that computes a view matrix by applying volume scaling, centering, rotation, zoom, and translation transformations. It differs from standard scene cameras by explicitly modeling the volume's physical bounds and scale, ensuring the view matrix correctly maps volume coordinates to clip space regardless of the dataset's dimensions.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per frame. The computation involves a fixed number of trigonometric functions, vector additions, and cross products.
+- **Memory Complexity:** $O(1)$. Requires storage for a few temporary vectors and scalars.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with the number of cameras if multiple orbit cameras are computed simultaneously, but remains constant per camera.
+- **Strengths:** Simple to implement; provides intuitive spherical coordinate navigation; avoids gimbal lock with pitch clamping.
+- **Limitations:** Does not handle roll; relies on a fixed world up vector which may cause issues if the camera looks directly up or down (mitigated by the right-vector fallback); does not compute the projection matrix itself.
+- **When to use:** Interactive 3D viewers, orbiting visualization tools, and camera path generation where spherical coordinates are preferred.
+- **When not to use:** When roll is required; when the camera needs to maintain a specific local up vector independent of the world up; when quaternion-based smooth interpolation is needed.
+
+## Background
+The orbit camera model is a common technique in 3D visualization and ray marching demos for allowing users to navigate around a scene [S1, unofficial]. It is often used for testing visualization algorithms [S2, unofficial]. The specific implementation details, such as the pitch limit and basis construction, are found in open-source ray marching projects [S1, unofficial] and GLSL tutorials [S3, unofficial].
+
+## Sources
+[S1] MohammadHossinzehi/sdf-raymarcher, https://github.com/MohammadHossinzehi/sdf-raymarcher, fetched 2026-10-26 (unofficial)
+[S2] marceline-cramer/svo-cpu, https://github.com/marceline-cramer/svo-cpu, fetched 2026-10-27 (unofficial)
+[S3] Ray Marching and Signed Distance Functions — GLSL in the..., https://www.mysimulator.uk/content/articles/ray-marching-sdf.html, fetched 2026-10-29 (unofficial)

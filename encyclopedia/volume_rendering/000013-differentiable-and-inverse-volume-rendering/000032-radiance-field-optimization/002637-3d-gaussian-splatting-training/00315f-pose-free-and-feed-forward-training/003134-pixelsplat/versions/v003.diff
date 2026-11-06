@@ -1,0 +1,193 @@
+--- v002.md
++++ v003.md
+@@ -4,39 +4,143 @@
+ 
+ ## Overview
+-pixelSplat is a feed-forward model that reconstructs a 3D radiance field parameterized by 3D Gaussian primitives from a pair of input images [S1]. It solves the problem of generalizable novel view synthesis by replacing the iterative, memory-intensive optimization of single-scene methods with a direct neural mapping, while avoiding the local minima inherent to sparse, locally-supported primitive representations [S1]. Unlike light-field transformers that produce black-box ray fields, pixelSplat generates an explicit, editable 3D representation that enables real-time rasterization-based rendering [S1].
++pixelSplat is a feed-forward model that reconstructs a 3D radiance field parameterized by 3D Gaussian primitives from a pair of input images [S1]. It solves the problem of generalizable novel view synthesis by producing an explicit, editable 3D representation that renders in real-time, avoiding the memory and time intensity of ray-marching based methods [S1]. Unlike light-field transformers which output implicit fields, pixelSplat generates a primitive-based structure that is significantly faster to encode and render [S1]. It specifically addresses two key challenges in sparse-view reconstruction: scale ambiguity inherent in Structure-from-Motion (SfM) poses and local minima in primitive regression, using an epipolar transformer and differentiable probabilistic sampling respectively [S1].
+ 
+ ## How it works
+-**Inputs:** A pair of images $I_1, I_2$ and their associated camera parameters (intrinsics and extrinsics) [S1].
+-**Outputs:** A set of 3D Gaussian primitives $\{G_i\}$, each defined by mean $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and scale $S_i$ [S1].
++**Inputs and Outputs:**
++*   **Input:** A pair of images $\{I_1, I_2\}$ and their associated camera parameters (intrinsics and extrinsics) [S1].
++*   **Output:** A set of 3D Gaussian primitives $\{G_i\}$, each defined by mean $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and scale $S$ [S1]. The spherical harmonics coefficients $c_{i,lm}$ are also predicted to define color [6464-pixelsplat.md].
+ 
+ **Data Structures:**
+-The model predicts parameters for pixel-aligned Gaussian primitives. For each pixel $u$ in the reference view, a feature vector $\mathbf{F}[u]$ is computed. The prediction network $f$ outputs:
+-*   $\phi$: A scalar probability density value (logit or raw output before softmax/sigmoid, depending on implementation details not fully specified, but used to form a distribution).
+-*   $\boldsymbol{\delta}$: The depth offset along the camera ray for the mean $\mu$.
+-*   $\boldsymbol{\Sigma}$: The covariance matrix (or parameters to construct it).
+-*   $\mathbf{S}$: The scale factor [S1].
++The model predicts parameters for a dense grid of pixels in the reference image. For each pixel $u$, a Gaussian primitive is defined.
++*   **Feature Map $F[u]$:** A concatenated feature vector for pixel $u$, derived from the image encoder.
++*   **Gaussian Parameters:**
++    *   $\mu$: Mean position in 3D space.
++    *   $\Sigma$: Covariance matrix (often parameterized via rotation $R$ and scale $S$).
++    *   $\alpha$: Opacity.
++    *   $S$: Scale factor (used to resolve scale ambiguity).
++    *   $c_{lm}$: Spherical harmonics coefficients for color [6464-pixelsplat.md].
+ 
+-The mean $\mu$ is constructed by projecting the pixel $u$ into 3D space using the camera pose and adding the predicted depth offset $\boldsymbol{\delta}$ along the ray direction [S1].
++**Algorithm Steps:**
+ 
+-**Algorithm:**
++1.  **Image Encoding:**
++    Pass each reference image $I$ through two pre-trained backbones:
++    *   A ResNet-50 [15].
++    *   A Vision Transformer (ViT-B/8) [9].
++    Both are pre-trained using the DINO objective [3]. Sum their pixel-wise outputs to generate initial features [S1].
+ 
+-1.  **Feature Extraction:** Pass each reference image $I_j$ through a ResNet-50 and a ViT-B/8 vision transformer, both pre-trained with a DINO objective. Sum their pixel-wise outputs to generate initial features [S1].
+-2.  **Epipolar Encoding:** Perform two rounds of epipolar cross-attention between the features of the two views. This step utilizes frequency-based positional encoding of depth to resolve scale ambiguity [S1].
+-3.  **Probability Distribution Prediction:** For each pixel $u$ in the reference view, use the encoded feature $\mathbf{F}[u]$ to predict a dense probability distribution over 3D space along the camera ray. The network $f$ outputs $\phi, \boldsymbol{\delta}, \boldsymbol{\Sigma}, \mathbf{S}$ conditioned on $\mathbf{F}[u]$ [S1].
+-    $$ \phi, \boldsymbol{\delta}, \boldsymbol{\Sigma}, \mathbf{S} = f(\mathbf{F}[u]) $$
+-4.  **Differentiable Sampling (Reparameterization Trick):** Sample Gaussian means from the predicted dense probability distribution. The sampling operation is made differentiable via a reparameterization trick. This couples the density of a sampled Gaussian primitive to the probability of that location, allowing gradients to back-propagate through the sampling operation [S1].
+-    *   *Mechanism:* When a gradient indicates that increasing the opacity of a Gaussian at a specific 3D location would reduce loss, the model increases the probability that a Gaussian will be sampled at that location in future training steps. This implicitly spawns or deletes primitives without non-differentiable pruning/splitting [S1].
+-5.  **Rendering:** Render the predicted Gaussians using standard differentiable volume rendering/rasterization [S1].
+-6.  **Loss Calculation:** Minimize the combination of Mean Squared Error (MSE) and Learned Perceptual Image Patch Similarity (LPIPS) between the rendered image and the ground-truth image [S1].
+-7.  **Optimization:** Use the Adam optimizer [S1].
++2.  **Epolar Transformer Encoding:**
++    Perform two rounds of epipolar cross-attention between the features of the two views [S1].
++    *   Use frequency-based positional encoding of depth to resolve scale ambiguity [S1].
++    *   This step infers the per-scene scale factor $s_i$ by finding cross-view pixel correspondences [S1].
++
++3.  **Probabilistic Gaussian Prediction:**
++    Predict a dense probability distribution over 3D space conditioned on the feature $F[u]$ for each pixel $u$ [S1].
++    *   The network $f$ outputs parameters $\phi, \boldsymbol{\delta}, \boldsymbol{\Sigma}, \mathbf{S}$ [S1].
++    *   Sample Gaussian means $\mu$ from this predicted distribution [S1].
++
++4.  **Differentiable Sampling (Reparameterization Trick):**
++    Make the sampling operation differentiable to allow gradient back-propagation [S1].
++    *   Couple the density of a sampled Gaussian primitive to the probability of its location [S1].
++    *   If a gradient increases the opacity of a Gaussian at a location, the model increases the probability of sampling a Gaussian at that location in future iterations, implicitly spawning or deleting primitives [S1].
++
++5.  **Rendering and Loss:**
++    Render the predicted Gaussians to the target view using standard differentiable rasterization [S1].
++    *   Minimize the loss $\mathcal{L}$ between the rendered image and the ground truth target image [S1].
++    *   $\mathcal{L} = \mathcal{L}_{MSE} + \lambda \mathcal{L}_{LPIPS}$ [S1].
++
++**Pseudocode:**
++
++```python
++import torch
++import torch.nn as nn
++import torch.nn.functional as F
++
++class PixelSplat(nn.Module):
++    def __init__(self):
++        super().__init__()
++        # Pre-trained encoders (DINO)
++        self.resnet = ResNet50(pretrained=True)
++        self.vit = ViT_B8(pretrained=True)
++        # Epipolar Transformer layers
++        self.epipolar_attn = EpipolarCrossAttention(num_rounds=2)
++        # Gaussian prediction head
++        self.gaussian_head = nn.Sequential(
++            nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
++            nn.ReLU(),
++            nn.Conv2d(hidden_dim, out_channels, kernel_size=1)
++        )
++        
++    def forward(self, images, camera_params):
++        """
++        images: List[Tensor] of shape [2, C, H, W]
++        camera_params: Dict containing intrinsics and extrinsics for the two views
++        """
++        # Step 1: Image Encoding
++        feats_resnet = []
++        feats_vit = []
++        for img in images:
++            feats_resnet.append(self.resnet(img))
++            feats_vit.append(self.vit(img))
++        
++        # Sum pixel-wise outputs
++        features = [r + v for r, v in zip(feats_resnet, feats_vit)]
++        
++        # Step 2: Epipolar Transformer
++        # Encode features using epipolar cross-attention with depth positional encoding
++        fused_features = self.epipolar_attn(features, camera_params)
++        
++        # Step 3 & 4: Probabilistic Prediction and Sampling
++        # Predict distribution parameters for each pixel
++        # Note: The exact mapping from head output to distribution params depends on implementation
++        # Assuming head outputs mean, log-variance, opacity, scale, etc.
++        pred_params = self.gaussian_head(fused_features[0]) # Use reference view features
++        
++        # Sample means from the predicted distribution
++        # This step must be differentiable via reparameterization trick
++        means = self.sample_gaussian_means(pred_params)
++        
++        # Extract other parameters (covariance, opacity, scale, SH coeffs)
++        covariances = self.get_covariance(pred_params)
++        opacities = self.get_opacity(pred_params)
++        scales = self.get_scale(pred_params)
++        sh_coeffs = self.get_sh_coeffs(pred_params)
++        
++        # Step 5: Rendering
++        # Render the set of Gaussians to the target view
++        rendered_image = rasterize_gaussians(
++            means=means,
++            covariances=covariances,
++            opacities=opacities,
++            sh_coeffs=sh_coeffs,
++            camera_params=camera_params['target']
++        )
++        
++        return rendered_image
++
++    def sample_gaussian_means(self, params):
++        """
++        Differentiable sampling from the predicted probability distribution.
++        Implements the reparameterization trick.
++        """
++        # Extract mean and variance from params
++        mu = params['mean']
++        log_var = params['log_var']
++        
++        # Reparameterization: z = mu + sigma * epsilon
++        epsilon = torch.randn_like(mu)
++        sigma = torch.exp(0.5 * log_var)
++        sampled_means = mu + sigma * epsilon
++        
++        return sampled_means
++```
+ 
+ **Parameters:**
+-*   Training resolution: $256 \times 256$ pixels [S1].
+-*   Loss weights: Not specified in sources.
+-*   Optimizer: Adam [S1].
++*   **Training Resolution:** $256 \times 256$ pixels [S1].
++*   **Optimizer:** Adam [S1].
++*   **Loss Weights:** $\lambda$ for LPIPS is not specified in the sources [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Scale Ambiguity:** SfM poses are scaled by arbitrary unknown factors $s_i$. The model handles this by inferring the per-scene scale factor via the epipolar transformer, which finds cross-view pixel correspondences associated with positionally encoded depth values [S1]. Without this, ghosting artifacts occur [S1].
+-*   **Local Minima:** Direct regression of Gaussian means fails because gradients vanish if the Gaussian is far from the correct location (local support) or if the path to the correct location traverses empty space (non-monotonic loss). The probabilistic sampling scheme avoids this [S1].
++*   **Scale Ambiguity:** SfM poses are scaled by an arbitrary factor $s_i$. The model handles this by inferring the scale via the epipolar transformer [S1]. Without this, ghosting artifacts occur [S1].
++*   **Local Minima:** Direct regression of Gaussian means suffers from local minima due to local support and non-monotonic loss paths through empty space. The probabilistic sampling approach avoids this [S1].
+ *   **Out-of-Distribution Views:** Reflective surfaces may appear transparent, and Gaussians may appear billboard-like when viewed from poses outside the training distribution [S1].
+ 
+@@ -44,16 +148,16 @@
+ 
+ ### MVSplat
+-A method that builds upon pixelSplat by combining multi-view feature extraction through transformers and cost volumes, which are then processed by a U-Net [S3]. It extends the two-view input to multi-view inputs.
++A method that builds upon PixelSplat by combining multi-view feature extraction through transformers and cost volumes, which are then processed by a U-Net [S3]. It extends the two-view framework to multi-view inputs.
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** Inference cost is approximately 650 times less than the next-fastest baseline for encoding one scene and rendering 100 images [S1]. It accelerates rendering by 2.5 orders of magnitude compared to state-of-the-art light field transformers [S1].
+-*   **Memory Complexity:** Significantly less memory per ray at training time compared to baselines like pixelNeRF and GPNR [S1].
+-*   **Strengths:** Real-time and memory-efficient rendering; explicit, editable 3D representation; fast 3D reconstruction at inference time; outperforms baselines on perceptual quality (LPIPS) [S1].
+-*   **Limitations:** Suffers from transparency on reflective surfaces and billboard artifacts on out-of-distribution views, similar to standard 3D Gaussian Splatting [S1]. Requires known camera poses (unlike NoPoSplat) [S3].
++*   **Memory Complexity:** Significantly less memory per ray at training time compared to ray-marching methods [S1].
++*   **Strengths:** Real-time rendering, editable 3D representation, fast training/inference, high perceptual quality (lower LPIPS) [S1].
++*   **Limitations:** Struggles with reflective surfaces and out-of-distribution camera poses [S1]. Requires known camera poses (intrinsics and extrinsics) for the input pair [S1].
+ *   **When to use:** Wide-baseline novel view synthesis from image pairs where real-time rendering and explicit 3D structure are required [S1].
+-*   **When not to use:** When camera poses are unknown (use NoPoSplat) or when monocular reconstruction is required (use Flash3D) [S3].
++*   **When not to use:** When camera poses are unknown or uncalibrated (consider NoPoSplat [S2, unofficial]), or when single-view reconstruction is needed (consider Flash3D [S2, unofficial]).
+ 
+ ## Background
+-pixelSplat was introduced by Charatan, Li, Tagliasacchi, and Sitzmann from MIT and Simon Fraser University/University of Toronto [S1]. It was presented at CVPR 2024 [S1]. The method addresses the limitations of differentiable rendering (memory/time intensive) and light-field transformers (lack of editable 3D representation) by integrating 3D Gaussian primitives into a generalizable, feed-forward framework [S1]. It is benchmarked on the RealEstate10k and ACID datasets [S1].
++pixelSplat was introduced by Charatan, Li, Tagliasacchi, and Sitzmann from MIT and Simon Fraser University/University of Toronto [S1]. It was presented at CVPR 2024 [S1]. The method addresses the limitations of previous generalizable novel view synthesis approaches, such as pixelNeRF and GPNR, by integrating 3D Gaussian splatting into a feed-forward architecture [S1]. It builds on the principles of differentiable rendering and 3D Gaussian primitives [S1].
+ 
+ ## Sources

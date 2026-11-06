@@ -1,75 +1,192 @@
 # Path Tracing with Volume Interaction
 
-Also called: Volume-Aware Path Tracing, Mixed Surface-Volume Path Tracing
+Also called: Path Tracing for Volume Lighting
 
 ## Overview
-Path Tracing with Volume Interaction is a unified path tracing algorithm that handles both surface and participating media intersections within a single loop, using Russian Roulette for path termination and power heuristic for light sampling [S1, unofficial]. It distinguishes itself from [Single Scattering Volume Rendering with Ray Marching](1532-single-scattering-volume-rendering-with-ray-marching.md) by supporting multiple bounces and indirect illumination through recursive path extension, while avoiding the complexity of [Explicit Path Tracing with Russian Roulette](2209-explicit-path-tracing-with-russian-roulette.md) by integrating volume scattering directly into the main traversal logic rather than treating it as a separate pass.
+Path Tracing with Volume Interaction is a global illumination algorithm that handles both surface and participating media intersections within a single unified framework, using Russian Roulette for path termination and power heuristic for light sampling [S1, unofficial]. It solves the problem of simulating multiple scattering in participating media, where light takes random paths through the medium until reaching a point, analogous to indirect illumination in surface rendering [S2, unofficial]. It sets itself apart from [Single Scattering Volume Rendering with Ray Marching](1532-single-scattering-volume-rendering-with-ray-marching.md) by supporting multiple scattering events rather than limiting interactions to the first scattering event, and from [Explicit Path Tracing with Russian Roulette](2209-explicit-path-tracing-with-russian-roulette.md) by explicitly integrating volume intersection logic and isotropic scattering models into the path generation loop.
 
 ## How it works
-**Inputs:** Scene geometry, volume data (density/gradient fields), material definitions, light sources, camera ray, sampler state, and settings (`minDepth`, `maxDepth`, `gradientFactor`, `stepSize`, `backgroundLight`).
-**Outputs:** Final pixel color.
+**Inputs and Outputs:**
+*   **Inputs:** Scene geometry, volume data (density field, gradient field), light sources, camera parameters, maximum bounce depth (`maxDepth`), minimum bounce depth for Russian Roulette (`minDepth`), gradient factor (`gradientFactor`), and a random number sampler.
+*   **Outputs:** Final pixel color (radiance).
 
 **Data Structures:**
-*   `Vec3f`: 3D vector (x, y, z), typically float32.
-*   `Ray`: `origin` (Vec3f), `direction` (Vec3f, normalized), `minT` (float).
-*   `Intersection`: `position` (Vec3f), `normal` (Vec3f), `materialID` (int), `isVolume` (bool), `iorI` (float, index of refraction incoming), `iorO` (float, index of refraction outgoing).
-*   `Material`: Properties including BRDF/BTDF evaluation functions, emission data, and specular flags.
-*   `LightHit`: `colour` (Vec3f), `direction` (Vec3f), `distance` (float), `pdf` (float).
-
-**Steps:**
-1.  Initialize `throughput` to $(1.0, 1.0, 1.0)$ and `colour` to $(0, 0, 0)$. Set `interaction.iorI` to $1.0$ (air).
-2.  Loop for `bounces` from $0$ to `settings.maxDepth` - $1$:
-    a.  Intersect the current ray with the scene.
-    b.  If no intersection is found:
-        i.  Add `throughput * settings.backgroundLight` to `colour`.
-        ii. Break the loop.
-    c.  If the intersection is a **Volume** type:
-        i.  Compute the local position relative to the volume origin.
-        ii. Get the gradient of the volume at that position to determine the surface normal magnitude.
-        iii. Sample the volume intensity (density) at that position.
-        iv. Calculate the probability of treating this as a surface interaction using the formula:
-        $$probBRDF = 1.0 - \exp(-settings.gradientFactor \cdot \frac{magnitude}{intensity})$$
-        v.  If `sampler.nextFloat() < probBRDF`:
-            1.  Treat as a surface (BRDF) interaction.
-            2.  Shift the position along the normal by `settings.stepSize` to avoid self-intersection.
-            3.  Multiply `throughput` by the transfer function's RGBA output (attenuation).
-            4.  Retrieve the material from the transfer function.
-        vi. Else (treat as isotropic volume scattering):
-            1.  Multiply `throughput` by $2.0$ (isotropic scattering assumption).
-            2.  Create an isotropic material using the transfer function's color.
-    d.  If the intersection is a **Surface** type:
-        i.  Retrieve the material from `scene.materials` using `intersection.materialID`.
-    e.  If the material has a light source and (`bounces == 0` or the sampled lobe is Specular):
-        i.  Add `throughput * hitLight->getEmittance(interaction)` to `colour`.
-    f.  Add direct lighting contribution:
-        $$colour += throughput \cdot SampleOneLight(interaction, scene, material, hitLight, settings, sampler)$$
-    g.  Sample the next direction from the material.
-        i.  If the PDF is not a number (e.g., parallel direction), resample until a valid PDF is obtained [G].
-    h.  Update `throughput`:
-        $$throughput *= \frac{material->evaluate(interaction)}{pdf}$$
-    i.  If the sampled lobe is SpecularTransmission:
-        i.  Update the index of refraction: `interaction.iorI = interaction.iorO`.
-    j.  Create the new ray:
-        i.  `origin = interaction.position`
-        ii. `direction = interaction.inputDir` (the sampled direction)
-        iii. `minT = RAY_EPS`
-    k.  Perform Russian Roulette if `bounces >= settings.minDepth - 1`:
-        i.  Calculate $p$ as the maximum component of `throughput`.
-        ii. If `sampler.nextFloat() > p`, break the loop.
-        iii. Otherwise, divide `throughput` by $p$.
-3.  Return the final `colour` divided by $(1 + bounces)$ [G, normalization factor].
+*   `ScatterEvent`: Stores intersection position, normal, material ID, index of refraction (`iorI`, `iorO`), and input direction.
+*   `LightHit`: Stores light color, direction, distance, and probability density function (PDF).
+*   `Material`: Defines surface properties (diffuse, specular, emission) or volume properties (isotropic scattering).
+*   `Sampler`: Provides uniform random floats for stochastic decisions.
 
 **Parameters:**
-*   `settings.minDepth`: Minimum number of bounces before Russian Roulette can terminate the path.
-*   `settings.maxDepth`: Maximum number of bounces allowed for the path.
-*   `settings.gradientFactor`: Factor controlling the probability of treating volume gradients as surfaces.
-*   `settings.stepSize`: Offset distance applied when treating a volume interaction as a surface to prevent self-intersection.
-*   `settings.backgroundLight`: Color of the background environment.
+*   `settings.maxDepth`: Maximum number of bounces allowed for the path [S1, unofficial].
+*   `settings.minDepth`: Minimum number of bounces before Russian Roulette can terminate the path [S1, unofficial].
+*   `settings.gradientFactor`: Factor used to determine the probability of treating a volume interaction as a surface [S1, unofficial].
+*   `settings.stepSize`: Small offset distance to shift position along the normal for surface interactions [S1, unofficial].
+*   `RAY_EPS`: Minimum ray segment length to prevent self-intersection [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Initialize `throughput` to $(1.0, 1.0, 1.0)$.
+    *   Initialize `colour` to $(0, 0, 0)$.
+    *   Initialize `interaction.iorI` to $1.0$ (air) [S1, unofficial].
+    *   Loop from `bounces = 0` to `maxDepth - 1`.
+
+2.  **Ray Intersection:**
+    *   Intersect the current ray with the scene.
+    *   If no intersection is found:
+        *   Add `throughput * backgroundLight` to `colour`.
+        *   Break the loop [S1, unofficial].
+
+3.  **Volume Interaction Handling:**
+    *   If the intersection is a Volume type:
+        *   Compute the local position relative to the volume origin.
+        *   Get the gradient of the volume at that position to determine the surface normal magnitude and direction.
+        *   Sample the volume intensity (density) at that position [S1, unofficial].
+        *   Calculate the probability of treating this as a surface interaction using the formula:
+            $$ p_{BRDF} = 1.0 - \exp(-\text{gradientFactor} \cdot \frac{\|\mathbf{g}\|}{\rho}) $$
+            where $\|\mathbf{g}\|$ is the gradient magnitude and $\rho$ is the sampled intensity [S1, unofficial].
+        *   If `sampler.nextFloat() < p_BRDF`:
+            *   Treat as surface (BRDF).
+            *   Shift position along the normal by `settings.stepSize`.
+            *   Multiply `throughput` by the transfer function's RGBA output.
+            *   Retrieve the material from the transfer function [S1, unofficial].
+        *   Else (`sampler.nextFloat() >= p_BRDF`):
+            *   Treat as isotropic scattering.
+            *   Multiply `throughput` by $2.0$ [S1, unofficial].
+            *   Create an `Isotropic` material using the transfer function's color [S1, unofficial].
+
+4.  **Surface Interaction Handling:**
+    *   If the intersection is a Surface type:
+        *   Retrieve the material from `scene.materials` using `intersection.materialID` [S1, unofficial].
+
+5.  **Emission Contribution:**
+    *   If the material has a light source and (`bounces == 0` or the sampled lobe is Specular):
+        *   Add `throughput * hitLight->getEmittance(interaction)` to `colour` [S1, unofficial].
+
+6.  **Direct Lighting:**
+    *   Add direct lighting contribution:
+        $$ \text{colour} \ += \ \text{throughput} \times \text{SampleOneLight}(\text{interaction}, \text{scene}, \text{material}, \text{hitLight}, \text{settings}, \text{sampler}) $$
+        [S1, unofficial].
+
+7.  **Next Direction Sampling:**
+    *   Sample the next direction from the material.
+    *   If the PDF is not a valid number (e.g., parallel direction), resample until a valid PDF is obtained [S1, unofficial].
+
+8.  **Throughput Update:**
+    *   Update throughput:
+        $$ \text{throughput} \ *= \ \frac{\text{material} \rightarrow \text{evaluate}(\text{interaction})}{\text{pdf}} $$
+        [S1, unofficial].
+
+9.  **Index of Refraction Update:**
+    *   If the sampled lobe is `SpecularTransmission`:
+        *   Update `interaction.iorI = interaction.iorO` [S1, unofficial].
+
+10. **Ray Creation:**
+    *   Create the new ray:
+        *   `origin = interaction.position`
+        *   `direction = interaction.inputDir` (sampled direction)
+        *   `minT = RAY_EPS` [S1, unofficial].
+
+11. **Russian Roulette:**
+    *   If `bounces >= minDepth - 1`:
+        *   Calculate $p$ as the maximum component of `throughput`.
+        *   If `sampler.nextFloat() > p`:
+            *   Break the loop.
+        *   Otherwise:
+            *   Divide `throughput` by $p$ [S1, unofficial].
+
+12. **Final Output:**
+    *   Return the final `colour` divided by $(1 + \text{bounces})$ [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def path_trace_volume(scene, camera, settings, sampler):
+    # Initialize buffers
+    throughput = Vec3f(1.0, 1.0, 1.0)
+    colour = Vec3f(0.0, 0.0, 0.0)
+    ior_i = 1.0  # Air
+    
+    for bounces in range(settings.max_depth):
+        # 1. Intersect ray
+        ray = current_ray  # From previous iteration or camera
+        hit = scene.intersect(ray)
+        
+        if hit is None:
+            colour += throughput * scene.background_light
+            break
+            
+        interaction = hit.event
+        interaction.ior_i = ior_i
+        
+        # 2. Handle Volume Intersections
+        if hit.type == Volume:
+            local_pos = hit.position - volume.origin
+            gradient = volume.gradient(local_pos)
+            normal = normalize(gradient)
+            magnitude = length(gradient)
+            intensity = volume.sample(local_pos)
+            
+            # Calculate probability of surface-like interaction
+            prob_brdf = 1.0 - exp(-settings.gradient_factor * (magnitude / intensity))
+            
+            if sampler.next_float() < prob_brdf:
+                # Treat as surface
+                hit.position += normal * settings.step_size
+                throughput *= volume.transfer_function_rgba(local_pos)
+                material = volume.get_material(local_pos)
+            else:
+                # Treat as isotropic volume scatter
+                throughput *= 2.0
+                material = IsotropicMaterial(volume.transfer_function_color(local_pos))
+                
+        # 3. Handle Surface Intersections
+        elif hit.type == Surface:
+            material = scene.materials[hit.material_id]
+            
+        # 4. Emission
+        if material.has_emission and (bounces == 0 or material.sampled_lobe == Specular):
+            light_hit = material.get_emittance(interaction)
+            colour += throughput * light_hit.colour
+            
+        # 5. Direct Lighting
+        light_hit = sample_one_light(interaction, scene, material, settings, sampler)
+        colour += throughput * light_hit.colour
+        
+        # 6. Sample Next Direction
+        while True:
+            next_dir = material.sample_direction(interaction, sampler)
+            pdf = material.pdf(interaction, next_dir)
+            if is_valid(pdf):
+                break
+                
+        # 7. Update Throughput
+        throughput *= material.evaluate(interaction) / pdf
+        
+        # 8. Update IOR for Transmission
+        if material.sampled_lobe == SpecularTransmission:
+            ior_i = interaction.ior_o
+            
+        # 9. Create New Ray
+        current_ray = Ray(interaction.position, next_dir, min_t=RAY_EPS)
+        
+        # 10. Russian Roulette
+        if bounces >= settings.min_depth - 1:
+            p = max_component(throughput)
+            if sampler.next_float() > p:
+                break
+            throughput /= p
+            
+    return colour / (1 + bounces)
+```
 
 **Edge Cases and Pitfalls:**
-*   **Parallel Directions:** When sampling a direction parallel to the surface normal or previous ray, the PDF may become invalid or zero. The algorithm must resample until a valid PDF is obtained [S1, unofficial].
-*   **Volume Gradient Magnitude:** If the gradient magnitude is zero (uniform volume), `probBRDF` becomes $0$, forcing isotropic scattering.
-*   **Precision:** Floating-point precision errors in ray intersection or position shifting can cause self-intersection artifacts. Using `RAY_EPS` and `settings.stepSize` mitigates this.
+*   **Invalid PDF:** If the sampled direction results in a zero or invalid PDF (e.g., parallel to normal), the algorithm must resample [S1, unofficial].
+*   **Self-Intersection:** Use `RAY_EPS` for the minimum ray segment length to prevent the ray from intersecting the surface it just left [S1, unofficial].
+*   **Precision:** The exponential decay in `prob_BRDF` can lead to numerical underflow for large gradient factors or small intensities.
+*   **Homogeneous vs Heterogeneous:** The basic implementation assumes homogeneous media between steps for simplicity, but Woodcock tracking can be used for unbiased results in heterogeneous media [S2, unofficial].
 
 ## Subtopics
 
@@ -77,20 +194,20 @@ Path Tracing with Volume Interaction is a unified path tracing algorithm that ha
 Extends path tracing to support participating media that emit light, integrating volume emission sampling directly into medium interaction routines.
 
 ### [Neural Photon Field Rendering](3427-neural-photon-field-rendering.md)
-Uses a pre-trained neural field to approximate indirect global illumination, computing only the first volume interaction and querying the network for incoming radiance.
+Approximates indirect global illumination by querying a pre-trained neural field after the first volume interaction, avoiding recursive ray tracing for global illumination.
 
 ## Operating characteristics
-**Time Complexity:** $O(N \cdot B)$, where $N$ is the number of pixels and $B$ is the average number of bounces. Each bounce involves ray-scene intersection and potential volume sampling.
-**Memory Complexity:** $O(V)$ for volume data storage, where $V$ is the volume resolution.
-**Measured Performance:** Not given in the sources.
-**Scaling:** Performance scales linearly with resolution and average path length. Volume sampling cost depends on the density field evaluation complexity.
-**Strengths:** Unified handling of surfaces and volumes; supports multiple bounces and indirect illumination; relatively simple integration into existing path tracers.
-**Limitations:** Isotropic scattering assumption for volume interactions may not be accurate for all media; Russian Roulette termination can introduce noise if not tuned properly.
-**When to Use:** Scenes with mixed surface and volumetric elements where indirect illumination is important.
-**When Not to Use:** Scenes requiring highly anisotropic volume scattering or real-time performance constraints where simpler single-scattering methods are preferred.
+*   **Time Complexity:** $O(N \cdot D)$, where $N$ is the number of pixels and $D$ is the maximum path depth. Each bounce involves ray intersection and potential volume sampling.
+*   **Memory Complexity:** $O(V)$, where $V$ is the size of the volume data structure, plus $O(1)$ per pixel for the path state.
+*   **Performance:** Path tracing for volumes is expensive because light can take random paths in the media until it reaches the point, analogous to indirect illumination in surface rendering [S2, unofficial].
+*   **Strengths:** Physically accurate multiple scattering; unified handling of surfaces and volumes.
+*   **Limitations:** High computational cost; requires efficient volume traversal and sampling; sensitive to noise in heterogeneous media.
+*   **When to use:** When multiple scattering in participating media is required and real-time performance is not critical.
+*   **When not to use:** For real-time applications or when single scattering is sufficient.
 
 ## Background
-Originated in the `thewildnath/PathTracer` repository [S1, unofficial]. The method is part of a broader effort to integrate participating media into standard path tracing frameworks, building on [Path Tracing and Sampling](2526-path-tracing-and-sampling.md).
+Path tracing for volume interaction was developed as an extension of surface path tracing to handle participating media. The specific implementation details described here are derived from the `thewildnath/PathTracer` repository [S1, unofficial]. The concept of using path tracing for volumes to handle multiple scattering is discussed in community resources such as Computer Graphics Stack Exchange [S2, unofficial].
 
 ## Sources
 [S1] thewildnath/PathTracer, https://github.com/thewildnath/PathTracer, fetched 2026-10-26 (unofficial)
+[S2] Volume Rendering (Path Tracing & Real-Time), https://computergraphics.stackexchange.com/questions/4412, fetched 2026-10-30 (unofficial)

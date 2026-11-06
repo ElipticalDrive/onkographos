@@ -1,0 +1,141 @@
+Context No light types exist in the engine. This issue introduces the full light hierarchy, pre-built light volume meshes, and the LightRenderer singleton that manages two-pass stencil rendering for local lights. Depends on: #79 (VideoDe...
+
+Light class hierarchy, volume geometry, and LightRenderer · Issue #83 · seblef/claudeengine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Light class hierarchy, volume geometry, and LightRenderer #83
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Light class hierarchy, volume geometry, and LightRenderer#83
+Copy link
+Labels
+corefeaturerenderer
+Milestone
+Support for lighting
+Description
+seblef
+opened on May 7, 2026
+Issue body actions
+Context
+No light types exist in the engine. This issue introduces the full light hierarchy, pre-built light volume meshes, and the LightRenderer singleton that manages two-pass stencil rendering for local lights.
+Depends on: #79 (VideoDevice stencil state methods)
+Light hierarchy
+All lights inherit from Renderable and submit themselves to LightRenderer via Enqueue().
+```
+renderer::Renderable
+  └─ renderer::Light (abstract)
+       ├─ renderer::GlobalLight
+       ├─ renderer::OmniLight
+       ├─ renderer::CircleSpotLight
+       └─ renderer::RectangleSpotLight
+```
+src/renderer/Light.h/.cpp
+```
+class Light : public Renderable {
+ public:
+  void Enqueue() override;  // submits to LightRenderer::Instance()
+  virtual core::Mat4f GetVolumeMatrix() const = 0;
+  // color, intensity getters/setters
+ private:
+  core::Color color_;
+  float intensity_;
+};
+```
+src/renderer/GlobalLight.h/.cpp
+Properties: Vec3f ambient_color_, Vec3f direction_
+always_visible = true, infinite bbox
+GetVolumeMatrix() returns identity (uses fullscreen quad)
+src/renderer/OmniLight.h/.cpp
+Property: float radius_
+Bbox = sphere AABB from world position ± radius
+GetVolumeMatrix() = translation(world_pos) × uniform_scale(radius)
+src/renderer/CircleSpotLight.h/.cpp
+Properties: float inner_angle_, float outer_angle_, float range_ (radians)
+GetVolumeMatrix() = translation(pos) × rotation_align_Z_to_direction × scale(range×tan(outer), range×tan(outer), range)
+src/renderer/RectangleSpotLight.h/.cpp
+Properties: float h_angle_, float v_angle_, float range_
+GetVolumeMatrix() = translation(pos) × rotation_align_Z_to_direction × scale(range×tan(h), range×tan(v), range)
+LightInfos UBO
+src/renderer/LightInfos.h — 80-byte std140 struct (slot 4), shared by all light shaders:
+```
+struct LightInfos {
+  core::Vec3f position;    float type;       // 0=global,1=omni,2=circle_spot,3=rect_spot
+  core::Vec3f color;       float intensity;
+  core::Vec3f direction;   float range;
+  float inner_angle;  float outer_angle;  float h_angle;  float v_angle;
+  core::Vec3f ambient;     float pad_;
+};
+static_assert(sizeof(LightInfos) == 80);
+```
+Add data/shaders/glsl/uniforms/light_infos.glsl (binding 4).
+LightRenderer
+src/renderer/LightRenderer.h/.cpp (singleton):
+Light volume meshes (created once at init, Vertex3D layout)
+Unit quad: 4 vertices covering NDC [-1,1]², for GlobalLight
+Unit UV sphere: ~32 stacks × 64 sectors, radius 1
+Unit cone: apex at origin, Z pointing forward, half-angle 45°, height 1 — scaled per light
+Unit pyramid: apex at origin, base 1×1, height 1 — scaled per light
+Render logic
+Instances are sorted by light type (GlobalLight first) to minimize shader switches.
+GlobalLight (fullscreen quad):
+Additive blend, depth write OFF, stencil OFF
+One draw call per GlobalLight instance
+Local lights (OmniLight, CircleSpotLight, RectangleSpotLight) — two sub-passes per light:
+Sub-pass A (stencil fill):
+```
+video->ClearStencil(0)
+video->SetColorWriteEnabled(false)
+video->SetFaceCulling(CullFace::kNone)
+video->SetStencilTestEnabled(true)
+video->SetStencilFunc(CompareFunc::kAlways, 0, 0xFF)
+video->SetStencilOp(Face::kFront, kKeep, kIncrWrap, kKeep)
+video->SetStencilOp(Face::kBack,  kKeep, kDecrWrap, kKeep)
+// draw volume mesh
+```
+Sub-pass B (lighting):
+```
+video->SetColorWriteEnabled(true)
+video->SetFaceCulling(CullFace::kBack)
+video->SetStencilFunc(CompareFunc::kNotEqual, 0, 0xFF)
+// additive blend ON
+// draw volume mesh again → Blinn-Phong only on stencil-marked pixels
+```
+Holds four abstract::Shader* (one per type: global_light_ps, omni_light_ps, circle_spot_ps, rect_spot_ps) sharing one VS. Shader switch happens only at type boundaries.
+Notes
+Update src/renderer/CMakeLists.txt with all new .cpp files
+Activity
+seblef
+added this to the Support for lighting milestone on May 7, 2026
+seblef
+added
+core
+renderer
+feature
+on May 7, 2026
+seblef
+closed this as completedon May 10, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+corefeaturerenderer
+Projects
+No projects
+Milestone
+Support for lighting
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

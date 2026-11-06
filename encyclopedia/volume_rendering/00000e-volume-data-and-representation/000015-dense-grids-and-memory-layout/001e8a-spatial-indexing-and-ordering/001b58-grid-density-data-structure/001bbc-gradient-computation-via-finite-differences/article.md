@@ -1,150 +1,196 @@
 # Gradient Computation via Finite Differences
 
-Also called: Central Difference Gradient, Central Difference Gradient Estimation, Central-Difference Gradient Operator, Component-wise Linear Gradient Estimation, Finite Difference Gradient, Gradient Computation Using Central Differences, Numerical Gradient Approximation
+Also called: Central Difference Gradient, Central Difference Gradient Calculation, Central Difference Gradient Estimation, Finite Difference Gradient, Gradient Computation Using Central Differences, Gradient Estimation (Central Difference), Levoy, Gradient/Normals
 
 ## Overview
-Gradient Computation via Finite Differences estimates the spatial gradient vector of a scalar volume field at sample positions to enable local illumination (e.g., Phong shading) and multidimensional transfer functions [S1, unofficial][S3, book]. It sets itself apart from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by requiring no basis function derivatives and from [Sobel Operator](1416-sobel-operator.md) by using a minimal 6-neighbor stencil rather than a separable smoothing kernel, making it faster but less robust to noise [S2, S7, unofficial].
+Gradient Computation via Finite Differences estimates the surface normal at a voxel by approximating the gradient of the scalar volume field using central differences [S2, S3, S8, unofficial]. It solves the problem of providing directional lighting cues (such as Phong shading) in direct volume rendering when an analytic gradient is unavailable [S1, unofficial][S18]. It sets itself apart from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by requiring additional sample evaluations (typically 6) rather than deriving gradients from basis function coefficients, and from [Neumann Gradient](3342-neumann-gradient.md) by using a simpler 6-neighbor stencil rather than a 26-neighbor regression framework [S3, S8, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A scalar volume grid $V$ of dimensions $N_x \times N_y \times N_z$, stored in row-major order (x fastest, y middle, z slowest) [S6, unofficial].
-- Output: A gradient vector grid $G$ of the same dimensions, where each voxel stores a 3D vector $(g_x, g_y, g_z)$ [S5, unofficial].
+*   **Input:** A 3D scalar volume grid $V$ of dimensions $N_x \times N_y \times N_z$. The grid may be stored in row-major order (x fastest, y middle, z slowest) [S7, S9, unofficial].
+*   **Output:** A 3D vector grid $\nabla V$ (or a normalized normal grid) of the same dimensions, where each voxel stores a 3D vector $(g_x, g_y, g_z)$ [S6, S11, unofficial].
 
 **Data Structures:**
-- The gradient array is a 1D float array of size $N_x N_y N_z \times 3$, with interleaved RGB components per voxel: `gradient[idx*3]` is $g_x$, `gradient[idx*3+1]` is $g_y$, `gradient[idx*3+2]` is $g_z$ [S5, unofficial].
-- Alternatively, for GPU storage, gradients are encoded into signed normalized 8-bit textures (e.g., `GL_RGBA8_SNORM`) where the direction is mapped to $[0,1]$ and magnitude may be stored in an alpha channel or separate buffer [S4, unofficial].
+*   **Volume Grid:** A 1D array or texture of size $N_x N_y N_z$ containing scalar values $v_{i,j,k}$ [S7, S9, unofficial].
+*   **Gradient Grid:** A 1D array of size $N_x N_y N_z \times 3$ storing interleaved float components $(g_x, g_y, g_z)$ per voxel [S6, unofficial]. Alternatively, gradients can be stored in a signed normalized 8-bit texture (RGBA8_SNORM) where R, G, B encode the normalized normal components mapped to $[0, 1]$ [S5, S13, unofficial].
 
 **Parameters:**
-- $h$: The physical distance between voxels along the axis of differentiation (voxel size) [S3, book][S16, unofficial].
-- `grad_magnitude_modifier`: A scalar multiplier applied to the gradient magnitude before clamping (typical value depends on data range, often 1.0 or scaled to fit texture range) [S4, unofficial].
+*   **Step Size ($h$):** The physical distance between voxels along the axis of differentiation. If the grid is uniform, $h_x = h_y = h_z = h$ [S4, book][S24]. In index space, this is often normalized to 1.0 or handled by the texture sampling hardware [S12, S20, unofficial].
+*   **Boundary Handling:** At data boundaries, the gradient is undefined. Common strategies include:
+    1.  Clamping coordinates to the valid range $[0, N-1]$ (repeating boundary values) [S13, S22, unofficial].
+    2.  Using one-sided differences (forward/backward) if only one neighbor is available [S23, unofficial].
+    3.  Padding the volume by repeating boundary values [S4, book][S24].
 
-**Algorithm Steps:**
-1. Iterate over every voxel $(x, y, z)$ in the volume grid [S5, S8, unofficial].
-2. For each axis, compute the central difference approximation of the partial derivative [S1, unofficial].
-   - **X-component:** Sample the voxel at $(x-1, y, z)$ and $(x+1, y, z)$ [S2, unofficial].
-     $$ g_x = \frac{V(x+1, y, z) - V(x-1, y, z)}{2h} $$ [S3, book][S17]
-   - **Y-component:** Sample the voxel at $(x, y-1, z)$ and $(x, y+1, z)$ [S2, unofficial].
-     $$ g_y = \frac{V(x, y+1, z) - V(x, y-1, z)}{2h} $$ [S3, book][S17]
-   - **Z-component:** Sample the voxel at $(x, y, z-1)$ and $(x, y, z+1)$ [S2, unofficial].
-     $$ g_z = \frac{V(x, y, z+1) - V(x, y, z-1)}{2h} $$ [S3, book][S17]
-3. If the gradient is used solely for surface normals, the division by $2h$ may be omitted, as the vector is normalized immediately after [S10, unofficial].
-4. Handle boundary conditions: At data boundaries, the gradient is undefined because neighbors are missing. Common handling includes padding the volume by repeating boundary values [S3, book][S16, unofficial].
-5. Normalize the resulting vector $\mathbf{g} = (g_x, g_y, g_z)$ to obtain the surface normal $\mathbf{n}$:
-   $$ \mathbf{n} = \frac{\mathbf{g}}{\|\mathbf{g}\|} \quad \text{if } \|\mathbf{g}\| > \epsilon $$
-   If $\|\mathbf{g}\| \le \epsilon$ (e.g., $10^{-6}$), set $\mathbf{n} = (0, 0, 0)$ or a default normal [S10, unofficial].
-6. Store $\mathbf{n}$ (and optionally magnitude) in the output gradient grid or texture [S5, S10, unofficial].
+**Formulas:**
+The central difference approximation for the gradient component along axis $a$ at voxel $(i, j, k)$ is:
+$$ \nabla_a v_{i,j,k} = \frac{v_{i,j,k+1} - v_{i,j,k-1}}{2h_a} $$
+where $h_a$ is the cell size along axis $a$ [S23, unofficial][S24]. In index space (assuming unit spacing $h=1$), this simplifies to:
+$$ g_x = v_{i+1,j,k} - v_{i-1,j,k} $$
+$$ g_y = v_{i,j+1,k} - v_{i,j-1,k} $$
+$$ g_z = v_{i,j,k+1} - v_{i,j,k-1} $$
+[S2, S8, S19, unofficial]. The resulting gradient vector $\mathbf{g} = (g_x, g_y, g_z)$ is typically normalized to obtain the surface normal $\mathbf{n}$:
+$$ \mathbf{n} = \frac{\mathbf{g}}{|\mathbf{g}|} = \frac{(g_x, g_y, g_z)}{\sqrt{g_x^2 + g_y^2 + g_z^2}} $$
+[S3, S13, unofficial]. If $|\mathbf{g}| < \epsilon$ (e.g., $10^{-6}$), the normal is set to zero or a default value [S13, unofficial][S25].
 
 **Pseudocode:**
+The following Python-like pseudocode computes the gradient for a 3D volume array `volume` of shape `(nx, ny, nz)` and stores results in `gradient` of shape `(nx, ny, nz, 3)`. It uses clamping for boundary handling.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_central_difference_gradients(volume, resolution, voxel_size):
+import math
+
+def compute_central_difference_gradients(volume, nx, ny, nz):
     """
-    Computes the gradient vector for each voxel in a scalar volume using central differences.
+    Computes the gradient vector for each voxel in a 3D scalar volume
+    using central differences with clamped boundary handling.
     
     Args:
-        volume: 3D list of shape (res_x, res_y, res_z) containing scalar values.
-        resolution: Tuple (res_x, res_y, res_z).
-        voxel_size: Float representing the physical distance between voxels (h).
+        volume: 1D array or 3D array of shape (nx, ny, nz) containing scalar values.
+        nx, ny, nz: Dimensions of the volume.
         
     Returns:
-        gradients: 3D list of shape (res_x, res_y, res_z, 3) containing normalized gradient vectors.
+        gradient: 3D array of shape (nx, ny, nz, 3) containing (gx, gy, gz).
     """
-    res_x, res_y, res_z = resolution
-    gradients = [[[ [0.0, 0.0, 0.0] for _ in range(res_z)] for _ in range(res_y)] for _ in range(res_x)]
-    inv_2h = 1.0 / (2.0 * voxel_size)
+    # Initialize gradient array
+    gradient = [[[[0.0, 0.0, 0.0] for _ in range(nz)] for _ in range(ny)] for _ in range(nx)]
     
-    for z in range(res_z):
-        for y in range(res_y):
-            for x in range(res_x):
-                # Pad boundaries by repeating edge values [S3, book]
-                x_prev = x - 1 if x > 0 else 0
-                x_next = x + 1 if x < res_x - 1 else res_x - 1
-                y_prev = y - 1 if y > 0 else 0
-                y_next = y + 1 if y < res_y - 1 else res_y - 1
-                z_prev = z - 1 if z > 0 else 0
-                z_next = z + 1 if z < res_z - 1 else res_z - 1
+    # Helper to clamp index
+    def clamp(val, min_val, max_val):
+        if val < min_val: return min_val
+        if val > max_val: return max_val
+        return val
+
+    # Iterate over all voxels
+    for k in range(nz):
+        for j in range(ny):
+            for i in range(nx):
+                # X-component: neighbor in +X and -X
+                i_plus = clamp(i + 1, 0, nx - 1)
+                i_minus = clamp(i - 1, 0, nx - 1)
                 
-                gx = (volume[x_next][y][z] - volume[x_prev][y][z]) * inv_2h
-                gy = (volume[x][y_next][z] - volume[x][y_prev][z]) * inv_2h
-                gz = (volume[x][y][z_next] - volume[x][y][z_prev]) * inv_2h
+                # Access values. Assuming row-major 1D layout or direct 3D access.
+                # Using 3D access for clarity: volume[i, j, k]
+                val_plus_x = volume[i_plus][j][k]
+                val_minus_x = volume[i_minus][j][k]
                 
-                length = (gx*gx + gy*gy + gz*gz) ** 0.5
-                if length > 1e-6:
-                    gradients[x][y][z][0] = gx / length
-                    gradients[x][y][z][1] = gy / length
-                    gradients[x][y][z][2] = gz / length
+                gx = val_plus_x - val_minus_x
+                
+                # Y-component: neighbor in +Y and -Y
+                j_plus = clamp(j + 1, 0, ny - 1)
+                j_minus = clamp(j - 1, 0, ny - 1)
+                
+                val_plus_y = volume[i][j_plus][k]
+                val_minus_y = volume[i][j_minus][k]
+                
+                gy = val_plus_y - val_minus_y
+                
+                # Z-component: neighbor in +Z and -Z
+                k_plus = clamp(k + 1, 0, nz - 1)
+                k_minus = clamp(k - 1, 0, nz - 1)
+                
+                val_plus_z = volume[i][j][k_plus]
+                val_minus_z = volume[i][j][k_minus]
+                
+                gz = val_plus_z - val_minus_z
+                
+                # Normalize
+                length_sq = gx*gx + gy*gy + gz*gz
+                if length_sq > 1e-6:
+                    length = math.sqrt(length_sq)
+                    gradient[i][j][k] = [gx/length, gy/length, gz/length]
                 else:
-                    gradients[x][y][z][0] = 0.0
-                    gradients[x][y][z][1] = 0.0
-                    gradients[x][y][z][2] = 0.0
-    return gradients
+                    gradient[i][j][k] = [0.0, 0.0, 0.0]
+                    
+    return gradient
 ```
 
 **Edge Cases and Pitfalls:**
-- **Boundary Access:** The standard central difference formula requires neighbors at $i-1$ and $i+1$. Accessing these at the grid edges causes out-of-bounds memory errors unless clamping, padding, or reflection is applied [S6, S13, unofficial].
-- **Zero Magnitude:** In homogeneous regions, the gradient magnitude is zero. Normalization must check for this to avoid division by zero [S10, unofficial].
-- **Noise Sensitivity:** Because it uses only 6 neighbors, the central difference operator produces less smooth gradients compared to operators using more voxels (like Sobel), making it sensitive to high-frequency noise [S2, S7, unofficial].
-- **Visual Artifacts:** Artifacts similar to those from trilinear interpolation resampling may occur [S16, unofficial].
+*   **Boundary Conditions:** Accessing neighbors outside the grid bounds causes out-of-bounds memory access. Clamping or padding is required [S7, S9, S22, unofficial].
+*   **Zero Gradient:** If all neighbors have the same value (homogeneous region), the gradient magnitude is zero, leading to division by zero during normalization. A threshold check is required [S13, unofficial][S25].
+*   **Voxel Artifacts:** Central differences can produce "voxel artifacts" or less smooth gradients compared to regression-based methods like Sobel or Neumann, especially on coarse grids [S3, unofficial][S18].
+*   **Precision:** When storing gradients in 8-bit textures, signed values must be mapped to $[0, 1]$ via $enc = n \cdot 0.5 + 0.5$ and quantized, potentially losing precision [S13, unofficial].
 
 ## Subtopics
 
 ### [Gradient Map Generation](1204-gradient-map-generation.md)
-A compute shader pass that calculates gradients for all voxels and stores them in a gradient map image, including magnitude and direction. It uses a 3D image buffer with `rgba8_snorm` layout, storing normalized gradient direction in x, y, z and magnitude in w. The magnitude is clamped to [0, 1] after applying a modifier.
+Gradient Map Generation is a GPU compute shader pass that calculates gradients for all voxels in a 3D scalar volume and stores them in a gradient map image, including magnitude and direction.
+
+### [Gradient-based Diffuse Lighting with Alpha Blending](1257-gradient-based-diffuse-lighting-with-alpha-blending.md)
+This method computes diffuse lighting for a scalar volume by estimating surface normals from voxel gradients and compositing the lit color into a framebuffer using front-to-back alpha blending. It integrates gradient estimation, lighting application, and compositing into a single per-voxel step rather than storing precomputed gradients separately.
+
+### [Analytic Gradient Computation](2167-analytic-gradient-computation.md)
+Analytic Gradient Computation computes gradient vectors for local shading (BRDF) in volume rendering using analytic derivatives of the basis reconstruction function, avoiding additional samples or ray traversals. It sets itself apart from [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by requiring no additional sample evaluations or ray traversals, relying solely on the data values already loaded for the scalar reconstruction.
+
+### [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md)
+Gradient Estimation from Samples is a technique for computing surface normals directly from the scalar field samples taken during volume ray casting, enabling Phong-based shading without precomputing a separate gradient volume. It differs from [Precomputed Gradient Volume](2425-precomputed-gradient-volume.md) by avoiding the memory overhead and preprocessing time of storing explicit gradient vectors, and from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on discrete finite differences rather than closed-form derivatives. This method is primarily used in interactive GPU-based volume rendering to enhance shape perception through diffuse and specular lighting cues.
+
+### [Precomputed Gradient Volume](2425-precomputed-gradient-volume.md)
+
+### [Gradient-based Surface Projection](2668-gradient-based-surface-projection.md)
+Gradient-based surface projection visualizes interfaces between regions of different density by projecting through a matrix of gradient magnitude values derived from voxel density. It differs from standard volume rendering by treating the volume as a collection of internal surfaces defined by normals and strengths, rather than a continuous medium with absorption and emission. This method allows for the visualization of diffuse transitions and sub-voxel surface accuracy that binary representations cannot achieve.
+
+### [Per-Region Gradient Averaging](2715-per-region-gradient-averaging.md)
+Per-Region Gradient Averaging computes the 3D gradient vector for each voxel in a scalar volume by averaging directional gradients across multiple discrete scalar regions, using a binary neighbor check to detect region boundaries. It builds on [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) but replaces continuous interpolation with discrete region membership checks [G].
+
+### [Gradient Magnitude Computation](3184-gradient-magnitude-computation.md)
+Computes the Euclidean norm $|\mathbf{v}|$ at every active voxel of a vector grid, producing a scalar magnitude grid.
+
+### [Neumann Gradient](3342-neumann-gradient.md)
+The Neumann Gradient is a 3D gradient estimation method for scalar volumes that computes the gradient vector for each voxel using a 3×3×3 neighborhood of 26 surrounding voxels. It distinguishes itself from simpler finite difference methods by employing a linear regression framework that produces nearly isotropic gradients with reduced fringing artifacts.
+
+### [Scanline Gradient Computation](3582-scanline-gradient-computation.md)
+Scanline Gradient Computation is a memory-efficient method for computing 3D gradient vectors and surface normals for scalar volume data by processing one scanline at a time. It solves the problem of high memory bandwidth and storage requirements when computing derivatives for large volumes by maintaining only a sliding window of three slices in memory, making it suitable for volumes that exceed available RAM. It sets itself apart from batch processing methods like [VolPack Volume Normals Computation](3126-volpack-volume-normals-computation.md) by streaming data slice-by-slice rather than requiring the entire scalar array in memory.
+
+### [Finite Difference Stencils (Central/Forward/Backward)](3858-finite-difference-stencils-central-forward-backward.md)
+Finite difference stencils compute the spatial gradient $\nabla V$ of a scalar volume field $V$ at each voxel by approximating partial derivatives using values from neighboring voxels. This method solves the problem of estimating surface orientation for lighting and shading in direct volume rendering when an analytic gradient is unavailable. It is distinguished from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by requiring additional sample evaluations (typically 6 for central differences) rather than deriving gradients from basis function coefficients, and from [Gradient Estimation from Samples](2180-gradient-estimation-from-samples.md) by operating on a structured grid rather than unstructured ray samples.
+
+### [Second Derivative Computation](6353-second-derivative-computation.md)
+This family computes second-order spatial derivatives (curvature, Laplacian, divergence) from discrete grid data to highlight structural features, boundaries, or physical properties like fluid compressibility. It differs from sibling methods like [Gradient Computation via Finite Differences](1077-gradient-computation-via-finite-differences.md) by operating on the rate of change of the gradient rather than the gradient itself, and from [Analytic Gradient Computation](2167-analytic-gradient-computation.md) by relying on discrete stencil approximations rather than closed-form derivatives of basis functions.
 
 ### Voxel Gradient Calculation
-A pre-processing step using the Sobel operator to detect edges within the volume and compute gradients. Gradient magnitude modulates voxel opacity to hide homogeneous regions, and gradient direction is used for shading [S19, unofficial].
+A pre-processing step using the Sobel operator to detect edges within the volume and compute gradients. Gradient magnitude modulates voxel opacity to hide homogeneous regions, and gradient direction is used for shading [S26, unofficial].
 
-### Clamped Central Differences
-A variant of central differencing for gradient computation that clamps offset positions to the current region to avoid additional ray traversals. It computes six additional basis reconstruction samples at positions offset from the current sample by a distance proportional to the region's sample rate. Gradients are not necessarily continuous at level boundaries because the offset size can change. Accurate central differencing requires tracing 6 additional rays per sample via infinitesimal rays to find containing regions, which is expensive. The clamped version removes ray traversals but reduces quality [S20].
+### Linearly Separable Piecewise Polynomial Interpolation Gradient
+A gradient estimation method using optimized piecewise polynomial interpolation filters designed for specific accuracy and continuity characteristics, proposed by Möller et al. It uses coefficients $-1/12, 2/3, -2/3, 1/12$ for offsets $-2, -1, +1, +2$ respectively along each axis [S18]. It has slightly softer edges in regions of rapid change compared to central differences [S18].
 
-### Precomputed Gradient Volume
-A method where gradients are precomputed and stored alongside scalar values in a flat array. For each voxel at $(x, y, z)$, neighbors are fetched using a safe access function (returning 0.0 for out-of-bounds indices, effectively zero-padding boundaries). The gradient vector is normalized and stored in a union with the scalar value. Template parameter defines the cubic volume dimension, with a typical code value of 60 (`CUBE_SIZE`). `VoxelVertex` is a union containing `vec4 xyzw` and `vec3 gradient`, where `xyzw.w` stores the scalar volume value and `gradient` stores the precomputed normalized gradient vector. Data is stored in a flat `std::array<VoxelVertex, cube(length)> m_data` indexed by `cartesian_to_index(v, length) = v.z * length * length + v.y * length + v.x` [S21, unofficial].
-
-### Gradient-based Surface Projection
-Visualization of interfaces between two regions of different density by projecting through a matrix of gradient magnitude values derived from voxel density. The estimate of an interface between regions at each voxel is defined by a surface normal $N$ and surface strength $|N|$, derived from voxel density. A refractive index-only image is obtained by projecting directly through the surface magnitude information. Surface normal $N = (N_x, N_y, N_z)$ is approximated by a finite difference of neighbouring densities, and surface strength $|N|$ is the L2-norm of $N$. Surfaces may appear to lie at sub-voxel accuracy because they are defined by fractional values at each voxel, allowing visualization of diffuse transitions not possible with binary representation [S22, unofficial].
-
-### Curl Grid Computation
-Computes the curl $\nabla \times \mathbf{F}$ at every active voxel of a vector grid using central differences. It initializes a `GradStencil` with the grid tree, iterates over all active voxels, moves the stencil to the current coordinate, and computes the x, y, and z components of the curl using the formulas. The result is stored in a dictionary keyed by coordinate and built into a result grid with a zero vector background and the original grid's voxel size. The formulas are: `curl_x = (v[4][3] - v[5][3] - v[6][2] + v[7][2]) * 0.5`, `curl_y = (v[6][1] - v[7][1] - v[2][3] + v[3][3]) * 0.5`, `curl_z = (v[2][2] - v[3][2] - v[4][1] + v[5][1]) * 0.5`. The scalar multiplier `0.5` represents $1/(2 \times \text{voxel\_size})$ in index space [S9, unofficial].
-
-### Laplacian Grid Computation
-Computes the Laplacian $\nabla^2 f$ at every active voxel using a 6-point stencil in index space. It initializes a `GradStencil` with the grid tree, iterates over all active voxels, moves the stencil to the current coordinate, computes the Laplacian scalar using the stencil, stores it in a dictionary keyed by coordinate, and builds the result grid with a zero background and the original grid's voxel size [S9, unofficial].
-
-### Gradient Magnitude Computation
-Computes the Euclidean norm $|\mathbf{v}|$ at every active voxel of a vector grid. It iterates over all active voxels, computes the norm of the vector, stores it in a dictionary keyed by coordinate, and builds the result grid with a zero background and the original grid's voxel size [S9, unofficial].
-
-### Forward Difference Gradient
-Gradient estimation taking four neighboring voxels as input. For a voxel $V$ at $(x, y, z)$, the gradient components are calculated using forward differences: $\nabla_x = V_{x+1,y,z} - V_{x,y,z}$, $\nabla_y = V_{x,y+1,z} - V_{x,y,z}$, $\nabla_z = V_{x,y,z+1} - V_{x,y,z}$ [S7, unofficial].
+### Gradient Selection
+Selects between Central Difference and Sobel gradient estimation based on the `gradientMode` uniform. If `gradientMode == GRADIENT_SOBEL`, it returns `gradientSobel(textureCoord)`, else it returns `gradientCentral(textureCoord)` [S15, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of voxels, as each voxel is processed once with a constant number of operations [S5, unofficial].
-- **Memory Complexity:** $O(N)$ for storing the gradient grid, typically 3 times the size of the scalar volume if stored as floats [S5, unofficial].
-- **Performance:** Requires 6 sampling points per voxel. It is faster than Sobel3D (which requires 27 samples) but provides lower quality gradient descriptions [S2, unofficial].
-- **Strengths:** Simple to implement, low computational cost, suitable for real-time applications where noise is low or pre-smoothing is applied [G].
-- **Limitations:** Sensitive to noise due to small stencil size; boundary handling requires care; less smooth than larger kernels [S2, S7, unofficial].
+*   **Time Complexity:** $O(N)$, where $N$ is the number of voxels, as each voxel requires a constant number of reads and arithmetic operations [S6, unofficial].
+*   **Memory Complexity:** $O(N)$ for storing the gradient grid if precomputed [S6, unofficial]. If computed on-the-fly during ray casting, it requires 6 additional texture fetches per sample point [S19, unofficial].
+*   **Performance:** The method is computationally inexpensive compared to higher-order stencils (e.g., Sobel or Neumann) because it only requires 6 neighboring samples [S3, unofficial]. However, it may produce less smooth gradients and more visible voxel artifacts on coarse resolutions [S18].
+*   **Strengths:** Simple to implement, low memory overhead for on-the-fly computation, fast execution [S3, unofficial][S18].
+*   **Limitations:** Less accurate representation of local surface structure compared to Sobel3D or Neumann gradients [S3, unofficial]. Sensitive to boundary conditions [S4, book][S24].
 
 ## Background
-In volume rendering, the method was popularized for adding visual cues like directional light and Phong shading to ray-traced volumes [S1, unofficial]. It is used in scientific visualization tools and libraries, such as CGAL's isosurfacing modules [S18].
+The method originates from the use of central differences for gradient estimation in volume rendering, notably discussed in the context of Levoy's work on shading and normals [S2, unofficial]. It is a standard technique for approximating surface normals in discrete scalar fields when analytic derivatives are not available [S25]. The approach is widely used in direct volume rendering to enable Phong shading and other local illumination models [S1, unofficial][S4, book].
 
 ## Sources
 [S1] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
-[S2] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
-[S3] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
-[S4] CalamityMichL/DVR_ESS_PDM, https://github.com/CalamityMichL/DVR_ESS_PDM, fetched 2026-10-26 (unofficial)
-[S5] extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, fetched 2026-10-26 (unofficial)
-[S6] thoniorf/volumeraycasting, https://github.com/thoniorf/volumeraycasting, fetched 2026-10-26 (unofficial)
-[S7] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
-[S8] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
-[S9] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
-[S10] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
-[S11] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
-[S12] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
-[S13] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)
-[S14] [PDF] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
-[S15] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
-[S16] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29 (unofficial)
-[S17] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
-[S18] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26
-[S19] PDF Ray Tracing Structured AMR Data Using ExaBricks, https://www.sci.utah.edu/~wald/Publications/2020/exabrick/exabrick.pdf, fetched 2026-10-30 (unofficial)
-[S20] Y-o-p/fog, https://github.com/Y-o-p/fog, fetched 2026-10-26
-[S21] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
+[S2] Direct Volume Rendering (DVR): Ray-casting | PPT - SlideShare, https://www.slideshare.net/slideshow/direct-volume-rendering-dvr-raycasting/265104120, fetched 2026-10-26 (unofficial)
+[S3] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
+[S4] Chapter 39. Volume Rendering Techniques | NVIDIA Developer, https://developer.nvidia.com/gpugems/gpugems/part-vi-beyond-triangles/chapter-39-volume-rendering-techniques, fetched 2026-10-26 (book)
+[S5] CalamityMichL/DVR_ESS_PDM, https://github.com/CalamityMichL/DVR_ESS_PDM, fetched 2026-10-26 (unofficial)
+[S6] extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, fetched 2026-10-26 (unofficial)
+[S7] thoniorf/volumeraycasting, https://github.com/thoniorf/volumeraycasting, fetched 2026-10-26 (unofficial)
+[S8] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S9] Scrawk/Marching-Cubes-On-The-GPU, https://github.com/Scrawk/Marching-Cubes-On-The-GPU, fetched 2026-10-26 (unofficial)
+[S10] Magnus2/MeshReconstruction, https://github.com/Magnus2/MeshReconstruction, fetched 2026-10-26 (unofficial)
+[S11] tobiasosborne/Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S12] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+[S13] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+[S14] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+[S15] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S16] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)
+[S17] [PDF] The VolumePro Real-Time Ray-Casting System, https://www.merl.com/publications/docs/TR99-19.pdf, fetched 2026-10-26 (unofficial)
+[S18] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
+[S19] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
+[S20] AnBenLa/OpenGL-MarchingCubes-MarchingTetrahedra-GeometryShader, https://github.com/AnBenLa/OpenGL-MarchingCubes-MarchingTetrahedra-GeometryShader, fetched 2026-10-27 (unofficial)
+[S21] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
+[S22] Rabidus4k/UnityVoxelTerrain, https://github.com/Rabidus4k/UnityVoxelTerrain, fetched 2026-10-28 (unofficial)
+[S23] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
+[S24] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
+[S25] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
+[S26] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)

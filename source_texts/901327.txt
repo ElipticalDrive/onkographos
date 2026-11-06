@@ -1,0 +1,552 @@
+SfM, MVS, visual-inertial SLAM, 3D Gaussian Splatting and map-based localization in Rust - gsplat trainer (M0-M3) + GPU SIFT, matcher and bundle adjustment for SfM by rsasaki0109 · Pull Request #206 · rsasaki0109/visloc-rs
+
+gsplat trainer (M0-M3) + GPU SIFT, matcher and bundle adjustment for SfM by rsasaki0109 · Pull Request #206 · rsasaki0109/visloc-rs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rsasaki0109
+commented
+Sep 24, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+A Rust 3DGS trainer on wgpu that competes with brush, plus GPU acceleration of the SfM front end and bundle adjustment. Together they turn raw EuRoC into a trained splat with no COLMAP and no Python.
+3DGS trainer (visloc-gsplat-train, M0–M3)
+M0: evaluator. Scoring matches brush's protocol: hold out every 8th view, black background, PSNR/SSIM. gsplat_eval implements it.
+M1: backward pass. A CPU f64 reference, checked against finite differences, backs a GPU backward pass (Renderer::backward) that matches it to < 1e-6 relative.
+M2: trainer.
+Loss: L1 + 0.2 D-SSIM, with a tiled GPU SSIM gradient.
+Adam on the GPU, using the Inria learning rates.
+Inria densification (clone, split, prune, opacity reset), fully on the device.
+GPU memory is halved: ground-truth views are streamed per step, the depth sort is sized to the gaussian count, and the tile sort runs in place over 4 per-intersection buffers instead of 8.
+M3: gsplat_euroc example. Raw EuRoC is undistorted, run through SIFT, verified matching and visloc-rs incremental SfM, then trained.
+SfM on the GPU (all opt-in, validated by quality rather than bytes)
+visloc-sift-gpu: SiftGpu. The default SIFT path, run in f32. Against the CPU extractor, 99.9–100% of keypoints match and descriptor dot products are ≥ 0.99999. It is about 240× faster on 1024 px images.
+GpuMatcher + FeatureBank. Batched top-2 matching over descriptors kept on the device. Its match sets are identical to CrossCheckMatcher(BruteForceMatcher { ratio }): 18 ms vs 1.4 s per pair (78×).
+visloc-ba-gpu: GpuBundleAdjuster.
+Keeps the CPU optimizer's LM schedule and gates, and runs its f64 cost test on the CPU.
+Moves f32 linearization and implicit-Schur block-Jacobi PCG to the GPU.
+Replayed SfM problems reach the same final cost as the dense CPU solver.
+visloc_slam::BaAccelerator. A GPU-free hook that lets the incremental SfM hand its global BA to an accelerator.
+Local windows are opt-in: they are latency-bound on small systems.
+VISLOC_SFM_BA_DUMP / ba_problem_io / examples/ba_replay dump and replay the exact BA problems the SfM solves.
+Parallel pair verification. gsplat_euroc verifies pairs with rayon; RANSAC is seeded, so the results do not change.
+Results (GTX 1660 Ti)
+brush comparison. Same evaluator and split, 1024 px, 30k steps.
+scene
+method
+PSNR
+SSIM
+time
+south-building
+brush 0.3.0
+21.684
+0.7875
+2379 s
+south-building
+ours
+22.102
+0.8009
+3054 s
+gerrard-hall
+brush 0.3.0
+19.022
+0.6934
+2147 s
+gerrard-hall
+ours
+19.579
+0.7046
+2344 s
+Quality beats brush on both scenes.
+Wall time is still 1.28× / 1.09× brush's. The GPU was thermal-throttling during these runs.
+These timings predate the 4-buffer tile sort (profiled forward pass 160 → 144 ms).
+EuRoC V1_01 end to end. 200 frames, stride 4, 7k training steps.
+CPU SfM
+--gpu-sift --gpu-ba
+images → poses
+~1700 s (SfM alone 838 s)
+239 s
+registered / reprojection
+182/200, 0.617 px
+183/200, 0.638 px
+held-out PSNR / SSIM
+29.03 / 0.945
+29.26 / 0.946
+Compatibility
+GPU code stays out of the default build. visloc-core and visloc-slam remain GPU-free. wgpu is only pulled in by the opt-in gpu features, so the MSRV 1.83 build is unchanged (scripts/check_msrv.sh passes).
+Existing outputs are unchanged. Default CPU paths behave exactly as before, so the byte- and hash-exact gates are unaffected.
+Checks run locally:
+cargo fmt --check
+cargo clippy --workspace --all-targets -D warnings
+RUSTDOCFLAGS=-D warnings cargo doc
+cargo check --no-default-features
+cargo test --workspace --all-targets: everything passes except staged_map_update. That binary cannot be launched on Windows because its name contains "update" and Windows treats it as an installer needing UAC elevation. It is untouched by this PR.
+GPU tests. The tests for the render, train, SIFT and matcher crates pass with --features gpu.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+rsasaki0109
+and others
+added 21 commits
+September 24, 2026 13:11
+feat(gsplat): trainer goal, gsplat-train crate with brush-compatible …
+…
+47c9612
+```
+…evaluator
+
+Set the 3DGS goal (docs/rust_3dgs_plan.md): a Rust trainer competing
+with brush, differentiated by a COLMAP-free all-Rust pipeline and
+released crates only; milestones M0 baselines -> M1 wgpu backward ->
+M2 trainer -> M3 end-to-end CLI, plus the evaluation protocol and the
+M1 design (hand-written WGSL backward, not Burn/CubeCL).
+
+New crate visloc-gsplat-train:
+- dataset: COLMAP model + images, views sorted by name, every Nth held
+  out (brush's and the Inria split).
+- metrics: PSNR on display-space RGB.
+- gsplat_eval example: scores any Inria-format .ply on the held-out
+  views with the wgpu renderer, so every method is compared with one
+  renderer, split and metric (brush prints no metrics headless).
+
+Fixes found on the way:
+- Image::to_rgb8 applied a gamma-2.2 encode, but splat colours are
+  already display-space (as in Inria/brush): every PNG was washed out.
+- The PLY reader assumed f_dc/scale/rot properties are contiguous;
+  brush writes them alphabetically. All are now looked up by name.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(gsplat): CPU reference backward, checked against finite differences
+…
+8297577
+```
+backward::render_backward returns dL/d(every gaussian parameter) for
+L = sum_px dot(d_image, C), as the oracle for the GPU backward (M1):
+- f64 forward (render_f64) with the same gates as cpu_render (matches
+  it to 1e-4).
+- Compositing differentiated analytically per pixel, back to front,
+  from the recorded contributing splats.
+- Projection (mean, log-scale, un-normalised quaternion, opacity logit)
+  differentiated with forward-mode dual numbers, so the EWA Jacobian,
+  the 1.3x frustum clamp, quaternion normalisation and the SH view
+  direction are exact; SH coefficient gradients are the basis values.
+
+Tests check every parameter group of three rotated, anisotropic,
+semi-transparent degree-2 splats against central differences. The
+renderer's hard gates (alpha >= 1/255 etc.) can make one step size jump
+when a pixel crosses them, so a gradient passes if any of four step
+sizes agrees within 0.2%.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+fix(gsplat): SH rest-coefficient count was 3x per channel
+…
+a869d44
+```
+sh_rest_coeffs_per_channel returned 9/24/45 for degrees 1..3 -- the
+3-channel totals -- although every caller multiplies it by 3 and the
+doc says per channel. As a result the PLY reader rejected every
+standard degree 1-3 file (brush exports included) as an unsupported
+f_rest count, and PackedScene used 45 coefficients per channel for
+degree 3, so the GPU read garbage SH for any degree > 0 (all earlier
+GPU renders were degree-0 .splat files, which hid it).
+
+It now returns (d + 1)^2 - 1 (0, 3, 8, 15). The PLY degree detection
+and the packing tests follow.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(gsplat): GPU backward pass matching the CPU reference (M1)
+…
+5ce082a
+```
+Renderer::backward(d_image) returns the gradient of
+L = sum_px dot(d_image, C) w.r.t. every gaussian parameter for the last
+rendered frame, in the forward input layouts.
+
+Forward changes (always on, output unchanged):
+- map_gaussians also writes each isect's own index; the tile sort now
+  carries that instead of the compact id, and a gather kernel builds
+  the compact id per sorted entry for rasterize.
+- rasterize stores per-pixel final transmittance and one past the last
+  blended list index.
+
+Backward kernels:
+- rasterize_backward: one workgroup per tile, pixels walk the list back
+  to front (T_before = T_after / (1 - alpha), colour composited behind),
+  per-splat pixel sums via subgroupAdd plus a shared-memory CAS float
+  add across subgroups, written to the isect's own slot: no global
+  atomics.
+- grad_reduce: deterministic per-gaussian sum over its isect range.
+- project_backward: hand-derived chain through conic inversion, the
+  EWA Jacobian with the 1.3x frustum clamp, W Sigma W^T, Sigma = M M^T,
+  scale, rotation and quaternion normalisation, opacity sigmoid, and
+  SH (coefficients plus the view-direction term up to degree 3).
+
+GpuContext requests Features::SUBGROUP when the adapter has it (DX12 +
+DXC does); the backward errors without it.
+
+Tests compare GPU against the f64 CPU oracle (itself FD-checked):
+screen-space gradients worst 6e-6, parameter gradients worst 8e-7 of
+each group's max, on a 3-splat degree-2 scene and a 64-splat degree-3
+scene spanning many tiles. The CPU oracle also exposes screen-space
+gradients (render_backward_screen).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(gsplat): first on-device trainer (M2a: L1 + Adam, fixed gaussians)
+…
+db714cf
+```
+visloc-gsplat-train gains:
+- init: read COLMAP points3D.txt with colours; seed one gaussian per
+  point (DC colour, isotropic scale = mean distance to 3 nearest
+  neighbours via a hash grid, opacity 0.1, identity rotation).
+- trainer (feature gpu): per step render (no readback) -> L1 loss
+  gradient kernel -> Renderer::backward_on_device -> Adam kernel over
+  the three parameter buffers with per-group learning rates (Inria
+  defaults; mean LR scaled by scene extent, exponential decay). All on
+  the device; ground-truth images are uploaded once as RGBA8.
+- gsplat_train example: train from a COLMAP dataset with the brush /
+  Inria eval split, periodic eval PSNR, export .ply.
+
+gsplat-render exposes the device-side hooks the trainer needs
+(param/grad/d_image/output buffers, backward_on_device, read_params).
+
+Fix: the dataset loader used ColmapScene's placeholder names
+(frame_{id}.png) because the visloc map drops COLMAP image names;
+ColmapScene now carries the IMAGE_IDs and the loader maps them to the
+names in images.txt.
+
+Smoke test, south-building (undistorted, 1024px, 61.5k points):
+200 steps, L1 0.104 -> 0.030, eval PSNR 13.8 -> 15.1.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(gsplat): densification and D-SSIM loss in the trainer (M2b/M2c)
+…
+9fef15f
+```
+- densify (host): Inria adaptive density control -- clone small /
+  split large gaussians whose mean view-space gradient (NDC units)
+  exceeds 2e-4, prune transparent (<0.005) and, after the first opacity
+  reset, oversized ones; opacity reset every 3000 steps. Adam moments
+  are carried for kept gaussians and zeroed for new ones.
+- densify_stats kernel accumulates |dL/d mean2d| per gaussian after
+  each backward; every 100 steps (500..15000) the trainer downloads the
+  population, densifies, and rebuilds the renderer and optimiser state
+  (Renderer::into_context returns the GPU context for that).
+- D-SSIM: four separable passes (11x11 gaussian window, zero padding,
+  the Inria SSIM) add ssim_weight * d(1 - SSIM)/dC to the gradient
+  image; the L1 kernel is weighted by 1 - ssim_weight. Loss is the
+  Inria 0.8 L1 + 0.2 D-SSIM.
+- metrics::ssim / ssim_with_grad: f64 CPU SSIM and its gradient,
+  checked against finite differences; the GPU gradient matches it to
+  1.2e-6 of the maximum (gpu_ssim_gradient_matches_cpu).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(gsplat): raw EuRoC -> splat pipeline in Rust (M3 scaffold)
+…
+433722f
+```
+visloc-gsplat-train feature `euroc` (visloc-io/vision/slam/core) and
+the gsplat_euroc example: read a EuRoC sequence, take every Nth cam0
+frame, undistort it (radial-tangential, bilinear remap to the same
+pinhole K), native SIFT, cross-checked + geometrically verified matches
+to temporal neighbours and skip offsets, visloc-rs incremental SfM
+(COLMAP-style mapper) -> poses and tracks, grey-coloured points, then
+the GPU trainer. No COLMAP, no Python.
+
+Also: gsplat_train --export-steps, gsplat_eval reports SSIM.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+fix(gsplat): accumulate backward gradients with atomics, not per-isec…
+…
+860831a
+```
+…t slots
+
+The first 30k-step training run died at step ~8k on south-building:
+~890k gaussians at 1024 px made ~60M intersections, and the per-isect
+gradient buffer (36 B each) passed wgpu's 2 GiB buffer limit (and would
+soon have exhausted the 6 GB GPU).
+
+rasterize_backward now adds each (tile, splat) total straight into the
+gaussian's 9-float record with a global CAS float add, so there is no
+per-intersection gradient storage and grad_reduce is gone. The price is
+determinism of the last float bits (summation order varies). Parameter
+gradients still match the CPU reference to < 1e-6 relative.
+
+Also records the M0-M3 status and brush baselines in the plan doc.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+docs(gsplat): M2 benchmark vs brush -- quality parity/win, 1.6-2.2x s…
+…
+377179a
+```
+…lower
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+perf(gsplat): backward without local-array spills (train step 163 -> …
+…
+14473ab
+```
+…103 ms)
+
+Profiling a training step at 1.2M gaussians (south-building, 1024 px):
+forward 29, loss 13, backward 112, adam 8 ms. The backward kernels kept
+per-lane gradients and SH/matrix temporaries in runtime-indexed local
+arrays, which spill to local memory:
+
+- rasterize_backward: per-lane gradient as scalars + vector
+  subgroupAdds, and the reductions are skipped when no lane of the
+  subgroup blended the splat (subgroupAny): 78 -> 33 ms.
+- project_backward: mat3x3/vec3 algebra instead of arrays of arrays,
+  SH basis and its direction derivative written out term by term:
+  31 -> 23 ms.
+
+Gradients still match the CPU reference to < 1e-6 relative. Adds
+opt-in profiling: GSPLAT_TRAIN_PROFILE (per-stage step time in
+gsplat_train) and a rasterize/project split of the backward under
+GSPLAT_PROFILE; gsplat_train --init-ply starts from a trained scene.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+perf(gsplat): tiled SSIM, unrolled SH colour, packed densify rebuild
+…
+13a2b44
+```
+At 1.2M gaussians (south-building, 1024 px) the train step goes from
+~103 to ~87 ms:
+- D-SSIM: two tiled kernels (16x16 tile + 5 px apron in shared memory,
+  both separable passes in shared memory, one channel at a time)
+  replace four full-image passes whose vertical blur read 165 floats
+  per pixel from global memory: 12.7 -> 2.3 ms. The GPU gradient still
+  matches the f64 CPU SSIM to 1.2e-6.
+- project_visible evaluates SH term by term instead of copying the
+  coefficients into a runtime-indexed local array: 12-18 -> 7-11 ms.
+- Densification rebuilds the renderer from a PackedScene built straight
+  from the population (Renderer::from_packed / GpuScene::upload_packed)
+  instead of Scene -> PackedScene per gaussian.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+perf(gsplat): densify on the device (no host copy of the scene)
+…
+ab5dc5c
+```
+The host densification downloaded parameters and Adam moments, built
+the new population on the CPU and uploaded it again. At ~600k gaussians
+that transiently needed ~2 GB of host RAM (a benchmark run died with
+"memory allocation of 269959296 bytes failed") and cost ~1.5 s per
+event at 1M gaussians.
+
+Now:
+- densify_classify: per gaussian keep / clone / split / prune (the
+  Inria rule of crate::densify) and its output row count; tallies for
+  the report.
+- the counts are prefix-summed on the device (PrefixScanner).
+- densify_scatter: one dispatch per parameter group copies rows and
+  Adam moments to new buffers (kept rows keep moments, new rows start at
+  zero); split children sample their mean from the parent with hashed
+  normals and shrink scales by 1.6; opacity reset clamps logits and
+  zeroes that group's moments.
+- the renderer is rebuilt around the new device buffers
+  (GpuScene::from_buffers, Renderer::from_gpu_scene); GpuScene now
+  drops its host arrays after upload.
+
+Only the new count and three tallies are read back. 2000 steps on
+south-building: 145,631 gaussians / 20.43 dB (host version: 144,137 /
+20.05 dB). The host densify stays as the reference implementation.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(sift-gpu): wgpu SIFT matching the CPU default path (~240x on 102…
+…
+ad7aa86
+```
+…4px)
+
+New opt-in crate visloc-sift-gpu: DoG scale space, extrema, legacy
+orientation histogram and 128-D descriptors on the GPU (f32). Keypoints
+are ordered/truncated on the host exactly like extract_sift. Validated
+against the CPU extractor: 99.9-100% keypoints matched, descriptor dot
+>= 0.99999 on south-building; gsplat_euroc gains --gpu-sift.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(sift-gpu): batched GPU top-2 matcher over a device-resident bank
+…
+0986e38
+```
+GpuMatcher::match_pairs reproduces CrossCheckMatcher(BruteForceMatcher
+{ratio}) for many pairs in one dispatch (tiled GEMM + per-row top-2 on
+the GPU, ratio test + cross-check on the host). Identical match sets to
+the CPU in tests and on EuRoC V1_01 (4000 kps): 18 ms vs 1.4 s per pair
+(78x). gsplat_euroc --gpu-sift now also matches on the GPU.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(ba-gpu): GPU bundle adjustment for SfM global BA (838 -> 197 s SfM)
+…
+44f2366
+```
+- visloc-slam: GPU-free GlobalBaAccelerator hook used by the incremental
+  SfM's unweighted global BA; VISLOC_SFM_BA_DUMP + ba_problem_io to dump
+  and replay exact BA problems (examples/ba_replay).
+- visloc-ba-gpu: same LM schedule/gates as the CPU optimizer with f64 cost
+  tests, but per-observation linearization (Huber IRLS), reductions and an
+  implicit-Schur block-Jacobi PCG + landmark back-substitution on wgpu.
+  Replayed problems reach the same final cost as the dense CPU solver.
+- gsplat_euroc: --gpu-ba; pair verification runs in parallel (rayon).
+EuRoC V1_01 200f: SfM 838 s -> 197 s, 183/200 registered, 0.638 px.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+feat(ba-gpu): local BA on the GPU too (BaAccelerator + BaScope)
+…
+883ff8e
+```
+Generalize the SfM hook to BaAccelerator { optimize(ba, config, scope) }
+and offer local BA windows as well (VISLOC_SFM_BA_DUMP_LOCAL dumps them).
+GPU PCG runs in 10-iteration chunks with a device done-flag check, and the
+step outputs come back in one staging map. Local-window replays (8
+variable poses) reach the same final cost as the dense CPU solver.
+Matcher batches capped at 1M rows (16 MB) so it survives a busy GPU.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+perf(gsplat): halve trainer GPU memory (stream GT, size depth sort by n)
+…
+d4e1fff
+```
+At 1.2M gaussians the trainer overflowed the 6 GB GTX 1660 Ti and WDDM
+paged (1.2 s/step instead of ~90 ms). Keep ground-truth views on the
+host and upload one per step (~3 MB) instead of ~336 MB resident, and
+allocate the depth-sort ping-pong buffers for n gaussians instead of the
+intersection capacity. 265k gaussians: 1605 -> 850 MiB allocated.
+GSPLAT_MEM_REPORT prints the allocator breakdown every 1000 steps.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+perf(gsplat): tile sort in place over 4 per-isect buffers (was 8)
+…
+97ecc94
+```
+map writes (tile id, compact id) straight into the tile sort's ping-pong
+pair; sorting compact ids as values removes the isect_id indirection and
+the gather_compact pass. Intersection memory halves (training frames
+reach ~60M isects on south-building) and the profiled forward drops
+160 -> 144 ms; renders are identical (south-building 30k eval 22.102).
+
+ba-gpu: local BA windows are opt-in (VISLOC_BA_GPU_LOCAL). On a
+realistic local window (54 poses, 8 variable, 13k obs) GPU 0.44-0.66 s vs
+CPU 0.52-0.85 s: the GPU path is bound by ~5 ms submit/sync latency at
+this size (a single-workgroup fused PCG was slower still and is dropped).
+ba_gpu_replay --local now reproduces the SfM local-window shape.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+docs(gsplat): 09-24 brush re-benchmark and all-GPU EuRoC M3; rustfmt
+…
+247ab75
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+docs: feature-gated GPU crate docs without broken links; MSRV note
+…
+b7ccebe
+```
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+perf(gsplat): stage SH rows through shared memory in project_backward
+…
+dfcdd3f
+```
+Each thread read and wrote its gaussian's 48-float SH row float by float;
+rows are scattered, so a warp touched 48 strided cache lines per row and
+thrashed L1. A 64-wide workgroup now copies whole rows with consecutive
+lanes into shared memory, each thread overwrites its row with the
+gradient in place, and the rows go back the same way. project_backward
+at ~1.1M visible gaussians: 37-41 ms -> 17-18 ms (GPU shared with another
+process during the measurement; gradient tests unchanged).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+Hide details
+View details
+rsasaki0109
+merged commit 0842dac
+into
+main
+Sep 24, 2026
+10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+rsasaki0109
+mentioned this pull request
+Sep 24, 2026
+gsplat_euroc: ground-truth ATE, denser GPU matching defaults, keyframe gate
+#213
+Merged
+ansonTGN
+pushed a commit
+to ansonTGN/visloc-rs
+that referenced
+this pull request
+Sep 25, 2026
+docs(gsplat): brush speed bar met (PR rsasaki0109#206 build) and SfM …
+…
+75378b5
+```
+…ATE results
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01LXZ6YqkUsWkrahEp59C28U
+```
+rsasaki0109
+deleted the
+gsplat/trainer
+branch
+September 27, 2026 03:03
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

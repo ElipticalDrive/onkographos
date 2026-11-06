@@ -1,0 +1,142 @@
+# Simple-NeRF
+
+Also called: Simple Radiance Field for NeRF, Simple-NeRF regularization
+
+## Overview
+Simple-NeRF is a radiance field regularization method for sparse input views that trains two augmented NeRF models (Smoothing and Lambertian) in tandem with a main NeRF to reduce overfitting and distortions, using depth supervision and consistency losses [S1]. It differs from its siblings by explicitly reducing model capacity (via positional encoding and view-dependence removal) to learn "simpler" solutions that serve as reliable depth priors, whereas [HashNeRF Parameters](3068-hashnerf-parameters.md) focuses on hash table regularization and [Gradient Scaling for Near-Camera Training](7379-gradient-scaling-for-near-camera-training.md) focuses on loss weighting [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Sparse set of input images and their camera poses; sparse depth estimates from Structure from Motion (SfM) [S1].
+*   **Outputs:** A trained main NeRF model ($N_1, N_2$) for inference; augmented models ($N_{1s}, N_{2s}, N_{1l}, N_{2l}$) are discarded after training [S1].
+
+**Data Structures:**
+The method uses four neural networks:
+1.  **Main Coarse MLP ($N_1$):** Input: Positional encoding $\gamma(\mathbf{p}_i, 0, l_p)$. Output: Density $\sigma_i$ and latent feature $\mathbf{h}_i$.
+2.  **Main Fine MLP ($N_2$):** Input: Latent feature $\mathbf{h}_i$ and view direction $\gamma(\mathbf{v}_i, 0, l_v)$. Output: Color $\mathbf{c}_i$.
+3.  **Smoothing Augmentation Coarse MLP ($N_{1s}$):** Input: Positional encoding $\gamma(\mathbf{p}_i, l_{ps}, l_p)$ (reduced frequency). Output: Latent feature $\mathbf{h}_{is}$.
+4.  **Smoothing Augmentation Fine MLP ($N_{2s}$):** Input: Latent feature $\mathbf{h}_{is}$ and view direction $\gamma(\mathbf{v}_i, 0, l_v)$. Output: Color $\mathbf{c}_{is}$.
+5.  **Lambertian Augmentation Coarse MLP ($N_{1l}$):** Input: Positional encoding $\gamma(\mathbf{p}_i, 0, l_p)$. Output: Latent feature $\mathbf{h}_{il}$.
+6.  **Lambertian Augmentation Fine MLP ($N_{2l}$):** Input: Latent feature $\mathbf{h}_{il}$ and **no** view direction (or zero vector). Output: Color $\mathbf{c}_{il}$.
+
+*Note: The positional encoding function is defined as $\gamma(\mathbf{x}, d_1, d_2) = [\sin(2^{d_1}\mathbf{x}), \cos(2^{d_1}\mathbf{x}), \dots, \sin(2^{d_2-1}\mathbf{x}), \cos(2^{d_2-1}\mathbf{x})]$ [S1]. If $d_1=0$, $\mathbf{x}$ is concatenated directly [S1].*
+
+**Parameters:**
+*   $l_p$: Highest positional encoding frequency for position.
+*   $l_v$: Highest positional encoding frequency for view direction.
+*   $l_{ps}$: Reduced highest positional encoding frequency for the smoothing augmentation coarse MLP [S1].
+*   Sampling: Coarse stratified sampling (64 queries) and fine dense sampling (192 queries) per pixel [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:** Initialize main NeRF ($N_1, N_2$) and two augmented models: Smoothing ($N_{1s}, N_{2s}$) and Lambertian ($N_{1l}, N_{2l}$) [S1].
+2.  **Forward Pass (Main):** For each pixel, sample points along the ray. Compute density $\sigma$ and color $\mathbf{c}$ using $N_1$ and $N_2$. Render color $\hat{C}$ and mean depth $z_m$ [S1].
+3.  **Forward Pass (Augmented):**
+    *   **Smoothing:** Pass remaining high-frequency positional encoding components $\gamma(\mathbf{p}_i, l_{ps}, l_p)$ to $N_{1s}$ to get $\mathbf{h}_{is}$. Pass $\mathbf{h}_{is}$ and $\gamma(\mathbf{v}_i, 0, l_v)$ to $N_{2s}$ to get $\mathbf{c}_{is}$. Render coarse depth $z_s$ [S1].
+    *   **Lambertian:** Pass $\gamma(\mathbf{p}_i, 0, l_p)$ to $N_{1l}$ to get $\mathbf{h}_{il}$. Pass $\mathbf{h}_{il}$ and zero view direction to $N_{2l}$ to get $\mathbf{c}_{il}$. Render coarse depth $z_l$ [S1].
+4.  **Reliability Masking:** Compute reliability masks $m_a$ (for augmented) and $m_m$ (for main) by reprojecting to the closest training view and checking intensity consistency. If intensities do not match (e.g., specular regions), the mask is zero [S1].
+5.  **Depth Supervision Loss ($L_{aug}$):** Impose depth supervision using stop-gradient ($\hat{\nabla}$) on the target depth to prevent gradient flow to the teacher model:
+    $$ L_{aug} = \mathbb{1}\{m_a=1\} \odot \|z_m - \hat{\nabla}(z_a)\|^2 + \mathbb{1}\{m_m=1\} \odot \|\hat{\nabla}(z_m) - z_a\|^2 $$
+    where $z_a$ is the depth from the augmented model (either $z_s$ or $z_l$). Compute $L_s$ and $L_l$ separately for smoothing and Lambertian augmentations, then sum them for the final depth supervision loss [S1].
+6.  **Coarse-Fine Consistency Loss ($L_{cfc}$):** Ensure hierarchical sampling consistency between coarse depth $z_c$ and fine depth $z_f$ of the main model:
+    $$ L_{cfc} = \mathbb{1}\{m_f=1\} \odot \|z_c - \hat{\nabla}(z_f)\|^2 + \mathbb{1}\{m_c=1\} \odot \|\hat{\nabla}(z_c) - z_f\|^2 $$
+    where $m_f$ and $m_c$ are reliability masks for fine and coarse depths respectively [S1].
+7.  **Photometric Loss:** Standard photometric loss between rendered color $\hat{C}$ and ground truth image $C$ [S1].
+8.  **Optimization:** Minimize the sum of photometric, depth supervision ($L_{aug}$), and consistency ($L_{cfc}$) losses [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def simple_nerf_training_step(images, poses, sparse_depths, camera_intrinsics):
+    # 1. Initialize models
+    N1, N2 = init_main_nerf()
+    N1s, N2s = init_smoothing_augmentation()
+    N1l, N2l = init_lambertian_augmentation()
+    
+    # 2. Compute reliability masks
+    # Reproject scene points to closest training view and check intensity consistency
+    m_main = compute_reliability_mask(images, poses, N1, N2)
+    m_aug_s = compute_reliability_mask(images, poses, N1s, N2s)
+    m_aug_l = compute_reliability_mask(images, poses, N1l, N2l)
+    
+    # 3. Forward pass Main Model
+    # Coarse sampling (64 points)
+    z_c, sigma_c, h_c = forward_coarse(N1, positions, N2, h_c, views)
+    # Fine sampling (192 points)
+    z_f, sigma_f, h_f = forward_fine(N2, positions, views)
+    
+    # Render Main
+    C_main, z_m = render_volume_rendering(z_c, sigma_c, z_f, sigma_f)
+    
+    # 4. Forward pass Smoothing Augmentation
+    # Reduce positional encoding frequency for coarse MLP
+    pos_enc_s = positional_encoding(positions, d1=l_ps, d2=l_p)
+    h_s = N1s(pos_enc_s)
+    C_s, z_s = render_augmented(N2s, h_s, views)
+    
+    # 5. Forward pass Lambertian Augmentation
+    # Disable view-dependent feature
+    pos_enc_l = positional_encoding(positions, d1=0, d2=l_p)
+    h_l = N1l(pos_enc_l)
+    views_zero = zeros_like(views)
+    C_l, z_l = render_augmented(N2l, h_l, views_zero)
+    
+    # 6. Compute Losses
+    # Photometric Loss
+    L_photo = mean_squared_error(C_main, images)
+    
+    # Depth Supervision Loss (Sum of Smoothing and Lambertian)
+    # Stop gradient on target depth
+    L_s = (m_aug_s * (z_m - stop_gradient(z_s))**2).mean()
+    L_l = (m_aug_l * (z_m - stop_gradient(z_l))**2).mean()
+    L_aug = L_s + L_l
+    
+    # Coarse-Fine Consistency Loss
+    L_cfc = (m_f * (z_c - stop_gradient(z_f))**2).mean() + \
+            (m_c * (stop_gradient(z_c) - z_f)**2).mean()
+            
+    # Total Loss
+    loss = L_photo + L_aug + L_cfc
+    
+    # 7. Backpropagate and Update
+    update_parameters(N1, N2, N1s, N2s, N1l, N2l, loss)
+    
+    return loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Specular Regions:** Reprojected patch intensities may not match, causing masks to be zero. This results in fewer supervised pixels but avoids supervision with incorrect depth estimates [S1].
+*   **Single View Visibility:** Transparent floaters persist in regions visible in only one training view because reliable depth supervision is not available there [S1].
+*   **Poor Base Performance:** The method is limited to cases where the base model achieves reasonable performance but suffers from distortions; it may not help if the base model performance is very poor [S1].
+*   **Variance Supervision:** The depth supervision loss is imposed only on the mean depth, not on the variance. Attempting to minimize standard deviation or KL divergence led to stronger artifacts [S1].
+
+## Subtopics
+
+### Simple-TensoRF
+Uses factorized tensor representations; augmentation reduces high-resolution components to mitigate floaters [S1].
+
+### Simple-ZipNeRF
+Uses hash tables; augmentation constrains large hash tables to learn simpler solutions [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Simple-NeRF queries coarse MLPs 192 times and fine MLPs 192 times (384 total) per pixel, whereas standard NeRF queries coarse MLPs 64 times and fine MLPs 192 times (256 total) [S1].
+*   Training time is approximately 1.5 times that of standard NeRF [S1].
+*   Disabling $L_{cfc}$ increases training time by almost 2x due to the inclusion of augmentations for the fine NeRF [S1].
+
+**Measured Performance:**
+*   On RealEstate-10K with two input views: MAE 0.3269, SROCC 0.9215 (vs DS-NeRF MAE 0.7164, SROCC 0.6660) [S1].
+*   On NeRF-LLFF with two input views: MAE 0.1420, SROCC 0.8480 (vs DS-NeRF MAE 0.2074, SROCC 0.7230) [S1].
+
+**Strengths and Limitations:**
+*   Mitigates both floaters and incorrect depth issues, unlike RegNeRF which fuses objects at different depths [S1].
+*   Requires complementary abilities in augmented models; replacing them with identical replicas causes performance drop [S1].
+*   Reducing positional encoding degree is more effective than simply reducing MLP layers (e.g., 8 to 4 layers) in the smoothing augmentation, as smaller MLPs may still learn floaters [S1].
+
+## Background
+Simple-NeRF is part of the Simple Radiance Fields (Simple-RF) family, introduced by Nagabhushan Somraj, Sai Harsha Mupparaju, Adithyan Karanayil, and Rajiv Soundararajan in 2024 [S1]. The framework is viewed as semi-supervised learning where sparse depth from Structure from Motion (SfM) provides limited depth labels [S1]. The approach of using augmented models in tandem with the main radiance field model is closest to the Dual-Student architecture [Ke et al. 2019] [S1].
+
+## Sources
+[S1] Simple-RF: Regularizing Sparse Input Radiance Fields with Simpler Solutions, https://arxiv.org/abs/2404.19015v5, fetched 2026-10-27

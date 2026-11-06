@@ -1,0 +1,58 @@
+# Bidirectional Path Tracing
+
+Also called: Bidirectional Path Tracing for Participating Media, Bidirectional transmittance-based path sampling, Vertex-vertex connection
+
+## Overview
+Bidirectional Path Tracing constructs a full light transport path by independently generating a light subpath and an eye subpath, then connecting their endpoints with a deterministic segment [S1]. It sets itself apart from unidirectional path tracing by including both emitted radiance and sensor importance in the path probability density function (PDF), which improves convergence rates for scenes with refractive boundaries [S2].
+
+## How it works
+**Inputs:** Scene geometry, participating media properties, light source distribution, camera parameters.
+**Outputs:** Estimated radiance at the camera.
+
+**Data Structures:**
+*   **Light Subpath:** A sequence of vertices $L_0, L_1, \dots, L_s$. $L_0$ is on the light source.
+*   **Eye Subpath:** A sequence of vertices $E_0, E_1, \dots, E_t$. $E_0$ is the camera lens/pixel.
+*   **Connection Segment:** A deterministic link between $L_s$ and $E_t$.
+
+**Steps:**
+1.  **Generate Light Subpath:** Use unidirectional path tracing to sample $s$ vertices starting from the light source. For each vertex $L_i$ ($0 \le i < s$), sample a direction and distance to the next interaction point $L_{i+1}$, accounting for medium transmittance and phase function [S1].
+2.  **Generate Eye Subpath:** Use unidirectional path tracing to sample $t$ vertices starting from the camera. For each vertex $E_j$ ($0 \le j < t$), sample a direction into the scene and distance to the next interaction point $E_{j+1}$ [S1].
+3.  **Connect Subpaths:** Deterministically connect the endpoint of the light subpath ($L_s$) to the endpoint of the eye subpath ($E_t$) with a straight line segment. This segment represents the final path between the medium interaction points [S1].
+4.  **Estimate Radiance:** Compute the radiance contribution of the full path. The contribution includes the product of all scattering events along both subpaths and the transmittance of the connecting segment. Since the connection is deterministic (0 random decisions), its PDF contribution is handled by the ratio of the joint PDF to the marginal PDFs of the subpaths [S1].
+
+**Formula:**
+The radiance estimate $L$ for a path with $s$ light vertices and $t$ eye vertices is proportional to:
+$$ L \propto \frac{f(L_s, E_t) T(L_s, E_t)}{p_L(L_s) p_E(E_t)} $$
+Where:
+*   $f(L_s, E_t)$ is the phase function or scattering term at the connection.
+*   $T(L_s, E_t)$ is the transmittance between $L_s$ and $E_t$.
+*   $p_L(L_s)$ is the PDF of generating the light subpath endpoint.
+*   $p_E(E_t)$ is the PDF of generating the eye subpath endpoint.
+
+**Parameters:**
+*   $s, t$: Number of vertices in light and eye subpaths. Typical values are small integers (e.g., 1-3).
+*   $s=1$ or $t=1$ corresponds to Next Event Estimation (path tracing or light tracing respectively) [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Infinite Variance:** Vertex-vertex connections can lead to infinite variance because the connecting segment is not importance sampled (it is a 0-random-decision subpath) [S1].
+*   **High-Frequency Phase Functions:** In participating media, sampling high-frequency phase functions can result in noisy results even with importance sampling [S2].
+
+## Subtopics
+
+### [Bidirectional Path-Space Differentiable Rendering](7618-bidirectional-path-space-differentiable-rendering.md)
+Computes gradients of the rendering equation by constructing a differentiable path space using both light and eye subpaths. It leverages the bidirectional structure to reduce variance in gradient estimation for complex light transport, addressing discontinuities inherent in path-space derivatives.
+
+## Operating characteristics
+*   **Convergence:** Improves convergence rate for light transport with refractive boundaries compared to unidirectional path tracing [S2].
+*   **Variance:** Can exhibit high or infinite variance due to the deterministic connection of vertices, which is not importance sampled [S1].
+*   **Performance:** Monte Carlo methods for participating media generally take a long time to converge, especially for high-order scattering or highly anisotropic media [S2].
+*   **Use Cases:** Suitable for scenes with refractive boundaries where unidirectional sampling is difficult [S2].
+
+## Background
+*   **Origin:** Lafortune and Willems expanded path tracing ideas to bidirectional path tracing to improve convergence rates for light transport with refractive boundaries [S2].
+*   **Development:** The method addresses the high variance of unidirectional sampling by including both emitted radiance and sensor importance in the path PDF [S1].
+*   **Context:** It is part of the broader family of Monte Carlo methods used for rendering participating media, which are unbiased but can be slow to converge [S2].
+
+## Sources
+[S1] Joint importance sampling of low-order volumetric scattering, https://doi.org/10.1145/2508363.2508411, fetched 2026-10-28
+[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

@@ -3,105 +3,116 @@
 Also called: Chunk-based Mesh Caching
 
 ## Overview
-Chunked World Management splits a voxel world into smaller, independent sub-worlds called chunks to allow localized mesh rebuilding, solving the performance bottleneck of regenerating geometry for an entire volume when only a small region changes [S1, unofficial]. It differs from its parent [Static Mesh Caching](1138-static-mesh-caching.md) by partitioning the single mesh object into multiple chunk-specific meshes, enabling independent updates per chunk rather than global invalidation [S1, unofficial].
+Chunked World Management splits a voxel world into smaller, independent sub-worlds called chunks to allow localized mesh rebuilding [S1, unofficial]. It solves the performance bottleneck of rebuilding the entire world's geometry when a single block is modified [S1, unofficial]. Unlike [Static Mesh Caching](1138-static-mesh-caching.md), which caches all voxel geometry into a single mesh object, this method partitions the geometry by spatial region, enabling incremental updates [S1, unofficial].
 
 ## How it works
-**Inputs:** World position of a voxel edit (e.g., placement or removal); global voxel data structure [S1, unofficial].
-**Outputs:** Updated chunk mesh; modified chunk voxel set [S1, unofficial].
+**Inputs:** World position of a voxel modification (e.g., placement or removal).
+**Outputs:** Updated chunk data structures and invalidated mesh references.
 
 **Data Structures:**
-*   `World`: Contains a `dict` mapping `tuple` chunk positions to `Chunk` objects [S1, unofficial].
-*   `Chunk`: Contains a `set` of local voxel positions (`tuple`) and an optional `Mesh` object [S1, unofficial].
-*   `Chunk Size`: Fixed at $32 \times 32 \times 32$ blocks [S1, unofficial].
+The world is represented by a `World` struct containing a `HashMap` mapping chunk positions to `Chunk` objects.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Coordinate Conversion:**
-To map a global world position $P$ to a chunk, two steps are required:
-1.  **Chunk Position:** $C = \lfloor P / S \rfloor$ (floor division) [S1, unofficial].
-2.  **Local Position:** $L = P \pmod S$ (floor remainder) [S1, unofficial].
+```rust
+struct World {
+    chunks: HashMap<IVec3, Chunk>,
+}
+```
+Each `Chunk` struct contains its own local voxel set and an optional mesh.
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-Where $S$ is the chunk size (32). It is critical to use **euclidean division** (`div_euclid`) and **euclidean remainder** (`rem_euclid`) for negative coordinates [S1, unofficial]. Standard integer division/remainder fails for negative numbers, causing incorrect chunk assignment (e.g., mapping $-7$ to chunk $0$ with offset $-7$ instead of chunk $-1$ with offset $7$) and resulting in uneven chunk sizes [S1, unofficial].
+```rust
+struct Chunk {
+    voxels: HashSet<IVec3>,
+    mesh: Mesh?,
+}
+```
+*   `IVec3`: A 3D integer vector type.
+*   `HashSet`: A hash-based set for O(1) voxel lookup.
+*   `Mesh`: A geometry object containing vertices and indices.
 
-**Algorithm Steps:**
-1.  Calculate `chunk_position` using `position.div_euclid(32)` [S1, unofficial].
-2.  Calculate `local_position` using `position.rem_euclid(32)` [S1, unofficial].
-3.  Retrieve or create the `Chunk` at `chunk_position` in the world's `dict` [S1, unofficial].
-4.  Invalidate the chunk's existing mesh (set to `None`) to trigger regeneration on next render [S1, unofficial].
-5.  Update the chunk's local `set`: remove the voxel if it exists, or insert it if it does not [S1, unofficial].
-6.  During rendering, iterate over all chunks. For each chunk with a valid mesh, draw it with an offset of `chunk_position * 32`. If the mesh is invalid, regenerate it using the chunk's local voxels before drawing [S1, unofficial].
+**Parameters:**
+*   **Chunk Size:** Typically $32 \times 32 \times 32$ blocks [S1, unofficial]. The exact size is configurable but must be consistent across the world [S1, unofficial].
+
+**Steps:**
+1.  **Coordinate Conversion:** Convert the global world position to chunk coordinates and local chunk coordinates.
+    *   Calculate chunk position: $P_{chunk} = \lfloor P_{world} / S \rfloor$
+    *   Calculate local position: $P_{local} = P_{world} \pmod S$
+    *   **Critical:** Use Euclidean division (`div_euclid`) and remainder (`rem_euclid`) to handle negative coordinates correctly. Standard integer division/remainder fails for negative numbers, causing incorrect chunk assignment and uneven chunk sizes at boundaries [S1, unofficial].
+2.  **Chunk Access:** Retrieve or create the `Chunk` object at $P_{chunk}$ in the `World.chunks` HashMap.
+3.  **Data Update:**
+    *   Invalidate the chunk's mesh (set `chunk.mesh = None`) to mark it for rebuilding [S1, unofficial].
+    *   Update the chunk's local voxel set: remove the voxel if it exists, or insert it if it does not [S1, unofficial].
+4.  **Rendering:** Iterate over all chunks in the `World.chunks` HashMap. For each chunk:
+    *   If `chunk.mesh` is invalid, rebuild it using the chunk's local voxels.
+    *   Draw the mesh with an offset of $P_{chunk} \times S$ [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def div_euclid(a, b):
-    return a // b if (a >= 0) == (b >= 0) or a % b == 0 else a // b - 1
+def flip_voxel(world: World, position: IVec3, chunk_size: int = 32) -> None:
+    # 1. Convert world position to chunk and local positions using Euclidean division
+    # div_euclid and rem_euclid handle negative coordinates correctly
+    chunk_position = position.div_euclid(chunk_size)
+    local_position = position.rem_euclid(chunk_size)
 
-def rem_euclid(a, b):
-    return a - b * div_euclid(a, b)
+    # 2. Get or create the target chunk
+    chunk = world.chunks.get_or_create(chunk_position)
 
-class Chunk:
-    def __init__(self):
-        self.voxels = set()
-        self.mesh = None
-
-class World:
-    def __init__(self):
-        self.chunks = {}
-
-def get_or_create_chunk(world: World, chunk_pos: tuple) -> Chunk:
-    if chunk_pos not in world.chunks:
-        world.chunks[chunk_pos] = Chunk()
-    return world.chunks[chunk_pos]
-
-def flip_voxel(world: World, position: tuple):
-    chunk_position = (div_euclid(position[0], 32), div_euclid(position[1], 32), div_euclid(position[2], 32))
-    local_position = (rem_euclid(position[0], 32), rem_euclid(position[1], 32), rem_euclid(position[2], 32))
-
-    chunk = get_or_create_chunk(world, chunk_position)
-    chunk.mesh = None
-
+    # 3. Invalidate mesh and update voxel set
+    chunk.mesh = None  # Mark for rebuild
+    
     if local_position in chunk.voxels:
         chunk.voxels.remove(local_position)
     else:
         chunk.voxels.add(local_position)
 
-def render_world(world: World):
-    for chunk_pos, chunk in world.chunks.items():
-        if chunk.mesh is None:
-            vertices = []
-            for voxel_pos in chunk.voxels:
-                vertices.append(draw_cube(voxel_pos))
-            chunk.mesh = create_mesh_from_vertices(vertices)
+def render_world(world: World, chunk_size: int = 32) -> None:
+    for chunk_position, chunk in world.chunks.items():
+        # Calculate global offset for the chunk
+        offset = chunk_position * chunk_size
         
-        offset = (chunk_pos[0] * 32, chunk_pos[1] * 32, chunk_pos[2] * 32)
+        # Rebuild mesh if invalid
+        if chunk.mesh is None:
+            chunk.mesh = create_mesh(chunk.voxels)
+            
+        # Draw mesh with offset
         draw_mesh(chunk.mesh, offset)
 
-# Standard graphics stubs for syntactic validity
-def draw_cube(pos): return []
-def create_mesh_from_vertices(vertices): return object()
-def draw_mesh(mesh, offset): pass
+def create_mesh(voxels: HashSet[IVec3]) -> Mesh:
+    vertices = []
+    for voxel_pos in voxels:
+        # Draw a cube centered at or aligned with voxel_pos
+        # Implementation depends on specific meshing algorithm (e.g., face culling)
+        vertices.extend(draw_cube(voxel_pos))
+    return Mesh.from_vertices(vertices)
 ```
 
 ## Subtopics
 
 ### [Remesh Budget](3119-remesh-budget.md)
-Remesh Budget limits the computational cost of mesh regeneration per frame by processing only the most visually significant dirty chunks. It solves frame-time spikes caused by rebuilding geometry for distant or less important chunks by enforcing a strict time budget, ensuring that mesh updates are prioritized based on camera proximity. It differs from [Chunk-Based Parallel Voxel Culling & Rendering](3994-chunk-based-parallel-voxel-culling-rendering.md) by focusing on temporal budgeting and spatial prioritization of rebuilds rather than parallel culling strategies [G].
+Remesh Budget is a rendering optimization that processes dirty chunks nearest the camera first within a strict time budget per frame. It prevents main-thread stalls by limiting the number of sub-chunks remeshed per frame and capping the total time spent on geometry generation. Unlike immediate synchronous rebuilding, which causes frame drops during rapid block placement, this method decouples modification detection from geometry generation.
 
 ### [Chunk-Based Parallel Voxel Culling & Rendering](3994-chunk-based-parallel-voxel-culling-rendering.md)
-This method accelerates the rendering of blocky voxel meshes by distributing the computationally expensive face culling and instance collection tasks across multiple CPU threads, organized by spatial chunks [G]. It solves the bottleneck of single-threaded mesh generation in large voxel worlds by allowing independent chunks to be processed concurrently [G]. It differs from [Remesh Budget](3119-remesh-budget.md) by focusing on parallelism and spatial partitioning rather than dynamic cost-based remeshing thresholds [G].
+This method accelerates blocky voxel mesh rendering by distributing face culling and instance collection across multiple CPU threads organized by spatial chunks [G]. It solves the single-threaded mesh generation bottleneck by allowing independent chunks to be processed concurrently [G]. It differs from [Remesh Budget](3119-remesh-budget.md) by focusing on parallelism and spatial partitioning rather than dynamic cost-based remeshing thresholds [G].
 
 ### ChunkManager
-A manager class that handles spatial hashing, automatic job scheduling, world/local coordinate conversion, and smart meshing algorithm selection (blocky vs smooth) [S2, unofficial]. The manager selects the appropriate meshing algorithm (e.g., `GreedyMeshingJob` for blocky, `MarchingCubesJob` for smooth) based on voxel data, with meshes generated automatically via Unity Jobs [S2, unofficial].
+ChunkManager is a manager class that handles spatial hashing, automatic job scheduling, world/local coordinate conversion, and smart meshing algorithm selection (blocky vs smooth) [S2, unofficial]. It selects the appropriate meshing algorithm (e.g., `GreedyMeshingJob` for blocky, `MarchingCubesJob` for smooth) based on voxel data and generates meshes automatically via job systems [S2, unofficial].
 
 ### Dirty Region Remeshing with Mesh Pruning
-A remeshing strategy that rebuilds meshes only for a ring of chunks surrounding an edit, combined with pruning meshes for deleted chunks to prevent visual artifacts during undo [S3, unofficial]. When an edit occurs, the owning chunk and any existing neighbor across a shared face are marked dirty, limiting rebuilds to this ring [S3, unofficial]. A key pitfall is that if a chunk is deleted during undo, it leaves no dirty flag to drive a rebuild; without explicit pruning, its mesh quads continue to draw, causing the undone stroke to remain visible on screen despite passing CPU assertions [S3, unofficial].
+Dirty Region Remeshing is a strategy that rebuilds meshes only for a ring of chunks surrounding an edit, combined with pruning meshes for deleted chunks to prevent visual artifacts during undo [S3, unofficial]. When an edit occurs, it marks the owning chunk and any existing neighbor across a shared face as dirty [S3, unofficial]. It rebuilds meshes only for these dirty chunks [S3, unofficial]. A key pitfall is that if a chunk is deleted during undo, it leaves no dirty flag to drive a rebuild; without explicit pruning, its mesh quads continue to draw, causing the undone stroke to remain visible on screen despite passing CPU assertions [S3, unofficial].
 
 ## Operating characteristics
-Time complexity for voxel updates is $O(1)$ per chunk modification, as only the affected chunk's mesh is invalidated and rebuilt, rather than the entire world [S1, unofficial]. Memory complexity scales with the number of active chunks, where each chunk stores its own voxel set and mesh [S1, unofficial]. The method reduces draw calls compared to per-voxel rendering but increases them compared to a single global mesh, as each chunk typically requires a separate draw call (or instanced call) [S1, unofficial]. It is most effective in large, sparse worlds where edits are localized, avoiding the $O(N)$ cost of global mesh regeneration [S1, unofficial].
+*   **Time Complexity:** Mesh rebuilding is proportional to the number of voxels in the affected chunk, not the entire world. For a single block edit, complexity is $O(1)$ relative to world size, but $O(V_c)$ where $V_c$ is voxels in the chunk [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ where $N$ is the total number of active voxels, distributed across chunk structures [S1, unofficial].
+*   **Strengths:** Eliminates global rebuild latency; allows for incremental updates; scales well with large worlds [S1, unofficial].
+*   **Limitations:** Requires careful handling of chunk boundaries and negative coordinates [S1, unofficial]. Overhead of managing multiple mesh objects and HashMap lookups [S1, unofficial].
+*   **When to Use:** Large voxel worlds where frequent, localized modifications occur [S1, unofficial].
+*   **When Not to Use:** Very small worlds where global rebuild is negligible; worlds with global modifications [S1, unofficial].
 
 ## Background
-This method was detailed in practical implementations of voxel engines, specifically in tutorials demonstrating the transition from a single global mesh to a chunked architecture for efficient editing [S1, unofficial].
+Chunked World Management originated as a fundamental optimization in voxel engine development to address the performance limitations of monolithic mesh structures [S1, unofficial]. It is widely used in voxel-based games and editors to enable real-time editing of large terrains [S1, unofficial]. The technique is often combined with parallel processing and dirty-region tracking for further optimization [S2, unofficial][S3, unofficial].
 
 ## Sources
 [S1] Make yourself a Voxel Engine THIS weekend, https://daymare.net/blogs/voxel-engine-in-a-weekend/, fetched 2026-10-26 (unofficial)

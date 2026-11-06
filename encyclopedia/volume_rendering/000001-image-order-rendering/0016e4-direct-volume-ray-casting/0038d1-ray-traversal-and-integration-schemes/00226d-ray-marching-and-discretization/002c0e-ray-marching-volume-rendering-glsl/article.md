@@ -1,0 +1,110 @@
+# Ray Marching Volume Rendering (GLSL)
+Also called: Fragment Shader Ray Marching, GLSL Ray Marching Volume Rendering, GPU Ray Marching, GPU-Based Ray Marching, Ray Marching on the GPU [S1][S3, unofficial]
+
+## Overview
+This method implements direct volume rendering by marching a ray through a 3D texture volume within a fragment shader, applying alpha blending and early ray termination [S1][S3, unofficial]. It differs from [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md) by integrating the integration loop directly into the fragment shader for per-pixel execution, and from [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md) by using a two-pass setup where the first pass computes ray boundaries and the second pass evaluates the volume rendering equation [S1][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Entry point `first` (in vec3), exit point texture `lastHit` (sampler2D), transfer function `transferFunction` (sampler1D), volume data `volume` (sampler3D), step size `h` (uniform float), and early termination threshold `opacityThreshold` (constant 0.99) [S1].
+*   **Outputs:** Accumulated fragment color `vFragColor` (out vec4) [S1].
+
+**Data Structures:**
+*   `volume`: 3D texture at binding 3 storing scalar density data [S1].
+*   `transferFunction`: 1D texture at binding 2 mapping density to RGBA color and alpha [S1].
+*   `lastHit`: 2D texture at binding 1 storing the ray exit point per pixel [S1].
+
+**Parameters:**
+*   `h`: Uniform float representing the fixed step size for ray traversal [S1].
+*   `opacityThreshold`: Constant set to 0.99 for early ray termination [S1].
+
+**Algorithm Steps:**
+1.  **Fetch Exit Point:** Retrieve the ray exit point from the `lastHit` texture using the fragment's screen coordinates [S1].
+2.  **Compute Ray Direction and Length:** Calculate the direction vector from the entry point `first` to the fetched exit point, normalize it, and compute the total ray length $D$ [S1].
+3.  **Initialize Accumulators:** Set the accumulated color to transparent black and initialize the transmittance `color.a` to 1.0 [S1].
+4.  **Marching Loop:** Iterate from $t=0$ to $t \le D$ with increment $h$ [S1].
+    a.  **Sample Density:** Sample the scalar field from the volume texture at the current ray position `tr` [S1].
+    b.  **Map to Color/Alpha:** Pass the density through the transfer function to obtain RGBA values [S1].
+    c.  **Calculate Alpha:** Convert the sample alpha using the formula $samp.a = 1.0 - \exp(-0.5 \times samp.a)$ [S1].
+    d.  **Pre-multiply Alpha:** Multiply the sample RGB by its alpha [S1].
+    e.  **Accumulate Color:** Add the pre-multiplied sample color to the accumulated color weighted by the current transmittance [S1].
+    f.  **Update Transmittance:** Multiply the current transmittance by $(1.0 - samp.a)$ [G].
+    g.  **Early Termination:** If the accumulated opacity $(1.0 - color.a)$ exceeds `opacityThreshold`, break the loop [S1].
+    h.  **Advance Ray:** Increment the ray position `tr` by `direction * h` and increment $t$ by $h$ [S1].
+5.  **Finalize Output:** Convert the final transmittance to opacity by setting `color.a = 1.0 - color.a` and store the result in `vFragColor` [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_marching_fragment_shader(lastHit, first, transferFunction, volume, h, opacityThreshold):
+    # 1. Fetch exit point from lastHit texture using fragment coordinates
+    tcoord = floor(gl_FragCoord.xy)  # [G] standard GLSL fragment coordinate retrieval
+    last = texel_fetch(lastHit, tcoord, 0).xyz
+
+    # 2. Compute ray direction and length
+    direction = last - first
+    D = length(direction)
+    direction = normalize(direction)
+
+    # 3. Initialize accumulators
+    color = vec4(0.0)
+    color.a = 1.0  # Transmittance T starts at 1.0
+
+    tr = first
+    rayStep = direction * h
+
+    # 4. Marching loop
+    t = 0.0
+    while t <= D:
+        # a. Sample density
+        density = texture(volume, tr).x
+        # b. Map to color/alpha via transfer function
+        samp = texture(transferFunction, density).rgba
+        # c. Calculate alpha
+        samp.a = 1.0 - exp(-0.5 * samp.a)
+        # d. Pre-multiply alpha
+        samp.rgb *= samp.a
+        # e. Accumulate color
+        color.rgb += samp.rgb * color.a
+        # f. Update transmittance
+        color.a *= (1.0 - samp.a)
+        # g. Early termination
+        if (1.0 - color.a) > opacityThreshold:
+            break
+        # h. Advance ray
+        tr += rayStep
+        t += h
+
+    # 5. Finalize output
+    color.a = 1.0 - color.a
+    return color
+```
+
+## Subtopics
+
+### [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md)
+The compositing strategy used in the accumulation step. Choose when opacity is the primary visual cue.
+
+### [Fixed Step Ray Marching](3136-fixed-step-ray-marching.md)
+The underlying traversal technique. Choose when uniform sampling is sufficient and adaptive steps are too complex.
+
+### [Volume Raycasting on GPU](6058-volume-raycasting-on-gpu.md)
+A broader category of GPU-based volume rendering. Choose this when comparing shader-based approaches to compute-shader or voxel-based approaches.
+
+## Operating characteristics
+*   **Time Complexity:** Proportional to the number of pixels and the number of marching steps per ray [S3, unofficial].
+*   **Memory Complexity:** Proportional to the size of the 3D texture volume [S3, unofficial].
+*   **Performance:** On a 3.8Ghz Pentium 4 with two nVidia GeForce FX7950 GX2 512Mb running in split frame SLI mode, the Knee model (512x512x73 voxels) renders at 134 fps with Shear-Warp (s=1) and 44 fps with Ray Marching (500 steps) [S3, unofficial]. The Skull model (320x320x46 voxels) renders at 308 fps (50 steps), 175 fps (100 steps), 95 fps (200 steps), 64 fps (300 steps), 48 fps (400 steps), and 44 fps (500 steps) [S3, unofficial].
+*   **Strengths:** Generates the final image in a single pass within the fragment shader; processes rays independently, allowing optimizations like early termination and adaptive sampling; outperforms Shear-Warp for equivalent quality (e.g., 48 fps at 400 steps vs 10 fps at sampling rate 10 for Shear-Warp) [S3, unofficial].
+*   **Limitations:** Uniform point sampling along the ray causes aliasing artifacts when the sampling rate is too low; visible slices appear at low sampling rates (s=1) [S3, unofficial].
+*   **When to use:** Real-time rendering of simple volumes on standard PC graphics hardware where interactive frame rates are required [S3, unofficial].
+*   **When not to use:** Not given in the sources.
+
+## Background
+This method was proposed for efficient volume rendering on standard PC graphics hardware [S3, unofficial]. The specific implementation details (unit cube, offset +0.5, fixed parameters) are derived from the HNanoSolver project [S1]. It builds on the general principles of ray casting and front-to-back compositing described in [Front-to-Back Volume Rendering](2350-front-to-back-volume-rendering.md) [S3, unofficial].
+
+## Sources
+[S1] (PDF) A Comparison between GPU-based Volume Ray Casting ..., https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
+[S2] ZephirFXEC/HNanoSolver, https://github.com/ZephirFXEC/HNanoSolver, fetched 2026-10-27 (unofficial)
+[S3] GPU-Based Volume Rendering for Medical Imagery, https://scholarly.org/pdf/display/gpu-based-volume-rendering-for-medical-imagery, fetched 2026-10-28 (unofficial)

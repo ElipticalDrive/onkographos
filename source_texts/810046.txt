@@ -1,0 +1,235 @@
+# PCA-Initialized 2D Gaussian Splatting
+
+A from-scratch differentiable 2D Gaussian rasterizer with adaptive density control and a PCA/SVD-based learned initializer.
+
+![Renderer sanity check](figures/renderer_sanity.png)
+
+*Ten hand-built Gaussians rendered by the implementation, with each primitive's 2σ ellipse drawn on the right. This is the geometric sanity check: anisotropic scales and rotations land where they should, and overlapping primitives composite front-to-back in index order.*
+
+---
+
+## At a Glance
+
+| | |
+|---|---|
+| **Renderer** | differentiable 2D Gaussian rasterizer, written from scratch in PyTorch |
+| **Primitive** | 9 parameters — position `x, y`, anisotropic scale `s_x, s_y`, rotation `θ`, colour `r, g, b`, opacity `α` |
+| **Rendering** | oriented Gaussian conics, front-to-back alpha compositing, gradients through all 9N parameters |
+| **Adaptive density** | prune / clone / split during optimization, with Adam state preserved across topology changes |
+| **Initializer** | PCA/SVD coefficients → small MLP → an initial Gaussian set, trained *through* the renderer |
+| **Supervision** | pixel reconstruction MSE only — no Gaussian ground-truth labels anywhere |
+| **Datasets** | MNIST, FashionMNIST, CIFAR10, Olivetti faces, STL-10 (kept at native 96×96) |
+| **Benchmark** | 10 held-out images per dataset, 50 head-to-head comparisons |
+| **Tests** | 36 tests, CPU only, no dataset download required |
+
+**Headline result.** PCA initialization finished with higher mean PSNR on all five datasets and won **50 / 50** held-out image comparisons. The smallest single-image margin was **+0.21 dB**; mean gains ranged from **+1.31 dB** (STL-10) to **+11.36 dB** (MNIST).
+
+The PCA initializer reached the random baseline's final PSNR **2.43×–10.40× earlier in the optimization schedule** across the five evaluated datasets. That figure is iteration-based, not wall-clock — see [Results](#results) for exactly how it is measured and why it is coarse.
+
+---
+
+## Why This Project
+
+Gaussian splatting represents an image as an explicit collection of Gaussian primitives optimized directly. In this implementation, their compositing order also matters because rendering is performed front-to-back.
+
+The fixed-N baseline in this project starts the Gaussian parameters from a random initialization. The main question is whether information from a dataset of related images can provide a better starting point.
+
+The question, narrowly: **can an image-derived structured initialization replace or improve a random initial Gaussian set?**
+
+The project explores three connected components:
+
+1. a **differentiable rasterizer**, so gradients reach every Gaussian parameter;
+2. **adaptive density control** for changing the primitive set during optimization;
+3. a **learned PCA/SVD initializer**, trained through the renderer itself.
+
+The initialization benchmark uses components 1 and 3 with fixed-N optimization; adaptive density control is a separate experiment and is not part of that comparison.
+
+This is coursework-scale work built on well-established ideas, not a new method. The initializer is described in the notebook as *EigenGS-inspired* — the idea of mapping an eigenimage representation into a Gaussian representation comes from that line of work, adapted here to 2D image reconstruction.
+
+## Differentiable 2D Gaussian Rasterizer
+
+Each primitive carries nine parameters: a centre, two scales, an orientation, an RGB colour and an opacity. The renderer turns the oriented scales into the three distinct entries of the inverse covariance — the **conic** `(a, b, c)` — in closed form, so **no matrix inverse ever appears in the render path**. The Gaussian kernel is then evaluated on the pixel grid and the primitives are composited front to back, each one attenuated by the transmittance of everything in front of it.
+
+Optimization never touches the physical parameters directly, since they are constrained (scales positive, colours and opacity in [0, 1], centres inside the image). Instead an unconstrained raw tensor is optimized and mapped through sigmoid/softplus activations; the inverse map exists too, which is what lets the adaptive machinery and the predictor hand physical Gaussians back into raw space.
+
+Correctness is tested, not asserted. Eight checks cover the peak-at-centre convention, isotropic rotational symmetry, scale-versus-energy monotonicity, whether `θ` reorients an elongated blob correctly, front-to-back occlusion, **finite non-zero gradients for all 9N parameters**, and the fact that swapping two primitives' order changes the rendered overlap. One cross-checks the closed-form conic against `torch.inverse` — a call that exists only in the test, never in the renderer.
+
+## Adaptive Density Control
+
+The number of Gaussians does not have to be chosen in advance. Starting from a small set, the fit periodically rewrites its own topology using the gradient of the loss with respect to the **physical** primitive centres:
+
+- **prune** primitives whose opacity has fallen below a threshold;
+- **clone** small primitives with a high centre-gradient (add detail where it is wanted);
+- **split** large primitives with a high centre-gradient into two smaller children;
+- cap the total at `max_N`, dropping newest-created rows first;
+- stop densifying at `densify_until` so the final topology has time to settle.
+
+![Adaptive density progress](figures/adaptive_density_progress.png)
+
+*MNIST refinement strip: the target, then checkpoints through the adaptive fit as the primitive count grows from 10 towards its cap.*
+
+The implementation detail worth pointing at: **changing the number of primitives changes the shape of the optimizer's parameter tensor.** Naively rebuilding the optimizer throws away Adam's accumulated moments and restarts every surviving primitive from scratch. Here the rebuild carries `exp_avg`, `exp_avg_sq` and the **step counter** across for every row that survives, so bias correction stays consistent, while freshly created children start from zero moments. Nine tests cover the topology rules and this state handling, including one asserting that survivors' moments transfer bit-for-bit and one asserting that new rows really are zeroed.
+
+## PCA/SVD-Based Initialization
+
+For each dataset, a PCA basis is fitted over the flattened images by thin SVD. The number of components is chosen from the cumulative explained variance (K₉₀ = the smallest count reaching 90 %), then capped to a model dimension `K_model`. An image is encoded as its top-`K_model` coefficient vector.
+
+![Cumulative explained variance](figures/pca_explained_variance.png)
+
+*Cumulative explained variance for all five datasets on one axis. Aligned faces need far fewer components than natural images.*
+
+Those coefficients feed a small MLP — `K → 256 → 512 → 9N` — whose output is reshaped into raw parameters for N Gaussians and mapped through the same activations the optimizer uses, so its prediction is always a valid Gaussian set. The predictor is trained **through the differentiable renderer** on pixel reconstruction MSE: render the predicted Gaussians, compare to the target image, backpropagate into the network. There are **no target Gaussian parameters** to imitate — the only supervision is the rendered image. A small engineered output-bias initialization means the very first forward pass already produces a sensible grid layout rather than noise.
+
+This is a dataset-specific PCA-based initializer. It is not a foundation model, not a generative model, and it predicts one starting point rather than a finished reconstruction.
+
+## Fair A/B Evaluation
+
+The whole claim rests on the two compared runs differing in *only* the initialization, so that requirement is **enforced in code** rather than promised in prose. `verify_part5_fairness` compares the two configurations field by field and fails unless all of these are equal:
+
+target hash · number of Gaussians · renderer · optimizer · learning rate · iteration budget · loss · PSNR function · split · image indices
+
+and unless `init_type` is the one thing that differs. The random baseline uses a **deterministic per-image seed**, recorded per row in the results table. The target is content-hashed so two runs can be proven to have seen the same image. There is also a **negative test** that plants a mismatch (a different N) and asserts that the contract catches it — a checker nobody ever sees fail is not a checker.
+
+## Results
+
+Means over 10 held-out images per dataset. Both columns use the same target, the same N, the same optimizer and the same iteration budget.
+
+| Dataset | N | K_model | Random final PSNR | PCA-init final PSNR | ΔPSNR | Iteration speed-up | Wins |
+|---|---|---|---|---|---|---|---|
+| MNIST | 80 | 64 | 28.72 dB | **40.07 dB** | **+11.36 dB** | 9.60× | 10/10 |
+| FashionMNIST | 80 | 64 | 28.99 dB | **34.97 dB** | **+5.98 dB** | 6.25× | 10/10 |
+| CIFAR10 | 120 | 96 | 32.15 dB | **36.79 dB** | **+4.64 dB** | 3.68× | 10/10 |
+| Olivetti | 160 | 59 | 30.82 dB | **36.14 dB** | **+5.31 dB** | 10.40× | 10/10 |
+| STL-10 | 200 | 128 | 26.53 dB | **27.84 dB** | **+1.31 dB** | 2.43× | 10/10 |
+
+![PCA vs random convergence on MNIST](figures/pca_convergence_mnist.png)
+
+**How the speed-up is measured, and its limits.** For each image, the threshold is that image's *random* run final PSNR; the speed-up is the iteration budget divided by the first logged PCA iteration reaching that threshold. Two consequences to keep in mind:
+
+- it is **iteration-based, not wall-clock**. Both branches use the same refinement routine and optimization settings, but no wall-clock timing was recorded. A wall-clock comparison would also need to account for predictor inference and the cost of training the initializer;
+- logging happens **every 25 iterations**, so the values are **checkpoint-quantized**. A 12.00× per-image figure means "already past the threshold at the first checkpoint" and is a lower bound; the coarse grid is why the numbers land on values like 9.60× and 6.25×.
+
+![Olivetti: random vs PCA initialization](figures/pca_vs_random_olivetti.png)
+
+*Olivetti faces, all ten held-out images: target, random-init reconstruction, PCA-init reconstruction and both absolute-error maps on a shared scale, with PSNR annotated per reconstruction.*
+
+One more check worth reporting: the predictor was applied across datasets (MNIST ↔ FashionMNIST). In both cross-dataset checks, the shifted predictor still outperformed random initialization, while losing 5.39 dB and 2.49 dB relative to its in-domain counterpart.
+
+## Interpreting the Dataset Differences
+
+The gains are not uniform, and the PCA evidence points at why. Components needed for 90 % of the variance:
+
+| Olivetti | FashionMNIST | MNIST | CIFAR10 | STL-10 |
+|---|---|---|---|---|
+| 59 | 82 | 85 | 96 | **327** |
+
+STL-10 requires substantially more PCA components: K₉₀ = 327, compared with 59–96 for the other four datasets. Its predictor was capped at `K_model = 128` — under half of what the dataset's own variance structure asks for. It is also the dataset with the smallest benefit (+1.31 dB, 2.43×), while the most compactly represented datasets show the largest ones.
+
+This pattern is **consistent with** the initializer working best where the dataset occupies a compact low-dimensional subspace, because that is where a short coefficient vector carries enough information to place a good starting layout. It is an observed relationship across five datasets, not a demonstrated cause: dataset resolution, class count and the K_model cap all vary together here, and the experiment was not designed to separate them.
+
+## Adaptive Density Control: A Negative Result
+
+Adaptive density is useful as a mechanism — it discovers a working capacity from a tiny start — but at a **budget-matched** comparison it does not reliably beat simply fixing N. Same target, same final N, same iteration count, same seed:
+
+| Dataset | Adaptive | Matched fixed-N | ΔPSNR |
+|---|---|---|---|
+| MNIST | 39.83 dB | 41.23 dB | **−1.39** |
+| FashionMNIST | 43.89 dB | 41.52 dB | **+2.37** |
+| CIFAR10 | 36.02 dB | 40.43 dB | **−4.40** |
+| Olivetti | 38.65 dB | 37.97 dB | **+0.69** |
+| STL-10 | 25.98 dB | 27.10 dB | **−1.13** |
+
+![Adaptive vs matched fixed-N](figures/adaptive_vs_fixed_budget.png)
+
+**Adaptive density lost to the matched fixed-N baseline on 3 of 5 datasets**, including by 4.40 dB on CIFAR10. It is also strongly sensitive to its own density-control policy: on STL-10, varying *only* the gradient percentile gave
+
+| Gradient percentile | 70 | 80 | 90 |
+|---|---|---|---|
+| Final N | 300 | 121 | 42 |
+| Final PSNR | 26.85 dB | 22.37 dB | 18.86 dB |
+
+— an 8 dB spread from one hyper-parameter. Adaptive topology should be read as an engineering mechanism whose payoff depends on the densification criterion, not as a universally beneficial upgrade.
+
+## Validation and Tests
+
+The notebook's own validation suites were extracted into pytest and run locally:
+
+```bash
+pytest -q
+# 36 passed in 34.87s
+```
+
+| Suite | Tests | Covers |
+|---|---|---|
+| `tests/test_renderer.py` | 8 | conic vs `torch.inverse`, gradients for all 9N parameters, compositing order, occlusion, kernel geometry |
+| `tests/test_adaptive_density.py` | 9 | prune / clone / split rules, `max_N` cap, Adam moment + step preservation, zero moments for new rows, `densify_until` stop |
+| `tests/test_pca_initializer.py` | 9 | PCA shapes, monotone cumulative variance, K₉₀ selection, rank-K MSE ordering, valid predicted parameter ranges, render-MSE-only loss, training improves |
+| `tests/test_fairness.py` | 10 | fairness contract passes, **fairness contract catches a planted mismatch**, shared optimizer routine, iterations-to-threshold and speed-up metrics, error maps, inits differ |
+
+All 36 run on CPU using synthetic fixtures generated by the renderer itself — **no dataset download and no network access**. There is no CI set up for this repository.
+
+## Project Structure
+
+```
+notebooks/gaussian_splatting_2d.ipynb   full experimental record: 130 cells,
+                                        167 saved outputs, 78 embedded figures
+figures/                                the six public figures, extracted
+                                        byte-exactly from the notebook outputs
+src/                                    renderer, optimization, adaptive_density,
+                                        pca_initializer, evaluation, utils
+tests/                                  the 36 extracted validation tests
+ENVIRONMENT.md                          result-producing vs validation environments
+requirements.txt                        dependencies (PyTorch installed separately)
+pytest.ini                              test discovery
+```
+
+The notebook is the primary artifact — it holds every result, table and figure as saved output. **`src/` was not the original development layout**: it is a faithful extraction of the validated notebook implementations into importable modules, so the core code can be read and tested without running a 15 MB notebook. Function bodies were copied verbatim; the only changes were import wiring and replacing two notebook globals with explicit parameters.
+
+## Running It
+
+**The tests** (CPU, no dataset downloads). Only `torch` is needed — the suite never touches `torchvision` or a dataset:
+
+```bash
+# 1. install a PyTorch build appropriate to your platform (the version used
+#    here was torch 2.11.0; the CPU build is enough for the tests)
+# 2. then:
+pip install -r requirements.txt
+pytest -q
+# 36 passed in 34.87s
+```
+
+PyTorch is intentionally absent from `requirements.txt`: on Linux, installing `torch==2.11.0` from PyPI drags in a multi-gigabyte NVIDIA/CUDA stack that nothing here needs. **CUDA is not required** for the tests or for the library code.
+
+**The full results** live in the notebook, not in a script, and it needs more than the tests do: `torchvision` for the MNIST / FashionMNIST / CIFAR10 / STL-10 loaders and `scikit-learn` for the Olivetti faces, both of which download their data automatically on first use. Every experiment is gated behind an execution flag. The reported run was executed in a **Google Colab GPU runtime**; `ENVIRONMENT.md` records its exact package versions and also what was *not* captured — the GPU model and the total wall-clock runtime. There is no single command that reproduces the whole benchmark, and although seeds are fixed throughout, GPU floating-point results are not guaranteed bit-identical across hardware.
+
+## Limitations
+
+- **2D only.** This is image reconstruction with 2D Gaussians, not 3D Gaussian Splatting: no cameras, no multi-view geometry, no scene reconstruction.
+- **Pure PyTorch renderer.** No custom CUDA kernel, no tiling, no sorting optimizations. It is written for clarity and differentiability, not throughput.
+- **Small images.** Up to STL-10 at 96×96. Nothing here says how the approach behaves at higher resolution.
+- **Five datasets, 10 held-out images each.** Fifty comparisons is enough to be consistent, not enough to generalize.
+- **Speed-up is iteration-based and checkpoint-quantized**, measured on a 25-iteration grid, and no wall-clock timing was recorded.
+- **The STL-10 predictor was capped** at `K_model = 128` against a K₉₀ of 327, so its weak result partly reflects a budget choice rather than a property of the method.
+- **Adaptive density does not consistently beat fixed-N** at a matched budget, and is highly sensitive to its gradient-percentile setting.
+- **Only PSNR and pixel MSE.** No SSIM, no LPIPS, no perceptual evaluation.
+- **No novelty claim.** The renderer follows established Gaussian-splatting practice and the initializer is explicitly EigenGS-inspired; the contribution here is a careful implementation and a controlled comparison.
+
+## References
+
+Prior work that motivates the two ideas this project builds on. This project is **not** a reproduction of either paper, and claims no novelty of its own.
+
+1. Lo-Wei Tai, Ching-En Li, Cheng-Lin Chen, Chih-Jung Tsai, Hwann-Tzong Chen, and Tyng-Luh Liu. [**EigenGS Representation: From Eigenspace to Gaussian Image Space**](https://openaccess.thecvf.com/content/CVPR2025/html/Tai_EigenGS_Representation_From_Eigenspace_to_Gaussian_Image_Space_CVPR_2025_paper.html). CVPR 2025, pp. 13487–13496. — the eigenspace-to-Gaussian idea behind the PCA-based initializer used here.
+
+2. Xinjie Zhang, Xingtong Ge, Tongda Xu, Dailan He, Yan Wang, Hongwei Qin, Guo Lu, Jing Geng, and Jun Zhang. [**GaussianImage: 1000 FPS Image Representation and Compression by 2D Gaussian Splatting**](https://link.springer.com/chapter/10.1007/978-3-031-72673-6_18). ECCV 2024. — prior work on representing images with 2D Gaussians.
+
+## Authorship, Provenance, and AI Assistance
+
+This project was completed by **Mohamed Awad** and **Rawey Sleiman**. Mohamed implemented most of the code and carried out most of the experimental work.
+
+**Provenance.** This repository is a cleaned portfolio version of a university project. The public packaging was created from the final validated notebook: academic submission metadata and personal identifiers were removed. The saved outputs and reported experimental results were preserved unchanged. The public package also exposes the core notebook implementations as importable modules, with only minimal import and context adaptations needed for standalone use. The original development history is not included in this repository.
+
+**AI assistance.** Claude was used during parts of implementation, debugging, review, and documentation. The code, experiments, extracted tests, and reported results were reviewed and validated as part of the project workflow.
+
+## License and Dataset Terms
+
+No repository license has been added yet. Dataset and model usage remains subject to their respective upstream licenses and terms — including MNIST, FashionMNIST, CIFAR10 and STL-10 as distributed by `torchvision`, and the Olivetti faces dataset as distributed by `scikit-learn`.

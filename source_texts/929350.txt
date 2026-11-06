@@ -1,0 +1,83 @@
+# Masked ISAR for 3DGS
+
+Echo-masked Gaussian splatting with bounded real spherical harmonics through degree three (SH3), for 3-D reconstruction from calibrated inverse synthetic aperture radar (ISAR) amplitude images.
+
+This repository contains the **main manuscript method** (historical experiment M46: Echo mask + SH3). The persistent tracking loss and background guard are not enabled. Other-paper adaptations, coefficient sweeps, failed runs and most ablation launchers are deliberately excluded.
+
+## Method
+
+1. Represent a rigid target with anisotropic surface-oriented Gaussian primitives and shared support coefficients `q`.
+2. Predict directional amplitude with 16 real SH coefficients, passed through a sigmoid.
+3. Project into calibrated range/cross-range image coordinates; estimate visibility in a separate line-of-sight plane.
+4. Supervise inside an observed-image Echo mask: threshold `max(0.02*peak, median+4*MAD)` followed by 2-pixel dilation. Apply SSIM only to complete 7x7 valid windows.
+5. Optimise geometry, support and scattering with the original surface priors and adaptive density control.
+6. Report **both all Gaussian centres and the declared `q >= 0.3` output**.
+
+`q` is a learned structural-support proxy, not a calibrated probability of physical existence. Echo masks are not physical shadow or unobstructed-visibility labels. SH3 is an established appearance basis; this repository does not claim its invention.
+
+## Installation
+
+Python 3.10+ is required. Install a PyTorch build appropriate for your GPU first, then:
+
+```bash
+python -m pip install -e .
+python -m unittest discover -s tests -v
+```
+
+The main renderer uses PyTorch; the Pei/ISAR-GS/RNSplat custom CUDA rasterizers are not dependencies of this release.
+
+## Data and initialization
+
+Images, CAD assets, point-cloud initializers, checkpoints and private server paths are **not bundled**. Supply the calibrated GEIST-style dataset externally. Each CPI folder is read by `radar_gs/data.py`; its geometry supplies the range/cross-range axes. See [the data contract](docs/DATA_AND_PROTOCOL.md).
+
+The exact paper initializer is a training-derived NumPy archive with key `points` and shape `(10000, 6)`: XYZ centres and XYZ normals. Place it at `data/initializer.npz` or pass `--init_path`. The shared paper initializer includes 32 tracking-derived seed substitutions, despite there being **no persistent tracking loss**. A different initializer is a new experiment and must not be presented as the exact paper reproduction.
+
+The frozen 1903 training CPI identifiers are in `protocol/train_cpis.txt`; identifiers alone are not the images. Supply the original frozen 475 held-out identifiers and the original 5000 GT samples separately for exact evaluation. Do not regenerate the split or choose a new extraction threshold based on test results.
+
+## Train
+
+Run from the repository root:
+
+```bash
+python train.py --config configs/echo_sh3.json \
+  --data_root /path/to/bsat --out_dir outputs/main_seed42 \
+  --init_path /path/to/initializer.npz \
+  --encounter_names_file protocol/train_cpis.txt
+```
+
+The paper budget is 12000 iterations, batch eight, seed 42, initial 10000 primitives and cap 20000. The config preserves the effective M46 scientific parameters. The wrapper caps its CUDA allocator at 20% of device memory, matching the original resource setting. It refuses nonempty output directories. Historical checkpoint files do not contain the optimizer/RNG/scheduler state needed for equivalent resume; this release does not claim reliable continuation.
+
+## Evaluate
+
+```bash
+python evaluate.py --run outputs/main_seed42 --data-root /path/to/bsat \
+  --test-cpis /path/to/frozen_test475.txt \
+  --gt-points /path/to/frozen_skynet_frame_points.npy \
+  --out-dir outputs/main_seed42/evaluation
+```
+
+GT must already be in the declared reconstruction frame and metres. The historical Skynet mapping is `(x,y,z) -> (x,-z,y)` at unit scale, applied **once** when preparing the frozen samples. Evaluation does not fit ICP or re-align each method. It checks train/test disjointness and uses full test images, with zero held-out background and no Echo mask applied to test metrics.
+
+Outputs include CD-L1 (mean unsquared Euclidean nearest-neighbour distance, metres), CD-L2 (mean squared distance, square metres), directional accuracy/completeness, HD95, threshold precision/recall/F1, point counts and image PSNR/SSIM. Both Chamfer measures average the two directional means. CD-L1 here is not Manhattan distance; CD-L2 is not the square of CD-L1.
+
+## Reported evidence and limits
+
+For the fixed `q >= 0.3` protocol, the completed three-seed SH3+Echo-mask experiment reports CD-L1 `0.052248 +/- 0.000193 m`, CD-L2 `0.006600 +/- 0.000114 m^2`, and HD95 `0.211803 +/- 0.002193 m` (sample SD, n=3). These are archived research results, not results generated merely by installing this release.
+
+The 475 held-out CPI are excluded from fitting but come from the same correlated simulated trajectory. The orbital geometry comes from real TLE records; radar images are simulated using a CAD surrogate, not measured BSAT echoes. All-centre errors differ substantially from selected-structure errors. The experiments do not establish universal SOTA, independent-orbit generalisation or physical shadow detection.
+
+## Layout and provenance
+
+- `train.py`, `evaluate.py`: main-method entry points.
+- `masked_isar/`: Echo supervision, bounded SH3 and frozen image metric helpers.
+- `radar_gs/`, `_train_engine.py`: original core implementation. Disabled legacy core options remain for checkpoint/config compatibility, not as additional supported experiments.
+- `configs/echo_sh3.json`: portable effective configuration.
+- `docs/SOURCE_PROVENANCE.json`: downloaded frozen-source archive hash and hashes for unchanged core files.
+
+The repository is a cleaned release of the M46 source snapshot. Numerical refactor checks and CPU tests are recorded in `docs/RELEASE_CHECK.md`. A new full 12k GPU rerun is not implied by packaging.
+
+## Attribution and permissions
+
+Real SH appearance and Gaussian splatting build on established work, including Kerbl et al., *3D Gaussian Splatting for Real-Time Radiance Field Rendering* (2023), DOI: 10.1145/3592433. The SH polynomial convention was reused from the project's radar-rendering adaptation of Pei et al., DOI: 10.1109/LMWT.2026.3725695; the released sigmoid-bounded amplitude is not Pei's complete model.
+
+No new open-source license is assigned in this release. Retain existing authorship and obtain permission before redistributing third-party datasets, CAD assets or code whose license has not been established.

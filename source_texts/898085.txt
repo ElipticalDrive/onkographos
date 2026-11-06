@@ -1,0 +1,197 @@
+CS infrastructure components for HPC applications. Contribute to llnl/axom development by creating an account on GitHub.
+
+Check if the polyhedron is still valid before being clipped by next plane by liyangrock · Pull Request #1005 · llnl/axom · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+liyangrock
+commented
+Jan 20, 2023
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+This PR is a bugfix.
+It does the following:
+Check if the polyhedron is still valid before being clipped by next plane. If the polyhedron is invalid, then clear the polyhedron and return. Otherwise, it may triger arithmetic exception due to the bounding box of polyhedron is invalid.
+liyangrock
+added 2 commits
+January 21, 2023 00:55
+Check the polyhedron is still valid before
+…
+5def5d0
+```
+being clipped by next plane
+```
+Format code style
+24e00c6
+liyangrock
+changed the title
+Check the polyhedron is still valid before being clipped by next plane
+Check if the polyhedron is still valid before being clipped by next plane
+Jan 21, 2023
+kennyweiss
+reviewed
+Jan 23, 2023
+View reviewed changes
+Comment thread
+src/axom/primal/operators/detail/clip_impl.hpp
+Comment on lines
++428
+to
++434
+// Check the obtained Polyhedron is still valid
+if(!poly.isValid())
+{
+poly.clear();
+break;
+}
+kennyweiss
+Jan 23, 2023
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thank you for the contribution @liyangrock.
+Can you please provide a reproducer for the problem?
+E.g. a polyhedron and set of clipping planes that generate the behavior that you were seeing?
+It seems to me that the error could be elsewhere, e.g. in the intersect() algorithm, and we'd rather fix the problem at the source.
+Specifically, the solution in this PR would skip the current plane, but the state of the polyhedron, poly, has nothing to do with plane.
+liyangrock
+Jan 24, 2023
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thank you for your reply @kennyweiss. I failed to reproduce the problem. I create a reproducer, but it calculate r as -inf rather than throw an arithmetic exception in my FEM code, as shown in the following figs. I was fully confused because the values of all input variables in the reproducer are exactly the same as in my FEM code.
+I believe this is a bug due to the function intersect_plane_bbox inappropriately deal with the infinite number (i.e., vector e, which results from invalid variable poly in function clipPolyhedron and consequently invalid bounding box bb).
+REPLY
+Specifically, the solution in this PR would skip the current plane, but the state of the polyhedron, poly, has nothing to do with plane.
+I still think this PR can resolve the bug. The solution in this PR skips the current plane only if the poly is invalid. Note that it's meaningless to clip an invalid Polyhedron. Thus, clear and then return an empty Polyhedron poly is reasonable for the function clipPolyhedron.
+REPRODUCER
+```
+#include "axom/core.hpp"
+#include "axom/fmt.hpp"
+
+#include "axom/primal/geometry/BoundingBox.hpp"
+#include "axom/primal/geometry/Point.hpp"
+#include "axom/primal/geometry/Tetrahedron.hpp"
+#include "axom/primal/geometry/Polyhedron.hpp"
+#include "axom/primal/geometry/Polygon.hpp"
+#include "axom/primal/geometry/Triangle.hpp"
+#include "axom/primal/operators/compute_bounding_box.hpp"
+#include "axom/primal/operators/clip.hpp"
+#include "axom/primal/operators/intersect.hpp"
+
+#include <iostream>
+
+int main()
+{
+  constexpr int in3D = 3;
+  using BoundingBoxType = axom::primal::BoundingBox<double, in3D>;
+  using PointType = axom::primal::Point<double, in3D>;
+  using VectorType = axom::primal::Vector<double, in3D>;
+  using TetType = axom::primal::Tetrahedron<double, in3D>;
+  using PolyhedronType = axom::primal::Polyhedron<double, in3D>;
+  using PolygonType = axom::primal::Polygon<double, in3D>;
+  using TriangleType = axom::primal::Triangle<double, in3D>;
+
+  // Using fmt library exported by axom
+  std::cout << axom::fmt::format(
+                 "Example of using and installed version of Axom {}",
+                 axom::getVersion())
+            << std::endl
+            << std::endl;
+
+  // Uses installed axom library
+  axom::about();
+
+  PointType A = PointType::make_point(0, 1, 0);
+  PointType B = PointType::make_point(-1, 0, 0);
+  PointType C = PointType::make_point(0, -1, 0);
+  PointType D = PointType::make_point(-0.25, 0, 0.25);
+
+  PointType E = PointType::make_point(0.74899999999999922, 0, 1);
+  PointType F = PointType::make_point(1.7489999999999992, 0, 0);
+  PointType G = PointType::make_point(0.74899999999999922, -1, 0);
+  PointType H = PointType::make_point(0.99899999999999922, 0, 0.25);
+
+  TetType tet1 = TetType(A, B, C, D);
+  TetType tet2 = TetType(E, F, G, H);
+
+  PolyhedronType overlap;
+
+  overlap = axom::primal::clip(tet1, tet2);
+
+  tet1.print(std::cout) << std::endl;
+  tet2.print(std::cout) << std::endl;
+
+  overlap.print(std::cout) << std::endl;
+
+  return 0;
+}
+```
+kennyweiss
+Jan 25, 2023
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thank you for the detailed explanation and simplified reproducer @liyangrock !
+Based on the above, the main problem was with primal::intersect_plane_bbox(). Specifically, we need to check that the provided bounding box is valid before using it's geometry.
+I fixed this and some related things in #1013
+I also added your test case to our unit tests and verified that primal::clip() returns an empty polyhedron with 0 volume.
+When you get a chance, please let us know if this fixes the problem that you were seeing.
+liyangrock
+Jan 26, 2023
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+It works for me now. Thank you @kennyweiss
+kennyweiss
+Jan 26, 2023
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Great! Thanks for letting us know @liyangrock.
+kennyweiss
+mentioned this pull request
+Jan 25, 2023
+Improves robustness of intersection operators against bounding boxes
+#1013
+Merged
+Merge branch 'LLNL:develop' into bugfix/liyang/fixClipPolyhedron
+a383647
+liyangrock
+closed this
+Jan 26, 2023
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

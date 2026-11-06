@@ -1,0 +1,208 @@
+3D geometry processing SDK: fast mesh boolean, mesh repair, decimation, remeshing, offset, point cloud triangulation and ICP registration. C++ with Python, C#, C and JavaScript bindings. - findProjection, ray casting and findTrisInBall over a 4-wide AABB tree by Fedr · Pull Request #7389 · MeshInspector/MeshLib
+
+findProjection, ray casting and findTrisInBall over a 4-wide AABB tree by Fedr · Pull Request #7389 · MeshInspector/MeshLib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Fedr
+commented
+Nov 6, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+findProjection and ray casting spent most of their time in the shape of the binary AABBTree (one triangle per leaf, siblings far apart in memory) and in walking the topology (edgeWithLeft -> prev -> org) to get the corners of every tested triangle.
+What changed
+New AABBTreeWide (MRAABBTreeWide.h): up to 4 children per node stored next to each other, up to 4 triangles per leaf; every leaf keeps the face id and the 3 vertex ids of its triangles (16 bytes per triangle), so a query reads corners straight from mesh.points.
+It is built in MRAABBTree.cpp by the same median splits as AABBTree (two binary levels per node, in parallel); the median partition of AABBTreeMaker became the free function partitionBoxedLeaves shared by both.
+Mesh::getAABBTreeWide() / getAABBTreeWideNotCreate() cache it like the other trees; invalidateCaches, updateCaches, updateCachesAfterSplits and packOptimally drop it (no refit yet), heapBytes counts it.
+findProjection searches this tree, with a fast path when no transformation, region, validFaces or validProjections is given (their checks cost 13% in the hot loops). findProjectionSubtree and the binary tree are unchanged.
+rayMeshIntersect (and so multiRayMeshIntersect, rayMultiMeshAnyIntersect) and rayMeshIntersectAll traverse it too: the closest-hit search pushes the crossed children with the nearest entered last. The float version passes the stored boxes to rayBoxIntersect by reference; the copy of every box made before (Box3<T>{ box }) cost 20% of the ray time.
+findTrisInBall searches this tree too, testing the triangles of the leaves in the ball by their exact distance (offsetVerts and MeshThickness use it). findBoxedTrisInBall stays on AABBTree: it reports triangles by their own boxes, and rebuilding those from the vertices made it 1.4-2x slower than reading them from the binary tree's leaves.
+The places that built the binary tree before parallel projections or rays now build the wide one: replicateZ, spline projection, MeshOrPoints::cacheAABBTree, the voxel volumes of distance, closeness and inside (MRMeshToDistanceVolume.cpp) and the screen lasso. The binary tree is still built for winding numbers by getDipoles. Line3Mesh::tree was not used by the rays even before; its comment says so now.
+Measurements
+Dragon meshes of 58K, 244K and 1M triangles, Ryzen 9 3900X, Windows, MSVC, best of 3 rounds.
+Closest point
+100K query points uniform in the bounding box grown by 20%; old = findProjectionSubtree over AABBTree in the same DLL.
+triangles
+old 24 thr, ms
+new 24 thr, ms
+old 1 thr, ms
+new 1 thr, ms
+58K
+36.5
+29.6
+701
+512
+244K
+69.6
+47.4
+1M
+195
+87.3
+3677
+1540
+Where the old time went on 1M (24 threads): reading the corners through the topology 27%; the rest is the tree shape. MeshLib's binary tree regrouped into 2 children with 4 triangles per leaf gives 105 ms, 4 children with 1 triangle 108 ms, 4 with 4 86 ms. Computing the closest point in float instead of double would save only 2-4%, so double precision stays.
+Ray casting
+100K rays from points of the same grown box towards other such points; old = the MRMesh.dll of the first commit of this PR, same executable. Time in ms, 24 threads, change vs old.
+58K
+244K
+1M
+rayMeshIntersect closest, float
+4.58 -> 4.40 (-4%)
+6.83 -> 5.00 (-27%)
+9.90 -> 6.64 (-33%)
+same, Line3d
+4.81 -> 5.23 (+9%)
+7.05 -> 6.08 (-14%)
+10.41 -> 7.71 (-26%)
+any hit (closestIntersect = false)
+3.97 -> 3.66 (-8%)
+5.94 -> 4.30 (-28%)
+8.61 -> 5.68 (-34%)
+rayMeshIntersectAll, float
+2.66 -> 2.31 (-13%)
+4.12 -> 2.65 (-36%)
+6.94 -> 4.16 (-40%)
+rayMeshIntersectAll, double
+3.22 -> 3.63 (+13%)
+5.45 -> 4.09 (-25%)
+8.46 -> 5.84 (-31%)
+1 thread, 1M: closest 206 -> 133 ms (-36%), all hits in double 153 -> 115 ms (-25%). The double versions convert every box, which keeps the small mesh 0.4 ms per 100K rays slower.
+Triangles in a ball
+findTrisInBall with 100K balls centered at mesh vertices, radius of 2 or 8 average edge lengths; old = the MRMesh.dll before this change, same executable. Time in ms, 24 threads.
+58K
+244K
+1M
+radius 2 edges
+17.6 -> 11.2 (1.57x)
+75.1 -> 45.8 (1.64x)
+73.1 -> 40.3 (1.81x)
+radius 8 edges
+190 -> 102 (1.86x)
+735 -> 386 (1.90x)
+613 -> 300 (2.04x)
+1 thread, 1M, radius 2 edges: 1298 -> 764 ms (1.70x). The same triangles are found (count and sum of distances), and a ball shrunk to every found distance ends with the same radius.
+Tree
+Build, 1M: AABBTreeWide 80 ms vs AABBTree 72 ms on 24 threads (the first two levels are serial), 581 vs 607 ms on 1 thread. Memory: 28 MB vs 66 MB.
+Results
+Closest point: squared distances are identical to the old path for all queries on 58K, 244K and 1M triangles with every option: plain, region, upDistLimitSq, xf, validFaces, validProjections and all together; with loDistLimitSq the answer stays within the limit whenever the old one is. The returned face differs in about 35% of the queries: these are ties, 99.7% of them the same point on an edge or a vertex shared by both faces, the rest equidistant points.
+Rays (closest in float and double, from -FLT_MAX, with a region): the same rays hit, at the same distance, except at most 9 rays per mode hitting another face at the same distance and 1-2 rays on 1M where the new search finds a closer hit that the old one missed (a float-rounded box of a single triangle). Any-hit rays may return another hit, as before. rayMeshIntersectAll reports exactly the same faces for every ray in float and double, in another order.
+findTrisInBall finds the same triangles, possibly in another order.
+Callers relying on which face wins a tie, or on the order of rayMeshIntersectAll callbacks, may see different, equally correct results.
+A mesh that also needs AABBTree (Boolean, collisions, winding numbers, findBoxedTrisInBall, ...) keeps both trees: the wide one costs 80 ms and 28 MB for 1M triangles.
+Testing
+122 MRTest files that depend only on MRMesh, built against this branch: 548 passed, 6 skipped, 2 failed only because that local test executable has no mimalloc redirect and no logger set up (MimallocRedirectActive, Spdlog).
+clang-cl syntax check of the changed sources; the full MRTest and the generated bindings are left to CI.
+🤖 Generated with Claude Code
+Fedr
+and others
+added 3 commits
+November 6, 2026 14:39
+findProjection over a 4-wide AABB tree with up to 4 triangles per leaf
+…
+67c37ac
+```
+AABBTreeWide keeps up to 4 children per node next to each other and the vertex ids of up to 4 triangles per leaf,
+so a query reads triangle corners without walking the topology. Mesh caches it like the other trees.
+findProjection uses it, with a fast path when no transformation, region or filters are given;
+findProjectionSubtree keeps the binary AABBTree. The median partition of AABBTreeMaker is now shared.
+
+100K queries in the grown box of the dragon meshes, Ryzen 9 3900X: 1M triangles 195 -> 87 ms on 24 threads,
+3677 -> 1540 ms on 1 thread; same distances, other faces only at ties.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+AABBTreeWide: node and leaf triangle structs at namespace scope
+…
+6a8e75c
+```
+A nested struct with default member initializers is not default-constructible
+until the enclosing class is complete, so clang and GCC rejected Vector<Node>::resize.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Ray casting over AABBTreeWide
+…
+4eebc2f
+```
+rayMeshIntersect, multiRayMeshIntersect, rayMultiMeshAnyIntersect and rayMeshIntersectAll
+traverse the 4-wide tree; the closest hit pushes the crossed children nearest last, and the float
+version passes the stored boxes by reference (their copy before rayBoxIntersect cost 20%).
+100K rays in the box of the dragon meshes, 24 threads: closest hit 1M -33%, 250k -27%, all hits -31..-40%;
+same hits except ties and 1-2 closer hits on 1M; all-hits sets identical.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Fedr
+changed the title
+findProjection over a 4-wide AABB tree with up to 4 triangles per leaf
+findProjection and ray casting over a 4-wide AABB tree with up to 4 triangles per leaf
+Nov 6, 2026
+Fedr
+and others
+added 3 commits
+November 6, 2026 15:08
+Instantiate UniqueThreadSafeOwner<AABBTreeWide> as for the other trees
+…
+aca6659
+```
+The C bindings wrap it (AABBTreeWide names it a friend), and MeshLibC2 failed to link without it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Prebuild AABBTreeWide where only projections or rays follow
+…
+0d0de33
+```
+replicateZ, spline projection, MeshOrPoints::cacheAABBTree, the voxel volumes of mesh distance,
+closeness and inside, and the screen lasso built the binary tree before parallel queries that now use
+the wide one; the binary tree remains built for winding numbers (getDipoles builds it).
+Line3Mesh::tree was not used by the rays even before.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+findTrisInBall over AABBTreeWide
+…
+bde0394
+```
+The triangles of the leaves in the ball are tested by their exact distance from the leaf's vertex ids,
+nearer children first. 100K balls at the vertices of the dragon meshes, 24 threads: 1M radius of 2 / 8 edges
+73 -> 40 / 613 -> 300 ms, 250k 1.6-1.9x; the same triangles are found.
+findBoxedTrisInBall stays on AABBTree: rebuilding each triangle's box from its vertices made it 1.4-2x slower.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Fedr
+changed the title
+findProjection and ray casting over a 4-wide AABB tree with up to 4 triangles per leaf
+findProjection, ray casting and findTrisInBall over a 4-wide AABB tree
+Nov 6, 2026
+MRDotNet2Test: projection test independent of which triangle wins a tie
+…
+20bc7d1
+```
+The point (1, 2, 3) projects onto the edge shared by faces 904 and 546 of the sphere at the same distance;
+the wide tree visits 546 first (clang-cl CI), so the test checks the point, the distance and that mtp lies on
+the returned face instead of fixed face ids.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,269 @@
+# HashDAG Ray Traversal
+
+
+## Overview
+HashDAG Ray Traversal is a GPU kernel that traverses a HashDAG structure to find the path of a ray through the volume, storing the sequence of child indices taken at each level [S1, unofficial]. It determines if a ray intersects any node, returning a boolean [S1, unofficial]. It differs from standard octree traversal by using a hash-based indexing scheme for sparse voxel storage, allowing for efficient traversal of large, sparse volumes without the overhead of explicit tree pointers [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   `dag`: The HashDAG structure containing node data.
+*   `rayOrigin`: The starting point of the ray in world space.
+*   `rayDirection`: The direction of the ray.
+*   `rayDirectionInverse`: The reciprocal of `rayDirection` components, computed in double precision.
+*   `traceParams`: Contains `cameraPosition`, `rayMin`, `rayDDx`, `rayDDy`, `imageWidth`, `imageHeight`, and `pathsSurface` [S1, unofficial].
+
+**Outputs:**
+*   `pathsSurface`: A buffer storing the final path to the output surface for each ray [S1, unofficial].
+*   Boolean return value indicating intersection [S1, unofficial].
+
+### Data Structures
+
+**StackEntry**
+A struct used to save traversal state during ascent.
+*   `index` (`uint32`): The node index in the HashDAG.
+*   `childMask` (`uint8`): Bitmask of children present at this node.
+*   `visitMask` (`uint8`): Bitmask of unvisited children.
+
+**CachedLeaf**
+Used for handling packed leaf data at the last two levels.
+*   `get_first_child_mask()`: Retrieves the mask for the first child level.
+*   `get_second_child_mask(nextChild)`: Retrieves the mask for the second child level based on the next child index [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Pixel and Ray Initialization:**
+    *   Calculate pixel coordinates from `blockIdx` and `threadIdx`. Return if outside image bounds.
+    *   Compute `rayOrigin` from `cameraPosition` and ray direction by normalizing the vector from camera to pixel position.
+    *   Compute `rayDirectionInverse` using double precision for reciprocal components [S1, unofficial].
+
+2.  **Child Order Bitmask:**
+    *   Determine `rayChildOrder` bitmask:
+        *   Bit 4 if $x < 0$.
+        *   Bit 2 if $y < 0$.
+        *   Bit 1 if $z < 0$.
+    *   This bitmask dictates the order in which children are visited [S1, unofficial].
+
+3.  **State Initialization:**
+    *   Initialize `level = 0`.
+    *   Initialize `path = (0, 0, 0)`.
+    *   Initialize `stack[MAX_LEVELS]` and `cache`.
+    *   Set `cache.index = dag.get_first_node_index()`.
+    *   Compute `cache.childMask = Utils::child_mask(dag.get_node(0, cache.index))`.
+    *   Compute `cache.visitMask = cache.childMask & compute_intersection_mask<true>(0, path, dag, rayOrigin, rayDirection, rayDirectionInverse)` [S1, unofficial].
+
+4.  **Traversal Loop:**
+    *   Enter an infinite loop `for (;;)`.
+
+5.  **Ascent (Backtracking):**
+    *   If `cache.visitMask` is zero:
+        *   Set `newLevel = level`.
+        *   While `newLevel > 0` and `!cache.visitMask`:
+            *   Decrement `newLevel`.
+            *   Load `cache = stack[newLevel]`.
+        *   If `newLevel == 0` and `!cache.visitMask`:
+            *   Reset `path = Path(0, 0, 0)`.
+            *   Break loop.
+    *   Update path and level after ascent:
+        *   `path.ascend(level - newLevel)`.
+        *   `level = newLevel`.
+
+6.  **Find Next Child:**
+    *   Find next child to visit using `nextChild = 31 - __clz(cache.visitMask)` (finds highest set bit index) [S1, unofficial].
+    *   Mark as handled: `cache.visitMask &= ~(1u << nextChild)`.
+
+7.  **Descent:**
+    *   `path.descend(nextChild)`.
+    *   Save current cache state: `stack[level] = cache`.
+    *   Increment level: `level++`.
+
+8.  **Leaf Check:**
+    *   If `level == dag.levels`, return `true` (intersection found) [S1, unofficial].
+
+9.  **Internal Node Processing:**
+    *   If `level < dag.leaf_level()`:
+        *   Compute child index: `cache.index = dag.get_child_index(level - 1, cache.index, cache.childMask, nextChild)`.
+        *   Get child mask: `cache.childMask = Utils::child_mask(dag.get_node(level, cache.index))`.
+        *   Compute intersection mask: `cache.visitMask = cache.childMask & compute_intersection_mask<false>(level, path, dag, rayOrigin, rayDirection, rayDirectionInverse)`.
+
+10. **Packed Leaf Handling:**
+    *   If at second-to-last or last level (`level >= dag.leaf_level()`):
+        *   Handle packed leaf data: get `childMask` from `cachedLeaf`.
+        *   Update `visitMask` based on the specific level (second-to-last vs last) to retrieve the correct child mask from `cachedLeaf` [S1, unofficial].
+
+11. **Loop Continuation:**
+    *   Loop continues. If loop exits without returning `true`, return `false` [S1, unofficial].
+
+12. **Output:**
+    *   Store the final path to the `pathsSurface` output [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def hash_dag_ray_traversal(dag, ray_origin, ray_direction, trace_params):
+    # 1. Pixel and Ray Initialization
+    pixel_x = trace_params.blockIdx.x * trace_params.blockDim.x + trace_params.threadIdx.x
+    pixel_y = trace_params.blockIdx.y * trace_params.blockDim.y + trace_params.threadIdx.y
+    
+    if pixel_x >= trace_params.imageWidth or pixel_y >= trace_params.imageHeight:
+        return False
+
+    # Compute ray direction and inverse
+    ray_direction_normalized = normalize(ray_direction)
+    ray_direction_inverse = double_precision_reciprocal(ray_direction_normalized)
+
+    # 2. Child Order Bitmask
+    ray_child_order = 0
+    if ray_direction_normalized.x < 0:
+        ray_child_order |= 1 << 4
+    if ray_direction_normalized.y < 0:
+        ray_child_order |= 1 << 2
+    if ray_direction_normalized.z < 0:
+        ray_child_order |= 1 << 1
+
+    # 3. State Initialization
+    level = 0
+    path = (0, 0, 0)
+    stack = [None] * dag.max_levels
+    cache = {
+        'index': dag.get_first_node_index(),
+        'childMask': 0,
+        'visitMask': 0
+    }
+    
+    # Get root node info
+    root_node = dag.get_node(0, cache['index'])
+    cache['childMask'] = utils.child_mask(root_node)
+    
+    # Compute initial intersection mask
+    cache['visitMask'] = cache['childMask'] & compute_intersection_mask(
+        level=0, 
+        path=path, 
+        dag=dag, 
+        ray_origin=ray_origin, 
+        ray_direction=ray_direction_normalized, 
+        ray_direction_inverse=ray_direction_inverse,
+        is_root=True
+    )
+
+    # 4. Traversal Loop
+    while True:
+        # 5. Ascent
+        new_level = level
+        while new_level > 0 and cache['visitMask'] == 0:
+            new_level -= 1
+            cache = stack[new_level]
+        
+        if new_level == 0 and cache['visitMask'] == 0:
+            path = (0, 0, 0)
+            break
+
+        # Update path and level
+        path.ascend(level - new_level)
+        level = new_level
+
+        # 6. Find Next Child
+        # Find highest set bit index
+        next_child = 31 - count_leading_zeros(cache['visitMask'])
+        
+        # Mark as handled
+        cache['visitMask'] &= ~(1 << next_child)
+
+        # 7. Descent
+        path.descend(next_child)
+        stack[level] = cache
+        level += 1
+
+        # 8. Leaf Check
+        if level == dag.levels:
+            return True
+
+        # 9. Internal Node Processing
+        if level < dag.leaf_level():
+            cache['index'] = dag.get_child_index(
+                level - 1, 
+                cache['index'], 
+                cache['childMask'], 
+                next_child
+            )
+            child_node = dag.get_node(level, cache['index'])
+            cache['childMask'] = utils.child_mask(child_node)
+            cache['visitMask'] = cache['childMask'] & compute_intersection_mask(
+                level=level, 
+                path=path, 
+                dag=dag, 
+                ray_origin=ray_origin, 
+                ray_direction=ray_direction_normalized, 
+                ray_direction_inverse=ray_direction_inverse,
+                is_root=False
+            )
+        else:
+            # 10. Packed Leaf Handling
+            # Handle packed leaf data for last two levels
+            if level == dag.leaf_level():
+                # Second-to-last level
+                cache['childMask'] = cached_leaf.get_first_child_mask()
+            else:
+                # Last level
+                cache['childMask'] = cached_leaf.get_second_child_mask(next_child)
+            
+            # Update visitMask based on childMask and intersection
+            cache['visitMask'] = cache['childMask'] & compute_intersection_mask(
+                level=level, 
+                path=path, 
+                dag=dag, 
+                ray_origin=ray_origin, 
+                ray_direction=ray_direction_normalized, 
+                ray_direction_inverse=ray_direction_inverse,
+                is_root=False
+            )
+
+    return False
+```
+
+### Parameters
+*   `traceParams`: Contains `cameraPosition`, `rayMin`, `rayDDx`, `rayDDy`, `imageWidth`, `imageHeight`, and `pathsSurface` [S1, unofficial].
+
+### Pitfalls
+*   The last two levels are packed densely into a single 64-bit word. The code distinguishes between the second-to-last level (`level == dag.leaf_level()`) and the last level (`level > dag.leaf_level()`) to retrieve the correct child mask from `cachedLeaf` [S1, unofficial].
+*   Precision issues may arise if `rayDirectionInverse` is not computed in double precision [S1, unofficial].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+
+### Measured Performance
+*   Not given in the sources.
+
+### Scaling
+*   Not given in the sources.
+
+### Strengths and Limitations
+*   **Strengths:** Efficient traversal of sparse volumes using hash-based indexing [S1, unofficial].
+*   **Limitations:** Complexity in handling packed leaf data at the last two levels [S1, unofficial].
+
+### When to Use
+*   Use for rendering large, sparse voxel volumes on the GPU where memory efficiency is critical [S1, unofficial].
+
+### When Not to Use
+*   Not given in the sources.
+
+## Background
+
+### Origin
+*   The method is associated with the HashDAG structure, as described in the GitHub repository [S1, unofficial].
+
+### History and Development
+*   Not given in the sources.
+
+### Usage
+*   Used in GPU-based volume rendering applications [S1, unofficial].
+
+## Sources
+
+[S1] Phyronnaz/HashDAG, https://github.com/Phyronnaz/HashDAG, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,91 @@
+# Slice Plane Ordering
+
+Also called: Back-to-Front Alpha Blending, Slice Sorting
+
+## Overview
+Slice Plane Ordering is a rendering rule that dictates the draw order of transparent volume slices to ensure correct alpha blending and occlusion. It solves the problem of transparent objects appearing blended in front of obscured objects when rendered in arbitrary order. It sets itself apart from sibling methods like [Plane Composing Algorithms](2154-plane-composing-algorithms.md) by focusing strictly on the temporal draw sequence relative to the camera, rather than the geometric assembly of the slices themselves.
+
+## How it works
+**Inputs:**
+- Camera position vector $P = (P_x, P_y, P_z)$ [S2, unofficial].
+- Volume bounding box size $SIZE$ [S2, unofficial].
+- Number of slices $N$ [S2, unofficial].
+- Slice spacing is uniform, defined by the grid structure from [Plane Slicing](845-plane-slicing.md).
+
+**Outputs:**
+- An ordered list of slice indices (or slice identifiers) ready for GPU upload [S2, unofficial].
+
+**Data Structures:**
+- `slice_list`: A dynamic array or vector storing pairs of $(z_{world}, slice\_id)$ or simply $slice\_id$ [S2, unofficial].
+- `slice_id`: Integer index $i$ identifying the slice [S2, unofficial].
+
+**Parameters:**
+- Alpha Test Threshold: Default $0.1$ [S2, unofficial].
+- Depth Test: Enabled [S2, unofficial].
+- Back-face Culling: Disabled [S2, unofficial].
+
+**Steps:**
+1. Determine the camera's position along the rendering axis (typically Z in the provided implementation context) [S2, unofficial].
+2. Initialize an empty `slice_list` [S2, unofficial].
+3. Iterate through slice indices $i$ from $0$ to $N-1$ (front to back relative to the negative Z axis convention used in the source):
+   a. Calculate the slice world position: $pos = -SIZE/2 + SIZE \times i / (N-1)$ [S2, unofficial].
+   b. If $pos \ge P_z$, break the loop [S2, unofficial].
+   c. Push valid slices (those behind or at the camera) into `slice_list` [S2, unofficial].
+4. Iterate through slice indices $i$ from $N-1$ down to $0$ (back to front):
+   a. Calculate the slice world position: $pos = -SIZE/2 + SIZE \times i / (N-1)$ [S2, unofficial].
+   b. If $pos < P_z$, break the loop [S2, unofficial].
+   c. Push valid slices (those in front of the camera) into `slice_list` [S2, unofficial].
+5. Upload the ordered `slice_list` to the GPU buffer [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def order_slices(camera_z, size, count):
+    slice_list = []
+    
+    # Pass 1: Slices behind or at the camera (sorted front-to-back in index, 
+    # but these are the "back" slices relative to the viewer if camera is at -inf)
+    # Note: The source logic pushes slices where pos >= camera_z first.
+    # In the source's coordinate system, larger i means larger z.
+    # If camera is at P_z, slices with pos >= P_z are "in front" of the camera 
+    # in standard OpenGL Z-buffer terms if looking down -Z, but the source 
+    # treats this as the first pass. Let's follow the source's exact logic.
+    
+    for i in range(count):
+        pos = -size / 2.0 + size * i / (count - 1)
+        if pos >= camera_z:
+            break
+        slice_list.append(i)
+        
+    # Pass 2: Slices in front of the camera (sorted back-to-front in index)
+    for i in range(count - 1, -1, -1):
+        pos = -size / 2.0 + size * i / (count - 1)
+        if pos < camera_z:
+            break
+        slice_list.append(i)
+        
+    return slice_list
+```
+*[G] The pseudocode assumes the coordinate system described in [S2, unofficial] where $pos$ increases with $i$. The logic ensures that slices are processed in an order that respects the back-to-front requirement for alpha blending, handling the camera crossing the volume bounds.*
+
+**Edge Cases and Pitfalls:**
+- If depth testing is enabled but slices are not sorted back-to-front, or if back-face culling is enabled, parts of the volume may disappear or render incorrectly [S2, unofficial].
+- Specifically, slices facing away from the camera are culled if back-face culling is on [S2, unofficial].
+- If depth testing is disabled, the depth of the slices does not occlude one another. If slices are not sorted back-to-front, front slices may obscure back slices incorrectly, or if sorted front-to-back, back slices may overwrite front slices depending on the blending state [S2, unofficial].
+- Slice plane ordering is not important when drawing 3D smoke if all smoke has the same color (only opacity varies), but is important when drawing smoke and fire (different colors) or using elaborate lighting algorithms [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ to iterate and sort the slices, where $N$ is the number of slices [S2, unofficial].
+- **Memory Complexity:** $O(N)$ to store the ordered slice list [S2, unofficial].
+- **Strengths:** Ensures correct alpha blending for transparent volumes; handles occlusion correctly when combined with depth testing [S2, unofficial].
+- **Limitations:** Requires dynamic sorting per frame if the camera moves; not necessary for single-color opacity-only volumes [S1, unofficial].
+- **When to use:** When rendering partially transparent volume data with varying colors or lighting [S1, S2, unofficial].
+- **When not to use:** When rendering opaque volumes or single-color opacity-only volumes where order does not affect the final color [S1, unofficial].
+
+## Background
+The concept originates from general computer graphics principles regarding transparent object rendering, where back-to-front ordering is required to prevent inconsistent drawing [S1, unofficial]. It is specifically applied in volume rendering contexts such as Smokeview, a tool for visualizing fire dynamics simulation data, to handle the rendering of smoke and fire slices [S1, unofficial]. Practical implementation details and pitfalls are documented in community discussions on OpenGL volume rendering [S2, unofficial].
+
+## Sources
+[S1] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+[S2] Volume Rendering in OpenGL using 2D textures, https://stackoverflow.com/questions/44370174/volume-rendering-in-opengl-using-2d-textures, fetched 2026-10-27 (unofficial)

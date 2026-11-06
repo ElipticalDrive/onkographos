@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -4,90 +4,96 @@
+ 
+ ## Overview
+-This method uses a geometry shader to generate cube meshes from instanced points, optimizing for visibility by emitting at most 12 vertices (3 quads) per cube [S1, unofficial]. It leverages backface culling and frustum culling in projection space to avoid generating geometry for invisible or occluded faces [S1, unofficial]. Unlike creating full 24-vertex cubes, this approach reduces vertex count by half because backface culling always removes one of two opposite faces [S1, unofficial].
++This method uses a geometry shader to generate cube meshes from instanced points, optimizing for visibility by emitting at most 12 vertices (3 quads) per cube [S1, unofficial]. It leverages backface culling and frustum culling in projection space to reduce the number of primitives submitted to the rasterizer [S1, unofficial]. Unlike methods that generate full 24-vertex cubes, this approach exploits the fact that backface culling always removes one of two opposite faces, allowing the shader to emit only the visible faces [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A point sprite representing a voxel center $(x, y, z)$ and instance attributes (e.g., `VoxelCode` for face visibility masks).
+-*   **Output:** A triangle strip representing the visible faces of the cube.
++*   **Input:** A stream of points representing voxel centers, transformed by the vertex shader. The vertex shader outputs the world position of the voxel center and a `VoxelCode` bitmask indicating which faces are potentially visible (e.g., `0x10` for front, `0x20` for back) [S1, unofficial].
++*   **Output:** A stream of triangles (quads) representing the visible faces of the cubes [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Precomputed Corner Vectors:** Constant vectors representing the 8 corners of a unit cube centered at the origin, transformed into projection space relative to the camera. These are added to the transformed center position. Let $c\_vCorner_{ijk}$ be the precomputed vector for corner $(i,j,k)$ where $i,j,k \in \{0,1\}$ [S1, unofficial].
+-*   **Instance Data:** Contains position and a visibility mask (e.g., `vs_out_VoxelCode`) indicating which faces are solid [S1, unofficial].
++*   **Corner Vectors:** Precomputed vectors representing the 8 corners of a unit cube centered at the origin. These are transformed into projection space once per frame and stored as constants (e.g., `c_vCorner000` to `c_vCorner111`) [S1, unofficial].
++*   **VoxelCode:** A bitmask passed from the vertex shader to the geometry shader to indicate which faces of the voxel are exposed (not occluded by neighbors) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Transform Center:** Transform the voxel center to clip space:
+-    $$vPos = vec4(x, y, z, 1) \times M_{WVP}$$
+-    where $M_{WVP}$ is the World-View-Projection matrix [S1, unofficial].
+-2.  **Frustum Culling:** Calculate an expanded frustum boundary using the corner vectors:
+-    $$w = vPos.w + \max(\max(\|c\_vCorner_{000}\|, \|c\_vCorner_{001}\|), \max(\|c\_vCorner_{010}\|, \|c\_vCorner_{011}\|))$$
+-    Discard the voxel if:
+-    $$|vPos.z| > w \quad \text{or} \quad |vPos.x| > w \quad \text{or} \quad |vPos.y| > w$$
+-    This offset prevents voxels from disappearing too early [S1, unofficial].
+-3.  **Backface Culling:** Determine visible faces by transforming a direction in projection space to view space using the inverse projection matrix diagonal:
+-    $$v_{proj\_to\_view} = (1/M_{P}[0][0], 1/M_{P}[1][1], 1/M_{P}[2][2])$$
+-    Check the dot product with the view direction to decide between front and back faces [S1, unofficial].
+-4.  **Face Visibility Check:** Use a mask (e.g., `vs_out_VoxelCode[0] & uint(0x10)`) to reject invisible faces inside the model (occluded by neighbors) [S1, unofficial].
+-5.  **Emit Geometry:** For each visible face, emit 4 vertices forming a quad. The vertices are computed as:
+-    $$v_{final} = c\_vCorner_{ijk} + vPos$$
+-    Emit at most 3 quads (12 vertices) per cube [S1, unofficial].
++1.  **Frustum Culling in Projection Space:**
++    *   Transform the voxel center to clip space: $vPos = vec4(x, y, z, 1) \times M_{WVP}$, where $M_{WVP}$ is the Model-View-Projection matrix [S1, unofficial].
++    *   Calculate an expanded frustum boundary $w$:
++        $$
++        w = vPos.w + \max(\max(\|c_{vCorner000}\|, \|c_{vCorner001}\|), \max(\|c_{vCorner010}\|, \|c_{vCorner011}\|))
++        $$
++        Note: The source uses specific corner vectors, implying a check against the bounding box of the cube in projection space [S1, unofficial].
++    *   Discard the voxel if it is outside the expanded frustum:
++        $$
++        \text{if } |vPos.z| > w \lor |vPos.x| > w \lor |vPos.y| > w \text{ then discard}
++        $$
++        This offset prevents voxels from disappearing prematurely when only the center is tested [S1, unofficial].
++
++2.  **Backface Culling in View Space:**
++    *   Transform a direction from projection space to view space using the inverse of the projection matrix's diagonal elements: $v_{proj\_to\_view} = (1/M_{proj}[0][0], 1/M_{proj}[1][1], 1/M_{proj}[2][2])$ [S1, unofficial].
++    *   Determine face visibility by computing the dot product of the face normal (transformed to view space) and the view direction. If the dot product is positive, the face is back-facing and should be discarded [S1, unofficial].
++
++3.  **Face Visibility Check and Emission:**
++    *   Use the `VoxelCode` bitmask to reject faces that are occluded by neighboring voxels (e.g., shared faces) [S1, unofficial].
++    *   For each visible face, emit a quad (4 vertices) using the precomputed corner vectors added to the transformed voxel center $vPos$ [S1, unofficial].
++    *   Since backface culling removes one of each opposite pair, only 3 quads (12 vertices) are emitted per cube at most [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-# Precomputed constants (example for unit cube corners in projection space)
+-# c_vCorner000, c_vCorner001, ..., c_vCorner111 are vec4 constants
+-# c_vInverseProjection is vec3(1/M_P[0][0], 1/M_P[1][1], 1/M_P[2][2])
+-# vViewDirection is the view vector in projection space
++# Precomputed constants (transformed corner vectors in projection space)
++# c_vCorner000 to c_vCorner111 are vec4
++# c_vInverseProjection is vec3(1/M_proj[0][0], 1/M_proj[1][1], 1/M_proj[2][2])
+ 
+-def geometry_shader(point_in):
+-    x, y, z = point_in.position
+-    voxel_code = point_in.attributes.voxel_code
+-    
+-    # Step 1: Transform center to clip space
+-    vPos = vec4(x, y, z, 1) * c_mWorldViewProjection
+-    
+-    # Step 2: Frustum Culling with offset
+-    w = vPos.w + max(max(length(c_vCorner000), length(c_vCorner001)), 
+-                     max(length(c_vCorner010), length(c_vCorner011)))
+-    
+-    if abs(vPos.z) > w or abs(vPos.x) > w or abs(vPos.y) > w:
+-        return # Discard voxel
+-    
+-    # Step 3 & 4: Backface Culling and Face Visibility
+-    # Check front face (e.g., -Z face in local space)
+-    # Transform corner direction to view space
+-    corner_dir = (c_vCorner000.xyz + c_vCorner110.xyz) * c_vInverseProjection.xyz
+-    
+-    if dot(corner_dir, vViewDirection) > 0:
+-        # Front face visible
+-        if (voxel_code & 0x10) != 0: # Mask check
+-            emit_quad(c_vCorner000, c_vCorner100, c_vCorner010, c_vCorner110, vPos)
+-    else:
+-        # Back face visible
+-        if (voxel_code & 0x20) != 0: # Mask check
+-            emit_quad(c_vCorner001, c_vCorner101, c_vCorner011, c_vCorner111, vPos)
+-            
+-    # Repeat for other visible faces...
++def geometry_shader(points):
++    for point in points:
++        # 1. Frustum Culling
++        vPos = vec4(point.x, point.y, point.z, 1.0) * M_WVP
++        
++        # Calculate expanded frustum boundary
++        # Note: Source uses specific corners, assuming a unit cube centered at origin
++        # The max length of the relevant corners is added to vPos.w
++        corner_lengths = [
++            length(c_vCorner000), length(c_vCorner001),
++            length(c_vCorner010), length(c_vCorner011)
++        ]
++        w = vPos.w + max(max(corner_lengths[0], corner_lengths[1]), 
++                          max(corner_lengths[2], corner_lengths[3]))
++        
++        if abs(vPos.z) > w or abs(vPos.x) > w or abs(vPos.y) > w:
++            continue # Discard voxel outside frustum
+ 
+-def emit_quad(corner0, corner1, corner2, corner3, vPos):
+-    # Emit vertices for a quad
+-    gl_Position = corner0 + vPos
+-    EmitVertex()
+-    gl_Position = corner1 + vPos
+-    EmitVertex()
+-    gl_Position = corner2 + vPos
+-    EmitVertex()
+-    gl_Position = corner3 + vPos
+-    EmitVertex()
+-    EndPrimitive()
++        # 2. Backface Culling and Face Emission
++        # Check Front Face (e.g., normal pointing towards camera)
++        # Transform normal to view space
++        vNormal_proj = vec4(0, 0, -1, 0) # Example normal for front face
++        vNormal_view = vec3(dot(vNormal_proj.xyz, c_vInverseProjection)) # Simplified transform
++        
++        # View direction is typically (0,0,-1) in view space or derived from camera
++        vViewDir = vec3(0, 0, -1) 
++        
++        if dot(vNormal_view, vViewDir) > 0:
++            # Check if face is visible (not occluded by neighbor)
++            if (point.VoxelCode & 0x10) != 0:
++                emit_quad(vPos + c_vCorner000, vPos + c_vCorner100, 
++                          vPos + c_vCorner010, vPos + c_vCorner110)
++
++        # Check Back Face
++        vNormal_proj = vec4(0, 0, 1, 0)
++        vNormal_view = vec3(dot(vNormal_proj.xyz, c_vInverseProjection))
++        
++        if dot(vNormal_view, vViewDir) > 0:
++            if (point.VoxelCode & 0x20) != 0:
++                emit_quad(vPos + c_vCorner001, vPos + c_vCorner101, 
++                          vPos + c_vCorner011, vPos + c_vCorner111)
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ per voxel, with early discards reducing effective work.
+-*   **Memory Complexity:** Low, as no large mesh buffers are generated; geometry is created on the fly.
+-*   **Strengths:** Significant reduction in vertex count (12 vs 24) and improved culling efficiency by operating in projection space [S1, unofficial].
+-*   **Limitations:** Requires careful handling of projection matrix dependencies for backface culling [S1, unofficial].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, with a constant factor reduced by culling. Frustum culling is performed in the geometry shader, avoiding CPU-GPU synchronization [S1, unofficial].
++*   **Memory Complexity:** Low, as only the voxel centers and a small bitmask are stored in the instance buffer. The geometry shader generates vertices on the fly [S1, unofficial].
++*   **Performance:** Significantly reduces the number of vertices and triangles sent to the rasterizer by emitting only visible faces (up to 12 vertices per cube instead of 24) [S1, unofficial].
++*   **Strengths:** Efficient culling in projection space; simple implementation; works well for dense voxel grids [S1, unofficial].
++*   **Limitations:** Requires a geometry shader stage; culling accuracy depends on the precomputed corner vectors and projection matrix [S1, unofficial].
+ 
+ ## Background
+-This technique was developed by Johannes Jendersie for efficient voxel rendering, focusing on minimizing overdraw and vertex processing by leveraging GPU geometry shader capabilities [S1, unofficial].
++This technique was described by Johannes Jendersie in a blog post, focusing on optimizing voxel rendering by leveraging the geometry shader's ability to cull and generate primitives efficiently [S1, unofficial].
+ 
+ ## Sources

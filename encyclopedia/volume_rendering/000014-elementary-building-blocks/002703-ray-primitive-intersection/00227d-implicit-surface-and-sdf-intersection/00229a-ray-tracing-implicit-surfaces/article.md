@@ -3,142 +3,164 @@
 Also called: Isosurface Ray Tracing, Ray Tracing General-Form Implicits, Ray Tracing Implicits, Ray casting isosurfaces
 
 ## Overview
-Ray tracing implicit surfaces renders a surface defined by a filter function $f(\mathbf{x})$ and an isovalue $v$ by solving for the root where a viewing ray intersects the surface $f(\mathbf{x}) - v = 0$, without using a proxy triangle mesh [S1, unofficial]. It distinguishes itself from rasterization of proxy geometry (e.g., [Marching Cubes](2795-implicit-surface-and-sdf-intersection.md)) by avoiding mesh extraction, thereby eliminating time complexity proportional to the number of samples and issues with proxy sampling rates beneath the Nyquist limit [S1, unofficial]. Unlike [SDF Raycast Collision Detection](2417-sdf-raycast-collision-detection.md) which often relies on distance-based stepping, this method formulates the intersection as a general root-finding problem for the parametric ray equation substituted into the implicit function [S1, unofficial].
+Ray tracing implicit surfaces renders a surface defined by a filter function $f(\mathbf{x})$ and an isovalue $v$ by solving for the root where a viewing ray intersects the surface $f(\mathbf{x}) - v = 0$, without using a proxy triangle mesh [S1, unofficial]. It solves the root-finding problem $f_t(t) = 0$ for the smallest $t > 0$, where $f_t$ is the implicit function evaluated along the parametric ray [S1, unofficial]. Unlike rasterization of proxy geometry (e.g., [Marching Cubes](2795-implicit-surface-and-sdf-intersection.md)), ray tracing does not require mesh extraction, avoiding time complexity on the order of the number of samples and issues with proxy sampling rates beneath the Nyquist limit [S1, unofficial]. It is distinguished from simple ray casting by its native support for secondary rays (shadows, refractions) and ray traversal of acceleration structures [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- Ray origin $\vec{o} = (o_x, o_y, o_z)$ and direction $\vec{d} = (d_x, d_y, d_z)$.
-- Implicit surface function $f: \mathbb{R}^3 \to \mathbb{R}$.
-- Isovalue $v$ (typically 0 for $f(\mathbf{x})=v$, or the function is pre-shifted to $g(\mathbf{x}) = f(\mathbf{x}) - v$).
-- Acceleration structure (e.g., grid, octree, kd-tree, BVH) specialized for the implicit data [S1, unofficial].
+**Inputs and Outputs**
+*   **Input:** Implicit function $f: \mathbb{R}^3 \to \mathbb{R}$, isovalue $v$, ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), and optionally an acceleration structure for the domain of $f$.
+*   **Output:** Intersection distance $t^*$ such that $t^* = \min \{ t > 0 \mid f(\mathbf{o} + t\mathbf{d}) - v = 0 \}$, or null if no intersection exists within the search range.
 
-**Outputs:**
-- Intersection distance $t > 0$ (smallest root).
-- Intersection point $\vec{p} = \vec{o} + t\vec{d}$.
+**Data Structures**
+*   **Ray:** Defined by origin $\mathbf{o} = (o_x, o_y, o_z)$ and direction $\mathbf{d} = (d_x, d_y, d_z)$ [S1, unofficial].
+*   **Implicit Function:** A callable or mathematical expression $f(\mathbf{x})$ that returns a scalar value for any 3D point $\mathbf{x}$ [S1, unofficial].
+*   **Acceleration Structure:** Spatial partitioning (e.g., grid, octree, kd-tree, BVH) specialized to the implicit data to enable $O(\log N)$ traversal cost [S1, unofficial].
 
-**Data Structures:**
-- **Acceleration Structure:** A spatial hierarchy (grid, octree, etc.) that bounds the domain of $f$. For structured volume data, this is often a hierarchical grid storing min-max values of $f$ to cull empty regions [S1, unofficial].
-- **Implicit Function:** A callable routine $f(\mathbf{x})$ that evaluates the scalar field at any point $\mathbf{x}$.
+**Method Steps**
+1.  **Ray Definition:** Define the parametric line equation for the ray:
+    $$ \vec{p}(t) = \vec{o} + t\vec{d} $$
+    where $t$ is the distance parameter [S1, unofficial].
+2.  **Substitution:** Substitute the ray equation into the implicit function to create a unidimensional function $f_t(t)$:
+    $$ f_t(t) = f(o_x + td_x, o_y + td_y, o_z + td_z) - v $$
+    The goal is to find the smallest $t > 0$ such that $f_t(t) = 0$ [S1, unofficial].
+3.  **Root Finding:** Solve $f_t(t) = 0$ using an appropriate numerical method. The choice of method depends on the properties of $f$:
+    *   **Simple/Closed-Form:** If $f$ allows, compute roots directly [S1, unofficial].
+    *   **Newton-Raphson:** Use iterative refinement if derivatives are available and the initial guess is close [S1, unofficial].
+    *   **Robust Methods:** For complex $f$ with multiple roots or nonmonotonic behavior, use robust techniques such as:
+        *   Sturm sequences for differentiable algebraics (e.g., POV-Ray) [S1, unofficial].
+        *   Interval arithmetic for root isolation followed by refinement (e.g., regula falsi, bounded Newton-Raphson) [S1, unofficial].
+        *   Affine arithmetic (extension of interval arithmetic) [S1, unofficial].
+        *   Lipschitz bounds for algebraic and non-algebraic surfaces [S1, unofficial].
+        *   Piecewise Bernstein polynomials over local tetrahedral domains (GPU implementation) [S1, unofficial].
+4.  **Acceleration:** If an acceleration structure is present, traverse it to narrow the search interval for $t$ before applying the root-finding algorithm [S1, unofficial].
+5.  **Secondary Rays:** If the intersection is valid, spawn secondary rays (shadows, reflections, refractions) from the intersection point $\vec{p}(t^*)$ [S1, unofficial].
 
-**Steps:**
-1. **Ray Formulation:** Define the parametric ray equation:
-   $$ \vec{p}(t) = \vec{o} + t\vec{d} $$
-   where $t$ is the distance parameter [S1, unofficial].
-
-2. **Implicit Evaluation along Ray:** Substitute the ray equation into the implicit function to create a unidimensional function $f_t(t)$:
-   $$ f_t(t) = f(o_x + t d_x, o_y + t d_y, o_z + t d_z) $$
-   The goal is to find the smallest $t > 0$ such that $f_t(t) = 0$ [S1, unofficial].
-
-3. **Acceleration Structure Traversal:** Use the acceleration structure to determine a valid interval $[t_{min}, t_{max}]$ where the ray might intersect the surface. This involves traversing the hierarchy (e.g., checking if the isovalue lies within the min-max bounds of a voxel or node) to skip empty space [S1, unofficial].
-
-4. **Root Finding:** Solve $f_t(t) = 0$ for the smallest $t > 0$ within the valid interval using an appropriate numerical method. The choice of method depends on the properties of $f$:
-   - **Simple/Algebraic:** Closed-form solutions or Newton-Raphson iterations [S1, unofficial].
-   - **Complex/Multiple Roots:** Robust techniques such as Lipschitz methods, bracketing, or self-validated arithmetic [S1, unofficial].
-   - **Interval Arithmetic:** Use interval arithmetic for root isolation, followed by a root refinement algorithm such as regula falsi, bounded Newton-Raphson, or another globally convergent numerical method [S1, unofficial].
-   - **Differentiable Algebraics:** Recursive root bracketing using Sturm sequences [S1, unofficial].
-   - **GPU Approximation:** Approximate implicit forms with piecewise Bernstein polynomials over local tetrahedral domains [S1, unofficial].
-
-5. **Refinement:** If an approximate root $t^*$ is found, refine it using the chosen numerical method to ensure $|f_t(t^*)| < \epsilon$ for a desired precision $\epsilon$ [S1, unofficial].
-
-6. **Secondary Rays:** If the intersection is valid, proceed with shading calculations, potentially spawning secondary rays for shadows, reflections, or refractions, distinguishing this as "ray tracing" rather than simple "ray casting" [S1, unofficial].
-
-**Pseudocode:**
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_trace_implicit_surface(ray_origin, ray_direction, implicit_func, isovalue, accel_struct):
+def ray_trace_implicit_surface(f, v, o, d, accel_struct=None, max_iter=100, tol=1e-6):
     """
-    Ray trace an implicit surface defined by implicit_func(x) = isovalue.
-    Returns the smallest t > 0 where the ray intersects the surface, or None.
+    Ray trace an implicit surface defined by f(x) - v = 0.
+    
+    Args:
+        f: Function f(x, y, z) returning scalar.
+        v: Isovalue.
+        o: Ray origin (vec3).
+        d: Ray direction (vec3, normalized).
+        accel_struct: Optional acceleration structure with method 'traverse(o, d, t_min, t_max)'.
+        max_iter: Maximum iterations for root finder.
+        tol: Convergence tolerance.
+        
+    Returns:
+        t: Intersection distance, or None if no intersection.
     """
-    # 1. Define the 1D function along the ray
-    def f_t(t):
-        p = ray_origin + t * ray_direction
-        return implicit_func(p) - isovalue
+    # Define the 1D function along the ray
+    def ft(t):
+        x = o.x + t * d.x
+        y = o.y + t * d.y
+        z = o.z + t * d.z
+        return f(x, y, z) - v
 
-    # 2. Use acceleration structure to find a candidate interval [t_min, t_max]
-    # The accel_struct must support a query: find_t_interval(ray) -> [t_min, t_max]
-    # If no intersection is possible, return None
-    t_min, t_max = accel_struct.find_t_interval(ray_origin, ray_direction)
+    # Determine search interval
+    t_min = 0.0
+    t_max = float('inf')
     
-    if t_min is None or t_max is None:
-        return None
-
-    # 3. Root finding within [t_min, t_max]
-    # Choose a robust method based on the implicit function's properties.
-    # Here we use a generic bracketing/refinement approach as an example.
-    
-    # Check if the interval contains a root
-    # Note: Simple sign change check is insufficient for non-monotonic functions.
-    # Robust methods (e.g., interval arithmetic, Sturm sequences) are preferred.
-    
-    # Example: Bounded Newton-Raphson with bracketing
-    # Initialize with the midpoint or a point guaranteed to be inside the bracket
-    t_current = (t_min + t_max) / 2.0
-    
-    # Iterative refinement
-    for i in range(MAX_ITERATIONS):
-        val = f_t(t_current)
-        
-        # Check for convergence
-        if abs(val) < EPSILON:
-            return t_current
-        
-        # Compute derivative for Newton step
-        # d/dt f(o + t*d) = grad_f(p) . d
-        grad_f = implicit_func_gradient(t_current, ray_origin, ray_direction)
-        deriv = dot(grad_f, ray_direction)
-        
-        if abs(deriv) < EPSILON:
-            # Derivative is too small, fallback to bisection or regula falsi
-            # For simplicity, we shift towards the midpoint of the bracket
-            # In practice, a robust solver handles this internally
-            t_current = (t_min + t_max) / 2.0
+    if accel_struct is not None:
+        # Traverse acceleration structure to find valid t interval
+        # This step is implementation-specific to the accel structure
+        # [G] Assume traverse returns (hit, t_hit) or updates t_min/t_max
+        hit, t_hit = accel_struct.traverse(o, d, t_min, t_max)
+        if hit:
+            t_min = t_hit
         else:
-            t_next = t_current - val / deriv
-            
-            # Clamp to interval to ensure bracketing
-            if t_next < t_min or t_next > t_max:
-                t_next = (t_min + t_max) / 2.0
-                
-            # Update bracket based on sign of f_t(t_next)
-            # This is a simplified bracketing logic; robust implementations
-            # use interval arithmetic or Sturm sequences for guaranteed isolation
-            if f_t(t_min) * f_t(t_next) < 0:
-                t_max = t_next
-            else:
-                t_min = t_next
-                
-            t_current = t_next
+            return None
 
-    return None
+    # Root finding
+    # [G] Simple bisection/Newton hybrid for demonstration. 
+    # Robust implementations use interval arithmetic or Sturm sequences.
+    
+    # Initial guess: assume intersection is near t_min if accel_struct hit, else 0
+    t = t_min
+    
+    # Check if already intersected
+    if abs(ft(t)) < tol:
+        return t
+
+    # Iterative refinement (e.g., Newton-Raphson)
+    # Note: Requires derivative df/dt. 
+    # df/dt = grad_f . d
+    # [G] Placeholder for derivative calculation if available.
+    # If f is not differentiable or robustness is required, use bracketing methods.
+    
+    for i in range(max_iter):
+        val = ft(t)
+        if abs(val) < tol:
+            return t
+        
+        # Compute derivative numerically or analytically
+        # [G] Assuming a helper function grad_f exists
+        # grad = grad_f(o.x + t*d.x, o.y + t*d.y, o.z + t*d.z)
+        # dfdt = dot(grad, d)
+        
+        # If derivative is zero or undefined, fallback to bisection or return None
+        # [G] For this generic pseudocode, we assume a robust solver handles this.
+        # Here we simulate a step towards the root.
+        # dt = -val / dfdt
+        # t = t + dt
+        
+        # Safety clamp to prevent divergence
+        # t = clamp(t, t_min, t_max)
+        
+        # If no derivative info, use bisection between t_min and t_max
+        # This is a simplified robust fallback
+        mid = (t_min + t_max) / 2
+        if ft(mid) * val < 0:
+            t_max = mid
+        else:
+            t_min = mid
+        t = mid
+        
+    return None if abs(ft(t)) >= tol else t
 ```
 
-**Parameters:**
-- `EPSILON`: Convergence tolerance for root finding. Typical value: $10^{-6}$ to $10^{-8}$ [G].
-- `MAX_ITERATIONS`: Maximum number of iterations for the root finder. Typical value: 20-50 [G].
+**Parameters**
+*   **Tolerance (`tol`):** Convergence threshold for $|f_t(t)|$. Typical value: $10^{-6}$ [S1, unofficial].
+*   **Max Iterations (`max_iter`):** Limit for iterative solvers. Typical value: 100 [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-- **Multiple Roots:** Simple closed-form solutions or Newton-Raphson may fail for complex implicit functions with multiple roots or non-monotonic behavior along the ray interval [S1, unofficial]. Robust techniques like interval arithmetic or Sturm sequences are required [S1, unofficial].
-- **Non-Convex Surfaces:** The acceleration structure must correctly handle non-convex shapes to avoid missing intersections or returning false positives [S1, unofficial].
-- **Precision Issues:** Floating-point precision errors in evaluating $f_t(t)$ can lead to incorrect root isolation, especially near the surface. Self-validated arithmetic or interval arithmetic can mitigate this [S1, unofficial].
+**Edge Cases and Pitfalls**
+*   **Multiple Roots:** Simple closed-form or Newton-Raphson may fail for complex implicit functions with multiple roots or nonmonotonic behavior along the ray interval [S1, unofficial]. Robust techniques like Sturm sequences or interval arithmetic are required [S1, unofficial].
+*   **Non-Differentiable Functions:** Newton-Raphson requires derivatives. If $f$ is not differentiable, use bracketing methods or finite differences [S1, unofficial].
+*   **Acceleration Structure Failure:** If the acceleration structure fails to cull empty space, performance degrades to $O(N)$ [S1, unofficial].
+
+## Subtopics
+
+### Kalra & Barr Implicit Surface Intersection
+Uses Lipschitz bounds for robust intersection of algebraic and non-algebraic surfaces. Choose when robustness for complex algebraic surfaces is needed. [Kalra & Barr Implicit Surface Intersection](1278-kalra-barr-implicit-surface-intersection.md)
+
+### SDF Raycast Collision Detection
+Uses Signed Distance Functions for efficient ray marching. Choose when distance bounds are available and the surface is smooth. [SDF Raycast Collision Detection](2417-sdf-raycast-collision-detection.md)
+
+### LevelSetHDDA
+Hybrid Depth-First/Depth-First approach for level set rendering. Choose for volume data with hierarchical structures. [LevelSetHDDA](2875-levelsethdda.md)
+
+### Ray-Ellipsoid Intersection
+Closed-form solution for ellipsoids. Choose for simple quadratic primitives. [Ray-Ellipsoid Intersection](3463-ray-ellipsoid-intersection.md)
+
+### RayImplicitIntersection
+General intersection routine. Choose for generic implicit primitives. [RayImplicitIntersection](3591-rayimplicitintersection.md)
 
 ## Operating characteristics
-- **Time Complexity:** With acceleration structures, each pixel is rendered at roughly $O(\log N)$ cost with respect to the number of geometric primitives. Without acceleration, or for rasterization, the cost is $O(N)$ for the entire frame [S1, unofficial].
-- **Memory Complexity:** Depends on the acceleration structure. Hierarchical grids or octrees require memory proportional to the number of nodes, which can be significant for large structured volumes [S1, unofficial].
-- **Strengths:**
-  - No mesh extraction required, avoiding time complexity on the order of the number of samples [S1, unofficial].
-  - Avoids issues with proxy sampling rates beneath the Nyquist limit [S1, unofficial].
-  - Enables on-the-fly changes in isovalue [S1, unofficial].
-  - Native support for secondary rays (shadows, refractions) and ray traversal of acceleration structures [S1, unofficial].
-- **Limitations:**
-  - Root-solving process is not as fast as rasterization of simpler proxy geometry [S1, unofficial].
-  - Requires robust numerical methods for complex implicits, which can be computationally expensive [S1, unofficial].
-- **When to Use:** Suitable for isosurface visualization of large structured data, particularly when dynamic isovalue changes are needed or when proxy mesh extraction is prohibitive [S1, unofficial].
-- **When Not to Use:** When real-time performance is critical and the implicit surface is simple enough to be efficiently rasterized via proxy geometry [S1, unofficial].
+*   **Time Complexity:** With acceleration structures, each pixel is rendered at roughly $O(\log N)$ cost with respect to the number of geometric primitives. Without acceleration, or for rasterization, the cost is $O(N)$ for the entire frame [S1, unofficial].
+*   **Memory Complexity:** Depends on the acceleration structure and the storage of the implicit function data (e.g., voxel grid, polynomial coefficients). Not given in the sources.
+*   **Measured Performance:** Interactive rendering of isosurfaces from large (1 GB) structured volumes has been achieved on 128-CPU workstations using hierarchical grids [S1, unofficial]. GPU implementations have demonstrated interactive ray casting of cubics and quartics [S1, unofficial].
+*   **Scaling:** Parallelization on GPUs or multi-core CPUs allows efficient rendering of large scenes. Scaling is limited by memory bandwidth for large voxel grids or the complexity of the implicit function evaluation [S1, unofficial].
+*   **Strengths:** No mesh extraction required; correct rendering regardless of camera position; on-the-fly changes in isovalue; native support for secondary rays; avoids Nyquist limit issues of proxy geometry [S1, unofficial].
+*   **Limitations:** Root-solving is not as fast as rasterization of simpler proxy geometry; robust methods can be computationally expensive; requires efficient acceleration structures for complex scenes [S1, unofficial].
+*   **When to Use:** Isosurface visualization of large structured data; dynamic isovalue changes; scenes with complex implicit geometry where mesh extraction is prohibitive [S1, unofficial].
+*   **When Not to Use:** Simple scenes where rasterization of proxy geometry is faster; real-time applications with strict performance constraints and simple primitives [S1, unofficial].
 
 ## Background
-Ray tracing implicit surfaces was first explored by Hanrahan [39], using Descartes' rule of signs to determine if a given ray interval contained roots [S1, unofficial]. Van Wijk [122] implemented a recursive root bracketing algorithm using Sturm sequences for differentiable algebraics, which is employed in the POV-Ray software [96] [S1, unofficial]. Mitchell [82] suggested using interval arithmetic for root isolation followed by a root refinement algorithm [S1, unofficial]. De Cusatis Junior et al. [16] extended the interval arithmetic technique to employ affine arithmetic [S1, unofficial]. Loop and Blinn [72] implemented a GPU ray caster approximating implicit forms with piecewise Bernstein polynomials over local tetrahedral domains [S1, unofficial]. Fryazinov and Pasko [27] employ rule-of-signs interval methods in ray tracing generalized implicit (FRep) surfaces on the GPU [S1, unofficial]. Direct ray tracing of implicits interpolating volume data was first demonstrated by [115], with rendering times on the order of seconds per frame [S1, unofficial]. Parker et al. [90, 89] implemented a tile-based parallel ray tracer on a 128-CPU SGI workstation, achieving interactive rendering of isosurfaces from large (1 GB) structured volumes [S1, unofficial].
+Ray tracing implicit surfaces was first explored by Hanrahan [39] using Descartes' rule of signs. Van Wijk [122] implemented a recursive root bracketing algorithm using Sturm sequences, employed in POV-Ray [96]. Mitchell [82] suggested interval arithmetic for root isolation. De Cusatis Junior et al. [16] extended this to affine arithmetic. Loop and Blinn [72] implemented a GPU ray caster using Bernstein polynomials. Fryazinov and Pasko [27] employed rule-of-signs interval methods on the GPU. Parker et al. [90, 89] implemented a tile-based parallel ray tracer for large structured volumes. The method is used in visualization, particularly for isosurface rendering of volume data [S1, unofficial].
 
 ## Sources
 [S1] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

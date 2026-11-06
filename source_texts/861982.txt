@@ -1,0 +1,94 @@
+# 3D-Reconstruction
+
+**English** | [简体中文](README.zh-CN.md)
+
+An end-to-end pipeline that turns a folder of photos into a 3D Gaussian Splatting model and serves it to an interactive browser viewer.
+
+![Python](https://img.shields.io/badge/Python-3.10-3776AB)
+![gsplat](https://img.shields.io/badge/gsplat-1.5.2%2Bpt24cu118-555)
+![React](https://img.shields.io/badge/React-18.3-61DAFB)
+![License](https://img.shields.io/badge/License-MIT-blue)
+
+---
+
+## Overview
+
+Reconstructing a scene from photographs normally means stitching together several tools by hand: a Structure-from-Motion package, a CUDA training script, an export step, and some way to look at the result. This project wires that chain into a single system — COLMAP/GLOMAP for camera poses, a self-contained gsplat trainer for the Gaussian fit, and a React + Three.js viewer that renders the exported `.ply` in the browser.
+
+The design constraint that shaped most of the engineering was hardware: everything was built and measured on a single RTX 4070 Laptop GPU with 8 GB of VRAM, on Windows. That ruled out the usual `nerfstudio` / `tiny-cuda-nn` / `fused-ssim` stack (which needs a working CUDA toolchain to compile on Windows) and ruled out running jobs concurrently. The result is a deliberately small system: one serial job queue, one subprocess per training run, one dependency (`gsplat`) for the CUDA rasterizer.
+
+## Key Features
+
+- **Full pipeline in one request** — upload images or pick a bundled dataset, and the backend runs COLMAP feature extraction → matching → sparse reconstruction → undistortion → Gaussian training → PLY export without manual steps (`app/core/scheduler.py:99`).
+- **Self-contained 3DGS trainer** — 258 lines depending only on `gsplat`, `torch`, `numpy` and `Pillow`: SfM initialization, MCMC adaptive density control, 3rd-degree spherical-harmonic color, L1 + SSIM loss, opacity/scale regularization (`backend/train/train_gsplat.py`).
+- **Live progress over SSE** — five weighted stages (0.02 / 0.25 / 0.05 / 0.60 / 0.08) normalized into a single 0–100 bar, pushed over `text/event-stream`, with a 2.5 s polling fallback for buffering proxies (`app/schemas.py:30`, `components/JobProgress.tsx:34`).
+- **Three camera modes in the viewer** — orbit (`OrbitControls`), free tumble (`TrackballControls`) and first-person walk (`FlyControls`, for indoor scenes), switchable without reloading the splat scene (`components/SplatViewer.tsx:220`).
+- **Outlier-resistant auto-framing** — the viewer samples up to 20,000 splat centers and frames on the median center with a 95th-percentile radius, so distant floaters cannot blow up the bounding box and push the camera out of the scene (`components/SplatViewer.tsx:126`).
+- **Reusable artifacts** — every model is registered in `workspace/models.json` through an atomic write, and existing `.ply` / `.splat` / `.ksplat` files can be imported and viewed without a GPU (`app/core/registry.py:37`, `app/api/import_model.py`).
+
+## Architecture
+
+```mermaid
+flowchart LR
+  subgraph FE["Frontend - React 18 + Three.js"]
+    RP["ReconstructPage.tsx<br/>UploadZone / dataset picker"]
+    JPG["JobProgress.tsx<br/>EventSource + poll fallback"]
+    SV["SplatViewer.tsx<br/>orbit / tumble / walk"]
+  end
+
+  subgraph API["API layer - backend/app/api"]
+    CJ["POST /api/jobs<br/>jobs.create_job"]
+    EV["GET /api/jobs/:id/events<br/>jobs.job_events"]
+    MF["GET /api/models/:id/file<br/>models.get_model_file"]
+  end
+
+  subgraph CORE["Core - backend/app/core"]
+    SCH["JobScheduler<br/>single asyncio.Queue worker"]
+    BUS["EventBus<br/>replay-on-subscribe"]
+    REG["ModelRegistry<br/>atomic models.json"]
+  end
+
+  subgraph SVC["Services - backend/app/services + train"]
+    SFM["sfm_service.run_sfm<br/>COLMAP / GLOMAP"]
+    TS["trainer_service.run_gsplat<br/>subprocess + stdout parse"]
+    TG["train_gsplat.py<br/>MCMCStrategy + SH + L1/SSIM"]
+    FIN["compressor.finalize_model"]
+  end
+
+  RP --> CJ --> SCH
+  SCH --> SFM --> TS --> TG --> FIN --> REG
+  TG -. "stdout: step x/y psnr=z" .-> TS
+  SFM -. stage progress .-> SCH
+  TS -. stage progress .-> SCH
+  SCH -. "publish job snapshot" .-> BUS
+  BUS --> EV --> JPG
+  REG --> MF --> SV
+```
+
+The critical path is one-way and serial. `JobScheduler.submit` assigns a 12-hex-character job id and pushes it onto a single `asyncio.Queue`; one worker coroutine drains that queue, so two reconstructions can never contend for the same 8 GB of VRAM. Inside `_run_pipeline`, each stage reports its own 0–100 progress through a callback, and `_overall` converts it into a global percentage by summing the weights of completed stages plus the weighted fraction of the current one. Training runs as a child process (`asyncio.create_subprocess_exec`), so a CUDA fault kills the subprocess rather than the API server; `trainer_service.on_line` regexes `step x/y` out of its stdout and only emits an event once progress has advanced by at least 1 %, which keeps a 30,000-step run to roughly 100 SSE messages instead of 600. Every progress update is published as a full `Job` snapshot to the `EventBus`, which stores the latest event per job and replays it the instant a client subscribes — so a browser that connects mid-run, or reconnects after a refresh, immediately sees the current state instead of waiting for the next tick.
+
+Job state is two-dimensional: a `JobStatus` lifecycle crossed with a `JobStage` position in the pipeline.
+
+```mermaid
+stateDiagram-v2
+    [*] --> QUEUED: scheduler.submit
+    QUEUED --> RUNNING: worker dequeues job_id
+
+    state RUNNING {
+        [*] --> upload
+        upload --> sfm: no sparse/0 in dataset
+        upload --> train: sparse/0 already present
+        sfm --> train
+        train --> compress
+        compress --> [*]
+    }
+
+    RUNNING --> SUCCEEDED: stage = done, overall = 100
+    RUNNING --> FAILED: exception caught in _run_worker
+    SUCCEEDED --> [*]
+    FAILED --> [*]
+```
+
+The `upload --> train` edge is the skip path: when a dataset already ships COLMAP poses under `sparse/0`, SfM is marked complete and the pipeline jumps straight to training. Failure is contained at the worker level — `_run_worker` catches any exception from `_run_pipeline`, marks that job `FAILED`, publishes the error message, and then loops to the next queued job, so one bad dataset cannot take the queue down. `JobStatus.CANCELED` is declared in the schema but no transition reaches it (see Limitations).
+
+## Quick Start

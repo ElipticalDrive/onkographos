@@ -1,0 +1,884 @@
+Model-based design and verification for robotics. Contribute to RobotLocomotion/drake development by creating an account on GitHub.
+
+[geometry] Build deformable sdf from distance to surface mesh by xuchen-han · Pull Request #17603 · RobotLocomotion/drake · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+xuchen-han
+commented
+Jul 19, 2022
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Remove the ReferenceDeformableGeometry class and instead stores the approximate signed distance field directly in deformable geometry. With this, we unlock arbitrary volume mesh (with potentially non-convex surface mesh) as deformable geomtries.
+While doing that, we ensure that the mesh inside the SDF points to the deformable mesh held by DeformableGeometry so that we don't have to create local copies in deformable_mesh_intersection.cc.
+Towards #16875.
+This change is
+xuchen-han
+added
+status: do not review
+component: geometry proximity
+Contact, distance, signed distance queries and related properties
+release notes: none
+This pull request should not be mentioned in the release notes
+labels
+Jul 19, 2022
+xuchen-han
+force-pushed
+the
+deformable-sdf
+branch
+3 times, most recently
+from
+d1a96fd to
+e6f1c90
+Compare
+July 20, 2022 23:36
+xuchen-han
+removed
+the
+status: do not review
+label
+Jul 20, 2022
+xuchen-han
+assigned
+SeanCurtis-TRI
+Jul 20, 2022
+xuchen-han
+commented
+Jul 20, 2022
+View reviewed changes
+xuchen-han
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
++@SeanCurtis-TRI for feature review please.
+Reviewable status: LGTM missing from assignee SeanCurtis-TRI(platform), needs at least two assigned reviewers (waiting on @SeanCurtis-TRI)
+SeanCurtis-TRI
+reviewed
+Jul 21, 2022
+View reviewed changes
+SeanCurtis-TRI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+First pass done. The big question is: is this the right architecture. You can read down below to get my ruminations, but the question is: is having both DeformableVolumeMesh and DeformableGeometry worthwhile?
+Reviewed 5 of 6 files at r1, 1 of 1 files at r2, all commit messages.
+Reviewable status: 20 unresolved discussions, LGTM missing from assignee SeanCurtis-TRI(platform), needs at least two assigned reviewers (waiting on @xuchenhan-tri)
+-- commits line 2 at r2:
+Your explanation in the PR would fit nicely in your commit message. :) Particularly as the change is not just "building the sdf", but it changes some classes and their relationships.
+geometry/proximity/deformable_contact_geometries.h line 23 at r2 (raw file):
+```
+namespace deformable {
+
+/* Definition of a deformable geometry for contact implementations. To be
+```
+BTW "implementation" is a weird word. "Evaluation" perhaps? After, all code implements something (even if it's just an interface design).
+geometry/proximity/deformable_contact_geometries.h line 27 at r2 (raw file):
+```
+   - a deformable volume mesh, and
+   - an approximate signed distance field in the interior of the mesh. */
+class DeformableGeometry {
+```
+BTW Because this is no longer the reference geometry, it seems the mesh should be T-valued. That said, I recognize that for the forseeable future we're only doing double-valued simulation here and this is an internal class, so it can be deferred. But the lack of T in the mesh will make this class one of the blocks to supporting AutoDiffXd, so we'll have to clean it up eventually. Author's discretion on when. For now, a TODO?
+geometry/proximity/deformable_contact_geometries.h line 29 at r2 (raw file):
+```
+class DeformableGeometry {
+ public:
+  DeformableGeometry(const DeformableGeometry& other);
+```
+Functionally, the end result is the same as DRAKE_DEFAULT_COPY_AND_MOVE_AND_ASSIGN. Therefore, you'd like it to look the same in doxygen. The fact that they aren't all defaulted is not an important detail to people consuming the documentation.
+There are a couple of ways to achieve this end. Let me know if you want to chat.
+geometry/proximity/deformable_contact_geometries.h line 36 at r2 (raw file):
+nit: I'm not sure how to interpret "field is interpolated from..." Some of the terms seem misleading (interpolation? from what?) It also seems to include a lot of implementation details. Perhaps it would be sufficient to say:
+Constructs a deformable geometry from the given mesh. Also computes an approximate signed distance field for the mesh.
+geometry/proximity/deformable_contact_geometries.h line 39 at r2 (raw file):
+```
+   distance (always non-positive) from the vertex to the surface of the volume
+   mesh. */
+  explicit DeformableGeometry(VolumeMesh<double> mesh);
+```
+What are your thoughts on a constructor that takes both mesh and (corresponding) pre-computed field? While this constructor is generic, it subverts applications in which we have a better means of defining the distance field (e.g. generated sphere). And, in the future, we'll have the ability to read pre-computed fields from disk.
+geometry/proximity/deformable_contact_geometries.h line 43 at r2 (raw file):
+In my first pass I made the following comment:
+DeformableGeometry::deformable_mesh() looks really redundant. "Deformable" appears twice. TODO for future PR?
+After I read further, I saw, essentially, geo.deformable_mesh().mesh() and remembered our previous conversation. Now my comment has been reduced to a "please ignore this whinging complaint". But, nevertheless, I have to say....yuck. :(
+My third thought is that we have a left over artifact (like when we were using ContactSurface to report deformable contact. Here's the question: is there any value in having both DeformableGeometry and DeformableVolumeMesh? Why can't they simply be merged such that the DeformableGeometry is DeformableMesh and contains the mesh, bvh, updaters, and field? (Essentially, this class is the same as a SoftMesh, but with updaters).
+I believe the analogy to hydro breaks down a bit. In hydro, a "soft" geometry has multiple representations (with potentially more in the future). So, it makes sense to abstract out the concept of a soft geometry which may be implemented as a mesh or a half space. Does that same logic apply here? Or is it simply all volume meshes? Will there be other representations of a deformable geometry such that the distinction between geometry and mesh is valuable?
+What do you think?
+geometry/proximity/deformable_contact_geometries.h line 138 at r2 (raw file):
+```
+      : rigid_mesh_(std::move(rigid_mesh)) {}
+
+  DRAKE_DEFAULT_COPY_AND_MOVE_AND_ASSIGN(RigidGeometry)
+```
+nit: This should come before the constructor. Always at the top.
+geometry/proximity/deformable_contact_geometries.cc line 21 at r2 (raw file):
+```
+ inside the given volume mesh. The signed distance value at each vertex is
+ calculated with respect to the surface of the volume mesh and is exact (to
+ the accuracy of the distance query algorithm), and the values in
+```
+nit: This could be improved:
+Part of the documentation consists of documenting how MeshFieldLinear works. That's not necessary.
+Because of (1) some good details get buried.
+There are some lifespan issues that aren't addressed.
+How about:
+```
+/* Returns an approximation of the signed distance field inside the given
+ `mesh`. The distance field is samples are exact (to the accuracy of the
+ distance query algorithm). All values in the field are non-positive.
+
+ @warning The resultant field depends on the given `mesh` and the mesh must be
+ kept alive at least as long as the returned field. 
+ @pre mesh != nullptr. */
+```
+geometry/proximity/deformable_contact_geometries.cc line 32 at r2 (raw file):
+```
+  const TriangleSurfaceMesh<double> surface_mesh =
+      ConvertVolumeToSurfaceMesh(*mesh);
+  for (const Vector3<double>& vertex : mesh->vertices()) {
+```
+Are you worried about whether or not the surface vertices evaluate to a perfect zero? I'd put some note about that one way or another.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 25 at r2 (raw file):
+```
+  constexpr double kEdgeLength = 1.0;
+  const Box box = Box::MakeCube(kEdgeLength);
+  constexpr double kRezHint = 0.5;
+```
+BTW Given your statement about "the targeted edge length is set to half the edge length" this could be:
+```
+constexpr double kRezHint = 0.5 * kEdgeLength;
+```
+geometry/proximity/test/deformable_contact_geometries_test.cc line 30 at r2 (raw file):
+```
+  // We leverage our knowledge about box mesh generation -- the targeted edge
+  // length is set to half the edge length, so we expect 8 subcubes to be
+  // created with a total of 27 vertices.
+```
+nit: "...with 26 vertices on the surface and one vertex (index 13) in the center of the box."
+geometry/proximity/test/deformable_contact_geometries_test.cc line 32 at r2 (raw file):
+```
+  // created with a total of 27 vertices.
+  ASSERT_EQ(num_vertices, 27);
+  const int center_vertex_index = 13;
+```
+nit: Name should be kCenterVertexIndex.
+And, as long as you're constexpring, here as well?
+geometry/proximity/test/deformable_contact_geometries_test.cc line 34 at r2 (raw file):
+```
+  const int center_vertex_index = 13;
+
+  DeformableGeometry deformable_geometry(mesh);
+```
+BTW Did you mean to copy the mesh in this test?
+geometry/proximity/test/deformable_contact_geometries_test.cc line 43 at r2 (raw file):
+```
+    for (int i = 0; i < num_vertices; ++i) {
+      if (i == center_vertex_index) continue;
+      EXPECT_DOUBLE_EQ(sdf.EvaluateAtVertex(i), 0.0);
+```
+This test seems a bit misleading. If you replaced this EXPECT with EXPECT_EQ(sdf.EvalauteAtVertex(i), 0.0); the test still passes. You're getting exactly zero.
+My initial hypothesis on why you were getting perfectly zero is because the box is axis aligned (i.e. if the vertices were transformed before field calculation you'd expose some numerical error into the result). That appears not to be the case. My next hypothesis was because it was a box.
+So, I replaced the box with a sphere and found that (with the right rotation matrix), I could get the EXPECT_DOUBLE_EQ test to fail.
+The reason this causes me concern is that, ideally, the test should bound the tested code. If a function can produce perfectly precise results in some cases, the test shouldn't be articulated for those cases (unless, of course, those cases are promised). The test should really look to tax the code so it characterizes the worst case. (It's why so much geometry test code applies arbitrary transforms so we don't have happy identities in our values.)
+Here's the code I played with:
+```
+/* Construct a coarse sphere (octahedron) whose vertices are transformed from
+ the canoncial sphere frame S to some arbitrary frame F. */
+VolumeMesh<double> MakeTransformedSphere(double radius,
+                                         const math::RigidTransformd& X_FS) {
+  const Sphere sphere = Sphere(radius);
+  VolumeMesh<double> mesh_S = MakeSphereVolumeMesh<double>(
+      sphere, radius * 2, TessellationStrategy::kSingleInteriorVertex);
+  const int num_vertices = mesh_S.num_vertices();
+  
+  std::vector<Vector3d> vertices_F;
+  vertices_F.reserve(num_vertices);
+  for (int v = 0; v < num_vertices; ++v) {
+    vertices_F.push_back(X_FS * mesh_S.vertex(v));
+  }
+  std::vector<VolumeElement> tets_F(mesh_S.tetrahedra());
+  return VolumeMesh<double>(move(tets_F), move(vertices_F));
+}
+
+GTEST_TEST(DeformableGeometryTest, ConstructorSphere) {
+  constexpr double kRadius = 1;
+  // This arbitrary transform (with the particularly oddly spelled rotation),
+  // stresses the distance computation on the surface. Another transform may not
+  // be so taxing.
+  math::RigidTransformd X_WS(math::RotationMatrixd::MakeXRotation(0.5) *
+                                 math::RotationMatrixd::MakeYRotation(0.3) *
+                                 math::RotationMatrixd::MakeZRotation(0.9),
+                             Vector3d(0.5, 0.7, 0.9));
+
+  VolumeMesh<double> mesh_W = MakeTransformedSphere(kRadius, X_WS);
+  // We leverage our knowledge about sphere mesh generation -- because the
+  // the sphere is the coarsest possible, it is an octahedron with 8 tests and
+  // 7 vertices (where the center vertex is at index 0).
+  const int num_vertices = mesh_W.num_vertices();
+  ASSERT_EQ(num_vertices, 7);
+  const int kCenterVertexIndex = 0;
+
+  DeformableGeometry deformable_geometry(move(mesh_W));
+
+  auto verify_sdf = [num_vertices](const DeformableGeometry& geometry) {
+    const VolumeMeshFieldLinear<double, double>& sdf =
+        geometry.signed_distance_field();
+    EXPECT_DOUBLE_EQ(sdf.EvaluateAtVertex(kCenterVertexIndex),
+                     -kRadius / std::sqrt(3));
+    // Skipping center vertex = 0.
+    for (int i = 1; i < num_vertices; ++i) {
+      EXPECT_NEAR(sdf.EvaluateAtVertex(i), 0.0, 0.125 * std::numeric_limits<double>::epsilon());
+      // This fails for vertex 6.
+      EXPECT_DOUBLE_EQ(sdf.EvaluateAtVertex(i), 0.0) << "For vertex " << i;
+    }
+  };
+  verify_sdf(deformable_geometry);
+
+  // Verify that the distance field is unaffected by deformation of the mesh.
+  const VectorXd q = VectorXd::LinSpaced(3 * num_vertices, 0.0, 1.0);
+  deformable_geometry.UpdateVertexPositions(q);
+  verify_sdf(deformable_geometry);
+}
+```
+I'd put particular emphasis on the fact that although EXPECT_DOUBLE_EQ fails, EXPECT_NEAR passes with an epsilon of 1/8 of machine precision. Apparently, in this case, that's still a looser tolerance than the "last four bits" that googletest uses.
+P.S. It was fun educating myself a bit on what EXPECT_DOUBLE_EQ actually does. :)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 54 at r2 (raw file):
+```
+}
+
+GTEST_TEST(DeformableGeometryTest, TestCopyMoveAssignConstruct) {
+```
+BTW In naming tests like these, I tend to go with something likeTestCopyAndMoveSemantics as you've got two sets of words (Copy and Move) and (Assign and Construct) that need to be combined in all ways. The list in the current title seems insufficient to that task. Obviously not a defect as I doubt any reader will be mystified by what this test accomplishes. :) (However, it feels more correct -- even if less explicit -- to just say "semantics". Hence my bias.)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 68 at r2 (raw file):
+```
+  // Test copy-assignment operator.
+  {
+    DeformableGeometry copy(dummy_mesh);
+```
+BTW Up to you, but this test would be a bit stronger if you had a strong signal that copy started different from original. Something like:
+```
+EXPECT_FALSE(
+  copy.deformable_mesh().mesh().Equal(original.deformable_mesh().mesh()));
+```
+geometry/proximity/test/deformable_contact_geometries_test.cc line 75 at r2 (raw file):
+```
+    EXPECT_NE(&original.signed_distance_field(), &copy.signed_distance_field());
+
+    EXPECT_TRUE(
+```
+nit Necessary but not sufficient.
+1)You should also confirm the addresses of the VolumeMeshes are not the same.
+You should also either a) test the bvh explicitly or b) assert that unique but equal meshes imply unique but equal bvhs. Too bad the DeformableVolumeMesh doesn't have its own EqualTo() so that this class could simply rely on that.
+This also applies to copy assignment.
+geometry/proximity/test/deformable_mesh_intersection_test.cc line 82 at r2 (raw file):
+```
+      {{0, 1, 2, 3}}, {Vector3<double>::Zero(), Vector3<double>::UnitX(),
+                       Vector3<double>::UnitY(), Vector3<double>::UnitZ()});
+  const deformable::DeformableGeometry deformable_W(single_tetrahedron_mesh_W);
+```
+BTW In these tests, consider if you want to copy the meshes. It's fine if you do, but might cause readers pause for thought in the future.
+geometry/proximity/test/deformable_mesh_intersection_test.cc line 113 at r2 (raw file):
+```
+  const double signed_distance_at_contact_point =
+      contact_data.signed_distances()[0];
+  EXPECT_EQ(signed_distance_at_contact_point, 0.0);
+```
+BTW Look! Perfect zeros! :)
+xuchen-han
+force-pushed
+the
+deformable-sdf
+branch
+from
+e6f1c90 to
+d9a9d9f
+Compare
+July 21, 2022 17:42
+xuchen-han
+added
+the
+priority: medium
+label
+Jul 21, 2022
+xuchen-han
+commented
+Jul 21, 2022
+View reviewed changes
+xuchen-han
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I addressed most of the comments. See below for thoughts on whether to merge DeformableVolumeMesh and DeformableGeometry.
++(priority: medium) as #17606 is dependent on this PR.
+Reviewable status: 8 unresolved discussions, LGTM missing from assignee SeanCurtis-TRI(platform), needs at least two assigned reviewers (waiting on @SeanCurtis-TRI)
+-- commits line 2 at r2:
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+Your explanation in the PR would fit nicely in your commit message. :) Particularly as the change is not just "building the sdf", but it changes some classes and their relationships.
+Done.
+geometry/proximity/deformable_contact_geometries.h line 23 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW "implementation" is a weird word. "Evaluation" perhaps? After, all code implements something (even if it's just an interface design).
+Done.
+geometry/proximity/deformable_contact_geometries.h line 27 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW Because this is no longer the reference geometry, it seems the mesh should be T-valued. That said, I recognize that for the forseeable future we're only doing double-valued simulation here and this is an internal class, so it can be deferred. But the lack of T in the mesh will make this class one of the blocks to supporting AutoDiffXd, so we'll have to clean it up eventually. Author's discretion on when. For now, a TODO?
+The philosophy I've taken so far towards supporting autodiff for deformable so far has been "don't do it yet". The main reason for that is that I haven't spent the time to reason about what needs to be typed AutoDiffXd and what can we be smart about and use analytic results instead. That by itself seems like project on its own.
+Since much of the code supporting deformable is double only, the value of plumbing through T here seems low. I put a TODO for now.
+geometry/proximity/deformable_contact_geometries.h line 29 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+Functionally, the end result is the same as DRAKE_DEFAULT_COPY_AND_MOVE_AND_ASSIGN. Therefore, you'd like it to look the same in doxygen. The fact that they aren't all defaulted is not an important detail to people consuming the documentation.
+There are a couple of ways to achieve this end. Let me know if you want to chat.
+I think you introduced the various tricks to me at one point, but I can't recall. Perhaps point me to an example?
+In this case, the documentation won't show up in Doxygen anyway, so the point might be moot?
+geometry/proximity/deformable_contact_geometries.h line 36 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit: I'm not sure how to interpret "field is interpolated from..." Some of the terms seem misleading (interpolation? from what?) It also seems to include a lot of implementation details. Perhaps it would be sufficient to say:
+Constructs a deformable geometry from the given mesh. Also computes an approximate signed distance field for the mesh.
+Done, thanks.
+geometry/proximity/deformable_contact_geometries.h line 39 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+What are your thoughts on a constructor that takes both mesh and (corresponding) pre-computed field? While this constructor is generic, it subverts applications in which we have a better means of defining the distance field (e.g. generated sphere). And, in the future, we'll have the ability to read pre-computed fields from disk.
+Done via TODO.
+That is definitively desirable! But without proper upstream code support, I can't tell for sure what that format would be yet (a std::vector of vertex values or a preprocessed MeshFieldLinear?). Thus a TODO for now.
+geometry/proximity/deformable_contact_geometries.h line 43 at r2 (raw file):
+Does that same logic apply here? Or is it simply all volume meshes? Will there be other representations of a deformable geometry such that the distinction between geometry and mesh is valuable?
+I don't foresee any representation other than a volume mesh with movable vertices (at least in the near future).
+So far, there's no reason that DeformableGeometry and DeformableVolumeMesh needs to be two different classes -- They are both only used for collision queries in tandem. However, I don't quite see the appeal merging them. Here are the pros and cons of merging that I see. Perhaps you could help me complete each section:
+Pro: Fewer layers to peel through when reading and we avoid deformable_geometry.deformable_mesh().mesh().
+Con: This prevents us from reusing the deformable mesh class in other contexts that doesn't require a distance field (e.g. visualization?). Also, it makes the class a bit harder to read. The existence of MeshDeformer in DeformableVolumeMesh already gives me chills. Now throw in MeshFieldLinear that also holds onto a mesh pointer...
+Personally, I don't feel like getting close to the implementation of DeformableVolumeMesh and would prefer keeping the structure as is. (You can probably tell that deformable_mesh().mesh() doesn't bother me as much :)
+geometry/proximity/deformable_contact_geometries.h line 138 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit: This should come before the constructor. Always at the top.
+Done.
+geometry/proximity/deformable_contact_geometries.cc line 21 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit: This could be improved:
+Part of the documentation consists of documenting how MeshFieldLinear works. That's not necessary.
+Because of (1) some good details get buried.
+There are some lifespan issues that aren't addressed.
+How about:
+```
+/* Returns an approximation of the signed distance field inside the given
+ `mesh`. The distance field is samples are exact (to the accuracy of the
+ distance query algorithm). All values in the field are non-positive.
+
+ @warning The resultant field depends on the given `mesh` and the mesh must be
+ kept alive at least as long as the returned field. 
+ @pre mesh != nullptr. */
+```
+Done. Very clear. Thank you.
+geometry/proximity/deformable_contact_geometries.cc line 32 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+Are you worried about whether or not the surface vertices evaluate to a perfect zero? I'd put some note about that one way or another.
+I don't care about exact zeros. Artifacts from floating point numeric are fine.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 25 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW Given your statement about "the targeted edge length is set to half the edge length" this could be:
+```
+constexpr double kRezHint = 0.5 * kEdgeLength;
+```
+Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 30 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit: "...with 26 vertices on the surface and one vertex (index 13) in the center of the box."
+Done thanks.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 32 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit: Name should be kCenterVertexIndex.
+And, as long as you're constexpring, here as well?
+Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 34 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW Did you mean to copy the mesh in this test?
+Nope. Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 43 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+This test seems a bit misleading. If you replaced this EXPECT with EXPECT_EQ(sdf.EvalauteAtVertex(i), 0.0); the test still passes. You're getting exactly zero.
+My initial hypothesis on why you were getting perfectly zero is because the box is axis aligned (i.e. if the vertices were transformed before field calculation you'd expose some numerical error into the result). That appears not to be the case. My next hypothesis was because it was a box.
+So, I replaced the box with a sphere and found that (with the right rotation matrix), I could get the EXPECT_DOUBLE_EQ test to fail.
+The reason this causes me concern is that, ideally, the test should bound the tested code. If a function can produce perfectly precise results in some cases, the test shouldn't be articulated for those cases (unless, of course, those cases are promised). The test should really look to tax the code so it characterizes the worst case. (It's why so much geometry test code applies arbitrary transforms so we don't have happy identities in our values.)
+Here's the code I played with:
+```
+/* Construct a coarse sphere (octahedron) whose vertices are transformed from
+ the canoncial sphere frame S to some arbitrary frame F. */
+VolumeMesh<double> MakeTransformedSphere(double radius,
+                                         const math::RigidTransformd& X_FS) {
+  const Sphere sphere = Sphere(radius);
+  VolumeMesh<double> mesh_S = MakeSphereVolumeMesh<double>(
+      sphere, radius * 2, TessellationStrategy::kSingleInteriorVertex);
+  const int num_vertices = mesh_S.num_vertices();
+  
+  std::vector<Vector3d> vertices_F;
+  vertices_F.reserve(num_vertices);
+  for (int v = 0; v < num_vertices; ++v) {
+    vertices_F.push_back(X_FS * mesh_S.vertex(v));
+  }
+  std::vector<VolumeElement> tets_F(mesh_S.tetrahedra());
+  return VolumeMesh<double>(move(tets_F), move(vertices_F));
+}
+
+GTEST_TEST(DeformableGeometryTest, ConstructorSphere) {
+  constexpr double kRadius = 1;
+  // This arbitrary transform (with the particularly oddly spelled rotation),
+  // stresses the distance computation on the surface. Another transform may not
+  // be so taxing.
+  math::RigidTransformd X_WS(math::RotationMatrixd::MakeXRotation(0.5) *
+                                 math::RotationMatrixd::MakeYRotation(0.3) *
+                                 math::RotationMatrixd::MakeZRotation(0.9),
+                             Vector3d(0.5, 0.7, 0.9));
+
+  VolumeMesh<double> mesh_W = MakeTransformedSphere(kRadius, X_WS);
+  // We leverage our knowledge about sphere mesh generation -- because the
+  // the sphere is the coarsest possible, it is an octahedron with 8 tests and
+  // 7 vertices (where the center vertex is at index 0).
+  const int num_vertices = mesh_W.num_vertices();
+  ASSERT_EQ(num_vertices, 7);
+  const int kCenterVertexIndex = 0;
+
+  DeformableGeometry deformable_geometry(move(mesh_W));
+
+  auto verify_sdf = [num_vertices](const DeformableGeometry& geometry) {
+    const VolumeMeshFieldLinear<double, double>& sdf =
+        geometry.signed_distance_field();
+    EXPECT_DOUBLE_EQ(sdf.EvaluateAtVertex(kCenterVertexIndex),
+                     -kRadius / std::sqrt(3));
+    // Skipping center vertex = 0.
+    for (int i = 1; i < num_vertices; ++i) {
+      EXPECT_NEAR(sdf.EvaluateAtVertex(i), 0.0, 0.125 * std::numeric_limits<double>::epsilon());
+      // This fails for vertex 6.
+      EXPECT_DOUBLE_EQ(sdf.EvaluateAtVertex(i), 0.0) << "For vertex " << i;
+    }
+  };
+  verify_sdf(deformable_geometry);
+
+  // Verify that the distance field is unaffected by deformation of the mesh.
+  const VectorXd q = VectorXd::LinSpaced(3 * num_vertices, 0.0, 1.0);
+  deformable_geometry.UpdateVertexPositions(q);
+  verify_sdf(deformable_geometry);
+}
+```
+I'd put particular emphasis on the fact that although EXPECT_DOUBLE_EQ fails, EXPECT_NEAR passes with an epsilon of 1/8 of machine precision. Apparently, in this case, that's still a looser tolerance than the "last four bits" that googletest uses.
+P.S. It was fun educating myself a bit on what EXPECT_DOUBLE_EQ actually does. :)
+Much wow. This is definitely an improvement. And I'll now take credit for it :)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 54 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW In naming tests like these, I tend to go with something likeTestCopyAndMoveSemantics as you've got two sets of words (Copy and Move) and (Assign and Construct) that need to be combined in all ways. The list in the current title seems insufficient to that task. Obviously not a defect as I doubt any reader will be mystified by what this test accomplishes. :) (However, it feels more correct -- even if less explicit -- to just say "semantics". Hence my bias.)
+Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 68 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW Up to you, but this test would be a bit stronger if you had a strong signal that copy started different from original. Something like:
+```
+EXPECT_FALSE(
+  copy.deformable_mesh().mesh().Equal(original.deformable_mesh().mesh()));
+```
+Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 75 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit Necessary but not sufficient.
+1)You should also confirm the addresses of the VolumeMeshes are not the same.
+You should also either a) test the bvh explicitly or b) assert that unique but equal meshes imply unique but equal bvhs. Too bad the DeformableVolumeMesh doesn't have its own EqualTo() so that this class could simply rely on that.
+This also applies to copy assignment.
+Done.
+geometry/proximity/test/deformable_mesh_intersection_test.cc line 82 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW In these tests, consider if you want to copy the meshes. It's fine if you do, but might cause readers pause for thought in the future.
+Done.
+geometry/proximity/test/deformable_mesh_intersection_test.cc line 113 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+BTW Look! Perfect zeros! :)
+Yeah, I don't care perfect zeros. Changed to an EXPECT_NEAR.
+SeanCurtis-TRI
+reviewed
+Jul 21, 2022
+View reviewed changes
+SeanCurtis-TRI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+A couple of small cosmetic typos (largely provided by me). But definitely ready for platform review. If it's not too late. You might send out a call to platform_review channel.
+Reviewed 4 of 4 files at r3, all commit messages.
+Reviewable status: 1 unresolved discussion, needs at least two assigned reviewers (waiting on @xuchenhan-tri)
+geometry/proximity/deformable_contact_geometries.h line 29 at r2 (raw file):
+Previously, xuchenhan-tri wrote…
+I think you introduced the various tricks to me at one point, but I can't recall. Perhaps point me to an example?
+In this case, the documentation won't show up in Doxygen anyway, so the point might be moot?
+That's an excellent point. I happily withdraw the overzealous comment. :)
+geometry/proximity/deformable_contact_geometries.h line 39 at r2 (raw file):
+Previously, xuchenhan-tri wrote…
+Done via TODO.
+That is definitively desirable! But without proper upstream code support, I can't tell for sure what that format would be yet (a std::vector of vertex values or a preprocessed MeshFieldLinear?). Thus a TODO for now.
+I like your TODO.
+FTR I believe you would take the mes and field (and you could confirm that the field was properly constructed on the given mesh).
+geometry/proximity/deformable_contact_geometries.h line 43 at r2 (raw file):
+Previously, xuchenhan-tri wrote…
+Does that same logic apply here? Or is it simply all volume meshes? Will there be other representations of a deformable geometry such that the distinction between geometry and mesh is valuable?
+I don't foresee any representation other than a volume mesh with movable vertices (at least in the near future).
+So far, there's no reason that DeformableGeometry and DeformableVolumeMesh needs to be two different classes -- They are both only used for collision queries in tandem. However, I don't quite see the appeal merging them. Here are the pros and cons of merging that I see. Perhaps you could help me complete each section:
+Pro: Fewer layers to peel through when reading and we avoid deformable_geometry.deformable_mesh().mesh().
+Con: This prevents us from reusing the deformable mesh class in other contexts that doesn't require a distance field (e.g. visualization?). Also, it makes the class a bit harder to read. The existence of MeshDeformer in DeformableVolumeMesh already gives me chills. Now throw in MeshFieldLinear that also holds onto a mesh pointer...
+Personally, I don't feel like getting close to the implementation of DeformableVolumeMesh and would prefer keeping the structure as is. (You can probably tell that deformable_mesh().mesh() doesn't bother me as much :)
+Further pros:
+The existence of two classes implies the need of two classes. We'd be removing that mispreresentation.
+Fewer files, fewer classes to coordinate. Code for a single purpose is co-located.
+We now have two classes that have bespoke copy/move semantics. It could just be one "weird" class.
+Thoughts on cons:
+"prevents us from us reusing". This kind of argument is a slippery slope. It is highly speculative. If you had a concrete plan in mind, that would be one thing. But developing code today for a case you can't imagine tomorrow is not a good way forward. It's like why we don't put code in common/ by default. Even if we imagine that others could use it, we don't actually place it there until we have confirmed need.
+re: the contents of DeformableVolumeMesh giving you the chills. This doesn't seem to be a technical argument.
+That said, this is all internal code and can be rejiggered at any time. I'm willing to tackle it myself once you get the surrounding code settled in geometry/. My goal isn't to interfere your current flow.
+geometry/proximity/deformable_contact_geometries.cc line 21 at r2 (raw file):
+Previously, xuchenhan-tri wrote…
+Done. Very clear. Thank you.
+In retrospect the phrase "depends on the given mesh" would probably be better expressed as "aliases the given mesh" That would be a more precise characterization of that dependency.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 43 at r2 (raw file):
+Previously, xuchenhan-tri wrote…
+Much wow. This is definitely an improvement. And I'll now take credit for it :)
+Sounds good. :)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 75 at r2 (raw file):
+Previously, xuchenhan-tri wrote…
+Done.
+"Testing the bvh" is both parts. You have to make sure the same BVH hasn't been aliased. So you also need:
+```
+EXPECT_NE(&copy.deformable_mesh().bvh(), original.deformable_mesh().bvh());
+```
+(Again, this is where some utility function on the other class that says "Unique but equal" would be of great benefit to this class.)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 52 at r3 (raw file):
+```
+  VolumeMesh<double> mesh_W = MakeTransformedSphere(kRadius, X_WS);
+  // We leverage our knowledge about sphere mesh generation -- because the
+  // the sphere is the coarsest possible, it is an octahedron with 8 tests and
+```
+nit: my all-to-common typo
+s/tests/tets
+SeanCurtis-TRI
+reviewed
+Jul 21, 2022
+View reviewed changes
+SeanCurtis-TRI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewable status: 2 unresolved discussions, needs at least two assigned reviewers (waiting on @xuchenhan-tri)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 40 at r3 (raw file):
+```
+}
+
+GTEST_TEST(DeformableGeometryTest, ConstructorSphere) {
+```
+nit: Oh, yeah. The "Sphere" in this test name has no relevance to the test. It only made sense when i was comparing box and Sphere.
+xuchen-han
+commented
+Jul 21, 2022
+View reviewed changes
+xuchen-han
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewable status: needs at least two assigned reviewers (waiting on @xuchenhan-tri)
+geometry/proximity/deformable_contact_geometries.h line 43 at r2 (raw file):
+The existence of two classes implies the need of two classes.
+I'm not seeing the argument against the need of two classes. Sure, DeformableVolumeMesh is only used in this one place right now, but it seems like a perfectly fine abstraction to me -- a mesh that can be deformed while maintaining its topology.
+re: the contents of DeformableVolumeMesh giving you the chills. This doesn't seem to be a technical argument.
+The fact that I find the code easier to read and work given the DeformableVolumeMesh abstraction is an argument towards to utility of this class. The argument would be a whole lot stronger if this opinion comes from an impartial third party, but still...
+Anyway, I'm not against merging the two class. Instead, I'm not seeing a clear win to justify spending effort on it right now. I appreciate the offer to improve upon this later on!
+geometry/proximity/deformable_contact_geometries.cc line 21 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+In retrospect the phrase "depends on the given mesh" would probably be better expressed as "aliases the given mesh" That would be a more precise characterization of that dependency.
+Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 75 at r2 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+"Testing the bvh" is both parts. You have to make sure the same BVH hasn't been aliased. So you also need:
+```
+EXPECT_NE(&copy.deformable_mesh().bvh(), original.deformable_mesh().bvh());
+```
+(Again, this is where some utility function on the other class that says "Unique but equal" would be of great benefit to this class.)
+Done.
+geometry/proximity/test/deformable_contact_geometries_test.cc line 40 at r3 (raw file):
+Previously, SeanCurtis-TRI (Sean Curtis) wrote…
+nit: Oh, yeah. The "Sphere" in this test name has no relevance to the test. It only made sense when i was comparing box and Sphere.
+Done.
+xuchen-han
+force-pushed
+the
+deformable-sdf
+branch
+2 times, most recently
+from
+43f49ec to
+bed79ef
+Compare
+July 21, 2022 23:07
+SeanCurtis-TRI
+reviewed
+Jul 25, 2022
+View reviewed changes
+SeanCurtis-TRI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed 2 of 2 files at r4, all commit messages.
+Reviewable status: needs at least two assigned reviewers (waiting on @xuchenhan-tri)
+xuchen-han
+assigned
+rpoyner-tri
+Jul 25, 2022
+xuchen-han
+commented
+Jul 25, 2022
+View reviewed changes
+xuchen-han
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
++@rpoyner-tri for platform review on Tuesday per rotation please.
+Reviewable status: LGTM missing from assignee rpoyner-tri(platform) (waiting on @rpoyner-tri)
+rpoyner-tri
+reviewed
+Jul 26, 2022
+View reviewed changes
+rpoyner-tri
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+typos
+Reviewed 2 of 6 files at r1, 2 of 4 files at r3, 2 of 2 files at r4, all commit messages.
+Reviewable status: 2 unresolved discussions (waiting on @xuchenhan-tri)
+geometry/proximity/deformable_contact_geometries.h line 24 at r4 (raw file):
+```
+// TODO(xuchenhan-tri): Consider supporting AutoDiffXd.
+/* Definition of a deformable geometry for contact evalutions. To be
+```
+typo
+Code quote:
+```
+evalutions
+```
+geometry/proximity/test/deformable_contact_geometries_test.cc line 23 at r4 (raw file):
+```
+/* Constructs a coarse sphere (octahedron) whose vertices are transformed from
+ the canoncial sphere frame S to some arbitrary frame F. */
+```
+typo
+Code quote:
+```
+canoncial
+```
+xuchen-han
+force-pushed
+the
+deformable-sdf
+branch
+from
+bed79ef to
+633ba8d
+Compare
+July 26, 2022 18:09
+xuchen-han
+commented
+Jul 26, 2022
+View reviewed changes
+xuchen-han
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewable status: complete! all discussions resolved, LGTM from assignees rpoyner-tri(platform),SeanCurtis-TRI(platform) (waiting on @rpoyner-tri and @SeanCurtis-TRI)
+geometry/proximity/deformable_contact_geometries.h line 24 at r4 (raw file):
+Previously, rpoyner-tri (Rick Poyner (rico)) wrote…
+typo
+Done
+geometry/proximity/test/deformable_contact_geometries_test.cc line 23 at r4 (raw file):
+Previously, rpoyner-tri (Rick Poyner (rico)) wrote…
+typo
+Done.
+rpoyner-tri
+reviewed
+Jul 26, 2022
+View reviewed changes
+rpoyner-tri
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed 2 of 2 files at r5, all commit messages.
+Reviewable status: 1 unresolved discussion (waiting on @xuchenhan-tri)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 23 at r5 (raw file):
+```
+/* Constructs a coarse sphere (octahedron) whose vertices are transformed from
+ the canonicial sphere frame S to some arbitrary frame F. */
+```
+sigh different typo
+Suggestion:
+```
+canonical
+```
+[geometry] Build deformable sdf from distance to surface mesh
+…
+8d35686
+```
+Remove the ReferenceDeformableGeometry class and instead stores the
+approximate signed distance field directly in deformable geometry. With
+this, we unlock arbitrary volume meshes (with potentially non-convex
+surface) as deformable geomtries.
+
+While doing that, we ensure that the mesh inside the SDF points to the
+deformable mesh held by DeformableGeometry so that we don't have to
+create local copies in deformable_mesh_intersection.cc.
+```
+xuchen-han
+force-pushed
+the
+deformable-sdf
+branch
+from
+633ba8d to
+8d35686
+Compare
+July 26, 2022 18:17
+xuchen-han
+commented
+Jul 26, 2022
+View reviewed changes
+xuchen-han
+left a comment
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewable status: 1 unresolved discussion (waiting on @rpoyner-tri)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 23 at r5 (raw file):
+Previously, rpoyner-tri (Rick Poyner (rico)) wrote…
+sigh different typo
+Ah sorry. Done.
+rpoyner-tri
+reviewed
+Jul 26, 2022
+View reviewed changes
+rpoyner-tri
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed 1 of 1 files at r6, all commit messages.
+Reviewable status: complete! all discussions resolved, LGTM from assignees rpoyner-tri(platform),SeanCurtis-TRI(platform) (waiting on @xuchenhan-tri)
+rpoyner-tri
+reviewed
+Jul 26, 2022
+View reviewed changes
+rpoyner-tri
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewable status: complete! all discussions resolved, LGTM from assignees rpoyner-tri(platform),SeanCurtis-TRI(platform) (waiting on @xuchenhan-tri)
+geometry/proximity/test/deformable_contact_geometries_test.cc line 23 at r5 (raw file):
+Previously, xuchenhan-tri wrote…
+Ah sorry. Done.
+Thanks!
+SeanCurtis-TRI
+reviewed
+Jul 26, 2022
+View reviewed changes
+SeanCurtis-TRI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Reviewed 1 of 2 files at r5, 1 of 1 files at r6, all commit messages.
+Reviewable status: complete! all discussions resolved, LGTM from assignees rpoyner-tri(platform),SeanCurtis-TRI(platform) (waiting on @xuchenhan-tri)
+rpoyner-tri
+merged commit 2e17b1a
+into
+RobotLocomotion:master
+Jul 26, 2022
+xuchen-han
+mentioned this pull request
+Aug 8, 2022
+Support deformable geometries in SceneGraph
+#16875
+Closed
+13 tasks done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+component: geometry proximity
+Contact, distance, signed distance queries and related properties
+priority: medium
+release notes: none
+This pull request should not be mentioned in the release notes
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

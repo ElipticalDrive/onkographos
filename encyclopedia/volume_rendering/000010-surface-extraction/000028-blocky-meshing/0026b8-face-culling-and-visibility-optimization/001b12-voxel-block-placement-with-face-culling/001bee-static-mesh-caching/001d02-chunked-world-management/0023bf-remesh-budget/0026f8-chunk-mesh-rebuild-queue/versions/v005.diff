@@ -1,0 +1,160 @@
+--- v004.md
++++ v005.md
+@@ -4,99 +4,91 @@
+ 
+ ## Overview
+-A queue-based system to batch and process chunk mesh rebuilds asynchronously or on tick [S1, unofficial]. It solves the problem of redundant mesh generation by ensuring each dirty chunk is processed exactly once per frame or tick cycle, serving as the execution engine for the Remesh Budget [Remesh Budget](3119-remesh-budget.md).
++A queue-based system to batch and process chunk mesh rebuilds asynchronously or on tick [S1, unofficial]. It solves the problem of redundant mesh regeneration by ensuring each modified chunk is processed exactly once per frame or tick cycle [S1, unofficial]. Unlike immediate synchronous rebuilding, which can cause frame drops during rapid block placement, this method decouples modification detection from geometry generation [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `RebuildQueue`: A dynamic array or stack of chunk indices requiring mesh updates.
+-- `RebuildSet`: A hash set or boolean array tracking which chunk indices are currently in the queue to prevent duplicates.
++- `RebuildQueue`: A dynamic array or stack storing `ChunkIndex` values (integer pairs/tuples) pending mesh regeneration.
++- `RebuildSet`: A hash set or boolean map storing `ChunkIndex` values currently in the queue to prevent duplicates.
+ - `ActiveChunks`: A set of chunk indices currently loaded and visible in the world.
+-- `ChunkCache`: A data structure mapping chunk indices to their raw voxel block data.
++- `ChunkCache`: A data structure mapping `ChunkIndex` to raw voxel block data.
+ - `WorldMesh`: The rendering component responsible for managing chunk meshes.
+ 
+ **Outputs:**
+-- Updated meshes for processed chunks in `WorldMesh`.
++- Updated meshes for chunks in `RebuildQueue`.
+ - Collision state updates for chunks near the player.
+ 
+ **Data Structures:**
+-- `RebuildQueue`: Stores `ChunkIndex` (typically `FIntPoint` or `int2` representing X, Z coordinates).
+-- `RebuildSet`: Stores `ChunkIndex` for O(1) lookup.
+-- `ChunkCache`: Maps `ChunkIndex` to block data (e.g., `TMap<FIntPoint, TMap<FIntVector, EBlockType>>`).
++- `ChunkIndex`: Typically a 2D integer coordinate $(x, z)$ or a flattened integer ID.
++- `RebuildQueue`: LIFO stack (pop from end).
++- `RebuildSet`: $O(1)$ lookup structure.
+ 
+ **Steps:**
+-1. **Enqueue Dirty Chunks:** When a chunk's block data changes, if its `ChunkIndex` is not in `RebuildSet`, add it to both `RebuildSet` and `RebuildQueue` [S1, unofficial].
+-2. **Process Loop:**
+-   a. If `RebuildQueue` is empty or `WorldMesh` is null, terminate the process [S1, unofficial].
+-   b. Pop the last element from `RebuildQueue`: `ChunkIndex = RebuildQueue.Last()`, then `RebuildQueue.Pop()` [S1, unofficial].
+-   c. Remove `ChunkIndex` from `RebuildSet` [S1, unofficial].
+-   d. If `ChunkIndex` is not in `ActiveChunks`, return to step 2a (skip processing) [S1, unofficial].
+-   e. Retrieve chunk data from `ChunkCache`. If not found, return to step 2a [S1, unofficial].
+-   f. Prepare mesh: `Mesh = AWorldMeshActor::PrepareChunkMesh(*Data)` [S1, unofficial].
+-   g. Update the chunk mesh: `WorldMesh->UpdateChunk(ChunkIndex, Mesh)` [S1, unofficial].
+-   h. Check if the chunk is near the player (within 1 chunk in X and Y). If so, enable collision for the chunk [S1, unofficial].
++1. **Enqueue Modification:** When a chunk is modified, check if its `ChunkIndex` exists in `RebuildSet`. If not, add `ChunkIndex` to both `RebuildSet` and `RebuildQueue` [S1, unofficial].
++2. **Process Loop:** Check if `RebuildQueue` is empty or `WorldMesh` is null. If so, terminate [S1, unofficial].
++3. **Pop Task:** Retrieve the last element from `RebuildQueue`: `ChunkIndex = RebuildQueue.Last()`. Remove it from the queue: `RebuildQueue.Pop()`. Remove `ChunkIndex` from `RebuildSet` [S1, unofficial].
++4. **Validate Activity:** Check if `ChunkIndex` is present in `ActiveChunks`. If not, discard and return to step 2 [S1, unofficial].
++5. **Retrieve Data:** Fetch chunk data from `ChunkCache` using `ChunkIndex`. If data is missing, discard and return to step 2 [S1, unofficial].
++6. **Prepare Mesh:** Call `AWorldMeshActor::PrepareChunkMesh(*Data)` to generate the geometry from the raw block data [S1, unofficial].
++7. **Update Mesh:** Call `WorldMesh->UpdateChunk(ChunkIndex, Mesh)` to replace the old mesh with the new one [S1, unofficial].
++8. **Collision Check:** Determine if the chunk is near the player (within 1 chunk in X and Y axes). If true, enable collision for the chunk [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def ProcessRebuildQueue(RebuildQueue, RebuildSet, ActiveChunks, ChunkCache, WorldMesh, PlayerPosition):
+-    if not RebuildQueue or not WorldMesh:
++def ProcessRebuildQueue(RebuildQueue, RebuildSet, ActiveChunks, ChunkCache, WorldMesh):
++    # Step 2: Check termination conditions
++    if not RebuildQueue or WorldMesh is None:
+         return
+ 
+-    while RebuildQueue:
+-        # Pop the last element
+-        ChunkIndex = RebuildQueue[-1]
+-        RebuildQueue.pop()
+-        
+-        # Remove from set
+-        RebuildSet.remove(ChunkIndex)
+-        
+-        # Check if active
+-        if ChunkIndex not in ActiveChunks:
+-            continue
+-            
+-        # Retrieve data
+-        Data = ChunkCache.get(ChunkIndex)
+-        if Data is None:
+-            continue
+-            
+-        # Prepare and update mesh
+-        Mesh = PrepareChunkMesh(Data)
+-        WorldMesh.UpdateChunk(ChunkIndex, Mesh)
+-        
+-        # Check proximity for collision
+-        if IsNearPlayer(ChunkIndex, PlayerPosition):
+-            WorldMesh.EnableCollision(ChunkIndex)
++    # Step 3: Pop last element
++    ChunkIndex = RebuildQueue[-1]
++    RebuildQueue.pop()
++    RebuildSet.remove(ChunkIndex)
++
++    # Step 4: Validate active status
++    if ChunkIndex not in ActiveChunks:
++        return
++
++    # Step 5: Retrieve data
++    Data = ChunkCache.get(ChunkIndex)
++    if Data is None:
++        return
++
++    # Step 6: Prepare mesh
++    Mesh = PrepareChunkMesh(Data)
++
++    # Step 7: Update mesh
++    WorldMesh.UpdateChunk(ChunkIndex, Mesh)
++
++    # Step 8: Collision check
++    if IsNearPlayer(ChunkIndex, PlayerPosition):
++        EnableCollision(ChunkIndex)
+ 
+ def IsNearPlayer(ChunkIndex, PlayerPosition):
+     # Check if within 1 chunk in X and Y
+-    # Implementation depends on coordinate system specifics [G]
+-    dx = abs(ChunkIndex.x - PlayerPosition.chunk_x)
+-    dy = abs(ChunkIndex.y - PlayerPosition.chunk_y)
+-    return dx <= 1 and dy <= 1
+-
+-def EnqueueChunk(ChunkIndex, RebuildQueue, RebuildSet):
+-    if ChunkIndex not in RebuildSet:
+-        RebuildSet.add(ChunkIndex)
+-        RebuildQueue.append(ChunkIndex)
++    return abs(ChunkIndex.x - PlayerPosition.x) <= 1 and abs(ChunkIndex.z - PlayerPosition.z) <= 1
+ ```
+ 
+-**Parameters:**
+-- Processing order: LIFO (Last-In-First-Out) via `Last()` and `Pop()` [S1, unofficial].
+-- Proximity threshold: 1 chunk in X and Y [S1, unofficial].
+-
+ **Edge Cases:**
+-- If `WorldMesh` is null, the process halts immediately [S1, unofficial].
+-- If chunk data is missing from cache, the chunk is skipped [S1, unofficial].
+-- Duplicate entries are prevented by `RebuildSet` [S1, unofficial].
++- **Duplicate Modifications:** The `RebuildSet` prevents adding the same chunk to the queue multiple times if multiple blocks change in the same frame [S1, unofficial].
++- **Unloaded Chunks:** Chunks modified while outside the active view are skipped if they are not in `ActiveChunks` during processing [S1, unofficial].
++- **Null Mesh:** If `WorldMesh` is not initialized, the queue processing halts immediately to prevent crashes [S1, unofficial].
+ 
+ ## Subtopics
+ 
++### [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md)
++Offloads mesh generation to background threads to prevent frame stutter. Choose when frame rate stability is critical.
++
++### [Multithreaded Job Queue (Generation & Remeshing)](6848-multithreaded-job-queue-generation-remeshing.md)
++Distributes tasks across CPU threads using LIFO priority. Choose for high-performance CPU utilization; builds on this method.
++
+ ## Operating characteristics
+-- **Time Complexity:** O(1) per chunk for queue operations. Mesh generation complexity depends on the chunk size and culling algorithm.
+-- **Memory Complexity:** O(N) where N is the number of dirty chunks.
+-- **Performance:** Prevents redundant mesh generation by tracking state in `RebuildSet` [S1, unofficial].
+-- **Strengths:** Simple implementation, prevents duplicate work, integrates collision updates [S1, unofficial].
+-- **Limitations:** Synchronous processing on the main thread can cause stutter if not offloaded [Asynchronous Chunk Loading](4216-asynchronous-chunk-loading.md). LIFO order may not prioritize camera proximity without additional logic [Remesh Budget](3119-remesh-budget.md).
++- **Time Complexity:** $O(1)$ for enqueue and dequeue operations. Mesh generation is $O(N)$ where $N$ is the number of blocks in the chunk.
++- **Memory Complexity:** $O(M)$ where $M$ is the number of modified chunks in the queue.
++- **Performance:** Reduces per-frame overhead by batching updates. Prevents blocking the main thread if combined with asynchronous loading [S1, unofficial].
++- **Strengths:** Simple implementation, prevents redundant work, easy to integrate with existing chunk systems.
++- **Limitations:** Does not inherently handle parallelism (requires external threading). Collision updates are synchronous with mesh updates.
+ 
+ ## Background
+-Originated in voxel world management systems for real-time applications, specifically implemented in the VoxelWorld project [S1, unofficial]. It addresses the need for efficient incremental mesh updates in dynamic voxel environments.
++Originated in voxel world management systems to handle dynamic terrain changes efficiently [S1, unofficial]. It is commonly used in sandbox games where players frequently modify the environment [S1, unofficial].
+ 
+ ## Sources

@@ -12,26 +12,24 @@ Symmetry Mapping maps one of the 256 possible cube configurations to one of 23 c
 
 **Data Structures:**
 The method relies on three precomputed arrays defined as follows [S1, unofficial]:
-1. `RotationAndBaseCase` struct: Contains `int Rot` (rotation index) and `int BaseCase` (base case index).
-2. `MapToBase` array: Type `RotationAndBaseCase[256]`. Maps each of the 256 input configurations to its corresponding base case and rotation.
-3. `BaseRotat` array: Type `Rotation[24]`. Stores 24 rotation transformations (symmetries of the cube). Each rotation is represented as a permutation of the 8 vertex indices.
-4. `BaseConfig` array: Type `Configuration[23]`. Defines the 23 unique base cases, including their edge intersections and triangle lists. Each triangle is a triplet of edge indices $(0 \le k \le 11)$.
+1. `RotationAndBaseCase` struct: Contains `int Rot` (rotation index) and `int BaseCase` (base case index) [S1, unofficial].
+2. `MapToBase` array: Type `RotationAndBaseCase[256]` [S1, unofficial]. Maps each of the 256 input configurations to its corresponding base case and rotation [S1, unofficial].
+3. `BaseRotat` array: Type `Rotation[24]` [S1, unofficial]. Stores 24 rotation transformations (symmetries of the cube) [S1, unofficial]. Each rotation is represented as a permutation of the 8 vertex indices [S1, unofficial].
+4. `BaseConfig` array: Type `Configuration[23]` [S1, unofficial]. Defines the 23 unique base cases, including their edge intersections and triangle lists [S1, unofficial]. Each triangle is a triplet of edge indices $(0 \le k \le 11)$ [S1, unofficial].
 
 **Steps:**
-1. Given a cube configuration index $C$, retrieve the entry from `MapToBase[C]`.
-2. Extract the base case index $B = \text{MapToBase}[C].\text{BaseCase}$ and the rotation index $R = \text{MapToBase}[C].\text{Rot}$.
-3. Retrieve the rotation permutation $P_R$ from `BaseRotat[R]`.
-4. Retrieve the triangle list for base case $B$ from `BaseConfig[B]`.
-5. Apply the rotation permutation $P_R$ to the edge indices in the base case's triangle list to generate the final triangles for configuration $C$.
+1. Given a cube configuration index $C$, retrieve the entry from `MapToBase[C]` [S1, unofficial].
+2. Extract the base case index $B = \text{MapToBase}[C].\text{BaseCase}$ and the rotation index $R = \text{MapToBase}[C].\text{Rot}$ [S1, unofficial].
+3. Retrieve the rotation permutation $P_R$ from `BaseRotat[R]` [S1, unofficial].
+4. Retrieve the triangle list for base case $B$ from `BaseConfig[B]` [S1, unofficial].
+5. Apply the rotation permutation $P_R$ to the edge indices in the base case's triangle list to generate the final triangles for configuration $C$ [S1, unofficial].
 
 **Parameters:**
 - Number of unique base cases: 23 [S1, unofficial].
 - Number of rotations: 24 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- The mapping must be exhaustive; every index from 0 to 255 must have a valid entry in `MapToBase` [S1, unofficial].
-- The rotation transformations must be consistent with the vertex ordering of the voxel. If the vertex ordering changes, the `BaseRotat` table must be adjusted accordingly [S1, unofficial].
-- Precision issues are minimal as this method operates on integer indices and precomputed mappings [S1, unofficial].
+- The rotation transformations must be consistent with the vertex ordering of the voxel. If the vertex ordering changes, the `BaseRotat` table must be adjusted accordingly [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.

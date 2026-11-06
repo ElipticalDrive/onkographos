@@ -3,47 +3,45 @@
 Also called: Voxelization Layer Distribution
 
 ## Overview
-Logarithmic Depth Partitioning is a non-linear depth distribution scheme for froxel grids that enforces a constant minimum angular resolution for reconstructed surface normals [S1, unofficial]. It solves the problem of insufficient depth precision near the camera during voxelization, which causes discontinuities in extracted boundary surfaces [S1, unofficial]. It sets itself apart from linear depth partitioning by keeping the ratio of cell depth to column width constant, ensuring that the visual angle subtended by a voxel remains uniform across the entire depth range [S1, unofficial].
+Logarithmic Depth Partitioning is a depth partitioning scheme that enforces a minimum angle resolution for surface normals by using logarithmic spacing, keeping cell extent ratios and minimum angle alpha constant throughout the perspective grid [S1]. It solves the problem of ensuring continuous appearance in the final renders generated from the extracted boundary surface depths by requiring more depth precision near the camera than farther away during voxelization [S1]. It sets itself apart from linear depth partitioning by maintaining a constant minimum angle step between reconstructed surfaces across the entire depth range [S1].
 
 ## How it works
 **Inputs:**
-- $d_0$: Near plane depth.
-- $\alpha$: Minimum angle step for surface normal resolution (dimensionless).
-- $\theta_y$: Vertical field of view (radians).
-- $R_y$: Vertical grid resolution (number of cells in the vertical axis).
+- $d_0$: Near plane depth [S1].
+- $\alpha$: Minimum angle step for surface normal resolution (dimensionless) [S1].
+- $\theta_y$: Vertical field of view (radians) [S1].
+- $R_y$: Vertical grid resolution (number of cells in the vertical axis) [S1].
 
 **Outputs:**
-- A mapping from layer index $i$ to depth $d_i$.
-- A mapping from depth $d_i$ to layer index $i$.
+- A mapping from layer index $i$ to depth $d_i$ [S1].
+- A mapping from depth $d_i$ to layer index $i$ [S1].
 
 **Data Structures:**
-The method defines a set of depth layers. The depth $d_i$ of layer $i$ is determined by the logarithmic growth formula. No complex data structures are required for the partitioning definition itself, though precomputed logarithms are recommended for performance [S1, unofficial].
+The method defines a set of depth layers [S1]. The depth $d_i$ of layer $i$ is determined by the logarithmic growth formula [S1]. No complex data structures are required for the partitioning definition itself, though precomputed logarithms are recommended for performance [S1].
 
 **Parameters:**
-- $K_d$: A constant determining the logarithmic growth rate of depth layers. It is derived from the condition $c_d = c_w \arctan \alpha$, where $c_d$ is cell depth and $c_w$ is column width. Specifically, $K_d = \arctan \alpha$ [S1, unofficial].
-- $\alpha$: The minimum angle step between a reconstructed surface coplanar to the viewer and an adjacent surface bent towards the viewer. This parameter, along with $d_0$, fully determines the partitioning [S1, unofficial].
+- $K_d$: A constant determining the logarithmic growth rate of depth layers [S1]. It is derived from the condition $c_d = c_w \arctan \alpha$, where $c_d$ is cell depth and $c_w$ is column width [S1].
+- $\alpha$: The minimum angle step between a reconstructed surface coplanar to the viewer and an adjacent surface bent towards the viewer [S1]. This parameter, along with $d_0$, fully determines the partitioning [S1].
 
 **Formulas:**
 1.  **Vertical Cell Width ($c_w$):**
     $$c_w = 2\tan\left(\frac{\theta_y}{2}\right) \frac{d}{R_y}$$
-    Where $d$ is the depth of the cell [S1, unofficial].
+    Where $d$ is the depth of the cell [S1].
 
 2.  **Growth Constant ($K_d$):**
-    Derived from the constraint that the minimum depth step $c_d$ satisfies $\alpha = \tan(c_d/c_w)$.
-    $$c_d = c_w \arctan \alpha$$
-    Substituting $c_d = K_d d$ (since $c_w$ is proportional to $d$), we get:
-    $$K_d = \arctan \alpha$$
-    [S1, unofficial]
+    Derived from the constraint that the minimum depth step $c_d$ satisfies $\alpha = \tan(c_d/c_w)$ [S1]. Substituting $c_d = K_d d$ and $c_w/d = 2\tan(\theta_y/2)/R_y$ yields:
+    $$K_d = \frac{2\tan(\theta_y/2)}{R_y} \arctan \alpha$$
+    [S1]
 
 3.  **Layer Depth ($d_i$):**
     The depth of layer $i$ is given by:
     $$d_i = (1 + K_d)^i d_0$$
-    [S1, unofficial]
+    [S1]
 
 4.  **Layer Index ($i$):**
     The layer index for a given depth $d_i$ is:
     $$i = \left\lfloor \frac{\log d_i - \log d_0}{\log(1 + K_d)} \right\rfloor$$
-    [S1, unofficial]
+    [S1]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -64,12 +62,8 @@ def compute_log_depth_partitioning(d0, alpha, theta_y, R_y):
     Returns:
         K_d (float): The logarithmic growth constant.
     """
-    # K_d is derived from the minimum angle resolution requirement
-    # c_d = c_w * arctan(alpha)
-    # Since c_w is proportional to depth d, and c_d = K_d * d,
-    # K_d = arctan(alpha)
-    K_d = math.atan(alpha)
-    
+    # K_d = (2 * tan(theta_y / 2) / R_y) * atan(alpha)
+    K_d = (2.0 * math.tan(theta_y / 2.0) / R_y) * math.atan(alpha)
     return K_d
 
 def get_layer_index(d, d0, K_d):
@@ -85,21 +79,12 @@ def get_layer_index(d, d0, K_d):
         i (int): The layer index.
     """
     if d < d0:
-        return 0
-    
-    # i = floor((log(d) - log(d0)) / log(1 + K_d))
-    # Note: log can be natural log or base 2, as long as numerator and denominator use the same base.
-    # Using natural log for standard math library compatibility.
+        return 0  # Boundary condition [G]
+    if K_d == 0.0:
+        return 0  # Degenerate case: alpha=0 implies K_d=0, log(1)=0 causes division by zero [G]
     numerator = math.log(d) - math.log(d0)
-    denominator = math.log(1 + K_d)
-    
-    if denominator == 0:
-        # This happens if K_d is 0, which implies alpha is 0.
-        # In this case, all depths map to layer 0 or the partitioning is undefined.
-        return 0
-        
-    i = math.floor(numerator / denominator)
-    return i
+    denominator = math.log(1.0 + K_d)
+    return math.floor(numerator / denominator)
 
 def get_layer_depth(i, d0, K_d):
     """
@@ -113,26 +98,23 @@ def get_layer_depth(i, d0, K_d):
     Returns:
         d_i (float): The depth of the layer.
     """
-    d_i = (1 + K_d) ** i * d0
-    return d_i
+    return (1.0 + K_d) ** i * d0
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Computing distances repetitively during surface extraction can be avoided by precomputing a lower bound of the number of voxels corresponding to a threshold distance $g$ for each part of a voxel column [S1, unofficial].
-- **Boundary Conditions:** The formula assumes $d \ge d_0$. Depths less than $d_0$ are typically clamped to the first layer [G].
-- **Degenerate Input:** If $\alpha = 0$, then $K_d = 0$, and the logarithmic term becomes undefined (division by zero in index calculation). This case implies no angular resolution is required, collapsing the partitioning [S1, unofficial].
-
-## Subtopics
+- **Precision:** Computing distances repetitively during surface extraction can be avoided by precomputing a lower bound of the number of voxels corresponding to a threshold distance $g$ for each part of a voxel column [S1].
+- **Boundary Conditions:** The formula assumes $d \ge d_0$ [G]. Depths less than $d_0$ are typically clamped to the first layer [G].
+- **Degenerate Input:** If $\alpha = 0$, then $K_d = 0$, and the logarithmic term $\log(1 + K_d)$ becomes zero, causing division by zero in the index calculation [G].
 
 ## Operating characteristics
-- **Time Complexity:** The computation of layer indices and depths is $O(1)$ per voxel/column using logarithms and exponentiation. Precomputing logarithms can optimize this further [S1, unofficial].
-- **Memory Complexity:** The partitioning itself requires minimal memory (a few constants). However, it enables more efficient voxelization by reducing the number of voxels needed for distant objects, potentially lowering memory usage for the froxel grid compared to linear partitioning at equivalent angular resolution [S1, unofficial].
-- **Performance:** On a GTX 970, pure OpenGL-based rendering using this method was found to be slower than SIMT-based splatting for certain particle sorting scenarios, but the method itself is efficient for voxelization [S1, unofficial].
-- **Strengths:** Ensures continuous appearance in final renders by maintaining constant angular resolution; reduces depth precision requirements for distant objects.
-- **Limitations:** Requires perspective projection; non-linear spacing may complicate uniform sampling if not handled correctly.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Not given in the sources.
+- **Strengths:** Not given in the sources.
+- **Limitations:** Not given in the sources.
 
 ## Background
-Logarithmic Depth Partitioning, also referred to as Voxelization Layer Distribution, was introduced in the context of memory-efficient on-the-fly voxelization of particle data [S1, unofficial]. It addresses the need for continuous appearance in rendered boundary surfaces by enforcing minimum angle resolution during voxelization [S1, unofficial]. The method is particularly relevant for SPH (Smoothed Particle Hydrodynamics) simulations and other particle-based rendering techniques where surface extraction from voxelized data is required [S1, unofficial].
+Logarithmic Depth Partitioning, also referred to as Voxelization Layer Distribution, was introduced in the context of on-the-fly voxelization of particle data [S1]. It addresses the need for continuous appearance in rendered boundary surfaces by enforcing minimum angle resolution during voxelization [S1]. The method is particularly relevant for SPH (Smoothed Particle Hydrodynamics) simulations and other particle-based rendering techniques where surface extraction from voxelized data is required [S1].
 
 ## Sources
-[S1] Memory-Efficient On-The-Fly Voxelization of Particle Data, https://doi.org/10.2312/pgv.20151150, fetched 2026-10-26 (unofficial)
+[S1] Memory-Efficient On-The-Fly Voxelization of Particle Data, https://doi.org/10.2312/pgv.20151150, fetched 2026-10-26

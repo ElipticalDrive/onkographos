@@ -1,0 +1,1576 @@
+VOYAGER : R EAL -T IME C ITY-S CALE 3D G AUSSIAN
+S PLATTING ON R ESOURCE -C ONSTRAINED D EVICES
+arXiv:2506.02774v3 [cs.GR] 26 Sep 2025
+Zheng Liu1∗ He Zhu1∗ Xingyang Li1 Yirun Wang1 Yujiao Shi3
+Wei Li1 Jingwen Leng1,2 Yu Feng1,2,# Minyi Guo1,2
+1
+Shanghai Jiao Tong University 2 Shanghai Qizhi Institute
+3
+ShanghaiTech University 4 Chinese Academy of Sciences
+∗
+Equal Contribution # Corresponding Author
+y-feng@sjtu.edu.cn
+Project site: https://voyager-web.netlify.app/
+Yiming Gan4
+A BSTRACT
+3D Gaussian splatting (3DGS) is an emerging technique for photorealistic 3D
+scene rendering. However, rendering city-scale 3DGS scenes on resourceconstrained mobile devices in real-time remains a significant challenge due to two
+compute-intensive stages: level-of-detail (LoD) search and rasterization.
+In this paper, we propose VOYAGER, an effective solution to accelerate city-scale
+3DGS rendering on mobile devices. Our key insight is that, under normal user
+motion, the number of newly visible Gaussians within the view frustum remains
+roughly constant. Leveraging this temporal correlation, we propose a temporalaware LoD search to identify the necessary Gaussians for the remaining rendering
+stages. For the remaining rendering process, we accelerate the bottleneck stage,
+rasterization, via preemptive α-filtering. With all optimizations above, our system
+can deliver low-latency, city-scale 3DGS rendering on mobile devices. Compared
+to existing solutions, VOYAGER achieves up to 6.6× speedup and 85% energy
+savings with superior rendering quality. Codes will be released upon publication.
+1
+I NTRODUCTION
+The field of 3D Gaussian splatting (3DGS) (Kerbl et al., 2023; Fan et al., 2024; Fang & Wang,
+2024; Girish et al., 2024; Lee et al., 2024a; Niemeyer et al., 2024; Wang et al., 2024a; Mallick
+et al., 2024; Gui et al., 2024; Radl et al., 2024) has made tremendous progress in recreating the 3D
+world with photo-realistic fidelity. While 3DGS unlocks new possibilities and fuels our imagination,
+rendering city-scale 3DGS scenes on mobile devices, e.g., the smartphone in your pocket, remains
+a substantial challenge. Primarily, there are some inherent limitations of mobile devices, such as
+limited compute resources and memory bandwidth. For example, a single scene like SmallCity from
+HierarchicalGS (Kerbl et al., 2024) can barely achieve 12.2 frame-per-second (FPS) on a Nvidia
+mobile Ampere GPU (Nvidia, 2023). These constraints make it infeasible to achieve city-scale
+3DGS on today’s mobile devices.
+In order to render massive-scale scenes, 3DGS algorithms require managing tens of millions of
+Gaussian ellipsoids, a.k.a. Gaussians. For instance, SmallCity from HierarchicalGS (Kerbl et al.,
+2024) contains over 1.8×107 Gaussians. To effectively manage at this scale, the state-of-the-art cityscale 3DGS methods (Kerbl et al., 2024; Ren et al., 2024; Liu et al., 2024) often adopt a two-stage
+pipeline: level-of-detail (LoD) search and splatting. LoD search uses a hierarchical representation
+to manage those Gaussians and selects a subset of Gaussians at an appropriate LoD under the current
+camera pose. Splatting then renders these selected Gaussians on the canvas in a visually consistent
+order. Our experiment in Fig. 2 shows that both stages take non-trivial execution time, with the LoD
+search further dominating as the scene complexity increases.
+To reduce the computation workload of LoD search, our key insight is that, as the user navigates
+through a 3D scene, the number of newly visible Gaussians introduced by continuous viewpoint
+changes remains roughly constant (assuming a general case of a smooth user motion). The subsets
+1
+of selected Gaussians across adjacent frames are often similar in LoD search. By leveraging this insight, we propose a temporal-aware LoD search algorithm in Sec. 4 .1. Specifically, we propose two
+GPU-oriented optimizations in LoD search. For the initial frame, we propose an efficient tree traversal algorithm that can be highly parallelized on GPUs to accelerate LoD search. For the subsequent
+frames, we design a companion data structure that leverages temporal correlations across consecutive tree traversals to further accelerate this process. Rather than recomputing the tree traversal
+results from scratch, our data structure can reuse previous traversal results to reduce the computation. Compared against the previous LoD search algorithms (Kerbl et al., 2024), we achieve 6.5×
+speedup with the bit-accurate LoD search result.
+To improve the efficiency of splatting, prior studies (Wang et al., 2024a; Fan et al., 2024; Fang &
+Wang, 2024; Huang et al., 2025; Lin et al., 2025) have primarily focused on reducing the total number of Gaussians in rasterization, a sub-step in splatting. However, these methods often overlook the
+underlying bottleneck within rasterization itself. We pinpoint the major bottleneck in rasterization
+and propose a GPU-oriented optimization, preemptive α-filtering in Sec. 4 .2, to accelerate rasterization. Our key observation is that the primary source of slowdown during rasterization stems from
+the per-ray computation of Gaussian transmittance, αi . This operation is computationally expensive
+due to the heterogeneous design of modern GPU architectures (see Sec. 3 .2). To address this issue,
+our filter can pre-determine the subset of Gaussians that do not need to compute transmittance, αi ,
+without explicitly calculating αi . For those Gaussians that do require α-computation, we bypass
+the costly α-computation by embedding a 128-byte precomputed lookup table (LUT) in the GPU’s
+shared memory and approximating Gaussian transmittance instead.
+Together, our algorithm can achieve up to 6.6× speedup compared to prior city-scale 3DGS algorithms on a mobile platform, Nvidia Orin SoC. The contributions of this paper are as follows:
+• A parallel LoD search algorithm that exploits temporal coherence across frames to avoid
+repetitive tree traversal in LoD search.
+• A GPU-efficient rasterization method that bypasses the key bottleneck in rasterization and
+significantly improves rendering efficiency.
+• A framework that enables rendering city-scale 3DGS models on mobile devices, achieving
+up to 6.6× speedup and 85% energy savings compared to prior works.
+2
+R ELATED W ORK
+Efficient 3DGS. State-of-the-art methods for the efficiency of 3DGS can largely be categorized
+into two main directions. The first direction focuses on reducing model size. Several studies propose
+various pruning techniques (Fan et al., 2024; Fang & Wang, 2024; Girish et al., 2024; Niemeyer
+et al., 2024; Feng et al., 2024b; Peng et al., 2024; Tu et al., 2024; Franke et al., 2024; Hahlbohm et al.,
+2025), while others introduce alternative representations to minimize storage requirements (Roessle
+et al., 2024; Lee et al., 2024a; Huang et al., 2024; Wang et al., 2024b; Dai et al., 2024; Lee et al.,
+2024a; Girish et al., 2024).
+The second direction aims to improve the efficiency of the 3DGS rendering pipeline. Some approaches introduce fine-grained filtering techniques for Gaussian-ray intersections to alleviate the
+computation of subsequent stages (Feng et al., 2024a; Lee et al., 2024b; Wang et al., 2024a). For instance, various online filtering techniques, such as axis-aligned bounding box (AABB) (Wang et al.,
+2024a) and oriented bounding box (OBB) (Lee et al., 2024b) intersection tests, have been proposed
+for more fine-grained filtering. Others tackle GPU performance bottlenecks such as warp divergence
+and workload imbalance in rasterization (Huang et al., 2025; Gui et al., 2024; Mallick et al., 2024).
+In contrast to these prior works, our framework focuses on large-scale 3DGS rendering. We jointly
+optimize both the LoD search and splatting stages, while addressing the performance constraints
+and hardware limitations that exist in today’s mobile GPUs.
+Large-scale 3DGS. How to represent Level-of-Detail (LoD) efficiently is an issue existed broadly
+in neural rendering (Turki et al., 2023; Xu et al., 2023; Barron et al., 2023). Since 3DGS models are
+inherently point-based representations, various tree-based structures have been designed to manage
+large-scale scenes, such as Octree-GS (Ren et al., 2024), CityGaussian (Liu et al., 2024), and Hier2
+2
+3
+Cut
+4
+10
+11
+5
+6
+12
+13
+7
+14
+8
+15
+16
+17
+2
+7
+7
+8
+7
+2
+9
+9
+Filtered
+Queue
+Sorted
+Queue
+9
+Rendering
+Queue
+}
+Cut Finding
+w/ LoD Tree
+9
+2
+Sorting
+1
+1
+Culling &
+Projection
+se
+Weight
+Interpolation
+Po
+1
+Color Blending
+Splatting
+1
+Check Transparency
+⍺i > ⍺*
+LoD Search
+0
+Rasterization
+0 1
+2 3
+Rendered
+Image
+Fig. 1: Overview of rendering pipeline for large-scale 3D Gaussians. LoD search consists of two
+sub-steps: cut finding and weight interpolation. Splatting contains three sub-steps: projection, sorting, and rasterization. LoD search traverses the LoD tree to determine a set of Gaussians, given a
+LoD granularity. The result Gaussians form a “cut” that separates the top and bottom of the LOD
+tree. Then, the Gaussians on the cut go through a sequence of operations to render an image.
+archicalGS (Kerbl et al., 2024). These hierarchical structures organize Gaussian points to support
+scalable rendering. However, the irregular tree traversals introduce non-trivial runtime overhead.
+In contrast, our LoD search is co-designed with GPU execution characteristics, such as the SIMT
+execution model. With the temporal correlation that commonly exists in continuous rendering, our
+method can achieve more efficient tree traversal and improve the overall runtime performance.
+3
+M OTIVATION
+In this section, we first introduce the general pipeline of the large-scale 3DGS algorithm in Sec. 3
+.1. We then analyze the performance bottlenecks of existing algorithms on modern GPUs in Sec. 3
+.2.
+3 .1
+P RELIMINARY
+LoD Tree. All city-scale 3DGS algorithms require a hierarchical tree-like structure to represent
+the entire scene. This data structure serves two main purposes: first, it identifies the Gaussians inside
+the view frustum; second, it supports rendering at an appropriate level of detail. Here, we describe
+the most general form of this data structure, LoD tree, where each tree level represents a specific
+detail granularity (see Fig. 1). Each tree node contains a single Gaussian with an unfixed number of
+child nodes. Gaussians in lower levels are generally smaller and provide finer details.
+Pipeline. Fig. 1 gives an overview of the pipeline, which consists of two main stages: LoD search
+and splatting. Each of these stages includes several sub-steps, which we describe as follows:
+• Cut Finding: This step traverses the LoD tree from top to bottom. At each node, we assess
+if the projected dimension of the Gaussian is smaller than the predefined LoD (τ ∗ ), while
+the projected dimension of its parent node is larger. We then gather all the Gaussians that
+meet this criterion. Essentially, these Gaussians form a “cut” that separates the top and
+bottom of the LoD tree, as shown in Fig. 1.
+• Weight Interpolation: Each selected Gaussian then interpolates with its parent node to ensure a smooth transition across different LoDs. The interpolated Gaussians are inserted into
+the rendering queue in Fig. 1.
+• Culling & Projection: Once the cut is determined, the selected Gaussians are projected
+onto the image plane. Gaussians outside the view frustum or deemed irrelevant are culled.
+• Sorting: The remaining Gaussians are then sorted by depth, from the nearest to the farthest.
+• Rasterization: The final step contains two parts. First, each pixel calculates the intersected
+transmittance αi for each Gaussian. If αi is below a predefined threshold, α∗ , the Gaussian
+is skipped for color blending. Otherwise, the Gaussian contributes to the final pixel color
+via weighted blending.
+3
+0
+3
+6 9 12 15
+LoD Level (τ)
+Exec. Percentage (%)
+Redundancy
+Percentage (%)
+100
+80
+60
+40
+20
+0
+100
+80
+60
+40
+20
+0
+llCity enceciArt bble ding
+Sma Resid S Ru Buil
+Fig. 2: Normalized exe- Fig. 3: The percentage of Fig. 4: The overlap Fig. 5: The execution
+cution breakdown across redundant tree node ac- of selected Gaus- percentage of α compudifferent LoDs.
+cesses across LoDs.
+sians in the cuts be- tation in rasterization.
+tween frames.
+3 .2
+P ERFORMANCE A NALYSIS
+Execution Breakdown. Fig. 2 shows the execution breakdown of HierarchicalGS across various
+LoDs on a Nvidia mobile Ampere GPU (Nvidia, 2023). Here, we use the SmallCity scene from the
+HierarchicalGS dataset as an example. When the LoD (τ ∗ ) is low, execution time is dominated by
+the rasterization step in the splatting stage. As the LoD increases, the cut finding step in the LoD
+search stage becomes the main contributor to overall execution time, accounting for up to 67%. On
+average, cut finding and rasterization accounts for 83% of total execution time. This means that both
+steps must be accelerated to achieve substantial speedups by Amdahl’s Law (Amdahl, 1967).
+Cut Finding. We identify two primary inefficiencies in cut finding. First, existing methods primarily rely on exhaustive search to find the cut, as the inherent irregularity of the LoD tree makes
+it difficult to achieve efficient parallelism on modern GPUs. Such a brute-force approach often
+leads to substantial redundant computation. Our experiment shows that 92% of tree node accesses
+are unnecessary when the LoD is 6 (see Fig. 3). Second, in real-time rendering scenarios, repeatedly performing tree traversal from the root node for every frame introduces considerable redundant
+computation. We simulate a 60 FPS real-time rendering scenario and analyze the overlap in selected
+Gaussians across consecutive frames. Fig. 4 shows that 99% of the selected Gaussians remain unchanged across frames when the LoD is 6. This indicates that a substantial amount of computation
+is wasted due to repetitive tree traversal.
+Rasterization. While a few studies have addressed certain inefficiencies in rasterization, such
+as taming workload imbalance (Wang et al., 2024a) and reducing warp divergence (Huang et al.,
+2025), existing works have largely overlooked the most time-consuming operation in rasterization:
+computing the Gaussian transmittance, αi , for each pixel-Gaussian pair. Using Nvidia Nsight Compute (Nvidia, 2025), Fig. 5 shows that this operation takes roughly 50% of the total rasterization
+time. The root cause is the imbalanced compute units within modern GPUs. Taking Nvidia GPUs
+as an example, most operations can be massively parallelized by CUDA cores. However, the computation of Gaussian transmittance requires exponential computation, which is executed by special
+functional units (SFUs). Since CUDA cores vastly outnumber the SFUs (16:1) (Krashinsky et al.,
+2020), calculating Gaussian transmittance becomes a key bottleneck.
+4
+M ETHODOLOGY
+To address the challenges in Sec. 3 .2, we present our framework, VOYAGER, which introduces two
+key optimizations, temporal-aware LoD search (Sec. 4 .1) and preemptive α-filtering (Sec. 4 .2),
+targeting cut finding and rasterization in city-scale 3DGS rendering, respectively.
+4 .1
+T EMPORAL -AWARE L O D S EARCH
+We first explain our data structure, which is augmented on top of the original LoD tree to enhance
+GPU parallelism. Next, we explain our fully-streaming LoD tree traversal that can streamingly
+process subtrees in parallel on off-the-shelf GPUs. Finally, we describe how our temporal-aware
+LoD search can leverage previous cut results to further accelerate the LoD search.
+4
+Search top or bottom subtrees
+No
+GPU
+Block
+Previous
+Cut
+Identify
+subtrees
+Dispatch
+GPU
+Block
+…
+Cut
+Is cut complete
+in subtree? Yes
+GPU
+Block
+LoD Tree & Previous Cut Result
+Relevant Subtrees
+GPU Block Pool
+Cut Result
+Fig. 6: The overview of temporal-aware LoD search. Our algorithm exploits the temporal correlations across frames and reuses the previous “cut” result to avoid the redundant tree traversal.
+LoD Tree Partitioning. Recall, from Sec. 3 .1, each tree node in the LoD tree contains a single
+Gaussian with a variable number of child nodes. An important performance issue with this irregular
+data structure is the workload imbalance across different GPU warps1 . To address this issue, we
+propose to partition the LoD tree into smaller chunks, such that each chunk has a similar workload.
+In our partitioning algorithm, we first split the entire LoD tree into N small subtrees from the top to
+the bottom. Each subtree is constrained to have a maximal tree height of 2. Once the decomposition
+is complete, the resulting subtrees are sorted in a breadth-first search (BFS) order and stored in a
+list, S = {S0 , S1 , ..., SN }, where each Si represents a single subtree. With this transformation,
+the tree partitioning problem can be converted into a constrained bin packing problem (Martello
+& Toth, 1990). The objective is to pack the subtrees into the minimum number of chunks, each
+corresponding to a batch of work for one GPU block. The constraint is that each chunk must contain
+subtrees with contiguous IDs in S, to ensure the entire tree is traversed from the top to bottom.
+Optimization Objective. Given this setup, we can convert this bin packing problem into a linear
+constrained optimization. The objective is to minimize the number of chunks:
+argmin F(Θ) = Size(Θ), where Θ = {θi }, θi ∈ {0, 1}, and i ∈ [0, 1, ..., N − 1].
+(1)
+Θ
+Here, each non-zero θi represents the starting index of a new chunk. All non-zero θi are grouped
+into I. Any two consecutive non-zero entries, θn and θm , define a chunk that includes the substree
+IDs within [n, m). These subtrees are grouped and assigned to a single GPU block.
+Memory Constraints. To maximize usage of the on-chip memory on GPUs, we set the total size of
+each chunk to be smaller than the GPU shared memory size (M ) per streaming multiprocessor,
+θm+1 −1
+∀θm ∈ I,
+X
+SubtreeSize(θi ) ≤ M.
+(2)
+θi =θm
+This design ensures that all traversal operations for a chunk can be performed entirely within shared
+memory, avoiding off-chip memory stalls that would otherwise stall the GPU pipeline. Given this
+formulation, we can easily apply existing integer linear programming solvers, such as Google ORTools (Google, 2025), to obtain the optimal LoD tree partitioning offline.
+Fully-Streaming LoD Tree Traversal. With our LoD tree partitioning, we propose a fully streaming algorithm that achieves high parallelism on GPUs while avoiding unnecessary tree node visits.
+Rather than relying on the inherent parent-child relations in the original LoD tree, we perform tree
+traversal chunk by chunk in BFS order. During the GPU execution, each chunk is assigned to a GPU
+warp. The tree nodes within one chunk are then evenly distributed among threads within a warp to
+ensure a balanced workload across GPU threads. Since each chunk of nodes is small enough to fit
+in GPU shared memory, our algorithm streamingly processes those tree nodes and avoids irregular
+global memory accesses in the original LoD tree traversal.
+The workload assignment is dynamically dispatched whenever a warp becomes available at runtime.
+The tree traversal terminates once a clean cut separates the top and bottom of the LoD tree, thereby
+avoiding redundant tree accesses. Meanwhile, we adopt the warp specialization (Bauer et al., 2014)
+that uses a small group of dedicated GPU threads within each warp for data loading. This allows
+data loading to be overlapped with computation, hiding the latency of loading LoD tree chunks.
+1
+A GPU warp is a group of threads that execute the same instruction in lockstep.
+5
+Algorithm 1: Algorithm of Temporal-Aware LoD Search
+Data: LoD tree S, Previous cut, Rprev , LoD granularity, τ ∗ .
+Result: cut Rcut .
+Sprev ← identifySubtreeInPrevCut(S, Rprev , τ ∗ );
+while Sprev is not empty do
+Si ← Sprev .dequeue();
+Fsignal , Rtmp ← findCut(Si , τ ∗ ); // delegate to one GPU warp if available;
+for ni in Rtmp do
+Rcut .enqueue(ni ); // enqueue the subtree result;
+end
+if Fsignal == TOP and Sprev .parent is not visited then
+Sprev .push(Sprev .parent); // too fine-grained, need to find its parent;
+end
+if Fsignal == BOTTOM then
+for ni in Rtmp do
+Sprev .push(); // too coarse-grained, need to find its children;
+end
+end
+end
+Temporal-Aware LoD Search. For tree traversal of subsequent frames, we further exploit the
+temporal correlations across frames and introduce a temporal-aware LoD search. Our algorithm
+also leverages our LoD tree partitioning and works on the subtree traversal. Fig. 6 highlights some
+individual subtrees in red dashed blocks. Here, we only show a two-level subtree partitioning for
+illustration purposes; our actual implementation applies multi-level partitioning to the LoD tree.
+The overall algorithm is also described in Algo. 1. Given the cut result, Rprev , from the previous
+frame (highlighted in pink in Fig. 6), our algorithm first identifies the subtrees, Sprev , to which each
+Gaussian in the cut belongs. Then, our algorithm only traverses those identified subtrees instead
+of all subtrees in a GPU streaming fashion. In GPU implementation, each subtree is assigned to a
+separate GPU warp for local subtree traversal. Because each subtree is approximately equal in size,
+it ensures a balanced workload distribution across GPU warps. If searching the local subtree cannot
+obtain the complete “cut” result, i.e., no clean cut for this subtree (signaled by Fsignal ), we then
+search its corresponding parent subtree or child subtrees to complete the cut finding. This way, we
+ensure that the results from our temporal-aware LoD search are bit-accurate.
+4 .2
+P REEMPTIVE α-F ILTERING
+In Sec. 3 .2, we show that the primary performance bottleneck in rasterization is the computation
+of Gaussian transmittance, which accounts for over 50% of the total execution time. This operation introduces significant latency because it relies on exponential computations. Unlike common
+arithmetic operations, exponentials are not executed by the massive CUDA cores. Instead, they are
+executed by SFUs, which are far fewer in number compared to CUDA cores (1:16). This imbalance
+in hardware resources makes transmittance computation a major bottleneck in rasterization.
+To address this, we propose preemptive α-filtering to accelerate rasterization. In canonical rasterization, the Gaussian transmittance, α, is computed by,
+α = min(0.99, θi · eρ ),
+(3)
+where ρ is the power decay of the current Gaussian-ray intersection and θi is the constant opacity
+of the intersected Gaussian i. Each αi is then compared against a transmittance threshold α∗ to
+determine whether to proceed with the subsequent color blending.
+Instead of computing the expensive exponential for every Gaussian-ray intersection, we refactor the
+transmittance comparison as,
+log(α∗ ) − log(θi ) < ρ.
+(4)
+Since log(θi ) can be precomputed offline and stored for each Gaussian, we replace the original transmittance check with our lightweight check, log(α∗ ) − log(θi ) < ρ, before computing the transmit6
+Percentage (%)
+10
+1
+0
+10 0
+-1
+-2
+-3
+ρ value
+-4
+-5
+-5.5
+Fig. 7: The distribution of ρ values across the value space, [−5.55, 0].
+tance, θi · eρ . This optimization has two advantages. First, it allows us to skip unnecessary exponent
+computations for Gaussians that are below the transmittance threshold, α∗ . Second, by moving this
+preemptive check to the culling&projection stage, we can further reduce the computation overheads
+for subsequent stages: sorting and rasterization.
+Although our lightweight check reduces the number of exponential operations, it cannot eliminate
+them completely. To remove these computations altogether, we introduce a lookup table (LUT)
+embedded in GPU shared memory. The LUT can directly map ρ values to the corresponding exponential results, eρ , allowing us to obtain eρ via a memory lookup rather than invoking SFUs.
+The next question is how to design such a LUT. Our observation is that ρ values are uniformly
+distributed between the effective value space, [−5.55, 0], as shown in Fig. 7. Thus, we uniformly
+split the effective value space into m intervals. Here, we choose m to be 32. a given ρ value can be
+directly indexed to this LUT by computing,
+
+
+ρ
+index =
+·m ,
+(5)
+−5.55
+where ⌊·⌉ denotes rounding to the nearest integer. The LUT indexing enables low-latency exponential approximation via a small shared memory. The sensitivity of m is shown in Fig. 10.
+5
+E VALUATION
+5 .1
+E XPERIMENTAL S ETUP
+To show the efficiency and robustness of VOYAGER, we evaluate on three large-scale datasets: HierarchicalGS (Kerbl et al., 2024), UrbanScene3D (Lin et al., 2022), and MegaNeRF (Turki et al.,
+2022). Meanwhile, we also test VOYAGER on small-scale datasets: Mip-NeRF360 (Barron et al.,
+2021), Tank&Temple (Knapitsch et al., 2017), and DeepBlending (Hedman et al., 2018). For quality
+evaluation, we use PSNR, SSIM, and LPIPS. We also report frame-per-second (FPS), the number of
+executed operations (#Op.), and energy consumption as our performance metrics.
+To evaluate the performance, our hardware platform is the mobile Ampere GPU on Nvidia AGX
+Orin SoC with 5.33 TFLOPs, which is the flagship development board in AR/VR. For GPU performance, we measure latency, including the execution time as well as the kernel launch on the mobile
+Ampere GPU. The GPU power is directly obtained using the built-in power sensing circuitry.
+For comparison, we compare against three large-scale 3DGS algorithms: HierarchicalGS (Kerbl
+et al., 2024), CityGaussian (Liu et al., 2024), and Octree-GS (Ren et al., 2024). We also compare
+against a dense 3DGS algorithm: 3DGS (Kerbl et al., 2023). In our evaluation, our algorithm
+VOYAGER applies optimizations in LOD search and splatting.
+5 .2
+R ENDERING Q UALITY ON L ARGE -S CALE DATASETS
+Tbl. 1 shows the overall performance and quality comparison between VOYAGER and other baselines. Across three quality metrics, both HierarchicalGS and VOYAGER with τ of 3 achieve the
+overall highest quality. These two achieve similar scores on quality metrics, because the LUT-based
+exponential approximation in Sec. 4 .2 introduces negligible accuracy loss. Other optimizations
+introduced by VOYAGER all produce the bit-accurate results as HierarchicalGS. In comparison,
+dense models, e.g., 3DGS, perform poorly on large-scale scenes due to their lack of a mechanism to
+manage LoD. More qualitative comparisons are shown in the appendix.
+7
+Table 1: Quantitative evaluation of VOYAGER against the state-of-the-arts (Kerbl et al., 2023;
+Liu et al., 2024; Ren et al., 2024; Kerbl et al., 2024). Here, we show the results on three largescale datasets: HierarchicalGS (Kerbl et al., 2024), UrbanScene3D (Lin et al., 2022), and MegaNeRF (Turki et al., 2022). We highlight the best and second-best results among all methods.
+HierarchicalGS
+Dataset
+UrbanScene3D
+23.32
+22.01
+21.33
+26.24
+25.39
+26.24
+25.39
+0.724
+0.729
+0.646
+0.812
+0.771
+0.812
+0.771
+0.430
+0.344
+0.415
+0.254
+0.316
+0.254
+0.316
+12.18
+24.86
+13.55
+11.43
+15.53
+42.19
+68.84
+732.69
+649.68
+2068.59
+857.64
+591.01
+584.15
+363.68
+Latency (msec.)
+HierarchicalGS (τ=3)
+21.65
+21.73
+21.97
+23.79
+23.11
+23.78
+23.11
+0.818
+0.825
+0.802
+0.755
+0.716
+0.755
+0.716
+0.269
+0.223
+0.247
+0.228
+0.306
+0.228
+0.306
+Voyager (τ=3)
+2.7
+3.2
+2.9
+3.2
+Residence
+SciArt
+Rubble
+Building
+11.60
+19.24
+30.30
+12.69
+17.94
+39.01
+58.67
+2544.25
+2522.30
+2121.52
+2502.38
+1547.26
+1118.84
+653.54
+479.88
+276.16
+186.43
+409.96
+290.29
+139.69
+92.05
+22.96
+24.27
+24.56
+25.18
+23.31
+25.17
+23.31
+0.752
+0.797
+0.765
+0.783
+0.686
+0.783
+0.686
+0.330
+0.238
+0.272
+0.280
+0.367
+0.280
+0.367
+12.03
+20.40
+29.04
+15.39
+19.63
+56.42
+79.38
+HierarchicalGS (τ=3)
+19.3
+15.2
+13.2
+10.4
+443.52
+209.16
+398.54
+455.03
+334.73
+127.99
+78.44
+Latency (msec.)
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+30 30.6
+25
+20
+15
+10
+5.1
+5
+0 Small City
+MegaNeRF
+Quality
+Efficiency
+Quality
+Efficiency
+Quality
+Efficiency
+PSNR↑
+FPS↑ #Op.↓ Energy↓ PSNR↑
+FPS↑ #Op.↓ Energy↓ PSNR↑
+FPS↑ #Op.↓ Energy↓
+SSIM↑ LPIPS↓
+SSIM↑ LPIPS↓
+SSIM↑ LPIPS↓
+(dB)
+(Orin) (106 )
+(mJ)
+(dB)
+(Orin) (106 )
+(mJ)
+(dB)
+(Orin) (106 )
+(mJ)
+Metrics
+40
+35 33.4
+30
+25
+20
+15
+9.5
+10
+5
+0 Small City
+39.7
+1630.92
+2326.09
+1198.70
+1628.42
+1182.06
+528.81
+362.02
+415.46
+261.98
+176.87
+344.55
+270.57
+99.12
+70.60
+Voyager (τ=3)
+36.6
+35.1
+20.6
+12.7
+11.2
+9.8
+Residence
+SciArt
+Rubble
+6.4
+Building
+Fig. 8: The standalone latency comparison Fig. 9: The standalone latency compariof LoD search between HierarchicalGS and son of splatting between HierarchicalGS and
+VOYAGER with τ of 3. We accelerate 5.1× VOYAGER with τ of 3. We accelerate 3.3×
+speedup compared to HierarchicalGS.
+speedup compared to HierarchicalGS.
+5 .3
+R ENDERING E FFICIENCY
+Speedup. In terms of rendering speed, VOYAGER achieves the highest FPS among all evaluated
+methods in Tbl. 1. Specifically, VOYAGER can achieve up to 68.84, 58.67, and 79.38 FPS on three
+large-scale datasets, respectively. It is also the only method capable of delivering real-time rendering (≥60 FPS) consistently across all tested scenes. Compared to dense models such as 3DGS,
+VOYAGER delivers up to 6.6× speedup with better rendering quality. Compared to the corresponding large-scale 3DGS algorithm, HierarchicalGS, VOYAGER still achieves 4.0× speedup. Fig. 8 and
+Fig. 9 further dissect our speedup contribution and show the standalone speedup on LoD search and
+rasterization, respectively. Compared to HierarchicalGS, VOYAGER achieves 5.1× speedup on LoD
+search and 3.3× speedup on splatting (including projection, sorting, and rasterization).
+In terms of total executed operations (#Op.), VOYAGER achieves the lowest computational cost. This
+efficiency is primarily attributed to two key optimizations. First, the temporal-aware LoD search
+reduces redundant tree node accesses. Second, the preemptive α-filtering shifts a transparency check
+to the early projection stage and naturally reduces the workload of the subsequent stages. Lastly, the
+overall trend in energy savings follows the speedup results. VOYAGER achieves the highest energy
+savings with 82% and 80% of energy savings compared to 3DGS and HierarchicalGS, repectively.
+5 .4
+A BLATION S TUDY
+Tbl. 2 presents an ablation study that breaks down the contributions of individual components in
+VOYAGER. Because the only approximation introduced by VOYAGER is the LUT-based exponential
+approximation, it only introduces a negligible quality loss. All other acceleration techniques produce
+Table 2: Ablation Study of individual contributions in VOYAGER on the HierarchicalGS dataset. FS:
+Fully-streaming LoD search. Temporal: Temporal-aware LoD search. FPS is measured on Orin.
+Metrics
+Base (τ = 3.0)
+Base+FS (τ = 3.0)
+Base+Temporal (τ = 3.0)
+VOYAGER (τ = 3.0)
+Quality
+Efficiency
+PSNR (dB)↑ SSIM↑ LPIPS↓ FPS↑ #Op. (106 )↓ Energy (mJ)↓
+26.24
+26.24
+26.24
+26.24
+0.812
+0.812
+0.812
+0.812
+8
+0.254
+0.254
+0.254
+0.254
+11.43
+15.78
+22.15
+42.19
+857.64
+746.01
+681.63
+584.15
+455.03
+335.87
+239.12
+127.99
+Table 3: Evaluation of VOYAGER against the state-of-the-arts on three small-scale datasets: MipNeRF360 (Barron et al., 2021), Tank&Temple (Knapitsch et al., 2017), DeepBlending (Hedman
+et al., 2018). We highlight the best and second-best results among all methods. Note that, rendering
+small-scale scenes is not the primary focus of this work; we include the results for completeness.
+MipNeRF360
+Dataset
+Tank&Temple
+DeepBlending
+Quality
+Efficiency
+Quality
+Efficiency
+Quality
+Efficiency
+PSNR↑
+FPS↑ Energy↓ PSNR↑
+FPS↑ Energy↓ PSNR↑
+FPS↑ Energy↓
+SSIM↑ LPIPS↓
+SSIM↑ LPIPS↓
+SSIM↑ LPIPS↓
+(dB)
+(Orin) (mJ)
+(dB)
+(Orin) (mJ)
+(dB)
+(Orin) (mJ)
+8
+32
+LUT Size
+22.0
+21.8
+21.6
+21.4
+21.2
+21.0
+(a) Small City.
+PSNR
+13.07
+14.42
+20.16
+16.44
+16.89
+58.10
+70.28
+428.79
+380.82
+362.75
+320.30
+308.00
+110.38
+90.04
+FPS
+45
+44
+43
+42
+41
+40
+128
+26.0
+25.8
+25.6
+25.4
+25.2
+25.0
+8
+32
+LUT Size
+(b) Residence.
+23.76
+23.71
+24.39
+25.65
+24.72
+25.65
+24.72
+0.852
+0.848
+0.856
+0.850
+0.819
+0.850
+0.819
+PSNR
+0.169
+0.177
+0.170
+0.170
+0.233
+0.170
+0.233
+23.95
+27.20
+36.31
+24.93
+31.95
+46.52
+93.45
+FPS
+40
+38
+36
+34
+32
+30
+128
+27.0
+26.8
+26.6
+26.4
+26.2
+26.0
+8
+32
+LUT Size
+(c) SciArt.
+215.21
+193.11
+135.10
+194.06
+149.19
+134.30
+66.97
+29.80
+29.54
+29.92
+30.29
+29.02
+30.29
+29.02
+PSNR
+0.907
+0.904
+0.903
+0.904
+0.892
+0.904
+0.892
+FPS
+50
+48
+46
+44
+42
+40
+128
+8
+32
+LUT Size
+(d) Rubble.
+0.238
+0.244
+0.262
+0.260
+0.277
+0.260
+0.277
+25.0
+24.8
+24.6
+24.4
+24.2
+24.0
+14.73
+14.63
+26.67
+26.95
+28.71
+53.27
+67.91
+368.21
+382.83
+141.18
+203.76
+191.97
+131.44
+103.13
+PSNR
+FPS
+70
+68
+66
+64
+62
+60
+128
+FPS
+FPS
+44
+43
+42
+41
+40
+39
+38
+128
+0.220
+0.221
+0.198
+0.213
+0.294
+0.213
+0.294
+FPS
+PSNR (dB)
+PSNR
+0.815
+0.813
+0.846
+0.818
+0.718
+0.818
+0.718
+FPS
+PSNR (dB)
+27.0
+26.8
+26.6
+26.4
+26.2
+26.0
+27.53
+27.50
+27.80
+27.24
+24.71
+27.24
+24.71
+FPS
+PSNR (dB)
+PSNR (dB)
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+FPS
+PSNR (dB)
+Metrics
+8
+32
+LUT Size
+(e) Building.
+Fig. 10: The sensitivity of rendering quality and performance to the lookup table size (m intervals)
+in the rasterization stage. As m increases, the performance decreases while the accuracy increases a
+little. We found that the size of 32 is a good trade-off across different datasets.
+lossless and bit-accurate results. From an efficiency perspective, each component contributes to the
+overall speedup. Our fully streaming LoD search can achieve 1.4× speedup. On top of that, our
+temporal-aware LoD search can further boost the overall performance to 1.9×. Due to Amdahl’s
+Law, only optimizing LoD search would not achieve a significant speedup. By further accelerating
+the splatting stage via our preemptive α-flitering, VOYAGER eventually boosts the performance to
+3.7× on the HierarchicalGS dataset.
+5 .5
+E VALUATION ON S MALL -S CALE DATASETS
+We also evaluate VOYAGER on small-scale datasets in Tbl. 3. While rendering small-scale scenes is
+not the primary focus of this work, we include the results for completeness. We show that VOYAGER
+achieves relatively low rendering quality compared to the corresponding HierarchicalGS. The primary reason is that the LUT approximation introduces some artifacts compared to the exact αcomputation. Nevertheless, VOYAGER can achieve 2.5× and 3.4× speedup against HierarchicalGS
+and 3DGS, respectively. With some degree of quality sacrifices, VOYAGER at τ of 15 can further
+boost the performance to 3.6× and 4.8× speedup, respectively. This could be a potential limitation
+of VOYAGER on small-scale datasets, which we leave for future work.
+5 .6
+S ENSTIVITY S TUDY
+Fig. 10 shows the sensitivity study of rendering quality and the performance to the LUT size (m
+intervals in Sec. 4 .2), across five different scenes. We observe that increasing the LUT size from 8 to
+32 results in notable improvements in rendering quality, while incurring only minimal performance
+overhead. However, further increasing the LUT size from 32 to 128 leads to a significant drop in
+performance, with negligible gains in visual quality. This trade-off suggests that a LUT size of 32
+strikes a good balance between performance and rendering fidelity.
+6
+C ONCLUSION
+Human imagination is boundless. When harnessing Gaussians to construct virtual worlds, our rendering systems should be just as limitless. VOYAGER marks the first attempt toward enabling real9
+time city-scale Gaussian splatting on resource-constrained devices. By identifying and addressing
+the two primary bottlenecks, LoD search and splatting, we introduce two key innovations: temporalaware LoD search and preemptive α-filtering, both of which significantly enhance rendering efficiency. Overall, VOYAGER achieves up to 6.6× speedup in large-scale scenes and 4.8× speedup in
+small-scale scenes, all with comparable rendering quality.
+R EFERENCES
+Gene M Amdahl. Validity of the single processor approach to achieving large scale computing
+capabilities. In Proceedings of the April 18-20, 1967, spring joint computer conference, pp. 483–
+485, 1967.
+Jonathan T Barron, Ben Mildenhall, Matthew Tancik, Peter Hedman, Ricardo Martin-Brualla, and
+Pratul P Srinivasan. Mip-nerf: A multiscale representation for anti-aliasing neural radiance fields.
+In Proceedings of the IEEE/CVF International Conference on Computer Vision, pp. 5855–5864,
+2021.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Zip-nerf:
+Anti-aliased grid-based neural radiance fields. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pp. 19697–19705, 2023.
+Michael Bauer, Sean Treichler, and Alex Aiken. Singe: Leveraging warp specialization for high
+performance on gpus. In Proceedings of the 19th ACM SIGPLAN symposium on Principles and
+practice of parallel programming, pp. 119–130, 2014.
+Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu. High-quality
+surface reconstruction using gaussian surfels. In ACM SIGGRAPH 2024 Conference Papers, pp.
+1–11, 2024.
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, Zhangyang Wang, et al. Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps. Advances in neural
+information processing systems, 37:140138–140158, 2024.
+Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of
+gaussians. In European Conference on Computer Vision, pp. 165–181. Springer, 2024.
+Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang, Tao Liu, Zhilin Pei, Hengjie Li,
+Xingcheng Zhang, and Bo Dai. Flashgs: Efficient 3d gaussian splatting for large-scale and highresolution rendering. arXiv preprint arXiv:2408.07967, 2024a.
+Qi-Yuan Feng, Geng-Chen Cao, Hao-Xiang Chen, Qun-Ce Xu, Tai-Jiang Mu, Ralph Martin, and
+Shi-Min Hu. Evsplitting: an efficient and visually consistent splitting algorithm for 3d gaussian
+splatting. In SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024b.
+Linus Franke, Laura Fink, and Marc Stamminger. Vr-splatting: Foveated radiance field rendering
+via 3d gaussian splatting and neural points. arXiv preprint arXiv:2410.17932, 2024.
+Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. Eagles: Efficient accelerated 3d gaussians
+with lightweight encodings. In European Conference on Computer Vision, pp. 54–71. Springer,
+2024.
+Google. Or-tools - google optimization tools. https://github.com/google/or-tools,
+2025.
+Hao Gui, Lin Hu, Rui Chen, Mingxiao Huang, Yuxin Yin, Jin Yang, and Yong Wu. Balanced 3dgs:
+Gaussian-wise parallelism rendering with fine-grained tiling. arXiv preprint arXiv:2412.17378,
+2024.
+Florian Hahlbohm, Fabian Friederichs, Tim Weyrich, Linus Franke, Moritz Kappel, Susana Castillo,
+Marc Stamminger, Martin Eisemann, and Marcus Magnor. Efficient perspective-correct 3d gaussian splatting using hybrid transparency. In Computer Graphics Forum, pp. e70014. Wiley Online
+Library, 2025.
+10
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep blending for free-viewpoint image-based rendering. ACM Transactions on Graphics
+(ToG), 37(6):1–15, 2018.
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting
+for geometrically accurate radiance fields. In ACM SIGGRAPH 2024 conference papers, pp.
+1–11, 2024.
+Xiaotong Huang, He Zhu, Zihan Liu, Weikai Lin, Xiaohong Liu, Zhezhi He, Jingwen Leng, Minyi
+Guo, and Yu Feng. Seele: A unified acceleration framework for real-time gaussian splatting.
+arXiv preprint arXiv:2503.05168, 2025.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Transactions on Graphics, 42(4):1–14, 2023.
+Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas, Michael Wimmer, Alexandre Lanvin, and
+George Drettakis. A hierarchical 3d gaussian representation for real-time rendering of very large
+datasets. ACM Transactions on Graphics (TOG), 43(4):1–15, 2024.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics, 36(4), 2017.
+Ronny Krashinsky, Olivier Giroux, Stephen Jones, Nick Stam, and Sridhar Ramaswamy. Nvidia
+ampere architecture in-depth, 2020. URL https://developer.nvidia.com/blog/
+nvidia-ampere-architecture-in-depth/.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3d gaussian
+representation for radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pp. 21719–21728, 2024a.
+Junseo Lee, Seokwon Lee, Jungi Lee, Junyong Park, and Jaewoong Sim. Gscore: Efficient radiance
+field rendering via architectural support for 3d gaussian splatting. In Proceedings of the 29th ACM
+International Conference on Architectural Support for Programming Languages and Operating
+Systems, Volume 3, pp. 497–511, 2024b.
+Liqiang Lin, Yilin Liu, Yue Hu, Xingguang Yan, Ke Xie, and Hui Huang. Capturing, reconstructing,
+and simulating: the urbanscene3d dataset. In European Conference on Computer Vision, pp. 93–
+109. Springer, 2022.
+Weikai Lin, Yu Feng, and Yuhao Zhu. Metasapiens: Real-time neural rendering with efficiencyaware pruning and accelerated foveated rendering. In Proceedings of the 30th ACM International
+Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1, pp. 669–682, 2025.
+Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran Peng, and Zhaoxiang Zhang. Citygaussian: Real-time high-quality large-scale scene rendering with gaussians. In European Conference
+on Computer Vision, pp. 265–282. Springer, 2024.
+Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente
+Carrasco, and Fernando De La Torre. Taming 3dgs: High-quality radiance fields with limited
+resources. In SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024.
+Silvano Martello and Paolo Toth. Knapsack problems: algorithms and computer implementations.
+John Wiley & Sons, Inc., 1990.
+Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle, Daniel Duckworth, Rama Gosula, Keisuke Tateno, John Bates, Dominik Kaeser, and Federico Tombari. Radsplat: Radiance field-informed gaussian splatting for robust real-time rendering with 900+ fps.
+arXiv preprint arXiv:2403.13806, 2024.
+Nvidia. Jetson orin for next-gen robotics, 2023. URL https://www.nvidia.com/en-us/
+autonomous-machines/embedded-systems/jetson-orin/.
+11
+Nvidia.
+Nvidia nsight compute, 2025.
+URL https://docs.nvidia.com/
+nsight-compute/ProfilingGuide/index.html#metrics-reference.
+Zhexi Peng, Tianjia Shao, Yong Liu, Jingke Zhou, Yin Yang, Jingdong Wang, and Kun Zhou. Rtgslam: Real-time 3d reconstruction at scale using gaussian splatting. In ACM SIGGRAPH 2024
+Conference Papers, pp. 1–11, 2024.
+Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus
+Steinberger. Stopthepop: Sorted gaussian splatting for view-consistent real-time rendering. ACM
+Transactions on Graphics (TOG), 43(4):1–17, 2024.
+Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu, Zhangkai Ni, and Bo Dai. Octreegs: Towards consistent real-time rendering with lod-structured 3d gaussians. arXiv preprint
+arXiv:2403.17898, 2024.
+Barbara Roessle, Norman Müller, Lorenzo Porzi, Samuel Rota Bulò, Peter Kontschieder, Angela
+Dai, and Matthias Nießner. L3dg: Latent 3d gaussian diffusion. In SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024.
+Xuechang Tu, Bernhard Kerbl, and Fernando de la Torre. Fast and robust 3d gaussian splatting for
+virtual reality. In SIGGRAPH Asia 2024 Posters, pp. 1–3. 2024.
+Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-nerf: Scalable construction
+of large-scale nerfs for virtual fly-throughs. In Proceedings of the IEEE/CVF conference on
+computer vision and pattern recognition, pp. 12922–12931, 2022.
+Haithem Turki, Michael Zollhöfer, Christian Richardt, and Deva Ramanan. Pynerf: Pyramidal
+neural radiance fields. Advances in neural information processing systems, 36:37670–37681,
+2023.
+Xinzhe Wang, Ran Yi, and Lizhuang Ma. Adr-gaussian: Accelerating gaussian splatting with adaptive radius. In SIGGRAPH Asia 2024 Conference Papers, pp. 1–10, 2024a.
+Zichen Wang, Xi Deng, Ziyi Zhang, Wenzel Jakob, and Steve Marschner. A simple approach to
+differentiable rendering of sdfs. In SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024b.
+Linning Xu, Vasu Agrawal, William Laney, Tony Garcia, Aayush Bansal, Changil Kim, Samuel
+Rota Bulò, Lorenzo Porzi, Peter Kontschieder, Aljaž Božič, et al. Vr-nerf: High-fidelity virtualized walkable spaces. In SIGGRAPH Asia 2023 Conference Papers, pp. 1–12, 2023.
+12
+Table 4: Efficiency evaluation of VOYAGER against the state-of-the-arts (Kerbl et al., 2023; Lee
+et al., 2024a; Liu et al., 2024; Ren et al., 2024; Kerbl et al., 2024). Here, we show the results on
+three large-scale datasets: HierarchicalGS (Kerbl et al., 2024), UrbanScene3D (Lin et al., 2022), and
+MegaNeRF (Turki et al., 2022).
+Quality Metrics
+Methods
+HierarchicalGS
+Small City
+FPS (Orin) ↑
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 0.0)
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 0.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+12.18
+24.86
+13.55
+8.95
+11.43
+15.53
+28.70
+42.19
+68.84
+13.61
+18.47
+32.63
+13.02
+12.93
+17.25
+42.24
+42.71
+58.19
+9.59
+20.00
+27.97
+11.70
+12.44
+18.63
+32.63
+35.31
+59.15
+11.60
+19.24
+30.30
+12.36
+12.69
+17.94
+37.43
+39.01
+58.67
+12.28
+25.20
+31.24
+12.70
+13.25
+16.79
+43.55
+46.0
+64.24
+11.78
+15.59
+26.85
+16.97
+17.52
+22.46
+63.65
+66.86
+94.52
+12.03
+20.40
+29.04
+14.83
+15.39
+19.63
+53.60
+56.42
+79.38
+#Op. (106 )↓
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 0.0)
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 0.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+732.69
+649.68
+2068.59
+1086.99
+857.64
+591.01
+682.10
+584.15
+363.67
+2225.49
+2473.56
+2088.34
+2338.85
+2323.27
+1587.84
+1205.48
+1166.39
+712.98
+2863.02
+2571.05
+2154.70
+2946.90
+2681.50
+1506.68
+1180.87
+1071.29
+594.10
+2544.25
+2522.30
+2121.52
+2642.88
+2502.38
+1547.26
+1193.17
+1118.84
+653.54
+1407.22
+1177.23
+1389.11
+1993.58
+1948.93
+1368.09
+580.58
+556.27
+391.20
+1854.63
+3474.94
+1008.29
+1359.21
+1307.92
+996.03
+522.95
+501.35
+332.85
+1630.92
+2326.09
+1198.70
+1676.39
+1628.42
+1182.06
+551.77
+528.81
+362.02
+Energy (mJ)↓
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 0.0)
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 0.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+443.52
+209.16
+398.54
+581.16
+455.03
+405.95
+188.13
+127.99
+78.44
+396.78
+292.30
+207.37
+399.37
+402.08
+378.15
+127.85
+126.44
+92.80
+562.99
+260.01
+165.49
+444.44
+417.85
+371.99
+165.50
+152.94
+91.29
+479.88
+276.16
+186.43
+421.90
+409.96
+375.07
+146.67
+139.69
+92.05
+423.37
+190.47
+160.04
+409.61
+392.37
+372.24
+123.99
+117.47
+84.06
+407.54
+333.49
+193.69
+306.37
+296.73
+273.68
+84.83
+80.76
+57.13
+415.46
+261.98
+176.87
+357.99
+344.55
+322.96
+104.41
+99.12
+70.60
+A
+S UPPLEMENTARY
+A .1
+E XPERIMENTAL S ETUP
+UrbanScene3D
+Residence SciArt Average
+Rubble
+MegaNeRF
+Building Average
+Hardware Platforms. We conduct both the performance and accuracy measurements on Nvidia
+Jetson Orin SoC with 5.325 TFLOPS (FP32) and 64 GB memory.
+Evaluation Metrics.
+Next, we describe how we obtain various performance and quality metrics.
+• Image Consistency (PSNR, SSIM, LPIPS). To assess frame-to-frame image consistency, we compared generated videos by different acceleration methods against the original video results on image quality, using PSNR, SSIM,
+and LPIPS. PSNR is calculated using standard image processing libraries,
+e.g.,skimage.metrics.peak signal noise ratio. Similarly, SSIM is calculated using skimage.metrics.structural similarity. LPIPS is measured
+using the lpips library in Python.
+• Performance. For performance, we report end-to-end latency, GPU memory consumption,
+and GPU energy consumption. For end-to-end latency, we measure the total time elapsed
+during one single frame rendering. Here, we use Python’s torch.cuda module. We capture the start and end timestamps using torch.cuda.event() and use the difference
+between these two as the end-to-end latency. For GPU memory consumption, we use the
+built-in measurement to monitor the peak GPU memory usage during inference. The GPU
+power is directly obtained using the built-in power sensing circuitry on Orin.
+13
+Table 5: Quality evaluation of VOYAGER against the state-of-the-arts (Kerbl et al., 2023; Lee et al.,
+2024a; Liu et al., 2024; Ren et al., 2024; Kerbl et al., 2024). Here, we show the results on three
+large-scale datasets: HierarchicalGS (Kerbl et al., 2024), UrbanScene3D (Lin et al., 2022), and
+MegaNeRF (Turki et al., 2022). We do not report the result of Campus due to OOM on all methods.
+Quality Metrics
+Methods
+HierarchicalGS
+Small City
+UrbanScene3D
+Residence SciArt Average
+MegaNeRF
+Rubble Building Average
+PSNR (dB) ↑
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 0.0)
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 0.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+23.32
+22.01
+21.33
+26.34
+26.24
+25.39
+26.34
+26.24
+25.06
+21.86
+22.03
+21.77
+21.69
+21.65
+21.11
+21.69
+21.65
+20.67
+21.43
+21.43
+22.18
+25.95
+25.92
+25.11
+25.95
+25.92
+24.64
+21.65
+21.73
+21.97
+23.82
+23.79
+23.11
+23.82
+23.78
+22.66
+25.68
+25.59
+25.56
+26.47
+26.29
+23.88
+26.47
+26.28
+23.43
+20.25
+22.96
+23.55
+24.15
+24.07
+22.75
+24.15
+24.07
+22.51
+22.96
+24.27
+24.56
+25.31
+25.18
+23.31
+25.31
+25.17
+22.97
+SSIM ↑
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 0.0)
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 0.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+0.724
+0.729
+0.646
+0.814
+0.811
+0.771
+0.814
+0.812
+0.772
+0.797
+0.814
+0.771
+0.675
+0.674
+0.639
+0.675
+0.674
+0.627
+0.839
+0.835
+0.834
+0.838
+0.837
+0.793
+0.838
+0.837
+0.787
+0.818
+0.825
+0.802
+0.757
+0.755
+0.716
+0.757
+0.755
+0.707
+0.791
+0.810
+0.809
+0.817
+0.812
+0.706
+0.817
+0.812
+0.689
+0.713
+0.784
+0.720
+0.757
+0.754
+0.666
+0.757
+0.754
+0.653
+0.752
+0.797
+0.765
+0.787
+0.783
+0.686
+0.787
+0.783
+0.671
+LPIPS ↓
+3DGS
+CityGaussian
+OctreeGS
+HierarchicalGS (τ = 0.0)
+HierarchicalGS (τ = 3.0)
+HierarchicalGS (τ = 15.0)
+VOYAGER (τ = 0.0)
+VOYAGER (τ = 3.0)
+VOYAGER (τ = 15.0)
+0.430
+0.344
+0.415
+0.250
+0.254
+0.316
+0.250
+0.254
+0.324
+0.264
+0.212
+0.275
+0.246
+0.248
+0.332
+0.246
+0.248
+0.351
+0.274
+0.234
+0.219
+0.206
+0.208
+0.279
+0.206
+0.208
+0.311
+0.269
+0.223
+0.247
+0.226
+0.228
+0.306
+0.226
+0.228
+0.331
+0.304
+0.233
+0.269
+0.256
+0.261
+0.358
+0.256
+0.261
+0.365
+0.356
+0.243
+0.274
+0.296
+0.299
+0.376
+0.296
+0.299
+0.384
+0.330
+0.238
+0.272
+0.276
+0.280
+0.367
+0.276
+0.280
+0.375
+Fig. 11: Qualitative comparison of VOYAGER against other baselines Liu et al. (2024); Kerbl et al.
+(2024; 2023); Ren et al. (2024) on SciArt and SmallCity. More results in the supplementary video.
+14
+Fig. 12: Qualitative comparison of VOYAGER against other baselines Liu et al. (2024); Kerbl et al.
+(2024; 2023); Ren et al. (2024) on Building and Residence. More results in the supplementary
+video.
+Fig. 13: Qualitative comparison of VOYAGER against other baselines Liu et al. (2024); Kerbl et al.
+(2024; 2023); Ren et al. (2024) on small-scale datasets. More results in the supplementary video.
+15
+Fig. 14: Qualitative results of the sensitivity of rendering quality and performance to the lookup
+table size (m intervals) in the rasterization stage.
+16

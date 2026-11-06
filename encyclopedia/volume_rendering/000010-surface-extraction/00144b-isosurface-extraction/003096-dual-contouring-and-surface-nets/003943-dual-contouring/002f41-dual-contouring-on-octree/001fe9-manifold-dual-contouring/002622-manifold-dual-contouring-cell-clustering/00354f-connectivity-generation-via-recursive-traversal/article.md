@@ -1,0 +1,143 @@
+# Connectivity Generation via Recursive Traversal
+
+Also called: CellProc, FaceProc, EdgeProc algorithm
+
+## Overview
+This algorithm extracts the topological connectivity of a surface represented by an octree by enumerating the minimal edges intersected by the surface [S1]. It establishes a one-to-one relationship between surface patches and these minimal edges, serving as the connectivity generation phase for Manifold Dual Contouring [S1]. Unlike methods that rely on global optimization, it uses local recursive traversal to identify where surface patches should be formed, enabling the subsequent placement of dual nodes [S1].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** An octree structure representing the volumetric data, where cells can be subdivided. The octree supports both uniform (quad patches) and adaptive (triangle patches) configurations [S1].
+*   **Output:** A set of minimal edges intersected by the surface, identified by the recursive traversal [S1].
+
+**Data Structures**
+The algorithm operates on the octree hierarchy. Each node in the octree represents a cell. The traversal logic assumes standard octree subdivision where a parent cell has 8 sub-cells.
+
+**Definitions**
+*   **Minimal Edge:** An edge that does not contain any other edge in a neighboring octree cell. In other words, it is the smallest edge unit at the boundary of the surface intersection within the octree hierarchy [S1].
+*   **Dual Node:** A vertex associated with a cell, typically located inside the cell, which will later be connected to form the surface mesh [S1].
+
+**Algorithm Steps**
+The connectivity generation is performed by three mutually recursive functions: `CellProc`, `FaceProc`, and `EdgeProc`.
+
+1.  **CellProc(c):** Receives a cell $c$.
+    *   Recursively call `CellProc` for every sub-cell of $c$.
+    *   Make 12 calls to `FaceProc` for every pair of face-adjacent sub-cells of $c$.
+    *   Make 6 calls to `EdgeProc` for all four sub-cells sharing an edge of $c$.
+
+2.  **FaceProc(c1, c2):** Receives two cells $c1$ and $c2$ sharing a common face $f$.
+    *   Recursively call `FaceProc` four times, once for every pair of sub-cells of $c1$ and $c2$ that share a face contained in $f$.
+    *   Make 4 calls to `EdgeProc` for every four sub-cells (two from $c1$, two from $c2$) that share an edge contained in $f$.
+
+3.  **EdgeProc(c1, c2, c3, c4):** Receives four edge-adjacent cells sharing a common edge.
+    *   In the uniform case, the four cells are distinct.
+    *   In the adaptive case, one of the cells is repeated (resulting in only three distinct cells), indicating that the edge is not fully subdivided in one direction [S1].
+    *   Make 2 recursive calls to `EdgeProc` for all four sub-cells sharing a half-edge contained in the current edge.
+    *   **Patch Generation:** When `EdgeProc` receives four cells that share a **minimal edge** (i.e., no further subdivision exists along that edge in the neighborhood), it generates a surface patch.
+        *   **Uniform Case:** Connect the dual nodes in the four cells related to the minimal edge to form a quad [S1].
+        *   **Adaptive Case:** If one cell is repeated (3 distinct cells), create a triangular patch using the corresponding dual nodes [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def CellProc(cell):
+    # 1. Recurse into sub-cells
+    for sub_cell in cell.sub_cells:
+        CellProc(sub_cell)
+    
+    # 2. Process face adjacencies among sub-cells
+    # There are 12 pairs of face-adjacent sub-cells in an octant
+    face_adjacent_pairs = get_face_adjacent_pairs(cell.sub_cells)
+    for c1, c2 in face_adjacent_pairs:
+        FaceProc(c1, c2)
+        
+    # 3. Process edge adjacencies among sub-cells
+    # There are 6 edges in a cube, each shared by 4 sub-cells
+    edge_adjacent_quads = get_edge_adjacent_quads(cell.sub_cells)
+    for c1, c2, c3, c4 in edge_adjacent_quads:
+        EdgeProc(c1, c2, c3, c4)
+
+def FaceProc(cell_a, cell_b):
+    # cell_a and cell_b share a common face f
+    
+    # 1. Recurse into face-adjacent sub-cell pairs
+    # There are 4 pairs of sub-cells sharing a face within f
+    face_sub_pairs = get_face_adjacent_sub_pairs(cell_a, cell_b)
+    for sa, sb in face_sub_pairs:
+        FaceProc(sa, sb)
+        
+    # 2. Process edge adjacencies within the face f
+    # There are 4 edges within face f, each shared by 2 sub-cells from cell_a and 2 from cell_b
+    edge_quads_on_face = get_edge_quads_on_face(cell_a, cell_b)
+    for sa1, sa2, sb1, sb2 in edge_quads_on_face:
+        EdgeProc(sa1, sa2, sb1, sb2)
+
+def EdgeProc(cell_1, cell_2, cell_3, cell_4):
+    # cell_1, cell_2, cell_3, cell_4 share a common edge
+    # In adaptive case, one cell may be repeated (e.g., cell_4 == cell_3)
+    
+    # 1. Recurse into half-edge adjacencies
+    # There are 2 half-edges in the current edge, each shared by 4 sub-cells
+    half_edge_quads = get_half_edge_quads(cell_1, cell_2, cell_3, cell_4)
+    for h1, h2, h3, h4 in half_edge_quads:
+        EdgeProc(h1, h2, h3, h4)
+        
+    # 2. Check if this is a minimal edge
+    # A minimal edge is one that does not contain any other edge in a neighboring octree cell.
+    # This is determined by the fact that we are at the leaf level of recursion for this edge topology.
+    if is_minimal_edge(cell_1, cell_2, cell_3, cell_4):
+        # Generate surface patch
+        dual_nodes = [get_dual_node(c) for c in [cell_1, cell_2, cell_3, cell_4]]
+        
+        # Handle duplicates in adaptive case
+        unique_cells = list(dict.fromkeys([cell_1, cell_2, cell_3, cell_4]))
+        unique_dual_nodes = [get_dual_node(c) for c in unique_cells]
+        
+        if len(unique_cells) == 4:
+            # Uniform case: Quad patch
+            create_quad_patch(unique_dual_nodes)
+        else:
+            # Adaptive case: Triangle patch (3 unique cells)
+            create_triangle_patch(unique_dual_nodes)
+
+def is_minimal_edge(c1, c2, c3, c4):
+    # Returns True if the edge shared by these cells is minimal.
+    # This is implicitly true when the recursion stops because the cells are leaves
+    # or the edge is not further subdivided in the octree structure.
+    # Specifically, it means no smaller edge exists in neighboring cells.
+    # [G] Implementation detail: Check if any of the cells have children that would
+    # split this edge further. If not, it is minimal.
+    return not any(c.has_children for c in [c1, c2, c3, c4])
+
+def get_dual_node(cell):
+    # Returns the dual node associated with the cell.
+    # [G] This is typically the centroid of the intersection of the volume V with the cell.
+    return cell.centroid_of_intersection()
+```
+
+**Parameters**
+*   **Octree Structure:** The algorithm requires an octree where cells can be subdivided [S1].
+*   **Configuration:** Supports uniform (quad patches) and adaptive (triangle patches) configurations [S1].
+
+**Edge Cases and Pitfalls**
+*   **Adaptive Case:** In adaptive octrees, one of the four cells sharing an edge may be repeated (only three distinct cells). The algorithm must handle this by creating a triangular patch instead of a quad [S1].
+*   **Minimal Edge Definition:** A minimal edge is defined as one that does not contain any other edge in a neighboring octree cell. Failure to correctly identify minimal edges may result in incorrect connectivity or duplicate patches [S1].
+
+## Subtopics
+
+### [Span-based Surface Extraction](8207-span-based-surface-extraction.md)
+Span-based Surface Extraction is a method for extracting connected surface topology from voxelized particle data by identifying depth intervals (spans) in voxel columns and linking overlapping spans in neighboring columns. It builds on [Connectivity Generation via Recursive Traversal](7454-connectivity-generation-via-recursive-traversal.md) by converting the minimal edge connectivity into a continuous surface mesh representation suitable for filtering and rendering. Unlike dual contouring methods that rely on quadric error metrics and vertex optimization, this approach operates directly on compressed depth lists, making it highly memory-efficient for large-scale particle datasets.
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm performs a recursive traversal of the octree. The complexity is proportional to the number of nodes in the octree, specifically focusing on the boundary between occupied and empty cells.
+*   **Memory Complexity:** Requires storage for the octree structure and the dual nodes. The connectivity generation itself is local and does not require global data structures.
+*   **Strengths:** Localizes nodes inside cells, providing freedom to place surface nodes close to features of the volume [S1]. It is robust enough for noisy volumetric data surfaces [S1].
+*   **Limitations:** Relies on the octree structure; performance depends on the depth and distribution of the octree.
+
+## Background
+The algorithm was proposed in the context of Dual Contouring on generalized octrees [S1]. It is based on the method described in the original Dual Contouring paper [S1, S4]. The method is used to extract the connectivity of the surface before dual nodes are localized and connected.
+
+## Sources
+[S1] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29

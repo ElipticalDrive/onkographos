@@ -1,0 +1,1563 @@
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+NINA VESSERON, ENSAE-CREST, France and Adobe, France
+ELIE MICHEL, Adobe, France
+arXiv:2609.05127v1 [cs.GR] 4 Sep 2026
+smooth selection
+(a) Skinning w/ differentiable weights
+deformation
+resampling
+(b) Real-time deformation
+(c) Adaptive resampling
+Fig. 1. We present a full pipeline to apply skinned deformation to 3D Gaussian Splats (3DGS). When setting up the rig, we evaluate the gradient of skinning
+weights (a). These are used during deformation to dynamically stretch splats to prevent holes (b). To further reduce deformation artifacts, we add an optional
+adaptive resampling step based on a pretrained resampling dictionary (c).
+Skinned deformation is a common framework to turn a 3D shape from its
+rest pose into a dynamic pose through the deformation of a coarser kinematic structure, called rig. When applied to a 3D mesh, this rig only needs
+to displace vertices to deform the polygons that connect them. However,
+when deforming 3D Gaussian Splats, which do not provide connectivity information, rigidly transforming points is not enough to prevent the creation
+of holes when stretching shapes. In this paper, we use the spatial gradient
+of skinning weights to provide a full mesh-free deformation pipeline for
+Gaussian Splats, that more accurately stretches splats while remaining fully
+compatible with real-time rendering capabilities, which we demonstrate in
+a WebGL viewer. We present how we evaluate these gradients when the
+user creates the rig structure and propose an optional adaptive resampling
+scheme to split up splats that still produce artifacts.
+CCS Concepts: • Computing methodologies → Point-based models.
+Additional Key Words and Phrases: Gaussian splatting, Shape deformation
+1
+Introduction
+Animating 3D shapes typically consists in starting from a rest shape
+and deforming it into a specific pose. The pose is slightly different
+at each frame of the animation, while remaining consistent at the
+scale of the sequence. Since a shape is usually represented by an
+aggregation of millions of primitives, it would be both too time consuming and too temporally inconsistent to manually modify every
+one of them. Instead, computer animation tools provide a means
+to only deform a coarser structure, and then automatically propagate the deformation to the full shape. This coarse structure can
+take multiple forms (bounding cage [Thiery et al. 2024], constraint
+Authors’ Contact Information: Nina Vesseron, nina.vesseron@ensae.fr, ENSAE-CREST,
+France and Adobe, France; Elie Michel, emichel@adobe.com, Adobe, France.
+points [Botsch and Sorkine 2008], skeleton [Weber et al. 2007]), and
+we focus here on the most common case, where it represents an
+internal skeleton of the shape. This is called a rig and often comes
+with extra constraints about maximum deformation angles, locked
+transforms, etc. The individual components of a rig are called rig
+nodes, or sometimes "bones" (for character animation).
+The propagation of the deformation from the coarse structure
+to the full shape relies on an association of the base elements that
+compose the shape with the rig nodes, which is called "skinning".
+When the deformed shape is represented as a 3D mesh, each pair of
+a rig node and a mesh vertex is associated with a skinning weight,
+which tells how much the vertex is influenced by the pose of the
+rig node. When the rig pose changes, each vertex is displaced, and
+since the connectivity information remains unchanged, the polygons
+smoothly deform over time.
+In this paper, we apply rigged deformation to 3D shapes represented using 3D Gaussian Splatting (3DGS) rather than a 3D mesh.
+This representation has shown great flexibility to encode shapes
+that are not limited to surfaces, yet a key difference is their absence
+of connectivity information: each point carries its own element
+of surface/volume without explicit notion of neighboring points.
+In case of a rigid deformation, where all neighbor points undergo
+the same deformation, this is not a problem as we can apply the
+same transform to all splats. However, in regions where neighbor
+splats follow different deformation – because they have different
+skinning weights – the element of surface/volume carried around
+each deformed position should account for the stretch or twist introduced by the relative movement of its neighbors. As illustrated
+2
+•
+Vesseron and Michel
+Deformed pose
+Splats
+Mesh
+Rest pose
+Fig. 2. Traditional skinned deformation is applied to each point independently. When deforming a mesh (top row), the surface elements (triangles)
+are stretched as a consequence of connecting vertices. But when deforming
+a splat cloud (bottom row), the elements of surface/volumes (splats) are
+not deformed according to their neighbors because there is no connectivity
+information. This results in unwanted holes or overlap in the deformed
+shape. For clarity this example uses rig nodes (not represented in the figure)
+that are only translated (no scaling/rotation) and each point is influenced
+by a different mixture of rig nodes.
+in Fig. 2, we address this problem by using a first-order estimation
+of the neighbors deformation, which we evaluate using the gradient
+of skinning weights so that it does not depend on the number of
+neighbors and as such remains easy to parallelize on a GPU.
+Our contributions in this paper are:
+• A lightweight and GPU-friendly skinning technique that
+deforms Gaussian splat models and automatically stretches
+Gaussians to prevent the introduction of holes, based on the
+gradient of skinning weights (Sec. 3.1).
+• A framework to define the gradient of skinning weights
+without explicitly looking at splat’s neighbors (Sec. 3.2).
+• A refinement post-process that adaptively resamples the
+deformed Gaussian splats using a scene-agnostic dictionarybased technique. This mitigates the artifacts inherent to
+parallel per-splat deformation schemes. (Sec. 3.3)
+Our method enables real time manipulation of Gaussian splats
+on consumer-grade device without scene-specific optimization nor
+mesh extraction. It operates on pre-existing Gaussian splat scenes
+without access to original images.
+2
+Related Work
+Gaussian splatting. While popularized in the context of novel
+view synthesis, Gaussian splat representations [Kerbl et al. 2023]
+are increasingly produced by other means such as generative models
+[Li et al. 2025; Liang et al. 2025a; Ziwen et al. 2025], authoring tools
+[Chen et al. 2024; Pandey et al. 2025], and simulation pipelines
+[Zhong et al. 2025]. We thus propose a deformation method that
+does not assume any particular upstream reconstruction process.
+3DGS Animation. Gaussian splats have been used to represent
+animated scenes, for which temporal variations are often encoded
+through neural deformation models [Liang et al. 2025b; Luiten et al.
+2024; Sun et al. 2024; Wu et al. 2024; Yang et al. 2023] or physicallybased constraints [Jiang et al. 2024; Xie et al. 2024]. Although compatible with real-time rendering, this implicit or latent representation
+does not allow user-specified deformations at inference time. Even
+explicit models [Duan et al. 2024; Luiten et al. 2024] are generally
+tied to the specific motions observed during training. SC-GS [Huang
+et al. 2024a] notably enables motion edition thanks to a sparse set
+of controls, but these require a video input and per-scene training. Our method uses a sparse, explicit and editable representation
+for Gaussian splat animation that follows the idioms from skeletal
+animation.
+Mesh-based splat deformation. One common solution to enable
+interactive deformation of Gaussian splats is to rely on a mesh
+proxy [Borycki et al. 2025; Huang et al. 2024b]. For instance, GaussianMesh [Gao et al. 2024] connects Gaussians through a mesh that
+also guides their optimization, although this requires full retraining
+from images. In these approaches the mesh acts less as the actual
+rendered shape and more as a deformation structure like a cage or
+lattice, and these methods are tightly coupled with work that uses
+splats for the goal of extracting better meshes [Guédon and Lepetit
+2024; Liu et al. 2024] or to guide optimization [Guédon et al. 2025].
+The main issue however is that meshes cannot adequately handle
+volumetric or non-surface content such as smoke or foliage. Tetrahedral meshes [Jiang et al. 2024; Mai et al. 2025] lift this restriction by
+relying on a solid volume, but at the cost of a substantially heavier
+preprocessing step.
+Deformation refinement. Deforming a Gaussian splat by applying
+a rigid or affine transform to its mean and covariance is straightforward, but becomes problematic when the deformation field varies
+significantly across the support of individual splats. One mitigation
+is to add an anisotropy regularizer during reconstruction that encourages splats to remain near-isotropic [Feng et al. 2025; Xie et al.
+2024]. This helps prevent major artifacts under rotations or torsions
+and corrects the rigid component of the gradient associated with
+such transformations. However, in the general case, this correction
+is not sufficient, and it requires a scene-specific retraining pass. We
+instead introduce a lightweight resampling stage that runs in seconds as a post-process, selectively refining only the splats whose
+support spans a region of high deformation-field variation. This is
+complementary to proxy-based deformation pipelines; for instance,
+our resampling could be plugged into the workflow of [Huang et al.
+2024b] to improve its output quality.
+3
+Our method
+Our deformation process is designed around a simple idea. When
+all splats undergo the same rigid transform, they do not need to be
+stretched; what drives the deformation of individual splats is indeed
+the difference of transform with respect to their neighbors. In other
+words, what we need is the gradient of the deformation field.
+When using skinned deformation, the deformation field is defined
+by the combination of a few global rigid transforms (the rig nodes)
+using per-splat skinning weights. In Sec. 3.1 we present a real-time
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+deformation scheme where the overall deformation gradient is obtained from the gradient of individual skinning weights, evaluated
+at each splat center and stored as extra splat attributes.
+We then discuss in Sec. 3.2 how to compute reliable skinning
+weight gradients. Our key idea is to evaluate these as part of the
+authoring process that defines skinning weights, so as to avoid
+discretization artifacts. We do this by instrumenting the authoring
+tool in a way that does not affect the user workflow.
+Our method deforms individual splats in a rigid way, based solely
+on gradients evaluated at their center. Although this approximation is key to the real-time aspect of our technique, we discuss in
+Sec. 3.3 how to overcome the visual artifacts that it may introduce
+when splats are large with respect to the frequency at which skinning weights vary. We address this using an adaptive resampling
+scheme that only splits splats that need it, relying on a precomputed
+dictionary of splat decompositions to speed up the process.
+3.1
+Gradient rig for real-time deformation
+In this section, we assume that we know the gradient of skinning
+weights and describe how they can be used to properly stretch
+splats during real-time skinned deformation. Gaussian splats are
+given as a sequence of positions (𝑝𝑖 )𝑖 and a sequence of covariances
+(Σ𝑖 )𝑖 , where 𝑖 is the splat index (0 ≤ 𝑖 < 𝑁 ). To enable fast parallel
+deformation, we consider in this section that the number 𝑁 of splats
+does not change. We write respectively 𝑝𝑖′ and Σ𝑖′ the deformed
+position and deformed covariance of the splat of index 𝑖.
+The rig consists in 𝑀 rig nodes and its deformed pose is represented as a sequence (𝑇 𝑗′ )0≤ 𝑗 <𝑀 of rigid transforms. Each transform
+𝑇 𝑗′ is a 4 × 4 matrix that encodes a 3D affine map in homogeneous
+coordinates. To simplify notations we assume here that the rest pose
+of each node is the identity. The splats are attached to the rig using
+skinning weights 𝑤𝑖,𝑗 ∈ R, which give the relative influence that a
+Í −1
+rig node 𝑗 has on the splat 𝑖. We write 𝑊𝑖 = 𝑀
+𝑗=0 𝑤 𝑖,𝑗 the sum of
+all weights for a given splat.
+3.1.1 Deformation of 𝑝𝑖 . Although more advanced skinning schemes
+such as dual quaternions [Kavan et al. 2007] have been proposed, we
+demonstrate our method in the case of regular linear blend skinning
+in order to better highlight the simplicity of our extension. The center 𝑝𝑖′ of the deformed splat is obtained like the deformed vertices in
+a skinned mesh. We apply the average 𝐹𝑖 of the rig node transform
+matrices 𝑇 𝑗′ weighted by the splat’s skinning weights 𝑤𝑖,𝑗 :
+𝑝𝑖′ = 𝐹𝑖 𝑝𝑖
+where
+𝑀 −1
+1 ∑︁
+𝐹𝑖 =
+𝑤𝑖,𝑗 𝑇 𝑗′
+𝑊𝑖 𝑗=0
+(1)
+3.1.2 Deformation of Σ𝑖 . To compute the deformed covariance Σ𝑖′ ,
+we also assume that for each 𝑗 the skinning weight 𝑤𝑖,𝑗 is computed,
+in rest pose, as a field 𝑤𝑖,𝑗 = 𝑤 𝑗 (𝑝𝑖 ) and that we have access to
+® 𝑗 at 𝑝𝑖 . We write ∇𝑤
+® 𝑖,𝑗 = ∇𝑤
+® 𝑗 (𝑝𝑖 ) and
+the spatial gradients ∇𝑤
+𝐹𝑖 = 𝐹 (𝑝𝑖 ) becomes a field. We see in Sec. 3.2 how we get these.
+In theory, the element of geometry encoded by the Gaussian
+splat could be deformed arbitrarily by the rig, requiring to either
+bend the primitive or resample it. But since we want the deformed
+shape to remain a cloud of gaussian splats (to be able to chain
+a
+•
+3
+a'
+b
+b'
+c
+c'
+Rest pose
+Weight
+of node #1
+Weight
+of node #0
+Deformed pose
+Fig. 3. This simplified example highlights why a splat needs to be aware of
+how its neighbors are deformed in order to properly transform its covariance
+matrix. Since rig nodes 0 and 1 are only translated (no scale nor rotation),
+the linear blend 𝐹𝑖 is also only a translation for any splat 𝑖. However, splats
+𝑎, 𝑏 and 𝑐 need to be elongated in order to properly fill in the gap left by
+the spatial variation of this translation factor. Instead of costly neighbor
+lookups, we rely on a precomputed gradient of skinning weights to provide
+(𝑒𝑙𝑎𝑠𝑡𝑖𝑐 )
+information about neighbor deformation when computing 𝑅𝑖
+.
+deformations), and that each splat gets deformed into a single splat
+(to enable parallelization through a GPU vertex shader), we only
+apply a first order (i.e., linear) approximation of the deformation
+field 𝐹 to the covariance matrix. We can thus encode the deformation
+of the covariance Σ𝑖 as a 3×3 matrix 𝑅𝑖 , namely Σ𝑖′ = 𝑅𝑖 Σ𝑖 𝑅𝑇𝑖 . If all
+neighbors of the splat 𝑖 undergo the very same deformation as 𝑖
+(i.e., if all skinning weights are the same), we rigidly transform the
+covariance using the upper-left 3×3 part of 𝐹𝑖 :
+(rigid)
+𝑅𝑖
+= mat3x3(𝐹𝑖 )
+(2)
+However, neighbors may have different skinning weights, resulting in another component in the covariance deformation (see Fig. 3).
+Formally, this comes from differentiating the field 𝐹 (𝑝) with respect
+to 𝑝 (details in supplemental), which leads to a second term where
+the gradient of skinning weights estimates how the variation of
+deformation across neighbors results in covariance deformation:
+(elastic)
+𝑅𝑖
+=
+𝑀
+−1
+∑︁
+(𝑇 𝑗′ 𝑝𝑖 ) ⊗ 𝐺®𝑖,𝑗
+(3)
+−1
+∑︁
+® 𝑖,𝑗 𝑤𝑖,𝑗 𝑀
+∇𝑤
+® 𝑖,𝑗 ′
+− 2
+∇𝑤
+𝑊𝑖
+𝑊𝑖 𝑗 ′ =0
+(4)
+𝑗=0
+where 𝐺®𝑖,𝑗 =
+Note that 𝐺®𝑖,𝑗 is the gradient of the normalized weights 𝑤𝑖,𝑗 /𝑊𝑖 ,
+® 𝑖,𝑗 in cases where all weights sum to 1 (i.e.,
+which simplifies into ∇𝑤
+𝑊𝑖 = 1). The outer product (𝑇 𝑗′ 𝑝𝑖 ) ⊗ 𝐺®𝑖,𝑗 is a 3×3 matrix.
+We combine our rigid and elastic deformation terms with an
+hyper-parameter 𝜂 that tunes the strength of the elastic term. This
+𝜂 would be exactly one if the first order approximation was exact,
+in practice one can use slightly smaller values to reduce artifacts in
+previews (our post-processing properly fixes them in Sec. 3.3):
+Σ𝑖′ = 𝑅𝑖 Σ𝑖 𝑅𝑇𝑖
+(rigid)
+where 𝑅𝑖 = 𝑅𝑖
+(elastic)
++ 𝜂 𝑅𝑖
+(5)
+3.1.3 Deformation of view-dependent color. Many Gaussian splatting flavors allow splats to have a view-dependent color, starting
+4
+•
+Vesseron and Michel
+with the original 3DGS paper [Kerbl et al. 2023] which encodes this
+using Spherical Harmonics (SH). In general, this takes the form of a
+term 𝐶 ( ®
+𝑑), where 𝑑® is the view direction. Since we explicitly build
+a rotation matrix 𝑅𝑖 to transform the covariance, we may apply its
+inverse for the directional color. The color of the splat thus becomes
+® with 𝑑® evaluated for the deformed position 𝑝 ′ .
+𝑐𝑖 = 𝐶 (𝑅𝑇𝑖 𝑑),
+𝑖
+3.1.4 Implementation. In practice, we draw splats using GPU accelerated rasterization, where each splat is an instance of a quad. In
+the vertex shader, the splat’s position and covariance are loaded as
+instance attributes and used to project the 4 corners of the quad.
+To implement our gradient-based skinned deformation, we add
+instance attributes for skinning weights 𝑤𝑖,𝑗 and their evaluated
+∇𝑤𝑖,𝑗 = ®
+∇𝑤 𝑗 (𝑝𝑖 ), and a uniform buffer is used to pass in
+gradients ®
+the 𝑀 rig node transforms 𝑇 𝑗′ . To limit the memory footprint of the
+skinning weights, we constrain our scenes to 2 non-zero weights
+per splat to be able to encode them in a sparse way: we add 2 integer
+attributes to tell the 2 𝑗 indices where 𝑤𝑖,𝑗 is non zero.
+Formulas from equations 1 to 5 are inserted before the computation of corner projection, in which 𝑝𝑖′ and Σ𝑖′ are then used as
+drop-in replacements of 𝑝𝑖 and Σ𝑖 respectively. When a rig node is
+transformed, we only need to update the corresponding uniform
+buffer, and the skinned deformation of the Gaussian splat cloud thus
+happens in real time.
+3.2
+add
+Fig. 4. We model the process that defines skinning weights as a sequence
+of selections that add, subtract or multiply the previous weights. This encompasses the way most authoring tool enable skinning weight definition.
+(4) Set a selection strength 𝜔 ∈ (0, 1).
+(5) Set a selection compositing operation Op, which is either
+Replace, Add, Subtract or Multiply (or any other operation
+that can be auto-differentiated). Return to step (1).
+At each iteration of this authoring loop, the skinning weights for
+the active rig node 𝑗 are updated as follows:
+Differentiable skinning weights
+The previous section assumed that we know for each splat 𝑖 and
+each rig node 𝑗 the gradient ®
+∇𝑤𝑖,𝑗 = ®
+∇𝑤 𝑗 (𝑝𝑖 ). When all we know
+about the field 𝑤 𝑗 of skinning weight for node 𝑗 is its value sampled
+at Gaussian centers, we can only estimate its gradient a posteriori,
+using finite differences with the nearest neighbors of each Gaussian.
+However, we argue in this paper that we can do better, because
+in practice we have access to more information: the authoring operations that lead to the definition of skinning weights 𝑤𝑖,𝑗 can
+easily be augmented with auto-differentiation. We show that this
+approach is flexible and captures more accurately the full skinning
+fields 𝑤 𝑗 : R3 → R than looking at nearest neighbors. Nonetheless, our deformation method from Sec. 3.1 can be used with both
+gradient estimation techniques.
+3.2.1 Selection fields. We propose to instrument the process that
+leads to the definition of the weights 𝑤𝑖,𝑗 so that it automatically
+provides a gradient as well. When these weights are produced by
+authoring operations, we consider that users start from 𝑤𝑖,𝑗 = 0 everywhere and then modify the weights using a sequence of smooth
+screen-space selection followed by a composition operation to add,
+subtract, multiply or replace this selection from the current weights.
+For instance, Fig. 4 shows an example where the user defines the
+skinning weight for the head node of a character rig by drawing a
+circle around the head, then changes viewpoint, and subtract the
+hair (that belongs to another node).
+Formally, we consider the following steps:
+(1) Pick a viewpoint 𝑉 (position/orientation/etc.) of the camera.
+(2) Draw a selection shape 𝑆 in screen space.
+(3) Set a selection smoothness 𝜎 ≥ 0 to define how the weight
+decays when a splat is close to the edges of the selection.
+subtract
+′
+𝑤𝑖,𝑗 ← Op(𝑤𝑖,𝑗 , 𝑤𝑖,𝑗
+)
+′
+where 𝑤𝑖,𝑗
+= 𝜔 · smoothstep(−𝜎, 𝜎, 𝑠𝑑 𝑓 )
+
+
+and 𝑠𝑑 𝑓 = SignedDist 𝑆, Proj(𝑉 , 𝑝𝑖 )
+(6)
+(7)
+(8)
+The operator SignedDist(𝑆, 𝑥) evaluates the signed distance to
+the selection shape 𝑆 at a screen space position 𝑥, and the operator
+Proj(𝑉 , 𝑝) computes the screen space position onto which a 3D
+point 𝑝 ∈ R gets projected, given the viewpoint information 𝑉 .
+This authoring framework enables various means of interaction
+by playing with the shape 𝑆 (rectangle, ellipse, free-form contour,
+brushed shape, etc.) as well as the compositing operation Op. A
+user typically sets the skinning weight field of a rig node in 1 to 5
+iterations of the steps described above.
+3.2.2 Auto-differentiation of authoring operations. In this authoring framework the resulting weights 𝑤𝑖,𝑗 are entirely defined from
+expressions that auto-differentiation libraries handle easily, including the signed distance to the screen-space selection shape and the
+projection (be it perspective or orthographic). As a consequence, implementing this authoring loop with an auto-differentiation library
+® 𝑖,𝑗 that are needed in Sec. 3.1.
+naturally provides the gradients ∇𝑤
+3.3
+Resampling algorithm
+As illustrated in Fig. 5, the affine approximation used when deforming splats in a parallel pipeline can introduce visual artifacts,
+particularly under large deformations or when certain splats exhibit
+large eigenvalues. We propose to solve this with a post-processing
+that adaptively splits the splats whose covariance matrix causes
+artifacts. We first discuss the root cause of artifacts caused by our
+deformation model (Sec. 3.3.1). We then introduce the optimization
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+Rest pose
+•
+5
+where 𝐻 𝐹𝑘 is the Hessian matrix of the 𝑘-th dimension of 𝐹 and
+(𝑒𝑘 )1≤𝑘 ≤3 is the canonical basis of R3 . Our approach used in Sec. 3.1
+to build the Jacobian matrices can be generalized to get an analytical
+form for the Hessians as well (see supplemental).
+Weights #0 Weights #1
+3.3.2 Subdivision of one splat. Let us consider a single Gaussian,
+lying at position 𝑝 ∗ , with covariance Σ∗ and opacity 𝑜 ∗ . We intend to
+replace this single splat by a budget of 𝐿 new splats, parameterized
+by 𝑝¯ = (𝑝𝑙 )𝑙 , Σ̄ = (Σ𝑙 )𝑙 and 𝑜¯ = (𝑜𝑙 )𝑙 (1 ≤ 𝑙 ≤ 𝐿) so that this set of
+𝐿 splats is visually close to the original one while being less prone
+to artifacts in case of deformation. We obtain these parameters by
+gradient descent over the following loss:
+L = Lrendering + 𝜏reg Lconditioning
+where 𝜏reg is a regularization factor. The first term ensures that at
+rest pose, our resampling operation does not impact the rendered
+appearance of the shape. To this extent, we sample the differentiable
+rendering function R from random rays:
+Deformed poses
+Fig. 5. When our gradient rig deformation is not used (𝜂 = 0), holes are
+introduced because splats are not stretched according to their neighbors
+deformations. Our gradient rig (𝜂 = 1) addresses this issue, however its linear
+approximation may overstretch some splats, which shows when artificially
+doubling the influence of our elastic term (𝜂 = 2). This is solved by our
+adaptive resampling or by lowering the elastic term (for previsualization).
+problem used to subdivide a splat (Sec. 3.3.2), and finally we describe how we construct a scene-agnostic dictionary that speeds-up
+resampling during (or shortly after) deformation (Sec. 3.3.3).
+3.3.1 Deformation model. Our intent to limit the runtime performance overhead introduced by our deformation scheme led to the
+following assumptions in Sec. 3.1:
+• The deformed shape remains within the space of Gaussian
+splats, i.e., Gaussians that cannot be bent.
+• Gaussians are small enough to be deformed using an affine
+approximation of the deformation field 𝐹 : for any point 𝑦 of
+the splat, we use 𝐹 (𝑦) ≈ 𝐹 (𝑝) + 𝐽𝐹 (𝑝) · (𝑦 − 𝑝), where 𝑝 is
+the center of the splat and 𝐽𝐹 is the Jacobian of 𝐹 .
+• Gaussians are processed in parallel, and are not aware of
+their neighbors (except through the gradients ®
+∇𝑤 𝑗 ).
+The key source of artifact introduced by such a deformation model
+comes from the affine approximation. When a Gaussian is too large,
+or when the deformation field 𝐹 has high frequency variations, the
+approximation no longer holds. Our solution consists in adaptively
+splitting Gaussian in the rest shape, given a bound on the error in the
+deformed shape. By operating on the rest shape, this resampling can
+happen at a slower framerate than deformation, because it remains
+valid for similar or less intense deformations.
+Formally, in regions of high deformation, we resample splats to
+enforce that the second-order term of the Taylor expansion remains
+below an arbitrary threshold 𝜀, since this term is the leading-order
+error of the local affine approximation:
+3
+∑︁
+𝑘=1
+(𝑦 − 𝑝)𝑇 𝐻 𝐹𝑘 (𝑝)(𝑦 − 𝑝)𝑒𝑘 < 𝜀
+(10)
+(9)
+Lrendering =
+∑︁
+∥R (𝑟, ¯
+𝑝, Σ̄, ¯
+𝑜) − R (𝑟, 𝑝 ∗, Σ∗, 𝑜 ∗ ) ∥ 2
+(11)
+random
+ray 𝑟
+The second term ensures that the resampling reduces the error
+of the affine approximation of the deformation field. To do so, we
+limit ∥𝑦 − 𝑝 ∥ by fostering smaller Gaussian: we penalize the largest
+eigenvalue across all covariance matrices Σ𝑙 .
+Lconditioning = softmax ∥𝜆(Σ𝑙 )∥ 8
+1≤𝑙 ≤𝐿
+(12)
+where we approximate the largest eigenvalue of Σ𝑙 as the 𝐿8 norm
+of the vector 𝜆(Σ𝑙 ) of its eigenvalues.
+Sampling scheme. The evaluation of Lrendering requires to sample
+random rays, at which we check that drawing only the original splat
+or only the 𝐿 new splats yields the same result. Naively drawing rays
+with respect to a uniform distribution would require a prohibitive
+amount of samples when the splats are very elongated (e.g. 𝜆max =
+106 𝜆min ). To address this, we pick rays by sampling both its start
+and end points on the Mahalanobis ellipsis of the Gaussian: we first
+uniformly sample a position on the unit sphere in a frame aligned
+with the eigen vectors of the covariance, then scale each dimension
+by the square root of the corresponding eigenvalue, scaled by a
+factor 4 to encompass most of the original Gaussian.
+3.3.3 Dictionary-based resampling. The computational cost of generalizing this approach to an arbitrary number of splats would be
+prohibitive. Instead, we adopt a dictionary-based approach where
+we first precompute a database of many cases of resampling a single
+Gaussian splat, then we process the input splats in parallel and
+look-up this database to quickly produce a global resampling of the
+whole cloud. This approach is possible because the input space of
+the database has a low dimension: only 2 eigenvalues of the covariance matrix and the opacity factor matter for the lookup operation.
+The dictionary is only built once and then used for any scene.
+Discretization. We precompute a table for many shapes of Gaussian splats. By symmetry, we ignore the orientation of the splat (we
+can simply rotate the resampled version) and divide all eigenvalues
+by the smallest one (we can always scale the resampled version),
+6
+•
+Vesseron and Michel
+so that the covariance is (𝜆1, 𝜆2, 1). We then discretize the scale of
+possible eigenvalues. The range of eigenvalues is typically between
+1 and 104 , but can become very large (see supplemental). We note
+that the good solution for resampling a splat does not vary much
+in extreme conditioning, so we can afford less examples in our dictionary for these cases. As a consequence, we use a logarithmic
+discretization for 𝜆1 and 𝜆2 . More exactly, we consider 40 values
+between 1 and 104 on a log scale. We also discretize the scale of
+opacity 𝑜, in linear space this time, with 10 increments between
+0 and 1. We thus build a dictionary of 16k entries. We use 𝐿 = 5,
+which yields to a dictionary of about 0.74 MB (using 32 bit float
+values, no compression).
+Lookup. Once the dictionary is filled with one resampling per
+entry using the loss described in Sec. 3.3.2, we can use it to process a
+whole cloud of Gaussian splats. For each splat, we test whether the
+condition from Eq. 9 is respected. If not, we normalize its eigenvalues
+to get 𝜆1 and 𝜆2 , switch to log space and round them down and up.
+We also round the opacity down and up to the next/previous tenth.
+This gives us the 3D index of 8 precomputed entries that we retrieve
+from the dictionary by simple index linearization.
+Resampling criterion. To test whether a splat with center 𝑝 and
+covariance Σ satisfies the condition from Eq. 9, we verify that this
+criterion is satisfied with high probability when 𝑦 is drawn from the
+Gaussian distribution with mean 𝑝 and covariance matrix Σ. More
+precisely, we randomly draw 512 samples from N (𝑝, Σ) and check
+whether at least 𝜏 = 95% of the samples satisfy criterion Eq. 9. Note
+that in this model, 𝜀 is a hyperparameter of our method; we perform
+a hyperparameter search over 𝜀 ∈ {0.001, 0.01, 0.1, 1.0} to ensure
+that we resample sufficiently to avoid artifacts, while minimizing
+unnecessary resampling of splats.
+Interpolation and extrapolation. In the results reported below, we
+only use the closest neighbor among the 8 entries that we retrieve.
+We additionally tested linear interpolation, but found that it did
+not provide a meaningful improvement (see supplemental). We
+handle extreme eigenvalues, i.e. values beyond 104 , by clamping
+the lookup to the largest available training conditioning value, then
+extrapolating by rescaling the corresponding eigen-direction.
+4 Results
+4.1 Gradient rig
+We test our skinned deformation technique in a Web-based realtime Gaussian splatting renderer. As we limit our sparse weight
+representation to 2 non-zero weights per splats, we add for each
+splat 2 node indices, 2 weights and 2 gradients. We encode each of
+these new attributes on 8 bits, adding a total of 10 bytes per splat.
+Quality. The quality of our deformation method is illustrated
+in Fig. 9, where we compare deformation results obtained with
+(elastic)
+and without the elastic term 𝑅𝑖
+introduced in our formulation.
+Across all examples, we consider a range of deformations, including
+translation and torsion. These results also show that our approach
+greatly reduces the visual artifacts caused by a regular skinned
+deformation. We also compare our method with the Real-time Largescale Deformation proposed by Gao et al [2024]. We show in Fig. 10
+(a) Diﬀ Skinning (ours)
+(b) Finite diﬀ on KNN
+Fig. 6. Our deformation procedure relies on an estimation of the gradients
+of skinning weights. We show that our differentiable skinning approach
+(a) described in Sec. 3.2.2 provides gradients that yield to deformation
+that exhibit less artifacts than an estimation based on finite differences on
+K nearest neighbors (b). Top-right: the smooth selection mask and twist
+transform used for this example.
+that our method can reproduce deformation that are at least as
+large as their method. Furthermore, we do so solely in the space of
+Gaussian splats, without relying on a mesh proxy nor re-optimizing
+the Gaussians, which makes our approach readily available for other
+optimizers such as FastGS [Ren et al. 2026]. Similarly to Gao et al.
+[2024], our comparison focuses on qualitative measures per lack of
+ground truth for deformed objects (see also supplementary video).
+Performance. Since our deformation affects the render process,
+we measure its impact on rendering speed on an Apple M1 Max
+with 32 GB of memory on scenes ranging from 85K to 850K splats.
+Our study shows that the addition of our per-splat transform has
+no significant impact in this context. Indeed, the render process is
+largely fragment-bound; and a change of point of view have a much
+stronger effect on rendering speed than adding our deformation
+process, which is done once per vertex. In the end, the main runtime
+cost of our method is its impact on memory, since adding 10 bytes
+per splat might hinder the loading of larger scenes in GPU memory.
+4.2
+Differentiable skinning weights
+Quality. We demonstrate that our automatic derivation of the
+gradient of skinning weights from the authoring gestures leads to
+more accurate results than estimating gradients afterwards. In Fig. 6,
+we compare visually our approach with gradients estimated using
+Moving Least Squares on 16 nearest neighbors (KNN). In Fig. 8, we
+show through a quantitative analysis that this KNN estimation cannot match our differentiable skinning technique when the gradient
+varies quickly. This ablation confirms that the extra information that
+we harvest from user gestures when building an analytic definition
+of the weight field in Sec. 3.2 can meaningfully improve the quality
+of gradients used for elastic deformation.
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+•
+7
+Performance. In Tab. 1 we measure the runtime cost of computing
+gradients of skinning weights as part of every authoring manipulation that modifies them. With our auto-grad addition, weight
+edition is about 3 times slower, mostly because it computes 4 values
+(weight and spatial gradient) instead of one (weight only). It remains
+nonetheless interactive, and could be easily parallelize on GPU to
+better scale to large scenes. Furthermore, it is already about 10 times
+faster than the estimation using KNN. Note that this overhead is
+only paid once during the one-time setup that defines the skinning,
+not at deformation time (as reported in Sec. 4.1).
+influence a splat. If this would become an issue, we could improve
+the synergy between our gradient rig (Sec. 3.1) and differentiable
+skinning (Sec. 3.2) by storing only the symbolic representation of the
+weights (resulting from the composition of user selection gestures),
+and evaluating gradients on the fly. This would trade memory usage
+for compute power, but as we have seen the rendering process is
+not compute-bound. We show results and derive equations only for
+the case of rigged deformation based on linear blend skinning. Our
+approach could be ported to other skinning models such as dual
+quaternion to enable more complex deformations.
+Table 1. Measure of the overhead introduced by our gradient computation
+during operations that modify skinning weights, in ms. Measured for a soft
+rectangle selection, on 𝑁 = 32 samples, CPU-only (JavaScript). We also
+report the KNN duration (16 neighbors per splat, using scipy’s cKDTree).
+Interpolation in the lookup table. Our resampling procedure uses
+the closest entry from the precomputed dictionary, and we see in
+supplementary material that linear interpolation alone does not
+improve the results, but future work could explore other interpolation strategies. The interpolation scheme for opacity could be
+more consistent with the rendering formula, where rendering two
+Gaussians is not equivalent to summing their opacities. As for interpolating the rotations, a promising direction would be to use
+the Wasserstein barycenter. In fact, the barycenter of a Gaussian
+distribution is itself Gaussian [Agueh and Carlier 2011]. However,
+there is no closed-form expression for it, and computing it would
+require solving the optimization problem defined by Equation (6.2)
+in Agueh and Carlier [2011] during resampling, which is too costly
+in practice. A useful direction for future work would therefore be
+to find a cheap surrogate for this procedure.
+4.3
+Scene
+#splats
+w/o grads
+w/ grads
+KNN
+banana
+car
+flower
+fountain
+tractor
+56k
+160k
+270k
+850k
+2700k
+7.72 ± 1.4
+18.4 ± 1.5
+28.2 ± 4.8
+80.9 ± 2.8
+262 ± 16
+19.9 ± 1.7
+47.2 ± 9.9
+83.9 ± 6.1
+258 ± 12
+827 ± 42
+280 ± 4
+1080 ± 9
+960 ± 17
+2400 ± 20
+7700 ± 300
+Resampling
+Quality. We analyze in Fig. 7 the impact of the regularization
+coefficient 𝜏reg , that drives the trade-off between Lrendering and
+Lconditioning during the construction of our dictionary (Eq. (10)).
+Overall, 𝜏reg must be picked as high as possible, within the limit
+of acceptable error in rest pose. Based on this experiment, we use
+𝜏𝑟𝑒𝑔 = 0.002, which reduces the diameter of the largest splat by
+approximately a factor of two on average, while keeping artifacts
+introduced by the resampling operation visually imperceptible.
+We then evaluate in Fig. 11 our resampling algorithm on several
+examples in which the deformation vector field varies rapidly; in
+particular, the splat weighting function is not smooth and has a
+large Lipschitz constant, which leads to visible artifacts. Across all
+examples, we observe that resampling significantly improves the
+visual quality of the deformed objects by preventing the splats to
+be overstretched. See supplemental for extra results and an analysis
+of the threshold hyperparameter 𝜀.
+Performance. Since our resampling process is not mandatory for
+the user to get a real-time preview of the deformation (playing with
+𝜂 gives satisfying results already), and since the resampling can be
+reused across deformations because it operates on the rest shape, we
+can afford to have a slower process. The adaptive resampling takes
+10 s to 1 min 30 s on the models in Fig. 11. This duration is largely
+dominated by the stochastic estimation of the adaptive criterion
+Eq. (9) because uniformly applying the dictionary to the whole cloud
+takes about 1 s for 160k splats (using numpy, CPU).
+5
+Limitations and future work
+Gradient rig. Despite our use of a sparse encoding, explicitly storing the gradients of skinning weights introduces a memory overhead, which increases with the maximum number of rig nodes that
+Resampling for a whole deformation space. Our resampling strategy consists in resampling the rest shape, rather than the deformed
+shape. The strength of this approach is that we can reuse the resampling computed for a given transform on other neighboring
+deformations, and for in-between with the rest shape, where the
+error is overall lower. We could imagine generalizing this further
+by relying on the maximum amplitude of plausible deformations
+of each rig node (e.g., the elbow node is only rotating around a
+given axis and within a given range) to resample the Gaussian splat
+cloud for a whole class of transforms, ahead of time. Meanwhile,
+we could improve its runtime performance by accelerating the estimation of erroneous Gaussian splats and resampling on GPU, since
+our dictionary-based approach is very parallel-friendly. To further
+reduce the introduction of new splats, we could also have the resampling process tune a per-splat elastic factor 𝜂𝑖 , to selectively reduce
+the elongation only for splats that cause artifacts.
+Conclusion. We propose a method to interactively deform Gaussian splats without requiring a mesh proxy, nor a specific re-optimization
+or view-specific projections. We also provide a rest-space resampling
+to further improve the quality of deformed shapes.
+References
+Martial Agueh and Guillaume Carlier. 2011. Barycenters in the Wasserstein space.
+SIAM Journal on Mathematical Analysis 43, 2 (2011), 904–924.
+M. Alexa, J. Behr, D. Cohen-Or, S. Fleishman, D. Levin, and C.T. Silva. 2001. Point set
+surfaces. In Proceedings Visualization, 2001. VIS ’01. 21–29, 537. doi:10.1109/VISUAL.
+2001.964489
+Piotr Borycki, Weronika Smolak, Joanna Waczyńska, Marcin Mazur, Sławomir Tadeja,
+and Przemysław Spurek. 2025. GASP: Gaussian Splatting for Physic-Based Simulations. arXiv:2409.05819 [cs.CV] https://arxiv.org/abs/2409.05819
+8
+•
+Vesseron and Michel
+Mario Botsch and Olga Sorkine. 2008. On Linear Variational Surface Deformation
+Methods. IEEE Transactions on Visualization and Computer Graphics 14, 1 (2008),
+213–230. doi:10.1109/TVCG.2007.1054
+Yiwen Chen, Zilong Chen, Chi Zhang, Feng Wang, Xiaofeng Yang, Yikai Wang, Zhongang Cai, Lei Yang, Huaping Liu, and Guosheng Lin. 2024. GaussianEditor: Swift
+and Controllable 3D Editing with Gaussian Splatting. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). 21476–21485.
+Yuanxing Duan, Fangyin Wei, Qiyu Dai, Yuhang He, Wenzheng Chen, and Baoquan
+Chen. 2024. 4D-Rotor Gaussian Splatting: Towards Efficient Novel-View Synthesis
+for Dynamic Scenes. In Proc. SIGGRAPH.
+Yutao Feng, Xiang Feng, Yintong Shang, Ying Jiang, Chang Yu, Zeshun Zong, Tianjia
+Shao, Hongzhi Wu, Kun Zhou, Chenfanfu Jiang, et al. 2025. Gaussian splashing:
+Unified particles for versatile motion synthesis and rendering. In Proceedings of the
+Computer Vision and Pattern Recognition Conference. 518–529.
+Lin Gao, Jie Yang, Botao Zhang, Jiamu Sun, Yujie Yuan, Hongbo Fu, and Yu-Kun Lai.
+2024. Real-time Large-scale Deformation of Gaussian Splatting. ACM Transactions
+on Graphics (SIGGRAPH Asia 2024) (2024).
+Antoine Guédon, Diego Gomez, Nissim Maruani, Bingchen Gong, George Drettakis, and
+Maks Ovsjanikov. 2025. MILo: Mesh-In-the-Loop Gaussian Splatting for Detailed
+and Efficient Surface Reconstruction. ACM Transactions on Graphics (2025). https:
+//anttwo.github.io/milo/
+Antoine Guédon and Vincent Lepetit. 2024. SuGaR: Surface-Aligned Gaussian Splatting
+for Efficient 3D Mesh Reconstruction and High-Quality Mesh Rendering. CVPR
+(2024).
+Gaël Guennebaud and Markus Gross. 2007. Algebraic point set surfaces. In ACM
+SIGGRAPH 2007 Papers (San Diego, California) (SIGGRAPH ’07). Association for
+Computing Machinery, New York, NY, USA, 23–es. doi:10.1145/1275808.1276406
+Jiajun Huang, Shuolin Xu, Hongchuan Yu, and Tong-Yee Lee. 2024b. GSDeformer:
+Direct, Real-time and Extensible Cage-based Deformation for 3D Gaussian Splatting.
+arXiv:2405.15491 [cs.CV] https://arxiv.org/abs/2405.15491
+Yi-Hua Huang, Yang-Tian Sun, Ziyi Yang, Xiaoyang Lyu, Yan-Pei Cao, and Xiaojuan Qi.
+2024a. SC-GS: Sparse-Controlled Gaussian Splatting for Editable Dynamic Scenes. In
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR). 4220–4230.
+Ying Jiang, Chang Yu, Tianyi Xie, Xuan Li, Yutao Feng, Huamin Wang, Minchen Li,
+Henry Lau, Feng Gao, Yin Yang, and Chenfanfu Jiang. 2024. VR-GS: A Physical
+Dynamics-Aware Interactive Gaussian Splatting System in Virtual Reality. arXiv
+preprint arXiv:2401.16663 (2024).
+Ladislav Kavan, Steven Collins, Jiří Žára, and Carol O’Sullivan. 2007. Skinning with
+dual quaternions. In Proceedings of the 2007 Symposium on Interactive 3D Graphics
+and Games (Seattle, Washington) (I3D ’07). Association for Computing Machinery,
+New York, NY, USA, 39–46. doi:10.1145/1230100.1230107
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 2023.
+3D Gaussian Splatting for Real-Time Radiance Field Rendering. ACM Transactions on
+Graphics 42, 4 (July 2023). https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/
+Xinyang Li, Tengfei Wang, Zixiao Gu, Shengchuan Zhang, Chunchao Guo, and Liujuan Cao. 2025. FlashWorld: High-quality 3D Scene Generation within Seconds.
+arXiv:2510.13678 [cs.CV]
+Hanwen Liang, Junli Cao, Vidit Goel, Guocheng Qian, Sergei Korolev, Demetri Terzopoulos, Konstantinos N. Plataniotis, Sergey Tulyakov, and Jian Ren. 2025a. Wonderland:
+Navigating 3D Scenes from a Single Image. In Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR). 798–810.
+Yiqing Liang, Numair Khan, Zhengqin Li, Thu Nguyen-Phuoc, Douglas Lanman, James
+Tompkin, and Lei Xiao. 2025b. GauFRe: Gaussian Deformation Fields for Real-time
+Dynamic Novel View Synthesis. In Proc. IEEE/CVF Winter Conference on Applications
+of Computer Vision (WACV).
+Isabella Liu, Hao Su, and Xiaolong Wang. 2024. Dynamic Gaussians Mesh: Consistent
+Mesh Reconstruction from Monocular Videos. arXiv preprint arXiv:2404.12379
+(2024).
+Isabella Liu, Zhan Xu, Wang Yifan, Hao Tan, Zexiang Xu, Xiaolong Wang, Hao Su, and
+Zifan Shi. 2025. RigAnything: Template-Free Autoregressive Rigging for Diverse
+3D Assets. ACM Trans. Graph. 44, 4, Article 122 (July 2025), 12 pages. doi:10.1145/
+3731149
+Jonathon Luiten, Georgios Kopanas, Bastian Leibe, and Deva Ramanan. 2024. Dynamic
+3D Gaussians: Tracking by Persistent Dynamic View Synthesis. In 3DV.
+Alexander Mai, Trevor Hedstrom, George Kopanas, Janne Kontkanen, Falko Kuester,
+and Jonathan T. Barron. 2025. Radiance Meshes for Volumetric Reconstruction.
+arXiv:2512.04076 [cs.GR] https://arxiv.org/abs/2512.04076
+Karran Pandey, Anita Hu, Clement Fuji Tsang, Or Perel, Karan Singh, and Maria
+Shugrina. 2025. Painting with 3D Gaussian Splat Brushes. In Proceedings of the
+Special Interest Group on Computer Graphics and Interactive Techniques Conference
+Conference Papers (SIGGRAPH Conference Papers ’25). Association for Computing
+Machinery, New York, NY, USA, Article 39, 10 pages. doi:10.1145/3721238.3730724
+Shiwei Ren, Tianci Wen, Yongchun Fang, and Biao Lu. 2026. FastGS: Training 3D
+Gaussian Splatting in 100 Seconds. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR).
+Jiakai Sun, Han Jiao, Guangyuan Li, Zhanjie Zhang, Lei Zhao, and Wei Xing. 2024.
+3DGStream: On-the-Fly Training of 3D Gaussians for Efficient Streaming of PhotoRealistic Free-Viewpoint Videos. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). 20675–20685.
+Jean-Marc Thiery, Élie Michel, and Jiong Chen. 2024. Biharmonic Coordinates and
+their Derivatives for Triangular 3D Cages. ACM Trans. Graph. 43, 4, Article 138
+(July 2024), 17 pages. doi:10.1145/3658208
+Ofir Weber, Olga Sorkine, Yaron Lipman, and Craig Gotsman. 2007. Context-Aware
+Skeletal Shape Deformation. Computer Graphics Forum (Proceedings of EUROGRAPHICS) 26, 3 (2007), 265–273.
+Guanjun Wu, Taoran Yi, Jiemin Fang, Lingxi Xie, Xiaopeng Zhang, Wei Wei, Wenyu Liu,
+Qi Tian, and Xinggang Wang. 2024. 4D Gaussian Splatting for Real-Time Dynamic
+Scene Rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). 20310–20320.
+Tianyi Xie, Zeshun Zong, Yuxing Qiu, Xuan Li, Yutao Feng, Yin Yang, and Chenfanfu
+Jiang. 2024. Physgaussian: Physics-integrated 3d gaussians for generative dynamics.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition.
+4389–4398.
+Ziyi Yang, Xinyu Gao, Wen Zhou, Shaohui Jiao, Yuqing Zhang, and Xiaogang Jin. 2023.
+Deformable 3D Gaussians for High-Fidelity Monocular Dynamic Scene Reconstruction. arXiv preprint arXiv:2309.13101 (2023).
+Licheng Zhong, Hong-Xing Yu, Jiajun Wu, and Yunzhu Li. 2025. Reconstruction and
+Simulation of Elastic Objects with Spring-Mass 3D Gaussians. In Computer Vision
+– ECCV 2024, Aleš Leonardis, Elisa Ricci, Stefan Roth, Olga Russakovsky, Torsten
+Sattler, and Gül Varol (Eds.). Springer Nature Switzerland, Cham, 407–423.
+Chen Ziwen, Hao Tan, Kai Zhang, Sai Bi, Fujun Luan, Yicong Hong, Li Fuxin, and
+Zexiang Xu. 2025. Long-LRM: Long-sequence Large Reconstruction Model for Widecoverage Gaussian Splats. In Proceedings of the IEEE/CVF International Conference
+on Computer Vision (ICCV). 4349–4359.
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+× 1e 3
+τreg = 0.002
+4
+0.4 0.5
+3
+3
+1
+1
+0
+0.3
+τreg = 0.001
+4
+2
+0.2 0.3
+× 1e 3
+0.6 0.7
+0
+0.4
+Original
+8
+100%
+4
+80%
+Smooth selection
+High-error splats
+Error Rate
+6
+2
+0.4 0.5
+× 1e 3
+40k
+2
+0.7 0.8
+0.5 0.6
+λmax(Σ̄)/λmax(Σ*)
+0
+9
+30k
+0.6 0.8 1.0 1.2 1.4
+60%
+20k
+40%
+Splat count
+5
+4
+3
+2
+1
+0
+τreg = 0.01
+Error rate
+Frequency
+× 1e 3
+•
+10k
+20%
+0%
+0.01
+0.05
+0.10
+0.15
+0.20
+0.25
+0.30
+0.35
+0.40
+0.45
+0
+0.50
+Selection smoothness σ
+2476.6
+6266.5
+∥ΔI(x, y)∥2
+2723.0
+0.0
+Fig. 7. Impact of the regularization factor 𝜏reg used to balance the two terms
+of our loss when building the dictionary. Smaller 𝜏reg yield better preservation
+of the rest shape (middle and bottom rows), but higher 𝜏reg leads to a faster
+decrease of the largest eigenvalue, and thus to lower deformation error.
+Skinning
+weight
+(a)
+(b)
+Fig. 8. We compare our automatic differentiable skinning (Sec. 3.2) with Moving Least Square over 16 nearest neighbors (KNN). When the selection smoothness 𝜎 is high enough, the weight field is smooth enough for the KNN method
+to correctly recover the gradient, but when 𝜎 gets lower, the density of Gaussians is not enough to estimate steeper gradients. The error rate is measured
+among splats whose weight is neither 1 nor 0 and gradients is non null (which
+encompasses more splats when smoothness is higher). It is considered high
+® | > 1.0 (our encoding allows gradients in range (−4, 4)).
+when |Δ ∇𝑤
+(a)
+(c)
+(c)
+(d)
+(b)
+Rigid-only
+(d)
+Ours
+(e)
+(f)
+Rigid-only
+(e)
+(g)
+(g)
+(f)
+Rigid-only
+Ours
+(h)
+(h)
+Ours
+Rigid-only
+Ours
+Fig. 9. Results of our real-time deformation (Sec. 3.1) without any resampling. These examples feature large deformations, for which a rigid-only deformation
+introduces holes that our elastic term fixes. In all examples, weights and gradients are computed using smooth selections operations, as described in Sec. 3.2.2.
+10
+•
+Vesseron and Michel
+Ours
+Gao et al.
+Gao et al.
+(a)
+Ours
+(b)
+(c)
+Rest
+MeshGaussian
+(360k)
+FastGS
+(110k)
+Fig. 10. Comparison with Gao et al. [2024]. Left: images for Gao et al. are taken from their paper. We reproduce deformations of similar scale, showing that
+our method handles large-scale deformations without relying on a mesh proxy. Right: To compare similar deformations of the chair, (a) we run the code from
+Gao et al. and (b) we use our method to deform the splats resulting from their re-optimization of the asset. (c) Since our method does not require any specific
+splat optimization, we can apply it on the same chair optimized using FastGS [2026] (which trains in 2 min instead of 30 min and needs 60% less Gaussians).
+(a)
+(b)
+(c)
+(a)
+(b)
+(c)
+(a)
+(b)
+(c)
+(a)
+(b)
+(c)
+Fig. 11. Four examples where the deformation field varies too rapidly for the affine approximation to remain valid. Naïve rigid deformation introduces holes (a).
+Our method resolves these holes, but some splats become overstretched due to strong deformation variations across their spatial extent (b). Our resampling
+procedure removes these artifacts (c). Adaptive resampling takes 82.2 s, 81.7 s, 21.8 s, and 9.4 s for the banana, teddy bear, rabbit, and dinosaur, respectively.
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+Supplementary Material
+6 Justification of the affine approximation
+Since 𝑞 𝑗 is affine in 𝑝, we have
+Given a diffeomorphism 𝐹 and a probability measure 𝜌, the density associated with 𝛾 = 𝐹 # 𝜌 (where 𝐹 # 𝜌 denotes the pushforward
+distribution of 𝑋 ∼ 𝜌 under 𝐹 ) is given by
+Applying the product rule gives
+𝛾=
+𝐾
+∑︁
+𝑟𝑖 N (𝐺𝑝𝑖 + ℎ, 𝐺 Σ𝑖 𝐺𝑇 ).
+𝑖=1
+For this reason, and similarly to Xie et al. [2024], we propose to
+perform local affine approximations of the vector field on each
+Gaussian in order to remain in the space of Gaussian mixtures. Each
+particle (Gaussian) is deformed by a local affine transformation
+given by the first-order Taylor expansion of 𝐹 at the center of the
+Gaussian 𝑝. More precisely, we approximate 𝐹 as
+𝐽𝐹 =
+7
+Jacobian of the deformation field
+In Sec. 3.1 of the main paper, we use the Jacobian 𝑅 of the deformation field 𝐹 (𝑝) and decompose it into 𝑅 (rigid) + 𝑅 (elastic) . We give
+®
+here details about the derivation. In what follows, all gradients ∇
+are with respect to the spatial coordinates of 𝑝 and 𝐽𝐹 = 𝜕𝐹 /𝜕𝑝
+represents the Jacobian of 𝐹 with respect to 𝑝.
+We recall that
+𝑀
+−1
+𝑀 −1
+∑︁
+1 ∑︁
+𝑤 𝑗 (𝑝)𝑇 𝑗′ 𝑝,
+𝑊 (𝑝) =
+𝑤 𝑗 (𝑝).
+𝐹 (𝑝) =
+𝑊 (𝑝) 𝑗=0
+𝑗=0
+Let us introduce the normalized weights
+𝛼 𝑗 (𝑝) =
+𝑤 𝑗 (𝑝)
+.
+𝑊 (𝑝)
+Then
+𝐹 (𝑝) =
+𝑀
+−1
+∑︁
+=
+𝐽𝛼 𝑗 𝑞 𝑗
+𝑀
+−1
+∑︁
+
+𝛼 𝑗 𝐴 𝑗 + 𝑞 𝑗 ⊗ ∇𝛼 𝑗 .
+𝑗=0
+The first term corresponds to the rigid part:
+𝑅
+(rigid)
+=
+𝑀
+−1
+∑︁
+𝛼 𝑗 𝐴 𝑗 = mat3x3
+𝑗=0
+𝑀
+−1
+∑︁
+𝑞 𝑗 (𝑝) = 𝑇 𝑗′ 𝑝.
+𝑗 ′ =0
+we define
+𝐺® 𝑗 = ∇𝛼 𝑗 =
+−1
+∑︁
+∇𝑤 𝑗
+𝑤𝑗 𝑀
+− 2
+∇𝑤 𝑗 ′ .
+𝑊
+𝑊 𝑗 ′ =0
+Therefore,
+𝐽𝐹 = 𝑅 (rigid) +
+𝑀
+−1
+∑︁
+𝑞 𝑗 ⊗ 𝐺® 𝑗 .
+𝑗=0
+Finally, since 𝑞 𝑗 = 𝑇 𝑗′ 𝑝, we obtain
+𝐽𝐹 = 𝑅 (rigid) + 𝑅 (elastic) ,
+𝑅 (rigid) =
+𝑀
+−1
+∑︁
+𝛼 𝑗 mat3x3(𝑇 𝑗′ ),
+𝑗=0
+𝑅 (elastic) =
+𝑀
+−1
+∑︁
+(𝑇 𝑗′ 𝑝) ⊗ 𝐺® 𝑗 .
+𝑗=0
+8
+Hessian of the 𝑘-th coordinate of the deformation field
+We now derive the Hessian of the 𝑘-th coordinate of the deformation
+field using the same notation as in the Jacobian derivation. We recall
+that
+𝑀
+−1
+∑︁
+𝐹 (𝑝) =
+𝛼 𝑗 (𝑝)𝑞 𝑗 (𝑝),
+𝑞 𝑗 (𝑝) = 𝑇 𝑗′ 𝑝,
+𝐴 𝑗 = mat3x3(𝑇 𝑗′ ),
+𝑗=0
+𝛼 𝑗 (𝑝) =
+𝑤 𝑗 (𝑝)
+,
+𝑊 (𝑝)
+𝑊 (𝑝) =
+𝑀
+−1
+∑︁
+𝑗=0
+For the 𝑘-th coordinate,
+Thus,
+𝑀
+−1
+∑︁
+𝑗=0
+𝛼 𝑗 (𝑝)𝑞 𝑗 (𝑝).
+.
+𝑗=0
+with
+We also define
+𝐹 (𝑝) =
+!
+𝛼 𝑗 𝑇 𝑗′
+For the second term, we compute
+𝑤 
+𝑗
+∇𝛼 𝑗 = ∇
+𝑊
+∇𝑤 𝑗
+𝑤𝑗
+=
+− 2 ∇𝑊 .
+𝑊
+𝑊
+Using
+𝑀
+−1
+∑︁
+∇𝑊 =
+∇𝑤 𝑗 ′ ,
+𝛼 𝑗 (𝑝)𝑇 𝑗′ 𝑝.
+𝑗=0
+𝐴 𝑗 = mat3x3(𝑇 𝑗′ ),
+𝑀
+−1
+∑︁
+𝑗=0
+𝐹 (𝑦) ≈ 𝐹 (𝑝) + 𝐽𝐹 (𝑝)(𝑦 − 𝑝),
+for points 𝑦 belonging to the Gaussian. Consequently, each Gaussian
+N (𝑝, Σ) is mapped to
+
+N 𝐹 (𝑝), 𝐽𝐹 (𝑝) Σ 𝐽𝐹 (𝑝)𝑇 .
+11
+𝐽𝑞 𝑗 = 𝐴 𝑗 .
+𝜌 (𝐹 −1 (𝑥))
+𝛾 (𝑥) =
+,
+det(𝐽𝐹 (𝐹 −1 (𝑥)))
+where 𝐽𝐹 is the Jacobian of 𝐹 . When 𝜌 is a mixture of Gaussians,
+Í𝐾
+𝜌 = 𝑖=1
+𝑟𝑖 N (𝑝𝑖 , Σ𝑖 ), the resulting probability measure is generally
+not a mixture of Gaussians. In particular this is not the case for
+the deformation field we consider due to the non-linearity of the
+skinning weight functions 𝑤 𝑗 . However, when 𝐹 is affine, i.e., 𝐹 (𝑥) =
+𝐺𝑥 + ℎ, the resulting 𝛾 is also a mixture of Gaussians with the
+following expression:
+•
+𝐹𝑘 (𝑝) =
+𝑀
+−1
+∑︁
+𝑗=0
+𝛼 𝑗 (𝑝)𝑞 𝑗,𝑘 (𝑝).
+𝑤 𝑗 (𝑝).
+12
+•
+Vesseron and Michel
+Since 𝑞 𝑗 is affine in 𝑝, we have
+Thus, the Hessian of the 𝑘-th coordinate is
+∇𝑞 𝑗,𝑘 = 𝐴 𝑗,𝑘:,
+∇2𝑞 𝑗,𝑘 = 0,
+𝐻 𝐹𝑘 =
+where 𝐴 𝑗,𝑘: denotes the 𝑘-th row of 𝐴 𝑗 , interpreted as a 3D vector.
+From the Jacobian derivation, we have
+𝐺® 𝑗 = ∇𝛼 𝑗 =
+𝐻 𝐹𝑘 = ∇ 2 𝐹 𝑘 =
+𝑀
+−1
+∑︁
+∇2 𝛼 𝑗 𝑞 𝑗,𝑘
+=
+and
+Note that when the weights sum to one, so that𝑊 (𝑝) = 1 is constant,
+K 𝑗 reduces to ∇2𝑤 𝑗 and 𝐺 𝑗 is equal to ∇𝑤 𝑗 . Moreover,
+
+∇𝑊 =
+𝑀
+−1 
+∑︁
+
+𝑞 𝑗,𝑘 ∇𝐺® 𝑗 + 𝐴 𝑗,𝑘: ⊗ 𝐺® 𝑗 + 𝐺® 𝑗 ⊗ 𝐴 𝑗,𝑘: .
+𝑗=0
+There remains to expand ∇𝐺® 𝑗 . Starting from
+we differentiate the first term:
+
+
+1
+1
+1
+∇
+∇𝑤 𝑗 = ∇2𝑤 𝑗 − 2 ∇𝑤 𝑗 ⊗ ∇𝑊 .
+𝑊
+𝑊
+𝑊
+For the second term, we have
+
+𝑤 
+𝑤
+𝑤𝑗
+𝑗
+𝑗
+∇𝑊 = ∇
+∇
+⊗ ∇𝑊 + 2 ∇2𝑊
+2
+2
+𝑊
+𝑊
+𝑊
+
+
+2𝑤 𝑗
+𝑤𝑗
+1
+=
+∇𝑤
+−
+∇𝑊
+⊗ ∇𝑊 + 2 ∇2𝑊 .
+𝑗
+2
+3
+𝑊
+𝑊
+𝑊
+Therefore, we define K 𝑗 as the gradient of 𝐺® 𝑗 :
+K 𝑗 := ∇𝐺® 𝑗
+1
+1
+= ∇2𝑤 𝑗 − 2 ∇𝑤 𝑗 ⊗ ∇𝑊
+𝑊
+𝑊
+
+2𝑤 𝑗
+𝑤𝑗
+1
+∇𝑤
+−
+∇𝑊
+⊗ ∇𝑊 − 2 ∇2𝑊
+−
+𝑗
+𝑊2
+𝑊3
+𝑊
+𝑤𝑗
+2𝑤 𝑗
+1
+2
+= ∇2𝑤 𝑗 − 2 ∇𝑤 𝑗 ⊗ ∇𝑊 − 2 ∇2𝑊 + 3 ∇𝑊 ⊗ ∇𝑊
+𝑊
+𝑊
+𝑊
+𝑊 
+
+𝑤𝑗 2
+𝑤𝑗
+1 2
+2 1
+= ∇ 𝑤𝑗 − 2 ∇ 𝑊 −
+∇𝑤 𝑗 − 2 ∇𝑊 ⊗ ∇𝑊
+𝑊
+𝑊
+𝑊 𝑊
+𝑊
+𝑤𝑗 2
+1 2
+2 ®
+= ∇ 𝑤 𝑗 − 2 ∇ 𝑊 − 𝐺 𝑗 ⊗ ∇𝑊 .
+𝑊
+𝑊
+𝑊
+Finally, using 𝑞 𝑗,𝑘 = (𝑇 𝑗′ 𝑝)𝑘 , we get
+𝑗=0
+∇2𝑊 =
+𝑀
+−1
+∑︁
+∇ 2𝑤 𝑗 ′ .
+𝑗 ′ =0
+(𝐻 𝐹𝑘 )𝑎𝑏 =
+
+(𝑇 𝑗′ 𝑝)𝑘 K 𝑗 + 𝐴 𝑗,𝑘: ⊗ 𝐺® 𝑗 + 𝐺® 𝑗 ⊗ 𝐴 𝑗,𝑘: .
+𝜕 2 𝐹𝑘
+.
+𝜕𝑝𝑎 𝜕𝑝𝑏
+In this work, our first-order approximation is valid as long as
+the second-order term in the Taylor expansion of 𝐹 remains small.
+Using a second-order Taylor expansion around 𝑝, we have
+(𝑦 − 𝑝)𝑇 𝐻 𝐹1 (𝑝)(𝑦 − 𝑝)
+ª
+1 ©­
+..
+®.
+𝐹 (𝑦) ≈ 𝐹 (𝑝) + 𝐽𝐹 (𝑝)(𝑦 − 𝑝) + ­
+®
+.
+2
+𝑇
+« (𝑦 − 𝑝) 𝐻 𝐹𝑑 (𝑝) (𝑦 − 𝑝) ¬
+𝑤𝑗
+1
+𝐺® 𝑗 = ∇𝑤 𝑗 − 2 ∇𝑊 ,
+𝑊
+𝑊
+𝑀
+−1 
+∑︁
+∇𝑤 𝑗 ′ ,
+The entries of 𝐻 𝐹𝑘 are
+Using ∇2𝑞 𝑗,𝑘 = 0 and ∇𝛼 𝑗 = 𝐺® 𝑗 , we obtain
+𝐻 𝐹𝑘 =
+𝑀
+−1
+∑︁
+𝑗 ′ =0
+
+𝑞 𝑗,𝑘 ∇2 𝛼 𝑗 + ∇𝑞 𝑗,𝑘 ⊗ ∇𝛼 𝑗 + ∇𝛼 𝑗 ⊗ ∇𝑞 𝑗,𝑘 + 𝛼 𝑗 ∇2𝑞 𝑗,𝑘 .
+𝑗=0
+𝐻 𝐹𝑘 =
+∇𝑤 𝑗
+𝑤𝑗
+− 2 ∇𝑊 ,
+𝑊
+𝑊
+𝑤𝑗
+1
+2
+K 𝑗 = ∇2𝑤 𝑗 − 2 ∇2𝑊 − 𝐺® 𝑗 ⊗ ∇𝑊 .
+𝑊
+𝑊
+𝑊
+with 𝐺® 𝑗 =
+𝑗=0
+𝑀
+−1
+∑︁
+
+(𝑇 𝑗′ 𝑝)𝑘 K 𝑗 + 𝐴 𝑗,𝑘: ⊗ 𝐺® 𝑗 + 𝐺® 𝑗 ⊗ 𝐴 𝑗,𝑘: ,
+𝑗=0
+∇𝑤 𝑗
+𝑤𝑗
+− 2 ∇𝑊 .
+𝑊
+𝑊
+Applying the product rule twice gives
+𝑀
+−1 
+∑︁
+Therefore, the validity of the first-order approximation depends on
+the magnitude of the quadratic terms
+(𝑦 − 𝑝)𝑇 𝐻 𝐹𝑘 (𝑝)(𝑦 − 𝑝),
+9
+𝑘 = 1, . . . , 𝑑.
+Maximum number of rig node per splat
+Our experiments are limited to a maximum of 2 rig nodes influencing
+a given Gaussian splat in order to limit the number of attributes to
+add for each splats. When there is more than 2 rig nodes influencing
+a Gaussian splat, two option are possible: (a) the easiest one is to add
+another pair of attribute for each splats (rig node index + weight)
+and all the formulas generalize well or (b) if the memory overhead
+of these extra attributes is too costly for the application case, one
+can introduce new mock rig nodes that track weighted barycenters
+of the true rig nodes. In Fig. 12 we measure on a real scenario (the
+output of RigAnything [Liu et al. 2025]) the number of splats that
+are influenced by more than 2 rig nodes. Limiting to 2 rig nodes is a
+problem for 8.5% of Gaussian splats, which are typically located on
+the hands and feet, were they cause some splats to be detached from
+one of their nodes. Increasing to 3 rig nodes addresses the issue.
+10
+Interpolation in dictionary lookup
+In Sec. 3.3 of the main paper, we precompute a dictionary of resampled Gaussians. After a deformation, we look this up to selectively
+resample all Gaussians of a shape. We show in Fig. 16 that with the
+resolution of our dictionary, linear interpolation does not significantly improve results over nearest neighbor interpolation (which
+is less costly).
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+12
+•
+13
+Extra result for our gradient-based deformation
+In Fig. 17, we present additional deformation examples similar to
+those shown in Gao et al. [2024]. These results demonstrate that
+our deformation procedure can readily reproduce deformations of
+comparable scale and nature to those of Gao et al. [2024].
+13
+Estimating gradients using finite differences on
+neighbor graph
+13.1 Method
+Fig. 12. We test our deformation technique with the skinning weights
+produced by RigAnything [Liu et al. 2025]. In this example, 8.5% of Gaussian
+splats are significantly influenced by more than 2 rig nodes.
+When we evaluate our differentiable skinning weight definition in
+Sec. 4.2 of the main paper, we compare it with an a posteriori estimation that we perform using finite differences. If we already know the
+value 𝑤𝑖,𝑗 of the skinning weight field 𝑤 𝑗 at all positions (𝑝𝑖 )0≤𝑖<𝑁 ,
+we can estimate the gradients using Moving Least Squares (like
+point set surfaces do to define their normal [Alexa et al. 2001; Guennebaud and Gross 2007]). For a position 𝑝, the gradient of 𝑤 𝑗 is
+estimated by minimizing a local least square error:
+® 𝑗 (𝑝) = argmin
+∇𝑤
+𝑔®
+11
+Range of eigenvalues
+To determine the discretization scale used for our precomputed
+dictionary, we study the range of eigenvalues different splat scenes.
+More precisely, we study the ratio 𝜆max /𝜆min , since Gaussians are
+normalized before looking up the dictionary. Fig. 13 shows that it is
+typically between 1 and 104 , but can become very large (up to 1012
+in our worst cases). We use this analysis to establish the range of
+our precomputed dictionary.
+𝑁
+−1
+∑︁
+
+
+𝛼𝑖 (𝑤 𝑗 (𝑝) − 𝑤 𝑗 (𝑝𝑖 )) − 𝑔® · (𝑝 − 𝑝𝑖 )
+(13)
+𝑖=0
+where influence weights 𝛼𝑖 indicate how much 𝑝𝑖 is a neighbor of 𝑝.
+Typically, only a small number of 𝛼𝑖 are non null, and they live in the
+vicinity of 𝑝 so we use a KD-Tree to look for the 16 nearest neighbors
+of 𝑝 and only account for these neighbors in the minimization.
+Non-null weights 𝛼𝑖 are computed as 1/𝑑𝑖2 , where the distance
+𝑑𝑖 measures how close we are to the splat 𝑖. We use the Euclidean
+distance between the Gaussian centers 𝑝 and 𝑝𝑖 :
+𝑑𝑖 = ∥𝑝 − 𝑝𝑖 ∥ 2
+13.2
+(14)
+Results
+In Fig. 7 of the main paper, we report for various values of feather
+(i.e., selection smoothness 𝜎) the error between skinning gradients
+obtained using our differentiable skinning and a reconstruction
+of gradients from weights only using KNN. This experiment can
+be seen as an ablation: could we use our gradient-based deformation technique without differentiable skinning? For larger values
+of feather we can, but we have to be careful when splat density
+gets smaller wrt. gradient variation. Note that here we consider
+the result of our differentiable skinning to be the ground truth to
+compare KNN against because it has access to more information
+(namely, an analytic function that describes the weight field).
+In the folder data/ours-vs-knn of this supplementary data, we
+share extra detailed about the comparison reported in Fig. 7 of
+the main paper. For each value of feather, we plot an histogram
+of the error. Feather shape was set to "smoothstep" (as opposed to
+"linear"). The file stats.txt contains the raw data of Fig. 7 and
+chair_selection.png shows the scene for which we tested, with
+the skinning weight highlighted in orange.
+Fig. 13. Distribution of conditioning coefficients (𝜆max /𝜆min ) for all Gaussian
+splats of the rabbit and the wire car model.
+14
+Comparison with Gao et al.
+In Fig. 10 of the main paper we present a comparison with results
+from Gao et al. [2024]. Since the figure only shows selected viewpoints, we also share in folder data/ours-vs-gao the PLY and OBJ
+14
+•
+Vesseron and Michel
+files that were used. Note that for the sake of concision we only use
+the first letter of each filename (e.g., x for x_foo.ext).
+Files a, b and c correspond to the (a), (b) and (c) columns of the
+right-hand side of Fig. 10. In particular, files a (Gao et al.) and b
+(ours) are both deformed versions of the same rest input, which is
+given in file d (optimized by Gao et al.). In the case of file a – which
+is deformed by the method of Gao et al. – only the rest input from
+file d could be used, whereas in file c we show an example of our
+method applied on a rest input provided by a different optimizer
+(namely FastGS [Ren et al. 2026]), provided in file e.
+This ability to adapt to any new Gaussian splat optimizer is a
+notable advantage of our method over the one proposed by Gao
+et al. Another benefit is that we do not need a mesh proxy; we
+share in file f the mesh extracted from the rest splats and in file
+g the deformed mesh, provided back to the pipeline of Gao et al.
+to evaluate the deformed splats. Deformation was done in Blender
+using the proportional editing tool, which is very close to our model
+for defining skinning weights but not perfectly identical, which is
+why we did not try to reproduce the exact same deformation.
+15
+Additional results for resampling
+Impact of resampling. We validate in Fig. 15 that applying our
+resampling procedure does not significantly change the appearance
+of the shape. For this experiment, we resample all splats and replace
+each of them by five smaller splats, without using our resampling
+criterion, in order to isolate the effect of the resampling process
+itself on the rendered object. Although the rendered views are not
+perfectly preserved, the error remains low and is well distributed
+over the shape.
+Instead of selecting the closest splat in the lookup table, we also
+experimented with linearly interpolating between the four lookuptable entries corresponding to the splat to be resampled. We compare
+both strategies in Fig. 16. Linear interpolation does not appear to
+improve the results.
+Choice of 𝜏reg . To construct our lookup table, we need to choose
+a suitable value for the hyperparameter 𝜏reg . This parameter must
+both ensure an accurate reconstruction of the original splat and
+reduce the largest eigenvalue when replacing it with five smaller
+splats. In Fig. 14, we show an extended version of Fig. 7 from the
+main paper, which justifies our choice of 𝜏reg = 0.002 as a good
+compromise.
+Choice of 𝜀 for resampling. The effect of the threshold hyperparameter 𝜀 used in the resampling criterion is analyzed in Fig. 18. The
+smaller 𝜀 is, the more splats are resampled. This creates a trade-off:
+𝜀 should be small enough to remove artifacts through resampling,
+but large enough to prevent the number of splats from increasing
+excessively. The value of 𝜀 also impacts the resampling time (1.5x
+to 3x slowdown when switching from 𝜀 = 0.1 to 𝜀 = 0.01). When
+resampling duration is not an issue (e.g., because one does it once
+for all before rendering an animated sequence), we find that a grid
+search over the values {0.001, 0.01, 0.1, 1.0} is sufficient for our examples. We start from 𝜀 = 1.0 and decrease it until the artifacts
+disappear.
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+τreg = 0.05
+τreg = 0.01
+τreg = 0.005
+τreg = 0.002
+τreg = 0.001
+original
+λmax(Σ̄)/λmax(Σ*)
+λmax(Σ̄)/λmax(Σ*)
+λmax(Σ̄)/λmax(Σ*)
+λmax(Σ̄)/λmax(Σ*)
+λmax(Σ̄)/λmax(Σ*)
+λmax(Σ̄)/λmax(Σ*)
+L2 Difference: 20325.9
+L2 Difference: 6266.5
+L2 Difference: 3575.0
+L2 Difference: 2476.6
+L2 Difference: 2723.0
+•
+15
+L2 Difference: 0.0
+Fig. 14. Impact of the regularization factor 𝜏reg used to balance the two terms of our loss when building the dictionary. Smaller 𝜏reg yield better preservation of
+the rest shape (middle and bottom rows), but higher 𝜏reg leads to a faster decrease of the largest eigenvalue, and thus to lower deformation error.
+Original
+Resampled
+Original
+Resampled
+Fig. 15. Comparison of images rendered from the original cloud of Gaussian splats (left) and from our resampled cloud (right). This validates that for the rest
+position, our resampling does not introduce significant error. The error map on the right shows that the error is well distributed over the shape (i.e., it does not
+introduce local artifacts).
+16
+•
+Vesseron and Michel
+Original
+Average
+Nearest
+Average
+Nearest
+Fig. 16. In our 2D look-up table, instead of selecting the nearest case for the splat to be resampled, we perform interpolation using the four neighboring cases
+and apply linear interpolation. The weights are defined as the inverse of the Euclidean distance between the eigenvalues of the target Gaussian and those of
+the corresponding cases in the table. This figure compares the nearest-neighbor and interpolation approaches. Both methods produce similar results, and
+neither method is consistently superior to the other.
+GradRig: Differentiable Weights for Skinned Gaussian Splat Deformation
+(a)
+(a)
+(b)
+(b)
+(a)
+(a)
+(b)
+•
+17
+(b)
+(a)
+(b)
+Fig. 17. Other object deformations similar to Gao et al. [2024]). The naïve rigid deformation creates holes in the Gaussian splats (a). Our method removes
+these artifacts and produces the intended deformation (b).
+18
+•
+Vesseron and Michel
+Original (238 090 splats)
+Original (46 864 splats)
+Skinning Gradient (238 090 splats)
+Skinning Gradient (46 864 splats)
+Recursive resampling ε = 1.0 (240 702 splats)
+Recursive resampling ε = 0.1 (225 496 splats)
+Recursive resampling ε = 0.01 (289 198 splats)
+Recursive resampling ε = 0.01 (611832 splats)
+Fig. 18. The threshold 𝜀 quantifies when the second-order term is sufficiently small to avoid resampling a splat. Smaller values of 𝜀 result in more splats being
+resampled. We observe that with excessively large values of 𝜀, visible artifacts remain, whereas decreasing 𝜀 eliminates these artifacts. For the teddy bear,
+𝜀 = 1.0 leads to 6 resampling loops and takes 71.1 s, whereas 𝜀 = 0.01 leads to 9 resampling loops and takes 101.3 s. For the banana example, 𝜀 = 0.1 leads to
+8 resampling loops and takes 82.2 s, whereas 𝜀 = 0.01 leads to 10 resampling loops and takes 244.9 s. In both cases, we find that taking 𝜀 = 0.1 is already
+satisfactory, and in general we remain below the 1 min 30 s limit.

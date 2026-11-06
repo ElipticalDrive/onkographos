@@ -1,0 +1,175 @@
+Volume Shaders Using Autovolume
+home
+« prev
+next »
+index
+Volume Shaders Using Autovolume
+mental ray offers
+a volume tracking mode called autovolume.
+In this mode, mental ray keeps track of which volumes a ray is in, manages
+nested volumes, keeps track of which volumes the camera is in, and
+takes over inside/outside decisions. This allows scenes with
+overlapping volumes such as light cones from street lights, even if
+the camera moves through the light cones in an animation. With
+mental ray 2.x, sophisticated volume shaders would be required for
+handling this correctly.
+In autovolume mode, the volume
+shader attached to the camera controls the volume of the world
+outside all other object volumes, and necessarily the volume that
+the camera is in. Volume shader declarations may specify a
+volume level greater
+than zero that defines the properties of the volume: volumes at
+higher levels displace volumes at lower levels, and volumes at
+equal levels mix. The default level is 0. Mixing means that if a
+ray travels through such a volume, all volume shaders at the
+highest level are called, and all lower levels are ignored. Levels
+are defined in the shader
+declaration (see page shaderdecl):
+```
+     declare shader
+         color "volume_shader_name" (...)
+         volume level 1
+     end declare
+```
+Each volume shader has the option of terminating the chain of
+mixed volume shaders scheduled for execution. For example, a volume
+shader that creates a swirl of particles may allow other shaders to
+be called to add their particles, but a plain fog shader might
+terminate the list to prevent the fog to be twice as dense where
+two fog volumes intersect.
+To activate autovolume mode,
+the following options are required:
+volume on
+to turn on volume shading (this is the default),
+autovolume on
+to switch to autovolume shading, and
+shadow segments
+because shadow segments are
+required to keep track of shadow rays passing through volumes.
+scanline off
+for mental ray 3.2 and earlier, because scanline intersections
+were not reliable.
+It is not necessary to turn on raytracing. After activating
+autovolume, old volume shaders can still be used. However,
+state→volume and
+state→refraction_volume are ignored by mental ray
+since inside/outside determination is now done internally. Shaders
+can detect autovolume mode by checking
+state→options→autovolume.
+To help the shader writer merge results of individual volume
+shaders called on a ray, mental ray 3.x provides functions for
+limited communication between these shaders:
+mi_volume_num_shaders
+returns the total number of shaders that mental ray is going call
+for this ray segment.
+mi_volume_cur_shader
+returns the relative index of the current shader, ranging from 0 to
+mi_volume_num_shaders − 1.
+mi_volume_tags
+returns a const pointer to an array of volume shader tags that
+mental ray calls for this ray segment.
+mi_volume_user_color
+returns the pointer to a user-defined color which can be used to
+accumulate shader results. mental ray does not touch this
+value.
+When mental ray has collected all the shaders to call for a
+given volume, there are three principally different ways how
+results of individual volume shaders can be combined:
+By user color: the first shader (where mi_volume_cur_shader returns 0)
+initializes the user color. All remaining shaders contribute their
+results by modifying the user color. The last shader (where
+mi_volume_cur_shader
+returns mi_volume_num_shaders - 1) returns
+the user color in its result argument.
+By tag array: the first shader may obtain the tag array and
+uses mi_call_shader to
+carry out volume shading in the desired way. It sets the final
+result in its result argument, and returns (miBoolean)2 to
+indicate that volume shading has been completed. mental ray will
+then not call the remaining shaders in the list for the current ray
+segment.
+By state: all mixed volume shaders called for a given ray
+segment are supplied the same state which can be used to exchange
+information, for example using state→user. This
+method is not recommended because it assumes that all shaders were
+designed to cooperate in this way.
+In any case, all volume shaders called for the volume will
+operate on the same result pointer.
+Sometimes, not all volumes through which a ray is traveling will
+contribute significantly to the final result. Consider a bubble of
+carbon dioxide inside a glass of beer. As the ray passes through
+the bubble, both shaders, CO2 and beer, will be called
+(since the bubble is inside the beer), but the beer is not going to
+contribute to the current ray since the bubble is completely filled
+with CO2.
+Here is an example with two volume shaders. The
+attenuating_volume volume shader at level 1 which attenuates
+a ray according to the distance it has traveled through the volume.
+If two such volumes intersect, the effect is accumulating. see how
+the user color is used for that purpose. The
+luminescent_volume volume shader at level 2 brightens the
+current ray. The effect is non-accumulating, so the shader return
+(miBoolean)2 to prevent mental ray from continuing to follow the
+shader list.
+```
+    struct lv {
+        miScalar        emission;
+        miColor         color;
+    };
+
+    DLLEXPORT miBoolean luminescent_volume(
+        miColor         *result,
+        miState         *state,
+        struct lv       *parms)
+    {
+        miScalar        factor;
+        miColor         *volcolor;
+
+        factor   = *mi_eval_scalar(&parms->emission) * state->dist;
+        volcolor =  mi_eval_color (&parms->color);
+        result->r += factor * volcolor->r;
+        result->g += factor * volcolor->g;
+        result->b += factor * volcolor->b;
+
+        return((miBoolean)2);           /* no more calls in chain */
+    }
+
+
+    struct av {
+        miScalar        extinction;
+        miColor         color;
+    };
+
+    DLLEXPORT miBoolean attenuating_volume(
+        miColor         *result,
+        miState         *state,
+        struct av       *parms)
+    {
+        miScalar        factor;
+        miColor         *volcolor, *usercolor;
+
+        factor    = *mi_eval_scalar(&parms->extinction) * state->dist;
+        volcolor  =  mi_eval_color (&parms->color);
+        userColor =  mi_volume_user_color(state);
+
+        if (mi_volume_cur_shader(state) == 0) {
+                usercolor->r = result->r - factor*volcolor->r;
+                usercolor->g = result->g - factor*volcolor->g;
+                usercolor->b = result->b - factor*volcolor->b;
+        } else {
+                usercolor->r -= factor * volcolor->r;
+                usercolor->g -= factor * volcolor->g;
+                usercolor->b -= factor * volcolor->b;
+        }
+        if (mi_volume_cur_shader(state) == mi_volume_num_shaders(state)-1)
+                *result = *usercolor;
+
+        return(miTRUE);
+    }
+```
+home
+« prev
+next »
+index
+Copyright © 1986-2008 by
+mental images GmbH

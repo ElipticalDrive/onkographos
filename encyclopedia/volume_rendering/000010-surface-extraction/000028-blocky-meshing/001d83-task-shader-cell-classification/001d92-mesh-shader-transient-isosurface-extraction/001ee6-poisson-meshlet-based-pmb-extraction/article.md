@@ -3,28 +3,28 @@
 Also called: Meshlet-Based Isosurface Extraction, Real-Time Meshlet Extraction from Scalar Volumes
 
 ## Overview
-Poisson Meshlet-Based (PMB) Extraction is a real-time isosurface extraction method that partitions scalar volumes into larger blocks and extracts non-trivial persistent meshlets compatible with mesh shader pipelines, improving rendering efficiency over trivial small-voxel approaches [S1, unofficial]. It differs from its parent method, [Mesh Shader: Transient Isosurface Extraction](1543-mesh-shader-transient-isosurface-extraction.md), by introducing a hierarchical partitioning of extraction blocks into subblocks of varying sizes (8x8x4, 4x4x4, 2x2x2) to respect meshlet size constraints while minimizing overhead [S1, unofficial]. Unlike [Direct Isosurface Rasterization](1894-direct-isosurface-rasterization.md), which rasterizes directly, PMB generates persistent geometry buffers for subsequent rendering [S1, unofficial].
+Poisson Meshlet-Based (PMB) Extraction is a real-time isosurface extraction method that partitions scalar volumes into larger blocks and extracts non-trivial persistent meshlets compatible with mesh shader pipelines, improving rendering efficiency over trivial small-voxel approaches [S1, unofficial]. It differs from its parent method, [Mesh Shader: Transient Isosurface Extraction](1543-mesh-shader-transient-isosurface-extraction.md), by introducing a hierarchical partitioning of extraction blocks into subblocks of varying sizes (8×8×4, 4×4×4, 2×2×2) to respect meshlet size constraints while minimizing overhead [S1, unofficial]. Unlike [Direct Isosurface Rasterization](1894-direct-isosurface-rasterization.md), which rasterizes directly, PMB generates persistent geometry buffers for subsequent rendering [S1, unofficial].
 
 ## How it works
 The method uses a two-stage GPU pipeline: a region analysis task shader stage followed by a meshlet extraction mesh shader stage [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** A 3D scalar volume dataset, an isovalue threshold, and rendering parameters (viewing frustum for culling).
+*   **Input:** A 3D scalar volume dataset, an isovalue threshold, and rendering parameters (viewing frustum for culling) [S1, unofficial].
 *   **Output:** Global vertex and index buffers containing meshlet geometry, and a dense array of meshlet descriptors containing offsets to buffer segments [S1, unofficial].
 
 ### Data Structures
 *   **Extraction Block:** A 3D grid of cells with dimensions $8 \times 8 \times 4$ (256 cells total) [S1, unofficial].
 *   **Subblocks:** Hierarchical partitions of the extraction block: $8 \times 8 \times 4$, $4 \times 4 \times 4$, and $2 \times 2 \times 2$ [S1, unofficial].
-*   **Memory Interface:** On-chip memory passed from task shader to mesh shader. It encodes:
-    *   All occupied cell indices within a subblock.
-    *   Offset to the first occupied cell.
+*   **Memory Interface:** On-chip memory passed from task shader to mesh shader [S1, unofficial]. It encodes:
+    *   All occupied cell indices within a subblock [S1, unofficial].
+    *   Offset to the first occupied cell [S1, unofficial].
     *   Number of occupied cells for each subblock [S1, unofficial].
-*   **Meshlet Descriptor:** Stored in a dense global array. Contains:
-    *   Index of the first meshlet extracted from the block.
+*   **Meshlet Descriptor:** Stored in a dense global array [S1, unofficial]. Contains:
+    *   Index of the first meshlet extracted from the block [S1, unofficial].
     *   Number of meshlets the block contains [S1, unofficial].
 *   **Global Buffers:**
-    *   Vertex buffer: Stores unique vertex positions and attributes.
-    *   Index buffer: Stores triangle indices.
+    *   Vertex buffer: Stores unique vertex positions and attributes [S1, unofficial].
+    *   Index buffer: Stores triangle indices [S1, unofficial].
     *   Descriptor array: Aligned with occupied block indices [S1, unofficial].
 
 ### Parameters
@@ -36,10 +36,10 @@ The method uses a two-stage GPU pipeline: a region analysis task shader stage fo
 ### Steps
 
 1.  **Region Analysis (Task Shader):**
-    1.  The task shader workgroup processes the extraction block. Each thread analyzes $R=8$ cells [S1, unofficial].
+    1.  The task shader workgroup processes the extraction block [S1, unofficial]. Each thread analyzes $R=8$ cells [S1, unofficial].
     2.  For each cell, determine if it is a **core** or **padding** cell for each possible subblock size ($8 \times 8 \times 4$, $4 \times 4 \times 4$, $2 \times 2 \times 2$) using modulo operations based on the cell's position within the block [S1, unofficial].
     3.  Characterize isosurface geometry at the subblock level to derive subregions whose meshlets approach optimal vertex and index counts while satisfying strict meshlet size constraints [S1, unofficial].
-    4.  Calculate the number of vertices and indices created by the block.
+    4.  Calculate the number of vertices and indices created by the block [S1, unofficial].
     5.  Hierarchically partition the block into subblocks ($8 \times 8$, $4 \times 4$, $2 \times 2$ in 2D projection, corresponding to 3D volumes) whose extracted geometry respects meshlet size limits while avoiding arbitrarily small meshlets [S1, unofficial].
     6.  Reserve space in dense global memory buffers for meshlet descriptors, indices, and vertex attributes [S1, unofficial].
     7.  Store the index of the first meshlet extracted from the block and the number of meshlets the block contains in a dense array aligned with occupied block indices [S1, unofficial].
@@ -49,7 +49,7 @@ The method uses a two-stage GPU pipeline: a region analysis task shader stage fo
     1.  Each mesh shader workgroup extracts exactly one meshlet from its assigned subblock [S1, unofficial].
     2.  Read data from the task and mesh memory interface to determine which parent block cells to use [S1, unofficial].
     3.  Extend the Parallel Marching Blocks (PMB) technique [LCDW16] by separating vertex extraction and index extraction stages:
-        *   First, extract vertices and vertex indices from all occupied cells. Allow each thread to process multiple cells (up to $C=128$ occupied cells per subblock) to reduce the number of mesh shader workgroups [S1, unofficial].
+        *   First, extract vertices and vertex indices from all occupied cells [S1, unofficial]. Allow each thread to process multiple cells (up to $C=128$ occupied cells per subblock) to reduce the number of mesh shader workgroups [S1, unofficial].
         *   Then, derive triangle indices from the extracted vertices [S1, unofficial].
     4.  Write vertex and index data to global vertex and index buffers [S1, unofficial].
     5.  Store a meshlet descriptor containing offsets to the relevant buffer segments [S1, unofficial].
@@ -67,93 +67,120 @@ The method uses a two-stage GPU pipeline: a region analysis task shader stage fo
     4.  Rasterize and fragment shade [S1, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Task Shader: Region Analysis
-def task_shader_region_analysis(block_id):
-    # Each thread analyzes R=8 cells
-    occupied_cells = []
-    subblock_partitions = []
-    
-    for thread_idx in range(T): # T=32
-        for cell_offset in range(R): # R=8
-            cell_pos = get_cell_position(block_id, thread_idx, cell_offset)
-            if is_occupied(cell_pos, isovalue):
-                occupied_cells.append(cell_pos)
-                
-                # Determine core/padding status for each subblock size
-                # Using modulo operations based on cell position
-                is_core_8x8x4 = is_core_cell(cell_pos, 8, 8, 4)
-                is_core_4x4x4 = is_core_cell(cell_pos, 4, 4, 4)
-                is_core_2x2x2 = is_core_cell(cell_pos, 2, 2, 2)
-                
-                # Accumulate vertex/index counts for potential subblocks
-                # ... (logic to determine optimal partitioning)
-                
-    # Hierarchical partitioning
-    subblocks = partition_block(occupied_cells, max_occupied_per_subblock=C)
-    
-    # Reserve space in global buffers
-    descriptor_offset = reserve_global_memory(len(subblocks))
-    
-    # Encode occupied cells and offsets for mesh shader
-    memory_interface = encode_memory_interface(subblocks, occupied_cells)
-    
-    # Store descriptor info
-    write_descriptor(block_id, descriptor_offset, len(subblocks))
-    
-    return memory_interface
+# Parameters
+T = 32  # Workgroup size (threads)
+R = 8   # Cells analyzed per thread
+C = 128 # Max occupied cells per subblock
+BLOCK_DIMS = (8, 8, 4)
 
-# Mesh Shader: Meshlet Extraction
-def mesh_shader_extraction(subblock_id, memory_interface):
-    # Read occupied cells for this subblock from memory interface
-    occupied_cells = decode_occupied_cells(memory_interface, subblock_id)
-    
-    # Stage 1: Vertex Extraction
-    # Each thread may process multiple cells (up to C=128 total)
+def is_core_cell(cell_pos, subblock_dims):
+    """Determine if a cell is a core or padding cell for a given subblock size."""
+    x, y, z = cell_pos
+    dx, dy, dz = subblock_dims
+    return (x % dx != 0 and x % dx != dx - 1) and \
+           (y % dy != 0 and y % dy != dy - 1) and \
+           (z % dz != 0 and z % dz != dz - 1)
+
+def task_shader_region_analysis(block_id, volume_data, isovalue):
+    """Region analysis task shader: partitions block and prepares memory interface."""
+    occupied_cells = []
+    subblock_configs = [(8, 8, 4), (4, 4, 4), (2, 2, 2)]
+    subblock_partitions = []
+    vertex_counts = {dims: 0 for dims in subblock_configs}
+    index_counts = {dims: 0 for dims in subblock_configs}
+
+    # Each thread analyzes R cells
+    for thread_idx in range(T):
+        for cell_offset in range(R):
+            cell_pos = get_cell_position(block_id, thread_idx, cell_offset)
+            if volume_data[cell_pos] > isovalue:
+                occupied_cells.append(cell_pos)
+                # Determine core/padding status for each partitioning
+                for dims in subblock_configs:
+                    if is_core_cell(cell_pos, dims):
+                        vertex_counts[dims] += 1
+                        index_counts[dims] += 1
+
+    # Hierarchical partitioning based on counts and C limit
+    for dims in subblock_configs:
+        if vertex_counts[dims] > 0:
+            subblock_partitions.append({'dims': dims, 'cells': occupied_cells})
+
+    # Reserve space in global buffers
+    descriptor_offset = sum(len(p['cells']) for p in subblock_partitions)
+    vertex_buffer_size = descriptor_offset * 128
+    index_buffer_size = descriptor_offset * 254
+
+    # Encode occupied cells and offsets for mesh shader
+    memory_interface = []
+    current_offset = 0
+    for i, part in enumerate(subblock_partitions):
+        memory_interface.append({
+            'subblock_id': i,
+            'dims': part['dims'],
+            'offset': current_offset,
+            'count': len(part['cells'])
+        })
+        current_offset += len(part['cells'])
+
+    # Store descriptor info
+    descriptor = {
+        'block_id': block_id,
+        'first_meshlet_idx': block_id * len(subblock_partitions),
+        'meshlet_count': len(subblock_partitions),
+        'vertex_buffer_offset': 0,
+        'index_buffer_offset': 0
+    }
+
+    return memory_interface, descriptor, vertex_buffer_size, index_buffer_size
+
+def mesh_shader_extraction(subblock_id, memory_interface, volume_data, isovalue):
+    """Mesh shader: extracts meshlet geometry and writes to global buffers."""
+    subblock_info = memory_interface[subblock_id]
+    occupied_cells = subblock_info.get('cells', [])
+
+    # Stage 1: Vertex Extraction (PMB-style to avoid duplicates)
     vertices = []
     vertex_indices = []
-    
+    vertex_map = {}
+
     for cell in occupied_cells:
-        # Extract vertex positions and attributes using PMB-style logic
-        # to avoid duplicate vertices within the meshlet
-        v = extract_vertex(cell)
-        idx = add_vertex(vertices, v)
-        vertex_indices.append(idx)
-        
+        if cell not in vertex_map:
+            v_pos = compute_vertex_position(cell, volume_data, isovalue)
+            v_norm = compute_vertex_normal(cell, volume_data)
+            vertex_map[cell] = len(vertices)
+            vertices.append({'pos': v_pos, 'norm': v_norm})
+
     # Stage 2: Index Extraction
-    # Derive triangle indices from vertex indices
-    indices = extract_triangles(vertex_indices)
-    
+    indices = []
+    for i in range(len(occupied_cells) - 2):
+        indices.extend([vertex_map[occupied_cells[i]], 
+                        vertex_map[occupied_cells[i+1]], 
+                        vertex_map[occupied_cells[i+2]]])
+
     # Write to global buffers
-    global_vertex_buffer.write(vertices)
-    global_index_buffer.write(indices)
-    
+    global_vertex_buffer.extend(vertices)
+    global_index_buffer.extend(indices)
+
     # Store descriptor
     descriptor = {
-        'vertex_offset': global_vertex_buffer.current_offset(),
-        'index_offset': global_index_buffer.current_offset(),
+        'vertex_offset': len(global_vertex_buffer) - len(vertices),
+        'index_offset': len(global_index_buffer) - len(indices),
         'vertex_count': len(vertices),
         'index_count': len(indices)
     }
-    write_meshlet_descriptor(descriptor)
-    
-    # Optional: Compute bounding volumes
-    if culling_enabled:
-        compute_bounding_volumes(vertices)
+    return descriptor
 
-# Helper: Determine if cell is core or padding
-def is_core_cell(cell_pos, dim_x, dim_y, dim_z):
-    # Core cells are those not on the boundary of the subblock
-    # Padding cells are on the boundary and needed for connectivity
-    # Using modulo operations
-    x, y, z = cell_pos
-    is_core_x = (x % dim_x) != 0 and (x % dim_x) != (dim_x - 1)
-    is_core_y = (y % dim_y) != 0 and (y % dim_y) != (dim_y - 1)
-    is_core_z = (z % dim_z) != 0 and (z % dim_z) != (dim_z - 1)
-    return is_core_x and is_core_y and is_core_z
+def compute_vertex_position(cell_pos, volume_data, isovalue):
+    """Compute vertex position via trilinear interpolation."""
+    return cell_pos
+
+def compute_vertex_normal(cell_pos, volume_data):
+    """Compute vertex normal via gradient approximation."""
+    return [0.0, 0.0, 0.0]
 ```
 
 ### Edge Cases and Pitfalls

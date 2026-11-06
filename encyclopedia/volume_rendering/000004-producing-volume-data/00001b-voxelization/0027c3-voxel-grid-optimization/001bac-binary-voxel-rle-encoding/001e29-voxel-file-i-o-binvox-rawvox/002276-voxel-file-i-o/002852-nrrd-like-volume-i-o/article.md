@@ -1,0 +1,137 @@
+# NRRD-like Volume I/O
+
+Also called: NRRD-like Format I/O
+
+## Overview
+This method defines a minimal, custom binary volume file format designed for efficient storage and transfer of voxel grids. It solves the problem of serializing 3D volumetric data by using a simple two-line header followed by a raw binary payload. Unlike the full Network Common Data Form (NRRD) specification, which supports complex metadata, encodings, and transformations, this variant is restricted to fixed dimensions and a single data type (`uint32_t`), prioritizing implementation simplicity and parsing speed over flexibility. It serves as a lightweight alternative to more verbose formats like [VTK Legacy ASCII File Writing](6698-vtk-legacy-ascii-file-writing.md) or the more complex [NRRD File Parsing and Volume Initialization](7216-nrrd-file-parsing-and-volume-initialization.md).
+
+## How it works
+**Inputs and Outputs:**
+- Input: A contiguous array of `uint32_t` values representing the voxel grid, along with its dimensions $(D_x, D_y, D_z)$.
+- Output: A binary file containing the header and raw voxel data.
+- Input (Import): A file in the specified format.
+- Output: A resized array of `uint32_t` and the parsed dimensions.
+
+**Data Structures:**
+The file layout is strictly sequential:
+1.  **Line 1:** Three space-separated integers representing $D_x$ (width), $D_y$ (height), and $D_z$ (depth).
+2.  **Line 2:** The literal string `uint32` followed by a newline.
+3.  **Payload:** Raw binary bytes of the voxel data, stored in row-major order (X fastest, then Y, then Z). The total size is $D_x \times D_y \times D_z \times 4$ bytes.
+
+**Numbered Steps:**
+
+1.  **Export:**
+    1.  Open the output file for writing in binary mode.
+    2.  Write the dimensions as a string: `f"{D_x} {D_y} {D_z}\n"`.
+    3.  Write the data type identifier: `"uint32\n"`.
+    4.  Write the raw voxel data. The data array `m_data` is treated as a byte stream.
+        $$ \text{bytes\_to\_write} = D_x \times D_y \times D_z \times \text{sizeof(uint32\_t)} $$
+        Write `m_data` directly to the file buffer.
+
+2.  **Import:**
+    1.  Open the input file for reading in binary mode.
+    2.  Read the first line as text. Parse the three integers to obtain $D_x, D_y, D_z$.
+    3.  Read the second line as text. Verify it equals `"uint32"`. If not, raise an error or handle as unsupported.
+    4.  Calculate the total voxel count:
+        $$ N = D_x \times D_y \times D_z $$
+    5.  Allocate or resize the output array `m_data` to hold $N$ elements of type `uint32_t`.
+    6.  Read $N \times \text{sizeof(uint32\_t)}$ bytes from the file into `m_data`.
+    7.  Verify that the read operation consumed the expected number of bytes. If the file ends prematurely, handle the error.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import struct
+
+def export_nrrd_like(filename: str, dims: tuple, data: list):
+    """
+    Exports a volume to the NRRD-like format.
+    :param filename: Output file path.
+    :param dims: Tuple (Dx, Dy, Dz) of integers.
+    :param data: List of uint32_t values.
+    """
+    Dx, Dy, Dz = dims
+    voxel_count = Dx * Dy * Dz
+    
+    if len(data) != voxel_count:
+        raise ValueError("Data length does not match dimensions")
+
+    with open(filename, 'wb') as f:
+        # Write header line 1: dimensions
+        f.write(f"{Dx} {Dy} {Dz}\n".encode('ascii'))
+        
+        # Write header line 2: data type
+        f.write(b"uint32\n")
+        
+        # Write raw binary payload
+        # Pack as little-endian unsigned 32-bit integers
+        # Note: The source uses reinterpret_cast, implying native byte order.
+        # For portability, explicit packing is safer, but we follow the source's
+        # assumption of direct memory copy if endianness matches.
+        # Here we use struct to ensure consistent binary output.
+        packed_data = struct.pack(f'{voxel_count}I', *data)
+        f.write(packed_data)
+
+def import_nrrd_like(filename: str) -> tuple:
+    """
+    Imports a volume from the NRRD-like format.
+    :param filename: Input file path.
+    :return: Tuple (dims, data) where dims is (Dx, Dy, Dz) and data is list of uint32_t.
+    """
+    with open(filename, 'rb') as f:
+        # Read header line 1
+        line1 = f.readline().decode('ascii').strip()
+        parts = line1.split()
+        if len(parts) != 3:
+            raise ValueError("Invalid header line 1")
+        
+        Dx, Dy, Dz = int(parts[0]), int(parts[1]), int(parts[2])
+        
+        # Read header line 2
+        line2 = f.readline().decode('ascii').strip()
+        if line2 != "uint32":
+            raise ValueError(f"Unsupported data type: {line2}")
+        
+        voxel_count = Dx * Dy * Dz
+        bytes_to_read = voxel_count * 4  # sizeof(uint32_t) = 4
+        
+        # Read raw binary payload
+        raw_bytes = f.read(bytes_to_read)
+        if len(raw_bytes) != bytes_to_read:
+            raise ValueError("File truncated: insufficient data")
+        
+        # Unpack as little-endian unsigned 32-bit integers
+        data = struct.unpack(f'{voxel_count}I', raw_bytes)
+        
+        return (Dx, Dy, Dz), list(data)
+```
+
+**Parameters:**
+-   **Data Type:** Fixed to `uint32_t`. No other types are supported by this specific variant.
+-   **Endianness:** The source code uses `reinterpret_cast`, which implies native machine endianness. Implementers should be aware that files generated on little-endian machines may not read correctly on big-endian machines without conversion. [G] For cross-platform compatibility, explicit endianness handling (e.g., swapping bytes if necessary) should be added.
+
+**Edge Cases and Pitfalls:**
+-   **Truncated Files:** The import step must verify that the number of bytes read matches the expected size. Failure to do so may result in reading garbage data or crashing.
+-   **Dimension Mismatch:** The number of elements in the data array must exactly equal $D_x \times D_y \times D_z$.
+-   **Header Parsing:** Whitespace handling in the first header line should be robust (e.g., splitting by any whitespace).
+
+## Subtopics
+
+## Operating characteristics
+-   **Time Complexity:**
+    -   Export: $O(N)$, where $N$ is the number of voxels. Writing the header is $O(1)$.
+    -   Import: $O(N)$, dominated by reading the binary payload.
+-   **Memory Complexity:** $O(N)$ for storing the voxel data. The header requires negligible memory.
+-   **Performance:** This format is extremely fast to parse and write because it avoids complex header parsing, metadata extraction, and encoding/decoding steps. It is suitable for intermediate data exchange in pipelines where speed is critical and metadata is handled separately.
+-   **Strengths:** Simplicity, small file size (no overhead for metadata or compression), fast I/O.
+-   **Limitations:** No support for metadata (spacing, orientation, data type flexibility), no compression, no support for multiple data types or arrays. Not suitable for long-term archival or interoperability with general-purpose scientific tools that expect standard NRRD.
+-   **When to use:** Internal pipeline data transfer, debugging, or scenarios where the volume structure is known and fixed.
+-   **When not to use:** When metadata (physical spacing, coordinate systems) is required, or when interoperability with standard medical/scientific imaging software is needed.
+
+## Background
+This format is an unofficial, simplified variant of the Network Common Data Form (NRRD) specification. It originates from the `max-pio/compressed-segmentation-volumes` repository, where it is used as a lightweight container for voxel data in the context of compressed segmentation volumes. It is not a standard format defined by any governing body but rather a pragmatic convention adopted by specific implementations to avoid the complexity of full NRRD parsers.
+
+## Sources
+[S1] max-pio/compressed-segmentation-volumes, https://github.com/max-pio/compressed-segmentation-volumes, fetched 2026-10-26 (unofficial)

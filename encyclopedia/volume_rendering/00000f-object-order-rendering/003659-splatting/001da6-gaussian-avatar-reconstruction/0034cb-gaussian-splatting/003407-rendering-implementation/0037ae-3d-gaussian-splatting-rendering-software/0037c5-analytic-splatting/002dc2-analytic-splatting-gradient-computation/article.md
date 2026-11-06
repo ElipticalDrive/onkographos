@@ -1,0 +1,155 @@
+# Analytic-Splatting Gradient Computation
+
+Also called: Gradient of 2D Gaussian integral w.r.t covariance matrix, Gradient of Analytic 2D Gaussian Splat
+
+## Overview
+This method computes the exact gradient of the analytically integrated 2D Gaussian splat intensity with respect to the elements of the 2D covariance matrix $\hat{\Sigma}$ [S1]. It enables differentiable training of Gaussian splat parameters by providing the necessary backpropagation signals for the covariance, which is critical for optimizing the shape and orientation of the Gaussians in 3D Gaussian Splatting [S1].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** The analytically integrated 2D Gaussian intensity $\mathcal{I}^{2D}_g$, the 2D covariance matrix $\hat{\Sigma}$, and the pixel center coordinates $(u_x, u_y)$ relative to the Gaussian center $(\hat{\mu}_x, \hat{\mu}_y)$ [S1].
+- **Output:** The gradient matrix $\frac{\partial \mathcal{I}^{2D}_g}{\partial \hat{\Sigma}}$ with respect to the independent elements $\hat{\Sigma}_{11}, \hat{\Sigma}_{12}, \hat{\Sigma}_{22}$ [S1].
+
+**Data Structures:**
+The covariance matrix $\hat{\Sigma}$ is represented by its eigenvalues $\lambda_1, \lambda_2$ and corresponding eigenvectors $\mathbf{v}_1, \mathbf{v}_2$ [S1].
+- $\lambda_1, \lambda_2 \in \mathbb{R}$: Eigenvalues.
+- $\mathbf{v}_1, \mathbf{v}_2 \in \mathbb{R}^2$: Eigenvectors, normalized such that $\|\mathbf{v}_i\|=1$.
+
+**Method Steps:**
+The gradient is computed using the chain rule over the eigenvalues and eigenvectors [S1]. For each element $\hat{\Sigma}_{ij}$ where $(i,j) \in \{(1,1), (1,2), (2,2)\}$:
+
+1.  **Decompose Covariance:** Compute the eigenvalues $\lambda_1, \lambda_2$ and eigenvectors $\mathbf{v}_1, \mathbf{v}_2$ of $\hat{\Sigma}$.
+2.  **Compute Intensity Gradients w.r.t Eigenvalues:** Calculate $\frac{\partial \mathcal{I}^{2D}_g}{\partial \lambda_1}$ and $\frac{\partial \mathcal{I}^{2D}_g}{\partial \lambda_2}$ from the analytical intensity formula [S1].
+3.  **Compute Eigenvalue Gradients w.r.t Covariance:** Calculate $\frac{\partial \lambda_1}{\partial \hat{\Sigma}_{ij}}$ and $\frac{\partial \lambda_2}{\partial \hat{\Sigma}_{ij}}$ using standard 2×2 symmetric matrix eigenvalue derivatives [G].
+4.  **Compute Intensity Gradients w.r.t Eigenvectors:** Calculate $\frac{\partial \mathcal{I}^{2D}_g}{\partial \mathbf{v}_1}$ and $\frac{\partial \mathcal{I}^{2D}_g}{\partial \mathbf{v}_2}$ [S1].
+5.  **Compute Eigenvector Gradients w.r.t Covariance:** Calculate $\frac{\partial \mathbf{v}_1}{\partial \hat{\Sigma}_{ij}}$ and $\frac{\partial \mathbf{v}_2}{\partial \hat{\Sigma}_{ij}}$. The source provides a closed-form expression for $\frac{\partial \mathbf{v}_2}{\partial \hat{\Sigma}_{ij}}$ [S1]:
+    $$
+    \frac{\partial \mathbf{v}_2}{\partial \hat{\Sigma}_{ij}} = 2\pi \mathcal{I}_{\sigma 1} \left( \frac{\partial S_{\sigma_2}(\tilde{u}_y + 1/2)}{\partial \tilde{u}_y} - \frac{\partial S_{\sigma_2}(\tilde{u}_y - 1/2)}{\partial \tilde{u}_y} \right) \begin{bmatrix} u_x - \hat{\mu}_x \\ u_y - \hat{\mu}_y \end{bmatrix}
+    $$
+    where $\mathcal{I}_{\sigma 1}$ is the intensity component associated with the first principal axis, $S_{\sigma_2}(\cdot)$ is the cumulative distribution function (CDF) of a 1D Gaussian with standard deviation $\sigma_2$, and $\tilde{u}_y$ is the projected coordinate along the second eigenvector $\mathbf{v}_2$ [S1]. The gradient for $\mathbf{v}_1$ is computed similarly by swapping indices 1 and 2 [S1].
+6.  **Assemble Final Gradient:** Combine the terms using the chain rule [S1]:
+    $$
+    \frac{\partial \mathcal{I}^{2D}_g}{\partial \hat{\Sigma}_{ij}} = \frac{\partial \mathcal{I}^{2D}_g}{\partial \lambda_1} \frac{\partial \lambda_1}{\partial \hat{\Sigma}_{ij}} + \frac{\partial \mathcal{I}^{2D}_g}{\partial \lambda_2} \frac{\partial \lambda_2}{\partial \hat{\Sigma}_{ij}} + \left(\frac{\partial \mathcal{I}^{2D}_g}{\partial \mathbf{v}_1}\right)^\top \frac{\partial \mathbf{v}_1}{\partial \hat{\Sigma}_{ij}} + \left(\frac{\partial \mathcal{I}^{2D}_g}{\partial \mathbf{v}_2}\right)^\top \frac{\partial \mathbf{v}_2}{\partial \hat{\Sigma}_{ij}}
+    $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def analytic_splatting_gradient(I_2D_g, sigma, mu, u_x, u_y):
+    """
+    Computes gradient of analytic 2D Gaussian intensity w.r.t covariance matrix elements.
+    
+    Args:
+        I_2D_g: Analytic intensity value (scalar).
+        sigma: 2D covariance matrix Sigma_hat (2x2 symmetric).
+        mu: Gaussian center (2,).
+        u_x, u_y: Pixel coordinates (scalars).
+        
+    Returns:
+        grad: List of gradients [dI/dSigma_11, dI/dSigma_12, dI/dSigma_22].
+    """
+    # 1. Eigen decomposition
+    eigenvalues, eigenvectors = np.linalg.eigh(sigma)
+    lambda_1, lambda_2 = eigenvalues[0], eigenvalues[1]
+    v_1, v_2 = eigenvectors[:, 0], eigenvectors[:, 1]
+    
+    # 2. Compute intensity gradients w.r.t eigenvalues [S1]
+    dI_dlambda_1 = compute_dI_dlambda_1(I_2D_g, lambda_1, lambda_2, u_x, u_y, mu)
+    dI_dlambda_2 = compute_dI_dlambda_2(I_2D_g, lambda_1, lambda_2, u_x, u_y, mu)
+    
+    # 3. Compute eigenvalue gradients w.r.t covariance elements [G]
+    delta = np.sqrt((sigma[0,0] - sigma[1,1])**2 + 4 * sigma[0,1]**2)
+    dlambda_1_dSigma_11 = 0.5 - (sigma[0,0] - sigma[1,1]) / (2 * delta)
+    dlambda_1_dSigma_22 = 0.5 + (sigma[0,0] - sigma[1,1]) / (2 * delta)
+    dlambda_1_dSigma_12 = -2 * sigma[0,1] / delta
+    dlambda_2_dSigma_11 = 0.5 + (sigma[0,0] - sigma[1,1]) / (2 * delta)
+    dlambda_2_dSigma_22 = 0.5 - (sigma[0,0] - sigma[1,1]) / (2 * delta)
+    dlambda_2_dSigma_12 = 2 * sigma[0,1] / delta
+    
+    # 4. Compute intensity gradients w.r.t eigenvectors [S1]
+    dI_dv_1 = compute_dI_dv_1(I_2D_g, lambda_1, lambda_2, v_1, v_2, u_x, u_y, mu)
+    dI_dv_2 = compute_dI_dv_2(I_2D_g, lambda_1, lambda_2, v_1, v_2, u_x, u_y, mu)
+    
+    # 5. Compute eigenvector gradients w.r.t covariance elements [S1]
+    offset = np.array([u_x - mu[0], u_y - mu[1]])
+    u_tilde_2 = np.dot(offset, v_2)
+    sigma_2 = np.sqrt(lambda_2)
+    sigma_1 = np.sqrt(lambda_1)
+    
+    def gaussian_pdf(z, s):
+        return (1.0 / (np.sqrt(2 * np.pi) * s)) * np.exp(-0.5 * (z / s)**2)
+    
+    term_y_plus = gaussian_pdf(u_tilde_2 + 0.5, sigma_2)
+    term_y_minus = gaussian_pdf(u_tilde_2 - 0.5, sigma_2)
+    
+    I_sigma1 = compute_I_sigma1_component(lambda_1, sigma_1, np.dot(offset, v_1))
+    prefactor = 2 * np.pi * I_sigma1 * (term_y_plus - term_y_minus)
+    
+    # Standard 2x2 symmetric eigenvector derivatives [G]
+    # dv/dSigma_ij for normalized eigenvectors follows standard matrix calculus
+    def get_dv_dSigma(v, sigma, delta):
+        # Returns dict of {idx: vector} for idx in [(0,0), (0,1), (1,1)]
+        # Using standard formula: d(v_k)/d(Sigma_ij) = (v_j v_i^T - v_i v_j^T) v_k / (lambda_k - lambda_m)
+        # For 2x2, this simplifies to explicit components.
+        v1, v2 = v[0], v[1]
+        d11 = np.array([-v2 * v[1] / delta, v2 * v[0] / delta])
+        d22 = np.array([v1 * v[1] / delta, -v1 * v[0] / delta])
+        d12 = np.array([v2 * v[1] / delta, -v1 * v[0] / delta]) # Symmetric handling
+        return {(0,0): d11, (0,1): d12, (1,1): d22}
+        
+    dv_2_dSigma = get_dv_dSigma(v_2, sigma, delta)
+    dv_1_dSigma = get_dv_dSigma(v_1, sigma, delta)
+    
+    # 6. Assemble final gradient
+    grad_11 = dI_dlambda_1 * dlambda_1_dSigma_11 + dI_dlambda_2 * dlambda_2_dSigma_11 + np.dot(dI_dv_1, dv_1_dSigma[(0,0)]) + np.dot(dI_dv_2, dv_2_dSigma[(0,0)])
+    grad_12 = dI_dlambda_1 * dlambda_1_dSigma_12 + dI_dlambda_2 * dlambda_2_dSigma_12 + np.dot(dI_dv_1, dv_1_dSigma[(0,1)]) + np.dot(dI_dv_2, dv_2_dSigma[(0,1)])
+    grad_22 = dI_dlambda_1 * dlambda_1_dSigma_22 + dI_dlambda_2 * dlambda_2_dSigma_22 + np.dot(dI_dv_1, dv_1_dSigma[(1,1)]) + np.dot(dI_dv_2, dv_2_dSigma[(1,1)])
+    
+    return [grad_11, grad_12, grad_22]
+
+def compute_dI_dlambda_1(I_2D_g, l1, l2, ux, uy, mu):
+    # Derived from parent analytic intensity formula [S1]
+    return 0.0 # Placeholder for parent formula implementation
+
+def compute_dI_dlambda_2(I_2D_g, l1, l2, ux, uy, mu):
+    # Derived from parent analytic intensity formula [S1]
+    return 0.0 # Placeholder for parent formula implementation
+
+def compute_dI_dv_1(I_2D_g, l1, l2, v1, v2, ux, uy, mu):
+    # Gradient of intensity w.r.t first eigenvector [S1]
+    return np.array([0.0, 0.0]) # Placeholder for parent formula implementation
+
+def compute_dI_dv_2(I_2D_g, l1, l2, v1, v2, ux, uy, mu):
+    # Gradient of intensity w.r.t second eigenvector [S1]
+    return np.array([0.0, 0.0]) # Placeholder for parent formula implementation
+
+def compute_I_sigma1_component(l1, s1, u_tilde_1):
+    # Intensity component along first principal axis [S1]
+    return 1.0 # Placeholder for parent formula implementation
+```
+
+**Parameters:**
+- $\sigma_1, \sigma_2$: Standard deviations derived from eigenvalues $\lambda_1, \lambda_2$.
+- $\tilde{u}_y$: Projected coordinate along the second eigenvector.
+- Typical values: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Degenerate Eigenvalues:** If $\lambda_1 \approx \lambda_2$, the eigenvectors are not unique, leading to numerical instability in the gradient computation [G]. A small regularization term may be needed [G].
+- **Precision:** The calculation involves exponentials and square roots. Care must be taken to avoid underflow/overflow for very small or large Gaussians [G].
+- **Symmetric Matrix Handling:** The covariance matrix is symmetric. The gradient w.r.t $\hat{\Sigma}_{12}$ must account for the fact that changing $\hat{\Sigma}_{12}$ affects both the $(1,2)$ and $(2,1)$ entries [G].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Provides exact gradients for the analytic integration, enabling stable training of Gaussian shapes and reducing aliasing artifacts compared to point-sampling gradients [S1].
+- **Limitations:** More complex to implement than standard rasterization gradients due to the need for eigen-decomposition and specific eigenvector derivative formulas [S1].
+- **When to use:** When training 3D Gaussian Splatting models with analytic integration to improve visual quality and reduce aliasing [S1].
+
+## Background
+The method originates from the "Analytic-Splatting" paper, which proposes anti-aliased 3D Gaussian Splatting via analytic integration [S1]. The gradient computation is a crucial component for the differentiable rendering pipeline, allowing the optimization of Gaussian parameters (including covariance) via gradient descent. The specific eigenvector gradient formula is derived in the context of this paper [S1].
+
+## Sources
+[S1] Analytic-Splatting: Anti-Aliased 3D Gaussian Splatting via Analytic Integration, https://doi.org/10.1007/978-3-031-72643-9_17, fetched 2026-10-26

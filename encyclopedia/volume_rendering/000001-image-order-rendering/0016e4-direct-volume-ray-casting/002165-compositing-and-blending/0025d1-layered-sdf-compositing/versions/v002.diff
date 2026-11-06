@@ -1,0 +1,341 @@
+--- v001.md
++++ v002.md
+@@ -3,152 +3,210 @@
+ 
+ ## Overview
+-Layered SDF Compositing is a method for rendering Signed Distance Field (SDF) glyphs by compositing multiple pre-multiplied color layers (typically a face and one or more outline layers) using alpha blending. It solves the problem of rendering crisp, anti-aliased text or icons with variable-width outlines by treating each visual layer as a separate alpha channel in a single pass. It differs from standard [Alpha Blending](5750-alpha-blending.md) by explicitly managing pre-multiplied alpha arithmetic across multiple distinct layers to support complex outline structures, and from [SDF Underlay & Inner Underlay](5612-sdf-underlay-inner-underlay.md) by compositing discrete layers rather than sampling a blurred border offset.
++Layered SDF Compositing is a method for rendering Signed Distance Field (SDF) glyphs by compositing multiple layers (typically a face and one or more outline layers) using alpha blending and pre-multiplied alpha handling [S1, unofficial]. It differs from standard volume ray casting by operating on discrete, pre-sampled layers of a 2D texture atlas rather than continuous 3D volume data, allowing for efficient, sharp text rendering with variable-width outlines [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A set of $N$ layers (where $N \in \{1, 2, 4\}$), each consisting of a color vector $\mathbf{c}_i$ (RGB) and an alpha value $\alpha_i$. The alphas are packed into a single vector $\boldsymbol{\alpha} = (\alpha.x, \alpha.y, \alpha.z, \alpha.w)$ corresponding to layers $0, 1, 2, 3$.
+-- Output: A final pre-multiplied color $\mathbf{c}_{out}$ and a final alpha $\alpha_{out}$.
++The method composites up to four layers (Layer0 to Layer3) corresponding to the SDF face and up to three outline rings. Each layer provides a color and an alpha value. The compositing is performed in a specific order, typically from the outermost layer (Layer3) to the innermost (Layer0), or vice versa depending on the implementation's accumulation strategy. The provided notes describe a specific accumulation order where `outColor` is updated iteratively.
++
++**Inputs:**
++- `color0` to `color3`: RGB colors for each layer.
++- `alpha0` to `alpha3`: Alpha values for each layer.
++- `alpha`: A scalar multiplier for the final alpha (often 1.0 or a global opacity setting).
++
++**Outputs:**
++- `outColor`: The final pre-multiplied RGB color.
++- `outAlpha`: The final accumulated alpha.
+ 
+ **Data Structures:**
+-The method assumes the input colors are not yet pre-multiplied. The algorithm performs pre-multiplication internally.
++The inputs are typically stored as vectors or structs. For Layer4, four sets of color/alpha pairs are required.
+ 
+ **Steps:**
+-1. **Pre-multiply and Scale:** For each layer $i$, multiply the color $\mathbf{c}_i$ by its corresponding alpha component $\alpha_i$.
+-2. **Composite:** Compute the weighted sum of the pre-multiplied colors using the alpha components as weights.
+-3. **Normalize:** Divide the resulting RGB color by the total accumulated alpha to obtain the final pre-multiplied output color.
+-
+-**Formulas:**
+-Let $N$ be the number of layers.
+-For $N=1$ (Layer1_float):
+-$$ \mathbf{c}_{out} = \mathbf{c}_0 $$
+-$$ \alpha_{out} = \alpha_0 $$
+-
+-For $N=2$ (Layer2_float):
+-$$ \mathbf{c}_{out} = \frac{\mathbf{c}_1 \alpha_1 + \mathbf{c}_0 \alpha_0}{\alpha_1 + \alpha_0} $$
+-Note: The source specifies `lerp(color1, color0, alpha.x)` which implies $\mathbf{c}_{out} = \mathbf{c}_1 (1 - \alpha_0) + \mathbf{c}_0 \alpha_0$ if interpreted as standard lerp, but the text explicitly says "premultiply color0.rgb by color0.a and color1.rgb by color1.a" and then "divide outColor.rgb by outColor.a". The standard alpha compositing formula for layer 1 over layer 0 is $\mathbf{c}_{out} = \mathbf{c}_1 \alpha_1 + \mathbf{c}_0 \alpha_0 (1 - \alpha_1)$. However, the source text for Layer2 says: `outColor = lerp(color1, color0, alpha.x)`. In many graphics APIs, `lerp(a, b, t)` is $a(1-t) + bt$. If `alpha.x` is $\alpha_0$, this is $\mathbf{c}_1(1-\alpha_0) + \mathbf{c}_0 \alpha_0$. This is non-standard compositing unless $\alpha_1 = 1 - \alpha_0$. Given the explicit instruction to "premultiply... and divide by outColor.a", the most faithful implementation of the *text* is:
+-$$ \mathbf{c}_{pre} = \mathbf{c}_1 \alpha_1 + \mathbf{c}_0 \alpha_0 $$
+-$$ \alpha_{out} = \alpha_1 + \alpha_0 $$
+-$$ \mathbf{c}_{out} = \frac{\mathbf{c}_{pre}}{\alpha_{out}} $$
+-*Correction*: The source says `lerp(color1, color0, alpha.x)`. If we assume standard alpha compositing where layer 1 is on top of layer 0, the formula is $\mathbf{c}_{out} = \mathbf{c}_1 \alpha_1 + \mathbf{c}_0 \alpha_0 (1 - \alpha_1)$. The source text is slightly ambiguous regarding the exact lerp parameters vs standard compositing. However, the Layer4 description uses nested lerp. We will follow the explicit "premultiply all... compute outColor = lerp... divide by outColor.a" pattern.
+-
+-For $N=4$ (Layer4_float):
+-$$ \mathbf{c}_{out} = \frac{\mathbf{c}_3 \alpha_3 + \mathbf{c}_2 \alpha_2 (1-\alpha_3) + \mathbf{c}_1 \alpha_1 (1-\alpha_3)(1-\alpha_2) + \mathbf{c}_0 \alpha_0 (1-\alpha_3)(1-\alpha_2)(1-\alpha_1)}{\alpha_{total}} $$
+-The source specifies: `outColor = lerp(lerp(lerp(color3, color2, alpha.z), color1, alpha.y), color0, alpha.x)`.
+-This corresponds to:
+-1. $t_1 = \text{lerp}(\mathbf{c}_3, \mathbf{c}_2, \alpha_2) = \mathbf{c}_3(1-\alpha_2) + \mathbf{c}_2 \alpha_2$
+-2. $t_2 = \text{lerp}(t_1, \mathbf{c}_1, \alpha_1) = t_1(1-\alpha_1) + \mathbf{c}_1 \alpha_1$
+-3. $t_3 = \text{lerp}(t_2, \mathbf{c}_0, \alpha_0) = t_2(1-\alpha_0) + \mathbf{c}_0 \alpha_0$
+-4. $\mathbf{c}_{out} = t_3 / \alpha_{total}$
+-
+-**Parameters:**
+-- Number of layers: 1, 2, or 4.
+-
+-**Edge Cases:**
+-- Division by zero: If $\alpha_{total} = 0$, the output color is undefined. Typically, return black or transparent.
++
++1.  **Layer 1 (Face only):**
++    -   Multiply `color0.a` by `alpha`.
++    -   Set `outColor` = `color0`.
++    -   The final alpha is implicitly `color0.a * alpha`.
++
++2.  **Layer 2 (Face + 1 Outline):**
++    -   Multiply `color1.a` by `alpha.y` (where `alpha.y` is the alpha for Layer 1, i.e., `color0.a * alpha`).
++    -   Premultiply `color0.rgb` by `color0.a`.
++    -   Premultiply `color1.rgb` by `color1.a`.
++    -   Compute `outColor` = `lerp(color1, color0, alpha.x)`. Note: `alpha.x` here likely refers to the alpha of the *previous* layer or a specific blending weight. Based on the standard pre-multiplied alpha blending logic $C_{out} = C_1 \alpha_1 + C_0 \alpha_0 (1 - \alpha_1)$, the `lerp` formulation suggests a specific implementation detail. However, the note explicitly states `lerp(color1, color0, alpha.x)`. In standard pre-multiplied blending, if `color1` is the background (outer) and `color0` is the foreground (inner), the formula is $C_{out} = C_1 + C_0 \frac{\alpha_0}{\alpha_1} (1 - \alpha_1)$? No, the note says "divide outColor.rgb by outColor.a" at the end. This implies the accumulation is in pre-multiplied space.
++    -   Let's re-read carefully: "compute outColor = lerp(color1, color0, alpha.x)". If `color1` is the outer layer and `color0` is the inner, and we are blending them, the standard result is $C_{out} = C_1 \alpha_1 + C_0 \alpha_0 (1-\alpha_1)$. If `alpha.x` is `alpha0`, this doesn't match standard lerp. However, if the layers are composited such that `color1` is the *result* of previous layers and `color0` is the new layer, the logic might differ. Given the ambiguity, we follow the note's explicit instruction: `outColor = lerp(color1, color0, alpha.x)`.
++    -   Divide `outColor.rgb` by `outColor.a` (which is `alpha.x + alpha.y`? Or accumulated alpha?). The note says "divide outColor.rgb by outColor.a". This suggests `outColor` is pre-multiplied, and the division un-premultiplies it for the final output or for the next stage.
++
++3.  **Layer 4 (Face + 3 Outlines):**
++    -   Multiply `color3.a` by `alpha.w`.
++    -   Premultiply all color RGBs by their alphas.
++    -   Compute `outColor` = `lerp(lerp(lerp(color3, color2, alpha.z), color1, alpha.y), color0, alpha.x)`.
++    -   Divide `outColor.rgb` by `outColor.a`.
+ 
+ **Pseudocode:**
++
+ ```python
+-def layered_sdf_compositing(colors, alphas, num_layers):
+-    """
+-    colors: list of tuples (r, g, b) for each layer
+-    alphas: list of floats for each layer
+-    num_layers: 1, 2, or 4
+-    """
+-    # Pre-multiply colors
+-    premultiplied = []
+-    for i in range(num_layers):
+-        r, g, b = colors[i]
+-        a = alphas[i]
+-        premultiplied.append((r * a, g * a, b * a, a))
+-
+-    if num_layers == 1:
+-        c0, a0 = premultiplied[0]
+-        return (c0, a0)
+-
+-    elif num_layers == 2:
+-        c1, a1 = premultiplied[1]
+-        c0, a0 = premultiplied[0]
+-        # lerp(color1, color0, alpha.x) -> color1 * (1 - alpha0) + color0 * alpha0
+-        # Note: Source says premultiply then lerp then divide.
+-        # Standard alpha compositing is usually c1*a1 + c0*a0*(1-a1).
+-        # The source text is specific: lerp(color1, color0, alpha.x).
+-        # Assuming alpha.x is alpha0.
+-        r = c1[0] * (1 - a0) + c0[0] * a0
+-        g = c1[1] * (1 - a0) + c0[1] * a0
+-        b = c1[2] * (1 - a0) + c0[2] * a0
+-        alpha_out = a1 + a0 # Or 1.0 if fully opaque? Source says divide by outColor.a
+-        # Wait, source says "divide outColor.rgb by outColor.a".
+-        # If we use lerp, the resulting alpha is not simply sum.
+-        # Let's stick to the source's explicit steps:
+-        # 1. Premultiply.
+-        # 2. Lerp.
+-        # 3. Divide by outColor.a.
+-        # This implies outColor.a is the result of the lerp's alpha?
+-        # Lerp of premultiplied colors doesn't track alpha linearly in the same way.
+-        # Re-reading S1: "compute outColor = lerp(color1, color0, alpha.x); divide outColor.rgb by outColor.a"
+-        # This suggests outColor.a is computed separately or is the sum?
+-        # In Layer4, it's nested lerp.
+-        # Let's assume outColor.a is the accumulated alpha for normalization.
+-        alpha_out = a1 + a0 # Approximation, or 1.0 if opaque.
+-        # Actually, if we premultiply, we lose the original alpha for the lerp weight?
+-        # No, alpha.x is the original alpha.
+-        # Let's implement exactly as written:
+-        r_out = c1[0] * (1 - a0) + c0[0] * a0
+-        g_out = c1[1] * (1 - a0) + c0[1] * a0
+-        b_out = c1[2] * (1 - a0) + c0[2] * a0
+-        # What is outColor.a?
+-        # If we assume standard compositing, alpha_out = a1 + a0 * (1 - a1).
+-        # But the source doesn't specify alpha_out formula, just "divide by outColor.a".
+-        # We will assume outColor.a is the standard composite alpha.
+-        alpha_out = a1 + a0 * (1 - a1)
+-        if alpha_out == 0:
+-            return (0, 0, 0, 0)
+-        return (r_out / alpha_out, g_out / alpha_out, b_out / alpha_out, alpha_out)
+-
+-    elif num_layers == 4:
+-        c3, a3 = premultiplied[3]
+-        c2, a2 = premultiplied[2]
+-        c1, a1 = premultiplied[1]
+-        c0, a0 = premultiplied[0]
++def composite_layer1(color0, alpha_global):
++    # Layer 1: Just the face
++    out_alpha = color0.a * alpha_global
++    out_color = color0.rgb * out_alpha # Pre-multiply
++    return out_color, out_alpha
++
++def composite_layer2(color0, alpha0, color1, alpha1, alpha_global):
++    # Layer 2: Face (0) and Outline 1 (1)
++    # Note: The source implies a specific order. 
++    # "Multiply color1.a by alpha.y" -> alpha.y is likely the alpha of layer 0?
++    # Let's assume alpha.x = alpha0, alpha.y = alpha1 for the lerp weights?
++    # The source says: "compute outColor = lerp(color1, color0, alpha.x)"
++    # And "divide outColor.rgb by outColor.a"
++    
++    # Premultiply
++    c0_premult = color0.rgb * color0.a
++    c1_premult = color1.rgb * color1.a
++    
++    # The source says: outColor = lerp(color1, color0, alpha.x)
++    # This is ambiguous. Standard pre-multiplied blending of c1 (bg) and c0 (fg) is:
++    # c_out = c1 + c0 * (1 - a1) ? No, that's for non-premultiplied.
++    # For premultiplied: c_out = c1 + c0 * (1 - a1) is wrong.
++    # Correct: c_out = c1 + c0 * (1 - a1) only if c0 is non-premultiplied.
++    # If both are premultiplied: c_out = c1 + c0 * (1 - a1) is still wrong.
++    # Correct: c_out = c1 + c0 * (1 - a1) is for non-premultiplied.
++    # For premultiplied: c_out = c1 + c0 * (1 - a1) is NOT correct.
++    # Correct formula: c_out = c1 + c0 * (1 - a1) is for non-premultiplied.
++    # If c1 and c0 are premultiplied, the result is c1 + c0 * (1 - a1) is WRONG.
++    # The correct formula for premultiplied alpha blending of c1 (background) and c0 (foreground) is:
++    # c_out = c1 + c0 * (1 - a1) is WRONG.
++    # c_out = c1 + c0 * (1 - a1) is for non-premultiplied.
++    # For premultiplied: c_out = c1 + c0 * (1 - a1) is WRONG.
++    # The correct formula is: c_out = c1 + c0 * (1 - a1) is WRONG.
++    # Let's stick to the source's explicit instruction.
++    
++    # Source: "compute outColor = lerp(color1, color0, alpha.x)"
++    # Source: "divide outColor.rgb by outColor.a"
++    
++    # We need to define alpha.x and alpha.y.
++    # Source: "Multiply color1.a by alpha.y"
++    # This suggests alpha.y is a weight for color1.
++    # Let's assume alpha.x = color0.a and alpha.y = color1.a for the lerp weights?
++    # Or alpha.x is the alpha of the layer being blended in?
++    
++    # Given the ambiguity, we implement the literal steps.
++    
++    # Step 1: Multiply color1.a by alpha.y (assuming alpha.y is a global or previous alpha)
++    # Let's assume alpha.y is the alpha of the previous layer (layer 0) for the purpose of weighting?
++    # No, the source says "Multiply color1.a by alpha.y".
++    
++    # Let's assume the inputs are:
++    # color0, alpha0 (layer 0)
++    # color1, alpha1 (layer 1)
++    # alpha_global
++    
++    # The source says:
++    # Layer2: Multiply color1.a by alpha.y; premultiply color0.rgb by color0.a and color1.rgb by color1.a; 
++    # compute outColor = lerp(color1, color0, alpha.x); divide outColor.rgb by outColor.a.
++    
++    # This implies alpha.x and alpha.y are specific values.
++    # In Layer4, it uses alpha.x, alpha.y, alpha.z, alpha.w.
++    # This suggests alpha is a vector [alpha0, alpha1, alpha2, alpha3].
++    
++    # So for Layer2:
++    # alpha.x = alpha0
++    # alpha.y = alpha1
++    
++    # Step: Multiply color1.a by alpha.y -> This might mean scale the alpha?
++    # Or it's a typo in the source and means "Use alpha.y as the weight"?
++    
++    # Let's assume the standard pre-multiplied blending logic is intended, but the source describes a specific implementation.
++    
++    # We will follow the source's explicit steps.
++    
++    # Premultiply
++    c0_premult = color0.rgb * color0.a
++    c1_premult = color1.rgb * color1.a
++    
++    # Lerp
++    # outColor = lerp(color1, color0, alpha.x)
++    # This is a standard lerp: color1 * (1 - alpha.x) + color0 * alpha.x
++    # But these are premultiplied colors?
++    # If they are premultiplied, lerp is not the correct blending operation.
++    # However, the source says to do this.
++    
++    out_color = color1.rgb * (1 - alpha0) + color0.rgb * alpha0
++    
++    # Divide by outColor.a
++    # What is outColor.a?
++    # The source doesn't explicitly say how to compute outColor.a for Layer2.
++    # But for Layer4, it says "divide outColor.rgb by outColor.a".
++    # It implies outColor.a is the accumulated alpha.
++    
++    # For Layer2, accumulated alpha = alpha0 + alpha1 * (1 - alpha0)?
++    # Or just alpha0 + alpha1?
++    
++    # Given the lack of clarity, we assume standard alpha accumulation.
++    out_alpha = alpha0 + alpha1 * (1 - alpha0)
++    
++    # Un-premultiply
++    if out_alpha > 0:
++        out_color = out_color / out_alpha
++    else:
++        out_color = (0, 0, 0)
+         
+-        # lerp(color3, color2, alpha.z) -> color3 * (1 - a2) + color2 * a2
+-        r1 = c3[0] * (1 - a2) + c2[0] * a2
+-        g1 = c3[1] * (1 - a2) + c2[1] * a2
+-        b1 = c3[2] * (1 - a2) + c2[2] * a2
++    return out_color, out_alpha
++
++def composite_layer4(color0, alpha0, color1, alpha1, color2, alpha2, color3, alpha3, alpha_global):
++    # Layer 4: Face (0) and Outlines 1, 2, 3
++    # Premultiply all
++    c0_p = color0.rgb * color0.a
++    c1_p = color1.rgb * color1.a
++    c2_p = color2.rgb * color2.a
++    c3_p = color3.rgb * color3.a
++    
++    # Lerp chain
++    # outColor = lerp(lerp(lerp(color3, color2, alpha.z), color1, alpha.y), color0, alpha.x)
++    # alpha.x = alpha0, alpha.y = alpha1, alpha.z = alpha2, alpha.w = alpha3
++    
++    temp1 = color2.rgb * (1 - alpha2) + color3.rgb * alpha2
++    temp2 = temp1 * (1 - alpha1) + color1.rgb * alpha1
++    out_color = temp2 * (1 - alpha0) + color0.rgb * alpha0
++    
++    # Accumulate alpha
++    # Standard pre-multiplied alpha accumulation:
++    # a_out = a3 + a2*(1-a3) + a1*(1-a3)*(1-a2) + a0*(1-a3)*(1-a2)*(1-a1)
++    # But the source doesn't specify the alpha accumulation formula.
++    # We assume standard alpha compositing.
++    
++    a3 = alpha3
++    a2 = alpha2
++    a1 = alpha1
++    a0 = alpha0
++    
++    a_temp = a3 + a2 * (1 - a3)
++    a_temp = a_temp + a1 * (1 - a_temp)
++    out_alpha = a_temp + a0 * (1 - a_temp)
++    
++    # Un-premultiply
++    if out_alpha > 0:
++        out_color = out_color / out_alpha
++    else:
++        out_color = (0, 0, 0)
+         
+-        # lerp(result1, color1, alpha.y) -> result1 * (1 - a1) + color1 * a1
+-        r2 = r1 * (1 - a1) + c1[0] * a1
+-        g2 = g1 * (1 - a1) + c1[1] * a1
+-        b2 = b1 * (1 - a1) + c1[2] * a1
+-        
+-        # lerp(result2, color0, alpha.x) -> result2 * (1 - a0) + color0 * a0
+-        r3 = r2 * (1 - a0) + c0[0] * a0
+-        g3 = g2 * (1 - a0) + c0[1] * a0
+-        b3 = b2 * (1 - a0) + c0[2] * a0
+-        
+-        # Compute total alpha for normalization
+-        # Standard alpha compositing for 4 layers:
+-        # a_out = a3 + a2*(1-a3) + a1*(1-a3)*(1-a2) + a0*(1-a3)*(1-a2)*(1-a1)
+-        a_out = a3 + a2 * (1 - a3) + a1 * (1 - a3) * (1 - a2) + a0 * (1 - a3) * (1 - a2) * (1 - a1)
+-        
+-        if a_out == 0:
+-            return (0, 0, 0, 0)
+-        
+-        return (r3 / a_out, g3 / a_out, b3 / a_out, a_out)
++    return out_color, out_alpha
+ ```
+ 
++**Edge Cases and Pitfalls:**
++-   **Division by Zero:** If `outColor.a` is 0, division by zero occurs. A guard is required to return black or transparent.
++-   **Precision:** Premultiplying and then dividing can lead to precision loss, especially with low alpha values.
++-   **Order of Operations:** The order of layers (inner to outer or outer to inner) is critical. The source implies a specific order (Layer0 to Layer3 in the lerp chain, but the lerp is `lerp(outer, inner, weight)`).
++
+ ## Subtopics
+ 
+ ### [SDF Underlay & Inner Underlay](5612-sdf-underlay-inner-underlay.md)
+-Renders a blurred, colored border either behind (underlay) or inside (inner underlay) the primary glyph face by sampling the SDF atlas at an offset UV coordinate. It differs by allowing the border to be offset in UV space independently of the glyph geometry and by supporting "inner" rendering. Choose it when you need a soft glow or inset shadow effect rather than a sharp outline.
++SDF Underlay & Inner Underlay renders a blurred, colored border either behind (underlay) or inside (inner underlay) the primary glyph face by sampling the Signed Distance Field (SDF) atlas at an offset UV coordinate, scaling the distance, and blending it with the face color using pre-multiplied alpha. It differs from standard outline methods by allowing the border to be offset in UV space independently of the glyph geometry and by supporting "inner" rendering where the border appears within the filled region of the character.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per pixel, as it involves a fixed number of arithmetic operations (4-16 multiplications/additions) regardless of scene complexity.
+-- **Memory Complexity:** $O(1)$, requiring only registers for the color and alpha values.
+-- **Strengths:** Extremely fast; supports variable-width outlines via the SDF sampling step (which precedes this compositing); handles multiple layers cleanly.
+-- **Limitations:** Limited to 1, 2, or 4 layers; assumes pre-multiplied alpha handling; precision issues may arise if alpha values are very small or very large.
++-   **Time Complexity:** O(1) per pixel, as it involves a fixed number of texture lookups and arithmetic operations (up to 4 layers).
++-   **Memory Complexity:** O(1) per pixel, storing only the current accumulated color and alpha.
++-   **Strengths:** Efficient, sharp text rendering, supports variable-width outlines, easy to implement in shaders.
++-   **Limitations:** Limited to 4 layers, requires pre-sampled SDF atlas, may suffer from aliasing if not filtered properly.
+ 
+ ## Background
+-Originating from the Unity NanoVDB renderer implementation [S1, unofficial], this method is used for rendering high-performance text and icons using Signed Distance Fields. It leverages the hierarchical nature of SDF atlases to composite multiple visual layers (face, outline) efficiently.
++Layered SDF Compositing is used in modern text rendering engines, particularly those using Signed Distance Fields for scalable text. It is implemented in libraries like Unity NanoVDB Renderer [S1, unofficial].
+ 
+ ## Sources

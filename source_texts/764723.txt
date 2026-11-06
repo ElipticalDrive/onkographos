@@ -1,0 +1,898 @@
+The Vesuvius Challenge monorepo. Contribute to ScrollPrize/villa development by creating an account on GitHub.
+
+VC3D: matter-compressor render cache (one .mca per volume, mc_cache resident) + fetch/render perf by SuperOptimizer · Pull Request #1036 · ScrollPrize/villa · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+SuperOptimizer
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+What
+Replaces VC3D's render caching with matter-compressor: remote (and local) chunks are fetched once, re-encoded into ONE persistent volume.mca per volume (all LODs, crash-safe, appendable), and served as 16³ blocks through mc_cache (sharded S3FIFO resident cache inside the library). VC3D-side caching scaffolding is deleted; the ChunkCache keeps only per-256³-region fetch status plus the async orchestration (worker pool, listeners). Non-uint8 volumes keep the legacy byte-LRU path.
+Vendored matter-compressor is at 1e53dbb (format v6: per-axis dims, self-contained blocks, SIMD decode). Stale/older-format cache files are detected and rebuilt automatically.
+Fetch path
+per-region single-flight; worker-pool tasks interleave across regions so 48 I/O workers fetch distinct regions concurrently (workers are ~85% network-blocked)
+remote sharded zarr reads: shard index table cached after one GET — one S3 round trip per chunk instead of two (halves cold-fetch latency)
+128³-chunk sources assemble their 256³ region with parallel sub-fetches
+download stats/status bar count only bytes actually pulled from the source; archive serves are not "downloading"
+Rendering / frontend
+Profile-driven (perf + --profile logs, before/after in the commit messages):
+interactive preview system deleted (~420 lines): no more transformed-stale-frame previews, no 140ms settle timer, no 250/500ms chunk-ready coalescing windows (which starved repaints while chunks streamed). Interactions schedule normal full renders behind the single 16ms debounce; cache-side chunk-ready callbacks are throttled to ~30Hz with a guaranteed final notify
+speculative prefetch deleted: render-worker tryGetChunk misses queue exactly what requested frames need; the mca archive makes refetches cheap
+stale-render coalescing: a submit while the worker is busy only invalidates the in-flight frame if view parameters changed (fingerprint); data-only refreshes display it. Discarded renders: 19% → 5%
+pool submission moved outside the cache mutex; ChunkKey hash packs to 64 bits + one mix; shift/mask chunk indexing in the trilinear sampler hot path
+main-thread stalls (formerly up to 284ms in submitRender) are gone — the UI thread no longer registers in CPU profiles
+Also
+fixed a segfault on every exit: gnutls/libtasn1 DSO destructors free through mimalloc after its teardown in _dl_fini; VC3D now runs real teardown then _exit()
+Measured end state
+Steady-state (warm archive): blocks decode from volume.mca via mc_cache, zero network, ~4% CPU in mc block decode. Cold exploration: c3d decode + mc encode dominate pool threads (once per region ever, amortizes out). Render frames are 94% sampler kernel — follow-up territory (pan reuse, kernel work).
+Known: test_volume_local exact-roundtrip fails on this branch (reads go through the lossy q=8 mca; pre-existing design question, not a regression).
+SuperOptimizer
+added 15 commits
+June 9, 2026 15:16
+vendor matter-compressor (appendable/persistent/streaming archive)
+…
+3d15958
+```
+Vendor SuperOptimizer/matter-compressor @ ab0649c into libs/. This snapshot has the
+appendable dense-node archive: mc_writer_open / mc_append_chunk_raw /
+mc_append_chunk_compressed / mc_writer_close (persistent, crash-safe, reopened across
+runs) + mc_open_streaming (byte-source range-GET reader). Foundation for the mca
+streaming/re-encode cache wired into the chunk fetch path.
+```
+render: vendor unified mc_archive + MatterArchive C++ wrapper, wire i…
+…
+b2c56da
+```
+…nto vc_core
+
+- re-vendor matter-compressor @ 1524688 (unified mc_archive read+write handle,
+  vendoring-friendly CMake)
+- add_subdirectory(libs/matter-compressor) + link matter_compressor into vc_core
+- MatterArchive: RAII C++ wrapper around mc_archive_open/append_chunk_raw/
+  chunk_offset/decode_block/close. Storage/encode unit 256^3; decode/serve unit 16^3
+  (the granularity the resident chunk cache will key on). Append is thread-safe; decode
+  serialized by the underlying archive (codec quality is process-global).
+```
+render: mca streaming/re-encode cache in the fetch path (VCA_MCA_CACHE)
+…
+8e29468
+```
+MatterCacheFetcher decorates each level's source (zarr/c3d) fetcher to re-express the
+volume through one persistent matter-compressor (.mca) archive: 'fetch native, serve
+mca-native'.
+
+- The volume is reported to the ChunkCache at mca's native 16^3 chunk granularity (the
+  resident cache resides 4KB blocks).
+- fetch(16^3 key) -> enclosing 256^3 mca region. On a miss, fetch the SOURCE's native
+  chunks covering it (256^3 c3d = 1:1; 128^3 zarr-v2 = eager 2x2x2 coalesce), assemble
+  one 256^3 u8 buffer, encode it into the .mca once. Then decode the requested 16^3
+  block out of the .mca.
+- One .mca holds all chunks at all 8 LODs and persists across runs (skips re-fetch on a
+  warm cache). Region-materialization is memoized + checks the persisted archive.
+
+Wired in createChunkCache, gated by VCA_MCA_CACHE=<path.mca> (+ VCA_MCA_QUALITY,
+default 8); uint8 volumes only (mca is u8). Off by default. Full VC3D builds + links.
+```
+render: move mca cache into Volume::createChunkCache (real path), in …
+…
+2ded8e4
+```
+…cache dir
+
+The mca integration was in ZarrChunkFetcher's createChunkCache, which VC3D does NOT call
+-- the live path is Volume::createChunkCache. Move it there:
+- ONE persistent volume.mca lives in the volume's existing remote cache dir
+  (remoteCacheRoot_/id()), NOT /tmp -- same place other chunks are cached.
+- When mca engages it REPLACES the old per-chunk-file persistent cache (mca IS the
+  persistence), so persistentCachePath is left unset; the old per-chunk cache remains
+  only as the fallback when mca is off (non-uint8, local, or VCA_NO_MCA_CACHE).
+- Default ON for remote uint8 volumes; VCA_NO_MCA_CACHE disables; VCA_MCA_QUALITY sets q.
+
+applyMatterCache() factored into ZarrChunkFetcher (wrap fetchers + 16^3 LevelInfo).
+Also deleted the stale 503GB .vca .vcacache disk-cache artifact (superseded by mca).
+```
+render: remove per-chunk persistent cache; mca is the only on-disk cache
+…
+8b0901d
+```
+Rip out the entire per-chunk-file persistent cache. On-disk caching is now ONLY the
+single per-volume matter-compressor archive (volume.mca), and ALL volumes -- remote
+AND local -- go through it.
+
+- ChunkCache: deleted readPersistent/readPersistentEmpty/queuePersistentWrite/
+  queuePersistentEmptyWrite/writePersistent/writePersistentEmpty/persistentPath/
+  persistentEmptyPath/persistentCacheBytes(dir)/persistentCacheWriterPool + the
+  Entry::persisted field + the persist-on-evict path. The fetch worker just calls
+  fetch() (the MatterCacheFetcher owns mca read/write).
+- Options::persistentCachePath -> Options::mcaPath (path to the single volume.mca);
+  the 'disk' cache-size stat now reports that file's size (a throttled file_size),
+  not a recursive dir scan of millions of per-chunk files.
+- ChunkFetchResult: dropped persistentBytes/hasPersistentBytes; IChunkFetcher dropped
+  persistentCacheExtension/decodePersistentBytes; ZarrChunkFetcher dropped its
+  encoded-c3d persistent path.
+- Volume::createChunkCache: mca for every volume (remote -> remote cache dir; local ->
+  <dataset>.mcacache/), uint8 only, VCA_NO_MCA_CACHE disables. Viewer no longer sets a
+  per-chunk persistent path.
+- Tests: removed the per-chunk-cache TEST_CASEs (kept the unrelated ones); all pass.
+
+Also deleted the stale 503GB .vca .vcacache and the 81GB per-chunk chunk_cache on disk.
+```
+render: fix mca never engaging (empty remoteCacheRoot) + disk-size re…
+…
+ee7f64a
+```
+…port
+
+Root cause: Volume::createChunkCache resolved the mca dir from Volume::remoteCacheRoot_,
+but that member was empty for the render path's volumes -- the GUI resolves the cache
+root (remoteCacheRootForState: /volpkgs|/ephemeral|settings) and the old code passed it
+via Options, which I'd removed. So cacheDir came up empty, applyMatterCache was skipped,
+and the slow raw S3-streaming path ran (pegging CPU + 22 S3 conns) while 'disk' read 0
+(options_.mcaPath unset).
+
+Fix: add Volume::setRemoteCacheRoot(); the viewer pushes the GUI-resolved root into the
+volume before createChunkCache builds the cache. Now mca engages (verified: 'mca cache
+enabled', one volume.mca written + grown, chunks served from it, disk stat reads its
+size). Added diagnostics: createChunkCache logs isRemote/cacheDir/levels, applyMatterCache
+logs why it skips.
+```
+render: fix mca spin -- lock-free decode + per-region single-flight
+…
+660eeaa
+```
+Two fixes for 'spinning, barely downloading' (CPU-bound, no progress):
+- Re-vendor lock-free mc_archive_decode_block (was serializing every 16^3 decode on one
+  mutex -> all cache-IO threads spun on one lock).
+- MatterCacheFetcher::ensureRegion: per-256^3-region single-flight. A render touches up
+  to 4096 16^3 blocks of the same region nearly simultaneously; before, EACH thread
+  passed the not-done check and redundantly re-fetched the same 8 source chunks +
+  re-encoded the same 256^3 region. Now the first thread claims the region (InFlight),
+  assembles+encodes it once, and publishes Present/Absent; the rest wait on a condvar for
+  that one assembly. Eliminates the redundant fetch/encode storm.
+```
+vendor: sync matter-compressor to upstream 2666f4d (format v4, mc_cache)
+…
+d9bec9f
+```
+Brings the unified archive format v4 (self-contained blocks, trained priors),
+the mc_cache sharded CLOCK/NRU decoded-block cache, and lock-free decode.
+```
+render: mc_cache is the resident cache; region-granular ChunkCache
+…
+bb4f143
+```
+- MatterArchive owns an mc_cache bound to the archive; decodeBlock is a
+  mc_cache_get_copy. Stale/incompatible volume.mca is deleted and rebuilt.
+- ChunkCache in mca mode keeps NO decoded bytes and tracks status per 256^3
+  REGION (corner-block key): one entry + one fetch task per region instead of
+  4096 per-block entries duplicating what the archive + mc_cache already know.
+  Resolved blocks decode straight from mc_cache. Legacy byte-LRU remains only
+  for non-uint8 volumes (mca is u8).
+- fetch throughput: pool tasks interleave across regions (rank priority),
+  48 I/O workers (they are mostly network-blocked), parallel sub-chunk
+  assembly for 128^3 sources, prefetch keys snapped to region corners.
+- pool submission moved outside the cache mutex; chunk-ready callbacks
+  throttled to ~30Hz with a guaranteed final notify on drain.
+- ChunkKey hash packs to 64 bits (3 lod + 3x20 coord bits) + one mix.
+- download stats count only bytes actually pulled from the source; blocks
+  served from the on-disk archive are not downloads.
+```
+utils: cache remote shard index tables (one GET per shard, not per ch…
+…
+9920eba
+```
+…unk)
+
+Remote sharded reads did two ranged GETs per chunk (16-byte index entry +
+payload); over S3 the index round trip doubled per-chunk latency. Fetch the
+whole index table once per shard and serve entries from RAM.
+```
+VC3D: demand-driven rendering; delete interactive preview + delay timers
+…
+c7a7c54
+```
+- interactive preview deleted outright (~420 lines): coarse axis-slice
+  preview, stable-frame transform previews, 50ms preview rate cap, 140ms
+  settle timer. Interactions schedule normal full-quality renders.
+- chunk-ready 250/500ms restart-on-arrival windows deleted; they starved
+  repaints for as long as chunks kept streaming. The cache-side 30Hz
+  throttle + the 16ms render debounce are the only coalescing layers.
+- speculative prefetch disabled (visible-set warming, viewport halos,
+  normal-direction neighbors): render-worker tryGetChunk misses queue
+  exactly what requested frames need; the mca archive makes refetches cheap.
+- prefetch key enumeration is region-granular via IChunkedArray::prefetchShape
+  (was 512x more keys than designed for after the 16^3 re-expression).
+- stale-render fix: a busy-time submit only invalidates the in-flight frame
+  when view params actually changed (fingerprint); data-only refreshes let it
+  display. Discarded renders drop from 19% to 5%.
+- status bar only reports downloading when bytes move from the source.
+```
+VC3D: skip DSO finalizers on exit (mimalloc vs gnutls teardown segfault)
+…
+e2803d0
+```
+Every exit crashed in _dl_fini: gnutls/libtasn1 destructors free through
+mimalloc after its own teardown. Run real teardown (CWindow dtor, settings),
+flush, _exit().
+```
+render: shift/mask chunk indexing in the sampler hot path
+…
+c19d5fe
+```
+Chunk shapes are powers of two (16 mca, 128/256 zarr); replaces 3 idivs per
+voxel read in trilinear/nearest sampling.
+```
+vendor: matter-compressor 1e53dbb (format v6); per-axis archive dims
+…
+f2fe28e
+```
+v6: per-axis dims, per-chunk q, xxh64, per-volume priors; SIMD decode kernels;
+S3FIFO default mc_cache eviction (scan-resistant for render loops).
+MatterArchive opens with the real volume shape instead of a padded cube;
+existing v4 caches are auto-recreated.
+```
+VC3D: delete dead speculative-prefetch code
+…
+8c5e332
+```
+The prefetch paths were disabled; remove them: plane/surface halos,
+normal-direction neighbors, visible-set warming, the surface tile prefetch
+cache, and IChunkedArray::prefetchShape (only consumer). ~550 lines.
+```
+SuperOptimizer
+requested a review
+from hendrikschilling
+as a code owner
+June 10, 2026 15:17
+vercel
+Bot
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Someone is attempting to deploy a commit to the scroll Team on Vercel.
+A member of the Team first needs to authorize it.
+SuperOptimizer
+and others
+added 5 commits
+June 10, 2026 10:19
+Merge branch 'ScrollPrize:main' into mca_cache
+aed197f
+vendor: unified matter_compressor.{h,c} (upstream 4b5e7ed); drop vend…
+…
+10e34e4
+```
+…ored tests
+
+Upstream consolidated 11 source files into one header + one implementation;
+VC vendors just the pair (same code, same format — existing caches unaffected).
+```
+Merge branch 'mca_cache' of github.com:SuperOptimizer/villa into mca_…
+…
+5206f96
+```
+…cache
+```
+vendor: drop matter-compressor README + .gitignore (keep LICENSE)
+7d6e3a1
+render: unify MatterArchive + MatterCacheFetcher into MatterCache.{hp…
+…
+056f6ee
+```
+…p,cpp}
+
+One file pair for the whole mca layer: the archive/mc_cache RAII wrapper and
+the IChunkFetcher decorator that fills it from the source volume.
+```
+SuperOptimizer
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@codex review
+chatgpt-codex-connector
+Bot
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+💡 Codex Review
+villa/volume-cartographer/core/src/render/ZarrChunkFetcher.cpp
+Line 435
+in
+056f6ee
+const int srcEdge = opened.chunkShapes[i][0]; // assume cubic native chunks
+Preserve non-cubic Zarr chunk shapes
+This enables the MCA wrapper for every uint8 pyramid but collapses each source chunk shape to opened.chunkShapes[i][0]; the rest of MatterCacheFetcher then computes source chunk indices and copies srcEdge_^3 bytes as if all axes had that same edge. openLocalZarrPyramid/openHttpZarrPyramid preserve arbitrary 3-D chunk shapes from Zarr metadata, so a valid volume chunked like {64,64,128} will have half of each x row ignored and neighboring source chunk coordinates computed incorrectly once MCA is enabled. Please either skip MCA unless all chunk dimensions are equal and divide 256, or pass the full chunk shape through the fetcher.
+villa/volume-cartographer/core/src/Volume.cpp
+Lines 1502 to 1503
+in
+056f6ee
+} else if (!path_.empty()) {
+cacheDir = path_.parent_path() / (path_.filename().string() + ".mcacache");
+Invalidate local MCA archives after writes
+Creating a persistent .mcacache/volume.mca for local volumes makes mutable local datasets serve stale data: after a region has been cached, Volume::writeZYX updates the Zarr files and only calls invalidateCache() (line 1819), which resets the in-memory ChunkCache but does not remove or update this sibling archive. The next read reopens the old archive and MatterCacheFetcher::ensureRegion trusts archive_->hasChunk, so edited chunks can keep returning pre-write bytes until the cache directory is manually deleted. Please avoid persistent MCA for local mutable volumes or invalidate the corresponding archive contents on writes.
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+SuperOptimizer
+added 2 commits
+June 10, 2026 15:54
+utils: back HttpClient with vendored libs3; delete curl/SigV4 hand-roll
+…
+2600fdd
+```
+Vendors SuperOptimizer/libs3 @01577e0 (minimal C23 S3 client: GET/HEAD/range,
+SigV4, env/INI/SSO/IMDSv2 credential chain, retries, process abort flag).
+utils::HttpClient keeps its API but becomes a ~180-line adapter; aws_auth.cpp
+and the 500-line curl implementation are deleted. Consumers unchanged.
+Credential discovery now finds SSO profiles without AWS_PROFILE exported.
+```
+render: address codex review — cubic-chunk guard + local mca invalida…
+…
+8daf20c
+```
+…tion
+
+- applyMatterCache requires cubic source chunks whose edge divides 256
+  (the region assembler's assumption); other shapes fall back to raw cache.
+- Volume::invalidateCache (write paths only) deletes the local sibling
+  .mcacache so edited local volumes never serve stale pre-write bytes.
+```
+SuperOptimizer
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Both codex P1s addressed in 8daf20c:
+Non-cubic chunk shapes: applyMatterCache now requires cubic source chunks whose edge divides 256 on every level (the region assembler's assumption) and falls back to the raw cache otherwise. No known producer emits non-cubic chunks, so this is a guard rather than full anisotropic support.
+Stale local archives after writes: Volume::invalidateCache — which is called from every write path (writeZYX, removeChunk, pyramid rebuild) and nowhere else — now also deletes the local sibling .mcacache, so reads after an edit rebuild from the updated zarr. Remote archives are unaffected (immutable sources).
+SuperOptimizer
+commented
+Jun 10, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@codex review
+test: judge writeZYX/readZYX round-trip by MAE/PSNR, not exact equality
+…
+95f5993
+```
+Reads go through the lossy mca render cache (q=8); the exact-value checks
+predate that. MAE < 16 / PSNR > 22 dB (measured: ~7.7 / ~26 dB).
+```
+chatgpt-codex-connector
+Bot
+reviewed
+Jun 10, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 95f5993ce7
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+volume-cartographer/core/src/render/MatterCache.cpp
+Outdated
+Comment on lines
++182
+to
++183
+if (sub.status != ChunkFetchStatus::Found || sub.bytes.empty())
+return; // missing/air sub-chunk -> stays zero in the region
+chatgpt-codex-connector
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Propagate sub-fetch failures before encoding the region
+When a 256³ MCA region is assembled from multiple native chunks (e.g. 128³ remote zarr), this treats every non-Found sub-fetch the same as an intentionally missing/air chunk. If one subrequest returns HttpError/DecodeError while another subchunk succeeds, anyData becomes true and the partially zero-filled region is appended to volume.mca, so later reads (and future runs) serve permanently corrupted zeros instead of retrying or surfacing the error.
+Useful? React with 👍 / 👎.
+Comment thread
+volume-cartographer/core/src/Volume.cpp
+Outdated
+std::vector<vc::render::ChunkCache::LevelInfo> mcaLevels;
+const bool mcaDisabled = std::getenv("VCA_NO_MCA_CACHE") != nullptr;
+bool mcaOn = false;
+if (!mcaDisabled && !cacheDir.empty()) {
+chatgpt-codex-connector
+Bot
+Jun 10, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Keep local volume reads exact by default
+This enables the default q=8 MCA path for local volumes too, but Volume::readZYX reads through chunkedCache() and matter-compressor is lossy at that quality. For any local uint8 dataset with a cache directory (including immediately after writeZYX), API reads and samples now return reconstructed values rather than the exact zarr bytes; the cache should be restricted to render-only/remote/opt-in or use a lossless mode for local editable volumes.
+Useful? React with 👍 / 👎.
+SuperOptimizer
+added 4 commits
+June 11, 2026 17:08
+vendor: sync matter-compressor (per-thread ctx for render-path block …
+…
+5a66461
+```
+…decode)
+
+Fixes ~4% render CPU wasted rebuilding the quant table (4096 powf) on every
+mc_cache-miss block read.
+```
+render: zero-lock cache + pure tick-render loop
+…
+2d54d34
+```
+Cache (matter-compressor) is now fully lock-free on the render path:
+- delete per-shard mutex; mc_cache_update partitions fill by shard
+  ownership (worker t owns shards t::nt) so every mutation is
+  single-owner. Reworked the async-update ticket the same way.
+- getters (get/get_copy/contains/best_lod) are bare lock-free probes;
+  removed rd_mu (single-owner reader decode) and encoder bm_mu (stripes
+  write byte-disjoint bitmap regions). mc lock-ops 77->33, none in the
+  cache/render path; survivors are all off-tick (ftruncate, S3 footer,
+  download<->decode queue handoff, one-time init).
+- coverage memo: mc_archive_chunk_coverage is an O(1) hash probe instead
+  of a per-block mc_resolve_chunk tree walk; backfills from the tree.
+
+Render-hitch fix: mc_block_range was O(n^2) over a chunk's blocks
+(per-block 512B popcount + O(slot) prefix sum). Replaced with a
+thread-local per-chunk bi->offset index built in one O(4096) pass;
+O(1)/block. Also memoize the chunk_offset tree walk per chunk in
+src_archive. Fresh-working-set spike 348ms->~35ms, worker median
+79->25ms. Residual ~6ms is pure AVX2 trilinear (already optimal).
+
+Render scheduling: the global tick is the only scheduler.
+- chunk arrival never schedules a render; the tick renders while data is
+  in flight (whole-pipeline depth collated at thaw into a plain frozen
+  inflight_snapshot -- queued+downloading+decode-queue+undrained misses,
+  read during frozen render, no atomic/lock).
+- removed the worker-busy render queue: if a render worker is still busy
+  at tick time, skip this tick and re-arm dirty; no completion
+  self-scheduling. Kills the worker-finished re-render chains
+  (was ~320/session, now 0).
+- fold per-viewer timers into the global clock; Constants.hpp for the
+  tick/debounce constants.
+- clear the stale latency-origin stamp on superseded frames.
+```
+vendor: sync matter-compressor (content-keyed chunk index + re-append…
+…
+f158afd
+```
+… gen)
+
+Pull back the correctness fixes found by the upstream mc test suite:
+content-key the per-chunk block-offset index (arc+off+xxh64) so a stale
+index isn't served after chunk_off reuse/re-append, and add an archive
+gen counter that invalidates src_archive's chunk_off memo on publish.
+```
+render: mc owns compositing + colormap; delete VC3D's C++ versions
+…
+db373d1
+```
+matter-compressor is now the single render/composite/colormap engine for
+the GUI. Net ~1000 lines of VC3D render code deleted.
+
+- mc_colormap (vendored): window/level + colormap LUT as baked static
+  [256][3] gray->RGB tables (viridis/magma/fire bit-identical to OpenCV,
+  + gray/r/g/b/cyan/magenta tints). The viewer calls mc_colormap_lut/
+  mc_colormap_id instead of buildWindowLevelColormapLut.
+- delete BOTH postprocess pipelines: util/PostProcess (CLAHE/raking/
+  stretch/iso/remove-small-components) and render/PostProcess (the LUT
+  builder mc replaced) + their tests. Drop SampleParams::postProcess and
+  Volume::applyOptionalPostProcess (CLI 2D post, also gone).
+- slim CompositeParams/CompositeRenderSettings to the mc-mapped fields:
+  method, alphaMin/Opacity, percentile, and the SHADED knobs (light dir,
+  ambient/diffuse/specular/shininess/absorption/shadow/sss/curvature).
+  Deleted beerLambert, lighting, volume gradients, pre/post transfer
+  functions, dvr/pbr, etc. -- mc's SHADED mode subsumes the relief/raking
+  /lighting passes.
+- remove the streamingCompositeUnsupported fallback; every method is an
+  mc reduction now. Extend the method map: stddev=5 shaded=6 percentile=7
+  depth=8. McVolumeArray::render takes a ShadeParams* for those modes.
+- Colormaps.cpp keeps only the UI registry (specs/resolve/entries);
+  makeColors/applyPackedLut pixel funcs removed (no live callers).
+
+GUI verified: 281 frames rendered through the mc path, no errors.
+CLI tools (Slicing.cpp, zarr reader) still use legacy paths -- deferred.
+```
+SuperOptimizer
+force-pushed
+the
+mca_cache
+branch
+from
+4f6119c to
+db373d1
+Compare
+June 11, 2026 20:35
+SuperOptimizer
+added 24 commits
+June 11, 2026 21:38
+render: per-pixel LOD fallback + thaw-gate; isolate patch-index pool
+…
+26f46fd
+```
+vendor: sync matter-compressor (1a62a52) -- fast thaw (region-granular
+absent miss + ABSENT coverage memo + single-call fill), per-pixel LOD
+fallback, pointer-into-arena sampler, LIFO decode queue.
+
+VC3D side:
+- McVolumeArray slice path uses mc_render_points_par_lod with native L0
+  coords: per-pixel coarser-LOD fallback (coarse-not-black on zoom/pan,
+  render never decodes). Composite path still single-level. ShadeParams
+  pass-through for SHADED/PERCENTILE.
+- THAW-GATE (correctness): onGlobalTick skips thaw/freeze/render while any
+  viewer's async render worker is busy. The pointer-into-arena sampler
+  holds raw arena pointers across the async render; thawing (the only
+  mutator) mid-render would evict/realloc under them -> use-after-free.
+  Gating restores the freeze/thaw invariant: no mutation while frozen
+  reads are live. (renderWorkerBusy() accessor added.)
+- "downloading N" status now reads regions_inflight (stable pipeline
+  depth) while the render gate reads workPending (+ undrained misses), so
+  the status no longer ping-pongs 0..thousands with the per-frame miss set.
+- SurfacePatchIndex rtree rebuild moved to a dedicated 1-thread QThreadPool
+  (was on the global pool shared with render bands -> a 1.6s startup
+  rebuild stole render workers). Internals untouched; rebuild now timed.
+```
+vendor: sync matter-compressor (3602aa7) -- pointer-only sampler memo
+…
+d0482ef
+```
+Drops the per-entry 4KB block-memo buffer: the sampler caches the cache
+arena pointer directly (owns_ptr source) instead of a 1MB/8MB per-band-
+per-frame buffer. LOD sample L4 27ms->8ms, L0 13ms->5ms; kills the
+sampler-alloc page-fault storm that was ~25% of render-thread time.
+```
+render: geometry-driven predictive prefetch (tick-collated)
+…
+62d5f24
+```
+At the start of each global tick, before freeze, every viewer predicts the
+256^3 regions it will sample this frame and the tick submits the downloads
+up front -- so data front-runs the render instead of being discovered as a
+miss a cycle late.
+
+Prediction (predictWorkingSet): run the surface's OWN gen() at 1/8 res over
+the exact render viewport, so we get only the IN-VIEWPORT coords (gen clips
+to the screen rect; a warped sheet's off-screen patch is excluded). Map
+each coord -> 16^3 block -> 256^3 region, dedup at region granularity. This
+replaced an earlier control-grid walk that sprayed ~46k regions across the
+volume (a folded sheet's padded control window) and flooded the download
+stack ("downloading 45000"). Now ~hundreds of regions, stack depth maxes ~50.
+
+Submit via McVolumeArray::prefetchChunks -> mc_volume_request_region (cheap,
+absent-only, no decode). Cross-viewer + inflight/present dedup is handled by
+the deduping download stack in mc, not here. vendor: sync mc 63e9601.
+VCA_NO_PREDICT disables for A/B.
+```
+vendor: sync matter-compressor (2b85111) -- remove c3d post-decode de…
+…
+5506cc0
+```
+…noiser
+```
+fix: New Project crash -- fs::absolute("") on empty volpkg dir
+…
+8bd0835
+```
+volpkgRootForState / outputSegmentsPathForState called
+std::filesystem::absolute() on the volpkg directory, which a freshly-
+created ("New Project") VolumePkg::newEmpty() leaves empty until saved.
+absolute("") throws "cannot make absolute path: Invalid argument" ->
+uncaught -> std::terminate -> SIGABRT. Guard the empty path and return {}.
+```
+render: direct remote .mca streaming (no transcode, no disk cache)
+…
+1ee3414
+```
+Open an already-built remote .mca and stream blocks straight from it, instead
+of throwing "remote .mca not supported". A pre-built archive already holds every
+LOD in mc format, so there's nothing to transcode: the streaming mc_reader pulls
+just the bytes a decode needs (partial-fetch ranged GETs over S3) and the
+resident mc_cache holds decoded 16^3 blocks. No zarr discovery, no local .mca,
+no download/decode threads.
+
+mc (vendored, upstream 4d7c33f):
+  - mc_volume_open_streaming(url, cache_bytes): reader-backed volume. Per-LOD dims
+    from the reader (n0>>lod); its own lock-free coverage memo resolved in THAW
+    (reader I/O is single-owner there -- the decode ctx is non-reentrant) and
+    probed lock-free during frozen renders. The shared mc_volume_* API branches on
+    a streaming flag. A built archive has no ABSENT/download state: PRESENT or air.
+  - mc_s3_open now does full credential resolution (was anonymous) so a private
+    bucket authenticates; mc_s3_net_bytes feeds the download-rate readout.
+  - test mc_stream_volume_test; freeze/thaw/sample over a built local .mca.
+
+VC3D:
+  - McVolumeArray::openStreaming wraps mc_volume_open_streaming.
+  - Volume::openRemote probes a remote .mca's per-LOD shape via a throwaway
+    streaming open (header read) to fill the pyramid meta the GUI needs, replacing
+    the throw; createChunkCache routes remote .mca through the streaming path.
+
+Validated against s3://philodemos/forrest: the 80MB 45.532um and the 320GB 2.4um
+PHerc-Paris4 archives both open, report 8 LODs, and serve a decoded center block
+with ~107KB pulled (partial-fetch, not a full download).
+```
+render: .mca streaming = verbatim chunk copy into the local archive (…
+…
+a4c81aa
+```
+…upstream e75da9c)
+
+Supersede the reader-serves-the-cache streaming design (blocking S3 reads in
+THAW on the tick thread -- the GUI hang) with the same shape as the transcode
+path: local .mca + LIFO request stack + download thread + THAW-decodes-from-
+local. For a built .mca source the download step slaps the remote chunk's
+compressed blob verbatim onto the end of the local archive (no decode, no
+re-encode); zarr/blosc/zstd/c3d sources keep the transcode pipeline.
+
+Throughput: batched fetches (two rounds of 32-way concurrent ranged GETs,
+adaptive EMA-sized round A) replace the serial 3-4-RTTs-per-chunk flow that
+topped out ~2MB/s; node-table cache 64 -> 512; stats count all bytes.
+
+VC3D: VolumePkg accepts a direct remote .mca location (was zarr-suffix-only --
+the .mca volume was silently dropped, "Opened volpkg with no volumes");
+Volume::openRemote probes shape via header-only mc_mca_probe (no throwaway
+volume); createChunkCache passes the real cacheDir so the streamed archive
+persists across sessions.
+```
+vendor: sync matter-compressor (2e0f6dc)
+…
+553517f
+```
+- coalesced streaming GETs: sort batch by archive offset, merge near-adjacent
+  blobs (<=512KB gap) into large sequential ranges -- per-chunk ~200KB GETs
+  stalled in TCP slow-start (~2-4MB/s); runs reach ~7MB/s useful on a
+  raster-ordered source (Morton-repacked source would collapse a viewport
+  into 1-3 runs and hit line rate)
+- mc_chunk_offset_chk: failed streaming node-table reads no longer poison
+  regions as permanent ZERO (the expired-creds black-patches bug)
+- node-table cache 64->512, DL_BATCH 32->64, net_bytes counts all bytes
+- mc_archive_set_metadata/mc_archive_metadata (parallel upstream work)
+```
+render: per-stage pipeline depths in the status bar (vendor ab361fc)
+…
+7d9898d
+```
+Split the single "downloading N" into the real stages: downloading B @ rate
+(regions on the wire), queued A (LIFO download stack), encode C (xxMB)
+(decode -> re-encode -> append backlog + the compressed RAM it holds).
+mc_volume_stats gains the per-stage counters, THAW-collated frozen snapshots
+like regions_inflight; IChunkedArray::Stats + McVolumeArray pass-through.
+Items appear only while nonzero; streaming mode has no encode stage.
+```
+render: two-row status bar with named pipeline stages (vendor f76924d)
+…
+3649ffe
+```
+Row 1 = view state (LOD/scale/res/composite/cursor/normal offset/POI); row 2 =
+the data pipeline: RAM, disk, downloading N @ rate, download queued, decode
+queued (staging MB), encoding. Stages appear only while nonzero; archive append
+is synchronous (no queue). ViewerStatsBar grows a two-row setItems overload.
+```
+render: skip provably-identical streaming frames + sampler perf (vend…
+…
+04fcd9e
+```
+…or 78128e5)
+
+Profile (perf, fp call graphs, streaming the 2.4um .mca): 87% of cycles in the
+render workers, and inside them 21% of ALL cycles were the straddling-cell
+fallback doing 8 per-corner block lookups. Two fixes, top-down and bottom-up:
+
+- Bottom-up: mc's straddle fast path (fetch each distinct block once, gather
+  inline) eliminates the mc_s_voxel storm; main-thread decode share also fell
+  12% -> 4.7% on the follow-up profile.
+- Top-down: tickRender skips a streaming-forced re-render when the camera is
+  unchanged and IChunkedArray::dataGeneration() hasn't moved -- no THAW fill
+  and no chunk/air publish means the frame is provably identical. A streaming
+  settle drops from ~10 full re-renders/s to one per landed batch.
+
+Also: NaN guards as bit tests (memcpy + exponent pattern) in mc_s_sample /
+mc_lod_sample / McVolumeArray::render so -ffast-math can't delete them; new
+clang -O3 -ffast-math profiling build config (build/dev-unsafe-profiling).
+```
+vendor: sync matter-compressor (per-lane SIMD fallback dispatch, ecdf…
+…
+12bc3a6
+```
+…2fe)
+```
+vendor: sync matter-compressor (masked SIMD groups, 8b46a89)
+76a2fd6
+render: retry the remote .mca header probe before failing the volume
+…
+a131db4
+```
+One transient S3 HEAD/read failure at launch made openRemote throw and the
+volpkg load with no volumes (gray session, no recovery). The probe is cheap
+and header-only: retry 3x with 0.5s/1s backoff.
+```
+vendor: sync matter-compressor (x-straddle fast path, 97341b3)
+ecd433a
+render: viewport-local render skips + hidden-viewer gating (vendor 38…
+…
+680c0b9
+```
+…08da2)
+
+Two "extra work" eliminations:
+
+- The identical-frame gate was volume-global: a batch landing anywhere made
+  all 4 viewers re-render full frames. mc now keeps per-region change gens
+  (64K-slot direct map; collisions err toward rendering); each viewer takes
+  the max over ITS predicted working set (already computed per tick for the
+  prefetch) via IChunkedArray::dataGenerationFor and skips when nothing the
+  viewport samples changed.
+
+- Hidden/minimized viewers no longer render (tickRender returns, dirty flag
+  kept; showEvent re-schedules on reveal) and no longer predict/download
+  their working set.
+```
+render: memoize the predicted working set
+…
+d97cbc2
+```
+predictWorkingSet re-ran the 1/8-res gen() every streaming tick with an
+unchanged camera -- the set is a pure function of geometry+viewport. Keyed on
+(surface, fb size, scale, pan); any scheduleRender invalidates (geometry edits
+arrive through there). The region request blast still runs every tick (mc
+dedups present/in-flight/queued in O(1)); only the gen() is skipped.
+```
+render: partial inter-frame rendering (pan / zoom / z-scroll / data t…
+…
+5ec9ca5
+```
+…iles)
+
+Persistent pre-colormap sample buffer per viewer + 64px tile grid; each render
+pass classifies the frame delta and reuses everything it can:
+
+- same camera          -> re-render only tiles whose region signature went
+                          stale (per-tile region bbox at the picked LOD,
+                          stride-4 walk of the cached coords, dilated +/-1 for
+                          slab/trilinear margins, checked against mc's
+                          per-region change gens incl. coarser-LOD ancestors)
+- integer-pixel pan    -> blit the overlap pixel-exact, dirty only the exposed
+                          strips (clean tiles inherit min source-tile gen)
+- zoom                 -> seed a nearest-neighbor warp of the old frame as an
+                          instant preview, then refine
+- z-scroll / geometry  -> old frame stands as the preview, then refine
+
+Dirty tiles render center-out under a ~50ms budget in ONE stacked mc call
+(64 x 64K image -- full SIMD/thread parallelism, no per-tile spawn); the
+remainder re-arms the dirty flag and continues next tick. Window/colormap
+changes never resample at all (LUT-only, applied at blit).
+
+Safety: cache keyed on array+surface+fb+sampling fingerprint (any mismatch =
+full render); overlay views / non-mc arrays keep the full-frame path; all
+conservatism errs toward re-rendering. IChunkedArray grows dataGenerationForBox
++ pickLevel (McVolumeArray impl over mc_volume_region_gen). Also: predict's
+NaN check made -ffast-math-safe (bit test).
+```
+VC3D+mc: ink/PBR composite, surface-relative raking, GUI cleanup; mc …
+…
+17c7b8d
+```
+…concurrent-append + alloc fixes
+
+Vendored matter-compressor synced to upstream 25540ed:
+- MC_COMP_INK composite (backlit transmission + cone SSS + sheet-lock), surface-
+  relative raking, mc_image_dog stroke-scale band-pass.
+- CRITICAL fix: w_ensure_shard_slot index-corruption race under concurrent append
+  (now CAS-published); vol_mark_region gated on append success; every encode/stream/
+  cache-init alloc checked; mc_cache_resize made transactional.
+- Drop vendored mc tests (they live upstream only).
+
+VC3D:
+- Ink composite mode + shading controls; removed raking/preTf/postTf/preNormalize/
+  preHistEq/CLAHE/remove-small-components from the GUI.
+- Partial inter-frame rendering (pan blit / zoom / z-scroll / data-stale tiles).
+```
+Merge remote-tracking branch 'origin/main' into mca_cache
+600b044
+render: value 0 always renders black (air / no-material), no gray pla…
+…
+64c22f1
+```
+…ceholder
+
+- Blit maps every pixel through the LUT (lut[0] is black); dropped the gray
+  'uncovered' branch -- air, confirmed-zero, and not-yet-fetched all read black.
+- Framebuffer clears -> black (were 64-gray) so partial-frame gaps don't flash gray.
+- Vendored mc synced to upstream 45ae6c5: lut[0] black for all colormaps + INK
+  transmission gated on material traversed (pure air no longer glows gray).
+```
+render: decode off the GUI thread (fill pool) + masked margin renders…
+…
+be1998f
+```
+… black
+
+Vendored matter-compressor synced to upstream 3cb625a:
+- Persistent archive->cache fill pool: mc_volume_thaw hands the frame's PRESENT
+  block set to N persistent workers and returns; decode overlaps the frame render
+  instead of blocking the GUI tick (~10% main-thread cost in profiling). freeze()
+  is the barrier. Fill set copied into a volume-owned buffer (not thaw's shared
+  thread-local) so sibling caches can't clobber an in-flight fill.
+- Masked-void junk fix (plane viewers): record remote MC_SLOT_ZERO chunks as local
+  ZERO, so the LOD fallback stops at the masked mid-level instead of bleeding
+  coarser PRESENT (unmasked-downsample) data into the void.
+```
+render: compute plane intersections off the main thread
+…
+932539f
+```
+The r-tree query + triangle clip in renderIntersections was ~12% of the GUI tick
+(profiling). On a geometry-cache miss it now runs on a QtConcurrent worker; the
+QGraphicsItem build (Qt scene mutation, main-thread-only) happens when the result
+lands (finishPlaneIntersectionCompute re-enters renderIntersections, which hits the
+geometry cache and builds synchronously). Current items stand as the preview until
+then. A generation token drops superseded results; one compute at a time (coalesced).
+
+The worker reads the live SurfacePatchIndex, which the main thread (and the single-
+surface task worker) mutates in place. Added a ViewerManager read-gate:
+beginIndexRead/endIndexRead bracket each worker read, and the four index-mutation
+sites (rebuild swap, updateSurface, refresh-region, clear, single-surface task) defer
+while a read is in flight; endIndexRead applies the deferred work once reads drain.
+Gate is released even if the viewer is destroyed mid-compute (released via the
+ViewerManager, which outlives viewers).
+```
+render: reuse per-decoder-thread decode scratch (kill page-reclaim st…
+…
+05c32f2
+```
+…orm under streaming)
+
+Vendored matter-compressor synced to upstream 42fe4b4: decode_one no longer
+posix_memalign's a fresh 16MB dense buffer per call -- each decoder thread allocates
+its scratch once in decoder_main and reuses it. Under heavy navigation the per-call
+16MB allocs across the decode pool drove the kernel into direct page reclaim
+(native_queued_spin_lock_slowpath ~14% in profiling); that contention is gone. Fill
+threads named mc-fill for profiler clarity.
+```
+SuperOptimizer
+closed this
+Jun 15, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

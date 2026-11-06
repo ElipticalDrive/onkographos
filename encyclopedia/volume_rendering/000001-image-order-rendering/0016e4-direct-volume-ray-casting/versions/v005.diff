@@ -1,0 +1,430 @@
+--- v004.md
++++ v005.md
+@@ -1,221 +1,227 @@
+ # Direct volume ray casting
+ 
++Also called: Ray casting, Backward ray marching, Image-order volume rendering
+ 
+ ## Overview
+-Direct volume ray casting is an image-order rendering technique that casts a ray through a 3D volume for every pixel, sampling scalar values, mapping them to RGBA via a transfer function, and compositing samples front-to-back using alpha blending to produce the final image [S2, S3, unofficial]. It differs from [Isosurface and first-hit ray casting](20-isosurface-and-first-hit-ray-casting.md) by allowing all voxels to contribute to the final image rather than stopping at the first opaque surface [S5, unofficial], and from [Distance-field ray marching](21-distance-field-ray-marching.md) by using uniform step sizes rather than distance-field-guided steps [G]. It replaces slice-stack methods by providing a solid volume appearance from any angle without edge-on gaps [S15, unofficial].
++Direct volume ray casting is an image-order rendering technique that visualizes 3D scalar data by treating the volume as a translucent medium, integrating emission and absorption along rays cast from the camera through each pixel [S3, S4, S5, unofficial]. Unlike surface-based methods that extract explicit geometry, it renders the entire volume implicitly, allowing internal structures to be seen through outer layers [S3, unofficial]. It differs from object-order methods (like splatting) by computing the final pixel color via a per-ray integration loop, which naturally supports early ray termination and view-dependent shading [S4, S9, unofficial].
+ 
+ ## Shared principles
+-The method relies on the volume rendering integral, discretized into a summation over sample points along a ray [S3, S5, unofficial]. The ray $r$ is parameterized by $r(t) = O + tD$, entering the volume at $t_{start}$ and exiting at $t_{end}$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md). The data model is sampled using $s(t)$ [Volume Raycasting Discretization](831-volume-raycasting-discretization.md).
+-
+-The compositing is performed front-to-back [S2, S3, S8, S9, S11, S14, S16, S20, S23, S26, unofficial]. Let $C'_i$ be the accumulated color and $\alpha'_i$ be the accumulated opacity after sample $i$, with initial conditions $C'_0 = 0$ and $\alpha'_0 = 0$ [S9, unofficial]. For each sample $i$ along the ray:
+-1.  Sample the volume at the current ray position to get a scalar value $d_i$ [S2, S5, unofficial].
+-2.  Apply a transfer function to map the scalar value to color $C_i$ and opacity $\alpha_i$ [S2, S5, unofficial].
+-3.  Update accumulated color:
+-    $$ C'_i = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i $$
+-4.  Update accumulated opacity:
+-    $$ \alpha'_i = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i $$
+-5.  If $\alpha' \ge 1$ or a threshold (typically 0.99) [S2, S18, unofficial], terminate the ray (early ray termination) [S2, S3, S4, unofficial].
+-
+-Rays are cast from the eyepoint, one for each pixel [S1][S4, unofficial]. The volume is typically represented as a 3D texture [S4, S3, unofficial]. Gradients for shading are calculated using a central difference operator [S6, unofficial]. To avoid normal discontinuities that cause visible rings on smooth surfaces, the gradient is computed using a two-voxel offset rather than a one-voxel offset [S18, unofficial]. Sampling is performed using trilinear interpolation [S1][S5, unofficial]. A fixed random offset is applied to each ray's start position to prevent sample layers from appearing as bands [S18, unofficial]. The final accumulated color is typically corrected with gamma 2.2 [S9, unofficial].
+-
+-```python
+-import random
+-import math
+-
+-def vec3(x, y, z):
+-    return [x, y, z]
+-
+-def pow_vec3(v, exponent):
+-    return [v[0]**exponent, v[1]**exponent, v[2]**exponent]
+-
+-def compute_ray_exit(origin, direction, bounds):
+-    # Slab intersection for axis-aligned box [G]
+-    t0 = max((bounds[0][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
+-    t1 = min((bounds[1][i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf') for i in range(3))
+-    return max(t0, t1)
+-
+-def trilinear_interpolate(volume, pos, dims):
+-    # Standard trilinear interpolation [G]
+-    vx = pos[0] * (dims[0] - 1)
+-    vy = pos[1] * (dims[1] - 1)
+-    vz = pos[2] * (dims[2] - 1)
+-    x0, y0, z0 = int(math.floor(vx)), int(math.floor(vy)), int(math.floor(vz))
+-    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+-    x0 = max(0, min(x0, dims[0]-1))
+-    x1 = max(0, min(x1, dims[0]-1))
+-    y0 = max(0, min(y0, dims[1]-1))
+-    y1 = max(0, min(y1, dims[1]-1))
+-    z0 = max(0, min(z0, dims[2]-1))
+-    z1 = max(0, min(z1, dims[2]-1))
+-    wx = vx - x0
+-    wy = vy - y0
+-    wz = vz - z0
+-    c00 = volume[x0][y0][z0] * (1-wx) + volume[x1][y0][z0] * wx
+-    c01 = volume[x0][y0][z1] * (1-wx) + volume[x1][y0][z1] * wx
+-    c10 = volume[x0][y1][z0] * (1-wx) + volume[x1][y1][z0] * wx
+-    c11 = volume[x0][y1][z1] * (1-wx) + volume[x1][y1][z1] * wx
+-    r0 = c00 * (1-wy) + c10 * wy
+-    r1 = c01 * (1-wy) + c11 * wy
+-    return r0 * (1-wz) + r1 * wz
+-
+-def direct_volume_raycast(volume_data, camera, transfer_function, volume_bounds, volume_dims, step_size=0.001, threshold=0.99):
+-    """
+-    Renders a volume using fixed-step raycasting with front-to-back compositing.
+-    """
+-    h, w = camera.screen_height, camera.screen_width
+-    image = [[vec3(0.0, 0.0, 0.0) for _ in range(w)] for _ in range(h)]
+-    
+-    for y in range(h):
+-        for x in range(w):
+-            ray_origin, ray_direction = camera.cast_ray(x, y)
+-            accumulated_color = vec3(0.0, 0.0, 0.0)
+-            accumulated_opacity = 0.0
+-            
+-            # Ray initialization: fixed random offset to prevent banding [S18, unofficial]
+-            t = random.uniform(0.0, step_size)
+-            
+-            # Compute ray exit distance from volume bounds [G]
+-            t_end = compute_ray_exit(ray_origin, ray_direction, volume_bounds)
+-            
+-            while accumulated_opacity < threshold and t < t_end:
+-                # Compute current position in texture space [0,1]
+-                pos = [(ray_origin[i] + t * ray_direction[i]) for i in range(3)]
+-                # Sample volume at current position using trilinear interpolation [S1][S5, unofficial]
+-                scalar_value = trilinear_interpolate(volume_data, pos, volume_dims)
+-                
+-                # Apply transfer function to get color and opacity [S2, S5, unofficial]
+-                color, opacity = transfer_function(scalar_value)
+-                
+-                # Front-to-back compositing [S2, S5, unofficial]
+-                accumulated_color[0] += (1.0 - accumulated_opacity) * opacity * color[0]
+-                accumulated_color[1] += (1.0 - accumulated_opacity) * opacity * color[1]
+-                accumulated_color[2] += (1.0 - accumulated_opacity) * opacity * color[2]
+-                accumulated_opacity += (1.0 - accumulated_opacity) * opacity
+-                
+-                t += step_size
+-                
+-            # Gamma correction [S9, unofficial]
+-            image[y][x] = pow_vec3(accumulated_color, 1.0/2.2)
+-            
+-    return image
+-```
++The method implements the emission-absorption optical model, computing the light intensity reaching the eye by integrating radiative energy along a ray through the scalar volume [S1, S5, S9, unofficial]. The process follows a strict pipeline for each pixel: ray generation, sampling, classification (transfer function application), shading, and compositing [S4, S34, unofficial].
++
++### Ray Generation and Discretization
++For each pixel, a ray $r(t) = \mathbf{o} + t\mathbf{d}$ is defined, where $\mathbf{o}$ is the camera origin and $\mathbf{d}$ is the direction [S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70, S71, S72, S73, S74, S75, S76, S77, S78, S79, S80, S81, S82, S83, S84, S85, S86, S87, S88, S89, S90, S91, S92, S93, S94, S95, S96, S97, S98, S99, S100]. The ray is intersected with the volume domain (typically an axis-aligned bounding box) to determine the entry parameter $t_{start}$ and exit parameter $t_{end}$ [S1, S7, S15, S22, S33, S55, unofficial]. The segment $[t_{start}, t_{end}]$ is discretized into $N$ samples at equidistant intervals $\Delta t$ [S4, S8, S9, S16, S33, S40, unofficial]. The step size $\Delta t$ is often chosen to ensure at least one sample per voxel along the fastest axis to minimize aliasing, though adaptive stepping is also used [S36, unofficial][S46, abstract only, unofficial].
++
++### Sampling and Interpolation
++At each sample point $\mathbf{p}_i = r(t_i)$, the scalar volume value $V(\mathbf{p}_i)$ is reconstructed from the discrete voxel grid [S6, S7, S33, unofficial][S44, book]. Trilinear interpolation is the standard reconstruction filter for high-quality rendering, combining the eight surrounding voxels [S6, S7, S33, S40, unofficial]. Nearest-neighbor interpolation is used for performance or specific artifact styles [S43, unofficial][S44, book]. The interpolated value represents the local density or material property [S9, S18, unofficial].
++
++### Classification (Transfer Function)
++The scalar value $d_i = V(\mathbf{p}_i)$ is mapped to optical properties: color $C_i$ and opacity $\alpha_i$ [S2, S5, S11, S12, S25, S29, S31, S34, unofficial]. This mapping is defined by a transfer function $T(d_i)$ [S2, S5, S2789]. Pre-classification maps scalar values to RGBA before interpolation, while post-classification interpolates scalars first and then applies the transfer function [S4, unofficial][S44, book]. The opacity $\alpha_i$ determines the fraction of light absorbed or scattered at the sample [S18, S23, S51, unofficial].
++
++### Compositing (Front-to-Back Integration)
++The final pixel color $C_{final}$ is computed by integrating contributions from all samples along the ray from front to back ($t_{start}$ to $t_{end}$) [S1, S12, S16, S23, S24, S43, S50, S51, unofficial]. The standard compositing equation (over operator) updates the accumulated color $C'$ and accumulated opacity $\alpha'$ for each sample $i$:
++
++$$
++C'_{i} = C'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i C_i
++$$
++$$
++\alpha'_{i} = \alpha'_{i-1} + (1 - \alpha'_{i-1}) \alpha_i
++$$
++
++where $C'_0 = 0$ and $\alpha'_0 = 0$ [S12, S43, S50, unofficial]. The term $(1 - \alpha'_{i-1})$ represents the transmittance (light reaching the current sample) [S1, S51, unofficial]. If $\alpha'$ reaches 1 (or a threshold close to it), the ray can be terminated early, as subsequent samples are fully occluded [S9, S12, S27, unofficial].
++
++### Shading
++Shading models are applied to enhance depth perception. Common techniques include Phong or Blinn-Phong shading, which use the gradient of the volume data $\nabla V$ to compute surface normals for lighting calculations [S14, S15, S30, unofficial][S54]. The gradient is typically estimated using central differences or Sobel operators on the interpolated scalar field [S14, S30, unofficial][S54].
+ 
+ ## Subtopics
+ 
+-### [Distance Color Blending](791-distance-color-blending.md)
+-Enhances depth perception by dimming and shifting colors towards a background as they recede [791-distance-color-blending.md].
+-
+-### [Interpolation Schemes for Volume Rendering](817-interpolation-schemes-for-volume-rendering.md)
+-Handles reconstruction of scalar values, addressing artifacts from nearest neighbor interpolation.
+-
+-### [Volume Raycasting Discretization](831-volume-raycasting-discretization.md)
+-Defines the discretization of the volume rendering integral and ray parameterization context.
+-
+-### [Maximum Intensity Projection](902-maximum-intensity-projection.md)
+-Finds the maximum voxel value along the ray, ignoring intermediate values.
+-
+-### [Alpha Compositing Ray Casting](922-alpha-compositing-ray-casting.md)
+-Projects a semi-transparent 3D scalar field onto a 2D plane by integrating optical properties along viewing rays.
+-
+-### [Stochastic Jittering](924-stochastic-jittering.md)
+-Reduces banding artifacts by adding stochastic jittering controlled by a noise texture.
+-
+-### [Hierarchical Sampling (Inverse CDF Sampling)](973-hierarchical-sampling-inverse-cdf-sampling.md)
+-Samples points along a ray from a discrete probability distribution using inverse CDF interpolation.
+-
+-### [GPU-based Ray-casting for Unstructured Grids](1118-gpu-based-ray-casting-for-unstructured-grids.md)
+-Guarantees accurate rendering results for non-convex meshes on GPU.
+-
+ ### [Direct Volume Rendering](1184-direct-volume-rendering.md)
+-Considers volume data as a transparent gel, simulating light travelling through it without mapping.
+-
+-### [Multi-Sample Anti-Aliasing via Ray Distribution](1219-multi-sample-anti-aliasing-via-ray-distribution.md)
+-Casts multiple rays per pixel distributed within the pixel area to reduce jagged edges.
+-
+-### [Uniform Ray Sampling](1261-uniform-ray-sampling.md)
+-Generates points uniformly distributed between minimum and maximum depth along each ray.
++The core implementation of the emission-absorption model, treating the volume as a translucent gel. It distinguishes itself by visualizing the entire volume without extracting surfaces.
+ 
+ ### [Opacity Correction for Slice Count Invariance](1277-opacity-correction-for-slice-count-invariance.md)
+-Scales per-slice opacity to maintain constant image intensity regardless of slice count.
++Corrects the opacity $\alpha_i$ to ensure visual consistency regardless of the sampling rate, solving the brightness artifact where denser sampling appears brighter.
+ 
+ ### [Back-face rasterized volume rendering](1296-back-face-rasterized-volume-rendering.md)
+-Rasterizes back faces of the bounding box to trigger fragment shaders, avoiding processing pixels outside the volume.
+-
+-### [Classical Ray Tracing Integration](1334-classical-ray-tracing-integration.md)
+-Computes pixel color by combining background transmission and uniform in-scattering, applying Beer's law.
+-
+-### [Procedural Volume Rendering with Noise Perturbation](1370-procedural-volume-rendering-with-noise-perturbation.md)
+-Enhances coarse macrostructure at render time by perturbing texture coordinates and optical properties with noise.
+-
+-### [Rendering Pipelines and Passes](1411-rendering-pipelines-and-passes.md)
+-Manages the sequence of rendering operations for volume data.
+-
+-### [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md)
+-Visualizes 3D grid data into 2D views.
+-
+-### [Trilinear Interpolation](1531-trilinear-interpolation.md)
+-Renders scalar field data on a 3D rectilinear grid using front-to-back alpha compositing.
+-
+-### [Single Scattering Volume Rendering with Ray Marching](1532-single-scattering-volume-rendering-with-ray-marching.md)
+-Simulates light interaction with particles assuming light scatters only once before reaching the camera.
++Uses GPU rasterization of the volume's bounding box front and back faces to determine ray entry/exit points, replacing analytical intersection calculations.
+ 
+ ### [Neural volume rendering](1576-neural-volume-rendering.md)
+-Uses neural networks to represent and render volumetric data.
+-
+-### [Composition via Convolution (Power Form)](1591-composition-via-convolution-power-form.md)
+-Transforms a trivariate polynomial into a univariate polynomial using convolution operators.
+-
+-### [Tile-based Volume Ray Marching](1678-tile-based-volume-ray-marching.md)
+-Stores 3D volume data in a 1D texture array organized into tiles for ray marching.
+-
+-### [Ray Marching Volume Rendering](1735-ray-marching-volume-rendering.md)
+-Real-time GPU method using Taichi to perform ray marching through a 3D scalar field.
+-
+-### Piecewise Density Approximation for Reparameterized Sampling
+-An approximation of the opacity function $F_r(t)$ and its inverse by approximating the density field $\sigma_r(t)$ as piecewise constant or piecewise linear on a grid, allowing analytical computation of the integral $\int \sigma_r(s) ds$ [S29, unofficial]. For piecewise constant approximation, pick a point $\hat{t}_i$ within each bin $[t_i, t_{i+1}]$ and approximate density as $\sigma_r(\hat{t}_i)$ inside the bin [S29, unofficial]. For piecewise linear approximation, compute $\sigma_r$ at grid points and interpolate values between grid points [S29, unofficial]. Solve $y_f u = 1 - \exp(-I(t))$ for $t$, where $I(t)$ is the chosen integral approximation ($I_0$ or $I_1$), to find the sample location $t$ corresponding to uniform sample $u$ [S29, unofficial]. The integral approximation $I_0(t)$ for piecewise constant density is: $I_0(t) = \sum_{j=1}^i \sigma_r(\hat{t}_j)(t_j - t_{j-1}) + \sigma_r(\hat{t}_i)(t - t_i)$, where $t \in [t_i, t_{i+1}]$ [S29, unofficial]. The integral approximation $I_1(t)$ for piecewise linear density is a sum of trapezoidal areas [S29, unofficial]. The grid is a set of points $t_n = t_0 < t_1 < \dots < t_m = t_f$ defining the bins for the piecewise approximation [S29, unofficial].
+-
+-### Projected Slabs Approximation
+-An algorithm that approximates perspective volume rendering using parallel projected slabs to enable acceleration on hardware designed for parallel projection, with analytical error bounds [S30, unofficial]. It approximates perspective projection using parallel projected slabs, performs an analytical study of maximum and average error, and improves the basic algorithm based on error analysis to bound global maximum error while increasing frame rate [S30, unofficial].
+-
+-### Forward Projection (aTx)
+-Inside the loop, for each intersected voxel (img_i, img_j), add length * image_value to the sum, where image_value is accessed at index batch_index * channels * height * width + channel_index * height * width + img_i * width + img_j [S31, unofficial].
+-
+-### Commutative Blend Direct Volume Rendering
+-Rendering technique for unsorted cell projection using optical models that lead to a commutative blend function, allowing compositing in arbitrary order [S32]. It applies arbitrary transfer functions via texture lookup, which only affect the generation of the texture map [S32]. Models allowing arbitrary order compositing include maximum intensity projection and restrictions of the full volume density model to either the source term or the absorption term [S32].
++Replaces the explicit voxel grid with a continuous 5D neural function (MLP) that predicts density and color, enabling differentiable rendering and novel view synthesis.
++
++### [Hybrid Gradient Volume Raycasting with Lasso Masking](2059-hybrid-gradient-volume-raycasting-with-lasso-masking.md)
++Combines pre-computed Hounsfield Unit gradients for lighting with a hybrid shading model, applying Phong lighting only where opacity changes are significant.
++
++### [Temporal Accumulation (Closest Hit)](2080-temporal-accumulation-closest-hit.md)
++Stabilizes noisy rendering by blending current frames with history, specifically selecting the closest hit to prevent ghosting from disoccluded structures.
++
++### [Alpha-to-Weight Computation (Forward)](2373-alpha-to-weight-computation-forward.md)
++Computes per-sample weights and transmittance for front-to-back compositing from raw alpha values, segmenting samples by ray ID for efficient GPU processing.
++
++### [Volumetric Smoke Rendering with Worley Noise and Light Maps](2447-volumetric-smoke-rendering-with-worley-noise-and-light-maps.md)
++Uses Worley noise for density and light maps for scattering in real-time smoke rendering, differing from standard DVR by using procedural noise instead of scalar data.
++
++### [Compositing and Blending](2515-compositing-and-blending.md)
++The family of techniques for integrating optical properties (color/opacity) along a ray, solving the problem of combining semi-transparent samples into a single pixel value.
++
++### [Tiled Ray Marching with Grid Sampling](2586-tiled-ray-marching-with-grid-sampling.md)
++Renders volumes by tiling the image to manage memory, using grid sampling for density and accumulating attenuation.
++
++### [Surface Rendering Pipeline](2614-surface-rendering-pipeline.md)
++A mode that stops at the first voxel above a threshold and shades it, generating no mesh but avoiding the "fuzzy" look of full volume rendering.
++
++### [Energy Region Compositing](2717-energy-region-compositing.md)
++Composites multiple energy volumes within a region defined by a magnitude volume, applying thresholds before compositing.
++
++### [Window/Level Volume Raycasting with Bricking](2775-window-level-volume-raycasting-with-bricking.md)
++Accelerates traversal by decomposing data into bricks and applying window/level transfer functions, supporting LQ/HQ modes.
++
++### [Interpolation and Sampling Techniques](2787-interpolation-and-sampling-techniques.md)
++Provides mechanisms to reconstruct continuous fields from discrete voxels, solving discretization artifacts like aliasing.
++
++### [Ray Marching and Discretization](2788-ray-marching-and-discretization.md)
++The fundamental iterative algorithm for approximating the volume rendering integral by accumulating optical properties at discrete points.
++
++### [Transfer Function and Opacity Mapping](2789-transfer-function-and-opacity-mapping.md)
++Defines the mapping from scalar data to RGBA attributes, solving the semantic interpretation of raw numerical data.
++
++### [Doppler Volume Rendering](3536-doppler-volume-rendering.md)
++Accounts for the Doppler effect of light in moving media, emitting/attenuating light at shifted wavelengths based on a 3D velocity field.
++
++### [Multiresolution Volume Rendering](3541-multiresolution-volume-rendering.md)
++Uses a hierarchy of resolutions (e.g., wavelets) for adaptive integration and early termination, reducing cost for large datasets.
++
++### [Next Event Estimation for Emissive Volumes](3557-next-event-estimation-for-emissive-volumes.md)
++Samples light sources directly within participating media to reduce noise in path tracing, differing from fixed-step casting.
++
++### [Classified Volume Rendering](3590-classified-volume-rendering.md)
++Precomputes a run-length encoded structure of classified voxels to enable rapid rendering with fixed classification but arbitrary shading.
++
++### [Parallel Domain-Decomposed Ray Casting](3625-parallel-domain-decomposed-ray-casting.md)
++Distributes the volume across MPI processes for distributed-memory parallelization, with each process rendering its sub-volume chunk.
++
++### [Front-to-Back Volume Ray Casting with HSV Shading and SOS/Attenuation/Reflection Filtering](4324-front-to-back-volume-ray-casting-with-hsv-shading-and-sos-at.md)
++Uses fixed steps and specific filtering (SOS, attenuation, reflection) combined with HSV shading.
++
++### [LOS-integration for visualization](4807-los-integration-for-visualization.md)
++Integrates scalar physical quantities (emissivity/density) along rays, often from neural networks, outputting integrals rather than color.
++
++### [Hierarchical Sampling](4865-hierarchical-sampling.md)
++Uses a coarse estimate to guide fine sample placement via importance sampling, solving inefficient uniform sampling.
++
++### [Volumetric Rendering with Spherical Harmonics](4962-volumetric-rendering-with-spherical-harmonics.md)
++Represents the volume as sparse grid SH coefficients to compute color and transmittance, supporting background compositing.
++
++### [Monte Carlo Path Tracing for Volume Rendering](4980-monte-carlo-path-tracing-for-volume-rendering.md)
++Simulates light transport stochastically, tracing random paths and scattering events, unlike fixed-step casting.
++
++### [Customization Volume Integration](5291-customization-volume-integration.md)
++Integrates a pre-computed "customization volume" to apply position-dependent modifications like gamma correction.
++
++### [Pre-integrated Volume Rendering](5327-pre-integrated-volume-rendering.md)
++Pre-computes the rendering integral for ray segments into a lookup table (LUT) to accelerate runtime, solving high computational cost.
++
++### [Hardware-Accelerated Volume Rendering](5616-hardware-accelerated-volume-rendering.md)
++Offloads ray casting and compositing to specialized hardware (GPUs), using 3D textures and hardware interpolation units.
++
++### [Two-pass and Multi-pass Techniques](6224-two-pass-and-multi-pass-techniques.md)
++Decouples light attenuation (depth pass) from color compositing (eye pass) to efficiently compute accurate volumetric lighting.
++
++### [Slice-based and Proxy Geometry Rendering](6225-slice-based-and-proxy-geometry-rendering.md)
++Rasterizes 2D proxy geometry (slices) inside the volume to perform sampling and compositing, solving hardware limitations.
++
++### [Projection and MIP Techniques](6305-projection-and-mip-techniques.md)
++Projects a single scalar value (e.g., maximum) along each ray, rather than integrating emission/absorption [Direct volume ray casting](19-direct-volume-ray-casting.md).
++
++### [GPU Ray Casting for Light Field Display](6503-gpu-ray-casting-for-light-field-display.md)
++Generates per-pixel ray parameters for multi-viewer 3D visualization using MCOP projection, addressing light field display challenges.
++
++### [WebGL Multi-pass Ray-casting with 3D Geometry Intersection](6575-webgl-multi-pass-ray-casting-with-3d-geometry-intersection.md)
++Integrates 3D meshes with volumes in WebGL using a five-pass pipeline to handle lack of native 3D texture support.
++
++### [TVAM Integrator](6814-tvam-integrator.md)
++Handles projector ray sampling and time sampling for volumetric additive manufacturing integrators.
++
++### Forward Mapping
++A variant that projects each voxel directly onto the image plane, relying on traversal order for hidden surface removal [S56, unofficial]. It determines the foremost corner voxel and establishes a traversal order (rows, columns, slices) such that the foremost voxel is visited last [S56, unofficial].
++
++### Gradient Shading for Turbulent Flow Visualization
++Applies solid-texture-mapping to map one velocity component onto another, then applies gradient shading with ambient, diffuse, specular, and glossiness lighting to solve the "fuzzy" look of turbulent flow data [S57].
++
++### Raw Volume Rendering
++A slower algorithm that does not use precomputed data structures like min-max octrees, useful only for single renderings [S58].
++
++### Spherical Volume Rendering with Adaptive Ray Casting
++Uses a spherical mosaic as proxy geometry and adaptive sampling based on depth distribution and data change rate to improve efficiency for ocean scalar fields [S46, abstract only, unofficial].
++
++### Svox1 Rendering Formula (Nearest-Neighbor)
++Implements the Svox1 rendering formula using nearest-neighbor interpolation with infinitely many steps, including forward, backward, and fused variants [S59, unofficial].
++
++### MCOP GPU Ray-Casting Pipeline
++Uses Mixed Camera and Object Perspective (MCOP) projection to render light fields, bypassing rasterizer interpolation limitations by computing ray entry/direction in the fragment shader [S60].
++
++### GPU-accelerated ray casting with volumetric lenses
++Calculates ray directions using lens rules (feature-based, sampling-rate-based, angular) and implements a four-pass fragment program structure for magnifier/angular lenses [S61].
+ 
+ ## Background
+-The term "direct volume rendering" was coined by Marc Levoy in his 1988 paper "Display of Surfaces from Volume Data" [S6, unofficial]. Levoy defined the volume rendering pipeline, which remains an influential framework [S6, unofficial]. The technique was originally designed to display weak or fuzzy surfaces with smooth silhouettes and few aliasing artifacts [S6, unofficial].
++Direct volume ray casting was pioneered by Marc Levoy in his seminal 1988 paper "Display of Surfaces from Volume Data" [S8, S9, unofficial]. Levoy coined the term and defined the standard visualization pipeline (classification, shading, compositing) [S8, unofficial]. The method was initially developed for CPU-based rendering and later adapted for GPU acceleration in the early 2000s (e.g., Roettger et al. 2003, Stegmaier et al. 2004) as fragment shader capabilities improved [S5, unofficial]. It remains the foundational technique for interactive volume visualization in medical imaging and scientific visualization [S4, S9, S26, unofficial].
+ 
+ ## Sources
+-[S1] Hierarchical and parallelizable direct volume rendering for irregular and multiple grids, https://doi.org/10.1109/visual.1996.567606, fetched 2026-10-24
+-[S2] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+-[S3] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)
+-[S4] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+-[S5] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)
+-[S6] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
+-[S7] DakaiZhou/Volume-Rendering, https://github.com/DakaiZhou/Volume-Rendering, fetched 2026-10-26 (unofficial)
+-[S8] rhnfzl/raycasting-volume-rendering, https://github.com/rhnfzl/raycasting-volume-rendering, fetched 2026-10-26 (unofficial)
+-[S9] upupming/volume-rendering, https://github.com/upupming/volume-rendering, fetched 2026-10-26 (unofficial)
+-[S10] khizarsiddiqui/Volume-Rendering, https://github.com/khizarsiddiqui/Volume-Rendering, fetched 2026-10-26 (unofficial)
+-[S11] Twinklebear/webgl-marching-cubes, https://github.com/Twinklebear/webgl-marching-cubes, fetched 2026-10-26 (unofficial)
+-[S12] l0exy1h/VolumetricPathTracing-public, https://github.com/l0exy1h/VolumetricPathTracing-public, fetched 2026-10-26 (unofficial)
+-[S13] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)
+-[S14] viljanvr/VisualNifty, https://github.com/viljanvr/VisualNifty, fetched 2026-10-26 (unofficial)
+-[S15] vulekhanh/VolumeRendering, https://github.com/vulekhanh/VolumeRendering, fetched 2026-10-26 (unofficial)
+-[S16] GitHub - LDeakin/VkVolume: Vulkan-based volume renderer with efficient ..., https://github.com/LDeakin/VkVolume, fetched 2026-10-26 (unofficial)
+-[S17] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+-[S18] 3D: ray-cast volume rendering instead of a stack of slices, https://github.com/jamescarruthers/quick_dicom/pull/4, fetched 2026-10-27 (unofficial)
+-[S19] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
+-[S20] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)
+-[S21] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
+-[S22] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)
+-[S23] franjaviersans/VRCUDA, https://github.com/franjaviersans/VRCUDA, fetched 2026-10-27 (unofficial)
+-[S24] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)
+-[S25] (PDF) GPU-Based Volume Rendering for Medical Imagery - ResearchGate, https://www.researchgate.net/publication/228912978_GPU-Based_Volume_Rendering_for_Medical_Imagery, fetched 2026-10-28 (unofficial)
+-[S26] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
+-[S27] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)
+-[S28] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
+-[S29] Differentiable Rendering with Reparameterized Volume Sampling, https://doi.org/10.48550/arxiv.2302.10970, fetched 2026-10-26 (unofficial)
+-[S30] Academia | (PDF) FAST VOLUME RENDERING USING A SHEAR-WARP FACTORIZATION ..., https://www.academia.edu/6981092/FAST_VOLUME_RENDERING_USING_A_SHEAR_WARP_FACTORIZATION_OF_THE_VIEWING_TRANSFORMATION, fetched 2026-10-27 (unofficial)
+-[S31] ApaarRaina/DiffTomo, https://github.com/ApaarRaina/DiffTomo, fetched 2026-10-27 (unofficial)
+-[S32] Hardware-based view-independent cell projection, https://www.semanticscholar.org/paper/Hardware-based_view-independent_cell_projection-Weiler-Kraus/36615d19709bce724437ec3257e43a1916f7de26, fetched 2026-10-29+[S1] The Ray-Marching Algorithm, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/ray-marching-algorithm.html, fetched 2026-10-25 (unofficial)
++[S2] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
++[S3] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
++[S4] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)
++[S5] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
++[S6] Shear-warp factorization volume rendering visualization system, https://archive.org/details/0162018299360, fetched 2026-10-26 (unofficial)
++[S7] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
++[S8] Volume Visualisation Via Variable-Detail Non-Photorealistic Illustration, https://uwspace.uwaterloo.ca/bitstream/10012/1104/1/jlmckinl2002.pdf, fetched 2026-10-26 (unofficial)
++[S9] Volume rendering techniques for general purpose graphics hardware, https://opus4.kobv.de/opus4-fau/files/9/Dissertation.pdf, fetched 2026-10-26 (unofficial)
++[S10] palasjir/ct-volumetric-rendering, https://github.com/palasjir/ct-volumetric-rendering, fetched 2026-10-26 (unofficial)
++[S11] rhnfzl/raycasting-volume-rendering, https://github.com/rhnfzl/raycasting-volume-rendering, fetched 2026-10-26 (unofficial)
++[S12] upupming/volume-rendering, https://github.com/upupming/volume-rendering, fetched 2026-10-26 (unofficial)
++[S13] khizarsiddiqui/Volume-Rendering, https://github.com/khizarsiddiqui/Volume-Rendering, fetched 2026-10-26 (unofficial)
++[S14] RuolinZheng08/volume-rendering, https://github.com/RuolinZheng08/volume-rendering, fetched 2026-10-26 (unofficial)
++[S15] rokcej/volumetric-ray-casting, https://github.com/rokcej/volumetric-ray-casting, fetched 2026-10-26 (unofficial)
++[S16] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
++[S17] Twinklebear/webgl-marching-cubes, https://github.com/Twinklebear/webgl-marching-cubes, fetched 2026-10-26 (unofficial)
++[S18] Yonghao-Lee/differentiable-rendering, https://github.com/Yonghao-Lee/differentiable-rendering, fetched 2026-10-26 (unofficial)
++[S19] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)
++[S20] gillesferrand/Unity-RayTracing, https://github.com/gillesferrand/Unity-RayTracing, fetched 2026-10-26 (unofficial)
++[S21] Dy111111/volumeRenderingGPU, https://github.com/Dy111111/volumeRenderingGPU, fetched 2026-10-26 (unofficial)
++[S22] vulekhanh/VolumeRendering, https://github.com/vulekhanh/VolumeRendering, fetched 2026-10-26 (unofficial)
++[S23] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
++[S24] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
++[S25] hands133/opengl-directVolumeRenderer, https://github.com/hands133/opengl-directVolumeRenderer, fetched 2026-10-26 (unofficial)
++[S26] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
++[S27] thePZH/VolumeRendering-OpenGL, https://github.com/thePZH/VolumeRendering-OpenGL, fetched 2026-10-26 (unofficial)
++[S28] manishaa1704/Interactive-DVR-System, https://github.com/manishaa1704/Interactive-DVR-System, fetched 2026-10-26 (unofficial)
++[S29] GitHub - LDeakin/VkVolume: Vulkan-based volume renderer with efficient ..., https://github.com/LDeakin/VkVolume, fetched 2026-10-26 (unofficial)
++[S30] Volume Rendering With Ray Casting - WPI, https://web.cs.wpi.edu/~matt/courses/cs563/talks/powwie/p1/ray-cast.htm, fetched 2026-10-26 (unofficial)
++[S31] PDF VOLUME RENDERING BY RAY CASTING - Warse, https://www.warse.org/IJATCSE/static/pdf/file/icetetssp47.pdf, fetched 2026-10-30 (unofficial)
++[S32] 20 volume rendering (using glsl) with ray casting algorithm, https://stackoverflow.com/questions/9482572/volume-rendering-using-glsl-with-ray-casting-algorithm?rq=4, fetched 2026-10-26 (unofficial)
++[S33] Guide for beginners: What is Volume Ray Casting? - VisCircle, https://viscircle.com/guide-for-beginners-what-is-volume-ray-casting/, fetched 2026-10-27 (unofficial)
++[S34] Volume Ray Casting Techniques and Applications using ..., https://halogenica.net/bin/graphics/volume-rendering-using-gpgpu/Thesis.pdf, fetched 2026-10-27 (unofficial)
++[S35] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
++[S36] 3D: ray-cast volume rendering instead of a stack of slices, https://github.com/jamescarruthers/quick_dicom/pull/4, fetched 2026-10-27 (unofficial)
++[S37] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)
++[S38] kapadia/volumetric.js, https://github.com/kapadia/volumetric.js, fetched 2026-10-27 (unofficial)
++[S39] hwenchi/visible-human-volume, https://github.com/hwenchi/visible-human-volume, fetched 2026-10-27 (unofficial)
++[S40] PDF CS 519: Scientific Visualization - University of Illinois Urbana-Champaign, https://courses.grainger.illinois.edu/cs519/fa2017/Lecture%2012%20-%20Volume%20Visualization.pdf, fetched 2026-10-27 (unofficial)
++[S41] StarsX/VoxelizerX12, https://github.com/StarsX/VoxelizerX12, fetched 2026-10-27 (unofficial)
++[S42] vooranagendra/Parallel-3D-Volume-Rendering-using-MPI, https://github.com/vooranagendra/Parallel-3D-Volume-Rendering-using-MPI, fetched 2026-10-27 (unofficial)
++[S43] overhaul88/Parallel_Volume_Rendering, https://github.com/overhaul88/Parallel_Volume_Rendering, fetched 2026-10-27 (unofficial)
++[S44] PDF Direct Volume Rendering, https://www.sci.utah.edu/~stevec/classes/cs5630/dvr.pdf, fetched 2026-10-27 (book)
++[S45] Medical Volume Rendering Techniques, https://arxiv.org/pdf/1802.07710v1, fetched 2026-10-27 (unofficial)
++[S46] Fast volume rendering using a shear-warp factorisation ... - ResearchGate, https://www.researchgate.net/publication/243763776_Fast_volume_rendering_using_a_shear-warp_factorisation_of_the_viewing_transform, fetched 2026-10-27 (abstract only, unofficial)
++[S47] JCLemme/voxnine, https://github.com/JCLemme/voxnine, fetched 2026-10-28 (unofficial)
++[S48] WebGL Volume Rendering made simple - Lebarba, https://www.barbaleon.co.uk/webgl/index.html, fetched 2026-10-28 (unofficial)
++[S49] (PDF) GPU-Based Volume Rendering for Medical Imagery - ResearchGate, https://www.researchgate.net/publication/228912978_GPU-Based_Volume_Rendering_for_Medical_Imagery, fetched 2026-10-28 (unofficial)
++[S50] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
++[S51] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)
++[S52] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)
++[S53] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
++[S54] Three Architectures for Volume Rendering, https://vcg.seas.harvard.edu/publications/19950801-three-architectures-for-volume-rendering/paper, fetched 2026-10-29
++[S55] https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, https://github.com/pygfx/pygfx/blob/main/pygfx/renderers/wgpu/wgsl/volume_ray.wgsl, fetched 2026-10-29 (unofficial)
++[S56] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)
++[S57] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
++[S58] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28
++[S59] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)
++[S60] GPU Accelerated Direct Volume Rendering on an Interactive Light Field Display, https://doi.org/10.1111/j.1467-8659.2008.01120.x, fetched 2026-10-29
++[S61] PDF The Magic Volume Lens: An Interactive Focus+Context Technique for ..., https://www3.cs.stonybrook.edu/~mueller/papers/lens_highres.pdf, fetched 2026-10-27

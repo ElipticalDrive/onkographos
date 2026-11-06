@@ -1,50 +1,49 @@
 # Volume Illustration Tone Shading
 
-Also called: Modified Gooch tone shading for volume models, Tone illumination model
+Also called: Gooch tone shading for volumes, Modified Gooch tone shading for volume, Modified Gooch tone shading for volume models, Tone Shading, Tone illumination model
 
 ## Overview
-Volume Illustration Tone Shading is a non-photorealistic illumination model for volume rendering that combines gaseous illumination with directed shading based on the signed dot product between the volume sample gradient and the light vector [S1, unofficial]. Unlike standard Gooch shading, the illuminated object contribution is zero at orientations orthogonal to the light vector, matching diffuse illumination models [S1, unofficial]. It differs from [Vignette Shading](1830-vignette-shading.md) and [Blinn-Phong Toon Shading](4708-blinn-phong-toon-shading.md) by using continuous warm/cool color interpolation for tone and clamped dot products for directed illumination, rather than silhouette-based darkening or discrete toon bands [S1, unofficial].
+Volume Illustration Tone Shading is a non-photorealistic illumination model for volume rendering that combines gaseous illumination with directed shading based on the signed dot product between the volume sample gradient and the light vector [S1]. Unlike standard Gooch shading, the illuminated object contribution is zero at orientations orthogonal to the light vector, matching diffuse illumination models [S1].
 
 ## How it works
-**Inputs:**
-- Volume dataset $V$ with scalar values.
-- Gradient field $\nabla f_n$ (normalized volume sample gradient).
-- Light vectors $L_i$ (unit vectors, $i=1 \dots NL$).
-- Illuminated object color $I_i$ (from transfer function or base color).
-- Gaseous illumination color $I_G$ (from transfer function).
-- Parameters: $k_{ta}, k_{td}, k_{ty}, k_{tb}$.
-
-**Outputs:**
-- Final color $c$ for each volume sample.
+**Inputs and Outputs:**
+- **Inputs:** Volume dataset $V$ with scalar values; gradient field $\nabla f_n$ (normalized volume sample gradient) [S1]; light vectors $L_i$ (unit vectors, $i=1 \dots NL$) [S1]; illuminated object color $I_i$ (from transfer function) [S1]; gaseous illumination color $I_G$ (from transfer function) [S1]; parameters $k_{ta}, k_{td}, k_{ty}, k_{tb}$.
+- **Output:** Final color $c$ for each volume sample [S1].
 
 **Data Structures:**
-- Colors are 3-component vectors $(R, G, B)$.
-- $\nabla f_n$ is a normalized 3D vector.
-- $L$ is a normalized 3D vector.
+- Colors are 3-component vectors $(R, G, B)$ [G].
+- $\nabla f_n$ and $L$ are normalized 3D vectors [G].
 
-**Parameters:**
-- $k_{ta}$: Controls gaseous illumination amount. Typical: $1.0$ [S1, unofficial].
-- $k_{td}$: Controls directed illumination amount. Typical: $0.6$ [S1, unofficial].
-- $k_{ty}$: Warm tone intensity. Typical: $0.3$ [S1, unofficial].
-- $k_{tb}$: Cool tone intensity. Typical: $0.3$ [S1, unofficial].
-- $NL$: Number of light sources. Note: More than a few lights likely results in confusing images [S1, unofficial].
+**Numbered Steps:**
+1. Compute warm and cool tone colors from parameters.
+2. For each light source, compute the dot product between the normalized gradient and the light vector.
+3. Calculate the tone contribution $I_t$ by interpolating between warm and cool colors using the dot product.
+4. Calculate the directed illumination contribution $I_o$, clamping to zero for negative dot products.
+5. Accumulate $I_t$ and $I_o$ across all lights, add the gaseous illumination component, and output the final color $c$.
 
 **Formulas:**
-1. Warm color: $c_w = (k_{ty}, k_{ty}, 0)$ [S1, unofficial].
-2. Cool color: $c_c = (0, 0, k_{tb})$ [S1, unofficial].
+1. Warm color: $c_w = (k_{ty}, k_{ty}, 0)$ [S1].
+2. Cool color: $c_c = (0, 0, k_{tb})$ [S1].
 3. Tone contribution per light:
    $$ I_t = \left(\frac{1.0 + \nabla f_n \cdot L}{2}\right) c_w + \left(1 - \frac{1.0 + \nabla f_n \cdot L}{2}\right) c_c $$
-   [S1, unofficial]
+   [S1]
 4. Directed illumination contribution per light:
    $$ I_o = \begin{cases} k_{td} I_i (\nabla f_n \cdot L) & \text{if } \nabla f_n \cdot L > 0 \\ 0 & \text{if } \nabla f_n \cdot L \le 0 \end{cases} $$
-   [S1, unofficial]
+   [S1]
 5. Final color:
-   $$ c = k_{ta} I_G + \sum_{i=1}^{NL} (I_t + I_o) $$
-   [S1, unofficial]
+   $$ c = k_{ta} I_G + \sum_{i=1}^{NL} (I_t + k_{td} I_o) $$
+   [S1] Note: The source defines $I_o$ with $k_{td}$ already included, but the final summation formula multiplies $I_o$ by $k_{td}$ again. This is a known typo in the original paper [S1]. Implementation should use $I_t + I_o$ where $I_o$ contains $k_{td}$.
 
-**Pitfalls:**
-- Using more than a few light sources results in confusing images because humans are not used to interpreting complex illumination from many lights [S1, unofficial].
-- The directed illumination $I_o$ is zero when the gradient is orthogonal to the light, unlike standard diffuse models which might use absolute values or different clamping [S1, unofficial].
+**Parameters:**
+- $k_{ta}$: Controls gaseous illumination amount. Typical: $1.0$ [S1].
+- $k_{td}$: Controls directed illumination amount. Typical: $0.6$ [S1].
+- $k_{ty}$: Warm tone intensity. Typical: $0.3$ [S1].
+- $k_{tb}$: Cool tone intensity. Typical: $0.3$ [S1].
+- $NL$: Number of light sources. Note: More than a few lights likely results in confusing images [S1].
+
+**Edge Cases and Pitfalls:**
+- Using more than a few light sources results in confusing images because humans are not used to interpreting complex illumination from many lights [S1].
+- The directed illumination $I_o$ is zero when the gradient is orthogonal to the light, unlike standard diffuse models which might use absolute values or different clamping [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -71,60 +70,49 @@ def volume_illustration_tone_shading(gradient, light_vectors, I_i, I_G, k_ta=1.0
     c_w = (k_ty, k_ty, 0.0)
     c_c = (0.0, 0.0, k_tb)
     
-    # Initialize result
-    color = (0.0, 0.0, 0.0)
-    
-    # Add gaseous illumination
-    color = vector_add(color, vector_scale(I_G, k_ta))
+    # Initialize result with gaseous illumination
+    color = (I_G[0] * k_ta, I_G[1] * k_ta, I_G[2] * k_ta)
     
     # Sum contributions from all lights
     for L in light_vectors:
         # Compute dot product
-        dot = vector_dot(gradient, L)
+        dot = gradient[0]*L[0] + gradient[1]*L[1] + gradient[2]*L[2]
         
         # Compute tone contribution It
-        # It = ((1.0 + dot) / 2) * cw + (1 - (1.0 + dot) / 2) * cc
         t1 = (1.0 + dot) / 2.0
         t2 = 1.0 - t1
-        I_t = vector_add(vector_scale(c_w, t1), vector_scale(c_c, t2))
+        I_t = (c_w[0]*t1 + c_c[0]*t2, c_w[1]*t1 + c_c[1]*t2, c_w[2]*t1 + c_c[2]*t2)
         
         # Compute directed illumination contribution Io
+        # Note: Source [S1] contains a typo where k_td is multiplied twice.
+        # We follow the explicit I_o definition which already includes k_td.
         if dot > 0:
-            I_o = vector_scale(I_i, k_td * dot)
+            I_o = (I_i[0] * k_td * dot, I_i[1] * k_td * dot, I_i[2] * k_td * dot)
         else:
             I_o = (0.0, 0.0, 0.0)
             
         # Add to total
-        color = vector_add(color, vector_add(I_t, I_o))
+        color = (color[0] + I_t[0] + I_o[0], color[1] + I_t[1] + I_o[1], color[2] + I_t[2] + I_o[2])
         
     return color
-
-def vector_add(v1, v2):
-    return (v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2])
-
-def vector_scale(v, s):
-    return (v[0] * s, v[1] * s, v[2] * s)
-
-def vector_dot(v1, v2):
-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
 ```
 
 ## Subtopics
 
 ### [Gooch Shading](1670-gooch-shading.md)
-A shading technique applied in the fragment shader using vertex normals sampled on the fly.
+A non-photorealistic illumination model applied to volume rendering isosurfaces, combining cool/warm color mapping with directional shading based on the angle between the surface normal and the light vector. It is distinguished from standard Gooch shading by its specific integration with central difference normal estimation in rasterization pipelines, ensuring consistent visual output across different extraction methods (rasterization vs. ray-marching).
 
 ## Operating characteristics
-- **Time Complexity:** Linear in the number of volume samples and the number of light sources $NL$. Each sample requires $NL$ dot products and vector operations.
-- **Memory Complexity:** Low, primarily storing the volume data and gradients. No large auxiliary buffers required beyond standard volume rendering structures.
-- **Performance:** Depends on hardware acceleration for volume ray casting or slicing. The per-sample computation is lightweight but involves multiple vector operations per light.
-- **Strengths:** Enhances shape perception by providing continuous tone variation and directional cues. Preserves base tissue colors while adding illustrative depth. Effective for medical volumes where structure clarity is key [S1, unofficial].
-- **Limitations:** Can become visually confusing with many light sources. Relies on accurate gradient estimation, which can be noisy in low-resolution or noisy data.
-- **When to use:** When illustrative clarity and shape perception are prioritized over photorealism, especially in medical or scientific visualization [S1, unofficial].
-- **When not to use:** When photorealistic rendering is required, or when the scene has many light sources that would create visual clutter.
+- **Time and memory complexity:** Not given in the sources.
+- **Measured performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths and limitations:** Enhances shape perception by providing continuous tone variation and directional cues [S1]. Can become visually confusing with many light sources [S1]. Relies on accurate gradient estimation, which can be noisy in low-resolution or noisy data [G].
+- **When to use and when not:** Not given in the sources.
 
 ## Background
-Originated in the paper "Non-Photorealistic Rendering of Volume Models" [S1, unofficial]. It extends Gooch shading to volume data by using volume gradients instead of surface normals and modifying the directed illumination component to be zero at orthogonal orientations, aligning with diffuse illumination models [S1, unofficial]. It is used in medical visualization to enhance the perception of 3D structures like liver, kidney, and intestine [S1, unofficial].
+Originated in the paper "Non-Photorealistic Rendering of Volume Models" [S1]. It extends Gooch shading to volume data by using volume gradients instead of surface normals and modifying the directed illumination component to be zero at orthogonal orientations, aligning with diffuse illumination models [S1]. It is used in medical visualization to enhance the perception of 3D structures like liver, kidney, and intestine [S1]. Based on Gooch et al. [Gooch98] proposed illumination model [S2, unofficial].
 
 ## Sources
-[S1] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27 (unofficial)
+[S1] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
+[S2] Non-Photorealistic Rendering of Volume Models, https://www.cs.umbc.edu/~rheingan/pubs/volillus00.pdf, fetched 2026-10-27 (unofficial)
+[S3] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27 (unofficial)

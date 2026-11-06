@@ -1,42 +1,34 @@
 # Octahedron Signed Distance Function
 Also called: Octahedron SDF, sdOctahedron
+
 ## Overview
-Computes the exact signed distance from a point to a regular octahedron centered at the origin with size parameter $s$ [S1, unofficial]. It is distinguished from its siblings, the [Hexagonal Prism](2348-hexagonal-prism.md) and [Triangular Prism](2865-triangular-prism.md), by its specific symmetry group and face geometry [S1, unofficial].
+Computes the exact signed distance from a query point to the surface of a regular octahedron centered at the origin with a specified size parameter. It solves the primitive distance query required for ray marching and implicit modeling. It is distinguished from other polyhedral primitives by its specific symmetry and the use of coordinate permutation to handle its six faces efficiently.
+
 ## How it works
-**Inputs:** Point $p = (p_x, p_y, p_z)$ in 3D space; size $s$ (distance from center to vertex along axes) [S1, unofficial].
-**Outputs:** Signed distance $d$. Negative if inside, positive if outside, zero on surface [S1, unofficial].
+**Inputs and outputs**:
+- Input: Query point $p \in \mathbb{R}^3$, size parameter $s \in \mathbb{R}^+$ (representing the distance from the center to a vertex along the axes, or the "radius" of the octahedron).
+- Output: Signed distance $d \in \mathbb{R}$. $d < 0$ inside, $d > 0$ outside.
 
-**Data Structures:**
-- $p$: Input vector.
-- $q$: Permuted vector used for face-specific calculation.
-- $m$: Scalar intermediate value.
-- $k$: Scalar clamp value.
+**Data structures**:
+- None required beyond standard 3D vectors.
 
-**Steps:**
-1. Compute absolute coordinates: $p \leftarrow |p|$ [S1, unofficial].
-2. Compute $m = p_x + p_y + p_z - s$ [S1, unofficial].
-3. Determine the closest face region by comparing $3p_i$ against $m$:
-    - If $3p_x < m$, set $q = (p_x, p_y, p_z)$ [S1, unofficial].
-    - Else if $3p_y < m$, set $q = (p_y, p_z, p_x)$ [S1, unofficial].
-    - Else if $3p_z < m$, set $q = (p_z, p_x, p_y)$ [S1, unofficial].
-    - Else (central region), return $m \cdot \tan(\pi/6)$ [S1, unofficial].
-4. Calculate $k = \text{clamp}(0.5 \cdot (q_z - q_y + s), 0, s)$ [S1, unofficial].
-5. Compute the distance vector $v = (q_x, q_y - s + k, q_z - k)$ [S1, unofficial].
-6. Return $d = |v|$ [S1, unofficial].
+**Steps**:
+1.  Compute the absolute value of the query point: $p' = |p|$. Let components be $p_x, p_y, p_z$.
+2.  Calculate the sum minus size: $m = p_x + p_y + p_z - s$.
+3.  Determine the closest face region by comparing $3p_i$ against $m$:
+    -   If $3p_x < m$, the point is closest to the face normal to the X-axis. Set $q = (p_x, p_y, p_z)$.
+    -   Else if $3p_y < m$, the point is closest to the face normal to the Y-axis. Set $q = (p_y, p_z, p_x)$.
+    -   Else if $3p_z < m$, the point is closest to the face normal to the Z-axis. Set $q = (p_z, p_x, p_y)$.
+    -   Else, the point is in the central region (closest to the origin relative to the face planes). Return $m \cdot \tan(\pi/6)$.
+4.  For the selected $q = (q_x, q_y, q_z)$, calculate the clamp value:
+    $$ k = \text{clamp}(0.5 \cdot (q_z - q_y + s), 0, s) $$
+5.  Calculate the distance vector components:
+    $$ v_x = q_x $$
+    $$ v_y = q_y - s + k $$
+    $$ v_z = q_z - k $$
+6.  Return the Euclidean norm: $d = \sqrt{v_x^2 + v_y^2 + v_z^2}$.
 
-**Formulas:**
-- $m = \sum p_i - s$ [S1, unofficial].
-- $k = \max(0, \min(s, 0.5(q_z - q_y + s)))$ [S1, unofficial].
-- $d = \sqrt{q_x^2 + (q_y - s + k)^2 + (q_z - k)^2}$ [S1, unofficial].
-
-**Parameters:**
-- $s$: Size of the octahedron. Typical values depend on scene scale [G].
-
-**Edge Cases:**
-- **Precision:** Near the center, the distance is linear ($m \cdot \tan(\pi/6)$). Floating point errors in $m$ directly affect the sign [G].
-- **Boundaries:** The logic relies on the symmetry of the octahedron. Points exactly on the boundaries between regions (e.g., $3p_x = m$) are handled by the `else if` chain, which is mathematically continuous but may exhibit slight discontinuities in derivatives due to branch selection [G].
-
-**Pseudocode:**
+**Pseudocode**:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
@@ -48,47 +40,56 @@ def sd_octahedron(p, s):
     p: tuple or list of 3 floats (x, y, z)
     s: float, size parameter
     """
-    # Step 1: Absolute coordinates
+    # Step 1: Absolute value
     px, py, pz = abs(p[0]), abs(p[1]), abs(p[2])
     
-    # Step 2: Calculate m
+    # Step 2: Sum minus size
     m = px + py + pz - s
     
     # Step 3: Determine region
-    if 3.0 * px < m:
+    if 3 * px < m:
         qx, qy, qz = px, py, pz
-    elif 3.0 * py < m:
+    elif 3 * py < m:
         qx, qy, qz = py, pz, px
-    elif 3.0 * pz < m:
+    elif 3 * pz < m:
         qx, qy, qz = pz, px, py
     else:
         # Central region
-        return m * math.tan(math.pi / 6.0)
+        return m * math.tan(math.pi / 6)
     
-    # Step 4: Calculate k
+    # Step 4: Clamp calculation
     k = max(0.0, min(s, 0.5 * (qz - qy + s)))
     
-    # Step 5 & 6: Distance
-    dx = qx
-    dy = qy - s + k
-    dz = qz - k
+    # Step 5: Distance vector
+    vx = qx
+    vy = qy - s + k
+    vz = qz - k
     
-    return math.sqrt(dx*dx + dy*dy + dz*dz)
+    # Step 6: Norm
+    return math.sqrt(vx*vx + vy*vy + vz*vz)
 ```
+
+**Parameters**:
+- $s$: The "radius" of the octahedron. The vertices lie at $(\pm s, 0, 0), (0, \pm s, 0), (0, 0, \pm s)$.
+
+**Edge cases**:
+- $s=0$: Returns distance to origin.
+- Precision: The `clamp` and comparisons are robust, but floating point errors near the boundaries ($3p_i = m$) may cause slight discontinuities in derivatives, though the distance value remains continuous.
+
 ## Subtopics
 
 ### Equilateral Triangle Signed Distance Function
-Computes the signed distance to an equilateral triangle with inscribed radius $r$ [S2, unofficial]. The algorithm sets $k = \sqrt{3.0}$, transforms $p_x \leftarrow |p_x| - r$ and $p_y \leftarrow p_y + r/k$ [S2, unofficial]. If $p_x + k \cdot p_y > 0.0$, it reflects the point via $p \leftarrow \text{Vec2}(p_x - k \cdot p_y, -k \cdot p_x - p_y) \cdot 0.5$ [S2, unofficial]. It then clamps the x-coordinate via $p_x \leftarrow p_x - \text{clamp}(p_x, -2.0 \cdot r, 0.0)$ [S2, unofficial]. Finally, it returns $-|p| \cdot \text{sign}(p_y)$ [S2, unofficial]. It is chosen when 2D triangular primitives are needed in SDF scenes [G].
+Computes the signed distance to an equilateral triangle with inscribed radius $r$ in 2D. It transforms the query point into a canonical sector, clamps to the edge, and returns the distance with a sign based on the Y-coordinate. It is used for 2D SDF primitives. [S2, unofficial]
 
 ## Operating characteristics
-**Time Complexity:** $O(1)$. Constant number of arithmetic operations and comparisons [S1, unofficial].
-**Memory Complexity:** $O(1)$. No auxiliary data structures [S1, unofficial].
-**Strengths:** Exact analytic solution; no iteration required; fast evaluation suitable for real-time ray marching [S1, unofficial].
-**Limitations:** Only applies to regular octahedra centered at the origin [S1, unofficial]. Scaling requires adjusting $s$ [G].
-**When to use:** When rendering octahedral geometry in ray marching or SDF-based rendering [S1, unofficial].
-**When not to use:** For irregular octahedra or when the octahedron is not axis-aligned (requires transformation of $p$ before calling) [G].
+- **Time complexity**: $O(1)$. Constant number of arithmetic operations and comparisons.
+- **Memory complexity**: $O(1)$. No auxiliary data structures.
+- **Strengths**: Exact analytical solution; no approximation error; very fast evaluation suitable for real-time ray marching.
+- **Limitations**: Only applies to regular octahedra. Requires transformation (rotation/translation) for arbitrary placement.
+
 ## Background
-The function is a standard primitive in the repertoire of signed distance functions for ray marching [G]. It is widely used in procedural generation and real-time graphics for its efficiency and clean geometry [G].
+The function is a standard primitive in the library of Signed Distance Functions popularized by Inigo Quilez and others in the procedural geometry and ray marching community. It is implemented in various open-source ray tracers and SDF libraries. [S1, unofficial][S2, unofficial]
+
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
 [S2] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)

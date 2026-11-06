@@ -1,0 +1,71 @@
+GPUのrasterizerを用いてポリゴンからvoxelを構築する方法を考えてみます。 3つの軸 voxel…
+
+GPU上でのvoxel構築手法 | shikihuiku
+GPUのrasterizerを用いてポリゴンからvoxelを構築する方法を考えてみます。
+3つの軸
+voxelをrasterizerを用いてレンダリングする場合は、どの軸から投影するかを考慮する必要があります。
+たとえば、XY平面に垂直なポリゴンをXY平面から正射影したマトリクスでラスタライズすると、1pixelも描画されません。この問題を解決するため、ポリゴンごとに、どの軸から投影するのが一番望ましいかを考慮しなくてはなりません。この決定は簡単で、面法線と各軸の内積をとって、絶対値が一番大きな面から投影すれば良いだけです。
+投影する面が決まれば、それに従って各頂点のXYZの要素を入れ替えて、一番大きな投影面が、正規化デバイス座標系のXY平面からレンダリングされるようにします。この処理はgeometry shaderで行います。さらに、頂点データにオリジナルの座標を記述しておき、それを基にpixel shader側でvoxel化を行います。
+Conservative Rasterizationとvoxelのseparation
+GPUのrasterizerは、基本的には描画するプリミティブがpixelの中央を内包したときに、その位置でpixel shaderを起動します。2Dのrasterizeでは、このルールで連続した平面のポリゴンをpixelの抜け無くレンダリングすることができます。
+しかし3Dのvoxelizeでは、この条件では不十分です。連続平面のポリゴンをvoxelizeしたにもかかわらず、voxelizeされたvoxelでvoxel空間を正しく分割（内包）できないケースがあります。このvoxel空間の分割の定義には種類があり、26-separating、18-separating、6-separatingがあります。
+話が少しそれますが、pixelでラインのプリミティブを描画する場合を考えます。
+pixelでのseparatingには、4-separatingと8-separatingがあり、それぞれのseparatingででラインをrasterizeした場合を下図に示します。4-separatingは、分割された一方の領域のすべてのpixelの4-neighborhoodが、分割された他方のpixelに到達できないことを定義します。8-separatingも同様です。
+話をvoxelに戻します。
+もっとも”conservative”なのは26-separatingで、これは一方のvoxel空間に属するvoxelに隣接する26個のvoxelが、分割された他方のvoxel空間に到達できないことを定義します。同様に18,6ではそれぞれの隣接するvoxelで、分割された空間に到達出来ないことを定義します。6-separatingは、もっとも”薄い”voxelによる空間分割の定義で、このルールに基づくvoxelizationをthin-voxelizationと呼びます。下図はそれぞれの隣接voxelの定義です。
+これらのvoxelizeを行うためには、正規化デバイス座標系に投影されたポリゴン平面が、少しでもpixelと交差した場合は、pixel shaderを起動して、voxelを描画をするかをテストする必要があります。この2Dのrasterizeを、conservative rasterizationと呼びます。
+conservative rasterizationを行うために、GPUのrasterizationのルールを変更することは出来ないので、geometry shaderで、投入されたプリミティブの各頂点を少し移動して、プリミティブの平面を大きくします。プリミティブの面法線とエッジのベクトルの外積から、エッジの法線を求め、conservertive rasterizationに必要な分だけ頂点をオフセットさせます。この計算で作られるプリミティブは、本来のconservative rasterizationに比べて余計なpixel shaderを起動する可能性があります（拡張した三角形の各頂点付近です）。しかしpixel shaderでvoxelとの交差判定を行うので、問題にはなりません。
+広告
+三角形とvoxelの交差判定
+pixel shaderでは、実際にvoxelizeする必要があるかをテストします。
+まず、プリミティブの平面（無限平面）が対象voxelと交差しているかをチェックします。プリミティブの面法線と内積をとって、もっともプラス側になるvoxelの頂点を、法線ベクトルの各XYZの符号から求めます（下図の赤い点）。次に、このvoxel頂点と点対称に位置する頂点も求めます（下図の青い点）。この2つのvoxelの頂点と面法線で、それぞれ内積をとり、計算結果の符号が異なれば、プリミティブの平面がvoxelと交差していると判定できます。
+次に、プリミティブ（3角形）がvoxelと交差しているかは、xy,xz,yzの各面にvoxelとプリミティブを投影してテストします。投影した各エッジの法線（エッジのベクトルと、面法線の外積。geometry shaderから渡しても良いかも ）を反転した、エッジに垂直なプリミティブ中心向きのベクトルと、投影したvoxelの頂点とテストを行います。各エッジの法線と内積をとると一番大きな値になるvoxelの頂点をテストの対象として、それぞれ内積を計算し、3辺すべてがプラスの場合は、投影したプリミティブが投影したvoxelと交差していると判定できます。
+上記二つの条件を満たした場合、プリミティブがvoxelと交差していると判定することが出来ます。この判定で構築できるのは、いわゆる26-separatingのvoxelになります。
+追記
+上記の条件に加えて、voxelとプリミティブのAABB(AxisAlinedBoundingBox)交差テストが必要です。
+6-separatingのvoxel構築
+6-separatingのvoxelの構築では、投影したvoxelとの交差判定で、voxelの頂点ではなく投影したvoxelのエッジの中点を判定に使用します。下図の例は、上図の26-separationのテストでは”voxelizeする”という判定になったvoxelですが、6-separatingのテストでは、赤で示したエッジの内積が負の値となるため、voxelizeされません。
+追記
+上記の条件に加えて、voxelとプリミティブのBoundingBox交差テストが必要です。（詳細は別記事）
+6-separationと26-separationの例
+次に具体的に1枚のポリゴンをvoxelizeした場合の図を示します。1枚のポリゴンを3軸から投影してテストしています。灰色で示したvoxelは26-separationではテストにパスしますが、6-separationではテストに失敗するvoxelになります。
+広告
+最後に構築されたvoxelを立体的に確認してみます。
+余談ですが、26-separatingを行うのであれば、より一般的な三角形とboxの交差判定である、SAT(separating axis theorem)でも判定が可能です。
+References
+An Accurate Method for Voxelizing Polygon Meshes[Huang et al. 98]
+Fast Parallel Surface and Solid Voxelization on GPUs [Michael et al. 10]
+Octree-Based Sparse Voxelization Using the GPU Hardware Rasterizer [Cyril et al. 11]
+広告
+共有:
+X で共有 (新しいウィンドウで開きます)
+X
+Facebook で共有 (新しいウィンドウで開きます)
+Facebook
+いいね 読み込み中…
+関連
+「GPU上でのvoxel構築手法」への3件のフィードバック
+この方法だと例えばxy平面に平行な三角形だとボクセル化に失敗する部分が出てくると思うのですが、どうなんでしょう
+返信 ↓
+ですので、「3つの軸」で記したとおり、投影する軸を事前に選ぶことをお勧めします。
+xy平面に平行ならば、z軸に沿って投影すればうまくいくのではないでしょうか。
+返信 ↓
+z軸に沿って投影しても以下のようになってしまうとボクセル化されないと思ったのですが
+https://d.kuku.lu/3df5f17db3
+コメントをどうぞ コメントをキャンセル
+コメント
+リブログ
+定期購入
+開始日
+shikihuiku
+WordPress.com のアカウントをお持ちですか ? 今すぐログインしてください。
+shikihuiku
+短縮リンクをコピーReader で投稿を表示
+購読管理登録ログイン
+このコンテンツを報告
+このバーを折りたたむ
+コメントを読み込み中…
+%d
+WordPress.comで自分のサイトを無料で作成しましょう。自分のサイトを作成しましょう。
+無料で開始
+広告

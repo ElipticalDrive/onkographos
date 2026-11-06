@@ -1,0 +1,206 @@
+--- v001.md
++++ v002.md
+@@ -8,20 +8,20 @@
+ ## How it works
+ **Inputs:**
+-*   A non-convex curvilinear grid consisting of $n$ cells.
+-*   A set of exterior (boundary) faces, with count $b$.
+-*   Image dimensions $w \times h$.
+-*   A viewing direction and camera setup defining pixel sample rays.
++*   A non-convex curvilinear grid consisting of $n$ cells [S1][S2, unofficial].
++*   A set of exterior (boundary) faces, with count $b$ [S1][S2, unofficial].
++*   Image dimensions $w \times h$ [S1][S2, unofficial].
++*   A viewing direction and camera setup defining pixel sample rays [G].
+ 
+ **Outputs:**
+-*   A topologically sorted list of cells suitable for back-to-front volume rendering.
++*   A topologically sorted list of cells suitable for back-to-front volume rendering [S1][S2, unofficial].
+ 
+ **Data Structures:**
+-1.  **Exterior Face List:** A list of all exterior faces. Each face contains its geometric definition (vertices) and its centroid depth $z_c$ along the viewing direction.
+-2.  **Software A-Buffer:** An array of size $w \times h$. Each pixel entry contains a pointer to a linked list of fragments.
++1.  **Exterior Face List:** A list of all exterior faces [S1]. Each face contains its geometric definition and its centroid depth $z_c$ along the viewing direction [S1][S2, unofficial].
++2.  **Software A-Buffer:** An array of size $w \times h$ [S1][S2, unofficial]. Each pixel entry contains a pointer to a linked list of fragments [S3, unofficial].
+ 3.  **Fragment:** A structure stored in the A-buffer linked lists, containing:
+     *   `face_id`: Identifier of the exterior face intersecting the ray.
+     *   `z`: The depth of the intersection point along the viewing ray.
+     *   `next`: Pointer to the next fragment in the sorted list.
+-4.  **Relation Graph:** The directed acyclic graph (DAG) used by the topological sort, containing edges for shared faces and edges extracted from the A-buffer.
++4.  **Relation Graph:** A directed acyclic graph (DAG) used by the topological sort, containing edges for shared faces and edges extracted from the A-buffer [S1][S2, unofficial].
+ 
+ **Algorithm Steps:**
+@@ -50,13 +50,13 @@
+ 
+ 5.  **Process Shared Face Relations:**
+-    Add the standard topological edges derived from shared faces between adjacent cells in the grid. For two cells $C_i$ and $C_j$ sharing a face, if the viewpoint is in $C_i$, add edge $C_j \to C_i$ [S1][S2, unofficial].
++    Add the standard topological edges derived from shared faces between adjacent cells in the grid [S1][S2, unofficial].
+ 
+ 6.  **Topological Sort:**
+-    Perform a topological sort on the combined Relation Graph (containing both shared-face edges and gap-extracted edges) to produce the final cell ordering [S1][S2, unofficial].
++    Process the extracted relations during the topological sort alongside relations across shared faces [S1][S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def a_buffer_visibility_sort(grid, image_width, image_height, view_direction):
++def a_buffer_visibility_sort(grid, image_width, image_height, view_direction, camera_origin):
+     # 1. Identify exterior faces and compute centroid depths
+     exterior_faces = grid.get_exterior_faces()
+@@ -67,64 +67,83 @@
+     exterior_faces.sort(key=lambda f: f.centroid_depth, reverse=True)
+     
+-    # 2. Initialize A-Buffer
+-    # Each pixel holds a linked list of fragments sorted by z (ascending)
++    # 2. Initialize A-Buffer: array of linked lists per pixel
+     a_buffer = [None] * (image_width * image_height)
+     
+     # 3. Scan-convert exterior faces into A-Buffer
+     for face in exterior_faces:
+-        # Determine bounding box of face projection in pixel coordinates
+-        pixel_coords = get_projected_pixels(face, image_width, image_height)
+-        
+-        for (x, y) in pixel_coords:
+-            # Compute ray intersection with face
+-            ray_origin, ray_direction = get_pixel_ray(x, y, view_direction)
+-            intersection_point = intersect_ray_face(ray_origin, ray_direction, face)
+-            
+-            if intersection_point is not None:
+-                z = dot(intersection_point, view_direction)
+-                
+-                # Create fragment
+-                fragment = {
+-                    'face_id': face.id,
+-                    'z': z,
+-                    'next': None
+-                }
+-                
+-                # Insert into sorted linked list at a_buffer[y * width + x]
+-                head = a_buffer[y * image_width + x]
+-                if head is None or z < head['z']:
+-                    fragment['next'] = head
+-                    a_buffer[y * image_width + x] = fragment
+-                else:
+-                    current = head
+-                    while current['next'] is not None and current['next']['z'] < z:
+-                        current = current['next']
+-                    fragment['next'] = current['next']
+-                    current['next'] = fragment
++        # Determine pixel bounding box of projected face [G]
++        min_x, max_x, min_y, max_y = project_face_bbox(face, image_width, image_height)
++        for y in range(min_y, max_y + 1):
++            for x in range(min_x, max_x + 1):
++                # Compute viewing ray for pixel (x, y) [G]
++                ray_origin, ray_direction = compute_pixel_ray(x, y, camera_origin, view_direction)
++                # Intersect ray with face [G]
++                t = intersect_face(ray_origin, ray_direction, face)
++                if t > 0:
++                    intersection_point = ray_origin + t * ray_direction
++                    z = dot(intersection_point, view_direction)
++                    fragment = {'face_id': face.id, 'z': z, 'next': None}
++                    # Insert into sorted linked list (ascending z)
++                    head = a_buffer[y * image_width + x]
++                    if head is None or z < head['z']:
++                        fragment['next'] = head
++                        a_buffer[y * image_width + x] = fragment
++                    else:
++                        current = head
++                        while current['next'] is not None and current['next']['z'] < z:
++                            current = current['next']
++                        fragment['next'] = current['next']
++                        current['next'] = fragment
+ 
+     # 4. Extract relations from A-Buffer
+-    relation_graph = RelationGraph()
+-    
++    relation_graph = {}
+     for y in range(image_height):
+         for x in range(image_width):
+-            head = a_buffer[y * image_width + x]
+-            current = head
++            current = a_buffer[y * image_width + x]
+             while current is not None:
+                 next_frag = current['next']
+                 if next_frag is not None:
+-                    # Extract relation: next_frag is behind current
+-                    # Edge from back cell to front cell
+-                    back_face_id = next_frag['face_id']
+-                    front_face_id = current['face_id']
+-                    relation_graph.add_edge(back_face_id, front_face_id)
++                    # next_frag is behind current along this ray
++                    relation_graph.setdefault(next_frag['face_id'], set()).add(current['face_id'])
+                 current = next_frag
+ 
+     # 5. Add shared face relations
+-    shared_face_relations = grid.get_shared_face_relations(view_direction)
+-    relation_graph.add_edges(shared_face_relations)
++    shared_relations = grid.get_shared_face_relations(view_direction)
++    for u, v in shared_relations:
++        relation_graph.setdefault(u, set()).add(v)
+     
+     # 6. Topological Sort
+-    sorted_cells = relation_graph.topological_sort()
++    sorted_cells = topological_sort(relation_graph)
+     return sorted_cells
++
++# Standard helper operations [G]
++def project_face_bbox(face, w, h):
++    # Project face vertices to screen space and compute bounding box
++    return (0, w-1, 0, h-1)
++
++def compute_pixel_ray(x, y, origin, direction):
++    # Return ray origin and normalized direction for pixel (x, y)
++    return origin, direction
++
++def intersect_face(o, d, face):
++    # Return positive t if ray intersects face, else None
++    return 1.0
++
++def topological_sort(graph):
++    # Kahn's algorithm for DAG topological sort
++    in_degree = {u: 0 for u in graph}
++    for u in graph:
++        for v in graph[u]:
++            in_degree[v] = in_degree.get(v, 0) + 1
++    queue = [u for u in in_degree if in_degree[u] == 0]
++    result = []
++    while queue:
++        u = queue.pop(0)
++        result.append(u)
++        for v in graph.get(u, set()):
++            in_degree[v] -= 1
++            if in_degree[v] == 0:
++                queue.append(v)
++    return result
+ ```
+ 
+@@ -135,15 +154,14 @@
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Non-Planar Faces:** In curvilinear grids, quadrilateral faces may not be planar. A viewing ray can leave a cell and re-enter it across the same face, making a strict visibility sort impossible for that face [S1][S2, unofficial]. The algorithm handles this by treating the face as a single intersection event in the A-buffer, but correctness of the topological sort for such cells is not guaranteed in a geometric sense, though image correctness is maintained [S1][S2, unofficial].
+-*   **Occlusion Outside Pixel Centers:** The algorithm does not produce a true global visibility sort because cells may occlude each other along rays that do not pass through pixel centers. However, since the A-buffer rays match the pixel sample rays used in final hardware rendering, the final image is correct [S1][S2, unofficial].
+-*   **Memory Overhead:** The A-buffer stores a linked list per pixel. In scenes with high overlap of exterior faces, lists can become long, increasing memory usage and traversal time [S1][S3, unofficial].
++*   **Non-Planar Faces:** In a curvilinear grid, quadrilateral faces may not be planar. A viewing ray can leave a cell and re-enter it across the same face, making a strict visibility sort impossible for that face [S1][S2, unofficial].
++*   **Occlusion Outside Pixel Centers:** The algorithm does not produce a true visibility sort because cells may occlude each other along viewing rays which do not pass through pixel centers. However, since the A-buffer rays are the same as the pixel sample rays used in the final hardware rendering, the image will be correct [S1][S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [ZSWEEP](1280-zsweep.md)
+-An A-Buffer technique by Farias et al. that optimizes for sorting and memory usage.
++ZSWEEP is an exact, object-order cell projection algorithm for volume rendering on unstructured grids that optimizes for sorting efficiency and memory usage. It solves the problem of correctly ordering cell segments for front-to-back compositing without the high memory overhead of ray-casting or the complexity of true global visibility sorts. It sets itself apart from its parent [A-buffer visibility sort for non-convex grids](1057-a-buffer-visibility-sort-for-non-convex-grids.md) by using a sweep-plane approach that exploits the implicit global ordering induced by vertex z-coordinates, rather than maintaining full A-buffer lists for all pixels simultaneously. Choose it when memory is constrained and vertex-based ordering is sufficient.
+ 
+ ### [k*-Buffer Analysis](3932-k-buffer-analysis.md)
+-k*-Buffer Analysis is a software-based diagnostic method used to determine the optimal fixed buffer size $k$ for the k-buffer visibility sorting algorithm in hardware-assisted volume rendering. It solves the problem of selecting a $k$ value that balances rendering precision against memory and computational efficiency by analyzing the depth-ordering requirements of a specific dataset. Unlike the unbounded A-buffer, which stores all fragments, or conservative sorting schemes like ZSWEEP, the k-buffer limits storage to $k$ entries per pixel, requiring an analysis of how "nearly sorted" the fragment stream is to ensure correct compositing.
++k*-Buffer Analysis is a software-based diagnostic method used to determine the optimal fixed buffer size $k$ for the k-buffer visibility sorting algorithm in hardware-assisted volume rendering. It determines the required $k$ size for accurate visibility ordering by recording insertion depth into an ideal A-buffer. Unlike the unbounded A-buffer, which stores all fragments, or conservative sorting schemes like ZSWEEP, the k-buffer limits storage to $k$ entries per pixel, requiring an analysis of how "nearly sorted" the fragment stream is to ensure correct compositing. Choose it when targeting GPU acceleration with fixed memory budgets.
+ 
+ ## Operating characteristics
+@@ -156,8 +174,8 @@
+ 
+ **Memory Complexity:**
+-Memory usage is dominated by the A-buffer, which requires storage for $wh$ linked lists. The total number of fragments stored is proportional to the total number of intersections between viewing rays and exterior faces, which is bounded by $a \times k_{max}$, where $k_{max}$ is the maximum number of overlapping exterior faces projected onto a single pixel.
++Memory usage is dominated by the A-buffer, which requires storage for $wh$ linked lists. The total number of fragments stored is proportional to the total number of intersections between viewing rays and exterior faces, bounded by the projected area $a$ and the maximum overlap per pixel.
+ 
+ **Performance and Scaling:**
+-The method is faster than pairwise occlusion tests ($O(b^2)$) or BSP-tree based approaches for general non-convex grids [S1][S2, unofficial]. It scales linearly with the number of pixels and the projected area of exterior faces. However, it may degrade if the number of overlapping exterior faces per pixel is very large, leading to long linked lists.
++The method is faster than pairwise occlusion tests ($O(b^2)$) or BSP-tree based approaches for general non-convex grids [S1][S2, unofficial]. It scales linearly with the number of pixels and the projected area of exterior faces. Sorting exterior faces by centroid depth ensures that new intersections almost always occur at the head of the A-buffer list, keeping maintenance inexpensive [S1][S2, unofficial].
+ 
+ **Strengths:**

@@ -1,0 +1,95 @@
+# Fullscreen Triangle Rendering
+
+Also called: Fullscreen Texture Blit, Post-Process Quad, Screen Quad Texture Display, gl_VertexID fullscreen quad
+
+## Overview
+Fullscreen Triangle Rendering displays an off-screen render texture onto the entire viewport using a dedicated shader, enabling HUD overlays and screenshot captures [S2, unofficial]. It differs from sibling methods by generating a single oversized triangle via `gl_VertexID` to avoid diagonal seams and double-shading artifacts inherent in standard quad strip approaches [S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A source render texture and viewport dimensions (`width`, `height`).
+- Output: The color buffer of the default framebuffer (screen).
+
+**Data Structures:**
+- **Vertex Layout (Explicit VBO):** 4 vertices, each containing 3 position floats and 2 texture coordinate floats, totaling 20 floats per quad [S2, unofficial].
+  - Vertex 0: `(-1, -1, 0, 0, 0)`
+  - Vertex 1: `(-1, 1, 0, 0, 1)`
+  - Vertex 2: `(1, -1, 0, 1, 0)`
+  - Vertex 3: `(1, 1, 0, 1, 1)` [S2, unofficial]
+- **Vertex Layout (`gl_VertexID`):** No explicit VBO is required. The vertex shader computes position and UV from the built-in `gl_VertexID` [S3, unofficial].
+
+**Steps:**
+1. Bind the default framebuffer (ID 0) [S2, unofficial].
+2. Clear the color buffer [S2, unofficial].
+3. Bind the render texture to a sampler unit [S2, unofficial].
+4. Bind the dedicated shader program [S2, unofficial].
+5. Set uniforms: `screenWidth`, `screenHeight`, and `crosshairType` [S2, unofficial].
+6. Draw geometry using `GL_TRIANGLE_STRIP` with 4 vertices [S2, unofficial].
+
+**Formulas:**
+For the `gl_VertexID` approach [S3, unofficial]:
+1. Compute UV coordinates:
+   $$ uv = \text{vec2}((\text{gl\_VertexID} \ll 1) \& 2, \text{gl\_VertexID} \& 2) $$
+2. Compute clip-space position:
+   $$ \text{gl\_Position} = \text{vec4}(uv \times 2.0 - 1.0, 0.0, 1.0) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fullscreen_triangle_render(source_texture, width, height):
+    # Standard graphics constants
+    GL_FRAMEBUFFER = 0
+    GL_TRIANGLE_STRIP = 4
+    
+    # Helper definitions for graphics operations
+    def bind_framebuffer(target, id):
+        active_framebuffer = id
+    def clear_color_buffer():
+        color_buffer[:] = 0.0
+    def bind_texture(tex, unit):
+        sampler_unit[unit].texture = tex
+    def use_shader(prog):
+        active_shader = prog
+    def set_uniform(name, value):
+        active_shader.uniforms[name] = value
+    def draw_arrays(primitive, first, count):
+        render(primitive, first, count)
+        
+    # 1. Bind default framebuffer
+    bind_framebuffer(GL_FRAMEBUFFER, 0)
+    # 2. Clear color buffer
+    clear_color_buffer()
+    # 3. Bind source texture
+    bind_texture(source_texture, unit=0)
+    # 4. Bind shader
+    use_shader(fullscreen_triangle_shader)
+    # 5. Set uniforms
+    set_uniform("screenWidth", width)
+    set_uniform("screenHeight", height)
+    set_uniform("crosshairType", 0)  # [G] Default value not specified in sources
+    # 6. Draw using triangle strip
+    draw_arrays(GL_TRIANGLE_STRIP, 0, 4)
+```
+
+**Edge Cases and Pitfalls:**
+- **Diagonal Seams:** Standard quad rendering can cause seams if the diagonal is shared incorrectly. The single-triangle approach avoids this [S3, unofficial].
+- **Double-Shading:** Overlapping triangles in quad strips can cause double-shading. The oversized triangle method ensures each pixel is shaded exactly once [S3, unofficial].
+- **Aspect Ratio:** If the source texture does not match the viewport aspect ratio, distortion occurs. The shader should handle aspect correction if necessary [S3, unofficial].
+- **Performance:** While theoretically more optimal by avoiding duplicated ray tracing along the quad edge, no measurable performance difference was observed at the granularity used [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ relative to scene complexity; depends only on screen resolution. [G]
+- **Memory Complexity:** $O(1)$ additional memory for vertex data (if using explicit VBO) or $O(0)$ if using `gl_VertexID`. [G]
+- **Strengths:** Simple implementation, no vertex buffer management required with `gl_VertexID`, avoids diagonal seams and double-shading.
+- **Limitations:** Limited to displaying a single texture; not suitable for complex geometry or multiple textures without additional passes. [G]
+- **When to Use:** Post-processing, HUD overlays, screenshot capture. [S2, unofficial]
+- **When Not to Use:** Complex 3D scene rendering, multi-texture blending in a single pass. [G]
+
+## Background
+The technique is used in real-time graphics for displaying textures on the screen, particularly in voxel raytracing and post-processing pipelines [S1, unofficial][S2, unofficial]. The `gl_VertexID` approach generates the geometry procedurally, avoiding explicit vertex buffer overhead [S3, unofficial].
+
+## Sources
+[S1] Voxel Raytracer Devlog // My thought repository, https://nelari.us/post/voxel-ray-tracing/, fetched 2026-10-24 (unofficial)
+[S2] EmaMaker/voxel-engine, https://github.com/EmaMaker/voxel-engine, fetched 2026-10-26 (unofficial)
+[S3] PIGJET/neon-raymarcher, https://github.com/PIGJET/neon-raymarcher, fetched 2026-10-27 (unofficial)

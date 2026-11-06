@@ -1,0 +1,168 @@
+Type: Integration + Spike Severity: P0/Critical Difficulty: Extreme Estimate: 24h Touch surface: 14 files 1. Background & Context HelPhone renders live responders through three competing raster paths at once: src/App.tsx owns page compos...
+
+# ISP-071: React 19 concurrent rendering vs Mapbox imperative GL + WebGPU double-raster tearing during live responder updates · Issue #741 · Hel-Phone/HelPhone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+# ISP-071: React 19 concurrent rendering vs Mapbox imperative GL + WebGPU double-raster tearing during live responder updates #741
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#842
+Closed
+# ISP-071: React 19 concurrent rendering vs Mapbox imperative GL + WebGPU double-raster tearing during live responder updates#741
+#842
+Copy link
+Assignees
+Labels
+Stellar WaveIssues in the Stellar wave programIssues in the Stellar wave programadvancedhelp wantedExtra attention is neededExtra attention is neededintegrationspike
+Description
+Mikey-222
+opened on Oct 14, 2026
+Issue body actions
+Type: Integration + Spike
+Severity: P0/Critical
+Difficulty: Extreme
+Estimate: 24h
+Touch surface: 14 files
+1. Background & Context
+HelPhone renders live responders through three competing raster paths at once: src/App.tsx owns page composition under React 19 concurrent rendering, src/components/MapboxWrapper.jsx + src/components/MapboxWrapper.tsx wraps mapbox-gl imperative map instances, and src/components/CommunityMap.jsx + src/components/WebGPUMap.jsx (+ src/components/WebGPUMap.d.ts) owns an experimental WebGPU overlay for high-density pins. Live positions flow from src/stores/helpStore.ts subscriptions into both renderers, while clustering happens in src/workers/clusterWorker.js / src/workers/cluster-worker.js / src/hooks/useClusterer.js (supercluster) and routes in src/workers/routingWorker.js fed by src/utils/graphTraversal.js.
+React 19 changes the contract: createRoot + useTransition + useDeferredValue in src/main.tsx and src/App.tsx can now interrupt, suspend, and re-render the map container while mapbox-gl holds raw WebGL context state outside React's knowledge. The twin MapboxWrapper.jsx / .tsx files disagree on lifecycle — one creates the map in useEffect, the other in useLayoutEffect — so StrictMode double-mount in dev creates two GL contexts, while concurrent re-renders in prod tear down and reattach the container <div> mid-frame. Mapbox does not expect its canvas to be moved or resized by React reconciliation.
+The WebGPU path compounds tearing. WebGPUMap.jsx allocates its own canvas stacked above Mapbox via src/lib/offscreenCanvas.ts + src/workers/canvas-worker.js, re-rastering clusters offloaded from the main thread. Both rasters subscribe to the same helpStore.ts live-responder tick (1–2 Hz during drills). Because React batches store updates with startTransition but workers post back unordered, Mapbox applies tick N while WebGPU still draws tick N-1, producing visible double-raster: pins ghost, jump, then snap. At city scale (2k pins) the offset is 300–600ms and is mistaken for responder teleporting.
+OffscreenCanvas transfer adds a fourth actor. src/lib/offscreenCanvas.ts + src/lib/worker-manager.js + src/lib/workerSandbox.ts transfer control of the overlay canvas to canvas-worker.js. React 19 strict effects + HMR remounts re-transfer an already-neutered canvas, throwing InvalidStateError that is swallowed by the worker sandbox and leaves a black overlay over Mapbox. docs/performance-optimization.md documents the intended single-raster handoff but the code keeps both alive for fallback, so fallback and primary fight.
+Finally, live updates bypass every memo boundary. helpStore.ts (zustand) notifies on each GPS tick, CommunityMap.jsx re-derives GeoJSON inline without useMemo, useClusterer.js reindexes supercluster synchronously, and App.tsx re-renders the hero + map section together. React 19 schedules this as a transition, Mapbox fires move/render events synchronously, and the WebGPU worker posts a fresh bitmap — three clocks, no vsync coordination. The result is tearing that only reproduces under real 2 Hz live load, never in static Storybook.
+2. Current Broken Behaviour
+Live drill with >500 responders: Mapbox pins and WebGPU overlay diverge by 1–2 blocks for ~500ms per tick, then snap; users report duplicate ambulances.
+StrictMode / React 19 dev double-mount creates two mapbox-gl maps on the same container; second remove() kills first context, leaving grey tiles.
+Hot update to helpStore.ts during navigation re-parents map container div; Mapbox canvas resizes to 0x0, WebGPUMap throws InvalidStateError on neutered OffscreenCanvas, overlay goes black.
+CommunityMap.jsx inline GeoJSON rebuild triggers supercluster reindex per tick on main thread (180–300ms), blocking React commit and delaying WebGPU bitmap present, widening tear window.
+No frame-coordination: Mapbox render event, React commit, and canvas-worker.js bitmap post are unsynchronized; tearing invisible at 10 pins, catastrophic at 2k pins.
+Telemetry in src/lib/telemetry.ts logs only React render counts, not GL frame drops, so tearing has no metric and is closed as "cannot reproduce".
+3. Desired End State
+Single source of frame truth: helpStore.ts live ticks versioned (monotonic tickId), both Mapbox and WebGPU render same tickId or skip; stale bitmaps dropped, never composited.
+React 19 isolation: map container is memo + ref-stable, never re-parented by concurrent renders; Mapbox instance created once in useLayoutEffect with StrictMode guard, destroyed once; WebGPU overlay transfer happens once via offscreenCanvas.ts.
+Vsync coordination: canvas-worker.js raster posts aligned to Mapbox render / idle events or requestAnimationFrame; double-raster fallback resolved — WebGPU is primary above threshold, Mapbox symbols hidden, not both drawn.
+Main-thread offload: GeoJSON build + supercluster reindex moved to clusterWorker.js / cluster-worker.js via worker-manager.js; useClusterer.js consumes async clusters with useDeferredValue, React stays under 50ms commits.
+Observable tearing metric: telemetry.ts records tickId skew + frame-drop count + GL context loss events; alert if skew >1 tick for >5s.
+4. Files / Systems Involved (10-15 real paths)
+src/App.tsx — concurrent root composition, live tick propagation
+src/main.tsx — createRoot, StrictMode, React 19 flags
+src/stores/helpStore.ts — live responder ticks, versioning point
+src/components/MapboxWrapper.jsx — legacy imperative wrapper
+src/components/MapboxWrapper.tsx — TS wrapper, lifecycle conflict
+src/components/CommunityMap.jsx — GeoJSON build, Mapbox symbols
+src/components/WebGPUMap.jsx — WebGPU overlay canvas
+src/components/WebGPUMap.d.ts — WebGPU typings, canvas contract
+src/workers/canvas-worker.js — offscreen re-raster
+src/workers/clusterWorker.js + src/workers/cluster-worker.js — cluster twins to unify
+src/hooks/useClusterer.js — supercluster reindex hotspot
+src/lib/offscreenCanvas.ts + src/lib/worker-manager.js + src/lib/workerSandbox.ts — transfer + sandbox
+src/lib/telemetry.ts — frame-skew observability gap
+docs/performance-optimization.md — intended single-raster design to enforce
+5. Reproduction Steps (numbered, with real commands)
+cat src/main.tsx | grep -n "createRoot\|StrictMode\|concurrent" ; grep -n "useEffect\|useLayoutEffect\|new mapboxgl.Map\|remove()" src/components/MapboxWrapper.jsx src/components/MapboxWrapper.tsx — record dual lifecycle.
+grep -n "helpStore\|subscribe\|useStore\|tick" src/components/CommunityMap.jsx src/components/WebGPUMap.jsx src/hooks/useClusterer.js | head -40 — map tick fan-out.
+npm run dev -- --port 3000 & sleep 5; npx playwright codegen http://localhost:3000 || xdg-open http://localhost:3000 — open live map.
+Simulate live load: node -e "setInterval(()=>{fetch('/api/debug/inject-responders?count=800')},500)" or npm run drill -- --responders 800 --hz 2 — if no drill script, loop curl -X POST http://localhost:3000/api/responders/tick -d @test/fixtures/tick-800.json.
+Observe tearing: enable paint flashing in DevTools, scroll to map, watch ghost pins; capture video: npx playwright test --headed --project=chromium tests/map-tear.spec.ts 2>&1 | tee /tmp/tear.log or manual screen record.
+Force StrictMode remount: npm run build && npm run preview -- --port 4173 vs npm run dev — compare grey-tile rate; grep -n "InvalidStateError\|OffscreenCanvas\|transferControl" src/lib/offscreenCanvas.ts src/workers/canvas-worker.js.
+Profile commit vs raster: npx vite --profile or Chrome Performance trace 10s during drill; confirm useClusterer long task 180–300ms overlapping Map.render + worker bitmap post.
+cat docs/performance-optimization.md | grep -n -i "raster\|offscreen\|webgpu\|cluster" | head -20 — contrast intent vs dual-raster reality.
+6. Spike Investigation Plan
+Instrument tickId: add monotonic counter in helpStore.ts, log tickId at Mapbox setData and WebGPU bitmap present; measure skew distribution at 100/500/2000 pins over 5-min drill.
+Lifecycle audit: unify MapboxWrapper.jsx vs .tsx — pick one, guard useLayoutEffect with ref + StrictMode cleanup test, assert single mapboxgl.Map instance via window.__MAP_COUNT.
+Transfer-once proof: wrap offscreenCanvas.ts transfer in idempotent guard, add postMessage handshake with canvas-worker.js; chaos-test with React remount + HMR edit to WebGPUMap.jsx without black overlay.
+Frame sync prototype: gate WebGPU present on Mapbox render/idle or shared rAF; A/B test naive post vs synced present, quantify ghost rate via pixel diff of overlaid frames.
+Cluster offload: move GeoJSON + supercluster to clusterWorker.js, consume via useDeferredValue in useClusterer.js; profile commit time before/after, target <50ms p95.
+Single-raster policy: implement density switch (Mapbox symbols <300 pins, WebGPU only above), hide opposite layer; verify no double-draw in screenshots.
+Telemetry: emit map.tick_skew, map.frame_drop, map.context_loss from telemetry.ts; dashboard + alert threshold proposal.
+7. Acceptance Criteria (8-12 hard checkboxes)
+helpStore.ts ticks carry monotonic tickId; Mapbox and WebGPU both log tickId, skew >1 tick never composited (stale dropped)
+Single MapboxWrapper survives StrictMode double-mount with exactly 1 GL context (window.__MAP_COUNT===1) across 20 HMR edits
+OffscreenCanvas transfer is idempotent; 10 forced React remounts produce zero InvalidStateError black overlays
+At 2000 pins / 2 Hz for 5 min, ghost/double-pin frames <1% (frame-diff measurement), no user-visible teleport
+React commit p95 <50ms during live ticks; supercluster reindex off main thread (no >100ms long task in trace)
+Density switch hides duplicate layer; screenshots show exactly one pin set at 100 and 2000 pins
+telemetry.ts emits tick_skew + frame_drop + context_loss with dashboard; alert fires on skew >1 for >5s
+docs/performance-optimization.md updated with frame-truth diagram + single-raster policy + StrictMode guard rationale
+No grey-tile 0x0 canvas after route nav + back during live drill (10/10 passes)
+Playwright tear spec added and green in CI (fails on old code, passes on fix)
+8. Why This Takes 24h / Why It Is Extremely Hard
+React 19 concurrent semantics vs imperative GL is fundamentally adversarial: repro requires live 2 Hz load + StrictMode + navigation, each hiding the other; isolating which layer tears takes hours of instrumented drills.
+Twin wrappers (MapboxWrapper.jsx + .tsx) + twin cluster workers mean no single lifecycle to fix; unifying without breaking map style, geocoder, and routing integrations is a full-day merge with visual regression risk.
+OffscreenCanvas neutering is irreversible and error-swallowing via workerSandbox.ts; proving transfer-once under HMR + concurrent remount requires custom harness, not just unit tests.
+Frame-sync across three clocks (React commit, Mapbox GL render, worker bitmap post) has no framework support; correct vsync gating must be prototyped and pixel-measured, not reasoned.
+Performance proof needs 2k-pin soak + Chrome traces + pixel diffs; each soak is 15–30 min, and tuning density thresholds without regressing low-end devices takes multiple iterations.
+9. Risks & Blast Radius
+Map refactor can break geocoder (src/lib/geocoder.ts fuse.js), routing (routingWorker.js + graphTraversal.js), and style switching; full map regression suite must run.
+Hiding Mapbox symbols above threshold changes accessibility / test selectors; Playwright snapshots will churn until updated.
+Worker offload changes tick latency profile; if worker-manager.js queues under load, pins freeze instead of tear — perceived as worse.
+Telemetry additions raise event volume 2 Hz × clients; sampling + cap required to avoid ingestion blowup.
+WebGPU fallback removal risks non-WebGPU browsers (Safari older); feature-detect + fallback path must remain, doubling QA matrix.
+Activity
+Mikey-222
+added
+help wantedExtra attention is neededExtra attention is needed
+advanced
+integration
+spike
+on Oct 14, 2026
+drips-wave
+added
+Stellar WaveIssues in the Stellar wave programIssues in the Stellar wave program
+on Oct 19, 2026
+adewunmiodunlamipriscilla-glitch commented on Oct 19, 2026
+adewunmiodunlamipriscilla-glitch
+on Oct 19, 2026 – with Drips Wave
+Contributor
+More actions
+@adewunmiodunlamipriscilla-glitch has applied to work on this issue as part of the Stellar Wave Program's 10th wave.
+hello, id like to work on this issue please
+ℹ️ Repo Maintainers: To accept this application, review their application or assign @adewunmiodunlamipriscilla-glitch to this issue.
+Mikey-222
+assigned
+adewunmiodunlamipriscilla-glitch
+on Oct 19, 2026
+drips-wave commented on Oct 19, 2026
+drips-waveBot
+on Oct 19, 2026 – with Drips Wave
+More actions
+Congratulations, @adewunmiodunlamipriscilla-glitch! 🎉 Your application was accepted by the repo's maintainers, and the issue is due on October 22, 2026.
+🧑‍💻 @adewunmiodunlamipriscilla-glitch: Please resolve the issue such that the repo's maintainers have enough time to review your contribution before the due date. You'll earn Points for completing the issue on-time, which will make you eligible for a share of the Stellar Wave Program's reward pool.
+Warning
+When opening a PR, please link it to this issue to ensure it gets tracked accurately. Points are awarded when this issue is marked as completed by the maintainer.
+🤠 Repo maintainers: Please keep an eye on the contributor's progress and review their work before the due date. You can manage this issue, including adjusting its complexity and points, here.
+🌊 Happy Wave 🌊
+Mikey-222
+closed this as completedin #842on Oct 19, 2026
+drips-wave commented on Oct 19, 2026
+drips-waveBot
+on Oct 19, 2026 – with Drips Wave
+More actions
+This issue has been completed by @adewunmiodunlamipriscilla-glitch as part of the Stellar Wave Program's 10th Wave 🥳
+😎 @adewunmiodunlamipriscilla-glitch: You earned 200 Points for completing this issue! Once the Wave's rewards are finalized, you'll be eligible for a percentage of the Wave's reward pool based on the percentage of total points you've earned. Learn more here. You can also Leave a review to share your experience working on this issue.
+🧑‍💻 Repo maintainers: How'd the contributor do? Leave a review to share your experience working with them.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+adewunmiodunlamipriscilla-glitch
+Labels
+Stellar WaveIssues in the Stellar wave programIssues in the Stellar wave programadvancedhelp wantedExtra attention is neededExtra attention is neededintegrationspike
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

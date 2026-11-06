@@ -1,0 +1,133 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - feat(gsplats): import classical Gaussian-splat formats (PLY / .splat / SPZ / SuperSplat compressed.ply) by royerloic · Pull Request #546 · royerlab/luxar
+
+feat(gsplats): import classical Gaussian-splat formats (PLY / .splat / SPZ / SuperSplat compressed.ply) by royerloic · Pull Request #546 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Jul 16, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Part 1/3 of the classical-splat interop campaign (approved plan: import → PLY export → auto-download demos). This PR brings the four common photogrammetric 3DGS file dialects into Luxar as first-class GSplatData, after which the entire existing toolchain (LOD recipes, partition, filter, gsplat convert, scenes, viewer streaming) applies unchanged.
+Dialect
+Files
+Decode
+inria
+point_cloud.ply (INRIA-style trainers)
+header-driven (any SH degree), opacity logit→sigmoid, log-scales→exp, quats normalized
+splat
+antimatter15 .splat
+flat 32-byte records
+spz
+Niantic/Scaniverse .spz
+legacy gzip v1–3 (24-bit fixed positions, first-three/smallest-three rotations); v4 NGSP/zstd rejected with a clear error
+supersplat
+SuperSplat compressed .ply
+chunked bit-packed (11-10-11 pos/scale, 2+10-10-10 smallest-three rot, 8888 color), 12- and 18-prop chunk layouts
+Conversion: Σ = R·diag(s²)·Rᵀ → packed lower-tri Cholesky (eigenvalue-clamp guard for degenerate splats in real files); opacity → amplitudes; SH reduced to the DC band baked to per-splat RGB (f_rest dropped). NumPy + stdlib only — zero new dependencies.
+Orientation is per-dialect: COLMAP y-down sources (INRIA/.splat/SuperSplat) get the canonical 180°-about-X fix by default; SPZ declares Y-up (RUB) data and is left untouched. --reorient/--no-reorient/--flip override; the applied matrix is recorded in stats["interop"] so the upcoming export can invert it. Columns stay world (x, y, z) — exactly what build_dimensions_from_data labels x/y/z.
+Surfaces
+```
+luxar gsplat import garden.splat garden.gsplats.zarr
+luxar gsplat import point_cloud.ply scene.gsplats.zarr --no-reorient
+luxar gsplat import capture.spz capture.gsplats.zarr -e precision
+```
+```
+from luxar.gsplats.interop import import_gsplats
+data = import_gsplats("garden.splat")                    # → GSplatData
+
+scene.add_gsplats_from_file("garden", "garden.splat",    # one-line scene embed
+                            blending_mode="normal")       # (extension-sniffed)
+```
+Imports pair with blending_mode="normal" — acceptable under today's renderer, fully correct the moment the depth-sorting work lands.
+Verification
+Bit layouts ported from the MIT references (nianticlabs/spz, playcanvas/splat-transform) and verified against real files: hornedlizard.spz decodes byte-exact vs the reference (N=786,233, bbox ±200, opacity mean 0.565), soar.compressed.ply (N=200,258), Babylon gs_Skull.splat end-to-end through the CLI (162,598 splats → v3.2, read-back verified), and an INRIA .ply.
+38 new tests: per-dialect synthetic writers (interop/tests/_synthetic.py) → reader parity at each format's real quantization tolerance, quat round-trips incl. 180° branches, non-PD guard, orientation/flip, format sniffing + error cases, full read→convert→save→load covariance fidelity (relF p95 ≤ AUTO certificate bound), CLI (CliRunner), scene-API embed.
+Adjacent regressions green: core/tests + test_gsplat_cli_extended.py = 1,186 passed; interop+CLI new suites 44 passed. ruff + mypy clean on all touched files.
+🤖 Generated with Claude Code
+feat(gsplats): import classical Gaussian-splat formats (PLY / .splat …
+…
+524d50a
+```
+…/ SPZ / SuperSplat)
+
+New `luxar.gsplats.interop.classical_splats`: readers for the four common
+photogrammetric 3DGS dialects — INRIA point_cloud.ply (header-driven, any SH
+degree), antimatter15 .splat, Niantic/Scaniverse .spz (legacy gzip v1-3;
+v4 NGSP rejected with a clear error), and SuperSplat compressed .ply (chunked
+bit-packed, 12/18-prop chunks) — into a shared ClassicalSplats intermediate,
+converted to GSplatData (scale+quat → Σ → packed Cholesky with an
+eigenvalue-clamp guard; opacity → amplitudes; SH DC band baked to per-splat
+RGB, f_rest dropped). NumPy + stdlib only, zero new dependencies.
+
+Orientation is per-dialect: COLMAP y-down sources (INRIA/.splat/SuperSplat)
+get the canonical 180°-about-X fix by default, SPZ declares Y-up (RUB) data
+and is left untouched; --reorient/--no-reorient/--flip override. Columns stay
+in world (x, y, z) order (what dimension inference labels x/y/z); the applied
+orientation is recorded in stats["interop"] so a future export can invert it.
+
+Surfaces:
+- CLI `luxar gsplat import <src> <out.gsplats.zarr>` (--format auto|inria|
+  splat|spz|supersplat, --reorient/--no-reorient, --flip, -e, --overwrite)
+  with migrate-format-style post-write read-back verification.
+- `scene.add_gsplats_from_file(...)` now sniffs .ply/.splat/.spz and imports
+  on the fly — one-line scene embedding of classical captures.
+- Python API `import_gsplats()` re-exported from luxar.gsplats.interop.
+
+Bit layouts ported from the MIT reference implementations (nianticlabs/spz,
+playcanvas/splat-transform) and verified against the official sample files
+(hornedlizard.spz byte-exact, soar.compressed.ply, Babylon gs_Skull.splat,
+an INRIA .ply). Tests generate miniature files of every dialect on the fly
+(interop/tests/_synthetic.py) and assert reader parity plus covariance
+fidelity through read → convert → save → load (cov relF p95 ≤ the AUTO
+certificate bound).
+
+Part 1/3 of the classical-splat interop campaign (next: PLY export, then
+auto-download demos). Imports pair with blending_mode="normal" so scenes
+become fully correct when depth-sorted rendering lands.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+This was referenced Jul 16, 2026
+feat(gsplats): export .gsplats.zarr to classical INRIA PLY (gsplat export)
+#547
+Merged
+feat(demos): classical-splat interop demos + HTTP-Range zip-member extractor
+#548
+Merged
+Merge branch 'main' into worktree-gsplat-interop-import
+d5b1aec
+Hide details
+View details
+royerloic
+merged commit 3dbda15
+into
+main
+Jul 16, 2026
+7 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Jul 16, 2026
+perf(gsplats/interop): vectorize non-PD Cholesky fallback in classical-splat import
+#551
+Merged
+feat(gsplats): classical-splat PLY export + interop demos (re-land #547 + #548)
+#552
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

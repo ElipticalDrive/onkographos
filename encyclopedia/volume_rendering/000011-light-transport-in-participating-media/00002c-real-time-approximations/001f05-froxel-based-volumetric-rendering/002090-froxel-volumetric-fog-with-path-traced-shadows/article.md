@@ -1,25 +1,25 @@
 # Froxel Volumetric Fog with Path-Traced Shadows
 
-Also called: Froxel volumetric fog, Frustum-aligned volumetric grid fog, Path-traced froxel fog
+Also called: Froxel volumetric fog, Frustum-aligned volumetric fog grid
 
 ## Overview
-Froxel Volumetric Fog with Path-Traced Shadows is a real-time rendering technique that simulates light scattering in participating media by dividing the camera view frustum into a 3D grid of voxels ("froxels") and computing their illumination via path-traced Next Event Estimation (NEE) shadow rays [S1, unofficial]. Unlike sibling methods that rely on shadow maps or precomputed lighting passes, this approach inherits real color transmission through tinted dielectrics (e.g., magenta glass scattering magenta fog) and dynamic sky-dome lighting, distinguishing it from [Froxel Volumetric Fog with Precomputed Lighting](2647-froxel-volumetric-fog-with-precomputed-lighting.md) which uses compute-shader approximations [S1, unofficial]. It solves the problem of flat, uniform screen-space fog by providing spatially varying, shadowed, and spectrally accurate volumetric lighting at the cost of higher computational complexity per voxel [S1, unofficial].
+Froxel Volumetric Fog with Path-Traced Shadows is a real-time rendering technique that simulates light scattering in participating media by dividing the camera view frustum into a 3D grid of voxels ("froxels") and computing their illumination via path-traced Next Event Estimation (NEE) shadow rays [S1, unofficial]. Unlike sibling methods that rely on shadow maps or precomputed lighting passes, this approach inherits real color transmission through tinted dielectrics (e.g., magenta glass scattering magenta fog) and dynamic sky-dome lighting, distinguishing it from [Froxel Volumetric Fog with Precomputed Lighting](2647-froxel-volumetric-fog-with-precomputed-lighting.md) which uses compute-shader approximations [S1, unofficial]. It solves the problem of flat, uniform screen-space fog by providing spatially varying, shadowed, and spectrally accurate volumetric lighting [S1, unofficial].
 
 ## How it works
 The method operates in two distinct passes: a **Light Pass** that computes per-voxel illumination and a **Raymarch Pass** that composites the volume against the scene [S1, unofficial].
 
 ### Inputs and Outputs
 **Inputs:**
-*   Camera frustum parameters (near plane, far plane, aspect ratio, field of view).
-*   Light source data (position, intensity, color).
-*   Sky dome LUT (for view-directional ambient lighting).
-*   Surface depth buffer (reversed-Z format) for raymarch termination.
-*   Scene geometry (for shadow ray intersection).
+*   Camera frustum parameters (near plane, far plane, aspect ratio, field of view) [S1, unofficial].
+*   Light source data (position, intensity, color) [S1, unofficial].
+*   Sky dome LUT (for view-directional ambient lighting) [S1, unofficial].
+*   Surface depth buffer (reversed-Z format) for raymarch termination [S1, unofficial].
+*   Scene geometry (for shadow ray intersection) [S1, unofficial].
 *   Configuration parameters: `fogDensity`, `farPlaneDistance`, `heightFalloff`, `phaseG` [S1, unofficial].
 
 **Outputs:**
-*   A `StorageImage3D` (RGBA16F) storing froxel data.
-*   Final composited screen color.
+*   A `StorageImage3D` (RGBA16F) storing froxel data [S1, unofficial].
+*   Final composited screen color [S1, unofficial].
 
 ### Data Structures
 **Froxel Grid Storage:**
@@ -39,22 +39,22 @@ For each froxel in the grid:
 4.  **Accumulate Transmittance:** Traverse the shadow ray through the scene. Accumulate per-channel Beer-Lambert transmittance through any tinted dielectrics (glass, ice, water) encountered. This ensures color bleeding from tinted surfaces into the fog [S1, unofficial].
 5.  **Calculate In-scatter:** Compute the in-scatter radiance using the formula:
     $$
-    L_{in} = \sigma_s \cdot p(\omega_i, \omega_o) \cdot E \cdot \mathbf{toLight}
+    L_{in} = \sigma_s \cdot \text{HG}(\text{phase}) \cdot \text{illuminance} \cdot \text{toLight}
     $$
     Where:
     *   $\sigma_s$: Scattering coefficient (derived from density).
-    *   $p(\omega_i, \omega_o)$: Henyey-Greenstein phase function evaluated with `phaseG`.
-    *   $E$: Illuminance (light intensity).
-    *   $\mathbf{toLight}$: Direction vector to the light source.
+    *   $\text{HG}(\text{phase})$: Henyey-Greenstein phase function evaluated with `phaseG`.
+    *   $\text{illuminance}$: Light intensity attenuated by shadow transmittance.
+    *   $\text{toLight}$: Direction vector to the light source [S1, unofficial].
 6.  **Add Sky Ambient:** Sample the sky-view LUT (`skyDome`) in the current froxel's view direction to get directional ambient lighting. Add a tiny isotropic ambient term for night/ground floor fill to prevent clipping in moonless shadows [S1, unofficial].
 7.  **Store Result:** Write the accumulated `inscatter` (RGB) and `density` (R) to the `StorageImage3D` as a `float4` [S1, unofficial].
 
 #### 2. Raymarch Pass (Compute Shader: `froxel.comp`)
 For each pixel on the screen:
 
-1.  **Initialize Ray:** Construct a ray from the camera origin through the pixel's screen coordinates into the froxel grid [S1, unofficial].
-2.  **Raymarch:** Step through the froxel grid along the ray.
-3.  **Integrate Transmittance:** For each segment within a froxel, perform analytic Beer-Lambert integration.
+1.  **Initialize Ray:** Construct a screen-space ray for the pixel [S1, unofficial].
+2.  **Raymarch:** Step through the froxel grid along the ray [S1, unofficial].
+3.  **Integrate Transmittance:** For each segment within a froxel, perform analytic Beer-Lambert integration [S1, unofficial].
     *   *Pitfall:* The integral result is RGB (`float3`). The accumulator variable must be declared as `float3`, not `float`, to avoid compilation errors (e.g., E30019) [S1, unofficial].
 4.  **Termination:** Stop raymarching when the ray intersects the surface depth buffer (reversed-Z) [S1, unofficial].
 5.  **Composite:** Calculate the final color using the formula:
@@ -75,93 +75,103 @@ For each pixel on the screen:
 # Light Pass: froxel.rgen
 def light_pass(froxel_id, camera, light, sky_lut, scene):
     # 1. Reconstruct world position
-    froxel_world_pos = reconstruct_froxel_world_position(froxel_id, camera.frustum)
-    
+    grid_min = camera.frustum.min
+    grid_max = camera.frustum.max
+    step = (grid_max - grid_min) / camera.frustum.resolution
+    froxel_world_pos = grid_min + step * (froxel_id + 0.5)
+
     # 2. Compute density with height falloff
-    base_density = config.fog_density
-    height_factor = compute_height_falloff(froxel_world_pos.y)
+    base_density = 0.005 # Default fog density [S1, unofficial]
+    height_factor = exp(-froxel_world_pos.y * 0.1) # Standard height falloff [G]
     density = base_density * height_factor
-    
+
     # 3. Cast NEE shadow ray
     to_light_dir = normalize(light.position - froxel_world_pos)
-    shadow_ray = Ray(froxel_world_pos, to_light_dir)
-    
+    shadow_origin = froxel_world_pos
+    shadow_t = 0.0
+    shadow_max = length(light.position - froxel_world_pos)
+
     # 4. Accumulate Beer-Lambert transmittance through tinted media
-    # Note: This must be float3 to handle RGB color transmission
-    transmittance = float3(1.0, 1.0, 1.0)
-    for intersection in scene.trace_volume(shadow_ray):
-        if intersection.is_dielectric:
-            sigma_t = intersection.density
-            dist = intersection.distance
-            # Beer-Lambert: T = exp(-sigma_t * dist)
-            transmittance *= exp(-sigma_t * dist)
-    
+    transmittance = vec3(1.0)
+    while shadow_t < shadow_max:
+        hit = scene.trace_volume(shadow_origin + shadow_t * to_light_dir, to_light_dir, shadow_max - shadow_t)
+        if hit.hit:
+            if hit.is_dielectric:
+                sigma_t = hit.density
+                dist = hit.distance
+                transmittance *= exp(-sigma_t * dist)
+            shadow_t += hit.distance
+        else:
+            break
+
     # 5. Calculate In-scatter
-    # L_in = sigma_s * HG(phase) * illuminance * toLight
-    sigma_s = density # Assuming single scattering approximation for density
-    phase_val = heney_greenstein_phase(to_light_dir, camera.view_dir, config.phase_g)
-    illuminance = light.intensity * transmittance # Light attenuated by shadows
-    in_scatter = sigma_s * phase_val * illuminance
-    
+    # L_in = σₛ · HG(phase) · illuminance · toLight [S1, unofficial]
+    sigma_s = density
+    cos_theta = dot(to_light_dir, camera.view_dir)
+    g = 0.7 # Default phaseG [S1, unofficial]
+    phase_val = (1.0 - g*g) / (4.0 * pi * pow(1.0 + g*g - 2.0*g*cos_theta, 1.5))
+    illuminance = light.intensity * transmittance
+    in_scatter = sigma_s * phase_val * illuminance * to_light_dir
+
     # 6. Add Sky Ambient
     # Sample sky dome for view-directional lighting
-    sky_ambient = sample_sky_dome(sky_lut, froxel_world_pos, camera.view_dir)
+    sky_ambient = sky_lut.sample(camera.view_dir)
     # Tiny isotropic fill for night/ground
-    night_fill = float3(0.001, 0.001, 0.001) 
+    night_fill = vec3(0.001)
     total_in_scatter = in_scatter + sky_ambient + night_fill
-    
+
     # 7. Store result
-    # Output: float4(inscatter, density)
-    return float4(total_in_scatter, density)
+    return vec4(total_in_scatter, density)
 
 # Raymarch Pass: froxel.comp
 def raymarch_pass(pixel_coord, camera, froxel_grid, depth_buffer):
     # 1. Initialize Ray
     ray_origin = camera.origin
-    ray_dir = unproject(pixel_coord, camera.projection, camera.view)
-    ray = Ray(ray_origin, normalize(ray_dir))
-    
+    ndc = vec2(pixel_coord.x / camera.width * 2.0 - 1.0, pixel_coord.y / camera.height * 2.0 - 1.0)
+    # Standard unprojection using inverse projection and view matrices [G]
+    view_ray = inverse(camera.projection) * vec4(ndc, 0.0, 1.0)
+    view_ray = vec3(view_ray) / view_ray.w
+    ray_dir = normalize(inverse(camera.view) * vec4(view_ray, 0.0))
+
     # 2. Raymarch through froxel grid
-    total_transmittance = float3(1.0, 1.0, 1.0)
-    accumulated_fog_color = float3(0.0, 0.0, 0.0)
-    
-    # Determine bounds in froxel grid
-    froxel_bounds = get_froxel_grid_bounds(camera.frustum)
-    
-    # Step through grid
+    total_transmittance = vec3(1.0)
+    accumulated_fog_color = vec3(0.0)
+
+    grid_min = camera.frustum.min
+    grid_max = camera.frustum.max
+    step_size = (grid_max - grid_min).x / camera.frustum.resolution.x
+    max_t = length(grid_max - ray_origin)
+
     t = 0.0
-    step_size = froxel_bounds.step_size
-    max_t = froxel_bounds.max_distance
-    
     while t < max_t:
-        # Get froxel data at current position
-        froxel_data = froxel_grid.sample(ray.origin + ray.dir * t)
-        density = froxel_data.w # Density is stored in W channel
+        pos = ray_origin + ray_dir * t
+
+        # 4. Termination check against reversed-Z depth buffer
+        if pos.z >= depth_buffer.sample(pos):
+            break
+
+        # Sample froxel data
+        froxel_data = froxel_grid.sample(pos)
+        density = froxel_data.w
         in_scatter = froxel_data.xyz
-        
+
         # 3. Analytic Beer-Lambert Integration
-        # Segment transmittance T_seg = exp(-density * step_size)
         segment_transmittance = exp(-density * step_size)
-        
+
         # Accumulate fog color: L_fog += L_in * T_prev * (1 - T_seg)
-        # Note: Accumulator must be float3
+        # Note: Accumulator must be float3 to match RGB integral [S1, unofficial]
         accumulated_fog_color += in_scatter * total_transmittance * (1.0 - segment_transmittance)
-        
+
         # Update total transmittance
         total_transmittance *= segment_transmittance
-        
-        # 4. Termination check against reversed-Z depth buffer
-        surface_depth = depth_buffer.read(ray.origin + ray.dir * t)
-        if ray.origin.z + ray.dir.z * t >= surface_depth:
-            break
-            
+
         t += step_size
-        
+
     # 5. Composite
-    scene_color = get_scene_color(pixel_coord)
-    pre_exposure = config.pre_exposure
+    scene_color = froxel_grid.scene_color.sample(pixel_coord)
+    pre_exposure = 1.0 # Default exposure factor [S1, unofficial]
     final_color = scene_color * total_transmittance + accumulated_fog_color * pre_exposure
-    
+
     return final_color
 ```
 
@@ -198,7 +208,7 @@ General fog volume grid techniques.
 *   **Memory Complexity:** $O(V)$ for the `StorageImage3D` grid. Each voxel stores 16 bytes (`RGBA16F`) [S1, unofficial].
 *   **Performance:** The method is computationally intensive due to the per-voxel path-traced shadow rays and per-pixel raymarching. It relies on Vulkan compute shaders and Slang [S1, unofficial].
 *   **Strengths:** Real color transmission through tinted media, dynamic shadows, sky-dome lighting integration, no shadow map artifacts [S1, unofficial].
-*   **Limitations:** High performance cost, requires path tracing infrastructure, sensitive to density parameter tuning [S1, unofficial].
+*   **Limitations:** Requires path tracing infrastructure [S1, unofficial].
 *   **When to use:** When high-fidelity, spectrally accurate volumetric fog with dynamic shadows is required and hardware supports path tracing (e.g., Vulkan ray tracing extensions) [S1, unofficial].
 *   **When not to use:** When performance is critical and shadowed fog is not required, or when hardware lacks path tracing support [S1, unofficial].
 

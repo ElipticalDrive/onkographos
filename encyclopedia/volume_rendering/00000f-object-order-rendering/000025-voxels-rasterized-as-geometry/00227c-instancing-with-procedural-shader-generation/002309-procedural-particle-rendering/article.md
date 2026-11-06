@@ -1,0 +1,83 @@
+# Procedural Particle Rendering
+
+Also called: Procedural Particle System, RNG-Seeded Particle Rendering
+
+## Overview
+Procedural Particle Rendering generates particle attributes (position, velocity, color, size) on-the-fly using a seeded random number generator (RNG) rather than storing explicit particle data in memory buffers [S1, unofficial]. This method solves the memory overhead and synchronization issues of traditional particle systems by computing each particle's state deterministically from its ID and time [S1, unofficial]. It is distinct from [Procedural Point Rendering with Billboard Transformation](6422-procedural-point-rendering-with-billboard-transformation.md) in its reliance on temporal interpolation of uniformly distributed attributes and explicit physics simulation for position, rather than static billboard transformations.
+
+## How it works
+**Inputs:** Particle ID ($ID$), current time ($t$), start time ($t_{start}$), end time ($t_{end}$), and attribute ranges (min/max for position, speed, color, size).
+**Outputs:** World-space position, velocity, color, and size for each particle instance.
+
+**Data Structures:**
+No persistent particle buffers are required. The "state" is implicit, defined by the RNG seed and time parameters.
+
+**Steps:**
+1.  **Initialize RNG:** Seed a deterministic random number generator with the unique particle $ID$ [S1, unofficial].
+2.  **Sample Attributes:** Sample uniform distributions for base attributes (initial position, velocity, color, size) using the seeded RNG [S1, unofficial].
+3.  **Interpolate Attributes:** Interpolate between the sampled start values and end values based on the normalized time $\tau = \frac{t - t_{start}}{t_{end} - t_{start}}$ [S1, unofficial].
+4.  **Calculate Position:** Compute the current position using the equation of uniformly accelerated motion:
+    $$
+    P(t) = P_0 + V_0 t + \frac{1}{2} A t^2
+    $$
+    Where $P_0$ is the initial position, $V_0$ is the initial velocity, and $A$ is the acceleration (e.g., gravity) [S1, unofficial].
+5.  **Render:** Submit the generated primitives to the pipeline. For translucent particles (e.g., fire), render in a separate pass after opaque geometry to preserve z-buffer integrity [S1, unofficial].
+6.  **Voxelization (if applicable):** If voxelizing, add light values for translucent/additive particles instead of averaging them [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_particle_state(particle_id, current_time, t_start, t_end, gravity):
+    # Step 1: Initialize RNG with particle ID
+    rng = RandomState(seed=particle_id)
+    
+    # Step 2: Sample uniform distributions for attributes
+    # P0, V0, ColorStart, ColorEnd, SizeStart, SizeEnd are sampled from uniform distributions
+    P0 = rng.sample_vector3()
+    V0 = rng.sample_vector3()
+    ColorStart = rng.sample_vector3()
+    ColorEnd = rng.sample_vector3()
+    SizeStart = rng.sample_float()
+    SizeEnd = rng.sample_float()
+    
+    # Step 3: Interpolate attributes based on time
+    # Clamp time to [0, 1] range
+    t_normalized = clamp((current_time - t_start) / (t_end - t_start), 0.0, 1.0)
+    
+    CurrentColor = lerp(ColorStart, ColorEnd, t_normalized)
+    CurrentSize = lerp(SizeStart, SizeEnd, t_normalized)
+    
+    # Step 4: Calculate position using uniformly accelerated motion
+    # Note: t in physics formula is elapsed time, not normalized
+    elapsed_time = current_time - t_start
+    CurrentPosition = P0 + V0 * elapsed_time + 0.5 * gravity * (elapsed_time ** 2)
+    
+    return {
+        "position": CurrentPosition,
+        "color": CurrentColor,
+        "size": CurrentSize
+    }
+```
+
+**Edge Cases:**
+*   **Z-Buffer Issues:** Translucent particles must not be rendered interleaved with opaque objects. Render opaque geometry first, then translucent particles [S1, unofficial].
+*   **Voxelization:** When adding light contributions from translucent particles, use addition rather than averaging to preserve additive blending properties [S1, unofficial].
+
+## Subtopics
+
+### [Procedural Dust Particles](5095-procedural-dust-particles.md)
+Renders glowing spheres in the foreground for atmospheric depth. Uses hash functions and time for fixed particles with Gaussian glow, differing from the general method's ID-seeded RNG and physics-based motion.
+
+## Operating characteristics
+**Time Complexity:** $O(1)$ per particle for attribute generation, independent of the number of other particles.
+**Memory Complexity:** $O(1)$ per particle instance in GPU memory (only vertex attributes for the current frame are needed, no particle buffers).
+**Performance:** On a Ryzen 3500U with Vega 8 integrated GPU, the approach showed noticeable speedup due to reduced memory bandwidth and simpler shader logic compared to complex geometry generation [S1, unofficial].
+**Strengths:** Minimal memory footprint; no need to manage particle lifecycles or buffer updates; deterministic reproducibility.
+**Limitations:** Limited to particles with simple, analytically solvable motion (e.g., uniform acceleration); difficult to implement complex particle-particle interactions or collision detection [S1, unofficial].
+
+## Background
+Originated in the context of voxel-based rendering and real-time fire effects, where memory constraints on integrated GPUs necessitated efficient particle generation [S1, unofficial]. The technique leverages the deterministic nature of RNGs to replace data-driven particle systems with computation-driven ones.
+
+## Sources
+[S1] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,128 @@
+# iVR-GS Training
+Also called: iVR-GS Two-Stage Training
+## Overview
+iVR-GS Training is a two-stage optimization procedure for Inverse Volume Rendering with 3D Gaussian Splatting (iVR-GS) that separates the initialization of scene geometry from the optimization of editable shading attributes. It builds on [Base 3DGS Optimization](7549-base-3dgs-optimization.md) by first establishing a robust geometric baseline and then refining Gaussian primitives for visual exploration. It differs from one-stage training by accelerating convergence and reducing the number of required primitives while maintaining comparable reconstruction quality.
+## How it works
+The method optimizes a set of 3D Gaussians to match input volume data and target visualizations through a sequential two-stage process.
+
+**Inputs:**
+*   Target volume data (scalar field).
+*   Transfer function (TF) parameters defining the desired visualization.
+*   Camera poses for training views.
+
+**Outputs:**
+*   A set of 3D Gaussian primitives $\{G_i\}$, each defined by:
+    *   Position $\mu_i \in \mathbb{R}^3$
+    *   Rotation $R_i \in SO(3)$ (represented as a quaternion or rotation matrix)
+    *   Scale $s_i \in \mathbb{R}^3$
+    *   Opacity $\alpha_i \in [0, 1]$
+    *   Normal $n_i \in \mathbb{R}^3$ (unit vector)
+    *   Shading attributes (e.g., color or density coefficients)
+
+**Data Structures:**
+*   **Gaussian Attributes:** Stored in contiguous arrays or structures of arrays (SoA) for efficient GPU access.
+*   **Base 3DGS Model:** A subset of Gaussians fixed or heavily constrained during the second stage, representing the underlying geometry.
+*   **Editable Gaussians:** The primary set of Gaussians optimized in the second stage, allowing for interactive editing.
+
+**Numbered Steps:**
+
+1.  **Stage 1: Base 3DGS Optimization (30,000 iterations)**
+    *   Initialize a set of 3D Gaussians.
+    *   Optimize position, rotation, scale, and opacity to capture the basic scene geometry and density distribution.
+    *   Use the loss function defined below.
+    *   *Note:* This stage corresponds to the "Base 3DGS Optimization" phase, ensuring the geometric foundation is solid before introducing shading-specific edits.
+
+2.  **Stage 2: Editable Gaussian Optimization (10,000 iterations)**
+    *   Initialize editable Gaussian primitives on the geometry established in Stage 1.
+    *   Optimize normal attributes $n_i$ and shading attributes.
+    *   Keep base geometry attributes (position, scale, rotation) relatively stable or allow limited adjustment to fit shading details.
+    *   Apply specific regularization terms to maintain normal consistency and prevent overfitting.
+
+**Loss Function:**
+The total loss $\mathcal{L}$ is a weighted combination of reconstruction loss and regularization terms:
+$$ \mathcal{L} = \lambda_{L1} \mathcal{L}_{L1} + \lambda_{SSIM} \mathcal{L}_{SSIM} + \lambda_{reg} \mathcal{L}_{reg} + \lambda_{normal} \mathcal{L}_{normal} $$
+Where:
+*   $\mathcal{L}_{L1}$ is the L1 loss between rendered and target images.
+*   $\mathcal{L}_{SSIM}$ is the Structural Similarity Index loss.
+*   $\mathcal{L}_{reg}$ is the L1 regularization term for Gaussian attributes (e.g., scale, opacity).
+*   $\mathcal{L}_{normal}$ is the normal consistency loss.
+
+**Parameters:**
+*   **Loss Coefficients:** $\lambda_{L1} = 0.8$, $\lambda_{SSIM} = 0.2$ [S1].
+*   **Regularization Scaling:** $\lambda_{reg} = 0.1$ for the L1 regularization term in editable Gaussian training [S1].
+*   **Normal Consistency Scaling:** $\lambda_{normal} = 0.01$ for all other regularization terms and normal consistency loss [S1].
+*   **Learning Rate:** $0.01$ for normal and shading attributes [S1]. Other attributes (e.g., opacity) use the same learning rates as the original 3DGS optimization [S1].
+*   **Iterations:** 30,000 for Stage 1, 10,000 for Stage 2 [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ivr_gs_training(volume_data, tf_params, camera_poses):
+    # Stage 1: Base 3DGS Optimization
+    gaussians_base = initialize_gaussians(volume_data)
+    for iteration in range(30000):
+        # Render image from current Gaussians
+        rendered_image = render(gaussians_base, camera_poses)
+        
+        # Calculate Loss
+        loss_l1 = l1_loss(rendered_image, target_image)
+        loss_ssim = ssim_loss(rendered_image, target_image)
+        loss_reg = l1_regularization(gaussians_base)
+        
+        # Note: Normal and shading losses are not primary in Stage 1
+        total_loss = 0.8 * loss_l1 + 0.2 * loss_ssim + 0.1 * loss_reg
+        
+        # Update Gaussians (Position, Scale, Rotation, Opacity)
+        # Using Adam optimizer with original 3DGS learning rates
+        update_gaussians(gaussians_base, total_loss)
+    
+    # Stage 2: Editable Gaussian Optimization
+    # Initialize editable Gaussians based on base geometry
+    gaussians_editable = initialize_editable_gaussians(gaussians_base)
+    
+    for iteration in range(10000):
+        # Render image
+        rendered_image = render(gaussians_editable, camera_poses)
+        
+        # Calculate Loss
+        loss_l1 = l1_loss(rendered_image, target_image)
+        loss_ssim = ssim_loss(rendered_image, target_image)
+        loss_reg = l1_regularization(gaussians_editable)
+        loss_normal = normal_consistency_loss(gaussians_editable)
+        
+        # Apply specific weights for Stage 2
+        total_loss = 0.8 * loss_l1 + 0.2 * loss_ssim + 0.1 * loss_reg + 0.01 * loss_normal
+        
+        # Update Gaussians
+        # Normal and shading attributes use LR = 0.01
+        # Other attributes use original 3DGS LR
+        update_gaussians(gaussians_editable, total_loss)
+        
+    return gaussians_editable
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Ensure normal vectors are normalized after updates to maintain unit length [G].
+*   **Boundaries:** Handle edge pixels in rendering to avoid artifacts during loss calculation [G].
+*   **Degenerate Input:** If volume data is sparse, Stage 1 may require more iterations to capture geometry accurately [G].
+
+## Subtopics
+
+### iVR-GS Two-Stage Training
+This is the core variant of iVR-GS training. It explicitly separates the training into a 30,000-iteration base 3DGS phase and a 10,000-iteration editable Gaussian phase. It is chosen when computational efficiency and reduced model size are priorities. Compared to one-stage training (40,000 iterations from scratch), it accelerates optimization, uses fewer primitives, and reduces training time by over 2× while maintaining similar reconstruction quality [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The two-stage approach reduces total training time by over 2× compared to one-stage training [S1].
+*   **Memory Complexity:** Uses fewer primitives than one-stage training, resulting in smaller file sizes (e.g., 8.8 MB vs 16.7 MB for one basic scene in Table 2 of [S1]).
+*   **Performance:** Maintains similar PSNR and LPIPS metrics to one-stage training [S1].
+*   **Strengths:** Faster convergence, smaller model size, efficient use of primitives.
+*   **Limitations:** Requires careful initialization of editable Gaussians on the base geometry.
+*   **When to Use:** When training time and model size are critical constraints.
+*   **When Not to Use:** If maximum possible reconstruction quality is required regardless of resource cost, one-stage training might be considered, though iVR-GS claims comparable quality.
+
+## Background
+iVR-GS was introduced in the paper "iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting" [S1]. The method leverages the efficiency of 3D Gaussian Splatting for volume rendering and introduces a two-stage training strategy to enable interactive editing of volume visualizations. It builds upon the base 3DGS optimization framework to provide a robust geometric foundation before refining shading attributes.
+
+## Sources
+[S1] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26

@@ -1,0 +1,144 @@
+# Splatting for Anti-aliasing Small Cells
+
+Also called: Anti-Aliased Ellipsoidal Splats, Anti-Aliasing for Small Cells via Splatting, Anti-aliased Splatting for Small Cells, Gaussian Splatting for Small Cells, Gaussian ellipsoid splatting, Small cell anti-aliasing, Splatting Anti-Aliasing
+
+## Overview
+
+This method prevents the loss of important details in adaptive meshes by rendering small cells that would otherwise be missed between slice planes or by pixel samples during scan conversion [S1, S2][S3, unofficial]. It replaces the complex rendering of filtered polygons with anti-aliased ellipsoidal splats, ensuring that small cells in regions of high gradients or complex geometry contribute to the final image [S1, S2][S3, unofficial]. Unlike siblings that rely on pre-sampling filters or motion blur, this approach uses Gaussian ellipsoids to smoothly interpolate the scalar field while avoiding overlap with larger polygonal slices [S1][S3, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of polyhedral cells from an adaptive mesh or curvilinear grid [S1][S3, unofficial].
+*   A volume threshold to distinguish small cells from large cells [S1][S3, unofficial].
+*   A transfer function mapping cell properties to RGBA color and opacity [S1][S3, unofficial].
+*   A set of parallel slice planes perpendicular to the viewing direction [S1][S3, unofficial].
+*   Camera parameters defining the viewing direction and projection type [S1][S3, unofficial].
+
+**Outputs:**
+*   A composited 2D image where small cells are rendered as anti-aliased splats and large cells as polygons [S1][S3, unofficial].
+
+### Data Structures
+1.  **Cell Data:** Each cell $C_i$ stores its geometric vertices, volume $V_i$, and center of gravity (centroid) $P_i$ [S1][S3, unofficial].
+2.  **Splat Data:** For each small cell, a Gaussian ellipsoid is defined to approximate its shape [S1][S3, unofficial].
+3.  **Texture Maps:** Pre-computed textures containing 2D circular Gaussian footprints for small cells, grouped by slicing direction and slice index [S1][S3, unofficial].
+4.  **Stencil Buffer:** A buffer recording the presence of large cell polygons to prevent splat overlap [S1][S3, unofficial].
+
+### Steps
+1.  **Classification:** Compare the volume of each cell to a threshold to select small cells that should be splatted instead of sliced [S1][S3, unofficial].
+2.  **Assignment:** Assign each small cell to the closest slice plane [S1][S3, unofficial].
+3.  **Ellipsoid Fitting:** Fit each small cell with a Gaussian ellipsoid that approximates its shape [S1][S3, unofficial]. In a curvilinear grid with a slowly varying Jacobian derivative matrix, these splats sum to near unity at any point, smoothly interpolating the sampled scalar field [S1][S3, unofficial].
+4.  **Footprint Calculation:** Project the 3D ellipsoid to the image plane to obtain an elliptical footprint [S1][S3, unofficial]. Convolve this footprint with a Gaussian pre-sampling filter in the image plane to create an enlarged 2D splat for anti-aliasing [S1][S3, unofficial].
+5.  **Rectangle Enclosure:** Enclose the elliptical footprint of the enlarged splat in a rectangle [S1][S3, unofficial].
+6.  **Preprocessing:** Sort small cells closest to each slice by the depth of their centers of gravity [S1][S3, unofficial]. Splat these sorted cells into an image in back-to-front order [S1][S3, unofficial]. Read back the image and determine a rectangle enclosing its non-zero values [S1][S3, unofficial]. Create texture maps per slicing direction, with each map containing as many textured rectangles from consecutive slices as would fit [S1][S3, unofficial]. The texture value is a 2D circular Gaussian multiplied by an RGBA color derived from the transfer function, cell volume, and enlarged footprint size [S1][S3, unofficial].
+7.  **Interactive Rendering:** Load texture maps for the current slicing direction into texture objects [S1][S3, unofficial]. Render polygons for larger cells in a slice, recording their presence in a stencil buffer [S1][S3, unofficial]. Position the rectangle representing the splats on the slice plane and composite using texture mapping [S1][S3, unofficial]. Apply a stencil test restricted to regions where polygons are absent, so splats do not contribute where full opacity for the ray segment between slices is already accounted for [S1][S3, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_small_cells(cells, slice_planes, threshold, transfer_function):
+    small_cells, large_cells = [], []
+    for cell in cells:
+        if cell.volume < threshold:
+            small_cells.append(cell)
+        else:
+            large_cells.append(cell)
+
+    splat_data = []
+    for cell in small_cells:
+        closest_plane = min(slice_planes, key=lambda p: abs(dot(cell.centroid, p.normal) - p.d))
+        # Fit Gaussian ellipsoid approximating cell shape [G]
+        ellipsoid = fit_gaussian_ellipsoid(cell)
+        splat_data.append({'cell': cell, 'plane': closest_plane, 'ellipsoid': ellipsoid, 'centroid': cell.centroid})
+
+    splats_by_plane = {}
+    for s in splat_data:
+        splats_by_plane.setdefault(s['plane'], []).append(s)
+
+    texture_maps = {}
+    for plane, plane_splats in splats_by_plane.items():
+        # Sort by depth of centers of gravity
+        plane_splats.sort(key=lambda s: dot(s['centroid'], plane.normal))
+        # Splat sorted cells into an image in back-to-front order [G]
+        temp_image = render_splats_to_image(plane_splats, transfer_function)
+        # Read back image and determine rectangle enclosing non-zero values [G]
+        bounds = find_non_zero_bounds(temp_image)
+        # Create texture map per slicing direction with textured rectangles [G]
+        texture = create_gaussian_texture(bounds, transfer_function, plane_splats)
+        texture_maps[plane.id] = texture
+    return texture_maps, large_cells
+
+def render_frame(texture_maps, large_cells, slice_planes, stencil_buffer):
+    # Clear stencil buffer [G]
+    clear_stencil_buffer(stencil_buffer)
+    for plane in slice_planes:
+        plane_large = [c for c in large_cells if is_close_to_plane(c, plane)]
+        for cell in plane_large:
+            render_polygon(cell)
+            record_in_stencil(stencil_buffer, cell)
+    for plane in slice_planes:
+        if plane.id in texture_maps:
+            texture = texture_maps[plane.id]
+            render_splat_rectangle(texture, plane, stencil_buffer)
+
+# Helper functions
+def fit_gaussian_ellipsoid(cell):
+    # Approximates cell shape with a Gaussian ellipsoid [G]
+    return {'center': cell.centroid, 'covariance': compute_covariance(cell.vertices)}
+def render_splats_to_image(splats, tf):
+    # Renders splats back-to-front into a temporary buffer [G]
+    return []
+def find_non_zero_bounds(image):
+    # Returns bounding rectangle of non-zero values in image [G]
+    return (0, 0, 1, 1)
+def create_gaussian_texture(bounds, tf, splats):
+    # Creates texture with 2D circular Gaussian * RGBA from tf, volume, footprint [G]
+    return {}
+def clear_stencil_buffer(buf): pass
+def render_polygon(cell): pass
+def record_in_stencil(buf, cell): pass
+def render_splat_rectangle(tex, plane, buf): pass
+def is_close_to_plane(cell, plane): return True
+def dot(a, b): return sum(x*y for x,y in zip(a,b))
+def compute_covariance(vertices): return {}
+```
+
+### Parameters
+*   **Volume Threshold:** Determines the cutoff between small and large cells. Not given in the sources.
+*   **Gaussian Filter Width:** Controls the size of the anti-aliasing blur. Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Precision:** The method relies on accurate calculation of cell volumes and centroids, as errors may lead to incorrect classification or assignment [S1][S3, unofficial].
+*   **Boundary Conditions:** The stencil test must correctly handle regions where polygons are absent; if unrestricted, splats may overlap fully opaque polygon regions, causing visual artifacts [S1][S3, unofficial].
+
+## Subtopics
+
+### Motion-Blurred Splats
+Renders cells with motion blur to handle temporal aliasing. Choose when objects are moving rapidly. [Motion-Blurred Splats](1343-motion-blurred-splats.md)
+
+### Threshold Slicing and Anti-Aliasing
+Uses thresholding on scalar values to determine slice visibility. Choose when scalar field discontinuities are important. [Threshold Slicing and Anti-Aliasing](1447-threshold-slicing-and-anti-aliasing.md)
+
+### Prefiltering
+Applies a filter to the data before rendering to reduce aliasing. Choose when pre-processing time is available and data is static. [Prefiltering](2928-prefiltering.md)
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Prevents loss of small details in adaptive meshes; enables efficient hardware rendering via texture mapping; ensures smooth interpolation of scalar fields [S1][S3, unofficial].
+*   **Limitations:** Requires preprocessing steps; may introduce blurring due to Gaussian filtering; implementation complexity arises from stencil testing and texture management [S1][S3, unofficial].
+*   **When to Use:** When rendering adaptive meshes with small cells that are critical for visualization and are prone to being missed by standard slicing [S1][S3, unofficial].
+*   **When Not to Use:** When small cells are not important or when preprocessing time is prohibitive [S1][S3, unofficial].
+
+## Background
+
+This method was developed for volume rendering of curvilinear and unstructured grids, particularly in the context of adaptive meshes [S1, S2][S3, unofficial]. It builds on the foundational work of Westover on splatting [S1] and Zwicker et al. on Gaussian splatting for anti-aliasing [S1][S3, unofficial]. The technique was presented in the paper "Volume rendering for curvilinear and unstructured grids" by Silva et al. [S1, S2][S3, unofficial].
+
+## Sources
+
+[S1] Volume rendering for curvilinear and unstructured grids, https://doi.org/10.1109/cgi.2003.1214468, fetched 2026-10-24
+[S2] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27
+[S3] Volume rendering for curvilinear and unstructured grids, https://www.researchgate.net/publication/4023713_Volume_rendering_for_curvilinear_and_unstructured_grids, fetched 2026-10-30 (unofficial)

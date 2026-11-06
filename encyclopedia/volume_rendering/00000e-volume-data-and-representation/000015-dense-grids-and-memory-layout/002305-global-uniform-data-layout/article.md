@@ -1,0 +1,127 @@
+# Global Uniform Data Layout
+
+Also called: App State Buffer, GlobalUniformData
+
+## Overview
+Global Uniform Data Layout defines the memory layout and update protocol for the `GlobalUniformData` GPU buffer structure, which transmits global rendering state, camera matrices, and lighting parameters from the CPU to volume rendering and shading shaders [S1, unofficial]. It solves the problem of maintaining a consistent, single-source-of-truth for global context across all rendering passes, ensuring that camera pose, projection, and lighting configurations are correctly applied to volume data [S1, unofficial]. It is distinguished from generic camera matrices by its inclusion of voxel texture dimensions, rendering state flags, and packed lighting data within a single contiguous buffer [S1, unofficial].
+
+## How it works
+The method maps high-level application settings and camera parameters into a tightly packed binary structure suitable for GPU uniform buffers.
+
+**Inputs and Outputs:**
+*   **Input:** Application settings (lighting flags, shadow toggles), camera matrices (View, Projection), camera position, voxel grid dimensions, and an array of point lights.
+*   **Output:** A contiguous block of memory (Uniform Buffer Object) uploaded to the GPU.
+
+**Data Structures:**
+The layout is defined by the `GlobalUniformData` struct, which inherits from `Settings` and appends camera and lighting data [S1, unofficial].
+
+1.  **Settings:** Inherits base rendering flags.
+    *   `indirectSpecularLight`: bool
+    *   `indirectDiffuseLight`: bool
+    *   `directLight`: bool
+    *   `shadows`: bool
+2.  **PointLights:** Array of `PointLight` structs.
+    *   `position`: `packed_float3` (3 floats)
+    *   `color`: `packed_float3` (3 floats)
+    *   Count: `MAX_LIGHTS` (Default: 1) [S1, unofficial].
+3.  **numberOfLights:** `int` (32-bit integer) [S1, unofficial].
+4.  **V:** `glm::mat4` (View matrix, 4x4 floats) [S1, unofficial].
+5.  **P:** `glm::mat4` (Projection matrix, 4x4 floats) [S1, unofficial].
+6.  **cameraPosition:** `vec3` (3 floats) [S1, unofficial].
+7.  **voxelTextureSize:** `uint32_t` (32-bit unsigned integer) [S1, unofficial].
+8.  **state:** `int32_t` (32-bit signed integer) [S1, unofficial].
+9.  **padding:** `uint32_t[3]` (3 unsigned integers, 12 bytes) [S1, unofficial].
+
+**Formulas:**
+No complex mathematical formulas are defined for the layout itself, but the coordinate mapping for volume sampling relies on the `V` and `P` matrices provided in this buffer to transform world-space ray origins into texture-space coordinates [G].
+
+**Parameters:**
+*   `MAX_LIGHTS`: Maximum number of point lights supported. Default: 1 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Padding:** The explicit `padding[3]` field suggests alignment requirements for the uniform buffer, likely to satisfy GPU memory alignment constraints for subsequent data or to ensure the buffer size is a multiple of 16 bytes [S1, unofficial].
+*   **Matrix Order:** The use of `glm::mat4` implies column-major storage, which is standard for OpenGL/Metal but must be handled correctly when uploading from C++ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Define the layout in Python-like pseudocode for clarity
+class GlobalUniformData:
+    def __init__(self):
+        # Settings (inherited)
+        self.indirectSpecularLight = False
+        self.indirectDiffuseLight = False
+        self.directLight = False
+        self.shadows = False
+        
+        # Lighting
+        self.MAX_LIGHTS = 1
+        self.pointLights = [PointLight() for _ in range(self.MAX_LIGHTS)]
+        self.numberOfLights = 0
+        
+        # Camera
+        self.V = [[1.0]*4 for _ in range(4)] # View Matrix
+        self.P = [[1.0]*4 for _ in range(4)] # Projection Matrix
+        self.cameraPosition = [0.0, 0.0, 0.0]
+        
+        # Voxel Info
+        self.voxelTextureSize = 0
+        
+        # State
+        self.state = 0
+        
+        # Padding
+        self.padding = [0, 0, 0]
+
+class PointLight:
+    def __init__(self):
+        self.position = [0.0, 0.0, 0.0]
+        self.color = [1.0, 1.0, 1.0]
+
+# To upload to GPU, serialize these fields into a byte buffer
+# respecting the order: Settings, PointLights, numberOfLights, V, P, cameraPosition, voxelTextureSize, state, padding
+```
+
+## Subtopics
+
+### Instance Data Layout
+Instance Data Layout defines the memory layout for the `ShapeInstance` struct, used to pass instance-specific data (position, texture, tint, shape ID, orientation) to the GPU for instanced rendering of voxel shapes [S2, unofficial]. It is distinguished from the Global Uniform Data by its focus on per-instance geometric and material properties rather than global rendering state [S2, unofficial].
+
+**Definition:**
+A tightly packed data structure used to pass instance data to the GPU [S2, unofficial].
+
+**Layout:**
+*   **Struct:** `ShapeInstance`
+*   **Kind:** `LayoutKind.Explicit`, `Pack = 1` [S2, unofficial].
+*   **Total Size:** 32 bytes [S2, unofficial].
+*   **Fields:**
+    1.  `position`: `Vector3` (float[3], 12 bytes, offset 0) [S2, unofficial].
+    2.  `texture`: `int` (4 bytes, offset 12) [S2, unofficial].
+    3.  `shape`: `ushort` (2 bytes, offset 16) [S2, unofficial].
+    4.  `rotation`: `ushort` (2 bytes, offset 18) [S2, unofficial].
+    5.  `tint`: `Vector3` (float[3], 12 bytes, offset 20) [S2, unofficial].
+*   **Shader Combination:** The `shape` and `rotation` fields are combined in shader code into a single `uint` named `shapeRotation` [S2, unofficial].
+
+**Parameters:**
+*   **Rotation Encoding:** Calculated as `(int)up * 4 + forward` [S2, unofficial].
+    *   `up`: `Direction` enum.
+    *   `forward`: Integer range 0-3, representing clockwise rotation perpendicular to `up` [S2, unofficial].
+
+**Pitfalls:**
+*   The `shape` field is truncated to `ushort` (2 bytes) despite the constructor accepting an `int` [S2, unofficial]. This limits the number of unique shapes to 65,535 [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Uploading the buffer is $O(1)$ relative to the number of voxels, but $O(L)$ relative to the number of lights $L$ (where $L \le MAX\_LIGHTS$) [S1, unofficial].
+*   **Memory Complexity:** The size is fixed and small. For `MAX_LIGHTS=1`, the size is approximately: Settings (4 bytes) + 1 Light (24 bytes) + numberOfLights (4 bytes) + V (64 bytes) + P (64 bytes) + cameraPosition (12 bytes) + voxelTextureSize (4 bytes) + state (4 bytes) + padding (12 bytes) = 192 bytes [S1, unofficial].
+*   **Strengths:** Single buffer upload reduces API calls; tightly packed layout minimizes memory bandwidth usage [S1, unofficial].
+*   **Limitations:** Fixed number of lights; rigid structure requires full buffer update if any field changes [S1, unofficial].
+*   **When to use:** When rendering voxel volumes with a small, fixed set of lights and standard camera parameters [S1, unofficial].
+*   **When not to use:** When dynamic lighting with many lights or complex per-instance data is required (use Instance Data Layout or other methods) [S2, unofficial].
+
+## Background
+The Global Uniform Data Layout originates from the VoxelConeTracingMetal project, which implements voxel-based cone tracing for real-time lighting [S1, unofficial]. It was developed to provide a efficient way to pass global rendering state to Metal shaders [S1, unofficial].
+
+## Sources
+[S1] kakashidinho/VoxelConeTracingMetal, https://github.com/kakashidinho/VoxelConeTracingMetal, fetched 2026-10-26 (unofficial)
+[S2] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)

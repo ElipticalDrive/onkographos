@@ -3,87 +3,50 @@
 Also called: 3D Projection Matrix Construction, Camera projection matrix setup, Canvas projection setup, Custom Perspective Projection Matrix, Perspective projection, View matrix assembly, View matrix setup
 
 ## Overview
-This method constructs the specific projection and view matrices required to transform 3D scene coordinates into clip space for rendering, specifically tailored for Gaussian Splatting pipelines [S3, unofficial]. It differs from standard textbook perspective matrices by allowing explicit control over focal lengths ($f_x, f_y$) and handling viewport shifts to align the camera center with the visibility bounding box (Vbb) [S2, S3, unofficial]. It builds on [General Perspective Transformation](1845-general-perspective-transformation.md) by providing the concrete matrix assembly steps for a custom camera model.
+This method constructs the projection and view matrices required to transform 3D scene coordinates into clip space for rendering [S3, unofficial]. It differs from standard symmetric frustum constructors by allowing explicit control over non-square focal lengths ($f_x, f_y$) and supporting viewport shift vectors to align the camera with a visibility bounding box [S1, S2, unofficial].
 
 ## How it works
 **Inputs:**
-- Camera focal lengths $f_x, f_y$ (in pixels).
-- Viewport dimensions: width $W$, height $H$.
-- Near plane distance $n$ (default 0.1).
-- Far plane distance $f$ (default 500.0 or 1000.0).
-- Optional shift vectors `before` and `after` for coordinate system alignment [S1, unofficial].
-- Camera orientation parameters: yaw, pitch [S1, unofficial].
+- Focal lengths $f_x, f_y$ [S2, unofficial].
+- Viewport dimensions: width $W$, height $H$ [S2, unofficial].
+- Near plane distance $n$ [S2, S3, unofficial].
+- Far plane distance $f$ [S2, S3, unofficial].
+- Shift vectors `before` and `after` for coordinate alignment [S1, unofficial].
+- Camera orientation: yaw, pitch, and zoom/aspect ratio [S1, S3, unofficial].
 
 **Outputs:**
-- A $4 \times 4$ projection matrix $P$.
-- A $4 \times 4$ view matrix $V$.
-- A combined model-view-projection matrix $MVP = P \cdot V \cdot M$ [S3, unofficial].
+- Projection matrix $P$ [S2, S3, unofficial].
+- View matrix $V$ [S3, unofficial].
+- Model matrix $M$ [S3, unofficial].
+- Combined transformation matrix $M_{final} = P \cdot V \cdot M$ [S3, unofficial].
 
 **Data Structures:**
-- `ProjectionMatrix`: A $4 \times 4$ column-major or row-major matrix (implementation dependent, but typically column-major in GLM).
-- `CameraSpecs`: Struct containing $f_x, f_y, n, f$.
+- $4 \times 4$ matrices for projection, view, and model [S3, unofficial].
 
 **Steps:**
-
-1. **Initialize Matrices:**
-   Set the model matrix $M$ to the identity matrix $I_4$ [S3, unofficial].
-   Set the view matrix $V$ based on camera orientation. If using a standard camera class, call `GetViewMatrix()` [S3, unofficial]. If constructing manually:
-   - Apply yaw rotation $R_z(\text{yaw})$ around the Z-axis if $|\text{yaw}| > 10^{-20}$ [S1, unofficial].
-   - Apply pitch rotation $R_x(\text{pitch})$ around the X-axis if $|\text{pitch}| > 10^{-20}$ [S1, unofficial].
-   - Combine rotations to form the view rotation component.
-
-2. **Calculate Projection Matrix $P$:**
-   Compute the aspect ratio $a = W / H$ [S3, unofficial].
-   Compute the field of view angle $\theta$ if using an angle-based constructor, or use focal lengths directly.
-   
-   The explicit elements of the projection matrix $P$ are defined as [S2, unofficial]:
-   $$
-   P = \begin{bmatrix}
-   \frac{2 f_x}{W} & 0 & 0 & 0 \\
-   0 & \frac{2 f_y}{H} & 0 & 0 \\
-   0 & 0 & -\frac{f + n}{f - n} & -1 \\
-   0 & 0 & -\frac{2 f n}{f - n} & 0
-   \end{bmatrix}
-   $$
-   Note: The source [S2, unofficial] specifies $P[2][3] = -1$ and $P[3][2] = -\frac{2 f n}{f - n}$, with all other elements zero except the diagonal terms $P[0][0]$ and $P[1][1]$. This corresponds to a right-handed coordinate system where the camera looks down the negative Z-axis, mapping depth to $[-1, 1]$ in clip space (with a sign flip in the W-component handling).
-
-   Alternatively, if using an API like GLM, one might call `glm::perspective(glm::radians(camera.Zoom), a, n, f)` [S3, unofficial], but the explicit formula above is required for custom focal lengths $f_x, f_y$ that differ from the standard symmetric frustum assumption.
-
-3. **Apply Viewport Shifts (Optional):**
-   If a shift vector `before` is provided (non-zero), apply a translation to shift the coordinate system to the origin before projection [S1, unofficial].
-   If an `after` vector is provided (non-zero), apply an inverse translation to shift back to screen coordinates after projection [S1, unofficial].
-
-4. **Combine Matrices:**
-   Compute the final transformation matrix:
-   $$
-   M_{final} = P \cdot V \cdot M
-   $$
-   where $M$ is the model matrix (often identity for global scene coordinates) [S3, unofficial].
-
-5. **Update Uniforms:**
-   Pass $M_{final}$ to the shader uniforms. On viewport resize, update $W, H$, recalculate $P$, and update the splat mesh uniforms [S2, unofficial].
+1. **Initialize Model Matrix:** Set $M$ to the $4 \times 4$ identity matrix [S3, unofficial]. Apply uniform scaling with factor $0.7$ if required by the scene setup [S1, unofficial].
+2. **Construct View Matrix:** Initialize $V$ based on camera orientation [S3, unofficial]. Apply yaw rotation around the Z-axis if $|\text{yaw}| > 10^{-20}$ [S1, unofficial]. Apply pitch rotation around the X-axis if $|\text{pitch}| > 10^{-20}$ [S1, unofficial]. This threshold prevents numerical instability and skips unnecessary multiplications for near-zero angles [S1, unofficial].
+3. **Calculate Projection Matrix $P$:** Compute the aspect ratio $a = W / H$ [S3, unofficial]. Set the matrix elements explicitly as [S2, unofficial]:
+   $$P[0][0] = \frac{2 f_x}{W}, \quad P[1][1] = \frac{2 f_y}{H}, \quad P[2][2] = -\frac{f + n}{f - n}, \quad P[2][3] = -1, \quad P[3][2] = -\frac{2 f n}{f - n}$$
+   All other elements are zero [S2, unofficial]. Alternatively, standard libraries may be used with `glm::perspective(glm::radians(camera.Zoom), a, n, f)` [S3, unofficial], but the explicit construction is necessary when $f_x \neq f_y$ [S2, unofficial].
+4. **Apply Viewport Shifts:** If the `before` shift vector is non-zero, apply a translation to shift coordinates to the origin before projection [S1, unofficial]. If the `after` shift vector is non-zero, apply an inverse translation to shift back to screen coordinates after projection [S1, unofficial].
+5. **Combine and Update:** Compute $M_{final} = P \cdot V \cdot M$ [S3, unofficial]. Pass $M_{final}$ to shader uniforms. On viewport resize, retrieve new dimensions, temporarily set the renderer size to $1 \times 1$, update the camera aspect ratio and projection matrix, restore the actual renderer dimensions, and update the real projection matrix and splat mesh uniforms [S2, unofficial].
 
 **Parameters:**
 - Default camera specs: $f_x = 1159.5880733038064$, $f_y = 1164.6601287484507$, $n = 0.1$, $f = 500.0$ [S2, unofficial].
 - Default resolution: $1280 \times 720$ [S3, unofficial].
-- Rotation threshold: $10^{-20}$ to skip near-zero rotations [S1, unofficial].
+- Rotation threshold: $10^{-20}$ [S1, unofficial].
 
 **Pitfalls:**
 - Numerical instability occurs if yaw or pitch are extremely small but non-zero; skip rotation if $|\theta| < 10^{-20}$ [S1, unofficial].
-- Ensure consistent coordinate system handedness (left vs. right) between the projection matrix construction and the view matrix. The formula in [S2, unofficial] assumes a specific handedness (likely right-handed with negative Z look direction).
-- When resizing, temporarily setting renderer size to $1 \times 1$ to update aspect ratio can cause visual glitches if not handled carefully [S2, unofficial].
+- The resize procedure requires temporarily setting the renderer size to $1 \times 1$ to correctly update the aspect ratio and projection matrix before restoring the actual dimensions [S2, unofficial].
 
 ## Subtopics
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for matrix construction. $O(N)$ for updating uniforms if $N$ is the number of splats/objects, but the matrix math itself is constant time.
-- **Memory Complexity:** $O(1)$ for the matrices themselves ($4 \times 4$ floats).
-- **Strengths:** Allows precise control over focal length and aspect ratio, essential for Gaussian Splatting where $f_x \neq f_y$ is common. Handles viewport shifts for bounding box alignment.
-- **Limitations:** Requires manual handling of coordinate system conventions. Not a general-purpose "black box" like `glm::perspective` for standard symmetric frustums.
-- **When to use:** Gaussian Splatting rendering, custom camera models with non-square pixels or specific focal lengths, or when aligning the camera center with a specific Vbb.
 
 ## Background
-This method is derived from implementations in Gaussian Splatting web viewers and voxel demos [S2, S3, unofficial]. It adapts standard perspective projection formulas to support the specific camera parameters (focal lengths) used in 3D Gaussian Splatting, which often differ from the standard OpenGL/DirectX default perspective matrix assumptions. The explicit matrix construction ensures compatibility with shaders expecting specific clip-space transformations.
+This method is documented in implementations for Gaussian Splatting web viewers and voxel demos [S2, S3, unofficial]. It provides explicit matrix assembly steps for custom camera models, combining projection, view, and model transformations for shader input [S3, unofficial].
 
 ## Sources
 [S1] hikaricai/vdrm, https://github.com/hikaricai/vdrm, fetched 2026-10-26 (unofficial)

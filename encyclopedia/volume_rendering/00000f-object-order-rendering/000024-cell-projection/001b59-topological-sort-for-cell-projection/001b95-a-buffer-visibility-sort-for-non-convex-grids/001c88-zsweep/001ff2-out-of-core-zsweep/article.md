@@ -9,35 +9,35 @@ Out-of-Core ZSWEEP is a direct volume rendering technique for large unstructured
 The algorithm is divided into two distinct phases: a view-independent preprocessing phase performed once to generate disk files, and a view-dependent rendering phase [S1, unofficial].
 
 ### Inputs and Outputs
-*   **Input:** An unstructured volumetric grid defined by vertices and cells.
-*   **Output:** A rendered image (pixel colors/compositing results).
+*   **Input:** An unstructured volumetric grid defined by vertices and cells [S1, unofficial].
+*   **Output:** A rendered image (pixel colors/compositing results) [S1, unofficial].
 
 ### Data Structures
 The preprocessing generates two primary files on disk:
-1.  **Meta-cell File:** A small file containing a high-level description for each meta-cell. Each entry includes:
-    *   Bounding box.
-    *   Number of vertices.
-    *   Number of cells.
+1.  **Meta-cell File:** A small file containing a high-level description for each meta-cell [S1, unofficial]. Each entry includes:
+    *   Bounding box [S1, unofficial].
+    *   Number of vertices [S1, unofficial].
+    *   Number of cells [S1, unofficial].
     *   Pointer to the start of the meta-cell's data in the main data file [S1, unofficial].
-2.  **Meta-cell Data File:** A larger file containing the actual list of vertices and cells for each meta-cell. Vertices and cells may appear repeated across different meta-cells because each meta-cell is a self-contained unit [S1, unofficial].
+2.  **Meta-cell Data File:** A larger file containing the actual list of vertices and cells for each meta-cell [S1, unofficial]. Vertices and cells may appear repeated across different meta-cells because each meta-cell is a self-contained unit [S1, unofficial].
 
 During rendering, the following in-memory structures are used:
 *   **Pixel Intersection Lists:** For each pixel in the current tile, a sorted list of intersections storing z-values and auxiliary information [S1, unofficial].
-*   **Vertex Queue:** A queue used for sweeping vertices. Vertices are tagged as either 'bounding-box' or 'dataset' vertices [S1, unofficial].
+*   **Vertex Queue:** A queue used for sweeping vertices [S1, unofficial]. Vertices are tagged as either 'bounding-box' or 'dataset' vertices [S1, unofficial].
 *   **Meta-cell Memory Buffer:** Holds the vertices and cells of the currently active meta-cell(s) loaded from disk [S1, unofficial].
 
 ### Preprocessing Steps
 1.  **Chunk Creation (Meta-cell Generation):**
-    *   Let $v$ be the total number of vertices and $m$ be the target number of vertices per meta-cell.
-    *   Externally sort all vertices by their x-values.
-    *   Partition the sorted vertices into $\lceil v/m \rceil$ consecutive parts.
-    *   For each part, externally sort its vertices by y-values.
-    *   Partition each part into $\lceil v/m \rceil$ sub-parts.
-    *   For each refined part, externally sort its vertices by z-values.
-    *   Take the final parts as chunks (meta-cells). These chunks have roughly the same number of vertices but may differ in volume [S1, unofficial].
+    *   Let $v$ be the total number of vertices and $m$ be the target number of vertices per meta-cell [S1, unofficial].
+    *   Externally sort all vertices by their x-values [S1, unofficial].
+    *   Partition the sorted vertices into $v/m$ consecutive parts [S1, unofficial].
+    *   For each part, externally sort its vertices by y-values [S1, unofficial].
+    *   Partition each part into $v/m$ sub-parts [S1, unofficial].
+    *   For each refined part, externally sort its vertices by z-values [S1, unofficial].
+    *   Take the final parts as chunks (meta-cells) [S1, unofficial]. These chunks have roughly the same number of vertices but may differ in volume [S1, unofficial].
 2.  **Meta-cell Association:**
-    *   Compute which cells spatially intersect each meta-cell and identify the vertices belonging to those cells.
-    *   This is performed in external memory. The output is the two files described above [S1, unofficial].
+    *   Compute which cells spatially intersect each meta-cell and identify the vertices belonging to those cells [S1, unofficial].
+    *   This is performed in external memory [S1, unofficial]. The output is the two files described above [S1, unofficial].
     *   *Note:* Unlike the meta-cells in Chiang et al. [2], a cell in this variant can belong to as many meta-cells as it spatially intersects [S1, unofficial].
 
 ### Rendering Steps
@@ -53,31 +53,31 @@ The rendering is performed tile by tile.
             *   Dequeue the next vertex $v$.
             *   If $v$ is a **bounding-box** vertex:
                 *   If the meta-cell $m$ associated with this bounding box has not been loaded:
-                    *   Retrieve all vertices and cells of $m$ from the disk files.
-                    *   Transform the vertices to view space.
+                    *   Retrieve all vertices and cells of $m$ from the disk files [S1, unofficial].
+                    *   Transform the vertices to view space [S1, unofficial].
                     *   Insert these vertices into the queue, tagging them as **dataset** vertices [S1, unofficial].
-                *   Increment the counter of bounding-box vertices seen for meta-cell $m$.
+                *   Increment the counter of bounding-box vertices seen for meta-cell $m$ [S1, unofficial].
                 *   If the counter for $m$ reaches 8:
                     *   Deallocate the memory for meta-cell $m$ (free memory from disk) [S1, unofficial].
             *   If $v$ is a **dataset** vertex:
-                *   Project the faces incident to $v$.
-                *   For each pixel covered by the face, compute the intersection of the ray emanating from the pixel with the face.
+                *   Project the faces incident to $v$ [S1, unofficial].
+                *   For each pixel covered by the face, compute the intersection of the ray emanating from the pixel with the face [S1, unofficial].
                 *   Store the z-value and auxiliary information in the pixel's intersection list in sorted order [S1, unofficial].
         *   **Compositing:** As the sweep plane reaches the "target Z" plane for each pixel, perform compositing using the accumulated intersection list for that pixel [S1, unofficial].
 
 ### Parameters
-*   **Target vertices per meta-cell ($m$):** Determines the size of the chunks. The number of meta-cells should be small enough to fit in memory [S1, unofficial].
-*   **Tile Size:** Determines the granularity of screen subdivision. Smaller tiles reduce peak memory usage for pixel intersection lists but increase overhead [S1, unofficial].
+*   **Target vertices per meta-cell ($m$):** Determines the size of the chunks [S1, unofficial]. The number of meta-cells should be small enough to fit in memory [S1, unofficial].
+*   **Tile Size:** Determines the granularity of screen subdivision [S1, unofficial].
 
 ### Edge Cases and Pitfalls
 *   **Memory Usage:** Main memory usage is dominated by pixel intersection lists and the "use set" of each vertex (cells incident to each vertex) for the currently loaded meta-cells [S1, unofficial].
-*   **Cell Overlap:** A single cell may be stored in multiple meta-cells if it spatially intersects multiple meta-cells. This increases disk space but simplifies the rendering logic by making meta-cells self-contained [S1, unofficial].
-*   **Bounding Box Count:** The algorithm assumes 8 bounding-box vertices per meta-cell (likely corresponding to a hexahedral bounding box). If the meta-cell geometry differs, the deallocation condition must be adjusted [S1, unofficial].
+*   **Cell Overlap:** A single cell may be stored in multiple meta-cells if it spatially intersects multiple meta-cells [S1, unofficial]. This increases disk space but simplifies the rendering logic by making meta-cells self-contained [S1, unofficial].
+*   **Bounding Box Count:** The algorithm assumes 8 bounding-box vertices per meta-cell (likely corresponding to a hexahedral bounding box) [S1, unofficial].
 
 ## Operating characteristics
 *   **Memory Complexity:** Constant memory usage with respect to dataset size. For a large 2048-by-2048 image of the Delta dataset, in-core ZSWEEP requires over 380 MB, while OOC-ZSWEEP requires about 24 MB [S1, unofficial].
 *   **Time Complexity:** Rendering times depend on the number of cells and resolution. For the SPX3 dataset at 2048^2 resolution, OOC-ZSWEEP took 1157 seconds to generate the image, with a cost of 174 µs per cell [S1, unofficial].
-*   **Comparison with MIR:** OOC-ZSWEEP is usually more efficient than MIR (Memory Insensitive Rendering), sometimes by a factor of 10 or more. However, it requires preprocessing and uses more memory than MIR. MIR is simpler to implement and may be preferred for rendering the same viewpoint with different transfer functions, as lighting calculations are deferred [S1, unofficial].
+*   **Comparison with MIR:** OOC-ZSWEEP is usually more efficient than MIR (Memory Insensitive Rendering), sometimes by a factor of 10 or more. However, it requires preprocessing and uses more memory than MIR. MIR is simpler to implement but considerably slower due to more sorting and disk I/O [S1, unofficial].
 *   **Strengths:** Enables rendering of datasets larger than RAM; faster than purely disk-based methods like MIR; leverages ZSWEEP's early compositing and sorting optimizations.
 *   **Limitations:** Complex preprocessing; higher memory usage than MIR; implementation complexity due to lazy loading and queue management.
 

@@ -159,6 +159,7 @@ def level_synchronized_bisection_cast(origins, directions, bounds_min, bounds_ma
             t_begin = iv_t_lo[i]
             t_end = iv_t_hi[i]
             
+            # [G] Standard evaluation returning function value and derivative for Hermite interpolation
             h_b = inclusion_fn.get_hermite_data(origins[ray_idx[i]] + t_begin * directions[ray_idx[i]])
             h_e = inclusion_fn.get_hermite_data(origins[ray_idx[i]] + t_end * directions[ray_idx[i]])
             
@@ -280,14 +281,14 @@ def oracle_hermite_interpolation(t_begin, t_end, h_b, h_e):
 Bisection Trace with Gradient Inclusion is a robust ray casting algorithm that renders the zero-level-set of an implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ by combining level-synchronized bisection with gradient-based inclusion functions. It solves the problem of missing surface features during ray traversal by using interval arithmetic to guarantee that no zero-crossings are pruned incorrectly. It distinguishes itself from standard bisection by using a Lipschitz constant derived from gradient norms to tighten the inclusion bounds, offering a configurable trade-off between generality and bound tightness.
 
 ## Operating characteristics
-- **Time Complexity:** $O(R \cdot D \cdot K)$, where $R$ is the number of rays, $D$ is the maximum bisection depth (`max_depth`), and $K$ is the cost of inclusion function evaluation and Hermite data computation per interval. The level-synchronized approach allows for efficient batch processing, reducing overhead per ray.
-- **Memory Complexity:** $O(R)$ for storing ray states and results. The batch processing minimizes memory fragmentation compared to per-ray processing.
-- **Measured Performance:** Performance depends heavily on the efficiency of the `inclusion_fn`. Black-box `SamplingInclusion` is slower but more general, while `NaturalIntervalInclusion` and `AffineInclusion` are faster for analytic functions [S1, unofficial].
-- **Scaling:** Scales well with the number of rays due to batch processing. Performance on GPU is significantly better than CPU due to parallel evaluation of inclusion bounds and Hermite data.
-- **Strengths:** Guaranteed robustness against missed features, handles arbitrary implicit functions, supports black-box functions, provides sub-pixel accuracy with Newton refinement.
-- **Limitations:** Slower than standard ray marching due to interval arithmetic overhead. Requires careful tuning of `max_depth` and `threshold` for high-frequency surfaces.
-- **When to Use:** When robustness is critical, e.g., for thin shells, cusps, high-frequency surfaces, or near-tangent intersections. When working with black-box implicit functions.
-- **When Not to Use:** When performance is the primary concern and the implicit function is simple and well-behaved. When analytic gradients are not available and black-box evaluation is too slow.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Guaranteed robustness against missed features, handles arbitrary implicit functions, supports black-box functions, provides sub-pixel accuracy with Newton refinement [S1, unofficial].
+- **Limitations:** Slower than standard ray marching due to interval arithmetic overhead [G]. Requires careful tuning of `max_depth` and `threshold` for high-frequency surfaces [S1, unofficial].
+- **When to Use:** When robustness is critical, e.g., for thin shells, cusps, high-frequency surfaces, or near-tangent intersections [S1, unofficial]. When working with black-box implicit functions [S1, unofficial].
+- **When Not to Use:** When performance is the primary concern and the implicit function is simple and well-behaved [G]. When analytic gradients are not available and black-box evaluation is too slow [G].
 
 ## Background
 Level-synchronized bisection ray casting is a method for robust iso-surface rendering via interval-arithmetic ray casting for arbitrary implicit geometries [S1, unofficial]. It was developed as part of the `isoray` library, which targets black-box functions where only point evaluations are available [S1, unofficial]. The method builds on the principles of interval arithmetic and bisection, extending them to a batch-synchronized framework for efficient ray tracing [S1, unofficial]. It is used in research and applications requiring robust rendering of complex implicit surfaces, such as medical imaging, CAD, and scientific visualization [S1, unofficial].

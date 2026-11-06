@@ -1,0 +1,158 @@
+--- v001.md
++++ v002.md
+@@ -4,92 +4,78 @@
+ 
+ ## Overview
+-This method initializes the data structures required for tiled parallel compositing by computing which triangles (or splats) overlap with each tile in the output framebuffer. It solves the problem of mapping spatial geometry to disjoint processing units without synchronization. It differs from its siblings by relying on a global radix-sort to organize triangle-tile relationships rather than per-tile queues or expensive coverage tests during setup [S1, unofficial].
++This method initializes the data structures required for tiled parallel compositing [1192-tiled-parallel-compositing.md] by computing which geometry overlaps each tile in the output framebuffer. It differs from [Tile-Based Alpha Compositing](1215-tile-based-alpha-compositing.md) and [Dynamic Load Balancing via Tile Queue](1763-dynamic-load-balancing-via-tile-queue.md) by relying on a global radix-sort to organize tile relationships rather than per-tile queues or expensive coverage tests during setup [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- Swapchain width and height (resolution).
+-- Number of instances (triangles/splats) to process.
+-- Sorted key buffer (`sortKBufferEven`) containing tile indices for each instance.
++- Swapchain width and height (resolution) [S1, unofficial].
++- Number of instances (`numInstances`) to process [S1, unofficial].
++- Sorted key buffer (`sortKBufferEven`) containing tile indices for each instance [S1, unofficial].
+ 
+ **Outputs:**
+-- `tileBoundaryBuffer`: A storage buffer storing boundary indices for each tile.
++- `tileBoundaryBuffer`: A storage buffer storing boundary indices for each tile [S1, unofficial].
+ 
+ **Data Structures:**
+-- `tileBoundaryBuffer`: A storage buffer of size `tileX * tileY * 2 * sizeof(uint32_t)`. It stores two `uint32_t` values per tile, likely representing start and end indices into the sorted instance list [S1, unofficial].
++- `tileBoundaryBuffer`: A storage buffer of size `tileX * tileY * 2 * sizeof(uint32_t)` [S1, unofficial]. It stores two `uint32_t` values per tile, representing boundary indices into the sorted instance list [S1, unofficial].
+ 
+ **Parameters:**
+ - `tileX`: Number of tiles in the x-direction, calculated as `(width + 15) / 16` [S1, unofficial].
+ - `tileY`: Number of tiles in the y-direction, calculated as `(height + 15) / 16` [S1, unofficial].
+-- `numInstances`: The total number of geometry instances (triangles/splats) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Calculate Tile Grid:** Compute `tileX` and `tileY` using ceiling division by 16.
+-    $$ tileX = \lceil \frac{width}{16} \rceil, \quad tileY = \lceil \frac{height}{16} \rceil $$
+-2.  **Allocate Buffer:** Allocate `tileBoundaryBuffer` with size `tileX * tileY * 2 * sizeof(uint32_t)` [S1, unofficial].
+-3.  **Initialize Buffer:** Zero out `tileBoundaryBuffer` using a fill operation [S1, unofficial].
+-4.  **Barrier:** Apply a pipeline barrier transitioning `tileBoundaryBuffer` from `eTransfer` to `eComputeShader` access [S1, unofficial].
+-5.  **Bind Descriptors:** Bind `sortKBufferEven` and `tileBoundaryBuffer` to the compute pipeline descriptor set [S1, unofficial].
+-6.  **Dispatch:** Bind `tileBoundaryPipeline` and dispatch compute shaders.
+-    -   Push constant: `numInstances`.
+-    -   Workgroup size: 256 threads per workgroup.
+-    -   Number of workgroups: `(numInstances + 255) / 256` [S1, unofficial].
+-7.  **Barrier:** Apply a compute read/write barrier on `tileBoundaryBuffer` to ensure completion before subsequent reads [S1, unofficial].
++1. **Calculate Tile Grid:** Compute `tileX` and `tileY` using ceiling division by 16: `tileX = (width + 15) / 16`, `tileY = (height + 15) / 16` [S1, unofficial].
++2. **Allocate Buffer:** Allocate `tileBoundaryBuffer` with size `tileX * tileY * 2 * sizeof(uint32_t)` [S1, unofficial].
++3. **Initialize Buffer:** Zero out `tileBoundaryBuffer` using a fill operation [S1, unofficial].
++4. **Pipeline Barrier:** Apply a pipeline barrier transitioning `tileBoundaryBuffer` from `eTransfer` to `eComputeShader` access [S1, unofficial].
++5. **Bind Descriptors:** Bind `sortKBufferEven` and `tileBoundaryBuffer` to the compute pipeline descriptor set [S1, unofficial].
++6. **Dispatch:** Bind `tileBoundaryPipeline` and dispatch compute shaders with `numInstances` as a push constant [S1, unofficial]. The dispatch size is `(numInstances + 255) / 256` workgroups [S1, unofficial].
++7. **Compute Barrier:** Apply a compute read/write barrier on `tileBoundaryBuffer` to ensure completion before subsequent reads [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def setup_tile_boundaries(context, width, height, num_instances, sort_k_buffer_even):
++def setup_tile_boundaries(width, height, num_instances, sort_k_buffer_even):
+     # 1. Calculate tile grid dimensions
+     tile_x = (width + 15) // 16
+     tile_y = (height + 15) // 16
+-    
++
+     # 2. Allocate tile boundary buffer
+-    # Size: tileX * tileY * 2 * sizeof(uint32_t)
+-    tile_boundary_buffer = context.create_storage_buffer(
+-        size=tile_x * tile_y * 2 * 4, 
+-        name="tileBoundaryBuffer"
+-    )
+-    
+-    # 3. Zero out the buffer
+-    context.fill_buffer(tile_boundary_buffer, 0)
+-    
+-    # 4. Apply pipeline barrier: Transfer -> ComputeShader
+-    context.apply_pipeline_barrier(
+-        buffer=tile_boundary_buffer,
+-        src_access=vk.AccessFlagBits.eTransferWrite,
+-        dst_access=vk.AccessFlagBits.eShaderWrite,
+-        src_stage=vk.PipelineStageFlagBits.eTransfer,
+-        dst_stage=vk.PipelineStageFlagBits.eComputeShader
+-    )
+-    
++    buffer_size = tile_x * tile_y * 2 * 4  # 4 bytes per uint32
++    tile_boundary_buffer = allocate_storage_buffer(buffer_size)
++
++    # 3. Initialize buffer
++    fill_buffer(tile_boundary_buffer, 0)
++
++    # 4. Pipeline barrier: Transfer -> ComputeShader
++    apply_pipeline_barrier(tile_boundary_buffer, src_stage='eTransfer', dst_stage='eComputeShader')
++
+     # 5. Bind descriptors
+-    descriptor_set = context.create_descriptor_set()
+-    descriptor_set.bind_buffer(0, vk.DescriptorType.eStorageBuffer, vk.ShaderStageFlagBits.eCompute, sort_k_buffer_even)
+-    descriptor_set.bind_buffer(1, vk.DescriptorType.eStorageBuffer, vk.ShaderStageFlagBits.eCompute, tile_boundary_buffer)
+-    descriptor_set.build()
+-    
++    descriptor_set = create_descriptor_set()
++    descriptor_set.bind_buffer(0, 'eStorageBuffer', 'eCompute', sort_k_buffer_even)
++    descriptor_set.bind_buffer(1, 'eStorageBuffer', 'eCompute', tile_boundary_buffer)
++    build_descriptor_set(descriptor_set)
++
+     # 6. Dispatch compute pipeline
+-    # Pipeline: tileBoundaryPipeline
+-    # Push constant: num_instances
+-    # Workgroup size: 256
+     num_workgroups = (num_instances + 255) // 256
+-    
+-    context.bind_pipeline(tile_boundary_pipeline)
+-    context.bind_descriptor_set(0, descriptor_set)
+-    context.push_constant(num_instances)
+-    context.dispatch_compute(num_workgroups, 1, 1)
+-    
+-    # 7. Apply compute barrier
+-    context.apply_pipeline_barrier(
+-        buffer=tile_boundary_buffer,
+-        src_access=vk.AccessFlagBits.eShaderWrite,
+-        dst_access=vk.AccessFlagBits.eShaderRead | vk.AccessFlagBits.eShaderWrite,
+-        src_stage=vk.PipelineStageFlagBits.eComputeShader,
+-        dst_stage=vk.PipelineStageFlagBits.eComputeShader
+-    )
++    bind_pipeline('tileBoundaryPipeline')
++    bind_descriptor_set(0, descriptor_set)
++    push_constant(num_instances)
++    dispatch_compute(num_workgroups, 1, 1)
++
++    # 7. Compute barrier
++    apply_pipeline_barrier(tile_boundary_buffer, src_stage='eComputeShader', dst_stage='eComputeShader')
++
++# Helper definitions to satisfy self-contained requirement
++def allocate_storage_buffer(size): return bytearray(size)
++def fill_buffer(buffer, value): buffer[:] = bytes([value]) * len(buffer)
++def apply_pipeline_barrier(buffer, src_stage, dst_stage): pass
++def create_descriptor_set(): return type('DS', (), {'bind_buffer': lambda s, i, t, p, b: None, 'build': lambda s: None})()
++def bind_pipeline(name): pass
++def bind_descriptor_set(idx, ds): pass
++def push_constant(val): pass
++def dispatch_compute(x, y, z): pass
+ ```
+ 
+ **Edge Cases:**
+--   **Zero Instances:** If `num_instances` is 0, the dispatch should handle this gracefully or be skipped [G].
+--   **Boundary Precision:** Ceiling division ensures full coverage of the swapchain dimensions, even if not perfectly divisible by 16 [S1, unofficial].
++- **Zero Instances:** If `num_instances` is 0, the dispatch calculates 0 workgroups and skips execution [G].
++- **Boundary Precision:** Ceiling division ensures full coverage of the swapchain dimensions, even if not perfectly divisible by 16 [S1, unofficial].
+ 
+ ## Subtopics
+@@ -99,9 +85,9 @@
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Linear with respect to the number of instances for the dispatch, dominated by the preceding radix sort [S1, unofficial].
+--   **Memory Complexity:** $O(tileX \times tileY)$ for the boundary buffer [S1, unofficial].
+--   **Strengths:** Zero synchronization between tiles during compositing; leverages GPU compute parallelism [S1, unofficial].
+--   **Limitations:** Requires a sorted input list; setup cost is non-trivial for very small tile counts or low instance counts [G].
+--   **When to Use:** When compositing large numbers of overlapping primitives on GPU where atomic operations are expensive or undesirable [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** $O(tileX \times tileY)$ for the boundary buffer [S1, unofficial].
++- **Strengths:** Not given in the sources.
++- **Limitations:** Not given in the sources.
++- **When to Use:** Not given in the sources.
+ 
+ ## Background

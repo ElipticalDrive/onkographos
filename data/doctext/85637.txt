@@ -1,0 +1,1132 @@
+# Computed Tomography Reconstruction: Traditional and Deep Learning Methods
+
+This project explores the field of **inverse problems**, a class of mathematical challenges where the goal is to determine the underlying cause of observed effects, applied to the field of computed tomography (CT). Inverse problems are often **ill-posed**, making direct solutions infeasible and motivates the use of robust reconstruction techniques illustrated in this work. You can read the full report for this work [here](https://github.com/imanfs/inverse-problems-CT-scans/blob/master/report.pdf).
+
+In the context of CT, the inverse problem involves reconstructing the true 2D or 3D image of an object (left) from its projections, which are collected as the object is scanned from multiple angles. These projections can be visualised as **sinograms** (right):
+
+<img src="figs/1a.png" alt="True underlying CT image" width="300">  <img src="figs/1b.png" alt="Observed sinogram" width="250">
+
+Mathematically, this can be expressed as:
+
+$$g = Af_{true} + n$$
+
+where:
+- $A$ represents the forward operator, modeling how the image projections are generated,
+- $f_{true}$ is the true underlying image to be reconstructed,
+- $g$ is the observed data (e.g., sinograms in CT),
+- $n$ represents noise introduced during the scanning process.
+
+This project investigates methods for solving the CT reconstruction problem using both traditional methods, such as filtered backprojection (FBP) and wavelet denoising, and modern deep learning approaches. The project addresses challenges such as limited data, missing segments, and noise, providing a comparative analysis of various methodologies.
+
+### Traditional Reconstruction Methods
+1. **Radon Transform and Back-Projection**:
+   - The Radon transform maps an image into its sinogram representation by integrating along various projection angles.
+   - Back-projection is the inverse process, reconstructing the image from the sinogram by redistributing the data along the same projection paths.
+   - Unfiltered back-projection creates a blurred image due to the accumulation of low-frequency noise, while filtering in the frequency domain is used to emphasize edges and suppress artifacts.
+
+2. **Matrix Form of the Radon Transform**:
+   - The Radon transform can be expressed in a matrix form, where the forward operator maps the image to its sinogram, and the adjoint operator approximates the inverse transform.
+   - Singular value decomposition (SVD) is applied to study the properties of the transform, revealing how the information is distributed across singular vectors.
+   - Sparse and limited angle cases highlight typical challenges in reconstruction, such as aliasing artifacts and missing data, caused by insufficient or non-uniform sampling.
+
+3. **Matrix-Free Regularized Least-Squares Solver**:
+   - Regularized least-squares methods solve the inverse problem by minimizing the residual between the forward-transformed reconstruction and the observed data.
+   - Tikhonov regularization imposes smoothness constraints on the solution, with 0-order regularization minimizing intensity variations and 1st-order regularization penalizing large gradients.
+   - Krylov subspace solvers like GMRES are used for efficient computation without explicitly constructing large matrices.
+
+4. **Haar Wavelet Denoiser**:
+   - Haar wavelet decomposition represents an image as a combination of scaled and shifted wavelet functions, capturing details at various resolutions.
+   - The approximation coefficients represent low-frequency information, while detail coefficients capture horizontal, vertical, and diagonal high-frequency features.
+   - Thresholding eliminates coefficients below a certain value, effectively removing noise while preserving significant image details. Reconstruction is performed by inverting the wavelet transform.
+
+5. **Iterative Soft-Thresholding**:
+   - This iterative approach minimizes the discrepancy between measured sinograms and the forward projection of the reconstruction.
+   - Soft-thresholding is applied to the wavelet coefficients at each step to reduce noise while retaining essential structural information.
+   - The method integrates optimization and regularization, iteratively refining the reconstruction until convergence.
+
+### Learning-Based Reconstruction
+1. **Learned Post-Processing**:
+   - A synthetic dataset was created by generating 5 to 20 overlapping ellipses of varying sizes as the `ftrue` target set. Noisy sinograms are created from the ellipses and are used to create noisy reconstructions using filtered backprojection.
+   - A convolutional neural network (ResNet) is trained to correct artifacts and noise in initial reconstructions.
+   - The network learns a mapping from the noisy input to the true image by minimizing the pixel-wise difference during training.
+
+2. **Learned Model-Based Reconstructions**:
+   - This method incorporates the Radon transform and its gradient directly into a learned iterative framework.
+   - At each step, the gradient of the data fidelity term is computed and passed through a residual block alongside the image to refine the reconstruction.
+   - The approach merges traditional optimization with neural network flexibility, theoretically allowing the model to adaptively learn prior constraints from inverse problems theory.
+
+### deep_recon.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+from torch.utils.data import DataLoader
+import torch.optim as optim
+import astra
+from tqdm import tqdm
+import skimage
+import torch
+import torch.nn as nn
+from model.resnet import ResNet, ResNet_Grad
+from model.data import generate_train
+from utils.sinogram import create_sinogram,BP_recon, explicit_radon
+from utils.plotting import f_subplots
+
+f = np.load("SLPhan.npy")
+f_small = skimage.transform.rescale(f,scale=0.5)
+f = torch.as_tensor(f_small).unsqueeze(0).unsqueeze(0).float()
+print(f.shape)
+#encoder = MiniResBlock2()
+#encoder2 = ResBlock2()
+decoder = ResNet()
+decoder.forward(f)
+
+v,h = 64,64
+n_angles = 45
+max_angle = np.pi
+n_samples = 120
+theta = 10000
+train_dataset = []
+train_sinograms = []
+generate_train(n_angles,max_angle,n_samples,theta,v,h,plot=True)
+
+v,h = 64,64
+n_angles = 45
+max_angle = np.pi
+n_samples = 120
+theta = 10000
+train_dataset = []
+train_sinograms = []
+for _ in tqdm(range(8000)):
+    theta = np.random.randint(100,10000)
+    data_pair,g = generate_train(n_angles,max_angle,n_samples,theta,v,h)
+    train_dataset.append(data_pair)
+    train_sinograms.append(g)
+
+val_dataset = []
+for i in tqdm(range(2000)):
+    theta = np.random.randint(100,10000)
+    data_pair,g_val = generate_train(n_angles,max_angle,n_samples,theta,v,h)
+    val_dataset.append(data_pair)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
+
+model = ResNet()
+criterion = nn.MSELoss() 
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Number of parameters: {total_params}")
+
+train_loss_arr,val_loss_arr = [], []
+num_epochs = 10
+for epoch in tqdm(range(num_epochs)):
+    model.train()  # Set the model to training mode
+    running_loss = 0.0
+    for i, data in enumerate(train_loader, 0):
+        targets,inputs = data
+        optimizer.zero_grad()
+        outputs = model(inputs.float())
+        loss = criterion(outputs, targets.float())
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+    avg_train_loss = running_loss / len(train_loader)
+    train_loss_arr.append(avg_train_loss)
+
+    model.eval()  # Set the model to evaluation mode
+    val_loss = 0.0
+    with torch.no_grad(): 
+        for data in val_loader:
+            targets,inputs = data
+            f_recon = model(inputs.float())
+            loss = criterion(f_recon, targets)
+            val_loss += loss.item()
+
+            f_recon = f_recon.squeeze()
+            f_BP = inputs.squeeze()
+    avg_val_loss = val_loss / len(val_loader)
+    val_loss_arr.append(avg_val_loss)
+plt.figure()
+plt.plot(train_loss_arr, label='Training Loss')
+plt.plot(val_loss_arr, label='Validation Loss')
+plt.title('Training and Validation Losses')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+
+ftrue = np.load('SLphan.npy')
+f_small = skimage.transform.rescale(ftrue,scale=1)
+v_large,h_large=128,128
+v_small,h_small = f_small.shape
+test_dataset = []
+for i in range(10):
+    vol_geom, proj_geom, projector_id, g_id, g = create_sinogram(f_small, n_angles, max_angle, n_samples, v_large, h_large)
+    gNoisy = astra.functions.add_noise_to_sino(g, np.random.randint(8000,10000))
+    gNoisy_id = astra.data2d.create('-sino', proj_geom, gNoisy)
+    f_BP = BP_recon(vol_geom, projector_id, gNoisy_id, 'FBP')
+    ftrue = torch.as_tensor(ftrue).unsqueeze(0)
+    f_BP = torch.as_tensor(f_BP).unsqueeze(0)  
+    test_dataset.append((f_BP,f_small))
+    
+test_loader = DataLoader(test_dataset)
+model.eval()
+preds = []
+with torch.no_grad(): 
+    for i in test_loader:
+        sample,target = i
+        pred = model(sample.float())
+        preds.append(pred)
+f_subplots(test_dataset[0][0].squeeze(),test_dataset[0][1].squeeze(),np.array(preds[0].squeeze()),'')
+
+ftrue = np.load('SLphan.npy')
+f_small = skimage.transform.rescale(ftrue,scale=1)
+v_large,h_large=128,128
+v_small,h_small = f_small.shape
+test_dataset = []
+for i in range(10):
+    vol_geom, proj_geom, projector_id, g_id, g = create_sinogram(f_small, n_angles, max_angle, n_samples, v_large, h_large)
+    gNoisy = astra.functions.add_noise_to_sino(g, np.random.randint(8000,10000))
+    gNoisy_id = astra.data2d.create('-sino', proj_geom, gNoisy)
+    f_BP = BP_recon(vol_geom, projector_id, gNoisy_id, 'FBP')
+    ftrue = torch.as_tensor(ftrue).unsqueeze(0)
+    f_BP = torch.as_tensor(f_BP).unsqueeze(0)  
+    test_dataset.append((f_BP,f_small))
+    
+test_loader = DataLoader(test_dataset)
+model.eval()
+preds = []
+with torch.no_grad(): 
+    for i in test_loader:
+        sample,target = i
+        pred = model(sample.float())
+        preds.append(pred)
+f_subplots(test_dataset[0][0].squeeze(),test_dataset[0][1].squeeze(),np.array(preds[0].squeeze()),'')
+
+v,h = 64,64
+n_angles = 45
+max_angle = np.pi
+n_samples = 120
+theta = 10000
+train_dataset = []
+train_sinograms = []
+for _ in tqdm(range(2000)):
+    theta = np.random.randint(100,10000)
+    inputs,targets = generate_train(n_angles,max_angle,n_samples,theta,v,h,grad=True)
+    train_dataset.append((inputs,targets))
+
+
+val_dataset = []
+for i in tqdm(range(500)):
+    theta = np.random.randint(100,10000)
+    inputs,targets = generate_train(n_angles,max_angle,n_samples,theta,v,h,grad=True)
+    val_dataset.append((inputs,targets))
+
+A = explicit_radon(n_angles,max_angle,n_samples,v,h)
+A = torch.tensor(A)
+
+train_loader = DataLoader(train_dataset[:500], batch_size=16, shuffle=True)
+val_loader = DataLoader(val_dataset[:200], batch_size=16, shuffle=True)
+
+model = ResNet_Grad(A)
+criterion = nn.MSELoss() 
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Number of parameters: {total_params}")
+
+train_loss_arr,val_loss_arr = [], []
+num_epochs = 10
+for epoch in tqdm(range(num_epochs)):
+    model.train()  # Set the model to training mode
+    running_loss = 0.0
+    for i, data in enumerate(train_loader):
+        inputs,targets = data
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets.float())
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item()
+    avg_train_loss = running_loss / len(train_loader)
+    train_loss_arr.append(avg_train_loss)
+
+    model.eval()  # Set the model to evaluation mode
+    val_loss = 0.0
+    with torch.no_grad(): 
+        for data in val_loader:
+            inputs,targets = data
+            f_recon = model(inputs)
+            loss = criterion(f_recon, targets)
+            val_loss += loss.item()
+
+            f_recon = f_recon.squeeze()
+            f_BP = inputs.squeeze()
+    avg_val_loss = val_loss / len(val_loader)
+    val_loss_arr.append(avg_val_loss)
+plt.figure()
+plt.plot(train_loss_arr, label='Training Loss')
+plt.plot(val_loss_arr, label='Validation Loss')
+plt.title('Training and Validation Losses')
+plt.xlabel('Epochs')
+plt.ylabel('Loss')
+plt.legend()
+plt.show()
+```
+
+### filtered_backprojection.py
+```
+import astra
+import matplotlib.pyplot as plt
+import numpy as np
+import skimage
+from utils.gmres import gmres_solver, L_array
+from utils.plotting import MSE, format_plot, f_subplots, g_subplots
+from utils.sinogram import BP_recon, create_sinogram, explicit_radon
+
+
+def normalise(f):
+    f = np.nan_to_num(f)
+    if f.max() == 0:
+        return np.zeros_like(f) 
+    else:
+        return f / f.max()
+    
+class counter(object):
+    def __init__(self, disp=True):
+        self._disp = disp
+        self.niter = 0
+    def __call__(self, rk=None):
+        self.niter += 1
+        if self._disp:
+            print('iter %3i\trk = %s' % (self.niter, str(rk)))
+
+
+# Create volume geometries
+f = np.load('SLphan.npy')
+plt.imshow(f)
+format_plot('1a')
+v,h = f.shape
+
+n_angles = 180
+max_angle = np.pi
+n_samples = 128
+
+vol_geom,proj_geom,projector_id,sinogram_id,sinogram = create_sinogram(f,n_angles,max_angle,128,v,h)
+_,_,projector1_id,sinogram1_id,sinogram1 = create_sinogram(f,n_angles,max_angle,95,v,h)
+
+fig,ax = plt.subplots(1,2,figsize=(10,6))
+ax[0].imshow(sinogram)
+ax[1].imshow(sinogram1)
+format_plot('1b')
+
+
+f_rec = BP_recon(vol_geom,projector_id,sinogram_id,'BP')
+f_subplots(f,normalise(f_rec),'1c')
+
+g_rec = create_sinogram(f_rec,n_angles,max_angle,128,v,h,return_sino=True)
+g_subplots(sinogram,g_rec,'1ci')
+
+f_rec = BP_recon(vol_geom,projector_id,sinogram_id,'FBP')
+f_subplots(f,f_rec,'1d')
+
+g_rec = create_sinogram(f_rec,n_angles,max_angle,128,v,h,return_sino=True)
+g_subplots(sinogram,g_rec,'1di')
+
+thetas = [30,100,1000,10000]
+fig,ax = plt.subplots(2,len(thetas),figsize=(17,8))
+ax[0,0].set_ylabel("BP")
+ax[1,0].set_ylabel("FBP")
+for i,theta in enumerate(thetas):
+    gNoisy = astra.functions.add_noise_to_sino(sinogram,theta)
+    gNoisy_id = astra.data2d.create('-sino',proj_geom,gNoisy)
+
+    f_rec = BP_recon(vol_geom,projector_id,gNoisy_id,'BP')
+
+    f_rec_FBP = BP_recon(vol_geom,projector_id,gNoisy_id,'FBP')
+
+    ax[0,i].imshow(f_rec)
+    ax[1,i].imshow(f_rec_FBP)
+    ax[1,i].set_xlabel(r"$\theta$ = " + str(theta))
+format_plot('1e',ax=ax)
+
+
+f_small = skimage.transform.rescale(f,scale=0.5)
+v_small,h_small = f_small.shape
+
+### sparse
+n_samples = 95
+n_angles = 45
+max_angle = np.pi
+
+A_sp,W_sp = explicit_radon(n_angles,max_angle,n_samples,v_small,h_small,sparse_svd=False)
+
+### limited
+n_angles = 45
+max_angle = np.pi/4
+angles = np.linspace(0,max_angle,n_angles,endpoint=False)
+
+A_lim,W_lim = explicit_radon(n_angles,max_angle,n_samples,v_small,h_small,sparse_svd=False)
+
+fig,ax = plt.subplots(1,2)
+ax[0].imshow(A_sp)
+ax[1].imshow(A_lim)
+format_plot('2a',ax=ax)
+
+plt.plot(W_sp,label='Sparse angles',lw=0.7)
+plt.plot(W_lim,label='Limited angles',lw=0.7)
+plt.legend()
+format_plot('2b',ax=ax)
+
+_,_,_,_,sinogram = create_sinogram(f_small,45,np.pi,95,v_small,h_small)
+g_explicit = A_sp@f_small.flatten()
+g_explicit = g_explicit.reshape(n_samples,n_angles)
+g_subplots(sinogram.T,g_explicit,'2c')
+
+# %%
+n_angles = [45,90,135,180]
+max_angle = np.pi
+fig_sp,ax_sp = plt.subplots()
+for n in n_angles:
+  _,W = explicit_radon(n,max_angle,n_samples,v_small,h_small)
+  ax_sp.plot(W[::-1],lw=0.7,label=str(n) + " angles")
+ax_sp.legend()
+format_plot('2i')  
+
+n_angles = 45
+max_angles = [np.pi/2,2*np.pi/3, 3*np.pi/4,np.pi]
+fig_lim,ax_lim = plt.subplots()
+for m in max_angles:
+  _,W = explicit_radon(n_angles,m,n_samples,v_small,h_small)
+  degrees = int(round((m * 180/np.pi)))
+  ax_lim.plot(W[::-1],lw=0.7,label=str(degrees) + " degrees")
+ax_lim.legend()
+format_plot('2ii')  
+
+## Finding optimal alpha using L-curve residuals
+
+alphas = 10.0**np.linspace(-3,4,15)
+n_angles = 45
+n_samples = 95
+max_angle = np.pi
+fi_norms,r_norms,keys = L_array(f_small,alphas,max_angle,n_angles,n_samples,v_small,h_small,"tikhonov")
+
+max_angle = np.pi/4
+fi_norms1,r_norms1,keys1 = L_array(f_small,alphas,max_angle,n_angles,n_samples,v_small,h_small,"tikhonov")
+
+fig,ax = plt.subplots(1,2,figsize=(10,6))
+ax[0].loglog(fi_norms,r_norms,'.-',lw=0.7,label='L-curve residuals')
+idx_sp = 5
+ax[0].scatter(fi_norms[idx_sp],r_norms[idx_sp],c='g',marker='x',
+              label=r"Optimal $\alpha$ = " + f"{alphas[idx_sp]:.2f}")
+ax[0].set_xlabel(f'$||f||$'), ax[1].set_xlabel(f'$||f||$')
+ax[0].set_ylabel(f'$||r||$'), ax[1].set_ylabel(f'$||r||$')
+ax[0].set_title("L-curve for sparse angle case"),ax[1].set_title("L-curve for limited angle case")
+ax[1].loglog(fi_norms1,r_norms1,'.-',lw=0.7,label='L-curve residuals')
+idx_lim = 6
+ax[1].scatter(fi_norms1[idx_lim],r_norms1[idx_lim],c='g',marker='x',
+              label=r"Optimal $\alpha$ = " + f"{alphas[idx_lim]:.2f}")
+ax[0].legend(), ax[1].legend()
+format_plot('3a')
+
+# ## Sparse angle case
+
+alpha=alphas[idx_sp]
+v,h = f.shape
+n_angles = [45,90,135,180]
+max_angle = np.pi
+n_samples = 95
+fig,ax = plt.subplots(2,4,figsize=(17,8))
+ax[0,0].set_ylabel("0-order Tikhonov")
+ax[1,0].set_ylabel("1st order Tikhonov")
+for i,n in enumerate(n_angles):
+  vol_geom,proj_geom,projector_id,g_id,g = create_sinogram(f,n,max_angle,n_samples,v,h)
+  gNoisy = astra.functions.add_noise_to_sino(g,10000)
+  gNoisy_id = astra.data2d.create('-sino',proj_geom,gNoisy)
+  
+  f_gmres_tik = gmres_solver(gNoisy_id,projector_id,max_angle,n,n_samples,v,h,alpha,"tikhonov",callback=None)
+  f_gmres_grad = gmres_solver(gNoisy_id,projector_id,max_angle,n,n_samples,v,h,alpha,"gradient",callback=None)
+
+  ax[0,i].imshow(f_gmres_tik)
+  ax[0,i].set_title("MSE " + f"{MSE(f_gmres_tik,f):.1e}")
+
+  ax[1,i].imshow(f_gmres_grad)
+  ax[1,i].set_title("MSE " + f"{MSE(f_gmres_grad,f):.1e}")
+
+  ax[0,i].set_xlabel(str(n) + " angles")
+  ax[1,i].set_xlabel(str(n) + " angles")
+
+format_plot('3i',ax=ax)
+
+# ## Limited angle case
+
+alpha=alphas[idx_lim]
+v,h = f.shape
+max_angles = [np.pi/4,np.pi/2,3*np.pi/4,np.pi]
+n_angles = 45
+fig,ax = plt.subplots(2,4,figsize=(17,8))
+ax[0,0].set_ylabel("0-order Tikhonov")
+ax[1,0].set_ylabel("1st order Tikhonov")
+for i,m in enumerate(max_angles):
+  vol_geom,proj_geom,projector_id,g_id,g = create_sinogram(f,n_angles,m,n_samples,v,h)
+  gNoisy = astra.functions.add_noise_to_sino(g,10000)
+  gNoisy_id = astra.data2d.create('-sino',proj_geom,gNoisy)
+  
+  f_gmres_tik = gmres_solver(gNoisy_id,projector_id,m,n_angles,n_samples,v,h,alpha,"tikhonov",callback=None)
+  f_gmres_grad = gmres_solver(gNoisy_id,projector_id,m,n_angles,n_samples,v,h,alpha*2,"gradient",callback=None)
+  
+  ax[0,i].imshow(f_gmres_tik)
+  ax[0,i].set_title("MSE " + f"{MSE(f_gmres_tik,f):.1e}")
+
+  ax[1,i].imshow(f_gmres_grad)
+  ax[1,i].set_title("MSE " + f"{MSE(f_gmres_grad,f):.1e}")
+  
+  degrees = int(round((m * 180/np.pi)))
+  ax[0,i].set_xlabel(str(degrees) + " degrees")
+  ax[1,i].set_xlabel(str(degrees) + " degrees")
+
+format_plot('3ii',ax=ax)
+```
+
+### haar_wavelets.py
+```
+import astra
+import matplotlib.pyplot as plt
+import numpy as np
+import pywt
+from utils.gmres import AT_y, L_array
+from utils.plotting import MSE, format_plot, f_subplots
+from utils.sinogram import BP_recon, create_sinogram
+import skimage
+
+def normalise(f):
+    f = np.nan_to_num(f)
+    if f.max() == 0:
+        return np.zeros_like(f) 
+    else:
+        return f / f.max()
+
+# ## Haar Wavelets
+
+f = np.load('SLphan.npy')
+
+v,h = f.shape
+
+n_angles = 180
+max_angle = np.pi
+n_samples = 128
+
+vol_geom,proj_geom,projector_id,sinogram_id,sinogram = create_sinogram(f,n_angles,max_angle,128,v,h)
+_,_,projector1_id,sinogram1_id,sinogram1 = create_sinogram(f,n_angles,max_angle,95,v,h)
+
+f_small = skimage.transform.rescale(f,scale=0.5)
+v_small,h_small = f_small.shape
+
+coeffs = pywt.wavedec2(f,'haar',level = 7)
+lvls = len(coeffs) - 1
+fig,ax = plt.subplots(3,lvls,figsize=(13,5))
+ax[0,0].set_ylabel("Horizontal")
+ax[1,0].set_ylabel("Vertical")
+ax[2,0].set_ylabel("Diagonal")
+
+for i in range(1,len(coeffs)):
+    for j in range(3):
+        if i == 1:
+            vmin = (min(coeffs[i]))
+            vmax = (max(coeffs[i]))
+            ax[j][i-1].imshow(np.array(coeffs[i][j]),vmin=vmin, vmax=vmax)
+        else:
+            ax[j][i-1].imshow(np.array(coeffs[i][j]))
+    ax[j][i-1].set_xlabel(f"Coefficient {len(coeffs) - i}")
+format_plot('4a',ax=ax)
+
+coeffs = pywt.wavedec2(f,'haar',level = 7)
+f_rec = pywt.waverec2(coeffs,'haar')
+f_subplots(f,f_rec,'4b')
+np.allclose(f,f_rec)
+
+def thresholdFunction(coeffs,tRange,tVal):
+    for i in tRange:
+        coeffs[i+1] = [tuple(pywt.threshold(comp, tVal) for comp in detail) for detail in coeffs[i+1]]
+    return coeffs
+
+#f = plt.imread('house.png')
+theta = 0.05
+f_noisy = f + theta*np.random.randn(f.shape[0],f.shape[1])
+coeffs = pywt.wavedec2(f_noisy,'haar',level = 7) # W
+
+## varying threshold parameter
+tVals = [0.01,0.05,0.1]
+tRange = [0,1,2,3,4,5,6]
+fig,ax = plt.subplots(3,3,figsize=(6,6))
+for i,tVal in enumerate(tVals):
+    coeffsT = thresholdFunction(coeffs,tRange,tVal)
+    f_denoise = pywt.waverec2(coeffsT,'haar') # W^-1
+    ax[i][0].imshow(f_noisy)
+    ax[i][0].set_title("$f_{noisy}$")   
+    ax[i][1].imshow(f_denoise)
+    ax[i][1].set_title("$f_{denoise}$ (MSE " + f"{MSE(f_denoise,f):.1e})")
+    ax[i][2].imshow(f-f_denoise)
+    ax[i][2].set_title("$f_{true} - f_{denoise}$")
+format_plot('4ci',ax=ax)
+
+theta = 0.1
+f_noisy = f + theta*np.random.randn(f.shape[0],f.shape[1])
+coeffs = pywt.wavedec2(f_noisy,'haar',level = 7) # W
+## varying threshold parameter
+tVal = 0.05
+tRange = [2,3,4]
+fig,ax = plt.subplots(3,3,figsize=(6,6))
+for i in range(3):
+    coeffsT = thresholdFunction(coeffs,tRange,tVal)
+    f_denoise = pywt.waverec2(coeffsT,'haar') # W^-1
+    ax[i][0].imshow(f_noisy)
+    ax[i][0].set_title("$f_{noisy}$")   
+    ax[i][1].imshow(f_denoise)
+    ax[i][1].set_title("$f_{denoise}$ (MSE " + f"{MSE(f_denoise,f):.1e})")
+    ax[i][2].imshow(f-f_denoise)
+    ax[i][2].set_title("$f_{true} - f_{denoise}$")
+    tRange = [x + 1 for x in tRange]
+format_plot('4cii',ax=ax)
+
+def soft_threshold(f,levels,alpha,lambda_,tRange):
+    mu = alpha*lambda_
+    Wf = pywt.wavedec2(f,'haar',level = levels)
+    S_mu = thresholdFunction(Wf,tRange,mu)
+    W_1SWf = pywt.waverec2(S_mu,'haar')
+    return W_1SWf
+
+def iterative_thres(f,n_angles,max_angle,n_samples,vol_geom,v,h,alpha,threshold,step_size,tRange,maxIter=5000):
+    vol_geom,proj_geom,projector_id,g_id,g = create_sinogram(f,n_angles,max_angle,n_samples,v,h)
+    g = astra.functions.add_noise_to_sino(g,10000)
+    g_id = astra.data2d.create('-sino',proj_geom,g)
+    f_k = normalise(BP_recon(vol_geom,projector_id,g_id,'BP'))  ## create f0
+    for _ in range(maxIter):
+        vol_geom,_,projector_id,sinogram_id,Af_k = create_sinogram(f_k,n_angles,max_angle,n_samples,v,h)
+        # create sinogram id for Afk_g so that it can be passed into ATy
+        # (because ATy takes sinogram ID, not sinogram as input)
+        Afk_g_id = astra.data2d.create('-sino',proj_geom, Af_k - g)
+        ATAfk_g = AT_y(vol_geom,projector_id,Afk_g_id).reshape(v,h)
+        f_kplus1 = soft_threshold(f_k - step_size*ATAfk_g,7,alpha,step_size,tRange)
+        print(MSE(f_k,f) - MSE(f_kplus1,f))
+        if MSE(f_k,f) - MSE(f_kplus1,f) <= threshold:
+            break
+        else:
+            f_k = f_kplus1
+    return f_k,MSE(f_k,f)
+
+## Finding optimal alpha using L-curve residuals
+
+alphas = 10.0**np.linspace(-3,4,15)
+n_angles = 45
+n_samples = 95
+max_angle = np.pi
+fi_norms,r_norms,keys = L_array(f_small,alphas,max_angle,n_angles,n_samples,v_small,h_small,"tikhonov")
+
+max_angle = np.pi/4
+fi_norms1,r_norms1,keys1 = L_array(f_small,alphas,max_angle,n_angles,n_samples,v_small,h_small,"tikhonov")
+
+fig,ax = plt.subplots(1,2,figsize=(10,6))
+ax[0].loglog(fi_norms,r_norms,'.-',lw=0.7,label='L-curve residuals')
+idx_sp = 5
+ax[0].scatter(fi_norms[idx_sp],r_norms[idx_sp],c='g',marker='x',
+              label=r"Optimal $\alpha$ = " + f"{alphas[idx_sp]:.2f}")
+ax[0].set_xlabel(f'$||f||$'), ax[1].set_xlabel(f'$||f||$')
+ax[0].set_ylabel(f'$||r||$'), ax[1].set_ylabel(f'$||r||$')
+ax[0].set_title("L-curve for sparse angle case"),ax[1].set_title("L-curve for limited angle case")
+ax[1].loglog(fi_norms1,r_norms1,'.-',lw=0.7,label='L-curve residuals')
+idx_lim = 6
+ax[1].scatter(fi_norms1[idx_lim],r_norms1[idx_lim],c='g',marker='x',
+              label=r"Optimal $\alpha$ = " + f"{alphas[idx_lim]:.2f}")
+ax[0].legend(), ax[1].legend()
+format_plot('3a')
+
+alpha = alphas[idx_sp]
+
+n_angles = 45
+max_angle = np.pi
+threshold = 0.0001
+tRange = [1,2,3,4,5,6]
+arr = [1,10,30,35,37,38,39]
+step_sizes = [x * 1e-5 for x in arr]
+mse_arr = np.zeros((len(alphas),len(step_sizes)))
+best_score = float('inf')
+for a,alpha in enumerate(alphas):
+    for s,step_size in enumerate(step_sizes):
+        f_recon,mse =  iterative_thres(f,n_angles,max_angle,n_samples,vol_geom,v,h,alpha,threshold,step_size,tRange)
+        if mse < best_score:
+                # re-assign best values for MSE, gamma & sigma
+                best_score = mse
+                best_alpha = alpha
+                best_step_size = step_size  
+        mse_arr[a,s] = mse
+
+fig,ax = plt.subplots()
+xx, yy = np.meshgrid(np.log(step_sizes),np.log(alphas))
+ax = fig.add_subplot(projection = '3d')
+surf1 = ax.plot_surface(xx, yy, mse_arr,cmap=plt.cm.coolwarm)
+plt.xlabel(r"log $\lambda$")
+plt.ylabel(r"log $\alpha$")
+plt.show()
+
+f_k,mse = iterative_thres(f,n_angles,max_angle,n_samples,vol_geom,v,h,best_alpha,threshold,best_step_size,tRange)
+f_subplots(f,f_k,'')
+
+alpha = alphas[idx_lim]
+step_size = 30e-5
+n_angles = 45
+max_angle = np.pi/2
+threshold = 0.0001
+tRange = [4,5,6]
+arr = [1,10,30,35]
+step_sizes = [x * 1e-5 for x in arr]
+mse_arr = np.zeros((len(alphas),len(step_sizes)))
+best_score = float('inf')
+for a,alpha in enumerate(alphas):
+    for s,step_size in enumerate(step_sizes):
+        f_recon,mse =  iterative_thres(f,n_angles,max_angle,n_samples,vol_geom,v,h,alpha,threshold,step_size,tRange)
+        if mse < best_score:
+                best_score = mse
+                best_alpha = alpha
+                best_step_size = step_size  
+        mse_arr[a,s] = mse
+
+fig,ax = plt.subplots()
+xx, yy = np.meshgrid(np.log(step_sizes),np.log(alphas))
+ax = fig.add_subplot(projection = '3d')
+surf1 = ax.plot_surface(xx, yy, mse_arr,cmap=plt.cm.coolwarm)
+plt.show()
+
+threshold = 0.000001
+f_recon,mse =  iterative_thres(f,n_angles,max_angle,n_samples,vol_geom,v,h,best_alpha,threshold,1e-6,tRange)
+f_subplots(f,f_recon,'')
+```
+
+### model/data.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+from skimage.draw import ellipse
+from utils.sinogram import BP_recon, create_sinogram
+from utils.plotting import format_plot
+import torch
+import astra
+
+def draw_ellipses(n,opacity=0.1,plot=False):
+    """
+    Draws a grayscale image with 5 to 20 random, shaded ellipses.
+    """
+    image = np.zeros((n, n))
+
+    num_ellipses = np.random.randint(5, 20)
+    for _ in range(num_ellipses):
+        center_x = np.random.randint(0, n)
+        center_y = np.random.randint(0, n)
+        axis_length_x = np.random.randint(n//48, n//3)
+        axis_length_y = np.random.randint(n//48, n//3)
+        orientation = np.random.rand() * np.pi * 2
+        rr, cc = ellipse(center_x, center_y, axis_length_x, axis_length_y, rotation=orientation, shape=image.shape)
+        image[rr, cc] = image[rr, cc] + opacity
+    if plot:
+        plt.imshow(image)
+        plt.colorbar()
+        plt.axis('off')
+        plt.show()
+    return image/image.max()
+
+
+
+def generate_train(n_angles, max_angle, n_samples, theta, v, h, plot=False,grad=False):
+    '''
+    Generates ellipses and noisy filtered backprojections  
+    Returns: tuple containing target (ftrue) and sample (f_recon)
+    -- note that order of outputs is generally flipped 
+    -- but this was more convenient for plotting 
+    '''
+    ftrue = draw_ellipses(v)
+    vol_geom, proj_geom, projector_id, g_id, g = create_sinogram(ftrue, n_angles, max_angle, n_samples, v, h)
+    gNoisy = astra.functions.add_noise_to_sino(g, theta)
+    gNoisy_id = astra.data2d.create('-sino', proj_geom, gNoisy)
+    f_BP = BP_recon(vol_geom, projector_id, gNoisy_id, 'FBP')
+    
+    if plot:
+        fig,ax = plt.subplots(1,2)
+        ax[0].imshow(ftrue)
+        ax[1].imshow(f_BP)    
+        format_plot('data',ax=ax)
+    
+    ftrue = torch.as_tensor(ftrue).unsqueeze(0)
+    f_BP = torch.as_tensor(f_BP).unsqueeze(0)  
+    if grad:
+        return (f_BP, gNoisy), ftrue
+    else:
+        return (ftrue, f_BP),gNoisy
+```
+
+### model/resnet.py
+```
+import torch.nn as nn
+import torch 
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        if in_channels != out_channels:
+            self.linearproj = nn.Conv2d(in_channels, out_channels, 1, stride=1)
+        else:
+            self.linearproj = None
+
+    def forward(self, x):
+        identity = x
+        
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        if self.linearproj is not None:
+            identity = self.linearproj(identity)
+        out += identity
+        out = self.relu(out)
+        
+        return out
+    
+class ResNet(nn.Module):
+    def __init__(self):
+        super(ResNet, self).__init__()
+        in_channels = 1
+        self.resblock = ResBlock(in_channels,4)
+        #self.resblock1 = BasicResNetBlock(2,2)
+        #self.resblock2 = BasicResNetBlock(2,4)
+        self.resblock3 = ResBlock(4,8)
+        self.resblock4 = ResBlock(8,16)
+        self.transconv = nn.ConvTranspose2d(16, 8, 3, stride=1, padding=0, output_padding=0)
+        self.bn = nn.BatchNorm2d(8)
+        self.relu = nn.ReLU(inplace=True)
+        self.transconv2 = nn.ConvTranspose2d(8, 4, 3, stride=1, padding=1, output_padding=0)
+        self.bn2 = nn.BatchNorm2d(4)
+        self.transconv3 = nn.ConvTranspose2d(4, 1, 1, stride=1, padding=1, output_padding=0)
+        self.bn3 = nn.BatchNorm2d(1)
+        
+    def forward(self, X):
+        X = self.resblock(X)
+        #X = self.resblock1(X)
+        #X = self.resblock2(X)
+        X = self.resblock3(X)
+        X = self.resblock4(X)
+        X = self.transconv(X)
+        X = self.bn(X)
+        X = self.relu(X)
+        X = self.transconv2(X)
+        X = self.bn2(X)
+        X = self.relu(X)
+        X = self.transconv3(X)
+        X = self.bn3(X)
+        X = self.relu(X)
+        return X
+
+
+class ResNet_Grad(nn.Module):
+    def __init__(self, A):
+        super(ResNet_Grad, self).__init__()
+        self.A = A
+        self.model = nn.Sequential()
+        out_channels = 1
+        conv_2_channels = None
+        n_layers = 4
+        for i in range(1, n_layers+1):
+            self.model.append(GradBlock(self.A))
+            self.model.append(ResBlock(2, 1))
+
+    def forward(self, x):
+        f_recon = self.model(x)
+        return f_recon, self.head(f_recon)
+
+
+class ResBlock(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        if in_channels != out_channels:
+            self.linearproj = nn.Conv2d(in_channels, out_channels, 1, stride=1)
+        else:
+            self.linearproj = None
+    
+    def forward(self, x):
+        identity = x
+        
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+        
+        out = self.conv2(out)
+        out = self.bn2(out)
+        if self.linearproj is not None:
+            identity = self.linearproj(identity)
+        out += identity
+        out = self.relu(out)
+        
+        return out
+
+class GradBlock(nn.Module):
+    def __init__(self, A):
+        super(GradBlock, self).__init__()
+        self.A = A
+
+    def gradient(self, f, g):
+        f_cur = f
+        f = f.flatten(start_dim=2).detach().permute(0, 2, 1).clone().requires_grad_(True)
+        g = g.flatten(start_dim=2).detach().permute(0, 2, 1).clone()
+        Af_g = (self.A @ f - g.flatten())
+        ATAf_g = (self.A.T.squeeze(0) @ Af_g).permute(0, 2, 1)
+        ATAf_g.mean().backward()
+        out = f.grad.permute(0, 2, 1).reshape(f_cur.shape)
+        return out
+    def forward(self,x):
+        f,g = x
+        grad = self.gradient(f,g)
+        return (torch.cat((f,grad),1),g)
+```
+
+### utils/derivatives.py
+```
+import numpy as np
+
+def applyDx(u):
+    '''Applies the first derivative along the first dimension (rows)'''
+    Dx = np.diff(u, axis=0)
+    Dx = np.vstack([Dx, np.zeros((1, u.shape[1]))])
+    return Dx
+
+def applyDy(u):
+    '''Applies the first derivative along the second dimension (columns)'''
+    Dy = np.diff(u, axis=1)
+    Dy = np.hstack([Dy, np.zeros((u.shape[0], 1))])
+    return Dy
+
+def applyDxTrans(u):
+    '''Applies the transpose of the first derivative along the first dimension (rows)'''
+    DxT = np.vstack([-u[0:1, :], -np.diff(u[:-1, :], axis=0), u[-2:-1, :]])
+    return DxT
+
+def applyDyTrans(u):
+    '''Applies the transpose of the first derivative along the second dimension (columns)'''
+    DyT = np.hstack([-u[:, 0:1], -np.diff(u[:, :-1], axis=1), u[:, -2:-1]])
+    return DyT
+
+def laplacian(f,gamma=0):
+    if not isinstance(gamma, np.ndarray):
+        gamma = np.eye(f.shape[0])
+    dxx = np.sqrt(gamma)@ applyDxTrans(np.sqrt(gamma)@applyDx(f))
+    dyy = np.sqrt(gamma)@ applyDyTrans(np.sqrt(gamma)@applyDy(f))
+    laplace_f = dxx + dyy
+    
+    return laplace_f.flatten()
+
+def laplacian(f):
+    dxx = applyDxTrans(applyDx(f))
+    dyy = applyDyTrans(applyDy(f))
+    laplace_f = dxx + dyy
+    
+    return laplace_f.flatten()
+```
+
+### utils/gmres.py
+```
+from sinogram import create_sinogram,BP_recon
+import numpy as np
+import astra
+import scipy as sp
+from derivatives import laplacian
+from tqdm import tqdm
+
+def A_f(f,n_angles,max_angle,n_samples,v,h):
+    """Blurs an image using a gaussian filter"""
+    vol_geom,proj_geom,projector_id,sinogram_id,sinogram = create_sinogram(f,n_angles,max_angle,n_samples,v,h)
+    Af = sinogram.flatten()
+    return vol_geom,proj_geom,projector_id,sinogram_id,Af
+
+def AT_y(vol_geom,projector_id,sinogram_id):
+    """Blurs an image using a gaussian filter"""
+    f_rec = BP_recon(vol_geom,projector_id,sinogram_id,'BP')
+    AT_y = f_rec.flatten()
+
+    return AT_y
+
+def ATA(f,n_angles,max_angle,n_samples,vol_geom,v,h,alpha,reg_type):
+    _,_,projector_id,sinogram_id,Af = A_f(f,n_angles,max_angle,n_samples,v,h)
+    A_Ty = AT_y(vol_geom,projector_id,sinogram_id)
+    if reg_type == "tikhonov":
+        z = A_Ty.reshape(f.shape) + alpha*f
+    elif reg_type == "gradient":
+        z = A_Ty + alpha*laplacian(f.reshape((v,h)))
+    return z.reshape((-1,1))
+
+def gmres_solver(g_id,projector_id,max_angle,n_angles,n_samples,v,h,alpha,reg_type,callback=None):
+    """
+    Implements the GMRES solver for normal equations. 
+    g is the blurred image to be reconstructed
+    alpha is the regularisation parameter
+    sigma is the blurring parameter passed to A (imblur(f))
+    """
+    vol_geom = astra.create_vol_geom(v,h)
+    angles = np.linspace(0,max_angle,n_angles,endpoint=False)
+    M = v*h
+    N = M
+    ATg = AT_y(vol_geom,projector_id,g_id)
+    A = sp.sparse.linalg.LinearOperator((M,N),
+                                        matvec=lambda f: ATA(f,n_angles,max_angle,n_samples,vol_geom,v,h,alpha,reg_type))
+    gmresOutput = sp.sparse.linalg.gmres(A, ATg.flatten(),
+                                         callback=callback,maxiter=700) #gmres output
+    f_alpha = gmresOutput[0]
+    return f_alpha.reshape(v,h)
+
+
+# # Alpha choice
+
+def L_curve(g,g_id,projector_id,alpha,max_angle,n_angles,n_samples,v,h,reg_type):
+    fi = gmres_solver(g_id,projector_id,max_angle,n_angles,n_samples,v,h,alpha,reg_type,callback=None)
+    Af = create_sinogram(fi,n_angles,max_angle,n_samples,v,h,return_sino=True)
+    r = g - Af
+    fi_norm = np.linalg.norm(fi)
+    r_norm = np.linalg.norm(r)
+    return fi_norm,r_norm
+
+def L_array(f,alphas,max_angle,n_angles,n_samples,v,h,reg_type):
+    vol_geom,proj_geom,projector_id,g_id,g = create_sinogram(f,n_angles,max_angle,n_samples,v,h)
+    gNoisy = astra.functions.add_noise_to_sino(g,10000)
+    gNoisy_id = astra.data2d.create('-sino',proj_geom,gNoisy)
+    r_norms = np.zeros(len(alphas))
+    fi_norms = np.zeros(len(alphas))
+    keys = []
+    for i, alpha in tqdm(enumerate(alphas)):
+        fi_norm,r_norm = L_curve(gNoisy,gNoisy_id,projector_id,alpha,max_angle,n_angles,n_samples,v,h,reg_type)
+        fi_norms[i],r_norms[i] = fi_norm,r_norm
+        keys.append([fi_norm,r_norm,alpha])
+    return fi_norms,r_norms,keys
+```
+
+### utils/plotting.py
+```
+import numpy as np
+import matplotlib.pyplot as plt
+
+#### FORMATTING FUNCTIONS ####
+
+def format_plot(name,show_axis=False,ax=None):
+    plt.rcParams['savefig.dpi'] = 300
+    plt.rcParams['figure.dpi'] = 144
+    plt.rc('font', size=10)
+    plt.rc('xtick', labelsize='medium')
+    plt.rc('ytick', labelsize='medium')
+    plt.rc('xtick.major', size=4, width=1)
+    plt.rc('ytick.major', size=4, width=1)
+    plt.rc('axes', linewidth=1, labelsize='medium', titlesize='medium');
+    if show_axis:
+        plt.axhline(color='k', lw=0.5)
+        plt.axvline(color='k', lw=0.5);
+    if ax is not None:
+        for axis in ax.ravel():
+            axis.set_xticks([])
+            axis.set_yticks([]);
+    plt.savefig("figs/" + name, bbox_inches='tight');
+    plt.show();
+
+def MSE(f_rec,f_true):
+    '''
+    Returns mean squared error between each iterate reconstruction f_k
+    and the original image f_true
+    '''
+    N = f_true.size
+    return (1/N) * np.sum((f_rec - f_true)**2)
+
+def f_subplots(f,f_rec,plot_name):
+    fig,ax = plt.subplots(1,3)
+    ax[0].imshow(f)
+    ax[1].imshow(f_rec)
+    ax[2].imshow(f-f_rec)
+
+    ax[0].set_title("$f_{true}$")
+    ax[1].set_title("$f_{recon}$ (MSE " + f"{MSE(f_rec,f):.1e})")
+    ax[2].set_title("$f_{true} - f_{recon}$")
+    plt.colorbar(ax[2].imshow(f-f_rec),ax=ax[2],fraction=0.046, pad=0.04)
+    format_plot(plot_name,ax=ax)
+
+def g_subplots(Af,g_rec,plot_name):
+    fig,ax = plt.subplots(1,3)
+    ax[0].imshow(Af)
+    ax[1].imshow(g_rec)
+    ax[2].imshow(Af-g_rec)
+
+    ax[0].set_title("$Af_{true}$")
+    ax[1].set_title("$g_{recon}$")
+    ax[2].set_title("$Af_{true} - g_{recon}$")
+    plt.colorbar(ax[2].imshow(Af-g_rec),ax=ax[2],fraction=0.063, pad=0.04)
+    format_plot(plot_name,ax=ax)
+```
+
+### utils/sinogram.py
+```
+import numpy as np
+import scipy as sp
+import astra
+
+def create_sinogram(f,n_angles,max_angle,n_samples,v,h,return_sino=False):
+    vol_geom = astra.create_vol_geom(v,h)
+    angles = np.linspace(0,max_angle,n_angles,endpoint=False)
+    proj_geom = astra.create_proj_geom('parallel',1.,n_samples,angles)
+    projector_id = astra.create_projector('strip', proj_geom, vol_geom)
+    sinogram_id, sinogram = astra.create_sino(f.reshape(v,h), projector_id)
+    if return_sino:
+        return sinogram
+    return vol_geom,proj_geom,projector_id,sinogram_id,sinogram
+
+def BP_recon(vol_geom,projector_id,sinogram_id,BP_type):
+    # Create a data object for the reconstruction
+    rec_id = astra.data2d.create('-vol', vol_geom)
+    # Set up the parameters for a reconstruction via back-projection
+    cfg = astra.astra_dict(BP_type)
+    cfg['ReconstructionDataId'] = rec_id
+    cfg['ProjectionDataId'] = sinogram_id
+    cfg['ProjectorId'] = projector_id
+    # Create the algorithm object from the configuration structure
+    alg_id = astra.algorithm.create(cfg)
+    # Run back-projection and get the reconstruction
+    astra.algorithm.run(alg_id)
+    f_rec = astra.data2d.get(rec_id)
+    #return f_rec if BP_type == 'FBP' else normalize_array(f_rec)
+    return f_rec 
+
+def explicit_radon(n_angles,max_angle,n_samples,v,h,sparse_svd=True):
+    angles = np.linspace(0,max_angle,n_angles,endpoint=False)
+    A_exp = []
+    vol_geom = astra.create_vol_geom(v,h)
+    proj_geom = astra.create_proj_geom('parallel',1.,n_samples,angles)
+    projector_id = astra.create_projector('strip', proj_geom, vol_geom)
+    row_idx = 0
+    for col in range(v): # For each column
+        for row in range(h): # For each row in the current column
+            dummy_img = np.zeros((v,h))
+            dummy_img[row][col] = 1
+            # Radon transform (generate sinogram)
+            sinogram_id, sinogram = astra.create_sino(dummy_img.T, projector_id)
+            A_exp.append(sinogram.reshape(-1,1,order='F'))
+        row_idx +=1 
+    A_exp = np.hstack(A_exp)
+    if sparse_svd:
+        _,W,_ = sp.sparse.linalg.svds(A_exp)
+    else:
+        _,W,_ = sp.linalg.svd(A_exp)
+    return A_exp,W
+```

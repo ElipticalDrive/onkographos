@@ -1,0 +1,170 @@
+I am currently using an Octree in my Renderer and wanted to evaluate using this BVH library instead to check if i can get better performance. So i have rewritten my ground face search. I want to only intersect the aabbs of my triangles, ...
+
+Ray-Bbox collision not working (too few collisions) · Issue #109 · madmann91/bvh · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Ray-Bbox collision not working (too few collisions) #109
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Ray-Bbox collision not working (too few collisions)#109
+Copy link
+Assignees
+Labels
+questionFurther information is requestedFurther information is requested
+Description
+Katharsas
+opened on Jan 13, 2026
+Issue body actions
+I am currently using an Octree in my Renderer and wanted to evaluate using this BVH library instead to check if i can get better performance. So i have rewritten my ground face search. I want to only intersect the aabbs of my triangles, not the triangles themselves.
+So like suggested in #90 I am using traverse_top_down and then using DirectXMath to do the ray-bbox intersections for me:
+```
+using BvhVec3 = bvh::v2::Vec<float, 3>;
+using BvhBBox = bvh::v2::BBox<float, 3>;
+using BvhNode = bvh::v2::Node<float, 3>;
+using Bvh = bvh::v2::Bvh<BvhNode>;
+
+struct VertLookupTree
+{
+	Bvh bvh;
+	std::vector<DirectX::BoundingBox> bboxes;
+	std::vector<render::VertKey> treeIndexToVert;
+};
+
+BvhBBox createBbox(const array<VertexPos, 3>& verts)
+{
+    float minX = FLT_MAX, minY = FLT_MAX, minZ = FLT_MAX;
+    float maxX = -FLT_MAX, maxY = -FLT_MAX, maxZ = -FLT_MAX;
+    for (uint32_t i = 0; i < 3; i++) {
+        auto& vert = verts[i];
+        minX = std::min(minX, vert.x);
+        minY = std::min(minY, vert.y);
+        minZ = std::min(minZ, vert.z);
+        maxX = std::max(maxX, vert.x);
+        maxY = std::max(maxY, vert.y);
+        maxZ = std::max(maxZ, vert.z);
+    }
+    return BvhBBox { {minX, minY, minZ}, { maxX, maxY, maxZ } };
+}
+
+DirectX::BoundingBox toBboxDx(BvhBBox bbox)
+{
+    auto center = (bbox.max + bbox.min) * 0.5f;
+    auto extents = (bbox.max - bbox.min) * 0.5f;
+    return DirectX::BoundingBox({ center[0], center[1], center[2] }, { extents[0], extents[1], extents[2] });
+}
+
+BvhVec3 createTriCenter(const array<VertexPos, 3>& verts)
+{
+    Vec3 center = mul(add(add(verts[0], verts[1]), verts[2]), 1.f / 3.f);
+    return BvhVec3 { center.x , center.y, center.z };
+}
+
+bvh::v2::ThreadPool thread_pool;
+bvh::v2::ParallelExecutor executor(thread_pool);
+
+VertLookupTree createVertLookup(const MatToChunksToVertsBasic& meshData)
+{
+    VertLookupTree result;
+
+    std::vector<BvhBBox> bboxes;
+    std::vector<BvhVec3> centers;
+
+    forEachFace(meshData, [&](const VertKey& vertKey) -> void {
+        auto tri = vertKey.getPos(meshData);
+        centers.push_back(createTriCenter(tri)); // TODO should i use center of bbox or center of tri here??
+        auto bbox = createBbox(tri);
+        bboxes.push_back(bbox);
+        result.bboxes.push_back(toBboxDx(bbox));
+        result.treeIndexToVert.push_back(vertKey);
+    });
+
+    typename bvh::v2::DefaultBuilder<BvhNode>::Config config;
+    config.quality = bvh::v2::DefaultBuilder<BvhNode>::Quality::High;
+    result.bvh = bvh::v2::DefaultBuilder<BvhNode>::build(thread_pool, bboxes, centers, config);
+
+    return result;
+}
+
+vector<VertKey> rayIntersected(const VertLookupTree& lookup, BvhVec3 rayOrigin, BvhVec3 rayDir, float rayMaxLength)
+{
+	const DirectX::XMVECTOR rayOriginXm = toXM4Pos(Vec3{ rayOrigin[0], rayOrigin[1], rayOrigin[2] });
+	const DirectX::XMVECTOR rayDirXm = toXM4Dir(Vec3{ rayDir[0], rayDir[1], rayDir[2] });
+
+	vector<VertKey> result;
+
+	bvh::v2::SmallStack<Bvh::Index, 64> stack;
+	lookup.bvh.traverse_top_down<false>(lookup.bvh.get_root().index, stack,
+		[&](size_t begin, size_t end) {
+			for (size_t i = begin; i < end; ++i) {
+				DirectX::BoundingBox bbox = lookup.bboxes.at(i);
+				float dist;
+				bool intersect = bbox.Intersects(rayOriginXm, rayDirXm, dist) && dist < rayMaxLength;
+				if (intersect) {
+					result.push_back(lookup.treeIndexToVert.at(i));
+				}
+			}
+			return true;
+		},
+		[&](const BvhNode& left, const BvhNode& right) {
+			float dist;
+			bool hit_left = toBboxDx(left.get_bbox()).Intersects(rayOriginXm, rayDirXm, dist) && dist < rayMaxLength;
+			bool hit_right = toBboxDx(right.get_bbox()).Intersects(rayOriginXm, rayDirXm, dist) && dist < rayMaxLength;
+			bool should_swap = false;
+			return std::make_tuple(hit_left, hit_right, should_swap);
+		}
+	);
+
+	return result;
+}
+```
+I have checked to make sure i am generating bvh centers, bvh bboxes, and DirectXMath bboxes correctly. However i barely get any collisions. I have tried for several ours to find any problems but not found anything. But i must be using the library wrong somewhere.
+Total number of bbox collisions for all 9120 rays:
+brute force (just looping over every triangle's bbox for every ray): 47164
+octree: 47656
+bvh: 6
+Maybe i am completely misunderstanding what (size_t begin, size_t end) is. I assume they are indices corresponding to the bbox/center arrays that were passed to create the bvh.
+Activity
+madmann91 commented on Jan 13, 2026
+madmann91
+on Jan 13, 2026
+Owner
+More actions
+Hello, and thank you for your interest.
+First, the begin and end passed to the intersection callback refer to the indices in bvh.prim_ids (e.g. the i-th primitive is at index bvh.prim_ids[begin + i]). You can also remove that indirection by permuting your primitives (which should be faster). This is all explained in simple_example.cpp.
+Also, you should use the center of the primitive (and not the center of its bounding box) for better quality BVHs (which is why both bounding box and center are required by the builders). Using the bounding box center is possible but produces BVHs that are not as good (still correct, but lower performance).
+Finally, you should use the traversal code in Bvh::intersect instead of rolling your own based on DirectXMath and traverse_top_down. It will be more robust (won't miss intersections), and more efficient. This is also detailed in simple_example.cpp.
+I am closing this issue, but please re-open it if that does not answer your question.
+madmann91
+closed this as completedon Jan 13, 2026
+madmann91
+added
+questionFurther information is requestedFurther information is requested
+on Jan 13, 2026
+madmann91
+self-assigned this
+on Jan 13, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+madmann91
+Labels
+questionFurther information is requestedFurther information is requested
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

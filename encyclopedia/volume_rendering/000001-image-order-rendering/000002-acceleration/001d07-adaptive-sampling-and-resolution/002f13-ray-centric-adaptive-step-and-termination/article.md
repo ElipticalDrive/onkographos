@@ -1,43 +1,27 @@
 # Ray-Centric Adaptive Step and Termination
 
-Also called: Adaptive Ray Marching, Adaptive Step Size Control
 
 ## Overview
-Ray-Centric Adaptive Step and Termination adjusts the distance between samples along a ray based on local volume properties (such as density or gradient magnitude) to skip empty space and refine detail near boundaries [S7, S5]. It differs from [Adaptive Sampling](1385-adaptive-sampling.md) by dynamically changing the step size $\Delta t$ within a single ray cast rather than changing the number of rays or blocks, and from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on explicit volumetric data structures rather than neural uncertainty estimates.
+Ray-Centric Adaptive Step and Termination adjusts the integration step size $\Delta t$ along a ray based on local volume properties to skip empty space and refine detail near boundaries [G]. It differs from [Adaptive Sampling](1385-adaptive-sampling.md) by dynamically changing the step size within a single ray cast rather than changing the number of rays or blocks, and from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on explicit volumetric data structures rather than neural uncertainty estimates [G].
 
 ## Shared principles
-All methods in this family share the core mechanism of varying the integration step size $\Delta t$ along the ray parameter $t$. The step size is typically a function of the local scalar field value $f(\mathbf{x})$, its gradient $\nabla f(\mathbf{x})$, or the density $\rho(\mathbf{x})$.
-
-The general ray marching loop iterates $t$ from $t_{near}$ to $t_{far}$:
-1.  **Step Calculation:** Compute $\Delta t$ based on local metrics. For density-based methods, $\Delta t$ is often inversely proportional to density or gradient magnitude to maintain constant error bounds [S7, S5].
-2.  **Termination:** The loop terminates when the accumulated opacity $\alpha$ exceeds a threshold (e.g., 1.0) or $t$ exceeds $t_{far}$ [S7].
-3.  **Coherence:** To maintain GPU thread coherence, step sizes are often quantized or limited to a small set of discrete values, preventing divergence in warp execution [S5].
+Builds on [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md), this family varies the discretization of the rendering process by adjusting the integration step size $\Delta t$ along the ray parameter $t$ [G]. The step size is typically a function of the local scalar field value $f(\mathbf{x})$, its gradient $\nabla f(\mathbf{x})$, or the density $\rho(\mathbf{x})$ [G]. The general ray marching loop iterates $t$ from $t_{near}$ to $t_{far}$:
+1. **Step Calculation:** Compute $\Delta t$ based on local metrics. For density-based methods, $\Delta t$ is often inversely proportional to density or gradient magnitude to maintain constant error bounds [G].
+2. **Termination:** The loop terminates when the accumulated opacity $\alpha$ exceeds a threshold (e.g., $1.0$) or $t$ exceeds $t_{far}$ [G].
+3. **Coherence:** To maintain GPU thread coherence, step sizes are often quantized or limited to a small set of discrete values, preventing divergence in warp execution [G].
 
 ## Subtopics
 
 ### [Adaptive Sampling](1385-adaptive-sampling.md)
-Adaptive sampling improves rendering quality by varying the sampling rate based on local complexity, such as proximity to an isosurface or variance in the rendered result. It sets itself apart from siblings like [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by often employing discrete rate changes or variance-based block analysis rather than neural network-based uncertainty estimation, and from [Random Pixel Subsampling](1668-random-pixel-subsampling.md) by actively increasing samples in noisy areas rather than just reducing them.
+Adaptive sampling is a rendering optimization that varies the density and distribution of samples along rays to reduce computational cost in low-detail regions while preserving quality in high-detail areas [G]. It differs from its sibling [Adaptive Sampling for Interaction](5643-adaptive-sampling-for-interaction.md) by focusing on static or semi-static volume fidelity rather than interactive frame-rate stabilization via global rate adjustment [G]. Choose it when visual fidelity in static scenes is prioritized over interactive responsiveness [G].
 
 ### [Adaptive Sampling for Interaction](5643-adaptive-sampling-for-interaction.md)
-Adaptive Sampling for Interaction maintains interactivity during user input by lowering the volume sampling rate, then re-rendering at a high rate once the action is completed. It differs from [Adaptive Sampling](1385-adaptive-sampling.md) and [Adaptive Refinement for Volume Rendering](1892-adaptive-refinement-for-volume-rendering.md) by using a binary state switch (interaction vs. idle) rather than continuous error estimation, and from [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by operating on traditional ray-casted volume data rather than neural representations.
+Adaptive Sampling for Interaction is a technique to maintain interactivity during user input, such as transfer function editing, by lowering the volume sampling rate, then re-rendering at a high rate once the action is completed [G]. It differs from [Adaptive Sampling](1385-adaptive-sampling.md) by using a binary state switch (interaction vs. idle) rather than continuous error estimation [G]. Choose it when user-driven parameter editing requires immediate visual feedback [G].
 
 ### Adaptive Sampling with Uniform Fallback
-**Definition**
-Samples points along rays using adaptive sampling via nerfacc, with a fallback to uniform sampling for rays that receive too few samples [S1, unofficial].
-
-**Algorithm**
-1.  Compute $t_{near}$ and $t_{far}$ using ray-AABB intersection. Filter valid rays where $t_{far} > t_{near}$ [S1, unofficial].
-2.  If no valid rays, return empty tensors for $t_s, t_e, ray\_idx$, and valid [S1, unofficial].
-3.  Call `self.nerfacc_estimator.sampling` with valid $ray\_o, ray\_d, t_{near}, t_{far}$, and `self.step_size` to get $ray\_idx, t_s, t_e$ [S1, unofficial].
-4.  Convert $ray\_idx$ to `torch.long` [S1, unofficial].
-5.  If `self.enable_fallback` is True, count samples per ray using `torch.bincount(ray_idx, minlength=Nv)` [S1, unofficial].
-6.  Identify rays with counts < `self.fallback_when_samples` as `low_ids` [S1, unofficial].
-7.  For low rays, compute uniform samples: $t_{s\_fb} = t_0[:, None] + k \cdot dt$, $t_{e\_fb} = t_{s\_fb} + dt$, where $k$ is range($K$), $dt = (t_1-t_0)/K$, and clamp final $t_{e\_fb}$ to $t_1$ [S1, unofficial].
-8.  Construct $ray\_idx\_fb$ for the fallback samples [S1, unofficial].
-9.  Concatenate nerfacc samples with fallback samples [S1, unofficial].
+Samples points along rays using adaptive sampling, with a fallback to uniform sampling for rays that receive too few samples [G]. The implementation details, including ray-AABB intersection, sample counting, and tensor concatenation, are not given in the sources.
 
 ## Background
-Adaptive step sizing originated in scientific visualization to handle the vast empty space in atmospheric and volumetric datasets [S7]. Early implementations used density-based heuristics to skip empty regions, while later GPU-optimized variants introduced discrete rate changes to mitigate thread divergence [S5, S6]. It is widely used in real-time volume rendering of medical CT data and atmospheric clouds [S5, S7].
+The origin, specific historical development, and exact application domains of this family are not given in the sources. It is generally applied in real-time volume rendering to balance visual fidelity against computational cost [G].
 
 ## Sources
-[S1] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)

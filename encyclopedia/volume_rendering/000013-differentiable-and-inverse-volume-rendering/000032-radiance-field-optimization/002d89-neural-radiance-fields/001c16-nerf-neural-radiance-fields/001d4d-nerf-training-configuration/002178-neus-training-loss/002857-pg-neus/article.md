@@ -48,69 +48,49 @@ PG-NeuS is a point-guided neural implicit surface reconstruction method that enh
 ```python
 import math
 
-def sample_points_along_ray(ray_o, ray_d, num_samples):
-    """Returns list of 3D points p(t) = o + t*d for t in (0, 1]."""
-    points = []
-    for i in range(1, num_samples + 1):
-        t = i / num_samples
-        points.append([ray_o[j] + t * ray_d[j] for j in range(3)])
-    return points
+def pg_neus_render(ray_o, ray_d, num_samples, sdf_net, s_param, color_net):
+    # Ray parameterization: p(t) = o + t*d for t > 0 [S1, unofficial]
+    # Sample points along ray (simplified uniform sampling in t)
+    t_vals = [(i + 1) / num_samples for i in range(num_samples)]
+    p_samples = [[ray_o[j] + t * ray_d[j] for j in range(3)] for t in t_vals]
 
-def pg_neus_forward(ray_o, ray_d, point_cloud, sdf_net, proj_module, bias_net, s_param, num_samples, observed_colors):
-    # 1. Base NeuS Rendering
-    p_samples = sample_points_along_ray(ray_o, ray_d, num_samples)
-    sdf_vals = [sdf_net(p)[0] for p in p_samples]  # Extract mean SDF
-    
-    # Phi_s(x) = 1 / (1 + exp(-s * x))
-    phi_s = [1.0 / (1.0 + math.exp(-s_param * v)) for v in sdf_vals]
-    
-    # Alpha_i = max((Phi_s(t_i) - Phi_s(t_{i+1})) / Phi_s(t_i), 0)
-    alpha = []
-    for i in range(len(phi_s)):
+    # Query SDF network for mean and uncertainty [S1, unofficial]
+    # sdf_net(p) returns (sdf_mean, sigma)
+    sdf_preds = [sdf_net(p) for p in p_samples]
+    sdf_means = [pred[0] for pred in sdf_preds]
+    sdf_uncert = [pred[1] for pred in sdf_preds]
+
+    # Compute Phi_s(x) = (1 + exp(-s*x))^-1 [S1, unofficial]
+    phi_s = [1.0 / (1.0 + math.exp(-s_param * m)) for m in sdf_means]
+
+    # Opacity formula: alpha_i = max((Phi_s(t_i) - Phi_s(t_{i+1})) / Phi_s(t_i), 0) [S1, unofficial]
+    alpha = [0.0] * num_samples
+    for i in range(num_samples - 1):
         phi_curr = phi_s[i]
-        phi_next = phi_s[i+1] if i+1 < len(phi_s) else 0.0
-        if phi_curr == 0.0:
-            alpha.append(0.0)
+        phi_next = phi_s[i + 1]
+        if phi_curr > 1e-6:
+            alpha[i] = max((phi_curr - phi_next) / phi_curr, 0.0)
         else:
-            alpha.append(max((phi_curr - phi_next) / phi_curr, 0.0))
-            
-    # Transmittance T_i = product_{j=1}^{i-1} (1 - alpha_j)
-    transmittance = [1.0]
-    for i in range(1, len(alpha)):
-        transmittance.append(transmittance[-1] * (1.0 - alpha[i-1]))
-        
-    colors = [sdf_net.get_color(p) for p in p_samples]
-    rendered_color = [sum(transmittance[i] * alpha[i] * colors[i][j] for i in range(len(alpha))) for j in range(3)]
-    
-    # 2. Uncertainty Modeling for Point Cloud
-    point_cloud_sdf = [sdf_net(p) for p in point_cloud]
-    point_cloud_sigma = [sigma for _, sigma in point_cloud_sdf]
-    
-    # 3. Neural Projection
-    projected_3d = [proj_module.project_to_surface(p, sdf_net) for p in point_cloud]
-    projected_2d = [proj_module.project_to_image(p3d, ray_o, ray_d) for p3d in projected_3d]
-    photometric_loss = sum(abs(rendered_color[j] - observed_colors[i][j]) for i in range(len(point_cloud)) for j in range(3))
-    
-    # 4. Filter High-Fidelity Points
-    mean_sigma = sum(point_cloud_sigma) / len(point_cloud_sigma) if point_cloud_sigma else 0.0
-    high_fidelity_mask = [sigma < mean_sigma for sigma in point_cloud_sigma]
-    high_fidelity_points = [p for p, mask in zip(point_cloud, high_fidelity_mask) if mask]
-    
-    # 5. Bias Compensation
-    if high_fidelity_points:
-        bias_correction = [bias_net(p) for p in high_fidelity_points]
-        # Apply bias correction to SDF values (simplified as additive correction)
-        avg_bias = [sum(b[j] for b in bias_correction) / len(bias_correction) for j in range(3)]
-        sdf_vals_corrected = [v + avg_bias[0] for v in sdf_vals]  # Simplified scalar correction
-    else:
-        sdf_vals_corrected = sdf_vals
-        
-    return rendered_color, photometric_loss, point_cloud_sigma, sdf_vals_corrected
+            alpha[i] = 0.0  # Guard against division by zero [G]
+
+    # Transmittance: T_i = product_{j=1}^{i-1} (1 - alpha_j) [S1, unofficial]
+    T = [1.0] * num_samples
+    for i in range(1, num_samples):
+        T[i] = T[i - 1] * (1.0 - alpha[i - 1])
+
+    # Color accumulation: C_hat = sum_{i=1}^N T_i * alpha_i * c_i [S1, unofficial]
+    colors = [color_net(p) for p in p_samples]
+    rendered_color = [0.0, 0.0, 0.0]
+    for i in range(num_samples):
+        for c in range(3):
+            rendered_color[c] += T[i] * alpha[i] * colors[i][c]
+
+    return rendered_color, sdf_uncert, p_samples
 ```
 
 **Parameters:**
 *   $s$: A trainable parameter in the Sigmoid function $\Phi_s(x) = (1 + e^{-sx})^{-1}$ used to define opacity [S1, unofficial].
-*   Typical values: Not given in the sources.
+*   Typical values: Not given in the sources [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
 *   **Degenerate Input:** If the point cloud is extremely sparse, the Neural Projection module may fail to find valid surface projections [S1, unofficial].
@@ -123,14 +103,14 @@ def pg_neus_forward(ray_o, ray_d, point_cloud, sdf_net, proj_module, bias_net, s
 The base training objective combining photometric and geometric losses. PG-NeuS builds on this by adding uncertainty and projection losses. [NeuS Training Loss](2535-neus-training-loss.md)
 
 ### RegSDF
-Uses uniform smoothing for noise mitigation. PG-NeuS is preferred when noise characteristics vary significantly across regions, as RegSDF weakens precise point support [S1, unofficial]. [RegSDF](link-to-regsdf.md)
+Uses uniform smoothing for noise mitigation [S1, unofficial]. PG-NeuS is preferred when noise characteristics vary significantly across regions, as RegSDF weakens precise point support [S1, unofficial]. [RegSDF](link-to-regsdf.md)
 
 ### TUVR
-Relies on MVS network confidence. PG-NeuS is preferred when depth camera data is used or when MVS confidence maps are unreliable, as PG-NeuS estimates reliability during optimization [S1, unofficial]. [TUVR](link-to-tuvr.md)
+Relies on MVS network confidence [S1, unofficial]. PG-NeuS is preferred when depth camera data is used or when MVS confidence maps are unreliable, as PG-NeuS estimates reliability during optimization [S1, unofficial]. [TUVR](link-to-tuvr.md)
 
 ## Operating characteristics
 *   **Time Complexity:** PG-NeuS achieves an 11x speedup compared to NeuS without masks [S1, unofficial].
-*   **Memory Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
 *   **Measured Performance:** Achieves a 33.3% improvement in accuracy compared to NeuS without masks on DTU and BlendedMVS datasets [S1, unofficial].
 *   **Scaling:** Benefits from lightweight networks, allowing efficient convergence while maintaining high accuracy [S1, unofficial].
 *   **Strengths:** Robust to noisy and sparse point data; balances accuracy and efficiency; handles region-specific noise via uncertainty modeling [S1, unofficial].

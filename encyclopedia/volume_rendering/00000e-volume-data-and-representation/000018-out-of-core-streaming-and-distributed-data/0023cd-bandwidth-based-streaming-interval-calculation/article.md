@@ -1,0 +1,195 @@
+# Bandwidth-based Streaming Interval Calculation
+
+Also called: N_skip calculation, t_delta calculation
+
+## Overview
+Bandwidth-based Streaming Interval Calculation is a method for determining the minimum time interval between data fetches and the number of simulation slices to skip, based on system bandwidth limits to ensure real-time streaming from HDD to GPU [S1, unofficial]. It solves the problem of managing large volumetric datasets that exceed GPU and RAM capacity by calculating a safe skip count ($N_{\text{skip}}$) that accounts for transfer latency and user-defined time multipliers [S1, unofficial]. It sets itself apart from static partitioning methods like [Sectioning](1636-sectioning.md) by dynamically adapting the streaming rate to hardware throughput and user interaction speed, rather than pre-defining fixed spatial chunks.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   $B_{\text{HDD} \rightarrow \text{RAM}}$: Throughput from hard disk to RAM [S1, unofficial].
+    *   $B_{\text{RAM} \rightarrow \text{GPU}}$: Throughput from RAM to GPU memory [S1, unofficial].
+    *   $\text{size}(\mathcal{S})$: Size of a single time slice in bytes [S1, unofficial].
+    *   $t_0, t_1$: Start and end time of the simulation [S1, unofficial].
+    *   $N_S$: Number of slices in the simulation [S1, unofficial].
+    *   $m_{\text{app}}$: Application time multiplier [S1, unofficial].
+    *   $m_{\text{func}}$: Function time multiplier [S1, unofficial].
+*   **Outputs:**
+    *   $t_\Delta$: Minimum time interval between fetches [S1, unofficial].
+    *   $N_{\text{skip}}$: Number of slices to skip for the next fetch [S1, unofficial].
+
+**Data Structures:**
+The method relies on two ring buffers:
+1.  **Host Layer:** A ring buffer of 6 items in heap memory. Each item stores one flow slice. Items 2 and 4 are the center items containing slices before and after the current function time $t_{\text{func}}$. A queue manages more than 6 items for smooth buffering [S1, unofficial].
+2.  **Device Layer:** A ring buffer of 4 items. Each item is a composition of one host-layer item and a chunk of allocated device memory, managed by a CUDA queue. Items 1 and 2 are the center items corresponding to time slices around $t_{\text{func}}$ [S1, unofficial].
+
+**Formulas:**
+1.  **Minimum Bandwidth:**
+    $$B_{\min} = \min(B_{\text{HDD} \rightarrow \text{RAM}}, B_{\text{RAM} \rightarrow \text{GPU}})$$
+    Where $B_{\min}$ is the bottleneck bandwidth [S1, unofficial].
+
+2.  **Minimum Time Interval:**
+    $$t_\Delta = \frac{\text{size}(\mathcal{S})}{B_{\min}}$$
+    Where $t_\Delta$ is the minimum time required to transfer one slice [S1, unofficial].
+
+3.  **Data Time Spacing:**
+    $$t_S = \frac{t_1 - t_0}{N_S - 1}$$
+    Where $t_S$ is the temporal distance between consecutive slices [S1, unofficial].
+
+4.  **Skip Count:**
+    $$N_{\text{skip}} = \frac{t_\Delta}{t_S} \cdot m_{\text{app}} \cdot m_{\text{func}}$$
+    Where $N_{\text{skip}}$ is the number of slices to skip. This is a floating-point value [S1, unofficial].
+
+**Parameters:**
+*   $B_{\text{HDD} \rightarrow \text{RAM}}$: Typical value 1.2 GB/s [S1, unofficial].
+*   $B_{\text{RAM} \rightarrow \text{GPU}}$: Typical value 1.6 GB/s [S1, unofficial].
+*   $m_{\text{app}}$: Range $[0, 1]$ or $\mathbb{R}$ [S1, unofficial].
+*   $m_{\text{func}}$: Range $\mathbb{R}$ [S1, unofficial].
+
+**Steps:**
+1.  Calculate $B_{\min}$ using the minimum of the HDD-to-RAM and RAM-to-GPU throughputs.
+2.  Calculate $t_\Delta$ by dividing the size of a single time slice $\mathcal{S}$ by $B_{\min}$.
+3.  Calculate $t_S$ using the simulation start time $t_0$, end time $t_1$, and number of slices $N_S$.
+4.  Calculate $N_{\text{skip}}$ by dividing $t_\Delta$ by $t_S$ and multiplying by $m_{\text{app}}$ and $m_{\text{func}}$.
+5.  **Host Layer Management:**
+    *   Maintain a ring buffer of 6 items.
+    *   Ensure items 2 and 4 contain the slices immediately before and after the current function time $t_{\text{func}}$.
+    *   If $t_{\text{func}}$ moves past the interval between items 2 and 3 in the positive time direction, pop item 0 from the left of the buffer and push it to the right.
+    *   Upon inserting a new item (e.g., ID 5), schedule it to load a future time slice from the hard disk. The ID of this slice is determined by $N_{\text{skip}}$ relative to the current position.
+    *   **Synchronization:** After popping a new item from the host buffer queue, block the host thread if the associated host memory is still subject to device or host layer transfer [S1, unofficial].
+6.  **Device Layer Management:**
+    *   Maintain a ring buffer of 4 items.
+    *   Upon insertion of a new item into the host ring buffer, pop one item from the left of the device ring buffer.
+    *   Send the popped item's associated memory chunk back to the CUDA queue.
+    *   Copy the previously last (fully loaded) host-buffer item by reference to the device layer, combine it with a CUDA memory object, and schedule for asynchronous memory transfer.
+    *   **Synchronization:** After popping a new item from the device buffer queue, block the host thread if the associated host memory is still subject to host layer transfer. Assign a unique CUDA stream object to every device layer item to synchronize transfers [S1, unofficial].
+7.  **CUDA Launch Synchronization:**
+    *   After performing all tasks on both layers, synchronize device layer items with IDs 1 and 2 before launching CUDA kernels. This asserts that the time slices are fully loaded when accessed [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def calculate_streaming_params(B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func):
+    """
+    Calculate the minimum time interval and skip count for streaming.
+    """
+    # 1. Calculate minimum bandwidth
+    B_min = min(B_hdd_ram, B_ram_gpu)
+    
+    # 2. Calculate minimum time interval
+    t_delta = size_S / B_min
+    
+    # 3. Calculate data time spacing
+    # Note: Source defines t_S as (t1 - t0) / (N_S - 1)
+    if N_S <= 1:
+        raise ValueError("Number of slices must be greater than 1")
+    t_S = (t1 - t0) / (N_S - 1)
+    
+    # 4. Calculate N_skip
+    N_skip = (t_delta / t_S) * m_app * m_func
+    
+    return t_delta, N_skip
+
+class StreamingManager:
+    def __init__(self, B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func):
+        self.t_delta, self.N_skip = calculate_streaming_params(
+            B_hdd_ram, B_ram_gpu, size_S, t0, t1, N_S, m_app, m_func
+        )
+        self.host_buffer = RingBuffer(capacity=6)
+        self.device_buffer = RingBuffer(capacity=4)
+        self.cuda_streams = [None] * 4 # Unique stream per device item
+        self.t_func = t0 # Current function time
+        
+    def update_function_time(self, dt):
+        """Update t_func based on multipliers and delta time."""
+        # t_func is updated every frame
+        self.t_func += self.t_delta * self.m_app * self.m_func
+        
+    def host_layer_step(self, new_slice_data):
+        """
+        Manage host layer ring buffer.
+        """
+        # Check if t_func leaves the valid interval between items 2 and 3
+        # Assuming items are indexed 0-5, center items are 2 and 4? 
+        # Source says: "items in its center (i.e., item IDs 2 and 4) always contain the time slices before and after t_func"
+        # And: "Should t_func leave the currently valid interval between items 2 and 3"
+        
+        # Pop from left if necessary
+        if self.is_interval_exceeded(self.host_buffer, 2, 3):
+            item_0 = self.host_buffer.pop_left()
+            self.host_buffer.push_right(item_0)
+            
+        # Insert new item
+        new_item = BufferItem(data=new_slice_data, id=self.host_buffer.size)
+        self.host_buffer.push_right(new_item)
+        
+        # Schedule load for future slice determined by N_skip
+        # The ID of this slice is determined by N_skip
+        future_slice_id = self.host_buffer.last_id + self.N_skip
+        self.schedule_disk_load(future_slice_id)
+        
+        # Synchronization: Block if host memory is still subject to transfer
+        if self.host_buffer.last_item.is_transferring():
+            self.host_thread.block()
+
+    def device_layer_step(self):
+        """
+        Manage device layer ring buffer.
+        """
+        # Pop from left of device buffer
+        if self.device_buffer.size > 0:
+            popped_item = self.device_buffer.pop_left()
+            self.send_memory_to_cuda_queue(popped_item)
+            
+        # Copy last fully loaded host item to device
+        last_host_item = self.host_buffer.last_item
+        device_item = DeviceBufferItem(
+            host_ref=last_host_item,
+            cuda_mem=self.allocate_cuda_memory()
+        )
+        
+        # Schedule asynchronous transfer
+        stream_id = self.device_buffer.size % 4
+        self.cuda_streams[stream_id] = self.create_cuda_stream()
+        self.async_copy_to_device(device_item, self.cuda_streams[stream_id])
+        self.device_buffer.push_right(device_item)
+        
+        # Synchronization: Block if host memory is still subject to host layer transfer
+        if self.device_buffer.last_item.host_ref.is_transferring_from_host():
+            self.host_thread.block()
+
+    def launch_cuda(self):
+        """
+        Synchronize center device items before launch.
+        """
+        # Synchronize items 1 and 2
+        self.cuda_streams[1].synchronize()
+        self.cuda_streams[2].synchronize()
+        
+        # Launch kernel
+        self.render_kernel(self.device_buffer.items[1], self.device_buffer.items[2])
+```
+
+**Subtopics:**
+*   **Ring Buffer Management:** A technique for maintaining a fixed-size window of data items to ensure the most relevant time slices are always available for interpolation. It differs from simple FIFO queues by allowing circular reuse of memory slots. Choose this when memory is constrained but continuous access to a sliding window of time steps is required. See [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) for spatial equivalents.
+*   **Asynchronous CUDA Streams:** A mechanism for overlapping data transfer with computation. It differs from synchronous transfers by allowing the CPU to continue scheduling tasks while the GPU processes previous ones. Choose this to hide I/O latency. See [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) for hardware-specific optimizations.
+
+## Operating characteristics
+*   **Time Complexity:** The calculation of $N_{\text{skip}}$ is $O(1)$. The streaming overhead is dominated by I/O latency, which is hidden by asynchronous transfers.
+*   **Memory Complexity:** $O(1)$ with respect to the total dataset size, as only a fixed number of slices (6 host, 4 device) are held in memory. Total memory usage is proportional to the size of a single time slice $\mathcal{S}$ [S1, unofficial].
+*   **Measured Performance:** In the source example, a system with 1.2 GB/s HDD and 1.6 GB/s RAM-to-GPU bandwidth was used. The method allows rendering of datasets like 100 time slices of $128^3$ points (2,500 MB) which would otherwise exceed GPU memory [S1, unofficial].
+*   **Scaling:** Scales well with dataset size as it does not depend on the total number of slices $N_S$ for memory allocation, only for calculating $t_S$. It scales with bandwidth; faster storage allows higher $m_{\text{app}}$ or $m_{\text{func}}$ values.
+*   **Strengths:** Decouples rendering speed from dataset size; allows real-time exploration of large simulations; handles user interaction (time manipulation) gracefully via synchronization.
+*   **Limitations:** Relies on constant transfer rates for $N_{\text{skip}}$ calculation; actual transfer may take longer than $t_\Delta$ (up to twice as long), requiring the safety margin provided by the multi-layered buffer structure [S1, unofficial]. Memory is scarce on the device layer, so buffer sizes must be minimized [S1, unofficial].
+*   **When to use:** When streaming volumetric data from slow storage (HDD) to GPU for real-time visualization, especially when the dataset is too large for GPU memory.
+*   **When not to use:** When the entire dataset fits in GPU memory (uploading all is simpler and faster); when network bandwidth is the bottleneck in a distributed setting (see [Distributed computing and load balancing](5624-distributed-computing-and-load-balancing.md)).
+
+## Background
+The method originates from the work of Dirk Sowinski in his 2012 Master's thesis "Real-Time Smoke Volume Rendering" [S1, unofficial]. It was developed to address the limitations of uploading entire simulation outputs to the GPU, which is infeasible for large datasets. The approach uses a multi-layered streaming architecture (Host and Device layers) with specific synchronization rules to handle the asynchronous nature of data transfer and user interaction.
+
+## Sources
+[S1] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)

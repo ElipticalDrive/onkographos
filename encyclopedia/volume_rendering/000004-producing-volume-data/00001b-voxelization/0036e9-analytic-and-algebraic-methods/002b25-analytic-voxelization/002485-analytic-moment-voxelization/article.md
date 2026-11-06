@@ -1,0 +1,211 @@
+# Analytic Moment Voxelization
+Also called: GPU Polyhedral Voxelization with Analytic Moments
+
+## Overview
+Analytic Moment Voxelization is a GPU-based technique for converting 3D polyhedra into a discrete Cartesian grid by computing the analytic moments of a polynomial density field over the polyhedron's volume [S1, unofficial]. It solves the problem of high-fidelity volume data generation for scientific visualization (e.g., SPH simulations) by avoiding rasterization artifacts and supporting arbitrary polynomial density orders [S1, unofficial]. It distinguishes itself from sibling methods like [Monte Carlo 2D Voxelization](1734-monte-carlo-2d-voxelization.md) by providing exact geometric integration rather than statistical approximation, and from [Differentiable Voxelization (MC/CF)](1742-differentiable-voxelization-mc-cf.md) by relying on explicit geometric clipping and simplicial decomposition rather than differentiable rendering pipelines [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D polyhedron defined by vertices and connectivity (`r3d_poly`), an axis-aligned bounding box (AABB) of the target grid region (`ibox[2]`), the grid spacing vector `d`, and the polynomial order `polyorder`.
+*   **Output:** A flattened array `dest_grid` storing the computed moments for each voxel in the AABB.
+
+**Data Structures:**
+The method uses specific C-style structures for geometric representation [S1, unofficial]:
+*   `r3d_poly`: Contains an array of `r3d_vertex` (max `R3D_MAX_VERTS = 64`) and an integer `nverts`.
+*   `r3d_vertex`: Contains `pnbrs[3]` (neighbor indices), `pos` (`r3d_rvec3`), and `orient` (`r3d_orientation`).
+*   `r3d_rvec3`: A union of `{x, y, z}` and `xyz[3]`, typed as `float` or `double` based on compilation flags.
+*   `r3d_dvec3`: A union of `{i, j, k}` and `ijk[3]`, typed as `int32_t`.
+*   `r3d_plane`: Contains a unit normal `n` (`r3d_rvec3`) and signed distance `d` (`r3d_real`).
+*   `r3d_orientation`: Contains `fdist[4]` (signed distances to clip planes) and `fflags` (bit flags for inside/outside status).
+
+**Number of Moments:**
+The number of moments $M$ required for a given polynomial order $P$ is:
+$$ M = \frac{(P+1)(P+2)(P+3)}{6} $$
+For $P=0$ (constant), $M=1$. For $P=1$ (linear), $M=4$. For $P=2$ (quadratic), $M=10$ [S1, unofficial].
+
+**Moment Array Ordering:**
+Moments are stored in row-major order corresponding to monomials $x^a y^b z^c$ where $a+b+c \le P$. The sequence begins: $1, x, y, z, x^2, xy, xz, y^2, yz, z^2, x^3, \dots$ [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Validation:** Verify the polyhedron is valid using `r3d_is_good`. This checks if the vertices form a 3-vertex-connected graph (Steinitz' theorem) [S1, unofficial]. This step runs in $O(n_{verts}^2)$ time [S1, unofficial].
+2.  **Bounding Box Calculation:** Compute the AABB of the polyhedron in grid coordinates to determine the range of voxels to process.
+3.  **Simplicial Decomposition:** Decompose the polyhedron into tetrahedra. For each tetrahedron:
+    a.  Ensure correct orientation (positive volume). If volume is negative, swap two vertices to correct it [S1, unofficial].
+    b.  Compute face normals and distances for the tetrahedron.
+4.  **Voxel Intersection Test:** For each voxel in the AABB:
+    a.  Define the 8 corners of the voxel.
+    b.  Evaluate the signed distance of each corner to each of the tetrahedron's 4 faces.
+    c.  Determine the inside/outside status of each corner using the `fflags` bits.
+    d.  Compute the intersection of the tetrahedron and the voxel using geometric clipping.
+5.  **Geometric Clipping:**
+    a.  Initialize a vertex buffer with the voxel corners.
+    b.  Iterate through the tetrahedron's faces. If a face clips the current polytope (defined by the vertex buffer), clip the edges intersecting that face.
+    c.  Compute new intersection points using a weighted average of perpendicular distances to the clipping plane [S1, unofficial].
+    d.  Update the vertex buffer and neighbor links (`pnbrs`) to maintain the polyhedral structure.
+6.  **Moment Integration:**
+    a.  For the resulting clipped polytope (intersection of tetrahedron and voxel), compute the analytic moments.
+    b.  Accumulate these moments into the `dest_grid` at the voxel's index.
+7.  **Output:** The `dest_grid` buffer must be sized at least `(ibox[1].i-ibox[0].i)*(ibox[1].j-ibox[0].j)*(ibox[1].k-ibox[0].k)*R3D_NUM_MOMENTS(polyorder)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for the core voxelization logic per tetrahedron and voxel
+# Note: This is a simplified representation of the GPU kernel logic found in r3d.cu
+
+def compute_tet_voxel_moments(tet, voxel_corners, grid_spacing, polyorder):
+    """
+    Computes the analytic moments of the intersection between a tetrahedron and a voxel.
+    """
+    # 1. Orientation Check
+    tet_vol = compute_signed_volume(tet)
+    if tet_vol < 0.0:
+        # Swap vertices 2 and 3 to ensure positive volume
+        tet.pos[2], tet.pos[3] = tet.pos[3], tet.pos[2]
+        tet_vol = -tet_vol
+
+    # 2. Compute Tetrahedron Faces
+    faces = compute_tet_faces(tet.pos)
+
+    # 3. Initialize Voxel Polytope with Voxel Corners
+    # Create a temporary polytope structure representing the voxel
+    voxel_poly = create_polytope_from_corners(voxel_corners)
+    
+    # 4. Clip Voxel Polytope against Tetrahedron Faces
+    for face in faces:
+        # Determine which vertices are outside the face plane
+        # A vertex is outside if its signed distance to the plane is > 0
+        outside_flags = []
+        for v in voxel_poly.verts:
+            dist = dot(v.pos, face.n) + face.d
+            v.fdist = dist
+            if dist > 0.0:
+                outside_flags.append(v)
+            else:
+                outside_flags.append(None)
+        
+        # If all vertices are inside, no clipping needed for this face
+        if all(v is None for v in outside_flags):
+            continue
+            
+        # Clip the polytope against this face
+        voxel_poly = clip_polytope_against_plane(voxel_poly, face)
+        
+        # If polytope is empty, break early
+        if voxel_poly.nverts == 0:
+            return None
+
+    # 5. Compute Moments of the Clipped Polytope
+    # This involves integrating the polynomial density field over the clipped volume
+    # The specific integration formula depends on the polyorder
+    moments = compute_analytic_moments(voxel_poly, polyorder)
+    
+    return moments
+
+def clip_polytope_against_plane(poly, plane):
+    """
+    Clips a polytope against a plane.
+    Returns a new polytope representing the intersection.
+    """
+    new_verts = []
+    new_faces = []
+    
+    # Iterate over edges of the current polytope
+    # For each edge, check if it crosses the plane
+    for i in range(poly.nverts):
+        v_curr = poly.verts[i]
+        v_prev = poly.verts[(i - 1) % poly.nverts]
+        
+        d_curr = dot(v_curr.pos, plane.n) + plane.d
+        d_prev = dot(v_prev.pos, plane.n) + plane.d
+        
+        # If current vertex is outside (dist > 0) and previous is inside (dist <= 0)
+        if d_curr > 0.0 and d_prev <= 0.0:
+            # Compute intersection point
+            # Weighted average based on perpendicular distances
+            w_curr = -d_prev
+            w_prev = d_curr
+            inter_pos = (w_curr * v_curr.pos + w_prev * v_prev.pos) / (w_curr + w_prev)
+            new_vert = create_vertex(inter_pos)
+            new_verts.append(new_vert)
+            
+        # If current vertex is inside, keep it
+        if d_curr <= 0.0:
+            new_verts.append(v_curr)
+            
+    # Reconstruct connectivity for the new polytope
+    # This part is complex and relies on the specific neighbor structure (pnbrs)
+    # Simplified: assume a function exists to rebuild the polytope from new_verts
+    new_poly = rebuild_polytope(new_verts, poly)
+    return new_poly
+
+def compute_analytic_moments(poly, polyorder):
+    """
+    Computes the analytic moments of a polytope for a given polynomial order.
+    This is the core analytic step.
+    """
+    # The number of moments M is determined by polyorder
+    M = (polyorder + 1) * (polyorder + 2) * (polyorder + 3) // 6
+    
+    moments = [0.0] * M
+    
+    # Decompose polytope into tetrahedra if necessary
+    # For a general polytope, triangulation is required
+    tets = decompose_polytope_to_tetrahedra(poly)
+    
+    for tet in tets:
+        # Compute moments for the tetrahedron
+        # The formula for moments of a tetrahedron is derived analytically
+        tet_moments = compute_tet_moments(tet, polyorder)
+        
+        # Accumulate into the result
+        for i in range(M):
+            moments[i] += tet_moments[i]
+            
+    return moments
+
+def compute_tet_moments(tet, polyorder):
+    """
+    Computes the analytic moments of a single tetrahedron.
+    """
+    # This function implements the specific analytic integration formulas
+    # for monomials x^a y^b z^c over a tetrahedron.
+    # The exact formulas are complex and depend on the vertex coordinates.
+    # For polyorder 0, it's just the volume.
+    # For higher orders, it involves higher-order terms.
+    
+    # Placeholder for the actual analytic integration logic
+    # which is not fully detailed in the source snippets but implied by the method name.
+    pass
+```
+
+**Parameters:**
+*   `polyorder`: Order of the polynomial density field. Typical values are 0 (constant), 1 (linear), or 2 (quadratic) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Buffer Size:** The `dest_grid` buffer must be pre-allocated to a size of at least `(ibox[1].i-ibox[0].i)*(ibox[1].j-ibox[0].j)*(ibox[1].k-ibox[0].k)*R3D_NUM_MOMENTS(polyorder)` [S1, unofficial].
+*   **Validity:** The polyhedron vertices must form a 3-vertex-connected graph for `r3d_is_good` to pass, which is required for valid polyhedral operations [S1, unofficial].
+*   **Precision:** The type of `r3d_rvec3` (float vs double) depends on compilation flags (`-DSINGLE_PRECISION`), which affects numerical stability [S1, unofficial].
+
+## Subtopics
+
+### [Polynomial Field Integration via Coordinate Moments](3791-polynomial-field-integration-via-coordinate-moments.md)
+Computes integrals of arbitrary scalar/vector fields over a voxel using coordinate moments, allowing simultaneous integration of multiple fields without re-clipping. It builds on [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md).
+
+### [R3D Polytope Splitting and Moment Reduction](3809-r3d-polytope-splitting-and-moment-reduction.md)
+Computes exact coordinate moments of polytope-grid intersections by recursively splitting the polytope along grid axes until it fits within a single voxel, then reducing moments. It builds on [Analytic Moment Voxelization](3307-analytic-moment-voxelization.md) by providing specific geometric splitting logic for arbitrary convex polyhedra.
+
+## Operating characteristics
+*   **Time Complexity:** The validation step `r3d_is_good` runs in $O(n_{verts}^2)$ time [S1, unofficial]. The overall complexity depends on the number of voxels intersected and the polynomial order, as moment computation scales with the number of moments $M$.
+*   **Memory Complexity:** Memory usage is proportional to the number of voxels in the bounding box and the number of moments per voxel. The `dest_grid` buffer size is explicitly defined [S1, unofficial].
+*   **Performance:** The method is implemented on the GPU (`__global__` kernel) for parallel processing of voxels and polyhedra [S1, unofficial].
+*   **Strengths:** Exact geometric integration, support for arbitrary polynomial densities, GPU acceleration.
+*   **Limitations:** Requires valid 3-vertex-connected polyhedra, complex implementation for general polytope clipping and moment integration.
+*   **Usage:** Used in `mainVoxel.py` to process Gadget files (SPH simulation data) [S1, unofficial].
+
+## Background
+The method originates from the `r3d` library, prepared by Los Alamos National Security, LLC at Los Alamos National Laboratory (LANL) under contract with the U.S. Department of Energy (DOE) [S1, unofficial]. It was developed by Devon Powell in August 2015 [S1, unofficial]. The technique is designed for scientific visualization, particularly for processing Smoothed Particle Hydrodynamics (SPH) simulation data from Gadget files [S1, unofficial].
+
+## Sources
+[S1] PabloRS89/Voxelization_GPU, https://github.com/PabloRS89/Voxelization_GPU, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,632 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+NanoVDB loading: fix mixed grid type loading and add read_metadata API by swahtz · Pull Request #641 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Apr 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Problem
+Two bugs surfaced when trying to read real-world .nvdb files in fVDB:
+Wrong-type dispatch for multi-grid handles. detail::io::loadOneGrid calls handle.gridType() and handle.gridMetaData() without the gridId argument, so every grid in a multi-grid GridHandle is dispatched as if it were grid 0. Loading e.g. {Float, Float, Vec3f} therefore fails at grid 2 with Grid has type Vec3f, but expected float.
+Cryptic concat error for heterogeneous per-voxel shapes. Even when dispatch is correct, JaggedTensor packs per-grid data along dim 0 via torch::cat, which requires matching dtype and matching trailing sizes. A file that contains a Float grid at [N, 1] alongside a Vec3f grid at [M, 3] bubbles up as Sizes of tensors must match except in dimension 0. Expected size 1 but got size 3 for tensor number 2... with no hint at which grids are actually incompatible or how to load them.
+A third papercut: .nvdb files saved with ZIP compression fail to open because NANOVDB_USE_ZIP was never set at build time.
+What changed
+C++ (src/fvdb)
+detail/io/LoadNanovdb.cpp — loadOneGrid: thread gridId through every handle.gridType(...) / handle.gridMetaData(...) call so per-grid dispatch is actually per-grid.
+detail/io/LoadNanovdb.cpp — new validateTrailingShapeAndDtype helper: runs in fromNVDB before JaggedTensor construction and raises a TORCH_CHECK_VALUE that names both the reference grid and the offending grid, prints their shapes/dtypes, and tells the caller to use name= / index= / load_nanovdb_single to load them one at a time. No perf impact on the happy path (data.size() <= 1 early-out).
+New NanoVDBGridMetadata struct (src/fvdb/NanoVDBGridMetadata.h): POD with name, type, gridClass, voxelCount, voxelSize, indexBBoxMin, indexBBoxMax.
+New fvdb::read_metadata(path) (src/fvdb/FVDB.{h,cpp}): public C++ entry point backed by a new detail::io::readNVDBMetaData wrapping nanovdb::io::readGridMetaData. File-header-only; no voxel data is materialized.
+Python bindings (src/python/Bindings.cpp)
+Bound NanoVDBGridMetadata as a Python class with read-only accessors and a compact __repr__.
+Bound fvdb.read_metadata as a free function taking path.
+Python API (fvdb/functional)
+_io.py: added read_nanovdb_metadata(path) and a grid_names_in_nanovdb(path) convenience wrapper; both with docstrings and a short usage example.
+__init__.py: added both names to __all__. Reordered the existing from ._xxx import ... blocks into alphabetical order while I was in there.
+Build (src/CMakeLists.txt)
+find_package(ZLIB REQUIRED), -DNANOVDB_USE_ZIP, and ZLIB::ZLIB in target_link_libraries so NanoVDB's ZIP-compressed .nvdb reader is actually compiled in.
+Tests (tests/unit)
+__init__.py: bump set_testing_git_tag to the fvdb-test-data commit that ships the new io/mixed_types.nvdb fixture (46e7bd4...).
+test_io.py: new TestLoadMixedTypeNanovdb class driven by a single _MIXED_TYPES_GRIDS truth table covering all four grids in the fixture (density float, pressure double, label int32, velocity Vec3f). 19 tests total covering:
+read_nanovdb_metadata enumerates names / types / voxel counts.
+grid_names_in_nanovdb returns the right names.
+Loading the whole file without a selector raises ValueError, the message is lowercase-matched against "mixed value type", references at least one grid by name, and contains an actionable hint (name= / index= / load_nanovdb_single).
+By-name load for each of the 4 types on CPU and CUDA, with round-trip value verification.
+By-index load for each of the 4 types on CPU and CUDA.
+swahtz
+added 3 commits
+April 24, 2026 20:41
+Fix nanovdb loading for mixed-type grids and add metadata read API
+…
+b1deb14
+```
+Improve behavior and ergonomics of reading .nvdb files, especially when a
+single file contains grids of multiple value types.
+
+Correctness:
+- LoadNanovdb.cpp: loadOneGrid() was calling handle.gridMetaData() and
+  handle.gridType() without the gridId, so every grid in a multi-grid
+  GridHandle was dispatched using grid 0's type. Files with, e.g., a Float
+  grid at index 0 and a Vec3f grid at index 2 would fail with a misleading
+  "Grid has type Vec3f, but expected float" error. Pass gridId through to
+  gridMetaData(gridId) and gridType(gridId) in every relevant call site,
+  including the TensorGrid branch and the default error path.
+
+Error reporting:
+- fvdb::JaggedTensor packs per-grid data tensors via torch::cat along dim 0,
+  which requires matching dtype and matching trailing shape. Grids with
+  heterogeneous value types (e.g. a Float grid [N, 1] next to a Vec3f grid
+  [M, 3]) therefore cannot share a single JaggedTensor. Previously this
+  surfaced as a cryptic torch::cat size-mismatch error deep in tensor ops.
+  Add validateTrailingShapeAndDtype() in both fromNVDB() overloads that
+  checks shape/dtype uniformity up front and raises a TORCH_CHECK_VALUE
+  naming the specific offending grids and suggesting the name=/index=
+  selectors or load_nanovdb_single as workarounds.
+
+New metadata-only API:
+- Add fvdb::NanoVDBGridMetadata (new header src/fvdb/NanoVDBGridMetadata.h)
+  holding name, type string, grid-class string, voxel count, voxel size,
+  and index bbox min/max.
+- Add fvdb::read_metadata(path) / detail::io::readNVDBMetaData(path), which
+  wraps nanovdb::io::readGridMetaData and only reads file headers (no voxel
+  data). This lets callers enumerate a .nvdb file without paying the cost
+  of a full load and is the supported way to inspect files with mixed value
+  types before choosing which grids to load individually.
+- Bindings.cpp: bind NanoVDBGridMetadata (with a __repr__) and expose
+  read_metadata as _fvdb_cpp.read_metadata.
+- fvdb.functional: add read_nanovdb_metadata(path) and the convenience
+  wrapper grid_names_in_nanovdb(path), and export both from
+  fvdb.functional.__init__.
+
+Also reorders the import blocks in fvdb/functional/__init__.py
+alphabetically while touching the file.
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+undo get_nanovdb.cmake change
+…
+3578c30
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+add tests
+…
+d10711c
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from a team
+as a code owner
+April 24, 2026 10:36
+swahtz
+requested review from
+areidmeyer and
+phapalova
+April 24, 2026 10:36
+swahtz
+added
+bug
+Something isn't working
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+labels
+Apr 24, 2026
+swahtz
+added this to the
+v0.5 milestone
+Apr 24, 2026
+swahtz
+requested a review
+from Copilot
+April 24, 2026 10:37
+Copilot started reviewing on behalf of
+swahtz
+April 24, 2026 10:38
+View session
+Copilot
+AI
+reviewed
+Apr 24, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Fixes NanoVDB multi-grid loading for heterogeneous grid types and adds a lightweight metadata-reading API (C++ + Python) to inspect .nvdb contents without materializing voxel data.
+Changes:
+Fix per-grid type/class dispatch in loadOneGrid by threading gridId through NanoVDB handle metadata/type lookups.
+Add read_metadata / read_nanovdb_metadata APIs (C++ + pybind + Python functional wrappers) plus a grid_names_in_nanovdb convenience helper.
+Improve mixed-type load failure mode by validating dtype/trailing-shape compatibility before constructing a JaggedTensor, and add unit tests + ZIP support via ZLIB.
+Reviewed changes
+Copilot reviewed 11 out of 11 changed files in this pull request and generated 3 comments.
+Show a summary per file
+File
+Description
+src/fvdb/detail/io/LoadNanovdb.cpp
+Fixes multi-grid dispatch; adds mixed-type shape/dtype validation; implements readNVDBMetaData.
+src/fvdb/detail/io/LoadNanovdb.h
+Declares new metadata-reading entry point.
+src/fvdb/NanoVDBGridMetadata.h
+Adds POD struct for per-grid metadata surfaced to public APIs.
+src/fvdb/FVDB.h
+Adds public C++ read_metadata(path) API.
+src/fvdb/FVDB.cpp
+Implements C++ read_metadata by delegating to IO layer.
+src/python/Bindings.cpp
+Exposes NanoVDBGridMetadata + read_metadata to Python via pybind11.
+fvdb/functional/_io.py
+Adds read_nanovdb_metadata and grid_names_in_nanovdb Python wrappers/docstrings.
+fvdb/functional/__init__.py
+Reorders imports and exports new I/O helpers via __all__.
+src/CMakeLists.txt
+Enables ZIP-compressed NanoVDB reads by requiring and linking ZLIB + NANOVDB_USE_ZIP.
+tests/unit/__init__.py
+Bumps fvdb-test-data tag to include the new mixed-types fixture.
+tests/unit/test_io.py
+Adds metadata + mixed-type loading tests (by-name / by-index; CPU/CUDA).
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/io/LoadNanovdb.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb/functional/_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/python/Bindings.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 3 commits
+April 24, 2026 22:48
+Update src/fvdb/detail/io/LoadNanovdb.cpp
+…
+e866870
+```
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Addressing notes
+…
+efb9551
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update test data commit
+…
+cc6817c
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+harrism
+requested a review
+from Copilot
+April 25, 2026 09:36
+Copilot started reviewing on behalf of
+harrism
+April 25, 2026 09:36
+View session
+Copilot
+AI
+reviewed
+Apr 25, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 11 out of 11 changed files in this pull request and generated 2 comments.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+fvdb/functional/_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/test_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+harrism
+mentioned this pull request
+Apr 25, 2026
+TensorGrid blind-data lookup uses index 0 instead of loop counter
+#642
+Closed
+harrism
+requested changes
+Apr 25, 2026
+View reviewed changes
+harrism
+left a comment
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Re-reviewed in detail. The two bug fixes (per-grid type dispatch and the actionable mixed-type error) are clearly correct and well-tested for the load path; the metadata API is a clean addition.
+A few things to address before merge — comments are inline. Summary by severity:
+Blockers
+fvdb/functional/_io.py:17 — TYPE_CHECKING import points to a non-existent module; static type-check / IDE tooling will fail to resolve NanoVDBGridMetadata.
+fvdb/_fvdb_cpp.pyi — new bindings (NanoVDBGridMetadata, read_metadata) are not added to the type stubs.
+Doc bugs that will mislead callers
+src/fvdb/NanoVDBGridMetadata.h:18 — example grid_class strings ("LS", "TensorGrid") don't match what nanovdb::toStr(GridClass) actually returns ("SDF", "TENSOR").
+Structural / readability
+src/fvdb/detail/io/LoadNanovdb.cpp — validateTrailingShapeAndDtype runs after mergeGrids + makeGridBatchData; hoisting it before saves all that work on the error path.
+src/python/Bindings.cpp — def_property_readonly lambdas are unnecessary; pybind11/stl.h already auto-converts std::array<T, N> to a Python tuple via def_readonly.
+fvdb/functional/_io.py — new metadata functions sit under the # Save section divider.
+Test coverage gaps
+grid_class / voxel_size / index_bbox_* are exposed but not asserted (and would have caught the grid_class doc bug above).
+CUDA-parameterized loads don't assert data.jdata.device.type, so a silent device= regression would pass.
+The by-index load test only checks shape/dtype, not the round-tripped value — the by-name test does, and the same proof matters for the index path.
+Adjacent (not blocking this PR)
+Filed #642 for a pre-existing latent bug in nanovdbTensorGridToFVDBGrid (always reads blindMetaData(0) inside the loop). Not introduced here, but the per-grid dispatch fix in this PR makes the bug more reachable for multi-grid TensorGrid files.
+(Review by Claude Opus 4.7 with guidance from @harrism).
+Comment thread
+fvdb/functional/_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/python/Bindings.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/NanoVDBGridMetadata.h
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/io/LoadNanovdb.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/python/Bindings.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/test_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/test_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+tests/unit/test_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+fvdb/functional/_io.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 3 commits
+April 26, 2026 23:49
+Update fvdb/functional/_io.py
+…
+25db91c
+```
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update tests/unit/test_io.py
+…
+118cfd9
+```
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Addressing notes
+…
+2900c4c
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+April 26, 2026 12:49
+Copilot started reviewing on behalf of
+swahtz
+April 26, 2026 12:49
+View session
+Copilot
+AI
+reviewed
+Apr 26, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 13 out of 13 changed files in this pull request and generated 2 comments.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+fvdb/__init__.pyi
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/CMakeLists.txt
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Re-export NanoVDBGridMetadata in the runtime module
+…
+998e4dd
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+April 27, 2026 01:07
+Copilot started reviewing on behalf of
+swahtz
+April 27, 2026 01:08
+View session
+Copilot
+AI
+reviewed
+Apr 27, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated 2 comments.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/io/LoadNanovdb.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/CMakeLists.txt
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Update error message in validateTrailingShapeAndDtype to be more sp…
+…
+d344627
+```
+…ecific
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+April 27, 2026 01:40
+Copilot started reviewing on behalf of
+swahtz
+April 27, 2026 01:41
+View session
+Copilot
+AI
+reviewed
+Apr 27, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated 2 comments.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Comment thread
+src/fvdb/detail/io/LoadNanovdb.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+src/fvdb/detail/io/LoadNanovdb.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+and others
+added 2 commits
+April 27, 2026 13:47
+Update src/fvdb/detail/io/LoadNanovdb.cpp
+…
+1b8bce1
+```
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Update src/fvdb/detail/io/LoadNanovdb.cpp
+…
+39ee423
+```
+Co-authored-by: Copilot <175728472+Copilot@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from Copilot
+April 27, 2026 01:48
+Copilot started reviewing on behalf of
+swahtz
+April 27, 2026 01:48
+View session
+Copilot
+AI
+reviewed
+Apr 27, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Pull request overview
+Copilot reviewed 14 out of 14 changed files in this pull request and generated no new comments.
+💡 Add Copilot custom instructions for smarter, more guided reviews. Learn how to get started.
+Fix error message checking in `test_load_whole_mixed_type_file_raises…
+…
+2d585ee
+```
+…_actionable_error` test for new text on the C++ side
+
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+harrism
+approved these changes
+Apr 27, 2026
+View reviewed changes
+Merge branch 'main' into js/load_nano_improvements
+…
+5c8f10f
+```
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+enabled auto-merge (squash)
+April 27, 2026 23:38
+Hide details
+View details
+swahtz
+merged commit 7da88ac
+into
+openvdb:main
+Apr 28, 2026
+39 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+deleted the
+js/load_nano_improvements
+branch
+April 28, 2026 00:14
+mvanhorn
+mentioned this pull request
+May 16, 2026
+fix: TensorGrid blind-data lookup uses index 0 instead of loop counter
+#652
+Merged
+swahtz
+added a commit
+that referenced
+this pull request
+Jul 2, 2026
+fix: TensorGrid blind-data lookup uses index 0 instead of loop counter (
+…
+d9c9e4e
+```
+#652)
+
+## Summary
+
+`LoadNanovdb.cpp::loadTensorBlindData` iterated over channels but called
+`grid->getBlindData(0)` inside the loop body, so every channel was
+reading from channel 0. Same bug at four sites (L210, L236, L366, L370).
+Replace `(0)` with `(i)` at each call site.
+
+## Why this matters
+
+Reporter caught this while reviewing the recently-merged PR #641 and
+dropped the exact line numbers. The bug means every TensorGrid load
+currently returns the channel-0 data for every channel slot, silently
+producing incorrect tensors with no error or warning.
+
+## Changes
+
+- `src/fvdb/detail/io/LoadNanovdb.cpp` - swap `grid->getBlindData(0)`
+for `grid->getBlindData(i)` at L210, L236, L366, L370.
+
+## Testing
+
+Existing TensorGrid load tests cover this; they pass with the fix on
+HEAD 7e8213e.
+
+Fixes #642
+
+---------
+
+Signed-off-by: Matt Van Horn <455140+mvanhorn@users.noreply.github.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+Co-authored-by: Matt Van Horn <455140+mvanhorn@users.noreply.github.com>
+Co-authored-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bug
+Something isn't working
+core library
+Core fVDB library. i.e. anything in the _Cpp module (C++) or fvdb python module
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

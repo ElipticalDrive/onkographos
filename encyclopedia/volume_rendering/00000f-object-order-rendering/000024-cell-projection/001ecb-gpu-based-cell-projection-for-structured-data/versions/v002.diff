@@ -1,0 +1,250 @@
+--- v001.md
++++ v002.md
+@@ -4,130 +4,145 @@
+ 
+ ## Overview
+-This method provides an interactive rendering technique for large, regular (structured) volumetric data sets on GPUs by exploiting data regularity to eliminate redundant projection and sorting computations [S1, unofficial]. It differs from general Projective Tetrahedra (PT) algorithms by avoiding the computationally expensive visibility sorting of cells, as the traversal order for a regular grid is determined in constant time [S1, unofficial]. Unlike Hardware-Based Ray Casting (HARC), it consumes significantly less memory [S1, unofficial].
++This method is a GPU-accelerated implementation of the Projected Tetrahedra (PT) algorithm [S1, unofficial] specifically optimized for large, regular (structured) volumetric data sets. It solves the problem of interactive visualization for medical and scientific data by exploiting the geometric regularity of structured grids to eliminate redundant projection and visibility sorting computations [S1, unofficial]. Unlike general PT algorithms that require expensive cell sorting [S1, unofficial], this approach achieves rendering speeds of over 5.0 M Tet/s by precomputing projection parameters for a single "basis" hexahedron and reusing them for all voxels via orthographic projection [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A structured (regular) 3D grid of voxels (e.g., $256^3$ to $512^3$).
+-**Outputs:** A 2D image composited in back-to-front order.
++The method divides the volume into hexahedral voxels, subdivides each into five tetrahedra (a "volunit"), and renders them as triangle fans on the GPU. It relies on orthographic projection to ensure all volunits project identically, allowing the reuse of geometric parameters [S1, unofficial].
+ 
+-**Data Structures:**
+-1.  **Vertex Array:** Stores volume information. Each entry corresponds to a grid vertex but is rendered multiple times (once per incident tetrahedron).
+-    *   **Position:** 3D coordinates derived from lattice indices.
+-    *   **Normal:** Encoded with auxiliary data:
+-        *   $x$-coordinate: `tetid` (integer, 0–4), identifying which of the five tetrahedra in the volunit is being rendered.
+-        *   $y$-coordinate: `vertid` (integer, 0–3), identifying the specific vertex of that tetrahedron.
+-2.  **Basis Hexahedron Parameters (Uniforms):** Precomputed once on the CPU for a single reference hexahedron. Stored values for each of the five basis tetrahedra include:
+-    *   `basis_projection_class`: Determined by four cross-product tests.
+-    *   `basis_projected_vertices`: Screen coordinates of the projected vertices.
+-    *   `basis_thick_vertex`: Coordinates of the thick vertex.
+-    *   `basis_intersection_parameters`: Used to compute front ($s_f$) and back ($s_b$) scalar values.
+-    *   `basis_rendering_order`: The order in which the five tetrahedra must be rendered.
+-    *   `basis_thickness`: The thickness $l$ for the thick vertex.
+-3.  **Transfer Function:** A 1D texture with 256 positions mapping scalar values to RGBA (chromaticity and opacity/extinction coefficient $\tau$) [S1, unofficial].
++### Inputs and Outputs
++*   **Input:** A structured 3D grid of scalar values (typically $256^3$ to $512^3$ voxels) [S1, unofficial].
++*   **Output:** A 2D image composited in back-to-front order [S1, unofficial].
+ 
+-**Numbered Steps:**
++### Data Structures
+ 
+-1.  **Preprocessing (CPU):** Subdivide each hexahedron in the volume into five tetrahedra. This set is termed a "volunit" [S1, unofficial].
+-2.  **Basis Projection (CPU):** Compute projection parameters for a single "basis hexahedron" using orthographic projection.
+-    *   Determine the projection class for each of the five basis tetrahedra using four cross-product tests.
+-    *   Compute the thick vertex coordinates, basis projected vertices coordinates, basis intersection parameters (for $s_f, s_b$), and basis rendering order.
+-    *   Store these values as global uniforms for the GPU [S1, unofficial].
+-3.  **Traversal Order (CPU):** Determine a traversal order for the whole volume in constant time. This avoids the sorting step required by general PT algorithms [S1, unofficial].
+-4.  **Data Allocation (CPU):** Allocate volume information into the Vertex Array structure [S1, unofficial].
+-5.  **Rendering Loop (GPU):** Iterate through the volume according to the traversal order. For each volunit:
+-    *   Render each of the five tetrahedra as a triangle fan.
+-    *   The first vertex of the fan (central node) is the basis thick vertex.
+-    *   The number of triangles in the fan depends on the basis projection class.
+-    *   Triangles are drawn in the basis rendering order (back-to-front) [S1, unofficial].
+-6.  **Vertex Shader Execution:** For each vertex in the lattice:
+-    *   Compute vertex coordinates on the fly using the 3 integer lattice indices and the basis hexahedron uniform variables to displace the vertex [S1, unofficial].
+-    *   Encode `tetid` in the normal's $x$ and `vertid` in the normal's $y$ [S1, unofficial].
++**1. Basis Hexahedron Parameters (CPU-side, stored as GPU Uniforms)**
++Computed once for a single reference hexahedron. For each of the five tetrahedra comprising the basis hexahedron, the following are stored:
++*   `basis_projection_class`: Integer derived from four cross-product tests [S1, unofficial].
++*   `basis_projected_vertices_coords`: Screen-space coordinates of the projected vertices [S1, unofficial].
++*   `basis_thick_vertex_coords`: Screen-space coordinates of the "thick" vertex (the vertex with non-zero thickness) [S1, unofficial].
++*   `basis_intersection_params`: Parameters for computing front ($s_f$) and back ($s_b$) scalar values at the thick vertex [S1, unofficial].
++*   `basis_thickness`: The ray segment length $l$ at the thick vertex [S1, unofficial].
++*   `basis_rendering_order`: The back-to-front drawing order for the tetrahedra [S1, unofficial].
++
++**2. Vertex Array Structure (CPU-side)**
++Allocated to hold volume information. Each vertex in the grid is associated with:
++*   3 integer indices $(i, j, k)$ identifying its position in the lattice [S1, unofficial].
++*   A vertex normal vector used to encode metadata:
++    *   $x$-coordinate: `tetid` (integer 0–4, identifying which of the five tetrahedra is being rendered) [S1, unofficial].
++    *   $y$-coordinate: `vertid` (integer 0–3, identifying which vertex of the tetrahedron is being processed) [S1, unofficial].
++
++**3. Transfer Function (GPU-side)**
++*   A 1D texture with 256 positions mapping scalar values to RGBA color and extinction coefficient $\tau$ [S1, unofficial].
++
++### Numbered Steps
++
++1.  **Preprocessing (CPU):** Subdivide each hexahedral voxel in the volume into five tetrahedra. Each set of five tetrahedra is termed a "volunit" [S1, unofficial].
++2.  **Basis Projection (CPU):** Compute the projection parameters for a single "basis hexahedron" once.
++    *   Determine the projection class for each of the five basis tetrahedra using four cross-product tests [S1, unofficial].
++    *   Compute the thick vertex coordinates, basis projected vertices coordinates, basis intersection parameters (for $s_f, s_b$), and basis rendering order for each tetrahedron [S1, unofficial].
++    *   Store these values as global uniform variables for the GPU [S1, unofficial].
++3.  **Traversal Order (CPU):** Determine a constant-time traversal order for the whole volume. Because the grid is regular, voxels are sorted straightforwardly, eliminating the need for general visibility sorting [S1, unofficial].
++4.  **Vertex Array Allocation (CPU):** Allocate the volume information into a Vertex Array structure. Encode `tetid` and `vertid` into the vertex normal vector for each vertex [S1, unofficial].
++5.  **GPU Rendering Loop:** For each volunit in the traversal order:
++    *   Render each of the five tetrahedra as a triangle fan [S1, unofficial].
++    *   The first vertex of the fan is the basis thick vertex. The remaining vertices are composed using the stored basis projected vertices coordinates displaced to the current volunit's position [S1, unofficial].
++    *   Draw primitives in the `basis_rendering_order` (back-to-front) [S1, unofficial].
++6.  **Vertex Shader Execution:** For each vertex in the triangle fan:
++    *   Compute the vertex coordinates on the fly using the 3 integer lattice indices and the basis hexahedron uniform parameters [S1, unofficial].
++    *   Decode `tetid` and `vertid` from the vertex normal [S1, unofficial].
+     *   Compute scalar values ($s_f, s_b$) and thickness ($l$):
+-        *   If the vertex is **not** the thick vertex: $s_f = s_b = \text{original scalar}$, and $l = 0$.
+-        *   If the vertex **is** the thick vertex: Calculate $s_f$ and $s_b$ using the basis intersection parameters, and set $l$ to the precomputed basis thickness [S1, unofficial].
++        *   If the vertex is **not** the thick vertex: $s_f = s_b = \text{original scalar value}$, and $l = 0$ [S1, unofficial].
++        *   If the vertex **is** the thick vertex: Calculate $s_f$ and $s_b$ using the `basis_intersection_params`, and set $l$ to the `basis_thickness` [S1, unofficial].
++    *   Pass $(s_f, s_b, l)$ as vertex colors to the fragment shader [S1, unofficial].
+ 7.  **Fragment Shader Execution:**
+-    *   Receive trilinearly interpolated $(s_f, s_b, l)$ values for the fragment.
+-    *   Compute the average scalar value $s_{avg} = (s_f + s_b) / 2$.
++    *   Receive trilinearly interpolated $(s_f, s_b, l)$ values for the fragment [S1, unofficial].
++    *   Compute the average scalar $s_{avg} = (s_f + s_b) / 2$ [S1, unofficial].
+     *   Lookup the extinction coefficient $\tau$ and color $C_{new}$ from the 1D transfer function texture using $s_{avg}$ [S1, unofficial].
+     *   Compute opacity $\alpha$ using the formula:
+         $$ \alpha = 1 - e^{-\tau \cdot l} $$
+-    *   Compose the fragment with the frame buffer color $C_{fb}$:
++        where $\tau$ is the extinction coefficient and $l$ is the interpolated thickness [S1, unofficial].
++    *   Compose the fragment color with the frame buffer color $C_{fb}$:
+         $$ C_{fb} = \alpha \cdot C_{new} + (1 - \alpha) C_{fb} $$
+-    *   This composition occurs in back-to-front order [S1, unofficial].
++        Fragments are composed in back-to-front order [S1, unofficial].
+ 
+-**Pseudocode:**
++### Pseudocode
+ 
+ ```python
+-# Global Uniforms (Basis Hexahedron Data)
+-# basis_params[tet_id] contains:
+-#   class, projected_vertices[4], thick_vertex_coords, 
+-#   intersection_params, rendering_order, thickness
++# Global Uniforms (Basis Hexahedron Parameters)
++# For each of the 5 tetrahedra (tet_idx 0..4):
++#   basis_proj_class[tet_idx]
++#   basis_proj_verts[tet_idx][4]  # Screen coords of 4 vertices
++#   basis_thick_vert[tet_idx]     # Screen coords of thick vertex
++#   basis_intersect_params[tet_idx] # Params for sf, sb
++#   basis_thickness[tet_idx]      # l at thick vertex
++#   basis_render_order[tet_idx]   # Drawing order index
+ 
+-def render_volume(volume_data, grid_dims, transfer_function_texture):
+-    # Step 1-3: CPU Preprocessing
+-    # Subdivide hexahedra into volunits (5 tetrahedra each)
+-    # Compute basis hexahedron projection parameters
+-    # Determine constant-time traversal order
++# Vertex Shader Input
++#   lattice_indices: (i, j, k)
++#   normal: (tetid, vertid, 0, 0)  # tetid in x, vertid in y
++
++# Vertex Shader Output
++#   color: (sf, sb, l, 1.0)
++
++def vertex_shader(lattice_indices, normal):
++    tetid = normal.x
++    vertid = normal.y
+     
+-    # Step 4: CPU Data Allocation
+-    vertex_array = allocate_vertex_array(volume_data, grid_dims)
++    # Compute screen coordinates based on lattice indices and basis parameters
++    # This displaces the basis hexahedron to the current volunit position
++    screen_coords = compute_displaced_coords(lattice_indices, tetid, vertid)
+     
+-    # Step 5-7: GPU Rendering
+-    for volunit in volume_array_traversed_in_order:
+-        for tet_id in range(5):
+-            # Get basis parameters for this tetrahedron
+-            params = basis_params[tet_id]
+-            
+-            # Determine triangle fan structure based on projection class
+-            triangles = get_triangles_for_class(params.class)
+-            
+-            # Render triangle fan
+-            # First vertex is the thick vertex
+-            # Subsequent vertices are the projected basis vertices
+-            
+-            for triangle in triangles:
+-                # Vertex Shader Logic (per vertex in triangle)
+-                # Vertex coordinates are displaced from basis using lattice indices
+-                # Normal.x = tet_id
+-                # Normal.y = vert_id
+-                
+-                # Compute scalar/thickness per vertex
+-                if vertex is thick_vertex:
+-                    sf, sb = compute_scalars_from_intersection(params.intersection_params)
+-                    l = params.thickness
+-                else:
+-                    sf = volume_data[vertex.lattice_index]
+-                    sb = sf
+-                    l = 0.0
+-                
+-                # Fragment Shader Logic
+-                # Interpolate sf, sb, l across the triangle
+-                sf_frag, sb_frag, l_frag = interpolate(sf, sb, l)
+-                
+-                # Lookup transfer function
+-                s_avg = (sf_frag + sb_frag) / 2.0
+-                tau, c_new = transfer_function_texture.sample(s_avg)
+-                
+-                # Compute opacity
+-                alpha = 1.0 - exp(-tau * l_frag)
+-                
+-                # Composite
+-                c_fb = frame_buffer.read()
+-                c_fb = alpha * c_new + (1.0 - alpha) * c_fb
+-                frame_buffer.write(c_fb)
++    # Determine scalar values and thickness
++    if vertid == thick_vertex_index_for_class(basis_proj_class[tetid]):
++        # Thick vertex: compute sf, sb using intersection params
++        sf, sb = compute_front_back_scalars(
++            lattice_indices, 
++            basis_intersect_params[tetid]
++        )
++        l = basis_thickness[tetid]
++    else:
++        # Non-thick vertex: scalar is original value, thickness is 0
++        sf = get_scalar_at(lattice_indices)
++        sb = sf
++        l = 0.0
++        
++    return screen_coords, (sf, sb, l, 1.0)
++
++def fragment_shader(interpolated_color):
++    sf, sb, l, _ = interpolated_color
++    
++    # Compute average scalar for transfer function lookup
++    s_avg = (sf + sb) / 2.0
++    
++    # Lookup extinction coefficient and color from 1D texture (256 positions)
++    tau, C_new = lookup_transfer_function(s_avg)
++    
++    # Compute opacity
++    alpha = 1.0 - exp(-tau * l)
++    
++    # Compose with frame buffer
++    C_fb = get_frame_buffer_color()
++    C_final = alpha * C_new + (1.0 - alpha) * C_fb
++    
++    return C_final
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Redundant Computation:** Computing projection for every voxel individually is inefficient. This method solves this by computing parameters only once for the basis hexahedron [S1, unofficial].
+-*   **Precision:** The method relies on orthographic projection to ensure all volunits project identically. Perspective projection would break the basis reuse assumption [S1, unofficial].
++### Parameters
++*   **Transfer Function Table Size:** 1D texture with 256 positions [S1, unofficial].
++*   **Projection Type:** Orthographic projection. This ensures all volunits are projected to the screen in exactly the same way, enabling the reuse of basis parameters [S1, unofficial].
++
++### Edge Cases and Pitfalls
++*   **Redundant Computation:** Computing projection for every voxel individually is inefficient. This is solved by computing projection parameters only once for a basis hexahedron and reusing them [S1, unofficial].
++*   **Memory Consumption:** Compared to Hardware-Based Ray Casting (HARC), this method consumes less memory [S1, unofficial].
++*   **Sorting:** General PT algorithms require visibility sorting. This method avoids sorting because voxels of a regular grid are sorted straightforwardly in constant time [S1, unofficial].
+ 
+ ## Operating characteristics
+ *   **Performance:** Achieves rendering speeds of over 5.0 M Tet/s on current graphics hardware [S1, unofficial].
+-*   **Time Distribution:** More than 60% of the processing time is dedicated solely to the rendering pipeline, as projection and sorting costs are virtually eliminated [S1, unofficial].
+-*   **Memory:** Consumes less memory than HARC (Hardware-Based Ray Casting) [S1, unofficial].
+-*   **Strengths:** High performance for large structured datasets; avoids expensive sorting; efficient GPU utilization.
+-*   **Limitations:** Restricted to structured (regular) grids; not suitable for unstructured grids without significant modification [S1, unofficial].
++*   **Processing Distribution:** More than 60% of the processing time is dedicated solely to the rendering pipeline, as projection and sorting costs are virtually eliminated [S1, unofficial].
++*   **Memory:** Consumes less memory than HARC [S1, unofficial].
++*   **Strengths:** High performance for large structured grids; interactive visualization capability; efficient use of GPU hardware by shifting computation to shaders [S1, unofficial].
++*   **Limitations:** Restricted to structured (regular) grids; relies on orthographic projection for the optimization [S1, unofficial].
+ 
+ ## Background
+-This method is an implementation of the Projective Tetrahedra (PT) algorithm proposed by Shirley and Tuchman (1990) [S1, unofficial]. It was specifically adapted for GPU implementation to address the challenges of interactive visualization of large 3D data sets in medical and scientific visualization, where data sets are typically regular grids ranging between $256^3$ and $512^3$ voxels [S1, unofficial]. The approach builds on the observation that for regular grids, visibility sorting is straightforward, allowing the elimination of the most computationally expensive part of general PT algorithms [S1, unofficial].
++The method is an implementation of the Projected Tetrahedra (PT) algorithm proposed by Shirley and Tuchman (1990) [S1, unofficial]. It was developed to address the challenge of interactive visualization of large 3D data sets, particularly in medical imaging where data sets are typically regular grids ranging between $256^3$ and $512^3$ voxels [S1, unofficial]. Previous GPU implementations like GATOR were fast but redundant, requiring all other tetrahedron vertices to be available for every vertex computation [S1, unofficial]. This approach improves upon general PT by leveraging data regularity to eliminate sorting and redundant projection calculations [S1, unofficial].
+ 
+ ## Sources

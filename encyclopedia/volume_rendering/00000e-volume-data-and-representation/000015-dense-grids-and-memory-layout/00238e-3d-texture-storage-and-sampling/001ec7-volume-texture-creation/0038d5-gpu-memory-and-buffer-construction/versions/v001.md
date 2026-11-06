@@ -1,0 +1,35 @@
+# GPU Memory and Buffer Construction
+
+Also called: GPU Data Layout, ClearView Unified Buffer Construction, Device Volume Snapshot
+
+## Overview
+GPU Memory and Buffer Construction defines the mechanisms for organizing volumetric data, topology, and rendering state into GPU-accessible memory structures such as textures, framebuffers, and unified buffers. It solves the problem of transferring heterogeneous host-side data (meshes, scalar fields, transfer functions) into formats optimized for GPU raycasting or gather/resolve passes. It sets itself apart from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the specific memory layouts, buffer construction algorithms, and resource management (framebuffers, texture objects) required for execution, rather than the mathematical interpolation or texture generation itself.
+
+## Shared principles
+The family shares the principle of mapping logical volumetric or topological entities to linear GPU memory arrays (textures or buffers) with specific formats and dimensions. Key commonalities include:
+- **Resource Identification**: Use of integer IDs (e.g., OpenGL texture/framebuffer IDs or CUDA texture objects) to reference GPU resources [S1, unofficial].
+- **Validation**: Input data (dimensions, components, types) is validated against constraints before buffer allocation to ensure compatibility with rendering modes (e.g., scalar vs. RGBA, blend mode support) [S1, unofficial].
+- **Normalization**: Scalar values are often normalized to a specific range (e.g., $[0, 1]$) using global min/max values to prevent division by zero and ensure consistent rendering behavior [S1, unofficial].
+- **Layout Mapping**: Logical indices (cells, edges, faces, voxels) are mapped to linear texture coordinates or buffer indices using arithmetic (modulo, division) based on texture dimensions [S1, unofficial].
+
+## Subtopics
+
+### [GPU Data Layout](2469-gpu-data-layout.md)
+Defines the host-side memory structures and OpenGL resource IDs required to manage volumetric rendering state on the GPU. It organizes heterogeneous resources—3D scalar textures, 1D transfer function tables, and offscreen framebuffers—into a unified configuration object for raycasting mappers. It is chosen when using a generic raycasting mapper that requires explicit management of texture objects, framebuffers, and bounding boxes.
+
+### [ClearView Unified Buffer Construction](2475-clearview-unified-buffer-construction.md)
+A preprocessing technique that converts a hexahedral mesh (positions, connectivity, scalars) into four GPU-friendly texture buffers (vertices, edges, faces, cellScalar) for the ClearView volume rendering pipeline. It sets itself apart by explicitly organizing topology into a "unified" set of textures optimized for the specific gather/resolve passes of the ClearView renderer, rather than generic storage. It is chosen when rendering hexahedral meshes with the ClearView pipeline.
+
+### Device Volume Snapshot
+#### definition
+Creates a compact, immutable snapshot of volume metadata and texture handles for passing to CUDA kernels [S1, unofficial].
+#### step
+Initialize DeviceVolume struct with values from Volume::Description and texture handles [S1, unofficial].
+#### layout
+DeviceVolume struct contains: field_tex (cudaTextureObject_t), grad_tex (cudaTextureObject_t, can be 0), dim (int3), voxel_size (float3), origin (float3), value_range (float2), density_scale (float) [S1, unofficial].
+
+## Background
+The concepts originate from CUDA-accelerated volume rendering engines, specifically the cuVRender project, which implements scene management, volume description, and device-side data structures for efficient raycasting [S1, unofficial]. The GPU Data Layout pattern is common in VTK-based volume rendering mappers, while ClearView Unified Buffer Construction is specific to the ClearView renderer's hexahedral mesh processing pipeline [S1, unofficial].
+
+## Sources
+[S1] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)

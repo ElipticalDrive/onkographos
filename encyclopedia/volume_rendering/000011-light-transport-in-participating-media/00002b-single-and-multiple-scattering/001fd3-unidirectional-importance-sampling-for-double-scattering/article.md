@@ -1,0 +1,247 @@
+# Unidirectional Importance Sampling for Double-Scattering
+
+Also called: Analytic unidirectional PDF sampling, Joint importance sampling of low-order volumetric scattering (unidirectional)
+
+## Overview
+Unidirectional Importance Sampling for Double-Scattering is a fully analytic method to importance sample the geometry terms along 3-segment paths (double-scattering) in isotropic participating media [S1]. It generalizes equiangular sampling for 2-segment paths (single-scattering) [S1]. The method constructs a joint probability density function (PDF) for two intermediate vertices and a final distance, ensuring the path PDF includes the geometry term $G(abcd)$ [S1]. It is chosen when variance reduction for double-scattering events in isotropic media is required, specifically addressing the singularity in the geometry term when the scattering angle approaches zero [S1].
+
+## How it works
+**Inputs:**
+*   Start point $\mathbf{a}$ and end point $\mathbf{d}$ of the double-scattering path segment.
+*   Direction $\boldsymbol{\omega}_{dc}$ of the ray from $\mathbf{d}$ towards the camera (or previous vertex).
+*   Uniform random numbers $\xi, \xi_1, \xi_2 \in [0, 1)$.
+*   Maximum sampling distance $t_{dc}^{\max}$ along the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$ [S1].
+
+**Outputs:**
+*   First scattering vertex $\mathbf{b}$.
+*   Distance $t_{cb}$ along direction $\boldsymbol{\omega}_{cb}$.
+*   Second scattering vertex $\mathbf{c}$ (implicitly defined by $\mathbf{b}$ and $t_{cb}$).
+*   Distance $t_{dc}$ along ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$.
+
+**Data Structures:**
+*   Points $\mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}$ as 3D vectors.
+*   Directions $\boldsymbol{\omega}_{cb}, \boldsymbol{\omega}_{dc}$ as unit vectors.
+*   Distances $t_{cb}, t_{dc}$ as scalars.
+*   Geometric helpers: $h_{ca}^{\perp}$ (distance from $\mathbf{a}$ to projection on ray $\mathbf{c} \to \mathbf{b}$? No, ray $\mathbf{c} \to \mathbf{a}$? The source defines $h_{ca}^{\perp}$ in the context of sampling $t_{cb}$ given $\theta_{cb}$. Specifically, $h_{ca}^{\perp}$ is the distance between $\mathbf{a}$ and its projection onto the ray starting at $\mathbf{c}$ with direction $\boldsymbol{\omega}_{cb}$? No, the source says "Given uniform random number $\xi$, compute $t_{cb} = t_{ca}^{\perp} + h_{ca}^{\perp} \tan(...)$". This implies the ray is from $\mathbf{c}$ in direction $\boldsymbol{\omega}_{cb}$. $t_{ca}^{\perp}$ is the distance from $\mathbf{c}$ to the projection of $\mathbf{a}$ onto the line defined by $\mathbf{c}$ and $\boldsymbol{\omega}_{cb}$? Actually, standard equiangular sampling usually projects the *other* endpoint. Let's look at Eq 35: $t_{cb} = t_{ca^\perp} + h_{ca^\perp} \tan(...)$. In equiangular sampling for single scattering (points $\mathbf{a}, \mathbf{c}$), $t$ is sampled along a ray from $\mathbf{c}$? Or $\mathbf{a}$? The source says "generalizes ... equiangular sampling for 2-segment paths". In single scattering, we sample a point $\mathbf{b}$ on the segment $\mathbf{a}-\mathbf{c}$. Here we sample $\mathbf{b}$ relative to $\mathbf{c}$ and $\mathbf{a}$. The direction $\boldsymbol{\omega}_{cb}$ is sampled. Then $t_{cb}$ is the distance from $\mathbf{c}$ to $\mathbf{b}$. So the ray is $\mathbf{c} + t \boldsymbol{\omega}_{cb}$. $h_{ca}^{\perp}$ is the perpendicular distance from $\mathbf{a}$ to the line passing through $\mathbf{c}$ with direction $\boldsymbol{\omega}_{cb}$. $t_{ca}^{\perp}$ is the signed distance from $\mathbf{c}$ to the projection of $\mathbf{a}$ onto this line [S1].
+*   Geometric helpers for $t_{dc}$: $h_{da}^{\perp}$ (distance between $\mathbf{a}$ and its projection onto the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$), $t_{da}^{\perp}$ (distance between $\mathbf{d}$ and this projection) [S1].
+
+**Steps:**
+
+1.  **Sample Direction $\boldsymbol{\omega}_{cb}$:**
+    Generate $\xi_1, \xi_2 \in [0, 1)$.
+    Define a local coordinate system where the vector $\mathbf{c} \to \mathbf{a}$ is the z-axis. Note: $\mathbf{c}$ is not yet known. This creates a circular dependency. However, the source states: "where $\theta_{cb}$ and $\phi_{cb}$ represent standard spherical coordinates with respect to a local frame where the direction from $\mathbf{c}$ to $\mathbf{a}$ is the z-axis".
+    *Correction*: The source describes the PDF $p(\omega_{cb} | t_{dc}, \Xi)$. The sampling of $\omega_{cb}$ must happen before $\mathbf{c}$ is fixed? No, $\mathbf{c}$ is the vertex on the ray from $\mathbf{d}$. The method samples $\mathbf{b}$ and $\mathbf{c}$.
+    Let's re-read carefully. "Sampling direction $\omega_{cb}$... relative to a local frame where $c \to a$ is the z-axis". This implies $\mathbf{c}$ is known? But $\mathbf{c}$ is determined by $t_{dc}$.
+    Actually, the joint PDF is $p(\mathbf{b}, t_{dc} | \Xi)$. The factorization is $p(t_{dc} | \Xi) p(\mathbf{b} | t_{dc}, \Xi)$.
+    The source says: "The final marginalization step gives us the PDF for sampling the distance $t_{dc}$...".
+    Then it says: "Joint unidirectional PDF... multiplying the conditional PDFs U1, U2 and U3".
+    U1: Sampling $t_{cb}$.
+    U2: Sampling $\omega_{cb}$.
+    U3: Sampling $t_{dc}$.
+    
+    The order of sampling in the implementation must respect dependencies.
+    The PDF for $\omega_{cb}$ depends on $\theta_{cb}$, which is the angle between $\boldsymbol{\omega}_{cb}$ and $\mathbf{c} \to \mathbf{a}$. But $\mathbf{c}$ is on the ray from $\mathbf{d}$.
+    Wait, the source says: "Note that the above PDF diverges when $\theta_{cb}$ approaches zero... By sampling $\omega_{cb}$ from this PDF... we can effectively cancel out this singularity".
+    Equation 34 gives $\theta_{cb} = \pi(1 - \sqrt{\xi_1})$.
+    This $\theta_{cb}$ is the angle between $\boldsymbol{\omega}_{cb}$ and the vector $\mathbf{c} \to \mathbf{a}$?
+    If $\mathbf{c}$ is unknown, we cannot define the z-axis.
+    However, look at the geometry. $\mathbf{a}$ and $\mathbf{d}$ are fixed. $\mathbf{c}$ lies on the ray from $\mathbf{d}$ with direction $\boldsymbol{\omega}_{dc}$.
+    The method samples $\mathbf{b}$ and $\mathbf{c}$.
+    The source text for U1 says: "Given a uniform random number $\xi$, a distance $t_{cb}$ along $\boldsymbol{\omega}_{cb}$ is sampled... yielding vertex $\mathbf{b}$".
+    This implies $\boldsymbol{\omega}_{cb}$ is sampled first.
+    But the PDF for $\boldsymbol{\omega}_{cb}$ (Eq 27) depends on $\theta_{cb}$, the angle between $\boldsymbol{\omega}_{cb}$ and $\mathbf{c} \to \mathbf{a}$.
+    This seems circular if $\mathbf{c}$ is not known.
+    
+    Let's look at the "Comparison" note: "For double-scattering, the propagation distance is chosen proportionally to the inverse distance to $\mathbf{a}$."
+    
+    Re-evaluating the dependency:
+    The source states: "The PDF for sampling the distance $t_{dc}$... is given by... $h_{da}$ is the distance between $\mathbf{a}$ and its projection onto the ray". This part depends only on $\mathbf{a}, \mathbf{d}, \boldsymbol{\omega}_{dc}$. So $t_{dc}$ can be sampled independently of $\mathbf{b}$?
+    Eq 30: $p(t_{dc} | \Xi) = \frac{1}{C} \frac{1}{\sqrt{h_{da}^2 + (t_{da} - t_{dc})^2}}$.
+    This PDF depends only on $\mathbf{a}, \mathbf{d}, \boldsymbol{\omega}_{dc}$. So we can sample $t_{dc}$ first.
+    Once $t_{dc}$ is sampled, $\mathbf{c} = \mathbf{d} + t_{dc} \boldsymbol{\omega}_{dc}$ is known.
+    Then we can define the local frame for $\boldsymbol{\omega}_{cb}$ using $\mathbf{c} \to \mathbf{a}$.
+    Then we sample $\boldsymbol{\omega}_{cb}$ using Eq 34.
+    Then we sample $t_{cb}$ using Eq 35.
+    
+    So the order is:
+    1. Sample $t_{dc}$ from $p(t_{dc} | \Xi)$.
+    2. Compute $\mathbf{c} = \mathbf{d} + t_{dc} \boldsymbol{\omega}_{dc}$.
+    3. Sample $\boldsymbol{\omega}_{cb}$ relative to $\mathbf{c} \to \mathbf{a}$.
+    4. Sample $t_{cb}$ along $\boldsymbol{\omega}_{cb}$.
+    5. Compute $\mathbf{b} = \mathbf{c} + t_{cb} \boldsymbol{\omega}_{cb}$.
+
+    **Step 1: Sample $t_{dc}$**
+    Calculate geometric terms relative to ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$:
+    *   Project $\mathbf{a}$ onto the line passing through $\mathbf{d}$ with direction $\boldsymbol{\omega}_{dc}$.
+    *   $t_{da}^{\perp} = (\mathbf{a} - \mathbf{d}) \cdot \boldsymbol{\omega}_{dc}$ (Signed distance from $\mathbf{d}$ to projection).
+    *   $h_{da}^{\perp} = \| (\mathbf{a} - \mathbf{d}) - t_{da}^{\perp} \boldsymbol{\omega}_{dc} \|$ (Perpendicular distance).
+    *   Calculate normalization constant $C_{t_{dc}}^{\max}$:
+        $$ C_{t_{dc}}^{\max} = \frac{1}{\sinh\left(\frac{t_{dc}^{\max} - t_{da}^{\perp}}{h_{da}^{\perp}}\right) - \sinh\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right)} $$
+        *Note: The source defines $C_{\Xi} = \frac{1}{C_{t_{dc}}^{\max}}$. So $C_{t_{dc}}^{\max}$ is the denominator of the sinh difference? No. Eq 29: $C_{\Xi} = \frac{1}{a \sinh(...) - a \sinh(...)}$. The 'a' is likely a typo for '1' or a variable? The source text says "C_{\Xi} = \frac{1}{C_{max}^{max}} = \frac{1}{a \sinh...}". In LaTeX, `a` might be a typo for `1` or it refers to a parameter. Looking at Eq 29 in the source snippet: `C_{\Xi} = \frac{1}{a \sinh(...) - a \sinh(...)}`. The previous line says `C_{\Xi} = \frac{1}{C_{max}^{max}}`. It is highly likely `a` is a typo for `1` or it is a specific constant from the paper not defined in the snippet. However, Eq 30 uses $C_{t_{dc}}^{\max}$ in the denominator. $p(t_{dc}) = \frac{1}{C_{t_{dc}}^{\max}} \frac{1}{\sqrt{...}}$. If $C_{\Xi} = 1/C_{t_{dc}}^{\max}$, then $C_{t_{dc}}^{\max}$ is the integral of the unnormalized PDF. The integral of $1/\sqrt{h^2 + (t-t_0)^2}$ is $\text{arsinh}((t-t_0)/h)$. The source uses $\sinh$ in the denominator? No, Eq 29 has `a sinh`. This is likely `arsinh` (inverse hyperbolic sine) or the source text has a typo. Given the integral of $1/\sqrt{x^2+1}$ is $\text{arsinh}(x)$, the normalization constant involves `arsinh`. The source text says `a sinh`. I will assume it means `arsinh` or the inverse function, but I must stick to the source. The source explicitly writes `a sinh`. I will write `arsinh` if it makes sense, but the source says `a sinh`. Wait, `a` might be a variable? No, `a` is a point. It's likely a typo for `1` and `sinh` should be `arsinh`? Or `a` is a parameter? The source says "incorporates the product of three isotropic phase functions".
+        Let's look at the integral: $\int \frac{1}{\sqrt{h^2 + (t-t_0)^2}} dt = \ln(t-t_0 + \sqrt{h^2+(t-t_0)^2}) = \text{arsinh}(\frac{t-t_0}{h})$.
+        The source Eq 29: `a sinh(...)`. This is almost certainly a typo for `arsinh(...)`. I will use `arsinh` in the pseudocode for correctness, noting the source text likely meant the inverse hyperbolic sine. If I must follow the source literally, I would write `a sinh`, but that is mathematically incorrect for normalization. The prompt says "Content from your own knowledge is allowed only to fill a small gap... marked [G]". Correcting a likely typo in a formula to make it implementable is a small gap. I will use `arsinh`.
+        $$ C_{t_{dc}}^{\max} = \text{arsinh}\left(\frac{t_{dc}^{\max} - t_{da}^{\perp}}{h_{da}^{\perp}}\right) - \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right) $$
+    *   Sample $t_{dc}$ using the inverse CDF of the distribution $p(t) \propto \frac{1}{\sqrt{h_{da}^2 + (t_{da}^{\perp} - t)^2}}$.
+        The CDF is proportional to $\text{arsinh}(\frac{t - t_{da}^{\perp}}{h_{da}^{\perp}})$.
+        Let $u = \xi$.
+        $$ \text{arsinh}\left(\frac{t_{dc} - t_{da}^{\perp}}{h_{da}^{\perp}}\right) = \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right) + u \cdot C_{t_{dc}}^{\max} $$
+        $$ \frac{t_{dc} - t_{da}^{\perp}}{h_{da}^{\perp}} = \sinh\left( \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right) + u \cdot C_{t_{dc}}^{\max} \right) $$
+        $$ t_{dc} = t_{da}^{\perp} + h_{da}^{\perp} \sinh\left( \text{arsinh}\left(\frac{-t_{da}^{\perp}}{h_{da}^{\perp}}\right) + \xi \cdot C_{t_{dc}}^{\max} \right) $$
+        *Note*: The source does not explicitly give the inverse CDF for $t_{dc}$, only the PDF and normalization. I must derive the inverse CDF to implement it. This is a "small gap" [G].
+
+    **Step 2: Compute $\mathbf{c}$**
+    $$ \mathbf{c} = \mathbf{d} + t_{dc} \boldsymbol{\omega}_{dc} $$
+
+    **Step 3: Sample Direction $\boldsymbol{\omega}_{cb}$**
+    *   Define local frame at $\mathbf{c}$ with z-axis along $\mathbf{a} - \mathbf{c}$.
+    *   Generate $\xi_1, \xi_2 \in [0, 1)$.
+    *   Compute spherical angles:
+        $$ \theta_{cb} = \pi(1 - \sqrt{\xi_1}) $$
+        $$ \phi_{cb} = 2\pi \xi_2 $$
+    *   Convert $(\theta_{cb}, \phi_{cb})$ to vector $\boldsymbol{\omega}_{cb}$ in the local frame, then rotate to world coordinates.
+        *   Local vector: $(\sin\theta_{cb}\cos\phi_{cb}, \sin\theta_{cb}\sin\phi_{cb}, \cos\theta_{cb})$.
+        *   Construct orthonormal basis $(\mathbf{u}, \mathbf{v}, \mathbf{w})$ where $\mathbf{w} = \frac{\mathbf{a} - \mathbf{c}}{\|\mathbf{a} - \mathbf{c}\|}$.
+        *   $\boldsymbol{\omega}_{cb} = \sin\theta_{cb}\cos\phi_{cb} \mathbf{u} + \sin\theta_{cb}\sin\phi_{cb} \mathbf{v} + \cos\theta_{cb} \mathbf{w}$.
+
+    **Step 4: Sample Distance $t_{cb}$**
+    *   Calculate geometric terms relative to ray $(\mathbf{c}, \boldsymbol{\omega}_{cb})$:
+        *   Project $\mathbf{a}$ onto the line passing through $\mathbf{c}$ with direction $\boldsymbol{\omega}_{cb}$.
+        *   $t_{ca}^{\perp} = (\mathbf{a} - \mathbf{c}) \cdot \boldsymbol{\omega}_{cb}$.
+        *   $h_{ca}^{\perp} = \| (\mathbf{a} - \mathbf{c}) - t_{ca}^{\perp} \boldsymbol{\omega}_{cb} \|$.
+    *   Use the equiangular inverse CDF (Eq 35):
+        $$ t_{cb} = t_{ca}^{\perp} + h_{ca}^{\perp} \tan\left( \xi(\pi - \theta_{cb}) + \theta_{cb} - \frac{\pi}{2} \right) $$
+        *Note*: The source uses $\xi$ here. I will use a new random number $\xi_3$ to avoid correlation issues, or reuse $\xi$ if the source implies a specific sequence. The source says "Given a uniform random number $\xi$". I will use $\xi_3$.
+
+    **Step 5: Compute $\mathbf{b}$**
+    $$ \mathbf{b} = \mathbf{c} + t_{cb} \boldsymbol{\omega}_{cb} $$
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def sample_double_scattering_unidirectional(a, d, omega_dc, t_dc_max, rng):
+    """
+    Samples a double-scattering path segment a -> b -> c -> d.
+    a: Start point (3D vector)
+    d: End point (3D vector)
+    omega_dc: Direction from d to c (unit vector)
+    t_dc_max: Maximum sampling distance along omega_dc
+    rng: Random number generator
+    Returns: b, c, t_cb, t_dc
+    """
+    
+    # Step 1: Sample t_dc
+    # Geometric helpers for ray (d, omega_dc)
+    vec_da = a - d
+    t_da_perp = np.dot(vec_da, omega_dc)
+    proj_a_on_ray = d + t_da_perp * omega_dc
+    h_da_perp = np.linalg.norm(a - proj_a_on_ray)
+    
+    # Avoid division by zero if a is on the ray
+    if h_da_perp < 1e-6:
+        h_da_perp = 1e-6
+        
+    # Normalization constant C_t_dc_max (integral of 1/sqrt(h^2 + (t-t0)^2))
+    # Integral is arsinh((t - t0) / h)
+    arg1 = (t_dc_max - t_da_perp) / h_da_perp
+    arg2 = (-t_da_perp) / h_da_perp
+    
+    # Using arsinh
+    C_t_dc_max = math.asinh(arg1) - math.asinh(arg2)
+    
+    # Inverse CDF for t_dc
+    u1 = rng.uniform()
+    # arsinh((t_dc - t_da_perp)/h) = arsinh(-t_da_perp/h) + u1 * C
+    val = math.asinh(arg2) + u1 * C_t_dc_max
+    t_dc = t_da_perp + h_da_perp * math.sinh(val)
+    
+    # Step 2: Compute c
+    c = d + t_dc * omega_dc
+    
+    # Step 3: Sample omega_cb
+    # Local frame at c, z-axis along a - c
+    vec_ca = a - c
+    len_ca = np.linalg.norm(vec_ca)
+    if len_ca < 1e-6:
+        # Degenerate case: a == c. Return arbitrary direction or handle error.
+        # For implementation, return a default direction.
+        return None, None, None, None
+        
+    w = vec_ca / len_ca
+    
+    # Construct orthonormal basis u, v, w
+    # Pick an arbitrary vector not parallel to w
+    if abs(w[0]) < 0.9:
+        arbitrary = np.array([1.0, 0.0, 0.0])
+    else:
+        arbitrary = np.array([0.0, 1.0, 0.0])
+        
+    u = np.cross(w, arbitrary)
+    u = u / np.linalg.norm(u)
+    v = np.cross(w, u)
+    
+    # Spherical coordinates
+    u2, u3 = rng.uniform(), rng.uniform()
+    theta_cb = math.pi * (1 - math.sqrt(u2))
+    phi_cb = 2 * math.pi * u3
+    
+    # Local vector
+    local_omega = np.array([
+        math.sin(theta_cb) * math.cos(phi_cb),
+        math.sin(theta_cb) * math.sin(phi_cb),
+        math.cos(theta_cb)
+    ])
+    
+    # Rotate to world
+    omega_cb = local_omega[0] * u + local_omega[1] * v + local_omega[2] * w
+    
+    # Step 4: Sample t_cb
+    # Geometric helpers for ray (c, omega_cb)
+    vec_ca2 = a - c
+    t_ca_perp = np.dot(vec_ca2, omega_cb)
+    proj_a_on_ray_cb = c + t_ca_perp * omega_cb
+    h_ca_perp = np.linalg.norm(a - proj_a_on_ray_cb)
+    
+    if h_ca_perp < 1e-6:
+        h_ca_perp = 1e-6
+        
+    u4 = rng.uniform()
+    # Equiangular inverse CDF
+    # t_cb = t_ca_perp + h_ca_perp * tan( u4 * (pi - theta_cb) + theta_cb - pi/2 )
+    angle = u4 * (math.pi - theta_cb) + theta_cb - math.pi / 2
+    t_cb = t_ca_perp + h_ca_perp * math.tan(angle)
+    
+    # Step 5: Compute b
+    b = c + t_cb * omega_cb
+    
+    return b, c, t_cb, t_dc
+```
+
+**Edge Cases and Pitfalls:**
+*   **Singularity at $\theta_{cb} = 0$:** The PDF for $\omega_{cb}$ diverges as $\theta_{cb} \to 0$. Sampling from this PDF cancels the singularity in the path contribution function, reducing variance [S1].
+*   **Divergence at Infinity:** The integral for the normalization constant $C_{\Xi}$ diverges at infinity. A maximum sampling distance $t_{dc}^{\max}$ must be set to obtain an analytical expression [S1].
+*   **Degenerate Geometry:** If $\mathbf{a}$ lies on the ray $(\mathbf{d}, \boldsymbol{\omega}_{dc})$ or $(\mathbf{c}, \boldsymbol{\omega}_{cb})$, $h^{\perp}$ becomes zero. Guard against division by zero [G].
+*   **Isotropic Media Only:** The method assumes isotropic scattering. It does not directly apply to anisotropic media without extensions like tabulated importance sampling [S1, Child].
+
+## Subtopics
+
+### [Tabulated Importance Sampling for Anisotropic Scattering](4542-tabulated-importance-sampling-for-anisotropic-scattering.md)
+A method to efficiently tabulate target PDFs for both unidirectional and bidirectional factorizations to handle anisotropic scattering, avoiding the need for analytic formulations which are unavailable for some conditional PDFs.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample, involving basic trigonometric and vector operations.
+*   **Memory Complexity:** $O(1)$, storing only geometric intermediates.
+*   **Strengths:** Fully analytic; no rejection sampling; reduces variance by canceling geometry term singularities; generalizes equiangular sampling to double-scattering [S1].
+*   **Limitations:** Restricted to isotropic media; requires a maximum sampling distance $t_{dc}^{\max}$; complex geometric setup for local frames [S1].
+*   **When to use:** When rendering double-scattering effects in isotropic participating media and variance reduction is critical.
+*   **When not to use:** For anisotropic media (use Tabulated Importance Sampling) or single-scattering only (use Equiangular Sampling) [S1].
+
+## Background
+The method was introduced by [S1] as a generalization of Kulla and Fajardo's [2012] equiangular sampling for single-scattering. It builds on Kalos' [1963] OCF approach by sampling two distances and a direction to construct two intermediate vertices. The derivation involves marginalizing the joint PDF of the double-scattering path to obtain conditional PDFs for the direction and distances [S1].
+
+## Sources
+[S1] Joint importance sampling of low-order volumetric scattering, https://doi.org/10.1145/2508363.2508411, fetched 2026-10-28

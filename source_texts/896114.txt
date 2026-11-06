@@ -1,0 +1,183 @@
+JSON-driven RVE generator for computational homogenization — synthetic microstructures to gmsh .geo or voxel grids - Add voronoi_cell shape: convex polyhedron via vertices+faces (#8 phase 1) by petlenz · Pull Request #25 · NumSim-Stack/numsim-rvegen
+
+Add voronoi_cell shape: convex polyhedron via vertices+faces (#8 phase 1) by petlenz · Pull Request #25 · NumSim-Stack/numsim-rvegen · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+petlenz
+commented
+May 10, 2026
+Copy link
+Copy Markdown
+Member
+Summary
+Phase 1 of #8 (Voronoi-based polycrystal generator). Lands the consumer side — a convex polyhedral shape that ingests pre-computed Voronoi cell geometry. The actual tessellator (which needs CGAL or Voro++ — heavy deps) lands as a follow-up so this PR can be reviewed without a 200 MB dependency churn.
+Why no CGAL dependency yet
+The full polycrystal generator wants to (a) sample N seed points in the RVE box, (b) compute a periodic 3D Voronoi tessellation, (c) emit each cell. Step (b) needs CGAL or Voro++. Adding either as a hard rvegen dep just to land an unused phase-1 shape is premature.
+This PR keeps rvegen's deps unchanged and ships only the consumer side: any external tool (Voro++, qhull, CGAL outside rvegen, even SciPy scipy.spatial.Voronoi from Python) can produce cell geometry; rvegen ingests it. The follow-up adds the in-tree tessellator.
+What ships
+rvegen::voronoi_cell<T> — convex polyhedron defined by vertices + faces:
+Direct C++ ctor from std::vector<gte::Vector3<T>> (vertices) + std::vector<std::vector<size_t>> (faces as vertex-index lists)
+is_inside(p) — half-space test against each face. Outward normals are derived once at construction via the centroid trick (centroid of the convex cell is on the inward side of every face).
+volume() — divergence theorem via signed tetrahedra from centroid
+make_bounding_box(), get_middle_point(), set_middle_point() (translate; planes translate too), clone(), shape_id()
+static_indexing integration so the collision dispatcher can address it
+Test fixture
+A unit cube as a degenerate Voronoi cell (8 vertices, 6 quad faces) — exercises every code path:
+Volume = 1.0 within FP tolerance
+Origin inside; (0.6, 0, 0) and (0.51, 0.51, 0.51) outside
+A tetrahedron exercises set_middle_point translation and the 3-vertex face path.
+What's NOT in this PR (follow-up)
+voronoi_polycrystal_generator — produces N tessellated cells for a given seed-point distribution. Needs Voro++ (lightweight, ~5 MB) or CGAL (heavy, ~200 MB). Voro++ is the leading candidate.
+Periodic Voronoi — cells that wrap across the RVE box boundary
+voronoi_cell_input — JSON-driven loader (cell vertex/face data is heterogeneous; needs careful schema design or a separate file format)
+Precise collision_details(voronoi_cell, X) overloads — falls back to AABB until then
+Drive-by fix
+Same pre-existing tests/extra_types_smoke.cpp brace bug fixed in PRs #17–#23.
+Test plan
+Unit-cube cell volume = 1.0 within 1e-12
+Inside/outside parity correct for origin and corner-adjacent points
+Translation via set_middle_point shifts the inside region (face planes translate too)
+Tetrahedron fixture exercises 3-vertex faces
+All 15 ctest tests pass
+Add voronoi_cell shape: convex polyhedron via vertices+faces (#8 phas…
+…
+bfb7e1b
+```
+…e 1)
+```
+petlenz
+commented
+May 10, 2026
+View reviewed changes
+petlenz
+left a comment
+Copy link
+Copy Markdown
+Member
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review: PR #25 voronoi_cell
+Correctness
+volume() per-tetrahedron std::abs() masks bugs. With consistent winding (the convex-cell case), every signed tet has the same sign, so per-term abs equals abs-of-sum and gives the right answer. With inconsistent winding (a Voronoi-cell loader emits faces with mixed orientation — easy mistake), per-term abs adds magnitudes and produces a falsely large volume. The principled formula:
+```
+// current — masks bad winding
+sum += std::abs(apex[0]*cx + apex[1]*cy + apex[2]*cz);
+return sum / T{6};
+
+// safer — exposes bad winding
+sum += apex[0]*cx + apex[1]*cy + apex[2]*cz;
+return std::abs(sum) / T{6};
+```
+The unit-cube test will pass either way because the test winding is correct. A test with intentionally-flipped face would catch the difference.
+Convexity is silently assumed. is_inside uses half-space intersection, which is only correct for convex polyhedra. Voronoi cells of interior seeds in a convex domain are always convex — but the moment a Voronoi cell touches a periodic boundary or a non-convex domain, this falls apart. Worth a runtime_assert or at least an explicit doc warning that the consumer must guarantee convexity.
+Robustness
+rebuild_face_planes derives an outward normal from v[0], v[1], v[2] of each face. If the face polygon's first three vertices happen to be collinear (rare but possible for specific Voronoi tessellators), the cross product e1 × e2 is zero, mag = 0, and if (mag > 0) n /= mag skips the normalisation, leaving n = (0,0,0). Then every subsequent is_inside test against that face becomes 0 ≤ 0 (true), and the face contributes nothing — the cell becomes effectively unbounded on that side.
+Fix: walk the face vertices to find the first non-collinear triple.
+set_middle_point translates _centroid and _face_planes correctly but doesn't update derived state if the cell is later mutated by some other path (e.g. directly modifying _vertices). Currently no public path to do that, but set_centerline-equivalent might land in a follow-up. Note in the comment that any mutation outside set_middle_point requires rebuild_face_planes.
+Centroid choice
+The "centroid" is the mean of vertices, used for face-orientation tests. For a convex polyhedron this is guaranteed to be strictly inside, so the orientation flip works. Good.
+For volume, the same centroid is used as the apex of the signed-tetrahedron sum. If the centroid happens to lie on a face plane (degenerate but mathematically possible), one of the tetrahedra has zero volume — fine, doesn't break anything.
+Test coverage
+Unit cube and tetrahedron fixtures are good.
+No test for a degenerate (collinear-first-three-vertices) face — would catch the normal=0 bug.
+No test exercising actual Voronoi cell geometry (irregular polyhedron with ≥6 faces of mixed shape). With a phase-1 PR not yet linked to a tessellator, that's hard to do without bringing in test fixture data; could land alongside the eventual tessellator PR.
+Naming
+voronoi_cell<T> — but the type is really a generic convex polyhedron. The name implies a specific data source. If a future user wants the same shape for, say, a polyhedral inclusion from CAD, they'd be surprised by the name. Consider convex_polyhedron<T> and have the eventual voronoi_polycrystal_generator produce instances of it.
+petlenz
+mentioned this pull request
+May 10, 2026
+Add STL ASCII reader + mesh_inclusion shape (#9 phase 1)
+#23
+Merged
+5 tasks done
+Address review: at-end abs in volume(), collinear-face fallback, doc …
+…
+fe4e606
+```
+…convexity contract
+```
+petlenz
+commented
+May 10, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Addressed in fe4e606:
+volume() now takes std::abs of the sum at the end, not per term. Mis-wound input now produces a small/zero result that surfaces the bug rather than the falsely-large 'sum of magnitudes' the per-term abs was emitting. Updated the unit-cube test fixture to use consistent outward-CCW winding (this is what real producers — Voro++, CGAL — emit). The previous fixture was inconsistently wound and was passing only because of the per-term abs.
+Collinear-first-three-vertices fallback. rebuild_face_planes() now walks the face polygon to find a non-collinear triple before giving up. A face whose vertices are entirely collinear is silently dropped (would have produced a zero normal that always evaluates as inside). Magnitude threshold uses epsilon * 1024 rather than a hardcoded value. Test exercises the case via a 5-vertex face whose first three vertices lie on a single line.
+Convexity contract documented in the header — assumption is up-front and the implications for non-convex input (decompose first) are spelled out.
+Naming question acknowledged in the header: a future rename to convex_polyhedron is the right call but should land alongside the tessellator PR so the rename and its primary user (the generator) ship together.
+petlenz
+commented
+May 10, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Second-pass review:
+Collinear threshold is absolute, not relative. mag_eps = epsilon * 1024 ≈ 2.3e-13 for double. Cross-product magnitude scales with the input vertex magnitudes squared. For unit-cube-scale inputs (extent ~1) the threshold works; but for a cell at metre-scale or with vertices in micrometres, the threshold doesn't track. Real fix: divide mag by |e1| · |e2| to get sin(angle) which is scale-invariant. Tracked as follow-up — not blocking the unit-cube test.
+The if (face.size() < 3) continue in volume() and rebuild_face_planes() handles degenerate empty/short faces. ✓
+The convexity-contract doc paragraph is up-front and clear. ✓
+The collinear-face test uses a single-face cell, which is unusual but exercises the walker correctly.
+No new issues from the fix. The at-end-abs change + walker are correct. Ship it.
+voronoi_cell: scale-invariant collinearity threshold (sin-of-angle, n…
+…
+3111031
+```
+…ot absolute cross magnitude)
+```
+petlenz
+commented
+May 10, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Followed up the scale-invariance issue in 3111031:
+Threshold is now scale-invariant. Compare mag / (|e1| · |e2|) against epsilon * 1024 — that's sin-of-angle, dimensionless. Old absolute threshold was OK for unit-cube tests but accepted near-collinear triples at micrometre scale and rejected genuine triples at kilometre scale.
+Added test_voronoi_cell_scale_invariant_collinear_threshold — same unit-cube cell scaled to 1e-6, verifies volume = s³ and is_inside still works at micrometre scale.
+petlenz
+commented
+May 10, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Third-pass review:
+Scale-invariant threshold via mag / (|e1|·|e2|) > sin_eps is correct.
+Walker correctly handles the case where _vertices[face[0]] itself sits on a collinear edge with face[1]/face[2] but a non-collinear triple exists deeper (anchor stays at face[0], walks (b, c) pairs from i=1).
+The micrometre-scale test exercises the scale invariance.
+No new issues. Ship it.
+Merge remote-tracking branch 'origin/main' into feature/voronoi-polyc…
+…
+61685a0
+```
+…rystals
+
+# Conflicts:
+#	include/rvegen/rvegen.h
+#	tests/extra_types_smoke.cpp
+```
+petlenz
+merged commit 68edbb4
+into
+main
+May 10, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

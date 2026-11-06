@@ -1,0 +1,198 @@
+# Ray Marching Dither
+
+Also called: Ray Marching Jittering, Blue Noise Dithering
+
+## Overview
+Ray Marching Dither is a technique to reduce banding and layering artifacts caused by low step counts or fixed step sizes in distance-field ray marching [S1, unofficial][S2, unofficial][S3, unofficial]. It perturbs the ray's sampling position or step size using random values to break up coherent aliasing patterns [S1, unofficial][S3, unofficial]. Unlike standard sphere tracing which uses deterministic steps, dithering introduces stochastic variation to smooth intensity transitions in volumes or surfaces [S3, unofficial].
+
+## How it works
+The method modifies the standard ray marching loop by introducing a random offset to either the UV coordinates (affecting ray origin/direction) or the initial depth/step size [S1, unofficial][S2, unofficial][S3, unofficial].
+
+### Inputs and Outputs
+- **Inputs**: Ray origin $ro$, ray direction $v$, fragment coordinates (UV), frame count (for temporal stability), dithering strength parameters.
+- **Outputs**: Modified ray parameters or step sizes for the marching loop.
+
+### Data Structures
+- **Blue Noise Texture**: A 2D sampler texture containing a blue noise pattern [S2, unofficial].
+- **Random Values**: Generated via a hash function or texture lookup [S1, unofficial][S2, unofficial].
+
+### Steps
+
+#### 1. UV-Based Dithering (Perturbing Ray Origin/Direction)
+This variant perturbs the UV coordinates before reconstructing the ray, effectively jittering the ray origin or direction [S1, unofficial].
+
+1. Calculate the hit distance $t$ from the ray march [S1, unofficial].
+2. Compute the dither amount:
+   $$ \text{dither} = t^2 \cdot c_{\text{fDither}} $$
+   where $c_{\text{fDither}}$ is the dithering strength factor [S1, unofficial].
+3. Generate random values using a hash function `rand` based on UV coordinates [S1, unofficial]:
+   $$ r_x = \text{rand}(vUv + \vec{2}(0.12, 0.32)) $$
+   $$ r_y = \text{rand}(vUv + \vec{2}(0.42, 0.52)) $$
+4. Perturb the UV coordinates:
+   $$ uv.x \leftarrow uv.x + r_x \cdot \text{dither} - \frac{\text{dither}}{2.0} $$
+   $$ uv.y \leftarrow uv.y + r_y \cdot \text{dither} - \frac{\text{dither}}{2.0} $$
+5. Reconstruct the ray origin $ro$ and direction $v$ from the perturbed $uv$ [S1, unofficial].
+
+#### 2. Depth/Step Dithering (Blue Noise)
+This variant adds a random offset to the initial depth or step size using a blue noise texture [S2, unofficial].
+
+1. Sample the blue noise texture at normalized fragment coordinates:
+   $$ \text{blueNoise} = \text{texture2D}(u_{\text{BlueNoise}}, \frac{gl\_FragCoord.xy}{1024.0}).r $$
+   [S2, unofficial].
+2. Compute the fractional offset:
+   $$ \text{offset} = \text{fract}(\text{blueNoise}) $$
+   [S2, unofficial].
+3. Add the offset to the initial depth before the loop:
+   $$ \text{depth} \leftarrow \text{depth} + \text{MARCH\_SIZE} \cdot \text{offset} $$
+   [S2, unofficial].
+4. Temporal Variant: To prevent noticeable patterns in single frames, add a frame-dependent value:
+   $$ \text{offset} = \text{fract}(\text{blueNoise} + \frac{\text{frame} \pmod{32}}{\sqrt{0.5}}) $$
+   [S2, unofficial].
+
+#### 3. Step Size Jittering
+This variant randomizes the step size itself [S3, unofficial].
+
+1. Determine the fixed step size $s$ [S3, unofficial].
+2. Generate a random factor $r$ uniformly distributed in $[0.5, 1.5]$ [S3, unofficial].
+3. Compute the jittered step size:
+   $$ s_{\text{jittered}} = s \cdot r $$
+   [S3, unofficial].
+
+### Parameters
+- $c_{\text{fDither}}$: Dithering strength factor. Value: 0.001 [S1, unofficial].
+- $\text{MARCH\_SIZE}$: The base step size for the ray march [S2, unofficial].
+- $u_{\text{BlueNoise}}$: 2D sampler texture containing the blue noise pattern [S2, unofficial].
+
+### Edge Cases and Pitfalls
+- **Noticeable Patterns**: Blue noise dithering can produce visible patterns in single frames [S2, unofficial]. Mitigation: Use temporal variation by incorporating the frame count into the noise offset [S2, unofficial].
+- **Aliasing**: Fixed step sizes introduce aliasing in the form of clearly defined bands of intensity in volume regions [S3, unofficial]. Dithering removes this banding while keeping features like god rays sharp [S3, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def rand(v_uv):
+    """
+    Simple hash-based random number generator for UV coordinates.
+    Returns a value in [0, 1).
+    """
+    # Placeholder for specific hash implementation found in [S1, unofficial]
+    # Typically involves sin/cos or integer hashing
+    return (math.sin(v_uv.x * 12.9898 + v_uv.y * 78.233) * 43758.5453) % 1
+
+def ray_march_dither_uv(ro, v, uv, scene, max_steps=40, hit_threshold=0.001, max_range=100.0, c_fDither=0.001):
+    """
+    Ray marching with UV-based dithering [S1, unofficial].
+    """
+    # 1. Perform initial ray march to get hit distance t
+    # Note: In practice, this might be a preliminary pass or the dither is applied 
+    # before the main loop if t is not yet known. The source [S1, unofficial] implies t is the hit distance.
+    # For implementation completeness, we assume a standard march first.
+    p = ro
+    t = 0.0
+    hit = False
+    for i in range(max_steps):
+        d = scene(p)
+        if d < hit_threshold:
+            hit = True
+            t = dot(p - ro, v)
+            break
+        p += v * d
+        if dot(p - ro, v) > max_range:
+            break
+    
+    if not hit:
+        return p, False, t
+
+    # 2. Calculate dither amount
+    dither = t * t * c_fDither
+
+    # 3. Perturb UVs
+    rx = rand(uv + [0.12, 0.32])
+    ry = rand(uv + [0.42, 0.52])
+    
+    uv.x += rx * dither - dither / 2.0
+    uv.y += ry * dither - dither / 2.0
+
+    # 4. Reconstruct ray from perturbed UVs
+    # Assuming standard perspective projection setup as in [S1, unofficial]
+    # C = normalize(cam_center - cam_pos)
+    # A = normalize(cross(C, cam_up))
+    # B = -1.0/aspect * normalize(cross(A, C))
+    # scale A and B by root3/3 for fov=30 degrees
+    # ro_new = cam_pos + C + (2.0*uv.x - 1.0)*ROOTTHREE*A + (2.0*uv.y - 1.0)*ROOTTHREE*B
+    # v_new = normalize(ro_new - cam_pos)
+    
+    # [G] Placeholder for camera reconstruction logic specific to the scene
+    ro_new = reconstruct_ray_from_uv(uv) 
+    v_new = normalize(ro_new - cam_pos)
+
+    return ro_new, v_new, t
+
+def ray_march_dither_depth(ro, v, blue_noise_texture, frame, march_size=0.1):
+    """
+    Ray marching with Blue Noise depth dithering [S2, unofficial].
+    """
+    # 1. Sample blue noise
+    # Normalize fragment coordinates
+    frag_x = gl_FragCoord.x / 1024.0
+    frag_y = gl_FragCoord.y / 1024.0
+    
+    blue_noise = blue_noise_texture.sample(frag_x, frag_y).r
+
+    # 2. Temporal variation
+    offset_val = fract(blue_noise + (frame % 32) / math.sqrt(0.5))
+
+    # 3. Compute initial depth offset
+    depth_offset = march_size * offset_val
+
+    # 4. Adjust starting point
+    p = ro + v * depth_offset
+    
+    return p, depth_offset
+
+def ray_march_jitter_step(ro, v, scene, fixed_step=0.1, max_steps=40):
+    """
+    Ray marching with step size jittering [S3, unofficial].
+    """
+    p = ro
+    for i in range(max_steps):
+        d = scene(p)
+        if d < 0.001:
+            return p, True
+        
+        # Jitter step size between 0.5x and 1.5x fixed step
+        jitter_factor = random.uniform(0.5, 1.5)
+        step = fixed_step * jitter_factor
+        
+        p += v * step
+        
+    return p, False
+```
+
+## Subtopics
+
+### Blue Noise Dithering
+A technique to reduce banding and layering artifacts by introducing a random offset to the sampling start point using a blue noise texture. It is chosen when low step counts cause visible layering in volumes. It differs from UV dithering by perturbing depth directly rather than ray origin/direction. Temporal variation is often required to mitigate single-frame patterns. Link: [Blue Noise Dithering](1115-blue-noise-dithering.md) (hypothetical link based on sibling structure).
+
+### Ray Marching Jittering
+A technique to add random variation to ray marching step sizes to counteract aliasing artifacts (banding) in the volume. It is chosen when fixed step sizes cause clearly defined bands of intensity. It differs from other dithering methods by modifying the step size $s$ directly rather than the ray origin or UVs. It keeps god rays sharp while removing banding. Link: [Ray Marching Jittering](1116-ray-marching-jittering.md) (hypothetical link).
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of steps per ray, same as standard ray marching, plus the cost of noise generation/lookup [S1, unofficial][S2, unofficial][S3, unofficial].
+- **Memory Complexity**: $O(1)$ for UV dithering and step jittering; $O(T)$ for blue noise dithering where $T$ is the size of the noise texture [S2, unofficial].
+- **Performance**: Reduces visual artifacts without significantly increasing computational cost [S2, unofficial].
+- **Strengths**: Effective at removing banding and layering artifacts in volumes and surfaces [S1, unofficial][S2, unofficial][S3, unofficial].
+- **Limitations**: Can introduce noise if not temporally stable [S2, unofficial]. Fixed step jittering may slightly reduce precision in surface location [S3, unofficial].
+
+## Background
+Ray marching dithering techniques have been developed to address aliasing issues in real-time ray marching, particularly in WebGL and shader-based rendering [S1, unofficial][S2, unofficial]. Blue noise dithering was popularized in the context of real-time cloudscapes and volumetric rendering [S2, unofficial]. Step jittering was used in academic projects for underwater scene rendering [S3, unofficial].
+
+## Sources
+[S1] nopjia/WebGL-RayMarch, https://github.com/nopjia/WebGL-RayMarch, fetched 2026-10-26 (unofficial)
+[S2] Real-time dreamy Cloudscapes with Volumetric Raymarching, https://blog.maximeheckel.com/posts/real-time-cloudscapes-with-volumetric-raymarching/, fetched 2026-10-28 (unofficial)
+[S3] CS348b Final Project - Rendering Underwater Scenes, http://www.graphics.stanford.edu/courses/cs348b-competition/cs348b-04/underwater/index.html, fetched 2026-10-30 (unofficial)

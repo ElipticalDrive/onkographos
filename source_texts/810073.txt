@@ -1,0 +1,256 @@
+Direct3D 10, 11 and 12 on Metal, for Windows games on Apple silicon. - d3d12: conservative rasterization of a vertex shader's triangles at one sample rasterizes their pixels' hull by aaf2tbz · Pull Request #142 · dttdrv/mullion
+
+d3d12: conservative rasterization of a vertex shader's triangles at one sample rasterizes their pixels' hull by aaf2tbz · Pull Request #142 · dttdrv/mullion · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aaf2tbz
+commented
+Nov 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Conservative rasterization of a vertex shader's triangles now takes about a fifth less GPU time and a third less CPU time per frame. The mesh stage passes on the exact hull of the pixels each triangle touches, so the pixel shader no longer tests and discards pixels. It still takes more GPU time than VKD3D-Proton on the same scenes (see Performance). The rest of the gap is Mullion's pass-through mesh pipeline itself, not conservative rasterization.
+Profiling on an Apple M4 (perf probe conservative_t1: 2,000 draws of one small triangle; GPU time per frame, Metal 4) found:
+The discard costs most of it. Mullion grew each triangle by a pixel and had the pixel shader test every pixel against the clipped triangle and discard the ones it misses. A shader that may discard stops Metal from removing hidden pixels, and the scene's triangles overlap. With the test still computed but nothing discarded, the scene took 1.50–1.54 ms instead of 1.84–2.08 ms.
+The rest is the pass-through mesh pipeline. The same draws through the same object and mesh stages, without any conservative work, take 1.47–1.56 ms, against 0.63–0.66 ms for conservative_off's vertex pipeline. Removing the mesh stage's conservative arithmetic made no difference (1.46–1.51 ms).
+None of these made a measurable difference: a 2 KB payload instead of 16 KB, dropping the per-primitive outputs, or launching one mesh threadgroup per valid primitive instead of one per warp slot.
+CPU time per frame follows the GPU: the frames are GPU bound.
+What changed:
+A hull, not a grown triangle. A pipeline of one raster sample (SampleDesc.Count and ForcedSampleCount at most 1) with only a vertex shader before the rasterizer qualifies. Its mesh stage passes on the triangle as clipped, grown by the pixel's square: the Minkowski sum. Each corner of the clipped, snapped polygon is moved to the square's corners that its edges' outward normals turn through. That makes 9 points (some repeated), drawn as a fan of 7 triangles.
+Metal covers a pixel when its center is in the fan. That is exactly when the pixel's square overlaps the polygon, give or take a 256th of a pixel, so the pixel shader tests nothing and discards nothing.
+The polygon is snapped to a 256th of a pixel, and the square's half width is 0.5 + 1/256, so the hull's points are on the snapping grid too.
+The points' attributes are the plane's, as before: w is 1 and inputs are divided by the interpolated 1/w. Depth and the polygon's clipping are also as before.
+The fan turns as the triangle does. A triangle of no area turns back, so it faces back.
+Threads share the points. The hull's 9 points are shared among the mesh threadgroup's threads (threads_per_threadgroup). A direct draw gives it 9 threads. With one point per thread, the mesh stage takes about as long as the pass-through. With one thread doing all 9 points, it took 2.1–2.4 ms.
+Less work in the pixel shader. The pixel shader reads the polygon only for SV_InnerCoverage. It writes depth only where Metal would clamp the interpolated depth wrongly (probe-depth-clamp.m): when it may discard, or changes its coverage, or writes memory. That covers the shader's own discards and every discard or coverage change the converter adds: the depth bounds test, the pipeline's sample mask, alpha-to-coverage, clip distances tested per sample and coarse shading.
+Without a pixel shader there is no fragment function, unless depth bounds or the sample mask need one. That one discards, so it writes depth too.
+Where the old way stays. These still grow one triangle and test its pixels, as before:
+pipelines with several samples, where a pixel's samples must all be covered;
+a pixel shader that reads inputs at each vertex (GetAttributeAtVertex, new reflection VertexValues), which needs the three corners as Metal's primitive;
+geometry and domain shaders, and mesh shaders.
+Off switch. MULLION_CONSERVATIVE_HULL=0 (read once) turns the hull off. It sets a field of the pipelines' shader arguments, which is in the shader cache key.
+CPU.
+The conservative viewports (SM50_CONSERVATIVE_VIEWPORTS) are bound again only when the viewports or the pipeline change. Before, they were allocated, filled and bound at every draw.
+Root arguments and static samplers are no longer bound to the mesh stage of a pipeline whose mesh_reads_root_arguments is false. That is a new pipeline property, true by default and false only for the plain pass-through mesh function, which reads neither. A pipeline change that changes the property binds them again.
+d3d12: a list of triangles a vertex shader's cull distances pass through runs in a mesh function alone #139 runs the vertex shader in a pass-through pipeline's mesh function, which does read root arguments. It sets mesh_reads_root_arguments for those pipelines under the same name, so either PR can land first.
+32-bit builds. The new pixel shader argument field conservative_hull is at the end of SM50_SHADER_PSO_PIXEL_SHADER_DATA. The 32-bit argument mirrors in winemetal_unix.c take it, along with the geometry arguments' conservative_hull and conservative_inner. The i686 and unix field offsets match. D3D11 zeroes its pixel shader arguments.
+d3d12_conservative (DXIL) on main. On this Mac, macOS 27.2 (26B5112a) on an Apple M4, every failure is GetAttributeAtVertex. Metal's own vertex_value<T> returns the bits 1, 1 and 0 whatever the vertices output. tests/native/vertex_value.swift shows it in a plain Metal program, so it can go to Apple. winemetal now draws one triangle the same way before the device reports BarycentricsSupported. It draws it once per process (dispatch_once), the first time the device is asked, not at every CheckFeatureSupport. On this Mac the device no longer reports barycentrics, and d3d12_conservative skips them and passes. D3D12 has one cap for both, so SV_Barycentrics, which works on this Mac, is withdrawn with GetAttributeAtVertex. Conservative rasterization, SV_InnerCoverage and SV_Barycentrics themselves don't use vertex_value.
+Why it's exact. D3D needs every pixel whose square the primitive overlaps, and allows pixels up to tier 2's 1/256 of a pixel beyond it (D3D11.3 15.17, 15.17.2). At one sample Metal rasterizes a pixel's center:
+the fan contains a center exactly when the square, grown by 1/256, overlaps the snapped polygon;
+a center on a shared fan edge goes to one triangle, so the shader runs once a pixel;
+the flat inputs are the first point's, which carries the first corner's;
+a triangle of no area still has a hull (a segment's is a hexagon, a point's a square) and faces back (15.11.1);
+depth is the plane's at the center, clamped to the viewport's range (17.10), as before.
+Performance (perf probe scenes conservative_off, conservative_t1 and conservative_t3; Apple M4, a private copy of the work Wine; 150 frames, MULLION_SHADER_CACHE=0, the switch alternately off and on). The values are CPU / GPU ms per frame:
+scene
+MULLION_CONSERVATIVE_HULL=0
+this PR
+VKD3D-Proton
+conservative_t1, Metal 4 (3 rounds)
+1.02–1.03 / 1.97–2.01
+0.66–0.68 / 1.55–1.57
+0.62–0.75 / 1.25–1.29
+conservative_t3, Metal 4
+1.03–1.04 / 1.97–1.99
+0.75–0.80 / 1.63–1.64
+0.52–0.68 / 1.21–1.24
+conservative_off, Metal 4
+0.28–0.30 / 0.63–0.66
+0.27–0.29 / 0.64–0.66
+0.45–0.48 / 0.78–0.79
+conservative_t1, Metal 3 (rounds 2, 4, 5)
+1.04–2.03 / 1.93–2.11
+0.64–0.67 / 1.41–1.44
+conservative_t3, Metal 3
+1.02–1.22 / 1.80–2.27
+0.74–0.77 / 1.45–1.56
+Two Metal 3 rounds ran while another process used the GPU (conservative_off at 0.96 and 3.1 ms GPU). They are left out.
+The switch keeps the CPU binding changes, so its column is not main. The issue's numbers for main were 1.04 / 2.10 ms (t1) and 1.12 / 2.08 ms (t3).
+VKD3D-Proton ran 2 rounds.
+This PR does not beat VKD3D-Proton. On Metal 4 it is 20–26% slower in GPU time on t1 and 31–36% on t3; on Metal 3 it is 9–15% slower on t1. CPU time is about even on t1 and higher on t3. Mullion draws conservative_off faster than VKD3D-Proton does (0.64 ms against 0.78 ms GPU). The gap is the pass-through mesh pipeline, which costs about 0.85 ms over the vertex pipeline in this scene (1.47–1.56 ms with no conservative work at all). The VS runs in 30-thread object threadgroups that build a payload, and one mesh threadgroup per primitive passes it on. Closing it is a change to that pipeline (it also carries cull distances, quadrilateral lines and stream output), not to conservative rasterization.
+VKD3D-Proton's conservative rasterization is not exact. Its MoltenVK fork also grows each triangle by the pixel box in a generated mesh stage (SPIRV-Cross emit_conservative_raster_mesh), with FullyCoveredEXT from derivatives of screen-space barycentrics. From its source:
+it grows the unclipped triangle, so pixels past the near or far plane follow Metal's clipping of the grown points;
+it passes a triangle with a corner behind the eye through without growing it;
+it uses viewport 0 whatever the viewport index;
+at several samples it covers only the samples inside the grown triangle.
+It reports tier 3. I could not run d3d12_conservative against it: the tests are ARM64 builds, and its runtime loads for the x86_64 probe here.
+Contract and tests. This is the contract in the header of d3d12_conservative, now on the hull path for its one-sample pipelines. The new d3d12_conservative_hull (DXIL and DXBC) draws vertex-shader triangles at one sample, through an offset viewport with a depth range of 0.25 to 0.75. It covers:
+a needle in both windings, a triangle of edges along the axes, a segment and a point;
+a triangle across the near plane, with depth clipping and without;
+a triangle 1/128 of a pixel into the neighbouring row and column.
+Each pixel must run once if the triangle overlaps its square, and never if it is more than 1/256 away. Each must see its face and the first vertex's flat input. In one list, without setting state that does not change, it also checks:
+a second viewport set between two draws of one pipeline;
+another depth clipping set between two draws of one viewport;
+a geometry shader's pipeline after a pass-through one, reading root constants that move its triangle;
+the depth at each pixel, the plane's clamped to the viewport's range: of a steep triangle, for a pixel shader that writes no memory and one that may discard; and of the triangle across the near plane, for a pixel shader that writes no memory, one with a sample mask, one with the depth bounds test, and the depth bounds test without a pixel shader.
+d3d12_conservative_hull and d3d12_conservative pass on Metal 4 and Metal 3, with the switch on and off. These match a main-based build (the cull-distance worktree), failure for failure:
+d3d12_raster*, d3d12_geometry*, d3d12_mesh*, d3d12_meshout, d3d12_streamout*, d3d12_quads, d3d12_viewport*, d3d12_pipeline*, d3d12_border_pipelines;
+d3d10_raster*, d3d10_viewports;
+d3d11_geometry*, d3d11_gs_restart, d3d11_raster*, d3d11_streamout*, d3d11_viewports.
+d3d11_raster, d3d11_raster_bias, d3d11_raster_samples, d3d11_raster_state, d3d10_raster and d3d10_raster_bias fail there on this M4 too, with the same counts.
+Failing controls. Each patch in tests/breaks deliberately breaks part of this, to show the test catches it if it ever goes wrong (docs/TESTING.md). Each one fails on Metal 4 and Metal 3, with DXIL and DXBC, with its patch applied, and passes on this PR:
+deliberate break (tests/breaks)
+test with the break
+test on this PR
+d3d12_conservative_hull (the hull grows the polygon by 1/64 of a pixel less than half)
+fails: 8 wrong results
+passes
+d3d12_conservative_hull.2 (the conservative viewports are bound again for another pipeline only, not another viewport)
+fails: 1 wrong result
+passes
+d3d12_conservative_hull.3 (bound again for another viewport only, not another pipeline)
+fails: 2 wrong results
+passes
+d3d12_conservative_hull.4 (the stages ignore mesh_reads_root_arguments, so the root arguments are not bound again for a geometry shader's mesh stage)
+fails: 1 wrong result
+passes
+d3d12_conservative_hull.5 (the hull's points take the second corner's flat inputs)
+fails: 18 wrong results
+passes
+d3d12_conservative_hull.6 (the hull always turns as a polygon of positive area does)
+fails: 6 wrong results
+passes
+d3d12_conservative_hull.7 (a hull's pixel shader writes depth only for its own discards and memory writes, not for the depth bounds, sample mask and coverage the converter adds)
+fails: 2 wrong results
+passes
+d3d12_conservative_hull.8 (the fragment function of a hull pipeline without a pixel shader tests the depth bounds without writing depth)
+fails: 1 wrong result
+passes
+d3d12_conservative.31 (the device reports barycentrics without drawing to check vertex_value)
+DXIL fails: 17,207 mismatches over 98 triangles (DXBC has no barycentrics)
+passes
+d3d12_conservative's controls .2, .12, .13, .21, .22, .29 and .30 no longer applied to the moved code. They now break the same thing where it is, .21 on the hull's points too. All seven still fail on both families: from 27/54 to 6,717 mismatches (DXBC/DXIL). .3, .4, .6, .23 and .26 don't apply to upstream main either. This PR leaves them as they are.
+Notes.
+This bumps AIRCONV_VERSION to 93 (main is at 92): the hull changes the mesh and pixel shaders, and MTL_PIXEL_SHADER_REFLECTION and two argument structs have new fields.
+Every open airconv PR sets AIRCONV_VERSION 93: whichever lands after another needs the next number.
+wmtcmd_render_mullion_geometry_draw and _indexed have a new mesh_threads. D3D11 sets it to 1. Indirect geometry draws keep one mesh thread, which then makes all 9 points.
+Conservative rasterization at a viewport index of 16 or more was already fixed on main by 31b847f, so this PR doesn't touch it.
+Not measured: a scene of large triangles, or pipelines that write depth. With a depth target, a pixel shader that writes no memory and never discards now keeps early depth testing, which it lost before.
+d3d12: conservative rasterization of a vertex shader's triangles at o…
+…
+cdc5b0c
+```
+…ne sample rasterizes their pixels' hull
+
+At one raster sample Metal covers a pixel when its center is inside a triangle, so the mesh stage now passes on the
+triangle as clipped, grown by the pixel's square (its Minkowski sum, the polygon's corners each moved to the square's
+corners its edges' normals turn through): a fan of 7 triangles, whose 9 points the mesh threadgroup's threads share.
+The pixel shader no longer tests pixels against the polygon or discards them, which kept Metal from removing hidden
+pixels, and writes depth only when it may discard or writes memory itself. It reads the polygon only for
+SV_InnerCoverage. Several samples, a pixel shader reading inputs at each vertex, geometry and domain shaders and mesh
+shaders grow one triangle and test its pixels as before. MULLION_CONSERVATIVE_HULL=0 (read once, in the pipelines'
+shader arguments) turns the hull off.
+
+The conservative viewports are bound again only when the viewports or the pipeline change, not at every draw, and a
+pass-through mesh stage, which reads none, no longer gets the root arguments and static samplers.
+
+GetAttributeAtVertex: macOS 27.2 on an Apple M4 reads other values than the vertices' through MSL 4's vertex_value
+(tests/native/vertex_value), which d3d12_conservative (DXIL) failed on. winemetal draws a triangle once to see that
+the values are the vertices' before the device reports barycentrics.
+
+AIRCONV_VERSION 93. New test d3d12_conservative_hull, with failing controls; d3d12_conservative's controls follow the
+code.
+```
+This was referenced Nov 1, 2026
+airconv: minimum and maximum filters read and reduce their texels
+#130
+Merged
+airconv: frac is its D3D subtraction, without a NaN select
+#137
+Merged
+airconv: a coarse shading pixel shader without a discard has none, so its draws are hidden-surface removed
+#136
+Merged
+d3d12: a conservative hull writes the depth for every discard, and it…
+…
+0522d2e
+```
+…s argument fields reach 32-bit builds
+
+A hull's pixel shader now writes the depth whenever Metal would clamp it wrongly: also for the depth bounds test, a
+pipeline sample mask, alpha-to-coverage, clip distances tested per sample and coarse shading, which the converter
+discards or changes coverage for itself. A hull pipeline without a pixel shader whose fragment function tests the depth
+bounds or keeps a sample mask writes the depth too.
+
+SM50_SHADER_PSO_PIXEL_SHADER_DATA's conservative_hull moves to the end of the struct, and the 32-bit argument mirrors
+in winemetal take it and SM50_SHADER_PSO_GEOMETRY_SHADER_DATA's conservative_hull and conservative_inner. D3D11 zeroes
+its pixel shader arguments.
+
+Whether a pipeline's mesh stage reads the root arguments and static samplers is the pipeline's own property,
+mesh_reads_root_arguments, false only for the plain pass-through mesh function. The vertex_value check runs once a
+process.
+
+d3d12_conservative_hull checks the depth across the near plane with a sample mask and with the depth bounds test, with
+a pixel shader and without, with failing controls .7 and .8.
+```
+aaf2tbz
+mentioned this pull request
+Nov 1, 2026
+d3d12: a list of triangles a vertex shader's cull distances pass through runs in a mesh function alone
+#139
+Merged
+aaf2tbz
+added a commit
+to aaf2tbz/mullion
+that referenced
+this pull request
+Nov 1, 2026
+Merge d3d12-faster-conservative (dttdrv#142)
+…
+05c90d9
+```
+Beside dttdrv#139's mesh-only pipelines: one mesh_reads_root_arguments (true for mesh, domain and geometry shaders and mesh-only
+pipelines); mesh_only, conservative_hull and conservative_inner in SM50_SHADER_PSO_GEOMETRY_SHADER_DATA and its 32-bit
+mirror; draw_geometry_parts takes both mesh_only and the hull's mesh_threads. Beside dttdrv#138's pixel culls: one "may discard"
+flag (ShaderInfo::discards); TestFragment keys and takes conservative, depth, bounds, sample mask, culls and cull depth;
+the reflection keeps EarlyTests and Discards beside VertexValues and InnerCoverage.
+```
+Hide details
+View details
+dttdrv
+merged commit 5e5ad2d
+into
+dttdrv:main
+Nov 2, 2026
+1 check passed
+Uh oh!
+There was an error while loading. Please reload this page.
+dttdrv
+added a commit
+that referenced
+this pull request
+Nov 2, 2026
+d3d11: a pixel shader reading SV_InnerCoverage is refused, as D3D11 r…
+…
+f528786
+```
+…eports no conservative rasterization
+
+inner coverage needs tier 3; #142's reflection says which shaders read it. d3d11_raster's case passes, 2641 -> 2640 wrong results, the rest its known causes
+```
+dttdrv
+mentioned this pull request
+Nov 3, 2026
+Onimusha: Way of the Sword crashes after loading a save on M5 (v0.4, DXGI_ERROR_DEVICE_REMOVED)
+#69
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

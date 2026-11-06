@@ -1,0 +1,163 @@
+--- v001.md
++++ v002.md
+@@ -32,5 +32,5 @@
+     *   `screen`: Pointer to 1D color array [S2, unofficial].
+ *   **Occlusion Buffer (`yBuffer` or `hiddenY`):**
+-    *   Array of integers, size equal to screen width. Initialized to `screenHeight` (bottom of screen). Tracks the lowest drawn pixel (highest Y value in screen coordinates, closest to camera) for each column to handle occlusion [S2, S4, unofficial].
++    *   Array of integers, size equal to screen width [S2, S4, unofficial]. Initialized to `screenHeight` (bottom of screen) [S2, S4, unofficial]. Tracks the lowest drawn pixel (highest Y value in screen coordinates, closest to camera) for each column to handle occlusion [S2, S4, unofficial].
+ 
+ ### Parameters and Typical Values
+@@ -57,5 +57,5 @@
+ 
+ 2.  **Depth Loop (LOD):**
+-    *   Iterate depth $d$ from 1 to `MAX_DEPTH`.
++    *   Iterate depth $d$ from 1 to `MAX_DEPTH` [S4, unofficial].
+     *   Calculate `colWidth` = $\text{WIDTH} / (\text{viewFactor} \times d \times 2 \times \text{CLOSE\_LOD})$. If `colWidth` < 1, set to 1 [S4, unofficial].
+     *   *LOD Adjustment:* After processing columns for depth $d$, increase $d$ by $(\lfloor d / \text{LOD\_DISTANCE} \rfloor \times \text{LOD\_AMOUNT})$ to skip distant samples [S4, unofficial].
+@@ -71,5 +71,5 @@
+             $$ \text{samplePos}.x = \text{tempX} + \text{playerPos}.x $$
+             $$ \text{samplePos}.y = \text{tempY} + \text{playerPos}.y $$
+-        *   Sample heightmap at `samplePos` (using modulo or bitwise AND for wrapping):
++        *   Sample heightmap at `samplePos` (using modulo or bitwise AND for wrapping) [S3, S4, unofficial]:
+             $$ \text{heightVal} = \text{heightMap}[\text{samplePos}] $$
+             $$ \text{worldZ} = -\text{heightVal} \times \text{zScale} + \text{playerPos}.z $$
+@@ -77,5 +77,5 @@
+         *   Calculate screen Y coordinate `sy`:
+             $$ \text{sy} = (\text{worldZ} / d) \times \text{HEIGHT} + \text{HEIGHT} / 2 $$
+-            *(Alternative formula from S2/S3: $\text{proj\_height} = \lfloor (\text{camera.height} - \text{height}) / z \times \text{SCALE\_FACTOR} + \text{horizon} \rfloor$)* [S2, S3, unofficial].
++            *(Alternative formula from S3: $\text{proj\_height} = \lfloor (\text{camera.height} - \text{height}) / z \times \text{SCALE\_FACTOR} + \text{horizon} \rfloor$)* [S3, unofficial].
+         *   Clamp `sy` to $[0, \text{SCREEN\_HEIGHT}-1]$ [S3, unofficial].
+ 
+@@ -85,10 +85,12 @@
+         *   Apply fog: If $d > \text{MAX\_DEPTH} - \text{FOG\_START}$, set alpha:
+             $$ \text{color}.a = \lfloor 255 \times (\text{MAX\_DEPTH} - d) / \text{FOG\_START} \rfloor $$
+-        *   Draw vertical line from `sy` to `yBuffer[sx]` for pixels `sx` to `sx + colWidth - 1` (clamped to `WIDTH`) [S4, unofficial].
+-        *   Update `yBuffer[sx + i] = sy` for all drawn pixels $i$ [S4, unofficial].
++        *   Draw vertical line from `sy` to `yBuffer[sx+i]` for pixels `sx+i` where $i$ ranges from 0 to `colWidth-1` (clamped to `WIDTH`) [S4, unofficial].
++        *   Update `yBuffer[sx+i] = sy` for all drawn pixels $i$ [S4, unofficial].
+ 
+ ### Pseudocode
+ 
+ ```python
++import math
++
+ def render_heightfield(camera, height_map, color_map, screen_width, screen_height):
+     # Constants
+@@ -102,9 +104,24 @@
+     HEIGHT = screen_height
+     
++    # Helper functions
++    def radians(deg):
++        return deg * math.pi / 180.0
++
++    def modulo(a, b):
++        res = a % b
++        return res if res >= 0 else res + b
++
++    class Color:
++        def __init__(self, r, g, b, a=255):
++            self.r = r
++            self.g = g
++            self.b = b
++            self.a = a
++
+     # Precompute
+-    view_factor = sin(radians(FOV / 2.0))
++    view_factor = math.sin(radians(FOV / 2.0))
+     z_scale = (WIDTH / HEIGHT) * 1.0
+-    cos_rot = cos(-camera.rotation)
+-    sin_rot = sin(-camera.rotation)
++    cos_rot = math.cos(-camera.rotation)
++    sin_rot = math.sin(-camera.rotation)
+     
+     # Initialize occlusion buffer
+@@ -126,7 +143,6 @@
+         while sx < WIDTH:
+             # Calculate sample position in camera space
+-            # Lerp from -viewFactor*d to viewFactor*d based on column fraction
+             fraction = sx / WIDTH
+-            sample_x_cam = lerp(-view_factor * d, view_factor * d, fraction)
++            sample_x_cam = (-view_factor * d) * (1 - fraction) + (view_factor * d) * fraction
+             sample_y_cam = d
+             
+@@ -145,35 +161,29 @@
+             
+             # Calculate world Z (terrain height)
+-            # Note: S4 negates heightVal, S3 uses camera.height - height
+             world_z = -height_val * z_scale + camera.position.z
+             
+             # Calculate screen Y
+-            # S4 formula
+             sy = (world_z / d) * HEIGHT + HEIGHT / 2
+             
+             # Clamp
+-            sy = max(0, min(sy, HEIGHT - 1))
+-            
+-            # Occlusion check
+-            if sy < y_buffer[sx]:
+-                # Sample color
+-                cx = modulo(int(sample_x_world), color_map.width)
+-                cy = modulo(int(sample_y_world), color_map.height)
+-                color = color_map.get_color(cx, cy)
+-                
+-                # Fog
+-                if d > MAX_DEPTH - FOG_START:
+-                    fog_factor = (MAX_DEPTH - d) / FOG_START
+-                    color.a = int(255 * fog_factor)
+-                
+-                # Draw vertical line for this column width
+-                for i in range(col_width):
+-                    col_idx = sx + i
+-                    if col_idx < WIDTH:
+-                        # Draw from sy to y_buffer[col_idx]
+-                        # Assuming draw_vertical_line(x, y_top, y_bottom, color)
+-                        # y_top is sy (closer to camera/bottom), y_bottom is old buffer value
+-                        draw_vertical_line(screen, col_idx, sy, y_buffer[col_idx], color, WIDTH, HEIGHT)
+-                        y_buffer[col_idx] = sy
++            sy = max(0, min(int(sy), HEIGHT - 1))
++            
++            # Occlusion check and drawing for each pixel in the column width
++            for i in range(col_width):
++                col_idx = sx + i
++                if col_idx < WIDTH and sy < y_buffer[col_idx]:
++                    # Sample color
++                    cx = modulo(int(sample_x_world), color_map.width)
++                    cy = modulo(int(sample_y_world), color_map.height)
++                    color = color_map.get_color(cx, cy)
++                    
++                    # Fog
++                    if d > MAX_DEPTH - FOG_START:
++                        fog_factor = (MAX_DEPTH - d) / FOG_START
++                        color.a = int(255 * fog_factor)
++                    
++                    # Draw vertical line from sy to y_buffer[col_idx]
++                    draw_vertical_line(screen, col_idx, sy, y_buffer[col_idx], color, WIDTH, HEIGHT)
++                    y_buffer[col_idx] = sy
+             
+             sx += col_width
+@@ -184,5 +194,4 @@
+ def draw_vertical_line(screen, x, y_top, y_bottom, color, width, height):
+     """Draws a vertical line from y_top to y_bottom (exclusive) at column x."""
+-    # Ensure correct order
+     start_y = min(y_top, y_bottom)
+     end_y = max(y_top, y_bottom)
+@@ -196,5 +205,5 @@
+ ### Pitfalls and Edge Cases
+ *   **Overshooting:** The naive distance field $D(pos) = h(pos.xz) + pos.y$ can overestimate distance in the ray direction, causing rays to overshoot the heightfield if a step size of $D(pos)$ is taken [S5, unofficial]. Solution: Use a `shrinkFactor` derived from the bound $c$ on the heightfield's derivative: $\text{shrinkFactor} = \frac{1}{\sqrt{c^2+1}}$ [S5, unofficial].
+-*   **Coordinate Wrapping:** Heightmap coordinates must wrap around the grid (e.g., 1024x1024). Use modulo or bitwise AND with $(N-1)$ for power-of-two dimensions [S3, S4, unofficial].
++*   **Coordinate Wrapping:** Heightmap coordinates must wrap around the grid (e.g., 1024x1024). Use modulo or bitwise AND with $(N-1)$ for power-of-two dimensions [S3, unofficial].
+ *   **Screen Bounds:** `proj_height` can be negative or exceed screen height; must be clamped to $[0, \text{SCREEN\_HEIGHT}-1]$ [S3, unofficial].
+ *   **Map Dimensions:** Height and color maps must be square, same dimensions, and powers of two for bitwise optimization [S2, unofficial].
+@@ -212,10 +221,8 @@
+ ## Operating characteristics
+ *   **Time Complexity:** $O(\text{WIDTH} \times (\text{MAX\_DEPTH} / \text{LOD\_step}))$ in the worst case. Optimized by variable column width (`colWidth`), which reduces ray casting density at greater distances [S4, unofficial].
+-*   **Memory Complexity:** $O(\text{WIDTH} + \text{MAP\_SIZE})$. Requires $O(\text{WIDTH})$ for the occlusion buffer (`yBuffer`) and storage for height/color maps [S2, S4, unofficial].
+-*   **Performance:** CPU-driven, suitable for real-time on modest hardware (e.g., GBA, early PCs) [S3, S4, unofficial]. Performance scales with screen width and max depth; LOD reduces far-field cost.
++*   **Memory Complexity:** Not given in the sources.
++*   **Performance:** CPU-driven, suitable for real-time on modest hardware (e.g., GBA, early PCs) [S3, S4, unofficial]. Performance scales with screen width and max depth; LOD reduces far-field cost [S4, unofficial].
+ *   **Strengths:** Real-time perspective, simple implementation, low memory overhead, effective hidden surface removal via per-column buffer [S2, S3, S4, unofficial].
+ *   **Limitations:** Limited to heightfield terrains (no overhangs), discrete depth steps can cause aliasing or "popping" if LOD is coarse, pitch/roll restrictions [S1, S5, unofficial].
+-*   **When to Use:** 2D/2.5D terrain rendering where performance is critical and terrain is defined by a heightmap.
+-*   **When Not to Use:** Complex 3D geometry with overhangs, or when full 3D raymarching precision is required [S5, unofficial].
+ 
+ ## Background

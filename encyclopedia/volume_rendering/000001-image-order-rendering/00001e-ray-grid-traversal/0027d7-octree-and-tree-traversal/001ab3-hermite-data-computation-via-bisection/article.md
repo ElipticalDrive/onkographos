@@ -3,157 +3,202 @@
 Also called: Bisection-based Hermite Data Computation, Edge Crossing Detection with Bisection
 
 ## Overview
-A method to find all edge crossings in an adaptive octree for an implicit function and compute Hermite data (intersection points and normals) using bisection [S1, unofficial]. It refines linear interpolation guesses with bisection to achieve higher precision than standard Marching Cubes, which is essential for dual contouring methods that rely on accurate vertex placement via Quadratic Error Functions (QEF) [S1, unofficial]. Unlike [Octree Path Computation](897-octree-path-computation.md) which focuses on traversal efficiency, this method focuses on geometric accuracy of the isosurface intersection.
+Hermite Data Computation via Bisection is a method for precisely locating isosurface intersections on the edges of an adaptive octree's leaf cells and computing associated surface normals. It solves the problem of geometric inaccuracy in dual contouring, where linear interpolation between corner values introduces visible jaggedness on curved or sharp features [S1, unofficial]. Unlike [Octree Path Computation](897-octree-path-computation.md) which focuses on traversal efficiency, or [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md) which samples volume density, this method refines intersection positions to sub-cell accuracy to enable accurate Quadratic Error Function (QEF) vertex placement [S1, unofficial].
 
 ## How it works
+The method operates on the leaf cells of an adaptive octree. It identifies edges where the implicit function changes sign relative to an iso-value, refines the intersection point along these edges using bisection, and computes normals.
+
 **Inputs:**
-- `octree`: An adaptive octree structure containing leaf cells. Each leaf cell has:
-  - `bounds`: Cubic bounds defining the cell's spatial extent.
-  - `corner_values`: Array of 8 scalar values representing the implicit function at the cell's corners.
-  - `corner_mask`: Bitmask indicating which corners are inside the isosurface.
-  - `depth`: The depth level of the leaf in the octree.
-- `iso_value`: The scalar value defining the isosurface.
-- `func`: A function evaluator capable of batch evaluation of the implicit function and its gradients at a list of 3D points.
+- An adaptive octree with leaf cells containing corner values and bounds.
+- An implicit function $f(\mathbf{x})$ and an `iso_value`.
+- `max_depth`: The maximum depth of the octree.
+- `bisection_iters`: Number of bisection iterations (typically 8–10).
 
 **Outputs:**
-- `hermite_data`: A collection of `HermitePoint` structs, one for each detected edge crossing.
+- A list of `HermitePoint` structures, each containing:
+  - `pos`: The 3D intersection point $[f64; 3]$.
+  - `normal`: The normalized surface normal $[f64; 3]$.
+  - `t`: The parameter along the edge $[0, 1]$.
 
 **Data Structures:**
-- `EdgeCrossing`: A temporary struct used during collection.
-  - `p0: [f64; 3]`: Start point of the edge.
-  - `p1: [f64; 3]`: End point of the edge.
-  - `v0: f64`: Signed function value at `p0` (i.e., `value - iso_value`).
-  - `v1: f64`: Signed function value at `p1`.
-  - `leaf_idx: usize`: Index of the leaf cell containing the edge.
-  - `edge: u8`: Index of the edge (0–11) within the cell.
-  - `comp_id: u8`: Component ID for multi-component cells (from connected component analysis).
-- `HermitePoint`: The final output struct.
-  - `pos: [f64; 3]`: The computed intersection point.
-  - `normal: [f64; 3]`: The normalized gradient at the intersection point.
-  - `t: f64`: The parameter along the edge $[0, 1]$ where the intersection occurs.
+- `EdgeCrossing` (or `SignChangeEdge`):
+  - `p0`: Start point of the edge $[f64; 3]$.
+  - `p1`: End point of the edge $[f64; 3]$.
+  - `v0`: Signed function value at `p0` ($f(p0) - \text{iso\_value}$) $f64$.
+  - `v1`: Signed function value at `p1` ($f(p1) - \text{iso\_value}$) $f64$.
+  - `leaf_idx`: Index of the leaf cell containing the edge $usize$.
+  - `edge`: Edge identifier $u8$ (0–11).
+  - `comp_id`: Component ID within the cell for multi-component handling $u8$.
+- `HermitePoint`:
+  - `pos`: Intersection position $[f64; 3]$.
+  - `normal`: Surface normal $[f64; 3]$.
+  - `t`: Refined parameter $f64$.
 
 **Steps:**
 
-1. **Initialization:**
-   - Extract `iso_value` from `octree.iso_value`.
-   - Extract `max_depth` from `octree.max_depth`.
-   - Calculate `cell_size_at_max` as `octree.bounds.size / (1u32 << max_depth)` [S1, unofficial].
+1.  **Initialization:**
+    - Calculate `cell_size_at_max`:
+      $$
+      \text{cell\_size\_at\_max} = \frac{\text{octree.bounds.size}}{2^{\text{max\_depth}}}
+      $$
+    - Collect all sign-change edges from leaf cells. For each leaf cell, iterate over its 12 edges. For each edge with endpoints $c_0, c_1$:
+      - Compute signed values: $v_0 = f(\text{corner}(c_0)) - \text{iso\_value}$, $v_1 = f(\text{corner}(c_1)) - \text{iso\_value}$.
+      - If $(v_0 < 0.0) \neq (v_1 < 0.0)$, create an `EdgeCrossing` struct with `p0`, `p1`, `v0`, `v1`, `leaf_idx`, `edge`, and `comp_id`.
 
-2. **Collect Sign-Change Edges:**
-   - Iterate over all leaf cells in the octree.
-   - For each leaf cell, iterate over its 12 edges.
-   - For each edge, identify the two corner vertices `c0` and `c1`.
-   - Compute signed values: `v0 = corner_values[c0] - iso_value` and `v1 = corner_values[c1] - iso_value`.
-   - If `(v0 < 0.0) != (v1 < 0.0)`, a sign change exists.
-   - Record the edge endpoints `p0 = bounds.corner(c0)`, `p1 = bounds.corner(c1)`, `v0`, `v1`, `leaf_idx`, `edge`, and `comp_id` (derived from connected component analysis of the cell's corner mask) in a list of `EdgeCrossing` structs [S1, unofficial].
+2.  **Bisection Refinement:**
+    - Initialize arrays `lo_t` and `hi_t` of size $N$ (number of crossings) to $0.0$ and $1.0$ respectively.
+    - Initialize `lo_val` with the $v_0$ values from the `EdgeCrossing` structs.
+    - Perform `bisection_iters` iterations (e.g., 8 or 10):
+      - Compute midpoints for all crossings:
+        $$
+        t_i = \frac{\text{lo\_t}[i] + \text{hi\_t}[i]}{2}
+        $$
+        $$
+        \text{pos}_i = \text{lerp3}(\text{p0}_i, \text{p1}_i, t_i)
+        $$
+      - Batch evaluate the implicit function at all $\text{pos}_i$.
+      - Compute `mid_val` for each crossing:
+        $$
+        \text{mid\_val}_i = f(\text{pos}_i) - \text{iso\_value}
+        $$
+      - Update intervals:
+        - If $(\text{mid\_val}_i < 0.0) == (\text{lo\_val}[i] < 0.0)$:
+          $$
+          \text{lo\_t}[i] = t_i, \quad \text{lo\_val}[i] = \text{mid\_val}_i
+          $$
+        - Else:
+          $$
+          \text{hi\_t}[i] = t_i
+          $$
 
-3. **Bisection Refinement:**
-   - Initialize arrays `lo_t` and `hi_t` of size `num_crossings` to `[0.0, 1.0]`.
-   - Initialize `lo_val` with the `v0` values from the collected edges.
-   - Perform 10 bisection iterations (or 8 as per some implementations, see [Operating characteristics]):
-     - For each crossing `i`:
-       - Compute midpoint parameter: `mid_t = (lo_t[i] + hi_t[i]) * 0.5`.
-       - Compute 3D position: `pos = p0 + mid_t * (p1 - p0)`.
-     - Batch evaluate the implicit function at all `pos` points.
-     - For each crossing `i`:
-       - Compute `mid_val = result.values[i] - iso_value`.
-       - If `(mid_val < 0.0) == (lo_val[i] < 0.0)`:
-         - `lo_t[i] = mid_t`
-         - `lo_val[i] = mid_val`
-       - Else:
-         - `hi_t[i] = mid_t`
+3.  **Final Intersection Computation:**
+    - For each crossing $i$, compute the final parameter:
+      $$
+      t_i = \frac{\text{lo\_t}[i] + \text{hi\_t}[i]}{2}
+      $$
+    - Compute the final position:
+      $$
+      \text{pos}_i = \text{lerp3}(\text{p0}_i, \text{p1}_i, t_i)
+      $$
 
-4. **Compute Final Intersection Points:**
-   - For each crossing `i`:
-     - `t = (lo_t[i] + hi_t[i]) * 0.5`
-     - `pos = p0 + t * (p1 - p0)`
+4.  **Normal Computation:**
+    - Batch evaluate the implicit function at all final $\text{pos}_i$.
+    - If gradients $\nabla f$ are available:
+      - For each gradient $\mathbf{g}$:
+        - If $\|\mathbf{g}\| > 10^{-12}$:
+          $$
+          \text{normal}_i = \frac{\mathbf{g}}{\|\mathbf{g}\|}
+          $$
+        - Else:
+          $$
+          \text{normal}_i = [0.0, 0.0, 1.0]
+          $$
+    - If gradients are not available, estimate them using finite differences with step size $h = \text{cell\_size\_at\_max} \times 0.01$. Normalize the estimated gradients using the same logic.
 
-5. **Compute Normals:**
-   - Batch evaluate the implicit function at all final `pos` points to obtain gradients.
-   - If gradients are available:
-     - For each gradient `g`:
-       - If `len(g) > 1e-12`: `normal = g / len(g)`
-       - Else: `normal = [0.0, 0.0, 1.0]` [G] (Guard against zero-length gradients)
-   - If gradients are not available:
-     - Estimate gradients using finite differences with step size `cell_size_at_max * 0.01`.
-     - Normalize estimated gradients using the same logic.
-
-6. **Store Hermite Data:**
-   - Create `HermitePoint` structs with `pos`, `normal`, and `t`.
-   - Store in `octree.hermite_data` associated with the leaf and edge index.
+5.  **Storage:**
+    - Store the `HermitePoint` (pos, normal, t) in the octree's `hermite_data` structure, associated with the leaf and edge index.
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def compute_hermite_data(octree, iso_value, func):
+def compute_hermite_data(octree, iso_value, bisection_iters=10):
+    """
+    Computes Hermite data (intersection points and normals) for an adaptive octree.
+    """
     max_depth = octree.max_depth
     cell_size_at_max = octree.bounds.size / (1 << max_depth)
     
-    # Step 2: Collect sign-change edges
+    # Step 1: Collect sign-change edges
     all_edges = []
     for leaf_idx, leaf in enumerate(octree.leaves):
-        components = get_components(leaf.corner_mask) # From connected component analysis
-        for edge in range(12):
-            c0, c1 = CubicBounds.edge_corners(edge)
+        # Get components for this leaf to handle multi-component masks
+        components = get_leaf_components(leaf)
+        
+        for edge_id in range(12):
+            c0, c1 = CubicBounds.edge_corners(edge_id)
             v0 = leaf.corner_values[c0] - iso_value
             v1 = leaf.corner_values[c1] - iso_value
             
+            # Check for sign change
             if (v0 < 0.0) != (v1 < 0.0):
                 p0 = leaf.bounds.corner(c0)
                 p1 = leaf.bounds.corner(c1)
-                comp_id = edge_component(components, leaf.corner_mask, edge)
+                comp_id = edge_component(components, leaf.corner_mask, edge_id)
                 all_edges.append({
-                    'p0': p0, 'p1': p1, 'v0': v0, 'v1': v1,
-                    'leaf_idx': leaf_idx, 'edge': edge, 'comp_id': comp_id
+                    'p0': p0,
+                    'p1': p1,
+                    'v0': v0,
+                    'v1': v1,
+                    'leaf_idx': leaf_idx,
+                    'edge': edge_id,
+                    'comp_id': comp_id
                 })
     
     num_crossings = len(all_edges)
     if num_crossings == 0:
         return []
-    
-    # Step 3: Bisection Refinement
+
+    # Step 2: Bisection Refinement
     lo_t = [0.0] * num_crossings
     hi_t = [1.0] * num_crossings
     lo_val = [edge['v0'] for edge in all_edges]
     
-    # 10 iterations for ~1/1024 cell accuracy
-    for _ in range(10):
+    for _ in range(bisection_iters):
+        if num_crossings == 0:
+            break
+            
+        # Compute midpoints
         mid_points = []
         for i in range(num_crossings):
             t = (lo_t[i] + hi_t[i]) * 0.5
             mid_points.append(lerp3(all_edges[i]['p0'], all_edges[i]['p1'], t))
         
-        result = func.batch_evaluate(mid_points)
+        # Batch evaluate implicit function
+        results = batch_evaluate_implicit_function(mid_points)
         
+        # Update intervals
         for i in range(num_crossings):
-            mid_val = result.values[i] - iso_value
+            mid_val = results.values[i] - iso_value
             mid_t = (lo_t[i] + hi_t[i]) * 0.5
+            
             if (mid_val < 0.0) == (lo_val[i] < 0.0):
                 lo_t[i] = mid_t
                 lo_val[i] = mid_val
             else:
                 hi_t[i] = mid_t
-    
-    # Step 4: Final Points
+
+    # Step 3: Final Intersection Points
     crossing_points = []
     for i in range(num_crossings):
         t = (lo_t[i] + hi_t[i]) * 0.5
         crossing_points.append(lerp3(all_edges[i]['p0'], all_edges[i]['p1'], t))
     
-    # Step 5: Normals
+    # Step 4: Normal Computation
+    normals = []
     if crossing_points:
-        result = func.batch_evaluate(crossing_points)
-        if result.gradients:
-            normals = [normalize3(g) for g in result.gradients]
+        results = batch_evaluate_implicit_function(crossing_points)
+        if results.gradients:
+            for g in results.gradients:
+                norm = length(g)
+                if norm > 1e-12:
+                    normals.append(normalize3(g))
+                else:
+                    normals.append([0.0, 0.0, 1.0])
         else:
-            fd_grads = func.estimate_gradients_fd(crossing_points, cell_size_at_max * 0.01)
-            normals = [normalize3(g) for g in fd_grads]
+            # Finite difference estimation
+            fd_grads = estimate_gradients_fd(crossing_points, cell_size_at_max * 0.01)
+            for g in fd_grads:
+                norm = length(g)
+                if norm > 1e-12:
+                    normals.append(normalize3(g))
+                else:
+                    normals.append([0.0, 0.0, 1.0])
     else:
         normals = []
-    
-    # Step 6: Store Hermite Data
+
+    # Step 5: Store Hermite Data
     hermite_data = []
     for i in range(num_crossings):
         t = (lo_t[i] + hi_t[i]) * 0.5
@@ -162,31 +207,22 @@ def compute_hermite_data(octree, iso_value, func):
             'normal': normals[i],
             't': t,
             'leaf_idx': all_edges[i]['leaf_idx'],
-            'edge': all_edges[i]['edge']
+            'edge': all_edges[i]['edge'],
+            'comp_id': all_edges[i]['comp_id']
         })
-    
+        
     return hermite_data
 
 def lerp3(p0, p1, t):
     return [p0[j] + t * (p1[j] - p0[j]) for j in range(3)]
 
 def normalize3(v):
-    len_v = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
-    if len_v > 1e-12:
-        return [v[j] / len_v for j in range(3)]
-    return [0.0, 0.0, 1.0]
+    norm = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    return [v[j] / norm for j in range(3)]
+
+def length(v):
+    return (v[0]**2 + v[1]**2 + v[2]**2)**0.5
 ```
-
-**Parameters:**
-- `iso_value`: The scalar value defining the isosurface.
-- `max_depth`: The maximum depth of the octree.
-- `bisection_iters`: Number of bisection iterations. Value: 10. Context: Provides ~1/1024 cell accuracy [S1, unofficial].
-- `cell_size_at_max`: The physical size of a cell at the maximum octree depth. Used for finite difference step size.
-
-**Edge Cases and Pitfalls:**
-- **No Sign Change:** If no sign change exists on an edge, no Hermite data is computed for that edge [S1, unofficial].
-- **Division by Zero:** In linear interpolation (if used as initial guess), if `|v1 - v0| < 1e-15`, the denominator is near zero. Handled by defaulting `t` to 0.5 [S1, unofficial].
-- **Zero-Length Gradient:** If the gradient magnitude is `< 1e-12`, normalization fails. Handled by defaulting the normal to `[0.0, 0.0, 1.0]` [S1, unofficial].
 
 ## Subtopics
 
@@ -194,16 +230,16 @@ def normalize3(v):
 Edge Completeness Enforcement is a post-processing step in adaptive octree surface extraction that ensures all edges with sign changes possess complete 4-cell neighborhoods at the same depth, thereby eliminating geometric gaps at depth boundaries. It differs from its parent, Hermite Data Computation via Bisection, by focusing on topological consistency of the grid structure rather than the precise computation of intersection points and normals.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of leaf cells and edges. Bisection adds a constant factor (10 iterations) per edge crossing.
-- **Memory Complexity:** Linear with respect to the number of edge crossings.
-- **Measured Performance:** 8 bisection iterations provide ~1/256 cell accuracy, which is sufficient for many cases, but 10 iterations are recommended for curved sharp edges (cylinders, chamfers) to avoid visible jaggedness [S1, unofficial].
-- **Strengths:** High precision intersection points, essential for dual contouring and QEF-based vertex placement. Handles adaptive octrees effectively.
-- **Limitations:** Requires batch evaluation of the implicit function. Finite difference gradient estimation adds overhead if analytical gradients are not available.
-- **When to Use:** When high-precision isosurface extraction is required, particularly for dual contouring.
-- **When Not to Use:** When performance is critical and lower precision is acceptable (e.g., simple Marching Cubes).
+- **Time Complexity:** $O(N \cdot I)$, where $N$ is the number of sign-change edges and $I$ is the number of bisection iterations. Each iteration requires a batch evaluation of the implicit function.
+- **Memory Complexity:** $O(N)$ to store the `EdgeCrossing` and `HermitePoint` structures.
+- **Performance:** 10 bisection iterations provide approximately $1/1024$ of a cell accuracy, which is sufficient for smooth surfaces. 8 iterations provide $1/256$ accuracy [S1, unofficial].
+- **Strengths:** Significantly reduces jaggedness on curved and sharp edges compared to linear interpolation, enabling high-quality dual contouring [S1, unofficial].
+- **Limitations:** Requires batch evaluation of the implicit function, which may be costly if the function is complex. Relies on accurate gradient computation for normals.
+- **When to Use:** When high-fidelity surface reconstruction is required, particularly for dual contouring where vertex placement accuracy is critical.
+- **When Not to Use:** When performance is critical and lower geometric fidelity is acceptable, or when the implicit function is too expensive to evaluate in batches.
 
 ## Background
-Originated in the context of adaptive octree surface extraction for implicit functions, specifically for dual contouring methods [S1, unofficial]. The method was developed to address the limitations of linear interpolation in finding edge crossings, which can introduce visible artifacts on curved surfaces. The implementation is found in the `isomesh` library [S1, unofficial].
+The method is described in the `isomesh` project by Mason [S1, unofficial]. It is used in the context of adaptive octree-based isosurface extraction, specifically for dual contouring, where precise Hermite data (position and normal) is required for solving Quadratic Error Functions (QEF) to place vertices [S1, unofficial].
 
 ## Sources
 [S1] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)

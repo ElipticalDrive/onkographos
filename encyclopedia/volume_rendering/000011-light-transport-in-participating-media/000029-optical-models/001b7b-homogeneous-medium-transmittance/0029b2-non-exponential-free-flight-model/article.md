@@ -1,150 +1,167 @@
 # Non-Exponential Free Flight Model
-Also called: Davis and Xu model, Generalized linear transport model for spatially correlated stochastic media
+
+Also called: Davis and Xu model, Generalized Boltzmann Equation (GBE) for non-exponential media, Generalized linear transport model for spatially correlated stochastic media
 
 ## Overview
-The Non-Exponential Free Flight Model describes light transport in participating media where scattering particles are positively correlated, resulting in free path distributions with longer tails than the standard exponential distribution [S1, unofficial]. It allows for artistic control over the depth of light bleeding into subsurface media by introducing a shape parameter that modifies the probability of interaction based on distance traveled [S1, unofficial]. Unlike the Exponential Fog model, which assumes uncorrelated particle distribution, this model gives photons "memory," where past non-interactions influence future interaction probabilities [S1, unofficial].
+The Non-Exponential Free Flight Model simulates light transport in homogeneous participating media where scattering particles are spatially correlated, resulting in free path distributions with longer tails than the standard exponential decay of Beer's Law [S2, unofficial]. Unlike [Exponential Fog (Beer-Lambert)](3968-exponential-fog-beer-lambert.md), which assumes uncorrelated particle distributions, this model introduces "memory" into the photon transport process, allowing artistic control over light bleeding depth by adjusting a shape parameter [S2, unofficial]. It is primarily used for subsurface scattering and volumetric effects where natural clustering or voids in particle distribution affect attenuation [S1].
 
 ## How it works
-**Inputs:**
-- $\sigma_e$: Extinction coefficient (constant for the homogeneous medium).
-- $\sigma_s$: Scattering coefficient (constant for the homogeneous medium).
-- $s$: Distance traveled from the current position.
-- $b$: User-defined "bleed" parameter controlling the shape of the distribution.
+The model adapts the Generalized Boltzmann Equation (GBE) from neutron transfer to computer graphics, assuming an isotropic medium without boundaries where the phase function and scattering albedo do not depend on distance [S1]. It modifies the standard Monte Carlo random walk by making the scattering probability a function of both the scattering cross-section and the distance traveled [S2, unofficial].
 
-**Outputs:**
-- $T_a(s)$: Transmittance at distance $s$.
-- $p(s)$: Probability density function (PDF) for sampling distance $s$.
-- $c(s)$: Cumulative distribution function (CDF) for sampling distance $s$.
-- $s(\xi)$: Sampled distance from a uniform random variable $\xi$.
-- $S(s)$: Modified scattering coefficient for Monte Carlo random walk steps.
+### Inputs and Outputs
+*   **Inputs:**
+    *   $\sigma_e$: Extinction coefficient (constant for the homogeneous medium).
+    *   $\sigma_s$: Scattering coefficient (constant).
+    *   $a$: Shape parameter controlling the tail of the distribution.
+    *   $\xi$: Uniform random variable in $[0, 1]$.
+*   **Outputs:**
+    *   $s$: Sampled free flight distance.
+    *   $T_a(s)$: Transmittance at distance $s$.
+    *   $S(s)$: Effective scattering coefficient at distance $s$.
 
-**Data Structures:**
-No complex data structures are required. The model relies on scalar values and standard floating-point arithmetic. The parameter $a$ is derived from the user-friendly parameter $b$ as $a = 1/b$.
+### Data Structures
+No complex data structures are required. The model relies on scalar values for coefficients and distances. The parameter $a$ is often mapped to a user-friendly "bleed" parameter $b$ such that $a = 1/b$ [S2, unofficial].
 
-**Parameters:**
-- $b$ (bleed): Controls the tail length of the distribution. Typical values are not explicitly given in the sources, but the mapping $a=1/b$ is designed to provide a meaningful unit range for artists [S1, unofficial].
-- $a$: Shape parameter. $a = 1/b$.
+### Formulas
+1.  **Transmittance:**
+    $$ T_a(s) = \frac{1}{(1 + \frac{\sigma_e s}{a})^a} $$
+    Where $s$ is the distance traveled [S2, unofficial].
 
-**Formulas:**
-The transmittance $T_a$ is defined as [S1, unofficial]:
-$$ T_a(s) = \frac{1}{(1 + \frac{\sigma_e s}{a})^a} $$
+2.  **Probability Density Function (PDF):**
+    $$ p(s) = \frac{\sigma_e}{(1 + \frac{\sigma_e s}{a})^{a+1}} $$
+    This defines the likelihood of a scattering event occurring at distance $s$ [S2, unofficial].
 
-The probability density function (PDF) for sampling distance $s$ is [S1, unofficial]:
-$$ p(s) = \frac{\sigma_e}{(1 + \frac{\sigma_e s}{a})^{a+1}} $$
+3.  **Cumulative Distribution Function (CDF):**
+    $$ c(s) = \frac{1}{(1 + \frac{\sigma_e s}{a})^a} $$
+    Note that $c(s) = T_a(s)$ [S2, unofficial].
 
-The cumulative distribution function (CDF) is [S1, unofficial]:
-$$ c(s) = \frac{1}{(1 + \frac{\sigma_e s}{a})^a} $$
+4.  **Inverse CDF (Sampling):**
+    To sample a distance $s$ from a uniform random variable $\xi \in [0, 1]$:
+    $$ s(\xi) = \frac{a \cdot (\xi^{-1/a} - 1)}{\sigma_e} $$
+    This allows direct sampling of the free flight distance [S2, unofficial].
 
-To sample a distance $s$ from a uniform random variable $\xi \in (0, 1]$, use the inverse CDF [S1, unofficial]:
-$$ s(\xi) = \frac{a \cdot (\xi^{-1/a} - 1)}{\sigma_e} $$
+5.  **Modified Scattering Coefficient:**
+    In the Monte Carlo random walk, the scattering coefficient $\sigma_s$ is modified to depend on the distance traveled:
+    $$ S(s) = \frac{\sigma_s}{1 + \frac{\sigma_e s}{a}} $$
+    This reflects the reduced probability of interaction as the photon travels further through correlated voids [S2, unofficial].
 
-In the context of a Monte Carlo random walk, the scattering coefficient $\sigma_s$ is modified to depend on the distance traveled $s$ [S1, unofficial]:
-$$ S(s) = \frac{\sigma_s}{1 + \frac{\sigma_e s}{a}} $$
+### Parameters
+*   **$a$ (Shape Parameter):** Controls the shape of the distribution.
+    *   As $a \to \infty$, the model converges to the exponential Beer's Law case.
+    *   Smaller values of $a$ (or larger "bleed" values) result in longer tails, allowing light to penetrate deeper [S2, unofficial].
+*   **Bleed ($b$):** A user-friendly parameter where $a = 1/b$. This maps the parameter to a meaningful unit range for artists [S2, unofficial].
 
-**Pseudocode:**
+### Pseudocode
+The following Python-like pseudocode implements the sampling and scattering logic for a single step in the random walk.
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+def sample_non_exponential_free_flight(sigma_e, a, xi):
+    """
+    Samples the free flight distance s for a non-exponential medium.
+    
+    Args:
+        sigma_e (float): Extinction coefficient.
+        a (float): Shape parameter.
+        xi (float): Uniform random number in [0, 1].
+        
+    Returns:
+        float: Sampled distance s.
+    """
+    # Guard against xi = 0 to avoid division by zero or log(0)
+    if xi <= 0.0:
+        xi = 1e-9
+        
+    # Inverse CDF: s = a * (xi^(-1/a) - 1) / sigma_e
+    # Note: xi^(-1/a) is equivalent to (1/xi)^(1/a)
+    term = math.pow(xi, -1.0 / a)
+    s = (a * (term - 1.0)) / sigma_e
+    return s
+
 def compute_transmittance(sigma_e, s, a):
     """
-    Computes the non-exponential transmittance Ta(s).
+    Computes the transmittance Ta(s) for the non-exponential model.
     
     Args:
         sigma_e (float): Extinction coefficient.
-        s (float): Distance traveled.
-        a (float): Shape parameter (a = 1/bleed).
-        
-    Returns:
-        float: Transmittance value.
-    """
-    if sigma_e == 0:
-        return 1.0
-    term = 1.0 + (sigma_e * s) / a
-    return 1.0 / (term ** a)
-
-def sample_free_flight(sigma_e, sigma_s, s, a, xi):
-    """
-    Samples a new free flight distance and computes the modified scattering coefficient.
-    
-    Args:
-        sigma_e (float): Extinction coefficient.
-        sigma_s (float): Scattering coefficient.
-        s (float): Current distance traveled from the last interaction.
-        a (float): Shape parameter (a = 1/bleed).
-        xi (float): Uniform random number in (0, 1].
-        
-    Returns:
-        tuple: (new_s, modified_sigma_s)
-            new_s: The sampled distance to the next interaction.
-            modified_sigma_s: The scattering coefficient at the new position.
-    """
-    # Sample distance using inverse CDF
-    # Note: xi should be in (0, 1]. If xi is 0, handle as edge case (e.g., return 0 or max float)
-    if xi <= 0.0:
-        xi = 1e-9  # Guard against log(0) or division by zero, though inverse CDF uses power
-        
-    # s_new = a * (xi^(-1/a) - 1) / sigma_e
-    # This is the distance to the NEXT interaction relative to the start of the step.
-    # In a random walk, we usually sample the step length directly.
-    # The formula s(xi) gives the distance s such that c(s) = xi.
-    # Since c(s) is the probability of NO interaction up to s, 
-    # sampling xi from uniform and solving for s gives the distance to the next interaction.
-    
-    if sigma_e == 0:
-        return float('inf'), sigma_s
-        
-    exponent = -1.0 / a
-    term = xi ** exponent
-    new_s = (a * (term - 1.0)) / sigma_e
-    
-    # Compute modified scattering coefficient at the new position
-    # The model modifies the scattering probability based on total distance traveled.
-    # However, in a step-by-step random walk, 's' in the formula S(s) usually refers 
-    # to the distance from the last scattering event.
-    # The source states: "scatter S(s) = sigma_s / (1 + sigma_e s / a)"
-    # This implies the scattering coefficient is evaluated at the current position s.
-    
-    if sigma_e == 0:
-        modified_sigma_s = sigma_s
-    else:
-        modified_sigma_s = sigma_s / (1.0 + (sigma_e * new_s) / a)
-        
-    return new_s, modified_sigma_s
-
-def compute_scattering_probability(sigma_e, sigma_s, s, a):
-    """
-    Computes the modified scattering coefficient S(s) for use in Russian Roulette or albedo calculations.
-    
-    Args:
-        sigma_e (float): Extinction coefficient.
-        sigma_s (float): Scattering coefficient.
         s (float): Distance traveled.
         a (float): Shape parameter.
         
     Returns:
-        float: Modified scattering coefficient.
+        float: Transmittance value.
     """
-    if sigma_e == 0:
-        return sigma_s
-    return sigma_s / (1.0 + (sigma_e * s) / a)
+    denominator = 1.0 + (sigma_e * s) / a
+    ta = 1.0 / (denominator ** a)
+    return ta
+
+def get_effective_scattering_coefficient(sigma_s, sigma_e, s, a):
+    """
+    Computes the distance-dependent scattering coefficient S(s).
+    
+    Args:
+        sigma_s (float): Base scattering coefficient.
+        sigma_e (float): Extinction coefficient.
+        s (float): Distance traveled.
+        a (float): Shape parameter.
+        
+    Returns:
+        float: Effective scattering coefficient S(s).
+    """
+    denominator = 1.0 + (sigma_e * s) / a
+    s_s = sigma_s / denominator
+    return s_s
+
+def monte_carlo_step(sigma_e, sigma_s, a, xi):
+    """
+    Performs one step of the Monte Carlo random walk using the non-exponential model.
+    
+    Args:
+        sigma_e (float): Extinction coefficient.
+        sigma_s (float): Scattering coefficient.
+        a (float): Shape parameter.
+        xi (float): Uniform random number in [0, 1].
+        
+    Returns:
+        tuple: (distance s, transmittance Ta, effective scattering coeff S_s)
+    """
+    # 1. Sample distance
+    s = sample_non_exponential_free_flight(sigma_e, a, xi)
+    
+    # 2. Compute transmittance
+    ta = compute_transmittance(sigma_e, s, a)
+    
+    # 3. Compute effective scattering coefficient for this step
+    s_s = get_effective_scattering_coefficient(sigma_s, sigma_e, s, a)
+    
+    return s, ta, s_s
 ```
 
-**Edge Cases and Pitfalls:**
-- **Division by Zero:** If $\sigma_e = 0$, the medium is transparent. The formulas involve division by $\sigma_e$ or terms like $1 + \sigma_e s/a$. If $\sigma_e = 0$, transmittance is 1, and no scattering occurs. The pseudocode handles this with guards.
-- **Parameter Range:** The parameter $a$ can result in unintuitive ranges for users. The model maps it to 'bleed' ($b$) where $a = 1/b$ to provide a meaningful unit range [S1, unofficial]. Users should input $b$ and compute $a$.
-- **Random Variable Range:** The inverse CDF formula $s(\xi) = \frac{a \cdot (\xi^{-1/a} - 1)}{\sigma_e}$ requires $\xi \in (0, 1]$. If $\xi = 0$, the term $\xi^{-1/a}$ becomes infinite. In practice, $\xi$ should be sampled from $(0, 1]$ or clamped to a small positive value [G].
-- **Memory Effect:** The probability of scattering depends on both the scattering cross section and the distance traveled. This "memory" effect means that photons that have traveled further without interacting have a lower probability of scattering in the immediate future compared to the exponential case [S1, unofficial].
+### Edge Cases and Pitfalls
+*   **Boundary Limitations:** The original GBE theory assumes an isotropic medium without boundaries [S1]. While computer graphics adaptations eliminate some limitations, the model is strictly defined for homogeneous media in its basic form [S1].
+*   **Heterogeneous Media:** Although the theory can conceptually support heterogeneous media, it does not provide a feasible solution, nor explain reciprocity and path integral form for such cases, so it cannot be directly applied to general light transport methods for heterogeneous volumes [S1].
+*   **Parameter Intuition:** The raw parameter $a$ can have unintuitive ranges. Using the mapped "bleed" parameter $b$ ($a=1/b$) is recommended for usability [S2, unofficial].
+*   **Precision:** When $\xi$ is very close to 0, numerical stability in the inverse CDF calculation must be handled (e.g., clamping $\xi$ to a small positive value) [G].
+
+## Subtopics
+
+### Fractional Gaussian Field (FGF) Framework
+A general, physically-based framework for modeling and rendering spatially-correlated media with non-exponential decay of transmittance, addressing both short-range and long-range correlations [S1]. It describes spatial correlations by introducing the fractional Gaussian field (FGF), a mathematical tool for modeling high-frequency noise-like fluctuations and k-th order fractional Brownian motion (fBm) with stochastic continuity [S1]. This method simulates different extents of randomness, resulting in a smooth transition in appearance from exponential falloff to complete transparency [S1]. It is the first method to address both short-range and long-range correlations using physically-based fluctuation models [S1].
 
 ## Operating characteristics
-- **Time Complexity:** The computational cost per step is similar to the exponential model, involving a few floating-point operations (power, division, multiplication). The inverse CDF sampling requires a power operation, which is slightly more expensive than the logarithm used in exponential sampling, but still constant time $O(1)$ per step.
-- **Memory Complexity:** $O(1)$ per particle/step. No additional data structures are required.
-- **Strengths:** Provides artistic control over light bleeding depth. The long-tail distribution allows a small fraction of photons to travel much deeper than an exponential distribution would allow, which can be useful for simulating subsurface scattering in materials like skin [S1, unofficial].
-- **Limitations:** The model assumes a homogeneous medium with positively correlated particle distribution. It may not accurately represent all types of participating media. The parameter $a$ (or $b$) requires tuning to achieve desired visual results.
-- **When to use:** When simulating subsurface scattering in materials where light bleeding depth is a key artistic control, and the medium can be approximated as having positively correlated scattering particles.
-- **When not to use:** For media with uncorrelated particle distributions (use Exponential Fog) or heterogeneous media (use Heterogeneous Medium Transmittance).
+*   **Time Complexity:** Sampling the distance $s$ requires computing a power function and basic arithmetic, which is $O(1)$ per step, similar to exponential sampling but slightly more expensive due to the exponentiation [S2, unofficial].
+*   **Memory Complexity:** $O(1)$, as no additional data structures are needed beyond the coefficients and current distance [S2, unofficial].
+*   **Performance:** The model allows for artistic control over light bleeding, which can be computationally efficient compared to explicitly simulating correlated particle distributions [S2, unofficial].
+*   **Strengths:** Provides a simple parametric way to model non-exponential attenuation with longer tails, suitable for subsurface scattering and correlated volumetric effects [S2, unofficial].
+*   **Limitations:** Limited to homogeneous media in its standard implementation; does not natively support heterogeneous media with reciprocity in a feasible path-integral form [S1]. The "memory" effect is local to the free flight step and does not account for complex boundary interactions in the original formulation [S1].
+*   **When to Use:** When simulating media with clustered or voided particle distributions (e.g., skin, clouds, fog) where Beer's Law is too aggressive in attenuation [S2, unofficial].
+*   **When Not to Use:** For heterogeneous media where a full path-integral solution is required, or when strict physical accuracy of particle positions is needed over artistic control [S1].
 
 ## Background
-The Non-Exponential Free Flight Model was developed by Anthony B. Davis and Feng Xu in 2014, published in "A generalized linear transport model for spatially correlated stochastic media" in the Journal of Computational and Theoretical Transport [S1, unofficial]. It was later adopted and popularized in the graphics community by Pixar for path-traced subsurface scattering, as described in "Path Traced Subsurface Scattering Model" [S1, unofficial]. The model addresses the limitation of Beer's Law, which assumes uncorrelated particle distribution, by introducing a shape parameter that allows for non-exponential free path distributions. This is particularly useful for simulating the visual appearance of subsurface scattering in materials like skin, where light bleeding depth is a critical factor.
+The Non-Exponential Free Flight Model is based on the Generalized Boltzmann Equation (GBE) from the field of neutron transfer [S1]. It was adapted for computer graphics by Davis and Xu in 2014, published in "A generalized linear transport model for spatially correlated stochastic media" in the Journal of Computational and Theoretical Transport [S2, unofficial]. The model was further popularized in graphics for subsurface scattering by Pixar researchers (e.g., Brent Burley) to provide intuitive artistic control over light bleeding [S2, unofficial]. The Fractional Gaussian Field (FGF) framework was later proposed by Guo et al. in 2019 to extend these concepts to both short-range and long-range correlations [S1].
 
 ## Sources
-[S1] Path Traced Subsurface Scattering Model, https://www.scribd.com/document/965284472/Pixar-Path-Traced-SSS-Paper, fetched 2026-10-29 (unofficial)
+[S1] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
+[S2] Path Traced Subsurface Scattering Model, https://www.scribd.com/document/965284472/Pixar-Path-Traced-SSS-Paper, fetched 2026-10-29 (unofficial)

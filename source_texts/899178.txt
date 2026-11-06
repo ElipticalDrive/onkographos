@@ -1,0 +1,203 @@
+A GPU renderer for Minecraft Java worlds: fast raster preview and path-traced light, with entities, headless and deterministic. - feat(hq): an emitter lights the room around it — next-event estimation with MIS, and a calibrated light separate from its look by stellarfeline · Pull Request #32 · stellarfeline/lumenwright
+
+feat(hq): an emitter lights the room around it — next-event estimation with MIS, and a calibrated light separate from its look by stellarfeline · Pull Request #32 · stellarfeline/lumenwright · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+stellarfeline
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Owner
+Closes #1. In HQ, an emitter was found only by a bounced path that happened to hit it. Small emitters lit almost nothing (a candle room was near black at hundreds of spp), while their own faces blew out. The research behind the change is in docs/research/emitters.md, each line marked cited or inferred.
+What changed
+NEE with MIS. A light quad is picked by power, then a texel within it by its share of the quad's power. Each pick is weighted against BSDF sampling by the power heuristic (Veach, PBRT). Kernel, WGSL and CUDA share one layout and one random stream, with two new buffers: the light list and an emitter table. --no-light-sampling renders the reference without it.
+The look and the light are separate, as Blender's camera-ray visibility and Unreal's EmissiveBoost separate them:
+camera and specular rays see texel × level/15 × --emitter-glow (default 1.5);
+diffuse surfaces receive texel² × light scale × --emitter-intensity (default 1).
+Each block casts power 600 × (L/15)² whatever its shape. This rule is our own: no source calibrates a path tracer to the game's 15-level falloff, and the research doc says so. Power ∝ L² makes reach proportional to level under inverse-square falloff, so a torch and a glowstone block light a room about equally, as in the game.
+Falloff is 1/max(d², 1), from Chunky, applied to both strategies so MIS stays consistent.
+Measured
+Candle room, 640×360:
+NEE at 256 spp against NEE at 4096: RMS 5.51/255.
+Without light sampling at 256 spp against the 4096 reference: 61.87.
+At 4096 spp, linear means with and without light sampling agree within 0.27%, so the estimator is unbiased.
+emitter_calibration: a torch on a white floor, HQ against quick at light levels 12 down to 3. Mean error 0.76 levels, worst 2.11, within bounds of 1.5 and 3. Half power and double power both fail the test.
+Daylight showcase at 1024 spp:
+RMS 4.07/255 against a seed-noise floor of 1.30; the difference sits in tiles that hold emitters.
+Render time 13.3 s → 24.7 s, because the shadow ray to emitters is traced on every bounce.
+Parity:
+Metal: gpu_matches_cpu_in_hq_mode and determinism pass.
+RTX (Vulkan via dzn): 0.001% / 0.021%; the known environmental crash at thread exit follows the checks.
+CUDA: the PTX builds; the parity test skipped because WSL exposes no CUDA device.
+Open, recorded in the research doc
+Walls facing a lamp read brighter than quick mode, because the game ignores a surface's angle to the light. On a plain floor, 4 candles read about 1.8 levels darker than the game.
+Dark-coloured emitters (red candles) cast oversaturated light, because power is normalised by luminance.
+No spatial light structure exists for many emitters.
+Gates (local, toolchain 1.97.1)
+fmt: 0. clippy: 0. doc: 0. publish dry-run: 0.
+cargo test --workspace: 104 passed, 0 failed, 0 skips.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+stellarfeline
+and others
+added 8 commits
+October 19, 2026 16:28
+feat(hq): emitters get next-event estimation with MIS, and cast light…
+…
+b6c2ce6
+```
+… by their level
+
+The scene builds a light list: one entry per instance of a quad of a
+light-emitting block, faces against an occluding neighbour and buried bricks
+left out, picked by binary search on a power-proportional CDF. Each diffuse
+vertex samples one point on one light and weighs it against cosine BSDF
+sampling with the power heuristic; a BSDF ray that finds an emitter takes the
+complementary weight from the quad's stored pick probability. The kernel,
+the WGSL mirror and the CUDA entry point take the light list as a new buffer.
+
+An emitter's look and its light are separate: the camera (or a specular chain
+from it) sees texel x level/15 x the glow scale (misc_f.x, --emitter-glow,
+default 1.5); diffuse surfaces receive texel^2 x the quad's light scale x
+misc_f.w (--emitter-intensity, default 1). A block's light scale makes its
+total power LEVEL_15_POWER x (level/15)^2 whatever its shape (calibration
+constant still to be measured).
+
+Kernel test: on a lamp-lit floor at 16384 spp the frame mean with light
+sampling is within 4% of BSDF sampling alone (0.40% apart at 65536 spp:
+0.00923 vs 0.00927) and one sample's variance falls from 0.0154 to 0.0027.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+test(hq): a torch room and a candle room, and the torch calibration a…
+…
+7d0b2dc
+```
+…gainst the game
+
+demo-world --torch-room / --candle-room write the two lamp-lit rooms.
+emitter_calibration renders the torch room in quick and HQ mode and reads
+each HQ floor pixel, tonemapped, as a light level on the quick curve, for
+distances 1..15; --no-light-sampling renders without emitter NEE (a
+reference for checking it).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+wip: calibration sweep at LEVEL_15_POWER 64
+…
+c2839ae
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+fix(hq): a glowing cutout quad is cut to the texels it draws, so ligh…
+…
+532bbf2
+```
+…t sampling lands on them
+
+A torch's side planes are 16x16 texels around a 2x10 stick: uniform area
+sampling put about 92% of light samples on transparent texels, and the MIS
+weight of BSDF hits, computed from the full plane's area, left fireflies on
+every wall. Each light-casting cutout quad is now trimmed to the bounding
+rectangle of its drawn texels (alpha >= 128); it draws exactly what it drew.
+
+Calibration run before this change (LEVEL_15_POWER 64, CPU, 256 spp): the
+best fitting power multiplier was 7.46, mean level error 0.74 there.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+test(hq): compare the untrimmed quad by its bytes (its tint lane is a…
+…
+1ea7685
+```
+… NaN pattern)
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+feat(hq): emitters are sampled texel by texel, lit with a near-field …
+…
+5f0f335
+```
+…clamp, and calibrated
+
+Light sampling now picks a texel cell of the chosen quad by its share of the
+quad's emitted power (an emitter table per light quad: pick probability and
+cumulative cell shares), so a torch's flame texels take the samples its dark
+stick used to. A hit records its (s, t) so BSDF hits evaluate the same
+density for MIS. The table is a new kernel buffer (WGSL binding 7, two more
+CUDA arguments).
+
+Emitted light reaching a surface closer than one block is scaled by d^2:
+falloff 1/max(d^2, 1), as Chunky's emitter sampling does, applied to light
+sampling and BSDF hits alike so MIS stays consistent. Without it, the floor
+touching the torch made a hot spot whose indirect light speckled every wall.
+
+LEVEL_15_POWER = 600: emitter_calibration's best fit at the old value of 64
+was a multiplier of 9.19 (CPU, 256 spp, macOS). At 600: mean |level error|
+0.76, worst 2.11 over game levels 12..3; at half the power 2.34, at double
+3.19. The test now also asserts that half and double fail its bounds.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+docs: the emitter research and the rule chosen, measured
+…
+a32c4fd
+```
+docs/research/emitters.md records what Chunky, the shader packs and the
+literature do (cited vs inferred), the rule chosen and the measurements.
+
+Proof renders (640x360, Metal, this commit's parent build vs 4b658a7):
+- candle room, linear means at 4096 spp with and without light sampling:
+  0.12540 vs 0.12506 (+0.27%).
+- candle room 256 spp with light sampling: display RMS 5.51/255 against its
+  own 4096 spp; 17.86/255 against the 4096 spp reference without light
+  sampling, which is itself that noisy (17.04/255 against the 4096 spp with
+  light sampling); 61.87/255 for 256 spp without light sampling.
+- daylight showcase 1024 spp: RMS 4.07/255 against before (noise floor
+  1.30/255 between seeds); linear mean +0.29%; the difference sits in the
+  tiles holding emitters.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+merge: bring main (unifont glyphs) into the emitters branch
+…
+70554eb
+```
+fixture.rs keeps both module declarations: emitters and chinese.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_016ba8LkuKW2bd5C5HCDo7p2
+```
+Hide details
+View details
+stellarfeline
+merged commit 01d6067
+into
+main
+Oct 20, 2026
+5 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

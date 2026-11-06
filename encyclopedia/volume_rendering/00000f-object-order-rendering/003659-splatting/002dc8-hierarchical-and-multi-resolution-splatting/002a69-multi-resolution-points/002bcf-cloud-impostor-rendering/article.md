@@ -1,0 +1,144 @@
+# Cloud Impostor Rendering
+
+Also called: Dynamic impostors, Dynamically Generated Impostors, Impostors for clouds
+
+## Overview
+Cloud Impostor Rendering is a technique to accelerate cloud rendering by replacing geometric particle models with 2D texture impostors, exploiting the lack of high-frequency edges in clouds to tolerate lower resolution textures and frequent updates [S1, unofficial]. Unlike geometric models which require high-resolution impostors only at a distance, this method allows impostors to be used for clouds even when the viewer is inside or very close to them, significantly reducing overdraw and fill-rate requirements [S1, unofficial]. It builds on [Multi-Resolution Points](4784-multi-resolution-points.md) by using pre-shaded textures to represent volumetric density.
+
+## How it works
+The method consists of a two-pass shading algorithm and a dynamic impostor generation system.
+
+**Inputs and Outputs:**
+*   **Input:** A cloud model composed of static particles (relative to each other), where each particle is a roughly spherical volume with Gaussian density falloff defined by center, radius, density, and color [S1, unofficial]. Light direction.
+*   **Output:** A rendered image of the cloud scene.
+
+**Data Structures:**
+*   **Particle:** Struct containing `center` (3D vector), `radius` (scalar), `density` (scalar), `color` (RGB).
+*   **Impostor Texture:** 2D texture map storing the pre-shaded density and color information for a cloud or cloud region.
+*   **Impostor Polygon:** A screen-oriented quad (or rectangle) textured with the impostor texture.
+
+**Shading Pass (Preprocess):**
+1.  For each particle in the cloud, compute multiple forward scattering illumination in the light direction [S1, unofficial]. This approximates the bulk of illumination in the cloud [S1, unofficial].
+2.  Store the resulting shaded density and color in the particle data or a texture atlas [S1, unofficial].
+
+**Impostor Generation and Rendering:**
+1.  **Determine Viewpoint Relation:** Check if the viewpoint is inside the cloud's bounding volume.
+2.  **Generate Impostor Texture:**
+    *   **If outside:** Position a view frustum at the viewpoint, tightly fitted to the cloud's bounding volume [S1, unofficial]. Render the cloud particles into an image using splatting (drawing screen-oriented polygons texture-mapped with a Gaussian density function) [S1, unofficial]. Use this image to texture the impostor polygon.
+    *   **If inside:** Use the same frustum used to display the whole scene (not tightly fitted) [S1, unofficial]. Render the cloud into an image at a reduced resolution (factor of 4 in each dimension) [S1, unofficial]. Display the impostor as a screenspace rectangle sized to fill the screen [S1, unofficial].
+3.  **Update Decision:** Compute the translation error angle $\alpha_{trans}$ between the current viewpoint and the viewpoint used to generate the current impostor [S1, unofficial]. Compute the required texture resolution:
+    $$resolution_{texture} = resolution_{screen} \cdot \frac{object\_size}{dist}$$
+    where $resolution_{screen}$ is the screen resolution, $object\_size$ is the object size (bounding volume diameter), and $dist$ is the distance to the object [S1, unofficial].
+4.  **Regenerate if Necessary:** If $\alpha_{trans} >$ tolerance OR $current\_resolution < required\_resolution$, regenerate the impostor from the current viewpoint [S1, unofficial].
+5.  **Render:** Draw the impostor polygon textured with the generated image [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_cloud_impostor(cloud, viewpoint, screen_resolution, tolerance_angle=0.15):
+    """
+    Renders a cloud using dynamic impostors.
+    cloud: Object with method get_bounding_volume() and render_to_texture(frustum, resolution)
+    viewpoint: Current camera position
+    screen_resolution: Tuple (width, height)
+    tolerance_angle: Max allowed translation error in degrees
+    """
+    # Check if viewpoint is inside cloud
+    inside = is_inside_bounding_volume(viewpoint, cloud.get_bounding_volume())
+    
+    # Determine if update is needed
+    current_impostor = cloud.get_current_impostor()
+    needs_update = False
+    
+    if current_impostor is None:
+        needs_update = True
+    else:
+        # Compute translation error angle
+        alpha_trans = compute_angle_between_vectors(
+            current_impostor.view_direction, 
+            vector_to(viewpoint, current_impostor.view_origin)
+        )
+        
+        # Compute required resolution
+        object_size = cloud.get_bounding_volume().diameter
+        dist = distance(viewpoint, cloud.get_bounding_volume().center)
+        required_res = screen_resolution * (object_size / dist)
+        
+        if alpha_trans > tolerance_angle:
+            needs_update = True
+        elif current_impostor.resolution < required_res:
+            needs_update = True
+            
+    # Generate new impostor if needed
+    if needs_update:
+        if inside:
+            # Use scene frustum, reduced resolution
+            frustum = get_scene_frustum()
+            res_factor = 4
+            new_res = (screen_resolution[0] // res_factor, screen_resolution[1] // res_factor)
+        else:
+            # Tight frustum around cloud
+            frustum = create_tight_frustum(viewpoint, cloud.get_bounding_volume())
+            new_res = screen_resolution # Full resolution for distant objects
+            
+        # Render cloud particles into texture using splatting
+        # Splatting: draw screen-oriented polygons with Gaussian density
+        texture = cloud.render_to_texture(frustum, new_res)
+        
+        # Create impostor polygon (quad)
+        if inside:
+            # Fill screen
+            polygon = create_screen_filling_quad()
+        else:
+            # Project bounding volume to screen
+            polygon = create_projected_quad(frustum, cloud.get_bounding_volume())
+            
+        cloud.set_current_impostor(Impostor(polygon, texture, viewpoint, frustum.direction, new_res))
+        
+    # Draw impostor
+    draw_quad(cloud.get_current_impostor().polygon, cloud.get_current_impostor().texture)
+
+def compute_angle_between_vectors(v1, v2):
+    """Compute angle in degrees between two vectors."""
+    dot = dot_product(normalize(v1), normalize(v2))
+    # Clamp to [-1, 1] to avoid domain errors in acos
+    dot = max(-1.0, min(1.0, dot))
+    angle_rad = acos(dot)
+    return degrees(angle_rad)
+```
+
+**Parameters:**
+*   **Translation error tolerance:** ~0.15 degrees for imperceptible popping [S1, unofficial]. Up to 1 degree for added performance [S1, unofficial].
+*   **Resolution reduction factor for clouds containing the viewpoint:** 4 in each dimension [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Viewpoint Inside Cloud:** The tight frustum cannot be used. The method uses the scene frustum and reduces texture resolution by a factor of 4 [S1, unofficial].
+*   **Objects Passing Through Clouds:** Standard impostors cause objects to appear to pass through 2D images. This is handled by **Impostor Splitting** (see Subtopics) [S1, unofficial].
+*   **Precision:** The resolution formula assumes linear scaling. At very large distances, the required resolution may drop below 1x1, but the impostor is likely culled or not generated.
+
+## Subtopics
+
+### Impostor Splitting
+A technique to render objects passing through clouds realistically by splitting a single cloud impostor into multiple layers to avoid the artifact of objects appearing to pass through 2D images [S1, unofficial]. It is chosen when objects (e.g., aircraft) are expected to intersect cloud volumes. Unlike direct particle rendering, it avoids artifacts caused by billboards intersecting object geometry [S1, unofficial].
+*   **Step:** Detect when objects pass within the bounding volume of a cloud [S1, unofficial]. Split the cloud impostor into $N+1$ layers, where $N$ is the number of objects within the cloud [S1, unofficial]. Layer 1 is behind the first object, Layer 2 is in front of the first object and behind the second, etc. [S1, unofficial]. Render the set of alternating impostor layers and objects from back to front [S1, unofficial]. Enable depth testing for objects during rendering [S1, unofficial]. Disable depth testing for impostors during rendering [S1, unofficial].
+
+### Real-Time Cloud Rendering
+A two-pass algorithm for realistic real-time rendering of clouds suitable for flight simulation and games [S1, unofficial]. It approximates multiple forward scattering in a preprocess and first order anisotropic scattering at runtime, using impostors to accelerate rendering [S1, unofficial]. It is chosen for scenes requiring realistic lighting with static cloud particles.
+*   **Step:** Pass 1 (Preprocess): Compute multiple forward scattering illumination for each particle in the light direction [S1, unofficial]. Pass 2 (Runtime): Render the clouds using the precomputed shading and single scattering toward the viewer [S1, unofficial]. The cloud model assumes particles are static relative to each other, allowing clouds to be shaded once per scene in a preprocess [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Preprocessing is $O(P)$ where $P$ is the number of particles, taking ~5-10 seconds per light source for hundreds of thousands of particles [S1, unofficial]. Runtime is $O(I)$ where $I$ is the number of impostors, independent of the number of particles [S1, unofficial].
+*   **Memory Complexity:** $O(P)$ for particle data and $O(I \cdot R^2)$ for impostor textures, where $R$ is texture resolution [S1, unofficial].
+*   **Measured Performance:** On an NVIDIA GeForce 256 (PC, 800 MHz Pentium III, 256MB RAM), the system renders scenes with up to hundreds of thousands of particles at >50 fps, and >1.2 million particles at 10-12 fps with slow viewpoint movement [S1, unofficial].
+*   **Strengths:** High frame rates for large particle counts; realistic interaction with objects via splitting; works even when viewer is inside clouds [S1, unofficial].
+*   **Limitations:** Requires static particles (no dynamic simulation); artifacts if objects move quickly through clouds without splitting; texture resolution may be insufficient for very close-up inspection if not handled by the inside-cloud reduction [S1, unofficial].
+*   **When to use:** Flight simulators, games, scenes with large static clouds and dynamic objects [S1, unofficial].
+*   **When not to use:** Dynamic cloud simulation, scenes with high-frequency geometric details in clouds [S1, unofficial].
+
+## Background
+Originated by Harris and Lastra at the University of North Carolina, Chapel Hill, in 2001 [S1, unofficial]. The paper "Real-Time Cloud Rendering" presents the method for realistic real-time rendering of clouds suitable for flight simulation and games [S1, unofficial]. It builds on previous work in particle systems [Westover1991] and impostors [Schaufler1995], adapting them to the specific properties of clouds (lack of high-frequency edges) [S1, unofficial].
+
+## Sources
+[S1] Real-Time Cloud Rendering, https://www.cs.unc.edu/techreports/01-005.pdf, fetched 2026-10-28 (unofficial)

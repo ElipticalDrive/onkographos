@@ -1,0 +1,62 @@
+# Line Segment Distance
+
+Also called: Point-to-Line Distance Calculation, Segment SDF, sdSegment
+
+## Overview
+Computes the Euclidean distance from a query point `p` to a line segment defined by endpoints `l0` and `l1`. It distinguishes itself from infinite line distance methods by clamping the projection parameter to the segment bounds, ensuring the result is zero if the point lies on the segment and correctly handling endpoints [S1, unofficial].
+
+## How it works
+**Inputs:** Point `p`, segment endpoints `l0`, `l1` (all 3D vectors).
+**Output:** Scalar Euclidean distance.
+
+1. Compute vector `v = l1 - l0` and `w = p - l0`.
+2. Compute dot products `c1 = dot(v, w)` and `c2 = dot(v, v)`.
+3. If `c1 <= 0.0`, the closest point is `l0`; return `length(p - l0)` [S1, unofficial].
+4. If `c2 <= c1`, the closest point is `l1`; return `length(p - l1)` [S1, unofficial].
+5. Compute projection parameter `b = c1 / c2`.
+6. Compute projection point `pb = l0 + b * v`.
+7. Return `length(p - pb)` [S1, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def line_segment_distance(p, l0, l1):
+    v = l1 - l0
+    w = p - l0
+    c1 = dot(v, w)
+    if c1 <= 0.0:
+        return length(p - l0)
+    c2 = dot(v, v)
+    if c2 <= c1:
+        return length(p - l1)
+    b = c1 / c2
+    pb = l0 + b * v
+    return length(p - pb)
+```
+
+**Edge cases:** If `l0 == l1`, `c2` is zero, causing division by zero in step 5. Guard against `c2 < epsilon` by returning `length(p - l0)` [G].
+
+## Subtopics
+
+### Point-to-Line Distance
+Computes the vector from a point `p` to the closest point on an infinite line defined by origin `o` and direction `d`. It does not clamp the projection, allowing the closest point to be anywhere on the line [S2, unofficial]. Use when the segment bounds are irrelevant or the line is truly infinite [S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def point_to_line_distance(p, o, d):
+    op = p - o
+    scale_factor = dot(op, d) / dot(d, d)
+    q = o + scale_factor * d
+    return p - q
+```
+
+## Operating characteristics
+Time complexity is $O(1)$ with a constant number of arithmetic operations. Memory complexity is $O(1)$. Performance is limited only by floating-point precision; degenerate segments (zero length) require explicit handling to avoid NaN results [G].
+
+## Background
+Originated in computational geometry for collision detection and mesh processing. Implemented in GPU-based volume rendering pipelines for efficient primitive distance queries [S1, S2, unofficial].
+
+## Sources
+[S1] Amory0709/geresim-spike, https://github.com/Amory0709/geresim-spike, fetched 2026-10-27 (unofficial)
+[S2] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)

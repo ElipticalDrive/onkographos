@@ -1,0 +1,123 @@
+# Animated Worley Noise Texture Generation
+
+Also called: 2D Worley Noise, Animated Worley Noise Generation, Worley Noise Generation
+
+## Overview
+Generates a 2D Worley (Voronoi) noise texture to break up smoke silhouettes, updated per frame via compute shader [S1, unofficial]. It differs from its parent [Worley Noise](1726-worley-noise.md) by explicitly incorporating a time uniform to animate the point positions, and from [Voronoise](5519-voronoise.md) by returning raw distance values rather than smoothed vector displacements.
+
+## How it works
+**Inputs:**
+- `id`: Thread ID (`uint3`), derived from `SV_DispatchThreadID`.
+- `_NoiseResolution`: Texture resolution (width/height).
+- `_Scale`: UV multiplier.
+- `_Time`: Time uniform.
+- `range`: Neighborhood search radius.
+
+**Outputs:**
+- `_NoiseTexture`: `RWTexture2D<float4>`, format ARGB64, linear, random write enabled [S1, unofficial].
+
+**Data Structures:**
+- `cell`: `float2`, integer grid coordinates.
+- `kPoint`: `float2`, random point position within the cell.
+- `minDist`: `float`, minimum distance to any point.
+- `bestPoint`: `float2`, position of the nearest point.
+
+**Parameters:**
+- `textureWidth/textureHeight`: `int`, noise texture resolution. Default: 256 [S1, unofficial].
+- `scale`: `float`, UV multiplier. Default: 10.0 [S1, unofficial].
+- `range`: `int`, neighborhood search radius. Default: 2 [S1, unofficial].
+
+**Steps:**
+1. Dispatch compute shader with `[numthreads(8, 8, 1)]` [S1, unofficial].
+2. For each thread `(id.x, id.y)`, check bounds: if `id.x >= width || id.y >= height`, return [S1, unofficial].
+3. Compute UV: `uv = float2(id.x, id.y) / _NoiseResolution * _Scale + _Time / 5` [S1, unofficial].
+4. Initialize `minDist = 1.0`, `bestPoint = float2(0,0)` [S1, unofficial].
+5. Loop `j` from `-range` to `range` (-2 to 2), `i` from `-range` to `range` [S1, unofficial].
+6. Compute cell: `cell = floor(uv) + float2(i, j)` [S1, unofficial].
+7. Compute hash point: `kPoint = cell + frac(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453)` [S1, unofficial].
+8. Compute distance: `dist = distance(uv, kPoint)` [S1, unofficial].
+9. Update min: if `dist < minDist`, set `minDist = dist` and `bestPoint = kPoint` [S1, unofficial].
+10. Output: `_NoiseTexture[id.xy] = float4(1 - minDist, 1 - minDist, 1 - minDist, 1.0)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Animated Worley Noise Generation
+# Inputs: id (int2), width, height, noise_resolution, scale, time, range
+# Output: noise_texture (RWTexture2D<float4>)
+
+def generate_animated_worley(id, width, height, noise_resolution, scale, time, range):
+    # Check bounds
+    if id.x >= width or id.y >= height:
+        return
+
+    # Compute UV with time animation
+    uv = float2(id.x, id.y) / noise_resolution * scale + time / 5.0
+
+    # Initialize minimum distance and best point
+    min_dist = 1.0
+    best_point = float2(0, 0)
+
+    # Loop over neighborhood
+    for j in range(-range, range + 1):
+        for i in range(-range, range + 1):
+            # Compute cell coordinates
+            cell = floor(uv) + float2(i, j)
+
+            # Compute hash point using sine hash
+            k_point = cell + frac(sin(dot(cell, float2(12.9898, 78.233))) * 43758.5453)
+
+            # Compute distance to point
+            dist = distance(uv, k_point)
+
+            # Update minimum distance
+            if dist < min_dist:
+                min_dist = dist
+                best_point = k_point
+
+    # Output result
+    noise_texture[id.x, id.y] = float4(1 - min_dist, 1 - min_dist, 1 - min_dist, 1.0)
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The hash function uses `sin` and large constants, which may suffer from precision issues at very high resolutions or extreme time values [S1, unofficial].
+- **Boundaries:** The method assumes the texture is square and uses `noise_resolution` for both dimensions. Non-square textures may require separate width/height handling [S1, unofficial].
+- **Time Animation:** The time is divided by 5, which sets the animation speed. This value is hardcoded and not exposed as a parameter [S1, unofficial].
+
+## Subtopics
+
+### Fractal Brownian Motion (FBM) Worley Noise
+A technique to generate detailed volumetric noise by summing multiple layers (octaves) of Worley noise at decreasing scales and amplitudes [S2, unofficial]. It differs from the base method by accumulating detail across multiple resolutions. Choose it when high-frequency detail is required for volumetric smoke [S2, unofficial].
+
+**Definition:**
+- Generates detailed volumetric noise by summing multiple layers (octaves) of Worley noise at decreasing scales and amplitudes [S2, unofficial].
+
+**Steps:**
+1. Generate base noise: Call `_compute_worley_noise_3D(0.4f)` [S2, unofficial].
+2. Refine base noise: Divide `worley_noise_division_size` by 2. Call `_compute_worley_noise_3D(0.2f)` [S2, unofficial].
+3. Add detail octaves: Divide `worley_noise_division_size` by 2. Call `_compute_worley_noise_3D(0.1f)` four times [S2, unofficial].
+4. Generate detail noise octaves: Initialize `octave_count = 5`, `persistance = 0.5f`, `lacurancy = 2.0f`, `amplitude = 0.075f`, `size = 16`. Loop `octave` from 0 to 4: Set `worley_noise_division_size` to `(size, size, size)`. Call `_compute_worley_noise_3D_detail(amplitude)`. Update `amplitude *= persistance`. Update `size = Mathf.CeilToInt(size / lacurancy)` [S2, unofficial].
+
+**Parameters:**
+- `octave_count`: `Integer`, number of detail noise octaves. Default value 5 [S2, unofficial].
+- `persistance`: `Float`, amplitude decay factor per octave. Default value 0.5f [S2, unofficial].
+- `lacurancy`: `Float`, frequency increase factor per octave. Default value 2.0f [S2, unofficial].
+- `detail_noise`: `RenderTexture`, format `R8`, wrap `Clamp`, filter `Bilinear`. Stores the accumulated detail noise. Dimensions match `worley_noise_size` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(W \cdot H \cdot (2 \cdot range + 1)^2)$ per frame, where $W$ and $H$ are texture dimensions and $range$ is the search radius [S1, unofficial].
+- **Memory Complexity:** $O(W \cdot H)$ for the output texture [S1, unofficial].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Linear with resolution and search radius [S1, unofficial].
+- **Strengths:** Simple to implement, efficient for breaking up silhouettes, GPU-friendly [S1, unofficial].
+- **Limitations:** Limited to 2D, no smoothing or vector displacement, fixed hash function [S1, unofficial].
+- **When to use:** When simple, animated Voronoi patterns are needed for smoke or fluid silhouettes [S1, unofficial].
+- **When not to use:** When 3D noise, smoothing, or vector displacement is required [S1, unofficial].
+
+## Background
+Originated in the context of volumetric smoke rendering using ray marching, where analytical smoke evaluation per pixel is composited over the frame [S1, unofficial]. The method is part of a pipeline that includes voxelization, ray marching, and compositing [S1, unofficial].
+
+## Sources
+[S1] Schokolasbotter/volumetric-smoke-raymarching, https://github.com/Schokolasbotter/volumetric-smoke-raymarching, fetched 2026-10-28 (unofficial)
+[S2] furkanunsal42/VolumetricSmoke, https://github.com/furkanunsal42/VolumetricSmoke, fetched 2026-10-26 (unofficial)

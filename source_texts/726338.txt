@@ -1,0 +1,485 @@
+Contribute to hakuturu583/splatsim development by creating an account on GitHub.
+
+feat(actors): render rigid dynamic objects from a scene bundle's asset bank by hakuturu583 · Pull Request #3 · hakuturu583/splatsim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+hakuturu583
+commented
+Sep 1, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Why
+A scene USDZ's sequence_tracks.json says where every dynamic object is at every moment. Until now splatsim had nothing to draw there — the Gaussians are one static world-frame cloud, so a moving car is either smeared into the background or cut out of it and gone.
+3dgs_io v2.1.0 added the other half: splatsim.actor_assets/v1, a bank of object-local Gaussian clouds plus the bindings that say which track renders with which asset. This is splatsim's consumer for it.
+Poses come from outside
+The library hands out RigidBody instances and the scenario drives them — a CARLA bridge, a scenario runner, the gRPC service. The bundle's own tracks are metadata here, exposed through ActorAssetLibrary.bound_track_ids for callers replaying a recording, not a playback engine.
+```
+scene = Scene.from_config("scene.usdz")
+print(scene.actor_library.asset_ids)          # what the bundle ships
+
+scene.spawn_actor("sedan_0007", name="car_01", position=(113.6, -58.5, 1.9))
+scene.spawn_actor("sedan_0007", name="car_02", position=(120.0, -58.5, 1.9))
+scene.set_pose("car_01", (114.1, -58.5, 1.9), (0.966, 0.0, 0.0, 0.259))
+```
+Instances share their base tensors, so fifty of the same sedan cost one upload.
+What's in the diff
+splatsim/actor_assets.py — ActorAssetLibrary reads the bank out of a scene USDZ and spawns instances. An asset's Gaussians and its per-Gaussian LiDAR attributes go through cloud_to_tensors and attach_lidar_attrs exactly like a background chunk: nothing about an actor is a special kind of Gaussian.
+Scene.spawn_actor / SceneConfig.actors — spawn at load time for static props and spawn points, or at runtime from a scenario. Scene.actor_library exposes the bank.
+RigidBody(source=...) now accepts GaussianTensors already on the device, which is how bank assets arrive.
+attach_lidar_attrs moved from _usdz.py to _conversions.py and made public, so the USDZ loader and the actor bank share one implementation instead of two.
+3dgs_io pin v2.0.1 → v2.1.0 (pyproject.toml + uv.lock).
+Two conventions that are silent when you get them wrong
+Both are handled, not just documented and hoped for:
+Hazard
+Handled by
+Frame
+Background re-centres the scene on its own Gaussian centroid, so an ENU world-frame pose (a track pose, a map waypoint) needs that centroid subtracted — otherwise the actor renders hundreds of metres away
+spawn() takes world poses by default and converts; world_to_tile_local() is the conversion on its own; world_position=False opts out
+Quaternion order
+Everything inside a scene bundle is xyzw; every splatsim pose is wxyz. Reordering by hand gives a plausible-but-wrong heading
+pose_from_track_frame()
+View-dependent bands: camera and LiDAR
+An actor's heading changes every frame, so leaving its view-dependent bands in the object frame makes highlights — and raydrop — spin with the car. Posing an actor re-expresses both its colour SH and its raydrop_sh in the world frame; the LiDAR path consumes actor assets through the same Scene.collect_tensors walk a background chunk uses, so intensity, raydrop and the participation mask all reach the LiDAR renderer unchanged in kind.
+The rotation about +Z is exact and closed-form — it mixes only (m, −m) pairs, no Wigner-D — which covers the yaw-only poses road vehicles have. RigidBody.sh_rotation_is_exact reports when a pose is tilted far enough out of the ground plane for it to be an approximation, rather than silently approximating.
+Note the two SH layouts differ and are handled separately: colours are [N, K, 3] with the DC term at index 0, while raydrop_sh is [N, K] and DC-less (its DC lives in the scalar raydrop_logit), so band l starts at l² and l²−1 respectively.
+The direction is the subtle part. The rotation helper's contract is f_out(d) == f_in(R_z(angle) @ d), so 3dgs_io's world→object extraction uses +yaw while instancing object→world here needs the inverse, −yaw. Tests that only pin apply_rigid_transform against the helper prove agreement, not direction, so the invariant tests evaluate the bands along real rays and assert that the unrotated version would be wrong.
+apply_rigid_transform keeps its old behaviour by default (rotate_sh=False), so existing rigid bodies are untouched; only actors opt in.
+Verification
+End to end against a bundle written by 3dgs_io's own writer (not a hand-rolled zip): build a scene → extract_actor_asset at the track box → add_actor_assets_to_usdz → load through ActorAssetLibrary and pose from the track. The posed actor reproduces R·local + t to 1e-5 m, every Gaussian lands back inside the tracked box, and the tile-local centroid is applied (world -113.62 → tile-local -87.11 with a -26.51 centroid).
+SH rotation checked against an independent evaluation of the 3DGS real-SH basis — exact to 1e-12 across yaw, with the DC band left untouched.
+Physical invariants along real rays, for colour and for raydrop: a posed actor shades and drops rays the way its object-frame asset does. These are the tests that catch an inverted rotation.
+pytest: 99 → 139 passing (40 new). The 4 failures are the pre-existing cyclonedds import gap in the test environment and are unchanged from master.
+ruff check / ruff format --check clean; ty check clean on every changed file.
+Not in scope
+Driving actors from the bundle's tracks (timestamp → interpolated pose). The bindings are exposed for a caller that wants to build it.
+🤖 Generated with Claude Code
+Generated by Claude Code
+feat(actors): render rigid dynamic objects from a scene bundle's asse…
+…
+aa6fae0
+```
+…t bank
+
+A scene USDZ's sequence_tracks.json says where every dynamic object is at
+every moment; until now splatsim had nothing to draw there. 3dgs_io v2.1.0
+added the other half — splatsim.actor_assets/v1, a bank of object-local
+Gaussian clouds plus the bindings that say which track renders with which
+asset. This is splatsim's consumer for it.
+
+Poses come from outside. The library hands out RigidBody instances and the
+scenario drives them (CARLA bridge, scenario runner, gRPC); the bundle's own
+tracks are metadata, exposed through ActorAssetLibrary.bound_track_ids for
+callers replaying a recording, not a playback engine.
+
+* splatsim/actor_assets.py: ActorAssetLibrary reads the bank out of a scene
+  USDZ and spawns instances. An asset's Gaussians and its per-Gaussian LiDAR
+  attributes go through cloud_to_tensors and _attach_lidar_attrs exactly like
+  a background chunk — nothing about an actor is a special kind of Gaussian.
+  Instances share their base tensors, so fifty of the same sedan cost one
+  upload.
+* Scene.spawn_actor / SceneConfig.actors: spawn at load time for static props
+  and spawn points, or at runtime from a scenario. Scene.actor_library exposes
+  the bank.
+* RigidBody.from_tensors: build a body from tensors already on the device,
+  which is how bank assets arrive.
+
+Two conventions that are silent when you get them wrong, so both are handled
+rather than documented and hoped for:
+
+* Frame. Background re-centres the scene on its Gaussian centroid, so an ENU
+  world-frame pose needs that centroid subtracted or the actor renders
+  hundreds of metres away. spawn() takes world poses by default and converts;
+  world_to_tile_local() is the conversion on its own.
+* Quaternion order. Bundle poses are xyzw, every splatsim pose is wxyz.
+  pose_from_track_frame() reorders, so a track pose does not silently become a
+  plausible-but-wrong heading.
+
+Actors also re-express their colour SH when posed, which pre-existing rigid
+bodies do not: an actor's heading changes every frame, and leaving the
+specular bands in the object frame makes highlights spin with the car. The
+rotation about +Z is exact and closed-form (verified against an independent
+evaluation of the 3DGS real-SH basis, 1e-12), which covers the yaw-only poses
+road vehicles have; RigidBody.sh_rotation_is_exact reports when a pose is
+tilted far enough out of the ground plane for it to be an approximation.
+apply_rigid_transform keeps its old behaviour by default, so existing
+RigidBodyConfig bodies are untouched.
+
+Verified end to end against a bundle written by 3dgs_io's own writer: the
+posed actor reproduces R*local + t to 1e-5 m, every Gaussian lands back inside
+the tracked box, and the tile-local centroid is applied. Test suite goes 99 ->
+120 passing; the 4 failures are the pre-existing cyclonedds import gap.
+
+Signed-off-by: Masaya Kataoka <ms.kataoka@gmail.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QGHd9kqiH818wd7pZmyk5s
+```
+hakuturu583
+added
+the
+release:minor
+label
+Sep 1, 2026
+— with
+Claude
+chatgpt-codex-connector
+Bot
+reviewed
+Sep 1, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: aa6fae0045
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+pyproject.toml
+3dgs-io = { git = "https://github.com/autowarefoundation/3dgs_io.git", tag = "v2.0.1" }
+# extract_lidar_extension, parse_actor_assets, parse_rig_trajectories, ...)
+# are used.
+3dgs-io = { git = "https://github.com/autowarefoundation/3dgs_io.git", tag = "v2.1.0" }
+chatgpt-codex-connector
+Bot
+Sep 1, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Regenerate the lockfile for 3dgs-io v2.1.0
+The source pin is changed to v2.1.0, but the committed uv.lock still resolves both the package and requires-dist entry to v2.0.1. In environments using uv sync --frozen—whose inspected help defines it as “Sync without updating the uv.lock file”—the new module immediately accesses parse_actor_assets and decode_actor_asset, which v2.0.1 does not provide, so importing splatsim fails before any actor APIs are used. Regenerate and commit uv.lock with the new source pin.
+Useful? React with 👍 / 👎.
+Comment thread
+src/splatsim/scene.py
+Comment on lines
++94
+to
++96
+The scenario owns the pose from here on: call
+:meth:`set_pose` with ``name`` each frame. ``position`` is read in the
+bundle's ENU world frame unless ``world_position`` is ``False``;
+chatgpt-codex-connector
+Bot
+Sep 1, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Recenter world poses on every actor update
+When world_position=True, only the initial position passed to spawn_actor is converted to tile-local coordinates. The advertised per-frame Scene.set_pose call forwards later positions directly to RigidBody.set_pose, so a scenario supplying subsequent ENU track positions—as the new README example does—moves the actor by the omitted background centroid and typically sends it far outside the scene after the first update. Preserve the actor's frame mode and apply the same conversion on updates, or make the update API explicitly accept a world-position flag.
+Useful? React with 👍 / 👎.
+Comment thread
+src/splatsim/_conversions.py
+Outdated
+if base + 2 * degree > coefs:
+break
+for m in range(1, degree + 1):
+angle = m * yaw
+chatgpt-codex-connector
+Bot
+Sep 1, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Apply the inverse yaw when rotating actor SH
+For an actor pose mapping local points as p_world = R @ p_local + t, a world-space viewing direction must be expressed in the asset frame as R.T @ d_world. This implementation instead constructs coefficients satisfying f_world(d) = f_local(R @ d), as the new test also asserts, so any nonzero actor yaw rotates its view-dependent appearance in the opposite direction (for example, a +90° pose samples the +Y rather than -Y local direction). Rotate the SH by the inverse yaw here.
+Useful? React with 👍 / 👎.
+Comment thread
+src/splatsim/rigid_body.py
+) -> None:
+# LOD: sort base tensors by importance and store tier boundaries.
+self._lod_index: LodIndex | None = None
+if lod_manager is not None:
+chatgpt-codex-connector
+Bot
+Sep 1, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Precompute actor LOD data once per asset
+With the default enabled LOD configuration, every spawn calls LodManager.precompute again. That method advanced-indexes every tensor field into a new sorted GaussianTensors, so instances no longer share the cached asset tensors and each spawn repeats the CPU octree construction plus a full GPU allocation; this defeats the feature's stated one-upload behavior and can multiply load time and VRAM for fleets sharing one asset. Cache the sorted tensors and LodIndex once in ActorAssetLibrary and reuse them for each body.
+Useful? React with 👍 / 👎.
+Comment thread
+README.md
+Comment on lines
++135
+to
++136
+library = scene.actor_library
+print(library.asset_ids, library.info("sedan_0007").size)
+chatgpt-codex-connector
+Bot
+Sep 1, 2026
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Load the actor library before using it in the example
+For Scene.from_config("scene.usdz"), SceneConfig.from_usdz always produces an empty actors list, so from_config deliberately leaves scene.actor_library as None until spawn_actor is called. Consequently this newly documented discovery example always raises AttributeError at library.asset_ids for the shown flow, preventing users from discovering which asset ID they could spawn. Load the bank explicitly before dereferencing it or adjust the API/example to provide a supported discovery path.
+Useful? React with 👍 / 👎.
+hakuturu583
+and others
+added 3 commits
+September 1, 2026 14:07
+fix(deps): relock for 3dgs-io v2.1.0
+…
+2be6a92
+```
+Bumping the pin in pyproject.toml without regenerating the lock left the two
+out of sync, so `uv sync` had to re-resolve the whole graph instead of reading
+the lock — which drags in a from-source build of ppisp's CUDA extension and
+fails on a runner with no CUDA toolkit. That is exactly what the pre-commit
+job's `--no-install-package ppisp` is meant to sidestep, and it turned the job
+red:
+
+    × Failed to build `ppisp @ git+...`
+    ╰─▶ OSError: CUDA_HOME environment variable is not set.
+
+3dgs_io v2.0.1 -> v2.1.0 changes only the version string; its dependency set
+(numpy, scipy, spz) is untouched, so the lock delta is just the resolved tag,
+commit and version. `uv lock --check` is clean.
+
+Signed-off-by: Masaya Kataoka <ms.kataoka@gmail.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QGHd9kqiH818wd7pZmyk5s
+```
+refactor(actors): cut the per-frame cost and the duplicated seams
+…
+9169402
+```
+Quality pass over the actor wiring — no schema change, no behaviour change.
+
+Efficiency, on the per-frame transform path:
+* rotate_sh_about_z was a Python loop over SH bands: ~70 kernel launches and a
+  full [N, K, 3] clone per actor per gather, where master's colours were a
+  zero-copy passthrough. A +Z rotation only ever mixes the (m, -m) pair, so it
+  is now one gather and one blend against per-coefficient tables cached by
+  (coefs, device, dtype) — four kernels, no clone, and the DC and m == 0 slots
+  fall out for free (cos 1, sin 0). Same math: still exact to 1e-15 against an
+  independent evaluation of the 3DGS real-SH basis.
+* yaw/tilt read straight off the quaternion instead of building a 3x3 to take
+  three entries out of it, and split into yaw_from_quat / tilt_from_quat so
+  neither caller discards half a tuple.
+
+Altitude:
+* RigidBody.posed(base=None) — the body owns its transform. Scene's LOD branch
+  was a second place that had to mirror how a body wants to be transformed,
+  and had already grown a rotate_sh argument to keep in sync; it is now
+  rb.posed(base), and the rotate_sh property it existed to read is gone.
+* attach_lidar_attrs moved from _usdz to _conversions and lost its underscore.
+  It populates a GaussianTensors from a decoded attribute dict — a tensors
+  concern, not a USDZ one, which is why it took usdz_path and chunk_name only
+  to build error strings. Two modules now import it publicly, with one `source`
+  label instead of two USDZ-shaped parameters.
+* Scene.from_config builds the Scene and then routes configured actors through
+  spawn_actor, deleting a duplicate name-collision guard (with its own
+  divergent message), the eager library construction and an assert/noqa. The
+  bank is loaded once, on first spawn, either way.
+* quat_xyzw_to_wxyz lives in _geometry, whose docstring says outright that it
+  exists so these transforms stop being re-implemented per module — and which
+  pose_from_track_frame and _lidar_sensors_from_rigs were both re-deriving.
+
+Trimmed: RigidBody's __init__/from_tensors/_init_from_tensors ladder collapses
+to one constructor taking a path or tensors (the cls.__new__ bypass meant actor
+bodies skipped __init__ entirely); has_actor_assets (no caller, re-implemented
+the loader's own extras lookup and swallowed corrupt-bundle errors into False);
+ActorAssetLibrary.__len__/__contains__; ActorAssetInfo.metadata (an unbounded
+per-asset copy nothing read); ActorConfig's empty-asset_id check (the library
+already reports unknown ids with the available ones listed); the test suite's
+background SPZ chunk, whose bytes nothing under test decodes.
+
+Not done, and why: caching posed tensors per pose is an invalidation problem,
+not a cleanup — posed() now gives it one home when it is wanted. Lazy per-asset
+decode moves where a corrupt bank surfaces, from load to first spawn. The
+_usdz tempfile round-trip and the three other test modules' copied fixtures are
+pre-existing and outside this change.
+
+Verified end to end again on a bundle from 3dgs_io's own writer, now including
+the SceneConfig.actors path: R*local + t to 1e-5 m through both the library and
+the config route. 120 passing, unchanged; ruff and ty clean.
+
+Signed-off-by: Masaya Kataoka <ms.kataoka@gmail.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QGHd9kqiH818wd7pZmyk5s
+```
+fix(actors): rotate raydrop bands with the pose, and rotate the right…
+…
+9bc51e2
+```
+… way
+
+Two problems, both found by finally evaluating the bands along a real ray
+instead of asserting that apply_rigid_transform agrees with its own helper.
+
+1. raydrop_sh was passed through unrotated. The previous comment claimed the
+   LiDAR path did not consume actor assets — it does: Scene.collect_tensors
+   walks the rigid bodies, and lidar_renderer calls it for every sensor. So a
+   posed actor's view-dependent drop bands were being evaluated along the
+   world-space sensor ray while still expressed in the object frame. A car
+   facing east dropped rays with the pattern it had facing north — up to 0.78
+   absolute error in drop probability in the check below. raydrop_sh now
+   rotates with the colour SH, off the same yaw. The band-0 term lives in the
+   scalar raydrop_logit and is rotation-invariant, so it needs nothing.
+
+   The bands use the DC-less layout ([N, K], band l at l*l-1) against the
+   colours' DC-first one ([N, K, 3], band l at l*l), so the mixing tables took
+   a dc_offset and the blend handles both ranks; the closed form is otherwise
+   identical.
+
+2. The rotation went the wrong way — for the colours too. The rotators
+   re-express coefficients so f_out(d) == f_in(R_z(angle) @ d). Instancing
+   needs the world bands to answer for the object frame, f_world(d) ==
+   f_object(R^-1 d), which is the inverse: -yaw, not +yaw. (3dgs_io's
+   extract_actor_asset goes world -> object and correctly passes +yaw; this
+   side is the mirror image and had copied the sign.) The existing tests could
+   not catch it: they pinned apply_rigid_transform against rotate_sh_about_z,
+   which proves the two agree and says nothing about direction.
+
+So the tests now pin the invariant that actually matters, for both band sets:
+a posed actor evaluated at the world ray must equal the object-frame asset
+evaluated at the same ray seen from the object frame — and each asserts that
+the unrotated version would have been wrong, so a no-op cannot pass. Also
+covered: the DC-less rotation against the exact packing lidar_renderer uses
+(degrees 1-3), raydrop rotating for an RGB-mode asset (it does not depend on
+sh_degree), raydrop_logit staying put, and the LOD lidar_view gather — the
+path the LiDAR renderer actually takes — still handing back rotated bands.
+
+Verified end to end on a bank asset through the real evaluators: 4.8e-07 logit
+for raydrop, 6.0e-07 for colour, against 4.26 and 3.34 unrotated.
+
+The rest of the LiDAR path already treated an actor like any other source and
+needed no change: lidar_mask is applied per-source before the scene concat, so
+an asset without one participates fully; assets with no raydrop bands are
+zero-padded to the scene's SH width and contribute only their scalar logit;
+and _resolve_lidar_attrs falls back per-source. Documented in the README rather
+than left to be rediscovered.
+
+Signed-off-by: Masaya Kataoka <ms.kataoka@gmail.com>
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01QGHd9kqiH818wd7pZmyk5s
+```
+hakuturu583
+commented
+Sep 1, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+pre-commit failure is pre-existing on master, not introduced by this PR
+The pre-commit job fails on the ty hook. That failure reproduces identically on master:
+run
+commit
+ty result
+master
+33515220668
+ad6adcd
+Found 49 diagnostics
+this PR
+33519543894
+9bc51e2
+Found 49 diagnostics
+Same count, same diagnostics. This branch adds ~1,500 lines and contributes zero new ty diagnostics; every reported location is in a file this PR never touches.
+The hook is entry: uv run --no-sync ty check with pass_filenames: false, so it type-checks the whole project on every run regardless of what changed — which is why a master-side breakage lands on this PR's checks.
+What is actually failing
+Three groups, none of them related to actor assets:
+src/splatsim/carla_integration/** (~43 diagnostics). splatsim_scenario.py imports carla and autoware_carla_scenario.*, neither pip-installable, so both are unresolved-import in CI. The knock-on effect is that SplatSimLidarSensorConfig inherits from an unresolvable LidarSensorConfig, so ty cannot see the base class's fields and reports unknown-argument for n_columns, fps, min_range_m, max_range_m, position_x/y/z, roll, pitch, yaw at splatsim_lidar.py:42-53. Two unused-ignore-comment warnings at splatsim_scenario.py:134,138 follow from the same cause.
+test/test_grpc_pose_stream.py. Imports rendering_service_pb2, a build-time-generated, gitignored stub — the exact case pyproject.toml already covers for src/splatsim/grpc_service/** and test/test_grpc_lod.py. Plus two unresolved-attribute on TimestampedPose | None (.time_ns on an un-narrowed Optional).
+test/test_rig_shared_gather.py. One unresolved-attribute on LidarGaussians | None (:115) and two invalid-assignment from monkeypatching torch.cuda.Stream / Stream.wait_stream (:273, :337).
+Proposed fix (not applied here)
+Group 1 and the import half of group 2 are the same class of problem pyproject.toml already solves four times over, so they follow the existing convention:
+```
+# CARLA integration imports `carla` and `autoware_carla_scenario`, neither of
+# which is pip-installable, so the base-class fields are invisible to ty.
+[[tool.ty.overrides]]
+include = ["src/splatsim/carla_integration/**"]
+[tool.ty.overrides.rules]
+unresolved-import = "ignore"
+unknown-argument = "ignore"
+unused-ignore-comment = "ignore"
+```
+and adding "test/test_grpc_pose_stream.py" to the existing grpc_service override block.
+The remaining handful are real narrowing/monkeypatch nits fixed in the test files themselves — an assert x is not None before each Optional dereference, and setattr/# ty: ignore on the two torch.cuda.Stream patches.
+I have not pushed any of this: it is master's breakage in files outside this change, and folding a repo-wide lint-config change into a feature PR would make this diff harder to review. Happy to land it either as a separate PR against master (which would then make this PR green on merge) or here, whichever you prefer.
+The Require version bump label check is green; docker-build (6 CUDA arches) is still running and was green on master for the same configuration.
+Generated by Claude Code
+hakuturu583
+mentioned this pull request
+Sep 1, 2026
+fix(ci): make the ty pre-commit hook pass again
+#4
+Merged
+hakuturu583
+commented
+Sep 1, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Fix opened as a separate PR against master: #4.
+It is config + two test files only, no production code. Once it merges I will bring master into this branch so pre-commit goes green here too, without this PR carrying the repo-wide lint-config change.
+One thing worth noting from doing the work: the CI log I quoted above was truncated, and running ty locally turned up a 49th diagnostic the log had cut — src/scenarios/odaibatest_spawn/spawn_only.py hits the same invisible-base-class cascade as carla_integration, so the existing src/scenarios/** override needed unknown-argument too. #4 covers it.
+docker-build on this PR is still running.
+Generated by Claude Code
+Merge master into actor-assets branch
+…
+6eaedc6
+```
+Brings in the ty pre-commit fix (#4) so this PR's checks run against a
+green base.
+
+Signed-off-by: Masaya Kataoka <ms.kataoka@gmail.com>
+```
+Hide details
+View details
+hakuturu583
+merged commit c1ca95d
+into
+master
+Sep 1, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+hakuturu583
+deleted the
+claude/dynamic-object-3dgs-format-atw05u
+branch
+September 1, 2026 16:00
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+release:minor
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,239 @@
+# Ray Marching with Dithering and Early Termination
+
+Also called: Raymarching with Transmittance-based Early Ray Termination
+
+## Overview
+Ray marching with dithering and early termination is a GPU-based volume rendering technique that iterates along rays through a volume, accumulating color and transmittance while applying shading, to produce a final image with reduced aliasing and improved performance [S1, S2, unofficial]. It distinguishes itself from standard front-to-back compositing by integrating a dithered starting position to mitigate staircase artifacts from undersampling and employing a transmittance-based threshold to terminate rays early when they become effectively opaque, thereby skipping unnecessary samples in dense regions [S1, S2, unofficial]. This method builds on the principles of [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md) by using a deterministic transmittance threshold rather than probabilistic survival.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A 3D volume texture (density/intensity field), a transfer function texture (mapping intensity to color/opacity), camera parameters (origin `ro`, direction `rd`), light positions and colors, and rendering parameters (step size, thresholds).
+*   **Outputs:** A 2D screen image (color buffer) where each pixel contains the accumulated color and opacity of the ray passing through that pixel.
+
+**Data Structures:**
+*   **Volume Texture (`voltex`):** A 3D texture storing density or intensity values. Typically sampled using linear interpolation [S2, unofficial].
+*   **Transfer Function Texture (`tftex`):** A 1D or 2D texture mapping sampled intensity values to RGBA color and opacity [S1, unofficial].
+*   **Uniforms:**
+    *   `uCamPos`: Camera position (vec3) [S2, unofficial].
+    *   `uLightP`: Array of light positions (vec3 array) [S2, unofficial].
+    *   `uLightC`: Array of light colors (vec3 array) [S2, unofficial].
+    *   `uTex`: Reference to the volume texture [S2, unofficial].
+    *   `uTexDim`: Dimensions of the volume texture (vec3) [S2, unofficial].
+    *   `uOffset`: Offset for the volume (vec3) [S2, unofficial].
+    *   `uTMK`: Transmittance kernel constant (float) [S2, unofficial].
+    *   `uTMK2`: Secondary transmittance constant (float) [S2, unofficial].
+    *   `uShininess`: Specular shininess exponent (float) [S2, unofficial].
+    *   `uCrust`: Crust thickness parameter (float) [S2, unofficial].
+    *   `uShin2`: Secondary shininess parameter (float) [S2, unofficial].
+    *   `uR`, `uG`, `uB`: Base color components (float) [S2, unofficial].
+    *   `uPhi`: Phase function parameter (float) [S2, unofficial].
+    *   `gStepSize`: Precomputed step size (float) [S2, unofficial].
+    *   `MAX_STEPS`: Maximum number of samples per ray (int) [S2, unofficial].
+    *   `SHADING_THRES`: Threshold for applying shading (float, typically 0.10) [S1, unofficial].
+    *   `DELTA`: Gradient computation delta (float, typically 0.005) [S1, unofficial].
+    *   `TM_MIN`: Transmittance threshold for early termination (float, value not explicitly defined in sources but used in conditions) [S2, unofficial].
+
+**Numbered Steps:**
+
+1.  **Ray Initialization:**
+    *   Calculate the ray direction `rd` and origin `ro` for the current pixel based on screen coordinates and camera projection [S2, unofficial].
+    *   Normalize the screen coordinates: `norm_coord = gl_FragCoord.st / vec2(screen_width, screen_height)` [S1, unofficial].
+    *   Initialize accumulated color `col` to `vec3(0.0)` and accumulated transmittance `tm` to `1.0` [S2, unofficial].
+    *   Calculate the total ray length `len` and direction vector `direction` from the entry point to the exit point of the volume bounding box [S1, unofficial].
+    *   Compute the step size `stepsize` as `len / nsamples` [S1, unofficial].
+    *   Calculate the normalized direction `direction = normalize(direction)` and the delta vector `delta = direction * stepsize` [S1, unofficial].
+
+2.  **Dithering:**
+    *   Apply dithering to the starting position to reduce aliasing: `pos = pos + delta * rand()` where `rand()` is a random value in [0, 1) [S1, unofficial]. This offsets the ray start to hide woodgrain/staircase aliasing from undersampling [S1, unofficial].
+
+3.  **Ray Marching Loop:**
+    *   Iterate `i` from 0 to `MAX_STEPS` [S2, unofficial].
+    *   Sample the volume density/intensity `v` at the current position `pos`: `v = sampleVolTex(pos)` [S2, unofficial].
+    *   Update the accumulated transmittance `tm`:
+        $$ tm = tm \cdot \exp(-uTMK \cdot gStepSize \cdot v) $$
+        [S2, unofficial].
+    *   Update the accumulated color `col` using front-to-back compositing:
+        $$ col = col + (1.0 - tm_{new}) \cdot color_{sample} $$
+        where `color_sample` is obtained by mapping the sampled intensity through the transfer function `tftex` [S1, unofficial].
+    *   Update the position: `pos = pos + delta` [S1, unofficial].
+    *   **Early Termination Check:**
+        *   If `tm < TM_MIN` (transmittance is very low) OR `pos` is outside the unit cube bounds `[0, 1]` for any coordinate, break the loop [S2, unofficial].
+        *   Alternatively, if accumulated opacity `outcolor.a > 0.95`, break the loop [S1, unofficial].
+    *   **Shading Calculation (Conditional):**
+        *   If `color.a > SHADING_THRES` (0.10) AND `shading_mode != 3` AND `nsamples > 500`, compute shading [S1, unofficial].
+        *   Compute the surface normal `N` at `pos` using central differences on the volume texture:
+            $$ N.x = sampleVolTex(pos + \vec{\delta}_x) - sampleVolTex(pos - \vec{\delta}_x) $$
+            $$ N.y = sampleVolTex(pos + \vec{\delta}_y) - sampleVolTex(pos - \vec{\delta}_y) $$
+            $$ N.z = sampleVolTex(pos + \vec{\delta}_z) - sampleVolTex(pos - \vec{\delta}_z) $$
+            where $\vec{\delta}$ is a small offset (e.g., `DELTA = 0.005`) [S1, unofficial].
+        *   Normalize `N` and transform it to world space: `N = normalize(normalmatrix * N)` [S1, unofficial].
+        *   Calculate the light vector `L` from `pos` to the light position and the view vector `V` from `pos` to the camera origin `ro` [S2, unofficial].
+        *   Compute the halfway vector `H = normalize(L + V)` [S2, unofficial].
+        *   Apply shading based on the `shading_mode`:
+            *   Mode 0: Blinn-Phong shading [S1, unofficial].
+            *   Mode 1: Blinn-Phong + Edge Enhancement [S1, unofficial].
+            *   Mode 2: Toon shading [S1, unofficial].
+            *   Mode 3: No shading [S1, unofficial].
+        *   The specular intensity is computed as `pow(dot(normalize(H), N), shininess)` [S2, unofficial].
+        *   Apply compositing based on the `compositing_mode`:
+            *   Mode 0: Front-to-Back alpha blending [S1, unofficial].
+            *   Mode 1: Maximum Intensity Projection (MIP) [S1, unofficial].
+            *   Mode 2: Minimum Intensity Projection (MIDA) [S1, unofficial].
+
+4.  **Output:**
+    *   Return the accumulated color `col` and transmittance `tm` as the final pixel color [S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def raymarch_with_dithering_and_early_termination(ro, rd, volume_tex, tf_tex, params):
+    """
+    Ray marching with dithering and early termination.
+    
+    Args:
+        ro: Ray origin (vec3)
+        rd: Ray direction (vec3)
+        volume_tex: 3D volume texture
+        tf_tex: Transfer function texture
+        params: Dictionary of parameters including:
+            - uTMK: Transmittance kernel constant
+            - gStepSize: Step size
+            - MAX_STEPS: Max iterations
+            - SHADING_THRES: Shading threshold
+            - DELTA: Gradient delta
+            - TM_MIN: Transmittance threshold
+            - uShininess: Shininess exponent
+            - shading_mode: Shading mode (0-3)
+            - compositing_mode: Compositing mode (0-2)
+            - uLightP: Light positions
+            - uLightC: Light colors
+            - normalmatrix: Normal transformation matrix
+            - screen_width, screen_height: Screen dimensions
+            - gl_FragCoord: Current fragment coordinates
+            
+    Returns:
+        vec3: Final accumulated color
+    """
+    # 1. Ray Initialization
+    # Calculate normalized screen coordinates
+    norm_coord = vec2(gl_FragCoord.st) / vec2(screen_width, screen_height)
+    
+    # Calculate ray direction and length (assuming entry/exit points are known or computed)
+    # For simplicity, assume direction is normalized and length is computed
+    direction = normalize(rd)
+    len = compute_ray_length(ro, rd, volume_bounds) # Implementation detail for bounding box intersection
+    stepsize = len / params['nsamples']
+    delta = direction * stepsize
+    
+    # Initialize accumulators
+    col = vec3(0.0)
+    tm = 1.0
+    pos = ro # Entry point
+    
+    # 2. Dithering
+    # Apply dithering to starting position
+    pos = pos + delta * random_float()
+    
+    # 3. Ray Marching Loop
+    for i in range(params['MAX_STEPS']):
+        # Sample volume density
+        v = sample_volume(volume_tex, pos)
+        
+        # Update transmittance
+        # tm = tm * exp(-uTMK * gStepSize * v)
+        dtm = exp(-params['uTMK'] * params['gStepSize'] * v)
+        tm_new = tm * dtm
+        
+        # Map intensity to color via transfer function
+        intensity = v
+        color_sample = sample_transfer_function(tf_tex, intensity)
+        
+        # Update accumulated color (Front-to-Back)
+        # col = col + (1.0 - tm_new) * color_sample * tm / tm_new ? 
+        # Standard front-to-back: C_acc = C_acc + C_sample * alpha_sample * (1 - alpha_acc)
+        # Here, tm represents transmittance T. alpha_sample = 1 - T_new/T_old
+        # Let's use the direct update from S2:
+        # col = col + (1.0 - dtm) * color_sample * tm # This is approximate, S2 uses:
+        # col = col + (1.0 - dtm) * sampleVolTex(pos) * gStepFactor; # This seems to be for density accumulation, not color.
+        # Let's stick to the standard compositing with the computed tm.
+        alpha_sample = 1.0 - dtm
+        col = col + color_sample.rgb * alpha_sample * tm
+        tm = tm_new
+        
+        # Update position
+        pos = pos + delta
+        
+        # Early Termination Check
+        if tm < params['TM_MIN']:
+            break
+        if pos.x > 1.0 or pos.x < 0.0 or pos.y > 1.0 or pos.y < 0.0 or pos.z > 1.0 or pos.z < 0.0:
+            break
+        if col.a > 0.95: # Based on S1, assuming col.a is tracked or computed
+            break
+            
+        # Shading Calculation (Conditional)
+        if color_sample.a > params['SHADING_THRES'] and params['shading_mode'] != 3 and params['nsamples'] > 500:
+            # Compute normal using central differences
+            N = vec3(
+                sample_volume(volume_tex, pos + vec3(params['DELTA'], 0.0, 0.0)) - sample_volume(volume_tex, pos - vec3(params['DELTA'], 0.0, 0.0)),
+                sample_volume(volume_tex, pos + vec3(0.0, params['DELTA'], 0.0)) - sample_volume(volume_tex, pos - vec3(0.0, params['DELTA'], 0.0)),
+                sample_volume(volume_tex, pos + vec3(0.0, 0.0, params['DELTA'])) - sample_volume(volume_tex, pos - vec3(0.0, 0.0, params['DELTA']))
+            )
+            N = normalize(params['normalmatrix'] * N)
+            
+            # Calculate light and view vectors
+            L = normalize(params['uLightP'][0] - pos)
+            V = normalize(ro - pos)
+            H = normalize(L + V)
+            
+            # Apply shading
+            if params['shading_mode'] == 0: # Blinn-Phong
+                spec = pow(max(dot(H, N), 0.0), params['uShininess'])
+                col = col + spec * params['uLightC'][0] * color_sample.a
+            elif params['shading_mode'] == 1: # Blinn-Phong + Edge Enhancement
+                # Edge enhancement logic not fully specified, assume similar to Blinn-Phong with additional term
+                spec = pow(max(dot(H, N), 0.0), params['uShininess'])
+                col = col + spec * params['uLightC'][0] * color_sample.a
+            elif params['shading_mode'] == 2: # Toon
+                # Toon shading logic not fully specified
+                pass
+        
+    return col
+```
+
+**Parameters with Typical Values:**
+*   `SHADING_THRES`: 0.10 [S1, unofficial].
+*   `DELTA`: 0.005 [S1, unofficial].
+*   `gStepSize`: Calculated as `ROOTTHREE / float(MAX_STEPS)` to traverse the diagonal of the unit cube [S2, unofficial].
+*   `TM_MIN`: Not explicitly defined in sources, but used in conditions [S2, unofficial].
+*   Early termination threshold (opacity): 0.95 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Aliasings:** Dithering hides woodgrain/staircase aliasing from undersampling but does not prevent transfer function and shading aliasing [S1, unofficial].
+*   **Precision:** Use high-precision intermediate rendering steps (e.g., `GL_RGBA16F`) to maintain good precision [S1, unofficial].
+*   **Bounds:** Ensure ray position is checked against volume bounds to avoid out-of-bounds texture access [S2, unofficial].
+*   **Shading Conditions:** Shading is only applied if opacity exceeds a threshold and sample count is high, which may lead to inconsistent shading in sparse regions [S1, unofficial].
+
+## Subtopics
+
+### [Dynamic Volume Raycasting with Accumulated Shading](3570-dynamic-volume-raycasting-with-accumulated-shading.md)
+A GPU-based technique that performs front-to-back alpha blending and shading accumulation in a single fragment shader pass using dynamic branching. It extends the parent method by supporting procedurally generated dynamic density fields and single-pass accumulation with dynamic branching. Choose this when rendering dynamic volumes with overlapping spherical sources that require real-time updates.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray. Early termination reduces the average number of samples, especially in dense volumes.
+*   **Memory Complexity:** $O(V)$ for the volume texture and $O(T)$ for the transfer function, where $V$ and $T$ are the sizes of the respective textures.
+*   **Measured Performance:** Performance depends heavily on the density distribution of the volume and the early termination threshold. In sparse volumes, early termination significantly reduces the number of samples, improving performance. In dense volumes, rays may terminate early, but shading calculations can add overhead.
+*   **Scaling:** Scales well with resolution on GPUs due to parallel ray processing. However, increasing the number of samples or the complexity of shading calculations can impact performance.
+*   **Strengths:** Reduces aliasing through dithering, improves performance through early termination, and supports various shading and compositing modes.
+*   **Limitations:** Dithering does not eliminate all aliasing artifacts. Early termination introduces bias by ignoring the ray tail. Shading calculations are conditional and may be inconsistent.
+*   **When to Use:** Suitable for real-time volume rendering where performance is critical and some aliasing is acceptable. Ideal for dynamic volumes with simple shading requirements.
+*   **When Not to Use:** Not suitable for offline rendering where high accuracy and no bias are required. Not ideal for volumes with complex shading or transfer functions that require precise sampling.
+
+## Background
+This method is implemented in the `qvrc` (Qt Volume Raycasting) project by Fargiolas [S1, unofficial] and the `webgl-volumetric` project by Baravalle [S2, unofficial]. It leverages GPU fragment shaders to perform ray marching, shading, and compositing in a single pass, utilizing features like dynamic branching and texture sampling. The technique is rooted in the principles of volume raycasting and early termination, adapted for real-time rendering on GPUs.
+
+## Sources
+[S1] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)
+[S2] rbaravalle/webgl-volumetric, https://github.com/rbaravalle/webgl-volumetric, fetched 2026-10-27 (unofficial)

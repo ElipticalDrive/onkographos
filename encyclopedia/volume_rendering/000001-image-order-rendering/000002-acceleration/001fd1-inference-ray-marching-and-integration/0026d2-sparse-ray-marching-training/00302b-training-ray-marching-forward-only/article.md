@@ -1,43 +1,36 @@
 # Training Ray Marching (Forward Only)
-
-
 ## Overview
-Training Ray Marching is a specialized ray marching function designed to optimize the training phase of neural volume rendering by dynamically allocating memory for ray samples. It estimates the maximum number of points to allocate based on the mean sample count from previous training epochs, thereby avoiding the computational overhead of over-allocating memory while supporting a "force-all-rays" mode to ensure stability when estimates are insufficient. It differs from inference-only marchers by maintaining state (step counters) across iterations to adaptively tune memory usage, and from static allocation methods by using historical data to predict resource needs.
-
+Training Ray Marching is a training-specific ray marching function that estimates the maximum number of points to allocate based on the mean count from previous epochs, enabling faster training by avoiding over-allocation, while supporting a force-all-rays mode for stability [S1, unofficial]. It differs from inference-only marchers by maintaining state (step counters) across iterations to adaptively tune memory usage, and from static allocation methods by using historical data to predict resource needs [S1, unofficial].
 ## How it works
-The method prepares ray data for a CUDA backend kernel, dynamically sizing output buffers based on historical performance metrics to balance memory efficiency and correctness.
-
 ### Inputs and Outputs
 **Inputs:**
-- `rays_o`: Origin positions, shape $[N, 3]$.
-- `rays_d`: Direction vectors, shape $[N, 3]$.
-- `density_grid`: 3D density grid, shape $[H, H, H]$.
-- `bound`: Spatial boundary float (default $10^{-4}$).
-- `mean_density`: Mean density value float.
-- `iter_density`: Current iteration density value float.
-- `mean_count`: Estimated max points from previous epoch (int).
-- `perturb`: Boolean flag for perturbation.
-- `force_all_rays`: Boolean flag to ignore `mean_count` and process all rays.
-- `step_counter`: Optional int array $[2]$ for tracking points/rays.
-- `align`: Alignment padding value (int).
+- `rays_o`: Origin positions, shape $[N, 3]$ [S1, unofficial].
+- `rays_d`: Direction vectors, shape $[N, 3]$ [S1, unofficial].
+- `density_grid`: 3D density grid, shape $[H, H, H]$ [S1, unofficial].
+- `bound`: Spatial boundary float (default $10^{-4}$) [S1, unofficial].
+- `mean_density`: Mean density value float [S1, unofficial].
+- `iter_density`: Current iteration density value float [S1, unofficial].
+- `step_counter`: Optional int array $[2]$ for tracking points/rays; defaults to zeros if None [S1, unofficial].
+- `mean_count`: Estimated max points number from previous epoch; if $> 0$ and `force_all_rays` is false, this overrides the default allocation [S1, unofficial].
+- `perturb`: Boolean flag to enable perturbation [S1, unofficial].
+- `force_all_rays`: Boolean flag; if true, ignores `mean_count` and processes all rays, ensuring no rays are ignored due to underestimation [S1, unofficial].
+- `align`: Integer padding value [S1, unofficial].
 
 **Outputs:**
-- `xyzs`: Sample positions, shape $[M, 3]$.
-- `dirs`: Sample directions, shape $[M, 3]$.
-- `deltas`: Step sizes, shape $[M]$.
-- `rays`: Ray metadata, shape $[N, 3]$, dtype int32.
-  - Column 0: Ray ID.
-  - Column 1: Offset into `xyzs`/`dirs`/`deltas`.
-  - Column 2: Number of steps for that ray.
+- `xyzs`: Sample positions, shape $[M, 3]$ [S1, unofficial].
+- `dirs`: Sample directions, shape $[M, 3]$ [S1, unofficial].
+- `deltas`: Step sizes, shape $[M]$ [S1, unofficial].
+- `rays`: Ray metadata, shape $[N, 3]$, dtype int32 [S1, unofficial].
+- `step_counter`: Updated counter array [S1, unofficial].
 
 ### Data Structures
-- **`rays`**: A contiguous integer array of shape $[N, 3]$. Each row $i$ corresponds to ray $i$. The values are:
-  - `rays[i, 0]`: The index of the ray.
-  - `rays[i, 1]`: The starting index in the flattened output arrays (`xyzs`, `dirs`, `deltas`) where samples for this ray are stored.
-  - `rays[i, 2]`: The number of valid samples stored for this ray.
-- **`step_counter`**: An integer array of shape $[2]$.
-  - `step_counter[0]`: Total number of points generated so far.
-  - `step_counter[1]`: Number of rays processed.
+- **`rays`**: A contiguous integer array of shape $[N, 3]$ [S1, unofficial]. Each row $i$ corresponds to ray $i$ [S1, unofficial]. The values are:
+  - `rays[i, 0]`: The ray ID [S1, unofficial].
+  - `rays[i, 1]`: The offset into the `xyzs`/`dirs`/`deltas` arrays [S1, unofficial].
+  - `rays[i, 2]`: The number of steps for that ray [S1, unofficial].
+- **`step_counter`**: An integer array of shape $[2]$ [S1, unofficial].
+  - `step_counter[0]`: Total number of points generated [S1, unofficial].
+  - `step_counter[1]`: Number of rays processed [S1, unofficial].
 
 ### Parameters
 - `bound`: Float, spatial boundary for ray marching. Default: $10^{-4}$ [S1, unofficial].
@@ -46,76 +39,64 @@ The method prepares ray data for a CUDA backend kernel, dynamically sizing outpu
 - `align`: Int, if $> 0$, pads the allocated size $M$ to the next multiple of `align` [S1, unofficial].
 
 ### Steps
-1.  **Reshape Inputs**: Reshape `rays_o` and `rays_d` to contiguous views of shape $[-1, 3]$ [S1, unofficial].
-2.  **Determine Dimensions**: Let $N$ be the number of rays (`rays_o.shape[0]`) and $H$ be the grid resolution (`density_grid.shape[0]`) [S1, unofficial].
-3.  **Initialize Default Allocation**: Set $M = N \times 1024$ as the hardcoded default maximum number of points [S1, unofficial].
-4.  **Adjust Allocation Size**:
-    - If `force_all_rays` is false and `mean_count` $> 0$, set $M = \text{mean\_count}$ [S1, unofficial].
-    - If `align` $> 0$, pad $M$ to the next multiple of `align` [S1, unofficial].
-5.  **Initialize Output Tensors**:
-    - Create `xyzs` as a zero tensor of shape $[M, 3]$.
-    - Create `dirs` as a zero tensor of shape $[M, 3]$.
-    - Create `deltas` as a zero tensor of shape $[M]$ [S1, unofficial].
-6.  **Initialize Rays Metadata**: Create `rays` tensor of shape $[N, 3]$ with dtype int32 [S1, unofficial].
-7.  **Initialize Step Counter**: If `step_counter` is None, initialize it as a zero tensor of shape $[2]$ with dtype int32 [S1, unofficial].
-8.  **Execute Kernel**: Call the CUDA backend kernel `_backend.march_rays_train` with all parameters (`rays_o`, `rays_d`, `density_grid`, `bound`, `mean_density`, `iter_density`, `step_counter`, `mean_count`, `perturb`, `force_all_rays`, `align`, `xyzs`, `dirs`, `deltas`, `rays`) [S1, unofficial].
-9.  **Retrieve Actual Count**:
-    - If `force_all_rays` is true or `mean_count` $\le 0$:
-      - Retrieve the actual number of points $m$ from `step_counter[0].item()` [S1, unofficial].
-      - If `align` $> 0$, pad $m$ to the next multiple of `align` [S1, unofficial].
-      - Slice `xyzs`, `dirs`, and `deltas` to size $m$ [S1, unofficial].
+1. Reshape `rays_o` and `rays_d` to contiguous views of shape $[-1, 3]$ [S1, unofficial].
+2. Get $N$ (num rays) from `rays_o.shape[0]` and $H$ (grid resolution) from `density_grid.shape[0]` [S1, unofficial].
+3. Initialize $M$ (max points) to $N \times 1024$ as a hardcoded default [S1, unofficial].
+4. If `force_all_rays` is false and `mean_count` $> 0$, set $M = \text{mean\_count}$ [S1, unofficial]. If `align` $> 0$, pad $M$ to the next multiple of `align` [S1, unofficial].
+5. Initialize output tensors `xyzs`, `dirs`, and `deltas` with zeros of shape $[M, 3]$, $[M, 3]$, and $[M]$ respectively [S1, unofficial].
+6. Initialize `rays` tensor of shape $[N, 3]$ with dtype int32 [S1, unofficial].
+7. If `step_counter` is None, initialize it as a zero tensor of shape $[2]$ with dtype int32 [S1, unofficial].
+8. Call the CUDA backend kernel `_backend.march_rays_train` with all parameters [S1, unofficial].
+9. If `force_all_rays` is true or `mean_count` $\le 0$, retrieve the actual number of points $m$ from `step_counter[0]` and pad $m$ to the next multiple of `align` if `align` $> 0$ [S1, unofficial].
+10. Slice `xyzs`, `dirs`, and `deltas` to size $m$ [S1, unofficial].
 
 ### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def march_rays_train(
-    rays_o, rays_d, density_grid, bound, mean_density, iter_density,
-    step_counter=None, mean_count=0, perturb=False, force_all_rays=False, align=0
-):
-    # 1. Reshape inputs to contiguous views
-    rays_o = rays_o.contiguous().view(-1, 3)
-    rays_d = rays_d.contiguous().view(-1, 3)
+def march_rays_train(rays_o, rays_d, density_grid, bound, mean_density, iter_density,
+                     step_counter=None, mean_count=0, perturb=False, force_all_rays=False, align=0):
+    # 1. Reshape inputs to contiguous views of shape [-1, 3]
+    rays_o = rays_o.reshape(-1, 3)
+    rays_d = rays_d.reshape(-1, 3)
     
     # 2. Get dimensions
     N = rays_o.shape[0]
     H = density_grid.shape[0]
     
-    # 3. Initialize default M
+    # 3. Initialize default allocation
     M = N * 1024
     
-    # 4. Adjust M based on mean_count and force_all_rays
+    # 4. Adjust allocation size
     if not force_all_rays and mean_count > 0:
         M = mean_count
-    
-    # Pad M if align > 0
     if align > 0:
         M = ((M + align - 1) // align) * align
         
     # 5. Initialize output tensors
-    xyzs = torch.zeros((M, 3), dtype=rays_o.dtype, device=rays_o.device)
-    dirs = torch.zeros((M, 3), dtype=rays_o.dtype, device=rays_o.device)
-    deltas = torch.zeros((M,), dtype=rays_o.dtype, device=rays_o.device)
+    xyzs = zeros((M, 3), dtype=rays_o.dtype)
+    dirs = zeros((M, 3), dtype=rays_o.dtype)
+    deltas = zeros((M,), dtype=rays_o.dtype)
     
     # 6. Initialize rays metadata
-    rays = torch.zeros((N, 3), dtype=torch.int32, device=rays_o.device)
+    rays = zeros((N, 3), dtype=int32)
     
-    # 7. Initialize step_counter if None
+    # 7. Initialize step counter
     if step_counter is None:
-        step_counter = torch.zeros((2,), dtype=torch.int32, device=rays_o.device)
+        step_counter = zeros((2,), dtype=int32)
         
-    # 8. Call CUDA backend kernel
-    # Note: The exact signature of _backend.march_rays_train is implementation-specific.
-    # It modifies xyzs, dirs, deltas, rays, and step_counter in-place.
-    _backend.march_rays_train(
+    # 8. Execute CUDA backend kernel
+    # The kernel modifies xyzs, dirs, deltas, rays, and step_counter in-place
+    # Implementation-specific CUDA call: _backend.march_rays_train(...)
+    _backend_march_rays_train(
         rays_o, rays_d, density_grid, bound, mean_density, iter_density,
         step_counter, mean_count, perturb, force_all_rays, align,
         xyzs, dirs, deltas, rays
     )
     
-    # 9. Slice outputs if force_all_rays or mean_count <= 0
+    # 9. Retrieve actual count and slice outputs
     if force_all_rays or mean_count <= 0:
-        m = step_counter[0].item()
+        m = step_counter[0]
         if align > 0:
             m = ((m + align - 1) // align) * align
         xyzs = xyzs[:m]
@@ -126,21 +107,15 @@ def march_rays_train(
 ```
 
 ### Edge Cases and Pitfalls
-- **Underestimation**: If `mean_count` underestimates the required points and `force_all_rays` is false, rays may be randomly ignored, leading to incomplete rendering or training artifacts [S1, unofficial].
-- **Precision**: The method relies on the CUDA backend's precision for ray-grid intersection calculations. Ensure the backend handles floating-point comparisons consistently with the host logic [S1, unofficial].
-- **Alignment**: If `align` is not a power of two or does not match memory alignment requirements of the GPU, performance may degrade. The sources do not specify the optimal `align` value [S1, unofficial].
+- **Underestimation**: If `mean_count` underestimates the required points and `force_all_rays` is false, rays may be randomly ignored unless `force_all_rays` is enabled [S1, unofficial].
+## Subtopics
+
+### [NeuralPointsRayMarching](6818-neuralpointsraymarching.md)
+NeuralPointsRayMarching is a PyTorch module that performs ray marching for neural point rendering by aggregating sampled neural point features and blending them along rays. It solves the problem of efficiently rendering sparse 3D point clouds with learned features (such as color, SH coefficients, or embeddings) into 2D images by handling the spatial aggregation and alpha blending in a differentiable manner. It sets itself apart from standard volume rendering by operating on discrete, learned point entities rather than continuous volumetric fields, and from its parent [Training Ray Marching (Forward Only)](6205-training-ray-marching-forward-only.md) by providing the specific aggregation, distance calculation, and feature blending logic required for the neural point representation.
 
 ## Operating characteristics
-- **Time Complexity**: $O(N \cdot K)$, where $N$ is the number of rays and $K$ is the average number of steps per ray. The dynamic allocation reduces memory allocation overhead compared to static large buffers.
-- **Memory Complexity**: $O(M)$, where $M$ is the allocated number of points. $M$ is typically $N \times 1024$ or `mean_count`, whichever is larger.
-- **Performance**: Faster training due to reduced memory allocation and deallocation overhead. The use of `mean_count` allows for tighter memory bounds, reducing cache misses.
-- **Strengths**: Adaptive memory usage, stability with `force_all_rays`, efficient for training loops where ray sample counts are relatively stable.
-- **Limitations**: Requires historical data (`mean_count`) to be effective. If scene complexity changes drastically, `mean_count` may become inaccurate, requiring `force_all_rays` or manual tuning.
-- **When to Use**: During training of neural volume rendering models where memory efficiency is critical and ray sample counts are predictable.
-- **When Not to Use**: During inference where deterministic behavior is required without historical state, or when scene complexity varies wildly between frames.
-
+Not given in the sources.
 ## Background
-Training Ray Marching is part of the optimization strategies for neural radiance fields (NeRF) and related volume rendering techniques. It was introduced in the context of efficient training pipelines, specifically within the Instant Neural Graphics Primitives (NGP) framework and its derivatives. The method addresses the bottleneck of memory allocation in ray marching kernels during the iterative training process.
-
+Not given in the sources.
 ## Sources
 [S1] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)

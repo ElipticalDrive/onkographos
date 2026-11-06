@@ -8,7 +8,7 @@ A camera controller for volume visualization that computes a view matrix by appl
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:** Volume bounds (size), volume scale, camera position, zoom factors, rotation deltas, and pan deltas.
-*   **Outputs:** A 4x4 view matrix.
+*   **Outputs:** A 4×4 view matrix.
 
 **Data Structures:**
 *   `_forward`: `vec3`, initialized to `[0, 0, 1]` [S1, unofficial].
@@ -17,41 +17,88 @@ A camera controller for volume visualization that computes a view matrix by appl
 *   `_position`: `vec3`, initialized to `[0, 0, -length(bounds)]` [S1, unofficial].
 *   `volumeCentre`: `vec3`, computed as `0.5 * volume.bounds` [S1, unofficial].
 
-**View Matrix Construction:**
-The view matrix is constructed by multiplying transformations in the following order [S1, unofficial]:
-1.  Initialize `view` to identity.
-2.  Multiply by translation of `_position`.
-3.  Multiply by scaling of `_zoom`.
-4.  Multiply by rotation matrix.
-5.  Multiply by translation of `volumeCentre`.
-6.  Multiply by scaling of `volumeScale`.
+**Parameters:**
+*   `volumeScale`: Scaling factor for the volume dataset [S1, unofficial].
+*   `delta`: Interaction delta values (typically floating-point offsets from mouse/touch input) [S1, unofficial].
 
-**Rotation Matrix Computation:**
-1.  Compute `right` vector via cross product of `_up` and `_forward`.
-2.  Normalize `right` vector.
-3.  Construct 4x4 matrix with columns `[right, _up, _forward, 0]`.
-4.  Transpose the matrix [S1, unofficial].
+**Step-by-Step Procedure:**
+1.  Initialize `view` to the identity matrix [S1, unofficial].
+2.  Multiply `view` by a translation matrix using `_position` [S1, unofficial].
+3.  Multiply `view` by a scaling matrix using `_zoom` [S1, unofficial].
+4.  Multiply `view` by the computed rotation matrix [S1, unofficial].
+5.  Multiply `view` by a translation matrix using `volumeCentre` [S1, unofficial].
+6.  Multiply `view` by a scaling matrix using `volumeScale` [S1, unofficial].
+7.  Compute the rotation matrix by calculating the `right` vector via the cross product of `_up` and `_forward`, normalizing it, constructing a 4×4 matrix with columns `[right, _up, _forward, 0]`, and transposing the result [S1, unofficial].
+8.  Update camera rotation by computing `right` via the cross product of `_forward` and `_up`, creating a rotation matrix `rotY` around `_up` by `delta[0]`, transforming `_forward` by `rotY`, creating a rotation matrix `rotX` around `right` by `delta[1]`, and transforming both `_up` and `_forward` by `rotX` [S1, unofficial].
+9.  Update light direction by creating a rotation matrix `rotX` around `[0,1,0]` by `delta[0]`, creating a rotation matrix `rotY` around `[1,0,0]` by `delta[1]`, and transforming `_lightDir` by `rotX` then `rotY` [S1, unofficial].
+10. Clamp zoom by checking if `_zoom[0] - delta > 0`; if true, subtract `delta` from both `_zoom[0]` and `_zoom[1]` [S1, unofficial].
+11. Update pan by subtracting `delta[0]` from `_position[0]` and `delta[1]` from `_position[1]` [S1, unofficial].
+12. Recentre the camera by setting `_position[0]` to `-size[0]/2` and `_position[1]` to `-size[1]/2` [S1, unofficial].
 
-**Camera Rotation Update:**
-1.  Compute `right` vector via cross product of `_forward` and `_up`.
-2.  Create rotation matrix `rotY` around `_up` by `delta[0]`.
-3.  Transform `_forward` by `rotY`.
-4.  Create rotation matrix `rotX` around `right` by `delta[1]`.
-5.  Transform `_up` and `_forward` by `rotX` [S1, unofficial].
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-**Light Direction Update:**
-1.  Create rotation matrix `rotX` around `[0,1,0]` by `delta[0]`.
-2.  Create rotation matrix `rotY` around `[1,0,0]` by `delta[1]`.
-3.  Transform `_lightDir` by `rotX` then `rotY` [S1, unofficial].
+```python
+class VolumeVisualizationCamera:
+    def __init__(self, volume_bounds, volume_scale):
+        self._forward = vec3(0, 0, 1)
+        self._up = vec3(0, 1, 0)
+        self._zoom = vec3(1, 1, 1)
+        self._position = vec3(0, 0, -length(volume_bounds))
+        self.volumeCentre = 0.5 * volume_bounds
+        self.volumeScale = volume_scale
+        self._lightDir = vec3(0, 0, 1)  # Standard initialization [G]
 
-**Zoom Clamping:**
-If `_zoom[0] - delta > 0`, subtract `delta` from `_zoom[0]` and `_zoom[1]` [S1, unofficial].
+    def compute_view_matrix(self):
+        view = mat4_identity()
+        view = translate(view, self._position)
+        view = scale(view, self._zoom)
+        view = view @ self.compute_rotation_matrix()
+        view = translate(view, self.volumeCentre)
+        view = scale(view, self.volumeScale)
+        return view
 
-**Pan Update:**
-Subtract `delta[0]` from `_position[0]` and `delta[1]` from `_position[1]` [S1, unofficial].
+    def compute_rotation_matrix(self):
+        right = normalize(cross(self._up, self._forward))
+        rot = mat4(columns=[right, self._up, self._forward, vec4(0, 0, 0, 1)])
+        return transpose(rot)
 
-**Recentre:**
-Set `_position[0]` to `-size[0]/2` and `_position[1]` to `-size[1]/2` [S1, unofficial].
+    def update_camera_rotation(self, delta):
+        right = normalize(cross(self._forward, self._up))
+        rotY = rotate_around_axis(self._up, delta[0])  # Standard rotation [G]
+        self._forward = rotY @ self._forward
+        rotX = rotate_around_axis(right, delta[1])    # Standard rotation [G]
+        self._up = rotX @ self._up
+        self._forward = rotX @ self._forward
+
+    def update_light_direction(self, delta):
+        rotX = rotate_around_axis(vec3(0, 1, 0), delta[0])  # Standard rotation [G]
+        rotY = rotate_around_axis(vec3(1, 0, 0), delta[1])  # Standard rotation [G]
+        self._lightDir = rotY @ (rotX @ self._lightDir)
+
+    def update_zoom(self, delta):
+        if self._zoom[0] - delta > 0:
+            self._zoom[0] -= delta
+            self._zoom[1] -= delta
+
+    def update_pan(self, delta):
+        self._position[0] -= delta[0]
+        self._position[1] -= delta[1]
+
+    def recentre(self, size):
+        self._position[0] = -size[0] / 2
+        self._position[1] = -size[1] / 2
+```
+
+**Edge Cases and Pitfalls:**
+*   Precision loss may occur when `_zoom` approaches zero or when `delta` values are extremely small; clamping prevents division-by-zero or degenerate scaling [S1, unofficial].
+*   The cross product order for `right` differs between initial view matrix construction (`_up × _forward`) and interactive rotation updates (`_forward × _up`), which must be preserved to maintain consistent handedness [S1, unofficial].
+*   Boundary conditions for `_position` updates assume a left-handed or right-handed coordinate system consistent with the renderer; mismatched handedness will invert depth [G].
+
+## Subtopics
+
+### Zooming Interaction Model
+A camera transformation model for zooming that shifts the center of the object to emphasize user attention on focus parts near the initial button click [S2, unofficial]. It modifies the model-view matrix using the formula $MV' = \text{Translate}(-R \cdot (\vec{P}_{interaction} - \vec{P}_{center})) \cdot MV$, where $MV$ is the original model-view matrix, $MV'$ is the modified model-view matrix, $R$ is the magnification factor, $\vec{P}_{interaction}$ is the position of the initial user interaction, and $\vec{P}_{center}$ is the center of the rendering area [S2, unofficial]. This model is chosen when semantic focus on a specific region during zoom is required, contrasting with standard uniform zooming that scales around the camera origin [S2, unofficial].
 
 ## Operating characteristics
 Not given in the sources.
@@ -61,3 +108,4 @@ Not given in the sources.
 
 ## Sources
 [S1] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)
+[S2] (PDF) Dynamic Focus+Context for Volume Rendering - ResearchGate, https://www.researchgate.net/publication/220839241_Dynamic_FocusContext_for_Volume_Rendering, fetched 2026-10-27 (unofficial)

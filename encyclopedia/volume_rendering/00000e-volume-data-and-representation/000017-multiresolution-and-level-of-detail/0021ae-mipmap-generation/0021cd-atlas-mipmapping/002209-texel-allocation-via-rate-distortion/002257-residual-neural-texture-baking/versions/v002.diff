@@ -1,0 +1,92 @@
+--- v001.md
++++ v002.md
+@@ -2,62 +2,48 @@
+ Also called: Hash Grid Residual Baking, Residual Baking
+ ## Overview
+-Residual Neural Texture Baking converts a trained neural implicit representation (hash grid + MLP) into a static texture atlas, eliminating the need for network inference during rendering [S1, unofficial]. It differs from standard neural baking by predicting a residual color added to a fixed baseline, allowing the texture to subtract from the base color and carry high-frequency detail without surfel splitting [S1, unofficial].
++Residual Neural Texture Baking is a post-training stage that converts a learned neural appearance model into a static spatial texture atlas, thereby eliminating neural network inference costs during rendering [S1, unofficial]. It differs from its parent [Texel Allocation via Rate-Distortion](2672-texel-allocation-via-rate-distortion.md) by performing the actual evaluation and storage of the residual field, while the parent handles the allocation of texel counts per surfel based on rate-distortion principles.
+ ## How it works
+ **Inputs and outputs:**
+-- Input: Trained hash grid features $E_\theta$, trained view-dependent color function $f_{SV}$, surfel geometry (position, tangent basis, scale), and atlas constraints ($r_{\min}, r_{\max}$).
+-- Output: A static RGB texture atlas where each surfel occupies an anisotropic rectangular region.
++- Input: The trained hash grid features $\mathbf{E}_\theta$ and MLP decoder weights $f_\phi$; the set of surfels $\mathcal{G}$ with their spatial positions, tangent bases $\{\mathbf{u}, \mathbf{v}\}$, and scales $\{s_{g,u}, s_{g,v}\}$; the finest hash voxel size $\delta$; the UV half-extent factor $e$; and atlas bounds $r_{\min}, r_{\max}$.
++- Output: An RGB texture atlas containing the baked residual colors for all surfels.
+ 
+ **Data structures:**
+-- **Hash Grid:** Four levels of features. Each level stores 4-D feature vectors. Features are queried at fragment coordinates and trilinearly interpolated [S1, unofficial].
+-- **MLP Decoder:** Two hidden layers, each with width 16 [S1, unofficial].
+-- **Surfel Resolution:** Anisotropic resolution $r_g = (r_x, r_y)$ per surfel $g$, calculated to match the Nyquist rate of the finest hash voxel [S1, unofficial].
++- **Hash Grid:** A multiresolution hash grid with four levels. Each level stores 4-D feature vectors. The base resolution depends on the scene's spatial extent [S1, unofficial].
++- **MLP Decoder:** A network $f_\phi$ with two hidden layers, each of width 16 [S1, unofficial].
++- **Surfel Attributes:** For each surfel $g$, the tangent axes $\mathbf{u}, \mathbf{v}$ and scales $s_{g,u}, s_{g,v}$ are required to compute anisotropic resolutions [S1, unofficial].
+ 
+-**Formulas:**
+-The fragment color $\mathbf{c}(\mathbf{x}, \mathbf{d})$ at position $\mathbf{x}$ and view direction $\mathbf{d}$ is:
+-$$
+-\mathbf{c}(\mathbf{x}, \mathbf{d}) = \text{ReLU}\left(\text{ReLU}(f_{SV}(\mathbf{d}) + b_{SV}) + f_\theta(\mathbf{E}_\theta(\mathbf{x}))\right)
+-$$
+-where:
+-- $f_{SV}(\mathbf{d})$ is the view-dependent color output.
+-- $b_{SV} = 0.5$ is a neutral gray baseline offset [S1, unofficial].
+-- $f_\theta(\mathbf{E}_\theta(\mathbf{x}))$ is the spatial residual decoded from the hash grid features [S1, unofficial].
+-- The outer ReLU ensures non-negative final color [S1, unofficial].
++**Method steps:**
++1. **Evaluate Residual:** For every fragment $\mathbf{x}$ on the surface of each surfel, query the hash grid $\mathbf{E}_\theta(\mathbf{x})$. This involves trilinearly interpolating the features of every hash level, concatenating them, and decoding the result with the MLP $f_\phi$ to obtain the spatial residual $f_\phi(\mathbf{E}_\theta(\mathbf{x}))$ [S1, unofficial].
++2. **Compute Fragment Color:** Calculate the final color using the residual formula:
++   $$ \mathbf{c}(\mathbf{x}, \mathbf{d}) = \text{ReLU}\left(\text{ReLU}(f_{SV}(\mathbf{d}) + b_{SV}) + f_\phi(\mathbf{E}_\theta(\mathbf{x}))\right) $$
++   where $f_{SV}(\mathbf{d})$ is the view-dependent color, $b_{SV}=0.5$ is a neutral gray baseline, and $f_\phi(\mathbf{E}_\theta(\mathbf{x}))$ is the spatial residual [S1, unofficial]. Note that during baking, the view-dependent term is typically fixed or pre-computed, and the spatial residual is baked into the texture [S1, unofficial].
++3. **Determine Anisotropic Resolution:** For each surfel $g$ and tangent axis $a \in \{u, v\}$, calculate the required texel resolution $r_{g,a}$ to match the Nyquist rate of the finest hash voxel $\delta$:
++   $$ r_{g,a} = \text{clamp} \left( 2^{\lceil \log_2(4es_{g,a}/\delta) \rceil}, r_{\min}, r_{\max} \right) $$
++   where $s_{g,a}$ is the surfel scale on axis $a$, $e$ is the UV half-extent in units of that scale, and the factor 4 combines the $2e$ span with Nyquist sampling [S1, unofficial]. Typical values are $r_{\min} = 4$ and $r_{\max} = 64$ [S1, unofficial].
++4. **Pack Atlas:** Pack the anisotropic rectangular regions for each surfel into a fixed-width texture atlas using a shelf-packing algorithm [S1, unofficial].
+ 
+ **Parameters:**
+ - Hash grid levels: 4 [S1, unofficial].
+-- Feature dimension: 4 [S1, unofficial].
++- Feature dimension: 4-D [S1, unofficial].
+ - MLP hidden layers: 2 [S1, unofficial].
+ - MLP hidden width: 16 [S1, unofficial].
+-- Minimum atlas resolution $r_{\min}$: 4 [S1, unofficial].
+-- Maximum atlas resolution $r_{\max}$: 64 [S1, unofficial].
+-
+-**Steps:**
+-1. **Train the model:** Optimize the hash grid and MLP to predict residuals, while $f_{SV}$ captures low-frequency view dependence [S1, unofficial].
+-2. **Calculate surfel resolution:** For each surfel $g$ and tangent axis $a \in \{u, v\}$, compute:
+-   $$
+-   r_{g,a} = \text{clamp} \left( 2^{\lceil \log_2(4es_{g,a}/\delta) \rceil}, r_{\min}, r_{\max} \right)
+-   $$
+-   where $s_{g,a}$ is the surfel scale, $\delta$ is the finest hash voxel size, and $e$ is the UV half-extent in units of scale [S1, unofficial].
+-3. **Evaluate residual:** For each surfel, rasterize its surface. At each fragment $\mathbf{x}$, query the hash grid, interpolate features, and decode the residual $f_\theta(\mathbf{E}_\theta(\mathbf{x}))$ [S1, unofficial].
+-4. **Bake to atlas:** Store the computed residual (or final color) in the atlas region allocated for surfel $g$ with resolution $r_g$ [S1, unofficial].
+-5. **Pack atlas:** Pack the anisotropic rectangular regions into a fixed-width atlas using a shelf-packing algorithm [S1, unofficial].
++- Baseline offset $b_{SV}$: 0.5 [S1, unofficial].
++- Resolution bounds: $r_{\min}=4, r_{\max}=64$ [S1, unofficial].
+ 
+ **Edge cases and pitfalls:**
+-- The residual is unbounded, allowing subtraction from the base color. This is a feature, not a bug, as it allows one surfel to carry detail that positive-only textures would require splitting to reproduce [S1, unofficial].
+-- Precision issues may arise if the hash grid resolution $\delta$ is too coarse relative to surfel scale, causing aliasing [S1, unofficial].
+-- The baseline $b_{SV}=0.5$ must be maintained to ensure the residual builds on a neutral gray, preventing color bias [S1, unofficial].
++- The residual is unbounded, allowing the texture to subtract from the base color. This capability allows a single surfel to carry detail that a positive-only texture would require splitting to reproduce [S1, unofficial].
++- The hash grid is queried at every fragment along the surfel's surface, allowing it to absorb fine spatial texture, while per-surfel attributes (which are constant across a surfel) absorb low-frequency view dependence [S1, unofficial].
++- Anisotropic rectangles are used to avoid square padding on thin surfels [S1, unofficial].
+ 
+ ## Subtopics
+ ## Operating characteristics
+-- **Time complexity:** Baking is $O(N)$ where $N$ is the number of surfel fragments. Training is the dominant cost.
+-- **Memory complexity:** $O(A)$ where $A$ is the atlas size. The hash grid and MLP are discarded after baking [S1, unofficial].
+-- **Performance:** Enables ultrafast rendering by replacing neural inference with simple texture lookups [S1, unofficial].
+-- **Strengths:** High fidelity with fewer surfels due to residual subtraction; anisotropic packing reduces wasted space [S1, unofficial].
+-- **Limitations:** Requires prior training; static texture cannot adapt to dynamic scenes [S1, unofficial].
+-- **When to use:** Static scenes requiring high-performance rendering with neural-level detail [S1, unofficial].
+-- **When not to use:** Dynamic scenes or scenes requiring runtime appearance changes [S1, unofficial].
++- **Time Complexity:** Baking requires evaluating the hash grid and MLP for every fragment on every surfel. The complexity depends on the number of surfels and the sampling density per surfel.
++- **Memory Complexity:** The memory usage is dominated by the size of the texture atlas, which is determined by the sum of the anisotropic resolutions $r_{g,u} \times r_{g,v}$ for all surfels [S1, unofficial].
++- **Performance:** Eliminates neural network inference during rendering, enabling ultrafast spatial texture-atlas splatting [S1, unofficial].
++- **Strengths:** High-fidelity view-dependent appearance; efficient rendering after baking; unbounded residuals allow for compact representation of complex details [S1, unofficial].
++- **Limitations:** Requires a training phase before baking; atlas packing can be complex for highly anisotropic surfels [S1, unofficial].
+ 
+ ## Background
+-Originated in "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" [S1, unofficial]. The method leverages the observation that view dependence is low-frequency and can be separated from high-frequency spatial detail, allowing the latter to be baked into a texture atlas [S1, unofficial].
++Residual Neural Texture Baking is introduced in "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" [S1, unofficial]. It builds on the concept of using neural radiance fields or hash grids for appearance representation and adapts it for real-time splatting by baking the learned features into a static texture. The method leverages the fact that spatial variations are high-frequency and can be captured by the hash grid, while view dependence is low-frequency and can be handled by per-surfel attributes or a simple view-dependent function [S1, unofficial].
+ 
+ ## Sources

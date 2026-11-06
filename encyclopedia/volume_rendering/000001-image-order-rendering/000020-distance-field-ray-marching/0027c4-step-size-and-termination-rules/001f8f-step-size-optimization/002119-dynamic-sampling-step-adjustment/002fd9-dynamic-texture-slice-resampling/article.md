@@ -1,122 +1,78 @@
 # Dynamic Texture Slice Resampling
+
 Also called: Dynamic resampling
+
 ## Overview
-Dynamic Texture Slice Resampling is a step size optimization technique for distance-field ray marching that maintains a constant physical sampling step size along the ray by dynamically adjusting the texture coordinate increments based on the viewing direction. It solves the problem of striping artifacts caused by non-uniform sampling steps in hardware-accelerated volume rendering, particularly when using multitexturing or register combiners, while preserving high rendering performance. It sets itself apart from static step sizing by adapting to the ray's angle relative to the texture grid, ensuring consistent spatial resolution regardless of view orientation.
+Dynamic Texture Slice Resampling is a technique for volume rendering that dynamically updates slicing steps according to viewing directions to maintain a constant step size during the Direct Volume Rendering (DVR) process [S1]. It solves the problem of striping artifacts caused by non-uniform sampling steps, which occur when fixed step sizes result in varying spatial resolution across the volume due to perspective projection [S1]. Unlike methods that rely on post-processing upsampling or fixed-step approximations, this approach maintains high rendering performance by adapting the sampling density to the viewing geometry in real-time [S1].
+
 ## How it works
-**Inputs and outputs:**
-- Input: Volume texture data, camera view matrix, ray origin, ray direction, target constant physical step size $s_{phys}$.
-- Output: Resampled texture coordinates or interpolated values for the current ray step.
+**Inputs and Outputs:**
+- Input: Volume dataset, camera parameters (viewing direction, projection matrix), and current ray origin/direction.
+- Output: Resampled texture coordinates or slice indices for the current ray step.
 
-**Data structures:**
-- Volume texture: 3D grid of scalar values.
-- Ray state: Current position $P$, direction $D$.
+**Data Structures:**
+- The method relies on a texture representation of the volume data. The specific layout is not detailed in the sources, but it implies a 3D texture or a set of 2D slices [S1].
+- The core data structure is the dynamic step size variable, updated per ray or per pixel based on viewing direction [S1].
 
-**Method:**
-1. Calculate the intersection of the ray with the current voxel or texture boundary.
-2. Determine the local scaling factors required to map the desired physical step size $s_{phys}$ to texture coordinate space. This involves the Jacobian of the transformation from world space to texture space, which depends on the viewing direction $D$ and the texture grid dimensions.
-3. Compute the dynamic texture step size $\Delta u, \Delta v, \Delta w$ such that the Euclidean distance between consecutive samples equals $s_{phys}$.
-4. Advance the ray by $s_{phys}$ in world space.
-5. Update texture coordinates using the dynamic steps.
-6. Sample the volume texture at the new coordinates.
-7. Accumulate the color and opacity (DVR) and repeat until termination.
-
-**Formulas:**
-Let $s_{phys}$ be the constant physical step size.
-Let $D = (d_x, d_y, d_z)$ be the ray direction in world space.
-Let $T_x, T_y, T_z$ be the physical dimensions of the volume in world units.
-Let $N_x, N_y, N_z$ be the number of texels in each dimension.
-The physical step size per texel in each dimension is $\delta_x = T_x / N_x$, $\delta_y = T_y / N_y$, $\delta_z = T_z / N_z$.
-
-The dynamic texture step size $\Delta u$ (in normalized texture coordinates) for a ray step $s_{phys}$ is derived from the ray direction components. If the ray moves primarily along the x-axis, the texture step is larger than if it moves diagonally. The exact update depends on the specific hardware implementation (e.g., register combiners), but generally, the texture coordinate increment is scaled by the inverse of the ray direction's projection onto the texture axes to maintain constant physical spacing.
-
-For a ray direction $D$, the texture coordinate increment $\Delta u$ is proportional to $s_{phys} / (|D_x| \cdot \delta_x)$ (conceptually, ensuring the physical distance matches). In practice, this is often implemented by precomputing direction-dependent scaling factors or using hardware multitexturing units to interpolate texture coordinates at a rate that corresponds to $s_{phys}$.
-
-**Parameters:**
-- $s_{phys}$: Constant physical step size. Typical value depends on volume resolution and view distance; often chosen to balance performance and aliasing. Not given in the sources.
-
-**Edge cases and pitfalls:**
-- **Degenerate rays:** Rays parallel to texture axes may require special handling to avoid division by zero in direction-based scaling.
-- **Precision:** Floating-point precision in texture coordinate updates can lead to drift over long rays.
-- **Boundaries:** Ray termination at volume boundaries must be handled to prevent out-of-bounds texture access.
+**Steps:**
+1. **Calculate Viewing Direction:** Determine the ray direction vector $\vec{d}$ for the current pixel or ray in camera space [S1].
+2. **Compute Dynamic Step Size:** Calculate the slicing step size $s$ based on the viewing direction. The goal is to maintain a constant spatial step size in the volume, regardless of the angle of incidence [S1].
+   - Let $s_{target}$ be the desired constant spatial step size.
+   - The dynamic step size $s$ is adjusted such that the projection of $s$ onto the viewing direction maintains $s_{target}$.
+   - Note: The exact formula for $s$ as a function of $\vec{d}$ is not provided in the sources [S1].
+3. **Update Slicing Steps:** Apply the calculated $s$ to determine the next sample position along the ray [S1].
+4. **Resample Texture:** Use the updated step size to sample the volume texture. This may involve interpolating between slices or adjusting texture coordinates to reflect the non-uniform spacing in screen space [S1].
+5. **Accumulate Color:** Perform the standard DVR accumulation (e.g., front-to-back compositing) using the resampled values [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def dynamic_texture_slice_resampling(ray_origin, ray_direction, volume_texture, s_phys):
-    # Initialize ray state
-    t = 0.0
-    current_pos = ray_origin
+def dynamic_texture_slice_resampling(ray_origin, ray_direction, volume_texture, target_step_size):
+    # 1. Calculate viewing direction (already in ray_direction)
+    # 2. Compute dynamic step size based on viewing direction
+    # Note: The exact formula is not given in the sources [S1]
+    # This step ensures that the spatial step size remains constant
+    dynamic_step = compute_dynamic_step(ray_direction, target_step_size)
     
-    # Precompute texture grid dimensions and physical sizes
-    N_x, N_y, N_z = volume_texture.dimensions
-    T_x, T_y, T_z = volume_texture.physical_dimensions
+    # 3. Update slicing steps
+    # The step size is used to determine the next sample position
+    next_sample_position = ray_origin + dynamic_step * ray_direction
     
-    # Precompute physical step per texel
-    delta_x = T_x / N_x
-    delta_y = T_y / N_y
-    delta_z = T_z / N_z
+    # 4. Resample texture
+    # Sample the volume at the next position
+    # The texture sampling must account for the dynamic step size
+    color = sample_volume(volume_texture, next_sample_position)
     
-    # Precompute inverse direction components for dynamic step calculation
-    # Avoid division by zero by clamping or handling parallel rays
-    inv_dx = 1.0 / ray_direction.x if abs(ray_direction.x) > 1e-6 else float('inf')
-    inv_dy = 1.0 / ray_direction.y if abs(ray_direction.y) > 1e-6 else float('inf')
-    inv_dz = 1.0 / ray_direction.z if abs(ray_direction.z) > 1e-6 else float('inf')
-    
-    # Initial texture coordinates
-    u, v, w = world_to_texture(current_pos, volume_texture)
-    
-    while t < ray_length:
-        # Calculate dynamic texture step size to maintain s_phys
-        # This is a simplified model; actual hardware implementation may vary
-        # The goal is to ensure the physical distance between samples is s_phys
-        
-        # Estimate texture step based on dominant direction
-        # If ray is mostly along X, texture step is determined by dx
-        if abs(ray_direction.x) >= abs(ray_direction.y) and abs(ray_direction.x) >= abs(ray_direction.z):
-            texture_step = s_phys * inv_dx / delta_x
-            u += texture_step
-            # v and w may also need adjustment if ray has components in those directions
-            # For simplicity, assume primary axis update
-        elif abs(ray_direction.y) >= abs(ray_direction.x) and abs(ray_direction.y) >= abs(ray_direction.z):
-            texture_step = s_phys * inv_dy / delta_y
-            v += texture_step
-        else:
-            texture_step = s_phys * inv_dz / delta_z
-            w += texture_step
-            
-        # Sample volume texture
-        color, opacity = sample_volume(u, v, w, volume_texture)
-        
-        # Accumulate (DVR)
-        # ...
-        
-        # Advance ray in world space
-        t += s_phys
-        current_pos = ray_origin + ray_direction * t
-        
-        # Update texture coordinates for next step
-        # In a full implementation, all u, v, w are updated based on ray direction
-        u = world_to_texture(current_pos, volume_texture).u
-        v = world_to_texture(current_pos, volume_texture).v
-        w = world_to_texture(current_pos, volume_texture).w
-        
-        # Termination check
-        if opacity >= 1.0:
-            break
-            
-    return accumulated_color
+    # 5. Accumulate color
+    # Standard DVR accumulation
+    return color
+
+def compute_dynamic_step(ray_direction, target_step_size):
+    # Placeholder for the missing formula [S1]
+    # The step size should be adjusted based on the angle between
+    # the ray direction and the volume axes to maintain constant spatial resolution
+    return target_step_size
 ```
+
+**Parameters:**
+- `target_step_size`: The desired constant spatial step size. Typical values are not given in the sources [S1].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The dynamic adjustment of step sizes may introduce precision issues if not handled carefully, especially for rays nearly parallel to the volume axes [S1].
+- **Boundaries:** Care must be taken when rays exit the volume to avoid sampling outside the valid data range [S1].
+
 ## Subtopics
+
 ## Operating characteristics
-- **Time complexity:** O(N) where N is the number of samples along the ray. The dynamic step calculation adds a constant overhead per step.
-- **Memory complexity:** O(1) additional memory per ray, plus the volume texture storage.
-- **Measured performance:** Provides interactive frame rates for medium-sized datasets on commodity GPU hardware by leveraging multitexturing and register combiners [S1].
-- **Strengths:** Eliminates striping artifacts caused by non-uniform sampling; maintains high rendering performance; suitable for hardware acceleration.
-- **Limitations:** Requires careful handling of ray directions; may introduce complexity in texture coordinate management.
-- **When to use:** When visual quality (absence of striping) is critical and hardware supports dynamic texture coordinate updates.
-- **When not to use:** When hardware does not support efficient dynamic texture coordinate updates or when performance is the sole priority and artifacts are acceptable.
+- **Time Complexity:** The method adds a small overhead for calculating the dynamic step size per ray, but avoids the need for post-processing upsampling, potentially reducing overall rendering time [S1].
+- **Memory Complexity:** No additional memory structures are mentioned beyond the volume texture itself [S1].
+- **Performance:** The method is hardware-accelerated using register combiners and multitexturing, providing interactive frame rates for medium-sized datasets on commodity hardware [S1].
+- **Strengths:** Avoids striping artifacts, maintains high rendering performance, and adapts to viewing direction [S1].
+- **Limitations:** The exact implementation details and performance metrics are not provided in the sources [S1].
+
 ## Background
-Dynamic Texture Slice Resampling was proposed by Zhang and colleagues as part of a hardware-accelerated volume rendering algorithm based on register combiners and multitexturing [S1]. It extends earlier concepts of dynamic sampling by integrating them with hierarchical wavelet representation for data compression [S1]. The method leverages the parallel architecture and stream computation capabilities of GPUs to achieve interactive frame rates for volume visualization [S1].
+The method was developed by Zhang and colleagues as part of a hardware-accelerated Direct Volume Rendering (DVR) algorithm based on register combiners and multitexturing [S1]. It extends the concept of dynamic sampling to address the specific challenges of GPU-based rendering, where non-uniform sampling steps can lead to visual artifacts [S1]. The work is situated within the broader context of GPU-based raycasting, which leverages the parallel architecture of commodity video cards for interactive visualization [S1].
+
 ## Sources
 [S1] Volume Visualization: A Technical Overview with a Focus on ..., https://pmc.ncbi.nlm.nih.gov/articles/PMC3138940/, fetched 2026-10-27

@@ -1,0 +1,185 @@
+--- v001.md
++++ v002.md
+@@ -4,97 +4,113 @@
+ 
+ ## Overview
+-Frustum-based LOD Selection is a technique that determines the appropriate resolution level for a volume entity based on the distance from the camera to the frustum faces, ensuring voxel sizes remain smaller than a screen pixel [S1, unofficial]. It selects resolution based on ray distance from the viewer, using lower LODs for distant or peripheral rays to minimize samples [S2]. This distance-driven approach suits large-scale datasets, cutting memory and sample requirements significantly while maintaining perceptual quality [S2].
++Frustum-based LOD Selection is a method for adaptive volumetric rendering that determines the appropriate resolution level for a volume entity by calculating the distance from the camera to the entity's position relative to the camera's frustum faces [S1, unofficial][S2]. It solves the problem of maintaining responsive frame rates for large-scale datasets by selecting lower resolutions for distant or peripheral rays, thereby minimizing memory bandwidth and sample counts [S2]. Unlike [Footprint-based LOD Selection](3088-footprint-based-lod-selection.md), which ensures the projected voxel size does not exceed a specific pixel threshold to prevent aliasing, this method relies on distance-to-frustum-face metrics to drive LOD selection [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Camera position, camera view/projection matrices (or MVP), volume transform (position, scale), volume data structure (hierarchical MIP-map pyramid), screen width, depth thresholds.
+-*   **Outputs:** Selected LOD index (integer).
++*   **Inputs:** Camera world-space position, camera view/projection matrices (or inverse MVP), entity world-space position and scale, and a precomputed array of depth thresholds.
++*   **Outputs:** An integer LOD index (depth level) for the volume entity.
+ 
+ **Data Structures:**
+-*   **Volume Data:** Hierarchical representation such as an octree-based voxel MIP-map pyramid where each level reduces resolution [S2].
+-*   **Depth Thresholds:** An array of floats calculated as $1.0f / 2^{depth}$ for depths 1 to `maxSvoDepth_` [S1, unofficial].
++*   `depthTresholds_`: An array of floats representing distance thresholds for each LOD level. For a maximum depth of $D$, the array contains $D$ elements. The value at index $i$ (where $i$ ranges from $0$ to $D-1$) is calculated as $1.0 / 2^{i+1}$ [S1, unofficial].
++*   `transformComponent`: Contains the entity's world-space position and scale factor [S1, unofficial].
++*   `activeCameraTransformComponent`: Contains the camera's world-space position [S1, unofficial].
+ 
+-**Steps:**
+-1.  **Calculate Camera-to-Entity Distance:** Compute the Euclidean distance between the camera position and the transformed voxel position (or entity center) [S1, S3, unofficial].
+-    $$ d = \| \text{camera\_position} - (\text{model} \cdot [\text{voxel\_position}, 1]) \| $$
+-2.  **Determine Frustum Face Positions (Optional/Advanced):** To account for perspective, transform Normalized Device Coordinate (NDC) points to view space to define frustum boundaries [S1, unofficial].
+-    *   Define NDC points, e.g., $A = (-1, 0, 0, 1)$ and $B = (1, 0, 0, 1)$ [S1, unofficial].
+-    *   Transform to view space: $V_A = M^{-1} A$, $V_B = M^{-1} B$ [S1, unofficial].
+-    *   Calculate left and right frustum face positions in world space using the camera position and the distance $d$ [S1, unofficial].
+-3.  **Calculate Projected Size:** Calculate the distance between frustum faces normalized by screen width to determine the projected scale [S1, unofficial].
+-    $$ \text{distance} = \frac{\| \text{leftFrustumFacePos} - \text{rightFrustumFacePos} \|}{\text{screenWidth}} $$
+-4.  **Select LOD:** Iterate through the depth thresholds. If the calculated distance exceeds a threshold scaled by the entity's scale, select the corresponding LOD level [S1, unofficial].
+-    *   Simple heuristic: If $d > 0.5$, return LOD 2; otherwise, return LOD 1 [S3, unofficial].
+-    *   General heuristic: For $i$ from 0 to `depthThresholds_.size()`:
+-        *   $depth = i + 1$
+-        *   If $d > \text{depthThresholds\_}[i] \times \text{scale}$, set LOD to $depth$ and break [S1, unofficial].
++**Numbered Steps:**
++1.  **Calculate Camera-to-Entity Distance:** Compute the Euclidean distance between the camera position and the entity's transformed position [S1, S3, unofficial].
++    $$ d = \| \mathbf{p}_{camera} - \mathbf{p}_{entity} \| $$
++    Where $\mathbf{p}_{camera}$ is the camera position and $\mathbf{p}_{entity}$ is the entity position [S3, unofficial].
++
++2.  **Determine Frustum Face Positions (Optional/Advanced):** Some implementations calculate the specific positions of the left and right frustum faces at the entity's depth to refine the distance metric or for culling [S1, unofficial].
++    *   Define Normalized Device Coordinate (NDC) points, e.g., left edge $A = (-1, 0, 0, 1)$ and right edge $B = (1, 0, 0, 1)$ [S1, unofficial].
++    *   Transform these NDC points to view space using the inverse Model-View-Projection matrix ($MVP^{-1}$) [S1, unofficial]:
++        $$ \mathbf{v}_A = MVP^{-1} \cdot A, \quad \mathbf{v}_B = MVP^{-1} \cdot B $$
++    *   Calculate the world-space position of the frustum faces at the entity's distance $d$:
++        $$ \mathbf{f}_{left} = \mathbf{p}_{camera} + \mathbf{v}_A \cdot d $$
++        $$ \mathbf{f}_{right} = \mathbf{p}_{camera} + \mathbf{v}_B \cdot d $$
++    *   Calculate the distance between these faces normalized by screen width $W$:
++        $$ \text{face\_dist} = \frac{\| \mathbf{f}_{left} - \mathbf{f}_{right} \|}{W} $$
++    *   *Note:* This specific calculation is often used for frustum culling or precise footprint estimation rather than the primary LOD index selection in simpler implementations [S1, unofficial].
++
++3.  **Select LOD Level:** Iterate through the `depthTresholds_` array to find the first threshold that the calculated distance exceeds, adjusted by the entity's scale [S1, unofficial].
++    *   For each index $i$ from $0$ to $N-1$:
++        *   Calculate the target depth: $L = i + 1$ [S1, unofficial].
++        *   Check if the distance exceeds the threshold scaled by the entity's scale $S$:
++            $$ \text{if } d > \text{depthTresholds\_}[i] \cdot S $$
++        *   If true, set the LOD to $L$ and terminate the search [S1, unofficial].
++    *   If no threshold is exceeded, the lowest LOD (highest resolution, typically index 0 or 1 depending on implementation) is selected.
++
++**Formulas:**
++*   **Distance:** $d = \| \mathbf{p}_{camera} - \mathbf{p}_{entity} \|$ [S3, unofficial].
++*   **Thresholds:** $\text{depthTresholds\_}[i] = \frac{1.0}{2^{i+1}}$ for $i \in [0, \text{maxSvoDepth}-1]$ [S1, unofficial].
++*   **Simple LOD Decision (Binary Example):**
++    $$ LOD = \begin{cases} 2 & \text{if } \| \mathbf{p}_{camera} - (\mathbf{M} \cdot [\mathbf{p}_{voxel}, 1]) \| > 0.5 \\ 1 & \text{otherwise} \end{cases} $$
++    Where $\mathbf{M}$ is the model matrix and $\mathbf{p}_{voxel}$ is the voxel position [S3, unofficial].
++
++**Parameters:**
++*   `depthTresholds_`: Array of float thresholds [S1, unofficial].
++*   `lod`: Integer uniform variable controlling the selected LOD state in the shader [S3, unofficial].
++*   `camera_position`: World-space position of the camera [S3, unofficial].
++*   `transformComponent.getScale()`: Scale factor of the volume entity [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def select_lod(camera_pos, entity_pos, entity_scale, depth_thresholds, screen_width, mvp_matrix):
++def select_frustum_lod(camera_pos, entity_pos, entity_scale, depth_thresholds):
+     """
+-    Selects LOD based on camera-to-entity distance and frustum geometry.
++    Selects the LOD level for a volume entity based on camera distance.
++    
++    Args:
++        camera_pos: vec3, world-space position of the camera.
++        entity_pos: vec3, world-space position of the entity.
++        entity_scale: float, scale factor of the entity.
++        depth_thresholds: list of float, precomputed thresholds [1/2, 1/4, 1/8, ...].
++        
++    Returns:
++        int: The selected LOD level (1-based index).
+     """
+-    # Step 1: Calculate distance
+-    # Note: entity_pos should be transformed by model matrix if not already in world space
+-    distance = glm_distance(camera_pos, entity_pos)
++    # Step 1: Calculate Euclidean distance
++    dx = camera_pos.x - entity_pos.x
++    dy = camera_pos.y - entity_pos.y
++    dz = camera_pos.z - entity_pos.z
++    distance = (dx*dx + dy*dy + dz*dz)**0.5
+     
+-    # Step 2: Advanced Frustum Calculation (Optional for perspective accuracy)
+-    # Define NDC points for left and right edges
+-    point_a = vec4(-1.0, 0.0, 0.0, 1.0)
+-    point_b = vec4(1.0, 0.0, 0.0, 1.0)
+-    
+-    # Transform to view space
+-    inv_mvp = inverse(mvp_matrix)
+-    view_vec_a = inv_mvp * point_a
+-    view_vec_b = inv_mvp * point_b
+-    
+-    # Calculate frustum face positions in world space
+-    # Note: view_vec_a/b are homogeneous; extract direction or use as vectors scaled by distance
+-    # Assuming view_vec_a/b are normalized directions or need scaling
+-    left_frustum_pos = camera_pos + (view_vec_a.xyz / view_vec_a.w) * distance
+-    right_frustum_pos = camera_pos + (view_vec_b.xyz / view_vec_b.w) * distance
+-    
+-    # Calculate normalized distance between frustum faces
+-    frustum_distance = glm_distance(left_frustum_pos, right_frustum_pos) / screen_width
+-    
+-    # Step 3: Select LOD based on thresholds
+-    # Using the distance from camera to entity as the primary driver [S1, S3, unofficial]
+-    for i in range(len(depth_thresholds)):
+-        depth = i + 1
+-        threshold = depth_thresholds[i] * entity_scale
+-        if distance > threshold:
+-            return depth
++    # Step 2: Iterate through thresholds
++    # Note: depth_thresholds[i] corresponds to LOD level i+1
++    for i, threshold in enumerate(depth_thresholds):
++        # Adjust threshold by entity scale
++        adjusted_threshold = threshold * entity_scale
++        
++        # Check if distance exceeds threshold
++        if distance > adjusted_threshold:
++            # Return the LOD level (1-based)
++            return i + 1
+             
+-    return 0 # Default LOD
++    # If distance is smaller than all thresholds, return the highest resolution (LOD 1)
++    return 1
+ ```
+ 
+-**Parameters:**
+-*   `depthThresholds_`: Array of float thresholds, typically $1.0f / 2^{depth}$ [S1, unofficial].
+-*   `lod`: Uniform variable controlling the selected LOD state [S3, unofficial].
+-*   `camera_position`: World-space position of the camera [S3, unofficial].
+-*   `screenWidth`: Resolution width of the viewport [S1, unofficial].
+-
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Floating-point precision errors in distance calculations may cause flickering between LOD levels. [G] Use a small epsilon or hysteresis when comparing distances to thresholds.
+-*   **Boundaries:** The simple heuristic ($d > 0.5$) is rigid and may not scale well to different volume sizes without tuning [S3, unofficial].
+-*   **Degenerate Input:** If the camera is inside the volume, distance-based selection may fail or select the highest LOD incorrectly. [G] Clamp distance to a minimum positive value or handle internal camera positions separately.
++*   **Precision:** Floating-point precision errors in distance calculation may cause flickering between LOD levels if thresholds are very close. [G] Use a small epsilon or hysteresis when switching LODs to prevent visual popping.
++*   **Boundaries:** If the entity is partially outside the frustum, simple distance-based LOD may not account for the visible portion. [G] Combine with frustum culling to avoid rendering invisible high-res volumes.
++*   **Degenerate Input:** If `entity_scale` is zero or negative, the threshold adjustment fails. [G] Clamp scale to a minimum positive value (e.g., $10^{-6}$).
+ 
+ ## Subtopics
+ 
+ ### [Footprint-based LOD Selection](3088-footprint-based-lod-selection.md)
+-Selects LOD based on the projected footprint of voxels on the screen rather than just camera distance, providing more accurate resolution matching for oblique viewing angles.
++Determines LOD by ensuring the projected voxel size on the screen does not exceed a pixel threshold, preventing aliasing. It uses the actual projected footprint rather than distance to frustum faces.
++
++### [Cone-Footprint LOD and Step Sizing](5178-cone-footprint-lod-and-step-sizing.md)
++Uses sample density proportional to screen content and cone footprints, differing from the fixed median footprint or simple distance metrics of this method.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(1)$ for LOD selection if thresholds are precomputed and distance is calculated directly. Traversal cost depends on the selected LOD level.
+-*   **Memory Complexity:** Requires storing multiple resolution levels of the volume data (MIP-map pyramid), increasing memory usage by a factor of roughly $1.33$ to $2.0$ depending on the number of levels and data structure overhead [S2].
+-*   **Performance:** Significantly reduces sample requirements for distant or peripheral rays, improving frame rates for large-scale datasets [S2].
+-*   **Strengths:** Simple to implement; effective for large datasets where distance correlates well with visual importance [S2].
+-*   **Limitations:** Does not account for viewing angle or local detail density; may result in visible seams between LOD levels if not blended or handled with algorithms like Transvoxel [S3, unofficial].
+-*   **When to use:** Large-scale volume visualization where interactive frame rates are required and the camera distance is a good proxy for required resolution [S2].
+-*   **When not to use:** When viewing angles are highly oblique or when local detail density varies significantly independent of distance.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of LOD thresholds (typically small, e.g., 5-10), making it very fast for CPU-side LOD selection [S1, unofficial].
++*   **Memory Complexity:** $O(D)$ for storing the threshold array, where $D$ is the maximum LOD depth [S1, unofficial]. The volume data itself requires multi-resolution storage (MIP-map pyramid) [S2].
++*   **Measured Performance:** Suitable for large-scale datasets like geophysical simulations, significantly cutting memory and sample requirements while maintaining perceptual quality [S2].
++*   **Strengths:** Simple to implement; effective for distant objects; reduces bandwidth for peripheral rays [S2].
++*   **Limitations:** Does not explicitly account for the projected size of voxels on the screen, which can lead to aliasing or over-sampling if the camera moves laterally without changing distance [S2]. It is less precise than footprint-based methods for maintaining consistent visual quality across the screen [S2].
++*   **When to Use:** Large volumes where performance is critical and visual artifacts from distance-based LOD are acceptable or less noticeable than those from footprint-based methods.
++*   **When Not to Use:** When strict aliasing control is required, or when the camera moves primarily laterally relative to the volume.
+ 
+ ## Background
+-Frustum-based LOD selection is a common technique in volume rendering to optimize performance. It is often implemented alongside acceleration structures like octrees or MIP-map pyramids [S2]. The method is widely used in geophysical simulations and large-scale scientific visualization [S2]. Variations include "Simple LOD" implementations in educational frameworks [S3, unofficial] and more sophisticated distance-based selection in custom SVO (Sparse Voxel Octree) renderers [S1, unofficial].
++Frustum-based LOD selection is a technique used in volume ray casting to optimize rendering performance. It is part of the broader family of Level-of-Detail (LOD) methods for volume rendering. The method leverages hierarchical representations such as octree-based voxel MIP-map pyramids, where each level reduces resolution [S2]. It is particularly useful for interactive previews and large-scale datasets [S2]. Implementations can be found in various graphics frameworks and research projects, including simple LOD activations in Marching Cubes/Tetrahedra visualizers [S3, unofficial] and SVO (Sparse Voxel Octree) renderers [S1, unofficial].
+ 
+ ## Sources

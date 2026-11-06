@@ -1,0 +1,312 @@
+# Dual Contouring 2D (CUDA)
+
+Also called: KDualContour2, cudc2
+
+## Overview
+Dual Contouring 2D (CUDA) is a CUDA implementation of Dual Contouring for 2D mesh grids, used as a final project for CS 217 at UC Riverside [S1, unofficial]. It extracts isosurfaces from scalar fields by constructing Quadratic Error Functions (QEFs) at grid cell intersections [S1, unofficial]. It differs from its sibling [Dual Contouring (2D Grid Implementation)](3764-dual-contouring-2d-grid-implementation.md) by utilizing CUDA parallelism with tiled thread blocks, atomic operations for global indexing, and a parallel prefix sum (scan) for vertex and edge generation, rather than a sequential or CPU-based grid approach [S1, unofficial]. The method processes the scalar field in tiled blocks of grid cells [S1, unofficial]. Each thread block handles a tile of cells, computing intersection points, constructing QEFs, solving for vertex positions, and generating edges [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- Scalar field function $f(x, y)$ accessible via `Sample2<FT>` [S1, unofficial].
+- Grid bounds: $x \in [xs, xt]$, $y \in [ys, ys_{\text{end}}]$ [S1, unofficial].
+- Grid resolution: $n_x$ points in X, $n_y$ points in Y [S1, unofficial].
+- Isosurface value: $0$ (implicit in the source code checks) [S1, unofficial].
+- Parameters: `TILE_WIDTH` = 32, `TILE_HEIGHT` = 32, `BLOCK_SIZE` = 1024, `dh` = $10^{-5}$, `EPS` = $10^{-6}$, `EPS_SVD` = $10^{-1}$ [S1, unofficial].
+
+**Outputs:**
+- Vertex buffer `pd`: Array of 2D coordinates $(x, y)$ [S1, unofficial].
+- Edge buffer `edges`: Array of integer pairs $(v_1, v_2)$ referencing vertex indices [S1, unofficial].
+- Index buffer `ibuffer`: 2D array of integers with dimensions $(n_x - 1) \times (n_y - 1)$ used for connectivity tracking between tiles [S1, unofficial].
+- Global counter `pcnt`: Tracks the total number of generated vertices [S1, unofficial].
+
+### Data Structures
+- **`ibuffer`**: Double-buffered per tile row to handle boundary conditions between adjacent tile rows [S1, unofficial]. Initialized to $-1$ [S1, unofficial]. It stores the global vertex index generated for each cell [S1, unofficial].
+- **`edges`**: Flat array storing edge connectivity as pairs of vertex indices [S1, unofficial].
+- **`pcnt`**: Global atomic counter tracking the total number of generated vertices [S1, unofficial].
+
+### Steps
+1. **Grid Sampling**: Each thread $(tx, ty)$ within a block assigned to cell $(tx, ty)$ computes the scalar values at the four corners of its cell:
+   $$
+   \begin{aligned}
+   x_0 &= xs + tx \cdot x_{\text{step}}, & y_0 &= ys + ty \cdot y_{\text{step}} \\
+   x_1 &= x_0 + x_{\text{step}}, & y_1 &= y_0 + y_{\text{step}}
+   \end{aligned}
+   $$
+   Values: $s_0 = f(x_0, y_0)$, $s_1 = f(x_1, y_0)$, $s_2 = f(x_0, y_1)$, $s_3 = f(x_1, y_1)$ [S1, unofficial].
+
+2. **Intersection Detection**: Count intersections with the isosurface ($0$) along the four edges. An edge intersects if the signs of the corner values differ:
+   $$
+   \text{IsIntersected}(a, b) = \begin{cases} 1 & \text{if } (a < 0 \land b \ge 0) \lor (a \ge 0 \land b < 0) \\ 0 & \text{otherwise} \end{cases}
+   $$
+   Total intersections:
+   $$
+   I = \text{IsIntersected}(s_0, s_1) + \text{IsIntersected}(s_0, s_2) + \text{IsIntersected}(s_2, s_3) + \text{IsIntersected}(s_1, s_3)
+   $$
+   A cell is active if it has at least 2 intersections [S1, unofficial].
+
+3. **Global Indexing (Parallel Prefix Sum)**:
+   - Compute the number of active cells in the block using a block-wide reduction [S1, unofficial].
+   - Use `atomicAdd` on a global counter `pcnt` to get the base offset for the block's vertices [S1, unofficial].
+   - Perform a parallel prefix sum (scan) within the block to assign a local rank to each active cell [S1, unofficial].
+   - The global vertex index for the cell is:
+     $$
+     v_{\text{idx}} = \text{base} + \text{local\_rank} - 1
+     $$
+   - Store $v_{\text{idx}}$ in `ibuffer` for the current cell. If no vertex is generated, store $-1$ [S1, unofficial].
+
+4. **Intersection Point Calculation**: For each intersected edge, find the exact intersection point $(x, y)$ using binary search (bisection) between the endpoints with negative and non-negative scalar values. Iterate until $|f(x, y)| < \text{EPS}$ ($10^{-6}$) [S1, unofficial].
+
+5. **Gradient Estimation**: Estimate the normalized gradient $\mathbf{n} = (dx, dy)$ at each intersection point using central finite differences with step size $dh = 10^{-5}$:
+   $$
+   dx = \frac{f(x+dh, y) - f(x-dh, y)}{2 \cdot dh}, \quad dy = \frac{f(x, y+dh) - f(x, y-dh)}{2 \cdot dh}
+   $$
+   Normalize:
+   $$
+   \mathbf{n} = \frac{(dx, dy)}{\sqrt{dx^2 + dy^2}}
+   $$
+   [S1, unofficial].
+
+6. **QEF Construction**: For a cell with $k$ intersected edges, construct the QEF $E(\mathbf{v}) = \|A\mathbf{v} - \mathbf{b}\|^2$ [S1, unofficial].
+   - Matrix $A$ is $2 \times k$, where column $i$ is the gradient $\mathbf{n}_i = [dx_i, dy_i]^T$ [S1, unofficial].
+   - Vector $\mathbf{b}$ is size $k$, where $b_i = \mathbf{n}_i \cdot \mathbf{p}_i$, and $\mathbf{p}_i$ is the intersection point [S1, unofficial].
+   - Compute the sums:
+     $$
+     A^T A = \sum_{i=0}^{k-1} \mathbf{n}_i \mathbf{n}_i^T, \quad A^T \mathbf{b} = \sum_{i=0}^{k-1} b_i \mathbf{n}_i
+     $$
+   - Compute the centroid (mass point) $\mathbf{c}_{\text{mass}} = \frac{1}{k} \sum_{i=0}^{k-1} \mathbf{p}_i$ [S1, unofficial].
+
+7. **QEF Solving**: Solve for the vertex position $\mathbf{v}$ that minimizes the QEF. The implementation uses a pseudo-inverse method [S1, unofficial]:
+   - Let $M = A^T A = \begin{bmatrix} f[0] & f[1] \\ f[1] & f[2] \end{bmatrix}$ [S1, unofficial].
+   - Compute $M \mathbf{c}_{\text{mass}}$ [S1, unofficial].
+   - Compute residual $\mathbf{d} = A^T \mathbf{b} - M \mathbf{c}_{\text{mass}}$ [S1, unofficial].
+   - Compute the pseudo-inverse $M^+$ using SVD [S1, unofficial].
+   - The solution is $\mathbf{v} = M^+ \mathbf{d} + \mathbf{c}_{\text{mass}}$ [S1, unofficial].
+
+8. **SVD Implementation**: The $2 \times 2$ SVD of $M$ is computed analytically [S1, unofficial]:
+   - $e = 0.5(M_{00} + M_{11})$, $f = 0.5(M_{00} - M_{11})$, $g = 0.5(M_{01} + M_{10})$, $h = 0.5(M_{01} - M_{10})$ [S1, unofficial].
+   - Singular values: $S_{0,1} = \sqrt{e^2 + g^2} \pm \sqrt{f^2 + h^2}$ [S1, unofficial].
+   - Handle degenerate cases where $S_i < \text{EPS\_SVD}$ ($10^{-1}$) by setting inverse to 0 [S1, unofficial].
+   - Construct rotation matrices $U$ and $V^T$ using angles derived from `atan2` [S1, unofficial].
+
+9. **Edge Generation**: After vertices are generated, a second pass generates edges [S1, unofficial]. For each cell with a vertex:
+   - Check neighbors (left, down) in the `ibuffer` [S1, unofficial].
+   - If a neighbor has a valid vertex index, create an edge between the current cell's vertex and the neighbor's vertex [S1, unofficial].
+   - Use parallel prefix sums to determine the global edge index [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# CUDA Kernel: KDualContour2
+# Grid: (num_tiles_x, 1), Block: (TILE_WIDTH, TILE_HEIGHT)
+TILE_WIDTH = 32
+TILE_HEIGHT = 32
+BLOCK_SIZE = TILE_WIDTH * TILE_HEIGHT
+EPS = 1e-6
+EPS_SVD = 1e-1
+DH = 1e-5
+
+def sync_threads():
+    # Barrier: wait for all threads in the block
+    pass
+
+def KDualContour2(xs, xt, n_x, ys, ys_end, n_y, pd, pcap, pcnt, ibuffer, edges, ecnt):
+    tx = blockIdx.x * TILE_WIDTH + threadIdx.x
+    ty = threadIdx.y
+    tileY = blockIdx.y
+    ti = threadIdx.y * TILE_WIDTH + threadIdx.x
+    active = (tx < n_x - 1) and (ty < n_y - 1)
+
+    if not active:
+        return
+
+    # 1. Grid Sampling
+    xstep = (xt - xs) / (n_x - 1)
+    ystep = (ys_end - ys) / (n_y - 1)
+    x0 = xs + tx * xstep
+    y0 = ys + ty * ystep
+    x1 = x0 + xstep
+    y1 = y0 + ystep
+
+    s0 = Sample2(x0, y0)
+    s1 = Sample2(x1, y0)
+    s2 = Sample2(x0, y1)
+    s3 = Sample2(x1, y1)
+
+    # 2. Intersection Detection
+    def IsIntersected(a, b):
+        return 1 if (a < 0 and b >= 0) or (a >= 0 and b < 0) else 0
+
+    intersections = IsIntersected(s0, s1) + IsIntersected(s0, s2) + IsIntersected(s2, s3) + IsIntersected(s1, s3)
+    pred = active and (intersections >= 2)
+
+    # 3. Global Indexing (Parallel Prefix Sum)
+    # Count active threads in block
+    total_active = sum(1 for t in range(BLOCK_SIZE) if pred_threads[t]) # __syncthreads_count(pred)
+    # Get base offset for this block
+    base = atomicAdd(pcnt, total_active)
+
+    # Shared memory for scan
+    s = [0.0] * BLOCK_SIZE
+    s[ti] = 1 if pred else 0
+    sync_threads()
+
+    # Up-sweep (Reduction)
+    stride = 1
+    while stride <= BLOCK_SIZE // 2:
+        index = (ti + 1) * stride * 2 - 1
+        if index < BLOCK_SIZE:
+            s[index] += s[index - stride]
+        sync_threads()
+        stride *= 2
+
+    # Down-sweep (Scan)
+    stride = BLOCK_SIZE // 4
+    while stride > 0:
+        index = (ti + 1) * stride * 2 - 1
+        if index + stride < BLOCK_SIZE:
+            s[index + stride] += s[index]
+        sync_threads()
+        stride //= 2
+
+    # Compute global vertex index
+    pi = base + s[ti] - 1
+
+    # Store index in ibuffer
+    which = tileY % 2
+    ibuffer_stride = (n_x - 1) * TILE_HEIGHT
+    bi = which * ibuffer_stride + ty * (n_x - 1) + tx
+
+    if active:
+        ibuffer[bi] = pi if pred else -1
+
+    # 4. Generate Vertex if Active
+    if pred:
+        k = 0
+        cx, cy = 0.0, 0.0
+        A = [0.0] * 8  # 2x4 max intersections
+        b = [0.0] * 4
+
+        # Process edges
+        edge_data = [
+            (s0, s1, x0, y0, x1, y0),
+            (s0, s2, x0, y0, x0, y1),
+            (s2, s3, x0, y1, x1, y1),
+            (s1, s3, x1, y0, x1, y1)
+        ]
+
+        for sa, sb, xa, ya, xb, yb in edge_data:
+            if IsIntersected(sa, sb):
+                # Binary search for intersection
+                if sa < sb:
+                    xlow, ylow, xhigh, yhigh = xa, ya, xb, yb
+                else:
+                    xlow, ylow, xhigh, yhigh = xb, yb, xa, ya
+
+                x, y = SolveIntersection2(xlow, ylow, xhigh, yhigh)
+                dx, dy = SampleGradient2(x, y)
+
+                A[2 * k] = dx
+                A[2 * k + 1] = dy
+                cx += x
+                cy += y
+                b[k] = dx * x + dy * y
+                k += 1
+
+        # QEF Construction
+        f = [0.0] * 7
+        f[0] = A[0]**2 + A[2]**2 + A[4]**2 + A[6]**2
+        f[1] = A[0]*A[1] + A[2]*A[3] + A[4]*A[5] + A[6]*A[7]
+        f[2] = A[1]**2 + A[3]**2 + A[5]**2 + A[7]**2
+        f[3] = A[0]*b[0] + A[2]*b[1] + A[4]*b[2] + A[6]*b[3]
+        f[4] = A[1]*b[0] + A[3]*b[1] + A[5]*b[2] + A[7]*b[3]
+        f[5] = cx / k
+        f[6] = cy / k
+
+        # QEF Solving
+        ATA = [f[0], f[1], f[1], f[2]]
+        pinv = PseudoInverse2(ATA)
+
+        ATAg = [ATA[0]*f[5] + ATA[1]*f[6], ATA[2]*f[5] + ATA[3]*f[6]]
+        d = [f[3] - ATAg[0], f[4] - ATAg[1]]
+
+        c = [pinv[0]*d[0] + pinv[1]*d[1], pinv[2]*d[0] + pinv[3]*d[1]]
+        px = c[0] + f[5]
+        py = c[1] + f[6]
+
+        # Store vertex
+        vertex_idx = atomicAdd(pcap, 1)
+        pd[vertex_idx * 2] = px
+        pd[vertex_idx * 2 + 1] = py
+
+def SolveIntersection2(xlow, ylow, xhigh, yhigh):
+    # Bisection search
+    while abs(Sample2((xlow+xhigh)/2, (ylow+yhigh)/2)) >= EPS:
+        mid_x = (xlow + xhigh) / 2
+        mid_y = (ylow + yhigh) / 2
+        val = Sample2(mid_x, mid_y)
+        if val < 0:
+            xlow, ylow = mid_x, mid_y
+        else:
+            xhigh, yhigh = mid_x, mid_y
+    return (xlow + xhigh) / 2, (ylow + yhigh) / 2
+
+def SampleGradient2(x, y):
+    dx = (Sample2(x + DH, y) - Sample2(x - DH, y)) / (2 * DH)
+    dy = (Sample2(x, y + DH) - Sample2(x, y - DH)) / (2 * DH)
+    l = (dx**2 + dy**2)**0.5
+    return dx / l, dy / l
+
+def PseudoInverse2(M):
+    e = 0.5 * (M[0] + M[3])
+    f = 0.5 * (M[0] - M[3])
+    g = 0.5 * (M[1] + M[2])
+    h = 0.5 * (M[1] - M[2])
+
+    r1 = (e**2 + g**2)**0.5
+    r2 = (f**2 + h**2)**0.5
+
+    S0 = r1 + r2
+    S1 = r1 - r2
+
+    invS0 = 1.0 / S0 if S0 >= EPS_SVD else 0.0
+    invS1 = 1.0 / S1 if S1 >= EPS_SVD else 0.0
+
+    theta = atan2(g, f) if (f != 0 or g != 0) else 0.0
+    phi = atan2(h, r2) if (r2 != 0) else 0.0
+
+    ct, st = cos(theta), sin(theta)
+    cp, sp = cos(phi), sin(phi)
+
+    U00 = ct*cp - st*sp
+    U01 = -ct*sp - st*cp
+    U10 = st*cp + ct*sp
+    U11 = -st*sp + ct*cp
+
+    pinv00 = U00*U00*invS0 + U01*U01*invS1
+    pinv01 = U00*U10*invS0 + U01*U11*invS1
+    pinv10 = U10*U00*invS0 + U11*U01*invS1
+    pinv11 = U10*U10*invS0 + U11*U11*invS1
+
+    return [pinv00, pinv01, pinv10, pinv11]
+```
+
+### Edge Cases and Pitfalls
+- **Singular Value Zero**: If a singular value $S_i < \text{EPS\_SVD}$ ($10^{-1}$), the inverse is set to 0.0 to prevent division by zero. This occurs when the QEF is degenerate (e.g., all gradients are parallel or zero) [S1, unofficial].
+- **Atan2 Domain**: If both arguments to `atan2` are 0.0, it returns 0.0 to handle isotropic or zero matrices [S1, unofficial].
+- **Boundary Conditions**: Cells on the grid boundary may have fewer than 4 edges. The code checks `active` status to avoid out-of-bounds sampling [S1, unofficial].
+- **Tile Boundaries**: The `ibuffer` is double-buffered to handle vertex sharing between adjacent tile rows. The `which` variable determines which buffer is read/written [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N)$ where $N$ is the number of grid cells, as each cell is processed by one thread. The prefix sum adds a logarithmic factor per block, but is efficient on GPU [S1, unofficial].
+- **Memory Complexity**: $O(N)$ for vertex and edge buffers, plus $O(\text{tile size})$ for shared memory and temporary buffers [S1, unofficial].
+- **Performance**: Optimized for CUDA GPUs with 1024 threads per block. Performance scales with the number of SMs and memory bandwidth [S1, unofficial].
+- **Strengths**: Parallel processing, sharp feature preservation via QEF, efficient memory access patterns with tiled processing [S1, unofficial].
+- **Limitations**: Limited to 2D, requires careful handling of boundary conditions between tiles, numerical stability depends on SVD implementation [S1, unofficial].
+
+## Background
+Dual Contouring 2D (CUDA) was developed as a final project for CS 217 (GPU Architecture and Programming) at the University of California, Riverside, in Fall 2015. It was made public in December 2015. The project aims to provide a GPU-accelerated alternative to CPU-based dual contouring implementations, leveraging CUDA's parallel architecture for real-time or high-performance 2D isosurface extraction [S1, unofficial].
+
+## Sources
+[S1] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)

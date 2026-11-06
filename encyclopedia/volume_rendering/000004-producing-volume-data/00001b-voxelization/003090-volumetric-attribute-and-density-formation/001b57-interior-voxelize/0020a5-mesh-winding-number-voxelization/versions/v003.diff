@@ -1,0 +1,148 @@
+--- v002.md
++++ v003.md
+@@ -3,83 +3,86 @@
+ 
+ ## Overview
+-Mesh Winding Number Voxelization determines the interior of a mesh by evaluating the Mesh Winding Number (MWN) at sample points within a voxel grid [S1, unofficial]. It differs from sibling methods like [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxelization.md) or [Front/Back Face Flagging](1506-front-back-face-flagging.md) by computing a hierarchical field evaluation rather than relying on ray intersection parity or face orientation [S1, unofficial]. It sets itself apart by yielding an integer value for closed meshes and a smoothly diffusing value around open boundaries, allowing for a consistent threshold-based classification [S1, unofficial].
++Mesh Winding Number Voxelization determines the interior of a 3D mesh by evaluating the Mesh Winding Number (MWN) at sample points within a voxel grid. Unlike [Stochastic Ray-Casting Voxelization](1067-stochastic-ray-casting-voxelization.md) or [Ray-Cast Style Voxel Filling](1502-ray-cast-style-voxel-filling.md), which rely on ray-mesh intersections, this method computes a scalar field based on the solid angle subtended by the mesh triangles. It is distinct from [Front/Back Face Flagging](1506-front-back-face-flagging.md) and [Tight Voxelization (Point-in-Mesh Test)](1709-tight-voxelization-point-in-mesh-test.md) because it yields an integer value for closed meshes and smoothly diffuses around open boundaries, allowing it to correctly handle non-manifold geometry and meshes with holes [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- A triangular mesh [S1, unofficial].
+-- A base voxel grid resolution per axis, `numcells` [S1, unofficial].
+-- The spatial bounds of the mesh, specifically the minimum corner and maximum dimension [S1, unofficial].
+-
+-**Outputs:**
+-- A 3D boolean bitmap representing the interior voxels [S1, unofficial].
++**Inputs and Outputs:**
++- Input: A triangular mesh (typically represented with an AABB tree for acceleration) and a target grid resolution (`numcells`).
++- Output: A 3D boolean bitmap (`Bitmap3`) where `true` indicates the voxel center is inside the mesh.
+ 
+ **Data Structures:**
+-- `Bitmap3`: A 3D boolean array. Internally, bits are packed into 32-bit integers [S1, unofficial]. Concurrent writes require synchronization via a `SpinLock` using a method like `SafeSet` [S1, unofficial].
+-- Grid indexer: Maps integer grid indices $(i, j, k)$ to 3D world coordinates $(x, y, z)$ using a minimum corner vector and a cell size [S1, unofficial].
++- `Bitmap3`: A 3D array of bits. Internally, bits are packed into 32-bit integers. Due to the lack of atomic read-and-flip operations on individual bits within a 32-bit integer, concurrent writes require synchronization (e.g., a `SpinLock`) to prevent race conditions [S1, unofficial].
++- `ShiftGridIndexer3`: Maps grid indices $(i, j, k)$ to world coordinates $(x, y, z)$. It requires a bounding box (`bounds`) and a cell size (`cellsize`).
+ 
+ **Parameters:**
+-- `numcells`: Base resolution per axis [S1, unofficial].
+-- `cellsize`: Derived from mesh bounds. $cellsize = \frac{\text{bounds.MaxDim}}{numcells}$ [S1, unofficial].
+-- `threshold`: Classification threshold. Typical value: $0.5$. Values like $0.8$ may result in missing chunks for meshes with holes [S1, unofficial].
++- `numcells`: The resolution of the voxel grid along one axis.
++- `bounds`: The axis-aligned bounding box of the mesh.
++- `cellsize`: Calculated as `bounds.MaxDim / numcells`.
++- `threshold`: The MWN value above which a point is considered inside. Typical value: $0.5$. Values like $0.8$ may result in missing chunks for meshes with holes [S1, unofficial].
+ 
+ **Steps:**
+-1. Initialize the output grid dimensions to $(numcells+2, numcells+2, numcells+2)$ [S1, unofficial].
+-2. Calculate `cellsize` from the mesh bounds and `numcells` [S1, unofficial].
+-3. Create a grid indexer mapping grid indices to world coordinates using the bounds minimum corner and `cellsize` [S1, unofficial].
+-4. Seed the hierarchical cache by calling `WindingNumber` on a point outside the mesh (e.g., the origin) [S1, unofficial].
+-5. Parallelize evaluation over all grid indices [S1, unofficial].
+-6. For each index, map to a 3D world coordinate [S1, unofficial].
+-7. Compute the MWN at the coordinate and set the voxel to true if the value is greater than $0.5$ [S1, unofficial].
++1. **Calculate Grid Parameters:** Determine `cellsize` from the mesh bounding box and `numcells`. Create a `ShiftGridIndexer3` using `bounds.Min` and `cellsize`.
++2. **Seed Hierarchical Cache:** Call `WindingNumber` on a point known to be outside the mesh (e.g., the origin or a point far from the mesh). This initializes the hierarchical acceleration structure [S1, unofficial].
++3. **Parallel Evaluation:** Iterate over all grid indices $(i, j, k)$ in parallel.
++4. **Coordinate Mapping:** For each index, compute the world coordinate $v$ using `indexer.FromGrid(idx)`.
++5. **Winding Number Computation:** Compute the MWN at $v$ using the hierarchical tree structure.
++6. **Voxel Assignment:** Set the voxel to `true` if `WindingNumber(v) > threshold`, otherwise `false`. Use a thread-safe set operation (e.g., `SafeSet`) to handle concurrent writes [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+ def mesh_winding_number_voxelization(mesh, numcells):
+-    # 1. Calculate bounds and cell size [S1, unofficial]
+-    bounds_min = mesh.bounds.min
+-    max_dim = mesh.bounds.max_dim
+-    cellsize = max_dim / numcells
+-
+-    # 2. Initialize grid with dimensions numcells + 2 per axis [S1, unofficial]
+-    grid_dims = (numcells + 2, numcells + 2, numcells + 2)
+-    bitmap = [[[False] * grid_dims[2] for _ in range(grid_dims[1])] for _ in range(grid_dims[0])]
+-
+-    # 3. Define grid-to-world mapping [S1, unofficial]
+-    def grid_to_world(idx):
+-        return (bounds_min.x + idx[0] * cellsize,
+-                bounds_min.y + idx[1] * cellsize,
+-                bounds_min.z + idx[2] * cellsize)
+-
+-    # 4. Seed hierarchical cache with an outside point (e.g., origin) [S1, unofficial]
+-    mesh.aabb_tree.winding_number((0.0, 0.0, 0.0))
+-
+-    # 5. Parallel evaluation over all grid indices [S1, unofficial]
++    # 1. Setup grid parameters
++    bounds = mesh.get_bounding_box()
++    cellsize = bounds.max_dim / numcells
++    indexer = ShiftGridIndexer3(bounds.min, cellsize)
++    
++    # Output bitmap dimensions are numcells + 2 in each axis [S1, unofficial]
++    # Note: The source code example uses numcells+2, but standard voxelization 
++    # often uses numcells. We follow the source's specific implementation detail.
++    bmp = Bitmap3(Vector3i(numcells + 2, numcells + 2, numcells + 2))
++    
++    # 2. Seed the hierarchical cache with a point outside the mesh
++    # Using origin as an example; ensure it is outside the mesh bounds
++    spatial = DMeshAABBTree3(mesh)
++    spatial.winding_number(Vector3d(0, 0, 0))
++    
++    # 3. Parallel evaluation
+     def process_voxel(idx):
+-        world_pos = grid_to_world(idx)
+-        wn = mesh.aabb_tree.winding_number(world_pos)
+-        # 6. Set voxel if MWN > threshold [S1, unofficial]
+-        if wn > 0.5:
+-            bitmap_safe_set(bitmap, idx, True) # Thread-safe write using SpinLock [S1, unofficial]
+-
+-    # Standard parallel iteration construct [G]
+-    parallel_for(grid_indices(grid_dims), process_voxel)
+-    return bitmap
++        # 4. Map grid index to world coordinate
++        v = indexer.from_grid(idx)
++        
++        # 5. Compute winding number
++        w = spatial.winding_number(v)
++        
++        # 6. Set voxel if inside (threshold 0.5)
++        # Use SafeSet to avoid race conditions on BitArray [S1, unofficial]
++        bmp.safe_set(idx, w > 0.5)
++    
++    # Execute in parallel
++    g_parallel_for_each(bmp.indices(), process_voxel)
++    
++    return bmp
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Race Conditions:** Writing to a `BitArray` from multiple threads without synchronization causes data corruption because bits are packed into 32-bit integers and cannot be read-and-flipped atomically [S1, unofficial]. `SafeSet` with a `SpinLock` is required [S1, unofficial].
+-- **Threshold Selection:** For meshes with holes, the MWN diffuses smoothly [S1, unofficial]. A threshold of $0.5$ is standard, but higher thresholds (e.g., $0.8$) cause significant parts of the interior to be missed [S1, unofficial].
+-- **Performance:** The hierarchical evaluation is critical for large grids [S1, unofficial]. The non-hierarchical version takes well over a minute for a $64^3$ grid, while the hierarchical version takes 1-2 seconds on a 6-core/12-thread machine in Release build [S1, unofficial].
++- **Race Conditions:** Writing to the `Bitmap3` from multiple threads without synchronization causes data corruption because bits are packed into 32-bit integers. Use `SafeSet` or equivalent atomic operations [S1, unofficial].
++- **Threshold Selection:** Using a high threshold (e.g., $0.8$) for meshes with holes can lead to incomplete voxelization ("missing chunks"). A threshold of $0.5$ is recommended [S1, unofficial].
++- **Non-Hierarchical Performance:** Computing the winding number without the hierarchical AABB tree acceleration is extremely slow for large grids (e.g., >1 minute for $64^3$) [S1, unofficial].
++
++## Subtopics
++
++### [Generalized Winding Number Voxelization](7623-generalized-winding-number-voxelization.md)
++Generalized Winding Number Voxelization constructs a binary image (voxelization) from a set of oriented point clouds in $\mathbb{R}^3$ by evaluating an implicit surface defined by the generalized winding number framework. It differs from standard mesh voxelization by operating directly on oriented point clouds without requiring a manifold mesh, using the winding number to handle non-manifold geometry and holes via smooth diffusion. It builds on [Mesh Winding Number Voxelization](2328-mesh-winding-number-voxelization.md) by providing the specific implementation for point clouds using the libIGL backend.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Not given in the sources.
+-- **Memory Complexity:** Not given in the sources.
+-- **Measured Performance:** On a 6-core/12-thread machine in Release build, a $64^3$ voxelization takes 1-2 seconds using the hierarchical method [S1, unofficial]. The non-hierarchical version takes well over a minute [S1, unofficial].
+-- **Strengths:** Handles meshes with holes gracefully by diffusing smoothly around boundaries [S1, unofficial].
+-- **Limitations:** More computationally expensive per voxel than simple methods; requires a hierarchical bounding-box tree structure for efficiency [S1, unofficial].
+-- **When to use:** When the mesh may have holes or requires robust inside/outside classification [S1, unofficial].
+-- **When not to use:** Not given in the sources.
++- **Time Complexity:** The hierarchical evaluation reduces the cost per query from $O(N)$ to $O(\log N)$ or better, where $N$ is the number of triangles.
++- **Measured Performance:** On a 6-core/12-thread machine in Release build, computing a $64^3$ voxelization takes 1–2 seconds using the hierarchical version. The non-hierarchical version takes well over a minute [S1, unofficial].
++- **Memory Complexity:** Proportional to the number of voxels ($O(V)$) plus the memory for the AABB tree ($O(N)$).
++- **Strengths:** Handles non-manifold geometry, open boundaries, and self-intersections robustly. It does not require the mesh to be watertight.
++- **Limitations:** Computationally more expensive per voxel than simple ray casting for closed, manifold meshes. Requires careful handling of thread safety for the output bitmap.
++- **When to Use:** When the mesh has holes, is non-manifold, or when a smooth transition around boundaries is desired.
++- **When Not to Use:** For simple, closed, manifold meshes where performance is critical and ray-casting methods are sufficient.
+ 
+ ## Background
+-The Mesh Winding Number was introduced by Alec Jacobson, Ladislav Kavan, and Olga Sorkine-Hornung in a SIGGRAPH paper in 2013 [S1, unofficial]. It extends the concept of the 2D polygon winding number to 3D meshes [S1, unofficial]. For closed meshes, it yields an integer value (1 inside, 0 outside), while for meshes with holes, it diffuses smoothly around the boundaries [S1, unofficial]. This property makes it particularly useful for voxelization tasks where mesh quality may vary or where open boundaries are present [S1, unofficial].
++The Mesh Winding Number was introduced by Alec Jacobson, Ladislav Kavan, and Olga Sorkine-Hornung in a SIGGRAPH paper in 2013 [S1, unofficial]. It extends the concept of the 2D polygon winding number to 3D meshes, providing a robust way to determine point containment. The hierarchical implementation leverages bounding volume hierarchies to accelerate the computation for large-scale voxelization tasks.
+ 
+ ## Sources

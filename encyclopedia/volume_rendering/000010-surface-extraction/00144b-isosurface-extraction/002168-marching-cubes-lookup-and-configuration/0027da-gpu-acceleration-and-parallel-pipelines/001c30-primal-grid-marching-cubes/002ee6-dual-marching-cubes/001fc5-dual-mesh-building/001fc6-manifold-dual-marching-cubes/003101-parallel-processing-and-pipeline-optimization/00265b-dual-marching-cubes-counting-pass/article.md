@@ -1,0 +1,187 @@
+# Dual Marching Cubes (Counting Pass)
+
+Also called: DM counting pass, segment vertex/quad counter
+
+## Overview
+The Dual Marching Cubes (DMC) counting pass is the first phase of a two-pass parallel surface extraction algorithm designed to determine the exact memory requirements for vertex and quad buffers without generating geometry [S1, unofficial]. It solves the problem of dynamic buffer allocation in parallel pipelines by iterating over a voxel grid, classifying cells, and accumulating counts based on precomputed lookup tables [S1, unofficial]. Unlike the geometry generation pass, this phase is read-only regarding output buffers and focuses solely on sizing [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   `voxelToSegId`: A 1D array of `uint16_t` mapping linear voxel indices to segment identifiers [S1, unofficial].
+*   `segId`: The target segment identifier to process [S1, unofficial].
+*   `startX, startY, startZ, endX, endY, endZ`: Inclusive bounding box coordinates defining the region of interest within the voxel grid [S1, unofficial].
+*   `smooth`: A boolean flag indicating whether normal smoothing should be performed during the subsequent geometry pass (used here to determine buffer size for normals if applicable, though primarily a geometry pass concern) [S1, unofficial].
+
+**Outputs:**
+*   A `dmc_result` structure containing:
+    *   `vertCount`: Total number of vertices to be generated [S1, unofficial].
+    *   `quadCount`: Total number of quads to be generated [S1, unofficial].
+    *   `vertices`: Pointer to an allocated buffer of size `vertCount * 3` floats (allocated by the caller or returned as part of the result structure in the source implementation) [S1, unofficial].
+    *   `normals`: Pointer to an allocated buffer for normals [S1, unofficial].
+    *   `triangles`: Pointer to an allocated buffer for triangle indices [S1, unofficial].
+
+### Data Structures
+*   **Static Lookup Tables:**
+    *   `DM_VERT_COUNT[256]`: A `static const int8_t` array mapping 8-bit cube configuration masks (0-255) to the number of vertices generated [S1, unofficial].
+    *   `DM_QUAD_COUNT[256]`: A `static const int8_t` array mapping 8-bit cube configuration masks (0-255) to the number of quads generated [S1, unofficial].
+    *   `EDGE_TO_CELLS_EDGES[10*3]`: Maps edge indices to cell edge indices (triplets) [S1, unofficial].
+    *   `EDGE_TO_CELLS_OFFS[10*3]`: Maps edge indices to cell edge offsets (triplets using `X_OFF`, `Y_OFF`, `Z_OFF`) [S1, unofficial].
+*   **Dynamic/Intermediate Arrays:**
+    *   `counts`: An array used to accumulate corner bits for each voxel in the bounding box. Size depends on the bounding box dimensions.
+
+### Grid Definition
+The regular grid $L$ uses a spacing factor of 4 relative to base units $x,y,z$:
+$$L = \{(i \cdot 4 \cdot x, j \cdot 4 \cdot y, k \cdot 4 \cdot z) : i = 0,...,N_x; j = 0,...,N_y; k = 0,...,N_z\}$$
+Cell $(i,j,k)$ is defined by the diagonal from $(i \cdot 4 \cdot x, j \cdot 4 \cdot y, k \cdot 4 \cdot z)$ to $((i+1) \cdot 4 \cdot x, (j+1) \cdot 4 \cdot y, (k+1) \cdot 4 \cdot z)$ [S1, unofficial].
+
+### Steps
+1.  **Initialization:**
+    *   Initialize `vertCount = 0` and `quadCount = 0` [S1, unofficial].
+    *   Calculate window dimensions:
+        $$X\_WIN\_SIZE = endX - startX + 1$$
+        $$Y\_WIN\_SIZE = endY - startY + 1$$
+    *   Adjust start coordinates to account for counting overshoot:
+        $$startX = startX - 1$$
+        $$startY = startY - 1$$
+    *   Initialize linear grid index `i` to `endX + endY * Y_OFF + endZ * Z_OFF` [S1, unofficial].
+    *   Calculate `count_offset = startZ * Z_OFF` [S1, unofficial].
+
+2.  **Grid Traversal:**
+    *   Iterate `z` from `endZ` down to `startZ`.
+    *   Iterate `y` from `endY` down to `startY`.
+    *   Iterate `x` from `endX` down to `startX`.
+    *   Compute linear index `w_i = i - count_offset` [S1, unofficial].
+    *   Check if `voxelToSegId[i] == segId`. If true:
+        *   Accumulate corner bits into `counts[w_i]`. The 8 corners are mapped to bits 0-7:
+            *   Corner 0: `counts[w_i] |= 1`
+            *   Corner 1: `counts[w_i] |= 2`
+            *   Corner 2: `counts[w_i] |= 4`
+            *   Corner 3: `counts[w_i] |= 8`
+            *   Corner 4: `counts[w_i] |= 16`
+            *   Corner 5: `counts[w_i] |= 32`
+            *   Corner 6: `counts[w_i] |= 64`
+            *   Corner 7: `counts[w_i] |= 128`
+        *   Update counts using lookup tables:
+            $$vertCount += DM\_VERT\_COUNT[counts[w\_i]]$$
+            $$quadCount += DM\_QUAD\_COUNT[counts[w\_i]]$$
+    *   **Index Adjustment:**
+        *   Decrement linear index `i`.
+        *   Adjust for Y-loop wrap: `i = i + X_WIN_SIZE - Y_OFF` [S1, unofficial].
+        *   Adjust for Z-loop wrap: `i = i + Y_WIN_SIZE * Y_OFF - Z_OFF` [S1, unofficial].
+
+3.  **Buffer Allocation:**
+    *   Allocate vertex buffer: `vertices = calloc(vertCount * 3, sizeof(float))` [S1, unofficial].
+    *   (Note: The source code allocates `normals` and `triangles` buffers as well, sized based on `vertCount` and `quadCount` respectively, though the counting pass itself only determines the counts.)
+
+4.  **Cleanup:**
+    *   Reset `counts` array to zero for the next pass or segment [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_marching_cubes_counting_pass(voxel_to_seg_id, seg_id, start_x, start_y, start_z, end_x, end_y, end_z, x_off, y_off, z_off):
+    """
+    Counts vertices and quads for a specific segment in a voxel grid.
+    """
+    # Adjust start coordinates
+    start_x -= 1
+    start_y -= 1
+    
+    # Calculate window dimensions
+    x_win_size = end_x - start_x + 1
+    y_win_size = end_y - start_y + 1
+    
+    # Initialize counters
+    vert_count = 0
+    quad_count = 0
+    
+    # Initialize linear index to end position
+    i = end_x + end_y * y_off + end_z * z_off
+    
+    # Pre-calculate count offset
+    count_offset = start_z * z_off
+    
+    # Temporary array for corner bits (size depends on bounding box)
+    # In practice, this might be a local array or reused buffer
+    num_voxels = (end_z - start_z + 1) * (end_y - start_y + 1) * (end_x - start_x + 1)
+    counts = [0] * num_voxels
+    
+    # Traverse grid in reverse order
+    for z in range(end_z, start_z - 1, -1):
+        for y in range(end_y, start_y - 1, -1):
+            for x in range(end_x, start_x - 1, -1):
+                w_i = i - count_offset
+                
+                # Check segment ID
+                if voxel_to_seg_id[i] == seg_id:
+                    # Accumulate corner bits
+                    # Note: The specific mapping of corners to bits 0-7 depends on the 
+                    # specific DMC implementation's corner ordering. 
+                    # The source uses a bitmask accumulation.
+                    corner_bits = 0
+                    # Assuming corners 0-7 correspond to specific voxel neighbors
+                    # The source code implies a direct mapping from voxel index to corner bits
+                    # which are then accumulated into counts[w_i].
+                    # Since the exact corner-to-bit mapping isn't fully detailed in the 
+                    # provided snippet beyond the |= operations, we assume a standard 
+                    # 8-corner bitmask accumulation.
+                    
+                    # Placeholder for actual corner bit extraction logic which 
+                    # depends on the specific voxel-to-corner mapping in the DMC variant.
+                    # The source code shows: corner 0|=1, corner 1|=2, etc.
+                    # This implies the voxel contributes to the count array at w_i.
+                    
+                    # For the purpose of this counting pass, we assume the corner bits 
+                    # are correctly accumulated into counts[w_i] by the caller or 
+                    # a helper function not shown.
+                    
+                    # Update counts
+                    vert_count += DM_VERT_COUNT[counts[w_i]]
+                    quad_count += DM_QUAD_COUNT[counts[w_i]]
+                
+                # Decrement linear index
+                i -= 1
+                
+                # Adjust for Y-loop wrap
+                i = i + x_win_size - y_off
+            
+            # Adjust for Z-loop wrap
+            i = i + y_win_size * y_off - z_off
+            
+    # Allocate buffers
+    vertices = [0.0] * (vert_count * 3)
+    normals = [0.0] * (vert_count * 3) # Assuming one normal per vertex
+    triangles = [0] * (quad_count * 6) # Assuming 2 triangles per quad
+    
+    return {
+        'vert_count': vert_count,
+        'quad_count': quad_count,
+        'vertices': vertices,
+        'normals': normals,
+        'triangles': triangles
+    }
+```
+
+### Parameters
+*   `voxelToSegId`: Pointer to a 1D array mapping linear voxel indices to segment IDs (`uint16_t`) [S1, unofficial].
+*   `segId`: Target segment identifier [S1, unofficial].
+*   `startX, startY, startZ, endX, endY, endZ`: Inclusive bounding box coordinates [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Grid Traversal Direction:** The traversal is reversed (end to start) and requires explicit index reset logic using `X_WIN_SIZE`, `Y_WIN_SIZE`, and stride constants to maintain correct 3D-to-1D mapping [S1, unofficial].
+*   **Boundary Conditions:** The adjustment of `startX` and `startY` by -1 suggests that the algorithm may access voxels outside the primary bounding box or requires a halo region. Implementers must ensure `voxelToSegId` is valid for these adjusted indices.
+*   **Precision:** The use of `int8_t` for lookup tables limits the maximum number of vertices/quads per cell to 127, which is sufficient for Marching Cubes variants but should be verified for the specific DMC configuration.
+
+## Operating characteristics
+*   **Time Complexity:** $O(V)$ where $V$ is the number of voxels in the bounding box, as it performs a single pass with constant-time bitmask updates and table lookups [S1, unofficial].
+*   **Memory Complexity:** $O(V)$ for the `counts` array and output buffers proportional to the expected geometry size.
+*   **Strengths:** Avoids the overhead of geometry generation during the sizing phase; enables precise buffer allocation; suitable for parallel execution as it is read-only regarding the input grid.
+*   **Limitations:** Requires a second pass for actual geometry generation; the reversed traversal order may be less cache-friendly than forward traversal depending on memory layout.
+
+## Background
+The Dual Marching Cubes (DMC) algorithm is a variant of the Marching Cubes algorithm that generates a dual mesh. The counting pass is a specific optimization for parallel implementations, allowing for efficient buffer allocation before the geometry generation phase. The source code provided is from an unofficial GitHub repository [S1, unofficial].
+
+## Sources
+[S1] chrisj/dual-marching-cubes, https://github.com/chrisj/dual-marching-cubes, fetched 2026-10-27 (unofficial)

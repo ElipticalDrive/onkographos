@@ -1,134 +1,104 @@
 # Approximated Gradient Back-Propagation
 
-Also called: Aggressive Marching Gradient Approximation, First-Order SDF Gradient
 
 ## Overview
-Approximated Gradient Back-Propagation is a method for computing gradients in differentiable sphere tracing that reduces memory usage by ignoring high-order gradient terms. It solves the problem of back-propagating through the iterative point-position updates in sphere tracing, which normally require storing intermediate states for every marching step. It sets itself apart from exact gradient methods like [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md) by sacrificing the gradient contribution from the dependence of sample points on the latent code, in exchange for significantly lower memory overhead.
+Approximated Gradient Back-Propagation computes gradients for differentiable sphere tracing by ignoring high-order gradient terms to reduce memory usage [S1]. It solves the problem of back-propagating through the iterative point-position updates in sphere tracing, which normally require storing intermediate states for every marching step [S1]. It sets itself apart from exact gradient methods like [Differentiable Depth Rendering](1332-differentiable-depth-rendering.md) by sacrificing the gradient contribution from the dependence of sample points on the latent code, in exchange for significantly lower memory overhead [S1].
 
 ## How it works
 **Inputs:**
-- Latent code $\mathbf{z}$ (e.g., from a DeepSDF encoder).
-- Camera rays defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
-- SDF network $f_\theta(\mathbf{p}, \mathbf{z})$.
-- Number of marching steps $N$.
+- Latent code $\mathbf{z}$ [S1].
+- Camera rays defined by origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1].
+- SDF network $f_\theta(\mathbf{p}, \mathbf{z})$ [S1].
+- Number of marching steps $N$ [S1].
 
 **Outputs:**
-- Rendered depth $d'$ (or color/alpha).
-- Gradients $\frac{\partial \mathcal{L}}{\partial \mathbf{z}}$.
+- Rendered depth $d'$ [S1].
+- Gradients $\frac{\partial \mathcal{L}}{\partial \mathbf{z}}$ [S1].
 
 **Data Structures:**
-- Points $\mathbf{p}^{(i)}$: A list or tensor of shape $(N, 3)$ storing the 3D coordinates of the $i$-th sample along the ray.
-- Weights $\alpha_i$: Scalar weights for each sample, computed during the forward pass.
+- Points $\mathbf{p}^{(i)}$: A tensor of shape $(N, 3)$ storing the 3D coordinates of the $i$-th sample along the ray [G].
+- Weights $\alpha_i$: A tensor of shape $(N,)$ storing scalar weights for each sample, computed during the forward pass [G].
 
 **Steps:**
-1. **Initialization**: Initialize the first point $\mathbf{p}^{(0)}$ at the intersection of the camera ray and the unit sphere. If the ray does not intersect the sphere, mark as background [S1].
-2. **Forward Marching**: For $i = 0$ to $N-1$:
-   - Evaluate SDF: $s_i = f_\theta(\mathbf{p}^{(i)}, \mathbf{z})$.
-   - Update position: $\mathbf{p}^{(i+1)} = \mathbf{p}^{(i)} + s_i \cdot \mathbf{d}$.
-   - Compute weight $\alpha_i$ based on the SDF values and step size (standard volume rendering accumulation).
-3. **Gradient Calculation**:
-   - The full chain rule for the gradient of the rendered distance $d'$ with respect to the latent code $\mathbf{z}$ involves two terms [S1]:
-     $$ \frac{\partial d'}{\partial \mathbf{z}} = \alpha \sum_{i=0}^{N-1} \left( \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{z}} + \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{p}^{(i)}(\mathbf{z})} \frac{\partial \mathbf{p}^{(i)}(\mathbf{z})}{\partial \mathbf{z}} \right) $$
-   - The method ignores the second term (the residual term $e$), which represents the dependence of the point positions $\mathbf{p}^{(i)}$ on $\mathbf{z}$ [S1].
-   - The approximation is:
-     $$ \frac{\partial d'}{\partial \mathbf{z}} \approx \alpha \sum_{i=0}^{N-1} \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})}{\partial \mathbf{z}} $$
-   - Here, $\mathbf{z}_0$ refers to the fixed latent code used during the forward pass. The gradient is computed only with respect to the explicit $\mathbf{z}$ argument of the SDF network, treating $\mathbf{p}^{(i)}$ as constant with respect to $\mathbf{z}$ during back-propagation [S1].
+1. **Initialization**: Initialize the first point $\mathbf{p}^{(0)}$ at the intersection of the camera ray and the unit sphere [S1]. Rays that do not intersect the unit sphere are marked as background (infinite depth) [S1].
+2. **Forward Marching**: For $i = 0$ to $N-1$: evaluate the SDF value $s_i = f_\theta(\mathbf{p}^{(i)}, \mathbf{z})$ [S1]; update the position $\mathbf{p}^{(i+1)} = \mathbf{p}^{(i)} + \max(10^{-6}, s_i) \cdot \mathbf{d}$ [S1]; compute the weight $\alpha_i$ using standard volume rendering accumulation [G].
+3. **Gradient Calculation**: The full chain rule for the gradient of the rendered distance $d'$ with respect to the latent code $\mathbf{z}$ involves two terms [S1]:
+   $$ \frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z})}{\partial \mathbf{z}} \bigg|_{\mathbf{z}_0} = \alpha \sum_{i=0}^{N-1} \left( \frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})}{\partial \mathbf{z}} + \frac{\partial f_{\theta}(\mathbf{p}^{(i)}(\mathbf{z}), \mathbf{z}_0)}{\partial \mathbf{p}^{(i)}(\mathbf{z})} \frac{\partial \mathbf{p}^{(i)}(\mathbf{z}_0)}{\partial \mathbf{z}} \right) $$
+   The method ignores the second term (the residual term), which represents the dependence of the point positions $\mathbf{p}^{(i)}$ on $\mathbf{z}$ [S1]. The approximation is:
+   $$ \frac{\partial d'}{\partial \mathbf{z}} \approx \alpha \sum_{i=0}^{N-1} \frac{\partial f_\theta(\mathbf{p}^{(i)}(\mathbf{z}_0), \mathbf{z})}{\partial \mathbf{z}} $$
+   Here, $\mathbf{z}_0$ refers to the fixed latent code used during the forward pass [S1]. The gradient is computed only with respect to the explicit $\mathbf{z}$ argument of the SDF network, treating $\mathbf{p}^{(i)}$ as constant with respect to $\mathbf{z}$ during back-propagation [S1].
 
 **Pitfalls:**
-- The ignored residual term $e$ can lead to inaccurate gradients if the point positions are highly sensitive to changes in $\mathbf{z}$ [S1].
-- Empirically, high-order gradients have less impact on the optimization process, making this approximation feasible for many applications [S1].
+- The residual term is omitted because high-order gradients empirically have less impact on the optimization process [S1].
+- Rays must be normalized and step sizes clamped to prevent divergence when marching through empty space or inside the object [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import torch
+
+def compute_alpha(sdf_val, step):
+    """Standard volume rendering alpha from SDF step size [G]."""
+    return 1.0 - torch.exp(-torch.clamp(step, min=1e-6))
+
+def accumulate_depth(weights, points, rays_d):
+    """Weighted depth accumulation from marching samples [G]."""
+    w = torch.stack(weights)
+    # Project points to ray depth
+    d = torch.sum(points * rays_d, dim=-1)
+    return torch.sum(w * d) / (torch.sum(w) + 1e-8)
+
 def forward(z, rays_o, rays_d, sdf_net, num_steps):
-    """
-    Forward pass for differentiable sphere tracing with approximated gradients.
-    """
-    # Initialize points at sphere intersection
-    # Assume unit sphere for simplicity as per [S1]
-    # p[0] = intersection(ray, unit_sphere)
-    # For rays not intersecting, mark as background
-    
-    points = [] # List of tensors, shape (N, 3)
-    weights = [] # List of tensors, shape (N,)
-    
-    p = rays_o # Initial point
+    """Forward pass for differentiable sphere tracing with approximated gradients."""
+    # Normalize ray directions to ensure correct marching scale [G]
+    rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
+    points = []
+    weights = []
+    p = rays_o.clone()
     for i in range(num_steps):
-        # Evaluate SDF
-        sdf_val = sdf_net(p, z) # Shape: (batch,) or scalar
-        
-        # Store point for backward pass (if needed for other methods, 
-        # but here we only need z for gradient)
+        sdf_val = sdf_net(p, z)
         points.append(p)
-        
-        # Compute weight alpha (standard volume rendering)
-        # alpha_i = 1 - exp(-sigma * step_size)
-        # sigma derived from sdf_val
-        alpha = compute_alpha(sdf_val)
+        step = torch.clamp(sdf_val, min=1e-6)
+        alpha = compute_alpha(sdf_val, step)
         weights.append(alpha)
-        
-        # March
-        step_size = sdf_val.clamp(min=1e-6)
-        p = p + step_size * rays_d
-        
-        # Stop if surface hit or max depth
+        # March along the ray
+        p = p + step * rays_d
+        # Terminate early if surface is closely approached
         if sdf_val < 1e-4:
             break
-            
-    return accumulate_depth(weights, points, rays_o, rays_d), points, weights
+    depth = accumulate_depth(weights, points, rays_d)
+    return depth, points, weights
 
 def backward(grad_output, points, weights, z, sdf_net):
-    """
-    Backward pass with approximated gradient.
-    Ignores dp/dz term.
-    """
-    # grad_output is dL/dd'
-    
-    # Initialize gradient for z
+    """Backward pass with approximated gradient. Ignores dp/dz term."""
     grad_z = torch.zeros_like(z)
-    
-    # Sum over all steps
     for i, p in enumerate(points):
-        # Compute gradient of SDF w.r.t z, treating p as constant
-        # This is the first term in Equation 4 of [S1]
-        # Note: In PyTorch, if p is detached or requires_grad=False,
-        # only the explicit z dependency is tracked.
-        
-        # Re-evaluate SDF to get computational graph for z
-        # p is fixed from forward pass
-        sdf_val = sdf_net(p.detach(), z)
-        
-        # Compute gradient of loss w.r.t sdf_val
-        # dL/dsdf = dL/dd' * dd'/dsdf
-        # dd'/dsdf involves the weight alpha and the chain rule for depth
-        # For simplicity, assume grad_sdf is pre-computed or derived from grad_output
-        grad_sdf = compute_grad_sdf(grad_output, weights, i)
-        
-        # Chain rule: dL/dz = dL/dsdf * dsdf/dz
-        # dsdf/dz is computed by autodiff
-        grad_sdf.backward(gradient=grad_sdf, retain_graph=True)
-        
-        # Accumulate gradient
-        # Note: In practice, this is done via torch.autograd.grad
-        # grad_z += grad_output * alpha * d(sdf)/dz
-        
+        # Detach p to stop gradient flow through position updates [S1]
+        p_detached = p.detach()
+        # Re-evaluate SDF to build computational graph for z only
+        sdf_val = sdf_net(p_detached, z)
+        # Chain rule: dL/dz = dL/dd' * dd'/dsdf * dsdf/dz
+        # Scale by accumulated weight for this sample [G]
+        loss_grad = grad_output * weights[i]
+        # Compute gradient of SDF w.r.t z via autodiff
+        dsdf_dz = torch.autograd.grad(sdf_val, z, grad_outputs=loss_grad, retain_graph=True, create_graph=False)[0]
+        grad_z = grad_z + dsdf_dz
     return grad_z
 ```
 
 ## Subtopics
 
 ### DCX Differentiable UDF Function
-A variant that computes gradients for an Unsigned Distance Function (UDF) using a flood-fill mask to determine surface proximity. It computes the gradient of the UDF with respect to the query points $\mathbf{x}$ by using the vector from the query point to the nearest surface point [S2, unofficial].
+A variant that computes gradients for an Unsigned Distance Function (UDF) using a flood-fill mask to determine surface proximity [S2, unofficial]. It computes the gradient of the UDF with respect to the query points $\mathbf{x}$ by using the vector from the query point to the nearest surface point [S2, unofficial].
 - **Formula**: $\text{grad\_input} = \text{grad\_output} \cdot \frac{\mathbf{x} - \text{nearest\_points}}{\|\mathbf{x} - \text{nearest\_points}\| + \epsilon}$ [S2, unofficial].
-- **Parameters**: $\epsilon = 1e-8$ to prevent division by zero; offset $1e-6$ subtracted from UDF to create SDF for inner mask determination [S2, unofficial].
-- **Steps**: Forward pass computes flood-fill mask, empty mask, and nearest points. Backward pass retrieves saved tensors and computes gradient using the normalized difference vector [S2, unofficial].
+- **Parameters**: $\epsilon = 10^{-8}$ to prevent division by zero; offset $10^{-6}$ subtracted from UDF to create SDF for inner mask determination [S2, unofficial].
+- **Steps**: Forward pass computes flood-fill mask, empty mask, and nearest points [S2, unofficial]. Backward pass retrieves saved tensors and computes gradient using the normalized difference vector [S2, unofficial].
 
 ## Operating characteristics
 - **Memory**: Significantly lower than exact gradient methods because it does not need to store the computational graph for the iterative point updates $\mathbf{p}^{(i)}(\mathbf{z})$ [S1].
 - **Speed**: Faster backward pass due to simpler gradient computation [S1].
-- **Accuracy**: Approximate. The ignored residual term may lead to suboptimal convergence in cases where point positions are highly sensitive to $\mathbf{z}$ [S1].
+- **Accuracy**: Approximate; the residual term is omitted because high-order gradients empirically have less impact on the optimization process [S1].
 - **Use Case**: Suitable for optimizing latent codes in shape priors (e.g., DeepSDF) where memory is a constraint and the approximation is empirically effective [S1].
 
 ## Background

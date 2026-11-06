@@ -3,23 +3,23 @@
 Also called: Grid Velocity Lines, Velocity Vector Lines
 
 ## Overview
-This technique visualizes a grid of velocity vectors by rendering short line segments where length and direction reflect the vector in each grid cell [S1, unofficial]. It differs from particle-based methods by operating directly on a structured grid, using a geometry shader to extrude points into lines based on sampled volume data [S1, unofficial].
+This technique visualizes a grid of velocities by rendering short line segments with alpha gradients, where line length and direction reflect the velocity vector in each grid cell [S1, unofficial]. It populates a vertex buffer with one point per grid cell and uses a geometry shader to extrude each point into a line segment based on sampled volume data [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A Vertex Buffer Object (VBO) containing one point per grid cell. A 3D texture volume (`sampler3D`) storing velocity vectors.
-*   **Output:** A rendered image of red line segments with alpha gradients.
+*   **Input:** A Vertex Buffer Object (VBO) containing one point per grid cell and a 3D texture volume (`sampler3D`) storing velocity vectors [S1, unofficial].
+*   **Output:** A rendered image of red line segments with alpha gradients [S1, unofficial].
 
 **Data Structures:**
-*   **VBO:** Contains `vec4 Position` (world-space coordinates).
-*   **Volume Texture:** 3D texture storing velocity vectors. Coordinates are normalized to [0, 1].
+*   **VBO:** Contains `vec4 Position` representing world-space coordinates [S1, unofficial].
+*   **Volume Texture:** 3D texture storing velocity vectors with coordinates normalized to [0, 1] [S1, unofficial].
 
 **Steps:**
-1.  **Vertex Shader:** Compute clip-space position using the ModelviewProjection matrix. Pass the original world-space position to the geometry shader [S1, unofficial].
-2.  **Geometry Shader Input:** Receive the point. Retrieve the world-space position [S1, unofficial].
-3.  **Velocity Sampling:** Convert the world-space position to normalized texture coordinates. Sample the 3D volume texture to get the velocity vector [S1, unofficial].
-4.  **Emit First Vertex:** Set alpha to 0. Set clip-space position to the input point's clip-space position. Emit the vertex [S1, unofficial].
-5.  **Emit Second Vertex:** Calculate the end position by adding the velocity vector to the world-space start position. Transform this end position to clip-space. Set alpha to 1. Emit the vertex [S1, unofficial].
+1.  **Vertex Shader:** Compute clip-space position using the ModelviewProjection matrix and pass the original world-space position to the geometry shader [S1, unofficial].
+2.  **Geometry Shader Input:** Receive the point and retrieve the world-space position [S1, unofficial].
+3.  **Velocity Sampling:** Convert the world-space position to normalized texture coordinates and sample the 3D volume texture to get the velocity vector [S1, unofficial].
+4.  **Emit First Vertex:** Set alpha to 0 and set clip-space position to the input point's clip-space position, then emit the vertex [S1, unofficial].
+5.  **Emit Second Vertex:** Calculate the end position by adding the velocity vector to the world-space start position, transform to clip-space, set alpha to 1, and emit the vertex [S1, unofficial].
 6.  **Finalize Primitive:** Call `EndPrimitive()` to finalize the line strip [S1, unofficial].
 7.  **Fragment Shader:** Output a red color scaled by the interpolated alpha and a uniform brightness factor [S1, unofficial].
 
@@ -33,56 +33,43 @@ This technique visualizes a grid of velocity vectors by rendering short line seg
 *   **Brightness:** Uniform float controlling intensity, typically 0.5 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Blending:** Requires `GL_MAX` blending (or similar non-additive blending) to prevent lines from brightening excessively when overlapping. Default `GL_FUNC_ADD` is incorrect [S1, unofficial].
-*   **Coordinate System:** The formula `0.5 * (vPosition.xyz + 1.0)` assumes the input positions are in a specific range (likely [-1, 1] or similar normalized space) that maps to the texture coordinates [S1, unofficial]. If the input positions are not in this range, the sampling will be incorrect.
-*   **Velocity Magnitude:** The velocity vector is added directly to the position. If the magnitude is too large, the line may extend beyond the view frustum or cause clipping issues.
+*   **Blending:** Requires `GL_MAX` blending rather than the default `GL_FUNC_ADD` to prevent incorrect visual results [S1, unofficial].
+*   **Coordinate System:** The normalization formula `0.5 * (vPosition.xyz + 1.0)` assumes input positions are in the [-1, 1] range to map correctly to texture coordinates [S1, unofficial].
+*   **Velocity Magnitude:** The velocity vector is added directly to the position; large magnitudes may extend lines beyond the view frustum or cause clipping issues [G].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Vertex Shader
-def vertex_shader(Position: vec4, ModelviewProjection: mat4) -> (vec4 gl_Position, vec4 vPosition):
-    gl_Position = ModelviewProjection * Position
-    vPosition = Position
-    return gl_Position, vPosition
+def mul_mat_vec(m: list, v: list) -> list:
+    return [sum(m[i][j] * v[j] for j in range(4)) for i in range(4)]
 
-# Geometry Shader
-def geometry_shader(vPosition: vec4, ModelviewProjection: mat4, Volume: sampler3D) -> list[vec4]:
-    # Convert world-space position to normalized texture coordinates
-    # Note: This assumes vPosition.xyz is in [-1, 1] range based on source formula
-    coord = 0.5 * (vPosition.xyz + 1.0)
+def sample_3d_texture(tex: dict, coord: list) -> list:
+    return tex.get(tuple(coord), [0.0, 0.0, 0.0, 0.0])
+
+def vertex_shader(position: list, mvp: list) -> tuple:
+    clip_pos = mul_mat_vec(mvp, position)
+    return clip_pos, position
+
+def geometry_shader(v_position: list, mvp: list, volume: dict) -> list:
+    coord = [0.5 * (v_position[i] + 1.0) for i in range(3)]
+    vel_sample = sample_3d_texture(volume, coord)
+    v = [vel_sample[0], vel_sample[1], vel_sample[2], 0.0]
     
-    # Sample velocity vector from 3D volume
-    V = texture(Volume, coord).xyz
-    
-    # Emit first vertex (start of line)
-    # Alpha is interpolated, so we set it here
-    # gl_Position for first vertex is the input point's clip-space position
-    # We need to pass alpha to fragment shader. In GLSL, this is done via out variable.
-    # Here we simulate the emission logic.
-    
-    # Vertex 1
-    gl_Position_1 = ModelviewProjection * vPosition # This is gl_in[0].gl_Position
     alpha_1 = 0.0
+    pos_1_clip = v_position  # Represents gl_in[0].gl_Position
     
-    # Vertex 2
-    end_world_pos = vPosition + vec4(V, 0.0)
-    gl_Position_2 = ModelviewProjection * end_world_pos
     alpha_2 = 1.0
+    end_world = [v_position[i] + v[i] for i in range(4)]
+    pos_2_clip = mul_mat_vec(mvp, end_world)
     
-    # Return the two vertices with their associated alpha values
-    # In actual GLSL, these are emitted via EmitVertex() and the out variable gAlpha is set before each.
     return [
-        {"position": gl_Position_1, "alpha": alpha_1},
-        {"position": gl_Position_2, "alpha": alpha_2}
+        {"clip_pos": pos_1_clip, "alpha": alpha_1},
+        {"clip_pos": pos_2_clip, "alpha": alpha_2}
     ]
 
-# Fragment Shader
-def fragment_shader(gAlpha: float, Brightness: float) -> vec4:
-    FragColor = Brightness * vec4(gAlpha, 0, 0, 1)
-    return FragColor
+def fragment_shader(alpha: float, brightness: float) -> list:
+    return [brightness * alpha, 0.0, 0.0, 1.0]
 ```
 
 ## Subtopics
@@ -100,12 +87,12 @@ Generates quads. Use for billboarded sprites.
 Renders particles as geometry. Use for unstructured particle systems.
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with the number of grid cells, as each cell generates one line strip (2 vertices) [S1, unofficial].
-*   **Memory Complexity:** Low. Requires VBO for points and 3D texture for velocities [S1, unofficial].
-*   **Strengths:** Simple implementation, efficient for structured grids, visually intuitive for flow fields [S1, unofficial].
-*   **Limitations:** Requires `GL_MAX` blending for correct visual result, sensitive to velocity magnitude scaling, assumes specific input coordinate range [S1, unofficial].
-*   **When to use:** Visualizing structured velocity fields (e.g., fluid simulation grids) [S1, unofficial].
-*   **When not to use:** Unstructured particle systems (use [GPU Particle Rendering via Geometry Shader](4444-gpu-particle-rendering-via-geometry-shader.md)) or when additive blending is desired.
+*   **Time Complexity:** Linear with the number of grid cells, as each cell generates one line strip with two vertices [S1, unofficial].
+*   **Memory Complexity:** Low, requiring only a VBO for points and a 3D texture for velocities [S1, unofficial].
+*   **Strengths:** Simple implementation, efficient for structured grids, and visually intuitive for flow fields [S1, unofficial].
+*   **Limitations:** Requires `GL_MAX` blending for correct visual results and depends on proper velocity magnitude scaling [S1, unofficial].
+*   **When to use:** Visualizing structured velocity fields such as fluid simulation grids [S1, unofficial].
+*   **When not to use:** Unstructured particle systems (use [GPU Particle Rendering via Geometry Shader](4444-gpu-particle-rendering-via-geometry-shader.md)) or when additive blending is desired [S1, unofficial].
 
 ## Background
 This technique was described by Philip Rideout in a blog post on November 28th, 2010, as part of the "Volumetric Splatting" series [S1, unofficial]. It is presented as a simple and "beautiful" way to visualize velocity grids using modern OpenGL geometry shaders [S1, unofficial].

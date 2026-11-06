@@ -3,56 +3,113 @@
 Also called: Signed Triangle Prism, Triangular Prism SDF, sdTriPrism
 
 ## Overview
-Computes the signed distance from a 3D point to an equilateral triangular prism aligned with the Z-axis [S2, unofficial]. It exploits the symmetry of the equilateral base to provide a closed-form, branch-free solution using absolute values and max operations, avoiding iterative projection or complex geometric decomposition [G].
+Computes the signed distance from a query point to a triangular prism aligned with the Z-axis, where the cross-section is an equilateral triangle. It differs from other polyhedral primitives by using a specific angular projection for the triangular base rather than a generic polygon clipping or modulo-based approach.
 
 ## How it works
 **Inputs:**
-- `p`: A 3D point $(p_x, p_y, p_z)$ stored as a 3-element floating-point array or tuple.
-- `h`: A 2D parameter vector $(h_x, h_y)$ stored as a 2-element floating-point array or tuple.
-  - $h_x$: Side-related parameter for the equilateral triangle base.
-  - $h_y$: Half-height of the prism along the Z-axis.
+*   $p \in \mathbb{R}^3$: The query point $(p_x, p_y, p_z)$.
+*   $h \in \mathbb{R}^2$: The shape parameters. $h_x$ controls the triangle size, and $h_y$ controls the half-height.
+
 **Outputs:**
-- `d`: A single floating-point value representing the signed distance. Positive if outside, negative if inside.
+*   $d \in \mathbb{R}$: The signed distance. $d < 0$ is inside, $d > 0$ is outside.
+
 **Data Structures:**
-- None required beyond standard floating-point vectors [G].
+*   No persistent data structures. The function is stateless.
+
 **Steps:**
-1. Compute the component-wise absolute value of the input point to exploit symmetry: $q = |p|$, yielding $q_x = |p_x|$, $q_y = |p_y|$, $q_z = |p_z|$ [S2, unofficial].
-2. Calculate the distance to the triangular cross-section in the XY plane using the rotated coordinates [S2, unofficial].
-3. Compute the Z-distance to the top/bottom faces: $d_z = q_z - h_y$ [S2, unofficial].
-4. Compute the XY-distance to the triangle edges: $d_{xy} = \max(q_x \cdot 0.866025 + q_y \cdot 0.5, -q_y) - h_x \cdot 0.5$ [S2, unofficial].
-5. Combine the distances: $d = \max(d_z, d_{xy})$ [S2, unofficial].
-**Formulas:**
-$$ q = |p| $$
-$$ d = \max(q_z - h_y, \max(q_x \cdot 0.866025 + q_y \cdot 0.5, -q_y) - h_x \cdot 0.5) $$
-where $0.866025 \approx \frac{\sqrt{3}}{2}$ [S2, unofficial].
-**Parameters:**
-- Typical values: Not given in the sources [G].
-- Constants: $0.866025 \approx \frac{\sqrt{3}}{2}$, $0.5 = \frac{1}{2}$ [S2, unofficial].
-**Edge Cases and Pitfalls:**
-- Precision: The constant $0.866025$ is a floating-point approximation; for higher precision, use $\cos(\pi/6)$ or $\frac{\sqrt{3}}{2}$ [G].
-- Boundaries: At $h_x = 0$ or $h_y = 0$, the shape degenerates to a triangle or line segment; the formula remains valid but may require epsilon handling for robust ray marching [G].
-- Sign convention: The formula assumes the prism is centered at the origin with its axis aligned to Z [S2, unofficial].
+1.  Compute the absolute value of the query point components to exploit symmetry: $q = |p|$.
+2.  Calculate the distance to the triangular cross-section in the XY plane.
+3.  Calculate the distance to the top/bottom caps in the Z direction.
+4.  Combine these distances using the max function to determine the final signed distance.
+
+**Formula:**
+$$
+q = |p|
+$$
+$$
+d = \max(q_z - h_y, \max(q_x \cdot \frac{\sqrt{3}}{2} + q_y \cdot \frac{1}{2}, -q_y) - h_x \cdot \frac{1}{2})
+$$
+
+Where:
+*   $q_x = |p_x|, q_y = |p_y|, q_z = |p_z|$
+*   $\frac{\sqrt{3}}{2} \approx 0.866025$
+*   $h_x$ is the parameter related to the side length of the equilateral triangle.
+*   $h_y$ is the half-height of the prism.
+
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sdTriPrism(p, h):
-    q_x = abs(p[0])
-    q_y = abs(p[1])
-    q_z = abs(p[2])
-    d_z = q_z - h[1]
-    d_xy = max(q_x * 0.866025 + q_y * 0.5, -q_y) - h[0] * 0.5
-    return max(d_z, d_xy)
+import numpy as np
+
+def sd_tri_prism(p: np.ndarray, h: np.ndarray) -> float:
+    """
+    Computes the signed distance to a triangular prism.
+    
+    Args:
+        p: Query point (3,)
+        h: Shape parameters (2,), where h[0] is triangle size and h[1] is half-height.
+        
+    Returns:
+        Signed distance.
+    """
+    # Step 1: Absolute coordinates
+    q = np.abs(p)
+    
+    # Step 2 & 3: Calculate distances
+    # Distance to the triangular cross-section
+    # The term (qx * sqrt(3)/2 + qy * 0.5) corresponds to the projection onto one of the triangle's normal vectors
+    # The term (-qy) corresponds to the projection onto the base of the triangle (after abs)
+    # We take the max of these two projections, then subtract the radius/size offset
+    tri_dist = max(q[0] * 0.866025 + q[1] * 0.5, -q[1]) - h[0] * 0.5
+    
+    # Distance to the caps
+    cap_dist = q[2] - h[1]
+    
+    # Step 4: Combine
+    d = max(cap_dist, tri_dist)
+    
+    return d
 ```
 
+**Parameters:**
+*   $h_x$: Not given in the sources as a direct side length, but used in the formula. Typically derived from the desired side length $s$ of the equilateral triangle. For an equilateral triangle of side $s$, the distance from the center to a vertex is $s/\sqrt{3}$, and to an edge is $s/(2\sqrt{3})$. The formula structure suggests $h_x$ is related to the "radius" or size parameter. [S2, unofficial] uses `h.x` directly in the subtraction.
+*   $h_y$: Half-height of the prism.
+
+**Edge Cases:**
+*   Precision: The constant $0.866025$ is an approximation of $\frac{\sqrt{3}}{2}$. For higher precision, use `np.sqrt(3)/2`.
+*   Boundaries: The function assumes the prism is centered at the origin.
+
+## Subtopics
+
+### Octahedron Signed Distance Function
+*   **What it is:** SDF for an octahedron.
+*   **Difference:** Uses a different geometric shape (8 faces) and distance calculation.
+*   **When to choose:** When an octahedral shape is required.
+*   **Link:** [Octahedron Signed Distance Function](2339-octahedron-signed-distance-function.md)
+
+### Hexagonal Prism Signed Distance Function
+*   **What it is:** SDF for a hexagonal prism.
+*   **Difference:** Uses a hexagonal cross-section (6 sides) instead of triangular (3 sides).
+*   **When to choose:** When a hexagonal shape is required.
+*   **Link:** [Hexagonal Prism Signed Distance Function](2348-hexagonal-prism-signed-distance-function.md)
+
+### Dodecahedron Modulo
+*   **What it is:** SDF for a dodecahedron using modulo operations.
+*   **Difference:** Uses a 12-faced polyhedron and a different computational approach (modulo).
+*   **When to choose:** When a dodecahedral shape is required.
+*   **Link:** [Dodecahedron Modulo](3737-dodecahedron-modulo.md)
+
 ## Operating characteristics
-- Time Complexity: $O(1)$. Constant number of arithmetic operations [G].
-- Memory Complexity: $O(1)$. No auxiliary data structures [G].
-- Strengths: Extremely fast evaluation, suitable for real-time ray marching. No branching (using `max` and `abs`) [G].
-- Limitations: Only supports equilateral triangles. Orientation is fixed (aligned with Z, specific Y-axis asymmetry per source) [S2, unofficial].
+*   **Time Complexity:** $O(1)$ constant time.
+*   **Memory Complexity:** $O(1)$ constant space.
+*   **Strengths:** Very fast evaluation, suitable for real-time rendering.
+*   **Limitations:** Only supports triangular prisms.
+*   **When to use:** When a triangular prism shape is needed in ray marching.
+*   **When not to use:** When other polyhedral shapes are required.
 
 ## Background
-The function is a standard primitive in Signed Distance Field (SDF) ray marching, popularized by shader coding communities [G]. It appears in collections like `glsl-sdf-primitives` [S2, unofficial] and is used in procedural geometry generation [G].
+The triangular prism SDF is a standard primitive in signed distance field ray marching, often found in GLSL-based SDF libraries. It is used to represent 3D objects with a triangular cross-section.
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)

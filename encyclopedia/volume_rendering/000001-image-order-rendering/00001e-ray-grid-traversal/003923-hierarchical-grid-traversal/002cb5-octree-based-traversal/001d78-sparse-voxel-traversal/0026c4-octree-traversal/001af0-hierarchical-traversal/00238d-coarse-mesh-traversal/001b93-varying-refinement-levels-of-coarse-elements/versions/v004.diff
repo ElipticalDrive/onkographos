@@ -1,0 +1,199 @@
+--- v003.md
++++ v004.md
+@@ -4,138 +4,81 @@
+ 
+ ## Overview
+-This method optimizes hierarchical volume rendering by selecting which elements from a refinement tree are inserted into the coarse mesh (BVH). It addresses the trade-off between BVH traversal efficiency and the depth of the nested fine-structure traversal [S1, unofficial]. By varying the refinement level $k$ of the inserted elements, the algorithm controls the size of the macrocells and the granularity of the culling, allowing the renderer to balance between coarse culling overhead and fine-grained sampling cost [S1, unofficial].
++This method optimizes hierarchical volume rendering by controlling the granularity of the coarse mesh (BVH) through the selective insertion of elements from specific refinement levels of the underlying adaptive mesh. It solves the trade-off between BVH traversal efficiency and fine-level sampling overhead by allowing the renderer to choose how deep into the refinement tree elements are collected to form macrocells [S1, unofficial]. It differs from fixed-level coarse meshing by dynamically adjusting the macrocell size to balance BVH node count against the depth of the subsequent fine-level traversal [S1, unofficial].
+ 
+ ## How it works
+-The method modifies the coarse mesh construction phase of the parent [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md). Instead of using a fixed set of elements (e.g., only leaf nodes or only root nodes), it traverses the refinement tree to select elements at a specific depth.
++The method extends the standard Coarse Mesh Traversal by modifying the macrocell construction phase. Instead of collecting all leaf elements or a fixed set of nodes, the algorithm traverses the refinement tree to a user-defined depth or level.
+ 
+-### Inputs and Outputs
+-*   **Input:** The tetrahedral adaptive mesh refinement (TET-AMR) data structure, defined as a hierarchy of refinement trees.
+-*   **Input:** The target refinement level $k$ (integer $\ge 0$).
+-*   **Output:** A coarse mesh (BVH) containing a subset of the tetrahedra.
+-*   **Output:** A mapping from each coarse mesh element (macrocell) to its corresponding position in the refinement tree, enabling nested traversal.
++**Inputs:**
++*   The adaptive mesh refinement (AMR) tree structure.
++*   A target refinement level $L$ (integer $\ge 0$).
++*   The ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
++*   Macrocell optimization flags (e.g., Woodcock majorants).
+ 
+-### Data Structures
+-The coarse mesh consists of bounding volume hierarchy (BVH) nodes. Each leaf node in the BVH represents a "macrocell" which is a tetrahedron from the refinement tree.
+-*   **Macrocell:** A tetrahedron $T$ from the refinement tree.
+-*   **BVH Node:** Contains bounding box and children pointers.
+-*   **Refinement Tree Node:** Contains children pointers and density/value statistics.
++**Outputs:**
++*   A coarse mesh (BVH) containing elements from the specified refinement level or their nearest ancestors if they are leaves.
++*   Rendered image samples.
+ 
+-### Algorithm Steps
+-1.  **Initialize:** Start with an empty list of coarse elements $C$.
+-2.  **Traverse Refinement Tree:** For each root node $R$ in the refinement tree:
+-    a.  Perform a depth-first or breadth-first traversal of the children of $R$.
+-    b.  For each node $N$ encountered:
+-        i.  If the depth of $N$ is less than $k$, continue to its children.
+-        ii. If the depth of $N$ is equal to $k$, or if $N$ is a leaf node (whichever comes first), add $N$ to the list $C$.
+-        iii. If $N$ is a leaf node and depth $< k$, add $N$ to $C$ and stop traversing this branch.
+-3.  **Build BVH:** Construct a BVH using the elements in $C$. The sources specify using 4 faces per element for BVH construction [S1, unofficial].
+-4.  **Assign Macrocell Values:** For each element $T \in C$, compute a summary statistic (e.g., maximum density) to store in the macrocell for culling purposes.
+-5.  **Render:** Proceed with standard hierarchical traversal:
+-    a.  Traverse the BVH to find active macrocells.
+-    b.  For each active macrocell, enter the nested traversal loop.
+-    c.  Sample the fine structure (tetrahedra) within the bounds of the macrocell. This involves traversing the original refinement tree to find the specific tetrahedra contained within the macrocell's bounds and performing ray-tetrahedron intersection tests.
++**Data Structures:**
++*   **Refinement Tree Node:** Contains pointers to children and density/geometry data.
++*   **Coarse Mesh Element:** Represents a macrocell. Stores bounding box, density statistics (for culling/majorants), and a reference to the fine-level subtree root for nested traversal.
+ 
+-### Parameters
+-*   **Refinement Level $k$:** The depth in the refinement tree at which elements are selected.
+-    *   $k=0$: Only root nodes (coarsest).
+-    *   $k=\text{max}$: Only leaf nodes (finest).
+-    *   Typical values tested: $0, 1, 2, 3, 4, 5$ [S1, unofficial].
++**Steps:**
++1.  **Tree Traversal:** For each root of a refinement tree (or the global root), traverse the children.
++2.  **Level Check:** For each node, check its current refinement level.
++3.  **Selection:**
++    *   If the node's level is less than the target level $L$, continue traversing its children.
++    *   If the node's level is equal to $L$, or if the node is a leaf (regardless of level), stop traversing this branch.
++4.  **Insertion:** Add the selected node to the coarse mesh. This node becomes a macrocell.
++5.  **BVH Construction:** Build or update the BVH using these macrocells as leaf nodes.
++6.  **Rendering:** Perform standard hierarchical traversal. For each active macrocell, enter the nested fine-level traversal loop bounded by the macrocell's entry/exit distances [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Leaf Nodes:** If a refinement tree branch is shorter than level $k$, the leaf node is used instead. This ensures all data is covered.
+-*   **BVH Efficiency:** Increasing the number of elements in the coarse mesh (higher $k$) decreases BVH efficiency and maximum traversal depth in the BVH itself [S1, unofficial].
+-*   **Nested Traversal Cost:** Lower $k$ (fewer coarse elements) means larger macrocells, which may contain many more fine-level tetrahedra, increasing the cost of the nested traversal step.
+-
+-### Pseudocode
+-
++**Pseudocode:**
+ ```python
+-def build_coarse_mesh(refinement_tree_roots, target_level):
++def build_coarse_mesh(refinement_tree, target_level):
+     """
+     Builds a coarse mesh by inserting elements from the refinement tree
+-    at the specified target_level or at leaf nodes.
++    up to the specified target_level.
++    """
++    coarse_mesh_elements = []
+     
+-    Args:
+-        refinement_tree_roots: List of root nodes of the refinement trees.
+-        target_level: Integer, the desired refinement level.
++    def traverse(node, current_level):
++        # Base case: if we reached the target level or a leaf, add to coarse mesh
++        if current_level == target_level or node.is_leaf():
++            coarse_mesh_elements.append(node)
++            return
+         
+-    Returns:
+-        coarse_elements: List of tetrahedra to be inserted into the BVH.
+-    """
+-    coarse_elements = []
++        # Recursive step: traverse children
++        for child in node.children:
++            traverse(child, current_level + 1)
++
++    # Start traversal from the root
++    traverse(refinement_tree.root, 0)
+     
+-    for root in refinement_tree_roots:
+-        # Stack for DFS: (node, current_depth)
+-        stack = [(root, 0)]
+-        
+-        while stack:
+-            node, depth = stack.pop()
+-            
+-            # Check if we should stop at this node
+-            is_leaf = node.is_leaf()
+-            
+-            if is_leaf or depth == target_level:
+-                # Add this node's tetrahedron to the coarse mesh
+-                coarse_elements.append(node.tetrahedron)
+-            else:
+-                # Continue traversing children
+-                for child in node.children:
+-                    stack.append((child, depth + 1))
+-                    
+-    return coarse_elements
+-
+-def render_with_varying_levels(scene, target_level):
+-    """
+-    Renders the scene using the coarse mesh built at target_level.
+-    """
+-    # 1. Build Coarse Mesh
+-    coarse_elements = build_coarse_mesh(scene.refinement_tree_roots, target_level)
+-    
+-    # 2. Build BVH from coarse elements
+-    # Using 4 faces per element for BVH construction [G]
+-    bvh = build_bvh(coarse_elements)
+-    
+-    # 3. Traverse Rays
+-    for ray in scene.rays:
+-        color = trace_ray(ray, bvh, scene.refinement_tree_roots)
+-        scene.image.set_pixel(ray, color)
+-
+-def trace_ray(ray, bvh, refinement_tree_roots):
+-    """
+-    Standard hierarchical traversal with nested fine-structure traversal.
+-    """
+-    # Traverse BVH to find active macrocells
+-    active_macrocells = []
+-    traverse_bvh(ray, bvh.root, active_macrocells)
+-    
+-    accumulated_color = 0.0
+-    
+-    for macrocell in active_macrocells:
+-        # Nested traversal: find fine tetrahedra within this macrocell
+-        # This requires traversing the refinement tree to find tetrahedra
+-        # contained in the macrocell's bounds [G]
+-        fine_tetrahedra = find_tetrahedra_in_bounds(macrocell.bounds, refinement_tree_roots)
+-        
+-        for tet in fine_tetrahedra:
+-            # Perform ray-tetrahedron intersection
+-            t_hit = intersect_ray_tet(ray, tet)
+-            if t_hit is not None:
+-                # Sample density and accumulate color
+-                density = sample_density(tet, ray.origin + ray.direction * t_hit)
+-                accumulated_color += accumulate_color(density)
+-                
+-    return accumulated_color
++    # Build BVH from the collected elements
++    bvh = build_bvh(coarse_mesh_elements)
++    return bvh
+ ```
+ 
++**Parameters:**
++*   **Refinement Level ($L$):** The depth in the AMR tree where elements are harvested. $L=0$ typically means the root or very coarse elements; higher $L$ means finer, smaller macrocells.
++*   **Faces per Element:** In the cited experiments, BVH elements had 4 faces [S1, unofficial].
++
++**Edge Cases:**
++*   **Leaf Premature Termination:** If a refinement tree is shallower than $L$, the algorithm stops at the leaf. This ensures all parts of the domain are covered, even if some macrocells are larger than others [S1, unofficial].
++*   **Memory Blow-up:** High $L$ values can lead to a very large number of macrocells, increasing BVH memory usage and traversal overhead [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of elements in the coarse mesh ($N_{coarse}$) and the average number of fine tetrahedra per macrocell ($N_{fine}$). BVH traversal is $O(\log N_{coarse})$. Nested traversal cost is proportional to $N_{fine}$. Total cost is roughly $O(R \cdot (\log N_{coarse} + N_{fine}))$ where $R$ is the number of rays.
+-*   **Memory Complexity:** $O(N_{coarse})$ for the BVH. The refinement tree is stored separately.
++*   **Time Complexity:** BVH construction time increases with $L$ due to the larger number of leaf nodes. Ray traversal time depends on the balance between BVH traversal cost and fine-level sampling cost.
++*   **Memory Complexity:** Memory usage for the coarse mesh scales linearly with the number of elements inserted. Higher $L$ leads to more elements and higher memory consumption [S1, unofficial].
+ *   **Performance:**
+-    *   **Engine Dataset:** Increasing the refinement level (more coarse elements) generally degrades performance for the Ray Marcher with macrocell optimizations (41.47 ms at Level 0 vs 87.77 ms at Level 5) [S1, unofficial]. The Woodcock tracker also shows significant degradation (7.14 ms at Level 0 vs 94.97 ms at Level 5) [S1, unofficial].
+-    *   **Uniform Engine Dataset:** Performance is more variable. At Level 1, the Ray Marcher with macrocell optimizations is slightly faster (75.8 ms) than Level 0 (78.58 ms) [S1, unofficial]. The Woodcock tracker shows significant improvement at Levels 1 and 2 (9.57 ms and 9.56 ms) compared to Level 0 (10.72 ms) [S1, unofficial].
+-    *   **Trade-off:** Increasing coarse mesh elements decreases BVH efficiency but may decrease the refinement tree traversal depth. If the reduction in tree traversal depth outweighs the BVH overhead, performance improves (e.g., Uniform Engine Level 1) [S1, unofficial].
+-    *   **Macrocell Size:** Smaller macrocells (higher levels) yield tighter majorants for the Woodcock tracker, improving its performance at certain levels [S1, unofficial].
++    *   **BVH Efficiency:** Increasing the number of elements (higher $L$) generally decreases BVH efficiency and maximum traversal depth [S1, unofficial].
++    *   **Dataset Dependency:**
++        *   **Engine Dataset:** Performance degraded with higher $L$ for both Ray Marcher and Woodcock methods, as the BVH overhead outweighed any benefits [S1, unofficial].
++        *   **Uniform Engine Dataset:** Performance improved slightly at $L=1$ for the Ray Marcher because the reduction in refinement tree traversal depth compensated for BVH overhead. For Woodcock, $L=1$ and $L=2$ improved performance due to tighter majorants from smaller macrocells [S1, unofficial].
++*   **Strengths:** Allows tuning for specific scene characteristics (e.g., uniform vs. adaptive density). Can improve Woodcock tracking by providing tighter bounding volumes.
++*   **Limitations:** Not universally beneficial; can hurt performance if the BVH becomes too large or inefficient. Requires experimentation to find the optimal level [S1, unofficial].
+ 
+ ## Background
+-This method was explored in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement (TET-AMR) data [S1, unofficial]. The research investigates how the granularity of the coarse mesh affects the performance of different ray marching strategies (Ray Marcher, Woodcock) on hierarchical data structures. The experiments were conducted on two datasets: "Engine" and "Uniform Engine" [S1, unofficial].
++This technique was explored in the context of direct volume rendering of tree-based tetrahedral adaptive mesh refinement (TET-AMR) data. The research investigated how varying the granularity of the coarse mesh affects the performance of nested ray traversal methods, specifically comparing Ray Marching and Woodcock tracking [S1, unofficial]. The study highlighted that while finer coarse meshes (higher refinement levels) reduce the depth of the fine-level traversal, they increase the cost of the coarse-level BVH traversal, leading to a non-linear performance trade-off that depends heavily on the data distribution [S1, unofficial].
+ 
+ ## Sources

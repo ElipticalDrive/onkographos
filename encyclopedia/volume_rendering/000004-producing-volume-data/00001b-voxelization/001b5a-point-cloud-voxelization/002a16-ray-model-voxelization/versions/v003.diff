@@ -1,0 +1,112 @@
+--- v002.md
++++ v003.md
+@@ -51,27 +51,21 @@
+     [S1]
+ 
+-2.  **Temporal Aggregation**: Aggregate input points from frames $[index - p_{pre}, index]$ and ground truth points from frames $[index, index + p_{post}]$. For ground truth, further aggregate points from the window $[i - a_{pre}, i + a_{post}]$ for each target frame $i$ [S1].
+-
+-3.  **Ray Initialization**: For each ray, calculate the direction vector from the sensor origin to the target point. Compute `step` ($+1$ or $-1$ per axis), `tDelta` (increment to move one voxel), and `tMax` (distance to the next voxel boundary) [S1].
+-
+-4.  **Ray Traversal**: Traverse the ray path using a while loop with bounds checks.
+-    *   Mark the target voxel by incrementing `voxel_occ_count` using `atomicAdd` [S1].
+-    *   Mark all traversed voxels (excluding the target) by incrementing `voxel_free_count` using `atomicAdd` [S1].
+-    *   **Pitfall**: Stop rays at a distance of 1 voxel to prevent over-traversal. Ignore voxels too close to the sensor or target using a distance threshold of $1.0$m [S1].
+-
+-5.  **Voxel State Assignment**: Assign states based on counts:
+-    *   If `voxel_occ_count` $> 1$, state = OCCUPIED ($1$) [S1].
+-    *   Else if `voxel_free_count` $> 0$, state = FREE ($0$) [S1].
+-    *   Else, state = NOT_OBSERVED ($-1$) [S1].
+-
+-6.  **Label Assignment**: Calculate voxel indices for points within range:
++2.  **Temporal Aggregation**: Aggregate input points from frames $[index - p_{pre}, index]$ and ground truth points from frames $[index, index + p_{post}]$ [S1]. For ground truth, further aggregate points from the window $[i - a_{pre}, i + a_{post}]$ for each target frame $i$ [S1].
++
++3.  **Ray Initialization**: For each ray, calculate the direction vector from the sensor origin to the target point [S1]. Compute `step` ($+1$ or $-1$ per axis), `tDelta` (increment to move one voxel), and `tMax` (distance to the next voxel boundary) [S1].
++
++4.  **Ray Traversal**: Traverse the ray path using a while loop with bounds checks [S1]. Mark the target voxel by incrementing `voxel_occ_count` using `atomicAdd` [S1]. Mark all traversed voxels (excluding the target) by incrementing `voxel_free_count` using `atomicAdd` [S1]. Stop rays at a distance of 1 voxel to prevent over-traversal, and ignore voxels too close to the sensor or target using a distance threshold of $1.0$m [S1].
++
++5.  **Voxel State Assignment**: Assign states based on counts [S1]. If `voxel_occ_count` $> 1$, state = OCCUPIED ($1$) [S1]. Else if `voxel_free_count` $> 0$, state = FREE ($0$) [S1]. Else, state = NOT_OBSERVED ($-1$) [S1].
++
++6.  **Label Assignment**: Calculate voxel indices for points within range [S1].
+     $$
+     \text{pcds\_voxel} = \lfloor (\text{points} - \text{range\_min}) / \text{voxel\_size} \rfloor
+     $$
+-    Convert to scalar indices and assign point labels to `voxel_label_squeeze`. Default label for free voxels is $0$ [S1].
+-
+-7.  **Invalid Mask Generation**: Generate a mask for voxels that are unobserved (state $-1$) or have no label [S1].
+-
+-8.  **Compression**: Compress binary occupancy data using bit packing. Reshape the boolean array $[H, W, D]$ to 1D, compress 8 bools into 1 `uint8`, and save as `.npy` [S1].
++    Convert to scalar indices and assign point labels to `voxel_label_squeeze` [S1]. Default label for free voxels is $0$ [S1].
++
++7.  **Invalid Mask Generation**: Generate a mask for voxels that are unobserved or have no label [S1].
++
++8.  **Compression**: Compress binary occupancy data using bit packing [S1]. Reshape the boolean array $[H, W, D]$ to 1D, compress 8 bools into 1 `uint8`, and save as `.npy` [S1].
+ 
+ **Pseudocode**
+@@ -122,5 +116,4 @@
+     
+     range_min = point_cloud_range[:3]
+-    range_max = point_cloud_range[3:]
+     
+     # 3. Process Each Ray
+@@ -136,7 +129,11 @@
+         ray_dir = (target - origin) / dist
+         
++        # Shift coordinates to voxel space origin
++        origin_shifted = origin - range_min
++        target_shifted = target - range_min
++        
+         # Calculate voxel indices for origin and target
+-        origin_voxel = np.floor((origin - range_min) / voxel_size).astype(np.int32)
+-        target_voxel = np.floor((target - range_min) / voxel_size).astype(np.int32)
++        origin_voxel = np.floor(origin_shifted / voxel_size).astype(np.int32)
++        target_voxel = np.floor(target_shifted / voxel_size).astype(np.int32)
+         
+         # Check bounds
+@@ -146,15 +143,16 @@
+             continue
+             
+-        # Ray parameters
+-        step = np.where(ray_dir > 0, 1, -1).astype(np.int32)
+-        t_delta = np.abs(1.0 / ray_dir)
++        # Ray parameters in voxel space
++        ray_dir_voxel = ray_dir / voxel_size
++        step = np.where(ray_dir_voxel > 0, 1, -1).astype(np.int32)
++        t_delta = 1.0 / np.abs(ray_dir_voxel)
+         
+         # tMax: distance to next boundary in t units
+         t_max = np.zeros(3)
+         for d in range(3):
+-            if ray_dir[d] > 0:
+-                t_max[d] = ((origin_voxel[d] + 1) * voxel_size[d] - origin[d]) / ray_dir[d]
++            if ray_dir_voxel[d] > 0:
++                t_max[d] = (origin_voxel[d] + 1) - (origin_shifted[d] / voxel_size[d])
+             else:
+-                t_max[d] = (origin_voxel[d] * voxel_size[d] - origin[d]) / ray_dir[d]
++                t_max[d] = origin_voxel[d] - (origin_shifted[d] / voxel_size[d])
+                 
+         current_voxel = origin_voxel.copy()
+@@ -163,5 +161,5 @@
+         # Stop 1 voxel before target to prevent over-traversal
+         while not np.array_equal(current_voxel, target_voxel):
+-            # Mark free voxel
++            # Mark free voxel (simulates atomicAdd) [S1]
+             voxel_free_count[current_voxel[0], current_voxel[1], current_voxel[2]] += 1
+             
+@@ -175,5 +173,5 @@
+                 break
+                 
+-        # Mark target voxel as occupied
++        # Mark target voxel as occupied (simulates atomicAdd) [S1]
+         voxel_occ_count[target_voxel[0], target_voxel[1], target_voxel[2]] += 1
+         
+@@ -211,7 +209,7 @@
+ 
+ ## Operating characteristics
+-*   **Performance**: Implemented using CUDA kernels with NVRTC for high performance. Atomic operations ensure thread safety [S1].
+-*   **Strengths**: Explicitly models free space, which is critical for occupancy prediction. Handles multi-frame temporal aggregation for dense ground truth [S1].
+-*   **Limitations**: Requires careful handling of coordinate transformations for different datasets. Numerical precision issues can occur if TF32 is not disabled in CUDA operations [S1].
++*   **Performance**: Implemented using CUDA kernels with NVRTC for high performance [S1]. Atomic operations ensure thread safety [S1].
++*   **Strengths**: Explicitly models free space, which is critical for occupancy prediction [S1]. Handles multi-frame temporal aggregation for dense ground truth [S1].
++*   **Limitations**: Requires careful handling of coordinate transformations for different datasets [S1]. Numerical precision issues can occur if TF32 is not disabled in CUDA operations [S1].
+ 
+ ## Background

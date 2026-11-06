@@ -1,0 +1,958 @@
+LucidRaster: GPU Software Rasterizer for Exact
+Order-Independent Transparency
+Krzysztof Jakubowski
+Abstract
+Transparency rendering is problematic and can be considered an open problem in real-time
+graphics. There are many different algorithms currently available, but handling complex scenes and
+achieving accurate, glitch-free results is still costly.
+This paper describes LucidRaster: a software rasterizer running on a GPU which allows for efficient
+exact rendering of complex transparent scenes. It uses a new two-stage sorting technique and
+sample accumulation method. On average it's faster than high-quality OIT approximations and only
+about 3x slower than hardware alpha blending. It can be very efficient especially when rendering
+scenes with high triangle density or high depth complexity.
+LucidRaster is mainly implemented in C++ & GLSL shaders and is using Vulkan API.
+Full source code is available on GitHub: https://github.com/nadult/lucid
+1. Introduction
+Rendering 3D scenes with transparent surfaces can be difficult. Graphics hardware for a long time
+had support for blending transparent surfaces, but these surfaces had to be sorted first. In general,
+order-independent transparency (OIT) techniques allow for rendering transparent scenes without
+this requirement. An exact OIT algorithm has to identify all the fragments which contribute to a
+given pixel, sort them and blend them in the correct order. Good examples of exact OIT algorithms
+are a-buffer [Carpenter 1984], and depth peeling [Everitt 2001]. Advanced algorithms which utilize
+backwards memory allocation [Knowles 2013] and improved sorting techniques [Knowles 2014]
+can provide big performance improvements.
+Still, exact OIT techniques are about an order of magnitude slower than unsorted hardware alphablending. Approximate OIT techniques fill the performance gap between the two. Weightedblended OIT (WBOIT) [McGuire 2013] is only about 20% slower than hardware alpha-blending.
+Moment-based OIT (MBOIT) [Münstermann 2018] is significantly costlier than WBOIT but
+provides a much better approximation.
+Two surveys cover a wide range of OIT algorithms: "A Survey of Multifragment Rendering"
+[Vasilakis 2020] and "Exploring and Expanding the Continuum of OIT Algorithms" [Wyman
+2016].
+With each next generation, GPUs become more and more suitable for general-purpose
+computations. Current GPUs already allow for efficient implementation of software rasterizers.
+There are several interesting examples available. CudaRaster [Laine 2011] and cuRE [Kenzel 2018]
+are general-purpose rasterizers. FreePipe [Liu 2010] similarly to LucidRaster has a focus on multifragment effects. All three of these rasterizers are several times slower than hardware with
+CudaRaster being the fastest. Nanite [Karis 2021] uses a simple software micro-poly rasterizer
+which can be up to 3x faster than a general-purpose GPU rasterizer.
+Most of the OIT algorithms are built around a hardware rasterizer, which is used for the
+accumulation and / or composition of fragments. There were successful attempts at using compute
+shaders for sprite rendering [Köhler 2016], but in general, the core computation in a typical OIT
+algorithm happens in a fragment shader. This is a major restriction which limits the potential
+efficiency of OIT algorithms. LucidRaster is an attempt to remove this restriction by implementing
+a software rasterizer with custom pipeline tailored for transparency rendering.
+LucidRaster performance is evaluated by comparing it with a simple renderer which performs
+hardware-based unsorted alpha blending. Moment-based OIT paper [Peters 2018] contains a similar
+comparison which allows to roughly compare LucidRaster with several different OIT algorithms:
+Algorithm
+Parameters
+Relative running time
+Hardware alpha blending
+1.00
+Weighted-blended OIT
+1.17
+Multi-layer alpha blending (MLAB)
+2 layers
+2.78
+Multi-layer alpha blending
+4 layers
+4.75
+Moment based OIT
+4 power moments, 80 bits
+2.64
+Moment based OIT
+6 power moments, 112 bits
+3.13
+Moment based OIT
+4 trigonometric moments, 144 bits
+5.00
+LucidRaster
+3.30
+The scores for WBOIT, MLAB and MBOIT are averages, relative to hardware alpha blending,
+taken from MBOIT paper. The score for LucidRaster is an average computed from SW/HW values
+for all scenes and all tested GPUs. Because the algorithms were tested in different environments,
+this table can provide only a very rough idea about the performance differences between other OIT
+algorithms and LucidRaster.
+2. Pipeline description
+LucidRaster is built around several core ideas:
+• Sort-middle [Molnar 1994] pipeline where primitives are first distributed into small evenlysized bins. This allows for sorting and merging of all fragments in a given bin in shared
+memory, which can save a lot of framebuffer bandwidth.
+• Two-stage sorting: depth-sorting blocks of fragments (8x4 or 8x8) coupled with per-pixel
+fixed-size fragment sorter.
+• Taking quads as input instead of triangles. This allows to save bandwidth and reduces
+processing time in the initial pipeline stages.
+LucidRaster pipeline is comprised of three stages:
+• Setup stage: input primitives are tested for visibility. For each visible primitive, shading and
+rasterization data are computed and stored.
+• Binning stage: the screen is divided into 32x32-pixel bins and for each bin a list of
+overlapping primitives is created.
+• Rasterization stage: bins are rasterized one by one: triangles in each bin are sorted, samples
+are generated, blended together and written to the framebuffer.
+LucidRaster pipeline is quite similar to cuda-raster [Laine 2011]. The paper describing this
+rasterizer is also a very good introduction into software rasterization on GPUs.
+Stage 1: quad setup
+Essentially setup stage takes a stream of input quads, it culls those which do not contribute to the
+final image and pre-compute some data for those which are visible. Pre-computed data will be used
+in later pipeline stages.
+Input quads are divided into chunks of up to 1024 primitives which have the same material. Each
+chunk is processed by a different workgroup, every one having 1024 threads. Quad chunks are
+processed in two phases with a compacting step happening between them. The first phase culls
+invisible quads, which are then removed during compaction. The second phase does the precomputation and storage.
+Phase 1: processing input quads
+Each thread handles one input quad. It loads its vertex indices and if both tris which comprise a
+quad are degenerate, then the whole quad is culled. Vertex positions are loaded and if backface
+culling is enabled, each triangle is tested (in world space) whether it is back- or front-facing the
+camera and if both triangles are back-facing then the quad is culled. Next, quad vertices are
+transformed to NDC space and vertices are tested if they are on the visible side of the clipping
+planes. If all vertices are on the outer side of at least one of the clipping planes then the quad is
+culled.
+Because LucidRaster uses 3D rasterization [Davidovic 2012], full clipping is not required. This
+simplifies the setup stage, but screen-space AABBs still have to be computed. For that Jim Blinn's
+'Calculating Screen Coverage' algorithm [Blinn 1996] is used. With AABBs computed, quads
+which fall between the rasterizer's sample positions can be detected and culled ([Laine 2011] p 5.1).
+Finally, quads which weren't culled up until this point are considered visible. Those quads are
+classified as either small or large based on the number of bins which they overlap. If it's more than
+4 then quad is classified as large.
+Once all visible quads in a chunk are identified, they are compacted and space for them is allocated
+in global memory. Compacting improves performance of the second phase in cases where large
+percentage of randomly distributed quads are culled. Shared memory is used to transfer visible
+quads' data from the first phase to the second phase to avoid recomputation. For example, AABBs
+encoded in single uint are transferred this way.
+Phase 2: writing primitives data
+In this phase for each visible quad, shading & rasterization data are computed and stored in global
+memory. Different pre-computed quad attributes are put into different storages. This division is
+based on the way the data will be accessed later in the pipeline: attributes which are read together
+are stored together. Some attributes are computed and stored per-triangle, others per-quad.
+Per-triangle attributes are put in 4 different storages with the following contents:
+•
+•
+•
+•
+Triangle normals (encoded as uint: X10Y10Z10)
+Edge functions for barycentric coordinates (vec4[2])
+Edge function for depth, instance flags and instance id (encoded in uvec4)
+3D edge functions for scanline rasterizer, screen space AABB in the Y axis (encoded in
+uvec4[2])
+Per-quad attributes are put in 4 different storages with the following contents:
+• bin-resolution AABBs for the whole quad and per-triangle culling info (as uint: 28 bits for
+AABB and 2 bits for culling info)
+• vertex colors (as uvec4, each color encoded in R8G8B8A8)
+• vertex normals (as uvec4, each normal encoded in X10Y10Z10)
+• vertex texture coordinates (as vec4[2])
+Per-quad vertex attributes are optional and are only stored if the quad's material actually needs
+them. They require almost no computation and are basically copied from vertex buffers, but when
+grouped together in per-quad storage they improve cache efficiency in the final rasterization phase
+and in effect improve performance of the whole pipeline.
+Stage 2: quad binning
+Binning stage takes a flat stream of visible quads divided in two groups: small and large. At this
+stage, the main task is to generate a list of overlapping primitives for each bin. The secondary task
+is to categorize bins based on primitive density. Quad binning happens in 3 phases, each involving a
+separate compute shader dispatch.
+Phase 1: counting per-bin primitives
+In this phase only as many workgroups are spawned as required to saturate all GPU cores.
+Workgroups work in a persistent threading [Gupta 2012] fashion: each in a loop tries to acquire and
+process a batch of primitives until all primitives are processed. Workgroups have to be large enough
+so that they could fit an array of 32-bit per-bin primitive counters in shared memory. With a
+resolution limit of 2560x2048 and with 32x32 bins there can be at most 5120 bins. Depending on
+the platform, 512 or 1024 threads per workgroup should be enough to hold this array in shared
+memory without negatively affecting occupancy.
+The main goal in this phase is to count, for each bin, the number of overlapped primitives.
+Primitives are processed in batches. Because there are two categories of primitives (large and
+small), there are also two types of batches: quad-batches which contain small quads and tri-batches
+with large triangles. Because small quads require very little processing, it's best to process more
+quads at once to minimize per-batch overhead. Tri-batches on the other hand usually take a lot more
+time to process, because rasterization is involved and the primitive surface area is larger.
+Additionally, in a typical scene, there aren't that many of them. So tri-batches are only large enough
+so that each thread in a workgroup has a single triangle to work on.
+Quad-batches and tri-batches are processed separately: tri-batch processing starts only after all
+quad-batches have been processed. Each workgroup processes some number of batches of each type
+by counting (in a shared memory array) per-bin instances of overlapped primitives. To count small
+quads, only AABBs are used. It's not enough information to count accurately, but because small
+quads can overlap at most 2x2 bins, in most cases the estimate will be accurate. In the worst case, 1
+bin out of 4 will be marked incorrectly as overlapped which will negligibly affect the rasterizer
+stage performance. For large triangles, rasterization is used. Once there are no more batches of a
+given type to process, two things happen. First, all per-bin counters are atomically accumulated
+from all workgroups into a single array in global memory (BIN_QUAD_COUNTS for quads and
+BIN_TRI_COUNTS for triangles). Secondly, each workgroup saves to global memory a list of
+processed batches (a single number is sufficient to identify a batch) and per-bin counters array. In a
+way, it is a snapshot, which will allow to continue working on the same set of batches in the 3rd
+phase.
+Phase 2: bin categorization & offset computation
+Once the first phase is finished, BIN_QUAD_COUNTS and BIN_TRI_COUNTS arrays will
+contain primitive overlap counts for each bin. In this phase, these arrays are used to perform two
+tasks, each with a single workgroup. The first task is to compute offsets for primitive lists for each
+bin by applying prefix sum to per-bin primitive counts. These offsets will be used in the next phase
+when storing indices of per-bin primitives. The second task is to categorize bins based on the
+number of overlapping triangles (quads are counted as 2 triangles). Currently, there are 3 categories:
+empty, low (for bins with less than 1024 triangles) and high (for bins with at least 1024 triangles).
+Phase 3: writing per-bin primitive lists
+The third phase is in many ways similar to the first. It runs the same number of workgroups. Each
+workgroup continues work from the first phase workgroup with the same id. It will generate per-bin
+primitive lists for the same primitives which were processed in the first phase (by using a previously
+saved batch list). Previously saved per-workgroup per-bin counters are used to allocate space in a
+global per-bin offsets array for primitive indices for all bins touched by selected batches. After
+allocation, in shared memory, in an array similar as in the first phase, global per-bin offsets are
+kept.
+Quad-batches and tri-batches are processed separately, just like in the first phase. Processing
+primitives is also similar, but instead of counting, for each overlapped bin, an offset is computed by
+atomically incrementing a per-bin counter in shared memory and writing an appropriate primitive
+index to global memory. Large triangles may cause load-balancing problems, because surface area
+of different triangles may vary wildly. To deal with that, a simple balancing scheme is
+implemented: threads within a subgroup try to equally divide between them to-be-written indices on
+a row level. This scheme is simple and can provide a solid performance boost on some scenes
+(phase 3 up to 2.5X faster).
+It might be concerning that per-workgroup batch lists are inherited from phase 1 to phase 3. But in
+practice, it doesn't cause any load balancing problems across workgroups, because the amount of
+work which each workgroup has to perform in phase 1 is proportional to the amount of work in
+phase 3.
+Triangle rasterization
+The triangle scanline rasterization algorithm which is used in LucidRaster is similar to micropoly
+software rasterizer used in Nanite [Karis 2021] with the main difference that 3D rasterization
+[Davidovic 2012] is also used. Basically, for a given triangle it iterates over all rows of its screenspace AABB. In each row instead of testing each pixel, it computes (in constant time) an interval of
+overlapped pixels. 3D edge functions with parameters precomputed during the setup stage are used.
+There are two versions of the scanline algorithm: one which works on pixels (which is used in the
+final rasterization stage) and another which works on 32x32-pixel bins (this one is used in binning
+stage). The bin version is also optimized with a simple 'trivial reject test' [Abrash 2009].
+Stage 3: bin rasterization
+During the bin rasterization stage, 32x32-pixel bins are further divided into smaller regions: 32x8pixel block-rows, 8x8-pixel blocks and 8x4-pixel half-blocks. All of these are fixed on a grid:
+block-rows on 1x4 grid (4 total), blocks on 4x4 grid (16 total) and half-blocks on 4x8 grid (32
+total). Per-triangle pixel coverage information can be generated for all of those. Let's name the data
+structures that hold per-triangle pixel coverage information: Tri-block-row for block-rows, tri-block
+for blocks and tri-half-block for half-blocks.
+LucidRaster handles bins with low and high densities of triangles with two different compute
+shaders: low-rasterizer and high-rasterizer. The low-density version besides the limit on the number
+of triangles per bin also has limits on the number of fragments and triangles per block and per
+block-row. Those limits allow for more efficient processing but can be too constraining for some,
+albeit very small, percentage of bins. Such bins are detected in low-rasterizer and are propagated to
+high-rasterizer (which has much weaker constraints). Because of that high-rasterizer workgroups
+are dispatched only after the low-rasterizer has finished. What follows is a description of the lowrasterizer; the differences between the two versions are described afterwards.
+Similarly to the binning stage, persistent threads are used in this stage as well. Each workgroup in a
+loop tries to acquire and rasterize a bin until all bins are processed. Again, only as many
+workgroups are spawned as required to saturate all GPU cores. Low-rasterizer uses workgroups
+containing 256 threads each.
+Bin rasterization happens in three phases:
+• Phase 1: Block-row generation: arrays of tri-block-rows are generated.
+• Phase 2: Half-block extraction: depth-sorted tri-half-blocks are extracted from tri-blockrows.
+• Phase 3: Shading & blending: tri-half-blocks are shaded, blended together and written to the
+output framebuffer.
+Phase 1: tri-block-row generation
+Phase 1 begins with processing all per-bin small quads and large triangles. Quads are further
+divided into triangles, and triangles are processed directly. For each triangle, scanline algorithm is
+used to generate intervals of covered pixels for each row within 32x8-pixel block-rows. Per-triangle
+scanline data includes minimum & maximum Y coordinates, which allows the scanline algorithm to
+iterate only over block-rows with not-empty intervals. Tri-block-row pixel coverage information
+can be efficiently encoded in less than 128 bits: (5 + 5) * 8 = 80 bits for per-row pixel intervals, 4
+bits for block column coverage and 24 bits for visible triangle index. This information is saved in a
+per-workgroup scratch buffer stored in global memory. Tri-block-rows belonging to different blockrows are stored separately in 4 different arrays. Because of the limit on the number of triangles per
+block-row in low-rasterizer (1024), the size of a per-workgroup scratch buffer can be kept relatively
+low. Shared memory atomics are used for counting tri-block-rows.
+Phase 2: half-block extraction
+The goal in this phase is to generate, for all half-blocks within the current bin, a depth-sorted list of
+tri-half-blocks.
+Subgroups process all blocks within a current bin one after another. Subgroups work independently,
+each working on a single block at the time. Each subgroup will generate tri-blocks, sort them and
+divide them into two arrays of tri-half-blocks in a scratch buffer in global memory.
+Careful use of shared memory is the key to efficiency in this phase. Each subgroup has at its
+disposal 8 uints per thread (256 uints total for 32 threads). In the low-rasterizer, the upper limit on
+the number of triangles per block is 256, which allows to perform most of the processing (especially
+sorting) without constantly writing/reading to/from global memory.
+Subgroups start by first identifying which tri-block-rows overlap the current block. Block column
+coverage bits are used for that. Each subgroup generates in shared memory a list of tri-block-row
+indices. The easiest way to do it (and also quite efficient) is to simply iterate over all tri-block-rows
+and for those which overlap the current block, use an atomic counter to compute an index and count
+them at the same time.
+To generate a sorted tri-block list, depth values are needed as well. So, subgroups iterate over triblock-row index lists and compute first tri-block sample centroids by using tri-block-row data and
+after that depth values with per-triangle edge functions. Depth values together with tri-block index
+(which is identical to tri-block-row index) are encoded into a single 32-bit uint and stored in shared
+memory. 22 high bits are used for depth, 10 low bits are used for tri-block-index. Those values are
+then sorted with bitonic sort optimized with subgroup shuffles [Demouth 2013]. Tri-blocks are
+sorted front to back.
+At the end of the phase each subgroup iterates over sorted tri-block indices, generates two arrays of
+tri-half-blocks and stores them in scratch buffer in global memory. Tri-half-blocks contain:
+• Pixel coverage information ((3 + 3) * 4 = 24 bits).
+• Visible triangle index (24 bits).
+• Fragment count prefix sum (only 12 lower bits are needed). This value is used in the next
+phase to quickly compute an index for each sample.
+Phase 3: shading & blending
+Once the rasterizer gets to phase 3, data required to efficiently render samples in half-blocks will be
+available in a scratch buffer in global memory. Now subgroups will independently shade & blend
+each half-block. LucidRaster currently works only on GPUs which have subgroups containing 32 or
+64 threads. In the case of 64-thread subgroup, two half-blocks are processed at the same time by a
+single subgroup.
+All samples in a given half-block are ordered. Samples coming from different triangles are ordered
+in the same way as tri-half-blocks and as for the samples coming from the same triangle, they are
+ordered row-by-row, with top-left sample being first and bottom-right being last. Samples are
+additionally grouped in segments, where each segment can contain at most 256 samples. All
+segments except the last one will be full and contain 256 samples.
+Subgroups in a loop process samples in segments, one segment at a time. Each thread within a
+subgroup is responsible for a single pixel: it keeps the current RGBA color (initially fully
+transparent black) and depth filter context. This context contains a constant size (currently 3) of
+depth-color pairs. Depth filter allows for fixing invalid depth order of samples which may happen
+when tri-half-blocks sample depths overlap. It cannot fix all depth-order issues, but it handles the
+vast majority of cases. Increasing depth-filter size allows for solving more complex ordering issues,
+but increases register pressure and decreases overall performance.
+Each thread in a subgroup takes a single sample from a segment and shades it. After shading those
+samples are immediately blended with previously blended samples. Sample color & depth has to be
+transferred to the appropriate thread based on the sample position. It can be done efficiently with
+bitwise operations and subgroup shuffles: after shading each thread atomically writes a single bit to
+a 32x32-bit array in shared memory. Bit position encodes sample position within half-block and
+thread-id. Afterwards, each thread iterates in-order over all samples which overlap the pixel
+position assigned to the current thread. Those samples are then blended with those which were
+processed previously.
+Once all samples are processed, threads write the colors to the framebuffer. The workgroup can
+then proceed to the next bin.
+Sample shading
+In LucidRaster simple fragment shader is used to demonstrate the basic capabilities of the rasterizer.
+Shader supports vertex normals & colors, single texture per triangle and performs simple lighting
+calculation. To support mip-mapping, texture coordinate gradients are required. Instead of using
+quad-shading, analytic derivatives are computed. This allows for more efficient processing of tiny
+triangles. To support multiple textures in a given scene, texture atlases are used.
+Sample blending
+Samples, before being blended into the final result, first have to pass through the depth-filter. This
+filter is basically a fixed-size priority queue, in which samples are ordered by depth. Whenever a
+new sample is added to the stack, one of the samples falls out and is blended into the target result.
+By increasing the depth-filter size by 1, pixels with incorrectly ordered samples can also be
+detected. Those pixels could be registered and afterwards processed by a slower, conservative
+algorithm. In most scenes less than 0.1% of pixels are invalid. In the most problematic scenes, it's
+between 0.5% - 1%. Those errors can be prevented by fixing the geometry (for example in whiteoak and san-miguel scenes foliage is especially problematic, but intersections in foliage geometry
+are not required to achieve a satisfactory result) or by increasing depth-filter size. For example
+number of invalid pixels in white-oak scene can be decreased from 1% to 0.08% by increasing the
+depth-filter size from 3 to 8. This slows down the whole rendering performance by 1.5%.
+Blending is performed front to back. This allows for a simple, but efficient optimization. When
+accumulated alpha approaches 1.0, then further samples can be discarded, because their
+contribution will be minimal. In LucidRaster this optimization can be enabled with 'alpha_threshold'
+flag. When enabled, shading & blending stops once all pixels within a half-block have accumulated
+at least 1 - 1 / 128 alpha value.
+High-rasterizer
+High-rasterizer is very similar to the low-rasterizer, but it has to be able to process a lot more
+triangles per-bin than the low-rasterizer. The main differences are the following:
+• Increased workgroup size to 1024. This increases available shared memory per-bin and also
+improves caching efficiency.
+• Per-workgroup scratch buffer is much bigger. Currently, 768 KB are used for the scratch
+buffer. This will fit 128K tri-block-rows (16K per block-row) and 128K tri-half-blocks (4K
+per half-block).
+• In phase 2, tri-half-blocks are generated and sorted directly. The amount of space in shared
+memory required to generate and sort tri-half-blocks may be much bigger than in the lowrasterizer. Because of that, shared memory is allocated dynamically for this task and the
+number of subgroups working on a given half-block may vary as well.
+3. Results
+Test scenes
+12 different scenes were used during the evaluation of LucidRaster. To simplify the renderer all
+textures are packed into texture atlases. Each scene can use at most 2 atlases: one opaque and one
+transparent. Block compression is used: BC1 for opaque and BC3 for transparent atlases.
+Triangles are grouped into quads using a greedy maximal independent set algorithm [Halldorsson
+1994]. The algorithm is performed on a graph where quads are treated as nodes and triangles (which
+are shared by quads) as edges. In most scenes, this gives good results with on average about 5% of
+quads being degenerate.
+In the next table, for each scene, the following information is provided: number of triangles &
+quads, percentage of visible quads for a given view (vis), percentage of degenerate quads (deg),
+whether the backface culling is turned on (BC) or not.
+Boxes: 12K tris, 6K quads,
+100% vis, 0% deg
+Bunny: 144K tris, 72K quads,
+40% vis, 0.3% deg, BC
+Conference: 331K tris, 167K
+quads, 6% vis, 1.9% deg, BC
+Dragon: 871K tris, 438K
+quads, 42% vis 0.9% deg, BC
+Gallery: 999K tris, 513K
+quads, 60% vis, 5.2% deg
+Hairball: (2880K tris, 1495K
+quads, 99% vis, 7.4% deg
+Powerplant: 12759K tris,
+6402K quads, 15% vis,
+0.7% deg, BC
+San miguel: 5617K tris,
+3069K quads, 34% vis,
+17% deg
+Scrub pine: 527 tris, 289
+quads, 100% vis, 18% deg
+Sponza: 262K tris, 132K
+quads, 18% vis, 1.5% deg
+Teapot: 16K tris, 8K quads
+100% vis, 0.1% deg
+White oak: 37K tris, 19K
+quads, 53% vis, 10% deg
+Performance results
+LucidRaster performance was compared with a simple renderer which renders all triangles using
+hardware with alpha blending on and without any kind of sorting. SW, HW represent, respectively,
+LucidRaster and simple hardware-based renderer running times in microseconds. S/THB is the
+average number of samples divided by the number of tri-half-blocks.
+The fragment shader is almost identical in both renderers, with the main differences in vertex
+attribute retrieval and interpolation. Fragment shader code is available on GitHub:
+https://github.com/nadult/lucid/blob/main/data/shaders/simple_material.glsl
+Measurements were gathered in 'mixed' mode where in a single frame both simple and lucid
+renderer were running one after another. Timings shown in tables are averages of samples gathered
+over several seconds for each scene.
+Measurements on AMD Radeon RX 6700 XT were done on Linux, because it seems that the latest
+AMD Vulkan drivers for Linux have better subgroup support. Specifically, windows drivers didn't
+support VK_EXT_subgroup_size_control and some shaders which used subgroup instructions were
+working several times slower than on Linux.
+NVidia GTX 3050 TI, Windows 10, 2560x1330
+Scene
+Samples S/THB
+SW
+HW SW/HW
+Boxes
+Bunny
+Conference
+Dragon
+Gallery
+Hairball
+Powerplant
+San miguel
+Scrub pine
+Sponza
+Teapot
+White oak
+4.26
+4.49
+5.12
+3.38
+3.87
+3.23
+2.13
+2.52
+2.98
+2.31
+3.36
+2.15
+3.32
+24
+53
+58
+328
+771
+1756
+2720
+2391
+15
+98
+23
+37
+14%
+AMD Radeon RX 6700 XT, Ubuntu 22.04, 1920x1031
+Scene
+Samples
+S/HB
+SW
+HW SW/HW
+setup
+Boxes
+Bunny
+Conference
+Dragon
+Gallery
+Hairball
+Powerplant
+San miguel
+Scrub pine
+Sponza
+Teapot
+White oak
+12.11M
+0.74M
+5.31M
+0.67M
+4.89M
+22.00M
+18.03M
+21.27M
+3.26M
+24.00M
+1.71M
+122.00M
+7.28M
+0.44M
+3.11M
+0.40M
+2.86M
+13.22M
+10.83M
+12.59M
+1.96M
+13.97M
+1.03M
+71.41M
+17.91
+3.33
+16.75
+1.25
+3.07
+2.89
+3.60
+6.57
+24.44
+19.80
+8.53
+26.95
+15.80
+2.48
+14.77
+1.15
+2.48
+2.38
+3.27
+5.65
+22.90
+17.66
+6.91
+25.68
+1707
+401
+350
+78
+1158
+226
+837
+248
+2621
+678
+11518 3564
+10121 4761
+9234 3667
+575
+193
+3910 1690
+373
+111
+13005 6049
+Averages:
+setup
+546
+202
+131
+32
+370
+101
+272
+95
+907
+224
+4388 1084
+3532 1533
+3396 1066
+242
+57
+1194
+375
+147
+50
+3500 1624
+Averages:
+2.70
+4.09
+3.66
+2.86
+4.05
+4.05
+2.30
+3.19
+4.25
+3.18
+2.94
+2.16
+3.29
+LucidRaster (SW) stages
+binning low_raster
+hi_raster
+53
+38
+76
+51
+78
+244
+346
+216
+61
+130
+40
+189
+5%
+1609
+234
+1002
+302
+1427
+355
+838
+2261
+474
+3658
+285
+12759
+60%
+4
+4
+4
+136
+324
+9146
+6201
+4349
+4
+3
+4
+3
+18%
+LucidRaster (SW) stages
+binning low_raster
+hi_raster
+10
+17
+19
+88
+186
+991
+1260
+1127
+6
+33
+11
+11
+15%
+17
+19
+44
+25
+31
+116
+144
+97
+24
+55
+18
+80
+7%
+508
+84
+296
+68
+453
+152
+237
+653
+200
+1052
+107
+3397
+57%
+6
+5
+5
+85
+232
+3123
+1885
+1513
+6
+47
+5
+7
+20%
+Alpha threshold
+When the 'alpha threshold' mode is enabled, shading stops once enough alpha value is accumulated
+in a given pixel. Rendering of some scenes can be much faster when this flag is used, especially in
+cases when lots of samples are hidden beneath an almost opaque layer of samples. The following
+speedups were achieved:
+NVidia GTX 3050 TI, Windows 10,
+2560x1330
+Scene
+Scene opacity
+HW
+alpha_threshold
+off (default)
+SW
+SW/HW
+alpha_threshold
+on
+SW
+SW/HW
+Boxes
+Boxes
+Hairball
+Powerplant
+White oak
+White oak
+1707
+1707
+11518
+10121
+13005
+13005
+1288
+1169
+9784
+9445
+13129
+11070
+0.5
+0.8
+0.5
+0.5
+0.5
+0.8
+401
+401
+3564
+4761
+6049
+6049
+4.26
+4.26
+3.23
+2.13
+2.15
+2.15
+3.21
+2.92
+2.75
+1.98
+2.17
+1.83
+In other scenes the gains were negligible.
+Fragment sorting errors
+Two-stage sorting technique fails in some cases. Those cases are rare and can be detected and dealt
+with properly. On average the number of invalid pixels is very small (0.17%, 0.02% with DF=8), so
+even if they were handled with a very slow shader, it shouldn't affect overall performance
+noticeably. LucidRaster currently doesn't handle those cases, but it will show invalid pixels when
+the 'visualize_errors' flag is enabled.
+The number of invalid pixels depends on the geometrical complexity of nearby surface intersections
+in the scene and the size of the depth filter. What follows is a table with error statistics for all scenes
+for different depth filter sizes.
+Scene
+Invalid pixels (total)
+DF=3 DF=8 DF=12
+Invalid pixels (percentage)
+DF=3
+DF=8
+DF=12
+Boxes
+Bunny
+Conference
+Dragon
+Gallery
+Hairball
+Powerplant
+San miguel
+Scrub pine
+Sponza
+Teapot
+White oak
+3
+1
+19
+0
+70
+14100
+1800
+17112
+190
+290
+9
+34780
+<0.01%
+<0.01%
+<0.01%
+0
+0
+0
+0
+1
+1530
+15
+4513
+0
+4
+0
+2850
+0
+0
+0
+0
+0
+660
+3
+2828
+0
+1
+0
+905
+Averages:
+<0.01%
+0.41%
+0.05%
+0.50%
+0.01%
+0.01%
+<0.01%
+1.02%
+0.17%
+<0.01%
+0.04%
+<0.01%
+0.13%
+0.02%
+<0.01%
+0.08%
+<0.01%
+<0.01%
+0.08%
+0.02%
+0.03%
+0.01%
+Rendering time compared to DF=3
+DF=8
+DF=12
+102%
+101%
+104%
+99%
+101%
+100%
+100%
+103%
+102%
+103%
+103%
+103%
+102%
+115%
+124%
+127%
+108%
+121%
+107%
+106%
+112%
+121%
+128%
+124%
+116%
+117%
+In the next table, a visualization of errors in the most problematic areas of 3 different scenes
+(Hairball, San miguel and White oak) is shown.
+Depth filter size = 3 (default)
+Depth filter size = 8
+Depth filter size = 12
+4. Future work
+Work on LucidRaster was completely self-funded. One of the main goals was to create a minimum
+prototype which demonstrates the usefulness of this rendering method. Because of that LucidRaster
+uses only a simple shading model, all textures are packed into atlases and even the rendering
+resolution is quite limited (to 2560x2048). Additionally, LucidRaster uses a lot of GPU memory:
+about 1200MB to hold all the scratch, triangle & quad buffers, to be able to render scenes with
+millions of triangles. Many of these restrictions are not necessary, but they were added to simplify
+implementation. It should be possible to greatly reduce memory usage with dynamic allocation
+because most of the time most of the GPU storages are mostly empty.
+LucidRaster currently has no anti-aliasing support, but it shouldn’t be hard to extend it with 4x or
+16x multisample anti-aliasing (MSAA). MSAA would mostly affect the first and second phases of
+the raster stage. More space would be needed to store triangle sample ranges (~2x more for 4x
+MSAA and ~4x more for 16x MSAA). High-quality MSAA should be achievable just by modifying
+the blending phase and without a big increase in the number of samples (alpha values for samples
+would be affected by the number of MSAA samples).
+Although the pipeline is very well optimized, there are still areas for improvement. For example,
+currently, LucidRaster uses 32x32 bins, but it could be beneficial to use 64x64 bins in areas with
+low density of triangles and 16x16 in high-density areas. It should also be possible to run highrasterizers and low-rasterizers at the same time, which hopefully would increase parallelism.
+5. Vulkan glossary
+Workgroup: A collection of compute shader threads which execute the same program in parallel.
+Threads within a workgroup can share resources and synchronise their execution.
+Subgroup: A collection of compute shader threads which can effectively communicate and
+synchronize.
+Global memory: Off-chip GPU memory (DRAM). Accessible in Vulkan's compute shaders mainly
+through buffers, images and textures. It's global in the sense that it can be shared between different
+workgroups and pipeline stages.
+Shared memory: Fast, small on-chip GPU memory shared across all threads within a workgroup.
+More information about Vulkan and compute shaders can be found in:
+•
+•
+•
+Vulkan 1.3 specification:
+https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html
+Compute shader 101 glossary:
+https://github.com/googlefonts/compute-shader-101/blob/main/docs/glossary.md
+Vulkan subgroup tutorial: https://www.khronos.org/blog/vulkan-subgroup-tutorial
+6. References
+[Carpenter 1984]
+"The A-buffer, an Antialiased Hidden Surface Method"
+Carpenter, L. (1984, January). The A-buffer, an antialiased hidden surface method. In
+Proceedings of the 11th annual conference on Computer graphics and interactive techniques
+(pp. 103-108).
+[Molnar 1994]
+"A Sorting Classification of Parallel Rendering"
+Molnar, S., Cox, M., Ellsworth, D., & Fuchs, H. (1994). A sorting classification of parallel
+rendering. IEEE computer graphics and applications, 14(4), 23-32.
+[Blinn 1996]
+"Calculating Screen Coverage"
+Blinn, J. F. (1996). Calculating screen coverage. IEEE Computer Graphics and Applications,
+16(3), 84-88.
+[Halldorsson 1994]
+"Greed is good: Approximating independent sets in sparse and bounded-degree
+graphs"
+Halldórsson, M., & Radhakrishnan, J. (1994, May). Greed is good: Approximating
+independent sets in sparse and bounded-degree graphs. In Proceedings of the twenty-sixth
+annual ACM symposium on Theory of computing (pp. 439-448).
+[Everitt 2001]
+"Interactive Order-Independent Transparency"
+Everitt, C. (2001). Interactive order-independent transparency. White paper, nVIDIA, 2(6), 7.
+[Abrash 2009]
+"Rasterization on Larrabee"
+Abrash, M. (2009). Rasterization on larrabee. Dr. Dobbs Journal, 26-38.
+[Liu 2010]
+"FreePipe: a Programmable Parallel Rendering Architecture for Efficient MultiFragment Effects"
+Liu, F., Huang, M. C., Liu, X. H., & Wu, E. H. (2010, February). Freepipe: a programmable
+parallel rendering architecture for efficient multi-fragment effects. In Proceedings of the
+2010 ACM SIGGRAPH symposium on Interactive 3D Graphics and Games (pp. 75-82).
+[Laine 2011]
+"High-Performance Software Rasterization on GPUs"
+Laine, S., & Karras, T. (2011, August). High-performance software rasterization on GPUs.
+In Proceedings of the ACM SIGGRAPH Symposium on High Performance Graphics (pp. 7988).
+[Gupta 2012]
+"A Study of Persistent Threads Style GPU Programming for GPGPU Workloads"
+Gupta, K., Stuart, J. A., & Owens, J. D. (2012). A study of persistent threads style GPU
+programming for GPGPU workloads (pp. 1-14). IEEE.
+[Davidovic 2012]
+"3D Rasterization: A Bridge between Rasterization and Ray Casting"
+Davidovič, T., Engelhardt, T., Georgiev, I., Slusallek, P., & Dachsbacher, C. (2012). 3D
+rasterization: a bridge between rasterization and ray casting. In Proceedings of Graphics
+Interface 2012 (pp. 201-208).
+[Demouth 2013]
+"Shuffle: Tips and Tricks"
+Demouth, J. (2013). Shuffle: Tips and tricks. NVIDIA GTC.
+[McGuire 2013]
+"Weighted Blended Order-Independent Transparency"
+McGuire, M., & Bavoil, L. (2013). Weighted blended order-independent transparency.
+Journal of Computer Graphics Techniques, 2(4).
+[Knowles 2013]
+"Backwards Memory Allocation and Improved OIT"
+Knowles, P., Leach, G., & Zambetta, F. (2013, October). Backwards Memory Allocation and
+Improved OIT. In PG (Short Papers).
+[Knowles 2014]
+"Fast sorting for exact OIT of complex scenes"
+Knowles, P., Leach, G., & Zambetta, F. (2014). Fast sorting for exact OIT of complex
+scenes. The Visual Computer, 30(6), 603-613.
+[Salvi 2014]
+"Multi-Layer Alpha Blending"
+Salvi, M., & Vaidyanathan, K. (2014, March). Multi-layer alpha blending. In Proceedings of
+the 18th Meeting of the ACM SIGGRAPH Symposium on Interactive 3D Graphics and
+Games (pp. 151-158).
+[Wyman 2016]
+"Exploring and Expanding the Continuum of OIT Algorithms"
+Wyman, C. (2016, June). Exploring and expanding the continuum of OIT algorithms. In
+High Performance Graphics (pp. 1-11).
+[Köhler 2016]
+"Practical Order Independent Transparency"
+Johan Köhler, Treyarch
+[Kenzel 2018]
+"A High-Performance Software Graphics Pipeline Architecture for the GPU"
+Kenzel, M., Kerbl, B., Schmalstieg, D., & Steinberger, M. (2018). A high-performance
+software graphics pipeline architecture for the GPU. ACM Transactions on Graphics (TOG),
+37(4), 1-15.
+[Münstermann 2018]
+"Moment-Based Order-Independent Transparency"
+Münstermann, C., Krumpen, S., Klein, R., & Peters, C. (2018). Moment-based orderindependent transparency. Proceedings of the ACM on Computer Graphics and Interactive
+Techniques, 1(1), 1-20.
+[Vasilakis 2020]
+"A Survey of Multifragment Rendering"
+Vasilakis, A. A., Vardis, K., & Papaioannou, G. (2020, May). A survey of multifragment
+rendering. In Computer graphics forum (Vol. 39, No. 2, pp. 623-642).
+[Karis 2021]
+"Nanite, A deep dive"
+Karis, B., Stubbe, R., & Wihlidal, G. (2021). Nanite—A Deep Dive. In ACM SIGGRAPH
+(Vol. 21).

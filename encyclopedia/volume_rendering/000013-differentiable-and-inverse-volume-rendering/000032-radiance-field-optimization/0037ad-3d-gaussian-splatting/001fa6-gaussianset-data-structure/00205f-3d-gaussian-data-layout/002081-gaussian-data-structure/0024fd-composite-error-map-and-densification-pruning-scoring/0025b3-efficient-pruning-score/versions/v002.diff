@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -9,13 +9,13 @@
+ ### Inputs and Outputs
+ - **Inputs**:
+-  - The set of 3D Gaussians $\mathcal{G} = \{G_1, \dots, G_N\}$.
+-  - The set of training camera poses $\mathcal{P}_{gt}$.
++  - The set of 3D Gaussians $\mathcal{G} = \{G_1, \dots, G_N\}$ [S1, S2].
++  - The set of training camera poses $\mathcal{P}_{gt}$ [S2].
+   - The rendered image gradients with respect to the projected Gaussian values, $\nabla_{g_i} I_{\mathcal{G}}(\phi)$, computed during the standard backward pass of the differentiable renderer [S1, S2].
+ - **Outputs**:
+-  - A scalar pruning score $\tilde{U}_i$ for each Gaussian $G_i$.
+-  - A binary mask or list of Gaussians to be removed based on a threshold [S1].
++  - A scalar pruning score $\tilde{U}_i$ for each Gaussian $G_i$ [S1, S2].
++  - A list of Gaussians to be removed based on a threshold [S1].
+ 
+ ### Data Structures
+-- **Pruning Score Buffer**: An array of size $N$ (number of Gaussians) storing the accumulated score $\tilde{U}_i$ for each Gaussian. This replaces the $N \times 36$ matrix required by the original PUP 3D-GS method [S1, S2].
++- **Pruning Score Buffer**: An array of size $N$ (number of Gaussians) storing the accumulated score $\tilde{U}_i$ for each Gaussian [S1, S2].
+ - **Gradient Accumulator**: During the backward pass, the gradient $\nabla_{g_i} I_{\mathcal{G}}(\phi)$ is squared and added to the corresponding entry in the Pruning Score Buffer [S1, S2].
+ 
+@@ -35,5 +35,5 @@
+ $$
+ 
+-Since $g_i$ is a scalar at each pixel, the term inside the determinant is a $1 \times 1$ matrix (a scalar squared). Furthermore, because the logarithm is monotonically increasing, the log determinant simplifies to a sum of squared gradients [S1, S2]:
++Since $g_i$ is a scalar at each pixel, the term inside the determinant is a $1 \times 1$ matrix (a scalar squared) [S2]. Furthermore, because the logarithm is monotonically increasing, the log determinant simplifies to a sum of squared gradients [S1, S2]:
+ 
+ $$
+@@ -51,5 +51,5 @@
+ 
+ ```python
+-# Initialization
++# Efficient Pruning Score Integration
+ # N: Total number of Gaussians
+ # P_gt: Set of training camera poses
+@@ -57,25 +57,39 @@
+ # current_iteration: Integer tracking training step
+ 
+-def efficient_pruning_backward_pass(rendered_image, gt_image, gaussians, camera_poses):
++def accumulate_pruning_scores(rendered_image, gt_image, gaussians, camera_poses, pruning_scores):
+     """
+-    Standard differentiable rendering backward pass, modified to accumulate pruning scores.
++    Computes the backward pass and accumulates the efficient pruning score.
+     """
+-    # 1. Compute image loss (e.g., L1 or L2)
+-    loss = compute_loss(rendered_image, gt_image)
++    # 1. Compute image loss (e.g., L2)
++    loss = sum((rendered_image - gt_image) ** 2)  # Standard loss computation [G]
+     
+     # 2. Backward pass through the renderer
+-    # This computes gradients with respect to the projected Gaussian values g_i
++    # Computes gradients with respect to the projected Gaussian values g_i
+     # for each Gaussian contributing to each pixel.
+-    # gradient_g: Dictionary or array mapping Gaussian index i to gradient value
+-    gradient_g = backward_pass_renderer(rendered_image, gt_image, gaussians, camera_poses)
+-    
++    # gradient_g: Dictionary mapping Gaussian index i to a list of gradient values per pixel/view
++    gradient_g = {}
++    for phi in camera_poses:
++        # Standard differentiable rendering backward pass computes ∇_{g_i} I_G [S1]
++        # In practice, this is provided by the autograd framework [G]
++        pixel_gradients = compute_pixel_gradients(rendered_image, gt_image, gaussians, phi)
++        for i, grad_val in pixel_gradients.items():
++            if i not in gradient_g:
++                gradient_g[i] = []
++            gradient_g[i].append(grad_val)
++            
+     # 3. Accumulate pruning scores
+-    # For each Gaussian i that contributed to the render
+-    for i, grad_val in gradient_g.items():
+-        # Squared gradient is added to the score buffer
+-        # This corresponds to summing (grad_g_i)^2 over all pixels and views
+-        pruning_scores[i] += grad_val ** 2
++    # Squared gradients are summed across all pixels and views for each Gaussian
++    for i, grad_vals in gradient_g.items():
++        pruning_scores[i] += sum(g ** 2 for g in grad_vals)
+         
+     return loss
++
++def compute_pixel_gradients(rendered_image, gt_image, gaussians, camera_pose):
++    """
++    Computes ∇_{g_i} I_G per pixel using the standard differentiable renderer backward pass [S1].
++    Returns a dictionary mapping Gaussian index to gradient values.
++    """
++    # Implementation depends on the autograd framework [G]
++    pass
+ 
+ def prune_gaussians(gaussians, pruning_scores, current_iteration):
+@@ -83,32 +97,27 @@
+     Removes Gaussians based on the accumulated pruning score.
+     """
+-    # Determine pruning modality based on iteration
+     if current_iteration < 15000:
+-        # Soft Pruning: During densification phase
+-        # Note: Implementation details for soft pruning thresholding are not specified
+-        # in the sources, but it uses the same score metric.
+-        pass 
++        # Soft Pruning: During densification phase [S1]
++        # Exact thresholding logic is not specified in sources [S1]
++        pass
+     else:
+-        # Hard Pruning: After densification phase
+-        # Identify Gaussians with high scores (high sensitivity/redundancy)
+-        # The sources state up to 90% can be pruned.
+-        threshold = determine_threshold(pruning_scores, target_prune_ratio=0.9)
++        # Hard Pruning: After densification phase [S1]
++        # Determine threshold to remove up to 90% of Gaussians [S1, S2]
++        sorted_indices = sorted(range(len(pruning_scores)), key=lambda k: pruning_scores[k], reverse=True)
++        num_to_remove = int(len(pruning_scores) * 0.9)
++        gaussians_to_remove = sorted_indices[:num_to_remove]
+         
+-        gaussians_to_remove = []
+-        for i, score in enumerate(pruning_scores):
+-            if score > threshold:
+-                gaussians_to_remove.append(i)
+-                
+         # Remove Gaussians from the data structure
+-        remove_gaussians(gaussians, gaussians_to_remove)
+-        
+-        # Reset scores for remaining Gaussians if necessary for future iterations
+-        # (Not explicitly stated, but implied by "accumulated" nature)
++        for i in reversed(gaussians_to_remove):
++            gaussians.pop(i)
++            
++        # Reset scores for remaining Gaussians
++        new_scores = [0.0] * len(gaussians)
++        # Note: Exact score reset/remapping procedure is not detailed in sources [S1]
+ ```
+ 
+ ### Edge Cases and Pitfalls
+ - **Gradient Flow**: The original PUP 3D-GS method requires back-propagating through the render kernel per pixel and then per Gaussian, which breaks the efficient gradient flow of 3DGS [S1]. The Efficient Pruning Score avoids this by using $\nabla_{g_i} I_G$, which is already computed in the standard backward pass [S1].
+-- **Precision**: The score relies on squared gradients. If gradients are very small, numerical precision issues may arise, though this is not explicitly detailed in the sources [S1, S2].
+-- **Timing**: Pruning must be carefully timed. Soft pruning occurs during densification (first 15,000 iterations), while hard pruning occurs after [S1]. Pruning too early or too late may affect convergence or final quality [S1].
++- **Timing**: Pruning must be carefully timed. Soft pruning occurs during densification (first 15,000 iterations), while hard pruning occurs after [S1].
+ 
+ ## Operating characteristics

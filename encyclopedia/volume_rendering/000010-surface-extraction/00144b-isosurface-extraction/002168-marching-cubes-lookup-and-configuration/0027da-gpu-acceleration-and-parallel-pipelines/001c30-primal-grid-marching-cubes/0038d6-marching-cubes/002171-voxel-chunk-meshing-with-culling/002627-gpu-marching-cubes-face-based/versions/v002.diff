@@ -1,0 +1,225 @@
+--- v001.md
++++ v002.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-A GPU-based surface extraction method that generates a triangle mesh from a voxel grid by processing each voxel independently on the GPU [S1, unofficial]. It outputs vertices and indices into global buffers using atomic counters for parallel write safety. Unlike traditional Marching Cubes which interpolates vertices along edges, this method generates axis-aligned quads (two triangles) at voxel boundaries where a solid voxel meets an empty neighbor, effectively performing face-based culling in parallel [S1, unofficial]. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md).
++A GPU-based surface extraction method that generates a triangle mesh from a voxel grid by processing each voxel independently on the GPU [S1, unofficial]. It outputs vertices and indices into global buffers using atomic counters for parallel write safety [S1, unofficial]. Unlike traditional Marching Cubes which interpolates vertices along edges, this method generates axis-aligned quads (two triangles) at voxel boundaries where a solid voxel meets an empty neighbor, effectively performing face-based culling in parallel [S1, unofficial]. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md).
+ 
+ ## How it works
+@@ -9,9 +9,9 @@
+ **Inputs:**
+ *   **Voxel Grid:** A 3D array of voxel states, where a state $> 0$ indicates a solid voxel and $0$ indicates empty [S1, unofficial].
+-*   **Chunk Configuration:** The dimension of the voxel chunk processed by the compute shader, typically $CHUNK\_SIZE = 80$ [S1, unofficial].
++*   **Chunk Configuration:** The dimension of the voxel chunk processed by the compute shader, defined as $CHUNK\_SIZE = 80$ [S1, unofficial].
+ *   **Feedback Data:** Per-chunk feedback structures containing current vertex and index offsets and counts [S1, unofficial].
+ 
+ **Outputs:**
+-*   **Vertex Buffer:** A global buffer containing vertex data (position, texcoord, normal) [S1, unofficial].
++*   **Vertex Buffer:** A global buffer containing vertex data (position, normal) [S1, unofficial].
+ *   **Index Buffer:** A global buffer containing triangle indices [S1, unofficial].
+ *   **Updated Feedback:** Updated vertex and index offsets and counts for each chunk [S1, unofficial].
+@@ -21,5 +21,4 @@
+ Each vertex consists of 10 floats:
+ *   `position`: $(px, py, pz)$ [S1, unofficial]
+-*   `texcoord`: $(tx, ty)$ [S1, unofficial]
+ *   `normal`: $(nx, ny, nz)$ [S1, unofficial]
+ 
+@@ -36,4 +35,11 @@
+ *   `vertexOffset`: `int` [S1, unofficial]
+ *   `firstInstance`: `uint` [S1, unofficial]
++
++**Buffer Bindings:**
++*   `VoxelBuffer`: binding 1, readonly `std430` [S1, unofficial]
++*   `VertexBuffer`: binding 2, writeonly `std430` [S1, unofficial]
++*   `IndexBuffer`: binding 3, writeonly `std430` [S1, unofficial]
++*   `FeedbackBuffer`: binding 6, readonly `std430` [S1, unofficial]
++*   `ChunkFeedbackBuffer`: binding 7, readonly `std430` [S1, unofficial]
+ 
+ ### Algorithm Steps
+@@ -64,94 +70,105 @@
+ ### Pseudocode
+ ```python
+-# Shared memory variables (initialized by Thread 0)
+-sVertexOffset: uint
+-sIndexOffset: uint
+-sVertexCount: uint
+-sIndexCount: uint
++# Simulated GPU environment
++CHUNK_SIZE = 80
++voxels_1d = [...]  # 1D array of voxel states
++vertex_buffer = []
++index_buffer = []
++chunk_feedback = [...]  # List of feedback structs
++feedback_lock = threading.Lock()
+ 
+-# Constants
+-CHUNK_SIZE = 80
+-
+-# Helper to convert 3D coord to 1D index
+ def to1D(x, y, z):
+     return x + CHUNK_SIZE * (y + CHUNK_SIZE * z)
+ 
+-# Helper to check if a voxel exists and is solid
+ def hasVoxel(x, y, z):
+     if x < 0 or x >= CHUNK_SIZE or y < 0 or y >= CHUNK_SIZE or z < 0 or z >= CHUNK_SIZE:
+         return False
+-    return uVoxels.data[to1D(x, y, z)] > 0
++    return voxels_1d[to1D(x, y, z)] > 0
+ 
+-# Main compute shader entry point
+-def main():
++def atomic_add(counter, value):
++    """Simulates GPU atomicAdd for shared memory counters."""
++    with feedback_lock:
++        old = counter[0]
++        counter[0] += value
++        return old
++
++def process_chunk(workgroup_id, chunk_idx):
++    # Shared memory variables (initialized by Thread 0)
++    s_vertex_offset = [0]
++    s_index_offset = [0]
++    s_vertex_count = [0]
++    s_index_count = [0]
++
+     # Thread 0 initialization
+-    if gl_LocalInvocationID.x == 0 and gl_LocalInvocationID.y == 0 and gl_LocalInvocationID.z == 0:
+-        sChunkIndex = gl_WorkGroupID.x + 10 * (gl_WorkGroupID.y + 10 * gl_WorkGroupID.z)
+-        feedback = uChunkFeedback[sChunkIndex]
+-        sVertexOffset = feedback.vertexOffset
+-        sIndexOffset = feedback.indexOffset
+-        sVertexCount = feedback.vertexCount
+-        sIndexCount = feedback.indexCount
++    if workgroup_id == 0:
++        fb = chunk_feedback[chunk_idx]
++        s_vertex_offset[0] = fb.vertexOffset
++        s_index_offset[0] = fb.indexOffset
++        s_vertex_count[0] = fb.vertexCount
++        s_index_count[0] = fb.indexCount
+ 
+     # Synchronize to ensure shared memory is loaded
+-    barrier()
++    # barrier()
+ 
+-    # Calculate global voxel index
+-    globalVoxelIndex = to1D(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, gl_GlobalInvocationID.z)
+-    
+-    # Check if voxel is solid
+-    if uVoxels.data[globalVoxelIndex] > 0:
+-        # Extract faces for each of the 6 directions
+-        # +X
+-        if not hasVoxel(gl_GlobalInvocationID.x + 1, gl_GlobalInvocationID.y, gl_GlobalInvocationID.z):
+-            vOffset = atomicAdd(sVertexOffset, 4)
+-            iOffset = atomicAdd(sIndexOffset, 6)
+-            # Write 4 vertices with normal (1.0, 0.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to vOffset and iOffset
+-        
+-        # -X
+-        if not hasVoxel(gl_GlobalInvocationID.x - 1, gl_GlobalInvocationID.y, gl_GlobalInvocationID.z):
+-            vOffset = atomicAdd(sVertexOffset, 4)
+-            iOffset = atomicAdd(sIndexOffset, 6)
++    # Each thread processes one voxel
++    # Simulating gl_GlobalInvocationID mapping to 3D coordinates
++    thread_id = workgroup_id * (CHUNK_SIZE ** 3) + (thread_local_id)
++    x = thread_id % CHUNK_SIZE
++    y = (thread_id // CHUNK_SIZE) % CHUNK_SIZE
++    z = thread_id // (CHUNK_SIZE * CHUNK_SIZE)
++
++    # Voxel Check
++    if hasVoxel(x, y, z):
++        # Face Extraction (+X)
++        if not hasVoxel(x + 1, y, z):
++            v_off = atomic_add(s_vertex_offset, 4)
++            i_off = atomic_add(s_index_offset, 6)
++            # Write 4 vertices with normal (1.0, 0.0, 0.0) relative to (x, y, z)
++            # Write 6 indices [0,1,2, 2,3,0] relative to v_off and i_off
++
++        # Face Extraction (-X)
++        if not hasVoxel(x - 1, y, z):
++            v_off = atomic_add(s_vertex_offset, 4)
++            i_off = atomic_add(s_index_offset, 6)
+             # Write 4 vertices with normal (-1.0, 0.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to vOffset and iOffset
++            # Write 6 indices [0,1,2, 2,3,0]
+ 
+-        # +Y
+-        if not hasVoxel(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y + 1, gl_GlobalInvocationID.z):
+-            vOffset = atomicAdd(sVertexOffset, 4)
+-            iOffset = atomicAdd(sIndexOffset, 6)
++        # Face Extraction (+Y)
++        if not hasVoxel(x, y + 1, z):
++            v_off = atomic_add(s_vertex_offset, 4)
++            i_off = atomic_add(s_index_offset, 6)
+             # Write 4 vertices with normal (0.0, 1.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to vOffset and iOffset
++            # Write 6 indices [0,1,2, 2,3,0]
+ 
+-        # -Y
+-        if not hasVoxel(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y - 1, gl_GlobalInvocationID.z):
+-            vOffset = atomicAdd(sVertexOffset, 4)
+-            iOffset = atomicAdd(sIndexOffset, 6)
++        # Face Extraction (-Y)
++        if not hasVoxel(x, y - 1, z):
++            v_off = atomic_add(s_vertex_offset, 4)
++            i_off = atomic_add(s_index_offset, 6)
+             # Write 4 vertices with normal (0.0, -1.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to vOffset and iOffset
++            # Write 6 indices [0,1,2, 2,3,0]
+ 
+-        # +Z
+-        if not hasVoxel(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, gl_GlobalInvocationID.z + 1):
+-            vOffset = atomicAdd(sVertexOffset, 4)
+-            iOffset = atomicAdd(sIndexOffset, 6)
++        # Face Extraction (+Z)
++        if not hasVoxel(x, y, z + 1):
++            v_off = atomic_add(s_vertex_offset, 4)
++            i_off = atomic_add(s_index_offset, 6)
+             # Write 4 vertices with normal (0.0, 0.0, 1.0)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to vOffset and iOffset
++            # Write 6 indices [0,1,2, 2,3,0]
+ 
+-        # -Z
+-        if not hasVoxel(gl_GlobalInvocationID.x, gl_GlobalInvocationID.y, gl_GlobalInvocationID.z - 1):
+-            vOffset = atomicAdd(sVertexOffset, 4)
+-            iOffset = atomicAdd(sIndexOffset, 6)
++        # Face Extraction (-Z)
++        if not hasVoxel(x, y, z - 1):
++            v_off = atomic_add(s_vertex_offset, 4)
++            i_off = atomic_add(s_index_offset, 6)
+             # Write 4 vertices with normal (0.0, 0.0, -1.0)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to vOffset and iOffset
++            # Write 6 indices [0,1,2, 2,3,0]
+ 
+     # Synchronize to ensure all atomics are complete
+-    barrier()
++    # barrier()
+ 
+     # Thread 0 writes back feedback
+-    if gl_LocalInvocationID.x == 0 and gl_LocalInvocationID.y == 0 and gl_LocalInvocationID.z == 0:
+-        uChunkFeedback[sChunkIndex].vertexOffset = sVertexOffset
+-        uChunkFeedback[sChunkIndex].indexOffset = sIndexOffset
+-        uChunkFeedback[sChunkIndex].vertexCount = sVertexCount
+-        uChunkFeedback[sChunkIndex].indexCount = sIndexCount
++    if workgroup_id == 0:
++        chunk_feedback[chunk_idx].vertexOffset = s_vertex_offset[0]
++        chunk_feedback[chunk_idx].indexOffset = s_index_offset[0]
++        chunk_feedback[chunk_idx].vertexCount = s_vertex_count[0]
++        chunk_feedback[chunk_idx].indexCount = s_index_count[0]
+ ```
+ 
+@@ -161,14 +178,6 @@
+ ### Edge Cases and Pitfalls
+ *   **Boundary Check:** The `hasVoxel` function explicitly checks if coordinates are within $[0, CHUNK\_SIZE)$ to prevent out-of-bounds access when checking neighbors at chunk edges [S1, unofficial].
+-*   **Atomic Contention:** High density of solid voxels near chunk boundaries can lead to atomic contention on `sVertexOffset` and `sIndexOffset`.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels in the chunk, as each voxel is processed by one thread.
+-*   **Memory Complexity:** $O(V + I)$ where $V$ is the number of vertices and $I$ is the number of indices generated. The vertex buffer size is $10 \times V$ floats, and the index buffer size is $6 \times I$ integers.
+-*   **Performance:** Performance depends on the density of the voxel grid and the number of exposed faces. High-density grids with few exposed faces may have lower throughput due to atomic contention and memory bandwidth limits.
+-*   **Strengths:** Parallel processing on GPU, simple logic, no need for complex data structures like linked lists or hash maps for mesh generation.
+-*   **Limitations:** Generates non-manifold geometry if not careful with shared edges (though this implementation generates quads per face, which may result in duplicate vertices for shared faces if not deduplicated). The method does not handle internal faces, which is correct for surface extraction.
+-*   **When to use:** When real-time voxel mesh generation is required on the GPU, and the voxel grid is dense.
+-*   **When not to use:** When memory bandwidth is a bottleneck and the voxel grid is sparse, as the atomic operations and buffer writes can be expensive.
+ 
+ ## Background

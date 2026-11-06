@@ -1,0 +1,187 @@
+# Point-Based Light Transport in Participating Media
+
+Also called: PBGI for homogeneous media with refractive boundaries, Point-Based Global Illumination for Participating Media, Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries
+
+## Overview
+Point-Based Light Transport in Participating Media is a global illumination method for homogeneous translucent materials with refractive boundaries [S1]. It decorrelates scene complexity from illumination computation by replacing the scene with a shaded point cloud (volume samples) for indirect illumination, while keeping polygonal representation for direct visibility [S1]. It computes single, double, and multiple scattering contributions separately [S1]. Unlike methods exploiting screen-space coherence (e.g., ray-marching through light propagation volumes, volumetric shadow mapping) which target media without refractive interfaces, this method targets materials enclosed inside a refractive interface which breaks screen-space coherence [S1].
+
+## How it works
+The method follows the two-pass structure of photon-based rendering: photon tracing (preprocessing) to store light information, and radiance estimation (rendering) to gather contributions [S1]. The core principle is estimating scattered radiance $L_s(x', \omega_0)$ as a sum of contributions from stored photon power, weighted by a kernel function [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   Geometry of the translucent object (polygonal mesh).
+*   Material properties: index of refraction $\eta$, scattering coefficient $\sigma_s$, absorption coefficient $\sigma_a$, phase function $p(\hat{i}, \hat{o})$ [S1].
+*   Light source positions and intensities.
+*   Camera position and viewing rays.
+
+**Outputs:**
+*   Radiance values for each camera ray, composed of direct, single, double, and multiple scattering contributions [S1].
+
+### Data Structures
+
+**Light Surface Sample:**
+*   `position`: $x_s$ (3D vector)
+*   `intensity`: $I_s$ (scalar, diffuse intensity)
+
+**Volume Sample:**
+*   `position`: $x_v$ (3D vector)
+*   `incoming_direction`: $d_v$ (3D vector)
+*   `incoming_radiance`: $I_v$ (scalar)
+*   `surface_area`: $S_v$ (scalar, area around the surface sample at the origin of the ray)
+*   `volume_of_influence`: $V_v$ (defined by $S_v$ and an interval along the ray, approximated by an Oriented Bounding Box (OBB)) [S1]
+
+**Octree Node (for Volume Samples):**
+*   `children`: Array of 8 child nodes (or null if leaf)
+*   `average_position`: 3D vector
+*   `average_direction`: 3D vector
+*   `direction_variance`: Scalar
+*   `incoming_radiance`: Scalar
+*   `bounding_box`: OBB
+*   `leaf_area`: $A_v$ (Area of the octree leaf cell, only for leaves) [S1]
+
+### Preprocessing Steps
+
+1.  **Place Light Surface Samples:** Place blue-noise surface samples on the object surface. These store indirect diffuse illumination and indirect illumination from inside the material after multiple bounces [S1].
+2.  **Build Surface Hierarchy:** Build an octree spatial hierarchy over the light surface samples for future queries [S1].
+3.  **Handle Refractive Interfaces (Optional):** If the media is enclosed in transparent layers, place blue-noise samples on the outer layer, connect to the light source, trace the refracted ray through transparent layers to the participating media, and remove samples too close to others to ensure minimal distance [S1].
+4.  **Handle Glossy Interfaces (Optional):** If enclosed by glossy reflective interfaces, shoot photons from the light source, importance sample outgoing glossy reflection direction, store photons interacting with the media surface, and for each blue-noise surface sample, average the direction and radiance of close photons [S1].
+5.  **Create Volume Samples:** For each surface sample, connect to the light source, compute the refracted ray inside the material (including internal reflections on the enclosing surface), and sample the ray to create volume samples [S1]. Store $x_v, d_v, I_v, S_v$ for each volume sample [S1].
+6.  **Build Volume Octree (Top-Down):** Start with the bounding box of the material as the root. Subdivide regularly until there are at most 8 volume samples per cell [S1].
+7.  **Build Volume Octree (Bottom-Up):** Compute average position, direction, direction variance, and incoming radiance for each cell using values from its children [S1].
+8.  **Compute Density Factor:** For each volume sample $v$, compute the dimensionless density factor $k_v$:
+    $$ k_v = \left( \text{clamp} \left( \frac{A_v}{S_v}, 1, 8 \right) \times \text{clamp}(\sigma_t, 0.3, 0.8) \right)^2 $$
+    where $A_v$ is the area of the octree leaf cell containing $v$, $S_v$ is the surface area around the sample point, and $\sigma_t = \sigma_s + \sigma_a$ is the extinction coefficient [S1].
+
+### Rendering Steps
+
+1.  **Shoot Camera Rays:** Shoot rays from the camera. For rays reaching the translucent object, compute the refracted ray inside the object and its direction $\hat{o}$ [S1].
+2.  **Place Sample Points:** Place sample points $P_k$ on the camera ray inside the object, defined by depth $d_k$ measured from the entry point [S1].
+    *   If the camera ray reaches the media directly or after specular events, place $k_{max}$ samples with depth varying exponentially (more samples near the surface) [S1].
+    *   If the camera ray reaches the media after diffuse or glossy interactions, sample randomly with a smaller amount of samples [S1].
+3.  **Compute Single Scattering:**
+    *   Traverse the volume octree top-down. Discard nodes not intersected by the camera ray [S1].
+    *   At leaf nodes, test the direction variance and phase function.
+    *   If both are below a threshold, gather the leaf's aggregated contribution.
+    *   Otherwise, gather individual sample contributions from the leaf's volume samples [S1].
+    *   The contribution of a volume sample $v$ to a point $P_k$ is weighted by $k_v$ and the kernel function based on distance [S1].
+4.  **Compute Double Scattering:** Traverse the spatial hierarchy to obtain the best tree cut and gather contributions from these nodes [S1].
+5.  **Compute Multiple Scattering:** Use a precomputed table storing the resulting contribution for multiple scattering effects [S1].
+6.  **Compute Indirect Lighting:** Use the surface samples hierarchy to add contributions from indirect lighting and multiple scattering after several bounces on the refractive surface [S1].
+7.  **Combine:** Sum the contributions from single, double, multiple scattering, and indirect lighting [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def preprocess(object_geometry, material, lights):
+    # Step 1: Place blue-noise surface samples
+    surface_samples = place_blue_noise_samples(object_geometry)
+    
+    # Step 2: Build surface hierarchy
+    surface_octree = build_octree(surface_samples)
+    
+    # Step 3 & 4: Handle interfaces (simplified for homogeneous media)
+    # If refractive/glossy interfaces exist, adjust surface samples accordingly
+    # [See notes for detailed interface handling]
+    
+    # Step 5: Create volume samples
+    volume_samples = []
+    for sample in surface_samples:
+        # Connect to light source, compute refracted ray, sample it
+        refracted_ray = compute_refracted_ray(sample.position, lights, material.eta)
+        # Sample along the ray, including internal reflections
+        samples_along_ray = sample_ray(refracted_ray, object_geometry, material)
+        for v_sample in samples_along_ray:
+            v_sample.surface_area = sample.surface_area # S_v
+            volume_samples.append(v_sample)
+            
+    # Step 6 & 7: Build volume octree
+    volume_octree = build_volume_octree(volume_samples)
+    
+    # Step 8: Compute density factors
+    sigma_t = material.sigma_s + material.sigma_a
+    for leaf in volume_octree.leaves():
+        for v_sample in leaf.samples:
+            A_v = leaf.area
+            S_v = v_sample.surface_area
+            ratio = A_v / S_v
+            clamped_ratio = clamp(ratio, 1, 8)
+            clamped_sigma = clamp(sigma_t, 0.3, 0.8)
+            v_sample.density_factor = (clamped_ratio * clamped_sigma) ** 2
+            
+    return surface_octree, volume_octree
+
+def render(camera_ray, volume_octree, surface_octree, material):
+    # Step 1: Compute refracted ray inside object
+    entry_point, refracted_direction = compute_refraction(camera_ray, material.eta)
+    
+    # Step 2: Place sample points
+    if camera_ray.is_direct_or_specular():
+        depths = exponential_sample(k_max, entry_point)
+    else:
+        depths = random_sample(fewer_samples, entry_point)
+        
+    total_radiance = 0.0
+    
+    for depth in depths:
+        point = entry_point + depth * refracted_direction
+        
+        # Step 3: Single Scattering
+        single_scattering = compute_single_scattering(point, refracted_direction, volume_octree)
+        
+        # Step 4: Double Scattering
+        double_scattering = compute_double_scattering(point, refracted_direction, volume_octree)
+        
+        # Step 5: Multiple Scattering
+        multiple_scattering = get_multiple_scattering_contribution(point, material)
+        
+        # Step 6: Indirect Lighting
+        indirect_lighting = compute_indirect_lighting(point, surface_octree)
+        
+        total_radiance += single_scattering + double_scattering + multiple_scattering + indirect_lighting
+        
+    return total_radiance
+
+def compute_single_scattering(point, direction, octree):
+    contribution = 0.0
+    traverse_octree(octree, point, direction, contribution)
+    return contribution
+
+def traverse_octree(node, point, direction, contribution):
+    if not node.bounding_box.intersects_ray(point, direction):
+        return
+        
+    if node.is_leaf():
+        # Test direction variance and phase function
+        if node.direction_variance < threshold and phase_function(node.average_direction, direction) < threshold:
+            contribution += node.aggregated_contribution
+        else:
+            for v_sample in node.samples:
+                # Weight by density factor and kernel
+                dist = distance(point, v_sample.position)
+                kernel = evaluate_kernel(dist)
+                contribution += v_sample.incoming_radiance * v_sample.density_factor * kernel
+    else:
+        for child in node.children:
+            traverse_octree(child, point, direction, contribution)
+```
+
+### Edge Cases and Pitfalls
+*   **Concave Geometries:** The algorithm cannot handle multiple refractions caused by concave geometries. It only handles light paths with a single refraction on the camera ray and a single refraction on the light ray [S1].
+*   **Precision:** The density factor clamping prevents individual samples from dominating the contribution, avoiding artifacts in high-density regions (volume caustics) [S1].
+*   **Boundary Conditions:** The method assumes homogeneous media. Non-homogeneous media are not supported [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing step involves placing samples and building octrees, which is generally $O(N \log N)$ where $N$ is the number of samples. Rendering involves traversing the octree for each sample point on the camera ray. The complexity depends on the tree depth and the number of intersected nodes.
+*   **Memory Complexity:** The memory footprint is determined by the number of volume and surface samples stored in the octrees. The method provides reduced memory footprints compared to state-of-the-art algorithms [S1].
+*   **Measured Performance:** The GPU implementation yields 30 fps when moving the viewpoint and 25 fps when editing the light position or material parameters [S1].
+*   **Strengths:** Handles curved surfaces and triangles with interpolated normals, unlike methods that require flat surfaces for interactive framerates [S1]. Supports editing of material properties and light position, unlike methods with fixed illumination [S1]. Computes both single and multiple scattering effects, targeting a large range of translucent materials from almost transparent to almost opaque [S1].
+*   **Limitations:** Cannot handle multiple refractions from concave geometries [S1]. Accuracy is limited by the number of samples and the spatial hierarchy resolution [S1].
+
+## Background
+The method was introduced by [S1] as a Point-Based Global Illumination method for light transport on homogeneous translucent materials with refractive boundaries. It addresses the difficulty of simulating illumination inside translucent materials where refraction can focus light deep inside, creating volume caustics. The method separates single, double, and multiple scattering effects to accurately capture their different appearances: single scattering results in localized high-frequency volume caustics, double scattering is blurrier but still localized, and multiple scattering is mostly diffuse [S1].
+
+## Sources
+[S1] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26

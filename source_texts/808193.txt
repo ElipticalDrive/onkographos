@@ -1,0 +1,1208 @@
+RPC-GS: Gaussian Splatting with native RPC
+Rendering for Satellite Imagery
+arXiv:2606.06690v1 [cs.CV] 4 Jun 2026
+Valentin Wagner, Sebastian Bullinger, Christoph Bodensteiner, Michael Arens
+Fraunhofer Institute of Optronics, System Technologies and Image Exploitation
+Ettlingen, Germany
+{firstname.lastname}@iosb.fraunhofer.de
+Abstract
+We present RPC-GS, the first Gaussian Splatting framework for satellite imagery
+that operates natively with Rational Polynomial Camera (RPC) models. The RPC
+model is the de facto standard for representing the complex imaging geometry
+of modern pushbroom satellite sensors. To simplify rendering, prior satellite
+Gaussian Splatting methods replace the RPC model with perspective or affine
+camera approximations, leading to geometric errors during reconstruction. RPCGS avoids these approximations by projecting Gaussian means and covariances
+directly through the RPC model during the splatting process. We embed the RPC
+model in a chain of carefully selected geo-coordinate transformations representing
+a mapping from splatting-suitable scene coordinates to image coordinates. To
+map the Gaussian covariance matrices, we derive a numerically robust Jacobianbased covariance projection for the (partially nonlinear) coordinate transformations.
+Since RPCs lack an explicit notion of camera depth, we integrate a metric ray-based
+depth formulation. We benchmark RPC, perspective, and affine camera models
+in a unified framework, with our native RPC renderer consistently achieving the
+lowest reconstruction error on leading satellite benchmark datasets, improving
+mean altitude error over perspective and affine approximations by 29.6% and
+63.8% on DFC2019, and by 9.9% and 37.9% on IARPA2016. We release our code
+to support future research of Gaussian Splatting in the satellite imaging domain.
+1
+Introduction
+Novel methods for view synthesis such as Gaussian Splatting have recently achieved impressive
+results for 3D reconstruction from multi-view imagery [Aira et al., 2024, Bournez et al., 2025, Zhang
+et al., 2025, Lee et al., 2025]. Since Gaussian Splatting is natively designed for use with perspective
+camera models, its applicability to satellite imagery is limited. Satellite imaging typically relies on
+the non-linear Rational Polynomial Camera (RPC) [Tao and Hu, 2001] to capture complex imaging
+effects caused by push-broom camera systems, while also accounting for effects such as atmospheric
+distortion and Earth curvature.
+Prior Gaussian Splatting methods in the satellite domain address this mismatch by approximating the
+individual RPC models with either perspective [Lee et al., 2025, Zhang et al., 2025, Bai et al., 2025]
+or affine [Aira et al., 2024, Bournez et al., 2025] camera models. This approximation is convenient,
+but the substitution of complex RPC models with simple perspective or affine camera models
+inherently introduces systematic errors in the projection and covariance splatting process. Moreover,
+perspective approximations often require skew correction by warping the input images, introducing
+an additional error source [Zhang et al., 2019]. Consequently, replacing complex RPC models with
+simple approximations potentially introduces errors that degrade the geometry reconstructed by
+Gaussian Splatting.
+Preprint.
+1.1
+Contributions
+We eliminate this error source by introducing the first Gaussian Splatting renderer for satellite imagery
+that operates natively with RPC models. Specifically, our main contributions are:
+(A) Integrate the RPC model into a carefully chosen geo-coordinate transformation chain, enabling the
+mapping of splatting-compatible normalized local scene coordinates to global geodetic coordinates
+and their projection into image coordinates via the RPC model.
+(B) Derive a numerically robust, RPC-native covariance projection using Jacobians. In particular, for
+the nonlinear transformation from global Cartesian coordinates to ellipsoidal geodetic coordinates,
+we obtain a solver-independent Jacobian by inverting the local differential of the forward mapping.
+(C) Introduce a metric ray-based depth formulation for RPC cameras, enabling RPC-consistent
+front-to-back alpha compositing despite the absence of an inherent depth coordinate in RPC models.
+(D) Provide the first unified Gaussian Splatting benchmark of RPC, perspective, and affine camera
+models for satellite imagery, enabling a direct comparison of camera-model choices. Our RPC-native
+renderer achieves the lowest reconstruction error, reducing mean altitude error over perspective and
+affine approximations by 29.6% and 63.8% on DFC2019 [Le Saux et al., 2019], and by 9.9% and
+37.9% on IARPA2016 [Bosch et al., 2016], respectively.
+2
+Related Work
+Existing satellite Gaussian Splatting [Kerbl et al., 2023] methods address the discrepancy between
+the standard Gaussian Splatting renderer and satellite RPC imagery by replacing RPC projections
+with simpler surrogate camera models. We categorize these approaches based on the type of camera
+model used for approximation; the camera models themselves and their introduced approximation
+errors are analyzed in detail in Section 3.
+Recent works approximate the RPC model using perspective cameras, enabling the use of the original
+3DGS-renderer [Kerbl et al., 2023]. Shadow-GS [Zhang et al., 2025] models geometric shadows
+through a ray-casting procedure optimized for Gaussian Splatting. Skyfall-GS [Lee et al., 2025]
+reduces artifacts in off-nadir views using diffusion-guided iterative refinement. Sat-GS [Bai et al.,
+2025] models view-dependent appearance variations and transient objects in satellite imagery using
+uncertainty masks.
+Alternatively, EO-GS [Aira et al., 2024] adapts Gaussian Splatting to satellite data by approximating
+the RPC model with an affine camera model, adapting the 3DGS-renderer accordingly. The authors
+additionally model shadows by detecting geometric occlusions in a secondary sun-view rendering
+pass. EO-GS++ [Bournez et al., 2025] extends this approach by using only panchromatic images,
+evaluating the impact of color information on reconstruction quality.
+3
+Camera models for satellite Gaussian Splatting
+In this section, we examine camera models for Gaussian splatting of satellite images. We begin with
+the Rational Polynomial Camera (RPC) model, the de facto standard for describing the projection
+geometry of Earth observation satellites [Gao et al., 2021], and then consider two common approximations based on perspective and affine camera models. By quantifying the projection errors induced
+by these approximations, we motivate a native RPC formulation for Gaussian Splatting.
+3.1
+Rational Polynomial Camera
+The RPC (Rational Polynomial Camera) model is the de facto standard representation used by earth
+observation satellite image vendors [Gao et al., 2021], enabling complex imaging systems to be
+modeled without satellite-specific camera models. Notably, the RPC model does not correspond to a
+physically grounded imaging process but instead serves as a purely mathematical approximation of
+the mapping P : (λ, ϕ, h) 7→ (r, c) from geodetic coordinates (longitude λ, latitude ϕ, ellipsoidal
+altitude h) to image coordinates (r, c). Specifically, the normalized geodetic coordinates (λ̃, ϕ̃, h̃) are
+mapped to normalized image coordinates (r̃, c̃) using four polynomials pm [Tao and Hu, 2001]:
+r̃ = p0 (λ̃, ϕ̃, h̃)/p1 (λ̃, ϕ̃, h̃),
+c̃ = p2 (λ̃, ϕ̃, h̃)/p3 (λ̃, ϕ̃, h̃).
+(1)
+2
+For numerical stability, each geodetic input and image output coordinate is normalized componentwise
+using the corresponding offset and scale parameters specified by the RPC model. The image
+coordinates (r, c) are then recovered by applying the corresponding inverse normalization. Each
+polynomial pm is a cubic polynomial with 20 coefficients:
+X
+(m)
+pm (λ̃, ϕ̃, h̃) =
+cijk λ̃i ϕ̃j h̃k .
+(2)
+i,j,k≥0,
+i+j+k≤3
+(m)
+Here, i, j, k index the powers of the normalized coordinates, and cijk is the corresponding RPC
+coefficient for polynomial pm . This rational form provides a flexible sensor model for satellite
+imagery without requiring an explicit physical camera model, while capturing complex imaging
+effects such as optical distortion, Earth curvature, atmospheric refraction, and camera motion. [Tao
+and Hu, 2001]
+3.2
+Approximation as pinhole cameras
+Previous satellite-adapted Gaussian Splatting pipelines [Lee et al., 2025, Zhang et al., 2025, Bai
+et al., 2025] locally approximate the RPC camera model using a perspective pinhole camera, i.e. a
+central projection model in which all rays pass through a single camera center. The main motivation
+is of practical nature, since standard Gaussian Splatting pipelines are designed for conventional
+imagery captured by perspective cameras. In practice, this approximation is commonly obtained via
+SatelliteSfM [Zhang et al., 2019].
+img M
+For each view, a set of 3D–2D correspondences {(xenu
+)}i=1 is constructed by sampling a finite
+i , xi
+grid of M points in a local East–North–Up (ENU) coordinate system and projecting the points to
+image coordinates using the RPC model. Using a standard direct linear transform allows to estimate
+a projection matrix P ∈ R3×4 satisfying ximg ∼ P xenu for the sampled correspondences. This is
+followed by a decomposition into intrinsics K, rotation R and translation t using a QR decomposition
+with sign and scale normalization.
+Due to the large distances involved, the camera centers are positioned far from the scene, leading to
+large absolute depth values with limited relative variation. Additionally, the resulting solution yields
+a full intrinsic matrix K that includes a non-zero skew parameter. Since Gaussian Splatting does
+not natively support pinhole cameras with skew, SatelliteSfM [Zhang et al., 2019] applies a skew
+correction by warping the input images, effectively converting the camera to one with zero skew.
+This step is not lossless, as it shifts visible scene content outside the image bounds and introduces
+interpolation artifacts.
+3.3
+Approximation as affine cameras
+EOGS Aira et al. [2024] instead approximate the RPC camera using an affine transformation A :
+x ∈ R3 7→ Ax + a ∈ R2 , where x ∈ R3 is a 3D point, A ∈ R2×3 is the affine projection, and
+a ∈ R2 is a translation offset. The authors argue that this parallel projection is well suited to satellite
+imagery because of the large camera-to-scene distances, while also offering improved computational
+efficiency. Since the affine camera model does not encode depth, EOGS instead uses inverse altitude.
+While this is reasonable for nadir views, it can lead to incorrect depth ordering in off-nadir scenes,
+especially around tall buildings.
+Building on the affine formulation, the authors additionally propose an altitude-dependent shadow
+computation implemented via an additional sun-view rendering pass. Although the affine formulation
+is simpler than the perspective approximation in Section 3.2, practical use requires modifying the
+Gaussian mean and covariance projection inside of the Gaussian Splatting renderer.
+3.4
+Limitations of RPC approximation
+Perspective and affine cameras provide two principled approximations to the RPC model, corresponding respectively to central projection and parallel projection. Although both models approximate the
+RPC mapping locally, this approximation introduces a fundamental model mismatch, since neither a
+pinhole nor an affine camera can exactly represent the nonlinear image formation encoded by the
+RPC model. We evaluate the resulting projection error explicitly in Table 1, reporting the mean
+3
+Table 1: Mean approximation error in pixels when replacing the RPC camera model with either
+a perspective or an affine camera model. The error increases rapidly with scene size. Results are
+averaged over all 50 images of the IARPA2016 dataset [Bosch et al., 2016].
+Image size (pixels)
+2562
+5122
+10242
+20482
+40962
+81922
+163842
+Perspective
+Affine
+0.00231
+0.00273
+0.00514
+0.00656
+0.01540
+0.02221
+0.05578
+0.08519
+0.21753
+0.33734
+0.86486
+1.34605
+3.45615
+5.37837
+projection error for varying scene extents over all 50 images of the IARPA2016 dataset [Bosch et al.,
+2016]. The error is small for limited image regions but grows rapidly with scene size. At larger
+scales, it becomes substantial: 3.5 pixels at a GSD of 0.31 m corresponds to about 1 m horizontal
+reconstruction error from camera model approximation alone.
+Motivated by these approximation errors, we propose a native RPC rendering formulation for Gaussian
+Splatting that uses the sensor model directly. This removes the need for camera conversion and image
+warping, while avoiding a source of systematic geometric error that existing approaches inherit from
+surrogate camera models.
+4
+RPC-GS: Native RPC Gaussian Splatting
+Gaussian Splatting [Kerbl et al., 2023] represents a 3D scene with a set of Gaussian primitives, each
+parameterized by a mean µ3D , covariance Σ3D , opacity α, and color c. The primitives are optimized
+from multi-view imagery via differentiable rendering.
+The Gaussian Splatting rendering process is divided into two separate stages. The first stage projects
+the 3D Gaussians (with mean µ3D and covariance Σ3D ) into image coordinates as µ2D and Σ2D . The
+depth d is defined by the position of the Gaussian mean µ3D along the camera viewing direction. In
+the second stage (rasterization), the Gaussians are sorted front-to-back by the depth d and aggregated
+using traditional alpha compositing to render the image.
+RPC-GS retains this two-stage rendering structure, but replaces the standard perspective projection
+of Gaussian means and covariances with an RPC-native projection embedded in a geo-coordinate
+transformation chain. We further introduce a metric, ray-based depth for RPC-consistent front-to-back
+ordering during rasterization. An overview of the proposed RPC-GS pipeline is shown in Figure 1.
+4.1
+Coordinate System Transformations for Gaussian Splatting of Satellite Data
+RPC models are typically defined in geodetic coordinates (i.e. longitude λ, latitude ϕ, and ellipsoidal
+altitude h). Due to the approximately ellipsoidal shape of the Earth, geodetic coordinates are defined
+with respect to a reference ellipsoid such as WGS84 [NGA, 2014]. This results in a nonlinear
+representation with non-uniform scaling. Equal changes in longitude, latitude, and altitude therefore
+do not correspond to equal physical distances, making Gaussian means and covariances poorly
+conditioned and less geometrically interpretable.
+A metric alternative to geodetic coordinates is the Earth-centered, Earth-Fixed (ECEF) coordinate
+system. It is defined as a global Cartesian frame, with its origin at the center of mass, rotating with
+the earth. ECEF coordinates are expressed at the scale of Earths radius (around 6.4 · 106 meters for
+WGS84), resulting in poor numerical conditions [Leick et al., 2015]. Although this may be mitigated
+by subtracting a local origin and applying an affine normalization, the resulting frame still inherits
+the globally fixed ECEF axis alignment.
+Instead, we parameterize the Gaussians in a local East-North-Up (ENU) frame anchored at an observer
+point (λo , ϕo , ho ). The East-North plane is set parallel to the tangent plane of the reference ellipsoid
+at (λo , ϕo , 0), yielding a local Cartesian frame adapted to the scene geometry. Finally, we normalize
+the ENU coordinates into a normalized scene frame to improve numerical conditioning and ensure
+stable, well-scaled gradients during reconstruction. The chain of coordinate systems is therefore
+defined as:
+Scene → ENU → ECEF → Geodetic → Image.
+(3)
+4
+Figure 1: Overview of RPC-GS. We embed satellite-domain native RPC models into the Gaussian
+Splatting projection pipeline via carefully chosen geo-coordinate transformations. We derive a
+numerically robust Jacobian-based covariance projection and define a metric ray-based depth, enabling
+RGB and depth rendering using alpha compositing.
+4.2
+Gaussian Mean Projection
+To project the Gaussian mean µ from the scene frame into image coordinates, we need to convert
+its normalized coordinates µscene into the global geodetic frame µgeodetic and project the resulting
+values into image coordinates using the RPC projection function P from Section 3.1. The individual
+steps are:
+Scene → ENU
+Reverse center shift c and scale s via µenu = 1s µscene + c.
+ENU → ECEF The ENU observer point (λo , ϕo , ho ) is converted to the corresponding ECEF
+position xecef
+using the WGS84 ellipsoid. Given a Gaussian center µenu in the metric ENU frame,
+o
+the corresponding ECEF coordinate is obtained via an affine transformation consisting of a rotation
+Recef←enu (ϕo , λo ) and a translation by xecef
+[Torge and Müller, 2012].
+o
+µecef = xecef
++ Recef←enu (ϕo , λo ) µenu
+o
+(4)
+ECEF → Geodetic We first define the forward Geodetic → ECEF mapping before discussing
+the inverse ECEF → Geodetic transformation. The forward mapping between geodetic coordinates
+(λµ , ϕµ , hµ ) and ECEF coordinates (xµ , yµ , zµ ) is given by
+  
+
+(Nϕµ + hµ ) cos ϕµ cos λµ
+xµ
+ yµ  =  (Nϕµ + hµ ) cos ϕµ sin λµ  ,
+(5)
+
+zµ
+Nϕµ (1 − e2 ) + hµ sin ϕµ
+where Nϕµ = a/(1 − e2 sin2 ϕµ )1/2 denotes the radius of curvature in the prime vertical, a is the
+semi-major axis radius, and e is the first eccentricity of the WGS84 ellipsoid, quantifying its deviation
+from a perfect sphere [Subirana et al., 2011b]. The inverse ECEF → Geodetic mapping is nonlinear,
+due to the dependence of both the trigonometric terms and the curvature radius Nϕµ on the latitude ϕµ
+in Equation (5). We therefore compute the geodetic Gaussian center µgeodetic using the non-iterative,
+closed-form method of You [2000].
+Geodetic → Image Project µgeodetic onto the image plane using the RPC model with
+P(µgeodetic ) = µimage = (r, c).
+4.3
+Gaussian Covariance Projection
+To splat the covariance Σ3D from scene coordinates into the 2D image, standard Gaussian Splatting
+[Kerbl et al., 2023] applies a linear world-to-camera view transform W and a local, affine approximation of the projective transformation in the form of its Jacobian Jµ centered on the Gaussian mean
+µ3D [Zwicker et al., 2001].
+Σimage = Jµ W Σ3D W T JµT
+(6)
+5
+In contrast, in an RPC-based formulation, there is no explicit camera-coordinate frame. We instead
+view the Scene → Image mapping as a composition of coordinate transformations and propagate the
+covariance using the corresponding Jacobian J image←scene .
+Σimage = J image←scene Σscene (J image←scene )T .
+(7)
+image←scene
+Here, J
+is the product of the Jacobians of the Scene → ENU → ECEF → Geodetic →
+Image transformation chain.
+J image←scene = Jµimage←geodetic Jµgeodetic←ecef J ecef←enu J enu←scene
+(8)
+To compute the Jacobians, we solve the affine transformations (i.e. Scene → ENU and ENU → ECEF)
+exactly, and locally linearize the nonlinear transformations (i.e. ECEF → Geodetic and Geodetic →
+Image) at the Gaussian mean µ, denoted by the subscript µ . Analog to standard Gaussian Splatting
+Kerbl et al. [2023], we drop the third row and column of Σimage to obtain the final 2 × 2 covariance
+Σ2D .
+Scene → ENU
+The Jacobian J enu←scene is the inverse scaling given by 1s I3 .
+ENU → ECEF As the metric ENU→ ECEF transformation is a rigid-body-transformation, the
+Jacobian J ecef←enu is given by the constant rotation matrix Recef←enu (λo , ϕo ) based on the ENU
+observer location (λo , ϕo ).
+ECEF → Geodetic To avoid the differentiation of the nonlinear ECEF → Geodetic inverse solver
+in Section 4.2, we obtain the inverse Jacobian from the local differential of the forward Geodetic
+→ ECEF map [Torge and Müller, 2012]. This gives a solver-independent and numerically stable
+first-order derivative at the Gaussian mean µgeodetic = (λµ , ϕµ , hµ ).
+To allow for easier differentiation, we define a local orthonormal basis (eλµ , eϕµ , ehµ ), corresponding
+to the east, north, and ellipsoidal-up axes expressed in ECEF coordinates at the Gaussian mean
+µgeodetic [Subirana et al., 2011a].
+"
+#
+"
+#
+"
+#
+− sin λµ
+− sin ϕµ cos λµ
+cos ϕµ cos λµ
+eλµ = cos λµ ,
+eϕµ = − sin ϕµ sin λµ ,
+ehµ = cos ϕµ sin λµ
+(9)
+0
+cos ϕµ
+sin ϕµ
+Differentiating the forward Geodetic → ECEF map in Equation (5) yields the local linear map
+Jecef←geodetic
+. A step-by-step derivation is provided in Section A.1.
+µ
+
+
+
+ecef←geodetic
+Jµ
+= eλµ eϕµ ehµ diag (Nϕµ + hµ ) cos ϕµ , Mϕµ + hµ , 1
+(10)
+|
+{z
+}|
+{z
+}
+Rµ
+Hµ
+Here Nϕµ and Mϕµ denote the prime-vertical and meridional radii of curvature of the WGS84
+reference ellipsoid evaluated at ϕµ [NGA, 2014]. The matrix Hµ converts geodetic coordinate perturbations, into local East-North-Up metric displacements, and Rµ rotates these local components into
+ECEF coordinates. Since Rµ is orthonormal (i.e. Rµ−1 = RµT ), the inverse Jacobian Jµgeodetic←ecef
+is easily obtained through inversion:
+
+
+
+ e⊤
+λµ
+1
+1
+⊤
+
+(11)
+Jgeodetic←ecef
+= H−1
+,
+, 1 e⊤
+ϕµ
+µ
+µ Rµ = diag
+(Nϕµ + hµ ) cos ϕµ Mϕµ + hµ
+⊤
+ehµ
+Geodetic → Image Given the RPC definition in Equation (1), the derivatives of the normalized
+row and column coordinates are obtained by differentiating the corresponding polynomials. For
+normalized row r̃ = p0 /p1 the quotient rule gives following derivation:
+∂ r̃
+∂(p0 /p1 )
+p1 ∂p0 /∂ µ̃geodetic − p0 ∂p1 /∂ µ̃geodetic
+=
+=
+(12)
+∂ µ̃geodetic
+∂ µ̃geodetic
+p21
+The derivative of the normalized column coordinate c̃ = p2 /p3 is obtained analogously. Stacking the
+derivatives of r̃ and c̃ yields the Jacobian of the RPC projection w.r.t. normalized geodetic and image
+coordinates The Jacobian with respect to unnormalized geodetic and image coordinates follows from
+the RPC normalization parameters (i.e. rscale , cscale , λscale , ϕscale , hscale )
+
+
+
+
+1
+1
+1
+∂ r̃/∂ λ̃ ∂ r̃/∂ ϕ̃ ∂ r̃/∂ h̃
+Jµimage←geodetic = diag(rscale , cscale )
+diag
+,
+,
+∂c̃/∂ λ̃ ∂c̃/∂ ϕ̃ ∂c̃/∂ h̃
+λscale ϕscale hscale
+(13)
+6
+4.4
+RPC Ray-based Depth
+Standard Gaussian Splatting [Kerbl et al., 2023] orders projected Gaussian means µ by their z-axis
+depth in camera coordinates for front-to-back alpha compositing. However, the RPC projection P
+(c.f . Section 3.1) maps global geodetic coordinates directly to image coordinates and does not provide
+an explicit notion of depth. We therefore introduce a ray-based depth parameterization inspired by
+SatNeRF [Marí et al., 2022]. For each pixel (r, c), we determine two geodetic points xgeodetic
+=
+min
+=
+(λ
+,
+ϕ
+,
+h
+)
+using
+the
+inverse
+RPC
+projection
+function
+(λmin , ϕmin , hmin ) and xgeodetic
+max
+max
+max
+max
+such that
+P(xgeodetic
+) = P(xgeodetic
+) = (r, c).
+(14)
+max
+min
+These points define a viewing ray in metric ENU coordinates:
+r(t) = xenu
+max + td,
+enu
+enu
+enu
+d = (xenu
+min − xmax ) / ||xmin − xmax ||2
+(15)
+Given a Gaussian mean µenu , we define its depth d as the scalar for which r(d) = µenu . This yields
+a metric depth along the ray. The height bounds [hmin , hmax ] are fixed per scene and is obtained from
+external sources such as low-resolution elevation data (e.g. SRTM [Farr et al., 2007]). We precompute
+depth rays for each pixel and bilinearly interpolate the corresponding ray parameters based on the
+projected Gaussian center µimage .
+5
+Implementation
+We implement the proposed RPC Gaussian mean projection, covariance splatting and ray-based depth
+using PyTorch. The final image is rasterized via alpha compositing using the original 3DGS CUDA
+renderer [Kerbl et al., 2023]. We build on the original 3DGS codebase [Kerbl et al., 2023], keeping
+loss weights, densification and pruning unchanged.
+Following WildGaussians [Kulhánek et al., 2024], we employ trainable embeddings {gi }M
+i=1 and
+{ej }N
+for
+all
+Gaussians
+M
+and
+images
+N
+.
+A
+lightweight
+MLP
+f
+predicts
+an
+affine
+color
+transj=1
+formation (βi , γi ) = f (ej , gi , ai ) for each Gaussian i based on its base color ai , embedding gi
+and image-embedding ej . We assume a Lambertian surface analog to prior work [Marí et al., 2022,
+2023, Aira et al., 2024, Lee et al., 2025] and omit the use of spherical harmonics, predicting the
+view-independent color ci = γi ĉi + βi for each Gaussian i.
+6
+Experiments and Evaluation
+We evaluate our proposed RPC-renderer as well as the perspective and affine camera approximations
+in a shared framework with identical training and evaluation settings; only the camera model and
+corresponding renderer are substituted. We integrate the standard 3DGS [Kerbl et al., 2023] renderer
+for perspective cameras and the EOGS [Aira et al., 2024] renderer for affine cameras. To ensure a
+camera-focused evaluation, we omit non-camera satellite-domain adaptations such as explicit shadow
+modeling or regularization, trading absolute performance for a focused camera model evaluation. All
+experiments are run for 30.000 iterations on an NVIDIA RTX4090.
+We conduct experiments on four standard benchmark scenes from the 2019 IEEE GRSS Data Fusion
+Contest (DFC2019) dataset [Le Saux et al., 2019] and three standard benchmark scenes from the 2016
+IARPA Multi-View Stereo 3D Mapping Challenge (IARPA2016) dataset [Bosch et al., 2016], which
+have been widely adopted in prior work. The DFC2019 dataset contains multi-date WorldView-3
+true-color RGB images stored as 8-bit unsigned integers. The selected scenes cover suburban and
+urban areas of Jacksonville, USA, with 10–20 images per scene. The IARPA2016 dataset contains
+40–50 images of full-precision panchromatic and multispectral imagery of Buenos Aires, Argentina.
+We pansharpen and tone-map to 8-bit RGB [Zhang et al., 2019, Bullinger et al., 2021]. We bundleadjust the RPC models [Marí et al., 2021] and their derived perspective and affine camera models,
+and initialize Gaussians with Structure-from-Motion [Zhang et al., 2019].
+We evaluate geometry by converting the view-dependent surface depth from each training image into
+a georegistered, view-agnostic digital surface model (DSM). For each pixel, to obtain the surface
+depth values, the depths of contributing Gaussians are averaged according to their alpha-compositing
+render weights [Aira et al., 2024]. Geometry is therefore evaluated across the original off-nadir image
+observations, yielding a multi-view assessment of the reconstruction. We measure geometric accuracy
+7
+Table 2: Quantitative comparison of native RPC Gaussian Splatting against perspective and affine
+approximations on DFC2019 Le Saux et al. [2019] and IARPA2016 Bosch et al. [2016] scenes. All
+methods use identical settings, changing only the camera model and renderer. Native RPC achieves
+the lowest altitude MAE while maintaining competitive PSNR.
+DFC2019 [Le Saux et al., 2019]
+MAE [m] ↓
+Camera Model
+004 068
+214
+260 Mean 004
+PSNR ↑
+068
+214
+260 Mean
+Perspective [Kerbl et al., 2023] 2.56 1.95 4.10 3.57 3.04 35.31 35.30 32.70 32.21 33.88
+Affine [Aira et al., 2024]
+4.34 3.55 10.64 5.09 5.91 37.45 37.30 32.45 32.60 34.95
+RPC (Ours)
+1.96 1.55 3.00 2.05 2.14 31.91 30.39 29.28 28.65 30.06
+IARPA2016 [Bosch et al., 2016]
+MAE [m] ↓
+Camera Model
+001 002 003 Mean 001
+PSNR ↑
+002
+003 Mean
+Perspective [Kerbl et al., 2023] 2.65 1.73 2.61 2.33 30.94 33.92 34.48 33.11
+Affine [Aira et al., 2024]
+3.44 2.07 4.64 3.38 32.25 34.91 35.80 34.32
+RPC (Ours)
+2.34 1.53 2.43 2.10 27.68 29.68 30.23 29.20
+using altitude mean absolute error (MAE) against LiDAR-based DSM ground-truth. Following
+common practice [Marí et al., 2023, Aira et al., 2024, Zhang et al., 2025], we exclude water regions
+in each scene using manually created masks. For image reconstruction quality, we report peak
+signal-to-noise ratio (PSNR) between rendered and reference images.
+As shown in Table 2, our native RPC renderer outperforms the reconstruction accuracy of cameraapproximation-based approaches used by previous work. On DFC2019 [Le Saux et al., 2019], we
+reduce the MAE across all four scenes for perspective approximations from 3.04m to 2.14m (29.6%)
+and for affine approximations from 5.91m to 2.14m (63.8%). IARPA2016 [Bosch et al., 2016] shows
+the same trend, with improvements of 9.9% and 37.9%. Despite improved geometry, PSNR decreases
+in our setting, consistent with similar geometry-appearance trade-offs in prior Gaussian Splatting
+methods [Huang et al., 2024, Zhou et al., 2025]. Qualitative results are shown in Figure 2, with
+additional examples in Appendix Figures 3 to 8.
+7
+Limitations and Future Work
+Gaussian splatting typically uses Jacobian-based covariance projection, which approximates nonlinear mappings locally as affine. In our case, this approximation is applied to both the ECEF →
+geodetic transform and the RPC projection, and may introduce errors when first-order propagation is
+insufficient. Recent alternatives such as the Unscented Transform Wu et al. [2024] could provide
+more accurate uncertainty propagation and are a promising direction for future work. Our implementation also has computational overhead: RPC projection and splatting are performed in Python to
+support numerical gradients, while rasterization uses the 3DGS CUDA renderer. A unified CUDA
+implementation could substantially improve efficiency.
+8
+Conclusion
+In this work, we introduce RPC-GS, the first native RPC Gaussian Splatting renderer for satellite
+imagery. RPC-GS embeds the RPC model in a suitable geo-coordinate transformation chain that maps
+splatting-compatible normalized scene coordinates to image coordinates. We derive a numerically
+robust Jacobian-based covariance projection for this RPC-native setting and introduce a metric
+ray-based depth formulation for RPC-consistent alpha compositing. We provide the first unified
+Gaussian Splatting benchmark comparing RPC, perspective, and affine camera models for satellite
+imagery. RPC-GS achieves the lowest altitude reconstruction error, reducing mean altitude error over
+perspective and affine approximations by 29.6% and 63.8% on DFC2019, and by 9.9% and 37.9% on
+IARPA2016, respectively.
+8
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 2: Qualitative comparison of scene JAX_068 from the DFC2019 dataset Le Saux et al. [2019].
+We convert rendered depth to altitude to enable cross-camera-model comparison. The evaluation
+DSM indicates the LiDAR-covered region used for altitude error computation. Our native RPC
+renderer preserves fine image structure and yields sharper, more consistent geometry than perspective
+and affine approximations. Areas of interest are highlighted in yellow. Colors encode altitude, ranging
+from blue (low) to yellow (high).
+9
+References
+Luca Savant Aira, Gabriele Facciolo, and Thibaud Ehret. Gaussian splatting for efficient satellite
+image photogrammetry. 2025 IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 5959–5969, 2024.
+Nan Bai, Anran Yang, Hao Chen, and Chun Du. Satgs: Remote sensing novel view synthesis using
+multi- temporal satellite images with appearance-adaptive 3dgs. Remote Sensing, 2025.
+Marc Bosch, Zachary Kurtz, Shea Hagstrom, and Myron Brown. A multiple view stereo benchmark
+for satellite imagery. pages 1–9, 10 2016. doi: 10.1109/AIPR.2016.8010543.
+Pierrick Bournez, Luca Savant Aira, Thibaud Ehret, and Gabriele Facciolo. Eogs++: Earth observation
+gaussian splatting with internal camera refinement and direct panchromatic rendering. ArXiv,
+abs/2511.16542, 2025.
+Sebastian Bullinger, Christoph Bodensteiner, and Michael Arens. 3d surface reconstruction from
+multi-date satellite images, 2021. URL https://arxiv.org/abs/2102.02502.
+Tom G. Farr, Paul A. Rosen, Edward Caro, Robert Crippen, Riley Duren, Scott Hensley, Michael
+Kobrick, Mimi Paller, Ernesto Rodriguez, Ladislav Roth, David Seal, Scott Shaffer, Joanne
+Shimada, Jeffrey Umland, Marian Werner, Michael Oskin, Douglas Burbank, and Douglas Alsdorf.
+The shuttle radar topography mission. Reviews of Geophysics, 45(2), 2007.
+Jian Gao, Jin Liu, and Shunping Ji. Rational polynomial camera model warping for deep learning
+based satellite multi-view stereo matching. 2021 IEEE/CVF International Conference on Computer
+Vision (ICCV), pages 6128–6137, 2021.
+Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, and Shenghua Gao. 2d gaussian splatting for
+geometrically accurate radiance fields. ACM SIGGRAPH 2024 Conference Papers, 2024.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkuehler, and George Drettakis. 3d gaussian
+splatting for real-time radiance field rendering. ACM Transactions on Graphics (TOG), 42:1 – 14,
+2023.
+Jonáš Kulhánek, Songyou Peng, Zuzana Kúkelová, Marc Pollefeys, and Torsten Sattler. Wildgaussians: 3d gaussian splatting in the wild. ArXiv, abs/2407.08447, 2024.
+Bertrand Le Saux, Naoto Yokoya, Ronny Hänsch, and Myron Brown. Data fusion contest 2019
+(dfc2019), 2019. URL https://dx.doi.org/10.21227/c6tm-vw12.
+Jie-Ying Lee, Yi-Ruei Liu, Shr-Ruei Tsai, Wei-Cheng Chang, Chung-Ho Wu, Jiewen Chan, Zhenjun
+Zhao, Chieh Hubert Lin, and Yu-Lun Liu. Skyfall-gs: Synthesizing immersive 3d urban scenes
+from satellite imagery. ArXiv, abs/2510.15869, 2025.
+Alfred Leick, L. B. Rapoport, and Dmitry V. Tatarnikov. Gps satellite surveying: Leick/gps satellite
+surveying. 2015.
+Roger Marí, Gabriele Facciolo, and Thibaud Ehret. Sat-nerf: Learning multi-view satellite photogrammetry with transient objects and shadow modeling using rpc cameras. 2022 IEEE/CVF
+Conference on Computer Vision and Pattern Recognition Workshops (CVPRW), pages 1310–1320,
+2022.
+Roger Marí, Gabriele Facciolo, and Thibaud Ehret. Multi-date earth observation nerf: The detail
+is in the shadows. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR) Workshops, pages 2034–2044, June 2023.
+Roger Marí, Carlo de Franchis, Enric Meinhardt-Llopis, Jérémy Anger, and Gabriele Facciolo. A
+Generic Bundle Adjustment Methodology for Indirect RPC Model Refinement of Satellite Imagery.
+Image Processing On Line, 11:344–373, 2021.
+NGA. WORLD GEODETIC SYSTEM 1984 - Its Definition and Relationships with Local Geodetic
+Systems. Technical Report NGA.STND.0036_1.0.0_WGS84, National Geospatial-Intelligence
+Agency, 2014.
+10
+J. Sanz Subirana, J. M. Juan Zornoza, and M. Hernández-Pajares. Transformations between
+ecef and enu coordinates, 2011a. URL https://gssc.esa.int/navipedia/index.php/
+Transformations_between_ECEF_and_ENU_coordinates. Accessed 2026-04-13.
+J. Sanz Subirana, J. M. Juan Zornoza, and M. Hernández-Pajares. Ellipsoidal and cartesian coordinates
+conversion, 2011b. URL https://gssc.esa.int/navipedia/index.php/Ellipsoidal_
+and_Cartesian_Coordinates_Conversion. Accessed: 2026-04-13.
+C. Vincent Tao and Yong Hu. A comprehensive study of the rational function model for photogrammetric processing. Photogrammetric Engineering and Remote Sensing, 67:1347–1357,
+2001.
+Wolfgang Torge and Jürgen Müller. Geodesy. De Gruyter, Berlin, Boston, 2012.
+9783110250008. doi: doi:10.1515/9783110250008.
+ISBN
+Qi Wu, Janick Martinez Esturo, Ashkan Mirzaei, Nicolas Moënne-Loccoz, and Zan Gojcic. 3dgut:
+Enabling distorted cameras and secondary rays in gaussian splatting. 2025 IEEE/CVF Conference
+on Computer Vision and Pattern Recognition (CVPR), pages 26036–26046, 2024.
+R. J. You. Transformation of cartesian to geodetic coordinates without iterations. Journal of Surveying
+Engineering-asce, 126:1–7, 2000.
+Jiawei Zhang, Xiangrong Zhang, Junxiao Li, Xu Tang, Tianyang Zhang, Guanchun Wang, Feixiang
+Liu, and Licheng Jiao. Shadow-aware 3d gaussian splatting for multi-view satellite images.
+IGARSS 2025 - 2025 IEEE International Geoscience and Remote Sensing Symposium, pages
+7895–7898, 2025.
+Kai Zhang, Jin Sun, and Noah Snavely. Leveraging vision reconstruction pipelines for satellite
+imagery. 2019 IEEE/CVF International Conference on Computer Vision Workshop (ICCVW),
+pages 2139–2148, 2019.
+Qingyuan Zhou, Yue Gong, Weidong Yang, Jiaze Li, Yeqi Luo, Baixin Xu, Shuhao Li, Ben Fei, and
+Ying He. Mgsr: 2d/3d mutual-boosted gaussian splatting for high-fidelity surface reconstruction
+under various light conditions. 2025 IEEE/CVF International Conference on Computer Vision
+(ICCV), pages 27295–27304, 2025.
+Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and Markus H. Gross. Surface splatting.
+Proceedings of the 28th annual conference on Computer graphics and interactive techniques, 2001.
+A
+Technical appendices and supplementary material
+A.1
+Differentiating Geodetic → ECEF
+In this section we provide the step-by-step differentiation of the forward Geodetic → ECEF map as
+seen in Equation (10), which is restated here for ease of reference.
+The forward map as defines the conversion from geodetic coordinates (λ, ϕ, h) to ECEF coordinates
+(x, y, z):
+
+  
+(Nϕ + h) cos ϕ cos λ
+x
+f (λ, ϕ, h) =  (Nϕ + h) cos ϕ sin λ  = y 
+(16)
+z
+Nϕ (1 − e2 ) + h sin ϕ
+We recall the definition of the local orthonormal basis (eλ , eϕ , eh ) of Equation (9), corresponding to
+the east, north, and ellipsoidal-up axes expressed in ECEF coordinates [Subirana et al., 2011a].
+"
+#
+"
+#
+"
+#
+− sin λ
+− sin ϕ cos λ
+cos ϕ cos λ
+eλ = cos λ ,
+eϕ = − sin ϕ sin λ ,
+eh = cos ϕ sin λ
+(17)
+0
+cos ϕ
+sin ϕ
+Since ϕ and h are held fixed when differentiating with respect to longitude λ, and Nϕ depends only
+on latitude ϕ, the partial derivative with respect to longitude λ is
+"
+#
+"
+#
+−(Nϕ + h) cos ϕ sin λ
+− sin λ
+∂f
+= (Nϕ + h) cos ϕ cos λ = (Nϕ + h) cos ϕ cos λ = (Nϕ + h) cos ϕeλ
+(18)
+∂λ
+0
+0
+11
+The derivative with respect to latitude ϕ is less direct because the prime-vertical radius of curvature
+dN
+Nϕ also depends on latitude ϕ. We define Nϕ′ = dϕϕ for readability. Applying the product rule
+gives:
+
+
+
+
+Nϕ′ cos ϕ − (Nϕ + h) sin ϕ cos λ
+
+
+
+
+∂f
+
+′
+(19)
+=
+N
+cos
+ϕ
+−
+(N
++
+h)
+sin
+ϕ
+sin
+λ
+
+
+ϕ
+ϕ
+∂ϕ
+
+
+
+′
+2
+2
+Nϕ 1 − e sin ϕ + Nϕ 1 − e + h cos ϕ
+We recall the definitions of both the prime-vertical radius Nϕ and the meridionial radius Mϕ of the
+WGS84 reference ellipsoid NGA [2014].
+
+a 1 − e2
+a
+Nϕ = 1/2 ,
+Mϕ =
+(20)
+3/2
+Dϕ
+Dϕ
+Dϕ refers to Dϕ = 1 − e2 sin2 ϕ and a is the semi-major axis radius of the WGS84 ellipsoid. The
+dN
+derivative of the prime-vertical radius Nϕ′ = dϕϕ is given by
+Nϕ′ =
+dNϕ
+−3/2
+= ae2 sin ϕ cos ϕDϕ
+dϕ
+(21)
+Substituting these expressions and collecting terms gives the following two identities as purely
+algebraic consequences of the definitions of Nϕ and Mϕ .
+Nϕ′ cos ϕ − Nϕ sin ϕ = −Mϕ sin ϕ,
+Nϕ′ (1 − e2 ) sin ϕ + Nϕ (1 − e2 ) cos ϕ = Mϕ cos ϕ. (22)
+∂f
+Subsequently, we can reduce the derivation ∂ϕ
+to:
+"
+#
+− (Mϕ + h) sin ϕ cos λ
+∂f
+= − (Mϕ + h) sin ϕ sin λ = (Mϕ + h) eϕ
+∂ϕ
+(M + h) cos ϕ
+(23)
+ϕ
+Finally, the partial derivative ∂f
+∂h for the height h is given by:
+#
+"
+cos ϕ cos λ
+∂f
+= cos ϕ sin λ = eh
+∂h
+sin ϕ
+(24)
+Conceptually, these derivatives show that small longitude increments correspond to eastward displacements of magnitude (Nϕ + h) cos ϕ, small latitude increments correspond to northward displacements
+of magnitude (Mϕ + h), and height increments translate directly to equal displacements along the
+ellipsoidal-up direction eh .
+The full Jacobian of the Geodetic → ECEF map, with columns ordered as (λ, ϕ, h), is
+Jecef←geodetic = [eλ eϕ eh ] diag((Nϕ + h) cos ϕ, Mϕ + h, 1)
+"
+#
+− (Nϕ + h) cos ϕ sin λ − (Mϕ + h) sin ϕ cos λ cos ϕ cos λ
+= (Nϕ + h) cos ϕ cos λ − (Mϕ + h) sin ϕ sin λ cos ϕ sin λ
+0
+(Mϕ + h) cos ϕ
+sin ϕ
+A.2
+(25)
+Additional qualitative evaluation results
+We provide additional qualitative comparisons for the three remaining scenes (i.e. ¸JAX_004,
+JAX_214, and JAX_260) of the DFC2019 dataset [Le Saux et al., 2019] in Figures 3 to 5 and
+for all three scenes of the IARPA2016 dataset [Bosch et al., 2016] in Figures 6 to 8. We select the
+training view with the lowest MAE. The altitude and corresponding DSM are clipped to a consistent
+value range across all three camera models to allow for visual comparison. Areas-of-Interest are
+marked in yellow.
+12
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 3: Qualitative comparison of scene JAX_004 from the DFC2019 dataset Le Saux et al. [2019].
+Depth is converted to altitude for cross-camera comparison; the evaluation DSM marks the LiDARcovered region used for altitude error computation. Areas of interest are highlighted in yellow. Colors
+encode altitude, ranging from blue (low) to yellow (high).
+13
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 4: Qualitative comparison of scene JAX_214 from the DFC2019 dataset Le Saux et al. [2019].
+Depth is converted to altitude for cross-camera comparison; the evaluation DSM marks the LiDARcovered region used for altitude error computation. Areas of interest are highlighted in yellow. Colors
+encode altitude, ranging from blue (low) to yellow (high).
+14
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 5: Qualitative comparison for scene JAX_260 from the DFC2019 dataset Le Saux et al.
+[2019]. Depth is converted to altitude for cross-camera comparison; the evaluation DSM marks the
+LiDAR-covered region used for altitude error computation. Areas of interest are highlighted in yellow.
+Colors encode altitude, ranging from blue (low) to yellow (high).
+15
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 6: Qualitative comparison for scene 001 from the IARPA2016 dataset Bosch et al. [2016].
+Depth is converted to altitude for cross-camera comparison; the evaluation DSM marks the LiDARcovered region used for altitude error computation. Areas of interest are highlighted in yellow. Colors
+encode altitude, ranging from blue (low) to yellow (high).
+16
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 7: Qualitative comparison for scene 002 from the IARPA2016 dataset Bosch et al. [2016].
+Depth is converted to altitude for cross-camera comparison; the evaluation DSM marks the LiDARcovered region used for altitude error computation. Areas of interest are highlighted in yellow. Colors
+encode altitude, ranging from blue (low) to yellow (high).
+17
+Altitude
+Evaluation DSM
+No view-specific GT available
+Native RPC (Ours)
+Perspective Approx.
+Affine Approx.
+GT
+RGB
+Figure 8: Qualitative comparison for scene 003 from the IARPA2016 dataset Bosch et al. [2016].
+Depth is converted to altitude for cross-camera comparison; the evaluation DSM marks the LiDARcovered region used for altitude error computation. Areas of interest are highlighted in yellow. Colors
+encode altitude, ranging from blue (low) to yellow (high).
+18
+NeurIPS Paper Checklist
+1. Claims
+Question: Do the main claims made in the abstract and introduction accurately reflect the
+paper’s contributions and scope?
+Answer: [Yes]
+Justification: The claims made in abstract and introduction accurately reflect the paper’s
+contribution and scope.
+Guidelines:
+• The answer [N/A] means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A [No] or
+[N/A] answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reflect how
+much the results can be expected to generalize to other settings.
+• It is fine to include aspirational goals as motivation as long as it is clear that these goals
+are not attained by the paper.
+2. Limitations
+Question: Does the paper discuss the limitations of the work performed by the authors?
+Answer: [Yes]
+Justification: We discuss the limitations in Section 7.
+Guidelines:
+• The answer [N/A] means that the paper has no limitation while the answer [No] means
+that the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate “Limitations” section in their paper.
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-specification, asymptotic approximations only holding locally). The authors
+should reflect on how these assumptions might be violated in practice and what the
+implications would be.
+• The authors should reflect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reflect on the factors that influence the performance of the approach.
+For example, a facial recognition algorithm may perform poorly when image resolution
+is low or images are taken in low lighting. Or a speech-to-text system might not be
+used reliably to provide closed captions for online lectures because it fails to handle
+technical jargon.
+• The authors should discuss the computational efficiency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to
+address problems of privacy and fairness.
+• While the authors might fear that complete honesty about limitations might be used by
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover
+limitations that aren’t acknowledged in the paper. The authors should use their best
+judgment and recognize that individual actions in favor of transparency play an important role in developing norms that preserve the integrity of the community. Reviewers
+will be specifically instructed to not penalize honesty concerning limitations.
+3. Theory assumptions and proofs
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+Answer: [Yes]
+19
+Justification: We provide full proof of all coordinate transformations and Jacobians, and
+provide a detailed step-by-step derivation of the Geodetic → ECEF Jacobian in Section A.1.
+Guidelines:
+• The answer [N/A] means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and crossreferenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a short
+proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented
+by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental result reproducibility
+Question: Does the paper fully disclose all the information needed to reproduce the main experimental results of the paper to the extent that it affects the main claims and/or conclusions
+of the paper (regardless of whether the code and data are provided or not)?
+Answer: [Yes]
+Justification: We provide all relevant implementation details in Section 5.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• If the paper includes experiments, a [No] answer to this question will not be perceived
+well by the reviewers: Making the paper reproducible is important, regardless of
+whether the code and data are provided or not.
+• If the contribution is a dataset and/or model, the authors should describe the steps taken
+to make their results reproducible or verifiable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture fully
+might suffice, or if the contribution is a specific model and empirical evaluation, it may
+be necessary to either make it possible for others to replicate the model with the same
+dataset, or provide access to the model. In general. releasing code and data is often
+one good way to accomplish this, but reproducibility can also be provided via detailed
+instructions for how to replicate the results, access to a hosted model (e.g., in the case
+of a large language model), releasing of a model checkpoint, or other means that are
+appropriate to the research performed.
+• While NeurIPS does not require releasing code, the conference does require all submissions to provide some reasonable avenue for reproducibility, which may depend on the
+nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear how
+to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce
+the model (e.g., with an open-source dataset or instructions for how to construct
+the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case
+authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+Question: Does the paper provide open access to the data and code, with sufficient instructions to faithfully reproduce the main experimental results, as described in supplemental
+material?
+20
+Answer: [Yes]
+Justification: We will release all code and required dataset processing steps.
+Guidelines:
+• The answer [N/A] means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://neurips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not
+be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//neurips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental setting/details
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer) necessary to understand the results?
+Answer: [Yes]
+Justification: We base our work on the existing 3DGS implementation with unchanged
+training hyperparameter. We also release our code and steps to reproduce our experimental
+results.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of detail
+that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment statistical significance
+Question: Does the paper report error bars suitably and correctly defined or other appropriate
+information about the statistical significance of the experiments?
+Answer: [No]
+Justification: We follow established evaluation protocol in reference to prior works.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The authors should answer [Yes] if the results are accompanied by error bars, confidence
+intervals, or statistical significance tests, at least for the experiments that support the
+main claims of the paper.
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+• The assumptions made should be given (e.g., Normally distributed errors).
+21
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should
+preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis
+of Normality of errors is not verified.
+• For asymmetric distributions, the authors should be careful not to show in tables or
+figures symmetric error bars that would yield results that are out of range (e.g., negative
+error rates).
+• If error bars are reported in tables or plots, the authors should explain in the text how
+they were calculated and reference the corresponding figures or tables in the text.
+8. Experiments compute resources
+Question: For each experiment, does the paper provide sufficient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce
+the experiments?
+Answer: [Yes]
+Justification: We provide information on the GPU and number of training iterations in
+Section 6.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments that
+didn’t make it into the paper).
+9. Code of ethics
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+Answer: [Yes]
+Justification: We conform to the NeurIPS Code of Ethics.
+Guidelines:
+• The answer [N/A] means that the authors have not reviewed the NeurIPS Code of
+Ethics.
+• If the authors answer [No], they should explain the special circumstances that require a
+deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special consideration due to laws or regulations in their jurisdiction).
+10. Broader impacts
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+Answer: [N/A]
+Justification: To the best of our knowledge, there is no societal impact of our research.
+Guidelines:
+• The answer [N/A] means that there is no societal impact of the work performed.
+• If the authors answer [N/A] or [No], they should explain why their work has no societal
+impact or why the paper does not address societal impact.
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake profiles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact specific
+groups), privacy considerations, and security considerations.
+22
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate Deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation
+strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efficiency and accessibility of ML).
+11. Safeguards
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pre-trained language models,
+image generators, or scraped datasets)?
+Answer: [N/A]
+Justification: This paper poses no such risks.
+Guidelines:
+• The answer [N/A] means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring
+that users adhere to usage guidelines or restrictions to access the model or implementing
+safety filters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+Answer: [Yes]
+Justification: We properly cite all used prior works and datasets.
+Guidelines:
+• The answer [N/A] means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+• If assets are released, the license, copyright information, and terms of use in the
+package should be provided. For popular datasets, paperswithcode.com/datasets
+has curated licenses for some datasets. Their licensing guide can help determine the
+license of a dataset.
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+23
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New assets
+Question: Are new assets introduced in the paper well documented and is the documentation
+provided alongside the assets?
+Answer: [Yes]
+Justification: We release all code including the required dataset processing, accompanied by
+all relevant documentation.
+Guidelines:
+• The answer [N/A] means that the paper does not release new assets.
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can either
+create an anonymized URL or include an anonymized zip file.
+14. Crowdsourcing and research with human subjects
+Question: For crowdsourcing experiments and research with human subjects, does the paper
+include the full text of instructions given to participants and screenshots, if applicable, as
+well as details about compensation (if any)?
+Answer: [N/A]
+Justification: The paper does not involve any form of crowd sourcing experiments.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Including this information in the supplemental material is fine, but if the main contribution of the paper involves human subjects, then as much detail as possible should be
+included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation,
+or other labor should be paid at least the minimum wage in the country of the data
+collector.
+15. Institutional review board (IRB) approvals or equivalent for research with human
+subjects
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+Answer: [N/A]
+Justification: The paper does not include any research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent)
+may be required for any human subjects research. If you obtained IRB approval, you
+should clearly state this in the paper.
+• We recognize that the procedures for this may vary significantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+• For initial submissions, do not include any information that would break anonymity (if
+applicable), such as the institution conducting the review.
+24
+16. Declaration of LLM usage
+Question: Does the paper describe the usage of LLMs if it is an important, original, or
+non-standard component of the core methods in this research? Note that if the LLM is used
+only for writing, editing, or formatting purposes and does not impact the core methodology,
+scientific rigor, or originality of the research, declaration is not required.
+Answer: [N/A]
+Justification: LLMs are not part of the core method in this paper.
+Guidelines:
+• The answer [N/A] means that the core method development in this research does not
+involve LLMs as any important, original, or non-standard components.
+• Please refer to our LLM policy in the NeurIPS handbook for what should or should not
+be described.
+25

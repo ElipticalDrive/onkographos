@@ -1,0 +1,196 @@
+Hello! So as apart of investigation into potentially improving perf, I've collected some stats, and I've identified two target areas that appear to occupy largest portion of meshing budget: Reconstructed 11790 vertices (indices=64464) fr...
+
+perf improvements: generate_iso_surface_vertices and generate_sparse_density_map · Issue #6 · InteractiveComputerGraphics/splashsurf · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+perf improvements: generate_iso_surface_vertices and generate_sparse_density_map #6
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+perf improvements: generate_iso_surface_vertices and generate_sparse_density_map#6
+Copy link
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+whiterabbit42k
+opened on Dec 9, 2020
+Issue body actions
+Hello! So as apart of investigation into potentially improving perf, I've collected some stats, and I've identified two target areas that appear to occupy largest portion of meshing budget:
+```
+Reconstructed 11790 vertices (indices=64464) from 1000 particlces in 43.492334ms and pushed in 43.679657ms
+reconstruct_surface: 100.00%, 43.49ms/call @ 22.99Hz
+  compute minimum enclosing aabb: 0.01%, 0.01ms/call @ 22.99Hz
+  neighborhood_search: 11.67%, 5.07ms/call @ 22.99Hz
+    parallel_generate_cell_to_particle_map: 26.25%, 1.33ms/call @ 22.99Hz
+    get_cell_neighborhoods_par: 5.06%, 0.26ms/call @ 22.99Hz
+    calculate_particle_neighbors_par: 64.24%, 3.26ms/call @ 22.99Hz
+  parallel_compute_particle_densities: 0.47%, 0.21ms/call @ 22.99Hz
+  parallel_generate_sparse_density_map: 41.18%, 17.91ms/call @ 22.99Hz
+  triangulate_density_map: 46.62%, 20.28ms/call @ 22.99Hz
+    interpolate_points_to_cell_data: 91.94%, 18.64ms/call @ 22.99Hz
+      generate_iso_surface_vertices: 84.61%, 15.77ms/call @ 22.99Hz
+      relative_to_threshold_postprocessing: 15.36%, 2.86ms/call @ 22.99Hz
+    triangulate: 8.04%, 1.63ms/call @ 22.99Hz
+```
+So for meshing every frame the 1k particles, it takes from 30-50ms; Ideally we can get this down somewhere close to 16ms, so that we could have a one-frame latency delay on generating the meshes for a realtime sim in 60fps.
+As such, it looks like generate_iso_surface_vertices (15.7ms) and parallel_generate_sparse_density_map (17.9ms) are good candidates.
+I don't know much about fluid simulations, so I'll defer to you on matters here, but I have done a lot of work in perf and optimization; do you think there's any place to attack here, and if so, mind giving me a pointer so I could start/take a look? :)
+I'm also wondering perhaps is there any data structures we don't have to compute every frame? Perhaps the density map? Or similar to #4 we could perhaps reuse container structures to reduce allocation strain?
+Thanks, and looking forward to your insights here :)
+Activity
+w1th0utnam3 commented on Dec 11, 2020
+w1th0utnam3
+on Dec 11, 2020
+Member
+More actions
+I'll come back to this in the next days, I have to get back into the code.
+For parallel_generate_sparse_density_map, I think the main problem is the insertion into the hash map. I currently use DashMap for this, not sure if there is an obvious alternative. The author of DashMap is working on a lockfree rewrite that might improve performance but this does not seem to be ready soon.
+Even an alternative with less parallel overhead might not be enough, due to the cash unfriendliness of this approach. If we cannot find a more or less drop-in replacement for the hash map with satisfying performance, I think the only true alternative is a completely different approach of implementing marching cubes that doesn't use a map at all.
+whiterabbit42k commented on Dec 11, 2020
+whiterabbit42k
+on Dec 11, 2020
+ContributorAuthor
+More actions
+Re density map, interesting! Yea so I have actually switched to sequential_generate_sparse_density_map for now, the perf difference is on average quite large (for me, i do have a lot of threads doing other stuff, could be contention reduces any parallel benefits?)!
+```
+reconstruct_surface_inplace: 100.00%, 5.29ms/call @ 188.86Hz
+  compute minimum enclosing aabb: 0.07%, 0.00ms/call @ 188.86Hz
+  neighborhood_search: 19.00%, 1.01ms/call @ 188.86Hz
+    parallel_generate_cell_to_particle_map: 71.40%, 0.72ms/call @ 188.86Hz
+    get_cell_neighborhoods_par: 8.22%, 0.08ms/call @ 188.86Hz
+    calculate_particle_neighbors_par: 15.36%, 0.15ms/call @ 188.86Hz
+  parallel_compute_particle_densities: 2.41%, 0.13ms/call @ 188.86Hz
+  parallel_generate_sparse_density_map: 58.12%, 3.08ms/call @ 188.86Hz
+  triangulate_density_map: 19.72%, 1.04ms/call @ 188.86Hz
+    interpolate_points_to_cell_data: 89.64%, 0.94ms/call @ 188.86Hz
+      generate_iso_surface_vertices: 83.85%, 0.78ms/call @ 188.86Hz
+      relative_to_threshold_postprocessing: 16.01%, 0.15ms/call @ 188.86Hz
+    triangulate: 10.28%, 0.11ms/call @ 188.86Hz
+
+reconstruct_surface_inplace: 100.00%, 3.35ms/call @ 298.12Hz
+  compute minimum enclosing aabb: 0.12%, 0.00ms/call @ 298.12Hz
+  neighborhood_search: 8.71%, 0.29ms/call @ 298.12Hz
+    sequential_generate_cell_to_particle_map: 20.71%, 0.06ms/call @ 298.12Hz
+    calculate_particle_neighbors_seq: 75.79%, 0.22ms/call @ 298.12Hz
+  sequential_compute_particle_densities: 2.05%, 0.07ms/call @ 298.12Hz
+  sequential_generate_sparse_density_map: 56.94%, 1.91ms/call @ 298.12Hz
+  triangulate_density_map: 31.72%, 1.06ms/call @ 298.12Hz
+    interpolate_points_to_cell_data: 89.53%, 0.95ms/call @ 298.12Hz
+      generate_iso_surface_vertices: 84.19%, 0.80ms/call @ 298.12Hz
+      relative_to_threshold_postprocessing: 15.69%, 0.15ms/call @ 298.12Hz
+    triangulate: 10.40%, 0.11ms/call @ 298.12Hz
+```
+You could also look into CHashMap? though i don't know how maintained it is anymore?
+I will look into seeing if reusing the hashmap can help as well (similar to vertices, indices), though its a bit more complicated since the DensityMap is an enum
+w1th0utnam3 commented on Dec 11, 2020
+w1th0utnam3
+on Dec 11, 2020
+Member
+More actions
+Ah, well I didn't consider your number of particles in my first reply 😅 I mostly tested the parallel stuff with 100k to 1 million particles. I think for a few thousand particles you have too much overhead with the worker pool of rayon, the locks in the hashmap etc. So it's not surprising that the sequential version is faster.
+I think dropping the maps by using a different marching cubes strategy would help a lot as you could really need the cache efficiency here.
+whiterabbit42k commented on Dec 11, 2020
+whiterabbit42k
+on Dec 11, 2020
+ContributorAuthor
+More actions
+I think dropping the maps by using a different marching cubes strategy would help a lot as you could really need the cache efficiency here.
+Sounds like a plan :) let me know once you've got some thoughts on how to proceed, or if you need help, etc. :)
+w1th0utnam3 commented on Dec 16, 2020
+w1th0utnam3
+on Dec 16, 2020
+Member
+More actions
+I made some improvements to the current reconstruction approach that should increase performance with a lot of threads. The number of particles might still be much too small in your case, but you could try it again.
+whiterabbit42k commented on Dec 28, 2020
+whiterabbit42k
+on Dec 28, 2020
+Last edited by whiterabbit42k
+ContributorAuthor
+More actions
+sorry for the delay! so just rebased, and seeing these numbers for about 500 particles:
+```
+Reconstructed mesh size: vertices=8352 indices=8352
+reconstruct_surface_inplace: 100.00%, 14.67ms/call @ 68.18Hz
+  compute minimum enclosing aabb: 0.03%, 0.00ms/call @ 68.18Hz
+  neighborhood_search: 17.78%, 2.61ms/call @ 68.18Hz
+    parallel_generate_cell_to_particle_map: 42.01%, 1.10ms/call @ 68.18Hz
+    get_cell_neighborhoods_par: 22.55%, 0.59ms/call @ 68.18Hz
+    calculate_particle_neighbors_par: 31.07%, 0.81ms/call @ 68.18Hz
+  parallel_compute_particle_densities: 5.34%, 0.78ms/call @ 68.18Hz
+  parallel_generate_sparse_density_map: 52.58%, 7.71ms/call @ 68.18Hz
+    generate thread local maps: 62.59%, 4.83ms/call @ 68.18Hz
+    merge thread local maps to global map: 36.89%, 2.84ms/call @ 68.18Hz
+  triangulate_density_map: 23.44%, 3.44ms/call @ 68.18Hz
+    interpolate_points_to_cell_data: 93.15%, 3.20ms/call @ 68.18Hz
+      generate_iso_surface_vertices: 83.26%, 2.67ms/call @ 68.18Hz
+      relative_to_threshold_postprocessing: 16.59%, 0.53ms/call @ 68.18Hz
+    triangulate: 6.76%, 0.23ms/call @ 68.18Hz
+
+
+reconstruct_surface_inplace: 100.00%, 14.06ms/call @ 71.13Hz
+  compute minimum enclosing aabb: 0.04%, 0.01ms/call @ 71.13Hz
+  neighborhood_search: 3.28%, 0.46ms/call @ 71.13Hz
+    sequential_generate_cell_to_particle_map: 20.68%, 0.10ms/call @ 71.13Hz
+    calculate_particle_neighbors_seq: 75.65%, 0.35ms/call @ 71.13Hz
+  sequential_compute_particle_densities: 0.76%, 0.11ms/call @ 71.13Hz
+  sequential_generate_sparse_density_map: 69.70%, 9.80ms/call @ 71.13Hz
+  triangulate_density_map: 25.98%, 3.65ms/call @ 71.13Hz
+    interpolate_points_to_cell_data: 92.49%, 3.38ms/call @ 71.13Hz
+      generate_iso_surface_vertices: 84.77%, 2.86ms/call @ 71.13Hz
+      relative_to_threshold_postprocessing: 15.10%, 0.51ms/call @ 71.13Hz
+    triangulate: 7.41%, 0.27ms/call @ 71.13Hz
+```
+looks like the density map still accounts for large perf overhead; your changes only affected threaded version yes?
+For comparison, here is inout patch not rebased (above is inout patch rebased):
+```
+Reconstructed mesh size: vertices=8904 indices=8904
+reconstruct_surface_inplace: 100.00%, 14.60ms/call @ 68.49Hz
+  compute minimum enclosing aabb: 0.05%, 0.01ms/call @ 68.49Hz
+  neighborhood_search: 3.55%, 0.52ms/call @ 68.49Hz
+    sequential_generate_cell_to_particle_map: 21.25%, 0.11ms/call @ 68.49Hz
+    calculate_particle_neighbors_seq: 74.78%, 0.39ms/call @ 68.49Hz
+  sequential_compute_particle_densities: 0.82%, 0.12ms/call @ 68.49Hz
+  sequential_generate_sparse_density_map: 74.72%, 10.91ms/call @ 68.49Hz
+  triangulate_density_map: 20.63%, 3.01ms/call @ 68.49Hz
+    interpolate_points_to_cell_data: 91.26%, 2.75ms/call @ 68.49Hz
+      generate_iso_surface_vertices: 83.57%, 2.30ms/call @ 68.49Hz
+      relative_to_threshold_postprocessing: 16.28%, 0.45ms/call @ 68.49Hz
+    triangulate: 8.64%, 0.26ms/call @ 68.49Hz
+```
+whiterabbit42k commented on Dec 29, 2020
+whiterabbit42k
+on Dec 29, 2020
+ContributorAuthor
+More actions
+So I noticed the inline(never) annotation everywhere, as mentioned in the inout branch. Is the rationale there for the profiling infra to have more accurate reporting? If yes, perhaps we should cfg the inline annotations along with the profile feature?
+w1th0utnam3
+added
+enhancementNew feature or requestNew feature or request
+on Dec 16, 2021
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or request
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

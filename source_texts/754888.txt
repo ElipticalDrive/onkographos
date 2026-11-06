@@ -1,0 +1,859 @@
+arXiv:1410.0925v3 [cs.CV] 23 Oct 2014
+A Framework for the Volumetric Integration of Depth Images
+Victor Adrian Prisacariu*
+victor@robots.ox.ac.uk
+University of Oxford
+Olaf Kähler*
+olaf@robots.ox.ac.uk
+University of Oxford
+Ming Ming Cheng
+cmm.thu@gmail.com
+Nankai University, China
+Carl Yuheng Ren
+carl@robots.ox.ac.uk
+University of Oxford
+Julien Valentin
+julien.valentin@eng.ox.ac.uk
+University of Oxford
+Philip H.S. Torr
+philip.torr@eng.ox.ac.uk
+University of Oxford
+Ian D Reid
+ian.reid@adelaide.edu.au
+University of Adelaide
+David W Murray
+dwm@robots.ox.ac.uk
+University of Oxford
+October 27, 2014
+Contents
+1
+Introduction
+2
+2
+Architecture Overview
+2.1 Processing Pipeline . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2.2 Cross Device Implementation Architecture . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+2
+2
+3
+3
+Volumetric Representation
+3.1 Framework Flexibility . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3.2 Dense Volumes . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3.3 Voxel Block Hashing . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3.3.1 Hash Table and Hashing Function . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3.3.2 Hash Table Operations . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+3
+4
+4
+5
+6
+6
+4
+Individual Method Stages
+4.1 Tracking . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4.2 Allocation . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4.3 Integration . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+4.4 Raycast . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . .
+8
+9
+10
+10
+11
+5
+Swapping
+12
+6
+Compilation, UI, Usage and Examples
+14
+7
+Conclusions
+16
+* Olaf Kähler and Victor Adrian Prisacariu contributed equally to this work
+1
+1
+Introduction
+Volumetric models have become a popular representation for 3D scenes in recent years. While being used
+as early as [4], one of the breakthroughs leading to their popularity was KinectFusion [9, 7]. The focus of
+KinectFusion and a number of related works [12, 1, 13] is on 3D reconstruction using RGB-D sensors. However, monocular SLAM has since also been tackled with very similar approaches [8, 11]. In the monocular
+case, various dense stereo techniques are used to create depth images and then the same integration methods
+and volumetric representations are used to fuse the information into a consistent 3D world model. Storing
+the underlying truncated signed distance function (TSDF) volumetrically makes for most of the simplicity and
+efficiency that can be achieved with GPU implementations of these systems. However, this representation is
+also memory-intensive and limits the applicability to small scale reconstructions.
+Several avenues have been explored for overcoming this limitation. A first line of works uses a moving
+volume [15, 18, 5] to follow the camera while a sparse point cloud or mesh representation is computed for
+the parts of the scene outside the active volume. In a second line of research, the volumetric representation is
+split into a set of blocks aligned with dominant planes [6] or even reduced to a set of bump maps along such
+planes [17]. A third category of approaches employs an octree representation of the 3D volume [19, 3, 16].
+Finally, a hash lookup for a set of sparsely allocated subblocks of the volume is used in [10]. Some of these
+works, e.g. [5, 3, 10, 6], also provide methods for swapping data from the limited GPU memory to some larger
+host memory to further expand the scale of the reconstructions.
+With the aim of providing for a fast and flexible 3D reconstruction pipeline, we propose a new, unifying
+framework called InfiniTAM. The core idea is that individual steps like camera tracking, scene representation
+and integration of new data can easily be replaced and adapted to the needs of the user.
+Along with the framework we also provide a set of components for scalable reconstruction: two implementations of camera trackers, based on RGB data and on depth data, two representations of the 3D volumetric data,
+a dense volume and one based on hashes of subblocks [10], and an optional module for swapping subblocks
+in and out of the typically limited GPU memory. Given these components, a wide range of systems can be
+developed for specific purposes, ranging from very efficient reconstruction of small scale volumes with limited
+hardware resources up to full scale reconstruction of large-scale scenes. While such systems can be tailored for
+the development of higher level applications, the framework also allows users to focus on the development of
+individual new components, reusing only parts of the framework.
+Although most of the ideas used in our implementation have already been presented in related works, there
+are a number of differences and novelties that went into the engineering of our framework. For example in
+Section 5 we define an engine for swapping data to and from the GPU in a way that can deal with slow read
+and write accesses on the host, e.g. on a disk. It also has a fixed maximum number of data transfers between
+GPU and host to ensure an interactive online framework. One general aim of the whole framework was to
+keep the implementation portable, adaptable and simple. As we show in Section 6, InfiniTAM has minimal
+dependencies and natively builds on Linux, Mac OS and Windows platforms.
+The remainder of this report and in particular Sections 2 through 5 describe technical implementation details
+of the InfiniTAM framework. These sections are aimed at closing the gap between the theoretical description of
+volumetric depth map fusion and the actual software implementation in our InfiniTAM package. Some advice
+on compilation and practical usage of InfiniTAM is given in Section 6 and some concluding remarks follow in
+Section 7.
+2
+Architecture Overview
+We first present an overview of the overall processing pipeline of our framework and discuss the cross device
+implementation architecture. These serve as the backbone of the framework throughout this report.
+2.1
+Processing Pipeline
+The main processing steps are illustrated in Figure 1. As with the typical and well known KinectFusion
+pipeline [9], there is a tracking step for localizing the camera, an integration step for updating the 3D world
+model and a raycasting step for rendering the 3D data in preparation of the next tracking step. To accommodate
+the additional processing requirements for octrees [16], voxel block hashing [10] or other data structures, an
+2
+Image Source
+Controlling Engine
+Visualization
+Tracking
+Allocation
+Integration
+Swapping
+Raycasting
+Localize Camera
+Find New Scene
+Update 3D Model
+Transfer CPU/GPU
+Render 3D Data
+Figure 1: InfiniTAM processing pipeline
+Controlling Engine
+Abstract
+Class Shared Code
+CPU Code
+...
+GPU Code
+Device Specific
+Device Agnostic
+Inline Shared Code
+Figure 2: InfiniTAM Cross Device Engine Architecture
+allocation step is included, where the respective data structures are updated in preparation for integrating data
+from a new frame. Also an optional swapping step is included for transferring data between GPU and CPU.
+A detailed discussion of each individual stage follows in Section 4. For now notice that our implementation follows the chain-of-responsibility design pattern, which means that the relevant data structures (e.g.
+ITMImage) are passed between several processing engines (e.g. ITMSceneReconstructionEngine).
+The engines are stateless and each engine is responsible for one specific aspect of the overall processing
+pipeline. The state is passed on in objects containing the processed information. Finally one central class
+(ITMMainEngine) holds instances of all objects and engines and controls the flow of information.
+2.2
+Cross Device Implementation Architecture
+Each engine is further split into three layers as shown in Figure 2. The topmost, Abstract Layer is accessed by
+the library’s main engine and is in general just an blank interface, although some common code can be shared
+at this point. The interface is implemented in the Device Specific Layer, which will be very different depending
+on whether it runs on a CPU, a GPU, on OpenMP or other hardware acceleration architectures. In the Device
+Agnostic Layer there may be some inline code that is called from the higher layers and recompiled for the
+different architectures.
+Considering the example of a tracking engine, the Abstract Layer contains code for the generic optimisation
+of an error function, the Device Specific Layer contains a loop or GPU kernel call to evaluate the error function
+for all pixels in an image, and the Device Agnostic Layer contains a simple inline C-function to evaluate the
+error in a single pixel.
+3
+Volumetric Representation
+The volumetric representation is the central data structure within the InfiniTAM framework. It is used to store
+a truncated signed distance function that implicitly represents the 3D geometry by indicating for each point in
+space how far in front or behind the scene surface it is. Being truncated, only a small band of values around the
+current surface estimate is actually being stored, while beyond the band the values are set to a maximum and
+minimum value, respectively.
+The data structure used for this representation crucially defines the memory efficiency of the 3D scene
+model and the computational efficiency of interacting with this model. We therefore keep it modular and
+interchangeable in our framework and provide two implementations, namely for a fixed size dense volume
+(ITMPlainVoxelArray) and voxel block hashing (ITMVoxelBlockHash). Both are described in the
+following, but first we briefly discuss how the representation is kept interchangeable throughout the framework.
+3
+3.1
+Framework Flexibility
+Core data classes dealing with the volumetric signed distance function are templated on (i) the type of voxel
+information stored, and (ii) the data structure used for indexing and accessing the voxels. The relevant engine
+classes are equally templated to provide the specific implementations depending on the choosen data structures.
+An example for a class representing the actual information at each voxel is given in the following listing:
+s t r u c t ITMVoxel s rgb
+{
+CPU AND GPU CODE s t a t i c s h o r t S D F i n i t i a l V a l u e ( ) { r e t u r n 3 2 7 6 7 ; }
+CPU AND GPU CODE s t a t i c f l o a t S D F v a l u e T o F l o a t ( f l o a t x )
+{ r e t u r n ( f l o a t ) ( x ) / 32767.0 f ; }
+CPU AND GPU CODE s t a t i c s h o r t S D F f l o a t T o V a l u e ( f l o a t x )
+{ r e t u r n ( s h o r t ) ( ( x ) ∗ 32767.0 f ) ; }
+s t a t i c const bool hasColorInformation = t r u e ;
+/ ∗ ∗ Value of t h e t r u n c a t e d s i g n e d d i s t a n c e t r a n s f o r m a t i o n . ∗ /
+short sdf ;
+/ ∗ ∗ Number o f f u s e d o b s e r v a t i o n s t h a t make up @p s d f . ∗ /
+uchar w depth ;
+/ ∗ ∗ RGB c o l o u r i n f o r m a t i o n s t o r e d f o r t h i s v o x e l . ∗ /
+Vector3u c l r ;
+/ ∗ ∗ Number o f o b s e r v a t i o n s t h a t made up @p c l r . ∗ /
+uchar w color ;
+CPU AND GPU CODE I T M V o x e l s r g b ( )
+{
+sdf = SDF initialValue () ;
+w depth = 0;
+c l r = ( uchar ) 0;
+w color = 0;
+}
+};
+where the macro CPU AND GPU CODE identifies methods and functions that can be run both as host and as
+device code and is defined as:
+# i f d e f i n e d ( CUDACC ) && d e f i n e d ( CUDA ARCH )
+# d e f i n e CPU AND GPU CODE
+device
+/ / f o r CUDA d e v i c e c o d e
+#else
+# d e f i n e CPU AND GPU CODE
+# endif
+Alternative voxel types provided along with the current implementation are based on floating point values
+instead of short, or they do not contain colour information. Note that the member hasColorInformation
+is used in the provided integration methods to decide whether or not to gather colour information, which has an
+impact on the processing speed accordingly.
+Two examples for the index data structures that allow accessing the voxels are given below. Again, note that
+the processing engines choose different implementations according to the selected indexing class. For example
+the allocation step for voxel block hashing has to modify a hash table, whereas for a dense voxel array it can
+return immediately and does not have to do anything.
+3.2
+Dense Volumes
+We first discuss the naive way of using a dense volume of limited size, as presented in the earlier works
+of [9, 7, 8, 11]. This is very well suited for understanding the basic workings of the algorithms, it is trivial to
+parallelise on the GPU, and it is sufficient for small scale reconstruction tasks.
+In the InfiniTAM framework the class ITMPlainVoxelArray is used to represent dense volumes and a
+simplified listing of this class is given below:
+c l a s s ITMPlainVoxelArray
+{
+4
+public :
+s t r u c t ITMVoxelArrayInfo {
+/ / / Size in voxels
+Vector3i size ;
+/ / / o f f s e t o f t h e l o w e r l e f t f r o n t c o r n e r o f t h e volume i n v o x e l s
+Vector3i o f f s e t ;
+ITMVoxelArrayInfo ( void )
+{
+s i z e . x = s i z e . y = s i z e . z = 512;
+o f f s e t . x = −256;
+o f f s e t . y = −256;
+o f f s e t . z = 0;
+}
+};
+t y p e d e f ITMVoxelArrayInfo IndexData ;
+private :
+IndexData indexData host ;
+public :
+ITMPlainVoxelArray ( bool allocateGPU )
+...
+˜ ITMPlainVoxelArray ( void )
+...
+/ ∗ ∗ Maximum number o f t o t a l e n t r i e s . ∗ /
+i n t getNumVoxelBlocks ( v o i d ) { r e t u r n 1 ; }
+i n t getVoxelBlockSize ( void ) { r e t u r n indexData host . s i z e . x ∗ indexData host . s i z e . y ∗
+indexData host . size . z ; }
+const Vector3i getVolumeSize ( void ) { r e t u r n i nd e x D a t a h o s t . s i z e ; }
+const IndexData ∗ getIndexData ( void ) const
+...
+};
+Note that the subtype IndexData as well as the methods getIndexData(), getNumVoxelBlocks()
+and getVoxelBlockSize() are used extensively within the processing engines and on top of that the methods getNumVoxelBlocks() and getVoxelBlockSize() are used to determine the overall number of
+voxels that have to be allocated.
+Depending on the choice of voxel type, each voxel requires at least 3 bytes and, depending on the available
+memory a total volume of about 768×768×768 voxels is typically the upper limit for this dense representation.
+To make the most of this limited size, the initial camera is typically placed towards the centre of the rear plane of
+this voxel cube, as identified by the offset in our implementation, so that there is maximum overlap between
+the view frustum and the volume.
+3.3
+Voxel Block Hashing
+The key idea for scaling the SDF based representation to larger 3D environments is to drop the empty voxels
+from outside the truncation band and to represent only the relevant parts of the volume. In [10] this is achieved
+using a hash lookup of subblocks of the volume. Our framework provides an implementation of this method
+that we explain in the following.
+Voxels are grouped in blocks of predefined size (currently 8 × 8 × 8 voxels). All the voxel blocks are stored
+in a contiguous array, referred henceforth as the voxel block array or VBA. In the current implementation this
+has a defined size of 218 elements.
+To handle the voxel blocks we further need:
+• Hash Table and Hashing Function: Enable fast access to voxel blocks in the voxel block array – details
+in Subsection 3.3.1.
+5
+3D voxel block location in world coordinates
+bucket
+Unordered (excess) entries
+Ordered entries
+Hash Table
+Voxel Block Array
+Figure 3: Hash table logical structure
+• Hash Table Operations: Insertion, retrieval and deletion of voxel blocks – details in Subsection 3.3.2.
+3.3.1
+Hash Table and Hashing Function
+To quickly and efficiently find the position of a certain voxel block in the voxel block array, we use a hash table.
+This hash table is a contiguous array of ITMHashEntry objects of the following form:
+s t r u c t ITMHashEntry
+{
+/ ∗ ∗ P o s i t i o n o f t h e c o r n e r o f t h e 8 x8x8 volume , t h a t i d e n t i f i e s t h e e n t r y . ∗ /
+Vec tor3 s pos ;
+/∗ ∗ Offset in the excess l i s t . ∗/
+int offset ;
+/∗ ∗ Pointer to the voxel block array .
+− >= 0 i d e n t i f i e s an a c t u a l a l l o c a t e d e n t r y i n t h e v o x e l b l o c k a r r a y
+− −1 i d e n t i f i e s an e n t r y t h a t h a s b e e n removed ( swapped o u t )
+− <−1 i d e n t i f i e s an u n a l l o c a t e d b l o c k
+∗/
+int ptr ;
+};
+The hash function hashIndex for locating entries in the hash table takes the corner coordinates vVoxPos of
+a 3D voxel block and computes an index as follows [10]:
+t e m p l a t e <t y p e n a m e T> CPU AND GPU CODE i n l i n e i n t h a s h I n d e x ( c o n s t InfiniTAM : : V e c t o r 3 <T>
+vVoxPos , c o n s t i n t hashMask ) {
+r e t u r n ( ( u i n t ) ( ( ( u i n t ) vVoxPos . x ∗ 7 3 8 5 6 0 9 3 ) ˆ ( ( u i n t ) vVoxPos . y ∗ 1 9 3 4 9 6 6 9 ) ˆ ( ( u i n t )
+vVoxPos . z ∗ 8 3 4 9 2 7 9 1 ) ) & ( u i n t ) hashMask ) ;
+}
+To deal with hash collisions, each hash index points to a bucket of fixed size (typically 2), which we consider
+the ordered part of the hash table. There is an additional unordered excess list that is used once an ordered
+bucket fills up. In either case, each ITMHashEntry in the hash table stores an offset in the voxel block array
+and can hence be used to localise the voxel data for this specific voxel block. This overall structure is illustrated
+in Figure 3.
+3.3.2
+Hash Table Operations
+The three main operations used when working with a hash table are the insertion, retrieval and removal of
+entries. In the current version of InfiniTAM we support the former two, with removal not currently required or
+6
+implemented. The code used by the retrieval operation is shown below:
+t e m p l a t e <c l a s s TVoxel>
+CPU AND GPU CODE i n l i n e TVoxel r e a d V o x e l ( c o n s t TVoxel ∗ v o x e l D a t a , c o n s t
+ITMVoxelBlockHash : : I n d e x D a t a ∗ v o x e l I n d e x , c o n s t V e c t o r 3 i & p o i n t , b o o l &i s F o u n d )
+{
+c o n s t ITMHashEntry ∗ h a s h T a b l e = v o x e l I n d e x −> e n t r i e s a l l ;
+c o n s t TVoxel ∗ localVBA = v o x e l D a t a ;
+TVoxel r e s u l t ; V e c t o r 3 i b l o c k P o s ; i n t o f f s e t E x c e s s ;
+i n t l i n e a r I d x = vVoxPosParse ( point , blockPos ) ;
+i n t h a s h I d x = h a s h I n d e x ( b l o c k P o s , SDF HASH MASK ) ∗ SDF ENTRY NUM PER BUCKET ;
+isFound = f a l s e ;
+/ / check ordered l i s t
+f o r ( i n t i n B u c k e t I d x = 0 ; i n B u c k e t I d x < SDF ENTRY NUM PER BUCKET ; i n B u c k e t I d x ++)
+{
+c o n s t ITMHashEntry &h a s h E n t r y = h a s h T a b l e [ h a s h I d x + i n B u c k e t I d x ] ;
+offsetExcess = hashEntry . o f f s e t − 1;
+i f ( h a s h E n t r y . p o s == b l o c k P o s && h a s h E n t r y . p t r >= 0 )
+{
+r e s u l t = localVBA [ ( h a s h E n t r y . p t r ∗ SDF BLOCK SIZE3 ) + l i n e a r I d x ] ;
+isFound = t r u e ;
+return result ;
+}
+}
+/ / check excess l i s t
+w h i l e ( o f f s e t E x c e s s >= 0 )
+{
+c o n s t ITMHashEntry &h a s h E n t r y = h a s h T a b l e [ SDF BUCKET NUM ∗
+SDF ENTRY NUM PER BUCKET + o f f s e t E x c e s s ] ;
+i f ( h a s h E n t r y . p o s == b l o c k P o s && h a s h E n t r y . p t r >= 0 )
+{
+r e s u l t = localVBA [ ( h a s h E n t r y . p t r ∗ SDF BLOCK SIZE3 ) + l i n e a r I d x ] ;
+isFound = t r u e ;
+return result ;
+}
+offsetExcess = hashEntry . o f f s e t − 1;
+}
+return result ;
+}
+Both insertion and retrieval work by iterating through the elements of the list stored within the hash table.
+Given a target 3D voxel location in world coordinates, we first compute its corresponding voxel block location,
+by dividing the voxel location by the size of the voxel blocks. Next, we call the hashing function hashIndex
+to compute the index of the bucket from the ordered part of the hash table. All elements in the bucket are then
+checked, with retrieval looking for the target block location and insertion for an unallocated hash entry. If this
+is found, retrieval returns the voxel stored at the target location within the block addressed by the hash entry.
+Insertion (i) reserves a block inside the voxel block array and (ii) populates the hash table with a new entry
+containing the reserved voxel block array address and target block 3D world coordinate location.
+If all locations in the bucket are exhausted, the enumeration of the list moves to the linked list in the
+unordered part of the hash table, using the offset field to provide the location of the next hash entry. The
+enumeration finishes when offset is found to be smaller or equal to −1. At this point, if the target location
+still has not been found, retrieval returns an empty voxel. Insertion (i) reserves an unallocated entry in the
+unordered part of the hash table and a block inside the voxel block array, (ii) populates the hash table with a
+new entry containing the reserved voxel block array address and target block 3D world coordinate location and
+(iii) changes the offset field in the previous entry in the linked list to point to the newly populated one.
+7
+UserAProgram
+InfiniTAM
+UIEngine
+getImagesfV
+ProcessFramefV
+ImageSourceEngine
+ImageFileReader
+OpenNIEngine
+ITMLib
+ITMMainEngine
+TrackCamerafV
+AllocateScenefV
+IntegratefV
+RaycastfV
+ITMSwappingEngine
+ITMTracker
+ITMColorTracker
+SwapInAndOutfV
+ITMDepthTracker
+ITMGlobalCache
+ITMRenTracker
+ITMSceneReconstructionEngine
+ITMVisualisationEngine
+Figure 4: Simplified diagram of InfiniTAM namespaces, classes and collaborations.
+The reserve operations used for the unordered part of the hash table and for the voxel block array use
+prepopulated allocation lists and, in the GPU code, atomic operations.
+All hash table operations are done through these functions and there is no direct memory access encouraged
+or indeed permitted by the current version of the code.
+4
+Individual Method Stages
+A general outline of the InfiniTAM processing pipeline has already been given in Section 2.1 and Figure 1.
+Details of each processing stage will be discussed in the following. The distinct stages are implemented using
+individual engines and a simplified diagram of the corresponding classes and their collaborations is given in
+Figure 4. The stages are:
+• Tracking: The camera pose for the new frame is obtained by fitting the current depth (or optionally
+colour) image to the projection of the world model from the previous frame. This is implemented using
+the ITMTracker, ITMColorTracker and ITMDepthTracker engines.
+• Allocation: Based on the depth image, new voxel blocks are allocated as required and a list of all visible
+voxel blocks is built. This is implemented inside the ITMSceneReconstructionEngine.
+• Integration: The current depth and colour frames are integrated within the map. This is implemented
+inside the ITMSceneReconstructionEngine.
+• Swapping In and Out: If required, map data is swapped in from host memory to device memory and
+merged with the present data. Parts of the map that are not required are swapped out from device memory
+to host memory. This is implemented using the ITMSwappingEngine and ITMGlobalCache.
+• Raycasting: The world model is rendered from the current pose (i) for visualisation purposes and (ii) to
+be used by the tracking stage at the next frame. This uses the ITMVisualisationEngine.
+As illustrated in Figure 4, the main processing engines are contained within the ITMLib namespace. Apart
+from these, the UI and image acquisition engines (UIEngine, ImageSourceEngine and OpenNIEngine)
+are contained in the InfiniTAM namespace. The ITMLib namespace also contains the additional engine
+8
+class ITMLowLevelEngine that we do not discuss in detail. It is used for low level image processing such
+as computation of image gradients and a resolution hierarchy.
+In this section we discus the tracking, allocation, integration and raycasting stages in greater detail. We
+delay a discussion of the swapping until Section 5.
+4.1
+Tracking
+In the tracking stage the camera pose consisting of the rotation matrix R and translation vector t has to be
+determined given the RGB-D image and the current 3D world model. Along with InfiniTAM we provide the
+three engines ITMDepthTracker and ITMRenTracker that performs tracking based on the new depth
+image, and ITMColorTracker that is using the colour image. All three of these implement the abstract
+ITMTracker class and have implementations running on the CPU and on CUDA.
+In the ITMDepthTracker we follow the original alignment process as described in [9, 7]:
+• Render a map V of surface points and a map N of surface normals from the viewpoint of an initial guess
+for R and t – details in Section 4.4
+• Project all points p from the depth image onto points p̄ in V and N and compute their distances from the
+planar approximation of the surface, i.e. d = (Rp + t − V(p̄))T N (p̄)
+• Find R and t minimising the linearised sum of the squared distances by solving a linear equation system
+• Iterate the previous two steps until convergence
+A resolution hierarchy of the depth image is used in our implementation to improve the convergence behaviour.
+ITMRenTracker is used as the local refinement after ITMDepthTracker, and we implemented a
+variation of the tracking algorithm described in [14]:
+• Given an initial guess for R and t, the method back projects all points p from the depth image into points
+p̄ in the map V and computes the robust cost E = −4 exp{σ V(p̄)}/(exp{σ V(p̄)} + 1)2 , where σ is a
+fixed parameter that controls the basin of attraction
+• Find R and t minimising the sum of the cost using Gauss Newton optimization algorithm
+When ITMRenTracker is chosen, the system first runs ITMDepthTracker on coarse hierarchies of the
+depth image, then ITMRenTracker runs on the high-resolution depth image for the final pose refinement.
+Alternatively the colour image can be used within an ITMColorTracker. In this case the alignment
+process is as follows:
+• Create a list V of surface points and a corresponding list C of colours from the viewpoint of an initial
+guess – details in Section 4.4
+• Project all points from V into the current colour image I and compute the Euclidean norm of the difference
+in colours, i.e. d = kI(π(RV(i) + t)) − C(i)k2
+• Find R and t minimising the sum of the squared differences using the Levenberg-Marquardt optimisation
+algorithm
+Again a resolution hierarchy in the colour image is used and the list of surface points is subsampled by
+a factor of 4. A flag in ITMLibSettings allows to select which tracker is used and the default is the
+ITMDepthTracker.
+The three main classes ITMDepthTracker, ITMRenTracker and ITMColorTracker actually only
+implement a shared optimisation framework, including e.g. the Levenberg-Marquardt algorithm, Gauss Newton
+algorithm and solving the linear equation systems. These are always running on the CPU. Meanwhile the
+evaluation of the error function value, gradient and Hessian is implemented in derived, CPU and CUDA specific
+classes and makes use of parallelisation.
+9
+4.2
+Allocation
+In the allocation stage the underlying data structure for the representation of the truncated signed distance
+function is prepared and updated, so that a new depth image can be integrated. In the simple case of a dense
+voxel grid, the allocation stage does nothing. In contrast, for voxel block hashing the goal is to find all the voxel
+blocks affected by the current depth image and to make sure that they are allocated in the hash table [10].
+In our implementation of voxel block hashing, the aim was to minimise the use of blocking operations (e.g.
+atomics) and to completely avoid the use of critical sections. This has led us to doing the processing three
+separate stages, as we explain in the following.
+In the first stage we project each pixel from the depth image to 3D space and create a line segment along the
+ray from depth d − µ to d + µ, where d is the measured depth at the pixel and µ is the width of the truncation
+band of the signed distance function. This line segment intersects a number of voxel blocks, and we search for
+these voxel blocks in the hash table. If one of the blocks is not allocated yet, we find a free hash bucket space
+for it. As a result for the next stage we create two arrays, each of the same size as the number of elements
+in the hash table. The first array contains a bool indicating the visibility of the voxel block referenced by the
+hash table entry, the second contains information about new allocations that have to be performed. Note that
+this requires only simple, non-atomic writes and if more than one new block has to be allocated with the same
+hash index, only the most recently written allocation will actually be performed. We tolerate such artefacts
+from intra-frame hash collisions, as they will be corrected in the next frame automatically for small intra-frame
+camera motions.
+In the second stage we allocate voxel blocks for each non-zero entry in the allocation array that we built
+previously. This is done using a single atomic subtraction on a stack of free voxel block indices i.e. we decrease
+the number of remaining blocks by one and add the previous head of the stack to the hash entry.
+In the third stage we build a list of live voxel blocks, i.e. a list of the blocks that project inside the visible
+view frustum. This is later going to be used by the integration and swapping stages.
+4.3
+Integration
+In the integration stage, the information from the most recent RGB-D image is incorporated into the 3D world
+model. In case of a dense voxel grid this is identical to the integration in the original KinectFusion algorithm [9,
+7] and for voxel block hashing the changes are minimal after the list of visible voxel blocks has been created in
+the allocation step.
+For each voxel in any of the visible voxel blocks, or for each voxel in the whole volume for dense grids, the
+function computeUpdatedVoxelDepthInfo is called. If a voxel is behind the surface observed in the
+new depth image by more than the truncation band of the signed distance function, the image does not contain
+any new information about this voxel, and the function returns without writing any changes. If the voxel is close
+to or in front of the observed surface, a corresponding observation is added to the accumulated sum. This is
+illustrated in the listing of the function computeUpdatedVoxelDepthInfo below, and there is a similar
+function in the code that additionally updates the colour information of the voxels.
+t e m p l a t e <c l a s s TVoxel>
+CPU AND GPU CODE i n l i n e f l o a t c o m p u t e U p d a t e d V o x e l D e p t h I n f o ( TVoxel &v o x e l , V e c t o r 4 f
+pt model , Matrix4f M d , Vector4f projParams d ,
+f l o a t mu , i n t maxW, f l o a t ∗ d e p t h , V e c t o r 2 i i m g S i z e )
+{
+Vector4f pt camera ; Vector2f pt image ;
+f l o a t d e p t h m e a s u r e , e t a , oldF , newF ;
+i n t oldW , newW ;
+/ / p r o j e c t p o i n t i n t o image
+pt camera = M d ∗ pt model ;
+i f ( p t c a m e r a . z <= 0 ) r e t u r n −1;
+pt image . x = projParams d . x ∗ pt camera . x / pt camera . z + projParams d . z ;
+p t i m a g e . y = p r o j P a r a m s d . y ∗ p t c a m e r a . y / p t c a m e r a . z + p r o j P a r a m s d . w;
+i f ( ( pt image . x < 1) | | ( pt image . x > imgSize . x − 2) | | ( pt image . y < 1) | | ( pt image
+. y > imgSize . y − 2) ) r e t u r n − 1;
+10
+/ / g e t m e a s u r e d d e p t h from image
+depth measure = depth [ ( i n t ) ( pt image . x + 0.5 f ) + ( i n t ) ( pt image . y + 0.5 f ) ∗ imgSize . x
+];
+i f ( d e p t h m e a s u r e <= 0 . 0 ) r e t u r n −1;
+/ / check whether voxel needs up da ti ng
+eta = depth measure − pt camera . z ;
+i f ( e t a < −mu ) r e t u r n e t a ;
+/ / compute u p d a t e d SDF v a l u e and r e l i a b i l i t y
+o l d F = TVoxel : : S D F v a l u e T o F l o a t ( v o x e l . s d f ) ; oldW = v o x e l . w d e p t h ;
+newF = MIN ( 1 . 0 f , e t a / mu ) ;
+newW = 1 ;
+newF = oldW ∗ o l d F + newW ∗ newF ;
+newW = oldW + newW ;
+newF / = newW ;
+newW = MIN(newW , maxW) ;
+/ / w r i t e back
+v o x e l . s d f = TVoxel : : S D F f l o a t T o V a l u e ( newF ) ;
+v o x e l . w d e p t h = newW ;
+return eta ;
+}
+The main difference between the dense voxel grid and the voxel block hashing representations is that the aforementioned update function is called for a different number of voxels and from within different loop constructs.
+4.4
+Raycast
+As the last step in the pipeline, an image is computed from the updated 3D world model to provide input for
+the tracking at the next frame. This image can also be used for visualisation. The main process underlying this
+rendering is raycasting, i.e. for each pixel in the image a ray is being cast from the camera up until an intersection
+with the surface is found. This essentially means checking the value of the truncated signed distance function at
+each voxel along the ray until a zero-crossing is found, and the same raycasting engine can be used for a range
+of different representations, as long as an appropriate readVoxel() function is called for reading values
+from the SDF.
+As noted in the original KinectFusion paper [9], the performance of the raycasting can be improved significantly by taking larger steps along the ray. The value of the truncated signed distance function can serve
+as a conservative estimate for the distance to the nearest surface, hence this value can be used as step size. To
+additionally handle empty space in the volumetric representation, where no corresponding voxel block has been
+allocated, we introduce a state machine with the following states:
+enum {
+SEARCH BLOCK COARSE ,
+SEARCH BLOCK FINE ,
+SEARCH SURFACE ,
+BEHIND SURFACE ,
+WRONG SIDE
+} state ;
+Starting from SEARCH BLOCK COARSE, we take steps of the size of each block, i.e. 8 voxels, until an actually
+allocated block is encountered. Once the ray enters an allocated block, we take a step back and enter state
+SEARCH BLOCK FINE, indicating that the step length is now limited by the truncation band µ of the signed
+distance function. Once we enter a valid block and the values in that block indicate we are still in front of
+the surface, the state is changed to SEARCH SURFACE until a negative value is read from the signed distance
+function, which indicates we are now in state BEHIND SURFACE. This terminates the raycasting iteration and
+the exact location of the surface is now found using two trilinear interpolation steps. The state WRONG SIDE
+is entered if we are searching for a valid block in state SEARCH BLOCK FINE and encounter negative SDF
+values, indicating we are behind the surface as soon as we enter a block. In this case the ray hits the surface
+11
+from behind for whichever reason, and we do not want to count the boundary between the unallocated, empty
+space and the block with the negative values as an object surface.
+Another measure for improving the performance of the raycasting is to select a plausible search range. If a
+sparse voxel block representation is used, then we are given a list of visible blocks from the allocation step, and
+we can render these blocks by forward projection to give us an idea of the maximum and minimum depth values
+to expect at each pixel. Within InfiniTAM this can be done using the method CreateExpectedDepths()
+of an ITMVisualisationEngine. A naive implementation on the CPU computes the 2D bounding box
+of the projection of each voxel block into the image and fills this area with the maximum and minimum depth
+values of the corresponding 3D bounding box of the voxel block, correctly handling overlapping bounding
+boxes, of course.
+To parallelise this process on the GPU we split it into two steps. First we project each block down into
+the image, compute the bounding box, and create a list of 16 × 16 pixel fragments, that are to be filled with
+specific minimum and maximum depth values. Apart from a prefix sum to count the number of fragments, this
+is trivially parallelisable. Second we go through the list of fragments and actually render them. Updating the
+minimum and maximum depth for a pixel requires atomic operations, but by splitting the process into fragments
+we reduce the number of collisions to typically a few hundreds or thousands of pixels in a 640 × 480 image and
+achieve an efficiently parallelised overall process.
+5
+Swapping
+Voxel hashing already enables much larger maps to be created, compared to the much simpler dense 3D volumes. Video card memory capacity however is often quite limited. Practically an off-the-shelf video card can
+roughly hold the map of a single room at 4mm voxel resolution in active memory, even with voxel hashing.
+This problem can be mitigated using a traditional method from the graphics community, that is also employed
+e.g. in [5, 3, 10, 6]. We only hold the active part of the map in video card memory, i.e. only parts that are inside
+or close to the current view frustum. The remainder of the map is swapped out to host memory and swapped
+back in as needed.
+We have designed our swapping framework aiming for the following three objectives: (O1) the transfers
+between host and device should be minimised and have guaranteed maximum bounds, (O2) host processing
+time should be kept to a minimum and (O3) no assumptions should be made about the type and speed of the
+host memory, i.e. it could be a hard drive. These objectives lead to the following design considerations:
+• O1: All memory transfers use a host/device buffer of fixed user-defined size.
+• O2: The host map memory is configured as a voxel block array of size equal to the number of entries in
+the hash table. Therefore, to check if a hash entry has a corresponding voxel block in the host memory,
+only the hash table index needs to be transferred and checked. The host does not need to perform any
+further computations, e.g. as it would have to do if a separate host hash table were used. Furthermore,
+whenever a voxel block is deallocated from device memory, its corresponding hash entry is not deleted
+but rather marked as unavailable in device memory, and, implicitly, available in host memory. This (i)
+helps maintain consistency between device hash table and host voxel block storage and (ii) enables a fast
+visibility check for the parts of the map stored only in host memory.
+• O3: Global memory speed is a function of the type of storage device used, e.g. faster for RAM and slower
+for flash or hard drive storage. This means that, for certain configurations, host memory operations can
+be considerably slower than the device reconstruction. To account for this behaviour and to enable stable
+tracking, the device is constantly integrating new live depth data even for parts of the scene that are known
+to have host data that is not yet in device memory. This might mean that, by the time all visible parts
+of the scene have been swapped into the device memory, some voxel blocks might hold large amounts
+of new data integrated by the device. We could replace the newly fused data with the old one from the
+host stored map, but this would mean disregarding perfectly fine map data. Instead, after the swapping
+operation, we run a secondary integration that fuses the host voxel block data with the newly fused device
+map.
+12
+Tracking
+Allocation
+Populate cacheFromHost.
+Integration
+Populate cacheToHost.
+Swap In
+→ Build list of needed voxel blocks.
+→ Copy list to host memory.
+→ Populate transfer buffer according to list.
+→ Copy voxel transfer buffer to device memory.
+→ Integrate transferred block into device memory.
+Swap Out
+→ Build list of transferring voxel blocks.
+→ Populate transfer buffer according to list.
+→ Delete transferring blocks from voxel block array.
+→ Copy voxel transfer buffer to host memory.
+→ Update global memory with transferred blocks.
+Raycast
+Figure 5: Swapping pipeline
+7
+Device Voxel Memory
+1
+Hash Table
+2
+3
+6
+5
+Transfer Buffer
+Host Voxel Memory
+4
+Figure 6: Swapping in: First, the hash table entry at address 1 is copied into the device transfer buffer at address 2. This
+is then copied at address 3 in the host transfer buffer and used as an address inside the host voxel block array, indicating
+the block at address 4. This block is finally copied back to location 7 inside the device voxel block array, passing through
+the host transfer buffer (location 5) and the device transfer buffer (location 6).
+The design considerations have led us to the swapping in/out pipeline shown in Figure 5. We use the
+allocation stage to establish which parts of the map need to be swapped in, and the integration stage to mark
+which parts need to swapped out. A voxel needs to be swapped (i) from host once it projects within a small
+(tunable) distance from the boundaries of live visible frame and (ii) to disk after data has been integrated from
+the depth camera.
+The swapping in stage is exemplified for a single block in Figure 6. The indices of the hash entries that
+need to be swapped in are copied into the device transfer buffer, up to its capacity. Next, this is transferred to
+the host transfer buffer. There the indices are used as addresses inside the host voxel block array and the target
+blocks are copied to the host transfer buffer. Finally, the host transfer buffer is copied to the device where a
+single kernel integrates directly from the transfer buffer into the device voxel block memory.
+An example for the swapping out stage is shown in Figure 7 for a single block. Both indices and voxel
+blocks that need to be swapped out are copied to the device transfer buffer. This is then copied to the host
+transfer buffer memory and again to host voxel memory.
+All swapping related variables and memory is kept inside the ITMGlobalCache object and all swapping
+related operations are done by the ITMSwappingEngine.
+13
+3
+Device Voxel Memory
+1
+Hash Table
+2
+5
+4
+5
+Transfer Buffer
+Host Voxel Memory
+7
+Figure 7: Swapping Out. The hash table entry at location 1 and the voxel block at location 3 are copied into the device
+transfer buffer at locations 2 and 4, respectively. The entire used transfer buffer is then copied to the host, at locations 5,
+and the hash entry index is used to copy the voxel block into location 7 inside the host voxel block array.
+6
+Compilation, UI, Usage and Examples
+As indicated in the class diagram in Figure 4, the InfiniTAM software package is split into two major parts.
+The bulk of the implementation is grouped in the namespace ITMLib, which contains a stand alone 3D reconstruction library for use in other applications. The InfiniTAM namespace contains further supporting classes
+for image acquisition and a GUI – these parts would almost certainly be replaced in user applications. Finally
+there is a single sample application included allowing the user to quickly test the framework.
+The project comes with a Microsoft R Visual Studio R solution file as well as with a cmake build file
+and has been tested on Microsoft R Windows R 8, openSUSE Linux 12.3 and Apple R Mac R OS X R 10.9
+platforms. Apart from a basic C++ software development environment, InfiniTAM depends on the following
+external third party libraries:
+• OpenGL / GLUT (e.g. freeglut 2.8.0): This is required for the visualisation in the InfiniTAM namespace and the sample application, but the ITMLib library should run without. Freeglut is available from
+http://freeglut.sourceforge.net/
+• NVIDIA c CUDATM SDK (e.g. version 6.0): This is required for all GPU accelerated code. The use
+of GPUs is optional however, and it is still possible to compile the CPU part of the framework without
+CUDA. The CUDA SDK is available from https://developer.nvidia.com/cuda-downloads
+• OpenNI (e.g. version 2.2.0.33): This is optional and the framework compiles without OpenNI, but it is required to get live images from suitable hardware sensors. Again, it is only referred to in the InfiniTAM
+namespace, and without OpenNI the system will still run of previously recorded images stored on disk.
+OpenNI is available from http://structure.io/openni
+Finally the framework comes with a Doxygen reference documentation, that can be built separately. More
+details on the build process can be found in the README file provided alongside the framework.
+The UI for our InfiniTAM sample application is shown in Figure 8. We display the raycasted reconstruction
+rendering, live depth image and live colour image from the camera. Furthermore the processing time per frame
+and the keyboard shortcuts available for the UI are displayed near the bottom. The keyboard shortcuts allow
+the user to process the next frame, to process continuously and to exit. Other functionalities such as exporting
+a 3D model from the current reconstruction and rendering the reconstruction from arbitrary viewpoints are not
+currently implemented. The UI window and interactivity is implemented in UIEngine and depends on the
+OpenGL and GLUT libraries.
+Running InfiniTAM requires the intrinsic calibration data for the depth (and optionally colour) camera. The
+calibration is specified through an external file, an example of which is shown below.
+640 480
+504.261 503.905
+352.457 272.202
+14
+Reconstruction
+Live depth image
+Keyboard shortcuts
+Live colour image
+Processing time per frame
+Figure 8: InfiniTAM UI Example
+640 480
+573.71 574.394
+346.471 249.031
+0.999749 0.00518867 0.0217975 0.0243073
+−0.0051649 0 . 9 9 9 9 8 6 −0.0011465 −0.000166518
+−0.0218031 0 . 0 0 1 0 3 3 6 3 0 . 9 9 9 7 6 2 0 . 0 1 5 1 7 0 6
+1135.09 0.0819141
+This includes (i) for each camera (RGB and depth) the image size, focal length and principal point in pixels,
+as per the Matlab Calibration Toolbox [2] (ii) the Euclidean transformation matrix mapping points in the RGB
+camera coordinate system to the depth camera and (iii) the calibration converting Kinect-like disparity values
+to depths. If the depth tracker is used, the calibration for the RGB camera and the Euclidean transformation
+between the two are ignored. If live data from OpenNI is used, the disparity calibration is ignored.
+We also provide two example command lines using different data sources, OpenNI and image files. These
+data sources are selected based on the number of arguments passed to InfiniTAM and for example in the bash
+shell with a Linux environment these are:
+$ ./InfiniTAM Teddy/calib.txt
+$ ./InfiniTAM Teddy/calib.txt Teddy/Frames/%04i.ppm Teddy/Frames/%04i.pgm
+The first line starts InfiniTAM with the specified calibration file and live input from OpenNI, while the second
+uses the given calibration file and the RGB and depth images specified in the other two arguments. We tested the
+OpenNI input with a Microsoft Kinect for XBOX 360, with a PrimeSense Carmine 1.08 and with the Occipital
+Structure Sensor. For offline use with images from files, these have to be in PPM/PGM format with the RGB
+images being standard PPM files and the depth images being 16bit big-endian raw Kinect disparities.
+All internal library settings are defined inside the ITMLibSettings class, and they are:
+/ / / Use GPU o r r u n t h e c o d e on t h e CPU i n s t e a d .
+b o o l useGPU ;
+15
+/ / / E n a b l e s s w a p p i n g b e t w e e n h o s t and d e v i c e .
+bool useSwapping ;
+/ / / Tracker types
+t y p e d e f enum {
+/ / ! I d e n t i f i e s a t r a c k e r b a s e d on c o l o u r image
+TRACKER COLOR,
+/ / ! I d e n t i f i e s a t r a c k e r b a s e d on d e p t h image
+TRACKER ICP
+} TrackerType ;
+/ / / S e l e c t the type of t r a c k e r to use
+TrackerType trackerType ;
+/ / / Number o f r e s o l u t i o n l e v e l s f o r t h e t r a c k e r .
+i n t noHierarchyLevels ;
+/ / / Number o f r e s o l u t i o n l e v e l s t o t r a c k o n l y r o t a t i o n i n s t e a d o f f u l l SE3 .
+i n t noRotationOnlyLevels ;
+/ / / For ITMColorTracker : s k i p every o t h e r p o i n t i n energy f u n c t i o n e v a l u a t i o n .
+bool s k i p P o i n t s ;
+/ / / F o r I T M D e p th T r a c k e r : ICP d i s t a n c e t h r e s h o l d
+f l o a t depthTrackerICPThreshold ;
+/ / / Further , scene s p e c i f i c p ar a me t er s such as voxel s i z e
+ITMLib : : O b j e c t s : : ITMSceneParams s c e n e P a r a m s ;
+The ITMSceneParams further contain settings for the voxel size in millimetres and the truncation band of
+the signed distance function. Furthermore the file ITMLibDefines.h contains definitions that select the
+type of voxels and the voxel index used in the compilation of ITMMainEngine:
+/ ∗ ∗ T h i s c h o o s e s t h e i n f o r m a t i o n s t o r e d a t e a c h v o x e l . At t h e moment , v a l i d
+o p t i o n s a r e ITMVoxel s , ITMVoxel f , I T M V o x e l s r g b and I T M V o x e l f r g b
+∗/
+t y p e d e f ITMVoxel s ITMVoxel ;
+/ ∗ ∗ T h i s c h o o s e s t h e way t h e v o x e l s a r e a d d r e s s e d and i n d e x e d . At t h e moment ,
+v a l i d o p t i o n s a r e ITMVoxelBlockHash and I T M P l a i n V o x e l A r r a y .
+∗/
+t y p e d e f ITMLib : : O b j e c t s : : ITMVoxelBlockHash ITMVoxelIndex ;
+For using InfiniTAM as a 3D reconstruction library in other applications, the class ITMMainEngine
+is recommended as the main entry point to the ITMLib library. It performs the whole 3D reconstruction
+algorithm. Internally it stores the latest image as well as the 3D world model and it keeps track of the camera
+pose. The intended use is as follows:
+1. Create an ITMMainEngine specifying the internal settings, camera parameters and image sizes.
+2. Get the pointer to the internally stored images with the method GetView() and write new image information to that memory.
+3. Call the method ProcessFrame() to track the camera and integrate the new information into the
+world model.
+4. Optionally access the rendered reconstruction or another image for visualisation using GetImage().
+5. Iterate the above three steps for each image in the sequence.
+The internally stored information can be accessed through member variables trackingState and scene.
+7
+Conclusions
+We tried to keep the InfiniTAM system as simple, portable and usable as possible. We hope that the external
+dependencies on CUDA, OpenNI, OpenGL and GLUT are easy to meet and that the cmake and MSVC project
+16
+files allow users to build the framework on a wide range of platforms. While the user interface and surroundings
+are fairly minimalistic, the underlying library should be reliable, robust and well tested.
+We also tried to keep an eye on expandability. For example it is fairly easy to integrate a different form of
+tracking into the pipeline by reimplementing the ITMTracker interface. Also different media for swapping
+can be made accessible by replacing the ITMGlobalCache class. Finally it is still a manageable process to
+port InfiniTAM to different kinds of hardware platforms by reimplementing the Device Specific Layer of the
+engines.
+While we hope that InfiniTAM provides a reliable basis for further research, no system is perfect. We will
+try to fix any problems we hear of and provide future updates to InfiniTAM at the project website.
+References
+[1] Anatoly Baskeheev. An open source implementation of kinectfusion. http://play.pointclouds.org/
+news/2011/12/08/kinectfusion-open-source/, December 2011. [accessed 15th October 2014].
+[2] Jean-Yves Bouguet. Camera calibration toolbox for matlab.
+bouguetj/calib_doc/, 2004. [accessed 15th October 2014].
+http://www.vision.caltech.edu/
+[3] Jiawen Chen, Dennis Bautembach, and Shahram Izadi. Scalable real-time volumetric surface reconstruction. ACM
+Transactions on Graphics, 32(4):113:1–113:16, July 2013.
+[4] Brian Curless and Marc Levoy. A volumetric method for building complex models from range images. In Conference
+on Computer Graphics and Interactive Techniques (SIGGRAPH), pages 303–312, 1996.
+[5] Raphael Favier and Francisco Heredia. Using kinfu large scale to generate a textured mesh. http://
+pointclouds.org/documentation/tutorials/using_kinfu_large_scale.php, 2012. [accessed 15th October 2014].
+[6] Peter Henry, Dieter Fox, Achintya Bhowmik, and Rajiv Mongia. Patch volumes: Segmentation-based consistent
+mapping with rgb-d cameras. In International Conference on 3D Vision, pages 398–405, 2013.
+[7] Shahram Izadi, David Kim, Otmar Hilliges, David Molyneaux, Richard Newcombe, Pushmeet Kohli, Jamie Shotton, Steve Hodges, Dustin Freeman, Andrew Davison, and Andrew Fitzgibbon. Kinectfusion: Real-time 3d reconstruction and interaction using a moving depth camera. In User Interface Software and Technology (UIST), pages
+559–568, 2011.
+[8] R.A. Newcombe, S.J. Lovegrove, and A.J. Davison. Dtam: Dense tracking and mapping in real-time. In International Conference on Computer Vision (ICCV), pages 2320–2327, 2011.
+[9] Richard A. Newcombe, Shahram Izadi, Otmar Hilliges, David Molyneaux, David Kim, Andrew J. Davison, Pushmeet Kohli, Jamie Shotton, Steve Hodges, and Andrew Fitzgibbon. Kinectfusion: Real-time dense surface mapping
+and tracking. In International Symposium on Mixed and Augmented Reality (ISMAR), pages 127–136, 2011.
+[10] Matthias Nießner, Michael Zollhöfer, Shahram Izadi, and Marc Stamminger. Real-time 3d reconstruction at scale
+using voxel hashing. ACM Transactions on Graphics, 32(6):169:1–169:11, November 2013.
+[11] V. Pradeep, C. Rhemann, S. Izadi, C. Zach, M. Bleyer, and S. Bathiche. Monofusion: Real-time 3d reconstruction
+of small scenes with a single web camera. In International Symposium on Mixed and Augmented Reality (ISMAR),
+pages 83–88, Oct 2013.
+[12] PROFACTOR. Reconstructme. http://reconstructme.net/, 2012. [accessed 15th October 2014].
+[13] Gerhard Reitmayr. Kfusion. https://github.com/GerhardR/kfusion, 2013. [accessed 15th October
+2014].
+[14] Carl Yuheng Ren and Ian Reid. A unified energy minimization framework for model fitting in depth. In Computer
+Vision ECCV 2012. Workshops and Demonstrations, volume 7584, pages 72–82. Springer Berlin Heidelberg, 2012.
+[15] Henry Roth and Marsette Vona. Moving volume kinectfusion. In British Machine Vision Conference (BMVC), pages
+112.1–112.11, 2012.
+[16] F. Steinbruecker, J. Sturm, and D. Cremers. Volumetric 3d mapping in real-time on a cpu. In International Conference on Robotics and Automation (ICRA), 2014.
+[17] Diego Thomas and Akihiro Sugimoto. A flexible scene representation for 3d reconstruction using an rgb-d camera.
+In International Conference on Computer Vision (ICCV), pages 2800–2807, Dec 2013.
+17
+[18] Thomas Whelan, Hordur Johannsson, Michael Kaess, John J Leonard, and John McDonald. Robust real-time visual
+odometry for dense rgb-d mapping. In International Conference on Robotics and Automation (ICRA), pages 5724–
+5731, 2013.
+[19] Ming Zeng, Fukai Zhao, Jiaxiang Zheng, and Xinguo Liu. Octree-based fusion for realtime 3d reconstruction.
+Graphical Models, 75(3):126–136, May 2013.
+18

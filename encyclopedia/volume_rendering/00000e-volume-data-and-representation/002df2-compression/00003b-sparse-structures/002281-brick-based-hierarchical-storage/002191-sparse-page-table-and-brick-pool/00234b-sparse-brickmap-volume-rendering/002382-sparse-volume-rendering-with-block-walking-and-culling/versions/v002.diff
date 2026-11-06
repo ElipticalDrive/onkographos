@@ -1,0 +1,203 @@
+--- v001.md
++++ v002.md
+@@ -8,17 +8,17 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** RGBA volume data (8 bits per channel, last component is density), user-specified density range for culling, rendering mode (first-hit, alpha=1 termination, or full traversal).
+-- **Output:** Rendered image or scalar traversal count.
++- **Input:** RGBA volume data (8 bits per channel, last component represents density), user-specified density range for culling, rendering mode (first-hit, alpha=1 termination, or full traversal) [S1, unofficial].
++- **Output:** Rendered image or scalar traversal count [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Subblock:** A dense 3D grid of voxels. Default size is $8 \times 8 \times 8$ voxels, but parametric [G]. Voxel data is RGBA 8-bit; no transfer function applied during preprocessing [S1, unofficial].
++1.  **Subblock:** A dense 3D grid of voxels. Default size is $8 \times 8 \times 8$ voxels, with parametric support for other sizes [S1, unofficial]. Voxel data is RGBA 8-bit; no transfer function is applied during preprocessing [S1, unofficial].
+ 2.  **Block:** Contains indices of active Subblocks.
+-    -   **Index Storage:** Subblock addresses are stored as unsigned 8-bit integers. This limits the maximum number of subblocks per block to $6^3 = 216$ (since $6^3 \le 256$) [S1, unofficial].
+-    -   **Adjacency:** Stores information about adjacent nodes (blocks) to enable block walking [S1, unofficial].
+-    -   **Culling Mask:** A bitfield representing the density range of the block.
+-3.  **Acceleration Structure:** Built from Block AABBs. Blocks act as top-level instances [S1, unofficial].
++    -   **Index Storage:** Subblock addresses are stored as unsigned 8-bit integers inside blocks. This limits the maximum number of subblocks per block to $6^3 = 216$ (since $6^3 \le 256$) [S1, unofficial].
++    -   **Adjacency:** Stores indices of neighboring blocks to enable block walking [S1, unofficial].
++    -   **Culling Mask:** A bitfield representing the quantized density range of the block [S1, unofficial].
++3.  **Acceleration Structure:** Built from Block AABBs. Blocks are passed as top-level primitives to the acceleration structure [S1, unofficial].
+ 
+ **Parameters:**
+--   **Quantization Divider ($q$):** Used to bin density ranges into culling mask bits. Calculated as $q = \frac{\text{max density}}{\text{max bits allowed}}$. For Vulkan (8-bit mask) and 8-bit density data (max 256), $q = 256 / 32 = 8$ [S1, unofficial]. Note: The source states "divide... by 32" implying 32 bits are used for annotation or a specific mapping, resulting in $q=8$ [S1, unofficial].
++-   **Quantization Divider ($q$):** Used to bin density ranges into culling mask bits. Calculated by dividing the maximum possible density value by the maximum number of bits the API allows for acceleration structure annotation. For Vulkan (8-bit mask) and 8-bit density data (max 256), the source divides 256 by 32 to represent the density range as a bitfield, yielding $q = 256 / 32 = 8$ [S1, unofficial].
+ 
+ **Steps:**
+@@ -26,5 +26,5 @@
+ 2.  **Compute Adjacency Information:** For each block, compute and store indices of neighboring blocks in the BVH node's corresponding field [S1, unofficial].
+ 3.  **Compute Culling Masks:**
+-    -   For each block, compute min and max density of its voxels.
++    -   For each block, compute min and max density of its voxels [S1, unofficial].
+     -   Calculate quantized indices: $idx_{min} = \lfloor \min(\text{density}) / q \rfloor$, $idx_{max} = \lfloor \max(\text{density}) / q \rfloor$ [S1, unofficial].
+     -   Create a bitfield mask with bits set between $idx_{min}$ and $idx_{max}$ [S1, unofficial].
+@@ -44,28 +44,29 @@
+ # Constants
+ SUBBLOCK_SIZE = 8
+-MAX_SUBBLOCKS_PER_BLOCK = 216 # 6^3
+-Q = 8 # Quantization divider for 8-bit density and 32-bit mask range
++MAX_SUBBLOCKS_PER_BLOCK = 216  # 6^3
++Q = 8                          # Quantization divider for 8-bit density and 32-bit mask range
++VoxelBytes = 4                 # RGBA 8-bit
+ 
+-# Data Structures
+ class Subblock:
+-    voxels: array[8][8][8] # RGBA 8-bit
++    voxels: list  # Flat list of RGBA tuples, length 8*8*8
+ 
+ class Block:
+-    subblock_indices: array[MAX_SUBBLOCKS_PER_BLOCK] # uint8
+-    adjacency: array[26] # Indices of neighboring blocks
+-    culling_mask: uint32 # Bitfield
+-    min_density: float
+-    max_density: float
+-    aabb: AABB
++    subblock_indices: list  # uint8, active subblock indices
++    adjacency: list         # list of Block references
++    culling_mask: int       # bitfield
++    aabb_min: tuple         # (x, y, z)
++    aabb_max: tuple         # (x, y, z)
+ 
+-# Initialization
+-blocks: array[Block]
+-accel_structure: AccelerationStructure(blocks)
++class Ray:
++    origin: tuple
++    direction: tuple
++    max_t: float
+ 
+-def compute_culling_mask(block: Block) -> uint32:
+-    min_d = min(block.voxels)
+-    max_d = max(block.voxels)
+-    idx_min = floor(min_d / Q)
+-    idx_max = floor(max_d / Q)
++def get_subblock(base_addr, index):
++    return base_addr + index * (SUBBLOCK_SIZE ** 3 * VoxelBytes)
++
++def compute_culling_mask(min_d, max_d):
++    idx_min = int(min_d // Q)
++    idx_max = int(max_d // Q)
+     mask = 0
+     for i in range(idx_min, idx_max + 1):
+@@ -73,17 +74,60 @@
+     return mask
+ 
+-def traverse_block(block: Block, ray: Ray, t_start: float, t_end: float):
+-    # Two-level DDA traversal of subblocks within the block
+-    for subblock_idx in block.subblock_indices:
+-        subblock = get_subblock(subblock_idx)
+-        # Traverse voxels in subblock along ray segment [t_start, t_end]
+-        # Accumulate color/alpha
+-        pass
++def intersect_aabb(ray, aabb_min, aabb_max):
++    t_min, t_max = 0.0, ray.max_t
++    for i in range(3):
++        inv_d = 1.0 / ray.direction[i]
++        t1 = (aabb_min[i] - ray.origin[i]) * inv_d
++        t2 = (aabb_max[i] - ray.origin[i]) * inv_d
++        t_min = max(t_min, min(t1, t2))
++        t_max = min(t_max, max(t1, t2))
++    return t_min if t_min < t_max else -1.0
+ 
+-def render_ray(ray: Ray, config: Config):
++def traverse_block(block, ray, t_start, t_end, base_addr):
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_alpha = 0.0
++    for idx in block.subblock_indices:
++        if idx == 0: break  # Null index terminator
++        subblock_addr = get_subblock(base_addr, idx)
++        # Standard 3D DDA through subblock voxels
++        inv_dir = [1.0 / d if d != 0 else 1e8 for d in ray.direction]
++        start_voxel = [int((ray.origin[i] - block.aabb_min[i]) * inv_dir[i]) for i in range(3)]
++        step = [1 if ray.direction[i] > 0 else -1 for i in range(3)]
++        t_delta = [abs(inv_dir[i]) for i in range(3)]
++        t_max_voxel = [t_delta[i] * (step[i] * (SUBBLOCK_SIZE - 1 - max(0, start_voxel[i])) if step[i] > 0 else t_delta[i] * max(0, -start_voxel[i])) for i in range(3)]
++        
++        t = t_start
++        while t <= t_end:
++            # Check if current voxel is within subblock bounds
++            if all(0 <= start_voxel[i] < SUBBLOCK_SIZE for i in range(3)):
++                voxel_idx = start_voxel[0] * 64 + start_voxel[1] * 8 + start_voxel[2]
++                r, g, b, density = subblock_addr[voxel_idx]
++                density /= 255.0
++                if density > 0:
++                    weight = (1.0 - accumulated_alpha) * density
++                    accumulated_color[0] += weight * r / 255.0
++                    accumulated_color[1] += weight * g / 255.0
++                    accumulated_color[2] += weight * b / 255.0
++                    accumulated_alpha += weight
++                    if accumulated_alpha >= 1.0:
++                        return accumulated_color, True
++            # Advance DDA
++            t_next = t
++            for i in range(3):
++                if t_next > t_max_voxel[i]:
++                    t_next = t_max_voxel[i]
++                    start_voxel[i] += step[i]
++            t = t_next
++    return accumulated_color, accumulated_alpha >= 1.0
++
++def render_ray(ray, config, accel, base_addr):
++    accumulated_color = [0.0, 0.0, 0.0]
++    accumulated_alpha = 0.0
++    t_current = 0.0
++    
+     # 1. First Hit Query
+-    hit = accel_structure.ray_query(ray, cull_mask=config.culling_mask)
++    hit = accel.ray_query(ray, cull_mask=config.culling_mask)
+     if not hit.hit:
+-        return background_color
++        return config.background_color
+ 
+     current_block = hit.block
+@@ -92,28 +136,27 @@
+     while t_current < ray.max_t:
+         # 2. Process Current Block
+-        traverse_block(current_block, ray, t_current, ray.max_t)
+-        
+-        # Check termination conditions (alpha=1, etc.)
+-        if is_terminated():
++        color, terminated = traverse_block(current_block, ray, t_current, ray.max_t, base_addr)
++        accumulated_color = [accumulated_color[i] + (1.0 - accumulated_alpha) * color[i] for i in range(3)]
++        accumulated_alpha += (1.0 - accumulated_alpha) * 0.0  # Placeholder for block-level alpha contribution
++        if terminated or accumulated_alpha >= 1.0:
+             break
+ 
+         # 3. Block Walking
+-        t_next = get_next_t_after_hdda() # Parametric t after HDDA
+-        
+-        # Check adjacency
++        # Compute exit t from current block's AABB along ray
++        t_exit = intersect_aabb(ray, current_block.aabb_min, current_block.aabb_max)
++        if t_exit < 0 or t_exit > ray.max_t:
++            break
++            
+         next_block = None
+-        for neighbor_idx in current_block.adjacency:
+-            neighbor = get_block(neighbor_idx)
+-            if is_inside_block(neighbor, t_next):
++        for neighbor in current_block.adjacency:
++            if intersect_aabb(ray, neighbor.aabb_min, neighbor.aabb_max) >= t_exit:
+                 next_block = neighbor
+                 break
+         
+         if next_block:
+-            # Block Walking: Skip ray query
+             current_block = next_block
+-            t_current = t_next
++            t_current = t_exit
+         else:
+-            # Fallback: Ray Query
+-            hit = accel_structure.ray_query(ray, cull_mask=config.culling_mask, t_min=t_next)
++            hit = accel.ray_query(ray, cull_mask=config.culling_mask, t_min=t_exit)
+             if not hit.hit:
+                 break
+@@ -133,5 +176,5 @@
+ 
+ ## Background
+-Originated by Mehmet Oguz Derin, Takahiro Harada, Yusuke Takeyama, and Yasuhiro Iba from Hokkaido University, Japan [S1, unofficial]. Presented at SIGGRAPH Asia 2021 [S1, unofficial]. Implemented using Vulkan 1.2 with buffer device address, acceleration structure, and ray query extensions [S1, unofficial]. Tested on AMD Radeon PRO W6800 GPU [S1, unofficial].
++Originated by Mehmet Oguz Derin, Takahiro Harada, Yusuke Takeyama, and Yasuhiro Iba from Hokkaido University, Japan [S1, unofficial]. Implemented using Vulkan 1.2 with buffer device address, acceleration structure, and ray query extensions [S1, unofficial]. Tested on AMD Radeon PRO W6800 GPU [S1, unofficial].
+ 
+ ## Sources

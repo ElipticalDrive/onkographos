@@ -1,0 +1,308 @@
+--- v006.md
++++ v007.md
+@@ -4,163 +4,139 @@
+ 
+ ## Overview
+-Data Consistency Loss enforces fidelity between the rendered output of a differentiable volume rendering model and the observed input data by minimizing the discrepancy between forward-projected predictions and ground-truth measurements [S1, unofficial]. It solves the inverse problem of reconstructing a volumetric scene from projections (e.g., X-ray CT) or ensuring that the implicit surface representation is consistent with multi-view image observations [S1, S2, unofficial]. Unlike sibling regularization losses that enforce spatial smoothness or geometric priors, this method directly ties the optimization to the physical measurement process [S1, unofficial]. It builds on [Regularization losses](1413-regularization-losses.md).
++Data Consistency Loss enforces geometric and photometric fidelity by minimizing the discrepancy between the forward-projected scene representation and the measured input data (e.g., raw projections or reference images) [S1, unofficial]. It solves the problem of ill-posedness in inverse rendering and tomography by ensuring the optimized volume or implicit surface remains consistent with the physical observation process [S1, unofficial]. Unlike sibling methods that rely on pixel-wise photometric errors in the final rendered image space (e.g., [L1+SSIM Loss](2890-l1-ssim-loss.md)) or semantic feature matching (e.g., [Multi-level Semantic Consistency Loss](7472-optimal-transport-loss.md)), this method operates directly on the projection domain or enforces consistency via explicit geometric projection of points to surfaces [S1, S2, unofficial].
+ 
+ ## How it works
+-The method minimizes the difference between the data predicted by the differentiable forward model and the actual measured data. The specific implementation depends on the domain (tomographic reconstruction vs. multi-view surface reconstruction).
++The method minimizes the squared L2 norm difference between the forward-projected data and the original measured projection data [S1, unofficial]. In implicit surface variants, it projects points to the nearest neighbor on the implicit surface using SDF gradients and enforces photometric consistency between image patches [S2, unofficial].
+ 
+-### Inputs and Outputs
++**Inputs and Outputs:**
+ *   **Inputs:**
+-    *   $x$: The scene representation parameters (e.g., voxel grid values, neural network weights for density/color/SDF) [S1, S2, unofficial].
+-    *   $y$: The observed projection data (e.g., sinogram in CT) or reference/source images [S1, S2, unofficial].
+-    *   $A$: The forward projection operator, which maps the scene representation $x$ to the measurement space [S1, unofficial].
++    *   $x$: The scene representation (volume density field or SDF field).
++    *   $y$: The measured data (X-ray projections or reference images).
++    *   $A$: The forward projection operator (differentiable).
+ *   **Outputs:**
+-    *   $\mathcal{L}_{data}$: A scalar loss value representing the inconsistency between the forward-projected scene and the observations.
++    *   $\mathcal{L}_{data}$: The scalar loss value.
++    *   Gradients $\frac{\partial \mathcal{L}_{data}}{\partial x}$ for backpropagation.
+ 
+-### Data Structures
+-*   **Forward Projector ($A$):** A differentiable module that implements the rendering or projection equation. In tomography, this is often a differentiable ray-marching or line-integral operator [S1, unofficial]. In multi-view settings, it involves projecting 3D points to 2D image coordinates and sampling features [S2, unofficial].
+-*   **Scene Representation ($x$):** Can be a discrete volume (tensor) or continuous neural network parameters [S1, S2, unofficial].
++**Data Structures:**
++*   **Volume/Field $x$**: A tensor of shape $(N,)$ or $(D, H, W)$ containing density or SDF values at sampled points. [S1, S2, unofficial]
++*   **Projection Operator $A$**: A differentiable function or module that maps $x$ to the projection space. In PyTorch implementations, this is often a custom `nn.Module` or CUDA kernel [S1, unofficial].
++*   **Measured Data $y$**: A tensor of shape matching the output of $A(x)$, containing the ground-truth projection values or image patches. [S1, S2, unofficial]
+ 
+-### Steps and Formulas
++**Steps:**
+ 
+-#### 1. Tomographic/Projection Consistency (L2 Norm)
+-For volume rendering applied to tomographic reconstruction, the loss is defined as the squared L2 norm difference between the forward-projected data and the original projection data [S1, unofficial].
++1.  **Forward Projection:** Compute the predicted projection data by applying the forward projection operator to the current scene representation.
++    $$ \hat{y} = A(x) $$
++    Where $\hat{y}$ is the forward-projected data. [S1, unofficial]
+ 
+-$$
+-\mathcal{L}_{data} = \| Ax - y \|_2^2
+-$$
++2.  **Loss Calculation (Projection Domain):** Compute the squared L2 norm difference between the predicted projection $\hat{y}$ and the measured data $y$.
++    $$ \mathcal{L}_{data} = \| A(x) - y \|_2^2 = \sum_{i} (\hat{y}_i - y_i)^2 $$
++    Where the sum is over all projection elements. [S1, unofficial]
+ 
+-Where:
+-*   $x \in \mathbb{R}^n$ is the volume representation [S1, unofficial].
+-*   $A$ is the forward projection operator [S1, unofficial].
+-*   $y$ is the measured projection data [S1, unofficial].
++3.  **Neural Projection (Implicit Surface Variant):** For methods using Signed Distance Fields (SDF), project a point $x_P$ to the nearest neighbor $t_P$ on the implicit surface $S$ using the SDF value and its gradient.
++    *   Compute the gradient of the SDF at $x_P$:
++        $$ g(x_P) = \nabla f(x_P) $$
++        Where $f(x_P)$ is the SDF value and $g(x_P)$ is the direction of fastest increase (pointing outward). [S2, unofficial]
++    *   Project $x_P$ to $t_P$ along the gradient direction by a distance of $|f(x_P)|$:
++        $$ t_P = x_P - f(x_P) \frac{g(x_P)}{\|g(x_P)\|_2} $$
++        [S2, unofficial]
+ 
+-#### 2. Neural Projection with Photometric Consistency (SDF Regularization)
+-In implicit surface reconstruction (NeRF/SDF variants), a variant called **Neural Projection** uses photometric consistency to regularize the SDF field [S2, unofficial]. This is applied to the base SDF network signals, not the final output, to allow gradient computation and avoid interfering with bias networks [S2, unofficial].
++4.  **Photometric Consistency (Implicit Surface Variant):** Enforce consistency between patches around the projected point $t_P$ in the reference image $I_r$ and source images $I_s$.
++    *   Extract patches $s$ around $t_P$ in $I_r$ and $I_s$.
++    *   Calculate the Normalized Cross-Correlation (NCC) score:
++        $$ \text{Score}(I_r(s), I_s(s)) = \frac{\text{Cov}(I_r(s), I_s(s))}{\sqrt{\text{Var}(I_r(s)) \text{Var}(I_s(s))}} $$
++        Where $\text{Cov}$ is covariance and $\text{Var}$ is variance. [S2, unofficial]
++    *   Compute the photometric consistency loss $\mathcal{L}_{pc}$ over a set of points $P$ and the top $m$ source images:
++        $$ \mathcal{L}_{pc} = \frac{1}{m D_P} \sum_{x_P \in P} \sum_{i=1}^m (1 - \text{Score}(I_r(s), I_{s_i}(s))) $$
++        Where $D_P$ is the number of points in $P$, and $m$ is the number of source images used (typically 4). [S2, unofficial]
+ 
+-**Step 1: Neural Projection**
+-For a point $x_P$, compute the gradient $g(x_P) = \nabla f(x_P)$, which represents the direction of fastest increasing SDF [S2, unofficial]. Project $x_P$ to the nearest neighbor $t_P$ on the implicit surface $S$ by moving along the gradient direction [S2, unofficial]:
++5.  **Total Loss:** Combine with other terms (e.g., Eikonal loss, RGB loss) as per the specific framework. For example, in Point-NeuS:
++    $$ \mathcal{L} = \mathcal{L}_{rgb} + \lambda_{eik} \mathcal{L}_{eik} + \lambda_{pc} \mathcal{L}_{pc} $$
++    [S2, unofficial]
+ 
+-$$
+-t_P = x_P - f(x_P) \frac{g(x_P)}{\|g(x_P)\|_2}
+-$$
++**Parameters:**
++*   $\lambda_k$: Weight for the data consistency term relative to other losses. Not given in the sources for the base formula, but typically tuned per scene.
++*   $m$: Number of source images for photometric consistency. Set to 4 in [S2, unofficial].
+ 
+-Where $f(x_P)$ is the SDF value at $x_P$ [S2, unofficial].
++**Edge Cases and Pitfalls:**
++*   **Gradient Computation:** In implicit surface methods, the photometric consistency loss should be applied to the signals from the base SDF network, not the final SDF, to allow for gradient computation and avoid interfering with bias networks [S2, unofficial].
++*   **Precision:** The accuracy of the learned projection distance is consistent with the accuracy of the constructed implicit surface; errors in gradient estimation can lead to incorrect surface projections [S2, unofficial].
++*   **Differentiability:** The forward projection operator $A$ must be differentiable to enable backpropagation through the rendering equation [S1, unofficial].
+ 
+-**Step 2: Patch Extraction**
+-Extract patches $s$ around the projected point $t_P$ in the reference image $I_r$ and source images $I_s$ [S2, unofficial]. The image corresponding to the depth map generating $x_P$ is the reference; others are sources [S2, unofficial].
+-
+-**Step 3: Photometric Scoring**
+-Calculate the Normalized Cross-Correlation (NCC) score between the reference patch $I_r(s)$ and source patch $I_s(s)$ [S2, unofficial]:
+-
+-$$
+-\text{Score}(I_r(s), I_s(s)) = \frac{\text{Cov}(I_r(s), I_s(s))}{\sqrt{\text{Var}(I_r(s)) \text{Var}(I_s(s))}}
+-$$
+-
+-Where $\text{Cov}$ is covariance and $\text{Var}$ is variance [S2, unofficial].
+-
+-**Step 4: Loss Calculation**
+-Compute the photometric consistency loss $\mathcal{L}_{pc}$ over all points $P$ and the top $m$ source images [S2, unofficial]:
+-
+-$$
+-\mathcal{L}_{pc} = \frac{1}{m D_P} \sum_{x_P \in P} \sum_{i=1}^m (1 - \text{Score}(I_r(s), I_{s_i}(s)))
+-$$
+-
+-Where $D_P$ is the number of points in set $P$, and $m$ is the number of source images used (typically 4) [S2, unofficial].
+-
+-### Parameters
+-*   **$m$ (Number of source images):** The number of source images achieving the best NCC scores used for loss calculation. Typical value: 4 [S2, unofficial].
+-*   **$\lambda_{pc}$ (Weight):** The weight for the photometric consistency loss in the total loss function. Not explicitly given in sources, but typically balanced with other terms like Eikonal loss [S2, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Gradient Interference:** The photometric consistency loss must be applied to the signals from the base SDF network, not the final SDF output, to ensure valid gradient computation and avoid interfering with subsequent bias networks [S2, unofficial].
+-*   **Precision:** The accuracy of the learned projection distance is directly consistent with the accuracy of the constructed implicit surface; errors in SDF prediction lead to incorrect projection positions [S2, unofficial].
+-*   **Differentiability:** The forward projector $A$ must be fully differentiable to allow backpropagation through the rendering equation [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def data_consistency_loss_tomography(scene_params, projections, projector):
++import torch
++import torch.nn.functional as F
++
++def data_consistency_loss_projection(x, y, projector):
+     """
+-    Computes L2 loss between forward-projected scene and ground truth projections.
++    Computes Data Consistency Loss for volume rendering/tomography.
+     
+     Args:
+-        scene_params: Tensor representing the volume x.
+-        projections: Tensor representing the measured data y.
+-        projector: Differentiable forward projection operator A.
++        x: Scene representation (volume or SDF values) at sampled points.
++        y: Measured projection data (ground truth).
++        projector: Differentiable forward projection operator (callable).
+         
+     Returns:
+-        Scalar loss value.
++        loss: Scalar tensor representing the L2 loss.
+     """
+-    # Forward projection: y_pred = A * x
+-    y_pred = projector(scene_params)
++    # Step 1: Forward projection
++    # A(x) computes the projection of the scene representation x
++    y_pred = projector(x)
+     
+-    # L2 norm squared difference
+-    loss = torch.sum((y_pred - projections) ** 2)
++    # Step 2: Compute L2 loss
++    # ||Ax - y||_2^2
++    loss = torch.sum((y_pred - y) ** 2)
++    
+     return loss
+ 
+-def neural_projection_loss(sdf_network, points_3d, reference_image, source_images, m=4):
++def neural_projection_loss(x_P, f, grad_f, I_r, I_s, m=4):
+     """
+-    Computes photometric consistency loss for SDF regularization.
++    Computes Neural Projection Loss for implicit surface reconstruction.
+     
+     Args:
+-        sdf_network: Base SDF network (not final output).
+-        points_3d: Set of 3D points P.
+-        reference_image: Reference view I_r.
+-        source_images: List of source views I_s.
++        x_P: Points in space (tensor of shape [N, 3]).
++        f: SDF values at x_P (tensor of shape [N]).
++        grad_f: Gradients of SDF at x_P (tensor of shape [N, 3]).
++        I_r: Reference image tensor.
++        I_s: List of source image tensors.
+         m: Number of top source images to use.
+         
+     Returns:
+-        Scalar photometric consistency loss.
++        loss: Scalar tensor representing the photometric consistency loss.
+     """
+-    loss = 0.0
+-    count = 0
++    # Step 3: Neural Projection
++    # Project x_P to nearest neighbor t_P on the implicit surface
++    # t_P = x_P - f(x_P) * g(x_P) / ||g(x_P)||_2
++    grad_norm = torch.norm(grad_f, dim=1, keepdim=True)
++    # Avoid division by zero
++    grad_norm = torch.clamp(grad_norm, min=1e-8)
++    t_P = x_P - f.unsqueeze(1) * (grad_f / grad_norm)
+     
+-    for x_P in points_3d:
+-        # 1. Get SDF value and gradient
+-        f_xP = sdf_network(x_P)
+-        g_xP = torch.autograd.grad(f_xP, x_P, create_graph=True)[0]
+-        
+-        # 2. Project to surface
+-        norm_g = torch.norm(g_xP)
+-        if norm_g > 1e-8:
+-            t_P = x_P - f_xP * (g_xP / norm_g)
+-        else:
+-            continue # Skip degenerate points
+-            
+-        # 3. Project t_P to 2D coordinates in reference and source images
+-        # (Assuming camera intrinsics/extrinsics are available)
+-        u_r, v_r = project_to_image(t_P, reference_image.camera)
+-        u_s_list, v_s_list = [], []
+-        for img in source_images:
+-            u_s, v_s = project_to_image(t_P, img.camera)
+-            u_s_list.append(u_s)
+-            v_s_list.append(v_s)
+-            
+-        # 4. Extract patches and compute NCC
+-        scores = []
+-        for i in range(len(source_images)):
+-            patch_r = extract_patch(reference_image, u_r, v_r)
+-            patch_s = extract_patch(source_images[i], u_s_list[i], v_s_list[i])
+-            
+-            cov = covariance(patch_r, patch_s)
+-            var_r = variance(patch_r)
+-            var_s = variance(patch_s)
+-            
+-            if var_r > 1e-8 and var_s > 1e-8:
+-                score = cov / torch.sqrt(var_r * var_s)
+-                scores.append(score)
+-                
+-        # 5. Average over top m scores
+-        if len(scores) > 0:
+-            top_scores, _ = torch.topk(torch.tensor(scores), k=min(m, len(scores)))
+-            mean_score = torch.mean(top_scores)
+-            loss += (1.0 - mean_score)
+-            count += 1
+-            
+-    if count > 0:
+-        loss = loss / (m * count)
+-    else:
+-        loss = torch.tensor(0.0)
+-        
++    # Step 4: Photometric Consistency
++    # Extract patches around t_P in reference and source images
++    # Note: Patch extraction depends on specific implementation details not fully provided
++    # Assuming a function extract_patches(image, points, patch_size) exists
++    patches_r = extract_patches(I_r, t_P, patch_size=5)
++    
++    # Calculate NCC scores for all source images
++    scores = []
++    for i in range(len(I_s)):
++        patches_s = extract_patches(I_s[i], t_P, patch_size=5)
++        # NCC calculation
++        cov = torch.mean((patches_r - patches_r.mean(dim=1, keepdim=True)) * 
++                         (patches_s - patches_s.mean(dim=1, keepdim=True)))
++        var_r = torch.var(patches_r, dim=1, keepdim=True, unbiased=False)
++        var_s = torch.var(patches_s, dim=1, keepdim=True, unbiased=False)
++        score = cov / torch.sqrt(var_r * var_s + 1e-8)
++        scores.append(score)
++    
++    # Select top m scores
++    scores_tensor = torch.stack(scores, dim=1) # Shape [N, num_sources]
++    top_m_scores, _ = torch.topk(scores_tensor, m, dim=1)
++    
++    # Compute loss: 1 - Score
++    loss = torch.mean(1 - top_m_scores)
++    
+     return loss
+ ```
+@@ -169,25 +145,29 @@
+ 
+ ### [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md)
+-Enforces consistency between estimated depth and predicted monocular depth, resolving scale/shift ambiguity via affine alignment. It treats monocular depth as a relative cue rather than absolute metric data.
++Monocular Depth Consistency Loss enforces geometric consistency between the depth rendered from a differentiable volume rendering pipeline and depth predictions from a pre-trained monocular depth estimation network. It solves the problem of scale and shift ambiguity inherent in monocular depth priors by computing a closed-form least-squares alignment for each training batch. Unlike sibling methods that may rely on sparse geometric constraints or multi-view consistency, this method specifically addresses the relative nature of monocular depth cues by treating them as relative signals that must be locally aligned to the rendered geometry. See [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md).
++
++### [Optimal Transport Loss](7472-optimal-transport-loss.md)
++Optimal Transport (OT) Loss captures global and long-range correspondences between a rendered image $I$ and a target image $I_{ref}$ by solving a transportation problem, replacing local pixel-wise losses like L1 or L2. It differs from [Data Consistency Loss](2976-data-consistency-loss.md) by optimizing for a global matching structure rather than point-wise residuals, and from [Monocular Depth Consistency Loss](4668-monocular-depth-consistency-loss.md) by operating directly in image space color and position rather than depth constraints. See [Optimal Transport Loss](7472-optimal-transport-loss.md).
+ 
+ ### Neural Projection with Photometric Consistency
+-A variant that regularizes the SDF field by projecting points to the implicit surface using SDF gradients and enforcing photometric consistency between image patches via Normalized Cross-Correlation. It is applied to the base SDF network signals to allow gradient computation. It uses the top $m=4$ source images for scoring [S2, unofficial].
++Neural Projection with Photometric Consistency projects points to the implicit surface using SDF and gradient information, then regularizes the SDF field using photometric consistency between image patches [S2, unofficial]. It differs from standard Data Consistency Loss by operating in the implicit surface domain and using NCC-based patch matching rather than direct projection domain L2 errors [S2, unofficial]. It is chosen when reconstructing surfaces from noisy data where geometric constraints are critical [S2, unofficial].
+ 
+ ### Multi-level Semantic Consistency Loss
+-A loss function that integrates pixel-level loss and semantic feature matching loss to constrain global similarity between predicted and ground truth images. It is designed to assist with informative representation learning with limited computational cost [S3, unofficial].
++Multi-level Semantic Consistency Loss assists with more informative representation learning by integrating pixel-level loss and semantic feature matching loss to constrain global similarity between predicted images and ground truth [S3, unofficial]. It differs from standard Data Consistency Loss by incorporating high-level semantic features rather than just raw pixel or projection values [S3, unofficial]. It is designed to constrain similarity with limited computational cost [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the forward projector $A$. For tomography, ray-marching or line integrals scale with the number of rays and voxels [S1, unofficial]. For neural projection, it involves gradient computation and patch matching, which is more expensive per point [S2, unofficial].
+-*   **Memory Complexity:** Requires storing the scene representation and intermediate gradients for backpropagation [S1, S2, unofficial].
+-*   **Strengths:** Directly enforces data fidelity, which is crucial for ill-posed inverse problems like CT reconstruction or noisy multi-view reconstruction [S1, S2, unofficial].
+-*   **Limitations:** Requires a differentiable forward model, which can be computationally intensive [S1, unofficial]. In multi-view settings, it assumes strong photometric consistency, which may fail under lighting changes or textureless regions [S2, unofficial].
+-*   **When to use:** When the primary goal is to match the rendered output to observed measurements, especially in tomography or when regularizing implicit surfaces with multi-view images [S1, S2, unofficial].
+-*   **When not to use:** When the input data is highly noisy or inconsistent, or when computational resources are limited and a simpler photometric loss suffices [S2, unofficial].
++*   **Time Complexity:** Depends on the forward projection operator $A$. For differentiable volume rendering, it is proportional to the number of samples per ray and the number of rays [S1, unofficial]. For neural projection, it involves gradient computation and patch extraction, which can be computationally expensive [S2, unofficial].
++*   **Memory Complexity:** Requires storing the scene representation $x$, the measured data $y$, and intermediate gradients. For neural projection, patch extraction increases memory usage [S2, unofficial].
++*   **Measured Performance:** In X-ray CT, it enables accurate reconstruction from limited or noisy projections [S1, unofficial]. In NeRF, it improves rendering quality and depth estimation, reducing samples by 50% compared to state-of-the-art generalizable NeRF methods [S3, unofficial].
++*   **Strengths:** Enforces physical consistency; robust to noise when combined with appropriate regularizers (e.g., Eikonal loss) [S2, unofficial]; differentiable end-to-end [S1, unofficial].
++*   **Limitations:** Requires a differentiable forward projection operator, which may be complex to implement for arbitrary geometries [S1, unofficial]; sensitive to initialization in implicit surface methods [S2, unofficial].
++*   **When to use:** When physical projection data is available (e.g., CT, multi-view stereo); when geometric consistency is more important than photometric appearance alone.
++*   **When not to use:** When only final rendered images are available and no explicit projection model exists; when computational resources are extremely limited.
+ 
+ ## Background
+-The concept of minimizing the difference between forward-projected data and original projection data originates from tomographic reconstruction techniques [S1, unofficial]. It has been adapted for differentiable rendering in neural radiance fields and implicit surface reconstruction to enforce geometric and photometric consistency [S2, S3, unofficial]. The specific formulation using L2 norm for tomography is detailed in recent works on differentiable forward projectors [S1, unofficial]. The neural projection variant was introduced to enhance SDF prediction accuracy and enforce geometric constraints on noisy data [S2, unofficial].
++Data Consistency Loss originates from the field of computed tomography (CT) and inverse problems, where minimizing the difference between forward-projected data and measured projections is a standard approach [S1, unofficial]. It has been adapted for differentiable volume rendering and neural implicit surface reconstruction to enforce geometric fidelity [S1, S2, unofficial]. The neural projection variant was introduced in Point-NeuS to enhance SDF prediction accuracy from noisy data [S2, unofficial]. The multi-level semantic variant was introduced in DARF to improve representation learning in generalizable NeRF methods [S3, unofficial].
+ 
+ ## Sources
+-[S1] Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)
++[S1] PDF Differentiable Forward Projector for X-ray Computed Tomography, https://differentiable.xyz/papers-2023/paper_48.pdf, fetched 2026-10-29 (unofficial)
+ [S2] Point-NeuS: Point-Guided Neural Implicit Surface Reconstruction by Volume Rendering, https://doi.org/10.48550/arXiv.2310.07997, fetched 2026-10-30 (unofficial)
+ [S3] GARF: Geometry-Aware Generalized Neural Radiance Field, https://doi.org/10.48550/arXiv.2212.02280, fetched 2026-10-29 (unofficial)

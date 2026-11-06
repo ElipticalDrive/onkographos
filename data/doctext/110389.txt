@@ -1,0 +1,171 @@
+Lebarba
+67 captures
+01 Aug 2015 - 30 Mar 2022
+Jan
+MAR
+Apr
+30
+2020
+2022
+2023
+success
+fail
+About this capture
+COLLECTED BY
+Collection: ahrefs
+TIMESTAMPS
+Skip to content
+WebGL Volume Rendering made simple
+This is simple introduction to Volume Rendering that:
+Uses volume ray casting.
+Emulates the texture3D by sampling a 2D texture.
+Has a simple customizable transfer function.
+View Online DEMO
+Code download in GitHub
+What is volume rendering?
+Unlike traditional rendering uses triangles to display 3D graphics, volume rendering uses other methods such as Volume Ray Casting. This image-based method renders a 3D scalar field into a 2D image by casting rays along the 3D volume. Each pixel we see on the screen is the result of a ray that is going through the cube and getting intensity samples from the voxels at regular intervals.
+But how do we cast rays?
+A simple option is to use 3D mesh cube of size (1,1,1) and render the front and back faces (enabling and disabling back face culling) in two different render passes.
+For every cube fragment generated in the screen we can create a ray that starts at the front face of cube and ends in back face. Having the starting and ending points of the ray we can start sampling the voxels at regular intervals to generate the resulting fragment color.
+The scalar field is represented as voxels that contain the intensity values at each (x,y,z) position
+Step by step in WebGL
+In this section we are going to explain the implementation steps to achieve Volume Rendering using WebGL and ThreeJS.
+Step 1: Prepare the raw file
+Raw files are very simple files that only contain the voxel intensities, they have no headers or metadata and they usually have a 8-bit (or 16-bit) intensity value per voxel arranged in the X, Y and Z order.
+In OpenGL or DirectX we would be able to load all this data in a 3D texture made for the purpouse, but as WebGL currently does not support storing or sampling 3D textures, we have to store it in a way that can be used by 2D textures. For this reason we can store a png image file with all the Z slices one next to the other making a mosaic of 2D slices. I developed an extremely simple converter tool with souce code included. The tool takes the raw file and generates a png image mosaic encoding the intensity of each voxel in the alpha channel (Although the ideal would be to store the png as A8 format only to save some space).
+Once the png file is loaded into memory as a 2D texture, we can later sample it as it if was a 3D texture using our own custom sampleAs3DTexture function.
+Find more raw files to test with in the Resources section at the end of this article.
+Step 2: First render pass
+In this second step, we intent to generate the fragments that will be used as the ending point of the ray. So for the first render pass, instead of drawing the back faces colors, we store the fragment’s World-Space position in a rendering texture as x,y,z coordinates values inside the RGB fragment’s color (here the RGB is encoded as floating point values).
+Notice how worldSpaceCoords is used to store the world space position of the cube’s back face positions.
+```
+varying vec3 worldSpaceCoords;
+
+void main()
+{
+//Set the world space coordinates of the back faces vertices as output.
+worldSpaceCoords = position + vec3(0.5, 0.5, 0.5); //move it from [-0.5;0.5] to [0,1]
+gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+```
+```
+varying vec3 worldSpaceCoords;
+
+void main()
+{
+//The fragment's world space coordinates as fragment output.
+gl_FragColor = vec4( worldSpaceCoords.x , worldSpaceCoords.y, worldSpaceCoords.z, 1 );
+}
+```
+Left: Front faces color coordinates Right: Back faces color coordinates
+Step 3: Second render pass
+This rendering pass is the one that actually performs the Volume Ray Casting, and it begins by drawing the cube’s front faces, where each point of the front face will be the ray starting point.
+The vertex shader creates two outputs: the projected coordinates (the 2D screen coordinates of the fragment) and the world space coordinates.
+The world space coordinates will be used as the ray starting point, whereas the projected coordinates will be used to sample the texture that stores the cube back faces positions.
+```
+varying vec3 worldSpaceCoords;
+varying vec4 projectedCoords;
+
+void main()
+{
+worldSpaceCoords = (modelMatrix * vec4(position + vec3(0.5, 0.5,0.5), 1.0 )).xyz;
+gl_Position = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+projectedCoords = projectionMatrix * modelViewMatrix * vec4( position, 1.0 );
+}
+```
+The fragment shader of this second render pass is a bit more complex, so we are going to go through it in parts.
+In this example rays R0 to R4 are casted from the cube’s front facing fragment positions (f0 to f4) and ending in the back facing positions (I0 to I4)
+Getting the ray ending position
+Based on the position of the previous step, we sample the texture to get the world space position of the back face fragment.
+Note how we convert from the projected coords into NDC (normalized device coordinates) by dividing by W and then how we convert it to the [0;1] range so it can be used as a UV coordinate. The ending position of the ray is obtained when we sample the 2D texture generated in the previous render pass.
+```
+//Transform the coordinates it from [-1;1] to [0;1]
+vec2 texc = vec2(((projectedCoords.x / projectedCoords.w) + 1.0 ) / 2.0,
+((projectedCoords.y / projectedCoords.w) + 1.0 ) / 2.0 );
+
+//The back position is the world space position stored in the texture.
+vec3 backPos = texture2D(tex, texc).xyz;
+
+//The front position is the world space position of the second render pass.
+vec3 frontPos = worldSpaceCoords;
+
+//The direction from the front position to back position.
+vec3 dir = backPos - frontPos;
+
+float rayLength = length(dir);
+```
+Setting up the the ray
+With the front and back positions we can now create a ray that will start at frontPos and end in backPos.
+```
+//Calculate how long to increment in each step.
+float delta = 1.0 / steps;
+
+//The increment in each direction for each step.
+vec3 deltaDirection = normalize(dir) * delta;
+float deltaDirectionLength = length(deltaDirection);
+
+//Start the ray casting from the front position.
+vec3 currentPosition = frontPos;
+
+//The color accumulator.
+vec4 accumulatedColor = vec4(0.0);
+
+//The alpha value accumulated so far.
+float accumulatedAlpha = 0.0;
+
+//How long has the ray travelled so far.
+float accumulatedLength = 0.0;
+
+vec4 colorSample;
+float alphaSample;
+```
+Ray marching
+Once the ray is setup, we start the ray marching from the start position and advancing the ray current position towards the dir.
+In each step we sample the texture in search for the voxel itensity. It is important to note that the voxels only contain the intensity value and therefore they don’t have any information about the color so far. What gives the color to each voxel is given by the transform function. You can look at the sampleAs3DTexture function code to see how the transform function works.
+After we have the color of the voxel given by the sampleAs3DTexture it is corrected by the alphaCorrection parameter. You can tweak this value online and see what the different results are.
+The important part of each iteration is the actual color composition, where the accumulatedColor value is added on top of the previously stored value based on the alpha value. We also keep an alphaAccumulator that will let us know when to stop the ray marching.
+The iterations keep going until one of these three conditions is met:
+The distance travelled by the ray reaches the supposed ray length. Remember that the ray goes from startPos to endPos.
+The accumulated alpha value reaches 100%
+The iterations reach the maximum constant MAX_STEPS
+Finally the fragment shader returns the result of compositing the values of the voxels that were traversed.
+```
+//Perform the ray marching iterations
+for(int i = 0 ; i < MAX_STEPS ; i++)
+{
+//Get the voxel intensity value from the 3D texture.
+colorSample = sampleAs3DTexture( currentPosition );
+
+//Allow the alpha correction customization
+alphaSample = colorSample.a * alphaCorrection;
+
+//Perform the composition.
+accumulatedColor += (1.0 - accumulatedAlpha) * colorSample * alphaSample;
+
+//Store the alpha accumulated so far.
+accumulatedAlpha += alphaSample;
+
+//Advance the ray.
+currentPosition += deltaDirection;
+accumulatedLength += deltaDirectionLength;
+
+//If the length traversed is more than the ray length, or if the alpha accumulated reaches 1.0 then exit.
+if(accumulatedLength >= rayLength || accumulatedAlpha >= 1.0 )
+break;
+
+}
+
+gl_FragColor = accumulatedColor;
+```
+Changing the Steps in the controls provided you can change the maximum number of iterations done per ray, and you will have to probably adjust the alphaCorrection value accordingly.
+For more advanced techniques in Volume Rendering check the Resources section below.
+View Online DEMO
+by Leandro R Barbagallo
+Resources
+Graphics Runner – Volume Rendering 101 : Excellent introduction for volume rendering in C# and XNA.
+Levgeniia Gutenko : Volume rendering using WebGL, uses slices mosaic and has two modes X-Ray and Maximum Intensity Projection
+Bits and Pixels: Volume rendering in WebGL and ThreeJs, using lighting mode (note: doesn’t work in windows)
+Advanced Illumination Techniques for GPU-Based Volume Raycasting – Images in this article were taken from this
+GPU Gems Chapter 39. Volume Rendering Techniques : GPU volume rendering advanced techniques.
+Simian: Volume Rendering tool from the University In Utah.
+The Volume Library : A library full of raw files to download for free.

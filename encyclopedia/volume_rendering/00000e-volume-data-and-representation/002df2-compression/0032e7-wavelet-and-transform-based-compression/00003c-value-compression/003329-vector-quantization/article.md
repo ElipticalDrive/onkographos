@@ -1,0 +1,148 @@
+# Vector Quantization
+Also called: LBG algorithm modification, Dictionary-based compression, Codebook compression
+## Overview
+Vector Quantization (VQ) is a lossy compression technique that maps $n$-dimensional input vectors to a fixed-length index referencing an entry in a pre-defined or learned codebook (dictionary) [S1, S3, unofficial][S4]. It solves the problem of high storage requirements for volumetric data by exploiting spatial redundancy: identical or similar data blocks are replaced by a single compact index, reducing storage from individual voxel storage to codebook storage plus mapping indices [S2][S4]. Unlike scalar quantization which processes values independently, VQ treats blocks of data as vectors, allowing it to capture correlations within the block [S3, unofficial]. It sets itself apart from transform-based methods (like wavelets) by enabling extremely fast, parallel decompression on the GPU, as decoding is reduced to a simple texture lookup [S1, unofficial][S4].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ input vectors $\mathbf{x}_m \in \mathbb{R}^n$ (e.g., voxel blocks or feature vectors) [S1, S3, unofficial].
+*   **Output:** A codebook $C$ of size $K = 2^r$ codewords, and for each input vector, an index $j \in \{0, \dots, K-1\}$ [S1, S3, unofficial].
+
+**Data Structures:**
+1.  **Codebook ($C$):** A list of $K$ codewords. Each codeword $\mathbf{c}_j$ is an $n$-dimensional vector [S1, unofficial][S2].
+2.  **Index Map:** For each input vector $\mathbf{x}_m$, an integer index $j$ pointing to the best-matching codeword in $C$ [S1, unofficial][S4].
+3.  **Address Texture (GPU Implementation Specific):** In GPU-accelerated decoding, a 3D texture (Texture A) stores coordinate offsets. It is typically a $4^3$ block where RGBA components store fractional weights (e.g., multiples of $1/63$) for linear interpolation between codewords [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Block Partitioning:** Divide the input volume into small, non-overlapping data blocks. Each block forms an input vector $\mathbf{x}_m$ [S4].
+2.  **Codebook Initialization:** Initialize the codebook $C$ with $K$ codewords. Common initialization methods include random selection from the input data or using Principal Component Analysis (PCA) to avoid empty cells [S1, S3, unofficial].
+3.  **Encoding (Nearest Neighbor Search):** For each input vector $\mathbf{x}_m$, find the codeword $\mathbf{c}_j \in C$ that minimizes the distortion metric $\delta(\mathbf{x}_m, \mathbf{c}_j)$. The standard metric is the squared Euclidean distance [S3, unofficial]:
+    $$ \delta(\mathbf{x}, \mathbf{y}) = \|\mathbf{x} - \mathbf{y}\|_2^2 $$
+    Store the index $j$ for $\mathbf{x}_m$ [S1, S3, unofficial].
+4.  **Codebook Optimization (Training):** Update the codebook to minimize the average distortion $D_{avg}$ [S1, unofficial]:
+    $$ D_{avg} = \frac{1}{N} \sum_{m=1}^N \|\mathbf{x}_m - \mathbf{c}_{j_m}\|^2 $$
+    where $\mathbf{c}_{j_m}$ is the codeword corresponding to the index of $\mathbf{x}_m$ [S1, unofficial].
+    *   *Linde-Buzo-Gray (LBG) Algorithm:* An iterative method that alternates between assigning vectors to the nearest centroid and updating centroids to the mean of their assigned vectors [S1, S3, unofficial].
+    *   *PCA Splitting:* An enhanced splitting strategy that uses PCA to determine split directions, automatically avoiding empty cells and speeding up convergence compared to standard LBG [S1, S3, unofficial].
+5.  **Decoding (GPU Reconstruction):**
+    *   Load the index map and codebook into GPU memory [S1, unofficial].
+    *   For each voxel/block, retrieve the index $j$.
+    *   Look up the corresponding codeword $\mathbf{c}_j$ from the codebook [S2].
+    *   *Linear Interpolation (Optional):* If the codebook uses a structured address texture for interpolation, calculate the interpolated value using the address texture coordinates [S1, unofficial].
+    *   *Time-Varying Data:* For sequences, decode the difference (P-frame) and add it to the previously reconstructed volume (I-frame) to yield the current frame [S1, unofficial].
+
+**Parameters:**
+*   **Codebook Size ($K$ or $2^r$):** Determines the number of codewords. A larger $K$ reduces distortion but increases storage and search time. Typical index bit-sizes are 8 bits ($K=256$) [S1, unofficial].
+*   **Block Size:** The dimensionality $n$ of the input vectors. Smaller blocks allow finer adaptation but reduce compression ratio [S4].
+*   **Bit-size of Index:** Controls the trade-off between compression quality and distortion. 8-bit indices are common [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Empty Cells:** In iterative algorithms like LBG, some codebook entries may not be assigned any input vectors, leading to wasted capacity and increased distortion. PCA-based splitting avoids this [S1, S3, unofficial].
+*   **Accumulated Error:** In time-varying data, repeatedly adding decoded differences (P-frames) causes error accumulation. Mitigated by periodically transmitting original data (I-frames) [S1, unofficial].
+*   **GPU Coordinate Mapping:** Cg/GLSL does not support integer shift/bitwise operations. Integer coordinates must be mapped to float texture coordinates $[-1.0, 1.0]$ using specific linear transformations, and `GL_NEAREST` is used to simulate floor operations [S1, unofficial].
+*   **Dictionary Size Limit:** The dictionary size imposes a hard limit on achievable quality and compression rate [S4].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def vector_quantization_encode(vectors, codebook_size, max_iterations=10):
+    """
+    Encodes a set of vectors using Vector Quantization.
+    vectors: List of n-dimensional vectors.
+    codebook_size: Number of codewords K.
+    Returns: Codebook C, List of indices.
+    """
+    # Initialize codebook using PCA or random selection
+    C = initialize_codebook(vectors, codebook_size)
+    
+    indices = []
+    
+    for iteration in range(max_iterations):
+        # Assignment Step: Find nearest codeword for each vector
+        current_indices = []
+        for x in vectors:
+            min_dist = infinity
+            best_index = -1
+            for j, c in enumerate(C):
+                dist = squared_euclidean_distance(x, c)
+                if dist < min_dist:
+                    min_dist = dist
+                    best_index = j
+            current_indices.append(best_index)
+        
+        # Update Step: Recompute centroids
+        for j in range(codebook_size):
+            assigned_vectors = [v for v, idx in zip(vectors, current_indices) if idx == j]
+            if assigned_vectors:
+                # Update codeword to mean of assigned vectors
+                C[j] = mean(assigned_vectors)
+            # If empty, keep old codeword or reinitialize (PCA avoids this)
+            
+        indices = current_indices
+        
+    return C, indices
+
+def vector_quantization_decode(indices, codebook):
+    """
+    Decodes indices back to approximate vectors.
+    """
+    reconstructed_vectors = []
+    for idx in indices:
+        reconstructed_vectors.append(codebook[idx])
+    return reconstructed_vectors
+
+def squared_euclidean_distance(v1, v2):
+    return sum((a - b) ** 2 for a, b in zip(v1, v2))
+
+def mean(vectors):
+    if not vectors:
+        return None
+    dim = len(vectors[0])
+    return [sum(v[i] for v in vectors) / len(vectors) for i in range(dim)]
+```
+
+## Subtopics
+
+### [Hierarchical Vector Quantization](827-hierarchical-vector-quantization.md)
+Hierarchical Vector Quantization (HVQ) is a lossy compression algorithm that achieves around 20:1 compression ratio with minimal artifacts, specifically designed to allow GPU-based decompression and rendering. Unlike wavelet-based methods that require serial CPU decompression before transfer, HVQ encodes data into an RGB index texture, enabling parallel, on-the-fly decoding directly on the graphics chip to minimize CPU-to-GPU data transfer. It uses a multiresolution covariance analysis to efficiently process multi-dimensional data.
+
+### [LBG Algorithm](840-lbg-algorithm.md)
+The Linde-Buzo-Gray (LBG) algorithm is an iterative vector quantization method that partitions a set of input vectors into quantization regions and updates codebook entries to minimize distortion. It solves the problem of finding an optimal codebook for lossy compression by iteratively refining centroid positions. It is known for execution speed issues and the 'empty cell problem'.
+
+### [Progressive Encoding of Time-Varying Sequences](959-progressive-encoding-of-time-varying-sequences.md)
+This method compresses time-varying volumetric data by encoding frames individually while reusing codebooks from previous frames to improve compression performance and encoding speed. It distinguishes itself from static vector quantization by introducing temporal dependencies between frames, treating the sequence as a series of I-frames (independently encoded) and P-frames (predicted via codebook retraining). This approach significantly reduces memory requirements and encoding time compared to encoding each frame independently.
+
+### [Vector Quantization for Volumetric Radiance Fields](1870-vector-quantization-for-volumetric-radiance-fields.md)
+Vector Quantization (VQ) is a dictionary-based compression strategy that encodes voxel color features into a compact codebook, substituting multiple voxel features with a single code vector to reduce storage from individual voxel storage to codebook storage plus mapping indices. It solves the problem of high memory consumption for color features in volumetric radiance fields by enabling per-voxel random access through on-the-fly reconstruction. Unlike sparse structures that store explicit coordinates or value compression that quantizes individual values, VQ learns a shared representation space. It sets itself apart by allowing a trade-off between compression ratio and rendering quality via a "keep quantile" that preserves the most important voxels uncompressed.
+
+### [Fortune's Palette Compression](4988-fortune-s-palette-compression.md)
+Fortune's Palette Compression is a lossless data compression method that maps unique values in a flat, cubic 3D vector to a compact palette, storing indices in a bit-packed integer array. It is designed for fast, header-only implementation in C++ to compress block data where the number of unique values is small relative to the total volume. It differs from general-purpose codecs by operating directly on the value space rather than spatial frequency, making it suitable for sparse or low-entropy volumetric data with discrete values.
+
+### LightGaussian
+Pruning + SH distillation to lower bands + vector quantization, achieving 15x size reduction at <0.5 dB drop [S5, unofficial].
+
+### Compact3D / C3DGS / EAGLES
+Vector quantize SH and scale parameters [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Encoding is $O(N \cdot K \cdot n)$, where $N$ is the number of vectors, $K$ is the codebook size, and $n$ is the vector dimension. Decoding is $O(1)$ per vector (index lookup) [S1, unofficial][S4].
+*   **Memory Complexity:** Storage is $O(K \cdot n + N)$ for the codebook and indices [S2].
+*   **Measured Performance:** HVQ achieves ~20:1 compression ratio with minimal artifacts [S2][S3, unofficial]. VQRF achieves ~100x storage reduction over original grid models [S2].
+*   **Scaling:** Decompression scales well on GPUs due to parallel texture lookups [S1, unofficial][S4].
+*   **Strengths:** Extremely fast decompression; good for real-time rendering; handles high spatial redundancy well [S1, unofficial][S4].
+*   **Limitations:** High encoding complexity; dictionary size limits quality; accumulated error in time-varying data [S1, S3, unofficial][S4].
+*   **When to Use:** Real-time volume rendering of large datasets; time-varying data with high redundancy; scenarios where GPU decompression is preferred [S1, unofficial][S4].
+*   **When Not to Use:** Lossless compression required; data with low spatial redundancy; limited GPU memory for large codebooks [S1, unofficial][S4].
+
+## Background
+Vector Quantization was first introduced in volume rendering by [NH92, NH93] [S4]. The LBG algorithm, a foundational method for VQ, was developed by Linde, Buzo, and Gray in 1980, improving on scalar quantizers by Max (1960) and Lloyd (1982) [S3, unofficial]. It is widely used for large time-varying volumetric data compression due to its ability to exploit high spatial and time redundancy [S1, unofficial].
+
+## Sources
+[S1] A system for real-time rendering of compressed time-varying volume data, https://doi.org/10.7939/r3041m, fetched 2026-10-26 (unofficial)
+[S2] Compressing Volumetric Radiance Fields to 1 MB, https://doi.org/10.1109/cvpr52729.2023.00411, fetched 2026-10-26
+[S3] Compression Domain Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Compression_Domain_Volume_Rendering/vis03-vq.pdf, fetched 2026-10-26 (unofficial)
+[S4] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S5] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

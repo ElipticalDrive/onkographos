@@ -1,0 +1,154 @@
+# Branchless Ray/AABB Intersection with NaN Handling
+
+Also called: Branchless Ray-AABB Intersection, Fast Branchless Ray/Bounding Box Intersection Part 2, NaN-safe Ray-AABB Intersection, Ray-AABB Intersection (Branchless), checkHit
+
+## Overview
+This method computes the intersection of a ray with an Axis-Aligned Bounding Box (AABB) using a branchless algorithm that correctly handles IEEE 754 floating-point edge cases, specifically NaNs generated when a ray direction component is zero [S2, unofficial]. It builds on [Ray-AABB Intersection (Slab/Min-Max)](6548-ray-aabb-intersection-slab-min-max.md) by replacing conditional checks for zero direction with precomputed inverse directions and nested min/max operations that suppress NaN propagation [S2, unofficial]. Unlike the standard branchless slab method, this variant guarantees robustness for degenerate cases where the ray origin lies exactly on a box boundary or the ray is parallel to an axis, preventing false positives caused by NaN propagation [S2, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin $\mathbf{o} = (o_x, o_y, o_z)$, ray direction $\mathbf{d} = (d_x, d_y, d_z)$, AABB bounds $\mathbf{min} = (x_{min}, y_{min}, z_{min})$, $\mathbf{max} = (x_{max}, y_{max}, z_{max})$.
+- Output: Boolean indicating intersection, and optionally entry time $t_{min}$, exit time $t_{max}$, and side vectors $\mathbf{sideMin}, \mathbf{sideMax}$ [S1, unofficial].
+
+**Data Structures:**
+- Ray: Struct containing `origin` (float3) and `dir` (float3). Precomputed `dir_inv` (float3) is required.
+- AABB: Struct containing `min` (float3) and `max` (float3).
+
+**Precomputation:**
+Compute the inverse direction components. If $d_i = 0$, $1/d_i$ results in $\pm \infty$ in IEEE 754 [S2, unofficial].
+$$
+\text{dir\_inv}_i = \frac{1.0}{d_i}
+$$
+
+**Algorithm Steps:**
+1. Initialize $t_{min}$ and $t_{max}$ using the first dimension ($i=0$) without bounds checking [S2, unofficial]:
+   $$
+   t_1 = (x_{min} - o_x) \cdot \text{dir\_inv}_x
+   $$
+   $$
+   t_2 = (x_{max} - o_x) \cdot \text{dir\_inv}_x
+   $$
+   $$
+   t_{min} = \min(t_1, t_2)
+   $$
+   $$
+   t_{max} = \max(t_1, t_2)
+   $$
+
+2. Loop over dimensions $i \in \{1, 2\}$ (y and z axes):
+   a. Compute slab intersections for the current axis:
+      $$
+      t_1 = (\text{min}_i - o_i) \cdot \text{dir\_inv}_i
+      $$
+      $$
+      t_2 = (\text{max}_i - o_i) \cdot \text{dir\_inv}_i
+      $$
+   b. Update $t_{min}$ to suppress NaNs from the current slab. The expression $\min(t_1, t_2)$ may be NaN if $d_i=0$ and $o_i$ is on the boundary. The nested min/max uses the property that $\min(\text{NaN}, x) = x$ and $\max(\text{NaN}, x) = x$ in standard IEEE 754 min/max implementations, or specifically leverages the fact that $\min(\text{NaN}, t_{max})$ returns $t_{max}$ if $t_{max}$ is not NaN [S2, unofficial]:
+      $$
+      t_{min} = \max(t_{min}, \min(\min(t_1, t_2), t_{max}))
+      $$
+   c. Update $t_{max}$ to suppress NaNs from the current slab:
+      $$
+      t_{max} = \min(t_{max}, \max(\max(t_1, t_2), t_{min}))
+      $$
+
+3. Return true if $t_{max} > \max(t_{min}, 0.0)$, otherwise return false. This checks for a valid intersection interval that starts after or at the ray origin [S2, unofficial]. Note: Using $\ge$ instead of $>$ is required for degenerate boxes with zero thickness or to handle floating-point precision issues where $t_{max} == t_{min}$ at edges/corners [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_aabb_intersect_branchless_nan_safe(origin, dir, min_bound, max_bound):
+    # Precompute inverse direction
+    dir_inv = [1.0 / d if d != 0.0 else float('inf') * (1.0 if d > 0 else -1.0) for d in dir]
+    # Note: In IEEE 754, 1.0/0.0 is +inf, 1.0/-0.0 is -inf. 
+    # The code below assumes dir_inv is precomputed or computed as 1.0/d.
+    
+    # Dimension 0 (X)
+    t1 = (min_bound[0] - origin[0]) * dir_inv[0]
+    t2 = (max_bound[0] - origin[0]) * dir_inv[0]
+    
+    tmin = min(t1, t2)
+    tmax = max(t1, t2)
+    
+    # Dimensions 1 (Y) and 2 (Z)
+    for i in range(1, 3):
+        t1 = (min_bound[i] - origin[i]) * dir_inv[i]
+        t2 = (max_bound[i] - origin[i]) * dir_inv[i]
+        
+        # NaN suppression logic
+        # min(t1, t2) might be NaN. 
+        # min(NaN, tmax) -> tmax (if tmax is not NaN)
+        # max(tmin, tmax) -> tmax (if tmin <= tmax)
+        # Effectively, if the current slab produces NaN, it is ignored.
+        tmin = max(tmin, min(min(t1, t2), tmax))
+        tmax = min(tmax, max(max(t1, t2), tmin))
+        
+    # Check intersection
+    # Use >= for degenerate boxes or precision safety [S2, unofficial]
+    return tmax >= max(tmin, 0.0)
+```
+
+**Side Vector Calculation (Optional):**
+To determine which faces are intersected, the algorithm can be extended as shown in [S1, unofficial]. This requires the AABB to be defined by `center` and `minSize`/`maxSize` or derived from min/max.
+1. Compute `isPositive` vector: $\text{isPositive}_i = 1.0$ if $\text{dir\_inv}_i > 0$, else $0.0$.
+2. Compute `isNegative` vector: $\text{isNegative}_i = 1.0 - \text{isPositive}_i$.
+3. Compute `leftSide` and `rightSide` vectors:
+   $$
+   \text{leftSide}_i = \text{center}_i + \text{isPositive}_i \cdot \text{minSize}_i + \text{isNegative}_i \cdot \text{maxSize}_i
+   $$
+   $$
+   \text{rightSide}_i = \text{center}_i + \text{isPositive}_i \cdot \text{maxSize}_i + \text{isNegative}_i \cdot \text{minSize}_i
+   $$
+   (Note: `minSize` and `maxSize` refer to the distance from center to min/max bounds, effectively half-extents if centered, or adjusted based on the specific AABB representation. In the source [S1, unofficial], `aabb.minSize` and `aabb.maxSize` are used directly with `center`.)
+4. Compute time vectors:
+   $$
+   \text{leftSideTimesOneOverDir}_i = (\text{leftSide}_i - o_i) \cdot \text{dir\_inv}_i
+   $$
+   $$
+   \text{rightSideTimesOneOverDir}_i = (\text{rightSide}_i - o_i) \cdot \text{dir\_inv}_i
+   $$
+5. Compute $t_{min}$ and $t_{max}$ from these vectors:
+   $$
+   t_{min} = \max(\text{leftSideTimesOneOverDir}_x, \max(\text{leftSideTimesOneOverDir}_y, \text{leftSideTimesOneOverDir}_z))
+   $$
+   $$
+   t_{max} = \min(\text{rightSideTimesOneOverDir}_x, \min(\text{rightSideTimesOneOverDir}_y, \text{rightSideTimesOneOverDir}_z))
+   $$
+6. Compute side vectors:
+   $$
+   \text{directionSign}_i = \text{sign}(\text{dir\_inv}_i)
+   $$
+   $$
+   \text{sideMin}_i = (\text{leftSideTimesOneOverDir}_i == t_{min}) \cdot \text{directionSign}_i
+   $$
+   $$
+   \text{sideMax}_i = (\text{rightSideTimesOneOverDir}_i == t_{max}) \cdot \text{directionSign}_i
+   $$
+   The side vectors are signed to correctly identify entry/exit faces relative to the viewer, compensating for floating-point precision errors [S1, unofficial].
+
+**Parameters:**
+- No tunable parameters. Relies on IEEE 754 standard behavior for min/max with NaNs [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Zero Direction:** If $d_i = 0$, $\text{dir\_inv}_i = \pm \infty$. If the ray origin is inside the box along that axis, $t_1$ and $t_2$ become $\pm \infty$. The NaN suppression logic handles this by ignoring the NaN/Inf results from that slab [S2, unofficial].
+- **Ray on Boundary:** If the ray origin lies exactly on a box face, $t_1$ or $t_2$ may be NaN (0 * $\infty$). The nested min/max suppresses these NaNs [S2, unofficial].
+- **Degenerate Boxes:** For boxes with zero thickness (e.g., planes), use $\ge$ in the final return condition to avoid false negatives due to precision [S2, unofficial].
+- **Precision Errors:** Floating-point inaccuracies may cause $t_{max} == t_{min}$ at edges/corners. Using $\ge$ helps mitigate this [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ with a fixed number of operations (unrolled loop for 3 dimensions).
+- **Memory Complexity:** $O(1)$, requiring only a few scalar registers.
+- **Performance:** On GCC 4.9.2 at -O3, the NaN-safe implementation handles just over 93 million rays per second, taking around 30 clock cycles per ray without vectorization [S2, unofficial].
+- **Scaling:** Performance is independent of scene complexity as it operates on a single AABB.
+- **Strengths:** Branchless execution improves pipeline efficiency on modern CPUs/GPUs. Robust handling of NaNs prevents visual artifacts and incorrect BVH traversal in degenerate cases [S2, unofficial].
+- **Limitations:** Approximately 30% slower than the fastest version that ignores NaN consistency, and 15% slower than the version without explicit NaN handling, due to extra min/max operations and handling of floating-point special cases (infinities, NaNs) [S2, unofficial].
+- **When to use:** When robustness is critical, especially in BVH traversal where degenerate rays or boxes might occur. When visual artifacts from NaN propagation are unacceptable.
+- **When not to use:** In performance-critical paths where the risk of degenerate cases is negligible and the 15-30% overhead is prohibitive, and the application can tolerate potential false positives in rare degenerate cases [S2, unofficial].
+
+## Background
+The branchless approach originated with Brian Smits (1998) and was implemented by Amy Williams et al. (2005) [S2, unofficial]. The specific NaN handling workaround using nested min/max was applied by Thierry Berger-Perrin [S2, unofficial]. The method is widely used in ray tracing and volume rendering for efficient and robust ray-primitive intersection tests [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
+[S2] Fast, Branchless Ray/Bounding Box Intersections, Part 2: NaNs, https://tavianator.com/fast-branchless-raybounding-box-intersections-part-2-nans/, fetched 2026-10-29 (unofficial)

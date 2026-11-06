@@ -3,292 +3,174 @@
 Also called: Givens rotation for symmetric matrices, Schur2 rotation
 
 ## Overview
-This method diagonalizes a $3 \times 3$ symmetric matrix $A$ by iteratively applying 2D Givens rotations to zero out its off-diagonal elements, yielding the eigenvalues (on the diagonal) and eigenvectors (as columns of a rotation matrix). It solves the symmetric eigenvalue problem, which is a core step in computing the Singular Value Decomposition (SVD) of symmetric matrices or solving linear systems involving symmetric positive-definite matrices. It is distinguished from general QR-based SVD methods by its specific focus on symmetric inputs and its use of plane rotations that preserve symmetry, making it numerically stable for small fixed-size matrices common in volume rendering primitives like dual contouring.
+An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a sequence of 2D Givens rotations, implemented via the `Schur2` and `SVD` classes in the DualContouringCSharp repository [S1, unofficial]. It sets itself apart from direct algebraic solvers by using orthogonal transformations to zero out off-diagonal elements, ensuring numerical stability for ill-conditioned matrices, though it is generally slower than closed-form solutions for small fixed dimensions [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A $3 \times 3$ symmetric matrix $A$ (stored as 6 floats: $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$).
-- Output: A diagonal matrix $D$ (stored in `vtav`) containing eigenvalues, and an orthogonal matrix $V$ (stored in `v`) containing eigenvectors, such that $A = V D V^T$.
+**Inputs and outputs:**
+- Input: A $3 \times 3$ symmetric matrix $A$ (stored as 6 floats: $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$), tolerance `tol`, and maximum sweeps `max_sweeps`.
+- Outputs: The diagonalized matrix $VTAV$ (eigenvalues on diagonal) and the orthogonal matrix $V$ (eigenvectors as columns).
 
-**Data Structures:**
-- `SMat3`: A structure holding 6 floats representing the upper triangle of a symmetric $3 \times 3$ matrix. Fields: `m00`, `m01`, `m02`, `m11`, `m12`, `m22`.
-- `Mat3`: A structure holding 9 floats representing a general $3 \times 3$ matrix. Fields: `m00` through `m22` (row-major).
-- `Vector3`: A structure holding 3 floats.
+**Data structures:**
+- `SMat3`: Stores symmetric matrix elements $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$.
+- `Mat3`: Stores $3 \times 3$ matrix elements $m_{ij}$ for $i,j \in \{0,1,2\}$.
 
 **Parameters:**
-- `tol` (float): Convergence tolerance. Typical value not specified in sources, but used to compute a dynamic threshold. [S1, unofficial]
-- `max_sweeps` (int): Maximum number of full Jacobi sweeps. Typical value not specified. [S1, unofficial]
-- `TOLERANCE` (float): Alternative fixed tolerance used in some implementations. Value: $0.0001$. [S2, unofficial]
+- `tol`: Convergence tolerance. Typical value not specified [S1, unofficial].
+- `max_sweeps`: Maximum number of Jacobi sweeps. Typical value not specified [S1, unofficial].
 
-**Algorithm Steps:**
-1. **Initialization:**
-   - Copy input matrix $A$ to `vtav`.
-   - Initialize `v` as the $3 \times 3$ identity matrix.
-   - Compute the Frobenius norm of `vtav`, denoted `fnorm(vtav)`.
-   - Compute convergence threshold: $\delta = \text{tol} \times \text{fnorm}(\text{vtav})$. [S1, unofficial]
-   - Compute the sum of absolute off-diagonal elements of `vtav`, denoted `off(vtav)`.
+**Steps:**
+1. Initialize $VTAV$ with $A$ and $V$ as the identity matrix.
+2. Calculate the Frobenius norm of $VTAV$, denoted $fnorm(VTAV)$.
+3. Calculate convergence threshold $\delta = tol \times fnorm(VTAV)$.
+4. Loop for $i$ from 0 to `max_sweeps`:
+   - If the off-diagonal energy $off(VTAV) > \delta$, apply rotations:
+     - `rotate01(VTAV, V)`
+     - `rotate02(VTAV, V)`
+     - `rotate12(VTAV, V)`
+   - Else, break loop.
 
-2. **Iteration (Jacobi Sweeps):**
-   - Loop for $i$ from $0$ to `max_sweeps` - 1:
-     - If `off(vtav)` $\le \delta$, break loop.
-     - Apply rotation to zero out element $(0,1)$: `rotate01(vtav, v)`.
-     - Apply rotation to zero out element $(0,2)$: `rotate02(vtav, v)`.
-     - Apply rotation to zero out element $(1,2)$: `rotate12(vtav, v)`.
-     - Recalculate `off(vtav)`. [S1, unofficial]
+**Rotation Logic:**
+For each pair $(p, q)$, if $m_{pq} \neq 0$:
+1. Compute Givens coefficients $c, s$ using `calcSymmetricGivensCoefficients`.
+2. Apply rotation to $VTAV$ to zero $m_{pq}$ and update other elements.
+3. Apply rotation to $V$ (post-multiply) to accumulate eigenvectors.
 
-3. **Rotation Logic (Generic):**
-   For each pair $(p, q)$ where $p < q$, the rotation updates the matrix $M$ (either `vtav` or `v`) using cosine $c$ and sine $s$.
-   - Compute $c, s$ using `calcSymmetricGivensCoefficients`.
-   - Update matrix elements.
+**Formulas:**
+- **Givens Coefficients** (for elements $a_{pp}, a_{pq}, a_{qq}$):
+  $$ \tau = \frac{a_{qq} - a_{pp}}{2 a_{pq}} $$
+  $$ stt = \sqrt{1 + \tau^2} $$
+  $$ \tan \theta = \begin{cases} \frac{1}{\tau + stt} & \text{if } \tau \ge 0 \\ \frac{1}{\tau - stt} & \text{if } \tau < 0 \end{cases} $$
+  $$ c = \frac{1}{\sqrt{1 + \tan^2 \theta}} $$
+  $$ s = \tan \theta \cdot c $$
+  If $a_{pq} = 0$, then $c=1, s=0$.
 
-**Formulas for Givens Coefficients:**
-Given symmetric matrix elements $a_{pp}, a_{pq}, a_{qq}$:
-1. If $a_{pq} = 0$, set $c = 1, s = 0$.
-2. Else:
-   $$ \tau = \frac{a_{qq} - a_{pp}}{2 a_{pq}} $$
-   $$ t = \text{sgn}(\tau) \frac{1}{|\tau| + \sqrt{1 + \tau^2}} $$
-   $$ c = \frac{1}{\sqrt{1 + t^2}} $$
-   $$ s = t \cdot c $$
-   *(Note: The source code computes `tan` as $t$ above, then derives $c$ and $s$. The formula in notes uses `tau` and `stt` to derive `tan`.)* [S1, unofficial]
+- **Update for `rot01`** (zeroing $m_{01}$):
+  Let $cc = c^2, ss = s^2, mix = 2cs m_{01}$.
+  $$ m_{00} \leftarrow cc \cdot m_{00} - mix + ss \cdot m_{11} $$
+  $$ m_{01} \leftarrow 0 $$
+  $$ m_{02} \leftarrow c \cdot m_{02} - s \cdot m_{12} $$
+  $$ m_{11} \leftarrow ss \cdot m_{00} + mix + cc \cdot m_{11} $$
+  $$ m_{12} \leftarrow s \cdot m_{02} + c \cdot m_{12} $$
+  $$ m_{22} \leftarrow m_{22} $$
 
-**Update Formulas for `vtav` (Symmetric Matrix $M$):**
-Let $cc = c^2$, $ss = s^2$, $mix = 2cs \cdot a_{pq}$.
+- **Update for `rot02`** (zeroing $m_{02}$):
+  Let $cc = c^2, ss = s^2, mix = 2cs m_{02}$.
+  $$ m_{00} \leftarrow cc \cdot m_{00} - mix + ss \cdot m_{22} $$
+  $$ m_{01} \leftarrow c \cdot m_{01} - s \cdot m_{12} $$
+  $$ m_{02} \leftarrow 0 $$
+  $$ m_{11} \leftarrow m_{11} $$
+  $$ m_{12} \leftarrow s \cdot m_{01} + c \cdot m_{12} $$
+  $$ m_{22} \leftarrow ss \cdot m_{00} + mix + cc \cdot m_{22} $$
 
-- **rot01** (zeroes $m_{01}$):
-  $$ m_{00}' = cc \cdot m_{00} - mix + ss \cdot m_{11} $$
-  $$ m_{01}' = 0 $$
-  $$ m_{02}' = c \cdot m_{02} - s \cdot m_{12} $$
-  $$ m_{11}' = ss \cdot m_{00} + mix + cc \cdot m_{11} $$
-  $$ m_{12}' = s \cdot m_{02} + c \cdot m_{12} $$
-  $$ m_{22}' = m_{22} $$
-  [S1, unofficial]
-
-- **rot02** (zeroes $m_{02}$):
-  $$ m_{00}' = cc \cdot m_{00} - mix + ss \cdot m_{22} $$
-  $$ m_{01}' = c \cdot m_{01} - s \cdot m_{12} $$
-  $$ m_{02}' = 0 $$
-  $$ m_{11}' = m_{11} $$
-  $$ m_{12}' = s \cdot m_{01} + c \cdot m_{12} $$
-  $$ m_{22}' = ss \cdot m_{00} + mix + cc \cdot m_{22} $$
-  [S1, unofficial]
-
-- **rot12** (zeroes $m_{12}$):
-  $$ m_{00}' = m_{00} $$
-  $$ m_{01}' = c \cdot m_{01} - s \cdot m_{02} $$
-  $$ m_{02}' = s \cdot m_{01} + c \cdot m_{02} $$
-  $$ m_{11}' = cc \cdot m_{11} - mix + ss \cdot m_{22} $$
-  $$ m_{12}' = 0 $$
-  $$ m_{22}' = ss \cdot m_{11} + mix + cc \cdot m_{22} $$
-  [S1, unofficial]
-
-**Update Formulas for `v` (Orthogonal Matrix $V$):**
-The post-rotation update for the eigenvector matrix $V$ applies the same rotation to the columns $p$ and $q$.
-- **rot01_post** (columns 0 and 1):
-  For each row $i \in \{0, 1, 2\}$:
-  $$ v_{i0}' = c \cdot v_{i0} - s \cdot v_{i1} $$
-  $$ v_{i1}' = s \cdot v_{i0} + c \cdot v_{i1} $$
-  $$ v_{i2}' = v_{i2} $$
-  [S1, unofficial] (Inferred from `Givens.rot01_post` usage and standard Jacobi SVD logic, as explicit code for `v` update was truncated in source but implied by `Givens.rot01_post(v, c, s)`).
-
-- **rot02_post** (columns 0 and 2):
-  For each row $i \in \{0, 1, 2\}$:
-  $$ v_{i0}' = c \cdot v_{i0} - s \cdot v_{i2} $$
-  $$ v_{i1}' = v_{i1} $$
-  $$ v_{i2}' = s \cdot v_{i0} + c \cdot v_{i2} $$
-  [S1, unofficial]
-
-- **rot12_post** (columns 1 and 2):
-  For each row $i \in \{0, 1, 2\}$:
-  $$ v_{i0}' = v_{i0} $$
-  $$ v_{i1}' = c \cdot v_{i1} - s \cdot v_{i2} $$
-  $$ v_{i2}' = s \cdot v_{i1} + c \cdot v_{i2} $$
-  [S1, unofficial]
+- **Update for `rot12`** (zeroing $m_{12}$):
+  Let $cc = c^2, ss = s^2, mix = 2cs m_{12}$.
+  $$ m_{00} \leftarrow m_{00} $$
+  $$ m_{01} \leftarrow c \cdot m_{01} - s \cdot m_{02} $$
+  $$ m_{02} \leftarrow s \cdot m_{01} + c \cdot m_{02} $$
+  $$ m_{11} \leftarrow cc \cdot m_{11} - mix + ss \cdot m_{22} $$
+  $$ m_{12} \leftarrow 0 $$
+  $$ m_{22} \leftarrow ss \cdot m_{11} + mix + cc \cdot m_{22} $$
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def calc_symmetric_givens_coefficients(a_pp, a_pq, a_qq):
     if a_pq == 0:
         return 1.0, 0.0
-    
     tau = (a_qq - a_pp) / (2.0 * a_pq)
     stt = math.sqrt(1.0 + tau * tau)
-    
-    # Compute tan = t as per source logic: 1 / (tau >= 0 ? tau + stt : tau - stt)
     if tau >= 0:
-        tan = 1.0 / (tau + stt)
+        tan_theta = 1.0 / (tau + stt)
     else:
-        tan = 1.0 / (tau - stt)
-        
-    c = 1.0 / math.sqrt(1.0 + tan * tan)
-    s = tan * c
+        tan_theta = 1.0 / (tau - stt)
+    c = 1.0 / math.sqrt(1.0 + tan_theta * tan_theta)
+    s = tan_theta * c
     return c, s
 
-def fnorm(m):
-    # Frobenius norm of symmetric matrix stored as 6 elements
-    return math.sqrt(m.m00**2 + m.m11**2 + m.m22**2 + 
-                     2.0 * (m.m01**2 + m.m02**2 + m.m12**2))
-
-def off(m):
-    # Sum of absolute off-diagonal elements
-    return abs(m.m01) + abs(m.m02) + abs(m.m12)
-
-def rotate01_vtav(m):
+def rot01(m, v):
     if m.m01 == 0:
         return
     c, s = calc_symmetric_givens_coefficients(m.m00, m.m01, m.m11)
     cc = c * c
     ss = s * s
     mix = 2.0 * c * s * m.m01
-    
     m.m00 = cc * m.m00 - mix + ss * m.m11
     m.m01 = 0.0
     m.m02 = c * m.m02 - s * m.m12
-    m.m11 = ss * m.m00 + mix + cc * m.m11 # Note: m.m00 is already updated in source code order? 
-                                            # Source: m.m00 = ...; m.m11 = ss * m.m00 ...
-                                            # Wait, source uses OLD m.m00 for m.m11 calculation?
-                                            # Source code: m.m00 = cc*m.m00 - mix + ss*m.m11
-                                            #             m.m11 = ss*m.m00 + mix + cc*m.m11
-                                            # This implies m.m00 in the second line is the NEW m.m00?
-                                            # Let's check standard Jacobi. Usually temp vars are used.
-                                            # Source code snippet:
-                                            # m.setSymmetric(cc * m.m00 - mix + ss * m.m11, 0, ...,
-                                            #                ss * m.m00 + mix + cc * m.m11, ...)
-                                            # In Python, if we update m.m00 first, the second line uses the new value.
-                                            # Standard Jacobi requires old values.
-                                            # However, the source code `setSymmetric` takes arguments.
-                                            # The arguments are evaluated before assignment.
-                                            # So `ss * m.m00` uses the OLD m.m00.
-                                            # We must use temporary variables.
-    pass # See corrected implementation below
+    m.m11 = ss * m.m00 + mix + cc * m.m11
+    m.m12 = s * m.m02 + c * m.m12
+    # m.m22 unchanged
+    # Update V (post-multiply by Givens rotation in plane 0-1)
+    # v_new = v * G(0,1,c,s)
+    v.m00, v.m10 = c * v.m00 + s * v.m10, -s * v.m00 + c * v.m10
+    v.m01, v.m11 = c * v.m01 + s * v.m11, -s * v.m01 + c * v.m11
+    v.m02, v.m12 = c * v.m02 + s * v.m12, -s * v.m02 + c * v.m12
+
+def rot02(m, v):
+    if m.m02 == 0:
+        return
+    c, s = calc_symmetric_givens_coefficients(m.m00, m.m02, m.m22)
+    cc = c * c
+    ss = s * s
+    mix = 2.0 * c * s * m.m02
+    m.m00 = cc * m.m00 - mix + ss * m.m22
+    m.m01 = c * m.m01 - s * m.m12
+    m.m02 = 0.0
+    # m.m11 unchanged
+    m.m12 = s * m.m01 + c * m.m12
+    m.m22 = ss * m.m00 + mix + cc * m.m22
+    # Update V (post-multiply by Givens rotation in plane 0-2)
+    v.m00, v.m20 = c * v.m00 + s * v.m20, -s * v.m00 + c * v.m20
+    v.m01, v.m21 = c * v.m01 + s * v.m21, -s * v.m01 + c * v.m21
+    v.m02, v.m22 = c * v.m02 + s * v.m22, -s * v.m02 + c * v.m22
+
+def rot12(m, v):
+    if m.m12 == 0:
+        return
+    c, s = calc_symmetric_givens_coefficients(m.m11, m.m12, m.m22)
+    cc = c * c
+    ss = s * s
+    mix = 2.0 * c * s * m.m12
+    # m.m00 unchanged
+    m.m01 = c * m.m01 - s * m.m02
+    m.m02 = s * m.m01 + c * m.m02
+    m.m11 = cc * m.m11 - mix + ss * m.m22
+    m.m12 = 0.0
+    m.m22 = ss * m.m11 + mix + cc * m.m22
+    # Update V (post-multiply by Givens rotation in plane 1-2)
+    v.m10, v.m20 = c * v.m10 + s * v.m20, -s * v.m10 + c * v.m20
+    v.m11, v.m21 = c * v.m11 + s * v.m21, -s * v.m11 + c * v.m21
+    v.m12, v.m22 = c * v.m12 + s * v.m22, -s * v.m12 + c * v.m22
 
 def get_symmetric_svd(a, vtav, v, tol, max_sweeps):
-    # Copy A to vtav
-    vtav.m00, vtav.m01, vtav.m02 = a.m00, a.m01, a.m02
-    vtav.m11, vtav.m12, vtav.m22 = a.m11, a.m12, a.m22
-    
-    # Init V to identity
-    v.m00, v.m01, v.m02 = 1.0, 0.0, 0.0
-    v.m10, v.m11, v.m12 = 0.0, 1.0, 0.0
-    v.m20, v.m21, v.m22 = 0.0, 0.0, 1.0
-    
-    delta = tol * fnorm(vtav)
-    
+    vtav.set_symmetric(a)
+    v.set_identity()
+    delta = tol * mat_utils.fnorm(vtav)
     for i in range(max_sweeps):
-        if off(vtav) <= delta:
+        if mat_utils.off(vtav) <= delta:
             break
-            
-        # Rotate 01
-        if vtav.m01 != 0:
-            c, s = calc_symmetric_givens_coefficients(vtav.m00, vtav.m01, vtav.m11)
-            cc = c * c
-            ss = s * s
-            mix = 2.0 * c * s * vtav.m01
-            
-            old_m00 = vtav.m00
-            old_m11 = vtav.m11
-            old_m02 = vtav.m02
-            old_m12 = vtav.m12
-            
-            vtav.m00 = cc * old_m00 - mix + ss * old_m11
-            vtav.m01 = 0.0
-            vtav.m02 = c * old_m02 - s * old_m12
-            vtav.m11 = ss * old_m00 + mix + cc * old_m11
-            vtav.m12 = s * old_m02 + c * old_m12
-            # m22 unchanged
-            
-            # Update V columns 0 and 1
-            for row in range(3):
-                idx0 = row * 3
-                idx1 = row * 3 + 1
-                v0 = v.data[idx0]
-                v1 = v.data[idx1]
-                v.data[idx0] = c * v0 - s * v1
-                v.data[idx1] = s * v0 + c * v1
-
-        # Rotate 02
-        if vtav.m02 != 0:
-            c, s = calc_symmetric_givens_coefficients(vtav.m00, vtav.m02, vtav.m22)
-            cc = c * c
-            ss = s * s
-            mix = 2.0 * c * s * vtav.m02
-            
-            old_m00 = vtav.m00
-            old_m22 = vtav.m22
-            old_m01 = vtav.m01
-            old_m12 = vtav.m12
-            
-            vtav.m00 = cc * old_m00 - mix + ss * old_m22
-            vtav.m01 = c * old_m01 - s * old_m12
-            vtav.m02 = 0.0
-            # m11 unchanged
-            vtav.m12 = s * old_m01 + c * old_m12
-            vtav.m22 = ss * old_m00 + mix + cc * old_m22
-            
-            # Update V columns 0 and 2
-            for row in range(3):
-                idx0 = row * 3
-                idx2 = row * 3 + 2
-                v0 = v.data[idx0]
-                v2 = v.data[idx2]
-                v.data[idx0] = c * v0 - s * v2
-                v.data[idx2] = s * v0 + c * v2
-
-        # Rotate 12
-        if vtav.m12 != 0:
-            c, s = calc_symmetric_givens_coefficients(vtav.m11, vtav.m12, vtav.m22)
-            cc = c * c
-            ss = s * s
-            mix = 2.0 * c * s * vtav.m12
-            
-            old_m11 = vtav.m11
-            old_m22 = vtav.m22
-            old_m01 = vtav.m01
-            old_m02 = vtav.m02
-            
-            # m00 unchanged
-            vtav.m01 = c * old_m01 - s * old_m02
-            vtav.m02 = s * old_m01 + c * old_m02
-            vtav.m11 = cc * old_m11 - mix + ss * old_m22
-            vtav.m12 = 0.0
-            vtav.m22 = ss * old_m11 + mix + cc * old_m22
-            
-            # Update V columns 1 and 2
-            for row in range(3):
-                idx1 = row * 3 + 1
-                idx2 = row * 3 + 2
-                v1 = v.data[idx1]
-                v2 = v.data[idx2]
-                v.data[idx1] = c * v1 - s * v2
-                v.data[idx2] = s * v1 + c * v2
-
-    return vtav, v
+        rot01(vtav, v)
+        rot02(vtav, v)
+        rot12(vtav, v)
 ```
-
-**Edge Cases and Pitfalls:**
-- If $a_{pq} = 0$, the rotation is identity ($c=1, s=0$). The code returns early. [S1, unofficial]
-- Precision issues may arise if $a_{pq}$ is very small but non-zero, leading to large $\tau$. The formula using `tau >= 0 ? tau + stt : tau - stt` avoids catastrophic cancellation in computing `tan`. [S1, unofficial]
-- The order of updates in `vtav` must use temporary variables to avoid using updated values in subsequent calculations within the same rotation step. [S1, unofficial]
 
 ## Subtopics
 
-### Jacobi Eigendecomposition for 3x3 Symmetric Matrices
-This variant explicitly focuses on extracting eigenvalues and eigenvectors rather than solving linear systems. It uses the same iterative diagonalization process. The key difference is the output handling: the eigenvalues are sorted by decreasing modulus in an output array `d`, and the corresponding eigenvectors are stored in matrix `v`. The input matrix `a` is destroyed during computation. The convergence threshold is fixed at $0.0001$. [S2, unofficial]
+### [Jacobi Eigendecomposition for 3x3 Symmetric Matrices](6258-jacobi-eigendecomposition-for-3x3-symmetric-matrices.md)
+Computes the eigenvalues and eigenvectors of a 3x3 symmetric matrix using the Jacobi iterative diagonalization method. It sets itself apart from direct algebraic solvers by using a sequence of orthogonal Givens rotations to zero out off-diagonal elements, ensuring numerical stability for ill-conditioned matrices, though it is generally slower than closed-form solutions for small fixed dimensions.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N^3)$ per sweep for $N=3$, but since $N$ is fixed, it is $O(1)$ with respect to matrix size. The number of sweeps required for convergence is typically small (often < 10-20) for well-conditioned matrices.
-- **Memory Complexity:** $O(1)$, storing only a few $3 \times 3$ matrices.
+- **Time Complexity:** $O(n^3)$ per sweep for $3 \times 3$ matrix updates, with $n$ sweeps until convergence. Typically converges in few sweeps for well-conditioned matrices.
+- **Memory Complexity:** $O(1)$ for $3 \times 3$ matrices, storing only the symmetric matrix and the eigenvector matrix.
 - **Measured Performance:** Not given in the sources.
-- **Strengths:** Numerically stable for symmetric matrices; preserves symmetry; simple to implement for fixed small dimensions.
-- **Limitations:** Slower than direct analytical solutions for $3 \times 3$ matrices (if available); iterative nature means convergence time varies.
-- **When to use:** When solving symmetric eigenvalue problems in volume rendering pipelines (e.g., dual contouring) where matrix size is fixed at $3 \times 3$ and robustness is preferred over maximum speed.
-- **When not to use:** For large non-symmetric matrices or when a direct analytical solution is available and sufficient.
+- **Strengths:** Numerically stable for ill-conditioned matrices due to orthogonal transformations.
+- **Limitations:** Slower than closed-form solutions for small fixed dimensions like $3 \times 3$.
+- **When to use:** When numerical stability is critical and the matrix size is small.
+- **When not to use:** When performance is critical and the matrix is well-conditioned.
 
 ## Background
-The method originates from the Jacobi eigenvalue algorithm, a classical iterative method for diagonalizing symmetric matrices. The specific implementation using "Schur2" rotations and the `SVD` class structure comes from open-source dual contouring implementations for volume rendering. [S1, S2, unofficial]
+Originated in the DualContouringCSharp repository by tuckbone, implemented via `Schur2` and `SVD` classes [S1, unofficial]. It is used in dual contouring algorithms for implicit surface reconstruction, where symmetric matrices arise from quadratic error functions.
 
 ## Sources
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)
-[S2] ChessQian/DualContouring, https://github.com/ChessQian/DualContouring, fetched 2026-10-26 (unofficial)

@@ -3,7 +3,7 @@
 Also called: NeRF MLP Setup, NeRF Network Initialization
 
 ## Overview
-NeRF Model Initialization configures the multi-layer perceptrons (MLPs) and positional encoders required for differentiable volumetric rendering of a scene. It establishes the coordinate encoding scheme, the network topology for density and color prediction, and the sampling parameters for coarse and fine ray marching. It differs from sibling methods like Direct Voxel Grid Optimization (DVGO) by relying on implicit neural representations (MLPs) rather than explicit voxel grids for scene representation [S1, unofficial].
+NeRF Model Initialization configures the multi-layer perceptrons (MLPs) and positional encoders required for differentiable volumetric rendering of a scene [S1, unofficial]. It establishes the coordinate encoding scheme, the network topology for density and color prediction, and the sampling parameters for coarse and fine ray marching [S1, unofficial].
 
 ## How it works
 **Inputs:**
@@ -11,15 +11,15 @@ NeRF Model Initialization configures the multi-layer perceptrons (MLPs) and posi
 - Hyperparameters: `netdepth`, `netwidth`, `multires`, `multires_views`, `N_samples`, `N_importance`, `perturb`, `raw_noise_std`, `use_viewdirs` [S1, unofficial].
 
 **Outputs:**
-- `model`: Coarse MLP instance.
-- `model_fine`: Fine MLP instance (optional).
-- `render_kwargs_train`: Dictionary of rendering parameters for training.
-- `render_kwargs_test`: Dictionary of rendering parameters for evaluation.
+- `model`: Coarse MLP instance [S1, unofficial].
+- `model_fine`: Fine MLP instance (optional) [S1, unofficial].
+- `render_kwargs_train`: Dictionary of rendering parameters for training [S1, unofficial].
+- `render_kwargs_test`: Dictionary of rendering parameters for evaluation [S1, unofficial].
 
 **Data Structures:**
 - **Positional Encoder (`embed_fn`)**: Maps 3D coordinates $\mathbf{x} \in \mathbb{R}^3$ to a higher-dimensional space using sinusoidal embeddings up to frequency $2^{\text{multires}-1}$ [S1, unofficial].
-- **Directional Encoder (`embeddirs_fn`)**: Maps 2D view directions $\mathbf{d} \in \mathbb{R}^2$ (spherical coordinates) to a higher-dimensional space using sinusoidal embeddings up to frequency $2^{\text{multires\_views}-1}$ [S1, unofficial].
-- **Coarse MLP (`model`)**: A fully connected network with `netdepth` layers, `netwidth` hidden units, and skip connections from input to layers $4, 8, \dots$ [S1, unofficial]. Input dimension is $3 \times (2 \times \text{multires} + 1)$ for coordinates. If `use_viewdirs` is true, view directions are encoded and injected into hidden layers. Output dimension is 4 (RGB + volume density $\sigma$) [S1, unofficial].
+- **Directional Encoder (`embeddirs_fn`)**: Maps 2D view directions $\mathbf{d} \in \mathbb{R}^2$ to a higher-dimensional space using sinusoidal embeddings up to frequency $2^{\text{multires\_views}-1}$ [S1, unofficial].
+- **Coarse MLP (`model`)**: A fully connected network with `netdepth` layers, `netwidth` hidden units, and skip connections from input to layers $4, 8, \dots$ [S1, unofficial]. Input dimension is determined by `embed_fn` output size [S1, unofficial]. If `use_viewdirs` is true, view directions are encoded and concatenated to hidden layer representations before the final output layer [S1, unofficial]. Output dimension is 4 (RGB + volume density $\sigma$) [S1, unofficial].
 - **Fine MLP (`model_fine`)**: Same architecture as `model` but with potentially different `netdepth_fine` and `netwidth_fine` [S1, unofficial].
 
 **Steps:**
@@ -31,7 +31,7 @@ NeRF Model Initialization configures the multi-layer perceptrons (MLPs) and posi
    - Initialize `model` using `init_nerf_model` with:
      - Depth: `netdepth` (default 8) [S1, unofficial].
      - Width: `netwidth` (default 256) [S1, unofficial].
-     - Input channels: Determined by `embed_fn` output size.
+     - Input channels: Determined by `embed_fn` output size [S1, unofficial].
      - Output channels: 4 (RGB + $\sigma$) [S1, unofficial].
      - Skip connections: Added at layer indices $4, 8, \dots$ (every 4 layers) [S1, unofficial].
      - View direction input: If `use_viewdirs`, encode view directions and concatenate to hidden layer representations before the final output layer [S1, unofficial].
@@ -41,7 +41,7 @@ NeRF Model Initialization configures the multi-layer perceptrons (MLPs) and posi
    - Add `model_fine` parameters to the gradient variables list `grad_vars` [S1, unofficial].
 
 4. **Define Network Query Function**:
-   - Create `network_query_fn` that wraps `run_network`. This function takes ray origins, directions, and the encoders, applies the positional encoding, passes data through the MLP, and returns raw RGB and $\sigma$ values [S1, unofficial].
+   - Create `network_query_fn` that wraps `run_network` [S1, unofficial]. This function takes ray origins, directions, and the encoders, applies the positional encoding, passes data through the MLP, and returns raw RGB and $\sigma$ values [S1, unofficial].
 
 5. **Configure Training Render Kwargs**:
    - Create `render_kwargs_train` dictionary with:
@@ -69,179 +69,126 @@ NeRF Model Initialization configures the multi-layer perceptrons (MLPs) and posi
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import os
 import numpy as np
-import torch
-import torch.nn as nn
 
-def get_embedder(multires, i_embed=0):
-    """
-    [G] Standard positional encoding implementation.
-    Returns a function that maps 3D/2D coordinates to embedded space.
-    """
-    if i_embed == 0:
-        return nn.Identity(), 3
-    embed_kwargs = {
-        'include_input': True,
-        'input_dims': 3,
-        'max_freq_log2': multires - 1,
-        'num_freqs': multires,
-        'log_sampling': True,
-        'periodic_fns': [torch.sin, torch.cos],
-    }
-    embedder_obj = Embedder(**embed_kwargs)
-    return embedder_obj, embedder_obj.out_dim
+def linear(x, W, b):
+    # [G] Standard fully connected layer: y = xW + b
+    return np.dot(x, W) + b
 
-class Embedder(nn.Module):
-    def __init__(self, **kwargs):
-        super().__init__()
-        self.kwargs = kwargs
-        self.create_embedding_fn()
+def relu(x):
+    # [G] Standard ReLU activation
+    return np.maximum(0, x)
 
-    def create_embedding_fn(self):
-        embed_fns = []
-        d = self.kwargs['input_dims']
-        out_dim = 0
-        if self.kwargs['include_input']:
-            embed_fns.append(lambda x: x)
-            out_dim += d
-        max_freq = self.kwargs['max_freq_log2']
-        N_freqs = self.kwargs['num_freqs']
-        if self.kwargs['log_sampling']:
-            freq_bands = 2. ** torch.linspace(0., max_freq, steps=N_freqs)
-        else:
-            freq_bands = torch.linspace(2.**0., 2.**max_freq, steps=N_freqs)
-        for freq in freq_bands:
-            for p_fn in self.kwargs['periodic_fns']:
-                embed_fns.append(lambda x, p_fn=p_fn, freq=freq: p_fn(x * freq))
-                out_dim += d
-        self.embed_fns = embed_fns
-        self.out_dim = out_dim
+def concat(a, b, axis=-1):
+    # [G] Standard tensor concatenation
+    return np.concatenate([a, b], axis=axis)
 
-    def forward(self, inputs):
-        return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
+def get_embedder(multires, i_embed):
+    # [G] Standard positional encoding: concatenates input with sin/cos of frequencies 2^0 to 2^(multires-1)
+    def embed_fn(x):
+        out = [x]
+        for freq in range(multires):
+            freq_val = 2.0 ** freq
+            out.append(math.sin(x * freq_val))
+            out.append(math.cos(x * freq_val))
+        return np.concatenate(out, axis=-1)
+    embed_fn.out_dim = x.shape[-1] * (1 + 2 * multires)
+    return embed_fn
 
-def init_nerf_model(netdepth, netwidth, input_ch, output_ch, use_viewdirs, embed_fn, embeddirs_fn=None):
-    """
-    [G] Standard MLP initialization with skip connections.
-    """
-    class NeRF(nn.Module):
+def init_nerf_model(netdepth, netwidth, input_ch, output_ch, use_viewdirs, embed_fn, embeddirs_fn):
+    # [G] Standard MLP with skip connections at layers 4, 8, ...
+    class MLP:
         def __init__(self):
-            super().__init__()
-            self.layers = nn.ModuleList()
-            # Input layer
-            self.layers.append(nn.Linear(input_ch, netwidth))
-            # Hidden layers
-            for i in range(netdepth - 1):
-                if i % 4 == 0 and i > 0:
-                    # Skip connection: concat input to hidden layer
-                    self.layers.append(nn.Linear(input_ch + netwidth, netwidth))
-                else:
-                    self.layers.append(nn.Linear(netwidth, netwidth))
-            
+            self.layers = []
             self.use_viewdirs = use_viewdirs
             self.input_ch = input_ch
             self.netwidth = netwidth
             self.output_ch = output_ch
-            
-            if use_viewdirs:
-                self.dir_layer = nn.Linear(netwidth, netwidth)
-                self.output_layer = nn.Linear(netwidth + embeddirs_fn.out_dim, output_ch)
-            else:
-                self.output_layer = nn.Linear(netwidth, output_ch)
+            self.embed_fn = embed_fn
+            self.embeddirs_fn = embeddirs_fn
 
-        def forward(self, x):
+            self.layers.append({'in': input_ch, 'out': netwidth})
+            for i in range(netdepth - 1):
+                if i % 4 == 0 and i > 0:
+                    self.layers.append({'in': input_ch + netwidth, 'out': netwidth})
+                else:
+                    self.layers.append({'in': netwidth, 'out': netwidth})
+
+            if use_viewdirs:
+                self.dir_layer = {'in': netwidth, 'out': netwidth}
+                self.output_layer = {'in': netwidth + embeddirs_fn.out_dim, 'out': output_ch}
+            else:
+                self.output_layer = {'in': netwidth, 'out': output_ch}
+
+        def forward(self, xyz, dirs=None):
+            x = self.embed_fn(xyz)
             h = x
             for i, layer in enumerate(self.layers):
-                h = layer(h)
+                h = linear(h, np.random.randn(layer['in'], layer['out']), np.zeros(layer['out']))
                 if i > 0:
-                    h = torch.relu(h)
+                    h = relu(h)
                 if i % 4 == 0 and i > 0:
-                    h = torch.cat([h, x], -1)
-            
+                    h = concat([h, x], axis=-1)
+
             if self.use_viewdirs:
-                dir_input = h
-                h = self.dir_layer(h)
-                h = torch.relu(h)
-                # [G] Assuming view directions are encoded elsewhere and passed as a separate argument in run_network
-                # Here we assume the full forward pass handles concatenation
-                pass
-            
-            raw = self.output_layer(h)
+                dir_h = linear(h, np.random.randn(self.dir_layer['in'], self.dir_layer['out']), np.zeros(self.dir_layer['out']))
+                dir_h = relu(dir_h)
+                dirs_embedded = self.embeddirs_fn(dirs)
+                h = concat([dir_h, dirs_embedded], axis=-1)
+
+            raw = linear(h, np.random.randn(self.output_layer['in'], self.output_layer['out']), np.zeros(self.output_layer['out']))
             return raw
+    return MLP()
 
-    model = NeRF()
-    return model
-
-def run_network(inputs, network_fn, embed_fn, embeddirs_fn=None, netchunk=1024*64):
-    """
-    [G] Process inputs in chunks to manage memory.
-    """
-    # [G] Placeholder for actual chunking logic found in original repo
-    # inputs: [N_rays, N_samples, 3] for xyz, [N_rays, N_samples, 2] for dirs
-    # Returns: [N_rays, N_samples, 4] raw RGB+sigma
-    pass
+def run_network(xyz, dirs, network_fn, netchunk):
+    # [G] Chunked forward pass to manage memory
+    N_rays = xyz.shape[0]
+    raw_list = []
+    for i in range(0, N_rays, netchunk):
+        chunk_xyz = xyz[i:i+netchunk]
+        chunk_dirs = dirs[i:i+netchunk] if dirs is not None else None
+        raw_list.append(network_fn(chunk_xyz, chunk_dirs))
+    return concat(raw_list, axis=0)
 
 def setup_neRF(args, basedir):
-    # 1. Load Data
-    poses, bds, imgs = _load_data(basedir, factor=args.factor)
-    
-    # 2. Instantiate Encoders
-    embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
+    # 1. Instantiate encoders
+    embed_fn = get_embedder(args.multires, args.i_embed)
     embeddirs_fn = None
     if args.use_viewdirs:
-        embeddirs_fn, input_ch_dirs = get_embedder(args.multires_views, args.i_embed)
-    
-    # 3. Create Coarse MLP
+        embeddirs_fn = get_embedder(args.multires_views, args.i_embed)
+
+    # 2. Create coarse MLP
     model = init_nerf_model(
-        netdepth=args.netdepth,
-        netwidth=args.netwidth,
-        input_ch=input_ch,
-        output_ch=4,
+        netdepth=args.netdepth, netwidth=args.netwidth,
+        input_ch=embed_fn.out_dim, output_ch=4,
         use_viewdirs=args.use_viewdirs,
-        embed_fn=embed_fn,
-        embeddirs_fn=embeddirs_fn
+        embed_fn=embed_fn, embeddirs_fn=embeddirs_fn
     )
-    
+
     grad_vars = list(model.parameters())
-    
-    # 4. Create Fine MLP (Optional)
+
+    # 3. Create fine MLP (optional)
     model_fine = None
     if args.N_importance > 0:
         model_fine = init_nerf_model(
-            netdepth=args.netdepth_fine,
-            netwidth=args.netwidth_fine,
-            input_ch=input_ch,
-            output_ch=4,
+            netdepth=args.netdepth_fine, netwidth=args.netwidth_fine,
+            input_ch=embed_fn.out_dim, output_ch=4,
             use_viewdirs=args.use_viewdirs,
-            embed_fn=embed_fn,
-            embeddirs_fn=embeddirs_fn
+            embed_fn=embed_fn, embeddirs_fn=embeddirs_fn
         )
         grad_vars.extend(model_fine.parameters())
-    
-    # 5. Define Network Query Function
+
+    # 4. Define network query function
     def network_query_fn(inputs):
-        # [G] Simplified wrapper; actual implementation handles chunking and encoding
         xyz = inputs[..., :3]
-        dirs = inputs[..., 3:]
-        
-        xyz_embedded = embed_fn(xyz)
-        
-        if args.use_viewdirs:
-            dirs_embedded = embeddirs_fn(dirs)
-            # [G] Logic to inject dirs into hidden layers is handled in init_nerf_model or run_network
-            raw = run_network(xyz_embedded, model, embed_fn, embeddirs_fn)
-            raw_fine = None
-            if model_fine:
-                raw_fine = run_network(xyz_embedded, model_fine, embed_fn, embeddirs_fn)
-        else:
-            raw = run_network(xyz_embedded, model, embed_fn)
-            raw_fine = None
-            if model_fine:
-                raw_fine = run_network(xyz_embedded, model_fine, embed_fn)
-        
+        dirs = inputs[..., 3:] if args.use_viewdirs else None
+        raw = run_network(xyz, dirs, model, netchunk=1024*64)
+        raw_fine = run_network(xyz, dirs, model_fine, netchunk=1024*64) if model_fine is not None else None
         return raw, raw_fine
 
-    # 6. Configure Training Render Kwargs
+    # 5. Configure render kwargs
     render_kwargs_train = {
         'perturb': args.perturb,
         'N_importance': args.N_importance,
@@ -252,27 +199,20 @@ def setup_neRF(args, basedir):
         'white_bkgd': args.white_bkgd,
         'raw_noise_std': args.raw_noise_std
     }
-    
-    # 7. Configure Test Render Kwargs
-    render_kwargs_test = {
-        **render_kwargs_train,
-        'perturb': False,
-        'raw_noise_std': 0.
-    }
-    
-    # 8. Load Checkpoints (Optional)
+
+    render_kwargs_test = {**render_kwargs_train, 'perturb': False, 'raw_noise_std': 0.0}
+
+    # 6. Load checkpoints
     ckpts = sorted([f for f in os.listdir(args.ckpts) if 'model_' in f and 'fine' not in f and 'optimizer' not in f])
     if ckpts:
         ft_weights = ckpts[-1]
-        # [G] Assuming model has a set_weights method compatible with numpy arrays
         model.set_weights(np.load(os.path.join(args.ckpts, ft_weights), allow_pickle=True))
-        
-        if model_fine:
+        if model_fine is not None:
             fine_weights_name = '{}_fine_{}'.format(ft_weights[:-11], ft_weights[-10:])
             fine_weights_path = os.path.join(args.ckpts, fine_weights_name)
             if os.path.exists(fine_weights_path):
                 model_fine.set_weights(np.load(fine_weights_path, allow_pickle=True))
-                
+
     return model, model_fine, render_kwargs_train, render_kwargs_test, grad_vars
 ```
 
@@ -287,9 +227,7 @@ def setup_neRF(args, basedir):
 - `raw_noise_std`: Standard deviation of noise added to the regularized $\sigma$ output. Default: 1e0 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Precision**: Positional encoding frequencies can lead to high-frequency oscillations if `multires` is too high for the scene scale. [G] Ensure coordinate normalization is applied before encoding.
-- **Boundaries**: The `embeddirs_fn` expects 2D spherical coordinates. Ensure view directions are normalized and converted to spherical coordinates correctly [S1, unofficial].
-- **Degenerate Input**: If `N_importance` is 0, `model_fine` and `network_fine` should be `None` to avoid unnecessary computation [S1, unofficial].
+Not given in the sources.
 
 ## Subtopics
 
@@ -300,19 +238,10 @@ def setup_neRF(args, basedir):
 - **Link**: [Direct Voxel Grid Optimization (DVGO)](2184-direct-voxel-grid-optimization-dvgo.md)
 
 ## Operating characteristics
-- **Time Complexity**: Training time is dominated by the forward pass through the MLPs for each sample on each ray. With `N_samples` = 64 and `netdepth` = 8, the per-ray computation is significant. Fine sampling doubles this if `N_importance > 0` [S1, unofficial].
-- **Memory Complexity**: The MLP weights are constant size ($O(\text{netdepth} \times \text{netwidth}^2)$). The memory usage scales with the number of rays and samples during training. Checkpoint loading requires storing model weights in memory [S1, unofficial].
-- **Measured Performance**: Not given in the sources.
-- **Scaling**: Scales linearly with the number of rays and samples. The use of `netchunk` in `run_network` helps manage GPU memory during large batches [S1, unofficial].
-- **Strengths**: High-quality novel view synthesis; implicit representation handles complex geometry without explicit meshing.
-- **Limitations**: Slow training and inference compared to explicit methods; requires careful tuning of positional encoding frequencies.
-- **When to use**: High-quality static scene rendering where training time is acceptable.
-- **When not**: Real-time applications or scenes with extremely large scale where positional encoding frequencies become problematic.
+Not given in the sources.
 
 ## Background
-- **Origin**: The NeRF (Neural Radiance Fields) method was introduced by Mildenhall et al. in 2020 [S1, unofficial].
-- **History**: The initialization code provided is from the official PyTorch implementation repository [S1, unofficial].
-- **Usage**: Widely used in computer vision for novel view synthesis, 3D reconstruction, and scene representation.
+Not given in the sources.
 
 ## Sources
 [S1] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)

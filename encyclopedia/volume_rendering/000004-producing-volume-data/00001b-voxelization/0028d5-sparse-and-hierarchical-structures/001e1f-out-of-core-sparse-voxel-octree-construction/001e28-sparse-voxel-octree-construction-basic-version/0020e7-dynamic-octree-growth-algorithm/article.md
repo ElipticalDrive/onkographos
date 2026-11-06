@@ -1,110 +1,117 @@
 # Dynamic Octree Growth Algorithm
 
-Also called: Jan Schultke's construction method, Octree expansion method
+Also called: Jan Schultke's construction method, Octree Construction from Voxels, Octree expansion method, SVO Builder, Voxel to Octree Conversion
 
 ## Overview
-The Dynamic Octree Growth Algorithm constructs a Sparse Voxel Octree (SVO) by dynamically increasing its depth and spatial extent as new voxels are processed, rather than pre-calculating the scene's bounding box [S1, unofficial]. It differs from static voxelization methods by handling out-of-bounds coordinates on-the-fly, ensuring the octree grows to encompass all input data without prior knowledge of the scene's dimensions [S1, unofficial]. This method serves as the foundational growth logic for incremental SVO construction, upon which [Octree Insertion with Growth](2387-octree-insertion-with-growth.md) builds specific recursive insertion and boundary check logic [S1, unofficial].
+The Dynamic Octree Growth Algorithm constructs a Sparse Voxel Octree (SVO) by dynamically increasing its depth and spatial extent as new voxels are processed, rather than pre-calculating the size from the input data [S1, unofficial]. It handles both positive and negative coordinates by centering the root at the boundary between -1 and 0, ensuring the tree grows to encompass all input data without pre-calculating the scene's bounding box [S1, unofficial]. It differs from static voxelization by handling out-of-bounds coordinates on-the-fly [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: An octree structure $o$ (initially containing only a root node) and a sequence of voxel coordinates $v$ [S1, unofficial].
-- Output: The modified octree $o$ with expanded depth and spatial extent if necessary [S1, unofficial].
+- Input: A stream of voxel positions (coordinates).
+- Output: A Sparse Voxel Octree structure with dynamically grown depth.
 
 **Data Structures:**
-- **Octree Node:** Each node has up to 8 children, indexed 0 to 7 [S1, unofficial].
-- **Child Indexing:** Child 0 (binary `000`) represents the lowest position (minimum coordinates), and Child 7 (binary `111`) represents the highest position (maximum coordinates) [S1, unofficial].
-- **Coordinate System:** The root node covers the range $[-1, 0)$ for each axis [S1, unofficial]. A voxel $v$ is contained in an octree of depth $d$ if $v$ is in the range $[-2^{d-1}, 2^{d-1})$ for each axis [S1, unofficial].
+- **Node**: Represents a voxel or a parent of 8 children.
+- **Octree**: Contains a root node and manages the current depth.
+- **Child Indexing**: Child 0 (binary `000`) is the lowest position; Child 7 (binary `111`) is the highest position [S1, unofficial].
 
-**Algorithm Steps:**
+**Initialization:**
+1. Initialize the Octree with a root node.
+2. Define the coordinate system: The root node covers the range $[-1, 0)$ for each axis [S1, unofficial].
+3. A voxel $v$ is contained in an octree of depth $d$ if $v$ is in the range $[-2^{d-1}, 2^{d-1})$ [S1, unofficial].
 
-1. **Check Containment:** Determine if the incoming voxel $v$ is contained within the current octree depth $d$ [S1, unofficial]. If $v$ is within the bounds $[-2^{d-1}, 2^{d-1})$, no growth is needed [S1, unofficial]. If not, trigger the growth loop [S1, unofficial].
+**Processing Steps:**
+For each incoming voxel $v$:
+1. **Check Containment**: Determine if voxel $v$ is contained within the current octree depth $d$.
+   - If yes, insert $v$ into the leaf node corresponding to its position.
+   - If no, trigger **Growth**.
 
-2. **Growth Loop:** To expand the octree, the algorithm doubles the spatial extent by adding a new layer of nodes around the existing tree [S1, unofficial]. For each child index $i$ from 0 to 7 of the root node $r$: create a new node $n'$, move the existing child $n$ (at index $i$) to become the child at index $7-i$ of $n'$, and make $n'$ the new child of the root $r$ at index $i$ [S1, unofficial]. The source pseudocode uses 1-based indexing ($1 \le i \le 8$) and a mirror calculation of $8-i+1$, which maps to 0-based indexing as $i \in [0, 7]$ and mirror index $7-i$ [S1, unofficial].
+2. **Growth Loop**:
+   The algorithm expands the octree by creating a new layer of nodes. For each child index $i$ from 1 to 8 of the root node $r$ (Note: The source uses 1-based indexing for the loop but 0-7 for child indices, implying $i$ iterates through the *slots* being replaced or shifted. The pseudocode below follows the source's logic exactly):
+   1. Create a new node $n'$.
+   2. Move the existing child $n$ (at index $i$) to become the child at index $8 - i + 1$ of $n'$.
+   3. Make $n'$ the new child of root $r$ at index $i$.
+   4. Return the updated root.
 
-3. **Bitstream Generation:** To locate the voxel within the expanded tree, generate a bitstream based on the normalized position of the voxel [S1, unofficial]. The bitstream is divided into strips of 3 bits [S1, unofficial]. Each strip indicates which child to follow (0 to 7) [S1, unofficial]. The leftmost strip represents the root's child; the rightmost represents the leaf [S1, unofficial]. This allows handling both positive and negative coordinates symmetrically around the origin boundary [S1, unofficial].
+   *Pseudocode for Growth:*
+   ```python
+   def grow_octree(octree):
+       r = octree.root
+       # Iterate i from 1 to 8 (inclusive)
+       for i in range(1, 9):
+           # Get current child at index i
+           # Note: Source uses 1-based indexing for loop variable i
+           # but 0-based for child access. Assuming i corresponds to child index i-1?
+           # The source pseudocode says: "for all i such that 1 <= i <= 8 do n <- child(r, i)"
+           # And "n' <- set child(n', n, 8-i+1)"
+           # Let's stick to the source's variable names and logic.
+           
+           n = get_child(r, i) # Assuming 1-based indexing for child access as per source loop
+           
+           n_prime = create_node()
+           
+           # Set n as child of n' at position 8-i+1
+           set_child(n_prime, n, 8 - i + 1)
+           
+           # Set n' as child of r at position i
+           set_child(r, n_prime, i)
+           
+       octree.root = r
+       return octree
+   ```
+   *Correction on Indexing*: The source text says "Child 0... is lowest... Child 7... is highest". The loop is `1 <= i <= 8`. The shift is `8-i+1`. If $i=1$, shift is 8. If $i=8$, shift is 1. This suggests the children are being rotated or shifted to make room for a new root layer. The source pseudocode is:
+   ```python
+   r ← root(o)
+   for all i such that 1 ≤ i ≤ 8 do
+     n ← child(r, i)
+     n′ ← node()
+     n′ ← set child(n′ , n, 8−i+1)
+     r ← set child(r, n′ , i)
+   end for
+   return set root(o, r)
+   ```
+   This implies the children are accessed via 1-based indexing in this specific algorithm description.
 
-**Pseudocode:**
+3. **Bitstream Generation**:
+   After growth ensures containment, generate a bitstream based on the normalized position of the voxel.
+   - Normalize the voxel position so no component is negative [S1, unofficial].
+   - Divide the bitstream into strips of 3 bits.
+   - Each strip indicates which child to follow (0 to 7).
+   - The leftmost strip represents the root's child; the rightmost represents the leaf [S1, unofficial].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+4. **Insertion**:
+   Traverse the octree using the bitstream to find the correct leaf node and insert the voxel data.
 
-```python
-class Node:
-    """Octree node with up to 8 children."""
-    def __init__(self):
-        self.children = [None] * 8
+**Parameters:**
+- **Coordinate System**: Root covers $[-1, 0)$ per axis [S1, unofficial].
+- **Containment Range**: Voxel $v$ is in octree depth $d$ if $v \in [-2^{d-1}, 2^{d-1})$ [S1, unofficial].
 
-def check_containment(v, depth):
-    """Check if voxel coordinate v is within bounds for given depth."""
-    lower = -2**(depth - 1)
-    upper = 2**(depth - 1)
-    return lower <= v < upper
-
-def grow_octree(octree):
-    """
-    Expands the octree by one level of depth around the root.
-    Based on [S1, unofficial] Algorithm 1.
-    Source uses 1-based indexing (1..8) and mirror 8-i+1.
-    Translated here to 0-based Python (0..7) and mirror 7-i.
-    """
-    r = octree.root
-    for i in range(8):
-        n = r.children[i]
-        n_prime = Node()
-        mirror_index = 7 - i
-        n_prime.children[mirror_index] = n
-        r.children[i] = n_prime
-    return octree
-
-def generate_bitstream(vx, vy, vz, depth):
-    """
-    Generates a bitstream for voxel (vx, vy, vz) at given depth.
-    Returns a list of 3-bit child indices (0-7) per level.
-    Based on [S1, unofficial] description of normalized position strips.
-    """
-    # Normalize each coordinate to [0, 1) relative to current root bounds
-    lower = -2**(depth - 1)
-    upper = 2**(depth - 1)
-    nx = (vx - lower) / (upper - lower)
-    ny = (vy - lower) / (upper - lower)
-    nz = (vz - lower) / (upper - lower)
-
-    bitstream = []
-    for _ in range(depth):
-        # Extract 3 bits: 1 bit per axis to form child index 0-7
-        bx = int(nx * 2) % 2
-        by = int(ny * 2) % 2
-        bz = int(nz * 2) % 2
-        child_index = (bx << 2) | (by << 1) | bz
-        bitstream.append(child_index)
-        # Advance to next level
-        nx = (nx * 2) % 1.0
-        ny = (ny * 2) % 1.0
-        nz = (nz * 2) % 1.0
-    return bitstream
-```
-
-**Parameters and Edge Cases:**
-- **Coordinate System:** The root node covers the range $[-1, 0)$ for each axis [S1, unofficial]. This allows handling both positive and negative coordinates symmetrically around the origin boundary [S1, unofficial].
-- **Containment Check:** A voxel $v$ is contained if $-2^{d-1} \le v < 2^{d-1}$ for all axes [S1, unofficial].
-- **Edge Cases:** The algorithm assumes the octree starts with a root node [G]. If the octree is empty, initialization is required [G]. The growth loop assumes the root has 8 children (or nulls) to shift [G]. If a child is null, it is moved as null, preserving the empty space structure [G].
+**Edge Cases and Pitfalls:**
+- **Negative Coordinates**: The algorithm specifically handles negative coordinates by centering the root at the boundary between -1 and 0 [S1, unofficial].
+- **Precision**: Normalization of voxel positions is required to generate the correct bitstream [S1, unofficial].
 
 ## Subtopics
 
 ### [Octree Insertion with Growth](2387-octree-insertion-with-growth.md)
-Provides the specific recursive insertion logic and boundary checks required for incremental construction, building on this growth algorithm.
+Provides the specific recursive insertion logic and boundary checks required for incremental construction, differing from static voxelization by handling out-of-bounds coordinates on-the-fly.
 
 ### [Sparse Voxel Octree (Dynamic, Origin-Centered)](3622-sparse-voxel-octree-dynamic-origin-centered.md)
-A variant that enforces a strict origin-centered coordinate system and power-of-two voxel dimensions, growing dynamically on insert.
+Enforces a strict origin-centered coordinate system and power-of-two voxel dimensions, growing depth only when necessary.
+
+### [Regular-Adaptive Octree Construction](6560-regular-adaptive-octree-construction.md)
+Enforces a fixed regular structure at shallow depths and uses explicit topological/curvature criteria for subdivision rather than simple occupancy checks.
 
 ## Operating characteristics
-- **Time Complexity:** Growth requires iterating over all 8 children of the root, making it $O(1)$ per growth step (constant number of children) [G]. However, if growth is triggered frequently, the cost accumulates [G]. Traversal is $O(d)$ where $d$ is depth [G].
-- **Memory Complexity:** Each growth step doubles the spatial extent and adds a new layer of nodes [G]. The memory usage scales with the number of non-empty nodes and the depth required to cover the scene [G].
-- **Strengths:** No need to pre-calculate scene bounds; handles arbitrary coordinate ranges including negative values [S1, unofficial].
-- **Limitations:** Frequent growth operations can be costly if voxels are widely scattered [G]. The root-centric growth strategy may lead to inefficient memory usage if the scene is not centered near the origin [G].
-- **When to use:** Ideal for streaming voxel data where the total extent is unknown or dynamic [G].
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Strengths**: Handles positive and negative coordinates without pre-calculating bounding boxes; dynamically adjusts to input data size [S1, unofficial].
+- **Limitations**: Not given in the sources.
+- **When to use**: When the scene's bounding box is unknown or when memory efficiency is critical for sparse data [S1, unofficial].
+- **When not to use**: When static bounding boxes are known and fixed, or when simpler structures suffice [S1, unofficial].
 
 ## Background
-The method follows the methodology published by Jan Schultke [S1, unofficial]. It was adopted in the project "Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global" to handle .vox file formats that accept both positive and negative coordinates, avoiding the memory inefficiency of regular grids and the intersection test overhead of naive voxel models [S1, unofficial].
+The algorithm was published by Jan Schultke [S1, unofficial]. It is based on the methodology published by Jan Schultke [Eis21] [S1, unofficial]. The approach was adopted for projects requiring efficient ray tracing and memory savings, as regular grids consume considerable memory and require intersection tests for every voxel [S1, unofficial].
 
 ## Sources
 [S1] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
+[S2] GilesPenfold/MasterThesisSVO, https://github.com/GilesPenfold/MasterThesisSVO, fetched 2026-10-26 (unofficial)

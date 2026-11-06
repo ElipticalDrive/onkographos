@@ -1,0 +1,178 @@
+--- v003.md
++++ v004.md
+@@ -1,87 +1,124 @@
+ # Nearest Voxel Lookup with Periodic Boundary
+ 
+-Also called: Grid Probing, Nearest Voxel Lookup, Nearest-Neighbor Density Lookup, Nearest-Neighbor Search Interpolation, Periodic Boundary Voxel Lookup, Wrapped Nearest Neighbor Sampling
++Also called: Grid Probing, Nearest Voxel Lookup, Nearest-Neighbor Density Lookup, Periodic Boundary Voxel Lookup, Wrapped Nearest Neighbor Sampling
+ 
+ ## Overview
+-This method retrieves the scalar density value of the single voxel containing a sample point, without interpolating neighboring values [S1, unofficial]. It differs from interpolation methods by selecting only the nearest grid vertex [S1, unofficial]. The "Periodic Boundary" variant handles out-of-bounds coordinates by wrapping them via modulo arithmetic, allowing seamless tiling or robust handling of rays outside the grid volume [S2, unofficial].
++Nearest Voxel Lookup retrieves the scalar value of the single voxel containing a sample point without interpolating neighboring values [S1, unofficial]. It maps continuous sample coordinates to discrete grid indices, applying periodic boundary conditions (modulo arithmetic) to handle out-of-bounds access [S2, unofficial]. Unlike [Interpolated Discrete Values & Gradients](1268-interpolated-discrete-values-gradients.md), which blends adjacent voxels, this method provides a discontinuous, blocky approximation that is computationally cheaper but less smooth [S5].
+ 
+ ## How it works
+ **Inputs:**
+-*   `grid`: A structure containing `bounds` (a 3D vector pair `[min, max]` defining the world-space AABB), `baseResolution` (an integer scalar or 3D vector representing voxel counts per axis), and `density` (a 1D array storing voxel values) [S1, unofficial].
+-*   `p`: A 3D point in world space [S1, unofficial].
++- Sample point $p$ in world space.
++- Grid bounding box defined by minimum corner $B_{min}$ and maximum corner $B_{max}$ [S1, unofficial].
++- Grid resolution $R$ (assumed uniform cubic grid with $R$ voxels per axis) [S1, unofficial].
++- 1D density array `grid.density` of size $R^3$ [S1, unofficial].
+ 
+ **Outputs:**
+-*   `value`: The scalar density at the nearest voxel [S1, unofficial].
++- Scalar density value $d$ at the nearest voxel.
++- Boolean flag `out_of_bounds` indicating if the sample was outside the grid bounds before wrapping [S2, unofficial].
+ 
+ **Data Structures:**
+-The density array follows a Z-major, Y-major, X-minor contiguous layout [S1, unofficial]. The linear memory index $I$ for coordinates $(x, y, z)$ is calculated as $I = (z \cdot N_y + y) \cdot N_x + x$ [S1, unofficial].
++- `Grid`: Struct containing `bounds[2]` (Vec3), `baseResolution` (int), and `density` (float array).
++- `Point`: Vec3 structure for coordinates.
+ 
+ **Steps:**
+-1.  **Transform to Local Space:** Subtract the grid's minimum bound from the sample point to shift the coordinate system so the grid origin is at $(0,0,0)$ [S1, unofficial].
+-    $$ p_{local} = p - grid.bounds[0] $$
+-2.  **Normalize:** Divide by the grid's physical size to map the point to the $[0, 1]$ range [S1, unofficial].
+-    $$ gridSize = grid.bounds[1] - grid.bounds[0] $$
+-    $$ p_{norm} = p_{local} / gridSize $$
+-3.  **Convert to Voxel Space:** Multiply normalized coordinates by the grid resolution to obtain floating-point voxel coordinates [S1, unofficial].
+-    $$ p_{voxel} = p_{norm} \cdot grid.baseResolution $$
+-4.  **Compute Integer Indices:** Apply the floor function to the voxel coordinates to determine the integer grid indices [S1, unofficial].
+-    $$ x_i = \lfloor p_{voxel}.x \rfloor $$
+-    $$ y_i = \lfloor p_{voxel}.y \rfloor $$
+-    $$ z_i = \lfloor p_{voxel}.z \rfloor $$
+-5.  **Apply Periodic Boundary Conditions:** If the indices fall outside the valid range $[0, N-1]$, wrap them using modulo arithmetic [S2, unofficial].
+-    $$ x_i = x_i \pmod{N_x} $$
+-    $$ y_i = y_i \pmod{N_y} $$
+-    $$ z_i = z_i \pmod{N_z} $$
+-6.  **Lookup:** Calculate the linear memory index and retrieve the value [S1, unofficial].
+-    $$ index = (z_i \cdot N_y + y_i) \cdot N_x + x_i $$
+-    $$ value = grid.density[index] $$
++1. **Transform to Local Space:** Compute the vector from the grid minimum to the sample point:
++   $$ p_{local} = p - B_{min} $$
++2. **Normalize:** Divide by the grid physical size to get coordinates in $[0, 1]$:
++   $$ gridSize = B_{max} - B_{min} $$
++   $$ p_{norm} = \frac{p_{local}}{gridSize} $$
++3. **Convert to Voxel Space:** Scale by resolution to get floating-point voxel coordinates:
++   $$ p_{voxel} = p_{norm} \times R $$
++4. **Quantize to Integer Indices:** Compute floor of each component to get the voxel index. Using `floor` is critical to ensure indices are $\ge 0$ for negative local coordinates, avoiding invalid memory access that `static_cast<int>` (truncation) would cause for negative values [S1, unofficial].
++   $$ i = \lfloor p_{voxel.x} \rfloor $$
++   $$ j = \lfloor p_{voxel.y} \rfloor $$
++   $$ k = \lfloor p_{voxel.z} \rfloor $$
++5. **Handle Boundaries:**
++   - Check if indices are within $[0, R-1]$. If $p_{norm}$ is exactly 1.0, $p_{voxel}$ is $R$, leading to index $R$, which is out of bounds.
++   - Apply periodic boundary conditions using modulo arithmetic for out-of-bounds indices:
++     $$ i_{final} = i \pmod R $$
++     $$ j_{final} = j \pmod R $$
++     $$ k_{final} = k \pmod R $$
++   - Note: In languages where modulo can return negative values for negative operands, adjust by adding $R$ before modulo or using a dedicated wrap function [S2, unofficial].
++6. **Lookup:** Compute linear memory index and return value:
++   $$ idx = (k_{final} \times R + j_{final}) \times R + i_{final} $$
++   $$ d = grid.density[idx] $$
+ 
+ **Pseudocode:**
+ ```python
+-import math
+-
+ def nearest_voxel_lookup_periodic(grid, p):
+     # 1. Transform to local space
+     p_local = p - grid.bounds[0]
++    
+     # 2. Normalize to [0, 1]
+     grid_size = grid.bounds[1] - grid.bounds[0]
+     p_norm = p_local / grid_size
++    
+     # 3. Convert to voxel space
+     p_voxel = p_norm * grid.baseResolution
+-    # 4. Compute integer indices using floor
+-    xi = int(math.floor(p_voxel.x)) [G]
+-    yi = int(math.floor(p_voxel.y)) [G]
+-    zi = int(math.floor(p_voxel.z)) [G]
+-    # 5. Apply periodic boundary conditions (modulo)
+-    nx, ny, nz = grid.baseResolution
+-    xi = xi % nx
+-    yi = yi % ny
+-    zi = zi % nz
+-    # 6. Calculate linear index (Z-major, Y-major, X-minor)
+-    index = (zi * ny + yi) * nx + xi
+-    # 7. Return value
+-    return grid.density[index]
++    
++    # 4. Floor to integer indices
++    # Using floor ensures 0 for negative coordinates, preventing -1 index
++    i = floor(p_voxel.x)
++    j = floor(p_voxel.y)
++    k = floor(p_voxel.z)
++    
++    # 5. Handle out-of-bounds with periodic boundary (modulo)
++    # Check if originally out of bounds for reporting
++    out_of_bounds = (i < 0) or (i >= grid.baseResolution) or \
++                    (j < 0) or (j >= grid.baseResolution) or \
++                    (k < 0) or (k >= grid.baseResolution)
++    
++    # Apply modulo for periodic wrapping
++    # Ensure positive modulo result
++    i = ((i % grid.baseResolution) + grid.baseResolution) % grid.baseResolution
++    j = ((j % grid.baseResolution) + grid.baseResolution) % grid.baseResolution
++    k = ((k % grid.baseResolution) + grid.baseResolution) % grid.baseResolution
++    
++    # 6. Linear index calculation
++    R = grid.baseResolution
++    idx = (k * R + j) * R + i
++    
++    return grid.density[idx], out_of_bounds
+ ```
+ 
+ **Parameters:**
+-*   `grid.baseResolution`: Integer or 3D vector representing voxel counts per axis [S1, unofficial].
+-*   `grid.bounds`: Defined by the scene geometry or asset origin [S1, unofficial].
++- `grid.baseResolution`: Integer, typical values $64^3$ to $256^3$ [S1, unofficial].
++- `grid.bounds`: Vec3, defines physical extent [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Negative Coordinates:** Using truncation (e.g., `static_cast<int>`) instead of `floor` returns -1 for negative coordinates, causing invalid memory access [S1, unofficial]. `floor` must be used to correctly handle negative coordinates before wrapping [S1, unofficial].
+-*   **Boundary Exceedance:** Coordinates in voxel space must not exceed `resolution - 1`, which occurs if normalized coordinates are exactly 1.0 [S1, unofficial]. Periodic boundary conditions via modulo handle this by wrapping $N$ to $0$ [S2, unofficial].
+-*   **Memory Layout:** The index calculation assumes a Z-major, Y-major, X-minor layout as specified by the source formula [S1, unofficial].
++**Edge Cases:**
++- **Exact Boundary:** If $p_{norm}$ is exactly 1.0, $p_{voxel}$ equals $R$. `floor(R)` is $R$, which is out of bounds $[0, R-1]$. Modulo handles this by wrapping to 0 [S1, unofficial].
++- **Negative Coordinates:** If $p_{local}$ is negative, `floor` returns negative integers. Modulo wraps them to the end of the grid [S1, S2, unofficial].
++- **Precision:** Floating-point errors in normalization might cause coordinates slightly outside $[0,1]$ to be misclassified. Modulo arithmetic is robust to this [S2, unofficial].
++
++## Subtopics
++
++### Nearest Integer Rounding (Floor)
++Converts continuous floating-point coordinates into discrete integer grid indices by rounding to the closest integer value [4233-nearest-integer-rounding.md]. It minimizes spatial quantization error compared to floor-based indexing, which is critical for accurate gradient estimation. It differs from [Ceil](1574-ceil.md) and [Floor](1575-floor.md) by balancing bias in both directions.
++
++### Nearest Neighbor Search Interpolation
++A variant that uses a KD-tree to find constraint points within a radius $w$ for each grid vertex, then solves for coefficients using LLT/LDLT decomposition to compute implicit function values [S3, unofficial]. It is more complex than simple lookup, involving weight matrix generation and basis matrix solving.
++
++### Nearest Integer Rounding (Floor)
++Rounds a 3D vector down to the nearest integer coordinates [S4]. This is the specific quantization step used in the primary method to ensure non-negative indices for negative local coordinates.
++
++### Nearest Neighbor Interpolation
++Estimates the sample value as the value at the nearest grid point [S5]. It gives a rough estimate compared to trilinear interpolation and is the conceptual basis for the lookup method described here.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **Memory Complexity:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **Measured Performance:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **Strengths and Limitations:** Not given in the sources [S1, unofficial][S2, unofficial].
+-*   **When to use:** Not given in the sources [S1, unofficial][S2, unofficial].
++- **Time Complexity:** $O(1)$ per sample. Involves constant number of arithmetic operations and one array lookup [S1, unofficial].
++- **Memory Complexity:** $O(1)$ auxiliary space. Requires storage for the grid data $O(R^3)$ [S1, unofficial].
++- **Performance:** Significantly faster than interpolation methods due to lack of blending calculations [S5].
++- **Strengths:** Simple implementation, low computational cost, periodic boundaries allow seamless tiling [S2, unofficial].
++- **Limitations:** Discontinuous output (blocky artifacts), no smoothing, aliasing at high frequencies [S5].
++- **When to Use:** Low-resolution volumes, performance-critical applications, or when periodicity is required [S1, S2, unofficial].
++- **When Not to Use:** High-fidelity rendering requiring smooth gradients or continuous derivatives [S5].
+ 
+ ## Background
+-This technique is referred to as "probing" in libraries like OpenVDB [S1, unofficial]. The specific handling of periodic boundaries is implemented in projects like Plenoxels to manage out-of-bounds indices via modulo arithmetic [S2, unofficial].
++Originated from basic voxel grid rendering techniques where density is probed directly from memory [S1, unofficial]. The term "probing" is used in OpenVDB for this operation [S1, unofficial]. Periodic boundary conditions are common in procedural noise and texture synthesis, adapted here for volume data to handle out-of-bounds rays [S2, unofficial]. The method is foundational for more complex interpolation schemes like trilinear or Hermite interpolation, which build upon this coordinate mapping step [S1, unofficial].
+ 
+ ## Sources
+ [S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
+-[S2] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)+[S2] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)
++[S3] mwrazam/marchingtets-reconstruction, https://github.com/mwrazam/marchingtets-reconstruction, fetched 2026-10-27 (unofficial)
++[S4] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24
++[S5] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28

@@ -1,0 +1,338 @@
+--- v003.md
++++ v004.md
+@@ -4,19 +4,87 @@
+ 
+ ## Overview
+-Extended Trilinear Triangulation is a method for generating topologically correct, degenerate-free isosurface triangulations from volumetric data by extending the Marching Cubes 33 (MC33) algorithm [S1]. It solves the dual problems of topological ambiguity in the original Marching Cubes and the generation of degenerate or "skinny" triangles when vertex values exactly match the isovalue [S1]. Unlike standard MC33, which uses a fixed lookup table of 33 entries based on binary vertex signs, this method introduces a ternary classification ('+', '-', '=') and constructs triangulations using convex hulls of intersection points and vertex groups, ensuring the mesh topology coincides exactly with the trilinear interpolant [S1].
++Extended Trilinear Triangulation is a method for generating topologically correct, degenerate-free triangulations of isosurfaces within a voxel grid by extending the Marching Cubes 33 algorithm with a three-state vertex classification and convex hull-based geometry construction [S1]. It solves the dual problems of topological ambiguity in standard Marching Cubes and the generation of degenerate or skinny triangles caused by vertices lying exactly on the isovalue [S1]. Unlike the Asymptotic Decider, which resolves ambiguity by analyzing the critical points of the trilinear interpolant, this method resolves ambiguity by tracking the connectivity of positive and negative regions via an interior test, and unlike the basic Marching Cubes 33, it explicitly handles the "=" (zero) label to prevent degenerate geometry while preserving the topology of the trilinear interpolant [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A rectilinear grid $H$ with a scalar field $f$, an isovalue $\alpha$, and a unit cube $C$ with 8 vertices $v_0, \dots, v_7$ [S1].
+-*   **Output:** A set of triangles approximating the isosurface $\bar{S}_\alpha = \{x \in \mathbb{R}^3 | g(x) = \alpha\}$ within the cube, where $g$ is the trilinear interpolant [S1].
+-
+-**Data Structures:**
+-*   **Vertex Label:** Each vertex $v_i$ is assigned a label $L(v_i) \in \{+, -, =\}$ [S1].
+-*   **Group of Vertices (GV):** A set of vertices in a cube connected by a "positive path" (for positive cubes) or "negative path" (for negative cubes) restricted to the cube's edges and faces [S1].
+-*   **Group of Edges (GE):** A set of edges intersected by the isosurface, incident to vertices in the same GV [S1].
+-*   **Intersection Points:** Midpoints of intersected edges (used for convex hull construction) [S1].
+-
+-**Formulas:**
+-The trilinear interpolant $g(x,y,z)$ for a unit cube is:
++### Inputs and Outputs
++- **Input:** A rectilinear grid $H$ containing a scalar field $f$, an isovalue $\alpha$, and a specific voxel (unit cube) with scalar values $f(v_i)$ at its 8 vertices $v_0, \dots, v_7$.
++- **Output:** A set of triangles forming the isosurface patch $\bar{S}_\alpha$ within the cube, or an empty set if no intersection exists.
++
++### Data Structures
++- **Vertex Label:** Each vertex $v_i$ is assigned a label $L(v_i) \in \{+, -, =\}$.
++- **Group of Vertices (GV):** A set of vertices in the same cube connected by a path of vertices with the same non-zero label (positive or negative) along the edges or faces of the cube.
++- **Group of Edges (GE):** A set of edges intersected by the isosurface that are incident to vertices in a specific GV.
++- **Intersection Points:** For each intersected edge, the midpoint is used as a representative point for convex hull construction [S1].
++
++### Numbered Steps
++
++1.  **Vertex Classification:**
++    For each vertex $v_i$ of the cube, determine its label based on the scalar field value $f(v_i)$ and isovalue $\alpha$:
++    $$
++    L(v_i) = \begin{cases} 
++    + & \text{if } f(v_i) > \alpha \\
++    - & \text{if } f(v_i) < \alpha \\
++    = & \text{if } f(v_i) = \alpha
++    \end{cases}
++    $$
++    [S1]
++
++2.  **Cube Classification:**
++    Count the number of vertices labeled "+" or "=".
++    - If the count is $\le 4$, the cube is classified as **Positive**.
++    - Otherwise, the cube is classified as **Negative**.
++    [S1]
++
++3.  **Group Identification:**
++    - **Positive Cube:** Identify all **Groups of Vertices (GV)**. A GV is a set of "+" vertices connected by a path consisting only of "+" vertices along the cube's edges or faces.
++    - **Negative Cube:** Identify all **Groups of Vertices (GV)**. A GV is a set of "-" vertices connected by a path consisting only of "-" vertices along the cube's edges or faces.
++    - For each GV, identify the corresponding **Group of Edges (GE)**: the set of edges intersected by the isosurface that are incident to the vertices in that GV.
++    [S1]
++
++4.  **Interior Test (Topology Resolution):**
++    Use the interior test (Chernyaev/Custodio) to determine the connectivity of the GV groups inside the cube volume. This distinguishes cases where groups are separated versus joined (e.g., distinguishing subcases 6.1.1 and 6.1.2 which have identical edge/vertex groups but different topologies) [S1].
++    Classify the cube into one of three categories:
++    - **Simple Leaf:** The isosurface forms a single patch or disconnected patches within the cube.
++    - **Tunnel:** The isosurface passes through the cube, connecting opposite sides.
++    - **Interior Point:** The isosurface forms a closed loop or complex structure involving the cube center (typically associated with Case 13 subcases) [S1].
++
++5.  **Triangulation Construction:**
++    Depending on the category and specific case, construct the mesh using one of the following methods:
++
++    **A. Simple Leaves Triangulation:**
++    For each group $i$ (with vertex set $GVi$ and edge set $GEi$):
++    1.  Let $W_i$ be the set containing:
++        - The midpoints of all edges in $GEi$.
++        - All vertices in $GVi$ that are labeled "+" or "=".
++    2.  Compute the convex hull $conv(W_i)$.
++    3.  If $conv(W_i)$ is 3-dimensional:
++        - Triangulate the boundary $\partial(conv(W_i))$.
++        - Remove any triangles that lie entirely on the faces of the cube.
++    4.  If $conv(W_i)$ is 2-dimensional (contained in a cube face):
++        - Return the triangulation of $conv(W_i)$.
++        - **Exception:** If all 8 vertices of the cube are labeled "=", return no triangulation to avoid duplicate faces.
++    5.  **Face Deduplication:** Track grid faces that have already been triangulated by adjacent cubes to prevent duplicate output [S1].
++
++    **B. Tunnel Triangulation:**
++    1.  Let $W$ be the set of midpoints of *all* intersected edges in the cube.
++    2.  Compute the convex hull $conv(W)$.
++    3.  If $conv(W)$ is 3-dimensional:
++        - Triangulate the boundary $\partial(conv(W))$.
++        - Remove any triangles where all three vertices belong to the same Group of Edges ($GE_i$). This ensures the tunnel topology is preserved rather than capping the ends [S1].
++
++    **C. Interior Point Leaves Triangulation:**
++    1.  Identify faces where all four edges are intersected.
++    2.  Connect pairs of intersection points on these faces based on the bilinear interpolant behavior to form a simple closed polygonal curve.
++    3.  Add a vertex at the center of the cube.
++    4.  Form triangles connecting the center vertex to the segments of the polygonal curve [S1].
++
++    **D. Case 13 Specific Combinations:**
++    Case 13 is the most complex, with all faces ambiguous. Specific subcases require combining methods:
++    - **Case 13.3:** One group of 4 positive vertices. Use the incident negative vertex. Apply **Interior Point Leaves** triangulation combined with **Simple Leaves** triangulation on the single negative vertex group [S1].
++    - **Case 13.5.1:** Two groups of vertices. Apply **Simple Leaves** triangulation to both groups [S1].
++    - **Case 13.5.2:** Two groups of vertices connected by the interior, with a signal change diagonally opposite to one vertex group. Apply **Tunnel** triangulation combined with **Simple Leaves** triangulation in the region diagonally opposite to the one-vertex positive group [S1].
++
++### Formulas
++The trilinear interpolant $g(x,y,z)$ within a unit cube is defined as [S1]:
+ $$
+ \begin{aligned}
+@@ -27,71 +95,171 @@
+ \end{aligned}
+ $$
+-where $v_0$ is at $(0,0,0)$, $v_1$ at $(1,0,0)$, $v_2$ at $(1,1,0)$, $v_3$ at $(0,1,0)$, $v_4$ at $(0,0,1)$, $v_5$ at $(1,0,1)$, $v_6$ at $(1,1,1)$, and $v_7$ at $(0,1,1)$ [S1].
+-
+-**Steps:**
+-
+-1.  **Classify Vertices:** For each vertex $v_i$ of the cube:
+-    *   If $f(v_i) > \alpha$, label $L(v_i) = '+'$ [S1].
+-    *   If $f(v_i) < \alpha$, label $L(v_i) = '-'$ [S1].
+-    *   If $f(v_i) = \alpha$, label $L(v_i) = '='$ [S1].
+-
+-2.  **Classify Cube Sign:**
+-    *   Count $N_{=+}$ as the number of vertices labeled '=' or '+' [S1].
+-    *   If $N_{=+} \le 4$, the cube is **Positive** [S1].
+-    *   Otherwise, the cube is **Negative** [S1].
+-
+-3.  **Identify Groups:**
+-    *   **Positive Cube:** Identify **Groups of Vertices (GV)** as sets of '+' vertices connected by a path of '+' vertices along the cube's edges and faces [S1]. Identify **Groups of Edges (GE)** as sets of intersected edges incident to vertices in the same GV [S1].
+-    *   **Negative Cube:** Apply the analogous definition using '-' vertices and negative paths [S1].
+-
+-4.  **Interior Test:** Determine if groups of vertices are separated or joined inside the cube using the Chernyaev/Custodio interior test [S1]. Classify the cube into one of three categories: **Simple Leaf**, **Tunnel**, or **Interior Point** [S1]. Note that cases 6.1.1 and 6.1.2 have identical vertex/edge groups but different topologies; the interior test distinguishes them [S1].
+-
+-5.  **Generate Triangulation:** Based on the category and specific case (e.g., Case 13 subcases), apply one of the following methods:
+-
+-    *   **Simple Leaves Triangulation:**
+-        For each group $i$:
+-        1.  Let $G_i = GV_i \cup GE_i$ [S1].
+-        2.  Let $W_i$ be the set of intersection points (midpoints of edges in $G_i$) and vertices in $GV_i$ labeled '=' or '+' [S1].
+-        3.  Construct $CH_i = \text{conv}(W_i)$ [S1].
+-        4.  If $CH_i$ is 3D, triangulate the boundary $\partial(CH_i)$ and remove triangles lying on the cube faces [S1].
+-        5.  If $CH_i$ is 2D (contained in faces), return the triangulation of $CH_i$ [S1].
+-        6.  **Exception:** If all cube vertices are '=', no triangulation is generated to avoid duplicates [S1].
+-        7.  **Global Check:** Track grid faces to ensure a face is not triangulated twice by adjacent cubes [S1].
+-
+-    *   **Tunnel Triangulation:**
+-        1.  Let $W$ be the set of midpoints of *all* intersected edges in the cube [S1].
+-        2.  Construct $CH = \text{conv}(W)$ [S1].
+-        3.  If $CH$ is 3D, triangulate $\partial(CH)$ [S1].
+-        4.  Remove triangles where all three vertices belong to the same Group of Edges $GE_i$ [S1].
+-
+-    *   **Interior Point Leaves Triangulation:**
+-        1.  Identify faces where all four edges are intersected [S1].
+-        2.  Connect pairs of intersected edges on these faces based on bilinear interpolant behavior to form a simple closed polygonal curve [S1].
+-        3.  Add a vertex at the cube center [S1].
+-        4.  Form triangles connecting the center vertex to the segments of the polygonal curve [S1].
+-
+-    *   **Case 13 Subcases (Complex):**
+-        *   **13.3:** One group of 4 positive vertices. Use the incident negative vertex. Apply Interior Point Leaves triangulation combined with Simple Leaves triangulation on the single negative vertex group [S1].
+-        *   **13.5.1:** Two groups of vertices. Apply Simple Leaves triangulation to both groups [S1].
+-        *   **13.5.2:** Two groups connected by interior, with signal change diagonally opposite to one vertex group. Apply Tunnel triangulation combined with Simple Leaves triangulation in the region diagonally opposite to the one vertex positive group [S1].
+-
+-**Pitfalls and Edge Cases:**
+-*   **Degenerate Triangles:** Occur in standard MC if $f(v_i) = \alpha$ is treated as positive, creating a triangle with three vertices at the same point. The '=' label prevents this [S1].
+-*   **Skinny Triangles:** Occur when two vertices are close to a grid vertex and the third is far. The convex hull method mitigates this by respecting the interpolant's regions [S1].
+-*   **Duplicate Faces:** If a cube has all vertices '=', no mesh is generated. The algorithm tracks grid faces already triangulated to prevent a cube face from being triangulated twice by adjacent cubes [S1].
+-
+-## Subtopics
+-
+-### [Marching Cubes 33](2129-marching-cubes-33.md)
+-Resolves topological ambiguities of original MC using 33 entries derived from analytical tests. Unlike Extended Trilinear Triangulation, it does not use convex hulls or the '=' label, relying instead on a larger lookup table.
++The extracted isosurface is $\bar{S}_\alpha = \{x \in \mathbb{R}^3 | g(x) = \alpha\}$ [S1].
++
++### Parameters
++- **Isovalue ($\alpha$):** The scalar threshold for the isosurface.
++- **Vertex Labeling Threshold:** Equality check $f(v_i) = \alpha$. In floating-point implementations, a small epsilon tolerance may be required for robustness [G].
++
++### Edge Cases and Pitfalls
++- **Degenerate Triangles:** Occur in standard Marching Cubes when $f(v_i) = \alpha$ is treated as positive, causing three intersected edges to meet at a single point. This method avoids this by explicitly labeling such vertices as "=" and excluding them from the "positive" connectivity paths used for convex hull generation [S1].
++- **Skinny Triangles:** Generated when two vertices are close to a grid vertex and the third is far. The convex hull approach mitigates this by using midpoints and the cube center, creating more uniform triangles [S1].
++- **Duplicate Faces:** If a cube has all vertices "=", no triangulation is generated. Additionally, the algorithm must maintain a state of triangulated grid faces to prevent adjacent cubes from triangulating the same face twice [S1].
++- **Topology Ambiguity:** Cases 6.1.1 and 6.1.2 have identical vertex/edge groups but different interpolant topologies. The interior test is mandatory to distinguish them [S1].
++
++### Pseudocode
++
++```python
++def extended_trilinear_triangulation(cube_vertices, isovalue):
++    """
++    cube_vertices: list of 8 scalar values f(v0)...f(v7)
++    isovalue: scalar alpha
++    Returns: list of triangles (each triangle is a tuple of 3 vertex coordinates)
++    """
++    
++    # Step 1: Vertex Classification
++    labels = []
++    for val in cube_vertices:
++        if val > isovalue:
++            labels.append('+')
++        elif val < isovalue:
++            labels.append('-')
++        else:
++            labels.append('=')
++            
++    # Step 2: Cube Classification
++    pos_or_zero_count = labels.count('+') + labels.count('=')
++    is_positive_cube = pos_or_zero_count <= 4
++    
++    # Step 3: Group Identification
++    # Identify Groups of Vertices (GV) and Groups of Edges (GE)
++    # This requires graph traversal on the cube edges/faces based on labels
++    groups = identify_groups(labels, is_positive_cube)
++    
++    # Step 4: Interior Test
++    # Determine if groups are separated or joined inside the cube
++    # Returns category: 'Simple Leaf', 'Tunnel', or 'Interior Point'
++    # Also returns specific case ID if it's a complex case like 13
++    category, case_id = interior_test(groups, labels, is_positive_cube)
++    
++    # Step 5: Triangulation
++    triangles = []
++    
++    if category == 'Simple Leaf':
++        for group in groups:
++            triangles.extend(simple_leaves_triangulation(group, labels))
++            
++    elif category == 'Tunnel':
++        triangles.extend(tunnel_triangulation(groups, labels))
++        
++    elif category == 'Interior Point':
++        triangles.extend(interior_point_triangulation(groups, labels))
++        
++    # Handle Case 13 specific combinations
++    if case_id == '13.3':
++        triangles.extend(case_13_3_triangulation(groups, labels))
++    elif case_id == '13.5.1':
++        for group in groups:
++            triangles.extend(simple_leaves_triangulation(group, labels))
++    elif case_id == '13.5.2':
++        # Tunnel for main structure, Simple Leaves for the opposite region
++        triangles.extend(tunnel_triangulation(groups, labels))
++        # Apply simple leaves to the specific region diagonally opposite
++        # Implementation detail: identify the specific group/region and triangulate
++        triangles.extend(simple_leaves_triangulation(opposite_group, labels))
++        
++    # Deduplication check would happen at the grid level, not per-cube
++    return triangles
++
++def simple_leaves_triangulation(group, labels):
++    """
++    group: dict with 'vertices' (indices) and 'edges' (indices)
++    """
++    # Check for all-zero cube exception
++    if all(l == '=' for l in labels):
++        return []
++        
++    # Construct W_i
++    W = []
++    for edge_idx in group['edges']:
++        # Midpoint of the edge
++        p1 = get_vertex_coords(edge_idx.start)
++        p2 = get_vertex_coords(edge_idx.end)
++        W.append(midpoint(p1, p2))
++        
++    for v_idx in group['vertices']:
++        if labels[v_idx] in ['+', '=']:
++            W.append(get_vertex_coords(v_idx))
++            
++    # Convex Hull
++    hull = convex_hull_3d(W)
++    
++    # Triangulate boundary
++    boundary_tris = triangulate_boundary(hull)
++    
++    # Remove triangles on cube faces
++    valid_tris = []
++    for tri in boundary_tris:
++        if not is_on_cube_face(tri):
++            valid_tris.append(tri)
++            
++    return valid_tris
++
++def tunnel_triangulation(groups, labels):
++    """
++    groups: list of all groups in the cube
++    """
++    W = []
++    for group in groups:
++        for edge_idx in group['edges']:
++            p1 = get_vertex_coords(edge_idx.start)
++            p2 = get_vertex_coords(edge_idx.end)
++            W.append(midpoint(p1, p2))
++            
++    hull = convex_hull_3d(W)
++    boundary_tris = triangulate_boundary(hull)
++    
++    valid_tris = []
++    for tri in boundary_tris:
++        # Check if all 3 vertices belong to the same Group of Edges
++        # This requires mapping triangle vertices back to their source groups
++        if not all_vertices_in_same_group(tri, groups):
++            valid_tris.append(tri)
++            
++    return valid_tris
++
++def interior_point_triangulation(groups, labels):
++    """
++    Used for Case 13 subcases involving interior loops
++    """
++    # Identify faces with 4 intersected edges
++    intersected_faces = find_faces_with_4_intersections(labels)
++    
++    # Form polygonal curve
++    polygon = form_polygonal_curve(intersected_faces, labels)
++    
++    # Add center vertex
++    center = get_cube_center()
++    
++    # Triangulate from center to polygon segments
++    triangles = []
++    for i in range(len(polygon)):
++        p1 = polygon[i]
++        p2 = polygon[(i + 1) % len(polygon)]
++        triangles.append((center, p1, p2))
++        
++    return triangles
++```
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method processes each cube independently [S1]. The complexity is dominated by the interior test and convex hull construction, which are constant time per cube for a fixed number of vertices (8) [S1].
+-*   **Performance:** In a 5x5x5 test case, the method produced correct Betti numbers (b0=1, b1=0, b2=1), whereas Raman and Wenger's method (which covers only 23 of 33 behaviors) failed, producing (b0=4, b1=0, b2=4) [S1].
+-*   **Strengths:** Guarantees topological correctness for all 33 cases of the trilinear interpolant; eliminates degenerate triangles; improves mesh quality by avoiding skinny triangles [S1].
+-*   **Limitations:** More complex implementation than standard MC due to group identification and interior tests; requires tracking of grid faces to prevent duplicates [S1].
++- **Time Complexity:** The algorithm processes each cube independently. The complexity per cube is dominated by the interior test and convex hull construction, which are constant time for a fixed number of vertices (8) and edges (12). Thus, it is $O(N)$ for $N$ voxels.
++- **Memory Complexity:** $O(N)$ to store the output mesh. The algorithm requires minimal auxiliary memory per cube (labels, groups, hull points).
++- **Measured Performance:** In a 5x5x5 piecewise-trilinear field test, the method produced correct Betti numbers (b0=1, b1=0, b2=1), whereas the Raman and Wenger method (which uses a lookup table covering only 23 of 33 behaviors) produced incorrect Betti numbers (b0=4, b1=0, b2=4) [S1].
++- **Strengths:** Guarantees topological correctness for all 33 cases of the trilinear interpolant; avoids degenerate and skinny triangles; handles the "=" label explicitly.
++- **Limitations:** More complex implementation than standard Marching Cubes due to the need for group identification and interior testing; convex hull computation adds overhead compared to simple lookup table indexing [S1].
++- **When to use:** When topological correctness and mesh quality (avoiding degenerate triangles) are critical, and the underlying scalar field is assumed to be interpolated by a trilinear function.
++- **When not to use:** When performance is the sole constraint and topological errors are acceptable; or when the scalar field is not well-approximated by a trilinear interpolant (e.g., higher-order splines) [S1].
+ 
+ ## Background
+-The base Marching Cubes algorithm was proposed by Lorensen and Cline in 1987 [S1]. Marching Cubes 33 was proposed by Chernyaev in 1995 to guarantee topological correctness [S1]. Raman and Wenger introduced the extended lookup table concept with '+'/'-'/'=' labels in 2008 to avoid degenerate triangles, but their table only covered 23 of 33 behaviors, leading to topological errors in ambiguous cases (e.g., Case 10) [S1]. Extended Trilinear Triangulation extends MC33 by integrating the '=' label with the full topological correctness of MC33 using convex hulls [S1].
++The base Marching Cubes algorithm was proposed by Lorensen and Cline in 1987 [S1]. Marching Cubes 33, which guarantees topological correctness for the trilinear interpolant, was proposed by Chernyaev in 1995 [S1]. The concept of an extended lookup table including "+" and "-" labels was introduced by Raman and Wenger in 2008, but their table only covered 23 of the 33 possible behaviors, leading to topological errors in ambiguous cases like Case 10 [S1]. Extended Trilinear Triangulation extends the Marching Cubes 33 table to handle the "=" label and correctly resolves all 33 cases using convex hulls and interior tests, as presented in the source paper [S1].
+ 
+ ## Sources

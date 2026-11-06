@@ -1,0 +1,151 @@
+# Branch-on-Need Octree (BONO)
+Also called: branch-on-need strategy
+
+## Overview
+The Branch-on-Need Octree (BONO) is a space-efficient geometric decomposition method for isosurface extraction that partitions volume data based on geometric positions to prune branches during traversal [S1]. Unlike even-subdivision octrees, BONO minimizes node count for non-power-of-two dimensions by aligning subdivisions to the largest possible power-of-two blocks, allowing the extraction algorithm to skip nodes whose value ranges do not span the isovalue [S1].
+
+## How it works
+**Inputs:** A 3D scalar volume $V$ of dimensions $D_x \times D_y \times D_z$; an isovalue $I$.
+**Outputs:** A triangular mesh representing the isosurface $V = I$.
+
+**Data Structures:**
+The BONO structure is an octree where each internal node stores a pair of extreme values: $(min\_value, max\_value)$. Leaf nodes reference groups of 8 input cells (or fewer if near volume boundaries) [S1]. The memory efficiency arises because one node's extreme values cover 8 cells, reducing the overhead compared to methods indexing individual cells [S1].
+
+**Construction Steps:**
+1.  **Partitioning:** Divide the volume recursively. At each level, the "lower" subdivision in each spatial direction covers the largest possible power of two cells, rather than dividing the remaining space evenly [S1]. This strategy ensures that when $D_x, D_y, D_z$ are not powers of two, the total number of nodes is fewer than in an even-subdivision scheme [S1].
+2.  **Leaf Assignment:** Leaf nodes reference 8 cells from the input volume. Along the edges of the volume, leaf nodes may reference fewer than 8 cells [S1].
+3.  **Propagation:** During construction, propagate the minimum and maximum scalar values from the child cells up to the parent node. For a node covering a set of cells, $min\_value = \min(c_i)$ and $max\_value = \max(c_i)$ for all cells $c_i$ in that node's domain [S1].
+
+**Extraction Steps:**
+1.  **Traversal:** Traverse the octree starting from the root.
+2.  **Pruning:** For each node, check if the isovalue $I$ lies within the node's range:
+    $$min\_value < I < max\_value$$
+    If this condition is false, the node does not contain the isosurface and is pruned (skipped) [S1].
+3.  **Leaf Processing:** If the condition is true, proceed to the children. If the node is a leaf, extract the isosurface from the 8 referenced cells using a standard cell-based algorithm (e.g., Marching Cubes) [S1].
+4.  **Edge Interpolation Optimization (Optional):** To exploit spatial coherence, maintain a hash table of edges. When interpolating a point along an edge for the first time, store the result in the hash table. Subsequent cells sharing that edge access the hash entry to avoid recomputing the interpolation [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_bono(volume, isovalue):
+    """
+    volume: 3D array of shape (Dx, Dy, Dz)
+    isovalue: scalar float
+    Returns: list of triangles
+    """
+    # 1. Build Octree
+    root = build_octree(volume)
+    
+    # 2. Traverse and Extract
+    triangles = []
+    edge_cache = {} # Hash table for edge interpolation optimization [S1]
+    
+    traverse_and_extract(root, isovalue, triangles, edge_cache)
+    
+    return triangles
+
+def build_octree(volume):
+    """
+    Recursively builds the BONO structure.
+    Partitions such that lower subdivisions cover largest power-of-two blocks.
+    """
+    # Determine bounds of current volume chunk
+    # Partition logic:
+    # For a dimension D, find largest power of two P <= D.
+    # Lower child gets P cells, upper child gets D - P cells.
+    # This is applied recursively to x, y, z.
+    
+    # Base case: leaf node
+    if current_chunk_size_is_minimal():
+        # Leaf node references 8 cells (or fewer at boundaries)
+        # Compute min and max of these cells
+        min_val = min(volume_cells)
+        max_val = max(volume_cells)
+        return LeafNode(min_val, max_val, volume_cells)
+    
+    # Recursive step
+    # Split dimensions based on power-of-two strategy
+    x_split, y_split, z_split = calculate_power_of_two_splits(current_dims)
+    
+    children = []
+    for child_bounds in generate_8_subregions(x_split, y_split, z_split):
+        child_node = build_octree(volume, child_bounds)
+        children.append(child_node)
+        
+    # Propagate extreme values up
+    min_val = min(child.min_val for child in children)
+    max_val = max(child.max_val for child in children)
+    
+    return InternalNode(min_val, max_val, children)
+
+def traverse_and_extract(node, isovalue, triangles, edge_cache):
+    """
+    Traverses the octree, pruning branches that do not span the isovalue.
+    """
+    # Pruning condition: isovalue must be strictly between min and max
+    # If node.min_val >= isovalue or node.max_val <= isovalue, skip
+    if node.min_val >= isovalue or node.max_val <= isovalue:
+        return
+
+    if node.is_leaf():
+        # Extract surface from the 8 cells referenced by this leaf
+        # Use edge_cache for interpolation if optimization is enabled [S1]
+        cells = node.cells
+        extract_cells(cells, isovalue, triangles, edge_cache)
+    else:
+        for child in node.children:
+            traverse_and_extract(child, isovalue, triangles, edge_cache)
+
+def extract_cells(cells, isovalue, triangles, edge_cache):
+    """
+    Standard cell-based extraction (e.g., Marching Cubes) for the 8 cells.
+    Uses edge_cache to avoid recomputing edge intersections [S1].
+    """
+    # Implementation details of Marching Cubes or similar
+    # Access edge_cache[edge_id] if available, else compute and store
+    pass
+```
+
+**Parameters:**
+*   **Isovalue ($I$):** The scalar threshold for surface extraction.
+*   **Edge Cache:** Optional hash table. Not given in the sources whether this is always enabled or a specific optimization variant [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Non-Power-of-Two Dimensions:** The BONO strategy explicitly handles this by producing fewer nodes than even-subdivision schemes, improving traversal efficiency [S1].
+*   **Boundary Conditions:** Leaf nodes at volume edges reference fewer than 8 cells. The implementation must handle variable cell counts per leaf [S1].
+*   **Precision:** The pruning condition $min\_value < I < max\_value$ assumes strict inequality. If $I$ equals a min or max, the surface may touch the node boundary. The sources do not specify handling for equality cases [S1].
+
+## Operating characteristics
+**Time Complexity:** The extraction time depends on the number of nodes that span the isovalue. By pruning branches where $min\_value \ge I$ or $max\_value \le I$, BONO avoids processing irrelevant regions [S1].
+
+**Memory Complexity:** BONO is space-efficient because leaf nodes reference 8 cells simultaneously, and one pair of extreme values covers 8 cells. This reduces memory overhead compared to span space methods that index individual cells [S1]. However, the octree structure itself adds overhead compared to simple marching cubes [S1].
+
+**Measured Performance:**
+*   On the Head128 dataset ($128^3$ CT scan), the average execution time for BONO is 0.58 seconds [S1].
+*   On the Rage256 dataset ($256^3$ CFD simulation), BONO showed the best performance among the listed geometric decomposition techniques, though the exact time is not explicitly listed in the text (implied to be faster than Standard Marching Cubes at 2.13s and Seed Set at 0.66s) [S1].
+
+**Strengths:**
+*   Reduced node count for non-power-of-two dimensions compared to even-subdivision octrees [S1].
+*   Lower memory usage per cell index compared to span space methods due to grouping 8 cells per leaf [S1].
+*   Efficient pruning via extreme value propagation [S1].
+
+**Limitations:**
+*   Requires construction of the octree, adding preprocessing time [S1].
+*   The optional edge interpolation optimization adds complexity and memory for the hash table [S1].
+
+**When to Use:**
+*   When memory is constrained but speed is needed.
+*   When volume dimensions are not powers of two.
+*   When the isosurface is sparse or localized, allowing significant pruning.
+
+**When Not to Use:**
+*   When the isosurface is dense and spans most of the volume, reducing pruning benefits.
+*   When preprocessing time is prohibitive.
+
+## Background
+The Branch-on-Need Octree was introduced by Wilhelms and Van Gelder [S1]. It is a geometric decomposition technique that contrasts with span space decomposition methods like NOISE, ISSUE, and the Interval Tree [S1]. The method was tested alongside Marching Cubes and seed-set propagation algorithms on CT and CFD datasets [S1].
+
+## Sources
+[S1] A Case Study of Isosurface Extraction Algorithm Performance, https://doi.org/10.1007/978-3-7091-6783-0_26, fetched 2026-10-26

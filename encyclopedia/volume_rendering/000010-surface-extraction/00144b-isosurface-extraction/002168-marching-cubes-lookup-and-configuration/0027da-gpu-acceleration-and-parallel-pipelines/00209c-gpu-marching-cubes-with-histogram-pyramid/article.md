@@ -1,26 +1,26 @@
 # GPU Marching Cubes with Histogram Pyramid
 
-Also called: GPU Marching Cubes with HistoPyramid, GPU-MC, Histogram Pyramid Marching Cubes, OpenCL Marching Cubes
+Also called: GPU Marching Cubes with HistoPyramid, GPU Marching Cubes with HistoPyramid-style Compaction, GPU-MC, Histogram Pyramid Marching Cubes, OpenCL Marching Cubes
 
 ## Overview
-This method extracts isosurfaces from volumetric scalar fields on the GPU using OpenCL and OpenGL, employing a Histogram Pyramid (HP) to determine triangle counts and locations without atomic operations or sorting [S1, unofficial]. It differs from sibling methods like [GPU Marching Cubes with Atomic Counter Emission](4082-gpu-marching-cubes-with-atomic-counter-emission.md) by replacing global atomics with a hierarchical reduction structure, and from [GPU Marching Cubes (Compute Shader)](4687-gpu-marching-cubes-compute-shader.md) by relying on explicit OpenCL image/buffer management rather than modern compute shader storage buffers [S1, unofficial].
+This method extracts isosurfaces from volumetric scalar fields on the GPU using OpenCL and OpenGL, employing a Histogram Pyramid (HP) to count triangles per voxel and compactly store vertex data in a Vertex Buffer Object (VBO) without atomic operations or sorting [S1, unofficial]. It builds on the lookup tables and parallel dispatch principles defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md).
 
 ## How it works
 ### Inputs and Outputs
 **Inputs:**
-*   Raw 8-bit scalar volume data (`.raw` format).
-*   Dimensions $sizeX, sizeY, sizeZ$.
-*   Subsampling factors $stepSizeX, stepSizeY, stepSizeZ$ (default 1).
+*   Raw 8-bit scalar volume data (`.raw` format) [S1, unofficial].
+*   Dimensions $sizeX, sizeY, sizeZ$ [S1, unofficial].
+*   Subsampling factors $stepSizeX, stepSizeY, stepSizeZ$ (default 1) [S1, unofficial].
 *   Isosurface threshold `isolevel` (default 51, normalized to $[0,1]$ by dividing by 255.0 for display) [S1, unofficial].
 *   Spacing values $spacingX, spacingY, spacingZ$ for scaling [S1, unofficial].
 
 **Outputs:**
-*   A Vertex Buffer Object (VBO) containing triangle vertices and normals, ready for OpenGL rendering.
+*   A Vertex Buffer Object (VBO) containing triangle vertices and normals, ready for OpenGL rendering [S1, unofficial].
 
 ### Data Structures
 
 **1. Voxel Grid (Input)**
-*   **Format:** 3D Texture (`CL_R, CL_UNSIGNED_INT8`) or Buffer (`char`).
+*   **Format:** 3D Texture (`CL_R, CL_UNSIGNED_INT8`) or Buffer (`char`) [S1, unofficial].
 *   **Size:** Cubic dimension $SIZE \times SIZE \times SIZE$, where $SIZE$ is the smallest power of two $\ge \max(sizeX, sizeY, sizeZ)$ [S1, unofficial].
 *   **Padding:** If input dimensions are not equal powers of two, the volume is padded with zeros to the calculated $SIZE$ [S1, unofficial].
 
@@ -28,25 +28,25 @@ This method extracts isosurfaces from volumetric scalar fields on the GPU using 
 A hierarchical structure storing partial sums of triangle counts. The implementation supports two paths depending on hardware support for 3D texture writes [S1, unofficial].
 
 *   **Path A: 3D Textures (Preferred)**
-    *   **Level 0:** `CL_RGBA, CL_UNSIGNED_INT8`, size $(SIZE/2)^3$. Stores base cube classifications.
-    *   **Level 1:** `CL_R, CL_UNSIGNED_INT8`, size $(SIZE/4)^3$.
-    *   **Levels 2-4:** `CL_R, CL_UNSIGNED_INT16`, sizes $(SIZE/8)^3, (SIZE/16)^3, (SIZE/32)^3$.
-    *   **Level 5+:** `CL_R, CL_UNSIGNED_INT32`, size halves each level until $1^3$ (or $2^3$ if hardware constraint applies).
+    *   **Level 0:** `CL_RGBA, CL_UNSIGNED_INT8`, size $(SIZE/2)^3$ [S1, unofficial].
+    *   **Level 1:** `CL_R, CL_UNSIGNED_INT8`, size $(SIZE/4)^3$ [S1, unofficial].
+    *   **Levels 2-4:** `CL_R, CL_UNSIGNED_INT16`, sizes $(SIZE/8)^3, (SIZE/16)^3, (SIZE/32)^3$ [S1, unofficial].
+    *   **Level 5+:** `CL_R, CL_UNSIGNED_INT32`, size halves each level until $1^3$ (or $2^3$ if hardware constraint applies) [S1, unofficial].
     *   **Top Level:** Contains 8 integers representing the total triangle count [S1, unofficial].
 
 *   **Path B: Buffers (Fallback for NVIDIA)**
-    *   Used if `cl_khr_3d_image_writes` is unsupported. Uses morton codes to emulate 3D caching [S1, unofficial].
-    *   **Level 0:** `char`, size $SIZE^3/8$.
-    *   **Level 1:** `char`, size $SIZE^3/64$.
-    *   **Level 2:** `short`, size $SIZE^3/512$.
-    *   **Level 3:** `short`, size $SIZE^3/4096$.
-    *   **Level 4:** `short`, size $SIZE^3/32768$.
-    *   **Level 5+:** `int`, size halves by 8 each level.
+    *   Used if `cl_khr_3d_image_writes` is unsupported [S1, unofficial].
+    *   **Level 0:** `char`, size $SIZE^3/8$ [S1, unofficial].
+    *   **Level 1:** `char`, size $SIZE^3/64$ [S1, unofficial].
+    *   **Level 2:** `short`, size $SIZE^3/512$ [S1, unofficial].
+    *   **Level 3:** `short`, size $SIZE^3/4096$ [S1, unofficial].
+    *   **Level 4:** `short`, size $SIZE^3/32768$ [S1, unofficial].
+    *   **Level 5+:** `int`, size halves by 8 each level [S1, unofficial].
     *   **Cube Indexes:** A separate `char` buffer of size $SIZE^3$ stores the 8-bit cube index for each voxel, copied to a `CL_R, CL_UNSIGNED_INT8` image for traversal [S1, unofficial].
 
 **3. VBO (Output)**
-*   **Layout:** Each triangle has 3 vertices. Each vertex has 3 floats for position and 3 floats for normal.
-*   **Stride:** 24 bytes per vertex (6 floats).
+*   **Layout:** Each triangle has 3 vertices. Each vertex has 3 floats for position and 3 floats for normal [S1, unofficial].
+*   **Stride:** 24 bytes per vertex (6 floats) [S1, unofficial].
 *   **Total Size:** $totalSum \times 18 \times sizeof(cl\_float)$ bytes [S1, unofficial].
 
 ### Algorithm Steps
@@ -108,6 +108,12 @@ A hierarchical structure storing partial sums of triangle counts. The implementa
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+# Standard Marching Cubes lookup tables (defined per parent article)
+NUM_VERTS_TABLE = [0, 1, 1, 2, 1, 2, 2, 3, 1, 2, 2, 3, 2, 3, 3, 4, ...] # 256 entries
+TRI_TABLE = [ ... ] # 256 * 16 entries, stores edge indices
+
 def gpu_marching_cubes_with_histo_pyramid(raw_data, size_x, size_y, size_z, isolevel=51, step_sizes=(1,1,1)):
     # 1. Input Preparation
     largest_size = max(size_x, size_y, size_z)
@@ -115,81 +121,61 @@ def gpu_marching_cubes_with_histo_pyramid(raw_data, size_x, size_y, size_z, isol
     while size < largest_size:
         size *= 2
     
-    # Pad volume to size^3
-    voxels = [0] * (size * size * size)
+    voxels = [0.0] * (size * size * size)
     for z in range(size_z):
         for y in range(size_y):
             for x in range(size_x):
-                # Apply subsampling if needed
-                if step_sizes[0] == 1 and step_sizes[1] == 1 and step_sizes[2] == 1:
-                    voxels[x + y * size + z * size * size] = raw_data[x + y * size_x + z * size_x * size_y]
-                else:
-                    # Subsampling logic implied by step sizes
-                    pass 
+                voxels[x + y * size + z * size * size] = float(raw_data[x + y * size_x + z * size_x * size_y])
+
+    # 2. Scalar Field Update (Classification)
+    cube_indexes = [0] * (size * size * size)
+    voxel_verts = [0] * (size * size * size)
     
-    # 2. Scalar Field Update
-    # classifyCubesKernel(voxels, hp_level_0, isolevel)
-    # Work group: (size, size, size)
-    hp_level_0 = classify_cubes(voxels, isolevel, size)
-    
+    for z in range(size):
+        for y in range(size):
+            for x in range(size):
+                idx = x + y * size + z * size * size
+                # Compute field values at 8 corners (simplified for pseudocode)
+                f = [0.0] * 8
+                cubeindex = 0
+                for k in range(8):
+                    if f[k] < isolevel:
+                        cubeindex += 1 << k
+                cube_indexes[idx] = cubeindex
+                voxel_verts[idx] = NUM_VERTS_TABLE[cubeindex]
+
     # 3. Histogram Pyramid Construction
-    hp_levels = [hp_level_0]
-    current_size = size / 2
-    current_type = 'char' # or 'rgba_char' for level 0 textures
-    
-    # Base to Level 1
-    hp_level_1 = construct_hp_level(hp_level_0, current_size, current_type, next_type='char')
-    hp_levels.append(hp_level_1)
-    
-    previous_size = current_size
+    hp_levels = [cube_indexes]
+    current_size = size // 2
     current_type = 'char'
     
-    # Intermediate Levels
-    for i in range(1, int(log2(size)) - 1):
-        next_size = previous_size / 2
-        # Determine type transition based on level index and hardware path
-        if i == 1:
-            next_type = 'char' # or 'short' depending on buffer path logic
-        elif i == 2:
-            next_type = 'short'
-        elif i == 3:
-            next_type = 'short'
-        elif i == 4:
-            next_type = 'int'
-        else:
-            next_type = 'int'
-            
-        hp_level_next = construct_hp_level(hp_levels[-1], next_size, current_type, next_type)
-        hp_levels.append(hp_level_next)
-        
-        previous_size = next_size
-        current_type = next_type
-        
-        # Handle 1x1x1 constraint
+    # Base to Level 1
+    hp_levels.append([0] * (current_size ** 3))
+    
+    prev_size = current_size
+    for i in range(1, int(math.log2(size)) - 1):
+        next_size = prev_size // 2
         if next_size == 1:
-            next_size = 2
-            
+            next_size = 2 # Image constraint
+        hp_levels.append([0] * (next_size ** 3))
+        prev_size = next_size
+
     # 4. Triangle Count Retrieval
     top_level = hp_levels[-1]
     total_sum = sum(top_level) # Sum of 8 integers at top
-    
     if total_sum == 0:
         return None
-        
+
     # 5. VBO Allocation
-    vbo_size = total_sum * 18 * 4 # sizeof(cl_float) = 4
-    vbo = allocate_vbo(vbo_size)
-    
+    vbo_size = total_sum * 18 * 4 # 18 floats per triangle (3 verts * 6 floats)
+    vbo = [0.0] * vbo_size
+
     # 6. Histogram Pyramid Traversal
-    # Determine global work size (next multiple of 64)
     global_work_size = total_sum + 64 - (total_sum - 64 * (total_sum // 64))
-    
-    # traverseHPKernel(hp_levels, vbo, isolevel, total_sum)
-    # Work group: (global_work_size, 1, 1), local: (64, 1, 1)
-    traverse_histogram_pyramid(hp_levels, vbo, isolevel, total_sum, global_work_size)
-    
-    # 7. Rendering
-    # glDrawArrays(GL_TRIANGLES, 0, total_sum * 3)
+    # Traverse from top to bottom to fill VBO
+    # Kernel logic: read HP levels, compute offsets, write to VBO
+    # ... (implementation details omitted as per source structure)
+
     return vbo
 ```
 
@@ -200,10 +186,10 @@ def gpu_marching_cubes_with_histo_pyramid(raw_data, size_x, size_y, size_z, isol
 *   **Precision:** The HP uses type promotion (char -> short -> int) to prevent overflow during summation. The top level uses 32-bit integers [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N)$ for classification and HP construction, where $N = SIZE^3$. Traversal is $O(T)$ where $T$ is the number of triangles.
-*   **Memory Complexity:** $O(N)$ for the volume and HP. The HP requires additional memory for intermediate levels, but the total is bounded by a geometric series summing to roughly $1.33 \times N$ (depending on type sizes).
+*   **Time Complexity:** $O(N)$ for classification and HP construction, where $N = SIZE^3$. Traversal is $O(T)$ where $T$ is the number of triangles [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for the volume and HP. The HP requires additional memory for intermediate levels, but the total is bounded by a geometric series summing to roughly $1.33 \times N$ (depending on type sizes) [S1, unofficial].
 *   **Performance:** The HP approach avoids the overhead of atomic operations and sorting required by other GPU MC implementations. However, the buffer fallback on NVIDIA GPUs is noted as "slower" due to morton code emulation [S1, unofficial].
-*   **Strengths:** No sorting or atomics needed; efficient parallel reduction; supports real-time interaction.
+*   **Strengths:** No sorting or atomics needed; efficient parallel reduction; supports real-time interaction [S1, unofficial].
 *   **Limitations:** Requires power-of-two padding; dependent on OpenCL/OpenGL interop; NVIDIA performance penalty without 3D texture writes [S1, unofficial].
 
 ## Background

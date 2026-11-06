@@ -1,0 +1,576 @@
+# CUDA Raymarcher
+
+![Banner](./screenshots/banner.jpeg)
+
+A sample / experimental ray-marching renderer implemented with CUDA. Designed to explore GPU acceleration, distance fields, and basic shading in a CUDA environment.
+
+---
+
+## Overview
+
+This project demonstrates:
+- Ray-marching of signed distance fields (SDFs) on the GPU using NVIDIA CUDA.  
+- Use of CUDA kernels to compute ray intersections, normals, and perform simple shading.  
+- Use of raylib for rendering and implement a UI.
+- Performance considerations (step size, iteration limits, etc.).  
+- Rendering to an image buffer and saving the result.  
+
+---
+
+## Structure
+
+```
+/
+├── src/ — source files (CUDA code, host/C++ orchestration)
+├── include/ — header files, shared declarations
+├── external/ — any third-party helper libs or dependencies
+├── builds/ — compiled binaries / build artifacts
+├── saved_image.png — example output image
+├── Makefile — build script
+
+```
+---
+
+## Screenshots
+![Screenshot1](./screenshots/image.png)
+![Screenshot2](./screenshots/image2.png)
+![Screenshot3](./screenshots/image3.png)
+
+### include/camera.cuh
+```
+#pragma once
+
+#include "utils.cuh"
+#include <cuda_runtime.h>
+
+namespace cam {
+    class Camera {
+        float3 position;
+
+        float3 top, front, right;
+
+        float yaw, pitch;
+    public:
+        Camera();
+
+        __host__ void setPosition(float3 position);
+        __host__ void setPosition(float x, float y, float z);
+        __host__ void setRotation(float yaw, float pitch);
+
+        __host__ void moveForward(float speed);
+        __host__ void moveBack(float speed);
+        __host__ void moveRight(float speed);
+        __host__ void moveLeft(float speed);
+        __host__ void moveUp(float speed);
+        __host__ void moveDown(float speed);
+
+        __host__ void rotateRight(float sensitivity);
+        __host__ void rotateLeft(float sensitivity);
+        __host__ void rotateUp(float sensitivity);
+        __host__ void rotateDown(float sensitivity);
+
+        __host__ void calculateRotation();
+
+        __device__ float3 getRay(float2 screenCoord, float FOV);
+        __host__ __device__ float3 getPosition();
+        __host__ __device__ float2 getRotation();
+    };
+}
+```
+
+### include/raymarcher.cuh
+```
+#pragma onoce
+
+#include "camera.cuh"
+
+__global__ void updateStuff(float power_host, float darkness_host, float cutoff_host, 
+                            float3 colorMixA_host, float3 colorMixB_host);
+__global__ void render(uchar4* canvas, cam::Camera& cam, float currTime);
+__device__ void boxBlur(uchar4* canvas, int radius);
+```
+
+### include/utils.cuh
+```
+#pragma once
+
+#include <cmath>
+#include <cuda_runtime.h>
+
+__host__ __device__ inline float3 operator+(const float3 &a, const float3 &b) {
+    return make_float3(a.x + b.x, a.y + b.y, a.z + b.z);
+}
+
+__host__ __device__ inline float3 operator-(const float3 &a, const float3& b) {
+    return make_float3(a.x - b.x, a.y - b.y, a.z - b.z);
+}
+
+__host__ __device__ inline float3 operator*(const float3 &v, float s) {
+    return make_float3(v.x * s, v.y * s, v.z * s);
+}
+
+__host__ __device__ inline float3 operator/(const float3 &v, float s) {
+    return make_float3(v.x / s, v.y / s, v.z / s);
+}
+
+__host__ __device__ inline float3 operator*(float s, const float3 &v) {
+    return v * s;
+}
+
+namespace util {
+    __host__ __device__ inline float length(const float3 &v) {
+        return sqrtf(v.x * v.x + v.y * v.y + v.z * v.z);
+    }
+
+    __host__ __device__ inline float3 normalize(float3 v) {
+        float len = length(v);
+        return make_float3(v.x / len, v.y / len, v.z / len);
+    }
+
+    __host__ __device__ inline float dot(const float3 &a, const float3 &b) {
+        return a.x * b.x + a.y * b.y + a.z * b.z;
+    }
+
+    __host__ __device__ inline float3 cross(const float3 &a, const float3 &b) {
+        return make_float3(
+                a.y * b.z - b.y * a.z,
+                a.z * b.x - b.z * a.x,
+                a.x * b.y - b.x * a.y
+            );
+    }
+
+    __host__ __device__ inline float saturate(float x) {
+        return fmaxf(0.0f, fminf(x, 1.0f));
+    }
+
+    __host__ __device__ inline float3 saturateV(float3 v) {
+        return make_float3(saturate(v.x), saturate(v.y), saturate(v.z));
+    }
+
+    __host__ __device__ inline float3 lerp(const float3 &a, const float3 &b, float t) {
+        return a * (1.0f - t) + b * t;
+    }
+}
+
+const int WIDTH = 2560;
+const int HEIGHT = 1440;
+
+const float ASPECT_RATIO = (float) WIDTH / HEIGHT;
+
+const float MAX_DIST = 100.0f;
+const int MAX_STEPS = 120.0f;
+
+const float EPSILON = 0.0001f;
+```
+
+### src/camera.cu
+```
+#include <cstdio>
+#include <cuda_runtime.h>
+#include "../include/camera.cuh"
+#include "../include/utils.cuh"
+
+#include <stdio.h>
+
+namespace cam {
+    Camera::Camera() {
+        this->position = make_float3(0.0, 0.0, 10.0f);
+        this->top = make_float3(0.0, 1.0f, 0.0f);
+        this->right = make_float3(1.0f, 0.0f, 0.0f);
+        this->front = make_float3(0.0f, 0.0f, -1.0f);
+
+        this->yaw = 180.0f;
+        this->pitch = 0.0f;
+    }
+
+    __host__ 
+    void Camera::calculateRotation() {
+        static const float3 worldUp = make_float3(0.0f, 1.0f, 0.0f);
+        float3 newFront;
+        newFront.z = cos(yaw * 3.14 / 180.0f) * cos(pitch * 3.14 / 180.0f);
+        newFront.x = sin(yaw * 3.14 / 180.0f);
+        newFront.y = sin(pitch * 3.14 / 180.0f);
+
+        front = util::normalize(newFront);
+        right = util::cross(front, worldUp);
+        top = util::cross(front, right);
+    }
+
+    __host__ 
+    void Camera::setPosition(float3 position) {
+        this->position = position;
+    }
+    __host__ 
+    void Camera::setPosition(float x, float y, float z) {
+        this->position = util::normalize(make_float3(x, y, z));
+    }
+
+    __host__ 
+    void Camera::moveForward(float speed) {
+        position = position + front * speed;
+    }
+    __host__ 
+    void Camera::moveBack(float speed) {
+        position = position - front * speed;
+    }
+    __host__ 
+    void Camera::moveRight(float speed) {
+        position = position + right * speed;
+    }
+    __host__ 
+    void Camera::moveLeft(float speed) {
+        position = position - right * speed;
+    }
+    __host__ 
+    void Camera::moveUp(float speed) {
+        position = position + top * speed;
+    }
+    __host__ 
+    void Camera::moveDown(float speed) {
+        position = position - top * speed;
+    }
+
+    __host__
+    void Camera::rotateRight(float sensitivity) {
+        this->yaw -= sensitivity;
+    }
+    __host__
+    void Camera::rotateLeft(float sensitivity) {
+        yaw += sensitivity;
+    }
+    __host__
+    void Camera::rotateUp(float sensitivity) {
+        pitch += sensitivity;
+    }
+    __host__
+    void Camera::rotateDown(float sensitivity) {
+        pitch -= sensitivity;
+    }
+
+    __device__  __host__
+    float3 Camera::getPosition() {
+        return make_float3(position.x, position.y, position.z);
+    }
+
+    __device__ 
+    float3 Camera::getRay(float2 screenCoord, float FOV) {
+        float z = 1.0f / (tan((FOV / 2.0f) / 180 * 3.14f));
+        float3 ray = screenCoord.x * right + screenCoord.y * top + front * z;
+        return util::normalize(ray);
+    }
+
+    __device__ __host__ 
+    float2 Camera::getRotation() {
+        return make_float2(yaw, pitch);
+    }
+}
+```
+
+### src/main.cu
+```
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+#include <raylib.h>
+#include <time.h>
+
+#include "../include/raymarcher.cuh"
+
+#define RAYGUI_IMPLEMENTATION
+#include "../external/raygui.h"
+
+#include <iostream>
+
+int main() {
+    uchar4 *canvas;
+    cudaMallocManaged(&canvas, WIDTH * HEIGHT * sizeof(uchar4));
+
+    InitWindow(WIDTH, HEIGHT, "skibidi cuda raymarcher");
+
+    Image image = {
+        .data = malloc(WIDTH * HEIGHT * sizeof(uchar4)),
+        .width = WIDTH,
+        .height = HEIGHT,
+        .mipmaps = 1,
+        .format = PIXELFORMAT_UNCOMPRESSED_R8G8B8A8
+    };
+
+    Texture2D canvasTexture = LoadTextureFromImage(image);
+    free(image.data); 
+
+    cam::Camera *camera = new cam::Camera();
+
+    uchar4 *hostCanvas = (uchar4 *)malloc(WIDTH * HEIGHT * sizeof(uchar4));
+    for (int i = 0; i < WIDTH * HEIGHT; i++) {
+        hostCanvas[i] = (uchar4){ 0, 0, 0, 255 };  
+    }
+
+    float sensitivity = 0.1f;
+    float turnSensitivity = 0.1f;
+
+    float power_host = 8.0f;
+    float darkness_host = 60.0f;
+    float cutoff_host = 16.0f;
+
+    float3 colorMixA_host = {1.0f, 0.0f, 0.0f};
+    float3 colorMixB_host = {0.0f, 0.0f, 1.0f};
+
+    camera->calculateRotation();
+    camera->setPosition(-2.32173, -1.8306, 0.893631);
+
+    while (!WindowShouldClose()) {
+        const dim3 blockSize(16, 16);
+        const dim3 gridSize((WIDTH + blockSize.x - 1) / blockSize.x, (HEIGHT + blockSize.y - 1) / blockSize.y);
+
+        cudaDeviceSynchronize();
+
+        if (IsKeyDown(KEY_W)) camera->moveForward(sensitivity);
+        if (IsKeyDown(KEY_S)) camera->moveBack(sensitivity);
+        if (IsKeyDown(KEY_A)) camera->moveLeft(sensitivity);
+        if (IsKeyDown(KEY_D)) camera->moveRight(sensitivity);
+
+        if (IsKeyDown(KEY_E)) camera->moveDown(sensitivity);
+        if (IsKeyDown(KEY_Q)) camera->moveUp(sensitivity);
+        
+        if (IsKeyDown(KEY_L)) camera->rotateRight(turnSensitivity);
+        if (IsKeyDown(KEY_H)) camera->rotateLeft(turnSensitivity);
+        if (IsKeyDown(KEY_K)) camera->rotateUp(turnSensitivity);
+        if (IsKeyDown(KEY_J)) camera->rotateDown(turnSensitivity);
+
+        camera->calculateRotation();
+
+        std::cerr << "Camera position: " << camera->getPosition().x << " " << camera->getPosition().y << " " << camera->getPosition().z << std::endl;
+
+        updateStuff<<<1, 1>>>(power_host, darkness_host, cutoff_host, colorMixA_host, colorMixB_host);
+        cudaDeviceSynchronize();
+        render<<<gridSize, blockSize>>>(canvas, *camera, clock());
+
+        cudaDeviceSynchronize();
+        cudaMemcpy(hostCanvas, canvas, WIDTH * HEIGHT * sizeof(uchar4), cudaMemcpyDeviceToHost);
+
+        UpdateTexture(canvasTexture, hostCanvas);
+
+        if (IsKeyPressed(KEY_P)) {
+            Image image = LoadImageFromTexture(canvasTexture);
+            ExportImage(image, "saved_image.png");
+        }
+
+        BeginDrawing();
+        ClearBackground(WHITE);
+        DrawTexture(canvasTexture, 0, 0, WHITE);
+
+        GuiSliderBar((Rectangle){100, 100, 200, 20}, "Low", "High", &sensitivity, 0.0f, 0.5f);
+        GuiSliderBar((Rectangle){100, 130, 200, 20}, "Low", "High", &turnSensitivity, 0.0f, 2.0f);
+
+        GuiSliderBar((Rectangle){100, 160, 200, 20}, "Low", "High", &power_host, 3.0f, 10.0f);
+        GuiSliderBar((Rectangle){100, 190, 200, 20}, "Low", "High", &darkness_host, 1.0f, 80.0f);
+        GuiSliderBar((Rectangle){100, 210, 200, 20}, "Low", "High", &cutoff_host, 0.0f, 200.0f);
+
+        GuiSliderBar((Rectangle){400, 100, 200, 20}, "Low", "High", &colorMixA_host.x, 0.0f, 1.0f);
+        GuiSliderBar((Rectangle){400, 130, 200, 20}, "Low", "High", &colorMixA_host.y, 0.0f, 1.0f);
+        GuiSliderBar((Rectangle){400, 160, 200, 20}, "Low", "High", &colorMixA_host.z, 0.0f, 1.0f);
+
+        GuiSliderBar((Rectangle){400, 190, 200, 20}, "Low", "High", &colorMixB_host.x, 0.0f, 1.0f);
+        GuiSliderBar((Rectangle){400, 220, 200, 20}, "Low", "High", &colorMixB_host.y, 0.0f, 1.0f);
+        GuiSliderBar((Rectangle){400, 250, 200, 20}, "Low", "High", &colorMixB_host.z, 0.0f, 1.0f);
+
+        EndDrawing();
+    }
+
+    cudaFree(canvas);
+
+    UnloadTexture(canvasTexture);
+    CloseWindow();
+
+    return 0;
+}
+```
+
+### src/raymarcher.cu
+```
+#include <cmath>
+#include <cuda_runtime.h>
+#include <device_launch_parameters.h>
+
+#include <raylib.h>
+
+#include "../include/camera.cuh"
+#include "../include/raymarcher.cuh"
+
+#include <stdio.h>
+
+#include <time.h>
+
+__device__ float power = 8;
+__device__ float darkness = 60.0f;
+__device__ float cutoff = 16.0f;
+__device__ float blackAndWhite = 0.0f;
+
+__device__ float3 colorMixA = {0.1f, 0.0f, 1.0f};
+__device__ float3 colorMixB = {0.0f, 0.0f, 0.1f};
+
+__device__ float sphereSDF(float3 p, float radius, float3 center) {
+    float3 diff = p - center;
+    return util::length(diff) - radius;
+}
+
+__device__ float mandelblubSDF(float3 p, int *steps) {
+    float3 z = p;
+    float dr = 1.0f;
+    float r = 0.0f;
+
+    for (int i = 0; i < 20; i++) {
+        r = util::length(z);
+        if (steps != NULL) *steps = i;
+        if (r > 2.0f) break;
+
+        float theta = acos(z.z / r) * power;
+        float phi = atan2(z.y, z.x) * power;
+        dr = pow(r, power - 1) * power * dr  + 1.0f;
+
+        float zr = pow(r, power);
+
+        z = zr * make_float3(sin(theta) * cos(phi), sin(phi) * sin(theta), cos(theta));
+        z = z + p;
+    }
+
+    return 0.5 * log(r) * r / dr;
+}
+
+__device__ float scene(float3 p, int *steps = NULL) {
+    return mandelblubSDF(p, steps);
+}
+
+__device__ float3 getNormal(float3 p) {
+    float3 normal = {0.0f, 0.0f, 0.0f};
+    const float delta = 0.0001f;
+
+    normal.x = scene(p + make_float3(delta, 0.0f, 0.0f)) - scene(p - make_float3(delta, 0.0f, 0.0f));
+    normal.y = scene(p + make_float3(0.0f, delta, 0.0f)) - scene(p - make_float3(0.0f, delta, 0.0f));
+    normal.z = scene(p + make_float3(0.0f, 0.0f, delta)) - scene(p - make_float3(0.0f, 0.0f, delta));
+
+    return util::normalize(normal);
+}
+
+__device__ float2 raymarch(float3 position, float3 direction, int *steps) {
+    float currDistance = 0;
+
+    for (int i = 0; i < MAX_STEPS; i++) {
+        float3 newPosition = position + (direction * currDistance);
+        float dist = scene(newPosition, steps);
+
+        if (currDistance > MAX_DIST) return {currDistance, (float)i};
+        if (dist < EPSILON) return {currDistance, (float)i};
+
+        currDistance += dist;
+    }
+
+    return {MAX_DIST, (float)MAX_STEPS};
+}
+
+__device__ inline float sharp_exponential(float x, float k = 0.5f) {
+    return (expf(k * x) - 1.0f) / (expf(k) - 1.0f);
+}
+
+__global__ void render(uchar4* canvas, cam::Camera& cam, float currTime) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x > WIDTH || y > HEIGHT) return;
+
+    float2 uv = make_float2((float)x / WIDTH, (float)y / HEIGHT);
+    uv.x -= 0.5, uv.y -= 0.5;
+
+    uv.x *= ASPECT_RATIO;
+
+    float3 cameraPosition = cam.getPosition();
+    float3 rayDirection = cam.getRay(uv, 60.0f);
+
+    int fractalSteps = 0;
+    float2 temp = raymarch(cameraPosition, rayDirection, &fractalSteps);
+    float dist = temp.x;
+    float steps = temp.y;
+
+    float3 finalRay = cameraPosition + dist * rayDirection;
+
+    float3 lightDirection = make_float3(0.0f, -1.0f, 0.0f);
+
+    float3 background = util::lerp(
+        make_float3(51.0f, 3.0f, 20.0f),
+        make_float3(16.0f, 6.0f, 28.0f),
+        uv.y + 0.5f
+    );
+
+    if (dist < MAX_DIST) {
+        float3 normal = getNormal(finalRay);
+
+        float colorA = util::saturate(util::dot(make_float3(0.5, 0.5, 0.5) + normal*0.5f, (-1) * lightDirection));
+        float colorB = util::saturate(steps / cutoff);
+
+        float3 color = util::saturateV(colorA * colorMixA + colorB * colorMixB);
+        float brightness = util::length(color);
+        color = color + (1.0f - brightness) * make_float3(0.0f, 0.0f, 0.0f);
+
+        canvas[y * WIDTH + x] = {
+            (unsigned char)(255.0f * color.x),
+            (unsigned char)(255.0f * color.y),
+            (unsigned char)(255.0f * color.z),
+            255
+        };
+
+    }
+    else {
+        float rim  = (steps / darkness);
+        float3 color = util::lerp(background, make_float3(255.0f, 255.0f, 255.0f), blackAndWhite) * rim;
+        float brightness = util::length(color);
+        canvas[y * WIDTH + x] = {
+            (unsigned char)(color.x),
+            (unsigned char)(color.y),
+            (unsigned char)(color.z),
+            255
+        };
+    }
+}
+
+__global__ void updateStuff(float power_host, float darkness_host, float cutoff_host, 
+                            float3 colorMixA_host, float3 colorMixB_host) {
+    power = power_host;
+    darkness = darkness_host;
+    cutoff = cutoff_host;
+
+    colorMixA = colorMixA_host;
+    colorMixB = colorMixB_host;
+}
+
+__device__ void boxBlur(uchar4* canvas, int radius) {
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+
+    if (x > WIDTH || y > HEIGHT) return;
+
+    int count = 0;
+    float3 sum = {0.0f, 0.0f, 0.0f};
+
+    for (int i = -1; i <= 1; i++) {
+        for (int j = -1; j <= 1; j++) {
+            int nx = x + i;
+            int ny = y + j;
+
+            if (nx >= 0 && nx < WIDTH && ny >= 0 && ny < HEIGHT) {
+                uchar4 neighborColor = canvas[ny * WIDTH + nx];
+                sum = sum + make_float3(neighborColor.x, neighborColor.y, neighborColor.z);
+                count++;
+            }
+        }
+    }
+
+    if (count > 0) {
+        sum = sum / (float)count;
+        canvas[y * WIDTH + x] = {
+            (unsigned char)(sum.x),
+            (unsigned char)(sum.y),
+            (unsigned char)(sum.z),
+            255
+        };
+    }
+}
+```

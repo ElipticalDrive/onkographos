@@ -1,0 +1,121 @@
+Metal-accelerated 3D Gaussian Splatting for iPhone - Speed up rasterization, tile binning, and sorting (-37% training step on M4 Pro) by lanxinger · Pull Request #5 · Plinth-it/msplat-ios
+
+Speed up rasterization, tile binning, and sorting (-37% training step on M4 Pro) by lanxinger · Pull Request #5 · Plinth-it/msplat-ios · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+lanxinger
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Six raster-pipeline optimizations adapted from George Kopanas's "What the 3DGS Literature Left on the Table" (https://grgkopanas.github.io/3dgs_cuda_blog/), chosen and ranked from Metal stage profiles rather than the blog's A100 numbers.
+On an M4 Pro (garden, 1.6M Gaussians, 1297x840) the training step falls from 38.2 to 24.1 ms (-37%). At 324x210, the crowded-tile regime of the first ~6,000 steps of a default run, it falls from about 7.6 to 3.1 ms. Rendered output is unchanged or changes only by float rounding, and gradients match to float rounding.
+Commits
+Commit
+Change
+Effect on M4 Pro (garden)
+Reduce-scatter backward raster gradients across SIMD lanes
+12 shuffles replace nine simd_sums; nine lanes issue the atomics as one instruction; scalar color accumulator
+rast_bwd -15%
+Emit tiles from each Gaussian's exact opacity-aware footprint
+Tiles come from the ellipse where opacity * exp(-sigma) can reach 1/255, walked row by row, instead of the 3-sigma box
+~24% fewer tile pairs; step -15%
+Sort crowded tiles with SIMD-group radix slices
+Tiles over 2,048 entries rank with SIMD ballots, skip constant key bytes, and share the bitonic threadgroup memory (21 KB -> 16 KB)
+sort -89% at 324x210
+Stop forward rasterization once every pixel in the threadgroup is done
+Per-SIMD-group completion vote read after the existing barrier
+rast_fwd -5% at full res
+Stage only Gaussians that can blend each raster block
+A conservative ellipse-vs-8x8-block test at batch load; fewer than half of a tile's Gaussians reach a given block
+both raster stages -24%; step -13%
+Rasterize staged Gaussians branchlessly with a safe-math sigma
+Misses blend with alpha 0; sigma comes from one helper under #pragma METAL fp math_mode(safe)
+rast_bwd -12%; step -5%
+Each row was A/B-tested against the commit before it on the same build, in alternating rounds.
+Behavior changes
+Tile footprint. Opaque Gaussians now also cover their 3-3.33 sigma rim, which the 3-sigma box clipped at tile borders. Held-out PSNR on a model trained under the old footprint is unchanged (26.5867 -> 26.5872 dB). Visibility, radii, densification statistics, and optimizer gating still use the 3-sigma box.
+Safe-math sigma. Under fast math, the compiler could round sigma differently in forward and backward, depending on surrounding code. Moving only the sigma computation in the previous backward kernel shifted gradients by up to 1.8e-4 relative, because forward and backward could disagree on a pixel at the 1/255 threshold. Both passes now share bit-identical sigma by construction. Forward output moves by at most 1e-6 in color on random scenes, and contributor indices are unchanged.
+Retry-arena test. It used opacity 0.001 Gaussians to overflow the arena. Those can never blend, so they now emit no tiles, and the test uses 0.005.
+Verification
+Native tests. All 61 pass. New coverage:
+msplat_raster_footprint compiles the shader with probe kernels and checks every blending pixel of 20,000 random Gaussians against the emitted tiles and the kept 8x8 blocks. It found zero misses and 0.09% / 0.13% slack.
+test_exact_sort now covers byte skipping, odd pass counts, identical keys, and a 9,000-entry tile.
+Mutation checks. The new tests fail on deliberately broken shaders: a 3% smaller footprint, a missing ellipse extreme, a missing radix copy-back, a skipped varying byte, and a 10% tighter block cull.
+Contract pins. New pins cover the shared footprint helpers, the radix structure, the early-exit vote, block staging, and the safe-mode sigma.
+Out-of-tree harnesses (not committed): old vs new kernels on random scenes for all nine gradient components and forward output. Count/scatter agreement was checked on every tile of 24 full-resolution renders of the 1.6M-Gaussian model.
+Not done
+No physical-iPhone measurements. scripts/run-ios-benchmarks.sh is the device check.
+The prebuilt metallibs in swift/Sources/Msplat/Resources/ are not rebuilt, so the Swift package picks this up only after an xcframework/metallib rebuild.
+lanxinger
+added 6 commits
+October 30, 2026 17:04
+Reduce-scatter backward raster gradients across SIMD lanes
+6384e8e
+Emit tiles from each Gaussian's exact opacity-aware footprint
+5162810
+Sort crowded tiles with SIMD-group radix slices
+8baea00
+Stop forward rasterization once every pixel in the threadgroup is done
+2ba1677
+Stage only Gaussians that can blend each raster block
+7c2f6dc
+Rasterize staged Gaussians branchlessly with a safe-math sigma
+c58c6fa
+chatgpt-codex-connector
+Bot
+commented
+Oct 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-10-30T18:39:25.980818Z
+c58c6fa
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+Hide details
+View details
+lanxinger
+merged commit ee9070e
+into
+main
+Oct 30, 2026
+1 of 2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+lanxinger
+deleted the
+claude/raster-pipeline-optimizations
+branch
+October 30, 2026 18:50
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

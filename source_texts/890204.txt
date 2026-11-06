@@ -1,0 +1,132 @@
+Context beahiv currently has two independent 64-bit id layouts sharing the same field widths: encode/decode (cell_id.py) — plain concatenation: orientation | side_length | q_enc | r_enc. encode_morton/decode_morton (morton.py) — same fie...
+
+Should Morton encoding be the default cell id layout? · Issue #1 · safer-streets/beahiv · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Should Morton encoding be the default cell id layout? #1
+New issue
+Copy link
+New issue
+Copy link
+Closed as not planned
+Closed as not planned
+Should Morton encoding be the default cell id layout?#1
+Copy link
+Description
+virgesmith
+opened on Jul 24, 2026
+Issue body actions
+Context
+beahiv currently has two independent 64-bit id layouts sharing the same field widths:
+encode/decode (cell_id.py) — plain concatenation: orientation | side_length | q_enc | r_enc.
+encode_morton/decode_morton (morton.py) — same fields, but q/r bit-interleaved (Z-order), described as useful for "DuckDB clustering, Parquet sort-order pruning, and range scans."
+encode/decode is the one used everywhere internally (geo.py, neighbours.py, polyfill.py, the numpy-vectorised batch.py); Morton is opt-in and untouched by the rest of the library.
+Should the Morton layout become the default cell id — i.e. what latlon_to_cell/encode produce out of the box — given that spatial locality on disk (DuckDB/Parquet range scans) is probably the more common consumption pattern for a crime-analysis dataset than raw single-cell lookup speed?
+Performance data (measured, not estimated)
+Benchmarked scalar encode/decode on this repo as of this issue, timeit over 200k iterations, same (q, r, side_length, orientation) input for both:
+Operation
+Time
+vs plain
+encode
+244 ns
+—
+encode_morton
+2905 ns
+11.9x slower
+decode
+837 ns
+—
+decode_morton
+3756 ns
+4.5x slower
+_interleave/_deinterleave in morton.py are pure-Python bit-by-bit loops over up to 22 bits per call, which is where the cost comes from — the plain layout is just shifts and masks. decode alone is already close to the "sub-microsecond" scalar target called out in batch.py's module docstring and AGENTS.md; decode_morton is well past it in both directions.
+Also relevant: there is no vectorised (numpy) Morton path at all. batch.py has no encode_morton_batch/decode_morton_batch, and geo.py's scalar/array dispatch never touches morton.py. Making Morton the default would mean either:
+writing a numpy-vectorised bit-interleave (doable — magic-number bit-spreading tricks exist for this — but real work, and another scalar/batch-parity surface per AGENTS.md's developer rules), or
+leaving bulk encode moderately slower than it needs to be until that's written.
+Question to resolve
+Should encode/decode (the default, used by latlon_to_cell etc.) switch to the Morton layout, given the ~5-12x per-call cost?
+If yes: is that a bulk-ingest-time cost that's paid once and amortised (e.g. batch-encoding a whole crime dataset), making the scalar hot-path cost irrelevant in practice — or does anything in this library call encode/decode in a genuine hot loop where 2-4 extra microseconds per call matters?
+Does "default" even need to change, or is the right fix instead to document Morton as the recommended id for anything hitting DuckDB/Parquet, and add the missing vectorised encode_morton_batch/decode_morton_batch so bulk callers can opt in without the plain-Python interleave cost?
+Leaning towards (3) — keep plain encode/decode as the default (it's the faster, simpler, already-vectorised path, and nothing internal needs spatial locality), and treat Morton purely as a storage-layer opt-in — but opening this to get a decision recorded rather than assuming it.
+Activity
+virgesmith commented on Jul 27, 2026
+virgesmith
+on Jul 27, 2026
+ContributorAuthor
+More actions
+Resolution: option (3), weakened — Morton stays opt-in and unused for now
+Worked through what Morton encoding would actually buy us against DuckDB. Conclusion: not enough to justify making it the default, and not enough to justify writing the missing vectorised path yet either.
+The mechanism, and its limits
+Both layouts keep orientation and side_length in bits 63–43, so any ordering or range is confined to a single grid either way. The only difference is what a [min, max] interval over the low 43 bits means geometrically:
+Plain — a run of ids spanning more than one q has an r-range covering essentially the whole extent. A row group's bounding box is a full-height vertical strip. Prunes in q, never in r.
+Morton — a contiguous run is a union of quadtree-ish blocks. A row group's bounding box is a compact 2D block. Prunes in both axes.
+DuckDB keeps per-row-group min/max on every column (native storage and Parquet) and pushes =, <, >, BETWEEN down against them. That zone-map interaction is the entire win. Critically, it only exists if the data is physically sorted by the Morton id — Z-order is a clustering key, not an index.
+When it wins, and when it doesn't
+At side_length=202 (303m × 350m spacing, ~0.106 km²/cell), GB's bbox is ~8.6M cells. At DuckDB's 122,880-row groups, uniformly distributed:
+row-group footprint
+50km × 50km query
+200km × 200km query
+10km × 400km corridor
+Plain
+10km wide × 1300km tall
+~7% of file
+~29% of file
+~1.4%
+Morton
+~114km × 114km block
+1 row group
+~4% of file
+~4 row groups
+Wins on square-ish regions large enough to exceed one row group — 5–7× fewer bytes read at the 200km scale.
+Neutral below ~10km at this resolution: the query fits in one row group either way.
+Loses on thin strips aligned with the r axis (corridor queries). Row-major ordering is optimal for that shape; Z-order fragments it.
+And it does nothing at all for:
+point lookups (WHERE cell_id = X) — equality prunes identically under both layouts;
+GROUP BY cell_id, i.e. the bread-and-butter count-per-cell query — hash aggregate, no locality benefit;
+k-ring / neighbour queries — the decisive one. k_ring returns 1 + 3k(k+1) known ids; you do an IN list or a semi-join. There is no range scan to optimise. The library's premise (O(1) neighbours, no R-tree) means the queries Morton helps with are largely the ones we aren't running.
+DuckDB has no Z-order awareness
+Unlike Delta's OPTIMIZE ZORDER BY, DuckDB won't decompose a region into id ranges for you — that's litmax/bigmin machinery we'd have to write and maintain.
+The cheap way to get the benefit without any of that: sort by the Morton id, but filter on plain x/y columns. Two zone maps, both tight, 2D pruning, no range decomposition:
+```
+COPY (SELECT * FROM crimes ORDER BY cell_id_morton)
+TO 'crimes.parquet' (FORMAT parquet, ROW_GROUP_SIZE 122880);
+
+SELECT cell_id, count(*) FROM 'crimes.parquet'
+WHERE x BETWEEN 320000 AND 370000 AND y BETWEEN 380000 AND 430000
+GROUP BY cell_id;
+```
+The other genuine use is Hive partitioning: PARTITION_BY (cell_id >> 34) under Morton gives a spatially compact directory per block, pruned from the path before any file is opened. Under the plain layout >> 22 is just q — one directory per 303m column strip.
+Caveat worth recording
+A Morton prefix is not a parent cell. Truncating low bits gives a valid bucket, but hexagons don't nest across side_length (verified in JOURNAL: 5 fully-inside vs 11 straddling, out of 16). Don't use prefix truncation for hierarchical rollups.
+Decision
+No — encode/decode keep the plain layout. It's faster on both paths, already vectorised, and nothing internal needs spatial locality.
+Moot.
+Effectively yes, but weaker than the issue proposed: Morton stays exactly where it is — an opt-in storage-layer variant, untouched by the rest of the library. Not writing encode_morton_batch/decode_morton_batch yet, since nothing is consuming Morton ids. Without a vectorised path the Arrow UDF route (bng_to_cell → encode_batch) can't emit them at speed, which is fine while there's no consumer.
+Noting for whenever that changes: the 11.9×/4.5× penalty is entirely the pure-Python bit-by-bit loops in _interleave/_deinterleave. Plain → Morton is a pure bit permutation of the low 43 bits, so the standard "Part1By1" shift-and-mask constant sequence vectorises it in numpy in ~5 steps with no loop. The slowness is an implementation artefact, not inherent — worth remembering if a range-scan workload ever actually materialises.
+Closing as not planned; reopen if a query pattern shows up that needs large isotropic range scans.
+virgesmith
+closed this as not plannedon Jul 27, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

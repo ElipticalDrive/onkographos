@@ -1,0 +1,116 @@
+# Multiple Scattering Albedo Estimation
+
+Also called: Computation of multiple scattering albedo, $\sigma_{ms}$ estimation
+
+## Overview
+This method estimates the multiple scattering albedo $\alpha_{ms}$ (RGB) for a low-resolution voxel such that its effective albedo $\alpha_e$ matches the effective albedo $\alpha_e^{\text{input}}$ of the corresponding high-resolution input block. It addresses the problem of preserving the color and density appearance of light after multiple scattering events during volume downsampling. It differs from single-scattering approximations by explicitly modeling the probability of self-shadowing at the microscopic scale and solving for $\alpha_{ms}$ via a numerical root-finding process based on scattering event probabilities.
+
+## How it works
+**Inputs:**
+- High-resolution input voxel block with known extinction coefficient $\sigma_t$, single-scattering albedo $\alpha_{ss}$, and phase function.
+- Low-resolution target voxel geometry.
+- Maximum number of scattering events $N_{max}$ for probability estimation.
+
+**Outputs:**
+- Multiple scattering albedo $\alpha_{ms}$ for the low-resolution voxel (RGB).
+
+**Data Structures:**
+- $P_{sh}(n)$: Array of size $N_{max}+1$, storing the probability of exactly $n$ scattering events.
+- $P_{ss}$: Scalar, microscopic self-shadowing probability.
+- $\alpha_e^{\text{input}}$: Vector (RGB), effective albedo of the input block.
+
+**Steps:**
+
+1. **Estimate $\alpha_e^{\text{input}}$:**
+   Cast rays through the input block of high-resolution voxels. For each ray, compute the light path until it leaves the block, simulating a volume path tracer. The throughput is accumulated for all scattering events. $\alpha_e^{\text{input}}$ is the average throughput of these rays.
+
+2. **Estimate $P_{sh}(n)$:**
+   Cast rays through the low-resolution voxel. For each ray, count the number of scattering events $n$ before the ray leaves the voxel. Estimate $P_{sh}(n)$ as the fraction of rays that undergo exactly $n$ scattering events. This step is independent of $\alpha_{ms}$.
+
+3. **Estimate $P_{ss}$:**
+   Compute the microscopic self-shadowing probability $P_{ss}$ using the approximation:
+   $$ P_{ss} \approx \frac{\int \sigma_{ss}}{\alpha_{ss}(\lambda) \int \sigma_t} $$
+   where $\int \sigma_{ss}$ is the integral of the self-shadowing cross-section, $\alpha_{ss}(\lambda)$ is the single-scattering albedo at wavelength $\lambda$, and $\int \sigma_t$ is the integral of the extinction coefficient over the voxel. [G] In practice, these integrals are approximated by summing the respective coefficients over the high-resolution voxels contained within the low-resolution voxel.
+
+4. **Solve for $\alpha_{ms}$:**
+   For each color channel (wavelength), solve the following equation numerically for $\alpha_{ms}$:
+   $$ \alpha_e^{\text{input}} = \sum_{n=0}^{N_{max}} P_{sh}(n) (P_{ss} \alpha_{ss} + (1 - P_{ss}) \alpha_{ms})^n $$
+   The term $(P_{ss} \alpha_{ss} + (1 - P_{ss}) \alpha_{ms})$ represents the effective albedo per scattering event, combining single-scattering and multiple-scattering contributions weighted by the self-shadowing probability.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def estimate_multiple_scattering_albedo(input_block, low_res_voxel, N_max):
+    # Step 1: Estimate effective albedo of input block
+    # Cast rays through input_block, trace paths until exit, average throughput
+    alpha_e_input = estimate_effective_albedo_path_tracing(input_block)
+
+    # Step 2: Estimate scattering event probabilities for low-res voxel
+    # Cast rays through low_res_voxel, count scattering events n
+    P_sh = estimate_scattering_probabilities(low_res_voxel, N_max)
+
+    # Step 3: Estimate self-shadowing probability
+    # Approximate integrals of sigma_ss and sigma_t over the input_block
+    integral_sigma_ss = sum_sigma_ss(input_block)
+    integral_sigma_t = sum_sigma_t(input_block)
+    alpha_ss = get_single_scattering_albedo(input_block) # Assume constant or average
+    
+    # P_ss approximation
+    P_ss = integral_sigma_ss / (alpha_ss * integral_sigma_t)
+
+    # Step 4: Solve for alpha_ms for each color channel
+    alpha_ms = zeros(3) # RGB
+    
+    for c in range(3):
+        target = alpha_e_input[c]
+        # Define function f(x) = sum(P_sh(n) * (P_ss * alpha_ss[c] + (1 - P_ss) * x)^n) - target
+        def f(x):
+            val = 0.0
+            for n in range(N_max + 1):
+                term = (P_ss * alpha_ss[c] + (1 - P_ss) * x) ** n
+                val += P_sh[n] * term
+            return val - target
+        
+        # Numerical root finding (e.g., Newton-Raphson or Bisection)
+        # Search range for alpha_ms is [0, 1]
+        alpha_ms[c] = solve_root(f, lower=0.0, upper=1.0)
+        
+    return alpha_ms
+
+def estimate_effective_albedo_path_tracing(block):
+    # Implementation detail: Cast rays, trace, average throughput
+    # This is a standard volume path tracing step
+    pass
+
+def estimate_scattering_probabilities(voxel, N_max):
+    # Implementation detail: Cast rays, count events, normalize
+    pass
+
+def sum_sigma_ss(block):
+    # Sum self-shadowing cross-section over all high-res voxels in block
+    pass
+
+def sum_sigma_t(block):
+    # Sum extinction coefficient over all high-res voxels in block
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+- The method tends to slightly underestimate the effective albedo $\alpha_e$. [S1]
+- Accuracy depends on the density and the amount of shadowing in the voxel. [S1]
+- The approximation of $P_{ss}$ may be inaccurate for very sparse or very dense voxels.
+- Numerical stability of the root-finding algorithm should be ensured, especially when $\alpha_{ms}$ is close to 0 or 1.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the ray casting steps for estimating $\alpha_e^{\text{input}}$ and $P_{sh}(n)$. The number of samples required depends on the complexity of the input block. [S1]
+- **Memory Complexity:** Low, requiring storage for $P_{sh}(n)$ and intermediate ray data.
+- **Strengths:** Preserves the color of multiple scattering during downsampling. Avoids iterative optimization by using a closed-form approximation for the effective albedo.
+- **Limitations:** Approximation errors in $P_{ss}$ and the effective albedo formula can lead to inaccuracies. Performance scales with the number of samples needed for convergence.
+
+## Background
+This method is part of the "new microflake model with microscopic self-shadowing" for accurate volume downsampling. It was introduced to handle the color of light scattered at least two times at the microscopic scale due to self-shadowing. The approach is detailed in the paper "A new microflake model with microscopic self-shadowing for accurate volume downsampling" [S1].
+
+## Sources
+[S1] A new microflake model with microscopic self-shadowing for accurate volume downsampling, https://doi.org/10.1111/cgf.13346, fetched 2026-10-26

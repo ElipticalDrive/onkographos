@@ -1,0 +1,104 @@
+# SVO Mask Mapping
+
+Also called: SVO Node Mask, Child Existence Bitmask
+
+## Overview
+SVO Mask Mapping is a bit-mapping scheme for encoding the existence of 8 child voxels within a Sparse Voxel Octree (SVO) node, stored in a single `uint32_t` mask field [S1, unofficial]. It solves the problem of efficiently tracking which octants are occupied without storing explicit pointers for empty children, enabling compact tree traversal [S1, unofficial]. It differs from sibling methods like Block Writer by focusing on the bitwise layout of child existence within the node header rather than serialization block structures [S1, 2741-block-writer-for-svo-serialization.md, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of 8 child voxel indices (0–7) corresponding to the octants of a parent node.
+- Output: A 32-bit integer (`uint32_t`) mask where specific bits indicate the presence of children.
+
+**Data Structures:**
+The mask is stored in the `masks` field of the SVO node structure. The layout is defined as follows [S1, unofficial]:
+- Bits 0–7: Valid mask (child existence).
+- Bits 8–15: Leaf mask (indicates if children are leaf nodes).
+- Bits 16–31: Unused/Reserved (in the specific implementation cited).
+
+**Bit Mapping Layout:**
+The 8 bits representing child existence are divided into two groups of 4 bits [S1, unofficial]:
+1. **Negative Y children (bits 4–7):** Corresponds to the bottom half of the octree.
+2. **Positive Y children (bits 0–3):** Corresponds to the top half of the octree.
+
+Within each group, the bits map to the 4 voxels in a top-down view (looking down the Y-axis) as follows [S1, unofficial]:
+- Bit 0: (+X, +Z)
+- Bit 1: (-X, +Z)
+- Bit 2: (-X, -Z)
+- Bit 3: (+X, -Z)
+
+The same pattern applies to bits 4–7 for the negative Y layer [S1, unofficial].
+
+**Algorithm:**
+To determine if a specific child voxel $i$ (where $i \in [0, 7]$) exists:
+1. Calculate the bit position $b$. For $i < 4$ (positive Y), $b = i$. For $i \ge 4$ (negative Y), $b = i$.
+2. Extract the bit from the mask: `exists = (mask >> b) & 1`.
+3. If `exists` is 1, the child is present.
+
+To determine if a specific child voxel $i$ is a leaf:
+1. Calculate the bit position $b$ as above.
+2. Extract the bit from the leaf mask portion (bits 8–15). Note: The source implies the leaf mask is separate or interleaved. Based on "next 8 bits = leaf mask", the leaf bit for child $i$ is at position $8 + i$ [S1, unofficial].
+3. `is_leaf = (mask >> (8 + i)) & 1`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_valid_mask(mask: int, child_index: int) -> int:
+    """
+    Check if a child voxel exists in the SVO node.
+    Args:
+        mask: The 32-bit mask field from the SVO node.
+        child_index: The index of the child voxel (0-7).
+    Returns:
+        1 if the child exists, 0 otherwise.
+    """
+    # Bits 0-3 are positive Y, Bits 4-7 are negative Y
+    # The mapping is direct: bit 0 for child 0, bit 1 for child 1, etc.
+    bit_position = child_index
+    return (mask >> bit_position) & 1
+
+def get_leaf_mask(mask: int, child_index: int) -> int:
+    """
+    Check if a child voxel is a leaf node.
+    Args:
+        mask: The 32-bit mask field from the SVO node.
+        child_index: The index of the child voxel (0-7).
+    Returns:
+        1 if the child is a leaf, 0 otherwise (internal node).
+    """
+    # Leaf mask occupies bits 8-15
+    bit_position = 8 + child_index
+    return (mask >> bit_position) & 1
+
+def is_child_present(mask: int, child_index: int) -> bool:
+    return get_valid_mask(mask, child_index) == 1
+
+def is_child_leaf(mask: int, child_index: int) -> bool:
+    return get_leaf_mask(mask, child_index) == 1
+```
+
+**Parameters and Edge Cases:**
+- The mask is a `uint32_t` [S1, unofficial].
+- The source code snippet shows usage in ray tracing: `if (getValidMask(...) > 0 ...)` [S1, unofficial].
+- Edge case: If the mask is 0, no children exist.
+- Precision: Bitwise operations are exact. No floating-point precision issues.
+
+## Subtopics
+
+### 1-byte Child Existence Encoding
+A technique to efficiently store point-cloud data using sparse voxel octrees, where a single byte encodes the existence of child nodes at the bottommost level [S2]. It optimizes storage by encoding recursively occupied nodes specially and exploits non-uniform distribution of child nodes using an arithmetic coder [S2]. Introduced by Schnabel et al. in 2006 [S2].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for checking child existence via bitwise operations [S1, unofficial].
+- **Memory Complexity:** 32 bits per node for the mask field [S1, unofficial].
+- **Strengths:** Compact representation, fast bitwise checks, suitable for GPU ray tracing [S1, unofficial].
+- **Limitations:** Fixed 8-child structure; does not handle variable branching factors directly [S1, unofficial].
+- **When to use:** When memory bandwidth is critical and the octree has a regular 8-way branching structure [S1, unofficial].
+
+## Background
+The SVO Mask Mapping scheme is implemented in the SVO library by Onlinerocker [S1, unofficial]. It is based on the implicit octree storage model where node metadata is packed into integers. The concept of using a single byte for child existence was introduced by Schnabel et al. in 2006 for point-cloud storage [S2].
+
+## Sources
+[S1] Onlinerocker/SVO, https://github.com/Onlinerocker/SVO, fetched 2026-10-24 (unofficial)
+[S2] Voxel Compression - GitHub Pages, https://eisenwave.github.io/voxel-compression-docs/introduction.html, fetched 2026-10-27

@@ -1,0 +1,545 @@
+--- v001.md
++++ v002.md
+@@ -1,298 +1,285 @@
+ # Kernel Selection
++
+ Also called: Coarse Rasterization for Ellipsoid Selection, Ellipsoid Kernel Selection, Gaussian Kernel Selection, Optional coarse rasterization stage, Ray Tracing Kernel Selection
+ 
+ ## Overview
+-Kernel selection is a pre-processing and filtering strategy used in volume rendering with Gaussian ellipsoids to reduce computational cost by tracing only a subset of primitives that contribute non-trivially to the final image [S1, unofficial]. It solves the problem of expensive full-scene ray tracing by discarding distant or low-density ellipsoids before the blending stage [S1, unofficial]. Unlike [Ray Intersection Selector (RIS)](3092-ray-intersection-selector-ris.md) which analytically computes precise ray-primitive intersections to identify high-density regions, kernel selection relies on a coarse rasterization of bounding boxes and density thresholds to select a fixed number of nearest kernels per pixel [S1, unofficial].
++Kernel Selection is a pre-processing and filtering strategy used in volume rendering with Gaussian ellipsoids to reduce computational cost by tracing only a subset of primitives that contribute non-trivially to the final image [S1, unofficial]. It solves the problem of expensive full-scene ray tracing for every pixel by discarding distant or low-density ellipsoids before the heavy blending stage [S1, unofficial]. Unlike [Ray Intersection Selector (RIS)](3092-ray-intersection-selector-ris.md), which analytically computes precise ray-primitive intersections to replace stochastic sampling, Kernel Selection relies on a coarse rasterization pass and density thresholds to select a fixed number of nearest neighbors [S1, unofficial].
+ 
+ ## How it works
++The method operates in two phases: a coarse rasterization stage to identify candidate kernels, and a ray tracing stage to select the final subset for blending.
++
+ **Inputs:**
+ - Set of $N$ Gaussian ellipsoids, each defined by center $\mathbf{c}_k$, covariance $\boldsymbol{\Sigma}_k$, and opacity/density parameters.
+ - Camera parameters: focal length $F$, image dimensions $h \times w$.
+-- Selection parameters: density threshold $\eta$, maximum number of kernels to trace $K'$.
++- Parameters: density threshold $\eta$, number of nearest kernels $K'$.
+ 
+ **Outputs:**
+-- A mapping from each pixel (or low-resolution tile) to a subset of at most $K'$ ellipsoid indices to be traced.
++- A list of selected kernel indices for each pixel (or global list, depending on implementation) to be processed in the ray tracing stage.
+ 
+ **Data Structures:**
+-- `PixelKernels`: A 2D array of lists, indexed by $(u, v)$, storing indices of selected ellipsoids. Dimensions are $W/8 \times H/8$ (low-resolution grid).
+-- `CandidateList`: A list of tuples `(distance, kernel_index)` for ellipsoids passing the density check.
++- **Candidate List:** A list of ellipsoid indices that pass the initial density check.
++- **Distance List:** For each pixel, a list of distances from the pixel center to the projected ellipsoid centers.
++- **Selected Kernels:** The final subset of $K'$ kernels per pixel.
+ 
+ **Steps:**
+ 
+-1. **Projection and Bounding Box Calculation:**
+-   For each ellipsoid $k$:
+-   a. Project the center $\mathbf{c}_k$ to screen coordinates.
+-   b. Compute the distance $d_z$ from the camera to the center of the ellipsoid.
+-   c. Compute the height $b_h$ and width $b_w$ of the maximum bounding box of the ellipsoid in 2D screen coordinates using:
+-      $$ [b_h \quad b_w \quad \cdot] = \frac{\log(-\eta)}{d_z} \cdot \boldsymbol{\Omega} \cdot \boldsymbol{\Sigma}_k^{-1} \cdot \boldsymbol{\Omega} $$
+-      where $\boldsymbol{\Omega}$ is the projection matrix from camera coordinate to screen:
+-      $$ \boldsymbol{\Omega} = \begin{bmatrix} \frac{2\cdot F}{h} & 0 & 0 \\ 0 & \frac{2\cdot F}{w} & 0 \\ 0 & 0 & 1 \end{bmatrix} $$
+-      [S1, unofficial]
+-
+-2. **Coarse Rasterization:**
+-   a. Initialize `PixelKernels` for a resolution $8\times$ smaller than the final image (i.e., width $W/8$, height $H/8$).
+-   b. Rasterize the bounding boxes $[b_h, b_w]$ onto this low-resolution grid.
+-   c. For each pixel $(u, v)$ in the low-res grid, record all ellipsoids whose bounding boxes cover it. This creates a preliminary set of candidate kernels for each pixel.
+-
+-3. **Density Filtering:**
+-   a. For each candidate kernel $k$ associated with a pixel, evaluate if it has a non-trivial contribution.
+-   b. Record ellipsoids where the maximum density $e q_k > \eta$. The term $e q_k$ refers to the peak density value of the Gaussian kernel [S1, unofficial].
+-   c. If the source implies $q_k$ is the density value, the condition is $q_k > \eta$. The text states "maximum density $e q_k > \eta$", which likely denotes the exponential density term or simply the density value $q_k$ compared against threshold $\eta$. Given the formula uses $\log(-\eta)$, $\eta$ is a small positive fraction (e.g., 0.01), so $-\eta$ is negative, making $\log(-\eta)$ undefined in real numbers unless $\eta$ is treated as a magnitude or the formula implies $\log(1/\eta)$ or similar. However, we must stick to the source text: "maximum density $e q_k > \eta$". We interpret this as checking if the kernel's density exceeds $\eta$.
+-
+-4. **Distance Sorting and Selection:**
+-   a. For each pixel, collect all recorded ellipsoids from Step 3.
+-   b. Calculate the distance $l_k$ from the ray origin (camera center) to the 1D Gaussian center of each ellipsoid.
+-   c. Sort the recorded kernels by $l_k$ in ascending order.
+-   d. Select the $K'$ nearest ellipsoids.
+-
+-5. **Assignment:**
+-   Assign the selected $K'$ kernels to the corresponding pixel in `PixelKernels`.
++1. **Projection:** For each ellipsoid $k$, project its center $\mathbf{c}_k$ from world space to screen coordinates using standard object-to-camera transformation.
++
++2. **Bounding Box Calculation:** Compute the height $b_h$ and width $b_w$ of the maximum bounding box of the ellipsoid in 2D screen coordinates. This bounding box approximates the screen footprint of the ellipsoid based on the density threshold $\eta$.
++
++   The formula for the bounding box dimensions is:
++   $$ [b_h \quad b_w \quad \cdot] = \frac{\log(-\eta)}{d_z} \cdot \boldsymbol{\Omega} \cdot \boldsymbol{\Sigma}^{-1} \cdot \boldsymbol{\Omega} $$
++   where:
++   - $d_z$ is the distance from the camera to the center of the ellipsoid.
++   - $\eta$ is the threshold for maximum volume density.
++   - $\boldsymbol{\Omega}$ is the projection matrix from camera coordinate to screen.
++
++   The projection matrix $\boldsymbol{\Omega}$ is defined as:
++   $$ \boldsymbol{\Omega} = \begin{bmatrix} \frac{2\cdot F}{h} & 0 & 0 \\ 0 & \frac{2\cdot F}{w} & 0 \\ 0 & 0 & 1 \end{bmatrix} $$
++   where $F$ is the focal length, $h$ is the image height, and $w$ is the image width.
++
++3. **Coarse Rasterization:** Rasterize the calculated bounding boxes onto a low-resolution buffer (typically 8 times smaller than the final image size). This produces a pixel-to-kernels assignment, indicating which ellipsoid kernels potentially cover each pixel.
++
++4. **Density Filtering:** Record all ellipsoids that satisfy the condition where the maximum density $e q_k > \eta$. This filters out ellipsoids that are too transparent or distant to contribute significantly.
++
++5. **Distance Sorting:** For each pixel, calculate the distance $l_k$ from the pixel center to the 1D Gaussian center of each recorded kernel.
++
++6. **Nearest Neighbor Selection:** Sort the recorded kernels by their distance $l_k$ and select the $K'$ nearest ellipsoids. These selected kernels are then fed into the subsequent ray tracing and blending stage.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-import math
+-import numpy as np
+-
+-def compute_bounding_box_dims(d_z, eta, Omega, Sigma_inv):
+-    """
+-    Computes height and width of the bounding box in screen coordinates.
+-    d_z: distance from camera to ellipsoid center
+-    eta: density threshold
+-    Omega: 3x3 projection matrix
+-    Sigma_inv: 2x2 inverse covariance matrix (projected)
+-    Returns: (b_h, b_w)
+-    """
+-    # Note: The source formula [bh bw .] = ... suggests a vector multiplication.
+-    # Assuming Sigma_inv is the relevant 2x2 part or the formula implies extracting the first two components.
+-    # The source writes: [bh bw .] = (log(-eta)/dz) * Omega * Sigma_inv * Omega
+-    # This implies Sigma_inv is 3x3 or the result is projected.
+-    # We assume standard 3D covariance projection to 2D screen space for the bounding box.
+-    # However, to be strictly faithful to the provided text which uses Sigma^{-1} directly:
+-    
+-    term = math.log(-eta) / d_z
+-    # The source formula is ambiguous regarding dimensions. 
+-    # Omega is 3x3. Sigma^{-1} is likely 3x3 (3D covariance inverse).
+-    # The result [bh bw .] is a 3-vector where the third component is ignored or used for depth.
+-    
+-    # Let's assume Sigma_inv is 3x3.
+-    # Vector v = Omega @ Sigma_inv @ Omega
+-    # This results in a 3x3 matrix. The formula likely implies taking the diagonal or specific elements.
+-    # However, the text says "height bh and width bw ... computed via: [bh bw .] = ..."
+-    # This notation usually means the first two elements of the resulting vector/matrix diagonal.
+-    # Let's assume the operation yields a vector where the first two components are bh and bw.
+-    
+-    # Re-reading carefully: "compute the height bh and width bw ... via: [bh bw .] = ..."
+-    # It is highly likely that Sigma^{-1} here refers to the 2D projected covariance inverse, 
+-    # or the formula is a simplified representation. 
+-    # Given the constraint to implement from text, we follow the literal matrix mult.
+-    
+-    # If Sigma is 3x3, Omega is 3x3.
+-    # M = Omega @ Sigma_inv @ Omega
+-    # bh = M[0,0] * term ? Or is it a vector result?
+-    # The notation [bh bw .] suggests a column vector.
+-    # Let's assume the result of the matrix multiplication is treated as a vector of scales?
+-    # Actually, bounding box size is usually derived from the eigenvalues or diagonal of the projected covariance.
+-    # The source formula is specific. We implement it as written.
+-    
+-    # To avoid guessing the dimensionality mismatch, we note that in PyTorch3D-style rendering,
+-    # the bounding box is often computed from the projected covariance.
+-    # We will implement the matrix multiplication as given.
+-    
+-    res = term * (Omega @ Sigma_inv @ Omega)
+-    # The source says [bh bw .] = res. 
+-    # This implies bh = res[0,0] and bw = res[1,1] if res is diagonal, 
+-    # or perhaps res is a vector. 
+-    # Given Omega is diagonal-like in the source (mostly), and Sigma is symmetric.
+-    # Let's assume the result is a vector where the first two elements are the dims.
+-    # But the RHS is a matrix. 
+-    # Correction: The source might mean the diagonal elements.
+-    # "height bh and width bw ... computed via: [bh bw .] = ..."
+-    # We will extract the diagonal elements of the resulting matrix scaled by the term.
+-    
+-    bh = res[0, 0]
+-    bw = res[1, 1]
+-    return bh, bw
+-
+ def kernel_selection(ellipsoids, camera_params, eta, K_prime):
+     """
+-    ellipsoids: list of dicts with keys 'center', 'covariance', 'density'
+-    camera_params: dict with 'F', 'h', 'w'
+-    eta: float, density threshold
+-    K_prime: int, max kernels per pixel
++    Selects a subset of Gaussian ellipsoids for rendering based on density and proximity.
++    
++    Args:
++        ellipsoids: List of ellipsoid objects with attributes:
++            - center: (x, y, z) in world space
++            - covariance: 3x3 matrix Sigma
++            - opacity/density params (for eq_k calculation)
++        camera_params: Dict with 'focal_length', 'height', 'width'
++        eta: Density threshold (float)
++        K_prime: Number of nearest kernels to select (int)
++        
++    Returns:
++        selected_kernels: List of lists, where selected_kernels[i] contains
++                          indices of selected kernels for pixel i.
+     """
+-    F = camera_params['F']
+-    h = camera_params['h']
+-    w = camera_params['w']
+-    
+-    # Projection matrix Omega
+-    Omega = np.array([
+-        [2*F/h, 0, 0],
+-        [0, 2*F/w, 0],
++    F = camera_params['focal_length']
++    h = camera_params['height']
++    w = camera_params['width']
++    
++    # Define projection matrix Omega
++    # Note: In practice, this might be part of a larger projection matrix.
++    # Here we assume a simplified 3x3 mapping for the bounding box calculation
++    # as described in the source.
++    Omega = [
++        [2 * F / h, 0, 0],
++        [0, 2 * F / w, 0],
+         [0, 0, 1]
+-    ])
+-    
+-    # Low-res grid dimensions
++    ]
++    
++    # Precompute inverse covariance for all ellipsoids
++    # This is a placeholder for actual matrix inversion logic
++    inv_sigmas = [inverse_3x3(ell.covariance) for ell in ellipsoids]
++    
++    # Step 1 & 2: Project and compute bounding boxes
++    candidates = [] # List of (ellipsoid_index, b_h, b_w, projected_center, distance_to_camera)
++    
++    for k, ell in enumerate(ellipsoids):
++        # Project center to screen coordinates
++        # Assuming standard view transformation is applied to ell.center
++        cam_center = transform_to_camera(ell.center)
++        d_z = cam_center[2] # Distance from camera
++        
++        if d_z <= 0:
++            continue # Behind camera
++            
++        # Compute bounding box dimensions
++        # Formula: [bh bw .] = (log(-eta) / dz) * Omega * Sigma^-1 * Omega
++        # Note: The source formula implies a vector result. 
++        # We interpret this as computing the scale factors for width and height.
++        # Let's assume the result is a vector [bh, bw, 1] or similar scaling.
++        # The source writes: [bh bw .] = ...
++        # We will compute the scaling factor S = log(-eta) / dz
++        S = math.log(-eta) / d_z
++        
++        # Compute Omega * Sigma^-1 * Omega
++        # This is a matrix multiplication. 
++        # Let M = Omega * Sigma^-1 * Omega
++        M = matrix_multiply(matrix_multiply(Omega, inv_sigmas[k]), Omega)
++        
++        # The bounding box dimensions are derived from the diagonal elements or 
++        # the extent of the transformed ellipse. The source formula is slightly ambiguous 
++        # about whether it returns a vector or matrix. 
++        # Given [bh bw .], it likely extracts the x and y scales.
++        # Let's assume bh and bw are proportional to the square root of the diagonal 
++        # elements of the resulting matrix scaled by S, or simply the diagonal elements themselves 
++        # if the formula represents the semi-axes squared. 
++        # However, the source explicitly writes the formula as a vector equality.
++        # We will assume the result of the matrix mult is a 3x3, and we take the first two 
++        # diagonal elements scaled by S? Or perhaps the formula yields a vector directly 
++        # if Omega is treated differently. 
++        # Let's stick to the literal interpretation: 
++        # The result is a vector [bh, bw, 1]. 
++        # This implies the matrix operation yields a vector, which is unusual for standard matrix mult.
++        # It is more likely that the formula describes the semi-axes lengths.
++        # Let's assume bh and bw are computed as:
++        # bh = S * sqrt(M[0][0]) ? Or just S * M[0][0]?
++        # The source says "height bh and width bw ... computed via: [bh bw .] = ..."
++        # This suggests the RHS evaluates to a vector.
++        # If Omega is 3x3 and Sigma^-1 is 3x3, the result is 3x3.
++        # Perhaps the formula is for the *squared* semi-axes?
++        # Let's assume the source implies:
++        # bh = S * sqrt(M[0][0])
++        # bw = S * sqrt(M[1][1])
++        # This is a common interpretation for bounding box of a transformed ellipse.
++        # However, without explicit clarification, we will use the diagonal elements directly 
++        # as the source might be using a specific convention.
++        # Let's use the diagonal elements of the resulting matrix scaled by S.
++        bh = S * M[0][0]
++        bw = S * M[1][1]
++        
++        # Store candidate
++        candidates.append({
++            'index': k,
++            'bh': bh,
++            'bw': bw,
++            'center': cam_center,
++            'd_z': d_z
++        })
++        
++    # Step 3: Coarse Rasterization
++    # Create a low-res buffer (e.g., h/8, w/8)
+     low_h = h // 8
+     low_w = w // 8
+-    
+-    # Initialize pixel-to-kernel mapping
+-    pixel_kernels = [[] for _ in range(low_h * low_w)]
+-    
+-    # Step 1 & 2: Project and Rasterize
+-    for k, ell in enumerate(ellipsoids):
+-        center = ell['center'] # [x, y, z] in camera coords
+-        cov = ell['covariance'] # 3x3 matrix
+-        d_z = center[2] # Distance from camera (assuming camera looks down -z or z is depth)
+-        
+-        # Compute inverse covariance
+-        Sigma_inv = np.linalg.inv(cov)
+-        
+-        # Compute bounding box dimensions
+-        # Note: log(-eta) requires eta < 0 if strictly interpreted, but eta is 0.01.
+-        # The source likely means log(1/eta) or -log(eta) or eta is negative in their convention.
+-        # Source says: "eta is the threshold for maximum volume density" and "eta = 0.01".
+-        # Formula: log(-eta). If eta=0.01, -eta=-0.01, log is complex.
+-        # This is a known issue in the source text. We assume the magnitude |eta| or 1/eta.
+-        # However, to be faithful, we use math.log(abs(eta)) or similar if allowed by [G].
+-        # [G] Use abs(eta) to avoid complex numbers, assuming eta is a positive magnitude threshold.
+-        log_term = math.log(abs(eta)) / d_z
+-        
+-        bh, bw = compute_bounding_box_dims(d_z, eta, Omega, Sigma_inv)
+-        
+-        # Determine screen coordinates of center
+-        # Project center using Omega
+-        center_hom = np.array([center[0], center[1], center[2]])
+-        center_screen = Omega @ center_hom
+-        
+-        # Map to low-res grid
+-        # Assuming center_screen[0] and center_screen[1] are in normalized or pixel coords?
+-        # Omega maps to screen. Usually screen coords are in pixels.
+-        # Let's assume center_screen[0] is x-pixel, center_screen[1] is y-pixel.
+-        cx = center_screen[0]
+-        cy = center_screen[1]
+-        
+-        # Convert to low-res grid index
+-        # Bounding box extends bh/2 and bw/2 from center
+-        # We need to map pixel coords to low-res indices
+-        # Low-res pixel size is 8x8 in high-res
+-        low_cx = int(cx / 8)
+-        low_cy = int(cy / 8)
+-        
+-        # Rasterize bounding box onto low-res grid
+-        # Calculate extent in low-res pixels
+-        # bh and bw are in screen coordinates (pixels).
+-        # Low-res grid cell size is 8 pixels.
+-        half_bh_lr = (bh / 2) / 8
+-        half_bw_lr = (bw / 2) / 8
+-        
+-        min_cy = max(0, int(low_cy - half_bh_lr))
+-        max_cy = min(low_h - 1, int(low_cy + half_bh_lr))
+-        min_cx = max(0, int(low_cx - half_bw_lr))
+-        max_cx = min(low_w - 1, int(low_cx + half_bw_lr))
+-        
+-        for y in range(min_cy, max_cy + 1):
+-            for x in range(min_cx, max_cx + 1):
+-                idx = y * low_w + x
+-                pixel_kernels[idx].append(k)
+-
+-    # Step 3 & 4: Filter and Select
+-    final_selection = {} # Map from pixel_idx to list of kernel indices
+-    
+-    for idx, candidates in enumerate(pixel_kernels):
+-        if not candidates:
+-            continue
+-            
+-        # Filter by density
+-        valid_candidates = []
+-        for k in candidates:
+-            ell = ellipsoids[k]
+-            # Check density condition: max density e qk > eta
+-            # Assuming ell['density'] holds qk or the peak density value
+-            # Source says "maximum density e qk > eta". 
+-            # We assume ell['peak_density'] > eta.
+-            if ell.get('peak_density', 0) > eta:
+-                # Calculate distance to 1D Gaussian center
+-                # l_k is distance from camera to center
+-                center = ell['center']
+-                l_k = np.linalg.norm(center)
+-                valid_candidates.append((l_k, k))
+-        
+-        # Sort by distance
+-        valid_candidates.sort(key=lambda x: x[0])
+-        
+-        # Select K' nearest
+-        selected = [k for _, k in valid_candidates[:K_prime]]
+-        
+-        if selected:
+-            final_selection[idx] = selected
+-            
+-    return final_selection
++    pixel_to_kernels = [[] for _ in range(low_h * low_w)]
++    
++    for cand in candidates:
++        # Map center to low-res pixel coordinates
++        # Assuming center is in camera coordinates, we need to project to screen
++        # This step is simplified; in reality, perspective division is needed.
++        # Let's assume a simplified projection for the bounding box center.
++        screen_x = (cand['center'][0] / cand['center'][2]) * (w / 2) + w / 2
++        screen_y = (cand['center'][1] / cand['center'][2]) * (h / 2) + h / 2
++        
++        # Check if center is within image bounds
++        if 0 <= screen_x < w and 0 <= screen_y < h:
++            # Map to low-res pixel
++            low_x = int(screen_x / 8)
++            low_y = int(screen_y / 8)
++            
++            if 0 <= low_x < low_w and 0 <= low_y < low_h:
++                pixel_idx = low_y * low_w + low_x
++                pixel_to_kernels[pixel_idx].append(cand['index'])
++                
++    # Step 4 & 5 & 6: Density Filtering, Sorting, and Selection
++    selected_kernels = [[] for _ in range(h * w)]
++    
++    # We need to map low-res assignments back to high-res pixels or process per high-res pixel.
++    # The source says "rasterize ... to produce a pixel-to-kernels assignment ... which indicates 
++    # the set of ellipsoid kernels for each pixel to trace."
++    # Then "record all ellipsoids that gives a maximum density eq_k > eta".
++    # This filtering likely happens before or during the assignment.
++    # Let's assume the 'candidates' list is filtered by density eq_k > eta.
++    # Since eq_k is not defined in the formula, we assume it's a property of the ellipsoid.
++    
++    filtered_candidates = [c for c in candidates if is_density_significant(c['index'], eta)]
++    
++    # Re-rasterize filtered candidates
++    pixel_to_filtered_kernels = [[] for _ in range(low_h * low_w)]
++    for cand in filtered_candidates:
++        screen_x = (cand['center'][0] / cand['center'][2]) * (w / 2) + w / 2
++        screen_y = (cand['center'][1] / cand['center'][2]) * (h / 2) + h / 2
++        
++        if 0 <= screen_x < w and 0 <= screen_y < h:
++            low_x = int(screen_x / 8)
++            low_y = int(screen_y / 8)
++            if 0 <= low_x < low_w and 0 <= low_y < low_h:
++                pixel_idx = low_y * low_w + low_x
++                pixel_to_filtered_kernels[pixel_idx].append(cand)
++                
++    # For each high-res pixel, determine which low-res pixel it belongs to,
++    # and select the K' nearest kernels from that low-res pixel's list.
++    # This is a simplification; a more accurate approach would be to assign 
++    # each high-res pixel to its nearest low-res pixel or interpolate.
++    # Given the source's description, we assume a direct mapping.
++    
++    for y in range(h):
++        for x in range(w):
++            low_x = x // 8
++            low_y = y // 8
++            low_idx = low_y * low_w + low_x
++            
++            kernels = pixel_to_filtered_kernels[low_idx]
++            
++            # Calculate distance to 1D Gaussian center
++            # Assuming 1D Gaussian center is the projected center
++            cam_center = get_camera_center(kernels) # Helper to get center from kernel index
++            # Distance l_k is distance from pixel center to ellipsoid center in 3D? 
++            # Or 2D screen distance? Source says "length to the 1D Gaussian center lk".
++            # Let's assume 3D distance for sorting.
++            
++            dists = []
++            for k_idx in kernels:
++                ell = ellipsoids[k_idx]
++                cam_c = transform_to_camera(ell.center)
++                # Distance from camera to ellipsoid center
++                l_k = math.sqrt(cam_c[0]**2 + cam_c[1]**2 + cam_c[2]**2)
++                dists.append((l_k, k_idx))
++            
++            # Sort by distance and select K' nearest
++            dists.sort(key=lambda x: x[0])
++            selected_indices = [idx for _, idx in dists[:K_prime]]
++            
++            selected_kernels[y * w + x] = selected_indices
++            
++    return selected_kernels
++
++def inverse_3x3(M):
++    # Placeholder for 3x3 matrix inversion
++    pass
++
++def matrix_multiply(A, B):
++    # Placeholder for 3x3 matrix multiplication
++    pass
++
++def transform_to_camera(point):
++    # Placeholder for view transformation
++    pass
++
++def is_density_significant(index, eta):
++    # Placeholder for checking eq_k > eta
++    pass
++
++def get_camera_center(kernels):
++    # Placeholder
++    pass
+ ```
+ 
+ **Parameters:**
+-- $K'$: Number of nearest kernels to select per pixel. Default: 20 [S1, unofficial].
+-- $\eta$: Density threshold. Default: 0.01 [S1, unofficial].
++- $K'$: Number of nearest kernels to select. Default value is 20 [S1, unofficial].
++- $\eta$: Density threshold. Default value is 0.01 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Inadequate $K'$:** Leads to dark regions around the boundary of kernels due to hard cutoff of the boundary [S1, unofficial].
+-- **Threshold $\eta$:** Decreasing $\eta$ makes the object appear denser (less transparent) but requires a higher $K'$ to avoid artifacts [S1, unofficial].
+-- **Formula Domain:** The formula uses $\log(-\eta)$. Since $\eta$ is positive (0.01), this is mathematically undefined in real numbers. The implementation must use $\log(1/\eta)$ or $\log(|\eta|)$ with appropriate sign handling, or assume $\eta$ is negative in the source's convention [G].
++- **Inadequate $K'$:** Setting $K'$ too low leads to dark regions around the boundaries of kernels due to hard cutoff of the boundary [S1, unofficial].
++- **Threshold Tuning:** Decreasing $\eta$ makes the object appear denser (less transparent) but requires a higher $K'$ to avoid artifacts [S1, unofficial].
++- **Parameter Interaction:** $K'$ has a significant impact on image quality, while $\eta$ has a relatively lower impact but must be fitted with $K'$ [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Ray Intersection Selector (RIS)](3092-ray-intersection-selector-ris.md)
+-Replaces stochastic sampling with analytical ray-primitive intersection detection. Chooses this when precise surface reconstruction is needed without auxiliary networks.
+-
+-### [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)
+-Uses orthogonal projections to clip occluded geometry.
+-
+-### [Adaptive Sampling and Resolution](1412-adaptive-sampling-and-resolution.md)
+-Adjusts sampling density based on image variance.
+-
+-### [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md)
+-Stops ray marching when opacity is sufficient.
+-
+-### [Inference Ray Marching and Integration](2148-inference-ray-marching-and-integration.md)
+-Optimizes the integration step during inference.
+-
+-### [Ray-guided volume rendering with missing brick reporting](2815-ray-guided-volume-rendering-with-missing-brick-reporting.md)
+-Handles missing data in voxel grids.
+-
+-### [Intra-ray Parallelism](3135-intra-ray-parallelism.md)
+-Parallelizes sampling along a single ray.
+-
+-### [Acceleration Structure Rebuild](3266-acceleration-structure-rebuild.md)
+-Dynamically updates acceleration structures.
+-
+-### [Spatiotemporal Importance Sampling](4696-spatiotemporal-importance-sampling.md)
+-Uses temporal coherence for sampling.
+-
+-### [Temporal Differential Rendering](5499-temporal-differential-rendering.md)
+-Renders differentially over time.
+-
+-### [Visibility Culling](6226-visibility-culling.md)
+-Culls invisible primitives.
+-
+-### [Parallelism and Distribution](6265-parallelism-and-distribution.md)
+-Distributes rendering across devices.
+-
+-### [Performance Optimization Techniques](6301-performance-optimization-techniques.md)
+-General optimization methods.
+-
+-### [Hierarchical Grid Traversal](6306-hierarchical-grid-traversal.md)
+-Traverses hierarchical voxel grids.
++Replaces stochastic sampling with analytical ray-primitive intersection. Choose when precise surface reconstruction is needed and stochastic sampling is too costly.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Reduces the number of ray-tracing operations from $O(N)$ to $O(P \cdot K')$, where $P$ is the number of pixels and $K'$ is the selected kernel count. The coarse rasterization step is $O(N)$ for projection and $O(P)$ for rasterization.
+-- **Memory Complexity:** Requires storage for the low-resolution pixel-to-kernel mapping, $O(P)$.
+-- **Measured Performance:** Selecting 10% of ellipsoids significantly reduces computational cost [S1, unofficial].
+-- **Strengths:** Simple to implement; effective at removing distant/low-density primitives; reduces artifacts compared to random sampling if $K'$ is sufficient.
+-- **Limitations:** Hard cutoff at $K'$ can cause boundary artifacts (dark regions); sensitive to the choice of $K'$ and $\eta$; coarse rasterization may miss small but important kernels if the low-res grid is too coarse.
+-- **When to Use:** When rendering large scenes with many Gaussian ellipsoids and computational budget is limited.
+-- **When Not to Use:** When high fidelity at object boundaries is critical and $K'$ cannot be increased; when kernels are very small and sparse.
++- **Time Complexity:** The coarse rasterization stage is $O(N)$ for projection and bounding box calculation, where $N$ is the number of ellipsoids. The selection stage is $O(P \cdot K \log K)$ or $O(P \cdot K)$ depending on sorting, where $P$ is the number of pixels and $K$ is the number of candidates per pixel.
++- **Memory Complexity:** Requires storage for the candidate list and the low-resolution buffer.
++- **Performance:** Reduces computational cost by avoiding full ray tracing for all primitives, typically selecting 10% of all ellipsoids [S1, unofficial].
++- **Strengths:** Simple to implement, reduces rendering time significantly.
++- **Limitations:** Hard cutoff can cause artifacts if $K'$ is too small. Quality is sensitive to $K'$.
+ 
+ ## Background
+-Kernel selection was introduced in the context of differentiable volume rendering using Gaussian ellipsoids, specifically in the VoGE (Volume Gaussian Ellipsoid) renderer [S1, unofficial]. It is part of a coarse-to-fine rendering strategy designed to efficiently render Gaussian ellipsoids by gradually reducing the number of ellipsoids interacting with viewing rays [S1, unofficial]. The method builds on standard rasterization techniques (e.g., PyTorch3D) to perform a coarse selection before the more expensive ray tracing stage [S1, unofficial].
++Kernel Selection was introduced in the context of differentiable volume rendering using Gaussian ellipsoids, specifically in the VoGE renderer [S1, unofficial]. It is part of a coarse-to-fine rendering strategy designed to efficiently render Gaussian ellipsoids by gradually reducing the number of ellipsoids that interact with viewing rays.
+ 
+ ## Sources

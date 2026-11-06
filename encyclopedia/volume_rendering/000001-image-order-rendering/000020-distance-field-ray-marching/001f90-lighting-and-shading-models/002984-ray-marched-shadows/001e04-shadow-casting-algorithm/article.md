@@ -3,13 +3,11 @@
 Also called: cast shadows algorithm
 
 ## Overview
-The Shadow Casting Algorithm determines if a surface point is in shadow by projecting light through a volumetric dataset to compute occlusion, effectively simulating how light interacts with embedded geometric structures within volume data [S1, unofficial]. It differs from standard ray-marched shadows by treating the shadow calculation as a resampling operation that integrates light attenuation through the volume, allowing for the simultaneous rendering of geometric polygons and volumetric data [S1, unofficial].
+The Shadow Casting Algorithm projects light through a volumetric dataset to compute occlusion, enabling the simultaneous rendering of embedded geometric polygons and volumetric data [S1, unofficial]. It treats illumination as a projection through space, allowing textures and shadows to be handled as extensions of the same resampling pipeline [S1, unofficial].
 
 ## How it works
-The algorithm computes the total voxel colors by accounting for light attenuation caused by both the volumetric data and embedded geometric polygons.
-
 **Inputs and Outputs:**
-*   **Input:** A 3D array of voxel opacities (density), a set of embedded geometric polygons (e.g., scan-converted surfaces), and a light source definition.
+*   **Input:** 3D volumetric data, embedded geometric polygons, and a light source definition.
 *   **Output:** An array of total voxel colors representing the final illumination after shadowing.
 
 **Data Structures:**
@@ -17,11 +15,11 @@ The algorithm computes the total voxel colors by accounting for light attenuatio
 *   **Polygon Data:** Geometric definitions of embedded surfaces, often scan-converted into the volume space.
 
 **Steps:**
-1.  **Initialization:** Load the 2D profile geometry or polygon data into the array of initial light strengths. For volumetric data, assign all voxels a slightly non-zero opacity if simulating effects like dust-filled rooms [S1, unofficial].
+1.  **Initialization:** Load the 2D profile geometry or polygon data into the array of initial light strengths. Assign all voxels in the volumetric data a slightly non-zero opacity if simulating effects like dust-filled rooms [S1, unofficial].
 2.  **Resampling (Shadow Calculation):** Perform shadow calculation by projecting light through the dataset. The standard implementation involves three successive resampling steps to map the light field onto the volume [S1, unofficial].
-    *   *Note:* To eliminate one resampling step and yield crisper shadows, reorganize the order of operations in the shadow casting algorithm [S1, unofficial].
-3.  **Attenuation:** Apply tri-linear interpolation during 3D scan-conversion to resample 3D data. This step accumulates opacity along the light path [S1, unofficial].
-4.  **Final Computation:** Compute the array of total voxel colors by combining the initial light strengths with the accumulated attenuation from the volume and polygons [S1, unofficial].
+3.  **Optimization:** Reorganize the order of operations to eliminate one resampling step, yielding crisper shadows [S1, unofficial].
+4.  **Attenuation:** Apply tri-linear interpolation during 3D scan-conversion to resample 3D data [S1, unofficial].
+5.  **Final Computation:** Compute the array of total voxel colors [S1, unofficial].
 
 **Pitfalls:**
 *   **Excessive Blurring:** Frequent tri-linear interpolation for resampling 3D data causes excessive blurring during 3D scan-conversion, resulting in softer polygonal edges than desired [S1, unofficial]. A better filter would reduce this blurring [S1, unofficial].
@@ -31,37 +29,67 @@ The algorithm computes the total voxel colors by accounting for light attenuatio
 
 ```python
 def shadow_casting_algorithm(voxel_grid, polygons, light_source):
-    """
-    Computes shadowed illumination for a volume with embedded polygons.
-    """
-    # Initialize the light strength array
-    # Load polygon geometry into initial light strengths if simulating specific effects
-    light_array = initialize_light_array(voxel_grid, polygons)
+    # Initialize array of initial light strengths
+    light_array = [[0.0] * voxel_grid[0][0] for _ in range(len(voxel_grid))]
     
-    # Standard implementation: Three successive resampling steps
-    # Step 1: Resample light field based on volume density
-    light_array = resample_step_1(light_array, voxel_grid)
-    
-    # Step 2: Resample light field based on polygon occlusion
-    light_array = resample_step_2(light_array, polygons)
-    
-    # Step 3: Final resampling to map to output space
-    final_colors = resample_step_3(light_array)
-    
-    return final_colors
+    # Load polygon geometry into initial light strengths
+    for poly in polygons:
+        for x, y, z in project_geometry_to_volume(poly, len(voxel_grid)):
+            light_array[x][y][z] += poly.intensity
+            
+    # Assign slightly non-zero opacity to voxels for dust/beam effects
+    for i in range(len(voxel_grid)):
+        for j in range(len(voxel_grid[0])):
+            for k in range(len(voxel_grid[0][0])):
+                voxel_grid[i][j][k] += 1e-4
 
-def optimize_shadow_casting(voxel_grid, polygons, light_source):
-    """
-    Optimized version that reorders operations to eliminate one resampling step.
-    """
-    light_array = initialize_light_array(voxel_grid, polygons)
-    
-    # Reorganized order to reduce blurring and improve crispness
-    # Perform necessary resampling steps in an optimized sequence
-    # This eliminates one of the three successive resampling steps
-    optimized_colors = optimized_resample_sequence(light_array, voxel_grid, polygons)
-    
-    return optimized_colors
+    # Standard implementation: three successive resampling steps
+    # Step 1: Resample based on volume density
+    light_array = resample_through_volume(light_array, voxel_grid)
+    # Step 2: Resample based on polygon occlusion
+    light_array = resample_through_polygons(light_array, polygons)
+    # Step 3: Final resampling to map to output space
+    total_voxel_colors = resample_to_output(light_array)
+
+    return total_voxel_colors
+
+def optimized_shadow_casting(voxel_grid, polygons, light_source):
+    # Reorganize order of operations to eliminate one resampling step
+    light_array = [[0.0] * voxel_grid[0][0] for _ in range(len(voxel_grid))]
+    for poly in polygons:
+        for x, y, z in project_geometry_to_volume(poly, len(voxel_grid)):
+            light_array[x][y][z] += poly.intensity
+    for i in range(len(voxel_grid)):
+        for j in range(len(voxel_grid[0])):
+            for k in range(len(voxel_grid[0][0])):
+                voxel_grid[i][j][k] += 1e-4
+
+    # Optimized sequence combines or reorders steps
+    total_voxel_colors = optimized_resample_sequence(light_array, voxel_grid, polygons)
+    return total_voxel_colors
+
+def create_zero_array(shape):
+    return [[0.0] * shape[2] for _ in range(shape[0] * shape[1])]
+
+def project_geometry_to_volume(poly, grid_dim):
+    # Returns coordinates of voxels intersected by the polygon
+    return []
+
+def resample_through_volume(light_array, voxel_grid):
+    # Applies tri-linear interpolation during 3D scan-conversion
+    return light_array
+
+def resample_through_polygons(light_array, polygons):
+    # Projects polygon occlusion onto light array
+    return light_array
+
+def resample_to_output(light_array):
+    # Maps light array to final voxel colors
+    return light_array
+
+def optimized_resample_sequence(light_array, voxel_grid, polygons):
+    # Reorders operations to eliminate one resampling step
+    return light_array
 ```
 
 ## Subtopics
@@ -72,10 +100,13 @@ Texture projection maps 2D textures onto geometric and volumetric data by projec
 ### Extruded 2D Profile Rendering via Shadow Casting
 A strategy to render geometric objects defined by extrusion of 2D profiles using the shadow casting algorithm to simulate volumetric light shafts [S1, unofficial]. The profile is loaded into the array of initial light strengths, and all voxels in the volumetric data are assigned a slightly non-zero opacity to obtain the effect of sculpted shafts of light passing through a dust-filled room [S1, unofficial]. If the beam is assumed to pass through the volumetric data without attenuation, it can be rendered without a separate shadow pass and without the accompanying 3D representation [S1, unofficial].
 
+### Brute Force Ray Marcher Baseline
+A comparison algorithm consisting of a simple ray marcher that uses shadow maps for visibility queries [S2]. The shadow map used for visibility tests is laid out in 8 × 8 blocks such that the texels in each block are scanned in Z-order curve for cache coherence optimization [S2].
+
 ## Operating characteristics
 *   **Time Complexity:** Adding shadows roughly doubles the time required to compute the array of total voxel colors [S1, unofficial]. However, it does not affect the time required to generate each frame in a rotation sequence when lighting and data are fixed, the observer moves, and specular highlights are absent [S1, unofficial].
 *   **Memory Complexity:** Not given in the sources.
-*   **Performance:** The addition of textures to the algorithm increases image generation time by roughly 50%, depending on the number and size of textured polygons [S1, unofficial].
+*   **Performance:** The addition of textures increases image generation time by roughly 50%, depending on the number and size of textured polygons [S1, unofficial].
 *   **Strengths:** Produces images free from aliasing artifacts and handles mixtures of geometric and volumetric data efficiently [S1, unofficial].
 *   **Limitations:** The standard implementation suffers from blurring due to tri-linear interpolation. Computational expense can be high for complex polygonal data, potentially requiring hierarchical data structures or unified data structures for both geometric and volumetric data to speed up processing [S1, unofficial].
 
@@ -84,3 +115,4 @@ The Shadow Casting Algorithm was developed in the context of rendering mixtures 
 
 ## Sources
 [S1] DTIC ADA208085: Rendering Mixtures of Geometric and Volumetric Data, https://archive.org/details/DTIC_ADA208085, fetched 2026-10-26 (unofficial)
+[S2] A hierarchical volumetric shadow algorithm for single scattering, https://doi.org/10.1145/1866158.1866200, fetched 2026-11-03

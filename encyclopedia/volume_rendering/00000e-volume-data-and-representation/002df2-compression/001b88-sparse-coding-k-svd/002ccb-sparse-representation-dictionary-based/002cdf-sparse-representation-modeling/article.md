@@ -1,222 +1,122 @@
 # Sparse Representation Modeling
 
-Also called: Dictionaries for Sparse Representation Modeling, Sparse Coding
+Also called: Dictionaries for Sparse Representation Modeling, Sparse Representation / Sparse Coding, Sparse Representation via Dictionary Learning
 
 ## Overview
-Sparse Representation Modeling represents a signal (such as a voxel block) as a sparse linear combination of atoms from an overcomplete dictionary matrix $\mathbf{D}$ [S1, unofficial][S2][S3, unofficial]. It generalizes Vector Quantization (VQ) by allowing each input signal to be represented by a linear combination of multiple dictionary elements with arbitrary values, rather than a single prototype [S2][S3, unofficial]. This method is distinguished from its parent [Sparse Representation (Dictionary Based)](5366-sparse-representation-dictionary-based.md) by its specific implementation of dictionary training via K-SVD and data reduction via importance sampling coresets to handle massive volumes [S2].
+Sparse Representation Modeling represents a signal as a sparse linear combination of atoms from an overcomplete dictionary matrix [S1, unofficial]. It solves the problem of compactly encoding volumetric data by allowing each input signal to be represented by a linear combination of dictionary elements rather than a single codeword, generalizing Vector Quantization (VQ) [S2][S3]. Unlike VQ, which is limited by a hard limit on achievable quality and compression rate [S3], this method allows arbitrary coefficient values and multiple nonzero entries, offering increased flexibility and adaptation to specific signal data [S2][S3].
 
 ## How it works
-**Inputs:** A set of signal blocks extracted from the volume data. Each block is a vector $\mathbf{y} \in \mathbb{R}^m$ where $m = M^3$ (e.g., $M=6$ for $6^3$ voxel blocks) [S2].
-**Outputs:** A learned dictionary $\mathbf{D} \in \mathbb{R}^{m \times K}$ with $K$ atoms, and for each block, a sparse coefficient vector $\mathbf{x} \in \mathbb{R}^K$ such that $\mathbf{y} \approx \mathbf{D}\mathbf{x}$ [S1, unofficial][S2].
+**Inputs and Outputs:**
+- Input: A signal vector $\mathbf{y} \in \mathbb{R}^n$ (typically a flattened voxel block).
+- Input: A dictionary matrix $\mathbf{D} \in \mathbb{R}^{n \times K}$ where $K > n$ (overcomplete).
+- Output: A sparse coefficient vector $\mathbf{x} \in \mathbb{R}^K$.
 
 **Data Structures:**
-1.  **Dictionary $\mathbf{D}$:** A matrix of size $m \times K$. Columns $\{\mathbf{d}_j\}_{j=1}^K$ are the prototype signal-atoms. The dictionary is overcomplete, meaning $K > m$ [S1, unofficial][S2].
-2.  **Coefficient Vector $\mathbf{x}$:** A vector of size $K$. It contains at most $S$ non-zero entries (sparsity $S$) [S2].
-3.  **Coreset:** A weighted subset of the original data blocks used for training. Each element $j$ in the coreset has a weight $w_j$ [S2].
+- Dictionary $\mathbf{D}$: A matrix of size $n \times K$. Each column $\mathbf{d}_j$ is a prototype signal-atom. The dictionary can be a mathematical model (e.g., wavelets) or learned from data [S2][S3].
+- Coefficient Vector $\mathbf{x}$: A vector of size $K$.
 
-**Steps:**
+**Method:**
+The goal is to find $\mathbf{x}$ such that $\mathbf{y} \approx \mathbf{D}\mathbf{x}$ with $\mathbf{x}$ having the fewest nonzero coefficients [S1, unofficial]. This is formulated as an optimization problem:
 
-1.  **Data Reduction via Coreset Construction:**
-    To avoid the prohibitive cost of training on massive volumes, the dataset is reduced prior to dictionary learning [S2].
-    *   Calculate importance $\iota_i$ for each block $i$. The importance is proportional to the standard deviation of the block [S2].
-    *   Uniform subsampling is explicitly rejected because material boundaries carry more information than empty or uniform space [S2].
-    *   Select $C$ elements using importance sampling, where the probability of picking block $i$ is proportional to $\iota_i$ [S2].
-    *   Assign a weight $w_j$ to each selected element $j$ to remove bias from the resampled set:
-        $$ w_j = \frac{1}{\sqrt{p_j}} $$
-        where $p_j$ is the picking probability for element $j$ [S2].
+$$
+\min_{\mathbf{x}} \|\mathbf{x}\|_0 \quad \text{subject to} \quad \mathbf{y} = \mathbf{D}\mathbf{x}
+$$
 
-2.  **Dictionary Training (K-SVD):**
-    Apply the K-SVD algorithm to the resampled and re-weighted set of blocks [S2]. K-SVD is a state-of-the-art method for dictionary learning that updates both the dictionary atoms and the sparse coefficients to minimize the reconstruction error [S2].
+Or, allowing for an error threshold $\epsilon$:
 
-3.  **Sparse Coding (Encoding):**
-    For each block $\mathbf{y}$ in the volume, find the sparse coefficient vector $\mathbf{x}$ that best represents $\mathbf{y}$ using the learned dictionary $\mathbf{D}$ [S1, unofficial]. This is formulated as finding the sparsest solution:
-    $$ \min_{\mathbf{x}} \|\mathbf{x}\|_0 \quad \text{subject to} \quad \mathbf{y} = \mathbf{D}\mathbf{x} $$
-    or approximately:
-    $$ \min_{\mathbf{x}} \|\mathbf{x}\|_0 \quad \text{subject to} \quad \|\mathbf{y} - \mathbf{D}\mathbf{x}\|_2 \leq \epsilon $$
-    where $\|\mathbf{x}\|_0$ is the $\ell_0$ "norm" (number of non-zero entries) and $\epsilon$ is an error threshold [S1, unofficial].
+$$
+\min_{\mathbf{x}} \|\mathbf{x}\|_0 \quad \text{subject to} \quad \|\mathbf{y} - \mathbf{D}\mathbf{x}\|_2 \le \epsilon
+$$
 
 **Parameters:**
-*   **Block Size:** $M^3$. Example: $6^3$ voxels [S2].
-*   **Dictionary Size ($K$):** Number of atoms. Example: 1024 [S2].
-*   **Sparsity ($S$):** Maximum number of non-zero coefficients. Example: 8 [S2].
+- $n$: Dimension of the signal (e.g., $6^3 = 216$ for a $6 \times 6 \times 6$ voxel block) [S2].
+- $K$: Number of atoms in the dictionary (e.g., 1024) [S2].
+- Sparsity $S$: The maximum number of nonzero entries in $\mathbf{x}$ [S2].
 
 **Pseudocode:**
+The following pseudocode outlines the representation of a single signal block $\mathbf{y}$ given a dictionary $\mathbf{D}$ and sparsity constraint $S$. Note that solving the $\ell_0$ minimization is NP-hard; practical implementations use greedy algorithms like Orthogonal Matching Pursuit (OMP) or Basis Pursuit [G].
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def train_dictionary(blocks, target_sparsity=8, dict_size=1024):
+def sparse_representation(y, D, S):
     """
-    Trains a dictionary using K-SVD on a coreset derived from importance sampling.
+    Computes the sparse representation x of signal y using dictionary D
+    with sparsity constraint S.
     
     Args:
-        blocks: List of signal vectors y (shape: [N, m]).
-        target_sparsity: Maximum number of non-zero coefficients S.
-        dict_size: Number of atoms K in the dictionary.
+        y: numpy array of shape (n,)
+        D: numpy array of shape (n, K)
+        S: int, maximum number of nonzero coefficients
         
     Returns:
-        D: Dictionary matrix of shape [m, K].
+        x: numpy array of shape (K,)
     """
-    # Step 1: Calculate importance for each block
-    # Importance is proportional to the standard deviation of the block
-    importances = []
-    for y in blocks:
-        std_dev = numpy.std(y)
-        importances.append(std_dev)
-    
-    # Normalize importances to form a probability distribution
-    total_importance = sum(importances)
-    probabilities = [imp / total_importance for imp in importances]
-    
-    # Step 2: Construct Coreset via Importance Sampling
-    # Select C elements. C is a small fraction of N.
-    # Note: The exact value of C is not specified in sources [G].
-    C = int(len(blocks) * 0.01) # Example fraction, not from source
-    
-    coreset_blocks = []
-    coreset_weights = []
-    coreset_probs = []
-    
-    # Sample C indices with replacement or without? 
-    # Sources say "C elements are picked with probability proportional to iota_i" [S2].
-    # Assuming sampling without replacement for a fixed subset size C.
-    indices = numpy.random.choice(len(blocks), size=C, replace=False, p=probabilities)
-    
-    for idx in indices:
-        y = blocks[idx]
-        p_j = probabilities[idx]
-        w_j = 1.0 / numpy.sqrt(p_j)
-        
-        coreset_blocks.append(y)
-        coreset_weights.append(w_j)
-        coreset_probs.append(p_j)
-        
-    # Step 3: Apply K-SVD to the weighted coreset
-    # K-SVD minimizes reconstruction error while maintaining sparsity.
-    # The weights are applied during the least-squares updates in K-SVD.
-    D = k_svd_algorithm(coreset_blocks, coreset_weights, dict_size, target_sparsity)
-    
-    return D
-
-def k_svd_algorithm(data, weights, K, sparsity):
-    """
-    Simplified representation of K-SVD algorithm.
-    Initializes dictionary and iteratively updates atoms and coefficients.
-    """
-    m = data[0].shape[0]
-    # Initialize D randomly or using PCA
-    D = numpy.random.randn(m, K)
-    
-    # Normalize columns of D
-    for j in range(K):
-        D[:, j] /= numpy.linalg.norm(D[:, j])
-        
-    # Iterate until convergence
-    for iteration in range(max_iterations):
-        # 1. Sparse Coding Step: Find x for each data point
-        # Solve min ||y - D*x||_2 subject to ||x||_0 <= sparsity
-        # Using Orthogonal Matching Pursuit (OMP) or similar [G]
-        X = numpy.zeros((len(data), K))
-        for i, y in enumerate(data):
-            w = weights[i]
-            # Weighted residual
-            # Standard OMP does not natively support weights in the same way
-            # Implementation detail: Scale y and D by sqrt(w) or adjust cost function [G]
-            y_scaled = y * numpy.sqrt(w)
-            x_i = solve_sparse_coding(y_scaled, D, sparsity)
-            X[i, :] = x_i
-            
-        # 2. Dictionary Update Step
-        for j in range(K):
-            # Find indices of data points using the j-th atom
-            indices = numpy.where(X[:, j] != 0)[0]
-            
-            if len(indices) == 0:
-                continue
-                
-            # Compute error matrix E for these points
-            E = numpy.zeros((len(indices), m))
-            for k, idx in enumerate(indices):
-                E[k, :] = data[idx] - numpy.dot(D, X[idx, :])
-                # Remove the contribution of the j-th atom from the error
-                E[k, :] += numpy.dot(D[:, j], X[idx, j])
-                
-            # Perform SVD on E to update the atom
-            U, S, Vt = numpy.linalg.svd(E, full_matrices=False)
-            
-            # Update atom d_j and corresponding coefficients
-            # The first column of U is the new atom direction
-            # The first row of Vt scaled by S[0] updates the coefficients
-            new_atom = U[:, 0]
-            new_atom /= numpy.linalg.norm(new_atom)
-            
-            D[:, j] = new_atom
-            
-            # Update coefficients for the affected data points
-            for k, idx in enumerate(indices):
-                # The coefficient is updated based on the projection of the residual
-                # onto the new atom, scaled by the weight if necessary [G]
-                residual = data[idx] - numpy.dot(D, X[idx, :]) + numpy.dot(D[:, j], X[idx, j])
-                X[idx, j] = numpy.dot(new_atom, residual) / numpy.dot(new_atom, new_atom)
-                
-    return D
-
-def solve_sparse_coding(y, D, sparsity):
-    """
-    Solves min ||y - D*x||_2 subject to ||x||_0 <= sparsity.
-    Uses Orthogonal Matching Pursuit (OMP) as a common greedy algorithm [G].
-    """
-    m = y.shape[0]
-    K = D.shape[1]
-    x = numpy.zeros(K)
-    residual = y.copy()
+    n, K = D.shape
+    x = np.zeros(K)
     indices = []
+    residual = y.copy()
     
-    for _ in range(sparsity):
-        # Find the atom most correlated with the residual
-        correlations = numpy.abs(numpy.dot(D.T, residual))
-        idx = numpy.argmax(correlations)
+    for _ in range(S):
+        # Compute correlations between residual and all atoms
+        correlations = np.abs(D.T @ residual)
         
+        # Find the atom index with the highest correlation
+        idx = np.argmax(correlations)
+        
+        # If the atom is already selected, break (or handle appropriately)
         if idx in indices:
             break
             
         indices.append(idx)
         
-        # Solve least squares problem for the selected atoms
-        selected_atoms = D[:, indices]
-        coeffs, _, _, _ = numpy.linalg.lstsq(selected_atoms, y, rcond=None)
+        # Solve the least squares problem for the selected atoms
+        # D_selected is the submatrix of D with columns in indices
+        D_selected = D[:, indices]
         
+        # Solve min ||y - D_selected * x_selected||_2
+        # Using pseudo-inverse or QR decomposition for stability
+        try:
+            x_selected, _, _, _ = np.linalg.lstsq(D_selected, y, rcond=None)
+        except np.linalg.LinAlgError:
+            # Fallback if singular
+            x_selected = np.linalg.pinv(D_selected) @ y
+            
+        # Update the full coefficient vector
+        for i, ind in enumerate(indices):
+            x[ind] = x_selected[i]
+            
         # Update residual
-        residual = y - numpy.dot(selected_atoms, coeffs)
+        residual = y - D_selected @ x_selected
         
-        # Update x with the new coefficients
-        for k, i in enumerate(indices):
-            x[i] = coeffs[k]
+        # Check if residual is sufficiently small (optional early exit)
+        if np.linalg.norm(residual) < 1e-6:
+            break
             
     return x
 ```
 
+**Edge Cases and Pitfalls:**
+- **Ill-conditioned Dictionary:** If atoms in $\mathbf{D}$ are highly correlated, the least squares step may become unstable. Normalization of atoms in $\mathbf{D}$ is recommended [G].
+- **Sparsity Constraint:** If $S$ is too large, the representation may not be sparse, defeating the purpose of compression. If $S$ is too small, reconstruction error increases [S2].
+- **Boundary Conditions:** When processing voxel blocks, boundary effects may require specific handling (e.g., padding or Dirichlet conditions) if the signal processing involves gradients [S1, unofficial].
+
 ## Subtopics
 
-### K-SVD Dictionary Training
-A specific algorithm for learning overcomplete dictionaries by iteratively updating atoms and coefficients to minimize reconstruction error. It is chosen for its ability to adapt to specific signal data better than fixed mathematical bases [S2][S3, unofficial].
-
-### Importance Sampling Coresets
-A data reduction technique that selects a weighted subset of blocks for training based on their standard deviation (importance). It is chosen to make K-SVD feasible on massive volumes by avoiding uniform subsampling, which fails to capture material boundaries [S2].
+### [Sparse Coding with K-SVD and Coresets](5748-sparse-coding-with-k-svd-and-coresets.md)
+This method addresses the prohibitive computational cost of training data-specific dictionaries on massive volume datasets by combining the K-SVD algorithm with coreset-based data reduction. Unlike uniform subsampling, which fails to capture critical information at material boundaries, this approach uses importance sampling to construct a small, weighted subset of training blocks that approximates the original data distribution. It builds on [Sparse Representation Modeling](5392-sparse-representation-modeling.md) by providing a scalable training pipeline for dictionary-based sparse representations.
 
 ## Operating characteristics
-*   **Time Complexity:** Dictionary training is computationally expensive. Direct K-SVD on massive volumes is prohibitively expensive [S2]. The coreset approach reduces this significantly, but it remains higher than fixed-basis methods [S2].
-*   **Memory Complexity:** Requires storing the dictionary $\mathbf{D}$ ($m \times K$) and the sparse coefficients $\mathbf{x}$ for each block. The dictionary size $K$ (e.g., 1024) is larger than the block dimension $m$ (e.g., 216 for $6^3$), but sparsity $S$ (e.g., 8) keeps the coefficient storage low [S2].
-*   **Performance:** Demonstrated state-of-the-art performance on very large static and dynamic volumes [S2][S3, unofficial].
-*   **Strengths:** Increased flexibility and adaptation to specific signal data compared to mathematical models (e.g., wavelets) [S3, unofficial]. Allows representation by linear combinations of atoms, providing better approximation than VQ [S3, unofficial].
-*   **Limitations:** Computationally intensive training. Uniform subsampling fails due to information loss at material boundaries [S2].
-*   **When to use:** When high-quality reconstruction of complex, non-uniform volumes is required and computational resources allow for dictionary training [S2][S3, unofficial].
-*   **When not to use:** When fast, reduced-memory implicit implementation is needed (use wavelets) or when the volume is extremely large and training time is prohibitive [S3, unofficial].
+- **Time Complexity:** The encoding step (finding $\mathbf{x}$) is NP-hard in general ($\ell_0$ minimization). Greedy approximations like OMP take $O(S \cdot n \cdot K)$ per signal [G]. Dictionary learning (e.g., K-SVD) is significantly more expensive, requiring iterative updates over the entire training set.
+- **Memory Complexity:** Storing the dictionary requires $O(n \cdot K)$ space. For each block, storing the indices and coefficients requires $O(S)$ space. Compared to VQ, which stores $O(1)$ index per block, sparse coding uses more memory per block but achieves higher fidelity [S3].
+- **Performance:** Demonstrated state-of-the-art performance on very large static and dynamic volumes [S2][S3].
+- **Strengths:** Higher reconstruction quality than VQ due to linear combination of atoms; adaptability to specific data via learned dictionaries [S2][S3].
+- **Limitations:** Higher computational cost for both encoding and dictionary learning; larger storage per block compared to VQ [S3].
 
 ## Background
-Sparse Representation Modeling is a generalization of Vector Quantization (VQ) where signals are represented by linear combinations of dictionary elements rather than single prototypes [S2][S3, unofficial]. The concept of using overcomplete dictionaries (containing linearly dependent vectors) for sparse coding has gained significant interest in recent years [S2][S3, unofficial]. Gobbetti et al. [GIM12] applied this method to volume rendering, using K-SVD for dictionary training and importance sampling for data reduction [S2]. Recent architectures based on sparse representation of voxel blocks have demonstrated state-of-the-art performance on very large static and dynamic volumes [S2][S3, unofficial].
+The concept of dictionary-based sparse representation is a generalization of Vector Quantization (VQ) [S2][S3]. While historically signal decomposition used orthogonal or bi-orthogonal bases, there is growing interest in overcomplete dictionaries (containing linearly dependent vectors) for sparse coding [S2][S3]. Recent architectures based on sparse representation of voxel blocks have demonstrated state-of-the-art performance on very large static and dynamic volumes [S2][S3]. The method is closely related to Fractal Compression, which also works on block entities but relies on self-similarity and affine transformations [S2][S3].
 
 ## Sources
 [S1] Compressive Volume Rendering, https://doi.org/10.11575/prism/25391, fetched 2026-10-27 (unofficial)
 [S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

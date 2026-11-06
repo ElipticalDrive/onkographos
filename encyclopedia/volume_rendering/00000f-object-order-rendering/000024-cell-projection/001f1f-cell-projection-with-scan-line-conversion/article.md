@@ -1,148 +1,143 @@
 # Cell Projection with Scan-line Conversion
 
-Also called: Irregular grid cell projection, Parallel Software Scan Conversion / Cell Projection, Wilhelms et al. Cell Projection with Scan-line Conversion, Y-bucket scan conversion
+Also called: Coherent Projection, Irregular grid cell projection, Parallel Software Scan Conversion / Cell Projection, Scanline algorithm, Wilhelms et al. Cell Projection with Scan-line Conversion, Y-bucket scan conversion
 
 ## Overview
-Cell Projection with Scan-line Conversion is a software-based direct volume rendering method for irregular and multiple grids that uses Y-bucket sorting and scanline generation to leverage spatial coherence, avoiding expensive graphics hardware while handling unstructured tetrahedral and curvilinear grids [S1]. It sets itself apart from its siblings by producing image quality equivalent to ray casting but faster due to coherence, yielding noticeably clearer images with fewer artifacts than hardware Gouraud shading methods, though it is slower [S1].
+Cell Projection with Scan-line Conversion is a software-based direct volume rendering method that rasterizes volumetric primitives (such as tetrahedra or hexahedra) using scan-line algorithms to leverage spatial coherence, avoiding the need for expensive graphics hardware acceleration [S1][S3, unofficial]. It solves the problem of rendering irregular and multiple grids efficiently by decomposing primitives into triangles and accumulating color and opacity front-to-back along scan lines [S1][S2, unofficial]. It sets itself apart from its siblings, such as [Parallel Cell Projection](875-parallel-cell-projection.md) which focuses on hardware parallelization, and [Cell Projection with Texture Mapping for Opacity](993-cell-projection-with-texture-mapping-for-opacity.md) which uses texture hardware, by relying entirely on software scan-line coherence to produce image quality equivalent to ray casting but with fewer artifacts than hardware Gouraud shading [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Volumetric data defined on irregular grids (e.g., unstructured tetrahedral, curvilinear, or hexahedral grids) [S1][S2, unofficial].
-*   **Output:** A 2D image with accumulated color, opacity, and depth values for each pixel [S2, unofficial].
+*   **Input:** Volumetric data defined on irregular grids (e.g., tetrahedral, curvilinear) or structured grids; camera parameters (viewpoint, projection matrix); rendering parameters (opacity transfer function, color map).
+*   **Output:** A 2D image (frame buffer) with accumulated color and opacity values.
 
 **Data Structures:**
-*   **Triangle List:** Volumetric primitives are decomposed into triangles. For example, a hexahedron is decomposed into twelve triangles [S2, unofficial].
-*   **Y-Bucket Lists:** A list of triangles that first appear on a specific scan-line (Y-coordinate) [S2, unofficial].
-*   **X-Bucket Lists:** Used in conjunction with Y-buckets to manage triangles along the scan-line [S2, unofficial].
-*   **Pixel Frame Buffer:** Stores accumulated color, opacity, and depth for each pixel [S2, unofficial].
-*   **KD-Tree:** A hierarchical structure used for culling invisible regions and merging polygons for distant views [S2, unofficial].
+1.  **Primitive List:** A list of volumetric cells (e.g., hexahedra, tetrahedra).
+2.  **Triangle List:** Each cell is decomposed into triangles (e.g., 12 triangles for a hexahedron) [S2, unofficial].
+3.  **Y-Bucket Lists:** A set of buckets, one for each scan line (y-coordinate). Each bucket contains a list of triangles that intersect that scan line [S2, unofficial].
+4.  **X-Bucket Lists:** Within each y-bucket, triangles are further organized or processed in x-order to facilitate scan-line traversal [S2, unofficial].
+5.  **Frame Buffer:** Stores accumulated color ($C$) and opacity ($\alpha$) for each pixel.
+6.  **KD-Tree:** A hierarchical spatial index used for culling and level-of-detail management [S2, unofficial].
 
 **Steps:**
-1.  **Decomposition:** Decompose volumetric primitives into triangles depending on the grid type (e.g., twelve triangles for a hexahedron) [S2, unofficial].
-2.  **Bucket Sorting:** Use scan-line conversion with Y- and X-bucket lists consisting of triangles first appearing on the scan-line [S2, unofficial]. This allows the use of coherence between adjacent pixels and scan-lines [S2, unofficial].
-3.  **Traversal/Hierarchy:**
-    *   For close views, traverse the original data [S2, unofficial].
-    *   For distant views, use a hierarchical scheme based on KD-trees to merge polygons based on a user-defined threshold [S2, unofficial].
-    *   Use the KD-tree to cull invisible regions from the current viewpoint [S2, unofficial].
-4.  **Scan-line Conversion:** Process triangles within the buckets. For each pixel covered by a triangle, calculate the intersection and depth [S2, unofficial].
-5.  **Accumulation:** Accumulate color and opacity front-to-back for each pixel [S2, unofficial].
 
-**Formulas:**
-Not given in the sources.
-
-**Parameters:**
-*   **User-defined threshold:** Used in the KD-tree hierarchical scheme to merge polygons for distant views [S2, unofficial].
-*   **Viewport size:** Example given is $512 \times 512$ [S2, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Opaque Data:** The method is not optimized for opaque data sets. Ray casting can be competitive or faster on opaque datasets (e.g., head) because it can halt early when a pixel becomes opaque [S1].
-*   **Performance:** Rendering images with a $512 \times 512$ viewport takes up to one minute and more on the SGI Onyx with four processors [S2, unofficial].
+1.  **Decomposition:** Decompose each volumetric primitive into triangles based on the grid type. For example, a hexahedron is decomposed into 12 triangles [S2, unofficial].
+2.  **Transformation:** Transform the vertices of each triangle from volume space to screen space using the Model-View-Projection (MVP) matrix [S2, unofficial].
+3.  **Bucket Sorting (Y-Bucket):** Distribute the transformed triangles into y-bucket lists. A triangle is added to the y-bucket corresponding to its minimum y-coordinate (or the scan lines it spans) [S2, unofficial].
+4.  **Scan-line Conversion:** For each scan line (y-coordinate):
+    a. Retrieve the list of triangles from the corresponding y-bucket [S2, unofficial].
+    b. Sort or process these triangles to determine their intersection with the current scan line.
+    c. For each pixel (x-coordinate) along the scan line, determine the depth ($z$) and the volume data values (color, opacity) intersected by the ray passing through that pixel and the triangle [S3, unofficial].
+    d. Integrate the interpolated data and color samples at each scan-converting step to account for the volume properties within the triangle [S3, unofficial].
+5.  **Accumulation:** Accumulate the color and opacity contributions front-to-back for each pixel [S2, unofficial]. The standard front-to-back compositing equation is used:
+    $$ C_{out} = C_{in} + C_{src} \cdot \alpha_{src} \cdot (1 - \alpha_{in}) $$
+    $$ \alpha_{out} = \alpha_{in} + \alpha_{src} \cdot (1 - \alpha_{in}) $$
+    where $C_{in}, \alpha_{in}$ are the current accumulated color and opacity, and $C_{src}, \alpha_{src}$ are the source color and opacity from the current primitive [S2, unofficial].
+6.  **Hierarchical Culling (Optional):** Use a KD-tree to cull invisible regions from the current viewpoint and merge polygons for distant views based on a user-defined threshold [S2, unofficial]. For close views, traverse the original data [S2, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Cell Projection with Scan-line Conversion
-# Based on Wilhelms et al. [S2, unofficial]
-
-def cell_projection_scanline(primitives, view_params, threshold):
+def cell_projection_scanline(volume_data, camera, width, height):
     # 1. Decompose primitives into triangles
-    triangles = []
-    for primitive in primitives:
-        triangles.extend(decompose_into_triangles(primitive))
+    triangles = decompose_primitives(volume_data)
     
-    # 2. Build Y-bucket lists
-    # Y-buckets contain triangles that first appear on a specific scan-line
-    y_buckets = build_y_buckets(triangles, view_params.image_height)
-    
-    # 3. Build KD-tree for culling and merging
-    kd_tree = build_kd_tree(triangles)
-    
+    # 2. Transform vertices to screen space
+    for tri in triangles:
+        tri.vertices = transform(tri.vertices, camera.mvp_matrix)
+        
+    # 3. Build Y-Bucket lists
+    y_buckets = [[] for _ in range(height)]
+    for tri in triangles:
+        y_min, y_max = min(v.y for v in tri.vertices), max(v.y for v in tri.vertices)
+        for y in range(int(y_min), int(y_max) + 1):
+            if 0 <= y < height:
+                y_buckets[y].append(tri)
+                
     # 4. Initialize frame buffer
-    frame_buffer = initialize_frame_buffer(view_params.width, view_params.height)
+    frame_buffer = [Pixel(0.0, 0.0) for _ in range(width * height)]
     
-    # 5. Process each scan-line
-    for y in range(view_params.image_height):
+    # 5. Scan-line conversion
+    for y in range(height):
         current_triangles = y_buckets[y]
+        # Sort triangles by depth or process in order
+        # Note: Exact sorting logic for scan-line coherence is implied by [S2, unofficial]
         
-        # 5a. Cull invisible regions using KD-tree if necessary
-        visible_triangles = cull_with_kd_tree(current_triangles, kd_tree, view_params)
-        
-        # 5b. Sort triangles by depth for front-to-back accumulation
-        # Note: Perfect depth sorting is difficult; approximate sorting may be used
-        visible_triangles = sort_triangles_by_depth(visible_triangles, view_params)
-        
-        # 5c. Scan-convert triangles
-        for triangle in visible_triangles:
-            scan_convert_triangle(triangle, y, frame_buffer, view_params)
+        for x in range(width):
+            # Determine which triangles intersect the pixel (x, y)
+            intersecting_tris = get_intersecting_triangles(current_triangles, x, y)
+            
+            # Sort intersecting triangles by depth (front-to-back)
+            # Approximate depth sorting by center of gravity can be used [S4, unofficial]
+            intersecting_tris.sort(key=lambda t: t.center_of_gravity.z)
+            
+            # Accumulate color and opacity
+            pixel = frame_buffer[y * width + x]
+            for tri in intersecting_tris:
+                # Get volume data values at the intersection point
+                color, opacity = get_volume_values(tri, x, y, camera)
+                
+                # Front-to-back compositing
+                pixel.color = pixel.color + color * opacity * (1 - pixel.opacity)
+                pixel.opacity = pixel.opacity + opacity * (1 - pixel.opacity)
+                
+                # Early termination if opaque (optional optimization)
+                if pixel.opacity >= 1.0:
+                    break
+            
+            frame_buffer[y * width + x] = pixel
             
     return frame_buffer
 
-def decompose_into_triangles(primitive):
-    # Example: Hexahedron decomposed into 12 triangles
-    if primitive.type == 'hexahedron':
-        return decompose_hexahedron(primitive.vertices)
-    elif primitive.type == 'tetrahedron':
-        return decompose_tetrahedron(primitive.vertices)
-    else:
-        raise ValueError("Unsupported primitive type")
+def decompose_primitives(volume_data):
+    # Decompose hexahedra into 12 triangles, tetrahedra into 4, etc.
+    # Implementation depends on grid type [S2, unofficial]
+    pass
 
-def build_y_buckets(triangles, image_height):
-    y_buckets = [[] for _ in range(image_height)]
-    for triangle in triangles:
-        min_y = int(min(triangle.vertices, key=lambda v: v.y).y)
-        max_y = int(max(triangle.vertices, key=lambda v: v.y).y)
-        # Add triangle to buckets from min_y to max_y
-        for y in range(min_y, max_y + 1):
-            y_buckets[y].append(triangle)
-    return y_buckets
+def transform(vertices, mvp_matrix):
+    # Apply MVP matrix to each vertex
+    return [apply_matrix(v, mvp_matrix) for v in vertices]
 
-def cull_with_kd_tree(triangles, kd_tree, view_params):
-    # Cull triangles that are not visible from the current viewpoint
-    visible = []
-    for triangle in triangles:
-        if is_visible(triangle, kd_tree, view_params):
-            visible.append(triangle)
-    return visible
+def get_intersecting_triangles(triangles, x, y):
+    # Return triangles that cover the pixel (x, y)
+    # This involves checking if the pixel center lies within the projected triangle
+    pass
 
-def scan_convert_triangle(triangle, y, frame_buffer, view_params):
-    # For each pixel in the triangle's bounding box on scan-line y
-    for x in range(triangle.min_x, triangle.max_x + 1):
-        if is_inside_triangle(x, y, triangle):
-            # Calculate depth and color at (x, y)
-            depth, color, opacity = calculate_intersection(x, y, triangle, view_params)
-            # Accumulate front-to-back
-            accumulate_pixel(frame_buffer, x, y, depth, color, opacity)
-
-def accumulate_pixel(frame_buffer, x, y, depth, color, opacity):
-    # Standard front-to-back compositing
-    current_opacity = frame_buffer[x, y].opacity
-    current_color = frame_buffer[x, y].color
-    # Update frame buffer with new contribution
-    frame_buffer[x, y].color = current_color * (1 - opacity) + color * opacity
-    frame_buffer[x, y].opacity = current_opacity + opacity * (1 - current_opacity)
-    frame_buffer[x, y].depth = depth # Update depth if needed
+def get_volume_values(triangle, x, y, camera):
+    # Interpolate volume data (color, opacity) at the intersection point
+    # This accounts for interpolated data and color samples [S3, unofficial]
+    pass
 ```
+
+**Parameters:**
+*   **Threshold for KD-tree merging:** User-defined threshold for merging polygons in distant views [S2, unofficial].
+*   **Viewpoint:** Changes require recalculation of depth order [S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Depth Order Changes:** The depth order of cells may change pixel-by-pixel, making perfect depth sorting impossible [S4, unofficial].
+*   **Opaque Data:** Ray casting can be competitive or faster on opaque datasets (e.g., head) because it can halt early when a pixel becomes opaque, whereas cell projection typically processes all primitives [S1].
+*   **Performance:** Software scan conversion is slower than hardware-accelerated methods but produces clearer images with fewer artifacts [S1].
 
 ## Subtopics
 
 ### Approximate Depth Sorting
-A sorting scheme to process scan conversion in depth-sorted order to reduce ray-segment list length and manipulation cost, using the depth order of cell centers of gravity [S3, unofficial]. Perfect depth order is impossible because cell depth order may change pixel-by-pixel, and sorting must be recalculated when the viewpoint changes [S3, unofficial]. This approximation does not cause any quality error in the final image [S3, unofficial]. It differs from octree search by being simpler and less costly, avoiding the computational cost of sorting and list manipulation required for near-perfect order [S3, unofficial].
+A sorting scheme that processes scan conversion in depth-sorted order to reduce ray-segment list length and manipulation cost, using the depth order of cell centers of gravity [S4, unofficial]. It differs from octree search by being simpler and less costly, avoiding the computational cost of sorting and list manipulation required for near-perfect order [S4, unofficial]. Perfect depth order is impossible because cell depth order may change pixel-by-pixel, so sorting must be recalculated when the viewpoint changes [S4, unofficial]. This approximation does not cause any quality error in the final image [S4, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **Measured Performance:** Rendering images with a $512 \times 512$ viewport takes up to one minute and more on the SGI Onyx with four processors [S2, unofficial].
-*   **Scaling:** Vertex transforming and bucket sorting can both be parallelized [S2, unofficial].
-*   **Strengths:** Produces image quality equivalent to ray casting but faster due to coherence [S1]. Produces noticeably clearer images with fewer artifacts than hardware Gouraud shading methods [S1].
-*   **Limitations:** Noticeably slower than hardware methods [S1]. Not optimized for opaque data sets; ray casting can be competitive or faster on opaque datasets [S1].
-*   **When to use:** When high image quality is required and hardware acceleration is not available or insufficient [S1].
-*   **When not to use:** When rendering opaque datasets where early ray termination can provide significant speedups [S1].
+*   **Time Complexity:** Depends on the number of primitives and pixels. Software scan conversion is generally faster than ray casting due to coherence but slower than hardware-accelerated methods [S1].
+*   **Memory Complexity:** Requires storage for the frame buffer, triangle lists, and y-buckets. For a 500x500 window, the software frame buffer takes 5.0 Mbytes [S1]. Transformed vertex locations take 11.3 Mbytes for a shuttle grid [S1].
+*   **Measured Performance:** Rendering images with a 512x512 viewport takes up to one minute and more on an SGI Onyx with four processors [S2, unofficial].
+*   **Strengths:** Produces image quality equivalent to ray casting with fewer artifacts than hardware Gouraud shading; leverages coherence; handles irregular grids [S1].
+*   **Limitations:** Slower than hardware methods; not optimized for opaque datasets where ray casting can terminate early; requires recalculation of depth order with viewpoint changes [S1][S4, unofficial].
+*   **When to Use:** When high-quality rendering of irregular grids is needed and hardware acceleration is not available or insufficient; when artifacts from hardware shading are unacceptable [S1].
+*   **When Not to Use:** For real-time interactive rendering on opaque datasets where ray casting with early termination is faster; when hardware acceleration is available and sufficient [S1][S2, unofficial].
 
 ## Background
-The method was developed by Wilhelms et al. [S2, unofficial]. It is a software-based approach to direct volume rendering on irregular and multiple grids [S1]. The technique leverages spatial coherence to avoid expensive graphics hardware [S1].
+The method was introduced by Wilhelms et al. in 1996 as a software-based scan conversion algorithm for direct volume rendering on irregular and multiple grids [S1]. It uses Y-bucket sorting and scanline generation to leverage coherence, avoiding expensive graphics hardware while handling unstructured tetrahedral and curvilinear grids [S1]. The method was further developed by Williams et al. in 1998, who created a sophisticated software volume renderer based on cell projection, although it was not intended for interactive purposes [S2, unofficial]. The approach is part of the broader family of cell projection methods, which treat volumetric data as geometric primitives [S1][S3, S4, unofficial].
 
 ## Sources
 [S1] Hierarchical and parallelizable direct volume rendering for irregular and multiple grids, https://doi.org/10.1109/visual.1996.567606, fetched 2026-10-24
 [S2] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
-[S3] PDF Cell-projection Parallel Volume Rendering With Early Ray Termination, http://www.tomitaken.org/project/papers/ReVolver/2004/VIIP.pdf, fetched 2026-10-27 (unofficial)
+[S3] Direct Volume Rendering Direct Volume Rendering. What is volume rendering?. Accumulate information along 1 dimension line through volume. Volume rendering vs. isosurfaces. No intermediate geometry No , https://www.slideserve.com/lenci/direct-volume-rendering, fetched 2026-10-25 (unofficial)
+[S4] PDF Cell-projection Parallel Volume Rendering With Early Ray Termination, http://www.tomitaken.org/project/papers/ReVolver/2004/VIIP.pdf, fetched 2026-10-27 (unofficial)

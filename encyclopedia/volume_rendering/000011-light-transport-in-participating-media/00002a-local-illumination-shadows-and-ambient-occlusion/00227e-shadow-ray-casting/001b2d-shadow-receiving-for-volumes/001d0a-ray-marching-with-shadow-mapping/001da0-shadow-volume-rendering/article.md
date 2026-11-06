@@ -3,100 +3,116 @@
 Also called: Volumetric Shadow Maps
 
 ## Overview
-Shadow Volume Rendering is a specialized ray marching routine that computes only the accumulated alpha (transmittance) along a ray to generate shadow maps or occlusion values for volume scenes [S1, unofficial]. It precomputes a shadow volume to store the amount of light arriving at each sample after attenuation by intervening material, allowing the renderer to multiply interpolated values from this map by colors from the transfer function during the main pass [S2]. Unlike [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md), which uses an opacity shadow map for occlusion, this method explicitly constructs a volumetric shadow buffer [S2].
+Shadow Volume Rendering is a specialized ray marching routine that computes only the accumulated alpha (transmittance) along a ray to generate shadow maps or occlusion values for volume scenes [S1, unofficial]. It solves the problem of self-shadowing in participating media by precomputing a shadow volume that stores the amount of light arriving at each sample after attenuation by intervening material [S2]. Unlike full-resolution ray integration, it decouples storage from integration, allowing interactive adjustment of shadow map density while maintaining high-quality visibility estimates [S1, unofficial]. It differs from [Ray Marching with Shadow Mapping](1415-ray-marching-with-shadow-mapping.md) by explicitly precomputing a shadow volume structure rather than relying solely on runtime opacity shadow maps, and from [Volume Shadow Calculation via Light Strength Buffer](1914-volume-shadow-calculation-via-light-strength-buffer.md) by focusing on alpha accumulation for shadow generation rather than light strength buffering.
 
 ## How it works
-**Inputs:** Ray origin and direction in world space, world-to-object transformation matrix, `tMin`, `tMax`, `samplingScale`, `self.step`, and `nearly_one` threshold [S1, unofficial].
-**Outputs:** Accumulated alpha (transmittance) value for the ray [S1, unofficial].
+**Inputs:**
+- Ray origin and direction in world space.
+- World-to-object transformation matrix (`xfmPoint`, `xfmVector`).
+- Ray bounds `tMin`, `tMax`.
+- Sampling scale multiplier (`samplingScale`).
+- Step size (`self.step`).
+- Random number generator state (`RandomTEA`).
+
+**Outputs:**
+- Accumulated alpha (transmittance) value.
+- Volumetric shadow map data (precomputed).
 
 **Data Structures:**
-*   `ShadowPayload`: Contains `rng` (pointer to `RandomTEA`) and `alpha` (float) [S1, unofficial]. Packaged via `packPointer(&payload, u0, u1)` [S1, unofficial].
+- `ShadowPayload`:
+  - `rng`: Pointer to `RandomTEA` instance.
+  - `alpha`: Float, accumulated alpha.
+  - Layout: Packaged via `packPointer(&payload, u0, u1)`.
 
-**Numbered Steps:**
-1. Transform the ray origin and direction from world space to object space using the provided transformation matrix [S1, unofficial].
-2. Initialize a `ShadowPayload` with `alpha = 0.0` and a random number generator [S1, unofficial].
-3. March along the ray from `tMin` to `tMax` using a step size adjusted by `samplingScale` [S1, unofficial].
-4. For each step, compute the sample position $p$ using jittered interpolation between the current and next step boundaries [S1, unofficial].
-5. Sample the volume density/alpha at $p$ and accumulate it into `payload.alpha` using front-to-back blending [S1, unofficial].
-6. Continue marching while `payload.alpha` remains below `nearly_one`; terminate otherwise [S1, unofficial].
-7. Return the final `payload.alpha` for use in the main rendering pass [S1, unofficial].
+**Steps:**
+1. **Transform Ray:** Convert ray origin and direction from world space to object space.
+   ```python
+   org = xfmPoint(wto, _org)
+   dir = xfmVector(wto, _dir)
+   ```
+2. **Initialize Payload:** Create `ShadowPayload` with random state and initial alpha of 0.
+3. **March Ray:** Iterate along the ray using `raymarching_iterator` with parameters `org`, `dir`, `tMin`, `tMax`, `samplingScale * self.step`, and a lambda function.
+4. **Sample Position:** Compute sample position with jitter.
+   ```python
+   p = org + lerp(jitter, t.x, t.y) * dir
+   ```
+5. **Accumulate Alpha:** Perform front-to-back blending.
+   ```python
+   payload.alpha += (1.0 - payload.alpha) * sampleAlpha
+   ```
+6. **Termination:** Continue marching while `payload.alpha < nearly_one`.
 
-**Formulas:**
-*   Sample position: $p = \text{org} + \text{lerp}(\text{jitter}, t.x, t.y) \times \text{dir}$ [S1, unofficial]
-*   Alpha accumulation: $\text{payload.alpha} \leftarrow \text{payload.alpha} + (1.0 - \text{payload.alpha}) \times \text{sampleAlpha}$ [S1, unofficial]
-*   Termination condition: $\text{payload.alpha} < \text{nearly\_one}$ [S1, unofficial]
-Where `org` and `dir` are the transformed ray origin and direction, `jitter` is a random float, $t.x$ and $t.y$ are the step boundaries, and `sampleAlpha` is the sampled volume density [S1, unofficial].
+**Parameters:**
+- `samplingScale`: Multiplier applied to `self.step` to adjust shadow ray sampling density. Typical value: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- **Blurry Shadows:** Results in visual artifacts such as blurry shadows [S2].
+- **Dark Images:** Can result in dark images due to over-attenuation [S2].
+- **Memory Usage:** Uses extra memory for storing the shadow volume [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def shadow_volume_rendering(ray_origin, ray_direction, wto, t_min, t_max, sampling_scale, step_size, nearly_one):
-    # Step 1: Transform ray to object space [S1, unofficial]
-    org = xfm_point(wto, ray_origin)
-    dir = xfm_vector(wto, ray_direction)
-
-    # Step 2: Initialize payload [S1, unofficial]
-    payload = {
-        'rng': RandomTEA(),  # [G] standard RNG initialization
-        'alpha': 0.0
-    }
-
-    # Step 3: Ray marching loop [S1, unofficial]
-    t = t_min
-    while t < t_max:
-        t_next = t + sampling_scale * step_size
+def shadow_volume_rendering(ray_org, ray_dir, wto, t_min, t_max, sampling_scale, step_size, random_tea):
+    # Transform ray to object space
+    org = xfmPoint(wto, ray_org)
+    dir = xfmVector(wto, ray_dir)
+    
+    # Initialize payload
+    payload = ShadowPayload()
+    payload.rng = random_tea
+    payload.alpha = 0.0
+    
+    # March along the ray
+    # Note: raymarching_iterator is assumed to handle the loop and lambda invocation
+    # The lambda function performs sampling and accumulation
+    def sample_lambda(t):
+        # Compute sample position with jitter
+        jitter = get_jitter(payload.rng) # [G] Assuming a jitter generation function
+        p = org + lerp(jitter, t.x, t.y) * dir
         
-        # Step 4: Compute sample position with jitter [S1, unofficial]
-        jitter = payload['rng'].next_float()  # [G] standard RNG call
-        p = org + lerp(jitter, t, t_next) * dir
-
-        # Step 5: Sample volume density/alpha at p [G]
-        sample_alpha = sample_volume_density(p)
-
-        # Step 5: Accumulate alpha using front-to-back blending [S1, unofficial]
-        payload['alpha'] += (1.0 - payload['alpha']) * sample_alpha
-
-        # Step 6: Termination check [S1, unofficial]
-        if payload['alpha'] >= nearly_one:
-            break
-
-        t = t_next
-
-    return payload['alpha']
+        # Sample volume alpha at position p
+        # [G] Assuming sample_volume_alpha is defined elsewhere
+        sample_alpha = sample_volume_alpha(p)
+        
+        # Accumulate alpha using front-to-back blending
+        payload.alpha += (1.0 - payload.alpha) * sample_alpha
+        
+        # Return true if marching should continue
+        return payload.alpha < 0.9999 # nearly_one
+    
+    raymarching_iterator(org, dir, t_min, t_max, sampling_scale * step_size, sample_lambda)
+    
+    return payload.alpha
 ```
-
-**Parameters:**
-*   `samplingScale`: Multiplier applied to `self.step` to adjust shadow ray sampling density [S1, unofficial]. Typical values are not specified in the sources.
-
-**Edge Cases and Pitfalls:**
-*   **Blurry Shadows & Dark Images:** The method can result in blurry shadows and dark images due to interpolation and shadow mapping limitations [S2].
-*   **Memory Usage:** The precomputed shadow volume requires extra memory [S2].
-*   **Precision:** The sources do not specify precision issues, but the use of `float` for alpha accumulation suggests potential precision limits in high-opacity regions [S1, unofficial].
 
 ## Subtopics
 
+### [Shadow Volume Representation (SVR)](4603-shadow-volume-representation-svr.md)
+Shadow Volume Representation (SVR) is a sparse data structure that stores global opacity ($\alpha_g$) along rays from volume points to a light source, enabling efficient estimation of direct light contribution in participating media. It distinguishes itself from full-resolution ray integration by decoupling the storage resolution from the integration resolution, allowing interactive adjustment of the shadow map density while maintaining high-quality visibility estimates. Choose SVR when you need to balance shadow quality and performance by adjusting density independently of the rendering resolution. Link: [Shadow Volume Representation (SVR)](4603-shadow-volume-representation-svr.md).
+
 ### Transmittance Function Mapping
-*   **Definition:** An approximation method that uses orthogonal basis functions (e.g., Fourier series) to calculate self-shadowing more efficiently than ray marching [S3, unofficial].
-*   **How it works:**
-    1. Generate a volume shadow map from the sun direction using orthographic projection [S3, unofficial].
-    2. Store the first 9 Fourier coefficients in a shadow map with format 512x512x3 R11G11B10 [S3, unofficial].
-    3. During rendering, read the Fourier coefficients and combine them linearly with basis functions to reconstruct optical depth and transmittance [S3, unofficial].
-*   **Comparison:** TFM efficiency is roughly equivalent to Ray Marching with 1-2 steps, but provides more accurate results than 2-step RM. It may produce banding artifacts [S3, unofficial].
+Transmittance Function Mapping (TFM) approximates the transmittance function using orthogonal basis functions (e.g., Fourier series) to calculate self-shadowing more efficiently than ray marching [S3, unofficial]. It generates a volume shadow map from the sun direction using orthographic projection, storing Fourier coefficients in a 512x512x3 R11G11B10 format (first 9 coefficients) [S3, unofficial]. During rendering, it reads Fourier coefficients and combines them linearly with basis functions to reconstruct optical depth and transmittance [S3, unofficial]. TFM efficiency is roughly equivalent to Ray Marching with 1-2 steps but provides more accurate results than 2-step RM, though it may produce banding artifacts [S3, unofficial]. Choose TFM when you need higher accuracy than low-step ray marching with similar performance, and can tolerate potential banding.
+
+### Cloud Shadow Map Directional Consistency Fix
+Cloud Shadow Map Directional Consistency Fix addresses incorrect cloud shadows for non-parallel lights by ensuring the cloud shadow map is traced along the view's first directional light, but consumers look it up in that light's own basis [S4, unofficial]. Previously, every consumer looked it up for each light in that light's own basis, causing a second, nonparallel sun to read the first one's optical depths as a displaced, wrongly oriented shadow [S4, unofficial]. For non-parallel lights, it marches the cloud layer toward the light using `cloud_far_transmittance` in the atmosphere passes, leaving meshes unshadowed by clouds for those lights [S4, unofficial]. Parallel lights continue to share the shadow map [S4, unofficial]. Choose this fix when rendering scenes with multiple non-parallel directional lights (e.g., multiple suns) to avoid shadow orientation artifacts.
 
 ## Operating characteristics
-*   **Time Complexity:** The basic shadow volume rendering involves a ray marching loop. The number of steps depends on the `samplingScale` and volume density. TFM is roughly equivalent to 1-2 steps of ray marching in efficiency [S3, unofficial].
-*   **Memory Complexity:** Requires storage for the volumetric shadow map. The TFM variant uses a 512x512x3 R11G11B10 texture [S3, unofficial].
-*   **Performance:** Not given in the sources for the basic method. TFM is noted as efficient [S3, unofficial].
-*   **Strengths:** Precomputes shadow information to store light attenuation, which is interpolated and multiplied by transfer function colors during rendering [S2]. TFM offers a balance of efficiency and accuracy [S3, unofficial].
-*   **Limitations:** Can produce blurry shadows and dark images [S2]. TFM may produce banding artifacts [S3, unofficial]. Requires extra memory for the shadow volume [S2].
-*   **When to use:** When self-shadowing is required for volumetric scenes and performance is a concern, but high accuracy is still desired (TFM) [S3, unofficial].
-*   **When not to use:** When memory is constrained, as the method uses extra memory for the shadow volume [S2].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Uses extra memory for storing the shadow volume [S2].
+- **Measured Performance:** TFM efficiency is roughly equivalent to Ray Marching with 1-2 steps [S3, unofficial].
+- **Scaling:** Not given in the sources.
+- **Strengths:** Decouples storage resolution from integration resolution [S1, unofficial]; allows interactive adjustment of shadow map density [S1, unofficial]; TFM provides more accurate results than low-step RM [S3, unofficial].
+- **Limitations:** Results in blurry shadows and dark images [S2]; TFM may produce banding artifacts [S3, unofficial]; uses extra memory [S2].
+- **When to Use:** When self-shadowing in participating media is required and performance allows for precomputation or sparse storage.
+- **When Not to Use:** When memory is constrained or when blurry shadows are unacceptable.
 
 ## Background
-The concept of precomputing a shadow volume for volumetric materials was introduced to address the unrealistic assumption that light arrives at a sample without interacting with the rest of the volume [S2]. This approach was proposed as an alternative to surface-based lighting models [S2]. The Transmittance Function Mapping variant has been used in games like Final Fantasy, utilizing Fourier series for approximation [S3, unofficial].
+Shadow Volume Rendering was introduced as a method to incorporate complex lighting effects, such as volumetric shadows, into volume rendering [S2]. It was developed as an alternative to simple lighting models that assume light arrives at a sample without interacting with the rest of the volume [S2]. The technique is used in various volume rendering applications, including cloud rendering [S3, unofficial] and atmospheric scattering [S4, unofficial].
 
 ## Sources
 [S1] GitHub - VIDILabs/open-volume-renderer: Open source modular multi ..., https://github.com/VIDILabs/open-volume-renderer, fetched 2026-10-29 (unofficial)
 [S2] GPU Gems ch39, Volume rendering techniques, https://developer.nvidia.com/sites/all/modules/custom/gpugems/books/GPUGems/gpugems_ch39.html, fetched 2026-10-29
 [S3] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)
+[S4] WIP: Nubis-based volumetric clouds, https://github.com/mate-h/bevy/pull/26, fetched 2026-10-27 (unofficial)

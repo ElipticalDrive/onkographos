@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -4,13 +4,13 @@
+ 
+ ## Overview
+-Perceptual Loss Training is an optimization strategy that incorporates a perceptual loss term into the training objective to improve the perceptual quality of rendered images, addressing the inherent smoothness and blurriness issues associated with standard pixel-wise reconstruction losses [S1]. It sets itself apart from sibling methods like [Total Variation Regularization](860-total-variation-regularization.md) and [L1+SSIM Loss](2890-l1-ssim-loss.md) by leveraging high-level feature representations from Convolutional Neural Networks (CNNs) rather than relying solely on low-level pixel statistics or structural similarity metrics [S1].
++Perceptual Loss Training is an optimization strategy that incorporates a perceptual loss term into the training objective to improve the perceptual quality of rendered images, addressing the inherent smoothness and blurriness issues associated with standard pixel-wise reconstruction losses [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Inputs:** Rendered image $I_{render}$, ground-truth image $I_{gt}$, and a pre-trained feature extractor network (typically VGG or similar) [S1].
++*   **Inputs:** Rendered image $I_{\text{render}}$, ground-truth image $I_{\text{gt}}$, and a pre-trained feature extractor network (typically a CNN) [S1].
+ *   **Outputs:** A scalar perceptual loss value $\mathcal{L}_{\text{PIPS}}$ used for gradient backpropagation [S1].
+ 
+ **Data Structures:**
+-*   **Feature Maps:** The CNN extracts feature maps at multiple intermediate layers. Let $\Phi_l(I)$ denote the feature map at layer $l$ for image $I$. The layout is a tensor of shape $(C_l, H_l, W_l)$, where $C_l$ is the number of channels, and $H_l, W_l$ are the spatial dimensions specific to layer $l$ [S1].
++*   **Feature Maps:** The CNN extracts feature maps at multiple intermediate layers. Let $\Phi_l(I)$ denote the feature map at layer $l$ for image $I$ [S1].
+ 
+ **Formulas:**
+@@ -22,5 +22,5 @@
+ 
+ Where:
+-*   $\mathcal{L}_1$ is the L1 reconstruction loss: $\mathcal{L}_1 = \| I_{render} - I_{gt} \|_1$ [S1].
++*   $\mathcal{L}_1$ is the L1 reconstruction loss: $\mathcal{L}_1 = \| I_{\text{render}} - I_{\text{gt}} \|_1$ [S1].
+ *   $\mathcal{L}_{\text{SSIM}}$ is the structural similarity loss [S1].
+ *   $\mathcal{L}_{\text{PIPS}}$ is the perceptual loss, computed as the Euclidean distance between the feature representations of the rendered and ground-truth images [S1].
+@@ -29,6 +29,6 @@
+ 
+ **Numbered Steps:**
+-1.  Render the image $I_{render}$ from the current model state (e.g., Gaussian Splatting parameters) [S1].
+-2.  Pass both $I_{render}$ and $I_{gt}$ through the pre-trained CNN feature extractor to obtain feature maps $\Phi(I_{render})$ and $\Phi(I_{gt})$ [S1].
++1.  Render the image $I_{\text{render}}$ from the current model state [S1].
++2.  Pass both $I_{\text{render}}$ and $I_{\text{gt}}$ through the pre-trained CNN feature extractor to obtain feature maps $\Phi(I_{\text{render}})$ and $\Phi(I_{\text{gt}})$ [S1].
+ 3.  Compute the perceptual loss $\mathcal{L}_{\text{PIPS}}$ as the sum of squared differences between feature maps across selected layers [S1].
+ 4.  Compute $\mathcal{L}_1$ and $\mathcal{L}_{\text{SSIM}}$ [S1].
+@@ -37,59 +37,61 @@
+ 
+ **Computational Optimization:**
+-Because CNN-based computation increases training time, the perceptual loss $\mathcal{L}_{\text{PIPS}}$ is computed only every 20 training iterations [S1]. In iterations where it is not computed, its gradient contribution is effectively zero or carried over from the last computation, substantially alleviating computational overhead without noticeably increasing overall training time [S1].
++Because CNN-based computation increases training time, the perceptual loss $\mathcal{L}_{\text{PIPS}}$ is computed only every 20 training iterations [S1]. In iterations where it is not computed, its gradient contribution is effectively zero or carried over from the last computation, substantially alleviating the additional computational overhead without noticeably increasing the overall training time [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def compute_perceptual_loss_training(render_fn, gt_image, cnn_extractor, lambda1, lambda2, iteration):
++def compute_perceptual_loss_training(render_fn, gt_image, cnn_extractor, lambda1, lambda2, iteration, cache):
+     """
+     Computes the total loss including perceptual loss, updating every 20 iterations.
+     """
+-    # 1. Render the current view
+     rendered_image = render_fn()
+     
+-    # 2. Compute standard losses
+-    l1_loss = compute_l1_loss(rendered_image, gt_image)
+-    ssim_loss = compute_ssim_loss(rendered_image, gt_image)
++    # L1 loss
++    l1_loss = mean(abs(rendered_image - gt_image))
+     
+-    # 3. Compute perceptual loss only every 20 iterations
++    # SSIM loss
++    ssim_loss = 1.0 - compute_ssim(rendered_image, gt_image)
++    
++    # Perceptual loss (PIPS) computed every 20 iterations
+     if iteration % 20 == 0:
+-        # Extract features from CNN
+-        rendered_features = cnn_extractor(rendered_image)
+-        gt_features = cnn_extractor(gt_image)
++        features_rendered = cnn_extractor(rendered_image)
++        features_gt = cnn_extractor(gt_image)
++        pips_loss = 0.0
++        # [G] Standard PIPS sums L2 distances across multiple layers; 
++        # specific layer selection and weighting is not detailed in [S1]
++        for f_r, f_g in zip(features_rendered, features_gt):
++            pips_loss += mean(square(f_r - f_g))
++        cache['pips_loss'] = pips_loss
++    else:
++        pips_loss = cache.get('pips_loss', 0.0)
+         
+-        # Compute perceptual loss (e.g., L2 distance between feature maps)
+-        # Note: Specific layer selection and weighting within PIPS is not detailed in [S1]
+-        pips_loss = compute_pips_loss(rendered_features, gt_features)
+-    else:
+-        # Use cached value or zero gradient contribution
+-        # [G] Implementation detail: typically one would cache the last computed pips_loss
+-        # and use its value for the loss sum, but gradients would be stale.
+-        # The source states it alleviates overhead, implying the term is skipped in backprop
+-        # or the gradient is not computed for this term.
+-        pips_loss = 0.0 
+-        
+-    # 4. Combine losses
+-    # Ensure weights sum to <= 1 to keep L1 weight positive
+     l1_weight = 1.0 - lambda1 - lambda2
+     total_loss = (l1_weight * l1_loss) + (lambda1 * ssim_loss) + (lambda2 * pips_loss)
+-    
+     return total_loss
++
++def compute_ssim(img1, img2):
++    mu1 = mean(img1)
++    mu2 = mean(img2)
++    sigma1_sq = var(img1)
++    sigma2_sq = var(img2)
++    sigma12 = cov(img1.flatten(), img2.flatten())
++    C1, C2 = 0.01**2, 0.03**2
++    return ((2 * mu1 * mu2 + C1) * (2 * sigma12 + C2)) / ((mu1**2 + mu2**2 + C1) * (sigma1_sq + sigma2_sq + C2))
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Computational Overhead:** The primary pitfall is the significant increase in training time due to CNN inference [S1]. Mitigated by computing it every 20 iterations [S1].
+-*   **Metric Reliability:** Perceptual metrics like LPIPS (closely related to PIPS) may be unreliable signals in certain settings, such as scenes with blurry backgrounds where lower LPIPS scores might correspond to perceptually inferior outputs [S2].
+-*   **Proxy Geometry Dependency (Variant):** In variants relying on proxy geometry (e.g., Stable View Synthesis), incorrect proxy geometry (especially for distant/unobserved content like trees) can cause the perceptual loss to fail or produce poor results [S2].
++*   **Computational Overhead:** CNN inference increases training time, but this is substantially alleviated by computing the loss every 20 iterations [S1].
++*   **Metric Reliability:** Perceptual metrics like LPIPS may be unreliable in certain settings, such as scenes with blurry backgrounds where lower scores might correspond to perceptually inferior outputs [S2].
++*   **Proxy Geometry Dependency (Variant):** In variants relying on proxy geometry, incorrect proxy geometry for distant or unobserved content can cause the method to fail [S2].
+ 
+ ## Subtopics
+ 
+ ### Stable View Synthesis (SVS) Baseline
+-A view synthesis method that blends training images together, relying on proxy geometry from an external system [S2]. It is trained with a perceptual loss [S2]. It requires multiple large CNNs and access to all training images to render novel views [S2]. It may fail when the external proxy geometry is incorrect, particularly struggling with distant/unobserved content like trees [S2]. It is better suited to large piecewise planar objects (vehicles) due to reliance on piecewise planar mesh proxy geometry, whereas the proposed model handles natural content better [S2].
++A view synthesis method that blends training images together, relying on proxy geometry from an external system [S2]. It is trained with a perceptual loss [S2]. It requires multiple large CNNs and access to all training images to render novel views [S2]. It may fail when the external proxy geometry is incorrect, particularly struggling with distant or unobserved content like trees [S2]. It is better suited to large piecewise planar objects (vehicles) due to reliance on piecewise planar mesh proxy geometry, whereas the proposed model handles natural content better [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Increases training time significantly due to CNN-based computation [S1]. Mitigated by computing the perceptual loss every 20 iterations [S1].
+-*   **Memory Complexity:** Requires memory for the pre-trained CNN and intermediate feature maps [S1].
++*   **Time Complexity:** Increases training time due to CNN-based computation, but this is substantially alleviated by computing the perceptual loss every 20 iterations [S1].
+ *   **Strengths:** Improves perceptual quality of rendered images, addressing the smoothness issues of pixel-wise losses [S1].
+-*   **Limitations:** Computationally expensive; relies on external CNNs; may be less effective or fail if dependent on incorrect proxy geometry (in variant contexts) [S1, S2].
++*   **Limitations:** Computationally expensive without mitigation; relies on external CNNs; may be less effective or fail if dependent on incorrect proxy geometry (in variant contexts) [S1, S2].
+ *   **When to use:** When perceptual quality is prioritized over raw PSNR and computational resources allow for periodic CNN inference [S1].
+ *   **When not to use:** When real-time training speed is critical and the overhead of CNNs is prohibitive, or when the scene contains natural content that does not align well with piecewise planar proxy geometry (in SVS context) [S2].

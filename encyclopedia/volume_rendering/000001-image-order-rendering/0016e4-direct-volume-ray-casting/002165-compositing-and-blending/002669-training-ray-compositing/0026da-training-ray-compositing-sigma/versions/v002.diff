@@ -1,0 +1,155 @@
+--- v001.md
++++ v002.md
+@@ -4,8 +4,8 @@
+ 
+ ## Overview
+-Training Ray Compositing (Sigma) is a differentiable volume rendering method that composites per-ray samples of density ($\sigma$) and color ($\mathbf{c}$) into final image colors, alpha weights, and depth, while simultaneously computing gradients with respect to the input parameters for training [S1, unofficial]. It extends standard alpha compositing by including ambient light contributions and supporting a custom backward pass to propagate gradients from the loss function back to the density and color fields [S1, unofficial]. It is distinguished from its sibling [Training Ray Compositing (Backward)](3893-training-ray-compositing-backward.md) by handling the forward composition and the joint forward-backward logic in a unified CUDA kernel interface, whereas the backward variant focuses specifically on the gradient computation logic [S1, unofficial].
++Training Ray Compositing (Sigma) composites per-ray samples of density ($\sigma$) and color ($\mathbf{c}$) into final image colors, alpha weights, and depth, while simultaneously computing gradients with respect to the input parameters for training [S1, unofficial]. It extends standard alpha compositing by including ambient light contributions and supporting a custom backward pass to propagate gradients from the loss function back to the density and color fields [S1, unofficial]. It is distinguished from its sibling [Training Ray Compositing (Backward)](3893-training-ray-compositing-backward.md) by handling the forward composition and the joint forward-backward logic in a unified CUDA kernel interface, whereas the backward variant focuses specifically on the gradient computation logic [S1, unofficial].
+ 
+ ## How it works
+-The method implements differentiable volume rendering along rays. It assumes that the scene is represented by a set of samples along each ray, characterized by density, color, and step size. The forward pass computes the accumulated color, alpha, and depth, while the backward pass computes the gradients of the loss with respect to the input densities and colors.
++The forward pass computes the accumulated color, alpha, and depth, while the backward pass computes the gradients of the loss with respect to the input densities and colors [S1, unofficial]. The implementation relies on contiguous CUDA tensors [S1, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -14,5 +14,5 @@
+ *   `rgbs`: Float tensor of shape $[M, 3]$, representing view-dependent color for $M$ samples [S1, unofficial].
+ *   `ambient`: Float tensor of shape $[M]$, representing ambient light contribution for $M$ samples [S1, unofficial].
+-*   `deltas`: Float tensor of shape $[M, 2]$, representing step sizes (typically $t_{i+1}-t_i$ and other geometric info) for $M$ samples [S1, unofficial].
++*   `deltas`: Float tensor of shape $[M, 2]$, representing step sizes for $M$ samples [S1, unofficial].
+ *   `rays`: Integer tensor of shape $[N, 3]$, containing ray indices or identifiers for $N$ rays [S1, unofficial].
+ *   `T_thresh`: Float, transparency threshold. Default value is $10^{-4}$ [S1, unofficial].
+@@ -25,5 +25,5 @@
+ 
+ ### Data Structures and Layout
+-The implementation relies on contiguous CUDA tensors. The input data is structured as follows:
++The input data is structured as follows:
+ *   `sigmas`: $[M]$ float32.
+ *   `rgbs`: $[M, 3]$ float32.
+@@ -41,5 +41,5 @@
+ 
+ #### Forward Pass
+-1.  **Validation**: Ensure `sigmas`, `rgbs`, `ambient`, `deltas`, and `rays` are contiguous in memory [S1, unofficial].
++1.  **Validation**: Ensure `sigmas`, `rgbs`, and `ambient` are contiguous in memory [S1, unofficial].
+ 2.  **Dimensions**: Let $M$ be the number of samples (`sigmas.shape[0]`) and $N$ be the number of rays (`rays.shape[0]`) [S1, unofficial].
+ 3.  **Allocation**: Allocate output tensors `weights_sum` $[N]$, `ambient_sum` $[N]$, `depth` $[N]$, and `image` $[N, 3]$ initialized to zero [S1, unofficial].
+@@ -56,19 +56,14 @@
+ 
+ ### Pseudocode
+-The following Python-like pseudocode illustrates the PyTorch `autograd.Function` structure used in the implementation [S1, unofficial].
++The following Python-like pseudocode illustrates the autograd structure used in the implementation [S1, unofficial].
+ 
+ ```python
+-import torch
+-import _backend # Hypothetical CUDA extension module
+-
+-class TrainingRayCompositingSigma(torch.autograd.Function):
++class TrainingRayCompositingSigma:
+     @staticmethod
+-    def forward(ctx, sigmas, rgbs, ambient, deltas, rays, T_thresh=1e-4):
++    def forward(sigmas, rgbs, ambient, deltas, rays, T_thresh=1e-4):
+         # 1. Ensure contiguous
+         sigmas = sigmas.contiguous()
+         rgbs = rgbs.contiguous()
+         ambient = ambient.contiguous()
+-        deltas = deltas.contiguous()
+-        rays = rays.contiguous()
+         
+         # 2. Get dimensions
+@@ -77,34 +72,24 @@
+         
+         # 3. Allocate outputs
+-        weights_sum = torch.zeros(N, device=sigmas.device, dtype=sigmas.dtype)
+-        ambient_sum = torch.zeros(N, device=sigmas.device, dtype=sigmas.dtype)
+-        depth = torch.zeros(N, device=sigmas.device, dtype=sigmas.dtype)
+-        image = torch.zeros(N, 3, device=sigmas.device, dtype=sigmas.dtype)
++        weights_sum = zeros(N, device=sigmas.device, dtype=sigmas.dtype)
++        ambient_sum = zeros(N, device=sigmas.device, dtype=sigmas.dtype)
++        depth = zeros(N, device=sigmas.device, dtype=sigmas.dtype)
++        image = zeros(N, 3, device=sigmas.device, dtype=sigmas.dtype)
+         
+         # 4. Call forward kernel
+-        _backend.composite_rays_train_sigma_forward(
+-            sigmas, rgbs, ambient, deltas, rays, 
+-            weights_sum, ambient_sum, depth, image, T_thresh
+-        )
++        # _backend.composite_rays_train_sigma_forward(...)
+         
+         # 5. Save for backward
+-        ctx.save_for_backward(sigmas, rgbs, ambient, deltas, rays, 
+-                              weights_sum, ambient_sum, depth, image)
+-        ctx.M = M
+-        ctx.N = N
+-        ctx.T_thresh = T_thresh
++        saved_tensors = (sigmas, rgbs, ambient, deltas, rays, weights_sum, ambient_sum, depth, image)
++        ctx = (M, N, T_thresh)
+         
+-        return image, weights_sum, ambient_sum, depth
++        return image, weights_sum, ambient_sum, depth, saved_tensors, ctx
+ 
+     @staticmethod
+-    def backward(ctx, grad_image, grad_weights_sum, grad_ambient_sum, grad_depth):
+-        # Note: grad_depth is typically not used or propagated to sigmas [S1, unofficial]
++    def backward(grad_image, grad_weights_sum, grad_ambient_sum, grad_depth, saved_tensors, ctx):
++        sigmas, rgbs, ambient, deltas, rays, weights_sum, ambient_sum, depth, image = saved_tensors
++        M, N, T_thresh = ctx
+         
+         # 1. Retrieve saved tensors
+-        sigmas, rgbs, ambient, deltas, rays, weights_sum, ambient_sum, depth, image = ctx.saved_tensors
+-        M = ctx.M
+-        N = ctx.N
+-        T_thresh = ctx.T_thresh
+-        
+         # 2. Ensure gradients are contiguous
+         grad_image = grad_image.contiguous()
+@@ -113,35 +98,23 @@
+         
+         # 3. Initialize gradient tensors
+-        grad_sigmas = torch.zeros_like(sigmas)
+-        grad_rgbs = torch.zeros_like(rgbs)
+-        grad_ambient = torch.zeros_like(ambient)
++        grad_sigmas = zeros_like(sigmas)
++        grad_rgbs = zeros_like(rgbs)
++        grad_ambient = zeros_like(ambient)
+         
+         # 4. Call backward kernel
+-        _backend.composite_rays_train_sigma_backward(
+-            sigmas, rgbs, ambient, deltas, rays,
+-            weights_sum, ambient_sum, depth, image,
+-            grad_image, grad_weights_sum, grad_ambient_sum,
+-            grad_sigmas, grad_rgbs, grad_ambient, T_thresh
+-        )
++        # _backend.composite_rays_train_sigma_backward(...)
+         
+-        # 5. Call ambient-specific kernel if needed
+-        _backend.composite_rays_ambient_sigma(
+-            sigmas, rgbs, ambient, deltas, rays,
+-            weights_sum, ambient_sum, depth, image,
+-            grad_image, grad_weights_sum, grad_ambient_sum,
+-            grad_sigmas, grad_rgbs, grad_ambient, T_thresh
+-        )
++        # 5. Call ambient-specific kernel
++        # _backend.composite_rays_ambient_sigma(...)
+         
+-        # Return gradients in order of inputs
+         return grad_sigmas, grad_rgbs, grad_ambient, None, None, None
+ ```
+ 
+ ### Parameters
+-*   `T_thresh`: Float. The transparency threshold. Rays with accumulated transparency below this value are considered fully opaque and can be skipped or terminated for efficiency [S1, unofficial]. Default: $10^{-4}$.
++*   `T_thresh`: Float. The transparency threshold. Default: $10^{-4}$ [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Depth Gradient**: The gradient for depth is not propagated back to the density (`sigmas`) parameters [S1, unofficial]. This is a known limitation or design choice in this specific implementation.
+-*   **Contiguity**: The method requires all input tensors to be contiguous in memory. Non-contiguous tensors must be cloned or moved before passing to the kernel [S1, unofficial].
+-*   **Precision**: Standard float32 precision is used for all tensors. Precision issues may arise in very deep scenes or with very small step sizes, though the threshold `T_thresh` helps mitigate unnecessary computation for transparent regions [S1, unofficial].
++*   **Depth Gradient**: The gradient for depth is not propagated back to the density (`sigmas`) parameters [S1, unofficial].
++*   **Contiguity**: The method requires `sigmas`, `rgbs`, and `ambient` to be contiguous in memory. Non-contiguous tensors must be cloned or moved before passing to the kernel [S1, unofficial].
+ 
+ ## Subtopics
+@@ -164,5 +137,5 @@
+ 
+ ## Background
+-Training Ray Compositing (Sigma) is part of the differentiable volume rendering pipeline used in neural radiance fields (NeRF) and related methods, specifically those involving training with ambient lighting and uncertainty [S1, unofficial]. It is implemented in the ER-NeRF repository, which focuses on efficient neural rendering with audio and eye-driven animations [S1, unofficial]. The method builds on the principles of differentiable alpha compositing, adapting them for training scenarios where gradients must be computed for density and color parameters [S1, unofficial].
++Training Ray Compositing (Sigma) is part of the differentiable volume rendering pipeline used in neural radiance fields (NeRF) and related methods, specifically those involving training with ambient lighting and uncertainty [S1, unofficial]. The method builds on the principles of differentiable alpha compositing, adapting them for training scenarios where gradients must be computed for density and color parameters [S1, unofficial].
+ 
+ ## Sources

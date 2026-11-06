@@ -1,0 +1,110 @@
+# Hierarchical Data Structure Storage
+
+Also called: Octree storage layout
+
+## Overview
+Hierarchical Data Structure Storage is a method for compactly storing precomputed illumination samples in a spatial hierarchy to accelerate volume rendering in participating media [S1]. It solves the problem of efficiently querying and traversing large sets of illumination data by organizing samples into a tree structure stored in 1D buffers [S1]. It sets itself apart from sibling methods by maintaining two separate, redundant tree structures—one for single scattering and one for multiple scattering—to maximize data locality during traversal, whereas other methods often combine these or use different encoding schemes [S1].
+
+## How it works
+**Inputs:** A set of illumination samples computed for current lighting conditions. Each sample consists of position, direction, incoming radiance, scaled surface area, and interval length along the ray [S1].
+**Outputs:** Two 1D buffer arrays representing the single-scattering and multiple-scattering hierarchies, respectively [S1].
+
+**Data Structures:**
+The method uses a Structure of Arrays (SoA) to store the raw samples before hierarchy construction [S1]. Samples are grouped in sets of eight [S1].
+The hierarchy itself is stored as a 1D array of nodes. Each node is represented by two `float4` vectors (128 bits total):
+1.  `min_childIdx`: A `float4` where the first three components $(x_{min}, y_{min}, z_{min})$ store the minimum coordinates of the node's Axis-Aligned Bounding Box (AABB), and the fourth component stores the index of the first child in the 1D buffer [S1].
+2.  `max_nChild`: A `float4` where the first three components $(x_{max}, y_{max}, z_{max})$ store the maximum coordinates of the AABB, and the fourth component stores the number of children [S1].
+
+**Node Content by Scattering Type:**
+Although the tree topology (internal representation) is identical for both scattering types, the semantic meaning of the node data differs [S1]:
+*   **Single Scattering Nodes:** Store only the AABB of the node [S1].
+*   **Multiple Scattering Nodes:** Store the average position, average direction, average incoming radiance, volume of influence, and depth of the node [S1]. The values for a parent node are computed as the averages of the values of its children [S1].
+
+**Algorithm Steps:**
+1.  **Compute Samples:** Calculate illumination samples whenever lighting conditions change. Store individual samples in groups of eight in a temporary table using a Structure of Arrays layout [S1].
+2.  **Build Hierarchies:** Construct two separate tree structures from the samples:
+    *   For single scattering, aggregate samples to form nodes containing only the bounding box of the covered volume [S1].
+    *   For multiple scattering, aggregate samples to form nodes containing the averaged physical properties (position, direction, radiance, volume of influence, depth) [S1].
+3.  **Flatten to 1D Buffers:** Serialize both trees into 1D arrays. For each node in the tree, write the `min_childIdx` `float4` followed by the `max_nChild` `float4` into the respective buffer [S1].
+4.  **Store:** Keep the two buffers in memory. If lighting conditions remain identical, reuse these buffers; otherwise, recompute and replace them [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Data layout for raw samples (Structure of Arrays)
+class SampleTable:
+    positions: List[float3]
+    directions: List[float3]
+    incoming_radiance: List[float3]
+    scaled_surface_area: List[float]
+    interval_length: List[float]
+
+# Node representation in 1D buffer
+class Node:
+    # Stored as two consecutive float4s in the buffer
+    min_childIdx: float4  # xyz: AABB min, w: first child index
+    max_nChild: float4    # xyz: AABB max, w: number of children
+
+def build_hierarchical_storage(samples: SampleTable) -> tuple:
+    """
+    Builds two 1D buffers for single and multiple scattering hierarchies.
+    Returns (single_scattering_buffer, multiple_scattering_buffer)
+    """
+    single_buffer = []
+    multi_buffer = []
+    
+    # Note: The specific tree construction algorithm (e.g., bottom-up or top-down)
+    # is not detailed in the source, only the storage format and aggregation rules.
+    # We assume a helper function `build_tree` exists that creates the node structure.
+    
+    single_tree = build_tree(samples, type="single")
+    multi_tree = build_tree(samples, type="multi")
+    
+    # Flatten single scattering tree
+    for node in single_tree:
+        # Single scattering nodes only store AABB
+        # min_childIdx: (x_min, y_min, z_min, first_child_index)
+        # max_nChild: (x_max, y_max, z_max, num_children)
+        single_buffer.append(node.min_coords + [node.first_child_index])
+        single_buffer.append(node.max_coords + [node.num_children])
+        
+    # Flatten multiple scattering tree
+    for node in multi_tree:
+        # Multiple scattering nodes store averaged properties
+        # The storage format in the buffer is identical (AABB + indices),
+        # but the AABB is derived from the spatial extent of the children,
+        # and the semantic meaning of the node during traversal involves
+        # the averaged properties (position, direction, radiance, etc.)
+        # which are not explicitly stored in the 1D buffer fields described,
+        # but are implied to be associated with the node for traversal logic.
+        # Based on [S1], the buffer stores: "Each node contains its bounding box, 
+        # the index of its first child and the number of children."
+        # The "average position, direction..." are likely used during traversal 
+        # or stored in a parallel structure not fully detailed in the snippet,
+        # OR the "volume of influence" and other metrics are derived/used 
+        # during the two-step traversal described in [S1] section 4.3.
+        # However, the explicit storage definition is strictly the AABB and indices.
+        
+        multi_buffer.append(node.min_coords + [node.first_child_index])
+        multi_buffer.append(node.max_coords + [node.num_children])
+        
+    return single_buffer, multi_buffer
+```
+
+**Edge Cases and Pitfalls:**
+*   **Redundancy:** The method stores the hierarchy twice (once for single, once for multiple scattering). This introduces memory redundancy but is a deliberate trade-off to increase data locality and reduce traversal time [S1].
+*   **Lighting Changes:** The hierarchy is only valid for the specific lighting conditions under which it was computed. Any change in lighting requires a full recomputation of samples and rebuilding of the hierarchies [S1].
+*   **Precision:** The use of `float4` for bounding boxes and indices assumes sufficient precision for the scene scale. Indexing into the 1D buffer requires the child index to be representable within the floating-point format without loss of integer precision for large trees.
+
+## Operating characteristics
+*   **Memory:** Uses approximately double the memory for the tree structure compared to a single hierarchy due to the separation of single and multiple scattering data [S1]. The raw sample storage uses a Structure of Arrays, which is memory-efficient for the SoA access pattern but requires grouping samples in eights [S1].
+*   **Time Complexity:** Traversal is optimized via a "Two-Steps Hierarchy Traversal" method (coarse subtree extraction followed by fine traversal), which is the main computational cost [S1]. The storage format (1D buffer with AABB and indices) allows for efficient cache-friendly traversal.
+*   **Strengths:** High data locality for scattering computations; fast traversal due to optimized two-step algorithm; compact storage of bounding boxes and indices [S1].
+*   **Limitations:** High memory usage due to redundancy; requires full rebuild on lighting changes; limited to homogeneous participating media with refractive boundaries as per the source context [S1].
+
+## Background
+The method was introduced in the paper "Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries" [S1]. It is part of a point-based rendering approach for volume rendering, specifically designed to handle complex lighting interactions in participating media by precomputing and hierarchically storing illumination samples [S1].
+
+## Sources
+[S1] Point-Based Rendering for Homogeneous Participating Media with Refractive Boundaries, https://doi.org/10.1109/TVCG.2017.2768525, fetched 2026-10-26

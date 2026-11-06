@@ -1,115 +1,124 @@
 # View Matrix Construction
 
-Also called: LookAt Matrix, LookAt Matrix Construction, Camera Matrix Construction, gluLookAt
+Also called: Camera Matrix Construction, LookAt Matrix, LookAt Matrix Construction, gluLookAt, viewmatrix
 
 ## Overview
-View Matrix Construction builds a $4 \times 4$ transformation matrix that maps coordinates from world space to camera (view) space, or conversely transforms rays from view space to world space, given an eye position, a target (look-at) point, and an up vector [S1, S3, S5, S9, unofficial]. It solves the problem of defining a camera's extrinsic parameters in a 3D scene by establishing an orthonormal basis aligned with the viewing direction [S3, S9, unofficial]. It differs from [NDC Ray Transformation](905-ndc-ray-transformation.md) by handling only the rigid body rotation and translation of the camera, not the projection into screen coordinates, and from [Point to Camera Transformation](1660-point-to-camera-transformation.md) by explicitly constructing the full basis vectors from geometric constraints rather than applying a pre-defined transform [S1, S3, S9, unofficial].
+View Matrix Construction generates a $4 \times 4$ transformation matrix that maps coordinates from world space to camera (view) space, or conversely transforms rays from view space to world space, given an eye position, a target point, and an up vector [S1, S3, S5, S9, unofficial]. It solves the problem of defining a camera's orientation and position relative to the scene by constructing an orthonormal basis aligned with the viewing direction [S3, S9, unofficial]. Unlike [NDC Ray Transformation](905-ndc-ray-transformation.md), which handles projection and depth mapping, or [Point to Camera Transformation](1660-point-to-camera-transformation.md), which may apply arbitrary rigid transforms, this method specifically derives the camera's local coordinate frame from geometric constraints (eye, target, up) [S3, S9, unofficial]. It sets itself apart by explicitly ensuring the camera looks down the negative z-axis in view space, a convention required for standard ray marching and volume rendering pipelines [S3, S9, unofficial].
 
 ## How it works
 **Inputs:**
-- `eye`: A 3D vector representing the camera position in world space [S1, S3, S5, S9, unofficial].
-- `center` (or `target`): A 3D vector representing the point the camera is looking at in world space [S1, S3, S5, S9, unofficial].
-- `up`: A 3D vector indicating the camera's local "up" direction in world space [S1, S3, S5, S9, unofficial].
+*   $\mathbf{e}$ (eye): The camera position in world coordinates (float3) [S1, S9, unofficial].
+*   $\mathbf{t}$ (target/center): The point the camera is looking at in world coordinates (float3) [S1, S9, unofficial].
+*   $\mathbf{up}_{in}$ (up): The approximate "up" direction in world coordinates (float3), typically $(0, 1, 0)$ or $(0, 0, 1)$ depending on the coordinate system (e.g., RAS) [S1, S9, unofficial].
 
 **Outputs:**
-- A $4 \times 4$ matrix. In the standard convention used by most sources, this matrix transforms view-space coordinates to world-space coordinates (camera-to-world) [S3, S9, unofficial]. When used to transform world-space points to view-space, the inverse of this matrix is applied [S5, unofficial]. The matrix layout places the basis vectors in the first three columns (or rows, depending on row-major/column-major storage interpretation, but logically forming the rotation component) and the eye position in the translation component [S1, S5, S9, unofficial].
+*   $M$: A $4 \times 4$ matrix.
+    *   If transforming **view-to-world** (camera-to-world, C2W): The first three columns are the basis vectors $\mathbf{s}, \mathbf{u}, -\mathbf{f}$, and the fourth column is $\mathbf{e}$ [S3, S9, unofficial].
+    *   If transforming **world-to-view** (view matrix): The first three rows are $\mathbf{s}^T, \mathbf{u}^T, -\mathbf{f}^T$, and the fourth row is $(-\mathbf{e} \cdot \mathbf{s}, -\mathbf{e} \cdot \mathbf{u}, -\mathbf{e} \cdot \mathbf{f}, 1)$ [S5, S9, unofficial]. Note: Many implementations in volume rendering contexts (like [S3, S9, unofficial]) construct the C2W matrix directly for ray generation, assuming the view space camera looks down $-z$.
 
 **Data Structures:**
-- Vectors `eye`, `center`, `up`, `f`, `s`, `u` are 3-component floating-point vectors (e.g., `float3` or `vec3`) [S3, S9, unofficial].
-- The output matrix is a $4 \times 4$ structure. The first three columns (in column-major layout) or rows (in row-major layout) contain the basis vectors `s`, `u`, and `-f` with a $w$-component of $0.0$. The fourth column contains the eye position `eye` with a $w$-component of $1.0$ [S1, S5, S9, unofficial].
+*   Vectors $\mathbf{f}, \mathbf{s}, \mathbf{u}$ are 3D floating-point vectors.
+*   Matrix $M$ is a $4 \times 4$ array of floats.
 
 **Steps:**
-1. Calculate the forward vector `f` by normalizing the difference between the center and the eye:
-   $$ f = \text{normalize}(center - eye) $$
-   This vector points from the camera to the target [S1, S3, S5, S9, unofficial]. Note that in view space, the camera looks down the negative z-axis, so the basis vector corresponding to the view direction is $-f$ [S3, S9, unofficial].
+1.  **Forward Vector ($\mathbf{f}$):** Calculate the direction from the eye to the target and normalize it.
+    $$ \mathbf{f} = \text{normalize}(\mathbf{t} - \mathbf{e}) $$
+    This vector represents the camera's local negative z-axis in world space [S1, S3, S9, unofficial].
 
-2. Calculate the side (right) vector `s` by taking the cross product of `f` and `up`, then normalizing:
-   $$ s = \text{normalize}(f \times up) $$
-   This vector is orthogonal to the viewing plane [S3, S5, S9, unofficial].
+2.  **Side/Right Vector ($\mathbf{s}$):** Calculate the cross product of the forward vector and the input up vector, then normalize.
+    $$ \mathbf{s} = \text{normalize}(\text{cross}(\mathbf{f}, \mathbf{up}_{in})) $$
+    This vector represents the camera's local x-axis (right) [S1, S3, S9, unofficial].
+    *   *Pitfall:* If $\mathbf{f}$ is parallel to $\mathbf{up}_{in}$, the cross product is zero, causing division by zero during normalization. A guard is required [G].
 
-3. Calculate the true up vector `u` by taking the cross product of `s` and `f`:
-   $$ u = s \times f $$
-   This ensures `u` is orthogonal to both `s` and `f`, completing the orthonormal basis [S3, S5, S9, unofficial]. Note that `u` is not normalized again if `s` and `f` are orthonormal, as the cross product of two orthonormal vectors is already unit length [S9, unofficial].
+3.  **Up Vector ($\mathbf{u}$):** Calculate the cross product of the side vector and the forward vector. Normalization is often omitted here as $\mathbf{s}$ and $\mathbf{f}$ are orthonormal, but some implementations normalize for robustness against floating-point drift.
+    $$ \mathbf{u} = \text{cross}(\mathbf{s}, \mathbf{f}) $$
+    This vector represents the camera's local y-axis (up) [S3, S9, unofficial].
 
-4. Construct the $4 \times 4$ matrix. Using column-major storage (common in OpenGL and many graphics APIs), the matrix $M$ is:
-   $$
-   M = \begin{bmatrix}
-   s_x & u_x & -f_x & 0 \\
-   s_y & u_y & -f_y & 0 \\
-   s_z & u_z & -f_z & 0 \\
-   eye_x & eye_y & eye_z & 1
-   \end{bmatrix}
-   $$
-   Here, the first three columns are the basis vectors `s`, `u`, and `-f`, and the fourth column is the translation `eye` [S1, S5, S9, unofficial]. If row-major storage is used, these vectors appear as rows [S9, unofficial].
+4.  **Matrix Assembly:**
+    *   **Camera-to-World (C2W) Matrix:** Construct the matrix where the first three columns are $\mathbf{s}, \mathbf{u}, -\mathbf{f}$ and the fourth column is the eye position $\mathbf{e}$. The w-components of the basis vectors are 0.0, and the bottom-right element is 1.0.
+        $$
+        M_{c2w} = \begin{bmatrix}
+        s_x & u_x & -f_x & e_x \\
+        s_y & u_y & -f_y & e_y \\
+        s_z & u_z & -f_z & e_z \\
+        0 & 0 & 0 & 1
+        \end{bmatrix}
+        $$
+        This transforms a vector from view space (where the camera looks down $-z$) to world space [S3, S9, unofficial].
+    *   **World-to-View Matrix:** If the inverse is needed, it is the transpose of the rotational part combined with the translation of the eye. However, in many ray marching shaders, the C2W matrix is used to transform ray directions, while the eye position is used directly for origins [S3, S9, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def view_matrix(eye, center, up):
+import math
+
+def normalize(v):
+    length = math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+    if length == 0:
+        return [0.0, 0.0, 0.0] # Guard against degenerate input
+    return [v[0]/length, v[1]/length, v[2]/length]
+
+def cross(a, b):
+    return [
+        a[1]*b[2] - a[2]*b[1],
+        a[2]*b[0] - a[0]*b[2],
+        a[0]*b[1] - a[1]*b[0]
+    ]
+
+def view_matrix_construction(eye, target, up_in):
     """
-    Constructs a 4x4 view matrix (camera-to-world) from eye, center, and up vectors.
-    
-    Args:
-        eye: (3,) array-like, camera position in world space.
-        center: (3,) array-like, target point in world space.
-        up: (3,) array-like, up vector in world space.
-        
-    Returns:
-        (4, 4) array-like, the transformation matrix.
+    Constructs a 4x4 Camera-to-World matrix.
+    eye: (x, y, z)
+    target: (x, y, z)
+    up_in: (x, y, z)
+    Returns: list of 4 lists (rows) or list of 4 tuples (cols) depending on convention.
+    Here we return a list of 4 columns, each a tuple of 4 floats, matching [S3, S9, unofficial].
     """
-    # Step 1: Forward vector (camera looks down -z in view space)
-    f = normalize(center - eye)
+    # 1. Forward vector (negative z in view space)
+    f = normalize([target[0]-eye[0], target[1]-eye[1], target[2]-eye[2]])
     
-    # Step 2: Side vector (right vector)
-    s = normalize(cross(f, up))
+    # 2. Side vector (x axis)
+    s = normalize(cross(f, up_in))
     
-    # Step 3: True up vector
+    # 3. Up vector (y axis)
     u = cross(s, f)
     
-    # Step 4: Construct matrix
-    # Using column-major layout: columns are s, u, -f, eye
-    # Row 0: s.x, u.x, -f.x, 0
-    # Row 1: s.y, u.y, -f.y, 0
-    # Row 2: s.z, u.z, -f.z, 0
-    # Row 3: eye.x, eye.y, eye.z, 1
+    # 4. Construct Matrix (Column-Major representation as lists of columns)
+    # Col 0: s, Col 1: u, Col 2: -f, Col 3: eye
+    col0 = (s[0], s[1], s[2], 0.0)
+    col1 = (u[0], u[1], u[2], 0.0)
+    col2 = (-f[0], -f[1], -f[2], 0.0)
+    col3 = (eye[0], eye[1], eye[2], 1.0)
     
-    matrix = [
-        [s[0], u[0], -f[0], 0.0],
-        [s[1], u[1], -f[1], 0.0],
-        [s[2], u[2], -f[2], 0.0],
-        [eye[0], eye[1], eye[2], 1.0]
-    ]
-    
-    return matrix
+    return [col0, col1, col2, col3]
 ```
 
 **Parameters:**
-- `eye`: Camera position. Typical values depend on the scene scale [S1, S9, unofficial].
-- `center`: Look-at target. Often the center of the volume or scene [S1, S3, unofficial].
-- `up`: Up vector. Typically $(0, 1, 0)$ or $(0, 0, 1)$ depending on the coordinate system [S1, S5, unofficial].
+*   `fov`: Not directly used in the view matrix construction itself, but often passed alongside to compute the projection matrix [S11, S12, unofficial].
+*   `focD`: Focal distance, used in ray direction calculation, not the view matrix basis [S6, unofficial].
 
 **Edge Cases and Pitfalls:**
-- If `f` and `up` are parallel (or anti-parallel), the cross product `s` becomes zero, leading to a degenerate matrix [S9, unofficial]. This is a common pitfall when the camera is looking straight up or down relative to the global up vector [G]. A guard should check for this condition and substitute a default up vector if necessary.
-- The matrix assumes the camera looks down the negative z-axis in view space [S3, S9, unofficial]. When transforming direction vectors (rays), the $w$-component must be $0.0$ to ensure rotation is applied but translation is not [S9, unofficial].
-- The function assumes the center of the camera is aligned with the negative z-axis in view space when calculating ray marching directions [S3, unofficial].
+*   **Parallel Vectors:** If $\mathbf{f}$ is parallel to $\mathbf{up}_{in}$, $\mathbf{s}$ becomes zero-length. The implementation must handle this, typically by using a default right vector or perturbing the up vector [G].
+*   **Coordinate System Convention:** The method assumes the camera looks down the negative z-axis in view space [S3, S9, unofficial]. If the rendering engine uses positive z, the sign of $\mathbf{f}$ in the matrix must be flipped.
+*   **W-Component:** When transforming direction vectors (rays), the w-component must be 0.0. When transforming points (eye position), the w-component must be 1.0 [S9, unofficial].
 
 ## Subtopics
 
 ### [Average Pose Calculation](1645-average-pose-calculation.md)
-Computes a representative camera pose from a set of input camera poses by averaging their translations and rotations. It differs from simple vector averaging by using Singular Value Decomposition (SVD) to ensure the resulting rotation matrix remains orthogonal and valid, addressing the non-linear nature of rotation space. This method is primarily used to initialize a central view or create a canonical coordinate system for a scene.
+Computes a representative camera pose (origin and orientation) from a set of input camera poses, typically used to initialize a scene or define a central viewing direction for volume rendering and NeRF training. It differs from [Camera Pose Transformation](1672-camera-pose-transformation.md) by aggregating multiple poses into one, and from [Orbit Camera Basis Computation](1749-orbit-camera-basis-computation.md) by not assuming a fixed orbital path. It addresses the problem of defining a canonical coordinate frame or initial camera position when no single pose is dominant.
 
 ### [Camera Pose Transformation](1672-camera-pose-transformation.md)
-Camera Pose Transformation applies geometric transformations—specifically translation and rotation—to a point or coordinate system to define the camera's position and orientation within a 3D scene. It solves the problem of mapping local scene coordinates to the camera's view space or adjusting the camera's extrinsic parameters relative to the world. It sets itself apart from [View Matrix Construction](1644-view-matrix-construction.md) by operating on individual points or pose structures directly rather than constructing a full 4x4 matrix from basis vectors, and from [Average Pose Calculation](1645-average-pose-calculation.md) by performing a single rigid transformation rather than aggregating multiple poses.
+Camera Pose Transformation applies geometric transformations—specifically rotation and translation—to align a camera or scene within a 3D coordinate system. It solves the problem of positioning the viewing origin and orientation relative to the world or object space. It differs from [View Matrix Construction](1644-view-matrix-construction.md) by operating on individual pose components (rotation angles, translation vectors) rather than constructing the final 4x4 view matrix from basis vectors. It differs from [Camera Coordinate Homogenization and Rigid Transformation](4005-camera-coordinate-homogenization-and-rigid-transformation.md) by focusing on the construction and application of the pose itself, whereas the sibling method handles the coordinate frame conversion and rigid body application.
 
 ### [Orbit Camera Basis Computation](1749-orbit-camera-basis-computation.md)
-Computes an orthonormal camera basis (eye, forward, right, up) for an orbit camera looking at a target from a distance, oriented by yaw and pitch angles.
+Computes an orthonormal camera basis (eye position, forward, right, and up vectors) for an orbit camera that looks at a fixed target center from a specified distance, oriented by spherical yaw and pitch angles. It solves the problem of determining the viewing direction and position for navigation in 3D space based on user input angles. It sets itself apart from full 3-axis Euler rotation by excluding roll, and from quaternion-based approaches by using explicit trigonometric vector construction.
 
 ### [General Perspective Transformation](1845-general-perspective-transformation.md)
-The General Perspective Transformation is a camera model where both the eye point and the projection plane are positioned away from the world origin. It solves the problem of numerical instability in screen-z values that occurs when standard perspective projections (with the eye at the origin) are applied to scenes where the visibility bounding box (Vbb) is far from the origin. By shifting the eye and projection plane, it ensures the Jacobian of the transformation is the identity at the center of the Vbb, minimizing floating-point errors during the compositing of closely spaced geometry. It differs from standard textbook perspective matrices by explicitly decoupling the eye position from the origin to optimize precision for specific scene bounds.
+The General Perspective Transformation is a camera model where both the eye point and the projection plane are positioned away from the world origin. It solves the problem of numerical instability in screen-z values that occurs when standard perspective projections are applied to scenes where the visibility bounding box (Vbb) is far from the origin. By shifting the eye and projection plane, it ensures the Jacobian of the transformation is the identity at the center of the Vbb, minimizing floating-point errors during the compositing of closely spaced geometry. It differs from standard textbook perspective matrices by explicitly decoupling the eye position from the origin to optimize precision for specific scene bounds.
 
 ### [Custom Matrix Math Library](3216-custom-matrix-math-library.md)
-A custom implementation of 3D transformation matrices in JavaScript, providing native handling of translation, scaling, perspective projection, and look-at operations without external dependencies. It distinguishes itself by offering explicit, unoptimized implementations for small fixed-size matrices, prioritizing clarity and correctness over performance, serving as the computational core for view matrix construction and ray generation logic.
+A custom implementation of 3D transformation matrices in JavaScript, providing native handling of translation, scaling, perspective projection, and look-at operations without external dependencies. It serves as the computational core for view matrix construction and ray generation logic within the project.
 
 ### [Camera Look-at Basis Construction](3990-camera-look-at-basis-construction.md)
 Constructs a 3x3 rotation matrix that transforms world-space vectors into camera-local space, given a camera origin and look-at target. It builds an orthogonal camera coordinate system (basis) from a camera center and a look-at point by deriving an up vector orthogonal to the viewing direction, then computing the right vector via cross product. It differs from [Orbit Camera Basis Computation](1749-orbit-camera-basis-computation.md) by accepting an arbitrary look-at target rather than spherical angles, and from [General Perspective Transformation](1845-general-perspective-transformation.md) by producing only the rotational component of the extrinsic transform, not the full projection matrix.
@@ -118,29 +127,22 @@ Constructs a 3x3 rotation matrix that transforms world-space vectors into camera
 View Transformations define the pipeline for mapping volume data from its native object coordinate system to the final image plane. This method manages four distinct transformation matrices (modeling, viewing, projection, and viewport) that collectively handle the geometric positioning of the volume, the camera orientation, and the final clipping and mapping to screen coordinates. It is distinct from sibling methods like [Camera Look-at Basis Construction](3990-camera-look-at-basis-construction.md) by managing the entire state stack of transformations rather than computing a single basis, and differs from [View Matrix Construction](1644-view-matrix-construction.md) by handling the full pipeline including projection and viewport stages.
 
 ### Inverse View Matrix Loading
-Copies the inverse view matrix (3 float4s, 12 floats) to device symbol for ray direction transformation [S12, unofficial]. It involves copying 12 floats (representing the 3x4 rotation/translation part of the inverse matrix) to a device symbol `invViewMatrix` [S12, unofficial].
+Copies the inverse view matrix (3 float4s, 12 floats) to device symbol for ray direction transformation. It involves copying 12 floats (3x4 matrix) to `invViewMatrix` symbol [S13, unofficial].
+
+### UVW-based Camera Translation
+Defines a fixed up vector and camera position, normalizes them, and computes right and forward vectors via cross products. It builds translation and rotation matrices, inverts the rotation, and combines them to transform the camera position. This method is used for adjusting camera positions in specific coordinate systems (UVW) [S14, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- Time: $O(1)$, as it involves a fixed number of vector operations (subtraction, normalization, cross products) and matrix construction.
-- Memory: $O(1)$, storing a few 3D vectors and a $4 \times 4$ matrix.
-
-**Measured Performance:**
-- Not given in the sources.
-
-**Scaling:**
-- The method scales linearly with the number of cameras if constructing matrices for multiple views, but each individual construction is constant time.
-
-**Strengths and Limitations:**
-- Strengths: Simple, efficient, and widely supported. Provides a clear geometric interpretation of camera pose.
-- Limitations: Degenerates when the view direction is parallel to the up vector. Does not handle projection or field of view.
-
-**When to use it and when not:**
-- Use when you need to define a camera's orientation and position in world space for ray generation or coordinate transformation.
-- Do not use when you need to project 3D points to 2D screen coordinates (use [NDC Ray Transformation](905-ndc-ray-transformation.md) or a projection matrix).
+*   **Time Complexity:** $O(1)$ per camera. The operations involve a fixed number of vector subtractions, normalizations, cross products, and matrix assignments.
+*   **Memory Complexity:** $O(1)$. Requires storage for a few temporary vectors and a single $4 \times 4$ matrix.
+*   **Performance:** Extremely fast, suitable for per-frame camera updates in real-time rendering or iterative volume rendering [S1, S9, unofficial].
+*   **Strengths:** Intuitive input (eye, target, up), robust basis construction, widely supported in graphics APIs (e.g., `gluLookAt`) and libraries [S3, S9, unofficial].
+*   **Limitations:** Sensitive to degenerate inputs (parallel vectors). Does not handle projection or field-of-view, which must be computed separately [S11, S12, unofficial].
+*   **When to use:** When the camera's position and orientation are defined by geometric constraints (e.g., tracking a target, orbiting a center).
+*   **When not to use:** When the camera orientation is defined by quaternions or Euler angles directly, or when a full projection matrix is needed (use [General Perspective Transformation](1845-general-perspective-transformation.md) or similar).
 
 ## Background
-The LookAt matrix is a standard concept in computer graphics, originally popularized by the OpenGL utility function `gluLookAt` [S3, unofficial]. It is used to construct a view matrix that aligns the camera with a specified target and up vector. In volume rendering, it is essential for generating rays from the camera's perspective through the volume data [S1, S3, S9, unofficial].
+The LookAt matrix construction is a fundamental technique in computer graphics, originally popularized by OpenGL's `gluLookAt` function [S3, unofficial]. It is widely used in volume rendering pipelines to define the camera's extrinsic parameters. Implementations vary slightly in the order of cross products and the sign of the forward vector, depending on the coordinate system (left-handed vs. right-handed) and whether the matrix transforms world-to-view or view-to-world [S1, S3, S5, S9, unofficial]. In modern differentiable volume rendering frameworks like `flashdrr`, it is adapted to work with PyTorch tensors and specific coordinate systems like RAS (Right-Anterior-Superior) [S1, unofficial].
 
 ## Sources
 [S1] pcarnah/flashdrr, https://github.com/pcarnah/flashdrr, fetched 2026-10-26 (unofficial)
@@ -152,6 +154,8 @@ The LookAt matrix is a standard concept in computer graphics, originally popular
 [S7] ChadMcKinney/Dirac-Sea-Engine, https://github.com/ChadMcKinney/Dirac-Sea-Engine, fetched 2026-10-26 (unofficial)
 [S8] Ray Marching and Signed Distance Functions, https://github.com/guevara/read-it-later/issues/4535, fetched 2026-10-26 (unofficial)
 [S9] markpmlim/RaymarchingAndSDF, https://github.com/markpmlim/RaymarchingAndSDF, fetched 2026-10-27 (unofficial)
-[S10] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
-[S11] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)
-[S12] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
+[S10] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)
+[S11] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
+[S12] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)
+[S13] ojaisnielsen/dtu-2010-cuda-volume-rendering, https://github.com/ojaisnielsen/dtu-2010-cuda-volume-rendering, fetched 2026-10-27 (unofficial)
+[S14] 3D-Mesh-Voxelizer - GitHub, https://github.com/Talkative-Banana/3D-Mesh-Voxelizer, fetched 2026-10-26 (unofficial)

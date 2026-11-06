@@ -6,34 +6,34 @@ Also called: Plenoxel, Plenoxel grid, Sparse Plenoxel storage, plenoptic voxels
 Plenoxel is an explicit, sparse 3D grid representation for photorealistic view synthesis that stores opacity and spherical harmonic (SH) coefficients directly, optimized via gradient descent without neural networks [S1]. It differs from its sibling [Differentiable Volumetric Rendering (DVR)](775-differentiable-volumetric-rendering-dvr.md) by using a discrete, sparse voxel structure with trilinear interpolation rather than a continuous implicit field, and from [PlenOctrees](https://arxiv.org/abs/2112.05131) by maintaining continuity in the plenoptic function through interpolation, which is critical for successful optimization [S1].
 
 ## How it works
-**Inputs:** A set of calibrated 2D images with known camera poses.
-**Outputs:** A sparse voxel grid containing opacity ($\sigma$) and spherical harmonic coefficients for RGB channels, optimized to minimize reconstruction error.
+**Inputs:** A set of calibrated 2D images with known camera poses [S1].
+**Outputs:** A sparse voxel grid containing opacity ($\sigma$) and spherical harmonic coefficients for RGB channels, optimized to minimize reconstruction error [S1].
 
 ### Data Structures
 The representation consists of two components [S1]:
-1.  **Dense Pointer Grid:** A 3D array where each cell contains a pointer (or `NULL`). The grid dimensions are determined by the scene bounds and voxel resolution.
-2.  **Data Table:** A contiguous array storing values for occupied voxels only. Each entry contains:
-    *   A scalar opacity value $\sigma$.
-    *   A vector of Spherical Harmonic coefficients for the Red, Green, and Blue channels.
+1.  **Dense Pointer Grid:** A 3D array where each cell contains a pointer (or `NULL`) [S1]. The grid dimensions are determined by the scene bounds and voxel resolution [G].
+2.  **Data Table:** A contiguous array storing values for occupied voxels only [S1]. Each entry contains:
+    *   A scalar opacity value $\sigma$ [S1].
+    *   A vector of Spherical Harmonic coefficients for the Red, Green, and Blue channels [S1].
 
 **Layout Details:**
-*   The SH coefficients are stored contiguously.
+*   The SH coefficients are stored contiguously [S1].
 *   Degree 2 SH is used, requiring 9 coefficients per color channel, totaling 27 harmonic coefficients per voxel [S1].
 *   `NULL` cells in the pointer grid are treated as having zero opacity and zero SH coefficients [S1].
 
 ### Algorithm Steps
 
-1.  **Initialization:** Initialize the dense pointer grid with `NULL`. Initialize the data table. Set initial voxel parameters (e.g., small opacity, zero SH coefficients) [S1].
-2.  **Pruning (Optional/Iterative):** Remove empty voxels to manage memory. Thresholding strategies include weight-based thresholding (for synthetic/360° scenes) or opacity-based thresholding (for forward-facing scenes) [S1].
-3.  **Sampling:** For each training ray, sample points along the ray path.
-4.  **Interpolation:** For each sample point, identify the 8 surrounding voxels in the dense pointer grid. Retrieve the pointers to the data table entries. If a pointer is `NULL`, treat the value as zero. Trilinearly interpolate the opacity $\sigma$ and the SH coefficients from the 8 neighboring voxel corners to obtain the values at the sample point [S1].
+1.  **Initialization:** Initialize the dense pointer grid with `NULL` and the data table [G].
+2.  **Pruning:** Remove empty voxels to manage memory [S1]. Thresholding strategies include weight-based thresholding for synthetic/360° scenes and opacity-based thresholding for forward-facing scenes [S1].
+3.  **Sampling:** For each training ray, sample points along the ray path [G].
+4.  **Interpolation:** For each sample point, identify the 8 surrounding voxels in the dense pointer grid [G]. Retrieve the pointers to the data table entries [S1]. If a pointer is `NULL`, treat the value as zero [S1]. Trilinearly interpolate the opacity $\sigma$ and the SH coefficients from the 8 neighboring voxel corners to obtain the values at the sample point [S1].
 5.  **Color Evaluation:** Evaluate the SH basis functions at the viewing direction for the sample point using the interpolated coefficients to compute the color $\mathbf{c}_i$ for each RGB channel [S1].
 6.  **Rendering:** Compute the ray color $\hat{C}(\mathbf{r})$ using the volume rendering equation [S1]:
     $$
     \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i(1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
     $$
     where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ is the transmittance, $\sigma_i$ is the opacity, $\delta_i$ is the distance to the next sample, and $\mathbf{c}_i$ is the color [S1].
-7.  **Loss Computation:** Calculate the Mean Squared Error (MSE) between the rendered color $\hat{C}(\mathbf{r})$ and the ground truth image color. Add a Total Variation (TV) regularizer to the loss [S1].
+7.  **Loss Computation:** Calculate the Mean Squared Error (MSE) between the rendered color $\hat{C}(\mathbf{r})$ and the ground truth image color [S1]. Add a Total Variation (TV) regularizer to the loss [S1].
 8.  **Optimization:** Update the voxel coefficients (opacity and SH) using gradient descent (e.g., RM-SProp) [S1].
 9.  **Clipping:** Clip negative color values to 0 using a ReLU to preserve linearity for trilinear interpolation, unlike NeRF which uses sigmoid [S1].
 
@@ -44,7 +44,7 @@ The representation consists of two components [S1]:
 ```python
 import math
 
-def evaluate_plenoxel(ray_origin, ray_direction, grid, data_table, grid_bounds, voxel_size):
+def evaluate_plenoxel(ray_origin, ray_direction, grid, data_table, grid_min, grid_max, voxel_size):
     """
     Renders a single ray using the Plenoxel data structure.
     
@@ -53,150 +53,155 @@ def evaluate_plenoxel(ray_origin, ray_direction, grid, data_table, grid_bounds, 
         ray_direction: (x, y, z) tuple (normalized)
         grid: 3D array of pointers (None or index into data_table)
         data_table: List of voxel data objects
-        grid_bounds: (min_x, min_y, min_z, max_x, max_y, max_z)
+        grid_min: (min_x, min_y, min_z) tuple
+        grid_max: (max_x, max_y, max_z) tuple
         voxel_size: float, size of one voxel side
         
     Returns:
         color: (r, g, b) tuple
     """
     # 1. Determine ray segment bounds within the grid
-    t_min, t_max = compute_ray_grid_intersection(ray_origin, ray_direction, grid_bounds)
-    if t_max < 0:
+    t_min, t_max = compute_ray_grid_intersection(ray_origin, ray_direction, grid_min, grid_max)
+    if t_max < 0 or t_min > t_max:
         return (0.0, 0.0, 0.0)
     
-    # 2. Sample points along the ray
-    # Number of samples N is typically fixed or adaptive. 
-    # For simplicity, we assume a fixed step size or number of samples.
     num_samples = 100
-    t_vals = [t_min + i * (t_max - t_min) / num_samples for i in range(1, num_samples + 1)]
-    
+    delta_t = (t_max - t_min) / num_samples
     accumulated_transmittance = 1.0
-    accumulated_color = (0.0, 0.0, 0.0)
+    accumulated_color = [0.0, 0.0, 0.0]
     
-    for t in t_vals:
-        # 3. Get sample position
+    for i in range(1, num_samples + 1):
+        t = t_min + i * delta_t
         pos = (
             ray_origin[0] + t * ray_direction[0],
             ray_origin[1] + t * ray_direction[1],
             ray_origin[2] + t * ray_direction[2]
         )
         
-        # 4. Trilinear Interpolation
-        # Find the 8 surrounding voxel indices
-        # Map world coordinates to grid indices
-        # grid_idx = floor((pos - grid_min) / voxel_size)
-        # We need the fractional part for interpolation
-        # Let's assume helper functions for grid mapping exist or are trivial
+        # 2. Trilinear Interpolation
+        sigma, sh_r, sh_g, sh_b = trilinear_interpolate(pos, grid, data_table, grid_min, voxel_size)
         
-        # Get the 8 corner values
-        # This requires accessing the dense grid to get pointers, then data_table
-        # For brevity, we assume a function `get_trilinear_values` handles the pointer chasing
-        # and interpolation logic.
+        # 3. Evaluate SH for viewing direction
+        r = evaluate_sh_degree2(sh_r, ray_direction)
+        g = evaluate_sh_degree2(sh_g, ray_direction)
+        b = evaluate_sh_degree2(sh_b, ray_direction)
         
-        sigma, sh_coeffs_r, sh_coeffs_g, sh_coeffs_b = get_trilinear_values(
-            pos, grid, data_table, grid_bounds, voxel_size
-        )
-        
-        # 5. Evaluate SH for viewing direction
-        # Direction is relative to the sample point? Usually camera space or world space.
-        # Plenoxels use viewing direction.
-        view_dir = ray_direction # Simplified; usually needs to be normalized and possibly transformed
-        
-        r = evaluate_sh(sh_coeffs_r, view_dir)
-        g = evaluate_sh(sh_coeffs_g, view_dir)
-        b = evaluate_sh(sh_coeffs_b, view_dir)
-        
-        # 6. Clip negative colors (ReLU)
+        # 4. Clip negative colors (ReLU)
         r = max(0.0, r)
         g = max(0.0, g)
         b = max(0.0, b)
         
-        # 7. Volume Rendering Step
-        # delta_t is the distance between samples. 
-        # For uniform sampling in t, delta_t = (t_max - t_min) / num_samples
-        delta_t = (t_max - t_min) / num_samples
-        
-        # Convert opacity sigma (usually defined per unit length) to attenuation over delta_t
-        # The formula uses sigma * delta_t
+        # 5. Volume Rendering Step
         attenuation = math.exp(-sigma * delta_t)
         alpha = 1.0 - attenuation
-        
         weight = accumulated_transmittance * alpha
         
-        accumulated_color = (
-            accumulated_color[0] + weight * r,
-            accumulated_color[1] + weight * g,
-            accumulated_color[2] + weight * b
-        )
-        
+        accumulated_color[0] += weight * r
+        accumulated_color[1] += weight * g
+        accumulated_color[2] += weight * b
         accumulated_transmittance *= attenuation
         
         # Early termination if transmittance is very low
         if accumulated_transmittance < 1e-5:
             break
             
-    return accumulated_color
+    return tuple(accumulated_color)
 
-def get_trilinear_values(pos, grid, data_table, grid_bounds, voxel_size):
-    """
-    Performs trilinear interpolation of sigma and SH coefficients.
-    """
-    # Map world pos to grid coordinates
-    # grid_min = grid_bounds[0:3]
-    # grid_max = grid_bounds[3:6]
+def compute_ray_grid_intersection(origin, direction, grid_min, grid_max):
+    """Computes intersection t-min and t-max of a ray with an axis-aligned bounding box."""
+    inv_dir = (1.0/direction[0], 1.0/direction[1], 1.0/direction[2])
+    t1 = (grid_min[0] - origin[0]) * inv_dir[0]
+    t2 = (grid_max[0] - origin[0]) * inv_dir[0]
+    t3 = (grid_min[1] - origin[1]) * inv_dir[1]
+    t4 = (grid_max[1] - origin[1]) * inv_dir[1]
+    t5 = (grid_min[2] - origin[2]) * inv_dir[2]
+    t6 = (grid_max[2] - origin[2]) * inv_dir[2]
+    t_min = max(min(t1, t2), min(t3, t4), min(t5, t6))
+    t_max = min(max(t1, t2), max(t3, t4), max(t5, t6))
+    return t_min, t_max
+
+def trilinear_interpolate(pos, grid, data_table, grid_min, voxel_size):
+    """Performs trilinear interpolation of sigma and SH coefficients."""
+    # Map world pos to fractional grid coordinates
+    fx = (pos[0] - grid_min[0]) / voxel_size
+    fy = (pos[1] - grid_min[1]) / voxel_size
+    fz = (pos[2] - grid_min[2]) / voxel_size
     
-    # Calculate fractional grid coordinates
-    # x_frac = (pos[0] - grid_min[0]) / voxel_size
-    # ... similarly for y, z
+    x0, y0, z0 = math.floor(fx), math.floor(fy), math.floor(fz)
+    x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+    dx, dy, dz = fx - x0, fy - y0, fz - z0
     
-    # Determine the 8 integer indices
-    # x0, y0, z0 = floor(x_frac), floor(y_frac), floor(z_frac)
-    # x1, y1, z1 = x0+1, y0+1, z0+1
+    # Retrieve pointers from grid (8 corners)
+    ptrs = []
+    for x in (x0, x1):
+        for y in (y0, y1):
+            for z in (z0, z1):
+                ptrs.append(grid[x][y][z])
+                
+    # Interpolate scalar opacity
+    sigma = trilinear_interp_scalar(ptrs, dx, dy, dz, field='sigma')
     
-    # Retrieve pointers from grid
-    # ptr_000 = grid[x0][y0][z0]
-    # ... retrieve all 8 pointers
+    # Interpolate SH coefficient vectors (lists of 9 floats)
+    sh_r = trilinear_interp_vector(ptrs, dx, dy, dz, field='sh_r')
+    sh_g = trilinear_interp_vector(ptrs, dx, dy, dz, field='sh_g')
+    sh_b = trilinear_interp_vector(ptrs, dx, dy, dz, field='sh_b')
     
-    # Interpolate sigma
-    # sigma = trilinear_interpolate(ptrs, data_table, x_frac, y_frac, z_frac, field='sigma')
-    
-    # Interpolate SH coefficients
-    # sh_r = trilinear_interpolate(ptrs, data_table, x_frac, y_frac, z_frac, field='sh_r')
-    # ... similarly for sh_g, sh_b
-    
-    # Return interpolated values
     return sigma, sh_r, sh_g, sh_b
 
-def evaluate_sh(coeffs, direction):
-    """
-    Evaluates Degree 2 Spherical Harmonics for a given direction.
-    Direction is assumed to be a normalized 3D vector (x, y, z).
-    9 coefficients per channel.
-    """
+def trilinear_interp_scalar(ptrs, dx, dy, dz, field):
+    """Trilinear interpolation for a scalar field."""
+    vals = [p[field] if p is not None else 0.0 for p in ptrs]
+    return (
+        vals[0]*(1-dx)*(1-dy)*(1-dz) +
+        vals[1]*dx*(1-dy)*(1-dz) +
+        vals[2]*(1-dx)*dy*(1-dz) +
+        vals[3]*dx*dy*(1-dz) +
+        vals[4]*(1-dx)*(1-dy)*dz +
+        vals[5]*dx*(1-dy)*dz +
+        vals[6]*(1-dx)*dy*dz +
+        vals[7]*dx*dy*dz
+    )
+
+def trilinear_interp_vector(ptrs, dx, dy, dz, field):
+    """Trilinear interpolation for a vector field (SH coefficients)."""
+    vals = [p[field] if p is not None else [0.0]*9 for p in ptrs]
+    result = [0.0]*9
+    for k in range(9):
+        v0 = vals[0][k]; v1 = vals[1][k]; v2 = vals[2][k]; v3 = vals[3][k]
+        v4 = vals[4][k]; v5 = vals[5][k]; v6 = vals[6][k]; v7 = vals[7][k]
+        result[k] = (
+            v0*(1-dx)*(1-dy)*(1-dz) +
+            v1*dx*(1-dy)*(1-dz) +
+            v2*(1-dx)*dy*(1-dz) +
+            v3*dx*dy*(1-dz) +
+            v4*(1-dx)*(1-dy)*dz +
+            v5*dx*(1-dy)*dz +
+            v6*(1-dx)*dy*dz +
+            v7*dx*dy*dz
+        )
+    return result
+
+def evaluate_sh_degree2(coeffs, direction):
+    """Evaluates Degree 2 Spherical Harmonics for a given direction."""
     x, y, z = direction
-    # SH Degree 2 basis functions (standard normalization)
-    # Note: Exact basis functions depend on the convention used. 
-    # Common convention (e.g., from NeRF/PlenOcters papers):
-    
-    # L0
+    # Standard SH degree 2 basis functions (unnormalized convention)
     c0 = 0.282095
-    # L1
     c1 = 0.488603
     c2 = 1.092548
     c3 = -1.092548
     c4 = 0.315392
-    
-    # L2
-    # ... (standard SH basis evaluation)
-    
-    # Simplified placeholder for SH evaluation logic
-    # In practice, this is a dot product of coeffs and basis vector
-    return dot(coeffs, compute_sh_basis(x, y, z))
-
-def compute_sh_basis(x, y, z):
-    # Returns the 9 basis values for degree 2
-    # This is a standard mathematical function
-    pass
+    # Basis vector
+    b0 = c0
+    b1 = c1 * y
+    b2 = c1 * z
+    b3 = c1 * x
+    b4 = c2 * x * y
+    b5 = c2 * y * z
+    b6 = c4 * (3 * z * z - 1)
+    b7 = c2 * x * z
+    b8 = c2 * (x * x - y * y)
+    basis = [b0, b1, b2, b3, b4, b5, b6, b7, b8]
+    return sum(c * b for c, b in zip(coeffs, basis))
 ```
 
 ### Parameters

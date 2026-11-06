@@ -1,0 +1,1050 @@
+The LLVM Project is a collection of modular and reusable compiler and toolchain technologies. - [Flang][OpenMP] Lower scan directive and inscan reduction modifier by chandraghale · Pull Request #206747 · llvm/llvm-project
+
+[Flang][OpenMP] Lower scan directive and inscan reduction modifier by chandraghale · Pull Request #206747 · llvm/llvm-project · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+chandraghale
+commented
+Jun 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+This builds on top of #167031 to complete scan reduction lowering for OpenMP workshare loops. On top of that PR, it resets each reduction variable to its identity at the start of every input-loop iteration; otherwise the scan buffer holds a running sum and emitScanReduction prefix-sums it twice, producing incorrect results.
+SIMD, composite/nested loops, collapse, tiling, the linear clause and the exclusive clause are not enabled for scan reductions in this PR.
+```
+!$omp parallel do reduction(inscan, +: red)
+do i = 1, n
+  <input phase>
+  !$omp scan inclusive(red)      ! or exclusive(red)
+  <scan phase>
+end do
+```
+is transformed to roughly:
+```
+!$omp parallel
+  num_iters = n
+  <type> :: buffer(num_iters)          ! shared scratch, allocated once
+
+  ! Input phase: store each iteration's partial reduction value.
+  !$omp do
+  do i = 1, num_iters
+    <input phase>
+    buffer(i) = red
+  end do
+  !$omp barrier                        ! emitted even under nowait
+
+  ! Prefix sum over the buffer, computed by a single thread.
+  !$omp masked
+  do k = 0, ceil(log2(num_iters)) - 1
+    do cnt = num_iters, 2**k + 1, -1
+      buffer(cnt) = buffer(cnt) + buffer(cnt - 2**k)
+    end do
+  end do
+  !$omp end masked
+  !$omp barrier
+
+  ! Scan phase: read the running value back from the buffer.
+  !$omp do
+  do i = 1, num_iters
+    red = buffer(i)                    ! inclusive; exclusive => buffer(i-1)
+    <scan phase>
+  end do
+
+  ! Publish the final reduction value and release the buffer.
+  !$omp barrier                        ! all reads finished before the buffer is freed
+  !$omp masked
+    red = buffer(num_iters)
+    deallocate(buffer)                 ! free the shared buffer
+  !$omp end masked
+  !$omp barrier                        ! end-of-construct sync; omitted under nowait
+!$omp end parallel
+```
+Assisted-by: Claude Opus 4.8
+llvmorg-github-actions
+Bot
+added
+mlir:llvm
+mlir
+flang
+Flang issues not falling into any other category
+mlir:openmp
+flang:fir-hlfir
+flang:openmp
+labels
+Jun 30, 2026
+llvmorg-github-actions
+Bot
+commented
+Jun 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+@llvm/pr-subscribers-mlir-openmp
+@llvm/pr-subscribers-flang-openmp
+@llvm/pr-subscribers-mlir
+@llvm/pr-subscribers-flang-fir-hlfir
+Author: CHANDRA GHALE (chandraghale)
+Changes
+This builds on top of #167031 to complete scan reduction lowering for OpenMP workshare loops. On top of that PR, it resets each reduction variable to its identity at the start of every input-loop iteration; otherwise the scan buffer holds a running sum and emitScanReduction prefix-sums it twice, producing incorrect results.
+SIMD, composite/nested loops, collapse, tiling, the linear clause and the exclusive clause are not enabled for scan reductions in this PR.
+Patch is 43.92 KiB, truncated to 20.00 KiB below, full version: https://github.com/llvm/llvm-project/pull/206747.diff
+6 Files Affected:
+(modified) flang/lib/Lower/OpenMP/OpenMP.cpp (+52-5)
+(added) flang/test/Lower/OpenMP/Todo/nested-wsloop-scan.f90 (+34)
+(added) flang/test/Lower/OpenMP/Todo/wsloop-scan-collapse.f90 (+29)
+(modified) mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp (+403-50)
+(added) mlir/test/Target/LLVMIR/openmp-reduction-scan.mlir (+123)
+(modified) mlir/test/Target/LLVMIR/openmp-todo.mlir (+67-2)
+```
+diff --git a/flang/lib/Lower/OpenMP/OpenMP.cpp b/flang/lib/Lower/OpenMP/OpenMP.cpp
+index 99ce48206c33b..186ad074cb885 100644
+--- a/flang/lib/Lower/OpenMP/OpenMP.cpp
++++ b/flang/lib/Lower/OpenMP/OpenMP.cpp
+@@ -2750,12 +2750,59 @@ genParallelOp(lower::AbstractConverter &converter, lower::SymMap &symTable,
+ 
+ static mlir::omp::ScanOp
+ genScanOp(lower::AbstractConverter &converter, lower::SymMap &symTable,
+-          semantics::SemanticsContext &semaCtx, mlir::Location loc,
+-          const ConstructQueue &queue, ConstructQueue::const_iterator item) {
++          semantics::SemanticsContext &semaCtx, lower::pft::Evaluation &eval,
++          mlir::Location loc, const ConstructQueue &queue,
++          ConstructQueue::const_iterator item) {
+   mlir::omp::ScanOperands clauseOps;
+   genScanClauses(converter, semaCtx, item->clauses, loc, clauseOps);
+-  return mlir::omp::ScanOp::create(converter.getFirOpBuilder(),
+-                                   converter.getCurrentLocation(), clauseOps);
++  mlir::omp::ScanOp scanOp = mlir::omp::ScanOp::create(
++      converter.getFirOpBuilder(), converter.getCurrentLocation(), clauseOps);
++
++  /// Scan reduction is not implemented with nested workshare loops, linear
++  /// clause, tiling
++  mlir::omp::LoopNestOp loopNestOp =
++      scanOp->getParentOfType<mlir::omp::LoopNestOp>();
++  llvm::SmallVector<mlir::omp::LoopWrapperInterface> loopWrappers;
++  loopNestOp.gatherWrappers(loopWrappers);
++  mlir::Operation *loopWrapperOp = loopWrappers.front().getOperation();
++  if (llvm::isa<mlir::omp::SimdOp>(loopWrapperOp))
++    TODO(loc, "unsupported simd");
++  if (loopWrappers.size() > 1)
++    TODO(loc, "unsupported composite");
++  mlir::omp::WsloopOp wsLoopOp = llvm::cast<mlir::omp::WsloopOp>(loopWrapperOp);
++  bool isNested =
++      (loopNestOp.getNumLoops() > 1) ||
++      (wsLoopOp && (wsLoopOp->getParentOfType<mlir::omp::WsloopOp>()));
++  if (isNested)
++    TODO(loc, "Scan directive inside nested workshare loops");
++  if (wsLoopOp && !wsLoopOp.getLinearVars().empty())
++    TODO(loc, "Scan directive with linear clause");
++  if (loopNestOp.getTileSizes())
++    TODO(loc, "Scan directive with loop tiling");
++
++  // All loop indices should be loaded after the scan construct as otherwise,
++  // it would result in using the index variable across scan directive.
++  // (`Intra-iteration dependences from a statement in the structured
++  // block sequence that precede a scan directive to a statement in the
++  // structured block sequence that follows a scan directive must not exist,
++  // except for dependences for the list items specified in an inclusive or
++  // exclusive clause.`).
++  // TODO: Nested loops are not handled.
++  mlir::Region &region = loopNestOp->getRegion(0);
++  mlir::Value indexVal = fir::getBase(region.getArgument(0));
++  lower::pft::Evaluation *doConstructEval = eval.parentConstruct;
++  fir::FirOpBuilder &firOpBuilder = converter.getFirOpBuilder();
++  lower::pft::Evaluation *doLoop = &doConstructEval->getFirstNestedEvaluation();
++  auto *doStmt = doLoop->getIf<parser::NonLabelDoStmt>();
++  assert(doStmt && "Expected do loop to be in the nested evaluation");
++  const auto &loopControl =
++      std::get<std::optional<parser::LoopControl>>(doStmt->t);
++  const parser::LoopControl::Bounds *bounds =
++      std::get_if<parser::LoopControl::Bounds>(&loopControl->u);
++  mlir::Operation *storeOp =
++      setLoopVar(converter, loc, indexVal, bounds->Name().thing.symbol);
++  firOpBuilder.setInsertionPointAfter(storeOp);
++  return scanOp;
+ }
+ 
+ static mlir::omp::SectionsOp
+@@ -4079,7 +4126,7 @@ static void genOMPDispatch(lower::AbstractConverter &converter,
+                                   loc, queue, item);
+     break;
+   case llvm::omp::Directive::OMPD_scan:
+-    newOp = genScanOp(converter, symTable, semaCtx, loc, queue, item);
++    newOp = genScanOp(converter, symTable, semaCtx, eval, loc, queue, item);
+     break;
+   case llvm::omp::Directive::OMPD_section:
+     llvm_unreachable("genOMPDispatch: OMPD_section");
+diff --git a/flang/test/Lower/OpenMP/Todo/nested-wsloop-scan.f90 b/flang/test/Lower/OpenMP/Todo/nested-wsloop-scan.f90
+new file mode 100644
+index 0000000000000..414e2ef2d5aed
+--- /dev/null
++++ b/flang/test/Lower/OpenMP/Todo/nested-wsloop-scan.f90
+@@ -0,0 +1,34 @@
++! Tests scan reduction behavior when used in nested workshare loops
++
++! RUN: %not_todo_cmd %flang_fc1 -emit-hlfir -fopenmp -o - %s 2>&1 | FileCheck %s
++
++program nested_scan_example
++  implicit none
++  integer, parameter :: n = 4, m = 5
++  integer :: a(n, m), b(n, m)
++  integer :: i, j
++  integer :: row_sum, col_sum
++
++  do i = 1, n
++     do j = 1, m
++        a(i, j) = i + j
++     end do
++  end do
++
++  !$omp parallel do reduction(inscan, +: row_sum) private(col_sum, j)
++  do i = 1, n
++     row_sum = row_sum + i
++     !$omp scan inclusive(row_sum)
++
++     col_sum = 0
++     !$omp parallel do reduction(inscan, +: col_sum)
++     do j = 1, m
++        col_sum = col_sum + a(i, j)
++        !CHECK: not yet implemented: Scan directive inside nested workshare loops
++        !$omp scan inclusive(col_sum)
++        b(i, j) = col_sum + row_sum 
++     end do
++     !$omp end parallel do
++  end do
++  !$omp end parallel do
++end program nested_scan_example
+diff --git a/flang/test/Lower/OpenMP/Todo/wsloop-scan-collapse.f90 b/flang/test/Lower/OpenMP/Todo/wsloop-scan-collapse.f90
+new file mode 100644
+index 0000000000000..b8e6e831884ab
+--- /dev/null
++++ b/flang/test/Lower/OpenMP/Todo/wsloop-scan-collapse.f90
+@@ -0,0 +1,29 @@
++! Tests scan reduction behavior when used in nested workshare loops
++
++! RUN: %not_todo_cmd %flang_fc1 -emit-hlfir -fopenmp -o - %s 2>&1 | FileCheck %s
++
++program nested_loop_example
++  implicit none
++  integer :: i, j, x
++  integer, parameter :: N = 100, M = 200
++  real :: A(N, M), B(N, M)
++  x = 0
++
++  do i = 1, N
++    do j = 1, M
++      A(i, j) = i * j
++    end do
++  end do
++  
++  !$omp parallel do collapse(2) reduction(inscan, +:x)
++  do i = 1, N
++    do j = 1, M
++      x = x + A(i,j)
++      !CHECK: not yet implemented: Scan directive inside nested workshare loops
++      !$omp scan inclusive(x)
++      B(i, j) = x
++    end do
++  end do
++  !$omp end parallel do
++
++end program nested_loop_example
+diff --git a/mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp b/mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+index 77cc7a388a984..a204937798e1c 100644
+--- a/mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
++++ b/mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+@@ -41,6 +41,8 @@
+ #include "llvm/TargetParser/Triple.h"
+ #include "llvm/Transforms/Utils/ModuleUtils.h"
+ 
++#include <cassert>
++#include <cstddef>
+ #include <cstdint>
+ #include <iterator>
+ #include <numeric>
+@@ -84,6 +86,10 @@ class OpenMPAllocStackFrame
+       : allocInsertPoint(allocaIP), deallocBlocks(deallocBlocks) {}
+   llvm::OpenMPIRBuilder::InsertPointTy allocInsertPoint;
+   llvm::SmallVector<llvm::BasicBlock *> deallocBlocks;
++  /// Set to true when this alloca frame encloses an omp.parallel operation.
++  /// The alloca insertion point of a function in which a parallel op is
++  /// defined may be used to allocate the temporary buffer for scan reductions.
++  bool containsParallelOp = false;
+ };
+ 
+ /// Stack frame to hold a \see llvm::CanonicalLoopInfo representing the
+@@ -93,7 +99,17 @@ class OpenMPLoopInfoStackFrame
+     : public StateStackFrameBase<OpenMPLoopInfoStackFrame> {
+ public:
+   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(OpenMPLoopInfoStackFrame)
++  /// For constructs like `scan`, a single `omp.loop_nest` is split into an
++  /// input loop and a scan loop. In that case `loopInfo` holds the input loop
++  /// info and `scanloopInfo` holds the scan loop info.
+   llvm::CanonicalLoopInfo *loopInfo = nullptr;
++  llvm::CanonicalLoopInfo *scanloopInfo = nullptr;
++  llvm::ScanInfo *scanInfo = nullptr;
++  /// Map reduction variables to their LLVM types. Populated when the reduction
++  /// clause is processed and used when a `scan` directive is encountered in the
++  /// loop body.
++  std::unique_ptr<llvm::DenseMap<llvm::Value *, llvm::Type *>>
++      reductionVarToType = nullptr;
+ };
+ 
+ /// Custom error class to signal translation errors that don't need reporting,
+@@ -365,6 +381,10 @@ static LogicalResult checkImplementationStatus(Operation &op) {
+     if (!op.getDependVars().empty() || op.getDependKinds())
+       result = todo("depend");
+   };
++  auto checkExclusive = [&todo](auto op, LogicalResult &result) {
++    if (!op.getExclusiveVars().empty())
++      result = todo("exclusive");
++  };
+   auto checkHint = [](auto op, LogicalResult &) {
+     if (op.getHint())
+       op.emitWarning("hint clause discarded");
+@@ -392,8 +412,17 @@ static LogicalResult checkImplementationStatus(Operation &op) {
+           op.getReductionSyms())
+         result = todo("reduction");
+     if (op.getReductionMod() &&
+-        op.getReductionMod().value() != omp::ReductionModifier::defaultmod)
+-      result = todo("reduction with modifier");
++        op.getReductionMod().value() != omp::ReductionModifier::defaultmod) {
++      // The `inscan` modifier on a worksharing-loop is supported (it is
++      // translated as a scan reduction). All other reduction modifiers, and
++      // `inscan` on any other operation, are not yet implemented.
++      if (isa<omp::WsloopOp>(op)) {
++        if (op.getReductionMod().value() == omp::ReductionModifier::task)
++          result = todo("reduction with task modifier");
++      } else {
++        result = todo("reduction with modifier");
++      }
++    }
+   };
+   auto checkTaskReductionByref = [&todo](auto op, LogicalResult &result) {
+     if (auto byrefAttr = op.getTaskReductionByref())
+@@ -448,6 +477,7 @@ static LogicalResult checkImplementationStatus(Operation &op) {
+         checkAllocate(op, result);
+         checkOrder(op, result);
+       })
++      .Case([&](omp::ScanOp op) { checkExclusive(op, result); })
+       .Case([&](omp::SectionsOp op) {
+         checkAllocate(op, result);
+         checkPrivate(op, result);
+@@ -638,6 +668,97 @@ findCurrentLoopInfo(LLVM::ModuleTranslation &moduleTranslation) {
+   return loopInfo;
+ }
+ 
++/// Find the scan loop information structure for the scan loop nest being
++/// translated. It will return a `null` value unless called from the
++/// translation function for a loop wrapper operation after successfully
++/// translating its body.
++static llvm::CanonicalLoopInfo *
++findCurrentScanLoopInfo(LLVM::ModuleTranslation &moduleTranslation) {
++  llvm::CanonicalLoopInfo *scanLoopInfo = nullptr;
++  moduleTranslation.stackWalk<OpenMPLoopInfoStackFrame>(
++      [&](OpenMPLoopInfoStackFrame &frame) {
++        scanLoopInfo = frame.scanloopInfo;
++        return WalkResult::interrupt();
++      });
++  return scanLoopInfo;
++}
++
++/// Find the `ScanInfo` stored on the loop stack frame. Upon encountering an
++/// `inscan` reduction modifier, `scanInfoInitialize` initializes the
++/// `ScanInfo`, which is then used when a `scan` directive is encountered in the
++/// body of the loop nest.
++static llvm::ScanInfo *
++findScanInfo(LLVM::ModuleTranslation &moduleTranslation) {
++  llvm::ScanInfo *scanInfo = nullptr;
++  moduleTranslation.stackWalk<OpenMPLoopInfoStackFrame>(
++      [&](OpenMPLoopInfoStackFrame &frame) {
++        scanInfo = frame.scanInfo;
++        return WalkResult::interrupt();
++      });
++  return scanInfo;
++}
++
++/// The types of reduction variables are used for lowering a `scan` directive
++/// that appears in the body of the loop. The types are stored in the loop frame
++/// when the reduction clause is encountered and used when the `scan` directive
++/// is encountered.
++static llvm::DenseMap<llvm::Value *, llvm::Type *> *
++findReductionVarTypes(LLVM::ModuleTranslation &moduleTranslation) {
++  llvm::DenseMap<llvm::Value *, llvm::Type *> *reductionVarToType = nullptr;
++  moduleTranslation.stackWalk<OpenMPLoopInfoStackFrame>(
++      [&](OpenMPLoopInfoStackFrame &frame) {
++        if (!frame.reductionVarToType)
++          frame.reductionVarToType =
++              std::make_unique<llvm::DenseMap<llvm::Value *, llvm::Type *>>();
++        reductionVarToType = frame.reductionVarToType.get();
++        return WalkResult::interrupt();
++      });
++  return reductionVarToType;
++}
++
++/// Scan reduction requires a shared buffer to be allocated to perform the
++/// reduction. The allocation needs to be done outside the parallel region in
++/// which the scan operation is used.
++static llvm::OpenMPIRBuilder::InsertPointTy
++findParallelAllocaIP(llvm::IRBuilderBase &builder,
++                     LLVM::ModuleTranslation &moduleTranslation) {
++  // If there is an alloca insertion point on the stack belonging to a frame
++  // that encloses a parallel op, use it.
++  llvm::OpenMPIRBuilder::InsertPointTy allocaInsertPoint;
++  WalkResult walkResult = moduleTranslation.stackWalk<OpenMPAllocStackFrame>(
++      [&](OpenMPAllocStackFrame &frame) {
++        if (frame.containsParallelOp) {
++          allocaInsertPoint = frame.allocInsertPoint;
++          return WalkResult::interrupt();
++        }
++        return WalkResult::skip();
++      });
++  if (walkResult.wasInterrupted())
++    return allocaInsertPoint;
++  // Otherwise, insert into the entry block of the surrounding function.
++  // If the current IRBuilder InsertPoint is the function's entry, it cannot
++  // also be used for alloca insertion which would result in insertion order
++  // confusion. Create a new BasicBlock for the Builder and use the entry block
++  // for the allocs.
++  // TODO: Create a dedicated alloca BasicBlock at function creation such that
++  // we do not need to move the current InsertPoint here.
++  if (builder.GetInsertBlock() ==
++      &builder.GetInsertBlock()->getParent()->getEntryBlock()) {
++    assert(builder.GetInsertPoint() == builder.GetInsertBlock()->end() &&
++           "Assuming end of basic block");
++    llvm::BasicBlock *entryBB = llvm::BasicBlock::Create(
++        builder.getContext(), "entry", builder.GetInsertBlock()->getParent(),
++        builder.GetInsertBlock()->getNextNode());
++    builder.CreateBr(entryBB);
++    builder.SetInsertPoint(entryBB);
++  }
++
++  llvm::BasicBlock &funcEntryBlock =
++      builder.GetInsertBlock()->getParent()->getEntryBlock();
++  return llvm::OpenMPIRBuilder::InsertPointTy(
++      &funcEntryBlock, funcEntryBlock.getFirstInsertionPt());
++}
++
+ /// Converts the given region that appears within an OpenMP dialect operation to
+ /// LLVM IR, creating a branch from the `sourceBlock` to the entry block of the
+ /// region, and a branch from any block with an successor-less OpenMP terminator
+@@ -1402,7 +1523,8 @@ initReductionVars(OP op, ArrayRef<BlockArgument> reductionArgs,
+                   SmallVectorImpl<llvm::Value *> &privateReductionVariables,
+                   DenseMap<Value, llvm::Value *> &reductionVariableMap,
+                   llvm::ArrayRef<bool> isByRef,
+-                  SmallVectorImpl<DeferredStore> &deferredStores) {
++                  SmallVectorImpl<DeferredStore> &deferredStores,
++                  bool isInScanRegion = false) {
+   if (op.getNumReductionVars() == 0)
+     return success();
+ 
+@@ -1439,11 +1561,17 @@ initReductionVars(OP op, ArrayRef<BlockArgument> reductionArgs,
+   for (auto [data, addr] : deferredStores)
+     builder.CreateStore(data, addr);
+ 
++  llvm::DenseMap<llvm::Value *, llvm::Type *> *reductionVarToType =
++      findReductionVarTypes(moduleTranslation);
+   // Before the loop, store the initial values of reductions into reduction
+   // variables. Although this could be done after allocas, we don't want to mess
+   // up with the alloca insertion point.
+   for (unsigned i = 0; i < op.getNumReductionVars(); ++i) {
+     SmallVector<llvm::Value *, 1> phis;
++    llvm::Type *reductionType =
++        moduleTranslation.convertType(reductionDecls[i].getType());
++    if (isInScanRegion && reductionVarToType != nullptr)
++      (*reductionVarToType)[privateReductionVariables[i]] = reductionType;
+ 
+     // map block argument to initializer region
+     mapInitializationArgs(op, moduleTranslation, builder, reductionDecls,
+@@ -4327,11 +4455,15 @@ convertOmpWsloop(Operation &opInst, llvm::IRBuilderBase &builder,
+     return failure();
+ 
+   assert(afterAllocas.get()->getSinglePredecessor());
++  bool isInScanRegion =
++      wsloopOp.getReductionMod() && (wsloopOp.getReductionMod().value() ==
++                                     mlir::omp::ReductionModifier::inscan);
+   if (failed(initReductionVars(wsloopOp, reductionArgs, builder,
+                                moduleTranslation,
+                                afterAllocas.get()->getSinglePredecessor(),
+                                reductionDecls, privateReductionVariables,
+-                               reductionVariableMap, isByRef, deferredStores)))
++                               reductionVariableMap, isByRef, deferredStores,
++                               isInScanRegion)))
+     return failure();
+ 
+   // TODO: Handle doacross loops when the ordered clause has a parameter.
+@@ -4339,6 +4471,10 @@ convertOmpWsloop(Operation &opInst, llvm::IRBuilderBase &builder,
+   std::optional<omp::ScheduleModifier> scheduleMod = wsloopOp.getScheduleMod();
+   bool isSimd = wsloopOp.getScheduleSimd();
+   bool loopNeedsBarrier = !wsloopOp.getNowait();
++  // TODO: Linear clause support needs to be enabled for scan reduction.
++  if (isInScanRegion)
++    assert(wsloopOp.getLinearVars().empty() &&
++           "Linear clause support is not enabled with scan reduction");
+ 
+   // The only legal way for the direct parent to be omp.distribute is that this
+   // represents 'distribute parallel do'. Otherwise, this is a regular
+@@ -4377,21 +4513,93 @@ convertOmpWsloop(Operation &opInst, llvm::IRBuilderBase &builder,
+   if (failed(handleError(regionBlock, opInst)))
+     return failure();
+ 
++  // Generates the loop body for a worksharing loop, including linear-variable
++  // handling and the call into the OpenMPIRBuilder's worksharing-loop helper.
++  // For scan reductions this lambda is invoked twice: once for the input loop
++  // and once for the scan loop.
++  const auto &&wsloopCodeGen = [&](llvm::CanonicalLoopInfo *loopInfo,
++                                   bool noLoopMode,
++                                   bool inputScanLoop) -> LogicalResult {
++    // Emit Initialization and Update IR for linear variables
++    if (!wsloopOp.getLinearVars().empty()) {
++      linearClauseProcessor.initLinearVar(builder, moduleTranslation,
++                                          loopInfo->getPreheader());
++      llvm::OpenMPIRBuilder::InsertPointOrErrorTy afterBarrierIP =
++          moduleTranslation.getOpenMPBuilder()->createBarrier(
++              builder.saveIP(), llvm::omp::OMPD_barrier);
++      if (failed(handleError(afterBarrierIP, *loopOp)))
++        return failure();
++      builder.restoreIP(*afterBarrierIP);
++      linearClauseProcessor.updateLinearVar(builder, loopInfo->getBody(),
++                                            loopInfo->getIndVar());
++      linearClauseProcessor.splitLinearFiniBB(builder, loopInfo->getExit());
++    }
++
++    builder.SetInsertPoint(*regionBlock, (*regionBlock)->begin());
++
++    llvm::OpenMPIRBuilder::InsertPointOrErrorTy wsloopIP =
++        ompBuilder->applyWorkshareLoop(
++            ompLoc.DL, loopInfo, allocaIP, loopNeedsBarrier,
++            convertToScheduleKind(schedule), chunk, isSimd,
++            scheduleMod == omp::ScheduleModifier::monotonic,
++            scheduleMod == omp::ScheduleModifier::nonmonotonic, isOrdered,
++            workshareLoopType, noLoopMode, hasDistSchedule, distScheduleChunk);
++
++    if (failed(handleError(wsloopIP, opInst)))
++      return failure();
++
++    // Emit finalization and in-place rewrites for linear vars.
++    if (!wsloopOp.getLinearVars().empty()) {
++      llvm::OpenMPIRBuilder::InsertPointTy oldIP = builder.saveIP();
++      assert(loopInfo->getLastIter() &&
++             "`lastiter` in CanonicalLoopInfo is nullptr");
++      llvm::OpenMPIRBuilder::InsertPointOrErrorTy afterBarrierIP =
++          linearClauseProcessor.finalizeLinearVar(builder, moduleTranslation,
++                                                  loopInfo->getLastIter());
++      if (failed(handleError(afterBarrierIP, *loopOp)))
++        return failure();
++      for (size_t index = 0; index < wsloopOp.getLinearVars().size(); index++)
++        linearClauseProcessor.rewriteInPlace(
++            builder, sourceBlock->getSingleSuccessor(), *regionBlock,
+...
+[truncated]
+```
+chandraghale
+marked this pull request as draft
+June 30, 2026 16:33
+Lower scan directive and inscan reduction modifier
+82416bc
+chandraghale
+force-pushed
+the
+scan03
+branch
+from
+2ea3718 to
+82416bc
+Compare
+June 30, 2026 18:30
+github-actions
+Bot
+commented
+Jun 30, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+✅ With the latest revision this PR passed the C/C++ code formatter.
+formatting correction
+4011dd5
+chandraghale
+marked this pull request as ready for review
+July 1, 2026 09:02
+llvmorg-github-actions
+Bot
+added
+the
+openmp:libomp
+OpenMP host runtime
+label
+Jul 1, 2026
+chandraghale
+requested review from
+kparzysz and
+tblah
+July 13, 2026 14:57
+tblah
+reviewed
+Jul 14, 2026
+View reviewed changes
+tblah
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for working on this. I tested the lowering with the PR compiler, with substantial assistance from Codex in identifying edge cases and constructing reproducers.
+In particular:
+An inclusive scan with a nonidentity incoming value omits that value. With x = 10 and four +1 iterations, Flang produces 1, 2, 3, 4 instead of 11, 12, 13, 14, as required by OpenMP’s orig-val semantics.
+Legal loop shapes outside 1..N with unit stride corrupt the scan buffer. A 10..20 loop and a stride-two loop both produce incorrect results; the generated IR indexes a tripCount + 1 allocation using the source induction value.
+Zero-trip loops crash at runtime. Runtime bounds, by-reference reductions, and multidimensional MLIR loop nests can also crash during compilation.
+The general legal cases—nonidentity initial values, arbitrary bounds and strides, zero-trip loops, and runtime bounds—need to work before scan lowering is enabled. Cases intentionally outside this patch’s scope, such as by-reference reductions and multidimensional/collapsed loops, should instead produce clear “not yet implemented” diagnostics.
+Given the number and severity of the confirmed failures, I don’t think the patch is ready for detailed review yet. Please test the supported cases more broadly and ping me once the implementation either handles or explicitly rejects them; I’ll be happy to review the revised patch.
+Address review comments
+64b530d
+llvmorg-github-actions
+Bot
+added
+the
+clang:openmp
+OpenMP related changes to Clang
+label
+Jul 22, 2026
+Merge branch 'main' into scan03
+e69bc6c
+chandraghale
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks for working on this. I tested the lowering with the PR compiler, with substantial assistance from Codex in identifying edge cases and constructing reproducers. In particular:
+An inclusive scan with a nonidentity incoming value omits that value. With x = 10 and four +1 iterations, Flang produces 1, 2, 3, 4 instead of 11, 12, 13, 14, as required by OpenMP’s orig-val semantics.
+Legal loop shapes outside 1..N with unit stride corrupt the scan buffer. A 10..20 loop and a stride-two loop both produce incorrect results; the generated IR indexes a tripCount + 1 allocation using the source induction value.
+Zero-trip loops crash at runtime. Runtime bounds, by-reference reductions, and multidimensional MLIR loop nests can also crash during compilation.
+The general legal cases—nonidentity initial values, arbitrary bounds and strides, zero-trip loops, and runtime bounds—need to work before scan lowering is enabled. Cases intentionally outside this patch’s scope, such as by-reference reductions and multidimensional/collapsed loops, should instead produce clear “not yet implemented” diagnostics.
+Given the number and severity of the confirmed failures, I don’t think the patch is ready for detailed review yet. Please test the supported cases more broadly and ping me once the implementation either handles or explicitly rejects them; I’ll be happy to review the revised patch.
+Thanks for the review!
+Fixed
+The reduction variable's incoming value is now seeded on the first iteration
+instead of the identity, so non-identity initial values are handled correctly.
+The scan buffer is now indexed by the 1-based logical iteration number rather
+than the induction-variable value, fixing arbitrary bounds and non-unit strides.
+Zero-trip loops are now guarded so they no longer crash and correctly leave the
+reduction variable unchanged.
+Inner scan loops now use an empty ComputeIP, fixing the compile-time crash for
+runtime (non-constant) trip counts.
+Diagnosed (not yet implemented)
+By-ref inscan reductions now emit a clean "not yet implemented" error instead of crashing.
+Collapsed/nested scan loops remain guarded in flang lowering.
+Tests added
+Runtime: scan-nonidentity, scan-bounds (bounds + stride), scan-edge (zero-trip + runtime bounds).
+MLIR: by-ref inscan TODO test in openmp-todo.mlir; updated openmp-reduction-scan.mlir CHECKs.
+chandraghale
+requested a review
+from tblah
+July 22, 2026 14:38
+chichunchen
+reviewed
+Jul 23, 2026
+View reviewed changes
+Comment thread
+mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+chichunchen
+reviewed
+Jul 23, 2026
+View reviewed changes
+Comment thread
+mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+chichunchen
+reviewed
+Jul 23, 2026
+View reviewed changes
+Comment thread
+mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+chichunchen
+requested changes
+Jul 23, 2026
+View reviewed changes
+chichunchen
+commented
+Jul 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Please also add 2-dimension or even multiple-dimension test cases to mlir translation and lowering, thanks.
+Chandra Ghale
+added 3 commits
+July 27, 2026 10:13
+updated with review comments fixes
+5506275
+Merge remote-tracking branch 'upstream/main' into scan03
+…
+2572479
+```
+# Conflicts:
+#	mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+```
+git formatting
+c5283fc
+fix operand order in reduction seeding
+a51ea62
+chandraghale
+requested a review
+from chichunchen
+August 3, 2026 11:05
+chandraghale
+commented
+Aug 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+ping @chichunchen
+chichunchen
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+resolve merge-conflict
+3a3daf3
+chichunchen
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+llvm/lib/Frontend/OpenMP/OMPIRBuilder.cpp
+Outdated
+Builder.CreateAdd(ScanRedInfo->Span, ConstantInt::get(IndexTy, 1));
+for (size_t i = 0; i < ScanVars.size(); i++) {
+Type *IntPtrTy = Builder.getInt32Ty();
+Type *IntPtrTy = IndexTy;
+chichunchen
+Aug 10, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'd suggest we use IntPtrTy from the module's DataLayout instead of IndexTy since overflow can happen during i32 multiplication before malloc is called.
+chandraghale
+Aug 11, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Switched to the module DataLayout's pointer-width IntPtrTy so the element-size × count multiply happens in size_t and can't overflow i32 before the malloc call. Added an i64 malloc CHECK to the scan test.
+chichunchen
+reviewed
+Aug 10, 2026
+View reviewed changes
+Comment thread
+flang/lib/Lower/OpenMP/OpenMP.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Chandra Ghale
+added 2 commits
+August 11, 2026 08:40
+fix nested-parallel-segfault
+f2d45f6
+address review comment
+021193b
+chandraghale
+requested a review
+from chichunchen
+August 11, 2026 15:36
+anchuraj
+mentioned this pull request
+Aug 14, 2026
+[MLIR][OpenMP] Add scan reduction lowering to llvm
+#167031
+Closed
+chandraghale
+commented
+Aug 18, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+gentle ping @chichunchen @tblah
+chandraghale
+requested review from
+chichunchen and
+ergawy
+and removed request for
+chichunchen
+August 24, 2026 20:00
+Merge upstream/main into scan03: adapt scan lowering to new OMPIRBuil…
+…
+f57d2ad
+```
+…der malloc/barrier APIs
+```
+chandraghale
+commented
+Sep 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Gentle Ping @chichunchen @tblah
+tblah
+reviewed
+Oct 1, 2026
+View reviewed changes
+Comment thread
+mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Chandra Ghale
+added 2 commits
+October 14, 2026 12:55
+Merge upstream main into scan03; fix sibling-parallel scan buffer all…
+…
+e2b9f2a
+```
+…ocation
+
+Resolve conflict in OpenMPToLLVMIRTranslation.cpp arising from upstream's InsertPoint-as-iterator refactor (InsertPoint is now a BasicBlock::iterator; OpenMPAllocStackFrame::allocInsertPoint became allocBlock; popCancelFinalizationCB takes a BasicBlock*; applyWorkshareLoop gained NeedsLastIter). The scan wsloopCodeGen lambda and findParallelAllocaIP are adapted to the new API.
+
+Fix a segfault where a sibling inner parallel left the enclosing frame's containsParallelOp flag set, causing the scan reduction's shared buffer to be allocated per-thread inside the outer parallel instead of shared in the enclosing function. Scope the flag with save/restore around createParallel in convertOmpParallel.
+
+Add regression test Target/LLVMIR/openmp-reduction-scan-nested-sibling.mlir.
+```
+minor formatting
+0acc164
+github-actions
+Bot
+commented
+Oct 14, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+🐧 Linux x64 Test Results
+181026 tests passed
+4190 tests skipped
+✅ The build succeeded and all tests passed.
+Chandra Ghale
+and others
+added 2 commits
+October 14, 2026 23:29
+Use non-deprecated SetInsertPoint overload to fix -Werror CI build
+…
+54cc0e0
+```
+The BasicBlock+iterator SetInsertPoint overload is deprecated; the iterator-only overload derives the block from the iterator's parent, so the call is equivalent.
+```
+Merge branch 'main' into scan03
+ae712b0
+chandraghale
+requested a review
+from tblah
+October 15, 2026 08:08
+tblah
+reviewed
+Oct 19, 2026
+View reviewed changes
+Comment thread
+flang/lib/Lower/OpenMP/OpenMP.cpp
+// TODO: Nested loops are not handled.
+mlir::Region &region = loopNestOp->getRegion(0);
+mlir::Value indexVal = fir::getBase(region.getArgument(0));
+lower::pft::Evaluation *doConstructEval = eval.parentConstruct;
+tblah
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+AI pointed out that the do loop isn't always the immediate parent. There could be a BLOCK construct in between:
+```
+...
+!$omp parallel do reduction(inscan, +:x)
+do i = 1, n
+  block
+    x = x + 1
+    !$omp scan inclusive(x)
+    array(i) = x
+  end block
+end do
+```
+I would recommend looping on the parent until you either get to the top of the tree or find the enclosing OpenMP construct with the inscan reduction and then find the do construct which is the immediate child of that construct.
+chandraghale
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I've changed it to walk up the parent constructs until it reaches the enclosing DO loop, so a BLOCK (or anything else) sitting between the loop and the scan no longer trips it up.
+While testing this I ran into a related problem: when there's a BLOCK between the loop and the scan, flang emits stacksave/stackrestore around the scan directive, and the loop-splitting ends up putting the save and restore in different loops (so the save doesn't dominate the restore → invalid IR). Properly handling that is a bigger change, so for now I've added a "not yet implemented" message for the BLOCK case instead of generating broken IR. Added a test for it too.
+Comment thread
+llvm/lib/Frontend/OpenMP/OMPIRBuilder.cpp
+Outdated
+Comment on lines
++5765
+to
++5766
+SeedBB);
+Pow2K->addIncoming(llvm::ConstantInt::get(IndexTy, 1), SeedBB);
+tblah
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+(Issue pointed out by AI) I think these need to use AfterIP from line 5740. A multi-block combiner would leave the insertion point at some block other than seedBB.
+Multiblock combiners will be important if byref scan reductions are supported some day. For example an array reduction is implemented as a loop over each element of the array (but even now, a frontend would be producing valid IR if it decided to generate a multi-block combiner for a byval reduction).
+chandraghale
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks. The combiner can span multiple blocks, so I now capture the block the builder is actually in right before the branch into the loop and use that as the PHI predecessor, instead of hardcoding SeedBB. That way a multi-block combiner points the loop PHIs at the correct incoming block.
+Comment thread
+mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+Outdated
+Comment on lines
++5012
+to
++5014
+if (isInScanRegion)
+assert(wsloopOp.getLinearVars().empty() &&
+"Linear clause support is not enabled with scan reduction");
+tblah
+Oct 19, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Please capture this with a "not yet implemented" message not just an assertion. It gives a better experience if a user tries this before it is implemented.
+chandraghale
+Oct 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done !!
+Chandra Ghale
+added 3 commits
+October 21, 2026 10:07
+Merge remote-tracking branch 'upstream/main' into scan03
+…
+3d1a8a0
+```
+# Conflicts:
+#	mlir/lib/Target/LLVMIR/Dialect/OpenMP/OpenMPToLLVMIRTranslation.cpp
+```
+[flang][mlir][llvm] Address scan reduction review comments
+…
+0ffa992
+```
+- flang: walk the parent-construct chain to find the scan loop's DO
+  construct instead of assuming it is the scan directive's immediate
+  parent, so an intervening construct (e.g. a BLOCK) is handled. Emit a
+  clear "not yet implemented" message when a BLOCK sits between the loop
+  and the scan: its stacksave/stackrestore brackets the scan and cannot
+  be split across the input- and scan-phase loops.
+
+- OMPIRBuilder: use the block the builder actually sits in (not the
+  hardcoded seed block) as the seed-path predecessor for the scan
+  prefix-sum loop PHIs, so a multi-block reduction combiner produces
+  valid IR.
+
+- OpenMPToLLVMIRTranslation: replace the inline assert for inscan with a
+  linear clause with a centralized "not yet implemented" message in
+  checkImplementationStatus.
+
+- Add regression tests for the BLOCK TODO and the inscan+linear NYI.
+```
+Merge remote-tracking branch 'origin/scan03' into scan03
+1309714
+chandraghale
+requested a review
+from tblah
+October 23, 2026 11:02
+chandraghale
+commented
+Oct 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Gentle Ping @tblah
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+clang:openmp
+OpenMP related changes to Clang
+flang:fir-hlfir
+flang:openmp
+flang
+Flang issues not falling into any other category
+mlir:llvm
+mlir:openmp
+mlir
+openmp:libomp
+OpenMP host runtime
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

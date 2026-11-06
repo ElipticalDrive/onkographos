@@ -3,20 +3,20 @@
 Also called: Aurora Rendering, Aurora curtains, Horizon-Zenith Gradient, Neon Sky, Sky gradient texture, Synthwave Sky Gradient, getSky
 
 ## Overview
-Sky Gradient generates a background color for rays that miss the primary volume or reach infinite distance by interpolating between a horizon color and a zenith color based on the ray's vertical direction component [S1, S3, unofficial]. It differs from [Sky Radiance Model](3256-sky-radiance-model.md) by using simple linear or power-based blending rather than physical atmospheric scattering equations, and from [SkyboxRendering](2619-skyboxrendering.md) by lacking time-dependent sun arcs or procedural starfields in its core definition [S1, S2, S3, unofficial]. It is a lightweight, non-geometry effect suitable for stylized or performance-constrained rendering [S2, unofficial].
+Sky Gradient generates a background color for rays that miss the primary volume or reach infinite distance by interpolating between a horizon color and a zenith color based on the ray's vertical direction component [S1, S3, unofficial]. It is a lightweight, non-geometry effect often implemented as a handful of sine waves or simple color blending in a sky shader [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray direction $\mathbf{d}$ (normalized).
-- Horizon color $\mathbf{C}_{horizon}$ (RGB).
-- Zenith color $\mathbf{C}_{zenith}$ (RGB).
-- Optional parameters: transition bounds, mixing power, ground glow intensity/power.
+- Ray direction $\mathbf{d}$ (normalized) [S1, S3, unofficial].
+- Horizon color $\mathbf{C}_{horizon}$ (RGB) [S1, S4, unofficial].
+- Zenith color $\mathbf{C}_{zenith}$ (RGB) [S1, S3, S4, unofficial].
+- Optional parameters: transition bounds, mixing power, ground glow intensity/power [S1, S4, unofficial].
 
 **Outputs:**
-- Output color $\mathbf{C}_{out}$ (RGB).
+- Output color $\mathbf{C}_{out}$ (RGB) [S1, S3, S4, unofficial].
 
 **Data Structures:**
-- None required. Pure function of direction and constants.
+- None required. The method is a pure function of direction and constants [G].
 
 **Steps:**
 1. Normalize the ray direction $\mathbf{d}$ to ensure $\|\mathbf{d}\| = 1$ [S1, S3, unofficial].
@@ -30,7 +30,7 @@ Sky Gradient generates a background color for rays that miss the primary volume 
 
 **Formulas:**
 - Linear interpolation factor: $t = \frac{y + 1}{2}$ [S3, unofficial].
-- Smoothstep interpolation: $t = \begin{cases} 0 & y < 0 \\ \frac{y}{0.7} & 0 \le y < 0.7 \\ 1 & y \ge 0.7 \end{cases}$ (clamped) [S1, unofficial].
+- Smoothstep interpolation: $t = \text{smoothstep}(0.0, 0.7, y)$, a standard cubic Hermite interpolation function [S1, unofficial].
 - Final color (Variant B with ground glow): $\mathbf{C}_{out} = \mathbf{C}_{base} + \mathbf{C}_{horizon} \cdot 0.4 \cdot (1 - |\mathbf{d}_y|)^6$ [S4, unofficial].
 
 **Parameters (Typical Values):**
@@ -44,38 +44,35 @@ Sky Gradient generates a background color for rays that miss the primary volume 
 **Edge Cases and Pitfalls:**
 - **Unnormalized Rays:** If $\mathbf{d}$ is not normalized, $y$ will be incorrect, causing color distortion. Always normalize [S1, S3, unofficial].
 - **Y-Component Range:** The method assumes $y \in [-1, 1]$. Clamp $t$ to $[0, 1]$ to prevent out-of-bounds color mixing [S3, S4, unofficial].
-- **View Direction Convention:** Ensure $y$ corresponds to "up" in the camera basis. If the camera uses a different up vector, transform $\mathbf{d}$ into the camera's local space first [S3, unofficial].
+- **View Direction Convention:** Ensure $y$ corresponds to "up" in the camera basis [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sky_gradient(d: Vector3, color_horizon: Vector3, color_zenith: Vector3, 
-                 use_smoothstep: bool = False, smoothstep_max: float = 0.7,
-                 add_ground_glow: bool = False, glow_intensity: float = 0.4, 
-                 glow_power: float = 6.0) -> Vector3:
+def sky_gradient(d, color_horizon, color_zenith, use_smoothstep=False, smoothstep_max=0.7, add_ground_glow=False, glow_intensity=0.4, glow_power=6.0):
     # Step 1: Normalize direction
-    d = normalize(d)
+    d = d / length(d)
     
     # Step 2: Get vertical component
     y = d.y
     
     # Step 3: Compute interpolation factor
     if use_smoothstep:
-        # Variant A: Smoothstep
-        t = smoothstep(0.0, smoothstep_max, y)
+        # Variant A: Smoothstep (cubic Hermite interpolation)
+        t = (y - 0.0) / (smoothstep_max - 0.0)
+        t = clamp(t, 0.0, 1.0)
+        t = t * t * (3.0 - 2.0 * t)
     else:
         # Variant B: Linear with optional power
         t = 0.5 * (y + 1.0)
-        # Note: Power application varies by source; S4 applies power to the mix, 
-        # S3 uses linear. We stick to linear for base, but S4 uses pow(h, 0.55).
-        # Implementing S4's power on t for non-linear blend:
+        # S4 applies power to the mix factor for non-linear blend
         t = pow(t, 0.55)
         
     # Step 4: Interpolate
     # Clamp t to [0, 1] to handle edge cases
     t = clamp(t, 0.0, 1.0)
-    color = mix(color_horizon, color_zenith, t)
+    color = color_horizon * (1.0 - t) + color_zenith * t
     
     # Step 5: Optional Ground Glow
     if add_ground_glow:
@@ -95,12 +92,12 @@ Generates a dynamic sky color with time-dependent sun/moon arcs, day/night palet
 Uses a learnable/procedural 3D grid sampled on spherical shells with volumetric attenuation. Choose when you need density-based background sampling or volumetric fog in the background.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per ray. No loops or complex math beyond basic trigonometry/pow.
-- **Memory Complexity:** $O(1)$. Only stores two color vectors and a few constants.
-- **Performance:** Extremely fast. Suitable for real-time rendering on any hardware [S2, unofficial].
-- **Strengths:** Simple to implement, low cost, easy to tune visually [S1, S4, unofficial].
+- **Time Complexity:** $O(1)$ per ray. No loops or complex math beyond basic trigonometry/pow [G].
+- **Memory Complexity:** $O(1)$. Only stores two color vectors and a few constants [G].
+- **Performance:** Extremely fast. Suitable for real-time rendering [S2, unofficial].
+- **Strengths:** Simple to implement, low cost [G].
 - **Limitations:** No physical accuracy, no time variation (unless added externally), no volumetric interaction [S1, S3, unofficial].
-- **When to Use:** Stylized scenes, performance-critical applications, simple sky domes [S2, S4, unofficial].
+- **When to Use:** Performance-critical applications, simple sky domes [S2, S4, unofficial].
 - **When Not to Use:** Physically based rendering requiring atmospheric scattering, scenes with dynamic sun positions requiring accurate sky color changes [S1, S3, unofficial].
 
 ## Background

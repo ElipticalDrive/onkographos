@@ -1,0 +1,2843 @@
+# voxel-engine
+A simple voxel engine made for learning about voxels and advanced GPU / CPU optimization techniques.
+Uses C++, HLSL and D3D12.
+
+# Features
+* Bindless rendering (SM 6.6)
+* Reverse Z
+* Multi-threaded, async copy queue chunk loading system
+* Indirect rendering
+* GPU Culling
+
+# Gallery
+[Link : Click here, or on the Image below!](https://youtu.be/E0T0UMnOggg) 
+
+[![Youtube link](https://img.youtube.com/vi/E0T0UMnOggg/hqdefault.jpg)](https://youtu.be/E0T0UMnOggg)
+
+# Building
++ This project uses CMake as a build system, and all third party libs are setup using CMake's FetchContent().
++ There is a custom script that can be used to setup DirectX Shader Compiler (DXC) and the Agility SDK.
++ After cloning the project, build the project using CMake :
+``` 
+1. Run the setup_dxc_and_agility_sdk.bat file,
+
+2.
+cmake -S . -B build 
+cmake --build build --config release
+```
+
+# Controls
++ WASD -> Move camera.
++ Arrow keys -> Modify camera orientation.
++ Escape -> Exit editor.
+
+### shaders/gpu_culling_shader.hlsl
+```
+#include "interop/render_resources.hlsli"
+
+ConstantBuffer<GPUCullRenderResources> render_resources : register(b0);
+
+[numthreads(32, 1, 1)] void cs_main(uint dispatch_thread_id
+                                    : SV_DispatchThreadID) {
+    if (dispatch_thread_id < render_resources.number_of_chunks)
+    {
+        StructuredBuffer<GPUIndirectCommand> indirect_command =
+            ResourceDescriptorHeap[render_resources.indirect_command_srv_index];
+
+        AppendStructuredBuffer<GPUIndirectCommand> output_commands =
+            ResourceDescriptorHeap[render_resources.output_command_uav_index];
+
+        ConstantBuffer<SceneConstantBuffer> scene_constant_buffer =
+            ResourceDescriptorHeap[render_resources.scene_constant_buffer_index];
+
+        ConstantBuffer<ChunkConstantBuffer> chunk_constant_buffer =
+            ResourceDescriptorHeap[indirect_command[dispatch_thread_id]
+                                       .voxel_render_resources.chunk_constant_buffer_index];
+
+        // For each vertex, find the clip space coord and check if AABB vertex is culled.
+        uint culled_vertices = 0;
+        for (int i = 0; i < 8; i++)
+        {
+            float4 clip_space_coords =
+                mul(mul(scene_constant_buffer.aabb_vertices[i] + chunk_constant_buffer.translation_vector -
+                            float4(scene_constant_buffer.camera_position.xyz, 0.0f),
+                        scene_constant_buffer.view_matrix),
+                    scene_constant_buffer.projection_matrix);
+
+            clip_space_coords.x /= clip_space_coords.w;
+            clip_space_coords.y /= clip_space_coords.w;
+            clip_space_coords.z /= clip_space_coords.w;
+
+            bool is_visible =
+                (-clip_space_coords.w <= clip_space_coords.x) && (clip_space_coords.x <= clip_space_coords.w) &&
+                (-clip_space_coords.w <= clip_space_coords.y) && (clip_space_coords.y <= clip_space_coords.w) &&
+                (0 <= clip_space_coords.z) && (clip_space_coords.z <= clip_space_coords.w);
+
+            if (!is_visible)
+            {
+                ++culled_vertices;
+            }
+        }
+
+        if (culled_vertices < 7)
+        {
+            output_commands.Append(indirect_command[dispatch_thread_id]);
+        }
+    }
+}
+```
+
+### shaders/triangle_shader.hlsl
+```
+#include "interop/render_resources.hlsli"
+
+struct VSOutput
+{
+    float4 position : SV_Position;
+    float4 color : VertexColor;
+};
+
+ConstantBuffer<TriangleRenderResources> render_resources : register(b0);
+
+VSOutput vs_main(uint vertex_id : SV_VertexID)
+{
+    StructuredBuffer<float3> position_buffer = ResourceDescriptorHeap[render_resources.position_buffer_index];
+    StructuredBuffer<float3> color_buffer = ResourceDescriptorHeap[render_resources.color_buffer_index];
+
+    VSOutput output;
+    output.position = float4(position_buffer[vertex_id], 1.0f);
+    output.color = float4(color_buffer[vertex_id], 1.0f);
+
+    return output;
+}
+
+float4 ps_main(VSOutput input) : SV_Target
+{
+    return input.color;
+}
+```
+
+### shaders/voxel_shader.hlsl
+```
+#include "interop/render_resources.hlsli"
+
+struct VSOutput
+{
+    float4 position : SV_Position;
+};
+
+ConstantBuffer<VoxelRenderResources> render_resources : register(b0);
+
+VSOutput vs_main(uint vertex_id : SV_VertexID)
+{
+    ConstantBuffer<ChunkConstantBuffer> chunk_constant_buffer =
+        ResourceDescriptorHeap[render_resources.chunk_constant_buffer_index];
+
+    ConstantBuffer<SceneConstantBuffer> scene_buffer =
+        ResourceDescriptorHeap[render_resources.scene_constant_buffer_index];
+
+    StructuredBuffer<float3> position_buffer = ResourceDescriptorHeap[chunk_constant_buffer.position_buffer_index];
+
+    const float3 position =
+        position_buffer[vertex_id] + -scene_buffer.camera_position.xyz + chunk_constant_buffer.translation_vector.xyz;
+
+    VSOutput output;
+    output.position = mul(mul(float4(position, 1.0f), scene_buffer.view_matrix), scene_buffer.projection_matrix);
+
+    return output;
+}
+
+float4 ps_main(VSOutput input, uint primitive_id : SV_PrimitiveID) : SV_Target
+{
+    ConstantBuffer<ChunkConstantBuffer> chunk_constant_buffer =
+        ResourceDescriptorHeap[render_resources.chunk_constant_buffer_index];
+
+    StructuredBuffer<float3> color_buffer = ResourceDescriptorHeap[chunk_constant_buffer.color_buffer_index];
+    return float4(color_buffer[primitive_id], 1.0f);
+}
+```
+
+### src/camera.cpp
+```
+#include "voxel-engine/camera.hpp"
+
+DirectX::XMMATRIX Camera::update_and_get_view_matrix(const float delta_time)
+{
+    // For operator overloads.
+    using namespace DirectX;
+
+    const float movement_speed = m_movement_speed * delta_time;
+    const float rotation_speed = m_rotation_speed * delta_time;
+
+    // For making the camera 'smooth', the yaw / pitch / position vector values are not set based on the players input
+    // at a particular instance. Instead, these values lerp to the new values. The static variables help persist that
+    // data between multiple frames / instances.
+    static DirectX::XMVECTOR move_to_position_vector = DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f);
+    static float pitch_to = 0.0f;
+    static float yaw_to = 0.0f;
+
+    // First load data into SIMD datatypes.
+    DirectX::XMVECTOR position_vector = DirectX::XMLoadFloat4(&m_position);
+
+    DirectX::XMVECTOR front_vector = DirectX::XMLoadFloat4(&m_front);
+    DirectX::XMVECTOR right_vector = DirectX::XMLoadFloat4(&m_right);
+
+    // Index is the virutal key code.
+    // If higher order bit is 1 (0x8000), the key is down.
+    if (GetKeyState((int)'A') & 0x8000)
+    {
+        move_to_position_vector -= right_vector * movement_speed;
+    }
+
+    if (GetKeyState((int)'D') & 0x8000)
+    {
+        move_to_position_vector += right_vector * movement_speed;
+    }
+
+    if (GetKeyState((int)'W') & 0x8000)
+    {
+        move_to_position_vector += front_vector * movement_speed;
+    }
+
+    if (GetKeyState((int)'S') & 0x8000)
+    {
+        move_to_position_vector -= front_vector * movement_speed;
+    }
+
+    if (GetKeyState(VK_UP) & 0x8000)
+    {
+        pitch_to -= rotation_speed;
+    }
+    else if (GetKeyState(VK_DOWN) & 0x8000)
+    {
+        pitch_to += rotation_speed;
+    }
+
+    if (GetKeyState(VK_LEFT) & 0x8000)
+    {
+        yaw_to -= rotation_speed;
+    }
+    else if (GetKeyState(VK_RIGHT) & 0x8000)
+    {
+        yaw_to += rotation_speed;
+    }
+
+    // The static variables are lerped (between current value and 0, with the 'lerp factor' being the friction member
+    // variable).
+    pitch_to = std::lerp(pitch_to, 0.0f, m_friction);
+    yaw_to = std::lerp(yaw_to, 0.0f, m_friction);
+    move_to_position_vector =
+        DirectX::XMVectorLerp(move_to_position_vector, DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f), m_friction);
+
+    position_vector += move_to_position_vector * movement_speed;
+    m_pitch += pitch_to;
+    m_yaw += yaw_to;
+
+    // Compute rotation matrix.
+    static const DirectX::XMVECTOR world_up_vector = DirectX::XMVectorSet(0.0f, 1.0f, 0.0f, 0.0f);
+    static const DirectX::XMVECTOR world_right_vector = DirectX::XMVectorSet(1.0f, 0.0f, 0.0f, 0.0f);
+    static const DirectX::XMVECTOR world_front_vector = DirectX::XMVectorSet(0.0f, 0.0f, 1.0f, 0.0f);
+
+    const DirectX::XMMATRIX rotation_matrix = DirectX::XMMatrixRotationRollPitchYaw(m_pitch, m_yaw, 0.0);
+
+    right_vector = DirectX::XMVector3Normalize(DirectX::XMVector3Transform(world_right_vector, rotation_matrix));
+    front_vector = DirectX::XMVector3Normalize(DirectX::XMVector3Transform(world_front_vector, rotation_matrix));
+
+    DirectX::XMVECTOR up_vector = DirectX::XMVector3Normalize(DirectX::XMVector3Cross(front_vector, right_vector));
+
+    // Store results back to the member variables.
+    DirectX::XMStoreFloat4(&m_right, right_vector);
+    DirectX::XMStoreFloat4(&m_front, front_vector);
+
+    DirectX::XMStoreFloat4(&m_position, position_vector);
+
+    // The 'camera position' in the view matrix is a zero vector. In the shader, the vertex position subtracts the
+    // position vector so that the camera is ALWAYS at the origin.
+    // This should help a lot with precision.
+    return DirectX::XMMatrixLookAtLH(DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f),
+                                     DirectX::XMVectorSet(0.0f, 0.0f, 0.0f, 1.0f) + front_vector, up_vector);
+}
+```
+
+### src/filesystem.cpp
+```
+#include "voxel-engine/filesystem.hpp"
+
+FileSystem::FileSystem()
+{
+    // Start from the executable directory, and keep moving up until you find the project root directory.
+    std::filesystem::path current_path = std::filesystem::current_path();
+    while (!std::filesystem::exists(current_path / "voxel-engine"))
+    {
+        if (current_path.has_parent_path())
+        {
+            current_path = current_path.parent_path();
+        }
+        else
+        {
+            printf("Failed to find root directory voxel-engine.");
+        }
+    }
+
+    m_root_directory = (current_path / "voxel-engine/").string();
+
+    printf("Root directory :: %s\n", m_root_directory.c_str());
+}
+```
+
+### src/main.cpp
+```
+#include "voxel-engine/camera.hpp"
+#include "voxel-engine/filesystem.hpp"
+#include "voxel-engine/renderer.hpp"
+#include "voxel-engine/shader_compiler.hpp"
+#include "voxel-engine/timer.hpp"
+#include "voxel-engine/voxel.hpp"
+#include "voxel-engine/window.hpp"
+
+#include "shaders/interop/render_resources.hlsli"
+
+#include "imgui.h"
+#include "imgui_impl_dx12.h"
+#include "imgui_impl_win32.h"
+
+int main()
+{
+    printf("%s\n", FileSystem::instance().executable_path().c_str());
+
+    const Window window{};
+    Renderer renderer(window.get_handle(), window.get_width(), window.get_height());
+
+    // Setup imgui.
+    {
+        IMGUI_CHECKVERSION();
+        ImGui::CreateContext();
+
+        ImGui::StyleColorsDark();
+
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu_descriptor_handle =
+            renderer.m_cbv_srv_uav_descriptor_heap.current_cpu_descriptor_handle;
+
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu_descriptor_handle =
+            renderer.m_cbv_srv_uav_descriptor_heap.current_gpu_descriptor_handle;
+
+        renderer.m_cbv_srv_uav_descriptor_heap.offset_current_descriptor_handles();
+
+        // Setup platform / renderer backend.
+        ImGui_ImplWin32_Init(window.get_handle());
+        ImGui_ImplDX12_Init(renderer.m_device.Get(), Renderer::NUMBER_OF_BACKBUFFERS, Renderer::BACKBUFFER_FORMAT,
+                            renderer.m_cbv_srv_uav_descriptor_heap.descriptor_heap.Get(), cpu_descriptor_handle,
+                            gpu_descriptor_handle);
+    }
+
+    ChunkManager chunk_manager{renderer};
+
+    SceneConstantBuffer scene_buffer_data{};
+
+    // Setup the AABB data for scene buffer.
+
+    // AABB for chunk.
+    static constexpr std::array<DirectX::XMFLOAT4, 8> aabb_vertices{
+        DirectX::XMFLOAT4(0.0f, 0.0f, 0.0f, 1.0f),
+        DirectX::XMFLOAT4(0.0f, Chunk::CHUNK_LENGTH, 0.0f, 1.0f),
+        DirectX::XMFLOAT4(Chunk::CHUNK_LENGTH, Chunk::CHUNK_LENGTH, 0.0f, 1.0f),
+        DirectX::XMFLOAT4(Chunk::CHUNK_LENGTH, 0.0f, 0.0f, 1.0f),
+        DirectX::XMFLOAT4(0.0f, 0.0f, Chunk::CHUNK_LENGTH, 1.0f),
+        DirectX::XMFLOAT4(0.0f, Chunk::CHUNK_LENGTH, Chunk::CHUNK_LENGTH, 1.0f),
+        DirectX::XMFLOAT4(Chunk::CHUNK_LENGTH, Chunk::CHUNK_LENGTH, Chunk::CHUNK_LENGTH, 1.0f),
+        DirectX::XMFLOAT4(Chunk::CHUNK_LENGTH, 0.0f, Chunk::CHUNK_LENGTH, 1.0f),
+    };
+
+    for (int i = 0; i < 8; i++)
+    {
+        scene_buffer_data.aabb_vertices[i] = aabb_vertices[i];
+    }
+
+    auto scene_buffers = renderer.create_constant_buffer<Renderer::NUMBER_OF_BACKBUFFERS>(sizeof(SceneConstantBuffer),
+                                                                                          L"Scene constant buffer");
+
+    // Compile the vertex and pixel shader.
+    Microsoft::WRL::ComPtr<IDxcBlob> vertex_shader_blob = ShaderCompiler::compile(
+        FileSystem::instance().get_relative_path_wstr(L"shaders/voxel_shader.hlsl").c_str(), L"vs_main", L"vs_6_6");
+
+    Microsoft::WRL::ComPtr<IDxcBlob> pixel_shader_blob = ShaderCompiler::compile(
+        FileSystem::instance().get_relative_path_wstr(L"shaders/voxel_shader.hlsl").c_str(), L"ps_main", L"ps_6_6");
+
+    // Setup depth buffer.
+    Microsoft::WRL::ComPtr<ID3D12Resource> depth_buffer_resource{};
+    const D3D12_RESOURCE_DESC depth_buffer_resource_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION::D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+        .Width = window.get_width(),
+        .Height = window.get_height(),
+        .DepthOrArraySize = 1u,
+        .MipLevels = 1u,
+        .Format = DXGI_FORMAT_D32_FLOAT,
+        .SampleDesc = {1u, 0u},
+        .Layout = D3D12_TEXTURE_LAYOUT::D3D12_TEXTURE_LAYOUT_UNKNOWN,
+        .Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+    };
+
+    const D3D12_HEAP_PROPERTIES depth_buffer_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_DEFAULT,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    const D3D12_CLEAR_VALUE depth_buffer_optimized_clear_value = {
+        .Format = DXGI_FORMAT_D32_FLOAT,
+        .DepthStencil = {.Depth = 0.0f, .Stencil = 0u},
+    };
+
+    throw_if_failed(renderer.m_device->CreateCommittedResource(
+        &depth_buffer_heap_properties, D3D12_HEAP_FLAG_NONE, &depth_buffer_resource_desc,
+        D3D12_RESOURCE_STATE_DEPTH_WRITE, &depth_buffer_optimized_clear_value, IID_PPV_ARGS(&depth_buffer_resource)));
+
+    // Create DSV.
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_handle = renderer.m_dsv_descriptor_heap.current_cpu_descriptor_handle;
+    {
+        const D3D12_DEPTH_STENCIL_VIEW_DESC dsv_desc = {
+            .Format = DXGI_FORMAT_D32_FLOAT,
+            .ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D,
+            .Flags = D3D12_DSV_FLAG_NONE,
+            .Texture2D =
+                {
+
+                    .MipSlice = 0u,
+                },
+        };
+
+        renderer.m_dsv_descriptor_heap.offset_current_descriptor_handles();
+
+        renderer.m_device->CreateDepthStencilView(depth_buffer_resource.Get(), &dsv_desc, dsv_handle);
+    }
+
+    // Create the PSO.
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> pso{};
+    const D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics_pso_desc = {
+        .pRootSignature = renderer.m_bindless_root_signature.Get(),
+        .VS =
+            {
+                .pShaderBytecode = vertex_shader_blob->GetBufferPointer(),
+                .BytecodeLength = vertex_shader_blob->GetBufferSize(),
+            },
+        .PS =
+            {
+                .pShaderBytecode = pixel_shader_blob->GetBufferPointer(),
+                .BytecodeLength = pixel_shader_blob->GetBufferSize(),
+            },
+        .BlendState =
+            {
+                .AlphaToCoverageEnable = FALSE,
+                .IndependentBlendEnable = FALSE,
+                .RenderTarget =
+                    {
+                        D3D12_RENDER_TARGET_BLEND_DESC{
+                            .BlendEnable = FALSE,
+                            .RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL,
+                        },
+                    },
+            },
+        .SampleMask = 0xffff'ffff,
+        .RasterizerState =
+            {
+                .FillMode = D3D12_FILL_MODE_SOLID,
+                .CullMode = D3D12_CULL_MODE_BACK,
+                .FrontCounterClockwise = FALSE,
+                .DepthClipEnable = TRUE,
+            },
+        .DepthStencilState =
+            {
+                .DepthEnable = TRUE,
+                .DepthWriteMask = D3D12_DEPTH_WRITE_MASK::D3D12_DEPTH_WRITE_MASK_ALL,
+                .DepthFunc = D3D12_COMPARISON_FUNC_GREATER,
+                .StencilEnable = FALSE,
+            },
+        .InputLayout =
+            {
+                .NumElements = 0u,
+            },
+        .PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+        .NumRenderTargets = 1u,
+        .RTVFormats =
+            {
+                Renderer::BACKBUFFER_FORMAT,
+            },
+        .DSVFormat = DXGI_FORMAT_D32_FLOAT,
+        .SampleDesc =
+            {
+                1u,
+                0u,
+            },
+        .NodeMask = 0u,
+    };
+    throw_if_failed(renderer.m_device->CreateGraphicsPipelineState(&graphics_pso_desc, IID_PPV_ARGS(&pso)));
+
+    // Setup the gpu culling compute shader.
+    Microsoft::WRL::ComPtr<IDxcBlob> gpu_culling_compute_shader_blob = ShaderCompiler::compile(
+        FileSystem::instance().get_relative_path_wstr(L"shaders/gpu_culling_shader.hlsl").c_str(), L"cs_main",
+        L"cs_6_6");
+
+    Microsoft::WRL::ComPtr<ID3D12PipelineState> gpu_culling_pso{};
+    const D3D12_COMPUTE_PIPELINE_STATE_DESC gpu_culling_compute_pso_desc = {
+        .pRootSignature = renderer.m_bindless_root_signature.Get(),
+        .CS =
+            {
+                .pShaderBytecode = gpu_culling_compute_shader_blob->GetBufferPointer(),
+                .BytecodeLength = gpu_culling_compute_shader_blob->GetBufferSize(),
+            },
+        .NodeMask = 0u,
+        .Flags = D3D12_PIPELINE_STATE_FLAG_NONE,
+    };
+    throw_if_failed(
+        renderer.m_device->CreateComputePipelineState(&gpu_culling_compute_pso_desc, IID_PPV_ARGS(&gpu_culling_pso)));
+
+    // Indirect command struct : command signature must match this struct.
+    // Each chunk will have its own IndirectCommand, with 3 arguments. The render resources struct root constants, index
+    // buffer view and a draw call.
+    struct IndirectCommand
+    {
+        VoxelRenderResources render_resources{};
+        D3D12_INDEX_BUFFER_VIEW index_buffer_view{};
+        D3D12_DRAW_INDEXED_ARGUMENTS draw_arguments{};
+        float padding;
+    };
+
+    printf("Size of indirect command : %zd\n", sizeof(IndirectCommand));
+
+    // Create the command signature, which tells the GPU how to interpret the data passed in the ExecuteIndirect call.
+    const std::array<D3D12_INDIRECT_ARGUMENT_DESC, 3u> argument_descs = {
+        D3D12_INDIRECT_ARGUMENT_DESC{
+            .Type = D3D12_INDIRECT_ARGUMENT_TYPE_CONSTANT,
+            .Constant =
+                {
+                    .RootParameterIndex = 0u,
+                    .DestOffsetIn32BitValues = 0u,
+                    .Num32BitValuesToSet = sizeof(VoxelRenderResources) / sizeof(u32),
+                },
+        },
+        D3D12_INDIRECT_ARGUMENT_DESC{
+            .Type = D3D12_INDIRECT_ARGUMENT_TYPE_INDEX_BUFFER_VIEW,
+        },
+        D3D12_INDIRECT_ARGUMENT_DESC{
+            .Type = D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED,
+        },
+    };
+
+    Microsoft::WRL::ComPtr<ID3D12CommandSignature> command_signature{};
+    const D3D12_COMMAND_SIGNATURE_DESC command_signature_desc = {
+        .ByteStride = sizeof(IndirectCommand),
+        .NumArgumentDescs = argument_descs.size(),
+        .pArgumentDescs = argument_descs.data(),
+        .NodeMask = 0u,
+    };
+
+    throw_if_failed(renderer.m_device->CreateCommandSignature(
+        &command_signature_desc, renderer.m_bindless_root_signature.Get(), IID_PPV_ARGS(&command_signature)));
+
+    // Command buffer that will be used to store the indirect command args.
+    static constexpr size_t MAX_CHUNKS_TO_BE_DRAWN = 10'00'000;
+    std::vector<IndirectCommand> indirect_command_vector{};
+
+    CommandBuffer indirect_command_buffer =
+        renderer.create_command_buffer(sizeof(IndirectCommand), MAX_CHUNKS_TO_BE_DRAWN, L"Indirect Command Buffer");
+
+    // Create viewport and scissor.
+    const D3D12_VIEWPORT viewport = {
+        .TopLeftX = 0.0f,
+        .TopLeftY = 0.0f,
+        .Width = (float)window.get_width(),
+        .Height = (float)window.get_height(),
+        .MinDepth = 0.0f,
+        .MaxDepth = 1.0f,
+    };
+
+    // The default config is used if we want to mask the entire viewport for drawing.
+    const D3D12_RECT scissor_rect = {
+        .left = 0u,
+        .top = 0u,
+        .right = LONG_MAX,
+        .bottom = LONG_MAX,
+    };
+
+    // Execute and flush gpu so resources required for rendering (before the first frame) are ready.
+    renderer.m_copy_queue.flush_queue();
+
+    renderer.m_direct_queue.execute_command_list();
+    renderer.m_direct_queue.flush_queue();
+
+    // Precompute the offset to a chunk index X, using which we can load chunks within the CHUNK_RENDER_DISTANCE volume
+    // around the player at any given moment.
+    // For precomputation, X is assumed to be zero. These values will be added to the current chunk index.
+    // NOTE : The current player chunk is loaded first, then the chunks 1 distance away, then 2 distance away, etc.
+    // note(rtarun9) : Make this more efficient?
+    std::vector<DirectX::XMINT3> chunk_render_distance_offsets = {};
+    chunk_render_distance_offsets.push_back(DirectX::XMINT3{0, 0, 0});
+
+    for (i32 z = -1 * ChunkManager::CHUNK_RENDER_DISTANCE; z <= (i32)ChunkManager::CHUNK_RENDER_DISTANCE; z++)
+    {
+        for (i32 y = -ChunkManager::CHUNK_RENDER_DISTANCE; y <= (i32)ChunkManager::CHUNK_RENDER_DISTANCE; y++)
+        {
+            for (i32 x = -ChunkManager::CHUNK_RENDER_DISTANCE; x <= (i32)ChunkManager::CHUNK_RENDER_DISTANCE; x++)
+            {
+                if ((z == -ChunkManager::CHUNK_RENDER_DISTANCE || z == ChunkManager::CHUNK_RENDER_DISTANCE) ||
+                    (y == -ChunkManager::CHUNK_RENDER_DISTANCE || y == ChunkManager::CHUNK_RENDER_DISTANCE) ||
+                    (x == -ChunkManager::CHUNK_RENDER_DISTANCE || x == ChunkManager::CHUNK_RENDER_DISTANCE))
+                {
+                    chunk_render_distance_offsets.emplace_back(DirectX::XMINT3{x, y, z});
+                }
+            }
+        }
+    }
+    std::sort(chunk_render_distance_offsets.begin(), chunk_render_distance_offsets.end(),
+              [](const DirectX::XMINT3 &a, const DirectX::XMINT3 &b) {
+                  return a.x * a.x + a.y * a.y + a.z * a.z < b.x * b.x + b.y * b.y + b.z * b.z;
+              });
+
+    Camera camera{};
+    const u64 chunk_grid_middle = Chunk::CHUNK_LENGTH * ChunkManager::NUMBER_OF_CHUNKS_PER_DIMENSION / 2u;
+    camera.m_position = {chunk_grid_middle, chunk_grid_middle, chunk_grid_middle, 1.0f};
+
+    std::queue<u64> chunks_to_unload{};
+
+    Timer timer{};
+    float delta_time = 0.0f;
+
+    bool setup_chunks{false};
+
+    u64 frame_count = 0;
+
+    bool quit{false};
+    while (!quit)
+    {
+        static float near_plane = 1.0f;
+        static float far_plane = 1000000.0f;
+
+        // Get the player's current chunk index.
+
+        const DirectX::XMUINT3 current_chunk_3d_index = {
+            (u32)(floor((camera.m_position.x) / Chunk::CHUNK_LENGTH)),
+            (u32)(floor((camera.m_position.y) / Chunk::CHUNK_LENGTH)),
+            (u32)(floor((camera.m_position.z) / Chunk::CHUNK_LENGTH)),
+        };
+
+        const u64 current_chunk_index =
+            convert_to_1d(current_chunk_3d_index, ChunkManager::NUMBER_OF_CHUNKS_PER_DIMENSION);
+
+        if (setup_chunks)
+        {
+            // Load chunks around the player (ChunkManager::CHUNK_RENDER_DISTANCE) determines how many of these
+            // chunks to load.
+            for (const auto &offset : chunk_render_distance_offsets)
+            {
+                const DirectX::XMUINT3 chunk_3d_index = {
+                    current_chunk_3d_index.x + offset.x,
+                    current_chunk_3d_index.y + offset.y,
+                    current_chunk_3d_index.z + offset.z,
+                };
+
+                chunk_manager.add_chunk_to_setup_stack(
+                    convert_to_1d(chunk_3d_index, ChunkManager::NUMBER_OF_CHUNKS_PER_DIMENSION));
+            }
+        }
+
+        chunk_manager.create_chunks_from_setup_stack(renderer);
+
+        timer.start();
+
+        MSG message = {};
+        if (PeekMessageA(&message, NULL, 0u, 0u, PM_REMOVE))
+        {
+            TranslateMessage(&message);
+            DispatchMessageA(&message);
+        }
+
+        if (message.message == WM_QUIT)
+        {
+            quit = true;
+        }
+
+        chunk_manager.transfer_chunks_from_setup_to_loaded_state(renderer.m_copy_queue.m_fence->GetCompletedValue());
+
+        const float window_aspect_ratio = static_cast<float>(window.get_width()) / window.get_height();
+
+        // Article followed for reverse Z:
+        //  https://iolite-engine.com/blog_posts/reverse_z_cheatsheet
+
+        // https://github.com/microsoft/DirectXMath/issues/158 link that shows the projection matrix for infinite far
+        // plane.
+        // Note : This code is taken from the directxmath source code for perspective projection fov lh, but modified
+        // for infinite far plane.
+
+        float sin_fov{};
+        float cos_fov{};
+        DirectX::XMScalarSinCos(&sin_fov, &cos_fov, 0.5f * DirectX::XMConvertToRadians(45.0f));
+
+        float height = cos_fov / sin_fov;
+        float width = height / window_aspect_ratio;
+
+        const DirectX::XMMATRIX projection_matrix = DirectX::XMMatrixSet(
+            width, 0.0f, 0.0f, 0.0f, 0.0f, height, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, near_plane, 0.0f);
+
+        scene_buffer_data.view_matrix = camera.update_and_get_view_matrix(delta_time);
+        scene_buffer_data.projection_matrix = projection_matrix;
+        scene_buffer_data.camera_position = camera.m_position;
+
+        ConstantBuffer &scene_buffer = scene_buffers[renderer.m_swapchain_backbuffer_index];
+        scene_buffer.update(&scene_buffer_data);
+
+        const auto &swapchain_index = renderer.m_swapchain_backbuffer_index;
+
+        // Reset command allocator and command list.
+        renderer.m_direct_queue.reset(swapchain_index);
+
+        const auto &command_list = renderer.m_direct_queue.m_command_list;
+
+        const auto &rtv_handle = renderer.m_swapchain_backbuffer_cpu_descriptor_handles[swapchain_index];
+        const Microsoft::WRL::ComPtr<ID3D12Resource> swapchain_resource =
+            renderer.m_swapchain_backbuffer_resources[swapchain_index];
+
+        // Transition the backbuffer from presentation mode to render target mode.
+        const D3D12_RESOURCE_BARRIER presentation_to_render_target_barrier = {
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            .Transition =
+                {
+                    .pResource = swapchain_resource.Get(),
+                    .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    .StateBefore = D3D12_RESOURCE_STATE_PRESENT,
+                    .StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET,
+                },
+        };
+
+        command_list->ResourceBarrier(1u, &presentation_to_render_target_barrier);
+
+        // Now, clear the RTV and DSV.
+        const float clear_color[4] = {0.1f, 0.1f, 0.1f, 1.0f};
+        command_list->ClearRenderTargetView(rtv_handle, clear_color, 0u, nullptr);
+        command_list->ClearDepthStencilView(dsv_handle, D3D12_CLEAR_FLAG_DEPTH, 0.0f, 0u, 0u, nullptr);
+
+        // Set viewport.
+        command_list->RSSetViewports(1u, &viewport);
+        command_list->RSSetScissorRects(1u, &scissor_rect);
+
+        // Evict the chunks that are out of range of render distance.
+        // Because evicting chunks seems to have such a high overhead (more specifically freeing allocated id3d12
+        // resources) each frame only a certain number of chunks are unloaded.
+        for (const auto &[i, chunk] : chunk_manager.m_loaded_chunks)
+        {
+            const DirectX::XMUINT3 chunk_index_3d = convert_to_3d(i, ChunkManager::NUMBER_OF_CHUNKS_PER_DIMENSION);
+            if (std::abs((i32)chunk_index_3d.x - (i32)current_chunk_3d_index.x) >
+                    ChunkManager::CHUNK_RENDER_DISTANCE * 8 ||
+                std::abs((i32)chunk_index_3d.y - (i32)current_chunk_3d_index.y) >
+                    ChunkManager::CHUNK_RENDER_DISTANCE * 8 ||
+                std::abs((i32)chunk_index_3d.z - (i32)current_chunk_3d_index.z) >
+                    ChunkManager::CHUNK_RENDER_DISTANCE * 8)
+            {
+                chunks_to_unload.push(i);
+            }
+        }
+
+        /*
+        size_t unloaded_chunks = 0;
+        while (false && !chunks_to_unload.empty() && unloaded_chunks < ChunkManager::CHUNKS_TO_UNLOAD_PER_FRAME)
+        {
+            const auto chunk_to_unload = chunks_to_unload.front();
+            chunks_to_unload.pop();
+
+            chunk_manager.m_loaded_chunks.erase(chunk_to_unload);
+
+            chunk_manager.m_chunk_index_buffers.erase(chunk_to_unload);
+            chunk_manager.m_chunk_index_buffers[chunk_to_unload].resource.Reset();
+
+            chunk_manager.m_chunk_color_buffers.erase(chunk_to_unload);
+            chunk_manager.m_chunk_color_buffers[chunk_to_unload].resource.Reset();
+
+            chunk_manager.m_chunk_constant_buffers[chunk_to_unload].resource.Reset();
+            chunk_manager.m_chunk_constant_buffers.erase(chunk_to_unload);
+
+            ++unloaded_chunks;
+        }
+        */
+
+        // Setup indirect command vector.
+        indirect_command_vector.clear();
+        indirect_command_vector.reserve(chunk_manager.m_loaded_chunks.size());
+        for (const auto &[i, chunk] : chunk_manager.m_loaded_chunks)
+        {
+            const VoxelRenderResources render_resources = {
+                .scene_constant_buffer_index = static_cast<u32>(scene_buffer.cbv_index),
+                .chunk_constant_buffer_index = static_cast<u32>(chunk_manager.m_chunk_constant_buffers[i].cbv_index),
+            };
+
+            indirect_command_vector.emplace_back(IndirectCommand{
+                .render_resources = render_resources,
+                .index_buffer_view = chunk_manager.m_chunk_index_buffers[i].index_buffer_view,
+                .draw_arguments =
+                    D3D12_DRAW_INDEXED_ARGUMENTS{
+                        .IndexCountPerInstance = (u32)chunk_manager.m_chunk_index_buffers[i].indices_count,
+                        .InstanceCount = 1u,
+                        .StartIndexLocation = 0u,
+                        .BaseVertexLocation = 0u,
+                        .StartInstanceLocation = 0u,
+                    },
+            });
+        }
+
+        ID3D12DescriptorHeap *const *shader_visible_descriptor_heaps = {
+            renderer.m_cbv_srv_uav_descriptor_heap.descriptor_heap.GetAddressOf(),
+        };
+
+        command_list->SetDescriptorHeaps(1u, shader_visible_descriptor_heaps);
+
+        // Prepare rendering commands.
+        command_list->OMSetRenderTargets(1u, &rtv_handle, FALSE, &dsv_handle);
+
+        // Run the culling compute shader, followed by voxel rendering shader.
+        if (!indirect_command_vector.empty())
+        {
+            const D3D12_RESOURCE_BARRIER indirect_argument_to_copy_dest_state = {
+                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Flags = D3D12_RESOURCE_BARRIER_FLAGS::D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                .Transition =
+                    D3D12_RESOURCE_TRANSITION_BARRIER{
+                        .pResource = indirect_command_buffer.default_resource.Get(),
+                        .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        .StateBefore = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                        .StateAfter = D3D12_RESOURCE_STATE_COPY_DEST,
+                    },
+            };
+            command_list->ResourceBarrier(1u, &indirect_argument_to_copy_dest_state);
+
+            memcpy(indirect_command_buffer.upload_resource_mapped_ptr, indirect_command_vector.data(),
+                   indirect_command_vector.size() * sizeof(IndirectCommand));
+
+            GPUCullRenderResources gpu_cull_render_resources = {
+                .number_of_chunks = static_cast<u32>(indirect_command_vector.size()),
+                .indirect_command_srv_index = static_cast<u32>(indirect_command_buffer.upload_resource_srv_index),
+                .output_command_uav_index = static_cast<u32>(indirect_command_buffer.default_resource_uav_index),
+                .scene_constant_buffer_index = static_cast<u32>(scene_buffer.cbv_index),
+            };
+
+            command_list->SetDescriptorHeaps(1u, shader_visible_descriptor_heaps);
+            command_list->SetComputeRootSignature(renderer.m_bindless_root_signature.Get());
+            command_list->SetPipelineState(gpu_culling_pso.Get());
+
+            command_list->SetComputeRoot32BitConstants(0u, 64u, &gpu_cull_render_resources, 0u);
+
+            // Clear the counter associated with UAV.
+
+            command_list->CopyBufferRegion(indirect_command_buffer.default_resource.Get(),
+                                           indirect_command_buffer.counter_offset,
+                                           indirect_command_buffer.zeroed_counter_buffer_resource.Get(), 0u, 4u);
+
+            const D3D12_RESOURCE_BARRIER copy_dest_to_unordered_access_state = {
+                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Flags = D3D12_RESOURCE_BARRIER_FLAGS::D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                .Transition =
+                    D3D12_RESOURCE_TRANSITION_BARRIER{
+                        .pResource = indirect_command_buffer.default_resource.Get(),
+                        .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        .StateBefore = D3D12_RESOURCE_STATE_COPY_DEST,
+                        .StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                    },
+
+            };
+
+            command_list->ResourceBarrier(1u, &copy_dest_to_unordered_access_state);
+
+            command_list->Dispatch((indirect_command_vector.size() + 31) / 32u, 1u, 1u);
+
+            const D3D12_RESOURCE_BARRIER unordered_access_to_indirect_argument_state = {
+                .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                .Flags = D3D12_RESOURCE_BARRIER_FLAGS::D3D12_RESOURCE_BARRIER_FLAG_NONE,
+                .Transition =
+                    D3D12_RESOURCE_TRANSITION_BARRIER{
+                        .pResource = indirect_command_buffer.default_resource.Get(),
+                        .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                        .StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                        .StateAfter = D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT,
+                    },
+
+            };
+
+            command_list->ResourceBarrier(1u, &unordered_access_to_indirect_argument_state);
+
+            command_list->SetDescriptorHeaps(1u, shader_visible_descriptor_heaps);
+            command_list->SetGraphicsRootSignature(renderer.m_bindless_root_signature.Get());
+            command_list->SetPipelineState(pso.Get());
+
+            command_list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            command_list->ExecuteIndirect(
+                command_signature.Get(), MAX_CHUNKS_TO_BE_DRAWN, indirect_command_buffer.default_resource.Get(), 0u,
+                indirect_command_buffer.default_resource.Get(), indirect_command_buffer.counter_offset);
+        }
+
+        // Render UI.
+        // Start the Dear ImGui frame
+
+        ImGui_ImplDX12_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
+
+        ImGui::Begin("Debug Controller");
+        ImGui::SliderFloat("movement_speed", &camera.m_movement_speed, 0.0f, 5000.0f);
+        ImGui::SliderFloat("rotation_speed", &camera.m_rotation_speed, 0.0f, 10.0f);
+        ImGui::SliderFloat("friction", &camera.m_friction, 0.0f, 1.0f);
+        ImGui::SliderFloat("near plane", &near_plane, 0.1f, 1.0f);
+        ImGui::SliderFloat("Far plane", &far_plane, 10.0f, 10000000.0f);
+        ImGui::Checkbox("Start loading chunks", &setup_chunks);
+        ImGui::Text("Delta Time: %f", delta_time);
+        ImGui::Text("Camera Position : %f %f %f", camera.m_position.x, camera.m_position.y, camera.m_position.z);
+        ImGui::Text("Pitch and Yaw: %f %f", camera.m_pitch, camera.m_yaw);
+        ImGui::Text("Current Index: %zu", current_chunk_index);
+        ImGui::Text("Current 3D Index: %zu, %zu, %zu", current_chunk_3d_index.x, current_chunk_3d_index.y,
+                    current_chunk_3d_index.z);
+        ImGui::Text("Number of loaded chunks: %zu", chunk_manager.m_loaded_chunks.size());
+        ImGui::Text("Number of rendered chunks: %zu", indirect_command_vector.size());
+        ImGui::Text("Number of copy alloc / list pairs : %zu",
+                    renderer.m_copy_queue.m_command_allocator_list_queue.size());
+        ImGui::Text("Voxel edge length : %zu", Voxel::EDGE_LENGTH);
+        ImGui::Text("Number of threads in pool : %zu", chunk_manager.m_thread_pool.get_thread_count());
+        ImGui::Text("Number of queued threads in pool : %zu", chunk_manager.m_thread_pool.get_tasks_queued());
+
+        ImGui::ShowMetricsWindow();
+        ImGui::End();
+
+        command_list->SetDescriptorHeaps(1u, shader_visible_descriptor_heaps);
+        ImGui::Render();
+        ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), command_list.Get());
+
+        // Now, transition back to presentation mode.
+        const D3D12_RESOURCE_BARRIER render_target_to_presentation_barrier = {
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+            .Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            .Transition =
+                {
+                    .pResource = swapchain_resource.Get(),
+                    .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    .StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    .StateAfter = D3D12_RESOURCE_STATE_PRESENT,
+                },
+        };
+
+        command_list->ResourceBarrier(1u, &render_target_to_presentation_barrier);
+
+        // Submit command list to queue for execution.
+        renderer.m_direct_queue.execute_command_list();
+
+        // Now, present the rendertarget and signal command queue.
+        throw_if_failed(renderer.m_swapchain->Present(1u, 0u));
+        renderer.m_direct_queue.signal_fence(renderer.m_swapchain_backbuffer_index);
+
+        renderer.m_swapchain_backbuffer_index = static_cast<u8>(renderer.m_swapchain->GetCurrentBackBufferIndex());
+
+        // Wait for the previous frame (that is presenting to
+        // swpachain_backbuffer_index) to complete execution.
+        renderer.m_direct_queue.wait_for_fence_value_at_index(renderer.m_swapchain_backbuffer_index);
+
+        ++frame_count;
+
+        timer.stop();
+        delta_time = timer.get_delta_time();
+    }
+
+    // Cleanup
+    ImGui_ImplDX12_Shutdown();
+    ImGui_ImplWin32_Shutdown();
+    ImGui::DestroyContext();
+
+    renderer.m_direct_queue.flush_queue();
+    renderer.m_copy_queue.flush_queue();
+
+    return 0;
+}
+```
+
+### src/renderer.cpp
+```
+#include "voxel-engine/renderer.hpp"
+
+// Agility SDK setup.
+// Setting the Agility SDK parameters.
+extern "C"
+{
+    __declspec(dllexport) extern const UINT D3D12SDKVersion = 711u;
+}
+
+extern "C"
+{
+    __declspec(dllexport) extern const char *D3D12SDKPath = ".\\D3D12\\";
+}
+
+D3D12_GPU_DESCRIPTOR_HANDLE Renderer::DescriptorHeap::get_gpu_descriptor_handle_at_index(const size_t index) const
+{
+    D3D12_GPU_DESCRIPTOR_HANDLE handle = descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+    handle.ptr += index * descriptor_handle_size;
+
+    return handle;
+}
+
+D3D12_CPU_DESCRIPTOR_HANDLE Renderer::DescriptorHeap::get_cpu_descriptor_handle_at_index(const size_t index) const
+{
+    D3D12_CPU_DESCRIPTOR_HANDLE handle = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+    handle.ptr += index * descriptor_handle_size;
+
+    return handle;
+}
+
+void Renderer::DescriptorHeap::offset_current_descriptor_handles()
+{
+    current_cpu_descriptor_handle.ptr += descriptor_handle_size;
+    current_gpu_descriptor_handle.ptr += descriptor_handle_size;
+
+    current_descriptor_handle_index++;
+}
+
+void Renderer::DescriptorHeap::create(ID3D12Device *const device, const size_t num_descriptors,
+                                      const D3D12_DESCRIPTOR_HEAP_TYPE descriptor_heap_type,
+                                      const D3D12_DESCRIPTOR_HEAP_FLAGS descriptor_heap_flags)
+{
+    const D3D12_DESCRIPTOR_HEAP_DESC descriptor_heap_desc = {
+        .Type = descriptor_heap_type,
+        .NumDescriptors = static_cast<UINT>(num_descriptors),
+        .Flags = descriptor_heap_flags,
+        .NodeMask = 0u,
+    };
+
+    throw_if_failed(device->CreateDescriptorHeap(&descriptor_heap_desc, IID_PPV_ARGS(&descriptor_heap)));
+
+    current_cpu_descriptor_handle = descriptor_heap->GetCPUDescriptorHandleForHeapStart();
+
+    if (descriptor_heap_flags == D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE)
+    {
+        current_gpu_descriptor_handle = descriptor_heap->GetGPUDescriptorHandleForHeapStart();
+    }
+
+    current_descriptor_handle_index = 0u;
+
+    descriptor_handle_size = device->GetDescriptorHandleIncrementSize(descriptor_heap_type);
+}
+
+Renderer::Renderer(const HWND window_handle, const u16 window_width, const u16 window_height)
+{
+    // Enable the debug layer in debug mode.
+    if constexpr (VX_DEBUG_MODE)
+    {
+        throw_if_failed(D3D12GetDebugInterface(IID_PPV_ARGS(&m_debug_device)));
+        m_debug_device->EnableDebugLayer();
+
+        Microsoft::WRL::ComPtr<ID3D12Debug1> debug_1{};
+        throw_if_failed(m_debug_device->QueryInterface(IID_PPV_ARGS(&debug_1)));
+        debug_1->SetEnableSynchronizedCommandQueueValidation(TRUE);
+
+        // Note : This cannot be set, because of the warning message
+        // contains a shader op (Draw/Dispatch/ExecuteIndirect) recorded while using Shader Patch Mode NONE, or contains
+        // an ExecuteIndirect that changes VB/IB/Root bindings. Hence, all further GPU-based validation may
+        // undervalidate or produce true GBV errors with imprecise tracked state (labelled with 'Possibly imprecise')
+        // for resources in the COMMON state or Promoted-from-COMMON state at the time of execute.
+
+        debug_1->SetEnableGPUBasedValidation(FALSE);
+    }
+
+    // Create the DXGI Factory so we get access to DXGI objects (like adapters).
+    u32 dxgi_factory_creation_flags = 0u;
+
+    if constexpr (VX_DEBUG_MODE)
+    {
+        dxgi_factory_creation_flags = DXGI_CREATE_FACTORY_DEBUG;
+    }
+
+    throw_if_failed(CreateDXGIFactory2(dxgi_factory_creation_flags, IID_PPV_ARGS(&m_dxgi_factory)));
+
+    // Get the adapter with best performance. Print the selected adapter's details to console.
+    throw_if_failed(m_dxgi_factory->EnumAdapterByGpuPreference(0u, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                                                               IID_PPV_ARGS(&m_dxgi_adapter)));
+
+    DXGI_ADAPTER_DESC adapter_desc{};
+    throw_if_failed(m_dxgi_adapter->GetDesc(&adapter_desc));
+    printf("Selected adapter desc :: %ls.\n", adapter_desc.Description);
+
+    // Create the d3d12 device (logical adapter : All d3d objects require d3d12 device for creation).
+    throw_if_failed(D3D12CreateDevice(m_dxgi_adapter.Get(), D3D_FEATURE_LEVEL_12_1, IID_PPV_ARGS(&m_device)));
+
+    // In debug mode, setup the info queue so breakpoint is placed whenever a error / warning occurs that is d3d
+    // related.
+    Microsoft::WRL::ComPtr<ID3D12InfoQueue> info_queue{};
+    if constexpr (VX_DEBUG_MODE)
+    {
+        throw_if_failed(m_device.As(&info_queue));
+
+        throw_if_failed(info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_CORRUPTION, TRUE));
+        throw_if_failed(info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_ERROR, TRUE));
+        throw_if_failed(info_queue->SetBreakOnSeverity(D3D12_MESSAGE_SEVERITY_WARNING, TRUE));
+    }
+
+    // Setup the copy queue & direct queue primitives.
+    m_direct_queue.create(m_device.Get());
+    m_copy_queue.create(m_device.Get());
+
+    // Create descriptor heaps.
+    m_cbv_srv_uav_descriptor_heap.create(m_device.Get(), D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_1,
+                                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                                         D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE);
+
+    m_rtv_descriptor_heap.create(m_device.Get(), 10u, D3D12_DESCRIPTOR_HEAP_TYPE_RTV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
+
+    m_dsv_descriptor_heap.create(m_device.Get(), 1u, D3D12_DESCRIPTOR_HEAP_TYPE_DSV, D3D12_DESCRIPTOR_HEAP_FLAG_NONE);
+
+    // Create the dxgi swapchain.
+    {
+        Microsoft::WRL::ComPtr<IDXGISwapChain1> swapchain_1{};
+        const DXGI_SWAP_CHAIN_DESC1 swapchain_desc = {
+            .Width = static_cast<UINT>(window_width),
+            .Height = static_cast<UINT>(window_height),
+            .Format = BACKBUFFER_FORMAT,
+            .Stereo = FALSE,
+            .SampleDesc = {1, 0},
+            .BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            .BufferCount = NUMBER_OF_BACKBUFFERS,
+            .Scaling = DXGI_SCALING_NONE,
+            .SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD,
+            .AlphaMode = DXGI_ALPHA_MODE_IGNORE,
+            .Flags = 0u,
+        };
+        throw_if_failed(m_dxgi_factory->CreateSwapChainForHwnd(m_direct_queue.m_command_queue.Get(), window_handle,
+                                                               &swapchain_desc, nullptr, nullptr, &swapchain_1));
+
+        throw_if_failed(swapchain_1.As(&m_swapchain));
+    }
+
+    // Create the render target view for the swapchain back buffer.
+    for (u8 i = 0; i < NUMBER_OF_BACKBUFFERS; i++)
+    {
+        Microsoft::WRL::ComPtr<ID3D12Resource> swapchain_resource{};
+        throw_if_failed(m_swapchain->GetBuffer(i, IID_PPV_ARGS(&swapchain_resource)));
+        m_swapchain_backbuffer_cpu_descriptor_handles[i] = m_rtv_descriptor_heap.get_cpu_descriptor_handle_at_index(i);
+
+        m_device->CreateRenderTargetView(swapchain_resource.Get(), nullptr,
+                                         m_swapchain_backbuffer_cpu_descriptor_handles[i]);
+
+        m_swapchain_backbuffer_resources[i] = (std::move(swapchain_resource));
+    }
+
+    m_swapchain_backbuffer_index = static_cast<u8>(m_swapchain->GetCurrentBackBufferIndex());
+
+    // Create and setup the bindless root signature that is shared by all pipelines.
+
+    const D3D12_ROOT_PARAMETER1 shader_constant_root_parameter = {
+        .ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+        .Constants =
+            {
+                .ShaderRegister = 0u,
+                .RegisterSpace = 0u,
+                .Num32BitValues = 64u,
+            },
+        .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
+    };
+
+    Microsoft::WRL::ComPtr<ID3DBlob> bindless_root_signature_blob{};
+    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC root_signature_desc = {
+        .Version = D3D_ROOT_SIGNATURE_VERSION_1_1,
+        .Desc_1_1 =
+            {
+                .NumParameters = 1u,
+                .pParameters = &shader_constant_root_parameter,
+                .NumStaticSamplers = 0u,
+                .pStaticSamplers = nullptr,
+                .Flags = D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED |
+                         D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED,
+            },
+    };
+
+    // Serialize root signature.
+    throw_if_failed(D3D12SerializeVersionedRootSignature(&root_signature_desc, &bindless_root_signature_blob, nullptr));
+    throw_if_failed(m_device->CreateRootSignature(0u, bindless_root_signature_blob->GetBufferPointer(),
+                                                  bindless_root_signature_blob->GetBufferSize(),
+                                                  IID_PPV_ARGS(&m_bindless_root_signature)));
+}
+
+Renderer::IndexBufferWithIntermediateResource Renderer::create_index_buffer(const void *data, const size_t stride,
+                                                                            const size_t indices_count,
+                                                                            const std::wstring_view buffer_name)
+{
+    const size_t size_in_bytes = stride * indices_count;
+
+    u8 *resource_ptr{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> buffer_resource{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> intermediate_buffer_resource{};
+
+    // First, create a upload buffer (that is placed in memory accesible by both GPU and CPU).
+    // Then create a GPU only buffer, and copy data from the previous buffer to GPU only one.
+    const D3D12_HEAP_PROPERTIES upload_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_UPLOAD,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    const D3D12_RESOURCE_DESC buffer_resource_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = size_in_bytes,
+        .Height = 1u,
+        .DepthOrArraySize = 1u,
+        .MipLevels = 1u,
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc = {1u, 0u},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &upload_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES, &buffer_resource_desc,
+        D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr, IID_PPV_ARGS(&intermediate_buffer_resource)));
+
+    // Now that a resource is created, copy CPU data to this upload buffer.
+    const D3D12_RANGE read_range{.Begin = 0u, .End = 0u};
+
+    throw_if_failed(intermediate_buffer_resource->Map(0u, &read_range, (void **)&resource_ptr));
+
+    memcpy(resource_ptr, data, size_in_bytes);
+
+    // Create the final resource and transfer the data from upload buffer to the final buffer.
+    // The heap type is : Default (no CPU access).
+    const D3D12_HEAP_PROPERTIES default_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_DEFAULT,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &default_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES, &buffer_resource_desc,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buffer_resource)));
+
+    std::scoped_lock<std::mutex> scoped_lock(m_resource_mutex);
+
+    name_d3d12_object(buffer_resource.Get(), buffer_name);
+    name_d3d12_object(intermediate_buffer_resource.Get(), std::wstring(buffer_name) + std::wstring(L" [intermediate]"));
+
+    auto command_allocator_list_pair = m_copy_queue.get_command_allocator_list_pair(m_device.Get());
+
+    command_allocator_list_pair.m_command_list->CopyResource(buffer_resource.Get(), intermediate_buffer_resource.Get());
+    m_copy_queue.execute_command_list(std::move(command_allocator_list_pair));
+
+    const D3D12_INDEX_BUFFER_VIEW index_buffer_view = {
+        .BufferLocation = buffer_resource->GetGPUVirtualAddress(),
+        .SizeInBytes = static_cast<UINT>(size_in_bytes),
+        .Format = DXGI_FORMAT_R16_UINT,
+    };
+
+    return {
+        IndexBuffer{
+            .resource = buffer_resource,
+            .indices_count = indices_count,
+            .index_buffer_view = index_buffer_view,
+        },
+        intermediate_buffer_resource,
+    };
+}
+
+Renderer::StucturedBufferWithIntermediateResource Renderer::create_structured_buffer(
+    const void *data, const size_t stride, const size_t num_elements, const std::wstring_view buffer_name)
+{
+    const size_t size_in_bytes = stride * num_elements;
+
+    u8 *resource_ptr{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> buffer_resource{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> intermediate_buffer_resource{};
+
+    // First, create a upload buffer (that is placed in memory accesible by both GPU and CPU).
+    // Then create a GPU only buffer, and copy data from the previous buffer to GPU only one.
+    const D3D12_HEAP_PROPERTIES upload_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_UPLOAD,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    const D3D12_RESOURCE_DESC buffer_resource_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = size_in_bytes,
+        .Height = 1u,
+        .DepthOrArraySize = 1u,
+        .MipLevels = 1u,
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc = {1u, 0u},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &upload_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+        &buffer_resource_desc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+        IID_PPV_ARGS(&intermediate_buffer_resource)));
+
+    // Now that a resource is created, copy CPU data to this upload buffer.
+    const D3D12_RANGE read_range{.Begin = 0u, .End = 0u};
+
+    throw_if_failed(intermediate_buffer_resource->Map(0u, &read_range, (void **)&resource_ptr));
+
+    memcpy(resource_ptr, data, size_in_bytes);
+
+    // Create the final resource and transfer the data from upload buffer to the final buffer.
+    // The heap type is : Default (no CPU access).
+    const D3D12_HEAP_PROPERTIES default_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_DEFAULT,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &default_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+        &buffer_resource_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buffer_resource)));
+
+    std::scoped_lock<std::mutex> scoped_lock(m_resource_mutex);
+
+    name_d3d12_object(buffer_resource.Get(), buffer_name);
+    name_d3d12_object(intermediate_buffer_resource.Get(), std::wstring(buffer_name) + std::wstring(L" [intermediate]"));
+
+    auto command_allocator_list_pair = m_copy_queue.get_command_allocator_list_pair(m_device.Get());
+
+    command_allocator_list_pair.m_command_list->CopyResource(buffer_resource.Get(), intermediate_buffer_resource.Get());
+    m_copy_queue.execute_command_list(std::move(command_allocator_list_pair));
+
+    // Create structured buffer view.
+    size_t srv_index = create_shader_resource_view(buffer_resource.Get(), stride, num_elements);
+
+    return {
+        StructuredBuffer{
+            .resource = buffer_resource,
+            .srv_index = srv_index,
+        },
+        intermediate_buffer_resource,
+    };
+}
+
+ConstantBuffer Renderer::internal_create_constant_buffer(const size_t size_in_bytes,
+                                                         const std::wstring_view buffer_name)
+{
+    u8 *resource_ptr{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> buffer_resource{};
+
+    const D3D12_HEAP_PROPERTIES upload_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_UPLOAD,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    const D3D12_RESOURCE_DESC buffer_resource_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Alignment = 0u,
+        .Width = size_in_bytes,
+        .Height = 1u,
+        .DepthOrArraySize = 1u,
+        .MipLevels = 1u,
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc = {1u, 0u},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &upload_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+        &buffer_resource_desc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+        IID_PPV_ARGS(&buffer_resource)));
+
+    // Now that a resource is created, copy CPU data to this upload buffer.
+    const D3D12_RANGE read_range{.Begin = 0u, .End = 0u};
+
+    throw_if_failed(buffer_resource->Map(0u, &read_range, (void **)&resource_ptr));
+
+    std::scoped_lock<std::mutex> scoped_lock(m_resource_mutex);
+
+    name_d3d12_object(buffer_resource.Get(), buffer_name);
+
+    // Create Constant buffer view.
+    size_t cbv_index = create_constant_buffer_view(buffer_resource.Get(), size_in_bytes);
+
+    return ConstantBuffer{
+        .resource = buffer_resource,
+        .cbv_index = cbv_index,
+        .size_in_bytes = size_in_bytes,
+        .resource_mapped_ptr = resource_ptr,
+    };
+}
+
+CommandBuffer Renderer::create_command_buffer(const size_t stride, const size_t max_number_of_elements,
+                                              const std::wstring_view buffer_name)
+{
+    // Note that counter offset must be multiple of d3d12 uav counter placement alignment.
+    size_t counter_offset =
+        round_up_to_multiple(stride * max_number_of_elements, D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT);
+    const size_t size_in_bytes = counter_offset + 4u;
+
+    u8 *resource_ptr{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> buffer_resource{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> intermediate_buffer_resource{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> zeroed_counter_buffer_resource{};
+
+    // First, create a upload buffer (that is placed in memory accesible by both GPU and CPU).
+    // Then create a GPU only buffer, and copy data from the previous buffer to GPU only one.
+    const D3D12_HEAP_PROPERTIES upload_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_UPLOAD,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    const D3D12_RESOURCE_DESC upload_buffer_resource_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = size_in_bytes,
+        .Height = 1u,
+        .DepthOrArraySize = 1u,
+        .MipLevels = 1u,
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc = {1u, 0u},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags = D3D12_RESOURCE_FLAG_NONE,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &upload_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+        &upload_buffer_resource_desc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+        IID_PPV_ARGS(&intermediate_buffer_resource)));
+
+    // Now that a resource is created, copy CPU data to this upload buffer.
+    const D3D12_RANGE read_range{.Begin = 0u, .End = 0u};
+
+    throw_if_failed(intermediate_buffer_resource->Map(0u, &read_range, (void **)&resource_ptr));
+
+    // Create a small resource that only has a single uint -> whose value is always zero.
+    // This is used each frame to reset the counter value to 0 for the uav.
+    {
+
+        const D3D12_RESOURCE_DESC zeroed_counter_buffer_resource_desc = {
+            .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+            .Width = 4u,
+            .Height = 1u,
+            .DepthOrArraySize = 1u,
+            .MipLevels = 1u,
+            .Format = DXGI_FORMAT_UNKNOWN,
+            .SampleDesc = {1u, 0u},
+            .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+            .Flags = D3D12_RESOURCE_FLAG_NONE,
+        };
+
+        u8 *zeroed_counter_buffer_ptr = nullptr;
+        throw_if_failed(m_device->CreateCommittedResource(
+            &upload_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+            &upload_buffer_resource_desc, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, nullptr,
+            IID_PPV_ARGS(&zeroed_counter_buffer_resource)));
+
+        throw_if_failed(zeroed_counter_buffer_resource->Map(0u, &read_range, (void **)&zeroed_counter_buffer_ptr));
+        u32 zero = 0u;
+        memcpy(zeroed_counter_buffer_ptr, &zero, sizeof(u32));
+        zeroed_counter_buffer_resource->Unmap(0u, nullptr);
+    }
+
+    const D3D12_RESOURCE_DESC buffer_resource_desc = {
+        .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
+        .Width = size_in_bytes,
+        .Height = 1u,
+        .DepthOrArraySize = 1u,
+        .MipLevels = 1u,
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .SampleDesc = {1u, 0u},
+        .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+        .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+    };
+
+    // Create the final resource and transfer the data from upload buffer to the final buffer.
+    // The heap type is : Default (no CPU access).
+    const D3D12_HEAP_PROPERTIES default_heap_properties = {
+        .Type = D3D12_HEAP_TYPE_DEFAULT,
+        .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN,
+        .MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN,
+        .CreationNodeMask = 0u,
+        .VisibleNodeMask = 0u,
+    };
+
+    throw_if_failed(m_device->CreateCommittedResource(
+        &default_heap_properties, D3D12_HEAP_FLAG_ALLOW_ALL_BUFFERS_AND_TEXTURES | D3D12_HEAP_FLAG_CREATE_NOT_ZEROED,
+        &buffer_resource_desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&buffer_resource)));
+
+    name_d3d12_object(buffer_resource.Get(), buffer_name);
+    name_d3d12_object(intermediate_buffer_resource.Get(), std::wstring(buffer_name) + std::wstring(L" [intermediate]"));
+
+    // Create the SRV.
+    const size_t upload_resource_srv_index =
+        create_shader_resource_view(intermediate_buffer_resource.Get(), stride, max_number_of_elements);
+
+    // Create the UAV.
+    const size_t default_resource_uav_index =
+        create_unordered_access_view(buffer_resource.Get(), stride, max_number_of_elements, true, counter_offset);
+
+    return CommandBuffer{
+        .default_resource = buffer_resource,
+        .upload_resource = intermediate_buffer_resource,
+        .zeroed_counter_buffer_resource = zeroed_counter_buffer_resource,
+        .upload_resource_mapped_ptr = resource_ptr,
+        .upload_resource_srv_index = upload_resource_srv_index,
+        .default_resource_uav_index = default_resource_uav_index,
+        .counter_offset = counter_offset,
+    };
+}
+
+size_t Renderer::create_constant_buffer_view(ID3D12Resource *const resource, const size_t size)
+{
+    const D3D12_CPU_DESCRIPTOR_HANDLE handle = m_cbv_srv_uav_descriptor_heap.current_cpu_descriptor_handle;
+
+    const D3D12_CONSTANT_BUFFER_VIEW_DESC cbv_desc = {
+        .BufferLocation = resource->GetGPUVirtualAddress(),
+        .SizeInBytes = static_cast<UINT>(size),
+    };
+
+    m_device->CreateConstantBufferView(&cbv_desc, handle);
+
+    const size_t cbv_index = m_cbv_srv_uav_descriptor_heap.current_descriptor_handle_index;
+
+    m_cbv_srv_uav_descriptor_heap.offset_current_descriptor_handles();
+
+    return cbv_index;
+}
+
+size_t Renderer::create_shader_resource_view(ID3D12Resource *const resource, const size_t stride,
+                                             const size_t num_elements)
+{
+    const D3D12_CPU_DESCRIPTOR_HANDLE handle = m_cbv_srv_uav_descriptor_heap.current_cpu_descriptor_handle;
+
+    const D3D12_SHADER_RESOURCE_VIEW_DESC srv_desc = {
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .ViewDimension = D3D12_SRV_DIMENSION_BUFFER,
+        .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+        .Buffer{
+            .FirstElement = 0u,
+            .NumElements = static_cast<UINT>(num_elements),
+            .StructureByteStride = static_cast<UINT>(stride),
+        },
+    };
+
+    m_device->CreateShaderResourceView(resource, &srv_desc, handle);
+
+    const size_t srv_index = m_cbv_srv_uav_descriptor_heap.current_descriptor_handle_index;
+
+    m_cbv_srv_uav_descriptor_heap.offset_current_descriptor_handles();
+
+    return srv_index;
+}
+
+size_t Renderer::create_unordered_access_view(ID3D12Resource *const resource, const size_t stride,
+                                              const size_t num_elements, const bool use_counter,
+                                              const size_t counter_offset)
+{
+    const D3D12_CPU_DESCRIPTOR_HANDLE handle = m_cbv_srv_uav_descriptor_heap.current_cpu_descriptor_handle;
+
+    D3D12_UNORDERED_ACCESS_VIEW_DESC uav_desc = {
+        .Format = DXGI_FORMAT_UNKNOWN,
+        .ViewDimension = D3D12_UAV_DIMENSION_BUFFER,
+        .Buffer{
+            .FirstElement = 0u,
+            .NumElements = static_cast<UINT>(num_elements),
+            .StructureByteStride = static_cast<UINT>(stride),
+            .CounterOffsetInBytes = 0u,
+            .Flags = D3D12_BUFFER_UAV_FLAGS::D3D12_BUFFER_UAV_FLAG_NONE,
+        },
+    };
+
+    if (!use_counter)
+    {
+        m_device->CreateUnorderedAccessView(resource, nullptr, &uav_desc, handle);
+    }
+    else
+    {
+        uav_desc.Buffer.CounterOffsetInBytes = counter_offset;
+        m_device->CreateUnorderedAccessView(resource, resource, &uav_desc, handle);
+    }
+
+    const size_t uav_index = m_cbv_srv_uav_descriptor_heap.current_descriptor_handle_index;
+
+    m_cbv_srv_uav_descriptor_heap.offset_current_descriptor_handles();
+
+    return uav_index;
+}
+
+void Renderer::DirectCommandQueue::create(ID3D12Device *const device)
+{
+    const D3D12_COMMAND_QUEUE_DESC command_queue_desc = {
+        .Type = D3D12_COMMAND_LIST_TYPE_DIRECT,
+        .Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+        .Flags = D3D12_COMMAND_QUEUE_FLAG_NONE,
+        .NodeMask = 0u,
+    };
+    throw_if_failed(device->CreateCommandQueue(&command_queue_desc, IID_PPV_ARGS(&m_command_queue)));
+
+    // Create the command allocator (the underlying allocation where gpu commands will be stored after being
+    // recorded by command list). Each frame has its own command allocator.
+    for (u8 i = 0; i < NUMBER_OF_BACKBUFFERS; i++)
+    {
+        throw_if_failed(
+            device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_command_allocators[i])));
+    }
+
+    // Create the graphics command list.
+    throw_if_failed(device->CreateCommandList(0u, D3D12_COMMAND_LIST_TYPE_DIRECT, m_command_allocators[0].Get(),
+                                              nullptr, IID_PPV_ARGS(&m_command_list)));
+
+    // Create a fence for CPU GPU synchronization.
+    throw_if_failed(device->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+}
+
+void Renderer::DirectCommandQueue::reset(const u8 index) const
+{
+    const auto &allocator = m_command_allocators[index];
+    const auto &command_list = m_command_list;
+
+    // Reset command allocator and command list.
+    throw_if_failed(allocator->Reset());
+    throw_if_failed(command_list->Reset(allocator.Get(), nullptr));
+}
+
+void Renderer::DirectCommandQueue::execute_command_list() const
+{
+
+    throw_if_failed(m_command_list->Close());
+
+    ID3D12CommandList *const command_lists_to_execute[1] = {m_command_list.Get()};
+
+    m_command_queue->ExecuteCommandLists(1u, command_lists_to_execute);
+}
+
+void Renderer::DirectCommandQueue::wait_for_fence_value_at_index(const u8 index)
+{
+    if (m_fence->GetCompletedValue() >= m_frame_fence_values[index])
+    {
+        return;
+    }
+    else
+    {
+        throw_if_failed(m_fence->SetEventOnCompletion(m_frame_fence_values[index], nullptr));
+    }
+}
+
+void Renderer::DirectCommandQueue::signal_fence(const u8 index)
+{
+    throw_if_failed(m_command_queue->Signal(m_fence.Get(), ++m_monotonic_fence_value));
+    m_frame_fence_values[index] = m_monotonic_fence_value;
+}
+
+void Renderer::DirectCommandQueue::flush_queue()
+{
+
+    signal_fence(0);
+
+    for (u32 i = 0; i < NUMBER_OF_BACKBUFFERS; i++)
+    {
+        m_frame_fence_values[i] = m_monotonic_fence_value;
+    }
+
+    wait_for_fence_value_at_index(0);
+}
+
+void Renderer::CopyCommandQueue::create(ID3D12Device *const device)
+{
+    const D3D12_COMMAND_QUEUE_DESC command_queue_desc = {
+        .Type = D3D12_COMMAND_LIST_TYPE_COPY,
+        .Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL,
+        .Flags = D3D12_COMMAND_QUEUE_FLAG_NONE,
+        .NodeMask = 0u,
+    };
+    throw_if_failed(device->CreateCommandQueue(&command_queue_desc, IID_PPV_ARGS(&m_command_queue)));
+
+    // Create a fence for CPU GPU synchronization.
+    throw_if_failed(device->CreateFence(0u, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_fence)));
+}
+
+Renderer::CopyCommandQueue::CommandAllocatorListPair Renderer::CopyCommandQueue::get_command_allocator_list_pair(
+    ID3D12Device *const device)
+{
+    if (!m_command_allocator_list_queue.empty() &&
+        m_command_allocator_list_queue.front().m_fence_value <= m_fence->GetCompletedValue())
+    {
+        const auto front = m_command_allocator_list_queue.front();
+        m_command_allocator_list_queue.pop();
+
+        // Reset list and allocator.
+        throw_if_failed(front.m_command_allocator->Reset());
+        throw_if_failed(front.m_command_list->Reset(front.m_command_allocator.Get(), nullptr));
+
+        return front;
+    }
+    else
+    {
+        CommandAllocatorListPair command_allocator_list_pair{};
+        throw_if_failed(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+                                                       IID_PPV_ARGS(&command_allocator_list_pair.m_command_allocator)));
+        throw_if_failed(device->CreateCommandList(0u, D3D12_COMMAND_LIST_TYPE_COPY,
+                                                  command_allocator_list_pair.m_command_allocator.Get(), nullptr,
+                                                  IID_PPV_ARGS(&command_allocator_list_pair.m_command_list)));
+
+        return command_allocator_list_pair;
+    }
+}
+
+void Renderer::CopyCommandQueue::execute_command_list(CommandAllocatorListPair &&alloc_list_pair)
+{
+
+    throw_if_failed(alloc_list_pair.m_command_list->Close());
+
+    ID3D12CommandList *const command_lists_to_execute[1] = {alloc_list_pair.m_command_list.Get()};
+
+    m_command_queue->ExecuteCommandLists(1u, command_lists_to_execute);
+
+    throw_if_failed(m_command_queue->Signal(m_fence.Get(), ++m_monotonic_fence_value));
+
+    alloc_list_pair.m_fence_value = m_monotonic_fence_value;
+
+    m_command_allocator_list_queue.push(alloc_list_pair);
+}
+
+void Renderer::CopyCommandQueue::flush_queue()
+{
+    throw_if_failed(m_command_queue->Signal(m_fence.Get(), ++m_monotonic_fence_value));
+    throw_if_failed(m_fence->SetEventOnCompletion(m_monotonic_fence_value, nullptr));
+}
+```
+
+### src/shader_compiler.cpp
+```
+#include "voxel-engine/shader_compiler.hpp"
+
+namespace ShaderCompiler
+{
+// Core DXC objects.
+Microsoft::WRL::ComPtr<IDxcUtils> g_utils{};
+Microsoft::WRL::ComPtr<IDxcCompiler3> g_compiler{};
+Microsoft::WRL::ComPtr<IDxcIncludeHandler> g_include_handler{};
+
+IDxcBlob *compile(const wchar_t *const file_path, const wchar_t *const entry_point, const wchar_t *const target)
+{
+    // Check if the compiler object has been created.
+    if (!g_utils)
+    {
+        throw_if_failed(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&g_utils)));
+        throw_if_failed(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&g_compiler)));
+        g_utils->CreateDefaultIncludeHandler(&g_include_handler);
+    }
+
+    std::vector<LPCWSTR> compiler_arguments = {
+        file_path, L"-E", entry_point, L"-T", target, DXC_ARG_PACK_MATRIX_ROW_MAJOR, DXC_ARG_WARNINGS_ARE_ERRORS};
+    if constexpr (VX_DEBUG_MODE)
+    {
+        compiler_arguments.push_back(DXC_ARG_DEBUG);
+    }
+    else
+    {
+        compiler_arguments.emplace_back(DXC_ARG_OPTIMIZATION_LEVEL3);
+    }
+
+    // Open the source file.
+    Microsoft::WRL::ComPtr<IDxcBlobEncoding> source{};
+    throw_if_failed(g_utils->LoadFile(file_path, nullptr, &source));
+    const DxcBuffer source_buffer = {
+        .Ptr = source->GetBufferPointer(),
+        .Size = source->GetBufferSize(),
+        .Encoding = DXC_CP_ACP,
+    };
+
+    // Compile the shader.
+    Microsoft::WRL::ComPtr<IDxcResult> results{};
+    throw_if_failed(g_compiler->Compile(&source_buffer, compiler_arguments.data(),
+                                        static_cast<u32>(compiler_arguments.size()), g_include_handler.Get(),
+                                        IID_PPV_ARGS(&results)));
+
+    // Check for errors.
+    Microsoft::WRL::ComPtr<IDxcBlobUtf8> error_blob{};
+    throw_if_failed(results->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&error_blob), nullptr));
+
+    if (error_blob && error_blob->GetStringLength() > 0)
+    {
+        wprintf(L"Shader : %s has warnings and errors:\n%S\n", file_path, error_blob->GetStringPointer());
+    }
+
+    // Get the shader object and return.
+    IDxcBlob *shader_blob{nullptr};
+    throw_if_failed(results->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&shader_blob), nullptr));
+    return shader_blob;
+}
+} // namespace ShaderCompiler
+```
+
+### src/timer.cpp
+```
+#include "voxel-engine/timer.hpp"
+
+Timer::Timer()
+{
+    // Get the performance counter frequency (in seconds).
+    QueryPerformanceFrequency(&m_performance_frequency);
+
+    m_seconds_per_count = 1.0f / (float)m_performance_frequency.QuadPart;
+}
+
+void Timer::start()
+{
+    QueryPerformanceCounter(&m_start_time);
+}
+
+void Timer::stop()
+{
+    QueryPerformanceCounter(&m_end_time);
+}
+
+float Timer::get_delta_time() const
+{
+    return (m_end_time.QuadPart - m_start_time.QuadPart) * m_seconds_per_count;
+}
+```
+
+### src/voxel.cpp
+```
+#include "voxel-engine/voxel.hpp"
+
+#include "shaders/interop/render_resources.hlsli"
+
+Chunk::Chunk()
+{
+    m_voxels = new Voxel[NUMBER_OF_VOXELS];
+}
+Chunk::Chunk(Chunk &&other) noexcept : m_voxels(std::move(other.m_voxels)), m_chunk_index(other.m_chunk_index)
+
+{
+    other.m_voxels = nullptr;
+}
+
+Chunk &Chunk::operator=(Chunk &&other) noexcept
+{
+    this->m_voxels = std::move(other.m_voxels);
+    this->m_chunk_index = other.m_chunk_index;
+
+    other.m_voxels = nullptr;
+
+    return *this;
+}
+
+Chunk::~Chunk()
+{
+    if (m_voxels)
+    {
+        delete[] m_voxels;
+    }
+}
+
+ChunkManager::ChunkManager(Renderer &renderer)
+{
+    // Create the position buffer.
+    std::vector<DirectX::XMFLOAT3> chunk_position_data{};
+
+    static constexpr std::array<DirectX::XMFLOAT3, 8> chunk_voxel_vertices{
+        DirectX::XMFLOAT3(0.0f, 0.0f, 0.0f),
+        DirectX::XMFLOAT3(0.0f, Voxel::EDGE_LENGTH, 0.0f),
+        DirectX::XMFLOAT3(Voxel::EDGE_LENGTH, Voxel::EDGE_LENGTH, 0.0f),
+        DirectX::XMFLOAT3(Voxel::EDGE_LENGTH, 0.0f, 0.0f),
+        DirectX::XMFLOAT3(0.0f, 0.0f, Voxel::EDGE_LENGTH),
+        DirectX::XMFLOAT3(0.0f, Voxel::EDGE_LENGTH, Voxel::EDGE_LENGTH),
+        DirectX::XMFLOAT3(Voxel::EDGE_LENGTH, Voxel::EDGE_LENGTH, Voxel::EDGE_LENGTH),
+        DirectX::XMFLOAT3(Voxel::EDGE_LENGTH, 0.0f, Voxel::EDGE_LENGTH),
+    };
+
+    for (size_t i = 0; i < Chunk::NUMBER_OF_VOXELS; i++)
+    {
+        const DirectX::XMUINT3 index_3d = convert_to_3d(i, Chunk::NUMBER_OF_VOXELS_PER_DIMENSION);
+        const DirectX::XMFLOAT3 offset = DirectX::XMFLOAT3(
+            index_3d.x * Voxel::EDGE_LENGTH, index_3d.y * Voxel::EDGE_LENGTH, index_3d.z * Voxel::EDGE_LENGTH);
+
+        for (const auto &vertex : chunk_voxel_vertices)
+        {
+            chunk_position_data.push_back({vertex.x + offset.x, vertex.y + offset.y, vertex.z + offset.z});
+        }
+    }
+
+    const auto result = renderer.create_structured_buffer(chunk_position_data.data(), sizeof(DirectX::XMFLOAT3),
+                                                          chunk_position_data.size(), L"shared chunk position buffer");
+
+    renderer.m_copy_queue.flush_queue();
+    m_shared_chunk_position_buffer = result.structured_buffer;
+
+    m_thread_pool.reset(6);
+}
+
+ChunkManager::SetupChunkData ChunkManager::internal_mt_setup_chunk(Renderer &renderer, const size_t index)
+{
+    SetupChunkData setup_chunk_data{};
+
+    // Iterate over each voxel in chunk and setup the chunk index and color buffer.
+    std::vector<u16> chunk_index_data{};
+    std::vector<DirectX::XMFLOAT3> color_data{};
+
+    std::random_device random_device{};
+    std::mt19937 engine(random_device());
+    std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    // note(rtarun9) : Only for demo purposes.
+    const DirectX::XMFLOAT3 chunk_color = {
+        dist(engine),
+        dist(engine),
+        dist(engine),
+    };
+
+    for (size_t i = 0; i < Chunk::NUMBER_OF_VOXELS; i++)
+    {
+        if (!setup_chunk_data.m_chunk.m_voxels[i].m_active)
+        {
+            continue;
+        }
+
+        const auto voxel_color = chunk_color;
+
+        const DirectX::XMUINT3 index_3d = convert_to_3d(i, Chunk::NUMBER_OF_VOXELS_PER_DIMENSION);
+        const u16 shared_index_buffer_offset = i * 8u;
+
+        // Check if there is a voxel that blocks the front face of current voxel.
+        {
+
+            const bool is_front_face_covered =
+                (index_3d.z != 0 && setup_chunk_data.m_chunk
+                                        .m_voxels[convert_to_1d({index_3d.x, index_3d.y, index_3d.z - 1},
+                                                                Chunk::NUMBER_OF_VOXELS_PER_DIMENSION)]
+                                        .m_active);
+
+            if (!is_front_face_covered)
+            {
+                color_data.emplace_back(voxel_color);
+                for (const auto &vertex_index : {0u, 1u, 2u, 0u, 2u, 3u})
+                {
+                    chunk_index_data.push_back(vertex_index + shared_index_buffer_offset);
+                }
+            }
+        }
+
+        // Check if there is a voxel that blocks the back face of current voxel.
+        {
+
+            const bool is_back_face_covered = (index_3d.z != Chunk::NUMBER_OF_VOXELS_PER_DIMENSION - 1u &&
+                                               setup_chunk_data.m_chunk
+                                                   .m_voxels[convert_to_1d({index_3d.x, index_3d.y, index_3d.z + 1},
+                                                                           Chunk::NUMBER_OF_VOXELS_PER_DIMENSION)]
+                                                   .m_active);
+
+            color_data.emplace_back(voxel_color);
+            if (!is_back_face_covered)
+            {
+                for (const auto &vertex_index : {4u, 6u, 5u, 4u, 7u, 6u})
+                {
+                    chunk_index_data.push_back(vertex_index + shared_index_buffer_offset);
+                }
+            }
+        }
+
+        // Check if there is a voxel that blocks the left hand side face of current voxel.
+        {
+
+            const bool is_left_face_covered =
+                (index_3d.x != 0u && setup_chunk_data.m_chunk
+                                         .m_voxels[convert_to_1d({index_3d.x - 1, index_3d.y, index_3d.z},
+                                                                 Chunk::NUMBER_OF_VOXELS_PER_DIMENSION)]
+                                         .m_active);
+
+            color_data.emplace_back(voxel_color);
+            if (!is_left_face_covered)
+            {
+                for (const auto &vertex_index : {4u, 5u, 1u, 4u, 1u, 0u})
+                {
+                    chunk_index_data.push_back(vertex_index + shared_index_buffer_offset);
+                }
+            }
+        }
+
+        // Check if there is a voxel that blocks the right hand side face of current voxel.
+        {
+
+            const bool is_right_face_covered = (index_3d.x != Chunk::NUMBER_OF_VOXELS_PER_DIMENSION - 1u &&
+                                                setup_chunk_data.m_chunk
+                                                    .m_voxels[convert_to_1d({index_3d.x + 1, index_3d.y, index_3d.z},
+                                                                            Chunk::NUMBER_OF_VOXELS_PER_DIMENSION)]
+                                                    .m_active);
+
+            if (!is_right_face_covered)
+            {
+                color_data.emplace_back(voxel_color);
+                for (const auto &vertex_index : {3u, 2u, 6u, 3u, 6u, 7u})
+                {
+                    chunk_index_data.push_back(vertex_index + shared_index_buffer_offset);
+                }
+            }
+        }
+
+        // Check if there is a voxel that blocks the top side face of current voxel.
+        {
+
+            const bool is_top_face_covered = (index_3d.y != Chunk::NUMBER_OF_VOXELS_PER_DIMENSION - 1 &&
+                                              setup_chunk_data.m_chunk
+                                                  .m_voxels[convert_to_1d({index_3d.x, index_3d.y + 1, index_3d.z},
+                                                                          Chunk::NUMBER_OF_VOXELS_PER_DIMENSION)]
+                                                  .m_active);
+
+            if (!is_top_face_covered)
+            {
+                color_data.emplace_back(voxel_color);
+                for (const auto &vertex_index : {1u, 5u, 6u, 1u, 6u, 2u})
+                {
+                    chunk_index_data.push_back(vertex_index + shared_index_buffer_offset);
+                }
+            }
+        }
+
+        // Check if there is a voxel that blocks the bottom side face of current voxel.
+        {
+
+            const bool is_bottom_face_covered =
+                (index_3d.y != 0u && setup_chunk_data.m_chunk
+                                         .m_voxels[convert_to_1d({index_3d.x, index_3d.y - 1, index_3d.z},
+                                                                 Chunk::NUMBER_OF_VOXELS_PER_DIMENSION)]
+                                         .m_active);
+
+            if (!is_bottom_face_covered)
+            {
+                color_data.emplace_back(voxel_color);
+                for (const auto &vertex_index : {4u, 0u, 3u, 4u, 3u, 7u})
+                {
+                    chunk_index_data.push_back(vertex_index + shared_index_buffer_offset);
+                }
+            }
+        }
+    }
+
+    setup_chunk_data.m_chunk_indices_data = std::move(chunk_index_data);
+    setup_chunk_data.m_chunk_color_data = std::move(color_data);
+
+    if (!setup_chunk_data.m_chunk_indices_data.empty())
+    {
+
+        setup_chunk_data.m_chunk_index_buffer =
+            renderer.create_index_buffer((void *)setup_chunk_data.m_chunk_indices_data.data(), sizeof(u16),
+                                         setup_chunk_data.m_chunk_indices_data.size(),
+                                         std::wstring(L"Chunk Index buffer : ") + std::to_wstring(index));
+        setup_chunk_data.m_chunk_color_buffer =
+            renderer.create_structured_buffer((void *)setup_chunk_data.m_chunk_color_data.data(),
+                                              sizeof(DirectX::XMFLOAT3), setup_chunk_data.m_chunk_color_data.size(),
+                                              std::wstring(L"Chunk color buffer : ") + std::to_wstring(index));
+
+        setup_chunk_data.m_chunk_constant_buffer = renderer.create_constant_buffer<1>(
+            sizeof(ChunkConstantBuffer), std::wstring(L"Chunk constant buffer : ") + std::to_wstring(index))[0];
+    }
+
+    setup_chunk_data.m_chunk.m_chunk_index = index;
+    return setup_chunk_data;
+}
+
+void ChunkManager::add_chunk_to_setup_stack(const u64 index)
+{
+    if (m_loaded_chunks.contains(index) || m_chunk_indices_that_are_being_setup.contains(index))
+    {
+        return;
+    }
+
+    m_chunk_indices_that_are_being_setup.insert(index);
+    m_chunks_to_setup_stack.push(index);
+}
+
+void ChunkManager::create_chunks_from_setup_stack(Renderer &renderer)
+{
+    u64 chunks_that_are_setup = 0u;
+    while (chunks_that_are_setup++ < ChunkManager::NUMBER_OF_CHUNKS_TO_CREATE_PER_FRAME &&
+           !m_chunks_to_setup_stack.empty())
+    {
+        const size_t top = m_chunks_to_setup_stack.top();
+        m_chunks_to_setup_stack.pop();
+
+        m_setup_chunk_futures_queue.emplace(std::pair{
+            renderer.m_copy_queue.m_monotonic_fence_value + 1,
+            m_thread_pool.submit_task([this, &renderer, top]() { return internal_mt_setup_chunk(renderer, top); })});
+    }
+}
+
+void ChunkManager::transfer_chunks_from_setup_to_loaded_state(const u64 current_copy_queue_fence_value)
+{
+    using namespace std::chrono_literals;
+
+    u64 chunks_loaded = 0u;
+    while (!m_setup_chunk_futures_queue.empty() && chunks_loaded < ChunkManager::NUMBER_OF_CHUNKS_TO_LOAD_PER_FRAME)
+    {
+        auto &setup_chunk_data = m_setup_chunk_futures_queue.front();
+
+        switch (std::future_status status = setup_chunk_data.second.wait_for(0s); status)
+        {
+        case std::future_status::timeout: {
+
+            return;
+        }
+        break;
+
+        case std::future_status::ready: {
+            // If this condition is satisfied, the buffers are ready, so chunk is ready to be loaded :)
+            if (setup_chunk_data.first <= current_copy_queue_fence_value)
+            {
+                SetupChunkData chunk_to_load = setup_chunk_data.second.get();
+
+                const size_t num_vertices = chunk_to_load.m_chunk_indices_data.size();
+                const size_t chunk_index = chunk_to_load.m_chunk.m_chunk_index;
+
+                m_chunk_index_buffers[chunk_index] = std::move(chunk_to_load.m_chunk_index_buffer.index_buffer);
+                m_chunk_color_buffers[chunk_index] = std::move(chunk_to_load.m_chunk_color_buffer.structured_buffer);
+                m_chunk_constant_buffers[chunk_index] = std::move(chunk_to_load.m_chunk_constant_buffer);
+
+                const DirectX::XMUINT3 chunk_index_3d =
+                    convert_to_3d(chunk_index, ChunkManager::NUMBER_OF_CHUNKS_PER_DIMENSION);
+
+                const DirectX::XMUINT3 chunk_offset =
+                    DirectX::XMUINT3(chunk_index_3d.x * Voxel::EDGE_LENGTH * Chunk::NUMBER_OF_VOXELS_PER_DIMENSION,
+                                     chunk_index_3d.y * Voxel::EDGE_LENGTH * Chunk::NUMBER_OF_VOXELS_PER_DIMENSION,
+                                     chunk_index_3d.z * Voxel::EDGE_LENGTH * Chunk::NUMBER_OF_VOXELS_PER_DIMENSION);
+
+                const ChunkConstantBuffer chunk_constant_buffer_data = {
+                    .translation_vector = {chunk_offset.x, chunk_offset.y, chunk_offset.z, 0u},
+                    .position_buffer_index = static_cast<u32>(m_shared_chunk_position_buffer.srv_index),
+                    .color_buffer_index = static_cast<u32>(m_chunk_color_buffers[chunk_index].srv_index),
+                };
+
+                m_chunk_constant_buffers[chunk_index].update(&chunk_constant_buffer_data);
+
+                m_setup_chunk_futures_queue.pop();
+
+                m_chunk_indices_that_are_being_setup.erase(chunk_index);
+                m_loaded_chunks[chunk_index] = std::move(chunk_to_load.m_chunk);
+            }
+            else
+            {
+                return;
+            }
+        }
+        break;
+        }
+
+        ++chunks_loaded;
+    }
+}
+```
+
+### src/window.cpp
+```
+#include "voxel-engine/window.hpp"
+
+#include <imgui.h>
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window_handle, UINT message, WPARAM w_param,
+                                                             LPARAM l_param);
+
+static LRESULT CALLBACK window_proc(HWND window_handle, UINT message, WPARAM w_param, LPARAM l_param)
+{
+    if (ImGui_ImplWin32_WndProcHandler(window_handle, message, w_param, l_param))
+    {
+        return true;
+    }
+
+    switch (message)
+    {
+        // Handle case when the close button / alt f4 is pressed.
+    case WM_CLOSE: {
+        DestroyWindow(window_handle);
+    }
+    break;
+
+    // Handle case when destroy window is called.
+    case WM_DESTROY: {
+        // This adds a WM_QUIT message to the queue.
+        PostQuitMessage(0);
+        return 0;
+    }
+    break;
+
+    case WM_KEYDOWN: {
+        if (w_param == VK_ESCAPE)
+        {
+            PostQuitMessage(0);
+            return 0;
+        }
+    }
+    break;
+    }
+
+    return DefWindowProcA(window_handle, message, w_param, l_param);
+}
+
+Window::Window()
+{
+    // Get screen dimension.
+    const i32 screen_width = GetSystemMetrics(SM_CXSCREEN);
+    const i32 screen_height = GetSystemMetrics(SM_CYSCREEN);
+
+    RECT window_rect = {
+        0u,
+        0u,
+        screen_width,
+        screen_height,
+    };
+
+    // Calculate required size of window rect based on client rectangle size.
+    AdjustWindowRect(&window_rect, WS_OVERLAPPEDWINDOW, FALSE);
+
+    m_width = static_cast<u16>(window_rect.right - window_rect.left);
+    m_height = static_cast<u16>(window_rect.bottom - window_rect.top);
+
+    // Register the window class.
+    // This represents a set of common behavious that several windows may have.
+    const HINSTANCE instance_handle = GetModuleHandle(NULL);
+
+    const WNDCLASSA window_class = {
+        .lpfnWndProc = window_proc,
+        .hInstance = instance_handle,
+        .lpszClassName = WINDOW_CLASS_NAME,
+    };
+
+    RegisterClassA(&window_class);
+
+    m_handle = CreateWindowExA(0, WINDOW_CLASS_NAME, "voxel-engine", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+                               m_width, m_height, NULL, NULL, instance_handle, NULL);
+
+    if (m_handle != 0)
+    {
+        ShowWindow(m_handle, SW_SHOW);
+    }
+    else
+    {
+        printf("Failed to create win32 window.");
+        exit(EXIT_FAILURE);
+    }
+}
+
+Window::~Window()
+{
+    UnregisterClassA(WINDOW_CLASS_NAME, GetModuleHandle(NULL));
+}
+```
+
+### include/voxel-engine/camera.hpp
+```
+#pragma once
+
+class Camera
+{
+  public:
+    DirectX::XMMATRIX update_and_get_view_matrix(const float delta_time);
+
+  public:
+    DirectX::XMFLOAT4 m_position{0.0f, 0.0f, -5.0f, 1.0f};
+
+    // The up vector can be calculated using right and front vector.
+    DirectX::XMFLOAT4 m_right{1.0f, 0.0f, 0.0f, 0.0f};
+    DirectX::XMFLOAT4 m_front{0.0f, 0.0f, 1.0f, 0.0f};
+
+    float m_movement_speed{500.0f};
+    float m_rotation_speed{1.0f};
+
+    // Used to determine how 'smooth' the camera behaves.
+    // For now, both rotation and movement use the same friction value, purely for simplicity.
+    float m_friction{0.30f};
+
+    float m_pitch{};
+    float m_yaw{};
+};
+```
+
+### include/voxel-engine/common.hpp
+```
+#pragma once
+
+#include "types.hpp"
+
+// Helper function to print to console in debug mode if the passed Hresult has failed.
+static inline void throw_if_failed(const HRESULT hr,
+                                   const std::source_location src_loc = std::source_location::current())
+{
+    if constexpr (VX_DEBUG_MODE)
+    {
+        if (FAILED(hr))
+        {
+            printf("Hresult Failed!\nFile name :: %s\nLine number :: %u\nColumn number :: %u\nFunction name :: %s\n",
+                   src_loc.file_name(), src_loc.line(), src_loc.column(), src_loc.function_name());
+        }
+    }
+}
+
+// Helper functions to go from 1d to 3d and vice versa.
+static inline size_t convert_to_1d(const DirectX::XMUINT3 index_3d, const size_t N)
+{
+    return index_3d.x + N * (index_3d.y + (index_3d.z * N));
+}
+
+static inline DirectX::XMUINT3 convert_to_3d(const size_t index, const size_t N)
+{
+    // For reference, index = x + y * N + z * N * N.
+    const u32 z = static_cast<u32>(index / (N * N));
+    const u32 index_2d = static_cast<u32>(index - z * N * N);
+    const u32 y = static_cast<u32>(index_2d / N);
+    const u32 x = static_cast<u32>(index_2d % N);
+
+    return {x, y, z};
+}
+
+static inline void name_d3d12_object(ID3D12Object *const object, const std::wstring_view name)
+{
+    if constexpr (VX_DEBUG_MODE)
+    {
+        object->SetName(std::wstring(name).c_str());
+    }
+}
+
+static inline size_t round_up_to_multiple(size_t a, size_t multiple)
+{
+    if (a % multiple == 0)
+    {
+        return a;
+    }
+    else
+    {
+        return a + multiple - (a % multiple);
+    }
+}
+```
+
+### include/voxel-engine/filesystem.hpp
+```
+#pragma once
+
+// A simple class that can get the relative path of a file / folder with respect to the executable.
+// NOTE : Makes the assumption that between the executable and the project root directory, there is NO OTHER folder with
+// the name "voxel-engine".
+class FileSystem
+{
+  public:
+    static FileSystem &instance()
+    {
+        static FileSystem fs{};
+        return fs;
+    }
+
+    inline std::string get_relative_path(const std::string_view path) const
+    {
+        return m_root_directory + std::string(path);
+    }
+
+    inline std::wstring get_relative_path_wstr(const std::wstring_view path) const
+    {
+        return std::filesystem::path(m_root_directory).wstring() + std::wstring(path);
+    }
+
+    inline std::string executable_path() const
+    {
+        return std::filesystem::current_path().string();
+    }
+
+  private:
+    explicit FileSystem();
+
+  private:
+    std::string m_root_directory{};
+};
+```
+
+### include/voxel-engine/pch.hpp
+```
+#pragma once
+
+#ifdef _DEBUG
+constexpr bool VX_DEBUG_MODE = true;
+#else
+constexpr bool VX_DEBUG_MODE = false;
+#endif
+
+// Windows includes.
+#define WIN32_LEAN_AND_MEAN
+#include <Windows.h>
+
+// Dx12 / Com headers.
+#include <d3d12.h>
+#include <dxgi1_6.h>
+#include <wrl/client.h>
+
+// Shader compiler related headers.
+#include <d3d12shader.h>
+#include <dxcapi.h>
+
+// Simd - math library.
+#include <DirectXMath.h>
+
+// stdlib headers.
+#include <math.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <array>
+#include <filesystem>
+#include <future>
+#include <queue>
+#include <random>
+#include <set>
+#include <source_location>
+#include <stack>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+// Custom includes.
+#include "common.hpp"
+#include "types.hpp"
+```
+
+### include/voxel-engine/renderer.hpp
+```
+#pragma once
+
+struct StructuredBuffer
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
+    size_t srv_index{};
+};
+
+struct ConstantBuffer
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
+    size_t cbv_index{};
+    size_t size_in_bytes{};
+
+    u8 *resource_mapped_ptr{};
+
+    inline void update(const void *data) const
+    {
+        memcpy(resource_mapped_ptr, data, size_in_bytes);
+    }
+};
+
+struct IndexBuffer
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> resource{};
+    size_t indices_count{};
+    D3D12_INDEX_BUFFER_VIEW index_buffer_view{};
+};
+
+// The command buffer is a bit different. It internally has two resources, a default and upload heap.
+// the update function is not similar to constant buffer, as here data is copied from the upload to default resource.
+// The command buffer contains its ID3D12Resource directly since the same command buffer is used for the entire engine.
+struct CommandBuffer
+{
+    Microsoft::WRL::ComPtr<ID3D12Resource> default_resource{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> upload_resource{};
+    Microsoft::WRL::ComPtr<ID3D12Resource> zeroed_counter_buffer_resource{};
+
+    u8 *upload_resource_mapped_ptr{};
+    size_t upload_resource_srv_index{};
+    size_t default_resource_uav_index{};
+    size_t counter_offset{};
+};
+
+// A simple & straight forward high level renderer abstraction.
+struct Renderer
+{
+    // Nested struct definitions.
+  private:
+    // A simple descriptor heap abstraction.
+    // Provides simple methods to offset current descriptor to make creation of resources easier.
+    struct DescriptorHeap
+    {
+        Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> descriptor_heap{};
+
+        D3D12_CPU_DESCRIPTOR_HANDLE current_cpu_descriptor_handle{};
+        D3D12_GPU_DESCRIPTOR_HANDLE current_gpu_descriptor_handle{};
+
+        size_t current_descriptor_handle_index{};
+
+        size_t descriptor_handle_size{};
+
+        D3D12_GPU_DESCRIPTOR_HANDLE get_gpu_descriptor_handle_at_index(const size_t index) const;
+        D3D12_CPU_DESCRIPTOR_HANDLE get_cpu_descriptor_handle_at_index(const size_t index) const;
+
+        void offset_current_descriptor_handles();
+
+        void create(ID3D12Device *const device, const size_t num_descriptors,
+                    const D3D12_DESCRIPTOR_HEAP_TYPE descriptor_heap_type,
+                    const D3D12_DESCRIPTOR_HEAP_FLAGS descriptor_heap_flags);
+    };
+
+  public:
+    explicit Renderer(const HWND window_handle, const u16 window_width, const u16 window_height);
+
+    // Resource creation functions.
+    // The functions return a buffer and intermediate resource (which can be discarded once the CopyResource operation
+    // is complete).
+    struct IndexBufferWithIntermediateResource
+    {
+        IndexBuffer index_buffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> intermediate_resource;
+    };
+
+    IndexBufferWithIntermediateResource create_index_buffer(const void *data, const size_t stride,
+                                                            const size_t indices_count,
+                                                            const std::wstring_view buffer_name);
+
+    struct StucturedBufferWithIntermediateResource
+    {
+        StructuredBuffer structured_buffer;
+        Microsoft::WRL::ComPtr<ID3D12Resource> intermediate_resource;
+    };
+
+    StucturedBufferWithIntermediateResource create_structured_buffer(const void *data, const size_t stride,
+                                                                     const size_t num_elements,
+                                                                     const std::wstring_view buffer_name);
+
+    CommandBuffer create_command_buffer(const size_t stride, const size_t max_number_of_elements,
+                                        const std::wstring_view buffer_name);
+
+    ConstantBuffer internal_create_constant_buffer(const size_t size_in_bytes, const std::wstring_view buffer_name);
+
+    template <size_t T>
+    std::array<ConstantBuffer, T> create_constant_buffer(const size_t size_in_bytes,
+                                                         const std::wstring_view buffer_name);
+
+  private:
+    // This function automatically offset's the current descriptor handle of descriptor heap.
+    size_t create_constant_buffer_view(ID3D12Resource *const resource, size_t size);
+    size_t create_shader_resource_view(ID3D12Resource *const resource, const size_t stride, const size_t num_elements);
+    size_t create_unordered_access_view(ID3D12Resource *const resource, const size_t stride, const size_t num_elements,
+                                        const bool use_counter = false,
+                                        const size_t counter_offset = D3D12_UAV_COUNTER_PLACEMENT_ALIGNMENT);
+
+  public:
+    // Static globals.
+    static inline constexpr u8 NUMBER_OF_BACKBUFFERS = 3u;
+    static inline constexpr DXGI_FORMAT BACKBUFFER_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
+
+    static inline constexpr u8 COPY_QUEUE_RING_BUFFER_SIZE = 10u;
+
+  public:
+    // Core D3D12 and DXGI objects.
+    Microsoft::WRL::ComPtr<ID3D12Debug> m_debug_device{};
+    Microsoft::WRL::ComPtr<IDXGIFactory6> m_dxgi_factory{};
+    Microsoft::WRL::ComPtr<IDXGIAdapter4> m_dxgi_adapter{};
+
+    Microsoft::WRL::ComPtr<ID3D12Device2> m_device{};
+
+    Microsoft::WRL::ComPtr<IDXGISwapChain4> m_swapchain{};
+
+    std::array<D3D12_CPU_DESCRIPTOR_HANDLE, NUMBER_OF_BACKBUFFERS> m_swapchain_backbuffer_cpu_descriptor_handles{};
+    std::array<Microsoft::WRL::ComPtr<ID3D12Resource>, NUMBER_OF_BACKBUFFERS> m_swapchain_backbuffer_resources{};
+
+    DescriptorHeap m_cbv_srv_uav_descriptor_heap{};
+    DescriptorHeap m_rtv_descriptor_heap{};
+    DescriptorHeap m_dsv_descriptor_heap{};
+
+    u8 m_swapchain_backbuffer_index{};
+
+    // Bindless root signature, that is shared by all pipelines.
+    Microsoft::WRL::ComPtr<ID3D12RootSignature> m_bindless_root_signature{};
+
+    // Mutex used for resource creation.
+    std::mutex m_resource_mutex{};
+
+    // Command queue abstraction that holds the queue, allocators, command list and sync primitives.
+    // Each queue type has its own struct since they operate in different ways (copy queue is async and requires thread
+    // sync primitives, while the direct queue is not for now).
+    struct DirectCommandQueue
+    {
+        std::array<Microsoft::WRL::ComPtr<ID3D12CommandAllocator>, NUMBER_OF_BACKBUFFERS> m_command_allocators{};
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_command_queue{};
+        Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_command_list{};
+
+        Microsoft::WRL::ComPtr<ID3D12Fence> m_fence{};
+        u64 m_monotonic_fence_value{};
+        std::array<u64, NUMBER_OF_BACKBUFFERS> m_frame_fence_values{};
+
+        void create(ID3D12Device *const device);
+
+        void reset(const u8 index) const;
+        void execute_command_list() const;
+        void wait_for_fence_value_at_index(const u8 index);
+        void signal_fence(const u8 index);
+
+        void flush_queue();
+    };
+
+    struct CopyCommandQueue
+    {
+        struct CommandAllocatorListPair
+        {
+            Microsoft::WRL::ComPtr<ID3D12CommandAllocator> m_command_allocator{};
+            Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> m_command_list{};
+            u64 m_fence_value{};
+        };
+
+        std::queue<CommandAllocatorListPair> m_command_allocator_list_queue{};
+        Microsoft::WRL::ComPtr<ID3D12CommandQueue> m_command_queue{};
+
+        Microsoft::WRL::ComPtr<ID3D12Fence> m_fence{};
+        u64 m_monotonic_fence_value{};
+
+        void create(ID3D12Device *const device);
+
+        // If there is a allocator / list pair that has completed execution, return it. Else, create a new one.
+        CommandAllocatorListPair get_command_allocator_list_pair(ID3D12Device *const device);
+
+        // Execute command list and move the allocator list pair back to the queue.
+        void execute_command_list(CommandAllocatorListPair &&alloc_list_pair);
+
+        void flush_queue();
+    };
+
+    DirectCommandQueue m_direct_queue{};
+    CopyCommandQueue m_copy_queue{};
+};
+
+template <size_t T>
+inline std::array<ConstantBuffer, T> Renderer::create_constant_buffer(const size_t size_in_bytes,
+                                                                      const std::wstring_view buffer_name)
+{
+    std::array<ConstantBuffer, T> constant_buffers{};
+    for (size_t i = 0; i < T; i++)
+    {
+        constant_buffers[i] =
+            internal_create_constant_buffer(size_in_bytes, std::wstring(buffer_name) + std::to_wstring(i));
+    }
+
+    return constant_buffers;
+}
+```
+
+### include/voxel-engine/shader_compiler.hpp
+```
+#pragma once
+
+// The naming convention of namespaces is being broken here, mostly because this
+// "namespace" is a smart way of simulating static class behaviour.
+// DXC is used for shader compilation.
+namespace ShaderCompiler
+{
+// note(rtarun9) : Use std::wstring instead?
+IDxcBlob *compile(const wchar_t *const file_path, const wchar_t *const entry_point, const wchar_t *const target);
+} // namespace ShaderCompiler
+```
+
+### include/voxel-engine/timer.hpp
+```
+#pragma once
+
+class Timer
+{
+  public:
+    explicit Timer();
+
+    void start();
+    void stop();
+
+    float get_delta_time() const;
+
+  private:
+    LARGE_INTEGER m_performance_frequency{};
+    float m_seconds_per_count{};
+
+    LARGE_INTEGER m_start_time{};
+    LARGE_INTEGER m_end_time{};
+};
+```
+
+### include/voxel-engine/types.hpp
+```
+#pragma once
+
+// A collection of typedefs used throughout the project.
+
+using u8 = uint8_t;
+using u16 = uint16_t;
+using u32 = uint32_t;
+using u64 = uint64_t;
+
+using i8 = int8_t;
+using i16 = int16_t;
+using i32 = int32_t;
+using i64 = int64_t;
+```
+
+### include/voxel-engine/voxel.hpp
+```
+#pragma once
+
+#include "include/BS_thread_pool.hpp"
+#include "voxel-engine/renderer.hpp"
+
+// A voxel is just a value on a regular 3D grid. Think of it as the corners where the cells meet in a 3d grid.
+// For 3d visualization of voxels, A cube is rendered for each voxel where the front lower left corner is the 'voxel
+// position' and has a edge length as specified in the class below.
+struct Voxel
+{
+    static constexpr u32 EDGE_LENGTH{640 * 8u};
+    bool m_active{true};
+};
+
+struct Chunk
+{
+    explicit Chunk();
+
+    Chunk(const Chunk &other) = delete;
+    Chunk &operator=(Chunk &other) = delete;
+
+    Chunk(Chunk &&other) noexcept;
+    Chunk &operator=(Chunk &&other) noexcept;
+
+    ~Chunk();
+
+    static constexpr u32 NUMBER_OF_VOXELS_PER_DIMENSION = 8u;
+    static constexpr size_t NUMBER_OF_VOXELS =
+        NUMBER_OF_VOXELS_PER_DIMENSION * NUMBER_OF_VOXELS_PER_DIMENSION * NUMBER_OF_VOXELS_PER_DIMENSION;
+
+    static constexpr u32 CHUNK_LENGTH = Voxel::EDGE_LENGTH * Chunk::NUMBER_OF_VOXELS_PER_DIMENSION;
+
+    // A flattened 3d array of Voxels.
+    Voxel *m_voxels{};
+    size_t m_chunk_index{};
+};
+
+// A class that contains a collection of chunks and associated data.
+// The states a chunk can be in:
+// (i) Loaded -> Ready to be rendered.
+// (ii) Setup -> Chunk mesh is ready, but associated buffers may or maynot be ready. Once the buffers are ready, these
+// chunks are moved into the loaded chunks hashmap.
+struct ChunkManager
+{
+    // Constructor creates the shared position buffer.
+    explicit ChunkManager(Renderer &renderer);
+
+    struct SetupChunkData
+    {
+        Chunk m_chunk{};
+
+        Renderer::IndexBufferWithIntermediateResource m_chunk_index_buffer{};
+        Renderer::StucturedBufferWithIntermediateResource m_chunk_color_buffer{};
+
+        // A strange design decision, but rather than accessing the render resources via root constants, render
+        // resources will now be embedded into the chunk constant buffer.
+        // This is done to make the indirect rendering & GPU culling process simpler.
+        ConstantBuffer m_chunk_constant_buffer{};
+
+        std::vector<u16> m_chunk_indices_data{};
+        std::vector<DirectX::XMFLOAT3> m_chunk_color_data{};
+    };
+
+  private:
+    // internal_mt : Internal multithreaded.
+    SetupChunkData internal_mt_setup_chunk(Renderer &renderer, const size_t index);
+
+  public:
+    void add_chunk_to_setup_stack(const size_t chunk_index);
+    void create_chunks_from_setup_stack(Renderer &renderer);
+
+    void transfer_chunks_from_setup_to_loaded_state(const u64 current_copy_queue_fence_value);
+
+    static constexpr u32 NUMBER_OF_CHUNKS_PER_DIMENSION = 2048u;
+    static constexpr size_t NUMBER_OF_CHUNKS =
+        NUMBER_OF_CHUNKS_PER_DIMENSION * NUMBER_OF_CHUNKS_PER_DIMENSION * NUMBER_OF_CHUNKS_PER_DIMENSION;
+
+    // Determines how many chunks are loaded around the player.
+    static constexpr u32 CHUNKS_LOADED_AROUND_PLAYER = 6u;
+
+    // Determines how many chunks are deleted per frame.
+    static constexpr u32 CHUNKS_TO_UNLOAD_PER_FRAME = 64u * 4u;
+
+    // Determine how many chunks can be loaded at once. If a chunk is to be loaded and loaded chunks is already at the
+    // limit, re-use of memory happens.
+    static constexpr u32 CHUNK_RENDER_DISTANCE = CHUNKS_LOADED_AROUND_PLAYER;
+
+    // Chunks to create per frame : How many chunks are setup (i.e the meshing processes occurs).
+    static constexpr u32 NUMBER_OF_CHUNKS_TO_CREATE_PER_FRAME = 16u;
+
+    // Chunks to load per frame : How many setup chunks are moved into the loaded chunk hash map.
+    static constexpr u32 NUMBER_OF_CHUNKS_TO_LOAD_PER_FRAME = 64u;
+
+    std::unordered_map<size_t, Chunk> m_loaded_chunks{};
+
+    // NOTE : Chunks are considered to be setup when :
+    // (i) The result of async call (i.e the future) is ready,
+    // (ii) The fence value is < the current copy queue fence value.
+    // The setup chunks future stack consist of pairs of fence values , futures.
+    std::queue<std::pair<u64, std::future<SetupChunkData>>> m_setup_chunk_futures_queue{};
+
+    // Why is there also a stack?
+    // Use the stack to store chunk indices that at any given point in time are close to the player.
+    // Then, each from from this stack, add elements into the queue.
+    std::stack<size_t> m_chunks_to_setup_stack{};
+
+    // A unordered set to keep track of chunks that are currently in process of being setup.
+    // This is required in case create_chunk is called for a chunk that is being setup but not loaded. We do not want to
+    // load this chunk again.
+    std::unordered_set<size_t> m_chunk_indices_that_are_being_setup{};
+
+    std::unordered_map<size_t, IndexBuffer> m_chunk_index_buffers{};
+    std::unordered_map<size_t, StructuredBuffer> m_chunk_color_buffers{};
+    std::unordered_map<size_t, ConstantBuffer> m_chunk_constant_buffers{};
+
+    // All chunks only have a index buffer with them. The indices 'index' into this common shared chunk constant buffer.
+    // The data in this buffer is ordered vertex wise, voxel wise.
+    StructuredBuffer m_shared_chunk_position_buffer{};
+
+    // Threadpool from which std::futures are obtained.
+    BS::thread_pool m_thread_pool;
+};
+```
+
+### include/voxel-engine/window.hpp
+```
+#pragma once
+
+// Simple abstraction class over win32 window.
+class Window
+{
+  public:
+    // For now window is only created in full screen mode.
+    explicit Window();
+    virtual ~Window();
+
+    inline u16 get_width() const
+    {
+        return m_width;
+    }
+
+    inline u16 get_height() const
+    {
+        return m_height;
+    }
+
+    inline HWND get_handle() const
+    {
+        return m_handle;
+    }
+
+  private:
+    static inline constexpr const char WINDOW_CLASS_NAME[] = "Base Window Class";
+
+  private:
+    HWND m_handle{nullptr};
+
+    u16 m_width{};
+    u16 m_height{};
+};
+```

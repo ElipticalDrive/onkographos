@@ -1,0 +1,136 @@
+# Pixel-guided ray sampling
+Also called: Color-guided sampling, Pc sampling
+
+## Overview
+Pixel-guided ray sampling is a non-uniform sampling strategy that calculates a prior probability distribution based on the color variation (standard deviation) within pixel neighborhoods to identify high-information regions [S1]. It solves the problem of inefficient ray casting in uniform sampling by concentrating computational resources on pixels with sharp color differences, which typically correspond to rich texture details or sharp density variations in the scene [S1]. It differs from its sibling [Uniform Ray Sampling](1261-uniform-ray-sampling.md) by replacing the constant probability density with a spatially varying distribution derived from image statistics, and from [Stratified Ray Sampling](3014-stratified-ray-sampling.md) by using image content rather than geometric depth or stratification grids to determine sampling weights.
+
+## How it works
+**Inputs:**
+- Source view image $I_i$ with dimensions $H_i \times W_i$.
+- Pixel coordinates $(u, v)$ where $u \in [0, H_i]$ and $v \in [0, W_i]$.
+- Neighborhood size parameter $n$ (default 3).
+- Threshold scaling factor $\alpha = 0.01$ [S1].
+
+**Outputs:**
+- A set of sampled rays $r_i(u, v)$ for the image, where the probability of selecting a ray at $(u, v)$ is proportional to the computed probability density $P'_c(u, v)$.
+
+**Data Structures:**
+- The probability map $P_c$ is a 2D array of size $H_i \times W_i$ storing the raw standard deviation values.
+- The normalized probability map $P'_c$ is a 2D array of size $H_i \times W_i$ storing the final sampling weights.
+
+**Steps:**
+1. **Compute Local Mean:** For each pixel $(u, v)$, calculate the mean color $\bar{c}$ of the $n \times n$ neighborhood centered at $(u, v)$. The neighborhood indices are $x' \in [u - \frac{n-1}{2}, u + \frac{n-1}{2}]$ and $y' \in [v - \frac{n-1}{2}, v + \frac{n-1}{2}]$ [S1].
+2. **Compute Raw Probability:** Calculate the standard deviation of colors in the neighborhood, denoted as $P_c(u, v)$. To facilitate computation, use the variance identity:
+   $$P_c(u, v) = \sqrt{E(c(x', y')^2) - E(c(x', y'))^2}$$
+   where $E(\cdot)$ denotes the mean over the $n \times n$ neighborhood [S1]. Note: The source text contains a typo in the identity formula, repeating the squared term; the standard statistical identity implies subtracting the square of the mean from the mean of the squares [S1].
+3. **Find Maximum:** Determine the maximum value $\max(P_c(u, v))$ across the entire image.
+4. **Calculate Threshold:** Compute the lower bound threshold $s$ as:
+   $$s = \alpha \times \text{mean}(P_c(u, v))$$
+   where $\text{mean}(P_c(u, v))$ is the average of all $P_c$ values in the image [S1].
+5. **Normalize:** Apply normalization to prevent underfitting and ensure values are within a usable range. Clamp the raw probability to $[s, \max(P_c(u, v))]$ and divide by the maximum:
+   $$P'_c(u, v) = \frac{\text{clamp}(P_c(u, v), s, \max(P_c(u, v)))}{\max(P_c(u, v))}$$
+   Values below $s$ are scaled to $s$ to avoid sampling too few rays at certain locations [S1].
+6. **Sample Rays:** Sample rays $r_i(u, v)$ from pixel coordinates $(u, v)$ according to the probability distribution $P'_c(u, v)$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def pixel_guided_ray_sampling(image: Array, n: int = 3, alpha: float = 0.01) -> Array:
+    """
+    Computes the normalized probability distribution for pixel-guided ray sampling.
+    
+    Args:
+        image: 2D array of pixel colors (H, W, C).
+        n: Neighborhood size (default 3).
+        alpha: Threshold scaling factor (default 0.01).
+        
+    Returns:
+        P_prime_c: Normalized probability distribution (H, W).
+    """
+    H, W, C = image.shape
+    half_n = (n - 1) / 2
+    
+    # Initialize arrays for mean and mean of squares
+    # Using float64 for precision during accumulation
+    mean_color = np.zeros((H, W, C), dtype=np.float64)
+    mean_sq_color = np.zeros((H, W, C), dtype=np.float64)
+    
+    # Compute local statistics using a sliding window or convolution
+    # For each pixel (u, v), iterate over the n x n neighborhood
+    for u in range(H):
+        for v in range(W):
+            # Define neighborhood bounds
+            u_start = int(max(0, u - half_n))
+            u_end = int(min(H, u + half_n + 1))
+            v_start = int(max(0, v - half_n))
+            v_end = int(min(W, v + half_n + 1))
+            
+            neighborhood = image[u_start:u_end, v_start:v_end, :]
+            num_pixels = (u_end - u_start) * (v_end - v_start)
+            
+            # Compute mean
+            mean_color[u, v, :] = np.mean(neighborhood, axis=(0, 1))
+            
+            # Compute mean of squares
+            mean_sq_color[u, v, :] = np.mean(neighborhood ** 2, axis=(0, 1))
+            
+    # Compute standard deviation using variance identity: std = sqrt(E[X^2] - E[X]^2)
+    # Sum over color channels to get scalar intensity or handle per-channel?
+    # The source implies scalar Pc based on "color variation", usually L2 norm or sum of variances.
+    # Assuming scalar Pc based on the formula structure provided in source.
+    # We compute the variance for each channel and sum them, or take the norm.
+    # Standard interpretation for "color variation" in this context is often the sum of variances or the norm of the std vector.
+    # Given the source formula uses scalar c, we assume scalar intensity or L2 norm of color vector.
+    # Let's assume scalar intensity for simplicity as per source's scalar Pc notation, 
+    # or sum of variances for color. Source says "std(c(u,v))", implying c is scalar or treated as such.
+    # We will compute the standard deviation of the color vector magnitude or sum of channel variances.
+    # Most robust interpretation: Sum of variances of each channel.
+    
+    variances = mean_sq_color - mean_color ** 2
+    # Ensure non-negative due to floating point errors
+    variances = np.maximum(variances, 0)
+    
+    # Pc is the square root of the sum of variances across channels (L2 norm of std)
+    # Or simply the std of intensity if grayscale. Assuming color image, we sum variances.
+    Pc = np.sqrt(np.sum(variances, axis=2))
+    
+    # Find max and mean of Pc
+    max_Pc = np.max(Pc)
+    mean_Pc = np.mean(Pc)
+    
+    # Calculate threshold s
+    s = alpha * mean_Pc
+    
+    # Normalize
+    # Clamp Pc to [s, max_Pc]
+    Pc_clamped = np.clip(Pc, s, max_Pc)
+    
+    # Divide by max_Pc
+    P_prime_c = Pc_clamped / max_Pc
+    
+    return P_prime_c
+```
+
+**Parameters:**
+- $n$: The size of the pixel neighborhood for computing standard deviation. Default value: 3 [S1].
+- $\alpha$: The scaling factor for the lower bound threshold $s$. Default value: 0.01 [S1].
+
+**Edge Cases and Pitfalls:**
+- **Boundary Handling:** The neighborhood calculation must handle image boundaries. The source does not specify padding, so clamping indices to image bounds is required [S1].
+- **Zero Variance:** If a pixel and its neighborhood have identical colors, $P_c(u, v) = 0$. The clamping step ensures this value is raised to $s$, preventing zero probability [S1].
+- **Precision:** The variance identity $E(c^2) - E(c)^2$ can suffer from catastrophic cancellation if the color values are large and the variance is small. Using `float64` for intermediate calculations is recommended [S1].
+
+## Operating characteristics
+**Time Complexity:** $O(H \cdot W \cdot n^2)$ for computing the probability map, where $H$ and $W$ are image dimensions and $n$ is the neighborhood size. Sampling rays is $O(H \cdot W)$ assuming efficient sampling from the distribution.
+**Memory Complexity:** $O(H \cdot W)$ to store the probability maps $P_c$ and $P'_c$.
+**Strengths:** Reduces training time by focusing on informative pixels; improves reconstruction quality in textured regions [S1].
+**Limitations:** Requires an initial pass to compute statistics; may oversample noisy regions if noise is interpreted as high variation [S1].
+**When to use:** When training radiance fields or volume renderers where computational efficiency is critical and the scene has significant texture variation [S1].
+**When not to use:** For scenes with uniform color or when noise is dominant, as it may lead to suboptimal sampling [S1].
+
+## Background
+Pixel-guided ray sampling was introduced in the context of efficient ray sampling for radiance fields reconstruction [S1]. It is based on the intuition that pixels with identical colors to their neighborhood contain less information, while those with substantial color differences encompass more scene details [S1]. The method replaces the uniform distribution of sampled rays during training with a probability density function derived from color variation [S1].
+
+## Sources
+[S1] Efficient ray sampling for radiance fields reconstruction, https://doi.org/10.1016/j.cag.2023.11.005, fetched 2026-10-27

@@ -1,110 +1,58 @@
 # Camera Matrix Decomposition
 Also called: Decompose Projection Matrix, Intrinsic/Extrinsic Decomposition, PnP Decomposition
 ## Overview
-This method decomposes a $3 \times 4$ camera projection matrix $P$ into its constituent intrinsic parameters (focal length, principal point, skew), extrinsic rotation $R$, and translation $t$ [S1, unofficial]. It solves the problem of recovering the physical camera configuration from a projective transformation matrix, enabling the initialization of metric reconstruction pipelines [S1, unofficial]. It differs from non-linear bundle adjustment by providing a direct, linear initial estimate via Singular Value Decomposition (SVD) constraints, rather than iterative optimization [S1, unofficial].
+Decomposes a 3x4 projection matrix into intrinsic matrix $K$, rotation matrix $R$, and translation vector $t$ [S1, unofficial]. It extracts the camera's internal parameters and external pose from a combined projection matrix, enabling the separation of optical properties from physical camera position and orientation [S1, unofficial].
 ## How it works
-**Inputs:** A $3 \times 4$ projection matrix $P$ (float32).
-**Outputs:** Intrinsic matrix $K$ ($3 \times 3$), Rotation matrix $R$ ($3 \times 3$), Translation vector $t$ ($3 \times 1$).
+Inputs: A 3x4 projection matrix $P$ (float32). Outputs: Intrinsic matrix $K$ (3x3), Rotation matrix $R$ (3x3), Translation vector $t$ (3x1).
 
-**Data Structures:**
-- $P$: $3 \times 4$ matrix.
-- $K$: $3 \times 3$ upper triangular matrix.
-- $R$: $3 \times 3$ orthogonal matrix ($R^T R = I$).
-- $t$: $3 \times 1$ vector.
+1. Load the projection matrix $P$ ensuring float32 type [S1, unofficial].
+2. Decompose $P$ using a standard library function (e.g., OpenCV's `decomposeProjectionMatrix`) to obtain intermediate components: intrinsics $K'$, rotation $R'$, and translation $t'$ [S1, unofficial].
+3. Normalize the intrinsic matrix by dividing by $K'[2,2]$ to ensure the bottom-right element is 1 [S1, unofficial].
+4. Pad the normalized 3x3 intrinsic matrix to a 4x4 identity matrix for compatibility with homogeneous coordinate systems [S1, unofficial].
+5. Construct the final pose matrix: transpose $R'$ to get $R$ (assuming column-major convention where $R$ rotates world to camera) [S1, unofficial].
+6. Normalize the translation vector by dividing by $t'[3]$ to handle homogeneous scaling [S1, unofficial].
 
-**Steps:**
-1. **Decomposition:** Compute the decomposition of $P$ into $K$, $R$, and a homogeneous translation vector $T_h$. The standard decomposition satisfies $P = K [R | t]$. Note that $P$ is defined up to scale.
-2. **Intrinsic Normalization:** The extracted intrinsic matrix $K_{raw}$ must be normalized. Divide $K_{raw}$ by its element $K_{raw}[2,2]$ to ensure the bottom-right element is 1.0.
-   $$ K = \frac{K_{raw}}{K_{raw}[2,2]} $$
-3. **Rotation Extraction:** The rotation matrix $R$ is extracted directly. Ensure it is a proper rotation (determinant +1) by checking $\det(R)$. If $\det(R) = -1$, negate $R$ and $t$ to correct the coordinate system [G].
-4. **Translation Extraction:** The translation vector $t$ is derived from the homogeneous translation $T_h$ (often the last column of the decomposed matrix or a specific output index). Normalize $t$ by dividing by its homogeneous component $T_h[3]$ (if represented in homogeneous coordinates) or simply taking the first three components if the decomposition routine returns Euclidean translation directly.
-   $$ t = \frac{T_h[0:3]}{T_h[3]} $$
-5. **Pose Matrix Construction:** Construct the $4 \times 4$ pose matrix $M_{pose}$ for use in rendering pipelines:
-   $$ M_{pose} = \begin{bmatrix} R^T & -R^T t \\ 0 & 1 \end{bmatrix} $$
-   Note: The rotation is transposed because $R$ typically transforms world-to-camera, while pose matrices often define camera-to-world or vice-versa depending on the convention. The translation is adjusted to represent the camera center.
-
-**Pseudocode:**
+Pseudocode:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def decompose_projection_matrix(P):
+def decompose_projection_matrix(P: np.ndarray) -> tuple:
     """
-    Decomposes a 3x4 projection matrix P into K, R, t.
-    P: numpy array, shape (3, 4), dtype float32.
-    Returns: K (3x3), R (3x3), t (3x1)
+    Decomposes a 3x4 projection matrix into K, R, t.
+    :param P: 3x4 numpy array, float32
+    :return: K (3x3), R (3x3), t (3x1)
     """
-    # Step 1: Decompose using standard algorithm (e.g., OpenCV's decomposeProjectionMatrix)
-    # The function returns: (K, R, T, Q, D, E, F)
-    # K is at index 0, R at index 1, T (homogeneous translation) at index 2
-    K_raw, R, T_h, *_ = decompose_projection_matrix_opencv(P)
+    # Step 1: Ensure float32
+    P = P.astype(np.float32)
     
-    # Step 2: Normalize Intrinsics
-    # Ensure K[2,2] is 1.0
-    K = K_raw / K_raw[2, 2]
+    # Step 2: Decompose using OpenCV
+    # Note: cv2.decomposeProjectionMatrix returns (K, R, t, Q, ...). 
+    # We assume the first three outputs are K, R, t as per source [S1, unofficial].
+    import cv2
+    K_prime, R_prime, t_prime, _ = cv2.decomposeProjectionMatrix(P)[:4]
     
-    # Step 3: Handle Rotation Sign Ambiguity
-    # Check determinant to ensure proper rotation
-    if np.linalg.det(R) < 0:
-        R = -R
-        T_h = -T_h
-        
-    # Step 4: Extract Translation
-    # T_h is typically a 4x1 vector or the last column of the 3x4 matrix in some contexts.
-    # If T_h is the 3-vector from the decomposition routine (as per source note):
-    # Source note says: "translation divided by translation[3]"
-    # This implies T_h might be 4D or we need to handle the scale.
-    # Standard OpenCV decomposeProjectionMatrix returns T as a 3-vector in some versions, 
-    # but the source note explicitly mentions dividing by translation[3].
-    # Assuming T_h is 4D homogeneous vector [tx, ty, tz, w]
-    if T_h.shape[0] == 4:
-        t = T_h[:3] / T_h[3]
-    else:
-        # Fallback if T_h is 3D (scale ambiguity remains)
-        t = T_h
-        
+    # Step 3: Normalize intrinsics
+    K = K_prime / K_prime[2, 2]
+    
+    # Step 4: Pad to 4x4 identity (for internal use, though K is 3x3)
+    # The source mentions padding to 4x4 identity, but typically K remains 3x3.
+    # We return the 3x3 K as standard.
+    
+    # Step 5: Construct R (transpose R_prime)
+    R = R_prime.T
+    
+    # Step 6: Normalize t
+    t = t_prime / t_prime[3]
+    
     return K, R, t
-
-def decompose_projection_matrix_opencv(P):
-    """
-    Placeholder for OpenCV's cv2.decomposeProjectionMatrix behavior.
-    Returns K (3x3), R (3x3), T (4x1 homogeneous), and other matrices.
-    """
-    # Implementation detail: This function performs QR decomposition or SVD based extraction.
-    # P = K [R | t]
-    # We extract K by QR decomposition of the first 3x3 of P? 
-    # Actually, standard method:
-    # 1. Compute QR decomposition of P[:, :3]
-    # 2. Extract K and R.
-    # 3. Solve for t.
-    # For the purpose of this article, we assume a black-box function that returns the standard outputs.
-    pass
 ```
-
-**Parameters:**
-- Precision: float32 is required for stability in the decomposition step [S1, unofficial].
-
-**Edge Cases:**
-- **Singular K:** If $K$ is singular (e.g., zero focal length), decomposition fails.
-- **Scale Ambiguity:** The projection matrix is scale-invariant. The decomposition returns $t$ up to a scale factor. The normalization $K[2,2]=1$ fixes the scale of $K$, but $t$'s magnitude depends on the scene scale.
-- **Degenerate Input:** If $P$ is not a valid projection matrix (rank < 3), decomposition may produce invalid $R$ or $K$.
-
+Edge cases: The source does not specify handling for singular matrices or degenerate camera poses [S1, unofficial]. Precision issues may arise if $P$ is not well-conditioned [G].
 ## Subtopics
-
-### [Self-Calibration via Absolute Dual Quadric](4732-self-calibration-via-absolute-dual-quadric.md)
-Recovers metric reconstruction from projective reconstruction by imposing constraints on the absolute dual quadric $\Omega^*$. Sets itself apart by formulating calibration as a linear system solvable via SVD, providing an initial estimate for refinement.
-
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ for fixed-size $3 \times 4$ matrix decomposition, dominated by SVD or QR decomposition steps.
-- **Memory Complexity:** $O(1)$, storing only $3 \times 4$ and $3 \times 3$ matrices.
-- **Strengths:** Fast, deterministic, provides a good initial guess for non-linear optimization.
-- **Limitations:** Sensitive to noise in $P$; assumes a valid pinhole camera model; scale ambiguity in translation.
-- **When to Use:** Initializing camera parameters for volume rendering or 3D reconstruction from known projection matrices.
-- **When Not to Use:** When the camera model is complex (e.g., fisheye) or when high precision is required without subsequent refinement.
-
+Time complexity: Depends on the underlying decomposition algorithm (e.g., QR decomposition in OpenCV), typically $O(1)$ for fixed 3x4 matrix [G]. Memory complexity: $O(1)$ for fixed-size matrices [G]. Strengths: Simple extraction of camera parameters [S1, unofficial]. Limitations: Relies on library implementation details; sign ambiguity in rotation/translation is not addressed in the source [G].
 ## Background
-Originating from computer vision literature, this method is a standard step in camera calibration and structure-from-motion pipelines. It is widely used in libraries like OpenCV [S1, unofficial]. In volume rendering, it is used to convert camera poses from tracking systems or reconstruction algorithms into renderable camera matrices.
-
+Origin: The method is implemented in the `vf-nerf` repository by albertgassol1 [S1, unofficial]. It uses OpenCV's `decomposeProjectionMatrix` function [S1, unofficial].
 ## Sources
 [S1] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)

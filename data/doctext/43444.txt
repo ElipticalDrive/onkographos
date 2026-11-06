@@ -1,0 +1,504 @@
+# Unity-RayTracing
+Demo of volume rendering a data cube in Unity by performing ray tracing on the GPU
+
+The Loader script reads a raw binary file as a 3D texture, assigns the texture to the VolumetricData material of the Data Cube object, and saves it as an asset for re-use.
+The RayCaster shader performs volume rendering on the GPU, by casting rays inside the cube and sampling the 3D texture along each ray. It includes slicing and thresholding of the data cube.
+The Transformer script provides basic runtime interaction using a mouse and keyboard: rotate, translate, and scale the cube. 
+
+This demo was made as part of an astronomy project, see report at www.arxiv.org/abs/1607.08874
+
+### Assets/Loader.cs
+```
+﻿// loads the raw binary data into a texture saved as a Unity asset 
+// (so can be de-activated after a given data cube has been converted)
+// adapted from a XNA project by Kyle Hayward 
+// http://graphicsrunner.blogspot.ca/2009/01/volume-rendering-101.html
+// data can be UInt8 or Float32, expected to be normalized in [0, 1]
+// Gilles Ferrand, University of Manitoba / RIKEN, 2016–2017
+
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+using UnityEngine;
+using System.IO; // to get BinaryReader
+using System.Linq; // to get array's Min/Max
+
+public class Loader : MonoBehaviour {
+
+	public string path = @"Assets/";
+	public string filename = "skull";
+	public string extension = ".raw";
+	public int[] size = new int[3] {256, 256, 256};
+	public bool mipmap;
+	public enum Format {Uint8, Float32};
+	public Format format;
+
+	void Start() {
+		Color[] colors = new Color[0];
+		TextureFormat textureformat = new TextureFormat();
+		Vector4 channels = new Vector4();
+		string suffix = "";
+		// load the raw data
+		switch (format) {
+		case(Format.Uint8):
+			colors = LoadRAWUint8File ();
+			textureformat = TextureFormat.Alpha8;
+			channels = new Vector4 (0, 0, 0, 1);
+			suffix = "A8";
+			break;
+		case(Format.Float32):
+			colors = LoadRAWFloat32File ();
+			textureformat = TextureFormat.RFloat;
+			channels = new Vector4 (1, 0, 0, 0);
+			suffix = "R32";
+			break;
+		}
+		// create the texture
+		Texture3D texture = new Texture3D (size[0], size[1], size[2], textureformat, mipmap);
+		texture.SetPixels (colors);
+		texture.Apply ();
+		// assign it to the material of the parent object
+		try {
+			Material material = GetComponent<Renderer> ().material;
+			material.SetTexture ("_Data", texture);
+			material.SetVector ("_DataChannel", channels);
+		}
+		catch  { 
+			Debug.Log ("Cannot attach the texture to the parent object");
+		}
+		// save it as an asset for re-use
+		#if UNITY_EDITOR
+		AssetDatabase.CreateAsset(texture, path+filename+"-"+suffix+".asset");
+		#endif
+	}
+
+	private Color[] LoadRAWUint8File()
+	{
+		Color[] colors; // NB: data value goes into A channel only
+
+		Debug.Log ("Opening file " + path + filename + extension);
+		FileStream file = new FileStream (path + filename + extension, FileMode.Open);
+		Debug.Log ("File length = " + file.Length + " bytes, Data size = " + size [0] * size [1] * size [2] + " points -> " + file.Length / (size [0] * size [1] * size [2]) + " byte(s) per point");
+
+		BinaryReader reader = new BinaryReader (file);
+		byte[] buffer = new byte[size [0] * size [1] * size [2]];
+		reader.Read (buffer, 0, sizeof(byte) * buffer.Length);
+		reader.Close ();
+
+		colors = new Color[buffer.Length];
+		Color color = Color.black;
+		for (int i = 0; i < buffer.Length; i++) {
+			color = Color.black;
+			color.a = (float)buffer [i] / byte.MaxValue;
+			colors [i] = color;
+		}
+
+		return colors;
+	}
+
+	private Color[] LoadRAWFloat32File()
+	{
+		Color[] colors; // NB: data value goes into R channel only
+
+		Debug.Log ("Opening file "+path+filename+extension);
+		FileStream file = new FileStream(path+filename+extension, FileMode.Open);
+		Debug.Log ("File length = "+file.Length+" bytes, Data size = "+size[0]*size[1]*size[2]+" points -> "+file.Length/(size[0]*size[1]*size[2])+" byte(s) per point");
+
+		BinaryReader reader = new BinaryReader(file);
+		float[] buffer = new float[size[0] * size[1] * size[2]];
+		for (int i = 0; i < buffer.Length; i++) {
+			buffer [i] = reader.ReadSingle ();
+		}
+		reader.Close();
+
+		colors = new Color[buffer.Length];
+		Color color = Color.black;
+		for (int i = 0; i < buffer.Length; i++) {
+			color = Color.black;
+			color.r = (float)buffer[i];
+			colors [i] = color;
+		}
+
+		return colors;
+	}
+
+}
+```
+
+### Assets/RayCaster.shader
+```
+﻿// shader that performs ray casting using a 3D texture
+// adapted from a Cg example by Nvidia
+// http://developer.download.nvidia.com/SDK/10/opengl/samples.html
+// Gilles Ferrand, University of Manitoba / RIKEN, 2016–2017
+
+Shader "Custom/Ray Casting" {
+	
+	Properties {
+		// the data cube
+		[NoScaleOffset] _Data ("Data Texture", 3D) = "" {}
+		_DataChannel ("Data Channel", Vector) = (0,0,0,1) // in which channel were the data value stored?
+		_Axis ("Axes order", Vector) = (1, 2, 3) // coordinate i=0,1,2 in Unity corresponds to coordinate _Axis[i]-1 in the data
+		_TexFilling ("Data filling factors", Vector) = (1, 1, 1) // if only a fraction of the data texture is to be sampled
+		// data slicing and thresholding (X, Y, Z are user coordinates)
+		_SliceAxis1Min ("Slice along axis X: min", Range(0,1)) = 0
+		_SliceAxis1Max ("Slice along axis X: max", Range(0,1)) = 1
+		_SliceAxis2Min ("Slice along axis Y: min", Range(0,1)) = 0
+		_SliceAxis2Max ("Slice along axis Y: max", Range(0,1)) = 1
+		_SliceAxis3Min ("Slice along axis Z: min", Range(0,1)) = 0
+		_SliceAxis3Max ("Slice along axis Z: max", Range(0,1)) = 1
+		_DataMin ("Data threshold: min", Range(0,1)) = 0
+		_DataMax ("Data threshold: max", Range(0,1)) = 1
+		_StretchPower ("Data stretch power", Range(0.1,3)) = 1  // increase it to highlight the highest data values
+		// normalization of data intensity (has to be adjusted for each data set)
+		_NormPerStep ("Intensity normalization per step", Float) = 1
+		_NormPerRay  ("Intensity normalization per ray" , Float) = 1
+		_Steps ("Max number of steps", Range(1,1024)) = 128 // should ideally be as large as data resolution, strongly affects frame rate
+	}
+
+	SubShader {
+		
+		Tags { "Queue" = "Transparent" }
+
+		Pass {
+			Blend SrcAlpha OneMinusSrcAlpha
+			Cull Off
+			ZTest LEqual
+			ZWrite Off
+			Fog { Mode off }
+
+			CGPROGRAM
+	        #pragma target 3.0
+			#pragma vertex vert
+			#pragma fragment frag
+
+			#include "UnityCG.cginc"
+
+			sampler3D _Data;
+			float4 _DataChannel;
+			float3 _Axis;
+			float3 _TexFilling;
+			float _SliceAxis1Min, _SliceAxis1Max;
+			float _SliceAxis2Min, _SliceAxis2Max;
+			float _SliceAxis3Min, _SliceAxis3Max;
+			float _DataMin, _DataMax;
+			float _StretchPower;
+			float _NormPerStep;
+			float _NormPerRay;
+			float _Steps;
+
+			// calculates intersection between a ray and a box
+			// http://www.siggraph.org/education/materials/HyperGraph/raytrace/rtinter3.htm
+			bool IntersectBox(float3 ray_o, float3 ray_d, float3 boxMin, float3 boxMax, out float tNear, out float tFar)
+			{
+			    // compute intersection of ray with all six bbox planes
+			    float3 invR = 1.0 / ray_d;
+			    float3 tBot = invR * (boxMin.xyz - ray_o);
+			    float3 tTop = invR * (boxMax.xyz - ray_o);
+			    // re-order intersections to find smallest and largest on each axis
+			    float3 tMin = min (tTop, tBot);
+			    float3 tMax = max (tTop, tBot);
+			    // find the largest tMin and the smallest tMax
+			    float2 t0 = max (tMin.xx, tMin.yz);
+			    float largest_tMin = max (t0.x, t0.y);
+			    t0 = min (tMax.xx, tMax.yz);
+			    float smallest_tMax = min (t0.x, t0.y);
+			    // check for hit
+			    bool hit = (largest_tMin <= smallest_tMax);
+			    tNear = largest_tMin;
+			    tFar = smallest_tMax;
+			    return hit;
+			}
+
+			struct vert_input {
+			    float4 pos : POSITION;
+			};
+
+			struct frag_input {
+			    float4 pos : SV_POSITION;
+			    float3 ray_o : TEXCOORD1; // ray origin
+			    float3 ray_d : TEXCOORD2; // ray direction
+			};
+
+			// vertex program
+			frag_input vert(vert_input i)
+			{
+				frag_input o;
+
+			    // calculate eye ray in object space
+				o.ray_d = -ObjSpaceViewDir(i.pos);
+				o.ray_o = i.pos.xyz - o.ray_d;
+				// calculate position on screen (unused)
+				o.pos = UnityObjectToClipPos(i.pos);
+
+				return o;
+			}
+
+			// gets data value at a given position
+			float4 get_data(float3 pos) {
+				// sample texture (pos is normalized in [0,1])
+				float3 posTex = float3(pos[_Axis[0]-1],pos[_Axis[1]-1],pos[_Axis[2]-1]);
+				posTex = (posTex-0.5) * _TexFilling + 0.5;
+				float4 data4 = tex3Dlod(_Data, float4(posTex,0));
+				float data = _DataChannel[0]*data4.r + _DataChannel[1]*data4.g + _DataChannel[2]*data4.b + _DataChannel[3]*data4.a;
+				// slice and threshold
+				data *= step(_SliceAxis1Min, posTex.x);
+				data *= step(_SliceAxis2Min, posTex.y);
+				data *= step(_SliceAxis3Min, posTex.z);
+				data *= step(posTex.x, _SliceAxis1Max);
+				data *= step(posTex.y, _SliceAxis2Max);
+				data *= step(posTex.z, _SliceAxis3Max);
+				data *= step(_DataMin, data);
+				data *= step(data, _DataMax);
+				// colourize
+				float4 col = float4(data, data, data, data);
+				return col;
+			}
+
+#define FRONT_TO_BACK // ray integration order (BACK_TO_FRONT not working when being inside the cube)
+			
+			// fragment program
+			float4 frag(frag_input i) : COLOR
+			{
+			    i.ray_d = normalize(i.ray_d);
+			    // calculate eye ray intersection with cube bounding box
+				float3 boxMin = { -0.5, -0.5, -0.5 };
+				float3 boxMax = {  0.5,  0.5,  0.5 };
+			    float tNear, tFar;
+			    bool hit = IntersectBox(i.ray_o, i.ray_d, boxMin, boxMax, tNear, tFar);
+			    if (!hit) discard;
+			    if (tNear < 0.0) tNear = 0.0;
+			    // calculate intersection points
+			    float3 pNear = i.ray_o + i.ray_d*tNear;
+			    float3 pFar  = i.ray_o + i.ray_d*tFar;
+			    // convert to texture space
+				pNear = pNear + 0.5;
+				pFar  = pFar  + 0.5;
+				
+			    // march along ray inside the cube, accumulating color
+#ifdef FRONT_TO_BACK
+				float3 ray_pos = pNear;
+				float3 ray_dir = pFar - pNear;
+#else
+				float3 ray_pos = pFar;
+				float3 ray_dir = pNear - pFar;
+#endif
+				float3 ray_step = normalize(ray_dir) * sqrt(3) / _Steps;
+				float4 ray_col = 0;
+				for(int k = 0; k < _Steps; k++)
+				{
+					float4 voxel_col = get_data(ray_pos);
+					voxel_col.a = _NormPerStep * length(ray_step) * pow(voxel_col.a,_StretchPower);
+#ifdef FRONT_TO_BACK
+	        		//voxel_col.rgb *= voxel_col.a;
+			        //ray_col = (1.0f - ray_col.a) * voxel_col + ray_col;
+					ray_col.rgb = ray_col.rgb + (1 - ray_col.a) * voxel_col.a * voxel_col.rgb;
+					ray_col.a   = ray_col.a   + (1 - ray_col.a) * voxel_col.a;
+#else
+			        ray_col.rgb = (1-voxel_col.a)*ray_col.rgb + voxel_col.a * voxel_col.rgb;
+			        ray_col.a   = (1-voxel_col.a)*ray_col.a   + voxel_col.a;
+#endif
+					ray_pos += ray_step;
+					if (ray_pos.x < 0 || ray_pos.y < 0 || ray_pos.z < 0) break;
+					if (ray_pos.x > 1 || ray_pos.y > 1 || ray_pos.z > 1) break;
+				}
+				ray_col *= _NormPerRay;
+				ray_col = clamp(ray_col,0,1);
+		    	return ray_col;
+			}
+
+			ENDCG
+
+		}
+
+	}
+
+	FallBack Off
+}
+```
+
+### Assets/Transformer.cs
+```
+﻿// transforms an object: 
+// - hold and drag primary   mouse button to rotate the cube around its centre
+// - hold and drag secondary mouse button to rotate the cube around the camera (useful when inside the cube)
+// - use arrow keys to translate the cube left/right and forward/backward
+// - scroll wheel to scale the cube up/down
+// adapted from various online sources
+// Gilles Ferrand, University of Manitoba / RIKEN, 2016–2017
+
+using UnityEngine;
+
+public class Transformer : MonoBehaviour {
+	
+	// rotate
+	public float  rotSpeed = 4.0f;
+	bool isRotating;
+	Vector3 rotationAxisX;
+	Vector3 rotationAxisY;
+	Vector3 mouseOrigin;
+	Vector3 angleDelta;
+	GameObject rotationCentre;
+
+	// translate
+	public float panSpeed = 2.0f;
+	bool isMovingLeft, isMovingRight;
+	bool isMovingUp, isMovingDown;
+	bool isMovingForward, isMovingBackward;
+	Vector3 translationAxis;
+
+	// scale
+	public float zoomSpeed = 1.0f;
+	private float scaleMin = 0.01f;
+	private float scaleMax = 100f;
+	bool isScaling;
+	float scale; // same for the 3 axes
+
+	void Awake () {
+	}
+
+	void Start () {
+		scale = Mathf.Clamp (this.transform.localScale[0], scaleMin, scaleMax);
+	}
+
+	void Update () {
+
+		// rotate 
+
+		if (Input.GetMouseButtonDown (0) || Input.GetMouseButtonDown (1)) { 
+			isRotating = true;
+			if (Input.GetMouseButtonDown (0)) rotationCentre = this.gameObject;
+			if (Input.GetMouseButtonDown (1)) rotationCentre = Camera.main.gameObject;
+			mouseOrigin = Input.mousePosition;
+		}
+
+		if (isRotating) {
+			rotationAxisX = Camera.main.transform.up;
+			rotationAxisY = Camera.main.transform.right;
+			angleDelta = (Input.mousePosition - mouseOrigin)/Screen.width;
+			angleDelta *= rotSpeed;
+			angleDelta.x *= -1;
+			this.transform.RotateAround (rotationCentre.transform.position, rotationAxisX, angleDelta.x);
+			this.transform.RotateAround (rotationCentre.transform.position, rotationAxisY, angleDelta.y);
+			if (!Input.GetMouseButton(0) && !Input.GetMouseButton(1)) isRotating = false;
+		}
+
+		// translate
+
+		isMovingRight    = Input.GetKey (KeyCode.RightArrow);
+		isMovingLeft     = Input.GetKey (KeyCode.LeftArrow);
+		isMovingForward  = Input.GetKey (KeyCode.UpArrow);
+		isMovingBackward = Input.GetKey (KeyCode.DownArrow);
+
+		if (isMovingRight || isMovingLeft) {
+			translationAxis = Camera.main.transform.right;
+			float distance = panSpeed * Time.deltaTime;
+			if (isMovingRight) this.transform.position += translationAxis * distance;
+			if (isMovingLeft)  this.transform.position -= translationAxis * distance;
+		}
+
+		if (isMovingForward || isMovingBackward) {
+			translationAxis = Camera.main.transform.forward;
+			float distance = panSpeed * Time.deltaTime;
+			if (isMovingForward)  this.transform.position += translationAxis * distance;
+			if (isMovingBackward) this.transform.position -= translationAxis * distance;
+		}
+
+		// scale
+
+		float scroll = Input.GetAxis ("Mouse ScrollWheel");
+		isScaling = scroll != 0;
+
+		if(isScaling) {
+			scale *= 1 + scroll*zoomSpeed;
+			scale = Mathf.Clamp(scale, scaleMin, scaleMax);
+			this.transform.localScale = new Vector3(scale, scale, scale);
+			if (scroll == 0) isScaling = false;
+		}
+
+	}
+	
+}
+```
+
+### Assets/data_cubes.py
+```
+# generates mock 3D data cubes for loading into Unity
+# Gilles Ferrand, RIKEN, 2017
+
+import numpy as np
+import scipy.interpolate
+
+def axes(N_bins=256, formats=[8]):
+	""" generates coordinate axes at the centre of the cube """
+	cube = np.zeros((N_bins,N_bins,N_bins))
+	half = int(N_bins/2)
+	radius = 2
+	cube[half:int(half*(1+3/3.))+1,half-radius:half+radius+1,half-radius:half+radius+1] = 1 # long   segment along 1st dimension
+	cube[half-radius:half+radius+1,half:int(half*(1+2/3.))+1,half-radius:half+radius+1] = 1 # medium segment along 2nd dimension
+	cube[half-radius:half+radius+1,half-radius:half+radius+1,half:int(half*(1+1/3.))+1] = 1 # short  segment along 3rd dimension
+	for format in formats: tofile(cube, name='cube_axes', format=format, T=(3,2,1))
+
+def random(N_bins=256, N_dots=None, rand_power=0, rand_min=0, rand_max=1, gauss_centre=0.5, gauss_width=0, types=["sparse","dense"], formats=[8]):
+	""" generate dots at random locations inside the cube """
+	if N_dots==None: N_dots = N_bins**2
+	# set random coordinates
+	x = np.random.rand(N_dots) * N_bins
+	y = np.random.rand(N_dots) * N_bins
+	z = np.random.rand(N_dots) * N_bins
+	# set data
+	d = np.random.rand(N_dots)**rand_power
+	d = rand_min + d * (rand_max-rand_min)
+	if gauss_width>0: # Gaussian distribution in space
+		gauss_centre *= N_bins
+		gauss_width *= N_bins
+		d *= np.exp(-((x-gauss_centre)/gauss_width)**2-((y-gauss_centre)/gauss_width)**2-((z-gauss_centre)/gauss_width)**2)
+	# put dots inside a regular cube
+	if "sparse" in types:
+		cube   = np.zeros((N_bins,N_bins,N_bins))
+		weight = np.zeros((N_bins,N_bins,N_bins))
+		for i in range(N_dots):
+			cube  [int(x[i]),int(y[i]),int(z[i])] += d[i]
+			weight[int(x[i]),int(y[i]),int(z[i])] += 1.
+		i_dots = np.where(weight>=1)
+		cube[i_dots] /= weight[i_dots]
+		cube /= cube.max()
+		print "%i dots put in the cube at %i locations"%(N_dots,len(i_dots[0]))
+		for format in formats: tofile(cube, name='cube_random_sparse', format=format, T=(3,2,1))
+	# interpolate the scattered data
+	if "dense" in types:
+		print "interpolating values on a regular grid"
+		t = np.linspace(0, N_bins, N_bins)
+		X, Y, Z = np.meshgrid(t,t,t)
+		D = scipy.interpolate.griddata((x,y,z), d, (X,Y,Z), method='linear', fill_value=0)
+		if np.isnan(D).any(): print "! interpolation failed"
+		for format in formats: tofile(D, name='cube_random_dense', format=format, T=(3,2,1))
+	
+def tofile(cube_norm, name='cube', format=8, T=(3,2,1)):
+	""" writes a data cube in an 8-bit binary file """
+	# the data are expected to be normalized in [0,1]
+	if format==8: 
+		cube_fmt = (cube_norm*255).astype('uint8')
+	elif format==32: 
+		cube_fmt = cube_norm.astype('float32')
+	else:
+		print "unsupported format"
+		return
+	filename = '%s_T%i%i%i_%ix%ix%i.bin%i'%(name,T[0],T[1],T[2],cube_norm.shape[0],cube_norm.shape[1],cube_norm.shape[2],format)
+	print "writing "+filename
+	cube_fmt.transpose(T[0]-1,T[1]-1,T[2]-1).tofile(filename)
+	# note: data is always written in C order by tofile()
+	# transpose(3,2,1) is needed so that cube dimensions 1,2,3 map to Unity axes x,y,z (left -handed coordinate system)
+	# transpose(2,3,1) is needed so that cube dimensions 1,2,3 map to Unity axes x,z,y (right-handed coordinate system)
+
+def examples(N_bins=256, formats=[8]):
+	# coordinate system
+	axes(N_bins=N_bins)
+	# dots with Gaussian spatial distribution
+	random(N_bins=N_bins,rand_power=0,rand_max=1.0,gauss_width=0.0,types=["sparse"],formats=formats)
+	# cube filled with spongy texture
+	random(N_bins=N_bins,rand_power=2,rand_max=0.5,gauss_width=0.0,types=["dense" ],formats=formats)
+	
+if __name__ == "__main__":
+	examples()
+```

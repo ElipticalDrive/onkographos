@@ -7,7 +7,7 @@ The Gaussian Sum Transfer Function (GSTM) is a 1D signal approximation method th
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A scalar field value $x$ (typically normalized to $[0, 1]$ or mapped to data range), and a set of $N$ control points. Each control point $i$ defines parameters for the Gaussian components affecting Color (R, G, B) and Opacity ($\alpha$).
+- Input: A scalar field value $x$ (typically normalized to $[0, 1]$ or mapped to data range), and a set of $N$ control points [S2, S3, unofficial].
 - Output: A 4-tuple $(R, G, B, \alpha)$ representing the color and opacity at value $x$. In some implementations, a fixed density $\rho = 1.0$ is returned [S3, unofficial].
 
 **Data Structures:**
@@ -16,34 +16,34 @@ The control points are stored in an array or list. Two common layouts are observ
    - Red Channel: $N_R$ Gaussians with $(A_{i,R}, \mu_{i,R}, \sigma^2_{i,R})$.
    - Green Channel: $N_G$ Gaussians with $(A_{i,G}, \mu_{i,G}, \sigma^2_{i,G})$.
    - Blue Channel: $N_B$ Gaussians with $(A_{i,B}, \mu_{i,B}, \sigma^2_{i,B})$.
-   - Opacity: $N_\alpha$ Gaussians with $(A_{i,\alpha}, \mu_{i,\alpha}, \sigma^2_{i,\alpha})$.
+   - Opacity: $N_\alpha$ Gaussians with $(A_{i,\alpha}, \mu_{i,\alpha}, \sigma^2_{i,\alpha})$ [S2, unofficial].
 2. **Control Point Structure (S3):** A structure `TF1DControlPoint` containing:
-   - `value` (float): The position/mean $\mu_i$ on the scalar axis.
-   - `output.density` (float): Amplitude/weight $w_i$ for density (often unused if density is fixed).
-   - `output.attenuation` (Spectrum): Color/opacity contribution vector.
-   - `variance` (float): $\sigma_i^2$.
-   - `exponent` (float): Shape parameter (often fixed to 2 for standard Gaussian) [S3, unofficial].
+   - `position` (float): The mean $\mu_i$ on the scalar axis.
+   - `color` (Spectrum): The attenuation/color contribution vector.
+   - `exponent` (float): Shape parameter (typically 2 for standard Gaussian) [S3, unofficial].
+   - `offset` (float): Maps to the variance $\sigma_i^2$ used in the exponential denominator [S3, unofficial].
 
 **Formulas:**
-The general form for a Gaussian component is:
-$$ g_i(x) = A_i \exp\left(-\frac{(x - \mu_i)^2}{\sigma_i^2 + \epsilon}\right) $$
+The general form for a Gaussian component varies slightly across implementations:
+$$ g_i(x) = A_i \exp\left(-\frac{(x - \mu_i)^2}{2\sigma_i^2 + \epsilon}\right) $$
 Where:
 - $A_i$: Amplitude (weight).
 - $\mu_i$: Mean (center).
 - $\sigma_i^2$: Variance (width).
 - $\epsilon$: Small constant to prevent division by zero (typically $10^{-8}$) [S1].
+Some implementations omit the factor of 2 in the denominator or absorb it into the variance parameter, using $g_i(x) = A_i \exp\left(-\frac{(x - \mu_i)^2}{\sigma_i^2}\right)$ [S2, unofficial] or $g_i(x) = A_i \exp\left(-0.5 \frac{(x - \mu_i)^2}{\sigma_i^2}\right)$ [S3, unofficial].
 
 **Color and Opacity Calculation (S2):**
 $$ R(x) = \sum_{i} A_{i,R} \exp\left(-\frac{(x - \mu_{i,R})^2}{\sigma^2_{i,R}}\right) $$
 $$ G(x) = \sum_{i} A_{i,G} \exp\left(-\frac{(x - \mu_{i,G})^2}{\sigma^2_{i,G}}\right) $$
 $$ B(x) = \sum_{i} A_{i,B} \exp\left(-\frac{(x - \mu_{i,B})^2}{\sigma^2_{i,B}}\right) $$
-$$ \alpha(x) = \sum_{i} A_{i,\alpha} \exp\left(-\frac{(x - \mu_{i,\alpha})^2}{\sigma^2_{i,\alpha}}\right) $$
+$$ \alpha(x) = \sum_{i} A_{i,\alpha} \exp\left(-\frac{(x - \mu_{i,\alpha})^2}{\sigma^2_{i,\alpha}}\right) $$ [S2, unofficial]
 
-**Density Calculation (S3 variant):**
+**Density and Attenuation Calculation (S3 variant):**
 In the TF1DExp implementation, density is fixed:
 $$ \rho(x) = 1.0 $$
 Attenuation is calculated as:
-$$ \text{attenuation}(x) = \sum_{i=1}^{N} \text{control\_points}[i].\text{output}.attenuation \times \exp\left(-0.5 \frac{(x - \text{control\_points}[i].\text{value})^2}{\text{control\_points}[i].\text{variance}}\right) $$
+$$ \text{attenuation}(x) = \sum_{i=1}^{N} \text{control\_points}[i].\text{color} \times \exp\left(-0.5 \frac{(x - \text{control\_points}[i].\text{position})^2}{\text{control\_points}[i].\text{offset}}\right) $$ [S3, unofficial]
 Note: S3 states this TF is NOT C1 continuous [S3, unofficial].
 
 **Parameters:**
@@ -55,6 +55,8 @@ Note: S3 states this TF is NOT C1 continuous [S3, unofficial].
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def gaussian_sum_transfer_function(x, control_points):
     """
     Computes RGBA output for a scalar value x using Gaussian Sum Transfer Function.
@@ -69,7 +71,6 @@ def gaussian_sum_transfer_function(x, control_points):
             - 'amplitude_g' (float): A_i for Green
             - 'amplitude_b' (float): A_i for Blue
             - 'amplitude_a' (float): A_i for Alpha
-            - 'density_weight' (float): Optional, if density is not fixed to 1.0.
             
     Returns:
         tuple: (r, g, b, a)
@@ -79,7 +80,6 @@ def gaussian_sum_transfer_function(x, control_points):
     g = 0.0
     b = 0.0
     a = 0.0
-    density = 0.0
     
     for cp in control_points:
         mu = cp['mean']
@@ -89,39 +89,22 @@ def gaussian_sum_transfer_function(x, control_points):
         amp_b = cp['amplitude_b']
         amp_a = cp['amplitude_a']
         
-        # Avoid division by zero
+        # Avoid division by zero; S1 adds epsilon, S3 relies on caller [S1][S3, unofficial]
         denom = sigma_sq + epsilon
         
-        # Gaussian term
-        # Note: Some implementations use 2*sigma^2 in denominator (S1), others sigma^2 (S2, S3).
-        # S2 and S3 code examples use sigma^2 directly in denominator without 2.
-        # S1 formula uses 2*sigma^2.
-        # We follow S2/S3 code structure for consistency with provided examples.
+        # Gaussian term (using S2/S3 denominator convention)
         exponent = -((x - mu) ** 2) / denom
-        gauss_val = amp_r * math.exp(exponent)
         
-        r += gauss_val
+        r += amp_r * math.exp(exponent)
+        g += amp_g * math.exp(exponent)
+        b += amp_b * math.exp(exponent)
+        a += amp_a * math.exp(exponent)
         
-        gauss_val = amp_g * math.exp(exponent)
-        g += gauss_val
-        
-        gauss_val = amp_b * math.exp(exponent)
-        b += gauss_val
-        
-        gauss_val = amp_a * math.exp(exponent)
-        a += gauss_val
-        
-        # If density is not fixed to 1.0, sum density contributions
-        # density += cp['density_weight'] * math.exp(exponent)
-
-    # S3 variant: Density is always 1.0
-    density = 1.0
-    
-    return (r, g, b, a, density)
+    return (r, g, b, a)
 ```
 
 **Edge Cases and Pitfalls:**
-- **Zero Variance:** If $\sigma_i^2 = 0$, division by zero occurs. The code must ensure $\sigma_i^2 > 0$ or add $\epsilon$ [S1][S3, unofficial].
+- **Zero Variance:** If $\sigma_i^2 = 0$, division by zero occurs in the exponential calculation. S1 adds $\epsilon$ to the denominator, while S3 relies on the caller to provide non-zero variance or handles it elsewhere [S1][S3, unofficial].
 - **Continuity:** Some implementations (TF1DExp) are not C1 continuous [S3, unofficial].
 - **Density Handling:** In S3, density is hardcoded to 1.0, and Gaussians only affect attenuation/color. In S2, Gaussians affect opacity directly. Implementers must check which model is used [S2, S3, unofficial].
 
@@ -137,16 +120,16 @@ Uses a Generalized Normal Distribution PDF with an additional shape parameter $\
 Uses Laplacian of Gaussian functions (difference of Gaussians) for sharper peaks and valleys, defined by mean, scale, and weight.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$ per scalar value, where $N$ is the number of control points/components.
-- **Memory Complexity:** $O(N)$ to store control point parameters.
+- **Time Complexity:** $O(N)$ per scalar value, where $N$ is the number of control points/components [G].
+- **Memory Complexity:** $O(N)$ to store control point parameters [G].
 - **Performance:** Fast evaluation, suitable for real-time ray marching. Performance depends on $N$ and hardware (CUDA/SIMD) [S3, unofficial].
-- **Strengths:** Smooth, differentiable (if C1 continuous), intuitive control via peaks/valleys, handles multi-modal data well [S1][S2, unofficial].
-- **Limitations:** Not C1 continuous in some implementations [S3, unofficial]. Requires manual tuning of parameters. May not capture complex data distributions without many components [S1].
-- **When to use:** When explicit control over color/opacity peaks is needed, and data is multi-modal.
-- **When not to use:** When automatic adaptation to data statistics is preferred (use Frequency Distribution-based) or when C1 continuity is strictly required and the implementation is not C1.
+- **Strengths:** Smooth, differentiable, intuitive control via peaks/valleys, handles multi-modal data well [S1][S2, unofficial].
+- **Limitations:** Not C1 continuous in some implementations [S3, unofficial]. Requires manual tuning of parameters.
+- **When to use:** When explicit control over color/opacity peaks is needed, and data is multi-modal [G].
+- **When not to use:** When automatic adaptation to data statistics is preferred (use Frequency Distribution-based) or when C1 continuity is strictly required and the implementation is not C1 [G].
 
 ## Background
-The Gaussian Sum Transfer Function originates from the use of Gaussian Mixture Models (GMM) for signal approximation in volume rendering [S1]. It was popularized in various visualization toolkits and research projects for its flexibility in defining multi-modal transfer functions [S2, S3, unofficial]. The specific implementation "TF1DExp" appears in CUDA-based volume rendering projects [S3, unofficial]. The method is a subset of Probabilistic and Statistical Modeling techniques [Parent].
+The Gaussian Sum Transfer Function is based on Gaussian Mixture Models (GMM) for 1D signal approximation [S1]. It is implemented in various visualization projects for its flexibility in defining multi-modal transfer functions [S2, S3, unofficial]. The specific implementation "TF1DExp" appears in CUDA-based volume rendering projects [S3, unofficial]. The method operates within the Probabilistic and Statistical Modeling family [Parent].
 
 ## Sources
 [S1] GES: Generalized Exponential Splatting for Efficient Radiance Field Rendering, https://doi.org/10.1109/cvpr52733.2024.01873, fetched 2026-10-26

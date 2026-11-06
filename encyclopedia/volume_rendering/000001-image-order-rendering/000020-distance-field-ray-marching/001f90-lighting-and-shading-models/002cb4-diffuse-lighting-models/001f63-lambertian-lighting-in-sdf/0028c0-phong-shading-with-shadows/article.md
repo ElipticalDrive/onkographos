@@ -3,187 +3,94 @@
 Also called: Phong Relighting, Standard Illumination Model
 
 ## Overview
-Phong Shading with Shadows calculates the final pixel color by combining diffuse and specular lighting contributions using the Phong reflection model, modulated by shadow factors to determine visibility. It differs from its parent, Lambertian Lighting in SDF, by adding specular highlights and explicit shadow casting, and from its sibling, Sphere Tracing with Shading, by using a specific analytical reflection model rather than generic shading.
+Phong Shading with Shadows computes the final color of a surface point in a Signed Distance Field (SDF) by combining ambient, diffuse, and specular reflections according to the Phong model, modulated by shadow factors [S2, unofficial]. It differs from its parent [Lambertian Lighting in SDF](2023-lambertian-lighting-in-sdf.md) by adding specular highlights and shadowing, and from [Sphere Tracing with Shading](3812-sphere-tracing-with-shading.md) by explicitly calculating surface normals via gradient recovery to support view-dependent specular reflections [S1, unofficial][S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** Signed Distance Field (SDF) function $S(p)$, camera parameters, light source definitions, and material properties.
-*   **Output:** Final color $C$ for each pixel.
+**Inputs:**
+- SDF function $S(p)$ returning the distance from point $p$ to the surface.
+- Camera position $cam$ and ray direction $r$ for each pixel.
+- Light source parameters: color $c$, intensity $I$, and direction or position.
+- Material parameters: ambient $k_a$, diffuse $k_d$, specular $k_s$, and shininess $k_p$ (or $n$) [S1, unofficial][S2, unofficial].
+
+**Outputs:**
+- Final pixel color $C$.
 
 **Data Structures:**
-The implementation uses two primary structures to define the scene and material properties [S2, unofficial]:
-
-1.  `struct material`:
-    *   `vec3 ka`: Ambient color constant.
-    *   `float kd`: Diffuse reflection constant.
-    *   `float ks`: Specular reflection constant.
-    *   `float kp`: Shininess exponent (often denoted as $n$ in literature). Higher values result in smoother, shinier highlights [S1, unofficial].
-2.  `struct light`:
-    *   `vec3 c`: Light color.
-    *   `float intensiv`: Light intensity.
-
-**Numbered Steps:**
-
-1.  **Ray Marching:** Perform sphere tracing or ray marching through the SDF to find the intersection point $p$ on the surface. If no intersection is found within the max distance, return background color.
-2.  **Surface Normal Recovery:** Calculate the surface normal $n$ at point $p$ by evaluating the gradient of the SDF and normalizing it [S1, unofficial]:
-    $$ n = \frac{\nabla S(p)}{\|\nabla S(p)\|} $$
-    Where $\nabla S(p) = \left( \frac{\partial S}{\partial x}, \frac{\partial S}{\partial y}, \frac{\partial S}{\partial z} \right)$ is approximated using finite differences or analytical derivatives if available.
-3.  **Light Direction Calculation:** For a directional light source located at $L[0].c$ (or direction vector), compute the normalized light direction $l$ pointing from the surface point $p$ to the light [S2, unofficial]:
-    $$ l = \text{normalize}(L[0].c - p) $$
-    For a directional light, $l$ is constant. For a point light, $l$ varies per pixel.
-4.  **Shadow Factor Computation:** Determine the shadow factor $sh$ by casting a shadow ray from $p$ towards the light source.
-    *   **Hard Shadows:** $sh = 1$ if the ray does not intersect any geometry before reaching the light; $sh = 0$ otherwise.
-    *   **Soft Shadows:** $sh$ is computed based on the distance to the nearest occluder relative to the light distance, creating penumbra effects.
-5.  **Phong Reflection Model:** Calculate the diffuse and specular components [S2, unofficial]:
-    *   **Diffuse:**
-        $$ C_{diff} = k_d I \max(n \cdot l, 0) $$
-        Where $I$ is the light intensity/color.
-    *   **Specular:**
-        First, compute the reflection vector $r$:
-        $$ r = \text{reflect}(-v, n) $$
-        Where $v$ is the view direction (from $p$ to camera). Then:
-        $$ C_{spec} = k_s \max(r \cdot l, 0)^{k_p} $$
-        Note: Some implementations include light intensity $I$ in the specular term. The source formula implies $k_s$ absorbs intensity or $I$ is applied separately. Based on the final color formula, $I$ is applied to diffuse. We assume standard Phong where specular also scales with light intensity or $k_s$ is defined relative to it. The source formula $C_{spec} = k_s \max(r \cdot l, 0)^{k_p}$ does not explicitly show $I$, but $C_{diff}$ does. We will follow the source's explicit formula for $C_{spec}$ but note that physically, specular should also scale with light intensity. However, to remain faithful to the source [S2, unofficial], we use the provided formula.
-6.  **Final Color:** Combine ambient, diffuse, specular, and shadow factors [S2, unofficial]:
-    $$ C = (k_a + C_{diff} + C_{spec}) \times sh $$
-    Where $k_a$ is the ambient color/intensity.
-
-**Pseudocode:**
-
+The material properties are stored in a struct:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```python
-import math
-
-def get_surface_normal(sdf_func, p):
-    """
-    Computes the surface normal at point p by finite difference approximation of the gradient.
-    """
-    eps = 1e-4
-    dx = sdf_func(p + vec3(eps, 0, 0)) - sdf_func(p - vec3(eps, 0, 0))
-    dy = sdf_func(p + vec3(0, eps, 0)) - sdf_func(p - vec3(0, eps, 0))
-    dz = sdf_func(p + vec3(0, 0, eps)) - sdf_func(p - vec3(0, 0, eps))
-    
-    gradient = vec3(dx, dy, dz) / (2 * eps)
-    return normalize(gradient)
-
-def reflect(v, n):
-    """
-    Reflects vector v around normal n.
-    r = v - 2 * dot(v, n) * n
-    """
-    return v - 2 * dot(v, n) * n
-
-def phong_shading_with_shadows(sdf_func, ray_origin, ray_direction, light, material, max_steps, max_dist):
-    """
-    Renders a single ray using Phong shading with shadows.
-    
-    Args:
-        sdf_func: Function returning signed distance.
-        ray_origin: Camera ray origin.
-        ray_direction: Camera ray direction.
-        light: Light struct with 'c' (color) and 'intensiv' (intensity).
-        material: Material struct with 'ka', 'kd', 'ks', 'kp'.
-        max_steps: Maximum number of ray march steps.
-        max_dist: Maximum ray march distance.
-        
-    Returns:
-        Final color vec3.
-    """
-    p = ray_origin
-    t = 0.0
-    
-    # 1. Ray Marching
-    for i in range(max_steps):
-        dist = sdf_func(p)
-        if dist < 1e-4: # Hit surface
-            break
-        if t + dist > max_dist: # Missed scene
-            return vec3(0, 0, 0) # Background
-        t += dist
-        p += ray_direction * dist
-    else:
-        return vec3(0, 0, 0) # Background
-
-    # 2. Surface Normal Recovery
-    n = get_surface_normal(sdf_func, p)
-    
-    # 3. Light Direction
-    # Assuming directional light for simplicity as per S1 description of 'light_dir'
-    # If point light, l = normalize(light.c - p)
-    l = normalize(light.c) # light.c is direction for directional light
-    
-    # 4. Shadow Factor
-    # Simple hard shadow for implementation clarity
-    shadow_ray_origin = p + n * 1e-4 # Offset to avoid self-intersection
-    shadow_t = 0.0
-    shadow_hit = False
-    for i in range(max_steps):
-        dist = sdf_func(shadow_ray_origin + l * shadow_t)
-        if dist < 1e-4:
-            shadow_hit = True
-            break
-        if shadow_t > 100.0: # Arbitrary max shadow distance
-            break
-        shadow_t += dist
-        shadow_ray_origin += l * dist # This is incorrect for shadow ray, should be fixed direction
-    
-    # Correct shadow ray march
-    shadow_pos = p + n * 1e-4
-    shadow_t = 0.0
-    shadow_hit = False
-    for i in range(max_steps):
-        dist = sdf_func(shadow_pos)
-        if dist < 1e-4:
-            shadow_hit = True
-            break
-        if shadow_t > 100.0:
-            break
-        shadow_t += dist
-        shadow_pos += l * dist
-        
-    sh = 0.0 if shadow_hit else 1.0
-    
-    # 5. Phong Reflection Model
-    # View direction (from surface to camera)
-    v = normalize(-ray_direction)
-    
-    # Diffuse
-    ndotl = max(dot(n, l), 0.0)
-    C_diff = material.kd * light.intensiv * ndotl
-    
-    # Specular
-    r = reflect(-v, n)
-    rdotl = max(dot(r, l), 0.0)
-    C_spec = material.ks * (rdotl ** material.kp)
-    
-    # 6. Final Color
-    C = (material.ka + C_diff + C_spec) * sh
-    
-    return C
+```cpp
+struct material {
+    vec3 ka; // Ambient color/intensity
+    float kd; // Diffuse coefficient
+    float ks; // Specular coefficient
+    float kp; // Shininess exponent
+};
 ```
+Light sources are defined as:
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct light {
+    vec3 c; // Light color
+    float intensiv; // Light intensity
+};
+```
+[S2, unofficial]
+
+**Steps:**
+1. **Ray Marching:** Trace the ray from the camera to find the intersection point $p$ with the SDF surface. If no intersection is found within the max steps or distance, return background color.
+2. **Surface Normal Recovery:** Compute the surface normal $n$ at point $p$ by evaluating the gradient of the SDF and normalizing it [S1, unofficial]:
+   $$ n = \frac{\nabla S(p)}{\|\nabla S(p)\|} $$
+   The gradient $\nabla S(p)$ is approximated using finite differences:
+   $$ \nabla S(p) \approx \left( S(p + \epsilon \hat{x}) - S(p - \epsilon \hat{x}), S(p + \epsilon \hat{y}) - S(p - \epsilon \hat{y}), S(p + \epsilon \hat{z}) - S(p - \epsilon \hat{z}) \right) $$
+   where $\epsilon$ is a small value (e.g., $10^{-4}$) [G].
+3. **Light Direction Calculation:** Determine the light direction vector $l$. For a directional light, $l$ is the normalized direction from the surface to the light source. For a point light at position $L_{pos}$:
+   $$ l = \text{normalize}(L_{pos} - p) $$
+   [S2, unofficial]
+4. **Shadow Factor Calculation:** Compute the shadow factor $sh$ by casting a shadow ray from $p$ towards the light source.
+   - **Hard Shadows:** If the SDF value along the shadow ray is less than a small epsilon (indicating intersection with an object), $sh = 0$. Otherwise, $sh = 1$.
+   - **Soft Shadows:** Use a penumbra calculation based on the distance to the nearest surface along the shadow ray and the light's size (if applicable) [S2, unofficial].
+5. **Phong Reflection Model:** Calculate the diffuse and specular components [S2, unofficial]:
+   - **Diffuse:**
+     $$ C_{diff} = k_d I \max(n \cdot l, 0) $$
+   - **Specular:**
+     First, compute the reflection vector $r$:
+     $$ r = \text{reflect}(-v, n) $$
+     where $v$ is the view direction (from surface to camera, i.e., $-r_{ray}$).
+     Then, calculate the specular intensity:
+     $$ C_{spec} = k_s I \max(r \cdot l, 0)^{k_p} $$
+     Note: Some implementations use the half-way vector $h = \text{normalize}(l + v)$ instead of $r$, calculating $\max(h \cdot n, 0)^{k_p}$ (Blinn-Phong). The source notes specify $r = \text{reflect}(-v, n)$, implying standard Phong [S2, unofficial].
+6. **Final Color:** Combine ambient, diffuse, and specular components, modulated by the shadow factor:
+   $$ C = (k_a + C_{diff} + C_{spec}) \times sh $$
+   [S2, unofficial]
 
 **Parameters:**
-*   $k_s$: Specular constant. Not given in the sources.
-*   $k_d$: Diffuse constant. Not given in the sources.
-*   $k_a$: Ambient constant. Not given in the sources.
-*   $k_p$ (or $n$): Shininess constant. Higher values make the surface smoother and shinier [S1, unofficial]. Not given in the sources.
+- $k_a$: Ambient constant. [S1, unofficial]
+- $k_d$: Diffuse constant. [S1, unofficial]
+- $k_s$: Specular constant. [S1, unofficial]
+- $k_p$ (or $n$): Shininess constant. Higher values make the surface smoother and shinier (narrower specular highlight). [S1, unofficial]
 
 **Edge Cases and Pitfalls:**
-*   **Self-Intersection:** When casting shadow rays, the ray origin must be offset along the normal to avoid hitting the surface it originated from.
-*   **Gradient Approximation:** Finite difference approximation of the normal can be noisy if the SDF is not smooth or if $\epsilon$ is chosen poorly.
-*   **Shadow Artifacts:** Hard shadows can cause aliasing. Soft shadows require more complex sampling.
+- **Gradient Precision:** The finite difference approximation for the normal is sensitive to the step size $\epsilon$. Too large $\epsilon$ causes aliasing; too small causes numerical noise. [G]
+- **Shadow Acne:** Self-shadowing artifacts can occur if the shadow ray origin $p$ is not offset slightly along the normal $n$ (e.g., $p' = p + n \cdot \epsilon_{offset}$). [G]
+- **Degenerate Normals:** At sharp edges or non-smooth SDF combinations, the gradient may be zero or unstable. [G]
+
+## Subtopics
+
+### [Lighting Transfer Function](6468-lighting-transfer-function.md)
+The Lighting Transfer Function (LTF) is a 2D lookup table technique that integrates multiple illumination models into a single, constant-cost evaluation for volume rendering. It solves the problem of efficiently applying complex illustrative shading (such as contour enhancement, cartoon shading, or metal shading) by storing ambient, diffuse, specular, and opacity enhancement components indexed by the dot products of the normalized gradient with the light and half-way vectors. Unlike standard Phong shading which calculates lighting per sample, the LTF decouples the shading model from the ray marching loop, allowing different visual styles to be swapped without changing the rendering algorithm.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of pixels and $M$ is the number of ray march steps per pixel. Shadow casting adds another $M$ steps per lit pixel.
-*   **Memory Complexity:** $O(1)$ per pixel if the SDF is analytical. If the SDF is voxel-based, $O(V)$ where $V$ is the volume size.
-*   **Strengths:** Simple to implement, provides realistic specular highlights, easy to integrate with existing SDF renderers.
-*   **Limitations:** Phong model is physically inaccurate (specular lobe shape), hard shadows can be aliased, normal approximation can be noisy.
-*   **When to use:** Real-time rendering of smooth, shiny objects defined by SDFs.
-*   **When not to use:** Physically based rendering requiring accurate microfacet models, or when soft shadows are critical and performance is not a constraint (use path tracing).
+- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the number of ray marching steps per pixel. Shadow calculations add additional ray marches per light source.
+- **Memory Complexity:** $O(1)$ per pixel for shading calculations, assuming the SDF is evaluated on the fly. If the SDF is stored in a grid, memory is proportional to the grid size.
+- **Strengths:** Provides realistic specular highlights and shadows, enhancing the perception of depth and material properties. Simple to implement.
+- **Limitations:** Computationally expensive due to normal calculation (multiple SDF evaluations) and shadow ray marching. Not suitable for real-time rendering on low-end hardware without optimizations.
+- **When to Use:** When visual fidelity with specular highlights and shadows is required, and performance constraints allow for multiple SDF evaluations per pixel.
+- **When Not to Use:** For real-time applications with strict performance budgets, or when stylized shading (e.g., cel-shading) is preferred, in which case [Lighting Transfer Function](6468-lighting-transfer-function.md) might be more appropriate.
 
 ## Background
-The Phong shading model was introduced by Bui Tuong Phong in 1973. It is a widely used empirical shading model in computer graphics. The implementation described here is based on unofficial educational resources [S1, S2, unofficial].
+The Phong shading model was introduced by Bui Tuong Phong in 1975 [G]. It is a widely used empirical model for rendering surfaces with specular highlights. The integration of Phong shading with SDF ray marching allows for the visualization of implicit surfaces with realistic lighting. The specific implementation details described here are derived from educational resources and unofficial repositories [S1, unofficial][S2, unofficial].
 
 ## Sources
 [S1] omkarchittar/Neural_Surfaces, https://github.com/omkarchittar/Neural_Surfaces, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,292 @@
+--- v005.md
++++ v006.md
+@@ -8,138 +8,125 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A rectilinear volume dataset of dimensions $n_x \times n_y \times n_z$ with spacing $\Delta x, \Delta y, \Delta z$. A viewing direction defined by a rotation matrix $R$.
+-*   **Output:** A 2D image where each pixel contains the accumulated color and opacity of the volume along the viewing ray.
++*   **Input:** A rectilinear volume dataset $V$ with logical dimensions $(n_x, n_y, n_z)$, spacing $(\Delta x, \Delta y, \Delta z)$, and origin offset. A viewing direction defined by a rotation matrix $R$ and projection type (parallel or perspective).
++*   **Output:** A 2D image composed of blended polygonal slices.
+ 
+ **Data Structures:**
+-1.  **3D Texture Object:** A single 3D texture object in GPU memory.
+-    *   **Dimensions:** $(N_x, N_y, N_z)$, where $N_i$ is the smallest power of two such that $N_i \ge n_i$ [S3, S17, unofficial].
+-    *   **Internal Format:** Matches the input data type (e.g., `GL_R16UI` for unsigned short) [S5, unofficial].
+-    *   **Filtering:** `GL_LINEAR` for minification and magnification to enable tri-linear interpolation [S2, S5, unofficial].
+-2.  **Proxy Geometry:** A set of 2D polygons (quads) representing slices through the volume.
+-    *   **Vertices:** Each vertex has 3D spatial coordinates $(x, y, z)$ and associated 3D texture coordinates $(s, t, r)$ [S12, S18].
+-    *   **Layout:** The polygons are arranged in a stack parallel to the image plane (viewport-aligned) [S13, unofficial][S15].
++1.  **3D Texture Object:** A single texture resource (e.g., `GL_TEXTURE_3D`) with dimensions $(N_x, N_y, N_z)$, where $N_i$ is the smallest power of two such that $N_i \ge n_i$ [S3, S17, unofficial]. The texture stores pre-classified optical properties (color and opacity) or raw scalar data [S1, unofficial][S18].
++2.  **Proxy Geometry:** A set of 2D polygons (quads) representing slices through the volume. Each polygon has vertices with 3D texture coordinates $(s, t, r)$ [S12, S18].
+ 
+-**Numbered Steps:**
++**Coordinate Mapping:**
++The mapping from world coordinates $(x, y, z)$ to texture coordinates $(s, t, r)$ involves scaling and translation. Let $L_x = N_x \Delta x$, $L_y = N_y \Delta y$, $L_z = N_z \Delta z$ be the physical dimensions of the padded texture space [S3, unofficial]. The base mapping for a volume centered at the origin is:
++$$
++s(x) = \frac{x + \frac{1}{2}n_x \Delta x}{N_x \Delta x}, \quad t(y) = \frac{y + \frac{1}{2}n_y \Delta y}{N_y \Delta y}, \quad r(z) = \frac{z + \frac{1}{2}n_z \Delta z}{N_z \Delta z}
++$$
++[S3, unofficial]. This maps the volume corners to the appropriate texture regions. For arbitrary viewing angles, the texture matrix applies the inverse rotation $R^{-1}$ and uniform scaling $D^{-1}$ (where $D$ scales by the bounding cube diagonal $d = \sqrt{L_x^2 + L_y^2 + L_z^2}$) [S3, unofficial]. The correct order of operations is rotation followed by non-uniform scaling to avoid shearing distortion [S3, unofficial].
+ 
+-1.  **Pre-classification (Optional but Recommended):**
+-    Apply the transfer function to the raw volume data on the CPU to compute color $(C)$ and opacity $(A)$ for each voxel. Store these values in the 3D texture. If post-classification is used, store raw data and perform lookup in the fragment shader [S1, unofficial][S18].
++**Algorithm Steps:**
++1.  **Initialization:**
++    *   Allocate a 3D texture with power-of-two dimensions $(N_x, N_y, N_z)$ [S17, unofficial].
++    *   Upload the volume data (pre-classified into color/opacity or raw scalars) into the texture [S1, unofficial][S11].
++    *   Set texture parameters: `GL_TEXTURE_MIN_FILTER` and `GL_TEXTURE_MAG_FILTER` to `GL_LINEAR` for tri-linear interpolation [S2, S5, unofficial]. Set wrap modes to `GL_CLAMP_TO_EDGE` [S5, unofficial].
++    *   If using dependent texture reads for classification, set up the transfer function lookup texture [S19, book].
+ 
+-2.  **Texture Upload:**
+-    Upload the volume data to the GPU as a 3D texture object.
+-    *   Set wrap modes to `GL_CLAMP_TO_EDGE` to prevent sampling errors at boundaries [S5, unofficial].
+-    *   Set min/mag filters to `GL_LINEAR` [S2, S5, unofficial].
+-    *   Note: The `depth` parameter in `glTexImage3D` corresponds to the first dimension of the array; passing the wrong dimension causes index confusion [S5, unofficial].
++2.  **View Update (Per Frame):**
++    *   Determine the current viewing direction and projection matrix [S7].
++    *   Compute the proxy geometry: Generate a series of polygons (slices) perpendicular to the viewing direction. The number of slices $N_{slices}$ is typically chosen as $d/\Delta z$ (for parallel projection) or adjusted for perspective [S3, unofficial][S8].
++    *   Calculate the 3D texture coordinates for each vertex of the proxy polygons. This involves applying the texture transformation matrix (rotation $R^{-1}$, scaling $D^{-1}$, translation $T$) to the world-space vertices [S3, S14, unofficial].
++    *   Sort the polygons back-to-front relative to the camera [S6, unofficial].
+ 
+-3.  **Bounding Cube Definition:**
+-    Define a bounding cube centered at the origin with side length $d = \sqrt{L_x^2 + L_y^2 + L_z^2}$, where $L_i = N_i \Delta i$ [S3, unofficial]. This cube must contain the entire volume during any rotation [S17, unofficial].
+-
+-4.  **View-Dependent Slice Generation:**
+-    Compute a series of polygons that cut through the volume perpendicular to the current viewing direction [S7, S8, S9, S10].
+-    *   The number of slices $N_{slices}$ is typically chosen as $d / \Delta z$ (for uniform spacing) or adjusted to match the texel dimensions [S3, unofficial][S7, S8].
+-    *   For each slice, determine the intersection with the bounding cube to form a polygon (typically a quad or clipped polygon) [S2, S14, unofficial].
+-    *   Compute the 3D texture coordinates $(s, t, r)$ for each vertex of the polygon.
+-
+-5.  **Texture Coordinate Transformation:**
+-    Map world coordinates $(x, y, z)$ to texture coordinates $(s, t, r)$ using a transformation matrix. For a volume in its original orientation, the mapping is:
+-    $$
+-    s(x) = \frac{x + \frac{1}{2}n_x \Delta x}{N_x \Delta x}, \quad t(y) = \frac{y + \frac{1}{2}n_y \Delta y}{N_y \Delta y}, \quad r(z) = \frac{z + \frac{1}{2}n_z \Delta z}{N_z \Delta z}
+-    $$
+-    [S3, unofficial].
+-    
+-    For an arbitrary viewing angle defined by rotation matrix $R$, the transformation is:
+-    $$
+-    (s, t, r) = (x, y, z) R^{-1} D^{-1} S T
+-    $$
+-    where $D$ is uniform scaling by $d$, $S$ is non-uniform scaling by $(d/L_x, d/L_y, d/L_z)$, and $T$ is translation by $(\frac{n_x}{2N_x}, \frac{n_y}{2N_y}, \frac{n_z}{2N_z})$ [S3, unofficial].
+-    
+-    *Critical:* If the volume has non-uniform spacing ($\Delta x \neq \Delta y \neq \Delta z$), the scaling matrix $S$ does not commute with rotation. The correct order of operations is **rotation first, then scaling** to avoid shearing distortion [S3, unofficial].
+-
+-6.  **Clipping:**
+-    Use six programmable world-space clipping planes positioned at the faces of the volume bounding box to clip out parts of the rendered squares that lie outside the volume [S3, unofficial]. This avoids rendering empty space and artifacts from clipped edges [S3, S4, unofficial].
+-
+-7.  **Rasterization and Blending:**
+-    *   Disable lighting and depth buffer writing (enable depth testing only if compositing over opaque geometry) [S18].
+-    *   Enable alpha blending with equation: $Src = 1$, $Dst = 1 - SrcAlpha$ [S18].
+-    *   Render the proxy polygons from **back to front** relative to the viewer [S1, S6, S13, unofficial].
+-    *   The graphics hardware performs tri-linear interpolation of the $(s, t, r)$ coordinates across the polygon [S12].
+-    *   The interpolated coordinates are used as dependent texture lookups into the 3D texture to fetch color and opacity [S6, unofficial][S18].
+-    *   If pre-classified, the fetched values are blended. If post-classified, the fragment shader applies the transfer function to the fetched scalar value and then blends [S18].
++3.  **Rendering:**
++    *   Disable lighting and depth buffer writing (if compositing over opaque geometry) [S18].
++    *   Enable alpha blending with equation: $C_{out} = C_{src} + C_{dst}(1 - A_{src})$ [S18].
++    *   For each polygon in back-to-front order:
++        *   Bind the 3D volume texture.
++        *   Rasterize the polygon. The GPU interpolates the $(s, t, r)$ texture coordinates across the polygon surface [S12].
++        *   **Fragment Shader / Hardware Sampling:**
++            *   Perform a dependent texture lookup: Use the interpolated $(s, t, r)$ to sample the 3D volume texture [S12][S19, book].
++            *   If pre-classified: Retrieve color $C_i$ and opacity $A_i$ directly [S18].
++            *   If raw data: Use the sampled scalar value as an index into a 1D or 3D transfer function texture to retrieve $C_i$ and $A_i$ [S19, book].
++            *   Apply the emission-absorption model: $C_{final} = \sum_{i} C_i \cdot A_i \cdot \prod_{j=1}^{i-1} (1 - A_j)$ [S18]. Note: In the proxy geometry method, this integration is often approximated by the hardware alpha blending of the slices [S6, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ def render_3d_texture_proxy(volume_data, view_matrix, num_slices):
+-    # 1. Setup 3D Texture
+-    # Determine power-of-two dimensions
+-    Nx = next_power_of_two(volume_data.dim_x)
+-    Ny = next_power_of_two(volume_data.dim_y)
+-    Nz = next_power_of_two(volume_data.dim_z)
+-    
+-    # Calculate bounding cube diagonal
+-    Lx = Nx * volume_data.spacing_x
+-    Ly = Ny * volume_data.spacing_y
+-    Lz = Nz * volume_data.spacing_z
+-    d = sqrt(Lx**2 + Ly**2 + Lz**2)
+-    
+-    # Create and upload texture
+-    tex_id = create_3d_texture(Nx, Ny, Nz, volume_data.data)
+-    set_texture_filter(tex_id, GL_LINEAR, GL_LINEAR)
++    # 1. Setup 3D Texture (One-time or when data changes)
++    tex_id = create_3d_texture(volume_data.dimensions)
++    upload_volume_data(tex_id, volume_data)
++    set_texture_filter(tex_id, GL_LINEAR)
+     set_texture_wrap(tex_id, GL_CLAMP_TO_EDGE)
+     
+-    # 2. Compute Proxy Geometry
+-    # Inverse rotation matrix for texture coordinate transformation
+-    R_inv = invert(view_matrix.rotation_part)
++    # 2. Compute Proxy Geometry (Per Frame)
++    # Determine slice positions perpendicular to view direction
++    slices = compute_view_aligned_slices(volume_data.bounding_box, view_matrix, num_slices)
+     
+-    # Scaling and Translation matrices for texture coordinates
+-    # S scales by d/Li, T translates by ni/(2Ni)
+-    S = scale_matrix(d/Lx, d/Ly, d/Lz)
+-    T = translate_matrix(volume_data.dim_x/(2*Nx), 
+-                       volume_data.dim_y/(2*Ny), 
+-                       volume_data.dim_z/(2*Nz))
++    # Sort slices back-to-front
++    slices.sort_by_depth(view_matrix)
+     
+-    # Combined transformation matrix for texture coords: R_inv * D^-1 * S * T
+-    # Note: D is uniform scale by d, which commutes with R, so D^-1 can be merged into S/T or handled separately.
+-    # The core mapping is: (s,t,r) = (x,y,z) * R_inv * D^-1 * S * T
+-    texture_transform = R_inv @ invert(scale_matrix(d, d, d)) @ S @ T
+-    
+-    # Generate slice polygons
+-    slices = []
+-    for i in range(num_slices):
+-        # Determine slice plane position in view space
+-        # Assuming slices are evenly spaced through the bounding cube depth
+-        z_slice = -d/2 + (i + 0.5) * (d / num_slices)
+-        
+-        # Compute intersection of plane with bounding cube to get polygon vertices
+-        # This is typically done by clipping a large quad against the 6 volume faces
+-        polygon_vertices = compute_slice_polygon(z_slice, view_matrix, d)
+-        
+-        # Compute texture coordinates for each vertex
+-        for v in polygon_vertices:
+-            # v is (x, y, z) in world space
+-            # Apply transformation to get (s, t, r)
+-            # Note: In OpenGL, texture coordinates are often set via glTexGen or vertex attributes
+-            # Here we compute them explicitly for clarity
+-            v.s, v.t, v.r = apply_texture_transform(v.x, v.y, v.z, texture_transform)
+-        
+-        slices.append(polygon_vertices)
+-    
+-    # 3. Render
+-    enable_alpha_blending(src=1, dst=1-src_alpha)
++    # 3. Render Loop
++    enable_alpha_blending(src=GL_ONE, dst=GL_ONE_MINUS_SRC_ALPHA)
++    disable_depth_write()
+     disable_lighting()
+-    disable_depth_write()
+-    enable_depth_test() # Optional, if compositing over background
+-    
+     bind_texture(tex_id, unit=0)
+     
+-    # Set up clipping planes to clip against volume bounds
+-    setup_clipping_planes(volume_bounds)
++    for slice in slices:
++        # Apply texture matrix to transform slice vertices to texture space
++        # The texture matrix handles rotation R^-1, scaling D^-1, and translation T
++        apply_texture_matrix(view_matrix.inverse())
++        
++        # Rasterize the slice polygon
++        # Hardware interpolates (s,t,r) across the quad
++        draw_polygon(slice.vertices)
++        
++    disable_alpha_blending()
++    enable_depth_write()
++    enable_lighting()
++
++def compute_view_aligned_slices(bbox, view_matrix, num_slices):
++    # Calculate the diagonal length of the bounding box
++    d = sqrt(bbox.width**2 + bbox.height**2 + bbox.depth**2)
+     
+-    # Draw slices back-to-front
+-    for polygon in slices:
+-        draw_polygon(polygon)
++    # Determine slice spacing
++    # For parallel projection, spacing is often related to voxel depth
++    slice_spacing = d / num_slices
++    
++    slices = []
++    # Generate planes perpendicular to view direction
++    # Intersect planes with bbox to form quads
++    for i in range(num_slices):
++        plane_offset = i * slice_spacing
++        plane_normal = view_matrix.get_view_direction()
++        plane_origin = plane_offset * plane_normal
+         
+-    disable_clipping_planes()
+-    restore_render_state()
++        # Compute intersection of plane with bbox to get polygon vertices
++        vertices = intersect_plane_with_bbox(plane_origin, plane_normal, bbox)
++        
++        # Calculate texture coordinates for vertices
++        # Apply the inverse transformation to map world coords to texture coords
++        tex_coords = []
++        for v in vertices:
++            # s, t, r mapping as defined in S3
++            s = (v.x + 0.5 * volume_data.nx * dx) / (Nx * dx)
++            t = (v.y + 0.5 * volume_data.ny * dy) / (Ny * dy)
++            r = (v.z + 0.5 * volume_data.nz * dz) / (Nz * dz)
++            
++            # Apply rotation and scaling from view matrix
++            # (s,t,r) = (x,y,z) * R^-1 * D^-1 * S * T
++            tex_coords.append(transform_texture_coords(v, view_matrix))
++            
++        slices.append(Polygon(vertices, tex_coords))
++        
++    return slices
+ ```
++
++**Parameters:**
++*   **Number of Slices:** Default is $d/\Delta z$ for parallel projection, ensuring one sample per voxel depth [S3, unofficial]. Can be increased (2-4x) for higher accuracy [S3, unofficial].
++*   **Texture Resolution:** $(N_x, N_y, N_z)$ are powers of two $\ge (n_x, n_y, n_z)$ [S3, unofficial].
++*   **Interpolation:** Tri-linear (`GL_LINEAR`) is standard; nearest-neighbor is possible but lower quality [S1, unofficial][S12].
++
++**Edge Cases and Pitfalls:**
++*   **Perspective Sampling:** In perspective projection, the sampling rate varies with the angle between the slice polygon and the viewing ray, causing visual artifacts in fly-throughs [S4, S14, unofficial].
++*   **Shearing:** If volume spacing is non-uniform, the non-uniform scaling matrix $S$ does not commute with rotation $R$. The texture matrix must apply rotation before scaling to avoid distortion [S3, unofficial].
++*   **Memory Limits:** Large volumes may exceed texture memory, requiring partitioning into subvolumes (bricking) which incurs swapping overhead [S1, unofficial][S12].
++*   **Data Type Mismatch:** Using `sampler3D` for `unsigned short` data results in zero values; use `usampler3D` [S5, unofficial].
+ 
+ ## Subtopics
+@@ -160,24 +147,32 @@
+ Sm2D is a 2-dimensional test application implemented as a 2D ray tracer to investigate the applicability of a texture-based approach for smoke volumes. It simplifies the 3D volume rendering problem into a 1D viewport function where tetrahedra are represented by triangles. It sets itself apart from its siblings by serving as a diagnostic tool to demonstrate the precision limits and rotational artifacts inherent in texture-based approximations compared to explicit geometric calculations.
+ 
++### Dependent Texture Reads for Classification
++Dependent Texture Reads for Classification is a hardware extension (OpenGL) that uses color fragments to generate texture coordinates, replacing the color fragments with entries from a texture. It acts as an arbitrary function evaluation with up to three variables via a lookup table [S19, book]. The method involves storing data values in color components of a 3D texture, interpolating these values across proxy geometry, converting interpolated values to texture coordinates, and using these coordinates to acquire color and alpha values from a transfer-function texture per-pixel in screen space [S19, book].
++
+ ## Operating characteristics
+-*   **Time Complexity:** Image-order rendering. Computational cost scales with the number of pixels in the output image and the number of slices, independent of the number of geometric primitives in the scene [S14, unofficial].
+-*   **Memory Complexity:** Requires a single 3D texture of size $N_x \times N_y \times N_z$ in GPU memory. For large volumes, this may exceed texture memory capacity, requiring partitioning into subvolumes (bricks) swapped in and out, which incurs significant overhead [S1, unofficial][S12].
+-*   **Measured Performance:** Historically provided tremendous speedup due to high rasterization performance, treating all viewing rays simultaneously [S6, unofficial]. On SGI InfiniteReality2, max texture size was $128^3$ voxels [S12]. Modern hardware natively supports 3D textures, but performance is specific to hardware capabilities [S6, unofficial].
+-*   **Strengths:**
+-    *   Supports arbitrary viewing angles and perspective views without the time penalty of shear-warp [S3, S4, unofficial].
+-    *   Eliminates 'popping' artifacts associated with switching texture sets in 2D methods [S17, unofficial].
+-    *   Hardware-accelerated tri-linear interpolation provides smooth sampling [S3, unofficial].
+-    *   Requires only one copy of the data in memory, unlike 2D-texture methods which require three [S4, unofficial][S18].
+-*   **Limitations:**
+-    *   Cannot skip unseen voxels; all voxels are rendered [S1, unofficial].
+-    *   Perspective projection causes irregular sampling rates along rays, leading to visual artifacts in fly-through applications [S4, S14, unofficial].
+-    *   Limited by texture memory size; large volumes require inefficient bricking strategies [S3, unofficial][S12].
+-    *   Image quality is generally lower than ray casting due to aliasing and limited optical modeling capabilities [S14, unofficial].
+-    *   Standard implementations perform unnecessary operations on non-contributing fragments [S14, unofficial].
+-*   **When to Use:** Real-time interactive rendering of reasonably sized volumes on hardware with 3D texture support, especially when directional lighting is required and the volume fits in GPU memory [S14, unofficial][S15].
+-*   **When Not to Use:** Very large volumes that exceed texture memory, applications requiring high-fidelity optical models (e.g., refraction), or fly-throughs with large field-of-view angles where sampling artifacts are unacceptable [S4, S14, unofficial].
++**Time and Memory Complexity:**
++*   **Time:** The computational cost scales with the number of pixels in the output image (image-order rendering), independent of the number of geometric primitives in the scene [S14, unofficial]. The cost is dominated by rasterization and texture fetches.
++*   **Memory:** Requires a single 3D texture of size $N_x \times N_y \times N_z$ [S5, unofficial]. For large volumes, this may exceed GPU memory, requiring out-of-core techniques or bricking [S1, unofficial][S12].
++
++**Measured Performance:**
++*   Historically provided tremendous speedup due to high rasterization performance [S6, unofficial].
++*   Optimization techniques like occlusion clipping in fragment programs can yield an average 2.8x speedup [S2, unofficial].
++*   Performance is highly dependent on hardware support for 3D textures and tri-linear interpolation [S6, S14, unofficial].
++
++**Strengths and Limitations:**
++*   **Strengths:** Supports arbitrary viewing angles without fixed slice counts; avoids the "popping" artifact of 2D texture methods; leverages hardware acceleration for real-time rendering [S17, S14, unofficial].
++*   **Limitations:** Cannot skip unseen voxels (unlike ray casting); perspective projection causes variable sampling rates and artifacts; limited by texture memory size; lower image quality than ray casting due to aliasing and limited optical modeling [S1, S14, S4, unofficial].
++
++**When to Use:**
++*   Real-time interactive rendering of reasonably sized volumes on hardware with 3D texture support [S14, unofficial][S15].
++*   Scenarios requiring arbitrary viewing angles and directional lighting [S3, unofficial].
++
++**When Not to Use:**
++*   Very large volumes that exceed texture memory without efficient bricking strategies [S1, unofficial].
++*   Applications requiring precise optical modeling (e.g., refraction) or accurate skipping of transparent regions [S14, S1, unofficial].
++*   Fly-through applications with large field-of-view angles where perspective sampling artifacts are unacceptable [S4, unofficial].
+ 
+ ## Background
+-3D Texture Proxy Geometry was popularized by Cabral et al. in 1994 for nonshaded volume rendering [S1, unofficial][S15]. It was examined by Cabral et al. on the SGI RealityEngine, the first hardware to implement 3D texture mapping [S2, unofficial]. The method was further optimized by Rezk-Salama et al. using vertex shaders to offload slice computation [S2, unofficial]. 3D textures were available in OpenGL as an extension (EXT texture 3D) for a long time before being included in OpenGL 1.2 [S4, unofficial]. The first consumer product with support was the ATI Radeon in spring 2000, followed by NVIDIA GeForce 3 [S4, unofficial]. Historically used by Silicon Graphics in their InfiniteReality workstations, it is now a standard technique on modern graphics hardware [S14, unofficial][S15].
++3D Texture Proxy Geometry was popularized by Cabral et al. in 1994 for nonshaded volume rendering [S1, unofficial][S15]. It was examined on the SGI RealityEngine, the first hardware to implement 3D texture mapping [S2, S14, unofficial]. The method became mainstream with the introduction of affordable GPUs supporting 3D textures, such as the ATI Radeon (2000) and NVIDIA GeForce 3 [S4, S14, unofficial]. It was included in OpenGL 1.2 [S4, S17, unofficial]. Modern implementations often use vertex shaders to compute proxy geometry and fragment shaders for transfer function lookups [S2, unofficial][S18].
+ 
+ ## Sources

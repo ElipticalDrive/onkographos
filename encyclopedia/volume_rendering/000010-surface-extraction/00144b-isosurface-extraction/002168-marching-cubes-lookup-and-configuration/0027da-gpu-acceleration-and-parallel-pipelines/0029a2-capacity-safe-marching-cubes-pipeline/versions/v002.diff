@@ -1,0 +1,202 @@
+--- v001.md
++++ v002.md
+@@ -4,30 +4,26 @@
+ 
+ ## Overview
+-The Capacity-Safe Marching Cubes Pipeline is a GPU-based isosurface extraction method that prevents buffer overflow by determining the exact vertex count before geometry generation [S1]. Unlike fixed-capacity baselines that reserve static buffers and fail at high resolutions (e.g., $512^3$) due to insufficient space, this method uses a two-pass strategy to allocate exact buffers, ensuring stability and preventing overwritten or missing vertex data [S1]. It builds on [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md) by replacing atomic counters or histogram pyramids with a precise pre-calculation of output size.
++The Capacity-Safe Marching Cubes Pipeline is a GPU-accelerated isosurface extraction method that prevents buffer overflow by determining the exact vertex count before geometry generation [S1]. Unlike fixed-capacity baselines that reserve static buffers and risk failure at high resolutions, this method uses a two-pass approach: first computing counts and offsets, then allocating exact buffers and generating triangles [S1]. It sets itself apart from its siblings by guaranteeing stability without excessive static reservation or the overhead of dynamic atomic counters [S1].
+ 
+ ## How it works
+ The extraction process consists of four sequential stages: cell classification, prefix-sum computation, exact VBO (Vertex Buffer Object) allocation, and triangle generation [S1].
+ 
+-**Inputs and Outputs**
+-*   **Input**: A 3D scalar grid of dimensions $D_x \times D_y \times D_z$. The scalar values are normalized to the range $[0, 1]$ using the minimum and maximum values of the dataset [S1].
+-*   **Output**: A vertex buffer containing positions and normals, and an index buffer defining the triangles. The size of these buffers is determined dynamically by the method.
++**Inputs and Outputs:**
++*   **Input:** A 3D scalar grid of dimensions $D_x \times D_y \times D_z$. The scalar values are normalized to the range $[0, 1]$ using the minimum and maximum values of the dataset [S1].
++*   **Output:** A vertex buffer containing positions and normals for the extracted isosurface [S1].
+ 
+-**Data Structures**
+-*   **Scalar Volume**: A 3D texture or buffer storing normalized scalar values.
+-*   **Count Buffer**: A 1D buffer storing the number of vertices generated per thread block or work group.
+-*   **Offset Buffer**: A 1D buffer storing the cumulative starting index for each block, computed via prefix sum (scan) [S1].
+-*   **Vertex Buffer**: A dynamically allocated buffer sized exactly to the total vertex count.
+-*   **Index Buffer**: A dynamically allocated buffer sized exactly to the total index count.
++**Data Structures:**
++1.  **Input Scalar Volume:** A 3D array of normalized scalar values [S1].
++2.  **Count and Offset Buffers:** Intermediate buffers used to store the number of vertices generated per voxel and the cumulative offsets for compacting the output [S1].
++3.  **Output VBO:** A dynamically allocated buffer sized exactly to the total vertex count [S1].
+ 
+-**Parameters**
+-*   **Isovalue ($\tau$)**: Specified in the normalized scalar range $[0, 1]$. Typical tested values are 0.35, 0.50, and 0.65 [S1].
+-*   **Grid Resolution**: Tested at $128^3$, $256^3$, and $512^3$ [S1].
++**Parameters:**
++*   **Isovalue ($\tau$):** Specified in the normalized scalar range $[0, 1]$. Typical tested values are $0.35$, $0.50$, and $0.65$ [S1].
+ 
+-**Steps**
+-1.  **Cell Classification**: Each GPU thread processes one voxel cube. It reads the 8 scalar values at the cube's vertices and classifies the cube based on the sign of the values relative to the isovalue $\tau$. This generates an 8-bit configuration index (0-255) [S1, 1211-primal-grid-marching-cubes].
+-2.  **Vertex Count Computation**: For each classified cube, the thread determines the number of vertices generated (0 to 8) based on the configuration index. These counts are stored in a temporary count buffer.
+-3.  **Prefix-Sum Computation**: A parallel prefix-sum (scan) operation is performed on the count buffer to compute the starting offset for each thread block in the final vertex buffer [S1]. This ensures that threads write to non-overlapping regions.
+-4.  **Exact Buffer Allocation**: The total vertex count is obtained from the last element of the prefix-sum buffer. The vertex and index buffers are allocated with this exact size [S1].
+-5.  **Triangle Generation**: Threads re-process the voxel cubes. Using the pre-computed offsets, each thread writes the generated vertices and indices to the exact positions in the allocated buffers. Vertex positions are calculated via linear interpolation:
++**Steps:**
++1.  **Cell Classification:** Each voxel cube is classified based on the sign of the scalar values at its 8 vertices relative to the isovalue $\tau$. This generates an 8-bit configuration index (0-255) [S1, 1211-primal-grid-marching-cubes].
++2.  **Prefix-Sum Computation:** An exclusive prefix sum (scan) is performed on the counts of vertices generated by each voxel. This determines the exact starting offset for each voxel's output in the final buffer [S1].
++3.  **Exact VBO Allocation:** The total vertex count is derived from the prefix sum. A Vertex Buffer Object (VBO) is allocated with this exact size, eliminating the need for fixed-capacity buffers or atomic counters [S1].
++4.  **Triangle Generation:** Using the configuration index and the offsets from the prefix sum, vertices are interpolated and written to the VBO. The position is calculated via linear interpolation:
+     $$
+     \text{param} = \frac{\tau - v_1}{v_2 - v_1}
+@@ -38,81 +34,87 @@
+     where $v_1$ and $v_2$ are the scalar values at the edge endpoints [S1, 1211-primal-grid-marching-cubes]. Normals are computed similarly using interpolated gradients [S1, 1211-primal-grid-marching-cubes].
+ 
+-**Pseudocode**
++**Pseudocode:**
+ ```python
+-# Kernel 1: Count Generation
+-def count_generation_kernel(scalar_grid, isovalue, count_buffer):
+-    # Each thread handles one voxel
+-    voxel = get_voxel(thread_id)
+-    config = classify_cube(voxel.vertices, isovalue)
+-    num_vertices = get_vertex_count(config)
+-    count_buffer[thread_id] = num_vertices
++def capacity_safe_marching_cubes(scalar_grid, isovalue_tau, grid_dims):
++    # Step 1: Cell Classification
++    # Classify each voxel based on isovalue_tau
++    # Returns an array of 8-bit configuration indices
++    config_indices = classify_voxels(scalar_grid, isovalue_tau)
++    
++    # Step 2: Prefix-Sum Computation
++    # Count vertices per voxel based on config_indices
++    # Standard Marching Cubes lookup table defines vertex count per config
++    vertex_counts = count_vertices_per_voxel(config_indices)
++    
++    # Compute exclusive prefix sum to get offsets
++    # This determines the exact starting position in the output buffer for each voxel
++    offsets = exclusive_prefix_sum(vertex_counts)
++    
++    # Calculate total vertex count from the last offset
++    total_vertices = offsets[-1] + vertex_counts[-1]
++    
++    # Step 3: Exact VBO Allocation
++    # Allocate buffer of exact size
++    output_buffer = allocate_buffer(total_vertices)
++    
++    # Step 4: Triangle Generation
++    # Launch parallel kernel to generate geometry
++    # Each thread block handles one or more voxels
++    generate_geometry_kernel(scalar_grid, config_indices, offsets, output_buffer, isovalue_tau)
++    
++    return output_buffer
+ 
+-# Kernel 2: Prefix Sum (Scan)
+-def prefix_sum_kernel(count_buffer, offset_buffer):
+-    # Parallel scan to compute cumulative offsets
+-    # offset_buffer[i] = sum(count_buffer[0...i-1])
+-    # This requires a standard parallel scan algorithm (e.g., Blelloch scan)
+-    # Not given in the sources, but implied by "prefix-sum computation" [S1]
+-    pass
+-
+-# Kernel 3: Triangle Generation
+-def triangle_generation_kernel(scalar_grid, isovalue, offset_buffer, vertex_buffer, index_buffer):
+-    voxel = get_voxel(thread_id)
+-    config = classify_cube(voxel.vertices, isovalue)
++def generate_geometry_kernel(scalar_grid, config_indices, offsets, output_buffer, isovalue_tau):
++    # For each voxel processed by this thread/block:
++    # 1. Determine the base offset for this voxel's output in output_buffer
++    base_offset = offsets[voxel_index]
+     
+-    # Get the starting offset for this thread's output
+-    base_offset = offset_buffer[thread_id]
++    # 2. Retrieve the configuration index
++    config = config_indices[voxel_index]
+     
+-    # Generate vertices and indices
+-    vertices = generate_vertices(voxel, isovalue, config)
+-    indices = generate_indices(config)
++    # 3. Look up the triangle edges for this configuration
++    # Returns a list of edge pairs
++    triangles = lookup_triangles(config)
+     
+-    # Write to exact positions
+-    for i, vert in enumerate(vertices):
+-        vertex_buffer[base_offset + i] = vert
+-    
+-    for i, idx in enumerate(indices):
+-        index_buffer[base_offset + i] = idx
+-
+-# Main Pipeline
+-def capacity_safe_marching_cubes(scalar_grid, isovalue):
+-    # Step 1: Count vertices per voxel
+-    count_buffer = allocate_buffer(size=num_voxels)
+-    launch(count_generation_kernel, scalar_grid, isovalue, count_buffer)
+-    
+-    # Step 2: Compute offsets
+-    offset_buffer = allocate_buffer(size=num_voxels)
+-    launch(prefix_sum_kernel, count_buffer, offset_buffer)
+-    
+-    # Step 3: Determine total size
+-    total_vertices = offset_buffer.last_element + count_buffer.last_element
+-    
+-    # Step 4: Allocate exact buffers
+-    vertex_buffer = allocate_buffer(size=total_vertices)
+-    index_buffer = allocate_buffer(size=total_vertices * 3) # Assuming max 3 indices per vertex group
+-    
+-    # Step 5: Generate geometry
+-    launch(triangle_generation_kernel, scalar_grid, isovalue, offset_buffer, vertex_buffer, index_buffer)
+-    
+-    return vertex_buffer, index_buffer
++    # 4. For each triangle, interpolate vertices and write to output_buffer
++    for triangle in triangles:
++        for edge in triangle:
++            v1_idx, v2_idx = edge
++            # Get scalar values at edge endpoints
++            v1 = scalar_grid[v1_idx]
++            v2 = scalar_grid[v2_idx]
++            
++            # Calculate interpolation parameter
++            param = (isovalue_tau - v1) / (v2 - v1)
++            
++            # Interpolate position
++            pos = lerp(get_vertex_position(v1_idx), get_vertex_position(v2_idx), param)
++            
++            # Interpolate normal (using gradients)
++            normal = lerp(get_gradient(v1_idx), get_gradient(v2_idx), param)
++            normal = normalize(normal)
++            
++            # Write to output_buffer at base_offset + current_vertex_index
++            write_vertex(output_buffer, pos, normal)
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-*   **Buffer Overflow**: Using a fixed-capacity single-pass output buffer causes failure at high resolutions (e.g., $512^3$) because the generated output exceeds available buffer capacity, resulting in overwritten or missing vertex data and incomplete geometry [S1].
+-*   **Precision**: Scalar values are normalized to $[0, 1]$ to handle varying data ranges [S1].
++## Subtopics
++
++### [GPU Marching Cubes with Scan-Based Compaction](6632-gpu-marching-cubes-with-scan-based-compaction.md)
++A GPU-accelerated Marching Cubes pipeline that classifies voxels, uses exclusive prefix sums to count active voxels and required vertices, compacts the voxel index array to remove empty voxels, and extracts the isosurface only for active voxels. It sets itself apart from naive parallel Marching Cubes by avoiding buffer overflow and dynamic memory allocation during geometry generation through a two-pass counting and compaction strategy, building on the [Capacity-Safe Marching Cubes Pipeline](4596-capacity-safe-marching-cubes-pipeline.md).
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: The method involves two passes over the voxel grid (counting and generation) plus a prefix-sum operation. The extraction time scales with the number of voxels and the geometric complexity.
+-*   **Memory Complexity**: Peak VRAM usage includes the input scalar volume, intermediate count and offset buffers, and the generated position and normal buffers [S1].
+-*   **Measured Performance**:
+-    *   At $512^3$ resolution with isovalue 0.35, the method generates 42.81 million vertices in 44.7 ms with 10.9 GB peak VRAM usage, rendering at 28.6 FPS [S1].
+-    *   At $128^3$ resolution with isovalue 0.35, the method generates 1.28 million vertices in 5.8 ms with 1.9 GB peak VRAM usage, rendering at 221.4 FPS [S1].
+-*   **Strengths**: Ensures stability at high resolutions by avoiding buffer overflow. No excessive static reservation is needed.
+-*   **Limitations**: Requires two passes over the data, increasing memory bandwidth usage. The prefix-sum operation adds computational overhead.
+-*   **When to use**: When extracting isosurfaces from high-resolution grids where the output size is unpredictable and buffer overflow is a concern.
+-*   **When not to use**: When memory bandwidth is extremely limited and the overhead of the prefix-sum is prohibitive, or when the output size is known to be small and fixed.
++*   **Time Complexity:** The method involves a classification pass, a prefix-sum pass, and a generation pass. The prefix-sum operation is $O(N)$ where $N$ is the number of voxels [S1].
++*   **Memory Complexity:** Peak VRAM usage includes the input scalar volume, intermediate count and offset buffers, and the generated position and normal buffers [S1].
++*   **Measured Performance:**
++    *   At $512^3$ resolution with isovalue $0.35$, the method generates 42.81 million vertices in 44.7 ms with 10.9 GB peak VRAM usage, rendering at 28.6 FPS [S1].
++    *   At $128^3$ resolution with isovalue $0.35$, the method generates 1.28 million vertices in 5.8 ms with 1.9 GB peak VRAM usage, rendering at 221.4 FPS [S1].
++*   **Strengths:** Prevents buffer overflow at high resolutions (e.g., $512^3$) by determining the exact vertex count before generation [S1]. Stable and does not require excessive static reservation [S1].
++*   **Limitations:** Requires two passes (counting and generation) and intermediate buffers for counts and offsets [S1].
++*   **When to use:** When extracting isosurfaces from high-resolution scalar fields where buffer overflow is a concern and exact memory allocation is preferred over atomic counters or fixed buffers [S1].
++*   **When not to use:** When memory bandwidth is extremely limited and the overhead of intermediate buffers is prohibitive, or when the output size is known to be small and fixed [S1].
+ 
+ ## Background
+-The method was proposed in the context of visualizing 3D plasma simulation data, specifically electromagnetic potential values from fusion plasma simulations [S1]. It was developed to address the limitations of fixed-capacity baselines that fail at high resolutions [S1]. The evaluation was performed on a workstation with an NVIDIA RTX 3090 GPU [S1].
++The method was proposed in a study on visual tools for 3D plasma simulation, specifically for extracting isosurfaces from fusion plasma datasets [S1]. It was developed to address the limitations of fixed-capacity baselines that fail at high resolutions due to buffer overflow [S1]. The evaluation was performed on a workstation with an NVIDIA RTX 3090 GPU [S1].
+ 
+ ## Sources

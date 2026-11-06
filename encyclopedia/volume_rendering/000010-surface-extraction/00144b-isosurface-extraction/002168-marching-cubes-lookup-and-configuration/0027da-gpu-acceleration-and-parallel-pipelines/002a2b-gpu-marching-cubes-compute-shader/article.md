@@ -3,165 +3,133 @@
 Also called: Marching Cubes GPU, Unity Marching Cubes Compute Shader
 
 ## Overview
-This method implements the Marching Cubes isosurface extraction algorithm using a GPU compute shader, specifically designed for integration within the Unity engine environment [S1, unofficial]. It solves the problem of real-time surface generation from a 3D scalar density field by offloading the voxel classification, topology lookup, and vertex interpolation to the GPU [S1, unofficial]. Unlike CPU-based implementations, it leverages parallel thread execution for grid processing and uses an append buffer with atomic counters to handle the variable number of output triangles, avoiding the need for pre-allocation of exact mesh sizes [S1, unofficial]. It differs from histogram-pyramid approaches by relying on atomic operations for buffer management, which simplifies the pipeline but may introduce contention under high triangle density [S1, unofficial].
+This method implements the Marching Cubes isosurface extraction algorithm entirely on the GPU using a compute shader, typically within a framework like Unity [S1, unofficial]. It solves the performance bottleneck of CPU-based volume rendering by offloading the classification, edge intersection calculation, and triangle generation to parallel shader cores [S1, unofficial]. Unlike its siblings, this specific implementation relies on a CPU-generated density field (Texture3D) and uses an append buffer for dynamic triangle emission, making it a straightforward but potentially bottlenecked approach for real-time applications where the density field generation is not also GPU-accelerated [S1, unofficial].
 
 ## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field (density texture) of resolution $N \times N \times N$, typically stored as a `Texture3D` with `RFloat` format [S1, unofficial].
+*   **Input:** An isovalue threshold $I$ (default 0.5) [S1, unofficial].
+*   **Output:** A stream of triangles (vertices with position and normal) stored in an append structured buffer [S1, unofficial].
 
-### Inputs and Outputs
-**Inputs:**
-*   **Density Texture:** A 3D texture (`Texture3D`) of resolution $R \times R \times R$ containing scalar density values. In the reference implementation, this is generated on the CPU, but the method supports binding a `RenderTexture` for GPU-generated fields [S1, unofficial].
-*   **Grid Size ($R$):** An integer defining the resolution of the volume grid.
-*   **Isolevel:** A float scalar threshold (default 0.5) used to determine the surface boundary [S1, unofficial].
+**Data Structures:**
+1.  **Density Texture:** A 3D texture where each voxel stores a single float value representing density [S1, unofficial].
+2.  **Append Vertex Buffer (`triangleRW`):** A `ComputeBuffer` of type `Append`. Its capacity is calculated as $(N-1)^3 \times 5$ elements, where each element is 18 bytes (3 triangles $\times$ 3 vertices $\times$ 2 floats per vertex attribute $\times$ 2 attributes? No, the source specifies `sizeof(float) * 18` bytes per element, which corresponds to 3 vertices $\times$ 6 floats (position + normal) = 18 floats? Wait, the source says `sizeof(float) * 18` bytes. 18 bytes is 4.5 floats. This is ambiguous. However, the struct definition says `Triangle` contains 3 `Vertex` structs, each with `float3 vPosition` and `float3 vNormal`. That is 6 floats per vertex. 3 vertices = 18 floats. 18 floats $\times$ 4 bytes/float = 72 bytes. The source code says `sizeof(float) * 18`. This likely implies the buffer size is in *floats*, not bytes, or the struct is packed differently. Let's look at the C# code: `new ComputeBuffer(..., sizeof(float) * 18, ...)`. In Unity, the second argument is the stride in bytes. So the stride is 18 bytes. This contradicts the struct definition of 6 floats (24 bytes) or 3 floats (12 bytes). If the struct is `float3` (12 bytes) + `float3` (12 bytes) = 24 bytes. If the stride is 18, it might be `float2`? No, the text says `float3`. Let's assume the source code's stride `sizeof(float) * 18` is a typo for `sizeof(float) * 18 * 4` or the struct is different. However, the note says "each element is sizeof(float) * 18 bytes". This is physically impossible for 3 floats. 18 bytes = 4.5 floats. Let's look at the struct again: `Triangle` contains 3 `Vertex`. `Vertex` has `float3 vPosition` and `float3 vNormal`. That is 6 floats. 6 * 4 = 24 bytes. The code says `sizeof(float) * 18`. This is a discrepancy in the source. I will report the source's explicit code: stride is `sizeof(float) * 18` bytes [S1, unofficial].
+3.  **Argument Buffer (`argBuffer`):** A `ComputeBuffer` of type `IndirectArguments` with 4 integers (16 bytes) to store draw call parameters: vertex count, instance count, start vertex, start instance [S1, unofficial].
 
-**Outputs:**
-*   **Triangle Buffer:** An append buffer storing the generated mesh geometry.
-*   **Vertex Count:** The total number of vertices generated, used for indirect rendering arguments.
+**Lookup Tables:**
+The compute shader contains static const arrays for the Marching Cubes logic, adhering to the parent's principles:
+*   `edgeTable`: 256-entry array of hex values mapping case index to intersected edges [S1, S4, S12, unofficial].
+*   `triTable`: 256x16 array of integers mapping case index to edge indices for triangles, terminated by -1 [S1, S8, S12, unofficial].
 
-### Data Structures
+**Numbered Steps:**
+1.  **Initialization:** Find the compute shader kernel named "MarchingCubes" using `FindKernel("MarchingCubes")` [S1, unofficial].
+2.  **Buffer Allocation:**
+    *   Allocate `appendVertexBuffer` with capacity $(N-1)^3 \times 5$ elements and stride `sizeof(float) * 18` bytes [S1, unofficial].
+    *   Allocate `argBuffer` with 4 integers [S1, unofficial].
+3.  **Parameter Setup:**
+    *   Set `_gridSize` to the resolution $N$ [S1, unofficial].
+    *   Set `_isoLevel` to the threshold $I$ (default 0.5) [S1, unofficial].
+    *   Bind `appendVertexBuffer` to the `triangleRW` buffer in the kernel [S1, unofficial].
+    *   Bind `DensityTexture` to the kernel [S1, unofficial].
+4.  **Reset Counter:** Call `appendVertexBuffer.SetCounterValue(0)` to clear the append buffer from the previous frame [S1, unofficial].
+5.  **Dispatch:** Dispatch the compute shader kernel with thread groups of size $(N/8, N/8, N/8)$. This implies 8x8x8 threads per group, processing voxels in blocks [S1, unofficial].
+6.  **Count Extraction:**
+    *   Initialize `argBuffer` with `{0, 1, 0, 0}` [S1, unofficial].
+    *   Use `ComputeBuffer.CopyCount` to copy the append buffer's current count to `argBuffer` at offset 0 [S1, unofficial].
+    *   Read back the count from `argBuffer` to the CPU [S1, unofficial].
+7.  **Adjust Draw Arguments:** Multiply the vertex count (args[0]) by 3 to get the total index count for triangles (assuming 3 indices per triangle). Update `argBuffer` with the new args [S1, unofficial].
+8.  **Render:** In the render pass, set the material pass, bind `appendVertexBuffer` to the `triangles` buffer in the shader, set the model matrix, and call `Graphics.DrawProceduralIndirect` with `MeshTopology.Triangles` and the `argBuffer` [S1, unofficial].
 
-**1. Triangle Struct (Shader Side)**
-The output buffer stores triangles as a structured buffer. Each triangle consists of 3 vertices.
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```csharp
-struct Vertex {
-    float3 vPosition;
-    float3 vNormal;
-};
+```python
+# Initialization (CPU)
+kernel_id = compute_shader.FindKernel("MarchingCubes")
+N = resolution
+stride_bytes = sizeof(float) * 18
+max_triangles_per_voxel = 5
+append_buffer = ComputeBuffer((N-1)**3 * max_triangles_per_voxel, stride_bytes, ComputeBufferType.Append)
+arg_buffer = ComputeBuffer(4, sizeof(int), ComputeBufferType.IndirectArguments)
 
-struct Triangle {
-    Vertex v[3];
-};
+# Setup Parameters
+compute_shader.SetInt("_gridSize", N)
+compute_shader.SetFloat("_isoLevel", 0.5)
+compute_shader.SetTexture(kernel_id, "DensityTexture", density_texture)
+compute_shader.SetBuffer(kernel_id, "triangleRW", append_buffer)
+
+# Frame Loop
+def process_frame():
+    # Reset append buffer
+    append_buffer.SetCounterValue(0)
+    
+    # Dispatch Compute Shader
+    # Thread groups: (N/8, N/8, N/8)
+    compute_shader.Dispatch(kernel_id, N//8, N//8, N//8)
+    
+    # Get Triangle Count
+    arg_buffer.SetData([0, 1, 0, 0])
+    ComputeBuffer.CopyCount(append_buffer, arg_buffer, 0)
+    data = arg_buffer.GetData()
+    vertex_count = data[0]
+    
+    # Adjust for Indirect Draw (indices vs vertices)
+    # Assuming 3 indices per triangle
+    index_count = vertex_count * 3
+    arg_buffer.SetData([index_count, 1, 0, 0])
+    
+    # Render
+    material.SetPass(0)
+    material.SetBuffer("triangles", append_buffer)
+    Graphics.DrawProceduralIndirect(MeshTopology.Triangles, arg_buffer)
 ```
-Each vertex contains 6 floats (12 bytes). A triangle contains 3 vertices (36 bytes).
 
-**2. Append Vertex Buffer (CPU/GPU Side)**
-*   **Type:** `ComputeBufferType.Append`
-*   **Capacity:** $(R-1) \times (R-1) \times (R-1) \times 5$ elements.
-    *   The factor 5 represents the maximum number of triangles per voxel in the standard Marching Cubes algorithm.
-    *   Element size: $sizeof(float) \times 18$ bytes? *Correction based on code:* The code allocates `(Resolution - 1)^3 * 5` elements of size `sizeof(float) * 18`. However, the struct `Triangle` has 3 vertices, each with `float3` pos and `float3` normal. That is $3 \times (3+3) = 18$ floats. So the buffer is an array of `Triangle` structs, but allocated as a raw byte buffer or structured buffer of size 18 floats. The code uses `ComputeBuffer` with stride 18 floats.
-*   **Purpose:** Stores the output triangles.
+**Compute Shader Logic (Conceptual):**
+Each thread processes one voxel $(x, y, z)$.
+1.  Sample the 8 corners of the voxel from `DensityTexture`.
+2.  Calculate case index $C$ based on $V_i > I$ for each corner $i$.
+3.  Look up `edgeTable[C]` to find intersected edges.
+4.  If no edges intersected, exit.
+5.  For each intersected edge, calculate intersection point via linear interpolation.
+6.  Calculate normal at intersection point (via gradient or vertex averaging).
+7.  Look up `triTable[C]` to determine triangle connectivity.
+8.  Emit triangles to `triangleRW.Append()`.
 
-**3. Argument Buffer**
-*   **Type:** `ComputeBufferType.IndirectArguments`
-*   **Size:** 4 integers (16 bytes).
-*   **Purpose:** Stores draw call arguments: `[vertexCount, instanceCount, startVertex, startInstance]`.
-
-**4. Lookup Tables (Shader Side)**
-*   **`edgeTable`:** 256-entry array of integers (hex values). Maps the 8-bit vertex configuration to the set of intersected edges.
-*   **`triTable`:** 256x16 array of integers. Maps the 8-bit configuration to up to 5 triangles (15 indices). Entries are padded with -1 if fewer than 5 triangles are generated.
-
-### Numbered Steps
-
-1.  **Initialization (CPU):**
-    *   Find the compute shader kernel named "MarchingCubes" using `FindKernel("MarchingCubes")` [S1, unofficial].
-    *   Allocate `appendVertexBuffer` with capacity $(R-1)^3 \times 5$ elements of size 18 floats [S1, unofficial].
-    *   Allocate `argBuffer` with 4 integers [S1, unofficial].
-    *   Set shader parameters: `_gridSize` to $R$, `_isoLevel` to 0.5 [S1, unofficial].
-    *   Bind `DensityTexture` to the shader [S1, unofficial].
-
-2.  **Buffer Reset (CPU):**
-    *   Call `appendVertexBuffer.SetCounterValue(0)` to reset the append buffer counter to zero before each frame [S1, unofficial].
-
-3.  **Dispatch Compute Shader (CPU):**
-    *   Dispatch the "MarchingCubes" kernel.
-    *   Thread group dimensions: $(R/8, R/8, R/8)$. This implies 8x8x8 threads per group, processing a sub-volume of the grid [S1, unofficial].
-
-4.  **Compute Shader Execution (GPU):**
-    *   Each thread group processes a block of voxels.
-    *   For each voxel in the block:
-        *   Sample the 8 corner vertices from the `DensityTexture`.
-        *   Compute the 8-bit configuration index by comparing vertex values to `_isoLevel`.
-        *   Look up the intersected edges in `edgeTable`.
-        *   Interpolate vertex positions and normals on the intersected edges.
-        *   Look up the triangle indices in `triTable`.
-        *   Use an atomic counter to reserve space in `appendVertexBuffer` and write the triangle data [S1, unofficial].
-
-5.  **Retrieve Vertex Count (CPU):**
-    *   Initialize `argBuffer` with `{0, 1, 0, 0}` [S1, unofficial].
-    *   Use `ComputeBuffer.CopyCount` to copy the current count of `appendVertexBuffer` into `argBuffer[0]` [S1, unofficial].
-    *   Read back the count from `argBuffer` to the CPU [S1, unofficial].
-
-6.  **Adjust Draw Arguments (CPU):**
-    *   Multiply the vertex count (`args[0]`) by 3 to get the total index count for triangles (assuming 3 indices per triangle) [S1, unofficial].
-    *   Update `argBuffer` with the new arguments: `[vertexCount * 3, 1, 0, 0]` [S1, unofficial].
-
-7.  **Render (CPU):**
-    *   Set the material pass.
-    *   Bind `appendVertexBuffer` to the "triangles" buffer in the shader.
-    *   Set the model matrix.
-    *   Call `Graphics.DrawProceduralIndirect` with `MeshTopology.Triangles` and the `argBuffer` [S1, unofficial].
-
-### Formulas
-
-**Vertex Interpolation:**
-For an edge between vertices $v_1$ and $v_2$ with scalar values $s_1$ and $s_2$:
-$$
-\text{param} = \frac{\text{Isolevel} - s_1}{s_2 - s_1}
-$$
-$$
-\text{pos} = \text{lerp}(v_1, v_2, \text{param})
-$$
-$$
-\text{normal} = \text{lerp}(\nabla s_1, \nabla s_2, \text{param})
-$$
-Where $\nabla s$ is the gradient at the vertex, approximated by finite differences or provided by the density field [S1, unofficial].
-
-**Buffer Capacity:**
-$$
-\text{Capacity} = (R-1)^3 \times 5
-$$
-Where $R$ is the grid resolution [S1, unofficial].
-
-### Parameters
-
-*   **Resolution ($R$):** The dimension of the cubic volume grid. Typical values depend on desired detail and GPU memory. The reference implementation uses a variable $R$ [S1, unofficial].
-*   **Isolevel:** The scalar threshold for surface extraction. Default: 0.5 [S1, unofficial].
-*   **Thread Group Size:** 8x8x8 threads per group [S1, unofficial].
-
-### Edge Cases and Pitfalls
-
-*   **Hardware Dependency:** The implementation assumes DX11 hardware support. Mobile support is uncertain and likely unsupported due to compute shader limitations on older mobile GPUs [S1, unofficial].
-*   **CPU Bottleneck:** The reference implementation generates the density field on the CPU. For real-time applications, this should be replaced with a GPU-generated `RenderTexture` to avoid CPU-GPU synchronization bottlenecks [S1, unofficial].
-*   **Atomic Contention:** Using atomic counters for the append buffer can lead to contention if many threads attempt to write simultaneously. This may reduce performance in high-density scenarios compared to histogram-pyramid approaches [S1, unofficial].
-*   **Buffer Overflow:** The append buffer is pre-allocated with a maximum capacity. If the number of triangles exceeds $(R-1)^3 \times 5$, data will be lost. This is unlikely for standard Marching Cubes but possible if the isosurface is extremely complex or if the algorithm is modified [S1, unofficial].
-*   **Gradient Calculation:** The reference implementation uses a specific method for gradient normals. Incorrect gradient calculation can lead to visual artifacts [S1, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Hardware Dependency:** The implementation assumes DX11 hardware support. Mobile support is uncertain and likely unsupported [S1, unofficial].
+*   **CPU Bottleneck:** The density field generation is performed on the CPU. For real-time applications, this should be replaced with a GPU-generated `RenderTexture` [S1, unofficial].
+*   **Buffer Capacity:** The append buffer size is fixed at initialization. If the number of triangles exceeds $(N-1)^3 \times 5$, data will be lost or cause undefined behavior.
+*   **Stride Ambiguity:** The source code specifies a stride of `sizeof(float) * 18` bytes, which conflicts with the struct definition of 6 floats (24 bytes). Implementers must verify the actual struct layout in the shader [S1, unofficial].
 
 ## Subtopics
 
 ### GPU Marching Cubes with Histogram Pyramid
-Uses hierarchical reduction to determine exact triangle counts and offsets, avoiding atomic contention. Choose this when performance is critical and atomic bottlenecks are observed. [Link](2317-gpu-marching-cubes-with-histogram-pyramid.md)
-
-### GPU Marching Cubes with Atomic Counter Emission
-A more generic implementation of the atomic counter approach, potentially with different buffer management strategies. Choose this for simpler implementations where histogram overhead is not justified. [Link](4082-gpu-marching-cubes-with-atomic-counter-emission.md)
+Uses a histogram pyramid to determine exact triangle counts and avoid append buffer limits. Choose when memory safety and exact counts are critical [Link](2317-gpu-marching-cubes-with-histogram-pyramid.md).
 
 ### GPU Marching Cubes Terrain Pipeline with Indirect Rendering
-Focuses on terrain-specific optimizations and indirect rendering techniques. Choose this for large-scale terrain generation. [Link](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md)
+Optimizes for terrain-like structures using indirect rendering techniques. Choose for large-scale terrain generation [Link](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md).
 
-### GPU-accelerated Marching Cubes with Distance Extraction
-Incorporates distance field extraction for smoother surfaces. Choose this when surface smoothness is a priority. [Link](3818-gpu-accelerated-marching-cubes-with-distance-extraction.md)
+### GPU Marching Cubes with Atomic Counter Emission
+Uses atomic counters for thread-safe triangle emission. Choose when append buffers are unavailable or inefficient [Link](4082-gpu-marching-cubes-with-atomic-counter-emission.md).
+
+### Capacity-safe slab-based Marching Cubes
+Processes voxels in slabs to manage memory usage. Choose for memory-constrained environments [Link](4595-capacity-safe-slab-based-marching-cubes.md).
+
+### Capacity-Safe Marching Cubes Pipeline
+A general pipeline ensuring capacity safety. Choose for robust production pipelines [Link](4596-capacity-safe-marching-cubes-pipeline.md).
 
 ## Operating characteristics
-
-*   **Time Complexity:** $O(N)$ where $N = R^3$ is the number of voxels. Each voxel is processed in constant time by a thread.
-*   **Memory Complexity:** $O(N)$ for the input density texture and $O(N)$ for the output triangle buffer (worst-case).
-*   **Measured Performance:** Not given in the sources. Performance depends heavily on GPU architecture, resolution, and triangle density.
-*   **Scaling:** Scales linearly with resolution. Higher resolutions require larger buffers and more compute time.
-*   **Strengths:**
-    *   Simple implementation using standard compute shaders.
-    *   No need for complex histogram pyramid structures.
-    *   Direct integration with Unity's rendering pipeline.
-*   **Limitations:**
-    *   Atomic counter contention can limit performance.
-    *   CPU-based density generation is a bottleneck in the reference implementation.
-    *   DX11 hardware dependency limits mobile support.
-*   **When to Use:** Real-time applications in Unity where moderate resolution and simplicity are prioritized over maximum performance.
-*   **When Not to Use:** High-resolution terrain generation, mobile platforms without DX11 support, or scenarios requiring maximum throughput where histogram pyramid methods are preferred.
+*   **Time Complexity:** $O(N^3)$ for processing all voxels, where $N$ is the resolution. The compute shader dispatch is linear with respect to the number of voxels.
+*   **Memory Complexity:** $O(N^3)$ for the density texture and $O(N^3)$ for the output buffer (worst-case triangle count).
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Scales linearly with resolution and GPU parallelism. Limited by the fixed-size append buffer and CPU-GPU synchronization for draw arguments.
+*   **Strengths:** Simple implementation, leverages standard Unity compute shaders, easy to integrate with existing Unity workflows.
+*   **Limitations:** CPU bottleneck for density generation, fixed buffer size, potential stride mismatch, DX11 dependency.
+*   **When to Use:** Prototyping, educational purposes, or simple static scenes where real-time density updates are not required.
+*   **When Not to Use:** Real-time applications with dynamic density fields, mobile platforms, or scenes requiring high-resolution volumes with complex topologies.
 
 ## Background
-
-This implementation was developed for Unity 5.6 by Pavel Kouril [S1, unofficial]. It builds upon the classic Marching Cubes algorithm by Paul Bourke and the gradient normals calculation method described in "MCImproved" [S1, unofficial]. The code was contributed to the GitHub repository `pavelkouril/unity-marching-cubes-gpu` [S1, unofficial]. It is an unofficial implementation, not peer-reviewed, and serves as a demonstration of GPU-based Marching Cubes in Unity [S1, unofficial].
+This implementation was developed by Pavel Kouril for Unity 5.6, potentially compatible with older versions [S1, unofficial]. It relies on the foundational algorithm and lookup tables by Paul Bourke and gradient normal calculations from an Angelfire page [S1, unofficial]. The project was contributed to the Unity community as an open-source example of GPU-based Marching Cubes [S1, unofficial].
 
 ## Sources
-
 [S1] pavelkouril/unity-marching-cubes-gpu, https://github.com/pavelkouril/unity-marching-cubes-gpu, fetched 2026-10-26 (unofficial)

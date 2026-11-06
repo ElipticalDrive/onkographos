@@ -1,0 +1,195 @@
+--- v003.md
++++ v004.md
+@@ -3,64 +3,120 @@
+ 
+ ## Overview
+-Marching Cubes with Octree extracts a manifold triangle mesh from a scalar field defined over an adaptive octree structure, replacing the uniform grid traversal of standard Marching Cubes with hierarchical spatial partitioning [S1]. It sets itself apart from [Marching Cubes](30-isosurface-extraction.md) by reducing memory overhead and computation time in sparse or high-resolution domains, while differing from [Adaptive Marching Cubes](1351-adaptive-marching-cubes.md) by relying on a specific domain object (`MC_Domain`) and parallel execution framework provided by the CGAL library [S1].
++Marching Cubes with Octree extracts isosurfaces from scalar fields defined over an adaptive octree structure, enabling efficient processing of sparse or high-resolution volumetric data by skipping empty or uniform regions. Unlike uniform grid methods, it adapts the computational domain to the geometry, reducing memory overhead and processing time for large scenes [S1]. It sets itself apart from sibling methods like [Sparse Marching Cubes](3825-sparse-marching-cubes.md) by explicitly managing the hierarchical tree structure during traversal, and from [Transvoxel](6277-transvoxel.md) by relying on standard linear interpolation within octree nodes rather than specialized transition cells for level-set boundaries [S1].
+ 
+ ## How it works
++The method operates by constructing an octree that subdivides a 3D bounding box based on a split predicate, then applying the standard Marching Cubes lookup logic to each leaf node that intersects the isosurface.
++
+ **Inputs and Outputs:**
+-*   **Input:** A 3D bounding box (`bbox`), a split predicate function (`split_predicate`) that determines octree refinement, a scalar field function (`function`) evaluating values at points, and an isovalue threshold.
+-*   **Output:** A set of vertices (`Point_range`) and a set of triangles (`Polygon_range`).
++*   **Input:** A 3D bounding box defined by minimum and maximum points ($P_{min}, P_{max}$), a scalar field function $f(P)$, an isovalue $I$, and a split predicate function $S(node)$ that determines if a node should be subdivided.
++*   **Output:** A set of vertices (points) and a set of triangles (polygons) representing the extracted mesh [S1].
+ 
+ **Data Structures:**
+-*   **Octree:** A hierarchical structure initialized with two corner points of the bounding box. Nodes are refined recursively based on the split predicate.
+-*   **Values:** An object encapsulating the scalar function and the octree, allowing the domain to query scalar values at arbitrary points within the octree cells.
+-*   **MC_Domain:** A domain object that bridges the octree structure and the Marching Cubes algorithm, providing the necessary interface for cell traversal and value evaluation.
++1.  **Octree Node:** Represents a cubic volume. Each node stores its spatial bounds and a flag indicating if it is a leaf. The tree is built recursively: if $S(node)$ is true, the node is split into 8 children; otherwise, it remains a leaf [S1].
++2.  **Values Object:** Encapsulates the scalar function $f$ and the octree structure, providing access to scalar values at any point in space [S1].
++3.  **MC_Domain:** A domain object that interfaces the octree and values with the marching cubes algorithm. It handles the traversal and coordinate mapping [S1].
++4.  **Edge Intersection Table (`edgeTable`)** and **Triangle Connection Table (`triangleTable`)**: As defined in [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md). These tables are used for each leaf node [S1, S12].
+ 
+-**Steps:**
+-1.  **Define Bounding Box:** Create a vector of two 3D points representing the minimum (`xmin, ymin, zmin`) and maximum (`xmax, ymax, zmax`) corners of the domain [S1].
+-2.  **Construct Octree:** Initialize an `Octree` object using the bounding box points [S1].
+-3.  **Refine Octree:** Call `octree.refine()` passing the `split_predicate`. The predicate determines which nodes are subdivided based on the scalar field's behavior (e.g., proximity to the isovalue) [S1].
+-4.  **Initialize Values:** Create a `Values` object containing the scalar function and the refined octree [S1].
+-5.  **Initialize Output Containers:** Create empty `Point_range` and `Polygon_range` containers to store the resulting vertices and triangles [S1].
+-6.  **Construct Domain:** Instantiate an `MC_Domain` object, passing the octree and the values object [S1].
+-7.  **Execute Marching Cubes:** Call `CGAL::Isosurfacing::marching_cubes` with the `MC_Domain`, the `isovalue`, and the output ranges. The algorithm uses `Parallel_if_available_tag` to enable parallel execution if supported by the hardware [S1].
+-8.  **Post-processing (Optional):** The octree can be dumped to polylines or the output mesh can be written to an OFF file for visualization [S1].
++**Algorithm Steps:**
++1.  **Initialize Bounding Box:** Define the global bounding box using $P_{min} = (xmin, ymin, zmin)$ and $P_{max} = (xmax, ymax, zmax)$ [S1].
++2.  **Construct Octree:** Create an octree object initialized with the bounding box points [S1].
++3.  **Refine Octree:** Recursively refine the octree by applying the split predicate $S(node)$ to each node. If $S(node)$ returns true, split the node into 8 children and recurse. If false, mark as leaf [S1].
++4.  **Create Values Object:** Instantiate a `Values` object containing the scalar function $f$ and the constructed octree [S1].
++5.  **Initialize Output Containers:** Create empty containers for output vertices (`Point_range`) and triangles (`Polygon_range`) [S1].
++6.  **Construct MC_Domain:** Create an `MC_Domain` object passing the octree and values object [S1].
++7.  **Execute Marching Cubes:** Call the marching cubes function with the `MC_Domain`, isovalue $I$, and output containers. The implementation typically uses parallel execution (`Parallel_if_available_tag`) [S1].
++    *   For each leaf node in the octree:
++        a.  Evaluate the scalar field $f$ at the 8 vertices of the node's cube.
++        b.  Compute the case index $C$ by comparing each vertex value to $I$. If $f(v_i) < I$, set bit $i$ of $C$ to 1; otherwise 0 [S7, S8].
++        c.  If $C = 0$ or $C = 255$, no intersection occurs; skip the node.
++        d.  Use `edgeTable[C]` to determine which edges are intersected.
++        e.  Interpolate the intersection points on the intersected edges using linear interpolation:
++            $$ P_{interp} = v_a + \frac{I - f(v_a)}{f(v_b) - f(v_a)} (v_b - v_a) $$
++            where $v_a$ and $v_b$ are the endpoints of the intersected edge [S12].
++        f.  Use `triangleTable[C]` to form triangles from the interpolated points.
++        g.  Add the generated vertices and triangles to the output containers [S1].
++
++**Parameters:**
++*   **Isovalue ($I$):** The scalar value defining the surface. Typical values depend on the data range (e.g., 0.0 for normalized signed distance fields) [S1].
++*   **Split Predicate ($S$):** Determines refinement. Common predicates include checking if the node contains the isovalue or if the scalar variance exceeds a threshold [S1].
++
++**Edge Cases and Pitfalls:**
++*   **Cracks at Level Discontinuities:** If the octree has varying depths around the isosurface (i.e., fine nodes adjacent to coarse nodes), standard linear interpolation produces cracks because the coarse node's single triangle does not align with the fine node's multiple triangles [S1]. The method requires uniform node sizes around the surface to guarantee a manifold result [S1].
++*   **Ambiguity:** Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous. The standard LUT uses a fixed triangulation, which can cause holes if adjacent voxels resolve the ambiguity differently [S7, S8].
+ 
+ **Pseudocode:**
+ ```python
+-def run_marching_cubes_octree(bbox_min, bbox_max, split_predicate, scalar_function, isovalue):
+-    # Step 1: Define bounding box points
+-    bbox_points = [Point(bbox_min.x, bbox_min.y, bbox_min.z),
+-                   Point(bbox_max.x, bbox_max.y, bbox_max.z)]
++def run_marching_cubes_octree(bbox_min, bbox_max, scalar_func, isovalue, split_predicate):
++    # Step 1: Construct Octree
++    octree = Octree(bbox_min, bbox_max)
+     
+-    # Step 2: Construct Octree
+-    octree = Octree(bbox_points)
++    # Step 2: Refine Octree
++    def refine(node):
++        if split_predicate(node):
++            node.split_into_8_children()
++            for child in node.children:
++                refine(child)
++        else:
++            node.is_leaf = True
++            
++    refine(octree.root)
+     
+-    # Step 3: Refine the octree
+-    octree.refine(split_predicate)
++    # Step 3: Initialize Output
++    points = []
++    triangles = []
+     
+-    # Step 4: Create Values object
+-    values = Values(scalar_function, octree)
+-    
+-    # Step 5: Initialize output containers
+-    points = Point_range()
+-    triangles = Polygon_range()
+-    
+-    # Step 6: Construct MC_Domain
+-    mcdomain = MC_Domain(octree, values)
+-    
+-    # Step 7: Call Marching Cubes
+-    # Note: Parallel_if_available_tag is a CGAL tag; in pure Python logic, 
+-    # this implies the traversal is parallelized if resources allow.
+-    marching_cubes(mcdomain, isovalue, points, triangles, parallel_tag=True)
+-    
++    # Step 4: Traverse and Extract
++    for node in octree.get_leaves():
++        # Evaluate scalar field at 8 vertices
++        vertex_values = [scalar_func(node.vertex(i)) for i in range(8)]
++        
++        # Compute case index
++        case_index = 0
++        for i in range(8):
++            if vertex_values[i] < isovalue:
++                case_index |= (1 << i)
++                
++        # Skip if no intersection
++        if case_index == 0 or case_index == 255:
++            continue
++            
++        # Get intersected edges from edgeTable
++        intersected_edges = get_edges_from_table(case_index, edgeTable)
++        
++        # Intersect points
++        interp_points = []
++        for edge_idx in intersected_edges:
++            v_a_idx, v_b_idx = edge_endpoints[edge_idx]
++            v_a = node.vertex(v_a_idx)
++            v_b = node.vertex(v_b_idx)
++            val_a = vertex_values[v_a_idx]
++            val_b = vertex_values[v_b_idx]
++            
++            # Linear interpolation [G]
++            t = (isovalue - val_a) / (val_b - val_a)
++            p_interp = v_a + t * (v_b - v_a)
++            interp_points.append(p_interp)
++            
++        # Generate triangles from triangleTable
++        tri_indices = get_triangles_from_table(case_index, triangleTable)
++        for i in range(0, len(tri_indices), 3):
++            if tri_indices[i] == -1:
++                break
++            idx_a = tri_indices[i]
++            idx_b = tri_indices[i+1]
++            idx_c = tri_indices[i+2]
++            
++            # Map edge indices to interpolated points
++            # Note: edgeTable returns edge indices, triangleTable returns edge indices
++            # We need to map edge index to the position in interp_points
++            # This requires a consistent mapping between edge index and interp_points order
++            p_a = interp_points[edge_to_point_index[idx_a]]
++            p_b = interp_points[edge_to_point_index[idx_b]]
++            p_c = interp_points[edge_to_point_index[idx_c]]
++            
++            triangles.append((p_a, p_b, p_c))
++            
+     return points, triangles
+ ```
+-
+-**Parameters:**
+-*   **isovalue:** The scalar threshold for surface extraction. Typical values depend on the scalar field normalization (e.g., 0.0 for signed distance fields, 0.3 for normalized density) [S1].
+-*   **split_predicate:** A function returning true if a node should be subdivided. Common predicates include `Refine_one_eighth` (uniform refinement) or `Refine_around_isovalue` (adaptive refinement based on field proximity) [S1].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Cracks:** Using an octree with varying depths around the isosurface produces cracks at regions where octree levels are discontinuous [S1]. The algorithm assumes manifold connectivity which is broken by non-uniform depth transitions.
+-*   **Manifold Guarantee:** The octree behaves well and produces a manifold surface only if nodes are split with a uniform size around the surface [S1].
+ 
+ ## Subtopics
+@@ -79,16 +135,17 @@
+ 
+ ### Sparse-Voxel TSDF Fusion and Marching Cubes
+-This variant extracts a mesh by adapting TSDF-Fusion and Marching Cubes into a sparse voxel representation [S2]. It implements sparse-voxel TSDF-Fusion to compute truncated signed distance values of the sparse grid points, then extracts the surface of the zero-level set using sparse-voxel Marching Cubes [S2]. Duplicated vertices from adjacent voxels are merged to produce a unique set of vertices [S2]. If adjacent voxels belong to different Octree levels, all voxels are subdivided to the finest level to remove discontinuities in the density field [S2]. Unlike methods relying on coarse geometry priors, this method models the scene only with a density field [S2]. Pitfalls include producing unnecessary geometric bumps for texture details and disconnected triangles when adjacent voxels are at different Octree levels due to discontinuous density fields [S2]. It cites TSDF-Fusion (KinectFusion, 2011) and Marching Cubes (1987) as foundational references [S2].
++This variant extracts mesh by adapting TSDF-Fusion and Marching Cubes into the sparse voxel representation [S2]. It implements sparse-voxel TSDF-Fusion to compute truncated signed distance values of the sparse grid points, then extracts the surface of the zero-level set using sparse-voxel Marching Cubes [S2]. Duplicated vertices from adjacent voxels are merged to produce a unique set of vertices [S2]. If adjacent voxels belong to different Octree levels, all voxels are subdivided to the finest level to remove discontinuities in the density field [S2]. Unlike methods relying on coarse geometry priors, this method models the scene only with a density field [S2]. Pitfalls include producing unnecessary geometric bumps for texture details and disconnected triangles when adjacent voxels are at different Octree levels due to discontinuous density fields [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of leaf nodes in the octree and the complexity of the split predicate. Parallel execution (`Parallel_if_available_tag`) improves performance on multi-core hardware [S1].
+-*   **Memory Complexity:** Significantly lower than uniform grid Marching Cubes for sparse fields, as only relevant octree nodes are stored [S1].
+-*   **Strengths:** Efficient handling of high-resolution or sparse scalar fields; automatic adaptation to feature density via the split predicate [S1].
+-*   **Limitations:** Requires careful handling of octree depth discontinuities to avoid cracks; non-manifold outputs if the split predicate creates uneven depth transitions [S1].
+-*   **When to use:** Ideal for large-scale or sparse implicit surfaces where uniform grid memory is prohibitive [S1].
+-*   **When not to use:** When strict manifold guarantees are required without post-processing, or when the scalar field varies uniformly across the domain (uniform grid is simpler) [S1].
++*   **Time Complexity:** $O(N)$ where $N$ is the number of leaf nodes in the octree that intersect the isosurface. The split predicate determines the number of nodes, potentially reducing $N$ significantly compared to a uniform grid of equivalent resolution [S1].
++*   **Memory Complexity:** Proportional to the number of octree nodes. Adaptive subdivision reduces memory usage for sparse data compared to uniform grids [S1].
++*   **Performance:** Efficient for large scenes with localized features. Parallel execution (`Parallel_if_available_tag`) can further accelerate processing [S1].
++*   **Strengths:** Memory efficiency for sparse data, adaptability to complex geometries, parallelizability [S1].
++*   **Limitations:** Cracks at level discontinuities if the split predicate creates non-uniform depth around the surface [S1]. Requires careful handling of topological ambiguities [S7, S8].
++*   **When to Use:** Large volumetric datasets with sparse features, or when memory is a constraint.
++*   **When Not to Use:** When uniform resolution is required, or when strict manifold guarantees are needed without post-processing discontinuities [S1].
+ 
+ ## Background
+-The method originates from the CGAL library's Isosurfacing module, specifically the `CGAL::Isosurfacing::marching_cubes` function designed to work with `MC_Domain` objects [S1]. It extends the classic Marching Cubes algorithm (1987) to hierarchical data structures, allowing for adaptive resolution [S1]. The specific implementation details, including the `MC_Domain` interface and parallel execution tags, are documented in the CGAL 3D Isosurfacing documentation [S1].
++The method originates from the CGAL library's Isosurfacing module, which provides robust implementations of isosurfacing algorithms including Marching Cubes on octrees [S1]. The underlying Marching Cubes algorithm was introduced by Lorensen and Cline in 1987 [S2]. The adaptation to octrees allows for efficient processing of sparse volumetric data, building on the principles of adaptive mesh refinement [S1].
+ 
+ ## Sources

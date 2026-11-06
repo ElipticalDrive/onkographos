@@ -1,0 +1,342 @@
+--- v001.md
++++ v002.md
+@@ -7,8 +7,8 @@
+ 
+ ## How it works
+-The algorithm operates on a regular, axis-aligned 3D lattice. It classifies grid nodes, identifies ambiguous configurations, and resolves them to ensure a two-manifold mesh while optimizing topological properties [S1].
++The algorithm operates on a regular, axis-aligned 3D lattice [S1]. It classifies grid nodes, identifies ambiguous configurations, and resolves them to ensure a two-manifold mesh while optimizing topological properties [S1].
+ 
+ ### Inputs and Outputs
+-- **Input**: A regular 3D grid of nodes. Each node $N$ is classified as **black** (inside or on the boundary of the object) or **white** (outside). This classification is derived from a scalar field threshold or voxelization [S1].
++- **Input**: A regular 3D grid of nodes. Each node $N$ is classified as **black** (inside or on the boundary of the object) or **white** (outside) based on a scalar field threshold or voxelization [S1].
+ - **Output**: A triangle mesh $M$ approximating the boundary of the object. The mesh is guaranteed to be two-manifold and topologically valid [S1].
+ 
+@@ -19,5 +19,5 @@
+ 
+ ### Definitions
+-- **Border Edge**: An edge of the mesh $M$ lying on a face of a cube. It connects two mesh vertices.
++- **Border Edge**: An edge of the mesh $M$ lying on a face of a cube. It connects two mesh vertices [S1].
+ - **X-face**: A face of a cube with alternating black and white corners (e.g., Black-White-Black-White). Such a face contains four mesh vertices and two possible border edges. The algorithm must choose one of the two diagonals [S1].
+ - **X-cube**: A cube that has **no** X-faces but contains **more than one loop** of border edges. The only Marching Cubes configuration leading to an X-cube is the one with alternating colors on the cube's vertices such that no face is ambiguous, yet multiple disjoint cycles exist [S1].
+@@ -58,180 +58,155 @@
+ 
+ ```python
+-def extract_isosurface(grid_nodes, threshold):
++def extract_isosurface(grid, threshold):
+     """
+-    grid_nodes: 3D array of scalar values.
++    grid: 3D numpy array of scalar values.
+     threshold: float, the isolevel.
+-    Returns: List of triangles (v1, v2, v3).
++    Returns: List of triangles (v1, v2, v3) where v are node indices.
+     """
+     # Step 1: Classify nodes
+-    # Black (1) if node >= threshold, White (0) otherwise
+-    grid_colors = (grid_nodes >= threshold).astype(int)
+-    
+-    # Step 2: Identify X-faces and initial border edges
+-    # We need to determine which faces are X-faces
+-    # An X-face has alternating corners: 1010 or 0101 pattern
+-    x_faces = identify_x_faces(grid_colors)
+-    
+-    # Step 3: Identify X-cubes
+-    # An X-cube has no X-faces but >1 loop
+-    # First, determine border edges for non-X faces
+-    border_edges_non_x = compute_border_edges_non_x(grid_colors, x_faces)
+-    
+-    # Count loops per cube based on non-X border edges
+-    loop_counts = count_loops_per_cube(border_edges_non_x)
+-    
++    colors = (grid >= threshold).astype(int)
++    Dx, Dy, Dz = grid.shape
++    triangles = []
++
++    # Step 2: Identify X-faces
++    x_faces = set()
++    for axis in range(3):
++        limit = Dx if axis == 0 else (Dy if axis == 1 else Dz)
++        for i in range(limit - 1):
++            for j in range(Dy if axis != 1 else Dy - 1):
++                for k in range(Dz if axis != 2 else Dz - 1):
++                    # Face corners
++                    if axis == 0: corners = [(i,j,k), (i,j+1,k), (i,j+1,k+1), (i,j,k+1)]
++                    elif axis == 1: corners = [(i,j,k), (i+1,j,k), (i+1,j,k+1), (i,j,k+1)]
++                    else: corners = [(i,j,k), (i+1,j,k), (i+1,j+1,k), (i,j+1,k)]
++                    vals = [colors[n] for n in corners]
++                    if vals[0] != vals[1] and vals[1] != vals[2] and vals[2] != vals[3] and vals[3] != vals[0]:
++                        x_faces.add((axis, i, j, k))
++
++    # Step 3: Identify X-cubes and initial border edges
+     x_cubes = []
+-    for cube in all_cubes:
+-        if not has_x_faces(cube, x_faces) and loop_counts[cube] > 1:
+-            x_cubes.append(cube)
+-            
++    cube_edges = {}
++    for i in range(Dx - 1):
++        for j in range(Dy - 1):
++            for k in range(Dz - 1):
++                cube_idx = (i, j, k)
++                edges = []
++                # 6 faces of the cube
++                faces = [(0,i,j,k), (0,i+1,j,k), (1,i,j,k), (1,i,j+1,k), (2,i,j,k), (2,i,j,k+1)]
++                for f in faces:
++                    if f in x_faces:
++                        continue # Defer X-face edges
++                    # Non-X face: exactly 1 border edge
++                    if f[0] == 0: corners = [(f[1],f[2],f[3]), (f[1],f[2]+1,f[3]), (f[1],f[2]+1,f[3]+1), (f[1],f[2],f[3]+1)]
++                    elif f[0] == 1: corners = [(f[1],f[2],f[3]), (f[1]+1,f[2],f[3]), (f[1]+1,f[2],f[3]+1), (f[1],f[2],f[3]+1)]
++                    else: corners = [(f[1],f[2],f[3]), (f[1]+1,f[2],f[3]), (f[1]+1,f[2]+1,f[3]), (f[1],f[2]+1,f[3])]
++                    vals = [colors[n] for n in corners]
++                    edge = None
++                    for e in range(4):
++                        n1, n2 = corners[e], corners[(e+1)%4]
++                        if colors[n1] != colors[n2]:
++                            edge = (n1, n2)
++                            break
++                    if edge: edges.append(edge)
++                cube_edges[cube_idx] = edges
++                # Count loops (cycles) in the cube's border edges
++                loop_count = count_cycles(edges) # [G] Standard graph cycle counting
++                if loop_count > 1:
++                    x_cubes.append(cube_idx)
++
+     # Step 4: Resolve X-faces globally
+-    # Build X-face graph and solve for optimal slashing
+-    # This minimizes global topological complexity
+-    x_face_decisions = resolve_x_faces_globally(x_faces, grid_colors)
+-    
++    x_face_decisions = {}
++    # [G] The source specifies an X-face graph optimization. We implement a consistent assignment.
++    visited = set()
++    for f in x_faces:
++        if f not in visited:
++            # Deterministic consistent slashing based on coordinates
++            axis, i, j, k = f
++            diag = (i + j + k) % 2
++            x_face_decisions[f] = diag
++            visited.add(f)
++            # In practice, traverse connected X-faces sharing cubes and optimize genus/triangles
++
+     # Step 5: Resolve X-cubes globally
+-    # Decide whether to connect loops in X-cubes
+-    x_cube_decisions = resolve_x_cubes_globally(x_cubes, grid_colors)
+-    
+-    # Step 6: Generate triangles
+-    triangles = []
+-    for cube in all_cubes:
+-        # Determine final border edges for this cube
+-        final_border_edges = []
+-        
+-        # Add border edges from non-X faces
+-        final_border_edges.extend(border_edges_non_x[cube])
+-        
+-        # Add border edges from X-faces based on global decision
+-        for face in cube.faces:
+-            if face in x_faces:
+-                decision = x_face_decisions[face]
+-                final_border_edges.append(decision)
+-        
+-        # Handle X-cube loop connections
+-        if cube in x_cubes:
+-            decision = x_cube_decisions[cube]
+-            if decision == 'connect':
+-                # Merge loops to form a single sheet
+-                final_border_edges = merge_loops(final_border_edges)
+-        
+-        # Triangulate the sheets formed by final_border_edges
+-        sheets = form_sheets(final_border_edges)
+-        for sheet in sheets:
+-            # Triangulate the polygon defined by the sheet's boundary
+-            # Ensure triangles lie within the cube
+-            cube_triangles = triangulate_sheet(sheet, cube)
+-            triangles.extend(cube_triangles)
+-            
++    x_cube_decisions = {}
++    for c in x_cubes:
++        # [G] Source specifies a Merge Tree for loop equivalence classes.
++        x_cube_decisions[c] = 'separate' # Default; optimization minimizes genus/shells
++
++    # Step 6 & 7: Generate triangles
++    for i in range(Dx - 1):
++        for j in range(Dy - 1):
++            for k in range(Dz - 1):
++                cube_idx = (i, j, k)
++                final_edges = list(cube_edges[cube_idx])
++                faces = [(0,i,j,k), (0,i+1,j,k), (1,i,j,k), (1,i,j+1,k), (2,i,j,k), (2,i,j,k+1)]
++                for f in faces:
++                    if f in x_faces:
++                        diag = x_face_decisions[f]
++                        if f[0] == 0: corners = [(i,j,k), (i,j+1,k), (i,j+1,k+1), (i,j,k+1)]
++                        elif f[0] == 1: corners = [(i,j,k), (i+1,j,k), (i+1,j,k+1), (i,j,k+1)]
++                        else: corners = [(i,j,k), (i+1,j,k), (i+1,j+1,k), (i,j+1,k)]
++                        final_edges.append(corners[0] if diag == 0 else corners[1]) # Simplified edge representation
++                if cube_idx in x_cubes:
++                    if x_cube_decisions[cube_idx] == 'connect':
++                        final_edges = merge_loops(final_edges) # [G] Graph merge
++                sheets = form_sheets(final_edges) # [G] Groups edges into closed loops
++                for sheet in sheets:
++                    if len(sheet) >= 3:
++                        v0 = sheet[0]
++                        for m in range(1, len(sheet) - 1):
++                            # Step 7: Exclude face triangles (check omitted for brevity)
++                            triangles.append((v0, sheet[m], sheet[m+1]))
+     return triangles
+ 
+-def identify_x_faces(grid_colors):
+-    """
+-    Returns a set of faces that have alternating black/white corners.
+-    """
+-    x_faces = set()
+-    for face in all_faces:
+-        corners = [grid_colors[n] for n in face.corners]
+-        # Check for alternating pattern: 1,0,1,0 or 0,1,0,1
+-        if (corners[0] != corners[1] and 
+-            corners[1] != corners[2] and 
+-            corners[2] != corners[3] and 
+-            corners[3] != corners[0]):
+-            x_faces.add(face)
+-    return x_faces
+-
+-def compute_border_edges_non_x(grid_colors, x_faces):
+-    """
+-    For each cube, compute border edges on faces that are NOT X-faces.
+-    """
+-    border_edges = {}
+-    for cube in all_cubes:
+-        edges = []
+-        for face in cube.faces:
+-            if face not in x_faces:
+-                corners = [grid_colors[n] for n in face.corners]
+-                # Find the edge connecting the two mixed-color nodes
+-                # In a non-X face, there is exactly one such edge
+-                edge = find_single_border_edge(corners)
+-                if edge:
+-                    edges.append(edge)
+-        border_edges[cube] = edges
+-    return border_edges
+-
+-def count_loops_per_cube(border_edges):
+-    """
+-    Count the number of disjoint cycles (loops) in the border edges of each cube.
+-    """
+-    counts = {}
+-    for cube, edges in border_edges.items():
+-        # Build adjacency graph of vertices in the cube using edges
+-        # Count connected components that are cycles
+-        counts[cube] = count_cycles(edges)
+-    return counts
+-
+-def resolve_x_faces_globally(x_faces, grid_colors):
+-    """
+-    Use X-face graph to make consistent slashing decisions.
+-    Returns a dict mapping face -> chosen diagonal edge.
+-    """
+-    # Build graph where nodes are X-faces
+-    # Edges connect X-faces that share a cube
+-    graph = build_x_face_graph(x_faces)
+-    
+-    # Traverse graph to make decisions
+-    # This is a global optimization problem
+-    # For simplicity, we assume a greedy or flow-based approach
+-    decisions = {}
++def count_cycles(edges):
++    """[G] Counts disjoint cycles in a graph defined by edges."""
++    adj = {}
++    for u, v in edges:
++        adj.setdefault(u, []).append(v)
++        adj.setdefault(v, []).append(u)
+     visited = set()
+-    
+-    for face in x_faces:
+-        if face not in visited:
+-            # Find connected component
+-            component = bfs(graph, face)
+-            # Solve optimization for component
+-            # Minimize triangle count/genus
+-            component_decisions = optimize_component(component, grid_colors)
+-            decisions.update(component_decisions)
+-            visited.update(component)
+-            
+-    return decisions
+-
+-def resolve_x_cubes_globally(x_cubes, grid_colors):
+-    """
+-    Use Merge Tree to decide whether to connect loops in X-cubes.
+-    Returns a dict mapping cube -> 'connect' or 'separate'.
+-    """
+-    # Build Merge Tree of equivalence classes
+-    merge_tree = build_merge_tree(x_cubes)
+-    
+-    # Traverse tree to make decisions
+-    decisions = {}
+-    for cube in x_cubes:
+-        # Decide based on global topology optimization
+-        # Minimize genus or number of shells
+-        decisions[cube] = optimize_x_cube(cube, merge_tree)
+-        
+-    return decisions
+-
+-def triangulate_sheet(sheet, cube):
+-    """
+-    Triangulate a polygonal sheet within a cube.
+-    """
+-    # Sheet is a list of vertices forming a closed loop
+-    # Use ear clipping or fan triangulation
+-    # Ensure all triangles are inside the cube
+-    triangles = []
+-    if len(sheet) < 3:
+-        return triangles
+-    
+-    # Simple fan triangulation from first vertex
+-    v0 = sheet[0]
+-    for i in range(1, len(sheet) - 1):
+-        v1 = sheet[i]
+-        v2 = sheet[i+1]
+-        triangles.append((v0, v1, v2))
+-        
+-    return triangles
++    cycles = 0
++    for node in adj:
++        if node not in visited:
++            stack = [node]
++            visited.add(node)
++            path = []
++            while stack:
++                curr = stack.pop()
++                path.append(curr)
++                for neighbor in adj.get(curr, []):
++                    if neighbor not in visited:
++                        visited.add(neighbor)
++                        stack.append(neighbor)
++            if len(path) > 2: cycles += 1
++    return cycles
++
++def merge_loops(edges):
++    """[G] Merges disjoint edge sets into a single connected component."""
++    return edges # Simplified; actual implementation unions connected components
++
++def form_sheets(edges):
++    """[G] Groups edges into closed loops (sheets)."""
++    adj = {}
++    for u, v in edges:
++        adj.setdefault(u, []).append(v)
++        adj.setdefault(v, []).append(u)
++    visited = set()
++    sheets = []
++    for node in adj:
++        if node not in visited:
++            sheet = []
++            curr = node
++            prev = None
++            while True:
++                sheet.append(curr)
++                visited.add(curr)
++                neighbors = [n for n in adj[curr] if n != prev]
++                if not neighbors or neighbors[0] == node:
++                    break
++                prev, curr = curr, neighbors[0]
++            sheets.append(sheet)
++    return sheets
+ ```
+ 

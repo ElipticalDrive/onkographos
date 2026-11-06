@@ -1,0 +1,699 @@
+A generative game framework for Unity. Contribute to callum-rose/Assembler development by creating an account on GitHub.
+
+Image → voxel model pipeline: part-based rigged format + LLM generation stages by callum-rose · Pull Request #300 · callum-rose/Assembler · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Implements the locked design (grill session 2026-06-11) for the image → voxel model pipeline: a fresh-start replacement for the VoxelGenerationPipeline generation stages, reusing the existing Assembler.Voxels data/IO layer (VoxelModel, VoxWriter/VoxReader, GoxelTextWriter/Parser, GoxelCoordinateConverter, VoxelBuilder + VoxelScriptExecutor). The old window/stages are untouched for now; retirement is M6.
+New assembly: Assembler.Voxelization
+Format (M0) — the part-based *.vmodel.yaml is the working representation; .vox/Goxel text are exports:
+Records: VoxelRigModel / VoxelPart / PartData (layers | script | mirror | planned) / Pose / SetManifest / ReferenceBrief (+ silhouette).
+Hand-mapped YamlDotNet read/write for vmodel, manifest, brief; layered-ASCII codec; VoxelGridConvert.SwapYZ is the single Y-up ↔ Z-up storage boundary.
+One format addition over the doc: per-part offset places grid cell (0,0,0) in the part's pivot-local frame, so geometry can centre on its joint.
+Mirror convention: point reflection through the local origin (p → -p on the axis); an omitted mirror pivot is derived by reflecting the source pivot.
+Assembly + validation (M1/M2, pure code) — ModelAssembler (codec/script/mirror resolution, pivot accumulation, script-colour remap into the locked palette, compose), ModelValidator (scale vs manifest, floating chunks within parts, child-touches-parent connectivity, palette legality, declared-size bounds, and brief palette + silhouette-IoU checks), VoxelProjector, pure-code front/iso preview PNGs, ModelExporter (rig yaml + per-part .vox + flattened .vox/goxel text), RigInstantiator + naive culled-face vertex-colour mesher behind IPartMeshProvider (swappable for the future runtime greedy mesher).
+LLM stages (M3–M5) — all Claude-facing content standardised on Y-up:
+IAnthropicGateway with per-stage model selection (default Sonnet) and TokenUsageTracker accounting from day one.
+ManifestGenerator (Stage 0), ModelPlanner (Stage 1 — the only vision call when a reference image is attached via IReferenceImageSource; code re-anchors scale to the manifest and demotes over-budget layers parts to scripts), PartAuthor (Stage 2 — fenced layers blocks decoded immediately with error-fed retries; scripts via the run_voxel_script tool loop with a Y-up description override).
+SetOrchestrator: batch over the manifest, assemble → validate → re-author only the offending parts for bounded rounds, then export; failures land as Failed/NeedsReview instead of aborting the batch.
+Editor — Assembler > Voxel Set Review: brief → manifest → batch run → preview gallery with per-model accept / regenerate / refine (note), and per-stage token usage.
+Additive changes to existing assemblies
+Assembler.Anthropic: AnthropicMessage images (base64 blocks built via FromRawUnchecked for SDK-version stability) and an onUsage callback on SendAsync reporting per-request token usage.
+Assembler.Voxels: IVoxelScriptExecutor.RunScriptAsync (deterministic re-run of stored part scripts, shared limits) and an optional tool-description override.
+Tests (39 passing, Tests.Voxelization)
+Codec round-trips + error cases, Y/Z swap involution, mirror geometry/pivot conventions, pivot-chain math, palette-breach remapping, validator failure modes (scale drift / floating chunk / disconnected part / size exceeded / brief palette / silhouette IoU), vmodel/manifest/brief yaml round-trips, per-part .vox round-trip through VoxReader, rig instantiation + pose application, mesher face culling, a hand-written oak-tree script through the real expression compiler, and fake-gateway tests for fence parsing, retry feedback, scale re-anchoring, budget demotion, and the orchestrator end-to-end (incl. failed-plan handling).
+Tools/check-compile.sh clean (0 errors / 0 warnings), Tools/run-tests.sh Tests.Voxelization Tests.Voxels all green, Tools/check-format.sh clean.
+Not in this PR (per plan)
+M6 polish: authoring batching, response caching, curated generator promotion, retiring the old generation stages/window. The M3 quality checkpoint (real LLM runs on the villager/oak/car acceptance set) needs an API key in the editor window.
+🤖 Generated with Claude Code
+callum-rose
+and others
+added 3 commits
+June 11, 2026 23:29
+Image-to-voxel pipeline: part-based rigged model format + LLM generat…
+…
+92ec1c1
+```
+…ion stages
+
+Fresh-start replacement for the VoxelGenerationPipeline generation stages
+(design doc decisions locked 2026-06-11), reusing the existing Voxels
+data/IO layer. New Assembler.Voxelization assembly:
+
+- Format (M0): *.vmodel.yaml part-tree model (palette, pivots,
+  layers/script/mirror part encodings, named poses), set manifest /
+  scale bible, reference brief; hand-mapped YamlDotNet codecs; layered
+  ASCII codec; involutive Y-up <-> Z-up grid swap at the storage boundary.
+- Assembly + validation (M1): ModelAssembler (mirror resolution, pivot
+  accumulation, palette remap, compose), ModelValidator (scale vs
+  manifest, floating chunks, joint connectivity, palette legality,
+  declared-size bounds, brief palette/silhouette IoU), orthographic
+  projector, pure-code front/iso preview renderer, ModelExporter
+  (rig yaml + per-part .vox + flattened .vox/goxel text + preview PNGs),
+  RigInstantiator + naive culled-face mesher with poses.
+- LLM stages (M3-M5): per-stage-model gateway with token accounting,
+  ManifestGenerator, ModelPlanner (vision iff referenced; manifest owns
+  scale; over-budget layers parts demoted to script), PartAuthor (fenced
+  layers with decode-validated retries; Y-up run_voxel_script tool loop),
+  SetOrchestrator with bounded validation-driven targeted re-authoring.
+- Editor: VoxelSetReviewWindow batch + review gallery
+  (accept / regenerate / refine, per-stage token usage).
+- Additive enablers: AnthropicClient image content blocks + onUsage token
+  capture; VoxelScriptExecutor.RunScriptAsync + tool-description override.
+- Tests (39): codec/mirror/assembly/validator/pose/export round-trips,
+  villager fixture, oak-tree script through the real expression compiler,
+  fake-gateway stage tests incl. orchestrator end-to-end.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Tolerate misplaced blank lines in authored layers blocks
+…
+a9eb39e
+```
+Sonnet sometimes separates every row with a blank line (or omits the
+separators), which grouped into the wrong layer count and burned all
+authoring attempts ("Layer 0 has 1 rows but size.z is 2"). When the
+blank-line grouping doesn't yield size.y layers but the total row count
+is exactly size.y * size.z, re-chunk the rows deterministically instead
+of failing. Also bump MaxPartAttempts 2 -> 3 and spell out the
+blank-line rule in the layers prompt.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Review window: scrolling text boxes + estimated API spend
+…
+d54bab0
+```
+Wrap the game-brief and manifest text areas in capped scroll views, and
+show per-stage and total estimated USD spend next to the token usage
+(per-model rates via TokenPricing; cache reads 0.1x input, 5-min cache
+writes 1.25x). The API exposes no balance endpoint to regular keys, so
+estimated spend stands in for a remaining-balance readout.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+callum-rose
+commented
+Jun 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+The log text box is still no scrollable
+It would be good to have more feedback from the generation process, some stages don't update in the logs for a while at the moment. So kind of animation or more info if it's available. The claude code cli is very good at that for reference
+Remove the title "Token Usage" and the label "Estimated from..." because they take up space
+Models that are ready should be exported to the assets folder as they are ready so they can be inspected.
+The preview of the model in the gallery should fill the frame, they can be quite small
+Have a drop-down for the model used for each stage: this should be editable
+I'm not sure if you've done this already but generating each model in parallel would be useful to speed things up
+Make sure the raw data used to create the voxel model is exported alongside the actual model so it can be reused later if needed
+When planning a model, make sure to output what parts are going to be made before generated and output rough information about this
+When starting a re-authoring step make sure you output the reason in the logs
+The logs generally should be more desriptive about what it happening
+If the API fails mid-run (e.g. due to lack of funds) is the process resumable?
+Is the process generally resumable for any reason e.g. if unity re-compiles and we lose the state of the process in memory, or if the internet drops
+For the reference image folder text field add a folder icon which opens up a folder dialog to select
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+It would also be useful to have a timer somewhere in the window for how long the whole process has taken
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+The reviewable information per model in the gallery needs to be scrollable horiz and vert because it's being clipped at the moment
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Move the logs and token usage (and timer) to the right of the right of the window in their own column
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+The models have not come out symmetrical. The left and right sets of car wheels are different distances from the car body for example. Need more rigourous checking for that kind of thing
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+The villager also was not symmetrical. I think we need to be stricter about generating a model only on one side of it's plane of symmetry and then just mirroring it.
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+The tree looks good but it went through many rounds of adjustment. I think we need to loosen some of the rules for certain things, e.g. floating leaves isn't that bad, compared to a floating hand
+Address PR #300 review: symmetry rigour, loose parts, parallel batch,…
+…
+c34f6c4
+```
+… window UX
+
+Pipeline:
+- Bilateral symmetry is now enforced: the manifest's symmetry rides on
+  VoxelRigModel, the planner prompt forbids authoring both sides (one
+  side + mirror parts, centre parts symmetric about the x plane), and
+  the validator adds an occupancy mirror-IoU check across the composed
+  bbox centre plane (Asymmetric issue, threshold 97%).
+- Parts can declare loose: true (foliage/scatter) to permit disconnected
+  chunks; the planner decides per part — a floating leaf is fine, a
+  floating hand is not. Cuts needless re-author rounds on trees.
+- Assets in a batch generate in parallel.
+- Richer progress: plan part list before authoring, per-part authoring
+  detail, assembly voxel counts, every validation issue, and the reason
+  for each re-author round.
+- reference_brief.yaml exports alongside the model; the vmodel yaml
+  already carries all raw generation data (layers + scripts).
+- AnthropicGateway streams a live activity line (chars streamed).
+
+Review window:
+- Right sidebar: run timer, live streaming status, compact per-stage
+  usage + estimated spend (title/footnote removed), working scrollable
+  auto-following log.
+- Per-stage model dropdowns (sonnet/haiku/opus), persisted.
+- Models auto-export to the output folder the moment they finish, so
+  completed work is inspectable immediately and survives domain reloads.
+- Gallery previews scale to fill their frame; per-model info scrolls
+  both axes instead of clipping; folder-picker button for the reference
+  image folder; batch runs all assets concurrently.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+callum-rose
+commented
+Jun 11, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+All comments addressed in c34f6c4 — mapping each to its resolution:
+Symmetry (car wheels / villager)
+The manifest's symmetry now rides on the model, the planner prompt forbids authoring both sides (one side + mirror: parts only; centre parts must be symmetric about the x plane, side-part pivots exact reflections), and there's a new rigorous check: the validator mirrors the composed occupancy across the bbox-centre x plane and flags Asymmetric below 97% IoU. The off-by-one wheel case fails this check.
+Tree re-author rounds / floating leaves
+Parts can now declare loose: true (foliage, scatter, debris) — disconnected chunks within them are allowed. The planner is told to mark foliage-like parts loose and never limbs ("a floating leaf is fine, a floating hand is not").
+Window / UX
+Log box: fixed (the scroll content height was never being set); it also auto-follows new entries.
+Live feedback: the gateway now streams an activity line (stage + chars streamed) shown in the sidebar, so long model calls visibly tick instead of going quiet; plus a run timer (mm:ss, live).
+"Token Usage" title + estimate footnote removed; usage + spend moved with the timer and log into a right-hand sidebar column.
+Previews scale to fill their frame; per-model review info scrolls both axes instead of clipping.
+Per-stage model dropdowns (sonnet / haiku / opus), persisted across sessions.
+Folder-picker icon button on the reference image folder field.
+Process
+Models auto-export to the output folder the moment they finish (Accept became Re-export), so they're inspectable immediately.
+Assets in a batch now generate in parallel.
+Raw data: the .vmodel.yaml always carried the full generation source (every layers block + part script — it can rebuild the model); the reference brief now exports alongside it as reference_brief.yaml.
+Logs: the plan is printed before authoring starts (part list with encoding/size/notes, palette/pose counts, target height), each authoring step shows what's being made, assembly reports voxel counts, every validation issue is listed, and each re-author round logs its reason.
+Resumability (questions)
+Honest answer: a run is not resumable mid-asset today — orchestration state is in memory, so an API failure, dropped connection, or domain reload loses the in-flight asset. What this commit does give you: assets are independent and auto-export on completion, so finished models survive anything, and recovery is per-asset (Regenerate just the ones that didn't finish) rather than per-batch. True mid-asset checkpointing (persisting the plan + each authored part as it lands, then resuming from the last part) is a natural follow-up since the vmodel yaml can already represent a half-authored model — happy to do that as its own PR if you want it.
+One note: I left your generated Assets/Resources/Voxels/Sets/** outputs and the Voxel Toolkit material changes out of the commit — they're still on disk, just untracked. Say the word if you'd like the example set committed.
+callum-rose
+and others
+added 7 commits
+June 12, 2026 01:41
+Reject bilaterally-doomed plans before authoring; attribute asymmetry…
+…
+8b6bd33
+```
+… to parts
+
+The man mimic test exposed why bilateral models came out lopsided: the
+planner chose even-width centre parts at pivot x=0 (a 4-wide grid at
+offset -2 spans -2..1 and can never straddle the plane), and the
+whole-model Asymmetric issue carried no part id, so the targeted
+re-author loop could not act on it. The planning prompt's own example
+taught the failure (size [4,4,2], offset [-2,0,-1]).
+
+- PlanGeometryChecks: deterministic plan-stage rejection — centre parts
+  must be odd-width and centred (offset.x = -(size.x-1)/2), every side
+  part needs an x-mirror twin at the reflected world pivot, mirrors must
+  reflect exactly. ModelPlanner feeds violations back (3 attempts).
+- ModelValidator: parts sitting on the mirror plane are now checked
+  cell-by-cell (colours included) with the issue attributed to the part,
+  so re-authoring targets the offender.
+- ModelPlanner symmetrizes the vision-extracted silhouette in code for
+  bilateral assets (mirror union per row) so a lopsided read cannot
+  poison authoring or the IoU oracle.
+- Prompts: exact centre-part formula, odd-width example, silhouette
+  symmetry rule, and a per-part SYMMETRY notice when authoring a
+  mirror-plane part.
+- References/: goxel ground-truth man, rendered front-view reference
+  image, and the mimic-test manifest.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Show authors what they built: ASCII views in re-author feedback + sil…
+…
+b79fe54
+```
+…houette in prompts
+
+Part authors were drawing blind: they never saw the reference silhouette
+(only the planner did), and re-author feedback quoted issue strings
+without showing the geometry. Now:
+
+- VoxelProjector.Ascii renders colour-keyed ASCII projections (top row
+  first) — the authoring model writes ASCII layers, so it reads ASCII
+  views; costs ~nothing vs a vision round-trip.
+- Re-author feedback embeds FRONT/SIDE/TOP views of the assembled model
+  plus the reference silhouette. Back/bottom/left/right add nothing for
+  bilateral models, so three views suffice.
+- PartUser always states the part's world-cell extent, and includes the
+  brief's front silhouette so each part is authored against the whole.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Snap script grids into their window; reject plans whose boxes can't c…
+…
+3323353
+```
+…over the silhouette
+
+The man 2 logs showed two mechanical failure classes. Script authors
+build the right shape at the origin instead of the declared offset,
+cascading into SizeExceeded plus every DisconnectedPart issue — the
+assembler now snaps a grid that fits its declared size into the window
+with the minimal per-axis shift (genuinely oversized grids still fail).
+And SilhouetteMismatch carried no part id, so shape-level problems
+(stubby 4-tall arms vs the reference's long thin ones) never drove the
+loop — and couldn't be fixed by it anyway, since part sizes are fixed at
+plan time.
+
+Shape is now policed at the plan stage: part voxels can never leave
+their declared boxes, so any reference-silhouette cell no box reaches is
+unfillable by authoring. PlanGeometryChecks.SilhouetteFeasibilityError
+projects the planned boxes (mirrors reflected), compares them to the
+silhouette in the model's height-anchored frame, and bounces the plan
+back with a PLANNED vs REFERENCE ASCII diff when coverage is under 90%
+(new SilhouetteCoverageThreshold).
+
+Prompts: small parts (<~100 voxels) are always layers — no more flaky
+scripts for 4-voxel limbs; limb-proportion rule (arms reach mid-thigh,
+1 voxel thick, never stubby); PartUser spells out the allowed local cell
+window next to the world extent.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Ignore sets for now
+2d3167f
+Feasibility gate: tolerate silhouette blob noise, check overall width…
+…
+6313151
+```
+… strictly
+
+man 3 produced a CORRECT plan (arms at +/-3 with gap columns at +/-2,
+matching the reference) but the vision-extracted silhouette had blobbed
+the arm rows solid, so the 90% coverage gate rejected the plan three
+times and failed the asset. The silhouette is a guess, not ground truth.
+
+- Coverage threshold drops to 80%: blob noise (gaps read as solid) costs
+  a correct plan a few percent, never tens.
+- New strict width check: blobbing never moves a silhouette's bounds, so
+  planned overall width more than 1 voxel off the height-anchored
+  expected width is a reliable doomed-plan signal on its own (this is
+  what actually catches the 5-wide man 2 class).
+- Box alignment now centres by planned width rather than midpoint
+  rounding, so even/odd width pairs don't drop a column.
+- Vision prompt: mark gaps between limbs and body as '.', never blob
+  shapes together.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Split perception from planning; add a post-validation review round
+…
+9cfb4f8
+```
+man 4 proved the authors faithfully obey the plan — the plan itself asked
+for 3-wide arms. Root cause: one call produced both the reference brief
+and the plan, so the model harmonised its "transcription" with its design
+(a 9-wide silhouette to justify chunky arms) and every deterministic gate
+then validated the plan against its own hallucination.
+
+- New BriefExtractor (stage 1-brief): a dedicated vision call that ONLY
+  transcribes the image — palette, proportions, cell-accurate silhouette
+  (count carefully, mark limb/body gaps, bilateral symmetrized in code).
+  It has no plan to defend.
+- ModelPlanner now receives the brief as locked input; the width and
+  box-coverage gates judge the plan against independent ground truth.
+  The planning prompt reads limb thickness from silhouette columns.
+- New review round (stage 3-review, MaxReviewRounds=1): after validation,
+  one vision call sees the built ASCII views plus the original reference
+  image and replies OK or numbered corrections; corrections feed a full
+  re-plan as a refinement note. Catches what code checks cannot on a
+  clean pass: upside-down shoes, depth-shifted legs, wrong proportions.
+- PartUser: ground-contact parts are told their first layer is the
+  lowest row (feet in the first layer, never the last).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Harden the silhouette charset and reject malformed plans before autho…
+…
+8c7b31e
+```
+…ring
+
+man 5's IoU 0.00 unmasked the failure: the extractor transcribed
+silhouette rows with palette letters instead of '#', so occupancy
+parsing saw an all-empty silhouette — zero IoU at validation AND a
+silently neutered feasibility gate, which let a 20-tall 9-wide plan
+through unchallenged. The follow-up re-plan then added defects the
+re-author loop can never fix (children declared before parents, 13
+voxels tall, an invented #111111 outside the locked palette).
+
+- SilhouetteSpec.IsSolid: any non-'.'/' '/'_' cell counts as solid, so
+  colour-keyed transcriptions degrade gracefully instead of zeroing
+  every check. Used by the IoU matcher and the feasibility target.
+- BriefExtractor trims fully-empty margin rows/columns and re-anchors
+  the declared size — vision pads subjects with margin, inflating every
+  width-anchored check downstream.
+- PlanGeometryChecks now rejects, for ALL models: children declared
+  before parents / mirrors before sources (HierarchyInvalid is
+  unfixable by re-authoring), box stacks of the wrong height (±1), and
+  geometry floating above y=0.
+- ModelPlanner rejects plan palettes outside the locked brief palette
+  at plan time instead of discovering it after the authoring spend.
+- Prompts: brief rows use ONLY '#'/'.'; include every colour down to
+  2-cell details (eyes); no margin; planner declares parents first and
+  attaches limbs at the joint (shoulder row) instead of floating them.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+callum-rose
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Editor window improvements:
+For each run create a subfolder that contains all the models generated in that run. Current all models are in the root folder where they can collide
+Export the logs for each session into this subfolder
+Clear the logs on each run, and add a manual clear logs button
+Each new log entry should have some indicator that it's a new log e.g. a divider between all logs, or a tint on the first few words of the log, or a bullet point. Whatever just to break up the logs
+For each model add the gallery box from the beginning but just having some kind of processing message or animation
+Each gallery item message text is not scrollable, the text should also be copyable like the logs
+callum-rose
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Sometime the preview for a model is oriented at a weird angle. For example I tried to generate a chicken but the preview was point at it's back. Perhaps there's not a way to solve this but it would be good to have a general way to prompt the model to face in the expected direction e.g. a human should face forward, a car should face the same forward etc
+callum-rose
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Should the processing system also see a coloured silhouette of the generate model from all sides in the ASCII format? This may help to demo better to the model what's already made. This may already be implemented but if it's not can you consider the merits of this addition
+callum-rose
+commented
+Jun 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Author
+Currently the system can generate voxel using either an ASCII representation or it can write a script to output this procedurally. Can we also add the ability to declare primitive shape & combinations of these to create a model. There's not point in writing a script to generate a box when we can just say "box 5x5x5". An example where this would be great is generating a car: it's basically comprised of a main body (big box on the bottom, small box on top) and 4 wheels (4 shallow cylinders). Primitives I'd consider are: cuboid, sphere (& hemi), cylinder (& hemi). It would also be cool to have some edge rounding available to these e.g. a rounded cuboid
+Primitives encoding, facing convention, back view, review-window run …
+…
+89ee8f1
+```
+…folders
+
+Addresses the latest PR #300 comments:
+
+- New `primitives` part encoding: declarative box / sphere / cylinder
+  lines (with `round R` edge rounding and `half ±axis` clips for
+  hemispheres and domes), rasterized deterministically by
+  PrimitivesCodec — no script needed to build a box. The planner is
+  steered to it for geometric parts (car bodies, wheels, trunks) and
+  PartAuthor decodes the fenced block immediately so grammar errors
+  retry in-call.
+- Facing convention in every prompt: the subject's front (face, beak,
+  headlights) goes on the high-z side, towards the viewer — fixes
+  models authored facing backwards.
+- BACK ASCII view added to the re-author/review feedback for
+  non-bilateral models (front + side + top already flow through);
+  ProjectionFace.Back mirrors x and ranks nearest from behind.
+- Review window: each run exports into its own run-<timestamp>
+  subfolder (no more collisions) with the session log written
+  alongside; logs clear per run plus a manual Clear button; entries
+  open with a bullet + run timestamp; gallery boxes appear immediately
+  with a live processing line per asset; per-model info is one
+  selectable (copyable) label scrolling both axes.
+
+86/86 Tests.Voxelization, compile clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+callum-rose
+commented
+Jun 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+All four new comments addressed in 89ee8f1 — mapping each to its resolution:
+Editor window improvements
+Per-run subfolder: every run now exports its models into <output folder>/run-<timestamp>/<asset id>/, so successive runs never collide. Re-export after the run writes to the same run folder.
+Logs exported: the full session log is written to run-<timestamp>/session.log when the run finishes.
+Logs clear on each run, and there's a manual Clear button next to the Log header in the sidebar.
+Log entry markers: every entry now opens with a bullet plus the run timestamp (• [02:13] villager: planning...), so entries are easy to tell apart.
+Gallery boxes from the start: the moment a batch (or single regenerate/refine) starts, each asset gets a placeholder box with an animated generating... frame and a live line showing that asset's latest progress message. It's replaced by the real result box when the asset finishes; a regenerating existing model shows the live line inside its box.
+Gallery text scrollable + copyable: the per-model info is now one selectable label (copy like the log) inside a scroll view that scrolls both axes.
+Preview orientation / facing
+The iso preview camera already looks at the front-right of the model — the chicken was actually authored facing backwards. There's now an explicit facing convention in the shared coordinate doc that every stage's prompt (planning, authoring, review) inherits: the subject faces the viewer — front (face, eyes, beak, chest, headlights, windshield) on the high-z side, back/tail on low z. Reference-image models were mostly immune (the brief pins the front view); this mainly fixes unreferenced assets like the chicken.
+Coloured ASCII silhouettes from all sides
+Mostly already in: since the last round, every re-authoring call and the post-validation review get colour-keyed ASCII projections (palette letters, nearest voxel wins) of the whole assembled model — FRONT, SIDE and TOP — plus the reference silhouette. On the merits of all six views: for bilateral models left/right are mirrors and BACK adds almost nothing over FRONT+SIDE, and BOTTOM almost never disambiguates — so the extra tokens buy nothing. The one real gap was the back of asymmetric models, so a BACK view (x mirrored, as seen from behind) is now included whenever the model isn't bilateral.
+Primitive shapes
+Added as a full third encoding, primitives — there's now no reason to script a box:
+```
+box      KEY minX minY minZ sizeX sizeY sizeZ   [round R]
+sphere   KEY cx cy cz r                         [half +y]   <- hemisphere/dome
+cylinder KEY axis baseX baseY baseZ r h         [half -z]
+```
+One shape per line, later lines overwrite earlier, centres/radii may be fractional (a 4-wide wheel is a cylinder centred at x=1.5), round R gives rounded cuboids, and half clips give hemispheres and half-cylinders. It's rasterized deterministically in code (no LLM tool loop, no compile step), clipped to the declared part window, and validated like layers. The planner is told to pick primitives for geometric parts — car bodies, wheels, trunks, poles, walls — keeping layers for organic detail and script only for parametric patterns primitives can't express. The shape lines are stored verbatim in the vmodel yaml, so exported models stay rebuildable/hand-editable.
+Verified: compile clean, 86/86 Tests.Voxelization (17 new: rasterizer geometry incl. rounding/hemisphere/fractional centres, yaml round-trip, assembler integration, author retry loop, back view).
+callum-rose
+and others
+added 5 commits
+June 12, 2026 14:02
+Top-down iso preview, voxel-unit manifests, one-asset rule, copy parts
+…
+5d3cd78
+```
+- RenderIso projected depth upwards, so nearer voxels drew higher —
+  the preview read as viewed from below. Depth now grows away from the
+  camera (above the front-right corner): a proper top-down dimetric.
+- Generated manifests always use unit 1 with real_world_height as the
+  height in voxels — only relative scale matters. The prompt sizes
+  everything against a keystone (~10-16 voxel person) and
+  ManifestGenerator normalizes any metres-style response
+  deterministically, preserving each asset's voxel height.
+- Manifest prompt: ONE asset per distinct thing — a car's wheels and
+  body are parts of its rig, never separate assets; split only what
+  the game places independently.
+- New `copy: { source: <part> }` part data: prefab-like verbatim reuse
+  of a sibling's geometry positioned by the copy's own pivot (four
+  identical wheels: author one, mirror one, copy the rear pair).
+  Assembler resolves it from the already-resolved source; plan checks
+  enforce declaration order, count copy boxes towards vertical extent
+  and silhouette feasibility (resolving through copy chains), and
+  require mirror twins for off-centre copies on bilateral models.
+
+94/94 Tests.Voxelization, compile clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Per-asset bounding-box targets with tolerance, enforced plan-time and…
+…
+72d39c7
+```
+… post-build
+
+Fixes the recurring wide-car failure: height was the only gated
+dimension, so a car's length had nowhere to be enforced and routinely
+landed across x. Every asset now carries its full bounding box in a
+fixed shared orientation — height (y, up), length (z, the FORWARD
+axis: nose-to-tail), width (x, left-right) — plus a `tolerance` (±
+voxels, default 1) controlling how strictly each specified extent is
+enforced.
+
+- Manifest: `height`/`length`/`width`/`tolerance` per asset (the
+  legacy `real_world_height` key still reads); the generator prompt
+  demands the full box with correct aspect (a car is longer than
+  wide); unit normalization converts all extents.
+- The targets ride on VoxelRigModel (target_length / target_width /
+  size_tolerance in the vmodel yaml) so exported models keep them.
+- Plan gate: part-box spans are checked on all specified axes within
+  tolerance before any authoring spend, alongside ground contact.
+- Validator: the composed model's x/z extents are checked too, and
+  the height tolerance now respects size_tolerance.
+- Planner prompt states the orientation convention (long dimension on
+  z, never x; wheelbase exceeds track) and the user message spells out
+  the target box; the reviewer sees measured vs target dimensions as
+  numbers instead of inferring proportions from ASCII.
+
+z stays the forward axis (matches Unity's Transform.forward).
+
+102/102 Tests.Voxelization, compile clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Gallery model stats + operator style guidance threaded through genera…
+…
+2c4ea6a
+```
+…tion
+
+- Each gallery item shows the assembled dimensions (wide x tall x
+  long), voxel count, and part count under its title.
+- New persistent "Style guidance" text area in the review window:
+  set-wide hints ("prefer rounded boxes", "only as many parts as
+  needed", "prefer simplicity") carried on VoxelizationConfig and
+  injected into the planning, part-authoring, and review prompts —
+  the reviewer is told the guidance is intentional so it doesn't
+  flag adherence as a defect. The brief extractor stays untouched
+  so transcription remains an honest read of the reference.
+
+104/104 Tests.Voxelization, compile clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Make the game brief text area scrollable
+…
+feaf86c
+```
+The text area sized itself to the scroll viewport, so content taller
+than the box was clipped instead of scrolling — same fix as the log:
+size the field to its content via CalcHeight.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Game brief box: fixed viewport, explicit content height, so it scrolls
+…
+ce0fa1a
+```
+Wrapped prose defeats IMGUI's layout-pass height calculation (it
+reports a single line, unlike newline-rich YAML in the manifest box),
+so ExpandHeight never produced overflow and no scrollbar appeared.
+The field now gets an explicit wrap width and its CalcHeight content
+height inside a fixed 120px scroll viewport.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+callum-rose
+and others
+added 4 commits
+June 12, 2026 15:25
+Revert the game brief scroll experiments to the original text area
+…
+688ce19
+```
+Both attempts (content-height + ExpandHeight, then fixed width/height
+inside a fixed viewport) broke the window layout. Back to the plain
+scroll-view + TextArea the manifest box uses.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Per-asset binding description carried from the game brief to every stage
+…
+8208e43
+```
+The game brief died at Stage 0: the manifest had no description field,
+so "a green crossy-road style car" reached the planner as just
+`id: car` and the colour was invented. Each manifest asset now carries
+a `description` the generator must distil from the brief (colours,
+materials, style, distinguishing features — never dropping a stated
+detail), and it is treated as binding downstream: the planner locks
+palette/shapes to it, part authors see it, and the reviewer is told to
+flag departures (e.g. wrong dominant colour). It rides on the model
+(`description:` in the vmodel yaml) so exports keep their provenance.
+
+107/107 Tests.Voxelization, compile clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Word-wrap the text boxes; left panel scrolls vertically only
+…
+78a709d
+```
+EditorStyles.textArea does not word-wrap, so long prose rendered as
+one wide line: it never overflowed vertically (no scrollbar — the
+original brief-box complaint) and pushed the whole left panel wide
+(the horizontal panel scroll). All three text boxes (brief, style
+guidance, manifest) now use a wrapped style inside max-height scroll
+views — wrapped height computes correctly, so each box grows a
+vertical scrollbar once its text outgrows it. The style guidance box
+gains its own scroll view (max 100px), and the outer left panel hides
+its horizontal scrollbar so it can only scroll vertically.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Document the voxelization pipeline in Assets/Voxelization/README.md
+…
+ce019f4
+```
+At-a-glance reference for Claude (and humans): conventions (Y-up,
+z-forward facing, bounding box axes, unit 1), the stage pipeline with
+its deterministic plan gates and feedback loops, the formats and part
+encodings, prompt/config locations, editor/runtime entry points, and
+known gotchas.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+callum-rose
+merged commit 8def0f4
+into
+master
+Jun 12, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

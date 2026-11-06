@@ -1,0 +1,444 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - Close the WebGPU gsplat gap: vertex early-out and flat varyings by royerloic · Pull Request #3152 · royerlab/luxar
+
+Close the WebGPU gsplat gap: vertex early-out and flat varyings by royerloic · Pull Request #3152 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Member
+Closes #3140.
+Why
+The WebGL vs WebGPU study measured 10M normal-blend splats about 24% slower on WebGPU (render gate gpuMs, RTX 3070). A control run showed the gap wasn't specific to normal blending:
+case
+WebGL
+WebGPU
+10M normal
+56.6 ms
+69.5 ms
+10M volumetric
+58.0 ms
+70.3 ms
+10M additive
+60.1 ms
+61.5 ms
+The density guard thins half of each 10M scene (uDensityDrop = 0.5). GLSL returns before any texel fetch for a dropped splat; the TSL vertex stage fetched and projected every splat and only then chose the reject position. With depth-sorted order those wasted fetches are scattered.
+What
+In materials/gsplat/shader-tsl.ts:
+Vertex early-out: density thinning, then the label filter, then the near/coverage fade each nest in an If(), so a rejected splat does no fetch or covariance work. The body is split into helpers for the lint caps.
+Flat varyings: the per-splat varyings are flat, as in GLSL. vClipZW stays interpolated for the glass partition.
+Fragment guard: the work after the truncation test sits in the non-discard branch. WGSL discard only demotes the invocation, so that work used to run anyway.
+Measured
+obsidian RTX 3070, WebGPU gpuMs, 5 rounds, each variant against the unchanged code:
+case
+before
+after
+10M normal
+71.2 ms
+54.0 ms (WebGL 56.6)
+10M volumetric
+70.1 ms
+54.9 ms (WebGL 58.0)
+10M additive
+61.8 ms
+57.2 ms
+5M volumetric
+53.2 ms
+50.9 ms
+1M normal
+9.7 ms
+9.1 ms
+Attribution:
+The early-out gives nearly all of the 10M gain.
+Flat varyings give about 4–5% on 5M volumetric and nothing measurable on 10M normal.
+The fragment guard gives about 1.3–1.5% on 10M normal in two separate comparisons, within overlapping CIs. I kept it because it is small and exact.
+Testing
+Exact suite: ULP class, all 8 splat cases on webgl, webgpu and webgpu-gl, both pixel densities, every pose. 162 rows, 0 px different, zero drift. No GLSL changed.
+New wgsl-codegen.test.ts: builds the real material through WGSLNodeBuilder and pins the structure (flat varyings, no fetch before the density test, projection inside the fade block). Each partial variant fails it.
+Other checks: materials unit tests, typecheck and lint pass. lint:prune lowered two suppression counts.
+WebGPU frame time on the sorted 10M cases is still above WebGL's (about 93 vs 66 ms). That is CPU/sort-side and outside this change.
+royerloic
+commented
+Oct 16, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Let's fix this PR and merge it when green.
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Review of 16bbdb1
+This brings the TSL gsplat vertex stage in line with the GLSL twin's early returns. Density thinning, then the label filter, then the near/coverage fade each nest in an If(), so a rejected splat skips the fetch and the projection. The per-splat varyings become flat, and the fragment work past the truncation test moves into the Else of the discard. The perf case in the body is convincing. The restructure itself is equivalent: I diffed the generated WGSL before and after across 24 material variants and found nothing to change in it. One varying qualifier does need changing.
+Findings
+major: @interpolate(flat) breaks the gsplat pipeline on WebGPU compatibility-mode devices
+packages/luxar-viewer/src/rendering/materials/gsplat/shader-tsl.ts:698-706. setInterpolation('flat') with no sampling argument emits @interpolate( flat ). WGSL defaults that to flat, first, and Dawn rejects first sampling on a compat device. I checked this in Chrome by creating a pipeline with a two-stage module on requestAdapter({ featureLevel: 'compatibility' }) (device without core-features-and-limits):
+flat → The interpolation sampling (First) of the vertex output at location 0 is not supported in compatibility mode (ValidateInterStageMatching)
+flat, first → same error
+flat, either → ok
+on a core device, all three are ok
+We can reach that path. renderer-setup.ts hands three a device only when it gets a core adapter and requestDevice succeeds. Otherwise it falls through to three's own init, which asks for featureLevel: 'compatibility' (WebGPUBackend.js:213). That covers compat-only hardware (D3D11, GLES) and a failed requestDevice. Before this PR gsplats rendered there. After it, every gsplat material's pipeline fails to build, so gsplat layers disappear. Points, lines and mesh are unaffected.
+Fix: use .setInterpolation('flat', 'either') on all five varyings. That is exact, not an approximation: every value is per-splat, and every reject decision is per-splat, so all four quad vertices carry identical values and the choice of provoking vertex can't matter. Three uses flat, either for its own auto-flat integer varyings for the same reason (WGSLNodeBuilder.js ~2002). Update the comment above the declarations to say why it is either.
+minor: the codegen test would accept the compat-breaking qualifier
+packages/luxar-viewer/src/tests/unit/rendering/materials/gsplat/wgsl-codegen.test.ts:97. The filter is v.includes('@interpolate( flat )'), so it pins exactly the spelling that fails on compat devices. Once the fix above is in, it would also stop matching. Assert @interpolate( flat, either ) for the five varyings, and update the header comment's point 1.
+nit: the component count is 10, not 12
+shader-tsl.ts:695 ("interpolates 12 constant components") and changelog.d/3140.md:16 ("twelve constant components"). vColor 3 + vAmplitude2D 1 + vAlpha 1 + vL2D 3 + vCenterScreen 2 = 10. Fix the number in both places.
+Considered and dropped
+The changelog's numbers differ slightly from the PR body's (57.1 vs 57.2 ms, 50.8 vs 50.9 ms). This is rounding, it isn't in shipped code, and it isn't worth a round.
+On rejected splats the varyings now keep their prologue defaults instead of computed values. That doesn't matter, because the primitive is clipped at z = -2 either way, and vClipZW is still assigned outside the blocks.
+What I checked and found clean
+WGSL validity: I built the real GSplatTSLMaterial through WGSLNodeBuilder for additive/normal/volumetric/max/luminous/opaque × {plain, colormap, colormap+gamma, gain/offset/gamma}, at this head and at 25be026. All 48 modules pass naga --validate, uniformity analysis included. That matters here because the fragment work now sits inside non-uniform control flow, and the shaded fragment path has no implicit-derivative texture samples. The vertex colormap LUT read lowers to an explicit textureLoad, so it is legal inside the nested If.
+Equivalence: I compared the before/after WGSL by hand.
+The reject set is the same: density, label and fade are now hoisted, and invalidAmp || invalidCov || footprintCulled is still evaluated at the end.
+NaN handling is unchanged. A NaN fade isn't rejected early, as before. A NaN mahalSq still takes the non-discard side, because the test is still >.
+Every value read past a block boundary (clipOut, mahalSq) is a .toVar() emitted before the block.
+The uDensityAlphaExp If in normal mode emits correctly inside the new Else.
+The glass partition guard still runs first in the fragment, on the interpolated vClipZW.
+GLSL twin: it does have the matching flat qualifiers and returns (shader-glsl.ts:84-90, 131-308), so the README paragraph is accurate.
+Tests and static checks: vitest run src/tests/unit/rendering/materials/gsplat passes (8 files, 165 tests). pnpm typecheck is clean, and eslint is clean on both touched files at the lowered suppression counts.
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+The compat-mode qualifier issue is fixed locally. The WGSL codegen test now requires flat, either for all five per-splat varyings and passes; I’m running the viewer suite and static checks before pushing.
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed the review fixes in a3306c3. All five gsplat varyings now generate @interpolate( flat, either ), which keeps flat values valid on compatibility-mode WebGPU; the WebGL fallback still emits flat. The codegen test requires that qualifier and fails if any one of the five reverts. I also corrected the component count to ten in the shader comment and changelog, and updated the material README. Local checks passed: 18,102 viewer unit tests (one skipped), typecheck, lint, and Prettier.
+This was referenced Oct 17, 2026
+WebGPU: every blend-mode switch costs ~12 ms of CPU (TSL graph rebuild)
+#3161
+Closed
+WebGPU: large depth-sorted scenes are CPU-bound (10M splats 93 vs 66 ms per frame)
+#3162
+Open
+TSL texel fetches pay an identity UV-matrix multiply
+#3167
+Closed
+WebGPU parity: MSAA samples, colour depth, renderer info, GPU errors, glass resolution
+#3143
+Open
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Re-review of a3306c3 (delta since 16bbdb1)
+This round answers the three findings from the last review. All three are addressed, and the delta adds nothing new that needs another round.
+Prior findings
+major, compat-mode flat. Fixed. All five per-splat varyings in shader-tsl.ts:700-715 now use .setInterpolation('flat', 'either'). Three's WGSLNodeBuilder (~1994) turns that into @interpolate( flat, either ). On the WebGL fallback, GLSLNodeBuilder's interpolationModeMap maps only centroid, so either drops out and GLSL still gets plain flat. The fallback output is unchanged. either is exact here, as discussed last round: every value is per-splat. The comment above the declarations explains why.
+minor, codegen test. Fixed. wgsl-codegen.test.ts:97 now requires @interpolate( flat, either ) on exactly five inputs. The fragmentInputs regex was changed to stop at the closing paren rather than the first comma, because the old [^,]* would have cut the qualifier at flat,. Mutation check: if any varying goes back to bare flat, the count drops to 4 and the test fails. The header comment is updated too.
+nit, component count. Fixed. It now says ten in both the shader comment and changelog.d/3140.md. The README paragraph now names the either form as well.
+Checked and clean
+vitest run src/tests/unit/rendering/materials/gsplat: 8 files, 165 tests pass.
+pnpm typecheck is clean. eslint is clean on shader-tsl.ts and wgsl-codegen.test.ts. Prettier is clean on the three touched source and doc files.
+Callers are unaffected. The delta only changes interpolation qualifiers inside gsplatWebGPUFactory, and no other module reads these varyings.
+Deferred
+The same bare .setInterpolation('flat') pattern exists outside this PR, in the line draw shaders and in line, mesh and gsplat picking. It predates this branch, and some of those sites, such as the mesh pick's gl_VertexID element id, depend on the provoking vertex, so they need case-by-case thought rather than a sweep. I added it to #3143, the open WebGPU-parity issue, rather than growing this PR.
+No remaining findings. Good to go.
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+The review fixes are in place. The remaining red TypeScript job reaches the coverage slack guard: the new WGSL codegen test raised global and rendering line coverage past their recorded floors. I’m reproducing the CI check locally, then I’ll update those floors from the measured report and rerun the viewer checks.
+royerloic
+mentioned this pull request
+Oct 17, 2026
+Compat-mode WebGPU: line draw and picking varyings still emit bare @interpolate(flat)
+#3177
+Closed
+royerloic
+added a commit
+that referenced
+this pull request
+Oct 17, 2026
+test(viewer): tighten coverage floors after gsplat codegen test (#3152)
+7bc1f73
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Pushed 7bc1f73. The TypeScript job failed because the gsplat WGSL codegen test raised measured line coverage beyond the existing slack budget. I raised the global lines floor from 90 to 92 and the rendering lines floor from 84 to 86, with recorded baselines of 93.16% and 87.76% from the CI and local reports. The full coverage suite passed locally (885 files, 18,102 tests passed, one skipped); check:coverage-slack now passes all 49 floors. Typecheck, lint, layer and knip checks passed in the local check:ci run. That initial run had two unrelated timing-sensitive test failures under host load; both passed on an isolated rerun (195 tests across the gsplat and affected test files), and the subsequent full coverage run was green.
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Re-review of 7bc1f73 (delta since a3306c3)
+The only change since the last review is packages/luxar-viewer/coverage-thresholds.mjs. The a3306c3 TypeScript job went red on check:coverage-slack, not on any test: the new WGSL codegen test pushed two line floors past the 3-point slack budget. This commit raises them as the guard asked.
+Findings
+None that need another round.
+Checked and clean
+It matches the failing run. The a3306c3 CI log (run 38985251586) failed on exactly two rows: global lines, floor 90 against measured 93.16, and src/rendering/** lines, floor 84 against 87.76. The guard's own remedy was "raise to 92 / 86 and record 93.16 / 87.76", and the delta does exactly that. New slack is 1.16 and 1.76, inside the budget with margin. No other floor or recorded value moved, and the remaining erosion lines in that log are warnings, not failures.
+The cause is this PR. Recent green dev runs (38886198802, 38880143193) measure global lines at 92.88 (slack 2.9) and rendering lines at 86.50. So the branch adds about +0.3 global and +1.3 in rendering, which is what you'd expect from running the gsplat TSL factory body through WGSLNodeBuilder. That's enough to cross the 3-point line on a floor already sitting at 2.9.
+Consumers. vitest.config.ts and scripts/check-coverage-slack.mjs both import the object, and there's no other copy. scripts/check-coverage-slack.test.mjs passes locally (29 tests). The edit is plain numbers and comments, so the shape is unchanged.
+Branch state. It merges cleanly with current origin/dev.
+Dropped as not worth a round
+The new global comment says the codegen test "raised measured line coverage to 93.16". Most of the gap from the old 91.00 baseline was dev drift (dev already sits at 92.88). The PR only pushed it over the line. That's slightly loose wording in a comment, not a correctness problem.
+The shader changes and the three earlier findings were settled in the previous round and are untouched here. Good to go once the TypeScript job comes back green on this head.
+royerloic
+enabled auto-merge (squash)
+October 17, 2026 05:13
+royerloic
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Final review of 7bc1f73 — approved.
+This closes #3140 as specified: the WebGPU gsplat vertex stage now returns early like the GLSL twin (density, label, near/coverage fade), the five per-splat varyings are flat, either, and the fragment work past the truncation test sits in the non-discard branch. The issue asked for the volumetric control run and ULP-class exactness on both backends; both are in the PR body, and 10M normal lands within the noise floor of WebGL (54.0 vs 56.6 ms).
+What I checked on top of the two earlier rounds:
+The compat-mode flat, either fix from round one is in, and the codegen test now requires that exact qualifier on all five inputs.
+The reject set is unchanged: density, label and fade are hoisted; invalidAmp || invalidCov || footprintCulled is still decided at the end, and every value read past a block boundary is a .toVar() emitted before it.
+vitest run src/tests/unit/rendering/materials/gsplat: 8 files, 165 tests pass at this head. tsl-parity is green on the head.
+Cross-PR: six open PRs (Make the pip install route and the skills honest for new users #3124–Show true data intensities in the Layers panel; brightness becomes a layer gain #3128, Sync docs with the wild-test fixes; undo intensity_scale when scoring against the source #3151, Round-3 new-user friction: fit overwrite guard, region-aware compare, demo ports, quieter viewer, volumetric guidance #3175) list shader-tsl.ts, but all carry the same uDisplayGain hunk from Show true data intensities in the Layers panel; brightness becomes a layer gain #3128. git merge-tree of this head against Show true data intensities in the Layers panel; brightness becomes a layer gain #3128's head is conflict-free, and that multiply lands inside emitVisibleSplat where it belongs.
+The coverage-floor bump matches the failing guard's own remedy; no other floor moved.
+The bare flat sites elsewhere are recorded on #3143. Good to merge once the TypeScript job reports green on this head.
+royerloic
+mentioned this pull request
+Oct 17, 2026
+Guard WebGPU DPR render-target lifetime (#3171)
+#3183
+Merged
+royerloic
+marked this pull request as draft
+October 17, 2026 07:45
+auto-merge was automatically disabled
+October 17, 2026 07:45
+Pull request was converted to draft
+This was referenced Oct 17, 2026
+Fix compatibility-mode WebGPU flat varyings in line and pick shaders
+#3186
+Merged
+Test HDR mega-shader variants and tone curve (#3173)
+#3190
+Merged
+Skip UV matrices for element texel loads
+#3194
+Merged
+Avoid copying full WebGPU sort orders before upload
+#3198
+Merged
+Native WebGPU E2E project (chromium-webgpu)
+#3154
+Merged
+Avoid WebGPU node rebuilds for blend-state-only switches
+#3200
+Merged
+Clear dev-red: raise src/rendering coverage floor past the slack budget
+#3202
+Merged
+royerloic
+and others
+added 2 commits
+October 18, 2026 18:26
+Close the WebGPU gsplat gap: vertex early-out, flat varyings (#3140)
+…
+3b38f1f
+```
+The TSL gsplat vertex stage fetched and projected every splat before choosing
+the reject position, while GLSL returns before any fetch for density-thinned,
+label-filtered and faded splats. With the density guard thinning half of a 10M
+scene (and depth-sorted order making those fetches scattered), that cost
+WebGPU 69-71 ms vs WebGL 56.6 ms. Each stage now nests in an If(), the
+per-splat varyings are flat as in GLSL, and the post-truncation fragment work
+sits in the non-discard branch.
+
+obsidian RTX 3070, WebGPU gpuMs, 5 rounds: 10M normal 71.2 -> 54.0 ms
+(WebGL 56.6), 10M volumetric 70.1 -> 54.9 (WebGL 58.0), 10M additive
+61.8 -> 57.2, 5M volumetric 53.2 -> 50.9, 1M normal 9.7 -> 9.1. Exact suite
+(ULP class, 8 splat cases x webgl/webgpu/webgpu-gl x dsf x poses): 0 px
+differ. A WGSL codegen test pins the early-out structure.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+fix(gsplat): use compat-safe flat varyings on WebGPU (#3140)
+b305a47
+royerloic
+force-pushed
+the
+issue-3140-gsplat-normal-webgpu-perf
+branch
+from
+7bc1f73 to
+b305a47
+Compare
+October 19, 2026 01:43
+royerloic
+marked this pull request as ready for review
+October 19, 2026 07:46
+test(viewer): refresh coverage floors after gsplat codegen tests (#3140)
+…
+1649d6f
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+royerloic
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Review of 1649d6f
+This head is a rebase of the branch onto 1c54257 (v2026.10.19 prep) plus a regenerated coverage-floor commit. git range-diff shows the two shader commits (3b38f1f, b305a47) are patch-identical to 16bbdb1 / a3306c3 from the earlier rounds. The old 7bc1f73 floor commit is replaced by 1649d6f, which re-measures on the new base. I still re-read the whole change at this head rather than relying on the earlier rounds.
+What the PR does: the TSL gsplat vertex stage now nests density thinning → label filter → near/coverage fade in If() blocks (fetchSplat → projectSplatCentre → emitVisibleSplat), so a rejected splat skips the texel fetch and the covariance work, as the GLSL twin's returns do. The five per-splat varyings are flat, either, and the fragment work past the truncation test sits in the Else of the discard. Closes #3140.
+Findings
+None. Nothing for the fixer this round.
+Checked and clean
+Reject set and equivalence (shader-tsl.ts:1053-1080, :1037). Density, label and fade are hoisted. invalidAmp || invalidCov || footprintCulled is still decided at the end. The reject position is identical (z = -2), and vClipZW is still assigned outside the blocks from clipOut. Every value read across a block boundary (clipOut, mahalSq, the fetched aX values) is a .toVar() emitted before the block.
+Generated WGSL is valid. I built the real GSplatTSLMaterial through WGSLNodeBuilder with a colormap texture bound for additive / normal / volumetric / max / luminous. All 10 vertex and fragment modules pass naga validation. The vertex LUT read lowers to textureLoad (no implicit-derivative sample), so it is legal inside the nested If.
+The codegen test is a real guard. With shader-tsl.ts reverted to the base, wgsl-codegen.test.ts fails in all three modes. At this head it passes, and so do the other gsplat material tests (8 files, 165 tests).
+Coverage floors. 1649d6f raises global functions from 88 to 90 (recorded 91.03) and moves the recorded src/rendering/** lines from 90.79 to 91.96. typescript-tests is green on this head. That run started before Blend warm-up on WebGPU, and an earlier WebGPU start #3150 landed on dev, so I also merged current origin/dev (b5886ce) into a scratch copy and ran the full coverage suite: 893 files, 18,311 passed. check:coverage-slack reports all 49 floors within budget. On the merged tree src/rendering/** lines measures 91.97 against floor 89, a slack of 2.97 with no headroom left. That floor is dev's, not this PR's, and it passes today. Expect the next PR that adds rendering tests to have to raise it.
+Merge with dev. git merge-tree against origin/dev is clean. Blend warm-up on WebGPU, and an earlier WebGPU start #3150 touches eslint-suppressions.json in different keys (the blend-warmup rename), and the two suppression counts this PR lowers on shader-tsl.ts still hold.
+Static checks. pnpm typecheck is clean. eslint is clean on shader-tsl.ts and wgsl-codegen.test.ts. readme-claims.test.ts passes with the new README paragraph, which names fetchSplat / projectSplatCentre / emitVisibleSplat / wgsl-codegen.test.ts.
+Callers. gsplatWebGPUFactory is consumed by material-tsl.ts, the TSL registry and the GLSL wrapper's fallback path. The signature and node interface are unchanged. The pick factory shares gsplatQuadFootprintTSL, which this PR doesn't touch.
+Dropped
+The full-suite run had one timeout, the barrel-import version.test.ts, under host load. It passed on the rerun and has nothing to do with this change.
+The bare flat sites outside gsplat drawing are still tracked on #3143, per the earlier round. Good to merge once the remaining CI legs are green.
+royerloic
+commented
+Oct 19, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Final review of 1649d6f — approved.
+This closes #3140 as specified. The TSL gsplat vertex stage now rejects early like the GLSL twin (density thinning before any texel fetch, the label filter after it, the near/coverage fade before the covariance projection), the five per-splat varyings are flat, either, and the fragment work past the truncation test sits in the non-discard branch. The issue's volumetric control run and ULP-class exactness on both backends are in the PR body, and 10M normal lands inside WebGL's noise floor.
+Checked at this head on top of the earlier rounds:
+The reject set is unchanged: densityDropped is a pure hash of the per-instance sorted index plus a uniform, so hoisting it ahead of the fetch is exact; invalidAmp || invalidCov || footprintCulled is still decided at the end, and vClipZW is assigned from the toVar outside the blocks.
+The GLSL fallback is untouched by the qualifier change: three's interpolationModeMap maps only centroid, so either drops out and the fallback still emits plain flat; the WGSL builder emits @interpolate( flat, either ). The compat-mode finding from round one is fixed and pinned by the codegen test.
+tsl-parity (gsplat, colormap, display-gain, gamma-one, off-centre, thin-cov against the GLSL twin) and typescript-tests are green on this head; the gsplat material suite passes locally (8 files, 165 tests).
+merge-tree against current origin/dev is clean. The only other open PR touching shader-tsl.ts is draft Skip UV matrices for element texel loads #3194, whose shader hunk auto-merges; its sole conflict is the coverage-floor numbers file, which it re-measures anyway.
+Good to merge.
+Hide details
+View details
+royerloic
+merged commit a7e675b
+into
+dev
+Oct 19, 2026
+14 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+issue-3140-gsplat-normal-webgpu-perf
+branch
+October 19, 2026 09:25
+This was referenced Oct 19, 2026
+WebGPU parity: MSAA samples, colour depth, renderer info, GPU error routing
+#3153
+Merged
+Prime WebGL blend draw state during warm-up
+#3204
+Merged
+royerloic
+added a commit
+that referenced
+this pull request
+Oct 19, 2026
+Refresh the TSL codegen snapshots for #3152 and #3194
+…
+0fc89cb
+```
+Both changed the generated shaders (the gsplat vertex early-out; integer
+texel coordinates instead of UV matrices) without updating the E2E
+snapshots, which CI does not run. Regenerated on obsidian and verified in
+the chromium and chromium-webgpu projects.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+royerloic
+mentioned this pull request
+Oct 19, 2026
+Fix the native WebGPU recovery E2E and refresh codegen snapshots
+#3220
+Merged
+royerloic
+added a commit
+that referenced
+this pull request
+Oct 19, 2026
+Fix the native WebGPU recovery E2E and refresh codegen snapshots (#3220)
+…
+ef86277
+```
+* Point the native recovery E2E at the fixture that has an origin marker
+
+The flat labelled-points fixture has no 'Origin marker'; its Point 5 sits
+between the camera and the origin, so the pick returned it. The partitioned
+sibling carries the marker. The device-loss console.error is expected, so the
+test now allows it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Refresh the TSL codegen snapshots for #3152 and #3194
+
+Both changed the generated shaders (the gsplat vertex early-out; integer
+texel coordinates instead of UV matrices) without updating the E2E
+snapshots, which CI does not run. Regenerated on obsidian and verified in
+the chromium and chromium-webgpu projects.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Read the gsplat reach-radius block at any indent
+
+The draw variants now compute it inside the vertex early-out from #3140,
+three levels deeper than the pick shader, so the parity test matched no
+block in the refreshed snapshots. Match it at any depth and compare it
+dedented.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+* Forgive only the device-lost log line in the native recovery E2E
+
+The annotation opts the whole test out of the fixture's console gate; the
+test now collects console errors and page errors itself and fails on any
+but the expected loss message (on top of the default allow-list).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+---------
+
+Co-authored-by: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

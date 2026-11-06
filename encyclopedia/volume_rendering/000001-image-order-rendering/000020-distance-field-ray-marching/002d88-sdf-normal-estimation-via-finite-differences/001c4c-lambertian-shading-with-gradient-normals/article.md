@@ -3,41 +3,41 @@
 Also called: Gradient Normal Lambertian Shading, Lambertian Lighting with SDF, Diffuse Lighting with Gradient Normals, Lambertian Shading
 
 ## Overview
-Lambertian Shading with Gradient Normals is a surface shading technique for ray-marched signed distance fields (SDFs) or scalar volumes that approximates the surface normal using the numerical gradient of the field, then applies the Lambertian reflectance model to compute diffuse illumination [S1, S4, S6, unofficial]. It solves the problem of shading implicit surfaces that lack explicit mesh normals, allowing for realistic diffuse lighting without polygonization artifacts [S4, S5, unofficial]. Unlike sibling methods that may use analytic normals, tetrahedral interpolation, or regularization, this method relies exclusively on finite-difference gradient estimation of the scalar field $f$ (or $\phi$) at the hit point [S1, S3, S4, unofficial].
+Lambertian Shading with Gradient Normals is a surface shading technique for ray-marched signed distance fields (SDFs) or scalar volumes that approximates the surface normal using the numerical gradient of the field, then applies the Lambertian reflectance model to compute diffuse illumination [S1, unofficial][S4, unofficial][S6, unofficial]. It solves the problem of shading implicit surfaces that lack explicit mesh normals, allowing for realistic diffuse lighting without polygonization artifacts [S4, unofficial][S5, unofficial]. Unlike sibling methods that may use analytic normals, tetrahedral interpolation, or regularization, this method relies on finite-difference or analytic gradient estimation of the scalar field $f$ (or $\phi$) at the hit point [S3, unofficial].
 
 ## How it works
 **Inputs:**
-- Ray origin $\mathbf{o}$ and direction $\mathbf{r}$ (normalized) [S2, S6, unofficial].
-- Signed distance field function $f(\mathbf{p})$ returning the distance to the nearest surface [S1, S6, unofficial].
-- Light direction $\mathbf{l}$ (normalized, pointing from surface to light) [S1, S3, unofficial]. Default: $(1.0, 1.0, 1.0)$ if not provided [S3, unofficial].
+- Ray origin $\mathbf{o}$ and direction $\mathbf{r}$ (normalized) [S6, unofficial].
+- Signed distance field function $f(\mathbf{p})$ returning the distance to the nearest surface [S1, unofficial][S6, unofficial].
+- Light direction $\mathbf{l}$ (normalized, pointing from surface to light) [S1, unofficial][S3, unofficial]. Default: $(1.0, 1.0, 1.0)$ if not provided [S3, unofficial].
 - Surface color $\mathbf{c}_{surf}$ (RGB, range $[0, 1]$). Default: $(0.8, 0.5, 0.3)$ [S3, unofficial].
 - Ambient light intensity $a$ (range $[0, 1]$). Default: $0.1$ [S3, unofficial].
 - Background color $\mathbf{c}_{bg}$ (RGB, range $[0, 1]$). Default: $(0.2, 0.2, 0.2)$ [S3, unofficial].
 - Hit threshold $\epsilon$ (distance tolerance). Default: $0.001$ [S6, unofficial].
 
 **Outputs:**
-- Shaded pixel color $\mathbf{c}_{out}$ (RGB) [S3, S6, unofficial].
+- Shaded pixel color $\mathbf{c}_{out}$ (RGB) [S3, unofficial].
 
 **Data Structures:**
 - Point $\mathbf{p} \in \mathbb{R}^3$: Current ray position [S6, unofficial].
 - Normal $\mathbf{n} \in \mathbb{R}^3$: Estimated surface normal [S1, unofficial].
-- Gradient $\nabla f \in \mathbb{R}^3$: Numerical gradient of the SDF [S1, S4, unofficial].
+- Gradient $\nabla f \in \mathbb{R}^3$: Numerical gradient of the SDF [S1, unofficial][S4, unofficial].
 
 **Steps:**
 
-1. **Ray Marching:** March along the ray $\mathbf{p}(t) = \mathbf{o} + t\mathbf{r}$ using the SDF $f(\mathbf{p})$ to find the first intersection where $f(\mathbf{p}) < \epsilon$ [S5, S6, unofficial]. If no intersection is found within the maximum steps, return $\mathbf{c}_{bg}$ [S3, unofficial].
+1. **Ray Marching:** March along the ray $\mathbf{p}(t) = \mathbf{o} + t\mathbf{r}$ using the SDF $f(\mathbf{p})$ to find the first intersection where $f(\mathbf{p}) < \epsilon$ [S5, unofficial][S6, unofficial]. If no intersection is found within the maximum steps, return $\mathbf{c}_{bg}$ [G].
 
-2. **Gradient Estimation:** Compute the gradient $\nabla f$ at the hit point $\mathbf{p}$ using central finite differences [S3, S4, unofficial]. For a step size $h$ (typically the SDF's resolution or a small constant like $10^{-4}$):
+2. **Gradient Estimation:** Compute the gradient $\nabla f$ at the hit point $\mathbf{p}$ using central finite differences [S3, unofficial][S4, unofficial]. For a step size $h$ (typically the SDF's resolution or a small constant like $10^{-4}$):
    $$
    \nabla f(\mathbf{p}) \approx \left( \frac{f(\mathbf{p} + h\mathbf{e}_x) - f(\mathbf{p} - h\mathbf{e}_x)}{2h}, \frac{f(\mathbf{p} + h\mathbf{e}_y) - f(\mathbf{p} - h\mathbf{e}_y)}{2h}, \frac{f(\mathbf{p} + h\mathbf{e}_z) - f(\mathbf{p} - h\mathbf{e}_z)}{2h} \right)
    $$
-   where $\mathbf{e}_x, \mathbf{e}_y, \mathbf{e}_z$ are unit vectors along the axes [S4, unofficial].
+   where $\mathbf{e}_x, \mathbf{e}_y, \mathbf{e}_z$ are unit vectors along the axes [G].
 
 3. **Normal Normalization:** Normalize the gradient to obtain the surface normal $\mathbf{n}$:
    $$
    \mathbf{n} = \frac{\nabla f}{\|\nabla f\|}
    $$
-   If $\|\nabla f\| < 10^{-5}$, the gradient is degenerate; return $\mathbf{c}_{surf}$ (or base color) without shading [S7, unofficial].
+   If $\|\nabla f\| < 10^{-5}$, the gradient is degenerate; return base RGB without shading [S7, unofficial].
 
 4. **View Direction:** Compute the view direction $\mathbf{v}$ as the negative ray direction:
    $$
@@ -59,7 +59,7 @@ Lambertian Shading with Gradient Normals is a surface shading technique for ray-
    $$
    \text{ndotl} = \max(0.0, \text{ndotl})
    $$
-   [S2, S3, unofficial].
+   [S2, unofficial][S3, unofficial].
 
 7. **Lighting Intensity:** Combine ambient and diffuse lighting:
    $$
@@ -190,8 +190,8 @@ def lambertian_shading_with_gradient_normals(ray_origin, ray_direction, sdf_func
 ```
 
 **Edge Cases and Pitfalls:**
-- **Degenerate Gradients:** If the gradient magnitude is near zero (e.g., at flat regions or singularities), normalization fails. Return base color or handle gracefully [S7, unofficial].
-- **Precision:** Finite differences are sensitive to the step size $h$. Too large $h$ causes aliasing; too small $h$ causes floating-point noise [S4, S7, unofficial].
+- **Degenerate Gradients:** If the gradient magnitude is near zero (e.g., at flat regions or singularities), normalization fails. Return base RGB without shading [S7, unofficial].
+- **Precision:** Finite differences are sensitive to the step size $h$. Too large $h$ causes aliasing; too small $h$ causes floating-point noise [G].
 - **Back-Facing Normals:** The gradient points in the direction of increasing distance. For the outside of an object, this is outward. However, if the ray hits the inside of a hollow object, the normal may face inward. Flipping based on view direction ensures consistent shading [S7, unofficial].
 - **Grid Artifacts:** In volume rendering, low-resolution grids can cause jagged normals. Tricubic interpolation can mitigate this for liquid surfaces [S5, unofficial].
 
@@ -216,16 +216,16 @@ Estimates normals by interpolating within tetrahedral cells of a volume. It prov
 Computes normals from explicit polygonal faces. It is not applicable to pure SDF ray marching unless the SDF is converted to a mesh.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per hit point, but requires 6 additional SDF evaluations for the gradient (central differences). Total cost is proportional to the number of ray march steps plus 6 SDF calls per hit.
-- **Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are needed beyond the SDF function.
-- **Performance:** Fast and simple to implement. The main cost is the extra SDF evaluations. On GPU, this can be optimized by batching gradient calculations if multiple rays hit the same region, but typically it is done per-pixel.
-- **Strengths:** Simple, robust, works with any SDF, no preprocessing required.
-- **Limitations:** Gradients can be noisy near sharp features or at low resolutions. Finite differences may not capture the true normal accurately if the SDF is not smooth.
-- **When to Use:** When shading implicit surfaces without explicit normals is required, and performance is a concern. Suitable for real-time ray marching.
-- **When Not to Use:** When high-quality normals are critical for complex lighting (e.g., specular highlights), or when the SDF is not smooth. In such cases, consider [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) or [Normal Regularization](3704-normal-regularization.md).
+- **Time Complexity:** $O(1)$ per hit point, but requires 6 additional SDF evaluations for the gradient (central differences). Total cost is proportional to the number of ray march steps plus 6 SDF calls per hit [G].
+- **Memory Complexity:** $O(1)$ auxiliary memory. No additional data structures are needed beyond the SDF function [G].
+- **Performance:** Fast and simple to implement. The main cost is the extra SDF evaluations. On GPU, this can be optimized by batching gradient calculations if multiple rays hit the same region, but typically it is done per-pixel [G].
+- **Strengths:** Simple, robust, works with any SDF, no preprocessing required [G].
+- **Limitations:** Gradients can be noisy near sharp features or at low resolutions. Finite differences may not capture the true normal accurately if the SDF is not smooth [G].
+- **When to Use:** When shading implicit surfaces without explicit normals is required, and performance is a concern. Suitable for real-time ray marching [G].
+- **When Not to Use:** When high-quality normals are critical for complex lighting (e.g., specular highlights), or when the SDF is not smooth. In such cases, consider [Tetrahedral Normal Estimation](1986-tetrahedral-normal-estimation.md) or [Normal Regularization](3704-normal-regularization.md) [G].
 
 ## Background
-Lambertian shading with gradient normals originates from the field of volume rendering and implicit surface rendering. Max (1995) described using the gradient of a scalar field to approximate contour surface normals for direct volume rendering, enabling shading without polygonization [S4, S1, unofficial]. This approach was later adopted in ray marching for SDFs, where the gradient of the distance field provides a natural normal estimate [S1, S6, unofficial]. It is widely used in real-time graphics, particularly in demoscene and procedural geometry rendering, due to its simplicity and efficiency [S2, S6, unofficial].
+Lambertian shading with gradient normals originates from the field of volume rendering and implicit surface rendering. Max (1995) described using the gradient of a scalar field to approximate contour surface normals for direct volume rendering, enabling shading without polygonization [S4, unofficial][S1, unofficial]. This approach was later adopted in ray marching for SDFs, where the gradient of the distance field provides a natural normal estimate [S1, unofficial][S6, unofficial].
 
 ## Sources
 [S1] Raymarching Distance Fields (2013), http://9bitscience.blogspot.com/2013/07/raymarching-distance-fields_14.html, fetched 2026-10-26 (unofficial)

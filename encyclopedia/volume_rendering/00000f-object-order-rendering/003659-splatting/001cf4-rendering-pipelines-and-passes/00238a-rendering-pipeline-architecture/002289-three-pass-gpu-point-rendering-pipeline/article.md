@@ -1,0 +1,145 @@
+# Three-Pass GPU Point Rendering Pipeline
+Also called: Hardware Accelerated Point Splatting Pipeline
+
+## Overview
+The Three-Pass GPU Point Rendering Pipeline is a hardware-accelerated method for rendering point clouds or splatted primitives by separating depth occlusion, color accumulation, and normalization into distinct rendering stages [S1, unofficial]. It solves the problem of correctly blending overlapping splats with varying filter weights on standard graphics hardware without requiring complex software sorting or custom fragment shaders for every pixel [S1, unofficial]. Unlike the [Single-Pass Splat Rendering Pipeline](1254-single-pass-splat-rendering-pipeline.md), which attempts to compute weights and colors in one go, this method uses an intermediate depth buffer to resolve occlusion before accumulating color, ensuring that only the front-most contributions are weighted correctly [S1, unofficial]. It differs from [Splat Attributes Pass](1066-splat-attributes-pass.md) by explicitly handling the normalization of accumulated weights in a final dedicated pass rather than embedding it in the attribute computation [S1, unofficial].
+
+## How it works
+**Inputs:**
+*   A set of 3D points with associated attributes (position, color, filter variance/weight).
+*   Camera projection matrices (intrinsic and extrinsic).
+*   Viewport dimensions (width $W$, height $H$).
+
+**Outputs:**
+*   A final 2D image where each pixel contains the correctly blended color of the visible splats.
+
+**Data Structures:**
+*   **Framebuffers:** Three framebuffers are typically used or reused across passes:
+    1.  **Depth Buffer:** Stores depth values. Initialized to infinity or cleared per pass.
+    2.  **Color Buffer:** Stores accumulated color values (RGB).
+    3.  **Weight Buffer:** Stores accumulated filter weights (alpha or scalar sum). *Note: The source [S1, unofficial] implies weight accumulation happens implicitly or via the blending state, but explicitly mentions dividing by accumulated filter weights in Pass 3. Standard implementations often use a separate buffer or the alpha channel for weights. Based on [S1, unofficial], the color blending computes the weighted sum, implying the weight is part of the blend equation or stored separately. We assume a standard setup where Color and Weight are accumulated.*
+    4.  **Stencil/Depth Test Buffer:** Used for occlusion culling.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def three_pass_point_rendering(points, camera, viewport):
+    """
+    Renders points using the three-pass pipeline.
+    
+    Args:
+        points: List of point objects with pos (x,y,z), color (r,g,b), and weight (w).
+        camera: Camera object with project() method returning screen coords and depth.
+        viewport: Tuple (width, height).
+    """
+    W, H = viewport
+    
+    # Initialize Framebuffers
+    # depth_buffer: stores depth values, initialized to infinity
+    depth_buffer = [[float('inf')] * W for _ in range(H)]
+    
+    # color_buffer: stores accumulated color, initialized to (0,0,0)
+    color_buffer = [[(0.0, 0.0, 0.0)] * W for _ in range(H)]
+    
+    # weight_buffer: stores accumulated filter weights, initialized to 0
+    weight_buffer = [[0.0] * W for _ in range(H)]
+    
+    # Pass 1: Render Depth Image
+    # Render a depth image of the scene slightly offset along the viewing rays.
+    # This establishes the occlusion boundary.
+    for point in points:
+        # Project point to screen space
+        sx, sy, depth = camera.project(point.pos)
+        
+        # Check if within viewport
+        if 0 <= sx < W and 0 <= sy < H:
+            # Offset depth slightly to avoid z-fighting in subsequent passes
+            # The source mentions "slightly offset along the viewing rays"
+            # This is often done by rendering the point's depth with a small bias
+            # or by rendering the splat's bounding depth.
+            # For a point, we use the point's depth.
+            current_depth = depth_buffer[sy][sx]
+            
+            # Update depth buffer if this point is closer
+            # Note: In hardware, this is done via Depth Test with GL_LEQUAL
+            if depth < current_depth:
+                depth_buffer[sy][sx] = depth
+
+    # Pass 2: Accumulate Color
+    # Draw splats using only depth tests (no updates to depth buffer), 
+    # with color blending enabled. Accumulate color values.
+    # The blending function typically adds the splat's color weighted by its alpha/weight.
+    # However, to compute the weighted sum correctly for normalization, 
+    # we must also accumulate the weights.
+    
+    # Reset depth buffer for the next stage? 
+    # The source says "using only depth tests". This implies we use the depth 
+    # established in Pass 1 to cull fragments.
+    
+    for point in points:
+        sx, sy, depth = camera.project(point.pos)
+        
+        if 0 <= sx < W and 0 <= sy < H:
+            # Depth test: only process if point is closer than stored depth
+            if depth <= depth_buffer[sy][sx]:
+                # Accumulate color and weight
+                # Assuming point has color (r,g,b) and weight w
+                r, g, b = point.color
+                w = point.weight
+                
+                # Accumulate weighted color
+                cr, cg, cb = color_buffer[sy][sx]
+                color_buffer[sy][sx] = (cr + r * w, cg + g * w, cb + b * w)
+                
+                # Accumulate weight
+                weight_buffer[sy][sx] += w
+
+    # Pass 3: Normalize Color
+    # Normalize color values by dividing through the accumulated filter weights.
+    final_image = [[(0.0, 0.0, 0.0)] * W for _ in range(H)]
+    
+    for y in range(H):
+        for x in range(W):
+            cr, cg, cb = color_buffer[y][x]
+            w = weight_buffer[y][x]
+            
+            if w > 0:
+                final_image[y][x] = (cr / w, cg / w, cb / w)
+            else:
+                final_image[y][x] = (0.0, 0.0, 0.0)
+                
+    return final_image
+```
+
+**Parameters:**
+*   **Rendering Primitive:** OpenGL points are used instead of quads or triangles [S1, unofficial].
+*   **Depth Offset:** A small offset is applied to the depth in Pass 1 to ensure correct occlusion in Pass 2 [S1, unofficial]. The exact value is implementation-dependent but must be sufficient to prevent z-fighting [G].
+*   **Blending Function:** In Pass 2, the blending function must accumulate the weighted color. Typically, `glBlendFunc(GL_ONE, GL_ONE)` is used if the color is pre-multiplied by weight, or a custom blend equation is used [G]. The source [S1, unofficial] states "color blending enabled" and "computing the weighted sum", implying the fragment shader outputs `color * weight` and the blend function adds it.
+
+**Edge Cases and Pitfalls:**
+*   **Numerical Ill-conditioning:** Computing the variance matrix for splat shape may require inversion of the projective mapping, which can be ill-conditioned if the splat degenerates into a line segment [S1, unofficial].
+*   **Zero Weight:** If a pixel has no accumulated weight (background), division by zero must be handled in Pass 3 [G].
+*   **Depth Precision:** Using a single depth buffer for both occlusion culling and depth testing in Pass 2 requires careful handling of depth values to avoid artifacts [G].
+
+## Subtopics
+
+### Standard Point Splatting Assembly
+This variant refers to the core assembly step where point colors are written to a canvas based on depth sorting and a fixed or implicit radius [S2, unofficial]. It differs from the general pipeline by explicitly sorting points by depth and iterating in ascending order, writing color only if the point's depth is less than the current depth at that pixel [S2, unofficial]. It is chosen when software-based depth sorting is preferred or when the hardware pipeline needs to be emulated in a compute shader [S2, unofficial]. The process involves initializing canvases (depth with infinity, color/label with zeros, index with -1), sorting points, iterating and writing, and finally masking unwritten pixels [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ for projection and rasterization, where $N$ is the number of points. The normalization pass is $O(W \times H)$, where $W, H$ are viewport dimensions.
+*   **Memory Complexity:** $O(W \times H)$ for the framebuffers (depth, color, weight).
+*   **Performance:** Hardware-accelerated, leveraging GPU rasterization units. The separation into three passes allows for efficient use of depth testing hardware [S1, unofficial].
+*   **Strengths:** Correct handling of occlusion and weighted blending; simple to implement on standard OpenGL/DirectX pipelines [S1, unofficial].
+*   **Limitations:** Requires multiple passes over the framebuffer; potential for z-fighting if depth offset is not handled correctly; ill-conditioned variance matrix inversion for edge cases [S1, unofficial].
+*   **When to Use:** When rendering point clouds with varying densities and requiring accurate occlusion and blending on standard GPU hardware [S1, unofficial].
+*   **When Not to Use:** When real-time performance is critical and the number of points is very large, as the multiple passes and framebuffer reads/writes can be costly [G].
+
+## Background
+The method originates from research on perspective-accurate splatting for hardware acceleration [S1, unofficial]. It builds on previous methods for hardware-accelerated point splatting described in [1, 6, 22] (cited in [S1, unofficial]). The key innovation is the use of a depth offset in the first pass and the separation of color accumulation and normalization to handle perspective distortion and varying filter weights accurately [S1, unofficial].
+
+## Sources
+[S1] Perspective Accurate Splatting, http://infoscience.epfl.ch/record/149345, fetched 2026-10-26 (unofficial)
+[S2] Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, https://github.com/Luhao03/Point-Splatting-Multi-View-2D-Rendering-Pipeline, fetched 2026-10-28 (unofficial)

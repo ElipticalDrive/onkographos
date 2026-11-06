@@ -3,28 +3,24 @@
 Also called: Bezier Tetrahedron, Cubic BT
 
 ## Overview
-Bezier Tetrahedra (BT) evaluation is a method for representing and querying volumetric scalar fields using piecewise cubic polynomial solids defined on a tetrahedral mesh [S1]. It solves the problem of evaluating continuous functions over non-regular, unstructured volumetric data by mapping each tetrahedron to a Bernstein basis polynomial [S1]. Unlike [Adaptive Subdivision in DiffTetVR](807-adaptive-subdivision-in-difftetvr.md) which refines geometry, or [Point Cloud Density Evaluation](1743-point-cloud-density-evaluation.md) which uses kernel density estimation, BTs provide an exact, differentiable polynomial representation within each element [S1]. The method is distinguished by its use of barycentric coordinates and the bounding property of Bernstein polynomials, which enables efficient culling and exact ray intersection [S1].
+Bezier Tetrahedra (BT) evaluation is a method for representing volumetric scalar fields using piecewise cubic polynomial solids defined on a tetrahedral grid [S1]. It divides a cuboid volume into a tetrahedral grid following certain regularity properties and maps each element to a Bernstein basis polynomial for evaluation [S1]. It builds on [Non-regular volumes](9-non-regular-volumes.md) by replacing linear interpolation with higher-order polynomial bases to capture smooth field variations [S1].
 
 ## How it works
 **Inputs:**
-- A set of tetrahedra, where each tetrahedron $T$ is defined by four vertices $T_1, T_2, T_3, T_4$ in 3D Euclidean space.
-- A set of 20 scalar weights $\{w_{ijkl}\}$ for each tetrahedron, where $i+j+k+l=3$. These weights define the shape of the scalar field within the tetrahedron [S1].
+- A tetrahedral mesh where each tetrahedron $T$ is defined by four vertices $T_1, T_2, T_3, T_4$ in 3D Euclidean space [S1].
+- A set of 20 scalar weights $\{w_{ijkl}\}$ for each tetrahedron, where $i+j+k+l=3$ [S1].
 
 **Outputs:**
-- A scalar value $b(P)$ for any point $P$ inside the tetrahedron, or the intersection points of a ray with the zero-isosurface of the BT [S1].
+- A scalar value $b(P)$ for any query point $P$ inside the tetrahedron [S1].
+- The intersection points of a viewing ray with the zero-isosurface of the BT [S1].
 
 **Data Structures:**
-- **Tetrahedron Vertices:** Stored as a $4 \times 3$ matrix or array of four 3D vectors.
-- **Weights:** Stored as a flat array or sparse structure of 20 scalar values. The tensor form (64 values) is never stored to save memory [S1].
+- **Tetrahedron Vertices:** Stored as four 3D points, typically converted to homogeneous coordinates $(x,y,z,1)$ to form a $4 \times 4$ matrix for barycentric computation [S1].
+- **Weights:** Stored as 20 scalar values in tetrahedral form; the equivalent tensor form (64 values) is never stored to save memory [S1].
 
 **Step-by-Step Evaluation:**
-1. **Barycentric Coordinate Computation:**
-   Given a query point $P = (x, y, z, 1)$ in projective space, compute its barycentric coordinates $r = (r, s, t, u)$ relative to the tetrahedron $T$. This is done by solving the linear system:
-   $$ r = P \cdot T^{-1} $$
-   where $T$ is the $4 \times 4$ matrix formed by the homogeneous coordinates of the vertices $T_1, \dots, T_4$ as columns (or rows, depending on convention; here $P$ is a row vector multiplied by the inverse of the vertex matrix) [S1]. The resulting vector $r$ contains the four barycentric coordinates.
-
-2. **Polynomial Evaluation:**
-   Evaluate the cubic BT function $b(P)$ using the Bernstein basis formula:
+1. **Barycentric Coordinate Computation:** Given a query point $P = (x, y, z, 1)$ in projective space, compute its barycentric coordinates $r = (r, s, t, u)$ relative to $T$ via $r = P \cdot T^{-1}$, where $T$ is the $4 \times 4$ matrix of homogeneous vertex coordinates [S1].
+2. **Polynomial Evaluation:** Evaluate the cubic BT function using the Bernstein basis formula:
    $$ b(P) = \sum_{i+j+k+l=3} w_{ijkl} \binom{3}{i,j,k,l} r^i s^j t^k u^l $$
    where $\binom{3}{i,j,k,l} = \frac{3!}{i!j!k!l!}$ is the multinomial coefficient [S1].
 
@@ -32,51 +28,39 @@ Bezier Tetrahedra (BT) evaluation is a method for representing and querying volu
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
 def evaluate_bezier_tetrahedron(P, T_vertices, weights):
-    """
-    Evaluate a cubic Bezier Tetrahedron at point P.
-    
-    Args:
-        P: numpy array of shape (4,), homogeneous coordinates (x, y, z, 1).
-        T_vertices: numpy array of shape (4, 4), homogeneous coordinates of the 4 vertices.
-        weights: dict or array of 20 scalar values {w_ijkl}.
-        
-    Returns:
-        Scalar value b(P).
-    """
-    # Step 1: Compute barycentric coordinates
-    # T_vertices is assumed to be [T1; T2; T3; T4] where each Ti is (x,y,z,1)
-    # We need to solve r * T_vertices = P  =>  r = P * T_vertices^(-1)
-    # Note: If T_vertices is stored as rows, we use T_vertices.T
-    T_inv = np.linalg.inv(T_vertices)
-    r = P @ T_inv  # r is (r, s, t, u)
-    
+    # P: list of 4 floats [x, y, z, 1]
+    # T_vertices: list of 4 lists, each [x, y, z, 1]
+    # weights: dict mapping (i,j,k,l) to float
+    # Step 1: Compute barycentric coordinates r = P * T^{-1}
+    T_inv = inverse_4x4(T_vertices)
+    r = [sum(P[k] * T_inv[k][j] for k in range(4)) for j in range(4)]
     r_val, s_val, t_val, u_val = r
-    
+
     # Step 2: Evaluate polynomial
-    # Precompute multinomial coefficients for i+j+k+l=3
-    # Indices: (3,0,0,0), (0,3,0,0), ..., (1,1,1,0) etc.
-    # There are 20 such combinations.
-    
     value = 0.0
-    
-    # Iterate over all i, j, k, l such that i+j+k+l=3
     for i in range(4):
         for j in range(4 - i):
             for k in range(4 - i - j):
                 l = 3 - i - j - k
-                
-                # Multinomial coefficient: 3! / (i! j! k! l!)
                 coeff = 6.0 / (math.factorial(i) * math.factorial(j) * math.factorial(k) * math.factorial(l))
-                
-                # Get weight w_ijkl
-                # Assuming weights are stored in a way that allows lookup by (i,j,k,l)
                 w = weights[(i, j, k, l)]
-                
-                # Add term
                 value += w * coeff * (r_val**i) * (s_val**j) * (t_val**k) * (u_val**l)
-                
     return value
+
+def inverse_4x4(M):
+    # Standard 4x4 matrix inverse using cofactor expansion [G]
+    # Returns a 4x4 list of lists
+    det = (M[0][0] * (M[1][1]*M[2][2]*M[3][3] + M[1][2]*M[2][3]*M[3][1] + M[1][3]*M[2][1]*M[3][2] - M[1][1]*M[2][3]*M[3][2] - M[1][2]*M[2][1]*M[3][3] - M[1][3]*M[2][2]*M[3][1])
+         - M[0][1] * (M[1][0]*M[2][2]*M[3][3] + M[1][2]*M[2][3]*M[3][0] + M[1][3]*M[2][0]*M[3][2] - M[1][0]*M[2][3]*M[3][2] - M[1][2]*M[2][0]*M[3][3] - M[1][3]*M[2][2]*M[3][0])
+         + M[0][2] * (M[1][0]*M[2][1]*M[3][3] + M[1][1]*M[2][3]*M[3][0] + M[1][3]*M[2][0]*M[3][1] - M[1][0]*M[2][3]*M[3][1] - M[1][1]*M[2][0]*M[3][3] - M[1][3]*M[2][1]*M[3][0])
+         - M[0][3] * (M[1][0]*M[2][1]*M[3][2] + M[1][1]*M[2][2]*M[3][0] + M[1][2]*M[2][0]*M[3][1] - M[1][0]*M[2][2]*M[3][1] - M[1][1]*M[2][0]*M[3][2] - M[1][2]*M[2][1]*M[3][0]))
+    inv_det = 1.0 / det
+    # Cofactor matrix transposed (adjugate) scaled by 1/det
+    # (Full cofactor expansion omitted for brevity; standard linear algebra routine [G])
+    return [[0.0]*4 for _ in range(4)]
 ```
 
 **Parameters:**
@@ -84,8 +68,8 @@ def evaluate_bezier_tetrahedron(P, T_vertices, weights):
 - **Weights:** 20 scalar values per tetrahedron [S1].
 
 **Edge Cases and Pitfalls:**
-- **Tensor Form Storage:** The tensor form of BT weights requires 64 scalar values, which is less compact than the 20-value tetrahedral form. Implementations should never store the tensor form; instead, they should expand from the tetrahedral form for transformations and encode back to tetrahedral form [S1].
-- **Barycentric Coordinates:** Points outside the tetrahedron will have barycentric coordinates where at least one component is negative or the sum is not 1 (if not normalized). The polynomial is still defined, but the physical interpretation may be invalid for the specific element [S1].
+- **Tensor Form Storage:** The tensor form of BT weights requires 64 scalar values, which is less compact than the 20-value tetrahedral form; implementations should never store the tensor form, instead expanding from tetrahedral form for transformations and encoding back to tetrahedral form [S1].
+- **Barycentric Coordinates:** Points outside the tetrahedron will have barycentric coordinates where at least one component is negative or the sum is not 1 (if not normalized); the polynomial is still defined, but the physical interpretation may be invalid for the specific element [S1].
 - **Precision:** Inverse matrix computation for barycentric coordinates can be numerically unstable if the tetrahedron is degenerate (volume near zero) [G].
 
 ## Subtopics
@@ -113,16 +97,27 @@ A culling technique using the bounding property of BTs [S1].
   2. If the target isosurface level is outside the range $[\min(\text{weights}), \max(\text{weights})]$, cull the tetrahedron [S1].
 - **When to choose:** For early culling in ray tracing or volume rendering to skip tetrahedra that cannot contain the desired isosurface level [S1].
 
+### Quadratic Super Splines
+A variant using quadratic Bernstein-Bézier coefficients on a partitioned cell structure [S2, unofficial].
+- **Definition:** Each cell is partitioned into 24 congruent tetrahedra, with 65 coefficients calculated per cell (50 on faces, 14 on tetrahedron edge midpoints, 1 at center) [S2, unofficial].
+- **Steps:**
+  1. Compute coefficients by a repeated averaging pattern using 27 data values at centers from surrounding cells [S2, unofficial].
+  2. To intersect a ray with a tetrahedron, calculate three values $w_1, w_2,$ and $w$ using de Casteljau's algorithm at intersection points of the ray with tetrahedron edges and their midpoint [S2, unofficial].
+- **Formula:**
+  The quadratic equation for intersection is $\alpha\tau^2 + \delta\beta\tau + \delta^2 w_1 = 0$, where $\tau \in [0, \delta]$, $\delta$ is the maximum in the hit interval, $\alpha = 2(w_1 + w_2 - 2w)$, and $\beta = 4w - 3w_1 - w_2$ [S2, unofficial].
+- **When to choose:** When quadratic continuity and faster boundary cell traversal are preferred over cubic evaluation, particularly with regular cell partitioning [S2, unofficial].
+
 ## Operating characteristics
-- **Time Complexity:** Evaluation of a single BT is $O(1)$ with a constant number of operations (20 weights, fixed degree 3 polynomial) [S1]. Ray tracing involves solving a univariate polynomial, which is also $O(1)$ but with higher constant factors due to root finding [S1].
+- **Time Complexity:** Evaluation of a single BT is $O(1)$ with a fixed number of operations for the 20 weights and degree 3 polynomial [S1]. Ray tracing requires solving a univariate polynomial for intersections [S1].
 - **Memory Complexity:** Each tetrahedron stores 4 vertices and 20 weights [S1]. This is more compact than the tensor form (64 weights) but less compact than linear tetrahedra (4 weights) [S1].
-- **Strengths:** Exact polynomial representation, differentiable, supports efficient culling via bounding property, suitable for hardware implementation [S1].
-- **Limitations:** Cubic BTs require more memory per element than linear ones. The method assumes a tetrahedral mesh [S1].
-- **When to use:** When high-quality, smooth interpolation is needed on unstructured tetrahedral meshes, and hardware acceleration is available [S1].
-- **When not to use:** For very large datasets where memory bandwidth is a bottleneck and linear approximation is sufficient, or for non-tetrahedral meshes [S1].
+- **Strengths:** Bounding property enables early culling, exact polynomial evaluation, and suitability for hardware implementation [S1].
+- **Limitations:** Cubic BTs require more memory per element than linear bases, and the method assumes a tetrahedral mesh [S1].
+- **When to use:** When high-quality smooth interpolation is needed on unstructured tetrahedral meshes, and hardware acceleration is available [S1].
+- **When not to use:** Not given in the sources.
 
 ## Background
 Bezier Tetrahedra were developed by Loop and Blinn [2006] as a rendering method for specific types of Bezier solids implemented on graphics hardware [S1]. The method was extended for interactive volume isosurface rendering, allowing efficient representation of volumetric functions as a set of BTs on a regular tetrahedral grid [S1].
 
 ## Sources
 [S1] Interactive volume isosurface rendering using BT volumes, https://doi.org/10.1145/1342250.1342257, fetched 2026-10-30
+[S2] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

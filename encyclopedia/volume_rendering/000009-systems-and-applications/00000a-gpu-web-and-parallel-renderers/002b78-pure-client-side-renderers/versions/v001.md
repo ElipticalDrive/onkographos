@@ -1,0 +1,24 @@
+# Pure client-side renderers
+Also called: Browser-based volume rendering, Client-side DVR
+## Overview
+Pure client-side renderers perform all volume rendering computations within the user's web browser, requiring only a file server as a backend to serve volumetric data [S1, unofficial]. This approach eliminates the need for dedicated rendering servers or backend gradient computation, shifting the processing load entirely to the client's GPU [S1, unofficial]. It is distinguished from server-side rendering architectures by its reliance on local execution and from hybrid models by the absence of server-side rasterization or ray-marching services.
+## Shared principles
+The family shares the constraint that all rendering logic, including ray casting, shading, and compositing, must execute within the browser's JavaScript and WebGL/WebGPU contexts. Data transfer is limited to raw voxel data or pre-computed textures, avoiding the transmission of rendered images from a server. The architecture must handle large-scale data locally, often necessitating multi-resolution hierarchies or tiling strategies to fit within client-side GPU memory limits [S1, unofficial].
+## Subtopics
+
+### [WebSplatter](1741-websplatter.md)
+A WebGL-based splatting technique optimized for interactive performance in the browser.
+
+### [ClearView (Unified) Renderer](2460-clearview-unified-renderer.md)
+A unified rendering approach designed for web environments, potentially handling both 2D and 3D data visualization.
+
+### [CPU-Driven Task Spawning](4397-cpu-driven-task-spawning.md)
+A method where the browser's main thread or Web Workers manage rendering tasks, potentially offloading some logic from the GPU shader pipeline.
+
+### [Single Node Multi-GPU/Server Architecture](5165-single-node-multi-gpu-server-architecture.md)
+While typically server-side, this sibling is listed in the parent tree; however, pure client-side renderers explicitly avoid this by using only a file server.
+
+## Background
+The concept emerged from the need to visualize large biomedical and scientific datasets without requiring high-end server infrastructure. Early implementations faced limitations due to available GPU memory in browsers, leading to the development of bricked multi-resolution hierarchies to scale to large datasets [S1, unofficial]. Notable examples include Viv, a WebGL library for biomedical data, and Neuroglancer, which uses tiling for large-scale volumetric visualization [S1, unofficial]. The approach gained traction as WebGL capabilities improved, allowing for more complex ray-marching and shading operations directly in the browser.
+## Sources
+[S1] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

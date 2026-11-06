@@ -1,0 +1,122 @@
+Quickly render realistic Atmospheric Scatter in The Foundry Nuke - EzAtmosScatter gizmo lit by the HDRI (step 2) by calcipher89 · Pull Request #2 · calcipher89/EZ-Atmos-Scatter
+
+EzAtmosScatter gizmo lit by the HDRI (step 2) by calcipher89 · Pull Request #2 · calcipher89/EZ-Atmos-Scatter · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+calcipher89
+commented
+Oct 17, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Requested by Jeff
+Before: the scattering was a loose set of BlinkScript nodes built by a script, lit only by hand-typed sun knobs. The HDRI was used only as a background for the preview comp.
+After: one EzAtmosScatter node (Nodes > EzAtmosScatter) with an hdri input and an optional sun Axis input. It finds the sun in the HDRI and takes its colour, brightness and sky light from the image. It has plain-named knobs and a view output menu (Scatter Preview Comp by default, then Scatter, Sky (Rayleigh), Haze (Mie), Sky Light (Ambient) and Transmittance). Every pass is also written to its own atmos_* layer.
+How:
+blink/EzAtmosLight.blink (new) scans a 512x256 copy of the HDRI. It finds the brightest spot above the horizon, treats a 6° cone around it as the sun (centroid direction and irradiance), and averages the rest of the sky. It also flags a clipped sun, meaning a peak under 20x the average sky.
+blink/AtmosScatter.blink reads that through a second input:
+Sun direction: from the HDRI, the Axis's world position, or the manual knob.
+Unclipped sun: its irradiance is divided by the transmittance towards the sun, giving top-of-atmosphere light.
+Clipped sun: it is sized from the sky with the model's clear-sky ratio, and sun boost scales that.
+Sky light: a new skyAverage * (1 - transmittance) ambient term.
+python/build_gizmo.py builds the group from the kernels and writes gizmos/EzAtmosScatter.gizmo. init.py and menu.py register it. It replaces python/build_test_setup.py.
+Loading the kernel through kernelSourceFile fixes the old script's headless failure, where setting kernelSource from Python never rebuilt the parameter knobs.
+Tested in Nuke 15.1v3 (headless, NukeX):
+Gizmo: it loads, all six view outputs and five layers render, and Axis mode with and without an Axis connected behaves as expected (it falls back to Manual when no Axis is plugged in). The "copy detected sun to manual" button works.
+Synthetic HDRI with a known sun (az −150°, el 38°): it detects (−0.392, 0.616, 0.683) against the true (−0.394, 0.616, 0.682), and measures sun irradiance 23 against about 21.5 expected.
+Gemini JPEG panorama with a clipped sun: it detects (−0.18, 0.69, 0.71) and the clipped path gives a sky close to the unclipped one.
+Not covered: reference/atmos_reference.py still mirrors only the scattering core (no HDRI light or sky light), and no NumPy run was possible here.
+Speed-up (second commit):
+The optical depth towards the sun is read from a 256x64 table (blink/EzAtmosTransmittanceLUT.blink, Bruneton's parameterisation) instead of being marched at every view sample. The Transmittance and Sky Light passes skip the sun entirely.
+New viewer resolution (GUI, default Half) and render resolution (terminal and farm, default Full) knobs compute the passes at Full, Half or Quarter size. $gui decides which knob applies. The sky and ground halves are scaled up separately so the horizon stays sharp.
+Checked against the previous build on the Gemini HDRI: the mean difference is 0.1–0.4%, the max is 2%, and the horizon edge stays a one-row step at all three resolutions.
+Warm render times at 3044x1522 on CPU: 8.3 s before, then 3.1 s at Full, 0.95 s at Half and 0.36 s at Quarter. On the GPU (RTX 3070) both builds take about 0.2 s, since the GPU was already fast enough.
+Terminal Nuke only uses the GPU with --gpu, and every new process spends about 7 s (GPU) or 30 s (CPU) compiling the kernels. Both points are noted in the README for farm renders.
+Depth haze (replaces the earlier "fill below horizon"): feedback said that Extend Horizon and Mirror Sky weren't physical, so they're gone. In their place:
+A Haze Color view and an atmos_haze_color layer: the colour infinitely deep haze settles to in each direction, computed as (sun · Tsun · scatter(μ) + sky · scatter) / extinction at camera height. It has no ground and no horizon line, so a plate can be hazed with any depth pass using plate·T + hazeColor·(1−T).
+A read-only haze density (1/m) knob giving the extinction at camera height, for computing T = exp(−density·depth) in a comp.
+Haze height, moved to the main panel, and a Haze Preview view. The preview hazes the preview comp to haze distance, using the exact optical depth for haze that thins exponentially with height (flat-ground approximation).
+A passes switch (Atmosphere / Depth Haze). In Depth Haze mode, Scatter, Sky, Haze, Sky Light and Transmittance are computed for the haze around the camera out to haze distance, so the layers composite exactly as before. I checked that the layers sum to Scatter and that the comp equals hdri·T + scatter.
+Tested on the Gemini HDRI: Haze Preview at 0 km equals the preview comp, the gizmo shows no node errors, and I rendered a distance series at 1, 3 and 10 km.
+🤖 Generated with Claude Code
+Wrap the kernel in an EzAtmosScatter gizmo lit by the HDRI
+…
+d6b215d
+```
+Adds an EzAtmosLight kernel that finds the sun in the HDRI and measures its
+irradiance and the average sky, and teaches AtmosScatter to use them: sun
+direction from the HDRI, an Axis or a manual knob, sun light corrected to the
+top of the atmosphere (or sized from the sky when the sun is clipped), and a
+sky light term. The BlinkScript nodes are wrapped in a gizmo with plain knob
+names and a view output menu, built by python/build_gizmo.py, with init.py and
+menu.py so it shows up in the Nodes menu. The old build_test_setup.py is
+retired.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+calcipher89
+self-assigned this
+Oct 17, 2026
+calcipher89
+and others
+added 3 commits
+October 18, 2026 01:36
+Speed up the scatter passes and add viewer/render resolution knobs
+…
+bc41ffd
+```
+The optical depth towards the sun now comes from a 256x64 table
+(EzAtmosTransmittanceLUT.blink, Bruneton's parameterisation) instead of a
+second raymarch at every view sample, and the transmittance and sky light
+passes skip the sun entirely. The passes can be computed at half or quarter
+size and scaled back up, sky and ground halves apart so the horizon stays
+sharp: "viewer resolution" applies in the GUI and "render resolution" in
+terminal renders ($gui decides).
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Add a "fill below horizon" option for the sky passes
+…
+046fad3
+```
+The scatter passes are black below the horizon because the rays hit the
+ground a few metres from the camera. The new option fills that half of the
+Scatter, Sky, Haze and Sky Light passes, by repeating the horizon row or by
+mirroring the sky, so they can be used as a full sky dome. The preview comp
+and transmittance keep the physical result.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+Apply "fill below horizon" to the transmittance pass too
+…
+34384a7
+```
+The preview comp still uses the unfilled transmittance.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+calcipher89
+merged commit ff04e24
+into
+main
+Oct 19, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

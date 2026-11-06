@@ -1,118 +1,155 @@
 # Bilinear Interpolation
 
-Also called: 2D Bilinear Sampling, Bilinear Image Sampling, Bilinear Image Sampling at XY Grid, F.grid_sample with bilinear mode, Grid Sample Bilinear, Grid with Bilinear Interpolation, Tri-linear Interpolation on GPU
+Also called: Bi-linear Interpolation for Triangle Coloring, Bilinear Image Sampling at XY Grid, Grid Sample Bilinear, Grid with Bilinear Interpolation
 
 ## Overview
-Bilinear interpolation estimates values at arbitrary 2D coordinates by linearly interpolating across the four nearest grid points [S3, unofficial]. It sets itself apart from nearest neighbor interpolation by eliminating blocky artifacts while maintaining lower computational cost than higher-order schemes like tri-cubic interpolation [S4, unofficial].
+Bilinear interpolation is a reconstruction scheme that estimates values at arbitrary 2D coordinates within a regular grid by performing linear interpolation first in one dimension and then in the other [S2, S5, unofficial]. It is primarily used in volume rendering for 2D texture sampling, triangle coloring in flat-shaded rendering, and as the foundational 2D component of 3D trilinear interpolation [S2, S4, S5, unofficial]. It differs from [Trilinear Interpolation](1531-trilinear-interpolation.md) by operating only on the XY plane (or two dimensions), resulting in lower computational cost but requiring extension to the Z-axis for full 3D volume sampling.
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A 2D grid of values $V$ with dimensions $resX \times resY$, and a query coordinate $(x, y)$ where $x, y \in \mathbb{R}$ [S3, unofficial].
-*   **Output:** The interpolated scalar value $V(x, y)$ [S3, unofficial].
+- Input: A regular 2D grid of values $V_{grid}$ with dimensions $resX \times resY$, and a query point $(x, y)$ in continuous coordinate space.
+- Output: The interpolated scalar value $V(x, y)$.
 
 **Data Structures:**
-The grid is stored as a 1D contiguous array `values` of size $resX \times resY$ [S3, unofficial].
-*   **Fields:**
-    *   `int resX`: Width of the grid.
-    *   `int resY`: Height of the grid.
-    *   `Data* values`: Pointer to the memory block [S3, unofficial].
-*   **Layout:** Element at integer coordinates $(x, y)$ is stored at index $x \cdot resY + y$ [S3, unofficial].
+The grid is stored as a 1D contiguous array `values` of size $resX \times resY$ [S5, unofficial]. The element at integer coordinates $(x, y)$ is stored at index $x \cdot resY + y$ [S5, unofficial]. The grid metadata includes:
+- `resX`: Integer width of the grid.
+- `resY`: Integer height of the grid.
+- `values`: Pointer to the data array.
 
 **Algorithm Steps:**
-1.  **Integer Bounds:** Compute the integer coordinates of the lower-left corner of the cell containing $(x, y)$ [S3, unofficial].
-    *   Let $x_1 = \lfloor x \rfloor$ and $y_1 = \lfloor y \rfloor$ [S3, unofficial].
-    *   If the implementation uses integer truncation for negative numbers (e.g., `int(x)` in C++), special handling is required [S3, unofficial]. If $x < 0$, $x_1$ must be set to $-\lfloor -x \rfloor - 1$ to correctly identify the floor [S3, unofficial]. The same logic applies to $y_1$ [S3, unofficial].
-2.  **Fractional Parts:** Compute the interpolation weights (blending factors) as the fractional parts of the coordinates:
-    $$d_x = x - x_1$$
-    $$d_y = y - y_1$$
-    These values represent the offset from the corner in the range $[0, 1)$ [S3, S4, unofficial]. When working with normalized texture coordinates $C$ and resolution $R$, the blending factor can also be computed as $F = C \times R - \lfloor C \times R \rfloor$ [S4, unofficial].
-3.  **Neighbor Fetch:** Retrieve the four surrounding grid values:
-    *   $V_{00} = Grid(x_1, y_1)$
-    *   $V_{10} = Grid(x_1 + 1, y_1)$
-    *   $V_{01} = Grid(x_1, y_1 + 1)$
-    *   $V_{11} = Grid(x_1 + 1, y_1 + 1)$ [S3, unofficial].
-4.  **Interpolation:** Compute the final value using the bilinear formula:
-    $$V(x, y) = V_{00}(1 - d_x)(1 - d_y) + V_{10}d_x(1 - d_y) + V_{01}(1 - d_x)d_y + V_{11}d_x d_y$$
-    [S3, unofficial].
+1. **Coordinate Normalization and Indexing:**
+   Determine the integer coordinates of the bottom-left corner of the cell containing $(x, y)$. Let $x_1 = \lfloor x \rfloor$ and $y_1 = \lfloor y \rfloor$ [S5, unofficial].
+   *Note on Negative Indices:* If the implementation supports negative coordinates with wrapping (e.g., for periodic boundary conditions), negative indices must be handled carefully. A common bug is using the wrong dimension for modulo operations [S5, unofficial]. Correct wrapping for $x < 0$ is:
+   $$ x_{wrapped} = resX - ((-x) \% resX) $$
+   (Note: Some implementations incorrectly use $resY$ here, causing errors [S5, unofficial]).
+   If wrapping is not required, clamp $x_1$ and $y_1$ to the valid range $[0, resX-1]$ and $[0, resY-1]$ respectively.
+
+2. **Fractional Part Calculation:**
+   Compute the fractional distances (blending factors) from the integer corner to the query point:
+   $$ d_x = x - x_1 $$
+   $$ d_y = y - y_1 $$
+   These values lie in the range $[0, 1)$ [S5, S6, unofficial].
+
+3. **Neighbor Fetching:**
+   Retrieve the four nearest neighbor values from the grid:
+   - $V_{00} = Grid(x_1, y_1)$
+   - $V_{10} = Grid(x_1 + 1, y_1)$
+   - $V_{01} = Grid(x_1, y_1 + 1)$
+   - $V_{11} = Grid(x_1 + 1, y_1 + 1)$
+   *Boundary Handling:* If $x_1 + 1 \ge resX$ or $y_1 + 1 \ge resY$, the neighbor values must be determined by clamping, wrapping, or padding, depending on the application's requirements [S5, S6, unofficial].
+
+4. **Interpolation:**
+   Perform linear interpolation along the x-axis for the top and bottom edges, then interpolate the result along the y-axis:
+   $$ V(x, y) = V_{00}(1 - d_x)(1 - d_y) + V_{10}d_x(1 - d_y) + V_{01}(1 - d_x)d_y + V_{11}d_x d_y $$
+   This can be optimized as two linear interpolations:
+   $$ V_{bottom} = V_{00}(1 - d_x) + V_{10}d_x $$
+   $$ V_{top} = V_{01}(1 - d_x) + V_{11}d_x $$
+   $$ V(x, y) = V_{bottom}(1 - d_y) + V_{top}d_y $$
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def bilinear_interpolate(values, resX, resY, x, y):
-    # Handle negative coordinates for floor calculation
-    if x < 0:
-        x1 = -int(-x) - 1
-    else:
-        x1 = int(x)
+    """
+    Perform bilinear interpolation on a 2D grid.
+    
+    Args:
+        values: 1D array of size resX * resY.
+        resX: Width of the grid.
+        resY: Height of the grid.
+        x: Query x-coordinate.
+        y: Query y-coordinate.
         
-    if y < 0:
-        y1 = -int(-y) - 1
-    else:
-        y1 = int(y)
-        
-    # Compute fractional parts (weights)
+    Returns:
+        Interpolated value.
+    """
+    # 1. Determine integer bounds
+    # Handle negative coordinates with wrapping if necessary, 
+    # or clamp to [0, res-1] for standard texture sampling.
+    # Here we assume standard clamping for volume rendering boundaries.
+    
+    x1 = int(x)
+    y1 = int(y)
+    
+    # Clamp to valid range
+    x1 = max(0, min(x1, resX - 1))
+    y1 = max(0, min(y1, resY - 1))
+    
+    # 2. Calculate fractional parts
     dx = x - x1
     dy = y - y1
     
-    # Corrected wrapping logic (fixes the resY/resX bug in [S3, unofficial])
-    def wrap(idx, dim):
-        if idx < 0:
-            idx = dim - ((-idx) % dim)
-        return idx % dim
-
-    x0 = wrap(x1, resX)
-    x1_next = wrap(x1 + 1, resX)
-    y0 = wrap(y1, resY)
-    y1_next = wrap(y1 + 1, resY)
+    # 3. Fetch neighbors
+    # Index calculation: index = x * resY + y
+    idx_00 = x1 * resY + y1
+    idx_10 = (x1 + 1) * resY + y1 if x1 + 1 < resX else idx_00 # Clamp right
+    idx_01 = x1 * resY + (y1 + 1) if y1 + 1 < resY else idx_00 # Clamp top
+    idx_11 = (x1 + 1) * resY + (y1 + 1) if (x1 + 1 < resX and y1 + 1 < resY) else idx_00 # Clamp top-right
     
-    v00 = values[x0 * resY + y0]
-    v10 = values[x1_next * resY + y0]
-    v01 = values[x0 * resY + y1_next]
-    v11 = values[x1_next * resY + y1_next]
+    V_00 = values[idx_00]
+    V_10 = values[idx_10]
+    V_01 = values[idx_01]
+    V_11 = values[idx_11]
     
-    # Bilinear formula
-    result = (v00 * (1 - dx) * (1 - dy) +
-              v10 * dx * (1 - dy) +
-              v01 * (1 - dx) * dy +
-              v11 * dx * dy)
-              
+    # 4. Interpolate
+    # Linear interpolation in X
+    V_bottom = V_00 * (1 - dx) + V_10 * dx
+    V_top = V_01 * (1 - dx) + V_11 * dx
+    
+    # Linear interpolation in Y
+    result = V_bottom * (1 - dy) + V_top * dy
+    
     return result
 ```
 
-**PyTorch Implementation Note:**
-When using `torch.nn.functional.grid_sample`, the input grid coordinates must be negated and reshaped to `[batch_size, -1, 1, 2]` to match the expected format, and `align_corners=True` should be used [S2, unofficial].
+**Parameters:**
+- `align_corners`: In some frameworks (e.g., PyTorch's `grid_sample`), this boolean determines if the corners of the input and output tensors are aligned. If `True`, the coordinates are mapped to the center of the corner pixels; if `False`, they are mapped to the edges [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Negative Index Wrapping Bug:** A common implementation error in wrapping negative indices is using the wrong dimension for the modulo operation [S3, unofficial]. Specifically, `if(x<0){x = resX - ((-x) % resY);}` is incorrect because it uses `resY` instead of `resX` for the x-axis modulo, causing incorrect wrapping along the x-axis [S3, unofficial].
-*   **Boundary Conditions:** The sources do not specify behavior for coordinates outside the $[0, resX-1] \times [0, resY-1]$ range other than the wrapping bug example [S3, unofficial]. Standard implementations typically clamp or wrap coordinates to the grid boundaries [G].
+- **Negative Indices:** Incorrect handling of negative coordinates can lead to out-of-bounds access or incorrect wrapping. A specific bug in some implementations uses `resY` instead of `resX` when wrapping negative x-coordinates [S5, unofficial].
+- **Boundary Conditions:** Values at the grid edges require explicit handling (clamping, wrapping, or reflection) to avoid undefined behavior [S5, S6, unofficial].
+- **Precision:** Using integer arithmetic for indices is standard, but floating-point precision errors in coordinate calculation can lead to sampling adjacent pixels incorrectly if not handled with proper flooring/ceiling logic [S5, unofficial].
 
 ## Subtopics
 
-### Optimized Trilinear Reconstruction
-This variant uses trilinear interpolation of color and opacity optimized using SIMD extensions (MMX, SSE, or 3DNow!) to improve memory copying and interpolation speed [S5]. It typically uses 16-bit unsigned integers for color and opacity values [S5]. A specific pitfall is that on MMX-only processors, line equation tests cannot be performed, leading to minor artifacts in the image [S5].
+### [Optimized Trilinear Reconstruction](2437-optimized-trilinear-reconstruction.md)
+Optimized Trilinear Reconstruction accelerates the trilinear interpolation of color and opacity values during direct volume ray casting by utilizing SIMD processor extensions such as MMX, SSE, or 3DNow!. It builds on Bilinear Interpolation by extending the interpolation to three dimensions while optimizing the underlying arithmetic and memory operations for specific hardware capabilities. It differs from standard trilinear interpolation by reducing computational overhead through parallel processing of multiple samples, and from Multi-Dimensional Interpolation Extension by focusing specifically on the 3D trilinear case with fixed-point integer arithmetic.
+
+### [Multi-Dimensional Interpolation Extension](2784-multi-dimensional-interpolation-extension.md)
+This method extends one-dimensional reconstruction kernels to three dimensions for volume rendering. It constructs a 3D filter from a 1D base kernel $h'$ to correctly reconstruct signals on a regular 3D mesh, setting itself apart from radial extension methods by avoiding sample frequency ripple artifacts that occur with rotationally-symmetric kernels on regular grids.
+
+### [POCS Interpolation Hardware Implementation](6377-pocs-interpolation-hardware-implementation.md)
+A hardware architecture for implementing Piecewise Constant (POCS) interpolation filters in volume rendering, designed to overcome the quality limitations of standard tri-linear interpolation while remaining feasible within VLSI constraints. It distinguishes itself from Bilinear Interpolation by supporting larger kernel sizes (up to $5 \times 5 \times 5$) using lookup tables and specialized memory banking to handle the high data throughput required for multi-voxel sampling.
 
 ### Linear Interpolation on Polyhedra
-This method uses linear interpolation to scan-convert the front and back faces of each polyhedron in unstructured meshes [S6, unofficial]. It is chosen because reconstruction for non-uniform sampling on unstructured meshes is not well understood and is significantly more complex than uniform sampling [S6, unofficial]. It exhibits C1 discontinuities common to linear interpolation [S6, unofficial].
+Uses linear interpolation to scan-convert the front and back faces of each polyhedron. Used for unstructured meshes [S7, unofficial]. It exhibits C1 discontinuities common to linear interpolation [S7, unofficial]. Linear interpolation is used because reconstruction for non-uniform sampling on unstructured meshes is not well understood and is significantly more complex than uniform sampling [S7, unofficial].
 
 ### Temporal Interpolation
-This method uses linear interpolation between two sampled flow vectors of different time steps to handle dynamic vector fields [S7, unofficial]. The interpolated vector is calculated as $M_R(v, t) = (1 - t)S_i(v) + tS_j(v)$, where $S_i(v)$ and $S_j(v)$ are vector field slices [S7, unofficial]. A pitfall occurs if the interpolation index $k$ is not in $[i, j]$, as the equation yields extrapolation instead of interpolation [S7, unofficial].
+Linear interpolation between two sampled flow vectors of different time steps to handle dynamic vector fields [S8, unofficial]. The interpolated vector is calculated as $M_R(v, t) = (1 - t)S_i(v) + tS_j(v)$ where $S_i(v), S_j(v)$ are vector field slices [S8, unofficial]. If $k$ is not in $[i, j]$, the equation yields extrapolation instead of interpolation [S8, unofficial].
+
+### Hat-shaped Basis Functions
+A method using hat-shaped basis functions to define the interpolant, involving actual leaf cells only on the boundary to remove ghost artifacts [S9, unofficial]. It is unclear how to perform ray-isosurface intersections with this interpolant [S9, unofficial].
 
 ## Operating characteristics
-*   **Strengths:** Computationally inexpensive; provides smoother results than nearest neighbor; hardware-friendly (supported by GPU texture units via LRP instructions or bilinear filtering modes) [S4, unofficial].
-*   **Limitations:** Exhibits C1 discontinuities (discontinuous derivatives) at grid boundaries [S6, unofficial]; lower frequency response compared to sinc or cubic methods, potentially causing blurring [S4, unofficial].
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
-*   **When to use:** Not given in the sources.
+- **Time Complexity:** $O(1)$ per sample, as it involves a fixed number of arithmetic operations (4 multiplications, 3 additions) and memory accesses (4 reads) regardless of grid size.
+- **Memory Complexity:** $O(1)$ auxiliary space. The grid storage is $O(resX \cdot resY)$.
+- **Performance:** Extremely fast and suitable for real-time rendering. It is the standard interpolation method used in hardware texture units [S6, unofficial].
+- **Strengths:** Low computational cost, smooth results compared to nearest-neighbor, and hardware support.
+- **Limitations:** Introduces blurring (low-pass filtering) which can attenuate high-frequency details. It is not suitable for unstructured meshes where non-uniform sampling requires more complex reconstruction [S7, unofficial]. It suffers from C1 discontinuities in certain contexts like polyhedra scan-conversion [S7, unofficial].
+- **When to use:** Regular 2D grids, texture sampling, and as a component of 3D trilinear interpolation.
+- **When not to use:** Unstructured meshes (use Linear Interpolation on Polyhedra or other methods), high-frequency detail preservation (use higher-order interpolation like Tri-cubic), or when extrapolation is required (use Temporal Interpolation with care).
 
 ## Background
-The specific GPU-based frequency domain rendering implementation using LRP instructions for neighbor address pre-computation was described by Viola et al. [S4, unofficial]. Optimized trilinear variants using SIMD were explored in early object-order ray-casting algorithms [S5].
+Bilinear interpolation is a fundamental technique in computer graphics and image processing. It was historically used in early volume rendering systems for texture mapping and triangle coloring [S2, unofficial]. It is a core component of many modern rendering pipelines, including those using GPU-based frequency domain rendering [S6, unofficial] and neural radiance fields (NeRFs) which often employ bilinear sampling for 2D feature grids [S4, unofficial]. The method is widely supported in hardware via texture units and libraries like PyTorch's `grid_sample` [S4, unofficial].
 
 ## Sources
-[S1] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
-[S2] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
-[S3] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)
-[S4] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
-[S5] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26
-[S6] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
-[S7] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
+[S1] K-Planes: Explicit Radiance Fields in Space, Time, and Appearance, https://doi.org/10.1109/cvpr52729.2023.01201, fetched 2026-10-26
+[S2] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+[S3] learning3d/assignment3, https://github.com/learning3d/assignment3, fetched 2026-10-26
+[S4] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S5] mkazhdan/IsoSurfaceExtraction, https://github.com/mkazhdan/IsoSurfaceExtraction, fetched 2026-10-27 (unofficial)
+[S6] PDF GPU-based Frequency Domain Volume Rendering - TU Wien, https://www.cg.tuwien.ac.at/research/publications/2004/Viola-2004-GPU/Viola-2004-GPU-Paper.pdf, fetched 2026-10-27 (unofficial)
+[S7] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S8] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
+[S9] PDF CPU Isosurface Ray Tracing of Adaptive Mesh Refinement Da, https://www.sci.utah.edu/~feng/assets/papers/Fen-AMR-VIS18.pdf, fetched 2026-10-26 (unofficial)

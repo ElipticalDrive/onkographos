@@ -1,0 +1,131 @@
+# Gradient Descent Solver
+
+Also called: Adam Optimizer Solver, L1/L2 Norm Solver
+
+## Overview
+The Gradient Descent Solver is a matrix-free optimization method used to compute optimal transfer functions for volume rendering by minimizing the difference between rendered and target images [S1, unofficial]. It supports both constant update rates and the Adam optimizer, offering stable behavior for ill-conditioned systems where direct matrix inversion is numerically unstable [S1, unofficial]. Unlike CGLS, which solves normal equations, this solver accumulates gradients via atomic additions, making it suitable for large-scale or rank-deficient problems [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Target image $I_{target}$ and current rendered image $I_{rendered}$ (or residual map).
+- Optimization mode: Constant rate $\alpha$ or Adam.
+- Norm type: $L_2$ (least squares) or $L_1$ (least absolute deviations) [S1, unofficial].
+
+**Outputs:**
+- Optimized transfer function parameters (e.g., opacity values, control points) [S1, unofficial].
+
+**Data Structures:**
+- Gradient accumulator: A matrix-free structure where gradients are accumulated via atomic additions to avoid race conditions in parallel implementations [S1, unofficial].
+- Adam state (if used): First moment estimate $m$ and second moment estimate $v$ for each parameter [KB15].
+
+**Steps:**
+1. **Compute Residual:** Calculate the difference between the target and rendered images. For $L_2$ norm, this is $r = I_{target} - I_{rendered}$. For $L_1$ norm, the objective is based on absolute deviations [S1, unofficial].
+2. **Compute Gradient:** Compute the gradient of the loss function with respect to the transfer function parameters. In a matrix-free implementation, this is done by accumulating gradients directly [S1, unofficial].
+3. **Update Parameters:**
+   - **Constant Rate:** Update parameters $x$ using $x_{new} = x_{old} - \alpha \nabla L(x)$, where $\alpha$ is the constant update rate [S1, unofficial].
+   - **Adam Optimizer:** Use the Adam algorithm [KB15] to adapt the learning rate for each parameter based on the first and second moments of the gradients.
+4. **Iterate:** Repeat steps 1-3 until convergence or a maximum number of iterations is reached [S1, unofficial].
+
+**Formulas:**
+- $L_2$ Loss: $L = \sum (I_{target} - I_{rendered})^2$ [S1, unofficial].
+- $L_1$ Loss: $L = \sum |I_{target} - I_{rendered}|$ [S1, unofficial].
+- Update (Constant): $x_{k+1} = x_k - \alpha \nabla L(x_k)$ [S1, unofficial].
+
+**Parameters:**
+- $\alpha$: Constant update rate. Value not given in the sources.
+- Adam hyperparameters: Standard values (e.g., $\beta_1=0.9, \beta_2=0.999, \epsilon=10^{-8}$) are assumed from [KB15] as not specified in [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Ill-conditioned systems: The solver is noted to be stable for ill-conditioned systems, unlike direct matrix methods [S1, unofficial].
+- $L_1$ vs $L_2$: The choice of norm affects robustness to outliers. $L_2$ penalizes larger residuals more strongly, while $L_1$ tolerates larger outliers [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gradient_descent_solver(target_image, rendered_image, params, mode='adam', alpha=0.01, max_iter=1000):
+    """
+    Matrix-free gradient descent solver for transfer function optimization.
+    
+    Args:
+        target_image: Target image tensor.
+        rendered_image: Current rendered image tensor.
+        params: Transfer function parameters (e.g., opacity values).
+        mode: 'constant' or 'adam'.
+        alpha: Constant update rate (used if mode='constant').
+        max_iter: Maximum number of iterations.
+        
+    Returns:
+        Optimized params.
+    """
+    if mode == 'adam':
+        m = zeros_like(params)
+        v = zeros_like(params)
+        beta1 = 0.9
+        beta2 = 0.999
+        eps = 1e-8
+        t = 0
+    
+    for i in range(max_iter):
+        # Compute residual
+        residual = target_image - rendered_image
+        
+        # Compute gradient of loss w.r.t. params
+        # Note: In a real implementation, this requires the derivative of the rendering equation
+        # w.r.t. the transfer function parameters. Here we assume a generic gradient function.
+        grad = compute_gradient(residual, params, mode)
+        
+        if mode == 'constant':
+            params = params - alpha * grad
+        elif mode == 'adam':
+            t += 1
+            m = beta1 * m + (1 - beta1) * grad
+            v = beta2 * v + (1 - beta2) * grad**2
+            m_hat = m / (1 - beta1**t)
+            v_hat = v / (1 - beta2**t)
+            params = params - alpha * m_hat / (sqrt(v_hat) + eps)
+        
+        # Re-render with updated params to get new rendered_image
+        rendered_image = render(params)
+        
+        # Check for convergence (e.g., norm of grad < threshold)
+        if norm(grad) < 1e-6:
+            break
+            
+    return params
+```
+
+## Subtopics
+
+### [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md)
+The CGLS solver is a sparse linear least squares solver used to avoid the ill-conditioning of normal equations ($A^T A$), providing numerically stable results for large or rank-deficient problems. It builds on [Gradient Descent Solver](3280-gradient-descent-solver.md) [G].
+
+### [Partially Learned Gradient Descent](3771-partially-learned-gradient-descent.md)
+Partially Learned Gradient Descent is an iterative reconstruction method that unrolls a fixed number of optimization steps into a neural network, combining a fixed physics-based gradient step with a learnable convolutional network update. It initializes the reconstruction with a filtered backprojection (FBP) estimate and, in its base form, does not use a regularization term in the network input. Unlike standard Gradient Descent which uses a fixed step size, this method learns the update rule via convolutional layers while retaining the physical forward model and gradient structure, making it more interpretable and robust to distribution shifts than fully learned end-to-end CNNs. It builds on [Gradient Descent Solver](3280-gradient-descent-solver.md) [G].
+
+### [Newton's Method](6442-newton-s-method.md)
+Newton's method is a second-order optimization algorithm that approximates the objective function $f$ using a second-order Taylor expansion to determine an update step that targets the stationary point where the gradient is zero. It sets itself apart from first-order solvers like Gradient Descent by incorporating local curvature information via the Hessian matrix, allowing for faster convergence near optima, though at the cost of significant computational overhead for high-dimensional problems.
+
+### SGD with Positive t-Distribution
+An ablation study variant that uses Stochastic Gradient Descent (SGD) with a positive Student's t distribution [S2]. It replaces Gaussian distributions with Student's t distributions, removes negative components, removes SGHMC (Stochastic Gradient Hamiltonian Monte Carlo), and adds a low-pass filter (0.3 diagonal offset) to ensure fair comparison with similar component counts [S2]. It is used in the Ablation Study to provide a fair comparison with similar component numbers against methods using the low-pass filter [S2].
+
+### Inexact Line Search Optimization
+An iterative approach that adapts the step size in gradient descent to achieve a reduction in the objective function while making sufficiently fast progress, using an inexact strategy to avoid convergence deterioration of exact methods [S3]. It sets initial iteration count $m = 0$ and $M$ to the maximum iteration count. It checks whether $f(x_k + \gamma_{m+1}d_k) < f(x_k + \gamma_m d_k)$ where $\gamma_m = 2^m$, $d_k$ is the descent direction and $x_k$ is the current point at the $k$-th iteration. If the condition is met and $m < M - 1$, then $m = m + 1$ and repeat the check; otherwise terminate the line search and $\gamma_m$ is the chosen step size [S3]. Unlike exact line search which may suffer from convergence deterioration, this inexact strategy yields reasonable results and descends much faster than standard gradient descent [S3].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Matrix-free implementation reduces memory overhead compared to storing $A^T A$ [S1, unofficial].
+- **Performance:** Shows stable behavior for ill-conditioned systems [S1, unofficial]. The choice of loss function ($L_1$ vs $L_2$) can make a minor difference in final results [S1, unofficial].
+- **Strengths:** Stable for ill-conditioned systems, matrix-free (memory efficient), supports $L_1$ and $L_2$ norms [S1, unofficial].
+- **Limitations:** Generally slower than computing $A^T A$ and $A^T b$ directly for well-conditioned problems [S1, unofficial].
+- **When to use:** When the system is ill-conditioned or rank-deficient, or when memory is a constraint.
+- **When not to use:** When direct matrix methods are feasible and faster.
+
+## Background
+The Gradient Descent Solver was implemented in the context of transfer function optimization for comparative volume rendering [S1, unofficial]. It supports either a constant update rate or the Adam optimizer [KB15]. The implementation is matrix-free, accumulating gradients via atomic additions [S1, unofficial]. It is noted for its stability with ill-conditioned systems [S1, unofficial].
+
+## Sources
+[S1] Transfer Function Optimization for Comparative Volume Rendering, https://doi.org/10.48550/arxiv.2306.05885, fetched 2026-10-26 (unofficial)
+[S2] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29
+[S3] Transfer function optimization based on a combined model of visibility and saliency, https://doi.org/10.1145/3154353.3154357, fetched 2026-11-01
+[KB15] Kingma, D. P., & Ba, J. (2015). Adam: A Method for Stochastic Optimization. arXiv preprint arXiv:1412.6980.

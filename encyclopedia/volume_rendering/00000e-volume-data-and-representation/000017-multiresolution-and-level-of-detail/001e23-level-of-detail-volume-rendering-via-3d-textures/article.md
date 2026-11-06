@@ -18,7 +18,7 @@ The volume is decomposed into 3D bricks (subvolumes) small enough to fit into te
 
 **2. Texture Hierarchy**
 Each brick maintains a local hierarchy of texture maps.
-*   **Level 0:** The original resolution data.
+*   **Level 0:** The original resolution data [S2].
 *   **Level $k$:** A coarser resolution copy. The texture size is reduced by a factor of two compared to level $k-1$, and the width of texture elements is doubled [S1][S3].
 *   **Alignment:** Texture elements on level $k$ are aligned such that their centers correspond to the center of an even-indexed element on the finer level $k-1$ [S1][S3].
 *   **Domain Adaptation:** On level 0, the texture coordinate domain ranges from the center of the first element to the center of the last one. This domain is adapted for coarser levels to maintain geometric consistency [S1].
@@ -27,7 +27,7 @@ Each brick maintains a local hierarchy of texture maps.
 
 **3. Merged Texture Hierarchy (Octree-like)**
 To minimize memory overhead from boundary padding, textures of adjacent subvolumes are merged:
-*   **Level 0:** Each brick has its own texture map.
+*   **Level 0:** Each brick has its own texture map [S1].
 *   **Higher Levels:** Eight adjacent subvolumes share a single texture map. The number of subvolumes sharing a texture map multiplies by 8 at each coarser level, forming an octree-like hierarchy [S1].
 *   **Constraint:** Merging works optimally if the initial number of subvolumes in every direction is a power of two. If the count exceeds $2^{l-1}$ (where $l$ is the number of levels), additional subvolumes build their own texture sets. If fewer, the hierarchy depth is reduced by storing coarsest-level textures individually [S1].
 
@@ -80,16 +80,25 @@ def build_texture_hierarchy(brick_data, max_levels):
     levels = [brick_data]
     current_data = brick_data
     for k in range(1, max_levels):
-        # Apply quadratic spline filter to downsample
-        # Note: Simple sub-sampling is insufficient; filtering is required [S2]
+        # Apply quadratic spline filter to downsample [S2]
         coarser_data = apply_quadratic_spline_filter(current_data)
-        
         # Expand to power-of-two size if necessary, padding with zeros [S3]
         coarser_data = expand_to_power_of_two(coarser_data)
-        
         levels.append(coarser_data)
         current_data = coarser_data
     return levels
+
+def apply_quadratic_spline_filter(data):
+    """Iteratively filters data using a quadratic spline kernel to build low-pass copies [S2]."""
+    # Standard quadratic spline downsampling: convolve with kernel, then subsample by 2
+    return subsample_by_two(convolve_3d(data, quadratic_spline_kernel))
+
+def expand_to_power_of_two(data):
+    """Pads data with zero voxels to reach the next power-of-two dimensions."""
+    new_dims = [next_power_of_two(d) for d in data.shape]
+    padded = create_zeros(new_dims)
+    padded[:data.shape[0], :data.shape[1], :data.shape[2]] = data
+    return padded
 
 def adapt_boundary_fine_bricks(fine_brick_level, coarse_brick_level):
     """
@@ -103,6 +112,10 @@ def adapt_boundary_fine_bricks(fine_brick_level, coarse_brick_level):
         # Since centers align with even elements of finer level, this is often a copy
         # for even indices, but interpolation for misaligned boundaries [S1]
         voxel.value = interpolate_from_coarse(voxel.position, coarse_brick_level)
+
+def interpolate_from_coarse(position, coarse_level):
+    """Samples the coarse level at the given position using trilinear interpolation."""
+    return trilinear_sample(coarse_level, position)
 
 def correct_opacity(transfer_function):
     """
@@ -148,6 +161,50 @@ def render_brick_with_clipping(brick, level, view_params):
     # 4. Sort polygons to minimize state changes [S3]
     sort_polygons_by_color_table()
     render_all_polygons()
+
+def generate_slices(brick, level, view_params):
+    """Generates slicing planes parallel to the image plane for the given brick and level."""
+    return [plane for plane in compute_slices(brick.bounding_box, view_params.camera_direction, level.sample_distance)]
+
+def has_finier_neighbor(brick):
+    """Checks if the brick has an adjacent brick with a finer LOD level."""
+    return any(neighbor.level < brick.level for neighbor in brick.adjacent_bricks)
+
+def has_coarser_neighbor(brick):
+    """Checks if the brick has an adjacent brick with a coarser LOD level."""
+    return any(neighbor.level > brick.level for neighbor in brick.adjacent_bricks)
+
+def no_clipping_polygons_exist():
+    """Returns true if no clipping polygons are currently active."""
+    return len(active_clipping_polygons) == 0
+
+def sort_polygons_by_color_table():
+    """Sorts rendered polygons to minimize color table reloads."""
+    active_clipping_polygons.sort(key=lambda p: p.color_table_index)
+
+def render_all_polygons():
+    """Renders all sorted polygons to the framebuffer."""
+    for poly in active_clipping_polygons:
+        rasterize_and_draw(poly)
+
+def clip_polygon(slice_geom, projection_geom):
+    """Computes the clipped polygon using a modified 3D Sutherland-Hodgman algorithm."""
+    return modified_sutherland_hodgman_clip(slice_geom, projection_geom)
+
+def render_polygon(poly, opacity):
+    """Renders a single clipped polygon with the specified opacity."""
+    draw_polygon_with_opacity(poly, opacity)
+
+def reconstruct_slice(slice_index, coarse_level):
+    """Reconstructs a missing odd slice in the coarser brick from neighboring data."""
+    return interpolate_slice_from_coarse_neighbors(slice_index, coarse_level)
+
+def insert_slices_with_smallest_sample_distance():
+    """Inserts additional slices with the smallest sample distance at external boundaries."""
+    boundary_slices = compute_boundary_slices(brick.bounding_box, view_params)
+    for s in boundary_slices:
+        s.sample_distance = min_sample_distance
+        active_clipping_polygons.append(s)
 ```
 
 ## Operating characteristics
@@ -155,9 +212,9 @@ def render_brick_with_clipping(brick, level, view_params):
 *   **Memory Efficiency:** Significantly reduces texture memory consumption. On the "engine" dataset, an adaptive representation with four levels of detail required only 29% of the original texture memory [S2][S3]. Using two levels reduced memory to 57% [S2].
 *   **Performance:** Reduces the number of texture lookups. The four-level adaptive representation required only 32% of the originally needed texture lookups [S2][S3].
 *   **Rendering Speed:** Full resolution rendering took ~2 seconds per frame on the engine dataset, while the LOD version took 0.5 seconds per frame [S3].
-*   **Overhead:** Clipping overhead is less than 0.1 seconds per frame. Texture adaptation takes ~0.2 seconds. Clipping operations average 2500 per frame, up to 5500 in worst-case diagonal views [S3].
-*   **Strengths:** Guarantees consistent interpolation between levels; fixes opacity artifacts (light/dark bands) at boundaries; interactive performance for large datasets.
-*   **Limitations:** Relies on OpenGL power-of-two restrictions requiring padding; topology preservation is not guaranteed if LOD selection ignores approximation error; clipping complexity increases with diagonal views.
+*   **Overhead:** Clipping overhead is less than 0.1 seconds per frame. Texture adaptation takes ~0.2 seconds [S3].
+*   **Strengths:** Guarantees consistent interpolation between levels; fixes opacity artifacts (light/dark bands) at boundaries; interactive performance for large datasets [S1][S2].
+*   **Limitations:** Relies on OpenGL power-of-two restrictions requiring padding; topology preservation is not guaranteed if LOD selection ignores approximation error; clipping complexity increases with diagonal views [S3].
 
 ## Background
 

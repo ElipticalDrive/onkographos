@@ -7,88 +7,69 @@ Adaptive Undersampling accelerates volume rendering by replacing the full volume
 
 ## How it works
 **Inputs and Outputs**
-*   **Inputs:** 3D volume texture (unit cube), transfer function $f$, viewport resolution, block size $n$, maximum number of intervals $M$.
-*   **Outputs:** Final image (pixel colors).
+*   **Inputs:** 3D volume texture (unit cube), transfer function $f$, viewport resolution, block size $n$, maximum number of intervals $M$ [S1].
+*   **Outputs:** Final image (pixel colors) [S1].
 
 **Data Structures**
-*   **G-buffer:** Contains $M+1$ parallel textures (or arrays) with resolution $\frac{W}{n} \times \frac{H}{n}$ (where $W, H$ are viewport dimensions).
-    *   Texture 0 (`G[0]`): Stores the final composited color $C$ (4-component vector: RGB + Transparency $A$) for the representative pixel of each $n \times n$ block.
-    *   Textures $1 \dots M$ (`G[1] \dots G[M]`): Store the volume integral values $I_i$ for each of the $M$ equal-length intervals. Each $I_i$ is a 4-component vector containing the color and transparency contribution of that interval.
-    *   *Note:* The last interval may have a different length if the ray exits the volume early.
+*   **G-buffer:** Contains $M$ parallel textures with resolution $n$ times less than the viewport along each side [S1].
+    *   Texture 0 (`G[0]`): Stores the final composited color $C$ (4-component vector: RGB + Transparency $A$) for the representative pixel of each $n \times n$ block [S1].
+    *   Textures $1 \dots M$ (`G[1] \dots G[M]`): Store the volume integral values $I_i$ for each of the $M$ equal-length intervals [S1]. Each $I_i$ is a 4-component vector containing the color and transparency contribution of that interval [S1].
+    *   *Note:* The last interval may have a different length if the ray exits the volume early [S1].
 
 **Parameters**
-*   $n$: Side length of the square blocks. One pixel is processed per $n \times n$ block in Pass 1.
-*   $M$: User-selected maximum number of equal-length intervals into which the integration domain is divided.
+*   $n$: Side length of the square blocks. One pixel is processed per $n \times n$ block in Pass 1 [S1].
+*   $M$: User-selected maximum number of equal-length intervals into which the integration domain is divided [S1].
 
 **Algorithm Steps**
 
 1.  **Pass 1: Pre-computation**
     For each $n \times n$ block in the viewport:
-    1.  Select one representative pixel (e.g., top-left).
-    2.  Determine the ray starting point $s$ and final point $f$.
-    3.  Find the starting point $v$ of the non-zero transfer function domain using `GetDistanceForStart(s, f)`.
-        *   If `GetDistanceForStart` returns -1 (no intersection with non-zero domain), skip this pixel or mark as empty.
-        *   Otherwise, $v$ is the point where the ray first meets the domain where $f$ is not zero.
-    4.  Calculate the interval length $L$. Since samples are in a unit cube, the maximum ray length is $\sqrt{3}$. The length of each of the $M$ equal intervals is $L = \frac{\sqrt{3}}{M}$.
-    5.  Initialize composited color $C = (0,0,0,0)$ and transparency $A = 0$.
-    6.  Initialize interval integrals $I_i = (0,0,0,0)$ for $i = 0 \dots M-1$.
-    7.  Perform volume integration along the ray from $v$ to $f$, divided into $M$ intervals of length $L$.
-        *   For each interval $i$, compute the integral $I_i$ using the compositing recurrence relation (see Formulas).
-        *   Store $I_i$ in `G[i+1]`.
-    8.  Handle the last interval: If the ray exits the volume before completing the $M$-th equal interval, the last interval is shorter. Calculate this partial integral separately and store it.
-    9.  Store the final composited color $C$ in `G[0]`.
+    1.  Select one representative pixel (e.g., top-left) [S1].
+    2.  Determine the ray starting point $s$ and final point $f$ [S1].
+    3.  Find the starting point $v$ of the non-zero transfer function domain using `GetDistanceForStart(s, f)` [S1].
+        *   If `GetDistanceForStart` returns -1 (no intersection with non-zero domain), skip this pixel or mark as empty [S1].
+        *   Otherwise, $v$ is the point where the ray first meets the domain where $f$ is not zero [S1].
+    4.  Calculate the interval length $L$. Since samples are in a unit cube, the maximum ray length is $\sqrt{3}$. The length of each of the $M$ equal intervals is $L = \frac{\sqrt{3}}{M}$ [S1].
+    5.  Initialize composited color $C = (0,0,0,0)$ and transparency $A = 0$ [S1].
+    6.  Initialize interval integrals $I_i = (0,0,0,0)$ for $i = 0 \dots M-1$ [S1].
+    7.  Perform volume integration along the ray from $v$ to $f$, divided into $M$ intervals of length $L$ [S1].
+        *   For each interval $i$, compute the integral $I_i$ using the compositing recurrence relation (see Formulas) [S1].
+        *   Store $I_i$ in `G[i+1]` [S1].
+    8.  Handle the last interval: If the ray exits the volume before completing the $M$-th equal interval, the last interval is shorter. Calculate this partial integral separately and store it [S1].
+    9.  Store the final composited color $C$ in `G[0]` [S1].
 
 2.  **Pass 2: Interpolation and Partial Recomputation**
     For each pixel $P$ not processed in Pass 1:
-    1.  Identify the four neighboring pixels $N_0, N_1, N_2, N_3$ that were processed in Pass 1 (their coordinates correspond to the $n \times n$ blocks surrounding $P$).
-    2.  Check if the colors of the adjacent pixels are sufficiently close.
-        *   If yes, interpolate the current pixel's color $C_P$ bilinearly from the $C$ values in `G[0]` of the neighbors.
-        *   If no, calculate $C_P$ using the recurrence relation, leveraging the pre-computed interval integrals $I_i$ from the neighbors.
-            *   Let $A_i^*$ and $C_i^*$ be the transparency and color contributions for interval $i$.
-            *   If the neighbor's interval integral is close enough, use the interpolated $A_i^*, C_i^*$.
-            *   Otherwise, calculate the integral for that specific interval using the recurrence relation starting from the previous interval's result.
+    1.  Identify the four neighboring pixels $N_0, N_1, N_2, N_3$ that were processed in Pass 1 (their coordinates correspond to the $n \times n$ blocks surrounding $P$) [S1].
+    2.  Check if the colors of the adjacent pixels are sufficiently close [S1].
+        *   If yes, interpolate the current pixel's color $C_P$ bilinearly from the $C$ values in `G[0]` of the neighbors [S1].
+        *   If no, calculate $C_P$ using the recurrence relation, leveraging the pre-computed interval integrals $I_i$ from the neighbors [S1].
+            *   Let $A_i^*$ and $C_i^*$ be the transparency and color contributions for interval $i$ [S1].
+            *   If the neighbor's interval integral is close enough, use the interpolated $A_i^*, C_i^*$ [S1].
+            *   Otherwise, calculate the integral for that specific interval using the recurrence relation starting from the previous interval's result [S1].
             *   The recurrence relation for interval $i$ is:
                 $$ C_{i+1} = C_i + (1 - A_i) \cdot a_i \cdot c_i $$
                 $$ A_{i+1} = A_i + (1 - A_i) \cdot a_i $$
-                Where $a_i, c_i$ are the sample transparency and color. In the context of the interval integrals $I_i$, these are treated as the accumulated contributions for that segment.
+                Where $a_i, c_i$ are the sample transparency and color [S1]. In the context of the interval integrals $I_i$, these are treated as the accumulated contributions for that segment [S1].
             *   Specifically, for the second pass calculation [S1]:
                 $$ CP_{i+1} = CP_i + (1 - AP_i) \cdot A_i^* \cdot C_i^* $$
                 $$ AP_{i+1} = AP_i + (1 - AP_i) \cdot A_i^* $$
-                for $0 \le i \le M-1$. Here $A_i^*$ and $C_i^*$ are either interpolated or recomputed.
+                for $0 \le i \le M-1$. Here $A_i^*$ and $C_i^*$ are either interpolated or recomputed [S1].
+
+**Formulas**
+*   Compositing recurrence relation:
+    $$ C_{i+1} = C_i + (1 - A_i) \cdot a_i \cdot c_i $$
+    $$ A_{i+1} = A_i + (1 - A_i) \cdot a_i $$
+    Where $C_i$ is the composited color on the $i$-th step along the ray, $A_i$ is the composited transparency, and $a_i$ and $c_i$ are the transparency and color in the given sample [S1].
 
 **Pseudocode**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def get_distance_for_start(s, f, transfer_function):
-    """
-    Finds the distance from start point s to the first point v where
-    the transfer function is non-zero.
-    Returns -1 if no such point is found along the ray segment s->f.
-    """
-    # Implementation depends on specific ray-marching or intersection logic.
-    # For the purpose of this article, we assume this function exists
-    # and returns the 3D coordinate v or a distance value.
-    pass
-
-def compositing_step(C_prev, A_prev, a_sample, c_sample):
-    """
-    Standard front-to-back compositing step.
-    """
-    C_new = C_prev + (1.0 - A_prev) * a_sample * c_sample
-    A_new = A_prev + (1.0 - A_prev) * a_sample
-    return C_new, A_new
-
 def pass1_render(voxel_data, transfer_function, viewport_w, viewport_h, n, M):
-    """
-    First pass: Render representative pixels and pre-compute interval integrals.
-    """
-    # G-buffer textures
-    # G[0] stores final color C (RGBA)
-    # G[1..M] store interval integrals I_i (RGBA)
-    g_buffer_color = create_texture(viewport_w // n, viewport_h // n, channels=4)
-    g_buffer_intervals = [create_texture(viewport_w // n, viewport_h // n, channels=4) for _ in range(M)]
+    # G-buffer textures: G[0] stores final color C (RGBA), G[1..M] store interval integrals I_i (RGBA)
+    g_buffer_color = [[(0.0, 0.0, 0.0, 0.0)] * (viewport_w // n) for _ in range(viewport_h // n)]
+    g_buffer_intervals = [[[ (0.0, 0.0, 0.0, 0.0) for _ in range(viewport_w // n)] for _ in range(viewport_h // n)] for _ in range(M)]
     
     max_ray_length = 1.73205080757  # sqrt(3)
     interval_length = max_ray_length / M
@@ -96,109 +77,77 @@ def pass1_render(voxel_data, transfer_function, viewport_w, viewport_h, n, M):
     for block_y in range(0, viewport_h, n):
         for block_x in range(0, viewport_w, n):
             # Select one pixel per block (e.g., top-left)
-            pixel_x = block_x
-            pixel_y = block_y
+            pixel_x, pixel_y = block_x, block_y
             
-            # Get ray origin and direction for this pixel
+            # Standard ray generation for pixel (x,y) [G]
             ray_origin, ray_direction = get_ray_for_pixel(pixel_x, pixel_y)
+            ray_end = ray_origin + ray_direction
             
             # Find start of non-zero transfer function domain
-            start_point_v = get_distance_for_start(ray_origin, ray_direction, transfer_function)
+            start_point_v = get_distance_for_start(ray_origin, ray_end, transfer_function)
             
             if start_point_v == -1:
-                # No non-zero domain intersection
                 continue
             
-            # Initialize compositing variables
             current_color = (0.0, 0.0, 0.0, 0.0)
             current_alpha = 0.0
             
-            # Integrate over M intervals
             for i in range(M):
-                # Determine interval bounds
-                # Note: The source implies intervals are equal length sqrt(3)/M
-                # in texture space. We march along the ray.
-                
-                # Sample the volume along this interval
-                # This involves marching from current position to current position + interval_length
-                # Accumulate the integral for this interval
-                
                 interval_color = (0.0, 0.0, 0.0, 0.0)
                 interval_alpha = 0.0
                 
-                # Marching loop for the interval
-                # ... (standard volume integration steps) ...
-                # For each sample in the interval:
-                #   val = sample_volume(voxel_data, sample_pos)
-                #   a, c = transfer_function(val)
-                #   interval_color, interval_alpha = compositing_step(interval_color, interval_alpha, a, c)
+                t_start = i * interval_length
+                t_end = (i + 1) * interval_length
+                if t_end > 1.0:
+                    t_end = 1.0
                 
-                # Store interval integral
-                g_buffer_intervals[i][block_y // n, block_x // n] = (interval_color, interval_alpha)
+                t = t_start
+                # Standard volume marching loop for the interval [G]
+                while t < t_end:
+                    pos = start_point_v + t * (ray_end - start_point_v)
+                    val = sample_volume(pos)
+                    a, c = transfer_function(val)
+                    interval_color, interval_alpha = compositing_step(interval_color, interval_alpha, a, c)
+                    t += interval_length / 10.0
                 
-                # Update global compositing state
+                g_buffer_intervals[i][block_y // n][block_x // n] = (interval_alpha, interval_color[0], interval_color[1], interval_color[2])
                 current_color, current_alpha = compositing_step(current_color, current_alpha, interval_alpha, interval_color)
                 
-                # Check if ray has exited volume (alpha is 0 or position > end)
-                if current_alpha <= 0.0:
+                if current_alpha >= 1.0:
                     break
             
-            # Handle last interval if it was shorter (ray exited early)
-            # This is handled implicitly by the loop break, but the last stored
-            # interval might need adjustment if the source specifies separate handling.
-            # The source mentions a 'lastStep' calculation for the shorter last interval.
-            
-            # Store final color
-            g_buffer_color[block_y // n, block_x // n] = (current_color, current_alpha)
+            g_buffer_color[block_y // n][block_x // n] = (current_alpha, current_color[0], current_color[1], current_color[2])
             
     return g_buffer_color, g_buffer_intervals
 
 def pass2_render(g_buffer_color, g_buffer_intervals, viewport_w, viewport_h, n, M):
-    """
-    Second pass: Interpolate or partially recompute for remaining pixels.
-    """
-    final_image = create_texture(viewport_w, viewport_h, channels=4)
+    final_image = [[(0.0, 0.0, 0.0, 0.0)] * viewport_w for _ in range(viewport_h)]
     
     for y in range(viewport_h):
         for x in range(viewport_w):
-            # Skip pixels processed in Pass 1
             if x % n == 0 and y % n == 0:
                 continue
             
-            # Identify 4 neighboring blocks
-            # Neighbors are at (x//n, y//n), (x//n+1, y//n), etc.
-            # Need to map current pixel to the 4 surrounding G-buffer texels
+            # Standard neighbor block index calculation [G]
             neighbor_indices = get_neighbor_block_indices(x, y, n)
             
-            # Check if neighbors' colors are sufficiently close
-            neighbor_colors = [g_buffer_color[idx] for idx in neighbor_indices]
+            neighbor_colors = [g_buffer_color[idx[0]][idx[1]] for idx in neighbor_indices]
             is_similar = check_color_similarity(neighbor_colors)
             
             if is_similar:
-                # Bilinear interpolation of color
-                final_image[y, x] = bilinear_interpolate(g_buffer_color, x, y, n)
+                final_image[y][x] = bilinear_interpolate(g_buffer_color, x, y, n)
             else:
-                # Partial recomputation
-                # Start with zero
                 current_color = (0.0, 0.0, 0.0, 0.0)
                 current_alpha = 0.0
                 
                 for i in range(M):
-                    # Get interval integral from neighbors
-                    # Interpolate or pick from neighbors
                     interval_val = interpolate_interval(g_buffer_intervals[i], neighbor_indices, x, y, n)
-                    
-                    # If interpolation accuracy is insufficient, recompute this specific interval
-                    # This requires re-marching the ray for just this interval segment
-                    # For simplicity, we assume interval_val is the (a, c) for this interval
                     a_i, c_i = interval_val
-                    
                     current_color, current_alpha = compositing_step(current_color, current_alpha, a_i, c_i)
-                    
-                    if current_alpha <= 0.0:
+                    if current_alpha >= 1.0:
                         break
                 
-                final_image[y, x] = (current_color, current_alpha)
+                final_image[y][x] = (current_alpha, current_color[0], current_color[1], current_color[2])
                 
     return final_image
 ```

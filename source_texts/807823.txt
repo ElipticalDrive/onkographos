@@ -1,0 +1,768 @@
+A game engine based on Hazel. Contribute to drsnuggles8/OloEngineBase development by creating an account on GitHub.
+
+Merge pull request #835 from drsnuggles8/feature/volumetric-shadow-ma… · drsnuggles8/OloEngineBase@12a5ad2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+CLAUDE.md
+OloEditor
+assets
+shaders
+PostProcess_Cloudscape.glsl
+compute
+FroxelFogScatter.comp
+VolumetricShadow_Generate.comp
+include
+AtmosphereShading.glsl
+BindlessHeap.glsl
+VolumetricShadowCommon.glsl
+tests/visual
+VolumetricShadow_Clouds_TowardSun_Dusk05_Off.png
+VolumetricShadow_Clouds_TowardSun_Dusk05_On.png
+VolumetricShadow_Clouds_TowardSun_High60_Off.png
+VolumetricShadow_Clouds_TowardSun_High60_On.png
+VolumetricShadow_Clouds_TowardSun_Low12_Off.png
+VolumetricShadow_Clouds_TowardSun_Low12_On.png
+VolumetricShadow_Clouds_TowardSun_Mid30_Off.png
+VolumetricShadow_Clouds_TowardSun_Mid30_On.png
+VolumetricShadow_Clouds_Underside_Dusk05_Off.png
+VolumetricShadow_Clouds_Underside_Dusk05_On.png
+VolumetricShadow_Clouds_Underside_High60_Off.png
+VolumetricShadow_Clouds_Underside_High60_On.png
+VolumetricShadow_Clouds_Underside_Low12_Off.png
+VolumetricShadow_Clouds_Underside_Low12_On.png
+VolumetricShadow_Clouds_Underside_Mid30_Off.png
+VolumetricShadow_Clouds_Underside_Mid30_On.png
+VolumetricShadow_Fog_Broadside_Off.png
+VolumetricShadow_Fog_Broadside_On.png
+VolumetricShadow_Fog_Oblique_On.png
+src
+MCP/Generated
+McpFieldRegistry.Generated.inl
+Panels
+PostProcessSettingsPanel.cpp
+SceneHierarchyPanel.cpp
+OloEngine-ScriptCore/src/OloEngine
+InternalCalls.Generated.cs
+Scene
+Components.Generated.cs
+OloEngine
+src
+CMakeLists.txt
+OloEngine
+Renderer
+PostProcessSettings.h
+RenderPipeline.cpp
+Renderer3DLifecycle.cpp
+ShaderBindingLayout.h
+Texture3D.h
+VolumetricShadowMap.cpp
+VolumetricShadowMap.h
+SaveGame
+SaveGameComponentSerializer.cpp
+SaveGameSerializer.cpp
+SaveGameTypes.h
+Scene
+Components.h
+Generated
+SceneBinaryReadComponents.Generated.inl
+SceneBinaryWriteComponents.Generated.inl
+SceneDeserializeComponents.Generated.inl
+SceneSerializeComponents.Generated.inl
+Scene.cpp
+SceneBinaryFormat.h
+SceneSerializer.cpp
+Scripting/C#/Generated
+ScriptGlueBindings.inl
+ScriptGlueRegistrations.inl
+Platform
+OpenGL
+OpenGLTexture3D.cpp
+Vulkan
+VulkanTexture3D.cpp
+tests
+CMakeLists.txt
+Rendering
+PropertyTests
+BindlessHeapGpuTest.cpp
+BindlessShaderPipelineTest.cpp
+VolumetricShadowVisualEvidenceTest.cpp
+VolumetricShadowMapMathTest.cpp
+docs/agent-rules
+README.md
+binary-format-versioning.md
+volumetric-cloud-debugging.md
+Some content is hidden
+Large Commits have some content hidden by default. Use the searchbox below for content that may be hidden.
+Dismiss banner
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎CLAUDE.md‎
+Copy file name to clipboardExpand all lines: CLAUDE.md
++1-1Lines changed: 1 addition & 1 deletion
+Display the source diff
+Display the rich diff
+Original file line numberDiff line numberDiff line change
+@@ -98,7 +98,7 @@ you are in.
+9898
+- [distance-impostor-reflection-probes.md](docs/agent-rules/distance-impostor-reflection-probes.md) — one encoding contract mirrored in three places, and the miss-sentinel that shades from stale sky.
+9999
+- [foliage-impostor-card-rendering.md](docs/agent-rules/foliage-impostor-card-rendering.md) — three ways impostor cards go missing, separable only by reading the PNG from several azimuths.
+100100
+- [light-path-photometric-parity.md](docs/agent-rules/light-path-photometric-parity.md) — the three light evaluators must agree; a dropped field in a GPU light struct is a silently dead knob.
+101-
+- [volumetric-cloud-debugging.md](docs/agent-rules/volumetric-cloud-debugging.md) — four look-alike causes of a "uniform veil", plus the two suite-level golden killers.
+101+
+- [volumetric-cloud-debugging.md](docs/agent-rules/volumetric-cloud-debugging.md) — eight look-alike causes of a "uniform veil", the two suite-level golden killers, how to tell "darker" from "directionally darker", and why a correct change can move the frame by 0.3%.
+102102
+- [pbf-solver-stability.md](docs/agent-rules/pbf-solver-stability.md) — PBF/SPH formulas assume unit-mass particles; with physical masses the reference constants diverge.
+103103
+104104
+**Scene, ECS & serialization**
+Collapse file
+‎OloEditor/assets/shaders/PostProcess_Cloudscape.glsl‎
+Copy file name to clipboardExpand all lines: OloEditor/assets/shaders/PostProcess_Cloudscape.glsl
++33-6Lines changed: 33 additions & 6 deletions
+Original file line numberDiff line numberDiff line change
+@@ -57,6 +57,10 @@ layout(location = 0) out vec4 o_Cloud;
+5757
+5858
+#include "include/NoiseCommon.glsl"
+5959
+#include "include/CloudscapeCommon.glsl"
+60+
+// Volumetric shadow map (issue #723): the cloud cascade carries the optical
+61+
+// depth through the WHOLE layer, which the cone march below structurally
+62+
+// cannot — see cloudLightNearRange().
+63+
+#include "include/VolumetricShadowCommon.glsl"
+6064
+6165
+// Full-res scene depth (TEX_POSTPROCESS_DEPTH).
+6266
+#include "include/BindlessHeap.glsl"
+@@ -91,12 +95,23 @@ float cloudIGN(vec2 pixel)
+9195
+return fract(52.9829189 * fract(dot(pixel, vec2(0.06711056, 0.00583715))));
+9296
+}
+9397
+94-
+// Optical depth toward the light through the layer: short cone of
+95-
+// exponentially spaced cheap density taps (Schneider light march).
+96-
+float cloudLightOpticalDepth(vec3 worldPos, vec3 towardLight, int lightSteps)
+98+
+// The NEAR range of the light march, in metres. Historically this was also the
+99+
+// WHOLE march: capped at 1400 m, it could not reach the top of a 2500 m layer,
+100+
+// so density above that height darkened nothing — the deep interior of a thick
+101+
+// deck was lit exactly like its top, and no coverage setting could produce the
+102+
+// "bright on the sun side, dark underneath" cue. The volumetric shadow map
+103+
+// (issue #723) carries everything past this range; the cone keeps the near
+104+
+// field, where its high-frequency taps beat a ~94 m/texel volume.
+105+
+float cloudLightNearRange()
+106+
+{
+107+
+return min(u_CloudLayer.y - u_CloudLayer.x, 1400.0);
+108+
+}
+109+
+110+
+// Optical depth toward the light over [0, maxT]: short cone of exponentially
+111+
+// spaced cheap density taps (Schneider light march). Returns density-length —
+112+
+// the caller applies kCloudExtinction.
+113+
+float cloudLightOpticalDepth(vec3 worldPos, vec3 towardLight, int lightSteps, float maxT)
+97114
+{
+98-
+float layerThickness = u_CloudLayer.y - u_CloudLayer.x;
+99-
+float maxT = min(layerThickness, 1400.0);
+100115
+float od = 0.0;
+101116
+float prevT = 0.0;
+102117
+for (int i = 1; i <= lightSteps; ++i)
+@@ -179,7 +194,19 @@ void main()
+179194
+180195
+// Sun/moon in-scatter with powder + one cheap multi-scatter octave
+181196
+// (reduced-extinction re-evaluation, Wrenninge-style).
+182-
+float lightOD = cloudLightOpticalDepth(samplePos, u_CloudSunDir.xyz, lightSteps) * kExtinction;
+197+
+//
+198+
+// The light path splits at cloudLightNearRange(): the cone march
+199+
+// owns [0, near] and the volumetric shadow map owns [near, the
+200+
+// light]. They COMPOSE rather than overlap — the map stores optical
+201+
+// depth measured FROM the light, so sampling it at the point where
+202+
+// the cone stops is exactly the remainder, with no double count.
+203+
+// Both halves are in physical (extinction-multiplied) units by the
+204+
+// time they are added, and the map's own gate makes the second term
+205+
+// 0 when its cascade is off.
+206+
+float nearRange = cloudLightNearRange();
+207+
+float lightOD = cloudLightOpticalDepth(samplePos, u_CloudSunDir.xyz, lightSteps, nearRange) * kExtinction;
+208+
+lightOD += volumetricShadowOpticalDepth(samplePos + u_CloudSunDir.xyz * nearRange - u_RenderOrigin,
+209+
+VSM_CASCADE_CLOUD);
+183210
+float sunTrans = cloudBeerPowder(lightOD, u_CloudLight.w);
+184211
+sunTrans += u_CloudLight.z * 0.6 * cloudBeerPowder(lightOD * 0.25, 0.0);
+185212
+// 0.55: artistic single-scatter albedo — untamed, the sun term
+Collapse file
+‎OloEditor/assets/shaders/compute/FroxelFogScatter.comp‎
+Copy file name to clipboardExpand all lines: OloEditor/assets/shaders/compute/FroxelFogScatter.comp
++15Lines changed: 15 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -32,6 +32,12 @@ layout(local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+3232
+// light (parity: media under a cloud must darken like the ground under it).
+3333
+// Self-contained (UBO 53 + sampler 59), so a compute stage can include it.
+3434
+#include "../include/AtmosphereShading.glsl"
+35+
+// Volumetric shadow map (issue #723) — the fog's SELF-occlusion. Before this,
+36+
+// the medium's own density attenuated the view ray but never the light path:
+37+
+// a dense fog volume was lit identically at its sunward face and fifty metres
+38+
+// inside it. VolumetricShadowCommon includes AtmosphereShading, so the two
+39+
+// includes above/below are the same UBO, guarded.
+40+
+#include "../include/VolumetricShadowCommon.glsl"
+3541
+3642
+// Froxel fog parameters (binding 46) — mirrors UBOStructures::FroxelFogUBO
+3743
+layout(std140, binding = 46) uniform FroxelFogData
+@@ -457,6 +463,15 @@ void main()
+457463
+// surface shaders attenuate the directional light (issue #633).
+458464
+// relPos is render-relative — atmosphereCloudShadow's contract.
+459465
+scatter *= atmosphereCloudShadow(relPos);
+466+
+// ...and the fog now shadows ITSELF along the light direction (issue
+467+
+// #723), which is the cue that gives a volume depth. Same space
+468+
+// contract, same render-relative position. Deliberately applied to the
+469+
+// SUN term only: the ambient term below is the fog's own colour, and
+470+
+// attenuating that too would just darken the whole volume uniformly —
+471+
+// the "uniform veil" failure, not occlusion. The CLOUD cascade is not
+472+
+// sampled here on purpose: atmosphereCloudShadow already carries
+473+
+// cloud-over-fog occlusion, and adding both would double-count it.
+474+
+scatter *= volumetricShadowTransmittance(relPos, VSM_CASCADE_FOG);
+460475
+inscatter += multiScatterApprox(scatter, combinedDensity);
+461476
+}
+462477
+Collapse file
+‎OloEditor/assets/shaders/compute/VolumetricShadow_Generate.comp‎
+Copy file name to clipboard
++150Lines changed: 150 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,150 @@
+1+
+// =============================================================================
+2+
+// VolumetricShadow_Generate.comp — shared volumetric shadow map (issue #723)
+3+
+//
+4+
+// ONE THREAD PER (x, y, cascade): a light-space column. Each thread marches
+5+
+// straight down its cascade's light ray, evaluating the SAME density field its
+6+
+// consumer evaluates (CloudscapeCommon for the cloud cascade, FogCommon +
+7+
+// FogVolumeCommon for the fog cascade), and stores the RUNNING optical depth
+8+
+// into every slice as it passes.
+9+
+//
+10+
+// That shape is the whole point. An independent per-cell march would cost
+11+
+// slices x steps density taps per column and still undersample; walking the
+12+
+// column once makes the accumulation free and makes every slice exact to the
+13+
+// same midpoint quadrature.
+14+
+//
+15+
+// Output (image unit 0, r32f): optical depth from the light — NOT a
+16+
+// transmittance. The cloud consumer still owes it a Beer-powder term and a
+17+
+// reduced-extinction multi-scatter octave, and neither survives being handed
+18+
+// exp(-od). Cascade c occupies z-slices [c * slices, (c+1) * slices).
+19+
+//
+20+
+// DETERMINISTIC BY CONSTRUCTION: no jitter, no frame index, no history. The
+21+
+// output is a pure function of this frame's media settings and light direction.
+22+
+// That is what keeps it out of the golden-flicker business (issue #723's third
+23+
+// acceptance criterion) — but read it precisely: the MAP adds no time
+24+
+// dependence of its own, it does not remove the medium's. The fog extinction
+25+
+// below samples fogFBM at an offset built from u_FogNoiseParams.w, the
+26+
+// accumulated wall clock, so with animated fog noise on the shadow follows the
+27+
+// fog as it moves, which is correct and is also why a golden capturing fog
+28+
+// noise has to freeze the clock (Time::SetMockTime) exactly as it already does
+29+
+// for the fog itself. Banding is handled by the volume's trilinear filter and
+30+
+// by shadows being low-frequency, not by dithering.
+31+
+//
+32+
+// CALLER CONTRACT (VolumetricShadowMap::Dispatch): the cascade transforms
+33+
+// (UBO 54), the cloud field (UBO 53 + samplers 59/60/61) and the fog fields
+34+
+// (UBOs 17/20) must all be uploaded and bound BEFORE the dispatch.
+35+
+// =============================================================================
+36+
+#version 460 core
+37+
+38+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+39+
+40+
+#include "../include/BindlessHeap.glsl"
+41+
+42+
+// Heap-bindless conversion (issue #691 Phase 3). Under OLO_BINDLESS the
+43+
+// declaration moves into main() as a local built from the heap descriptor at
+44+
+// this image unit; the body below is unchanged either way.
+45+
+// NOT `u_VolumetricShadowVolume`: that name belongs to the sampler3D in
+46+
+// include/VolumetricShadowCommon.glsl, and this stage deliberately includes
+47+
+// AtmosphereShading.glsl (the transforms) rather than that file — a generator
+48+
+// has no business declaring a sampler for the volume it is writing.
+49+
+#ifndef OLO_BINDLESS
+50+
+layout(r32f, binding = 0) uniform writeonly image3D u_VolumetricShadowOut;
+51+
+#endif
+52+
+53+
+#include "../include/NoiseCommon.glsl"
+54+
+#include "../include/CloudscapeCommon.glsl"
+55+
+#include "../include/FogCommon.glsl"
+56+
+#include "../include/FogVolumeCommon.glsl"
+57+
+#include "../include/AtmosphereShading.glsl"
+58+
+59+
+// Extinction coefficient (per metre) of the medium at an ABSOLUTE world
+60+
+// position, for one cascade. This is the ONE place the two media meet, and
+61+
+// each side must agree with what its own consumer integrates:
+62+
+//
+63+
+// Cloud — cloudDensity() x kCloudExtinction, cheap taps (no detail erosion),
+64+
+// exactly what PostProcess_Cloudscape.glsl's own light march uses.
+65+
+// Fog — the froxel scatter's `combinedDensity` (height fog x FBM noise +
+66+
+// local volumes) and NOTHING ELSE. In particular NOT
+67+
+// u_FogVolumetricParams.y, the global absorption floor: it is a
+68+
+// spatial CONSTANT, so integrating it along a light path adds
+69+
+// exp(-absorption * pathLength) — a darkening that carries no shadow
+70+
+// information and varies only with the cascade box's geometry. That
+71+
+// is a uniform veil dressed as occlusion
+72+
+// (docs/agent-rules/volumetric-cloud-debugging.md), and it would move
+73+
+// when the box was refitted.
+74+
+float vsmMediumExtinction(vec3 absWorldPos, int cascade)
+75+
+{
+76+
+if (cascade == VSM_CASCADE_CLOUD)
+77+
+{
+78+
+return cloudDensity(absWorldPos, true) * kCloudExtinction;
+79+
+}
+80+
+81+
+float density = fogDensityAtPoint(absWorldPos, u_FogColorAndDensity.a, u_FogDistanceParams.z,
+82+
+u_FogDistanceParams.w);
+83+
+84+
+float noiseIntensity = u_FogNoiseParams.z;
+85+
+if (noiseIntensity > 0.001 && density > 0.0001)
+86+
+{
+87+
+float noiseScale = u_FogNoiseParams.x;
+88+
+float noiseSpeed = u_FogNoiseParams.y;
+89+
+float time = u_FogNoiseParams.w;
+90+
+vec3 noisePos = absWorldPos * noiseScale +
+91+
+vec3(time * noiseSpeed * 0.6, time * noiseSpeed * 0.15, time * noiseSpeed * 0.4);
+92+
+float noiseFactor = fogFBM(noisePos);
+93+
+density *= mix(1.0, clamp(noiseFactor * 2.0, 0.0, 2.5), noiseIntensity);
+94+
+}
+95+
+96+
+FogVolumeResult volumeResult = evaluateFogVolumesAtPoint(absWorldPos);
+97+
+return max(density, 0.0) + volumeResult.density;
+98+
+}
+99+
+100+
+void main()
+101+
+{
+102+
+#ifdef OLO_BINDLESS
+103+
+OLO_HEAP_IMAGE(r32f, writeonly, image3D, u_VolumetricShadowOut, 0);
+104+
+#endif
+105+
+106+
+ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+107+
+int cascade = int(gl_GlobalInvocationID.z);
+108+
+int slices = int(u_VsmVolume.x + 0.5);
+109+
+int resolution = int(u_VsmVolume.w + 0.5);
+110+
+111+
+if (cell.x >= resolution || cell.y >= resolution || cascade >= int(u_VsmVolume.y + 0.5))
+112+
+return;
+113+
+114+
+int sliceBase = cascade * slices;
+115+
+116+
+// A disabled cascade still has to be CLEARED, not skipped: the volume is
+117+
+// persistent, so leaving last frame's optical depth in place would keep
+118+
+// shadowing a medium that is no longer there — and the sampler's own
+119+
+// enable gate is the only other guard, which a future consumer could
+120+
+// forget. Zero is "fully lit".
+121+
+if (u_VsmParams[cascade].x < 0.5)
+122+
+{
+123+
+for (int i = 0; i < slices; ++i)
+124+
+imageStore(u_VolumetricShadowOut, ivec3(cell, sliceBase + i), vec4(0.0));
+125+
+return;
+126+
+}
+127+
+128+
+vec2 uv = (vec2(cell) + 0.5) / float(resolution);
+129+
+float stepLength = u_VsmParams[cascade].z;
+130+
+float invSlices = 1.0 / float(slices);
+131+
+132+
+// Midpoint quadrature. Slice i's stored value is the optical depth at the
+133+
+// slice CENTRE — which is where vsmCascadeW() samples it — so it is the
+134+
+// running total through slices [0, i) plus HALF of slice i's own
+135+
+// contribution. Storing the total through the slice's far edge instead
+136+
+// would bias every tap by half a step toward the dark side, a bias that
+137+
+// grows with the cascade depth and reads as "the shadow starts too early".
+138+
+float accumulated = 0.0;
+139+
+for (int i = 0; i < slices; ++i)
+140+
+{
+141+
+float w = (float(i) + 0.5) * invSlices;
+142+
+vec3 absWorldPos = (u_VsmTexToAbsWorld[cascade] * vec4(uv, w, 1.0)).xyz;
+143+
+float extinction = max(vsmMediumExtinction(absWorldPos, cascade), 0.0);
+144+
+float sliceOpticalDepth = extinction * stepLength;
+145+
+146+
+imageStore(u_VolumetricShadowOut, ivec3(cell, sliceBase + i),
+147+
+vec4(accumulated + sliceOpticalDepth * 0.5));
+148+
+accumulated += sliceOpticalDepth;
+149+
+}
+150+
+}
+Collapse file
+‎OloEditor/assets/shaders/include/AtmosphereShading.glsl‎
+Copy file name to clipboardExpand all lines: OloEditor/assets/shaders/include/AtmosphereShading.glsl
++37-10Lines changed: 37 additions & 10 deletions
+Original file line numberDiff line numberDiff line change
+@@ -1,24 +1,51 @@
+11
+// =============================================================================
+2-
+// AtmosphereShading.glsl — surface weather response (issue #633)
+2+
+// AtmosphereShading.glsl — the shared MEDIA-OCCLUSION block (issues #633, #723)
+33
+//
+4-
+// The weather director's global wetness signal and the cloudscape's ground
+5-
+// shadow, shared by every surface-lighting consumer (PBR forward/deferred,
+6-
+// terrain, and — because this include is deliberately self-contained, no
+7-
+// PBRCommon dependency — the froxel fog scatter compute).
+4+
+// The weather director's global wetness signal, the cloudscape's ground
+5+
+// shadow, and the two volumetric-shadow cascade transforms — shared by every
+6+
+// surface-lighting consumer (PBR forward/deferred, terrain, and — because this
+7+
+// include is deliberately self-contained, no PBRCommon dependency — the froxel
+8+
+// fog scatter compute, the cloud raymarch, and the volumetric-shadow
+9+
+// generator).
+810
+//
+911
+// CPU twin: UBOStructures::AtmosphereShadingUBO (ShaderBindingLayout.h),
+10-
+// uploaded once per frame at UBO_ATMOSPHERE_SHADING (53); a zeroed upload
+11-
+// disables both effects. Cloud shadow map: TEX_CLOUD_SHADOW (62), R8,
+12+
+// uploaded once per frame at UBO_ATMOSPHERE_SHADING (54); a zeroed upload
+13+
+// disables every effect it gates. Cloud shadow map: TEX_CLOUD_SHADOW (62), R8,
+1214
+// 1 = unshadowed transmittance (see CloudShadow_Generate.comp).
+15+
+//
+16+
+// #723 widened this block rather than taking the engine's LAST free UBO
+17+
+// binding (83): both volumetric consumers already read it, and it was already
+18+
+// carrying a dead 64-byte `u_CloudShadowViewProj` mat4 — declared "reserved",
+19+
+// never written by the CPU, never read by any shader — which the two cascade
+20+
+// transforms reclaimed. The volumetric SAMPLER and its helpers live in
+21+
+// include/VolumetricShadowCommon.glsl, which includes this file; only the
+22+
+// transforms are here, so a surface shader that wants wetness does not also
+23+
+// acquire a sampler3D it never reads.
+1324
+// =============================================================================
+1425
+1526
+#ifndef ATMOSPHERE_SHADING_GLSL
+1627
+#define ATMOSPHERE_SHADING_GLSL
+1728
+29+
+// Cascade indices into the arrays below (and into the z-stacked volume at
+30+
+// TEX_VOLUMETRIC_SHADOW). Mirrors AtmosphereShadingUBO::kVsmCascades == 2.
+31+
+#define VSM_CASCADE_CLOUD 0
+32+
+#define VSM_CASCADE_FOG 1
+33+
+#define VSM_CASCADE_COUNT 2
+34+
+1835
+layout(std140, binding = 54) uniform AtmosphereShadingData {
+19-
+mat4 u_CloudShadowViewProj; // reserved (world -> shadow clip); sampling uses Params1
+20-
+vec4 u_AtmoParams0; // x = wetness [0,1], y = cloud shadow strength, z = cloud shadow enabled, w = unused
+21-
+vec4 u_AtmoParams1; // xy = shadow map center (world xz), z = world size, w = 1/world size
+36+
+// ⚠ TWO SPACES IN ONE BLOCK, ON PURPOSE, AND THEY ARE NOT INVERSES.
+37+
+// RelWorldToVsmTex takes RENDER-RELATIVE world (issue #429 — the space
+38+
+// every consumer's fragments already carry, same as u_AtmoParams1 below).
+39+
+// VsmTexToAbsWorld produces ABSOLUTE world because its only consumer is the
+40+
+// generator, which evaluates cloud/fog density fields defined in absolute
+41+
+// world space. Each maps the cascade's OWN unit cube; the z-stacking of the
+42+
+// cascades inside the shared volume is folded in by the sampler.
+43+
+mat4 u_RelWorldToVsmTex[VSM_CASCADE_COUNT]; // render-relative world -> cascade [0,1]^3
+44+
+mat4 u_VsmTexToAbsWorld[VSM_CASCADE_COUNT]; // cascade [0,1]^3 -> ABSOLUTE world (generator only)
+45+
+vec4 u_AtmoParams0; // x = wetness [0,1], y = cloud shadow strength, z = cloud shadow enabled, w = unused
+46+
+vec4 u_AtmoParams1; // xy = shadow map center (world xz), z = world size, w = 1/world size
+47+
+vec4 u_VsmParams[VSM_CASCADE_COUNT]; // x = enabled, y = strength, z = march step length (m), w = unused
+48+
+vec4 u_VsmVolume; // x = slices per cascade, y = cascade count, z = 1/(slices*cascades), w = XY texels
+2249
+};
+2350
+2451
+layout(binding = 62) uniform sampler2D u_CloudShadowMap;
+Collapse file
+‎OloEditor/assets/shaders/include/BindlessHeap.glsl‎
+Copy file name to clipboardExpand all lines: OloEditor/assets/shaders/include/BindlessHeap.glsl
++4-3Lines changed: 4 additions & 3 deletions
+Original file line numberDiff line numberDiff line change
+@@ -208,8 +208,9 @@ layout(std140, binding = 56) uniform OloHeapOffsetBlock
+208208
+// MAX_ENGINE_TEXTURE_SLOTS = TEX_SHADER_GRAPH_0 + 1 — so it MOVES whenever an
+209209
+// engine texture slot is added, and this literal does not move with it.
+210210
+//
+211-
+// 67 since issue #702 inserted TEX_VSM_PHYSICAL at 65 and pushed the
+212-
+// shader-graph base to 66. Before that it was 66 (the A2 renumber moved
+211+
+// 68 since issue #723 inserted TEX_VOLUMETRIC_SHADOW at 66 and pushed the
+212+
+// shader-graph base to 67. Before that it was 67 (issue #702 inserted
+213+
+// TEX_VSM_PHYSICAL at 65), and 66 before THAT (the A2 renumber moved
+213214
+// TEX_DDGI_VISIBILITY to 64 and the shader-graph base to 65).
+214215
+//
+215216
+// THIS EXACT DRIFT SHIPPED ONCE. Adding the VSM slot silently moved the C++ base
+@@ -219,7 +220,7 @@ layout(std140, binding = 56) uniform OloHeapOffsetBlock
+219220
+// headless CI. It is now pinned headlessly by
+220221
+// BindlessShaderPipeline.HeapImageBaseMatchesTheBindingLayout — if you are here
+221222
+// because that failed, update this number, do not relax the test.
+222-
+#define OLO_HEAP_IMAGE_BASE 67u
+223+
+#define OLO_HEAP_IMAGE_BASE 68u
+223224
+#define OLO_HEAP_IMAGE_OFFSET(imgUnit) OLO_HEAP_OFFSET(OLO_HEAP_IMAGE_BASE + uint(imgUnit))
+224225
+225226
+// Pass this as `mem` for an image you both read and write, or for one with no
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

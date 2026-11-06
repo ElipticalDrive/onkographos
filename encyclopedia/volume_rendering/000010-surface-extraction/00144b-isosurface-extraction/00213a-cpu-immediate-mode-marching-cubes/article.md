@@ -1,0 +1,212 @@
+# CPU Immediate Mode Marching Cubes
+
+Also called: CPU Immediate Sim, Immediate Mode Marching Cubes, Legacy Marching Cubes
+
+## Overview
+CPU Immediate Mode Marching Cubes is a classic CPU-based isosurface extraction method that generates mesh vertices and normals in immediate mode, rendering them directly via WebGL draw calls without storing a persistent mesh buffer [S1, unofficial]. It differs from sibling methods like [Streaming Marching Cubes](6190-streaming-marching-cubes.md) or [GPU-accelerated Marching Cubes](3818-gpu-accelerated-marching-cubes-with-distance-extraction.md) by performing all field computation and geometry generation on the CPU and transmitting raw vertex data to the GPU every frame, rather than using persistent buffers or GPU-side geometry shaders [S1, unofficial]. It serves as a reference implementation for correctness and simplicity, particularly in educational contexts or for low-resolution scenes [S1, unofficial].
+
+## How it works
+The method operates on a 3D regular grid (voxel grid) containing a scalar field. It iterates over each cell, determines the intersection of the isosurface with the cell edges using lookup tables, and immediately sends the resulting triangles to the GPU for rendering.
+
+### Inputs and Outputs
+- **Input**: A 3D scalar field $F(x, y, z)$ defined on a grid of resolution $N_x \times N_y \times N_z$. The field is typically composed of contributions from multiple sources (e.g., metaballs) and a floor term.
+- **Input**: An isovalue threshold $T$.
+- **Input**: WebGL context and shader programs.
+- **Output**: Rendered triangles on the screen via immediate mode draw calls. No persistent mesh object is created in CPU memory.
+
+### Data Structures
+The implementation maintains a fixed-size circular buffer or static array for batching vertices to minimize draw calls.
+
+**Buffers (WebGL)**:
+- `posBuf`: `WebGLBuffer` for vertex positions.
+- `normalBuf`: `WebGLBuffer` for vertex normals.
+- `uvBuf`: `WebGLBuffer` for texture coordinates (optional).
+- `colorBuf`: `WebGLBuffer` for vertex colors (optional).
+
+**Data Arrays (CPU Memory)**:
+- `posArray`: `Float32Array` of size `maxCount * 3`. Stores $x, y, z$ for each vertex.
+- `normalArray`: `Float32Array` of size `maxCount * 3`. Stores $n_x, n_y, n_z$ for each vertex.
+- `uvArray`: `Float32Array` of size `maxCount * 2`.
+- `colorArray`: `Float32Array` of size `maxCount * 4`.
+- `maxCount`: Integer constant, typically 4096 [S1, unofficial].
+
+**State Variables**:
+- `count`: Integer, current number of vertices in the buffer.
+- `hasPos`, `hasNormal`, `hasUV`, `hasColor`: Boolean flags indicating which attributes are populated.
+- `prim`: Primitive type (`TRIANGLES`, `LINES`, `POINTS`).
+- `primsize`: Integer, 3 for triangles, 2 for lines, 1 for points.
+
+### Steps
+
+1. **Field Generation**:
+   For each voxel $(i, j, k)$ in the grid, compute the scalar value $F(i, j, k)$.
+   If using metaballs, accumulate contributions from all blobs $b_m$ with center $C_m$ and radius $R_m$:
+   $$ F(i, j, k) = \sum_{m} \frac{R_m^2}{\|P_{ijk} - C_m\|^2} + F_{floor} $$
+   where $P_{ijk}$ is the position of the voxel center. [S1, unofficial]
+
+2. **Primitive Batching Initialization**:
+   Set `prim` to `TRIANGLES`, `primsize` to 3. Reset `count` to 0. Reset `hasPos`, `hasNormal`, `hasUV`, `hasColor` to false. [S1, unofficial]
+
+3. **Grid Traversal and Surface Determination**:
+   Iterate over each cell $(i, j, k)$ in the grid, where $0 \le i < N_x-1$, $0 \le j < N_y-1$, $0 \le k < N_z-1$.
+   Let the scalar values at the 8 vertices of the cell be $v_0, \dots, v_7$.
+   Compute the cube index $I$ by comparing each $v_n$ against the isovalue $T$:
+   $$ I = \sum_{n=0}^{7} \begin{cases} 2^n & \text{if } v_n \ge T \\ 0 & \text{otherwise} \end{cases} $$
+   Use a precomputed lookup table (e.g., Paul Bourke's tables) to determine which edges are intersected and which triangles form the surface for index $I$ [S1, unofficial].
+
+4. **Vertex Interpolation**:
+   For each intersected edge, calculate the intersection point $P$ and normal $N$.
+   Let the edge connect vertices with values $v_a$ and $v_b$ at positions $P_a$ and $P_b$.
+   The interpolation factor $t$ is:
+   $$ t = \frac{T - v_a}{v_b - v_a} $$
+   The intersection position is:
+   $$ P = P_a + t(P_b - P_a) $$
+   The normal is typically the normalized gradient of the scalar field at $P$, or interpolated from vertex normals if available. [S1, unofficial]
+
+5. **Add Vertex Position**:
+   Store $P.x, P.y, P.z$ into `posArray` at indices `[count*3 + 0]`, `[count*3 + 1]`, `[count*3 + 2]`. Set `hasPos` to true. [S1, unofficial]
+
+6. **Add Vertex Normal**:
+   Store $N.x, N.y, N.z$ into `normalArray` at indices `[count*3]`, `[count*3 + 1]`, `[count*3 + 2]`. Set `hasNormal` to true. [S1, unofficial]
+
+7. **Add Triangle**:
+   For each triangle in the configuration (up to 5 triangles per cell):
+   - Copy positions from `posArray` at offsets $o_1, o_2, o_3$ and normals from `normalArray` at offsets $o_1, o_2, o_3$ into `posArray` and `normalArray` starting at index `count*3`.
+   - Increment `count` by 3.
+   - If `count >= maxCount - 3`, call `draw()` to flush the buffer. [S1, unofficial]
+
+8. **Flush and Render**:
+   If `count` is 0, return.
+   Zero out remaining `posArray` entries from `count*3` to `maxCount*3`.
+   Bind buffers for any enabled attributes using `gl.bufferData` with `DYNAMIC_DRAW`.
+   Enable vertex attribute arrays and set pointers.
+   Call `gl.drawArrays` with `prim`, offset 0, and count.
+   Reset `count` to 0. [S1, unofficial]
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+MAX_COUNT = 4096
+PRIM_SIZE = 3 # For triangles
+
+# Data structures
+pos_array = Float32Array(MAX_COUNT * 3)
+normal_array = Float32Array(MAX_COUNT * 3)
+count = 0
+has_pos = False
+has_normal = False
+
+def init_batch():
+    global count, has_pos, has_normal
+    count = 0
+    has_pos = False
+    has_normal = False
+
+def add_vertex(pos, normal):
+    global count, has_pos, has_normal
+    idx = count * 3
+    pos_array[idx] = pos.x
+    pos_array[idx+1] = pos.y
+    pos_array[idx+2] = pos.z
+    has_pos = True
+    
+    normal_array[idx] = normal.x
+    normal_array[idx+1] = normal.y
+    normal_array[idx+2] = normal.z
+    has_normal = True
+    
+    count += 1
+    if count >= MAX_COUNT - 3:
+        flush_and_render()
+
+def flush_and_render():
+    global count
+    if count == 0:
+        return
+    
+    # Zero out unused buffer space
+    for i in range(count * 3, MAX_COUNT * 3):
+        pos_array[i] = 0.0
+        normal_array[i] = 0.0
+        
+    # Bind buffers
+    gl.buffer_data(gl.ARRAY_BUFFER, pos_array, gl.DYNAMIC_DRAW)
+    gl.buffer_data(gl.ARRAY_BUFFER, normal_array, gl.DYNAMIC_DRAW)
+    
+    # Enable attributes
+    if has_pos:
+        gl.enable_vertex_attrib_array(0)
+        gl.vertex_attrib_pointer(0, 3, gl.FLOAT, False, 0, 0)
+    if has_normal:
+        gl.enable_vertex_attrib_array(1)
+        gl.vertex_attrib_pointer(1, 3, gl.FLOAT, False, 0, 0)
+        
+    # Draw
+    gl.draw_arrays(gl.TRIANGLES, 0, count)
+    
+    # Reset
+    count = 0
+    has_pos = False
+    has_normal = False
+
+def marching_cubes_cell(i, j, k, grid, isovalue):
+    # Get 8 vertex values
+    v = [grid[i][j][k], grid[i+1][j][k], grid[i+1][j+1][k], grid[i][j+1][k],
+         grid[i][j][k+1], grid[i+1][j][k+1], grid[i+1][j+1][k+1], grid[i][j+1][k+1]]
+    
+    # Compute cube index
+    cube_index = 0
+    for n in range(8):
+        if v[n] >= isovalue:
+            cube_index |= (1 << n)
+            
+    # Get triangle indices from lookup table
+    triangles = lookup_table[cube_index]
+    
+    for tri in triangles:
+        # Generate 3 vertices for the triangle
+        verts = []
+        for edge_idx in tri:
+            # Determine edge endpoints
+            p1, p2, v1, v2 = get_edge_vertices(edge_idx, i, j, k, grid)
+            # Interpolate
+            t = (isovalue - v1) / (v2 - v1)
+            pos = lerp(p1, p2, t)
+            normal = compute_normal(pos, grid)
+            verts.append((pos, normal))
+            
+        # Add vertices to batch
+        for pos, normal in verts:
+            add_vertex(pos, normal)
+
+def render_frame(grid, isovalue):
+    init_batch()
+    for i in range(grid.width - 1):
+        for j in range(grid.height - 1):
+            for k in range(grid.depth - 1):
+                marching_cubes_cell(i, j, k, grid, isovalue)
+    flush_and_render()
+```
+
+### Edge Cases and Pitfalls
+- **Buffer Overflow**: The code checks if `count >= maxCount - 3` before drawing to ensure space for a triangle (3 vertices). If exceeded, it flushes immediately [S1, unofficial].
+- **Precision**: Floating-point precision in interpolation can cause artifacts at high resolutions. [G]
+- **Boundary Conditions**: The grid traversal must handle boundaries correctly to avoid accessing out-of-bounds memory. [G]
+
+## Operating characteristics
+- **Time Complexity**: $O(N_x N_y N_z)$ for field generation and mesh extraction. Each cell is processed in constant time.
+- **Memory Complexity**: $O(N_x N_y N_z)$ for the scalar field. The vertex buffer is fixed size $O(1)$ relative to the grid, but limited to `maxCount` vertices per frame.
+- **Performance**: Limited by CPU bottlenecks at high resolutions or high blob counts. The constant transfer of vertex data to the GPU every frame is inefficient compared to GPU-based methods. [S1, unofficial]
+- **Strengths**: Simple implementation, easy to debug, no persistent mesh management.
+- **Limitations**: Poor scalability, high CPU usage, limited by `maxCount` buffer size.
+- **When to use**: Educational purposes, low-resolution scenes, or as a reference implementation.
+- **When not to use**: High-resolution volumes, real-time applications with complex scenes, or when memory bandwidth is a constraint.
+
+## Background
+The CPU Immediate Mode Marching Cubes method is inspired by Gregg Tavares' (Greggman) metaballs demo in JavaScript [S1, unofficial]. It uses classic Marching Cubes tables from Paul Bourke [S1, unofficial]. The method was popularized in web-based graphics demos due to the simplicity of WebGL's immediate mode rendering API. It serves as a baseline for comparing GPU-accelerated implementations.
+
+## Sources
+[S1] 3merillon/WebGL2-GPU-Marching-Cubes, https://github.com/3merillon/WebGL2-GPU-Marching-Cubes, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,488 @@
+--- v004.md
++++ v005.md
+@@ -4,236 +4,250 @@
+ 
+ ## Overview
+-GPU Mesh Voxelization converts a triangle mesh into a set of occupied voxel coordinates within a 3D grid by performing explicit geometric intersection tests on the GPU [S1, unofficial]. It differs from rasterization-based voxelization [Multi-channel Surface Voxelization](1899-multi-channel-surface-voxelization.md) by avoiding fragment shaders and depth buffers, instead using compute shaders to iterate over voxels or triangles and applying Separating Axis Theorem (SAT) or plane/projection tests [S2, unofficial][S3, unofficial]. This method provides exact surface intersection results without the aliasing artifacts common in rasterization, though it is computationally more expensive for high-poly meshes due to its brute-force nature [S2, unofficial].
++GPU Mesh Voxelization converts a triangle mesh into a set of occupied voxel coordinates within a 3D grid by performing explicit geometric intersection tests on the GPU [S1, S2, S3, unofficial]. Unlike rasterization-based methods that project geometry into a grid, this approach iterates over voxels (or triangles) and uses Separating Axis Theorem (SAT) or plane/projection tests to determine occupancy [S1, S3, S4, unofficial]. It is distinguished from its sibling [Multi-channel Surface Voxelization](1899-multi-channel-surface-voxelization.md) by using explicit geometric intersection logic rather than hardware rasterization, and from [GPU Rasterization-based Octree Building](2406-gpu-rasterization-based-octree-building.md) by producing a dense or sparse voxel grid directly without hierarchical tree construction [S1, S6, unofficial].
+ 
+ ## How it works
+-The method operates in two primary variants: a triangle-centric approach (processing one triangle per thread) and a voxel-centric approach (processing one voxel per thread). Both variants require preprocessing the mesh and defining a voxel grid, followed by a compute shader dispatch that marks occupied voxels, and optionally a sparse extraction pass.
++The method operates in two primary variants: a brute-force voxel-centric approach using SAT [S2, S3, unofficial] and a triangle-centric approach using plane and projection tests [S1, S5, unofficial]. Both variants require preprocessing the mesh and launching compute kernels.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   **Mesh Geometry:** A list of vertices (float3) and triangle indices (int3).
+-*   **Voxel Resolution:** Defined by a half-size parameter ($h$) or a grid resolution ($R$).
+-*   **Bounding Box:** The axis-aligned bounding box (AABB) of the mesh, typically normalized to $[0, 1]$ or defined by min/max coordinates [S1, unofficial].
++*   Triangle mesh defined by vertices $V$ and indices $I$.
++*   Voxel grid dimensions $(G_x, G_y, G_z)$ and voxel half-size $h$ [S2, S3, S5, unofficial].
++*   Mesh bounding box bounds $B_{min}, B_{max}$ [S1, S2, S3, unofficial].
+ 
+ **Outputs:**
+-*   **Voxel Grid:** A 3D array of occupied voxel coordinates. This can be stored as:
+-    *   A bit-packed 1D array (voxel table) where each bit represents a voxel [S1, unofficial].
+-    *   A structured buffer of `float4` containing voxel position and occupancy weight [S2, unofficial].
+-    *   A sparse list of $(x, y, z)$ coordinates extracted from the bit table [S1, unofficial].
++*   **Variant A (SAT):** A buffer of occupied voxels, typically stored as a list of coordinates or a bit-packed table [S1, S2, S3, unofficial].
++*   **Variant B (Plane/Projection):** A bit-packed voxel table (vtable) where each bit represents a voxel's occupancy, followed by a sparse extraction pass to retrieve coordinates [S1, S5, unofficial].
+ 
+ ### Data Structures
+-1.  **Triangle Data Buffer:** A flat array of floats. Each triangle is stored as 9 floats: $(v_{0x}, v_{0y}, v_{0z}, v_{1x}, v_{1y}, v_{1z}, v_{2x}, v_{2y}, v_{2z})$ [S1, unofficial].
+-2.  **Voxel Table (vtable):** A 1D array of 32-bit unsigned integers. The total size is $\lceil (R_x \cdot R_y \cdot R_z) / 32 \rceil$ words. Bit $i$ in word $\lfloor i/32 \rfloor$ corresponds to voxel index $i$ [S1, unofficial].
+-3.  **Grid Info Struct:** Contains the bounding box min/max, grid dimensions ($R_x, R_y, R_z$), number of triangles, and unit size (voxel width) per axis [S1, unofficial].
+-4.  **Compute Shader Buffers (D3D11/Unity variant):**
+-    *   `_VoxelGridPoints`: `RWStructuredBuffer<float4>` for output [S2, unofficial].
+-    *   `_MeshVertices`: `StructuredBuffer<float3>` [S2, unofficial].
+-    *   `_MeshTriangleIndices`: `StructuredBuffer<int>` [S2, unofficial].
+-    *   Constants: `_GridWidth`, `_GridHeight`, `_GridDepth`, `_CellHalfSize`, `_BoundsMin`, `_TriangleCount` [S2, unofficial].
++**1. Triangle Data Buffer:**
++*   Flat array of floats.
++*   Layout: 9 floats per triangle ($v_{0x}, v_{0y}, v_{0z}, v_{1x}, v_{1y}, v_{1z}, v_{2x}, v_{2y}, v_{2z}$) [S1, S4, unofficial].
++*   Vertices are often normalized to the $[0, 1]$ range relative to the mesh bounding box [S1, S5, unofficial].
++
++**2. Voxel Grid Parameters:**
++*   `gridSize`: Dimensions $(G_x, G_y, G_z)$ calculated as $\lceil \frac{B_{max} - B_{min}}{2h} \rceil$ [S1, S2, S3, S5, unofficial].
++*   `unit` or `cellSize`: Physical size of one voxel, $2h$ [S1, S3, S5, unofficial].
++
++**3. Voxel Table (vtable) - Variant B:**
++*   1D array of 32-bit unsigned integers.
++*   Size: $\lceil G_x G_y G_z / 32 \rceil$ integers [S1, S5, unofficial].
++*   Each bit corresponds to a voxel index $i = x + y G_x + z G_x G_y$ [S1, S5, unofficial].
++
++**4. Compute Shader Buffers (Variant A):**
++*   `_MeshVertices`: `StructuredBuffer<float3>` [S2, S3, unofficial].
++*   `_MeshTriangleIndices`: `StructuredBuffer<int>` [S2, S3, unofficial].
++*   `_VoxelGridPoints`: `RWStructuredBuffer<float4>` storing $(x, y, z, w)$ where $w=1.0$ if occupied, $0.0$ otherwise [S2, S3, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-#### 1. Preprocessing
+-1.  Calculate grid dimensions from mesh bounds and voxel half-size $h$:
+-    $$ R_x = \lceil \frac{B_{max,x} - B_{min,x}}{2h} \rceil, \quad R_y = \lceil \frac{B_{max,y} - B_{min,y}}{2h} \rceil, \quad R_z = \lceil \frac{B_{max,z} - B_{min,z}}{2h} \rceil $$
+-    [S2, unofficial][S3, unofficial]
+-2.  Normalize triangle vertices relative to the bounding box minimum: $v'_i = v_i - B_{min}$ [S1, unofficial].
+-3.  Initialize the voxel table to all zeros [S1, unofficial].
+-
+-#### 2. Triangle-Centric Voxelization (Kernel: `voxelize_kernel`)
+-Each thread processes one triangle.
+-
+-1.  **Triangle Setup:** Read vertices $v_0, v_1, v_2$. Compute edges $e_0 = v_1 - v_0$, $e_1 = v_2 - v_1$, $e_2 = v_0 - v_2$ [S1, unofficial].
+-2.  **Normal Calculation:** Compute normal $n = e_0 \times e_1$. If $|n| > 10^{-20}$, normalize $n$; otherwise, treat as degenerate [S1, unofficial].
+-3.  **Bounding Box:** Compute world AABB of the triangle. Convert to grid coordinates $t_{grid}.min$ and $t_{grid}.max$ by dividing by unit size and clamping to $[0, R-1]$ [S1, unofficial].
++#### Preprocessing
++1.  Calculate grid dimensions:
++    $$ G_x = \lceil \frac{B_{max,x} - B_{min,x}}{2h} \rceil, \quad G_y = \lceil \frac{B_{max,y} - B_{min,y}}{2h} \rceil, \quad G_z = \lceil \frac{B_{max,z} - B_{min,z}}{2h} \rceil $$
++    [S2, S3, S5, unofficial]
++2.  Compute unit vector (voxel size): $u = 2h$ [S1, S5, unofficial].
++3.  Normalize triangle vertices to local coordinates relative to $B_{min}$:
++    $$ v'_i = v_i - B_{min} $$
++    [S1, S5, unofficial]
++4.  Compute triangle bounding box in grid coordinates:
++    $$ t_{grid}.min = \text{clamp}(\lfloor \frac{v'_{min}}{u} \rfloor, 0, G-1) $$
++    $$ t_{grid}.max = \text{clamp}(\lceil \frac{v'_{max}}{u} \rceil, 0, G-1) $$
++    [S1, S5, unofficial]
++
++#### Variant A: SAT Intersection (Voxel-Centric)
++Each compute thread processes one voxel. It checks for intersection with all mesh triangles.
++
++1.  **Thread ID:** Map $(id.x, id.y, id.z)$ to voxel index.
++2.  **Voxel AABB:** Define voxel AABB centered at $C = id \cdot u + h + B_{min}$ with extents $h$ [S2, S3, unofficial].
++3.  **Triangle Loop:** Iterate through all triangles $T_j$.
++4.  **SAT Test:** Check if Voxel AABB intersects Triangle $T_j$ along 13 axes:
++    *   3 AABB face normals: $(1,0,0), (0,1,0), (0,0,1)$ [S2, S3, unofficial].
++    *   3 Triangle face normals: $n = (v_1-v_0) \times (v_2-v_1)$ [S2, S3, unofficial].
++    *   9 Edge-Axis cross products: $e_{tri} \times e_{aabb}$ [S2, S3, unofficial].
++5.  **Projection Check:** For each axis $a$, calculate projections:
++    $$ p_{tri} = \{ \text{dot}(v_k, a) \mid k \in \{0,1,2\} \} $$
++    $$ p_{aabb} = \text{dot}(C, a) \pm \text{dot}(h, |a|) $$
++    Separation exists if $\max(-\max(p_{tri}), \min(p_{tri})) > r$, where $r$ is the projected radius of the AABB [S2, S3, unofficial].
++6.  **Mark Occupied:** If intersection found, write to `_VoxelGridPoints` and break loop [S2, S3, unofficial].
++
++#### Variant B: Plane/Projection Tests (Triangle-Centric)
++Each compute thread processes one triangle. It iterates over voxels in the triangle's bounding box.
++
++1.  **Thread ID:** Map to triangle index $j$.
++2.  **Triangle Geometry:**
++    *   Edges: $e_0 = v_1 - v_0, e_1 = v_2 - v_1, e_2 = v_0 - v_2$ [S1, S5, unofficial].
++    *   Normal: $n = \text{normalize}(e_0 \times e_1)$ [S1, S5, unofficial]. Handle degenerate triangles ($|n| < 10^{-20}$) by skipping normalization [S1, S5, unofficial].
++3.  **Bounding Box:** Calculate $t_{grid}.min, t_{grid}.max$ in grid coordinates [S1, S5, unofficial].
+ 4.  **Plane Test Constants:**
+-    *   Define offset vector $c$: $c_i = h$ if $n_i > 0$, else $0$ [S1, unofficial].
+-    *   Compute slab bounds: $d_1 = n \cdot (c - v_0)$ and $d_2 = n \cdot (\delta_p - c - v_0)$, where $\delta_p = (2h, 2h, 2h)$ [S1, unofficial].
++    *   Define offset vector $c$: $c_i = u_i$ if $n_i > 0$, else $0$ [S1, S5, unofficial].
++    *   $d_1 = \text{dot}(n, c - v_0)$ [S1, S5, unofficial].
++    *   $d_2 = \text{dot}(n, (u - c) - v_0)$ [S1, S5, unofficial].
+ 5.  **Projection Test Constants:**
+-    *   **XY Plane:** Compute edge normals $n_{xy\_e0} = (-e_{0y}, e_{0x})$. If $n_z < 0$, negate all XY normals. Compute $d_{xy\_ei} = -(n_{xy\_ei} \cdot v_{i,xy}) + \max(0, h \cdot n_{xy\_ei,x}) + \max(0, h \cdot n_{xy\_ei,y})$ [S1, unofficial].
+-    *   **YZ Plane:** Compute edge normals $n_{yz\_e0} = (-e_{0z}, e_{0y})$. If $n_x < 0$, negate all YZ normals. Compute $d_{yz\_ei}$ similarly [S1, unofficial].
+-    *   **ZX Plane:** Compute edge normals $n_{zx\_e0} = (-e_{0x}, e_{0z})$. If $n_y < 0$, negate all ZX normals. Compute $d_{zx\_ei}$ similarly [S1, unofficial].
+-6.  **Voxel Iteration:** Loop $z$ from $t_{grid}.min.z$ to $t_{grid}.max.z$, $y$ from $t_{grid}.min.y$ to $t_{grid}.max.y$, $x$ from $t_{grid}.min.x$ to $t_{grid}.max.x$.
+-    *   Let $p = (x \cdot 2h, y \cdot 2h, z \cdot 2h)$.
+-    *   **Plane Check:** If $(n \cdot p + d_1)(n \cdot p + d_2) > 0$, continue (voxel is outside the triangle slab) [S1, unofficial].
+-    *   **XY Check:** If $n_{xy\_ei} \cdot p_{xy} + d_{xy\_ei} < 0$ for any edge $i$, continue [S1, unofficial].
+-    *   **YZ Check:** If $n_{yz\_ei} \cdot p_{yz} + d_{yz\_ei} < 0$ for any edge $i$, continue [S1, unofficial].
+-    *   **ZX Check:** If $n_{zx\_ei} \cdot p_{zx} + d_{zx\_ei} < 0$ for any edge $i$, continue [S1, unofficial].
+-    *   **Mark Voxel:** If all checks pass, set bit at index $x + y R_x + z R_x R_y$ in the voxel table using `atomicOr` [S1, unofficial].
+-
+-#### 3. Voxel-Centric Voxelization (Kernel: `VoxelizeMesh`)
+-Each thread processes one voxel.
+-
+-1.  **Voxel AABB:** Define voxel AABB with center $C = id \cdot 2h + h + B_{min}$ and extents $h$ [S2, unofficial].
+-2.  **SAT Intersection Test:** Iterate through all mesh triangles. For each triangle, test intersection with the voxel AABB using the Separating Axis Theorem [S2, unofficial][S3, unofficial].
+-    *   **Axes:** Test 13 axes: 3 AABB face normals $(1,0,0), (0,1,0), (0,0,1)$; 3 triangle face normals (cross products of edges); and 9 cross products of triangle edges with AABB axes [S2, unofficial].
+-    *   **Projection:** For an axis $A$, project triangle vertices $v_0, v_1, v_2$ to get $p_0, p_1, p_2$. Let $minP = \min(p_i)$, $maxP = \max(p_i)$. Project AABB extents $E$ to get radius $r = E_x |A_x| + E_y |A_y| + E_z |A_z|$ [S2, unofficial].
+-    *   **Separation:** If $\max(-maxP, minP) > r$, the axis separates the shapes. If any axis separates, the triangle does not intersect the voxel [S2, unofficial].
+-3.  **Output:** If an intersection is found, write `float4(voxel_min, 1.0)` to the output buffer at index $id.x + R_x(id.y + R_y id.z)$ and break the triangle loop [S2, unofficial].
+-
+-#### 4. Sparse Extraction (Optional)
+-If a bit-packed table is used, launch `extract_kernel` to iterate over all bits. If a bit is set, atomically increment a counter and store the $(x,y,z)$ coordinates in the output array [S1, unofficial].
+-
+-### Pseudocode (Triangle-Centric Variant)
++    *   For each plane (XY, YZ, ZX), compute 2D edge normals.
++    *   Example XY: $n_{xy\_e0} = (-e_{0y}, e_{0x})$. If $n_z < 0$, negate all XY edge normals [S1, S5, unofficial].
++    *   Compute $d_{xy\_ei} = -\text{dot}(n_{xy\_ei}, v_{i,xy}) + \max(0, u_x n_{xy\_ei,x}) + \max(0, u_y n_{xy\_ei,y})$ [S1, S5, unofficial].
++    *   Repeat for YZ and ZX planes [S1, S5, unofficial].
++6.  **Voxel Iteration:** Loop $z \in [t_{grid}.min.z, t_{grid}.max.z]$, $y \in [t_{grid}.min.y, t_{grid}.max.y]$, $x \in [t_{grid}.min.x, t_{grid}.max.x]$.
++    *   Voxel center: $p = (x u_x, y u_y, z u_z)$ [S1, S5, unofficial].
++    *   **Plane Check:** If $(\text{dot}(n, p) + d_1)(\text{dot}(n, p) + d_2) > 0$, voxel is outside slab, continue [S1, S5, unofficial].
++    *   **Projection Checks:**
++        *   XY: If $\text{dot}(n_{xy\_ei}, p_{xy}) + d_{xy\_ei} < 0$ for any edge, continue [S1, S5, unofficial].
++        *   YZ: If $\text{dot}(n_{yz\_ei}, p_{yz}) + d_{yz\_ei} < 0$ for any edge, continue [S1, S5, unofficial].
++        *   ZX: If $\text{dot}(n_{zx\_ei}, p_{zx}) + d_{zx\_ei} < 0$ for any edge, continue [S1, S5, unofficial].
++    *   **Mark Bit:** If all tests pass, set bit in `vtable` at index $x + y G_x + z G_x G_y$ using `atomicOr` [S1, S5, unofficial].
++7.  **Sparse Extraction (Post-Processing):**
++    *   Launch kernel to iterate over `vtable`.
++    *   If bit set, atomically increment counter and store $(x,y,z)$ in output array [S1, S5, unofficial].
++
++### Pseudocode (Variant B: Plane/Projection)
+ 
+ ```python
+-# Data Structures
+-struct VoxInfo:
+-    bbox_min: float3
+-    bbox_max: float3
+-    gridsize: int3
+-    n_triangles: int
+-    unit: float3
+-
+-# Helper: Set bit in atomic voxel table
+-def set_bit(vtable, index):
+-    int_loc = index // 32
+-    bit_pos = 31 - (index % 32)
+-    atomic_or(vtable[int_loc], 1 << bit_pos)
+-
+-# Kernel: voxelize_kernel
+-def voxelize_kernel(info, triangle_data, voxel_table):
+-    tid = thread_idx + block_idx * block_dim
+-    stride = block_dim * grid_dim
++def voxelize_mesh_gpu(triangles, bounds_min, bounds_max, half_size):
++    # Preprocessing
++    voxel_size = 2.0 * half_size
++    grid_size = ceil((bounds_max - bounds_min) / voxel_size)
++    unit = voxel_size
++    vtable_size = (grid_size.x * grid_size.y * grid_size.z + 31) // 32
++    vtable = [0] * vtable_size
+     
+-    while tid < info.n_triangles:
+-        t = tid * 9
+-        # Read vertices and normalize to bbox min
+-        v0 = float3(triangle_data[t+0], triangle_data[t+1], triangle_data[t+2]) - info.bbox_min
+-        v1 = float3(triangle_data[t+3], triangle_data[t+4], triangle_data[t+5]) - info.bbox_min
+-        v2 = float3(triangle_data[t+6], triangle_data[t+7], triangle_data[t+8]) - info.bbox_min
+-        
+-        # Compute edges
+-        e0 = v1 - v0
+-        e1 = v2 - v1
+-        e2 = v0 - v2
+-        
+-        # Compute normal
+-        cr = cross(e0, e1)
+-        len_cr = length(cr)
+-        if len_cr > 1e-20:
+-            n = cr / len_cr
+-        else:
+-            n = float3(0, 0, 0)
+-            
+-        # Compute triangle grid bounding box
+-        t_min = min(v0, min(v1, v2))
+-        t_max = max(v0, max(v1, v2))
+-        
+-        # Convert to grid coords and clamp
+-        t_grid_min = clamp(floor(t_min / info.unit), 0, info.gridsize - 1)
+-        t_grid_max = clamp(floor(t_max / info.unit), 0, info.gridsize - 1)
+-        
+-        # Plane test setup
+-        # delta_p is the voxel size (unit)
+-        delta_p = info.unit
+-        c = float3(0, 0, 0)
+-        if n.x > 0: c.x = delta_p.x
+-        if n.y > 0: c.y = delta_p.y
+-        if n.z > 0: c.z = delta_p.z
+-        
+-        d1 = dot(n, c - v0)
+-        d2 = dot(n, delta_p - c - v0)
+-        
+-        # Projection tests setup
+-        # XY Plane
+-        n_xy_e0 = float2(-e0.y, e0.x)
+-        n_xy_e1 = float2(-e1.y, e1.x)
+-        n_xy_e2 = float2(-e2.y, e2.x)
+-        if n.z < 0:
+-            n_xy_e0 = -n_xy_e0
+-            n_xy_e1 = -n_xy_e1
+-            n_xy_e2 = -n_xy_e2
+-            
+-        d_xy_e0 = -dot(n_xy_e0, float2(v0.x, v0.y)) + max(0, delta_p.x * n_xy_e0.x) + max(0, delta_p.y * n_xy_e0.y)
+-        d_xy_e1 = -dot(n_xy_e1, float2(v1.x, v1.y)) + max(0, delta_p.x * n_xy_e1.x) + max(0, delta_p.y * n_xy_e1.y)
+-        d_xy_e2 = -dot(n_xy_e2, float2(v2.x, v2.y)) + max(0, delta_p.x * n_xy_e2.x) + max(0, delta_p.y * n_xy_e2.y)
+-        
+-        # YZ Plane
+-        n_yz_e0 = float2(-e0.z, e0.y)
+-        n_yz_e1 = float2(-e1.z, e1.y)
+-        n_yz_e2 = float2(-e2.z, e2.y)
+-        if n.x < 0:
+-            n_yz_e0 = -n_yz_e0
+-            n_yz_e1 = -n_yz_e1
+-            n_yz_e2 = -n_yz_e2
+-            
+-        d_yz_e0 = -dot(n_yz_e0, float2(v0.y, v0.z)) + max(0, delta_p.y * n_yz_e0.x) + max(0, delta_p.z * n_yz_e0.y)
+-        d_yz_e1 = -dot(n_yz_e1, float2(v1.y, v1.z)) + max(0, delta_p.y * n_yz_e1.x) + max(0, delta_p.z * n_yz_e1.y)
+-        d_yz_e2 = -dot(n_yz_e2, float2(v2.y, v2.z)) + max(0, delta_p.y * n_yz_e2.x) + max(0, delta_p.z * n_yz_e2.y)
+-        
+-        # ZX Plane
+-        n_zx_e0 = float2(-e0.x, e0.z)
+-        n_zx_e1 = float2(-e1.x, e1.z)
+-        n_zx_e2 = float2(-e2.x, e2.z)
+-        if n.y < 0:
+-            n_zx_e0 = -n_zx_e0
+-            n_zx_e1 = -n_zx_e1
+-            n_zx_e2 = -n_zx_e2
+-            
+-        d_zx_e0 = -dot(n_zx_e0, float2(v0.z, v0.x)) + max(0, delta_p.x * n_zx_e0.x) + max(0, delta_p.z * n_zx_e0.y)
+-        d_zx_e1 = -dot(n_zx_e1, float2(v1.z, v1.x)) + max(0, delta_p.x * n_zx_e1.x) + max(0, delta_p.z * n_zx_e1.y)
+-        d_zx_e2 = -dot(n_zx_e2, float2(v2.z, v2.x)) + max(0, delta_p.x * n_zx_e2.x) + max(0, delta_p.z * n_zx_e2.y)
+-        
+-        # Iterate voxels in triangle bounding box
+-        for z in range(t_grid_min.z, t_grid_max.z + 1):
+-            for y in range(t_grid_min.y, t_grid_max.y + 1):
+-                for x in range(t_grid_min.x, t_grid_max.x + 1):
+-                    p = float3(x * info.unit.x, y * info.unit.y, z * info.unit.z)
+-                    
+-                    # Plane test
+-                    n_dot_p = dot(n, p)
+-                    if (n_dot_p + d1) * (n_dot_p + d2) > 0.0:
+-                        continue
+-                        
+-                    # XY Projection test
+-                    p_xy = float2(p.x, p.y)
+-                    if dot(n_xy_e0, p_xy) + d_xy_e0 < 0.0: continue
+-                    if dot(n_xy_e1, p_xy) + d_xy_e1 < 0.0: continue
+-                    if dot(n_xy_e2, p_xy) + d_xy_e2 < 0.0: continue
+-                    
+-                    # YZ Projection test
+-                    p_yz = float2(p.y, p.z)
+-                    if dot(n_yz_e0, p_yz) + d_yz_e0 < 0.0: continue
+-                    if dot(n_yz_e1, p_yz) + d_yz_e1 < 0.0: continue
+-                    if dot(n_yz_e2, p_yz) + d_yz_e2 < 0.0: continue
+-                    
+-                    # ZX Projection test
+-                    p_zx = float2(p.z, p.x)
+-                    if dot(n_zx_e0, p_zx) + d_zx_e0 < 0.0: continue
+-                    if dot(n_zx_e1, p_zx) + d_zx_e1 < 0.0: continue
+-                    if dot(n_zx_e2, p_zx) + d_zx_e2 < 0.0: continue
+-                    
+-                    # Mark voxel
+-                    loc = x + y * info.gridsize.x + z * info.gridsize.x * info.gridsize.y
+-                    set_bit(voxel_table, loc)
+-                    
+-        tid += stride
+-
+-# Kernel: extract_kernel
+-def extract_kernel(vtable, gridsize, out_coords, out_counter):
+-    idx = thread_idx + block_idx * block_dim
+-    stride = block_dim * grid_dim
+-    total = gridsize.x * gridsize.y * gridsize.z
++    # Kernel Launch: One thread per triangle
++    threads_per_block = 256
++    num_blocks = ceil(len(triangles) / threads_per_block)
+     
+-    for i in range(idx, total, stride):
+-        int_loc = i // 32
+-        bit = 31 - (i % 32)
+-        if vtable[int_loc] & (1 << bit):
+-            pos = atomic_add(out_counter, 1)
+-            out_coords[pos * 3 + 0] = i % gridsize.x
+-            out_coords[pos * 3 + 1] = (i // gridsize.x) % gridsize.y
+-            out_coords[pos * 3 + 2] = i // (gridsize.x * gridsize.y)
++    for block_idx in range(num_blocks):
++        for thread_idx in range(threads_per_block):
++            tri_idx = block_idx * threads_per_block + thread_idx
++            if tri_idx >= len(triangles):
++                break
++            
++            v0, v1, v2 = triangles[tri_idx]
++            # Normalize to local coords
++            v0 = v0 - bounds_min
++            v1 = v1 - bounds_min
++            v2 = v2 - bounds_min
++            
++            # Edges and Normal
++            e0 = v1 - v0
++            e1 = v2 - v1
++            e2 = v0 - v2
++            n = cross(e0, e1)
++            n_len = length(n)
++            if n_len > 1e-20:
++                n = n / n_len
++            else:
++                continue # Degenerate triangle
++            
++            # Bounding Box in Grid Coords
++            t_min = clamp(floor(min(v0, v1, v2) / unit), 0, grid_size - 1)
++            t_max = clamp(ceil(max(v0, v1, v2) / unit), 0, grid_size - 1)
++            
++            # Plane Test Setup
++            c = float3(0, 0, 0)
++            if n.x > 0: c.x = unit.x
++            if n.y > 0: c.y = unit.y
++            if n.z > 0: c.z = unit.z
++            
++            d1 = dot(n, c - v0)
++            d2 = dot(n, (float3(unit.x, unit.y, unit.z) - c) - v0)
++            
++            # Projection Tests Setup
++            # XY Plane
++            n_xy_e0 = float2(-e0.y, e0.x)
++            n_xy_e1 = float2(-e1.y, e1.x)
++            n_xy_e2 = float2(-e2.y, e2.x)
++            if n.z < 0:
++                n_xy_e0 = -n_xy_e0
++                n_xy_e1 = -n_xy_e1
++                n_xy_e2 = -n_xy_e2
++            
++            d_xy_e0 = -dot(n_xy_e0, float2(v0.x, v0.y)) + max(0, unit.x * n_xy_e0.x) + max(0, unit.y * n_xy_e0.y)
++            d_xy_e1 = -dot(n_xy_e1, float2(v1.x, v1.y)) + max(0, unit.x * n_xy_e1.x) + max(0, unit.y * n_xy_e1.y)
++            d_xy_e2 = -dot(n_xy_e2, float2(v2.x, v2.y)) + max(0, unit.x * n_xy_e2.x) + max(0, unit.y * n_xy_e2.y)
++            
++            # YZ Plane
++            n_yz_e0 = float2(-e0.z, e0.y)
++            n_yz_e1 = float2(-e1.z, e1.y)
++            n_yz_e2 = float2(-e2.z, e2.y)
++            if n.x < 0:
++                n_yz_e0 = -n_yz_e0
++                n_yz_e1 = -n_yz_e1
++                n_yz_e2 = -n_yz_e2
++                
++            d_yz_e0 = -dot(n_yz_e0, float2(v0.y, v0.z)) + max(0, unit.y * n_yz_e0.x) + max(0, unit.z * n_yz_e0.y)
++            d_yz_e1 = -dot(n_yz_e1, float2(v1.y, v1.z)) + max(0, unit.y * n_yz_e1.x) + max(0, unit.z * n_yz_e1.y)
++            d_yz_e2 = -dot(n_yz_e2, float2(v2.y, v2.z)) + max(0, unit.y * n_yz_e2.x) + max(0, unit.z * n_yz_e2.y)
++            
++            # ZX Plane
++            n_zx_e0 = float2(-e0.x, e0.z)
++            n_zx_e1 = float2(-e1.x, e1.z)
++            n_zx_e2 = float2(-e2.x, e2.z)
++            if n.y < 0:
++                n_zx_e0 = -n_zx_e0
++                n_zx_e1 = -n_zx_e1
++                n_zx_e2 = -n_zx_e2
++                
++            d_zx_e0 = -dot(n_zx_e0, float2(v0.z, v0.x)) + max(0, unit.x * n_zx_e0.x) + max(0, unit.z * n_zx_e0.y)
++            d_zx_e1 = -dot(n_zx_e1, float2(v1.z, v1.x)) + max(0, unit.x * n_zx_e1.x) + max(0, unit.z * n_zx_e1.y)
++            d_zx_e2 = -dot(n_zx_e2, float2(v2.z, v2.x)) + max(0, unit.x * n_zx_e2.x) + max(0, unit.z * n_zx_e2.y)
++            
++            # Voxel Iteration
++            for z in range(t_min.z, t_max.z + 1):
++                for y in range(t_min.y, t_max.y + 1):
++                    for x in range(t_min.x, t_max.x + 1):
++                        p = float3(x * unit.x, y * unit.y, z * unit.z)
++                        
++                        # Plane Test
++                        n_dot_p = dot(n, p)
++                        if (n_dot_p + d1) * (n_dot_p + d2) > 0.0:
++                            continue
++                            
++                        # XY Projection Test
++                        p_xy = float2(p.x, p.y)
++                        if dot(n_xy_e0, p_xy) + d_xy_e0 < 0.0: continue
++                        if dot(n_xy_e1, p_xy) + d_xy_e1 < 0.0: continue
++                        if dot(n_xy_e2, p_xy) + d_xy_e2 < 0.0: continue
++                        
++                        # YZ Projection Test
++                        p_yz = float2(p.y, p.z)
++                        if dot(n_yz_e0, p_yz) + d_yz_e0 < 0.0: continue
++                        if dot(n_yz_e1, p_yz) + d_yz_e1 < 0.0: continue
++                        if dot(n_yz_e2, p_yz) + d_yz_e2 < 0.0: continue
++                        
++                        # ZX Projection Test
++                        p_zx = float2(p.z, p.x)
++                        if dot(n_zx_e0, p_zx) + d_zx_e0 < 0.0: continue
++                        if dot(n_zx_e1, p_zx) + d_zx_e1 < 0.0: continue
++                        if dot(n_zx_e2, p_zx) + d_zx_e2 < 0.0: continue
++                        
++                        # Mark Voxel
++                        loc = x + y * grid_size.x + z * grid_size.x * grid_size.y
++                        int_idx = loc // 32
++                        bit_pos = 31 - (loc % 32)
++                        atomic_or(vtable[int_idx], 1 << bit_pos)
++
++    # Sparse Extraction
++    occupied_voxels = []
++    counter = 0
++    for i in range(grid_size.x * grid_size.y * grid_size.z):
++        int_idx = i // 32
++        bit_pos = 31 - (i % 32)
++        if vtable[int_idx] & (1 << bit_pos):
++            x = i % grid_size.x
++            y = (i // grid_size.x) % grid_size.y
++            z = i // (grid_size.x * grid_size.y)
++            occupied_voxels.append((x, y, z))
++            
++    return occupied_voxels
+ ```
+ 
+ ### Parameters
+-*   **Resolution/Half-Size:** The voxel size $h$ (typically $0.005$ to $0.05$) or grid resolution $R$ [S3, unofficial].
+-*   **Block Size:** Typically 256 threads per block [S4, unofficial].
+-*   **Solid vs. Surface:** A propagation pass may be added to fill interior voxels for solid voxelization [S4, unofficial].
++*   **Resolution/Grid Size:** Determined by mesh bounds and voxel half-size [S1, S2, S3, S5, unofficial].
++*   **Half-Size ($h$):** Typical value $0.05$ [S2, S3, unofficial]. Range $[0.005, 0.05]$ [S3, unofficial].
++*   **Thread Block Size:** Fixed at 256 threads per block in some implementations [S4, S5, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Degenerate Triangles:** If the triangle normal length is $\le 10^{-20}$, the normal is not normalized to prevent division by zero [S1, unofficial].
+-*   **Boundary Clamping:** Grid coordinates must be clamped to $[0, R-1]$ to prevent out-of-bounds memory access [S1, unofficial].
+-*   **Precision:** The SAT implementation normalizes triangle edges, which can introduce precision issues for very small triangles [S2, unofficial].
+-*   **Memory:** The implementation should check available GPU memory before allocating the voxel table [S5, unofficial].
++*   **Degenerate Triangles:** If triangle normal length $\le 10^{-20}$, do not normalize to avoid division by zero [S1, S5, unofficial].
++*   **Boundary Clamping:** Grid coordinates must be clamped to $[0, G-1]$ to prevent out-of-bounds memory access [S1, S5, unofficial].
++*   **Precision Issues:** SAT implementation may suffer from precision issues with very small or degenerate triangles if edges are normalized before cross products [S2, S3, unofficial].
++*   **Memory Limits:** Check available GPU memory before allocating voxel tables [S5, unofficial].
+ 
+ ## Subtopics
+@@ -245,13 +259,20 @@
+ Surface Voxelization determines which voxels in a 3D grid are intersected by the surface of a triangle mesh. It operates on individual triangles independently, supporting non-watertight meshes without requiring the input geometry to be closed. Unlike naive pipeline-based voxelization that samples only triangle centers, this method ensures coverage by checking collisions within the triangle's bounding volume, either via brute-force iteration or Breadth-First Search (BFS).
+ 
++### [GPU Mesh Voxelization via Plane/Projection Tests](6744-gpu-mesh-voxelization-via-plane-projection-tests.md)
++This method converts a triangle mesh into a solid voxel grid by testing each voxel within a triangle's bounding box against the triangle's plane equation and its 2D orthogonal projections. It differs from its sibling [Sparse Voxel DAG Voxelization via Bounding Box Grid and Plane Projections](1680-sparse-voxel-dag-voxelization-via-bounding-box-grid-and-plan.md) by using a dense bit-packed voxel table and explicit 3D plane tests rather than a hierarchical DAG structure, and from [Surface Voxelization](1683-surface-voxelization.md) by filling the interior of the mesh volume rather than marking only surface-adjacent cells.
++
+ ## Operating characteristics
+-*   **Time Complexity:** $O(T \cdot V_{local})$ for the triangle-centric approach, where $T$ is the number of triangles and $V_{local}$ is the average number of voxels in a triangle's bounding box. For the voxel-centric approach, it is $O(V \cdot T)$, where $V$ is the total number of voxels [S2, unofficial].
+-*   **Memory Complexity:** $O(R^3)$ for the voxel table, where $R$ is the grid resolution. The bit-packed table reduces this by a factor of 32 [S1, unofficial].
++*   **Time Complexity:**
++    *   Variant A (SAT): $O(V \cdot T)$ where $V$ is the number of voxels and $T$ is the number of triangles [S2, S3, unofficial].
++    *   Variant B (Plane/Projection): $O(T \cdot V_{bbox})$ where $V_{bbox}$ is the number of voxels in the triangle's bounding box [S1, S5, unofficial].
++*   **Memory Complexity:** $O(G_x G_y G_z)$ for the voxel table [S1, S5, unofficial].
+ *   **Performance:** Supports resolutions up to $256^3$ with real-time performance (10 fps or higher) for models with up to 2 million triangles [S6, unofficial].
+-*   **Strengths:** Exact geometric intersection; no rasterization artifacts; suitable for real-time applications [S6, unofficial].
+-*   **Limitations:** Computationally expensive for high-poly meshes due to lack of spatial acceleration structures (like BVH) in the basic implementation [S2, unofficial].
++*   **Strengths:** Exact geometric results; no rasterization artifacts; suitable for both surface and solid voxelization [S3, S4, S6, unofficial].
++*   **Limitations:** Computationally expensive for high triangle counts due to brute-force intersection testing; requires explicit triangle-voxel logic [S2, S3, S4, unofficial].
++*   **When to Use:** When exact geometric intersection is required, or when rasterization-based methods are unsuitable (e.g., non-polygonal inputs, specific occupancy criteria) [S3, S6, unofficial].
++*   **When Not to Use:** For very high-poly meshes where $O(V \cdot T)$ becomes prohibitive; consider spatial acceleration structures [S2, S3, unofficial].
+ 
+ ## Background
+-The method originates from GPU-based voxelization techniques using Direct3D 11 and Shader Model 5.0, utilizing compute shaders to rasterize 3D geometry into a voxel grid [S4, unofficial]. It builds on the concept of GPU Voxelization via Compute Shaders [GPU Voxelization via Compute Shaders](2549-gpu-voxelization-via-compute-shaders.md). Applications include volume-based modeling, transparent rendering, and collision detection [S6, unofficial].
++GPU Mesh Voxelization was introduced by Schwarz and Seidel in 2010 as a real-time voxelization technique for complex models [S6, unofficial]. It leverages compute shaders (Direct3D 11, Shader Model 5.0) to perform triangle-voxel intersection tests on the GPU, avoiding the bandwidth demands of frame buffer access [S4, S6, unofficial]. The method has been implemented in various open-source projects and Unity assets, often referred to as "GPU Voxelizer Part 3" or "Compute Shader Voxelization" [S2, S4, S5, unofficial]. It is used in applications such as volume-based modeling, transparent rendering, and collision detection [S6, unofficial].
+ 
+ ## Sources

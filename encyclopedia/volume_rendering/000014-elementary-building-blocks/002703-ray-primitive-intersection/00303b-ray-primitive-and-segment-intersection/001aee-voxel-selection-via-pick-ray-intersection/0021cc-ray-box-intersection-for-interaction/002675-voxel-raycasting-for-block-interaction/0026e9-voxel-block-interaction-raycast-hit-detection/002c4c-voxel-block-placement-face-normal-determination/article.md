@@ -1,0 +1,151 @@
+# Voxel Block Placement (Face Normal Determination)
+Also called: FindAdjacentEmpty, Voxel Placement & Adjacency, createAdjacent, createBlock, getBlock, setBlock
+
+## Overview
+This method determines the global coordinates of an empty voxel position adjacent to a solid block that was hit by a raycast, enabling the placement of new blocks or mining operations. It solves the problem of translating a continuous raycast hit location into a discrete voxel grid coordinate while respecting the geometry of the hit face. It differs from its parent, [Voxel Block Interaction (Raycast Hit Detection)](3912-voxel-block-interaction-raycast-hit-detection.md), which only identifies the hit block; this method extends that result to find the specific neighbor slot for interaction.
+
+## How it works
+**Inputs:**
+- `HitLocation`: The 3D world position where the raycast intersected the solid block.
+- `ChunkSizeX`, `ChunkSizeY`, `ChunkSizeZ`: The dimensions of a chunk in voxels.
+- `RaycastResults`: Data containing the hit location and potentially the hit block index (optional, as the method can derive the hit block from the location).
+
+**Outputs:**
+- `OutChunkIndex`: A 2D integer vector `(ChunkX, ChunkY)` identifying the chunk containing the target voxel.
+- `OutLocalBlock`: A 3D integer vector `(LocalX, LocalY, LocalZ)` identifying the voxel's position within that chunk.
+- `Success`: A boolean indicating if a valid, empty adjacent voxel was found.
+
+**Data Structures:**
+- `FIntPoint`: A 2D integer vector `(X, Y)`.
+- `FIntVector`: A 3D integer vector `(X, Y, Z)`.
+- `FVector`: A 3D floating-point vector `(X, Y, Z)`.
+
+**Steps:**
+1. **Identify Hit Block:** Determine the global coordinates of the solid block hit by the raycast. This is typically done by a helper function `FindSolidBlock` which maps `HitLocation` to the containing chunk and local block coordinates. Let the global coordinates of the hit block be $(G_x, G_y, G_z)$.
+2. **Calculate Block Center:** Compute the center of the hit block in world space. Assuming voxel size $S=1$ (unit voxels), the center is:
+   $$ C = \left( G_x + 0.5, G_y + 0.5, G_z + 0.5 \right) $$
+   [S2, unofficial]
+3. **Compute Offset Vector:** Calculate the vector from the block center to the hit location:
+   $$ \vec{O} = \text{HitLocation} - C $$
+   [S2, unofficial]
+4. **Determine Hit Face Axis:** Identify the axis of the hit face by comparing the absolute values of the offset components. Let $O_x, O_y, O_z$ be the components of $\vec{O}$.
+   - If $|O_x| \ge |O_y|$ and $|O_x| \ge |O_z|$, the hit face is on the X-axis.
+   - Else if $|O_y| \ge |O_x|$ and $|O_y| \ge |O_z|$, the hit face is on the Y-axis.
+   - Otherwise, the hit face is on the Z-axis.
+   [S2, unofficial]
+5. **Calculate Target Global Coordinates:** Initialize target global coordinates $(P_x, P_y, P_z)$ to the hit block's global coordinates $(G_x, G_y, G_z)$. Adjust the coordinate corresponding to the hit face axis by 1, based on the sign of the offset component:
+   - If X-axis hit: $P_x = G_x + (\text{sign}(O_x))$.
+   - If Y-axis hit: $P_y = G_y + (\text{sign}(O_y))$.
+   - If Z-axis hit: $P_z = G_z + (\text{sign}(O_z))$.
+   Where $\text{sign}(v) = 1$ if $v > 0$, else $-1$.
+   [S2, unofficial]
+6. **Validate Z-Boundary:** Check if the target Z-coordinate is within the valid vertical range of the world or chunk stack. Specifically, ensure $0 \le P_z < \text{ChunkSizeZ}$ (assuming the world height is defined by chunk size in Z, or a specific world height limit). If not, return failure.
+   [S2, unofficial]
+7. **Convert to Chunk/Local Coordinates:** Convert the target global coordinates $(P_x, P_y, P_z)$ into chunk index and local block coordinates using integer division and modulo operations:
+   $$ \text{ChunkX} = \lfloor P_x / \text{ChunkSizeX} \rfloor $$
+   $$ \text{ChunkY} = \lfloor P_y / \text{ChunkSizeY} \rfloor $$
+   $$ \text{LocalX} = P_x \pmod{\text{ChunkSizeX}} $$
+   $$ \text{LocalY} = P_y \pmod{\text{ChunkSizeY}} $$
+   $$ \text{LocalZ} = P_z \pmod{\text{ChunkSizeZ}} $$
+   [S2, unofficial]
+8. **Check Occupancy:** Query the voxel data at the calculated chunk and local coordinates. If the voxel is not "Air" (empty), return failure.
+   [S2, unofficial]
+9. **Return Result:** If all checks pass, set `OutChunkIndex` to $(\text{ChunkX}, \text{ChunkY})$ and `OutLocalBlock` to $(\text{LocalX}, \text{LocalY}, \text{LocalZ})$, and return success.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def FindAdjacentEmpty(HitLocation, ChunkSizeX, ChunkSizeY, ChunkSizeZ, FindSolidBlock, GetBlock):
+    # Step 1: Find the solid block hit
+    OutChunkIndex, OutLocalBlock = FindSolidBlock(HitLocation)
+    
+    # Calculate global coordinates of the hit block
+    SolidGX = OutChunkIndex.X * ChunkSizeX + OutLocalBlock.X
+    SolidGY = OutChunkIndex.Y * ChunkSizeY + OutLocalBlock.Y
+    SolidGZ = OutLocalBlock.Z
+    
+    # Step 2: Calculate block center (assuming unit voxel size S=1)
+    SolidCenterX = SolidGX + 0.5
+    SolidCenterY = SolidGY + 0.5
+    SolidCenterZ = SolidGZ + 0.5
+    
+    # Step 3: Calculate offset vector
+    OffsetX = HitLocation.X - SolidCenterX
+    OffsetY = HitLocation.Y - SolidCenterY
+    OffsetZ = HitLocation.Z - SolidCenterZ
+    
+    # Step 4: Determine hit face axis
+    AbsX = abs(OffsetX)
+    AbsY = abs(OffsetY)
+    AbsZ = abs(OffsetZ)
+    
+    PlaceGX = SolidGX
+    PlaceGY = SolidGY
+    PlaceGZ = SolidGZ
+    
+    if AbsX >= AbsY and AbsX >= AbsZ:
+        # X-axis hit
+        PlaceGX += 1 if OffsetX > 0 else -1
+    elif AbsY >= AbsX and AbsY >= AbsZ:
+        # Y-axis hit
+        PlaceGY += 1 if OffsetY > 0 else -1
+    else:
+        # Z-axis hit
+        PlaceGZ += 1 if OffsetZ > 0 else -1
+        
+    # Step 6: Validate Z-Boundary
+    if PlaceGZ < 0 or PlaceGZ >= ChunkSizeZ:
+        return False, None, None
+        
+    # Step 7: Convert to Chunk/Local Coordinates
+    TargetChunkX = PlaceGX // ChunkSizeX
+    TargetChunkY = PlaceGY // ChunkSizeY
+    TargetLocalX = PlaceGX % ChunkSizeX
+    TargetLocalY = PlaceGY % ChunkSizeY
+    TargetLocalZ = PlaceGZ % ChunkSizeZ
+    
+    # Step 8: Check Occupancy
+    # Note: GetBlock should handle chunk loading if necessary
+    BlockType = GetBlock(TargetChunkX, TargetChunkY, TargetLocalX, TargetLocalY, TargetLocalZ)
+    
+    if BlockType != 0: # 0 represents Air
+        return False, None, None
+        
+    # Step 9: Return Result
+    OutChunkIndex = (TargetChunkX, TargetChunkY)
+    OutLocalBlock = (TargetLocalX, TargetLocalY, TargetLocalZ)
+    return True, OutChunkIndex, OutLocalBlock
+```
+
+**Parameters:**
+- `ChunkSizeX`, `ChunkSizeY`, `ChunkSizeZ`: Typically 16, 32, or 64, depending on the engine. [S2, unofficial]
+- `HitLocation`: Floating-point vector.
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Floating-point errors in `HitLocation` or center calculation should not affect the sign determination of the offset, as the hit location is guaranteed to be within the block. However, if the hit is exactly on a face center, the sign logic must handle zero correctly (treated as negative or positive consistently). [S2, unofficial]
+- **Boundaries:** The Z-boundary check is critical for worlds with limited vertical extent. [S2, unofficial]
+- **Occupancy:** The method only checks if the target voxel is empty. It does not check if the player is standing in the target location. For safe placement, a separate check or function like `createBlock` should be used. [S1, unofficial]
+
+## Subtopics
+
+### Safe Block Placement
+Extends this method by adding a check for player occupancy before placing a block. Use when player collision must be respected. [S1, unofficial]
+
+### Direct Block Set
+Bypasses adjacency checks and places a block at an arbitrary global coordinate. Use for world editing or non-interaction-based placement. [S1, unofficial]
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ assuming chunk data is cached or loaded. The dominant cost is the chunk lookup and voxel query.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Simple, deterministic, and fast. Directly maps raycast results to voxel grid.
+- **Limitations:** Does not handle complex collision shapes (e.g., non-voxel objects). Assumes unit voxel size for center calculation. [S2, unofficial]
+- **When to use:** For standard voxel-based interaction (mining, building) in games like Minecraft clones.
+- **When not to use:** When precise sub-voxel interaction is required, or when the hit object is not a voxel.
+
+## Background
+This method is derived from voxel engine implementations, specifically those found in the HawkDev15/VoxelWorld repository. It is a fundamental component of voxel interaction systems, allowing players to place or remove blocks based on raycast feedback. The approach of using the offset from the block center to determine the hit face is a common technique in voxel engines. [S2, unofficial]
+
+## Sources
+[S1] voxel/voxel-engine-stackgl, https://github.com/voxel/voxel-engine-stackgl, fetched 2026-10-27 (unofficial)
+[S2] HawkDev15/VoxelWorld, https://github.com/HawkDev15/VoxelWorld, fetched 2026-10-28 (unofficial)

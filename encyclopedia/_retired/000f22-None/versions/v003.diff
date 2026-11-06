@@ -1,0 +1,82 @@
+--- v002.md
++++ v003.md
+@@ -44,5 +44,5 @@
+     *   Draw scene using `_shader_depth` (vertex: `splat.vert`, fragment: `splat_depth.frag`) [S2, unofficial].
+     *   Uniforms: `view_proj_matrix`, `fov_y`, `viewport_size`, `epsilon`, `particle_radius`, `z_near`, `z_far` [S2, unofficial].
+-    *   *Fragment Shader Logic:* For each point, generate a sphere impostor. Fragments outside the unit disk are discarded. The analytic front-surface depth is calculated:
++    *   *Fragment Shader Logic:* For each point, generate a sphere impostor [S2, unofficial]. Fragments outside the unit disk are discarded [S2, unofficial]. The analytic front-surface depth is calculated:
+         $$z = z_{center} - \sqrt{r^2 - x^2 - y^2}$$
+         This depth is pushed back by $\varepsilon$ before being written to the depth buffer [S2, unofficial].
+@@ -99,18 +99,20 @@
+ **Pseudocode (Finalization Pass):**
+ ```python
+-def finalization_pass(color_texture, normal_texture, depth_texture, projection_matrix_inv, viewport, smooth, multisampling):
++def finalization_pass(color_texture, normal_texture, depth_texture, projection_matrix_inv, viewport, texture_uv, smooth, multisampling):
+     res = vec4(0.0)
+     if multisampling:
+-        itexture_uv = textureSize(color_texture, 0) * In.texture_uv
++        texture_size = texture_size_func(color_texture)
++        itexture_uv = (texture_size * texture_uv).astype(int)
+         for i in range(4):
+-            pixel = texelFetch(color_texture, itexture_uv + vec2(i), 0)
++            pixel = texel_fetch(color_texture, itexture_uv + vec2(i), 0)
+             if smooth:
+-                normal = normalize(texelFetch(normal_texture, itexture_uv + vec2(i), 0))
+-                depth = texelFetch(depth_texture, itexture_uv + vec2(i), 0)
++                normal = normalize(texel_fetch(normal_texture, itexture_uv + vec2(i), 0))
++                depth = texel_fetch(depth_texture, itexture_uv + vec2(i), 0)
+             if pixel.a > 0.0:
+-                p_ndc = vec4(viewport.xy + pixel.xy * viewport.zw, depth.r, 1.0)
+-                v_eye = (projection_matrix_inv * p_ndc).xyz / p_ndc.w
++                # Reconstruct NDC from viewport and fragment coordinates [S1, unofficial]
++                p_ndc = vec4(gl_FragCoord.xy, depth.r, 1.0)
++                v_eye = (projection_matrix_inv @ p_ndc).xyz / p_ndc.w
+                 if smooth:
+-                    res += vec4(lighting(normal, v_eye, pixel.rgb / pixel.a, material_shininess), 1.0)
++                    res += vec4(lighting_model(normal, v_eye, pixel.rgb / pixel.a, material_shininess), 1.0)
+                 else:
+                     res += vec4(pixel.rgb / pixel.a, 1.0)
+@@ -119,13 +121,13 @@
+         frag_color = sqrt(res / 4.0)
+     else:
+-        pixel = texture(color_texture, In.texture_uv)
++        pixel = texture_sample(color_texture, texture_uv)
+         if smooth:
+-            normal = normalize(texture(normal_texture, In.texture_uv))
+-            depth = texture(depth_texture, In.texture_uv)
++            normal = normalize(texture_sample(normal_texture, texture_uv))
++            depth = texture_sample(depth_texture, texture_uv)
+         if pixel.a > 0.0:
+-            p_ndc = vec4(viewport.xy + pixel.xy * viewport.zw, depth.r, 1.0)
+-            v_eye = (projection_matrix_inv * p_ndc).xyz / p_ndc.w
++            p_ndc = vec4(gl_FragCoord.xy, depth.r, 1.0)
++            v_eye = (projection_matrix_inv @ p_ndc).xyz / p_ndc.w
+             if smooth:
+-                res += vec4(lighting(normal, v_eye, pixel.rgb / pixel.a, material_shininess), 1.0)
++                res += vec4(lighting_model(normal, v_eye, pixel.rgb / pixel.a, material_shininess), 1.0)
+             else:
+                 res += vec4(pixel.rgb / pixel.a, 1.0)
+@@ -134,4 +136,5 @@
+         frag_color = sqrt(res)
+ ```
++*Note: `lighting_model` is a standard lighting function [G]. `texture_sample`, `texel_fetch`, `texture_size_func`, `vec4`, `normalize`, `sqrt`, `@` are standard math/vector operations.*
+ 
+ **Edge Cases and Pitfalls:**
+@@ -155,12 +158,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the number of splats $N$ for the rasterization passes, plus constant time $O(1)$ per pixel for the finalization pass. The finalization pass is independent of $N$.
+-*   **Memory Complexity:** $O(W \times H)$ for the G-Buffer textures, where $W, H$ are viewport dimensions. The G-Buffer stores depth (32-bit float), normals (32-bit float RGBA), and color/weight (32-bit float RGBA).
++*   **Time Complexity:** Linear with respect to the number of splats $N$ for the rasterization passes, plus constant time $O(1)$ per pixel for the finalization pass. The finalization pass is independent of $N$. [G]
++*   **Memory Complexity:** $O(W \times H)$ for the G-Buffer textures, where $W, H$ are viewport dimensions. The G-Buffer stores depth (32-bit float), normals (32-bit float RGBA), and color/weight (32-bit float RGBA). [S2, unofficial]
+ *   **Measured Performance:** Real-time rendering of large point clouds is achieved on modern GPUs. The use of screen-aligned splats avoids the computational cost of per-point EWA covariance estimation and matrix inversion [S2, unofficial].
+ *   **Scaling:** Scales well with point count due to GPU parallelism in splat rasterization. The finalization pass scales with resolution. Level of Detail (LoD) via octree culling can reduce the number of splats drawn for distant points [S2, unofficial].
+-*   **Strengths:** Eliminates aliasing and transparency artifacts common in raw point rendering. Deferred shading allows efficient multi-lighting. Simplified kernel reduces per-point overhead.
++*   **Strengths:** Eliminates aliasing and transparency artifacts common in raw point rendering. Deferred shading allows efficient multi-lighting [G]. Simplified kernel reduces per-point overhead [S2, unofficial].
+ *   **Limitations:** Screen-aligned splats do not provide correct anisotropic filtering for oblique views, potentially causing blurring or distortion at grazing angles compared to true EWA [S2, unofficial]. Requires multiple render passes (Depth, Attribute, Finalization).
+-*   **When to use:** When rendering dense point clouds with smooth shading requirements and multiple light sources.
+-*   **When not to use:** When strict anisotropic filtering is required and the performance cost of true EWA is acceptable, or when rendering very sparse point clouds where raw points might suffice.
++*   **When to use:** When rendering dense point clouds with smooth shading requirements and multiple light sources. [G]
++*   **When not to use:** When strict anisotropic filtering is required and the performance cost of true EWA is acceptable, or when rendering very sparse point clouds where raw points might suffice. [G]
+ 
+ ## Background

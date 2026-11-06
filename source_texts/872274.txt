@@ -1,0 +1,350 @@
+Hi, Do you have any advice with regards to training MonoDTR algorithm to another dataset? Basically I have a dataset in KITTI format: images, annotation, pointcloud, calibration between the camera and the LiDAR. I load the KITTI dataset ...
+
+Applying to different dataset · Issue #6 · KuanchihHuang/MonoDTR · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Applying to different dataset #6
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Applying to different dataset#6
+Copy link
+Description
+jacoblambert
+opened on Jul 29, 2022
+Issue body actions
+Hi,
+Do you have any advice with regards to training MonoDTR algorithm to another dataset?
+Basically I have a dataset in KITTI format: images, annotation, pointcloud, calibration between the camera and the LiDAR. I load the KITTI dataset and my custom dataset in the same way, no problem.
+Major difference: my images are full HD (1920 x 1080). I created a custom config, with major differences as follows:
+```
+## data
+data = edict(
+    batch_size = 2,
+    num_workers = 2,
+    rgb_shape = (1280, 1920, 3),
+    train_dataset = "KittiMonoDataset",
+    val_dataset   = "KittiMonoDataset",
+    test_dataset  = "KittiMonoDemoDataset",
+    train_split_file = os.path.join('/home/jacobMonoDTR/data/KITTI/object/training/ImageSets/train.txt'),
+    val_split_file = os.path.join('/home/jacob/MonoDTR/data/KITTI/object/training/ImageSets/val.txt')
+)
+
+data.augmentation = edict(
+    rgb_mean = np.array([0.485, 0.456, 0.406]),
+    rgb_std  = np.array([0.229, 0.224, 0.225]),
+    cropSize = (data.rgb_shape[0], data.rgb_shape[1]),
+)
+data.train_augmentation = [
+    edict(type_name='ConvertToFloat'),
+    edict(type_name='PhotometricDistort', keywords=edict(distort_prob=1.0, contrast_lower=0.5, contrast_upper=1.5, saturation_lower=0.5, saturation_upper=1.5, hue_delta=18.0, brightness_delta=32)),
+    edict(type_name='Resize', keywords=edict(size=data.augmentation.cropSize)),
+    edict(type_name='RandomMirror', keywords=edict(mirror_prob=0.5)),
+    edict(type_name='Normalize', keywords=edict(mean=data.augmentation.rgb_mean, stds=data.augmentation.rgb_std))
+]
+```
+I can then run the data preparation scripts:
+```
+$ ./launchers/det_precompute.sh config/config_custom.py train
+Precomputation for the training/validation split
+train file len:  2975
+val file len:  155
+start reading training data
+training split finished precomputing16s, eta:12.36s, total_objs:[4016], usable_objs:[3739]
+start reading validation data
+validation split finished precomputings, eta:0.01s, total_objs:[0], usable_objs:[0]
+Preprocessing finished
+```
+And the generated depth images seem reasonable:
+And the training code runs but the loss does not go down and when validation comes, NMS fails, the reason seems to be far too many detections to convert to tensor:
+```
+RuntimeError: Trying to create tensor with negative dimension -40713152: [-40713152]
+```
+I'm not sure where to go from here, so I wanted to ask if you have any intuition on what I could debug, maybe something is hard-coded for KITTI. Or is there something I should change in the model to better handle HD images? As the KITTI images are a very different aspect ratio.
+Cheers,
+Jacob
+Activity
+KuanchihHuang commented on Aug 25, 2022
+KuanchihHuang
+on Aug 25, 2022
+Owner
+More actions
+Hi, the depth ground truth looks reasonable.
+Can you comment out the code for depth loss to check the training for image-only works well or not?
+jacoblambert commented on Aug 30, 2022
+jacoblambert
+on Aug 30, 2022
+Author
+More actions
+Hi,
+I will definitely give that a try, thank you for the suggestion. But my depth_loss seems reasonable:
+2D detection is doing OK, not great but I have many hard labels (occluded in image view). However what I can't seem to get good results in is orientation. There seems to be this really strong bias towards one particular orientation and I'm not sure why, my dataset is varied. I wrote some visualization functions and when the data is loaded in mono_dataset, both KITTI data and my custom dataset render "proper" labels.
+I started looking around and noticed the alpha2theta_3d and convertAlpha2Rot functions, I couldn't really understand the physical meaning of the offset offset = P2[0, 3] / P2[0, 0], but in my case it was quite large, KITTI was quite small... so I tried to disable this offset altogether, but no effect. Then I tried, instead of using Alpha rotation values, just use the 3d theta value directly (why not?) but still no change. It's weird to me that this significant change produced no change in results, so probably there's some part of the code I'm not seeing... For example:
+Using "Alpha" (pedestrians GT are shown but this is only trained on cars)
+Using "Alpha" without the "offset":
+Using "RY" aka "3d theta"
+Reducing image size by half, (1280, 1920, 3) -> (640, 960, 3) and increasing batch_size x4 for more stable training:
+I might try to increase the regression weight for angle next, but I feel with this kind of result I am missing something fundamental. Any guidance would be much appreciated.
+Finally, here's my config, very close to yours:
+```
+from easydict import EasyDict as edict
+import os
+import numpy as np
+
+cfg = edict()
+cfg.obj_types = ['Car']
+# cfg.obj_types = ['Pedestrian', 'Cyclist', 'Car']
+
+## trainer
+trainer = edict(
+    gpu = 0,
+    max_epochs = 120,
+    disp_iter = 100,
+    save_iter = 5,
+    test_iter = 10,
+    training_func = "train_mono_detection",
+    test_func = "test_mono_detection",
+    evaluate_func = "evaluate_kitti_obj",
+)
+
+cfg.trainer = trainer
+
+## path
+path = edict()
+path.data_path = "/home/jacob/MonoDTR/data/KITTI/object/training" # used in visualDet3D/data/.../dataset
+path.test_path = "/home/jacob/iSSD2/deepen_datasets/sample_evaluation_set/images/camera_0_img" # used in visualDet3D/data/.../dataset
+path.visualDet3D_path = "/home/jacob/MonoDTR/visualDet3D" # The path should point to the inner subfolder
+path.project_path = "/home/jacob/MonoDTR/workdirs" # or other path for pickle files, checkpoints, tensorboard logging and output files.
+if not os.path.isdir(path.project_path):
+    os.mkdir(path.project_path)
+path.project_path = os.path.join(path.project_path, 'MonoDTR')
+if not os.path.isdir(path.project_path):
+    os.mkdir(path.project_path)
+
+path.log_path = os.path.join(path.project_path, "log")
+if not os.path.isdir(path.log_path):
+    os.mkdir(path.log_path)
+
+path.checkpoint_path = os.path.join(path.project_path, "checkpoint")
+if not os.path.isdir(path.checkpoint_path):
+    os.mkdir(path.checkpoint_path)
+
+path.preprocessed_path = os.path.join(path.project_path, "output")
+if not os.path.isdir(path.preprocessed_path):
+    os.mkdir(path.preprocessed_path)
+
+path.train_imdb_path = os.path.join(path.preprocessed_path, "training")
+if not os.path.isdir(path.train_imdb_path):
+    os.mkdir(path.train_imdb_path)
+
+path.val_imdb_path = os.path.join(path.preprocessed_path, "validation")
+if not os.path.isdir(path.val_imdb_path):
+    os.mkdir(path.val_imdb_path)
+
+cfg.path = path
+
+## optimizer
+optimizer = edict(
+    type_name = 'adam',
+    keywords = edict(
+        lr        = 1e-4,
+        weight_decay = 0,
+    ),
+    clipped_gradient_norm = 0.1
+)
+cfg.optimizer = optimizer
+## scheduler
+scheduler = edict(
+    type_name = 'CosineAnnealingLR',
+    keywords = edict(
+        T_max     = cfg.trainer.max_epochs,
+        eta_min   = 5e-6,
+    )
+)
+cfg.scheduler = scheduler
+
+## data
+data = edict(
+    batch_size = 8, #2,
+    num_workers = 8, #2,
+    # rgb_shape = (1280, 1920, 3),
+    rgb_shape = (640, 960, 3),
+    train_dataset = "KittiMonoDataset",
+    val_dataset   = "KittiMonoDataset",
+    test_dataset  = "KittiMonoDemoDataset",
+    # train_split_file = os.path.join(cfg.path.visualDet3D_path, 'data', 'kitti', 'chen_split', 'train.txt'),
+    # val_split_file   = os.path.join(cfg.path.visualDet3D_path, 'data', 'kitti', 'chen_split', 'val.txt'),
+    train_split_file = os.path.join('/home/jacob/MonoDTR/data/KITTI/object/training/ImageSets/train.txt'),
+    val_split_file = os.path.join('/home/jacob/MonoDTR/data/KITTI/object/training/ImageSets/val.txt')
+)
+
+data.augmentation = edict(
+    rgb_mean = np.array([0.485, 0.456, 0.406]),
+    rgb_std  = np.array([0.229, 0.224, 0.225]),
+    cropSize = (data.rgb_shape[0], data.rgb_shape[1]),
+)
+data.train_augmentation = [
+    edict(type_name='ConvertToFloat'),
+    edict(type_name='PhotometricDistort', keywords=edict(distort_prob=1.0, contrast_lower=0.5, contrast_upper=1.5, saturation_lower=0.5, saturation_upper=1.5, hue_delta=18.0, brightness_delta=32)),
+    edict(type_name='Resize', keywords=edict(size=data.augmentation.cropSize)),
+    edict(type_name='RandomMirror', keywords=edict(mirror_prob=0.5)),
+    edict(type_name='Normalize', keywords=edict(mean=data.augmentation.rgb_mean, stds=data.augmentation.rgb_std))
+]
+data.test_augmentation = [
+    edict(type_name='ConvertToFloat'),
+    edict(type_name='Resize', keywords=edict(size=data.augmentation.cropSize)),
+    edict(type_name='Normalize', keywords=edict(mean=data.augmentation.rgb_mean, stds=data.augmentation.rgb_std))
+]
+cfg.data = data
+
+## networks
+detector = edict()
+detector.obj_types = cfg.obj_types
+detector.name = 'MonoDTR'
+detector.mono_backbone=edict(
+)
+head_loss = edict(
+    fg_iou_threshold = 0.5,
+    bg_iou_threshold = 0.4,
+    L1_regression_alpha = 5 ** 2,
+    focal_loss_gamma = 2.0,
+    balance_weight   = [20.0],
+    #balance_weight   = [20.0, 40, 40],
+    regression_weight = [1, 1, 1, 1, 1, 1, 12, 1, 1, 0.5, 0.5, 0.5, 1], #[x, y, w, h, cx, cy, z, sin2a, cos2a, w, h, l]
+)
+head_test = edict(
+    score_thr=0.75,
+    cls_agnostic = False,
+    nms_iou_thr=0.4,
+    post_optimization=True
+)
+
+anchors = edict(
+        {
+            'obj_types': cfg.obj_types,
+            'pyramid_levels':[3],
+            'strides': [2 ** 3],
+            'sizes' : [24],
+            'ratios': np.array([0.5, 1, 2.0]),
+            'scales': np.array([2 ** (i / 4.0) for i in range(16)]),
+        }
+    )
+
+head_layer = edict(
+    num_features_in=256,
+    num_cls_output=len(cfg.obj_types)+1,
+    num_reg_output=12,
+    cls_feature_size=256,
+    reg_feature_size=256,
+)
+detector.head = edict(
+    num_regression_loss_terms=13,
+    preprocessed_path=path.preprocessed_path,
+    num_classes     = len(cfg.obj_types),
+    anchors_cfg     = anchors,
+    layer_cfg       = head_layer,
+    loss_cfg        = head_loss,
+    test_cfg        = head_test
+)
+detector.anchors = anchors
+detector.loss = head_loss
+cfg.detector = detector
+```
+Cheers
+KuanchihHuang commented on Sep 9, 2022
+KuanchihHuang
+on Sep 9, 2022
+Last edited by KuanchihHuang
+Owner
+More actions
+Hi,
+depth loss looks to work well.
+The problem seems to come from roty and alpha (according to your observation).
+Can you try to plot the orientation loss?
+Also, most monocular works only supervise one of roty/alpha (since one can transfer to another),
+maybe there is a problem with the conversions in your data.
+You can try to visualize data based on roty and alpha separately.
+jacoblambert commented on Sep 16, 2022
+jacoblambert
+on Sep 16, 2022
+Last edited by jacoblambert
+Author
+More actions
+In this experiment, I convert rot_y (from ground truth) to alpha as you do with KITTI. I added alpha_loss to the loss dictionary for visualization. Seems it is learning, but result is still not great. Seems like all the boxes are oriented the same way. Here's alpha loss and depth loss and the result:
+```
+Car AP(Average Precision)@0.70, 0.50, 0.50:
+bbox AP:64.97, 54.30, 54.23
+bev  AP:0.35, 0.37, 0.37
+3d   AP:0.06, 0.03, 0.03
+aos  AP:31.99, 26.75, 26.68
+```
+Our dataset is hard so of course I don't expect KITTI level performance but clearly something is going wrong here. It is also not feasible to use KITTI pre-trained model since the image size is so different.
+You can try to visualize data based on roty and alpha separately.
+I don't see any visualization functions in your repository. Basically I used my the default MonoDTR loading functions, then wrote some visualization functions.
+When I load KITTI data, the ground truth is plotted correctly in camera 2d, camera 3d, and LiDAR frame. When I load my data, everything also looks fine. So based on this result, I have to assume everything is correct with my input. My calibration file is a slightly weird, but the TFs between Image, Camera and LiDAR frame all work as intended when used properly. Here's an example data, if you have your own plotting functions maybe you can try.
+Image:
+Label: 000000.txt
+Calib: 000000.txt
+Lidar: 000000.zip
+tuclen-3 commented on Nov 4, 2022
+tuclen-3
+on Nov 4, 2022
+More actions
+Hi @jacoblambert,
+I also do research on this model and I also have problems like you. Neither pretrain in GitHub nor fine-tuning with my custom data won't work when I test in my custom data. My config is also like you but I have path.pretrained_checkpoint and my rgb_shape is (1280,1920,3). Did you solve that problem and can you tell me how to fix it? Thanks
+OnceUponATimeMathley commented on Nov 7, 2022
+OnceUponATimeMathley
+on Nov 7, 2022
+More actions
+In this experiment, I convert rot_y (from ground truth) to alpha as you do with KITTI. I added alpha_loss to the loss dictionary for visualization. Seems it is learning, but result is still not great. Seems like all the boxes are oriented the same way. Here's alpha loss and depth loss and the result:
+```
+Car AP(Average Precision)@0.70, 0.50, 0.50:
+bbox AP:64.97, 54.30, 54.23
+bev  AP:0.35, 0.37, 0.37
+3d   AP:0.06, 0.03, 0.03
+aos  AP:31.99, 26.75, 26.68
+```
+Our dataset is hard so of course I don't expect KITTI level performance but clearly something is going wrong here. It is also not feasible to use KITTI pre-trained model since the image size is so different.
+You can try to visualize data based on roty and alpha separately.
+I don't see any visualization functions in your repository. Basically I used my the default MonoDTR loading functions, then wrote some visualization functions. When I load KITTI data, the ground truth is plotted correctly in camera 2d, camera 3d, and LiDAR frame. When I load my data, everything also looks fine. So based on this result, I have to assume everything is correct with my input. My calibration file is a slightly weird, but the TFs between Image, Camera and LiDAR frame all work as intended when used properly. Here's an example data, if you have your own plotting functions maybe you can try. Image: Label: 000000.txt Calib: 000000.txt Lidar: 000000.zip
+I try to inference your image with my custom code, but the 2d, 3d box is not correct. Are you fixed this problems? If in this case, could you recommend me some tips to fix this problem? Thanks
+jacoblambert commented on Nov 10, 2022
+jacoblambert
+on Nov 10, 2022
+Author
+More actions
+I could not fix this problem. The only issue I can think of is, there is some problem with my label files of calib matrices, but I do not know where.
+tuclen-3 commented on Nov 10, 2022
+tuclen-3
+on Nov 10, 2022
+Last edited by tuclen-3
+More actions
+Hi @jacoblambert,
+I tested MonoDTR pretrain model with public ONCE dataset. The result is quite good
+The box pretty small because I still use anchor box of pretrain MonoDTR but it oriented is quite good with high threshold (=0.5,0.6). But when I apply pretrain model with your P2 (intrinsic matrix), it have very bad result and result like this
+You can see oriented of bounding not correct. And size is also not correct too while car is very small
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,103 @@
+--- v001.md
++++ v002.md
+@@ -4,54 +4,63 @@
+ 
+ ## Overview
+-Relightable Gaussian Codec Avatars is a method for creating photorealistic, relightable 3D head avatars from monocular video by combining Gaussian Splatting with the FLAME parametric head model [S1, unofficial]. It extends standard Gaussian Avatar Reconstruction by decoupling geometry deformation from appearance, allowing the rendering of the avatar under arbitrary lighting conditions [S2, unofficial]. Unlike sibling methods that primarily focus on animatable geometry (e.g., [Gaussian Avatars](1477-gaussian-avatars.md)) or static appearance, this approach explicitly models a relightable BRDF, enabling diverse lighting synthesis while maintaining high-fidelity facial expressions driven by the FLAME rig [S1, unofficial].
++Relightable Gaussian Codec Avatars is a method for creating photorealistic, animatable 3D head avatars that support dynamic relighting [S1, unofficial][S2, unofficial]. It extends the Gaussian Avatar Reconstruction family by decoupling geometry and appearance from fixed lighting conditions, allowing the rendered avatar to be illuminated by arbitrary light sources [S1, unofficial][S2, unofficial]. Unlike standard Gaussian Avatars which bake lighting into the Gaussian colors, this method models the material properties explicitly, enabling diverse lighting conditions [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-*   Monocular video of a talking head (typically ~30 seconds).
+-*   FLAME mesh parameters (pose, expression, shape) fitted to the video frames.
+-
+-**Outputs:**
+-*   A set of 3D Gaussians representing the head.
+-*   Per-Gaussian attributes: position, covariance, opacity, spherical harmonics (or base color), and BRDF parameters.
+-*   A relightable appearance model allowing arbitrary light source insertion.
++**Inputs:** Multi-angle video capture (typically ~30 seconds) of a subject; initial FLAME mesh parameters fitted via MICA or DECA [S1, unofficial].
++**Outputs:** A set of 3D Gaussians with pose/shape-conditioned parameters and a relightable material representation (e.g., BRDF parameters) [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Gaussian Set:** Each Gaussian $i$ is defined by:
+-    *   $\mu_i \in \mathbb{R}^3$: Mean position.
+-    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (parameterized as rotation $R_i$ and scale $S_i$).
+-    *   $\alpha_i \in [0, 1]$: Opacity.
+-    *   $c_i$: Color/Appearance. In relightable variants, this is decomposed into base albedo and BRDF coefficients (e.g., diffuse/specular weights) rather than fixed spherical harmonics, or SHs are used for view-dependent effects while a separate lighting model handles illumination [S1, unofficial].
+-    *   $p_i \in \mathbb{R}^k$: Pose/expression condition vector mapping to deformation offsets.
++1.  **FLAME Model:** Parametric head model with shape ($\beta$) and expression ($\alpha$) parameters [S1, unofficial].
++2.  **Gaussian Primitives:** Initialized per mesh triangle in tangent space [S1, unofficial]. Each Gaussian stores:
++    *   Position ($\mathbf{p}$)
++    *   Rotation ($\mathbf{q}$)
++    *   Scale ($\mathbf{s}$)
++    *   Color/Material Parameters (e.g., diffuse/albedo, specular coefficients) [S1, unofficial].
++3.  **Deformation Network:** A per-Gaussian MLP or shared network that predicts offsets to position and rotation based on FLAME pose and expression parameters [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Fit a FLAME mesh to the input video using a regression network (e.g., MICA or DECA) to obtain per-frame pose and expression parameters [S1, unofficial]. Initialize one Gaussian per triangle of the FLAME mesh in tangent space [S1, unofficial].
+-2.  **Deformation Model:** Train a per-Gaussian deformation MLP or use explicit pose-conditioned offsets to map the canonical Gaussian positions to the deformed space based on FLAME pose/expression parameters [S1, unofficial]. This ensures the avatar is head-driven and riggable [S1, unofficial].
+-3.  **Appearance Training:** Optimize Gaussian attributes (opacity, scale, rotation, color/BRDF) using differentiable rasterization of Gaussians [S1, unofficial]. The loss function includes photometric reconstruction loss against input frames.
+-4.  **Relighting:** If explicit relighting is required, freeze geometry and train a relightable BRDF component (e.g., separating albedo from lighting) or optimize spherical harmonics under varying synthetic lighting conditions [S1, unofficial]. This allows the avatar to be rendered under novel light sources [S2, unofficial].
+-5.  **Compression:** Compress the resulting model to $\le 30$ MB for efficient deployment [S1, unofficial].
++1.  **Initialization:** Fit FLAME to input video using MICA/DECA. Initialize one Gaussian per triangle in the FLAME mesh tangent space [S1, unofficial].
++2.  **Geometry Optimization:** Train a pose-conditioned deformation network. The network takes FLAME pose $\theta$ and expression $\alpha$ as input and outputs offsets $\Delta \mathbf{p}, \Delta \mathbf{q}$ for each Gaussian [S1, unofficial]. The final Gaussian position is $\mathbf{p}_{final} = \mathbf{p}_{init} + \Delta \mathbf{p}$.
++3.  **Appearance Optimization:** Optimize Gaussian material parameters (e.g., albedo, roughness) to match input views under observed lighting [S1, unofficial].
++4.  **Relighting Setup:** Freeze geometry and deformation. Train a relightable BRDF model or store spherical harmonic coefficients for the material response [S1, unofficial].
++5.  **Rendering:** For a target pose and arbitrary light direction $\mathbf{l}$, compute the deformed Gaussian positions, then render using differentiable splatting with the BRDF evaluated at $\mathbf{l}$ [S1, unofficial].
+ 
+-**Formulas:**
+-*   **Deformation:** $\mu_i^{deformed} = \mu_i^{canonical} + \Delta \mu_i(P, E)$, where $P$ is pose and $E$ is expression [S1, unofficial].
+-*   **Rendering:** Standard alpha-blending of Gaussians projected to 2D [S1, unofficial].
+-*   **Lighting:** $C_{rendered} = f_{BRDF}(N, V, L, \text{albedo}, \text{roughness}, \dots)$ [S1, S2, unofficial].
+-
+-**Parameters:**
+-*   Number of Gaussians: Typically one per FLAME triangle (thousands to tens of thousands).
+-*   Compression target: $\le 30$ MB [S1, unofficial].
++**Pseudocode:**
++```python
++def render_relightable_avatar(gaussians, flame_pose, flame_expr, light_direction):
++    # 1. Deform Gaussians based on FLAME parameters
++    offsets = deformation_network(flame_pose, flame_expr)
++    deformed_positions = gaussians.base_position + offsets.position
++    deformed_rotations = apply_quaternion_offsets(gaussians.base_rotation, offsets.rotation)
++    
++    # 2. Compute material response for the given light
++    # Assuming a simple diffuse/specular model for illustration
++    albedo = gaussians.albedo
++    roughness = gaussians.roughness
++    
++    # 3. Differentiable Splatting with Relighting
++    # The color contribution of each Gaussian is modulated by the BRDF
++    rendered_image = splat_render(
++        positions=deformed_positions,
++        rotations=deformed_rotations,
++        scales=gaussians.scales,
++        colors=compute_brdf_response(albedo, roughness, light_direction, view_direction)
++    )
++    return rendered_image
++```
+ 
+ **Edge Cases:**
+-*   Sparse views: 3DGS can struggle with novel view synthesis from sparse sets, potentially trapping optimization in local minima [S2, unofficial].
+-*   Occlusions: Monocular input limits visibility of the back of the head; relighting may reveal inconsistencies if the back is not captured [S1, unofficial].
++*   **Degenerate Input:** Poor FLAME fitting leads to incorrect tangent space initialization. [G] Ensure MICA/DECA confidence scores are high.
++*   **Lighting Mismatch:** If training lighting is unknown, the BRDF parameters may be ambiguous. [G] Use polarization cues or known studio lighting if available.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training time is comparable to 3DGS but requires additional optimization for deformation and BRDF parameters. Inference is fast, similar to Gaussian Splatting [S1, unofficial].
+-*   **Memory Complexity:** High due to per-Gaussian attributes and deformation networks. Compression is critical to reach $\le 30$ MB [S1, unofficial].
+-*   **Strengths:** High-fidelity facial animation; explicit relighting capability; efficient rendering [S1, S2, unofficial].
+-*   **Limitations:** Requires accurate FLAME fitting; monocular input limits geometric completeness; potential artifacts under extreme lighting if BRDF is not well-regularized [S1, S2, unofficial].
+-*   **When to use:** Applications requiring interactive, relightable head avatars from limited video input (e.g., telepresence, virtual try-on) [S1, S2, unofficial].
+-*   **When not to use:** Full-body avatars (use [Gaussian Avatar](1479-gaussian-avatar.md) or [3DGS-Avatar](1480-3dgs-avatar.md)); scenes with complex dynamic lighting interactions beyond head-level BRDFs [S1, unofficial].
++*   **Complexity:** Rendering time is linear in the number of Gaussians, similar to standard 3DGS. Training is slower due to the additional BRDF/material optimization.
++*   **Memory:** Higher than standard Gaussian Avatars due to the storage of material parameters (e.g., multiple coefficients for BRDF) instead of single RGB values [S1, unofficial].
++*   **Performance:** Supports real-time rendering on modern GPUs if the Gaussian count is managed (e.g., $\le 30$ MB compressed) [S1, unofficial].
++*   **Strengths:** Supports arbitrary dynamic lighting; photorealistic head capture from monocular/multi-angle video.
++*   **Limitations:** Requires careful initialization of FLAME; material estimation can be unstable under low-texture conditions.
+ 
+ ## Background
+-Relightable Gaussian Codec Avatars (also referred to as GHG or GoHA) builds on the Gaussian Avatar Reconstruction framework [S1, unofficial]. It was introduced to address the limitations of previous methods that lacked explicit relighting capabilities or relied on more complex rigs like SMPL-X [S1, unofficial]. The method leverages the FLAME head model for rigging and uses techniques from photorealistic head reconstruction (e.g., PSAvatar) to enable relighting [S1, unofficial]. It is part of a broader trend in Gaussian Splatting variants for avatar creation, following works like Gaussian Avatars and 3DGS-Avatar [S2, unofficial].
++Relightable Gaussian Codec Avatars (also referred to as GHG or GoHA) builds on the Gaussian Avatar Reconstruction framework [S1, unofficial][S2, unofficial]. It was introduced to address the limitation of baked lighting in previous methods like GaussianAvatars and GoMAvatar, which relied on fixed lighting conditions [S1, unofficial]. The method leverages the FLAME parametric head model for rigging and deformation, similar to other head-driven methods [S1, unofficial]. It is part of the broader trend of "Codec Avatars" for telepresence and virtual production [S1, unofficial].
+ 
+ ## Sources

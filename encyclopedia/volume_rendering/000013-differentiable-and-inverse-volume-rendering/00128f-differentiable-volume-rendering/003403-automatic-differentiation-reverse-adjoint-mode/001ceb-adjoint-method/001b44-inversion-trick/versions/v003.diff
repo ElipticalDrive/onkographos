@@ -1,0 +1,141 @@
+--- v002.md
++++ v003.md
+@@ -7,17 +7,28 @@
+ 
+ ## How it works
+-The method relies on the invertibility of the standard volume rendering blending equations [S1][S2, unofficial]. The forward pass computes the final pixel color, and the backward pass computes gradients [S1]. The key insight is that if the accumulated color and opacity at step $i+1$ are known, and the current sample's color and opacity are recomputed, the accumulated values at step $i$ can be uniquely determined [S1][S2, unofficial].
+-
+ ### Inputs and Outputs
+-*   **Inputs**:
+-    *   Final accumulated color $C^{(N)}$ and opacity $\alpha^{(N)}$ from the forward pass [S1][S2, unofficial].
+-    *   Access to the volume data (density) and Transfer Function (TF) to re-evaluate sample properties $C_i$ (color) and $\alpha_i$ (opacity) at any step $i$ [S1][S2, unofficial].
+-*   **Outputs**:
+-    *   Gradients with respect to parameters (TF weights, camera pose, step size, volume densities) accumulated into local registers or shared memory [S2, unofficial].
++*   **Inputs**: Final accumulated color $C^{(N)}$ and opacity $\alpha^{(N)}$ from the forward pass [S1][S2, unofficial]. Access to the volume data (density) and Transfer Function (TF) to re-evaluate sample properties $C_i$ (color) and $\alpha_i$ (opacity) at any step $i$ [S1][S2, unofficial].
++*   **Outputs**: Gradients with respect to parameters (TF weights, camera pose, step size, volume densities) accumulated into local registers or shared memory [S2, unofficial].
+ 
+ ### Data Structures
+-*   **Accumulated State**: Two scalar/vector variables per ray: current accumulated color $C$ and accumulated opacity $\alpha$. No array of intermediate states is stored [S1][S2, unofficial].
++*   **Accumulated State**: Two scalar/vector variables per ray: current accumulated color $C$ and accumulated opacity $\alpha$ [S1][S2, unofficial]. No array of intermediate states is stored [S1][S2, unofficial].
+ *   **Adjoint State**: Two variables per ray: $\hat{C}$ (gradient w.r.t. color) and $\hat{\alpha}$ (gradient w.r.t. opacity) [S2, unofficial].
+ *   **Parameter Gradients**: Local registers for per-ray accumulation (camera, step size, volume densities) or shared memory for TF parameters [S2, unofficial].
++
++### Numbered Steps
++1.  **Forward Pass**: Execute standard non-adjoint volume rendering [S1][S2, unofficial]. Compute the final color $C^{(N)}$ and opacity $\alpha^{(N)}$ [S1][S2, unofficial]. Store only the final color $C^{(N)}$ [S1][S2, unofficial]. Do not store intermediate $C^{(i)}$ or $\alpha^{(i)}$ [S1][S2, unofficial].
++2.  **Initialize Adjoint**: Set $\hat{C}^{(N)} = 1$ and $\hat{\alpha}^{(N)} = 0$ (or as dictated by the loss function derivative) [S2, unofficial].
++3.  **Backward Pass Loop**: Iterate $i$ from $N-1$ down to $0$:
++    a.  **Recompute Sample**: Evaluate the volume density and TF at the current sample position to get current sample color $C_i$ and opacity $\alpha_i$ [S1][S2, unofficial].
++    b.  **Reconstruct Accumulated State**:
++        i.  Calculate reconstructed accumulated opacity: $\alpha^{(i)} = \frac{\alpha_i - \alpha^{(i+1)}}{\alpha_i - 1}$ [S1][S2, unofficial].
++        ii. Calculate reconstructed accumulated color: $C^{(i)} = C^{(i+1)} - (1 - \alpha^{(i)}) C_i$ [S1][S2, unofficial].
++    c.  **Compute Adjoint Variables**:
++        i.  $\hat{\alpha} = (1 - \alpha^{(i)}) \hat{\alpha}^{(i+1)}$ [S2, unofficial].
++        ii. $\hat{C} = (C_i - \alpha^{(i)}) \hat{C}^{(i+1)}$ [S2, unofficial].
++        iii. $\hat{\alpha}^{(i)} = (1 - \alpha_i) \hat{\alpha}^{(i+1)} - C_i \cdot \hat{C}^{(i+1)}$ [S2, unofficial].
++        iv. $\hat{C}^{(i)} = \hat{C}^{(i+1)}$ [S2, unofficial].
++    d.  **Accumulate Gradients**: Add $\hat{\alpha}$ and $\hat{C}$ to the local registers for the current parameters (TF weights, etc.) [S2, unofficial].
++4.  **Final Accumulation**: After traversing all rays, accumulate the per-ray gradients into global memory using atomic operations for shared parameters (TF, camera) or on cell exit for volume densities [S2, unofficial].
+ 
+ ### Formulas
+@@ -60,94 +71,18 @@
+ where $\hat{\alpha}$ and $\hat{C}$ are the gradients with respect to the current sample's opacity and color, respectively, and $\hat{\alpha}^{(i)}$ and $\hat{C}^{(i)}$ are the accumulated gradients passed to the previous step [S2, unofficial].
+ 
+-### Numbered Steps
+-1.  **Forward Pass**: Execute standard non-adjoint volume rendering. Compute the final color $C^{(N)}$ and opacity $\alpha^{(N)}$. Store only the final color $C^{(N)}$ [S1][S2, unofficial]. Do **not** store intermediate $C^{(i)}$ or $\alpha^{(i)}$ [S1][S2, unofficial].
+-2.  **Initialize Adjoint**: Set $\hat{C}^{(N)} = 1$ and $\hat{\alpha}^{(N)} = 0$ (or as dictated by the loss function derivative) [S2, unofficial].
+-3.  **Backward Pass Loop**: Iterate $i$ from $N-1$ down to $0$:
+-    a.  **Recompute Sample**: Evaluate the volume density and TF at the current sample position to get current sample color $C_i$ and opacity $\alpha_i$ [S1][S2, unofficial].
+-    b.  **Reconstruct Accumulated State**:
+-        i.  Calculate reconstructed accumulated opacity: $\alpha^{(i)} = \frac{\alpha_i - \alpha^{(i+1)}}{\alpha_i - 1}$ [S1][S2, unofficial].
+-        ii. Calculate reconstructed accumulated color: $C^{(i)} = C^{(i+1)} - (1 - \alpha^{(i)}) C_i$ [S1][S2, unofficial].
+-    c.  **Compute Adjoint Variables**:
+-        i.  $\hat{\alpha} = (1 - \alpha^{(i)}) \hat{\alpha}^{(i+1)}$ [S2, unofficial].
+-        ii. $\hat{C} = (C_i - \alpha^{(i)}) \hat{C}^{(i+1)}$ [S2, unofficial].
+-        iii. $\hat{\alpha}^{(i)} = (1 - \alpha_i) \hat{\alpha}^{(i+1)} - C_i \cdot \hat{C}^{(i+1)}$ [S2, unofficial].
+-        iv. $\hat{C}^{(i)} = \hat{C}^{(i+1)}$ [S2, unofficial].
+-    d.  **Accumulate Gradients**: Add $\hat{\alpha}$ and $\hat{C}$ to the local registers for the current parameters (TF weights, etc.) [S2, unofficial].
+-4.  **Final Accumulation**: After traversing all rays, accumulate the per-ray gradients into global memory using atomic operations for shared parameters (TF, camera) or on cell exit for volume densities [S2, unofficial].
+-
+-### Pseudocode
+-```python
+-def inversion_trick_backward(final_color, final_opacity, grad_final_color, grad_final_opacity, num_samples, sample_fn):
+-    """
+-    final_color: float, the rendered color C^(N)
+-    final_opacity: float, the accumulated opacity alpha^(N)
+-    grad_final_color: float, gradient of loss w.r.t. C^(N)
+-    grad_final_opacity: float, gradient of loss w.r.t. alpha^(N)
+-    num_samples: int, total number of samples N along the ray
+-    sample_fn: callable taking index i, returns (C_i, alpha_i)
+-    
+-    Returns:
+-    grad_tf: float, accumulated gradient for TF parameters
+-    grad_density: float, accumulated gradient for volume densities
+-    """
+-    # Initialize accumulated states for the backward pass
+-    C_next = final_color
+-    alpha_next = final_opacity
+-    
+-    # Adjoint variables
+-    hat_C_next = grad_final_color
+-    hat_alpha_next = grad_final_opacity
+-    
+-    # Local registers for parameter gradients
+-    grad_tf = 0.0
+-    grad_density = 0.0
+-    
+-    # Iterate backwards through samples
+-    for i in range(num_samples - 1, -1, -1):
+-        # 1. Recompute current sample
+-        C_i, alpha_i = sample_fn(i)
+-        
+-        # 2. Reconstruct accumulated state C^(i) and alpha^(i)
+-        # Inverse opacity reconstruction
+-        alpha_curr = (alpha_i - alpha_next) / (alpha_i - 1)
+-        
+-        # Inverse color reconstruction
+-        C_curr = C_next - (1 - alpha_curr) * C_i
+-        
+-        # 3. Compute adjoint variables for current sample and previous step
+-        # From [S2, unofficial] Eq 9
+-        hat_alpha_sample = (1 - alpha_curr) * hat_alpha_next
+-        hat_C_sample = (C_i - alpha_curr) * hat_C_next
+-        hat_alpha_curr = (1 - alpha_i) * hat_alpha_next - C_i * hat_C_next
+-        hat_C_curr = hat_C_next
+-        
+-        # 4. Accumulate gradients for parameters
+-        # Example accumulation for TF weights (derivative of sample w.r.t weights assumed known)
+-        # grad_tf += hat_alpha_sample * d_alpha_i/dw + hat_C_sample * d_C_i/dw
+-        # grad_density += ...
+-        
+-        # Update state for next iteration (i-1)
+-        alpha_next = alpha_curr
+-        C_next = C_curr
+-        hat_alpha_next = hat_alpha_curr
+-        hat_C_next = hat_C_curr
+-        
+-    return grad_tf, grad_density
+-```
+-
+ ### Parameters and Typical Values
+-*   **Number of Steps ($N$)**: The memory usage is $O(1)$ regardless of $N$. Typical $N$ ranges from 64 to 1024 depending on resolution and view [S1][S2, unofficial].
+-*   **Opacity Threshold**: The inversion requires $\alpha_i < 1$. In practice, transfer functions are designed such that opacity is strictly less than 1 to avoid infinite absorption [S1][S2, unofficial].
++*   **Number of Steps ($N$)**: The memory usage is $O(1)$ regardless of $N$ [S1][S2, unofficial]. Typical $N$ ranges from 64 to 1024 depending on resolution and view [S1][S2, unofficial].
++*   **Opacity Threshold**: The inversion requires $\alpha_i < 1$ [S1][S2, unofficial]. In practice, transfer functions are designed such that opacity is strictly less than 1 to avoid infinite absorption [S1][S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Singularity at $\alpha_i = 1$**: The inverse opacity formula divides by $\alpha_i - 1$. If $\alpha_i = 1$, the operation is undefined [S1][S2, unofficial]. This case is considered impossible in practice because it requires infinite absorption in the transfer function [S1]. Implementers should guard against numerical precision issues where $\alpha_i$ might be extremely close to 1, potentially causing large errors in $\alpha^{(i)}$ [S1].
++*   **Singularity at $\alpha_i = 1$**: The inverse opacity formula divides by $\alpha_i - 1$ [S1][S2, unofficial]. If $\alpha_i = 1$, the operation is undefined [S1][S2, unofficial]. This case is considered impossible in practice because it requires infinite absorption in the transfer function [S1]. Implementers should guard against numerical precision issues where $\alpha_i$ might be extremely close to 1, potentially causing large errors in $\alpha^{(i)}$ [S1].
+ *   **Precision Loss**: Repeated reconstruction of accumulated colors from subsequent values can accumulate floating-point errors, especially over long rays with many steps [S1][S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Memory Complexity**: $O(1)$ with respect to the number of steps per ray. This is a significant improvement over the standard adjoint method, which requires $O(N)$ memory to store intermediate colors [S1][S2, unofficial].
+-*   **Time Complexity**: The backward pass requires re-evaluating the sample properties (density and TF) for each step, effectively doubling the computation for the volume sampling part compared to a forward-only pass, and adding the overhead of reconstruction. However, it avoids the memory bandwidth cost of storing and retrieving large arrays of intermediate colors [S1][S2, unofficial].
+-*   **Measured Performance**: Not given in the sources.
++*   **Memory Complexity**: $O(1)$ with respect to the number of steps per ray [S1][S2, unofficial]. This is a significant improvement over the standard adjoint method, which requires $O(N)$ memory to store intermediate colors [S1][S2, unofficial].
++*   **Time Complexity**: The backward pass requires re-evaluating the sample properties (density and TF) for each step, effectively doubling the computation for the volume sampling part compared to a forward-only pass, and adding the overhead of reconstruction [S1][S2, unofficial]. However, it avoids the memory bandwidth cost of storing and retrieving large arrays of intermediate colors [S1][S2, unofficial].
++*   **Measured Performance**: Not given in the sources [S1][S2, unofficial].
+ *   **Strengths**: Enables differentiable volume rendering on hardware with limited memory (e.g., GPUs with small caches or VRAM) for high-resolution volumes or long rays [S1][S2, unofficial].
+-*   **Limitations**: Increased computational cost due to on-the-fly recomputation. Potential numerical instability if opacity values are close to 1 [S1][S2, unofficial].
++*   **Limitations**: Increased computational cost due to on-the-fly recomputation [S1][S2, unofficial]. Potential numerical instability if opacity values are close to 1 [S1][S2, unofficial].
+ *   **When to use**: When memory is the bottleneck for differentiable volume rendering, particularly for high-resolution volumes or large scenes [S1][S2, unofficial].
+ *   **When not to use**: When memory is abundant and computational speed is prioritized over memory usage, the standard adjoint method may be faster as it avoids recomputation [S1][S2, unofficial].

@@ -1,0 +1,97 @@
+# Procedural Dust Particles
+Also called: Dust Particles
+## Overview
+Procedural dust particles render glowing spheres in the foreground to add atmospheric depth, solving the problem of empty or flat-looking near-camera space without storing particle data in memory [S1, unofficial]. Unlike [Procedural Particle Rendering](2926-procedural-particle-rendering.md) which seeds a random number generator with a particle ID, this specific implementation calculates positions using hash functions and time for a fixed set of particles, adding a Gaussian glow if the particle is in front of the camera [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: Ray origin, ray direction, time uniform, camera position.
+- Output: Fragment color with added glow contribution.
+
+**Data Structures:**
+- No persistent data structures. Particle state is computed per-fragment or per-particle instance via procedural hashing.
+
+**Parameters:**
+- Number of particles: 45 [S1, unofficial].
+- Base radius: $0.011$ [S1, unofficial].
+- Radius scale factor: $0.0016$ [S1, unofficial].
+- Glow intensity multiplier: $0.42$ [S1, unofficial].
+- Sun color: `SUNCOL` (uniform) [S1, unofficial].
+
+**Steps:**
+1. For each particle $i$ from $0$ to $44$:
+   a. Calculate particle position $P_i$ using hash functions of $i$ and time $t$. The source notes "hash functions and time" but does not specify the exact hash algorithm (e.g., sine-based, integer hash). [G: Implementer must choose a deterministic hash function mapping $(i, t)$ to a 3D position in the scene space].
+   b. Compute the distance $d$ from the ray to $P_i$.
+   c. Check if the particle is in front of the camera (dot product of ray direction and vector to particle is positive).
+   d. If in front, calculate the offset $off$ from the ray center to the particle center in the view plane.
+   e. Calculate particle radius $r$:
+      $$r = 0.011 + \text{along} \times 0.0016$$
+      where $\text{along}$ is the distance along the ray to the particle's projection or depth [S1, unofficial].
+   f. Add glow to the fragment color:
+      $$\text{col} += \text{SUNCOL} \times \exp\left(\frac{-off^2}{r^2}\right) \times 0.42$$
+      [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_dust(ray_origin, ray_dir, time, sun_color):
+    total_glow = vec3(0.0)
+    num_particles = 45
+    
+    for i in range(num_particles):
+        # [G] Hash function to get 3D position from ID and time
+        # Example: deterministic pseudo-random position
+        hash_val = hash_function(i, time)
+        particle_pos = hash_to_position(hash_val)
+        
+        # Vector from ray origin to particle
+        to_particle = particle_pos - ray_origin
+        
+        # Check if particle is in front of camera
+        if dot(to_particle, ray_dir) > 0:
+            # Project particle onto plane perpendicular to ray at closest approach
+            # Distance along ray
+            along = dot(to_particle, ray_dir)
+            
+            # Closest point on ray to particle
+            closest_point = ray_origin + ray_dir * along
+            
+            # Offset vector from ray to particle
+            offset_vec = particle_pos - closest_point
+            off = length(offset_vec)
+            
+            # Calculate radius based on depth
+            r = 0.011 + along * 0.0016
+            
+            # Gaussian glow
+            glow = sun_color * exp(-(off * off) / (r * r)) * 0.42
+            total_glow += glow
+            
+    return total_glow
+```
+
+**Edge Cases and Pitfalls:**
+- Precision: The Gaussian function $\exp(-off^2/r^2)$ can underflow for large offsets. [G: Clamp or ignore if off > 5*r].
+- Boundaries: Particles may appear behind the camera if the hash function does not account for view frustum. The check `dot(to_particle, ray_dir) > 0` handles this.
+- Degenerate Input: If `r` is zero (at `along = -6.875`), division by zero occurs. Since `along` is distance in front of camera, it should be positive. [G: Ensure `along` is clamped to a minimum positive value or `r` has a minimum floor].
+
+## Subtopics
+
+### Procedural Fireflies
+Fireflies are rendered as a single draw call with no CPU work. Their positions are derived from `gl_VertexID` and the clock, allowing 9,000 fireflies to be rendered efficiently [S2, unofficial]. This method is chosen when a larger number of small, bright points is desired compared to the 45 larger dust particles. The effect can be disabled using the `--motes 0` command-line flag [S2, unofficial].
+
+## Operating characteristics
+- Time Complexity: $O(N)$ where $N$ is the number of particles (45 for dust, 9,000 for fireflies). Since $N$ is small and fixed, this is effectively constant time per fragment or draw call.
+- Memory Complexity: $O(1)$. No particle data is stored in memory; all state is procedural.
+- Measured Performance: Fireflies (9,000 particles) are rendered in a single draw call with no CPU overhead [S2, unofficial].
+- Strengths: Zero CPU synchronization overhead, minimal memory footprint, easy to scale particle count by changing the loop or vertex count.
+- Limitations: Fixed number of particles (45 for dust) may not be sufficient for dense scenes. Positioning is procedural and may not allow for complex physical interactions or collision detection.
+- When to use: Foreground atmospheric effects, starfields, or small insect simulations where performance is critical and physical accuracy is not required.
+- When not to use: When particles need to interact with geometry or other particles, or when a large, dynamic number of particles is needed.
+
+## Background
+Procedural dust particles were demonstrated in the `manim-glsl-butterflies` project, which uses GLSL shaders to render a 3D scene with procedural elements like butterflies and dust [S1, unofficial]. The technique is also present in the `voxel-engine` project, which includes both dust and fireflies as procedural effects in a voxel-based world [S2, unofficial]. The `voxel-engine` implementation highlights the efficiency of procedural generation for large numbers of small objects like fireflies [S2, unofficial].
+
+## Sources
+[S1] el-bakkali/manim-glsl-butterflies, https://github.com/el-bakkali/manim-glsl-butterflies, fetched 2026-10-26 (unofficial)
+[S2] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)

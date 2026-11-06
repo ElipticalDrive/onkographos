@@ -1,0 +1,320 @@
+--- v002.md
++++ v003.md
+@@ -1,69 +1,218 @@
+ # Tensor Approximation
+-Also called: Tucker model, Tucker formulation, Tucker formulation tensor approximation
++Also called: Tensor Decomposition, Tensor Reconstruction, Tucker formulation, Tucker formulation tensor approximation, Tucker model
++
+ ## Overview
+-Tensor Approximation (TA) is a volume data compression method that interprets a volume dataset as a multi-dimensional tensor and factorizes it into a set of basis matrices and a core tensor [S1][S2]. It solves the problem of storing and transmitting large volume datasets by reducing the reconstruction rank, thereby achieving data reduction [S1][S2]. Unlike wavelet transforms, rank-reduced TA captures non-axis aligned features at different scales more effectively using the same number of coefficients [S1][S2]. It is distinguished from its parent [Tucker Decomposition (HOSVD)](5352-tucker-decomposition-hosvd.md) by its specific integration into a multiresolution octree hierarchy with per-brick Tucker formulation and optimized GPU reconstruction [S1][S2].
++Tensor Approximation (TA) is a compression technique where a multi-dimensional input dataset (tensor) is factorized into a product of a core tensor and factor matrices (one for each dimension), known as the Tucker model [S1][S2][S3]. It solves the problem of compactly representing volume data by learning rank-reducible bases that capture non-axis aligned features at different scales, providing a highly compact model compared to fixed-basis transforms [S2][S3]. Unlike wavelet transforms which follow a multiresolution behavior, TA follows a multiscale behavior, making it more capable of capturing specific statistical features and non-axis aligned structures with the same number of coefficients, though wavelets may still outperform TA in reconstructing overall statistical distributions at very coarse resolutions [S2][S3].
++
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A volume dataset $V$ partitioned into bricks within a multiresolution octree hierarchy [S1][S2].
+-- Output: A compressed representation consisting of Tucker factors (basis matrices) and a core tensor for each brick, along with quantized coefficients [S1][S2].
+-
+-**Data Structures:**
+-- **Brick:** A sub-volume block processed independently using a single TA [S1][S2].
+-- **Tucker Model:** For a brick represented as tensor $\mathcal{X}$, the approximation is defined by a core tensor $\mathcal{G}$ and factor matrices $U^{(n)}$ for each dimension $n$:
+-  $$ \mathcal{X} \approx \mathcal{G} \times_1 U^{(1)} \times_2 U^{(2)} \times_3 U^{(3)} $$
+-  where $\times_n$ denotes the tensor-times-matrix (TTM) product [S1][S2].
+-- **Quantization:** A tensor-specific quantization scheme applies 8-bit logarithmic encoding for core tensor coefficients and 16-bit linear encoding for the basis matrices [S1][S2].
+-
+-**Steps:**
+-1. Partition the input volume domain into bricks using a multiresolution octree hierarchy [S1][S2].
+-2. For each brick, compute the Tucker decomposition to learn data-specific bases $U^{(n)}$ and a core tensor $\mathcal{G}$ [S1][S2].
+-3. Reduce the rank of the reconstruction to obtain data reduction, selecting a chosen number of multilinear tensor ranks $(R_1, R_2, R_3)$ [S1][S2].
+-4. Quantize the floating-point coefficients using the tensor-specific scheme (8-bit logarithmic for core, 16-bit linear for bases) [S1][S2].
+-5. During rendering, decompress the full working set before the rendering stage using a per-brick solution [S1][S2].
+-6. Implement TTM multiplications on the GPU, assigning each kernel thread to decompress one voxel [S1][S2].
+-
+-**Pseudocode:**
++*   **Input:** A third-order tensor $A \in \mathbb{R}^{I_1 \times I_2 \times I_3}$ representing a volume block or the entire volume [S1].
++*   **Outputs:** A core tensor $B \in \mathbb{R}^{R_1 \times R_2 \times R_3}$ and three factor matrices $U^{(1)} \in \mathbb{R}^{I_1 \times R_1}$, $U^{(2)} \in \mathbb{R}^{I_2 \times R_2}$, $U^{(3)} \in \mathbb{R}^{I_3 \times R_3}$, where $R_n < I_n$ for rank reduction [S1].
++
++**Data Structures and Layout:**
++*   **Core Tensor $B$:** Stores the interaction coefficients between the basis vectors. Dimensions are $R_1 \times R_2 \times R_3$.
++*   **Factor Matrices $U^{(n)}$:** Store the learned basis vectors for each mode $n$. The $n$-th matrix has dimensions $I_n \times R_n$, where columns correspond to the basis vectors [S1].
++*   **Quantization:** In optimized implementations, core tensor coefficients are quantized using 8-bit logarithmic encoding, and basis matrix coefficients are quantized using 16-bit linear encoding [S2][S3].
++
++**Algorithm Steps:**
++
++1.  **Decomposition (Encoding):**
++    Compute the Tucker decomposition of the input tensor $A$. This can be achieved using:
++    *   **HOSVD (Higher-Order SVD):** Compute a matrix SVD along every data mode to obtain the core tensor and factor matrices. Note that truncating HOSVD results is suboptimal [S1].
++    *   **HOOI (Higher-Order Orthogonal Iteration):** A method that directly obtains a reduced-rank Tucker decomposition, avoiding the suboptimal truncation of HOSVD [S1].
++    *   **TUCKALS3:** An Alternating Least Squares (ALS) approach for Tucker decompositions in three dimensions [S1].
++    
++    Select the multilinear tensor ranks $(R_1, R_2, R_3)$ to control the compression ratio. Typical configurations use ranks equal to half the block size (e.g., $R_1=R_2=R_3=2$ for a $4^3$ block, or $R=8$ for $16^3$ blocks) [S2].
++
++2.  **Reconstruction (Decompression):**
++    Reconstruct the volume tensor $\tilde{A}$ from the core tensor $B$ and factor matrices $U^{(n)}$. Three equivalent approaches exist [S1]:
++
++    *   **Progressive Reconstruction:** Iterate over all indices $r_1, r_2, r_3$ of the core tensor. For each combination, compute the weighted outer product of the corresponding column vectors from the factor matrices, scaled by the core coefficient $b_{r_1 r_2 r_3}$. Sum all weighted subtensors to form $\tilde{A}$ [S1].
++        $$ \tilde{A} = \sum_{r_1} \sum_{r_2} \sum_{r_3} b_{r_1 r_2 r_3} \cdot u_{r_1}^{(1)} \cdot u_{r_2}^{(2)} \cdot u_{r_3}^{(3)} $$
++        Where $u_{r_n}^{(n)}$ is the $r_n$-th column vector of $U^{(n)}$ [S1].
++
++    *   **Voxel-wise Reconstruction:** For each voxel index $(i_1, i_2, i_3)$, compute the sum over all core indices of the product of the core coefficient and the corresponding coefficients from the factor matrices [S1].
++        $$ a_{i_1 i_2 i_3} = \sum_{r_1} \sum_{r_2} \sum_{r_3} b_{r_1 r_2 r_3} \cdot u_{i_1 r_1}^{(1)} \cdot u_{i_2 r_2}^{(2)} \cdot u_{i_3 r_3}^{(3)} $$
++        Where $u_{i_n r_n}^{(n)}$ is the element at row $i_n$ and column $r_n$ of $U^{(n)}$ [S1].
++
++    *   **Tensor Times Matrix (TTM) / n-mode Product:** Reconstruct by building n-mode products along every mode. The n-mode product between a tensor $X$ and matrix $U$ is defined as $Y = X \times_n U \iff Y^{(n)} = U X^{(n)}$, where $X^{(n)}$ is the mode-$n$ unfolding of $X$ into a matrix [S1].
++        $$ \tilde{A} = B \times_1 U^{(1)} \times_2 U^{(2)} \times_3 U^{(3)} $$
++        This is the standard Tucker model formula [S1].
++
++**Pseudocode (Voxel-wise Reconstruction):**
++
+ ```python
+-def reconstruct_voxel(voxel_coords, brick_factors, brick_core, rank_M):
+-    """
+-    Reconstructs a single voxel value using the Tucker formulation.
+-    brick_factors: List of 3 matrices [U1, U2, U3], each of shape (brick_dim, rank_M).
+-    brick_core: Tensor of shape (rank_M, rank_M, rank_M).
+-    voxel_coords: Tuple (x, y, z) indicating the position within the brick.
+-    rank_M: The reduction rank.
+-    """
+-    # Dequantize basis matrices (16-bit linear encoding) [G]
+-    u1 = brick_factors[0][voxel_coords[0]] / 32768.0
+-    u2 = brick_factors[1][voxel_coords[1]] / 32768.0
+-    u3 = brick_factors[2][voxel_coords[2]] / 32768.0
+-    # Dequantify core tensor (8-bit logarithmic encoding) [G]
+-    core = brick_core * (2.0 ** (brick_core - 128.0))
+-    
+-    # Compute the tensor-times-matrix product for this specific voxel
+-    value = 0.0
+-    for i in range(rank_M):
+-        for j in range(rank_M):
+-            for k in range(rank_M):
+-                value += core[i, j, k] * u1[i] * u2[j] * u3[k]
+-    return value
+-
+-def decompress_bricks(bricks):
+-    """
+-    Decompresses all bricks in the hierarchy before rendering.
+-    """
+-    for brick in bricks:
+-        # Apply inverse quantization to brick_factors and brick_core
+-        # [G] Standard dequantization steps based on the specific scheme used
+-        pass
++def reconstruct_tensor_voxel_wise(core_tensor, factor_matrices, output_shape):
++    """
++    Reconstructs a 3D volume tensor from its Tucker decomposition components.
++    
++    Args:
++        core_tensor: 3D array of shape (R1, R2, R3) containing coefficients b_r1_r2_r3.
++        factor_matrices: List of 3 matrices [U1, U2, U3].
++                         U1 shape: (I1, R1)
++                         U2 shape: (I2, R2)
++                         U3 shape: (I3, R3)
++        output_shape: Tuple (I1, I2, I3) specifying the dimensions of the reconstructed volume.
++        
++    Returns:
++        reconstructed_volume: 3D array of shape (I1, I2, I3).
++    """
++    I1, I2, I3 = output_shape
++    R1, R2, R3 = core_tensor.shape
++    
++    U1, U2, U3 = factor_matrices
++    
++    # Initialize output volume
++    reconstructed_volume = zeros((I1, I2, I3))
++    
++    # Iterate over all voxel coordinates
++    for i1 in range(I1):
++        for i2 in range(I2):
++            for i3 in range(I3):
++                # Initialize voxel value
++                voxel_value = 0.0
++                
++                # Sum over all core tensor indices
++                for r1 in range(R1):
++                    for r2 in range(R2):
++                        for r3 in range(R3):
++                            # Get core coefficient
++                            b = core_tensor[r1, r2, r3]
++                            
++                            # Get corresponding basis coefficients
++                            # u_i_r is the element at row i, column r of matrix U
++                            u1_coeff = U1[i1, r1]
++                            u2_coeff = U2[i2, r2]
++                            u3_coeff = U3[i3, r3]
++                            
++                            # Accumulate weighted product
++                            voxel_value += b * u1_coeff * u2_coeff * u3_coeff
++                
++                reconstructed_volume[i1, i2, i3] = voxel_value
++                
++    return reconstructed_volume
+ ```
+ 
++**Pseudocode (TTM Reconstruction):**
++
++```python
++def reconstruct_tensor_ttm(core_tensor, factor_matrices):
++    """
++    Reconstructs a 3D volume tensor using Tensor Times Matrix (TTM) operations.
++    
++    Args:
++        core_tensor: 3D array of shape (R1, R2, R3).
++        factor_matrices: List of 3 matrices [U1, U2, U3].
++                         U1 shape: (I1, R1)
++                         U2 shape: (I2, R2)
++                         U3 shape: (I3, R3)
++                         
++    Returns:
++        reconstructed_volume: 3D array of shape (I1, I2, I3).
++    """
++    # Start with the core tensor
++    current_tensor = core_tensor
++    
++    # Apply n-mode product for each mode n=1, 2, 3
++    # Mode 1: Multiply along the first dimension
++    # Unfold current_tensor along mode 1 to get matrix M1 of shape (R1, R2*R3)
++    # Result M1_new = U1 @ M1
++    # Reshape M1_new back to tensor of shape (I1, R2, R3)
++    M1 = unfold_mode_n(current_tensor, mode=1) # Shape: (R1, R2*R3)
++    M1_new = matrix_multiply(factor_matrices[0], M1) # Shape: (I1, R2*R3)
++    current_tensor = fold_mode_n(M1_new, mode=1, original_shape=(I1, R2, R3))
++    
++    # Mode 2: Multiply along the second dimension
++    # Unfold current_tensor along mode 2 to get matrix M2 of shape (R2, I1*R3)
++    # Result M2_new = U2 @ M2
++    # Reshape M2_new back to tensor of shape (I1, I2, R3)
++    M2 = unfold_mode_n(current_tensor, mode=2) # Shape: (R2, I1*R3)
++    M2_new = matrix_multiply(factor_matrices[1], M2) # Shape: (I2, I1*R3)
++    current_tensor = fold_mode_n(M2_new, mode=2, original_shape=(I1, I2, R3))
++    
++    # Mode 3: Multiply along the third dimension
++    # Unfold current_tensor along mode 3 to get matrix M3 of shape (R3, I1*I2)
++    # Result M3_new = U3 @ M3
++    # Reshape M3_new back to tensor of shape (I1, I2, I3)
++    M3 = unfold_mode_n(current_tensor, mode=3) # Shape: (R3, I1*I2)
++    M3_new = matrix_multiply(factor_matrices[2], M3) # Shape: (I3, I1*I2)
++    current_tensor = fold_mode_n(M3_new, mode=3, original_shape=(I1, I2, I3))
++    
++    return current_tensor
++
++def unfold_mode_n(tensor, mode):
++    """
++    Unfolds a 3D tensor along the specified mode into a matrix.
++    Mode 1: Rows are index i1, Columns are (i2, i3) flattened.
++    Mode 2: Rows are index i2, Columns are (i1, i3) flattened.
++    Mode 3: Rows are index i3, Columns are (i1, i2) flattened.
++    """
++    I1, I2, I3 = tensor.shape
++    if mode == 1:
++        # Reshape to (I1, I2*I3)
++        return tensor.reshape(I1, I2 * I3)
++    elif mode == 2:
++        # Reshape to (I2, I1*I3)
++        # Need to transpose to bring i2 to first axis
++        transposed = tensor.transpose(1, 0, 2)
++        return transposed.reshape(I2, I1 * I3)
++    elif mode == 3:
++        # Reshape to (I3, I1*I2)
++        # Need to transpose to bring i3 to first axis
++        transposed = tensor.transpose(2, 0, 1)
++        return transposed.reshape(I3, I1 * I2)
++    else:
++        raise ValueError("Mode must be 1, 2, or 3")
++
++def fold_mode_n(matrix, mode, original_shape):
++    """
++    Folds a matrix back into a 3D tensor along the specified mode.
++    """
++    if mode == 1:
++        # Matrix shape (I1, I2*I3) -> Tensor (I1, I2, I3)
++        return matrix.reshape(original_shape)
++    elif mode == 2:
++        # Matrix shape (I2, I1*I3) -> Tensor (I1, I2, I3)
++        # First reshape to (I2, I1, I3)
++        temp = matrix.reshape(original_shape[1], original_shape[0], original_shape[2])
++        # Transpose back to (I1, I2, I3)
++        return temp.transpose(1, 0, 2)
++    elif mode == 3:
++        # Matrix shape (I3, I1*I2) -> Tensor (I1, I2, I3)
++        # First reshape to (I3, I1, I2)
++        temp = matrix.reshape(original_shape[2], original_shape[0], original_shape[1])
++        # Transpose back to (I1, I2, I3)
++        return temp.transpose(1, 2, 0)
++    else:
++        raise ValueError("Mode must be 1, 2, or 3")
++
++def matrix_multiply(A, B):
++    """
++    Standard matrix multiplication.
++    """
++    # A is (M, K), B is (K, N) -> Result (M, N)
++    M, K = A.shape
++    K2, N = B.shape
++    if K != K2:
++        raise ValueError("Matrix dimensions do not match for multiplication")
++    
++    result = zeros((M, N))
++    for i in range(M):
++        for j in range(N):
++            sum_val = 0.0
++            for k in range(K):
++                sum_val += A[i, k] * B[k, j]
++            result[i, j] = sum_val
++    return result
++```
++
+ **Parameters:**
+-- **Rank $M$:** The reduction rank. Typical values are not explicitly given in the sources, but the complexity is linear in $M$ [S1][S2].
+-- **Brick Size:** Determined by the multiresolution octree hierarchy [S1][S2]. Example configuration: Chameleon dataset, rank 8 tensor approximation of $16^3$ voxel blocks [S1][S2].
++*   **Multilinear Ranks $(R_1, R_2, R_3)$:** User-defined parameters controlling the number of retained coefficients and the resulting compression ratio. Typical values are half the block size (e.g., $R_1=R_2=R_3=2$ for small blocks) or fixed values like 8 for $16^3$ blocks [S2].
++*   **Tensor Order:** Generally restricted to third-order tensors ($I_1 \times I_2 \times I_3$) for Direct Volume Rendering (DVR) applications [S1].
+ 
+ **Edge Cases and Pitfalls:**
+-- **Precision:** Quantization errors may affect reconstruction quality. The tensor-specific quantization scheme must be chosen carefully [S1][S2].
+-- **Coarse Resolution Accuracy:** At coarse resolutions, wavelet transforms still outperform TA in reconstructing overall statistical distributions [S1][S2].
+-- **Degenerate Input:** If a brick has low variance, the rank reduction might discard important features. The learned bases are data-specific, so they must be computed per brick [S1][S2].
++*   **Truncation Optimality:** Truncating the result of HOSVD is not optimal in terms of the difference between the approximated and original data; HOOI is preferred for direct reduced-rank decomposition [S1].
++*   **Statistical Distribution:** At coarse resolutions, wavelet transforms may still outperform TA in reconstructing the overall statistical distribution of the dataset, despite TA's superior feature capture [S2][S3].
++
+ ## Subtopics
+ 
+@@ -72,28 +221,18 @@
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-- The computational complexity of the GPU reconstruction is $O(M)$, growing linearly with the rank $M$, instead of $O(M^3)$ [S1][S2].
+-- Memory usage is reduced by the rank reduction and quantization, storing only the Tucker factors and core tensor per brick [S1][S2].
+-
+-**Measured Performance:**
+-- Not given in the sources.
+-
+-**Scaling:**
+-- The method scales with the number of bricks and the rank $M$ [S1][S2].
+-
+-**Strengths and Limitations:**
+-- **Strengths:** Captures non-axis aligned features at different scales better than wavelet transforms using the same amount of coefficients [S1][S2]. Learned bases are data-specific, enabling effective feature extraction and compression [S1][S2].
+-- **Limitations:** Pre-processing (decomposition and quantization) can be costly [S1][S2]. The method requires storing Tucker factors for each brick, which may increase memory overhead compared to simpler methods if the rank is not sufficiently reduced [S1][S2].
+-
+-**When to Use:**
+-- Use when the volume data contains non-axis aligned features and efficient GPU-based rendering is required [S1][S2].
+-- Use when data-specific basis learning is beneficial for compression [S1][S2].
+-
+-**When Not to Use:**
+-- Avoid when coarse-resolution statistical distribution accuracy is prioritized over non-axis aligned features [S1][S2].
+-- Avoid if pre-processing time is a critical constraint and the data does not benefit from learned bases [S1][S2].
++*   **Time Complexity:** 
++    *   Progressive Reconstruction has cubic rank complexity $O(R_1 \cdot R_2 \cdot R_3)$ [S1]. For $R=16$, this results in 4096 operations per voxel.
++    *   TTM/n-mode Product Reconstruction has linear rank complexity $O(R)$ (or $O(M)$ where $M$ is the rank) [S1][S2][S3]. This is a 256-fold improvement over progressive reconstruction for $R=16$ [S1].
++*   **Memory Complexity:** Depends on the storage of the core tensor ($R_1 R_2 R_3$) and factor matrices ($I_1 R_1 + I_2 R_2 + I_3 R_3$). Quantization schemes (8-bit for core, 16-bit for bases) reduce memory footprint [S2][S3].
++*   **Performance:** Optimized GPU implementations assign one kernel thread per voxel, enabling fast random access and efficient decompression before rendering [S2][S3].
++*   **Strengths:** Captures non-axis aligned features at different scales better than wavelet transforms using the same amount of coefficients [S2][S3]. Provides a highly compact model [S2].
++*   **Limitations:** Wavelets may outperform TA in reconstructing overall statistical distributions at coarse resolutions [S2][S3]. Pre-processing (decomposition) can be costly [S3].
++*   **Usage:** Applied to interactive large volume visualization using local TA for every brick in a multiresolution hierarchy [S2][S3].
++
+ ## Background
+-Tensor Approximation was proposed in combination with a multiresolution octree hierarchy [SIM* 11] [S1][S2]. The same work introduced a tensor-specific quantization scheme and an optimized GPU reconstruction method [S1][S2]. The general idea behind tensor decomposition is to approximate a volume dataset with SVD/PCA-like tools, interpreting the volume as a tensor factorized into rank-one tensors (CP decomposition) or a core tensor and matrices (Tucker decomposition) [KB09] [S1][S2]. Suter et al. [SZP10] showed that rank-reduced TA is more able to capture non-axis aligned features at different scales than wavelet transforms using the same amount of coefficients [S1][S2]. The hierarchical tensor-based transform was proposed by Wu et al. [WXC* 08] [S1][S2].
++Tensor Approximation was introduced to Direct Volume Rendering (DVR) as a higher-order extension of matrix SVD/PCA [S2][S3]. Key contributions include Suter et al. [SZP10] demonstrating the ability of rank-reduced TA to capture non-axis aligned features, and Suter et al. [SIM* 11] applying TA to interactive large volume visualization with a multiresolution octree hierarchy, introducing tensor-specific quantization and GPU reconstruction methods [S2][S3]. The method builds on foundational tensor decomposition algorithms like HOSVD, HOOI, and TUCKALS3 [S1].
++
+ ## Sources
+-[S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+-[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27+[S1] Interactive Multiscale Tensor Reconstruction for Multiresolution Volume Rendering, https://ics.uci.edu/~gopi/SamplePubs/MultiscaleTensorVis.pdf, fetched 2026-10-26
++[S2] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
++[S3] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

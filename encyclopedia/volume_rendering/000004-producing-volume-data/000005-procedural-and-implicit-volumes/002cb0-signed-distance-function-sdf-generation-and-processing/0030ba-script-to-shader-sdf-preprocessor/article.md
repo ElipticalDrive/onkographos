@@ -1,0 +1,223 @@
+# Script-to-Shader SDF Preprocessor
+
+Also called: SDF Script Compiler, loadTxtFragFile
+
+## Overview
+The Script-to-Shader SDF Preprocessor is a C++ tool that parses a custom domain-specific script language to generate GLSL code for Signed Distance Function (SDF) scene composition [S1, unofficial]. It solves the problem of manually writing complex, nested GLSL distance functions by allowing users to define scenes using high-level operators (union, intersection, smooth union) and loops [S1, unofficial]. It distinguishes itself from sibling methods like [SDF Volume Generation & Ping-Pong Buffering](4570-sdf-volume-generation-ping-pong-buffering.md) by operating at the shader source code generation level rather than the volumetric data processing level, enabling dynamic scene composition without recompiling the host application.
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** A "dummy" fragment shader source file (`realCode`) containing placeholders and a script file (`psCode`) defining the scene geometry, materials, and lights [S1, unofficial].
+- **Output:** A complete, valid GLSL fragment shader source string (`realCode`) with the scene SDF logic inserted [S1, unofficial].
+
+**Data Structures:**
+The method operates on string buffers. The `psCode` script uses specific marker characters to denote structure:
+- `@i`: Loop iteration marker.
+- `#`: Function definition or operator marker.
+- `!`: Direct line insertion marker.
+- `!(envName)`: Environment variable placeholder in `realCode`.
+- `#envName`: Environment definition in `psCode`.
+
+**Steps:**
+1. **Load Files:** Read the dummy fragment shader into `realCode` and the script into `psCode` [S1, unofficial].
+2. **Environment Setup:** Define a lambda `setUpEnv(envName)` that:
+    - Finds the placeholder `!(envName)` in `realCode`.
+    - Scans `psCode` for the corresponding `#envName` block.
+    - Extracts the content between `{` and `}` from the script.
+    - Inserts this content into `realCode` at the placeholder location.
+    - If `envName` is `"light"`, increments a light counter `!(lightCnt)` [S1, unofficial].
+3. **Apply Environments:** Call `setUpEnv("material")` and `setUpEnv("light")` to inject material and lighting definitions [S1, unofficial].
+4. **Locate Insertion Point:** Find the `!(sceneSDF)` placeholder in `realCode`. This is where the generated SDF code will be inserted [S1, unofficial].
+5. **Parse Operators:** Define a lambda `findFunc` to parse script operators:
+    - `opU`: Union.
+    - `opS`: Subtraction.
+    - `opI`: Intersection.
+    - `opUs`: Smooth Union with parameter `k` [S1, unofficial].
+    - The parser handles recursive function calls by scanning for nested markers [S1, unofficial].
+6. **Main Generation Loop:** Scan `psCode` for markers:
+    - `@i`: Generates a `for` loop structure in GLSL.
+    - `#`: Triggers function definition generation using `findFunc`.
+    - `!`: Inserts the subsequent line directly into the output [S1, unofficial].
+7. **Insert Code:** Insert the generated GLSL code at the `!(sceneSDF)` position in `realCode` [S1, unofficial].
+8. **Return:** Return the modified `realCode` string [S1, unofficial].
+
+**Formulas:**
+The smooth union operator `opUs` uses the following formula [S1, unofficial]:
+$$ f = \min(a, b) - k \cdot \max(0, \min(a, b)) $$
+Where:
+- $a$ and $b$ are the signed distances of the two primitives.
+- $k$ is the smoothness parameter [S1, unofficial].
+
+**Parameters:**
+- `k`: Smoothness parameter for `opUs`. Parsed from the script using `sscanf(..., "#k%f", &k)` [S1, unofficial].
+- `prefix`: Directory prefix for shader files, formatted as `shaders/%s/%s.glsl` [S1, unofficial].
+
+**Pitfalls:**
+- The script parser relies on fixed string markers (`@i`, `#`, `!`) which can conflict with standard GLSL syntax if not carefully escaped [S1, unofficial].
+- The `findSubFunc` lambda assumes specific marker formats (e.g., `m` for matrix, `v` for vector) and may fail if the script deviates from these conventions [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def script_to_shader(real_code: str, ps_code: str) -> str:
+    """
+    Parses a custom script language to generate GLSL code for SDF scene composition.
+    
+    Args:
+        real_code: The dummy fragment shader source string.
+        ps_code: The scene definition script string.
+        
+    Returns:
+        The complete GLSL fragment shader source string.
+    """
+    light_cnt = 0
+    
+    def setUpEnv(env_name: str):
+        nonlocal light_cnt
+        # Find placeholder in real_code
+        placeholder = f"!( {env_name} )"
+        if placeholder not in real_code:
+            return
+            
+        # Find corresponding block in ps_code
+        # Format: #env_name { ... }
+        start_marker = f"# {env_name} "
+        start_idx = ps_code.find(start_marker)
+        if start_idx == -1:
+            return
+            
+        # Extract content between { and }
+        brace_start = ps_code.find('{', start_idx)
+        brace_end = ps_code.find('}', brace_start)
+        if brace_start == -1 or brace_end == -1:
+            return
+            
+        env_content = ps_code[brace_start + 1 : brace_end].strip()
+        
+        # Insert into real_code
+        real_code = real_code.replace(placeholder, env_content)
+        
+        # Update light counter if applicable
+        if env_name == "light":
+            light_cnt += 1
+
+    # Step 2 & 3: Apply environments
+    setUpEnv("material")
+    setUpEnv("light")
+    
+    # Step 4: Locate insertion point
+    scene_sdf_placeholder = "!(sceneSDF)"
+    if scene_sdf_placeholder not in real_code:
+        raise ValueError("Missing sceneSDF placeholder in real_code")
+        
+    scene_insert_pos = real_code.find(scene_sdf_placeholder)
+    
+    # Step 5 & 6: Parse operators and generate code
+    generated_code = ""
+    i = 0
+    while i < len(ps_code):
+        char = ps_code[i]
+        
+        if char == '@':
+            # Handle loop generation
+            # Assuming @i denotes a loop iteration, generate GLSL for loop
+            # This is a simplified representation; actual implementation 
+            # would need to parse loop bounds and body from the script
+            generated_code += "for (int i = 0; i < 1; i++) {\n"
+            # Skip the marker
+            i += 1
+            # Continue parsing inside the loop body until a closing marker or end
+            # Note: The original source implies a specific structure for @i
+            # which is not fully detailed in the provided notes.
+            # [G] Placeholder for loop body parsing logic
+            generated_code += "    // Loop body from script\n"
+            generated_code += "}\n"
+            
+        elif char == '#':
+            # Handle function/operator definition
+            # Find the operator name after #
+            # Format: #opU(...) or #opS(...)
+            # Extract operator type
+            op_start = i + 1
+            op_end = ps_code.find('(', op_start)
+            if op_end == -1:
+                op_end = ps_code.find(' ', op_start)
+            if op_end == -1:
+                op_end = len(ps_code)
+                
+            op_type = ps_code[op_start:op_end].strip()
+            
+            # Parse arguments and generate GLSL
+            # The original code shows complex string slicing for opU, opS, opI
+            # We will simulate the logic for opU as per the notes
+            if op_type == "opU":
+                # Union: mint(a, b)
+                # Extract arguments from the script
+                # This requires parsing the script's argument format
+                # [G] Placeholder for argument extraction logic
+                arg1 = "sdf1"
+                arg2 = "sdf2"
+                mtl_no = 0 # Placeholder
+                generated_code += f"mint({arg1}, vec2({arg2}, {mtl_no}));\n"
+                
+            elif op_type in ["opS", "opI"]:
+                # Subtraction/Intersection: opU(mint(a, b), c)
+                # This is more complex and requires nested parsing
+                # [G] Placeholder for nested operator parsing logic
+                generated_code += "// opS/opI logic not fully specified in notes\n"
+                
+            elif op_type == "opUs":
+                # Smooth Union
+                # Parse k parameter
+                k = 0.5 # Default value
+                # Parse k from script if present
+                # sscanf(..., "#k%f", &k)
+                k_str = ps_code.find("#k")
+                if k_str != -1:
+                    # Extract float after #k
+                    # [G] Placeholder for float parsing logic
+                    pass
+                    
+                arg1 = "sdf1"
+                arg2 = "sdf2"
+                generated_code += f"min({arg1}, {arg2}) - {k} * max(0.0, min({arg1}, {arg2}));\n"
+                
+            else:
+                generated_code += f"// Unknown operator: {op_type}\n"
+                
+        elif char == '!':
+            # Direct line insertion
+            # Find the end of the line
+            line_end = ps_code.find('\n', i)
+            if line_end == -1:
+                line_end = len(ps_code)
+            line_content = ps_code[i + 1 : line_end].strip()
+            generated_code += line_content + "\n"
+            i = line_end
+        else:
+            # Skip other characters
+            pass
+            
+        i += 1
+        
+    # Step 7: Insert generated code
+    real_code = real_code[:scene_insert_pos] + generated_code + real_code[scene_insert_pos + len(scene_sdf_placeholder):]
+    
+    # Step 8: Return
+    return real_code
+```
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the size of the script file `psCode`, as it involves a single pass scan with nested string operations [S1, unofficial].
+- **Memory Complexity:** Linear with respect to the size of the output shader, as it constructs a new string buffer [S1, unofficial].
+- **Strengths:** Allows for dynamic scene composition without recompiling the host application; supports high-level operators like smooth union [S1, unofficial].
+- **Limitations:** Relies on a custom script syntax that can conflict with GLSL; limited error handling for malformed scripts [S1, unofficial].
+- **When to use:** When rapid prototyping of SDF scenes is required and the scene structure is known at runtime [S1, unofficial].
+- **When not to use:** When performance-critical, static scenes are used, as the preprocessing overhead is unnecessary [S1, unofficial].
+
+## Background
+The Script-to-Shader SDF Preprocessor originates from an unofficial GitHub repository `trimesh33/sdf` [S1, unofficial]. It is designed to facilitate the creation of complex SDF scenes by abstracting the GLSL code generation process [S1, unofficial].
+
+## Sources
+[S1] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)

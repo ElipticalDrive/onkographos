@@ -1,0 +1,82 @@
+Puffing up reinforcement learning. Contribute to PufferAI/PufferLib development by creating an account on GitHub.
+
+trainer: parallel build_cdf scan + tiled (bitwise-identical) mingru backward by Infatoshi · Pull Request #615 · PufferAI/PufferLib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Infatoshi
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Contributor
+What this is
+Two env-agnostic optimizations to the compiled trainer, split out of #614 so each reviews on its own merits. Both come with parity proofs against the existing kernels; no training semantics change.
+1. Parallel build_cdf (src/pufferlib.cu)
+The prioritized-replay CDF was a <<<1,1>>> kernel — one thread serially prefix-summing B floats, once per minibatch update. At B=8192 that's 90us x 32 updates = ~2.9ms per train call of pure serialization; at B=262144 it's 2.85ms per update. Replaced with a two-level block scan using a preallocated block-sums buffer (registered in PrioBuffers): 7.5us at B=8192, 7.2us at B=262144, matching the serial result to 2e-7 rel, monotonic, deterministic, still allocation- and sync-free. A host assert documents the two-level limit (B <= 1M). This is the same fix the 5.0 branch makes via cub::DeviceScan in curriculum.cu — backported to 4.0's pipeline.
+2. Tiled mingru_scan_backward (src/models.cu)
+The BPTT backward launched B*H threads each walking T serially — at minibatch 8192 (B=64, H=256) that's 16k threads on a GPU that wants ~20x more, and the kernel sits on the critical path 3 layers x N updates per train call. The tiled variant assigns one block per (batch row, 16-wide hidden tile), recomputes the T/4 chunks in parallel from the checkpoints the forward already writes, and replays the cheap carries in reference order in-block — so gradients are bitwise identical to the original kernel (the affine chunk composition is mathematically clean but fp32 reassociation moves near-cancelled gate gradients; keeping reference order costs little and removes all numerical risk). 4x faster at B=64, 1.3x (bf16) at B=256. Originals kept as _ref for the parity harness. Plus a small fusion of scan-adjacent elementwise ops (193 -> 186 nodes per captured update).
+Measured end-to-end
+On the craftax env at h256x3, 8192 envs, horizon 128 (measured on the #614 GPU env; the patches themselves are env-independent):
+minibatch
+before
+after
+32768 (32 updates)
+8.09M
+8.64M train SPS
+8192 (128 updates)
+3.92M
+4.81M train SPS
+Gains scale with updates-per-batch since both patches attack per-update serial cost.
+Notes for 5.0
+build_cdf is already fixed there (CUB); this brings 4.0 to parity.
+The tiled backward ports directly — 5.0's PrefixScan/kernels are structurally identical; only the scratch-tensor registration needs reapplying.
+Two measured dead ends worth recording so they don't get re-attempted: a warp-specialized persistent fused update kernel is 3.6-4.8x slower than the current chain (cudagraphs already remove the launch overhead it targets; cuBLAS beats in-kernel WMMA at 256-wide shapes), and further launch-fusion beyond this PR measured neutral-to-negative (cublasLt epilogues drift fp32 by 3e-3; H-specialized launch bounds were slower).
+🤖 Generated with Claude Code
+trainer: parallel build_cdf scan + tiled mingru_scan_backward
+…
+dd6c1fa
+```
+Env-agnostic optimizations to the compiled trainer, both with parity
+proofs against the existing kernels:
+
+- build_cdf: the serial <<<1,1>>> prefix scan over B priorities becomes
+  a two-level block scan (90us -> 7.5us at B=8192; it runs once per
+  minibatch update). Matches the serial result to 2e-7 rel; same fix
+  the 5.0 branch makes via cub::DeviceScan, backported. Host assert
+  documents the B <= 1M two-level limit.
+- mingru_scan_backward: tiled variant (one block per (batch, h-tile),
+  chunks recomputed in parallel from the existing checkpoints, carries
+  replayed in reference order) producing BITWISE-identical gradients.
+  4x faster at B=64, 1.3x (bf16) at B=256; originals kept as _ref.
+  Plus a small fusion in the scan-adjacent elementwise ops.
+
+Measured on the craftax env at h256x3/8192 envs/horizon 128: train SPS
+8.09M -> 8.64M at minibatch 32768, 3.92M -> 4.81M at minibatch 8192
+(rollout unchanged).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Infatoshi
+mentioned this pull request
+Jul 22, 2026
+Craftax GPU-resident env behind opt-in vecenv device hooks
+#614
+Open
+Infatoshi
+marked this pull request as ready for review
+July 24, 2026 09:22
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

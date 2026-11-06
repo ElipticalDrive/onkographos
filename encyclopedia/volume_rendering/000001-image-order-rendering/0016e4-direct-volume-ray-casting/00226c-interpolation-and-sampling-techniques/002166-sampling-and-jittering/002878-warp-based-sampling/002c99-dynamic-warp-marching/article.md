@@ -1,38 +1,44 @@
 # Dynamic Warp Marching
 
-Also called: Dynamic approach
+Also called: 3D Warp Marching, Dynamic approach
 
 ## Overview
 Dynamic Warp Marching is a GPU sampling strategy for direct volume ray casting that optimizes texture cache performance by dynamically aligning the sampling direction of a thread warp with the volume's X-dimension, which has the minimum memory stride [S1]. It integrates the Warp Marching concept with a dynamic viewing-direction adjustment, overcoming the limitation of the original Dynamic approach which could only sample along horizontal or vertical directions [S1].
 
 ## How it works
 **Inputs:**
-*   Volume data texture.
-*   Viewing direction (defined by the camera orientation relative to the volume axes).
-*   Ray origin and direction for each pixel.
+*   Volume data texture [S1].
+*   Viewing direction (defined by the camera orientation relative to the volume axes) [S1].
+*   Ray origin and direction for each pixel [S1].
 
 **Outputs:**
-*   Sampled voxel values along the ray path.
-*   Composited color and opacity for the pixel.
+*   Sampled voxel values along the ray path [S1].
+*   Composited color and opacity for the pixel [S1].
 
 **Data Structures:**
 *   **Warp Shape:** $32 \times 1$. A single warp (32 threads) is responsible for one ray, with all 32 threads taking samples along the X-dimension of the volume [S1].
-*   **Thread Block Shape:** Not explicitly defined for the Dynamic method in the sources, but the Static method uses $16 \times 16$ [S1]. The Dynamic method's warp shape is fixed at $32 \times 1$ [S1].
+*   **Thread Block Shape:** Not given in the sources for the Dynamic method [S1].
 
 **Steps:**
-1.  **Determine Viewing Direction:** Identify the current viewing direction relative to the volume axes (e.g., XY, YZ, ZX, etc.). There are six unique viewing directions considered [S1].
+1.  **Determine Viewing Direction:** Identify the current viewing direction relative to the volume axes (e.g., XY, YZ, ZX, etc.) [S1].
 2.  **Adjust Sampling Direction:** Unlike the Static method which aligns the major sampling direction with the horizontal direction of the view, the Dynamic method adjusts the major direction of the warp to always be parallel to the X-dimension of the volume [S1].
 3.  **Sample Along X:** All 32 threads in the warp take samples along the X-dimension of the volume [S1]. This is done because the X-dimension has the minimum memory stride, ensuring best texture cache performance [S1].
-4.  **Integrate Warp Marching:** The method integrates Warp Marching to allow sampling along any direction, overcoming the limitation of Standard sampling which only supports horizontal or vertical directions [S1]. This implies that while the *warp's* internal sampling is along X, the *ray's* path through the volume is determined by the viewing direction, and the warp's threads are mapped to cover the ray's path efficiently [S1].
+4.  **Integrate Warp Marching:** The method integrates Warp Marching to allow sampling along any direction, overcoming the limitation of Standard sampling which only supports horizontal or vertical directions [S1].
+
+**Formulas:**
+*   Number of voxels covered along a dimension = (distance between samples along that dimension) × (number of samples taken along that dimension) [S1].
+*   Let $V_d$ be the voxels covered, $D_s$ be the sampling distance, and $N_s$ be the number of samples [S1]. Then $V_d = D_s \times N_s$ [S1].
 
 **Parameters:**
 *   Warp shape: $32 \times 1$ [S1].
 *   Block shape: Not given in the sources.
+*   Sampling distance: 0.5 voxel length between samples along rays [S1].
 
 **Edge Cases and Pitfalls:**
 *   **Viewing Direction XY or XZ:** When the view is facing XY or XZ, the major warp sampling direction of the Static method is already aligned with the X-dimension of the volume. Therefore, the performance of the Static and Dynamic approaches is similar [S1].
 *   **Viewing Direction YX:** The Dynamic approach is better than the Static approach when facing YX [S1].
 *   **Ray Distance/Volume Image Ratio:** The performance difference between Dynamic and Static approaches is notable in datasets with larger ray distances (e.g., `vhm_body`) but marginal in datasets with smaller ray distances (e.g., `vhf_head`) [S1]. This is due to different volume image ratios [S1].
+*   **Zero X-direction component:** If the ray direction's X-component is zero, stepping along X requires a fallback to another axis or a small epsilon to avoid division by zero [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -42,53 +48,59 @@ Dynamic Warp Marching is a GPU sampling strategy for direct volume ray casting t
 # Assumes a warp of 32 threads, each thread handles one sample along the X-dimension
 # The ray direction and origin are shared among the warp threads
 
-def dynamic_warp_marching(ray_origin, ray_direction, volume_texture):
-    # Determine the viewing direction relative to volume axes
-    viewing_direction = get_viewing_direction(ray_direction)
-    
-    # Adjust the sampling direction to be parallel to the X-dimension
-    # This is the key difference from Static method
-    sampling_direction = Vector(1, 0, 0) # X-dimension
-    
-    # Initialize sample position
-    sample_pos = ray_origin
-    
-    # Iterate through 32 samples (warp size)
+def dynamic_warp_marching(ray_origin, ray_direction, volume_texture, volume_dims):
+    # Initialize compositing state [G]
+    color = [0.0, 0.0, 0.0]
+    opacity = 0.0
+    alpha_contribution = 0.0
+
+    # Step size along X dimension (0.5 voxel length per evidence) [S1]
+    step_x = 0.5
+    dx = ray_direction[0]
+    dy = ray_direction[1]
+    dz = ray_direction[2]
+
+    # Handle zero X-component to avoid division by zero [G]
+    if abs(dx) < 1e-6:
+        dx = 1e-6
+
+    # Calculate step in t and corresponding Y/Z increments
+    step_t = step_x / dx
+    step_y = dy * step_t
+    step_z = dz * step_t
+
+    # Current position
+    pos_x = ray_origin[0]
+    pos_y = ray_origin[1]
+    pos_z = ray_origin[2]
+
+    # Iterate through 32 samples (warp size) [S1]
     for i in range(32):
-        # Sample along the X-dimension
-        # Note: The actual ray path is determined by the viewing direction,
-        # but the warp's threads are mapped to cover the ray's path efficiently
-        # by sampling along X. This implies a transformation or mapping
-        # of the ray's path to the X-dimension for cache efficiency.
-        # The exact mapping is not detailed in the sources, but the
-        # integration of Warp Marching allows sampling along any direction.
-        
-        # Get voxel value at sample_pos
-        voxel_value = sample_volume(volume_texture, sample_pos)
-        
-        # Composite the voxel value
-        # (Standard volume rendering compositing step)
-        color, opacity = composite(voxel_value, color, opacity)
-        
-        # Move to next sample along the ray direction
-        # The step size is adjusted to cover the ray path efficiently
-        step_size = get_step_size(ray_direction, viewing_direction)
-        sample_pos = sample_pos + ray_direction * step_size
-        
-        # Check for exit condition (e.g., end of volume or sufficient opacity)
-        if is_exit_condition(sample_pos, opacity):
+        # Check volume boundaries
+        if not (0 <= pos_x < volume_dims[0] and 0 <= pos_y < volume_dims[1] and 0 <= pos_z < volume_dims[2]):
             break
-            
+
+        # Sample voxel value (standard texture fetch operation) [G]
+        voxel = volume_texture.sample(pos_x, pos_y, pos_z)
+
+        # Standard front-to-back compositing [G]
+        alpha_contribution = voxel * (1.0 - opacity)
+        color[0] += voxel[0] * alpha_contribution
+        color[1] += voxel[1] * alpha_contribution
+        color[2] += voxel[2] * alpha_contribution
+        opacity += alpha_contribution
+
+        # Early ray termination [S1]
+        if opacity >= 0.95:
+            break
+
+        # Advance position along X dimension
+        pos_x += step_x
+        pos_y += step_y
+        pos_z += step_z
+
     return color, opacity
 ```
-
-## Subtopics
-
-### Static Warp Marching
-Uses Standard sampling with a fixed thread block shape ($16 \times 16$) and aligns the major sampling direction with the horizontal direction of the view. Choose when the viewing direction is already aligned with the X-dimension (XY or XZ views) for similar performance to Dynamic. [Static Warp Marching](4299-static-warp-marching.md)
-
-### Standard Sampling
-Only supports horizontal or vertical sampling directions. Choose when dynamic adjustment is not needed or when the viewing direction is fixed and favorable. [Standard Sampling](4297-standard-sampling.md)
 
 ## Operating characteristics
 *   **Performance:** Significant performance improvements when the view is facing YZ, ZX, or ZY [S1]. When facing XY or XZ, performance is similar to the Static method [S1]. When facing YX, the Dynamic approach is better than the Static approach [S1].
@@ -101,3 +113,13 @@ The Dynamic approach was introduced by Sugimoto et al. (2014) to adjust sampling
 
 ## Sources
 [S1] A cache-friendly sampling strategy for texture-based volume rendering on GPU, https://doi.org/10.1016/j.visinf.2017.08.001, fetched 2026-10-26
+
+## Subtopics
+
+### Static Warp Marching
+Uses Standard sampling with a fixed thread block shape ($16 \times 16$) and aligns the major sampling direction with the horizontal direction of the view. Choose when the viewing direction is already aligned with the X-dimension (XY or XZ views) for similar performance to Dynamic. [Static Warp Marching](4299-static-warp-marching.md)
+
+### Standard Sampling
+Only supports horizontal or vertical sampling directions. Choose when dynamic adjustment is not needed or when the viewing direction is fixed and favorable. [Standard Sampling](4297-standard-sampling.md)
+
+

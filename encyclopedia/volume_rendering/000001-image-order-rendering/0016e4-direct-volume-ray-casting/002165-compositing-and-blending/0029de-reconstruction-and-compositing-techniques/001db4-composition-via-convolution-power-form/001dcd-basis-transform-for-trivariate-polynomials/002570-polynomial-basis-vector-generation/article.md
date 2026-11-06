@@ -1,0 +1,92 @@
+# Polynomial Basis Vector Generation
+
+
+## Overview
+Polynomial Basis Vector Generation constructs the explicit monomial basis vector for a given spatial point and polynomial degree. It serves as the foundational step for the Basis Transform for Trivariate Polynomials, enabling the conversion of B-spline coefficients into a form suitable for efficient root finding and volume compositing. Unlike methods that store full polynomial descriptions, this method generates the basis vector on-the-fly or caches it, avoiding the memory overhead of storing every single polynomial's coefficients explicitly. It is distinct from the Basis Matrix Generation variant, which aggregates these vectors into a matrix structure for batch processing.
+
+## How it works
+The method takes a polynomial degree and a spatial point (implicitly or explicitly) to generate a vector of monomial terms. The specific monomials included depend strictly on the degree.
+
+**Inputs:**
+- `degree`: Integer specifying the polynomial degree. Supported values are 0, 1, and 2 [S1, unofficial].
+- `point`: A spatial coordinate $(x, y, z)$. Note: The source implementation computes the basis vector size based on the first point but the content of the vector depends on the degree. The source code snippet implies the vector content is fixed for a given degree regardless of the specific point coordinates, as it lists specific terms like $x, y, z$ [S1, unofficial].
+
+**Outputs:**
+- `b`: A `std::vector` (or equivalent array) containing the monomial basis elements.
+
+**Data Structures:**
+- The basis vector `b` is a dynamic array of floating-point numbers.
+- For degree $d$, the size of `b` is determined by the number of unique monomials of degree $\le d$ in 3D.
+
+**Steps:**
+1. Check the `degree`.
+2. If `degree` is 0:
+   - Initialize `b` with a single element: $[1]$.
+3. If `degree` is 1:
+   - Initialize `b` with 4 elements: $[1, x, y, z]$.
+4. If `degree` is 2:
+   - Initialize `b` with 10 elements: $[1, x, y, z, xy, xz, yz, x^2, y^2, z^2]$.
+5. Return `b`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def polynomial_basis_vector(degree, x, y, z):
+    """
+    Generates the polynomial basis vector for a given degree and point (x,y,z).
+    Based on [S1, unofficial].
+    """
+    if degree == 0:
+        return [1.0]
+    elif degree == 1:
+        return [1.0, x, y, z]
+    elif degree == 2:
+        return [1.0, x, y, z, x*y, x*z, y*z, x*x, y*y, z*z]
+    else:
+        # Not given in the sources. 
+        # Typically, higher degrees would include mixed terms like x^2*y, etc.
+        raise ValueError("Degree must be 0, 1, or 2")
+```
+
+**Parameters:**
+- `degree`: 0, 1, or 2 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Degrees higher than 2 are not supported in the provided source [S1, unofficial].
+- Precision issues may arise if $x, y, z$ are very large or very small, affecting the magnitude of higher-order terms like $z^2$ or $xyz$.
+
+## Subtopics
+
+### Basis Matrix Generation
+This variant aggregates individual basis vectors into a matrix. It computes the basis vector size by calling `polynomial_basis_vector` with degree 2 on the first point $P(0)$ [S1, unofficial]. It initializes a basis matrix $B$ of size $(P.rows(), bv.size())$ with zeros [S1, unofficial]. For each point $P(i)$, it computes its basis vector $bv$ and assigns it to row $i$ of $B$ [S1, unofficial]. This allows for batch operations on multiple points.
+
+## Operating characteristics
+**Time Complexity:**
+- $O(1)$ per point for degree 0, 1, or 2, as the number of terms is fixed and small (1, 4, or 10) [S1, unofficial].
+- $O(N)$ for generating a matrix for $N$ points.
+
+**Memory Complexity:**
+- $O(1)$ per point for the vector.
+- $O(N \times M)$ for the matrix, where $M$ is the basis vector size (10 for degree 2) [S1, unofficial].
+
+**Strengths:**
+- Simple and fast generation of basis terms.
+- Minimal memory overhead for individual vectors.
+
+**Limitations:**
+- Only supports degrees 0, 1, and 2 [S1, unofficial].
+- Does not handle higher-order polynomials.
+
+**When to use:**
+- When using B-spline or Bernstein basis transformations that require explicit monomial evaluation for low-degree polynomials.
+
+**When not to use:**
+- When higher-degree polynomials are required.
+- When memory is extremely constrained and on-the-fly computation is preferred over caching.
+
+## Background
+This method is part of the marching tets reconstruction pipeline, specifically within the context of volume rendering and direct volume ray casting. It is used to transform polynomial bases to enable efficient root finding and composition. The implementation is found in the `marchingtets-reconstruction` repository.
+
+## Sources
+[S1] mwrazam/marchingtets-reconstruction, https://github.com/mwrazam/marchingtets-reconstruction, fetched 2026-10-27 (unofficial)

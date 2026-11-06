@@ -1,0 +1,343 @@
+Desktop/Android/HTML5/iOS Java game development framework - Adding a new noise generation class  by trietng · Pull Request #7584 · libgdx/libgdx
+
+Adding a new noise generation class by trietng · Pull Request #7584 · libgdx/libgdx · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+trietng
+commented
+Feb 1, 2025
+Copy link
+Copy Markdown
+I added a new noise generator, FastNoiseLite, to the math module. The imported library is nearly identical to the original Java port excepts for some refactoring and formatting changes. There is also one new method named getNoise1D, which is just a wrapper for getNoise2D(x, 0.0f).
+Some relevant information on FastNoiseLite:
+FastNoiseLite uses the OpenSimplex2 as the default noise generation algorithm, which is pattern-free for all use cases.
+FastNoiseLite has been included in the Godot game engine since 2022.
+trietng
+added 3 commits
+February 1, 2025 17:36
+Add a FastNoiseLite implementation
+db22495
+Update syntax formatting
+bae4196
+Add missing include
+c51830d
+trietng
+changed the title
+Adding new a noise generation class
+Adding a new noise generation class
+Feb 1, 2025
+tommyettinger
+reviewed
+Feb 2, 2025
+View reviewed changes
+tommyettinger
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+As much as I have looked over this today, I don't feel like I can approve this or request specific changes yet. This is a really large file. I used to use a similarly massive file derived from the v1 of FastNoise, and extended in bits and pieces over the years. It was not a great way to work. My current approach for both of my active noise-related codebases (SquidSquad and cringe) is to have a shared interface or abstract class that all noise algorithms can implement or extend (including user-added ones). In cringe, there's a good example in how the abstract class RawNoise provides a skeletal basis for single-octave noise, and the ContinuousNoise class wraps another RawNoise to provide multiple octaves, FBM/ridged/billow/domain-warp, and so on when noise is requested. Simplex noise has one class, Perlin noise has another class, OpenSimplex2 has two classes (the fast kind and the smooth kind), etc. SquidSquad uses a similar approach (using an INoise interface instead of RawNoise), and also has alternatives to ContinuousNoise, like one that produces radially symmetrical noise loops.
+My noise code typically supports 1D through 6D noise, unless a particular algorithm has no working version for some dimensions. For example, OpenSimplex2 will probably never have 5D or 6D versions, because the math gets vastly more complex as dimension goes up; some generators are at least theoretically capable of producing noise in arbitrary dimensions without changing code, and though every type of noise gets slower as dimension goes up, they do so at different rates. All of my code for the last 4 years or so strongly emphasizes serialization, because I have seen how much of a problem this can be in other codebases. My noise code in particular has had some tricky changes needed to handle serializing generators wrapped by other generators; I know this works in SquidSquad, but I need to see if I made the changes to cringe as well. I can't say my approach is strictly better; it is probably slower on some tasks at the moment, and it doesn't offer identical features. But, it can be extended by users, each generator is in a manageable file, and it supports 4D, 5D, and 6D noise. I'd love to show off what 5D noise can do, but that's for another time.
+Mostly, my concerns are about the implementation in libGDX being treated as official and so becoming more widely used, but also being impossible to extend and inflexible. Adding a small interface would help, but FastNoiseLite is organized as a very, very large API surface for one class. This is going to require some careful thinking about how we expect the class to be used, or not used in the case of its presence in MathUtils.
+Comment thread
+gdx/src/com/badlogic/gdx/math/FastNoiseLite.java
+coord.y += vy * warpAmp;
+coord.z += vz * warpAmp;
+}
+}
+tommyettinger
+Feb 2, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+2353 lines in one file is a bit much to review! FastNoiseLite looks well-designed at first glance.
+I like that domain warp is a first-class citizen.
+I like that it's using different increments by primes per dimension, that's a good speed-up technique.
+I'm not sure about the random vectors.
+OpenSimplex2 doesn't use randomly-selected gradient vectors, though I'm not entirely sure what it is using. It looks like at least one regular polyhedron in 3D, though; there are 48 vertices following a pattern in the OpenSimplex2 source.
+Other approaches I've seen have used a Fibonacci spiral to evenly distribute an arbitrary number of vertices over a sphere in 3D.
+I don't like that it's limited to 1D, 2D, and 3D, especially because OpenSimplex2, Perlin Noise, Cellular Noise, ValueCubic, and Value noise all support 4D noise (it's just sometimes quite a lot of copy-paste to support with some!).
+I really don't like that this can't be extended at all by users.
+It uses enums to limit and validate user choices, but those also make it impossible to extend.
+Godot employs a Noise interface that FastNoiseLite extends, making their approach user-extensible, but the approach here in Java isn't.
+I'll probably employ bits and pieces of this code in my own noise libraries, like the prime increment technique. I already use different increments per-axis for value noise, and ensuring that the increments are all prime (or just don't share any common factors) might help.
+I'm also rather certain that we don't want any noise code in MathUtils. Many games don't ever use or need continuous noise (especially on the CPU), and if it's an initialized static variable in MathUtils, then I believe ProGuard won't be able to ignore it, and it will have to obfuscate 2353 likely-unused lines and put them in the JAR anyway... It would be safe to have a static initialized variable in FastNoiseLite, just moved from MathUtils to here. If FastNoiseLite isn't imported (and ProGuard removes unused code), then there's no extra cost in that case.
+trietng
+Feb 2, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+2353 lines of code might look like a lot but it is actually maybe like half of that. The code is just incredibly repeatitive and I don't think there is a way around it without breaking it into 10-20 more methods.
+4D noise is nice to have, although its usage might be niche though. Modifying FastNoiseLite to support 4D though is an entirely different story. I'm sure they (the original authors) didn't include it for a reason that's beyond me.
+I modified the code to be more in line with your suggestion. Now the FastNoiseLite class inherits from a Noise interface, which is intended for any user that wants to roll their own noise generator.
+By the way another sampling technique that I've found to be very handy to have in any game development framework is Poisson disk sampling. I did play around with procedural generation and one of the steps, after using Simplex noise that is, does require the usage of this particular sampling algorithm. The step in question is spawning foilage on the generated terrain.
+Comment thread
+gdx/src/com/badlogic/gdx/math/FastNoiseLite.java
+-0.6734383991f, 0.7392433447f, 0.639412098f, -0.7688642071f, 0.9211571421f, 0.3891908523f, -0.146637214f, -0.9891903394f,
+-0.782318098f, 0.6228791163f, -0.5039610839f, -0.8637263605f, -0.7743120191f, -0.6328039957f,};
+private static final float[] Gradients3D = {0, 1, 1, 0, 0, -1, 1, 0, 0, 1, -1, 0, 0, -1, -1, 0, 1, 0, 1, 0, -1, 0, 1, 0, 1, 0,
+tommyettinger
+Feb 2, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Oh, I was confused about Gradients3D vs. RandVecs3D. The gradients are the centers of the 12 edges of a cube, repeated several times but not completely (the section 1, 0, 1, 0, -1, 0, 1, 0, 1, 0, -1, 0, -1, 0, -1, 0, 1, 1, 0, 0, -1, 1, 0, 0, 1, -1, 0, 0, -1, -1, 0, 0, is repeated once less than the first four vertices). This is different from what OpenSimplex2 has done for the last four years! It's hard to tell what effect the gradient vectors have without seeing a preview with those very regular cube-edge vectors vs. well-distributed quasi-random 3D vectors vs. another polyhedron (I have used a rhombic triacontahedron's vertices before; that and a pentakis dodecahedron each have 32 vertices, so their vertices can be repeated without losing any to truncation). It's entirely possible there's no problem with these that humans can see. Analyzing noise in frequency space with an FFT is fun though, if you have an interesting definition of "fun!" That's where I'd expect to notice any quirks.
+trietng
+Feb 2, 2025
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Not sure if I can do any verification on this lol. I'm a CS major, not a math major (unfortunately). Like I mentioned in the PR comment, this is lifted straight from the original Java port of FastNoiseLite. Not a single number or math operation was changed.
+I'm just interested in having noise generation in libgdx since I noticed that it was lacking compared to its counterparts like Godot or Unity. And I believe noise generation is commonly used in a lot of games that have procedural generation like Minecraft, etc.
+Comment thread
+gdx/src/com/badlogic/gdx/math/FastNoiseLite.java
+* @param x X coordinate
+* @return noise output bounded between -1...1 */
+public float getNoise1D (float x) {
+return getNoise2D(x, 0.0f);
+tommyettinger
+Feb 2, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+There will be noticeable visual artifacts if using this with one octave of Perlin noise, and probably some artifacts with more Perlin octaves. At every integer grid point in 2D, single-octave Perlin evaluates to 0, but in 1D this is much more noticeable because rotations can't hide how regular it is. I am not sure how this affects OpenSimplex2 other than the frequency will be different from the expected one for Perlin, and it probably won't be moving along a grid-aligned path.
+tommyettinger
+Feb 2, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+For 1D noise, I have generally had better luck using a dedicated algorithm. Some of these are really extremely simple! This one isn't as simple, but it has extraordinarily smooth changes in direction. It's related to ValueCubic here.
+trietng
+Feb 2, 2025
+Copy link
+Copy Markdown
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I believe this is also the approach taken by Godot. Using an entirely different algorithm for just getNoise1D would complicate the API interface, so it's this or removing the 1D generation entirely.
+Comment thread
+gdx/src/com/badlogic/gdx/math/FastNoiseLite.java
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+gdx/res/com/badlogic/gdx.gwt.xml
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Update code so that the FastNoiseLite is now inherited from a Noise i…
+…
+a8134d9
+```
+…nterface; remove noise from MathUtils
+```
+obigu
+added
+the
+math
+label
+Feb 24, 2025
+tommyettinger
+reviewed
+Sep 7, 2025
+View reviewed changes
+tommyettinger
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'm not entirely sure if I want to approve a canonical noise for libGDX when none of the 3rd-party solutions seem to agree on... anything... but all do quite a lot more than this does. This can't do any 4D noise, which is useful both for 3D shapes that move over time, and 2D tiling textures using the noise4d(sin(x), cos(x), sin(y), cos(y)) trick. FastNoiseLite is basically standard now for various game engines/frameworks, but I think it supports 4D noise also... There's a bunch of oddities in the port here, mostly minor. It gets hard to maintain another 2K lines of source code if they weren't written in Java in the first place, and no one exactly understands how they work.
+OpenSimplex is an interesting algorithm, but its patent-free status hasn't mattered for several years now that Simplex noise has had its patent expire without renewal, and it's considerably slower and more complex in 3D than Simplex. Even the name is a misnomer in 3D; I don't think it involves a tetrahedron (the 3D simplex shape) at all...
+I think maybe a dependency on Joise would make more sense for user projects than incorporating parts of OpenSimplexNoise. I have my own libraries that provide noise (cringe and SquidSquad), though they also do other things. There's also my older and worse make-some-noise file, which no one should be using now probably... It's a nightmare to navigate. I think there are other projects with other goals for noise, too. Cringe and Joise both allow serialization at arbitrary points, and cringe uses libGDX Json for that as an option. Cringe and SquidSquad support OpenSimplexNoise 2 (F and S variants), as well as standard Simplex noise. It seems like there's no common interface between all these libraries, though; they all provide different features and have different APIs.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+}
+public enum FractalType {
+None, FBm, Ridged, PingPong, DomainWarpProgressive, DomainWarpIndependent
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Might as well do a little reviewing... The capitalization here seems weird, FBm isn't correct either for an acronym or a word. It's short for Fractal Brownian Motion, and other acronyms here use all capital letters for the starts of words, like ImproveXYPlanes. I'd suggest using either FBM or Fbm and sticking to it; I have no preference toward either but I don't think FBm is right at all.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+private static final float SQRT3 = 1.7320508075688772935274463415059f;
+private static final float R3 = 2.0f / 3.0f;
+private int mSeed = 1337;
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+As usual for libGDX, I think we should default to protected instead of private or especially package-private, and should be documenting fields so we understand them later. This is especially true here, since noise code is almost never easy to understand.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+calculateFractalBounding();
+}
+/** Sets octave weighting for all none DomainWarp fractal types. Keep between 0...1 to maintain -1...1 output bounding.
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Other than the typo here, where "none DomainWarp" should probably be "non-DomainWarp", I don't have the faintest idea what octave weighting is in this context. It isn't, as far as I know, a borderline-standard term like lacunarity or gain. The range restriction is definitely helpful to see documented, though.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+switch (mTransformType3D) {
+case ImproveXYPlanes: {
+float xy = x + y;
+float s2 = xy * -(float)0.211324865405187;
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+We should always be using a float literal instead of creating a double and casting it to float.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+}
+private static float fastAbs (final float f) {
+return f < 0 ? -f : f;
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This is likely slower than Math.abs(), which is already defined for floats.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+return (float)Math.sqrt(f);
+}
+private static int fastFloor (final float f) {
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+We already have fast floor, ceil, and round functions for floats defined in MathUtils, and they don't need branching.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+}
+private static float interpQuintic (final float t) {
+return t * t * t * (t * (t * 6 - 15) + 10);
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This interpolation can exceed the 0 to 1 range when passed certain less-than-1 floats. The lowest input that goes out-of-range is interpQuintic(0.99535805f) == 1.0000001f, which is surprisingly far from 1.0f. interpQuintic(243f/244f) == 1.0000002f is also true. I use return t * t * t * (t * (t * 6f - 15f) + 9.999998f); , myself, which won't exceed the boundary.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+Comment on lines
++899
+to
++902
+/*
+* --- Skew moved to switch statements before fractal evaluation --- final FNLfloat F2 = 0.5f * (SQRT3 - 1); FNLfloat s = (x
+* + y) * F2; x += s; y += s;
+*/
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+We definitely don't need this comment in... some language other than Java.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/FastNoiseLite.java
+Comment on lines
++1988
+to
++1989
+default:
+break;
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This default break isn't needed; both lines can be removed.
+Comment thread
+gdx/src/com/badlogic/gdx/math/noise/Noise.java
+import com.badlogic.gdx.math.Vector3;
+public interface Noise {
+tommyettinger
+Sep 7, 2025
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The noise interface would be nice but should probably have at least bare-minimum docs for the interface, if not the 5 methods.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+math
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

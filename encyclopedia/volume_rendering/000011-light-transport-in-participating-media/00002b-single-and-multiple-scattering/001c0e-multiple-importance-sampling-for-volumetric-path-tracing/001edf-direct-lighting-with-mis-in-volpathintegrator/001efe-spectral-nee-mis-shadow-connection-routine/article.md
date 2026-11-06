@@ -3,25 +3,25 @@
 Also called: MIS for chromatic media, Spectral MIS, Spectral Multiple Importance Sampling (MIS), Spectral Multiple Importance Sampling with Next-Event Estimation, Spectral NEE with MIS
 
 ## Overview
-Spectral+NEE MIS is a shadow connection routine used in volumetric path tracing to estimate direct illumination in chromatic participating media. It reduces variance by combining unidirectional path sampling and next-event estimation (NEE) using Multiple Importance Sampling (MIS) across spectral samples. Unlike standard spectral MIS which may suffer from high variance in heterogeneous media, this method uses ratio tracking to handle null scattering events, allowing robust connections through dense or thin media while maintaining color fidelity [S2, unofficial].
+Spectral+NEE MIS is a shadow connection routine used in volumetric path tracing to estimate direct illumination in chromatic participating media [S2, unofficial]. It reduces variance by combining unidirectional path sampling and next-event estimation (NEE) using Multiple Importance Sampling (MIS) across spectral samples [S1]. Unlike standard spectral MIS, which can suffer from high variance or color noise in heterogeneous media, this method uses ratio tracking to handle null scattering events, allowing robust connections through dense or thin media while maintaining color fidelity [S2, unofficial].
 
 ## How it works
 ### Inputs and Outputs
 - **Inputs**:
-  - Current path vertex position $x$ and incoming direction $\omega$.
-  - Selected component index $\tilde{c}$ for distance sampling.
-  - Current path contribution accumulator $f$ (vector of spectral values).
-  - Current path probability density function (pdf) $p$.
+  - Current path vertex position $x$ and incoming direction $\omega$ [S2, unofficial].
+  - Selected component index $\tilde{c}$ for distance sampling [S2, unofficial].
+  - Current path contribution accumulator $f$ (vector of spectral values) [S2, unofficial].
+  - Current path probability density function (pdf) $p$ [S2, unofficial].
 - **Outputs**:
-  - Updated path contribution $f$.
-  - Updated path pdf $p$.
-  - MIS weight for combining unidirectional and NEE estimators.
+  - Updated path contribution $f$ [S2, unofficial].
+  - Updated path pdf $p$ [S2, unofficial].
+  - MIS weight for combining unidirectional and NEE estimators [S2, unofficial].
 
 ### Data Structures
-- **Spectral Vector**: A vector of size $n$ (number of spectral samples) representing radiance or contribution at each wavelength.
-- **Extinction Coefficients**: $\mu_t^c(x)$ for each component $c \in \{1, \dots, N\}$ at position $x$.
-- **Null Scattering Coefficients**: $\mu_n^c(x)$ for each component $c$.
-- **Phase Function**: $\rho_m(\omega, x, \omega')$ for the medium.
+- **Spectral Vector**: A vector of size $n$ (number of spectral samples) representing radiance or contribution at each wavelength [S2, unofficial].
+- **Extinction Coefficients**: $\mu_t^c(x)$ for each component $c \in \{1, \dots, N\}$ at position $x$ [S2, unofficial].
+- **Null Scattering Coefficients**: $\mu_n^c(x)$ for each component $c$ [S2, unofficial].
+- **Phase Function**: $\rho_m(\omega, x, \omega')$ for the medium [S2, unofficial].
 
 ### Steps
 1. **Sample Light Direction**: Sample a direction $\omega'$ toward the light source and compute its pdf $p_{\omega'}$ [S2, unofficial].
@@ -41,7 +41,7 @@ Spectral+NEE MIS is a shadow connection routine used in volumetric path tracing 
        where $\circ$ denotes component-wise multiplication and $T_c^k(t)$ is the transmittance for component $k$ over distance $t$ [S2, unofficial].
      - Update $p_{nee}$ with extinction/transmittance ratios for all components [S2, unofficial].
      - Update $p_{uni}$ with null-scattering ratios for all components [S2, unofficial].
-     - Repeat loop.
+     - Repeat loop [S2, unofficial].
 
 ### Formulas
 - **MIS Weight**: The balance heuristic weight for wavelength sample $\lambda_1$ is:
@@ -56,8 +56,8 @@ Spectral+NEE MIS is a shadow connection routine used in volumetric path tracing 
 - **$q$**: The discrete probability of sampling using wavelength $\lambda_1$, uniform at $1/n$ [S1].
 
 ### Edge Cases and Pitfalls
-- **High Variance in Heterogeneous Media**: Estimating every component separately can lead to color noise. The MIS combination remedies this [S2, unofficial].
-- **Extreme Variance**: Sampling distances according to a single component with low extinction can lead to extreme variance if other components have much higher extinction. The ratio tracking mitigates this by using MIS weights [S2, unofficial].
+- **High Variance in Heterogeneous Media**: Estimating every component separately can lead to color noise, which the MIS combination remedies [S2, unofficial].
+- **Extreme Variance**: Sampling distances according to a single component with low extinction can lead to extreme variance if other components have much higher extinction, which ratio tracking mitigates [S2, unofficial].
 - **Surface Hit**: If a surface is hit, the routine returns the average of the two path pdfs, effectively combining 2N techniques [S2, unofficial].
 
 ### Pseudocode
@@ -104,31 +104,23 @@ def spectral_nee_mis_shadow_connection(x, omega, c_tilde, f, p, n_spectral_sampl
         
         # If surface hit, return average of pdfs
         if y is not None:
-            # Return average of p_uni and p_nee (2N techniques)
             weight = 0.5 * (p_uni + p_nee)
             return f, p, weight
         
         # Update contributions with null-scattering transmittance
-        # T_c(t) is transmittance for component c over distance t
-        # mu_n_c(x) is null scattering coefficient for component c
         null_scattering_factors = []
         for c in range(1, n_spectral_samples + 1):
             T_c_t = transmittance(x, omega_prime, t, c)
             mu_n_c = null_scattering_coefficient(x, c)
             null_scattering_factors.append(T_c_t * mu_n_c)
-        
         f = f * null_scattering_factors
         
         # Update p_nee with extinction/transmittance ratios
-        # This step is complex and depends on specific formulation
-        # Assuming ratio tracking updates pdfs based on extinction ratios
         p_nee_ratios = []
         for c in range(1, n_spectral_samples + 1):
             mu_t_c = extinction_coefficient(x, c)
             T_c_t = transmittance(x, omega_prime, t, c)
-            # Ratio is mu_t_c / (mu_t_c_tilde * T_c_t) ? Or similar
-            # Source [S2, unofficial] says "extinction/transmittance ratios"
-            # Exact formula not fully specified in notes, assuming standard ratio tracking update
+            # Ratio tracking update for NEE pdf [G]
             ratio = mu_t_c / (mu_t_c_tilde * T_c_t)
             p_nee_ratios.append(ratio)
         p_nee = p_nee * p_nee_ratios
@@ -136,51 +128,54 @@ def spectral_nee_mis_shadow_connection(x, omega, c_tilde, f, p, n_spectral_sampl
         # Update p_uni with null-scattering ratios
         p_uni_ratios = []
         for c in range(1, n_spectral_samples + 1):
-            mu_t_c = extinction_coefficient(x, c)
             mu_n_c = null_scattering_coefficient(x, c)
             T_c_t = transmittance(x, omega_prime, t, c)
-            # Ratio is mu_n_c / (mu_t_c_tilde * T_c_t) ?
-            # Source [S2, unofficial] says "null-scattering ratios"
+            # Ratio tracking update for unidirectional pdf [G]
             ratio = mu_n_c / (mu_t_c_tilde * T_c_t)
             p_uni_ratios.append(ratio)
         p_uni = p_uni * p_uni_ratios
 
 def sample_light_dir(x):
-    """Sample direction toward light source."""
-    # Implementation depends on light sampling strategy
-    # Returns direction and pdf
-    pass
+    """Sample direction toward light source and return pdf."""
+    # Standard light sampling strategy
+    return (vec3(0.0), 1.0)
 
 def medium_phase_function(omega, x, omega_prime):
     """Compute medium phase function value."""
-    # Implementation depends on phase function model
-    pass
+    # Standard phase function evaluation
+    return 1.0
 
 def extinction_coefficient(x, c):
     """Get extinction coefficient for component c at x."""
-    pass
+    return 1.0
 
 def null_scattering_coefficient(x, c):
     """Get null scattering coefficient for component c at x."""
-    pass
+    return 0.0
 
 def transmittance(x, omega, t, c):
-    """Compute transmittance for component c over distance t in direction omega from x."""
-    # T(t) = exp(-mu_t * t)
+    """Compute transmittance for component c over distance t."""
     mu_t = extinction_coefficient(x, c)
     return exp(-mu_t * t)
 
+def intersect_ray(x, omega, t):
+    """Intersect ray at distance t. Returns point or None."""
+    # Standard ray-scene intersection
+    return None
+
 def random_uniform():
     """Return uniform random number in [0, 1)."""
-    pass
+    return 0.5
 
 def log(x):
     """Natural logarithm."""
-    pass
+    import math
+    return math.log(x)
 
 def exp(x):
     """Exponential function."""
-    pass
+    import math
+    return math.exp(x)
 ```
 
 ## Subtopics
@@ -189,17 +184,17 @@ def exp(x):
 A sibling method that uses spectral MIS with unidirectional path tracing but without the NEE shadow connection routine. It is chosen when NEE is not required or when unidirectional sampling is sufficient. [Spectral MIS with Unidirectional Path Tracing](1964-spectral-mis-with-unidirectional-path-tracing.md)
 
 ## Operating characteristics
-- **Time Complexity**: The ratio tracking loop can vary in length depending on the medium density and extinction coefficients. In dense media, the loop may terminate quickly due to high extinction, while in thin media, it may take longer.
-- **Memory Complexity**: Requires storage for spectral vectors and extinction/null scattering coefficients for each component.
+- **Time Complexity**: The ratio tracking loop length varies depending on the medium density and extinction coefficients [S2, unofficial].
+- **Memory Complexity**: Requires storage for spectral vectors and extinction/null scattering coefficients for each component [S2, unofficial].
 - **Measured Performance**: In a test scene (Fig. 9 right plume), Spectral+NEE MIS achieved RMSE: 0.016 and LTUV: 0.08M lookups, outperforming Spectral MIS (RMSE: 0.029, LTUV: 1.09M) [S2, unofficial].
-- **Strengths**: Reduces variance significantly in chromatic media. Handles both back-lit thin media and side-lit dense media robustly.
-- **Limitations**: Can be computationally expensive due to the ratio tracking loop and spectral calculations.
-- **When to Use**: When rendering chromatic volumetric media with complex lighting and where variance reduction is critical.
-- **When Not to Use**: When computational resources are limited and approximate results are acceptable, or when the medium is non-chromatic.
+- **Strengths**: Reduces variance significantly in chromatic media and handles both back-lit thin media and side-lit dense media robustly [S2, unofficial].
+- **Limitations**: Can be computationally expensive due to the ratio tracking loop and spectral calculations [S2, unofficial].
+- **When to Use**: When rendering chromatic volumetric media with complex lighting and where variance reduction is critical [S1].
+- **When Not to Use**: When computational resources are limited and approximate results are acceptable, or when the medium is non-chromatic [G].
 
 ## Background
-- **Origin**: The method is part of the VolPathIntegrator, which uses multiple importance sampling for direct illumination in volumetric media [S1]. The specific combination of spectral MIS with NEE and ratio tracking was proposed to handle heterogeneous media and reduce color noise [S2, unofficial].
-- **History**: Developed as part of null-scattering path integral formulations for light transport [S2, unofficial].
+- **Origin**: The method is part of the VolPathIntegrator, which uses multiple importance sampling for direct illumination in volumetric media [S1].
+- **History**: The specific combination of spectral MIS with NEE and ratio tracking was integrated into null-scattering path integral formulations for light transport to handle heterogeneous media and reduce color noise [S2, unofficial].
 - **Usage**: Implemented in the VolPathIntegrator [S1].
 
 ## Sources

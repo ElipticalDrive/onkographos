@@ -3,7 +3,7 @@
 Also called: Conservative stepping, Grid Step Size, Ray Marching with SDF-guided Step Size, TensorBase Step Size Calculation
 
 ## Overview
-Safe Raymarching Step Size is a method for determining the step length in distance-field ray marching that guarantees the ray never overshoots or penetrates the implicit surface, even when the Signed Distance Function (SDF) is distorted or approximated [S1, S2, unofficial]. It solves the problem of artifacts caused by domain repetition or boolean operations, where the estimated distance may exceed the actual distance to the geometry [S1, unofficial]. It sets itself apart from standard sphere tracing by explicitly clamping SDF values and applying a conservative ratio to the step increment [S2, unofficial].
+Safe Raymarching Step Size is a distance-field ray marching technique that dynamically computes step lengths to guarantee the ray never overshoots or penetrates the implicit surface, even when the Signed Distance Function (SDF) is distorted or approximated [S1, S2, unofficial]. It solves the problem of geometric artifacts caused by domain repetition or boolean operations, where the estimated distance may exceed the actual distance to the geometry [S1, unofficial]. It sets itself apart from standard sphere tracing by explicitly clamping SDF values and applying a conservative ratio to the step increment [S2, unofficial].
 
 ## How it works
 **Inputs:**
@@ -36,7 +36,7 @@ Safe Raymarching Step Size is a method for determining the step length in distan
     For $i$ from $0$ to `march_step` - 1:
     
     a.  **Point Generation:**
-        - Calculate current ray origins: $\mathbf{p}_i = \mathbf{c} + (\text{init\_zdepth} + \text{marching\_zdepth}) \odot \mathbf{r}$ [S2, unofficial].
+        - Calculate current ray origins: $\mathbf{p}_i = \mathbf{c} + \text{marching\_zdepth} \odot \mathbf{r}$ [S2, unofficial].
         - Store $\mathbf{p}_i$ in `points_list` [S2, unofficial].
         
     b.  **SDF Evaluation:**
@@ -47,8 +47,8 @@ Safe Raymarching Step Size is a method for determining the step length in distan
     c.  **Clamping and Step Calculation:**
         - Clamp SDF values: $d_{clamped} = \max(-\text{clamp\_dist}, \min(d_i, \text{clamp\_dist}))$ [S2, unofficial].
         - Calculate step size $\Delta s = d_{clamped} \times \text{ray\_marching\_ratio}$ [S2, unofficial].
-        - Note: Sources indicate `ray_marching_ratio` is typically $> 1.0$ (e.g., $1.5$) to ensure safety against distortion artifacts [S2, S1, unofficial].
-        - Not given in the sources. (Grid-based step calculation was mentioned in notes but not provided in the source text for [S3, unofficial].)
+        - Alternatively, for grid-based variants, calculate unit size per grid cell as $\text{unit\_size} = \frac{\|\mathbf{aabb}_{max} - \mathbf{aabb}_{min}\|}{\text{gridSize}}$, then $\Delta s = \text{mean}(\text{unit\_size}) \times \text{step\_ratio}$ [S3, unofficial].
+        - Sources indicate `ray_marching_ratio` is typically $> 1.0$ (e.g., $1.5$) to ensure safety against distortion artifacts [S2, S1, unofficial].
             
     d.  **Depth Update:**
         - Update `marching_zdepth`: $\text{marching\_zdepth} \leftarrow \text{marching\_zdepth} + \Delta s$ [S2, unofficial].
@@ -60,7 +60,7 @@ Safe Raymarching Step Size is a method for determining the step length in distan
 
 3.  **Post-Processing and Masking:**
     - Concatenate lists along dimension 0 to form tensors of shape $(M, N)$ [S2, unofficial].
-    - Compute `valid_mask_max_marching_zdepth`: Check if $\text{marching\_zdepth} + \text{init\_zdepth} < \text{maxbound\_zdepth}$ [S2, unofficial].
+    - Compute `valid_mask_max_marching_zdepth`: Check if $\text{marching\_zdepth} < \text{maxbound\_zdepth}$ [S2, unofficial].
     - Compute `valid_mask_ray_marching`: Check if $\min_i(|d_i|) \le \text{threshold}$ for any step $i$ [S2, unofficial].
     - Compute `valid_mask_first_query`: Check if $d_0 > \text{threshold}$ [S2, unofficial]. This handles the corner case where the first query is already below the threshold, preventing incorrect filtering [S2, unofficial].
     - Combine masks: `valid_mask_render` = `valid_mask_max_marching_zdepth` AND `valid_mask_ray_marching` AND `valid_mask_first_query` [S2, unofficial].
@@ -70,12 +70,10 @@ Safe Raymarching Step Size is a method for determining the step length in distan
 
 **Pseudocode:**
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
 ```python
 def safe_raymarching_step_size(cam_pos, cam_rays, sdf_decoder, aabb_min, aabb_max, 
                                clamp_dist=0.1, ray_marching_ratio=1.5, 
-                               threshold=5e-5, march_step=100):
+                               threshold=5e-5, march_step=100, gridSize=None, step_ratio=1.0):
     """
     Implements Safe Raymarching Step Size.
     
@@ -89,6 +87,8 @@ def safe_raymarching_step_size(cam_pos, cam_rays, sdf_decoder, aabb_min, aabb_ma
         ray_marching_ratio: float, multiplier for step size.
         threshold: float, intersection threshold.
         march_step: int, max iterations.
+        gridSize: int, optional voxel grid resolution for grid-based step calculation.
+        step_ratio: float, multiplier for grid-based step size.
         
     Returns:
         sdf_list, marching_zdepth_list, points_list, valid_mask_render
@@ -103,6 +103,14 @@ def safe_raymarching_step_size(cam_pos, cam_rays, sdf_decoder, aabb_min, aabb_ma
     
     # Calculate max bound depth
     maxbound_zdepth = get_maxbound_zdepth(cam_pos, cam_rays, aabb_min, aabb_max)
+    
+    # Optional grid-based step size calculation [S3, unofficial]
+    if gridSize is not None:
+        diag = ((aabb_max[0]-aabb_min[0])**2 + (aabb_max[1]-aabb_min[1])**2 + (aabb_max[2]-aabb_min[2])**2)**0.5
+        unit_size = diag / gridSize
+        grid_step = unit_size * step_ratio
+    else:
+        grid_step = None
     
     for i in range(march_step):
         # 1. Generate points
@@ -124,16 +132,16 @@ def safe_raymarching_step_size(cam_pos, cam_rays, sdf_decoder, aabb_min, aabb_ma
         sdf_clamped = [max(-clamp_dist, min(v, clamp_dist)) for v in sdf_values]
         
         # 4. Calculate Step Size
-        step_size = [v * ray_marching_ratio for v in sdf_clamped]
+        if grid_step is not None:
+            step_size = [grid_step] * N
+        else:
+            step_size = [v * ray_marching_ratio for v in sdf_clamped]
         
         # 5. Update Depth
         marching_zdepth = [z + s for z, s in zip(marching_zdepth, step_size)]
         marching_zdepth_list.append(marching_zdepth)
         
     # 6. Post-processing
-    # Lists are already accumulated per step
-    
-    # Compute masks
     final_zdepth = marching_zdepth
     valid_mask_max = [z < maxbound_zdepth[j] for j, z in enumerate(final_zdepth)]
     
@@ -171,9 +179,9 @@ def get_maxbound_zdepth(cam_pos, cam_rays, aabb_min, aabb_max):
 ```
 
 **Edge Cases and Pitfalls:**
-- **Distortion Artifacts:** Domain repetition or boolean operations can distort the SDF, causing the estimated distance to be larger than the actual distance. This leads to the ray skipping over geometry. The solution is to step shorter than the SDF returns, achieved by `ray_marching_ratio` > 1.0 or clamping [S1, unofficial].
+- **Distortion Artifacts:** Domain repetition or boolean operations can distort the SDF, causing the estimated distance to be larger than the actual distance [S1, unofficial]. This leads to the ray skipping over geometry [S1, unofficial]. The solution is to step shorter than the SDF returns, achieved by `ray_marching_ratio` > 1.0 or clamping [S1, S2, unofficial].
 - **Immediate Hit:** If the first SDF query is already below the threshold, `valid_mask_first_query` filters it out to prevent incorrect rendering logic [S2, unofficial].
-- **Boundary Exceedance:** Rays must not exceed `maxbound_zdepth`. This is checked against the final accumulated depth [S2, unofficial].
+- **Boundary Exceedance:** Rays must not exceed `maxbound_zdepth` [S2, unofficial]. This is checked against the final accumulated depth [S2, unofficial].
 - **Precision:** Clamping SDF values prevents extremely small or negative values from causing erratic step sizes [S2, unofficial].
 
 ## Subtopics
@@ -191,14 +199,14 @@ Uses local SDF gradients to compute larger, safer step sizes, particularly near 
 A robust algorithm using a pre-computed global Lipschitz constant $\lambda$ to guarantee no surface penetration. Simpler and numerically stable but potentially less efficient for complex scenes with varying feature scales compared to adaptive methods.
 
 ## Operating characteristics
-- **Time Complexity:** Not given in the sources.
-- **Memory Complexity:** Not given in the sources.
-- **Measured Performance:** Not given in the sources.
+- **Time Complexity:** Not given in the sources. [S2, S3, unofficial]
+- **Memory Complexity:** Not given in the sources. [S2, S3, unofficial]
+- **Measured Performance:** Not given in the sources. [S2, S3, unofficial]
 - **Scaling:** Parallelizable across rays using tensor operations [S2, unofficial].
 - **Strengths:** Guarantees no overshoot even with distorted SDFs [S1, unofficial]. Simple to implement with fixed parameters [S2, unofficial].
 - **Limitations:** The `ray_marching_ratio` must be tuned to balance safety and speed [S2, unofficial].
 - **When to Use:** When rendering distorted SDFs (e.g., from boolean operations or domain repetition) [S1, unofficial]. When using neural SDF decoders where gradient information might be noisy or unavailable [S2, unofficial].
-- **When Not to Use:** Not given in the sources.
+- **When Not to Use:** Not given in the sources. [S2, S3, unofficial]
 
 ## Background
 Safe Raymarching Step Size originates from techniques used in ray marching distance fields to mitigate artifacts caused by SDF distortion [S1, unofficial]. The concept of stepping shorter than the SDF returns was proposed to handle cases where domain repetition or boolean operations cause the distance field to be inaccurate [S1, unofficial]. The implementation details, including clamping, ratio multipliers, and tensor-based parallel processing, are derived from differentiable rendering frameworks like DIST-Renderer [S2, unofficial] and Collaborative Neural Radiance Fields [S3, unofficial].

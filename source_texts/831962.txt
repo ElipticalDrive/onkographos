@@ -1,0 +1,1256 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: make the painterly viewport composite reachable, colour-correct and depth-correct (#986, #987) by klausi3D · Pull Request #999 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Sep 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Makes the painterly viewport composite actually run, and run correctly, at the shipped composite/depth_test=true default.
+Base: 5dfeb44b5b414d5f8cc2a21cdb4121fe8bab44da (origin/master at branch time).
+Risk class: R3 — every code file is R2 (renderer/shaders), but tests/ci/check_gs_pre_upscale_hook.py is on the R3 "CI deterministic-check / release-gate machinery" list in .agentic/policy.json. Design record for that placement: #996 (written during implementation, not before — disclosed, not backdated).
+Three defects, each hiding the next
+A — the composite could never load its shader. _ensure_painterly_composite_resources loaded painterly_composite.{vert,frag}.glsl from disk at runtime and passed the raw text to shader_compile_spirv_from_source. Both files begin with a Godot ShaderRD stage delimiter (#[vertex] / #[fragment]), which is not GLSL, so SPIR-V came back empty and painterly_composite_failed latched. In an exported project the res://modules/... paths do not exist at all. The correct machinery was already in the same class — the embedded PainterlyCompositeShaderRD — but its entry point _ensure_composite_resources() was never called from anywhere.
+B — the push constant was the wrong size. ERROR: This render pipeline requires (48) bytes of push constant data, supplied: (36). Where the 48 comes from: SPIRV-Reflect sizes a push-constant block as last_member.offset + RoundUp(last_member.offset + last_member.size, 16) - last_member.offset (thirdparty/spirv-reflect/spirv_reflect.c:2785-2803, SPIRV_DATA_ALIGNMENT = 16), so the block size is always rounded up to a multiple of 16. Godot adopts that reflected value verbatim (servers/rendering/rendering_device_commons.cpp:1292) and then requires an exact match (servers/rendering/rendering_device.cpp:4745). Nine floats = 36 → requirement 48.
+C — found only after A and B were fixed. With the composite finally running it wrote every pixel and still produced nothing. An instrumented build that colour-coded each discard showed 337,459 of 518,400 pixels rejected by the scene-depth occlusion test and zero pixels surviving it — including in a scene with no geometry at all, where the depth buffer holds only the clear value. The composite linearized scene depth from raw camera-projection columns (abs(proj_32 / (proj_22 + raw))) instead of the depth-corrected pair the host derives once in interfaces/gs_scene_depth_linearize.h — the header that says "ONE derivation shared by the whole-pixel composite and the per-splat raster clip". It also hardcoded a 0.0005 bias where the shared constant is GS_COMPOSITE_DEPTH_EPSILON_VIEW = 0.01, and depth-tested unconditionally, ignoring composite/depth_test.
+What changed
+Route the composite at the embedded PainterlyCompositeShaderRD, which understands the stage delimiters, ships inside the binary, and is created on RD::get_singleton() — the device that owns the viewport framebuffer. Delete the unreachable runtime loader (load_graphics_shader, its only caller), its two orphaned on-disk shader copies, and the dead duplicate resource path.
+Pad both sides of the push constant to 48 and assert it. check_gaussian_layout_sync.py now enforces the 16-byte rule on every registered push-constant struct — its own std430 engine rounds to the block's max member alignment (8 here), so it could not have seen this — and CompositePush is no longer on the deferred list.
+Move viewport_blit.glsl's scene-depth linearize / sanitize / background-detect trio and the occlusion predicate they feed into shaders/includes/gs_scene_depth_guard.glsl, with every input passed as an argument, and call it from both composites. The painterly push constant now carries depth_linearize_mul / depth_linearize_add / depth_is_orthogonal from the one host derivation, the shared epsilon, and a depth_test_enabled flag plumbed from the same setting read the compute path uses.
+GPU-001 follow-up: painterly composite bypasses the sRGB->linear source decode on the pre-upscale path — painterly splats blended as linear, then tonemapped #930's decode lands with it. Painterly output is premultiplied, display-referred, sRGB-encoded LDR and this pass always draws into the LINEAR pre-tonemap internal texture, so: unpremultiply, decode with the exact piecewise EOTF, re-premultiply. srgb_to_linear_exact moves from viewport_blit.glsl into shaders/includes/gs_srgb.glsl rather than being copied.
+The composite is gated to the pre-upscale phase, because its destination is get_internal_texture() unconditionally; in the legacy post-scene phase (forward mobile / multiview / probes) that buffer has already been consumed, so those paths keep the present-redirecting compute composite.
+Painterly renders nothing at the shipped default composite/depth_test=true: strict depth contract skips the composite (QA pin depth_test=false masks it) #987's root cause: render_painterly_or_baseline_stage never assigned raster_output.depth, while the baseline path publishes it through render_tile_fallback's out-parameter. That is why the strict scene-depth contract saw no source depth and skipped the composite at the shipped default — and why the render cache was invalidated every painterly frame (render_pipeline_stages.cpp:1906). Painterly's depth is the same normalized-linear texture both composites expand as mix(z_near, z_far, d), so it is the correct source depth.
+Pixel evidence
+Real scan Cabin in the forest.ply, 31,208 visible splats, 960x540 SubViewport with own_world_3d, Forward+, single view, RTX 3090. The rig project has no [gaussian_splatting] section, so composite/depth_test and the scene-depth policy are read at their shipped defaults; the depth_test=false rows set the setting explicitly at runtime and are labelled as such. Coverage = pixels differing from a splats-hidden reference capture taken in the same configuration. Before = base 5dfeb44b5b4, after = this branch, identical rig, same machine.
+composite/depth_test
+scene
+painterly variant
+before
+after
+delta
+true (shipped default)
+splats only
+off
+313,664
+313,664
++0
+true (shipped default)
+splats only
+on, no material (baseline fallback)
+313,664
+313,664
++0
+true (shipped default)
+splats only
+on, full material
+0
+307,242
++307,242
+true (shipped default)
+splats only
+on, strokes off
+0
+313,664
++313,664
+true (shipped default)
++ opaque mesh
+off
+305,891
+305,891
++0
+true (shipped default)
++ opaque mesh
+on, full material
+0
+306,920
++306,920
+false (explicit pin)
+splats only
+off
+313,664
+313,664
++0
+false (explicit pin)
+splats only
+on, full material
+307,242
+307,242
++0
+false (explicit pin)
++ opaque mesh
+on, full material
+308,304
+308,304
++0
+Painterly/standard luminance ratio over the shared pixel set, after: 0.8835 (splats only), 0.8855 (+ mesh).
+No regression anywhere. All twelve painterly-off captures are bit-identical before and after (max channel delta 0 over 518,400 px each), so moving viewport_blit.glsl onto the shared include does not move the shipped compute composite.
+Colour round trip, proven two ways
+Numerically (2,008 cases — 8 fixed + 2,000 random, seed 20260916, float64):
+new shader expression vs the reference transform srgb_to_linear_exact(straight) * alpha: max abs error 3.3e-16
+vs viewport_blit.glsl's shipped source_decode_srgb path on the same inputs: max abs error 1.1e-16
+vs the OLD painterly expression: max abs error 0.271 — the defect was real, not cosmetic
+decoding premultiplied instead of straight values is wrong by up to 88.1% relative (sRGB decode does not commute with the alpha multiply)
+the fast polynomial srgb_to_linear is off by up to 4.98 LSB after a decode→encode round trip over all 256 codes; the exact EOTF is off by 0.000 LSB. That is why the exact one is required.
+Empirically, on 313,664 real-scan pixels: painterly-with-strokes-off feeds the same tile raster texture as the standard path but through the new graphics composite instead of the shipped compute one, into the same destination and tonemapper. Mean absolute difference 0.012 / 0.012 / 0.027 LSB (R/G/B), max 1 LSB, and zero pixels differ by more than 1 LSB.
+Guards and tests
+python tests/ci/run_module_tests.py --guard-only — 0 guard failed / FAILED ( lines, "Guard-only mode complete" (run twice).
+python -m unittest discover -s tests/agentic — 132 tests, OK.
+python tests/runtime/run_runtime_validation.py --profile streaming-gpu-ci --skip-cpp --fail-on-skip — total=3 passed=3 failed=0 skipped=0.
+python tests/ci/check_gs_pre_upscale_hook.py --self-test — 25/25 reverting mutations flagged (14 pre-existing + 11 new). Mutation-checked, not assumed.
+check_gaussian_layout_sync.py: removing the pad from both sides is caught by the new 16-byte rule (verified by mutation, then reverted).
+Known limits
+One scene, one machine, one vendor (NVIDIA / Vulkan). Cross-vendor is a blind spot.
+The legacy post-scene phase (forward mobile, multiview, reflection probes) is reasoned about but not measured — this machine renders Forward+ single-view.
+Painterly and standard still disagree on the mesh-occlusion silhouette by ~2%: filed as Painterly and standard composites disagree on the mesh-occlusion silhouette by ~2% (depth-texture addressing, not the shared math) #998 (depth-texture addressing, not the shared math).
+Every painterly test in this repo runs the baseline fallback because the test project has no PainterlyMaterial at all: filed as Every in-repo painterly test exercises the baseline fallback, not painterly: the test project contains no PainterlyMaterial #997. This PR does not add one; doing so belongs with the painterly test rework.
+No independent Codex review was obtained: codex exec hit its usage limit before any turn started, twice, and is unavailable until Sep 19. The review round on this PR was a /code-review high self-check by the implementer — see the review-disposition comment. The independent GPU/domain review the policy requires is still owed.
+Screenshots need human eyes — I can report the pixel counts but not judge whether the painterly image looks right.
+Refs #986
+Refs #987
+Refs #930
+Refs #996
+Refs #1000
+Refs #1001
+🤖 Generated with Claude Code
+https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+klausi3D
+and others
+added 3 commits
+September 16, 2026 21:36
+gaussian_splatting: make the painterly viewport composite reachable a…
+…
+688273d
+```
+…nd colour-correct (#986)
+
+The painterly viewport composite could not succeed on any path.
+
+Blocker A: `_ensure_painterly_composite_resources` loaded
+painterly_composite.{vert,frag}.glsl from disk at runtime and passed the
+raw text to `shader_compile_spirv_from_source`. Both files begin with a
+Godot ShaderRD stage delimiter (`#[vertex]` / `#[fragment]`), which is
+not GLSL, so the compile produced empty SPIR-V and the composite latched
+failed; in an exported project the `res://modules/...` paths do not exist
+at all. The same class already had the correct machinery -- the embedded
+`PainterlyCompositeShaderRD` built from painterly_composite.glsl -- but
+its entry point `_ensure_composite_resources()` was never called. Route
+the composite at the embedded shader, which understands the stage
+delimiters, ships inside the binary, and is created on RD::get_singleton(),
+the device that owns the viewport framebuffer. Delete the unreachable
+runtime loader, its two orphaned shader copies, and the dead duplicate
+resource path.
+
+Blocker B, hidden behind A: every draw was rejected with "requires (48)
+bytes of push constant data, supplied: (36)". SPIRV-Reflect rounds a
+push-constant block's size up to a 16-byte multiple
+(spirv_reflect.c:2785-2803, SPIRV_DATA_ALIGNMENT = 16), Godot adopts that
+as the pipeline requirement (rendering_device_commons.cpp:1292) and then
+requires an exact size match (rendering_device.cpp:4745). The nine
+payload floats are 36 bytes, so the requirement was 48. Pad both sides to
+48 and assert it. check_gaussian_layout_sync.py now enforces the 16-byte
+rule on every registered push-constant struct -- its own std430 engine
+rounds to the block's max member alignment (8 here), so it could not see
+this -- and CompositePush is no longer deferred.
+
+#930: the composite now decodes its source. Painterly output is
+premultiplied, display-referred, sRGB-encoded LDR and this pass always
+draws into the LINEAR pre-tonemap internal texture, so unpremultiply,
+decode with the exact piecewise EOTF, re-premultiply -- the same
+transform the compute composite applies under `source_decode_srgb`.
+`srgb_to_linear_exact` moves from viewport_blit.glsl into
+shaders/includes/gs_srgb.glsl instead of being copied.
+
+The composite is also gated to the pre-upscale phase, because its
+destination is `get_internal_texture()` unconditionally; in the legacy
+post-scene phase (forward mobile / multiview / probes) that buffer has
+already been consumed, so those paths keep the present-redirecting
+compute composite.
+
+Refs #986
+Refs #930
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+tests: guard the painterly composite's reachability and source decode (…
+…
+04003ba
+```
+…#986)
+
+Adds check class G to check_gs_pre_upscale_hook.py. All three invariants
+this change establishes are silent when lost -- the composite stops
+running, or runs in the wrong colour space, with no warning either way --
+so each gets a fail-closed anchor plus a reverting mutation in the
+checker's own self-test:
+
+  G1  the painterly composite stays gated on the pre-upscale phase; its
+      destination is get_internal_texture() unconditionally, so in the
+      legacy post-scene phase the write would land in an already-consumed
+      buffer
+  G2  its shader comes from the embedded PainterlyCompositeShaderRD, and
+      the runtime GLSL file loader / on-disk composite paths stay gone
+  G3  the decode is applied to UNPREMULTIPLIED values
+  G4  the decode is applied at all
+  G5  srgb_to_linear_exact comes from the shared include, not a local copy
+
+Self-test: 19/19 reverting mutations flagged (14 pre-existing + 5 new).
+
+Also drops the two deleted on-disk composite shaders from the generated
+shader reference.
+
+Refs #986
+Refs #930
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+gaussian_splatting: share one scene-depth guard between both composit…
+…
+21555bf
+```
+…es (#986)
+
+With the composite reachable (previous commit) it ran, wrote every pixel,
+and still produced nothing: an instrumented build colour-coding each
+discard showed 337,459 of 518,400 pixels rejected by the composite's
+scene-depth occlusion test and zero pixels surviving it -- including in a
+scene with no geometry at all, where the depth buffer holds only the
+clear value.
+
+Cause: two independently written implementations of the same test.
+painterly_composite.glsl linearized scene depth from RAW camera
+projection columns (abs(proj_32 / (proj_22 + raw))) taken straight off
+`last_camera_projection`, while the shipped compute composite uses the
+depth-CORRECTED pair the host derives once in gs_scene_depth_linearize.h
+("ONE derivation shared by the whole-pixel composite and the per-splat
+raster clip", per that header). The painterly formula never matched the
+depth buffer, so is_scene_background_depth() never recognised the clear
+value and every splat fragment was judged occluded. It also hardcoded a
+0.0005 bias where the shared constant is GS_COMPOSITE_DEPTH_EPSILON_VIEW
+= 0.01, and it depth-tested unconditionally, ignoring
+composite/depth_test.
+
+Fix: move viewport_blit.glsl's linearize / sanitize / background-detect
+trio and the occlusion predicate they feed into
+shaders/includes/gs_scene_depth_guard.glsl, with every input passed as an
+argument so the two callers keep their own push-constant layouts, and
+call it from both. The painterly push constant now carries
+depth_linearize_mul / depth_linearize_add / depth_is_orthogonal from the
+one host derivation, the shared epsilon, and a depth_test_enabled flag
+plumbed from the same gs_get_composite_depth_test_enabled() read the
+compute path uses. Still 48 bytes.
+
+Measured on 'Cabin in the forest.ply' (31,208 splats, 960x540 SubViewport,
+Forward+, RTX 3090), no [gaussian_splatting] section in project.godot so
+composite/depth_test is at its shipped default:
+
+  composite/depth_test=true, splats only     0 -> 307,242 px
+  composite/depth_test=true, + opaque mesh   0 -> 306,920 px
+  composite/depth_test=false, splats only    307,242 -> 307,242 px
+  composite/depth_test=false, + opaque mesh  308,304 -> 308,304 px
+
+Every painterly-off capture is BIT-IDENTICAL before and after (12/12
+captures, max channel delta 0), so the viewport_blit refactor does not
+move the shipped compute composite.
+
+Refs #986
+Refs #987
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+This was referenced Sep 16, 2026
+Painterly viewport composite is unreachable: runtime GLSL load can never compile, and a 36-vs-48 push-constant mismatch sits behind it
+#986
+Closed
+Painterly renders nothing at the shipped default composite/depth_test=true: strict depth contract skips the composite (QA pin depth_test=false masks it)
+#987
+Closed
+Push-constant 16-byte rule does not cover the deferred blocks (ViewportBlitPushConstant, gs_shadow_blit) — the ones most at risk
+#1000
+Open
+Painterly composite: blend_strength is a hard-wired no-op, and the pass does not assert its shader/cache device matches draw_device
+#1001
+Open
+gaussian_splatting: address review findings on the painterly composite (
+…
+ac8d1b1
+```
+#986)
+
+Review of #999 raised fifteen findings. The correctness ones:
+
+- **Orthographic fallback.** The push-constant fill derived the scene-depth
+  pair unconditionally with a hardcoded `orthogonal = false`, even in the
+  `scene_data == nullptr` branch, so an orthographic camera would get a
+  perspective derivation of an ortho matrix -- re-creating blocker C in
+  exactly the branch added to handle it. The compute composite deliberately
+  does NOT derive when scene_data is missing. Now mirrors it: derive only
+  from scene_data, and when there is none, fall back to z_near/z_far AND
+  disable the depth test. The guard only ever removes fragments it can prove
+  are occluded, so with no trustworthy depth description it must fail open,
+  never blank the frame.
+
+- **Cached render hid material edits.** #987's `raster_output.depth` fix
+  newly lets painterly frames reuse the cached render, and the reuse
+  signature has no PainterlyMaterial term -- so under a static camera a
+  material edit would not reach the screen. `_on_painterly_material_changed`
+  now invalidates the cached render. A material edit is an editor-rate
+  event, so re-rendering once beats hashing a resource that changes one
+  inspector drag at a time.
+
+- **Blank evidence surface.** A successful painterly composite left
+  `last_output_copy_attempted` / `last_output_copy_success` at false,
+  because the `!composited` block is the only place they are assigned. Every
+  QA surface saw "no copy attempted" for a frame that had just drawn a
+  fullscreen pass. It read as clean only because `copy_failed = attempted &&
+  !success` short-circuits.
+
+- **Sampler free window.** The two composite samplers are created on the
+  VIEWPORT device but were freed only inside `device_still_valid` (which
+  tests `rd`), while the tail of `_shutdown_internal` clears their RIDs
+  unconditionally -- a permanent leak in a window the composite now reaches.
+  `_free_tracked_rid` resolves each RID's own owner device, so the frees
+  move out of that branch.
+
+Guard gaps the review found in the guards this series added:
+
+- Six new anchors + six new mutations in check_gs_pre_upscale_hook.py for
+  the contracts that were fixed but unguarded: the shared scene-depth guard
+  include, the `depth_test_enabled` gate, the shared depth epsilon, the
+  shared host derivation, and the setting plumbing. Self-test now flags
+  25/25 reverting mutations (was 19/19).
+- check_gaussian_layout_sync.py records why its new 16-byte rule cannot yet
+  reach the deferred blocks (function-local structs the parser cannot read)
+  rather than leaving the gap silent. Tracked as #1000.
+
+Hygiene: regenerate docs/api/shader_reference.md with
+scripts/generate_shader_docs.py instead of hand-deleting two sections;
+delete the dead `composite_pipeline` member and its teardown; drop the now
+unused `core/io/file_access.h` include; drop the redundant `% 16`
+static_assert (the `== 48` one entails it and the guard enforces the rule);
+drop the redundant per-frame pipeline warm-up and the now-unused framebuffer
+format parameter; fix a whitespace regression in the layout guard.
+
+Declined here and filed instead: #1000 (16-byte rule coverage for the
+deferred blocks), #1001 (`blend_strength` is a hard-wired no-op; the pass
+does not assert its shader/cache device matches `draw_device`).
+
+Re-measured after these changes: every one of the sixteen coverage numbers
+is identical to the pre-review run, and all twelve painterly-off captures
+remain bit-identical to base.
+
+Refs #986
+Refs #987
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review round 1 — disposition (head ac8d1b17157)
+The Codex round did not run. codex exec returned "You've hit your usage limit … try again at Sep 19th, 2026 1:17 PM" on both attempts, before any turn started (job task-mu4knfmx-21tk4c, phase failed, 41s). Recording that explicitly: Codex silence on this PR is a quota outage, not a clean review. The findings below come from a /code-review high pass instead, which is a self-check by the same implementer, not the independent review the policy asks for. The independent GPU/domain review is still owed.
+Fifteen findings. Eleven fixed, two declined-and-filed, two were correct observations about pre-existing code I left alone.
+Fixed — correctness
+#
+Finding
+Fix
+2
+scene_data == nullptr branch derived the scene-depth pair with a hardcoded orthogonal = false, so an ortho camera got a perspective derivation of an ortho matrix — blocker C re-created in the branch added to handle it. The compute composite deliberately does not derive when scene_data is missing.
+Mirror the compute path: derive only from scene_data; with none, fall back to z_near/z_far and disable the depth test. The guard only removes fragments it can prove are occluded, so with no trustworthy depth description it fails open rather than risking a blank frame.
+1
+#987's raster_output.depth fix newly lets painterly frames reuse the cached render, and the reuse signature carries no PainterlyMaterial term — under a static camera a material edit would not reach the screen.
+_on_painterly_material_changed() now invalidates the cached render. A material edit is an editor-rate event; re-rendering once beats hashing a resource that changes one inspector drag at a time.
+5
+A successful painterly composite left last_output_copy_attempted/last_output_copy_success false — every QA surface saw "no copy attempted" for a frame that had just drawn a fullscreen pass. It read as clean only because copy_failed = attempted && !success short-circuits.
+Set both (and last_depth_test_honored) in the painterly branch.
+8
+The two composite samplers are created on the viewport device but freed only inside device_still_valid (which tests rd), while the tail of _shutdown_internal clears their RIDs unconditionally — a permanent leak in a window the composite now reaches.
+_free_tracked_rid already resolves each RID's own owner device, so the frees move out of that branch.
+Fixed — guard gaps in the guards this PR added
+Finding 3 was the sharpest: the PR fixed the unconditional depth test and the private 0.0005 epsilon, then guarded neither. Both revert silently.
+Six new anchors and six new mutations cover the shared guard include, the depth_test_enabled gate, the shared epsilon, the shared host derivation, that gs_scene_depth_occludes is actually called (declared-and-dead is invisible to an include check), and the setting plumbing.
+check_gs_pre_upscale_hook.py --self-test: 25/25 reverting mutations flagged, up from 19/19.
+Fixed — hygiene
+Regenerated docs/api/shader_reference.md with scripts/generate_shader_docs.py (finding 6 — I had hand-deleted two sections and missed the generator, so the two new includes were absent and the coverage summary was wrong); deleted the dead composite_pipeline member and its five lines of teardown (9); dropped the now-unused core/io/file_access.h include (10); dropped the redundant % 16 static_assert (11); dropped the redundant per-frame pipeline warm-up and the parameter it was the only user of (15); fixed the =ROOT whitespace regression I introduced (13); moved the new docstring section below F. so the index matches run_checks() order (14).
+Declined and filed
+Push-constant 16-byte rule does not cover the deferred blocks (ViewportBlitPushConstant, gs_shadow_blit) — the ones most at risk #1000 — finding 4: the new 16-byte rule covers only registered structs, not the deferred ViewportBlitPushConstant / gs_shadow_blit blocks, which are the ones most at risk (ViewportBlitPushConstant is 80 bytes today only incidentally). Correct, and it needs parser work, not a list entry: those are function-local struct X { … } params = {}; declarations that _parse_struct_definition cannot read (verified — it raises on } params = {) and that carry no sizeof anchor. Doing it half-way here would be worse than naming the cost. The guard now records the gap in-line rather than leaving it silent.
+Painterly composite: blend_strength is a hard-wired no-op, and the pass does not assert its shader/cache device matches draw_device #1001 — findings 12 and 7: blend_strength is hard-wired to 1.0f with nothing feeding it (product call whether to wire it to painterly_mix_strength or delete the field), and the pass asserts three texture devices match draw_device but not the singleton device its shader, FramebufferCacheRD and UniformSetCacheRD come from. Latent on the measured path; the assertion belongs next to the three that exist.
+Re-measured after the fixes
+All sixteen coverage numbers are identical to the pre-review run (0 → 307,242 at the shipped default; no change at depth_test=false), and all twelve painterly-off captures remain bit-identical to base. Guards: 0 failures + "Guard-only mode complete". Agentic: 132 tests OK. Runtime validation streaming-gpu-ci: total=3 passed=3 failed=0 skipped=0.
+Hide details
+View details
+klausi3D
+merged commit b915afc
+into
+master
+Sep 17, 2026
+20 of 21 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/fix-painterly-composite-986
+branch
+September 17, 2026 15:23
+This was referenced Sep 17, 2026
+Overlap-record overflow recovery and persistent truncation (accepted alpha limitation)
+#54
+Open
+Resolve-time lighting (mode 0) ships via painterly and has two defects: black contour artifacts and inert shadow receive
+#851
+Closed
+Audit P3: define and enforce public alpha release acceptance gates
+#360
+Open
+Every in-repo painterly test exercises the baseline fallback, not painterly: the test project contains no PainterlyMaterial
+#997
+Closed
+The shipped performance overlay never updates: 17 of 20 monitors do not exist and a nil format aborts the refresh
+#833
+Closed
+GPU-001 follow-up: splat projection is unjittered while feeding temporal consumers (TAA/FSR2/MetalFX) — subpixel mismatch vs meshes
+#929
+Closed
+docs: widen the public-alpha envelope to streaming open worlds rather than narrow its gate (#1016)
+#1020
+Merged
+GPU-001 follow-up: painterly composite bypasses the sRGB->linear source decode on the pre-upscale path — painterly splats blended as linear, then tonemapped
+#930
+Closed
+Design record: the painterly composite's phase/decode anchors belong in check_gs_pre_upscale_hook.py (R3 placement)
+#996
+Closed
+Issue-ledger audit 2026-09-17: all 281 open issues classified against master; 32 closed
+#1021
+Closed
+docs: state the alpha's API promise, its real limitations, and fix docs the code contradicts (#1010, #1011, #1013)
+#1022
+Merged
+gaussian_splatting: render splats with the engine's TAA jitter, and key the render cache on the matrix that carries it (#929)
+#1026
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 17, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+4026709
+```
+…cs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+#1010 - there was no statement anywhere a user could see that the alpha makes no
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+#1011 - the known-limitations page said "No accepted public-alpha limitations are
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+#1013 - the quantized "effectively unlit" claim is withdrawn (fixed in #510;
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+mentioned this pull request
+Sep 17, 2026
+gaussian_splatting: bind painterly/material on the node and make painterly tests able to fail (#997, #851)
+#1028
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: correct what the candidate gate actually enforces, and name the…
+…
+1bc4d2e
+```
+… real cost of widening (#1016)
+
+Independent review found two P1s. Both are cases of this document describing a
+stricter gate than the one that runs, which is the failure mode the bar itself
+calls blocking under section 4.2. Every claim below was re-verified against the
+validator before the text changed. The widening decision is unchanged.
+
+P1(a): open_world_proof is integrity-only. The ADR said all three requirements
+"must run and pass". _validate_candidate_artifact_group (:1050-1065) runs the
+required-field, hash, commit and mtime checks and nothing else - no validator
+opens any artifact. The manifest already said so about itself
+(workflow_blocking_behavior_machine_enforced: false at :320-324; "open-world
+proof must be blocking rather than advisory" under documented_non_enforced_rules
+at :260-264).
+
+Reproduced here: a bundle identical to the ADR's passing Run B except that
+open_world_proof points at the repository's README.md, with a correct digest,
+exits 0 with NO failures. README.md is accepted as open-world proof. My own Run B
+passed partly for this reason - its artifacts were synthetic files - and section
+2 now says so instead of letting the run imply more than it showed.
+
+So section 4.3 now distinguishes the two content-validated benchmark lanes from
+the one hashed file, and states plainly that the open-world obligation is
+human-enforced: #961 must point the group at real corridor output and the signer
+must confirm it, because the gate will not catch a substitution. Section 6's
+reason 1 no longer cites disallow_open_world_advisory_only as machinery an option
+would have to defeat; it is a documented-not-enforced rule, and the argument is
+restated on what it actually is - a written intent, plus two lanes that ARE
+content-checked.
+
+P1(b): the cost section named three issues; the real number is 37. A
+bundle-supplied accepted_alpha_limitation or deferred fails unless the issue is
+in the manifest's own ledger (:1918-1926), and blocking always fails
+(:1793-1799). So the bundle cannot classify anything: an open relevant issue must
+be closed or ledgered, and ledgering is an R3 manifest edit. Measured 2026-09-19:
+2 open P0 (#182, #184), 35 open P1, 4 release-blocker-labelled (#1010, #1011,
+#1012, #1016) - 37 distinct. The old claim was wrong twice: #351 and #352 closed
+in June, and the requirement was never about three issues. New section 5.5 states
+it as the largest single cost of the alpha.
+
+The same section records the gap in the other direction: the four defects section
+11 still calls alpha blockers are invisible to that population. #929 carries only
+program:prod-ready; #851/#833/#54 are priority:P2; #1025 and #1030 are
+unlabelled. The bar's blocker set and the machine's are disjoint sets.
+
+P2s, all verified:
+
+- Section 10's table called the alpha's gate "Human sign-off" and made section
+  4.2 v1.0-only, while this ADR's central obligation rests on 4.2. Both rows
+  corrected, with the reasoning that this is a correction to machinery that
+  already ran, not a raised bar.
+- Section 11 recount: #930 closed FIXED by #999, so 8 fixed / 4 open / 0 refuted.
+  The "#930 is refuted only while #986 stands" and "whoever fixes #986 must land
+  the decode" paragraphs are discharged, not deleted. Items 4, 6 and 7 now say
+  "fixed on master" inline like items 1-3, instead of describing closed defects
+  in the present tense. Item 5 is left untouched - #1026 rewrites it.
+- Run A/B bundles are not attached, so section 2 now says so and gives the
+  reproduction recipe rather than asserting an unreproducible result.
+
+P3s: the selector accepts channel OR tag, not both (:900-910); visual acceptance
+is per benchmark-lane row, not per bundle, and also checks
+capture_threshold_pass_count and visual_reference_match (:1598-1630); the boxed
+note now says #351/#352 are already closed and need resolved_manifest_issues
+rows; section 7.1's section list aligned with what the PR touches; section 5.1's
+open question answered (benchmark_latest.json:25 carries a city_flyover row, so
+performance/index.md is right and benchmark-suite.md:300 is the stale line);
+section 11 no longer offers "record as an accepted limitation" as an equal
+alternative to un-quarantining a streaming QA scene - a switched-off scene cannot
+satisfy the limitations page's evidence bullet.
+
+Nothing here lowers a threshold, removes a blocker or relaxes a gate. Two of the
+changes make the documented bar stricter by correcting it upward.
+
+Refs #1016
+Refs #961
+Refs #963
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+34ef053
+```
+…cs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+#1010 - there was no statement anywhere a user could see that the alpha makes no
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+#1011 - the known-limitations page said "No accepted public-alpha limitations are
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+#1013 - the quantized "effectively unlit" claim is withdrawn (fixed in #510;
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 19, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+b31faec
+```
+…cs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+#1010 - there was no statement anywhere a user could see that the alpha makes no
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+#1011 - the known-limitations page said "No accepted public-alpha limitations are
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+#1013 - the quantized "effectively unlit" claim is withdrawn (fixed in #510;
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+22ac37b
+```
+…cs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+#1010 - there was no statement anywhere a user could see that the alpha makes no
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+#1011 - the known-limitations page said "No accepted public-alpha limitations are
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+#1013 - the quantized "effectively unlit" claim is withdrawn (fixed in #510;
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+mentioned this pull request
+Sep 20, 2026
+Splats ghost under TAA/FSR2 in motion: no depth write-back, no motion vectors, no reactive mask (post-#929 residual)
+#1025
+Open
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+3eea4eb
+```
+…cs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+```
+klausi3D
+added a commit
+that referenced
+this pull request
+Sep 20, 2026
+docs: state the alpha's API promise, its real limitations, and fix do…
+…
+bc77ce3
+```
+…cs the code contradicts (#1010, #1011, #1013) (#1022)
+
+* docs: state the alpha's API promise, its real limitations, and fix docs the code contradicts (#1010, #1011, #1013)
+
+Three user-facing gaps in the alpha's disclosure, all verified against
+b915afc before being written down.
+
+API promise; the only occurrence in the repo was the acceptance bar's own table
+row. Adds docs/development/api-stability.md and two README status rows. Counts
+were re-derived, not copied: 33 registered classes (independently confirmed by
+check_doc_classes_complete.py), 2 engine singletons, 193 settings of which 153
+resolve to public and 139 are inventory_only.
+
+recorded yet" while the bar recorded two, and the page was in no nav entry.
+Replaces it with the real list and gives it a click-path. Every entry was checked
+against code first; entries that are code-reading findings rather than observed
+failures say so by name, and the bar's 8.1 table is replaced by a pointer so the
+two cannot drift again.
+
+Dropped from the draft: the "painterly and standard composites disagree by ~2%"
+item (#998). Nothing in the repo substantiates the figure, and #999 replaced the
+two independent depth implementations with a shared guard, so the premise no
+longer holds either. Not written.
+
+Corrected from the draft rather than copied: #997 does not fail because the test
+project has no PainterlyMaterial - it has four, assigned to `painterly/material`,
+which GaussianSplatNode3D does not bind, so they are discarded in silence. And
+the painterly test suite renders neither pipeline; it is a CPU software
+rasterizer. #1006 is bypassed on every resubmit path, not "only after the first
+apply". #1003's bounds are sticky once non-empty however they got there.
+
+normals are decoded at tile_binning.glsl:752). The SH band-3 item turned out to
+need the opposite of the obvious fix: sh_config.h's "16 coefficients = 48 values"
+is mathematically CORRECT, and the real defect is that the GPU layout stores DC
+plus at most 12 non-DC coefficients, so 3 third-order coefficients are dropped
+even at full quality and 9 of 15 under quantization - undocumented, unmetered,
+untested. Documented user-facing in the quantization page. sh_config.h itself is
+NOT edited: renderer/** is R2 and this change is docs-only.
+
+Also in that page: PackedGaussian has been 128 bytes since #971, not 144, so
+-44% is now -37.5%; the measured tables predate the change and are labelled as
+such rather than silently reattributed.
+
+Further verified contradictions fixed: features/streaming.md told users to
+confirm a `streaming/enabled` setting that does not exist anywhere in the module
+(route_policy is the real key); features/index.md advertised .splat files, COLMAP
+poses and a GaussianSplat3D class, none of which exist; ply-loader.md named the
+sidecar .gsplatworld instead of .gsplatcache; two registration anchors pointed at
+the wrong class.
+
+NOT fixed here, and flagged instead: 27 past-EOF code anchors across five
+user-facing docs. Re-deriving them is its own change.
+
+Refs #1010
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: address self-review findings on the limitations and internal-classes pages
+
+Two defects found by /code-review high on origin/master..HEAD, both verified
+before fixing.
+
+#929 was classified twice. The page listed "splats swim relative to meshes under
+TAA or FSR2" as a shipping limitation while release-acceptance-bar.md section 11
+item 5 lists #929 as Blocking the Public Alpha, and this page's own rule says
+blockers are not listed here. A candidate bundle built from both documents would
+resolve one issue two ways, and the gate's ledger allows exactly one
+classification per issue. #929 is now named as a blocker in that neighbourhood -
+the same treatment #851 already had - and not listed as accepted.
+
+The page's admission criterion was unmet by its own entries. The preamble
+requires "evidence proving the limitation does not hide renderer correctness
+failures", while several entries state plainly that they were never reproduced
+(#1018, #983, #1005). Rather than soften the criterion, "How to read this page"
+now separates disclosure from admission: everything real is disclosed here for
+users, but an entry with no reproduction must not be pointed at by a candidate's
+docs_path until it has one. The criterion is unchanged.
+
+Also: internal-classes.md pointed the reader at #1013 for re-deriving its drifted
+registration table. #1013 is about the quantized-unlit and SH band-3 claims and
+does not mention that table, so the work was being sent to an issue that does not
+track it. The note now says plainly that it is untracked, and names a concrete
+instance (GaussianSplatAsset is at register_types.cpp:94, while the table says
+:71) so the warning is checkable rather than vague.
+
+Refs #1011
+Refs #1013
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: record the TAA/FSR2 motion residual and the get_statistics crash, and stop claiming machine enforcement the gate does not do (#1011)
+
+Independent review found three omissions and a promise the page cannot keep.
+All verified before writing.
+
+alpha envelope, and appeared nowhere: not on this page, not in bar section 11.
+The page instead carried a callout saying #929 "is in the blocker set, not the
+accepted set", which #1026 overturns by splitting #929 into a fixed
+static-camera half and this residual. That callout is replaced by a #1025 entry.
+
+The wording is taken verbatim on the substance from #1026's section 8.1 row, by
+agreement with its author, so the disclosure and the disposition cannot drift.
+The measured static-camera figures (0.2525 -> 0.0900 px at FSR2 scale 1.0,
+0.3603 -> 0.0927 px at scale 0.5) are attributed to #1026 rather than claimed
+here.
+
+The entry is marked PROPOSED, not accepted. #1025 is in-envelope, so under
+section 4.1 it is a blocker until a named human accepts it, and no such line
+exists yet; #1026 marks its own row proposed for the same reason. The entry also
+warns that a ledger entry is required before the classification can pass the
+gate at all - an accepted_alpha_limitation supplied by the bundle fails unless
+the issue is in public_alpha_issue_ledger.
+
+when polled per frame - was unrecorded. It is a ClassDB-bound public API
+(nodes/gaussian_splat_node_3d.cpp:233) at the polling rate any per-node HUD would
+use. Recorded with its real workaround (poll at 4 Hz or slower; a 444-frame run
+at that rate did not crash) and with its status stated as reproduced-not-
+diagnosed: 2 crashes in 5 runs, unsymbolized backtrace, no root cause. 2 of 5 is
+a rate, not a mechanism.
+
+The page also promised something the machinery does not do. "Blocking defects are
+not listed here - they are in the blocker set and stop the release" reads as
+machine enforcement, but the candidate gate's population is
+priority:P0|priority:P1|release blocker and the section 11 alpha blockers carry
+none of those - #929 has no priority label, #851/#833/#54 are priority:P2. So
+nothing automated stops a release on them. The sentence now points at the bar's
+section 11 list by name and says plainly that it is human-maintained and mostly
+invisible to the gate, rather than implying a guarantee.
+
+Smaller corrections from the same review:
+
+- #851's symptom is now named (black contour lines, inert shadow_strength), so a
+  user who sees it can find the issue. Previously the entry said only "lighting-
+  mode fields are tracked as #851".
+- features/streaming.md step 2 still said the node creates a streaming system
+  "when streaming is enabled", immediately after the new paragraph explaining
+  there is no such setting. Now: when the route policy selects streaming and the
+  payload is streamable.
+- api-stability.md no longer hand-asserts "193 project settings" as a bare fact -
+  it is a third copy of a number the bar's own section 7 says drifts. The page
+  now names the manifest and register_types.cpp as the authority and dates its
+  counts.
+- Bar section 8.1 no longer says "Two entries were decided here", which would go
+  stale the moment #1026 adds a third row. It names the entries without a count,
+  and says why no count is given.
+
+Refs #1011
+Refs #1025
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: fence the unaccepted #1025 entry, and narrow three claims Codex found overstated
+
+Codex (independent, quota restored) reviewed this PR's diff against the source.
+It confirmed every count and constant - 33 classes, 2 singletons, 193/153/139,
+MAX_ENCODED_COEFFICIENTS=12, quantized slots 6, PackedGaussian 128 B, and the
+3-of-15 / 9-of-15 SH drops - and found no reproduced-vs-code-read label wrong.
+Four substantive findings, all verified before fixing.
+
+1. The page contradicted its own rule. It says blocking defects are not listed
+   here, then listed #1025, which the entry itself describes as still blocking
+   pending maintainer acceptance. Rather than drop the entry - the merge plan
+   requires this PR to absorb #1026's disposition - #1025 moves into a fenced
+   "Proposed, not yet accepted" section at the foot of the page, and the rule at
+   the top now names that section as its single explicit exception. Everything
+   above the fence is what the alpha ships with; nothing below it may be cited as
+   an accepted_alpha_limitation. The rule and the content now agree.
+
+2. features/index.md said imports "land as a GaussianSplatNode3D node in your
+   scene tree". They do not: the importer produces a GaussianSplatAsset resource
+   (io/resource_importer_ply.cpp:494), which you then assign to a node. I had
+   corrected the class name in this PR and left the surrounding claim wrong.
+
+3. features/streaming.md overstated the route policy. I had reworded step 2 to
+   "when the route policy selects streaming and the payload is streamable", which
+   is still wrong for the node route: a direct GaussianSplatNode3D always pins
+   SUBMISSION_RESIDENCY_HINT_RESIDENT and DELIBERATELY IGNORES route_policy
+   (nodes/gaussian_splat_node_3d.cpp:2626-2631). Streaming is opt-in through
+   GaussianSplatWorld3D and only through it. The section now says that first, and
+   step 1 is choosing the right node type rather than setting a policy that the
+   node route does not read.
+
+4. The #1008 entry claimed every payload change costs a full GPU re-upload of
+   every splat buffer. That is the resident branch only: a file-backed world
+   takes set_file_backed_payload_source() instead
+   (renderer/render_data_orchestrator.cpp:799-803), and a world with no
+   registered submission resubmits nothing. Both bounds are now stated. The
+   resident path - which is what the alpha's world route uses - is unchanged and
+   still the cost the entry discloses.
+
+Codex's fifth finding is citation drift in two pre-existing table rows
+(ply_loader.cpp:69,97,112 and the colour-grading upload anchor). Not fixed here:
+it is the same systemic anchor-drift program this PR already declines to take on
+in one change, and both rows' prose is correct.
+
+Refs #1011
+Refs #1013
+Refs #1025
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: caveat the two figures taken during the GPU-contention window, and point the fence at 9.1
+
+A stray godot.head.exe left over from 2026-09-16 held this machine's GPU
+continuously until it was killed on 2026-09-19. Both measured figures this page
+quotes were taken inside that window, on 2026-09-17, so both are suspect. Found
+by the #1026 author, who had to retake their own timings for the same reason and
+flagged the window rather than only fixing their own numbers.
+
+#1030's crash rate is the one that matters more, and it cuts the opposite way to
+a timing. The issue attributes the crash to main-thread/render-thread contention
+over live metrics structures; a third process competing for the GPU is exactly
+what would make that MORE likely, so 2-of-5 may be an overestimate and the clean
+444-frame run at 4 Hz is correspondingly weaker evidence that the slower rate is
+actually safe. The defect is real - it is a bound public API taking the process
+down - but every number around it needs retaking on a quiet machine, and the
+entry now says so.
+
+#1008's medians (17 / 259 / 2124 ms) are marked an upper bound rather than a
+measurement. Figures another PR took in the same window moved about 10% when
+retaken quiet. The finding does not rest on them: a full rebuild with no
+dirty-field tracking and an unconditional re-upload is a code fact, and ~2 s at
+1M is not plausibly contention alone. But they should not be quoted as a
+baseline until retaken.
+
+Neither caveat softens a defect. Both say the shape stands and the numbers do
+not, which is the honest state.
+
+Also: the fence intro now points at the acceptance bar's 9.1 for the machinery
+behind the two conditions it names, instead of restating it. 9.1 covers the
+ledger requirement, the docs_path equality and the snapshot-completeness gap in
+more depth than this page should carry, and #1026's 10.1 collapsed to a
+cross-reference for the same reason - three documents, no overlap.
+
+Refs #1011
+Refs #1008
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: fix the direction of the #1030 contamination caveat
+
+The caveat added in the previous commit reasoned in two directions from one
+premise and got the second one backwards. Caught by the #1026 author.
+
+Premise: a stray process holding the GPU raises the hazard rate for a
+main-thread/render-thread race. From that, two consequences, and they move the
+SAME way:
+
+- 2-of-5 at per-frame polling is plausibly an OVERESTIMATE of what a user on a
+  quiet machine hits. (Correct as written.)
+- The clean 444-frame run at 4 Hz is STRONGER evidence that 4 Hz is safe, not
+  weaker - it survived while the hazard was elevated. The previous text said
+  "correspondingly weaker", which is simply the wrong direction.
+
+Both figures still need retaking: an overestimate is not a measurement and one
+clean run is not a safety proof. The practical conclusion is unchanged, but the
+reasoning was wrong on its face and a reader could have followed it into
+distrusting the workaround for no reason.
+
+The error is recorded inline rather than silently swapped, because a document
+that quietly reverses itself teaches nobody anything.
+
+No change to #1008's caveat: its finding rests on a code fact - a full rebuild
+with no dirty-field tracking and an unconditional re-upload - which survives any
+timing, so the caveat costs the defect nothing. #1030 is the case where the
+number IS the claim, which is why the two entries are worded differently.
+
+Refs #1011
+Refs #1030
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_013MbNkf9hckmDJSE3dogs1k
+
+* docs: correct the #1025 entry - FSR2 does not ghost, and the old text told users to avoid it
+
+The moving-camera case has now been measured (#1025 comment 5751997279), on a
+real scan, on both the base and #1026 binaries. The entry I shipped was a
+prediction taken verbatim from #1026's section 8.1 row, and it was wrong in the
+direction that costs a user a working feature.
+
+- FSR2: NO ghosting. 0.000 frames of staleness at scale 1.0 across a slow pan, a
+  normal pan and a dolly, at the floor set by an in-frame geometry control; at
+  scale 0.5 the splat trail is at or below the control's in two of three motions.
+- TAA: a real ~1.5 px trail, 0.27-0.87 frames stale, 6-26x the control, and it
+  does NOT grow with camera speed because the variance clip is computed from the
+  current frame.
+- Base and #1026's head agree within 0.01 frames, so the jitter fix neither
+  causes nor cures it.
+
+The workaround change is the one that matters: it said "keep scaling_3d_mode =
+bilinear at scale 1.0 and use_taa = false". Half of that was pushing users off
+FSR2 for a defect FSR2 does not have. It now says use_taa = false, which is
+Godot's own default, and states plainly that FSR2 needs no workaround.
+
+Also corrected: the entry said fixing this "edits render_forward_clustered.cpp
+and needs its own ADR". The ladder inverted under measurement - velocity
+write-back does not require depth write-back, and it is not an engine-boundary
+change, because the module already holds the buffers and the previous-frame
+camera. What survives is the honest reason it is not alpha work: a wrong velocity
+smears confidently and reads as a renderer bug rather than a missing feature.
+
+The correction is recorded in the entry rather than silently swapped, same as the
+#1030 direction fix.
+
+And a coupling that was undocumented anywhere, now on the #989 entry because that
+is where it will bite: the destination alpha #989 is about IS FSR2's reactive
+mask. Godot has no dedicated reactive texture - params.reactive is an
+alpha-swizzled view of the internal colour buffer, and the composite writes splat
+coverage into that alpha. That is WHY splats do not ghost under FSR2. Whoever
+fixes transparent_bg changes FSR2's temporal behaviour silently, and no test
+would notice.
+
+Refs #1011
+Refs #1025
+Refs #989
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01UA1aX2xX8cajR4uKaMeLN6
+
+---------
+
+Co-authored-by: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+klausi3D
+mentioned this pull request
+Sep 26, 2026
+docs: point the recurring-issues runbook at the known-limitations page (#1011)
+#1069
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

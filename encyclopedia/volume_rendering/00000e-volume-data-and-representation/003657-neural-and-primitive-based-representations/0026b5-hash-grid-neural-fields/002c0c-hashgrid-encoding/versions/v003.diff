@@ -1,0 +1,80 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-HashGrid Encoding is a learnable feature encoding method that maps input coordinates to multi-resolution grid features using spatial hashing and trilinear interpolation, allowing for efficient training of neural radiance fields (NeRF) on consumer GPUs [S1, unofficial]. It builds on [Hash Grid Neural Fields](3855-hash-grid-neural-fields.md).
++HashGrid Encoding is a learnable feature encoding method that maps input coordinates to multi-resolution grid features using spatial hashing and trilinear interpolation, allowing for efficient training of neural radiance fields (NeRF) on consumer GPUs [S1, unofficial].
+ 
+ ## How it works
+@@ -33,11 +33,11 @@
+     b.  **Map to Grid Space:** For each dimension $d \in [0, D-1]$: $\text{pos}[d] = \text{xyz}[d] \times \text{scale} + (\text{align\_corners} ? 0.0 : 0.5)$ [S1, unofficial][S3, unofficial].
+     c.  **Compute Integer Grid Coordinates:** $\text{pos\_grid}[d] = \lfloor \text{pos}[d] \rfloor$ [S1, unofficial][S3, unofficial]. $\text{pos}[d] \leftarrow \text{pos}[d] - \text{pos\_grid}[d]$ [S1, unofficial][S3, unofficial].
+-    d.  **Trilinear Interpolation:** Initialize `results[ch] = 0` for all $ch \in [0, C-1]$. Iterate over all $2^D$ corners of the voxel, indexed by $idx \in [0, 2^D - 1]$:
++    d.  **Trilinear Interpolation:** Initialize `results[ch] = 0` for all $ch \in [0, C-1]$ [S1, unofficial]. Iterate over all $2^D$ corners of the voxel, indexed by $idx \in [0, 2^D - 1]$:
+         i.  Compute weight $w = 1$. For each dimension $d \in [0, D-1]$: if bit $d$ of $idx$ is 0, $w \leftarrow w \times (1 - \text{pos}[d])$ and $\text{pos\_grid\_local}[d] = \text{pos\_grid}[d]$; else $w \leftarrow w \times \text{pos}[d]$ and $\text{pos\_grid\_local}[d] = \text{pos\_grid}[d] + 1$ [S1, unofficial][S3, unofficial].
+-        ii. **Hash Index Calculation:** Compute the hash index for the corner. If `gridtype` is 0 (Hash) and stride exceeds `hashmap_size`, use `fast_hash` [S1, unofficial]. Otherwise, use modulo arithmetic on the stride-based index: $\text{index} = \left( \sum_{d=0}^{D-1} \text{pos\_grid\_local}[d] \times \prod_{k=0}^{d-1} (\text{resolution}+1) \right) \pmod{\text{hashmap\_size}}$ [S3, unofficial]. The final index into the `grid` array is `offsets[l] + index` [S1, unofficial].
++        ii. **Hash Index Calculation:** Compute the hash index for the corner [S4, unofficial]. If `gridtype` is 0 (Hash) and stride exceeds `hashmap_size`, use `fast_hash` [S1, unofficial]. Otherwise, use modulo arithmetic on the stride-based index: $\text{index} = \left( \sum_{d=0}^{D-1} \text{pos\_grid\_local}[d] \times \prod_{k=0}^{d-1} (\text{resolution}+1) \right) \pmod{\text{hashmap\_size}}$ [S3, unofficial]. The final index into the `grid` array is `offsets[l] + index` [S1, unofficial].
+         iii. **Accumulate Features:** For each channel $ch \in [0, C-1]$: $\text{results}[ch] \leftarrow \text{results}[ch] + w \times \text{grid}[\text{index} + ch]$ [S1, unofficial][S3, unofficial].
+     e.  **Store Output:** Store `results` into `outputs[l, :, :]` [S2, unofficial].
+ 4.  **Backward Pass:** If `dy_dx` is requested:
+-    a.  Initialize `dy_dx` to 0.
++    a.  Initialize `dy_dx` to 0 [S1, unofficial].
+     b.  For each level $l$, dimension $gd \in [0, D-1]$, and channel $ch$:
+         i.  Compute partial derivative using finite differences along dimension $gd$ [S1, unofficial].
+@@ -66,5 +66,5 @@
+     B = len(inputs)
+     D = len(inputs[0])
+-    outputs = [[0.0] * C for _ in range(L * B)]
++    outputs = [[[0.0] * C for _ in range(B)] for _ in range(L)]
+     
+     for l in range(L):
+@@ -73,6 +73,4 @@
+         hashmap_size = offsets[l+1] - offsets[l]
+         grid_offset = offsets[l]
+-        
+-        level_outputs = [[0.0] * C for _ in range(B)]
+         
+         for b in range(B):
+@@ -84,5 +82,5 @@
+             
+             pos_grid = [int(math.floor(p)) for p in pos]
+-            pos_frac = [p - math.floor(p) for p in pos]
++            pos_frac = [pos[d] - pos_grid[d] for d in range(D)]
+             
+             for idx in range(1 << D):
+@@ -110,16 +108,14 @@
+                 base_idx = grid_offset + index
+                 for ch in range(C):
+-                    level_outputs[b][ch] += w * embeddings[base_idx + ch]
+-        
+-        for b in range(B):
+-            for ch in range(C):
+-                outputs[l * B + b][ch] = level_outputs[b][ch]
++                    outputs[l][b][ch] += w * embeddings[base_idx + ch]
+                 
+     return outputs
++
++# Backward pass computes gradients w.r.t. inputs by summing over levels and channels [S1, unofficial].
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+ *   **Out of Bounds:** Input coordinates must be in $[0, 1]$. If out of bounds, the forward pass outputs 0 and the backward pass returns immediately (gradient is 0) [S1, unofficial][S3, unofficial].
+-*   **AtomicAdd Performance:** In GPU implementations, `atomicAdd` on `__half` is very slow. The implementation uses `__half2` vectorization when $N_C \% 2 == 0$ (where $N_C = \min(2, C)$) to process two halves at once. If $N_C \% 2 \neq 0$, it falls back to scalar `atomicAdd` or `float` [S1, unofficial][S3, unofficial].
++*   **AtomicAdd Performance:** In GPU implementations, `atomicAdd` on `__half` is very slow. The implementation uses `__half2` vectorization when $N_C \% 2 == 0$ (where $N_C = \min(2, C)$) to process two halves at once. If $N_C \% 2 \neq 0$, it falls back to scalar `atomicAdd` or `float` [S4, unofficial].
+ *   **Hash Collisions:** Handled by modulo arithmetic on the stride-based index, with a fallback to `fast_hash` when the stride exceeds `hashmap_size` [S3, unofficial].
+ *   **Dimensionality:** Input dimensionality $D$ is supported for values 1 through 5 [S1, unofficial], though some implementations restrict it to 2 or 3 and throw a runtime error otherwise [S3, unofficial].
+@@ -131,11 +127,9 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Per sample per level, the complexity is $O(2^D)$ hash lookups and atomic additions. For a batch of size $B$ and $L$ levels, the total time complexity per thread block is $O(B \times L \times 2^D)$ [S3, unofficial].
++*   **Time Complexity:** Per sample per level, the complexity is $O(2^D)$ hash lookups and atomic additions. For a batch of size $B$ and $L$ levels, the total time complexity per thread block is $O(B \times L \times 2^D)$ [S4, unofficial].
+ *   **Memory Complexity:** $O(\sum_{l=0}^{L-1} \text{hashmap\_size}_l \times C)$ for the embedding table, where `hashmap_size` scales with the number of levels and desired resolution [S3, unofficial]. The total size is $sO \times C$, where $sO = \text{offsets}[L]$ [S1, unofficial][S3, unofficial].
+ *   **Performance:** Enables real-time training of NeRF on consumer GPUs by avoiding the memory overhead of dense high-resolution grids [S1, unofficial].
+ *   **Strengths:** Memory efficient for sparse scenes, supports multi-resolution details, fast lookup via hashing.
+-*   **Limitations:** Hash collisions can occur if the hash table is too small, leading to artifacts. Performance depends on hash function quality and collision resolution. Atomic operations can be a bottleneck on GPU if not vectorized [S1, unofficial][S3, unofficial].
+-*   **When to Use:** When training neural implicit representations (like NeRF) with limited GPU memory but requiring high-frequency details.
+-*   **When Not to Use:** When deterministic spatial locality is critical without hashing overhead, or when the scene is extremely dense and sparse hashing offers no advantage over dense grids.
++*   **Limitations:** Hash collisions can occur if the hash table is too small, leading to artifacts. Atomic operations can be a bottleneck on GPU if not vectorized [S1, unofficial][S4, unofficial].
+ 
+ ## Background

@@ -43,7 +43,7 @@ The Tent Alpha Transfer Function is a hardcoded 1D RGBA transfer texture generat
         $$
         y = \frac{x}{d}
         $$
-    *   *Note*: If $d=0$ (i.e., `peak`=0 and $i=0$), $y$ becomes undefined/Infinity [S1, unofficial].
+    *   *Note*: If $d=0$ (i.e., `peak`=255 and $i=255$), $y$ becomes undefined [S1, unofficial].
 5.  **Apply Data Gamma**:
     $$
     y_{\text{Gamma}} = y^{\frac{1.0}{\text{dataGamma}}}
@@ -145,7 +145,7 @@ def make_fluo_transfer_tex(alpha0, peak, data_gamma, alpha1, color_str):
 ```
 
 **Edge Cases and Pitfalls**
-*   **Division by Zero**: If `peak` is 0, $d=0$ when $i=0$. If `peak` is 255, $d=0$ when $i=255$ (since $256-255-1=0$) [S1, unofficial]. The source code does not explicitly check for $d=0$, leading to `Infinity` or `NaN` in $y$ calculation [S1, unofficial].
+*   **Division by Zero**: If `peak=255`, $d=0$ when $i=255$, causing division by zero [S1, unofficial]. The source notes warn about $d=0$ leading to `Infinity` or `NaN` in the $y$ calculation and recommend a guard [S1, unofficial].
 *   **Gamma Interpretation**: `dataGamma` is applied to the tent height before alpha blending, while `finalGamma` is applied to the accumulated color after ray casting/compositing [S1, unofficial].
 *   **Alpha Modulation**: The color channels are multiplied by `alpha/255`, storing premultiplied alpha values [S1, unofficial].
 
@@ -153,10 +153,10 @@ def make_fluo_transfer_tex(alpha0, peak, data_gamma, alpha1, color_str):
 *   **Time Complexity**: $O(1)$ for texture generation (fixed 256 iterations) and $O(N)$ for ray casting, where $N$ is the number of samples along the ray [G].
 *   **Memory Complexity**: $O(1)$ for the 1024-byte transfer texture [G].
 *   **Performance**: `dataGamma` < 1 reduces visibility of low data values during ray casting to prevent them from overwhelming significant features [S1, unofficial].
-*   **Strengths**: Not given in the sources.
-*   **Limitations**: Not given in the sources.
-*   **When to Use**: Not given in the sources.
-*   **When Not to Use**: Not given in the sources.
+*   **Strengths**: Not given in the sources. [S1, unofficial]
+*   **Limitations**: Not given in the sources. [S1, unofficial]
+*   **When to Use**: Not given in the sources. [S1, unofficial]
+*   **When Not to Use**: Not given in the sources. [S1, unofficial]
 
 ## Background
 The method is based on FluoRender by Wan et al., published in the Proceedings of the 2012 IEEE Pacific Visualization Symposium [S1, unofficial]. It leverages 2D image space methods for 3D and 4D confocal microscopy data visualization in neurobiology research [S1, unofficial].

@@ -1,0 +1,272 @@
+# Dual-Path Holographic Laser Rendering
+
+Also called: Volumetric display system with LC-SLM and 3D laser scanner
+
+## Overview
+Dual-Path Holographic Laser Rendering is a volumetric display method that renders palm-sized 3D contents in real space by splitting a femtosecond laser into two distinct optical paths: one utilizing a liquid-crystal spatial light modulator (LC-SLM) for holographic voxel generation, and the other employing a 3D laser scanner for mechanical scanning [S1]. It solves the limitation of single-path systems where voxel density or rendering volume is constrained by the speed of mechanical scanning or the resolution of the SLM alone. By cooperatively combining holographic multiplexing (creating multiple voxels per pulse) with galvanometric scanning, it achieves higher voxel density and larger effective volumes than either technique could independently [S1]. It differs from [Holographic Computer-Generated Holography (CGH) Calculation](6884-holographic-computer-generated-holography-cgh-calculation.md) by integrating the CGH generation directly into a physical laser scanning hardware loop for real-time volumetric emission, and from [Galvanometer Scanner Volume Rendering](5277-galvanometer-scanner-volume-rendering.md) by adding phase modulation to increase spatial sampling density per scan step.
+
+## How it works
+**Inputs:** 3D point cloud data representing the target volumetric content.
+**Outputs:** Physical emission points (voxels) formed in a gas-filled rendering space via multiphoton excitation.
+
+**Data Structures:**
+The system processes 3D point cloud data structured as a list of $(x, y, z)$ coordinates.
+1.  **Volume Division:** The input 3D point cloud is divided into two sub-volumes along the $z$-direction (the optical axis).
+2.  **Slicing:** Each sub-volume is sliced into 2D planes perpendicular to the $z$-axis.
+3.  **Sorting:** Slices are sorted to minimize the total scanning path length (shortest path heuristic) for the galvanometer scanners.
+4.  **Control Signals:** The sorted 2D slice data is converted into voltage signals for the galvanometer scanners and varifocal lens via a Digital-to-Analog (D/A) converter.
+
+**Optical Path Configuration:**
+A single Yb:KGW femtosecond laser beam is split into two paths using a half-wave plate and a polarizing beam splitter.
+*   **Path 1 (Holographic):** The beam passes through an LC-SLM displaying a Computer-Generated Hologram (CGH). The modulated beam passes through a varifocal lens, a concave lens, and an F-theta lens.
+*   **Path 2 (Scanning):** The beam passes through a two-axis galvanometer scanner, a varifocal lens, a concave lens, and an F-theta lens.
+*   **Rendering Space:** A $100 \times 100 \times 100 \text{ mm}^3$ glass cell filled with Xenon gas at 750 Torr.
+
+**Step-by-Step Rendering Process:**
+1.  **Laser Splitting:** The femtosecond laser pulse is split. Each path receives a pulse energy of $480 \text{ \mu J}$ [S1].
+2.  **Phase Modulation (Path 1):** The LC-SLM applies a phase pattern (CGH) to the laser beam. This modulates the wavefront to control the number and position of focal points within the focal volume. For example, a single CGH pattern can generate three distinct voxels simultaneously [S1].
+3.  **Beam Steering (Path 2):** The galvanometer scanners adjust the deflection angles $(\theta_x, \theta_y)$ of the laser beam incident on the F-theta lens.
+4.  **Focusing:** Both paths use an F-theta lens (focal length $100 \text{ mm}$) to focus the laser into the rendering space. The focus position is determined by the composite focal length $f$ of the F-theta lens, the concave lens, and the varifocal lens, and the deflection angle. The horizontal position $(x, y)$ of the emission point is calculated as:
+    $$ (x, y) = (f \theta_x, f \theta_y) $$
+    where $f$ is the composite focal length and $(\theta_x, \theta_y)$ is the deflection angle of the galvanometer scanner [S1]. This position varies depending on the axial ($z$) position.
+5.  **Multiphoton Excitation:** The focused femtosecond pulses interact with the Xenon gas, causing multiphoton excitation that emits light at the focal points, forming visible voxels.
+6.  **Stacking:** The 2D slices are stacked in the $z$-direction by varying the varifocal lens (changing the axial focus) and the galvanometer scanners (changing the lateral position) to build the 3D volume.
+
+**Parameters and Hardware Specifications:**
+*   **Laser Source:** Yb:KGW femtosecond laser (Pharos series PH1SP-10-1M, Light Conversion). Center wavelength: $1030 \text{ nm}$. Repetition frequency: $10 \text{ kHz}$. Pulse duration: $< 155 \text{ fs}$ [S1].
+*   **LC-SLM:** IL-WU070, JVCKENWOOD. Pixel pitch: $8 \text{ \mu m}$. Display area: $1920 \times 1200$ pixels. Used to display CGHs [S1].
+*   **Galvanometer Scanners:** GVS312, Thorlabs. Two-axis [S1].
+*   **Varifocal Lens:** TL-16-40-TC, Optotune. Used to change the spread angle of the laser incident on the F-theta lens, thereby adjusting the axial ($z$) focus [S1].
+*   **Concave Lens:** Focal length $-568 \text{ mm}$. Placed immediately after the varifocal lens to protect optical elements from reflected light from the glass cell surface [S1].
+*   **Rendering Area Path 1:** $50 \times 50 \text{ mm}^2$ at an axial position $88.4 \text{ mm}$ from the lens [S1].
+*   **Rendering Area Path 2:** $60 \times 60 \text{ mm}^2$ at an axial position $114.4 \text{ mm}$ from the lens [S1].
+*   **Combined Axial Rendering Area:** $60 \text{ mm}$ [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dual_path_holographic_rendering(point_cloud, laser_params, hardware_config):
+    """
+    Renders a 3D point cloud using dual-path holographic laser rendering.
+    
+    Args:
+        point_cloud: List of (x, y, z) coordinates.
+        laser_params: Dict containing pulse energy, wavelength, etc.
+        hardware_config: Dict containing SLM, scanner, and lens parameters.
+    """
+    # 1. Divide target 3D point cloud data into two volumes along the z-direction
+    # The z-direction is the optical axis for both paths.
+    # The division is based on the distinct axial rendering areas of Path 1 and Path 2.
+    path1_z_range = (0, 88.4) # mm, relative to lens, approximate based on source
+    path2_z_range = (88.4, 148.4) # mm, combined axial area is 60mm, path 2 is at 114.4mm
+    
+    volume_1 = []
+    volume_2 = []
+    
+    for point in point_cloud:
+        x, y, z = point
+        if z <= 88.4: # Assign to Path 1 region
+            volume_1.append(point)
+        else: # Assign to Path 2 region
+            volume_2.append(point)
+            
+    # 2. Slice the divided point data in the z-direction
+    slices_1 = slice_volume(volume_1, axis='z')
+    slices_2 = slice_volume(volume_2, axis='z')
+    
+    # 3. Sort the slices so that the scanning path is the shortest
+    # This minimizes the travel time of the galvanometer scanners
+    slices_1 = sort_slices_shortest_path(slices_1)
+    slices_2 = sort_slices_shortest_path(slices_2)
+    
+    # 4. Form graphics by stacking these 2D slices in the z-direction
+    # This is achieved by controlling the varifocal lens (z-position) 
+    # and the galvanometer scanners (x,y position)
+    
+    for slice_1, slice_2 in zip(slices_1, slices_2):
+        # Process Path 1: Holographic
+        # Generate CGH for the current slice
+        cgh_pattern = generate_cgh(slice_1, hardware_config['slm'])
+        
+        # Apply voltage to LC-SLM to display CGH
+        # The CGH controls the number and position of focal points (voxels)
+        apply_slm_pattern(hardware_config['slm'], cgh_pattern)
+        
+        # Set Varifocal Lens for Path 1 axial position
+        # The axial position for Path 1 is fixed at 88.4mm in the source description
+        # However, the varifocal lens allows adjustment. 
+        # In this specific demo, the paths are spatially separated axially.
+        set_varifocal_lens(hardware_config['varifocal'], z_position=88.4)
+        
+        # Process Path 2: Scanning
+        # Convert 3D scanning data to voltage signal via D/A converter
+        # The galvanometer scanners control the deflection angle (theta_x, theta_y)
+        # The horizontal position (x, y) is determined by (x, y) = (f * theta_x, f * theta_y)
+        
+        for point in slice_2:
+            x, y, z = point
+            
+            # Calculate required deflection angles
+            # f is the composite focal length of F-theta, concave, and varifocal lenses
+            f = hardware_config['composite_focal_length']
+            theta_x = x / f
+            theta_y = y / f
+            
+            # Apply voltage to galvanometer scanner
+            apply_scanner_voltage(hardware_config['scanner'], theta_x, theta_y)
+            
+            # Set Varifocal Lens for Path 2 axial position
+            # The axial position for Path 2 is fixed at 114.4mm in the source description
+            set_varifocal_lens(hardware_config['varifocal'], z_position=114.4)
+            
+            # Trigger laser pulse
+            trigger_laser_pulse(laser_params)
+            
+            # Wait for pulse emission and persistence
+            wait_for_exposure()
+
+def slice_volume(volume, axis='z'):
+    """
+    Splits a volume of points into 2D slices along the specified axis.
+    Returns a list of lists, where each inner list contains points at a specific z-coordinate.
+    """
+    # Group points by their z-coordinate
+    slices = {}
+    for point in volume:
+        z = point[2]
+        if z not in slices:
+            slices[z] = []
+        slices[z].append(point)
+    
+    # Return sorted by z
+    return [slices[z] for z in sorted(slices.keys())]
+
+def sort_slices_shortest_path(slices):
+    """
+    Sorts slices to minimize the total scanning path length.
+    This is a heuristic to optimize galvanometer scanner movement.
+    """
+    # Simple nearest-neighbor heuristic for 2D points within slices
+    # Note: The source mentions sorting so the scanning path is the shortest.
+    # Implementation details for the specific sorting algorithm are not provided.
+    # [G] Assuming a standard Traveling Salesman Problem heuristic for point ordering within each slice.
+    sorted_slices = []
+    for slice_points in slices:
+        if not slice_points:
+            sorted_slices.append([])
+            continue
+        
+        # Order points to minimize distance between consecutive points
+        ordered = [slice_points[0]]
+        remaining = slice_points[1:]
+        
+        while remaining:
+            last_point = ordered[-1]
+            # Find nearest remaining point
+            nearest_idx = 0
+            min_dist = float('inf')
+            for i, point in enumerate(remaining):
+                dist = (point[0] - last_point[0])**2 + (point[1] - last_point[1])**2
+                if dist < min_dist:
+                    min_dist = dist
+                    nearest_idx = i
+            ordered.append(remaining[nearest_idx])
+            remaining.pop(nearest_idx)
+            
+        sorted_slices.append(ordered)
+    return sorted_slices
+
+def generate_cgh(points, slm_config):
+    """
+    Generates a Computer-Generated Hologram pattern for the given points.
+    The CGH modulates the laser phase to create multiple focal points.
+    """
+    # The source states that CGH allows controlling the number and position of focal points.
+    # For example, three voxels can be formed by one CGH.
+    # [G] Standard CGH generation algorithms (e.g., Gerchberg-Saxton) would be used here.
+    # The output is a phase pattern matching the SLM resolution (1920x1200).
+    return generate_phase_pattern(points, slm_config['resolution'])
+
+def apply_slm_pattern(slm, pattern):
+    """
+    Applies the phase pattern to the LC-SLM.
+    """
+    # Send pixel data to the SLM driver
+    slm.driver.set_data(pattern)
+
+def apply_scanner_voltage(scanner, theta_x, theta_y):
+    """
+    Converts deflection angles to voltage and applies to galvanometer scanners.
+    """
+    # The source mentions conversion via D/A converter.
+    # [G] Assuming a linear mapping from angle to voltage for the galvanometer.
+    voltage_x = theta_x * scanner.sensitivity_x
+    voltage_y = theta_y * scanner.sensitivity_y
+    scanner.driver.set_voltage(voltage_x, voltage_y)
+
+def set_varifocal_lens(lens, z_position):
+    """
+    Sets the varifocal lens to focus at the desired axial position.
+    """
+    # The source mentions using a varifocal lens to change the spread angle.
+    # [G] The relationship between z_position and lens voltage is device-specific.
+    voltage = z_to_voltage(z_position, lens.calibration_curve)
+    lens.driver.set_voltage(voltage)
+
+def trigger_laser_pulse(params):
+    """
+    Triggers a single laser pulse.
+    """
+    # The laser repetition frequency is 10 kHz.
+    # Each path receives 480 uJ per pulse.
+    laser.trigger()
+
+def wait_for_exposure():
+    """
+    Waits for the emission to be visible.
+    The exposure time for static images is 67 ms.
+    Animation frame rate is 20 fps.
+    """
+    # Wait for the persistence of vision or the next frame
+    time.sleep(1.0 / 20.0) # 20 fps
+```
+
+## Subtopics
+
+### [Liquid-Crystal and Related SLMs](7068-liquid-crystal-and-related-slms.md)
+Use of spatial light modulators (SLMs) such as LCDs or magneto-optic SLMs to modulate light with a computed holographic fringe. LCDs are common electro-optic SLMs, typically containing about one million pixels. Magneto-optic SLMs often contain less than one million elements.
+
+## Operating characteristics
+**Time Complexity:** The rendering time is dominated by the laser repetition rate ($10 \text{ kHz}$) and the mechanical scanning speed of the galvanometers. The system achieves an animation frame rate of $20 \text{ fps}$ [S1]. The sorting of slices to minimize scanning path length optimizes the mechanical movement time.
+
+**Memory Complexity:** The system requires storing the 3D point cloud data and the CGH patterns for the SLM. The SLM resolution is $1920 \times 1200$ pixels, requiring approximately $2.3 \text{ M}$ pixels of phase data per frame.
+
+**Measured Performance:**
+*   **Rendering Volume:** Combined axial rendering area of $60 \text{ mm}$. Path 1 covers $50 \times 50 \text{ mm}^2$ at $88.4 \text{ mm}$ axial position. Path 2 covers $60 \times 60 \text{ mm}^2$ at $114.4 \text{ mm}$ axial position [S1].
+*   **Voxel Density:** Using CGH to form three voxels achieves higher voxel density compared to graphics rendered by a single voxel [S1].
+*   **Exposure:** Static image exposure time is $67 \text{ ms}$ when a human faces the display [S1].
+
+**Strengths:**
+*   **High Voxel Density:** Holographic multiplexing allows multiple voxels to be generated per laser pulse, increasing density without increasing laser power or repetition rate [S1].
+*   **Real-Time Rendering:** Demonstrated real-time animation at $20 \text{ fps}$ [S1].
+*   **Large Volume:** Cooperative dual-path design extends the effective rendering volume beyond what a single path could achieve [S1].
+
+**Limitations:**
+*   **Complexity:** Requires precise synchronization between two optical paths, SLM, and galvanometer scanners.
+*   **Safety:** Uses high-energy femtosecond lasers in a gas-filled cell, requiring safety precautions [S1].
+*   **Resolution:** Limited by the SLM pixel pitch ($8 \text{ \mu m}$) and the diffraction limit of the focusing optics.
+
+**When to Use:**
+*   When high voxel density and real-time volumetric animation are required in a palm-sized volume.
+*   When the content benefits from the brightness and sharpness of multiphoton excitation in gas.
+
+**When Not to Use:**
+*   For large-scale volumetric displays (e.g., room-sized) where mechanical scanning speed becomes a bottleneck.
+*   For applications requiring continuous color without multiple laser sources (this system uses a single wavelength, $1030 \text{ nm}$, though the emission color depends on the gas).
+
+## Background
+Dual-Path Holographic Laser Rendering was developed by Kota Kumagai, Hisashi Oka, Kazuki Horikiri, Tetsuji Suzuki, and Yoshio Hayasaki at the Center for Optical Research and Education, Utsunomiya University, Japan [S1]. The method was presented at SIGGRAPH 2024 Emerging Technologies [S1]. It builds on the principles of femtosecond laser-induced plasma emission in gases and the use of SLMs for holographic beam shaping. The system addresses the trade-off between scanning speed and voxel density by combining the parallelism of holography with the flexibility of mechanical scanning.
+
+## Sources
+[S1] Volumetric Display with Dual-Path Holographic Laser Rendering, https://doi.org/10.1145/3641517.3664387, fetched 2026-10-31

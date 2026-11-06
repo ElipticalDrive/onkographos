@@ -3,100 +3,53 @@
 Also called: rayIntersectsTriangle (AxisAlignedRay)
 
 ## Overview
-An algorithm to determine if a ray intersects a triangle, optimized for axis-aligned rays using Plücker coordinates to simplify cross products [S1, unofficial]. It builds on [General Ray-Triangle Intersection (Plücker Coordinates)](909-general-ray-triangle-intersection-pl-cker-coordinates.md) by restricting the ray direction to be axis-aligned, allowing for a simplified intersection test that avoids general 3D cross product computations for the ray direction itself [S1, unofficial].
+An algorithm to determine if a ray intersects a triangle, optimized for axis-aligned rays using Plücker coordinates to simplify cross products [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `org`: Ray origin (float3).
-- `dir`: Ray direction (float3), constrained to be axis-aligned (e.g., `(1,0,0)`, `(0,1,0)`, or `(0,0,1)`).
-- `a`, `b`, `c`: Triangle vertices (float3).
+- `org`: Ray origin (float3) [S1, unofficial].
+- `dir`: Ray direction (float3), constrained to be axis-aligned [S1, unofficial].
+- `a`, `b`, `c`: Triangle vertices (float3) [S1, unofficial].
+- `n`: Triangle normal (float3) [S1, unofficial].
 
 **Outputs:**
-- Boolean indicating intersection.
+- Boolean indicating intersection [S1, unofficial].
 
 **Data Structures:**
-- No complex data structures required. Standard 3D vectors and scalars.
+- Standard 3D vectors and scalars [S1, unofficial].
 
 **Steps:**
-1. Calculate the dot product of the triangle normal and ray direction:
-   $$ \text{cosND} = \mathbf{n} \cdot \mathbf{dir} $$
-   where $\mathbf{n}$ is the triangle normal. Note: The source code calculates `n` from the triangle vertices implicitly or explicitly before this step. In the provided snippet, `n` is passed as an input to the intersection logic context, or derived from `a,b,c`. The snippet shows `n` being used directly. We assume `n` is the normalized normal of the triangle defined by `a,b,c`.
-
-2. Calculate the intersection distance `t` along the ray:
-   $$ t = \frac{-\mathbf{n} \cdot (\text{org} - \mathbf{a})}{\text{cosND}} $$
-   This step determines if the ray plane intersects the triangle plane.
-
-3. Transform the triangle vertices `a`, `b`, `c` into the coordinate space centered at the ray origin:
-   $$ \mathbf{a}' = \mathbf{a} - \text{org} $$
-   $$ \mathbf{b}' = \mathbf{b} - \text{org} $$
-   $$ \mathbf{c}' = \mathbf{c} - \text{org} $$
-
-4. Compute Plücker coordinates for the three triangle edges relative to the ray direction. The Plücker coordinate helper function for two segments (ray edge and triangle edge) is defined as:
-   $$ \text{pluecker}(\mathbf{a}_0, \mathbf{a}_1, \mathbf{b}_0, \mathbf{b}_1) = \mathbf{a}_1 \cdot (\mathbf{b}_1 \times \mathbf{b}_0) + \mathbf{b}_1 \cdot (\mathbf{a}_1 \times \mathbf{a}_0) $$
-   However, the source code uses a specific call pattern: `pluecker(vec3f(0.f), dir, a, b)`. Let's map this to the formula.
-   Let $\mathbf{a}_0 = \mathbf{0}$, $\mathbf{a}_1 = \mathbf{dir}$, $\mathbf{b}_0 = \mathbf{a}'$, $\mathbf{b}_1 = \mathbf{b}'$.
-   $$ sx = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{a}', \mathbf{b}') $$
-   $$ sy = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{b}', \mathbf{c}') $$
-   $$ sz = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{c}', \mathbf{a}') $$
-
-5. Determine if the ray is inside the triangle by checking if all Plücker coordinates have the same sign (all non-negative or all non-positive):
-   $$ \text{if } (\min(sx, sy, sz) \ge 0 \text{ or } \max(sx, sy, sz) \le 0) \text{ return true} $$
+1. Calculate the dot product of the triangle normal and ray direction: $\text{cosND} = \mathbf{n} \cdot \mathbf{dir}$ [S1, unofficial].
+2. Calculate the intersection distance $t$ along the ray: $t = -\mathbf{n} \cdot (\text{org} - \mathbf{a}) / \text{cosND}$ [S1, unofficial].
+3. Transform the triangle vertices into the coordinate space centered at the ray origin: $\mathbf{a} = \mathbf{a} - \text{org}$, $\mathbf{b} = \mathbf{b} - \text{org}$, $\mathbf{c} = \mathbf{c} - \text{org}$ [S1, unofficial].
+4. Compute Plücker coordinates for the three triangle edges relative to the ray direction using the helper function $\text{pluecker}(\mathbf{a}_0, \mathbf{a}_1, \mathbf{b}_0, \mathbf{b}_1) = \mathbf{a}_1 \cdot (\mathbf{b}_1 \times \mathbf{b}_0) + \mathbf{b}_1 \cdot (\mathbf{a}_1 \times \mathbf{a}_0)$ [S1, unofficial]. The calls are $\text{sx} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{a}, \mathbf{b})$, $\text{sy} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{b}, \mathbf{c})$, and $\text{sz} = \text{pluecker}(\mathbf{0}, \mathbf{dir}, \mathbf{c}, \mathbf{a})$ [S1, unofficial].
+5. Determine if the ray is inside the triangle by checking if all Plücker coordinates have the same sign: if $\min(\text{sx}, \text{sy}, \text{sz}) \ge 0$ or $\max(\text{sx}, \text{sy}, \text{sz}) \le 0$, return true [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def axis_aligned_ray_triangle_intersection(org, dir, a, b, c):
-    # Calculate triangle normal
-    # Note: The source snippet assumes 'n' is available. 
-    # Standard calculation:
-    edge1 = b - a
-    edge2 = c - a
-    n = cross(edge1, edge2)
-    
+def axis_aligned_ray_triangle_intersection(org, dir, a, b, c, n):
     # Step 1: Dot product of normal and ray direction
     cosND = dot(n, dir)
     
-    # Pitfall: If cosND is 0, the ray is parallel to the triangle plane.
-    # The source returns false in this case, ignoring coplanar edge cases.
-    if cosND == 0.0:
-        return False
-    
     # Step 2: Calculate intersection distance t
-    # t = -dot(org - a, n) / cosND
-    # This step is technically used to find the intersection point, 
-    # but the Plücker test in the source does not explicitly use 't' 
-    # for the boolean result, only the Plücker coordinates. 
-    # However, the source lists this step. 
-    # In many Plücker-based tests, the distance check is separate.
-    # The source code snippet provided does not show 't' being used 
-    # in the final boolean check, only the Plücker signs.
-    # We include it as per the source's "step" list.
-    t = -dot(org - a, n) / cosND
+    t = -dot(n, org - a) / cosND
     
     # Step 3: Transform vertices to ray origin space
-    a_prime = a - org
-    b_prime = b - org
-    c_prime = c - org
+    a = a - org
+    b = b - org
+    c = c - org
     
     # Step 4: Compute Plücker coordinates
-    # Helper function definition from source:
-    # pluecker(a0, a1, b0, b1) = dot(a1-a0, cross(b1,b0)) + dot(b1-b0, cross(a1,a0))
-    # Call: pluecker(vec3f(0.f), dir, a, b)
-    # a0=0, a1=dir, b0=a_prime, b1=b_prime
-    
-    sx = pluecker_helper(vec3(0,0,0), dir, a_prime, b_prime)
-    sy = pluecker_helper(vec3(0,0,0), dir, b_prime, c_prime)
-    sz = pluecker_helper(vec3(0,0,0), dir, c_prime, a_prime)
+    sx = pluecker_helper(vec3(0, 0, 0), dir, a, b)
+    sy = pluecker_helper(vec3(0, 0, 0), dir, b, c)
+    sz = pluecker_helper(vec3(0, 0, 0), dir, c, a)
     
     # Step 5: Check signs
-    min_val = min(sx, sy, sz)
-    max_val = max(sx, sy, sz)
-    
-    if min_val >= 0.0 or max_val <= 0.0:
+    if min(sx, sy, sz) >= 0.0 or max(sx, sy, sz) <= 0.0:
         return True
-    else:
-        return False
+    return False
 
 def pluecker_helper(a0, a1, b0, b1):
     return dot(a1 - a0, cross(b1, b0)) + dot(b1 - b0, cross(a1, a0))
@@ -106,22 +59,22 @@ def pluecker_helper(a0, a1, b0, b1):
 - Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- If the ray is perfectly parallel to the triangle plane (`cosND == 0.f`), the function returns false, ignoring the edge case where the ray might lie in the same 2D plane [S1, unofficial].
+- If the ray is perfectly parallel to the triangle plane ($\text{cosND} == 0$), the function returns false, ignoring the edge case where the ray might lie in the same 2D plane [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** Constant time $O(1)$ per triangle.
-- **Memory Complexity:** Constant space $O(1)$.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Not given in the sources.
-- **Strengths:** Optimized for axis-aligned rays, simplifying cross product calculations.
-- **Limitations:** Only works for axis-aligned rays. Does not handle coplanar rays correctly (returns false).
-- **When to use:** When rays are guaranteed to be axis-aligned (e.g., in certain voxel traversal or specific ray tracing scenarios).
-- **When not:** For general ray directions.
+- Time complexity: Not given in the sources.
+- Memory complexity: Not given in the sources.
+- Measured performance: Not given in the sources.
+- Scaling: Not given in the sources.
+- Strengths: Optimized for axis-aligned rays using Plücker coordinates [S1, unofficial].
+- Limitations: Only works for axis-aligned rays; returns false for coplanar rays [S1, unofficial].
+- When to use: Not given in the sources.
+- When not: Not given in the sources.
 
 ## Background
-- **Origin:** The method is described in the `isoext` repository by Guangyan Cai [S1, unofficial].
-- **History:** Not given in the sources.
-- **Usage:** Used in the `isoext` project for volume rendering/isosurface extraction [S1, unofficial].
+- Origin: Described in the `isoext` repository by Guangyan Cai [S1, unofficial].
+- History: Not given in the sources.
+- Usage: Not given in the sources.
 
 ## Sources
 [S1] GuangyanCai/isoext, https://github.com/GuangyanCai/isoext, fetched 2026-10-27 (unofficial)

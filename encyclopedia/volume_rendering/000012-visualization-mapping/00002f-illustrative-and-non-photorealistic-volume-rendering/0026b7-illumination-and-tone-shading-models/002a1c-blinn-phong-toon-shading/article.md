@@ -1,0 +1,96 @@
+# Blinn-Phong Toon Shading
+
+Also called: Toon Blinn-Phong
+
+## Overview
+Blinn-Phong Toon Shading is a stylized illumination model for volume rendering that applies posterization to the diffuse component and binary thresholding to the specular component of the Blinn-Phong lighting equation [S1, unofficial]. It distinguishes itself from standard Blinn-Phong by replacing continuous lighting gradients with discrete color bands, creating a "cartoon" or "cel-shaded" aesthetic [S1, unofficial]. Unlike [Lit Sphere Shading](785-lit-sphere-shading.md) which maps lighting to a sphere texture, or [Volume Illustration Tone Shading](805-volume-illustration-tone-shading.md) which uses complex transfer functions, this method relies on simple arithmetic thresholds applied to the dot products of the normal and light vectors [S1, unofficial].
+
+## How it works
+The method operates on fragment-level data. It requires the normalized volume sample gradient $\nabla f_n$ (used as the surface normal $N$), the light direction vector $L$, the view direction vector $V$, and the half-vector $H = \frac{L+V}{\|L+V\|}$. The base color $c_{base}$ is derived from the scalar field via a transfer function.
+
+**Data Structures:**
+*   $N$: Normalized gradient vector.
+*   $L$: Normalized light direction vector.
+*   $V$: Normalized view direction vector.
+*   $H$: Normalized half-vector.
+*   $shininess$: Exponent for specular term (Not given in the sources).
+*   $c_{base}$: Base color from transfer function.
+
+**Steps:**
+1.  Calculate the diffuse factor $d_f$ using the dot product of the light direction and normal:
+    $$ d_f = \max(0, N \cdot L) $$
+2.  Calculate the specular factor $s_f$ using the dot product of the half-vector and normal, raised to the shininess exponent:
+    $$ s_f = \max(0, N \cdot H)^{shininess} $$
+3.  Posterize the diffuse factor $d_f$ into discrete levels based on thresholds $A=0.1$, $B=0.3$, $C=0.6$, and $D=1.0$ [S1, unofficial]:
+    *   If $d_f < 0.1$, set $d_f = 0.0$.
+    *   If $0.1 \le d_f < 0.3$, set $d_f = 0.3$.
+    *   If $0.3 \le d_f < 0.6$, set $d_f = 0.6$.
+    *   If $d_f \ge 0.6$, set $d_f = 1.0$.
+4.  Apply a harsh cut (binary threshold) to the specular factor $s_f$ using a threshold of $0.2$ [S1, unofficial]:
+    $$ s_f = \text{step}(0.2, s_f) $$
+    Where $\text{step}(edge, x)$ returns $0$ if $x < edge$ and $1$ otherwise.
+5.  Compute the final color $c$ by combining the ambient term (if any), the posterized diffuse term, and the binary specular term with the base color. The source implies a standard additive or multiplicative combination, typically:
+    $$ c = c_{base} \cdot (c_{ambient} + d_f \cdot c_{diffuse} + s_f \cdot c_{specular}) $$
+    *Note: Specific ambient/specular color weights are not given in the sources [G].*
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def blinn_phong_toon_shading(N, L, V, c_base, shininess, c_ambient, c_diffuse, c_specular):
+    # Normalize inputs if not already normalized
+    N = normalize(N)
+    L = normalize(L)
+    V = normalize(V)
+    
+    # Calculate half vector
+    H = normalize(L + V)
+    
+    # 1. Diffuse factor
+    diffuse_factor = max(0.0, dot(N, L))
+    
+    # 2. Specular factor
+    specular_factor = pow(max(0.0, dot(N, H)), shininess)
+    
+    # 3. Posterize diffuse factor
+    if diffuse_factor < 0.1:
+        diffuse_factor = 0.0
+    elif diffuse_factor < 0.3:
+        diffuse_factor = 0.3
+    elif diffuse_factor < 0.6:
+        diffuse_factor = 0.6
+    else:
+        diffuse_factor = 1.0
+        
+    # 4. Harsh cut specular factor
+    if specular_factor < 0.2:
+        specular_factor = 0.0
+    else:
+        specular_factor = 1.0
+        
+    # 5. Combine
+    # Assuming standard Blinn-Phong structure with toon-modulated terms
+    color = c_base * (c_ambient + diffuse_factor * c_diffuse + specular_factor * c_specular)
+    
+    return color
+```
+
+## Subtopics
+
+### Edge Enhancement Shading
+A variant that enhances edges by darkening pixels where the surface normal is nearly perpendicular to the view direction [S1, unofficial]. It calculates the dot product $dv = V \cdot N$, then computes an edge value $ev = (1.0 - |dv|)^{0.3}$ [S1, unofficial]. If $ev \ge 0.1$, the color is mixed towards black using the formula: $\text{mix}(color.rgb, \vec{0}, (\frac{ev - 0.1}{1.0 - 0.1})^6)$ [S1, unofficial]. The edge threshold $et$ is $0.1$ [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per fragment. The method involves basic vector operations and comparisons.
+*   **Memory Complexity:** $O(1)$. No additional buffers or textures are required beyond standard fragment data.
+*   **Performance:** Extremely fast due to the absence of texture lookups or complex iterative calculations [S1, unofficial].
+*   **Strengths:** Produces a distinct non-photorealistic style with minimal computational cost [S1, unofficial].
+*   **Limitations:** The discrete lighting levels can appear artificial; the harsh specular cut may look unnatural in some contexts [S1, unofficial].
+*   **When to use:** When a stylized, cartoon-like appearance is desired for volume data [S1, unofficial].
+*   **When not to use:** When photorealism or smooth lighting gradients are required.
+
+## Background
+The method is described in the context of a Qt-based volume rendering application [S1, unofficial]. It is presented as a simple extension of the standard Blinn-Phong model to achieve toon shading effects without complex shader logic [S1, unofficial].
+
+## Sources
+[S1] fargiolas/qvrc, https://github.com/fargiolas/qvrc, fetched 2026-10-26 (unofficial)

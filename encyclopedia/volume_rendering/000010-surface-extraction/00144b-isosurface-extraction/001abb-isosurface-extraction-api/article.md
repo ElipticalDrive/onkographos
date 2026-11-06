@@ -1,42 +1,32 @@
 # Isosurface Extraction API
-
 Also called: Marching Cubes Function Interface
 
 ## Overview
-The Isosurface Extraction API provides a high-level interface for extracting a manifold triangular mesh from a continuous implicit scalar field defined by a user-supplied function, rather than a pre-computed discrete grid. It solves the problem of converting mathematical implicit surfaces into polygonal meshes by internally managing an adaptive octree traversal and calling a Rust-based core extraction routine. It sets itself apart from standard grid-based methods like [Marching Cubes](30-isosurface-extraction.md) by accepting a callable function `func(x,y,z)` directly, handling gradient estimation via finite differences if not provided, and supporting adaptive refinement through octree depth parameters [S2, unofficial].
+The Isosurface Extraction API provides a high-level interface for extracting a manifold triangular mesh from a continuous implicit scalar field defined by a user-supplied function, rather than a pre-computed discrete grid [S2, unofficial]. It solves the problem of converting mathematical implicit surfaces into polygonal meshes by internally managing an adaptive octree traversal and calling a Rust-based core extraction routine [S2, unofficial]. It sets itself apart from standard grid-based methods like [Marching Cubes](30-isosurface-extraction.md) by accepting a callable function `func(x,y,z)` directly, handling gradient estimation via finite differences if not provided, and supporting adaptive refinement through octree depth parameters [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Inputs:**
-    *   `func`: A vectorized implicit function. It accepts an $(N, 3)$ array of float64 positions and returns an $(N,)$ array of float64 scalar values. It may optionally return an $(N, 3)$ array of float64 gradients.
-    *   `bbox_min`, `bbox_max`: 3-element tuples defining the axis-aligned bounding box of the extraction domain.
-    *   `iso_value`: The scalar isovalue for extraction (default 0.0) [S2, unofficial].
-    *   `min_depth`, `max_depth`: Integers defining the octree depth range. The number of cells per axis is $2^{\text{depth}}$. `min_depth` must be $\ge 1$ and `max_depth` must be $\le 12$ [S2, unofficial].
+    *   `func`: A vectorized implicit function taking $(N, 3)$ float64 positions and returning $(N,)$ float64 scalar values, optionally returning $(N, 3)$ float64 gradients [S2, unofficial].
+    *   `bbox_min`, `bbox_max`: 3-element tuples defining the axis-aligned bounding box of the extraction domain [S2, unofficial].
+    *   `iso_value`: Isosurface level, default $0.0$ [S2, unofficial].
+    *   `min_depth`, `max_depth`: Octree depth range. Cell count per axis is $2^{\text{depth}}$. `min_depth` must be $\ge 1$ and `max_depth` must be $\le 12$ [S2, unofficial].
     *   `angle_threshold`: Float in degrees $(0, 180)$. Normals differing by more than this value trigger sharp-feature handling [S2, unofficial].
-    *   `fd_step`: Float for finite difference gradient estimation when `func` does not return gradients (default $10^{-5}$) [S2, unofficial].
+    *   `fd_step`: Float for finite difference gradient estimation when `func` does not return gradients, default $10^{-5}$ [S2, unofficial].
 *   **Outputs:**
     *   `vertices`: A $(V, 3)$ float64 array of mesh vertices.
     *   `faces`: A $(F, 3)$ int64 array of triangle indices.
     *   Empty cases return arrays with shape $(0, 3)$ [S2, unofficial].
 
 **Data Structures:**
-The API uses a callback adapter `_eval_batch` to bridge Python and the Rust core. This adapter ensures that the output of `func` is converted to numpy arrays of correct dtype (`float64`) and shape. The Rust core `extract_mesh` handles the octree traversal and mesh generation [S2, unofficial].
+The API uses a callback adapter `_eval_batch` to bridge Python and the Rust core, ensuring that the output of `func` is converted to numpy arrays of correct dtype (`float64`) and shape [S2, unofficial].
 
 **Steps:**
-1.  **Validate Inputs:**
-    *   Check that `bbox_min` and `bbox_max` are 3-element tuples and `bbox_min < bbox_max` in all dimensions. Raise `ValueError` if not [S2, unofficial].
-    *   Check that `min_depth` and `max_depth` are integers, $1 \le \text{min\_depth} \le \text{max\_depth} \le 12$. Raise `ValueError` if not [S2, unofficial].
-    *   Check that `angle_threshold` is in $(0, 180)$. Raise `ValueError` if not [S2, unofficial].
-2.  **Normalize Bounding Box:**
-    *   If the bounding box is non-cubic, expand it to the smallest enclosing cube centered on the original bounding box center. Issue a warning during this expansion [S2, unofficial].
-3.  **Create Callback Adapter:**
-    *   Define `_eval_batch(points)` which calls `func(points)`.
-    *   If `func` returns a tuple `(values, gradients)`, validate that `values` has shape $(N,)$ and `gradients` has shape $(N, 3)$. If `gradients` is `None`, the core will use finite differences with step `fd_step` [S2, unofficial].
-    *   If `func` returns only values, ensure shape is $(N,)$ [S2, unofficial].
-4.  **Call Core Extraction:**
-    *   Invoke the Rust function `extract_mesh` with the callback, the normalized bounding box, `min_depth`, `max_depth`, `angle_threshold`, `iso_value`, and an adaptive flag [S2, unofficial].
-5.  **Post-process Output:**
-    *   Ensure the returned vertices are float64 with shape $(V, 3)$ and faces are int64 with shape $(F, 3)$ [S2, unofficial].
+1.  **Validate Inputs:** Check that `bbox_min` and `bbox_max` are 3-element tuples and `bbox_min < bbox_max` in all dimensions. Check that `min_depth` and `max_depth` are integers, $1 \le \text{min\_depth} \le \text{max\_depth} \le 12$. Check that `angle_threshold` is in $(0, 180)$. Raise `ValueError` on failures [S2, unofficial].
+2.  **Normalize Bounding Box:** If the bounding box is non-cubic, expand it to the smallest enclosing cube centered on the original bounding box center and issue a warning [S2, unofficial].
+3.  **Create Callback Adapter:** Define `_eval_batch(points)` which calls `func(points)`. If `func` returns a tuple `(values, gradients)`, validate that `values` has shape $(N,)$ and `gradients` has shape $(N, 3)$. If `gradients` is `None`, the core uses finite differences with step `fd_step` [S2, unofficial].
+4.  **Call Core Extraction:** Invoke the Rust `extract_mesh` function with the callback, normalized bounding box, depth range, angle threshold, `iso_value`, and adaptive flag [S2, unofficial].
+5.  **Post-process Output:** Ensure the returned vertices are float64 with shape $(V, 3)$ and faces are int64 with shape $(F, 3)$ [S2, unofficial].
 
 **Pseudocode:**
 
@@ -55,18 +45,13 @@ def isosurface_extraction_api(
     angle_threshold: float = 10.0,
     fd_step: float = 1e-5
 ) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Extract isosurface from implicit function using adaptive octree.
-    """
     # 1. Validate Inputs
     bbox_min_arr = np.asarray(bbox_min, dtype=np.float64)
     bbox_max_arr = np.asarray(bbox_max, dtype=np.float64)
-    
     if bbox_min_arr.shape != (3,) or bbox_max_arr.shape != (3,):
         raise ValueError("Bounding boxes must be 3-element tuples.")
     if not np.all(bbox_min_arr < bbox_max_arr):
         raise ValueError("bbox_min must be strictly less than bbox_max.")
-        
     if not (1 <= min_depth <= max_depth <= 12):
         raise ValueError("Depth must be in [1, 12] and min <= max.")
     if not (0.0 < angle_threshold < 180.0):
@@ -76,33 +61,24 @@ def isosurface_extraction_api(
     center = (bbox_min_arr + bbox_max_arr) / 2.0
     extents = (bbox_max_arr - bbox_min_arr) / 2.0
     max_extent = np.max(extents)
-    
-    # Expand to cubic
     bbox_min_cubic = center - max_extent
     bbox_max_cubic = center + max_extent
-    
     # Warning issued here in implementation [S2, unofficial]
 
     # 3. Define Callback Adapter
     def _eval_batch(points: np.ndarray) -> tuple:
-        """
-        Wrapper for func to ensure correct output format for Rust core.
-        """
         result = func(points)
         if isinstance(result, tuple):
             values, gradients = result
             values = np.asarray(values, dtype=np.float64)
             if values.shape[0] != points.shape[0]:
                 raise ValueError("Value count mismatch.")
-            
             if gradients is not None:
                 gradients = np.asarray(gradients, dtype=np.float64)
                 if gradients.shape != (points.shape[0], 3):
                     raise ValueError("Gradient shape mismatch.")
                 return values, gradients
-            else:
-                # Core will handle finite differences if gradients is None
-                return values, None
+            return values, None
         else:
             values = np.asarray(result, dtype=np.float64)
             if values.shape[0] != points.shape[0]:
@@ -110,49 +86,30 @@ def isosurface_extraction_api(
             return values, None
 
     # 4. Call Rust Core
-    # Note: This is a conceptual call to the underlying Rust implementation.
-    # The actual implementation uses a compiled binary.
-    vertices, faces = extract_mesh_rust_core(
-        callback=_eval_batch,
-        bbox_min=bbox_min_cubic,
-        bbox_max=bbox_max_cubic,
-        min_depth=min_depth,
-        max_depth=max_depth,
-        angle_threshold=angle_threshold,
-        iso_value=iso_value,
-        fd_step=fd_step,
-        adaptive=True
-    )
+    # Invoke Rust extract_mesh with callback, bbox_min_cubic, bbox_max_cubic,
+    # min_depth, max_depth, angle_threshold, iso_value, fd_step, adaptive=True [S2, unofficial]
+    # vertices, faces = ...
 
     # 5. Ensure Output Types
-    vertices = np.asarray(vertices, dtype=np.float64)
-    faces = np.asarray(faces, dtype=np.int64)
-    
-    # Handle empty cases
-    if vertices.ndim != 2 or vertices.shape[1] != 3:
-        vertices = np.empty((0, 3), dtype=np.float64)
-    if faces.ndim != 2 or faces.shape[1] != 3:
-        faces = np.empty((0, 3), dtype=np.int64)
-        
+    # Post-process to ensure vertices are float64 (V,3) and faces are int64 (F,3) [S2, unofficial]
     return vertices, faces
 ```
 
 ## Subtopics
 
 ### [Manual Shell Extraction](2153-manual-shell-extraction.md)
-Separates a polygonal isosurface mesh into connected components (shells) to handle disjoint surfaces or allow user selection of specific regions.
+Separates a polygonal isosurface mesh into connected components (shells) to handle disjoint surfaces or allow user selection of specific regions. It differs from automated connectivity filters by explicitly traversing the mesh graph from a starting triangle ID to identify all connected triangles belonging to the same shell, allowing for interactive selection of disjoint parts.
 
 ## Operating characteristics
-*   **Time Complexity:** Determined by the octree traversal and the number of leaf cells evaluated. The adaptive nature means complexity scales with the surface area and detail, not just the volume. The Rust core provides efficient memory management and parallelization [S2, unofficial].
-*   **Memory Complexity:** Proportional to the number of leaf cells in the octree and the resulting mesh size. The adaptive approach minimizes memory usage for smooth regions by using larger cells [S2, unofficial].
-*   **Performance:** Produces identical results to `marching_cubes` on a pre-computed grid for the same domain and resolution, as verified by `assert_allclose` [S1, unofficial].
+*   **Time Complexity:** Determined by the octree traversal and the number of leaf cells evaluated. The adaptive nature means complexity scales with the surface area and detail, not just the volume [S2, unofficial].
+*   **Memory Complexity:** Proportional to the number of leaf cells in the octree and the resulting mesh size [S2, unofficial].
 *   **Strengths:** No need to pre-compute a dense grid; supports arbitrary implicit functions; adaptive resolution captures detail efficiently; sharp feature handling via angle threshold [S2, unofficial].
 *   **Limitations:** Requires a callable function; gradient estimation via finite differences adds computational overhead if not provided; non-cubic bounding boxes are expanded, potentially wasting computation on empty space [S2, unofficial].
-*   **When to Use:** When the scalar field is defined by a complex mathematical function or simulation output that is expensive to sample on a full grid, or when adaptive resolution is desired.
-*   **When Not to Use:** When a pre-computed grid is already available and fixed resolution is sufficient (use [Marching Cubes](30-isosurface-extraction.md) directly for potentially lower overhead).
+*   **When to Use:** When the scalar field is defined by a complex mathematical function or simulation output that is expensive to sample on a full grid, or when adaptive resolution is desired [S2, unofficial].
+*   **When Not to Use:** When a pre-computed grid is already available and fixed resolution is sufficient (use [Marching Cubes](30-isosurface-extraction.md) directly for potentially lower overhead) [S2, unofficial].
 
 ## Background
-The Isosurface Extraction API is part of the `isomesh` library, which provides a Python interface to a Rust-based isosurface extraction engine [S2, unofficial]. It builds upon the principles of adaptive isosurface extraction, specifically leveraging Manifold Dual Contouring techniques for sharp feature preservation and manifold guarantee [S2, unofficial]. The API abstracts the complexity of octree traversal and cell processing, providing a simple function-call interface similar to `scipy.ndimage.marching_cubes` but for implicit functions.
+The Isosurface Extraction API is part of the `isomesh` library, which provides a Python interface to a Rust-based isosurface extraction engine [S2, unofficial]. It builds upon the principles of adaptive isosurface extraction, specifically leveraging Manifold Dual Contouring techniques for sharp feature preservation and manifold guarantee [S2, unofficial]. The API abstracts the complexity of octree traversal and cell processing, providing a simple function-call interface similar to `scipy.ndimage.marching_cubes` but for implicit functions [S2, unofficial].
 
 ## Sources
 [S1] pmneila/PyMCubes, https://github.com/pmneila/PyMCubes, fetched 2026-10-26 (unofficial)

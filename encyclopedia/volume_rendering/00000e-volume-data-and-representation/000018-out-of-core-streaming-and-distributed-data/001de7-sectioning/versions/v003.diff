@@ -1,0 +1,136 @@
+--- v002.md
++++ v003.md
+@@ -3,15 +3,15 @@
+ 
+ ## Overview
+-Sectioning partitions a volume dataset into smaller segments to constrain the on-chip memory usage of First-In-First-Out (FIFO) buffers within hardware pipelines [S1, unofficial]. It solves the problem of limited on-chip storage for intermediate values required for ray-casting by off-loading these values to external memory between processing sections [S1, unofficial]. Unlike [Hardware-Assisted Volume Streaming](2119-hardware-assisted-volume-streaming.md) which relies on hardware buffers for streaming, or [Chunk-based spatial partitioning](3862-chunk-based-spatial-partitioning.md) which divides space for load balancing, Sectioning specifically manages the recirculation of data within a single rendering pass to maintain exact numerical precision without approximation [S1, unofficial].
++Sectioning partitions a volume dataset into smaller segments to constrain the on-chip memory usage of First-In-First-Out (FIFO) buffers within hardware pipelines [S1, unofficial]. It solves the problem of limited on-chip storage for intermediate values required for ray-casting by off-loading these values to external memory between processing sections [S1, unofficial]. Unlike sibling methods that focus on network distribution or bandwidth scheduling, Sectioning manages data recirculation within a single rendering pass to maintain exact numerical precision without approximation [S1, unofficial][G].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A volume dataset, partitioned into sections along the x-direction.
+-*   **Output:** A rendered image, identical to a non-sectioned render, with no visual artifacts at section boundaries [S1, unofficial].
++*   **Input:** A volume dataset partitioned into sections along the x-direction [S1, unofficial].
++*   **Output:** A rendered image identical to a non-sectioned render, with no visual artifacts at section boundaries [S1, unofficial].
+ 
+ **Data Structures:**
+ *   **Section Memory:** An external memory block acting as a large FIFO [S1, unofficial]. It stores intermediate values (accumulated color and opacity) that would normally be passed between pipeline stages [S1, unofficial].
+     *   **Layout:** The memory organization corresponds to the width of a section. In the VolumePro implementation, each section is 32 voxels wide [S1, unofficial].
+-    *   **Content:** Intermediate values needed for rendering near the right boundary of a section.
++    *   **Content:** Intermediate values needed for rendering near the right boundary of a section [S1, unofficial].
+ 
+ **Numbered Steps:**
+@@ -43,50 +43,41 @@
+ **Pseudocode:**
+ ```python
+-def sectioned_volume_rendering(volume, ray_origin, ray_direction, step_size=0.5, section_width=32):
++def sectioned_volume_render(volume, section_width=32):
+     """
+-    Renders a volume using sectioning to manage on-chip FIFO memory.
+-    Follows VolumePro architecture: left and right pipelines with Section Memory.
++    Simulates the VolumePro sectioning pipeline.
++    Traversal: sections in x, then x within section, then y (beam), then z (front-to-back).
++    State: accumulated color (C) and opacity (alpha).
+     """
+-    # Compute ray bounds in volume coordinates [G]
+-    t_min, t_max = compute_ray_volume_intersection(ray_origin, ray_direction, volume.bounds)
+-    if t_min > t_max:
+-        return [0.0, 0.0, 0.0], 0.0
+-    
+-    # Initialize accumulated color and opacity
++    X, Y, Z = volume.shape
++    # Initialize pipeline state [G]
+     acc_color = [0.0, 0.0, 0.0]
+     acc_alpha = 0.0
+-    
+-    # Determine section boundaries along the x-axis
+-    x_min, x_max = volume.bounds.min_x, volume.bounds.max_x
+-    num_sections = int(ceil((x_max - x_min) / section_width))
+-    
+-    for s in range(num_sections):
+-        x_start = x_min + s * section_width
+-        x_end = min(x_start + section_width, x_max)
+-        
+-        # Left pipeline receives state from Section Memory at section start [S1, unofficial]
+-        # (In simulation, state persists; hardware multiplexers switch sources)
+-        
+-        for z in range(volume.depth):
+-            for y in range(volume.height):
+-                for x in range(x_start, x_end):
+-                    # Sample volume at current voxel [G]
+-                    sample_value = volume.sample(x, y, z)
+-                    
+-                    # Update pipeline state (standard over compositing) [G]
+-                    alpha_contribution = (1.0 - acc_alpha) * sample_value * step_size
+-                    acc_color[0] += alpha_contribution * sample_value
+-                    acc_color[1] += alpha_contribution * sample_value
+-                    acc_color[2] += alpha_contribution * sample_value
++    section_memory = None
++
++    for sec_start in range(0, X, section_width):
++        sec_end = min(sec_start + section_width, X)
++
++        # At start of section, left pipeline reads from Section Memory if available [S1, unofficial]
++        if section_memory is not None:
++            acc_color, acc_alpha = section_memory
++
++        for x in range(sec_start, sec_end):
++            for y in range(Y):
++                for z in range(Z):
++                    # Sample volume and update state using standard over-attenuation compositing [G]
++                    sample_color, sample_alpha = volume[x, y, z]
++                    alpha_contribution = (1.0 - acc_alpha) * sample_alpha
++                    acc_color[0] += alpha_contribution * sample_color
++                    acc_color[1] += alpha_contribution * sample_color
++                    acc_color[2] += alpha_contribution * sample_color
+                     acc_alpha += alpha_contribution
+-                    
+-                    # Right pipeline state is (acc_color, acc_alpha)
+-                    # If at end of section, write to Section Memory [S1, unofficial]
+-                    if x == x_end - 1:
+-                        section_memory = (acc_color.copy(), acc_alpha)
+-        
+-        # After section, left pipeline reads from Section Memory for next section [S1, unofficial]
+-        # (Handled implicitly by continuing acc_color/acc_alpha in this simulation)
+-        
++
++                # Right-hand pipeline shift registers hold current state [S1, unofficial]
++                current_state = (acc_color.copy(), acc_alpha)
++
++            # At end of section, write state to Section Memory [S1, unofficial]
++            if x == sec_end - 1:
++                section_memory = current_state
++
+     return acc_color, acc_alpha
+ ```
+@@ -95,23 +86,23 @@
+ 
+ ### VolumeLoader
+-Handles loading volume data into memory; Sectioning operates on already loaded data, partitioning it for processing [Link](2045-volumeloader.md).
++Handles loading volume data into memory; Sectioning operates on already loaded data, partitioning it for processing [G][Link](2045-volumeloader.md).
+ 
+ ### Hardware-Assisted Volume Streaming
+-Uses hardware buffers for streaming; Sectioning uses external memory for FIFO recirculation [Link](2119-hardware-assisted-volume-streaming.md).
++Uses hardware buffers for streaming; Sectioning uses external memory for FIFO recirculation [G][Link](2119-hardware-assisted-volume-streaming.md).
+ 
+ ### Bandwidth-based Streaming Interval Calculation
+-Determines streaming intervals based on bandwidth; Sectioning determines section boundaries based on memory limits [Link](3128-bandwidth-based-streaming-interval-calculation.md).
++Determines streaming intervals based on bandwidth; Sectioning determines section boundaries based on memory limits [G][Link](3128-bandwidth-based-streaming-interval-calculation.md).
+ 
+ ### Chunk-based spatial partitioning
+-Divides space for parallel processing; Sectioning divides space for memory management within a single pass [Link](3862-chunk-based-spatial-partitioning.md).
++Divides space for parallel processing; Sectioning divides space for memory management within a single pass [G][Link](3862-chunk-based-spatial-partitioning.md).
+ 
+ ### Distributed computing and load balancing
+-Distributes work across nodes; Sectioning manages memory within a single node's pipeline [Link](5624-distributed-computing-and-load-balancing.md).
++Distributes work across nodes; Sectioning manages memory within a single node's pipeline [G][Link](5624-distributed-computing-and-load-balancing.md).
+ 
+ ### MapReduce-based Volume Rendering
+-Uses MapReduce for parallel rendering; Sectioning is a hardware pipeline optimization [Link](5963-mapreduce-based-volume-rendering.md).
++Uses MapReduce for parallel rendering; Sectioning is a hardware pipeline optimization [G][Link](5963-mapreduce-based-volume-rendering.md).
+ 
+ ### Out-of-core brick-based volume rendering
+-Loads bricks from disk; Sectioning manages intermediate values in external memory during rendering [Link](6288-out-of-core-brick-based-volume-rendering.md).
++Loads bricks from disk; Sectioning manages intermediate values in external memory during rendering [G][Link](6288-out-of-core-brick-based-volume-rendering.md).
+ 
+ ## Operating characteristics

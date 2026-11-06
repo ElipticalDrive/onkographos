@@ -1,0 +1,130 @@
+# Spherical Harmonic Volumetric Visibility
+
+Also called: SH Volumetric Visibility
+
+## Overview
+Spherical Harmonic Volumetric Visibility is a real-time dynamic lighting technique for direct volume rendering that encodes local and global volumetric visibility using spherical harmonic basis functions [S1, unofficial]. It sets itself apart from its siblings by storing these coefficients in a multiresolution grid to handle directional lights, point lights, and environment maps efficiently [S1, unofficial]. Unlike [Voxel Cone Tracing](1454-voxel-cone-tracing.md) which relies on geometric cone tracing, or [Froxel-based Volumetric Rendering](1919-froxel-based-volumetric-rendering.md) which uses hierarchical voxel blocks, this method projects visibility into a frequency domain to approximate scattering integrals.
+
+## How it works
+**Inputs:**
+- Volumetric density field (voxel grid).
+- Light sources: directional, point, or environment maps [S1, unofficial].
+- Camera position and view parameters.
+
+**Outputs:**
+- Rendered volume image with dynamic lighting and self-shadowing.
+
+**Data Structures:**
+- **Multiresolution Grid:** Stores spherical harmonic (SH) coefficients for each voxel or grid cell. The grid structure allows for efficient access and interpolation during rendering. The specific resolution levels and bit-packing of coefficients are not given in the sources [S1, unofficial].
+
+**Steps:**
+1. **Preprocessing/Encoding:** For each relevant location in the volume, compute the local and global volumetric visibility. This involves integrating the light transport from all light sources through the participating medium.
+2. **SH Projection:** Project the computed visibility function (radiance or irradiance) onto spherical harmonic basis functions. This converts the directional lighting information into a set of SH coefficients.
+3. **Storage:** Store the resulting SH coefficients in a multiresolution grid [S1, unofficial]. This grid acts as a precomputed transfer function or light cache.
+4. **Rendering:** During real-time rendering, sample the SH coefficients from the multiresolution grid at the current ray-marching position. Reconstruct the lighting contribution using the SH basis functions and the current view direction.
+
+**Formulas:**
+The visibility $V(\mathbf{x}, \omega)$ at position $\mathbf{x}$ in direction $\omega$ is encoded as SH coefficients $L_{lm}$. The reconstructed radiance $L(\mathbf{x}, \omega)$ is given by:
+$$ L(\mathbf{x}, \omega) = \sum_{l=0}^{N} \sum_{m=-l}^{l} c_{lm}(\mathbf{x}) Y_{lm}(\omega) $$
+where $c_{lm}(\mathbf{x})$ are the stored SH coefficients at $\mathbf{x}$, $Y_{lm}$ are the spherical harmonic basis functions, and $N$ is the SH band limit. The exact method for computing $c_{lm}(\mathbf{x})$ from the light sources and density field is not detailed in the provided sources [S1, unofficial].
+
+**Parameters:**
+- **SH Band Limit ($N$):** Not given in the sources.
+- **Grid Resolution:** Not given in the sources.
+- **Light Types:** Directional, point, environment maps [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Heterogeneous Density:** The method must account for varying density within the volume to compute accurate visibility.
+- **Real-time Constraints:** The encoding step must be efficient enough to support dynamic scenes.
+- **Precision:** SH approximation errors may occur if the band limit is too low for complex lighting scenarios.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for Spherical Harmonic Volumetric Visibility
+# Note: Specific implementation details for SH projection and grid storage are not provided in sources [S1, unofficial]
+
+def encode_visibility(volume_grid, lights):
+    """
+    Precompute SH coefficients for volumetric visibility.
+    """
+    # Initialize multiresolution grid for SH coefficients
+    sh_grid = initialize_multiresolution_grid()
+    
+    for each voxel in volume_grid:
+        position = voxel.position
+        density = voxel.density
+        
+        # Compute visibility function for this position
+        # This involves integrating light transport from all lights
+        # through the medium, considering density and geometry
+        visibility_function = compute_visibility(position, density, lights)
+        
+        # Project visibility function onto spherical harmonics
+        # c_lm = integral(visibility_function * Y_lm) over sphere
+        sh_coefficients = project_to_sh(visibility_function)
+        
+        # Store coefficients in multiresolution grid
+        sh_grid.set_coefficients(position, sh_coefficients)
+        
+    return sh_grid
+
+def render_volume(camera, volume_grid, sh_grid):
+    """
+    Render volume using precomputed SH visibility.
+    """
+    image = create_empty_image()
+    
+    for each pixel in image:
+        ray = camera.generate_ray(pixel)
+        radiance = 0.0
+        
+        # Ray march through volume
+        while ray.has_intersection(volume_grid):
+            position = ray.position
+            density = volume_grid.get_density(position)
+            
+            # Sample SH coefficients from grid
+            sh_coefficients = sh_grid.get_coefficients(position)
+            
+            # Reconstruct lighting from SH coefficients
+            # L = sum(c_lm * Y_lm(view_direction))
+            lighting = reconstruct_lighting(sh_coefficients, ray.direction)
+            
+            # Accumulate radiance (simplified Beer-Lambert law)
+            # dL = lighting * density * dt
+            radiance += lighting * density * ray.step_size
+            
+            ray.advance()
+            
+        image.set_pixel(pixel, radiance)
+        
+    return image
+```
+
+## Subtopics
+
+### [Real-Time Image-Based Volume Lighting](2202-real-time-image-based-volume-lighting.md)
+Real-Time Image-Based Volume Lighting is a two-step, GPU-friendly technique for the real-time rendering of heterogeneous participating media under distant environment lighting. It estimates spherical scattered radiance at discrete points in the medium, projects this function into spherical harmonics (SH), and uses this cached information to compute single scattering via ray-marching. It sets itself apart from its parent [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by explicitly splitting the scattered radiance integral into a volume-independent factor and a volume-dependent factor to reduce the computational cost of the triple product inherent in SH-based scattering to a simple dot product. Unlike [Spherical Harmonics Irradiance Encoding](4336-spherical-harmonics-irradiance-encoding.md), which typically encodes irradiance at surface points, this method encodes scattered radiance within the volume itself to handle self-shadowing and heterogeneous density.
+
+### [Spherical Harmonics Irradiance Encoding](4336-spherical-harmonics-irradiance-encoding.md)
+An approach to encode full spherical irradiance information using spherical harmonics, the most generic method to encode directional surface lighting.
+
+### [Spherical Harmonical Exponentiation](4345-spherical-harmonical-exponentiation.md)
+A method that encodes visibility in the form of spherical harmonic vectors to provide directional occlusion.
+
+## Operating characteristics
+- **Time Complexity:** The encoding step is likely $O(V \cdot L)$ where $V$ is the number of voxels and $L$ is the number of light sources, assuming SH projection is constant time per light. Rendering is $O(R \cdot N^2)$ where $R$ is the number of ray samples and $N$ is the SH band limit.
+- **Memory Complexity:** $O(V \cdot N^2)$ to store SH coefficients for each voxel.
+- **Measured Performance:** Not given in the sources.
+- **Strengths:** Real-time dynamic lighting support for various light types; handles self-shadowing and heterogeneous density.
+- **Limitations:** Approximation errors from SH basis; precomputation cost for dynamic scenes.
+- **When to use:** Real-time volume rendering with dynamic lighting.
+- **When not to use:** Offline rendering requiring high accuracy; static scenes where simpler methods suffice.
+
+## Background
+The method was developed by Kronander et al. in 2011 [S1, unofficial]. It builds on earlier work by Mavridis et al. [Mavridis 2010] who used voxelization for illumination, and Landis [Landis 2002] and Stewart [Stewart 2003] who developed ambient occlusion and vicinity shading techniques. The technique allows for real-time dynamic lighting in direct volume rendering, supporting directional lights, point lights, and environment maps [S1, unofficial].
+
+## Sources
+[S1] Advanced illumination and view-selection techniques for volume rendering and its application to medical imaging, http://hdl.handle.net/10803/371154, fetched 2026-10-27 (unofficial)

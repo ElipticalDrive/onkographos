@@ -1,0 +1,4236 @@
+Published as a conference paper at ICLR 2026
+A S TEP TO D ECOUPLE O PTIMIZATION IN 3DGS
+Renjie Ding1
+Jiahao Zhao1
+Yaonan Wang1∗ Min Liu1 Jialin Zhu2 Jiazheng Wang1
+Wenting Shen1 Feixiang He3 Xiang Chen1
+1
+National Engineering Research Center of Robot Visual Perception and
+Control Technology, School of Artificial Intelligence and Robitics, Hunan University
+2
+Baidu Inc., 3 Central South University
+{regi, yaonan, liu min}@hnu.edu.cn, misaliet@outlook.com
+arXiv:2601.16736v5 [cs.CV] 8 May 2026
+{wjiazheng, zhaojiahao, wenting}@hnu.edu.cn
+drfxhe@gmail.com, xiangc@hnu.edu.cn
+https://eliottdjay.github.io/adamwgs/
+A BSTRACT
+3D Gaussian Splatting (3DGS) has emerged as a powerful technique for real-time
+novel view synthesis. As an explicit representation optimized through gradient
+propagation among primitives, optimization widely accepted in deep neural networks (DNNs) is actually adopted in 3DGS, such as synchronous weight updating
+and Adam with the adaptive gradient. However, considering the physical significance and specific design in 3DGS, there are two overlooked details in the optimization of 3DGS: (i) update step coupling, which induces optimizer state rescaling and costly attribute updates outside the viewpoints, and (ii) gradient coupling
+in the moment, which may lead to under- or over-effective regularization. Nevertheless, such a complex coupling is under-explored. After revisiting the optimization of 3DGS, we take a step to decouple it and recompose the process into: Sparse
+Adam, Re-State Regularization and Decoupled Attribute Regularization. Taking
+a large number of experiments under the 3DGS and 3DGS-MCMC frameworks,
+our work provides a deeper understanding of these components. Finally, based on
+the empirical analysis, we re-design the optimization and propose AdamW-GS by
+re-coupling the beneficial components, under which better optimization efficiency
+and representation effectiveness are achieved simultaneously.
+1
+I NTRODUCTION
+Novel view synthesis is a fundamental task in both computer graphics and computer vision. Owing to its highly parallelized design and efficient use of GPUs, 3DGS (Kerbl et al., 2023) leverages
+explicit primitive-based representations to achieve significantly higher efficiency than implicit representation adopted in NeRF (Mildenhall et al., 2020), while still delivering competitive reconstruction
+quality. 3DGS has sparked a wave of research and led to rapid extensions across various downstream
+applications (Matsuki et al., 2024; Chen et al., 2024; Dai et al., 2024).
+As a representation directly optimized via backpropagation, 3DGS commonly adopts Adam (Kinga
+et al., 2015) as its optimizer, following the standard practice in DNN training. By default, the
+attributes of all primitives are updated simultaneously at each iteration, which we refer to as synchronous optimization in this work. Given the viewpoint relationship, an ideal scenario is that
+the optimization of primitives is guided by gradients from visible viewpoints in different directions. However, upon closer examination, we observe that even when a primitive is invisible from
+a given viewpoint and receives zero gradients, the update-step coupling induced by Adam under
+synchronous optimization still evolves its optimizer state and can produce effective updates driven
+by historical moments. From the perspective of optimization efficiency, Mallick et al. (2024) introduce Sparse Adam, which restricts updates to primitives visible from the current viewpoint while
+excluding invisible primitives with zero gradients, thereby enabling asynchronous optimization.
+Nevertheless, Sparse Adam has not been widely used, as its efficiency gains often come at the cost
+∗
+Corresponding authors.
+1
+Published as a conference paper at ICLR 2026
+of degraded reconstruction performance. We argue that such viewpoint-related optimizer remains
+promising, and that its current limitation stems from insufficient recognition of update-step coupling.
+Furthermore, a previous study (Loshchilov & Hutter, 2017) on DNN optimization points out that the
+gradient coupling in Adam makes the regularization unstable. In current 3DGS, a variety of regularization losses (Yu et al., 2024) have been introduced to improve reconstruction quality or mitigate
+redundancy1 . Since regularization gradients are jointly preconditioned with photometric gradients
+by Adam, a natural question arises as to whether existing regularization losses are exerting their
+intended effects. In practice, regularization losses are typically assumed to be controlled by hyperparameters, yet it remains unclear whether they provide sufficient flexibility. This further motivates
+the question of whether additional decoupling can enable more precise control over regularization.
+In this work, we focus on opacity and scaling regularization, which are closely tied to reconstruction
+quality in the 3DGS-MCMC framework (Kheradmand et al., 2024) and redundancy removal in the
+vanilla 3DGS framework (Kerbl et al., 2023). Prior studies have shown that the densification stage
+often produces a large number of redundant primitives (Liu et al., 2025b), while the framework
+lacks a native mechanism to automatically remove them. Even with opacity regularization, existing
+pipelines usually rely on additional pruning operations or direct modifications to the densification
+process. However, if regularization can be properly decoupled and recomposed, is it possible to
+achieve redundancy removal without resorting to such extra pruning operations?
+Considering the coupling in 3DGS optimization, this work takes a step to decouple the coupled
+optimization factors and recomposing them in a better manner. Building on our analysis, we redesign
+the optimization process to improve efficiency while preserving or enhancing reconstruction quality.
+To summarize, our contributions are:
+• By reanalyzing the complex coupling in 3DGS optimization, we decouple and recompose the
+optimization process into three effective components: Sparse Adam, Re-State Regularization, and
+Decoupled Attribute Regularization.
+• We further investigate the effects of these components, including the behavior of Sparse Adam,
+the activation of regularization, the role of regularization hyperparameters, the risks of implicit
+updates, and the necessity of controllable regularization.
+• Based on the experiments and analysis, we propose AdamW-GS with controllable attribute regularization and adopt it into vanilla 3DGS, 3DGS-MCMC and more variants. Experiments show
+that AdamW-GS improves reconstruction quality and optimization efficiency, while significantly
+reducing primitive redundancy without introducing additional pruning operations.
+2
+R ELATED W ORK
+“Coupling” in 3DGS Optimization: 3DGS commonly adopts the Adam optimizer as in DNNs.
+However, its synchronous optimization induces overlooked update steps for primitives that are invisible from the current viewpoint. Sparse Adam (Mallick et al., 2024) introduces asynchronous
+updates to improve efficiency, yet the insufficient recognition of update-step coupling results in degraded performance. Regularization gradients in 3DGS are also coupled with photometric gradients
+through adaptive preconditioning of Adam, analogous to the coupling between L2 regularization
+and adaptive gradient preconditioning in DNN optimization. As analyzed in AdamW (Loshchilov
+& Hutter, 2017), such coupling makes the effective strength of regularization depend on the
+second-moment estimates, thereby motivating weight decay decoupling. A similar idea is reflected
+in (Rota Bulò et al., 2025), which, although not explicitly designed for decoupling, replaces opacity
+reset in vanilla 3DGS with a constant opacity decay during densification, effectively constructing an
+AdamW-style optimizer. Nevertheless, this approach neglects the physical properties of opacity and
+the varying significance of individual primitives. The central contribution of this work is to further
+decouple and recompose 3DGS optimization, thereby reinterpreting primitive redundancy in vanilla
+3DGS and reconstruction quality in 3DGS-MCMC from an optimization perspective.
+Redundancy during Optimization: 3DGS typically requires careful treatment of primitive generation and pruning (or death (Kheradmand et al., 2024; Zhu et al., 2025)). Current studies have
+observed that optimization often produces abundant redundant primitives, while pruning in adaptive
+density control (Kerbl et al., 2023) is insufficient to remove them. Four main strategies have been
+1
+Redundancy is strictly defined as minimizing active primitives without sacrificing reconstruction quality.
+2
+Published as a conference paper at ICLR 2026
+proposed to address this redundancy: (1) Densification refinement (Fang & Wang, 2024; Mallick
+et al., 2024; Wang et al., 2025); (2) Hand-crafted criteria (Fan et al., 2024; Niemeyer et al., 2025;
+Hanson et al., 2025); (3) Learning-based pruning (Lee et al., 2024; Liu et al., 2025b; Zhang et al.,
+2024a). More details can be found in Sec. H. (4) Optimization-based operations: Optimization together with additional opacity L1 regularization has become a common technique for redundancy
+removal, even extending beyond Efficient 3DGS tasks (Papantonakis et al., 2024; Lee et al., 2024;
+Kheradmand et al., 2024; Liu et al., 2025a; Svitov et al., 2024).
+3
+P RELIMINARY: 3DGS(-MCMC) AND A DAM
+3DGS approximates the radiance field of a target scene using a set of Gaussian primitives parameterized by location, opacity (o), scale (s), and other attributes, and renders images from given
+viewpoints via alpha blending. Further details are provided in Sec. D of the Appendix.
+Typically, the training pipeline can be divided into densification and pure optimization (P-Op).
+During densification, new primitives are generated to enhance scene representation while redundant
+ones are pruned (low-opacity primitives are removed (Kerbl et al., 2023)), or new primitives are sampled from existing primitives while dead primitives are reallocated to new locations (Kheradmand
+et al., 2024). After densification, there is a P-Op stage, during which only gradient propagation and
+attribute updates occur. In this training pipeline, the photometric loss term in Eq.1 is adopted with
+the Adam optimizer. For 3DGS-MCMC, extra regularization losses are used to promote respawning.
+L = (1 − λ1 )L1 + λ1 LDSSIM + λo |o|1 + λs |s|1
+|
+{z
+}
+{z
+}
+|
+photometric loss: ℓ
+(1)
+regularization loss:R
+In this work, ℓ and R denote photometric loss and any regularization, while ∇ℓ and ∇R are the
+corresponding gradient.
+Adam is a first-order stochastic optimization method that adaptively estimates moment statistics
+of the gradients. Specifically, it maintains exponential moving averages of the first- and secondmoment estimates, mt (θ) and vt (θ), which are bias-corrected to m̂(θ)t and v̂(θ)t . The parameter
+update is then performed as Eq. 3, where η denotes the learning rate and ϵ ensures numerical stability.
+m(θ)t = β1 × m(θ)t−1 + (1 − β1 ) × g(θ)t
+v(θ)t = β2 × v(θ)t−1 + (1 − β2 ) × g(θ)2t
+θt+1 = θt − η × p
+(2)
+m̂(θ)t
+(3)
+v̂(θ)t + ϵ
+We omit the expression of bias correction procedure. In this paper, θ and g denote an arbitrary
+primitive attribute and the gradient information respectively.
+As in DNN training (Goodfellow et al., 2016), Adam by default updates all attributes synchronously,
+including both primitives visible from the current viewpoint and those that are not. Even when
+invisible primitives receive zero gradients, they are still included in the update step, during which
+their moments are rescaled and attributes are still updated. In this paper, we refer to this phenomenon
+as Implicit Update, which is induced by historical optimizer states.
+4
+M ETHODOLOGY
+4.1
+C HARACTERISTICS OF S PARSE A DAM
+Table 1: Quantitative results on MipNAs discussed in Sec. 1, using Sparse Adam directly im- erf360 for 3DGS with different optimizproves optimization efficiency but causes degraded per- ers. The definitions of the metrics can
+formance. Let V denote a visibility filter that takes value be found in Sec.5. (m: million)
+Cite PSNR SSIM LPIPS Np /m Nd /m
+1 for primitives visible from the current viewpoint and 0
+GS1 27.507 0.815 0.216 3.331 0.232
+otherwise. Sparse Adam can be obtained by replacing β
+GS2 27.285 0.809 0.228 2.532 0.039
+in Eq. 2 via:
+β ′ = β × V + (1 − V)
+(4)
+GS3 27.567 0.816 0.216 3.342 0.048
+However, from the perspective of inter-viewpoint updates, Sparse Adam is effectively viewpointstable: the updates of primitives are influenced only by steps from visible viewpoints and does not
+undergo implicit updates from invisible viewpoints.
+3
+Published as a conference paper at ICLR 2026
+a) the Second Moment (Bonsai from MipNerf360)
+b) Opacity Penalty (Bonsai from MipNerf360)
+c) Average and Maximum Magnitude at Each
+Iteration (Bicycle from MipNeRF360)
+d) Average and Maximum Magnitude at Each
+Iteration (Bonsai from MipNerf360)
+p
+Figure 1: a: The v(o) in 3DGS-MCMC with different optimizers. More examples can be found
+in Appendix Figure 5. b: The opacity regularization decisive termpin 3DGS-MCMC with different
+optimizers. c-d: The average and maximum magnitudes of m(o)/ v(o) at every iteration.
+To conduct a preliminary investigation, three experiments are performed on vanilla 3DGS: (GS1)
+training with the original Adam optimizer, (GS2) replacing Adam with Sparse Adam, and (GS3)
+employing Adam during the densification stage while applying Sparse Adam in the P-Op stage.
+Based on the comparisons in Table 1, we make the following observations: Observation 1 Sparse
+Adam is more stable: Since densification is governed by gradient magnitudes, the smaller number
+of primitives observed under Sparse Adam suggests that more primitives fail to meet the gradient
+threshold. Moreover, Sparse Adam retains more active primitives, especially in GS3 of Table 1
+(0.048 million dead primitives with Sparse Adam vs. 0.232 million with Adam), which implies
+that certain components in Adam are potential for pruning redundant primitives. Observation 2
+Sparse Adam is less explorative: Although Sparse Adam quickly drives primitives toward stability
+and results in fewer primitives overall, its performance degrades noticeably. Experiments on 3DGSMCMC show similar observations in some scenes, where Sparse Adam leads to fewer reallocated
+primitives, as shown in Figure 3 f.
+4.2
+U PDATE - STEP DECOUPLING : R E -S TATE R EGULARIZATION
+The key question is which components differentiate Adam from Sparse Adam. To answer this,
+we revisit synchronous optimization with Adam introduced in Sec. 3. The overlooked update-step
+coupling arises as zero-gradient update steps rescale the moments (m(θ)t = β1 m(θ)t−1 , v(θ)t =
+β2 v(θ)t−1 ) and subsequently induce implicit updates based on the rescaled moments. This first
+implies that the optimizer states of primitives invisible from the current viewpoint continue to evolve.
+As visualized in Figure 1 a, the second moment in 3DGS-MCMC with Adam is notably smaller than
+that with Sparse Adam, suggesting a potential amplification of the first moment.
+p To verify this, we
+compare the effective strength of opacity regularization in Figure 1 b, ∇o/ v̂(o), and observe
+that Adam induces stronger regularization, consistent with our discussion in Sec. 4.1. Moment
+rescaling facilitates the activation of regularization. The comparison in Figure 1 a also shows that
+the magnitude remains consistently high for Sparse Adam, underscoring the importance of moment
+rescaling: when inappropriate gradients accumulate from a specific viewpoint, they are difficult to
+dissipate, thereby hindering optimization. The role of implicit updates is direct: primitives invisible
+from the current viewpoint are continuously updated based on the past moments. However, no prior
+work has explicitly examined the impact of these components on 3DGS optimization. Motivated by
+this, we construct two decoupled variants for Sparse Adam.
+The implementation of moment rescaling is straightforward. We define an optimization interval and
+introduce a milestone style State Sampling Schedule (StSS), which uniformly samples the existing
+primitives at fixed intervals. The sampled primitives are then processed as in Eq. 5 to deliberately
+attenuate their optimizer states. This process is referred to as Re-State Regularization (RSR).
+m(θ)new
+= α1 × m(θ)old
+t
+t
+v(θ)new
+= α2 × v(θ)old
+t
+t
+4
+0 ≤ α1 < 1, 0 ≤ α2 < 1
+(5)
+Published as a conference paper at ICLR 2026
+Vanilla 3DGS Training Pipeline:
+Densification
+0
+500
+15000
+30000
+RePR Pipeline:
+Opacity L1 Regularization
+RePR
+0
+30000
+a) Bicycle from MipNerf-360
+b) Garden from MipNerf-360
+MaskGaussian Pipeline:
+Mask Loss
+Mask Pruning
+0
+30000
+Our Pipeline:
+AdamW-GS
+1000
+15000
+e) Effective Iteration for Different Methods
+c) Counter from MipNerf-360
+d) Kitchen from MipNerf-360
+Figure 2: a-d: Changes in the number of primitives during training for four methods: vanilla 3DGS,
+Redundant Primitives Removal (RePR), MaskGaussian, and 3DGS with our proposed AdamW-GS.
+e: Iteration ranges over which different components affect the primitive number.
+Here, the subscript t follows an asynchronous indexing scheme rather than the synchronous step in
+Eq. 2, meaning that each primitive has its own distinct t. A detailed discussion of hyperparameter
+selection is provided in Sec. J.2.
+We also construct an artificial implicit update variant to study its role. While implicit updates can
+be beneficial in some cases, they may introduce negative effects, potentially linked to primitive
+redundancy (see Appendix Sec. I.4). In the experiment section in the main text, we use implicit
+updates only as a tool to amplify attribute regularization under Sparse Adam, so as to study the
+influence of regularization: when λ∇R(θ)/Nv in Eq. 6 is large, maintaining implicit updates further
+strengthens regularization. Concretely, our Artificial Implicit Update (AIU) is implemented as a
+uniform sampler that selects a random subset of invisible primitives for extra updates, while keeping
+their moments unchanged when they are invisible from the current viewpoint, as in Sparse Adam.
+∇ℓ(θ) λ∇R(θ)
+m(θ)′t = β1′ m(θ)′t−1 + (1 − β1′ )(
++
+)
+(6)
+NI
+Nv
+where NI and the Nv are the scale of image pixels and the primitive number visible from the current
+viewpoint, respectively, following the implementation of the codebase2 .
+4.3
+G RADIENT D ECOUPLING : D ECOUPLED ATTRIBUTE R EGULARIZATION
+We view attribute regularization as an essential component of optimization. In efficient 3DGS and
+related tasks, the widely used opacity L1 regularization exemplifies this idea, analogous to weight
+regularization in DNNs, though with a different role. As discussed in Sec. 3, our understanding of
+how regularization constrains individual primitives remains limited. Implicit updates may further
+magnify the effect of regularization: when the magnitude of λ∇R(θ)/Nv in Eq. 6 approaches or
+exceeds that of ∇ℓ(θ)/NI , the regularization term continues to influence the optimization via the
+adaptive gradient or implicit updates. The coupling between photometric and regularization losses
+in Eq. 6 therefore raises a natural question: is the current regularization over- or under-effective?
+First, we revisit the factors that actually govern the effect of the current attribute regularization loss,
+i.e., L1 loss under gradient coupling. The hyperparameters maintain the balance between different
+loss terms, ensuring that the regularization remains relatively small during sensitive optimization
+stages without interfering with the photometric loss. Relevant results are presented in Appendix
+Sec. I.1. Regarding the modulation by optimizer moments, the regularization is activated when
+λ∇R(θ)/Nv becomes dominant or when the moment is rescaled during synchronous optimization
+in Adam or reset in 3DGS-MCMC.
+∇ℓ(θ)
+∇ℓ(θ) 2
+m(θ)′t = β1′ × m(θ)′t−1 + (1 − β1′ ) ×
+v(θ)′t = β2′ × v(θ)′t−1 + (1 − β2′ ) × (
+) (7)
+NI
+NI
+2
+https://github.com/DerThomy/3dgs-mcmc
+5
+Published as a conference paper at ICLR 2026
+Using Sparse Adam or Adam in 3DGS-MCMC alters the effect of attribute regularization. As illustrated in Figure 3 e–f, different optimizers yield different numbers of reallocated primitives and
+different PSNR values, indicating over- or under-effective regularization. This suggests that stronger
+regularization may be required to improve reconstruction quality in some cases. However, due to
+the gradient coupling in the optimizer moments (Eq. 6), directly amplifying ∇R can easily lead to
+update steps that become overly attribute-dependent and less guided by the photometric gradient,
+while the coupling also sustains the effect of regularization across iterations. In extreme cases, such
+as when hyperparameters are scaled by 10×, optimization fails entirely. When amplification relies
+on the second moment, the effect of regularization depends on its scale relative to ∇ℓ. Furthermore,
+if ∇R aligns with ∇ℓ, the second moment grows rapidly; if they are opposed, it grows slowly, which
+is contrary to expectations. This coupling prevents effective control of regularization.
+p As shown in
+Figure 1 c,d, the order-of-magnitude gap between the average and maximum m(o)/ v(o) further illustrates that improper amplification under coupling can easily result in over-effective regularization.
+Decoupling ∇ℓ and ∇R and recomposing them enables more reliable control without destabilizing
+optimization. Further experiments in Sec. 5 also show the side effects of coupling.
+Therefore, the first step is to decouple the gradients in the moments in Eq. 6. This step is analogous to
+AdamW and readily yields Eq. 7, which defines a moment update term containing only the gradient
+of the photometric loss ∇ℓ. For ∇R(θ), AdamW constructs updates that are not controlled by the
+second moment. This AdamW-style decoupling is effectively equivalent to a constant penalty on
+opacity (Rota Bulò et al., 2025). The experiments are presented in Sec. I.2. Clearly, this approach is
+not optimal. Unlike DNNs, each attribute in 3DGS has physical meaning, and each primitive carries
+a distinct importance. Penalizing all primitives with the same strength fails to remove redundant
+primitives when the penalty is too weak, while overly strong penalties hinder optimization.
+AdamW-style decoupling suggests that effective regularization should assign different penalties to
+different primitives. Such assignment, however, cannot be arbitrary: (i) it must not interfere with
+normal optimization, particularly in under-constructed regions where ∇ℓ is large; (ii) it must still
+fulfill its core function of suppressing overfitting when ∇ℓ is small (Srivastava et al., 2014). This
+implies that regularization should adapt to the geometry of the data (Pascanu & Bengio, 2013),
+naturally linking back
+√ to adaptive gradient (Duchi et al., 2011; Kinga et al., 2015) where adjustments are made via v. The empirical success of vanilla regularization compared with the constant
+√
+penalty further highlights its potential. Since we have already disentangled the moment in Eq. 7, v̂
+now provides a more faithful estimate
+√ of the optimization geometry. Motivated by this, we introduce the regularization form ∇R/ v̂. This design offers four benefits: (1) updates are preserved in
+under-constructed regions with large ∇ℓ; (2) when a primitive lies near a saddle point, regularization
+facilitates escape, consistent with saddle-point analyses in (Wang et al., 2025) and long-axis primitive gradients in (Zhang et al., 2024b); (3) regularization remains small in general but adaptively
+amplified when needed; (4) it enables explicit control over regularization via moment modulation,
+e.g., through RSR. Building on this rationale, we extend this approach and propose Eq. 8:
+m̂(θ)′t
+∇R(θ)/NI
+θt+1 = θt − η × [ p
++ min(λθ p
+, Ct )]
+(8)
+′
+v̂(θ)t + ϵ
+v̂(θ)′t + ϵ
+We balance the losspterms with λθ and normalize the regularization scale by NI . Regularization
+preconditioned by v̂(θ)′t improves stability while removing the dependence on Nv , which can
+vary by orders of magnitude across training, views, and scenes. Ct remains on the same order as the
+maximum step size of Adam and matches the max values observed in Figure 1 c–d, while extensive
+results confirm its robustness. This recomposed regularization is referred to as Decoupled Attribute
+Regularization (DAR). Detailed hyperparameter selection is provided in Appendix Sec. J.2.
+4.4
+R ECOUPLING : A DAM W-GS
+Building on Sec. 4.1, 4.2, and 4.3, we propose AdamW-GS for better 3DGS optimization by recoupling Sparse Adam, RSR, and DAR. In detail, primitive attributes are optimized asynchronously with
+Sparse Adam, guided by photometric loss and DAR. At fixed training intervals, RSR uniformly samples primitives and rescales their moments via Eq. 5 to better activate regularization. The rescaled
+moments replace the previous estimates and directly participate in subsequent optimization.
+We consider two DAR variants—opacity and scaling regularization—both of which are already employed in 3DGS-MCMC. Considering the limited transport in vanilla 3DGS (Jung et al., 2024),
+6
+Published as a conference paper at ICLR 2026
+a) TreeHill from MipNerf-360(3DGS-MCMC)
+b) TreeHill (3DGS-MCMC+AdamW-GS)
+c) Room from MipNerf-360(Vanilla 3DGS)
+d) Room (3DGS+AdamW-GS)
+e) Garden from MipNerf-360
+f) Kitchen from MipNerf-360
+Figure 3: a-d: Reconstruction results visualization. More can be found in Appendix Sec.K. e-f: The
+Reallocated Primitive Number in 3DGS-MCMC Framework. For outdoor scenes, MC17 and MC8
+differ only in the StSS sampling ratio, where MC8(StSSMC3)>MC17(StSSMC1)=MCMC-SparseRSR. For indoor scenes, MC8 uses StSSMC1. More information can be checked in Table 2.
+exploration here denotes improved primitive mobility during optimization. We directly use the
+noise regularization from 3DGS-MCMC as an additional position regularization, which is similar to
+DAR but controlled by opacity and primitive shape rather than the second moment. However, due to
+the sensitivity to noise (Jung et al., 2024), the noise term is excluded for MipNerf360 indoor scenes
+with fewer primitives. To evaluate the effectiveness of exploration, we provide comparative experiments with and without opacity reset (Kerbl et al., 2023), which encourages exploration by lowering
+the opacity. Opacity Correction is adopted for cloning during densification, which is thought to be
+necessary. We adopt opacity operations similar to those in (Rota Bulò et al., 2025).
+5
+E XPERIMENTS
+Dataset and Metric Following existing research (Kerbl et al., 2023), we employ 13 scenes from 3
+datasets, including nine scenes from Mip-Nerf360 (Barron et al., 2022), two from Tanks&Temples
+dataset (Knapitsch et al., 2017) and two provided by Hedman et al. (Hedman et al., 2018).
+We follow the train/test split suggested by Mip-NeRF 360, taking every 8th photo for testing. This
+protocol enables consistent and meaningful comparisons under standard reconstruction metrics, including PSNR, SSIM, and LPIPS(VGG), which are widely used in the literature. We also present
+the total primitive number Np , the active primitives number Na and the dead primitives number Nd .
+Given the significant variation in primitive number across methods, often differing by millions, we
+N −Nxvanilla
+employ normalized changes relative to the vanilla (∆Nx = xN vanilla
+, where x ∈ {a, p, d}) to
+x
+better illustrate primitive number variations. A primitive is defined as active if its opacity is larger
+1
+, and as dead otherwise. This definition, differing from (Kheradmand et al., 2024), follows
+than 255
+1
+the 3DGS3 implementation, where primitives with opacity below 255
+are excluded from rendering.
+Baselines To evaluate the impact of different components on the training pipeline, we conduct
+extensive experiments under both the vanilla 3DGS and 3DGS-MCMC frameworks. These two
+baselines respectively represent approaches without and with an Np maximum. Without explicitly
+introducing pruning operations, we observe that a substantial number of redundant primitives can be
+automatically removed in the vanilla 3DGS with AdamW-GS. For comparison, we include 2 adaptive pruning methods, the learning-based MaskGaussian(Liu et al., 2025b) and Redundant Primitive
+Removal (RePR) with the hand-crafted criterion in (Papantonakis et al., 2024). Unlike methods with
+a predefined pruning rate, these methods are reported to identify redundant primitives automatically
+with negligible performance degradation. All methods are run on a single A6000 GPU.
+3
+https://github.com/graphdeco-inria/gaussian-splatting
+7
+Published as a conference paper at ICLR 2026
+Table 2: Quantitative results on MipNerf-360 with different components. Detailed descriptions of
+Sparse Adam, AIU, RSR, and DAR are provided in Sec. 4.1, Sec. 4.2, and Sec. 4.3, respectively.
+All RSR and DAR settings remain fixed across experiments, except for the StSS schedule. The
+StSS sampling ratios used in this table are as follows: for outdoor scenes, MC8 (StSSMC3) > MC7
+(StSSMC2) > others (StSSMC1), while for indoor scenes, MC8 = MC7 = others (StSSMC1). The
+complete StSS schedules for each configuration are illustrated in Figure 9. Appendix Sec. K provides
+per-scene experimental results, including detailed configurations and additional experiments with a
+broader range of settings.
+3DGS-MCMC
+5.1
+Cite
+MC1
+MC2
+MC3
+MC4
+MC19
+MC7
+MC8
+Sparse Adam
+x
+✓
+✓
+✓
+✓
+✓
+✓
+AIU
+x
+x
+✓
+✓
+x
+x
+x
+RSR
+x
+x
+x
+✓
+✓
+✓
+✓
+Ro
+L1
+L1
+L1
+L1
+L1
+DAR
+DAR
+Rs
+L1
+L1
+L1
+L1
+L1
+DAR
+DAR
+PSNR
+27.948
+27.998
+28.050
+28.017
+28.075
+28.185
+28.219
+SSIM
+0.833
+0.832
+0.833
+0.834
+0.837
+0.839
+0.840
+LPIPS
+0.199
+0.199
+0.198
+0.191
+0.190
+0.182
+0.182
+∆Na
+-3.75%
++4.28%
++3.62%
++0.51%
++2.97%
++4.72%
++4.52%
+Np /m
+3.313
+3.313
+3.313
+3.313
+3.313
+3.313
+3.313
+R ESULTS AND A NALYSIS
+Over- or Under-Effective Regularization To examine the controllability of regularization, we introduce AIU during densification as a direct tool to amplify the effect of regularization. Its role is
+straightforward: when the moment of a primitive places it under the regularization, AIU preserves
+the corresponding update, yielding more dead primitives and thus strengthening regularization. Figure 3 e–f visualizes changes in reallocated primitives in 3DGS-MCMC with AIU. Enhanced regularization promotes exploration and improves reconstruction quality in some cases (MC3 and MC4
+in Table 2), but the effect is scene-dependent. For instance, in Kitchen, as shown in Figure 3 f, the
+rapid growth of reallocated primitives degrades performance. This suggests that regularization can
+be under-effective in some scenes, requiring amplification, e.g., via AIU or other methods, but can
+also be over-effective when its strength is excessive or inapposite.
+Activated via the Moment Within the 3DGS-MCMC framework, we evaluate the effect of our proposed RSR on regularization, a way of activating regularization via rescaling the moment. Whether
+using the original L1 form with gradient coupling or our proposed DAR, attribute regularization remains tied to the second moment. Figure 3 e–f shows that applying RSR substantially increases the
+number of dead primitives, thereby strengthening attribute regularization. This directly demonstrates
+the effectiveness of RSR as a component for amplifying regularization. However, as highlighted by
+the comparison between MCMC-Sparse-RSR and MCMC-AdamWGS-MC17 in Figure 3 e, the influence of RSR with the same StSS is weaker under L1 regularization with gradient coupling than
+under DAR. By decoupling the gradient in the moment and recomposing the attribute regularization,
+RSR more effectively amplifies the regularization effect, which further translates into improved reconstruction quality under stronger regularization.
+Side Effect in Coupling To further examine this effect, we increase the sampling ratio of RSR in
+MidNeRF-360 indoor scenes, which typically involve fewer primitives. The results are summarized in Appendix, from Sec. K.6 to Sec. K.9, as MC20 and MC21. Specifically, we replace the
+low-ratio StSSMC1 in both the original 3DGS-MCMC with L1 regularization and 3DGSMCMC
+with our proposed AdamW-GS by the higher-ratio StSSMC2. As the sampling ratio increases,
+original 3DGS-MCMC with L1 regularization exhibits significant drops in reconstruction quality
+across all four scenes, e.g., Room: 32.514→31.179 dB; Kitchen: 32.289→31.924 dB. The same
+phenomenon is also observed in the experiments on outdoor scenes. In contrast, 3DGS-MCMC
+with DAR shows little to no degradation in Room, Counter, and Bonsai, and only a minor drop in
+Kitchen (32.546→32.298 dB), while consistently outperforming L1 regularization under the same
+settings. These results confirm that gradient coupling hinders effective control of regularization and
+can easily introduce negative effects on reconstruction quality. Thus, decoupling the gradient from
+the moment and recomposing regularization are necessary for stable and effective optimization.
+Experiments with RSR also highlight the issue of over- or under-effective regularization. For scenes
+with more primitives, such as MipNeRF360 outdoor scenes, we adopt a higher sampling ratio for
+RSR. As the ratio increases, the number of reallocated primitives grows further, as shown in Figure 3 e, strengthening regularization and enhancing the exploration capability of 3DGS-MCMC. A
+8
+Published as a conference paper at ICLR 2026
+Table 3: Quantitative results of different methods on MipNerf360. MC8 and GS8/GS7 denote our
+proposed AdamW-GS variants. More information of MC8 is provided in Table 2. All variants
+share the same hyperparameters except for the StSS schedule. Following the design used in 3DGSMCMC, outdoor scenes for vanilla 3DGS use a high-ratio StSS, while indoor scenes use a lowratio StSS. As discussed in Sec. 4.4, GS7 is the noise without opacity reset version to study the
+effectiveness of exploration. A per-scene organization of results, including detailed configurations
+and additional experiments, is presented in Sec. K.
+All
+Outdoor
+Indoor
+PSNR↑ SSIM↑ LPIPS↓ ∆Na time/mins↓ PSNR↑ SSIM↑ LPIPS↓ ∆Na PSNR↑ SSIM↑ LPIPS↓ ∆Na
+Original MCMC 27.948 0.833 0.199 -3.75%
+46.81
+25.105 0.755 0.212 -4.38% 31.502 0.930 0.182 -2.97%
++AdamW-GS(MC8) 28.219 0.840 0.182 +4.52%
+39.77
+25.247 0.764 0.191 +3.07% 31.934 0.935 0.172 +6.33%
+vanilla 3DGS
+27.506 0.815 0.216 (3.098m)
+30.58
+24.648 0.728 0.239 (4.512m) 31.080 0.925 0.189 (1.331m)
++AdamW-GS(GS8) 27.678 0.822 0.220 -49.3%
+18.53
+24.854 0.740 0.243 -48.4%
+31.209 0.925 0.191 -50.4%
++AdamW-GS(GS7) 27.730 0.820 0.222 -46.9%
+19.18
+24.949 0.737 0.248 -44.0%
+RePR
+27.503 0.815 0.218 -41.1%
+26.73
+24.661 0.728 0.241 -41.5% 31.055 0.924 0.190 -40.6%
+MaskGaussian
+27.485 0.815 0.219 -53.1%
+26.80
+24.683 0.728 0.240 -46.4% 30.988 0.924 0.192 -61.5%
+Methods
+direct comparison between MC7 and MC8 shows that higher sampling ratios improve reconstruction
+quality. This further demonstrates the effectiveness of RSR in controlling regularization.
+AdamW-GS in 3DGS-MCMC With properly tuned hyperparameters, we evaluate our proposed
+AdamW-GS within the 3DGS-MCMC framework. As shown in Table 3, our approach outperforms
+original 3DGS-MCMC in terms of PSNR, SSIM, and LPIPS. By decoupling the gradient coupling
+and recomposing regularization, AdamW-GS yields more stable regularization. Meanwhile, by decoupling update-step coupling, the proposed RSR provides finer control of regularization. Furthermore, eliminating numerous ineffective zero-gradient updates via Sparse Adam improves overall
+optimization efficiency.
+Robust Hyperparameter Test and Autonomously Redundancy Removal Given that AdamWGS, equipped with DAR and RSR, introduces many hyperparameters, we test their robustness by
+directly applying it to vanilla 3DGS with the same hyperparameters. According to the training division of vanilla 3DGS, we design several StSS configurations, as shown in Figure 9. Similar to
+our observations in 3DGS-MCMC with AdamW-GS, where moment rescaling and opacity DAR
+encourage a large number of dead primitives for exploration, our experiments show that AdamWGS automatically removes a large number of redundant primitives in vanilla 3DGS without introducing additional pruning components, while the improved reconstruction quality further indicates
+enhanced exploration (Observation 2 issue in Sparse Adam in Sec.4.1).
+We compare vanilla 3DGS optimized with AdamW-GS against two adaptive pruning methods. Importantly, our approach contains no extra pruning component; instead, it relies solely on opacity
+DAR. In terms of primitive reduction, AdamW-GS achieves results comparable to MaskGaussian
+and even outperforms it by 2% on outdoor scenes. Beyond pruning efficiency, our method also
+improves reconstruction quality: in outdoor scenes, it reduces the number of primitives by 48.4%
+while increasing PSNR by 0.2 dB and SSIM by 0.01. In indoor scenes, it removes 50% of primitives while still improving PSNR by 0.1 dB. By contrast, MaskGaussian removes 61% of primitives
+but degrades PSNR by 0.1 dB, suggesting a potential risk of reconstruction-quality degradation, as
+shown in Figure 2 c. The visualization in Figure 3 c-d also demonstrate better detail reconstruction
+by our methods compared with vanilla 3DGS. This partially explains why our method retains more
+primitives than MaskGaussian. Ultimately, our objective is not simply to minimize the number of
+active primitives, but to strike a preferable balance—achieving higher reconstruction quality with as
+few primitives as necessary.
+Table 4: Quantitative results on Deep Blending and
+The proposed method is further evaluated Tank & Temples. (m: million.)
+on additional datasets. As shown in TaDeep blending
+Tank & Temples
+PSNR↑ SSIM↑ LPIPS↓ ∆Na PSNR↑ SSIM↑ LPIPS↓ ∆Na
+ble 4, experiments on Deep Blending and
+Tanks&Temples further demonstrate the 3DGSMCMC 30.089 0.914 0.239 -24% 24.563 0.869 0.160 -3.1%
+superiority of our approach. In particu- +AdamW-GS 30.417 0.916 0.228 2.8% 24.726 0.875 0.150 6.7%
+3DGS
+29.694 0.904 0.247 2.60m 23.677 0.848 0.178 1.60m
+lar, on Deep Blending, 3DGS equipped +AdamW-GS 30.260 0.912 0.245 -60% 24.303 0.855 0.181 -40%
+with AdamW-GS even achieves higher MaskGaussian 29.895 0.908 0.248 -65% 23.607 0.846 0.181 -50%
+PSNR than the original 3DGS-MCMC.
+Appendix Sec. E.4 further reports results on long-sequence datasets for vanilla 3DGS and 3DGS9
+Published as a conference paper at ICLR 2026
+MCMC, both with and without the proposed AdamW-GS, demonstrating that AdamW-GS continues
+to provide clear advantages in these settings.
+Table 5: Quantitative results of MaskGaussian.
+Indoor
+Outdoor
+Beyond dataset-level evaluation, we examPSNR SSIM LPIPS ∆Na PSNR SSIM LPIPS ∆Na
+ine the compatibility of AdamW-GS with MaskGaussian 30.988
+0.924 0.192 -61.5% 24.683 0.728 0.240 -46.4%
+additional pipelines. As shown in Ta- +AdamW-GS 31.199 0.925 0.193 -68.6% 24.939 0.739 0.244 -48.1%
+ble 3, MaskGaussian exhibits a potential
+reconstruction-quality risk on indoor scenes, consistent with Observation 1 from the Adam-vs.Sparse-Adam experiments in Sec. 4.1. We attribute this issue to the synchronous updating of mask
+scores in MaskGaussian; MaskGaussian is briefly introduced in Sec. E. Results in Table 5 further
+support this hypothesis: when optimized with AdamW-GS, MaskGaussian no longer suffers from this
+quality risk and prunes about 7% more redundant primitives on indoor scenes. This also demonstrates that AdamW-GS is compatible with additional pruning operations. In Appendix Sec. E, we
+provide results for more pipeline variants with AdamW-GS, further confirming its robustness.
+To better understand how our method penalizes redundant primitives, we visualize the dynamics of
+primitive number during training, as shown in Figure 2. PePR, which relies solely on opacity L1
+regularization during densification, shows limited effectiveness in reducing redundancy. In contrast,
+under our proposed regularization, primitive number remains consistently lower. Even when final
+∆Na is larger than that of MaskGaussian, our method, i.e., vanilla 3DGS optimized with AdamWGS, still outperforms MaskGaussian in reducing redundancy during densification.
+Extra Exploration is Necessary Previous studies have highlighted the role of exploration in
+3DGS (Jung et al., 2024; Kheradmand et al., 2024), and here we investigate its interplay with redundancy. AdamW-GS benefits from the noise-based position regularization, yielding improved
+pruning efficiency and higher SSIM. As shown in GS7 and GS8 of Table 2, removing opacity reset
+weakens the noise-based regularization, leading to smaller SSIM gains and weaker redundancy removal. We attribute the effectiveness of the noise-based regularization in AdamW-GS to its more
+appropriate attribute regularization. Overall, our results underscore that additional exploration is
+necessary. However, the noise-based position regularization from 3DGS-MCMC cannot be directly
+applied to scenes with relatively few primitives, e.g., indoor scenes, where the smaller primitive
+set may make optimization more sensitive to noise and can lead to degraded reconstruction quality. In Appendix Sec. F, we provide a more detailed analysis of the exploration ability induced by
+our method. We also introduce two additional exploration strategies that can be combined with the
+current AdamW-GS and yield further improvements on certain indoor scenes.
+Efficiency Analysis As shown in Table 3, 3DGS-MCMC achieves further optimization efficiency
+gains from Sparse Adam. Vanilla 3DGS enjoys the same benefit, while our method achieves additional gains by substantially reducing redundancy during the densification stage, thereby further
+enhancing optimization efficiency. More detailed analysis is provided in Appendix Sec. C.
+6
+D ISCUSSION AND C ONCLUSION
+This work takes a step to decouple the complex 3DGS optimization and analyzes its key mechanisms. AdamW-GS is then proposed, which improves efficiency and enables more controllable
+regularization. The method enhances reconstruction quality within the 3DGS-MCMC framework
+and achieves notable redundancy removal in vanilla 3DGS, with slight quality gains and even without pruning. Our results indicate that efficiency and effectiveness can be jointly improved with
+appropriate regularization. While this work focuses on opacity and scaling, more general DAR
+variants for other attributes or alternative strategies may yield further improvements. Although the
+current hyperparameters and hand-crafted StSS configurations are robust, adaptive parameter adjustment during training remains a promising direction. Finally, although noise-driven exploration
+shows necessary, it can harm performance in certain scenes. The additional exploration strategies
+considered in this work provide only limited improvements. A more systematic investigation of
+exploration strategies may be a promising direction for future research.
+Acknowledgments This work was supported by China Mobile Hunan Company Limited, China
+Mobile Communications Group Co., Ltd., and by the National Natural Science Foundation of China
+under Grant U22B2050, 62425305, 62221002, and 62503161. This work was conducted as part of
+the project “Networked Robotic System for Major Equipment Manufacturing (5G+Robotics)”.
+10
+Published as a conference paper at ICLR 2026
+R EFERENCES
+Maksym Andriushchenko, Francesco D’Angelo, Aditya Varre, and Nicolas Flammarion. Why do
+we need weight decay in modern deep learning? CoRR, 2023.
+Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P Srinivasan, and Peter Hedman. Mip-nerf
+360: Unbounded anti-aliased neural radiance fields. In Proceedings of the IEEE/CVF conference
+on computer vision and pattern recognition, pp. 5470–5479, 2022.
+Tom Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared D Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, et al. Language models are
+few-shot learners. Advances in neural information processing systems, 33:1877–1901, 2020.
+Xiangning Chen, Chen Liang, Da Huang, Esteban Real, Kaiyuan Wang, Hieu Pham, Xuanyi Dong,
+Thang Luong, Cho-Jui Hsieh, Yifeng Lu, et al. Symbolic discovery of optimization algorithms.
+Advances in neural information processing systems, 36:49205–49233, 2023.
+Zilong Chen, Feng Wang, Yikai Wang, and Huaping Liu. Text-to-3d using gaussian splatting. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp. 21401–
+21412, 2024.
+Pinxuan Dai, Jiamin Xu, Wenxiang Xie, Xinguo Liu, Huamin Wang, and Weiwei Xu. High-quality
+surface reconstruction using gaussian surfels. In Proceedings of the ACM SIGGRAPH Conference, pp. 1–11, 2024.
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and
+stochastic optimization. Journal of machine learning research, 12(7), 2011.
+Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, Zhangyang Wang, et al. Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps. Advances in neural
+information processing systems, 37:140138–140158, 2024.
+Guangchi Fang and Bing Wang. Mini-splatting: Representing scenes with a constrained number of
+gaussians. In European Conference on Computer Vision, pp. 165–181. Springer, 2024.
+Ian Goodfellow, Yoshua Bengio, Aaron Courville, and Yoshua Bengio. Deep learning, volume 1.
+MIT Press, 2016.
+Alex Hanson, Allen Tu, Vasu Singla, Mayuka Jayawardhana, Matthias Zwicker, and Tom Goldstein. Pup 3d-gs: Principled uncertainty pruning for 3d gaussian splatting. In Proceedings of the
+Computer Vision and Pattern Recognition Conference, pp. 5949–5958, 2025.
+Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm, George Drettakis, and Gabriel Brostow. Deep blending for free-viewpoint image-based rendering. ACM Transactions on Graphics
+(ToG), 37(6):1–15, 2018.
+Geoffrey Hinton, Nitish Srivastava, and Kevin Swersky. Neural networks for machine learning
+lecture 6a overview of mini-batch gradient descent. Cited on, 14(8):2, 2012.
+Lukas Höllein, Aljaž Božič, Michael Zollhöfer, and Matthias Nießner. 3dgs-lm: Faster gaussiansplatting optimization with levenberg-marquardt. In Proceedings of the IEEE/CVF International
+Conference on Computer Vision, pp. 26740–26750, 2025.
+Yuning Huang, Jiahao Pang, Fengqing Zhu, and Dong Tian. Entropygs: An efficient entropy coding
+on 3d gaussian splatting. arXiv preprint arXiv:2508.10227, 2025.
+Jaewoo Jung, Jisang Han, Honggyu An, Jiwon Kang, Seonghoon Park, and Seungryong Kim. Relaxing accurate initialization constraint for 3d gaussian splatting. arXiv preprint arXiv:2403.09413,
+2024.
+Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and George Drettakis. 3d gaussian splatting for real-time radiance field rendering. ACM Trans. Graph., 42(4):139–1, 2023.
+11
+Published as a conference paper at ICLR 2026
+Shakiba Kheradmand, Daniel Rebain, Gopal Sharma, Weiwei Sun, Jeff Tseng, Hossam Isack, Abhishek Kar, Andrea Tagliasacchi, and Kwang Moo Yi. 3d gaussian splatting as markov chain
+monte carlo. arXiv preprint arXiv:2404.09591, 2024.
+Diederik Kinga, Jimmy Ba Adam, et al. A method for stochastic optimization. In International
+conference on learning representations (ICLR), volume 5. California;, 2015.
+Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen Koltun. Tanks and temples: Benchmarking
+large-scale scene reconstruction. ACM Transactions on Graphics (ToG), 36(4):1–13, 2017.
+Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko, and Eunbyung Park. Compact 3d gaussian
+representation for radiance field. In Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition, pp. 21719–21728, 2024.
+Rong Liu, Dylan Sun, Meida Chen, Yue Wang, and Andrew Feng. Deformable beta splatting.
+In Proceedings of the Special Interest Group on Computer Graphics and Interactive Techniques
+Conference Conference Papers, pp. 1–11, 2025a.
+Yifei Liu, Zhihang Zhong, Yifan Zhan, Sheng Xu, and Xiao Sun. Maskgaussian: Adaptive 3d
+gaussian representation from probabilistic masks. In Proceedings of the Computer Vision and
+Pattern Recognition Conference, pp. 681–690, 2025b.
+Ilya Loshchilov and Frank Hutter.
+arXiv:1711.05101, 2017.
+Decoupled weight decay regularization.
+arXiv preprint
+Chongshan Lu, Fukun Yin, Xin Chen, Tao Chen, Gang Yu, and Jiayuan Fan. A large-scale outdoor
+multi-modal dataset and benchmark for novel view synthesis and implicit scene reconstruction.
+arXiv preprint arXiv:2301.06782, 2023.
+Saswat Subhajyoti Mallick, Rahul Goel, Bernhard Kerbl, Markus Steinberger, Francisco Vicente
+Carrasco, and Fernando De La Torre. Taming 3dgs: High-quality radiance fields with limited
+resources. In SIGGRAPH Asia 2024 Conference Papers, pp. 1–11, 2024.
+Hidenobu Matsuki, Riku Murai, Paul HJ Kelly, and Andrew J Davison. Gaussian splatting slam.
+In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, pp.
+18039–18048, 2024.
+B Mildenhall, PP Srinivasan, M Tancik, JT Barron, R Ramamoorthi, and R Ng. Nerf: Representing
+scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision,
+2020.
+Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle, Daniel Duckworth, Rama Gosula, Keisuke Tateno, John Bates, Dominik Kaeser, and Federico Tombari. Radsplat: Radiance field-informed gaussian splatting for robust real-time rendering with 900+ fps. In
+2025 International Conference on 3D Vision (3DV), pp. 134–144. IEEE, 2025.
+Panagiotis Papantonakis, Georgios Kopanas, Bernhard Kerbl, Alexandre Lanvin, and George Drettakis. Reducing the memory footprint of 3d gaussian splatting. Proceedings of the ACM on
+Computer Graphics and Interactive Techniques, 7(1):1–17, 2024.
+Razvan Pascanu and Yoshua Bengio. Revisiting natural gradient for deep networks. arXiv preprint
+arXiv:1301.3584, 2013.
+Alec Radford, Jong Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal,
+Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning transferable visual
+models from natural language supervision. In International conference on machine learning, pp.
+8748–8763. PmLR, 2021.
+Martin Riedmiller and Heinrich Braun. A direct adaptive method for faster backpropagation learning: The rprop algorithm. In IEEE international conference on neural networks, pp. 586–591.
+IEEE, 1993.
+Samuel Rota Bulò, Lorenzo Porzi, and Peter Kontschieder. Revising densification in gaussian splatting. In European Conference on Computer Vision, pp. 347–362. Springer, 2025.
+12
+Published as a conference paper at ICLR 2026
+Johannes L Schonberger and Jan-Michael Frahm. Structure-from-motion revisited. In Proceedings
+of the IEEE Conference on Computer Vision and Pattern Recognition, pp. 4104–4113, 2016.
+Shai Shalev-Shwartz and Shai Ben-David. Understanding machine learning: From theory to algorithms. Cambridge university press, 2014.
+Nitish Srivastava, Geoffrey Hinton, Alex Krizhevsky, Ilya Sutskever, and Ruslan Salakhutdinov.
+Dropout: a simple way to prevent neural networks from overfitting. The journal of machine
+learning research, 15(1):1929–1958, 2014.
+David Svitov, Pietro Morerio, Lourdes Agapito, and Alessio Del Bue. Billboard splatting (bbsplat):
+Learnable textured primitives for novel view synthesis. arXiv preprint arXiv:2411.08508, 2024.
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in Neural Information Processing Systems, 2017.
+Peihao Wang, Yuehao Wang, Dilin Wang, Sreyas Mohan, Zhiwen Fan, Lemeng Wu, Ruisi Cai, YuYing Yeh, Zhangyang Wang, Qiang Liu, et al. Steepest descent density control for compact 3d
+gaussian splatting. In Proceedings of the Computer Vision and Pattern Recognition Conference,
+pp. 26663–26672, 2025.
+Yang You, Jing Li, Sashank Reddi, Jonathan Hseu, Sanjiv Kumar, Srinadh Bhojanapalli, Xiaodan
+Song, James Demmel, Kurt Keutzer, and Cho-Jui Hsieh. Large batch optimization for deep
+learning: Training bert in 76 minutes. arXiv preprint arXiv:1904.00962, 2019.
+Zehao Yu, Torsten Sattler, and Andreas Geiger. Gaussian opacity fields: Efficient adaptive surface
+reconstruction in unbounded scenes. ACM Transactions on Graphics, 43(6):1–13, 2024.
+Zhaoliang Zhang, Tianchen Song, Yongjae Lee, Li Yang, Cheng Peng, Rama Chellappa, and Deliang
+Fan. Lp-3dgs: Learning to prune 3d gaussian splatting. Advances in Neural Information Processing Systems, 37:122434–122457, 2024a.
+Zheng Zhang, Wenbo Hu, Yixing Lao, Tong He, and Hengshuang Zhao. Pixel-gs: Density control
+with pixel-aware gradient for 3d gaussian splatting. arXiv preprint arXiv:2403.15530, 2024b.
+Jialin Zhu, Jiangbei Yue, Feixiang He, and He Wang. 3d student splatting and scooping. In Proceedings of the Computer Vision and Pattern Recognition Conference, pp. 21045–21054, 2025.
+A
+R EPRODUCIBILITY
+The datasets are publicly available from (Kerbl et al., 2023). Methodological steps and formulas are
+detailed in Secs. 4.4 and J.1, and all hyperparameters are reported in Secs. J.2 and K.
+More rendering visualization can be found in Figure 10.
+B
+T HE U SE OF L ARGE L ANGUAGE M ODELS (LLM S )
+In this work, LLMs are used solely to assist in writing and polishing the manuscript; they do not
+contribute to the discovery or experimental design.
+C
+T IME C OST A NALYSIS
+Within the 3DGS-MCMC framework, Sparse Adam substantially reduces the step time by approximately 50% (see Table 6) by eliminating implicit updates. The fluctuations in forward and backward
+costs can be attributed to variations in the number of active primitives during training. Although
+DAR encourages a larger proportion of dead primitives, Sparse Adam exhibits greater stability and
+tends to retain more active primitives.
+13
+Published as a conference paper at ICLR 2026
+Table 6: Time cost of different methods, which is divided into time cost of densification, forward,
+backward and update step. In all experiments, the loss function is implemented consistently. Baseline methods employ the native Adam optimizer in PyTorch, whereas our AdamW-GS follows the
+implementation described in this work.
+Methods
+Densification
+Forward
+vanilla 3DGS
+Backward
+Step
+All
+Densification
+Forward
+RePR
+Backward
+Step
+All
+Densification
+Forward
+MaskGaussian
+Backward
+Step
+All
+Densification
+Forward
+3DGS
+Backward
+Step
++AdamWGS(GS8)
+All
+Densification
+Forward
+3DGSMCMC
+Backward
+Step
+All
+Densification
+Forward
+3DGSMCMC
+Backward
+Step
++AdamWGS(MC8)
+All
+Avg. Bicycle Flowers Garden Stump Treehill Room Counter Kichen Bonsai
+0.37
+0.43
+0.38
+0.49
+0.39
+0.37
+0.32
+0.34
+0.34
+0.32
+6.91
+8.35
+6.09
+8.47
+6.44
+6.08
+6.70
+6.67
+7.61
+5.86
+13.72 14.26
+11.27
+15.75 11.54 11.38 14.69 14.62
+17.38 12.59
+9.55
+16.30
+10.25
+17.08 13.65 10.53
+4.63
+3.75
+5.69
+4.12
+30.58 39.36
+28.01
+41.81 32.04 28.38 26.35 25.40
+31.03 22.91
+0.95
+1.40
+0.99
+1.29
+1.54
+1.07
+0.58
+0.60
+0.54
+0.62
+6.07
+6.55
+5.41
+6.85
+5.73
+5.40
+6.00
+6.23
+7.04
+5.50
+12.75 12.23
+10.52
+13.82 10.73 10.69 13.72 14.24
+16.79 12.05
+6.92
+11.20
+7.39
+11.51 11.05
+7.84
+3.10
+2.75
+4.51
+3.01
+26.73 31.40
+24.33
+33.48 29.06 25.02 23.41 23.83
+28.90 21.20
+0.37
+0.46
+0.36
+0.49
+0.41
+0.38
+0.31
+0.30
+0.32
+0.33
+5.91
+7.42
+5.26
+7.40
+5.46
+5.39
+5.30
+5.60
+6.41
+4.96
+13.66 14.19
+11.2
+15.66 11.20 11.45 14.15 14.81
+17.61 12.69
+6.83
+12.50
+7.64
+12.52
+9.38
+8.12
+2.39
+2.29
+3.94
+2.74
+26.8
+34.59
+24.48
+36.09 26.46 25.36 22.16 23.01
+28.30 20.75
+0.33
+0.34
+0.33
+0.34
+0.35
+0.33
+0.32
+0.31
+0.34
+0.33
+5.19
+5.21
+4.45
+4.81
+4.75
+4.49
+5.54
+5.69
+6.27
+5.56
+10.80
+9.76
+8.59
+9.70
+9.07
+8.61
+12.1
+12.73
+14.25 12.47
+2.17
+3.90
+2.89
+3.76
+4.19
+3.05
+0.34
+0.40
+0.58
+0.43
+18.53 19.23
+16.28
+18.62 18.37 16.50 18.39 19.15
+21.45 18.81
+0.02
+0.04
+0.03
+0.04
+0.04
+0.03
+0.02
+0.02
+0.02
+0.02
+9.03
+9.13
+8.15
+9.79
+8.02
+7.72
+9.67
+9.47
+10.45
+8.87
+18.95 17.39
+15.49
+19.19 14.85 14.39 22.55 22.20
+24.54 19.97
+21.09 31.51
+19.45
+33.76 24.68 20.46 10.23
+8.12
+12.17
+8.75
+46.81 58.08
+43.13
+62.79 47.60 42.61 42.49 39.81
+47.19 37.63
+0.03
+0.05
+0.03
+0.05
+0.04
+0.03
+0.02
+0.02
+0.02
+0.02
+9.18
+9.50
+8.10
+10.15
+8.51
+7.91
+9.55
+9.26
+10.84
+8.85
+11.46 18.33
+15.25
+21.32 16.02 14.41 21.18 19.91
+25.61 19.66
+11.46 18.75
+12.04
+20.64 14.84 12.35
+6.20
+5.06
+7.89
+5.40
+39.77 46.65
+35.44
+52.17 39.41 34.71 36.97 34.27
+44.39 33.94
+For vanilla 3DGS, the reduction in time cost benefits from both the decrease in update-step overhead
+achieved by Sparse Adam and the reduced forward and backward costs resulting from fewer primitives. Overall, our method achieves more than a 40% reduction in total runtime. In indoor scenes
+with fewer primitives, the update-step cost becomes negligible, as illustrated in Figure 4. Due to the
+additional loss used by MaskGaussian for pruning, it yields almost no improvement in the backward
+time cost.
+D
+P RELIMINARY
+3DGS(-MCMC) 3DGS approximates the radiance field of targeted scenes via a group of Gaussian primitives {Gi }n parameterized with θ = {θi ∈ Θ}ni=1 where θi ≜ (µi , Σi , oi , ci ), µi ∈ R3
+denotes the primitive position, Σ(i) ∈ S3×3
+is the positive semi-definite covariance matrix decou+
+pled into quaternion and a scaling vector, o(i) is considered as the opacity value. The color attribute
+c(i) ∈ R(3) is typically stored as spherical harmonics coefficients and converted into RGB when
+rendering.
+Given a viewpoint k and transformation (Kerbl et al., 2023), the pixel p on the screen is rendered
+via α-blending according to the projected depth of primitives:
+Ck (p; θ) =
+XNpk
+cki oi Gik (p; θi )
+i=1
+| {z }
+αk
+i (p;θi )
+i−1
+Y
+(1 − αjk (p; θj ))
+j=1
+|
+{z
+}
+Transmittance Tik (p;θi )
+14
+(9)
+a) Time Cost Comparison
+Published as a conference paper at ICLR 2026
+Garden from MipNerf-360
+Kitchen from MipNerf-360
+Bonsai from MipNerf-360
+f) Vanilla +AdamW-GS
+e) MaskGaussian
+d) Vanilla 3DGS
+c) MCMC + AdamW-GS
+b) 3DGS MCMC
+Bicycle from MipNerf-360
+Figure 4: Comparison of Training Time Costs.
+Here the superscript k denotes the corresponding parameters under the given viewpoint after the
+respective transformation, whereas Gik = exp(− 12 (µki − p)⊤ Σki (µki − p)).
+Optimization The 3DGS training pipeline typically initializes from Structure-from-Motion (SfM)
+(Schonberger & Frahm, 2016) and then trained with several warm-up iterations (Kerbl et al., 2023;
+Jung et al., 2024). The primitives then undergo densification, wherein new primitives are generated
+to enhance scene representation while redundant ones are pruned. In the vanilla pipeline shown in
+Figure 9 a, both operations are governed by adaptive density control: new primitives are created via
+cloning or splitting according to gradient magnitude, whereas low-opacity primitives are removed.
+After densification, optimization proceeds in a pure optimization (P-Op) stage, during which only
+gradient propagation and attribute updates are performed. Throughout warm-up, densification, and
+P-Op, training employs the photometric term in Eq. 1 and uses the Adam optimizer. Building on
+Stochastic Gradient Langevin Dynamics (SGLD), 3DGS-MCMC (Kheradmand et al., 2024) follows
+a similar stage division, as shown in Figure 9 b: new primitive sampling and dead primitive reallocation are performed during densification, followed by a shortened P-Op. It also adopts Adam,
+augmented with the regularization loss term in Eq. 1 to promote primitive respawning, together with
+additional positional noise for exploration and consistency with the SGLD formulation.
+15
+Published as a conference paper at ICLR 2026
+a) Bicycle in MipNerf-360
+b) Garden in MipNerf-360
+c) Kitchen in MipNerf-360
+d) Bonsai in MipNerf-360
+Figure 5: The average of the second moment in valid primitives.
+Table 7: Quantitative results of vanilla 3DGS and MaskGaussian (Liu et al., 2025b) with and without
+AdamW-GS on the Mip-NeRF 360 dataset.
+Pipeline
+vanilla 3DGS
+MaskGaussian
+AdamW-GS
+x
+✓
+x
+✓
+All
+Outdoor
+Indoor
+PSNR↑ SSIM↑ LPIPS↓ ∆Na PSNR↑ SSIM↑ LPIPS↓ ∆Na PSNR↑ SSIM↑ LPIPS↓ ∆Na
+27.506 0.815 0.216 (3.098m) 24.648 0.728 0.239 (4.512m) 31.080 0.925 0.189 (1.331m)
+27.678 0.822 0.220 -49.3% 24.854 0.740 0.243 -48.4% 31.209 0.925 0.191 -50.4%
+27.485 0.815 0.219 -53.1% 24.683 0.728 0.240 -46.4% 30.988 0.924 0.192 -61.5%
+27.721 0.821 0.221 -57.2% 24.939 0.739 0.244 -48.1% 31.199 0.925 0.193 -68.6%
+E
+M ORE P IPELINE VARIANTS WITH A DAM W-GS OR E XPERIMENTS ON
+D IFFERENT DATASETS
+E.1
+M ASK G AUSSIAN WITH A DAM W-GS: M ORE S TABLE U PDATING OF M ASK S CORE
+MaskGaussian introduces a probabilistic formulation of 3D Gaussian primitives, where each primitive is assigned a learnable probability of existence that governs a dynamic sampling process during
+rendering. This mechanism enables adaptive pruning of redundant primitives throughout the 3DGS
+optimization. Specifically, each primitive is associated with a mask score πi , from which a binary
+mask Mi is stochastically sampled using the Gumbel-Softmax reparameterization. The standard
+rendering equation in Eq. 9 is thus modified to incorporate the mask in both color accumulation and
+transmittance updates, as shown in Eq. 10. Detailed derivations and implementation are provided in
+(Liu et al., 2025b).
+XNpk
+Ck (p; θ) =
+Mi · cki · αik (p; θi ) · Tik (p; θi ) where Mi ∼ GumbelSoftmax(π) (10)
+i=1
+πt+1 = πt − η × [ p
+m̂(π)′t
+v̂(π)′t + ϵ
+]
+(11)
+When MaskGaussian is equipped with AdamW-GS, the observed PSNR improvement aligns with
+that of vanilla 3DGS using AdamW-GS. Additionally, for indoor scenes, it enables an extra pruning
+of approximately 7% of primitives. This suggests that synchronous updates of mask scores may lead
+to potentially “destructive pruning behavior”. In contrast, our method cannot only be jointly used
+with such pruning strategies to stabilize their inherent training dynamics, but also further improve
+overall efficiency, pruning performance, and representation quality simultaneously.
+E.2
+TAMING -3DGS WITH A DAM W-GS
+Taming-3DGS (Mallick et al., 2024) constrains the total number of primitives by restricting the
+number of new primitives added at each densification step, as defined by Eq. 12. During every
+densification step, Taming-3DGS computes a score for each primitive to determine its probability
+of being selected for densification. Based on these scores, a fixed number of primitives are sampled
+for densification. Additionally, Taming-3DGS incorporates further optimizations, such as enhanced
+16
+Published as a conference paper at ICLR 2026
+Taming-3DGS
+(final count)
+Taming-3DGS with AdamW-GS
+(final count)
+Taming-3DGS
+(multiplier)
+Taming-3DGS with AdamW-GS
+(multiplier)
+Figure 6: Rendering visualization of Taming-3DGS with or without AdamW-GS.
+Table 8: Quantitative results of Taming-3DGS (Mallick et al., 2024) with and without AdamWGS on the Mip-NeRF 360 dataset. A brief introduction to Taming-3DGS is provided in Appendix
+Sec. E.2. All primitive counts (Np and Na ) are reported in millions, and time cost is reported in
+minutes.
+AdamW
+All
+Indoor
+Outdoor
+-GS PSNR↑ SSIM↑ LPIPS↓ Np Na Time PSNR SSIM LPIPS Np Na PSNR SSIM LPIPS Np Na
+Taming-3DGS
+x
+27.386 0.796 0.258 0.668 0.620 7.44 31.025 0.918 0.205 0.357 0.329 24.479 0.698 0.299 0.916 0.853
+(multiplier)
+✓
+27.537 0.799 0.254 0.646 0.575 5.27 31.268 0.920 0.200 0.357 0.313 24.552 0.703 0.297 0.877 0.785
+Taming-3DGS
+x
+27.912 0.822 0.207 3.205 2.609 20.30 31.603 0.928 0.181 1.377 1.144 24.959 0.736 0.228 4.667 3.776
+(final count)
+✓
+28.034 0.826 0.207 3.109 1.847 10.46 31.720 0.928 0.180 1.408 0.759 25.085 0.744 0.229 4.469 2.717
+Taming-3DGS-p
+✓
+28.038 0.828 0.205 2.160 2.160 8.44 31.724 0.930 0.177 0.804 0.804 25.089 0.745 0.227 3.246 3.246
+(final count)
+Pipeline
+parallelization. For detailed implementation and algorithmic design, please refer to (Mallick et al.,
+2024).
+Ωdensi − Ω0 − 2stepdensi
+A(stepx ) =
+step2x + 2stepx + Ωdensi
+(12)
+step2densi
+Where stepx denotes the current number of densification steps, stepdensi represents the total number of densification iterations, Ωdensi refers to the upper bound on the number of primitives after
+densification, and Ω0 indicates the initial number of primitives.
+Two operating modes are provided in Taming-3DGS4 : final count and multiplier, which correspond
+to a higher and a lower upper bound on the final total primitive number Np , respectively. Experiments were conducted under both modes for Taming-3DGS as well as Taming-3DGS with AdamWGS. DAR in this setting only includes opacity and scaling regularization as well, following the same
+configuration as in Sec. 4.4. Noise regularization is omitted because the growth rate in Taming3DGS is constrained. Considering that AdamW-GS imposes stronger penalties on redundant primitives, leading to the generation of a large number of dead primitives that are rapidly pruned and thus
+reduce the total primitive count significantly, we propose to replace the conservative pruning strategy in Taming-3DGS with the pruning method used in vanilla 3DGS when integrating AdamW-GS.
+We denote this modified pipeline as Taming-3DGS-p. Related experimental results are summarized
+in Table 8.
+As shown in Table 8, under the same constraint on the final Np , the variants trained with AdamW-GS
+consistently outperform their original counterparts in reconstruction quality while also improving
+training speed. Visual comparisons in Figure 6 further demonstrate that our method more faithfully
+preserves fine scene details. When a relatively large final primitive budget is given, i.e., under the
+final-count setting in Table 8, AdamW-GS reduces the total training time by nearly half, from 20.30
+min in the original Taming-3DGS to 10.46 min in Taming-3DGS with AdamW-GS. Since AdamWGS effectively penalizes redundant primitives at an early stage, we further incorporate the pruning
+4
+https://github.com/humansensinglab/taming-3dgs
+17
+Published as a conference paper at ICLR 2026
+Table 9: Quantitative results of Deformable Beta Splatting (DBS) (Liu et al., 2025a) with and without AdamW-GS on the Mip-NeRF 360 dataset. A brief introduction to DBS is provided in Appendix
+Sec. E.3. The Treehill scene from Mip-NeRF 360 is excluded.
+AdamW-GS
+x
+✓
+PSNR↑
+29.362
+29.643
+All
+SSIM↑
+0.864
+0.871
+LPIPS↓
+0.165
+0.158
+PSNR↑
+26.029
+26.108
+Outdoor
+SSIM↑ LPIPS↓
+0.787
+0.187
+0.798
+0.175
+PSNR↑
+32.696
+33.178
+Indoor
+SSIM↑
+0.940
+0.945
+LPIPS↓
+0.143
+0.140
+Table 10: Quantitative results for vanilla 3DGS and 3DGS-MCMC with and without AdamW-GS
+on the OMMO dataset (Lu et al., 2023). All primitive counts (Np and Na ) are reported in millions.
+AdamW-GS
+x
+✓
+PSNR↑
+30.359
+30.716
+3DGSMCMC
+SSIM↑ LPIPS↓
+Np
+0.925
+0.135
+1.960
+0.930
+0.126
+1.960
+Na
+1.673
+1.765
+PSNR↑
+30.040
+30.351
+SSIM↑
+0.914
+0.914
+3DGS
+LPIPS↓
+0.154
+0.154
+Np
+1.878
+1.245
+Na
+1.640
+1.211
+strategy from vanilla 3DGS to construct Taming-3DGS-p. With our optimizer, this variant further
+reduces the peak primitive count during training, from 3.205 million in the original Taming-3DGS to
+2.160 million in Taming-3DGS with AdamW-GS, thereby yielding additional GPU memory savings.
+E.3
+D EFORMABLE B ETA S PLATTING WITH A DAM W-GS
+Deformable Beta Splatting (DBS) (Liu et al., 2025a) shares a similar pipeline design and the same
+loss as 3DGS-MCMC (Kheradmand et al., 2024), as both are formulated within the Stochastic Gradient Langevin Dynamics framework. Unlike 3DGS-MCMC, DBS replaces the Gaussian kernel
+with the Beta kernel B(p; θi ) and introduces a Spherical Beta function to better represent complex
+geometries and diverse appearance attributes. Consequently, the rendering process is reformulated
+as shown in Eq. 13.
+k
+C (p; θ) =
+i−1
+Y
+k
+k
+ci oi Bi (p; θi ) (1 − oi Bik (p; θi ))
+i=1
+j=1
+XNpk
+(13)
+Consistent with our experiments on 3DGS-MCMC, we apply AdamW-GS to DBS, and the results
+are summarized in Table 9. Across eight of the nine scenes, excluding Treehill, we observe clear improvements in reconstruction quality when using AdamW-GS. For the Treehill scene, however, we
+find that DBS suffers from pronounced overfitting and triggers early stopping prematurely. Meanwhile, we observe that during the densification stage, Nd has been closed early to zero, indicating
+that DAR cannot effectively exert its intended effect in this scenario. Our method may be less effective in such heavily overfitting scenario.
+E.4
+VANILLA 3DGS OR 3DGSMCMC WITH A DAM W-GS ON OMMO DATASETS
+We provide results on the OMMO dataset (Lu et al., 2023), which contains large-scale outdoor
+scenes with long-range sequences. Our data processing follows the settings described in (Kheradmand et al., 2024) and its associated Github repository 5 . However, the image preprocessing failed
+for scene #10; thus, we report the average results for the left scenes. All results are summarized in
+Table 10. Our method demonstrates effectiveness on long sequence datasets as well.
+F
+E XPLORATION S TRATEGIES
+In Sec. 4.1, we observe that Sparse Adam exhibits is less explosive. This behavior is partly due to the
+stability described in Observation 1 and partly attributable to the inherent poor transport property of
+3DGS (Jung et al., 2024), which we briefly discussed in Sec. 4.4. This phenomenon causes a larger
+portion of primitives to remain in a stable state during optimization with Sparse Adam, neither triggering further primitive generation nor contributing to continued reconstruction improvement. As a
+5
+https://github.com/ubc-vision/3dgs-mcmc
+18
+Published as a conference paper at ICLR 2026
+Table 11: Quantitative results of vanilla 3DGS under different modifications on Mip-NeRF 360.
+More details are provided in Sec. F. “+ Only RSR” denotes the variant that uses only Sparse Adam
+and RSR in the 3DGS pipeline.
+All
+Outdoor
+Indoor
+PSNR↑ SSIM↑ LPIPS↓ ∆Na PSNR↑ SSIM↑ LPIPS↓ ∆Na PSNR↑ SSIM↑ LPIPS↓ ∆Na
+vanilla 3DGS
+27.506 0.815 0.216 (3.098m) 24.648 0.728 0.239 (4.512m) 31.080 0.925 0.189 (1.331m)
++ Only RSR (GS0)
+27.483 0.818 0.217 -28.6% 24.685 0.733 0.238 -27.9% 30.981 0.924 0.190 -29.5%
++AdamW-GS (GS8)
+27.678 0.822 0.220 -49.3% 24.854 0.740 0.243 -48.4% 31.209 0.925 0.191 -50.4%
++AdamW-GS (GS8) + ABE
+27.751 0.822 0.220 -41.1% 24.909 0.740 0.243 -38.5% 31.304 0.925 0.191 -44.3%
++AdamW-GS (GS8) + Longer Densi 27.715 0.824 0.218 -48.4% 24.857 0.744 0.240 -44.6% 31.288 0.925 0.190 -53.2%
+Pipeline
+result, the final primitive set has a smaller Na but inferior reconstruction quality. In Sec. 5 (Extra
+Exploration is Necessary), we examine the necessity of additional exploration through experiments
+that introduce noise regularization. Here, exploration is deliberately to encourage primitives to undergo larger movements, which is consistent with the notion of bad transport described in (Jung
+et al., 2024). We have given the discussion in Sec. 4.4.
+Exploration in Current AdamW-GS In Sec. 5, we argue that the current AdamW-GS improves
+exploration. This enhancement arises from several factors: (1) RSR. We provide additional ablation
+studies showing that, when using only Sparse Adam together with RSR, training the vanilla 3DGS
+pipeline on Mip-NeRF 360 yields reconstruction quality comparable to vanilla 3DGS with Adam.
+The corresponding results are reported in Table 11 under “+ Only RSR (GS0)”. (2) The influence
+of DAR around saddle points. The analysis in (Wang et al., 2025) indicates that many primitives
+become trapped near saddle points, preventing further effective optimization. The presence of DAR
+encourages these primitives to continue participating in optimization rather than stagnating. (3)
+Improved gradient flow after removing redundant primitives. When a large number of redundant primitives are eliminated, the gradient flow within primitive groups becomes more coherent
+and effective. (4) Noise regularization for outdoor scenes. For outdoor datasets, we intentionally
+introduce noise regularization to further encourage extra exploration.
+Existing work provides only limited discussion of exploration strategies for the 3DGS pipeline.
+Noise regularization, while helpful in certain cases, has inherent limitations and is not applicable to all datasets. Nevertheless, we argue that developing additional exploration strategies is a
+promising direction, as such mechanisms encourage primitives to explore a broader region of the
+space. Building on our current work, we introduce two additional exploration strategies: Adaptive
+Bound-Expanding Split (Jung et al., 2024) and Densification Extending. For outdoor scenes, the
+following experiments still employ noise regularization; we further demonstrate that these strategies
+can be used jointly.
+Adaptive Bound-Expanding Split (ABE-Split) divides each Gaussian into three, where the location of the third cross-region primitive is initialized using a constant factor proportional to the scene
+extent. The corresponding results are reported in Table 11 “+ AdamW-GS (GS8) + ABE”. ABESplit consistently improves reconstruction quality across both indoor and outdoor scenes. In some
+cases, the gains are particularly clear—for example, on the Room scene from Mip-NeRF 360, the
+PSNR/SSIM increases from 31.500 dB / 0.920 (vanilla 3DGS) to 32.121 dB / 0.923.
+Densification Extending: We extend the original densification phase from 15,000 to 25,000 iterations to allow primitives to continue being generated and refined. Because our method quickly
+penalizes redundant primitives, this extension does not introduce the risk of memory explosion. The
+corresponding results are reported in Table 11 under “+ AdamW-GS (GS8) + Longer Densi”. Extending the densification phase further benefits indoor scenes and additionally reduces the number
+of active primitives.
+G
+FAILURE C ASES
+Although AdamW-GS yields improved reconstruction quality—both quantitatively and qualitatively in terms of rendering visualization—compared with the original method, it only offers an
+19
+Published as a conference paper at ICLR 2026
+a) Anti-Fact in Boundary Area：
+vanilla 3DGS
+b) Blurry Detail in Background：
+w/ AdamW-GS
+3DGSMCMC
+w/ AdamW-GS
+w/ AdamW-GS
+Rendered Depth
+c) Anti-Fact in Geometric Information：
+vanilla 3DGS
+Rendered Depth
+d) Floater：
+vanilla 3DGS
+e) Geometric Information：
+w/ AdamW-GS
+3DGSMCMC
+w/ AdamW-GS
+Figure 7: More examples to show the failure cases: a) the rendering results from Room to show the
+anti-fact boundary area; b) the rendering results from Garden to show the blurriness in background;
+c) the rendering results and normalized depth maps from bonsai to show anti-fact in geometric
+information; d-e) the ellipsoid visualization from Bicycle.
+optimization-level enhancement and does not fundamentally resolve the inherent limitations of the
+pipeline itself.
+• Severe artifacts in boundary regions with insufficient view coverage. As shown in Figure 7 a),
+boundary areas on walls exhibit substantial artifacts, floaters, and even incorrect colors due to the
+lack of sufficient multi-view constraints.
+• Insufficient refinement of background regions. These areas often remain under-optimized and may
+suffer from blurriness. We give an example in Figure 7 b).
+• Geometric inconsistency despite reasonable rendering results. Our current optimization does not
+incorporate any additional geometric priors. From the normalized depth map computed using
+Eq. 14, as shown in the rendered-depth visualization in Figure 7 c, many regions can be observed to violate geometric plausibility, such as reflective book regions and shadowed chair regions. Without explicit geometric priors, AdamW-GS cannot fully recover the correct underlying
+geometry. Nonetheless, certain improvements in geometry can be observed—for instance, the tree
+trunk region highlighted by the purple box in Figure 7 e).
+• Persisting floater issues when the original pipeline suffers from floaters. Even with AdamW-GS,
+floaters may remain, as illustrated in Figure 7 d).
+• Failure under severe overfitting. When the reconstruction pipeline significantly overfits the scene,
+AdamW-GS may break down. We encountered this issue when using DBS to reconstruct Treehill
+from the Mip-NeRF 360 dataset. Overfitting can prematurely trigger early stopping, and the sharp
+decreasing of Np leads to the failure of DAR.
+Dk (p) =
+XNpk
+i=1
+dki · αik (p) · Tik (p)
+(14)
+where dki is the depth of the primitive in the corresponding camera coordinations.
+H
+M ORE ABOUT R ELATED W ORK
+Redundancy during Optimization (1) Densification refinement: Several works refine the densification rule of 3DGS (Fang & Wang, 2024; Mallick et al., 2024; Wang et al., 2025). SteepGS (Wang
+20
+Published as a conference paper at ICLR 2026
+a) Per-Scene Error Bar of PSNR for 3DGSMCMC
+b) Per-Scene Error Bar of PSNR for vanilla 3DGS
+Figure 8: The PSNR error bar plot across nine scenes is shown for both methods, while the other
+metrics exhibit no notable variation. A more detailed per-scene result is provided in Sec. K.
+et al., 2025) mitigates redundancy and alleviates under-optimization by introducing optimizationconditioned densification, but its reconstruction quality and pruning effectiveness remain inferior
+to those of learning-based methods. (2) Hand-crafted criteria: These methods design importance
+or redundancy criteria to guide pruning after densification. LightGaussian (Fan et al., 2024) scores
+each Gaussian using the product of opacity, transmittance, scale, and ray contribution. RadSplat
+(Niemeyer et al., 2025) uses the maximum alpha–transmittance product across views. (Papantonakis
+et al., 2024) propose a pipeline to prune primitives based on the degree of primitive overlap. PUP3DGS(Hanson et al., 2025) proposes a principled sensitivity pruning score which is computed as a
+second-order approximation of the reconstruction error on the training views. (3) Learning-based
+pruning: Learning-based methods adaptively remove redundant primitives, often through learnable
+masks. Compact3DGS (Lee et al., 2024) introduces Gaussian masks with L1 regularization on active
+mask count. MaskGaussian (Liu et al., 2025b) models the existence of primitives, or measures the
+importance via learning. LP-3DGS(Zhang et al., 2024a) redesigns the masking function to leverage
+the Gumbel-Sigmoid method. (4) Optimization-related operations: Optimizing together with additional opacity L1 regularization has become a common technique for redundancy removal, even
+extending beyond Efficient 3DGS tasks (Papantonakis et al., 2024; Lee et al., 2024; Kheradmand
+et al., 2024; Liu et al., 2025a; Svitov et al., 2024).
+Redundancy reduction and training efficiency constitute subtopics of efficient 3DGS, involving
+inference-time and training-time acceleration, with partial overlap between the two. For inference,
+approaches include vector quantization (Lee et al., 2024), knowledge distillation (Fan et al., 2024),
+and entropy coding (Huang et al., 2025). For training, existing efforts mainly target backward acceleration and loss redesign (Mallick et al., 2024). These topics fall beyond the scope of this work: for
+fair comparison, we maintain the same loss function and refrain from using additional compression
+techniques.
+Optimizer and Regularization The development of adaptive first-order optimizers can be traced
+back to RProp (Riedmiller & Braun, 1993). AdaGrad (Duchi et al., 2011) adapts the learning rate
+of features by estimated geometry and assigns larger learning rate to infrequent features. RMSProp
+(Hinton et al., 2012) further stabilizes training by normalizing updates with an exponential moving
+average of squared gradients. Building on this, Adam (Kinga et al., 2015) incorporates momentum
+into RMSProp through an exponential average of gradients, quickly becoming the default optimizer
+for modern DNNs (Vaswani et al., 2017). Numerous refinements and extensions to Adam have since
+been proposed (You et al., 2019; Chen et al., 2023). Regularization has long been recognized as a key
+technique to improve model generalization and has also been employed as a tool to facilitate more
+effective optimization (Srivastava et al., 2014; Shalev-Shwartz & Ben-David, 2014; Andriushchenko
+et al., 2023; Brown et al., 2020; Radford et al., 2021). Importantly, Loshchilov & Hutter (2017)
+demonstrated that L2 regularization and weight decay are not equivalent, and further showed that
+weight decay provides a more appropriate formulation for Adam.
+Optimization for 3DGS Sparse Adam (Mallick et al., 2024) introduces asynchronous updates
+that improve efficiency, yet the insufficient recognition of update-step coupling results in degraded
+performance. 3DGS-LM (Höllein et al., 2025) proposes a tailored Levenberg-Marquardt optimizer
+for acceleration. However, it still relies on Adam for the initialization or densification. Although
+Adam has become a de facto indispensable optimizer for 3DGS, our understanding of its behavior in
+21
+Published as a conference paper at ICLR 2026
+Table 12: Quantitative results for 3DGS-MCMC + Sparse Adam with different opacity regularization settings on Mip-NeRF 360.
+Methods
+Cite
+λo
+PSNR
+MC2
+0.01 25.160
+|o|1
+MC101 0.1 17.379
+MC102 0.001 24.585
+MC103 0.1 24.298
+AdamW o MC104
+1
+24.155
+MC105 10 17.031
+AdamW o MC106 0.1 24.239
++ clip
+MC107
+1
+24.381
+(max 10) MC108 10 19.358
+Outdoor
+Indoor
+SSIM LPIPS ∆Na PSNR SSIM LPIPS
+0.754 0.212 3.92% 31.546 0.930 0.183
+0.400 0.604 -77.8% 29.957 0.906 0.220
+0.731 0.220 5.18% 31.342 0.930 0.179
+0.714 0.242 5.79% 30.687 0.921 0.193
+0.698 0.288 3.80% 30.326 0.917 0.203
+0.350 0.654 -19.8% 20.134 0.680 0.457
+0.713 0.242 5.77% 30.992 0.928 0.182
+0.713 0.260 5.08% 30.850 0.922 0.194
+0.440 0.560 2.69% 21.901 0.727 0.436
+∆Na
+4.74%
+-40.7%
+8.1%
+-2.08%
+-7.47%
+-11.6%
+9.66%
+8.76%
+7.99%
+PSNR
+27.998
+22.969
+27.588
+27.138
+26.898
+18.410
+27.240
+27.256
+20.488
+All
+SSIM LPIPS ∆Na
+0.832 0.199 4.28%
+0.625 0.433 -59.3%
+0.819 0.202 6.28%
+0.806 0.220 2.83%
+0.795 0.250 5.43%
+0.497 0.567 -16.1%
+0.808 0.215 7.50%
+0.806 0.231 6.71%
+0.568 0.505 5.04%
+this context remains limited. A similar situation arises for regularization: despite the widespread use
+of various regularization techniques in 3DGS, there is currently little work examining the interplay
+between regularization and the optimizer, even though this has already been explored in the deep
+neural networks (Loshchilov & Hutter, 2017).
+I
+P REPARATION FOR D ECOUPLED ATTRIBUTE R EGULARIZATION
+I.1
+H YPERPARAMETER A DJUSTMENT
+This section discusses the influence of hyperparameters on regularization. For both opacity and
+scaling regularization in 3DGS-MCMC, a default value of 0.01 is adopted. Here, we vary only the
+opacity hyperparameter by scaling it up or down by a factor of 10, with the results summarized in
+Table 12. When increased to 0.1, the stronger regularization leads to severe degradation in reconstruction quality. Conversely, reducing it to 0.001 weakens the regularization effect to the extent
+that the primitive reallocation process is significantly disrupted, also resulting in quality loss. These
+results suggest that simply tuning fixed hyperparameters is insufficient to effectively control the
+strength of regularization.
+I.2
+A DAM W S TYLE D ECOUPLING
+The AdamW-style decoupling implies an equal penalty applied to attributes, which can be formally
+expressed in Eq. 15 and Eq. 16. This formulation is equivalent to imposing a constant penalty
+on opacity (Rota Bulò et al., 2025). Within the 3DGS-MCMC framework, we apply AdamWstyle decoupling to opacity and evaluate it under three hyperparameter settings corresponding to
+different strengths. To disentangle the effect of magnitude, we also experiment with constraining
+the magnitude of the AdamW-style decoupling, as given in Eq. 17.
+The results are summarized in Table 12. Consistent with the findings in Appendix Sec. I.1, excessively large hyperparameters hinder convergence, while overly small values render the regularization
+ineffective. A key limitation of AdamW-style decoupling is that it enforces uniform penalties across
+all primitives, despite their varying importance.
+m(θ)′t = β1′ × m(θ)′t−1 + (1 − β1′ ) ×
+∇ℓ(θ)
+NI
+v(θ)′t = β2′ × v(θ)′t−1 + (1 − β2′ ) × (
+θt+1 = θt − η × ( p
+θt+1 = θt − η × ( p
+m̂(θ)′t
++ λ∇R(θ))
+(16)
++ min(λ∇R(θ), Ct ))
+(17)
+v̂(θ)′t + ϵ
+m̂(θ)′t
+v̂(θ)′t + ϵ
+22
+∇ℓ(θ) 2
+) (15)
+NI
+Published as a conference paper at ICLR 2026
+I.3
+A DDITIONAL DISCUSSION REGARDING THE FORMULATION IN E Q .8
+A thorough decoupling—i.e., activation via the second moment of ∇R—is unreasonable: in addition to incurring extra computational and memory costs, it reduces regularization to a trivial
+attribute-dependent penalty (e.g., higher opacity automatically incurs stronger regularization).
+I.4
+D ISCUSSION R ELATED TO I MPLICIT U PDATE
+Ineffective when stable: Implicit updates allow primitives that are invisible from the current viewpoint to be updated based on their optimizer moments. Our reasoning, grounded in experimental
+results, is as follows. When primitives are in a stable state—more precisely, near saddle points,
+which are abundant in 3DGS when no external perturbation is applied (Wang et al., 2025)—implicit
+updates are largely ineffective while incurring additional computational cost. In vanilla 3DGS, we
+implemented AIU (see GS4 and GS3 in Sec. K), and observed negligible improvement.
+Less controllable when unstable: In contrast, when primitives are unstable, such as during the
+early training phase, e.g., densification, where newly generated primitives often have zero optimizer
+moments, or when the update step is relatively large, or when optimizer moments are rescaled,
+implicit updates can become problematic. We design several experiments to highlight their uncontrollability. For instance, adopting AIU during densification in vanilla 3DGS with Sparse Adam can
+lead to more primitives but worse performance, as shown by GS6 in Appendix Sec. K, as even small
+update steps for invisible primitives introduce instability. According to Obsidian 1, Sparse Adam
+tends to be stable, causing fewer primitives to satisfy the gradient condition. AIU disrupts this stability: when primitives overfit certain views due to implicit updates, they induce larger gradients in
+other views, triggering unnecessary densification. The additional primitives do not necessarily improve rendering quality. In the Appendix Sec.K, we provide multiple AIU configurations: although
+in some cases the quality approaches that of vanilla 3DGS, the more common results are in worse
+quality, confirming the uncontrollable nature of implicit updates.
+Another related phenomenon is the emergence of dead primitives and the increase in reallocated
+primitives (see Sec.5.1). The comparison between GS1 and GS3 in Table 1, with full results provided in Appendix Sec. K, shows that Adam produces more dead primitives than Sparse Adam
+(0.232M vs. 0.048M). A natural conjecture is that when the update step, from a certain viewpoint, encourages primitives to become dead primitives, the implicit update accelerates this process,
+thereby producing more dead primitives. We provide several comparative experiments in Appendix
+Sec. K. (1) MC2 vs. MC3 in Appendix Sec. K, comparing the original 3DGSMCMC with Sparse
+Adam against the original 3DGSMCMC with Sparse Adam + AIU. (2) Similar comparisons can
+be found in GS3 and GS4, examining the effect of AIU on dead primitives when Sparse Adam is
+applied after densification ends. We observe that using AIU results in additional dead primitives. (3)
+Figure 3 likewise shows that adding AIU leads to more reallocated primitives during the densification stage of 3DGS-MCMC. For certain scenes, such as Kitchen, the corresponding reconstruction
+quality decreases, further reflecting the increased number of dead primitives. This also indicates that
+the phenomenon is not part of a normal optimization process; in Sec. 5.1, we relate this behavior to
+over-effective regularization. (4) The comparison between MC6 and MC7 in Appendix Sec. K similarly shows that adding AIU after densification produces additional dead primitives as well; note
+that in our application RSR is only added during densification. (5) When training MaskGaussian
+with AdamW-GS, MaskGaussian will not suffer from the quality risk.
+J
+I MPLEMENTATION D ETAILS
+J.1
+A DAM W-GS
+Specifically, each parameter of the optimizer can be expressed in the form:
+Since both opacity and scaling are strictly positive, the gradient of the L1 regularization reduces to
+a constant value of +1.
+For opacity:
+o = σ(τ ) =
+1
+1 + e−τ
+∇σ(τ ) = σ(τ )(1 − σ(τ ))
+23
+(18)
+Published as a conference paper at ICLR 2026
+Stage: WarmDensification
+up
+15000
+500
+Optimization
+Detail: Adaptive Density Control(ADC)
+Warmup
+Pure Optimization(P-Op)
+iteration:
+Densification
+500
+30000
+P-Op
+26000
+30000
+New Primitives Sampling/Dead Primitives Reallocation
+Adam
+Noise/Opacity L1 Regularization/Scaling L1 Regularization/Adam
+(a) Vanilla 3DGS Framework
+(b) 3DGS-MCMC Framework
+(c) StSS in Vanilla 3DGS
+(d) StSS in 3DGS-MCMC
+Figure 9: a-b:: This illustrates the training pipeline of 3DGS and 3DGS-MCMC. Since our method
+encourages more primitive reallocations, we postpone the densification stage by 1000 iterations
+compared to the original 3DGS-MCMC. In contrast, the original 3DGS-MCMC at 25k iterations
+produces almost no dead primitives. c-d: This shows the StSS used in this paper.
+τt+1 = τt − ητ × [ p
+m̂(τ )′t
+v̂(τ )′t + ϵ
+∇σ(τ )/NI
++ min(λo p
+, Ct )]
+v̂(τ )′t + ϵ
+(19)
+For scaling:
+s = exp(κ) ∇exp(κ) = exp(κ)
+m̂(κ)′t
+∇exp(κ)/NI
++ min(λs p
+, Ct )]
+κt+1 = κt − ηκ × [ p
+′
+v̂(κ)t + ϵ
+v̂(κ)′t + ϵ
+(20)
+(21)
+For position:
+Rµ = ηµ · σ(−λµ (o − λt )) · Σγ γ ∼ N (0, I)
+m̂(µ)′t
+ηRo
+µt+1 = µt − ηµ × [ p
+Rµ ]
++
+′
+ηµ
+v̂(µ)t + ϵ
+For the other:
+θt+1 = θt − ηθ × [ p
+J.2
+m̂(θ)′t
+v̂(θ)′t + ϵ
+]
+(22)
+(23)
+(24)
+H YPERPARAMETER S ELECTION
+For vanilla 3DGS(Kerbl et al., 2023) and 3DGS-MCMC(Kheradmand et al., 2024), all pipeline
+parameters follow the original settings, with noise parameters identical to those in 3DGS-MCMC.
+Operation for the opacity is similar as (Rota Bulò et al., 2025).
+θt+1 = θt − η × [ p
+m̂(θ)′t
+v̂(θ)′t + ϵ
+∇R(θ)/NI
++ min(λθ p
+, Ct )]
+v̂(θ)′t + ϵ
+(25)
+StSS in RSR We fix the sampling interval at 100. Currently, StSS is manually set. StSS samples
+the current set of primitives, followed by RSR rescaling. The configuration of StSS must take
+into account the generation and reallocation behavior in the pipeline, as these processes typically
+introduce additional primitives with zero state. When such zero-state primitives constitute a large
+proportion of the population, a smaller sampling ratio is generally preferred. In the main text,
+Figure 3 and Figure 2 respectively show the number of reallocated primitives for 3DGS-MCMC and
+the evolution of the primitive count under different scenes for 3DGS. Understanding these curves
+provides useful guidance for designing an effective StSS strategy.
+In general, the differences between these schedules arise from two main factors: (1) variations in the
+underlying pipelines, e.g., 3DGS versus 3DGS-MCMC, which naturally require distinct schedules;
+and (2) variations across scenes, where different schedules are needed to obtain the best performance
+on indoor versus outdoor datasets. The discrepancies introduced by the pipelines themselves are unavoidable. Nevertheless, for each pipeline we design a conservative schedule, denoted as StSSGS1
+24
+Published as a conference paper at ICLR 2026
+and StSSMC1, under which both 3DGS and 3DGS-MCMC outperform their original configurations. For outdoor scenes, which typically involve higher primitive generation or reallocation rates,
+we find that a more aggressive schedule further improves performance. All StSS schedules used in
+this paper are illustrated in Figure 9. Appendix Sec.K summarizes the results obtained by applying
+different StSS configurations across various pipelines and scenes.
+Scaling in RSR The three existing or designed operations provide guidance for selecting the parameters α1 and α2 in RSR. (1) The states of newly generated primitives in 3DGS, or reallocated
+primitives in 3DGS-MCMC, can be viewed as naturally constrained by an RSR with α1 = α2 = 0.
+m̂(θ)′
+(2) To properly control the magnitude of the update step √ ′t , it is necessary to impose the
+v̂(θ)t +ϵ
+relation α2 = α12 . (3) A very small α2 is consistent with the design philosophy of DAR, as we rely
+on such a small value to rescale the second moment and thereby activate regularization. Therefore,
+when α1 and α2 are chosen to be sufficiently small while satisfying α2 = α12 , the configuration
+remains stable. We conducted a search over different combinations of α1 and α2 . For larger configurations—for example, α1 = 0.5, α2 = 0.25—RSR becomes less effective, and some combinations
+even lead to gradient explosion. For smaller values of α1 and α2 , the performance differences are
+minor, and we find that α1 = 0.2, α2 = 0.04 generally performs best. In Appendix Sec.K, we
+report results for both α1 = α2 = 0 and α1 = 0.2, α2 = 0.04, cited as MC19 and MC18. Hence,
+we adopt α1 = 0.2, α2 = 0.04 as the default in all experiments.
+DAR We use two DAR variants: opacity and scaling regularization. Regularization is constrained
+to the densification stage, as no clear benefit is observed in P-Op. This is consistent with the smaller
+max magnitude of adaptive gradients in P-Op (Figure 1). Opacity regularization starts after 3000
+iterations, since a large percent of generated primitives initially have zero moment, motivating a
+delayed start.
+For the two hyperparameters, we select values by considering activation derivatives, original settings, and Adam’s parameters. We set λo = 0.001 and, since scaling activations are two orders
+larger than opacity, λs = 1e−5. Comparative DAR experiments with λs = 0.001 and λs = 1e−5
+show that 1e−5 performs better (see experiments MC14 and MC17 in Appendix Sec. K). In our
+application, only the most significant digit of NI is retained and then scaled down by one order of
+magnitude (NI /10).
+For opacity, Ct is set to 10, guided by the max magnitude of adaptive gradients in Figure 1. Without
+Ct , over-effective regularization occurs (see MC9 in Appendix Sec. K). Smaller values (e.g., 5 or
+1) reduce reallocated primitives, leading to slight drops in PSNR and SSIM, though the MCMC
+framework still explores effectively. For scaling, we adopt Ct = 10 by analogy with opacity, which
+yields good results; scaling is less sensitive to Ct (e.g., Ct = 1 shows little change in reconstruction
+quality; see MC8–MC17 in Appendix Sec. K).
+K
+A LL R ESULTS
+More rendering visualization can be found in Fig.10.
+25
+Published as a conference paper at ICLR 2026
+vanilla 3DGS + AdamW-GS
+vanilla 3DGS
+Ground Truth
+'
+3DGSMCMC + AdamW-GS
+original 3DGSMCMC
+Figure 10: Rendering visualization comparison.
+26
+Ground Truth
+Published as a conference paper at ICLR 2026
+K.1
+B ICYCLE FROM M IP N ERF -360
+Table 13: Quantitative results on the Bicycle from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite Sparse AIU ProAIU
+GS1
+x
+GS2
+✓
+GS3 Half
+GS0
+✓
+GS4 Half [15,30]
+0.5
+GS15 Half [15,30]
+1.0
+GS16 ✓ [0.1,15]
+0.5
+GS17 ✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS9
+GS7
+GS10
+GS8
+✓
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise reset
+Ours
+✓
+✓
+✓
+✓ StSSGS1RSR
+[0.1][15]
+✓
+[0.1][15]
+✓
+[0.1][0.1]
+✓
+[0.5][0.1]
+✓
+[0.2,0.5,0.1]
+✓
+[0.1,1,7]
+[0.5,0.1]
+✓
+[0.1,3]
+[0.8,0.5,0.1]
+✓
+[0.1,3,7]
+[0.1][0.1]
+✓
+✓
+x
+StSSGS2
+✓
+x
+StSSGS5
+✓
+✓
+StSSGS1
+✓
+✓
+StSSGS2
+PSNR
+25.238
+25.142
+25.260
+25.337
+25.284
+25.256
+25.145
+25.166
+SSIM LPIPS Na /m
+0.765 0.211 5.438
+0.752 0.235 4.052
+0.766 0.211 5.879
+0.770 0.213 3.929
+0.766 0.210 5.832
+0.766 0.210 5.651
+0.756 0.227 5.245
+0.755 0.228 5.026
+Nd /m
+0.548
+0.100
+0.109
+0.038
+0.176
+0.285
+0.105
+0.103
+∆Na
+-25.5%
+8.11%
+-28.4%
+7.24%
+3.91%
+-3.54%
+-7.57%
+25.166
+0.757
+0.226
+5.290
+0.102
+-2.72%
+25.133
+0.754
+0.229
+4.726
+0.097
+-13.1%
+25.116
+0.756
+0.226
+5.343
+0.103
+-1.74%
+25.206
+25.481
+25.470
+25.514
+25.454
+0.760
+0.776
+0.775
+0.780
+0.778
+0.220
+0.219
+0.223
+0.215
+0.219
+6.087
+3.116
+3.066
+2.853
+2.717
+0.203
+0.013
+0.011
+0.021
+0.018
+11.9%
+-42.7%
+-43.6%
+-47.5%
+-50.0%
+Table 14: Quantitative results on the Bicycle from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 13). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 25.537 0.794 0.181 5.189 0.790 -4.57%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 25.630 0.793 0.178 5.835 0.145 7.30%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 25.649 0.794 0.177 5.819 0.161 7.0%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 25.746 0.803 0.167 5.645 0.335 3.80%
+MC5
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 24.930 0.798 0.163 5.764 0.216 5.99%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 25.298 0.801 0.161 5.789 0.191 6.45%
+MC18 ✓
+StSSMC10 L1
+0.01/L1
+0.01/- 25.779 0.804 0.170 5.734 0.246 5.44%
+MC19 ✓
+StSSMC1 L1
+0.01/L1
+0.01/- 25.777 0.803 0.166 5.722 0.258 5.22%
+MC20 ✓
+StSSMC2 L1
+0.01/L1
+0.01/- 25.539 0.795 0.180 5.189 0.791 -4.57%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 25.766 0.803 0.167 5.715 0.265 5.09%
+MC10 ✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 25.768 0.804 0.160 5.840 0.139 7.4%
+MC11 ✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 25.813 0.807 0.158 5.835 0.144 7.31%
+MC12 ✓
+StSSMC1 DAR 0.001/5
+L1
+0.01/- 25.753 0.804 0.159 5.843 0.137 7.44%
+MC13 ✓
+StSSMC1 DAR 0.001/1
+L1
+0.01/- 25.666 0.800 0.162 5.871 0.109 7.96%
+MC14 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 25.727 0.803 0.159 5.873 0.107 7.99%
+MC15 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 25.743 0.804 0.159 5.863 0.117 7.81%
+MC16 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 25.791 0.806 0.158 5.807 0.173 6.78%
+MC17 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 25.781 0.806 0.158 5.807 0.173 6.78%
+MC7
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 25.826 0.807 0.158 5.799 0.181 6.63%
+MC8
+✓
+StSSMC3 DAR 0.001/10 DAR 10−5 /10 25.874 0.809 0.158 5.781 0.199 6.30%
+27
+Published as a conference paper at ICLR 2026
+K.2
+F LOWERS FROM M IP N ERF -360
+Table 15: Quantitative results on the Flowers from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite Sparse
+AIU
+ProAIU
+GS1
+x
+GS2
+✓
+GS3
+Half
+GS0
+✓
+GS4
+Half [15,30]
+0.5
+GS15 Half [15,30]
+1.0
+GS16
+✓
+[0.1,15]
+0.5
+GS17
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS9
+GS7
+GS10
+GS8
+✓
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise reset
+Ours
+✓
+✓
+✓
+✓ StSSGS1RSR
+[0.1][15]
+✓
+[0.1][15]
+✓
+[0.1][0.1]
+✓
+[0.5][0.1]
+✓
+[0.2,0.5,0.1]
+✓
+[0.1,1,7]
+[0.5,0.1]
+✓
+[0.1,3]
+[0.8,0.5,0.1]
+✓
+[0.1,3,7]
+[0.1][0.1]
+✓
+✓
+x
+StSSGS2
+✓
+x
+StSSGS5
+✓
+✓
+StSSGS1
+✓
+✓
+StSSGS2
+PSNR
+21.527
+21.463
+21.589
+21.698
+21.598
+21.585
+21.488
+21.535
+SSIM
+0.605
+0.598
+0.605
+0.610
+0.606
+0.605
+0.600
+0.600
+LPIPS
+0.336
+0.346
+0.337
+0.336
+0.336
+0.336
+0.343
+0.342
+Na /m
+3.421
+2.737
+3.616
+2.506
+3.581
+3.518
+3.198
+3.153
+Nd /m
+0.239
+0.030
+0.033
+0.011
+0.056
+0.098
+0.032
+0.032
+∆Na
+-19.9%
+5.70%
+-26.7%
+4.67%
+2.83%
+-6.51%
+-7.83%
+21.563
+0.601
+0.342
+3.240
+0.032
+-5.29%
+21.524
+0.599
+0.344
+2.940
+0.029
+-14.0%
+21.548
+0.601
+0.342
+3.330
+0.003
+-2.66%
+21.551
+21.762
+21.718
+21.708
+21.711
+0.601
+0.609
+0.606
+0.612
+0.610
+0.340
+0.343
+0.349
+0.339
+0.344
+3.599
+2.026
+1.951
+1.917
+1.832
+0.077
+0.004
+0.003
+0.007
+0.005
+5.20%
+-40.7%
+-42.9%
+-43.9%
+-46.4%
+Table 16: Quantitative results on the Flowers from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 15). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 22.028 0.641 0.296 3.352 0.248 -2.01%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 21.966 0.635 0.304 3.534 0.066 3.30%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 22.072 0.638 0.301 3.529 0.071 3.15%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 22.039 0.651 0.274 3.486 0.114 0.19%
+MC5
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 21.750 0.650 0.271 3.520 0.08 2.89%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 21.511 0.646 0.275 3.524 0.076 3.01%
+MC18 ✓
+StSSMC10 L1
+0.01/L1
+0.01/- 22.195 0.649 0.292 3.510 0.090 2.60%
+MC19 ✓
+StSSMC1 L1
+0.01/L1
+0.01/- 22.038 0.650 0.277 3.524 0.076 3.01%
+MC20 ✓
+StSSMC2 L1
+0.01/L1
+0.01/- 22.017 0.641 0.295 3.352 0.248 -2.01%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 21.288 0.588 0.349
+MC10 ✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 21.887 0.650 0.268 3.551 0.049 3.80%
+MC11 ✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 22.017 0.656 0.268 3.548 0.052 3.71%
+MC12 ✓
+StSSMC1 DAR 0.001/5
+L1
+0.01/- 21.876 0.650 0.266 3.554 0.046 3.88%
+MC13 ✓
+StSSMC1 DAR 0.001/1
+L1
+0.01/- 21.726 0.646 0.264 3.565 0.035 4.20%
+MC14 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 21.923 0.650 0.269 3.563 0.037 4.15%
+MC15 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 21.962 0.650 0.270 3.561 0.039 4.15%
+MC16 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 21.936 0.651 0.271 3.537 0.063 3.39%
+MC17 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 22.034 0.653 0.270 3.539 0.061 3.44%
+MC7
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 22.003 0.654 0.267 3.535 0.065 3.33%
+MC8
+✓
+StSSMC3 DAR 0.001/10 DAR 10−5 /10 22.108 0.658 0.268 3.525 0.075 3.04%
+28
+Published as a conference paper at ICLR 2026
+K.3
+G ARDEN FROM M IP N ERF -360
+Table 17: Quantitative results on the Garden from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. . Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite Sparse
+AIU
+ProAIU
+GS1
+x
+GS2
+✓
+GS3
+Half
+GS0
+✓
+GS4
+Half [15,30]
+0.5
+GS15 Half [15,30]
+1.0
+GS16
+✓
+[0.1,15]
+0.5
+GS17
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS9
+GS7
+GS10
+GS8
+✓
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise reset
+Ours
+✓
+✓
+✓
+✓ StSSGS1RSR
+[0.1][15]
+✓
+[0.1][15]
+✓
+[0.1][0.1]
+✓
+[0.5][0.1]
+✓
+[0.2,0.5,0.1]
+✓
+[0.1,1,7]
+[0.5,0.1]
+✓
+[0.1,3]
+[0.8,0.5,0.1]
+✓
+[0.1,3,7]
+[0.1][0.1]
+✓
+✓
+x
+StSSGS2
+✓
+x
+StSSGS5
+✓
+✓
+StSSGS1
+✓
+✓
+StSSGS2
+PSNR
+27.334
+27.237
+27.409
+27.318
+27.436
+27.455
+27.268
+27.304
+SSIM
+0.865
+0.860
+0.866
+0.865
+0.866
+0.866
+0.862
+0.862
+LPIPS
+0.108
+0.117
+0.107
+0.109
+0.107
+0.107
+0.114
+0.113
+Na /m
+5.614
+4.064
+5.878
+3.026
+5.827
+5.672
+5.138
+5.225
+Nd /m
+0.318
+0.059
+0.059
+0.019
+0.112
+0.265
+0.068
+0.066
+∆Na
+-27.6%
+4.70%
+-46.9%
+3.79%
+1.03%
+-8.47%
+-6.92%
+27.298
+0.862
+0.113
+5.363
+0.069
+-4.47%
+27.234
+0.861
+0.114
+4.652
+0.061
+-17.1%
+27.352
+0.863
+0.112
+5.548
+0.069
+-1.17%
+27.263
+27.438
+27.590
+27.370
+27.170
+0.862
+0.864
+0.864
+0.863
+0.862
+0.112
+0.123
+0.127
+0.122
+0.124
+5.877
+2.076
+1.983
+2.145
+2.075
+0.162
+0.006
+0.005
+0.016
+0.012
+4.68%
+-63.0%
+-64.7%
+-61.8%
+-63.0%
+Table 18: Quantitative results on the Garden from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 17). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 27.862 0.879 0.094 5.466 0.433 -2.63%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 27.889 0.878 0.096 5.785 0.115 3.04%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 27.896 0.878 0.095 5.770 0.13 2.77%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 28.032 0.883 0.089 5.627 0.273 0.23%
+MC5
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 25.235 0.864 0.107 5.645 0.255 0.55%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 24.993 0.825 0.149 5.651 0.249 0.65%
+MC18 ✓
+StSSMC10 L1
+0.01/L1
+0.01/- 28.010 0.882 0.090 5.726 0.174 1.99%
+MC19 ✓
+StSSMC1 L1
+0.01/L1
+0.01/- 28.028 0.882 0.089 5.705 0.195 1.62%
+MC20 ✓
+StSSMC2 L1
+0.01/L1
+0.01/- 27.877 0.879 0.094 5.714 0.186 1.78%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 28.037 0.882 0.093 5.632 0.268 0.32%
+MC10 ✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 28.087 0.884 0.088 5.752 0.148 2.24%
+MC11 ✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 28.065 0.884 0.088 5.740 0.160 2.24%
+MC12 ✓
+StSSMC1 DAR 0.001/5
+L1
+0.01/- 28.072 0.884 0.088 5.756 0.144 2.52%
+MC13 ✓
+StSSMC1 DAR 0.001/1
+L1
+0.01/- 28.021 0.883 0.089 5.807 0.093 3.43%
+MC14 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 28.045 0.883 0.088 5.805 0.095 3.40%
+MC15 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 28.018 0.883 0.088 5.796 0.104 3.24%
+MC16 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 28.081 0.884 0.088 5.725 0.175 1.97%
+MC17 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 28.104 0.884 0.088 5.726 0.174 1.99%
+MC7
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 28.109 0.884 0.088 5.714 0.186 1.78%
+MC8
+✓
+StSSMC3 DAR 0.001/10 DAR 10−5 /10 28.144 0.885 0.088 5.687 0.213 1.30%
+29
+Published as a conference paper at ICLR 2026
+K.4
+S TUMP FROM M IP N ERF -360
+Table 19: Quantitative results on the Stump from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite Sparse
+AIU
+ProAIU
+GS1
+x
+GS2
+✓
+GS3
+Half
+GS0
+✓
+GS4
+Half [15,30]
+0.5
+GS15 Half [15,30]
+1.0
+GS16
+✓
+[0.1,15]
+0.5
+GS17
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS9
+GS7
+GS10
+GS8
+✓
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise reset
+Ours
+✓
+✓
+✓
+✓ StSSGS1RSR
+[0.1][15]
+✓
+[0.1][15]
+✓
+[0.1][0.1]
+✓
+[0.5][0.1]
+✓
+[0.2,0.5,0.1]
+✓
+[0.1,1,7]
+[0.5,0.1]
+✓
+[0.1,3]
+[0.8,0.5,0.1]
+✓
+[0.1,3,7]
+[0.1][0.1]
+✓
+✓
+x
+StSSGS2
+✓
+x
+StSSGS5
+✓
+✓
+StSSGS1
+✓
+✓
+StSSGS2
+PSNR
+26.606
+26.511
+26.730
+26.624
+26.710
+26.759
+26.534
+26.475
+SSIM
+0.772
+0.762
+0.774
+0.782
+0.773
+0.774
+0.766
+0.764
+LPIPS
+0.216
+0.233
+0.215
+0.210
+0.215
+0.214
+0.226
+0.227
+Na /m
+4.542
+3.751
+4.774
+3.644
+4.928
+4.596
+4.974
+5.010
+Nd /m
+0.232
+0.026
+0.029
+0.016
+0.094
+0.270
+0.029
+0.030
+∆Na
+-17.4%
+5.10%
+-19.7%
+8.49%
+1.18%
+9.51%
+10.3%
+26.611
+0.768
+0.224
+4.811
+0.026
+5.94%
+26.633
+0.767
+0.226
+4.830
+0.026
+6.34%
+26.630
+0.767
+0.224
+5.165
+0.026
+13.7%
+26.601
+27.175
+27.271
+27.033
+27.045
+0.768
+0.796
+0.798
+0.800
+0.800
+0.222
+0.211
+0.211
+0.206
+0.206
+5.274
+2.894
+2.677
+2.567
+2.470
+0.125
+0.014
+0.009
+0.023
+0.020
+16.1%
+-36.3%
+-41.0%
+-43.5%
+-45.6%
+Table 20: Quantitative results on the Stump from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 19). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 27.204 0.805 0.183 4.245 0.555 -6.53%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 27.293 0.805 0.182 4.718 0.082 3.84%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 27.273 0.805 0.182 4.698 0.102 3.43%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 27.131 0.806 0.177 4.535 0.265 -0.154%
+MC5
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 20.854 0.687 0.284 4.621 0.179 1.73%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 25.509 0.782 0.195 4.615 0.185 1.60%
+MC18 ✓
+StSSMC10 L1
+0.01/L1
+0.01/- 27.064 0.805 0.179 4.620 0.180 1.71%
+MC19 ✓
+StSSMC1 L1
+0.01/L1
+0.01/- 27.172 0.807 0.176 4.631 0.169 1.93%
+MC20 ✓
+StSSMC2 L1
+0.01/L1
+0.01/- 27.170 0.796 0.190 4.673 0.127 2.88%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 26.943 0.796 0.191 4.620 0.180 1.71%
+MC10 ✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 27.041 0.800 0.178 4.713 0.087 3.76%
+MC11 ✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 27.064 0.803 0.176 4.705 0.095 3.58%
+MC12 ✓
+StSSMC1 DAR 0.001/5
+L1
+0.01/- 27.070 0.799 0.179 4.712 0.088 3.74%
+MC13 ✓
+StSSMC1 DAR 0.001/1
+L1
+0.01/- 26.853 0.793 0.184 4.741 0.059 4.38%
+MC14 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 26.966 0.797 0.180 4.724 0.076 4.00%
+MC15 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 27.108 0.801 0.177 4.717 0.083 3.85%
+MC16 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 27.088 0.801 0.178 4.683 0.117 3.10%
+MC17 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 27.101 0.802 0.178 4.681 0.119 3.06%
+MC7
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 27.159 0.805 0.175 4.673 0.127 2.88%
+MC8
+✓
+StSSMC3 DAR 0.001/10 DAR 10−5 /10 27.245 0.808 0.174 4.650 0.150 2.37%
+30
+Published as a conference paper at ICLR 2026
+K.5
+T REE H ILL FROM M IP N ERF -360
+Table 21: Quantitative results on the TreeHill from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite Sparse
+AIU
+ProAIU
+GS1
+x
+GS2
+✓
+GS3
+Half
+GS0
+✓
+GS4
+Half [15,30]
+0.5
+GS15 Half [15,30]
+1.0
+GS16
+✓
+[0.1,15]
+0.5
+GS17
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS9
+GS7
+GS10
+GS8
+✓
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise reset
+Ours
+✓
+✓
+✓
+✓ StSSGS1RSR
+[0.1][15]
+✓
+[0.1][15]
+✓
+[0.1][0.1]
+✓
+[0.5][0.1]
+✓
+[0.2,0.5,0.1]
+✓
+[0.1,1,7]
+[0.5,0.1]
+✓
+[0.1,3]
+[0.8,0.5,0.1]
+✓
+[0.1,3,7]
+[0.1][0.1]
+✓
+✓
+x
+StSSGS2
+✓
+x
+StSSGS5
+✓
+✓
+StSSGS1
+✓
+✓
+StSSGS2
+PSNR
+22.534
+22.477
+22.558
+22.447
+22.538
+22.577
+22.480
+22.633
+SSIM
+0.633
+0.629
+0.634
+0.638
+0.633
+0.634
+0.630
+0.631
+LPIPS
+0.326
+0.340
+0.327
+0.320
+0.327
+0.325
+0.335
+0.335
+Na /m
+3.547
+2.701
+3.820
+2.887
+3.732
+3.726
+3.488
+3.304
+Nd /m
+0.228
+0.027
+0.031
+0.016
+0.052
+0.083
+0.030
+0.029
+∆Na
+-23.8%
+7.69%
+-18.6%
+5.21%
+5.04%
+-1.66%
+-6.85%
+22.509
+0.631
+0.334
+3.490
+0.030
+-1.60%
+22.537
+0.630
+0.335
+3.131
+0.026
+-11.7%
+22.558
+0.631
+0.334
+3.553
+0.029
+0.169%
+22.484
+22.791
+22.691
+22.905
+22.891
+0.631
+0.646
+0.644
+0.650
+0.651
+0.331
+0.322
+0.328
+0.322
+0.325
+4.074
+2.616
+2.553
+2.335
+2.231
+0.080
+0.003
+0.002
+0.006
+0.005
+14.8%
+-26.2%
+-28.0%
+-34.1%
+-37.1%
+Table 22: Quantitative results on the TreeHill from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 21). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 22.894 0.655 0.310 3.329 0.37 -6.14%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 23.023 0.659 0.300 3.621 0.079 2.08%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 23.012 0.658 0.302 3.612 0.088 1.83%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 22.858 0.663 0.284 3.555 0.145 0.22%
+MC5
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 22.788 0.659 0.270 3.616 0.084 1.94%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 22.715 0.660 0.268 3.622 0.078 2.11%
+MC18 ✓
+StSSMC10 L1
+0.01/L1
+0.01/- 22.930 0.663 0.291 3.591 0.109 1.21%
+MC19 ✓
+StSSMC1 L1
+0.01/L1
+0.01/- 22.918 0.663 0.285 3.580 0.120 0.93%
+MC20 ✓
+StSSMC2 L1
+0.01/L1
+0.01/- 22.953 0.654 0.312 3.323 0.377 -6.32%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/MC10 ✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 22.771 0.657 0.270 3.653 0.047 2.98%
+MC11 ✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 22.740 0.660 0.268 3.654 0.046 3.01%
+MC12 ✓
+StSSMC1 DAR 0.001/5
+L1
+0.01/- 22.684 0.655 0.271 3.654 0.046 3.01%
+MC13 ✓
+StSSMC1 DAR 0.001/1
+L1
+0.01/- 22.533 0.652 0.274 3.663 0.037 3.27%
+MC14 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 22.690 0.655 0.270 3.663 0.037 3.27%
+MC15 ✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 22.692 0.656 0.270 3.661 0.039 3.21%
+MC16 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 22.800 0.658 0.270 3.638 0.062 2.56%
+MC17 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 22.806 0.658 0.270 3.639 0.061 2.59%
+MC7
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 22.836 0.661 0.268 3.637 0.063 2.53%
+MC8
+✓
+StSSMC3 DAR 0.001/10 DAR 10−5 /10 22.866 0.662 0.265 3.630 0.07 2.34%
+31
+Published as a conference paper at ICLR 2026
+K.6
+ROOM FROM M IP N ERF -360
+Table 23: Quantitative results on the Room from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite
+GS1
+GS2
+GS3
+GS0
+GS4
+GS15
+GS16
+GS17
+Sparse
+AIU
+ProAIU
+x
+✓
+Half
+✓
+Half [15,30]
+0.5
+Half [15,30]
+1.0
+✓
+[0.1,15]
+0.5
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS13
+GS7/GS8
+GS14
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise
+Ours
+StSSGS1RSR
+[0.1][15]
+[0.1][15]
+[0.1][0.1]
+[0.5][0.1]
+[0.2,0.5,0.1]
+[0.1,1,7]
+[0.5,0.1]
+[0.1,3]
+[0.8,0.5,0.1]
+[0.1,3,7]
+[0.1][0.1]
+StSSGS3
+StSSGS1
+StSSGS4
+PSNR
+31.500
+31.096
+31.607
+31.541
+31.719
+31.614
+31.389
+31.539
+SSIM
+0.920
+0.917
+0.921
+0.921
+0.921
+0.921
+0.919
+0.919
+LPIPS
+0.221
+0.231
+0.220
+0.220
+0.220
+0.220
+0.228
+0.227
+Na /m
+1.374
+1.131
+1.537
+0.994
+1.496
+1.466
+1.447
+1.441
+Nd /m
+0.202
+0.031
+0.041
+0.017
+0.111
+0.113
+0.034
+0.036
+∆Na
+-17.6%
+11.8%
+-28.8%
+8.87%
+6.69%
+5.31%
+2.25%
+31.379
+0.918
+0.227
+1.473
+0.037
+7.20%
+31.476
+0.919
+0.228
+1.342
+0.034
+-2.32%
+31.509
+0.919
+0.226
+1.504
+0.036
+9.46%
+31.259
+31.768
+31.741
+31.753
+0.917
+0.920
+0.921
+0.920
+0.228
+0.227
+0.222
+0.222
+1.549
+0.617
+0.624
+0.632
+0.066
+0.006
+0.005
+0.005
+12.7%
+-55.1%
+-54.6%
+-54.0%
+Table 24: Quantitative results on the Room from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 23). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite
+Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 32.034 0.927 0.210 1.320 0.250 -3.93%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 32.417 0.929 0.209 1.472 0.098 7.13%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 32.493 0.930 0.207 1.438 0.132 4.65%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 32.498 0.930 0.204 1.351 0.219 -1.67%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 19.068 0.734 0.387 1.505 0.065 9.53%
+0
+MC18
+✓
+StSSMC1
+L1
+0.01/L1
+0.01/- 32.328 0.929 0.207 1.428 0.142 3.93%
+MC19
+✓
+StSSMC1 L1
+0.01/L1
+0.01/- 32.514 0.930 0.205 1.430 0.140 4.07%
+MC20
+✓
+StSSMC2 L1
+0.01/L1
+0.01/- 31.179 0.922 0.213 1.126 0.444 -18.4%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 32.498 0.930 0.204 1.351 0.219 -1.67%
+MC10
+✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 32.600 0.933 0.196 1.536 0.034 11.7%
+MC11
+✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 32.542 0.933 0.197 1.535 0.035 11.7%
+MC12
+✓
+StSSMC1 DAR 0.001/5 L1
+0.01/- 32.611 0.933 0.197 1.536 0.034 11.7%
+MC13
+✓
+StSSMC1 DAR 0.001/1 L1
+0.01/- 32.317 0.932 0.197 1.546 0.024 12.5%
+MC14
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 32.547 0.933 0.195 1.528 0.042 11.2%
+MC15
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 32.586 0.933 0.196 1.528 0.042 11.2%
+MC16
+✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 32.647 0.933 0.197 1.515 0.055 10.2%
+MC8/MC7 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 32.651 0.933 0.196 1.515 0.055 10.2%
+MC21
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 32.647 0.933 0.197 1.512 0.058 10.0%
+32
+Published as a conference paper at ICLR 2026
+K.7
+C OUNTER FROM M IP N ERF -360
+Table 25: Quantitative results on the Counter from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite
+GS1
+GS2
+GS3
+GS0
+GS4
+GS15
+GS16
+GS17
+Sparse
+AIU
+ProAIU
+x
+✓
+Half
+✓
+Half [15,30]
+0.5
+Half [15,30]
+1.0
+✓
+[0.1,15]
+0.5
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS13
+GS7/GS8
+GS14
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise
+Ours
+StSSGS1RSR
+[0.1][15]
+[0.1][15]
+[0.1][0.1]
+[0.5][0.1]
+[0.2,0.5,0.1]
+[0.1,1,7]
+[0.5,0.1]
+[0.1,3]
+[0.8,0.5,0.1]
+[0.1,3,7]
+[0.1][0.1]
+StSSGS3
+StSSGS1
+StSSGS4
+PSNR
+29.046
+28.979
+29.065
+29.026
+29.060
+29.079
+28.947
+28.974
+SSIM
+0.909
+0.907
+0.909
+0.909
+0.909
+0.909
+0.908
+0.908
+LPIPS
+0.201
+0.205
+0.201
+0.202
+0.201
+0.201
+0.204
+0.204
+Na /m
+1.092
+1.005
+1.115
+0.768
+1.124
+1.067
+1.163
+1.175
+Nd /m
+0.097
+0.034
+0.076
+0.011
+0.067
+0.116
+0.035
+0.036
+∆Na
+-7.96%
+2.10%
+-30.6%
+2.93%
+-2.28%
+6.50%
+7.60%
+29.010
+0.908
+0.203
+1.199
+0.036
+9.97%
+28.972
+0.908
+0.203
+1.118
+0.033
+2.38%
+28.998
+0.908
+0.202
+1.221
+0.036
+11.81%
+28.974
+29.084
+29.112
+29.077
+0.908
+0.907
+0.907
+0.907
+0.202
+0.204
+0.206
+0.203
+1.257
+0.579
+0.535
+0.535
+0.058
+0.005
+0.004
+0.003
+15.1%
+-46.9%
+-51.0%
+-51.0%
+Table 26: Quantitative results on the Counter from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 25). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite
+Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 29.229 0.914 0.195 1.084 0.106 -0.73%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 29.180 0.912 0.198 1.148 0.042 5.12%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 29.194 0.914 0.196 1.140 0.05 4.39%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 29.345 0.916 0.190 1.098 0.092 0.54%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 28.791 0.916 0.186 1.148 0.042 5.12%
+0
+MC18
+✓
+StSSMC1
+L1
+0.01/L1
+0.01/- 29.274 0.914 0.196 1.160 0.03 6.22%
+MC19
+✓
+StSSMC1 L1
+0.01/L1
+0.01/- 29.291 0.916 0.191 1.151 0.039 5.40%
+MC20
+✓
+StSSMC2 L1
+0.01/L1
+0.01/- 29.069 0.911 0.199 0.967 0.223 -11.4%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 29.075 0.910 0.202 1.13 0.060 3.47%
+MC10
+✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 29.476 0.919 0.184 1.172 0.018 7.32%
+MC11
+✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 29.495 0.919 0.183 1.171 0.019 7.23%
+MC12
+✓
+StSSMC1 DAR 0.001/5 L1
+0.01/- 29.470 0.919 0.184 1.143 0.047 4.67%
+MC13
+✓
+StSSMC1 DAR 0.001/1 L1
+0.01/- 29.450 0.919 0.183 1.181 0.009 8.15%
+MC14
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 29.455 0.919 0.182 1.172 0.018 7.32%
+MC15
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 29.486 0.919 0.183 1.171 0.019 7.23%
+MC16
+✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 29.475 0.919 0.184 1.163 0.027 6.50%
+MC8/MC7 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 29.515 0.919 0.183 1.163 0.027 6.50%
+MC21
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 29.506 0.919 0.184 1.161 0.029 6.31%
+33
+Published as a conference paper at ICLR 2026
+K.8
+K ITCHEN FROM M IP N ERF -360
+Table 27: Quantitative results on the Kitchen from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite
+GS1
+GS2
+GS3
+GS0
+GS4
+GS15
+GS16
+GS17
+Sparse
+AIU
+ProAIU
+x
+✓
+Half
+✓
+Half [15,30]
+0.5
+Half [15,30]
+1.0
+✓
+[0.1,15]
+0.5
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS13
+GS7/GS8
+GS14
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise
+Ours
+StSSGS1RSR
+[0.1][15]
+[0.1][15]
+[0.1][0.1]
+[0.5][0.1]
+[0.2,0.5,0.1]
+[0.1,1,7]
+[0.5,0.1]
+[0.1,3]
+[0.8,0.5,0.1]
+[0.1,3,7]
+[0.1][0.1]
+StSSGS3
+StSSGS1
+StSSGS4
+PSNR
+31.505
+31.053
+31.564
+31.072
+31.531
+31.509
+31.110
+31.389
+SSIM
+0.928
+0.926
+0.929
+0.922
+0.929
+0.929
+0.926
+0.927
+LPIPS
+0.127
+0.131
+0.127
+0.133
+0.127
+0.127
+0.130
+0.129
+Na /m
+1.699
+1.621
+1.774
+0.930
+1.721
+1.602
+1.766
+1.740
+Nd /m
+0.116
+0.036
+0.040
+0.013
+0.089
+0.237
+0.035
+0.037
+∆Na
+-4.59%
+4.41%
+-45.2%
+1.29%
+-5.70%
+3.94%
+2.41%
+30.997
+0.926
+0.129
+1.769
+0.035
+4.12%
+31.330
+0.927
+0.129
+1.724
+0.035
+1.47%
+31.355
+0.927
+0.129
+1.772
+0.036
+4.29%
+31.404
+31.770
+31.728
+31.741
+0.928
+0.927
+0.927
+0.926
+0.128
+0.131
+0.132
+0.133
+1.782
+0.692
+0.667
+0.667
+0.069
+0.005
+0.004
+0.004
+4.88%
+-59.3%
+-60.7%
+-60.7%
+Table 28: Quantitative results on the Kitchen from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 27). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite
+Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 32.173 0.933 0.122 1.661 0.149 -2.23%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 32.079 0.934 0.122 1.753 0.057 3.17%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 32.286 0.934 0.122 1.743 0.067 2.58%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 31.765 0.909 0.137 1.681 0.129 -1.05%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 21.787 0.820 0.234 1.729 0.081 1.76%
+0
+MC18
+✓
+StSSMC1
+L1
+0.01/L1
+0.01/- 32.363 0.346 0.120 1.72 0.09 1.23%
+MC19
+✓
+StSSMC1 L1
+0.01/L1
+0.01/- 32.289 0.934 0.119 1.714 0.096 0.88%
+MC20
+✓
+StSSMC2 L1
+0.01/L1
+0.01/- 31.924 0.931 0.124 1.495 0.315 -12.0%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 32.342 0.934 0.121 1.703 0.107 2.35%
+MC10
+✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 32.570 0.937 0.117 1.765 0.045 3.88%
+MC11
+✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 32.397 0.935 0.118 1.763 0.047 3.76%
+MC12
+✓
+StSSMC1 DAR 0.001/5 L1
+0.01/- 32.443 0.936 0.118 1.767 0.043 4.00%
+MC13
+✓
+StSSMC1 DAR 0.001/1 L1
+0.01/- 32.458 0.935 0.118 1.786 0.024 5.12%
+MC14
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 32.466 0.936 0.117 1.766 0.044 3.94%
+MC15
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 32.173 0.935 0.118 1.766 0.044 3.94%
+MC16
+✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 32.521 0.936 0.117 1.756 1.756 3.35%
+MC8/MC7 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 32.546 0.937 0.117 1.755 1.755 3.29%
+MC21
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 32.298 0.936 0.117 1.753 0.057 3.17%
+34
+Published as a conference paper at ICLR 2026
+K.9
+BONSAI FROM M IP N ERF -360
+Table 29: Quantitative results on the Bonsai from Mip-NeRF 360 with different components in the
+vanilla 3DGS pipeline. For AIU, the brackets denote its active iteration range (e.g., [15,30] means
+15k–30k iterations). ProAIU is the sampling probability of primitives, and ηAIU constrains the extra
+update step applied to sampled primitives. [·][·] denote the scale value and the iteration at which it
+takes effect. For example, [0.5,0.1][0.1,3] means ηAIU = 0.5 after 0.1k iterations, ηAIU = 0.1 after
+3k, and ηAIU = 0 before 0.1k. In Ours, AdamW-GS uses the same configuration but different StSS
+settings. Sparse denotes using Sparse Adam or Adam, and Half means using Adam in densification
+but Sparse Adam in P-Op. RSR here means only adding RSR to the pipeline.
+cite
+GS1
+GS2
+GS3
+GS0
+GS4
+GS15
+GS16
+GS17
+Sparse
+AIU
+ProAIU
+x
+✓
+Half
+✓
+Half [15,30]
+0.5
+Half [15,30]
+1.0
+✓
+[0.1,15]
+0.5
+✓
+[0.1,7]
+0.2
+GS18
+✓
+[0.1,15]
+0.2
+GS19
+✓
+[0.1,15]
+0.2
+GS5
+✓
+[0.1,15]
+0.2
+GS6
+GS13
+GS7/GS8
+GS14
+✓
+✓
+✓
+✓
+[0.1,30]
+-
+1.0
+-
+ηAIU
+noise
+Ours
+StSSGS1RSR
+[0.1][15]
+[0.1][15]
+[0.1][0.1]
+[0.5][0.1]
+[0.2,0.5,0.1]
+[0.1,1,7]
+[0.5,0.1]
+[0.1,3]
+[0.8,0.5,0.1]
+[0.1,3,7]
+[0.1][0.1]
+StSSGS3
+StSSGS1
+StSSGS4
+PSNR
+32.269
+31.610
+32.325
+32.284
+32.382
+32.406
+32.243
+32.106
+SSIM
+0.943
+0.931
+0.943
+0.942
+0.943
+0.943
+0.942
+0.942
+LPIPS
+0.207
+0.216
+0.206
+0.205
+0.206
+0.206
+0.209
+0.208
+Na /m
+1.159
+1.230
+1.256
+1.003
+1.230
+1.208
+1.360
+1.353
+Nd /m
+0.115
+0.016
+0.017
+0.011
+0.037
+0.072
+0.016
+0.017
+∆Na
+6.12%
+8.36%
+-13.4%
+6.12%
+4.22%
+17.3%
+16.7%
+32.293
+0.943
+0.208
+1.370
+0.015
+18.2%
+32.260
+0.941
+0.209
+1.283
+0.015
+10.6%
+32.260
+0.943
+0.208
+1.378
+0.016
+18.8%
+32.251
+32.409
+32.251
+32.279
+0.942
+0.942
+0.942
+0.941
+0.208
+0.204
+0.205
+0.206
+1.428
+0.807
+0.747
+0.735
+0.034
+0.004
+0.004
+0.003
+23.2%
+-30.3%
+-35.5%
+-36.5%
+Table 30: Quantitative results on the Bonsai from Mip-NeRF 360 with different components in the
+3DGS-MCMC pipeline. AIU definitions follow the table description above (Table 29). For RSR,
+the sampler defaults to uniform (interval = 100) except StSS. R denotes the form of regularization,
+λ its hyperparameter, and max corresponds to Ct in the paper; other parameters remain default. 0 in
+StSSMC1 denotes using α1 = α2 = 0 here.
+cite
+Sparse AIU ProAIU /ηAIU
+RSR
+Ro λo /maxo Rs λs /maxs PSNR SSIM LPIPS Na /m Nd /m ∆Na
+MC1
+x
+L1
+0.01/L1
+0.01/- 32.572 0.946 0.200 1.101 0.169 -5.00%
+MC2
+✓
+L1
+0.01/L1
+0.01/- 32.508 0.945 0.203 1.200 0.070 3.53%
+MC3
+✓ [0.1,30]
+0.1/0.1
+L1
+0.01/L1
+0.01/- 32.578 0.946 0.202 1.191 0.079 2.76%
+MC4
+✓
+[3,30]
+0.1/0.1
+StSSMC1 L1
+0.01/L1
+0.01/- 32.742 0.947 0.198 1.130 0.140 -2.50%
+MC6
+✓
+[26,30]
+0.01/1
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 29.919 0.922 0.213 1.204 0.066 3.88%
+0
+MC18
+✓
+StSSMC1
+L1
+0.01/L1
+0.01/- 32.527 0.946 0.201 1.205 0.065 3.96%
+MC19
+✓
+StSSMC1 L1
+0.01/L1
+0.01/- 32.645 0.947 0.199 1.201 0.069 3.62%
+MC20
+✓
+StSSMC2 L1
+0.01/L1
+0.01/- 32.417 0.944 0.204 0.959 0.311 -17.2%
+MC9
+✓
+StSSMC1 DAR 0.001/L1
+0.01/- 32.513 0.943 0.206 1.184 0.086 2.15%
+MC10
+✓
+StSSMC1 DAR 0.001/10 L1
+0.01/- 33.006 0.950 0.191 1.221 0.049 5.34%
+MC11
+✓
+StSSMC2 DAR 0.001/10 L1
+0.01/- 32.990 0.950 0.189 1.234 0.036 6.47%
+MC12
+✓
+StSSMC1 DAR 0.001/5 L1
+0.01/- 32.990 0.950 0.189 1.237 0.033 6.72%
+MC13
+✓
+StSSMC1 DAR 0.001/1 L1
+0.01/- 32.921 0.950 0.190 1.252 0.018 8.02%
+MC14
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/10 32.916 0.950 0.189 1.233 0.037 6.38%
+MC15
+✓
+StSSMC1 DAR 0.001/10 DAR 0.001/1 32.906 0.950 0.189 1.232 0.038 6.29%
+MC16
+✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /1 32.990 0.950 0.190 1.220 0.050 5.26%
+MC8/MC7 ✓
+StSSMC1 DAR 0.001/10 DAR 10−5 /10 33.022 0.950 0.190 1.220 0.050 5.26%
+MC21
+✓
+StSSMC2 DAR 0.001/10 DAR 10−5 /10 33.007 0.950 0.190 1.219 0.051 5.17%
+35

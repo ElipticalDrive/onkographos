@@ -1,0 +1,116 @@
+I am going to describe the algorithm I have written. I have constructed a sparse oct tree where each node contains a quadratic function that approximates part of an SDF. 
+ I ray trace this structure by first testing the intersection of a ray against a voxel and then using the coefficients of the quadratic function in 3D and the ray to make a 1D quadratic that can be solved with the quadratic formula. I then solve the quadratic formula to tell if my ray intersects the quadric of the current node or not. This traversal is done based on depth so the first collision found is guaranteed to be the actual point of intersection. 
+ I am testing a sphere that has been projected onto this quadratic basis and I am noticing a weird artifact where parts of the sphere are not being intersected with. What's particularly weird about this is that these gaps happen entirely within the voxel, not at intersections (See image). 
+ 
+ I know for a fact that the coefficients I am using are correct (tested), and that the traversal logic is correct as well. So the only thing that oculd be wrong is an edge case in my theory. I.e. something about solving the quadratic formula in this setting must be wrong. 
+ This is the code that solves the equation for each individual node. I am hoping someone might have an intuition as to what could be causing those gaps. 
+ let quadratic_node_intersection =
+        move |origin: &Vec3,
+              lray: &Vec3,
+              box_position: &Vec3,
+              box_dims: &Vec3,
+              _,
+              node: &Node<HpNode<f32, 10>>| {
+            let cfs = node.data.coeffs();
+            let coeff_count = node.data.coeff_count();
+
+            let p = (2. * (origin - box_position) / box_dims) - 1.;
+            let v = (lray / (box_dims * 0.5));
+
+            let mut a = 0.;
+            let mut b = 0.;
+            let mut c = 0.;
+            // Shift and scale the ray and pos to the local node.
+            let ray = v;
+            let ray_pos = p;
+            for i in 0..coeff_count
+            {
+                let (s, powers) = cfs[i as usize];
+                // Compute coefficients for each dimension's Legendre polynomial
+                // restricted to line.
+                let mut poly = [1., 0., 0.];
+
+                // accumulates as [t^0, t^1, t^2] coefficients.
+                for axis in 0..3
+                {
+                    let (v, p) = match axis
+                    {
+                        0 => (ray.x, ray_pos.x),
+                        1 => (ray.y, ray_pos.y),
+                        2 => (ray.z, ray_pos.z),
+                        _ => unreachable!(),
+                    };
+
+                    let power = powers[axis];
+
+                    // Legendre polynomial P_n(vt + p) coefficients in t.
+                    let leg_coeffs = match power
+                    {
+                        0 => [1., 0., 0.],
+                        1 => [p, v, 0.],
+                        2 => [1.5 * p * p - 0.5, 3. * p * v, 1.5 * v * v],
+                        _ => unreachable!(),
+                    };
+
+                    // Multiply poly *= leg_coeffs.
+                    let temp = [
+                        poly[0] * leg_coeffs[0],
+                        poly[0] * leg_coeffs[1] + poly[1] * leg_coeffs[0],
+                        poly[0] * leg_coeffs[2]
+                            + poly[1] * leg_coeffs[1]
+                            + poly[2] * leg_coeffs[0],
+                    ];
+                    poly = temp;
+                }
+
+                a += s * poly[2];
+                b += s * poly[1];
+                c += s * poly[0];
+            }
+
+            let disc = b * b - 4. * a * c;
+            if disc < 0.
+            {
+                return f32::INFINITY;
+            }
+
+            let sqrt_disc = disc.sqrt();
+            let inv_2a = 1. / (2. * a);
+
+            // Quadratic solutions.
+            let x1 = (-b - sqrt_disc) * inv_2a;
+            let x2 = (-b + sqrt_disc) * inv_2a;
+
+            // Branchless valid selection: if x < 0, replace with infinity.
+            let valid_x1 = if x1 < 0. { f32::INFINITY } else { x1 };
+            let valid_x2 = if x2 < 0. { f32::INFINITY } else { x2 };
+
+            // Take minimum of valid solutions.
+            let quad_t = valid_x1.min(valid_x2);
+
+            // Handle linear case.
+            let is_linear = a.abs() < 1e-6;
+            let linear_t = -c / b;
+
+            let linear_t = if linear_t < 0.
+            {
+                f32::INFINITY
+            }
+            else
+            {
+                linear_t
+            };
+
+            let result = if is_linear { linear_t } else { quad_t };
+
+            let pos = p + v * result;
+
+            let pos = box_position + (pos + Vec3::splat(1.)) * box_dims / 2.;
+            if !point_in_box_bounds(box_position, box_dims, &pos, 0.0001)
+            {
+                return f32::INFINITY;
+            }
+
+            result
+        };
+ 

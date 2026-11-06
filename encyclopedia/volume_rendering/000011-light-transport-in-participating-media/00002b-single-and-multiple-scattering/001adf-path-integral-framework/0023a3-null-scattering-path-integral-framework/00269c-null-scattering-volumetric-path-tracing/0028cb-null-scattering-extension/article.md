@@ -17,14 +17,14 @@ The Null-Scattering Extension generalizes the equation of transfer to enable unb
 - Incident radiance $L_i(p, \omega)$ [S1].
 
 **Data Structures:**
-- No specific complex data structures are required beyond standard scalar fields for $\sigma_t, \sigma_a, \sigma_s$ [G]. The method relies on the constant $\sigma_{maj}$ [S1].
+- Standard scalar fields for $\sigma_t, \sigma_a, \sigma_s$ and functions for $L_e, f_s$ [G]. The method relies on the constant $\sigma_{maj}$ [S1].
 
 **Steps:**
 1. **Assumptions:** Assume scattering coefficients $\sigma$ do not vary as a function of direction [S1]. Assume the null-scattering coefficient $\sigma_n$ is nonnegative and set to homogenize the medium's density to a fixed majorant $\sigma_{maj} = \sigma_n + \sigma_t$ [S1].
-2. **Calculate Majorant Transmittance:** Compute the transmittance from a point $p'$ to $p$ using the majorant coefficient. Let $d$ be the distance between $p'$ and $p$. The majorant transmittance is:
+2. **Calculate Majorant Transmittance:** Compute the transmittance from a point $p'$ to $p$ using the majorant coefficient [S1]. Let $d$ be the distance between $p'$ and $p$ [S1]. The majorant transmittance is:
    $$ T_{maj}(p' \to p) = e^{-\sigma_{maj} d} $$
    This accounts for both regular attenuation and null scattering [S1].
-3. **Calculate Null-Scattering Source Function:** Compute the null-scattering source function $L_n(p, \omega)$. This is defined as the standard source function plus a new third term [S1]:
+3. **Calculate Null-Scattering Source Function:** Compute the null-scattering source function $L_n(p, \omega)$ [S1]. This is defined as the standard source function plus a new third term [S1]:
    $$ L_n(p, \omega) = \frac{\sigma_a(p)}{\sigma_{maj}} L_e(p, \omega) + \frac{\sigma_s(p)}{\sigma_{maj}} \int_{4\pi} f_s(p, \omega', \omega) L_i(p, \omega') d\omega' + \frac{\sigma_n(p)}{\sigma_{maj}} L_i(p, \omega) $$
    Where $L_e(p, \omega)$ is the emitted radiance [S1], $f_s(p, \omega', \omega)$ is the scattering phase function [S1], and $\sigma_n(p) = \sigma_{maj} - \sigma_t(p)$ is the null-scattering coefficient [S1].
 4. **Evaluate Integral Equation:** Compute the incident radiance using the null-scattering integral equation of transfer:
@@ -37,36 +37,36 @@ The Null-Scattering Extension generalizes the equation of transfer to enable unb
 ```python
 import math
 
-def null_scattering_extension(p_s, omega, t, sigma_maj, sigma_t_func, sigma_a_func, sigma_s_func, sigma_n_func, L_e_func, phase_func, L_i_func):
+def null_scattering_extension(p_s, omega, t, sigma_maj, sigma_t_func, sigma_a_func, sigma_s_func, L_e_func, phase_func, L_i_func):
     """
     Evaluates the null-scattering integral equation for incident radiance L_i(p, omega).
     """
     p = p_s + t * omega
     # Step 1: Boundary term
     T_maj_start = math.exp(-sigma_maj * t)
-    L_o_start = L_e_func(p_s, -omega) # Sources do not specify how boundary radiance L_o is obtained [G]
+    L_o_start = L_e_func(p_s, -omega)  # Sources do not specify how boundary radiance L_o is obtained [G]
     boundary_term = T_maj_start * L_o_start
 
     # Step 2: Integral term
     # The sources do not specify a numerical method for the spatial integral over dt' [G]
     integral_sum = 0.0
-    # Example structure for numerical quadrature:
     # for dt_prime in quadrature_points(0, t):
     #     p_prime = p_s + dt_prime * omega
     #     d_prime = t - dt_prime
     #     T_maj_prime = math.exp(-sigma_maj * d_prime)
-    #     L_n_prime = compute_L_n(p_prime, -omega, sigma_maj, sigma_a_func, sigma_s_func, sigma_n_func, L_e_func, phase_func, L_i_func)
+    #     L_n_prime = compute_L_n(p_prime, -omega, sigma_maj, sigma_a_func, sigma_s_func, sigma_t_func, L_e_func, phase_func, L_i_func)
     #     integral_sum += sigma_maj * T_maj_prime * L_n_prime * dt_prime
 
     return boundary_term + integral_sum
 
-def compute_L_n(p, omega, sigma_maj, sigma_a_func, sigma_s_func, sigma_n_func, L_e_func, phase_func, L_i_func):
+def compute_L_n(p, omega, sigma_maj, sigma_a_func, sigma_s_func, sigma_t_func, L_e_func, phase_func, L_i_func):
     """
     Computes the null-scattering source function L_n(p, omega).
     """
     sigma_a = sigma_a_func(p)
     sigma_s = sigma_s_func(p)
-    sigma_n = sigma_n_func(p)
+    sigma_t = sigma_t_func(p)
+    sigma_n = sigma_maj - sigma_t  # Derived from sigma_maj = sigma_n + sigma_t [S1]
     L_e = L_e_func(p, omega)
     L_i = L_i_func(p, omega)
 
@@ -74,8 +74,7 @@ def compute_L_n(p, omega, sigma_maj, sigma_a_func, sigma_s_func, sigma_n_func, L
     term_n = (sigma_n / sigma_maj) * L_i
 
     # The sources do not specify how to numerically evaluate the angular integral over 4pi [G]
-    # term_s = (sigma_s / sigma_maj) * integrate_phase_function(p, omega, phase_func, L_i_func)
-    term_s = 0.0 # Placeholder for angular integration
+    term_s = 0.0  # Requires angular quadrature [G]
 
     return term_a + term_s + term_n
 ```
@@ -84,7 +83,7 @@ def compute_L_n(p, omega, sigma_maj, sigma_a_func, sigma_s_func, sigma_n_func, L
 - $\sigma_{maj}$: The majorant coefficient, a constant value used to homogenize the medium density, defined as $\sigma_{maj} = \sigma_n + \sigma_t$ [S1].
 
 **Edge Cases and Pitfalls:**
-- $\sigma_{maj}$ must be greater than or equal to $\sigma_t(p)$ for all $p$ in the medium. If not, $\sigma_n$ becomes negative, violating the assumption [S1]. The sources do not specify how to numerically evaluate the angular integral in $L_n$ [G].
+- $\sigma_{maj}$ must be greater than or equal to $\sigma_t(p)$ for all $p$ in the medium [S1]. If not, $\sigma_n$ becomes negative, violating the assumption [S1]. The sources do not specify how to numerically evaluate the angular integral in $L_n$ [G].
 
 ## Subtopics
 

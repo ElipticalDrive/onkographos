@@ -1,0 +1,186 @@
+# Microscopic Self-Shadowing Microflake Model
+
+Also called: Self-shadowing model
+
+## Overview
+The Microscopic Self-Shadowing Microflake Model is a physically-based participating medium model that extends the standard Microflake Model by introducing correlations of microflake positions at a microscopic scale [S1]. It solves the problem of inaccurate light transport in dense or clustered media where microflakes occlude each other, leading to errors in attenuation and scattering predictions [S1]. It differs from the standard Microflake Model by using a shadowing function $A(\omega)$ to independently control attenuation, single scattering, and multiple scattering, thereby accounting for microscopic shadowing and masking [S1].
+
+## How it works
+The model characterizes the medium as a homogeneous cloud of microflakes whose orientations are statistically described by a microflake normal distribution function $D(\omega_m)$ [S1]. The key addition is a dimensionless scalar shadowing function $A(\omega)$ defined on the sphere, where $1 - A(\omega)$ represents the probability that a microflake is shadowed or masked by a neighboring microflake in direction $\omega$ [S1].
+
+### Inputs and Outputs
+**Inputs:**
+*   Microflake normal distribution function $D(\omega_m)$ [S1].
+*   Shadowing function $A(\omega)$ [S1].
+*   Single scattering albedo $\alpha_{ss}(\lambda)$ [S1].
+*   Multiple scattering albedo $\alpha_{ms}(\lambda)$ [S1].
+*   Density parameter $\rho$ [S1].
+
+**Outputs:**
+*   Attenuation coefficient $\sigma_t(\omega)$ [S1].
+*   Single scattering coefficient $\sigma_{ss}(\omega)$ [S1].
+*   Single scattering phase function $f_{ss}(\omega \rightarrow \omega')$ [S1].
+*   Multiple scattering coefficient $\sigma_{ms}(\omega)$ [S1].
+*   Multiple scattering phase function $f_{ms}(\omega \rightarrow \omega')$ [S1].
+
+### Data Structures
+The model relies on the following mathematical objects:
+*   **$D(\omega_m)$**: A probability density function over the unit sphere $S^2$, representing the distribution of microflake normals.
+*   **$A(\omega)$**: A scalar function $A: S^2 \rightarrow (0, 1]$.
+*   **$\omega, \omega_m, \omega'$**: Unit vectors representing directions (incoming, normal, outgoing).
+*   **$\omega_h$**: The half-vector between incoming direction $\omega$ and outgoing direction $\omega'$, defined as $\omega_h = \frac{\omega + \omega'}{\|\omega + \omega'\|}$ [S1].
+
+### Formulas and Constraints
+The shadowing function must satisfy:
+$$ A(\omega) = A(-\omega) \quad \text{and} \quad 0 < A(\omega) \leq 1 \quad \forall \omega \in S^2 \quad [S1] $$
+The case $A(\omega) = 1$ corresponds to the standard Microflake Model with no microscopic correlations [S1].
+
+**1. Attenuation Coefficient**
+The attenuation coefficient is the standard microflake attenuation multiplied by the self-shadowing function:
+$$ \sigma_t(\omega) = A(\omega) \rho \int_{S^2} D(\omega_m) \langle \omega \cdot \omega_m \rangle_+ \, d\omega_m \quad [S1] $$
+where $\langle \cdot \rangle_+$ denotes the positive part (i.e., $\max(0, \cdot)$).
+
+**2. Single Scattering Coefficient**
+Single scattering occurs when microflakes are both unmasked and un-shadowed. Using the Jacobian transformation from normals to specular reflections [WMLT07], the coefficient is:
+$$ \sigma_{ss}(\omega) = \frac{\rho \alpha_{ss}(\lambda) A(\omega)}{4} \int_{S^2} A(\omega') D(\omega_h) \, d\omega' \quad [S1] $$
+where $\omega'$ is the reflected direction corresponding to normal $\omega_h$ and incoming direction $\omega$. Note that the integral is over outgoing directions $\omega'$, transformed via the specular reflection geometry.
+
+**3. Single Scattering Phase Function**
+The phase function is normalized and satisfies reciprocity:
+$$ f_{ss}(\omega \rightarrow \omega') = \frac{\rho \alpha_{ss}(\lambda) A(\omega) A(\omega') D(\omega_h)}{4 \sigma_{ss}(\omega)} \quad [S1] $$
+
+**4. Multiple Scattering Coefficient**
+Multiple scattering accounts for light that undergoes more than one scattering event. It is derived from the total attenuation and single scattering components:
+$$ \sigma_{ms}(\omega) = \alpha_{ms}(\lambda) \left( \sigma_t(\omega) - \frac{\sigma_{ss}(\omega)}{\alpha_{ss}(\lambda)} \right) \quad [S1] $$
+Alternatively, expressed as an integral:
+$$ \sigma_{ms}(\omega) = \alpha_{ms}(\lambda) \rho \int_{S^2} (1 - A(\omega')) D(\omega_m) \langle \omega \cdot \omega_m \rangle_+ \, d\omega_m \quad [S1] $$
+
+**5. Multiple Scattering Phase Function**
+Assumed to be roughly diffuse, depending only on the outgoing direction:
+$$ f_{ms}(\omega \rightarrow \omega') = f_{ms}(\omega') = \frac{\sigma_{ms}(\omega')}{\int_{S^2} \sigma_{ms}(\omega'') \, d\omega''} \quad [S1] $$
+This satisfies reciprocity because $\sigma_{ms}(\omega) f_{ms}(\omega \rightarrow \omega') = \frac{\sigma_{ms}(\omega) \sigma_{ms}(\omega')}{\int \sigma_{ms}(\omega'') d\omega''}$ is symmetric in $\omega$ and $\omega'$ [S1].
+
+### Parameters
+*   **$\alpha_{ss}(\lambda)$**: Single scattering albedo. [S1]
+*   **$\alpha_{ms}(\lambda)$**: Multiple scattering albedo. [S1]
+*   **$\rho$**: Density parameter. [S1]
+
+### Edge Cases and Pitfalls
+*   **Energy Conservation**: If $\alpha_{ss} = \alpha_{ms} = 1$, then $\sigma_{ss}(\omega) + \sigma_{ms}(\omega) = \sigma_t(\omega)$. This ensures the model passes the white furnace test (energy conservation) when microflakes do not absorb light [S1].
+*   **Reciprocity**: The model satisfies reciprocity by construction for all coefficients [S1].
+*   **Implementation Difficulty**: Finding closed-form expressions for the integrals in $\sigma_{ss}$ and $\sigma_t$ is difficult for many standard distributions (e.g., SGGX, Gaussian Fiber, Spherical Gaussians) due to the convolution of $D$ and $A$ over different spaces (normals vs. directions) [S1].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_microflake_self_shadowing(D, A, alpha_ss, alpha_ms, rho, omega_in):
+    """
+    Computes the scattering coefficients and phase functions for the 
+    Microscopic Self-Shadowing Microflake Model.
+    
+    Args:
+        D: Function returning D(omega_m) for a given normal omega_m.
+        A: Function returning A(omega) for a given direction omega.
+        alpha_ss: Single scattering albedo.
+        alpha_ms: Multiple scattering albedo.
+        rho: Density parameter.
+        omega_in: Incoming direction vector.
+        
+    Returns:
+        sigma_t: Attenuation coefficient.
+        sigma_ss: Single scattering coefficient.
+        sigma_ms: Multiple scattering coefficient.
+        f_ss: Single scattering phase function (callable).
+        f_ms: Multiple scattering phase function (callable).
+    """
+    
+    # 1. Compute Attenuation Coefficient sigma_t
+    # sigma_t(omega) = A(omega) * rho * integral(D(omega_m) * max(0, omega . omega_m)) domega_m
+    # Note: Numerical integration required over the sphere for D and A.
+    integral_atten = numerical_sphere_integral(lambda omega_m: D(omega_m) * max(0, dot(omega_in, omega_m)))
+    sigma_t = A(omega_in) * rho * integral_atten
+    
+    # 2. Compute Single Scattering Coefficient sigma_ss
+    # sigma_ss(omega) = (rho * alpha_ss * A(omega) / 4) * integral(A(omega') * D(omega_h)) domega'
+    # The integral is over outgoing directions omega', transformed from normals.
+    # omega_h is the half-vector between omega_in and omega'.
+    # omega' is the reflection of omega_in about omega_h? No, omega_h is half vector.
+    # The source uses Jacobian transformation from normals to specular reflections.
+    # We integrate over the sphere of outgoing directions omega'.
+    
+    def integrand_ss(omega_out):
+        # omega_h is the half vector between omega_in and omega_out
+        omega_h = normalize(omega_in + omega_out)
+        # D is evaluated at the normal omega_h
+        # A is evaluated at the outgoing direction omega' (which is omega_out)
+        return A(omega_out) * D(omega_h)
+        
+    integral_ss = numerical_sphere_integral(integrand_ss)
+    sigma_ss = (rho * alpha_ss * A(omega_in) / 4.0) * integral_ss
+    
+    # 3. Compute Multiple Scattering Coefficient sigma_ms
+    # sigma_ms(omega) = alpha_ms * (sigma_t(omega) - sigma_ss(omega) / alpha_ss)
+    sigma_ms = alpha_ms * (sigma_t - sigma_ss / alpha_ss)
+    
+    # 4. Define Single Scattering Phase Function f_ss
+    def f_ss(omega_in, omega_out):
+        omega_h = normalize(omega_in + omega_out)
+        # f_ss(omega -> omega') = (rho * alpha_ss * A(omega) * A(omega') * D(omega_h)) / (4 * sigma_ss(omega))
+        numerator = rho * alpha_ss * A(omega_in) * A(omega_out) * D(omega_h)
+        denominator = 4.0 * sigma_ss
+        return numerator / denominator
+        
+    # 5. Define Multiple Scattering Phase Function f_ms
+    # f_ms(omega -> omega') = sigma_ms(omega') / integral(sigma_ms(omega'')) domega''
+    # The denominator is the integral of sigma_ms over all outgoing directions.
+    integral_sigma_ms = numerical_sphere_integral(lambda w: compute_sigma_ms(w, D, A, alpha_ss, alpha_ms, rho))
+    
+    def f_ms(omega_in, omega_out):
+        # Depends only on omega_out
+        sigma_ms_out = compute_sigma_ms(omega_out, D, A, alpha_ss, alpha_ms, rho)
+        return sigma_ms_out / integral_sigma_ms
+        
+    return sigma_t, sigma_ss, sigma_ms, f_ss, f_ms
+
+def compute_sigma_ms(omega, D, A, alpha_ss, alpha_ms, rho):
+    """Helper to compute sigma_ms for a given direction omega."""
+    # Re-compute sigma_t and sigma_ss for direction omega
+    integral_atten = numerical_sphere_integral(lambda omega_m: D(omega_m) * max(0, dot(omega, omega_m)))
+    sigma_t = A(omega) * rho * integral_atten
+    
+    def integrand_ss(w_out):
+        omega_h = normalize(omega + w_out)
+        return A(w_out) * D(omega_h)
+        
+    integral_ss = numerical_sphere_integral(integrand_ss)
+    sigma_ss = (rho * alpha_ss * A(omega) / 4.0) * integral_ss
+    
+    return alpha_ms * (sigma_t - sigma_ss / alpha_ss)
+```
+
+## Subtopics
+
+### [Simplified Model with Isotropic Self-Shadowing](4761-simplified-model-with-isotropic-self-shadowing.md)
+This variant simplifies the Microscopic Self-Shadowing Microflake Model by assuming the shadowing function $A$ is isotropic (constant for all directions). This reduces parameter count and implementation complexity while maintaining sufficient accuracy for volume downsampling. It differs from the parent model by decoupling the directional dependence of shadowing, allowing closed-form solutions for spherical integrals that would otherwise require numerical approximation.
+
+### SGGX Microflake Distribution
+A microflake normal distribution introduced by Heitz et al. [HDCD15] that supports fast and exact evaluation of attenuation coefficients, as well as efficient evaluation and sampling of specular phase functions [S1]. It was used by the authors for implementing their simplified self-shadowing model [S1]. However, closed-form solutions for the self-shadowing integrals (Eq. 4.3) could not be found using SGGX, necessitating the use of trigonometric lobes for the full self-shadowing model [S1].
+
+### Trigonometric Lobe Self-Shadowing Model
+A volume rendering model using microflake normal distributions based on trigonometric lobes to enable closed-form expressions for self-shadowing integrals, solving the difficulty of finding closed-form solutions for spherical convolutions with distributions like SGGX [S1]. The distributions are defined as:
+$$ D_{\cos}(\omega, \xi, n) = \frac{(\omega \cdot \xi)^{2n}}{N_{\cos}(n)} $$
+$$ D_{\sin}(\omega, \xi, n) = \frac{(1 - (\omega \cdot \xi)^2)^n}{N_{\sin}(n)} $$
+where $n$ is an integer and $N$ are normalization factors [S1]. This representation is simple, flexible, and can be stored with only 6 parameters [S1].
+
+## Operating characteristics
+*   **Complexity**: The model requires numerical integration over the sphere for the attenuation and single scattering coefficients if closed-form solutions are not available (e.g., for SGGX). The use of trigonometric lobes allows for closed-form solutions, significantly reducing computational cost [S1].
+*   **Performance**: The simplified isotropic model is efficient and suitable for volume downsampling [S1]. The full anisotropic model is more complex but provides higher accuracy for clustered media [S1].
+*   **Strengths**: Physically-based, accounts for microscopic shadowing/masking, satisfies energy conservation and reciprocity [S1].
+*   **Limitations**: Finding closed-form solutions for arbitrary distributions is difficult [S1]. Requires careful parameterization of $A(\omega)$ and $D(\omega)$ [S1].
+
+## Background
+The model was introduced in "A new microflake model with microscopic self-shadowing for accurate volume downsampling" [S1]. It extends the standard microflake model by Jakob et al. [JAM*10] and builds on the SGGX distribution by Heitz et al. [HDCD15]. It is used for accurate volume downsampling and rendering of participating media with microscopic correlations [S1].
+
+## Sources
+[S1] A new microflake model with microscopic self-shadowing for accurate volume downsampling, https://doi.org/10.1111/cgf.13346, fetched 2026-10-26

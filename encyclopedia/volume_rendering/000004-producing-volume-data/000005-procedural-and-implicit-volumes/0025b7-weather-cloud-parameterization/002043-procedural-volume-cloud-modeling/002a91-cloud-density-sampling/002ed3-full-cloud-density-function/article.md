@@ -1,0 +1,130 @@
+# Full Cloud Density Function
+
+
+## Overview
+The Full Cloud Density Function is a procedural volume sampling method that computes cloud density by combining a vertical atmospheric profile with horizontal footprint and high-frequency noise, modulated by a global coverage mask. It solves the problem of generating visually distinct, physically plausible cloud layers within a unified framework. It differs from generic noise-based volume generation by explicitly separating vertical stratification (Gaussian profiles) from horizontal structure (footprints and clusters), modulated by type-specific noise functions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D point in world space (`point`), a level-of-detail parameter (`lod`), and various scalar parameters (`radius`, `cloud_scale`, `gradient`, `multiplier`, `threshold`, `detail_scale`, `cap`, `powder_decay`).
+*   **Output:** A single float representing the cloud density at the given point.
+
+**Data Structures:**
+*   `cover`: A 3D texture (specifically a `samplerCube` in the reference implementation) storing global cloud cover. The source specifies a `6x512x512` cubemap [S1, unofficial].
+*   `cloud_profile`: A vertical profile texture containing 10 values [S1, unofficial]. This is sampled based on the vertical component of the input point.
+
+**Formulas and Steps:**
+The density calculation follows this sequence:
+
+1.  **Horizontal Noise Generation:** Compute a base cloud shape using Perlin-Worley noise.
+    $$ \text{clouds} = \text{perlin\_octaves}\left(\frac{\text{normalize}(\text{point}) \times \text{radius}}{\text{cloud\_scale}}\right) $$
+    The source uses 3 octaves of $64 \times 64 \times 64$ Perlin-Worley noise for this step [S1, unofficial].
+
+2.  **Vertical Profile Sampling:** Sample the vertical atmospheric profile.
+    $$ \text{profile} = \text{cloud\_profile}(\text{point}) $$
+    This uses a texture with 10 discrete values [S1, unofficial].
+
+3.  **Coverage Masking:** Sample the global cover and combine it with the horizontal noise.
+    $$ \text{cover\_sample} = \text{texture}(cover, \text{point}).r \times \text{gradient} + \text{clouds} \times \text{multiplier} - \text{threshold} $$
+    Note: The source author updated the implementation to remove the clamping operation for the cover sample noise [S1, unofficial].
+
+4.  **Base Density Calculation:** Multiply the masked coverage by the vertical profile.
+    $$ \text{base} = \text{cover\_sample} \times \text{profile} $$
+
+5.  **High-Frequency Detail:** Generate fine-grained noise for cloud structure.
+    $$ \text{noise} = \text{cloud\_octaves}\left(\frac{\text{point}}{\text{detail\_scale}}, \text{lod}\right) $$
+    The source uses 5 octaves of $64 \times 64 \times 64$ Worley noise for this step [S1, unofficial].
+
+6.  **Final Density Remapping and Clamping:** Remap the noise value based on the base density and clamp the result.
+    $$ \text{density} = \text{clamp}\left(\text{remap}(\text{noise}, 1 - \text{base}, 1.0, 0.0, \text{cap}), 0.0, \text{cap}\right) $$
+    The `remap` function is defined as:
+    $$ \text{remap}(v, \text{orig\_min}, \text{orig\_max}, \text{new\_min}, \text{new\_max}) = \text{new\_min} + \frac{v - \text{orig\_min}}{\text{orig\_max} - \text{orig\_min}} \times (\text{new\_max} - \text{new\_min}) $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cloud_density(point: vec3, lod: float, 
+                  radius: float, cloud_scale: float, 
+                  gradient: float, multiplier: float, threshold: float, 
+                  detail_scale: float, cap: float, 
+                  cover_texture: samplerCube, profile_texture: sampler1D) -> float:
+    
+    # Step 1: Horizontal noise (3 octaves Perlin-Worley)
+    # Note: normalize(point) assumes point is relative to center or origin
+    normalized_point = normalize(point)
+    clouds = perlin_octaves(normalized_point * radius / cloud_scale)
+    
+    # Step 2: Vertical profile (10 values)
+    profile = sample_vertical_profile(profile_texture, point)
+    
+    # Step 3: Coverage masking
+    # Source update: removed clamping for cover_sample
+    cover_r = sample_cubemap(cover_texture, point).r
+    cover_sample = cover_r * gradient + clouds * multiplier - threshold
+    
+    # Step 4: Base density
+    base = cover_sample * profile
+    
+    # Step 5: High-frequency detail (5 octaves Worley)
+    noise = cloud_octaves(point / detail_scale, lod)
+    
+    # Step 6: Remap and clamp
+    # remap(noise, 1 - base, 1.0, 0.0, cap)
+    orig_min = 1.0 - base
+    orig_max = 1.0
+    new_min = 0.0
+    new_max = cap
+    
+    if orig_max == orig_min:
+        remapped = new_min
+    else:
+        remapped = new_min + (noise - orig_min) / (orig_max - orig_min) * (new_max - new_min)
+        
+    density = clamp(remapped, 0.0, cap)
+    
+    return density
+
+def sample_vertical_profile(tex: sampler1D, point: vec3) -> float:
+    # Implementation detail [G]: Sample based on normalized height or specific axis
+    # The source does not specify the exact axis or normalization for 'point' in cloud_profile
+    # Assuming standard vertical profile sampling along Y or Z axis normalized to [0,1]
+    height = point.y # [G] Assumption: vertical component
+    # Normalize height to texture coordinates [0,1] based on scene bounds [G]
+    # This is a placeholder for the specific vertical mapping logic not provided in source
+    return tex.sample(height)
+```
+
+**Parameters:**
+*   `radius`: Scale factor for horizontal noise [S1, unofficial].
+*   `cloud_scale`: Normalization factor for horizontal noise [S1, unofficial].
+*   `gradient`: Multiplier for the cover texture [S1, unofficial].
+*   `multiplier`: Multiplier for the horizontal noise [S1, unofficial].
+*   `threshold`: Offset subtracted from the cover sample [S1, unofficial].
+*   `detail_scale`: Scaling factor for high-frequency noise [S1, unofficial].
+*   `cap`: Maximum density value [S1, unofficial].
+*   `powder_decay`: Used in the powder effect for scattered light, defined as $1.0 - \exp(-\text{powder\_decay} \times \text{density})$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** In the `remap` function, if `base` is 1.0, `orig_min` equals `orig_max`. The pseudocode includes a guard for this [G].
+*   **Coverage Clamping:** The source author explicitly removed clamping for the `cover_sample` in an update, so implementers should follow the unclamped version [S1, unofficial].
+*   **Vertical Profile Mapping:** The exact method for mapping `point` to the 10-value vertical profile texture is not detailed in the source [S1, unofficial].
+
+## Subtopics
+
+### [Realistic Cloud Density Slicing](8288-realistic-cloud-density-slicing.md)
+Realistic Cloud Density Slicing is a procedural volume generation method that computes cloud density by combining vertical atmospheric profiles with horizontal footprint and noise-based structural variations. It solves the problem of generating visually distinct, physically plausible cloud layers for different cloud types (e.g., Cirrus, Cumulus) within a unified framework. It differs from generic noise-based volume generation by explicitly separating vertical stratification (Gaussian profiles) from horizontal structure (footprints and clusters), modulated by type-specific noise functions.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Measured Performance:** Rendered at 28.5 frames per second on an AMD Ryzen 7 4700U (PassMark 2034) at 640x480 resolution [S1, unofficial].
+*   **Scaling:** The method uses 3 deep opacity maps, one 512x512 offset layer, and a 7x512x512 transmittance array per frame [S1, unofficial].
+*   **Strengths:** Combines global coverage, vertical stratification, and high-frequency detail in a single function.
+*   **Limitations:** Performance is dependent on the number of noise octaves and texture samples. The source does not provide scalability metrics for higher resolutions or more complex scenes.
+
+## Background
+The method was described by Jan Wedekind in an unofficial blog post titled "Procedural Volumetric Clouds" [S1, unofficial]. The implementation uses 5 octaves of $64 \times 64 \times 64$ Worley noise for high-frequency detail and 3 octaves of $64 \times 64 \times 64$ Perlin-Worley noise for horizontal shapes [S1, unofficial]. A 6x512x512 cubemap is used for global cloud cover, and a vertical profile texture with 10 values is used for atmospheric stratification [S1, unofficial].
+
+## Sources
+[S1] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)

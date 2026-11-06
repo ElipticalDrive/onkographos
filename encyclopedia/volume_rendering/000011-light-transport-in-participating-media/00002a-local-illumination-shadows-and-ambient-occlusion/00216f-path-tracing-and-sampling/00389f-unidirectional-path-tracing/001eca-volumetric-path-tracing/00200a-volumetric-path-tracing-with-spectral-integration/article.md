@@ -1,0 +1,93 @@
+# Volumetric Path Tracing with Spectral Integration
+
+Also called: Participating Medium Rendering, Spectral Volumetric Integration
+
+## Overview
+A path tracing technique that handles ray marching through participating media (homogeneous volumes) with absorption and scattering, using spectral wavelength sampling for dispersion effects like rainbow refraction [S1, unofficial]. It differs from standard RGB path tracing by performing spectral Multiple Importance Sampling (MIS) for channel selection based on throughput, rather than sampling in RGB space directly [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Ray origin, direction, current medium stack, material properties (Dielectric with spectral dispersion, ParticipatingMedium).
+*   **Output:** Radiance contribution, updated path state (wavelength, medium stack).
+
+**Data Structures:**
+*   `ParticipatingMedium`:
+    *   `absorption_coefficient`: Color (spectral or RGB).
+    *   `scattering_coefficient`: Color (spectral or RGB).
+*   `Dielectric`:
+    *   `absorption`: Color reached at a distance.
+    *   `scattering`: Density, color, anisotropy.
+    *   `abbe`: Cauchy dispersion parameters ($n_d$, $V$).
+*   `PathState`:
+    *   `wavelength`: Scalar float (nm).
+    *   `medium_stack`: List of `ParticipatingMedium` pointers.
+
+**Steps:**
+1.  **Medium Stack Management:** When a ray refracts through a volume boundary (Dielectric), it enters or leaves that object's interior medium. Nested volumes must resolve to the innermost medium to avoid incorrect scattering/absorption calculations [S1, unofficial].
+2.  **Spectral Dispersion Sampling:** On the first dispersive hit, pick a wavelength $\lambda$ via importance sampling using nonnegative CIE->sRGB weights that average to white [S1, unofficial]. The path continues monochromatic with refractive index $n(\lambda)$ derived from the Cauchy equation using $n_d$ and Abbe number $V$ [S1, unofficial].
+3.  **Ray Marching:** For homogeneous media, apply Beer-Lambert absorption per segment: $T(\lambda) = \exp(-\sigma_a(\lambda) \cdot d)$, where $\sigma_a$ is the absorption coefficient and $d$ is the segment length [S1, unofficial].
+4.  **Scattering Sampling:** Use free-flight sampling for scattering media. Sample the scattering direction using the Henyey-Greenstein phase function $p(\cos \theta) = \frac{1-g^2}{(1+g^2-2g\cos \theta)^{3/2}}$, where $g$ is the anisotropy parameter [S1, unofficial].
+5.  **Spectral MIS:** Perform spectral Multiple Importance Sampling (MIS) where the channel is picked by throughput. The probability density function (pdf) is a mixture over channels [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def trace_volumetric_spectral(ray, medium_stack, path_state):
+    # 1. Medium Stack Management
+    current_medium = get_innermost_medium(medium_stack)
+    
+    # 2. Spectral Dispersion Sampling (if first dispersive hit)
+    if path_state.wavelength is None and ray.material.is_dispersive:
+        # Importance sample wavelength using nonnegative CIE->sRGB weights averaging to white
+        path_state.wavelength = sample_wavelength_importance(ray.material.abbe)
+        
+    # 3. Ray Marching through Homogeneous Media
+    # Apply Beer-Lambert absorption per segment
+    transmittance = 1.0
+    for segment in ray.segments:
+        sigma_a = current_medium.absorption_coefficient(path_state.wavelength)
+        transmittance *= exp(-sigma_a * segment.length)
+        
+    # 4. Scattering Sampling
+    if current_medium.scattering_coefficient(path_state.wavelength) > 0:
+        # Free-flight sampling
+        distance = sample_free_flight(current_medium.extinction_coefficient(path_state.wavelength))
+        
+        # Sample scattering direction using Henyey-Greenstein phase function
+        scattering_direction = sample_henyey_greenstein(current_medium.scattering.anisotropy)
+        
+        # 5. Spectral MIS
+        # Channel picked by throughput, pdf is mixture over channels
+        throughput = compute_throughput(transmittance, current_medium)
+        spectral_pdf = compute_spectral_mis_pdf(throughput)
+        
+        return radiance_contribution(scattering_direction, throughput, spectral_pdf)
+    
+    return transmittance * ray.source_radiance
+```
+
+**Parameters:**
+*   `ParticipatingMedium.absorption_coefficient`: Typical values depend on material density.
+*   `ParticipatingMedium.scattering_coefficient`: Typical values depend on material density.
+*   `Dielectric.setAbsorption`: Color reached at a distance.
+*   `Dielectric.setScattering`: Density, color, anisotropy.
+*   `Dielectric.setAbbe`: Cauchy $n(\lambda)$ from $n_d$ and $V$.
+
+**Edge Cases and Pitfalls:**
+*   Nested volumes must resolve to the innermost medium to avoid incorrect scattering/absorption calculations [S1, unofficial].
+*   Precision issues may arise in spectral integration if wavelength sampling is not properly importance sampled.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of scattering events. Spectral MIS adds overhead for channel selection.
+*   **Memory Complexity:** $O(M)$ where $M$ is the depth of the medium stack.
+*   **Strengths:** Accurate dispersion effects (rainbows), energy conservation via spectral MIS.
+*   **Limitations:** Computationally expensive due to spectral calculations and MIS.
+*   **When to use:** When accurate spectral effects like dispersion are required.
+*   **When not to use:** When performance is critical and spectral accuracy is not needed.
+
+## Background
+Originated in the context of advanced path tracers supporting participating media and spectral rendering [S1, unofficial]. It builds on [Volumetric Path Tracing](1863-volumetric-path-tracing.md) by adding spectral integration and MIS for channel selection.
+
+## Sources
+[S1] Add volumetric rendering, advanced materials, and imager effects, https://github.com/MihrimatriX/photon-engine/pull/3, fetched 2026-10-28 (unofficial)

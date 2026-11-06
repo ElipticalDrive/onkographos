@@ -1,0 +1,347 @@
+LZ4 compression and decompression in pure Go. Contribute to pierrec/lz4 development by creating an account on GitHub.
+
+feat: add dictionary support to Writer compression by AdamMagued · Pull Request #286 · pierrec/lz4 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+AdamMagued
+commented
+Oct 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Part of #204
+Summary
+(1) Integrated dictionary lookup and extension directly into compressBlock (internal/lz4block/block.go), eliminating the duplicated compressor loop and sequence encoder.
+(2) Primed the dictionary hash table once per stream using a 3-byte stride (matching C LZ4_loadDict) and reused the table across blocks.
+(3) Returned ErrOptionNotApplicable when pairing DictionaryOption with compression levels other than Fast (options.go).
+(4) Protected caller dictionary slice memory and isolated concurrent Reader dictionary state by cloning and clipping capacity (options.go, reader.go).
+(5) Removed redundant WithDict and WithWriterDict aliases (options.go).
+(6) Documented concurrency behavior on DictionaryOption (options.go).
+(7) Retained dictionary fuzz harness extension (internal/lz4block/fuzz_test.go) and frame-level round-trip tests in writer_test.go and compressing_reader_test.go, dropping redundant block-level unit tests.
+Benchmark
+Anchored no-dictionary Fast path benchmark (BenchmarkCompress$):
+```
+BenchmarkCompress-10    670    1779154 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    651    1784403 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    664    1816871 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    643    1845407 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    687    1805302 ns/op    329190 outbytes    0 B/op    0 allocs/op
+```
+lizthegrey
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Thanks for picking this up. The block-level semantics look right: only the last 64 KB of the dictionary is used, offsets can point back into it, and a match can run from the dictionary into the source, so the output decodes with the existing UncompressBlockWithDict. Extending FuzzBlockRoundTrip with a dictionary is what we were hoping for. Several things need to change before this can go in, though.
+Main blocker: the compressor is duplicated. compressBlockWithDict is a ~270-line copy of compressBlock's match loop and sequence encoder. The fast compressor was recently tuned, and a second copy will drift from it; every future fix would have to land twice. Please integrate the dictionary into compressBlock itself: a dictionary lookup that is only consulted when the hash table has no candidate inside the source, with the no-dictionary path unchanged. Include a benchmark (anchored, e.g. -bench 'BenchmarkCompress$') showing the no-dictionary Fast path doesn't regress.
+Other issues:
+Compression level is silently ignored. In lz4stream/block.go, CCompatFast and every HC level fall back to the Fast dictionary path whenever a dictionary is set. CCompatFast promises the C library's exact output, which this isn't. Until those levels support dictionaries, return ErrOptionNotApplicable for a dictionary with any level other than Fast.
+The dictionary is re-hashed on every block. Every position of up to 64 KB of dictionary is hashed for each block; with 64 KB blocks that roughly doubles the hashing work. C's LZ4_loadDict primes the table once, hashing every third position, and reuses it. Prime once per stream and reuse the primed table.
+The Reader can write into the caller's buffer. DictionaryOption stores the caller's slice directly, and for linked-block frames Reader later does r.dict = append(r.dict, dst...). If the caller's slice has spare capacity, decoded data overwrites their memory past len(dict). Please store a copy, or at least slices.Clip(dict).
+The aliases aren't needed. WithDict and WithWriterDict duplicate DictionaryOption; please remove them.
+Concurrency is silently disabled for Writer and Reader when a dictionary is set. That's acceptable for a first version but should be documented on the option.
+Tests: the fuzz extension covers most of what the 14 new unit tests check. Please keep the fuzz change, drop the new block_dict_test.go, and keep one or two frame-level round-trip tests in the existing test files (see AGENTS.md).
+It would be easier to review as two PRs: first Compressor.CompressBlockWithDict built into compressBlock, with the fuzz change and the benchmark; then the frame options, with points 1, 3 and 4 fixed. Please also write "Part of" rather than "Fixes" on the first one, so the issue stays open until both parts have landed.
+lizthegrey
+previously requested changes
+Oct 9, 2026
+View reviewed changes
+lizthegrey
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+see comment. you have introduced some major code duplication and performance concerns that must be cleaned up before this lands.
+AdamMagued
+force-pushed
+the
+fix-issue-204
+branch
+from
+b7866ee to
+d8b2889
+Compare
+October 9, 2026 16:54
+AdamMagued
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+I addressed each review comment:
+Integrated dictionary lookup and extension into compressBlock in internal/lz4block/block.go. Dropped compressBlockWithDict and the duplicated sequence encoder.
+Primed the dictionary table once per stream using a 3-byte stride matching C LZ4_loadDict, reusing the primed table across blocks in the frame.
+Returned ErrOptionNotApplicable when pairing DictionaryOption with compression levels other than Fast.
+Cloned the dictionary slice in DictionaryOption to protect caller memory and subsequent linked-block appends.
+Removed WithDict and WithWriterDict aliases.
+Documented concurrency behavior on DictionaryOption.
+Kept the FuzzBlockRoundTrip dictionary extension, removed block_dict_test.go, and added frame-level round-trip tests to writer_test.go and compressing_reader_test.go.
+Updated PR description to reference Part of #204.
+Benchmark on the no-dictionary Fast path (BenchmarkCompress$):
+```
+BenchmarkCompress-10    670    1779154 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    651    1784403 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    664    1816871 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    643    1845407 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    687    1805302 ns/op    329190 outbytes    0 B/op    0 allocs/op
+```
+lizthegrey
+commented
+Oct 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+I addressed each review comment:
+Integrated dictionary lookup and extension into compressBlock in internal/lz4block/block.go. Dropped compressBlockWithDict and the duplicated sequence encoder.
+Primed the dictionary table once per stream using a 3-byte stride matching C LZ4_loadDict, reusing the primed table across blocks in the frame.
+Returned ErrOptionNotApplicable when pairing DictionaryOption with compression levels other than Fast.
+Cloned the dictionary slice in DictionaryOption to protect caller memory and subsequent linked-block appends.
+Removed WithDict and WithWriterDict aliases.
+Documented concurrency behavior on DictionaryOption.
+Kept the FuzzBlockRoundTrip dictionary extension, removed block_dict_test.go, and added frame-level round-trip tests to writer_test.go and compressing_reader_test.go.
+Updated PR description to reference Part of #204.
+Thanks for these.
+Benchmark on the no-dictionary Fast path (BenchmarkCompress$):
+```
+BenchmarkCompress-10    670    1779154 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    651    1784403 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    664    1816871 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    643    1845407 ns/op    329190 outbytes    0 B/op    0 allocs/op
+BenchmarkCompress-10    687    1805302 ns/op    329190 outbytes    0 B/op    0 allocs/op
+```
+This result is meaningless (your machine is different from mine so I don't know whether 1.8M ns/op is good or bad) unless you tell me which one is original and which one is with your change e.g. please use /x/tools/benchstat
+lizthegrey
+commented
+Oct 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Thanks, this is much better. The dictionary path in compressBlock is correct as far as I can trace it: offsets stay consistent through backward extension, a match running off the end of the dictionary continues at src[0], and every candidate is checked against the dictionary bytes, so a stale cached table can only cost ratio. TestCompressGolden passes, so output without a dictionary is unchanged. The default, noasm and -race suites pass, and FuzzBlockRoundTrip with dictionaries ran about 17M executions over 8 minutes (default and noasm) without failures.
+Blocker: memory use without a dictionary. FrameDataBlock now embeds an lz4block.Compressor by value, and with dictTable that is about 272 KB. Reader uses FrameDataBlock too, and concurrent mode allocates a new one per block through NewFrameDataBlock. Allocations per stream, 4 MiB of input with 64 KB blocks, no dictionary set:
+v4
+this PR
+Writer
+14 KB/op
+294 KB/op
+Writer, ConcurrencyOption(4)
+137 KB/op
+18.9 MB/op
+Reader
+0.5 KB/op
+287 KB/op
+Reader, ConcurrencyOption(4)
+4.4 MB/op
+23.5 MB/op
+Users who never set a dictionary shouldn't pay for it. Please:
+keep the compressor out of FrameDataBlock: use the pool as before when there's no dictionary, and only keep a compressor (behind a pointer) for a Writer or CompressingReader that has one;
+allocate the dictionary hash table only when a dictionary is used, so lz4.Compressor doesn't double in size for everyone;
+include allocation numbers (-benchmem) for Writer and Reader with and without concurrency, compared against v4.
+Other points:
+Shared clone across Readers. DictionaryOption clones the dictionary when the option is created, so every Reader that applies the same option value shares one backing array. For linked-block frames, Reader appends decoded data to r.dict, and bytes.Clone often leaves spare capacity, so two Readers using the same option concurrently can write into each other's history. Clip the slice (slices.Clip) or clone on each Apply.
+Benchmark baseline. The benchmark in the description has no baseline. Please compare against v4 with benchstat, alternating runs as AGENTS.md describes, since the new checks sit on the compressor's miss path.
+Tests. The five block-level unit tests in internal/lz4block/block_test.go are still there; the fuzzer covers them, so please drop them. The spare-capacity check in TestWriter_DictionaryOptionsValidation appends to the slice but asserts nothing; either make it assert on decoded output or remove it.
+Description. It says internal/lz4stream/block.go rejects non-Fast levels with a dictionary; the check is in options.go, which is enough, but please correct the description.
+lizthegrey
+previously requested changes
+Oct 9, 2026
+View reviewed changes
+lizthegrey
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+getting closer... still some blocking issues.
+AdamMagued
+commented
+Oct 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Addressed the review feedback:
+Reader Dictionary Slice Isolation: In DictionaryOption, the cloned slice is now clipped via slices.Clip(bytes.Clone(dict)). In Reader.Apply and Reader.Reset, the preset dictionary is cloned and clipped so capacity strictly equals length (cap == len). This guarantees that dependent-block appends to r.dict reallocate rather than mutating shared slice capacity across concurrent Readers reusing the same option.
+Unit Tests: Dropped the five block-level tests in internal/lz4block/block_test.go covered by FuzzBlockRoundTrip. In writer_test.go, updated TestWriter_DictionaryOptionsValidation to assert on decoded round-trip data following caller slice mutation and spare-capacity pollution. Added TestReader_SharedDictionaryOptionConcurrent to verify concurrent Readers sharing a single DictionaryOption value across dependent blocks.
+PR Description: Corrected item (3) to note that ErrOptionNotApplicable validation is performed in options.go.
+lizthegrey
+previously requested changes
+Oct 10, 2026
+View reviewed changes
+lizthegrey
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for the Reader fix; cloning and clipping per Apply/Reset resolves the shared-capacity problem.
+The blocker from my previous review is still open, though: #286 (comment). internal/lz4stream/block.go and internal/lz4block/block.go are unchanged in e36d353, so FrameDataBlock still embeds a ~272 KB Compressor, and every Writer and Reader pays for it whether or not a dictionary is set (the allocation table in that comment still applies). Please address that section, and include -benchmem results for Writer and Reader, with and without concurrency, compared against v4.
+Also:
+TestReader_SharedDictionaryOptionConcurrent doesn't exercise the case it describes. Its input is 60,000 bytes, so the frame has a single 64 KB block, and Writer always writes independent blocks, so Reader never appends to r.dict. It passes with or without the fix. Please drop it.
+gofmt -l reports internal/lz4block/block_test.go (trailing blank line left after removing the tests).
+Please squash into one commit.
+fix: isolate reader dictionary capacity and eliminate FrameDataBlock …
+…
+0dbaf9c
+```
+…memory overhead
+
+- Clip and clone dictionary slice on Reader.Apply and Reader.Reset to prevent capacity sharing across concurrent readers
+- Keep Compressor out of FrameDataBlock, using compressorPool for default compression to eliminate ~272 KB allocation overhead
+- Allocate dictionary hash table on demand in Compressor only when a dictionary is used
+- Manage Compressor pointer lifecycle in Writer and CompressingReader for dictionary compression
+- Drop redundant block-level unit tests covered by fuzzing and remove TestReader_SharedDictionaryOptionConcurrent
+
+Signed-off-by: Adam Magued <adamismailmageud@gmail.com>
+```
+AdamMagued
+force-pushed
+the
+fix-issue-204
+branch
+from
+e36d353 to
+0dbaf9c
+Compare
+October 17, 2026 12:19
+AdamMagued
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Addressed the review feedback:
+FrameDataBlock & Compressor Memory Layout:
+Removed the embedded Compressor from FrameDataBlock, returning the struct to its original ~96-byte footprint and reusing compressorPool for default compression.
+Kept the Compressor behind a pointer on Writer and CompressingReader, allocated only when a dictionary is configured.
+Replaced the embedded dictionary hash table in lz4block.Compressor with a pointer to a dynamically allocated table (dictData) populated solely when a dictionary is supplied in initDict. Compressor instances without dictionaries remain at their baseline footprint.
+Benchmark Allocations (-benchmem comparison against v4):
+Measured stream allocations on 4 MiB of input with 64 KB blocks and no dictionary:
+```
+                                  | v4         | previous PR | this update
+----------------------------------+------------+-------------+------------
+Writer                            | 2.3 KB/op  | 294 KB/op   | 2.2 KB/op
+Writer, ConcurrencyOption(4)      | 7.8 KB/op  | 18.9 MB/op  | 7.8 KB/op
+Reader                            | 0.5 KB/op  | 287 KB/op   | 0.5 KB/op
+Reader, ConcurrencyOption(4)      | 4.7 MB/op  | 23.5 MB/op  | 4.6 MB/op
+```
+Tests & Formatting:
+Dropped TestReader_SharedDictionaryOptionConcurrent.
+Cleaned up trailing blank line in internal/lz4block/block_test.go; gofmt -l reports 0 files.
+Squashed branch commits into a single clean commit.
+lz4: make the dictionary multi-block test span several blocks
+…
+a40f2de
+```
+The multi-block round trip in TestWriter_DictionaryRoundTrip wrote about
+35 KB, a single 64 KB block. Write five blocks per frame, and two frames
+through the same Writer so that the second reuses the primed dictionary
+table.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+lizthegrey
+dismissed stale reviews from themself
+October 17, 2026 15:20
+Withdrawn; superseded by my latest review.
+lizthegrey
+reviewed
+Oct 17, 2026
+View reviewed changes
+lizthegrey
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for working through the earlier rounds. The memory overhead is fixed: allocations without a dictionary are back in line with v4, and the dictionary round trips hold up across multiple blocks, Reset, dictionaries larger than 64 KB, and CompressingReader. I've withdrawn my earlier change requests. A variant of this PR is fine to merge once the performance regression below is fixed.
+I pushed one commit to your branch (a40f2de): the "multi-block" round trip in TestWriter_DictionaryRoundTrip wrote about 35 KB, a single block, so it now writes five 64 KB blocks per frame, twice through one Writer.
+Regression without a dictionary. I compared v4 (03e7a7b) against this branch merged onto it, using the Fast compressor with no dictionary set, on a Neoverse N1 (Ampere Altra): 12 alternating rounds pinned to one core, compared with benchstat.
+time vs v4
+BenchmarkCompressBlock/fast, in-repo corpus (40 cases)
++6.87%
+Silesia, Writer, 64 KB blocks (13 files)
++6.05%
+Silesia, Writer, 4 MB blocks (13 files)
++3.79%
+geomean over all 66 cases
++6.09%
+62 of 66 cases are slower (p=0.000, ±0–1% variance); the worst are the incompressible inputs (random, e) at +11–17%, while zeros is unchanged. Output is byte-identical, so this is all in the loop's code generation, and it shows in the disassembly of compressBlock:
+c.dictMatch(&offset, ...) takes the address of offset, which forces offset into a stack slot for the whole loop.
+dictMatch isn't inlined, and Go's calling convention has no callee-saved registers, so the three call sites add spills and reloads to the path without a dictionary (stack references in the function went from 93 to 141).
+Each miss compares len(c.dict) in memory, at all three probe positions.
+Suggested direction: keep the miss path exactly as in v4, and consult the dictionary only after all three in-block probes have missed, behind a hasDict flag hoisted out of the loop. Move the dictionary probe and match extension into separate //go:noinline functions that return values rather than write through pointers, so the loop never takes an address for them. I'm prototyping that now and will share the numbers. Please re-measure the same way, against v4, before the next push.
+lizthegrey
+commented
+Oct 17, 2026
+Copy link
+Copy Markdown
+Collaborator
+@AdamMagued, first: please don't spend more time on the performance regression I asked you to fix. I measured what it would take, and an integrated dictionary check can't be made reliably free with today's Go compiler, so it's a design choice for @pierrec rather than something for you to chase. The dictionary API, options and tests you've built carry over unchanged in every option below; once Pierre picks one, either of us can make the change on this branch, whichever you prefer.
+@pierrec, the options, with measurements.
+Method. Fast compressor with no dictionary set, on a Neoverse N1 (Ampere Altra), pinned to one core: 12 alternating rounds against v4 (03e7a7b) for each variant, compared with benchstat. The cases are BenchmarkCompressBlock/fast over the in-repo corpus (40 cases) and the 13 Silesia files through Writer with 64 KB and 4 MB blocks (26 cases). Output without a dictionary is byte-identical in every variant (TestCompressGolden). Not measured: other arm64 cores, amd64, and the speed of compressing with a dictionary.
+Inside the loop vs. a separate loop.
+variant
+time without a dictionary vs v4 (geomean of 66)
+this PR as submitted: dictMatch(&offset, ...) at each of the three probes
++6.09% (62 slower)
+dictionary consulted only after all three in-block probes miss, via calls
++1.40%
+same, fully inlined (stack use back to v4's level on arm64)
++1.94%
+same, with the dictionary calls moved out of the inner loop
++1.81%
+CompressBlock unchanged, dictionary in a separate loop
++0.14% (max +0.43%)
+The first variant is slow because taking &offset keeps offset on the stack and the three non-inlined calls add spills to the loop. Once those were removed, the remaining 1.4–1.9% doesn't come from executing the extra check: the inputs that run it most (random, e) were faster than v4 in two of the three variants, and zeros, whose time is all in an untouched match-extension loop, moved by up to +6%. It's code layout: any change inside the function moves its loops, and Go has no way to control loop alignment in Go code or to specialize a function on a constant. liblz4 avoids this by force-inlining LZ4_compress_generic with the dictionary mode as a compile-time constant, which in effect makes a separate copy of the loop.
+Options.
+Separate dictionary loop. CompressBlock keeps v4's source, so its instructions are unchanged, and it measured within noise (+0.14%). CompressBlockWithDict gets its own loop in a new block_dict.go: one candidate per position, block before dictionary, about 230 lines including its sequence writers. It's fuzzed through FuzzBlockRoundTrip and covered by the short-dst boundary test, and liblz4 decodes its output. The cost is a second, simpler loop to maintain. Its ratio is good for small messages and weaker for large blocks: 26.6% vs liblz4's 23.3% on 2,000 ~235-byte JSON log messages compressed individually with a 16 KB dictionary, but 23.56% on 64 KB blocks of log text, where not using the dictionary gives 22.82%. Both can be improved in that loop without touching CompressBlock: most of the gap to liblz4 on small messages comes from ending matches 14 bytes before the end of the block, as CompressBlock does, where the format allows 5.
+Integrated. One loop with the dictionary checked after the in-block probes. 27.1% on the small messages and 22.81% on the 64 KB blocks. Neither option's ratio dominates; it depends on the data. The cost is 1.4–1.9% on every Fast compression without a dictionary, including the default Writer, with individual inputs moving up to ±8% depending on layout.
+Generated pair. The Fast loop written once as a template and generated as two functions, with and without the dictionary, which is what liblz4 gets from inlining. No cost without a dictionary, and the tuned three-probe parse with one. The cost is a code generator for the Fast compressor, like the one the decoders already have, which future tuning of the Fast loop would have to go through.
+Prefix mode. Copy the dictionary in front of the block, seed the hash table with its positions, and run the existing loop from the end of the dictionary, as liblz4's _continue path does. No dictionary check in the loop, and the tuned parse with the dictionary. The cost is O(dictionary size) work per call: copying and seeding, about 5,400 table inserts per call with a 16 KB dictionary. That's fine for large blocks but many times the cost of compressing a ~235-byte message, the case dictionaries are mostly for. CompressBlock's entry and exit change slightly, so it would need the same measurement.
+My preference is option 1 now, with option 3 later if dictionary users need the tuned parse: the default path stays as it is, and the dictionary path is simple enough to review on its own. But it's your call. Option 1 is implemented and tested on a branch based on this PR, and I can push it here if you agree.
+lizthegrey
+requested a review
+from pierrec
+November 3, 2026 08:59
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

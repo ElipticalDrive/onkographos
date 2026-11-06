@@ -3,51 +3,53 @@
 Also called: Volume Color and Highlight Edges Rendering
 
 ## Overview
-This method renders volumetric data by coloring scalar cells based on their average value while simultaneously detecting and highlighting topological edges (faces of tetrahedra or quads) to provide structural clarity. It distinguishes itself from [Line Illustration Detection](772-line-illustration-detection.md) by operating on face-based primitives rather than extracted skeletal lines, and from [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating edge highlights directly into the volume fragment shader rather than post-processing silhouettes. The technique uses a Per-Pixel Linked List (PPLL) structure to manage fragment depth sorting, allowing for correct alpha blending of semi-transparent volume cells and sharp edge highlights in a single pass.
+This method renders volumetric data by coloring scalar cells based on their average value while simultaneously detecting and highlighting topological edges (faces of quads) to provide structural clarity [S1, unofficial]. It distinguishes itself from [Line Illustration Detection](772-line-illustration-detection.md) by operating on face-based primitives rather than extracted skeletal lines, and from [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating edge highlights directly into the volume fragment shader rather than post-processing silhouettes [S1, unofficial]. The technique uses a Per-Pixel Linked List (PPLL) structure to manage fragment depth sorting, allowing for correct alpha blending of semi-transparent volume cells and sharp edge highlights in a single pass [S1, unofficial].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   **Geometry:** A set of faces (quads or triangles) representing the volume mesh. For each fragment, the shader receives:
+*   **Geometry:** A set of faces (quads) representing the volume mesh. For each fragment, the shader receives:
     *   `vFragmentPositionWorld`: World-space position of the fragment.
     *   `vVertexPositions[4]`: World-space positions of the four vertices of the face.
     *   `vVertexAttributes[4]`: Scalar values at each vertex.
     *   `vLineAttributes[4]`: Importance/weight flags for each edge (1.0 if important, 0.0 otherwise).
     *   `vEdgeLodValues[4]`: Level-of-Detail (LOD) values for each edge.
 *   **Textures:**
-    *   `uCellScalarTex`: A 2D texture where each texel stores the scalar value for a cell/face.
+    *   `uCellScalarTex`: A 2D texture where each texel stores the scalar value for a cell/face [S1, unofficial].
 *   **Uniforms:**
-    *   `uLineWidth`: Base width of the edge highlight.
-    *   `uMaxLodValue`: Maximum LOD scale factor.
-    *   `uSelectedLodValueFocus`, `uSelectedLodValueContext`: Thresholds for LOD selection in focus and context regions.
-    *   `uImportantLineBoostFactor`: Threshold to distinguish important lines.
-    *   `uSphereCenter`, `uSphereRadius`: Defines the "focus" region (sphere) for depth cueing.
-    *   `uCameraPosition`, `uLookingDirection`: Camera parameters.
-    *   `uScalarMin`, `uScalarMax`: Scalar range for normalization.
-    *   `uEdgeColor`, `uBackgroundColor`, `uForegroundColor`: Color palette.
-    *   `uViewportSize`: Viewport dimensions in pixels.
-    *   `uFovY`: Vertical field of view.
+    *   `uLineWidth`: Base width of the edge highlight [S1, unofficial].
+    *   `uMaxLodValue`: Maximum LOD scale factor [S1, unofficial].
+    *   `uSelectedLodValueFocus`, `uSelectedLodValueContext`: Thresholds for LOD selection in focus and context regions [S1, unofficial].
+    *   `uImportantLineBoostFactor`: Threshold to distinguish important lines [S1, unofficial].
+    *   `uSphereCenter`, `uSphereRadius`: Defines the "focus" region (sphere) for depth cueing [S1, unofficial].
+    *   `uCameraPosition`, `uLookingDirection`: Camera parameters [S1, unofficial].
+    *   `uScalarMin`, `uScalarMax`: Scalar range for normalization [S1, unofficial].
+    *   `uEdgeColor`, `uBackgroundColor`, `uForegroundColor`: Color palette [S1, unofficial].
+    *   `uViewportSize`: Viewport dimensions in pixels (width, height) [S1, unofficial].
+    *   `uFovY`: Vertical field of view [S1, unofficial].
+    *   `contextFactor`, `focusFactor`: Depth cueing factors for context and focus regions [S1, unofficial].
+    *   `fragmentDistance`: Depth of the fragment [S1, unofficial].
 
 **Outputs:**
-*   **Blended Color:** The final RGBA color for the fragment.
-*   **Depth:** The depth value for the fragment, used for PPLL insertion.
+*   **Blended Color:** The final RGBA color for the fragment [S1, unofficial].
+*   **Depth:** The depth value for the fragment, used for PPLL insertion [S1, unofficial].
 
 ### Data Structures
-The method relies on a **Per-Pixel Linked List (PPLL)** structure implemented via GPU textures to handle depth sorting of overlapping fragments (volume cells and edge highlights).
+The method relies on a **Per-Pixel Linked List (PPLL)** structure implemented via GPU textures to handle depth sorting of overlapping fragments (volume cells and edge highlights) [S1, unofficial].
 
 1.  **Start Offset Buffer (`startOffsetImage`):**
-    *   Format: `R32UI` (Unsigned 32-bit Integer, Red channel only).
-    *   Dimensions: $W \times H$ (Viewport width and height).
-    *   Layout: Each pixel stores the index of the head of the linked list for that screen coordinate.
-    *   Initialization: All values set to `0xFFFFFFFF` (-1), acting as the end-of-list sentinel.
+    *   Format: `R32UI` (Unsigned 32-bit Integer, Red channel only) [S1, unofficial].
+    *   Dimensions: $W \times H$ (Viewport width and height) [S1, unofficial].
+    *   Layout: Each pixel stores the index of the head of the linked list for that screen coordinate [S1, unofficial].
+    *   Initialization: All values set to `0xFFFFFFFF` (-1), acting as the end-of-list sentinel [S1, unofficial].
 
 2.  **Fragment Buffer (`fragmentBufferImage`):**
-    *   Format: `RGBA32UI` (Unsigned 32-bit Integer, 4 channels).
-    *   Dimensions: $W \times H$.
-    *   Layout: Each pixel represents a node in the linked list.
-        *   Channel R: Color (or part of it, depending on implementation details not fully specified, but typically used for color/depth packing in PPLL). *Note: The source code initializes this to zero. The exact packing of color/depth/next-pointer into RGBA32UI is implied by the PPLL gather step but not explicitly detailed in the provided shader snippets. We assume standard PPLL packing: e.g., R=next_index, G=depth, B/R=color components, or similar.*
-        *   *Correction based on standard PPLL:* Usually, one buffer stores the list head, and another stores the nodes. The node structure typically contains: `next_index`, `depth`, `color`. The provided code initializes `fragmentBufferImage` to zeros. The `gatherFragmentCustomDepth` function (not fully shown) likely reads this buffer to resolve the final color.
+    *   Format: `RGBA32UI` (Unsigned 32-bit Integer, 4 channels) [S1, unofficial].
+    *   Dimensions: $W \times H$ [S1, unofficial].
+    *   Layout: Each pixel represents a node in the linked list [S1, unofficial].
+    *   Initialization: All values set to zero, indicating no fragment is present yet [S1, unofficial].
+    *   Note: The exact packing of color/depth/next-pointer into `RGBA32UI` is implied by the PPLL gather step but not explicitly detailed in the provided shader snippets [S1, unofficial].
 
 ### Numbered Steps
 
@@ -118,25 +120,24 @@ The method relies on a **Per-Pixel Linked List (PPLL)** structure implemented vi
     *   Premultiply if alpha is significant: If $blendedColor.a > 10^{-4}$, $blendedColor.rgb /= blendedColor.a$.
 
 8.  **Store Fragment:**
-    *   Call $gatherFragmentCustomDepth(blendedColor, fragmentDistance)$. This function inserts the fragment into the PPLL structure for later resolution.
+    *   Call $gatherFragmentCustomDepth(blendedColor, fragmentDistance)$ to insert the fragment into the PPLL structure for later resolution [S1, unofficial].
 
 ### Pseudocode
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def face_based_volume_rendering(vFragmentPositionWorld, vVertexPositions, vVertexAttributes, vLineAttributes, vEdgeLodValues, uLineWidth, uMaxLodValue, uSelectedLodValueFocus, uSelectedLodValueContext, uImportantLineBoostFactor, uSphereCenter, uSphereRadius, uCameraPosition, uLookingDirection, uScalarMin, uScalarMax, uEdgeColor, uBackgroundColor, uForegroundColor, uViewportSize, uFovY, contextFactor, focusFactor):
+def face_based_volume_rendering(vFragmentPositionWorld, vVertexPositions, vVertexAttributes, vLineAttributes, vEdgeLodValues, uLineWidth, uMaxLodValue, uSelectedLodValueFocus, uSelectedLodValueContext, uImportantLineBoostFactor, uSphereCenter, uSphereRadius, uScalarMin, uScalarMax, uEdgeColor, uBackgroundColor, uForegroundColor, uViewportSize, uFovY, contextFactor, focusFactor, fragmentDistance):
     # Step 1: Edge Width and Radius
-    distanceToFocusPointNormalized = calculate_distance_to_focus(vFragmentPositionWorld, uSphereCenter, uSphereRadius)
+    distanceToFocusPointNormalized = distance(vFragmentPositionWorld, uSphereCenter) / uSphereRadius
     eWidthPrime = uLineWidth * (-distanceToFocusPointNormalized * 0.3 + 1.0)
     lineRadius = eWidthPrime / 2.0
 
     # Step 2: Volume Cell Color
     cellScalar = 0.25 * sum(vVertexAttributes)
     t = (cellScalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6)
-    baseColor = colormap(clamp(t, 0.0, 1.0))
-    volumeColor = vec4(baseColor, 1.0)
-    volumeColor.a *= contextFactor
+    baseColor = viridis_colormap(clamp(t, 0.0, 1.0))
+    volumeColor = (baseColor[0], baseColor[1], baseColor[2], 1.0)
+    volumeColor = (volumeColor[0], volumeColor[1], volumeColor[2], volumeColor[3] * contextFactor)
 
     # Step 3: LOD Constants
     LOD_EPSILON = 0.001
@@ -150,70 +151,94 @@ def face_based_volume_rendering(vFragmentPositionWorld, vVertexPositions, vVerte
     minDistanceIndexAll = 0
     isLineNear = False
 
-    # Step 5: Iterate Over Edges
+    # Step 5: Iterate Over Edges (i = 0 to 3)
     for i in range(4):
-        currentDistance = get_distance_to_line_segment(vFragmentPositionWorld, vVertexPositions[i], vVertexPositions[(i + 1) % 4])
-        
+        currentDistance = point_to_line_segment_distance(vFragmentPositionWorld, vVertexPositions[i], vVertexPositions[(i + 1) % 4])
+
         isImportant = 1.0 if vLineAttributes[i] >= (1.0 - uImportantLineBoostFactor) else 0.0
         lodLevelFocus = max(isImportant * uMaxLodValue, discreteSelectedLodValueFocus)
-        
+
         lodLineValue = vEdgeLodValues[i]
         discreteLodValue = lodLineValue * uMaxLodValue
-        
+
         condContext = 1.0 if discreteLodValue <= (discreteSelectedLodValueContext + LOD_EPSILON) else 0.0
         condFocus = 1.0 if discreteLodValue <= (discreteSelectedLodValueFocus + LOD_EPSILON) else 0.0
         lodLevelOpacityFactor = mix(condContext, condFocus, focusFactor)
-        
+
         drawLine = lodLevelOpacityFactor > 0.01
-        
+
         if currentDistance < minDistance and drawLine:
             minDistance = currentDistance
             minDistanceIndex = i
             isLineNear = True
-            
+
         if currentDistance < minDistanceAll:
             minDistanceAll = currentDistance
             minDistanceIndexAll = i
 
     # Step 6: Edge Highlight Color
-    lineColor = vec4(0.0, 0.0, 0.0, 0.0)
+    lineColor = (0.0, 0.0, 0.0, 0.0)
     if isLineNear and minDistance <= lineRadius:
-        depthCueFactor = min(contextFactor, focusFactor)
-        
+        # depthCueFactor = min(contextFactor, focusFactor) # Calculated in source but unused in subsequent steps
         lodLineValue = vEdgeLodValues[minDistanceIndex]
         condContext = 1.0 if lodLineValue <= (uSelectedLodValueContext + LOD_EPSILON) else 0.0
         condFocus = 1.0 if lodLineValue <= (uSelectedLodValueFocus + LOD_EPSILON) else 0.0
         lodLevelOpacityFactor = mix(condContext, condFocus, focusFactor)
-        
+
         lineBaseColor = uEdgeColor
         lineBaseColorFocus = mix(lineBaseColor, uBackgroundColor, 0.3)
         lineBaseColorContext = mix(baseColor, uForegroundColor, 0.3)
         lineBaseColor = mix(lineBaseColorContext, lineBaseColorFocus, focusFactor)
-        
+
         lineCoordinates = max(minDistance / lineRadius, 0.0)
-        EPSILON = clamp(get_antialiasing_factor(fragmentDistance / lineRadius, uViewportSize, uFovY), 0.0, 0.49)
+        aa_distance = fragmentDistance / lineRadius
+        EPSILON = clamp(aa_distance / uViewportSize[1] * uFovY, 0.0, 0.49)
         coverage = 1.0 - smoothstep(1.0 - 2.0 * EPSILON, 1.0, lineCoordinates)
-        
-        lineColor = vec4(lineBaseColor, coverage * lodLevelOpacityFactor)
+
+        lineColor = (lineBaseColor[0], lineBaseColor[1], lineBaseColor[2], coverage * lodLevelOpacityFactor)
 
     # Step 7: Alpha Blend
-    blendedColor = vec4(0.0, 0.0, 0.0, 0.0)
-    blendedColor.a = lineColor.a + volumeColor.a * (1.0 - lineColor.a)
-    blendedColor.rgb = lineColor.rgb * lineColor.a + volumeColor.rgb * volumeColor.a * (1.0 - lineColor.a)
-    
-    if blendedColor.a > 1e-4:
-        blendedColor.rgb /= blendedColor.a
+    blendedColor = (0.0, 0.0, 0.0, 0.0)
+    blendedColor = (blendedColor[0], blendedColor[1], blendedColor[2], lineColor[3] + volumeColor[3] * (1.0 - lineColor[3]))
+    blendedColor = (
+        lineColor[0] * lineColor[3] + volumeColor[0] * volumeColor[3] * (1.0 - lineColor[3]),
+        lineColor[1] * lineColor[3] + volumeColor[1] * volumeColor[3] * (1.0 - lineColor[3]),
+        lineColor[2] * lineColor[3] + volumeColor[2] * volumeColor[3] * (1.0 - lineColor[3]),
+        blendedColor[3]
+    )
+
+    if blendedColor[3] > 1e-4:
+        blendedColor = (blendedColor[0] / blendedColor[3], blendedColor[1] / blendedColor[3], blendedColor[2] / blendedColor[3], blendedColor[3])
 
     # Step 8: Store Fragment
-    gather_fragment_custom_depth(blendedColor, fragmentDistance)
-    
+    # gatherFragmentCustomDepth(blendedColor, fragmentDistance) # Not fully specified in sources [S1, unofficial]
     return blendedColor
 
-def get_antialiasing_factor(distance, viewportSize, fovY):
-    return distance / viewportSize.y * fovY
+def distance(p1, p2):
+    return ((p1[0]-p2[0])**2 + (p1[1]-p2[1])**2 + (p1[2]-p2[2])**2)**0.5
+
+def point_to_line_segment_distance(p, a, b):
+    ab = (b[0]-a[0], b[1]-a[1], b[2]-a[2])
+    ap = (p[0]-a[0], p[1]-a[1], p[2]-a[2])
+    ab_len_sq = ab[0]**2 + ab[1]**2 + ab[2]**2
+    if ab_len_sq == 0: return distance(p, a)
+    t = max(0.0, min(1.0, (ap[0]*ab[0] + ap[1]*ab[1] + ap[2]*ab[2]) / ab_len_sq))
+    proj = (a[0] + t*ab[0], a[1] + t*ab[1], a[2] + t*ab[2])
+    return distance(p, proj)
+
+def viridis_colormap(t):
+    # Simplified 5-stop Viridis approximation [G]
+    stops = [(0.267, 0.004, 0.329), (0.282, 0.141, 0.458), (0.254, 0.360, 0.515), (0.477, 0.640, 0.398), (0.993, 0.906, 0.144)]
+    idx = t * 4.0
+    i = int(idx)
+    f = idx - i
+    if i >= 4: return stops[4]
+    c0, c1 = stops[i], stops[i+1]
+    return (c0[0]+f*(c1[0]-c0[0]), c0[1]+f*(c1[1]-c0[1]), c0[2]+f*(c1[2]-c0[2]))
 
 def mix(a, b, t):
-    return a + t * (b - a)
+    if isinstance(a, tuple): return tuple(a[i] + t*(b[i]-a[i]) for i in range(len(a)))
+    return a + t*(b - a)
 
 def clamp(x, min_val, max_val):
     return max(min_val, min(x, max_val))
@@ -221,9 +246,6 @@ def clamp(x, min_val, max_val):
 def smoothstep(edge0, edge1, x):
     t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
     return t * t * (3 - 2 * t)
-
-def vec4(r, g, b, a):
-    return {'r': r, 'g': g, 'b': b, 'a': a}
 
 def sum(lst):
     return sum(lst)
@@ -244,9 +266,9 @@ def min(a, b):
 *   `uSphereRadius`: Not given in the sources.
 
 ### Edge Cases and Pitfalls
-*   **Precision:** The use of `1e-6` in denominator normalization prevents division by zero if `uScalarMax == uScalarMin`.
-*   **Boundaries:** The `clamp` function is used for `lineCoordinates` and `EPSILON` to ensure valid ranges for `smoothstep` and anti-aliasing calculations.
-*   **Degenerate Input:** If `uScalarMax - uScalarMin` is zero, the scalar normalization uses `1e-6` as the denominator. If `lineRadius` is zero, division by zero may occur in `lineCoordinates` calculation; however, `uLineWidth` and focus factor should prevent this in practice.
+*   **Precision:** The use of `1e-6` in the denominator normalization prevents division by zero if `uScalarMax == uScalarMin` [S1, unofficial].
+*   **Boundaries:** The `clamp` function is used for `lineCoordinates` and `EPSILON` to ensure valid ranges for `smoothstep` and anti-aliasing calculations [S1, unofficial].
+*   **Degenerate Input:** If `uScalarMax - uScalarMin` is zero, the scalar normalization uses `1e-6` as the denominator. If `lineRadius` is zero, division by zero may occur in `lineCoordinates` calculation; however, `uLineWidth` and focus factor should prevent this in practice [S1, unofficial].
 
 ## Subtopics
 
@@ -272,7 +294,7 @@ Uses Laplacian of Gaussian for edge detection. Choose when robustness to noise i
 
 ## Background
 
-This method is derived from the "ClearView" rendering technique, specifically the "HexMeshUnified" fragment shader implementation. It is part of a broader effort to provide illustrative volume rendering with edge highlights. The technique is implemented in the "geresim-spike" project, which is an unofficial implementation.
+This method is derived from the "ClearView" rendering technique, specifically the "HexMeshUnified" fragment shader implementation. It is part of a broader effort to provide illustrative volume rendering with edge highlights. The technique is implemented in the "geresim-spike" project, which is an unofficial implementation [S1, unofficial].
 
 ## Sources
 

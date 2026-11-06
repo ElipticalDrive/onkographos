@@ -1,0 +1,108 @@
+# Atlas Mipmapping
+
+Also called: Mipmapping the Atlas
+
+## Overview
+Atlas Mipmapping addresses the undersampling artifacts that occur when a distant surfel covers few pixels but retains its full-resolution texture tile, causing a single pixel to span multiple texels during a bilinear fetch [S1, unofficial]. It sets itself apart from sibling methods like [GPU 3D Mip Chain Generation](5067-gpu-3d-mip-chain-generation.md) by operating on a pre-compressed 2D texture atlas rather than a volumetric grid, and from [Voxel Pre-integration](2956-voxel-pre-integration.md) by maintaining the surfel-based rendering pipeline while adding multi-resolution support [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A level-0 texture atlas containing surfel tiles, where each tile is compressed (e.g., BC7) and potentially dictionary-encoded [S1, unofficial].
+*   **Output:** A mip chain attached to the atlas, where each subsequent level is a box-filtered version of the previous level, compressed in the same manner as level 0 [S1, unofficial].
+
+**Data Structures:**
+The atlas is a 2D texture. Each surfel occupies a rectangular tile. The mip chain consists of $L$ levels. Level $l$ has dimensions $\lfloor W/2^l \rfloor \times \lfloor H/2^l \rfloor$ [S1, unofficial].
+
+**Steps:**
+1.  **Level Selection:** For each surfel, determine the appropriate mip level $l$ based on the texel footprint of a one-pixel step. This footprint is derived from the closed-form intersection calculation provided in the parent method's context (Sec. 3.3 of [S1, unofficial]). The level is chosen once per surfel [S1, unofficial].
+2.  **Mip Chain Generation:** Compute each level $l > 0$ by applying a box filter to level $l-1$ in the quantized domain. The filtering is performed before or during the compression step to ensure the compressed representation accurately reflects the lower resolution [S1, unofficial].
+3.  **Compression:** Compress each level using the same scheme as level 0 (e.g., BC7 block compression) [S1, unofficial]. If block dictionary compression is used, the codebook is built from level 0 blocks, and indices are stored for all levels [S1, unofficial].
+
+**Parameters:**
+*   **Extra Levels:** The number of additional mip levels beyond level 0. A typical value is 4, which adds approximately 33% to the total atlas byte size [S1, unofficial].
+*   **Default State:** Mipmapping is off by default. When off, all surfels are rendered at level 0 [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_atlas_mip_chain(atlas_level_0, num_extra_levels):
+    """
+    Generates a mip chain for a texture atlas.
+    
+    Args:
+        atlas_level_0: The base level (level 0) of the atlas, compressed.
+        num_extra_levels: Number of additional mip levels to generate.
+        
+    Returns:
+        A list of compressed atlas levels [level_0, level_1, ..., level_N].
+    """
+    levels = [atlas_level_0]
+    current_level = atlas_level_0
+    
+    for l in range(1, num_extra_levels + 1):
+        # Downsample the previous level using a box filter
+        # The filtering is done in the quantized domain as per [S1, unofficial]
+        filtered_level = box_filter_downsample(current_level)
+        
+        # Compress the filtered level using the same scheme as level 0
+        # e.g., BC7 block compression
+        compressed_level = compress_block(filtered_level)
+        
+        levels.append(compressed_level)
+        current_level = compressed_level
+        
+    return levels
+
+def select_mip_level(surfel_footprint, atlas_dimensions):
+    """
+    Selects the appropriate mip level for a surfel based on its screen-space footprint.
+    
+    Args:
+        surfel_footprint: The width/height of the surfel in texels at level 0.
+        atlas_dimensions: The width and height of the level 0 atlas.
+        
+    Returns:
+        The mip level index l.
+    """
+    # The footprint is derived from the closed-form intersection (Sec 3.3 of [S1, unofficial])
+    # We choose the level where the footprint is approximately 1x1 texel or smaller
+    # to avoid undersampling.
+    # This is a placeholder for the specific formula in Sec 3.3.
+    # In practice, this is computed once per surfel.
+    # [G] Assuming a simple heuristic: find l such that footprint / 2^l <= 1
+    l = 0
+    while l < 10: # Max levels
+        if surfel_footprint / (2 ** l) <= 1.0:
+            break
+        l += 1
+    return l
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Filtering in the quantized domain (after compression) may introduce artifacts if the compression scheme is not linear. The source specifies filtering in the quantized domain, which is a specific optimization [S1, unofficial].
+*   **Boundaries:** The box filter must handle atlas boundaries correctly.
+*   **Degenerate Input:** If a surfel is extremely small, it may map to a high mip level where it becomes a single texel or less.
+
+## Subtopics
+
+### [Anisotropic Texture Atlas Packing](2670-anisotropic-texture-atlas-packing.md)
+Anisotropic Texture Atlas Packing is a method to pack surfel textures into a fixed-width atlas using anisotropic rectangular tiles sized according to the Nyquist rate of the hash grid, avoiding square padding on thin surfels. It addresses the inefficiency of square padding for non-uniform surfels by aligning tile dimensions with the surfel's tangent axis scales, thereby reducing wasted texture memory and improving cache coherence during rendering.
+
+### [Texel Allocation via Rate-Distortion](2672-texel-allocation-via-rate-distortion.md)
+This method optimizes the memory footprint of a neural texture atlas by reducing the spatial extent of surfels to exclude zero-support regions and allocating texel counts per surfel based on visual importance rather than strict Nyquist limits. It addresses the inefficiency of uniform atlas sizing where many texels lie outside the compact kernel support or contribute negligibly to the rendered image. By probing the distortion introduced by downsampling each surfel's tile and weighting it by visibility, the method achieves significant compression with minimal quality loss, outperforming full-extent atlases in both PSNR and file size.
+
+## Operating characteristics
+*   **Time Complexity:** Mip chain generation is $O(N)$ where $N$ is the number of texels, as each level is a constant-factor downsampling of the previous one. Level selection is $O(1)$ per surfel after precomputation.
+*   **Memory Complexity:** Adds 33% to the atlas size for 4 extra levels [S1, unofficial].
+*   **Measured Performance:** On the "garden" scene, mipmapping adds 0.32 dB PSNR degradation and 0.045 LPIPS increase compared to the sharper level (27.20 PSNR / 0.8417 SSIM / 0.1270 LPIPS) versus no mips (27.06 PSNR / 0.8405 SSIM / 0.1247 LPIPS). Frame rate is unchanged on an RTX 5090 [S1, unofficial].
+*   **Strengths:** Reduces undersampling artifacts for distant surfels without changing the rendering pipeline.
+*   **Limitations:** Increases memory usage. Filtering in the quantized domain may not be optimal for all compression schemes.
+*   **When to Use:** When distant surfels cause aliasing or blurring due to undersampling.
+*   **When Not to Use:** When memory is constrained and distant surfels are not a significant issue, or when the compression scheme does not support efficient quantized-domain filtering.
+
+## Background
+Originated in "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" (Johnson et al., 2026) [S1, unofficial]. It builds on rasterization optimizations from Speedy-Splat and FastGS [S1, unofficial].
+
+## Sources
+[S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)

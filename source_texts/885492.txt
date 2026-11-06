@@ -1,0 +1,221 @@
+C# library for 2D/3D geometric computation, mesh algorithms, and so on. Boost license. - MeshDeviation: certified deviation interval per triangle by HarmenGrosseDeters · Pull Request #114 · HarmenGrosseDeters/geometry3Sharp
+
+MeshDeviation: certified deviation interval per triangle by HarmenGrosseDeters · Pull Request #114 · HarmenGrosseDeters/geometry3Sharp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+HarmenGrosseDeters
+commented
+Oct 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What
+MeshDeviation's map only sampled the vertices. Between them, the only certified number was the global Hausdorff bound. ComputeTriangleBounds adds an interval per triangle of Mesh:
+TriangleDeviationLower / TriangleDeviationUpper: the interval contains the largest (unsigned) distance from points of the triangle to the reference.
+No point of the triangle is farther than the upper bound.
+The lower bound is attained at TriangleWorstPoint and is at least the largest corner value.
+TriangleBoundsUnconverged: triangles that ran out of their MaxTriangleSubdivisions budget (default 1000). They keep a wider, still valid interval.
+Cap by the Hausdorff bound: with ComputeCertifiedBound, the upper bounds are capped by HausdorffUpperBound. A triangle that the cap brings within the tolerance counts as converged.
+TriangleUpperStatistics: statistics of the upper bounds, weighted by area. FractionWithin(tol) is a certified lower bound of the area fraction within tol.
+TriangleDeviationBounds.MaxDistance runs the branch and bound of MeshHausdorffDistance (Sacht & Jacobson 2024, cascading upper bounds) on a single triangle:
+Determinism: each triangle is refined sequentially and writes only its own slots. The parallel loop is deterministic.
+Far from the origin (Analysis: meshes far from the origin, LO-RANSAC measured, benchmark results #102): it runs on the local copies (with the reference's offset), and the default tolerance is 1e-4 of the bounding box diagonal, not of the coordinates.
+Reuse: the corner distances and closest triangles come from the vertex pass.
+The max-heap of MeshHausdorffDistance is now shared (DeviationMaxHeap<T>). No existing public member changed.
+One side effect of computing the Hausdorff interval before the triangle bounds: when Compute() returns false because the Hausdorff step fails (cancelled, or a non-finite vertex), the triangle outputs stay null. The return value is the same as before.
+Tests (MeshDeviationTests, 7 new)
+Hole: a reference plane with a square hole and one triangle over it.
+Every vertex has deviation 0, and the triangle interval contains the exact 1.
+With 0 subdivisions the interval is wider but valid and reported as unconverged, and it is capped by the Hausdorff bound.
+Cap converges: a corner at the hole center, with 0 subdivisions. The cap brings the interval within the tolerance, so the triangle counts as converged.
+Shifted spheres: a coarse sphere against a finer, larger, shifted one.
+A 12×12 barycentric sampling stays below every upper bound.
+Each interval is at most the tolerance wide.
+The intervals overlap the certified Hausdorff interval.
+Determinism and invariance: a run on a new tree gives bitwise the same result. Meters (×0.001) and geo coordinates (offset 5e6) give the same results, worst point included.
+Gaps and a given tree: gaps in the mesh's IDs, and a tree given by the caller on far coordinates. The width stays ≤ 1e-4 of the diagonal there.
+MaxDistance inputs: a wrong tree, non-finite corners, and a triangle that lies on the reference.
+Mutations (filter MeshDeviationTests; each caught by at least one test):
+no subdivision loop;
+upper = lower;
+pruning too early;
+worst point not tracked;
+worst point without the offset;
+no local copy far from the origin;
+tolerance from the coordinates (survived at first; caught after 2afac5f);
+unconverged triangles not counted;
+no cap by the Hausdorff bound;
+the cap does not update the convergence (caught after f3b8011).
+One mutation is not tested: Math.Max(lo, HausdorffUpperBound) → HausdorffUpperBound. The Math.Max only guards against rounding, since the Hausdorff bound is never below a distance that is actually attained.
+Benchmark (AnalysisBench.cs, BENCH_ANALYSIS=deviation, 100 of the 400 meshes: awk 'NR%4==1', medians)
+Two cases per mesh, each timed for the vertex values alone and with the triangle bounds (tolerance 1e-4 × diagonal):
+red: the copy reduced to half against the input. Its triangles are big compared with the input's details.
+pert: the input against a copy whose vertices are moved along their normals by up to 2e-3 × diagonal, in a fixed pattern per vertex. This case is the same in every transform.
+none
+meters
+geo
+red: vertex values / with triangle bounds
+32 ms / 1075 ms (×40)
+– / 835 ms (×32)
+– / 782 ms (×30)
+red: global Hausdorff interval alone (ComputeCertifiedBound)
+771 ms (p90 7.3 s)
+509 ms
+536 ms
+red: slowest mesh with triangle bounds
+26.1 s
+12.8 s
+12.7 s
+red: unconverged triangles (share of all)
+3621 in 51 meshes (0.48 %, worst mesh 5.8 %)
+0.43 %
+0.48 %
+pert: vertex values / with triangle bounds
+30 ms / 320 ms (×11)
+– / 243 ms (×9)
+– / 190 ms (×9)
+Bounds against the vertex values (none):
+red:
+The largest upper bound is 2.0× the largest vertex value.
+On 9.6 % of the area the interior is certainly (lower bound) farther than its corners plus the tolerance.
+The area certified within 1e-3 × diagonal is 99.86 %.
+pert:
+The largest upper bound is 1.025× the largest vertex value.
+On 43.6 % of the area the interior is certainly farther than its corners.
+The area certified within 1e-3 × diagonal is 20 %.
+Invariants: in all three transforms there are 0 NaN, 0 lower bounds below a corner value and 0 inverted intervals. The red intervals never lie apart from the Hausdorff interval.
+Invariance:
+pert: the largest lower and upper bounds differ by ≤ 1e-4 × diagonal between none, meters and geo, that is, within the tolerance.
+red: it differs by up to 0.07. That is the Reducer: its collapse order depends on rounding, so the reference differs per transform (the reason analyze_analysis.py leaves out dev_reduced_*).
+Found with it: on 16–20 of the 100 meshes, the largest upper bound in red was above the certified Hausdorff bound, from unconverged triangles. Hence the cap (34ee488).
+The numbers above are from the run before the cap.
+The benchmark computes the triangle bounds and the Hausdorff interval in separate instances, so it does not measure the cap. The cap is covered by the unit tests.
+With both outputs, the run time is the sum of the two.
+Limits:
+An interval of width 1e-4 × diagonal on every triangle costs about as much as the global Hausdorff interval, or more: the global bound may drop every triangle below its lower bound, the map may not.
+Triangles over plateaus of the distance (many reference triangles at nearly the same distance) can run out of the budget. They then keep a valid but wider interval. That is about 0.5 % of the triangles in red.
+Checks
+CI steps: all run locally (by the PR management session; this container has no .NET SDK) on e7a6227 merged onto master: 1221 tests (net10), 40 g3cli tests, the net48 build, all benchmark builds, pack and smoke test. MeshDeviationTests (16/16) and the mutations were rerun on 34ee488 and f3b8011.
+Review: independent reviews by agents that saw the code but not the reasoning, of the whole diff and of 34ee488, found no serious issue.
+The low findings of the first review are fixed in e7a6227 and 2afac5f:
+convergence uses the same test as the loop;
+NaN triangles are not counted as unconverged;
+the statistics with infinite bounds are documented;
+a test with gaps in the IDs and a given tree.
+The second review's mutation gap is fixed in f3b8011.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01Q8a84fEqMBx5JhamgPsMyk
+claude
+added 5 commits
+October 26, 2026 13:23
+MeshDeviation: certified deviation interval per triangle
+…
+bf73f28
+```
+ComputeTriangleBounds adds, per triangle of Mesh, an interval
+[TriangleDeviationLower, TriangleDeviationUpper] of the largest distance of
+its points to the reference: no point of the triangle is farther than the
+upper bound, the lower bound is attained (TriangleWorstPoint). So the
+deviation map is reliable between the vertices, not only at them.
+
+TriangleDeviationBounds.MaxDistance runs the branch and bound of
+MeshHausdorffDistance on a single triangle (cascading upper bounds of Sacht
+and Jacobson 2024), sequentially per triangle and so deterministic in the
+parallel loop. It reuses the vertex distances and closest triangles, runs on
+the local copies far from the origin, and its default tolerance is 1e-4 of
+the bounding box diagonal, not of the coordinates. Triangles that need more
+than MaxTriangleSubdivisions keep a wider, still valid interval
+(TriangleBoundsUnconverged). TriangleUpperStatistics gives certified area
+fractions within a tolerance.
+
+The max-heap of MeshHausdorffDistance is now shared (DeviationMaxHeap).
+AnalysisBench records the per triangle bounds against the vertex values for
+a reduced copy and a perturbed copy.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q8a84fEqMBx5JhamgPsMyk
+```
+Triangle bounds: review fixes
+…
+e7a6227
+```
+Convergence uses the loop's own test, so a stop by it always counts as
+converged. Non-finite triangles are not counted as unconverged. Document
+the statistics with unresolved bounds and the benchmark timing. Test a mesh
+with gaps in its IDs, far from the origin, with a tree given by the caller.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q8a84fEqMBx5JhamgPsMyk
+```
+Test: default tolerance relative to the mesh size with a tree on far …
+…
+2afac5f
+```
+…coordinates
+
+Kills the mutation that takes the tolerance from the coordinates
+(1e-4 * box.Max.Length): with a caller's tree on far coordinates there is no
+local copy, and the intervals would become far wider than 1e-4 of the
+diagonal.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q8a84fEqMBx5JhamgPsMyk
+```
+Triangle bounds: cap by the certified Hausdorff bound when both are c…
+…
+34ee488
+```
+…omputed
+
+In the analysis benchmark the largest per triangle upper bound was above the
+certified Hausdorff bound on 16-20 of 100 meshes, from triangles that ran out
+of subdivisions. No point is farther than that bound, so it caps them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q8a84fEqMBx5JhamgPsMyk
+```
+Test: the Hausdorff cap can make a triangle converge
+…
+f3b8011
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Q8a84fEqMBx5JhamgPsMyk
+```
+HarmenGrosseDeters
+marked this pull request as ready for review
+October 26, 2026 14:13
+Hide details
+View details
+HarmenGrosseDeters
+merged commit c581621
+into
+master
+Oct 26, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+HarmenGrosseDeters
+deleted the
+claude/triangle-deviation-bounds
+branch
+October 31, 2026 09:33
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

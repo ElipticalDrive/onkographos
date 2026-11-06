@@ -3,47 +3,153 @@
 Also called: EfficientRayCast, Raycasting Rendering Pipeline
 
 ## Overview
-This article covers two distinct implementations sharing the name "Efficient Ray Casting Pipeline," which differ fundamentally in domain and technique. The first is a software-based 2D raycaster for unstructured grid visualization that minimizes per-pixel cost by rendering to a low-resolution internal framebuffer and upscaling [S1, unofficial]. The second is a hardware-accelerated Direct Volume Ray Casting (DVR) pipeline for DirectX 11 that uses geometry shaders for active brick detection and ray generation [S2, unofficial]. Both aim to optimize rendering performance by reducing redundant calculations, though they achieve this through resolution scaling versus hardware-specific shader stages respectively.
+This article covers two distinct implementations sharing the alias "Efficient Ray Casting Pipeline": a high-performance, low-level Wolfenstein 3D-style raycaster optimized for direct canvas buffer manipulation [S1, unofficial], and a multi-pass DirectX 11 volume rendering pipeline utilizing geometry shaders for active brick detection [S2, unofficial]. The former solves the problem of real-time 2D/2.5D raycasting with minimal overhead by bypassing standard graphics APIs for direct memory access, while the latter addresses 3D volumetric data visualization by leveraging GPU geometry shaders to cull empty space and generate rays only for visible voxels.
 
 ## How it works
 
-### Implementation 1: Minimal Software Raycaster (2D Grid)
-This method casts one ray per screen column to render a 2D map, writing directly to the canvas buffer.
+### 1. Minimal Wolfenstein 3D Raycaster [S1, unofficial]
 
-**Inputs and Outputs:**
-*   **Input:** 2D map grid (cells), camera position, camera direction, viewport dimensions.
-*   **Output:** Uint32Array view over the canvas’s raw pixel buffer.
+**Inputs and Outputs**
+*   **Input:** A 2D grid map representing walls/cells; screen resolution parameters; camera position and orientation.
+*   **Output:** A Uint32Array view over the HTML5 Canvas's raw pixel buffer.
 
-**Data Structures:**
-*   **Map:** 2D array of cell types (e.g., empty, wall).
-*   **Framebuffer:** Internal buffer of size 480x300 pixels [S1, unofficial].
+**Data Structures**
+*   **Map:** 2D integer array representing cell occupancy.
+*   **Framebuffer:** Internal 480x300 resolution buffer (144,000 pixels).
+*   **Canvas Buffer:** Raw pixel data accessible via `Uint32Array`.
 
-**Steps:**
-1.  Initialize the internal framebuffer at 480x300 resolution [S1, unofficial].
-2.  For each screen column $x$ from $0$ to viewport width:
-    a.  Calculate the ray direction based on camera orientation and column index [S1, unofficial].
-    b.  Perform ray traversal (e.g., DDA algorithm) to find intersections with grid cells [S1, unofficial].
-    c.  For each intersected pixel along the ray, perform a texture fetch and fog multiply. This operation consists of three integer multiplies and shifts [S1, unofficial].
-    d.  Write the resulting color exactly once into the internal framebuffer [S1, unofficial].
-3.  After all columns are processed, upscale the 480x300 framebuffer to fill the viewport using an integer scale factor and pixelated filtering (`image-rendering: pixelated`) [S1, unofficial].
+**Steps**
+1.  **Initialize:** Set up the canvas context and obtain a reference to the raw pixel buffer (`Uint32Array`).
+2.  **Ray Generation:** For each screen column $x$ from $0$ to $width-1$:
+    *   Calculate the ray direction based on the camera's field of view and the column index.
+    *   Perform raycasting against the map grid to find the first wall hit.
+3.  **Rendering Loop (Hot Column Loop):**
+    *   For each pixel in the column (from top to bottom):
+        *   Perform a texture fetch (or distance calculation) to determine color/intensity.
+        *   Apply fog multiply: `color = color * fog_factor`.
+        *   Execute three integer multiplies and shifts for optimization [S1, unofficial].
+        *   Write the resulting pixel value directly to the `Uint32Array` at the correct offset.
+4.  **Upscaling:**
+    *   Render the internal framebuffer at 480x300.
+    *   Upscale to fill the viewport using an integer scale factor.
+    *   Apply CSS style `image-rendering: pixelated` to prevent interpolation artifacts [S1, unofficial].
 
-**Parameters:**
+**Parameters**
 *   **Internal Resolution:** 480x300 [S1, unofficial].
-*   **Upscaling:** Integer scale factor [S1, unofficial].
+*   **Scale Factor:** Integer value determining the upscaled viewport size [S1, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The use of integer multiplies and shifts for fog calculation requires careful handling of overflow if values are large [S1, unofficial].
-*   **Boundaries:** The ray traversal must handle grid boundaries correctly to avoid out-of-bounds access [S1, unofficial].
-*   **Degenerate Input:** The algorithm assumes a valid 2D grid structure; empty or malformed grids may cause undefined behavior [S1, unofficial].
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-### Implementation 2: DirectX 11 Volume Ray Casting
-This method uses a multi-pass D3D11 pipeline for volume raycasting.
+```python
+def render_wolfenstein_3d(canvas, map_grid, camera, width, height):
+    # Get raw pixel buffer
+    ctx = canvas.getContext('2d')
+    img_data = ctx.createImageData(width, height)
+    pixels = Uint32Array(img_data.data.buffer)
+    
+    # Internal resolution for calculation
+    int_width = 480
+    int_height = 300
+    
+    # Calculate scale factor
+    scale_x = width / int_width
+    scale_y = height / int_height
+    
+    # Ensure integer scaling for pixelated look
+    scale_x = int(scale_x)
+    scale_y = int(scale_y)
+    
+    for col in range(int_width):
+        # Calculate ray direction
+        ray_dir_x = camera.dir_x + camera.plane_x * (2 * col / int_width - 1)
+        ray_dir_y = camera.dir_y + camera.plane_y * (2 * col / int_width - 1)
+        
+        # Map position
+        map_x = int(camera.pos_x)
+        map_y = int(camera.pos_y)
+        
+        # Delta distance
+        delta_dist_x = abs(1 / ray_dir_x)
+        delta_dist_y = abs(1 / ray_dir_y)
+        
+        # Step direction and initial side distance
+        if ray_dir_x < 0:
+            step_x = -1
+            side_dist_x = (camera.pos_x - map_x) * delta_dist_x
+        else:
+            step_x = 1
+            side_dist_x = (map_x + 1.0 - camera.pos_x) * delta_dist_x
+            
+        if ray_dir_y < 0:
+            step_y = -1
+            side_dist_y = (camera.pos_y - map_y) * delta_dist_y
+        else:
+            step_y = 1
+            side_dist_y = (map_y + 1.0 - camera.pos_y) * delta_dist_y
+            
+        # Perform DDA (Amanatides & Woo)
+        hit = False
+        side = 0
+        while not hit:
+            if side_dist_x < side_dist_y:
+                side_dist_x += delta_dist_x
+                map_x += step_x
+                side = 0
+            else:
+                side_dist_y += delta_dist_y
+                map_y += step_y
+                side = 1
+            
+            if map_grid[map_x][map_y] > 0:
+                hit = True
+        
+        # Calculate perpendicular distance
+        if side == 0:
+            perp_wall_dist = (side_dist_x - delta_dist_x)
+        else:
+            perp_wall_dist = (side_dist_y - delta_dist_y)
+            
+        # Calculate line height and start/end points
+        line_height = int(int_height / perp_wall_dist)
+        draw_start = -line_height / 2 + int_height / 2
+        draw_end = line_height / 2 + int_height / 2
+        
+        # Write pixels to internal buffer (simplified for direct mapping)
+        # In the actual implementation, this maps to the Uint32Array view
+        for screen_y in range(int_height):
+            if draw_start <= screen_y < draw_end:
+                # Texture fetch and fog multiply
+                # Optimized with 3 integer multiplies and shifts [S1, unofficial]
+                tex_x = int((2 * screen_y - int_height + line_height) * tex_width / line_height)
+                tex_x = max(0, min(tex_x, tex_width - 1))
+                
+                # Fog calculation
+                fog_factor = 1.0 / (1.0 + perp_wall_dist * fog_density)
+                
+                # Get color from texture
+                color = texture_map[tex_y][tex_x]
+                final_color = color * fog_factor
+                
+                # Write to Uint32Array
+                # Offset calculation for direct buffer access
+                offset = screen_y * int_width + col
+                pixels[offset] = final_color
 
-**Inputs and Outputs:**
-*   **Input:** Volume data (voxels), view/projection matrices, camera position, density range constants.
-*   **Output:** Final output texture (`m_pOutputTex`) [S2, unofficial].
+    # Upscale and display
+    # Apply integer scale and image-rendering: pixelated via CSS
+    canvas.width = width
+    canvas.height = height
+    ctx.putImageData(img_data, 0, 0)
+```
 
-**Data Structures:**
+### 2. DirectX 11 Volume Raycasting Pipeline [S2, unofficial]
+
+**Inputs and Outputs**
+*   **Input:** 3D volume data (voxels), camera matrices, brick volume texture.
+*   **Output:** Final output texture (`m_pOutputTex`).
+
+**Data Structures**
 *   **Constant Buffer (`CB_EfficientRayCast_Frame`):**
     *   `mInvView`: XMMATRIX (Inverse View Matrix)
     *   `mView`: XMMATRIX (View Matrix)
@@ -55,62 +161,100 @@ This method uses a multi-pass D3D11 pipeline for volume raycasting.
     *   `NIU`: float (Not Given in the sources)
     *   `NIU1`: float (Not Given in the sources)
 *   **Textures:**
-    *   `m_pFarNearTex`: Texture for storing near/far ray positions [S2, unofficial].
-    *   `m_pOutputTex`: Final output texture [S2, unofficial].
-    *   `m_pBrickVolTex`: Brick volume texture [S2, unofficial].
-    *   `m_pVolTex`: Volume texture [S2, unofficial].
+    *   `m_pBrickVolTex`: Brick volume texture for active cell detection.
+    *   `m_pFarNearTex`: Texture for storing near/far ray positions.
+    *   `m_pOutputTex`: Final output texture.
 *   **Shaders:**
-    *   `m_pActiveCellAndSOGS`: Geometry shader for active brick check and cube mesh generation [S2, unofficial].
-    *   `m_pRaymarchGS`: Geometry shader for ray casting [S2, unofficial].
-    *   Compute shaders for volume reset and update (`m_pResetVolumeCS`, `m_pVolumeUpdateCS`, etc.) [S2, unofficial].
+    *   `m_pActiveCellAndSOGS`: Geometry shader for active brick check and cube mesh generation.
+    *   `m_pRaymarchGS`: Geometry shader for ray casting.
 
-**Steps:**
-1.  **Volume Update (Optional):** If animated, reset the data volume and flag volume using compute shaders, then update the volume data based on time and ball positions [S2, unofficial].
-2.  **Active Brick Detection:** Use `m_pActiveCellAndSOGS` geometry shader to detect active bricks and generate cube meshes [S2, unofficial].
-3.  **Ray Generation and Marching:** Use `m_pRaymarchGS` geometry shader to cast rays through the volume, storing near/far positions in `m_pFarNearTex` [S2, unofficial].
-4.  **Output:** Render the final result to `m_pOutputTex` [S2, unofficial].
+**Steps**
+1.  **Update Constant Buffers:** Update `m_pCB_VolumeInfo` with current camera and window parameters [S2, unofficial].
+2.  **Active Brick Detection:**
+    *   Use `m_pActiveCellAndSOGS` geometry shader to identify active bricks (non-empty voxels).
+    *   Generate cube meshes only for active bricks to reduce ray casting workload.
+3.  **Ray Generation and Marching:**
+    *   Use `m_pRaymarchGS` geometry shader to cast rays through the generated cubes.
+    *   Store near/far ray positions in `m_pFarNearTex`.
+4.  **Rendering:**
+    *   Perform volume integration along the rays.
+    *   Write results to `m_pOutputTex`.
 
-**Parameters:**
+**Parameters**
 *   **Density Range:** `MIN_DENSITY`, `MAX_DENSITY` initialized in constructor [S2, unofficial].
-*   **Thread Block Sizes:** `THREAD_X`, `THREAD_Y` used in compute shader dispatch [S2, unofficial].
-*   **Brick Ratio:** `VOXEL_BRICK_RATIO` used for flag volume updates [S2, unofficial].
+*   **Voxel Dimensions:** `VOXEL_NUM_X`, `VOXEL_NUM_Y`, `VOXEL_NUM_Z` [S2, unofficial].
+*   **Thread Block Size:** `THREAD_X`, `THREAD_Y` [S2, unofficial].
+*   **Brick Ratio:** `VOXEL_BRICK_RATIO` [S2, unofficial].
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** Floating-point precision in matrix operations and ray marching may affect accuracy [S2, unofficial].
-*   **Boundaries:** Ray traversal must handle volume boundaries correctly [S2, unofficial].
-*   **Degenerate Input:** Empty volumes or invalid matrices may cause rendering artifacts [S2, unofficial].
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_volume_d3d11(device_context, volume_data, camera_info):
+    # Update constant buffer with camera and window info
+    cb_volume_info = {
+        'mInvView': camera_info.inv_view_matrix,
+        'mView': camera_info.view_matrix,
+        'mViewProj': camera_info.view_proj_matrix,
+        'f4ViewPos': camera_info.position,
+        'f2HalfWinSize': camera_info.half_window_size,
+        'f2WinReso': camera_info.window_resolution,
+        'f2MinMaxDensity': [MIN_DENSITY, MAX_DENSITY],
+        'NIU': 0.0, # Placeholder, not defined in sources
+        'NIU1': 0.0 # Placeholder, not defined in sources
+    }
+    device_context.UpdateSubresource(m_pCB_VolumeInfo, 0, None, cb_volume_info, 0, 0)
+    
+    # Dispatch compute shader to reset volume flags if needed
+    if update_flag_volume:
+        dispatch_count_x = ceil(VOXEL_NUM_X / VOXEL_BRICK_RATIO / THREAD_X)
+        dispatch_count_y = ceil(VOXEL_NUM_Y / VOXEL_BRICK_RATIO / THREAD_Y)
+        dispatch_count_z = ceil(VOXEL_NUM_Z / VOXEL_BRICK_RATIO / THREAD_Z)
+        device_context.Dispatch(dispatch_count_x, dispatch_count_y, dispatch_count_z)
+        
+    # Set up unordered access views for volume data
+    uavs = [m_pVolUAV, m_pBrickVolUAV]
+    device_context.CSSetUnorderedAccessViews(0, 2, uavs, [0, 0])
+    
+    # Dispatch compute shader to update volume data
+    device_context.Dispatch(VOXEL_NUM_X / THREAD_X, VOXEL_NUM_Y / THREAD_Y, VOXEL_NUM_Z / THREAD_Z)
+    
+    # Render pass
+    # 1. Active brick detection using geometry shader
+    device_context.GSSetShader(m_pActiveCellAndSOGS, None, 0)
+    # Generate cube meshes for active bricks
+    
+    # 2. Ray marching using geometry shader
+    device_context.GSSetShader(m_pRaymarchGS, None, 0)
+    # Cast rays and store near/far positions in m_pFarNearTex
+    
+    # 3. Final output
+    # Write to m_pOutputTex
+```
 
 ## Operating characteristics
 
-### Implementation 1: Minimal Software Raycaster
-*   **Time Complexity:** $O(\text{columns} \times \text{height} + \text{sprites})$ [S1, unofficial]. Rendering time depends on screen resolution and visible sprites, not map size [S1, unofficial].
-*   **Memory Complexity:** Low, due to small internal framebuffer (480x300) [S1, unofficial].
-*   **Performance:** Very fast for 2D grids due to simple integer operations and low resolution [S1, unofficial].
-*   **Strengths:** Predictable performance, simple implementation, low memory usage [S1, unofficial].
-*   **Limitations:** Limited to 2D grids, lower visual fidelity due to upscaling [S1, unofficial].
-*   **When to Use:** Real-time 2D grid visualization where performance is critical [S1, unofficial].
-*   **When Not to Use:** 3D volume rendering or high-fidelity graphics [S1, unofficial].
+### Minimal Wolfenstein 3D Raycaster [S1, unofficial]
+*   **Time Complexity:** $O(columns \times height + sprites)$. Rendering time depends on screen resolution and visible sprites, not map size [S1, unofficial].
+*   **Memory Complexity:** Low. Uses a small internal framebuffer (480x300) and direct pixel buffer access [S1, unofficial].
+*   **Strengths:** Extremely fast due to minimal per-pixel operations (texture fetch + fog multiply with 3 integer multiplies/shifts). Direct buffer access avoids API overhead [S1, unofficial].
+*   **Limitations:** Limited to 2D/2.5D raycasting. Not suitable for complex 3D volumetric data.
 
-### Implementation 2: DirectX 11 Volume Ray Casting
-*   **Time Complexity:** Depends on volume size and ray marching steps [S2, unofficial].
-*   **Memory Complexity:** High, due to multiple textures and buffers [S2, unofficial].
-*   **Performance:** Hardware-accelerated, suitable for complex 3D volumes [S2, unofficial].
-*   **Strengths:** High performance for 3D volumes, flexible shader stages [S2, unofficial].
-*   **Limitations:** Requires DirectX 11 hardware, complex implementation [S2, unofficial].
-*   **When to Use:** 3D volume rendering with DirectX 11 [S2, unofficial].
-*   **When Not to Use:** 2D grids or non-DX11 platforms [S2, unofficial].
+### DirectX 11 Volume Raycasting Pipeline [S2, unofficial]
+*   **Time Complexity:** Depends on the number of active bricks and ray marching steps. Geometry shader culling reduces unnecessary ray casting [S2, unofficial].
+*   **Memory Complexity:** Requires storage for volume data, brick volume texture, and intermediate textures (near/far positions, output) [S2, unofficial].
+*   **Strengths:** Efficient culling of empty space using geometry shaders. Suitable for dynamic volume data [S2, unofficial].
+*   **Limitations:** Requires DirectX 11 hardware. Complex shader implementation [S2, unofficial].
 
 ## Background
 
-### Implementation 1: Minimal Software Raycaster
-*   **Origin:** Based on Wolfenstein 3D raycasting techniques [S1, unofficial].
-*   **History:** Popularized in the 1990s for fast 2D rendering [S1, unofficial].
-*   **Usage:** Used in retro-style games and educational graphics tutorials [S1, unofficial].
+### Minimal Wolfenstein 3D Raycaster [S1, unofficial]
+*   **Origin:** Based on the Wolfenstein 3D engine, popularized by Lode Vandevenne's tutorial [S1, unofficial].
+*   **History:** Raycasting was a pioneering technique for real-time 3D rendering in the early 1990s [S1, unofficial].
 
-### Implementation 2: DirectX 11 Volume Ray Casting
-*   **Origin:** Developed for DirectX 11 volume rendering [S2, unofficial].
-*   **History:** Part of the evolution of hardware-accelerated volume rendering [S2, unofficial].
-*   **Usage:** Used in scientific visualization and medical imaging [S2, unofficial].
+### DirectX 11 Volume Raycasting Pipeline [S2, unofficial]
+*   **Origin:** Part of the DynamicVolumeRayCasting project by pengliu916 [S2, unofficial].
+*   **History:** Builds on earlier volume rendering techniques, leveraging modern GPU features like geometry shaders for efficient culling [S2, unofficial].
 
 ## Sources
 

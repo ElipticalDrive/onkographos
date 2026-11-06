@@ -1,0 +1,273 @@
+--- v002.md
++++ v003.md
+@@ -4,177 +4,123 @@
+ 
+ ## Overview
+-Semi-transparent Empty-Space Skipping is a rendering approach for transparent or semi-transparent objects with constant density material where the ray continues inside toward the exit point, and the optical contribution of the inner ray segment is evaluated analytically from its length [S1]. It solves the problem of expensive ray marching inside semi-transparent objects by allowing the ray to skip empty regions outside the volume and then analytically compute the contribution of the segment inside the volume based on its length, rather than sampling it discretely [S1]. It sets itself apart from opaque empty-space skipping by using lower bounds for sphere tracing inside objects and from full volumetric rendering by avoiding numerical integration for constant-density materials [S1].
++Semi-transparent Empty-Space Skipping is a ray-tracing optimization for rendering transparent or semi-transparent volumes with constant density. It solves the problem of expensive ray traversal inside large, empty, or low-density regions by combining hierarchical empty-space skipping with analytic integration of the optical depth. Unlike opaque empty-space skipping which culls entire segments, this method identifies the entry and exit points of semi-transparent objects to compute the final color analytically from the segment length, while still using acceleration structures to skip empty space outside the object [S1].
+ 
+ ## How it works
+-The method adapts the BVH-based sphere tracing approach used for opaque volumes to handle transparency [S1]. The core distinction lies in how the ray interacts with the volume boundaries and how the optical depth is computed [S1].
++The method adapts the hierarchical traversal techniques described in [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md) to handle transparency. The implementation depends on whether the volume density $\rho$ is constant or varying.
+ 
+ ### Inputs and Outputs
+-- **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), volume density function $\rho(\mathbf{p})$, transfer function (opacity $\alpha$ per unit length), and a BVH representing the volume's spatial extent [S1].
+-- **Output**: Final color $C$ and accumulated opacity $\alpha_{acc}$ for the pixel [S1].
++*   **Input**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$ (normalized), volume density function $\rho(\mathbf{p})$, acceleration structure (BVH) representing the volume bounds, and transfer function parameters (opacity $\alpha$, emission $E$).
++*   **Output**: Pixel color $C$ and transmittance $T$.
+ 
+ ### Data Structures
+-The method relies on a Bounding Volume Hierarchy (BVH) [S1]. For sphere tracing, each node in the BVH must store bounds that allow for lower-bound distance queries [S1].
+-- **BVH Node**: Contains bounding volume (e.g., AABB or Sphere) and children indices [G].
+-- **Bounds**: For semi-transparent skipping, the bounds must support querying the *minimum* distance from the ray origin to the volume interior, rather than the maximum distance to the surface [S1].
++The acceleration structure is a Bounding Volume Hierarchy (BVH) where each node stores axis-aligned bounding boxes (AABBs). For semi-transparent empty-space skipping, the BVH nodes must store **lower bounds** on the distance to the ray, rather than just upper bounds used for opaque culling. This allows the ray to "sphere trace" through the interior of the volume to find the exit point [S1].
+ 
+-### Steps
+-1. **Ray Initialization**: Initialize accumulated opacity $\alpha_{acc} = 0$ and color $C = (0,0,0,0)$ [G]. Normalize $\mathbf{d}$ if not already normalized [G].
+-2. **Empty-Space Skipping (Outside)**: While the ray is outside the volume:
+-   - Perform sphere tracing using the BVH [S1].
+-   - Use **lower bounds** to determine the distance to the nearest point inside the volume [S1].
+-   - This allows the ray to quickly advance to the entry point [S1].
+-   - If the ray misses the volume entirely, terminate and return background color [G].
+-3. **Entry Point Detection**: Identify the entry point $\mathbf{p}_{in}$ where the ray intersects the volume boundary [S1].
+-4. **Inside Volume Processing**:
+-   - **Case A: Constant Density ($\rho(\mathbf{p}) = \rho_0$)**:
+-     - Determine the exit point $\mathbf{p}_{out}$ by continuing sphere tracing inside the volume using lower bounds to find the farthest exit or by solving the intersection analytically if the shape is simple [S1].
+-     - Calculate the segment length $L = \|\mathbf{p}_{out} - \mathbf{p}_{in}\|$ [S1].
+-     - Compute the optical depth $\tau = \rho_0 \cdot L$ [S1].
+-     - Compute the transmittance $T = e^{-\tau}$ [S1].
+-     - Update accumulated opacity: $\alpha_{acc} = 1 - T$ [S1].
+-     - Compute color contribution: $C = C_{in} \cdot (1 - T)$, where $C_{in}$ is the color of the volume material [S1].
+-     - Terminate ray [S1].
+-   - **Case B: Varying Density ($\rho(\mathbf{p})$ varies)**:
+-     - Switch to constant-size ray-marching to numerically integrate density when inside of volumes, as full volumetric rendering is required [S1].
+-     - Numerically integrate density along the segment: $\tau = \int_{\mathbf{p}_{in}}^{\mathbf{p}_{out}} \rho(\mathbf{p}(t)) dt$ [S1].
+-     - This part is not optimized by the skipping technique and requires full volumetric rendering [S1].
+-5. **Termination**: If $\alpha_{acc} \ge 1$ or ray length exceeds max distance, terminate [G].
++### Algorithm Steps
+ 
+-### Formulas
+-- **Optical Depth (Constant Density)**:
+-  $$ \tau = \rho_0 \cdot L $$
+-  Where $\rho_0$ is the constant density and $L$ is the length of the ray segment inside the volume [S1].
+-- **Transmittance**:
+-  $$ T = e^{-\tau} $$
+-- **Accumulated Opacity**:
+-  $$ \alpha_{acc} = 1 - T $$
++#### Case 1: Constant Density
++For constant density materials, the optical contribution of a ray segment inside the volume can be computed analytically.
+ 
+-### Parameters
+-- **Density Function**: $\rho(\mathbf{p})$. Can be constant $\rho_0$ or varying (e.g., FBM noise) [S1].
+-- **Sphere Tracing Step Size**: For varying density, a constant step size $h$ is used for numerical integration. Not given in the sources.
+-- **BVH Bounds**: Quadratic bounds are recommended for faster convergence away from the entry surface [S1].
++1.  **Find Entry Point**: Perform standard empty-space skipping to find the first intersection $t_{entry}$ with the volume boundary. If no intersection is found, return background color.
++2.  **Find Exit Point**: Inside the volume, perform sphere tracing using the BVH with **lower bounds**. The ray continues until it finds a node where the lower bound exceeds the remaining distance to the exit, or it exits the volume. Let the exit point be $t_{exit}$ [S1].
++3.  **Analytic Integration**: Compute the optical depth $\tau$ over the segment $[t_{entry}, t_{exit}]$:
++    $$
++    \tau = \rho \cdot (t_{exit} - t_{entry})
++    $$
++    The transmittance $T$ and color $C$ are computed as:
++    $$
++    T = e^{-\tau}
++    $$
++    $$
++    C = E \cdot (1 - T) + C_{background} \cdot T
++    $$
++    where $E$ is the emission coefficient and $C_{background}$ is the background color [S1].
+ 
+-### Edge Cases and Pitfalls
+-- **Varying Density Performance**: Performance gains from empty-space skipping for varying density depend heavily on the amount of empty space in the scene [S1].
+-- **Precision**: Quadratic bounds allow the ray to quickly move away from the entry surface, performing significantly better than naive approaches [S1].
+-- **Exit Point Calculation**: For complex shapes, determining the exact exit point $\mathbf{p}_{out}$ may require additional sphere tracing steps or analytical solutions [S1].
++#### Case 2: Varying Density
++For varying density materials, analytic integration is not possible. The method switches to numerical integration inside the volume.
++
++1.  **Find Entry Point**: Use empty-space skipping to find $t_{entry}$ [S1].
++2.  **Empty-Space Skipping Outside**: Use sphere tracing with the BVH to skip empty space outside the volume. This step is optimized using the same BVH techniques as the constant density case [S1].
++3.  **Numerical Integration Inside**: Once inside the volume, switch to constant-size ray marching. Sample the density $\rho(\mathbf{p})$ at regular intervals and numerically integrate the volume rendering integral:
++    $$
++    C = \int_{t_{entry}}^{t_{exit}} \rho(\mathbf{p}(t)) \cdot T(t) \, dt
++    $$
++    This part is **not** optimized by the empty-space skipping acceleration structure, as the density varies and requires sampling [S1].
+ 
+ ### Pseudocode
++
+ ```python
+-import math
++def render_semi_transparent_ray(ray_origin, ray_direction, bvh, density_func, is_constant_density, emission, background_color):
++    # Step 1: Find entry point using empty-space skipping
++    t_entry = find_entry_point(ray_origin, ray_direction, bvh)
++    
++    if t_entry is None:
++        return background_color
+ 
+-def render_semi_transparent_ray(ray_origin, ray_direction, volume_bvh, density_func, is_constant_density, constant_density_value, volume_color, step_size):
+-    # Normalize ray direction if not already normalized
+-    d_len = math.sqrt(sum(c*c for c in ray_direction))
+-    d = tuple(c / d_len for c in ray_direction)
+-    
+-    alpha_acc = 0.0
+-    color_acc = (0.0, 0.0, 0.0, 0.0)
+-    t = 0.0
+-    t_max = 1e6  # Standard large value for unbounded scenes [G]
+-    
+-    # Step 1: Skip empty space outside the volume using BVH sphere tracing with lower bounds [S1]
+-    # BVH traversal finds the minimum t where the ray enters the volume interior [S1]
+-    t_entry = 0.0
+-    if not ray_starts_inside_volume(ray_origin, volume_bvh):
+-        t_entry = sphere_trace_lower_bounds(ray_origin, d, volume_bvh, t_max)
+-        if t_entry is None:
+-            return background_color  # Ray misses volume entirely [G]
+-    
+-    p_entry = tuple(ray_origin[i] + t_entry * d[i] for i in range(3))
+-    
+-    # Step 2: Determine exit point [S1]
+-    t_exit = find_exit_point(p_entry, d, volume_bvh, t_entry, t_max, is_constant_density)
+-    if t_exit is None:
+-        return background_color
++    # Step 2: Find exit point or determine integration range
++    if is_constant_density:
++        # Use BVH with lower bounds to find exit point
++        t_exit = find_exit_point_lower_bounds(ray_origin, ray_direction, bvh, t_entry)
+         
+-    p_exit = tuple(ray_origin[i] + t_exit * d[i] for i in range(3))
+-    segment_length = math.sqrt(sum((p_exit[i] - p_entry[i])**2 for i in range(3)))
+-    
+-    # Step 3: Compute optical contribution [S1]
+-    if is_constant_density:
+-        # Analytic integration for constant density [S1]
+-        tau = constant_density_value * segment_length
+-        transmittance = math.exp(-tau)
+-        alpha_acc = 1.0 - transmittance
+-        color_acc = tuple(c * (1.0 - transmittance) for c in volume_color)
++        if t_exit is None:
++            # Ray stays inside volume indefinitely (or until max distance)
++            t_exit = MAX_DISTANCE
++            
++        # Analytic integration
++        distance = t_exit - t_entry
++        optical_depth = density_func(ray_origin) * distance
++        transmittance = exp(-optical_depth)
++        
++        color = emission * (1.0 - transmittance) + background_color * transmittance
++        return color
+     else:
+-        # Numerical integration for varying density [S1]
+-        tau = 0.0
+-        num_steps = int(segment_length / step_size)
+-        for i in range(num_steps):
+-            t_sample = t_entry + (i + 0.5) * step_size
+-            p_sample = tuple(ray_origin[i] + t_sample * d[i] for i in range(3))
+-            rho = density_func(p_sample)
+-            tau += rho * step_size
++        # Varying density: numerical integration
++        # Note: Empty-space skipping is only used to find t_entry and skip outside regions
++        # Inside the volume, we must sample
+         
+-        transmittance = math.exp(-tau)
+-        alpha_acc = 1.0 - transmittance
+-        # Integrate color contribution along the segment [G]
+-        color_acc = integrate_color(p_entry, p_exit, density_func, step_size) * (1.0 - transmittance)
++        color = 0.0
++        transmittance = 1.0
++        t = t_entry
++        step_size = 0.01 # Constant size ray marching
+         
+-    return color_acc
++        while t < MAX_DISTANCE and transmittance > EPSILON:
++            pos = ray_origin + ray_direction * t
++            density = density_func(pos)
++            
++            # Numerical integration step
++            alpha = 1.0 - exp(-density * step_size)
++            color += emission * alpha * transmittance
++            transmittance *= (1.0 - alpha)
++            
++            t += step_size
++            
++        color += background_color * transmittance
++        return color
+ 
+-def ray_starts_inside_volume(origin, bvh):
+-    # Returns True if origin is inside any bounding volume in the BVH [G]
+-    return False  # Placeholder for standard point-in-BVH test [G]
++def find_entry_point(ray_origin, ray_direction, bvh):
++    # Standard empty-space skipping using upper bounds
++    # Returns the smallest t > 0 where the ray intersects the volume
++    # Implementation details inherited from [Empty Space Skipping via Data Structures]
++    pass
+ 
+-def sphere_trace_lower_bounds(origin, direction, bvh, t_max):
+-    # Standard BVH traversal using minimum distance queries to volume interior [S1]
+-    # Returns the smallest t > 0 where ray intersects volume interior, or None [G]
+-    return None  # Comment: BVH lower-bound traversal logic not detailed in sources [S1]
+-
+-def find_exit_point(entry, direction, bvh, t_entry, t_max, is_constant):
+-    # For constant density, solve analytically or use lower-bound sphere trace to find farthest exit [S1]
+-    # For varying density, march to end of volume or use upper-bound BVH query [S1]
+-    return None  # Comment: Exit point logic depends on shape; analytical or BVH upper-bound trace [S1]
+-
+-def integrate_color(p_in, p_out, density_func, step_size):
+-    # Accumulates color contribution along the segment [G]
+-    return (0.0, 0.0, 0.0)  # Comment: Standard volumetric color integration [G]
+-
+-background_color = (0.0, 0.0, 0.0, 0.0)
++def find_exit_point_lower_bounds(ray_origin, ray_direction, bvh, t_start):
++    # Sphere tracing using lower bounds to find the exit
++    # The ray continues until it passes through the volume
++    # Quadratic bounds can be used to accelerate this step [S1]
++    pass
+ ```
+ 
+-## Subtopics
+-
+-### [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md)
+-Renders volumes by traversing the volume data structure directly, skipping empty regions. Choose when cache coherence is critical and the volume is sparse.
+-
+-### [Occlusion Clipping with Orthogonal Opacity Map](990-occlusion-clipping-with-orthogonal-opacity-map.md)
+-Uses precomputed opacity maps to clip rays. Choose when multiple views are rendered and precomputation is feasible.
+-
+-### [Ray Marcher with Macrocell Empty Space Skipping](1009-ray-marcher-with-macrocell-empty-space-skipping.md)
+-Uses macrocells to skip large empty regions. Choose for very large scenes with hierarchical empty space.
+-
+-### [Empty Space Skipping with Orthogonal BSP Tree](1054-empty-space-skipping-with-orthogonal-bsp-tree.md)
+-Uses a BSP tree for empty space skipping. Choose when the volume has a regular grid structure.
+-
+-### [Ray Casting with Depth/Alpha Test for Empty Space Skipping](1537-ray-casting-with-depth-alpha-test-for-empty-space-skipping.md)
+-Uses depth and alpha tests to skip rays. Choose for hardware-accelerated rasterization pipelines.
+-
+-### [Empty Space Skipping with Octree](1610-empty-space-skipping-with-octree.md)
+-Uses an octree to skip empty regions. Choose for hierarchical volume data.
+-
+-### [Spatial Skipping (Occupancy Grid)](1614-spatial-skipping-occupancy-grid.md)
+-Uses an occupancy grid to skip empty voxels. Choose for simple, uniform grids.
+-
+-### [Parallel Tree-Construction for Empty-Space Skipping](5037-parallel-tree-construction-for-empty-space-skipping.md)
+-Parallel construction of BVHs for empty space skipping. Choose for large-scale parallel rendering.
+-
+-### [Transfer-Function Independent Empty-Space Skipping](5038-transfer-function-independent-empty-space-skipping.md)
+-Skips empty space independent of the transfer function. Choose when multiple transfer functions are used.
++### Parameters and Edge Cases
++*   **Density Function**: Must be accessible for evaluation. For constant density, it returns a scalar. For varying density, it returns a scalar field value [S1].
++*   **Quadratic Bounds**: Using quadratic bounds instead of linear bounds allows the ray to move away from the entry surface more quickly, improving performance [S1].
++*   **Varying Density Pitfall**: Performance gains depend heavily on the amount of empty space in the scene. If the volume is dense everywhere, the overhead of the BVH traversal may not be offset by the skipping benefits [S1].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the BVH traversal cost and the number of samples inside the volume. For constant density, it is $O(\log N)$ for skipping plus $O(1)$ for analytic integration. For varying density, it is $O(\log N)$ for skipping plus $O(M)$ for ray marching, where $M$ is the number of steps inside the volume [G].
+-- **Memory Complexity**: $O(N)$ for the BVH, where $N$ is the number of nodes [G].
+-- **Measured Performance**: On a Clouds scene with constant density, the 'Ours, Impr Quad.' method achieves a 5.7x speedup over naive Sphere tracing (5.6ms vs 31.9ms), reducing average octaves from 1892.0 to 196.3 [S1]. On the same scene with varying density, it achieves a 1.8x speedup over naive Sphere tracing (37.9ms vs 66.5ms), reducing average octaves from 4087.4 to 1675.9 [S1].
+-- **Strengths**: Significant speedup for constant density volumes; efficient empty-space skipping for varying density volumes [S1].
+-- **Limitations**: Performance gains for varying density depend on the amount of empty space; requires accurate exit point calculation [S1].
+-- **When to Use**: Ideal for semi-transparent volumes with constant density or sparse varying density volumes [S1].
+-- **When Not to Use**: Not suitable for dense varying density volumes with little empty space, as the overhead of BVH traversal may not be justified [S1].
++*   **Time Complexity**: Depends on the BVH traversal depth and the number of samples. For constant density, the number of samples is reduced to 2 (entry/exit) plus BVH nodes visited. For varying density, it is proportional to the volume thickness and sampling rate [S1].
++*   **Measured Performance**: On a Clouds scene with constant density, the method achieves a 5.7x speedup over naive sphere tracing (5.6ms vs 31.9ms), reducing average octaves from 1892.0 to 196.3 [S1]. For varying density, it achieves a 1.8x speedup (37.9ms vs 66.5ms), reducing average octaves from 4087.4 to 1675.9 [S1].
++*   **Strengths**: Significant speedup for constant density semi-transparent volumes. Effective empty-space skipping for varying density volumes outside the object.
++*   **Limitations**: For varying density, the interior requires full numerical integration, limiting the potential speedup. Performance is sensitive to the amount of empty space [S1].
+ 
+ ## Background
+-The method was introduced in "Fast sphere tracing of procedural volumetric noise for very large and detailed scenes" [S1]. It builds on the concept of using BVHs for sphere tracing in opaque volumes and extends it to semi-transparent cases by incorporating analytic integration for constant density materials [S1]. The technique leverages quadratic bounds to improve convergence speed near the entry surface [S1].
++This method is described in the context of fast sphere tracing of procedural volumetric noise for large scenes [S1]. It extends opaque empty-space skipping techniques to handle transparency by leveraging analytic integration for constant density and hybrid traversal for varying density.
+ 
+ ## Sources

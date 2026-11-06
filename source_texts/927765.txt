@@ -1,0 +1,164 @@
+Interactive analysis of astronomical data cubes, images and catalogues — on your desktop, with the heavy computation wherever the data lives. - Ray-traced volume rendering: HDR light, two-field colour and projected maps by fvitello · Pull Request #109 · VisIVOLab/VisIVOVisualAnalytics
+
+Ray-traced volume rendering: HDR light, two-field colour and projected maps by fvitello · Pull Request #109 · VisIVOLab/VisIVOVisualAnalytics · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fvitello
+commented
+Nov 4, 2026
+Copy link
+Copy Markdown
+Contributor
+Closes #106.
+Ray-traced volumes
+A cube can now be drawn as light, as the particles of #101 are. Each voxel emits and, optionally, absorbs; the light along each ray is summed in floating point, without a ceiling, and graded by the same tone curves. A cube with a large dynamic range keeps both its faint diffuse emission and its bright cores, with no opacity curve to tune by hand. The analysis rendering (Composite, MIP, MinIP, threshold, colour bar) is unchanged; this is a presentation style switched on with Ray-traced light in the cube viewer's Display, 3D section.
+Two styles:
+3-D light: emission and grey absorption in perspective;
+Projected map: the column along each line of sight, without perspective, optionally within a slab, brightness from its logarithm.
+Colour from a second quantity:
+another field of a VBT volume (a simulation's density lit and coloured by its temperature);
+for a spectral cube, each channel's velocity in km/s (a frequency axis as optical velocity from RESTFRQ), on a linear scale over the velocities holding 98 % of the light, with Coolwarm seeded. Seen along the spectrum, a projected map coloured by velocity is the intensity-weighted mean velocity.
+Dark below the threshold: values under the 3-D view's threshold emit nothing. A ray sums every channel it crosses, so a radio cube's noise otherwise veils the source. On by default for a cube with negative values, off for a simulation's grid.
+In the window:
+drawn on the desktop's GPU, ray-marched through a grid the backend prepares once (at most 256³, strided from a larger cube);
+while it is on, the analysis controls that draw nothing in it are hidden; the threshold stays when it darkens;
+its map starts from the 3-D view's, and its colour bar is drawn exactly as the 3-D view's (same place, size, type, labels);
+without a GPU view (remote desktops, old drivers) the backend draws the frames from the same grid, with the box and colour bar drawn over them on the desktop.
+Output: stills up to 8K, orbit movies, PNG and floating-point FITS of the light, rendered by the backend from the full cube, with box and colour bar.
+Remote backends:
+the view starts from the remote (EGL) view's camera and hands it back with set_camera when it is switched off, so the remote view goes on from where the ray-traced one was turned to;
+the grid is gzipped for a client on another machine: below the brightness floor it is zeros, and through a tunnel a WALLABY grid goes from 34 MiB in 8 s to 0.4 MiB in 0.4 s. The desktop lifts Qt's decompression safety threshold for that one request (a floored grid expands about 130×).
+Backend
+app/volume_raytrace.py (numba): ray march, projected maps, emission with a brightness floor, colour index, light-weighted velocity range.
+app/routers/volume_render.py:
+POST /v1/tasks/volume_render: stills and movie frames (frames, tone, light and deletion through the particle-render routes);
+POST /v1/volume_render/grid: the GPU view's grid;
+POST /v1/volume_render/preview: a JPEG frame for a desktop without a GPU view.
+Request fields: brightness_floor, colour_by: velocity.
+New header X-Visivo-Colour-Table (contract regenerated).
+Cube render sessions accept set_camera; its validation is shared with point sessions.
+Smaller changes
+Colour-bar labels: values of a thousand or more are written out (1232, not 1.23e+03) when every tick stays distinct; shared by both bars (ColourBarTicks.h, tested).
+A finished still reports its voxels, not "0 particles".
+Tested
+Tests: backend 2042 passed; C++ 538 passed.
+Desktop, on this machine: WALLABY, HCG 44 and a simulation volume, including the GPU-less path.
+PLEIADI-GPU (r33c1s01, 1 V100, 32 cores, through the SSH tunnel), WALLABY opened on the node:
+remote EGL view at 22 FPS;
+Ray-traced light: the grid arrives in under 4 s and the view starts from the remote camera;
+Velocity colour;
+Render Still at 1080p computed on the node in 1.6 s;
+switching off returns the turned camera to the EGL view.
+On PLEIADI
+WALLABY 196×280×109
+Apertif 661×661×1218 (2 GB)
+Grid, plain / gzip
+34 MiB 7.9 s / 0.4 MiB 0.36 s
+48 MiB ~11 s / 15–28 MiB 4–8 s
+Backend frame 960×540 (light / map)
+0.4 / 0.3 s
+0.6 / 1.0 s
+Still 1920×1080
+0.9 s
+4.3 s
+Movie 24 × 1080p
+19 s
+71 s
+Docs
+docs/user-guide/raytraced-volumes.md
+docs/backend-api/volume-render.md
+docs/backend-api/render.md (set_camera for cubes)
+fvitello
+added 4 commits
+November 4, 2026 14:47
+Add ray-traced volume rendering for cubes
+…
+a3c36a5
+```
+Add backend and desktop support for ray-traced volume rendering (issue #106).
+
+Backend: numba ray-marcher (volume_raytrace.py) for emission/absorption with a second-field colour index and projected maps. New /v1/tasks/volume_render task (stills and movies, reusing the particle render result routes via a shared run_frames/start_render_task) and /v1/volume_render/grid, which prepares grids for the GPU view. Render sessions now report their camera in /levels. A process-wide numba lock (numba_parallel.py) serialises parallel kernels, since the workqueue threading layer aborts on concurrent use.
+
+Desktop: ParticleGLView gains a grid ray-march shader; RaytraceViewport and RaytraceOutput are generalised to support grids and a configurable task path. New VolumeRaytracePanel and a "Ray-traced light" option in the cube viewer.
+
+Also adds new response headers, tests, and docs.
+```
+Match ray-traced colour bar and hide classic controls
+…
+1d936b2
+```
+The ray-traced colour bar now reuses VolumeColorbar's layout and painting (placement/paint, Look struct), so it looks the same as the 3-D view's bar. It uses the window's font and scales with the output picture size relative to the view.
+
+While "Ray-traced light" is on, the analysis rendering's controls (mode, blend, lighting, threshold, colour map, 3-D layers) are hidden because they draw nothing in it. They return when the check is cleared or when no camera is available.
+
+The ray-traced panel now shows the basic settings first, with the rest under "More settings", and its map starts from the 3-D view's colour map. The user guide is updated.
+```
+Add brightness floor to ray-traced volume light
+…
+b94ce02
+```
+Radio cube noise, summed over every channel along a ray, veils the source in ray-traced renders. Add a `brightness_floor` request field so values at or below the 3-D view's threshold emit nothing.
+
+Backend: `emission_from` applies the floor on the logarithms themselves (avoids rounding and overflow of 10**floor) and never lights negatives. The floor is part of the grid cache key.
+
+GUI: add a "Dark below the threshold" checkbox, on by default for cubes with negative values. The threshold control stays visible in the ray-traced view when it darkens, and a threshold change re-prepares the grid after a debounce. The colour bar title is now shared via `volumeBarTitle()`, and the render summary counts voxels for volumes.
+
+Tests and docs are updated.
+```
+Add velocity colouring, grid gzip and GPU-less preview
+…
+64d6a70
+```
+Backend:
+- Add colour_by="velocity" for spectral FITS cubes (km/s, linear scale, range holding 98% of the light via velocity_range).
+- Gzip /v1/volume_render/grid for non-loopback clients that accept it; cache prepared grids through a shared helper.
+- Add POST /v1/volume_render/preview: a JPEG frame marched through the cached grid, with box, colour range and table headers (new X-Visivo-Colour-Table).
+- Move set_camera into render_session/_common and support it in cube sessions, so the desktop can hand back its ray-traced camera.
+
+Desktop:
+- Add a Velocity option to the ray-traced panel, shown for spectral CTYPE3 axes.
+- Draw backend preview frames with the box and colour bar overlay when there is no GPU view.
+- Send set_camera to the remote view when leaving the ray-traced view.
+- Extract tick labelling into ColourBarTicks.h, which writes velocities out instead of using exponents, and add tests.
+
+Docs and contract manifests are updated.
+```
+fvitello
+linked an issue
+Nov 4, 2026
+that may be
+closed
+by this pull request
+Volume rendering with HDR light, two-field colour tables and projected maps
+#106
+Closed
+Hide details
+View details
+fvitello
+merged commit 3009f81
+into
+main
+Nov 4, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fvitello
+deleted the
+106-volume-rendering-with-hdr-light-two-field-colour-tables-and-projected-maps
+branch
+November 4, 2026 20:34
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

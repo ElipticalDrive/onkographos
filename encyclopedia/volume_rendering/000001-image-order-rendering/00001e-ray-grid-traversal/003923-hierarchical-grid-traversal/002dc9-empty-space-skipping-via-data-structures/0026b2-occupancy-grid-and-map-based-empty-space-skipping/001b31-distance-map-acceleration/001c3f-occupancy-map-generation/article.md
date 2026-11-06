@@ -1,0 +1,146 @@
+# Occupancy Map Generation
+
+Also called: Compute Occupancy Map, ITF Occupancy Compute
+
+## Overview
+Occupancy Map Generation is a GPU compute shader dispatch routine that generates an occupancy map from volume, gradient, and ITF (Intensity Transfer Function) textures. It serves as the foundational step for Distance Map Acceleration, providing the binary occupancy data required for empty space skipping during volume ray marching. It differs from its sibling [Partitioned Distance Map Combination](1191-partitioned-distance-map-combination.md) by generating a single global occupancy map rather than partitioned variants, and from its child [Distance Map Computation (Multi-Stage)](1205-distance-map-computation-multi-stage.md) by producing the binary mask rather than the distance field itself.
+
+## How it works
+The method computes the occupancy status of a 3D grid by dispatching a compute shader that processes the input volume data. The shader determines if voxels are occupied based on the volume intensity and potentially the ITF, writing the result to an output occupancy map.
+
+**Inputs and Outputs:**
+*   **Input Volume:** Bound to Image Unit 0. Format: `GL_R8` or `GL_R16`. Access: `GL_READ_ONLY`.
+*   **Gradient Texture:** Bound to Image Unit 1. Format: `GL_RGBA8`. Access: `GL_READ_ONLY`.
+*   **ITF Texture:** Bound to Image Unit 2. Format: `GL_RGBA8`. Access: `GL_READ_ONLY`.
+*   **Output Occupancy Map:** Bound to Image Unit 3. Format: `GL_R8UI` (Unsigned 8-bit Integer). Access: `GL_READ_WRITE`.
+
+**Data Structures and Uniforms:**
+A uniform buffer at binding point 0 (20 bytes total) configures the shader:
+*   Offset 0 (16 bytes): `reductionBlockSize` packed as `glm::vec4`.
+*   Offset 16 (4 bytes): `useITF2D` as `int`.
+
+**Algorithm Steps:**
+1.  **Calculate Workgroup Dimensions:** For each axis $i \in \{0, 1, 2\}$, calculate the number of workgroups required:
+    $$ \text{workgroups}[i] = \lceil \frac{\text{sizeOccupancyMap}[i]}{8} \rceil $$
+    where $\text{sizeOccupancyMap}[i]$ is the dimension of the occupancy map along axis $i$.
+2.  **Dispatch Compute Shader:** Issue the dispatch command with the calculated 3D workgroup counts.
+3.  **Memory Barrier:** Issue a full memory barrier (`glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)`) to ensure the written image data is visible to subsequent reads.
+
+**Pseudocode:**
+The following pseudocode represents the dispatch logic and shader structure. The internal shader logic for determining occupancy is not fully specified in the sources, but the dispatch mechanism is:
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_occupancy_map(volume_tex, gradient_tex, itf_tex, occupancy_map, 
+                           size_occupancy_map, reduction_block_size, use_itf_2d):
+    """
+    Dispatches the compute shader to generate the occupancy map.
+    
+    Args:
+        volume_tex: Texture object for input volume (GL_R8/GL_R16).
+        gradient_tex: Texture object for gradient (GL_RGBA8).
+        itf_tex: Texture object for ITF (GL_RGBA8).
+        occupancy_map: Image object for output (GL_R8UI).
+        size_occupancy_map: Tuple (x, y, z) of the occupancy map dimensions.
+        reduction_block_size: Tuple (x, y, z, w) representing the reduction block size.
+        use_itf_2d: Integer flag (0 or 1) for 2D ITF mode.
+    """
+    # Step 1: Calculate workgroup dimensions
+    # Divide size by 8 and round up
+    workgroup_x = (size_occupancy_map[0] + 7) // 8
+    workgroup_y = (size_occupancy_map[1] + 7) // 8
+    workgroup_z = (size_occupancy_map[2] + 7) // 8
+    
+    workgroups = (workgroup_x, workgroup_y, workgroup_z)
+    
+    # Step 2: Bind textures and uniforms
+    # Image Unit 0: Volume
+    bind_image_unit(0, volume_tex, access="READ_ONLY")
+    # Image Unit 1: Gradient
+    bind_image_unit(1, gradient_tex, access="READ_ONLY")
+    # Image Unit 2: ITF
+    bind_image_unit(2, itf_tex, access="READ_ONLY")
+    # Image Unit 3: Output Occupancy Map
+    bind_image_unit(3, occupancy_map, access="READ_WRITE")
+    
+    # Uniform Buffer (Binding 0)
+    uniform_buffer_data = pack_uniforms(reduction_block_size, use_itf_2d)
+    bind_uniform_buffer(0, uniform_buffer_data)
+    
+    # Step 3: Dispatch Compute Shader
+    # Assuming a shader program 'shader_compute_occupancy' is linked and active
+    dispatch_compute(workgroups)
+    
+    # Step 4: Memory Barrier
+    # Ensure all image writes are complete and visible
+    memory_barrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT)
+
+def pack_uniforms(reduction_block_size, use_itf_2d):
+    """
+    Packs the uniform buffer data according to the layout:
+    Offset 0: reductionBlockSize (vec4, 16 bytes)
+    Offset 16: useITF2D (int, 4 bytes)
+    """
+    # reduction_block_size is expected to be a vec4-like structure
+    # Packed as 16 bytes
+    block_data = reduction_block_size.to_bytes(16)
+    
+    # use_itf_2d is an int, 4 bytes
+    flag_data = use_itf_2d.to_bytes(4, byteorder='little', signed=True)
+    
+    return block_data + flag_data
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** The workgroup calculation assumes the occupancy map dimensions are divisible by 8 or handled correctly by the shader's boundary checks. If dimensions are not multiples of 8, the shader must clamp accesses to prevent out-of-bounds reads/writes.
+*   **Precision:** The output is `GL_R8UI`, limiting occupancy values to 0 or 1 (or potentially other 8-bit integers if extended). This is sufficient for binary occupancy but may not support multi-level occupancy without modification.
+*   **ITF Mode:** The `useITF2D` flag affects how the ITF texture is sampled. If set, the shader likely uses a 2D lookup; otherwise, it may use a different mode. Incorrect configuration may lead to incorrect occupancy determination if the ITF is critical for the occupancy definition.
+
+## Subtopics
+
+### [Distance Map Computation (Multi-Stage)](1205-distance-map-computation-multi-stage.md)
+A GPU compute shader dispatch routine that computes a distance map from an occupancy map, using a swap buffer for iterative or multi-pass distance calculation. It enables empty space skipping during volume ray marching by providing the distance to the nearest occupied voxel for any given position. Unlike [Occupancy Mipmap Generation](2700-occupancy-mipmap-generation.md) which creates hierarchical mipmaps, this method produces a single-resolution distance field via a specific three-stage dispatch sequence.
+
+### [Occupancy Mipmap Generation](2700-occupancy-mipmap-generation.md)
+Occupancy Mipmap Generation computes a hierarchical occupancy mipmap for a 3D grid using JAX convolutions.
+
+### [Brick Occupancy Recomputation](3976-brick-occupancy-recomputation.md)
+Brick Occupancy Recomputation is a GPU compute shader routine that regenerates the occupancy status of volumetric bricks after dynamic voxel changes, ensuring the hierarchical traversal structure remains consistent with the underlying voxel data. It differs from static generation methods by being designed for frequent, localized updates in interactive simulations, relying on shared memory reduction to avoid global memory contention.
+
+### Partitioned Occupancy Map Generation
+A GPU compute shader dispatch routine that generates a partitioned occupancy map from volume, gradient, and partitioned occupancy textures using a reduction block size and intensity partition bounds [S1, unofficial].
+
+**Definition:**
+Generates a partitioned occupancy map, likely allowing for different occupancy thresholds or regions based on intensity partition bounds.
+
+**Steps:**
+1.  Calculate 3D workgroup dimensions by dividing `sizeOccupancyMap[i]` by 8 and rounding up for each axis $i=0,1,2$.
+2.  Dispatch the compute shader with the calculated workgroup counts.
+3.  Issue a full memory barrier to ensure visibility of written image data.
+4.  Bind the compute shader `shader_compute_partitioned_occupancy`.
+5.  Call the helper function `_ComputePOM` passing the input volume texture, output datatype, texture gradient, output partitioned occupancy map, occupancy map size, reduction block size, and intensity partition boundaries.
+
+**Layout:**
+*   Image Unit 0: Input volume, bound as `GL_R8` or `GL_R16` with `GL_READ_ONLY` access.
+*   Image Unit 1: Gradient texture, bound as `GL_RGBA8` with `GL_READ_ONLY` access.
+*   Image Unit 2: Output partitioned occupancy map, bound as `GL_R8UI` with `GL_READ_WRITE` access.
+*   Uniform Buffer (Binding 0): 24 bytes total.
+    *   Offset 0: `reductionBlockSize` packed as `glm::vec4` (16 bytes).
+    *   Offset 16: `partition_intensity_min` (float, 4 bytes).
+    *   Offset 20: `partition_intensity_max` (float, 4 bytes).
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of voxels in the occupancy map, $O(N)$, where $N$ is the total number of voxels. The workgroup size is fixed at $8 \times 8 \times 8$ (implied by the division by 8), so the number of dispatches is proportional to $N/512$.
+*   **Memory Complexity:** $O(N)$ for the output occupancy map. The input textures are already allocated.
+*   **Performance:** The method is designed for GPU execution, leveraging parallelism. The use of a fixed workgroup size and simple arithmetic for dispatch calculation suggests low overhead.
+*   **Strengths:** Simple to implement, efficient for static volumes, provides the necessary data for distance map acceleration.
+*   **Limitations:** Static generation; does not handle dynamic updates efficiently (see [Brick Occupancy Recomputation](3976-brick-occupancy-recomputation.md) for dynamic cases). Limited to single-resolution occupancy.
+*   **When to Use:** When a static occupancy map is needed for empty space skipping in volume rendering.
+*   **When Not to Use:** For dynamic scenes requiring frequent updates (use Brick Occupancy Recomputation) or when hierarchical occupancy is needed (use Occupancy Mipmap Generation).
+
+## Background
+The method originates from the DVR_ESS_PDM project by Michael Rauter, an unofficial implementation of dynamic volume rendering with empty space skipping and partitioned distance maps [S1, unofficial]. It is part of a pipeline that includes gradient computation, ITF sampling, and distance map generation to accelerate volume ray marching.
+
+## Sources
+[S1] CalamityMichL/DVR_ESS_PDM, https://github.com/CalamityMichL/DVR_ESS_PDM, fetched 2026-10-26 (unofficial)

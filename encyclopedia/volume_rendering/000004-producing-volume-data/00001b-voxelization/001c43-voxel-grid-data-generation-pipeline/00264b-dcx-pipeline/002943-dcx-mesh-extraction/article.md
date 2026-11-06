@@ -1,0 +1,111 @@
+# DCX Mesh Extraction
+
+Also called: DCX Pipeline Mesh Extraction
+
+## Overview
+DCX Mesh Extraction is a method for converting point clouds into triangle meshes by leveraging voxelization, cube type classification, and optional hole-filling techniques. It distinguishes itself from direct surface reconstruction methods (like Poisson Reconstruction) by operating on a discrete voxel grid, allowing for explicit control over topology via cube types and enabling supplementary sampling to fill geometric holes [S1, unofficial].
+
+## How it works
+The method takes a point cloud as input and produces a mesh (vertices and faces) as output. It operates within the DCX Pipeline framework, which relies on a Python binding module `DCX_main` and a package `dcx_pkg` for low-level voxel operations [S1, unofficial].
+
+### Data Structures
+The core data structure is the voxel grid. Each voxel is identified by a unique ID. The pipeline maintains:
+- `voxel_ids`: Array of active voxel IDs.
+- `voxel_points`: Corresponding 3D coordinates for each voxel.
+- `cube_ids`: IDs linking voxels to their local cube type definitions.
+- `cube_types`: Classification of each voxel's local geometry (e.g., inside, outside, boundary).
+
+### Parameters
+- `enable_thinning` (boolean): If true, performs thinning to reduce voxel density while preserving topology [S1, unofficial].
+- `enable_supplementary_sampling` (boolean): If true, performs hole-filling via supplementary sampling [S1, unofficial].
+- `hole_query_fn` (function): A callback function required if `enable_supplementary_sampling` is true. It takes `query_points` and returns `selected_candidate_indexes` and `selected_points`. If this is `None` while supplementary sampling is enabled, a `ValueError` is raised [S1, unofficial].
+
+### Steps
+1. **Voxelization**: Convert the input point cloud into voxels using `dcx_pkg.points_to_voxels`. This yields initial `voxel_ids` and `voxel_points` [S1, unofficial].
+2. **Cube Type Classification**: Compute the cube type for each voxel using `dcx_pkg.get_cube_types`. This classifies the local geometry of each voxel relative to the surface [S1, unofficial].
+3. **Supplementary Sampling (Optional)**: If `enable_supplementary_sampling` is true:
+    a. If `enable_thinning` is true, run the thinning step first to reduce voxel count [S1, unofficial].
+    b. Run reconstruction with `pattern=1` and `enable_postprocessing=False` to identify `margin_voxel_ids`. This step identifies voxels on the boundary that may need filling [S1, unofficial].
+    c. Call `filling_holes_prepare` with the margin voxels to generate `candidate_voxel_ids` and `query_points`. These are potential locations to fill holes [S1, unofficial].
+    d. Call `hole_query_fn(query_points)` to select which candidates are actually needed. This returns `selected_candidate_indexes` and `selected_points` [S1, unofficial].
+    e. Call `filling_holes_apply` to add the selected voxels to the grid. This updates `voxel_ids`, `voxel_points`, `add_voxel_ids`, and `add_voxel_points` [S1, unofficial].
+    f. Recompute cube types using `dcx_pkg.get_cube_types` to reflect the new voxel configuration [S1, unofficial].
+4. **Thinning (Optional)**: If `enable_thinning` is true (and not already done in step 3a), run the thinning algorithm. This reduces the number of voxels while maintaining the surface topology [S1, unofficial].
+5. **Reconstruction**: Run reconstruction with `pattern=0` to generate the final mesh vertices and faces. This step converts the voxel grid into a triangle mesh [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def dcx_mesh_extraction(points, enable_thinning=False, enable_supplementary_sampling=False, hole_query_fn=None):
+    # Step 1: Convert points to voxels
+    voxel_ids, voxel_points = dcx_pkg.points_to_voxels(points)
+    
+    # Step 2: Compute cube types
+    cube_ids, cube_types = dcx_pkg.get_cube_types(voxel_ids, voxel_points)
+    
+    # Step 3: Supplementary sampling (hole filling)
+    if enable_supplementary_sampling:
+        if hole_query_fn is None:
+            raise ValueError("hole_query_fn is required when enable_supplementary_sampling is true")
+        
+        # Step 3a: Thinning if enabled
+        if enable_thinning:
+            voxel_ids, voxel_points, cube_ids, cube_types = dcx_pkg.thinning(
+                voxel_ids, voxel_points, cube_ids, cube_types
+            )
+        
+        # Step 3b: Identify margin voxels
+        margin_voxel_ids, _, _ = dcx_pkg.reconstruction(
+            voxel_ids, voxel_points, cube_ids, cube_types, 
+            pattern=1, enable_postprocessing=False
+        )
+        
+        # Step 3c: Prepare hole filling
+        candidate_voxel_ids, query_points = dcx_pkg.filling_holes_prepare(
+            margin_voxel_ids
+        )
+        
+        # Step 3d: Select candidates
+        selected_candidate_indexes, selected_points = hole_query_fn(query_points)
+        
+        # Step 3e: Apply hole filling
+        voxel_ids, voxel_points, add_voxel_ids, add_voxel_points = dcx_pkg.filling_holes_apply(
+            voxel_ids, voxel_points, candidate_voxel_ids, selected_candidate_indexes, selected_points
+        )
+        
+        # Step 3f: Recompute cube types
+        cube_ids, cube_types = dcx_pkg.get_cube_types(voxel_ids, voxel_points)
+    
+    # Step 4: Thinning (if not done in step 3a)
+    if enable_thinning:
+        voxel_ids, voxel_points, cube_ids, cube_types = dcx_pkg.thinning(
+            voxel_ids, voxel_points, cube_ids, cube_types
+        )
+    
+    # Step 5: Final reconstruction
+    vertices, faces = dcx_pkg.reconstruction(
+        voxel_ids, voxel_points, cube_ids, cube_types, 
+        pattern=0
+    )
+    
+    return vertices, faces
+```
+
+### Edge Cases and Pitfalls
+- If `enable_supplementary_sampling` is true and `hole_query_fn` is `None`, the method raises a `ValueError` [S1, unofficial].
+- The order of operations matters: if both thinning and supplementary sampling are enabled, thinning is performed before hole filling preparation to reduce computational load, but cube types must be recomputed after hole filling [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Depends on the number of voxels and the complexity of the `hole_query_fn`. Thinning reduces voxel count, potentially speeding up reconstruction.
+- **Memory Complexity**: Proportional to the number of voxels and their associated data (IDs, points, cube types).
+- **Strengths**: Explicit control over voxel grid; ability to fill holes via supplementary sampling; robustness to noise via voxelization.
+- **Limitations**: Resolution-dependent; may produce blocky meshes if voxel size is large; requires careful tuning of `hole_query_fn` for effective hole filling.
+- **When to use**: When working with point clouds that have holes or when explicit control over voxel-based reconstruction is needed.
+- **When not to use**: When high-frequency detail is required without voxelization artifacts, or when real-time performance is critical and voxelization overhead is prohibitive.
+
+## Background
+The DCX Pipeline was introduced as a method for converting point clouds to meshes using voxelization, cube type classification, thinning, and reconstruction. It is exposed via a Python binding module named `DCX_main`. The specific mesh extraction method described here is part of this pipeline, leveraging the voxel grid for robust surface reconstruction [S1, unofficial].
+
+## Sources
+[S1] jjjkkyz/DCx, https://github.com/jjjkkyz/DCx, fetched 2026-10-26 (unofficial)

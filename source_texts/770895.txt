@@ -1,0 +1,264 @@
+DeepSeek 4 Flash and PRO local inference engine for Metal, CUDA and ROCm - metal: radix-select top-k for the V4.1 indexer by gaineyllc · Pull Request #1060 · antirez/ds4
+
+metal: radix-select top-k for the V4.1 indexer by gaineyllc · Pull Request #1060 · antirez/ds4 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+gaineyllc
+commented
+Sep 15, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+What
+The indexer's top-k (kernel_argsort_f32_i32_desc + merge) keeps every 1024-row block's
+top 512 and merges them in log2(blocks) dependent passes: at 435k rows that is 9 passes
+over 217k survivors, 2-3 ms per call, and the 32-row causal batches of prefill took ~5 ms.
+kernel_topk_select_{init,hist,scan,tiecount,compact,finish} (metal/argsort.metal) find
+the k-th key exactly with four 8-bit histogram levels over the sortable-int form of the
+scores, count the ties at it per chunk, compact the winners in one pass (the rows above
+the k-th key, then the first ties by index), and let one threadgroup order them (score
+desc, index asc). Taken when a row has at least 4096 visible entries and top_k <= 2048;
+the sort stays for everything else. The choice is made per visible width, the same for a
+token alone and inside a causal batch — a batch straddling 4096 is cut in two — so a
+position's top-k does not depend on how it was submitted; make test-deepseek41-metal
+checks exact IDs across frontiers 1024..65535, including rows of all-equal scores.
+DS4_METAL_DISABLE_TOPK_SELECT=1 restores the sort.
+Where the two differ: scores exactly tied at the k-th boundary. The sort keeps the
+members of the tie its comparison network happens to leave in place; the select keeps
+the lowest indices, deterministically. The set and its order are identical whenever the
+k-th score is not tied.
+Measured
+M5 Max 128 GiB, macOS 26.5, DeepSeek V4.1 Flash Q2, Metal SSD streaming.
+Standalone (tests/test_metal_topk_select, best of the loops, two runs each; sort =
+DS4_METAL_DISABLE_TOPK_SELECT=1):
+rows x tokens, k
+sort
+select
+435000 x 1, k=512
+1.7-2.4 ms
+0.4-1.0 ms
+435000 x 3, k=512
+2.0-3.8 ms
+1.0-1.4 ms
+869000 x 1, k=512
+2.5-3.8 ms
+1.2 ms
+54000 x 1, k=2048
+1.0-1.3 ms
+0.8 ms
+435000 x 32 causal (prefill)
+4.8-4.9 ms
+2.7-5.2 ms
+Encoder timeline of a 869k-context decode: kernel_topk_select_hist 58 us x 7348 calls =
+428 ms over the prefill tail where the causal argsort was 3.4 ms per batch.
+Decode: 435k rows / 3 tokens 3.0 -> 0.35 ms per call, 869k 2.7 -> 0.43 ms (earlier
+build, quiet GPU).
+On upstream main + this change (branch pr/indexer-topk-select), V4.1 Flash Q2 under SSD
+streaming at 16k with a 23 GiB bank: greedy output byte-identical with and without the
+select; prefill of the 10k prompt 169 -> 178 t/s (single runs). ./ds4_test --metal-kernels: OK. make test-metal-topk-select: PASS. make test-deepseek41-metal:
+PASS.
+Revision: the first push failed make test-deepseek41-metal at the 4096-row frontier
+(the batch and the single-token call chose different algorithms for the same row) and
+ordered ties by arrival past a 2048-tie cap; both fixed as described above — one more
+pass, no tie buffer.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+metal: radix-select top-k for the V4.1 indexer
+…
+be6a8ce
+```
+The indexer's top-k (kernel_argsort_f32_i32_desc + merge) keeps every
+1024-row block's top 512 and merges them in log2(blocks) dependent passes:
+at 435k rows that is 9 passes over 217k survivors, 2-3 ms per call, and the
+32-row causal batches of prefill took ~5 ms.
+
+kernel_topk_select_{init,hist,scan,tiecount,compact,finish} find the k-th
+key exactly with four 8-bit histogram levels over the sortable-int form of
+the scores, count the ties at it per chunk, compact the winners in one pass
+(the rows above the k-th key, then the first ties by index), and let one
+threadgroup order them (score desc, index asc). Taken when a row has at
+least 4096 visible entries and top_k <= 2048; the sort stays for everything
+else. The choice is made per visible width, the same for a token alone and
+inside a causal batch -- a batch straddling 4096 is cut in two -- so a
+position's top-k does not depend on how it was submitted, which
+tests/test_deepseek41_metal checks (exact IDs across frontiers 1024..65535,
+including rows of all-equal scores). DS4_METAL_DISABLE_TOPK_SELECT=1
+restores the sort.
+
+Where the two differ: scores exactly tied at the k-th boundary. The sort
+keeps the members of the tie its comparison network happens to leave in
+place; the select keeps the lowest indices, deterministically. The set and
+order are identical whenever the k-th score is not tied.
+
+tests/test_metal_topk_select.m checks random rows and rows full of ties
+against a stable reference (make test-metal-topk-select). M5 Max 128 GiB,
+macOS 26.5, best of the loops, sort -> select: 435k rows 1.7-2.4 -> 0.4-1.0
+ms, 869k 2.5-3.8 -> 1.2, 54k with k=2048 1.0-1.3 -> 0.8, 32-row causal batch
+at 435k 4.8 -> 2.7. DeepSeek V4.1 Flash Q2 under Metal SSD streaming at 16k:
+greedy output byte-identical with and without the select, prefill 169 -> 178
+t/s on a 10k prompt; ./ds4_test --metal-kernels OK; make test-deepseek41-metal
+PASS.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+gaineyllc
+force-pushed
+the
+pr/indexer-topk-select
+branch
+from
+a372d4c to
+be6a8ce
+Compare
+September 16, 2026 19:52
+gaineyllc
+pushed a commit
+to gaineyllc/ds4
+that referenced
+this pull request
+Sep 16, 2026
+metal: radix-select top-k picks per visible width and ranks ties by i…
+…
+dbdb91e
+```
+…ndex
+
+The batch and the single-token call chose different algorithms for the
+same row at the 4096 boundary, and ties past a 2048-tie cap were taken in
+arrival order; make test-deepseek41-metal caught both. A batch straddling
+4096 visible rows is cut in two, and a tie-count pass per chunk lets the
+compaction keep the lowest-index ties exactly, with no tie buffer (the
+same change as the revised PR antirez#1060).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+gaineyllc
+pushed a commit
+to gaineyllc/ds4
+that referenced
+this pull request
+Sep 16, 2026
+notes: read-ahead thread, split-miss result, PR antirez#1060 fix
+…
+6a1ab53
+```
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+gojack10
+added a commit
+to gojack10/ds4-m5-hardening
+that referenced
+this pull request
+Sep 18, 2026
+metal-indexer: radix-select top-k for the V4.1 indexer (upstream anti…
+…
+b1652f4
+```
+…rez#1060)
+
+Replaces argsort-plus-merge with exact k-th selection (four 8-bit histogram
+levels over sortable-int keys, one compaction pass) when a row has >=4096
+visible entries and top_k <= 2048. Upstream measured this on an M5 Max under
+SSD streaming: 169 -> 178 t/s prefill of a 10k prompt at 16k context, and
+2.4 -> 0.4 ms per top-k call at 435k rows. DS4_METAL_DISABLE_TOPK_SELECT=1
+restores the sort.
+
+Scores exactly tied at the k-th boundary now keep the lowest indices
+deterministically; the set and its order are unchanged when that score is not
+tied. `make test-metal-topk-select` and `make test-deepseek41-metal` both pass
+on this box.
+
+Upstream-PR: antirez#1060
+```
+gaineyllc
+pushed a commit
+to gaineyllc/ds4
+that referenced
+this pull request
+Nov 1, 2026
+metal: radix-select top-k picks per visible width and ranks ties by i…
+…
+c9ba72e
+```
+…ndex
+
+The batch and the single-token call chose different algorithms for the
+same row at the 4096 boundary, and ties past a 2048-tie cap were taken in
+arrival order; make test-deepseek41-metal caught both. A batch straddling
+4096 visible rows is cut in two, and a tie-count pass per chunk lets the
+compaction keep the lowest-index ties exactly, with no tie buffer (the
+same change as the revised PR antirez#1060).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+gaineyllc
+pushed a commit
+to gaineyllc/ds4
+that referenced
+this pull request
+Nov 1, 2026
+notes: read-ahead thread, split-miss result, PR antirez#1060 fix
+…
+38846bc
+```
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+gaineyllc
+pushed a commit
+to gaineyllc/ds4
+that referenced
+this pull request
+Nov 1, 2026
+metal: radix-select top-k picks per visible width and ranks ties by i…
+…
+fc163a3
+```
+…ndex
+
+The batch and the single-token call chose different algorithms for the
+same row at the 4096 boundary, and ties past a 2048-tie cap were taken in
+arrival order; make test-deepseek41-metal caught both. A batch straddling
+4096 visible rows is cut in two, and a tie-count pass per chunk lets the
+compaction keep the lowest-index ties exactly, with no tie buffer (the
+same change as the revised PR antirez#1060).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+gaineyllc
+pushed a commit
+to gaineyllc/ds4
+that referenced
+this pull request
+Nov 1, 2026
+notes: read-ahead thread, split-miss result, PR antirez#1060 fix
+…
+1a224ff
+```
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_0134faedfSUXMBFEUTeKAFia
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

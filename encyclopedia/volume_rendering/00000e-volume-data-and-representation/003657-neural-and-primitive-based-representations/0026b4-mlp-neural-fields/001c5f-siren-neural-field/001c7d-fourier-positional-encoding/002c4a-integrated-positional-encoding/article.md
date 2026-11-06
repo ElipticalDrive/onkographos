@@ -1,0 +1,99 @@
+# Integrated Positional Encoding
+
+Also called: Mip-NeRF Positional Encoding, anti-aliased positional encoding
+
+## Overview
+Integrated Positional Encoding (IPE) is a feature representation that generalizes standard positional encoding to allow a region of space to be compactly featurized, rather than encoding a single point [S1]. It solves the aliasing artifacts that occur in neural radiance fields when scene content is observed at multiple resolutions by integrating sine and cosine features over an interval (cone) instead of evaluating them at a single point [S1]. This effectively anti-aliases high-frequency features by shrinking them towards zero when the frequency period is small compared to the interval size [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A mean position vector $\mu \in \mathbb{R}^3$, the diagonal of a covariance matrix $\sigma^2 \in \mathbb{R}^3$ representing a multivariate Gaussian approximation of a 3D conical frustum, and a set of frequencies $\omega$ [S1][S2, unofficial].
+*   **Output:** A vector of integrated Fourier features [S1].
+
+**Data Structures:**
+*   **Frequencies:** A tensor or array of base frequencies $\omega$ [S2, unofficial].
+*   **Covariance:** The diagonal elements $\sigma^2$ are extracted from the covariance matrix for the attenuation calculation [S2, unofficial].
+
+**Parameters:**
+*   **$n\_freqs$:** Number of frequency octaves. Default value is 16 [S2, unofficial].
+*   **$L$:** The maximum frequency for IPE features. Unlike standard positional encoding, $L$ can be set to an extremely large value and never tuned, as IPE naturally suppresses high frequencies [S1].
+
+**Steps:**
+1. Approximate the 3D conical frustum defined by a camera pixel with a multivariate Gaussian distribution [S1].
+2. For each pixel, cast a cone instead of a ray [S1].
+3. Sample $n + 1$ values for $t_k$ along the cone axis [S1].
+4. Compute IPE features for the interval spanning each adjacent pair of sampled $t_k$ values [S1].
+5. For each frequency $\omega$, compute the expected feature under the isotropic Gaussian assumption using the closed-form integral [S1][S2, unofficial].
+
+**Formulas:**
+The expected value of the sine and cosine features under an isotropic Gaussian with mean $\mu$ and variance $\sigma^2$ is given by [S2, unofficial]:
+
+$$
+E[\sin(\omega x)] = \sin(\omega \mu) \exp(-\omega^2 \sigma^2 / 2)
+$$
+
+$$
+E[\cos(\omega x)] = \cos(\omega \mu) \exp(-\omega^2 \sigma^2 / 2)
+$$
+
+Where:
+*   $\omega$ is the frequency.
+*   $\mu$ is the mean position.
+*   $\sigma^2$ is the variance derived from the covariance matrix diagonal [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import torch
+
+def integrated_positional_encoding(means, covs_diag, freqs):
+    """
+    Compute Integrated Positional Encoding features.
+    
+    Args:
+        means: Tensor of shape (*, 3), mean positions.
+        covs_diag: Tensor of shape (*, 3), diagonal of the covariance matrix.
+        freqs: Tensor of shape (n_freqs,), base frequencies.
+        
+    Returns:
+        Tensor of shape (*, 3 * 2 * n_freqs), the integrated features.
+    """
+    parts = []
+    for freq in freqs:
+        # Calculate omega * pi * mean
+        omega_mean = freq * math.pi * means  # (*, 3)
+        
+        # Calculate attenuation factor: exp(-omega^2 * sigma^2 / 2)
+        w2_sigma2 = (freq * math.pi) ** 2 * covs_diag  # (*, 3)
+        decay = torch.exp(-0.5 * w2_sigma2)  # (*, 3)
+        
+        # Compute sine and cosine features attenuated by the decay factor
+        parts.append(decay * torch.sin(omega_mean))
+        parts.append(decay * torch.cos(omega_mean))
+        
+    return torch.cat(parts, dim=-1)
+```
+
+**Edge Cases and Pitfalls:**
+*   **Cone Approximation:** The method relies on approximating the conical frustum with a Gaussian [S1].
+*   **Precision:** When the variance $\sigma^2$ is large relative to the frequency $\omega$, the decay factor $\exp(-\omega^2 \sigma^2 / 2)$ approaches zero, which is the intended anti-aliasing behavior [S1].
+
+## Subtopics
+
+### [Off-Axis Positional Encoding](3503-off-axis-positional-encoding.md)
+An alternative approach to handling directional information in neural fields.
+
+## Operating characteristics
+*   **Performance:** Mip-NeRF using IPE reduces error rates relative to standard NeRF by 60% on average on a challenging multiresolution benchmark [S1].
+*   **Strengths:** Eliminates the need to tune the maximum frequency hyperparameter $L$; effectively handles multi-resolution scenes by suppressing high frequencies when the sampling interval is large [S1].
+*   **Limitations:** Requires casting cones and sampling multiple points along the axis, which is more complex than standard ray casting [S1]. The Gaussian approximation of the cone frustum is an approximation [S1].
+*   **Time and Memory Complexity:** Not given in the sources.
+
+## Background
+Integrated Positional Encoding was introduced in the Mip-NeRF paper by Barron et al., presented at ICCV 2021 [S1]. It was developed to address the aliasing artifacts in NeRF renderings that occur when training and testing images observe scene content from different distances or resolutions [S1]. The method generalizes the positional encoding used in NeRF by integrating the features over a region of space rather than evaluating them at a single point [S1].
+
+## Sources
+[S1] Mip-NeRF: A Multiscale Representation for Anti-Aliasing Neural Radiance Fields, https://doi.org/10.1109/iccv48922.2021.00580, fetched 2026-10-26
+[S2] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)

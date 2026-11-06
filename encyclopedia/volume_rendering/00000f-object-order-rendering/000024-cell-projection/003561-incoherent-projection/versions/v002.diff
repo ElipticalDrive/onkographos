@@ -1,0 +1,320 @@
+--- v001.md
++++ v002.md
+@@ -3,185 +3,181 @@
+ 
+ ## Overview
+-Incoherent projection is a cell projection method for general convex hexahedra that renders the 2D projection of each cell as an arrangement of polygons by analyzing each cell individually in screen space, thereby avoiding case analysis for the high number of projection topologies [S1, unofficial]. It builds on [Cell projection](26-cell-projection.md) by extending the sweep-line technique to irregular grids where vertex orderings vary per cell, unlike [Parallel Cell Projection](875-parallel-cell-projection.md) which assumes uniform topology.
++Incoherent projection is a cell-based volume rendering method that renders the 2D projection of general convex hexahedra by decomposing each cell's silhouette into an arrangement of planar polygons [S1, unofficial]. It solves the problem of handling the high number of nondegenerate projection topologies inherent in irregular hexahedral grids, where the projection shape varies significantly between cells and viewpoints [S1, unofficial]. Unlike coherent projection methods that assume uniform topology across the volume, incoherent projection analyzes each cell individually in screen space, making it robust for curvilinear grids but computationally more expensive [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A single convex hexahedron defined by 8 vertices in 3D space $(x, y, z)$, and a projection matrix transforming these to screen space $(x_s, y_s, z_s)$.
+-*   **Output:** A set of non-overlapping 2D polygons in screen space that exactly cover the projection of the hexahedron, along with depth ($z$) information for shading.
++*   **Input:** A single convex hexahedron defined by 8 vertices in 3D space, transformed into screen space coordinates $(x, y, z)$.
++*   **Output:** A set of 2D polygons (with associated $z$-depths) representing the visible projection of the hexahedron, ready for rasterization and compositing [S1, unofficial].
+ 
+ **Data Structures:**
+-1.  **Event Queue:** A priority queue storing vertex events, ordered by minimum $y$-value. The "minimum" is the unprocessed vertex with the smallest $y$.
+-2.  **Active Edges List:** An $x$-sorted list of edges. An edge is active if it connects a processed vertex (already removed from the event queue) to an unprocessed vertex.
+-3.  **Current Boundary:** An edge list representing the polygon boundary surrounding the processed vertices and edges. It is maintained as a planar, non-convex, non-simple polygon.
++The algorithm maintains three specific data structures during the sweep-line process [S1, unofficial]:
++1.  **Event Queue:** A priority queue storing vertex events. The priority is determined by the $y$-coordinate. The "minimum" element is the unprocessed vertex with the lowest $y$-value.
++2.  **Active Edges List:** A list of edges currently crossing the sweep line. An edge is "active" if it connects a processed vertex (already passed by the sweep line) to an unprocessed vertex. The list is sorted by the $x$-coordinate of the edge at the current sweep line position ($y = \text{currentY}$).
++3.  **Current Boundary:** An edge list representing the polygon formed by the processed portion of the hexahedron's projection. It surrounds the processed vertices and edges.
+ 
+ **Algorithm Steps:**
+ 1.  **Initialization:**
+-    *   Transform all 8 hexahedron vertices to screen space.
+-    *   Populate the Event Queue with these vertices, sorted by $y$-value.
++    *   Transform the hexahedron vertices into screen space.
++    *   Populate the Event Queue with the 8 vertices, sorted by $y$-value.
+     *   Initialize the Active Edges List and Current Boundary as empty.
++    *   Identify all edges of the hexahedron. Initially, all edges connect unprocessed vertices, so none are active. As vertices are processed, edges leading to them become active.
+ 
+-2.  **Sweep Loop:**
++2.  **Sweep-Line Processing:**
+     While the Event Queue is not empty:
+-    1.  Retrieve `nextVertex` = `getMin(Event Queue)`.
+-    2.  Set `currentY` = $y$-value of `nextVertex`.
+-    3.  For each `edge` in `ActiveEdges`:
+-        *   Calculate `currentX[edge]` = the $x$-coordinate of the edge at `currentY`.
+-        *   Check if `ActiveEdges` remains sorted by `currentX[edge]`.
+-        
+-        **Case A: Sorted**
+-        1.  Identify `remEdges`: edges in `ActiveEdges` that end at `nextVertex`.
+-        2.  Determine the $z$-distance of `nextVertex` from the face into which it projects (for shading/opacity).
+-        3.  **Update Current Boundary:**
+-            *   Insert the first removed edge and its reversal into the Current Boundary edge list. This forms a planar "needle" polygon (no edges cross).
+-            *   If a second edge is removed, insert it and its reversal similarly. This completes a counterclockwise polygon, which is then "spliced out" (extracted as a final output polygon).
++    1.  **Get Next Vertex:** Extract the vertex with the minimum $y$-value from the Event Queue. Let this be `nextVertex` and its $y$-coordinate be `currentY`.
++    2.  **Check Edge Order:** For each edge in the Active Edges List, calculate its $x$-coordinate at `currentY`. Verify if the Active Edges List remains sorted by this $x$-coordinate.
++    3.  **Case A: Order Preserved:**
++        *   Identify all edges in the Active Edges List that terminate at `nextVertex`. Call this set `remEdges`.
++        *   Remove `remEdges` from the Active Edges List.
++        *   **Update Boundary:**
++            *   Insert the first edge in `remEdges` and its reversal into the Current Boundary edge list. This forms a planar "needle" polygon (a degenerate polygon with zero area, effectively a line segment traversed back and forth).
++            *   If a second edge is removed (completing a cycle), insert it and its reversal. This completes a counterclockwise polygon. Splice this polygon out of the Current Boundary and output it as a final projection polygon.
+             *   (Note: The last vertex removal may create a second polygon to be spliced out).
+-        4.  Insert edges that *begin* at `nextVertex` into `ActiveEdges` such that the list remains $x$-ordered for a slight increase in $y$.
+-        5.  `deleteMin(Event Queue)`.
+-
+-        **Case B: Not Sorted (Intersection)**
+-        1.  Find the intersection point $(x, y)$ where two previously adjacent active edges cross.
+-        2.  Create a new vertex `newVertex` at this intersection.
+-        3.  Chop off the two intersecting edges so they end at `newVertex`.
+-        4.  The cut-off segments become new edges starting at `newVertex`.
+-        5.  Insert these new edges into `ActiveEdges` in correct $x$-order.
+-        6.  Insert `newVertex` into `Event Queue` (it will be the new minimum).
++        *   **Determine Depth:** Calculate the $z$-distance of `nextVertex` from the face into which it projects. This $z$-value is associated with the newly created/updated boundary segments for depth testing/compositing.
++        *   **Insert New Edges:** Identify all edges originating from `nextVertex` that lead to unprocessed vertices. Insert these edges into the Active Edges List, maintaining the sort order by $x$-coordinate at `currentY` (or slightly above).
++        *   Remove `nextVertex` from the Event Queue.
++    4.  **Case B: Order Violated (Edge Intersection):**
++        *   Find the intersection point $(x, y)$ of two previously adjacent active edges that have crossed.
++        *   Create a new virtual vertex `newVertex` at this intersection.
++        *   Chop the two intersecting edges so they end at `newVertex`.
++        *   The cut-off segments become new edges starting at `newVertex`.
++        *   Insert these new edges into the Active Edges List in the correct $x$-order.
++        *   Insert `newVertex` into the Event Queue. It will be the new minimum (or processed immediately depending on implementation details, but the source states it is inserted as the minimum) [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def incoherent_projection(hexahedron_vertices, projection_matrix):
+-    # 1. Transform to screen space
+-    screen_vertices = [project(v, projection_matrix) for v in hexahedron_vertices]
++def incoherent_projection(hexahedron_vertices_3d, faces):
++    # 1. Transform to screen space (x, y, z)
++    vertices = transform_to_screen_space(hexahedron_vertices_3d)
+     
+-    # 2. Initialize data structures
+-    # Event Queue: list of (y, vertex_index)
+-    event_queue = sorted([(v.y, i) for i, v in enumerate(screen_vertices)])
++    # 2. Initialize Data Structures
++    event_queue = PriorityQueue()
++    for v in vertices:
++        event_queue.push(v, priority=v.y)
++        
++    active_edges = [] # List of edges, sorted by x at current y
++    current_boundary = [] # List of edges forming the current polygon boundary
+     
+-    # Active Edges: list of edge objects, sorted by x-intercept at current y
+-    # An edge connects a processed vertex to an unprocessed one.
+-    active_edges = []
+-    
+-    # Current Boundary: list of edge indices forming the boundary polygon
+-    current_boundary = []
+-    
+-    # Output polygons
+-    output_polygons = []
+-    
+-    processed_vertices = set()
+-    
+-    while event_queue:
+-        y_min, v_idx = event_queue.pop(0) # getMin
+-        next_vertex = screen_vertices[v_idx]
+-        current_y = y_min
++    # Helper to get edges connected to a vertex
++    def get_edges_from_vertex(v):
++        return [e for e in hexahedron_edges if e.start == v or e.end == v]
+         
+-        # Check if active edges are still sorted by x-intercept at current_y
+-        # Calculate x-intercepts for all active edges at current_y
+-        edge_intercepts = []
+-        for edge in active_edges:
+-            x_int = edge.x_at_y(current_y)
+-            edge_intercepts.append((x_int, edge))
++    # Helper to calculate x-coordinate of an edge at a specific y
++    def edge_x_at_y(edge, y):
++        # Linear interpolation between edge endpoints
++        t = (y - edge.start.y) / (edge.end.y - edge.start.y)
++        return edge.start.x + t * (edge.end.x - edge.start.x)
++
++    # Helper to check if active_edges is sorted by x at current y
++    def is_sorted(active_edges, current_y):
++        xs = [edge_x_at_y(e, current_y) for e in active_edges]
++        return all(xs[i] <= xs[i+1] for i in range(len(xs)-1))
++
++    while not event_queue.is_empty():
++        next_vertex = event_queue.get_min()
++        current_y = next_vertex.y
+         
+-        is_sorted = all(edge_intercepts[i][0] <= edge_intercepts[i+1][0] 
+-                        for i in range(len(edge_intercepts)-1))
+-        
+-        if is_sorted:
+-            # Case A: No intersections
++        # Check if active edges are still sorted
++        if is_sorted(active_edges, current_y):
++            # Case A: Order preserved
+             # Find edges ending at next_vertex
+-            rem_edges = [e for e in active_edges if e.end_vertex == next_vertex]
++            rem_edges = [e for e in active_edges if e.end == next_vertex]
+             
+-            # Determine z-distance for shading [S1, unofficial]
+-            z_dist = determine_z_distance(next_vertex, hexahedron_vertices)
+-            
++            # Remove them from active list
++            for e in rem_edges:
++                active_edges.remove(e)
++                
+             # Update current boundary
+             if len(rem_edges) >= 1:
++                # Insert first removed edge and its reversal
+                 e1 = rem_edges[0]
+-                # Insert e1 and its reversal into boundary to form a needle
+                 current_boundary.append(e1)
+                 current_boundary.append(e1.reverse())
+-            
++                
+             if len(rem_edges) >= 2:
++                # Insert second removed edge and its reversal
+                 e2 = rem_edges[1]
+-                # Insert e2 and its reversal
+                 current_boundary.append(e2)
+                 current_boundary.append(e2.reverse())
+                 # Splice out the completed counterclockwise polygon
+-                polygon = extract_polygon_from_boundary(current_boundary)
+-                output_polygons.append(polygon)
+-                # Remove used edges from boundary? 
+-                # Note: The source implies splicing out the polygon, 
+-                # effectively removing those edges from the active boundary loop.
+-                remove_spliced_edges(current_boundary)
++                # The logic implies the boundary forms a closed loop here
++                output_polygon = splice_polygon(current_boundary)
++                render_polygon(output_polygon, z=next_vertex.z)
++                
++            # Determine z-distance (depth) for the new boundary segment
++            # This is associated with the projection of the vertex
++            depth = next_vertex.z 
+             
+-            # Remove processed edges from active list
+-            for e in rem_edges:
+-                active_edges.remove(e)
++            # Insert new edges starting from next_vertex
++            new_edges = [e for e in get_edges_from_vertex(next_vertex) if e.start == next_vertex and not is_processed(e.end)]
+             
+-            # Add new edges starting from next_vertex
+-            new_edges = get_edges_starting_at(next_vertex, hexahedron_vertices, screen_vertices)
++            # Insert into active_edges maintaining x-order
+             for e in new_edges:
+-                active_edges.append(e)
+-            
+-            # Re-sort active_edges by x-intercept at current_y + epsilon
+-            active_edges.sort(key=lambda e: e.x_at_y(current_y + 1e-9))
+-            
+-            processed_vertices.add(v_idx)
++                insert_sorted(active_edges, e, key=lambda x: edge_x_at_y(x, current_y))
++                
++            mark_processed(next_vertex)
+             
+         else:
+-            # Case B: Intersection detected
++            # Case B: Order violated (intersection)
+             # Find two adjacent edges in active_edges that intersect
+-            # "Previously adjacent" implies they are next to each other in the sorted list
++            # Note: "previously adjacent" implies they were neighbors in the list before crossing
+             intersecting_edges = find_intersecting_adjacent_edges(active_edges, current_y)
+-            e_a, e_b = intersecting_edges
+             
+-            # Find intersection point
+-            inter_x, inter_y = e_a.intersection(e_b)
+-            
+-            # Create new vertex
+-            new_vertex = Vertex(inter_x, inter_y, interpolate_z(e_a, e_b, inter_y))
+-            new_vertex_idx = len(screen_vertices) # Temporary index
+-            screen_vertices.append(new_vertex)
+-            
+-            # Chop off edges
+-            # e_a ends at new_vertex, e_b ends at new_vertex
+-            e_a.end_vertex = new_vertex
+-            e_b.end_vertex = new_vertex
+-            
+-            # Create new edges starting from new_vertex
+-            # The "cut-off parts" become new edges
+-            # This requires reconstructing the edge segments from intersection to original end
+-            new_e_a = Edge(e_a.start_vertex, new_vertex)
+-            new_e_b = Edge(e_b.start_vertex, new_vertex)
+-            
+-            # Replace old edges with new ones in active list
+-            active_edges.remove(e_a)
+-            active_edges.remove(e_b)
+-            active_edges.append(new_e_a)
+-            active_edges.append(new_e_b)
+-            
+-            # Re-sort
+-            active_edges.sort(key=lambda e: e.x_at_y(current_y + 1e-9))
+-            
+-            # Insert new vertex into event queue
+-            event_queue.append((inter_y, new_vertex_idx))
+-            event_queue.sort() # Maintain priority order
+-            
+-    return output_polygons, z_distances
++            if len(intersecting_edges) == 2:
++                e_a, e_b = intersecting_edges
++                # Find intersection point
++                new_vertex = compute_intersection(e_a, e_b)
++                
++                # Chop edges
++                # e_a ends at new_vertex
++                e_a.end = new_vertex
++                # e_b ends at new_vertex
++                e_b.end = new_vertex
++                
++                # Create new edges starting at new_vertex
++                # The parts of e_a and e_b that were cut off become new edges
++                # Original e_a went from start_a to old_end_a. Now start_a to new_vertex.
++                # The part from new_vertex to old_end_a is a new edge
++                new_edge_a = Edge(new_vertex, e_a.original_end)
++                new_edge_b = Edge(new_vertex, e_b.original_end)
++                
++                # Remove old edges from active list? 
++                # The source says "chop off... cut-off parts become new edges... insert new edges"
++                # Implicitly, the old edges are replaced or modified.
++                # We remove the old versions and add the new ones
++                active_edges.remove(e_a)
++                active_edges.remove(e_b)
++                
++                # Insert new edges in correct x-order
++                insert_sorted(active_edges, new_edge_a, key=lambda x: edge_x_at_y(x, current_y))
++                insert_sorted(active_edges, new_edge_b, key=lambda x: edge_x_at_y(x, current_y))
++                
++                # Insert new vertex into event queue
++                # It will be the minimum (or processed next)
++                event_queue.push(new_vertex, priority=new_vertex.y)
++                
++                # Note: The source says "insert (newVertex, eventQueue); /* it will be the minimum */"
++                # This implies immediate processing or very high priority.
+ ```
+ 
+-**Parameters and Edge Cases:**
+-*   **Degeneracies (Screen Space):** If two vertices share the same $x$ or $y$ value, assume a slight rotation of screen space to resolve the tie without changing non-degenerate topology [S1, unofficial].
+-*   **Degeneracies (3D Geometry):** If the hexahedron has coincident vertices (zero-length edges):
+-    *   Assume no two adjacent edges have zero length and no two adjacent faces have zero area [S1, unofficial].
+-    *   If a zero-length edge is found, perturb the hexahedron to give it length while maintaining convexity.
+-    *   If the edge connects two faces with positive area, use the intersection line of their planes as the pull-apart direction [S1, unofficial].
+-    *   If adjacent to a zero-area face, use diagonally opposite edges or intersecting face planes to determine the direction [S1, unofficial].
++**Parameters and Typical Values:**
++*   **Screen Space Rotation:** To handle degeneracies where two vertices share an $x$ or $y$ coordinate, a slight rotation of the screen space is assumed. The angle is infinitesimal, sufficient to break ties without altering nondegenerate topology [S1, unofficial].
++*   **Degeneracy Handling:** If the hexahedron has coincident vertices (zero-length edges), the algorithm perturbs the geometry. It finds a direction to "pull apart" the coincident vertices based on the intersection of adjacent face planes or diagonally opposite edges, ensuring convexity is maintained [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **Projection Degeneracies:** Occur when two projected vertices have identical $x$ or $y$ values. Resolved by assuming a slight screen space rotation [S1, unofficial].
++*   **Geometric Degeneracies:** Occur if the input hexahedron has zero-length edges or zero-area faces. The algorithm assumes no two adjacent edges have zero length and no two adjacent faces have zero area. If encountered, the hexahedron is perturbed [S1, unofficial].
++*   **Complexity:** The algorithm is described as the "most expensive" of the projection methods presented [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Complexity:** The method is described as "the most expensive" of the projection methods presented [S1, unofficial]. The sweep-line algorithm runs in $O(V \log V)$ per cell for vertex sorting and edge management, where $V=8$ for a hexahedron. However, the constant factors and per-pixel polygon rasterization overhead are high.
+-*   **Strengths:** It handles general convex hexahedra without pre-classifying projection topologies. It correctly handles complex topologies that vary from cell to cell.
+-*   **Limitations:** High computational cost per cell. Requires careful handling of degeneracies. Not suitable for real-time rendering on large volumes due to per-cell overhead.
+-*   **When to use:** High-quality offline rendering of irregular curvilinear grids where geometric accuracy is critical and performance is secondary.
++*   **Time Complexity:** The algorithm follows a sweep-line pattern. For a hexahedron with 8 vertices and 12 edges, the event queue processes 8 vertices plus potential intersection vertices. The active edge list is small (at most 12 edges). Sorting and insertion are $O(E \log E)$ or $O(E)$ depending on implementation, where $E$ is the number of edges. However, the overhead of managing the boundary and handling intersections makes it significantly slower than coherent methods [S1, unofficial].
++*   **Memory Complexity:** $O(V + E)$ per cell, where $V=8$ and $E=12$. The data structures are local to each cell.
++*   **Strengths:** Handles general convex hexahedra without case analysis for projection topologies. Robust for irregular/curvilinear grids.
++*   **Limitations:** Computationally expensive. Requires careful handling of degeneracies. Not suitable for real-time rendering of large volumes compared to coherent methods [S1, unofficial].
++*   **When to use:** When rendering curvilinear grids with significant distortion where coherent projection fails due to varying topologies.
++*   **When not to use:** When performance is critical and the grid is rectilinear or mildly distorted.
+ 
+ ## Background
+-Incoherent projection was introduced in a 1993 NASA technical report by the authors of the "coherent projection" technique for rectilinear grids [S1, unofficial]. It was developed to address the limitations of coherent projection when applied to irregular hexahedral grids, where the number of non-degenerate projection topologies is significantly higher and varies per cell [S1, unofficial]. The method is part of the broader effort in rapid exploration of curvilinear grids using direct volume rendering.
++Incoherent projection was introduced in a 1993 NASA technical report by West et al. [S1, unofficial]. It builds upon the "coherent projection" technique for rectilinear grids [WVG91] and extends it to general convex hexahedra. The method was developed to allow rapid exploration of curvilinear grids using direct volume rendering, addressing the limitations of existing methods that could not efficiently handle the complex projection topologies of irregular cells [S1, unofficial].
+ 
+ ## Sources

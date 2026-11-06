@@ -3,7 +3,7 @@
 Also called: packed tensors, variable-length sample storage
 
 ## Overview
-Packed Tensor Representation is a data structure designed to store samples from rays that have varying numbers of valid samples, avoiding the memory inefficiency of fixed-size tensors with masks when large portions of space are empty [S1]. It packs per-sample ray indices into per-ray chunk information (start index and count) for flattened tensors [S2, unofficial]. This approach is similar to those used in Instant-NGP [17] and PyTorch3D [22], but is explicitly described here as a solution to the memory inefficiency of storing data as a tensor with shape $(n\_rays, n\_samples, ...)$ and an extra mask [S1].
+Packed Tensor Representation is a data structure designed to store samples from rays that have varying numbers of valid samples, avoiding the memory inefficiency of fixed-size tensors with masks when large portions of space are empty [S1]. It packs per-sample ray indices into per-ray chunk information (start index and count) for flattened tensors [S2, unofficial]. This approach is similar to those used in Instant-NGP and PyTorch3D, but is explicitly described here as a solution to the memory inefficiency of storing data as a tensor with shape $(n\_rays, n\_samples, ...)$ and an extra mask [S1].
 
 ## How it works
 **Inputs and Outputs:**
@@ -20,8 +20,8 @@ The representation relies on two tensors:
 **Algorithm:**
 The construction of `packed_info` from `ray_indices` follows these steps [S2, unofficial]:
 
-1.  Assert that `ray_indices` is a 1D tensor.
-2.  Determine the device and data type (`dtype`) from `ray_indices`. If `ray_indices` is on CUDA, proceed; otherwise, raise `NotImplementedError` as CPU inputs are not supported [S2, unofficial].
+1.  Assert that `ray_indices` is a 1D tensor [S2, unofficial].
+2.  Determine the device and data type (`dtype`) from `ray_indices` [S2, unofficial]. If `ray_indices` is on CUDA, proceed; otherwise, raise `NotImplementedError` as CPU inputs are not supported [S2, unofficial].
 3.  If `n_rays` is not provided, set `n_rays = ray_indices.max().item() + 1` [S2, unofficial].
 4.  Initialize `chunk_cnts` as a zero tensor of shape $(n\_rays)$ with the same device and `dtype` as `ray_indices` [S2, unofficial].
 5.  Accumulate the counts of samples per ray by adding 1 to `chunk_cnts` at indices specified by `ray_indices`:
@@ -38,13 +38,13 @@ The construction of `packed_info` from `ray_indices` follows these steps [S2, un
 ```python
 def pack_tensor(ray_indices, n_rays=None):
     # Assert 1D
-    assert ray_indices.dim() == 1
+    assert ray_indices.ndim == 1
     
     # Device and dtype handling
     device = ray_indices.device
     dtype = ray_indices.dtype
     
-    if device.type != 'cuda':
+    if device != 'cuda':
         raise NotImplementedError("Only CUDA inputs are supported")
         
     # Infer n_rays if not provided
@@ -52,22 +52,23 @@ def pack_tensor(ray_indices, n_rays=None):
         n_rays = ray_indices.max().item() + 1
         
     # Initialize counts
-    chunk_cnts = torch.zeros(n_rays, device=device, dtype=dtype)
+    chunk_cnts = zeros(shape=(n_rays,), device=device, dtype=dtype)
     
     # Accumulate counts: for each sample, increment the count for its ray
-    # Equivalent to: chunk_cnts.scatter_add_(0, ray_indices, torch.ones_like(ray_indices, dtype=dtype))
-    chunk_cnts.index_add_(0, ray_indices, torch.ones_like(ray_indices, dtype=dtype))
-    
+    for idx in ray_indices:
+        chunk_cnts[idx] += 1
+        
     # Compute start indices
     # cumsum gives the end index (exclusive) for each ray's block
-    chunk_ends = chunk_cnts.cumsum(dim=0, dtype=dtype)
+    chunk_ends = cumsum(chunk_cnts, axis=0, dtype=dtype)
     chunk_starts = chunk_ends - chunk_cnts
     
     # Stack to form packed_info
-    packed_info = torch.stack([chunk_starts, chunk_cnts], dim=-1)
+    packed_info = stack([chunk_starts, chunk_cnts], axis=-1)
     
     return packed_info
 ```
+*Note: `zeros`, `cumsum`, and `stack` refer to standard contiguous array operations.*
 
 **Parameters:**
 *   `ray_indices`: LongTensor, shape $(n\_sample)$ [S2, unofficial].
@@ -76,17 +77,15 @@ def pack_tensor(ray_indices, n_rays=None):
 **Edge Cases and Pitfalls:**
 *   **CPU Support:** The implementation described in the sources only supports CUDA inputs; CPU inputs raise `NotImplementedError` [S2, unofficial].
 *   **Differentiability:** The function is not differentiable [S2, unofficial].
-*   **Empty Rays:** If a ray has no valid samples, its count in `chunk_cnts` will be 0, and its start index will be equal to the start index of the next ray with samples (or the total number of samples if it is the last ray). Accessing data for such a ray should handle zero-length slices gracefully [S1][S2, unofficial].
-
-## Subtopics
+*   **Empty Rays:** If a ray has no valid samples, its count in `chunk_cnts` will be 0, and its start index will be equal to the start index of the next ray with samples (or the total number of samples if it is the last ray) [S2, unofficial]. Accessing data for such a ray should handle zero-length slices gracefully [S1][S2, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   **Memory:** The memory usage is proportional to the number of *valid* samples plus $2 \times n\_rays$ integers for the `packed_info` tensor. This is significantly more efficient than a fixed-size tensor of shape $(n\_rays, n\_samples, ...)$ with a mask when the sparsity is high (i.e., many rays have few valid samples or large gaps) [S1].
+*   **Memory:** The memory usage is proportional to the number of *valid* samples plus $2 \times n\_rays$ integers for the `packed_info` tensor [S1][S2, unofficial]. This is significantly more efficient than a fixed-size tensor of shape $(n\_rays, n\_samples, ...)$ with a mask when the sparsity is high (i.e., many rays have few valid samples or large gaps) [S1].
 *   **Time:** The construction of `packed_info` requires a single pass to count indices and a cumulative sum, which is $O(n\_sample + n\_rays)$ [S2, unofficial].
 
 **Measured Performance:**
-*   In experiments replacing code in official NeRF repositories, NerfAcc using packed tensors showed improvements. For example, on the "nerfacc (occ)" variant, it achieved a training time of 130 minutes and rendering time of 30.11 seconds, with camera errors of 0.044 (rotational) and 0.07/0.35 (translational, scaled) [S1].
+*   In experiments replacing code in official NeRF repositories, NerfAcc using packed tensors showed improvements [S1]. For example, on the "nerfacc (occ)" variant, it achieved a training time of 130 minutes and rendering time of 30.11 seconds, with camera errors of 0.044 (rotational) and 0.07/0.35 (translational, scaled) [S1].
 
 **Strengths and Limitations:**
 *   **Strengths:** Efficient memory usage for sparse data; supports variable numbers of samples per ray without padding or masking overhead; enables spatial skipping [S1].

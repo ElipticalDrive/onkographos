@@ -1,0 +1,170 @@
+FLINT (Fast Library for Number Theory). Contribute to flintlib/flint development by creating an account on GitHub.
+
+Improved real and rational root finding and counting for fmpz_poly by fredrik-johansson · Pull Request #2855 · flintlib/flint · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fredrik-johansson
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Collaborator
+Fixes #2738, #2740 and much more.
+This PR reworks the algorithm selection for real root counting and isolation of fmpz_polys, adds two new isolation methods, uses real root isolation as the first step of arb_fmpz_poly_complex_roots, adds functions for computing integer and rational roots without factoring, and fixes several bugs found along the way.
+Done using Claude Opus 5.5. Extended writeup by the AI:
+Real root counting (#2738)
+New _fmpz_poly_num_real_roots_sturm_bounded: a Sturm sequence computed as a primitive PRS (with the Cohen pseudo-remainder, which is much faster than fmpz_poly_pseudo_rem on sparse input). It gives up as soon as some remainder has length × bits exceeding a bound. The primitive remainders shrink for structured input (classical orthogonal polynomials, sparse polynomials) and grow quickly for generic input, so this cheaply detects when Sturm wins.
+fmpz_poly_num_real_roots (degree ≥ 5): exact Descartes check on p(x) and p(−x), then subresultant Sturm for small input, then bounded primitive Sturm, falling back on VCA. Previously it always used subresultant Sturm, which is catastrophically slow for large input.
+fmpz_poly_num_real_roots_0_1: Descartes test on (0, 1), then bounded primitive Sturm, falling back on VCA. Previously it always used VCA, which is very slow for structured input and for sparse polynomials with close roots.
+Across ~360 test polynomials (random, perturbed Chebyshev, products of linear factors, orthogonal polynomials, Bernoulli, Fibonacci, Mignotte-type, sparse), the new defaults are on average within 1.25× (whole line) and 1.32× (on (0, 1)) of the fastest method for each input. The old defaults averaged 4.7× and 3.0×, with worst cases 10⁴–10⁶× slower. Examples at degree 256:
+old
+new
+num_real_roots, Chebyshev T
+2.45 s
+3.6 ms
+num_real_roots, Laguerre
+24 s
+3.9 ms
+num_real_roots, random 1000-bit
+50 s
+6.1 ms
+num_real_roots_0_1, Chebyshev T
+204 ms
+4.4 ms
+num_real_roots_0_1, x⁶⁴ − 2(ax − 1)², 256-bit a
+48 s
+0.5 ms
+Real root isolation
+fmpz_poly_isolate_real_roots and fmpz_poly_isolate_positive_roots now select among three methods. The output format and guarantees are unchanged.
+Faster Descartes test in VCA: _fmpz_poly_descartes_bound_0_1 (about 70% of VCA's time) now uses fixed-width two's complement limb arrays, as in _fmpz_poly_taylor_shift_horner. This makes VCA 1.4–2.4× faster at degree 64–256.
+Sturm bisection (new _fmpz_poly_isolate_real_roots_sturm): dyadic bisection with a primitive Sturm sequence. It stores only p₀, p₁ and the pseudo-quotients, since p_{k+1} = (L_k p_{k−1} − Q_k p_k)/G_k, so the whole sequence is evaluated at a point in O(n) operations. Evaluation uses ball arithmetic, with higher precision and then exact arithmetic as fallbacks. It gives up when the sequence grows, and is tried for length ≥ 64 unless Descartes already shows at most one positive and one negative root.
+Certified sign changes (new _fmpz_poly_isolate_real_roots_signs), for real-rooted polynomials whose roots span many orders of magnitude (e.g. Eulerian polynomials). These are VCA's worst case: nodes carry ~n²-bit coefficients. The new method evaluates p at dyadic points in ball arithmetic and stops once the number of sign changes equals the number of sign variations of the coefficients. By Descartes' rule of signs this certifies the isolation, and for real-rooted polynomials the rule is exact. It is gated by the Descartes counts adding up to the degree, Newton's inequalities, and root bounds spanning at least one octave per root. It falls back on VCA if it does not finish within max(4n log₂n, n²/2) evaluations: Eulerian polynomials need about n²/4, other successful inputs at most about 2n log₂n, and inputs with clusters of roots (such as Taylor shifts of Eulerian polynomials) fail, so a small budget keeps the cost of failing within 1.1–3× of plain VCA.
+Isolation timings (VCA → new):
+degree
+Chebyshev T
+Hermite
+Laguerre
+Legendre
+Eulerian
+128
+2.6×
+2.0×
+1.6×
+1.8×
+0.14 s → 0.035 s
+256
+6.3×
+7.7×
+4.8×
+5.1×
+3.7 s → 0.27 s
+512
+24× (4.5 s → 0.19 s)
+18×
+14×
+9×
+~130 s → 2.1 s
+Also: x^n − 2(ax − 1)² is 6× faster at n = 64 and 22× at n = 128, and cyclotomic polynomials are 1.6–4× faster. Generic input is essentially unaffected. VCA remains faster for polynomials with many integer roots (up to 3× at degree 64–128). With the refinement fix below, arb_fmpz_poly_real_roots at degree 512 is 2–3× faster.
+Complex root isolation: real roots first
+arb_fmpz_poly_complex_roots now starts by calling arb_fmpz_poly_real_roots on the (deflated) polynomial.
+All roots real: the result is complete, and no Durand–Kerner iteration or sign-change validation is needed.
+Many real roots (≥ 1/4 of the degree), or clustered real roots: the real roots are divided out in ball arithmetic. The quotient Q = f / ∏(x − r_i) is a rigorous enclosure of the exact quotient, whose roots are exactly the nonreal roots of f. acb_poly_find_roots is applied to Q only, and its roots must exclude the real axis. The precision lost to cancellation in the division is measured (normwise accuracy of Q) and compensated for when the real roots are refined. If this fails at 16× the target precision, the old algorithm is used.
+Few, well-separated real roots: the old algorithm is used. Dividing them out barely reduces the degree, and it makes sparse input dense and inexact. The waste is just the real root isolation, which is usually negligible.
+Timings, arb_fmpz_poly_complex_roots old → new, at 64 bits (1024 bits in parentheses):
+degree 128
+old
+new
+speedup
+Chebyshev T
+0.097 s
+0.014 s
+6.7× (5.6×)
+Legendre
+0.096 s
+0.017 s
+5.6× (5.3×)
+charpoly of random symmetric matrix
+0.36 s
+0.065 s
+5.6× (4.9×)
+Wilkinson ∏(x − i)
+1.17 s
+0.0099 s
+118× (115×)
+Wilkinson + 1
+1.21 s
+0.20 s
+6.1× (5.9×)
+half real: ∏₁⁶⁴(b_i x − a_i) × random degree 64
+0.085 s
+0.054 s
+1.6× (2.6×)
+Bernoulli (32 real roots)
+0.12 s
+0.055 s
+2.1× (1.5×)
+x¹²⁸ − 2(ax − 1)², a = 10⁶ + 3 (close real pair)
+> 60 s
+0.30 s
+> 200×
+random 30-bit, x^n − x − 1, cyclotomic, x^n − 2, Chebyshev + 3 (≤ 2 real roots)
+0.9–1.2×
+At degree 256: Chebyshev 15×, Legendre 13×, Wilkinson 255×, Wilkinson + 1 13×, and the Mignotte-type polynomial 3 s instead of > 60 s.
+Where it loses:
+Near-real-rooted polynomials where real isolation falls back on VCA, e.g. Eulerian × (x² + x + 1). The real roots span hundreds of octaves and the two nonreal roots disable the sign-change method. This is 0.2–0.7× at degree 34–130, and 1.1× (a win) at degree 258.
+Clusters of nonreal roots near the real axis, where real isolation finds nothing. This is 0.83–0.9×, with the VCA run as pure overhead.
+Results were checked against the old implementation for all families up to degree 64. t-complex_roots gains products of linear factors with perturbed constant terms, Wilkinson-type polynomials, and a check of the promised relative accuracy.
+Integer and rational roots (#2740)
+New functions:
+```
+slong fmpz_poly_roots_fmpz(fmpz * res, slong * exp, const fmpz_poly_t poly);
+slong fmpz_poly_roots_fmpq(fmpq * res, slong * exp, const fmpz_poly_t poly);
+slong _fmpz_poly_roots_fmpz_squarefree(fmpz * res, const fmpz * poly, slong len);
+slong _fmpz_poly_roots_fmpq_squarefree(fmpq * res, const fmpz * poly, slong len);
+```
+The first two return the distinct roots in increasing order, with multiplicities in exp if it is non-NULL. The underscore versions assume squarefree input with nonzero constant coefficient and return the roots in no particular order.
+Small coefficients: if the constant and leading coefficients are small with few divisors, the rational root test candidates are checked mod a prime, then exactly.
+p-adic lifting: otherwise, choose a word-size prime (the one with fewer roots among two) such that p ∤ lc and the roots mod p are simple. Find the roots via gcd(g, x^p − x) and lift them together by Newton iteration using fast multipoint evaluation. Lifting stops early per root once rational reconstruction gives a candidate that passes cheap checks, and is otherwise bounded by p^N > 2|lc|R.
+Verification: all candidates are verified exactly by checking that the product of the linear factors divides g.
+Multiplicities: a squarefree factorization is computed only when the polynomial is not squarefree mod a prime.
+Speedups compared to extracting linear factors from fmpz_poly_factor: Swinnerton-Dyer degree 256 (× a linear factor) 68× (160×); degree 21 with 100000-bit coefficients 6× (93× for integer roots); random degree 1024 8× (127× for integer roots); ∏₁²⁵⁶ (b_i x − a_i) 7×; x^n − 2 3–12×. Factoring is still slightly faster for degree-16 polynomials with many rational roots.
+The gr implementations of polynomial roots over ZZ and QQ, which factored completely ("todo: better algorithm"), now use these functions.
+New flag ARB_FMPZ_POLY_ROOTS_RATIONAL for arb_fmpz_poly_real_roots: it computes the rational roots exactly first and divides them out. For ∏₁⁵¹² (b_i x − a_i) this takes 0.07 s instead of 10.8 s; for ∏₁⁵¹² (x − i), 0.066 s instead of 0.83 s. It adds overhead for polynomials with few real roots, so it is off by default.
+Bug fixes
+Missed roots at the root bound: fmpz_poly_isolate_real_roots (and hence fmpz_poly_num_real_roots_vca, and fmpz_poly_num_real_roots_upper_bound) could miss a root ±2^k when the power-of-two root bound 2^k is attained. For example, (x − 2)(x² + x + 1) was reported to have no real roots. Fixed by rescaling if the scaled polynomial vanishes at 1.
+Wrong exact roots with a root at zero: fmpz_poly_isolate_positive_roots returned unscaled exact roots when the polynomial has a root at zero. For x(x − 1)(x − 2) it returned the exact root 1/4 instead of 2.
+hermite_h with reused output: fmpz_poly_hermite_h zeroed coefficients of the wrong parity, giving wrong results when overwriting a polynomial with nonzero coefficients (e.g. computing H₃₁ into a variable holding H₃₀).
+Near-infinite loop and slow convergence in refinement: arb_fmpz_poly_refine_root_arb could loop practically forever when the root is extremely close to an endpoint of the initial interval, because the bisection fallback never checked for termination. arb_fmpz_poly_real_roots on the degree-256 Eulerian polynomial did not finish in over an hour; it now takes 0.5 s. The refinement now works as follows:
+It tracks an exact bracketing interval with known endpoint signs.
+It intersects Newton candidates with that interval, trying a tight radius (assuming quadratic convergence) first.
+It bisects once per fallback step, instead of bisecting until the new interval lies strictly inside the old one. For roots of ∏(x − k) + 1, which lie within 2^−1500 of the integers, that could take ~1500 bisections per root.
+It keeps interval widths exactly representable, so the output is contained in the input interval (now documented).
+As a result, arb_fmpz_poly_real_roots on ∏₁²⁵⁶(x − k) + 1 takes 1.3 s instead of 62 s. Refinement is 1.2–1.6× faster on orthogonal polynomials, and 13–16× faster on ∏(x − k) + 1 and ∏(b x − a) + 1 at degree 128. It can be up to ~1.6× slower for isolated roots at high precision (e.g. about 1.5 ms extra for a close pair at 4096 bits).
+Interval semantics: fmpz_poly_num_real_roots_0_1{,_sturm,_vca} and _fmpz_poly_isolate_real_roots_0_1_vca counted or isolated a root at 0, contrary to the documented open interval (0, 1). They now consistently use (0, 1).
+Improved real and rational root finding and counting for fmpz_poly
+7082b75
+Hide details
+View details
+fredrik-johansson
+merged commit 3d68368
+into
+flintlib:main
+Sep 27, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

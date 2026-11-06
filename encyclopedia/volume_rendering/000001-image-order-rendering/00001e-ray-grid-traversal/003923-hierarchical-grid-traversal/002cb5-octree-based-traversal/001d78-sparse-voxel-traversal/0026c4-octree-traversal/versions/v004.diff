@@ -1,0 +1,209 @@
+--- v003.md
++++ v004.md
+@@ -4,29 +4,25 @@
+ 
+ ## Overview
+-Octree Traversal is a hierarchical ray-intersection method that accelerates volume rendering by recursively subdividing 3D space into eight equal blocks (octants) to skip empty regions [S1, S2, S3, unofficial]. It solves the problem of excessive sampling in sparse volumetric datasets by allowing rays to bypass large volumes of empty space, testing only non-empty nodes [S1, S3, unofficial]. Unlike flat grid traversal which checks every voxel, or [Empty-Space Skipping](link) which uses primitive hulls, octrees use a recursive tree structure to find non-empty space faster [S1, S5, unofficial]. It is theoretically optimal for fewest traversal steps when objects are uniformly contained within cells with no overlap [S5, unofficial].
++Octree Traversal is a hierarchical ray-intersection method that accelerates volume rendering by recursively subdividing 3D space into eight equal blocks (octants), allowing rays to skip empty regions without sampling individual voxels [S1, unofficial][S2, unofficial][S3, unofficial]. Unlike flat grid traversal which checks every voxel, or Empty-Space Skipping which uses primitive hulls, octrees use hierarchical spatial subdivision to find non-empty space faster, theoretically achieving the fewest traversal steps for regularly spaced geometry [S1, unofficial][S5, unofficial]. It sets itself apart from its siblings by relying on a strict $2 \times 2 \times 2$ regular subdivision structure, which simplifies child index computation and neighbor finding compared to irregular hierarchical grids [S5, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $O$ and direction $D$; an octree root node; traversal bounds $t_{enter}$ and $t_{exit}$ along the ray.
+-*   **Output:** A sorted list of intersected leaf nodes (voxels or scalar blocks) or a boolean hit status.
++**Inputs:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; an octree root node covering a bounding box; traversal bounds $t_{enter}$ and $t_{exit}$.
++**Outputs:** A sorted list of intersected leaf nodes (voxels or scalar blocks) along the ray.
+ 
+ **Data Structures:**
+-The octree is a tree where each parent node contains either 0 or 8 children [S2, S3, unofficial].
+-*   **Interior Node:** Contains pointers to 8 children. May store metadata (e.g., min/max values) for culling [S4][S5, unofficial].
+-*   **Cap Node:** A leaf node at a specific depth where children are explicit voxels [S4].
+-*   **Scalar Leaf:** A leaf node representing a coarser-resolution scalar block [S4].
+-*   **Child Index:** The 0–7 index of a child octant, determined by bitwise operations on the ray's position relative to the node's center [S1, unofficial][S4].
++The octree is a tree where each parent node contains either 0 or 8 children [S2, unofficial][S3, unofficial].
++*   **Interior Node:** Contains pointers to 8 children and potentially metadata (e.g., min/max values for culling) [S4].
++*   **Leaf Node:** Represents the finest level of subdivision (a voxel or a block of voxels).
++*   **Node Indexing:** Children are indexed 0–7. The index is computed using bitwise operations on the ray's position relative to the node's center [S4].
+ 
+-**Steps:**
+-1.  **Initialization:** Start at the octree root. Initialize traversal bounds $t_{enter}$ and $t_{exit}$ [S4].
+-2.  **Mid-Plane Intersection:** For the current node, compute the ray's intersection distances with the X, Y, and Z mid-planes of the node: $t_{midX}$, $t_{midY}$, $t_{midZ}$ [S4].
+-3.  **Ordering:** Sort these mid-plane intersections to determine the sequential order in which the ray intersects the eight child octants [S3, unofficial][S4][S5, unofficial]. A ray intersects at most 4 octants of a node [S4].
+-4.  **Traversal:** March the ray through the octants in the determined sorted order [S4].
+-5.  **Recursion/Descent:**
+-    *   If the current node is empty or fully outside $[t_{enter}, t_{exit}]$, terminate this branch [S1, unofficial].
+-    *   If the current node is an interior node, recurse into the first intersected child octant [S1, unofficial][S4].
+-    *   If the current node is a leaf (cap or scalar), sample the data [S4].
+-6.  **Termination:** The search terminates when encountering a block with no data or reaching the smallest blocks (single voxels) [S1, unofficial].
+-7.  **Output:** Write all found voxels to an output array in sorted order [S1, unofficial].
++**Algorithm Steps:**
++1.  **Initialization:** Start at the octree root. Initialize traversal bounds $t_{enter}$ and $t_{exit}$ based on the ray's entry and exit into the root bounding box [S4].
++2.  **Mid-Plane Intersection:** For the current node, compute the intersection distances of the ray with the X, Y, and Z mid-planes of the node's bounding box: $t_{midX}, t_{midY}, t_{midZ}$ [S4].
++3.  **Ordering:** Sort these mid-plane intersections to determine the order in which the ray enters the eight child octants. A ray intersects at most 4 octants of an interior node [S4].
++4.  **Culling:** Check if the current node is empty or fully behind the ray's exit bound. If so, terminate traversal for this branch [S1, unofficial].
++5.  **Descent/Traversal:**
++    *   If the node is an **Interior Node**: Iterate through the 8 children in the sorted order determined by the mid-planes. For each child, compute its local $t_{enter}$ and $t_{exit}$ based on the mid-plane intersection and recurse [S4].
++    *   If the node is a **Leaf Node**: Sample the voxel data. If using early termination (e.g., opacity threshold), update the accumulated color and opacity. If the ray has exited the volume or accumulated opacity is sufficient, terminate [S2, unofficial].
++6.  **Termination:** The search terminates when all reachable children are processed, or when a leaf node with no data is encountered, or when the minimum block size (single voxel) is reached [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -34,89 +30,111 @@
+ def traverse_octree(ray, node, t_enter, t_exit):
+     # Base case: node is empty or out of bounds
+-    if node.is_empty or not ray_intersects_node(ray, node, t_enter, t_exit):
++    if node.is_empty or t_enter > t_exit:
+         return []
+ 
+-    # Base case: leaf node
++    # Base case: node is a leaf
+     if node.is_leaf:
+-        return [node.sample(ray)]
++        return [node.sample(ray, t_enter, t_exit)]
+ 
+-    # Compute mid-plane intersections for the current node
+-    t_mid_x = ray.intersection_x_midplane(node)
+-    t_mid_y = ray.intersection_y_midplane(node)
+-    t_mid_z = ray.intersection_z_midplane(node)
++    # Compute mid-plane intersections for the current node's bounding box
++    # Assuming node center is (cx, cy, cz) and half-size is h
++    cx, cy, cz = node.center
++    h = node.half_size
++    
++    # Ray: p(t) = o + t * d
++    # Intersection with planes x=cx, y=cy, z=cz
++    t_mid_x = (cx - ray.o.x) / ray.d.x if ray.d.x != 0 else float('inf')
++    t_mid_y = (cy - ray.o.y) / ray.d.y if ray.d.y != 0 else float('inf')
++    t_mid_z = (cz - ray.o.z) / ray.d.z if ray.d.z != 0 else float('inf')
++    
++    # Sort mid-planes to determine octant traversal order
++    # This creates a permutation of the 8 children indices
++    mid_planes = sorted([(t_mid_x, 0), (t_mid_y, 1), (t_mid_z, 2)])
++    
++    results = []
++    
++    # Iterate through children in the determined order
++    # Note: The exact mapping from sorted mid-planes to child indices 0-7
++    # requires bitwise logic based on which side of the mid-plane the ray is on.
++    # For simplicity, we iterate all 8 children and check bounds, 
++    # but optimized versions skip non-intersecting octants.
++    for child_idx in range(8):
++        child = node.children[child_idx]
++        
++        # Compute new t_enter and t_exit for the child
++        # This involves clipping t_enter to the child's entry plane
++        # and t_exit to the child's exit plane.
++        # The entry plane is determined by the ray's direction relative to the child's boundary.
++        
++        t_child_enter, t_child_exit = compute_child_bounds(ray, node, child_idx, t_enter, t_exit)
++        
++        if t_child_enter < t_child_exit:
++            results.extend(traverse_octree(ray, child, t_child_enter, t_child_exit))
++            
++    return results
+ 
+-    # Sort mid-planes to determine octant traversal order
+-    # This determines the sequence of child indices to visit
+-    order = sort_octant_order(t_mid_x, t_mid_y, t_mid_z)
+-
+-    results = []
+-    for child_index in order:
+-        child = node.children[child_index]
+-        if child is not None:
+-            # Recurse into the child
+-            # Note: t_enter and t_exit may need clamping based on the child's bounds
+-            child_results = traverse_octree(ray, child, t_enter, t_exit)
+-            results.extend(child_results)
+-            
+-            # Optional: Early termination if sufficient opacity is reached
+-            if results_sufficient(results):
+-                break
+-
+-    return results
++def compute_child_bounds(ray, node, child_idx, t_enter, t_exit):
++    # Determine the child's bounding box relative to the parent
++    # This is a placeholder for the specific geometric clipping logic
++    # which depends on the child's position (0-7) and the ray direction.
++    # [G] In practice, this uses the sorted mid-plane distances to clip t_enter/t_exit.
++    return t_enter, t_exit
+ ```
+ 
+-**Parameters and Edge Cases:**
+-*   **Minimum Size:** Recursion stops when blocks reach a minimum size or the size of a single voxel [S1, unofficial].
+-*   **GPU Implementation:** Recursive algorithms are not natively supported on GPUs; the required stack must be implemented manually [S1, unofficial].
++**Parameters:**
++*   **Minimum Block Size:** Typically 1 voxel. Can be larger for coarser LOD [S1, unofficial].
++*   **Early Termination Threshold:** Opacity threshold (e.g., 0.95) to stop traversal [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++*   **GPU Implementation:** Octrees are difficult to implement on GPUs because recursive algorithms are not natively supported; a manual stack must be implemented [S1, unofficial].
+ *   **Irregular Geometry:** For meshes and unstructured volumes, octrees conform poorly, leading to expensive traversal strategies [S5, unofficial].
++*   **Node Types:** Separate traversal routines are required for interior nodes, scalar leaves, and cap nodes (which map to cells via reconstruction) [S4].
+ 
+ ## Subtopics
+ 
+ ### [Hierarchical Traversal](896-hierarchical-traversal.md)
+-Accelerates ray-object intersection by navigating a spatial hierarchy (Octree/SVO), skipping entire subtrees when a node is inactive or empty. Chosen when datasets are large and dense to reduce intersection tests compared to non-hierarchical traversal.
++Accelerates ray-object intersection by navigating a spatial hierarchy (Octree/SVO), skipping entire subtrees when inactive. Chosen for dense/large datasets to reduce intersection tests.
+ 
+ ### [Octree-based Volume Rendering](1131-octree-based-volume-rendering.md)
+-Accelerates image-order ray casting by recursively traversing a hierarchical subdivision, using projected size and FOV criteria for LOD selection. Differs from sibling methods by using a tree for adaptive LOD rather than fixed coarse meshes.
++Baseline image-order rendering using octrees for spatial culling and LOD. Relies on one-to-one mapping of data bricks to nodes, requiring subtree residency.
+ 
+ ### [Octree Child Index Computation](1807-octree-child-index-computation.md)
+-Determines the 0–7 octant offset of a child node containing a target coordinate using precomputed bit masks and constant-time bitwise operations. Sets itself apart by avoiding arbitrary bit shifts.
++Determines the 0–7 octant offset of a child node containing a target coordinate using precomputed bit masks and constant-time bitwise operations.
+ 
+ ### [Octree Neighbor Finding](1821-octree-neighbor-finding.md)
+-Determines adjacent leaf nodes in six cardinal directions for a given node in an SVO. Solves traversal between non-contiguous nodes by locating the nearest shared ancestor.
++Locates adjacent leaf nodes in six cardinal directions for a given node in an SVO, solving traversal between non-contiguous nodes.
+ 
+ ### [Ray Traversal of Octree Nodes](1841-ray-traversal-of-octree-nodes.md)
+-Determines the exact sequential order of intersecting eight child octants by computing and sorting ray intersection distances with X, Y, Z mid-planes. Replaces recursive descent with a deterministic, sorted march, effective for empty space skipping.
++Determines the exact sequential order of child octant intersections by sorting ray mid-plane distances, replacing recursive descent with a deterministic march.
+ 
+ ### [CPU Sparse Voxel Octree Traversal](2455-cpu-sparse-voxel-octree-traversal.md)
+-A CPU-based algorithm for linear block-structured SVOs. Uses a stack to manage traversal state, handling valid internal, leaf, and empty nodes. Sets itself apart by performing all calculations on the host processor.
++CPU-based ray traversal for linear block SVOs, using a stack to manage state and cast rays to the next occupied voxel.
+ 
+ ### [Sparse Ray-Octree Intersection (DECIDE)](3006-sparse-ray-octree-intersection-decide.md)
+-A GPU-based algorithm for finding the first intersection with a sparse voxel octree. Handles traversal, descent, and backtracking using a stack.
++GPU-based algorithm for first intersection with sparse voxel octrees, handling traversal, descent, and backtracking via a stack.
+ 
+ ### [Residency Octree Traversal](3073-residency-octree-traversal.md)
+-A ray-guided method for sparse voxel volume rendering that determines which data bricks to load from a server into a local cache. Integrates residency metadata to skip empty/homogeneous regions.
++Ray-guided method for sparse voxel rendering that determines data brick loading from a server based on cache status and resolution.
+ 
+ ### [PND3D Octree Rendering](3433-pnd3d-octree-rendering.md)
+-Uses a standard 8-way octree with child/solid masks, visited in front-to-back depth-first order. Splits the screen into tiles determined by 3 vanishing points for multithreaded occlusion culling.
++Uses 8-way octree with child/solid masks, visited front-to-back. Splits screen into tiles for multithreaded occlusion culling.
+ 
+ ### [GigaVoxels Ray Traversal and Rendering](4144-gigavoxels-ray-traversal-and-rendering.md)
+-A GPU-based technique using an octree to manage data at the "brick" level. Decouples geometric hierarchy from volumetric data storage, allowing efficient memory residency management and LOD culling based on brick occupancy.
++GPU-based technique decoupling geometric hierarchy (octree) from data storage (brick pool), managing residency and LOD based on brick occupancy.
+ 
+ ### N3-Tree
+-Octrees and their generalization N3-trees (N subdivisions per node) are considered a special case of Kd-Trees [S6, unofficial]. No algorithm in available literature proposes to exploit the specific structure of octrees to accelerate ray traversal [S6, unofficial]. Octrees offer regular subdivision providing identical node size at each level, which is interesting for storing regular data bricks [S6, unofficial].
++Octrees and their generalization N3-trees (N subdivisions per node) are considered a special case of Kd-Trees [S6, unofficial]. No algorithm in available literature proposes to exploit the specific structure of octrees to accelerate ray traversal [S6, unofficial]. However, octrees offer regular subdivision providing identical node size at each level, which is interesting for storing regular data bricks [S6, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Theoretically optimal for fewest traversal steps for regularly spaced geometry, assuming uniform containment and no overlap [S5, unofficial].
+-*   **Memory Complexity:** Requires storage for the tree structure. For meshes and unstructured volumes, conformity is poor, leading to higher memory overhead compared to hierarchical grids [S5, unofficial].
+-*   **Performance:** Dramatic speedups are achieved in volumetric rendering applications by performing empty space skipping [S2, S3, unofficial].
+-*   **Strengths:** Efficient for regular voxel geometry; allows a single structure for both ray traversal and scalar storage [S5, unofficial].
+-*   **Limitations:** Difficult to implement on GPUs due to lack of native recursion support [S1, unofficial]. Poor conformity to irregular geometry [S5, unofficial].
+-*   **When to Use:** Regular voxel geometry where empty space skipping is beneficial [S3, S5, unofficial].
+-*   **When Not to Use:** Irregular geometry or meshes where hierarchical grids may be more efficient [S5, unofficial].
++*   **Time Complexity:** Theoretically optimal in terms of fewest traversal steps for regularly spaced geometry, assuming uniform object containment [S5, unofficial]. Complexity is $O(\log N)$ for sparse data, where $N$ is the number of voxels, but degrades for dense data.
++*   **Memory Complexity:** Requires storage for tree nodes. For regular voxel data, it offers more compact storage than general Kd-Trees by reducing indirections [S6, unofficial].
++*   **Performance:** Dramatic speedups over non-hierarchical traversal due to empty space skipping [S1, unofficial][S5, unofficial]. However, for irregular geometry, traversal strategies can be relatively expensive [S5, unofficial].
++*   **Strengths:** Efficient empty space skipping; regular structure simplifies child index computation and neighbor finding; suitable for regular voxel data [S5, unofficial][S6, unofficial].
++*   **Limitations:** Difficult to implement on GPUs due to recursion (requires manual stack); poor fit for irregular geometry/meshes [S1, unofficial][S5, unofficial].
++*   **When to Use:** Regular volumetric datasets where empty space skipping is critical and hardware supports efficient stack management or iterative traversal.
++*   **When Not to Use:** Irregular geometry, meshes, or unstructured volumes where hierarchical grids or Kd-Trees may perform better [S5, unofficial].
+ 
+ ## Background
+-*   **Origin:** The original Glassner implementation [32] proposed top-down point location testing along successive octree nodes hit by the ray [S5, unofficial].
+-*   **Development:** Samet [105] modified the marching procedure to incorporate a neighbor-finding algorithm, delivering dramatic speedups [S5, unofficial]. Sung [120] proposed a DDA traversal similar to a hierarchical grid [S5, unofficial]. Gargantini and Atkinson [29] implemented a traversal similar to a kd-tree where the ray intersection with each octant midplane is ordered [S5, unofficial].
+-*   **Usage:** Used in volumetric rendering applications to perform empty space skipping [S3, unofficial]. Also used in out-of-core direct volume rendering [S5, unofficial].
++The original Glassner implementation proposed top-down point location testing along successive octree nodes hit by the ray [S5, unofficial]. Samet modified this marching procedure to incorporate a neighbor-finding algorithm, delivering dramatic speedups [S5, unofficial]. Sung proposed a DDA traversal similar to a hierarchical grid [S5, unofficial]. Gargantini and Atkinson implemented a traversal similar to a kd-tree where the ray intersection with each octant midplane is ordered [S5, unofficial]. Octrees are used in volumetric rendering applications to perform empty space skipping [S3, unofficial].
+ 
+ ## Sources

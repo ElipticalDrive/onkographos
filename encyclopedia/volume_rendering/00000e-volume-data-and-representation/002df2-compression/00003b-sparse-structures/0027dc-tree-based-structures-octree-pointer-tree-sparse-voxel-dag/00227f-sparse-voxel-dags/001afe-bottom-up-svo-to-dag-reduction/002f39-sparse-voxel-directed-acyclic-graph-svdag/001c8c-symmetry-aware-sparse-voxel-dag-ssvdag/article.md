@@ -1,192 +1,220 @@
 # Symmetry-aware Sparse Voxel DAG (SSVDAG)
 
+Also called: Symmetry-Aware Sparse Voxel Directed Acyclic Graph (SSVDAG)
 
 ## Overview
-SSVDAG is a compact, lossless volume representation that merges subtrees identical through reflective symmetries (planar reflections along principal grid axes) and employs variable bit-rate encoding for child pointers to minimize memory footprint while maintaining GPU-friendly traversal performance [S1, unofficial]. It differs from its parent [Sparse Voxel Directed Acyclic Graph (SVDAG)](962-sparse-voxel-directed-acyclic-graph-svdag.md) by recognizing geometric similarity via transformations rather than requiring exact node identity, and from its child article by explicitly detailing the binary layout and tagged pointer encoding [1349-ssvdag-node-layout-and-tagged-pointer-encoding.md].
+SSVDAG is a compact, lossless representation of voxelized geometry that achieves higher compression than standard Sparse Voxel DAGs (SVDAGs) by merging subtrees that are identical through similarity transforms, specifically planar reflections along the main grid axes [S1, S2, unofficial]. It solves the limitation of SVDAGs, which only share identical subtrees, by exploiting geometric symmetry to reduce memory footprint while maintaining GPU-friendly traversal performance [S1, S2, unofficial]. Unlike SVDAGs, SSVDAGs use variable-bit-rate encoding for child pointers to exploit the skewed distribution of node references [S1, S2, unofficial].
 
 ## How it works
-**Inputs:** A Sparse Voxel Octree (SVO) or an existing SVDAG [S1, unofficial].
-**Outputs:** A Symmetry-aware Sparse Voxel DAG (SSVDAG) stored in a compressed binary format [S1, unofficial].
+**Inputs:** A Sparse Voxel Octree (SVO) or an existing SVDAG representing a voxelized scene.
+**Outputs:** A Symmetry-aware Sparse Voxel DAG (SSVDAG) stored in a GPU-friendly format.
 
 **Data Structures:**
-1.  **Indexing Structure:** Contains the maximum level $L$ and three 32-bit offsets indicating the start of each level in the inner level array [S1, unofficial].
-2.  **Inner Node Header:** A 16-bit header containing a 2-bit code for each of the 8 potential children [S1, unofficial].
-    *   Tag `00`: Reserved for null pointers (not stored) [S1, unofficial].
-    *   Tag `01`: Child pointer is 16 bits [S1, unofficial].
-    *   Tag `10`: Child pointer is 32 bits [S1, unofficial].
-    *   Tag `11`: Child pointer is 32 bits [S1, unofficial].
-3.  **Child Pointer Formats:**
-    *   **Tag 01 (16 bits):** Leftmost 3 bits encode the transformation $T$ (reflection codes). Remaining 13 bits encode the offset in number of level-words from the beginning of the next level [S1, unofficial]. A level-word is 2 bytes for an inner level and 8 bytes for the leaf level [S1, unofficial]. This allows encoding reflections and references to nodes in the first $2^{14}$ bytes of an inner level or first $2^{16}$ bytes of the leaf level [S1, unofficial].
-    *   **Tag 10/11 (32 bits):** Leftmost 3 bits encode the transformation $T$. Remaining 29 bits encode the lowest 29 bits of the offset [S1, unofficial]. The highest bit of the offset is stored in the header or a subsequent byte [S1, unofficial].
+1.  **Leaf Node:** Represents a $2^3$ voxel grid.
+    *   **Canonical Representation ($G^*$):** The unique binary grid among all 8 reflections that yields the maximum integer value when bits are concatenated [S1, S2, unofficial][S3].
+    *   **Canonical Transformation ($T^*$):** The specific reflection combination (encoded in 3 bits: X, Y, Z) that maps the original grid $G$ to $G^*$ [S1, S2, unofficial].
+    *   **Invariant Bits:** A 3-bit mask indicating invariance to reflections along X, Y, and Z axes [S1, unofficial].
+2.  **Inner Node:**
+    *   **Header:** 16 bits. Contains a 2-bit code for each of the 8 potential children. Tag `00` indicates a null pointer (not stored). Other tags indicate the format of the following child pointer [S2, unofficial].
+    *   **Child Pointers:** Variable-length tagged pointers.
+        *   **Tag `01` (2 bytes):** 3 bits encode the transformation $T_{x,y,z}$; 13 bits encode the offset (in level-words) from the start of the next level array [S2, unofficial]. A level-word is 2 bytes for inner levels and 8 bytes for leaf levels. This allows referencing nodes within the first $2^{14}$ bytes of an inner level or $2^{16}$ bytes of the leaf level [S2, unofficial].
+        *   **Other Tags:** Reserved for other pointer sizes (e.g., 4-byte pointers) if offsets exceed the 2-byte range [S2, unofficial].
+3.  **Indexing Structure:**
+    *   Maximum level $L$.
+    *   Three 32-bit offsets indicating the start of each level in the inner level array [S2, unofficial].
 
-**Algorithm Steps:**
-The construction is a bottom-up external-memory process that reduces an SVO to a minimal SSVDAG by alternating phases at each level, starting from the finest level $L-1$ up to the root at level 0 [S1, unofficial].
+**Construction Algorithm (Bottom-Up):**
+The construction reduces an SVO to a minimal SSVDAG by alternating phases at each level, starting from the finest level $L-1$ up to the root at level 0 [S1, S2, unofficial].
 
-1.  **Leaf Grouping (Coarsening):** The construction graph is coarsened by one level. $4^3$ grids are encoded as simple grids in a single array of bricks, each occupying 64 bits [S1, unofficial]. This is done by grouping the $2^3$ leaves from the bottom-up process into $4^3$ inner nodes at level $L-2$ without performing new matches [S1, unofficial].
-2.  **Leaf Node Clustering:** Each small voxel grid $G$ of size $2^3$ is represented by a binary number $B(G)$ by concatenating occupancy bits [S1, unofficial]. The canonical representation $G^?$ is defined as $G^? = T_{x,y,z}(G)$ where $T_{x,y,z} = \arg \max_{T_{x,y,z}} B(T_{x,y,z}(G))$ [S1, unofficial]. This is the reflection with the largest integer value [S1, unofficial]. Two leaf nodes are similar if their canonical representations are identical [S1, unofficial]. A precomputed table of 256 entries maps all possible $2^3$ voxel combinations to the canonical transformation and the unique canonical representation (one of 46 possible ones) [S1, unofficial].
-3.  **Inner Node Clustering:** Inner nodes $n_1$ and $n_2$ are merged if they represent the same subtrees under a transformation $T$ [S1, unofficial]. First, sort inner nodes by the lexicographically sorted set of child pointers [S1, unofficial]. During a streaming pass, verify similarity: for every tagged pointer $(tag, p)$ of $n_1$, it must map to $(T(tag), p)$ in $n_2$ if $p$ is not invariant to $T$, or to $(T(tag) \neg T(tag), p)$ if $p$ is invariant [S1, unofficial]. Repeat for all 8 reflection combinations, stopping at the first match [S1, unofficial]. Replace pointers to the clustered nodes in the immediately higher level with tagged pointers to the single representative, where the tag encodes the specific transformation required to recover the original subtree [S1, unofficial].
-4.  **Frequency-based Pointer Compaction:** Nodes at each level are reordered by reference count (most referenced first) [S1, unofficial]. Pointers are replaced by offsets from the beginning of the level array [S1, unofficial]. The number of bits for each offset is chosen as the smallest available in the encoded format (16-bit or 32-bit) [S1, unofficial].
+1.  **Leaf Clustering:**
+    *   For each leaf node (a $2^3$ voxel grid $G$), compute its canonical representation $G^*$ and transformation $T^*$ using a precomputed lookup table of 256 entries [S1, S2, unofficial][S3].
+    *   Sort leaves by $G^*$.
+    *   Perform a streaming pass: merge nearby leaves with identical $G^*$ into a single representative. Compute the tag for each non-representative leaf as $T^*$ [S1, S2, unofficial].
+    *   Compute invariant bits for leaves: a leaf is invariant to axis $A$ if $G^*$ is identical to the reflection of $G$ across axis $A$ [S1, unofficial].
+
+2.  **Inner Node Clustering:**
+    *   Sort inner nodes by the lexicographically sorted set of their child pointers [S1, S2, unofficial].
+    *   Perform a streaming pass to group nodes with identical pointer sets.
+    *   For each group, verify self-similarity under the 8 possible reflection transformations $T_{x,y,z}$.
+    *   **Similarity Check:** Two nodes $n_1$ and $n_2$ are similar under $T$ if for every tagged pointer $(tag, p)$ in $n_1$, the corresponding pointer in $n_2$ is $(T(tag), p)$ if $p$ is not invariant to $T$, or $(T(tag) \neg T(tag), p)$ if $p$ is invariant [S1, S2, unofficial].
+    *   **Invariant Bit Propagation:** An inner node is invariant to axis $A$ if all its children are invariant to $A$, or if the left and right children are mirrors of each other across $A$ [S1, unofficial]. Pull these bits up from children during merging.
+    *   Select one representative per group. The tag for other nodes in the group is the transformation $T$ that maps them to the representative [S1, S2, unofficial].
+    *   Repeat for all 8 transformations, stopping at the first match [S1, unofficial].
+
+3.  **Pointer Update:**
+    *   Replace pointers in the level above with tagged pointers to the selected representatives [S1, S2, unofficial].
+
+4.  **Encoding (Variable Bit-Rate):**
+    *   **Frequency-Based Compaction:** Sort representatives at each level by their reference count (most referenced first) [S1, S2, unofficial].
+    *   **Offset Encoding:** Replace child pointers with offsets from the beginning of the level array. Use the smallest available bit-width (e.g., 2-byte format) that covers the maximum offset [S1, S2, unofficial].
+    *   **Leaf Grouping (Coarsening):** Group $2^3$ leaves into $4^3$ inner nodes at level $L-2$ without new matching, encoding them as simple grids in a single array of bricks (64 bits each) [S1, S2, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_ssvdag(svo_levels):
-    # svo_levels: list of lists of Node objects. 
-    # Node has: .children (list of 8 tuples (tag, ptr)), .ref_count, .parent, .parent_idx
-    L = len(svo_levels) - 1
-    processed = [set() for _ in range(L + 1)]
-    
-    # Precomputed table for 2^3 leaf grids: maps 256 occupancy patterns to (canonical_rep, transform_bits)
-    LEAF_TABLE = build_leaf_canonical_table()
-    
-    for level in range(L - 1, -1, -1):
-        nodes = svo_levels[level]
-        representatives = []
+def construct_ssvdag(svo):
+    # Start from finest level L-1 up to root level 0
+    for level in reversed(range(0, svo.max_level)):
+        nodes = get_nodes_at_level(level)
         
-        for i, node in enumerate(nodes):
-            if i in processed[level]:
-                continue
-            cluster = [node]
-            processed[level].add(i)
-            transforms = [0]
+        if level == svo.max_level - 1:
+            # Leaf Clustering
+            for node in nodes:
+                node.canonical_rep, node.canonical_transform = compute_canonical(node.grid)
+                node.invariant_bits = compute_leaf_invariants(node.grid)
             
-            for j in range(i + 1, len(nodes)):
-                if j in processed[level]:
-                    continue
-                other = nodes[j]
-                T = find_symmetry_match(cluster[0], other)
-                if T is not None:
-                    cluster.append(other)
-                    processed[level].add(j)
-                    transforms.append(T)
+            sort_nodes_by_key(nodes, key=lambda n: n.canonical_rep)
+            representatives = []
+            for node in nodes:
+                if not representatives or representatives[-1].canonical_rep != node.canonical_rep:
+                    rep = copy_node(node)
+                    rep.is_representative = True
+                    representatives.append(rep)
+                else:
+                    node.tag = node.canonical_transform
+                    node.pointer = find_pointer_to_rep(representatives[-1])
             
-            representatives.append((cluster[0], transforms))
-            
-            # Update parent pointers for merged nodes
-            for k, other in enumerate(cluster[1:], start=1):
-                T = transforms[k]
-                other.parent.children[other.parent_idx] = (T, cluster[0])
-        
-        # Frequency-based compaction
-        representatives.sort(key=lambda x: x[0].ref_count, reverse=True)
-        
-        for offset, (rep, _) in enumerate(representatives):
-            rep.offset = offset
-            rep.header = encode_header(rep.children)
-            rep.pointers = encode_pointers(rep.children, offset)
-        
-        svo_levels[level] = [rep for rep, _ in representatives]
-        
-    # Leaf coarsening: group 2^3 leaves into 4^3 bricks (64 bits each)
-    bricks = []
-    leaf_nodes = svo_levels[L-1]
-    for i in range(0, len(leaf_nodes), 8):
-        brick_data = pack_leaf_brick(leaf_nodes[i:i+8])
-        bricks.append(brick_data)
-        
-    return build_index(svo_levels), bricks
-
-def find_symmetry_match(n1, n2):
-    # Check 8 reflections. Returns transform bits or None.
-    for T_bits in range(8):
-        match = True
-        for i in range(8):
-            tag1, ptr1 = n1.children[i]
-            tag2, ptr2 = n2.children[i]
-            mapped_tag = apply_reflection_tag(tag1, T_bits)
-            if ptr1 != ptr2:
-                if not is_invariant(ptr1, T_bits):
-                    match = False
-                    break
-            else:
-                if mapped_tag != tag2:
-                    match = False
-                    break
-        if match:
-            return T_bits
-    return None
-
-def apply_reflection_tag(tag, T_bits):
-    # Standard octree child index permutation under axis reflections [G]
-    # Tags are 2-bit codes representing child indices 0-7
-    return tag  # Actual permutation depends on specific child indexing scheme
-
-def is_invariant(ptr, T_bits):
-    # Checks if the subtree pointed to by ptr is symmetric under T [G]
-    return ptr.is_symmetric_under(T_bits)
-
-def encode_header(children):
-    header = 0
-    for i in range(8):
-        tag, ptr = children[i]
-        if ptr is None:
-            code = 0
+            # Update pointers in level above
+            update_pointers_from_level(level + 1, representatives)
+            nodes = representatives
         else:
-            offset = ptr.offset
-            if offset < (1 << 13):
-                code = 1
-            else:
-                code = 2
-        header |= (code << (2 * i))
-    return header
+            # Inner Node Clustering
+            # Sort by lexicographically sorted child pointers
+            sort_nodes_by_key(nodes, key=lambda n: sorted(n.child_pointers))
+            
+            representatives = []
+            for node in nodes:
+                matched_rep = None
+                for rep in representatives:
+                    if pointers_match_set(node.child_pointers, rep.child_pointers):
+                        # Check similarity under 8 transformations
+                        for t in all_8_reflections():
+                            if check_similarity(node, rep, t):
+                                matched_rep = rep
+                                node.tag = t
+                                node.pointer = find_pointer_to_rep(rep)
+                                break
+                        if matched_rep:
+                            break
+                
+                if not matched_rep:
+                    rep = copy_node(node)
+                    rep.is_representative = True
+                    # Compute invariants for rep
+                    rep.invariant_bits = compute_inner_invariants(rep)
+                    representatives.append(rep)
+                    node.pointer = find_pointer_to_rep(rep)
+                    node.tag = identity_transform() # Or 0 if identical
+            
+            update_pointers_from_level(level + 1, representatives)
+            nodes = representatives
+        
+        # Frequency-based encoding for this level
+        sort_nodes_by_reference_count(nodes)
+        encode_pointers(nodes)
 
-def encode_pointers(children, base_offset):
-    packed = []
+def compute_canonical(grid):
+    # Precomputed table lookup for 2^3 grids
+    # Returns (canonical_grid, transform_bits)
+    return lookup_table[grid_to_index(grid)]
+
+def check_similarity(node1, node2, transform):
     for i in range(8):
-        tag, ptr = children[i]
-        if ptr is None:
-            continue
-        offset = ptr.offset - base_offset
-        T = ptr.tag
-        if offset < (1 << 13):
-            # 16-bit format: 3 bits T, 13 bits offset
-            val = (T << 13) | offset
-            packed.append(val & 0xFFFF)
+        p1 = node1.children[i]
+        # Determine expected child index in node2 based on transform
+        j = reflect_index(i, transform)
+        p2 = node2.children[j]
+        
+        if p1.pointer != p2.pointer:
+            return False
+        
+        tag1 = p1.tag
+        tag2 = p2.tag
+        
+        # Check tag transformation
+        # If p1 is invariant to transform, tag2 can be tag1 or inverted transform bits
+        if is_invariant(p1.pointer, transform):
+            if not (tag2 == tag1 or tag2 == invert_transform(tag1, transform)):
+                return False
         else:
-            # 32-bit format: 3 bits T, 29 bits offset
-            val = (T << 29) | (offset & 0x1FFFFFFF)
-            packed.append(val & 0xFFFFFFFF)
-    return packed
+            if tag2 != apply_transform(tag1, transform):
+                return False
+    return True
 
-def build_leaf_canonical_table():
-    # Returns dict mapping 256 occupancy patterns to (canonical_rep, transform_bits)
-    # Uses precomputed 2^3 voxel reflection table [S1, unofficial]
-    return {}
-
-def pack_leaf_brick(leaves):
-    # Packs 8 leaves into a 64-bit brick [S1, unofficial]
-    return 0
-
-def build_index(svo_levels):
-    # Returns indexing structure with max level L and 3 offsets [S1, unofficial]
-    return {}
+def compute_inner_invariants(node):
+    # Invariant to axis A if all children invariant to A, 
+    # OR left/right children are mirrors across A
+    inv_x = True
+    for child in node.children:
+        if not is_invariant(child.pointer, 'x'):
+            inv_x = False
+            break
+    
+    if not inv_x:
+        # Check mirror symmetry
+        if not is_mirror_symmetry(node.children[0], node.children[1], 'x'):
+            inv_x = False
+    # Repeat for y, z
+    return (inv_x, inv_y, inv_z)
 ```
-
-**Parameters:**
-*   **Symmetry Transforms:** Planar reflections along the main grid directions (X, Y, Z) [S1, unofficial].
-*   **Leaf Size for Construction:** $2^3$ voxels [S1, unofficial].
-*   **Transformation Encoding:** 3 bits corresponding to reflections along the X, Y, and Z axes [S1, unofficial]. The transformation $T_{x,y,z}$ is its own inverse: $T_{x,y,z}^{-1} = T_{x,y,z}$ [S1, unofficial].
-
-**Edge Cases and Pitfalls:**
-*   **Invariant Pointers:** When checking similarity, if a child pointer $p$ is invariant to the transformation $T$, the tag mapping logic differs from non-invariant pointers. The source specifies mapping to $(T(tag) \neg T(tag), p)$ if invariant, requiring careful implementation of the invariant check [S1, unofficial].
-*   **Precision:** The method relies on exact bitwise comparison of canonical representations for leaves and exact pointer matching for inner nodes [S1, unofficial].
 
 ## Subtopics
 
 ### [SSVDAG Node Layout and Tagged Pointer Encoding](1349-ssvdag-node-layout-and-tagged-pointer-encoding.md)
-Defines the binary layout of inner nodes, replacing fixed-size child pointers with variable-length tagged pointers (2 or 4 bytes) that embed transformation codes, solving the memory overhead problem of standard SVDAGs where all pointers are fixed at 4 bytes.
+This method defines the memory layout of inner nodes in an SSVDAG to minimize memory consumption while supporting GPU-friendly traversal. It replaces the fixed-size child pointers of standard SVDAGs with variable-length tagged pointers (2 or 4 bytes) that embed transformation codes, allowing the representation of symmetry-related subtrees with reduced overhead. Unlike standard SVDAGs which use only 0 or 4-byte pointers, this layout introduces 2-byte pointers for frequent, close-range references, significantly compressing the data structure for high-resolution scenes.
+
+### [SSVDAG Ray Traversal](5175-ssvdag-ray-traversal.md)
+SSVDAG Ray Traversal is a shader-based ray traversal algorithm designed for Symmetry-aware Sparse Voxel Directed Acyclic Graphs (SSVDAGs). It solves the problem of efficiently rendering high-resolution, compressed voxel data on the GPU by handling variable-size tagged pointers and symmetry transformations (planar reflections) during the traversal process. It sets itself apart from standard SVDAG traversal by supporting 0, 2, and 4-byte pointers and applying mirror masks to access child nodes, while distinguishing itself from sibling methods by its specific integration of Level of Detail (LOD) and beam optimization tailored to the SSVDAG memory layout.
+
+### [Transform-Aware Sparse Voxel Directed Acyclic Graph (TSVDAG)](8405-transform-aware-sparse-voxel-directed-acyclic-graph-tsvdag.md)
+TSVDAG extends Sparse Voxel Directed Acyclic Graphs (SVDAG) by detecting and encoding repeating geometry that aligns with node boundaries through destructive translations, mirror symmetries, and axis permutations. It solves the limitation of standard SVDAGs, which only merge subtrees that are identical in position and orientation, by allowing voxels to be translated out of a subtree (disappearing) to match translated counterparts. This enables significantly higher compression ratios for scenes with repetitive structures, at the cost of increased preprocessing complexity and rendering overhead due to variable-length pointer encoding and additional traversal state.
+
+### Out-of-core SSVDAG Construction
+A process to construct an SSVDAG of depth $L$ when the full model exceeds available memory, by recursively reducing subtrees and merging them bottom-up [S1, unofficial].
+1. Estimate level $L_0 < L$ where subtrees fit in memory.
+2. For each voxel at $L_0$, perform independent reduction: (a) Create in-core voxelized representation of depth $L-L_0$ (stream triangles if needed); (b) Reduce to SSVDAG using the in-core algorithm and store on disk.
+3. Recursively merge reduced representations bottom-up: (a) Load SSVDAGs of relevant voxels, construct DAG up to common root; (b) Apply reduction to union of SSVDAGs, store on disk.
+4. Repeat until root is a single SSVDAG.
+Parallelization: On a machine with `num_procs` processors, divide max available in-core memory by `num_procs` to set memory budget per subtree, then perform `num_procs` reductions in parallel [S1, unofficial].
+Pitfall: Processing subtrees separately finds symmetries only within the spatial region of each subtree, not globally. This is not a limitation because subsequent bottom-up merges restart reduction from the leaf level of merged subtrees, eventually capturing global symmetries [S1, unofficial].
+
+### Canonical Representation for Symmetry-Aware SVDAG Leaves
+A deterministic method to select a single representative grid from a set of grids equivalent under symmetry transformations, used to detect duplicate leaves in SVDAGs [S3].
+For each grid $g$, apply all symmetry transformations $S_{x,y,z}$. Compute $B(S_{x,y,z}(g))$ for each. Select the grid with the maximum $B$ value as $g^\star$. Store $g^\star$ and the transformation that produced it [S3].
+Formula: $g^\star = \arg\max_{S_{x,y,z}} B(S_{x,y,z}(g))$, where $B(g)$ is the binary number obtained by concatenating all voxels of $g$ [S3].
+Layout: Precomputed look-up table storing the canonical representation $g^\star$ and the accompanying transformation for each possible $2^3$ voxel grid [S3].
+
+### Recursive Symmetry Detection for Inner Nodes
+A bottom-up algorithm to find duplicate inner nodes by recursively applying mirror symmetry transformations to child subtrees [S3].
+Process the tree from the bottom up. For each inner node, swap its children along the respective symmetry axis and apply the same transformation to those subtrees [S3]. Ensure that child subtrees equivalent under a symmetry transformation have the same child pointer addresses. This is guaranteed by the bottom-up processing order [S3]. Reduce search space by clustering nodes with the same child pointers. Perform an exhaustive search for the eight possible transformations $S_{x,y,z}$ to find representative inner nodes and compute their mirror invariance [S3].
+Layout: Each subtree maintains a temporary 3-bit mask storing its invariance to x, y, or z symmetry ($g \equiv_{S_{x,y,z}} g$) [S3].
+
+### Improved Invariance Mask for SSVDAG
+An extension of the SSVDAG invariance mask to capture combined symmetries (e.g., xy invariance) that are not implied by individual axis invariances [S3].
+Layout: A 7-bit mask storing invariance for: x, y, z, xy, yz, xz, and xyz symmetries [S3].
+Pitfall: Original SSVDAG assumes invariance along x and y axes implies xy invariance. This is false; a grid can be invariant under xy but not x or y individually. The 7-bit mask corrects this [S3].
 
 ## Operating characteristics
-*   **Compression:** In the PowerPlant scene (64K$^3$ resolution, ~6 billion non-empty voxels), SSVDAG stores data in <86MB (0.123 bits/voxel), compared to 16.2GB for SVO (without pointers) and 167MB for SVDAG [S1, unofficial].
-*   **Performance:** Real-time GPU in-core visualization with shading and shadows is achieved for the full Boeing 777 model at sub-millimetric precision [S1, unofficial]. The tracing overhead for SSVDAG compared to standard SVO/SVDAG is less than 15% [S1, unofficial].
-*   **Memory Distribution:** In the Powerplant dataset, the most common 10% of nodes account for nearly 90% of references at level 14 and nearly 50% at level 11, justifying the frequency-based pointer compaction [S1, unofficial].
-*   **Strengths:** High compression ratio for scenes with reflective symmetry; transparent to standard ray-casting algorithms; GPU-friendly traversal [S1, unofficial].
-*   **Limitations:** Construction is complex and requires external-memory processing; limited to reflective symmetries (other similarity transforms not supported) [S1, unofficial].
+**Time and Memory Complexity:**
+*   Construction is an external-memory process, alternating clustering, pointer update, and encoding phases at each level [S1, S2, unofficial].
+*   Memory usage is significantly lower than SVOs and SVDAGs. On the PowerPlant scene (256K$^3$ resolution, ~100 billion non-empty voxels), SSVDAG storage is <575 MB (0.048 bits/voxel). An SVO would require 31.1 GB (55x more), and an SVDAG would require 1.0 GB (2x more) [S1, unofficial].
+*   On the PowerPlant scene (64K$^3$ resolution, ~6 billion non-empty voxels), SSVDAG stores data in <86 MB (0.123 bits/voxel), compared to 16.2 GB for SVO and 167 MB for SVDAG [S2, unofficial].
+
+**Measured Performance:**
+*   Real-time GPU in-core visualization with shading and shadows is achieved for the full Boeing 777 model at sub-millimetric precision [S1, S2, unofficial].
+*   Tracing overhead for SSVDAG compared to standard SVO/SVDAG is less than 15% [S2, unofficial].
+*   The most common 10% of nodes account for nearly 90% of references at level 14 and nearly 50% at level 11 in the Powerplant dataset (64K$^3$), justifying variable-bit-rate encoding [S2, unofficial].
+
+**Strengths and Limitations:**
+*   **Strengths:** High compression ratio for scenes with reflective symmetry; GPU-friendly traversal; out-of-core construction support.
+*   **Limitations:** Compression gain depends on the presence of reflective symmetry; preprocessing complexity is higher than SVO/SVDAG due to symmetry detection and variable-bit encoding [S1, S2, unofficial].
 
 ## Background
-SSVDAG was introduced by Alberto Jaspe Villanueva, Fabio Marton, and Enrico Gobbetti from CRS4 in 2016 [S1, unofficial]. It extends the concept of Sparse Voxel DAGs (SVDAGs) by incorporating symmetry-aware merging, building on prior work in DAG compression for SVOs [S1, unofficial].
+SSVDAG was introduced by Alberto Jaspe Villanueva, Fabio Marton, and Enrico Gobbetti from CRS4 [S1, S2, unofficial]. It is based on the earlier work "SSVDAGs: Symmetry-aware Sparse Voxel DAGs" presented at the 20th ACM SIGGRAPH Symposium on Interactive 3D Graphics and Games in 2016 [S1, unofficial]. The method extends the concept of Sparse Voxel DAGs (SVDAGs) by incorporating symmetry-aware merging and variable-bit-rate pointer encoding to achieve superior compression for high-resolution voxelized scenes [S1, S2, unofficial].
 
 ## Sources
-[S1] SSVDAGs: Symmetry-aware Sparse Voxel DAGs, https://www.crs4.it/vic/data/papers/i3d2016-symmetry-dags.pdf, fetched 2026-10-27 (unofficial)
+[S1] Symmetry-aware Sparse Voxel DAGs (SSVDAGs) for compression-domain tracing of high-resolution geometric scenes, https://albertojaspe.net/publications/2017-JCGT-ssvdags.pdf, fetched 2026-10-24 (unofficial)
+[S2] PDF SSVDAGs: Symmetry-aware Sparse Voxel DAGs - CRS4, https://www.crs4.it/vic/data/papers/i3d2016-symmetry-dags.pdf, fetched 2026-10-27 (unofficial)
+[S3] Transform-Aware Sparse Voxel Directed Acyclic Graphs, https://publications.graphics.tudelft.nl/rails/active_storage/blobs/redirect/eyJfcmFpbHMiOnsibWVzc2FnZSI6IkJBaHBBdjBUIiwiZXhwIjpudWxsLCJwdXIiOiJibG9iX2lkIn19--3e9c1bfab97521b420d59c348403286749dcf70d/I3D_authors_version.pdf, fetched 2026-11-01

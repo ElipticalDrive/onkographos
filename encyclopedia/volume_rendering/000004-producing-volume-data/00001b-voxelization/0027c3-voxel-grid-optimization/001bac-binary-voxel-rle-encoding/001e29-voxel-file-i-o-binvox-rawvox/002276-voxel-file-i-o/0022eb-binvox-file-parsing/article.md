@@ -3,7 +3,7 @@
 Also called: Binvox File Parser, Binvox Header & RLE Voxel Reader, Binvox SVO Import, binvox loader
 
 ## Overview
-Binvox File Parsing is the method for importing the binary voxel (binvox) file format into a contiguous array or a Sparse Voxel Octree (SVO) structure [S1, S2, unofficial]. It solves the problem of converting a legacy, run-length encoded (RLE) voxel representation into a format suitable for modern ray-casting or rasterization engines. Unlike raw voxel formats that store every voxel explicitly, binvox uses a compact binary RLE scheme, requiring specific handling to decompress the data correctly [S1, S2, unofficial].
+Binvox File Parsing is the method for importing the binary voxel (binvox) file format into a contiguous array or a Sparse Voxel Octree (SVO) structure [S2, unofficial]. It converts a legacy run-length encoded (RLE) voxel representation into a format suitable for modern ray-casting or rasterization engines [G]. Unlike raw voxel formats that store every voxel explicitly, binvox uses a compact binary RLE scheme, requiring specific handling to decompress the data correctly [S2, unofficial].
 
 ## How it works
 The method consists of two phases: parsing the ASCII header and decompressing the binary RLE data into a flat array, optionally followed by constructing an SVO hierarchy [S2, unofficial].
@@ -11,27 +11,24 @@ The method consists of two phases: parsing the ASCII header and decompressing th
 ### Inputs and Outputs
 - **Input**: A binary file or byte buffer containing the binvox data.
 - **Output**: 
-  1. A flat `unsigned char` array of size $D^3$ (where $D$ is the dimension) representing the voxel grid [S1, S2, unofficial].
+  1. A flat `unsigned char` array of size $D^3$ (where $D$ is the dimension) representing the voxel grid [S2, unofficial].
   2. (Optional) A Sparse Voxel Octree (SVO) structure built from the flat array [S2, unofficial].
 
 ### Data Structures
-1. **Flat Voxel Array**: A contiguous array of `unsigned char` (8-bit integers) with size $D \times D \times D$. Initialized to 0. Indices are typically mapped in row-major order (x, y, z) or similar, depending on the specific implementation's indexing convention [S2, unofficial].
-2. **RLE Data Buffer**: A `Vec<u8>` or byte array storing the raw binary RLE pairs read from the file [S2, unofficial].
-3. **SVO Node** (if building SVO):
-   - `children`: Array of 8 references/indices to child nodes.
-   - `occupancy`: Bitmask or integer indicating which children are occupied.
-   - `data.color`: Color value (e.g., `0xff00ffff` for internal nodes, `0` for empty leaves) [S2, unofficial].
+1. **Flat Voxel Array**: A contiguous array of `unsigned char` (8-bit integers) with size $D \times D \times D$ [S2, unofficial].
+2. **RLE Data Buffer**: A byte array storing the raw binary RLE pairs read from the file [S2, unofficial].
+3. **SVO Node**: Contains `children` (array of 8 references), `occupancy` (bitmask), and `data.color` (e.g., `0xff00ffff` for internal nodes, `0` for empty leaves) [S2, unofficial].
 
 ### Steps
 
 1. **Header Parsing**:
    - Read the first line. It must start with `"#binvox 1"`. If not, abort [S2, unofficial].
-   - Read the second line. It must start with `"dim D D D"`. The sources specify `D = 512` as the tested dimension. Note that the format requires cubic dimensions (width == height == depth), though exact power-of-2 enforcement is noted as a potential requirement or TODO in some implementations [S1, S2, unofficial].
+   - Read the second line. It must start with `"dim D D D"`. The sources specify `D = 512` as the tested dimension [S2, unofficial]. Note that the format requires cubic dimensions (width == height == depth), though exact power-of-2 enforcement is noted as a potential requirement or TODO in some implementations [S1, unofficial].
    - Read and discard the next three lines: `translate`, `scale`, and `data` [S2, unofficial].
 
 2. **RLE Data Loading**:
    - Read the remainder of the file into a byte buffer `rle_data` [S2, unofficial].
-   - Calculate `rle_size` as `len(rle_data) / 2`. The data consists of pairs of bytes [S2, unofficial].
+   - Calculate `rle_size` as `len(rle_data) / 2` [S2, unofficial]. The data consists of pairs of bytes [S2, unofficial].
 
 3. **RLE Decompression**:
    - Allocate a flat array `data` of size $D^3$, initialized to 0 [S2, unofficial].
@@ -45,26 +42,26 @@ The method consists of two phases: parsing the ASCII header and decompressing th
    - **Pitfall**: Do not skip whitespace when reading the binary RLE section. Standard text parsing functions may skip zero bytes or misalign reads, corrupting the RLE stream [S1, unofficial].
 
 4. **SVO Construction (Optional)**:
-   - Initialize a `nodes` vector with one default root node.
-   - Initialize a stack with `(0, 0, 0, 0, 8)` representing `(x, y, z, parent_ref, lod)`. The starting LOD is 8 for a $512^3$ grid ($512 = 2^9$, so depth 8 covers the internal levels, with leaves at LOD 0) [S2, unofficial].
+   - Initialize a `nodes` vector with one default root node [S2, unofficial].
+   - Initialize a stack with `(0, 0, 0, 0, 8)` representing `(x, y, z, parent_ref, lod)` [S2, unofficial]. The starting LOD is 8 for a $512^3$ grid ($512 = 2^9$, so depth 8 covers the internal levels, with leaves at LOD 0) [S2, unofficial].
    - While the stack is not empty:
      - Pop `(x, y, z, parent_ref, lod)` [S2, unofficial].
-     - Get the parent node. Resize the `nodes` array if necessary to accommodate new children.
+     - Get the parent node. Resize the `nodes` array if necessary to accommodate new children [S2, unofficial].
      - Calculate the 8 child offsets based on `x, y, z` and `lod` [S2, unofficial].
      - **If `lod == 0` (Leaf Level)**:
-       - Initialize a new node. Set `occupancy` to 0.
+       - Initialize a new node. Set `occupancy` to 0 [S2, unofficial].
        - For each of the 8 children (local indices 0-7):
-         - Calculate the flat index in `data` corresponding to this child's position in the $2 \times 2 \times 2$ block.
+         - Calculate the flat index in `data` corresponding to this child's position in the $2 \times 2 \times 2$ block [S2, unofficial].
          - If `data[flat_index] != 0`:
-           - Set the corresponding bit in `occupancy`.
-           - Set `children[i]` to a new node reference (or null if further subdivision is not needed, but the source implies creating nodes) [S2, unofficial].
+           - Set the corresponding bit in `occupancy` [S2, unofficial].
+           - Set `children[i]` to a new node reference [S2, unofficial].
            - Increment `placed_voxels` [S2, unofficial].
          - If `occupancy` is 0, set `node.data.color` to 0 [S2, unofficial].
      - **If `lod > 0` (Internal Node)**:
        - Set `node.data.color` to `0xff00ffff` [S2, unofficial].
        - Set `node.occupancy` to `0xff` (all 8 children occupied) [S2, unofficial].
        - For each of the 8 children:
-         - Set `children[i]` to a new node reference.
+         - Set `children[i]` to a new node reference [S2, unofficial].
          - Push `(offset.x, offset.y, offset.z, child_ref, lod - 1)` to the stack [S2, unofficial].
 
 ### Pseudocode
@@ -72,116 +69,93 @@ The method consists of two phases: parsing the ASCII header and decompressing th
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def import_binvox_svo(file_bytes: bytes) -> VoxBuf:
+def import_binvox_svo(file_bytes: bytes):
+    import io
+    reader = io.BytesIO(file_bytes)
+
     # 1. Header Parsing
-    reader = BufferedReader(file_bytes)
-    
-    header_line = reader.readline()
-    if not header_line.startswith("#binvox 1"):
+    header = reader.readline()
+    if not header.startswith(b"#binvox 1"):
         raise ValueError("Invalid binvox header")
-        
+
     dim_line = reader.readline()
-    if not dim_line.startswith("dim 512 512 512"):
+    if not dim_line.startswith(b"dim 512 512 512"):
         raise NotImplementedError("Unsupported dimension")
-        
+
     dim = 512
     capacity = dim * dim * dim
-    
+
     # Discard translate, scale, data lines
-    reader.readline() # translate
-    reader.readline() # scale
-    reader.readline() # data
-    
+    reader.readline()
+    reader.readline()
+    reader.readline()
+
     # 2. RLE Data Loading
-    # Read remaining bytes directly without whitespace skipping
     rle_data = reader.read()
     rle_size = len(rle_data) // 2
-    
+
     # 3. RLE Decompression
-    data = bytearray(capacity) # Initialized to 0
-    current_index = 0
-    
+    data = bytearray(capacity)
+    cur = 0
     for i in range(rle_size):
         value = rle_data[i * 2]
         count = rle_data[i * 2 + 1]
-        
         if value != 0:
-            if current_index + count > capacity:
-                raise OverflowError("RLE data exceeds grid capacity")
-            
-            # Fill the range with value
+            if cur + count > capacity:
+                raise OverflowError("RLE exceeds capacity")
             for j in range(count):
-                data[current_index + j] = value
-            current_index += count
-            
-    # 4. SVO Construction (Simplified)
-    nodes = [Node()] # Root node
-    stack = [(0, 0, 0, 0, 8)] # x, y, z, parent_ref, lod
-    
+                data[cur + j] = value
+            cur += count
+
+    # 4. SVO Construction
+    class Node:
+        def __init__(self):
+            self.children = [None] * 8
+            self.occupancy = 0
+            self.color = 0
+
+    nodes = [Node()]
+    stack = [(0, 0, 0, 0, 8)]
+
     while stack:
         x, y, z, parent_ref, lod = stack.pop()
         parent = nodes[parent_ref]
-        
-        # Calculate 8 child offsets based on x, y, z and lod
-        # This depends on the specific coordinate system and LOD mapping
-        # Assuming standard octree subdivision where each level halves the extent
-        offsets = get_child_offsets(x, y, z, lod)
-        
-        if lod == 0:
-            # Leaf level
-            node = Node()
-            node.occupancy = 0
-            placed_voxels = 0
-            
-            for i in range(8):
-                # Calculate flat index in 'data' for this child
-                # This requires mapping the 3D grid coordinates to the flat array
-                child_coords = offsets[i]
-                flat_idx = map_to_flat_array(child_coords, dim)
-                
-                if data[flat_idx] != 0:
-                    node.occupancy |= (1 << i)
-                    # Create new node reference
-                    child_ref = len(nodes)
-                    nodes.append(Node())
-                    parent.children[i] = child_ref
-                    placed_voxels += 1
-            
-            if placed_voxels == 0:
-                node.data.color = 0
-            parent.children = parent.children or [None] * 8
-            parent.children[0] = len(nodes) # Simplified: assuming single child logic in source? 
-            # Note: The source logic for lod==0 sets occupancy and children. 
-            # The source snippet implies creating nodes for occupied children.
-            # Re-interpreting source: "set children[i] to new node reference"
-            # This implies creating a node for each occupied child even at leaf?
-            # Or is it a leaf node containing the color?
-            # Source: "If occupancy is 0, set node.data.color to 0."
-            # It seems to create a node for the leaf block.
-            
-        else:
-            # Internal node
-            node = Node()
-            node.data.color = 0xff00ffff
-            node.occupancy = 0xff
-            node.children = [None] * 8
-            
-            for i in range(8):
-                child_ref = len(nodes)
-                nodes.append(Node())
-                node.children[i] = child_ref
-                stack.append((offsets[i].x, offsets[i].y, offsets[i].z, child_ref, lod - 1))
-                
-    return VoxBuf(nodes, data)
 
-def get_child_offsets(x, y, z, lod):
-    # Placeholder for specific coordinate math
-    # In a standard octree, offsets are determined by the bit at the current LOD level
-    return [] # Not given in the sources.
+        step = 1 << lod
+        for i in range(8):
+            dx = (i & 1) * step
+            dy = ((i >> 1) & 1) * step
+            dz = ((i >> 2) & 1) * step
+            cx, cy, cz = x + dx, y + dy, z + dz
+            child_ref = len(nodes)
+            nodes.append(Node())
+            parent.children[i] = child_ref
+
+            if lod == 0:
+                node = nodes[child_ref]
+                node.occupancy = 0
+                placed_voxels = 0
+                for k in range(8):
+                    vx = cx + (k & 1)
+                    vy = cy + ((k >> 1) & 1)
+                    vz = cz + ((k >> 2) & 1)
+                    flat_idx = (vz * dim + vy) * dim + vx
+                    if data[flat_idx] != 0:
+                        node.occupancy |= (1 << k)
+                        placed_voxels += 1
+                if placed_voxels == 0:
+                    node.color = 0
+            else:
+                node = nodes[child_ref]
+                node.color = 0xff00ffff
+                node.occupancy = 0xff
+                stack.append((cx, cy, cz, child_ref, lod - 1))
+
+    return nodes, data
 ```
 
 ### Parameters
-- **Dimensions**: The binvox format requires cubic dimensions ($W=H=D$). The source examples use $512 \times 512 \times 512$ [S1, S2, unofficial].
+- **Dimensions**: The binvox format requires cubic dimensions ($W=H=D$). The source examples use $512 \times 512 \times 512$ [S2, unofficial].
 - **RLE Pairs**: Each pair consists of a value (1 byte) and a count (1 byte) [S2, unofficial].
 
 ### Edge Cases and Pitfalls
@@ -190,14 +164,14 @@ def get_child_offsets(x, y, z, lod):
 - **Capacity Overflow**: If the RLE data specifies a total count greater than $D^3$, the parser must abort [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity**: $O(N)$ where $N$ is the number of RLE pairs. Decompression is linear in the size of the RLE data. SVO construction is $O(D^3)$ in the worst case (fully occupied) but proportional to the number of occupied voxels and tree depth.
-- **Memory Complexity**: $O(D^3)$ for the flat array. The SVO structure adds overhead for node objects, potentially reducing memory usage for sparse scenes compared to a dense grid, but increasing it for dense scenes due to node metadata.
-- **Performance**: The RLE format is significantly more compact than raw voxels for sparse data. Decompression is fast. Building the SVO adds overhead but enables efficient ray traversal.
+- **Time Complexity**: $O(N)$ where $N$ is the number of RLE pairs [G]. Decompression is linear in the size of the RLE data [G]. SVO construction is $O(D^3)$ in the worst case (fully occupied) but proportional to the number of occupied voxels and tree depth [G].
+- **Memory Complexity**: $O(D^3)$ for the flat array [G]. The SVO structure adds overhead for node objects, potentially reducing memory usage for sparse scenes compared to a dense grid, but increasing it for dense scenes due to node metadata [G].
+- **Performance**: The RLE format is significantly more compact than raw voxels for sparse data. Decompression is fast. Building the SVO adds overhead but enables efficient ray traversal [G].
 - **Strengths**: Compact storage for sparse voxel data; simple binary format.
-- **Limitations**: Fixed dimension support in some implementations; RLE can be inefficient for highly complex, non-repetitive data; no color/normal data in the basic format (though extensions exist).
+- **Limitations**: Fixed dimension support in some implementations; RLE can be inefficient for highly complex, non-repetitive data; no color/normal data in the basic format (though extensions exist) [S1, S2, unofficial].
 
 ## Background
-The binvox format was developed for efficient storage and transmission of 3D voxel models, particularly in computer graphics and gaming. It uses a simple ASCII header followed by binary RLE data. The format is widely used in datasets like the Stanford 3D Scanning Repository (e.g., Bunny, Dragon, Buddha models) [S2, unofficial]. The specific parsing method described here is from the `svo-cpu` project, which imports binvox files into a CPU-based Sparse Voxel Octree rasterizer [S2, unofficial].
+The binvox format was developed for efficient storage and transmission of 3D voxel models, particularly in computer graphics and gaming. It uses a simple ASCII header followed by binary RLE data. The specific parsing method described here is from the `svo-cpu` project, which imports binvox files into a CPU-based Sparse Voxel Octree rasterizer [S2, unofficial].
 
 ## Sources
 [S1] skyfex/svo-workbench, https://github.com/skyfex/svo-workbench, fetched 2026-10-26 (unofficial)

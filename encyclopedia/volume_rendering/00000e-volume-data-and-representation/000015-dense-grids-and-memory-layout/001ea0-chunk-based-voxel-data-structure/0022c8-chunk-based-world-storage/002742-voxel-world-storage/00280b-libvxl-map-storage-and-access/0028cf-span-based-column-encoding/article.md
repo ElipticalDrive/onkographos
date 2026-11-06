@@ -24,10 +24,10 @@ Span-based Column Encoding encodes a single $(x,y)$ column of a sparse voxel map
 ```python
 def encode_column(map, x, y):
     first_run = True
-    chunk = map.chunks[y * map.width + x]
+    chunk = get_chunk(map, x, y)
     if chunk.index == 0:
         return []
-    first_block = next((b for b in chunk.blocks if b.position >= pos_key(x, y, 0)), None)
+    first_block = get_gequal_block(chunk, x, y, 0)
     z = key_getz(first_block.position)
 
     if libvxl_geometry_get(map, x, y, z):
@@ -58,8 +58,9 @@ def encode_column(map, x, y):
     for k in range(top_start, top_end):
         block = get_block_at(map, x, y, k)
         if block:
-            write_color((block.color & 0xFFFFFF) | 0x7F000000)
+            colors.append((block.color & 0xFFFFFF) | 0x7F000000)
 
+    # Determine bottom_end [G]
     bottom_end = bottom_start
     while bottom_end < map.depth and libvxl_geometry_get(map, x, y, bottom_end):
         bottom_end += 1
@@ -69,13 +70,13 @@ def encode_column(map, x, y):
         for k in range(bottom_start, bottom_end):
             block = get_block_at(map, x, y, k)
             if block:
-                write_color(block.color)
+                colors.append(block.color)
         z = bottom_end
     else:
         desc.length = 1 + (top_end - top_start)
         z = bottom_start
 
-    return spans
+    return spans, colors
 
 # Helper definitions [G]
 class libvxl_span:
@@ -85,10 +86,18 @@ class libvxl_block:
 def pos_key(x, y, z): return (x << 24) | (y << 16) | z
 def key_getz(pos): return pos & 0xFFFF
 def libvxl_geometry_get(map, x, y, z): return map.geometry.get((x, y, z), False)
+def get_chunk(map, x, y): return map.chunks[y * map.width + x]
+def get_gequal_block(chunk, x, y, z):
+    target = pos_key(x, y, z)
+    for b in chunk.blocks:
+        if b.position >= target: return b
+    return None
 def get_block_at(map, x, y, z):
-    chunk = map.chunks[y * map.width + x]
-    return next((b for b in chunk.blocks if b.position == pos_key(x, y, z)), None)
-def write_color(c): pass
+    chunk = get_chunk(map, x, y)
+    for b in chunk.blocks:
+        if b.position == pos_key(x, y, z): return b
+    return None
+colors = []
 ```
 **Parameters:**
 * `map->depth`: Total height of the voxel map [S1, unofficial].

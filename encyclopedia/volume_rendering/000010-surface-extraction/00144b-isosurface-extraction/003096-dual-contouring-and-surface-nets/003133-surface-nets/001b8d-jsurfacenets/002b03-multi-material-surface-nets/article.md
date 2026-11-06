@@ -1,0 +1,332 @@
+# Multi-Material Surface Nets
+
+Also called: MMCellMap, Multi-Label Surface Generation, Surface Nets for multi-label segmentations
+
+## Overview
+Multi-Material Surface Nets extracts closed, watertight quad-meshes from multi-label volumetric segmentations while preserving sharp boundaries between materials [S2, unofficial]. It extends [JSurfaceNets](1040-jsurfacenets.md) by storing material labels at cell corners and associating distinct labels with the top and bottom faces of each generated quad, preventing material blending at interfaces [S1, unofficial].
+
+## How it works
+**Inputs:** A 3D volumetric grid of integer labels (material IDs) with dimensions $N_x \times N_y \times N_z$, and a voxel size $v_x, v_y, v_z$ [S2, unofficial].
+**Outputs:** A set of vertices, a quad-mesh, and per-quad material labels for the top and bottom faces [S1, unofficial].
+
+### Data Structures
+The core data structure is `MMCellMap`, which manages the padded grid and extracted geometry [S2, unofficial].
+
+**MMCellMap Layout:**
+*   `m_arraySize[3]`: Integer array storing the interior dimensions $(N_x, N_y, N_z)$ [S2, unofficial].
+*   `m_voxelSize[3]`: Float array storing $(v_x, v_y, v_z)$ [S2, unofficial].
+*   `m_cellArray`: Pointer to an array of `Cell` structures with dimensions $(N_x+2) \times (N_y+2) \times (N_z+2)$ to accommodate padding [S2, unofficial].
+*   `m_numVertices`: Integer count of extracted vertices [S2, unofficial].
+*   `m_vertices`: Pointer to an array of `Vertex` structures [S2, unofficial].
+
+**Cell Layout (stored in `m_cellArray`):**
+*   `label` (`unsigned short`): The material label of the cell's bottom-left-back corner [S2, unofficial].
+*   `flag` (`MMCellFlag`): A bitmask or struct indicating vertex type and face crossing types [S1, unofficial].
+*   `vertexIndex` (`int`): Index into `m_vertices` if this cell contains a vertex, or -1 otherwise [S2, unofficial].
+*   `vertexOffset[3]` (`float`): The local position of the vertex within the cell, relative to the cell's bottom-left-back corner [S2, unofficial].
+
+**Vertex Layout (stored in `m_vertices`):**
+*   `cellIndex[3]`: The global integer index of the cell containing this vertex [S2, unofficial].
+*   `position[3]`: The absolute world position of the vertex [G].
+
+**Quad Output Layout:**
+*   `quadCorners[12]`: Float array storing the 4 corner positions of the quad $(x_0, y_0, z_0, \dots, x_3, y_3, z_3)$ [S2, unofficial].
+*   `quadLabels[2]`: Integer array storing `[labelTopFaceOfQuad, labelBottomFaceOfQuad]` [S2, unofficial].
+
+### Algorithm Steps
+
+1.  **Initialization and Padding:**
+    Allocate `m_cellArray` with dimensions $(N_x+2) \times (N_y+2) \times (N_z+2)$ [S2, unofficial].
+    Iterate over all cells. For interior cells $(1 \le i \le N_x, 1 \le j \le N_y, 1 \le k \le N_z)$, set `cell.label` to the input label at $(i-1, j-1, k-1)$ [S2, unofficial].
+    For boundary cells (indices 0 or $N+1$ in any dimension), set `cell.label` to a reserved padding label (e.g., `ReservedLabel::Padding`) [S2, unofficial].
+
+2.  **Vertex Classification and Counting:**
+    Traverse cells in left-to-right, bottom-to-top, back-to-front order [S1, unofficial].
+    Determine the `vertexType` for each cell based on edge crossings [S1, unofficial]. A cell has a vertex if it contains an edge crossing between two different material labels [S1, unofficial].
+    Count the total number of vertices `m_numVertices` [S2, unofficial].
+    Allocate `m_vertices` array of size `m_numVertices` [S2, unofficial].
+    Second pass: Assign a unique `vertexIndex` to each cell containing a vertex and store the cell's global index in the corresponding `Vertex` struct [S2, unofficial].
+
+3.  **Relaxation (Fairing):**
+    Perform `numRelaxIterations` iterations to smooth the surface while preserving sharp features [S1, unofficial].
+    For each vertex `idxVtx`:
+    a. Retrieve the containing cell `pCell` and its global index `cellIdx[3]` [S2, unofficial].
+    b. Initialize `avgP[3] = {0, 0, 0}` and `numNeighbors = 0` [S2, unofficial].
+    c. If `pCell.flag.vertexType() == SurfaceVertex`:
+       Iterate over the 6 faces of the cell (Left, Right, Bottom, Top, Front, Back) [S2, unofficial].
+       If `pCell.flag.faceCrossingType(face) != NoFaceCrossing`:
+       Get the neighbor cell `nbrCell` and its global index `nbrIdx[3]` [S2, unofficial].
+       Accumulate the neighbor's relative position:
+       $$ avgP_x += nbrCell.vertexOffset_x + nbrIdx_x - cellIdx_x $$
+       $$ avgP_y += nbrCell.vertexOffset_y + nbrIdx_y - cellIdx_y $$
+       $$ avgP_z += nbrCell.vertexOffset_z + nbrIdx_z - cellIdx_z $$
+       Increment `numNeighbors` [S2, unofficial].
+    d. Else (if `vertexType` is `EdgeVertex`):
+       Iterate over the 6 faces.
+       If `pCell.flag.faceCrossingType(face) == JunctionFaceCrossing`:
+       Get neighbor `nbrCell` and `nbrIdx` [S2, unofficial].
+       Accumulate:
+       $$ avgP_x += nbrCell.vertexOffset_x + nbrIdx_x - cellIdx_x $$
+       $$ avgP_y += nbrCell.vertexOffset_y + nbrIdx_y - cellIdx_y $$
+       $$ avgP_z += nbrCell.vertexOffset_z + nbrIdx_z - cellIdx_z $$
+       Increment `numNeighbors` [S2, unofficial].
+    e. If `numNeighbors > 0`:
+       Average the accumulated positions:
+       $$ avgP_x /= numNeighbors, \quad avgP_y /= numNeighbors, \quad avgP_z /= numNeighbors $$
+       Update the vertex offset `p` (pointing to `pCell.vertexOffset`) using relaxation factor $\alpha$:
+       $$ p_x = (1 - \alpha) p_x + \alpha \cdot avgP_x $$
+       $$ p_y = (1 - \alpha) p_y + \alpha \cdot avgP_y $$
+       $$ p_z = (1 - \alpha) p_z + \alpha \cdot avgP_z $$
+       Constrain the position to the range $[0.5 - maxDist, 0.5 + maxDist]$ for each axis [S2, unofficial].
+
+4.  **Quad Generation:**
+    Iterate over all interior cells [S1, unofficial].
+    For each edge of the cell that crosses between two different materials (`isEdgeCrossing` is true):
+    a. Identify the two cells sharing this edge. Let them be `pCellFirst` and `pCellSecond` [S2, unofficial].
+    b. Retrieve their labels: `pCellFirstLabel = pCellFirst.label`, `pCellSecondLabel = pCellSecond.label` [S2, unofficial].
+    c. Identify the 4 cells surrounding this edge [S2, unofficial].
+    d. Retrieve the vertices located in these 4 cells [S2, unofficial].
+    e. Order the 4 vertices clockwise around the edge. The edge orientation convention is: Left-to-Right, Back-to-Front, Bottom-to-Top [S2, unofficial].
+    f. Store the 4 vertex positions in `quadCorners[12]` [S2, unofficial].
+    g. Store the material labels in `quadLabels[2]`:
+       $$ quadLabels[0] = pCellFirstLabel $$
+       $$ quadLabels[1] = pCellSecondLabel $$
+       This assigns the label of the "first" cell to the top face of the quad and the "second" cell to the bottom face, preserving the material boundary [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_material_surface_nets(input_labels, array_size, voxel_size, 
+                                num_relax_iterations, relax_factor, max_dist):
+    """
+    input_labels: 3D array of shape (Nx, Ny, Nz) of unsigned shorts.
+    array_size: tuple (Nx, Ny, Nz).
+    voxel_size: tuple (vx, vy, vz).
+    num_relax_iterations: int.
+    relax_factor: float (alpha).
+    max_dist: float.
+    """
+    Nx, Ny, Nz = array_size
+    padded_Nx, padded_Ny, padded_Nz = Nx + 2, Ny + 2, Nz + 2
+    
+    # Define helpers to satisfy self-contained requirement
+    class ReservedLabel:
+        PADDING = 0
+    class MMCellFlag:
+        class VertexType:
+            NO_VERTEX = 0; SURFACE_VERTEX = 1; EDGE_VERTEX = 2
+        class Face:
+            LEFT = 0; RIGHT = 1; BOTTOM = 2; TOP = 3; BACK = 4; FRONT = 5
+        class FaceCrossingType:
+            NO_FACE_CROSSING = 0; SURFACE_FACE_CROSSING = 1; JUNCTION_FACE_CROSSING = 2
+
+    def get_cell_idx(i, j, k):
+        return i + j * padded_Nx + k * padded_Nx * padded_Ny
+
+    def check_face_crossing(cells, i, j, k, face):
+        # Returns crossing type based on 4 corners of the face
+        # Corners are at (i+dx, j+dy, k+dz) for dx,dy,dz in {0,1}
+        labels = []
+        if face == MMCellFlag.Face.LEFT:
+            labels = [cells[get_cell_idx(i, j, k)]['label'], cells[get_cell_idx(i, j, k+1)]['label'],
+                      cells[get_cell_idx(i, j+1, k)]['label'], cells[get_cell_idx(i, j+1, k+1)]['label']]
+        elif face == MMCellFlag.Face.RIGHT:
+            labels = [cells[get_cell_idx(i+1, j, k)]['label'], cells[get_cell_idx(i+1, j, k+1)]['label'],
+                      cells[get_cell_idx(i+1, j+1, k)]['label'], cells[get_cell_idx(i+1, j+1, k+1)]['label']]
+        elif face == MMCellFlag.Face.BOTTOM:
+            labels = [cells[get_cell_idx(i, j, k)]['label'], cells[get_cell_idx(i, j, k+1)]['label'],
+                      cells[get_cell_idx(i+1, j, k)]['label'], cells[get_cell_idx(i+1, j, k+1)]['label']]
+        elif face == MMCellFlag.Face.TOP:
+            labels = [cells[get_cell_idx(i, j+1, k)]['label'], cells[get_cell_idx(i, j+1, k+1)]['label'],
+                      cells[get_cell_idx(i+1, j+1, k)]['label'], cells[get_cell_idx(i+1, j+1, k+1)]['label']]
+        elif face == MMCellFlag.Face.BACK:
+            labels = [cells[get_cell_idx(i, j, k)]['label'], cells[get_cell_idx(i, j+1, k)]['label'],
+                      cells[get_cell_idx(i+1, j, k)]['label'], cells[get_cell_idx(i+1, j+1, k)]['label']]
+        elif face == MMCellFlag.Face.FRONT:
+            labels = [cells[get_cell_idx(i, j, k+1)]['label'], cells[get_cell_idx(i, j+1, k+1)]['label'],
+                      cells[get_cell_idx(i+1, j, k+1)]['label'], cells[get_cell_idx(i+1, j+1, k+1)]['label']]
+        if len(set(labels)) == 1: return MMCellFlag.FaceCrossingType.NO_FACE_CROSSING
+        # Check for junction (2+ distinct labels)
+        if len(set(labels)) > 2: return MMCellFlag.FaceCrossingType.JUNCTION_FACE_CROSSING
+        return MMCellFlag.FaceCrossingType.SURFACE_FACE_CROSSING
+
+    # Step 1: Initialize padded grid
+    cells = []
+    for k in range(padded_Nz):
+        for j in range(padded_Ny):
+            for i in range(padded_Nx):
+                cell = {'label': 0, 'flag': MMCellFlag(), 'vertexIndex': -1, 'vertexOffset': [0.0, 0.0, 0.0]}
+                if 1 <= i <= Nx and 1 <= j <= Ny and 1 <= k <= Nz:
+                    cell['label'] = input_labels[i-1, j-1, k-1]
+                else:
+                    cell['label'] = ReservedLabel.PADDING
+                cells.append(cell)
+
+    # Step 2: Classify vertices and count
+    for k in range(1, Nz + 1):
+        for j in range(1, Ny + 1):
+            for i in range(1, Nx + 1):
+                idx = get_cell_idx(i, j, k)
+                cell = cells[idx]
+                # Check 12 edges for crossings
+                has_crossing = False
+                for dz in [0, 1]:
+                    for dy in [0, 1]:
+                        if cell['label'] != cells[get_cell_idx(i+1, j+dy, k+dz)]['label']: has_crossing = True
+                        if cell['label'] != cells[get_cell_idx(i, j+1, k+dz)]['label']: has_crossing = True
+                        if cell['label'] != cells[get_cell_idx(i, j, k+1)]['label']: has_crossing = True
+                if not has_crossing:
+                    cell['flag'].vertexType = MMCellFlag.VertexType.NO_VERTEX
+                    continue
+                
+                # Determine face types and vertex type
+                face_types = []
+                for f in range(6):
+                    ft = check_face_crossing(cells, i, j, k, f)
+                    face_types.append(ft)
+                    if ft == MMCellFlag.FaceCrossingType.JUNCTION_FACE_CROSSING:
+                        cell['flag'].vertexType = MMCellFlag.VertexType.EDGE_VERTEX
+                        break
+                else:
+                    cell['flag'].vertexType = MMCellFlag.VertexType.SURFACE_VERTEX
+                
+                cell['flag'].face_types = face_types
+
+    # Count and allocate
+    m_numVertices = sum(1 for k in range(1, Nz+1) for j in range(1, Ny+1) for i in range(1, Nx+1) 
+                        if cells[get_cell_idx(i,j,k)]['flag'].vertexType != MMCellFlag.VertexType.NO_VERTEX)
+    m_vertices = [{'cellIndex': [0,0,0], 'offset': [0.0, 0.0, 0.0]} for _ in range(m_numVertices)]
+    
+    # Second pass: assign indices
+    v_idx = 0
+    for k in range(1, Nz + 1):
+        for j in range(1, Ny + 1):
+            for i in range(1, Nx + 1):
+                idx = get_cell_idx(i, j, k)
+                if cells[idx]['flag'].vertexType != MMCellFlag.VertexType.NO_VERTEX:
+                    cells[idx]['vertexIndex'] = v_idx
+                    m_vertices[v_idx]['cellIndex'] = [i, j, k]
+                    v_idx += 1
+
+    # Step 3: Relaxation
+    for _ in range(num_relax_iterations):
+        for idxVtx in range(m_numVertices):
+            vertex = m_vertices[idxVtx]
+            i, j, k = vertex['cellIndex']
+            cell_idx = get_cell_idx(i, j, k)
+            pCell = cells[cell_idx]
+            avgP = [0.0, 0.0, 0.0]
+            numNeighbors = 0
+            
+            if pCell['flag'].vertexType == MMCellFlag.VertexType.SURFACE_VERTEX:
+                for f in range(6):
+                    if pCell['flag'].face_types[f] != MMCellFlag.FaceCrossingType.NO_FACE_CROSSING:
+                        if f == 0: nbr_i, nbr_j, nbr_k = i-1, j, k
+                        elif f == 1: nbr_i, nbr_j, nbr_k = i+1, j, k
+                        elif f == 2: nbr_i, nbr_j, nbr_k = i, j-1, k
+                        elif f == 3: nbr_i, nbr_j, nbr_k = i, j+1, k
+                        elif f == 4: nbr_i, nbr_j, nbr_k = i, j, k-1
+                        else: nbr_i, nbr_j, nbr_k = i, j, k+1
+                        nbr_idx = get_cell_idx(nbr_i, nbr_j, nbr_k)
+                        nbrCell = cells[nbr_idx]
+                        avgP[0] += nbrCell['vertexOffset'][0] + nbr_i - i
+                        avgP[1] += nbrCell['vertexOffset'][1] + nbr_j - j
+                        avgP[2] += nbrCell['vertexOffset'][2] + nbr_k - k
+                        numNeighbors += 1
+            else:
+                for f in range(6):
+                    if pCell['flag'].face_types[f] == MMCellFlag.FaceCrossingType.JUNCTION_FACE_CROSSING:
+                        if f == 0: nbr_i, nbr_j, nbr_k = i-1, j, k
+                        elif f == 1: nbr_i, nbr_j, nbr_k = i+1, j, k
+                        elif f == 2: nbr_i, nbr_j, nbr_k = i, j-1, k
+                        elif f == 3: nbr_i, nbr_j, nbr_k = i, j+1, k
+                        elif f == 4: nbr_i, nbr_j, nbr_k = i, j, k-1
+                        else: nbr_i, nbr_j, nbr_k = i, j, k+1
+                        nbr_idx = get_cell_idx(nbr_i, nbr_j, nbr_k)
+                        nbrCell = cells[nbr_idx]
+                        avgP[0] += nbrCell['vertexOffset'][0] + nbr_i - i
+                        avgP[1] += nbrCell['vertexOffset'][1] + nbr_j - j
+                        avgP[2] += nbrCell['vertexOffset'][2] + nbr_k - k
+                        numNeighbors += 1
+
+            if numNeighbors > 0:
+                avgP[0] /= numNeighbors; avgP[1] /= numNeighbors; avgP[2] /= numNeighbors
+                p = pCell['vertexOffset']
+                p[0] = (1.0 - relax_factor) * p[0] + relax_factor * avgP[0]
+                p[1] = (1.0 - relax_factor) * p[1] + relax_factor * avgP[1]
+                p[2] = (1.0 - relax_factor) * p[2] + relax_factor * avgP[2]
+                min_val = 0.5 - max_dist; max_val = 0.5 + max_dist
+                p[0] = max(min_val, min(max_val, p[0]))
+                p[1] = max(min_val, min(max_val, p[1]))
+                p[2] = max(min_val, min(max_val, p[2]))
+
+    # Step 4: Quad Generation
+    quads = []
+    # Edge mapping from evidence: maps edge index to (cell1_offset, cell2_offset) relative to (i,j,k)
+    edge_map = {
+        0: ((0,0,0), (0,1,0)), 1: ((1,0,0), (1,1,0)), 2: ((0,0,0), (1,0,0)), 3: ((0,1,0), (1,1,0)),
+        4: ((0,0,1), (0,1,1)), 5: ((1,0,1), (1,1,1)), 6: ((0,1,1), (1,1,1)), 7: ((0,0,1), (1,0,1)),
+        8: ((0,0,0), (0,0,1)), 9: ((1,0,0), (1,0,1)), 10: ((0,1,0), (0,1,1)), 11: ((1,1,0), (1,1,1))
+    }
+    # Surrounding cells for each edge direction (indices relative to cell)
+    surrounding_cells = {
+        0: [(0,0,0), (0,1,0), (0,0,1), (0,1,1)], 1: [(1,0,0), (1,1,0), (1,0,1), (1,1,1)],
+        2: [(0,0,0), (1,0,0), (0,0,1), (1,0,1)], 3: [(0,1,0), (1,1,0), (0,1,1), (1,1,1)],
+        4: [(0,0,1), (0,1,1), (0,0,0), (0,1,0)], 5: [(1,0,1), (1,1,1), (1,0,0), (1,1,0)],
+        6: [(0,1,1), (1,1,1), (0,1,0), (1,1,0)], 7: [(0,0,1), (1,0,1), (0,0,0), (1,0,0)],
+        8: [(0,0,0), (1,0,0), (0,1,0), (1,1,0)], 9: [(1,0,0), (0,0,0), (1,0,1), (0,0,1)],
+        10: [(0,1,0), (1,1,0), (0,1,1), (1,1,1)], 11: [(1,1,0), (0,1,0), (1,1,1), (0,1,1)]
+    }
+    
+    for k in range(1, Nz + 1):
+        for j in range(1, Ny + 1):
+            for i in range(1, Nx + 1):
+                idx = get_cell_idx(i, j, k)
+                cell = cells[idx]
+                for e_idx in range(12):
+                    off1, off2 = edge_map[e_idx]
+                    c1 = (i+off1[0], j+off1[1], k+off1[2])
+                    c2 = (i+off2[0], j+off2[1], k+off2[2])
+                    idx1 = get_cell_idx(*c1); idx2 = get_cell_idx(*c2)
+                    if cells[idx1]['label'] != cells[idx2]['label']:
+                        surr = surrounding_cells[e_idx]
+                        verts = []
+                        for s in surr:
+                            si = get_cell_idx(i+s[0], j+s[1], k+s[2])
+                            if cells[si]['vertexIndex'] != -1:
+                                verts.append(m_vertices[cells[si]['vertexIndex']]['offset'])
+                        if len(verts) == 4:
+                            quads.append({'corners': verts, 'labels': [cells[idx1]['label'], cells[idx2]['label']]})
+    return quads
+```
+
+### Parameters
+*   `relaxFactor` ($\alpha$): Fraction of the averaged position added to the current position [S2, unofficial]. Typical value: Not given in the sources.
+*   `maxDistFromCellCenter`: Maximum distance from the cell center (0.5) for the constrained vertex location [S2, unofficial]. Typical value: Not given in the sources.
+*   `numRelaxIterations`: Number of relaxation iterations [S2, unofficial]. Typical value: Not given in the sources.
+
+### Edge Cases and Pitfalls
+*   **Boundary Handling:** Boundary faces require padding to ensure closed shapes and sharp corners/edges at volume faces [S2, unofficial].
+*   **Precision:** Vertex positions are constrained to $[0.5 - maxDist, 0.5 + maxDist]$ to prevent them from drifting too far from the cell center [S2, unofficial].
+
+## Subtopics
+
+### [OBJ Export for Multi-Label Surfaces](5824-obj-export-for-multi-label-surfaces.md)
+Export as a set of surfaces, with each surface enclosing a single material. This variant generates separate OBJ files for each material label, allowing for individual rendering and manipulation of materials.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot I)$, where $N$ is the number of cells and $I$ is the number of relaxation iterations [S2, unofficial].
+*   **Memory Complexity:** $O(N)$ for the cell array and vertex list [S2, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Preserves sharp boundaries between materials; generates watertight quad-meshes; simple to implement [S1, unofficial].
+*   **Limitations:** Relies on relaxation which may smooth out fine details if parameters are not tuned; requires padding which increases memory usage by a factor of $(1+2/N)^3$ [S2, unofficial].
+*   **When to use:** Multi-label segmentations where sharp boundaries are important [S1, unofficial].
+*   **When not to use:** Single-label volumes (use JSurfaceNets); volumes with very fine details that require more than relaxation to preserve [G].
+
+## Background
+Multi-Material Surface Nets was introduced by Sarah Frisken in 2022 in the paper "Surfacenets for multi-label segmentations with preservation of sharp boundaries" [S2, unofficial]. It extends the original Surface Nets algorithm to handle multiple material labels, addressing the need for sharp boundaries in medical imaging and other fields where multi-label segmentations are common [S1, unofficial].
+
+## Sources
+[S1] SurfaceNets for Multi-Label Segmentations with Preservation of Sharp Boundaries., https://europepmc.org/article/MED/36325473, fetched 2026-10-26 (unofficial)
+[S2] sarahfrisken/surfaceNets-multi-material, https://github.com/sarahfrisken/surfaceNets-multi-material, fetched 2026-10-27 (unofficial)

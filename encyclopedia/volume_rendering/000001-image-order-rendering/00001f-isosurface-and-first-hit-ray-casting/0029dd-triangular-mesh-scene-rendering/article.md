@@ -1,0 +1,124 @@
+# Triangular Mesh Scene Rendering
+
+Also called: drawScene
+
+## Overview
+Triangular mesh scene rendering is a method for displaying a collection of pre-computed triangular mesh objects, often representing multiple isosurfaces or contour surfaces from scalar fields, within a single coordinate system [S1]. It differs from volume ray casting by operating on explicit geometric primitives rather than sampled voxel grids, allowing for exact surface representation and vectorized computation at the application level [S1]. Unlike sibling methods that trace rays through implicit fields, this approach relies on standard rasterization or specific engine handling to manage depth and occlusion among multiple intersecting surfaces [S1].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A list of triangular mesh objects. Each mesh consists of vertices and indices defining triangles. Optional parameters include material properties (e.g., "default", smoothness) and camera/screen configuration (position, scale, depth) [S1].
+- Output: A rendered image where the meshes are composited according to the engine's depth handling rules [S1].
+
+**Data Structures:**
+The core data structure is a list of mesh objects. Each mesh contains:
+- Vertices: A list of 3D coordinates $(x, y, z)$.
+- Triangles: Indices referencing the vertices to form triangles.
+- Material: A string or structure defining visual properties (e.g., color, smoothness) [S1].
+
+**Steps:**
+1. **Scene Construction:** Create or load a list of triangular mesh objects. These may be extracted from scalar fields at various isovales or defined manually [S1].
+2. **Configuration:** Set the camera position (e.g., `screen = list(x, y, z)`), scale, and depth parameters [S1].
+3. **Rendering:** Invoke the rendering function (e.g., `drawScene`) with the list of meshes and configuration [S1].
+4. **Depth Handling:** The engine processes the triangles. In standard or grid engines, triangles are drawn back-to-front, which can cause visual artifacts for intersecting surfaces [S1]. In `rgl` engines, proper depth buffering handles intersections correctly [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def draw_scene(meshes, camera_pos, scale=False, depth=1.0):
+    """
+    Render a scene of triangular meshes.
+    
+    Args:
+        meshes: List of mesh objects, each containing vertices and triangles.
+        camera_pos: Tuple (x, y, z) for camera position.
+        scale: Boolean, whether to auto-scale the scene.
+        depth: Float, depth parameter for rendering (engine-specific).
+    """
+    # Set up camera/view matrix based on camera_pos
+    view_matrix = compute_view_matrix(camera_pos)
+    
+    # If scale is False, use fixed coordinate system; otherwise compute bounds
+    if not scale:
+        transform_matrix = identity_matrix()
+    else:
+        bounds = compute_bounds(meshes)
+        transform_matrix = compute_scale_matrix(bounds)
+    
+    # Clear frame buffer
+    clear_framebuffer()
+    
+    # Sort meshes or triangles if required by the engine
+    # Note: Standard engines may not sort correctly for intersecting surfaces
+    for mesh in meshes:
+        # Apply material properties
+        material = mesh.material
+        
+        # Transform vertices
+        transformed_vertices = []
+        for v in mesh.vertices:
+            # Apply transform matrix
+            v_transformed = transform_matrix * v
+            # Apply view matrix
+            v_view = view_matrix * v_transformed
+            transformed_vertices.append(v_view)
+        
+        # Rasterize triangles
+        for tri in mesh.triangles:
+            v0 = transformed_vertices[tri[0]]
+            v1 = transformed_vertices[tri[1]]
+            v2 = transformed_vertices[tri[2]]
+            
+            # Draw triangle with material
+            rasterize_triangle(v0, v1, v2, material)
+
+def rasterize_triangle(v0, v1, v2, material):
+    """
+    Rasterize a single triangle.
+    Note: Implementation details depend on the specific graphics engine.
+    Standard engines may draw back-to-front, causing artifacts for intersections.
+    """
+    # Compute screen coordinates
+    p0 = project(v0)
+    p1 = project(v1)
+    p2 = project(v2)
+    
+    # Draw triangle using standard rasterization
+    draw_polygon([p0, p1, p2], material)
+```
+
+**Parameters:**
+- `material`: String or structure defining visual appearance (e.g., "default", smoothness) [S1].
+- `scale`: Boolean, whether to auto-scale the scene to fit the viewport [S1].
+- `depth`: Float, depth parameter for rendering, specific to the engine [S1].
+
+**Edge Cases and Pitfalls:**
+- **Intersecting Surfaces:** In standard and grid engines, intersecting surfaces appear ragged due to back-to-front drawing of triangles [S1]. The `rgl` engine handles intersections properly [S1].
+- **Quadrilaterals:** Rendering is restricted to triangular meshes to allow vectorized computations at the R level. Quadrilaterals and other polynomial surfaces are not directly supported [S1].
+
+## Subtopics
+
+### Isosurface Scene Representation
+ECoNGS represents isosurface scenes by extracting triangular meshes at different isovalues over a value range (e.g., [-1, 1]) to form basic scenes, then training them jointly [S2, unofficial]. For a composed isosurface scene with 53.9M triangles, the ECoNGS model size is 1.57 MB with 331 FPS, while the direct triangular mesh representation is 1002.9 MB with 101 FPS [S2, unofficial]. Compared to direct triangular mesh extraction, ECoNGS achieves high fidelity with much smaller model size (e.g., 0.65 MB vs 317.5 MB for iso=-0.5) and higher FPS (468 vs 101), but has a slightly higher GPU/host memory footprint during rendering (3.30/7.61 GB vs 0.31/1.86 GB) [S2, unofficial]. Memory cost stays constant regardless of scene complexity [S2, unofficial].
+
+### Water Surface Rendering
+A rendering technique for water surfaces using a triangle fan geometry with vertex positions in 3D space $(x, 0, y)$, rendered with various shader uniforms for visual effects [S3, unofficial]. The `WaterRender` constructor converts 2D vertices to 3D by setting $y=0$, creates a VBO with 3D vertices, and links the vertex position attribute at attribute 0 [S3, unofficial]. The draw function computes the MVP matrix as `camera.vp_matrix * translate(position)` and pushes uniforms to the shader: `uFar`, `uFoam` (0.5f), `uInvFar`, `uMotion` (0.5f), `uNear`, `uRipple` (0.5f), `uRndFrame`, `uVisibility` (3.6f), `uWave` (0.5f), `uRingCount` (0), `uMvpMatrix`, `uOldStableVpMatrix`, `uStableVpMatrix`, `uFoamTexture` (texture unit 5), `uPixelSize`, `uCameraPos`, `uRings` (vec4(0,0,0,0)), and `uWaterColor` (vec4(0.025f, 0.125f, 0.15f, 1.0f)) [S3, unofficial]. It binds the VAO and calls `glDrawArrays` with `GL_TRIANGLE_FAN` [S3, unofficial]. Default water color is vec4(0.025f, 0.125f, 0.15f, 1.0f) and default visibility is 3.6f [S3, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** For ECoNGS on a composed isosurface scene (53.9M triangles), the model size is 1.57 MB with 331 FPS, while the direct triangular mesh is 1002.9 MB with 101 FPS [S2, unofficial]. For fuzzy basic scenes, ECoNGS achieves 491 FPS with model sizes of 0.33 MB and 0.31 MB [S2, unofficial].
+- **Scaling:** ECoNGS memory cost stays constant regardless of scene complexity [S2, unofficial].
+- **Strengths:** Allows vectorized computations at the application level (e.g., R) [S1]. ECoNGS provides high fidelity with much smaller model size and higher FPS compared to direct triangular mesh extraction [S2, unofficial].
+- **Limitations:** Standard and grid engines may render intersecting surfaces raggedly due to back-to-front drawing [S1]. Rendering is restricted to triangular meshes; quadrilaterals and other polynomial surfaces are not supported [S1]. ECoNGS has a higher GPU/host memory footprint during rendering compared to direct meshes [S2, unofficial].
+- **When to use:** When rendering multiple contour surfaces or related data sets in a single plot, especially when exact surface representation is needed [S1]. When model size and rendering speed are critical, ECoNGS is a strong choice for isosurface scenes [S2, unofficial].
+- **When not to use:** When the scene contains non-triangular surfaces or when proper handling of intersecting surfaces is required in standard/grid engines [S1].
+
+## Background
+The method is described in the context of the R programming language, specifically within the `rgl` package, for computing and displaying isosurfaces [S1]. It is used for rendering multiple contour surfaces of a single function or contour surfaces of related functions or data sets in a single plot [S1]. The approach was used in constructing figures in the referenced paper [S1]. ECoNGS extends this concept by using neural Gaussian splats to represent isosurface scenes more compactly [S2, unofficial]. Water surface rendering is implemented in the Voxel-Render project [S3, unofficial].
+
+## Sources
+[S1] Computing and Displaying Isosurfaces inR, https://doi.org/10.18637/jss.v028.i01, fetched 2026-10-27
+[S2] ECoNGS: Efficient Compressive Neural Gaussian Splats for Volume Visualization, https://doi.org/10.48550/arxiv.2607.18466, fetched 2026-10-26 (unofficial)
+[S3] TTFH/Voxel-Render, https://github.com/TTFH/Voxel-Render, fetched 2026-10-27 (unofficial)

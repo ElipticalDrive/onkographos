@@ -3,93 +3,81 @@
 Also called: Visface mask computation, libvxl_kv6_block serialization
 
 ## Overview
-This method serializes a chunked voxel map into a compact file format by iterating through the spatial grid and computing a 6-bit visibility face mask (visfaces) for each block based on its immediate solid neighbors [S1, unofficial]. It differs from its sibling [Span-based Column Encoding](4365-span-based-column-encoding.md) by explicitly tracking surface orientation for rendering culling rather than just compressing empty spans, and from its child [Voxel Map Lookup](4226-voxel-map-lookup.md) by performing write-heavy serialization rather than read-only coordinate mapping [S1, unofficial].
+This method serializes a chunked voxel map into a compact file format by iterating through the spatial grid and computing a 6-bit visibility face mask (visfaces) for each block based on its immediate solid neighbors [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A `libvxl_map` structure containing geometry data, width, height, and depth dimensions.
-- Output: A serialized file containing a stream of `libvxl_kv6_block` structures.
+- Input: A `libvxl_map` structure containing geometry data, width, height, and depth dimensions [S1, unofficial].
+- Output: A serialized file containing a stream of `libvxl_kv6_block` structures [S1, unofficial].
 
 **Data Structures:**
 The core output unit is `struct libvxl_kv6_block` [S1, unofficial]:
-- `color`: `uint32_t`, masked to 24 bits (`0xFFFFFF`).
-- `z`: Extracted from the block's position key.
-- `normal`: Fixed to `0`.
+- `color`: `uint32_t`, masked to 24 bits (`0xFFFFFF`) [S1, unofficial].
+- `z`: Extracted from the block's position key [S1, unofficial].
+- `normal`: Fixed to `0` [S1, unofficial].
 - `visfaces`: `uint8_t`, a 6-bit mask where bits correspond to neighbor directions:
   - Bit 0 (`0x01`): +x face visible.
   - Bit 1 (`0x02`): -x face visible.
   - Bit 2 (`0x04`): +y face visible.
   - Bit 3 (`0x08`): -y face visible.
   - Bit 4 (`0x10`): +z face visible.
-  - Bit 5 (`0x20`): -z face visible.
+  - Bit 5 (`0x20`): -z face visible [S1, unofficial].
 
 **Steps:**
 1. Iterate $y$ from $0$ to `map->height` and $x$ from $0$ to `map->width` [S1, unofficial].
 2. Retrieve the chunk at position $(x, y)$ using `chunk_fposition(map, x, y)` [S1, unofficial].
-3. Iterate through the blocks within the chunk. For each block:
-   a. Verify the block's x-coordinate matches the current loop variable $x$ using `key_getx(next->position) == x` [S1, unofficial].
-   b. Create a `libvxl_kv6_block` instance [S1, unofficial].
-   c. Mask the block's color to 24 bits [S1, unofficial].
-   d. Extract the $z$ coordinate using `key_getz` [S1, unofficial].
-   e. Set the `normal` field to $0$ [S1, unofficial].
-   f. Compute the `visfaces` mask by checking the 6 immediate neighbors (±x, ±y, ±z) using `libvxl_map_issolid` [S1, unofficial]. If a neighbor is not solid, the corresponding bit is set.
-   g. Write the block to the output file [S1, unofficial].
-   h. Increment $x$ offset and $xy$ offset counters [S1, unofficial].
+3. Iterate through the blocks within the chunk [S1, unofficial].
+4. Verify the block's x-coordinate matches the current loop variable $x$ using `key_getx(next->position) == x` [S1, unofficial].
+5. Create a `libvxl_kv6_block` instance [S1, unofficial].
+6. Mask the block's color to 24 bits [S1, unofficial].
+7. Extract the $z$ coordinate using `key_getz` [S1, unofficial].
+8. Set the `normal` field to $0$ [S1, unofficial].
+9. Compute the `visfaces` mask by checking the 6 immediate neighbors (±x, ±y, ±z) using `libvxl_map_issolid` [S1, unofficial]. If a neighbor is not solid, the corresponding bit is set [S1, unofficial].
+10. Write the block to the output file [S1, unofficial].
+11. Increment $x$ offset and $xy$ offset counters [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def serialize_chunked_map(map, file):
-    # Iterate over the 2D grid of chunks
+    # Helper to retrieve chunk at x,y
+    def get_chunk_at(m, cx, cy):
+        return m.chunks[cy * m.chunk_width + cx]
+
+    # Helper to extract coordinates from packed position key
+    def get_block_x(pos): return pos & 0xFF
+    def get_block_z(pos): return (pos >> 16) & 0xFF
+
+    # Helper to check if a voxel is solid
+    def is_solid(m, x, y, z):
+        if not (0 <= x < m.width and 0 <= y < m.height and 0 <= z < m.depth):
+            return False
+        return m.geometry[(z * m.width + y) * m.width + x]
+
+    xoffset = 0
+    xyoffset = 0
     for y in range(map.height):
         for x in range(map.width):
-            # Get the chunk at this x,y position
-            chunk = chunk_fposition(map, x, y)
-            
-            # Iterate through blocks in the chunk
+            chunk = get_chunk_at(map, x, y)
             for block in chunk.blocks:
-                # Check if block's x-coordinate matches current loop x
-                if key_getx(block.position) != x:
+                if get_block_x(block.position) != x:
                     continue
-                
-                # Create output block structure
-                kv6_block = libvxl_kv6_block()
-                
-                # Mask color to 24 bits
-                kv6_block.color = block.color & 0xFFFFFF
-                
-                # Extract z coordinate
-                kv6_block.z = key_getz(block.position)
-                
-                # Set normal to 0
-                kv6_block.normal = 0
-                
-                # Compute visfaces mask
+                kv6 = Kv6Block()
+                kv6.color = block.color & 0xFFFFFF
+                kv6.z = get_block_z(block.position)
+                kv6.normal = 0
                 mask = 0
-                # Check +x neighbor
-                if not libvxl_map_issolid(map, x + 1, y, block.z):
-                    mask |= 0x01
-                # Check -x neighbor
-                if not libvxl_map_issolid(map, x - 1, y, block.z):
-                    mask |= 0x02
-                # Check +y neighbor
-                if not libvxl_map_issolid(map, x, y + 1, block.z):
-                    mask |= 0x04
-                # Check -y neighbor
-                if not libvxl_map_issolid(map, x, y - 1, block.z):
-                    mask |= 0x08
-                # Check +z neighbor
-                if not libvxl_map_issolid(map, x, y, block.z + 1):
-                    mask |= 0x10
-                # Check -z neighbor
-                if not libvxl_map_issolid(map, x, y, block.z - 1):
-                    mask |= 0x20
-                
-                kv6_block.visfaces = mask
-                
-                # Write block to file
-                file.write(kv6_block.serialize())
+                if not is_solid(map, x + 1, y, kv6.z): mask |= 0x01
+                if not is_solid(map, x - 1, y, kv6.z): mask |= 0x02
+                if not is_solid(map, x, y + 1, kv6.z): mask |= 0x04
+                if not is_solid(map, x, y - 1, kv6.z): mask |= 0x08
+                if not is_solid(map, x, y, kv6.z + 1): mask |= 0x10
+                if not is_solid(map, x, y, kv6.z - 1): mask |= 0x20
+                kv6.visfaces = mask
+                file.write(kv6.serialize())
+                xoffset += 1
+                xyoffset += 1
 ```
 
 **Parameters:**
@@ -105,15 +93,10 @@ def serialize_chunked_map(map, file):
 Retrieves the color of a voxel at a specific $(x, y, z)$ coordinate within a chunked voxel map. It solves the problem of efficient sparse voxel access by combining global geometry culling with binary search within sorted block arrays. It is distinguished from its sibling [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) by its read-only access pattern and lack of visibility face computation, focusing instead on direct coordinate-to-color mapping.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of blocks in the map, as each block is visited once to compute its visface mask.
 - **Memory Complexity:** Depends on the chunk size and map dimensions. The geometry array size is calculated as `(map->width * map->height * map->depth + (sizeof(size_t) * 8 - 1)) / (sizeof(size_t) * 8) * sizeof(size_t)` [S1, unofficial].
-- **Strengths:** Compact serialization format; explicit visibility data aids rendering culling.
-- **Limitations:** Only considers immediate neighbors for visibility, missing diagonal occlusion [S1, unofficial].
-- **When to use:** When serializing voxel data for rendering engines that require explicit face visibility flags.
-- **When not to use:** When diagonal occlusion is critical or when read-only lookup performance is the primary concern.
 
 ## Background
-This method is part of the `libvxl` library, an unofficial implementation for reading and writing `.vxl` maps used in the game 'Ace of Spades' (Voxel Space) [S1, unofficial]. It was developed to support efficient chunk-based storage and serialization of voxel worlds.
+This method is part of the `libvxl` library, an unofficial implementation for reading and writing `.vxl` maps used in the game 'Ace of Spades' (Voxel Space) [S1, unofficial].
 
 ## Sources
 [S1] xtreme8000/libvxl, https://github.com/xtreme8000/libvxl, fetched 2026-10-28 (unofficial)

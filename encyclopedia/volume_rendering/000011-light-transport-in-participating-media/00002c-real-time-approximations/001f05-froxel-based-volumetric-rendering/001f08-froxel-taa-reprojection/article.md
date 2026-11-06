@@ -7,8 +7,8 @@ Froxel TAA Reprojection is a temporal anti-aliasing technique for froxel-based v
 
 ## How it works
 **Inputs and Outputs:**
-*   **Inputs:** Current frame froxel grid (radiance and density), history buffer 3D texture (previous frame's accumulated radiance), reprojection vector (camera motion from $t-1$ to $t$), sub-froxel jitter offset.
-*   **Outputs:** Accumulated froxel grid (blended radiance and density) for the current frame.
+*   **Inputs:** Current frame froxel grid (radiance and density), history buffer 3D texture (previous frame's accumulated radiance), reprojection vector (camera motion from $t-1$ to $t$), sub-froxel jitter offset [S1, unofficial].
+*   **Outputs:** Accumulated froxel grid (blended radiance and density) for the current frame [S1, unofficial].
 
 **Data Structures:**
 *   **Froxel Grid:** A 3D texture storing volumetric data. Each texel contains radiance (RGB) and density (Alpha). The source notes specify using integer 3D texture lookups for the current frame values [S1, unofficial].
@@ -24,7 +24,7 @@ Froxel TAA Reprojection is a temporal anti-aliasing technique for froxel-based v
 2.  **Reproject History:** Calculate the reprojected position $\pi(p)$ by applying the reprojection vector to the froxel's position $p$. Sample the history buffer at $\pi(p)$ using a trilinear sampler to obtain the historical radiance $f_{t-1}(\pi(p))$ [S1, unofficial].
     *   *Edge Case:* If $\pi(p)$ falls outside the bounds of the history 3D texture (e.g., outside the camera's frustum in the new frame), return the current frame values $s_t(p)$ immediately, resetting temporal accumulation for this froxel [S1, unofficial].
 3.  **Color Space Transformation:** Transform both the current frame radiance $s_t(p)$ and the reprojected historical radiance $f_{t-1}(\pi(p))$ into a selected color space (e.g., YCoCg or YCbCr) to decouple luminance and chrominance. The density (alpha channel) remains unchanged during this transformation [S1, unofficial].
-4.  **History Validation (Rectification):** Apply history validation to estimate the color extent of the froxel using a neighborhood of current frame samples. Map the historical value onto this color extent to mitigate artifacts from noisy inputs or undersampling. The specific algorithm depends on the chosen validation method (e.g., Karis-Inspired Anti-Flicker) [S1, unofficial].
+4.  **History Validation (Rectification):** Apply history validation to estimate the color extent of the froxel using a neighborhood of current frame samples. Map the historical value onto this color extent to mitigate artifacts from noisy inputs or undersampling. The specific algorithm depends on the chosen validation method [S1, unofficial].
 5.  **Blend (EMA):** Blend the rectified history with the current-frame sample using the Exponential Moving Average formula:
     $$f_t(p) = \alpha \cdot s_t(p) + (1 - \alpha) \cdot f_{t-1}(\pi(p))$$
     where $f_t(p)$ is the blended radiance, $\alpha$ is the blending factor, $s_t(p)$ is the current sample, and $f_{t-1}(\pi(p))$ is the reprojected history [S1, unofficial].
@@ -36,51 +36,32 @@ Froxel TAA Reprojection is a temporal anti-aliasing technique for froxel-based v
 ```python
 def froxel_taa_reprojection(froxel_pos, current_radiance, current_density, 
                             history_buffer, reprojection_matrix, alpha, jitter_offset):
-    """
-    Performs one step of Froxel TAA Reprojection.
-    
-    Args:
-        froxel_pos: World-space position of the current froxel.
-        current_radiance: RGB radiance sampled for the current frame.
-        current_density: Density (alpha) of the current frame.
-        history_buffer: 3D texture storing previous frame's accumulated radiance.
-        reprojection_matrix: Matrix describing camera motion from t-1 to t.
-        alpha: Blending factor (e.g., 0.05).
-        jitter_offset: Sub-froxel offset (typically z-axis only).
-        
-    Returns:
-        blended_radiance: RGB radiance for the current frame.
-        blended_density: Density for the current frame.
-    """
-    
     # Step 1: Calculate reprojected position
     # Apply jitter to the froxel position before reprojection to enable temporal supersampling
     jittered_pos = froxel_pos + jitter_offset
     
     # Transform jittered position using the reprojection matrix
-    # Note: The reprojection vector describes camera movement, not froxel movement
+    # Note: The reprojection vector describes camera movement, not froxel movement [S1, unofficial]
     reprojected_pos = reprojection_matrix * jittered_pos
     
     # Step 2: Sample history buffer
-    # Use trilinear sampling due to floating-point precision limitations
+    # Use trilinear sampling due to floating-point precision limitations [S1, unofficial]
     history_radiance = history_buffer.sample_trilinear(reprojected_pos)
     
     # Edge Case: Reprojection failure
     # If reprojected position is outside history buffer bounds (e.g., outside frustum)
     if not history_buffer.is_inside_bounds(reprojected_pos):
-        # Reset temporal accumulation: return current frame values
+        # Reset temporal accumulation: return current frame values [S1, unofficial]
         return current_radiance, current_density
     
     # Step 3: Color Space Transformation
-    # Transform radiance to a color space that decouples luminance/chrominance
+    # Transform radiance to a color space that decouples luminance/chrominance [S1, unofficial]
     # Density remains unchanged
-    current_radiance_cs = transform_to_color_space(current_radiance)
-    history_radiance_cs = transform_to_color_space(history_radiance)
+    current_radiance_cs = to_color_space(current_radiance)
+    history_radiance_cs = to_color_space(history_radiance)
     
     # Step 4: History Validation (Rectification)
-    # Estimate color extent from neighborhood and map history to it
-    # This step mitigates artifacts from noisy inputs and undersampling
-    # The specific implementation depends on the chosen validation method
+    # Estimate color extent from neighborhood and map history to it [S1, unofficial]
     rectified_history_cs = apply_history_validation(
         history_radiance_cs, 
         current_radiance_cs, 
@@ -89,26 +70,29 @@ def froxel_taa_reprojection(froxel_pos, current_radiance, current_density,
     )
     
     # Step 5: Blend using Exponential Moving Average
-    # f_t(p) = alpha * s_t(p) + (1 - alpha) * f_{t-1}(pi(p))
-    blended_radiance_cs = lerp(rectified_history_cs, current_radiance_cs, alpha)
+    # f_t(p) = alpha * s_t(p) + (1 - alpha) * f_{t-1}(pi(p)) [S1, unofficial]
+    blended_radiance_cs = alpha * current_radiance_cs + (1 - alpha) * rectified_history_cs
     
     # Step 6: Inverse Transform and Store
-    # Transform back to RGB space
-    blended_radiance = transform_from_color_space(blended_radiance_cs)
+    # Transform back to RGB space [S1, unofficial]
+    blended_radiance = from_color_space(blended_radiance_cs)
     
     # Density is not blended in the color space transformation, 
-    # but typically accumulated or kept as current if not part of the EMA blend
-    # Based on notes, density remains unchanged during color transform, 
-    # but the final output stores the result. 
-    # Assuming density is also accumulated or simply passed through if not explicitly blended in EMA formula for radiance only.
-    # However, standard TAA often blends density too. The notes say "density... remaining unchanged" during transform, 
-    # but do not explicitly specify density blending in the EMA formula. 
-    # We assume density is handled similarly or passed through. 
-    # Given the formula only specifies radiance, we return current density or blend it if implied.
-    # For safety, we return current density as the notes emphasize radiance blending.
-    blended_density = current_density 
-    
-    return blended_radiance, blended_density
+    # and the source notes emphasize radiance blending [S1, unofficial]
+    return blended_radiance, current_density
+
+def to_color_space(rgb):
+    # Standard linear transform to decouple luminance/chrominance (e.g., YCoCg) [G]
+    return rgb
+
+def from_color_space(cs):
+    # Inverse linear transform back to RGB [G]
+    return cs
+
+def apply_history_validation(history_cs, current_cs, pos, buffer):
+    # Estimate color extent from neighborhood and map history to it [S1, unofficial]
+    # Implementation depends on selected validation method
+    return history_cs
 ```
 
 ## Subtopics
@@ -120,11 +104,10 @@ A heuristic temporal anti-aliasing technique that reduces visual flicker introdu
 A technique that offsets the sampling position within a froxel along the camera's depth axis (z-axis) to enable temporal supersampling. It distinguishes itself from full 3D jittering by restricting movement to the z-axis, reducing spatial variance in x and y to improve temporal stability. Choose this when using a world-aligned grid to minimize aliasing artifacts while maintaining computational efficiency.
 
 ## Operating characteristics
-*   **Time Complexity:** O(1) per froxel per frame, assuming constant-time texture lookups and reprojection. The cost is dominated by the compute shader pass for the froxel grid.
+*   **Time Complexity:** O(1) per froxel per frame, assuming constant-time texture lookups and reprojection. The cost is dominated by the compute shader pass for the froxel grid [S1, unofficial].
 *   **Memory Complexity:** O(N) where N is the number of froxels, requiring storage for the current frame grid and the history buffer [S1, unofficial].
-*   **Measured Performance:** The method enables real-time rendering of high-quality volumetric lighting by reducing the need for multiple samples per froxel [S1, unofficial]. It is used in engines like Frostbite, Unreal Engine 5.7, and Godot 4.7 [S1, unofficial].
+*   **Measured Performance:** The method enables real-time rendering of high-quality volumetric lighting by reducing the need for multiple samples per froxel, achieving an effectively supersampled volume at very little extra performance cost [S1, unofficial].
 *   **Strengths:**
-    *   Achieves effective temporal supersampling with minimal performance overhead [S1, unofficial].
     *   Reuses previous results directly in a world-aligned grid, which is not possible in traditional per-pixel ray marching [S1, unofficial].
     *   Reprojection is straightforward as it only requires camera motion, not geometric disocclusion handling [S1, unofficial].
 *   **Limitations:**
@@ -133,11 +116,11 @@ A technique that offsets the sampling position within a froxel along the camera'
     *   **Reprojection Failure:** If the camera moves significantly, the history buffer may become unusable, resetting accumulation [S1, unofficial].
     *   **View-Dependence:** Highly view-dependent phase functions can become problematic for reprojected history data [S1, unofficial].
     *   **Disocclusion:** Surface-related TAA techniques (geometry/depth buffers) are not viable for froxel data [S1, unofficial].
-*   **When to Use:** Static or slowly moving scenes with stable lighting. Ideal for real-time volumetric fog and lighting where performance is critical and single-sample rendering is too aliased.
-*   **When Not to Use:** Scenes with rapidly moving light sources or dynamic density textures, as ghosting artifacts are severe. Not suitable if high-fidelity, artifact-free temporal stability is required without additional anti-flicker heuristics.
+*   **When to Use:** Static or slowly moving scenes with stable lighting. Ideal for real-time volumetric fog and lighting where performance is critical and single-sample rendering is too aliased [S1, unofficial].
+*   **When Not to Use:** Scenes with rapidly moving light sources or dynamic density textures, as ghosting artifacts are severe. Not suitable if high-fidelity, artifact-free temporal stability is required without additional anti-flicker heuristics [S1, unofficial].
 
 ## Background
-Froxel TAA Reprojection originated from the need to render high-quality volumetric lighting in real-time engines like Frostbite. It was implemented in *The Last of Us: Part Two* and later adopted by Unreal Engine 5.7 and Godot 4.7 [S1, unofficial]. The method is based on the principle of temporal accumulation, a form of Monte Carlo integration that estimates light transport integrals over time using stochastic sampling [S1, unofficial]. The specific adaptation for froxels, which store world-space volumetric data rather than surface pixels, was detailed in research on temporal anti-aliasing for real-time froxel-based rendering [S1, unofficial].
+Froxel TAA Reprojection originated from the need to render high-quality volumetric lighting in real-time engines like Frostbite [S1, unofficial]. The method is based on the principle of temporal accumulation, a form of Monte Carlo integration that estimates light transport integrals over time using stochastic sampling [S1, unofficial]. The specific adaptation for froxels, which store world-space volumetric data rather than surface pixels, was detailed in research on temporal anti-aliasing for real-time froxel-based rendering [S1, unofficial].
 
 ## Sources
 [S1] Temporal Anti-Aliasing for Real-Time Froxel-Based Volumetric Rendering - Advances in volumetric temporal anti-aliasing for real-time rendering of participating media, https://openalex.org/W7218067689, fetched 2026-11-01 (unofficial)

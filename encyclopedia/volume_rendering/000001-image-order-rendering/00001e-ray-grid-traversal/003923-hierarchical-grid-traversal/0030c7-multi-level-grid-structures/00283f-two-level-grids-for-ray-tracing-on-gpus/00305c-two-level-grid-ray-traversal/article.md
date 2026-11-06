@@ -1,0 +1,99 @@
+# Two-Level Grid Ray Traversal
+
+Also called: Modified DDA Traversal
+
+## Overview
+Two-Level Grid Ray Traversal is a hierarchical ray traversal algorithm designed for two-level grid structures, modifying the classic DDA algorithm to step through top-level cells and then treat each top cell as a uniform grid for leaf traversal [S1, unofficial]. It solves the problem of efficiently traversing sparse or complex volumetric data by leveraging coherence within top-level cells, offering a SIMD-friendly approach that minimizes code divergence except when rays disagree on the traversal level [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A ray $r$ (origin $O$, direction $D$), a two-level grid structure (top-level grid with uniform cells, each containing a leaf-level uniform grid).
+- Output: A sequence of leaf cells intersected by the ray, or a termination signal.
+
+**Data Structures:**
+- Top-level grid: Uniform grid of size $N_t \times N_t \times N_t$ (implied by context of uniform grid traversal).
+- Leaf grid: Uniform grid within each top cell. Size not specified in sources [S1, unofficial].
+- Decision variables: Standard DDA variables ($t_{max}$, $t_{step}$, $step$ direction, $t_{next}$ intersection distance) [S1, unofficial].
+
+**Numbered Steps:**
+1. Initialize top-level traversal using the Amanatides and Woo DDA algorithm [S1, unofficial].
+2. For each top-level cell intersected by the ray:
+   a. If the top-level cell contains leaf data, initialize leaf-level traversal.
+   b. Reuse decision variables from the top-level traversal to spare computations when initializing the leaf-level decision variables [S1, unofficial].
+   c. Traverse the leaf-level uniform grid using the same DDA algorithm [S1, unofficial].
+3. For each leaf cell intersected:
+   a. Check if all rays in the warp have intersection candidates [S2, unofficial].
+   b. If yes, proceed with standard ray-triangle intersection [S2, unofficial].
+   c. If no, check if there are rays with high workload (at least 16 intersection candidates) [S2, unofficial].
+   d. If high workload rays exceed 20, proceed with standard intersection routine [S2, unofficial].
+
+**Formulas:**
+- DDA step advancement: $t_{next} = t_{current} + t_{step}$ [S1, unofficial].
+- Cell index update: $index = index + step$ [S1, unofficial].
+- Proof of coherence: For rays starting in the same grid cell $o$, if cell $c$ is the $n$-th cell along ray $r$, it is the $n$-th cell along any ray $r2$ from the same origin set that intersects $c$. This is because $c$ is at distance $(x, y, z)$ from $o$, where $x, y, z$ are integers denoting cell distances along axes, and traversal advances one neighbor cell at a time, so $c$ is traversed at $x + y + z = n$-th step [S1, unofficial].
+
+**Parameters:**
+- Workload threshold: 16 intersection candidates [S2, unofficial].
+- High workload threshold: More than 20 rays [S2, unofficial].
+- Typical values: Not given in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Code divergence occurs only when rays disagree on which level of structure they need to traverse [S1, unofficial].
+- Precision issues with DDA variables are not explicitly discussed, but standard DDA pitfalls apply [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def two_level_grid_ray_traversal(ray, top_grid, leaf_grids):
+    # Initialize top-level DDA variables
+    t_max, t_step, step_dir, t_next = init_dda_variables(ray, top_grid)
+    
+    while t_next < t_max:
+        # Determine current top-level cell
+        top_cell = get_top_cell(t_next, top_grid)
+        
+        # Traverse leaf cells if present
+        if leaf_grids[top_cell] is not None:
+            leaf_grid = leaf_grids[top_cell]
+            # Reuse some decision variables from top-level traversal
+            leaf_t_max, leaf_t_step, leaf_step_dir, leaf_t_next = \
+                init_leaf_dda_variables(ray, leaf_grid, t_next)
+            
+            while leaf_t_next < leaf_t_max:
+                leaf_cell = get_leaf_cell(leaf_t_next, leaf_grid)
+                yield leaf_cell
+                leaf_t_next += leaf_t_step
+                leaf_cell = advance_leaf_cell(leaf_cell, leaf_step_dir)
+        
+        # Advance top-level traversal
+        t_next += t_step
+        top_cell = advance_top_cell(top_cell, step_dir)
+```
+
+## Subtopics
+
+### Uniform Grid Traversal
+The base algorithm for uniform grids, which Two-Level Grid Ray Traversal modifies. Choose when data is uniformly distributed. Link to [Uniform Grid Traversal](52-uniform-grid-traversal.md).
+
+### Hierarchical Grid Traversal
+A broader category including Two-Level Grids. Choose when data has varying density. Link to [Hierarchical Grid Traversal](52-hierarchical-grid-traversal.md).
+
+## Operating characteristics
+- **Time Complexity:** Linear with respect to the number of cells traversed, similar to uniform grid traversal [S1, unofficial].
+- **Memory Complexity:** Depends on the two-level grid structure, with top-level and leaf-level grids stored [S1, unofficial].
+- **Measured Performance:** Not given in the sources [S1, unofficial].
+- **Scaling:** Favors coherent rays due to SIMD-friendly nature [S1, unofficial].
+- **Strengths:** Inexpensive traversal, SIMD-friendly, reuses decision variables [S1, unofficial].
+- **Limitations:** Code divergence when rays disagree on traversal level [S1, unofficial].
+- **When to Use:** Sparse or complex volumetric data with coherent rays [S1, unofficial].
+- **When Not to Use:** Highly divergent rays or uniform data where simpler traversal suffices [S1, unofficial].
+
+## Background
+- **Origin:** Modified from the DDA algorithm by Amanatides and Woo [AW87] [S1, unofficial].
+- **History:** Developed for GPU ray tracing, leveraging Fermi GPU features for workload management [S2, unofficial].
+- **Usage:** Used in two-level grid structures for ray tracing on GPUs [S1, unofficial].
+
+## Sources
+[S1] Two-Level Grids for Ray Tracing on GPUs, https://studylib.net/doc/18458638/two-level-grids-for-ray-tracing-on-gpus, fetched 2026-10-25 (unofficial)
+[S2] Two-Level Grids for Ray Tracing on GPUs, https://www.readkong.com/page/two-level-grids-for-ray-tracing-on-gpus-8829848, fetched 2026-10-25 (unofficial)

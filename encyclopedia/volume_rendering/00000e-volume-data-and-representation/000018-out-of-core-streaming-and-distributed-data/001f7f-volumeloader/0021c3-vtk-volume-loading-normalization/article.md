@@ -3,135 +3,143 @@
 Also called: VTK ASCII/Binary parser, VTK File Loader, VTK Structured Points Reader, VTK volume reader
 
 ## Overview
-This method parses VTK Structured Points files, extracts voxel data, and normalizes the scalar values to an 8-bit unsigned integer range [0, 255]. It solves the problem of converting arbitrary-precision medical or scientific volume data into a standardized format suitable for GPU-based raycasting or texture upload. It is distinguished from generic loaders by its specific reliance on the VTK Structured Points header format and its mandatory min-max normalization step, unlike [Raw Volume Data Reader](2259-raw-volume-data-reader.md) which assumes raw binary continuity, or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) which handles multi-frame DICOM series.
+This method parses VTK Structured Points files, extracts voxel data, and normalizes scalar values to an 8-bit unsigned integer range [0, 255] [S2, unofficial]. It converts arbitrary-precision medical or scientific volume data into a standardized format suitable for GPU-based raycasting or texture upload [S2, unofficial]. It is distinguished from generic loaders by its specific reliance on the VTK Structured Points header format and its mandatory min-max normalization step, unlike [Raw Volume Data Reader](2259-raw-volume-data-reader.md) which assumes raw binary continuity, or [DICOM Volume Loading and Coordinate Reconstruction](2574-dicom-volume-loading-and-coordinate-reconstruction.md) which handles multi-frame DICOM series [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A file path to a VTK Structured Points file (ASCII or Binary).
-- Output: A normalized `std::vector<unsigned char>` containing voxel data, and metadata (origin, spacing, dimensions).
+- Input: File path to a VTK Structured Points file (ASCII or Binary) [S2, unofficial].
+- Output: Normalized `std::vector<unsigned char>` (or equivalent list) containing voxel data, and metadata (origin, spacing, dimensions) [S2, unofficial].
 
 **Data Structures:**
-- `m_size`: `std::vector<int>` or similar, storing dimensions $(D_x, D_y, D_z)$.
-- `m_origin`: `std::vector<double>` or similar, storing $(O_x, O_y, O_z)$.
-- `m_spacing`: `std::vector<double>` or similar, storing $(S_x, S_y, S_z)$.
-- `image_data`: `std::vector<unsigned char>`, storing the final normalized 8-bit voxels.
-- `range`: `std::pair<double, double>`, storing $(min, max)$ of the original data.
+- `m_size`: Stores dimensions $(D_x, D_y, D_z)$ [S2, unofficial].
+- `m_origin`: Stores $(O_x, O_y, O_z)$ [S2, unofficial].
+- `m_spacing`: Stores $(S_x, S_y, S_z)$ [S2, unofficial].
+- `image_data`: `std::vector<unsigned char>` storing normalized 8-bit voxels [S2, unofficial].
+- `range`: `std::pair<double, double>` storing $(min, max)$ of the original data [S2, unofficial].
 
 **Steps:**
-1. **Header Validation**: Read the first line of the file. Verify it starts with `"# vtk"`. If not, raise a `VTKReadError` [S1, unofficial].
-2. **Header Parsing**: Read the first 10 lines of the file into a `std::vector<std::string>` [S1, unofficial].
-   - Identify the data format by searching for substrings `"BINARY"` or `"ASCII"` in the header lines [S1, unofficial].
-   - Parse the `DIMENSIONS` line using `sscanf` (or equivalent string parsing) to extract width, height, and depth into `m_size` [S1, unofficial].
-   - Parse the `ORIGIN` line to extract $O_x, O_y, O_z$ into `m_origin` [S1, unofficial].
-   - Parse the `SPACING` line to extract $S_x, S_y, S_z$ into `m_spacing` [S1, unofficial].
-   - Identify the scalar data type from the `SCALARS` line (e.g., `unsigned_char`, `float`, `unsigned_short`) [S1, unofficial].
-3. **Data Reading**:
-   - Calculate total element count: $N = D_x \times D_y \times D_z$.
-   - Allocate a temporary buffer of type $T$ (the parsed scalar type) of size $N$.
-   - **If Binary**:
-     - Read $N \times \text{sizeof}(T)$ bytes from the file into the buffer.
-     - Check endianness. If the host is little-endian and the file is big-endian (or vice versa, though VTK binary is typically native or specified), swap byte order for each element if necessary [S1, unofficial]. The source notes handling for "little endian host" swapping [S1, unofficial].
-   - **If ASCII**:
-     - Read $N$ elements of type $T$ sequentially from the text stream into the buffer [S1, unofficial].
-4. **Range Calculation**:
-   - Iterate over the loaded buffer of type $T$.
-   - Compute $min = \min(p[i])$ and $max = \max(p[i])$ for all $i \in [0, N-1]$.
-   - Store in `range = {min, max}` [S1, unofficial].
-5. **Normalization and Casting**:
-   - Allocate `image_data` of size $N$.
-   - For each voxel $i$:
-     $$ \text{normalized}[i] = \text{static\_cast<unsigned char>}\left( 255 \times \frac{p[i] - min}{max - min} \right) $$
-   - Store result in `image_data[i]` [S1, unofficial].
+1. **Header Validation**: Read the first line. Verify it starts with `"# vtk"` [S2, unofficial]. (Legacy ASCII fallback checks for `"# vtk DataFile"` [S1, unofficial]).
+2. **Header Parsing**: Read the first 10 lines into a string buffer [S2, unofficial]. Search for `"BINARY"` or `"ASCII"` to determine format [S2, unofficial]. Parse the `DIMENSIONS` line to extract width, height, and depth into `m_size` [S2, unofficial]. Parse the `ORIGIN` line to extract $O_x, O_y, O_z$ into `m_origin` [S2, unofficial]. Parse the `SPACING` line to extract $S_x, S_y, S_z$ into `m_spacing` [S2, unofficial]. Identify the scalar data type $T$ from the `SCALARS` line (e.g., `unsigned_char`, `float`, `unsigned_short`) [S2, unofficial].
+3. **Data Reading**: Calculate total element count $N = D_x \times D_y \times D_z$ [S2, unofficial]. Allocate a temporary buffer of type $T$ of size $N$. If Binary, read $N \times \text{sizeof}(T)$ bytes from the file into the buffer [S2, unofficial]. If the host is little-endian and `sizeof(T) > 1`, swap byte order for each element to handle endianness mismatch [S2, unofficial]. If ASCII, read $N$ elements of type $T$ sequentially from the text stream into the buffer [S2, unofficial]. (Legacy ASCII fallback only supports ASCII; binary raises `RuntimeError` [S1, unofficial]). Scalar fields must have exactly 1 component [S1, unofficial].
+4. **Range Calculation**: Iterate over the loaded buffer of type $T$ [S2, unofficial]. Compute $min = \min(p[i])$ and $max = \max(p[i])$ for all $i \in [0, N-1]$ [S2, unofficial]. Store in `range = {min, max}` [S2, unofficial].
+5. **Normalization and Casting**: Allocate `image_data` of size $N$ [S2, unofficial]. For each voxel $i$:
+   $$ \text{normalized}[i] = \text{static\_cast<unsigned char>}\left( 255 \times \frac{p[i] - min}{max - min} \right) $$
+   Store result in `image_data[i]` [S2, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+class VTKReadError(Exception):
+    pass
+
 def load_and_normalize_vtk(filepath):
-    with open(filepath, 'r') as f:
-        lines = f.readlines()
-    
-    # 1. Validate Magic Number
-    if not lines[0].strip().startswith("# vtk"):
-        raise VTKReadError("Not a valid VTK file.")
-    
-    # 2. Parse Header
-    header_text = "".join(lines[:10]) # Read first 10 lines
-    is_binary = "BINARY" in header_text
-    is_ascii = "ASCII" in header_text
-    
-    # Parse DIMENSIONS
-    dims_line = [l for l in lines if l.startswith("DIMENSIONS")][0]
-    dims = list(map(int, dims_line.split()[1:4]))
-    Dx, Dy, Dz = dims
-    N = Dx * Dy * Dz
-    
-    # Parse ORIGIN
-    origin_line = [l for l in lines if l.startswith("ORIGIN")][0]
-    origin = list(map(float, origin_line.split()[1:4]))
-    
-    # Parse SPACING
-    spacing_line = [l for l in lines if l.startswith("SPACING")][0]
-    spacing = list(map(float, spacing_line.split()[1:4]))
-    
-    # Determine Data Type (Simplified: assume float for this example, 
-    # in practice parse SCALARS line to get T)
-    # Note: The source uses a template read_data<T>. 
-    # We assume T is determined from the file header.
-    T = float 
-    
-    # 3. Read Data
-    data_buffer = [0.0] * N
-    
-    if is_binary:
-        # Read binary data
-        # In a real implementation, open file in 'rb' mode
-        # Read N * sizeof(T) bytes
-        # Handle endianness swap if host is little endian and file is big endian
-        pass # Implementation depends on binary read specifics
+    with open(filepath, 'rb') as f:
+        # Read first 10 lines for header
+        header_lines = []
+        for _ in range(10):
+            line = f.readline()
+            if not line:
+                raise VTKReadError("Unexpected end of file during header read.")
+            header_lines.append(line)
         
-    elif is_ascii:
-        # Read ASCII data
-        # Skip header lines, read N floats
-        pass
+        header_text = b' '.join(header_lines).decode('utf-8', errors='ignore')
         
-    # 4. Compute Range
-    min_val = min(data_buffer)
-    max_val = max(data_buffer)
-    
-    # 5. Normalize
-    normalized_data = []
-    range_span = max_val - min_val
-    
-    if range_span == 0:
-        # Avoid division by zero; fill with 0 or 128 depending on convention
-        normalized_data = [0] * N 
-    else:
-        for val in data_buffer:
-            normalized_val = 255 * (val - min_val) / range_span
-            normalized_data.append(int(normalized_val))
+        # 1. Validate Magic Number
+        if not header_text.startswith("# vtk"):
+            raise VTKReadError("Not a valid VTK file.")
+        
+        # 2. Parse Header
+        is_binary = "BINARY" in header_text
+        is_ascii = "ASCII" in header_text
+        
+        dims_line = [l.decode() for l in header_lines if l.startswith(b"DIMENSIONS")][0]
+        dims = list(map(int, dims_line.split()[1:4]))
+        Dx, Dy, Dz = dims
+        N = Dx * Dy * Dz
+        
+        origin_line = [l.decode() for l in header_lines if l.startswith(b"ORIGIN")][0]
+        origin = list(map(float, origin_line.split()[1:4]))
+        
+        spacing_line = [l.decode() for l in header_lines if l.startswith(b"SPACING")][0]
+        spacing = list(map(float, spacing_line.split()[1:4]))
+        
+        scalars_line = [l.decode() for l in header_lines if l.startswith(b"SCALARS")][0]
+        # Extract scalar type T (e.g., float, unsigned_short)
+        # Mapping simplified for demonstration; in practice, parse SCALARS type string
+        T = float 
+        type_size = 4 if T == float else 2 # Simplified size mapping
+        
+        # 3. Read Data
+        data_buffer = [0.0] * N
+        
+        if is_binary:
+            # Read N * sizeof(T) bytes
+            raw_bytes = f.read(N * type_size)
+            if len(raw_bytes) < N * type_size:
+                raise VTKReadError("Insufficient binary data.")
             
-    return normalized_data, origin, spacing, dims
+            # Handle endianness: swap if host is little-endian and file is big-endian
+            # Assuming native little-endian host for this example
+            import sys
+            if sys.byteorder == 'little':
+                # Swap byte order for each element
+                for i in range(N):
+                    start = i * type_size
+                    elem_bytes = bytearray(raw_bytes[start:start+type_size])
+                    elem_bytes.reverse()
+                    raw_bytes = raw_bytes[:start] + bytes(elem_bytes) + raw_bytes[start+type_size:]
+                
+            # Unpack to floats
+            import struct
+            fmt = '<' + 'f' * N # Little endian float
+            data_buffer = list(struct.unpack(fmt, raw_bytes))
+            
+        elif is_ascii:
+            # Read ASCII data element by element
+            ascii_data = f.read().decode('utf-8').split()
+            if len(ascii_data) < N:
+                raise VTKReadError("Insufficient ASCII data.")
+            data_buffer = [float(x) for x in ascii_data[:N]]
+            
+        # 4. Compute Range
+        min_val = min(data_buffer)
+        max_val = max(data_buffer)
+        range_span = max_val - min_val
+        
+        # 5. Normalize
+        normalized_data = []
+        if range_span == 0:
+            # Sources do not specify fallback for zero range [S2, unofficial]
+            normalized_data = [0] * N
+        else:
+            for val in data_buffer:
+                normalized_val = int(255 * (val - min_val) / range_span)
+                normalized_data.append(normalized_val)
+                
+        return normalized_data, origin, spacing, dims
 ```
 
 **Parameters:**
-- `T`: Template type for input data (e.g., `unsigned short`, `float`) [S1, unofficial].
-- `header_line_count`: Fixed at 10 lines for header parsing [S1, unofficial].
+- `T`: Template type for input data (e.g., `unsigned short`, `float`) [S2, unofficial].
+- `header_line_count`: Fixed at 10 lines for header parsing [S2, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Endianness**: Binary VTK files may have different endianness than the host. The method must detect this and swap bytes for elements where `sizeof(T) > 1` if the host is little-endian [S1, unofficial].
-- **Zero Range**: If `max == min`, division by zero occurs in normalization. The source does not explicitly define the fallback, but standard practice is to clamp to 0 or 128.
-- **Invalid Header**: Missing `# vtk` magic number or malformed dimensions/origin lines will cause parsing errors [S1, unofficial].
+- **Endianness**: Binary VTK files may differ from host endianness. The method swaps bytes for `sizeof(T) > 1` when host is little-endian [S2, unofficial].
+- **Zero Range**: If `max == min`, division by zero occurs. The sources do not specify a fallback value [S2, unofficial].
+- **Invalid Header**: Missing `# vtk` magic number causes a `VTKReadError` [S2, unofficial].
+- **Scalar Components**: Scalar fields must have exactly 1 component; otherwise, parsing fails [S1, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(N)$, where $N$ is the total number of voxels. The dominant cost is reading the data and iterating once to compute min/max, then iterating again to normalize.
-**Memory Complexity:** $O(N)$. Requires storage for the raw data buffer (type $T$) and the normalized output buffer (type `unsigned char`).
-**Performance:** Normalization to 8-bit is fast but requires two passes over the data (one for min/max, one for scaling). This is slower than loading pre-normalized data but necessary for unknown input ranges.
-**Strengths:** Handles both ASCII and Binary VTK formats; robust header parsing; automatic normalization ensures consistent visualization across different data scales.
-**Limitations:** Only supports Structured Points datasets; does not handle unstructured grids or other VTK formats; normalization loses precision if the original data has a very large dynamic range relative to 8-bit resolution.
+**Time Complexity:** $O(N)$, where $N$ is the total number of voxels [G]. The method requires two passes over the data: one to compute min/max and one to normalize [S2, unofficial].
+**Memory Complexity:** $O(N)$ [G]. Requires storage for the raw data buffer (type $T$) and the normalized output buffer (type `unsigned char`) [S2, unofficial].
+**Performance:** Normalization to 8-bit is fast but requires two passes over the data [S2, unofficial]. This is slower than loading pre-normalized data but necessary for unknown input ranges [G].
+**Strengths:** Handles both ASCII and Binary VTK formats; robust header parsing; automatic normalization ensures consistent visualization across different data scales [S2, unofficial].
+**Limitations:** Only supports Structured Points datasets; does not handle unstructured grids or other VTK formats; normalization loses precision if the original data has a very large dynamic range relative to 8-bit resolution [G].
 
 ## Background
-This method is derived from the `VTKVolume` class in the open-source project "volume-raycasting" by M. Pilia [S1, unofficial]. It implements a simplified VTK Structured Points reader tailored for GPU raycasting applications, where normalized 8-bit textures are often preferred for simplicity and compatibility with standard OpenGL texture units. The approach mirrors the VTK library's `vtkStructuredPointsReader` but is implemented from scratch to minimize dependencies.
+This method is derived from the `VTKVolume` class in the open-source project "volume-raycasting" by M. Pilia [S2, unofficial]. It implements a simplified VTK Structured Points reader tailored for GPU raycasting applications, where normalized 8-bit textures are often preferred for simplicity and compatibility with standard OpenGL texture units [S2, unofficial]. The approach mirrors the VTK library's `vtkStructuredPointsReader` but is implemented from scratch to minimize dependencies [G].
 
 ## Sources
-[S1] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)
+[S1] SammySuliman/point-cloud-voxelization, https://github.com/SammySuliman/point-cloud-voxelization, fetched 2026-10-27 (unofficial)
+[S2] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)

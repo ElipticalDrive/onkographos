@@ -1,102 +1,104 @@
 # RGB Network Layer
 ## Overview
-The RGB Network Layer is the final prediction head in neural volume rendering pipelines that use a Multi-Layer Perceptron (MLP) with positional encoding. It maps spatial and view-dependent features to final RGB color values. It differs from sibling layers by outputting only color (RGB), whereas variants like the Sigma Network Layer output density or other physical properties [S2, unofficial]. It builds on [MLP with Positional Encoding](2416-mlp-with-positional-encoding.md) by consuming the encoded input vectors produced by that module.
+The RGB Network Layer is the final component of the neural volume rendering pipeline responsible for predicting the RGB color at a given 3D position. It builds on [MLP with Positional Encoding](2416-mlp-with-positional-encoding.md) by processing positional embeddings and view directions to produce a 3-channel color output. It sets itself apart from its siblings, the [Sigma Network Layer](6256-sigma-network-layer.md) and [Field Output Prediction](4830-field-output-prediction.md), by specifically targeting the color channel prediction required for image synthesis, whereas the Sigma layer predicts scalar density and Field Output Prediction handles general semantic fields.
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A concatenated vector consisting of the first 16 components of the encoded view direction and 16 components of the spatial embedding (feature vector) [S1, unofficial].
-- Output: A 3-component RGB color vector with values in the range $[0, 1]$ [S1, unofficial].
+- Input: A feature vector combining the positional encoding of the 3D sample point and the view direction. The specific implementation in [S1, unofficial] concatenates the first 16 components of the direction encoding with 16 components of the spatial embedding.
+- Output: A 3-channel RGB color vector, typically passed through a sigmoid activation function to bound values to $[0, 1]$.
 
 **Data Structures:**
-- `self.rgb_depth`: Integer specifying the number of hidden layers in the RGB MLP. Typical value: 2 [S1, unofficial].
-- `self.rgb_n_input`: Integer, number of input features. Derived from concatenation of direction and spatial embeddings [S1, unofficial].
-- `self.rgb_n_output`: Integer, number of output features (typically 3 for RGB) [S1, unofficial].
-- `self.rgb_layer1_base`, `self.rgb_layer2_base`: Weights and biases for the respective layers [S1, unofficial].
-- `self.final_embedding`: Tensor storing spatial embeddings for active rays [S1, unofficial].
-- `dir_encode_func`: Function producing directional encoding [S1, unofficial].
-- `self.temp_hit`: Array mapping ray indices to processing slots [S1, unofficial].
-- `self.out_3`: Output buffer for RGB values [S1, unofficial].
-- `block_dim`: Block dimension for parallel execution (e.g., 16 or 32) [S1, unofficial].
+The implementation in [S1, unofficial] utilizes a block-based parallel processing structure suitable for GPU execution (Taichi):
+- `self.rgb_depth`: Integer specifying the number of hidden layers in the MLP (typically 2).
+- `self.rgb_n_input`: Integer for input dimensionality.
+- `self.rgb_n_output`: Integer for output dimensionality (3 for RGB).
+- `self.rgb_layer1_base`, `self.rgb_layer2_base`: Base indices or pointers to weight tensors in shared memory or global memory.
+- `weight`: Shared memory buffer holding the MLP weights for the current block.
+- `hid1`, `hid2`: Temporary buffers for hidden layer computations.
+- `self.out_3`: Output buffer storing the final RGB values indexed by `self.temp_hit[sn]`.
 
-**Steps:**
-1. Iterate over active sample indices `sn` within the current block.
-2. Retrieve the ray ID: `ray_id = self.temp_hit[sn]` [S1, unofficial].
-3. Encode the ray direction: `dir_enc = dir_encode_func(ray_direction)` [S1, unofficial].
-4. Construct the input vector by concatenating the first 16 components of `dir_enc` with the 16 components of `self.final_embedding[sn]` [S1, unofficial].
-5. Compute the first hidden layer `hid1` via a dot product of the input vector and the weights of the first layer [S1, unofficial].
-6. If `self.rgb_depth == 2`:
-   - Apply ReLU to `hid1` to get intermediate values.
-   - Compute the second hidden layer `hid2` using the weights of the second layer [S1, unofficial].
-   - Apply ReLU to `hid2` [S1, unofficial].
-   - Apply Sigmoid activation to produce the final output [S1, unofficial].
-7. If `self.rgb_depth != 2`:
-   - Compute the output directly from `hid1` using the weights of the single layer [S1, unofficial].
-   - Apply Sigmoid activation to produce the final output [S1, unofficial].
-8. Store the result in `self.out_3[ray_id]` [S1, unofficial].
+**Numbered Steps:**
+1. **Block Initialization**: Iterate over samples `sn` in the current block `self.padd_block_network[None]`. Retrieve the ray ID `ray_id = self.temp_hit[sn]` and thread index `tid = sn % block_dim`. Preload the RGB network weights into shared memory `weight`. Synchronize threads.
+2. **Input Encoding**: If `sn < did_launch_num`, encode the ray direction using `dir_encode_func(dir_)`. Concatenate the first 16 components of this direction encoding with the 16 components of the spatial embedding `self.final_embedding[sn, i]` to form the input vector.
+3. **First Hidden Layer**: Compute the first hidden layer `hid1[i, tid]` via the dot product of the input vector and the loaded weights.
+4. **Subsequent Layers and Output**:
+   - If `self.rgb_depth == 2`: Compute the second hidden layer `hid2` using a ReLU activation on `hid1`. Then, compute the output buffer `hid1` (reusing the buffer) using a ReLU activation on `hid2`. Apply a sigmoid activation:
+     $$ \text{output} = \frac{1}{1 + e^{-\text{hid1}[i, \text{tid}]} $$
+     Store in `self.out_3[self.temp_hit[sn], i]`.
+   - If `self.rgb_depth != 2`: Compute the output directly from `hid1` into `hid2`, then apply the sigmoid activation:
+     $$ \text{output} = \frac{1}{1 + e^{-\text{hid2}[i, \text{tid}]} $$
+     Store in `self.out_3[self.temp_hit[sn], i]`.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def rgb_network_layer(input_vector, weights_layer1, biases_layer1, 
-                      weights_layer2=None, biases_layer2=None, 
-                      rgb_depth=2):
+def rgb_network_layer_forward(sn, tid, dir_, final_embedding, self):
     """
-    Computes RGB color from input features using an MLP.
-    
-    Args:
-        input_vector: Tensor of shape (..., 32) containing concatenated 
-                      direction and spatial embeddings.
-        weights_layer1: Tensor of shape (32, hidden_dim) for first layer.
-        biases_layer1: Tensor of shape (hidden_dim,) for first layer.
-        weights_layer2: Tensor of shape (hidden_dim, 3) for second layer (if depth=2).
-        biases_layer2: Tensor of shape (3,) for second layer (if depth=2).
-        rgb_depth: Integer, 1 or 2.
-        
-    Returns:
-        Tensor of shape (..., 3) with RGB values in [0, 1].
+    Computes the RGB color for a single sample point.
+    Assumes weights are preloaded in shared memory 'weight'.
     """
-    # First hidden layer
-    hid1 = dot(input_vector, weights_layer1) + biases_layer1
+    # Step 2: Input Encoding
+    # Encode direction
+    dir_enc = dir_encode_func(dir_)
+    # Concatenate first 16 components of direction encoding with 16 components of spatial embedding
+    # Note: Implementation details for 'final_embedding' indexing depend on specific layout
+    spatial_emb = final_embedding[sn, :] 
+    input_vec = concat(dir_enc[:16], spatial_emb[:16])
     
-    if rgb_depth == 2:
+    # Step 3: First Hidden Layer
+    # Dot product of input and weights
+    hid1 = dot(input_vec, weight_layer1)
+    hid1 = relu(hid1)
+    
+    # Step 4: Subsequent Layers
+    if self.rgb_depth == 2:
         # Second hidden layer
-        hid2 = dot(relu(hid1), weights_layer2) + biases_layer2
-        # Output layer with sigmoid
-        rgb = sigmoid(hid2)
+        hid2 = dot(hid1, weight_layer2)
+        hid2 = relu(hid2)
+        # Output layer (reusing hid1 buffer conceptually, but here we compute output)
+        # The source uses hid1 buffer for output after hid2 computation
+        output_raw = dot(hid2, weight_output)
     else:
-        # Single layer output with sigmoid
-        rgb = sigmoid(dot(relu(hid1), weights_layer2) + biases_layer2)
+        # Direct output from hid1 if depth is not 2
+        output_raw = dot(hid1, weight_output)
         
-    return rgb
+    # Apply sigmoid activation
+    output = sigmoid(output_raw)
+    
+    return output
 ```
 
 **Parameters:**
-- `rgb_depth`: Controls network depth. Value 2 is common [S1, unofficial].
-- Input dimension: 32 (16 direction + 16 spatial) [S1, unofficial].
-- Output dimension: 3 (RGB) [S1, unofficial].
+- `self.rgb_depth`: Controls network depth. Typical value: 2.
+- `self.rgb_n_input`: Input dimension.
+- `self.rgb_n_output`: Output dimension (3).
+- `self.rgb_layer1_base`, `self.rgb_layer2_base`: Weight storage indices.
 
 **Edge Cases and Pitfalls:**
-- If `rgb_depth` is not 1 or 2, behavior is undefined in the source [S1, unofficial].
-- Precision issues may arise if `hid1` or `hid2` values are very large before sigmoid; however, the source uses `1 / (1 + exp(-x))` which is numerically stable for positive inputs, but standard sigmoid implementation should be used for negative inputs to avoid overflow [S1, unofficial].
-- Boundary conditions for ray indices must be handled to ensure `sn < did_launch_num` [S1, unofficial].
+- Precision: The sigmoid function `1 / (1 + exp(-x))` can suffer from overflow/underflow if `x` is very large or very small. Use numerically stable implementations.
+- Boundary: Ensure `sn < did_launch_num` check is correct to avoid encoding invalid directions.
 
 ## Subtopics
 
-### Field Output Prediction
-Predicts physical fields (e.g., density, temperature) instead of RGB. It passes input positions through the neural network and unpacks raw outputs based on the reconstruction target. It reshapes the output tensor to match the input dimensions if necessary [S2, unofficial].
+### VNetL16-17
+VNetL16-17 is a variant that performs compositing in an abstract 16-channel color space [S2, unofficial]. It uses a VNetLight architecture for volume encoding to produce a 16-channel volume [S2, unofficial]. For feature mapping, it uses an MLP (16 input -> 16 hidden ReLU -> output) but instead of a color transfer function, it uses the 16 semantic channels directly in compositing ($C(F) = F$) [S2, unofficial]. The resulting 16-channel image (plus one alpha channel) is decoded by another MLP with one ReLU-activated 16-channel hidden layer and a sigmoid output layer to yield a 3-channel RGB image [S2, unofficial]. Opacity is used directly from the DVRUnit [S2, unofficial].
+
+### [Field Output Prediction](4830-field-output-prediction.md)
+Field Output Prediction is the final stage of the RGB Network Layer in neural volume rendering, responsible for passing input positions through the trained neural network model and unpacking the raw tensor outputs into semantically meaningful values based on the specified reconstruction target. It serves as the bridge between the latent neural representation and the physical quantities (such as density, temperature, or RGB color) required for subsequent volume rendering steps. Unlike the Sigma Network Layer, which focuses specifically on opacity/density prediction, this method handles general field outputs and supports various target configurations.
+
+### [Sigma Network Layer](6256-sigma-network-layer.md)
+The Sigma Network Layer is the final component of the neural volume rendering pipeline, responsible for predicting the volume density ($\sigma$) at a given 3D position. It builds on the [RGB Network Layer](4051-rgb-network-layer.md) by processing the same positional embeddings but producing a scalar density value rather than color. It is distinct from the RGB layer in its output dimensionality and activation function, serving as the basis for opacity accumulation in ray marching.
+
+### [CNN Post-Processing Network](7179-cnn-post-processing-network.md)
+The CNN Post-Processing Network is a shallow convolutional neural network applied after the initial ray-casting or feature aggregation stage to refine rendered images. It solves the problem of blurry textures and aliasing artifacts common in neural volume rendering by leveraging spatial context from neighboring pixels. It sets itself apart from its siblings, the [RGB Network Layer](4051-rgb-network-layer.md) and [Field Output Prediction](4830-field-output-prediction.md), by explicitly using 2D convolutional operations with reflective padding to enhance texture detail without introducing multiview inconsistency or upsampling artifacts.
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of active samples and rays. The computation per sample is constant (fixed MLP depth) [S1, unofficial].
-- **Memory Complexity:** Depends on the number of active samples and the size of the weight matrices. Shared memory is used for weights in GPU implementations to reduce latency [S1, unofficial].
-- **Strengths:** Simple, fast, and effective for color prediction. The use of shared memory in GPU kernels improves performance [S1, unofficial].
-- **Limitations:** Limited to RGB output. Does not handle density or other physical properties directly [S2, unofficial].
-- **When to use:** When only color information is needed for the final image.
-- **When not to use:** When density, opacity, or other physical properties are required for volume integration [S2, unofficial].
+Time and memory complexity are determined by the MLP depth and width. The Taichi implementation [S1, unofficial] uses shared memory for weights to optimize access latency. Performance scales with the number of samples per ray and the network depth. Strengths include efficient parallel execution on GPUs. Limitations include the computational cost of multiple MLP evaluations per sample.
 
 ## Background
-The RGB Network Layer is a component of neural volume rendering systems that utilize hash encoding and MLPs for fast rendering. It is commonly found in implementations like the Taichi NGP Renderer [S1, unofficial] and CoroNeRF [S2, unofficial]. The approach leverages the efficiency of MLPs with positional encoding to predict view-dependent color from spatial features.
+The RGB Network Layer is a standard component in neural volume rendering architectures, such as those described in [S2, unofficial] and implemented in [S1, unofficial]. It evolved from the need to map latent neural representations to visible color spaces.
 
 ## Sources
 [S1] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
-[S2] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)
+[S2] Deep Direct Volume Rendering: Learning Visual Feature Mappings From Exemplary Images, https://doi.org/10.48550/arxiv.2106.05429, fetched 2026-10-26 (unofficial)

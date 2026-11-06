@@ -3,127 +3,142 @@
 Also called: Opacity Dithering, Texture-mapped transfer function alpha dithering
 
 ## Overview
-Alpha Dithering via Texture Map is an optimization technique for texture slicing that expands the range of representable opacity values on graphics hardware limited to 8 bits per channel [S1, S2]. It solves the problem where scientific volume renderings require very low per-slice opacities to maintain transparency; as slice density increases, these values often become too small to register on standard 8-bit hardware, causing rendering artifacts or loss of detail [S1, S2]. It distinguishes itself from standard texture slicing by dynamically adjusting the transfer function stored in the texture map to compensate for slice spacing changes, rather than relying solely on fixed hardware blending [S1, S2].
+Alpha Dithering via Texture Map is an optimization technique for texture-sliced volume rendering that expands the effective range of allowable opacity values on graphics hardware restricted to 8 bits per channel [S1, S2]. It solves the problem where typical scientific volume renderings require very low per-slice opacities to maintain transparency; as slice density increases, these values often become too small to register on standard 8-bit hardware, causing visual artifacts or loss of detail [S1, S2]. It sets itself apart from standard texture slicing by dynamically adjusting the transfer function stored in the texture map to compensate for slice spacing, rather than relying solely on fixed hardware blending [S1, S2].
 
 ## How it works
 **Inputs and Outputs:**
 *   **Input:** Scalar volume data, transfer function definition, current slice plane spacing (or density), and 8-bit per channel graphics hardware constraints.
-*   **Output:** A modified texture map containing the adjusted transfer function, which maps scalar values to RGBA colors with expanded alpha precision.
+*   **Output:** A texture map containing RGBA values where the alpha channel is adjusted to ensure visibility of low-opacity slices, and a sequence of rendered slices composited into the frame buffer.
 
 **Data Structures:**
-*   **Texture Map:** A 1D texture map storing the transfer function. The scalar values for polygon vertices are normalized to serve as 1D texture coordinates [S1, S2].
-*   **Storage:** The texture map stores RGBA values. The alpha channel is the primary target for adjustment [S1, S2].
+*   **Texture Map:** A 1D texture map (or 1D lookup table) storing the transfer function. The scalar values of polygon vertices are normalized to serve as 1D texture coordinates [S1, S2].
+*   **Slice Geometry:** Polygons (quads) representing the intersection of the volume with slice planes.
 
 **Steps:**
-1.  **Preprocessing:** Perform the slicing phase once. Normalize the scalar values for the polygon vertices so they can be used as 1D texture coordinates to access the transfer functions stored in the texture map [S1, S2].
-2.  **Texture Map Adjustment:** When the slice plane spacing is changed (altering the slice density), adjust the texture map to account for the appropriate per-slice opacity [S1, S2]. This adjustment expands the allowable opacity range to ensure that low-opacity values remain distinguishable on 8-bit hardware [S1, S2].
-3.  **Rendering:** Render the set of slices whose axis is closest to the viewing direction from back to front [S1, S2]. Use hardware-supported opacity blending to composite the slices [S1, S2].
-4.  **Progressive Refinement (Optional):** Initially render with few slices. As time permits, improve image resolution by rendering with more slices [S1, S2].
+1.  **Preprocessing (Slicing):** The volume is sliced into a set of parallel planes. The scalar values at the polygon vertices are normalized [S1, S2].
+2.  **Transfer Function Mapping:** The normalized scalar values are used as 1D texture coordinates to access the transfer function stored in the texture map [S1, S2].
+3.  **Opacity Adjustment (Dithering):** The texture map is adjusted for the appropriate per-slice opacity whenever the slice plane spacing changes [S1, S2]. This adjustment expands the range of allowable opacity values, ensuring that low-opacity slices remain visible on 8-bit hardware [S1, S2].
+4.  **Rendering:** The set of slices is rendered from back to front using hardware-supported alpha blending [S1, S2].
+5.  **Progressive Refinement (Optional):** Images may be generated progressively by initially rendering few slices and improving resolution by adding more slices as time permits [S1, S2].
 
 **Formulas:**
-Not given in the sources. The specific mathematical formula for the "adjustment" of the texture map is not provided, only that it is performed to expand the range of allowable opacity values [S1, S2].
+The standard hardware compositing equation is used:
+$$ C_{dest} = C_{src} \cdot A_{src} + C_{dest} \cdot (1 - A_{src}) $$
+where $C_{src}$ and $A_{src}$ are the color and opacity retrieved from the texture map, and $C_{dest}$ is the current frame buffer color [S3, book].
+
+The key modification is in the determination of $A_{src}$. Instead of a fixed low opacity, $A_{src}$ is derived from the texture map which has been scaled/adjusted based on the current slice spacing [S1, S2].
 
 **Parameters:**
-*   **Bit Depth:** 8 bits per channel [S1, S2].
-*   **Slice Spacing:** Variable; the adjustment is triggered when this changes [S1, S2].
+*   **Bit Depth:** 8 bits per channel (typical constraint addressed by this method) [S1, S2].
+*   **Slice Spacing:** Variable; the texture map must be re-adjusted when this changes [S1, S2].
 
 **Edge Cases and Pitfalls:**
-*   **Perspective View:** In perspective views, viewing rays between slanted slice planes vary in length. The current method does not account for this, and future work aims to add per-pixel opacity corrections to handle this variation [S1, S2].
-*   **Low Opacity Registration:** Without this technique, per-slice opacity frequently becomes too small to register on 8-bit hardware as slice density increases [S1, S2].
+*   **Perspective View:** In perspective views, viewing rays between slanted slice planes have varying lengths. The current method does not account for this, leading to potential opacity inaccuracies [S1, S2]. Future work aims to add per-pixel opacity corrections to address this [S1, S2].
+*   **Low Opacity Registration:** Without this technique, per-slice opacities often become too small to register on 8-bit hardware, especially as slice density increases [S1, S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Pseudocode for Alpha Dithering via Texture Map
-# Note: Specific adjustment algorithm for the texture map is not detailed in sources [S1, S2]
-
-def initialize_texture_map(volume_data, transfer_function):
+def render_volume_with_alpha_dithering(volume_data, transfer_function_1d, slice_spacing, view_direction):
     """
-    Preprocessing step: Create 1D texture map from transfer function.
-    Scalar values are normalized to be used as 1D texture coordinates.
+    Renders volume using alpha dithering via texture map.
     """
-    # Normalize scalar values for polygon vertices
-    normalized_scalars = normalize(volume_data)
+    # 1. Determine slice geometry based on view direction and spacing
+    # Select axis closest to viewing direction
+    slices = generate_slices(volume_data, view_direction, slice_spacing)
     
-    # Map scalars to RGBA using transfer function
-    # The texture map stores the transfer function
-    texture_map = create_1d_texture(normalized_scalars, transfer_function)
+    # 2. Adjust texture map for current slice spacing
+    # This is the core "alpha dithering" step
+    adjusted_transfer_function = adjust_transfer_function_for_opacity(
+        transfer_function_1d, 
+        slice_spacing
+    )
     
-    return texture_map
-
-def adjust_texture_for_spacing(texture_map, current_spacing, previous_spacing):
-    """
-    Adjust the texture map for the appropriate per-slice opacity 
-    whenever the slice plane spacing is changed.
-    This expands the range of allowable opacity values on 8-bit hardware.
-    """
-    if current_spacing != previous_spacing:
-        # Calculate new per-slice opacity factor based on spacing
-        # Specific formula not given in sources [S1, S2]
-        opacity_factor = calculate_opacity_factor(current_spacing)
+    # 3. Create texture map from adjusted transfer function
+    texture_map = create_1d_texture(adjusted_transfer_function)
+    
+    # 4. Render slices back-to-front
+    for slice in slices:
+        # Normalize vertex scalar values to [0, 1] for texture coordinates
+        normalized_vertices = normalize_scalars(slice.vertices)
         
-        # Adjust the alpha channel in the texture map
-        # This step expands the range of allowable opacity values
-        adjusted_texture = adjust_alpha_channel(texture_map, opacity_factor)
+        # Sample texture map to get RGBA
+        # The alpha channel is now adjusted to be visible on 8-bit hardware
+        rgba_values = sample_texture_map(texture_map, normalized_vertices)
         
-        return adjusted_texture
-    else:
-        return texture_map
+        # Rasterize and composite using hardware blending
+        rasterize_and_blend(slice.geometry, rgba_values)
+        
+    return frame_buffer
 
-def render_slices(texture_map, slices, view_direction):
+def adjust_transfer_function_for_opacity(original_tf, slice_spacing):
     """
-    Render slices from back to front using hardware blending.
+    Adjusts the transfer function's alpha channel to compensate for
+    low per-slice opacities caused by high slice density (small spacing).
+    Expands the range of allowable opacity values for 8-bit hardware.
     """
-    # Select slices whose axis is closest to the viewing direction
-    selected_slices = get_slices_aligned_with_view(slices, view_direction)
-    
-    # Sort slices back to front
-    sorted_slices = sort_back_to_front(selected_slices)
-    
-    # Render with opacity blending
-    for slice in sorted_slices:
-        # Use texture map for color and alpha
-        # Hardware blending accumulates color and opacity
-        render_slice_with_texture(slice, texture_map)
+    # Implementation detail: Scale alpha values based on inverse of slice spacing
+    # or similar heuristic to ensure visibility.
+    # Exact scaling formula not given in sources [S1, S2].
+    adjusted_tf = []
+    for scalar, rgba in original_tf:
+        # Adjust alpha to prevent it from becoming too small to register
+        new_alpha = scale_alpha_for_8bit_hardware(rgba.a, slice_spacing)
+        adjusted_tf.append((scalar, (rgba.r, rgba.g, rgba.b, new_alpha)))
+    return adjusted_tf
 
-# Main execution flow
-volume_data = load_volume()
-transfer_function = load_transfer_function()
-texture_map = initialize_texture_map(volume_data, transfer_function)
-current_spacing = 1.0
-previous_spacing = 1.0
-
-while rendering:
-    # Update spacing if user changes slice density
-    current_spacing = get_current_slice_spacing()
-    
-    # Adjust texture map if spacing changed
-    texture_map = adjust_texture_for_spacing(texture_map, current_spacing, previous_spacing)
-    previous_spacing = current_spacing
-    
-    # Render
-    render_slices(texture_map, slices, view_direction)
-    
-    # Progressive refinement: increase slice count over time if needed
-    if time_permitted:
-        increase_slice_density()
+def scale_alpha_for_8bit_hardware(alpha, slice_spacing):
+    """
+    Scales alpha to ensure it is representable and visible on 8-bit hardware.
+    [G] Placeholder logic: In practice, this might involve gamma correction,
+    thresholding, or multiplicative scaling based on the number of slices.
+    """
+    # Not given in the sources.
+    return alpha
 ```
 
+## Subtopics
+
+### Plane Slicing
+Renders volume using axis-aligned planes. Simpler but less flexible for arbitrary viewing directions compared to texture-mapped transfer functions. [Link](845-plane-slicing.md)
+
+### 2D Texture-Based Volume Rendering
+Uses 2D texture stacks. May not explicitly include the dynamic opacity adjustment for 8-bit hardware described here. [Link](916-2d-texture-based-volume-rendering.md)
+
+### GPU-based Cut-off Slice Generation
+Optimizes slice generation on GPU. Does not address the 8-bit opacity registration issue. [Link](948-gpu-based-cut-off-slice-generation.md)
+
+### 3-Pass Texture Mapping with Compositing
+Uses multiple passes for compositing. Different approach to handling transparency and performance. [Link](1354-3-pass-texture-mapping-with-compositing.md)
+
+### 2D Volume Cross-Section Rendering
+Renders cross-sections rather than projected slices. Different visual output. [Link](1764-2d-volume-cross-section-rendering.md)
+
+### Sliced Volume Rendering
+General term for slicing methods. May or may not include alpha dithering. [Link](3568-sliced-volume-rendering.md)
+
+### Slice Polygon Computation (3D Texture)
+Focuses on computing slice polygons for 3D textures. Different texture storage model. [Link](5680-slice-polygon-computation-3d-texture.md)
+
+### Palette Texture Volume Rendering
+Uses palette textures for transfer functions. Similar concept of texture-based transfer functions but different implementation. [Link](6502-palette-texture-volume-rendering.md)
+
+### View-Aligned Slicing with 3D Textures
+Uses 3D textures and view-aligned slices. Different hardware interaction model. [Link](6687-view-aligned-slicing-with-3d-textures.md)
+
 ## Operating characteristics
-*   **Time Complexity:** The slicing phase is done once in a preprocessing step [S1, S2]. Rendering time depends on the number of slices and hardware performance. Progressive refinement allows for initial fast rendering with few slices, improving over time [S1, S2].
-*   **Memory Complexity:** Requires storage for the 1D texture map representing the transfer function [S1, S2].
+*   **Time Complexity:** Preprocessing (slicing) is done once [S1, S2]. Rendering is linear with the number of slices. Progressive refinement allows for variable time per frame [S1, S2].
+*   **Memory Complexity:** Requires storage for the 1D texture map of the transfer function [S1, S2].
 *   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Efficiency relies on rasterization hardware, making it very fast on modern GPUs [S3, book]. It is an object-space approach, efficient for modern graphics processors, making it the choice for interactivity [S3, book].
-*   **Strengths:** Expands the range of allowable opacity values on 8-bit hardware, addressing the issue of very low per-slice opacities becoming too small to register [S1, S2]. Allows for transparency in scientific volume renderings [S1, S2].
-*   **Limitations:** Does not currently account for varying viewing ray lengths in perspective views with slanted slice planes [S1, S2]. Limited to 8-bit per channel hardware adjustments [S1, S2].
-*   **When to use:** When using 8-bit per channel graphics hardware and needing to render scientific volume data with very low per-slice opacities [S1, S2].
-*   **When not to use:** When high-precision (e.g., 16-bit or 32-bit) alpha is available and necessary, or when perspective view corrections for slanted slices are critical and not implemented [S1, S2].
+*   **Scaling:** Performance scales with the number of slices and resolution. Progressive refinement allows for interactive performance by adjusting slice count [S1, S2].
+*   **Strengths:** Enables visibility of low-opacity slices on 8-bit hardware, which is critical for scientific visualization [S1, S2].
+*   **Limitations:** Does not account for varying ray lengths in perspective views, leading to potential opacity inaccuracies [S1, S2]. Requires re-adjustment of the texture map when slice spacing changes [S1, S2].
+*   **When to use:** When rendering scientific volumes with low-opacity features on hardware with 8-bit per channel limitations, and when slice density needs to be high for smooth visualization.
+*   **When not to use:** When high-precision opacity is required in perspective views, or when hardware supports higher bit depths (e.g., 16-bit or 32-bit float) where low opacities are naturally representable.
 
 ## Background
-*   **Origin:** The technique is described in the context of volume rendering for curvilinear and unstructured grids [S1, S2].
-*   **History:** The method is part of an OpenGL rendering pipeline where slicing is done in a preprocessing step [S1, S2]. It leverages the use of texture maps for transfer functions to enable optimizations like alpha dithering [S1, S2].
-*   **Usage:** Used in scientific volume rendering to provide a penetrating view of objects through transparency [S1, S2].
+This technique was introduced in the context of volume rendering for curvilinear and unstructured grids [S1, S2]. It addresses the limitations of early OpenGL rendering hardware which often had 8-bit per channel color buffers [S1, S2]. The method leverages the flexibility of texture-mapped transfer functions to dynamically adjust opacity values, a concept that was particularly relevant in the early 2000s when 8-bit color was common [S1, S2].
 
 ## Sources
 [S1] Volume rendering for curvilinear and unstructured grids, https://doi.org/10.1109/cgi.2003.1214468, fetched 2026-10-24

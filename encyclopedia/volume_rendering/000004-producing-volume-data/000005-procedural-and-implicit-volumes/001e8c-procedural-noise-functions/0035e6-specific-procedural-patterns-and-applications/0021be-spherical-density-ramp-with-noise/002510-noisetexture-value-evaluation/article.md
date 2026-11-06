@@ -1,0 +1,169 @@
+# NoiseTexture value evaluation
+
+Also called: NoiseTexture
+
+## Overview
+NoiseTexture evaluates a volumetric color and density field by combining radial/vertical fading with double-warping via Fractal Brownian Motion (FBM) and sinusoidal noise modulation [S1, unofficial]. It differs from simple procedural noise by applying spatial warping to the noise domain and modulating the result with a sine wave, creating structured, organic patterns suitable for volumetric effects like smoke or clouds [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `point`: The 3D coordinate in world space to evaluate.
+- `min_bound_`, `max_bound_`: The bounding box of the volume.
+- `scale_`: A scaling factor for the noise frequency.
+- `color_`: An RGB color structure defining the base color.
+- `noise_`: A noise object providing FBM evaluation.
+
+**Outputs:**
+- `RGB`: The final color value at the point. If the point is outside the faded volume, returns `RGB(0,0,0)`.
+
+**Data Structures:**
+- `RGB`: Structure with fields `r`, `g`, `b` (floating point values, typically 0.0–1.0 or normalized from 0–255).
+- `Vector3`: 3D vector with components `x`, `y`, `z`.
+
+**Steps:**
+1. **Normalize Coordinates:** Map the input point to the unit cube $[0,1]^3$ using the bounding box bounds [S1, unofficial]:
+   $$
+   u = \frac{point.x - min\_bound_.x}{max\_bound_.x - min\_bound_.x}
+   $$
+   $$
+   v = \frac{point.y - min\_bound_.y}{max\_bound_.y - min\_bound_.y}
+   $$
+   $$
+   w = \frac{point.z - min\_bound_.z}{max\_bound_.z - min\_bound_.z}
+   $$
+
+2. **Compute Horizontal Distance:** Calculate the normalized horizontal distance from the vertical center axis ($u=0.5, w=0.5$) [S1, unofficial]:
+   $$
+   dist\_xz = \sqrt{(u - 0.5)^2 + (w - 0.5)^2} \times 2.0
+   $$
+
+3. **Compute Height-Dependent Radius:** Determine the radius of the volume at the current height $v$ [S1, unofficial]:
+   $$
+   radius\_at\_height = 0.1 + 0.9 \times v
+   $$
+
+4. **Compute Horizontal Fade:** Apply a smoothstep fade based on the horizontal distance relative to the height-dependent radius [S1, unofficial]:
+   $$
+   horizontal\_fade = \text{smoothstep}(radius\_at\_height, radius\_at\_height \times 0.4, dist\_xz)
+   $$
+   *Note: `smoothstep(edge0, edge1, x)` clamps $x$ to $[0,1]$ and returns $t^2(3-2t)$ where $t = \frac{x-edge0}{edge1-edge0}$.*
+
+5. **Compute Vertical Fade:** Apply a smoothstep fade based on height $v$, fading out from the top [S1, unofficial]:
+   $$
+   vertical\_fade = \text{smoothstep}(1.0, 0.4, v)
+   $$
+
+6. **Combine Fades:** Multiply the horizontal and vertical fades. If the combined fade is negligible, return black [S1, unofficial]:
+   $$
+   fade = horizontal\_fade \times vertical\_fade
+   $$
+   If $fade < 0.001$, return $RGB(0,0,0)$.
+
+7. **First Warp:** Apply the first layer of FBM warping to the point [S1, unofficial]:
+   $$
+   warp1 = \text{vector\_fbm}(noise_, point \times scale_ \times 0.5, 2)
+   $$
+   $$
+   warped\_p1 = point + warp1 \times 2.0
+   $$
+   *Note: `vector_fbm` returns a 3D vector. The octave count is 2.*
+
+8. **Second Warp:** Apply the second layer of FBM warping using the result of the first warp [S1, unofficial]:
+   $$
+   warp2 = \text{vector\_fbm}(noise_, warped\_p1 \times scale_ \times 1.5, 2)
+   $$
+   $$
+   deeply\_warped\_p = warped\_p1 + warp2 \times 1.0
+   $$
+
+9. **Compute Noise Value:** Evaluate a sinusoidal noise function using the deeply warped point [S1, unofficial]:
+   $$
+   n = 0.5 \times (1.0 + \sin(scale_ \times deeply\_warped\_p.z + 10.0 \times noise_.\text{fbm}(deeply\_warped\_p, 3)))
+   $$
+   *Note: `noise_.fbm(point, 3)` evaluates scalar FBM with 3 octaves.*
+
+10. **Final Output:** Apply the fade, clamp the result to $[0,1]$, and scale by the base color [S1, unofficial]:
+    $$
+    final\_n = \text{clamp}(n \times fade, 0.0, 1.0)
+    $$
+    Return $RGB(color_.r \times final\_n, color_.g \times final\_n, color_.b \times final\_n)$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def evaluate_noise_texture(point, min_bound, max_bound, scale, color, noise):
+    # 1. Normalize coordinates
+    u = (point.x - min_bound.x) / (max_bound.x - min_bound.x)
+    v = (point.y - min_bound.y) / (max_bound.y - min_bound.y)
+    w = (point.z - min_bound.z) / (max_bound.z - min_bound.z)
+
+    # 2. Horizontal distance from center
+    dist_xz = math.sqrt((u - 0.5)**2 + (w - 0.5)**2) * 2.0
+
+    # 3. Height-dependent radius
+    radius_at_height = 0.1 + 0.9 * v
+
+    # 4. Horizontal fade
+    horizontal_fade = smoothstep(radius_at_height, radius_at_height * 0.4, dist_xz)
+
+    # 5. Vertical fade
+    vertical_fade = smoothstep(1.0, 0.4, v)
+
+    # 6. Combine fades
+    fade = horizontal_fade * vertical_fade
+    if fade < 0.001:
+        return RGB(0.0, 0.0, 0.0)
+
+    # 7. First warp
+    warp1 = vector_fbm(noise, point * scale * 0.5, 2)
+    warped_p1 = point + warp1 * 2.0
+
+    # 8. Second warp
+    warp2 = vector_fbm(noise, warped_p1 * scale * 1.5, 2)
+    deeply_warped_p = warped_p1 + warp2 * 1.0
+
+    # 9. Compute noise value
+    # noise_.fbm returns a scalar float
+    fbm_val = noise.fbm(deeply_warped_p, 3)
+    n = 0.5 * (1.0 + math.sin(scale * deeply_warped_p.z + 10.0 * fbm_val))
+
+    # 10. Final output
+    final_n = clamp(n * fade, 0.0, 1.0)
+    return RGB(color.r * final_n, color.g * final_n, color.b * final_n)
+
+def smoothstep(edge0, edge1, x):
+    t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+    return t * t * (3.0 - 2.0 * t)
+
+def clamp(x, min_val, max_val):
+    if x < min_val: return min_val
+    if x > max_val: return max_val
+    return x
+```
+
+**Parameters:**
+- `scale_`: Frequency multiplier. Typical values not specified in sources [S1, unofficial].
+- `noise_`: Noise implementation providing `vector_fbm` (3D output, 2 octaves) and `fbm` (scalar output, 3 octaves) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If `max_bound` equals `min_bound` in any dimension, normalization fails. [G] Implementers should check for zero-length bounds and return a default value or error.
+- **Precision:** The use of `sin` and multiple FBM evaluations can accumulate floating-point errors. [G] Standard double precision is recommended.
+- **Boundary Conditions:** The normalization assumes the point is within the bounding box. Points outside may produce negative or >1 coordinates, affecting the fade logic. [G] Clamping normalized coordinates to $[0,1]$ before fade calculation may be necessary depending on desired behavior.
+
+## Subtopics
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per evaluation, as it involves a fixed number of arithmetic operations and two FBM evaluations with fixed octave counts (2 and 3).
+- **Memory Complexity:** $O(1)$, requiring only local variables.
+- **Performance:** Fast enough for real-time ray marching or path tracing, provided the underlying noise function is efficient.
+- **Strengths:** Produces visually complex, organic structures with minimal computational cost compared to higher-octave FBM. The fading ensures smooth transitions at volume boundaries.
+- **Limitations:** The fixed warping and sine modulation may not adapt to scene-specific features. Performance depends on the efficiency of the `vector_fbm` and `fbm` implementations.
+- **When to Use:** Suitable for procedural volumetric effects like smoke, clouds, or fire where structured noise patterns are desired.
+- **When Not to Use:** Not suitable for data-driven volumes or when high-frequency detail is required without increasing octave counts.
+
+## Background
+The method is implemented in the "Volumetric-Path-Tracing" project by TakTikFR [S1, unofficial]. It appears to be an original implementation for a custom volumetric renderer, combining standard procedural noise techniques with specific fading and warping strategies.
+
+## Sources
+[S1] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)

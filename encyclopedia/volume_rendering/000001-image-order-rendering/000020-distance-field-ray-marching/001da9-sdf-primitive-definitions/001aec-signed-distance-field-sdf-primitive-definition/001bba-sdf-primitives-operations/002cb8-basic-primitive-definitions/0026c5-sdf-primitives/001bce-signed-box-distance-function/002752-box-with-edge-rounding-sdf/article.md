@@ -2,7 +2,7 @@
 Also called: Rounded Box SDF, SDF Primitive: Box with Edge Rounding, sdBoxRounded
 
 ## Overview
-Computes the signed distance to an axis-aligned box with rounded edges and corners, defined by half-extents $b$ and edge radius $e$ [S1, unofficial]. It extends the basic box distance by replacing sharp corners with spherical fillets, allowing for smooth geometric transitions in ray marching [S1, unofficial]. It differs from the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) by providing signed interior/exterior information and from the [Rectangle Signed Distance Function](4031-rectangle-signed-distance-function.md) by supporting 3D volumes with uniform edge rounding rather than planar rectangles.
+Computes the signed distance to an axis-aligned box with rounded edges and corners, defined by half-extents $b$ and edge radius $e$ [S1, unofficial]. It extends the basic box distance by replacing sharp corners with spherical fillets, allowing for smooth geometric transitions in ray marching [S1, unofficial]. It differs from the [Unsigned Box Distance Function](3750-unsigned-box-distance-function.md) by providing signed interior/exterior information and from the [Rectangle Signed Distance Function](4031-rectangle-signed-distance-function.md) by supporting 3D volumes with uniform edge rounding rather than planar rectangles [G].
 
 ## How it works
 **Inputs:**
@@ -11,32 +11,32 @@ Computes the signed distance to an axis-aligned box with rounded edges and corne
 - $e$: Edge/corner rounding radius (float).
 
 **Outputs:**
-- Signed distance value (float). Negative inside, positive outside, zero on surface.
+- Signed distance value (float). Negative inside, positive outside, zero on surface [S1, unofficial].
 
 **Data Structures:**
-- Standard 3D vector types for $p$ and $b$. Scalar float for $e$.
+- Standard 3D vector types for $p$ and $b$. Scalar float for $e$ [G].
 
 **Steps:**
-1. Compute the absolute distance from the center: $p' = |p| - b$.
-2. Compute the rounded corner distance: $q = |p' + e| - e$.
+1. Compute the absolute distance from the center: $d = |p| - b$.
+2. Compute the rounded corner distance: $q = |d + e| - e$.
 3. Determine the distance to the box faces, edges, and rounded corners:
    - Let $d_{face}$ be the distance to the flat faces.
    - Let $d_{edge}$ be the distance to the straight edges.
    - Let $d_{corner}$ be the distance to the rounded corners.
-   - The final distance is $\min(\text{distance to faces}, \text{distance to edges}, \text{distance to corners})$.
+   - The final distance is $\min(\text{distance to faces}, \text{distance to edges}, \text{distance to corners})$ [S1, unofficial].
 
 **Formula:**
-The standard implementation computes the distance by analyzing the position of $p$ relative to the box's geometry.
+The standard implementation computes the distance by analyzing the position of $p$ relative to the box's geometry [S1, unofficial].
 Let $d = |p| - b$.
 Let $q = |d + e| - e$.
 The signed distance is:
-$$ \text{sd} = \begin{cases} \min(q.x, q.y, q.z) & \text{if } d.x < 0 \land d.y < 0 \land d.z < 0 \\ \min(\text{length}(q), \text{distance to edges}) & \text{otherwise} \end{cases} $$
+$$ \text{sd} = \begin{cases} \min(q_x, q_y, q_z) & \text{if } d_x < 0 \land d_y < 0 \land d_z < 0 \\ \min(\text{length}(q), \text{distance to edges}) & \text{otherwise} \end{cases} $$
 More precisely, following [S1, unofficial]:
 1. $d = |p| - b$
 2. $q = |d + e| - e$
 3. The distance is the minimum of the distances to the rounded corners, edges, and faces. The specific calculation involves checking if the point is in the corner region, edge region, or face region.
-   - If $d.x < 0, d.y < 0, d.z < 0$: The point is in the corner region. Distance is $\min(q.x, q.y, q.z)$.
-   - Otherwise, the distance is calculated based on the closest feature (face, edge, or corner).
+   - If $d_x < 0, d_y < 0, d_z < 0$: The point is in the corner region. Distance is $\min(q_x, q_y, q_z)$.
+   - Otherwise, the distance is calculated based on the closest feature (face, edge, or corner) [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -50,7 +50,7 @@ def sd_box_rounded(p, b, e):
     # Determine if point is in corner, edge, or face region
     # Corner region: all components of d are negative
     if d.x < 0 and d.y < 0 and d.z < 0:
-        return min(q.x, q.y, q.z)
+        return min(q.x, min(q.y, q.z))
     
     # Edge region: two components of d are negative
     # Face region: one component of d is negative

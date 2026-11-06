@@ -7,159 +7,90 @@ A rasterization technique for planar surfels that computes screen-space texture 
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A surfel defined in camera space, the current camera projection matrix, and the screen-space bounding box of the surfel.
-*   **Output:** For each pixel $(x, y)$ within the bounding box, the interpolated texture coordinates $(u, v)$ and a validity flag.
+*   **Input:** A surfel defined in camera space, the current camera projection matrix, and the screen-space bounding box of the surfel [S1, unofficial].
+*   **Output:** For each pixel $(x, y)$ within the bounding box, the interpolated texture coordinates $(u, v)$ and a validity flag [S1, unofficial].
 
 **Data Structures:**
-The method precomputates eight coefficients per surfel per frame. These are stored in a structure with the following layout:
-*   `u0`, `v0`: `float16` (FP16). The intersection coordinates at the center of the screen-space bounding box.
-*   `J_u`, `J_v`: `float16` (FP16). Elements of the Jacobian matrix $\mathbf{J}$, representing the rate of change of $u$ and $v$ per pixel offset.
-*   `opacity`, `shape`: `float16` (FP16). Surfels' opacity and shape parameters (contextual, not part of the coordinate formula but stored alongside).
-*   `d_x`, `d_y`: `float32` (FP32). Components of the perspective denominator gradient vector $\mathbf{d}$. Stored in FP32 because they span several orders of magnitude; errors here scale across the entire surfel [S1, unofficial].
+The method precomputes eight coefficients per surfel per frame [S1, unofficial]. These are stored in a structure with the following layout:
+*   `u0`, `v0`: `float16` (FP16). The intersection coordinates at the center of the screen-space bounding box [S1, unofficial].
+*   `J_uu`, `J_uv`, `J_vu`, `J_vv`: `float16` (FP16). Elements of the Jacobian matrix $\mathbf{J}$, representing the rate of change of $u$ and $v$ per pixel offset [S1, unofficial].
+*   `opacity`, `shape`: `float16` (FP16). Surfels' opacity and shape parameters (contextual, not part of the coordinate formula but stored alongside) [S1, unofficial].
+*   `d_x`, `d_y`: `float32` (FP32). Components of the perspective denominator gradient vector $\mathbf{d}$ [S1, unofficial]. Stored in FP32 because they span several orders of magnitude; errors here scale across the entire surfel [S1, unofficial].
 
 **Numbered Steps:**
-
-1.  **Precomputation (per surfel, per frame):**
-    1.  Determine the screen-space bounding box of the surfel.
-    2.  Compute the center of this bounding box, $(x_c, y_c)$.
-    3.  Evaluate the exact homography inversion at the center to find $(u_0, v_0)$ [S1, unofficial].
-    4.  Compute the Jacobian $\mathbf{J}$ and the denominator gradient $\mathbf{d}$ at the center. This involves evaluating the partial derivatives of the rational function. Specifically, the solution $p = k \times l$ (where $k$ and $l$ are linear constraints derived from the homography) is affine in $(x, y)$ because the bilinear term $xy(T_w \times T_w)$ vanishes [S1, unofficial].
-    5.  Store the eight coefficients: $(u_0, v_0)$, $\mathbf{J}$, and $\mathbf{d}$.
-
-2.  **Rasterization (per pixel in bounding box):**
-    1.  Calculate the pixel offset from the center: $\Delta = (x - x_c, y - y_c)$.
-    2.  Compute the perspective denominator: $denom = 1 + \mathbf{d}^{\top}\Delta$.
-    3.  **Edge Case/Pitfall:** If $denom \le 0$, the plane is parallel to or behind the camera for this pixel. Skip the fragment [S1, unofficial].
-    4.  Compute the numerator corrections:
-        $$ num_u = (\mathbf{J}\Delta)_u $$
-        $$ num_v = (\mathbf{J}\Delta)_v $$
-    5.  Evaluate the final coordinates:
-        $$ u = u_0 + \frac{num_u}{denom} $$
-        $$ v = v_0 + \frac{num_v}{denom} $$
+1. Determine the screen-space bounding box of the surfel [S1, unofficial].
+2. Compute the center of this bounding box, $(x_c, y_c)$ [S1, unofficial].
+3. Evaluate the surfel intersection at the center to obtain $(u_0, v_0)$ [S1, unofficial].
+4. Compute the Jacobian $\mathbf{J}$ and the denominator gradient $\mathbf{d}$ at the center [S1, unofficial].
+5. Store the eight coefficients: $(u_0, v_0)$, $\mathbf{J}$, and $\mathbf{d}$ [S1, unofficial].
+6. For each pixel $(x, y)$ in the bounding box, calculate the pixel offset from the center: $\Delta = (x - x_c, y - y_c)$ [S1, unofficial].
+7. Compute the perspective denominator: $denom = 1 + \mathbf{d}^{\top}\Delta$ [S1, unofficial].
+8. **Edge Case/Pitfall:** If $denom \le 0$, the plane is parallel to or behind the camera for this pixel. Skip the fragment [S1, unofficial].
+9. Compute the numerator corrections: $num_u = (\mathbf{J}\Delta)_u$ and $num_v = (\mathbf{J}\Delta)_v$ [S1, unofficial].
+10. Evaluate the final coordinates: $u = u_0 + \frac{num_u}{denom}$ and $v = v_0 + \frac{num_v}{denom}$ [S1, unofficial].
 
 **Formula:**
 The core interpolation formula is:
 $$ u = u_0 + \frac{(\mathbf{J}\Delta)_u}{1 + \mathbf{d}^{\top}\Delta}, \quad v = v_0 + \frac{(\mathbf{J}\Delta)_v}{1 + \mathbf{d}^{\top}\Delta} $$
 Where:
-*   $\Delta$ is the pixel offset from the bounding box center.
-*   $(u_0, v_0)$ is the intersection at the center.
-*   $\mathbf{J}$ is the Jacobian (rate of change per pixel).
+*   $\Delta$ is the pixel offset from the bounding box center [S1, unofficial].
+*   $(u_0, v_0)$ is the intersection at the center [S1, unofficial].
+*   $\mathbf{J}$ is the Jacobian (rate of change per pixel) [S1, unofficial].
 *   $\mathbf{d}$ is the gradient of the perspective denominator [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def precompute_surfel_coefficients(surfel, camera_matrix):
-    """
-    Computes the 8 coefficients for a surfel.
-    Returns: u0, v0, J_u, J_v, d_x, d_y
-    """
-    # 1. Project surfel corners to screen space to find bounding box
-    corners = project_corners(surfel, camera_matrix)
-    min_x, min_y, max_x, max_y = bounding_box(corners)
-    
-    # 2. Center of bounding box
-    x_c = (min_x + max_x) / 2.0
-    y_c = (min_y + max_y) / 2.0
-    
-    # 3. Evaluate exact homography inversion at center to get u0, v0
-    # The homography T maps surfel point q=(u,v,1) to screen (Tu·q, Tv·q)/(Tw·q)
-    # We solve T_u · q = x_c * T_w · q and T_v · q = y_c * T_w · q
-    # This yields linear constraints k·q=0 and l·q=0. Solution p = k x l.
-    # u0 = p_x / p_z, v0 = p_y / p_z
-    u0, v0 = exact_homography_inversion(surfel, camera_matrix, x_c, y_c)
-    
-    # 4. Compute Jacobian J and denominator gradient d
-    # Since u(x,y) and v(x,y) are ratios of affine functions,
-    # we can compute derivatives analytically or via finite differences around center.
-    # The derivation shows p is affine in (x,y), so u and v are rational affine.
-    # J is the rate of change of u and v per pixel offset.
-    # d is the gradient of the denominator (1 + d^T * Delta).
-    
-    # Analytical derivation from homography rows Tu, Tv, Tw:
-    # k = x*Tw - Tu, l = y*Tw - Tv
+def homography_invert(T_u, T_v, T_w, x, y):
+    """Inverts the homography T to find (u, v) for screen point (x, y)."""
+    # k = x * T_w - T_u, l = y * T_w - T_v
+    k = [x * T_w[i] - T_u[i] for i in range(3)]
+    l = [y * T_w[i] - T_v[i] for i in range(3)]
     # p = k x l
-    # u = p_x / p_z, v = p_y / p_z
-    # Denominator of u is p_z. Denominator of v is p_z.
-    # The shared denominator in the rational form is related to Tw·q.
+    p = [k[1]*l[2] - k[2]*l[1],
+         k[2]*l[0] - k[0]*l[2],
+         k[0]*l[1] - k[1]*l[0]]
+    return p[0] / p[2], p[1] / p[2]
+
+def compute_jacobian_and_gradient(T_u, T_v, T_w, x_c, y_c):
+    """Computes J and d. Uses finite differences with epsilon=1.0 [G]."""
+    u0, v0 = homography_invert(T_u, T_v, T_w, x_c, y_c)
+    u_dx, v_dx = homography_invert(T_u, T_v, T_w, x_c + 1.0, y_c)
+    u_dy, v_dy = homography_invert(T_u, T_v, T_w, x_c, y_c + 1.0)
     
-    # Compute partial derivatives at (x_c, y_c)
-    # du/dx, du/dy, dv/dx, dv/dy form J
-    # dd/dx, dd/dy form d (gradient of the denominator term)
+    J_uu = (u_dx - u0) / 1.0
+    J_uv = (u_dy - u0) / 1.0
+    J_vu = (v_dx - v0) / 1.0
+    J_vv = (v_dy - v0) / 1.0
     
-    # Note: The source states these 8 numbers depend only on surfel and camera.
-    # We compute them once per surfel.
+    def denom_val(x, y):
+        u, v = homography_invert(T_u, T_v, T_w, x, y)
+        q = [u, v, 1.0]
+        return sum(T_w[i] * q[i] for i in range(3))
+            
+    D_c = denom_val(x_c, y_c)
+    D_dx = denom_val(x_c + 1.0, y_c)
+    D_dy = denom_val(x_c, y_c + 1.0)
     
-    # Implementation detail: Compute u and v at (x_c+1, y_c) and (x_c, y_c+1)
-    # to estimate J, and analyze denominator structure for d.
-    # However, exact analytical computation is preferred for stability.
-    
-    # Let D(x,y) = Tw·q(x,y). The rational form is u = N_u(x,y)/D(x,y).
-    # The formula rewrites this around center.
-    
-    # For the purpose of implementation from text:
-    # J_u = du/dx at center, J_v = dv/dy at center (diagonal elements if aligned, 
-    # but generally J is a 2x2 matrix. The formula uses (J Delta)_u, implying 
-    # J is applied to Delta vector. So J_u and J_v in the coefficient list 
-    # likely refer to the relevant components or the matrix is stored.
-    # The source lists "J" as a single entity in the coefficient list alongside u0,v0.
-    # Given the formula (J Delta)_u, J is a 2x2 matrix.
-    # However, the precision section lists "J" as a single FP16 value? 
-    # "The coefficients (u0, v0), J, opacity, and shape are stored as FP16."
-    # This implies J might be simplified or the text refers to the magnitude or 
-    # specific components. But the formula uses (J Delta). 
-    # Re-reading: "J its rate of change per pixel". 
-    # If J is 2x2, it has 4 elements. The text says "eight coefficients".
-    # u0, v0 (2) + J (4?) + d (2) = 8. This fits.
-    
-    J_uu, J_uv, J_vu, J_vv = compute_jacobian(surfel, camera_matrix, x_c, y_c)
-    d_x, d_y = compute_denominator_gradient(surfel, camera_matrix, x_c, y_c)
-    
+    d_x = (1.0 - D_c / D_dx) / 1.0
+    d_y = (1.0 - D_c / D_dy) / 1.0
+        
+    return J_uu, J_uv, J_vu, J_vv, d_x, d_y
+
+def precompute_surfel_coefficients(T_u, T_v, T_w, x_c, y_c):
+    u0, v0 = homography_invert(T_u, T_v, T_w, x_c, y_c)
+    J_uu, J_uv, J_vu, J_vv, d_x, d_y = compute_jacobian_and_gradient(T_u, T_v, T_w, x_c, y_c)
     return u0, v0, J_uu, J_uv, J_vu, J_vv, d_x, d_y
 
-def rasterize_surfel_pixel(x, y, u0, v0, J_uu, J_uv, J_vu, J_vv, d_x, d_y):
-    """
-    Evaluates the closed-form formula for a single pixel.
-    """
-    # Center is implicit in the coefficients (u0, v0 are at center)
-    # We need the center coordinates to compute Delta.
-    # However, the coefficients are precomputed for a specific bounding box center.
-    # The caller must pass the center or the coefficients must include it.
-    # The source says "Delta is the pixel offset from that center".
-    # So the rasterizer needs to know the center or receive Delta directly.
-    # Let's assume the rasterizer receives Delta.
-    
-    # If the rasterizer receives x, y, it needs x_c, y_c.
-    # Let's assume the precomputed struct includes x_c, y_c or the rasterizer
-    # is called with Delta.
-    
-    # For this pseudocode, we assume Delta is passed or computed by caller.
-    # To make it self-contained, let's assume the function receives Delta.
-    pass
-
-def evaluate_closed_form(u0, v0, J_uu, J_uv, J_vu, J_vv, d_x, d_y, delta_x, delta_y):
-    """
-    Evaluates u, v for a given pixel offset Delta.
-    """
-    # Delta = (delta_x, delta_y)
-    
-    # Compute denominator
+def rasterize_surfel_pixel(u0, v0, J_uu, J_uv, J_vu, J_vv, d_x, d_y, delta_x, delta_y):
     denom = 1.0 + (d_x * delta_x + d_y * delta_y)
-    
-    # Edge case: skip if behind camera
     if denom <= 0.0:
         return None, None, False
-        
-    # Compute Jacobian product
-    # (J Delta)_u = J_uu * delta_x + J_uv * delta_y
-    # (J Delta)_v = J_vu * delta_x + J_vv * delta_y
     num_u = J_uu * delta_x + J_uv * delta_y
     num_v = J_vu * delta_x + J_vv * delta_y
-    
     u = u0 + num_u / denom
     v = v0 + num_v / denom
-    
     return u, v, True
 ```
 

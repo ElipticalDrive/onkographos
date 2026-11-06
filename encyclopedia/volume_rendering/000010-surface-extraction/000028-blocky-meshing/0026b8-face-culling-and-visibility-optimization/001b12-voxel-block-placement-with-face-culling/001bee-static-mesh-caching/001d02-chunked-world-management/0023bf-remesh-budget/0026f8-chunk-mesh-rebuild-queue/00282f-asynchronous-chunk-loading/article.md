@@ -3,140 +3,130 @@
 Also called: Async Chunk Streaming, Async Voxel Generation, Chunk Task Queue
 
 ## Overview
-Asynchronous Chunk Loading offloads chunk mesh generation from the main game thread to a background thread pool to prevent frame stutter during procedural voxel generation [S1, unofficial]. It decouples mesh computation from rendering using futures and task queues, ensuring the game loop remains responsive while chunk data is prepared [S1, unofficial].
+Asynchronous Chunk Loading offloads the computationally expensive process of generating chunk meshes from the main execution thread to a background thread pool, preventing frame stutter and maintaining frame rate in large voxel worlds [S1, unofficial]. It solves the problem of blocking the game loop during mesh generation by using futures and task queues to synchronize data transfer between the generation thread and the rendering/game thread [S1, unofficial]. Unlike synchronous loading, which halts execution until the mesh is ready, this method allows the player to continue interacting with the world while chunks are being generated in the background [S1, unofficial].
 
 ## How it works
+The method relies on a producer-consumer pattern where the game thread submits generation tasks and consumes results, while a thread pool executes the heavy lifting.
+
 **Inputs and Outputs**
-*   **Input:** Player chunk coordinates (`newChunkX`, `newChunkY`), a procedural population callback (`PopulateBlock`), and a render distance radius (`ChunkRenderDistance`) [S1, unofficial].
-*   **Output:** A queue of completed mesh data arrays containing vertices, indices, normals, UVs, and colors for each chunk section, which are subsequently uploaded to the GPU [S1, unofficial].
+*   **Input:** Player position (to determine which chunks to load), `ChunkRenderDistance` (integer radius), and a `PopulateBlock` callback function for procedural voxel data generation [S1, unofficial].
+*   **Output:** Uploaded mesh data (vertices, indices, normals, UVs) attached to chunk actors in the scene graph [S1, unofficial].
 
 **Data Structures**
-*   `chunkResults`: A hash map mapping chunk coordinates (integer hash) to a pointer to a future containing the generated mesh data array, used to track in-flight requests and prevent duplicate generation [S1, unofficial].
-*   `chunkLoaderQueue`: A thread-safe queue storing completed mesh data arrays, consumed by the game thread [S1, unofficial].
-*   `ChunkMap`: A spatial hash map storing already loaded and rendered chunk actors [S1, unofficial].
+1.  **Chunk Map (`ChunkMap`):** A spatial hash map (`TMap<int32, AChunk*>` or similar) storing references to currently loaded chunk actors, keyed by a hash of their chunk coordinates [S1, unofficial].
+2.  **In-Flight Results Map (`chunkResults`):** A map (`TMap<int32, TFuture<...>*>`) storing pointers to futures for chunks currently being generated. This prevents duplicate generation requests for the same chunk [S1, unofficial].
+3.  **Result Queue (`chunkLoaderQueue`):** A thread-safe queue (`TQueue<TArray<MeshData*>>`) used to pass generated mesh data from the thread pool back to the game thread [S1, unofficial].
 
-**Parameters**
-*   `ChunkRenderDistance`: Integer radius defining the square area of chunks to load around the player [S1, unofficial].
-*   `PopulateBlock`: A callback function signature `TPopulateBlockFunc` used to generate voxel data for a given chunk coordinate [S1, unofficial].
-
-**Steps**
-1.  **Calculate Load Area:** Determine the square region of chunks to load based on the player's current chunk `(newChunkX, newChunkY)` and `ChunkRenderDistance` [S1, unofficial]. The iteration range is `[newChunkX - ChunkRenderDistance, newChunkX + ChunkRenderDistance]` for both the X and Y axes [S1, unofficial].
-2.  **Iterate and Submit:** For each chunk `(i, j)` in the calculated area: compute the chunk hash using `GetHashFromChunkPosition(i, j)` [S1, unofficial]. Check if the chunk is already loaded in `ChunkMap` or if a generation task is in-flight in `chunkResults` [S1, unofficial]. If the hash exists in either structure, skip the chunk [S1, unofficial]. Submit a mesh generation task to the thread pool that executes `GetMeshDataForChunk(i, j, PopulateBlock)` [S1, unofficial]. Store the returned future pointer in `chunkResults` keyed by the chunk hash [S1, unofficial].
-3.  **Process Results (Game Thread):** On the game thread, dequeue completed mesh data arrays from `chunkLoaderQueue` one per frame [S1, unofficial].
-4.  **Create Chunk:** For each dequeued result: call `CreateChunk(ChunkX, ChunkY, World, chunkData)` [S1, unofficial]. Spawn the chunk actor at the world location `(ChunkX * 1600, ChunkY * 1600, -1000)` [S1, unofficial]. Iterate through the 16 sections in `chunkData` and upload the mesh data (vertices, triangles, normals, UVs, colors, tangents) to the procedural mesh component [S1, unofficial]. Enable physics collision data on the mesh component [S1, unofficial]. Add the new chunk actor to `ChunkMap` using its hash [S1, unofficial].
+**Numbered Steps**
+1.  **Detection:** The game thread detects that the player has moved into a new chunk or that the render distance has changed [S1, unofficial].
+2.  **Iteration:** The game thread iterates through all chunk coordinates within a square radius defined by `ChunkRenderDistance` relative to the player's current chunk [S1, unofficial].
+3.  **Submission:** For each chunk coordinate $(i, j)$:
+    *   Calculate the chunk hash.
+    *   Check if the chunk already exists in `ChunkMap` (already loaded) or if a future exists in `chunkResults` (currently generating) [S1, unofficial].
+    *   If neither exists, submit a mesh generation task to the thread pool [S1, unofficial].
+4.  **Task Execution (Background Thread):**
+    *   The thread pool executes the task, calling `GetMeshDataForChunk(i, j, PopulateBlock)` [S1, unofficial].
+    *   This involves generating the voxel block data via the `PopulateBlock` callback and performing mesh extraction (face culling, UV mapping) [S1, unofficial].
+    *   The result is wrapped in a `TFuture` and stored in `chunkResults` keyed by the chunk hash [S1, unofficial].
+5.  **Synchronization:** The background task completes and places the result into the `chunkLoaderQueue` [S1, unofficial].
+6.  **Consumption (Game Thread):** On the game thread (typically per frame):
+    *   Dequeue one result from `chunkLoaderQueue` [S1, unofficial].
+    *   If a result is available, call `AChunk::CreateChunk()` to instantiate the actor and upload the mesh data to the GPU [S1, unofficial].
+    *   Remove the corresponding entry from `chunkResults` [S1, unofficial].
 
 **Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import queue
-import threading
+# Data structures
+ChunkMap: Map<int32, AChunk*>      # Loaded chunk actors
+chunkResults: Map<int32, Future*>  # In-flight generation futures
+chunkLoaderQueue: Queue<ChunkData> # Results waiting for upload
 
-# Global state
-chunk_results: dict[int, 'Future'] = {}
-chunk_loader_queue: queue.Queue = queue.Queue()
-chunk_map: dict[int, 'Actor'] = {}
+# Callback for voxel generation
+def PopulateBlock(i, j, k):
+    # Returns block type at world position
+    pass
 
-class Future:
-    def __init__(self, func):
-        self._result = None
-        self._done = threading.Event()
-        self._callbacks = []
-        threading.Thread(target=self._run, args=(func,), daemon=True).start()
-    def _run(self, func):
-        self._result = func()
-        self._done.set()
-        for cb in self._callbacks:
-            cb(self)
-    def result(self):
-        self._done.wait()
-        return self._result
-    def add_done_callback(self, cb):
-        self._callbacks.append(cb)
-
-def submit_async_task(func):
-    return Future(func)
-
-def get_hash_from_chunk_position(i, j):
-    # Hash function implementation not specified in sources [G]
-    return (i << 16) | (j & 0xFFFF)
-
-def get_mesh_data_for_chunk(i, j, populate_block):
-    # Mesh generation algorithm not given in the sources.
-    return populate_block(i, j)
-
-def player_moved_to_another_chunk(new_chunk_x, new_chunk_y, populate_block, chunk_render_distance):
-    min_x = new_chunk_x - chunk_render_distance
-    max_x = new_chunk_x + chunk_render_distance
-    min_y = new_chunk_y - chunk_render_distance
-    max_y = new_chunk_y + chunk_render_distance
-
-    for i in range(min_x, max_x + 1):
-        for j in range(min_y, max_y + 1):
-            chunk_hash = get_hash_from_chunk_position(i, j)
-
-            if chunk_hash in chunk_map or chunk_hash in chunk_results:
+# Main update loop (Game Thread)
+def OnPlayerMove(newChunkX, newChunkY, ChunkRenderDistance):
+    # Iterate square radius around player
+    for i from (newChunkX - ChunkRenderDistance) to (newChunkX + ChunkRenderDistance):
+        for j from (newChunkY - ChunkRenderDistance) to (newChunkY + ChunkRenderDistance):
+            
+            # Skip exact player position if handled separately to avoid double-queuing
+            if i == newChunkX and j == newChunkY:
                 continue
 
-            future = submit_async_task(lambda i=i, j=j: get_mesh_data_for_chunk(i, j, populate_block))
-            chunk_results[chunk_hash] = future
+            chunkHash = GetHash(i, j)
 
-            def chunk_callback(fut, hash_val=chunk_hash):
-                result = fut.result()
-                chunk_loader_queue.put((hash_val, result))
-                del chunk_results[hash_val]
+            # Check if already loaded or currently generating
+            if chunkHash in ChunkMap:
+                continue
+            if chunkHash in chunkResults:
+                continue
 
-            future.add_done_callback(chunk_callback)
+            # Submit async task
+            future = ThreadPool.SubmitAsync(lambda: GenerateChunkMesh(i, j, PopulateBlock))
+            chunkResults[chunkHash] = future
 
-def game_thread_tick():
-    if not chunk_loader_queue.empty():
-        chunk_hash, mesh_data = chunk_loader_queue.get()
-        chunk_x = chunk_hash >> 16
-        chunk_y = chunk_hash & 0xFFFF
-        create_chunk(chunk_x, chunk_y, world, mesh_data)
+    # Process completed chunks
+    while not chunkLoaderQueue.IsEmpty():
+        chunkData = chunkLoaderQueue.Dequeue()
+        # Extract coordinates from chunkData or associated metadata
+        # Create the chunk actor and upload mesh
+        CreateChunk(chunkData)
 
-def create_chunk(chunk_x, chunk_y, world, chunk_data):
-    location = (chunk_x * 1600, chunk_y * 1600, -1000)
-    transform = Transform(location)
+# Background Task
+def GenerateChunkMesh(i, j, PopulateBlock):
+    # 1. Generate voxel data
+    blocks = GetMeshDataForChunk(i, j, PopulateBlock)
+    
+    # 2. Extract mesh (face culling, etc.)
+    meshData = ExtractMesh(blocks)
+    
+    # 3. Enqueue result for game thread
+    chunkLoaderQueue.Enqueue(meshData)
+    
+    # 4. Remove from in-flight map (can be done by game thread upon dequeue or here)
+    # Note: In the source, the game thread removes from chunkResults after processing
+    pass
 
-    if world:
-        new_chunk = world.spawn_actor(ChunkActor, transform)
-        new_chunk.set_actor_label(f"Chunk_{chunk_x}_{chunk_y}")
-
-        new_chunk.m_blocks = chunk_data[0].blocks
-        new_chunk.m_section_side = chunk_data[0].section_side
-        new_chunk.m_section_count = chunk_data[0].section_count
-        new_chunk.m_chunk_x = chunk_x
-        new_chunk.m_chunk_y = chunk_y
-
-        for section in range(16):
-            d = chunk_data[section]
-            if d is not None:
-                new_chunk.mesh.create_mesh_section_linear_color(
-                    section, d.vertices, d.triangles, d.normals,
-                    d.uv0, d.vertex_colors, d.tangents, True
-                )
-                del d
-
-        new_chunk.mesh.contains_physics_tri_mesh_data(True)
-        chunk_map[get_hash_from_chunk_position(chunk_x, chunk_y)] = new_chunk
+def CreateChunk(chunkData):
+    # Instantiate actor, upload vertices/indices/normals/UVs
+    # Add to ChunkMap
+    pass
 ```
 
+**Parameters**
+*   `ChunkRenderDistance`: Integer radius defining the square area of chunks to load. Typical values depend on performance requirements; larger distances increase memory and generation load [S1, unofficial].
+*   `PopulateBlock`: A callback function signature (`TPopulateBlockFunc`) that provides procedural voxel data. This allows terrain algorithms (e.g., sine-wave heightmaps) to be defined without recompiling [S1, unofficial].
+
 **Edge Cases and Pitfalls**
-*   **Player Chunk Skipping:** The current implementation logic `if (i != 0 || j != 0)` in the source loop skips the player's exact current chunk relative to itself [S1, unofficial]. If the player's current chunk is not handled elsewhere, it may remain unqueued and unloaded [S1, unofficial].
-*   **Duplicate Generation:** Without checking `chunkResults`, concurrent movements could trigger multiple generation tasks for the same chunk [S1, unofficial]. The map check prevents this [S1, unofficial].
-*   **Memory Management:** The source code manually deletes `MeshData` objects after upload [S1, unofficial]. Proper cleanup is required to prevent leaks [S1, unofficial].
-*   **No Inter-chunk Culling:** Boundary faces between chunks are always rendered, even if occluded by the neighbor, increasing draw calls [S1, unofficial].
+*   **Player Chunk Skipping:** A common pitfall is that the iteration loop may skip the player's current chunk if the condition `if (i != 0 || j != 0)` is used incorrectly relative to the player's offset, leaving the player's immediate chunk unqueued if not handled explicitly elsewhere [S1, unofficial].
+*   **Duplicate Generation:** Without checking `chunkResults`, rapid player movement or jitter could cause the same chunk to be generated multiple times, wasting CPU cycles [S1, unofficial].
+*   **Thread Safety:** The `chunkLoaderQueue` and `chunkResults` map must be thread-safe or accessed only from their respective threads (game thread for queue consumption/map updates, worker thread for submission) [S1, unofficial].
+
+## Subtopics
+
+### Chunk Upload Blocking
+A variant that delays GPU uploads for nearby changing chunks to prevent visual voids caused by asynchronous mesh generation [S2, unofficial]. It calculates the distance from the chunk center to the camera; if the distance is less than 512 units and the chunk is dirty/changing, it marks the chunk for blocking [S2, unofficial]. It queues SVL/mesh updates in separate arrays (`qs`/`qm`) with a maximum of 16 queued uploads (`MAX_UPLOADS`) [S2, unofficial]. If a chunk is blocked for more than 0.1 seconds or until a specific time, it forces an unblock to prevent indefinite stalling [S2, unofficial]. This ensures that critical nearby geometry is uploaded promptly even if the general queue is backed up [S2, unofficial].
+
+### Concurrent Chunk Mesh Queue Processing
+A variant that uses a thread-safe concurrent hash map to track chunk states and a lock-free queue to process incoming mesh data, allowing asynchronous mesh generation while rendering occurs on a single thread [S3, unofficial]. It defines specific chunk states (e.g., `CHUNK_STATE_GENERATED`, `CHUNK_STATE_MESH_LOADED`) to manage the lifecycle [S3, unofficial]. A key pitfall is that rendering must occur on a single thread because OpenGL context and state changes are not thread-safe across multiple draw calls in this setup, preventing the use of `parallel_for` for rendering [S3, unofficial]. It also includes a deletion queue to safely deallocate buffers and remove chunks from the map when they are unloaded [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources [S1, unofficial].
-*   **Memory Complexity:** Not given in the sources [S1, unofficial].
-*   **Performance:** Prevents frame stutter associated with procedural generation [S1, unofficial]. Performance is limited by the thread pool capacity and the cost of uploading mesh data to the GPU [S1, unofficial].
-*   **Strengths:** Smooth gameplay experience [S1, unofficial]. Decouples heavy computation from rendering [S1, unofficial].
-*   **Limitations:** No inter-chunk face culling [S1, unofficial]. Chunk unloading is not implemented in the source (stubbed) [S1, unofficial].
+*   **Time Complexity:** Mesh generation is offloaded, so the game thread's time per frame is dominated by queue consumption and actor creation, which is $O(N)$ where $N$ is the number of chunks completed in that frame. The total time for world generation is distributed across multiple frames, smoothing out latency spikes [S1, unofficial].
+*   **Memory Complexity:** Requires memory for the voxel block data during generation, the mesh data structures (vertices, indices, etc.), and the queue buffers. The `ChunkMap` and `chunkResults` map add overhead proportional to the render distance [S1, unofficial].
+*   **Strengths:** Eliminates frame stutter associated with synchronous mesh generation; allows for responsive gameplay even in large worlds [S1, unofficial].
+*   **Limitations:** Introduces complexity in synchronization and thread safety; visual pop-in may occur if chunks are generated slower than the player moves; no inter-chunk face culling is performed in the base implementation, leading to redundant geometry at chunk boundaries [S1, unofficial].
+*   **When to use:** Essential for real-time voxel worlds with dynamic generation or editing where frame rate stability is critical [S1, unofficial].
+*   **When not to use:** For static, pre-generated worlds where all chunks can be loaded during a loading screen, or for very small worlds where synchronous generation is negligible [S1, unofficial].
 
 ## Background
-This method is derived from the architecture of the UE5 Minecraft Clone project, which implements a voxel world generator using Unreal Engine 5's thread pool and procedural mesh components [S1, unofficial]. It builds on [Chunk Mesh Rebuild Queue](3911-chunk-mesh-rebuild-queue.md) by providing the specific asynchronous execution mechanism for the queue's tasks [G].
+Asynchronous Chunk Loading originated in the context of Unreal Engine 5 voxel world implementations, specifically in projects like the UE5 Minecraft Clone, to address the performance bottlenecks of generating chunk meshes on the main thread [S1, unofficial]. It builds upon the concept of chunked world management and mesh rebuild queues, extending them with thread pool integration and future-based synchronization [S1, unofficial]. The technique is widely used in modern voxel engines and open-world games to maintain high frame rates during dynamic terrain generation [S1, unofficial].
 
 ## Sources
 [S1] Manolo94/UE5MinecraftClone, https://github.com/Manolo94/UE5MinecraftClone, fetched 2026-10-26 (unofficial)
+[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)
+[S3] EmaMaker/voxel-engine, https://github.com/EmaMaker/voxel-engine, fetched 2026-10-26 (unofficial)

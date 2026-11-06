@@ -1,0 +1,79 @@
+# Power Transformation
+
+Also called: P(x, lambda), Power Ladder, Power Transformation Normalization
+
+## Overview
+The Power Transformation is a parameterized function used to map metric distance $t$ to a normalized distance $s$, enabling effective resampling and distortion loss calculation in neural radiance fields [S1]. It sets itself apart from discrete normalization choices (like pure log or inverse distance) by allowing smooth interpolation between linear, logarithmic, and inverse behaviors via a single shape parameter $\lambda$, while maintaining a linear-like shape near the origin to avoid singularities at the ray start [S1].
+
+## How it works
+**Inputs and Outputs**
+The input is $x \in \mathbb{R}$, representing the metric distance or a scaled variant [S1]. The parameter is $\lambda \in \mathbb{R} \cup \{-\infty, \infty\}$, denoted as `power` in implementations, which controls the curve shape [S1]. The output is $s \in \mathbb{R}$, representing the normalized distance [S1].
+
+**Data Structures**
+No complex data structures are required because the function is evaluated pointwise [G]. However, numerical stability requires access to `log1p` and `expm1` functions [S1].
+
+**Formula**
+The transformation $P(x, \lambda)$ is defined piecewise to handle removable singularities and limits [S1]:
+
+$$
+P(x, \lambda) = 
+\begin{cases} 
+x & \lambda = 1 \\
+\log(1 + x) & \lambda = 0 \\
+e^x - 1 & \lambda = \infty \\
+1 - e^{-x} & \lambda = -\infty \\
+\frac{|\lambda - 1|}{\lambda} \left( \left( \frac{x}{|\lambda - 1|} + 1 \right)^\lambda - 1 \right) & \text{otherwise}
+\end{cases}
+$$
+
+**Symbol Definitions**
+$x$ denotes the input metric distance [S1]. $\lambda$ denotes the shape parameter controlling the curve [S1]. $\log$ denotes the natural logarithm [G]. $e$ denotes Euler's number [G].
+
+**Parameters and Typical Values**
+$\lambda$ controls the curve shape [S1]. $\lambda = 1$ yields a linear mapping [S1]. $\lambda = 0$ yields a logarithmic mapping [S1]. $\lambda = -1$ yields an inverse-distance-like mapping [S1]. The specific value $\lambda = -1.5$ is used in Zip-NeRF for the normalization function $g(x) = P(2x, -1.5)$ [S1]. This value creates a curve that is roughly linear for $s \in [0, 1/2)$ and transitions between inverse and inverse-square for $s \in [1/2, 1]$ [S1]. Scaling $x$ (e.g., $2x$) controls the effective range where the function is approximately linear [S1].
+
+**Pitfalls and Edge Cases**
+Removable singularities occur at $\lambda = 1, 0, \pm\infty$, which must be handled explicitly using the piecewise definitions [S1]. For $\lambda = 0$ and $\lambda = \pm\infty$, implementations must use `log1p(x)` and `expm1(x)` respectively to maintain precision near zero [S1]. Using the original mip-NeRF 360 normalization function with anti-aliased losses causes catastrophic failure because prefiltering removes the invariance to monotonic transformations of distance that existed in the original loss [S1]. The Power Transformation is specifically designed to address this by providing a robust bijection [S1]. Unlike the Yeo-Johnson transformation, the second derivative of $P(x, \lambda)$ at the origin is bounded ($\pm 1$), ensuring it resembles a straight line near the origin [S1]. The second derivative depends on whether $\lambda$ is greater or less than 1 [S1].
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def power_ladder(x: float, power: float) -> float:
+    """
+    Computes the Power Transformation P(x, lambda).
+    
+    Args:
+        x: Input metric distance.
+        power: Shape parameter lambda.
+        
+    Returns:
+        Normalized distance s.
+    """
+    if power == 1:
+        return x
+    elif power == 0:
+        return math.log1p(x)
+    elif math.isinf(power) and power > 0:
+        return math.expm1(x)
+    elif math.isinf(power) and power < 0:
+        return -math.expm1(-x)
+    else:
+        abs_power_minus_1 = abs(power - 1)
+        inner = (x / abs_power_minus_1) + 1
+        inner_pow = math.pow(inner, power)
+        result = (abs_power_minus_1 / power) * (inner_pow - 1)
+        return result
+```
+
+## Operating characteristics
+Time complexity is $O(1)$ per evaluation [G]. Memory complexity is $O(1)$ [G]. Strengths include smoothly interpolating between linear, log, and inverse normalizations without discrete switching [S1]. It maintains a slope of 1 at the origin, ensuring normalized distance is proportional to metric distance near the ray origin, obviating the need for a tuned non-zero near plane distance $t_{near}$ [S1]. The bounded second derivative at the origin ensures stability [S1]. Limitations include that for $\lambda < 0$, the output is bounded by $\frac{\lambda-1}{\lambda}$ [S1]. It requires careful numerical implementation (`log1p`, `expm1`) to avoid precision loss [S1]. It should be used when resampling or distortion loss in neural radiance fields requires a distance normalization that is robust to monotonic transformations and handles both near-origin and far-field behavior smoothly [S1].
+
+## Background
+The Power Transformation was introduced in the context of Zip-NeRF, an anti-aliased grid-based neural radiance field method [S1]. It was developed to address the failure of the original mip-NeRF 360 normalization function when used with anti-aliased losses, which removed the invariance to monotonic transformations of distance [S1]. The function relates to the general robust loss $\rho(x, \alpha, c)$ and resembles a reparameterized Yeo-Johnson transformation but with a bounded second derivative at the origin [S1].
+
+## Sources
+[S1] Zip-NeRF: Anti-Aliased Grid-Based Neural Radiance Fields, https://doi.org/10.1109/iccv51070.2023.01804, fetched 2026-10-26

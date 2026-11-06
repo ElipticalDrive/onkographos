@@ -1,0 +1,274 @@
+Contribute to diziet/mathviz development by creating an account on GitHub.
+
+Task 93: Quaternion Julia set generator by claude-code-agent-diziet[bot] · Pull Request #93 · diziet/mathviz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+Adds a quaternion Julia set fractal generator that iterates q → q² + c in 4D quaternion space, slicing the result to 3D via a fixed fourth component (slice_w) and extracting an isosurface with marching cubes.
+Key changes
+New generator quaternion_julia (alias qjulia) in src/mathviz/generators/fractals/quaternion_julia.py — registered generator class with configurable c-constant (4 components), iteration count, escape radius, and slice position
+Numba escape kernels in _escape_kernel.py — _iterate_quaternion (single-point q² + c iteration) and quaternion_julia_escape_field (parallel 3D voxel grid evaluation)
+Validation helpers in _common.py — validate_quaternion_c_params for 4-component c bounds checking and validate_escape_radius for positive-radius enforcement
+Comprehensive tests (204 lines) covering valid mesh output, distinct shapes for different c/slice_w values, resolution scaling, registry/alias lookup, full pipeline STL export, determinism, metadata, bounding box, and default representation
+alex-claude
+and others
+added 2 commits
+March 16, 2026 02:31
+feat: add quaternion Julia set generator
+…
+ae56d17
+```
+Implements q → q² + c iteration in quaternion space with 3D slicing.
+Adds numba-JIT quaternion escape kernel and validation helpers.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+test: add quaternion Julia set test suite
+…
+24618af
+```
+Tests valid mesh output, distinct shapes for different c values,
+resolution scaling, pipeline rendering, determinism, and metadata.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 Design Review
+Broken math at boundary — escape at iteration 0 indistinguishable from non-escape (src/mathviz/generators/fractals/_escape_kernel.py, _iterate_quaternion)
+When a point escapes on the very first iteration (i=0), the function returns float(0) which is 0.0 — the same value returned for points that never escape. This means points whose initial norm already exceeds the escape radius are misclassified as interior points rather than exterior. Depending on the ESCAPE_ISOLEVEL used in marching cubes, this can produce spurious surface patches at the grid boundary.
+Fix: Return float(i + 1) on escape (so the minimum escape value is 1.0), keeping 0.0 as the unambiguous "did not escape" sentinel. Alternatively, use a sentinel like -1.0 for non-escape.
+Interface mismatch — validate_fractal_params called with a dummy power argument (src/mathviz/generators/fractals/quaternion_julia.py, lines ~113–115)
+_DUMMY_POWER = 2.0 is passed to validate_fractal_params solely to satisfy its signature. This means: (a) the power validation runs on a meaningless value, silently passing; (b) if validate_fractal_params ever tightens its power bounds, it could reject this generator for no reason; (c) readers must understand a comment to know why power is there.
+Fix: Either split validate_fractal_params into composable validators (e.g., validate_iteration_params(max_iter, voxel_resolution, extent) separate from validate_power), or add a power: float | None = None optional parameter that skips the power check when None.
+Reviewed at commit 24618af
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 DRY Review
+Duplicated mesh-difference assertion pattern in tests — tests/test_generators/test_quaternion_julia.py lines ~65-71 (test_different_c_values_produce_distinct_shapes) and lines ~181-187 (test_slice_w_changes_shape) contain an identical 6-line block:
+```
+vertices_differ = len(obj_a.mesh.vertices) != len(obj_b.mesh.vertices)
+if not vertices_differ:
+    vertices_differ = not np.allclose(
+        obj_a.mesh.vertices, obj_b.mesh.vertices,
+    )
+assert vertices_differ, "Different ... should produce distinct shapes"
+```
+Extract a helper like assert_meshes_differ(mesh_a, mesh_b, reason: str) at the top of the test module. This pattern is likely to recur in other fractal generator tests too.
+validate_quaternion_c_params duplicates the core logic of validate_c_params — Both functions in src/mathviz/generators/fractals/_common.py iterate over (name, value) pairs, check abs(val) > MAX_C_MAGNITUDE, and raise a ValueError with an identical message format. The only difference is the number of components (3 vs 4). Unify into a single function that accepts a list of (name, value) tuples:
+```
+def validate_c_components(components: list[tuple[str, float]]) -> None:
+    for name, val in components:
+        if abs(val) > MAX_C_MAGNITUDE:
+            raise ValueError(...)
+```
+Then validate_c_params and validate_quaternion_c_params become thin wrappers (or callers just pass the tuples directly).
+Reviewed at commit 24618af
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 General Review
+Bug: Escape at iteration 0 is indistinguishable from "did not escape" — src/mathviz/generators/fractals/_escape_kernel.py, _iterate_quaternion
+The function returns float(i) when a point escapes and 0.0 when it does not escape. When i == 0 (i.e., the initial point's norm already exceeds the escape radius), float(0) == 0.0, making these exterior points look like interior (non-escaping) points. This can cause marching cubes to produce spurious geometry at grid boundaries if any initial grid coordinates lie outside the escape radius.
+```
+for i in range(max_iterations):
+    norm_sq = a * a + b * b + c * c + d * d
+    if norm_sq > escape_radius_sq:
+        return float(i)        # ← returns 0.0 when i == 0
+    ...
+return 0.0                     # ← same value as "did not escape"
+```
+A common fix is to return float(i + 1) for escapes (so the minimum escape value is 1.0) or return -1.0 / max_iterations for the non-escape case — whichever convention the existing mandelbulb_escape_field uses. Check that the fix aligns with how ESCAPE_ISOLEVEL is defined.
+Reviewed at commit 24618af
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 Performance Review
+No issues found.
+Reviewed at commit 24618af
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 Security Review
+No issues found.
+Reviewed at commit 24618af
+alex-claude
+and others
+added 2 commits
+March 16, 2026 02:35
+fix: address PR review feedback for quaternion Julia
+…
+ddbfb3a
+```
+- Fix iteration-0 escape bug: return i+1 so escape at i=0 returns 1.0,
+  keeping 0.0 as the unambiguous "did not escape" sentinel
+- Make validate_fractal_params power optional (None skips check),
+  removing the dummy power workaround
+- Extract _validate_c_components to DRY the c param validation
+- Extract _assert_meshes_differ test helper to remove duplication
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+fix: add quaternion_julia to docs, GENERATOR_DEFAULTS, and update counts
+…
+04f083e
+```
+The quaternion_julia generator was registered but missing from:
+- docs/generators.md (h3 entry with parameters and example)
+- GENERATOR_DEFAULTS in representation_defaults.py
+- Generator count in README.md (69→70) and docs/generators.md (68→69)
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔧 Fixer Completed
+Post-fix tests: ✅ Passed
+Tests: 1751 total, 1751 passed, 0 failed in 12s
+Fixer summary
+All review feedback addressed and pushed. Here's what was fixed:
+Escape bug at iteration 0: Changed return float(i) to return float(i + 1) in _iterate_quaternion so that points escaping on the first check return 1.0, not 0.0 (which is the "did not escape" sentinel).
+Dummy power workaround: Made power parameter optional (float | None) in validate_fractal_params — when None, the power check is skipped. Removed _DUMMY_POWER from quaternion_julia.py.
+DRY: c parameter validation: Extracted _validate_c_components(components) in _common.py, with both validate_c_params and validate_quaternion_c_params delegating to it.
+DRY: test mesh comparison: Extracted _assert_meshes_differ(mesh_a, mesh_b, reason) helper, used by both test_different_c_values_produce_distinct_shapes and test_slice_w_changes_shape.
+Commits:
+```
+04f083e fix: add quaternion_julia to docs, GENERATOR_DEFAULTS, and update counts
+ddbfb3a fix: address PR review feedback for quaternion Julia
+```
+claude-code-agent-diziet
+Bot
+merged commit 9be17ee
+into
+main
+Mar 15, 2026
+claude-code-agent-diziet
+Bot
+deleted the
+autopilot/task-93
+branch
+March 15, 2026 18:39
+claude-code-agent-diziet
+Bot
+commented
+Mar 15, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Task 93: Quaternion Julia set generator
+Phase
+Wall
+API
+Turns
+Tokens In
+Tokens Out
+Cache Read
+Cache Create
+Retries
+Cost
+Coder
+230s
+223s
+32
+26
+10,353
+979,418
+49,941
+0
+$1.06
+Fixer
+116s
+110s
+20
+19
+5,245
+1,227,728
+74,887
+1
+$1.21
+Review
+106s
+106s
+5
+10
+4,205
+0
+62,644
+0
+$0.49
+Merger
+22s
+22s
+1
+3
+794
+8,888
+15,638
+0
+$0.12
+Total
+7m55s
+—
+58
+58
+20,597
+—
+—
+1
+$2.88
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+0 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

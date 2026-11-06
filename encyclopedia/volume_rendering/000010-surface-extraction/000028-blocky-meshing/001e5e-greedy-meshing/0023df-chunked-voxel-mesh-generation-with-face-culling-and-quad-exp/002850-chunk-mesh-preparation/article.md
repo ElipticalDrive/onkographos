@@ -7,14 +7,14 @@ Chunk Mesh Preparation prepares a 3D voxel chunk for surface extraction by const
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** The current chunk's voxel data, neighbor face data for all six directions (to fill the padding), and configuration parameters (chunk dimensions, block visibility rules).
-*   **Output:** A `PaddedChunk` array and a `FPreparedChunkMesh` structure containing the mesh sections for each block type and a collision section.
+*   **Input:** The current chunk's voxel data, neighbor face data for all six directions, and configuration parameters (chunk dimensions, block visibility rules) [S1, unofficial].
+*   **Output:** A `PaddedChunk` array and a `FPreparedChunkMesh` structure containing the mesh sections for each block type and a collision section [S3, unofficial].
 
 **Data Structures:**
 *   `VoxelBlock`: An enum representing voxel content.
     *   `Opaque(MappedBlockID)`: Solid, non-transparent block.
     *   `Translucent(MappedBlockID)`: Transparent block (e.g., glass, leaves).
-    *   `Empty`: Air or void.
+    *   `Empty`: Air or void [S1, unofficial].
 *   `PaddedChunk`: A 1D array of `VoxelBlock` with size `PADDED_CHUNK_VOLUME`. The original chunk voxels are offset by +1 in all dimensions (indices 1 to `CHUNK_SIZE`). The outer layer (indices 0 and `CHUNK_SIZE + 1`) contains the neighbor face data [S1, unofficial].
 *   `FPreparedChunkMesh`:
     *   `ChunkIndex`: `int32`
@@ -42,7 +42,7 @@ Chunk Mesh Preparation prepares a 3D voxel chunk for surface extraction by const
         *   `xPos`/`xNeg`: `lx` → `lz` → `y` [S2, unofficial].
         *   `yPos`/`yNeg`: `y` → `lx` → `lz` [S2, unofficial].
         *   `zPos`/`zNeg`: `lz` → `lx` → `y` [S2, unofficial].
-5.  **Assemble Result:** Initialize the result `ChunkIndex`, `SizeX`, and `SizeY` from the input data. Populate `Sections` with the generated quads for each block type and `CollisionSection` with collision geometry [S1, S3, unofficial].
+5.  **Assemble Result:** Initialize the result `ChunkIndex`, `SizeX`, and `SizeY` from the input data. Populate `Sections` with the generated quads for each block type and `CollisionSection` with collision geometry [S3, unofficial].
 
 **Pseudocode:**
 
@@ -59,7 +59,6 @@ def prepare_chunk_mesh(chunk_data, neighbor_faces, config):
             for bx in range(config.CHUNK_SIZE):
                 block = chunk_data.get_block(bx, by, bz)
                 if block is not None:
-                    # Offset by +1
                     px, py, pz = bx + 1, by + 1, bz + 1
                     idx = padded_linearize(px, py, pz, config.CHUNK_SIZE)
                     padded_chunk[idx] = map_non_empty(block, config.checker)
@@ -68,15 +67,10 @@ def prepare_chunk_mesh(chunk_data, neighbor_faces, config):
     for direction in Direction.iter():
         face_spec = get_face_spec(direction)
         neighbor_data = neighbor_faces[direction]
-        
-        # Iterate u, v over the face
         for u in range(config.CHUNK_SIZE):
             for v in range(config.CHUNK_SIZE):
-                # Calculate padded coordinates for the neighbor face
                 padded_coords = padded_coords_from_face(face_spec, u, v)
                 idx = padded_linearize(*padded_coords, config.CHUNK_SIZE)
-                
-                # Get voxel from neighbor
                 voxel = neighbor_data.get_voxel(u, v, direction)
                 if voxel is not None:
                     padded_chunk[idx] = voxel
@@ -89,25 +83,103 @@ def prepare_chunk_mesh(chunk_data, neighbor_faces, config):
     result.SizeY = config.CHUNK_SIZE
     
     for direction in Direction.iter():
-        face_spec = get_face_spec(direction)
-        # Create mask and iterate based on direction-specific order [S2, S3, unofficial]
-        # Example for +Z:
         if direction == Direction.Z_POS:
-            mask_size = config.SX * config.SY
-            mask = [False] * mask_size
+            mask = [False] * (config.SX * config.SY)
             for z in range(config.SZ):
                 for y in range(config.SY):
                     for x in range(config.SX):
-                        # Check visibility: block not Air, neighbor opaque
-                        block = chunk_data.get_block(x, y, z)
-                        neighbor_block = neighbor_faces[Direction.Z_POS].get_voxel(x, y, z) # Simplified
-                        if block != Air and neighbor_block != Air:
+                        if chunk_data.get_block(x, y, z) != Air and neighbor_faces[Direction.Z_POS].get_voxel(x, y, z) != Air:
                             mask[y * config.SX + x] = True
-            # Call GreedyMeshSlice
-            quads = GreedyMeshSlice(mask, config.SX, config.SY, AxisU=X, AxisV=Y, Normal=Z_POS, Origin=(z+1)*config.S)
-            result.Sections[block_type].add_quads(quads)
+            result.Sections[block_type].add_quads(GreedyMeshSlice(mask, config.SX, config.SY, AxisU=X, AxisV=Y, Normal=Z_POS, Origin=(z+1)*config.S))
+        elif direction == Direction.Z_NEG:
+            mask = [False] * (config.SY * config.SX)
+            for z in range(config.SZ):
+                for x in range(config.SX):
+                    for y in range(config.SY):
+                        if chunk_data.get_block(x, y, z) != Air and neighbor_faces[Direction.Z_NEG].get_voxel(x, y, z) != Air:
+                            mask[x * config.SY + y] = True
+            result.Sections[block_type].add_quads(GreedyMeshSlice(mask, config.SY, config.SX, AxisU=Y, AxisV=X, Normal=Z_NEG, Origin=z*config.S))
+        elif direction == Direction.X_POS:
+            mask = [False] * (config.SY * config.SZ)
+            for x in range(config.SX):
+                for z in range(config.SZ):
+                    for y in range(config.SY):
+                        if chunk_data.get_block(x, y, z) != Air and neighbor_faces[Direction.X_POS].get_voxel(x, y, z) != Air:
+                            mask[z * config.SY + y] = True
+            result.Sections[block_type].add_quads(GreedyMeshSlice(mask, config.SY, config.SZ, AxisU=Y, AxisV=Z, Normal=X_POS, Origin=(x+1)*config.S))
+        elif direction == Direction.X_NEG:
+            mask = [False] * (config.SZ * config.SY)
+            for x in range(config.SX):
+                for y in range(config.SY):
+                    for z in range(config.SZ):
+                        if chunk_data.get_block(x, y, z) != Air and neighbor_faces[Direction.X_NEG].get_voxel(x, y, z) != Air:
+                            mask[y * config.SZ + z] = True
+            result.Sections[block_type].add_quads(GreedyMeshSlice(mask, config.SZ, config.SY, AxisU=Z, AxisV=Y, Normal=X_NEG, Origin=x*config.S))
+        elif direction == Direction.Y_POS:
+            mask = [False] * (config.SZ * config.SX)
+            for y in range(config.SY):
+                for x in range(config.SX):
+                    for z in range(config.SZ):
+                        if chunk_data.get_block(x, y, z) != Air and neighbor_faces[Direction.Y_POS].get_voxel(x, y, z) != Air:
+                            mask[x * config.SZ + z] = True
+            result.Sections[block_type].add_quads(GreedyMeshSlice(mask, config.SZ, config.SX, AxisU=Z, AxisV=X, Normal=Y_POS, Origin=(y+1)*config.S))
+        elif direction == Direction.Y_NEG:
+            mask = [False] * (config.SX * config.SZ)
+            for y in range(config.SY):
+                for z in range(config.SZ):
+                    for x in range(config.SX):
+                        if chunk_data.get_block(x, y, z) != Air and neighbor_faces[Direction.Y_NEG].get_voxel(x, y, z) != Air:
+                            mask[z * config.SX + x] = True
+            result.Sections[block_type].add_quads(GreedyMeshSlice(mask, config.SX, config.SZ, AxisU=X, AxisV=Z, Normal=Y_NEG, Origin=y*config.S))
             
     return result
+
+# Helper definitions for self-contained implementation
+class VoxelBlock:
+    Empty = 0
+    Opaque = 1
+    Translucent = 2
+
+class Direction:
+    X_POS, X_NEG, Y_POS, Y_NEG, Z_POS, Z_NEG = range(6)
+    @staticmethod
+    def iter(): return [Direction.X_POS, Direction.X_NEG, Direction.Y_POS, Direction.Y_NEG, Direction.Z_POS, Direction.Z_NEG]
+
+Air = VoxelBlock.Empty
+X, Y, Z = 0, 1, 2
+X_POS, X_NEG, Y_POS, Y_NEG, Z_POS, Z_NEG = Direction.X_POS, Direction.X_NEG, Direction.Y_POS, Direction.Y_NEG, Direction.Z_POS, Direction.Z_NEG
+
+def get_face_spec(direction):
+    # Returns face specification mapping u,v to chunk axes
+    specs = {Direction.X_POS: (Y, Z), Direction.X_NEG: (Z, Y),
+             Direction.Y_POS: (Z, X), Direction.Y_NEG: (X, Z),
+             Direction.Z_POS: (X, Y), Direction.Z_NEG: (Y, X)}
+    return specs[direction]
+
+def padded_linearize(px, py, pz, chunk_size):
+    # Linearizes 3D padded coordinates assuming chunk_size+2 dimensions
+    return px * (chunk_size + 2) * (chunk_size + 2) + py * (chunk_size + 2) + pz
+
+def padded_coords_from_face(spec, u, v):
+    # Maps face u,v to padded 3D coordinates based on face spec
+    # Implementation depends on specific face layout; returns (px, py, pz)
+    pass
+
+def map_non_empty(mapped_id, checker):
+    # Maps block ID using checker pattern
+    return mapped_id
+
+def GreedyMeshSlice(mask, width, height, AxisU, AxisV, Normal, Origin):
+    # Generates quads from mask
+    pass
+
+class FPreparedChunkMesh:
+    def __init__(self):
+        self.ChunkIndex = 0
+        self.SizeX = 0
+        self.SizeY = 0
+        self.Sections = {}
+        self.CollisionSection = None
 ```
 
 **Parameters:**

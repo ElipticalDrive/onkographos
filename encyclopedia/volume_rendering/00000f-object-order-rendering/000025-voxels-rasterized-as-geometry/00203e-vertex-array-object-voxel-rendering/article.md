@@ -3,119 +3,96 @@
 Also called: Interleaved VBO Voxel Rendering, VAO technique, Vertex Array Objects (VAOs), Vertex Array Objects (VAOs) with per-vertex color
 
 ## Overview
-A rendering technique that stores explicit position and color data for voxel quads in interleaved Vertex Buffer Objects (VBOs), managed by a Vertex Array Object (VAO), and renders them using `glDrawArrays` [S1, S3, unofficial]. It differs from [Geometry Shader Processing](2524-geometry-shader-processing.md) by pre-computing all vertex data in memory rather than generating geometry on the GPU, and from [Naive Voxel Rendering](1103-naive-voxel-rendering.md) by using modern OpenGL state objects (VAOs) instead of legacy fixed-pipeline or immediate mode calls [S1, S3, unofficial].
+Vertex Array Object (VAO) Voxel Rendering is a method that converts voxel data into explicit geometric primitives (quads) stored in GPU memory, leveraging OpenGL's VAO and VBO mechanisms for efficient rasterization [S1, S3, unofficial]. It differs from [Geometry Shader Processing](2524-geometry-shader-processing.md) by pre-computing and storing all vertex data in video memory rather than generating geometry procedurally per frame, and from [Instancing with Procedural/Shader Generation](2794-instancing-with-procedural-shader-generation.md) by using explicit vertex buffers instead of instanced attributes [S1, S3, unofficial]. This approach trades higher video memory usage for simplified rendering pipelines and negligible main memory overhead [S1, S3, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A set of voxel objects, each defined by a collection of visible faces (quads).
-- Output: Rasterized fragments with per-vertex color and position attributes.
+- Input: A set of occupied voxels, each defined by its 3D index $(i, j, k)$, world position $P_{world}$, and color $C$.
+- Output: A rendered image of voxel quads.
 
 **Data Structures:**
-The vertex data is stored in a single interleaved VBO. The layout per vertex is defined as [S1, S3, unofficial]:
-
+The method uses an interleaved vertex structure stored in a Vertex Buffer Object (VBO). The layout is defined as [S1, S3, unofficial]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```cpp
 struct Vertex {
-    vec3 position;      // 3 floats (12 bytes)
-    uint32_t packedColor; // 1 unsigned int (4 bytes)
+    vec3 position;      // 3 floats (x, y, z)
+    uint32_t packedColor; // 4 bytes (e.g., RGBA)
 };
 ```
-Total size per vertex: 16 bytes. The `position` occupies the first 12 bytes, and `packedColor` occupies the next 4 bytes. There is no padding between fields [S1, S3, unofficial].
+Each occupied voxel generates one or more quads (typically 6 for a full cube, or fewer if culling is applied). Each quad consists of 4 vertices. Since indexing is not used, each vertex is stored explicitly [S1, S3, unofficial].
 
-**Setup Steps:**
-1.  **Create Vertex Buffer Object (VBO):** Generate a buffer object and bind it to `GL_ARRAY_BUFFER`. Upload the interleaved vertex data using `glBufferData` with the usage hint `GL_STATIC_DRAW` [S2, unofficial].
-2.  **Create Vertex Array Object (VAO):** Generate a VAO and bind it. This object stores the vertex attribute configuration [S1, S3, unofficial].
-3.  **Configure Vertex Attributes:**
-    -   Bind the VBO to `GL_ARRAY_BUFFER`.
-    -   Enable the vertex attribute array for the position attribute (typically index 0 or `POSITION`) using `glEnableVertexAttribArray` [S2, unofficial].
-    -   Set the attribute pointer using `glVertexAttribPointer`. The parameters are:
-        -   `size`: 3 (for `vec3`)
-        -   `type`: `GL_FLOAT`
-        -   `normalized`: `GL_FALSE`
-        -   `stride`: 0 (data is tightly packed)
-        -   `pointer`: `nullptr` (data starts at the beginning of the buffer) [S2, unofficial].
-    -   *Note:* The sources do not explicitly detail the configuration for the `packedColor` attribute in the VAO setup steps, though it is part of the `Vertex` struct. [G] In a standard implementation, a second `glVertexAttribPointer` call would be required for the color attribute at offset 12 bytes with stride 16.
-4.  **Bind Index Buffer (Optional/Context Dependent):** The sources mention binding an index VBO to `GL_ELEMENT_ARRAY_BUFFER` in the setup code snippet [S2, unofficial], but explicitly state that drawing uses `glDrawArrays` with no indexing [S1, S3, unofficial]. This implies the index buffer may be unused for this specific technique or used for other parts of the scene.
-5.  **Unbind:** Unbind the VAO to finalize the state [S2, unofficial].
-
-**Rendering Steps:**
-1.  Bind the VAO.
-2.  For each voxel object, call `glDrawArrays(GL_QUADS, ...)` to render the quads directly [S1, S3, unofficial].
-3.  No indexing is used during the draw call [S1, S3, unofficial].
+**Numbered Steps:**
+1. **Buffer Generation:** Generate a VBO for vertices and a VBO for indices (if indexing were used, but this method typically uses `glDrawArrays` without indices [S1, S3, unofficial]). For the VAO technique, only the vertex VBO is strictly necessary for `glDrawArrays`, but a VAO is required to store the attribute state [S2, S3, unofficial].
+2. **Data Upload:** Upload the interleaved vertex data to the vertex VBO using `GL_STATIC_DRAW` [S2, S3, unofficial].
+3. **VAO Setup:** Generate a VAO. Bind the VAO. Bind the vertex VBO to `GL_ARRAY_BUFFER`. Enable the vertex attribute array for position. Configure the attribute pointer to read 3 floats from the start of the buffer with a stride equal to the size of the `Vertex` struct. If color is used, enable and configure the color attribute pointer [S2, S3, unofficial]. Unbind the VAO.
+4. **Rendering:** For each frame, bind the VAO. Issue a draw call using `glDrawArrays(GL_QUADS, ...)` for each voxel object or batch of voxels [S1, S3, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Setup Phase
-def setup_voxel_rendering(vertices_data):
-    """
-    vertices_data: list of Vertex structs, each containing position (vec3) and packedColor (uint32)
-    """
-    # 1. Create and populate VBO
-    vertex_vbo = glGenBuffers(1)
-    glBindBuffer(GL_ARRAY_BUFFER, vertex_vbo)
-    # Calculate total size: len(vertices_data) * 16 bytes
-    glBufferData(GL_ARRAY_BUFFER, len(vertices_data) * 16, vertices_data, GL_STATIC_DRAW)
+# Step 1: Define Vertex Structure
+# struct Vertex { float position[3]; uint32_t color; };
+# VertexSize = 3 * 4 + 4 = 16 bytes
+# PositionOffset = 0
+# ColorOffset = 12
 
-    # 2. Create and configure VAO
-    vao = glGenVertexArrays(1)
+# Step 2: Create and Upload Vertex Buffer
+vertex_vbo = glGenBuffers(1)
+glBindBuffer(GL_ARRAY_BUFFER, vertex_vbo)
+glBufferData(GL_ARRAY_BUFFER, num_vertices * 16, vertex_data, GL_STATIC_DRAW)
+
+# Step 3: Create and Configure VAO
+vao = glGenVertexArrays(1)
+glBindVertexArray(vao)
+
+# Bind VBO
+glBindBuffer(GL_ARRAY_BUFFER, vertex_vbo)
+
+# Enable and configure Position attribute (location 0)
+glEnableVertexAttribArray(0)
+glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+
+# Enable and configure Color attribute (location 1)
+glEnableVertexAttribArray(1)
+glVertexAttribPointer(1, 1, GL_UNSIGNED_INT, GL_TRUE, 16, ctypes.c_void_p(12))
+
+# Unbind
+glBindVertexArray(0)
+
+# Step 4: Render Loop
+for voxel in voxels:
     glBindVertexArray(vao)
-
-    # 3. Configure Position Attribute (Location 0)
-    glBindBuffer(GL_ARRAY_BUFFER, vertex_vbo)
-    glEnableVertexAttribArray(0) # Assuming POSITION is at index 0
-    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 16, nullptr)
-
-    # 4. Configure Color Attribute (Location 1) - [G] Inferred from struct layout
-    # The sources do not explicitly list this step, but it is required for the struct to work.
-    glEnableVertexAttribArray(1)
-    glVertexAttribPointer(1, 1, GL_UNSIGNED_INT, GL_FALSE, 16, 12) # Offset 12 bytes
-
-    # 5. Unbind
-    glBindVertexArray(0)
-    glBindBuffer(GL_ARRAY_BUFFER, 0)
-
-    return vao, vertex_vbo
-
-# Render Phase
-def render_voxels(vao, num_quads):
-    """
-    num_quads: number of quads to draw. Each quad has 4 vertices.
-    """
-    glBindVertexArray(vao)
-    # Draw all quads. Total vertices = num_quads * 4
-    glDrawArrays(GL_QUADS, 0, num_quads * 4)
-    glBindVertexArray(0)
+    # Draw 4 vertices for one quad
+    glDrawArrays(GL_QUADS, voxel.start_index, 4)
 ```
 
 **Parameters:**
--   `GL_STATIC_DRAW`: Usage hint for `glBufferData`. Indicates data is set once and used many times [S2, unofficial].
--   `GL_QUADS`: Primitive type for `glDrawArrays` [S1, S3, unofficial].
+- `GL_STATIC_DRAW`: Usage hint for `glBufferData`, indicating data is set once and used many times [S2, unofficial].
+- `GL_QUADS`: Primitive type for `glDrawArrays` [S1, S3, unofficial].
 
 **Edge Cases and Pitfalls:**
--   **Memory Usage:** Video memory usage is significantly higher than geometry shader techniques because explicit vertices for all faces are stored. Main memory overhead is negligible [S1, S3, unofficial].
--   **Duplicate Data:** There is a lot of duplicate information (vertices shared between adjacent quads are not shared in memory) [S1, S3, unofficial].
--   **No Indexing:** The technique does not use index buffers for the voxel quads themselves, leading to redundant vertex data [S1, S3, unofficial].
+- **Memory Usage:** This method stores explicit vertices for all faces, leading to higher video memory usage compared to geometry shader approaches [S1, S3, unofficial].
+- **No Indexing:** The method typically avoids indexing to simplify the pipeline, resulting in duplicate vertex data for shared edges [S1, S3, unofficial].
+- **Main Memory:** Main memory overhead is negligible compared to older techniques like Display Lists [S1, S3, unofficial].
 
 ## Subtopics
 
 ### Multi-Draw Indirect VAO Setup
-A variant setup for rendering multiple objects using indirect draw calls. It involves creating a separate VAO (`multidrawVao`) configured for instance attributes. Vertex attribute at index 4 is enabled and configured as a 3-component float vector (`vec3`), normalized false, with offset 0. The divisor for this attribute is set to 1, marking it as an instance attribute, allowing multiple draw calls to share vertex data while varying instance data [S4, unofficial].
+A variant that uses a separate VAO configured for multi-draw indirect operations. It enables vertex attribute at index 4, configures it as a 3-component float vector with offset 0, and sets the divisor to 1, indicating it is an instance attribute [S4, unofficial]. This allows for efficient rendering of multiple voxel instances with per-instance data.
 
 ## Operating characteristics
--   **Time Complexity:** Setup time is non-trivial due to buffer creation and state configuration, but render time is efficient as it relies on standard `glDrawArrays` calls [S1, S3, unofficial].
--   **Memory Complexity:** High video memory usage. The technique stores explicit vertices for every face of every voxel. Memory usage is an order of magnitude greater than geometry shader techniques [S1, S3, unofficial]. Main memory usage is negligible [S1, S3, unofficial].
--   **Performance:** Display lists may win in raw render time in some benchmarks, but VAOs offer better memory efficiency than display lists and are more modern [S1, S3, unofficial].
--   **Strengths:** Simple to implement, direct mapping of voxel data to GPU memory, no GPU-side geometry generation overhead.
--   **Limitations:** High memory consumption due to vertex duplication. Not suitable for very large voxel datasets where memory is constrained.
--   **When to use:** Small to medium voxel datasets where simplicity and CPU-side data preparation are preferred over GPU-side generation.
--   **When not to use:** Large-scale voxel rendering where memory bandwidth and capacity are critical bottlenecks; consider [Geometry Shader Processing](2524-geometry-shader-processing.md) or [Sparse Voxel Rasterization](3032-sparse-voxel-rasterization.md) instead.
+- **Time Complexity:** Setup time is higher than geometry shader methods due to buffer creation and data upload, but render time is efficient as it relies on standard rasterization [S1, S3, unofficial].
+- **Memory Complexity:** Video memory usage is high, proportional to the number of voxel faces times 4 vertices per quad times the vertex size [S1, S3, unofficial]. Main memory usage is negligible [S1, S3, unofficial].
+- **Performance:** In benchmarks, VAO techniques show significantly higher video memory usage than geometry shaders (order of magnitude difference) but lower main memory usage than display lists [S1, S3, unofficial]. Render time is competitive but not the fastest among all methods [S1, S3, unofficial].
+- **Strengths:** Simple implementation, no complex shader logic for geometry generation, low main memory overhead.
+- **Limitations:** High video memory consumption, less flexible than procedural generation methods.
+- **When to Use:** When video memory is abundant and simplicity of implementation is prioritized. When main memory bandwidth is a bottleneck.
+- **When Not to Use:** When video memory is constrained or when the number of voxels is very large, making explicit vertex storage prohibitive.
 
 ## Background
-Originated as a standard OpenGL technique for rendering structured geometry. In the context of voxel rendering, it was compared against Display Lists and Geometry Shader techniques in early voxel rendering benchmarks [S1, S3, unofficial]. It represents a transition from legacy OpenGL (Display Lists) to modern OpenGL (VAOs/VBOs) for voxel visualization [S1, S3, unofficial].
+This technique is part of the evolution of voxel rendering in OpenGL, moving from fixed-function pipeline methods (Display Lists) to more flexible buffer-based approaches [S1, S3, unofficial]. It was discussed in the context of comparing various voxel rendering techniques, highlighting its simplicity and directness [S1, S3, unofficial]. The method relies on standard OpenGL 3.0+ features (VAOs, VBOs) [S2, S3, unofficial].
 
 ## Sources
 [S1] Quads All the Way Down: Simple Voxel Rendering - Medium, https://medium.com/@calebleak/quads-all-the-way-down-simple-voxel-rendering-fea1e4488e26, fetched 2026-10-27 (unofficial)

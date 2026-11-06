@@ -1,0 +1,288 @@
+# Volume Raycasting Discretization
+
+Also called: Discrete Summation, Discrete VRE, Discrete Volume Rendering Equation, Discrete Volume Rendering Integral, Ray Casting Integration, VRI, Volume Rendering Integral Approximation
+
+## Overview
+Volume Raycasting Discretization is a direct volume rendering technique that approximates the continuous Volume Rendering Integral (VRI) by tracing parallel rays from an observer through a 3D data array, sampling at evenly spaced intervals, and compositing front-to-back [S1][S2, S4, unofficial]. It solves the problem of projecting a 3D scalar field onto a 2D image plane by converting the two continuous integrals (outer integral and inner transmittance integral) into discrete Riemann sums over $N$ points along the ray [S10][S15, unofficial]. Unlike [Classical Ray Tracing Integration](1334-classical-ray-tracing-integration.md), which may use adaptive step sizes or analytical solutions for specific functions, this method relies on fixed-step marching and zero-order approximation (constant opacity/color per segment) to balance computational efficiency with visual accuracy [S1][S9, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field (voxel grid) of dimensions $D_x \times D_y \times D_z$ [S3, S8, unofficial]; Camera parameters (eye position, view direction, up vector) [S4, unofficial]; Transfer function mapping scalar values to color $\hat{C}$ and opacity $\alpha$ [S1][S4, unofficial]; Step size $\Delta s$ [S4, S11, unofficial].
+*   **Output:** A 2D image where each pixel $(u, v)$ contains the accumulated color $C(u)$ and opacity $\alpha(u)$ [S1][S3, unofficial].
+
+**Data Structures:**
+*   **Volume Data:** Stored as a 1D array or 3D texture. For CPU implementations, a common layout is row-major: `data[z * (width * height) + y * width + x]` [S3, S8, unofficial]. For GPU, a 3D texture (`volumeData`) stores scalar values and optionally precomputed gradients [S4, unofficial].
+*   **Transfer Function:** A 1D texture or lookup table mapping normalized scalar values to RGBA [S4, unofficial].
+*   **Accumulators:** Per-pixel variables for accumulated color $C$ (RGB) and accumulated opacity $\alpha$ (float) [S1][S11, unofficial].
+
+**Numbered Steps:**
+
+1.  **Initialize Image:** Set the background color to black (or transparent) and opacity to 0 for all pixels $(i, j)$ [S3, unofficial].
+2.  **Ray Generation:** For each pixel $(i, j)$, compute the ray origin $\mathbf{o}$ (eye position) and direction $\mathbf{d}$ based on the camera's projection matrix or view vectors [S4, unofficial].
+3.  **Determine Bounds:** Calculate the entry point $s_{in}$ and exit point $s_{out}$ of the ray with the volume's bounding box (e.g., unit cube or voxel grid extents) [S1][S13, unofficial]. If the ray does not intersect the volume, skip to the next pixel.
+4.  **Initialize Accumulators:** Set accumulated color $C = (0, 0, 0)$ and accumulated opacity $\alpha = 0$ [S1][S11, unofficial].
+5.  **Ray Marching Loop:** Iterate from sample index $k = 0$ to $N-1$, where $N$ is the number of samples along the ray segment $[s_{in}, s_{out}]$. The step size is $\Delta s = (s_{out} - s_{in}) / N$ [S10][S11, unofficial].
+    *   **Sample Position:** Compute the current sample position $\mathbf{p}_k = \mathbf{o} + (s_{in} + k \cdot \Delta s) \mathbf{d}$ [S11, unofficial].
+    *   **Interpolation:** Sample the scalar value $v$ at $\mathbf{p}_k$ from the volume data using trilinear interpolation from the 8 surrounding voxels [S1][S15, unofficial].
+        *   Formula: $V_{xyz} = \sum_{i,j,k \in \{0,1\}} V_{ijk} (1-x_i)(1-y_j)(1-z_k)$, where $x,y,z$ are fractional distances to the voxel corners [S15, unofficial].
+    *   **Transfer Function:** Map $v$ to pre-multiplied color $\hat{C}_k$ and opacity $\alpha_k$ using the transfer function [S1][S4, unofficial].
+    *   **Compositing:** Update accumulators using the front-to-back alpha compositing equations [S1][S11, unofficial]:
+        $$ \hat{C}_{\text{out}} = \hat{C}_{\text{in}} + \hat{C}_k (1 - \alpha_{\text{in}}) $$
+        $$ \alpha_{\text{out}} = \alpha_{\text{in}} + \alpha_k (1 - \alpha_{\text{in}}) $$
+        Where $\hat{C}$ is pre-multiplied color ($C \cdot \alpha$) [S1].
+    *   **Early Termination:** If $\alpha_{\text{out}} \ge 1.0 - \epsilon$ (or a threshold like 0.95), break the loop [S2, S3, unofficial][S10].
+6.  **Final Color:** If the background is not fully opaque, divide the accumulated pre-multiplied color by the accumulated opacity to get the final non-pre-multiplied color: $C_{\text{final}} = \hat{C}_{\text{out}} / \alpha_{\text{out}}$ [S1]. If a fully opaque background was composited, this step is omitted [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volume_raycasting_discretization(volume_data, transfer_func, camera, image_width, image_height, step_size):
+    """
+    Renders a 2D image from a 3D volume using fixed-step raycasting.
+    
+    Args:
+        volume_data: 3D array of scalar values (dimensions: z, y, x).
+        transfer_func: Function mapping scalar value -> (color_rgb, opacity).
+        camera: Object with eye_pos, look_at, up_vec, fov, aspect_ratio.
+        image_width: int
+        image_height: int
+        step_size: float, distance between samples along the ray.
+        
+    Returns:
+        image: 2D array of RGB colors.
+    """
+    # Initialize output image
+    image = np.zeros((image_height, image_width, 3))
+    
+    # Precompute camera vectors
+    forward = normalize(camera.look_at - camera.eye_pos)
+    right = normalize(cross(forward, camera.up_vec))
+    up = cross(right, forward)
+    
+    # Determine volume bounds (assuming unit cube or normalized coordinates)
+    # For simplicity, assume volume is in [0, 1]^3 and ray intersects if it passes through
+    # In practice, compute entry/exit t values for the AABB
+    
+    for y in range(image_height):
+        for x in range(image_width):
+            # 1. Generate Ray
+            # Map pixel to normalized device coordinates (-1 to 1)
+            ndc_x = (2.0 * (x + 0.5) / image_width) - 1.0
+            ndc_y = 1.0 - (2.0 * (y + 0.5) / image_height)
+            
+            # Calculate ray direction based on FOV and aspect ratio
+            fov_rad = radians(camera.fov)
+            ray_dir = normalize(
+                right * ndc_x * tan(fov_rad / 2.0) * camera.aspect_ratio +
+                up * ndc_y * tan(fov_rad / 2.0) +
+                forward
+            )
+            ray_origin = camera.eye_pos
+            
+            # 2. Determine Ray Bounds (Entry and Exit)
+            # Simplified: Assume volume is a unit cube [0,1]^3 centered at origin or similar.
+            # Real implementation requires AABB intersection test.
+            # Here we assume a helper function returns t_min and t_max.
+            t_min, t_max = compute_ray_volume_intersection(ray_origin, ray_dir, volume_bounds)
+            
+            if t_max <= t_min:
+                continue # Ray misses volume
+            
+            # 3. Initialize Accumulators
+            acc_color = np.array([0.0, 0.0, 0.0]) # Pre-multiplied color
+            acc_alpha = 0.0
+            
+            # 4. Ray Marching
+            t = t_min
+            while t < t_max:
+                # Sample position
+                sample_pos = ray_origin + ray_dir * t
+                
+                # Check if sample is inside volume bounds (for safety/clamping)
+                if not is_inside_volume(sample_pos, volume_bounds):
+                    t += step_size
+                    continue
+                
+                # 5. Interpolate Scalar Value
+                # Trilinear interpolation from volume_data
+                scalar_val = trilinear_interpolate(volume_data, sample_pos, volume_bounds)
+                
+                # 6. Transfer Function
+                color_rgb, opacity = transfer_func(scalar_val)
+                
+                # 7. Compositing (Front-to-Back)
+                # Update accumulated color and opacity
+                # Formula: C_out = C_in + C_sample * (1 - alpha_in)
+                #          alpha_out = alpha_in + alpha_sample * (1 - alpha_in)
+                
+                contribution = color_rgb * opacity # Pre-multiplied sample color
+                acc_color = acc_color + contribution * (1.0 - acc_alpha)
+                acc_alpha = acc_alpha + opacity * (1.0 - acc_alpha)
+                
+                # 8. Early Termination
+                if acc_alpha >= 0.99:
+                    break
+                
+                # Advance ray
+                t += step_size
+            
+            # 9. Final Color
+            # If background is transparent, divide by accumulated alpha
+            if acc_alpha > 0.0:
+                final_color = acc_color / acc_alpha
+            else:
+                final_color = np.array([0.0, 0.0, 0.0]) # Background color
+            
+            image[y, x] = final_color
+            
+    return image
+
+def trilinear_interpolate(volume, point, bounds):
+    """
+    Performs trilinear interpolation on a 3D volume.
+    Assumes volume is stored in a format accessible by normalized coordinates [0,1].
+    """
+    # Map point to voxel coordinates
+    # This depends on the specific storage layout (e.g., OpenGL texture coordinates vs raw array indices)
+    # For a raw array of size (Z, Y, X):
+    # x_idx = point.x * (X-1)
+    # y_idx = point.y * (Y-1)
+    # z_idx = point.z * (Z-1)
+    
+    # Extract fractional parts
+    fx = point.x * (volume.shape[2] - 1)
+    fy = point.y * (volume.shape[1] - 1)
+    fz = point.z * (volume.shape[0] - 1)
+    
+    x0 = int(floor(fx))
+    y0 = int(floor(fy))
+    z0 = int(floor(fz))
+    
+    x1 = min(x0 + 1, volume.shape[2] - 1)
+    y1 = min(y0 + 1, volume.shape[1] - 1)
+    z1 = min(z0 + 1, volume.shape[0] - 1)
+    
+    # Interpolation weights
+    sx = fx - x0
+    sy = fy - y0
+    sz = fz - z0
+    
+    # Get 8 corner values
+    v000 = volume[z0, y0, x0]
+    v100 = volume[z0, y0, x1]
+    v010 = volume[z0, y1, x0]
+    v110 = volume[z0, y1, x1]
+    v001 = volume[z1, y0, x0]
+    v101 = volume[z1, y0, x1]
+    v011 = volume[z1, y1, x0]
+    v111 = volume[z1, y1, x1]
+    
+    # Interpolate
+    c00 = lerp(v000, v100, sx)
+    c01 = lerp(v010, v110, sx)
+    c10 = lerp(v001, v101, sx)
+    c11 = lerp(v011, v111, sx)
+    
+    b0 = lerp(c00, c01, sy)
+    b1 = lerp(c10, c11, sy)
+    
+    return lerp(b0, b1, sz)
+
+def lerp(a, b, t):
+    return a + t * (b - a)
+
+def compute_ray_volume_intersection(origin, direction, bounds):
+    """
+    Computes t_min and t_max for ray-AABB intersection.
+    Returns (t_min, t_max) or (None, None) if no intersection.
+    """
+    # Standard slab method for AABB
+    # bounds: min_corner (3,), max_corner (3,)
+    t_min = -np.inf
+    t_max = np.inf
+    
+    for i in range(3):
+        if direction[i] == 0:
+            if origin[i] < bounds.min[i] or origin[i] > bounds.max[i]:
+                return None, None
+        else:
+            t1 = (bounds.min[i] - origin[i]) / direction[i]
+            t2 = (bounds.max[i] - origin[i]) / direction[i]
+            t_min = max(t_min, min(t1, t2))
+            t_max = min(t_max, max(t1, t2))
+            
+    if t_max < t_min or t_max < 0:
+        return None, None
+        
+    return t_min, t_max
+```
+
+**Parameters:**
+*   **Step Size ($\Delta s$):** Controls sampling density. Default values vary by implementation; e.g., 0.001 in normalized space [S4, unofficial] or fixed increments like 0.75 units [S8, unofficial]. Too large causes undersampling artifacts; too small reduces performance [S11, unofficial].
+*   **Number of Samples ($N$):** Often derived from $\Delta s$ and ray length. Some implementations fix $N$ (e.g., 100-200) [S10].
+*   **Opacity Threshold:** Early termination threshold, typically 0.95 or 0.99 [S3, unofficial][S10].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Artifacts:** If the ray entry/exit points do not align with sample positions, stepping artifacts or gaps can occur at the volume corners [S14, unofficial]. Strategies like "Entry Exit Align Corner" can mitigate this [S14, unofficial].
+*   **Trilinear Interpolation:** Requires accessing 8 surrounding voxels. Out-of-bounds access must be handled via clamping or wrapping [S1][S8, unofficial].
+*   **Precision:** Intermediate terms (transmittance, color) should be computed in full precision (float) rather than 8-bit fixed point to avoid round-off errors, especially for thin structures [S5, unofficial].
+*   **Ordering:** Strict front-to-back ordering is required for the compositing formula to be valid [S15, unofficial].
+
+## Subtopics
+
+### [Eye Align](849-eye-align.md)
+Aligns sample placement to the viewer's perspective, creating concentric sampling lines. Chosen when view-dependent aliasing is a concern, but may introduce endpoint artifacts.
+
+### [Self-Attenuation Integral Evaluation](1085-self-attenuation-integral-evaluation.md)
+Uses a closed-form solution for Gaussian density fields. Chosen when exact attenuation is needed for specific analytic functions, avoiding numerical errors.
+
+### [Partial Pre-Integration](1148-partial-pre-integration.md)
+Replaces per-sample marching with a 2D lookup table. Chosen for interactive transfer function updates, trading some speed for accuracy.
+
+### [CPU Volume Raycasting](1258-cpu-volume-raycasting.md)
+Explicit multithreaded CPU implementation. Chosen for debugging or environments without GPU support, using standard compositing.
+
+### [Average Intensity Projection](1310-average-intensity-projection.md)
+A simplified projection averaging scalar values. Chosen for X-ray-like views where opacity/absorption is ignored.
+
+### [Differential Sampling](1549-differential-sampling.md)
+Adapts step size based on view-dependent frequency. Chosen to prevent aliasing for features close to the camera.
+
+### [In-Scattering Integral Approximation via Riemann Sum](1585-in-scattering-integral-approximation-via-riemann-sum.md)
+Extends discretization to include in-scattering. Chosen for volumetric lighting effects, requiring auxiliary light rays.
+
+### [Zero Order Integration (Rectangle Rule)](2082-zero-order-integration-rectangle-rule.md)
+Assumes constant opacity/color per segment. Chosen for simplicity and speed, accepting higher approximation errors.
+
+## Operating characteristics
+*   **Time Complexity:** $O(P \cdot N)$, where $P$ is the number of pixels and $N$ is the number of samples per ray [S1]. Rendering time grows linearly with dataset size if all voxels are sampled, but early termination can reduce this [S1].
+*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the number of voxels [S1].
+*   **Performance:** On modern GPUs, this method is highly parallelizable, with one thread block or group per pixel. Performance is limited by memory bandwidth (texture fetches) and arithmetic intensity [S1][S4, unofficial].
+*   **Strengths:** Simple to implement; supports early ray termination; handles arbitrary transfer functions; produces high-quality results with sufficient sampling [S1][S2, unofficial].
+*   **Limitations:** Susceptible to aliasing if step size is too large; computationally expensive for high-resolution volumes or large view distances; ignores scattering (unless extended) [S11, S15, unofficial].
+*   **When to Use:** General-purpose direct volume rendering; medical imaging; scientific visualization where transparency and depth cues are important [S1][S4, unofficial].
+*   **When Not to Use:** When real-time performance is critical and the volume is very large (consider [Partial Pre-Integration](1148-partial-pre-integration.md) or [Average Intensity Projection](1310-average-intensity-projection.md)); when scattering effects are essential [S15, unofficial].
+
+## Background
+The method was derived from the continuous volume rendering integral by Lacroute [Lac94] using the rectangle rule for numerical integration [S15, unofficial]. It was popularized by Levoy's "Brute-Force Algorithm" for volume rendering, which established the front-to-back compositing approach [S1]. The approach is implemented in various frameworks, including Inviwo [S14, unofficial], and is foundational to techniques like Neural Radiance Fields (NeRF), where the discretization is differentiable [S9, unofficial].
+
+## Sources
+[S1] Efficient ray tracing of volume data, https://doi.org/10.1145/78964.78965, fetched 2026-10-25
+[S2] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S3] upupming/volume-rendering, https://github.com/upupming/volume-rendering, fetched 2026-10-26 (unofficial)
+[S4] extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, https://github.com/extrovert7986/Scientific-visualization-Ray-casting-volume-rendering, fetched 2026-10-26 (unofficial)
+[S5] Smokeview (Version 6) A Tool for Visualizing Fire Dynamics Simulation Data Volume II : Technical Reference Guide, https://doi.org/10.6028/nist.sp.1017-2, fetched 2026-10-26 (unofficial)
+[S6] samirangode/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/samirangode/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S7] Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, https://github.com/Shyam-pi/Volume-Rendering-and-Neural-Radiance-Fields, fetched 2026-10-26 (unofficial)
+[S8] browarsoftware/directvolumerenderingcpu, https://github.com/browarsoftware/directvolumerenderingcpu, fetched 2026-10-26 (unofficial)
+[S9] Volume Rendering - Lei Mao's Log Book, https://leimao.github.io/blog/Volume-Rendering/, fetched 2026-10-26 (unofficial)
+[S10] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
+[S11] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
+[S12] PDF Direct Volume Rendering - KTH, https://www.kth.se/social/files/565e35dff27654457fb84363/08_VolumeRendering.pdf, fetched 2026-10-27 (unofficial)
+[S13] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
+[S14] Volume Raycasting Sampling Revisited, https://osf.io/download/u9qnz/, fetched 2026-10-29 (unofficial)
+[S15] Texture Mapping Based Volume Rendering, https://www.ciroduran.com/files/Tesis.pdf, fetched 2026-10-29 (unofficial)
+[S16] Total Internal Reflection, https://avishek.net/2022/12/05/pytorch-guide-plenoxels-nerf-part-2.html, fetched 2026-10-29 (unofficial)
+[S17] CISC/CMPE 454, GPU Volume Rendering, https://watkins.cs.queensu.ca/~jstewart/454/notes/44/44-gpu-volume-rendering.html, fetched 2026-10-30 (unofficial)

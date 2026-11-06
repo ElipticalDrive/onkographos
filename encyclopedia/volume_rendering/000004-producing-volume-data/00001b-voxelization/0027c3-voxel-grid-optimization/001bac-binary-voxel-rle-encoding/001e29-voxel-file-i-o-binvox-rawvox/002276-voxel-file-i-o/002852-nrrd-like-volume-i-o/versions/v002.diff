@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -1,17 +1,21 @@
+ # NRRD-like Volume I/O
++
+ Also called: NRRD-like Format I/O
+ 
+ ## Overview
+-Exports and imports volumes in a simple NRRD-like format consisting of two header lines followed by raw binary payload [S1, unofficial]. It differs from [Binvox File Parsing](2862-binvox-file-parsing.md) by storing full 32-bit values rather than binary flags, and from [IMS File Format & Image Stack Class](3322-ims-file-format-image-stack-class.md) by using a single contiguous file rather than a directory of image stacks. It provides a minimal, non-standardized alternative to [VTK Legacy ASCII File Writing](6698-vtk-legacy-ascii-file-writing.md) and [VRDF File Format / VRDF Loader](6906-vrdf-file-format-vrdf-loader.md) by omitting metadata and using binary data for compactness.
++This method defines a minimal, custom binary volume file format designed for efficient storage and transfer of voxel grids. It solves the problem of serializing 3D volumetric data by using a simple two-line header followed by a raw binary payload. Unlike the full Network Common Data Form (NRRD) specification, which supports complex metadata, encodings, and transformations, this variant is restricted to fixed dimensions and a single data type (`uint32_t`), prioritizing implementation simplicity and parsing speed over flexibility. It serves as a lightweight alternative to more verbose formats like [VTK Legacy ASCII File Writing](6698-vtk-legacy-ascii-file-writing.md) or the more complex [NRRD File Parsing and Volume Initialization](7216-nrrd-file-parsing-and-volume-initialization.md).
+ 
+ ## How it works
+-**Inputs:** A volume data structure containing dimensions ($dim_x, dim_y, dim_z$) and a contiguous array of `uint32_t` values ($m\_data$).
+-**Outputs:** A file with a specific text header and raw binary body.
++**Inputs and Outputs:**
++- Input: A contiguous array of `uint32_t` values representing the voxel grid, along with its dimensions $(D_x, D_y, D_z)$.
++- Output: A binary file containing the header and raw voxel data.
++- Input (Import): A file in the specified format.
++- Output: A resized array of `uint32_t` and the parsed dimensions.
+ 
+-**Data Structure Layout:**
+-The file consists of:
+-1.  Line 1: Three space-separated integers representing width ($dim_x$), height ($dim_y$), and depth ($dim_z$).
+-2.  Line 2: The literal string `uint32`.
+-3.  Body: Raw bytes of the volume data.
++**Data Structures:**
++The file layout is strictly sequential:
++1.  **Line 1:** Three space-separated integers representing $D_x$ (width), $D_y$ (height), and $D_z$ (depth).
++2.  **Line 2:** The literal string `uint32` followed by a newline.
++3.  **Payload:** Raw binary bytes of the voxel data, stored in row-major order (X fastest, then Y, then Z). The total size is $D_x \times D_y \times D_z \times 4$ bytes.
+ 
+ **Numbered Steps:**
+@@ -19,17 +23,19 @@
+ 1.  **Export:**
+     1.  Open the output file for writing in binary mode.
+-    2.  Write the dimensions as a string: `std::to_string(dim_x) + " " + std::to_string(dim_y) + " " + std::to_string(dim_z) + "\n"`.
+-    3.  Write the type string: `"uint32\n"`.
+-    4.  Calculate the total byte size: $size = dim_x \times dim_y \times dim_z \times 4$.
+-    5.  Write the raw bytes of $m\_data$ to the file.
++    2.  Write the dimensions as a string: `f"{D_x} {D_y} {D_z}\n"`.
++    3.  Write the data type identifier: `"uint32\n"`.
++    4.  Write the raw voxel data. The data array `m_data` is treated as a byte stream.
++        $$ \text{bytes\_to\_write} = D_x \times D_y \times D_z \times \text{sizeof(uint32\_t)} $$
++        Write `m_data` directly to the file buffer.
+ 
+ 2.  **Import:**
+     1.  Open the input file for reading in binary mode.
+-    2.  Read the first line and parse three integers into $dim_x, dim_y, dim_z$.
+-    3.  Read the second line and verify it equals `"uint32"`. If not, raise an error.
+-    4.  Calculate the voxel count: $N = dim_x \times dim_y \times dim_z$.
+-    5.  Resize the destination data array to hold $N$ `uint32_t` values.
+-    6.  Read $N \times 4$ bytes from the file into the data array.
+-    7.  Verify the read operation was successful (i.e., the number of bytes read matches the expected size).
++    2.  Read the first line as text. Parse the three integers to obtain $D_x, D_y, D_z$.
++    3.  Read the second line as text. Verify it equals `"uint32"`. If not, raise an error or handle as unsupported.
++    4.  Calculate the total voxel count:
++        $$ N = D_x \times D_y \times D_z $$
++    5.  Allocate or resize the output array `m_data` to hold $N$ elements of type `uint32_t`.
++    6.  Read $N \times \text{sizeof(uint32\_t)}$ bytes from the file into `m_data`.
++    7.  Verify that the read operation consumed the expected number of bytes. If the file ends prematurely, handle the error.
+ 
+ **Pseudocode:**
+@@ -38,37 +44,40 @@
+ import struct
+ 
+-def export_volume(filepath, dim_x, dim_y, dim_z, data):
++def export_nrrd_like(filename: str, dims: tuple, data: list):
+     """
+-    Exports volume data to NRRD-like format.
+-    data: list or array of uint32_t values, length dim_x * dim_y * dim_z.
++    Exports a volume to the NRRD-like format.
++    :param filename: Output file path.
++    :param dims: Tuple (Dx, Dy, Dz) of integers.
++    :param data: List of uint32_t values.
+     """
+-    with open(filepath, 'wb') as f:
++    Dx, Dy, Dz = dims
++    voxel_count = Dx * Dy * Dz
++    
++    if len(data) != voxel_count:
++        raise ValueError("Data length does not match dimensions")
++
++    with open(filename, 'wb') as f:
+         # Write header line 1: dimensions
+-        header1 = f"{dim_x} {dim_y} {dim_z}\n"
+-        f.write(header1.encode('ascii'))
++        f.write(f"{Dx} {Dy} {Dz}\n".encode('ascii'))
+         
+-        # Write header line 2: type
+-        header2 = "uint32\n"
+-        f.write(header2.encode('ascii'))
++        # Write header line 2: data type
++        f.write(b"uint32\n")
+         
+         # Write raw binary payload
+-        # Assuming data is a list of integers, convert to bytes
+-        # Each uint32 is 4 bytes, little-endian is standard for this context unless specified otherwise
+-        # The source uses reinterpret_cast, implying native endianness or raw memory dump.
+-        # For portability, we assume the source implies raw memory layout.
+-        # In Python, we use struct to ensure consistent binary output if needed, 
+-        # but 'raw bytes' implies direct memory view.
+-        # Using struct.pack for explicit uint32 LE/BE or native. 
+-        # The C++ code uses reinterpret_cast<char*> which is native endian.
+-        # We will write raw bytes assuming the input data is already in the correct byte order.
+-        byte_data = bytes(data) # Assuming data is already bytes or convertible
+-        f.write(byte_data)
++        # Pack as little-endian unsigned 32-bit integers
++        # Note: The source uses reinterpret_cast, implying native byte order.
++        # For portability, explicit packing is safer, but we follow the source's
++        # assumption of direct memory copy if endianness matches.
++        # Here we use struct to ensure consistent binary output.
++        packed_data = struct.pack(f'{voxel_count}I', *data)
++        f.write(packed_data)
+ 
+-def import_volume(filepath):
++def import_nrrd_like(filename: str) -> tuple:
+     """
+-    Imports volume data from NRRD-like format.
+-    Returns: (dim_x, dim_y, dim_z, data_list)
++    Imports a volume from the NRRD-like format.
++    :param filename: Input file path.
++    :return: Tuple (dims, data) where dims is (Dx, Dy, Dz) and data is list of uint32_t.
+     """
+-    with open(filepath, 'rb') as f:
++    with open(filename, 'rb') as f:
+         # Read header line 1
+         line1 = f.readline().decode('ascii').strip()
+@@ -76,55 +85,50 @@
+         if len(parts) != 3:
+             raise ValueError("Invalid header line 1")
+-        dim_x = int(parts[0])
+-        dim_y = int(parts[1])
+-        dim_z = int(parts[2])
++        
++        Dx, Dy, Dz = int(parts[0]), int(parts[1]), int(parts[2])
+         
+         # Read header line 2
+         line2 = f.readline().decode('ascii').strip()
+         if line2 != "uint32":
+-            raise ValueError(f"Expected 'uint32', got '{line2}'")
++            raise ValueError(f"Unsupported data type: {line2}")
+         
+-        # Calculate size
+-        voxel_count = dim_x * dim_y * dim_z
+-        byte_count = voxel_count * 4
++        voxel_count = Dx * Dy * Dz
++        bytes_to_read = voxel_count * 4  # sizeof(uint32_t) = 4
+         
+-        # Read raw data
+-        raw_data = f.read(byte_count)
+-        if len(raw_data) != byte_count:
+-            raise ValueError("File truncated or read error")
++        # Read raw binary payload
++        raw_bytes = f.read(bytes_to_read)
++        if len(raw_bytes) != bytes_to_read:
++            raise ValueError("File truncated: insufficient data")
+         
+-        # Convert bytes to list of uint32
+-        # Using native endianness to match C++ reinterpret_cast behavior
+-        # struct.unpack with '<I' for little-endian or '>I' for big-endian or 'I' for native
+-        # The C++ code does not specify endianness conversion, so we assume native or consistent storage.
+-        # For a robust implementation, one might need to know the endianness.
+-        # Here we assume native for simplicity as per the source's direct memory copy.
+-        data = list(struct.unpack(f'{voxel_count}I', raw_data))
++        # Unpack as little-endian unsigned 32-bit integers
++        data = struct.unpack(f'{voxel_count}I', raw_bytes)
+         
+-        return (dim_x, dim_y, dim_z, data)
++        return (Dx, Dy, Dz), list(data)
+ ```
+ 
+ **Parameters:**
+--   Data type: Fixed to `uint32_t` (4 bytes per voxel).
+--   Endianness: Not explicitly specified in the source, but `reinterpret_cast` implies native machine endianness [S1, unofficial].
++-   **Data Type:** Fixed to `uint32_t`. No other types are supported by this specific variant.
++-   **Endianness:** The source code uses `reinterpret_cast`, which implies native machine endianness. Implementers should be aware that files generated on little-endian machines may not read correctly on big-endian machines without conversion. [G] For cross-platform compatibility, explicit endianness handling (e.g., swapping bytes if necessary) should be added.
+ 
+ **Edge Cases and Pitfalls:**
+--   **Endianness:** If files are exchanged between systems with different endianness, the data will be corrupted unless a standard endianness (e.g., little-endian) is enforced [G].
+--   **Data Type Verification:** The import step must strictly check for the string `uint32` to prevent misinterpreting other data types [S1, unofficial].
+--   **Truncation:** The import step must verify that the exact number of bytes were read to handle truncated files [S1, unofficial].
++-   **Truncated Files:** The import step must verify that the number of bytes read matches the expected size. Failure to do so may result in reading garbage data or crashing.
++-   **Dimension Mismatch:** The number of elements in the data array must exactly equal $D_x \times D_y \times D_z$.
++-   **Header Parsing:** Whitespace handling in the first header line should be robust (e.g., splitting by any whitespace).
+ 
+ ## Subtopics
+ 
+ ## Operating characteristics
+--   **Time Complexity:** Export is $O(N)$ where $N$ is the number of voxels, dominated by the write operation. Import is $O(N)$, dominated by the read operation.
+--   **Memory Complexity:** $O(N)$ for storing the volume data. The header is negligible.
+--   **Performance:** Very fast due to minimal parsing overhead and raw binary storage. No compression is applied.
+--   **Strengths:** Simplicity, small file size (compared to ASCII), fast I/O.
+--   **Limitations:** No metadata support (no spacing, direction, etc.), no compression, fixed data type (`uint32`), potential endianness issues.
+--   **When to use:** When a lightweight, fast, and simple binary volume format is needed for internal tools or specific pipelines where metadata is not required.
+--   **When not to use:** When interoperability with standard tools (which expect full NRRD metadata) is required, or when compression is needed.
++-   **Time Complexity:**
++    -   Export: $O(N)$, where $N$ is the number of voxels. Writing the header is $O(1)$.
++    -   Import: $O(N)$, dominated by reading the binary payload.
++-   **Memory Complexity:** $O(N)$ for storing the voxel data. The header requires negligible memory.
++-   **Performance:** This format is extremely fast to parse and write because it avoids complex header parsing, metadata extraction, and encoding/decoding steps. It is suitable for intermediate data exchange in pipelines where speed is critical and metadata is handled separately.
++-   **Strengths:** Simplicity, small file size (no overhead for metadata or compression), fast I/O.
++-   **Limitations:** No support for metadata (spacing, orientation, data type flexibility), no compression, no support for multiple data types or arrays. Not suitable for long-term archival or interoperability with general-purpose scientific tools that expect standard NRRD.
++-   **When to use:** Internal pipeline data transfer, debugging, or scenarios where the volume structure is known and fixed.
++-   **When not to use:** When metadata (physical spacing, coordinate systems) is required, or when interoperability with standard medical/scientific imaging software is needed.
+ 
+ ## Background
+-This format is an informal, simplified variant of the NRRD (Nearly Raw Raster Data) format, used in the `compressed-segmentation-volumes` project [S1, unofficial]. It strips down the full NRRD specification to just dimensions and data type, followed by raw binary data, to facilitate fast I/O for voxel-based volume rendering pipelines.
++This format is an unofficial, simplified variant of the Network Common Data Form (NRRD) specification. It originates from the `max-pio/compressed-segmentation-volumes` repository, where it is used as a lightweight container for voxel data in the context of compressed segmentation volumes. It is not a standard format defined by any governing body but rather a pragmatic convention adopted by specific implementations to avoid the complexity of full NRRD parsers.
+ 
+ ## Sources

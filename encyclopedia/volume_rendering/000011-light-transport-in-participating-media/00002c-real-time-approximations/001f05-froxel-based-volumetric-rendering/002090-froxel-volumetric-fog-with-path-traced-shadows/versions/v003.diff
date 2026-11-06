@@ -1,0 +1,148 @@
+--- v002.md
++++ v003.md
+@@ -71,4 +71,6 @@
+ 
+ ```python
++import math
++
+ # Light Pass: froxel.rgen
+ def light_pass(froxel_id, camera, light, sky_lut, scene):
+@@ -76,27 +78,30 @@
+     grid_min = camera.frustum.min
+     grid_max = camera.frustum.max
+-    step = (grid_max - grid_min) / camera.frustum.resolution
+-    froxel_world_pos = grid_min + step * (froxel_id + 0.5)
++    step = [(grid_max[i] - grid_min[i]) / camera.frustum.resolution[i] for i in range(3)]
++    froxel_world_pos = [grid_min[i] + step[i] * (froxel_id[i] + 0.5) for i in range(3)]
+ 
+     # 2. Compute density with height falloff
+-    base_density = 0.005 # Default fog density [S1, unofficial]
+-    height_factor = exp(-froxel_world_pos.y * 0.1) # Standard height falloff [G]
++    base_density = 0.005  # Default fog density [S1, unofficial]
++    height_factor = math.exp(-froxel_world_pos[1] * 0.1)  # Standard height falloff [G]
+     density = base_density * height_factor
+ 
+     # 3. Cast NEE shadow ray
+-    to_light_dir = normalize(light.position - froxel_world_pos)
++    to_light_dir = [light.position[i] - froxel_world_pos[i] for i in range(3)]
++    inv_len = 1.0 / math.sqrt(sum(x*x for x in to_light_dir))
++    to_light_dir = [x * inv_len for x in to_light_dir]
+     shadow_origin = froxel_world_pos
++    shadow_max = math.sqrt(sum((light.position[i] - froxel_world_pos[i])**2 for i in range(3)))
++
++    # 4. Accumulate Beer-Lambert transmittance through tinted media
++    transmittance = [1.0, 1.0, 1.0]
+     shadow_t = 0.0
+-    shadow_max = length(light.position - froxel_world_pos)
+-
+-    # 4. Accumulate Beer-Lambert transmittance through tinted media
+-    transmittance = vec3(1.0)
++    # Source does not specify exact ray intersection routine [G]
+     while shadow_t < shadow_max:
+-        hit = scene.trace_volume(shadow_origin + shadow_t * to_light_dir, to_light_dir, shadow_max - shadow_t)
++        hit = scene.ray_intersect(shadow_origin, to_light_dir, shadow_max - shadow_t)
+         if hit.hit:
+             if hit.is_dielectric:
+                 sigma_t = hit.density
+                 dist = hit.distance
+-                transmittance *= exp(-sigma_t * dist)
++                transmittance = [transmittance[i] * math.exp(-sigma_t * dist) for i in range(3)]
+             shadow_t += hit.distance
+         else:
+@@ -106,9 +111,10 @@
+     # L_in = σₛ · HG(phase) · illuminance · toLight [S1, unofficial]
+     sigma_s = density
+-    cos_theta = dot(to_light_dir, camera.view_dir)
+-    g = 0.7 # Default phaseG [S1, unofficial]
+-    phase_val = (1.0 - g*g) / (4.0 * pi * pow(1.0 + g*g - 2.0*g*cos_theta, 1.5))
+-    illuminance = light.intensity * transmittance
+-    in_scatter = sigma_s * phase_val * illuminance * to_light_dir
++    cos_theta = sum(to_light_dir[i] * camera.view_dir[i] for i in range(3))
++    g = 0.7  # Default phaseG [S1, unofficial]
++    denom = 1.0 + g*g - 2.0*g*cos_theta
++    phase_val = (1.0 - g*g) / (4.0 * math.pi * math.pow(denom, 1.5))
++    illuminance = light.intensity * transmittance[0]  # Using luminance approximation [G]
++    in_scatter = [sigma_s * phase_val * illuminance * to_light_dir[i] for i in range(3)]
+ 
+     # 6. Add Sky Ambient
+@@ -116,9 +122,9 @@
+     sky_ambient = sky_lut.sample(camera.view_dir)
+     # Tiny isotropic fill for night/ground
+-    night_fill = vec3(0.001)
+-    total_in_scatter = in_scatter + sky_ambient + night_fill
++    night_fill = [0.001, 0.001, 0.001]
++    total_in_scatter = [in_scatter[i] + sky_ambient[i] + night_fill[i] for i in range(3)]
+ 
+     # 7. Store result
+-    return vec4(total_in_scatter, density)
++    return (total_in_scatter[0], total_in_scatter[1], total_in_scatter[2], density)
+ 
+ # Raymarch Pass: froxel.comp
+@@ -126,41 +132,42 @@
+     # 1. Initialize Ray
+     ray_origin = camera.origin
+-    ndc = vec2(pixel_coord.x / camera.width * 2.0 - 1.0, pixel_coord.y / camera.height * 2.0 - 1.0)
++    ndc = [(pixel_coord[0] / camera.width * 2.0 - 1.0), (pixel_coord[1] / camera.height * 2.0 - 1.0)]
+     # Standard unprojection using inverse projection and view matrices [G]
+-    view_ray = inverse(camera.projection) * vec4(ndc, 0.0, 1.0)
+-    view_ray = vec3(view_ray) / view_ray.w
+-    ray_dir = normalize(inverse(camera.view) * vec4(view_ray, 0.0))
++    view_ray = camera.inv_projection * (ndc[0], ndc[1], 0.0, 1.0)
++    view_ray = (view_ray[0]/view_ray[3], view_ray[1]/view_ray[3], view_ray[2]/view_ray[3])
++    ray_dir = camera.inv_view * (view_ray[0], view_ray[1], view_ray[2], 0.0)
++    inv_len = 1.0 / math.sqrt(sum(x*x for x in ray_dir))
++    ray_dir = [x * inv_len for x in ray_dir]
+ 
+     # 2. Raymarch through froxel grid
+-    total_transmittance = vec3(1.0)
+-    accumulated_fog_color = vec3(0.0)
++    total_transmittance = [1.0, 1.0, 1.0]
++    accumulated_fog_color = [0.0, 0.0, 0.0]  # Must be float3 to match RGB integral [S1, unofficial]
+ 
+     grid_min = camera.frustum.min
+     grid_max = camera.frustum.max
+-    step_size = (grid_max - grid_min).x / camera.frustum.resolution.x
+-    max_t = length(grid_max - ray_origin)
++    step_size = (grid_max[0] - grid_min[0]) / camera.frustum.resolution[0]
++    max_t = math.sqrt(sum((grid_max[i] - ray_origin[i])**2 for i in range(3)))
+ 
+     t = 0.0
+     while t < max_t:
+-        pos = ray_origin + ray_dir * t
++        pos = [ray_origin[i] + ray_dir[i] * t for i in range(3)]
+ 
+         # 4. Termination check against reversed-Z depth buffer
+-        if pos.z >= depth_buffer.sample(pos):
++        if pos[2] >= depth_buffer.sample(pos):
+             break
+ 
+         # Sample froxel data
+         froxel_data = froxel_grid.sample(pos)
+-        density = froxel_data.w
+-        in_scatter = froxel_data.xyz
++        density = froxel_data[3]
++        in_scatter = (froxel_data[0], froxel_data[1], froxel_data[2])
+ 
+         # 3. Analytic Beer-Lambert Integration
+-        segment_transmittance = exp(-density * step_size)
++        segment_transmittance = math.exp(-density * step_size)
+ 
+         # Accumulate fog color: L_fog += L_in * T_prev * (1 - T_seg)
+-        # Note: Accumulator must be float3 to match RGB integral [S1, unofficial]
+-        accumulated_fog_color += in_scatter * total_transmittance * (1.0 - segment_transmittance)
++        accumulated_fog_color = [accumulated_fog_color[i] + in_scatter[i] * total_transmittance[i] * (1.0 - segment_transmittance) for i in range(3)]
+ 
+         # Update total transmittance
+-        total_transmittance *= segment_transmittance
++        total_transmittance = [total_transmittance[i] * segment_transmittance for i in range(3)]
+ 
+         t += step_size
+@@ -168,6 +175,6 @@
+     # 5. Composite
+     scene_color = froxel_grid.scene_color.sample(pixel_coord)
+-    pre_exposure = 1.0 # Default exposure factor [S1, unofficial]
+-    final_color = scene_color * total_transmittance + accumulated_fog_color * pre_exposure
++    pre_exposure = 1.0  # Default exposure factor [S1, unofficial]
++    final_color = [scene_color[i] * total_transmittance[i] + accumulated_fog_color[i] * pre_exposure for i in range(3)]
+ 
+     return final_color

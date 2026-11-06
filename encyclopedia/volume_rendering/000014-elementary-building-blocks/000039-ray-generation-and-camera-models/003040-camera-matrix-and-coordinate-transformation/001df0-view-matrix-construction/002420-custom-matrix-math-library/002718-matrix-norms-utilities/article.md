@@ -3,77 +3,54 @@
 Also called: MatUtils
 
 ## Overview
-Provides fundamental linear algebra operations for 3x3 and 4x4 matrices, including norms, transposition, and multiplication variants. It serves as the computational core for [Custom Matrix Math Library](3216-custom-matrix-math-library.md), enabling the construction of view matrices and ray generation logic without external dependencies. It distinguishes itself by offering explicit, unoptimized implementations for small fixed-size matrices, prioritizing clarity and correctness over performance.
+Matrix Norms & Utilities provides the fundamental arithmetic operations for 3x3 and 4x4 matrices used in volume rendering camera models and coordinate transformations. It implements norms (Frobenius, off-diagonal), transposition, and multiplication variants required for affine and linear mappings. It differs from sibling methods like [Scaling Matrix Construction](4126-scaling-matrix-construction.md) by focusing on measurement and composition rather than specific transformation generation.
 
 ## How it works
+### Inputs and Outputs
+- **Inputs**: 3x3 matrices (`Mat3`), symmetric 3x3 matrices (`SMat3`), 4x4 matrices, 3D vectors, 4D vectors.
+- **Outputs**: Scalar norms, transformed vectors, resulting matrices.
 
 ### Data Structures
+**`Mat3` Layout**: 9 floats in row-major order: `m00, m01, m02, m10, m11, m12, m20, m21, m22` [S1, unofficial].
+**`SMat3` Layout**: 6 floats representing symmetric upper triangle: `m00, m01, m02, m11, m12, m22` [S1, unofficial].
 
-**`Mat3` (3x3 Matrix)**
-A struct containing 9 floating-point numbers in row-major order [S1, unofficial]:
-*   `m00, m01, m02` (Row 0)
-*   `m10, m11, m12` (Row 1)
-*   `m20, m21, m22` (Row 2)
+### Formulas and Steps
 
-**`SMat3` (Symmetric 3x3 Matrix)**
-A struct containing 6 floating-point numbers representing the upper triangle [S1, unofficial]:
-*   `m00, m01, m02` (Row 0)
-*   `m11, m12` (Row 1, diagonal and off-diagonal)
-*   `m22` (Row 2, diagonal)
-*   Implicitly, `m10 = m01`, `m20 = m02`, `m21 = m12`.
+#### Frobenius Norm
+The Frobenius norm measures the magnitude of a matrix.
+For a general 3x3 matrix $A$:
+$$||A||_F = \sqrt{\sum_{i,j} a_{ij}^2} = \sqrt{a_{00}^2 + a_{01}^2 + a_{02}^2 + a_{10}^2 + a_{11}^2 + a_{12}^2 + a_{20}^2 + a_{21}^2 + a_{22}^2}$$ [S1, unofficial].
+For a symmetric 3x3 matrix $A$ (where $a_{ij} = a_{ji}$):
+$$||A||_F = \sqrt{a_{00}^2 + 2a_{01}^2 + 2a_{02}^2 + a_{11}^2 + 2a_{12}^2 + a_{22}^2}$$ [S1, unofficial].
 
-### Norms
+#### Off-Diagonal Norm
+Measures the magnitude of non-diagonal elements.
+For a general 3x3 matrix $A$:
+$$\text{off}(A) = \sqrt{a_{01}^2 + a_{02}^2 + a_{10}^2 + a_{12}^2 + a_{20}^2 + a_{21}^2}$$ [S1, unofficial].
+For a symmetric 3x3 matrix $A$:
+$$\text{off}(A) = \sqrt{2(a_{01}^2 + a_{02}^2 + a_{12}^2)}$$ [S1, unofficial].
 
-**Frobenius Norm**
-Calculates the square root of the sum of squared elements [S1, unofficial].
+#### Matrix Multiplication (3x3)
+Computes $C = AB$ for 3x3 matrices.
+$$c_{ij} = \sum_{k=0}^2 a_{ik} b_{kj}$$ [S1, unofficial].
+Implemented explicitly for 3x3 dimensions [S1, unofficial].
 
-For a general `Mat3` $A$:
-$$ ||A||_F = \sqrt{\sum_{i=0}^{2}\sum_{j=0}^{2} a_{ij}^2} = \sqrt{a_{00}^2 + a_{01}^2 + a_{02}^2 + a_{10}^2 + a_{11}^2 + a_{12}^2 + a_{20}^2 + a_{21}^2 + a_{22}^2} $$
+#### Compute $A^T A$ for Symmetric Output
+Given a 3x3 matrix $A$, compute $A^T A$ storing result in symmetric matrix `Out`.
+- `Out.m00 = a.m00^2 + a.m10^2 + a.m20^2`
+- `Out.m01 = a.m00*a.m01 + a.m10*a.m11 + a.m20*a.m21`
+- `Out.m02 = a.m00*a.m02 + a.m10*a.m12 + a.m20*a.m22`
+- `Out.m11 = a.m01^2 + a.m11^2 + a.m21^2`
+- `Out.m12 = a.m01*a.m02 + a.m11*a.m12 + a.m21*a.m22`
+- `Out.m22 = a.m02^2 + a.m12^2 + a.m22^2` [S1, unofficial].
 
-For a symmetric `SMat3` $A$ (exploiting symmetry $a_{ij} = a_{ji}$):
-$$ ||A||_F = \sqrt{a_{00}^2 + 2a_{01}^2 + 2a_{02}^2 + a_{11}^2 + 2a_{12}^2 + a_{22}^2} $$
+#### Matrix-Vector Multiplication
+Computes the product of a 4x4 transformation matrix and a 4D vector, yielding a transformed 4D vector [S1, unofficial]. This is the fundamental step for applying affine transformations (rotation, translation, scaling, shear) to points and directions [S1, unofficial].
 
-**Off-Diagonal Norm**
-Calculates the Euclidean norm of the off-diagonal elements [S1, unofficial].
-
-For a general `Mat3` $A$:
-$$ \text{off}(A) = \sqrt{a_{01}^2 + a_{02}^2 + a_{10}^2 + a_{12}^2 + a_{20}^2 + a_{21}^2} $$
-
-For a symmetric `SMat3` $A$:
-$$ \text{off}(A) = \sqrt{2(a_{01}^2 + a_{02}^2 + a_{12}^2)} $$
-
-### Matrix Multiplication
-
-**3x3 Matrix Multiplication**
-Computes $C = AB$ where $A, B, C$ are `Mat3` [S1, unofficial].
-$$ c_{ij} = \sum_{k=0}^{2} a_{ik} b_{kj} $$
-Explicitly:
-$$
-\begin{aligned}
-c_{00} &= a_{00}b_{00} + a_{01}b_{10} + a_{02}b_{20} \\
-c_{01} &= a_{00}b_{01} + a_{01}b_{11} + a_{02}b_{21} \\
-c_{02} &= a_{00}b_{02} + a_{01}b_{12} + a_{02}b_{22} \\
-c_{10} &= a_{10}b_{00} + a_{11}b_{10} + a_{12}b_{20} \\
-c_{11} &= a_{10}b_{01} + a_{11}b_{11} + a_{12}b_{21} \\
-c_{12} &= a_{10}b_{02} + a_{11}b_{12} + a_{12}b_{22} \\
-c_{20} &= a_{20}b_{00} + a_{21}b_{10} + a_{22}b_{20} \\
-c_{21} &= a_{20}b_{01} + a_{21}b_{11} + a_{22}b_{21} \\
-c_{22} &= a_{20}b_{02} + a_{21}b_{12} + a_{22}b_{22}
-\end{aligned}
-$$
-
-**Compute $A^T A$ for Symmetric Output**
-Computes the product of a matrix $A$ and its transpose, storing the result in a symmetric structure `Out` (since $A^T A$ is always symmetric) [S1, unofficial].
-$$
-\begin{aligned}
-\text{Out}.m_{00} &= a_{00}^2 + a_{10}^2 + a_{20}^2 \\
-\text{Out}.m_{01} &= a_{00}a_{01} + a_{10}a_{11} + a_{20}a_{21} \\
-\text{Out}.m_{02} &= a_{00}a_{02} + a_{10}a_{12} + a_{20}a_{22} \\
-\text{Out}.m_{11} &= a_{01}^2 + a_{11}^2 + a_{21}^2 \\
-\text{Out}.m_{12} &= a_{01}a_{02} + a_{11}a_{12} + a_{21}a_{22} \\
-\text{Out}.m_{22} &= a_{02}^2 + a_{12}^2 + a_{22}^2
-\end{aligned}
-$$
+#### Vector Magnitude
+Computes the Euclidean norm (length) of a 4D vector $u$.
+$$\|u\| = \sqrt{\sum_{i=0}^{3} u_i^2}$$ [S2, unofficial].
+Implementation: `Math.sqrt(this.dot(this))` [S2, unofficial].
 
 ### Pseudocode
 
@@ -81,94 +58,188 @@ $$
 
 ```python
 def mat3_frobenius_norm(m):
-    """Returns ||m||_F for a general 3x3 matrix."""
-    sum_sq = (m.m00**2 + m.m01**2 + m.m02**2 +
-              m.m10**2 + m.m11**2 + m.m12**2 +
-              m.m20**2 + m.m21**2 + m.m22**2)
+    """
+    Computes Frobenius norm of a 3x3 matrix.
+    m: list of 9 floats [m00, m01, m02, m10, m11, m12, m20, m21, m22]
+    """
+    sum_sq = 0.0
+    for val in m:
+        sum_sq += val * val
     return math.sqrt(sum_sq)
 
-def mat3_symmetric_frobenius_norm(m):
-    """Returns ||m||_F for a symmetric 3x3 matrix (SMat3)."""
-    sum_sq = (m.m00**2 + 2*m.m01**2 + 2*m.m02**2 +
-              m.m11**2 + 2*m.m12**2 + m.m22**2)
+def s_mat3_frobenius_norm(m):
+    """
+    Computes Frobenius norm of a symmetric 3x3 matrix.
+    m: list of 6 floats [m00, m01, m02, m11, m12, m22]
+    """
+    # m00, m11, m22 appear once; m01, m02, m12 appear twice (symmetric)
+    sum_sq = (m[0]**2 + m[3]**2 + m[5]**2) + 2 * (m[1]**2 + m[2]**2 + m[4]**2)
     return math.sqrt(sum_sq)
 
 def mat3_off_diagonal_norm(m):
-    """Returns off-norm for a general 3x3 matrix."""
-    sum_sq = (m.m01**2 + m.m02**2 +
-              m.m10**2 + m.m12**2 +
-              m.m20**2 + m.m21**2)
+    """
+    Computes off-diagonal norm of a 3x3 matrix.
+    m: list of 9 floats [m00, m01, m02, m10, m11, m12, m20, m21, m22]
+    """
+    # Indices 1,2,3,5,6,8 are off-diagonal
+    sum_sq = (m[1]**2 + m[2]**2 + m[3]**2 + m[5]**2 + m[6]**2 + m[8]**2)
     return math.sqrt(sum_sq)
 
-def mat3_symmetric_off_diagonal_norm(m):
-    """Returns off-norm for a symmetric 3x3 matrix (SMat3)."""
-    sum_sq = 2 * (m.m01**2 + m.m02**2 + m.m12**2)
+def s_mat3_off_diagonal_norm(m):
+    """
+    Computes off-diagonal norm of a symmetric 3x3 matrix.
+    m: list of 6 floats [m00, m01, m02, m11, m12, m22]
+    """
+    # Off-diagonals are m01, m02, m12 (indices 1, 2, 4)
+    sum_sq = 2 * (m[1]**2 + m[2]**2 + m[4]**2)
     return math.sqrt(sum_sq)
 
 def mat3_multiply(a, b):
-    """Returns C = A * B for 3x3 matrices."""
-    c = Mat3()
-    c.m00 = a.m00*b.m00 + a.m01*b.m10 + a.m02*b.m20
-    c.m01 = a.m00*b.m01 + a.m01*b.m11 + a.m02*b.m21
-    c.m02 = a.m00*b.m02 + a.m01*b.m12 + a.m02*b.m22
-    c.m10 = a.m10*b.m00 + a.m11*b.m10 + a.m12*b.m20
-    c.m11 = a.m10*b.m01 + a.m11*b.m11 + a.m12*b.m21
-    c.m12 = a.m10*b.m02 + a.m11*b.m12 + a.m12*b.m22
-    c.m20 = a.m20*b.m00 + a.m21*b.m10 + a.m22*b.m20
-    c.m21 = a.m20*b.m01 + a.m21*b.m11 + a.m22*b.m21
-    c.m22 = a.m20*b.m02 + a.m21*b.m12 + a.m22*b.m22
+    """
+    Multiplies two 3x3 matrices A and B.
+    a, b: lists of 9 floats each.
+    Returns: list of 9 floats for C.
+    """
+    c = [0.0] * 9
+    for i in range(3):
+        for j in range(3):
+            sum_val = 0.0
+            for k in range(3):
+                # Row-major indexing: row i, col k -> index i*3 + k
+                sum_val += a[i*3 + k] * b[k*3 + j]
+            c[i*3 + j] = sum_val
     return c
 
-def mat3_at_a(m):
-    """Returns A^T * A as a symmetric matrix SMat3."""
-    out = SMat3()
-    out.m00 = m.m00**2 + m.m10**2 + m.m20**2
-    out.m01 = m.m00*m.m01 + m.m10*m.m11 + m.m20*m.m21
-    out.m02 = m.m00*m.m02 + m.m10*m.m12 + m.m20*m.m22
-    out.m11 = m.m01**2 + m.m11**2 + m.m21**2
-    out.m12 = m.m01*m.m02 + m.m11*m.m12 + m.m21*m.m22
-    out.m22 = m.m02**2 + m.m12**2 + m.m22**2
+def mat3_at_a(a):
+    """
+    Computes A^T * A for 3x3 matrix A, storing result in symmetric matrix format.
+    a: list of 9 floats [m00, m01, m02, m10, m11, m12, m20, m21, m22]
+    Returns: list of 6 floats [m00, m01, m02, m11, m12, m22]
+    """
+    out = [0.0] * 6
+    # Unpack for clarity
+    m00, m01, m02, m10, m11, m12, m20, m21, m22 = a
+    
+    out[0] = m00**2 + m10**2 + m20**2
+    out[1] = m00*m01 + m10*m11 + m20*m21
+    out[2] = m00*m02 + m10*m12 + m20*m22
+    out[3] = m01**2 + m11**2 + m21**2
+    out[4] = m01*m02 + m11*m12 + m21*m22
+    out[5] = m02**2 + m12**2 + m22**2
     return out
+
+def vec4_magnitude(v):
+    """
+    Computes Euclidean norm of a 4D vector.
+    v: list of 4 floats.
+    """
+    sum_sq = sum(val**2 for val in v)
+    return math.sqrt(sum_sq)
+
+def mat4_transpose(m):
+    """
+    Returns the transpose of a 4x4 matrix.
+    m: list of 16 floats (row-major).
+    Returns: list of 16 floats (row-major).
+    """
+    # Initialize 4x4 matrix
+    mat = [0.0] * 16
+    for i in range(4):
+        for j in range(4):
+            # mat[i][j] = this[j][i]
+            mat[i*4 + j] = m[j*4 + i]
+    return mat
+
+def mat3_transpose_vec(mat, xyz):
+    """
+    Multiplies the transpose of a 3x3 matrix by a 3d vector.
+    mat: list of 9 floats [m00, m01, m02, m10, m11, m12, m20, m21, m22]
+    xyz: list of 3 floats [x, y, z]
+    Returns: list of 3 floats result.
+    Formula: result = mat^T x xyz
+    """
+    result = [0.0, 0.0, 0.0]
+    # Transpose multiplication: result_i = sum_j (mat^T)_{ij} * xyz_j = sum_j mat_{ji} * xyz_j
+    for i in range(3):
+        sum_val = 0.0
+        for j in range(3):
+            sum_val += mat[j*3 + i] * xyz[j]
+        result[i] = sum_val
+    return result
+
+def mat2x3_mult_3x3(lhs, rhs):
+    """
+    Multiplies a 2x3 matrix by a 3x3 matrix, result is a 2x3 matrix.
+    lhs: list of 6 floats [l00, l01, l02, l10, l11, l12]
+    rhs: list of 9 floats [r00, r01, r02, r10, r11, r12, r20, r21, r22]
+    Returns: list of 6 floats.
+    """
+    res = [0.0] * 6
+    for i in range(2):
+        for j in range(3):
+            sum_val = 0.0
+            for k in range(3):
+                sum_val += lhs[i*3 + k] * rhs[k*3 + j]
+            res[i*3 + j] = sum_val
+    return res
+
+def mat3x2_mult_2x3(lhs, rhs):
+    """
+    Multiplies a 3x2 matrix by a 2x3 matrix, result is a 3x3 matrix.
+    lhs: list of 6 floats [l00, l01, l10, l11, l20, l21]
+    rhs: list of 6 floats [r00, r01, r02, r10, r11, r12]
+    Returns: list of 9 floats.
+    """
+    res = [0.0] * 9
+    for i in range(3):
+        for j in range(3):
+            sum_val = 0.0
+            for k in range(2):
+                sum_val += lhs[i*2 + k] * rhs[k*3 + j]
+            res[i*3 + j] = sum_val
+    return res
 ```
+
+### Edge Cases and Pitfalls
+- **Symmetry Assumption**: The symmetric matrix norms and `mat3_at_a` functions assume the input matrix is symmetric or that the result is stored in symmetric format. Using general matrix indices on `SMat3` without accounting for the 6-element layout will cause errors [S1, unofficial].
+- **Precision**: Matrix-vector multiplication supports both 32-bit and 64-bit floating point arithmetic depending on the implementation context [S3].
+- **Boundary Conditions**: Matrix multiplication dimensions must match exactly (e.g., 2x3 times 3x3). Mismatched dimensions are not handled by these specific utility functions [S3].
 
 ## Subtopics
 
-### Matrix Transpose (3x3)
-Returns the transpose of a 4x4 matrix. It initializes a new 4x4 matrix and iterates through indices $i, j \in [0, 3]$, setting `mat[i][j] = this[j][i]` [S2, unofficial].
+### [Matrix-Vector Multiplication](4208-matrix-vector-multiplication.md)
+Computes the product of a 4x4 transformation matrix and a 4D vector, yielding a transformed 4D vector. This operation is the fundamental arithmetic step for applying affine transformations (rotation, translation, scaling, shear) to points and directions in volume rendering camera models. It differs from scalar-vector multiplication by altering direction and position via linear combination of basis vectors, rather than uniform scaling. See [Matrix-Vector Multiplication](4208-matrix-vector-multiplication.md).
+
+### [Symmetric Matrix Data Structure](6259-symmetric-matrix-data-structure.md)
+The Symmetric Matrix Data Structure is a compact memory layout for representing $3 \times 3$ symmetric matrices by storing only the six unique elements. It solves the problem of redundant storage in symmetric matrix operations, reducing memory footprint by 50% compared to a full $3 \times 3$ matrix. It sets itself apart from general matrix structures by enforcing symmetry constraints implicitly through its field layout, ensuring $m_{01}=m_{10}$, $m_{02}=m_{20}$, and $m_{12}=m_{21}$ without requiring runtime checks or extra fields. See [Symmetric Matrix Data Structure](6259-symmetric-matrix-data-structure.md).
 
 ### Matrix Transpose (3x3)
-Multiplies the transpose of a 3x3 matrix by a 3D vector. It supports both 32-bit (`float`) and 64-bit (`double`) arithmetic. The operation is defined as $\text{result} = \text{mat}^T \times \text{xyz}$ [S3].
+Returns the transpose of a 4x4 matrix. Initialize 4x4 matrix `mat`. Loop `i` from 0 to 3, `j` from 0 to 3. Set `mat[i][j] = this[j][i]`. Return `mat` [S2, unofficial].
 
-### Matrix Multiplication (2x3 by 3x3)
-Multiplies a 2x3 matrix by a 3x3 matrix, resulting in a 2x3 matrix. It also supports the reverse order (3x3 by 2x3), which also yields a 2x3 result [S3].
+### Matrix Transpose (3x3)
+Multiplies the transpose of a 3x3 matrix by a 3d vector using 32-bit or 64-bit floating point arithmetic. Formula: `result = mat^T x xyz`. Parameters: `mat` (pointer to array of floats/doubles with the 3x3 matrix), `xyz` (input vector) [S3].
 
 ### Matrix Multiplication (3x2 by 2x3)
-Multiplies a 3x2 matrix by a 2x3 matrix, resulting in a 3x3 matrix [S3].
+Multiplies a 2x3 matrix by a 3x3 matrix, result is a 2x3 matrix. Also supports 3x3 by 2x3 resulting in 2x3. Parameters: `lhs` (2x3 or 3x3 matrix), `rhs` (3x3 or 2x3 matrix) [S3].
 
-### Matrix-Vector Multiplication
-Returns the product of a 4x4 matrix and a 4D vector ($m \times v$) [S3].
+### Matrix Multiplication (3x2 by 2x3)
+Multiplies a 3x2 matrix by a 2x3 matrix, result is a 3x3 matrix. Parameters: `lhs` (3x2 matrix), `rhs` (2x3 matrix) [S3].
 
 ### Vector Magnitude
-Computes the Euclidean norm (length) of a 4D vector. It calculates $\|u\| = \sqrt{\sum_{i=0}^{3} u_i^2}$ by returning `Math.sqrt(this.dot(this))` [S2, unofficial].
+Computes the Euclidean norm (length) of a 4D vector. Returns `Math.sqrt(this.dot(this))`. Formula: $\|u\| = \sqrt{\sum_{i=0}^{3} u_i^2}$ [S2, unofficial].
 
 ## Operating characteristics
-
-**Time and Memory Complexity**
-All operations are $O(1)$ with respect to input size, as they operate on fixed-size matrices (3x3 or 4x4). Memory usage is minimal, requiring only the storage of the input and output matrices/vectors.
-
-**Strengths and Limitations**
-*   **Strengths:** Explicit implementations avoid library overhead and dependencies. Symmetric optimizations reduce computation for $A^T A$ and symmetric norms.
-*   **Limitations:** Not optimized for large matrices or batch operations. The lack of SIMD instructions in the basic JavaScript/Python-like pseudocode may lead to performance bottlenecks in high-throughput scenarios compared to optimized C++ libraries like Eigen or OpenVDB's native math [S3].
-
-**When to Use**
-Use for small-scale transformations in custom rendering engines or educational implementations where dependency management is critical. Avoid for large-scale scientific computing or real-time rendering with massive vertex buffers where hardware-accelerated or SIMD-optimized libraries are preferred.
+- **Time Complexity**: Norm calculations are $O(N)$ where $N$ is the number of elements (9 for 3x3, 6 for symmetric 3x3). Matrix multiplication is $O(N^3)$ for square matrices (27 multiplications for 3x3).
+- **Memory Complexity**: $O(1)$ for scalar norms. $O(N)$ for matrix storage. Symmetric storage reduces memory by 50% for 3x3 matrices [S1, unofficial].
+- **Strengths**: Efficient computation of matrix magnitudes and transformations without external libraries. Symmetric storage saves memory.
+- **Limitations**: Limited to specific matrix sizes (2x2, 2x3, 3x2, 3x3, 4x4). No dynamic sizing.
+- **When to use**: When implementing custom matrix math libraries for volume rendering camera models and coordinate transformations.
+- **When not to use**: For large-scale linear algebra operations where optimized BLAS libraries are available.
 
 ## Background
-
-The `MatUtils` module originates from custom implementations in WebGL-based volume rendering projects [S2, unofficial] and C++ dual contouring libraries [S1, unofficial]. The specific 3x3 symmetric matrix operations and norms are documented in the OpenVDB `nanovdb::math` namespace, which provides high-performance math primitives for volumetric data [S3]. The 4x4 transpose and vector magnitude operations are found in generic WebGL utility libraries [S2, unofficial].
+Originated from custom implementations in JavaScript and C# for volume rendering and dual contouring applications. The symmetric matrix structure and norms are used in mesh processing and octree visualization [S1, unofficial]. The transpose and multiplication utilities are part of broader math libraries used in WebGL and GPU computing contexts [S2, unofficial][S3].
 
 ## Sources
-
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)
 [S2] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
 [S3] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24

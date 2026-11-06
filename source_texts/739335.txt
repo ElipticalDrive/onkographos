@@ -1,0 +1,162 @@
+Problem At small map sizes (128×128, 256×256) the entire world fits comfortably in memory. At large sizes (1000×1000+, or infinite/open-world), you can't keep every chunk in memory at once. The sim needs to load chunks near the player/ca...
+
+Chunk streaming - load/unload map chunks based on player camera and agent proximity · Issue #207 · milkyskies/worldsim · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Chunk streaming - load/unload map chunks based on player camera and agent proximity #207
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Chunk streaming - load/unload map chunks based on player camera and agent proximity#207
+Copy link
+Description
+milkyskies
+opened on Apr 10, 2026
+Issue body actions
+Problem
+At small map sizes (128×128, 256×256) the entire world fits comfortably in memory. At large sizes (1000×1000+, or infinite/open-world), you can't keep every chunk in memory at once. The sim needs to load chunks near the player/camera and unload chunks that are far away.
+This is standard open-world game architecture. Without it, map size is bounded by available memory.
+What to do
+Chunk storage
+Convert the tile storage from a flat Vec (#201) into a per-chunk structure that can be loaded and unloaded independently:
+```
+#[derive(Resource)]
+pub struct WorldMap {
+    pub chunks: HashMap<ChunkId, ChunkState>,
+    pub chunk_size: u32,
+}
+
+pub enum ChunkState {
+    /// Fully loaded, tiles and entities available in memory
+    Loaded(ChunkData),
+    
+    /// Saved to disk, can be retrieved
+    Serialized(PathBuf),
+    
+    /// Never visited — will be generated from seed on first load
+    Unvisited,
+}
+
+pub struct ChunkData {
+    pub tiles: Vec<Tile>,
+    pub entities: Vec<PersistedEntity>,  // agents, structures, resources
+    pub last_accessed_tick: u64,
+}
+```
+Loading rules
+A system tracks the "interest center" (usually the camera, possibly the player-followed agent). Chunks within a distance from the interest center are kept loaded. Chunks beyond the radius are dematerialized to disk.
+```
+const LOAD_RADIUS: u32 = 4;  // chunks within this distance stay loaded
+const UNLOAD_DELAY: u64 = 600;  // ticks to wait before unloading
+
+fn update_chunk_loading(
+    camera_pos: Res<CameraPosition>,
+    mut world: ResMut<WorldMap>,
+    current_tick: Res<WorldTick>,
+) {
+    let center_chunk = chunk_of(camera_pos.pos);
+    
+    // Load needed chunks
+    for dx in -LOAD_RADIUS..=LOAD_RADIUS {
+        for dy in -LOAD_RADIUS..=LOAD_RADIUS {
+            let cid = ChunkId(center_chunk.x + dx, center_chunk.y + dy);
+            if !world.chunks.contains_key(&cid) || matches!(world.chunks.get(&cid), Some(ChunkState::Serialized(_)) | Some(ChunkState::Unvisited)) {
+                load_chunk(cid, &mut world);
+            }
+        }
+    }
+    
+    // Unload distant chunks (after delay)
+    let to_unload: Vec<ChunkId> = world.chunks.iter()
+        .filter_map(|(id, state)| {
+            if let ChunkState::Loaded(data) = state {
+                let dist = id.distance(center_chunk);
+                if dist > LOAD_RADIUS && current_tick.current - data.last_accessed_tick > UNLOAD_DELAY {
+                    Some(*id)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .collect();
+    
+    for id in to_unload {
+        unload_chunk(id, &mut world);
+    }
+}
+```
+What happens to agents when their chunk unloads
+Agents in unloaded chunks transition to AbstractAgentState (#206) — they continue to exist in a simplified form and are serialized with the chunk. When the chunk loads again, they materialize back to full fidelity.
+If #206 isn't done yet, agents in unloaded chunks are simply frozen in their serialized state (Dwarf Fortress style — time doesn't pass for them). Not ideal but functional.
+Chunk generation for unvisited chunks
+When a chunk is loaded for the first time (never visited, not yet generated), it's generated deterministically from the world seed:
+```
+fn generate_chunk(id: ChunkId, seed: u64) -> ChunkData {
+    let chunk_seed = hash(seed, id.x, id.y);
+    // Use noise to generate terrain based on chunk_seed
+    // Place initial resources, entities, etc.
+    ChunkData { ... }
+}
+```
+This means chunks have consistent content regardless of when they're first visited. A world with seed 42 always has the same chunk at (100, 50).
+Disk format
+Serialize loaded chunks to a binary format when unloading. Bevy's bevy_scene can handle entity serialization, or use bincode/postcard for custom formats. The exact format is #210 (incremental save/load) — this issue just needs round-trip serialization working for individual chunks.
+Tradeoffs
+Pros:
+Enables arbitrarily-large maps (memory bounded by loaded chunks, not total map)
+Makes infinite worlds possible (combined with deterministic generation)
+Player sees consistent chunks when revisiting
+Cons:
+Significant architectural change — touches WorldMap, agent spawning, entity lifecycle
+Cross-chunk interactions become complex (agent in loaded chunk can't directly interact with agent in unloaded chunk)
+Save files grow with the size of visited territory
+What this depends on
+Tilemap rendering - replace per-tile sprites with chunk-batched rendering (bevy_ecs_tilemap or custom) #205 Tilemap rendering (so tile rendering isn't tied to per-tile entities)
+WorldMap flat-array lookup - replace chunk HashMap with direct index for tile queries #201 Flat array tile storage (or its evolution into per-chunk storage)
+LOD simulation implementation - distant agents abstract-step via probabilistic summaries instead of per-tick #206 LOD simulation (ideally — handles agents across chunk boundaries)
+Incremental save/load at scale - binary format, snapshot-and-diff, per-chunk serialization #210 Save/load format (shares serialization infrastructure)
+Tests
+Chunks within LOAD_RADIUS are loaded
+Chunks beyond LOAD_RADIUS are eventually unloaded (after delay)
+Unloaded chunks serialize to disk and restore correctly
+First visit to a chunk generates deterministic content from seed
+Revisiting a previously-loaded chunk restores its modified state
+Agents in unloaded chunks don't cause errors
+Acceptance criteria
+Chunks can be in Loaded, Serialized, or Unvisited state
+Camera-proximity drives loading/unloading
+Serialization round-trip works
+Unvisited chunks generate from seed
+1000×1000 or larger maps are possible with bounded memory
+Depends on Tilemap rendering - replace per-tile sprites with chunk-batched rendering (bevy_ecs_tilemap or custom) #205 and ideally LOD simulation implementation - distant agents abstract-step via probabilistic summaries instead of per-tick #206, Incremental save/load at scale - binary format, snapshot-and-diff, per-chunk serialization #210
+Activity
+milkyskies
+added a parent issue on Apr 10, 2026
+Epic: Scale Architecture - hierarchical pathfinding, tilemap rendering, LOD simulation, chunk streaming, event sampling #196
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

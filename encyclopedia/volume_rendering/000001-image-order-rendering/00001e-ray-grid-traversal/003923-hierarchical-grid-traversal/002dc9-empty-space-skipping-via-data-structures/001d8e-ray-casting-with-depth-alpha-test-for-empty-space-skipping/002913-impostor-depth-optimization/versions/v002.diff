@@ -1,0 +1,178 @@
+--- v001.md
++++ v002.md
+@@ -1,81 +1,120 @@
+ # Impostor Depth Optimization
+ 
+-Also called: Nearest-point quad impostors, Depth-test culling for impostors
++Also called: Impostor Ray Casting, Nearest-Point Quad Ray Casting
+ 
+ ## Overview
+-Impostor Depth Optimization is a rendering acceleration technique that uses camera-facing quads placed at the nearest point of volumetric primitives (such as spheres) to leverage the GPU's depth test for early culling. It solves the performance bottleneck in deep piles of overlapping objects where full shading (including ray tracing) is prohibitively expensive. It sets itself apart from standard ray casting by replacing per-object ray-volume intersection logic with a fixed-screen-space primitive that triggers hardware depth discard, effectively skipping the fragment shader for occluded layers [S1, unofficial].
++Impostor Depth Optimization is a ray casting acceleration technique that renders volumetric primitives (such as spheres or particles) as 2D quads positioned at their nearest point to the camera, leveraging the graphics pipeline's depth test to skip shading for occluded or distant primitives. It solves the problem of excessive fragment shader execution in deep piles of overlapping objects by ensuring that only the front-most visible surface triggers the expensive ray-marching logic. It differs from standard depth buffering by explicitly avoiding writing to the depth buffer during the shading pass, thereby preventing the depth test from blocking the fragment shader execution itself, while relying on front-to-back ordering and specific quad placement to achieve culling.
+ 
+ ## How it works
+-**Inputs and outputs:**
+-- Input: A set of volumetric primitives (e.g., spheres) with known positions and radii.
+-- Input: A camera view matrix and projection matrix.
+-- Output: A rendered image where occluded primitives are skipped without executing their fragment shaders.
++**Inputs and Outputs:**
++- Input: A set of volumetric primitives (e.g., spheres) with known positions and radii; a camera view matrix.
++- Output: A rendered image where only visible front surfaces are ray-cast; occluded primitives are skipped.
+ 
+-**Data structures:**
+-- `sorted_positions_buffer`: Array of primitive centers, sorted front-to-back relative to the camera.
+-- `sorted_indices_buffer`: Array of indices corresponding to `sorted_positions_buffer`.
+-- `cell_offsets_buffer`: Offsets for grid-based access (if applicable).
+-- `cell_size`: Size of grid cells.
+-- `grid_origin`: Origin of the grid.
++**Data Structures:**
++- **Primitive List:** An array of sphere definitions (position, radius).
++- **Sorted Indices:** An integer array mapping the primitive list to a front-to-back order relative to the camera.
++- **Quad Geometry:** For each sphere, a 2D quad geometry defined by four vertices.
+ 
+ **Steps:**
+-1. **Sort Primitives:** Sort all primitives based on their distance to the camera plane, ensuring front-to-back ordering. This relies on stable sorting to maintain initial lattice order if needed [S1, unofficial].
+-2. **Compute Nearest Point:** For each primitive, calculate the point on its surface closest to the camera. For a sphere with center $C$ and radius $R$, and a camera position $P$, the nearest point $N$ is:
+-   $$ N = C + R \cdot \frac{P - C}{\|P - C\|} $$
+-   [G] This assumes the camera is outside the sphere. If the camera is inside, the nearest point is undefined for culling purposes; such cases should be handled separately or treated as fully visible.
+-3. **Generate Quads:** Create a quad (two triangles) centered at $N$ and oriented to face the camera. The quad's size should be sufficient to cover the sphere's silhouette from the camera's perspective.
+-4. **Render Quads:**
+-   - Enable the depth test.
+-   - **Do not write to the depth buffer** (`frag_depth`) in the fragment shader. Writing `frag_depth` forces the fragment shader to execute before the depth test, negating the culling benefit [S1, unofficial].
+-   - Render the quads in the sorted front-to-back order.
+-   - The depth test will discard fragments of quads that are behind already-rendered (closer) quads.
+-5. **Skip Shading:** For discarded fragments, the fragment shader (including any expensive ray tracing or volume sampling) is not executed.
++1. **Sort Primitives:** Order the primitives from nearest to farthest relative to the camera. This ensures that when the depth test is active, earlier (front) primitives correctly occlude later (back) ones. [S1, unofficial]
++2. **Calculate Impostor Position:** For each sphere, determine the point on its surface closest to the camera. This is the intersection of the ray from the camera center through the sphere's center with the sphere's surface. [S1, unofficial]
++3. **Generate Quad Geometry:** Create a 2D quad centered at the impostor position. The quad's orientation should face the camera (billboarding). The quad's size should be sufficient to cover the sphere's silhouette from the camera's perspective. [S1, unofficial]
++4. **Configure Depth Test:** Enable the OpenGL depth test (`glEnable(GL_DEPTH_TEST)`). Set the depth function to `GL_LEQUAL` (or equivalent). Crucially, **disable depth buffer writes** (`glDepthMask(GL_FALSE)`). This allows the depth test to compare against existing depth values but prevents the current fragment from updating the depth buffer. [S1, unofficial]
++5. **Render Loop:** For each primitive in the sorted order:
++    a. Bind the shader program for ray casting.
++    b. Set the uniform for the impostor quad's position and size.
++    c. Draw the quad.
++    d. The fragment shader executes. Inside the shader, perform the ray-marching logic for the volume.
++    e. Because depth writes are disabled, the depth buffer is not updated by this pass. However, the depth test still occurs. If the fragment's depth is greater than the existing depth buffer value (meaning it is behind something already rendered), the fragment is discarded. [S1, unofficial]
++6. **Re-enable Depth Writes (Optional):** If subsequent passes need to update the depth buffer, re-enable depth writes (`glDepthMask(GL_TRUE)`).
++
++**Formulas:**
++- **Impostor Position ($P_{imp}$):**
++  $$ P_{imp} = C + R \cdot \frac{C - V}{\|C - V\|} $$
++  Where:
++  - $C$ is the sphere center.
++  - $V$ is the camera position.
++  - $R$ is the sphere radius.
++  - $\| \cdot \|$ denotes the Euclidean norm.
+ 
+ **Parameters:**
+-- Sorting order: Front-to-back is critical for effective culling [S1, unofficial].
+-- Quad size: Must be large enough to cover the primitive's projection.
++- **Sorting Order:** Front-to-back relative to camera. [S1, unofficial]
++- **Depth Mask:** `GL_FALSE` during the impostor rendering pass. [S1, unofficial]
++- **Quad Size:** Must cover the sphere's maximum projected extent.
+ 
+-**Edge cases and pitfalls:**
+-- **Overlapping Artifacts:** Overlapping spheres rendered via this method meet along flat lines (the edges of the quads) instead of smooth curves. This visual artifact is often negligible at typical scene scales [S1, unofficial].
+-- **Depth Buffer Writing:** Writing `frag_depth` must be avoided. If written, the depth test occurs after shading, causing all layers in a deep pile to run full shading, including ray tracing [S1, unofficial].
+-- **Camera Inside Primitive:** If the camera is inside a sphere, the nearest point logic fails. This case requires special handling or fallback to standard rendering.
++**Edge Cases and Pitfalls:**
++- **Overlapping Artifacts:** Because spheres are represented as flat quads at their nearest point, overlapping spheres will meet along flat lines rather than curved boundaries. This is a visual artifact that may be acceptable depending on the scene scale and density. [S1, unofficial]
++- **Depth Test Behavior:** Writing to the depth buffer during the fragment shader execution would cause the depth test to block the fragment shader from running for subsequent layers in a deep pile, leading to incorrect shading or performance issues. The technique relies on the depth test *discarding* fragments without updating the buffer. [S1, unofficial]
++- **Precision:** Ensure that the depth buffer has sufficient precision to distinguish between closely spaced primitives, especially when using the depth test for culling.
+ 
+ **Pseudocode:**
+ ```python
+-def render_impostors(primitives, camera_pos, view_matrix, proj_matrix):
++def render_impostor_depth_optimization(primitives, camera_position, depth_buffer):
+     # Step 1: Sort primitives front-to-back
+-    # Calculate distance from camera to each primitive's center
+-    distances = [distance(camera_pos, p.center) for p in primitives]
+-    sorted_indices = argsort(distances) # Stable sort
+-    sorted_primitives = [primitives[i] for i in sorted_indices]
+-
+-    # Step 2 & 3: Generate and render quads
+-    for p in sorted_primitives:
+-        # Calculate nearest point on sphere surface to camera
+-        direction = normalize(camera_pos - p.center)
+-        nearest_point = p.center + p.radius * direction
+-
+-        # Generate quad at nearest_point, facing camera
+-        # Quad size should cover sphere's silhouette
+-        quad = generate_camera_facing_quad(nearest_point, p.radius * 2)
+-
+-        # Step 4: Render quad
+-        # Enable depth test
+-        # Disable depth buffer writing (do not write frag_depth)
+-        render(quad)
++    sorted_primitives = sort_front_to_back(primitives, camera_position)
++    
++    # Step 2: Configure OpenGL state
++    gl_enable(GL_DEPTH_TEST)
++    gl_depth_func(GL_LEQUAL)
++    gl_depth_mask(GL_FALSE)  # Critical: Do not write to depth buffer
++    
++    # Step 3: Render each primitive
++    for primitive in sorted_primitives:
++        # Calculate impostor position (nearest point on sphere to camera)
++        center = primitive.center
++        radius = primitive.radius
++        direction = normalize(center - camera_position)
++        impostor_pos = center + radius * direction
++        
++        # Generate quad geometry at impostor_pos, facing camera
++        quad = generate_billboard_quad(impostor_pos, radius * 2)
++        
++        # Bind shader and uniforms
++        bind_shader(ray_casting_shader)
++        set_uniform("impostor_pos", impostor_pos)
++        set_uniform("quad_size", radius * 2)
++        
++        # Draw quad
++        draw(quad)
++        # Fragment shader executes ray marching.
++        # Depth test discards fragments behind existing depth.
++        # Depth buffer is NOT updated.
++    
++    # Step 4: Restore state if needed
++    gl_depth_mask(GL_TRUE)
+ ```
+ 
+ ## Subtopics
+ 
++### [Binary Volume Ray Casting with Lookup Table](6600-binary-volume-ray-casting-with-lookup-table.md)
++Binary Volume Ray Casting with Lookup Table is a rendering technique that accelerates the determination of the first intersection point with a volume by using a binary mask to skip empty regions. It finds the first non-zero byte in a ray's path via sequential checking and uses a 256-entry lookup table (LUT) to determine the exact bit position within that byte, thereby avoiding the memory overhead of a $2^{32}$-byte direct addressing table. This method builds on Impostor Depth Optimization by providing a concrete mechanism for empty space skipping that allows for fast previewer applications where the original volume data does not need to reside in main memory.
++
+ ## Operating characteristics
+-- **Time Complexity:** Sorting is $O(N \log N)$ where $N$ is the number of primitives. Rendering is $O(K)$ where $K$ is the number of visible (non-occluded) primitives.
+-- **Memory Complexity:** $O(N)$ for storing sorted positions and indices.
+-- **Performance:** In headless Chrome, ray-traced scenes with deep piles of spheres saw frame times drop from ~92 ms to the 16.7 ms vsync cap [S1, unofficial].
+-- **Strengths:** Significant performance gains for deep piles of overlapping objects; leverages hardware depth test.
+-- **Limitations:** Visual artifacts at overlaps (flat lines); requires front-to-back sorting; not suitable for transparent blending without additional care.
++**Time and Memory Complexity:**
++- **Time Complexity:** Sorting primitives takes $O(N \log N)$ where $N$ is the number of primitives. Rendering is $O(V)$ where $V$ is the number of visible primitives. The depth test is $O(1)$ per fragment.
++- **Memory Complexity:** $O(N)$ for storing primitive data and sorted indices. No additional large data structures are required beyond the depth buffer.
++
++**Measured Performance:**
++- In a headless Chrome environment, rendering a pile of dozens of spheres deep saw frame times drop from ~92 ms to the 16.7 ms vsync cap when using this technique compared to rendering all layers with full shading and ray tracing. [S1, unofficial]
++
++**Scaling:**
++- Performance scales well with the number of primitives, as the depth test efficiently culls occluded objects. The sorting step becomes more expensive with very large $N$, but the rendering cost decreases as more primitives are culled.
++
++**Strengths and Limitations:**
++- **Strengths:** Significant performance gains in scenes with deep piles of overlapping volumetric primitives. Simple to implement using standard OpenGL features.
++- **Limitations:** Visual artifacts at the boundaries of overlapping primitives (flat lines instead of curves). Requires front-to-back sorting. Not suitable for transparent blending without additional care, as the depth test discards fragments.
++
++**When to Use:**
++- Use when rendering large numbers of overlapping volumetric primitives (e.g., particles, spheres) where occlusion is high and performance is critical.
++- Use when visual artifacts at primitive boundaries are acceptable.
++
++**When Not to Use:**
++- Do not use when precise boundary representation between overlapping primitives is required.
++- Do not use when transparent blending is the primary rendering goal, as the depth test will discard fragments incorrectly.
+ 
+ ## Background
+-This technique was implemented in the `kansei` project, specifically in the `voxel-gi-particles` example, to optimize ray-traced particle rendering [S1, unofficial]. It addresses the performance issues encountered when rendering deep piles of spheres with ray tracing enabled.
++Impostor Depth Optimization is a technique derived from the need to optimize ray casting in real-time graphics, particularly in web-based 3D environments. It was notably applied in the `kansei` project to optimize the rendering of ray-traced particles. The technique leverages the graphics pipeline's depth test in a non-standard way (by disabling depth writes) to achieve culling without the overhead of full depth buffer updates. [S1, unofficial]
+ 
+ ## Sources
+-[S1] voxel-gi-particles: the article's lightbox look, plus its ray-traced mirror and glass bonus, https://github.com/Siroko/kansei/pull/108, fetched 2026-10-26 (unofficial)+[S1] voxel-gi-particles: the article's lightbox look, plus its ray-traced mirror and glass bonus, https://github.com/Siroko/kansei/pull/108, fetched 2026-10-26 (unofficial)
++[S2] RvanderLaan/SVDAG-Compression, https://github.com/RvanderLaan/SVDAG-Compression, fetched 2026-10-26 (unofficial)

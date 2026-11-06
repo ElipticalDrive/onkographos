@@ -1,0 +1,390 @@
+--- v001.md
++++ v002.md
+@@ -4,69 +4,45 @@
+ 
+ ## Overview
+-Batch Ray Sampling generates training batches by selecting random pixels from training images and computing their corresponding ray origins and directions [S1, S2, S5, unofficial]. It differs from image-based training, which renders complete images per step, by using smaller batches of random rays to improve memory utilization and convergence speed [S5, unofficial]. This method is the standard approach in modern NeRF-style methods and differentiable volumetric rendering frameworks [S5, unofficial].
++Batch Ray Sampling is a data loading strategy for training radiance field models (such as NeRF) that generates batches of random rays from training images per optimization iteration, rather than rendering complete images [S4, unofficial]. It solves the memory bottleneck of full-image rendering by processing only $N_{rand}$ rays at a time, enabling efficient gradient updates and better GPU memory utilization [S4, unofficial]. It differs from sibling methods like [Pixel Batching](3134-pixel-batching.md) by focusing on ray generation and selection logic, whereas Pixel Batching encapsulates the full forward/backward rendering pipeline for a specific batch of pixels [S2, unofficial].
+ 
+ ## How it works
+-The method supports two primary modes: precomputed ray buffers and on-the-fly generation. It also includes mechanisms for geometry filtering and semantic weighting.
++The method generates ray origins, directions, and target colors for a batch of pixels. It supports two primary modes: precomputed batching (shuffled global buffer) and on-the-fly sampling (random image selection per step) [S1, unofficial][S5, unofficial].
+ 
+ ### Inputs and Outputs
+-*   **Inputs:** Training images (RGB), camera parameters (intrinsics $K$, extrinsics $c2w$), batch size $N_{rand}$ (or `batch_size`), and optional flags (`precompute_rays`, `use_batching`, `mask_away_instance`).
+-*   **Outputs:** A batch of ray origins $r_o$, ray directions $r_d$, view directions $v_d$, and target RGB colors $C_{target}$.
++*   **Inputs**:
++    *   Training images (RGB) and camera poses ($c2w$).
++    *   Camera intrinsics (focal length, image dimensions $H, W$).
++    *   Parameters: `batch_size` (or `N_rand`), `precompute_rays` (bool), `precrop_iters` (int), `precrop_frac` (float), `ndc` (bool, for forward-facing scenes) [S1, unofficial][S5, unofficial].
++*   **Outputs**:
++    *   `rays`: Tensor of shape $[N, 3]$ or $[N, 8+]$ containing ray origins, directions, near/far planes, and optionally view directions [S1, unofficial].
++    *   `rgb_targets`: Tensor of shape $[N, 3]$ containing the ground truth RGB values for the sampled pixels [S5, unofficial].
+ 
+ ### Data Structures
+-*   **Ray Buffer:** A tensor of shape $[N, 3]$ or $[N, 7+]$ containing ray origins, directions, and potentially near/far planes and view directions.
+-*   **Index Generator:** Maintains a permutation of ray indices to ensure uniform sampling over epochs.
+-
+-### Parameters
+-*   $N_{rand}$: Number of rays to sample per batch. Typical values: 1024–2048 for small scenes, 4096–8192 for medium scenes, 16384+ for large scenes [S1, S5, unofficial].
+-*   `precrop_iters`: Number of iterations to restrict sampling to a center crop. Default: 0 [S1, unofficial].
+-*   `precrop_frac`: Fraction of image width/height for the center crop. Default: 0.5 [S1, unofficial].
+-*   `precompute_rays`: Boolean flag to use precomputed ray buffers [S6, unofficial].
+-*   `mask_away_instance`: Boolean for semantic sampling to exclude specific instances [S7, unofficial].
+-*   `extra_sampling`: Boolean to enable class-weighted sampling [S7, unofficial].
+-*   `class_ratio`: Dictionary mapping class IDs to sampling ratios [S7, unofficial].
++*   **Ray Tensor**: Concatenation of ray origin $(3)$, ray direction $(3)$, near distance $(1)$, and far distance $(1)$. If `use_viewdirs` is enabled, viewing direction $(3)$ is appended [S1, unofficial].
++*   **Precomputed Buffer**: If `precompute_rays` is true, a buffer of shape $[N_{total}, 3, 3]$ (or similar flattened structure) stores all rays from all training images, concatenated with target colors, transposed, and shuffled [S1, unofficial].
+ 
+ ### Steps
+ 
+-1.  **Ray Generation or Retrieval:**
+-    *   If `precompute_rays` is true: Fetch precomputed rays from the dataset buffer [S6, unofficial].
+-    *   If `precompute_rays` is false:
+-        *   Randomly select a training image index $i$ [S1, S6, unofficial].
+-        *   Compute ray origins $r_o$ and directions $r_d$ for all pixels in image $i$ using camera intrinsics $K$ and extrinsics $c2w$ [S2, unofficial].
+-        *   If `use_batching` is false, randomly select $N_{rand}$ pixel coordinates $(u, v)$ from the image grid [S1, S3, unofficial].
+-        *   If `use_batching` is true, slice the precomputed ray buffer for the current batch [S3, unofficial].
+-
+-2.  **Center Cropping (Optional):**
+-    *   If current iteration $t < \text{precrop\_iters}$:
+-        *   Calculate crop dimensions $H_{crop} = \text{precrop\_frac} \times H$ and $W_{crop} = \text{precrop\_frac} \times W$ [S1, unofficial].
+-        *   Restrict pixel selection to the center region of the image [S1, unofficial].
+-
+-3.  **Geometry Filtering (Optional):**
+-    *   For each ray in the batch, test intersection with coarse geometry (e.g., voxel grid or mesh) [S2, unofficial].
+-    *   Generate a boolean mask $M$ where $M_j = \text{true}$ if ray $j$ hits the geometry [S2, unofficial].
+-    *   Filter the batch: keep only rays where $M_j$ is true [S2, unofficial].
+-    *   *Pitfall:* The ratio of kept rays to total rays should be monitored; if too few rays survive, the batch size or geometry approximation may need adjustment [S2, unofficial].
+-
+-4.  **Semantic Sampling (Optional):**
+-    *   If `mask_away_instance` is true:
+-        *   Create a mask excluding pixels belonging to specific instances: $M_{keep} = (\sum \text{instance\_seg} == 0)$ [S7, unofficial].
+-    *   If `extra_sampling` is true:
+-        *   For each class $c$ in `class_ratio`:
+-            *   Calculate extra rays: $N_{extra} = \lfloor \text{class\_ratio}[c] \times N_{rand} \rfloor$ [S7, unofficial].
+-            *   Identify pixel coordinates belonging to class $c$ using semantic segmentation masks [S7, unofficial].
+-            *   Sample $N_{extra}$ rays from these coordinates [S7, unofficial].
+-            *   Update remaining ray count: $N_{rand} \leftarrow N_{rand} - N_{extra}$ [S7, unofficial].
+-    *   *Pitfall:* If $\sum \text{class\_ratio} > 1$, $N_{rand}$ becomes negative, causing an error [S7, unofficial].
+-
+-5.  **Subpixel Sampling (Differentiable Rendering):**
+-    *   For each ray in the batch:
+-        *   Get integer pixel coordinates $(u, v)$ [S4, unofficial].
+-        *   Sample a subpixel offset $\delta \in [0, 1)^2$ using a sampler (e.g., stratified or random) [S4, unofficial].
+-        *   Compute floating-point position: $p = (u + \delta_u, v + \delta_v)$ [S4, unofficial].
+-        *   Rescale to normalized device coordinates or film coordinates if required by the renderer [S4, unofficial].
+-
+-6.  **Index Management:**
+-    *   Maintain a permutation array $P$ of size $N_{total}$ (total number of rays across all images) [S2, unofficial].
+-    *   Yield a batch of indices from $P$. If the current batch index exceeds $N_{total}$, regenerate $P$ using a random permutation [S2, unofficial].
+-    *   *Pitfall:* Use `np.random.permutation` instead of `torch.randperm` on CUDA if the latter produces incorrect results on the specific hardware [S2, unofficial].
++1.  **Determine Sampling Mode**: Check `precompute_rays` or `use_batching` flag [S1, unofficial][S5, unofficial].
++2.  **Precomputed Mode (Global Shuffle)**:
++    *   If not yet initialized, generate rays for all pixels in all training images.
++    *   Concatenate rays with target RGB colors.
++    *   Reshape and shuffle the entire dataset [S1, unofficial].
++    *   Slice the next batch: `rays_batch = rays_buffer[i:i+N_rand]` [S2, unofficial].
++    *   Update index `i` for next iteration [S2, unofficial].
++3.  **On-the-Fly Mode (Random Image)**:
++    *   Randomly select one training image index $k$ [S1, unofficial][S2, unofficial][S5, unofficial].
++    *   Generate ray origins and directions for all pixels in image $k$ using camera pose $c2w_k$ and intrinsics [S1, unofficial].
++    *   Apply NDC transformation if `ndc` is true [S1, unofficial].
++    *   Select $N_{rand}$ random pixel coordinates $(u, v)$ [S1, unofficial][S2, unofficial].
++4.  **Center Cropping (Optional)**:
++    *   If current iteration $i < precrop_iters$, restrict pixel selection to a center crop of size $2 \cdot dH \times 2 \cdot dW$, where $dH = H \cdot precrop\_frac$ and $dW = W \cdot precrop\_frac$ [S1, unofficial].
++5.  **Subpixel Sampling (Advanced/Differentiable)**:
++    *   For differentiable rendering (e.g., Mitsuba), extend the wavefront to $batch\_size \times spp$ [S3, unofficial].
++    *   Gather sensor and pixel indices using repeat indices [S3, unofficial].
++    *   Sample subpixel offset: $offset = sampler.next\_2d()$ [S3, unofficial].
++    *   Compute floating-point position: $pos\_f = pos + offset$ [S3, unofficial].
++    *   Rescale to $[0, 1]^2$: $pos\_unit = \frac{pos\_f}{film\_size}$ [S3, unofficial].
++6.  **Return**: Return the batched rays and corresponding target RGB values [S5, unofficial].
+ 
+ ### Pseudocode
+@@ -74,198 +50,116 @@
+ ```python
+ def sample_batch_rays(
+-    images, 
+-    poses, 
+-    K, 
+-    batch_size, 
+-    precompute_rays=False, 
+-    precomputed_rays=None,
+-    use_batching=False,
++    training_images, 
++    training_poses, 
++    intrinsics, 
++    batch_size=1024, 
++    precompute_rays=False,
+     precrop_iters=0,
+     precrop_frac=0.5,
+-    mask_away_instance=False,
+-    extra_sampling=False,
+-    class_ratio=None,
+-    semantic_seg=None,
+-    instance_seg=None,
+-    hit_coarse_geo=None
++    ndc=False,
++    current_iter=0
+ ):
+     """
+     Samples a batch of rays for training.
++    """
++    H, W = training_images[0].shape[:2]
+     
+-    Args:
+-        images: List of training images [H, W, 3].
+-        poses: List of camera-to-world matrices [3, 4].
+-        K: Camera intrinsics [3, 3].
+-        batch_size: Number of rays to sample.
+-        precompute_rays: If True, use precomputed ray buffers.
+-        precomputed_rays: Tuple of (rays_o, rays_d, viewdirs, rgb) precomputed for all images.
+-        use_batching: If True, slice from precomputed buffer.
+-        precrop_iters: Iterations to use center cropping.
+-        precrop_frac: Fraction of image for center crop.
+-        mask_away_instance: If True, mask out specific instances.
+-        extra_sampling: If True, oversample specific semantic classes.
+-        class_ratio: Dict mapping class ID to sampling ratio.
+-        semantic_seg: Semantic segmentation masks for images.
+-        instance_seg: Instance segmentation masks for images.
+-        hit_coarse_geo: Function to test ray-geometry intersection.
++    if precompute_rays:
++        # Assumes global buffer is pre-shuffled
++        # Fetch next batch from global index
++        rays_batch, targets_batch = global_ray_buffer.get_next_batch(batch_size)
++        return rays_batch, targets_batch
++
++    # On-the-fly mode
++    # 1. Pick random image
++    img_idx = random.randint(0, len(training_images) - 1)
++    img = training_images[img_idx]
++    pose = training_poses[img_idx]
++    
++    # 2. Generate all rays for this image
++    # rays_o: [H, W, 3], rays_d: [H, W, 3]
++    rays_o, rays_d = generate_rays_from_pose(pose, intrinsics, H, W, ndc)
++    
++    # 3. Determine pixel coordinates
++    if current_iter < precrop_iters:
++        # Center crop
++        dH = int(H * precrop_frac)
++        dW = int(W * precrop_frac)
++        y_min, y_max = (H - dH) // 2, (H + dH) // 2
++        x_min, x_max = (W - dW) // 2, (W + dW) // 2
++        # Sample from cropped region
++        ys = random.randint(y_min, y_max - 1)
++        xs = random.randint(x_min, x_max - 1)
++        # Note: In practice, meshgrid is created for the crop region
++        coords = generate_coords_in_crop(H, W, y_min, y_max, x_min, x_max, batch_size)
++    else:
++        # Full image
++        coords = generate_random_coords(H, W, batch_size)
+         
+-    Returns:
+-        rays_o: Ray origins [batch_size, 3].
+-        rays_d: Ray directions [batch_size, 3].
+-        viewdirs: View directions [batch_size, 3].
+-        targets: Target RGB values [batch_size, 3].
+-    """
++    # 4. Extract ray data and targets
++    # Flatten coords to [batch_size, 2]
++    ys, xs = coords[:, 0], coords[:, 1]
+     
+-    # 1. Get Base Rays
+-    if precompute_rays:
+-        # Fetch from precomputed buffer
+-        # Assuming precomputed_rays is a list of tensors or a single large tensor
+-        # For simplicity, assume we have a global index generator
+-        indices = get_next_batch_indices(batch_size)
+-        rays_o = precomputed_rays[0][indices]
+-        rays_d = precomputed_rays[1][indices]
+-        viewdirs = precomputed_rays[2][indices]
+-        targets = precomputed_rays[3][indices]
+-    else:
+-        # On-the-fly generation
+-        img_idx = random.randint(0, len(images) - 1)
+-        H, W, _ = images[img_idx].shape
+-        
+-        # Center Cropping Logic
+-        if current_iteration < precrop_iters:
+-            h_crop = int(H * precrop_frac)
+-            w_crop = int(W * precrop_frac)
+-            y_start = (H - h_crop) // 2
+-            x_start = (W - w_crop) // 2
+-            y_end = y_start + h_crop
+-            x_end = x_start + w_crop
+-            # Restrict pixel selection to this region
+-        else:
+-            y_start, y_end = 0, H
+-            x_start, x_end = 0, W
+-            
+-        # Generate all rays for the selected image
+-        rays_o_all, rays_d_all, viewdirs_all = get_rays_of_a_view(
+-            H, W, K, poses[img_idx], ndc=False, inverse_y=False, flip_x=False, flip_y=False
+-        )
+-        
+-        # Reshape to list of pixels
+-        rays_o_all = rays_o_all.reshape(-1, 3)
+-        rays_d_all = rays_d_all.reshape(-1, 3)
+-        viewdirs_all = viewdirs_all.reshape(-1, 3)
+-        targets_all = images[img_idx].reshape(-1, 3)
+-        
+-        # Randomly select batch_size pixels
+-        num_pixels = H * W
+-        pixel_indices = random.sample(range(num_pixels), batch_size)
+-        
+-        rays_o = rays_o_all[pixel_indices]
+-        rays_d = rays_d_all[pixel_indices]
+-        viewdirs = viewdirs_all[pixel_indices]
+-        targets = targets_all[pixel_indices]
++    rays_o_batch = rays_o[ys, xs] # [batch_size, 3]
++    rays_d_batch = rays_d[ys, xs] # [batch_size, 3]
++    targets = img[ys, xs]         # [batch_size, 3]
++    
++    # 5. Construct ray tensor (origin, direction, near, far)
++    # near/far are typically constants or per-ray based on scene bounds
++    near = 0.2
++    far = 6.0
++    rays = torch.cat([rays_o_batch, rays_d_batch, 
++                      torch.full((batch_size, 1), near), 
++                      torch.full((batch_size, 1), far)], dim=-1)
++                      
++    return rays, targets
+ 
+-    # 2. Geometry Filtering
+-    if hit_coarse_geo is not None:
+-        # Test intersection for all rays in batch
+-        mask = hit_coarse_geo(rays_o, rays_d)
+-        rays_o = rays_o[mask]
+-        rays_d = rays_d[mask]
+-        viewdirs = viewdirs[mask]
+-        targets = targets[mask]
+-        
+-        # If too few rays remain, this is a potential issue
+-        if len(rays_o) == 0:
+-            raise ValueError("No rays hit the coarse geometry")
++def generate_random_coords(H, W, N):
++    ys = torch.randint(0, H, (N,))
++    xs = torch.randint(0, W, (N,))
++    return torch.stack([ys, xs], dim=-1)
++```
+ 
+-    # 3. Semantic Sampling (if enabled)
+-    if extra_sampling or mask_away_instance:
+-        # This logic is complex and depends on specific implementation details
+-        # of semantic segmentation alignment with rays.
+-        # Generally:
+-        # 1. Identify valid pixels based on instance masks.
+-        # 2. Identify pixels for each class.
+-        # 3. Sample extra rays for classes based on class_ratio.
+-        # 4. Replace or augment the initial random batch.
+-        # For brevity, this step is marked as implementation-specific.
+-        pass
++### Parameters
++*   `N_rand` / `batch_size`: Number of rays per batch. Typical values: 1024–2048 for small/low-res scenes, 4096–8192 for medium scenes (default), 16384+ for large/high-res scenes [S1, unofficial][S4, unofficial].
++*   `precrop_iters`: Number of iterations to use center cropping. Default: 0 [S1, unofficial].
++*   `precrop_frac`: Fraction of image width/height for the center crop. Default: 0.5 [S1, unofficial].
++*   `precompute_rays`: Boolean flag to use precomputed ray buffers. Default: False [S5, unofficial].
+ 
+-    # 4. Subpixel Sampling (if differentiable rendering is used)
+-    # In many NeRF implementations, subpixel sampling is handled during the 
+-    # ray generation step (get_rays_of_a_view) or during the forward pass 
+-    # of the renderer. If explicit subpixel offsets are needed:
+-    # offsets = random.uniform(0, 1, (batch_size, 2))
+-    # rays_o_final = rays_o + ... # Adjust origin based on offset if necessary
+-    # rays_d_final = rays_d # Direction remains same, but sampling point changes
+-    
+-    return rays_o, rays_d, viewdirs, targets
+-
+-def get_rays_of_a_view(H, W, K, c2w, ndc, inverse_y, flip_x, flip_y):
+-    """
+-    Computes ray origins and directions for all pixels in a view.
+-    """
+-    # Standard pinhole camera model
+-    # i, j are pixel coordinates
+-    i, j = torch.meshgrid(torch.arange(W), torch.arange(H), indexing='ij')
+-    
+-    # Convert to homogeneous coordinates
+-    dirs = torch.stack([(i - W * 0.5) / K[0, 0], 
+-                        -(j - H * 0.5) / K[1, 1], 
+-                        -torch.ones_like(i)], -1) # Note: sign conventions vary
+-    
+-    # Transform directions by camera rotation
+-    dirs = dirs @ c2w[:3, :3].T
+-    
+-    # Ray origins are the camera center
+-    rays_o = torch.broadcast_to(c2w[:3, 3], dirs.shape)
+-    
+-    return rays_o, dirs, dirs # viewdirs are same as directions in world space
+-
+-def get_next_batch_indices(batch_size):
+-    """
+-    Manages index permutation to ensure uniform sampling.
+-    """
+-    global idx_perm, top, total_rays
+-    
+-    if top + batch_size > total_rays:
+-        idx_perm = np.random.permutation(total_rays)
+-        top = 0
+-        
+-    indices = idx_perm[top : top + batch_size]
+-    top += batch_size
+-    return indices
+-```
++### Edge Cases and Pitfalls
++*   **Precision**: When using NDC coordinates for forward-facing scenes, ensure ray origins and directions are correctly transformed to avoid artifacts [S1, unofficial].
++*   **Boundaries**: Ensure pixel coordinate sampling stays within $[0, H-1] \times [0, W-1]$ [S1, unofficial].
++*   **Memory**: Precomputing all rays for large datasets (e.g., 100+ images at 1024x1024) can exceed CPU/GPU memory limits; on-the-fly sampling is preferred in such cases [S5, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Pixel Batching](3134-pixel-batching.md)
+-A Python-side wrapper that samples `batch_size` random (sensor, pixel) pairs across all sensors, renders those rays to a 1xN box-filter film, and supports a decorrelated PRB (Pixel-Ray-Backpropagation) backward pass without kernel changes [3134-pixel-batching.md]. It extends the basic batch ray sampling by handling multi-sensor setups and specific backward pass requirements for differentiable rendering.
++Pixel Batching is a ray-centric batched rendering operation that computes gradients of rendered images with respect to scene parameters using automatic differentiation (AD) in backward mode, supporting multiple sensors and pixels in a single batch. It serves as a Python-side wrapper that samples `batch_size` random (sensor, pixel) pairs across all sensors, renders those rays to a 1xN box-filter film, and supports a decorrelated PRB (Path Reuse/Reparameterization) backward pass without requiring kernel changes. Unlike the sensor-centric `mi.render` or sibling methods like [Batch Ray Sampling](2767-batch-ray-sampling.md) which prepare rays, this method encapsulates the full forward and backward rendering pipeline for a specific batch of pixels, enabling efficient training loops for inverse volume rendering.
+ 
+ ### [Training Ray Shuffling](5446-training-ray-shuffling.md)
+-Initializes ray data from training cameras and ground truth, shuffles the rays, and transfers shuffled indices to GPU [5446-training-ray-shuffling.md]. This ensures that the training loop does not see correlated rays from adjacent pixels or similar views in consecutive batches, improving gradient stability.
+-
+-### [Batched Pixel Sampling](5947-batched-pixel-sampling.md)
+-Samples a batch of pixels and sensors for rendering, generating three separate samplers for pixel selection, primal subpixel sampling, and adjoint subpixel sampling [5947-batched-pixel-sampling.md]. This variant is designed for differentiable rendering frameworks where the adjoint (gradient) pass requires independent subpixel sampling to reduce variance.
++Training Ray Shuffling initializes the ray data for a training epoch by constructing rays from training cameras and ground truth, shuffling their order, and transferring the shuffled indices to the GPU. It serves as the setup phase for the training loop, ensuring that the batch of rays processed by the renderer is randomized to prevent training bias from spatial coherence in the dataset. It builds on [Batch Ray Sampling](2767-batch-ray-sampling.md) by handling the specific permutation and GPU transfer logic required for efficient training.
+ 
+ ### Semantic Ray Sampling
+-Samples rays based on semantic segmentation masks, allowing for extra sampling of specific classes and masking away instances [S7, unofficial]. It uses parameters like `class_ratio` to oversample rare or important classes and `mask_away_instance` to exclude occluding objects [S7, unofficial].
++Semantic Ray Sampling samples rays based on semantic segmentation masks, allowing for extra sampling of specific classes and masking away instances [S6, unofficial]. If `mask_away_instance` is true, it creates a kept mask where instance sum is 0: $kept\_mask = (instance\_seg.to(torch.float32).sum(axis=3) == 0).view(*prefix, H \times W)$ [S6, unofficial]. If `extra_sampling` is true, it iterates over classes in `self.class_ratio`, calculating extra rays for each class: $ray\_num\_extra = int(self.class\_ratio[class\_] \times N_{rays})$ [S6, unofficial]. It extracts coordinates for the class mask and records ray index ranges, subtracting extra rays from the remaining count [S6, unofficial]. A pitfall is that if the sum of sample ratios exceeds 1, `remain_rays` becomes negative, triggering an error [S6, unofficial].
++
++### Batched Pixel Sampling
++Batched Pixel Sampling samples a batch of pixels and sensors for rendering, generating three separate samplers for pixel selection, primal subpixel sampling, and adjoint subpixel sampling [S3, unofficial]. It determines the number of sensors $n_{sensors}$, creates samplers with sizes `batch_size`, `batch_size * spp`, and `batch_size * spp_grad`, and seeds them using `sub_seed = mi.sample_tea_32(seed, 17 * i + 5)[0]` [S3, unofficial]. It selects sensors via `sensor_idx = mi.UInt32(n_sensors * batch_samplers[0].next_1d())` and samples pixels via `pixels = mi.Point2u(mi.Point2f(film_size) * batch_samplers[0].next_2d())` [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{rand})$ per iteration for ray generation and filtering. Geometry filtering adds $O(N_{rand})$ with a constant factor depending on the complexity of the coarse geometry test [S2, unofficial].
+-*   **Memory Complexity:** $O(N_{rand})$ for the batch tensors. Precomputing rays for all images requires $O(N_{total})$ memory, where $N_{total}$ is the total number of pixels across all training images [S6, unofficial].
+-*   **Performance:** Ray-based sampling is significantly more memory-efficient than image-based training, allowing for larger batch sizes or higher resolution scenes on limited GPU memory [S5, unofficial]. Convergence speed is generally faster due to more frequent updates to diverse parts of the scene [S5, unofficial].
+-*   **Strengths:** Flexible batch size, efficient memory usage, easy to parallelize, supports various sampling strategies (random, semantic, geometry-filtered) [S5, S7, unofficial].
+-*   **Limitations:** Can lead to noisy gradients if $N_{rand}$ is too small or if rays are not well-distributed. Geometry filtering can discard a large portion of rays if the coarse geometry is inaccurate [S2, unofficial].
+-*   **When to use:** Standard for NeRF training. Use when GPU memory is limited or when scene resolution is high. Use semantic sampling when class-specific reconstruction quality is important [S7, unofficial].
+-*   **When not to use:** When full-image consistency is critical for the loss function (e.g., some specific regularization techniques). When the scene is very small and full-image rendering fits easily in memory.
++*   **Time Complexity**: $O(N_{rand})$ per iteration for ray generation and sampling [S4, unofficial]. Precomputed mode has $O(1)$ sampling cost but $O(N_{total})$ initialization cost [S1, unofficial].
++*   **Memory Complexity**: $O(N_{rand})$ for on-the-fly mode; $O(N_{total})$ for precomputed mode [S5, unofficial].
++*   **Performance**: Significantly reduces GPU memory usage compared to full-image rendering, allowing for larger batch sizes or higher resolutions [S4, unofficial]. Convergence speed is generally faster due to more frequent gradient updates per epoch [S4, unofficial].
++*   **Strengths**: Memory efficient, standard in modern NeRF methods, flexible (supports center cropping, NDC) [S4, unofficial].
++*   **Limitations**: On-the-fly mode may have higher CPU overhead for ray generation; precomputed mode requires significant RAM for large datasets [S5, unofficial].
++*   **When to use**: Standard for training NeRF and radiance field models [S4, unofficial]. Use precomputed mode for small datasets or when CPU ray generation is a bottleneck; use on-the-fly for large datasets [S5, unofficial].
+ 
+ ## Background
+-Batch Ray Sampling originated with the NeRF (Neural Radiance Fields) paper [S1, S5, unofficial]. It was introduced as a standard training procedure to make training feasible on consumer GPUs by avoiding the memory overhead of rendering full images. Subsequent works like DirectVoxGO [S2, unofficial] and various differentiable rendering frameworks [S4, S5, unofficial] have adopted and extended this method, adding features like geometry filtering, semantic sampling, and differentiable subpixel sampling.
++Batch Ray Sampling originated with the NeRF (Neural Radiance Fields) paper by Mildenhall et al. (2020) [S1, unofficial]. It was introduced as a memory-efficient alternative to full-image rendering, enabling the training of neural networks on consumer GPUs. The method has since become the standard approach in differentiable volumetric rendering frameworks and radiance field reconstruction [S4, unofficial]. Variants like Semantic Ray Sampling have been developed to incorporate additional supervision signals from segmentation masks [S6, unofficial].
+ 
+ ## Sources
+ [S1] yenchenlin/nerf-pytorch, https://github.com/yenchenlin/nerf-pytorch, fetched 2026-10-26 (unofficial)
+-[S2] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+-[S3] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)
+-[S4] https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, fetched 2026-10-26 (unofficial)
+-[S5] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
+-[S6] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
+-[S7] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)+[S2] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)
++[S3] https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, https://github.com/rgl-epfl/unbiased-inverse-volume-rendering, fetched 2026-10-26 (unofficial)
++[S4] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)
++[S5] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
++[S6] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)

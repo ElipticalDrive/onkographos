@@ -1,39 +1,28 @@
 # SDF Alpha Computation
 
-
 ## Overview
-Computes the output alpha for a Signed Distance Field (SDF) given the Screen Space Ratio (SSR), Signed Distance (SD), Signed Distance Ratio (SDR), isoPerimeter (dilation/contraction), and softness [S1, unofficial]. It differs from [SDF to Density Conversion](1282-sdf-to-density-conversion.md) by operating directly on distance metrics and screen-space scaling factors rather than converting to volumetric density, and from [Volume SDF Rendering](1344-volume-sdf-rendering.md) by being a specific shading/compositing step rather than a full rendering pipeline.
+Computes the output alpha for a Signed Distance Field (SDF) given the Screen Space Ratio (SSR), Signed Distance (SD), Signed Distance Ratio (SDR), isoPerimeter (dilation/contraction), and softness [S1, unofficial].
 
 ## How it works
 **Inputs:**
-- `SD`: Signed Distance value.
-- `SSR`: Screen Space Ratio.
-- `SDR`: Signed Distance Ratio.
-- `isoPerimeter`: Iso-perimeter value (controls dilation/contraction).
-- `softness`: Softness parameter.
-- `d`: Intermediate distance vector (for variants like `ComputeSDF44_float`).
+- `SD`: Signed Distance value [S1, unofficial].
+- `SSR`: Screen Space Ratio [S1, unofficial].
+- `SDR`: Signed Distance Ratio [S1, unofficial].
+- `isoPerimeter`: Iso-perimeter value controlling dilation/contraction [S1, unofficial].
+- `softness`: Softness parameter for edge blending [S1, unofficial].
+- `d`: Intermediate distance vector for variants like `ComputeSDF44_float` [S1, unofficial].
 
 **Outputs:**
-- `outAlpha`: Computed alpha value.
+- `outAlpha`: Computed alpha value [S1, unofficial].
 
 **Data Structures:**
-- `d`: A vector type (e.g., `float4` for `ComputeSDF44_float`, `float` for scalar variants). For `ComputeSDF44_float`, `d` contains components `x, y, z, w`.
+- `d`: A vector type (e.g., `float` for scalar variants, `float4` for `ComputeSDF44_float`) [S1, unofficial].
+- For `ComputeSDF44_float`, `d` contains components `x, y, z, w` [S1, unofficial].
 
 **Steps:**
-1. **Compute intermediate distance `d_val`**:
-   $$ d\_val = (SD - 0.5) \times SDR $$
-   [S1, unofficial]
-
-2. **Variant-specific preprocessing (ComputeSDF44_float with outline enabled)**:
-   If the variant is `ComputeSDF44_float` and outline is enabled, set the `w` component of `d` to the maximum of the other components:
-   $$ d.w = \max(\max(d.x, d.y), d.z) $$
-   [S1, unofficial]
-   *Note: For scalar variants or when outline is disabled, this step is skipped or `d` is treated as a scalar.*
-
-3. **Compute Alpha**:
-   $$ outAlpha = \text{saturate}\left( \frac{d\_val \times 2.0 \times SSR + 0.5 + isoPerimeter \times SDR \times SSR + softness \times 0.5}{1.0 + softness} \right) $$
-   [S1, unofficial]
-   Where `saturate(x)` clamps `x` to the range $[0, 1]$.
+1. **Compute intermediate distance `d_val`**: $d\_val = (SD - 0.5) \times SDR$ [S1, unofficial].
+2. **Variant-specific preprocessing**: If using `ComputeSDF44_float` with outline enabled, set $d.w = \max(\max(d.x, d.y), d.z)$ before computing alpha [S1, unofficial].
+3. **Compute Alpha**: $outAlpha = \text{saturate}\left( \frac{d\_val \times 2.0 \times SSR + 0.5 + isoPerimeter \times SDR \times SSR + softness \times 0.5}{1.0 + softness} \right)$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -45,11 +34,8 @@ def compute_sdf_alpha(SD, SSR, SDR, isoPerimeter, softness, d=None, outline_enab
     
     # Step 2: Variant-specific handling
     if outline_enabled and d is not None:
-        # Assuming d is a vector-like object with x, y, z, w attributes
-        # d.w = max(max(d.x, d.y), d.z)
-        # For scalar computation, d_val is used directly in step 3
-        pass
-    
+        d_val = max(d.x, max(d.y, d.z))
+        
     # Step 3: Compute Alpha
     numerator = d_val * 2.0 * SSR + 0.5 + isoPerimeter * SDR * SSR + softness * 0.5
     denominator = 1.0 + softness
@@ -65,36 +51,25 @@ def compute_sdf_alpha(SD, SSR, SDR, isoPerimeter, softness, d=None, outline_enab
 ```
 
 **Parameters:**
-- `SSR`: Screen Space Ratio. Typical values depend on resolution and view distance. Not given in the sources.
-- `SDR`: Signed Distance Ratio. Not given in the sources.
-- `isoPerimeter`: Controls dilation/contraction. Not given in the sources.
-- `softness`: Controls edge softness. Not given in the sources.
+- `SSR`, `SDR`, `isoPerimeter`, `softness`: Typical values are Not given in the sources.
 
 **Edge Cases:**
-- Division by zero: `denominator` is `1.0 + softness`. If `softness` is `-1.0`, division by zero occurs. [G] Guard against `softness == -1.0`.
-- Precision: Floating-point precision may affect `d_val` calculation for very small or large `SD` values.
+- Division by zero: The denominator is `1.0 + softness`; if `softness == -1.0`, division by zero occurs [G]. Guard against `softness == -1.0` before division.
+- Precision: Floating-point precision may affect `d_val` calculation for very small or large `SD` values [G].
 
 ## Subtopics
 
 ### UV Offset Computation
 Computes UV offset based on texture dimensions, offset values, and Signed Distance Ratio (SDR) [S1, unofficial].
-**Formula:**
-$$ uvOffset = \text{float2}\left( \frac{-offset.x \times SDR}{texWidth}, \frac{-offset.y \times SDR}{texHeight} \right) $$
-[S1, unofficial]
-**Inputs:** `offset` (float2), `SDR` (float), `texWidth` (float), `texHeight` (float).
-**Output:** `uvOffset` (float2).
-**When to choose:** When texture sampling requires adjustment based on SDF resolution and screen space scaling.
+**Formula:** $uvOffset = \text{float2}\left( \frac{-offset.x \times SDR}{texWidth}, \frac{-offset.y \times SDR}{texHeight} \right)$ [S1, unofficial].
+**Inputs:** `offset` (float2), `SDR` (float), `texWidth` (float), `texHeight` (float) [S1, unofficial].
+**Output:** `uvOffset` (float2) [S1, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** O(1) per pixel/voxel.
-- **Memory Complexity:** O(1) auxiliary memory.
-- **Strengths:** Efficient, simple arithmetic operations.
-- **Limitations:** Dependent on accurate SSR and SDR values. Performance impact is minimal.
-- **When to use:** When alpha compositing for SDF-based volumes is required.
-- **When not to use:** When density-based rendering is preferred.
+Time and memory complexity, measured performance, strengths, limitations, and usage guidelines are Not given in the sources.
 
 ## Background
-Originated in the context of Unity NanovDB renderer implementation [S1, unofficial]. Used in procedural and implicit volume rendering pipelines.
+Origin, history, and development context are Not given in the sources.
 
 ## Sources
 [S1] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)

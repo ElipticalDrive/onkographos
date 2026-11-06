@@ -1,0 +1,108 @@
+# Hierarchical Error Metric Calculation
+
+Also called: Fast Error Metric, Parent-Child MSE with Max Error
+
+## Overview
+This method calculates an error metric for each node in an adaptive octree (specifically a wavelet tree) by comparing a parent node's low-resolution data block against its eight immediate child nodes' data blocks, while incorporating the maximum error of those children [S1][S2]. It solves the problem of high computational cost and I/O overhead associated with standard Mean Square Error (MSE) calculations that require comparing data against the original raw volume [S1][S2]. Unlike standard MSE, which becomes increasingly expensive as one traverses toward the root due to growing volume sizes, this hierarchical approach operates on fixed-size child blocks and guarantees that a parent's error is always greater than or equal to its children's errors [S1][S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** For a given parent node $S$, the low-resolution data block $B$ associated with $S$, and the pre-calculated error values $E_i$ for each of its eight child nodes $S_i$ ($0 \le i \le 7$).
+*   **Output:** The error value $E$ for the parent node $S$.
+
+**Data Structures**
+*   **Data Block $B$:** A 3D array of voxel values representing the low-pass filtered (approximated) data for the parent node's spatial extent.
+*   **Child Data Blocks $b_i$:** Eight 3D arrays, where $b_i$ corresponds to the data block of child node $S_i$.
+*   **Error Values:** A scalar $E$ stored for each node. For leaf nodes, $E=0$.
+
+**Parameters**
+*   **$n$:** The number of voxels in a single child data block $b_i$.
+*   **Interpolation Function $f$:** Used to map coordinates from the child block space to the parent block space $B$. Can be nearest-neighbor or linear interpolation [S1][S2].
+
+**Steps**
+1.  **Base Case:** If the current node is a leaf node in the wavelet tree, set its error $E = 0$ and terminate [S1][S2].
+2.  **Iterate Children:** For each of the eight child nodes $S_i$ ($i$ from 0 to 7):
+    a. Retrieve the data block $b_i$ associated with $S_i$.
+    b. For every voxel location $(x, y, z)$ within the domain of $b_i$:
+        i. Calculate the corresponding position in the parent's low-resolution block $B$.
+        ii. Compute the interpolated value $f(x, y, z)$ from block $B$ at that position using the chosen interpolation function (nearest-neighbor or linear) [S1][S2].
+        iii. Compute the squared difference: $(b_i(x, y, z) - f(x, y, z))^2$.
+    c. Sum these squared differences over all voxels in $b_i$.
+3.  **Aggregate MSE:** Sum the squared differences from all eight children and divide by $8n$ to get the Mean Square Error component:
+    $$ \text{MSE} = \frac{\sum_{i=0}^{7} \left( \sum_{(x,y,z) \in B} (b_i(x, y, z) - f(x, y, z))^2 \right)}{8n} $$
+    *Note: The inner summation iterates over the voxels in the child block $b_i$, which maps to the corresponding region in $B$. The denominator $8n$ normalizes by the total number of voxels across all eight children [S1][S2].*
+4.  **Find Max Child Error:** Determine the maximum error among the eight children:
+    $$ \text{maxE} = \max(E_0, E_1, \dots, E_7) $$
+5.  **Calculate Parent Error:** Add the max child error to the MSE:
+    $$ E = \text{MSE} + \text{maxE} $$
+6.  **Store:** Assign $E$ to the parent node $S$.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def calculate_hierarchical_error(node):
+    """
+    Calculates the error metric for a node in an adaptive octree.
+    Assumes node.children is a list of 8 child nodes.
+    Assumes each node has a 'data_block' attribute (3D array) and an 'error' attribute.
+    """
+    # Base case: Leaf nodes have zero error
+    if node.is_leaf():
+        node.error = 0.0
+        return
+
+    # Step 1: Calculate MSE between parent's low-res block and children's high-res blocks
+    total_squared_diff = 0.0
+    n = node.children[0].data_block.size  # Number of voxels in one child block
+    
+    # Get parent's low-resolution block
+    parent_block = node.data_block
+    
+    for child in node.children:
+        child_block = child.data_block
+        
+        # Iterate over all voxels in the child block
+        for x, y, z in child_block.coordinates():
+            # Get interpolated value from parent block at corresponding position
+            # f(x,y,z) is the interpolated data value at (x,y,z) in parent block B
+            interpolated_val = interpolate(parent_block, x, y, z, method='linear')
+            
+            # Calculate squared difference
+            diff = child_block.value_at(x, y, z) - interpolated_val
+            total_squared_diff += diff * diff
+
+    # Calculate Mean Square Error
+    # Denominator is 8 * n (total voxels in all 8 children)
+    mse = total_squared_diff / (8 * n)
+
+    # Step 2: Find maximum error among children
+    # Children must have been processed in a bottom-up manner (post-order traversal)
+    max_child_error = 0.0
+    for child in node.children:
+        if child.error > max_child_error:
+            max_child_error = child.error
+
+    # Step 3: Combine MSE and max child error
+    node.error = mse + max_child_error
+```
+
+**Edge Cases and Pitfalls**
+*   **Leaf Nodes:** The error for any wavelet tree leaf node is explicitly defined as 0 [S1][S2].
+*   **Traversal Order:** The calculation must be performed in a bottom-up manner (post-order traversal) so that child errors are available when computing the parent's error [S1][S2].
+*   **Interpolation Choice:** The interpolation function $f$ can be either nearest-neighbor or linear. The choice affects the MSE value but not the algorithmic structure [S1][S2].
+*   **Monotonicity Guarantee:** This metric guarantees that the error value of any parent node is greater than or equal to those of its corresponding eight child nodes ($E_{parent} \ge E_{child}$) [S1][S2].
+
+## Operating characteristics
+*   **Time Complexity:** The calculation for a single parent node is proportional to the total number of voxels in its eight children ($8n$). Since $n$ is constant for a given resolution level, the cost per node is $O(1)$ relative to the tree depth, but depends on the block size. This is significantly faster than standard MSE, which scales with the size of the volume covered by the node (increasing towards the root) [S1][S2].
+*   **Memory Complexity:** Requires storing the error value $E$ for each node. No additional large temporary buffers are needed beyond the data blocks themselves [S1][S2].
+*   **Strengths:** Avoids high I/O overhead by not requiring access to the original raw data volume $V$ during error calculation; uses only data already present in the hierarchy [S1][S2]. Guarantees error monotonicity up the tree [S1][S2].
+*   **Limitations:** The error metric is an approximation based on the difference between parent and child resolutions, not the true error relative to the raw data. The choice of interpolation affects the absolute error values [S1][S2].
+*   **When to use:** When building adaptive octrees for volume rendering where computational efficiency is critical and the exact error relative to raw data is less important than a consistent, hierarchical error measure for pruning or level-of-detail selection [S1][S2].
+
+## Background
+This method was proposed to overcome the limitations of standard MSE error calculation in the context of parallel multiresolution volume rendering for large datasets. Standard MSE, which compares a block against the original raw subvolume, is slow and incurs high I/O overhead, especially as node size increases towards the root [S1][S2]. The hierarchical approach was introduced in papers by C. Wang et al. for the Parallel Multiresolution Volume Rendering (PMVR) algorithm [S1][S2].
+
+## Sources
+[S1] A Parallel Multiresolution Volume Rendering Algorithm for Large Data ..., https://academicweb.nd.edu/~cwang11/papers/pc05-pmvr.pdf, fetched 2026-10-26
+[S2] Parallel Multiresolution Volume Rendering of Large Data ..., https://academicweb.nd.edu/~cwang11/papers/pgv04-pmvr.pdf, fetched 2026-10-26

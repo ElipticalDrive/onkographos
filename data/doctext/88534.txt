@@ -1,0 +1,4893 @@
+# View- aligned slicing. 
+1. Load 3D volume data into a 3D texture.
+2.	A unit cube is scaled with the volumes dimension.
+3.	The volume is divided into n (sampling rate) slices in the z -direction.
+4.	The slices are view – aligned ( in this case in the X-Y plane) and stack up in the negative z direction.
+5.	To create view -aligned slices, I used a rotation matrix which transforms the texture coordinates. This way, the slices (unit quad) stays in the same position and only the texture of the slice changes.
+6.	The texture coordinates are transformed in the vertex shader.
+7.	The 3D Texture uses the GL_CLAMP_TO_BORDER clamping mode to avoid artifacts due to transformation of the texture coordinates.
+
+# Transfer function:
+  1.	Uses a manual array of points to setup a range for colors & alpha for 1D transfer function. 
+  2.	These points are fit onto a cubic spline. 
+  3.	The value from the 3D Texture is used to look-up color in the Fragment Shader.
+  4.	Adding a UI to manipulate the Tranfer function would be hugely beneficial. 
+
+# How to use application:  
+  1. Use the following commands to load and render the scenes.
+  * a. Bonsai – greyscale (figure 1,2,3,4)
+  > `SliceBasedVolumeRendering.exe BONSAI_OPACITY`
+  
+  * b. Bonsai – using Transfer function (figure 5,6,7,8)
+  > `SliceBasedVolumeRendering.exe BONSAI_TF`
+  * c. Foot – greyscale (figure 9,10)
+  > `SliceBasedVolumeRendering.exe FOOT_OPACITY`
+  * d. Foot – using transfer function (figure 11,12)
+  > `SliceBasedVolumeRendering.exe FOOT_TF`
+  * e. Anuerysm – greyscale (figure 13,14)
+  > `SliceBasedVolumeRendering.exe ANUERYSM_OPACITY`
+  * f. Anuerysm – using transfer function (figure 15,16)
+  > `SliceBasedVolumeRendering.exe ANUERYSM_TF`
+ 
+ 2. Use A & D keys to rotate the volume on the Y-axis . Esc key to exit the application.
+
+### Common/Core/atCamera.cpp
+```
+#include "atCamera.h"
+#include <Eigen/Geometry>
+using namespace atRenderEngine;
+
+atRenderEngine::atCamera::atCamera()
+	:mInitialFoV(Utility::ToRadians(45.0f)),
+	mLastTime(glfwGetTime()),
+	mHorizontalAngle(Utility::ToRadians(180.0f)),
+	mVerticalAngle(Utility::ToRadians(0.0f)),
+	mSpeed(0.1f),
+	mMouseSpeed(0.005f)
+{
+}
+
+atRenderEngine::atCamera::~atCamera()
+{
+}
+
+void atCamera::SetLookAt(const Eigen::Vector3f & position, const Eigen::Vector3f & target, const Eigen::Vector3f & up)
+{
+	mViewVector = position; 
+	mTargetVector = target;
+	mDirectionVector = target - position;
+	Vector3f f = (target - position).normalized();
+	Vector3f uBar = up.normalized();
+	mUpVector = uBar;
+
+	Vector3f s = (f.cross(up)).normalized();
+	Vector3f u = s.cross(f);
+
+	mViewMatrix << s.x(), s.y(), s.z(), -s.dot(position),
+		u.x(), u.y(), u.z(), -u.dot(position),
+		-f.x(), -f.y(), -f.z(), f.dot(position),
+		0, 0, 0, 1;
+
+}
+
+void atCamera::SetPerspective(float fovY, float aspect, float near, float far)
+{
+	float theta = fovY*0.5;
+	float range = far - near;
+	float invtan = 1. / tan(theta);
+	
+	mPerspectiveMatrix = Matrix4f::Zero();
+	mPerspectiveMatrix(0, 0) = invtan / aspect;
+	mPerspectiveMatrix(1, 1) = invtan;
+	mPerspectiveMatrix(2, 2) = -(near + far) / range;
+	mPerspectiveMatrix(3, 2) = -1;
+	mPerspectiveMatrix(2, 3) = -2 * near * far / range;
+	mPerspectiveMatrix(3, 3) = 0;
+}
+
+void atRenderEngine::atCamera::GetPerspective(Matrix4f & outMatrix)
+{
+	outMatrix = Matrix4f(mPerspectiveMatrix);
+}
+
+void atRenderEngine::atCamera::GetView(Matrix4f & outMatrix)
+{
+	outMatrix = Matrix4f(mViewMatrix);
+}
+
+void atCamera::GetMVP(Eigen::Matrix4f & mvp)
+{
+	mvp = mPerspectiveMatrix*mViewMatrix;// *mModelMatrix;
+}
+void atCamera::HandleKeyPress(Utility::KeyPressCodes keyPressed , float aspectRatio)
+{
+	// Compute time difference between current and last frame
+	float currentTime = glfwGetTime();
+	float deltaTime = float(currentTime - mLastTime);
+	//mDirectionVector  = Vector3f(
+	//	cos(mVerticalAngle) * sin(mHorizontalAngle),
+	//	sin(mVerticalAngle),
+	//	cos(mVerticalAngle) * cos(mHorizontalAngle));
+
+	mCameraVector = Vector3f(
+		sin(mHorizontalAngle - 3.14f / 2.0f),
+		0,
+		cos(mVerticalAngle - 3.14f / 2.0f)
+	);
+
+	//mUpVector  = Vector3f(= mCameraVector.cross(mDirectionVector);
+
+	switch (keyPressed)
+	{
+	case atRenderEngine::Utility::UP:
+		mViewVector += mDirectionVector * deltaTime * mSpeed;
+		break;
+	case atRenderEngine::Utility::DOWN:
+		mViewVector -= mDirectionVector * deltaTime * mSpeed;
+		break;
+	case atRenderEngine::Utility::ROTATE_RIGHT:
+		mViewVector = Utility::rotateYByDegree(20)*mViewVector;// += mCameraVector * deltaTime * mSpeed;
+		break;
+	case atRenderEngine::Utility::ROTATE_LEFT:
+		mViewVector = Utility::rotateYByDegree(-20)*mViewVector;// -= mCameraVector * deltaTime * mSpeed;
+		break;
+	case atRenderEngine::Utility::PAN_RIGHT:
+		mViewVector += (mDirectionVector.cross(mUpVector)) *mSpeed ;
+		mTargetVector += (mDirectionVector.cross(mUpVector))*mSpeed;
+		break;
+	case atRenderEngine::Utility::PAN_LEFT:
+		mViewVector -= (mDirectionVector.cross(mUpVector)) *mSpeed;
+		mTargetVector -= (mDirectionVector.cross(mUpVector)) *mSpeed;
+		break;
+	case atRenderEngine::Utility::PAN_UP:
+		mViewVector += ((mUpVector)) *mSpeed*10.0;
+		mTargetVector += ((mUpVector))*mSpeed*10.0;
+		break;
+	case atRenderEngine::Utility::PAN_DOWN:
+		mViewVector -= (mUpVector) *mSpeed*10.0;
+		mTargetVector -= (mUpVector) *mSpeed*10.0;
+		break;
+	default:
+		break;
+	}
+	SetPerspective(mInitialFoV, aspectRatio, 0.1f, 100.f);
+	SetLookAt(mViewVector, mTargetVector, mUpVector);
+
+	mLastTime = currentTime;
+}
+void atCamera::HandleSelection(float mouseX, float mouseY, float screenWidth, float screenHeight)
+{
+
+
+}
+```
+
+### Common/Core/atCamera.h
+```
+#pragma once
+#include "atUtility.h"
+
+namespace atRenderEngine
+{
+	class atCamera
+	{
+	public:
+		atCamera();
+		~atCamera();
+		void SetLookAt(const Eigen::Vector3f& position, const Eigen::Vector3f& target, const Eigen::Vector3f& up);
+		void SetPerspective(float fovY, float aspect, float near, float far);	
+		void GetPerspective(Matrix4f& outMatrix);
+		void GetView(Matrix4f& outMatrix);
+		void GetMVP(Eigen::Matrix4f& mvp);
+		void HandleKeyPress(Utility::KeyPressCodes keyPressed , float aspectRatio);
+		void HandleSelection(float mouseX, float mouseY, float screenWidth, float screenHeight);
+	private:
+		Vector3f mViewVector,mDirectionVector, mCameraVector, mUpVector, mTargetVector;
+		Matrix4f mPerspectiveMatrix;
+		Matrix4f mViewMatrix;
+		
+		Matrix4f mModelViewProjection;
+
+		float mInitialFoV; 
+		float mSpeed; 
+		float mMouseSpeed; 
+		float mLastTime;
+		float mHorizontalAngle; 
+		float mVerticalAngle;
+
+	};
+
+}
+```
+
+### Common/Core/atRenderer.cpp
+```
+#include "atRenderer.h"
+using namespace atRenderEngine;
+
+atRenderer::atRenderer()
+	:mWireFrame(false) , mSelectionActiveSrc(false) , mSelectionActiveTgt(false) , meshIdxForSelection(0)
+{
+	if (!glfwInit())
+	{
+		std::cerr << "Failed to initalize GLFW" << std::endl;	
+	}
+	glfwWindowHint(GLFW_SAMPLES, 4); // 4x antialiasing
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3); // We want OpenGL 3.3
+	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+	glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE); // To make MacOS happy; should not be needed
+	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE); //We don't want the old 
+
+	//rot120 = Eigen::Matrix4f::Identity();
+	//rot120(1, 1) = cos(Utility::ToRadians(120));
+	//rot120(1, 2) = -sin(Utility::ToRadians(120));
+	//rot120(2, 1) = sin(Utility::ToRadians(120));
+	//rot120(2, 2) = cos(Utility::ToRadians(120));
+}
+
+atRenderer::~atRenderer()
+{
+	for(int i = 0; i < mScenes.size(); i++)
+		mScenes[i]->Cleanup();
+	
+	delete mLineShader;	
+}
+
+void atRenderer::Setup(std::string title, int width, int height)
+{	
+	mWindow = new atWindow(this, title, width, height);
+	//atWindow* anotherWidow = new atWindow(this, "Blah", 640, 480);
+
+	//Initialize Glew
+	glfwMakeContextCurrent((GLFWwindow*)mWindow->getWindowHandle());
+	glfwSwapInterval(1);
+
+	glewExperimental = true; // Needed in core profile 
+	if (glewInit() != GLEW_OK) {
+		glfwTerminate();
+		exit(EXIT_FAILURE);
+	}	
+	mLineShader = new Utility::atLineShader();
+}
+
+void atRenderEngine::atRenderer::AddCamera(atCamera * camera)
+{
+	mCamera = camera;
+}
+
+void atRenderEngine::atRenderer::AddScene(atScene * scene)
+{
+	mScenes.push_back(scene);
+}
+
+void atRenderer::Draw()
+{
+	// Get a handle for our "MVP" uniform
+	//GLuint MatrixID = glGetUniformLocation(scene->ProgramID(), "MVP");
+	Eigen::Matrix4f MVPMatrix;
+	Eigen::Matrix4f viewMatrix;
+	Eigen::Matrix4f perspectiveMatrix;
+	glEnable(GL_DEPTH_TEST);
+	//// Accept fragment if it closer to the camera than the former one
+	glDepthFunc(GL_LESS);
+
+	//// Cull triangles which normal is not towards the camera
+	//glEnable(GL_CULL_FACE);
+	
+	while (!glfwWindowShouldClose((GLFWwindow*)mWindow->getWindowHandle()))
+	{
+		//Add Drawing functions here
+		glClearColor(0.4, 0.5, 0.3, 0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		for (int i = 0; i < mScenes.size(); i++)
+		{
+			// Use our shader
+			glUseProgram(mScenes[i]->ProgramID());
+			// Send our transformation to the currently bound shader, 
+			// in the "MVP" uniform
+			//camera->SetModel(Eigen::Matrix4f::Identity());
+			//if (mWireFrame)
+			//	glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+			//else
+			//	glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+
+			mCamera->GetMVP(MVPMatrix);						
+			mCamera->GetView(viewMatrix);
+			mCamera->GetPerspective(perspectiveMatrix);
+			mScenes[i]->Draw(viewMatrix,perspectiveMatrix);
+
+			//if (mSelectionActiveSrc)
+			//{
+			//	Matrix4f cModelMatrix; 
+			//	mScenes[mPreviousSelectedVertexInfo.meshIdx]->GetModelForMesh(0, cModelMatrix);
+			//	Matrix4f MVPLine = MVPMatrix*cModelMatrix;
+			//	mLineShader->Draw(std::vector<Vector3f>{mPreviousSelectedVertexInfo.verts[0], mPreviousSelectedVertexInfo.verts[1], mPreviousSelectedVertexInfo.verts[1], mPreviousSelectedVertexInfo.verts[2], mPreviousSelectedVertexInfo.verts[2] , mPreviousSelectedVertexInfo.verts[0]}, std::vector<Vector3f>{ Vector3f(1.0, 0.0, 0.0) , Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0)}, MVPLine);
+			//	mLineShader->DrawPoints(std::vector<Vector3f>{mPreviousSelectedVertexInfo.verts[mPreviousSelectedVertexInfo.vertexInTriangleIdx]}, std::vector<Vector3f>{ Vector3f(0.0, 0.0, 1.0)}, MVPLine);
+			//}			
+			//
+			//if (mSelectionActiveTgt)
+			//{
+			//	Matrix4f cModelMatrix;
+			//	mScenes[mCurrentSelectedVertexInfo.meshIdx]->GetModelForMesh(0, cModelMatrix);
+			//	Matrix4f MVPLine = MVPMatrix*cModelMatrix;
+			//	mLineShader->Draw(std::vector<Vector3f>{mCurrentSelectedVertexInfo.verts[0], mCurrentSelectedVertexInfo.verts[1], mCurrentSelectedVertexInfo.verts[1], mCurrentSelectedVertexInfo.verts[2], mCurrentSelectedVertexInfo.verts[2], mCurrentSelectedVertexInfo.verts[0]}, std::vector<Vector3f>{ Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0), Vector3f(1.0, 0.0, 0.0)}, MVPLine);
+			//	mLineShader->DrawPoints(std::vector<Vector3f>{mCurrentSelectedVertexInfo.verts[mCurrentSelectedVertexInfo.vertexInTriangleIdx]}, std::vector<Vector3f>{ Vector3f(0.0, 0.0, 1.0)}, MVPLine);
+			//}
+			//
+			//if (mDrawRayDebug)
+			//{
+			//	mLineShader->DrawRay(currentRay, MVPMatrix);
+			//}
+		}		
+		glfwSwapBuffers((GLFWwindow*)mWindow->getWindowHandle());
+		glfwPollEvents();
+	}
+}
+
+void atRenderer::atKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
+{
+	int width, height; 
+	glfwGetWindowSize(window, &width, &height);
+	float aspectRatio = (float)width / (float)height;
+
+	if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+		glfwSetWindowShouldClose(window, GL_TRUE);
+	// Move forward
+	if (key == GLFW_KEY_UP && mods == 0 && action == GLFW_PRESS) 
+	{		
+		mCamera->HandleKeyPress(Utility::UP , aspectRatio);
+	}
+	// Move backward
+	if (key == GLFW_KEY_DOWN && mods == 0 && action == GLFW_PRESS) 
+	{
+		mCamera->HandleKeyPress(Utility::DOWN, aspectRatio);
+	}
+	// Strafe right
+	if (key == GLFW_KEY_RIGHT && mods == 0 && action == GLFW_PRESS) 
+	{
+		mCamera->HandleKeyPress(Utility::ROTATE_RIGHT, aspectRatio);
+	}
+	// Strafe left
+	if (key == GLFW_KEY_LEFT && mods == 0 && action == GLFW_PRESS) {
+		mCamera->HandleKeyPress(Utility::ROTATE_LEFT, aspectRatio);
+	}
+
+	if (key == GLFW_KEY_RIGHT && mods == GLFW_MOD_ALT && action == GLFW_PRESS)
+	{
+		mCamera->HandleKeyPress(Utility::PAN_RIGHT, aspectRatio);
+	}
+
+	if (key == GLFW_KEY_LEFT && mods == GLFW_MOD_ALT && action == GLFW_PRESS)
+	{
+		mCamera->HandleKeyPress(Utility::PAN_LEFT, aspectRatio);
+	}
+	if (key == GLFW_KEY_UP && mods == GLFW_MOD_ALT && action == GLFW_PRESS)
+	{
+		mCamera->HandleKeyPress(Utility::PAN_UP, aspectRatio);
+	}
+
+	if (key == GLFW_KEY_DOWN && mods == GLFW_MOD_ALT && action == GLFW_PRESS)
+	{
+		mCamera->HandleKeyPress(Utility::PAN_DOWN, aspectRatio);
+	}
+
+
+	if (key == GLFW_KEY_D && action == GLFW_PRESS)
+	{
+		for each(auto scene in mScenes)
+		{
+			scene->SetRotationForMesh(0, 45);
+		}		
+	}
+	if (key == GLFW_KEY_A && action == GLFW_PRESS)
+	{
+		for each(auto scene in mScenes)
+		{
+			scene->SetRotationForMesh(0, -45);
+		}
+	}
+	//Wireframe
+	if (key == GLFW_KEY_W && action == GLFW_PRESS)
+		mWireFrame = (!mWireFrame);
+	if (key == GLFW_KEY_S && mods == GLFW_MOD_CONTROL && action == GLFW_PRESS)
+	{
+		std::cout << "Saving Correspondence file " << std::endl;
+		Utility::atCorrespondenceMarker writer; 
+		//for (int i = 0; i < 2000; i++)
+		//{
+		//	Utility::CorrespondenceMarkerData test;
+		//	test.vertIdxSource = i;
+		//	test.vertIdxTarget = i;
+
+		//	markerData.push_back(test);
+		//}
+		//for (int i = 10000; i < 12000; i++)
+		//{
+		//	Utility::CorrespondenceMarkerData test;
+		//	test.vertIdxSource = i;
+		//	test.vertIdxTarget = i;
+
+		//	markerData.push_back(test);
+		//}
+		writer.SaveCorrespondenceFile("../data/Male_Nekei.corres", markerData);
+	}		
+}
+
+void atRenderer::atMouseCallback(GLFWwindow* window, int button, int action, int mods)
+{
+	double xpos, ypos;
+	glfwGetCursorPos(window, &xpos, &ypos);
+
+	if (button == GLFW_MOUSE_BUTTON_LEFT && action == GLFW_PRESS)
+	{
+		//Vector3f ray_origin;
+		//Vector3f ray_direction;
+
+		//Matrix4f viewMatrix; 
+		//Matrix4f projectionMatrix;
+		//mCamera->GetView(viewMatrix);
+		//mCamera->GetPerspective(projectionMatrix);
+
+		//Utility::ScreenPosToWorldRay(xpos, ypos,
+		//	mWindow->mWidth, mWindow->mHeight,
+		//	viewMatrix,
+		//	projectionMatrix,
+		//	ray_origin,
+		//	ray_direction);
+		////mDrawRayDebug = true; 
+		//
+		//currentRay.rayOrigin = ray_origin;
+		//currentRay.rayDirection = ray_direction;
+
+		//
+		//if (meshIdxForSelection == 0)
+		//{
+		//	if (mScenes[meshIdxForSelection]->GetIntersection(currentRay, mPreviousSelectedVertexInfo))
+		//	{
+		//		mSelectionActiveSrc = true;
+		//		meshIdxForSelection = 1; 
+		//		mPreviousSelectedVertexInfo.meshIdx = 0;
+		//		//Utility::CorrespondenceMarkerData markerPair;
+		//		//markerPair.vertIdxSource = mPreviousSelectedVertexInfo.vertexListIdx;
+		//		//markerPair.vertIdxTarget = mPreviousSelectedVertexInfo.vertexListIdx;
+		//		//markerData.push_back(markerPair);
+		//	}
+		//	else
+		//	{
+		//		mSelectionActiveSrc = false;
+		//		mSelectionActiveTgt = false;
+		//	}
+		//}
+		//else if (meshIdxForSelection == 1)
+		//{
+		//	if (mScenes[meshIdxForSelection]->GetIntersection(currentRay, mCurrentSelectedVertexInfo))
+		//	{
+		//		mSelectionActiveTgt = true;
+		//		meshIdxForSelection = 0; 
+		//		mCurrentSelectedVertexInfo.meshIdx = 1;
+
+		//		Utility::CorrespondenceMarkerData markerPair;
+		//		markerPair.vertIdxSource = mPreviousSelectedVertexInfo.vertexListIdx;
+		//		markerPair.vertIdxTarget = mCurrentSelectedVertexInfo.vertexListIdx;
+		//		markerData.push_back(markerPair);
+		//	}
+		//	else
+		//	{
+		//		mSelectionActiveTgt = false;
+		//	}
+		//}
+
+
+
+		//for (int i = 0; i<mScenes.size(); i++) 
+		//{
+
+		//	float intersection_distance; // Output of TestRayOBBIntersection()
+		//	if (mScenes[i]->GetIntersection(currentRay, mPreviousSelectedVertexInfo))
+		//	{
+		//		mSelectionActiveSrc = true;
+		//		mPreviousSelectedVertexInfo.meshIdx = i; 
+		//		//if (i == 0 ) //Source mesh selected.
+		//		//{
+		//		//	// vertex from same mesh selected again. 
+		//		//	//Reject the selection. 
+		//		//	std::cout << "Same mesh selected again, rejecting vertex! "<< std::endl;
+		//		//	//mPreviousSelectedVertexInfo = mCurrentSelectedVertexInfo;
+		//		//	mSelectionActiveSrc = true;
+		//		//}
+		//		//else
+		//		//{
+		//		//	Utility::CorrespondenceMarkerData markerPair; 
+		//		//	markerPair.vertIdxSource = mPreviousSelectedVertexInfo.vertexListIdx;
+		//		//	markerPair.vertIdxTarget = mCurrentSelectedVertexInfo.vertexListIdx;
+		//		//	markerData.push_back(markerPair);
+
+		//		//	mPreviousSelectedVertexInfo = mCurrentSelectedVertexInfo;
+		//		//	mSelectionActive = true;
+		//		//	std::cout << "Mouse Postion : " << xpos << " , " << ypos << std::endl;
+		//		//	break;
+		//		//}
+		//		
+		//	}
+		//	else
+		//		mSelectionActiveSrc = false; 
+		//}
+
+	}	
+}
+
+void atRenderer::atWindowResizeCallback(GLFWwindow* window, int width, int height)
+{
+	int fwidth, fheight;
+	glfwGetFramebufferSize(window, &fwidth, &fheight);
+	glViewport(0, 0, fwidth, fheight);
+
+	mCamera->SetPerspective(Utility::ToRadians(45.0f), width / height, 0.1f, 100.0f);
+	//mCamera->SetLookAt(Vector3f(-3, 0.5, 0), Vector3f(0, 0.5, 0), Vector3f(0, 1, 0));
+}
+```
+
+### Common/Core/atRenderer.h
+```
+#pragma once
+#include "atWindow.h"
+#include "atVolumeRenderingScene.h"
+#include "atCamera.h"
+#include "atLineShader.h"
+#include "atCorrespondenceMarkerReadWrite.h"
+#include <vector>
+#include "atUserInterface.h"
+
+namespace atRenderEngine
+{
+	class atRenderer
+	{
+	public:
+		atRenderer();
+		~atRenderer();
+		
+		void Setup(std::string title, int width, int height);
+		void AddCamera(atCamera* camera);
+		void AddScene(atScene* scene);
+		void Draw();
+		void atKeyCallback(GLFWwindow * window, int key, int scancode, int action, int mods);
+		void atMouseCallback(GLFWwindow * window, int button, int action, int mods);
+		void atWindowResizeCallback(GLFWwindow * window, int width, int height);
+	private:
+		bool mWireFrame; 
+		atWindow* mWindow;
+		std::vector<atScene*> mScenes;
+		atCamera* mCamera;
+		Matrix4f rot120;
+		Matrix4f rot20;
+
+		bool mDrawRayDebug; 
+		bool mSelectionActiveSrc;
+		bool mSelectionActiveTgt;
+		Utility::VertexSelectionResult mPreviousSelectedVertexInfo;
+		Utility::VertexSelectionResult mCurrentSelectedVertexInfo;
+		//int IsSourceBeingSelected;
+		/*Vector3f mIntersectingTriangle[3];
+		int closestVertIndex;*/
+		std::vector<Utility::CorrespondenceMarkerData> markerData;
+		int vertIdxForSource;
+		int meshIdxForSelection; 
+		Utility::RayData currentRay; 
+		Utility::atLineShader* mLineShader;		
+	};
+}
+```
+
+### Common/Geometry/atBox.cpp
+```
+#include "atBox.h"
+using namespace atRenderEngine;
+
+
+atBox::atBox():mColor(Vector3f(1,0,0))
+{
+	// Create a unit 3d cube
+	// Our vertices. Tree consecutive floats give a 3D vertex; Three consecutive vertices give a triangle.
+	// A cube has 6 faces with 2 triangles each, so this makes 6*2=12 triangles.
+
+	const int CUBE_FACES = 6;
+	const int CUBE_TRIANGLES = CUBE_FACES * 2;
+	const int VERTICES_PER_TRIANGLE = 3;
+	const int UNIQUE_VERTICES_PER_CUBE = 8;
+
+	mVertexList = std::vector<Eigen::Vector3f>({
+		Eigen::Vector3f(-1.0f, -1.0f, 1.0f),
+		Eigen::Vector3f(1.0f, -1.0f, 1.0f),
+		Eigen::Vector3f(-1.0f, 1.0f, 1.0f),
+		Eigen::Vector3f(1.0f, 1.0f, 1.0f),
+		Eigen::Vector3f(-1.0f, -1.0f, -1.0f),
+		Eigen::Vector3f(1.0f, -1.0f, -1.0f),
+		Eigen::Vector3f(-1.0f, 1.0f, -1.0f),
+		Eigen::Vector3f(1.0f, 1.0f, -1.0f),
+
+
+		//Eigen::Vector3f(0.0, 0.0, 0.0),
+		//Eigen::Vector3f(0.0, 0.0, 1.0),
+		//Eigen::Vector3f(0.0, 1.0, 0.0),
+		//Eigen::Vector3f(0.0, 1.0, 1.0),
+		//Eigen::Vector3f(1.0, 0.0, 0.0),
+		//Eigen::Vector3f(1.0, 0.0, 1.0),
+		//Eigen::Vector3f(1.0, 1.0, 0.0),
+		//Eigen::Vector3f(1.0, 1.0, 1.0)
+	});
+
+	mEdgeList = std::vector<Vector2i>({
+		Vector2i(0,2),
+		Vector2i(2,3),
+		Vector2i(3,1),
+		Vector2i(1,0),
+		Vector2i(2,6),
+		Vector2i(3,7),
+		Vector2i(0,4),
+		Vector2i(1,5),
+		Vector2i(4,6),
+		Vector2i(6,7),
+		Vector2i(7,5),
+		Vector2i(5,4),
+	});
+	//ReadObjFile("../Common/StandardShapes/Cube.obj");
+}
+
+
+atBox::~atBox()
+{
+}
+
+void atRenderEngine::atBox::FindMinMax(Utility::MinMaxPair & result)
+{
+	result.minValue = std::numeric_limits<float>::max();
+	result.maxValue = std::numeric_limits<float>::min();
+	for each (auto vertex in mVertexList)
+	{
+		
+		if (vertex.z() < result.minValue)
+		{
+			result.minValue = vertex.z();
+		}
+		if (vertex.z() > result.maxValue)
+		{
+			result.maxValue = vertex.z();
+		}
+	}
+}
+void atBox::SetYRotation(float degree)
+{	
+	mRotationInY = degree;
+	mRotationMatrix = Utility::eulerAngleYXZ(-mRotationInY, 0, 0);
+}
+
+std::vector<Vector3f> atRenderEngine::atBox::DrawableBoxVertices()
+{
+	std::vector<Vector3f> drawableVerts;
+
+	for each (auto edge in mEdgeList)
+	{
+		drawableVerts.push_back(mVertexList[edge.x()]);
+		drawableVerts.push_back(mVertexList[edge.y()]);
+	}
+	return drawableVerts;
+}
+
+std::vector<Vector3f> atRenderEngine::atBox::DrawableBoxColors()
+{
+	return std::vector<Vector3f>(24, mColor);
+}
+```
+
+### Common/Geometry/atBox.h
+```
+#pragma once
+#include "atStandardShape.h"
+
+namespace atRenderEngine
+{
+	class atBox : public atStandardShape
+	{
+	public:
+		atBox();
+		~atBox();
+		void FindMinMax(Utility::MinMaxPair& result);
+		std::vector<Vector2i> mEdgeList;
+		void SetYRotation(float degree) override;
+		Vector3f mColor;
+		std::vector<Vector3f> DrawableBoxVertices();
+		std::vector<Vector3f> DrawableBoxColors();
+
+	};
+}
+```
+
+### Common/Geometry/atMesh.cpp
+```
+#include "atMesh.h"
+// Include AssImp
+#include "assimp-3.0.1270/include/assimp/Importer.hpp"      // C++ importer interface
+#include "assimp-3.0.1270/include/assimp/scene.h"          // Output data structure
+#include "assimp-3.0.1270/include/assimp/postprocess.h"     // Post processing flags
+using namespace atRenderEngine;
+
+atRenderEngine::atMeshData::atMeshData()
+	:mTranslationMatrix(Matrix4f::Identity()), mScalingMatrix(Matrix4f::Identity()), mRotationMatrix(Matrix4f::Identity()) , mRotationInY(0)
+{
+	SetScaling(Vector3f::Ones());
+}
+atRenderEngine::atMeshData::~atMeshData()
+{
+}
+
+size_t atMeshData::NumberOfTriangles()
+{
+	return mTriangleList.size();
+}
+std::vector<Utility::TriangleData>& atMeshData::TriangleList()
+{
+	return mTriangleList;
+}
+void atMeshData::TriangleList(std::vector<Utility::TriangleData> triList)
+{
+	mTriangleList = triList;
+}
+void atMeshData::ConvertTriangleToVertIndexList(std::vector<unsigned int>& triVertList)
+{
+	for (auto tri = mTriangleList.begin(); tri != mTriangleList.end(); tri++)
+	{
+		triVertList.push_back(tri->vertexIdx[0]);
+		triVertList.push_back(tri->vertexIdx[1]);
+		triVertList.push_back(tri->vertexIdx[2]);
+	}
+}
+void atMeshData::ConvertTriangleToVertIndexList(std::vector<unsigned int>& triVertList , std::vector<int>& triList)
+{
+	for (auto tri = triList.begin(); tri != triList.end(); tri++)
+	{
+		triVertList.push_back(mTriangleList[*tri].vertexIdx[0]);
+		triVertList.push_back(mTriangleList[*tri].vertexIdx[1]);
+		triVertList.push_back(mTriangleList[*tri].vertexIdx[2]);
+	}
+}
+
+size_t atMeshData::NumberOfVertices()
+{
+	return mVertexList.size();
+}
+std::vector<Vector3f>& atMeshData::VertexList()
+{
+	return mVertexList;
+}
+void atMeshData::VertexList(std::vector<Vector3f> vertList)
+{
+	mVertexList.swap(vertList);
+}
+
+size_t atMeshData::NumberofNormals()
+{
+	return mNormalList.size();
+}
+std::vector<Vector3f>& atMeshData::NormalList()
+{
+	return mNormalList;
+}
+void atMeshData::NormalList(std::vector<Vector3f> normList)
+{
+	mNormalList = mNormalList;
+}
+void atMeshData::SetTranslation(Vector3f deltaDist)
+{
+	mTranslationMatrix(0, 3) += deltaDist.x();
+	mTranslationMatrix(1, 3) += deltaDist.y();
+	mTranslationMatrix(2, 3) += deltaDist.z();
+}
+void atMeshData::SetScaling(Vector3f scaleFactor)
+{
+	mScalingMatrix(0, 0) = scaleFactor.x();
+	mScalingMatrix(1, 1) = scaleFactor.y();
+	mScalingMatrix(2, 2) = scaleFactor.z();
+}
+// Purely Y rotation for now.. 
+//TODO : Change this to rotate about any arbitrary pivot & axis
+void atMeshData::SetYRotation(float degree)
+{
+	mRotationInY = degree;
+	mRotationMatrix =  Utility::eulerAngleYXZ(mRotationInY, 0, 0);
+}
+float atMeshData::GetYRotation()
+{
+	return mRotationInY;
+}
+Matrix4f atRenderEngine::atMeshData::GetModel()
+{
+	Matrix4f modelMatrix = (mTranslationMatrix*mRotationMatrix*mScalingMatrix);
+	return modelMatrix;
+}
+Matrix4f atRenderEngine::atMeshData::GetTRMatrix()
+{
+	Matrix4f modelMatrix = (mTranslationMatrix*mRotationMatrix);
+	return modelMatrix;
+}
+Utility::BoundingRect atMeshData::ComputeBoundingBox(std::vector<int>& indices)
+{
+	Utility::BoundingRect bRect;
+	Vector3f vMax = mVertexList[mTriangleList[indices[0]].vertexIdx[0]];
+	Vector3f vMin = mVertexList[mTriangleList[indices[0]].vertexIdx[0]];
+
+	for (int iv = 0; iv < indices.size(); iv++)
+	{
+		Vector3f cV = mVertexList[indices[iv]];
+		vMax.x() = std::max(cV.x(), vMax.x());  vMin.x() = std::min(cV.x(), vMin.x());
+		vMax.y() = std::max(cV.y(), vMax.y());  vMin.y() = std::min(cV.y(), vMin.y());
+		vMax.z() = std::max(cV.z(), vMax.z());  vMin.z() = std::min(cV.z(), vMin.z());
+	}
+	//Vector4f vMaxTransformed = mModelMatrix*Vector4f(vMax.x(), vMax.y(), vMax.z(), 1);
+	//Vector4f vMinTransformed = mModelMatrix*Vector4f(vMin.x(), vMin.y(), vMin.z(), 1);
+
+	//bRect.max = Vector3f(vMaxTransformed.x(), vMaxTransformed.y(), vMaxTransformed.z());// +Vector3f(0.25, 0.25, 0.25);
+	//bRect.min = Vector3f(vMinTransformed.x(), vMinTransformed.y(), vMinTransformed.z());;// -Vector3f(0.25, 0.25, 0.25);
+	
+	bRect.max = vMax;
+	bRect.min = vMin;
+	return bRect;
+
+}
+Utility::BoundingRect atMeshData::ComputeBoundingBox()
+{
+	Utility::BoundingRect bRect;
+	Vector3f vMax = mVertexList[0];
+	Vector3f vMin = mVertexList[0];
+
+	/* find the bounding box of the model */
+	for (int iv = 0; iv < NumberOfVertices(); iv++)
+	{
+		Vector3f cV = mVertexList[iv];
+		vMax.x() = std::max(cV.x(), vMax.x());  vMin.x() = std::min(cV.x(), vMin.x());
+		vMax.y() = std::max(cV.y(), vMax.y());  vMin.y() = std::min(cV.y(), vMin.y());
+		vMax.z() = std::max(cV.z(), vMax.z());  vMin.z() = std::min(cV.z(), vMin.z());
+	}
+
+	//Vector4f vMaxTransformed = mModelMatrix*Vector4f(vMax.x(), vMax.y(), vMax.z(), 1);
+	//Vector4f vMinTransformed = mModelMatrix*Vector4f(vMin.x(), vMin.y(), vMin.z(), 1);
+
+	//bRect.max = Vector3f(vMaxTransformed.x(), vMaxTransformed.y(), vMaxTransformed.z());// +Vector3f(0.25, 0.25, 0.25);
+	//bRect.min = Vector3f(vMinTransformed.x(), vMinTransformed.y(), vMinTransformed.z());;// -Vector3f(0.25, 0.25, 0.25);
+
+	bRect.max = vMax;
+	bRect.min = vMin;
+	return bRect;
+}
+
+void atRenderEngine::atMeshData::GetIntersectingTriangleWithRay(Utility::RayData & ray, std::vector<int>& indices)
+{
+	Utility::atKDNodeBBox* nearest; 		
+	if (meshCollider->IntersectingBBox(ray, nearest, GetTRMatrix(), Vector3f(mScalingMatrix(0, 0), mScalingMatrix(1, 1), mScalingMatrix(2, 2))) && nearest != nullptr)
+	{
+		indices = std::vector<int>(nearest->data.elementIdx);
+	}
+}
+
+Vector3f atMeshData::CalculateNormal(Vector3f v1, Vector3f v2, Vector3f v3)
+{
+
+		/*Set Vector U to(Triangle.p2 minus Triangle.p1)
+		Set Vector V to(Triangle.p3 minus Triangle.p1)
+
+		Set Normal.x to(multiply U.y by V.z) minus(multiply U.z by V.y)
+		Set Normal.y to(multiply U.z by V.x) minus(multiply U.x by V.z)
+		Set Normal.z to(multiply U.x by V.y) minus(multiply U.y by V.x)*/
+
+	Vector3f u = v2 - v1;
+	Vector3f v = v3 - v1;
+
+	Vector3f normal = u.cross(v).normalized();
+	return normal;
+}
+bool atMeshData::ReadDatFileForRendering(std::string path, bool isBarrel)
+{
+	using namespace Utility;
+	using namespace std;
+
+	FILE* file = fopen(path.c_str(), "r");
+	char prefix[3];   // prefix reader - 3 chars should be sufficient. 
+	unsigned int count = 0;
+	unsigned int eqTriCount = 0;
+	unsigned int noneqTriCount = 0;
+	Vector2f uvValues[3] = { Vector2f(0.25,0.75),Vector2f(0.75,0.75), Vector2f(0.25,0.25) };
+	//mUVList.push_back(uvValues[0]);
+	//mUVList.push_back(uvValues[1]);
+	//mUVList.push_back(uvValues[2]);
+
+	float degToRot = 0;
+	float degToRotStep = (isBarrel) ? 20 : 120;
+	int numSymmetricParts = (isBarrel) ? 18 : 3; // (360/degtorot)
+	if (file == nullptr)
+	{
+		cout << "Could not open file :" << path << endl;
+		//std::fclose(file);
+		return false;
+	}
+	else
+	{
+		while (1)
+		{
+
+			int res = fscanf(file, "%d,\n", &count);
+			if (res == EOF)
+				break;
+
+			std::vector<Vector3f> tempVertList(numSymmetricParts * count, Vector3f(0, 0, 0));
+			//mVertexList = vector<Vector3f>(numSymmetricParts * count, Vector3f(0, 0, 0));
+			for (int i = 0; i < count; i++)
+			{
+				int idx;
+				Vector3f vert;
+				//Vector2f uv(0, 0);
+				fscanf(file, "%d, %f, %f, %f\n", &idx, &(vert.x()), &(vert.y()), &(vert.z()));
+
+				degToRot = 0.0f;
+				for (int j = 0; j < numSymmetricParts; j++, degToRot += degToRotStep)
+				{
+					Eigen::Matrix3f rotMat = Utility::rotateZByDegree(degToRot);
+					tempVertList[j*count + i] = rotMat*vert;
+				}
+			}
+			
+			res = fscanf(file, "%d,\n", &eqTriCount);
+			if (res == EOF)
+				break;
+			else
+			{
+				for (int i = 0; i < eqTriCount; i++)
+				{
+
+					int idx;
+					int vertIdx[3];
+					int colorIdx[3];
+					if (isBarrel)
+						fscanf(file, "%d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]));
+					else
+						fscanf(file, "%d, %d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]), &(colorIdx[2]));
+
+					//Change obj 1 index to c++ 0 index. 
+					vertIdx[0]--;
+					vertIdx[1]--;
+					vertIdx[2]--;
+
+					degToRot = 0.0f;
+					for (int i = 0; i < numSymmetricParts; i++, degToRot += degToRotStep)
+					{
+						TriangleData triData;
+						//Eigen::Matrix3f rotMat = Utility::rotateZByDegree(degToRot);
+						mVertexList.push_back(tempVertList[count*i + vertIdx[0]]);
+						mVertexList.push_back(tempVertList[count*i + vertIdx[1]]);
+						mVertexList.push_back(tempVertList[count*i + vertIdx[2]]);
+
+						triData.vertexIdx[0] = mVertexList.size() - 3; 
+						triData.vertexIdx[1] = mVertexList.size() - 2;
+						triData.vertexIdx[2] = mVertexList.size() - 1;
+
+						Vector3f normal = CalculateNormal(tempVertList[count*i + vertIdx[0]], tempVertList[count*i + vertIdx[1]], tempVertList[count*i + vertIdx[2]]);
+
+						mNormalList.push_back(normal);
+						mNormalList.push_back(normal);
+						mNormalList.push_back(normal);
+
+						if (isBarrel && i > 0)
+						{
+							int idx = i % 2;
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+						}
+						else
+						{
+							mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);
+						}
+
+						mTriangleList.push_back(triData);
+					}
+
+					//std::cout << "COLOR IDX : " << colorIdx[0] << std::endl;
+					//mUVList[triData.vertexIdx[0]] = uvValues[colorIdx[0]];
+					//mUVList[triData.vertexIdx[1]] = uvValues[colorIdx[0]];
+					//mUVList[triData.vertexIdx[2]] = uvValues[colorIdx[0]];
+					//mTriangleList.push_back(triData);
+				}
+			}
+
+			res = fscanf(file, "%d,\n", &noneqTriCount);
+			if (res == EOF)
+				break;
+			else
+			{
+				for (int i = 0; i < noneqTriCount; i++)
+				{
+					int idx;
+					int vertIdx[3];
+					int colorIdx[3];
+					if (isBarrel)
+						fscanf(file, "%d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]));
+					else
+						fscanf(file, "%d, %d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]), &(colorIdx[2]));
+
+					//Change obj 1 index to c++ 0 index. 
+					vertIdx[0]--;
+					vertIdx[1]--;
+					vertIdx[2]--;
+
+					degToRot = 0.0f;
+					for (int i = 0; i < numSymmetricParts; i++, degToRot += degToRotStep)
+					{
+						TriangleData triData;
+						//Eigen::Matrix3f rotMat = Utility::rotateZByDegree(degToRot);
+						mVertexList.push_back(tempVertList[count*i + vertIdx[0]]);
+						mVertexList.push_back(tempVertList[count*i + vertIdx[1]]);
+						mVertexList.push_back(tempVertList[count*i + vertIdx[2]]);
+
+						triData.vertexIdx[0] = mVertexList.size() - 3;
+						triData.vertexIdx[1] = mVertexList.size() - 2;
+						triData.vertexIdx[2] = mVertexList.size() - 1;
+
+						Vector3f normal = CalculateNormal(tempVertList[count*i + vertIdx[0]], tempVertList[count*i + vertIdx[1]], tempVertList[count*i + vertIdx[2]]);
+
+						mNormalList.push_back(normal);
+						mNormalList.push_back(normal);
+						mNormalList.push_back(normal);
+
+						if (isBarrel && i > 0)
+						{
+							int idx = i % 2;
+
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+						}
+						else
+						{
+							mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);
+						}
+
+						mTriangleList.push_back(triData);
+					}
+				}
+			}
+			break;
+		}
+		std::fclose(file);
+		return true;
+	}
+}
+bool atMeshData::ReadDatFile(std::string path, bool isBarrel)
+{
+	using namespace Utility;
+	using namespace std;
+
+	FILE* file = fopen(path.c_str(), "r");
+	char prefix[3];   // prefix reader - 3 chars should be sufficient. 
+	unsigned int count = 0;
+	unsigned int eqTriCount =0;
+	unsigned int noneqTriCount =0;
+	Vector2f uvValues[3] = { Vector2f(0.25,0.75),Vector2f(0.75,0.75), Vector2f(0.25,0.25) };
+	//mUVList.push_back(uvValues[0]);
+	//mUVList.push_back(uvValues[1]);
+	//mUVList.push_back(uvValues[2]);
+
+	float degToRot = 0;
+	float degToRotStep = (isBarrel) ? 20 : 120;
+	int numSymmetricParts = (isBarrel) ? 18 : 3; // (360/degtorot)
+	if (file == nullptr)
+	{
+		cout << "Could not open file :" << path << endl;
+		std::fclose(file);
+		return false;
+	}
+	else
+	{
+		while (1)
+		{
+			
+			int res = fscanf(file, "%d,\n", &count);
+			if (res == EOF)
+				break;
+
+			//std::vector<Vector3f> tempVertList(3 * count, Vector3f(0, 0, 0));
+			mVertexList = vector<Vector3f>(numSymmetricParts * count, Vector3f(0, 0, 0));
+			for (int i = 0; i < count; i++)
+			{
+				int idx;
+				Vector3f vert;
+				//Vector2f uv(0, 0);
+				fscanf(file, "%d, %f, %f, %f\n", &idx, &(vert.x()), &(vert.y()), &(vert.z()));
+
+				degToRot = 0.0f;
+				for (int j = 0; j < numSymmetricParts; j++, degToRot += degToRotStep)
+				{
+					Eigen::Matrix3f rotMat = Utility::rotateZByDegree(degToRot);
+					mVertexList[j*count + i] = rotMat*vert;
+				}
+			}
+			mUVList = vector<Vector2f>(numSymmetricParts * count, Vector2f(0, 0));
+			res = fscanf(file, "%d,\n", &eqTriCount);
+			if (res == EOF)
+				break;
+			else
+			{
+				for (int i = 0; i < eqTriCount; i++)
+				{
+					
+					int idx;
+					int vertIdx[3];
+					int colorIdx[3]; 
+					if(isBarrel)
+						fscanf(file, "%d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]));
+					else
+						fscanf(file, "%d, %d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]), &(colorIdx[2]));
+
+					//Change obj 1 index to c++ 0 index. 
+					vertIdx[0]--;
+					vertIdx[1]--;
+					vertIdx[2]--;
+
+					degToRot = 0.0f;
+					for (int j = 0; j < numSymmetricParts; j++, degToRot +=degToRotStep)
+					{
+						TriangleData triData;
+						//Eigen::Matrix3f rotMat = Utility::rotateZByDegree(degToRot);
+						//mVertexList.push_back(rotMat*tempVertList[triData.vertexIdx[0]]);
+						//mVertexList.push_back(rotMat*tempVertList[triData.vertexIdx[1]]);
+						//mVertexList.push_back(rotMat*tempVertList[triData.vertexIdx[2]]);
+						triData.vertexIdx[0] = count*j + vertIdx[0];
+						triData.vertexIdx[1] = count*j + vertIdx[1];
+						triData.vertexIdx[2] = count*j + vertIdx[2];
+
+						if (isBarrel && j > 0)
+						{
+							int idx = 1 - j % 2;
+							mUVList[count*j + vertIdx[0]] = uvValues[colorIdx[idx]];
+							mUVList[count*j + vertIdx[1]] = uvValues[colorIdx[idx]];
+							mUVList[count*j + vertIdx[2]] = uvValues[colorIdx[idx]];
+
+							triData.uvIdx[0] = count*j + vertIdx[0];
+							triData.uvIdx[1] = count*j + vertIdx[1];
+							triData.uvIdx[2] = count*j + vertIdx[2];
+
+
+
+							/*mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);*/
+						}
+						else
+						{
+							mUVList[count*j + vertIdx[0]] = uvValues[colorIdx[j]];
+							mUVList[count*j + vertIdx[1]] = uvValues[colorIdx[j]];
+							mUVList[count*j + vertIdx[2]] = uvValues[colorIdx[j]];
+
+							triData.uvIdx[0] = count*j + vertIdx[0];
+							triData.uvIdx[1] = count*j + vertIdx[1];
+							triData.uvIdx[2] = count*j + vertIdx[2];
+							/*mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);*/
+						}
+
+						mTriangleList.push_back(triData);
+					}
+
+					//std::cout << "COLOR IDX : " << colorIdx[0] << std::endl;
+					//mUVList[triData.vertexIdx[0]] = uvValues[colorIdx[0]];
+					//mUVList[triData.vertexIdx[1]] = uvValues[colorIdx[0]];
+					//mUVList[triData.vertexIdx[2]] = uvValues[colorIdx[0]];
+					//mTriangleList.push_back(triData);
+				}
+			}
+			
+			res = fscanf(file, "%d,\n", &noneqTriCount);
+			if (res == EOF)
+				break;
+			else
+			{
+				for (int i = 0; i < noneqTriCount; i++)
+				{
+					int idx;
+					int vertIdx[3];
+					int colorIdx[3];
+					if (isBarrel)
+						fscanf(file, "%d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]));
+					else
+						fscanf(file, "%d, %d, %d, %d, %d, %d, %d,\n", &idx, &(vertIdx[0]), &(vertIdx[1]), &(vertIdx[2]), &(colorIdx[0]), &(colorIdx[1]), &(colorIdx[2]));
+
+					//Change obj 1 index to c++ 0 index. 
+					vertIdx[0]--;
+					vertIdx[1]--;
+					vertIdx[2]--;
+
+					degToRot = 0.0f;
+					for (int j = 0; j < numSymmetricParts; j++, degToRot += degToRotStep)
+					{
+						TriangleData triData;
+						//Eigen::Matrix3f rotMat = Utility::rotateZByDegree(degToRot);
+						//mVertexList.push_back(rotMat*tempVertList[triData.vertexIdx[0]]);
+						//mVertexList.push_back(rotMat*tempVertList[triData.vertexIdx[1]]);
+						//mVertexList.push_back(rotMat*tempVertList[triData.vertexIdx[2]]);
+						triData.vertexIdx[0] = count*j + vertIdx[0];
+						triData.vertexIdx[1] = count*j + vertIdx[1];
+						triData.vertexIdx[2] = count*j + vertIdx[2];
+
+						if (isBarrel && j > 0)
+						{
+							int idx = 1 - j % 2;
+							mUVList[count*j + vertIdx[0]] = uvValues[colorIdx[idx]];
+							mUVList[count*j + vertIdx[1]] = uvValues[colorIdx[idx]];
+							mUVList[count*j + vertIdx[2]] = uvValues[colorIdx[idx]];
+
+							triData.uvIdx[0] = count*j + vertIdx[0];
+							triData.uvIdx[1] = count*j + vertIdx[1];
+							triData.uvIdx[2] = count*j + vertIdx[2];
+
+							/*mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);
+							mUVList.push_back(uvValues[colorIdx[idx]]);*/
+						}
+						else
+						{
+							mUVList[count*j + vertIdx[0]] = uvValues[colorIdx[j]];
+							mUVList[count*j + vertIdx[1]] = uvValues[colorIdx[j]];
+							mUVList[count*j + vertIdx[2]] = uvValues[colorIdx[j]];
+
+							triData.uvIdx[0] = count*j + vertIdx[0];
+							triData.uvIdx[1] = count*j + vertIdx[1];
+							triData.uvIdx[2] = count*j + vertIdx[2];
+							/*mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);
+							mUVList.push_back(uvValues[colorIdx[i]]);*/
+						}
+
+						mTriangleList.push_back(triData);
+					}
+				}
+			}
+			break;
+		}
+		std::fclose(file);
+		return true;
+	}
+}
+
+bool atMeshData::ReadObjFile(std::string path)
+{
+	using namespace Utility;
+	using namespace std;
+
+	FILE* file = fopen(path.c_str(), "r");
+	std::vector<Vector3f>tempNormalList; 
+	char prefix[3];   // prefix reader - 3 chars should be sufficient. 
+
+	if (file == nullptr)
+	{
+		cout << "Could not open file :" << path << endl;
+		fclose(file);
+		return false;
+	}
+	else
+	{
+		while (fscanf(file, "%2s", prefix) != EOF)
+		{
+			if (strcmp(prefix, "v") == 0)
+			{
+				Vector3f vert;
+				fscanf(file, "%f %f %f\n", &(vert.x()), &(vert.y()), &(vert.z()));
+				mVertexList.push_back(vert);
+			}
+			else if (strcmp(prefix, "vn") == 0)
+			{
+				Vector3f normal;
+				fscanf(file, "%f %f %f\n", &(normal.x()), &(normal.y()), &(normal.z()));
+				tempNormalList.push_back(normal);
+			}
+			else if (strcmp(prefix, "vt") == 0)
+			{
+				Vector2f uv;
+				fscanf(file, "%f %f \n", &(uv.x()), &(uv.y()));
+				mUVList.push_back(uv);
+			}
+			else if (strcmp(prefix, "f") == 0)
+			{
+				TriangleData triData;
+				for (int i = 0; i < 3; i++)
+				{
+					fscanf(file, "%d/", &(triData.vertexIdx[i]));
+					if ((prefix[0] = (char)fgetc(file)) != '/')
+					{
+						//skip texture coordinates if found. 
+						ungetc(prefix[0], file);  fscanf(file, "%*d/");
+					}
+					fscanf(file, "%d/", &(triData.normalIdx[i]));
+				}
+				//Change obj 1 index to c++ 0 index. 
+				triData.vertexIdx[0]--;
+				triData.vertexIdx[1]--;
+				triData.vertexIdx[2]--;
+
+				triData.normalIdx[0]--;
+				triData.normalIdx[1]--;
+				triData.normalIdx[2]--;
+
+				triData.uvIdx[0] = triData.vertexIdx[0];
+				triData.uvIdx[1] = triData.vertexIdx[1];
+				triData.uvIdx[2] = triData.vertexIdx[2];
+
+				mTriangleList.push_back(triData);
+			}
+			else
+			{
+				int readChar;
+				while ((readChar = fgetc(file)) != '\n' && readChar != EOF);
+			}
+		}
+
+		mUVList.clear();
+		mNormalList = std::vector<Vector3f>(NumberOfVertices());
+		
+		for (int i = 0; i < NumberOfTriangles(); i++)
+		{
+			mNormalList[mTriangleList[i].vertexIdx[0]] = tempNormalList[mTriangleList[i].normalIdx[0]];
+			mNormalList[mTriangleList[i].vertexIdx[1]] = tempNormalList[mTriangleList[i].normalIdx[1]];
+			mNormalList[mTriangleList[i].vertexIdx[2]] = tempNormalList[mTriangleList[i].normalIdx[2]];
+		}
+
+		tempNormalList.clear();
+		//for (int i = 0; i < mVertexList.size(); i++)
+		//	mUVList.push_back(Vector2f(0.5, 0.5));
+
+		
+		fclose(file);
+		return true;
+	}
+}
+bool atMeshData::SaveObjFile(std::string path)
+{
+	FILE *fd = fopen(path.c_str(), "w");
+	if (fd != NULL)
+	{
+		fprintf(fd, "mtllib EggColorMaterial.mtl\n");
+		/* save vertex information */
+		for (int i = 0; i < NumberOfVertices(); i++)
+		{
+			fprintf(fd, "v   %12.9f   %12.9f   %12.9f\n",
+				mVertexList[i].x(), mVertexList[i].y(), mVertexList[i].z());
+		}
+
+		for (int i = 0; i < mUVList.size(); i++)
+		{
+			fprintf(fd, "vt   %12.9f   %12.9f\n",
+				mUVList[i].x(), mUVList[i].y());
+		}
+		/* save normal vector information */
+		//for (int i = 0; i < NumberofNormals(); i++)
+		//{
+		//	fprintf(fd, "vn   %12.9f   %12.9f   %12.9f\n",
+		//		mNormalList[i].x(), mNormalList[i].y(), mNormalList[i].y());
+		//}
+
+		/* save triangular unit information
+
+		Notice that vertex/normvec indexes in .obj file are one-based, so
+		they need a incrementation before being written to filestream. */
+		fprintf(fd, "usemtl eggColors\n");
+		for (int i = 0; i < NumberOfTriangles(); i++)
+		{
+			fprintf(fd, "f %d/%d/ %d/%d/ %d/%d/\n",
+				mTriangleList[i].vertexIdx[0] + 1, mTriangleList[i].vertexIdx[0]+1,
+				mTriangleList[i].vertexIdx[1] + 1, mTriangleList[i].vertexIdx[1]+1,
+				mTriangleList[i].vertexIdx[2] + 1, mTriangleList[i].vertexIdx[2]+1);
+		}
+
+		fclose(fd);
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+
+
+
+bool atMeshData::loadAssImp(const std::string path)
+{
+
+	Assimp::Importer importer;
+
+	const aiScene* scene = importer.ReadFile(path, 0/*aiProcess_JoinIdenticalVertices | aiProcess_SortByPType*/);
+	if (!scene) {
+		fprintf(stderr, importer.GetErrorString());
+		getchar();
+		return false;
+	}
+	int verticesAdded = 0;
+	for (unsigned int meshNum = 0; meshNum < scene->mNumMeshes; meshNum++)
+	{
+
+		aiMesh* mesh = scene->mMeshes[meshNum]; // In this simple example code we always use the 1rst mesh (in OBJ files there is often only one anyway)
+
+												// Fill vertices positions
+		//mVertexList.reserve(mesh->mNumVertices);
+		for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
+			aiVector3D pos = mesh->mVertices[i];
+			mVertexList.push_back(Vector3f(pos.x, pos.y, pos.z));
+		}
+
+		// Fill vertices texture coordinates
+		//mUVList.reserve(mesh->mNumVertices);
+		if (mesh->mTextureCoords[0] == nullptr)
+		{
+			for (unsigned int i = 0; i < mesh->mNumVertices; i++)
+			{
+				mUVList.push_back(Vector2f(0.5, 0.5));
+			}
+		}
+		else
+		{
+			for (unsigned int i = 0; i < mesh->mNumVertices; i++)
+			{
+				aiVector3D UVW = mesh->mTextureCoords[0][i]; // Assume only 1 set of UV coords; AssImp supports 8 UV sets.
+				mUVList.push_back(Vector2f(UVW.x, UVW.y));
+			}
+		}
+
+		// Fill vertices normals
+		//mNormalList.reserve(mesh->mNumVertices);
+		for (unsigned int i = 0; i < mesh->mNumVertices; i++) {
+			aiVector3D n = mesh->mNormals[i];
+			mNormalList.push_back(Vector3f(n.x, n.y, n.z));
+		}
+
+
+		// Fill face indices
+		//indices.reserve(3 * mesh->mNumFaces);
+		for (unsigned int i = 0; i < mesh->mNumFaces; i++)
+		{
+			Utility::TriangleData triData;
+			// Assume the model has only triangles.
+			/*indices.push_back(mesh->mFaces[i].mIndices[0]);
+			indices.push_back(mesh->mFaces[i].mIndices[1]);
+			indices.push_back(mesh->mFaces[i].mIndices[2]);*/
+
+			triData.vertexIdx[0] = triData.normalIdx[0] = triData.uvIdx[0] = verticesAdded + mesh->mFaces[i].mIndices[0];
+			triData.vertexIdx[1] = triData.normalIdx[1] = triData.uvIdx[1] = verticesAdded + mesh->mFaces[i].mIndices[1];
+			triData.vertexIdx[2] = triData.normalIdx[2] = triData.uvIdx[2] = verticesAdded + mesh->mFaces[i].mIndices[2];
+
+			mTriangleList.push_back(triData);
+
+		}
+		verticesAdded = mVertexList.size();
+	}
+	// The "scene" pointer will be deleted automatically by "importer"
+
+}
+```
+
+### Common/Geometry/atMesh.h
+```
+#pragma once
+#include <vector>
+#include "atUtility.h"
+#include "atKDTreeBBox.h"
+
+namespace atRenderEngine
+{
+	class atMeshData
+	{
+	public:
+		atMeshData();
+		~atMeshData();
+		std::vector<Vector2f> mUVList;
+
+		size_t NumberOfTriangles();
+		std::vector<Utility::TriangleData>& TriangleList();
+		void TriangleList(std::vector<Utility::TriangleData> triList);
+		void ConvertTriangleToVertIndexList(std::vector<unsigned int>& triVertList);
+
+		void ConvertTriangleToVertIndexList(std::vector<unsigned int>& triVertList, std::vector<int>& triList);
+
+		size_t NumberOfVertices();
+		std::vector<Vector3f>& VertexList();
+		void VertexList(std::vector<Vector3f> vertList);
+
+		size_t NumberofNormals();
+		std::vector<Vector3f>& NormalList();
+		void NormalList(std::vector<Vector3f> normList);
+
+		void SetTranslation(Vector3f deltaDist);
+		virtual void SetYRotation(float degree);
+		float GetYRotation();
+		void SetScaling(Vector3f scaleFactor);
+		
+		Matrix4f GetModel();
+		Matrix4f GetTRMatrix();
+		Utility::BoundingRect ComputeBoundingBox(std::vector<int>& indices);
+		Utility::BoundingRect ComputeBoundingBox();
+		void GetIntersectingTriangleWithRay(Utility::RayData& ray, std::vector<int>& indices );
+
+		Vector3f CalculateNormal(Vector3f v1, Vector3f v2, Vector3f v3);
+
+		bool ReadDatFileForRendering(std::string path, bool isBarrel);
+		bool ReadDatFile(std::string path, bool isBarrel = false);
+		bool ReadObjFile(std::string path);
+		bool SaveObjFile(std::string path);
+		bool loadAssImp(const std::string path);
+		Utility::atKDTreeBBox* meshCollider; 
+	protected:
+		Matrix4f mRotationMatrix;
+		Matrix4f mTranslationMatrix;
+		Matrix4f mScalingMatrix;
+		float mRotationInY;
+		std::vector<Utility::TriangleData> mTriangleList;
+		std::vector<Vector3f> mVertexList;
+		std::vector<Vector3f> mNormalList;
+		
+
+	};
+}
+```
+
+### Common/Geometry/atQuad.cpp
+```
+#include "atQuad.h"
+
+using namespace atRenderEngine;
+
+atQuad::atQuad()
+{
+	mVertexList = std::vector<Eigen::Vector3f>({
+		Eigen::Vector3f(-1.0f, -1.0f, 0.0f),
+		Eigen::Vector3f(1.0f, -1.0f, 0.0f),
+		Eigen::Vector3f(1.0f, 1.0f, 0.0f),
+		Eigen::Vector3f(-1.0f, 1.0f, 0.0f)
+	});
+
+	mUVList = std::vector<Eigen::Vector2f>({
+		Eigen::Vector2f(0.0f, 0.0f),
+		Eigen::Vector2f(1.0f, 0.0f),
+		Eigen::Vector2f(1.0f, 1.0f),
+		Eigen::Vector2f(0.0f, 1.0f)
+	});
+	
+	mNormalList = std::vector<Eigen::Vector3f>({
+		Eigen::Vector3f(0.0f,0.0f,1.0f),
+		Eigen::Vector3f(0.0f,0.0f,1.0f),
+		Eigen::Vector3f(0.0f,0.0f,1.0f),
+		Eigen::Vector3f(0.0f,0.0f,1.0f),
+	});
+
+	//Triangle #1
+	Utility::TriangleData triData1;
+	triData1.vertexIdx[0] = triData1.normalIdx[0] = triData1.uvIdx[0] = 0;
+	triData1.vertexIdx[1] = triData1.normalIdx[1] = triData1.uvIdx[1] = 1;
+	triData1.vertexIdx[2] = triData1.normalIdx[2] = triData1.uvIdx[2] = 2;
+
+	Utility::TriangleData triData2;
+	triData2.vertexIdx[0] = triData2.normalIdx[0] = triData2.uvIdx[0] = 2;
+	triData2.vertexIdx[1] = triData2.normalIdx[1] = triData2.uvIdx[1] = 3;
+	triData2.vertexIdx[2] = triData2.normalIdx[2] = triData2.uvIdx[2] = 0;
+
+	mTriangleList.push_back(triData1);
+	mTriangleList.push_back(triData2);
+}
+
+
+atQuad::~atQuad()
+{
+}
+```
+
+### Common/Geometry/atQuad.h
+```
+#pragma once
+#include "atStandardShape.h"
+
+namespace atRenderEngine
+{
+	class atQuad :
+		public atStandardShape
+	{
+	public:
+		atQuad();
+		~atQuad();
+	};
+}
+```
+
+### Common/Geometry/atScene.cpp
+```
+#include "atScene.h"
+#include "atBox.h"
+using namespace atRenderEngine;
+
+void atScene::Setup()
+{
+	//Setup Vertex Array
+	glGenVertexArrays(1, &mVertexArrayID);
+	glBindVertexArray(mVertexArrayID);
+
+	// Create and compile our GLSL program from the shaders
+	mProgramID = Utility::atLoadShaders("../Common/Shaders/StandardShading.vs", "../Common/Shaders/StandardShading.fs");
+
+	// Generate 1 buffer, put the resulting identifier in vertexbuffer
+	glGenBuffers(1, &mVertexBuffer);
+
+	// The following commands will talk about our 'vertexbuffer' buffer
+	glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+
+	// Give our vertices to OpenGL.
+	//glBufferData(GL_ARRAY_BUFFER, sizeof(GLfloat)*mVertexBufferData.size(), &mVertexBufferData.front(), GL_STATIC_DRAW);
+	//for(auto mesh = mMeshesInScene.begin(); mesh != mMeshesInScene.end(); mesh++)
+	glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)*mMeshesInScene[0]->NumberOfVertices() , &(mMeshesInScene[0]->VertexList()[0]), GL_STATIC_DRAW);
+
+
+	if (mMeshesInScene[0]->mUVList.size() > 0)
+	{
+		glGenBuffers(1, &mUVVertexBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mUVVertexBuffer);
+		glBufferData(GL_ARRAY_BUFFER, mMeshesInScene[0]->mUVList.size() * sizeof(Vector2f), &(mMeshesInScene[0]->mUVList[0]), GL_STATIC_DRAW);
+	}
+
+	if (mMeshesInScene[0]->NumberofNormals() > 0)
+	{
+		glGenBuffers(1, &mNormalBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mNormalBuffer);
+		glBufferData(GL_ARRAY_BUFFER, mMeshesInScene[0]->NumberofNormals() * sizeof(Vector3f), mMeshesInScene[0]->NormalList().data(), GL_STATIC_DRAW);
+	}
+
+	texLoader = new atTextureLoader();
+	// Load the texture
+	GLuint Texture = texLoader->loadBMP_custom("../data/EggData/EggColors_24Bit.bmp");//  loadDDS("uvmap.DDS");
+	glActiveTexture(GL_TEXTURE0);
+	glBindTexture(GL_TEXTURE_2D, Texture); 
+
+	// Get a handle for our "myTextureSampler" uniform
+	mTextureID = glGetUniformLocation(mProgramID, "myTextureSampler");
+	// Get a handle for our "MVP" uniform
+	mMatrixID = glGetUniformLocation(mProgramID, "MVP");
+	mViewMatrixID = glGetUniformLocation(mProgramID, "V");
+	mModelMatrixID = glGetUniformLocation(mProgramID, "M");
+
+	//std::cout << "Number of Vertices : " << mMeshesInScene[0]->NumberOfVertices() << std::endl;
+}
+
+void atScene::Draw(Matrix4f& viewMatrix , Matrix4f& projectionMatrix)
+{
+	Matrix4f currentModeMat = mMeshesInScene[0]->GetModel();
+	Matrix4f MVPMatrix = projectionMatrix * viewMatrix * currentModeMat;
+	glUniformMatrix4fv(mMatrixID, 1, GL_FALSE, MVPMatrix.data());	
+	glUniformMatrix4fv(mModelMatrixID, 1, GL_FALSE, mMeshesInScene[0]->GetModel().data());
+	glUniformMatrix4fv(mViewMatrixID, 1, GL_FALSE,viewMatrix.data());
+
+	GLuint LightID = glGetUniformLocation(mProgramID, "LightPosition_worldspace");
+	Vector3f lightPos(currentModeMat(0,3), currentModeMat(1,3) + 15 ,9);
+	glUniform3f(LightID, lightPos.x(), lightPos.y(), lightPos.z());
+
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+	glVertexAttribPointer(
+		0,                  // attribute 0. No particular reason for 0, but must match the layout in the shader.
+		3,                  // size
+		GL_FLOAT,           // type
+		GL_FALSE,           // normalized?
+		0,                  // stride
+		(void*)0            // array buffer offset
+	);
+
+	 //2nd attribute buffer : UVs
+	if (mMeshesInScene[0]->mUVList.size() > 0)
+	{
+		glEnableVertexAttribArray(1);
+		glBindBuffer(GL_ARRAY_BUFFER, mUVVertexBuffer);
+		glVertexAttribPointer(
+			1,                                // attribute
+			2,                                // size
+			GL_FLOAT,                         // type
+			GL_FALSE,                         // normalized?
+			0,                                // stride
+			(void*)0                          // array buffer offset
+		);
+	}
+	if (mMeshesInScene[0]->NumberofNormals() > 0)
+	{
+		// 3rd attribute buffer : normals
+		glEnableVertexAttribArray(2);
+		glBindBuffer(GL_ARRAY_BUFFER, mNormalBuffer);
+		glVertexAttribPointer(
+			2,                                // attribute
+			3,                                // size
+			GL_FLOAT,                         // type
+			GL_FALSE,                         // normalized?
+			0,                                // stride
+			(void*)0                          // array buffer offset
+		);
+
+	}
+
+	// Set our "myTextureSampler" sampler to user Texture Unit 0
+	glUniform1i(mTextureID, 0);
+
+	//glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
+	// Generate a buffer for the indices as well
+	if (!mUpdateIndices)
+	{
+		indices.clear();
+		mMeshesInScene[0]->ConvertTriangleToVertIndexList(indices);
+	}
+		
+	
+	glGenBuffers(1, &mElementbuffer);
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mElementbuffer);
+	glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
+
+	 //Index buffer
+	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mElementbuffer);
+
+	// Draw the triangles !
+	glDrawElements(
+		GL_TRIANGLES,      // mode
+		indices.size(),    // count
+		GL_UNSIGNED_INT,   // type
+		(void*)0           // element array buffer offset
+	);
+
+	//glDrawArrays(GL_TRIANGLES, 0, mMeshesInScene[0]->NumberOfVertices()); // Starting from vertex 0; 3 vertices total -> 1 triangle
+	//glDrawArrays(GL_TRIANGLES, 0, mVertexBufferData.size()); // Starting from vertex 0; 3 vertices total -> 1 triangle
+	glDisableVertexAttribArray(0);
+	glDisableVertexAttribArray(1);
+	glDisableVertexAttribArray(2);
+	
+	//mMeshesInScene[0]->meshCollider->Draw(MVPMatrix);
+}
+
+void atScene::Cleanup()
+{
+	// Cleanup VBO and shader
+	glDeleteBuffers(1, &mVertexBuffer);
+	glDeleteBuffers(1, &mElementbuffer);
+	glDeleteProgram(mProgramID);
+	glDeleteVertexArrays(1, &mVertexArrayID);
+}
+
+void atScene::LoadCube()
+{
+	mUpdateIndices = false;
+	atBox* meshToLoad = new atBox();
+	mMeshesInScene.push_back(meshToLoad);
+	Setup();
+}
+
+void atScene::LoadMesh(std::vector<Vector3f> vertexData)
+{
+	atMeshData* meshToLoad = new atMeshData();
+	meshToLoad->VertexList(vertexData);
+	mMeshesInScene.push_back(meshToLoad);
+}
+
+void atScene::LoadMesh(const std::string path,bool isBarrel, bool forRender , Vector3f position , Vector3f scaleFactor, float degree )
+{
+	mUpdateIndices = false; 
+	atMeshData* meshToLoad = new atMeshData(); 
+	std::string ext = ".DAT";
+	std::size_t found = path.find(ext);
+
+	if (found == std::string::npos)
+	{
+		meshToLoad->ReadObjFile(path);
+		meshToLoad->SetTranslation(position);
+		meshToLoad->SetScaling(scaleFactor);
+		meshToLoad->SetYRotation(degree);
+		meshToLoad->meshCollider = new Utility::atKDTreeBBox();		
+		meshToLoad->meshCollider->BuildTree(*meshToLoad);
+		
+	}
+	else
+	{
+		if (forRender)
+			meshToLoad->ReadDatFileForRendering(path, isBarrel);
+		else
+		{
+			meshToLoad->ReadDatFileForRendering(path, isBarrel);
+			std::string savePath = path;
+			savePath.replace(found, ext.length(), ".obj");
+			meshToLoad->SaveObjFile(savePath);
+		}
+	}
+	//meshToLoad->SaveObjFile("../data/POINT.obj");
+	mMeshesInScene.push_back(meshToLoad);
+	Setup();
+}
+
+void atRenderEngine::atScene::SetRotationForMesh(int i, float degree /*Y axis for now*/)
+{
+	float newRot = mMeshesInScene[i]->GetYRotation() + degree;
+	mMeshesInScene[i]->SetYRotation(newRot);
+}
+
+void atRenderEngine::atScene::SetTRSForMesh(int i, Vector3f translate , float degree /*Y axis for now*/ , Vector3f scaleFactor)
+{
+	mMeshesInScene[i]->SetTranslation(translate);
+	mMeshesInScene[i]->SetScaling(scaleFactor);
+	mMeshesInScene[i]->SetYRotation(degree);
+}
+
+void atRenderEngine::atScene::GetModelForMesh(int i, Matrix4f& outMat)
+{
+	outMat = Matrix4f(mMeshesInScene[i]->GetModel());
+}
+
+bool atScene::GetIntersection(Utility::RayData& ray, Utility::VertexSelectionResult& selectionResult)
+{
+	bool hitSuccess = false;
+	for (int i = 0; i < mMeshesInScene.size(); i++)
+	{
+		std::vector<int> intersectingIndices;
+		mMeshesInScene[i]->GetIntersectingTriangleWithRay(ray, intersectingIndices);
+		float minDist = 100000.0;		
+		if(intersectingIndices.size()>0)
+		{
+			//mUpdateIndices = true;
+			//indices.clear();
+			//mMeshesInScene[0]->ConvertTriangleToVertIndexList(indices, intersectingIndices);
+			std::cout << "intersection found" << std::endl;
+			for (int j = 0; j < intersectingIndices.size(); j++)
+			{
+				int triIdx = intersectingIndices[j];
+				Vector3f v[3] , vTrans[3]; 
+				v[0] = mMeshesInScene[i]->VertexList()[mMeshesInScene[i]->TriangleList()[triIdx].vertexIdx[0]];
+				v[1] = mMeshesInScene[i]->VertexList()[mMeshesInScene[i]->TriangleList()[triIdx].vertexIdx[1]];
+				v[2] = mMeshesInScene[i]->VertexList()[mMeshesInScene[i]->TriangleList()[triIdx].vertexIdx[2]];
+
+				Matrix4f modelMat = mMeshesInScene[i]->GetModel(); 
+				vTrans[0] = (modelMat* Vector4f(v[0].x(), v[0].y(), v[0].z(),1.0f)).head<3>();
+				vTrans[1] = (modelMat* Vector4f(v[1].x(), v[1].y(), v[1].z(), 1.0f)).head<3>();
+				vTrans[2] = (modelMat* Vector4f(v[2].x(), v[2].y(), v[2].z(), 1.0f)).head<3>();
+
+				float result = 0.0; 
+				if (Utility::RayTriangleIntersection(ray, vTrans[0], vTrans[1], vTrans[2], result))
+				{
+					if (result < minDist)
+					{
+						minDist = result;
+						selectionResult.verts[0] = v[0];
+						selectionResult.verts[1] = v[1];
+						selectionResult.verts[2] = v[2];
+
+						selectionResult.triangleListIdx = triIdx;						
+
+						hitSuccess = true;
+
+					}
+					std::cout << "intersecting with triangle : " << triIdx << std::endl;
+					//return true;
+				}
+			}			
+			if (hitSuccess)
+			{
+				float closestPointDist = 100000.0;
+				Vector3f hitPoint = ray.rayOrigin + minDist * ray.rayDirection;
+				float dist; 
+
+				for (int k = 0; k < 3; k++)
+				{
+					dist = Utility::SquaredDistance(selectionResult.verts[k], hitPoint);
+					if (dist < closestPointDist)
+					{
+						closestPointDist = dist;
+						selectionResult.vertexListIdx = mMeshesInScene[i]->TriangleList()[selectionResult.triangleListIdx].vertexIdx[k];
+						selectionResult.vertexInTriangleIdx = k;
+					}						
+				}				
+			}
+			return hitSuccess;
+		}
+	}
+	return hitSuccess;
+}
+```
+
+### Common/Geometry/atScene.h
+```
+#pragma once
+#include "atUtility.h"
+#include "atMesh.h"
+#include "atTextureLoader.h"
+namespace atRenderEngine
+{
+	class atScene
+	{
+	public:
+		atScene() {}
+		~atScene() {}
+		virtual void Setup();
+		virtual void Draw(Matrix4f& viewMatrix, Matrix4f& projectionMatrix);
+		void Cleanup();
+		void LoadCube();
+		void LoadMesh(std::vector<Vector3f> vertexData);
+		void LoadMesh(const std::string path, bool isBarrel, bool forRender ,Vector3f position = Vector3f::Zero(), Vector3f scaleFactor = Vector3f::Ones(), float degree = 0.0);
+		void SetRotationForMesh(int i, float degree);
+		void SetTRSForMesh(int i, Vector3f translate, float degree, Vector3f scaleFactor);
+		void GetModelForMesh(int i, Matrix4f& outMat);
+		bool GetIntersection(Utility::RayData& ray, Utility::VertexSelectionResult& result);
+		GLuint ProgramID() { return mProgramID; }
+		GLuint MatrixID() { return mMatrixID; }
+	protected:
+		GLuint mElementbuffer;
+		GLuint mVertexArrayID;
+		GLuint mVertexBuffer;
+		GLuint mUVVertexBuffer;
+		GLuint mNormalBuffer;
+		std::vector<unsigned int> indices;
+		std::vector<GLfloat> mVertexBufferData;
+		std::vector<atMeshData *> mMeshesInScene;
+		GLuint mMatrixID;
+		GLuint mViewMatrixID;
+		GLuint mModelMatrixID;
+		GLuint mProgramID;
+		GLuint mTextureID;
+		atTextureLoader* texLoader; 
+		bool mUpdateIndices; 
+	};
+
+}
+```
+
+### Common/Geometry/atStandardShape.cpp
+```
+#include "atStandardShape.h"
+using namespace atRenderEngine;
+
+
+atStandardShape::atStandardShape()
+{
+}
+
+
+atStandardShape::~atStandardShape()
+{
+}
+```
+
+### Common/Geometry/atStandardShape.h
+```
+#pragma once
+#include "atMesh.h"
+
+namespace atRenderEngine
+{
+	class atStandardShape : public atMeshData
+	{
+	public:
+		atStandardShape();
+		~atStandardShape();
+	};
+}
+```
+
+### Common/Geometry/atVolumeRenderingScene.cpp
+```
+#include "atVolumeRenderingScene.h"
+using namespace atRenderEngine;
+
+
+atVolumeRenderingScene::atVolumeRenderingScene()
+{
+	atBox* volumeBoundingBox = new atBox();
+	mMeshesInScene.push_back(volumeBoundingBox);
+}
+
+
+atVolumeRenderingScene::~atVolumeRenderingScene()
+{
+}
+
+void atRenderEngine::atVolumeRenderingScene::LoadRawVolume(std::string path,
+	unsigned int numberOfSlices,
+	vector<Utility::TransferFunction1DPoint> colorPoints,
+	vector<Utility::TransferFunction1DPoint> alphaPoints,
+	unsigned int xRange,
+	unsigned int yRange,
+	unsigned int zRange)
+{
+	char* buffer;
+	char* rgbaBuffer;
+	vector<Vector4f> transferFunction(256, Vector4f::Ones());
+
+	//Set volume bounding box to match the volume size. 
+	atBox* volumeBoundingBox = (atBox*)mMeshesInScene[0];
+	//volumeBoundingBox->SetTranslation(Vector3f(0.0, 0.5, 0.0));
+	int maxDim = std::max(std::max(xRange, yRange), zRange);
+	Vector3f volumeScale((float)xRange / (float)maxDim, (float)yRange / (float)maxDim, (float)xRange / (float)maxDim);
+	volumeBoundingBox->SetScaling(volumeScale);
+
+
+
+	//Utility::MinMaxPair boxMinMax;
+	//volumeBoundingBox->FindMinMax(boxMinMax);
+	
+	mRawVolumeLoader.LoadFile(path, xRange, yRange, zRange, buffer,transferFunction,colorPoints,alphaPoints);
+	
+	//Utility::convertToRGBA(rgbaBuffer, buffer, xRange*yRange*zRange);
+
+	//if (rgbaBuffer != nullptr)
+	//{
+	//	mVRShader.Setup(*quad, rgbaBuffer, xRange, yRange, zRange);
+	//	mSlices = zRange;
+	//}
+	
+	if (buffer != nullptr)
+	{
+		mVRShader.Setup(mSliceQuad, buffer,transferFunction, xRange, yRange, zRange);
+		mSlices = numberOfSlices;
+	}
+
+	//if (buffer != nullptr)
+	//{
+	//	mVRShader.Setup(*volumeBoundingBox, buffer, xRange, yRange, zRange);
+	//	mSlices = numberOfSlices;
+	//}
+	//delete[] rgbaBuffer;
+	delete[] buffer;
+	Setup();
+}
+
+void atVolumeRenderingScene::Setup()
+{
+	mProgramID = mVRShader.mProgramId;
+}
+
+void atVolumeRenderingScene::Draw(Matrix4f& viewMatrix, Matrix4f& projectionMatrix)
+{
+	atBox* box = (atBox*)mMeshesInScene[0];	
+	Matrix4f VPMatrix = projectionMatrix * viewMatrix;
+	Matrix4f MVPMatrix = VPMatrix * box->GetModel();
+
+	// Enable blending
+	glEnable(GL_BLEND);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+	//Disable lighting
+	glDisable(GL_LIGHTING);
+	
+	//Disable Depth Test
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(0);
+	
+	//lineShader.Draw(box->DrawableBoxVertices(), box->DrawableBoxColors(), MVPMatrix);
+	mVRShader.Draw(mSliceQuad, mSlices, viewMatrix, projectionMatrix, box->GetModel());
+	
+	glDisable(GL_BLEND);
+	glEnable(GL_LIGHTING);
+	glEnable(GL_DEPTH_TEST);
+	glDepthMask(1);
+
+	
+	//lineShader.DrawCoordinateAxes(VPMatrix);
+
+}
+```
+
+### Common/Geometry/atVolumeRenderingScene.h
+```
+#pragma once
+#include "atScene.h"
+#include "atRawVolumeLoader.h"
+#include "atVolumeRendererShader.h"
+#include "atQuad.h"
+#include "atLineShader.h"
+
+namespace atRenderEngine
+{
+	class atVolumeRenderingScene :
+		public atScene
+	{
+	public:
+		atVolumeRenderingScene();
+		~atVolumeRenderingScene();
+		void Setup() override;
+		void Draw(Matrix4f & viewMatrix, Matrix4f & projectionMatrix) override;
+		void LoadRawVolume(std::string path,
+						unsigned int numberOfSlices,
+						vector<Utility::TransferFunction1DPoint> colorPoints,
+						vector<Utility::TransferFunction1DPoint> alphaPoints,
+						unsigned int xRange = 0,
+						unsigned int yRange = 0,
+						unsigned int zRange = 0);
+	private:
+		atRawVolumeLoader mRawVolumeLoader; 
+		Utility::atVolumeRenderingShader mVRShader;
+		int mSlices;		
+		atQuad mSliceQuad;
+		Utility::atLineShader lineShader;
+	};
+}
+```
+
+### Common/Loaders/atCorrespondenceMarkerReadWrite.cpp
+```
+#include "atCorrespondenceMarkerReadWrite.h"
+
+atRenderEngine::Utility::atCorrespondenceMarker::atCorrespondenceMarker()
+{
+}
+
+atRenderEngine::Utility::atCorrespondenceMarker::~atCorrespondenceMarker()
+{
+}
+
+bool atRenderEngine::Utility::atCorrespondenceMarker::SaveCorrespondenceFile(std::string filePath, std::vector<CorrespondenceMarkerData> markerData)
+{
+	FILE *fd = fopen(filePath.c_str(), "w");
+	if (fd != NULL)
+	{
+		fprintf(fd, "%d\n",markerData.size());
+		/* save vertex information */
+		for (std::vector<CorrespondenceMarkerData>::iterator it = markerData.begin(); it != markerData.end(); it++)
+		{
+			fprintf(fd, "%d ,  %d\n",
+				it->vertIdxSource, it->vertIdxTarget);
+		}
+
+		fclose(fd);
+		return true;
+	}
+	else
+	{
+		return false;
+	}
+}
+```
+
+### Common/Loaders/atCorrespondenceMarkerReadWrite.h
+```
+#pragma once
+#include "atUtility.h"
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		struct CorrespondenceMarkerData
+		{
+			int vertIdxSource, vertIdxTarget; 
+		};
+		class atCorrespondenceMarker
+		{
+		public:
+			atCorrespondenceMarker();
+			~atCorrespondenceMarker();
+			bool SaveCorrespondenceFile(std::string filePath, std::vector<CorrespondenceMarkerData> markerData);
+		private:
+
+		};
+	}
+}
+```
+
+### Common/Loaders/atRawVolumeLoader.cpp
+```
+#include "atRawVolumeLoader.h"
+#include "atCubicSpline.h"
+using namespace atRenderEngine;
+
+
+atRawVolumeLoader::atRawVolumeLoader()
+{
+}
+
+atRenderEngine::atRawVolumeLoader::atRawVolumeLoader(string filename)
+{
+
+}
+
+
+atRawVolumeLoader::~atRawVolumeLoader()
+{
+	if (mFileHandle.is_open())
+	{
+		mFileHandle.close();
+	}
+}
+
+void atRenderEngine::atRawVolumeLoader::LoadFile(string filename, int height, int width, int depth, char *& buffer, vector<Vector4f>& transferFunction, vector<Utility::TransferFunction1DPoint> colorPoints, vector<Utility::TransferFunction1DPoint> alphaPoints)
+{
+	if (!mFileHandle.is_open())
+	{
+		LoadFileInternal(filename, height*width*depth, buffer);		
+		ComputeTransferFunction(transferFunction, colorPoints, alphaPoints);
+	}
+}
+
+void atRenderEngine::atRawVolumeLoader::LoadFile(string filename, char *& buffer)
+{
+	if (!mFileHandle.is_open())
+	{
+		LoadFileInternal(filename, FILE_SIZE_UNKNOWN, buffer);
+	}
+}
+
+void atRenderEngine::atRawVolumeLoader::LoadFileInternal(string filename, const int bufferSize, char* &buffer)
+{
+	streampos size;
+	std::string ext = ".pvm";
+	std::size_t found = filename.find(ext);
+	mFileHandle.open(filename, ios::in | ios::binary | ios::ate);
+	if (mFileHandle.is_open())
+	{	
+		//raw file
+		size = mFileHandle.tellg();
+		const int bSize = (size > bufferSize && bufferSize != FILE_SIZE_UNKNOWN) ? bufferSize : size;
+		buffer = new char[bSize];
+		mFileHandle.seekg(0, mFileHandle.beg);
+		mFileHandle.read(buffer, bSize);
+		mFileHandle.close();
+	}
+}
+
+void atRenderEngine::atRawVolumeLoader::ComputeTransferFunction(vector<Vector4f>& transferFunction, vector<Utility::TransferFunction1DPoint> colorPoints, vector<Utility::TransferFunction1DPoint> alphaPoints)
+{
+	//initialize the cubic spline for the transfer function
+	transferFunction.resize(256);
+
+	auto colorCubic = Utility::CalculateCubicSpline(colorPoints.size() - 1, colorPoints);
+	auto alphaCubic = Utility::CalculateCubicSpline(alphaPoints.size() - 1, alphaPoints);
+
+	int numTF = 0;
+	for (int i = 0; i < colorPoints.size() - 1; i++)
+	{
+		int steps = colorPoints[i + 1].sampleValue - colorPoints[i].sampleValue;
+
+		for (int j = 0; j < steps; j++)
+		{
+			float k = (float)j / (float)(steps - 1);
+
+			transferFunction[numTF++] = colorCubic[i].GetPointOnSpline(k);
+		}
+	}
+
+	numTF = 0;
+	for (int i = 0; i < alphaPoints.size() - 1; i++)
+	{
+		int steps = alphaPoints[i + 1].sampleValue - alphaPoints[i].sampleValue;
+
+		for (int j = 0; j < steps; j++)
+		{
+			float k = (float)j / (float)(steps - 1);
+
+			transferFunction[numTF++].w() = alphaCubic[i].GetPointOnSpline(k).w();
+		}
+	}
+}
+```
+
+### Common/Loaders/atRawVolumeLoader.h
+```
+#pragma once
+#include "atUtility.h"
+
+using namespace std;
+namespace atRenderEngine
+{
+#define FILE_SIZE_UNKNOWN -1
+	class atRawVolumeLoader
+	{
+	public:
+		atRawVolumeLoader();
+		atRawVolumeLoader(string filename);
+
+		~atRawVolumeLoader();
+		void LoadFile(string filename, int height, int width, int depth, char* &buffer, vector<Vector4f>& transferFunction,vector<Utility::TransferFunction1DPoint> colorPoints, vector<Utility::TransferFunction1DPoint> alphaPoints);
+		void LoadFile(string filename, char* &buffer);
+		
+	private:
+		void LoadFileInternal(string filename, const int bufferSize, char* &buffer);
+		void ComputeTransferFunction(vector<Vector4f>& transferFunction, vector<Utility::TransferFunction1DPoint> colorPoints, vector<Utility::TransferFunction1DPoint> alphaPoints);
+		ifstream mFileHandle;
+	};
+}
+```
+
+### Common/Loaders/atTextureLoader.cpp
+```
+#include "atTextureLoader.h"
+
+
+using namespace atRenderEngine;
+
+atTextureLoader::atTextureLoader()
+{
+}
+
+atTextureLoader::~atTextureLoader()
+{
+}
+GLuint atRenderEngine::atTextureLoader::loadBMP_custom(const char * imagepath)
+{
+
+	std::cout << "Reading image " << imagepath << std::endl;
+
+	// Data read from the header of the BMP file
+	unsigned char header[54];
+	unsigned int dataPos;
+	unsigned int imageSize;
+	unsigned int width, height;
+	// Actual RGB data
+	unsigned char * data;
+
+	// Open the file
+	FILE * file = fopen(imagepath, "rb");
+	if (!file) { printf("%s could not be opened. Are you in the right directory ? Don't forget to read the FAQ !\n", imagepath); getchar(); return 0; }
+
+	// Read the header, i.e. the 54 first bytes
+
+	// If less than 54 bytes are read, problem
+	if (fread(header, 1, 54, file) != 54) {
+		printf("Not a correct BMP file\n");
+		fclose(file);
+		return 0;
+	}
+	// A BMP files always begins with "BM"
+	if (header[0] != 'B' || header[1] != 'M') {
+		printf("Not a correct BMP file\n");
+		fclose(file);
+		return 0;
+	}
+	// Make sure this is a 24bpp file
+	if (*(int*)&(header[0x1E]) != 0) { printf("Not a correct BMP file\n");    fclose(file); return 0; }
+	if (*(int*)&(header[0x1C]) != 24) { printf("Not a correct BMP file\n");    fclose(file); return 0; }
+
+	// Read the information about the image
+	dataPos = *(int*)&(header[0x0A]);
+	imageSize = *(int*)&(header[0x22]);
+	width = *(int*)&(header[0x12]);
+	height = *(int*)&(header[0x16]);
+
+	// Some BMP files are misformatted, guess missing information
+	if (imageSize == 0)    imageSize = width*height * 3; // 3 : one byte for each Red, Green and Blue component
+	if (dataPos == 0)      dataPos = 54; // The BMP header is done that way
+
+										 // Create a buffer
+	data = new unsigned char[imageSize];
+
+	// Read the actual data from the file into the buffer
+	fread(data, 1, imageSize, file);
+
+	// Everything is in memory now, the file wan be closed
+	fclose(file);
+
+	// Create one OpenGL texture
+	GLuint textureID;
+	glGenTextures(1, &textureID);
+
+	// "Bind" the newly created texture : all future texture functions will modify this texture
+	glBindTexture(GL_TEXTURE_2D, textureID);
+
+	// Give the image to OpenGL
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_BGR, GL_UNSIGNED_BYTE, data);
+
+	// OpenGL has now copied the data. Free our own version
+	delete[] data;
+	fclose(file);
+
+	// Poor filtering, or ...
+	//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	//glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); 
+
+	// ... nice trilinear filtering.
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+	glGenerateMipmap(GL_TEXTURE_2D);
+
+	// Return the ID of the texture we just created
+	return textureID;
+}
+
+//
+//// Since GLFW 3, glfwLoadTexture2D() has been removed. You have to use another texture loading library, 
+//// or do it yourself (just like loadBMP_custom and loadDDS)
+////GLuint loadTGA_glfw(const char * imagepath){
+////
+////	// Create one OpenGL texture
+////	GLuint textureID;
+////	glGenTextures(1, &textureID);
+////
+////	// "Bind" the newly created texture : all future texture functions will modify this texture
+////	glBindTexture(GL_TEXTURE_2D, textureID);
+////
+////	// Read the file, call glTexImage2D with the right parameters
+////	glfwLoadTexture2D(imagepath, 0);
+////
+////	// Nice trilinear filtering.
+////	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+////	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+////	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+////	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); 
+////	glGenerateMipmap(GL_TEXTURE_2D);
+////
+////	// Return the ID of the texture we just created
+////	return textureID;
+////}
+//
+//
+//
+#define FOURCC_DXT1 0x31545844 // Equivalent to "DXT1" in ASCII
+#define FOURCC_DXT3 0x33545844 // Equivalent to "DXT3" in ASCII
+#define FOURCC_DXT5 0x35545844 // Equivalent to "DXT5" in ASCII
+
+GLuint atRenderEngine::atTextureLoader::loadDDS(const char * imagepath)
+{
+
+	unsigned char header[124];
+
+	FILE *fp;
+
+	/* try to open the file */
+	fp = fopen(imagepath, "rb");
+	if (fp == NULL) {
+		printf("%s could not be opened. Are you in the right directory ? Don't forget to read the FAQ !\n", imagepath); getchar();
+		return 0;
+	}
+
+	/* verify the type of file */
+	char filecode[4];
+	fread(filecode, 1, 4, fp);
+	if (strncmp(filecode, "DDS ", 4) != 0) {
+		fclose(fp);
+		return 0;
+	}
+
+	/* get the surface desc */
+	fread(&header, 124, 1, fp);
+
+	unsigned int height = *(unsigned int*)&(header[8]);
+	unsigned int width = *(unsigned int*)&(header[12]);
+	unsigned int linearSize = *(unsigned int*)&(header[16]);
+	unsigned int mipMapCount = *(unsigned int*)&(header[24]);
+	unsigned int fourCC = *(unsigned int*)&(header[80]);
+
+
+	unsigned char * buffer;
+	unsigned int bufsize;
+	/* how big is it going to be including all mipmaps? */
+	bufsize = mipMapCount > 1 ? linearSize * 2 : linearSize;
+	buffer = (unsigned char*)malloc(bufsize * sizeof(unsigned char));
+	fread(buffer, 1, bufsize, fp);
+	/* close the file pointer */
+	fclose(fp);
+
+	unsigned int components = (fourCC == FOURCC_DXT1) ? 3 : 4;
+	unsigned int format;
+	switch (fourCC)
+	{
+	case FOURCC_DXT1:
+		format = GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+		break;
+	case FOURCC_DXT3:
+		format = GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+		break;
+	case FOURCC_DXT5:
+		format = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+		break;
+	default:
+		free(buffer);
+		return 0;
+	}
+
+	// Create one OpenGL texture
+	GLuint textureID;
+	glGenTextures(1, &textureID);
+
+	// "Bind" the newly created texture : all future texture functions will modify this texture
+	glBindTexture(GL_TEXTURE_2D, textureID);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+	unsigned int blockSize = (format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT) ? 8 : 16;
+	unsigned int offset = 0;
+
+	/* load the mipmaps */
+	for (unsigned int level = 0; level < mipMapCount && (width || height); ++level)
+	{
+		unsigned int size = ((width + 3) / 4)*((height + 3) / 4)*blockSize;
+		glCompressedTexImage2D(GL_TEXTURE_2D, level, format, width, height,
+			0, size, buffer + offset);
+
+		offset += size;
+		width /= 2;
+		height /= 2;
+
+		// Deal with Non-Power-Of-Two textures. This code is not included in the webpage to reduce clutter.
+		if (width < 1) width = 1;
+		if (height < 1) height = 1;
+
+	}
+
+	free(buffer);
+
+	return textureID;
+
+
+}
+```
+
+### Common/Loaders/atTextureLoader.h
+```
+#pragma once
+#include "atUtility.h"
+#include <GL/glew.h>
+
+namespace atRenderEngine
+{
+	class atTextureLoader
+	{
+	public:
+		atTextureLoader();
+		~atTextureLoader();
+		GLuint loadBMP_custom(const char * imagepath);
+		GLuint loadDDS(const char * imagepath);
+	};
+}
+```
+
+### Common/Renderers/atLineShader.cpp
+```
+#include "atLineShader.h"
+using namespace atRenderEngine::Utility;
+
+
+atLineShader::atLineShader()
+{
+	mProgramId = Utility::atLoadShaders("../Common/Shaders/SimpleColor.vs", "../Common/Shaders/SimpleColor.fs");
+}
+
+
+atLineShader::~atLineShader()
+{
+}
+
+void atLineShader::Draw(std::vector<Vector3f>& vertexArray, std::vector<Vector3f>& colorArray, Matrix4f & MVPMatrix)
+{
+	//GLfloat g_vertex_buffer_data[] =
+	//{
+	//	source.x(), source.y(),source.z(),
+	//	target.x(), target.y(),target.z()
+	//};
+	//// One color for each vertex. They were generated randomly.
+	//static const GLfloat g_color_buffer_data[] = {
+	//	1.0,0.0,0.0,
+	//	0.0,1.0,0.0,
+	//};
+	GLuint VertexArrayID;
+	glGenVertexArrays(1, &VertexArrayID);
+	glBindVertexArray(VertexArrayID);
+
+
+	// Get a handle for our "MVP" uniform
+	GLuint MatrixID = glGetUniformLocation(mProgramId, "MVP");
+
+	GLuint vertexbuffer;
+	glGenBuffers(1, &vertexbuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)* vertexArray.size(), vertexArray.data(), GL_STATIC_DRAW);
+
+	GLuint colorbuffer;
+	glGenBuffers(1, &colorbuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, colorbuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)* colorArray.size(), colorArray.data(), GL_STATIC_DRAW);
+
+	glUseProgram(mProgramId);
+
+	// Send our transformation to the currently bound shader, 
+	// in the "MVP" uniform
+	glUniformMatrix4fv(MatrixID, 1, GL_FALSE, MVPMatrix.data());
+
+	// 1rst attribute buffer : vertices
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	glVertexAttribPointer(
+		0,                  // attribute. No particular reason for 0, but must match the layout in the shader.
+		3,                  // size
+		GL_FLOAT,           // type
+		GL_FALSE,           // normalized?
+		0,                  // stride
+		(void*)0            // array buffer offset
+	);
+
+	// 2nd attribute buffer : colors
+	glEnableVertexAttribArray(1);
+	glBindBuffer(GL_ARRAY_BUFFER, colorbuffer);
+	glVertexAttribPointer(
+		1,                                // attribute. No particular reason for 1, but must match the layout in the shader.
+		3,                                // size
+		GL_FLOAT,                         // type
+		GL_FALSE,                         // normalized?
+		0,                                // stride
+		(void*)0                          // array buffer offset
+	);
+	glLineWidth(3);
+	// Draw the triangle !
+	glDrawArrays(GL_LINES, 0, vertexArray.size()); // 12*3 indices starting at 0 -> 12 triangles
+	glLineWidth(1);
+	glDisableVertexAttribArray(0);
+	glDisableVertexAttribArray(1);
+
+}
+
+void atRenderEngine::Utility::atLineShader::DrawRay(RayData & ray, Matrix4f & MVP)
+{
+	Vector3f source = ray.rayOrigin;
+	Vector3f target = ray.rayOrigin + 100 * ray.rayDirection;
+
+	std::vector<Vector3f> vertexBuffer;
+	vertexBuffer.push_back(source);
+	vertexBuffer.push_back(target);
+
+	std::vector<Vector3f> colorBuffer;
+	colorBuffer.push_back(Vector3f(1.0, 0.0, 0.0));
+	colorBuffer.push_back(Vector3f(0.0, 1.0, 0.0));
+
+	Draw(vertexBuffer, colorBuffer, MVP);
+	//GLfloat g_vertex_buffer_data[] =
+	//{
+	//	source.x(), source.y(),source.z(),
+	//	target.x(), target.y(),target.z()
+	//};
+	//// One color for each vertex. They were generated randomly.
+	//static const GLfloat g_color_buffer_data[] = {
+	//	1.0,0.0,0.0,
+	//	0.0,1.0,0.0,
+	//};
+
+
+	//GLuint VertexArrayID;
+	//glGenVertexArrays(1, &VertexArrayID);
+	//glBindVertexArray(VertexArrayID);
+
+	//GLuint programID = Utility::atLoadShaders("../Common/Shaders/SimpleColor.vs", "../Common/Shaders/SimpleColor.fs");
+	//// Get a handle for our "MVP" uniform
+	//GLuint MatrixID = glGetUniformLocation(programID, "MVP");
+
+	//GLuint vertexbuffer;
+	//glGenBuffers(1, &vertexbuffer);
+	//glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	//glBufferData(GL_ARRAY_BUFFER, sizeof(g_vertex_buffer_data), g_vertex_buffer_data, GL_STATIC_DRAW);
+
+	//GLuint colorbuffer;
+	//glGenBuffers(1, &colorbuffer);
+	//glBindBuffer(GL_ARRAY_BUFFER, colorbuffer);
+	//glBufferData(GL_ARRAY_BUFFER, sizeof(g_color_buffer_data), g_color_buffer_data, GL_STATIC_DRAW);
+
+	//glUseProgram(programID);
+
+	//// Send our transformation to the currently bound shader, 
+	//// in the "MVP" uniform
+	//glUniformMatrix4fv(MatrixID, 1, GL_FALSE, MVP.data());
+
+	//// 1rst attribute buffer : vertices
+	//glEnableVertexAttribArray(0);
+	//glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	//glVertexAttribPointer(
+	//	0,                  // attribute. No particular reason for 0, but must match the layout in the shader.
+	//	3,                  // size
+	//	GL_FLOAT,           // type
+	//	GL_FALSE,           // normalized?
+	//	0,                  // stride
+	//	(void*)0            // array buffer offset
+	//);
+
+	//// 2nd attribute buffer : colors
+	//glEnableVertexAttribArray(1);
+	//glBindBuffer(GL_ARRAY_BUFFER, colorbuffer);
+	//glVertexAttribPointer(
+	//	1,                                // attribute. No particular reason for 1, but must match the layout in the shader.
+	//	3,                                // size
+	//	GL_FLOAT,                         // type
+	//	GL_FALSE,                         // normalized?
+	//	0,                                // stride
+	//	(void*)0                          // array buffer offset
+	//);
+
+	//// Draw the triangle !
+	//glDrawArrays(GL_LINES, 0, 2); // 12*3 indices starting at 0 -> 12 triangles
+
+	//glDisableVertexAttribArray(0);
+	//glDisableVertexAttribArray(1);
+}
+
+void atLineShader::DrawPoints(std::vector<Vector3f>& vertexArray, std::vector<Vector3f>& colorArray, Matrix4f & MVPMatrix)
+{
+	//GLfloat g_vertex_buffer_data[] =
+	//{
+	//	source.x(), source.y(),source.z(),
+	//	target.x(), target.y(),target.z()
+	//};
+	//// One color for each vertex. They were generated randomly.
+	//static const GLfloat g_color_buffer_data[] = {
+	//	1.0,0.0,0.0,
+	//	0.0,1.0,0.0,
+	//};
+	GLuint VertexArrayID;
+	glGenVertexArrays(1, &VertexArrayID);
+	glBindVertexArray(VertexArrayID);
+
+
+	// Get a handle for our "MVP" uniform
+	GLuint MatrixID = glGetUniformLocation(mProgramId, "MVP");
+
+	GLuint vertexbuffer;
+	glGenBuffers(1, &vertexbuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)* vertexArray.size(), vertexArray.data(), GL_STATIC_DRAW);
+
+	GLuint colorbuffer;
+	glGenBuffers(1, &colorbuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, colorbuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)* colorArray.size(), colorArray.data(), GL_STATIC_DRAW);
+
+	glUseProgram(mProgramId);
+
+	// Send our transformation to the currently bound shader, 
+	// in the "MVP" uniform
+	glUniformMatrix4fv(MatrixID, 1, GL_FALSE, MVPMatrix.data());
+
+	// 1rst attribute buffer : vertices
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	glVertexAttribPointer(
+		0,                  // attribute. No particular reason for 0, but must match the layout in the shader.
+		3,                  // size
+		GL_FLOAT,           // type
+		GL_FALSE,           // normalized?
+		0,                  // stride
+		(void*)0            // array buffer offset
+	);
+
+	// 2nd attribute buffer : colors
+	glEnableVertexAttribArray(1);
+	glBindBuffer(GL_ARRAY_BUFFER, colorbuffer);
+	glVertexAttribPointer(
+		1,                                // attribute. No particular reason for 1, but must match the layout in the shader.
+		3,                                // size
+		GL_FLOAT,                         // type
+		GL_FALSE,                         // normalized?
+		0,                                // stride
+		(void*)0                          // array buffer offset
+	);
+	glPointSize(4);
+	// Draw the triangle !
+	glDrawArrays(GL_POINTS, 0, vertexArray.size()); // 12*3 indices starting at 0 -> 12 triangles
+	glPointSize(1);
+	glDisableVertexAttribArray(0);
+	glDisableVertexAttribArray(1);
+
+}
+
+void atLineShader::DrawCoordinateAxes(Matrix4f& MVPMatrix)
+{
+	std::vector<Vector3f> verts(6, Vector3f(0, 0, 0));
+	verts[1][0] = 5; //x - axis
+	verts[3][1] = 5; //y - axis
+	verts[5][2] = 5; //z - axis
+
+	std::vector<Vector3f> colors(6, Vector3f(0, 0, 0));
+	colors[0][0] = 1; //x - axis
+	colors[1][0] = 1; //x - axis
+	colors[2][1] = 1; //y - axis
+	colors[3][1] = 1; //y - axis
+	colors[4][2] = 1; //z - axis
+	colors[5][2] = 1; //z - axis
+
+	Draw(verts, colors, MVPMatrix);
+}
+```
+
+### Common/Renderers/atLineShader.h
+```
+#pragma once
+#include "atShader.h"
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		class atLineShader :
+			public atShader
+		{
+		public:
+			atLineShader();
+			~atLineShader();
+			void Draw(std::vector<Vector3f>& vertexArray, std::vector<Vector3f>& colorArray, Matrix4f& MVPMatrix);
+			void DrawPoints(std::vector<Vector3f>& vertexArray, std::vector<Vector3f>& colorArray, Matrix4f & MVPMatrix);			
+			void DrawRay(RayData& ray, Matrix4f& MVP);
+			void DrawCoordinateAxes(Matrix4f& MVPMatrix);
+		};
+	}
+}
+```
+
+### Common/Renderers/atShader.cpp
+```
+#include "atShader.h"
+using namespace atRenderEngine::Utility;
+
+
+atShader::atShader()
+{
+}
+
+
+atShader::~atShader()
+{
+}
+```
+
+### Common/Renderers/atShader.h
+```
+#pragma once
+#include "atUtility.h"
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		class atShader
+		{
+		public:
+			atShader();
+			virtual ~atShader() = 0;
+			GLuint mProgramId;
+		};
+	}
+}
+```
+
+### Common/Renderers/atVolumeRendererShader.cpp
+```
+#include "atVolumeRendererShader.h"
+
+using namespace atRenderEngine::Utility;
+
+atVolumeRenderingShader::atVolumeRenderingShader()
+{
+	mProgramId = Utility::atLoadShaders("../Common/Shaders/VolumeRenderer.vs", "../Common/Shaders/VolumeRenderer.fs");
+}
+atVolumeRenderingShader::~atVolumeRenderingShader()
+{
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::Setup(atQuad& quad, const char * volume, std::vector<Vector4f>& transferFunction, unsigned int xRange, unsigned int yRange, unsigned int zRange)
+{
+	SetupQuadRendering(quad);
+	Setup3DTexture(volume, xRange, yRange, zRange);
+	Setup1DTexture(transferFunction);
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::Setup(atBox& quad, const char * volume, unsigned int xRange, unsigned int yRange, unsigned int zRange)
+{
+	SetupBoxRendering(quad,0);
+	Setup3DTexture(volume, xRange, yRange, zRange);
+}
+
+void atVolumeRenderingShader::Draw(std::vector<Vector3f>& vertexArray, std::vector<Vector3f>& colorArray, Matrix4f& MVPMatrix)
+{
+
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::Draw(atQuad& quad, int numberOfSlices, Matrix4f & viewMatrix, Matrix4f & projectionMatrix, Matrix4f& textureMatrix)
+{
+	Matrix4f currentModeMat = quad.GetModel();
+	Matrix4f MVPMatrix = projectionMatrix * viewMatrix * currentModeMat;
+	glUniformMatrix4fv(mMatrixID, 1, GL_FALSE, MVPMatrix.data());
+	glUniformMatrix4fv(mModelMatrixID, 1, GL_FALSE, currentModeMat.data());
+	glUniformMatrix4fv(mViewMatrixID, 1, GL_FALSE, viewMatrix.data());
+	glUniformMatrix4fv(mTextureMatrixID, 1, GL_FALSE, textureMatrix.data());
+
+	for (int i = 0; i < numberOfSlices; i++)
+	{
+		//std::cout << "Z coordinate : " << ((float)(0.5f + i) / ((float)numberOfSlices)) - 0.5f << std::endl;
+		int sNumber = glGetUniformLocation(mProgramId, "sliceNumber");
+		glUniform1f(sNumber, ((float)(i) / ((float)numberOfSlices)) - 0.5f);
+
+		int totalSliceNum = glGetUniformLocation(mProgramId, "totalSlices");
+		glUniform1f(totalSliceNum, ((float)(0.5f + i)/((float)numberOfSlices)));
+
+		glEnableVertexAttribArray(0);
+		glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+		glVertexAttribPointer(
+			0,                  // attribute 0. No particular reason for 0, but must match the layout in the shader.
+			3,                  // size
+			GL_FLOAT,           // type
+			GL_FALSE,           // normalized?
+			0,                  // stride
+			(void*)0            // array buffer offset
+		);
+
+		//2nd attribute buffer : UVs
+		if (quad.mUVList.size() > 0)
+		{
+			glEnableVertexAttribArray(1);
+			glBindBuffer(GL_ARRAY_BUFFER, mUVVertexBuffer);
+			glVertexAttribPointer(
+				1,                                // attribute
+				2,                                // size
+				GL_FLOAT,                         // type
+				GL_FALSE,                         // normalized?
+				0,                                // stride
+				(void*)0                          // array buffer offset
+			);
+		}
+		if (quad.NumberofNormals() > 0)
+		{
+			// 3rd attribute buffer : normals
+			glEnableVertexAttribArray(2);
+			glBindBuffer(GL_ARRAY_BUFFER, mNormalBuffer);
+			glVertexAttribPointer(
+				2,                                // attribute
+				3,                                // size
+				GL_FLOAT,                         // type
+				GL_FALSE,                         // normalized?
+				0,                                // stride
+				(void*)0                          // array buffer offset
+			);
+
+		}
+
+		// Set our "myTextureSampler" sampler to user Texture Unit 0
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_3D, mVolumeTexture);
+		glUniform1i(mVolumeTextureId, 0);
+
+		//Index buffer
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mElementbuffer);
+
+		// Draw the triangles !
+		glDrawElements(
+			GL_TRIANGLES,      // mode
+			indices.size(),    // count
+			GL_UNSIGNED_INT,   // type
+			(void*)0           // element array buffer offset
+		);
+
+		glDisableVertexAttribArray(0);
+		glDisableVertexAttribArray(1);
+		glDisableVertexAttribArray(2);
+	}
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::Draw(atBox& quad, int numberOfSlices, Matrix4f & viewMatrix, Matrix4f & projectionMatrix)
+{
+	Matrix4f currentModeMat = quad.GetModel();
+	Matrix4f MVPMatrix = projectionMatrix * viewMatrix * currentModeMat;
+	glUniformMatrix4fv(mMatrixID, 1, GL_FALSE, MVPMatrix.data());
+	glUniformMatrix4fv(mModelMatrixID, 1, GL_FALSE, currentModeMat.data());
+	glUniformMatrix4fv(mViewMatrixID, 1, GL_FALSE, viewMatrix.data());
+
+	/*for (int i = 0; i < numberOfSlices; i++)
+	{*/
+
+		//int sNumber = glGetUniformLocation(mProgramId, "sliceNumber");
+		//glUniform1i(sNumber, i);
+
+		//int totalSliceNum = glGetUniformLocation(mProgramId, "totalSlices");
+		//glUniform1f(totalSliceNum, ((float)(0.5f + i) / ((float)numberOfSlices)));
+
+		glEnableVertexAttribArray(0);
+		glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+		glVertexAttribPointer(
+			0,                  // attribute 0. No particular reason for 0, but must match the layout in the shader.
+			3,                  // size
+			GL_FLOAT,           // type
+			GL_FALSE,           // normalized?
+			0,                  // stride
+			(void*)0            // array buffer offset
+		);
+
+		//2nd attribute buffer : UVs
+		if (quad.mUVList.size() > 0)
+		{
+			glEnableVertexAttribArray(1);
+			glBindBuffer(GL_ARRAY_BUFFER, mUVVertexBuffer);
+			glVertexAttribPointer(
+				1,                                // attribute
+				2,                                // size
+				GL_FLOAT,                         // type
+				GL_FALSE,                         // normalized?
+				0,                                // stride
+				(void*)0                          // array buffer offset
+			);
+		}
+		if (quad.NumberofNormals() > 0)
+		{
+			// 3rd attribute buffer : normals
+			glEnableVertexAttribArray(2);
+			glBindBuffer(GL_ARRAY_BUFFER, mNormalBuffer);
+			glVertexAttribPointer(
+				2,                                // attribute
+				3,                                // size
+				GL_FLOAT,                         // type
+				GL_FALSE,                         // normalized?
+				0,                                // stride
+				(void*)0                          // array buffer offset
+			);
+
+		}
+
+		// Set our "VolumeTexure" sampler to user Texture Unit 0
+		glActiveTexture(GL_TEXTURE0);
+		glBindTexture(GL_TEXTURE_3D, mVolumeTexture);
+		glUniform1i(mVolumeTextureId, 0);
+
+		// Set our "TransferFunction" sampler to user Texture Unit 1
+		glActiveTexture(GL_TEXTURE1);
+		glBindTexture(GL_TEXTURE_1D, mTransferFunctionTexture);
+		glUniform1i(mTransferFunctionTextureId, 1);
+
+		//Index buffer
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mElementbuffer);
+
+		// Draw the triangles !
+		glDrawElements(
+			GL_TRIANGLES,      // mode
+			indices.size(),    // count
+			GL_UNSIGNED_INT,   // type
+			(void*)0           // element array buffer offset
+		);
+
+		glDisableVertexAttribArray(0);
+		glDisableVertexAttribArray(1);
+		glDisableVertexAttribArray(2);
+	//}
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::Setup3DTexture(const char * volume, unsigned int xRange, unsigned int yRange, unsigned int zRange)
+{
+
+	glGenTextures(1, &mVolumeTexture);
+
+	// bind 3D texture target
+	glBindTexture(GL_TEXTURE_3D, mVolumeTexture);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+	glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+
+	// pixel transfer happens here from client to OpenGL server
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage3D(GL_TEXTURE_3D, 0, GL_RED, xRange, yRange, zRange, 0, GL_RED, GL_UNSIGNED_BYTE, volume);
+	//glTexImage3D(GL_TEXTURE_3D, 0, GL_RGBA, xRange, yRange, zRange, 0, GL_RGBA, GL_UNSIGNED_BYTE, volume);
+
+	mVolumeTextureId = glGetUniformLocation(mProgramId, "VolumeTex");
+
+	//glUniform1i(mVolumeTextureId, 0);
+
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::Setup1DTexture(std::vector<Vector4f>& transferFunction)
+{		
+	glGenTextures(1, &mTransferFunctionTexture);
+	glBindTexture(GL_TEXTURE_1D, mTransferFunctionTexture);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+	glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+	glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, 256, 0, GL_RGBA, GL_FLOAT, transferFunction.data());	
+
+	mTransferFunctionTextureId = glGetUniformLocation(mProgramId, "TransferFunction");
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::SetupQuadRendering(atQuad& quad)
+{
+	//Setup Vertex Array
+	glGenVertexArrays(1, &mVertexArrayID);
+	glBindVertexArray(mVertexArrayID);
+
+	if (quad.NumberofNormals() > 0)
+	{
+		// Generate 1 buffer, put the resulting identifier in vertexbuffer
+		glGenBuffers(1, &mVertexBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+		// Give our vertices to OpenGL.
+		glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)*quad.NumberOfVertices(), &(quad.VertexList()[0]), GL_STATIC_DRAW);
+	}
+
+	if (quad.mUVList.size() > 0)
+	{
+		glGenBuffers(1, &mUVVertexBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mUVVertexBuffer);
+		glBufferData(GL_ARRAY_BUFFER, quad.mUVList.size() * sizeof(Vector2f), &(quad.mUVList[0]), GL_STATIC_DRAW);
+	}
+
+	if (quad.NumberofNormals() > 0)
+	{
+		glGenBuffers(1, &mNormalBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mNormalBuffer);
+		glBufferData(GL_ARRAY_BUFFER, quad.NumberofNormals() * sizeof(Vector3f), quad.NormalList().data(), GL_STATIC_DRAW);
+	}
+
+	// Generate a buffer for the indices as well
+	indices.clear();
+	quad.ConvertTriangleToVertIndexList(indices);
+
+	if (indices.size() > 0)
+	{
+		glGenBuffers(1, &mElementbuffer);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mElementbuffer);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
+	}
+
+	// Get a handle for our "MVP" uniform
+	mMatrixID = glGetUniformLocation(mProgramId, "MVP");
+	mViewMatrixID = glGetUniformLocation(mProgramId, "V");
+	mModelMatrixID = glGetUniformLocation(mProgramId, "M");
+	mTextureMatrixID = glGetUniformLocation(mProgramId, "T");
+}
+
+void atRenderEngine::Utility::atVolumeRenderingShader::SetupBoxRendering(atBox & box, int slices)
+{
+	//Setup Vertex Array
+	glGenVertexArrays(1, &mVertexArrayID);
+	glBindVertexArray(mVertexArrayID);
+
+	if (box.NumberofNormals() > 0)
+	{
+		// Generate 1 buffer, put the resulting identifier in vertexbuffer
+		glGenBuffers(1, &mVertexBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mVertexBuffer);
+		// Give our vertices to OpenGL.
+		glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3f)*box.NumberOfVertices(), &(box.VertexList()[0]), GL_STATIC_DRAW);
+	}
+
+	if (box.mUVList.size() > 0)
+	{
+		glGenBuffers(1, &mUVVertexBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mUVVertexBuffer);
+		glBufferData(GL_ARRAY_BUFFER, box.mUVList.size() * sizeof(Vector2f), &(box.mUVList[0]), GL_STATIC_DRAW);
+	}
+
+	if (box.NumberofNormals() > 0)
+	{
+		glGenBuffers(1, &mNormalBuffer);
+		glBindBuffer(GL_ARRAY_BUFFER, mNormalBuffer);
+		glBufferData(GL_ARRAY_BUFFER, box.NumberofNormals() * sizeof(Vector3f), box.NormalList().data(), GL_STATIC_DRAW);
+	}
+
+	// Generate a buffer for the indices as well
+	indices.clear();
+	box.ConvertTriangleToVertIndexList(indices);
+
+	if (indices.size() > 0)
+	{
+		glGenBuffers(1, &mElementbuffer);
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mElementbuffer);
+		glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
+	}
+
+	// Get a handle for our "MVP" uniform
+	mMatrixID = glGetUniformLocation(mProgramId, "MVP");
+	mViewMatrixID = glGetUniformLocation(mProgramId, "V");
+	mModelMatrixID = glGetUniformLocation(mProgramId, "M");
+	mTextureMatrixID = glGetUniformLocation(mProgramId, "T");
+}
+```
+
+### Common/Renderers/atVolumeRendererShader.h
+```
+#pragma once
+#include "atShader.h"
+#include "atBox.h"
+#include "atQuad.h"
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		class atVolumeRenderingShader :
+			public atShader
+		{
+		public:
+			atVolumeRenderingShader();
+			~atVolumeRenderingShader();
+			GLuint VolumeTexture() { return mVolumeTexture; }
+			void Setup(atQuad& quad, const char* volume, std::vector<Vector4f>& transferFunction, unsigned int xRange, unsigned int yRange, unsigned int zRange);
+			void Setup(atBox& quad, const char* volume, unsigned int xRange, unsigned int yRange, unsigned int zRange);
+			void Draw(std::vector<Vector3f>& vertexArray, std::vector<Vector3f>& colorArray, Matrix4f& MVPMatrix);
+			void Draw(atQuad& quad, int numberOfSlices, Matrix4f& viewMatrix, Matrix4f& projectionMatrix, Matrix4f& textureMatrix);
+			void Draw(atBox& quad, int numberOfSlices, Matrix4f& viewMatrix, Matrix4f& projectionMatrix);
+		private:
+			void Setup3DTexture(const char* volume, unsigned int xRange, unsigned int yRange, unsigned int zRange);
+			void Setup1DTexture(std::vector<Vector4f>& transferFunction);
+			void SetupQuadRendering(atQuad& quad);
+			void SetupBoxRendering(atBox& box, int slices);
+
+			//member variables
+			GLuint mTransferFunctionTexture;
+			GLuint mTransferFunctionTextureId;
+			GLuint mVolumeTexture;
+			GLuint mVolumeTextureId;
+			GLuint mElementbuffer;
+			GLuint mVertexArrayID;
+			GLuint mVertexBuffer;
+			GLuint mUVVertexBuffer;
+			GLuint mNormalBuffer;
+			GLuint mMatrixID;
+			GLuint mViewMatrixID;
+			GLuint mModelMatrixID;
+			GLuint mTextureMatrixID;
+
+			std::vector<unsigned int> indices;
+			std::vector<GLfloat> mVertexBufferData;
+			//atBox mBox;
+		};
+	}
+}
+```
+
+### Common/UI/atUserInterface.cpp
+```
+#include "atUserInterface.h"
+
+atRenderEngine::atUserInterface::atUserInterface(int width, int height)
+{
+	TwDefine(" GLOBAL fontscaling=5 "); // double the size of all fonts
+	// Initialize AntTweakBar
+	if (!TwInit(TW_OPENGL_CORE, NULL))
+	{
+		std::cout << "Ant Tweak Bar init failed" << std::endl;
+		return;
+	}
+	
+	// Tell the window size to AntTweakBar
+	TwWindowSize(width, height);
+
+	// Create a tweak bar
+	bar = TwNewBar("TweakBar");
+	TwDefine(" GLOBAL help='This example shows how to integrate AntTweakBar with SDL and OpenGL.\nPress [Space] to toggle fullscreen.' "); // Message added to the help bar.
+	TwDefine("TweakBar position= '0 0'");
+	TwDefine("TweakBar size= '300 1080'");
+	TwDefine("TweakBar resizable=true ");
+
+	TwDefine("TweakBar movable=true ");
+	// Add 'width' and 'height' to 'bar': they are read-only (RO) variables of type TW_TYPE_INT32.
+	TwAddVarRO(bar, "Width", TW_TYPE_INT32, &width,
+		" label='Wnd width' help='Width of the graphics window (in pixels)' ");
+
+	TwAddVarRO(bar, "Height", TW_TYPE_INT32, &height,
+		" label='Wnd height' help='Height of the graphics window (in pixels)' ");
+
+	// Add 'numCurves' to 'bar': this is a modifiable variable of type TW_TYPE_INT32. Its shortcuts are [c] and [C].
+	TwAddVarRW(bar, "NumCubes", TW_TYPE_INT32, &numCubes,
+		" label='Number of cubes' min=1 max=100 keyIncr=c keyDecr=C help='Defines the number of cubes in the scene.' ");
+
+	// Add 'ka', 'kb and 'kc' to 'bar': they are modifiable variables of type TW_TYPE_DOUBLE
+	TwAddVarRW(bar, "ka", TW_TYPE_DOUBLE, &ka,
+		" label='X path coeff' keyIncr=1 keyDecr=CTRL+1 min=-10 max=10 step=0.01 ");
+	TwAddVarRW(bar, "kb", TW_TYPE_DOUBLE, &kb,
+		" label='Y path coeff' keyIncr=2 keyDecr=CTRL+2 min=-10 max=10 step=0.01 ");
+	TwAddVarRW(bar, "kc", TW_TYPE_DOUBLE, &kc,
+		" label='Z path coeff' keyIncr=3 keyDecr=CTRL+3 min=-10 max=10 step=0.01 ");
+
+	// Add 'color0' and 'color1' to 'bar': they are modifable variables of type TW_TYPE_COLOR3F (3 floats color)
+	TwAddVarRW(bar, "color0", TW_TYPE_COLOR3F, &color0,
+		" label='Start color' help='Color of the first cube.' ");
+	TwAddVarRW(bar, "color1", TW_TYPE_COLOR3F, &color1,
+		" label='End color' help='Color of the last cube. Cube colors are interpolated between the Start and End colors.' ");
+
+	// Add 'quit' to 'bar': this is a modifiable (RW) variable of type TW_TYPE_BOOL32 
+	// (a boolean stored in a 32 bits integer). Its shortcut is [ESC].
+	TwAddVarRW(bar, "Quit", TW_TYPE_BOOL32, &quit,
+		" label='Quit?' true='+' false='-' key='ESC' help='Quit program.' ");
+
+}
+
+atRenderEngine::atUserInterface::~atUserInterface()
+{
+	TwTerminate();
+}
+
+void atRenderEngine::atUserInterface::Draw()
+{
+	TwDraw();
+}
+```
+
+### Common/UI/atUserInterface.h
+```
+#pragma once
+#include <AntTweakBar.h>
+#include <atUtility.h>
+
+namespace atRenderEngine
+{
+	class atUserInterface
+	{
+	public:
+		atUserInterface(int width, int height);
+		~atUserInterface();
+		virtual void Draw();
+
+		int width = 640, height = 480;
+		int bpp, flags;
+		int quit = 0;
+		TwBar *bar;
+		int n, numCubes = 30;
+		Eigen::Vector3f color0{ 1.0f, 0.5f, 0.0f };
+		Eigen::Vector3f color1{ 0.5f, 1.0f, 0.0f };
+		double ka = 5.3, kb = 1.7, kc = 4.1;
+
+	};
+}
+```
+
+### Common/Utilities/atCubicSpline.cpp
+```
+#include "atCubicSpline.h"
+using namespace atRenderEngine::Utility;
+
+atCubicSpline::atCubicSpline(Vector4f a, Vector4f b, Vector4f c, Vector4f d)
+	:mA(a),mB(b),mC(c),mD(d)
+{
+}
+
+Vector4f atRenderEngine::Utility::atCubicSpline::GetPointOnSpline(float s)
+{
+	return (((((mD * s) + mC) * s + mB) * s) + mA);
+}
+
+std::vector<atCubicSpline> atRenderEngine::Utility::CalculateCubicSpline(int n, std::vector<TransferFunction1DPoint> v)
+{
+	std::vector<Vector4f> gamma(n + 1);
+	std::vector<Vector4f> delta(n + 1);
+	std::vector<Vector4f> D(n + 1);
+	int i;
+	/* We need to solve the equation
+	* taken from: http://mathworld.wolfram.com/CubicSpline.html
+	[2 1       ] [D[0]]   [3(v[1] - v[0])  ]
+	|1 4 1     | |D[1]|   |3(v[2] - v[0])  |
+	|  1 4 1   | | .  | = |      .         |
+	|    ..... | | .  |   |      .         |
+	|     1 4 1| | .  |   |3(v[n] - v[n-2])|
+	[       1 2] [D[n]]   [3(v[n] - v[n-1])]
+
+	by converting the matrix to upper triangular.
+	The D[i] are the derivatives at the control points.
+	*/
+
+	Vector4f denominator;
+	//this builds the coefficients of the left matrix
+	gamma[0] = Vector4f::Zero();
+	gamma[0].x() = 1.0f / 2.0f;
+	gamma[0].y() = 1.0f / 2.0f;
+	gamma[0].z() = 1.0f / 2.0f;
+	gamma[0].w() = 1.0f / 2.0f;
+	for (i = 1; i < n; i++)
+	{
+		denominator = ((4 * Vector4f::Ones()) - gamma[i - 1]);
+		gamma[i] = Vector4f::Ones();
+		gamma[i].x() = 1.0f / denominator.x();
+		gamma[i].y() = 1.0f / denominator.y();
+		gamma[i].z() = 1.0f / denominator.z();
+		gamma[i].w() = 1.0f / denominator.w();
+	}
+	denominator = ((2 * Vector4f::Ones()) - gamma[n - 1]);
+	gamma[n] = Vector4f::Ones();
+	gamma[n].x() = 1.0f / denominator.x();
+	gamma[n].y() = 1.0f / denominator.y();
+	gamma[n].z() = 1.0f / denominator.z();
+	gamma[n].w() = 1.0f / denominator.w();
+
+	delta[0] = (3 * (v[1].colorValue - v[0].colorValue)).cwiseProduct(gamma[0]);
+	for (i = 1; i < n; i++)
+	{
+		delta[i] = (3 * (v[i + 1].colorValue - v[i - 1].colorValue) - delta[i - 1]).cwiseProduct(gamma[i]);
+	}
+	delta[n] = (3 * (v[n].colorValue - v[n - 1].colorValue) - delta[n - 1]).cwiseProduct(gamma[n]);
+
+	D[n] = delta[n];
+	for (i = n - 1; i >= 0; i--)
+	{
+		D[i] = delta[i] - (gamma[i].cwiseProduct(D[i + 1]));
+	}
+
+	// now compute the coefficients of the cubics 
+	std::vector<atCubicSpline> C(n);
+	for (i = 0; i < n; i++)
+	{
+		C[i] = atCubicSpline(v[i].colorValue, D[i], 3 * (v[i + 1].colorValue - v[i].colorValue) - 2 * D[i] - D[i + 1],
+			2 * (v[i].colorValue - v[i + 1].colorValue) + D[i] + D[i + 1]);
+	}
+	return C;
+}
+```
+
+### Common/Utilities/atCubicSpline.h
+```
+#pragma once
+#include "atUtility.h"
+
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		class atCubicSpline
+		{
+		public:
+			atCubicSpline() {}
+			atCubicSpline(Vector4f a, Vector4f b, Vector4f c, Vector4f d);
+			//evaluate the point using a cubic equation
+			Vector4f GetPointOnSpline(float s);			
+		private:
+			Vector4f mA, mB, mC, mD;
+		};
+
+		std::vector<atCubicSpline> CalculateCubicSpline(int n, std::vector<TransferFunction1DPoint> v);
+
+	}
+}
+```
+
+### Common/Utilities/atKDTree.cpp
+```
+#include "atKDTree.h"
+using namespace atRenderEngine::Utility;
+
+atKDNode::atKDNode(int idx, Vector3f element, int cd)
+	:data(idx, element, cd)
+{
+}
+
+atKDNode * atKDTree::insert(const Vector3f& element, const int elemIdx, atKDNode* t, int cd)
+{
+	if (t == nullptr)
+	{
+		t = new atKDNode(elemIdx, element, cd);
+		return t;
+	}
+	if (t->data.elementIdx == elemIdx || t->data.element == element)
+	{
+		//duplicate element - Deal with this. 
+	}
+	else if(element[cd] < t->data.element[cd])
+	{
+		int newCD = (cd + 1) % dimK;
+		t->leftTree = insert(element, elemIdx, (t->leftTree), newCD);
+	}
+	else
+	{
+		int newCD = (cd + 1) % dimK;
+		t->rightTree = insert(element, elemIdx, (t->rightTree), newCD);
+	}
+
+	return t;
+}
+
+bool atKDTree::SearchElement(const Vector3f& elem, atKDNode* topNode, NodeInfo& result, int cd)
+{
+	if (topNode == nullptr)
+	{
+		//reached end, search unsuccessful.
+		return false;
+	}
+	if (elem == topNode->data.element)
+	{
+		//found element, return data 
+		result.element = topNode->data.element;
+		result.elementIdx = topNode->data.elementIdx;
+		return true;
+	}
+	else
+	{
+		int newCD = (cd + 1) % dimK;
+		if (elem[cd] < topNode->data.element[cd])
+		{
+			SearchElement(elem, topNode->leftTree, result, newCD);
+		}
+		else
+		{
+			SearchElement(elem, topNode->rightTree, result, newCD);
+		}
+	}
+}
+
+void atKDTree::NearestNeighbor(atKDNode* topNode, const Vector3f& x, BoundingRect& boundRect, atKDNode*& nearest, float& distance , std::function<bool(atKDNode* )> conditionOperator)
+{
+	if (topNode == nullptr)
+		return;
+	if (&x == nullptr)
+		return;
+
+	atKDNode* nearSubTree; 
+	atKDNode* farSubTree;
+	float* nearBoundDim; 
+	float* farBoundDim;
+	float temp; 
+	float dist_sq;
+	int cd = topNode->data.splitDim;
+
+	if (x[cd] <= topNode->data.element[cd])
+	{
+		nearSubTree = topNode->leftTree;
+		farSubTree = topNode->rightTree;
+		nearBoundDim = &(boundRect.max[cd]);
+		farBoundDim = &(boundRect.min[cd]);
+	}
+	else
+	{
+		nearSubTree = topNode->rightTree;
+		farSubTree = topNode->leftTree;
+		nearBoundDim = &(boundRect.min[cd]);
+		farBoundDim = &(boundRect.max[cd]);
+	}
+
+	if (nearSubTree != nullptr)
+	{
+		temp = *nearBoundDim;
+		*nearBoundDim = topNode->data.element[cd];
+
+		NearestNeighbor(nearSubTree, x, boundRect, nearest, distance, conditionOperator);
+		
+		*nearBoundDim = temp;
+	}
+	if (conditionOperator == nullptr || conditionOperator(topNode))
+	{
+		dist_sq = Utility::SquaredDistance(topNode->data.element, x);
+		if (dist_sq < distance) {
+			nearest = topNode;
+			distance = dist_sq;
+		}
+	}
+	if (farSubTree != nullptr)
+	{
+		/* make a slice on the hyperrect */
+		temp = *farBoundDim;
+		*farBoundDim = topNode->data.element[cd];
+
+		/* Check if we have to recurse down by calculating the closest point of
+		the hyperrect and see if it's closer than our minimum distance in
+		nearest_dist_sq. */
+		
+		if (Utility::SquaredDistanceRect(&boundRect, x) < distance)
+		{
+			/* recurse down into further subtree */
+			NearestNeighbor(farSubTree, x, boundRect, nearest, distance, conditionOperator);
+		}
+
+		/* undo the slice on the hyperrect */
+		*farBoundDim = temp;
+	}
+}
+
+int atKDTree::RangeSearch(atKDNode* topNode, const Vector3f& x, float& range, vector<atKDNode*>& result, vector<float>& distance, std::function<bool(atKDNode*)> conditionOperator)
+{
+	if (topNode == nullptr)
+	{
+		return 0; 
+	}
+	atKDNode* nearSubTree;
+	atKDNode* farSubTree;
+	int inBound = 0;
+	float distSq = SquaredDistance(topNode->data.element, x);
+
+	if (distSq < range*range)
+	{
+		inBound = 1;
+
+		if (conditionOperator == nullptr || conditionOperator(topNode))
+		{
+			result.push_back(topNode);
+			distance.push_back(distSq);
+		}
+	}
+	int cd = topNode->data.splitDim;
+	float dx = x[cd] - topNode->data.element[cd]; 
+	if (dx <= 0)
+	{
+		nearSubTree = topNode->leftTree;
+		farSubTree = topNode->rightTree;
+	}
+	else
+	{
+		nearSubTree = topNode->rightTree;
+		farSubTree = topNode->leftTree;
+	}
+
+	int ret = RangeSearch(nearSubTree, x, range, result, distance, conditionOperator);
+	inBound += ret;
+
+	if (ret >= 0 && fabs(dx) < range)
+	{
+		inBound += RangeSearch(farSubTree, x, range, result, distance, conditionOperator);
+	}
+
+	return inBound;
+}
+
+atKDTree::atKDTree(int k = 3)
+	:dimK(k)
+{
+}
+
+atKDTree::~atKDTree()
+{
+}
+
+void atKDTree::BuildTree(vector<Vector3f> listOfElements)
+{
+	int cd = -1;
+	for (int i = 0; i < listOfElements.size(); i++)
+	{
+		cd = (i) % dimK;
+		root = insert(listOfElements[i], i, root, cd);
+	}
+}
+```
+
+### Common/Utilities/atKDTree.h
+```
+#pragma once
+#include <vector>
+#include <Eigen/Core>
+#include "atUtility.h"
+using namespace std;
+using namespace Eigen;
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		//enum SplitDimension
+		//{
+		//	dimX = 0,
+		//	dimY, 
+		//	dimZ
+		//};
+
+		struct NodeInfo
+		{
+			int splitDim;
+			int elementIdx;
+			Vector3f element;
+
+			NodeInfo(int idx, Vector3f elem, int currentDim)
+				: elementIdx(idx), element(elem), splitDim(currentDim){}
+		};
+		class atKDNode
+		{
+		public:
+			NodeInfo data;
+			atKDNode* leftTree;
+			atKDNode* rightTree;
+		
+			atKDNode(int idx, Vector3f element, int cd);
+		};
+		class atKDTree
+		{
+			const int dimK; 
+			 
+			
+			atKDNode* insert(const Vector3f& element ,const int elemIdx, atKDNode* t, int cd);
+			
+		public:			
+			atKDNode* root;
+			
+			atKDTree(int k);
+			~atKDTree();
+			void BuildTree(vector<Vector3f> listOfElements);
+			bool SearchElement(const Vector3f & elem, atKDNode * topNode, NodeInfo & result, int cd);
+			void NearestNeighbor(atKDNode * topNode, const Vector3f & x, BoundingRect & boundRect, atKDNode*& nearest, float & distance, std::function<bool(atKDNode*)> conditionOperator);
+			int RangeSearch(atKDNode * topNode, const Vector3f & x, float & range, vector<atKDNode*>& result, vector<float>& distance, std::function<bool(atKDNode*)> conditionOperator);
+		};
+	}
+}
+```
+
+### Common/Utilities/atKDTreeBBox.cpp
+```
+#include "atKDTreeBBox.h"
+#include "atMesh.h"
+
+using namespace atRenderEngine;
+using namespace atRenderEngine::Utility;
+
+Utility::atKDNodeBBox::atKDNodeBBox(std::vector<int>& indices, int cd, BoundingRect bBox)
+	:data(indices, cd, bBox)
+{
+}
+
+void Utility::atKDTreeBBox::insert(std::vector<int>& indices, atMeshData& mesh, atKDNodeBBox* t, int cd , int depth)
+{
+
+	if (t == nullptr)
+		return;
+	//{
+	//	BoundingRect bBox = mesh.ComputeBoundingBox(indices);
+	//	t = new atKDNodeBBox(indices, cd, bBox);		
+	//}
+	if (indices.size() == 0 || depth == 3 )
+	{
+		t->leftTree = nullptr;
+		t->rightTree = nullptr;		 
+	}
+	else
+	{
+		//Split tree into two halves and recurse. 
+		BoundingRect leftBBox = t->data.bbox;
+		BoundingRect rightBBox = t->data.bbox;
+
+		leftBBox.min[cd] +=  (leftBBox.max[cd] - leftBBox.min[cd] )/ 2.0f;
+		rightBBox.max[cd] -= (rightBBox.max[cd] - rightBBox.min[cd]) / 2.0f;
+
+		std::vector<int> leftTriIndices;
+		std::vector<int> rightTriIndices; 
+
+		for (int i = 0; i < indices.size(); i++)
+		{
+			int triIdx = indices[i];
+			Vector3f v[3]; 
+			v[0] = mesh.VertexList()[mesh.TriangleList()[triIdx].vertexIdx[0]];
+			v[1] = mesh.VertexList()[mesh.TriangleList()[triIdx].vertexIdx[1]];
+			v[2] = mesh.VertexList()[mesh.TriangleList()[triIdx].vertexIdx[2]];
+
+			BoundingBoxContains IsContained = Utility::IsWithinBoundingBox(leftBBox, v , cd);
+			if (IsContained == BoundingBoxContains::BB_FULLY_WITHIN  || IsContained == BoundingBoxContains::BB_PARTIALLY_WITHIN)
+			{
+				leftTriIndices.push_back(triIdx);				
+			}
+			IsContained = Utility::IsWithinBoundingBox(rightBBox, v , cd);
+			if (IsContained == BoundingBoxContains::BB_FULLY_WITHIN || IsContained == BoundingBoxContains::BB_PARTIALLY_WITHIN)
+			{				
+				rightTriIndices.push_back(triIdx);
+			}
+			/*if(IsContained == BoundingBoxContains::BB_NOT_WITHIN)
+			{
+				rightTriIndices.push_back(i);
+			}*/
+		}
+
+		// recurse down each subtree. 
+
+		t->leftTree = new atKDNodeBBox(leftTriIndices, cd, leftBBox);
+		t->leftTree->name = "Left - " + std::to_string(depth);
+		//t->rightTree == nullptr;
+		t->rightTree = new atKDNodeBBox(rightTriIndices, cd, rightBBox);
+		t->rightTree->name = "Right - " + std::to_string(depth);
+		//std::cout << "Depth : " << depth << " Split Dim  : " << cd << std::endl;
+		//std::cout << "Left tree \n";
+		//std::cout << "Min : " << leftBBox.min.x() << " , " << leftBBox.min.y() << " , " << leftBBox.min.z()  << std::endl;
+		//std::cout << "Max : " << leftBBox.max.x() << " , " << leftBBox.max.y() << " , " << leftBBox.max.z() << std::endl;
+		//std::cout << "Right tree \n";
+		//std::cout << "Min : " << rightBBox.min.x() << " , " << rightBBox.min.y() << " , " << rightBBox.min.z() << std::endl;
+		//std::cout << "Max : " << rightBBox.max.x() << " , " << rightBBox.max.y() << " , " << rightBBox.max.z() << std::endl;
+		//std::cout << std::endl;
+		
+		int newCD = (cd + 1) % 3; 
+		insert(leftTriIndices, mesh, t->leftTree, newCD, depth + 1);
+		insert(rightTriIndices, mesh, t->rightTree, newCD, depth + 1);		
+	}	
+}
+
+void Utility::atKDTreeBBox::BuildTree( atMeshData& mesh)
+{
+	std::vector<int> listOfIndices;
+	for (int i = 0; i < mesh.NumberOfTriangles(); i++)
+	{
+		listOfIndices.push_back(i);
+	}
+	root = new atKDNodeBBox(listOfIndices, 0, mesh.ComputeBoundingBox());
+	root->name = "Root";
+	insert(listOfIndices, mesh, root,1 , 0);
+
+	programID = Utility::atLoadShaders("../Common/Shaders/SimpleColor.vs", "../Common/Shaders/SimpleColor.fs");
+}
+
+bool Utility::atKDTreeBBox::IntersectingBBox(const Utility::RayData& x, atKDNodeBBox*& nearest, Matrix4f& modelMatrix, Vector3f& scaleFactor )
+{
+	bool found = false; 
+	int depth = -1; 
+	float distance;
+	IntersectingBBox(root, x, nearest, modelMatrix,scaleFactor, nullptr, found, depth, distance);
+	if (found)
+	{
+		std::cout << "Found in node  : " << nearest->name << std::endl;
+		drawableBBox = nearest; 
+	}
+		
+	return found;
+}
+void Utility::atKDTreeBBox::IntersectingBBox(atKDNodeBBox* topNode, const Utility::RayData& x, atKDNodeBBox*& nearest,Matrix4f& modelMatrix, Vector3f& scaleFactor , std::function<bool(atKDNodeBBox*)> conditionOperator, bool& found, int& depth , float& distance )
+{
+	if (topNode == nullptr)
+		return;
+	if (&x == nullptr)
+		return;
+	float distLeft = 1000000.0, distRight = 1000000.0;
+	std::cout << " BBox Name : " << topNode->name << std::endl;
+	if ((conditionOperator == nullptr || conditionOperator(topNode))&& 
+		Utility::TestRayOBBIntersection(x.rayOrigin, x.rayDirection, topNode->data.bbox.min.cwiseProduct(scaleFactor), topNode->data.bbox.max.cwiseProduct(scaleFactor), modelMatrix, distance))
+	{
+		std::cout << "Found Intersection for " << topNode->name << std::endl;
+		nearest = topNode; 
+		found = true; 
+		depth = depth + 1;
+		atKDNodeBBox* tempNodeLeft = nullptr, *tempNodeRight = nullptr;
+
+		IntersectingBBox(topNode->leftTree, x, tempNodeLeft, modelMatrix, scaleFactor, conditionOperator, found,depth, distLeft);
+		IntersectingBBox(topNode->rightTree, x, tempNodeRight, modelMatrix,scaleFactor, conditionOperator, found,depth , distRight);
+		if (distLeft < distRight && tempNodeLeft->data.elementIdx.size()>0)
+		{
+			nearest = tempNodeLeft;
+			distance = distLeft;
+		}
+		else if(distLeft > distRight && tempNodeRight->data.elementIdx.size()>0)
+		{
+			nearest = tempNodeRight;
+			distance = distRight;
+		}
+		/*if (distLeft != 1000000.0 && distRight != 1000000.0)
+		{
+			
+		}*/
+	}
+	else
+		return;
+}
+
+void Utility::atKDTreeBBox::Draw(Matrix4f& MVP)
+{
+	if (drawableBBox == nullptr)
+		DrawRecursive(root, MVP);
+	else
+		DrawBoundingBox(drawableBBox, MVP);
+	/*DrawBoundingBox(root->leftTree, MVP);
+	DrawBoundingBox(root->rightTree, MVP);*/
+}
+void Utility::atKDTreeBBox::DrawBoundingBox(atKDNodeBBox* node, Matrix4f& MVP)
+{
+	if (node == nullptr)
+		return;
+	Vector3f bbMin = node->data.bbox.min;
+	Vector3f bbMax = node->data.bbox.max;
+
+	GLfloat g_vertex_buffer_data[] =
+	{
+		bbMin.x(), bbMin.y(),bbMin.z(),
+		bbMin.x(), bbMax.y(),bbMin.z(),
+
+		bbMin.x(), bbMax.y(),bbMin.z(),
+		bbMin.x(), bbMax.y(),bbMax.z(),
+
+
+		bbMin.x(), bbMax.y(),bbMax.z(),
+		bbMin.x(), bbMin.y(),bbMax.z(),
+
+		bbMin.x(), bbMin.y(),bbMax.z(),
+		bbMin.x(), bbMin.y(),bbMin.z(),
+
+
+
+		bbMax.x(), bbMin.y(),bbMin.z(),
+		bbMax.x(), bbMax.y(),bbMin.z(),
+
+		bbMax.x(), bbMax.y(),bbMin.z(),
+		bbMax.x(), bbMax.y(),bbMax.z(),
+
+		bbMax.x(), bbMax.y(),bbMax.z(),
+		bbMax.x(), bbMin.y(),bbMax.z(),
+
+		bbMax.x(), bbMin.y(),bbMax.z(),
+		bbMax.x(), bbMin.y(),bbMin.z(),
+
+
+		bbMin.x(), bbMin.y(),bbMin.z(),
+		bbMax.x(), bbMin.y(),bbMin.z(),
+
+		bbMin.x(), bbMax.y(),bbMin.z(),
+		bbMax.x(), bbMax.y(),bbMin.z(),
+
+		bbMin.x(), bbMax.y(),bbMax.z(),
+		bbMax.x(), bbMax.y(),bbMax.z(),
+
+		bbMin.x(), bbMin.y(),bbMax.z(),
+		bbMax.x(), bbMin.y(),bbMax.z()
+
+	};
+	GLuint VertexArrayID;
+	glGenVertexArrays(1, &VertexArrayID);
+	glBindVertexArray(VertexArrayID);
+
+
+	// Get a handle for our "MVP" uniform
+	GLuint MatrixID = glGetUniformLocation(programID, "MVP");
+
+	GLuint vertexbuffer;
+	glGenBuffers(1, &vertexbuffer);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	glBufferData(GL_ARRAY_BUFFER, sizeof(g_vertex_buffer_data), g_vertex_buffer_data, GL_STATIC_DRAW);
+
+	glUseProgram(programID);
+
+	// Send our transformation to the currently bound shader, 
+	// in the "MVP" uniform
+	glUniformMatrix4fv(MatrixID, 1, GL_FALSE, MVP.data());
+
+	// 1rst attribute buffer : vertices
+	glEnableVertexAttribArray(0);
+	glBindBuffer(GL_ARRAY_BUFFER, vertexbuffer);
+	glVertexAttribPointer(
+		0,                  // attribute. No particular reason for 0, but must match the layout in the shader.
+		3,                  // size
+		GL_FLOAT,           // type
+		GL_FALSE,           // normalized?
+		0,                  // stride
+		(void*)0            // array buffer offset
+	);
+
+	// Draw the triangle !
+	glDrawArrays(GL_LINES, 0, 8 * 3); // 12*3 indices starting at 0 -> 12 triangles
+
+	glDisableVertexAttribArray(0);
+}
+void Utility::atKDTreeBBox::DrawRecursive(atKDNodeBBox* node, Matrix4f& MVP)
+{
+	if (node == nullptr)
+		return;
+	else
+	{
+		DrawBoundingBox(node, MVP);
+
+		DrawRecursive(node->leftTree, MVP);
+		DrawRecursive(node->rightTree, MVP);
+	}
+}
+Utility::atKDTreeBBox::atKDTreeBBox()
+	:drawableBBox(nullptr)
+{
+}
+
+Utility::atKDTreeBBox::~atKDTreeBBox()
+{
+}
+```
+
+### Common/Utilities/atKDTreeBBox.h
+```
+#pragma once
+#include "atUtility.h"
+//#include "atMesh.h"
+
+namespace atRenderEngine
+{
+	class atMeshData;
+	namespace Utility
+	{
+		struct NodeInfoBBox
+		{
+			int splitDim;
+			std::vector<int> elementIdx;
+			BoundingRect bbox;
+			//TriangleData element;
+
+			NodeInfoBBox(std::vector<int>& idx, int currentDim, BoundingRect bBox)
+				: elementIdx(idx), splitDim(currentDim), bbox(bBox) {}
+		};
+
+		class atKDNodeBBox
+		{
+		public:
+			std::string name; 
+			NodeInfoBBox data;
+			atKDNodeBBox* leftTree;
+			atKDNodeBBox* rightTree;
+
+			atKDNodeBBox(std::vector<int>& indices, int cd, BoundingRect bBox);
+			
+		};
+		class atKDTreeBBox
+		{
+			void insert(std::vector<int>& indices, atMeshData& mesh, atKDNodeBBox* t, int cd, int depth);
+		public:
+			atKDNodeBBox* root;
+			atKDNodeBBox* drawableBBox; 
+			void BuildTree(atMeshData& mesh);
+			bool IntersectingBBox(const Utility::RayData & x, atKDNodeBBox *& nearest, Matrix4f & modelMatrix, Vector3f& scaleFactor);
+			void IntersectingBBox(atKDNodeBBox * topNode, const Utility::RayData & x, atKDNodeBBox *& nearest, Matrix4f& modelMatrix, Vector3f& scaleFactor, std::function<bool(atKDNodeBBox*)> conditionOperator, bool& found, int& depth , float& distance);
+			atKDTreeBBox();
+			~atKDTreeBBox();
+			void Draw(Matrix4f&);
+			void DrawBoundingBox(atKDNodeBBox * node, Matrix4f & MVP);
+			void DrawRecursive(atKDNodeBBox * node, Matrix4f & MVP);
+		private:
+			GLuint programID; 
+		};
+
+		
+
+	}
+}
+```
+
+### Common/Utilities/atUtility.cpp
+```
+#include "atUtility.h"
+#include "atLineShader.h"
+#include <iostream>
+using namespace atRenderEngine;
+
+GLuint Utility::atLoadShaders(const char * vertexShaderPath, const char * fragmentShaderPath)
+{
+	// Create the shaders
+	GLuint VertexShaderID = glCreateShader(GL_VERTEX_SHADER);
+	GLuint FragmentShaderID = glCreateShader(GL_FRAGMENT_SHADER);
+
+	// Read the Vertex Shader code from the file
+	std::string VertexShaderCode;
+	std::ifstream VertexShaderStream(vertexShaderPath, std::ios::in);
+	if (VertexShaderStream.is_open())
+	{
+		std::string Line = "";
+		while (getline(VertexShaderStream, Line))
+			VertexShaderCode += "\n" + Line;
+		VertexShaderStream.close();
+	}
+
+	// Read the Fragment Shader code from the file
+	std::string FragmentShaderCode;
+	std::ifstream FragmentShaderStream(fragmentShaderPath, std::ios::in);
+	if (FragmentShaderStream.is_open()) {
+		std::string Line = "";
+		while (getline(FragmentShaderStream, Line))
+			FragmentShaderCode += "\n" + Line;
+		FragmentShaderStream.close();
+	}
+
+	GLint Result = GL_FALSE;
+	int InfoLogLength;
+
+	// Compile Vertex Shader
+	printf("Compiling shader : %s\n", vertexShaderPath);
+	char const * VertexSourcePointer = VertexShaderCode.c_str();
+	glShaderSource(VertexShaderID, 1, &VertexSourcePointer, NULL);
+	glCompileShader(VertexShaderID);
+
+	// Check Vertex Shader
+	glGetShaderiv(VertexShaderID, GL_COMPILE_STATUS, &Result);
+	glGetShaderiv(VertexShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+	if (InfoLogLength > 0)
+	{
+		std::vector<char> VertexShaderErrorMessage(InfoLogLength);
+		glGetShaderInfoLog(VertexShaderID, InfoLogLength, NULL, &VertexShaderErrorMessage[0]);
+		fprintf(stdout, "%s\n", &VertexShaderErrorMessage[0]);
+	}
+
+
+	// Compile Fragment Shader
+	printf("Compiling shader : %s\n", fragmentShaderPath);
+	char const * FragmentSourcePointer = FragmentShaderCode.c_str();
+	glShaderSource(FragmentShaderID, 1, &FragmentSourcePointer, NULL);
+	glCompileShader(FragmentShaderID);
+
+	// Check Fragment Shader
+	glGetShaderiv(FragmentShaderID, GL_COMPILE_STATUS, &Result);
+	glGetShaderiv(FragmentShaderID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+	if (InfoLogLength > 0)
+	{
+		std::vector<char> FragmentShaderErrorMessage(InfoLogLength);
+		glGetShaderInfoLog(FragmentShaderID, InfoLogLength, NULL, &FragmentShaderErrorMessage[0]);
+		fprintf(stdout, "%s\n", &FragmentShaderErrorMessage[0]);
+	}
+
+
+	// Link the program
+	fprintf(stdout, "Linking program\n");
+	GLuint ProgramID = glCreateProgram();
+	glAttachShader(ProgramID, VertexShaderID);
+	glAttachShader(ProgramID, FragmentShaderID);
+	glLinkProgram(ProgramID);
+
+	// Check the program
+	glGetProgramiv(ProgramID, GL_LINK_STATUS, &Result);
+	glGetProgramiv(ProgramID, GL_INFO_LOG_LENGTH, &InfoLogLength);
+	std::vector<char> ProgramErrorMessage(std::fmaxl(InfoLogLength, int(1)));
+	glGetProgramInfoLog(ProgramID, InfoLogLength, NULL, &ProgramErrorMessage[0]);
+	if(InfoLogLength >0)
+		fprintf(stdout, "%s\n", &ProgramErrorMessage[0]);
+
+	glDeleteShader(VertexShaderID);
+	glDeleteShader(FragmentShaderID);
+
+	return ProgramID;
+}
+
+void Utility::atErrorCallback(int error, const char * description)
+{
+	std::cerr << description << std::endl;
+}
+float Utility::SquaredDistance(const Vector3f & a, const Vector3f & b)
+{
+	float x = a.x() - b.x();
+	float y = a.y() - b.y();
+	float z = a.z() - b.z();
+
+	return x*x + y* y + z*z;
+}
+float Utility::SquaredDistanceRect(const BoundingRect *rect, const Vector3f& x0)
+{
+	int i_dim;
+	float dist_sq = 0;
+
+	for (i_dim = 0; i_dim < 3; i_dim++)
+	{
+		if (x0[i_dim] < rect->min[i_dim]) {
+			dist_sq +=
+				(rect->min[i_dim] - x0[i_dim]) *
+				(rect->min[i_dim] - x0[i_dim]);
+		}
+		else if (x0[i_dim] > rect->max[i_dim]) {
+			dist_sq +=
+				(rect->max[i_dim] - x0[i_dim]) *
+				(rect->max[i_dim] - x0[i_dim]);
+		}
+	}
+
+	return dist_sq;
+}
+
+Utility::BoundingBoxContains Utility::IsWithinBoundingBox(const BoundingRect & rect, const Vector3f v[3] , int cd)
+{
+	bool result[3] = { true, true,true };
+	BoundingBoxContains containsResult = BoundingBoxContains::BB_NOT_WITHIN;
+	for (int i = 0; i < 3; i++)
+	{
+		result[i] = result[i] && (rect.max[cd] >= v[i][cd] && v[i][cd] >= rect.min[cd]);		
+	}
+
+	if (result[0] && result[1] && result[2])
+		containsResult = BoundingBoxContains::BB_FULLY_WITHIN;
+	else if (result[0] || result[1] || result[2])
+		containsResult = BoundingBoxContains::BB_PARTIALLY_WITHIN;
+
+	return containsResult;
+}
+Utility::BoundingBoxContains Utility::IsWithinBoundingBox(const BoundingRect & rect, const Vector3f v[3])
+{
+	bool result[3] = { true, true,true };
+	BoundingBoxContains containsResult = BoundingBoxContains::BB_NOT_WITHIN;
+	for (int i = 0; i < 3; i++)
+	{
+		result[i] = result[i] && (rect.max.x() >= v[i].x() && v[i].x() >= rect.min.x());
+		result[i] = result[i] && (rect.max.y() >= v[i].y() && v[i].y() >= rect.min.y());
+		result[i] = result[i] && (rect.max.z() >= v[i].z() && v[i].z() >= rect.min.z());
+	}
+
+	if (result[0] && result[1] && result[2])
+		containsResult = BoundingBoxContains::BB_FULLY_WITHIN;
+	else if (result[0] || result[1] || result[2])
+		containsResult = BoundingBoxContains::BB_PARTIALLY_WITHIN;
+
+	return containsResult;
+}
+
+void Utility::ScreenPosToWorldRay(
+	int mouseX, int mouseY,             // Mouse position, in pixels, from bottom-left corner of the window
+	int screenWidth, int screenHeight,  // Window size, in pixels
+	Matrix4f ViewMatrix,               // Camera position and orientation
+	Matrix4f ProjectionMatrix,         // Camera parameters (ratio, field of view, near and far planes)
+	Vector3f& out_origin,              // Ouput : Origin of the ray. /!\ Starts at the near plane, so if you want the ray to start at the camera's position instead, ignore this.
+	Vector3f& out_direction            // Ouput : Direction, in world space, of the ray that goes "through" the mouse.
+) {
+
+	// The ray Start and End positions, in Normalized Device Coordinates (Have you read Tutorial 4 ?)
+	Vector4f lRayStart_NDC(
+		((float)mouseX / (float)screenWidth - 0.5f) * 2.0f, // [0,1024] -> [-1,1]
+		((float)mouseY / (float)screenHeight - 0.5f) * -2.0f, // [0, 768] -> [-1,1]
+		-1.0, // The near plane maps to Z=-1 in Normalized Device Coordinates
+		1.0f
+	);
+	Vector4f lRayEnd_NDC(
+		((float)mouseX / (float)screenWidth - 0.5f) * 2.0f,
+		((float)mouseY / (float)screenHeight - 0.5f) * -2.0f,
+		0.0,
+		1.0f
+	);
+
+
+	// The Projection matrix goes from Camera Space to NDC.
+	// So inverse(ProjectionMatrix) goes from NDC to Camera Space.
+	Matrix4f InverseProjectionMatrix = ProjectionMatrix.inverse();
+
+	// The View Matrix goes from World Space to Camera Space.
+	// So inverse(ViewMatrix) goes from Camera Space to World Space.
+	Matrix4f InverseViewMatrix = ViewMatrix.inverse();
+
+	Vector4f lRayStart_camera = InverseProjectionMatrix * lRayStart_NDC;    lRayStart_camera /=lRayStart_camera.w();
+	Vector4f lRayStart_world = InverseViewMatrix       * lRayStart_camera; lRayStart_world /= lRayStart_world.w();
+	Vector4f lRayEnd_camera = InverseProjectionMatrix * lRayEnd_NDC;      lRayEnd_camera /= lRayEnd_camera.w();
+	Vector4f lRayEnd_world = InverseViewMatrix       * lRayEnd_camera;   lRayEnd_world /= lRayEnd_world.w();
+
+
+	// Faster way (just one inverse)
+	//Matrix4f M = glm::inverse(ProjectionMatrix * ViewMatrix);
+	//Vector4f lRayStart_world = M * lRayStart_NDC; lRayStart_world/=lRayStart_world.w;
+	//Vector4f lRayEnd_world   = M * lRayEnd_NDC  ; lRayEnd_world  /=lRayEnd_world.w;
+
+	Vector4f result = lRayEnd_world - lRayStart_world;
+	Vector3f lRayDir_world(result.x(), result.y(), result.z());
+	lRayDir_world = lRayDir_world.normalized();
+
+
+	out_origin = Vector3f(lRayStart_world.x(), lRayStart_world.y(), lRayStart_world.z());
+	out_direction = Vector3f(lRayDir_world).normalized();
+}
+
+
+bool Utility::TestRayOBBIntersection(
+	Vector3f ray_origin,        // Ray origin, in world space
+	Vector3f ray_direction,     // Ray direction (NOT target position!), in world space. Must be normalize()'d.
+	Vector3f aabb_min,          // Minimum X,Y,Z coords of the mesh when not transformed at all.
+	Vector3f aabb_max,          // Maximum X,Y,Z coords. Often aabb_min*-1 if your mesh is centered, but it's not always the case.
+	Matrix4f ModelMatrix,       // Transformation applied to the mesh (which will thus be also applied to its bounding box)
+	float& intersection_distance // Output : distance between ray_origin and the intersection with the OBB
+)
+{
+
+	//std::cout << "Test OBB  \n" ;
+	//std::cout << "Min : " << aabb_min.x() << " , " << aabb_min.y() << " , " << aabb_min.z() << std::endl;
+	//std::cout << "Max : " << aabb_max.x() << " , " << aabb_max.y() << " , " << aabb_max.z() << std::endl;
+
+	//std::cout << ModelMatrix(0, 0) << "\t" << ModelMatrix(0, 1) << "\t" << ModelMatrix(0, 2) << "\t" << ModelMatrix(0, 3) << std::endl;
+	//std::cout << ModelMatrix(1, 0) << "\t" << ModelMatrix(1, 1) << "\t" << ModelMatrix(1, 2) << "\t" << ModelMatrix(1, 3) << std::endl;
+	//std::cout << ModelMatrix(2, 0) << "\t" << ModelMatrix(2, 1) << "\t" << ModelMatrix(2, 2) << "\t" << ModelMatrix(2, 3) << std::endl;
+	//std::cout << ModelMatrix(3, 0) << "\t" << ModelMatrix(3, 1) << "\t" << ModelMatrix(3, 2) << "\t" << ModelMatrix(3, 3) << std::endl;
+
+	// Intersection method from Real-Time Rendering and Essential Mathematics for Games
+
+	float tMin = 0.0f;
+	float tMax = 100000.0f;
+
+	Vector3f OBBposition_worldspace(ModelMatrix(0,3), ModelMatrix(1,3), ModelMatrix(2,3));
+
+	Vector3f delta = OBBposition_worldspace - ray_origin;
+
+	// Test intersection with the 2 planes perpendicular to the OBB's X axis
+	{
+		Vector3f xaxis = Vector3f(ModelMatrix(0, 0), ModelMatrix(1, 0), ModelMatrix(2, 0));
+		
+		float e = xaxis.dot(delta);
+		float f = ray_direction.dot(xaxis);
+
+		if (fabs(f) > 0.001f) { // Standard case
+
+			float t1 = (e + aabb_min.x()) / f; // Intersection with the "left" plane
+			float t2 = (e + aabb_max.x()) / f; // Intersection with the "right" plane
+											 // t1 and t2 now contain distances betwen ray origin and ray-plane intersections
+
+											 // We want t1 to represent the nearest intersection, 
+											 // so if it's not the case, invert t1 and t2
+			if (t1>t2) {
+				float w = t1; t1 = t2; t2 = w; // swap t1 and t2
+			}
+
+			// tMax is the nearest "far" intersection (amongst the X,Y and Z planes pairs)
+			if (t2 < tMax)
+				tMax = t2;
+			// tMin is the farthest "near" intersection (amongst the X,Y and Z planes pairs)
+			if (t1 > tMin)
+				tMin = t1;
+
+			// And here's the trick :
+			// If "far" is closer than "near", then there is NO intersection.
+			// See the images in the tutorials for the visual explanation.
+			if (tMax < tMin)
+				return false;
+
+		}
+		else { // Rare case : the ray is almost parallel to the planes, so they don't have any "intersection"
+			if (-e + aabb_min.x() > 0.0f || -e + aabb_max.x() < 0.0f)
+				return false;
+		}
+	}
+
+
+	// Test intersection with the 2 planes perpendicular to the OBB's Y axis
+	// Exactly the same thing than above.
+	{
+		Vector3f yaxis = Vector3f(ModelMatrix(0, 1), ModelMatrix(1, 1), ModelMatrix(2, 1));
+		float e = yaxis.dot(delta);
+		float f = ray_direction.dot( yaxis);
+
+		if (fabs(f) > 0.001f) {
+
+			float t1 = (e + aabb_min.y()) / f;
+			float t2 = (e + aabb_max.y()) / f;
+
+			if (t1>t2) { float w = t1; t1 = t2; t2 = w; }
+
+			if (t2 < tMax)
+				tMax = t2;
+			if (t1 > tMin)
+				tMin = t1;
+			if (tMin > tMax)
+				return false;
+
+		}
+		else {
+			if (-e + aabb_min.y() > 0.0f || -e + aabb_max.y() < 0.0f)
+				return false;
+		}
+	}
+
+
+	// Test intersection with the 2 planes perpendicular to the OBB's Z axis
+	// Exactly the same thing than above.
+	{
+		Vector3f zaxis = Vector3f(ModelMatrix(0, 2), ModelMatrix(1, 2), ModelMatrix(2, 2));
+		float e = zaxis.dot( delta);
+		float f = ray_direction.dot( zaxis);
+
+		if (fabs(f) > 0.001f) {
+
+			float t1 = (e + aabb_min.z()) / f;
+			float t2 = (e + aabb_max.z()) / f;
+
+			if (t1>t2) { float w = t1; t1 = t2; t2 = w; }
+
+			if (t2 < tMax)
+				tMax = t2;
+			if (t1 > tMin)
+				tMin = t1;
+			if (tMin > tMax)
+				return false;
+
+		}
+		else {
+			if (-e + aabb_min.z() > 0.0f || -e + aabb_max.z() < 0.0f)
+				return false;
+		}
+	}
+
+	intersection_distance = tMin;
+	return true;
+
+}
+
+bool Utility::RayTriangleIntersection(Utility::RayData ray, Vector3f v1, Vector3f v2, Vector3f v3, float& result )
+{
+#define EPSILON 0.000001
+
+	//int triangle_intersection(const Vec3   V1,  // Triangle vertices
+	//	const Vec3   V2,
+	//	const Vec3   V3,
+	//	const Vec3    O,  //Ray origin
+	//	const Vec3    D,  //Ray direction
+	//	float* out)
+	{
+		Vector3f e1, e2;  //Edge1, Edge2
+		Vector3f P, Q, T;
+		float det, inv_det, u, v;
+		float t;
+
+		//Find vectors for two edges sharing V1
+		e1 = v2 - v1;//  V2, V1);
+		e2 = v3 - v1; // V3, V1);
+		//Begin calculating determinant - also used to calculate u parameter
+		P =  ray.rayDirection.cross(e2);
+		//if determinant is near zero, ray lies in plane of triangle or ray is parallel to plane of triangle
+		det = e1.dot(P);
+		//NOT CULLING
+		if (det > -EPSILON && det < EPSILON) return false;
+		inv_det = 1.f / det;
+
+		//calculate distance from V1 to ray origin
+		T =  ray.rayOrigin - v1;
+
+		//Calculate u parameter and test bound
+		u = T.dot(P) * inv_det;
+		//The intersection lies outside of the triangle
+		if (u < 0.f || u > 1.f) return false;
+
+		//Prepare to test v parameter
+		Q =  T.cross(e1);
+
+		//Calculate V parameter and test bound
+		v = ray.rayDirection.dot(Q) * inv_det;
+		//The intersection lies outside of the triangle
+		if (v < 0.f || u + v  > 1.f) return false;
+
+		t = e2.dot(Q) * inv_det;
+
+		if (t > EPSILON) { //ray intersection
+			result = t;
+			return true;
+		}
+
+		// No hit, no win
+		return false;
+	}
+}
+
+void Utility::convertToRGBA(char *& dest, char *& src, int size)
+{
+	dest = new char[size * 4];
+	for (int i = 0; i <size; i++)
+	{
+		dest[i * 4 + 0] = src[i];
+		dest[i * 4 + 1] = src[i];
+		dest[i * 4 + 2] = src[i];
+		dest[i * 4 + 3] = (src[i]<30) ? 0 : 255;
+	}
+}
+```
+
+### Common/Utilities/atUtility.h
+```
+#pragma once
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <GL/glew.h>
+#include <glfw3.h>
+#include <Eigen/Core>
+#include <Eigen/LU>
+using namespace Eigen;
+
+
+namespace atRenderEngine
+{
+	namespace Utility
+	{
+		const float PI = 3.14159265;
+		struct RayData
+		{
+			Vector3f rayOrigin; 
+			Vector3f rayDirection; 			
+		};
+
+		struct TriangleData
+		{
+			int vertexIdx[3];
+			int normalIdx[3];
+			int uvIdx[3];
+		};
+
+		struct BoundingRect
+		{
+			Vector3f min;
+			Vector3f max;
+		};
+
+		struct VertexSelectionResult
+		{
+			int meshIdx;
+			Vector3f verts[3];
+			int triangleListIdx; 
+			int vertexListIdx; 
+			int vertexInTriangleIdx;
+		};
+
+		struct MinMaxPair
+		{
+			float minValue;
+			float maxValue;
+		};
+
+		struct TransferFunction1DPoint
+		{
+			Vector4f colorValue;
+			int sampleValue;
+
+			TransferFunction1DPoint(Vector3f color, int sample)
+				: colorValue(Vector4f(color.x(),color.y(),color.z(),1.0f)),sampleValue(sample)
+			{}
+
+			TransferFunction1DPoint(float alpha, int sample)
+				: colorValue(Vector4f(0.0f, 0.0f, 0.0f, alpha)), sampleValue(sample)
+			{}
+		};
+		static float ToRadians(float degree)
+		{
+			return (degree * PI) / 180.0f;
+		}
+
+		enum KeyPressCodes
+		{
+			UP = 0x00025,
+			DOWN,
+			ROTATE_RIGHT,
+			ROTATE_LEFT,
+			PAN_RIGHT,
+			PAN_LEFT, 
+			PAN_UP,
+			PAN_DOWN
+		};
+
+		enum BoundingBoxContains
+		{
+			BB_FULLY_WITHIN,
+			BB_PARTIALLY_WITHIN,
+			BB_NOT_WITHIN,
+		};
+
+		static Matrix4f rotX120 = [] {
+			Eigen::Matrix4f tmp;
+			tmp = Eigen::Matrix4f::Identity();
+			tmp(1, 1) = cos(Utility::ToRadians(120));
+			tmp(1, 2) = -sin(Utility::ToRadians(120));
+			tmp(2, 1) = sin(Utility::ToRadians(120));
+			tmp(2, 2) = cos(Utility::ToRadians(120));
+			return tmp;
+		}();
+		static Matrix4f rotY120 = [] {
+			Eigen::Matrix4f tmp;
+			tmp = Eigen::Matrix4f::Identity();
+			tmp(0, 0) = cos(Utility::ToRadians(120));
+			tmp(0, 2) = sin(Utility::ToRadians(120));
+			tmp(2, 0) = -sin(Utility::ToRadians(120));
+			tmp(2, 2) = cos(Utility::ToRadians(120));
+			return tmp;
+		}();
+		static Matrix4f rotZ120 = [] {
+			Eigen::Matrix4f tmp;
+			tmp = Eigen::Matrix4f::Identity();
+			tmp(0, 0) = cos(Utility::ToRadians(-120));
+			tmp(0, 1) = -sin(Utility::ToRadians(-120));
+			tmp(1, 0) = sin(Utility::ToRadians(-120));
+			tmp(1, 1) = cos(Utility::ToRadians(-120));
+			return tmp;
+		}();
+		static Matrix4f rotZ240 = [] {
+			Eigen::Matrix4f tmp;
+			tmp = Eigen::Matrix4f::Identity();
+			tmp(0, 0) = cos(Utility::ToRadians(-240));
+			tmp(0, 1) = -sin(Utility::ToRadians(-240));
+			tmp(1, 0) = sin(Utility::ToRadians(-240));
+			tmp(1, 1) = cos(Utility::ToRadians(-240));
+			return tmp;
+		}();
+		static Matrix3f rotateZByDegree(float degree)
+		{
+			if (degree == 0.0f)
+				return Eigen::Matrix3f::Identity();
+			Eigen::Matrix3f tmp;
+			tmp = Eigen::Matrix3f::Identity();
+			tmp(0, 0) = cos(Utility::ToRadians(degree));
+			tmp(0, 1) = -sin(Utility::ToRadians(degree));
+			tmp(1, 0) = sin(Utility::ToRadians(degree));
+			tmp(1, 1) = cos(Utility::ToRadians(degree));
+			return tmp;
+		}
+		static Matrix3f rotateYByDegree(float degree)
+		{
+			if (degree == 0.0f)
+				return Eigen::Matrix3f::Identity();
+			Eigen::Matrix3f tmp;
+			tmp = Eigen::Matrix3f::Identity();
+			tmp(0, 0) = cos(Utility::ToRadians(degree));
+			tmp(0, 2) = sin(Utility::ToRadians(degree));
+			tmp(2, 0) = -sin(Utility::ToRadians(degree));
+			tmp(2, 2) = cos(Utility::ToRadians(degree));
+			return tmp;
+		}
+		static void rotateYByDegree(float degree, Matrix4f& transMatrix)
+		{
+			if (degree == 0.0f)
+				return;			
+			Eigen::Matrix4f tmp;
+			tmp = Eigen::Matrix4f::Identity();
+			tmp(0, 0) = cos(Utility::ToRadians(degree));
+			tmp(0, 2) = sin(Utility::ToRadians(degree));
+			tmp(2, 0) = -sin(Utility::ToRadians(degree));
+			tmp(2, 2) = cos(Utility::ToRadians(degree));
+
+			transMatrix = tmp + transMatrix;
+/*			transMatrix(0, 0) += cos(Utility::ToRadians(degree));
+			transMatrix(0, 2) += sin(Utility::ToRadians(degree));
+			transMatrix(2, 0) += -sin(Utility::ToRadians(degree));
+			transMatrix(2, 2) += cos(Utility::ToRadians(degree));*/			
+		}
+
+		static Matrix4f eulerAngleYXZ
+		(
+			float const & yaw,
+			float const & pitch,
+			float const & roll
+		)
+		{
+			float tmp_ch = cos(Utility::ToRadians(yaw));
+			float tmp_sh = sin(Utility::ToRadians(yaw));
+			float tmp_cp = cos(Utility::ToRadians(pitch));
+			float tmp_sp = sin(Utility::ToRadians(pitch));
+			float tmp_cb = cos(Utility::ToRadians(roll));
+			float tmp_sb = sin(Utility::ToRadians(roll));
+
+			Matrix4f Result = Matrix4f::Identity();
+			Result(0,0) = tmp_ch * tmp_cb + tmp_sh * tmp_sp * tmp_sb;
+			Result(0,1) = tmp_sb * tmp_cp;
+			Result(0,2) = -tmp_sh * tmp_cb + tmp_ch * tmp_sp * tmp_sb;
+			//Result(0,3) = static_cast<T>(0);
+			Result(1,0) = -tmp_ch * tmp_sb + tmp_sh * tmp_sp * tmp_cb;
+			Result(1,1) = tmp_cb * tmp_cp;
+			Result(1,2) = tmp_sb * tmp_sh + tmp_ch * tmp_sp * tmp_cb;
+			//Result(1,3) = static_cast<T>(0);
+			Result(2,0) = tmp_sh * tmp_cp;
+			Result(2,1) = -tmp_sp;
+			Result(2,2) = tmp_ch * tmp_cp;
+			//Result(2,3) = static_cast<T>(0);
+
+			return Result;
+		}
+
+		GLuint atLoadShaders(const char* vertexShaderPath, const char* fragmentShaderPath);
+		void atErrorCallback(int error, const char* description);
+		float SquaredDistance(const Vector3f& a, const Vector3f& b);
+		float SquaredDistanceRect(const BoundingRect *rect, const Vector3f& x0);
+		Utility::BoundingBoxContains IsWithinBoundingBox(const BoundingRect & rect, const Vector3f v[3], int cd);
+		BoundingBoxContains IsWithinBoundingBox(const BoundingRect& rect, const Vector3f v[3]);
+		void ScreenPosToWorldRay(int mouseX, int mouseY, int screenWidth, int screenHeight, Matrix4f ViewMatrix, Matrix4f ProjectionMatrix, Vector3f & out_origin, Vector3f & out_direction);
+		bool TestRayOBBIntersection(Vector3f ray_origin, Vector3f ray_direction, Vector3f aabb_min, Vector3f aabb_max, Matrix4f ModelMatrix, float & intersection_distance);
+		bool RayTriangleIntersection(Utility::RayData ray, Vector3f v1, Vector3f v2, Vector3f v3, float & result);
+		void convertToRGBA(char* &dest, char* &src, int size);
+		//void convertToRGBA(char *& dest, std::vector<Vector4f>& src, int size);
+		void DrawCoordinateAxes(Matrix4f& currentMatrix);
+		//void DrawRay(RayData & ray, Matrix4f& MVP);
+	}
+}
+```
+
+### Common/WindowMgt/atWindow.cpp
+```
+#include "atWindow.h"
+#include "atRenderer.h"
+using namespace atRenderEngine;
+
+
+
+atWindow::atWindow(atRenderer* renderer,std::string title, int width, int height)
+	:mRenderer(renderer),mTitle(title), mWidth(width),mHeight(height)
+{
+	glfwSetErrorCallback(Utility::atErrorCallback);
+
+	mWindow = glfwCreateWindow(width, height, title.c_str(), nullptr, nullptr);
+	if (!mWindow)
+	{
+		glfwTerminate();
+		exit(EXIT_FAILURE);
+	}
+	mRenderer = renderer;
+	glfwSetWindowUserPointer((GLFWwindow*)getWindowHandle(), this);
+	//mRenderer->mUIHandle = new atUserInterface(width, height);
+#define genericCallback(functionName)\
+        [](GLFWwindow* window, auto... args) {\
+            auto pointer = static_cast<atWindow*>(glfwGetWindowUserPointer(window));\
+            if (pointer->functionName) pointer->functionName(window, args...);\
+        }
+
+	glfwSetWindowCloseCallback((GLFWwindow*)getWindowHandle(), genericCallback(onClose));
+	glfwSetMouseButtonCallback((GLFWwindow*)getWindowHandle(), genericCallback(onMouseClick));
+	glfwSetKeyCallback((GLFWwindow*)getWindowHandle(), genericCallback(onKeyPressed));
+	glfwSetWindowSizeCallback((GLFWwindow*)getWindowHandle(), genericCallback(onWindowResize));
+
+	onMouseClick = [this](auto self, int button, int action, int mods)
+	{
+		//std::cout << "I'm such a rebel" << std::endl;
+		this->mRenderer->atMouseCallback(self, button, action, mods);
+	};
+	onClose = [](auto self) 
+	{
+		std::cout << "I'm such a rebellion" << std::endl;
+	};
+	onKeyPressed = [this](auto window, int key, int scancode, int action, int mods)
+	{
+		this->mRenderer->atKeyCallback(window, key, scancode, action, mods);
+		/*if (key == GLFW_KEY_ESCAPE && action == GLFW_PRESS)
+			glfwSetWindowShouldClose(window, GL_TRUE);*/
+	};
+	onWindowResize = [this](auto window, int width, int height)
+	{
+		this->mWidth = width; 
+		this->mHeight = height;
+		this->mRenderer->atWindowResizeCallback(window, width, height);
+	};
+
+}
+
+
+atWindow::~atWindow()
+{
+	glfwDestroyWindow((GLFWwindow*)mWindow);
+	glfwTerminate();
+	exit(EXIT_SUCCESS);
+}
+
+void * atWindow::getWindowHandle()
+{
+	return (mWindow) ? mWindow : NULL;
+}
+```
+
+### Common/WindowMgt/atWindow.h
+```
+#pragma once
+#include <GL/glew.h>
+#include <glfw3.h>
+#include <string>
+#include "atUtility.h"
+//#include "atRenderer.h"
+//#include "atCamera.h"
+
+
+namespace atRenderEngine
+{
+	class atRenderer; 
+	class atWindow
+	{
+	public:
+		//void atKeyCallback(GLFWwindow * window, int key, int scancode, int action, int mods);
+		//void atMouseCallback(GLFWwindow * window, int button, int action, int mods);
+		std::function<void(GLFWwindow*)> onClose;
+		std::function<void(GLFWwindow*, int, int, int)> onMouseClick;// = [](auto window, int, int, int);
+		std::function<void(GLFWwindow*, int, int, int, int)> onKeyPressed;
+		std::function<void(GLFWwindow*, int, int)> onWindowResize;
+		/*= [this](auto window, int key, int scancode, int action, int mods)
+		{
+			this->atKeyCallback(window, key, scancode, action, mods);
+		};*/
+		atWindow(atRenderer* renderer,const std::string title, int width, int height);
+		~atWindow();
+		void* getWindowHandle();
+		int mHeight;
+		int mWidth;
+		std::string mTitle;
+	private:
+		atRenderer* mRenderer;
+		GLFWwindow* mWindow;
+
+	};
+}
+```
+
+### SliceBasedVolumeRendering/Source/Source.cpp
+```
+#include <iostream>
+#include "atRenderer.h"
+using namespace atRenderEngine;
+
+enum VolumeRenderingScenes
+{
+	BONSAI_OPACITY,
+	BONSAI_TF,
+	FOOT_OPACITY,
+	FOOT_TF,
+	ANEURYSM_OPACITY,
+	ANEURYSM_TF,
+};
+
+void PrintUsage()
+{
+	int n;
+	std::cout << "Usage : SliceBasedVolumeRendering [scene_enum]" << std::endl;
+	std::cout << "scene_enum can be one of the following : 	BONSAI_OPACITY \n BONSAI_TF\n FOOT_OPACITY\n FOOT_TF\n HEAD_OPACITY\n HEAD_TF\n" << std::endl;
+	std::cout << "Press any key to exit!" << std::endl;
+	std::cin >> n;
+}
+void SetupDifferentScenes(atVolumeRenderingScene* scene, VolumeRenderingScenes enumScene)
+{
+	std::vector<Utility::TransferFunction1DPoint> colorPoints({
+		Utility::TransferFunction1DPoint(Vector3f(.91f, .7f, .61f), 0),
+		Utility::TransferFunction1DPoint(Vector3f(.91f, .7f, .61f), 80),
+		Utility::TransferFunction1DPoint(Vector3f(1.0f, 1.0f, .85f), 82),
+		Utility::TransferFunction1DPoint(Vector3f(1.0f, 1.0f, .85f), 256)
+	});
+
+	std::vector<Utility::TransferFunction1DPoint> anuerysmColorPoints({
+		Utility::TransferFunction1DPoint(Vector3f(.54f, .27f, .07f), 0),
+		Utility::TransferFunction1DPoint(Vector3f(.54f, .27f, .07f), 150),
+		Utility::TransferFunction1DPoint(Vector3f(.0f, .0f, .85f), 156),
+		Utility::TransferFunction1DPoint(Vector3f(.0f, .0f, .85f), 256)
+	});
+
+	std::vector<Utility::TransferFunction1DPoint> bonsaiColorPoints({
+		Utility::TransferFunction1DPoint(Vector3f(0.22f, .37f, .04f), 0),
+		Utility::TransferFunction1DPoint(Vector3f(0.22f, .37f, .04f), 50),
+		Utility::TransferFunction1DPoint(Vector3f(.54f, .27f, .07f), 60),
+		Utility::TransferFunction1DPoint(Vector3f(.54f, .27f, .07f), 150),
+		Utility::TransferFunction1DPoint(Vector3f(1.0f, 1.0f, .85f), 156),
+		Utility::TransferFunction1DPoint(Vector3f(1.0f, 1.0f, .85f), 256)
+	});
+
+	std::vector<Utility::TransferFunction1DPoint> bonsaiAlphaPoints({		
+		Utility::TransferFunction1DPoint(0.0f, 0),
+		Utility::TransferFunction1DPoint(0.0f, 30),
+		Utility::TransferFunction1DPoint(0.3f, 50),
+		Utility::TransferFunction1DPoint(1.0f, 256)
+	});
+
+	std::vector<Utility::TransferFunction1DPoint> grayPoints({
+		Utility::TransferFunction1DPoint(Vector3f(.1f, .1f, .1f), 0),		
+		Utility::TransferFunction1DPoint(Vector3f(1.0f, 1.0f, 1.0f), 256)
+	});
+
+	std::vector<Utility::TransferFunction1DPoint> alphaPoints({
+		Utility::TransferFunction1DPoint(0.0f, 0),
+		Utility::TransferFunction1DPoint(0.0f, 40),
+		Utility::TransferFunction1DPoint(0.2f, 60),
+		Utility::TransferFunction1DPoint(0.05f, 63),
+		Utility::TransferFunction1DPoint(0.0f, 80),
+		Utility::TransferFunction1DPoint(0.9f, 82),
+		Utility::TransferFunction1DPoint(1.0f, 256)
+	});
+
+	switch (enumScene)
+	{
+	case BONSAI_OPACITY:
+		scene->LoadRawVolume("../data/Volumes/Raw/bonsai.raw", 256, grayPoints, bonsaiAlphaPoints, 256, 256, 256);
+		break;
+	case BONSAI_TF:
+		scene->LoadRawVolume("../data/Volumes/Raw/bonsai.raw", 256, bonsaiColorPoints, bonsaiAlphaPoints, 256, 256, 256);
+		break;
+	case FOOT_OPACITY:
+		scene->LoadRawVolume("../data/Volumes/Raw/foot.raw", 256, grayPoints, alphaPoints, 256, 256, 256);
+		break;
+	case FOOT_TF:
+		scene->LoadRawVolume("../data/Volumes/Raw/foot.raw", 256, colorPoints, alphaPoints, 256, 256, 256);
+		break;
+	case ANEURYSM_OPACITY:
+		scene->LoadRawVolume("../data/Volumes/Raw/aneurism.raw", 256, grayPoints, alphaPoints, 256, 256, 256);
+		break;
+	case ANEURYSM_TF:
+		scene->LoadRawVolume("../data/Volumes/Raw/aneurism.raw", 256, anuerysmColorPoints, alphaPoints, 256, 256, 256);
+		break;
+	default:
+		break;
+	}
+}
+
+int main(int argc, const char** argv)
+{
+	if (argc < 2)
+	{
+		PrintUsage();
+		return 0;
+	}
+
+	atRenderer renderer;
+	atCamera* camera = new atCamera();
+	camera->SetPerspective(Utility::ToRadians(45.0f), 1080.0f / 1080.0f, 0.1f, 1000.0f);
+	camera->SetLookAt(Vector3f(0, 0, 4), Vector3f(0, 0, 0), Vector3f(0, 1, 0));
+
+	renderer.AddCamera(camera);
+	renderer.Setup("Volume Rendering ", 1080, 1080);
+
+	atVolumeRenderingScene* scene1 = new atVolumeRenderingScene();
+	std::string sceneArg = argv[1];
+	if(sceneArg.compare("BONSAI_OPACITY") == 0)
+		SetupDifferentScenes(scene1, VolumeRenderingScenes::BONSAI_OPACITY);
+	if (sceneArg.compare("BONSAI_TF") == 0)
+		SetupDifferentScenes(scene1, VolumeRenderingScenes::BONSAI_TF);
+	if (sceneArg.compare("FOOT_OPACITY") == 0)
+		SetupDifferentScenes(scene1, VolumeRenderingScenes::FOOT_OPACITY);
+	if (sceneArg.compare("FOOT_TF") == 0)
+		SetupDifferentScenes(scene1, VolumeRenderingScenes::FOOT_TF);
+	if (sceneArg.compare("ANEURYSM_OPACITY") == 0)
+		SetupDifferentScenes(scene1, VolumeRenderingScenes::ANEURYSM_OPACITY);
+	if (sceneArg.compare("ANEURYSM_TF") == 0)
+		SetupDifferentScenes(scene1, VolumeRenderingScenes::ANEURYSM_TF);
+
+	renderer.AddScene(scene1);
+	renderer.Draw();
+	return 1;
+}
+```

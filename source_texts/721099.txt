@@ -1,0 +1,125 @@
+Follow-up to #12737 (closed). That issue's original example was a [format("r32ui")] RWTexture2D<uint64_t> write on CUDA. #12766 fixed the stride when such a texture is passed through a function parameter. The converting write itself stil...
+
+CUDA: converting `RWTexture` writes can emit undefined `surf*write_convert<T>` specializations · Issue #13581 · shader-slang/slang · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+CUDA: converting RWTexture writes can emit undefined surf*write_convert<T> specializations #13581
+New issue
+Copy link
+New issue
+Copy link
+Open
+Bug
+Open
+CUDA: converting RWTexture writes can emit undefined surf*write_convert<T> specializations#13581
+Bug
+Copy link
+Assignees
+Labels
+cudareproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Milestone
+Q1 2027 (Winter)
+Description
+nv-slang-bot
+bot
+opened on Oct 12, 2026
+Issue body actions
+Follow-up to #12737 (closed). That issue's original example was a [format("r32ui")] RWTexture2D<uint64_t> write on CUDA. #12766 fixed the stride when such a texture is passed through a function parameter. The converting write itself still fails, even with direct access:
+```
+[format("r32ui")] RWTexture2D<uint64_t> tex;
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void computeMain() { tex[uint2(1, 0)] = 5; }
+```
+At master b00d9e4, -target cuda emits surf2Dwrite_convert<ulonglong>(…, x * 1, …) and exits 0. -target ptx then fails in NVRTC 12.6:
+```
+prelude/slang-cuda-prelude.h(1684): error : extern inline function "surf2Dwrite_convert(T, cudaSurfaceObject_t, int, int, cudaSurfaceBoundaryMode) [with T=ulonglong]" was referenced but not defined
+```
+Cause
+When the [format] decoration is found and its scalar base type or channel count differs from the element type (_isImageFormatCompatible/_isConvertRequired, source/slang/slang-intrinsic-expand.cpp:234-267), the $C expansion (:555-600) appends _convert without checking which element types the prelude implements. The prelude declares surf{1D,2D,3D}write_convert<T>, but specializes it only for float, uint and int, plus their 2- and 4-component vectors:
+prelude/slang-cuda-prelude.h:1662-1664 (1D)
+:1743-1745 (2D)
+:1836-1838 (3D)
+Every specialization uses a 32-bit sust.p … .b32 operand. Any other element type reaches the undefined primary template.
+Converting writes that fail the same way in NVRTC (each compiles with -target cuda, and each also compiles with -target spirv and passes validation unless noted):
+[format]
+element type
+emitted call
+r32ui
+uint64_t
+surf2Dwrite_convert<ulonglong> (SPIR-V: rejected, VUID-04965)
+r32i
+int64_t
+surf2Dwrite_convert<longlong> (SPIR-V: rejected, VUID-04965)
+r32f
+double
+surf2Dwrite_convert<double> (SPIR-V: rejected, VUID-04656)
+r32ui
+uint16_t
+surf2Dwrite_convert<ushort>
+r32i
+int16_t
+surf2Dwrite_convert<short>
+r32f
+half
+surf2Dwrite_convert<__half> (1D/3D: surf1Dwrite_convert/surf3Dwrite_convert, same error)
+rgba32f
+half4
+surf2Dwrite_convert<__half4>
+rgba16f
+float3
+surf2Dwrite_convert<float3>
+For comparison, rgba8/float4, r8/float, r16ui/uint and rgba16ui/uint4 writes compile through NVRTC. A matching format and type such as r64ui/uint64_t or r16f/half uses the non-converting surf2Dwrite<T> and also compiles. The three I also checked with v2025.4 (r32ui/uint64_t, r32i/int16_t, rgba16f/float3) fail the same way there.
+Expected
+Either the prelude implements the converting write for these element types, or the compiler reports the unsupported combination itself instead of leaving it to NVRTC. For three of the pairs (a 64-bit element with a 32-bit format, and double), SPIR-V validation also rejects the shader. The maintainers may want to decide whether those combinations should be supported at all.
+Related
+Support format conversion on RWTexture in CUDA #11088 is the broader issue that CUDA format conversion is incomplete for reads and writes. It includes conversions that compile but produce wrong data, and draft CUDA surface format conversion prototype #11090 is a prototype for it. On the read side, the prelude's converting-read helpers decode half data and are defined only with half support (prelude/slang-cuda-prelude.h:1545-1594). An rgba8/float4 read currently fails with identifier "surf2Dread_convert" is undefined. This issue isolates one measured part: converting writes whose element type has no specialization, which NVRTC rejects.
+Draft PR Fix #12627: lower partial RWTexture texel writes on CUDA to a surface read-modify-write #13363 adds E56007 for partial-texel accesses the prelude can't express. Open proposal CUDA: spell RWTexture Load/Store surface accesses once, through kIROp_ImageLoad/kIROp_ImageStore #13364 would move that check to every CUDA image access. As written in Fix #12627: lower partial RWTexture texel writes on CUDA to a surface read-modify-write #13363, the check treats every non-layered converting write as available without looking at the element type, so moving it unchanged would not catch these writes. That would also need a type-aware check, or an implementation for these types. Neither is on master.
+CUDA: [format] of a writable texture is not recovered for array elements, returned textures, runtime-selected and mixed-call arguments (wrong surface stride) #13580 is the other CUDA: wrong surface byte-stride when a formatted RWTexture is accessed through a function parameter #12737 follow-up (the [format] not being found).
+🤖 Generated by an automated Slang coworker — may be inaccurate. A human maintainer should verify.
+Activity
+nv-slang-bot
+added
+cuda
+reproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+on Oct 12, 2026
+nv-slang-bot
+added the
+Bug
+issue type on Oct 12, 2026
+tangent-vector
+self-assigned this
+on Oct 14, 2026
+tangent-vector commented on Oct 14, 2026
+tangent-vector
+on Oct 14, 2026
+Contributor
+More actions
+Assigning to myself so I can remember to follow up on how we should fix this kind of mess in the long run.
+👀React with 👀1Reacted by nv-slang-bot
+tangent-vector
+added this to the Q1 2027 (Winter) milestone on Oct 14, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+tangent-vector
+Labels
+cudareproducedProvided instructions confirmed to reproduce the issueProvided instructions confirmed to reproduce the issue
+Type
+Bug
+Projects
+No projects
+Milestone
+Q1 2027 (Winter)
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

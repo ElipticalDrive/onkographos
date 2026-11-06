@@ -1,0 +1,240 @@
+ILGPU JIT Compiler for high-performance .Net GPU programs - ILGPU V2.0: System.Half Replaces ILGPU.Half + XMath Half Overloads by m4rs-mt · Pull Request #1678 · m4rs-mt/ILGPU
+
+ILGPU V2.0: System.Half Replaces ILGPU.Half + XMath Half Overloads by m4rs-mt · Pull Request #1678 · m4rs-mt/ILGPU · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+m4rs-mt
+commented
+Oct 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Builds on #1677. System.Half is the half-precision type of ILGPU, in kernels and in every public API:
+its constants, operators, conversions, comparisons, math functions and bit casts compile on every backend, and
+generic math over INumber<T>, IBinaryNumber<T> and the floating-point function interfaces works with T = Half.
+Every public member of System.Half either compiles in kernels or is a compile error that names the member, so no
+member compiles from its BCL code. Half math functions evaluate in single precision and round to half precision,
+like System.Half on the host, and every XMath function with a float overload has a Half overload.
+ILGPU.Half is removed.
+```
+static T Wave<T>(T x) where T : ITrigonometricFunctions<T>, INumber<T> => T.Sin(x) * T.Cos(x);
+
+Half x = data[i];
+result[i] = Half.Sqrt(Half.Abs(x) + Half.One) + XMath.Rcp(x) + Wave(x);
+bits[i] = BitConverter.HalfToUInt16Bits(Half.One);  // 0x3C00
+```
+Closes #1606.
+A note on authorship
+This PR was done with AI-assistant pair programming (Claude via Claude Code). Every commit carries a
+Co-Authored-By: Claude trailer.
+Migrating from ILGPU.Half
+This is a breaking API change for code that uses ILGPU.Half: use System.Half instead. Kernels, views,
+buffers, structure fields, kernel parameters and every ILGPU API with a half-precision parameter or result
+(XMath, Interop, the CUDA libdevice and cuBLAS bindings, the radix sort operations, ...) use System.Half.
+```
+// Before
+ILGPU.Half h = (ILGPU.Half)1.5f;
+ArrayView1D<ILGPU.Half, Stride1D.Dense> view = ...;
+
+// Now
+Half h = (Half)1.5f;                                 // System.Half
+ArrayView1D<Half, Stride1D.Dense> view = ...;
+```
+System.Half has the operators, comparisons and conversions of ILGPU.Half and its Abs, IsNaN, IsInfinity,
+IsFinite, IsPositiveInfinity and IsNegativeInfinity functions; ILGPU.Half.IsZero(h) becomes
+h == Half.Zero. Files that import both System and ILGPU no longer need a using Half = ... alias or a
+qualified name.
+What's in this PR
+1. Frontend fixes for all types (Src/ILGPUC/Frontend/, Src/ILGPUC/Util/TypeExtensions.cs)
+The first commit fixes three frontend issues that are not specific to Half:
+Constrained calls through generic math that resolve to a member with a kernel remapping, such as
+T.IsInteger(x) with T = float or T = double, call the remapping instead of compiling the BCL
+implementation of the member.
+Specializing a remapping that is already a constructed generic method no longer crashes the compiler.
+char is an unsigned 16-bit integer in kernels: buffers, kernel parameters, comparisons, shifts, divisions,
+wrap-around arithmetic and conversions to float treat values from 0x8000 as unsigned.
+2. Failed Metal command buffers (Src/ILGPU/Runtime/Metal/MetalStream.cs, MetalAPI.cs)
+Synchronizing a Metal stream checks every command buffer committed since the last synchronization and throws a
+MetalException with the error code and description Metal reports for a failed one, instead of returning results
+the kernel never wrote. Disposing a stream waits for its command buffers without throwing.
+3. System.Half as the half-precision type (Src/ILGPU/, Src/ILGPUC/IR/, Src/ILGPUC/Roslyn/)
+ILGPU.Half, HalfConversion.tt and HalfExtensions are removed; the compiler and runtime use System.Half
+throughout.
+System.Half maps to the IR half type, so loads, stores, views, structure fields and kernel parameters of type
+Half are half-precision values with IEEE 754 comparisons (fcmp), including NaN and signed zeros. Before,
+kernels compiled System.Half values as 16-bit integers and compared their bits.
+Constant folding, half constants and the raw-bits helpers use BitConverter.HalfToUInt16Bits /
+UInt16BitsToHalf, and half constants compare with float constants by their value.
+Kernel extraction accepts Half, Int128 and UInt128 parameters only from the System namespace, and launch
+wrappers pass System.Half parameters and structure fields directly.
+4. The System.Half surface in kernels (Src/ILGPUC/Static/Intrinsics/Math.xml, Src/ILGPU/Numerics/XHalf.cs)
+Operators: + - * / %, unary + and -, ++, --, all comparisons, the implicit and explicit conversions
+with the primitive types including char, and the checked conversions, which compile like the explicit
+conversions, as for the other types in kernels.
+Constants: Zero, NegativeZero, One, NegativeOne, Epsilon, MaxValue, MinValue, NaN,
+PositiveInfinity, NegativeInfinity, E, Pi, Tau, MultiplicativeIdentity, AdditiveIdentity,
+AllBitsSet and Radix, built from their IEEE 754 binary16 bit patterns (Half.One is 0x3C00).
+Math functions with the coverage of float, plus the System.Half extras: trigonometric, hyperbolic,
+exponential and logarithmic functions, the pi functions (SinPi, CosPi, TanPi, SinCosPi, AsinPi,
+AcosPi, AtanPi, Atan2Pi) with exact results at the integers and half integers, ExpM1, Exp2M1,
+Exp10M1, LogP1, Log2P1, Log10P1, Pow, Sqrt, Cbrt, RootN, Hypot, ScaleB, ILogB, rounding,
+Min/Max/Clamp with the NaN propagation and signed-zero ordering of the host, their magnitude, number and
+native variants, CopySign, FusedMultiplyAdd, MultiplyAddEstimate, Ieee754Remainder, Lerp, Sign,
+BitIncrement, BitDecrement, the reciprocal estimates, and the classification predicates (IsNaN,
+IsNormal, IsSubnormal, IsEvenInteger, IsPow2, IsZero, IsRealNumber, ...).
+CompareTo, Equals and GetHashCode of Half values, the bitwise operators of IBinaryNumber<Half>, and
+the exponent and significand sizes of IFloatingPoint<Half>.
+Generic conversions: CreateChecked, CreateSaturating, CreateTruncating, ConvertToInteger,
+ConvertToIntegerNative and the TryConvertFrom* / TryConvertTo* members, so int.CreateSaturating(h) and
+T.CreateChecked(i) work with Half. Generic conversions to integers saturate: NaN gives 0 and infinities the
+bounds of the integer type.
+Calls through generic math reach the same implementations, including the explicit interface members.
+The remaining members (parsing, formatting, comparisons with boxed values, conversions with decimal, Int128
+and UInt128, and the span writers of IFloatingPoint<Half>) are compile errors that name the member
+("Not supported runtime method"), rather than compiling from their BCL implementation.
+BitConverter.HalfToInt16Bits, HalfToUInt16Bits, Int16BitsToHalf and UInt16BitsToHalf, and
+Interop.FloatAsInt(Half) / IntAsFloat(ushort), on every backend.
+The CUDA libdevice Half wrappers pass and return the raw half bits.
+5. XMath Half overloads (Src/ILGPU/XMath/)
+Every XMath function with a float overload has a Half overload, computed in single precision and rounded
+to half precision, including Round with digits and MidpointRounding, RoundAwayFromZero, RoundToEven,
+Rem, IEEERemainder, Rcp, Rsqrt, DegToRad and RadToDeg.
+6. Backend code generation (Src/ILGPUC/Backends/)
+Half math functions are emitted as single-precision operations on widened operands, rounded back to half
+precision, on CUDA, ROCm, OpenCL, Metal and the CPU backend. Negation and the four basic arithmetic operations
+stay native half operations.
+Half bit casts on every backend (__half_as_short, as_short, as_type<short>, BitConverter).
+7. Tests (Src/ILGPUC.Tests/)
+ConvertExecutionTests.CharUnsigned, registered for all five backends: chars from a buffer and a parameter,
+including values from 0x8000.
+ConstrainedRemapIRTests: T.IsInteger(x) with T = float and T = double calls XMath.IsInteger and
+compiles no BCL method.
+HalfPrecisionExecutionTests, nine tests registered for all five backends: constants (including Half.One as
+0x3C00), comparisons and classification, conversions with the primitive types and with double, 60 math
+functions over 12 inputs, the System.Half functions without an XMath counterpart, Min/Max/Clamp, the
+bitwise operators, CompareTo, Equals and GetHashCode over zeros, subnormal values, infinities and NaN,
+conversions with char, checked and generic conversions, views, structures and uniform parameters, and generic
+math including AdditiveIdentity, IsZero, AllBitsSet and int.CreateSaturating. Expected values are the
+host System.Half results.
+HalfMemberTests walks every public member of System.Half, including the explicit interface
+implementations, checks that each one is implemented or rejected, and that calling a rejected member is a
+compile error naming it. A member added by a later .NET version is reported until it is implemented.
+HalfPrecisionKernels (five kernels) for source generation and native compilation on every backend.
+The CompareFloatKernels Half snapshots show half-precision views and ordered floating-point comparisons
+(ILGPU V2.0: IR Snapshots for System.Half as the Half-Precision Type ILGPU-Snapshots#9).
+Depends on
+#1677 (based on its head; the base is retargeted once it merges) and
+m4rs-mt/ILGPU-Snapshots#9.
+Testing
+Suite
+This PR
+Full test suite, Apple Silicon (CPU, Metal, compile-only for all backends)
+9920 passed, 2530 skipped, 0 failed
+CUDA backend tests with nvcc, NVIDIA GB10
+1101 passed, 0 failed
+CUDA execution tests, NVIDIA GB10
+423 passed, 2 skipped, 0 failed
+IR snapshot tests
+all pass against m4rs-mt/ILGPU-Snapshots#9, 72 Half snapshots updated
+Release build with TreatWarningsAsErrors
+0 errors
+Every commit of the PR
+builds
+🤖 Generated with Claude Code
+m4rs-mt
+and others
+added 6 commits
+October 11, 2026 11:10
+Fixed char in kernels, which was not an unsigned 16-bit integer, cons…
+…
+e098382
+```
+…trained generic math calls of remapped members, which compiled their BCL code, and a crash when specializing generic remapped methods.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+Reported a failed Metal command buffer as a MetalException with the e…
+…
+fd9e509
+```
+…rror Metal gives, instead of returning results that the kernel never wrote.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+Replaced ILGPU.Half with System.Half, which the compiler now maps to …
+…
+7d247f5
+```
+…the half-precision type, and added Half overloads of the XMath math intrinsics, which evaluate in single precision on every backend.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+Completed the Half overloads of XMath and compiled the constants, ope…
+…
+fd48099
+```
+…rators and math functions of System.Half in kernels, which compute in single precision and round like System.Half on the host.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+Compiled the classification predicates, bit operations, pi functions …
+…
+28c6bcd
+```
+…and the CompareTo, Equals and GetHashCode members of System.Half in kernels, which match the NaN and signed-zero handling of the host.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+Compiled the generic conversions of System.Half in kernels, so that g…
+…
+93957de
+```
+…eneric math over Half works, and reported every System.Half member without a kernel implementation as a compile error that names it.
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+m4rs-mt
+mentioned this pull request
+Oct 27, 2026
+ILGPU V2.0: Radix Sort Order of Floating-Point Keys
+#1679
+Open
+m4rs-mt
+added this pull request to stack #1682
+October 27, 2026 20:09
+m4rs-mt
+force-pushed
+the
+system_half
+branch
+from
+d702e1e to
+93957de
+Compare
+October 28, 2026 07:08
+m4rs-mt
+added this to the
+v2.0 milestone
+Oct 28, 2026
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

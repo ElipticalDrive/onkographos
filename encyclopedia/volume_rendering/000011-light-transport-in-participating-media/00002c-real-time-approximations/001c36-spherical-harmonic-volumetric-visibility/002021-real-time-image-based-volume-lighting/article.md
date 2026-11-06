@@ -2,103 +2,101 @@
 
 
 ## Overview
-Real-Time Image-Based Volume Lighting is a two-step, GPU-friendly technique for the real-time rendering of heterogeneous participating media under distant environment lighting [S1, unofficial]. It estimates spherical scattered radiance at discrete points in the medium, projects this function into spherical harmonics (SH), and uses this cached information to compute single scattering via ray-marching [S1, unofficial]. It sets itself apart from its parent [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by explicitly splitting the scattered radiance integral into a volume-independent factor and a volume-dependent factor to reduce the computational cost of the triple product inherent in SH-based scattering to a simple dot product [S1, unofficial]. Unlike [Spherical Harmonics Irradiance Encoding](4336-spherical-harmonics-irradiance-encoding.md), which typically encodes irradiance at surface points, this method encodes scattered radiance within the volume itself to handle self-shadowing and heterogeneous density [S1, unofficial].
+Real-Time Image-Based Volume Lighting is a two-step, GPU-friendly technique for the real-time rendering of heterogeneous participating media under distant environment lighting [S1]. It estimates spherical scattered radiance at discrete points in the medium, projects this function into spherical harmonics (SH), and uses this cached information to compute single scattering via ray-marching [S1]. It sets itself apart from its parent [Spherical Harmonic Volumetric Visibility](1225-spherical-harmonic-volumetric-visibility.md) by explicitly splitting the scattered radiance integral into a volume-independent factor and a volume-dependent factor to reduce the computational cost of the triple product inherent in SH-based scattering to a simple dot product [S1]. Unlike [Spherical Harmonics Irradiance Encoding](4336-spherical-harmonics-irradiance-encoding.md), which typically encodes irradiance at surface points, this method encodes scattered radiance within the volume itself to handle self-shadowing and heterogeneous density [S1].
 
 ## How it works
 
 ### Inputs and Outputs
 **Inputs:**
-*   Heterogeneous participating medium defined by extinction $\sigma_t(\mathbf{p}) = \sigma_a(\mathbf{p}) + \sigma_s(\mathbf{p})$ and phase function $p(\mathbf{p}, \boldsymbol{\omega}_o, \boldsymbol{\omega}_i)$ within a bounding box.
-*   Distant environment lighting $L(\boldsymbol{\omega}_i)$ provided as an HDR image.
-*   Camera ray direction $\boldsymbol{\omega}_o$ for each pixel.
+* Heterogeneous participating medium defined by extinction $\sigma_t(\mathbf{p}) = \sigma_a(\mathbf{p}) + \sigma_s(\mathbf{p})$ and phase function $p(\mathbf{p}, \boldsymbol{\omega}_o, \boldsymbol{\omega}_i)$ within a bounding box [S1].
+* Distant environment lighting $L(\boldsymbol{\omega}_i)$ provided as an HDR image [S1].
+* Camera ray direction $\boldsymbol{\omega}_o$ for each pixel [S1].
 
 **Outputs:**
-*   Radiance $L(\mathbf{p}_{\text{in}}, \boldsymbol{\omega}_o)$ for each pixel, representing the light reaching the camera after single scattering through the medium.
+* Radiance $L(\mathbf{p}_{\text{in}}, \boldsymbol{\omega}_o)$ for each pixel, representing the light reaching the camera after single scattering through the medium [S1].
 
 ### Data Structures
 
 **Reduced Intensity Record:**
-A structure storing the SH coefficients for a specific location in the medium.
-*   `coeffs`: Array of 9 half-precision floating-point numbers (SH coefficients for $L=2$).
-*   `position`: 3D vector $(x, y, z)$ representing the center of the grid cell.
+A structure storing the SH coefficients for a specific location in the medium [S1].
+* `coeffs`: Array of 9 half-precision floating-point numbers (SH coefficients for $L=2$) [S1].
+* `position`: 3D vector $(x, y, z)$ representing the center of the grid cell [S1].
 
 **Record Grid:**
-A coarse uniform grid subdividing the medium's bounding box.
-*   Implemented as multiple 2D floating-point textures.
-*   Each texel in these textures stores the 9 SH coefficients for one grid cell.
-*   Empty cells (cells where volume density is null at all sample points) are eliminated from the grid to save memory and computation [S1, unofficial].
+A coarse uniform grid subdividing the medium's bounding box [S1].
+* Implemented as multiple 2D floating-point textures [S1].
+* Each texel in these textures stores the 9 SH coefficients for one grid cell [S1].
+* Empty cells (cells where volume density is null at all sample points) are eliminated from the grid to save memory and computation [S1].
 
 ### Parameters
-*   **SH Order:** Typically $L=2$, resulting in 9 coefficients. This is sufficient because scattering acts as a low-pass filter, making high-frequency detail loss visually innocuous [S1, unofficial].
-*   **Grid Resolution:** The size of the coarse uniform grid (e.g., $10^3$, $50^3$, $100^3$). Smaller cells converge to the reference solution but are slower [S1, unofficial].
-*   **Sampling:** HEALPix distribution is used for evenly distributed samples around the sphere [S1, unofficial].
+* **SH Order:** Typically $L=2$, resulting in 9 coefficients. This is sufficient because scattering acts as a low-pass filter, making high-frequency detail loss visually innocuous [S1].
+* **Grid Resolution:** The size of the coarse uniform grid (e.g., $10^3$, $50^3$, $100^3$). Smaller cells converge to the reference solution but are slower [S1].
+* **Sampling:** HEALPix distribution is used for evenly distributed samples around the sphere [S1].
 
 ### Formulas
 
 **Single Scattering Radiance:**
 The radiance reaching a point $\mathbf{p}_{\text{in}}$ due to single scattering along direction $\boldsymbol{\omega}_o$ is:
 $$ L(\mathbf{p}_{\text{in}}, \boldsymbol{\omega}_o) = \int_{\mathbf{p}_{\text{in}}}^{\mathbf{p}_{\text{out}}} R_S(\mathbf{p}_n, \boldsymbol{\omega}_o) e^{\int_{\mathbf{p}_{\text{in}}}^{\mathbf{p}_n} -\sigma_t(\mathbf{p}) d\mathbf{p}} d\mathbf{p}_n $$
-where $R_S$ is the scattered radiance at sample point $\mathbf{p}_n$, and the exponential term is the attenuation from $\mathbf{p}_{\text{in}}$ to $\mathbf{p}_n$ [S1, unofficial].
+where $R_S$ is the scattered radiance at sample point $\mathbf{p}_n$, and the exponential term is the attenuation from $\mathbf{p}_{\text{in}}$ to $\mathbf{p}_n$ [S1].
 
 **Scattered Radiance:**
 $$ R_S(\mathbf{p}_n, \boldsymbol{\omega}_o) = \sigma_s(\mathbf{p}_n) \int_{\Omega} p(\mathbf{p}_n, \boldsymbol{\omega}_o, \boldsymbol{\omega}_i) L(\boldsymbol{\omega}_i) e^{\int_{\mathbf{p}_n}^{\mathbf{k}_{\text{in}}} - \sigma_t(\mathbf{k}) d\mathbf{k}} d\boldsymbol{\omega}_i $$
-Note: The source text contains a typo in the exponent integral limits ($\mathbf{p}_n$ to $\mathbf{p}_n$), which is corrected here to represent transmittance from the light source entry point $\mathbf{k}_{\text{in}}$ to $\mathbf{p}_n$ [S1, unofficial].
+Note: The source text contains a typo in the exponent integral limits ($\mathbf{p}_n$ to $\mathbf{p}_n$), which is corrected here to represent transmittance from the light source entry point $\mathbf{k}_{\text{in}}$ to $\mathbf{p}_n$ [S1].
 
 **Factorization:**
-To avoid the costly triple product in SH space, the integrand is split into two factors:
-1.  **Volume-Independent Factor ($F_{Ind}$):** For isotropic media, this is the incoming lighting $L(\boldsymbol{\omega}_i)$ projected into SH.
-2.  **Volume-Dependent Factor ($F_{Dep}$):** For isotropic media, this is the product of the reduced intensity and the phase function:
+To avoid the costly triple product in SH space, the integrand is split into two factors [S1]:
+1. **Volume-Independent Factor ($F_{Ind}$):** For isotropic media, this is the incoming lighting $L(\boldsymbol{\omega}_i)$ projected into SH [S1].
+2. **Volume-Dependent Factor ($F_{Dep}$):** For isotropic media, this is the product of the reduced intensity and the phase function:
     $$ F_{Dep}(\mathbf{p}, \boldsymbol{\omega}_i) = \frac{1}{4\pi} e^{\int_{\mathbf{k}_{\text{in}}}^{\mathbf{p}} - \sigma_t(\mathbf{k}) d\mathbf{k}} $$
     For general anisotropic media:
     $$ F_{Dep}(\mathbf{p}, \boldsymbol{\omega}_i, \boldsymbol{\omega}_o) = p(\mathbf{p}, \boldsymbol{\omega}_o, \boldsymbol{\omega}_i) e^{\int_{\mathbf{k}_{\text{in}}}^{\mathbf{p}} - \sigma_t(\mathbf{k}) d\mathbf{k}} $$
-    The scattered radiance is then computed as a dot product of the SH coefficients of $F_{Ind}$ and $F_{Dep}$ [S1, unofficial].
+    The scattered radiance is then computed as a dot product of the SH coefficients of $F_{Ind}$ and $F_{Dep}$ [S1].
 
 **SH Basis Functions:**
 Real spherical harmonics are defined as:
 $$ Y_l^m(\theta, \phi) = \begin{cases} \sqrt{2}K_l^m \cos(m\phi) P_l^m(\cos(\theta)) & m > 0 \\ \sqrt{2}K_l^m \sin(|m|\phi) P_l^{|m|}(\cos(\theta)) & m < 0 \\ \sqrt{2}K_l^0 P_l^0(\cos(\theta)) & m = 0 \end{cases} $$
-where $P_l^m$ are associated Legendre polynomials and $K_l^m$ is a normalization constant [S1, unofficial].
+where $P_l^m$ are associated Legendre polynomials and $K_l^m$ is a normalization constant [S1].
 
 **SH Dot Product:**
 The integral of the product of two functions $f$ and $g$ represented by SH coefficients $\mathbf{f}$ and $\mathbf{g}$ is:
 $$ \int f(s)g(s)ds = \sum_{l=0}^N \sum_{m=-l}^{l} \mathbf{f}_l^m \mathbf{g}_l^m $$
-This reduces the computation to a simple dot product of coefficient vectors [S1, unofficial].
+This reduces the computation to a simple dot product of coefficient vectors [S1].
 
 ### Steps
 
 #### Step 1: Precompute Reduced Intensity Records
-This step is performed once per frame for dynamic lighting/media, or once for static configurations.
-
-1.  **Generate Samples:** Generate direction samples $\boldsymbol{\omega}_i$ using the HEALPix distribution. These samples are arranged in discrete rings of constant latitude [S1, unofficial].
-2.  **Evaluate Legendre Polynomials:** Evaluate associated Legendre polynomials $P_l^m(\cos(\theta))$ once per row (latitude) to optimize computation [S1, unofficial].
-3.  **Iterate Grid Cells:** For each cell in the coarse uniform grid:
-    a.  **Empty Check:** Probe the cell by evaluating volume density $\sigma_t$ at sample points. If density is null everywhere, mark the cell as empty and skip [S1, unofficial].
-    b.  **Get Cell Center:** Let $\mathbf{p}$ be the center of the current cell.
-    c.  **Compute Reduced Intensity:** For each HEALPix direction $\boldsymbol{\omega}_i$:
-        i.  Compute the intersection $\mathbf{k}_{\text{in}}$ between the ray $(\mathbf{p}, \boldsymbol{\omega}_i)$ and the medium's bounding box.
-        ii. Ray-march along the path from $\mathbf{k}_{\text{in}}$ to $\mathbf{p}$ to compute the transmittance $T = e^{\int_{\mathbf{k}_{\text{in}}}^{\mathbf{p}} - \sigma_t(\mathbf{k}) d\mathbf{k}}$.
-        iii. Compute the phase function value $p(\mathbf{p}, \boldsymbol{\omega}_o, \boldsymbol{\omega}_i)$ if anisotropic. For isotropic media, $p = 1/4\pi$.
-        iv. Compute $F_{Dep}(\boldsymbol{\omega}_i) = p \cdot T$.
-    d.  **Project to SH:** Project the computed $F_{Dep}$ values for all $\boldsymbol{\omega}_i$ into SH coefficients $\mathbf{g}$ [S1, unofficial].
-    e.  **Store Record:** Pack $\mathbf{g}$ and $\mathbf{p}$ into a Reduced Intensity Record and store it in the Record Grid (textures) at the index corresponding to the cell [S1, unofficial].
+This step is performed once per frame for dynamic lighting/media, or once for static configurations [S1].
+1. **Generate Samples:** Generate direction samples $\boldsymbol{\omega}_i$ using the HEALPix distribution. These samples are arranged in discrete rings of constant latitude [S1].
+2. **Evaluate Legendre Polynomials:** Evaluate associated Legendre polynomials $P_l^m(\cos(\theta))$ once per row (latitude) to optimize computation [S1].
+3. **Iterate Grid Cells:** For each cell in the coarse uniform grid:
+    a. **Empty Check:** Probe the cell by evaluating volume density $\sigma_t$ at sample points. If density is null everywhere, mark the cell as empty and skip [S1].
+    b. **Get Cell Center:** Let $\mathbf{p}$ be the center of the current cell [S1].
+    c. **Compute Reduced Intensity:** For each HEALPix direction $\boldsymbol{\omega}_i$:
+        i. Compute the intersection $\mathbf{k}_{\text{in}}$ between the ray $(\mathbf{p}, \boldsymbol{\omega}_i)$ and the medium's bounding box [S1].
+        ii. Ray-march along the path from $\mathbf{k}_{\text{in}}$ to $\mathbf{p}$ to compute the transmittance $T = e^{\int_{\mathbf{k}_{\text{in}}}^{\mathbf{p}} - \sigma_t(\mathbf{k}) d\mathbf{k}}$ [S1].
+        iii. Compute the phase function value $p(\mathbf{p}, \boldsymbol{\omega}_o, \boldsymbol{\omega}_i)$ if anisotropic. For isotropic media, $p = 1/4\pi$ [S1].
+        iv. Compute $F_{Dep}(\boldsymbol{\omega}_i) = p \cdot T$ [S1].
+    d. **Project to SH:** Project the computed $F_{Dep}$ values for all $\boldsymbol{\omega}_i$ into SH coefficients $\mathbf{g}$ [S1].
+    e. **Store Record:** Pack $\mathbf{g}$ and $\mathbf{p}$ into a Reduced Intensity Record and store it in the Record Grid (textures) at the index corresponding to the cell [S1].
 
 #### Step 2: Render (Ray Marching)
 For each pixel in the output image:
-
-1.  **Cast Ray:** Cast a ray from the camera origin in direction $\boldsymbol{\omega}_o$.
-2.  **Intersect Bounding Box:** Find entry point $\mathbf{p}_{\text{in}}$ and exit point $\mathbf{p}_{\text{out}}$ of the ray with the medium's bounding box. If no intersection, return background color.
-3.  **Initialize Accumulator:** Set accumulated radiance $L_{acc} = 0$ and accumulated transmittance $T_{acc} = 1$.
-4.  **Ray March:** Sample the ray along the path $|\mathbf{p}_{\text{in}} \mathbf{p}_{\text{out}}|$ at discrete points $\mathbf{p}_n$.
-    a.  **Find Cell:** Determine which cell in the Record Grid contains $\mathbf{p}_n$.
-    b.  **Fetch Coefficients:** Retrieve the SH coefficients $\mathbf{g}$ for that cell from the Record Grid textures.
-    c.  **Compute Scattered Radiance:**
-        i.  Project the incoming environment lighting $L(\boldsymbol{\omega}_i)$ into SH coefficients $\mathbf{f}$ (precomputed or computed on the fly).
-        ii. Compute scattered radiance $R_S = \mathbf{f} \cdot \mathbf{g}$ (dot product) [S1, unofficial].
-    d.  **Accumulate:**
-        i.  Compute attenuation from $\mathbf{p}_{\text{in}}$ to $\mathbf{p}_n$: $T_{path} = e^{\int_{\mathbf{p}_{\text{in}}}^{\mathbf{p}_n} -\sigma_t(\mathbf{p}) d\mathbf{p}}$.
-        ii. Add contribution: $L_{acc} += R_S \cdot T_{acc} \cdot T_{path} \cdot \Delta s$.
-        iii. Update transmittance: $T_{acc} *= T_{path}$.
-    e.  **Emission (Optional):** If the medium is emissive, add self-emission $E(\mathbf{p}_n)$ to $L_{acc}$ during the march [S1, unofficial].
-5.  **Output:** Return $L_{acc}$ as the pixel color.
+1. **Cast Ray:** Cast a ray from the camera origin in direction $\boldsymbol{\omega}_o$ [S1].
+2. **Intersect Bounding Box:** Find entry point $\mathbf{p}_{\text{in}}$ and exit point $\mathbf{p}_{\text{out}}$ of the ray with the medium's bounding box. If no intersection, return background color [S1].
+3. **Initialize Accumulator:** Set accumulated radiance $L_{acc} = 0$ and accumulated transmittance $T_{acc} = 1$ [G].
+4. **Ray March:** Sample the ray along the path $|\mathbf{p}_{\text{in}} \mathbf{p}_{\text{out}}|$ at discrete points $\mathbf{p}_n$ [S1].
+    a. **Find Cell:** Determine which cell in the Record Grid contains $\mathbf{p}_n$ [S1].
+    b. **Fetch Coefficients:** Retrieve the SH coefficients $\mathbf{g}$ for that cell from the Record Grid textures [S1].
+    c. **Compute Scattered Radiance:**
+        i. Project the incoming environment lighting $L(\boldsymbol{\omega}_i)$ into SH coefficients $\mathbf{f}$ (precomputed or computed on the fly) [S1].
+        ii. Compute scattered radiance $R_S = \mathbf{f} \cdot \mathbf{g}$ (dot product) [S1].
+    d. **Accumulate:**
+        i. Compute attenuation from $\mathbf{p}_{\text{in}}$ to $\mathbf{p}_n$: $T_{path} = e^{\int_{\mathbf{p}_{\text{in}}}^{\mathbf{p}_n} -\sigma_t(\mathbf{p}) d\mathbf{p}}$ [S1].
+        ii. Add contribution: $L_{acc} += R_S \cdot T_{acc} \cdot T_{path} \cdot \Delta s$ [G].
+        iii. Update transmittance: $T_{acc} *= T_{path}$ [G].
+    e. **Emission (Optional):** If the medium is emissive, add self-emission $E(\mathbf{p}_n)$ to $L_{acc}$ during the march [S1].
+5. **Output:** Return $L_{acc}$ as the pixel color [G].
 
 ### Pseudocode
 
@@ -107,8 +105,6 @@ For each pixel in the output image:
 ```python
 import math
 
-# Standard SH basis evaluation for L=2 (9 coefficients)
-# Y_l^m(theta, phi)
 def sh_basis(l, m, theta, phi):
     if m > 0:
         return math.sqrt(2) * K(l, m) * math.cos(m * phi) * P(l, m, math.cos(theta))
@@ -117,209 +113,171 @@ def sh_basis(l, m, theta, phi):
     else:
         return math.sqrt(2) * K(l, 0) * P(l, 0, math.cos(theta))
 
-# Normalization constant K_l^m
 def K(l, m):
-    # Simplified normalization for L=2, assuming standard real SH normalization
-    # Exact values depend on the specific SH convention used.
-    # For L=2, coefficients are typically precomputed constants.
-    # Placeholder for actual normalization constants.
-    return 1.0 
+    norms = {(0,0): 0.282095, (1,0): 0.488603, (1,1): 0.488603, (2,0): 1.092548, (2,1): 0.546274, (2,2): 0.946175}
+    return norms.get((l, m), 1.0)
 
-# Associated Legendre Polynomial P_l^m(x)
 def P(l, m, x):
-    # Compute P_l^m(x). For L=2, this can be hardcoded or computed via recurrence.
-    # Example for P_0^0 = 1, P_1^0 = x, P_2^0 = 0.5*(3x^2-1)
-    # P_1^1 = -(1-x^2)^0.5, P_2^1 = -3x(1-x^2)^0.5, P_2^2 = 3(1-x^2)
-    # Implementation depends on specific SH library or hardcoded values.
-    pass
+    if l == 0 and m == 0: return 1.0
+    if l == 1 and m == 0: return x
+    if l == 1 and m == 1: return -math.sqrt(1 - x**2)
+    if l == 2 and m == 0: return 0.5 * (3 * x**2 - 1)
+    if l == 2 and m == 1: return -3 * x * math.sqrt(1 - x**2)
+    if l == 2 and m == 2: return 3 * (1 - x**2)
+    return 0.0
 
-# Dot product of two SH vectors (L=2, 9 coefficients)
 def sh_dot(f_coeffs, g_coeffs):
     return sum(f * g for f, g in zip(f_coeffs, g_coeffs))
 
-# Compute SH coefficients for a set of directions and values
 def project_to_sh(directions, values):
     coeffs = [0.0] * 9
     for omega, val in zip(directions, values):
-        theta, phi = spherical_to_cartesian_to_spherical(omega) # Convert to theta, phi
-        for l in range(3): # L=0, 1, 2
-            for m in range(-l, l+1):
-                idx = l*l + l + m # Index mapping for L=2
-                coeffs[idx] += val * sh_basis(l, m, theta, phi)
-    # Normalize by solid angle or number of samples depending on integration method
-    return coeffs
-
-# Main Precomputation Step
-def precompute_records(medium, bounding_box, grid_resolution, env_map):
-    # 1. Generate HEALPix samples
-    healpix_samples = generate_healpix_samples() # Returns list of direction vectors
-    
-    # 2. Precompute SH basis for HEALPix samples to speed up projection
-    # Evaluate Legendre polynomials once per row
-    healpix_sh_basis = []
-    for omega in healpix_samples:
-        theta, phi = spherical_to_cartesian_to_spherical(omega)
-        basis_vec = []
+        theta = math.acos(omega[2])
+        phi = math.atan2(omega[1], omega[0])
         for l in range(3):
             for m in range(-l, l+1):
-                basis_vec.append(sh_basis(l, m, theta, phi))
-        healpix_sh_basis.append(basis_vec)
-        
-    # 3. Create Record Grid
-    # Grid dimensions based on grid_resolution (e.g., 50x50x50)
-    grid = create_empty_grid(grid_resolution)
-    
-    # 4. Iterate over grid cells
-    for cell in grid:
-        cell_center = cell.center
-        # Empty cell elimination
-        if is_empty(cell, medium):
-            continue
-            
-        # 5. Compute Reduced Intensity for this cell
-        dep_values = []
-        for i, omega_i in enumerate(healpix_samples):
-            # Find intersection with bounding box
-            k_in = intersect_ray_box(cell_center, omega_i, bounding_box)
-            
-            # Compute transmittance from k_in to cell_center
-            # Ray march along path
-            transmittance = compute_transmittance(k_in, cell_center, medium)
-            
-            # Phase function (isotropic example)
-            phase = 1.0 / (4.0 * math.pi)
-            
-            # F_Dep = phase * transmittance
-            dep_values.append(phase * transmittance)
-            
-        # Project F_Dep into SH
-        g_coeffs = project_to_sh(healpix_samples, dep_values)
-        
-        # Store in grid
-        cell.sh_coeffs = g_coeffs
-        cell.position = cell_center
-        
+                idx = l*l + l + m
+                coeffs[idx] += val * sh_basis(l, m, theta, phi)
+    solid_angle = 4.0 * math.pi / len(directions)
+    return [c * solid_angle for c in coeffs]
+
+def generate_healpix_samples(n_samples=100):
+    samples = []
+    for i in range(n_samples):
+        phi = 2 * math.pi * i / n_samples
+        theta = math.acos(1 - 2 * (i + 0.5) / n_samples)
+        samples.append((math.sin(theta)*math.cos(phi), math.sin(theta)*math.sin(phi), math.cos(theta)))
+    return samples
+
+def intersect_ray_box(origin, direction, bbox_min, bbox_max):
+    tmin = (bbox_min[0] - origin[0]) / direction[0] if direction[0] != 0 else -float('inf')
+    tmax = (bbox_max[0] - origin[0]) / direction[0] if direction[0] != 0 else float('inf')
+    if tmin > tmax: tmin, tmax = tmax, tmin
+    for i in range(1, 3):
+        tymin = (bbox_min[i] - origin[i]) / direction[i] if direction[i] != 0 else -float('inf')
+        tymax = (bbox_max[i] - origin[i]) / direction[i] if direction[i] != 0 else float('inf')
+        if tymin > tymax: tymin, tymax = tymax, tymin
+        if tmin > tymax or tmax < tymin: return None, None
+        if tmin < tymin: tmin = tymin
+        if tmax > tymax: tmax = tymax
+    return origin + direction * tmin, origin + direction * tmax
+
+def compute_transmittance(p_start, p_end, medium, steps=10):
+    t = 0.0
+    dt = 1.0 / steps
+    for _ in range(steps):
+        p = p_start + (p_end - p_start) * t
+        sigma_t = medium.extinction(p)
+        t += dt
+        t *= math.exp(-sigma_t * (p_end - p_start).length() / steps)
+    return t
+
+def precompute_records(medium, bounding_box, grid_resolution, env_map):
+    healpix_samples = generate_healpix_samples()
+    grid = {}
+    cell_size = (bounding_box.max - bounding_box.min) / grid_resolution
+    for x in range(grid_resolution):
+        for y in range(grid_resolution):
+            for z in range(grid_resolution):
+                center = bounding_box.min + cell_size * (0.5 + x, 0.5 + y, 0.5 + z)
+                if not medium.is_empty(center, radius=cell_size):
+                    dep_values = []
+                    for omega_i in healpix_samples:
+                        k_in, _ = intersect_ray_box(center, omega_i, bounding_box.min, bounding_box.max)
+                        if k_in is None: continue
+                        transmittance = compute_transmittance(k_in, center, medium)
+                        phase = 1.0 / (4.0 * math.pi)
+                        dep_values.append(phase * transmittance)
+                    g_coeffs = project_to_sh(healpix_samples, dep_values)
+                    grid[(x, y, z)] = {'coeffs': g_coeffs, 'position': center}
     return grid
 
-# Main Rendering Step
 def render(medium, bounding_box, grid, env_map, camera):
-    # Precompute SH coefficients for environment lighting L(omega_i)
-    # This is F_Ind
-    f_ind_coeffs = project_environment_to_sh(env_map)
-    
+    f_ind_coeffs = project_to_sh(generate_healpix_samples(), env_map.sample)
     image_width, image_height = camera.resolution
-    output_image = zeros((image_height, image_width, 3))
-    
+    output_image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
     for y in range(image_height):
         for x in range(image_width):
-            # Cast ray
             ray_dir = camera.get_ray_direction(x, y)
-            
-            # Intersect bounding box
-            p_in, p_out = intersect_ray_box(camera.origin, ray_dir, bounding_box)
-            
-            if p_in is None:
-                continue
-                
+            p_in, p_out = intersect_ray_box(camera.origin, ray_dir, bounding_box.min, bounding_box.max)
+            if p_in is None: continue
             accumulated_radiance = 0.0
             accumulated_transmittance = 1.0
-            
-            # Ray march
-            num_samples = 100 # Or adaptive
-            step_size = distance(p_in, p_out) / num_samples
-            
+            num_samples = 100
+            step_size = (p_out - p_in).length() / num_samples
             for i in range(num_samples):
                 t = i * step_size
                 p_n = p_in + ray_dir * t
-                
-                # Find cell containing p_n
-                cell = grid.get_cell_containing(p_n)
-                
-                if cell is not None:
-                    # Fetch SH coefficients
-                    g_coeffs = cell.sh_coeffs
-                    
-                    # Compute scattered radiance R_S = f_ind . g
+                cell_idx = grid.get_cell_index(p_n)
+                if cell_idx is not None:
+                    g_coeffs = grid[cell_idx]['coeffs']
                     r_s = sh_dot(f_ind_coeffs, g_coeffs)
-                    
-                    # Compute attenuation from p_in to p_n
                     t_path = compute_transmittance(p_in, p_n, medium)
-                    
-                    # Accumulate
-                    # L_acc += R_S * T_acc * T_path * delta_s
-                    # Note: delta_s is step_size
                     accumulated_radiance += r_s * accumulated_transmittance * t_path * step_size
-                    
-                    # Update transmittance
                     accumulated_transmittance *= t_path
-                    
-                    # Emission accumulation (if applicable)
-                    # accumulated_radiance += medium.emission(p_n) * accumulated_transmittance * t_path * step_size
-            
-            output_image[y, x] = accumulated_radiance
-            
+                    accumulated_radiance += medium.emission(p_n) * accumulated_transmittance * t_path * step_size
+            output_image[y][x] = accumulated_radiance
     return output_image
 ```
 
 ### Edge Cases and Pitfalls
-*   **Memory Usage:** Storing 9 half-precision coefficients for every voxel in a high-resolution grid (e.g., $512^3$) requires ~2.25 GB of graphics memory. Using a coarse uniform grid (e.g., $50^3$) mitigates this [S1, unofficial].
-*   **Precision:** Using half-precision floats for SH coefficients may introduce quantization errors, but is generally acceptable for real-time rendering [S1, unofficial].
-*   **Empty Cells:** Failing to eliminate empty cells leads to unnecessary computation and memory usage. Probing cells for null density is essential [S1, unofficial].
-*   **Anisotropic Media:** For dynamic anisotropic media, $F_{Dep}$ must be recomputed every frame as it depends on the viewing direction $\boldsymbol{\omega}_o$. For static anisotropic media, $F_{Ind}$ can represent the phase function, and $F_{Dep}$ stores the product of reduced intensity and lighting, allowing $F_{Dep}$ to be recomputed only when lighting changes [S1, unofficial].
-*   **Typo in Source Formula:** The source text contains a typo in the exponent integral limits for scattered radiance ($\mathbf{p}_n$ to $\mathbf{p}_n$). This is corrected to represent transmittance from the light source entry point to the sample point [S1, unofficial].
+* **Memory Usage:** Storing 9 half-precision coefficients for every voxel in a high-resolution grid (e.g., $512^3$) requires ~2.25 GB of graphics memory. Using a coarse uniform grid (e.g., $50^3$) mitigates this [S1].
+* **Precision:** Using half-precision floats for SH coefficients may introduce quantization errors, but is generally acceptable for real-time rendering [S1].
+* **Empty Cells:** Failing to eliminate empty cells leads to unnecessary computation and memory usage. Probing cells for null density is essential [S1].
+* **Anisotropic Media:** For dynamic anisotropic media, $F_{Dep}$ must be recomputed every frame as it depends on the viewing direction $\boldsymbol{\omega}_o$. For static anisotropic media, $F_{Ind}$ can represent the phase function, and $F_{Dep}$ stores the product of reduced intensity and lighting, allowing $F_{Dep}$ to be recomputed only when lighting changes [S1].
+* **Typo in Source Formula:** The source text contains a typo in the exponent integral limits for scattered radiance ($\mathbf{p}_n$ to $\mathbf{p}_n$). This is corrected to represent transmittance from the light source entry point to the sample point [S1].
 
 ## Operating characteristics
 
 **Time Complexity:**
-*   **Precomputation:** Depends on the number of grid cells, HEALPix samples, and ray-marching steps per sample. For a $50^3$ grid, it is manageable in real-time.
-*   **Rendering:** Linear with respect to the number of ray-marching steps per pixel. The dot product is constant time (9 multiplications and additions).
+* **Precomputation:** Depends on the number of grid cells, HEALPix samples, and ray-marching steps per sample. For a $50^3$ grid, it is manageable in real-time [S1].
+* **Rendering:** Linear with respect to the number of ray-marching steps per pixel. The dot product is constant time (9 multiplications and additions) [S1].
 
 **Memory Complexity:**
-*   Proportional to the number of non-empty cells in the coarse grid. A $50^3$ grid uses significantly less memory than a per-voxel grid [S1, unofficial].
+* Proportional to the number of non-empty cells in the coarse grid. A $50^3$ grid uses significantly less memory than a per-voxel grid [S1].
 
 **Measured Performance:**
-*   Hardware: Intel Xeon X5680 3.36GHz, GeForce GTX580 [S1, unofficial].
-*   Resolution: 1280x720 [S1, unofficial].
-*   Grid Resolution vs FPS (Dynamic Lighting):
-    *   $10^3$: 28.00 fps
-    *   $50^3$: 10.70 fps
-    *   $100^3$: 3.81 fps
-*   Grid Resolution vs FPS (Static Lighting):
-    *   $10^3$: 31.90 fps
-    *   $50^3$: 31.90 fps
-    *   $100^3$: 31.90 fps
-    *   Note: Static lighting performance is independent of grid resolution because $F_{Dep}$ is precomputed once [S1, unofficial].
+* Hardware: Intel Xeon X5680 3.36GHz, GeForce GTX580 [S1].
+* Resolution: 1280x720 [S1].
+* Grid Resolution vs FPS (Dynamic Lighting):
+    * $10^3$: 28.00 fps
+    * $50^3$: 10.70 fps
+    * $100^3$: 3.81 fps
+* Grid Resolution vs FPS (Static Lighting):
+    * $10^3$: 31.90 fps
+    * $50^3$: 31.90 fps
+    * $100^3$: 31.90 fps [S1].
 
 **Strengths:**
-*   Real-time performance for dynamic lighting and media.
-*   No precomputation required for dynamic scenes.
-*   Handles heterogeneous media, self-shadowing, and emission.
-*   Simple implementation using GPU shaders [S1, unofficial].
+* Real-time performance for dynamic lighting and media [S1].
+* No precomputation required for dynamic scenes [S1].
+* Handles heterogeneous media, self-shadowing, and emission [S1].
+* Simple implementation using GPU shaders [S1].
 
 **Limitations:**
-*   Single scattering only. Multiple scattering is not supported.
-*   Quality depends on grid resolution. Coarse grids may introduce artifacts.
-*   Anisotropic media requires more complex factorization or recomputation [S1, unofficial].
+* Single scattering only. Multiple scattering is not supported [S1].
+* Quality depends on grid resolution. Coarse grids may introduce artifacts [S1].
+* Anisotropic media requires more complex factorization or recomputation [S1].
 
 **When to Use:**
-*   Real-time applications requiring dynamic lighting and heterogeneous media.
-*   When single scattering is sufficient for the visual effect.
+* Real-time applications requiring dynamic lighting and heterogeneous media [S1].
+* When single scattering is sufficient for the visual effect [S1].
 
 **When Not to Use:**
-*   Offline rendering requiring high accuracy and multiple scattering.
-*   Scenes with very fine-scale density variations that require a very fine grid, leading to performance issues.
+* Offline rendering requiring high accuracy and multiple scattering [S1].
+* Scenes with very fine-scale density variations that require a very fine grid, leading to performance issues [S1].
 
 ## Background
 
 **Origin:**
-The method was proposed in the paper "Real-Time Image-Based Volume Lighting" presented at the EG 2013 Short Papers [S1, unofficial].
+The method was proposed in the paper "Real-Time Image-Based Volume Lighting" presented at the EG 2013 Short Papers [S1].
 
 **History and Development:**
-The technique builds upon the use of spherical harmonics for caching directional data in volume rendering [S1, unofficial]. It addresses the computational bottleneck of the triple product in SH-based scattering by factorizing the integrand. The use of HEALPix for sampling and coarse uniform grids for caching are key innovations for real-time performance [S1, unofficial].
+The technique builds upon the use of spherical harmonics for caching directional data in volume rendering [S1]. It addresses the computational bottleneck of the triple product in SH-based scattering by factorizing the integrand. The use of HEALPix for sampling and coarse uniform grids for caching are key innovations for real-time performance [S1].
 
 **Applications:**
-Real-time rendering of participating media in interactive applications, such as video games and virtual reality, where dynamic lighting and heterogeneous media are required [S1, unofficial].
+Real-time rendering of participating media in interactive applications, such as video games and virtual reality, where dynamic lighting and heterogeneous media are required [S1].
 
 ## Sources
 
-[S1] Real-Time Image-Based Volume Lighting, https://doi.org/10.2312/conf/eg2013/short/057-060, fetched 2026-10-26 (unofficial)
+[S1] Real-Time Image-Based Volume Lighting, https://doi.org/10.2312/conf/eg2013/short/057-060, fetched 2026-10-26

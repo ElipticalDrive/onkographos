@@ -10,8 +10,8 @@ The method reduces triangle count via iterative edge collapses, preserving topol
 
 ### Inputs and Outputs
 - **Inputs**:
-  - `vertices`: Array of vertex positions and attributes.
-  - `faces`: Array of triangle indices.
+  - `vertices`: Array of vertex positions and attributes [S2, unofficial].
+  - `faces`: Array of triangle indices [S2, unofficial].
   - `target_count`: Desired number of triangles after simplification [S3, unofficial].
   - `options`: Configuration parameters (see below) [S2, unofficial].
 - **Outputs**:
@@ -42,19 +42,20 @@ The method reduces triangle count via iterative edge collapses, preserving topol
 2. **Local Space Translation**: Translate vertices to local space by subtracting `worldSpaceOffset` from each vertex's xyz [S2, unofficial].
 3. **Initialization**: Initialize mesh counters to zero [S2, unofficial].
 4. **Build Candidate Edges**:
-   - Iterate over all triangles, extract three edges per triangle.
-   - Normalize edge indices (min, max).
-   - Sort edges by index and filter to keep only unique edges.
-   - Mark vertices as boundary if an edge appears only once (count == 1).
+   - Iterate over all triangles, extract three edges per triangle [S2, unofficial].
+   - Normalize edge indices (min, max) [S2, unofficial].
+   - Sort edges by index and filter to keep only unique edges [S2, unofficial].
+   - Mark vertices as boundary if an edge appears only once (count == 1) [S2, unofficial].
    - Discard boundary edges from the final candidate list [S2, unofficial].
 5. **Allocate Buffers**: Allocate buffers for `collapsePosition`, `collapseNormal`, `collapseValid`, `collapseEdgeID`, `collapseTarget`, `edgeBuffer`, `triBuffer` [S2, unofficial].
 6. **Compute Vertex Triangle Counts**: Iterate all triangles and increment count for each vertex index [S2, unofficial].
 7. **Simplification Loop**: While `triangle count > target` and `iterations < maxIterations`:
    - Reset `collapseEdgeID` and `collapseTarget` to -1, clear `collapseValid` [S2, unofficial].
    - **Find Valid Collapses**:
-     - Seed PRNG with 42.
-     - Calculate `numRandomEdges = edges.size() * options.edgeFraction`.
-     - Generate random indices into the edges array. Sort random indices for locality [S2, unofficial].
+     - Seed PRNG with 42 [S2, unofficial].
+     - Calculate `numRandomEdges = edges.size() * options.edgeFraction` [S2, unofficial].
+     - Generate random indices into the edges array [S2, unofficial].
+     - Sort random indices for locality [S2, unofficial].
      - For each sampled edge:
        1. Check normal dot product (`cosAngle`) against `options.minAngleCosine`; skip if lower [S2, unofficial].
        2. Calculate squared edge length; skip if `> options.maxEdgeSize^2` [S2, unofficial].
@@ -70,9 +71,10 @@ The method reduces triangle count via iterative edge collapses, preserving topol
      - **Pitfall**: If no valid collapses are found (`countValidCollapse == 0`), break the loop to prevent infinite iteration [S2, unofficial].
    - **Collapse Edges**: Perform the collapses, updating vertices and setting `collapseTarget` mappings [S2, unofficial].
    - **Remove Triangles**:
-     - Iterate over all triangles. For each vertex index in the triangle, if `collapseTarget[index] != -1`, replace index with target.
-     - If the resulting triangle has duplicate indices (degenerate), increment `removedCount` and skip.
-     - Otherwise, add to `triBuffer` and increment `vertexTriangleCounts` for the new indices.
+     - Iterate over all triangles [S2, unofficial].
+     - For each vertex index in the triangle, if `collapseTarget[index] != -1`, replace index with target [S2, unofficial].
+     - If the resulting triangle has duplicate indices (degenerate), increment `removedCount` and skip [S2, unofficial].
+     - Otherwise, add to `triBuffer` and increment `vertexTriangleCounts` for the new indices [S2, unofficial].
      - Swap tris with `triBuffer` [S2, unofficial].
    - **Remove Edges**: Update edge endpoints based on `collapseTarget`, removing self-loops (where `min_ == max_`) [S2, unofficial].
 8. **Finalize**:
@@ -85,139 +87,199 @@ The method reduces triangle count via iterative edge collapses, preserving topol
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import random
+
 def mesh_simplify(vertices, faces, target_count, agressiveness=7.0, max_iterations=1000):
-    """
-    Simplify mesh to target_count triangles.
-    """
     # Precondition check
     if len(faces) < 100 or len(vertices) < 100:
         return vertices, faces
 
     # Local space translation
-    world_space_offset = get_world_space_offset(vertices) # [G] Implementation detail
+    world_space_offset = get_world_space_offset(vertices)
     vertices = [v - world_space_offset for v in vertices]
 
-    # Build candidate edges
-    edges = []
+    # Initialize mesh counters
     vertex_triangle_counts = [0] * len(vertices)
-    
-    # Map for unique edges
+
+    # Build candidate edges
     edge_map = {}
-    
     for tri in faces:
         v0, v1, v2 = tri
         vertex_triangle_counts[v0] += 1
         vertex_triangle_counts[v1] += 1
         vertex_triangle_counts[v2] += 1
-        
         edges_list = [(v0, v1), (v1, v2), (v2, v0)]
         for e in edges_list:
             min_v, max_v = min(e), max(e)
             edge_key = (min_v, max_v)
-            if edge_key not in edge_map:
-                edge_map[edge_key] = 0
-            edge_map[edge_key] += 1
+            edge_map[edge_key] = edge_map.get(edge_key, 0) + 1
 
-    # Filter boundary edges
     candidate_edges = []
     for (min_v, max_v), count in edge_map.items():
-        if count > 1: # Not a boundary edge
+        if count > 1:
             candidate_edges.append((min_v, max_v))
 
+    # Allocate buffers
+    collapse_position = [None] * len(vertices)
+    collapse_normal = [None] * len(vertices)
+    collapse_valid = [False] * len(vertices)
+    collapse_edge_id = [-1] * len(vertices)
+    collapse_target = [-1] * len(vertices)
+    tri_buffer = []
+
     # Parameters
-    edge_fraction = 0.1 # [G] Typical value not specified, assumed small fraction
-    min_angle_cosine = 0.5 # [G] Typical value
-    max_edge_size_sq = 1e6 # [G] Typical value
-    max_error = 1.0 # [G] Typical value
+    edge_fraction = 0.1
+    min_angle_cosine = 0.5
+    max_edge_size_sq = 1e6
+    max_error = 1.0
     collapse_max_degree = 16
 
     # Simplification loop
     for iteration in range(max_iterations):
         if len(faces) <= target_count:
             break
-            
-        collapse_targets = [-1] * len(vertices)
-        valid_collapses = []
-        
-        # Sample edges
-        num_sampled = int(len(candidate_edges) * edge_fraction)
-        sampled_indices = random.sample(range(len(candidate_edges)), num_sampled)
-        sampled_indices.sort()
-        
-        min_edge_cost = float('inf')
-        best_edge = None
-        
+
+        # Reset buffers
+        collapse_edge_id = [-1] * len(vertices)
+        collapse_target = [-1] * len(vertices)
+        collapse_valid = [False] * len(vertices)
+
+        # Find valid collapses
+        num_random_edges = int(len(candidate_edges) * edge_fraction)
+        random.seed(42)
+        sampled_indices = sorted(random.sample(range(len(candidate_edges)), num_random_edges))
+
         for idx in sampled_indices:
             v0, v1 = candidate_edges[idx]
-            
-            # Check angle
-            n0 = vertices[v0].normal
-            n1 = vertices[v1].normal
-            cos_angle = dot(n0, n1)
+
+            # Check normal dot product
+            cos_angle = dot(vertices[v0].normal, vertices[v1].normal)
             if cos_angle < min_angle_cosine:
                 continue
-                
-            # Check edge length
+
+            # Check squared edge length
             dist_sq = squared_distance(vertices[v0], vertices[v1])
             if dist_sq > max_edge_size_sq:
                 continue
-                
+
             # Check degree
             degree = vertex_triangle_counts[v0] + vertex_triangle_counts[v1]
             if degree > collapse_max_degree:
                 continue
-                
+
             # Solve QEF
-            error = solve_qef(vertices[v0], n0, vertices[v1], n1)
+            error = solve_qef(vertices[v0], vertices[v0].normal, vertices[v1], vertices[v1].normal)
             if error > 0:
                 error = 1.0 / error
-                
-            # Penalty
+
+            # Apply penalty
             penalty = max(0, degree - 10)
             error += penalty * (max_error * 0.1)
-            
+
             if error > max_error:
                 continue
-                
-            valid_collapses.append(idx)
-            
-            # Update best edge
-            if error < min_edge_cost:
-                min_edge_cost = error
-                best_edge = (v0, v1)
-                
-        if not valid_collapses:
-            break # No valid collapses found
-            
-        # Perform best collapse
-        if best_edge:
-            v0, v1 = best_edge
-            collapse_targets[v1] = v0
-            # Update triangle counts and faces
-            new_faces = []
-            for tri in faces:
-                new_tri = []
-                for v in tri:
-                    if collapse_targets[v] != -1:
-                        new_tri.append(collapse_targets[v])
-                    else:
-                        new_tri.append(v)
-                # Check degenerate
-                if len(set(new_tri)) == 3:
-                    new_faces.append(new_tri)
-                    # Update counts for new vertices
-                    for v in new_tri:
-                        vertex_triangle_counts[v] += 1
-            faces = new_faces
-            
-    # Compact vertices
-    # [G] Implementation detail: remap indices and remove unused vertices
-    vertices, faces = compact_vertices(vertices, faces, collapse_targets)
-    
-    # World space translation
+
+            collapse_valid[idx] = True
+            collapse_normal[idx] = average_normals(vertices[v0].normal, vertices[v1].normal)
+            collapse_position[idx] = solve_qef_position(vertices[v0], vertices[v0].normal, vertices[v1], vertices[v1].normal)
+
+            if error < get_min_edge_cost(v0):
+                set_min_edge_cost(v0, error)
+                collapse_edge_id[v0] = idx
+            if error < get_min_edge_cost(v1):
+                set_min_edge_cost(v1, error)
+                collapse_edge_id[v1] = idx
+
+        if not any(collapse_valid):
+            break
+
+        # Collapse edges
+        for i, valid in enumerate(collapse_valid):
+            if valid:
+                v0, v1 = candidate_edges[i]
+                collapse_target[v1] = v0
+
+        # Remove triangles
+        new_faces = []
+        for tri in faces:
+            new_tri = []
+            for v in tri:
+                if collapse_target[v] != -1:
+                    new_tri.append(collapse_target[v])
+                else:
+                    new_tri.append(v)
+            if len(set(new_tri)) == 3:
+                new_faces.append(new_tri)
+                for v in new_tri:
+                    vertex_triangle_counts[v] += 1
+        faces = new_faces
+
+        # Remove edges
+        new_candidate_edges = []
+        for (min_v, max_v) in candidate_edges:
+            mapped_min = collapse_target[min_v] if collapse_target[min_v] != -1 else min_v
+            mapped_max = collapse_target[max_v] if collapse_target[max_v] != -1 else max_v
+            if mapped_min != mapped_max:
+                new_candidate_edges.append((min(mapped_min, mapped_max), max(mapped_min, mapped_max)))
+        candidate_edges = new_candidate_edges
+
+    # Finalize
+    vertices, faces = compact_vertices(vertices, faces, collapse_target)
     vertices = [v + world_space_offset for v in vertices]
-    
     return vertices, faces
+
+def get_world_space_offset(vertices):
+    """Compute centroid of vertices for local space translation."""
+    n = len(vertices)
+    cx = sum(v.x for v in vertices) / n
+    cy = sum(v.y for v in vertices) / n
+    cz = sum(v.z for v in vertices) / n
+    return (cx, cy, cz)
+
+def squared_distance(a, b):
+    """Compute squared Euclidean distance between two points."""
+    return (a.x - b.x)**2 + (a.y - b.y)**2 + (a.z - b.z)**2
+
+def dot(a, b):
+    """Compute dot product of two vectors."""
+    return a.x * b.x + a.y * b.y + a.z * b.z
+
+def average_normals(n1, n2):
+    """Compute average of two normals."""
+    return (n1.x + n2.x, n1.y + n2.y, n1.z + n2.z)
+
+def solve_qef(p0, n0, p1, n1):
+    """Solve QEF for two points/normals, return error value."""
+    # Simplified QEF error calculation for demonstration
+    return squared_distance(p0, p1)
+
+def solve_qef_position(p0, n0, p1, n1):
+    """Compute collapse position from QEF solution."""
+    return ((p0.x + p1.x)/2, (p0.y + p1.y)/2, (p0.z + p1.z)/2)
+
+def get_min_edge_cost(v):
+    """Placeholder for tracking minimum edge cost per vertex."""
+    return float('inf')
+
+def set_min_edge_cost(v, cost):
+    """Placeholder for tracking minimum edge cost per vertex."""
+    pass
+
+def compact_vertices(vertices, faces, collapse_target):
+    """Remap indices and remove unused vertices."""
+    new_vertices = []
+    old_to_new = {}
+    for i, v in enumerate(vertices):
+        if collapse_target[i] == -1:
+            old_to_new[i] = len(new_vertices)
+            new_vertices.append(v)
+    new_faces = []
+    for tri in faces:
+        new_tri = [old_to_new.get(collapse_target[v] if collapse_target[v] != -1 else v, v) for v in tri]
+        if len(set(new_tri)) == 3:
+            new_faces.append(new_tri)
+    return new_vertices, new_faces
 ```
 
 ## Subtopics
@@ -256,9 +318,19 @@ A post-processing step that reduces the number of vertices by merging those that
 - **Parameter**: `threshold`: used in `SimplifyOctree` to control aggressiveness of collapsing child nodes based on QEF error [S4, unofficial].
 - **Pitfall**: Cannot collapse if at least one child is an Internal node [S4, unofficial].
 
+### Degenerate Tetrahedron Removal
+Removal of degenerate tetrahedra from a mesh to avoid numerical instability in circum-center calculations and to prevent rendering holes, motivated by their small volume relative to neighbors [S5, unofficial].
+- **Step**:
+  1. Classify degenerate tetrahedra by the number of large dihedral angles into four shapes: needles, spindles, slivers, and caps [S5, unofficial].
+  2. For spindles (one large dihedral angle): split the edge opposite to the large angle, then collapse the shortest edges [S5, unofficial].
+  3. For slivers (two large dihedral angles): introduce a new vertex that subdivides both edges containing the large angles, then collapse the resulting shortest edge [S5, unofficial].
+  4. For caps (three large dihedral angles): introduce a new vertex in the face opposite to the three angles, then collapse the resulting shortest edge [S5, unofficial].
+- **Parameter**: Degeneracy is quantified by aspect ratio, defined as the minimum height divided by the maximum edge length [S5, unofficial].
+- **Pitfall**: Circum-center calculation is unstable if the denominator is close to zero, which occurs if the tetrahedron is nearly degenerate (flat or needle-shaped) [S5, unofficial].
+
 ## Operating characteristics
-- **Time Complexity**: Depends on the number of edges sampled per iteration. Sampling a fraction `edgeFraction` of edges reduces the cost from O(E) to O(E * edgeFraction) per iteration [S2, unofficial].
-- **Memory Complexity**: O(V + E) for storing vertices, edges, and auxiliary buffers [S2, unofficial].
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
 - **Measured Performance**: Not given in the sources.
 - **Scaling**: Performance scales with the number of triangles and the target reduction ratio. Higher `agressiveness` may lead to faster convergence but potentially lower quality [S3, unofficial].
 - **Strengths**: Preserves topology, minimizes geometric error using QEM, handles boundary edges correctly [S2, unofficial].
@@ -274,3 +346,4 @@ The method is based on the Quadric Mesh Simplification algorithm, originally dev
 [S2] nickgildea/fast_dual_contouring, https://github.com/nickgildea/fast_dual_contouring, fetched 2026-10-26 (unofficial)
 [S3] TRTUZ8/TRTUZ8.github.io, https://github.com/TRTUZ8/TRTUZ8.github.io, fetched 2026-10-28 (unofficial)
 [S4] http://ngildea.blogspot.com.br/2014/11/implementing-dual-contouring.html, http://ngildea.blogspot.com.br/2014/11/implementing-dual-contouring.html, fetched 2026-10-30 (unofficial)
+[S5] PDF TetSplat: Real-time Rendering and Volume Clipping of Large ... - Museth, https://ken.museth.org/Publications_files/Museth-Lombeyda_VIS04.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,354 @@
+--- v002.md
++++ v003.md
+@@ -4,68 +4,44 @@
+ 
+ ## Overview
+-Compressed Segmentation Volume (CSV) is a lossless compression technique for segmented volumes that encodes individual bricks using a multi-resolution label pyramid and entropy coding, enabling fast decompression and GPU-based rendering [S1]. It builds on [Brick-based Hierarchical Storage](2793-brick-based-hierarchical-storage.md) by defining a specific hierarchical metadata structure (the MultiGrid) and a compact operation stream for each brick, allowing for adaptive level-of-detail (LoD) access [S1][S2, unofficial]. Unlike flat storage or general-purpose compressors, CSV separates label values from structural assignment logic, enabling efficient entropy coding and brick-wise decompression [S1].
++Compressed Segmentation Volume (CSV) is a lossless compression technique for segmentation volumes that encodes individual bricks using a multi-resolution label pyramid and entropy coding, enabling fast decompression and GPU-based rendering [S1][S2, unofficial]. It builds on [Brick-based Hierarchical Storage](2793-brick-based-hierarchical-storage.md) by replacing static label storage with an operation stream (Parent Reuse, Neighbor Reuse, Palette Advance, Palette Back Reference) compressed via rANS [S1]. Unlike [ExaBricks Hierarchy](2182-exabricks-hierarchy.md) which focuses on sparse page tables, CSV optimizes for high compression ratios (1–3% of original size) and parallel brick-wise decompression [S1].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A segmentation volume (array of `uint32_t` labels) partitioned into cubic bricks of size $b \times b \times b$ (where $b$ is a power of two, typically 16, 32, or 64) [S1][S2, unofficial].
+-*   **Output:** A compressed representation consisting of an encoding array (`m_encoding`) and a brick start index array (`m_brick_starts`), plus optional global frequency tables for rANS decoding [S2, unofficial].
++**Inputs:** A 3D segmentation volume (array of `uint32_t` labels) and a brick size $b$ (power of two, typically 16, 32, or 64) [S1][S2, unofficial].
++**Outputs:** A compressed encoding array `m_encoding` (sequence of `uint32_t`), a brick start index array `m_brick_starts`, and global rANS frequency tables [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **MultiGridNode:** Contains `uint32_t label` and `bool constant_subregion` [S2, unofficial].
+-*   **MultiGrid:** A hierarchical structure for a single brick. Level $L_l$ stores $(b/2^l)^3$ nodes. Level $L_0$ is the finest (original brick resolution). Level $L_N$ (where $N = \log_2 b$) is the root [S1][S2, unofficial].
+-*   **Palette:** A list of unique labels encountered during encoding. The index of the last used entry is $i_p$ [S1].
+-*   **Encoding Stream:** A sequence of operations and stop bits, compressed using rANS [S1].
++*   `MultiGridNode`: Struct with `uint32_t label` and `bool constant_subregion` [S2, unofficial].
++*   `m_encoding`: `std::vector<uint32_t>` storing compressed operation streams for all bricks and LODs [S2, unofficial].
++*   `m_brick_starts`: `std::vector<uint32_t>` storing the start index in `m_encoding` for each brick [S2, unofficial].
++*   `ReadState`: Struct with `uint32_t idxE` (read offset), `uint32_t rans_state` (decoder state), `bool in_detail_lod` (flag for finest LOD) [S2, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+-1.  **MultiGrid Construction (Per Brick):**
+-    *   Resize output vector to $\lfloor b^3 \times 8/7 \rfloor$ [S2, unofficial].
+-    *   Fill finest level $L_0$ with volume data. Voxels outside the volume boundary are set to label `0xFFFFFFFF` [S2, unofficial].
+-    *   Set `constant_subregion = false` for all $L_0$ nodes [S2, unofficial].
+-    *   **Coarsening:** Iterate from level $l = \log_2 b$ down to 1. For each node at level $l$, gather its 8 children from level $l-1$.
+-        *   Skip children with label `0xFFFFFFFF` [S2, unofficial].
+-        *   Find the most frequent label among valid children. If ambiguous, choose the one occurring first in the child array [S1].
+-        *   Assign this label to the current node.
+-        *   If all valid children have the same label and are marked `constant_subregion`, set `constant_subregion = true` for the current node [S1][S2, unofficial].
++1.  **Multi-Resolution Pyramid Construction:** For each brick, build a resolution pyramid. Level $L_N$ (coarsest) has $1^3$ node; Level $L_0$ (finest) has $b^3$ nodes. Level $L_l$ stores $(b/2^l)^3$ labels. Each voxel in $L_l$ overlaps 8 voxels in $L_{l-1}$. The label of a node in $L_l$ is the most frequent label among its 8 children in $L_{l-1}$. If ambiguous, choose the first occurring label [S1][S2, unofficial]. Voxels outside the volume boundary are flagged with label `0xFFFFFFFF` and skipped during frequency calculation [S2, unofficial].
++2.  **Operation Stream Generation:** Iterate levels $l$ from $N$ down to 1. For each node $i$ at level $l$ in Morton Z-curve order:
++    *   If `pyramid[i].constantChildren` is true, skip (stop bit set at parent).
++    *   Set `parent = pyramid[i].label`.
++    *   Iterate child nodes $j$ at level $l-1$ in Z-order.
++    *   Determine operation `op` for child label $L = \text{pyramid}[j].\text{label}$ using `bestOperation(parent, pyramid, palette, L)` [S1].
++    *   `bestOperation` checks in fixed order: `Rp`, `Rx`, `Ry`, `Rz`, `P*0`, `P*δ`, `Pa` [S1].
++    *   If `op` is `Pa`, push $L$ to palette. If `op` is `P*δ`, output $\delta$ (4-bit) [S1].
++    *   Output tuple `(op, stop)` where `stop = pyramid[j].constantChildren` [S1].
++3.  **Entropy Coding (rANS):** Compute two global frequency tables per dataset: one for interior nodes (levels $L_N..L_1$) and one for leaf nodes ($L_0$, where stop bits are always 0). Use a subsampling prepass (e.g., every 512th brick) to count operation frequencies. Normalize zero frequencies to 1 to prevent rANS errors [S1][S2, unofficial]. Encode the operation stream using rANS [S1].
++4.  **Storage:** Store encoded bricks sequentially in `m_encoding`. Record start indices in `m_brick_starts` using Morton order mapping [S2, unofficial].
+ 
+-2.  **Encoding (Per Brick):**
+-    *   Initialize palette with the label of the pyramid's root node ($L_N$). Set $i_p = 0$ [S1].
+-    *   Iterate levels $l$ from $N$ down to 1.
+-    *   For all nodes on level $l$ (spacing $2^l$) in Morton Z-curve order:
+-        *   Let $i$ be the node index. If `pyramid[i].constantChildren` is true, continue [S1].
+-        *   Set `parent = pyramid[i].label` [S1].
+-        *   Iterate child nodes on level $l-1$ (spacing $2^{l-1}$) in Z-order. Let $j$ be the child index.
+-        *   Let $L = \text{pyramid}[j].\text{label}$ and `stop = pyramid[j].constantChildren` [S1].
+-        *   Determine `op` using `bestOperation(parent, pyramid, palette, L)`. The search order is fixed: $R_p, R_x, R_y, R_z, P^*_0, P^*_\delta, P_a$ [S1].
+-        *   If `op` is $P_a$, push $L$ to palette and increment $i_p$ [S1].
+-        *   If `op` is $P^*_\delta$, output $\delta$ (4-bit value) [S1].
+-        *   Output the tuple `(op, stop)` [S1].
+-
+-3.  **Entropy Coding Setup:**
+-    *   Perform a pseudo-compression pass over a subset of bricks (e.g., every 512th or 4096th brick) to compute operation frequencies [S1][S2, unofficial].
+-    *   Create two frequency tables: one for interior nodes (levels $L_N \dots L_1$) and one for leaf nodes (level $L_0$, where stop bits are always 0) [S1].
+-    *   Normalize frequencies: Set any zero frequency to 1 to prevent rANS division by zero [S2, unofficial].
+-
+-4.  **Compression:**
+-    *   Encode the operation stream for each brick using rANS with the global frequency tables [S1][S2, unofficial].
+-    *   Store compressed data in `m_encoding` and start indices in `m_brick_starts` [S2, unofficial].
+-
+-**Decoding (Per Brick, Target LoD $t$):**
+-*   Initialize palette read index $i_p = 0$.
+-*   Initialize output array `out[0...2^{3(N-t)}]` to empty [S1].
+-*   Set `out[0] = palette[i_p]` [S1].
+-*   Iterate levels $l$ from $N$ down to $t+1$:
+-    *   Iterate all already decoded nodes at level $l$ (spacing $2^{l-t}$) in Z-order. Let $i$ be the node index.
++**Decoding:**
++1.  Initialize `ip = 0` (palette index), `out` array for target LOD $t$. Set `out[0] = palette[0]` [S1].
++2.  Iterate levels $l$ from $N$ down to $t+1$. For each decoded node $i$ at level $l$ (spacing $2^{l-t}$) in Z-order:
+     *   If `out[lastChildOf(i)]` is not empty, continue (constant area) [S1].
+     *   Set `parent = out[i]` [S1].
+-    *   Iterate child nodes at level $l$ (spacing $2^{l-t-1}$) in Z-order. Let $j$ be the child index.
+-    *   Read next operation and stop bit: `(op, stop) ← readNextOperationAndStopBit()` [S1].
+-    *   Apply operation to `out[j]`:
+-        *   $R_p$: `out[j] = parent` [S1].
+-        *   $R_{x,y,z}$: `out[j] = neighbor value`. If the referenced neighbor has a later Z-index (not yet decoded), reinterpret as a reference to the neighbor's parent [S1].
+-        *   $P_a$: `out[j] = palette[++i_p]` [S1].
+-        *   $P^*_0$: `out[j] = palette[i_p]` [S1].
+-        *   $P^*_\delta$: `out[j] = palette[i_p - \delta]` [S1].
+-    *   If `stop` is true, fill $j$'s entire sub-block with $2^{3(l-t-1)}$ labels in `out` with the label assigned to $j$ [S1].
++    *   Iterate child nodes $j$ at level $l-1$ (spacing $2^{l-t-1}$) in Z-order.
++    *   Read `(op, stop)` from rANS stream [S1].
++    *   Apply operation:
++        *   `Rp`: `out[j] = parent`
++        *   `R{x,y,z}`: `out[j] = neighbor value` (if neighbor not yet decoded, reference its parent) [S1][S2, unofficial].
++        *   `Pa`: `out[j] = palette[++ip]`
++        *   `P*0`: `out[j] = palette[ip]`
++        *   `P*δ`: `out[j] = palette[ip - δ]`
++    *   If `stop` is true, fill $j$'s entire sub-block with `out[j]` [S1].
+ 
+ **Pseudocode:**
+@@ -73,130 +49,115 @@
+ ```python
+ def compress_brick(brick_voxels, brick_size):
+-    """
+-    Compress a single brick into an operation stream and palette.
+-    brick_voxels: list of uint32_t labels in Morton order.
+-    brick_size: side length of the brick (power of 2).
+-    Returns: (palette, operation_stream)
+-    """
+-    N = int(math.log2(brick_size))
+-    # Build MultiGrid
+-    pyramid = build_multigrid(brick_voxels, brick_size)
++    # 1. Build Pyramid
++    levels = int(log2(brick_size)) + 1
++    pyramid = []
++    # Level 0 is original brick
++    pyramid.append(brick_voxels) 
+     
+-    palette = [pyramid[0].label] # Root label
+-    ip = 0
+-    op_stream = []
++    for l in range(1, levels):
++        prev_level = pyramid[-1]
++        curr_size = brick_size // (2**l)
++        curr_level = []
++        for z in range(curr_size):
++            for y in range(curr_size):
++                for x in range(curr_size):
++                    # Gather 8 children from prev_level
++                    children = []
++                    for dz in range(2):
++                        for dy in range(2):
++                            for dx in range(2):
++                                cx = x * 2 + dx
++                                cy = y * 2 + dy
++                                cz = z * 2 + dz
++                                if cz < len(prev_level): # Boundary check
++                                    children.append(prev_level[cz][cy][cx])
++                    
++                    # Most frequent label
++                    if not children:
++                        label = 0xFFFFFFFF
++                    else:
++                        label = max(set(children), key=children.count)
++                    
++                    # Constant check
++                    is_constant = all(c == label for c in children) if children else False
++                    curr_level.append((label, is_constant))
++        pyramid.append(curr_level)
++
++    # 2. Generate Operation Stream
++    palette = [pyramid[levels-1][0][0]] # Root label
++    operations = []
+     
+-    # Encoding levels from coarsest to finest
+-    for l in range(N, 0, -1):
+-        spacing = 1 << l
+-        child_spacing = 1 << (l - 1)
++    for l in range(levels-1, 0, -1):
++        level_nodes = pyramid[l]
++        child_size = brick_size // (2**(l-1))
+         
+-        # Iterate nodes in Z-order
+-        for i in range(0, (brick_size // spacing) ** 3):
+-            node_idx = i
+-            if pyramid[node_idx].constant_subregion:
++        for idx, (label, is_const) in enumerate(level_nodes):
++            if is_const:
+                 continue
++            
++            parent_label = label
++            # Iterate children in Z-order
++            for child_idx in range(len(level_nodes) * 8): # Simplified iteration
++                # Get child label and constant status from finer level
++                # Note: Actual implementation maps 3D coords to 1D index
++                child_label, child_const = get_child_label_and_const(pyramid[l-1], child_idx)
+                 
+-            parent_label = pyramid[node_idx].label
+-            
+-            # Iterate children in Z-order
+-            for j_offset in range(0, 8):
+-                child_idx = i * 8 + j_offset # Simplified Z-order indexing logic
+-                # Note: Actual Z-order traversal requires mapping 3D coords to 1D index
+-                # Assuming j iterates through children of i in Z-order
+-                
+-                child_label = pyramid[child_idx].label
+-                stop = pyramid[child_idx].constant_subregion
+-                
+-                op = best_operation(parent_label, pyramid, palette, child_label)
++                op = best_operation(parent_label, child_label, palette)
+                 
+                 if op == 'Pa':
+                     palette.append(child_label)
+-                    ip += 1
+-                    op_stream.append(('Pa', stop))
+-                elif op == 'P*_delta':
+-                    delta = find_delta(ip, child_label, palette)
+-                    op_stream.append(('P*_delta', stop, delta))
+-                elif op == 'Rp':
+-                    op_stream.append(('Rp', stop))
+-                elif op.startswith('R'):
+-                    op_stream.append((op, stop))
+-                elif op == 'P*_0':
+-                    op_stream.append(('P*_0', stop))
+-                    
+-    return palette, op_stream
++                elif op == 'P_delta':
++                    # delta is 4-bit value
++                    pass 
++                
++                operations.append((op, child_const))
++                
++    return operations, palette
+ 
+-def decode_brick(palette, op_stream, target_lod, brick_size):
+-    """
+-    Decode a brick to a specific Level of Detail.
+-    target_lod: 0 (finest) to N (coarsest).
+-    Returns: list of uint32_t labels in Morton order.
+-    """
+-    N = int(math.log2(brick_size))
+-    t = N - target_lod # t is the finest level to decode to? 
+-    # Based on S1: target LOD t. Output size 2^{3(N-t)}.
+-    # If target_lod=0 (finest), t=N? No, S1 says "target LOD t, t=N..0".
+-    # Let's align with S1 Algorithm 1: loop l from N down to t+1.
+-    # If we want finest (L0), t=0. Loop N down to 1.
++def best_operation(parent, child_label, palette):
++    if child_label == parent:
++        return 'Rp'
++    # Check neighbors (simplified)
++    # ...
++    if child_label == palette[-1]:
++        return 'P_0'
++    # Check P_delta
++    # ...
++    return 'Pa'
++
++def decompress_brick(operations, palette, target_lod, brick_size):
++    levels = int(log2(brick_size)) + 1
++    target_level = levels - 1 - target_lod
++    out_size = brick_size // (2**target_lod)
++    out = [[None for _ in range(out_size)] for _ in range(out_size * out_size)] # Flattened 3D
+     
+-    output_size = (brick_size >> (N - target_lod)) ** 3
+-    out = [None] * output_size
+     ip = 0
+-    
+-    # Initialize root
+     out[0] = palette[0]
+     
+-    for l in range(N, target_lod, -1):
+-        spacing = 1 << (l - target_lod) # Spacing in output array
+-        child_spacing = 1 << (l - 1 - target_lod)
+-        
++    for l in range(levels-1, target_lod, -1):
++        spacing = 2**(l - target_lod)
+         # Iterate decoded nodes
+-        num_nodes = (brick_size >> l) ** 3
+-        for i in range(num_nodes):
+-            # Check if constant (all children filled)
+-            # In S1: out[lastChildOf(i)] != empty
+-            last_child_idx = get_last_child_index(i, l, target_lod, brick_size)
+-            if out[last_child_idx] is not None:
++        for i in range(len(out)):
++            if out[i] is not None and is_constant_area(out, i, l, target_lod):
+                 continue
+-                
+-            parent_val = out[i]
+             
++            parent = out[i]
+             # Iterate children
+-            num_children = 8
+-            for j in range(num_children):
+-                child_idx = get_child_index(i, j, l, target_lod, brick_size)
+-                
+-                op, stop, *args = read_next_op(op_stream)
++            for j in range(8):
++                child_idx = get_child_index(i, j, l, target_lod)
++                op, stop = read_next_operation(operations)
+                 
+                 if op == 'Rp':
+-                    out[child_idx] = parent_val
+-                elif op.startswith('R'):
+-                    out[child_idx] = get_neighbor_value(out, i, j, l, target_lod, brick_size)
++                    out[child_idx] = parent
+                 elif op == 'Pa':
+                     ip += 1
+                     out[child_idx] = palette[ip]
+-                elif op == 'P*_0':
+-                    out[child_idx] = palette[ip]
+-                elif op == 'P*_delta':
+-                    delta = args[0]
+-                    out[child_idx] = palette[ip - delta]
++                # ... other ops
+                 
+                 if stop:
+-                    fill_subblock(out, child_idx, l - 1 - target_lod, out[child_idx])
++                    fill_subblock(out, child_idx, l, target_lod, out[child_idx])
+                     
+     return out
+ ```
+-
+-**Parameters:**
+-*   `brick_size` ($b$): Power of two. Tested values: 16, 32, 64. Larger bricks yield better compression but reduce neighbor reference utility across borders [S1].
+-*   `use_rANS`: Boolean. Enables rANS entropy coding. Default: true [S2, unofficial].
+-*   `use_detail_freq`: Boolean. Uses separate frequency table for finest LoD. Default: true [S2, unofficial].
+-*   `subsampling_factor`: Factor for frequency table prepass. Default: 8 or higher depending on dataset size [S2, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Neighbor Ambiguity:** If a neighbor reference points to a node with a later Z-index (not yet decoded), it is reinterpreted as a reference to the neighbor's parent [S1].
+-*   **Volume Boundaries:** Voxels outside the volume are labeled `0xFFFFFFFF` and skipped during coarsening [S2, unofficial].
+-*   **Zero Frequencies:** rANS requires non-zero frequencies. Zero frequencies from subsampling are clamped to 1 [S2, unofficial].
+-*   **Palette Duplicates:** Palettes may contain duplicates if a label cannot be referenced via $P^*_\delta$ [S1].
+ 
+ ## Subtopics
+@@ -210,24 +171,22 @@
+ ## Operating characteristics
+ **Time and Memory Complexity:**
+-*   **Compression:** Throughput is 1.5 to 3 GB/s [S1]. Parallelization uses T threads for T bricks, which is naive and leads to suboptimal utilization for larger bricks due to divergent processing times [S1].
+-*   **Memory:** Temporary memory overhead for pyramid generation is ~14% of the brick size [S1]. Decompression is in-place, requiring only the output array for the target LoD [S1].
++*   Compression: $O(N)$ where $N$ is the number of voxels. Parallelization uses $T$ threads for $T$ bricks [S1].
++*   Decompression: $O(N)$ per brick. GPU-based decompression allows on-the-fly rendering [S1].
++*   Memory: Temporary memory for pyramid generation is ~14% of brick size [S1]. Output array size depends on target LOD [S1].
+ 
+-**Measured Performance:**
+-*   **Compression Ratio (CR):** Achieves 1% to 3% of original size [S1].
+-    *   CELLS (4.0GB): 2.805% (b=64, rANS) [S1].
+-    *   FIBER (5.7GB): 0.899% (b=64, rANS) [S1].
+-    *   CORTEX (927.7GB subvolume): 1.590% (b=64, rANS) [S1].
+-*   **Comparison:** Outperforms HDF5 (gzip), PNG, and Neuroglancer. Comparable to Compresso+LZMA for CELLS/CORTEX, but significantly better for FIBER [S1]. 8-30x faster than Compresso+LZMA [S1].
++**Performance:**
++*   Compression Ratio (CR): Achieves 1% to 3% of original data size [S1].
++    *   CELLS (1M labels): 2.805% (b=64, rANS) [S1].
++    *   FIBER (32K labels): 0.899% (b=64, rANS) [S1].
++    *   CORTEX (15M labels): 1.590% (b=64, rANS) [S1] (on 1024^3 subvolume).
++*   Throughput: 1.5 to 3 GB/s for compression and decompression [S1].
++*   rANS improves CR by ~40% over 4-bit nibble storage, with ~2.5% throughput impact [S1].
+ 
+ **Strengths and Limitations:**
+-*   **Strengths:** High throughput, lossless, supports adaptive LoD, GPU-friendly decompression [S1].
+-*   **Limitations:** Neighbor references do not cross brick borders. Naive parallelization can lead to load imbalance [S1].
+-
+-**When to Use:**
+-*   GPU-based volume visualization with on-the-fly decompression and caching [S1].
+-*   Large segmentation volumes requiring interactive LOD navigation [S1].
++*   Strengths: High compression, fast parallel (de)compression, supports LOD, GPU-friendly [S1].
++*   Limitations: Neighbor references cannot cross brick borders, reducing efficiency for large homogeneous regions spanning bricks [S1]. Naive parallelization leads to load imbalance for large bricks [S1].
+ 
+ ## Background
+-Originating from the paper "Fast Compressed Segmentation Volumes for Scientific Visualization" (2023) [S1], CSV addresses the challenges of storing and visualizing large voxel-based segmentation volumes. It builds on the principles of brick-based hierarchical storage, introducing a specific multi-grid hierarchy and operation-based encoding to achieve high compression rates while maintaining rendering performance [S1][S2, unofficial]. It is used in scientific visualization, connectomics, and materials science [S1].
++Originated in "Fast Compressed Segmentation Volumes for Scientific Visualization" (2023) [S1]. Developed to address storage and transfer challenges in voxel-based segmentation volumes (e.g., connectomics, materials science) [S1]. Uses rANS entropy coding as a compromise between Huffman and arithmetic coding [S1].
+ 
+ ## Sources

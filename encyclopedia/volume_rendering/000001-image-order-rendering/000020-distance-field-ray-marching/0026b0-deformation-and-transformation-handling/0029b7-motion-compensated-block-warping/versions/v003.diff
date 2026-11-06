@@ -1,0 +1,291 @@
+--- v002.md
++++ v003.md
+@@ -4,186 +4,155 @@
+ 
+ ## Overview
+-Motion-Compensated Block Warping is a technique for compressing dynamic 3D volumes by predicting the current frame's Truncated Signed Distance Field (TSDF) from the previously reconstructed frame using rigid body motion. It solves the problem of temporal redundancy in dynamic scenes by inverse-warping voxel samples from the target frame into the coordinate space of the previous frame, creating a predictor that captures the bulk of the geometric change. Unlike static compression or simple frame-differencing, it explicitly models 6-DoF rigid motion per block, allowing for efficient residual coding of the remaining geometric details [S1].
++Motion-Compensated Block Warping is a technique for compressing dynamic Truncated Signed Distance Fields (TSDF) by predicting the current frame's geometry from the previous frame using estimated rigid body motion [S1]. It improves prediction accuracy over static methods by inverse-warping voxel samples from the target block into the previously reconstructed TSDF and resampling them via trilinear interpolation [S1]. Unlike global transformation methods, this approach operates on local blocks, allowing for piecewise-rigid motion estimation which is essential for complex, non-uniform scene dynamics [S1].
+ 
+ ## How it works
+-The method operates on a block-based sparse TSDF representation. The core pipeline consists of motion estimation to find the rigid transform, inverse warping to generate a predictor, and residual encoding.
++The method consists of two main phases: motion estimation to determine the rigid transform between frames, and motion compensation to generate the predictor for residual coding.
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Current frame TSDF block $s_t^{(b)}$ at block index $b$ and frame $t$; Previous frame reconstructed TSDF $\hat{s}_{t-1}^{(b)}$; 3x3x3 neighborhood of blocks surrounding $b$ in frame $t-1$.
+-*   **Output:** Motion parameters (6-DoF rigid transform $\mathbf{r}, \mathbf{t}$); Residual coefficients (transform-domain) for the difference between $s_t^{(b)}$ and the predictor.
++*   **Inputs:** Current frame TSDF block $s_t^{(b)}$, previous frame reconstructed TSDF block $\hat{s}_{t-1}^{(b)}$, and the spatial neighborhood structure.
++*   **Outputs:** A motion-compensated predictor block and the 6-DoF rigid transform parameters $(\mathbf{r}, \mathbf{t})$ encoded as side information.
+ 
+ **Data Structures:**
+-*   **TSDF Block:** A 3D grid of TSDF values. In the sparse representation, active blocks are stored in a spatial hash table (e.g., voxel hashing) [S1].
++*   **TSDF Block:** A 3D grid of voxel values.
+ *   **Motion Parameters:** A translation vector $\mathbf{t} \in \mathbb{R}^3$ and an Euler-angle rotation vector $\mathbf{r} \in \mathbb{R}^3$.
+-*   **Sampling Grid:** A set of sample positions $\Omega$ within the block $b$, typically corresponding to voxel centers.
++*   **Neighborhood:** A stitched $3 \times 3 \times 3$ array of blocks surrounding the target block to support interpolation across boundaries.
+ 
+ **Algorithm Steps:**
+ 
+-1.  **Neighborhood Assembly:** Assemble a stitched $3 \times 3 \times 3$ neighborhood of blocks from the previous frame $\hat{s}_{t-1}$ centered on block $b$. This ensures that when samples are warped, they can be interpolated even if they fall into adjacent blocks [S1].
++1.  **Motion Estimation:** Estimate the rigid transform $(\mathbf{r}, \mathbf{t})$ that aligns the previous frame's geometry to the current frame. This is done by minimizing the squared residuals between the warped previous samples and the current samples [S1].
++2.  **Inverse Warping:** For each voxel center position $\mathbf{p}_i$ in the target block $b$ at frame $t$, apply the inverse of the estimated rigid transform $\mathbf{T}^{-1}(\cdot; \mathbf{r}, \mathbf{t})$ to map $\mathbf{p}_i$ into the coordinate space of the previous frame [S1].
++3.  **Resampling:** Evaluate the TSDF value at the warped location using trilinear interpolation over the stitched $3 \times 3 \times 3$ neighborhood from the previous frame $\hat{s}_{t-1}^{(b)}$ [S1]. This handles fractional positions and boundary crossings.
++4.  **Residual Coding:** Compute the difference between the current frame's TSDF values and the interpolated predictor. Encode these residual coefficients (e.g., using DCT) [S1].
++5.  **Side Information Encoding:** Encode the 6-DoF transform $(\mathbf{r}, \mathbf{t})$ for each block. The decoder applies the same inverse warp to reconstruct the identical predictor before decoding residuals [S1].
+ 
+-2.  **Motion Estimation:** Estimate the rigid transform $(\mathbf{r}, \mathbf{t})$ that best aligns the current block samples with the previous frame.
+-    *   Define the residual for a sample $i$ at position $\mathbf{p}_i$:
+-        $$ \epsilon_i(\mathbf{r}, \mathbf{t}) = \hat{s}_{t-1}^{(b)}(\mathbf{T}(\mathbf{p}_i; \mathbf{r}, \mathbf{t})) - s_t^{(b)}(\mathbf{p}_i) $$
+-        where $\mathbf{T}(\cdot; \mathbf{r}, \mathbf{t})$ is the rigid transformation function [S1].
+-    *   Minimize the sum of squared residuals:
+-        $$ \mathbf{t}, \mathbf{r} := \arg \min_{\mathbf{t}, \mathbf{r}} \sum_{i \in \Omega} \epsilon_i(\mathbf{r}, \mathbf{t})^2 $$
+-    *   Use a damped Gauss-Newton procedure to solve for $\mathbf{t}$ and $\mathbf{r}$ [S1].
++**Formulas:**
+ 
+-3.  **Inverse Warping (Prediction):**
+-    *   For each sample position $\mathbf{p}_i$ in the current block $b$, compute the warped position in the previous frame's coordinate space: $\mathbf{p}'_i = \mathbf{T}(\mathbf{p}_i; \mathbf{r}, \mathbf{t})$.
+-    *   Evaluate the TSDF value at $\mathbf{p}'_i$ using trilinear interpolation over the assembled $3 \times 3 \times 3$ neighborhood from $\hat{s}_{t-1}$. This forms the motion-compensated predictor $\hat{s}_{pred}$ [S1].
++The residual for a sample $i$ is defined as [S1]:
++$$ \epsilon_i(\mathbf{r}, \mathbf{t}) = \hat{s}_{t-1}^{(b)}(\mathbf{T}(\mathbf{p}_i; \mathbf{r}, \mathbf{t})) - s_t^{(b)}(\mathbf{p}_i) $$
++where $\mathbf{T}(\cdot; \mathbf{r}, \mathbf{t})$ is the rigid transform parameterized by rotation $\mathbf{r}$ and translation $\mathbf{t}$, and $\hat{s}_{t-1}^{(b)}$ is the trilinearly interpolated TSDF from the previous frame.
+ 
+-4.  **Residual Encoding:**
+-    *   Compute the difference between the current block $s_t^{(b)}$ and the predictor $\hat{s}_{pred}$.
+-    *   Encode the transform-domain residual coefficients [S1].
++The optimal transform is found by minimizing the sum of squared residuals [S1]:
++$$ \mathbf{t}, \mathbf{r} := \arg \min_{\mathbf{t}, \mathbf{r}} \sum_{i \in \Omega} \epsilon_i(\mathbf{r}, \mathbf{t})^2 $$
++where $\Omega$ is the set of sample positions within the block.
+ 
+-5.  **Side Information:**
+-    *   Encode the per-block rigid transform $(\mathbf{r}, \mathbf{t})$ as motion side information. The decoder applies the same inverse warp to reconstruct the identical predictor before decoding the residuals [S1].
++The update step in the damped Gauss-Newton optimization is [S1]:
++$$ \Delta \mathbf{p} = -(J^\top J + \lambda I)^{-1} J^\top \boldsymbol{\varepsilon} $$
++where $J$ is the Jacobian of the residuals with respect to the parameters, $\boldsymbol{\varepsilon}$ is the vector of residuals, and $\lambda$ is a damping factor for numerical stability.
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def motion_compensated_block_warping(current_block_s_t, prev_block_s_t_minus_1, neighborhood_blocks_t_minus_1):
++def motion_compensated_block_warping(current_block, prev_block_reconstructed, neighborhood_blocks):
+     """
+-    current_block_s_t: TSDF values for block b at frame t
+-    prev_block_s_t_minus_1: Reconstructed TSDF for block b at frame t-1
+-    neighborhood_blocks_t_minus_1: 3x3x3 grid of TSDF blocks surrounding b at frame t-1
++    Generates a motion-compensated predictor for a TSDF block.
+     
+-    Returns: motion_params (r, t), residual_coeffs
++    Args:
++        current_block: TSDF values for the current frame block b at time t.
++        prev_block_reconstructed: Reconstructed TSDF values for block b at time t-1.
++        neighborhood_blocks: Stitched 3x3x3 array of blocks surrounding b in t-1.
++        
++    Returns:
++        predictor: Interpolated TSDF values for the current block.
++        transform: Estimated 6-DoF rigid transform (r, t).
+     """
+     
+-    # 1. Define sample positions (e.g., voxel centers)
+-    sample_positions = get_voxel_centers(current_block_s_t.shape)
+-    
+-    # 2. Motion Estimation
+-    # Initialize motion parameters (e.g., zero motion)
++    # 1. Motion Estimation
++    # Initialize transform to zero motion
+     r = [0.0, 0.0, 0.0] # Euler angles
+     t = [0.0, 0.0, 0.0] # Translation
+     
+-    # Damped Gauss-Newton optimization
+-    lambda_damping = 1e-3
+-    max_iterations = 10
+-    threshold = 1e-4
++    # Define sample positions p_i for the current block
++    sample_positions = get_voxel_centers(current_block)
+     
+-    for iter in range(max_iterations):
+-        # Calculate residuals
++    # Minimize squared residuals using damped Gauss-Newton
++    # Objective: sum( (interp(prev_block, T(p_i; r, t)) - current_block(p_i))^2 )
++    converged = False
++    while not converged:
++        # Calculate residuals epsilon_i(r, t)
+         residuals = []
+-        jacobian_rows = []
++        for p_i in sample_positions:
++            # Apply rigid transform T to p_i
++            warped_pos = apply_rigid_transform(p_i, r, t)
++            # Trilinear interpolation over the 3x3x3 neighborhood
++            # This handles fractional positions and block boundaries
++            val = trilinear_interpolate(warped_pos, neighborhood_blocks)
++            residuals.append(val - current_block.get_value(p_i))
+         
+-        for p_i in sample_positions:
+-            # Apply rigid transform T(p; r, t) to get warped position
+-            p_warped = apply_rigid_transform(p_i, r, t)
+-            
+-            # Interpolate TSDF from previous frame at warped position
+-            # Uses the 3x3x3 neighborhood for support
+-            s_pred = trilinear_interpolate(p_warped, neighborhood_blocks_t_minus_1)
+-            
+-            # Current TSDF value
+-            s_curr = get_tsdf_at_position(p_i, current_block_s_t)
+-            
+-            residual = s_pred - s_curr
+-            residuals.append(residual)
+-            
+-            # Compute Jacobian row via finite difference
+-            # J = d(T(p; r, t)) / d[r, t]
+-            jacobian_row = compute_jacobian_row(p_i, r, t)
+-            jacobian_rows.append(jacobian_row)
+-            
+-        residuals = np.array(residuals)
+-        J = np.array(jacobian_rows)
+-        
+-        # Solve for update step: delta_p = -(J^T J + lambda I)^-1 J^T epsilon
+-        # Note: delta_p contains updates for both r and t
+-        delta_p = solve_linear_system(-(J.T @ J + lambda_damping * np.eye(6)), J.T @ residuals)
+-        
+-        # Clamp updates
+-        # Translation update magnitude <= 1 voxel
+-        # Rotation update magnitude <= 5 degrees
+-        delta_t = delta_p[3:6]
+-        delta_r = delta_p[0:3]
+-        
+-        if np.linalg.norm(delta_t) > 1.0:
+-            delta_t = delta_t / np.linalg.norm(delta_t)
+-        if np.linalg.norm(delta_r) > 5.0 * np.pi / 180.0:
+-            delta_r = delta_r / np.linalg.norm(delta_r) * (5.0 * np.pi / 180.0)
+-            
+-        # Update parameters
+-        t = t + delta_t
+-        r = r + delta_r
+-        
+-        # Check convergence
+-        if np.linalg.norm(delta_p) < threshold:
++        # Check convergence: if objective decrease is below threshold, stop
++        if check_convergence(residuals):
++            converged = True
+             break
+             
+-    # 3. Generate Predictor
+-    predictor = np.zeros_like(current_block_s_t)
+-    for i, p_i in enumerate(sample_positions):
+-        p_warped = apply_rigid_transform(p_i, r, t)
+-        predictor[i] = trilinear_interpolate(p_warped, neighborhood_blocks_t_minus_1)
++        # Compute Jacobian J approximately via finite difference
++        J = compute_jacobian_finite_difference(sample_positions, r, t, neighborhood_blocks, current_block)
+         
+-    # 4. Compute Residual
+-    residual = current_block_s_t - predictor
+-    
+-    # 5. Encode Residual (Placeholder for actual transform encoding)
+-    residual_coeffs = encode_residual(residual)
+-    
+-    return (r, t), residual_coeffs
++        # Solve for update step Delta p
++        # Delta p = -(J^T J + lambda I)^-1 J^T epsilon
++        epsilon = vector(residuals)
++        lambda_damp = 1e-4 # Small damping factor
++        update = solve_linear_system(-(J.T @ J + lambda_damp * identity_matrix(6)), J.T @ epsilon)
++        
++        # Update parameters
++        r_new, t_new = update_rotation_translation(r, t, update)
++        
++        # Clamp updates to prevent divergence
++        # Translation magnitude clamped to 1 voxel
++        # Rotation magnitude clamped to 5 degrees
++        r, t = clamp_updates(r_new, t_new, max_trans=1.0, max_rot_deg=5.0)
++        
++    # 2. Motion Compensation (Prediction)
++    predictor = []
++    for p_i in sample_positions:
++        # Inverse warp: map current position to previous frame coordinates
++        # Note: The estimation minimizes T(p_i) -> prev, so we use the forward T
++        # to find where p_i came from in the previous frame.
++        # Actually, the formula uses T(p_i) to sample from prev.
++        # If T maps prev->curr, we need T_inv(curr) -> prev.
++        # The source defines epsilon using T(p_i) sampling from prev.
++        # This implies T maps current local coords to previous local coords?
++        # Or T is the transform FROM prev TO curr?
++        # Source: "inverse-warping its voxel-center sample positions into the previous... TSDF"
++        # Formula: s_hat_{t-1}(T(p_i)) - s_t(p_i).
++        # This implies T maps p_i (in current block space) to a location in prev block space.
++        # So T is the "inverse warp" transform estimated.
++        
++        warped_pos = apply_rigid_transform(p_i, r, t)
++        val = trilinear_interpolate(warped_pos, neighborhood_blocks)
++        predictor.append(val)
++        
++    return predictor, (r, t)
+ 
+ def apply_rigid_transform(p, r, t):
+     """
+     Applies rigid transform defined by Euler angles r and translation t to point p.
++    Assumes r is rotation vector (axis-angle or Euler) and t is translation.
+     """
+-    # Convert Euler angles to rotation matrix R
++    # Construct rotation matrix R from Euler angles r
+     R = euler_to_rotation_matrix(r)
+     # Apply rotation and translation
+-    p_warped = R @ p + t
+-    return p_warped
+-
+-def trilinear_interpolate(p, neighborhood_blocks):
+-    """
+-    Performs trilinear interpolation of TSDF value at position p
+-    using the 3x3x3 neighborhood of blocks.
+-    """
+-    # Determine which block in the 3x3x3 grid contains p
+-    # Calculate fractional offset within that block
+-    # Interpolate using 8 corner values
+-    pass # Implementation detail of trilinear interpolation over sparse grid
+-
+-def compute_jacobian_row(p, r, t):
+-    """
+-    Computes the Jacobian of the rigid transform T(p; r, t) with respect to r and t.
+-    """
+-    # J = d(T(p; r, t)) / d[r, t]
+-    # This requires the derivative of the rotation matrix with respect to Euler angles
+-    pass # Implementation detail of Jacobian calculation
++    # The specific order (R*p + t vs R*(p+t)) depends on convention.
++    # Standard rigid transform: p' = R*p + t
++    return R @ p + t
+ ```
+ 
+-**Parameters:**
+-*   **Damping factor ($\lambda$):** Small value for numerical stability in Gauss-Newton. Not given in the sources.
+-*   **Translation clamp:** 1 voxel per iteration [S1].
+-*   **Rotation clamp:** 5 degrees per iteration [S1].
+-*   **Convergence threshold:** Objective decrease threshold. Not given in the sources.
+-
+ **Edge Cases and Pitfalls:**
+-*   **Insufficient Samples:** If too few reliable samples are available or the $3 \times 3 \times 3$ neighborhood is incomplete, fall back to zero-motion prediction ($\mathbf{t}, \mathbf{r} = 0$) for that block [S1].
+-*   **Boundary Conditions:** Warped samples may land outside the target block, requiring the stitched neighborhood for valid interpolation [S1].
+-*   **Divergence:** Large motion steps can cause the Gauss-Newton procedure to diverge; clamping updates prevents this [S1].
++*   **Insufficient Samples:** If too few reliable samples are available or the $3 \times 3 \times 3$ neighborhood is incomplete (e.g., at the volume boundary), the method falls back to zero-motion prediction ($\mathbf{r} = \mathbf{0}, \mathbf{t} = \mathbf{0}$) [S1].
++*   **Divergence:** The Gauss-Newton optimization can diverge if updates are too large. Clamping translation to 1 voxel and rotation to 5 degrees per step prevents this [S1].
++*   **Boundary Interpolation:** Warped samples may land in neighboring blocks. The stitched $3 \times 3 \times 3$ neighborhood ensures valid trilinear interpolation is always possible [S1].
+ 
+ ## Subtopics
+ 
+ ### Per-Block Motion Estimation
+-A variant focusing on the optimization process to determine the 6-DoF rigid transform $(\mathbf{r}, \mathbf{t})$ for each block. It uses a damped Gauss-Newton procedure to minimize the squared residuals between the warped previous frame and the current frame. It is chosen when high-fidelity motion estimation is required for each block independently. It differs from global motion estimation by allowing local rigid body motions, which is suitable for scenes with multiple independently moving objects or articulated parts. [S1]
++This variant focuses on the optimization procedure used to determine the 6-DoF rigid transform for each block independently [S1]. It differs from global motion estimation by allowing piecewise-rigid motion, which is necessary for complex deformations. It is chosen when the scene contains multiple moving objects or non-rigid deformations that can be approximated locally. The method uses a damped Gauss-Newton algorithm to minimize the squared residuals between the warped previous frame and the current frame [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Motion estimation involves an iterative Gauss-Newton procedure per block, which is computationally expensive compared to simple frame differencing. The number of iterations depends on convergence.
+-*   **Memory Complexity:** Requires storing the previous frame's TSDF blocks and the $3 \times 3 \times 3$ neighborhood for interpolation. Sparse representation helps reduce memory usage.
+-*   **Measured Performance:** Implemented in C++ with CUDA acceleration. The codebase is around 30K lines of code. Experiments run on an Intel i9-13900K CPU and NVIDIA RTX 4090 GPU. [S1]
+-*   **Strengths:** Efficiently compresses dynamic scenes with rigid motion by reducing temporal redundancy. Handles block boundaries correctly via neighborhood stitching.
+-*   **Limitations:** Assumes rigid motion within each block. Non-rigid deformation within a block is not handled well and will result in larger residuals. Computationally intensive motion estimation.
+-*   **When to use:** Dynamic scenes with dominant rigid body motion.
+-*   **When not to use:** Scenes with significant non-rigid deformation or no motion.
++*   **Time Complexity:** The complexity is dominated by the motion estimation step, which involves iterative Gauss-Newton optimization for each block. The number of iterations depends on the convergence threshold and the complexity of the motion. Resampling is linear in the number of voxels per block.
++*   **Memory Complexity:** Requires storing the previous frame's TSDF blocks and the stitched $3 \times 3 \times 3$ neighborhood for interpolation. The sparse representation (e.g., voxel hashing) helps manage memory for large volumes [S1].
++*   **Performance:** Implemented with CUDA acceleration, the method achieves real-time or near-real-time performance on modern GPUs (e.g., NVIDIA RTX 4090) for typical resolutions [S1].
++*   **Strengths:** Significantly reduces residual error for dynamic scenes compared to static compression, leading to higher compression ratios. Handles local motion variations.
++*   **Limitations:** Computationally expensive due to per-block optimization. Fails to capture non-rigid deformations well if the block size is too large. Requires accurate initial estimates or robust clamping to avoid divergence.
+ 
+ ## Background
+-Motion-Compensated Block Warping is used in the context of implicit surface compression, specifically for compressing dynamic TSDF volumes. It builds on the principles of video compression (motion compensation) and applies them to 3D volumetric data. The method was described in the paper "Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation" [S1].
++Motion-Compensated Block Warping was introduced in the context of implicit surface compression, specifically in the paper "Implicit Surface Compression -- with Good Old Discrete Cosine Transform and Motion Compensation" [S1]. It builds upon the principles of sparse TSDF representation and voxel hashing [S1]. The method leverages the temporal coherence of dynamic 3D scans to improve compression efficiency.
+ 
+ ## Sources

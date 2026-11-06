@@ -1,0 +1,230 @@
+--- v001.md
++++ v002.md
+@@ -8,6 +8,6 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$ (normalized), world bounds (min/max), and voxel grid metadata (brick dimensions, occupancy data).
+-*   **Output:** The first solid voxel coordinate hit by the ray, or `None` if no hit occurs within bounds or steps.
++*   **Input:** Ray origin $\mathbf{O}$, ray direction $\mathbf{D}$ (normalized), world bounds (min/max), and voxel grid metadata (brick dimensions, occupancy data) [S2, unofficial].
++*   **Output:** The first solid voxel coordinate hit by the ray, or `None` if no hit occurs within bounds or steps [S1, unofficial].
+ 
+ **Data Structures:**
+@@ -15,7 +15,7 @@
+ 1.  `kOrigin`: The ray origin $(O_x, O_y, O_z)$.
+ 2.  `kDirection`: The ray direction $(D_x, D_y, D_z)$.
+-3.  `kInvDirection`: The component-wise reciprocal $(1/D_x, 1/D_y, 1/D_z)$.
+-4.  `kOod`: The Origin-Inverse Direction product $(O_x/D_x, O_y/D_y, O_z/D_z)$.
+-5.  `kSigns`: The component-wise sign of the direction $(-1$ if $D_i < 0$, else $1)$.
++3.  `kInvDirection`: The component-wise reciprocal $(1/D_x, 1/D_y, 1/D_z)$ [S3, unofficial].
++4.  `kOod`: The Origin-Inverse Direction product $(O_x/D_x, O_y/D_y, O_z/D_z)$ [S3, unofficial].
++5.  `kSigns`: The component-wise sign of the direction ($-1$ if $D_i < 0$, else $1$) [S3, unofficial].
+ 
+ The `Data()` method returns a pointer to `kOrigin`, ensuring the five vectors are contiguous [S3, unofficial].
+@@ -24,5 +24,5 @@
+ *   **Inverse Direction:** $kInvDirection_i = \frac{1}{Direction_i}$ for $i \in \{x, y, z\}$ [S3, unofficial].
+ *   **Origin-Inverse Direction (OOD):** $OOD_i = \frac{Origin_i}{Direction_i}$ for $i \in \{x, y, z\}$ [S3, unofficial].
+-*   **Signs:** $kSigns_i = \text{sign}(Direction_i)$ [S2, unofficial][S3, unofficial].
++*   **Signs:** $kSigns_i = \text{sign}(Direction_i)$ [S3, unofficial].
+ 
+ **Parameters:**
+@@ -35,13 +35,14 @@
+     *   Validate the ray direction. If the direction is near-zero or un-normalized, return `None` [S1, unofficial].
+     *   Compute `kSigns` component-wise: $-1$ if $Direction_i < 0$, else $1$ [S3, unofficial].
+-    *   Compute `kInvDirection` via component-wise reciprocal. Note: Division by zero is avoided by requiring floating-point types and assuming non-zero direction components, enforced by a `static_assert` [S3, unofficial].
++    *   Compute `kInvDirection` via component-wise reciprocal [S3, unofficial]. Division by zero is avoided by requiring floating-point types and assuming non-zero direction components, enforced by a `static_assert` [S3, unofficial].
+     *   Compute `kOod` as the component-wise product of `kOrigin` and `kInvDirection` [S3, unofficial].
+     *   Clamp the ray origin `p` with an epsilon ($10^{-3}$) to prevent precision issues [S1, unofficial].
+-    *   Calculate the initial voxel coordinate containing the ray origin.
+-    *   Compute `tDelta` for each axis: $tDelta_i = |kInvDirection_i|$ [S1, unofficial][S2, unofficial].
++    *   Calculate the initial voxel coordinate containing the ray origin [S1, unofficial].
++    *   Compute `tDelta` for each axis: $tDelta_i = |kInvDirection_i|$ [S3, unofficial].
+     *   Compute `tMax` for each axis:
+         *   If $Direction_i > 0$: $tMax_i = (Voxel_i + 1 - Origin_i) \times tDelta_i$ [S2, unofficial].
+         *   If $Direction_i < 0$: $tMax_i = (Origin_i - Voxel_i) \times tDelta_i$ [S2, unofficial].
+         *   If $Direction_i = 0$: Set $tDelta_i = \infty$, $tMax_i = \infty$, and step $= 0$ to prevent the axis from being selected [S2, unofficial].
++    *   Compute ray clipping bounds against the world window: $t0_i = (win\_min_i - Origin_i) \times kInvDirection_i$, $t1_i = (win\_max_i - Origin_i) \times kInvDirection_i$. Calculate $t\_enter = \max(t0_x, t0_y, t0_z)$ and $t\_exit = \min(t1_x, t1_y, t1_z)$. Return `None` if $t\_enter \ge t\_exit$ or $t\_exit < 0.0$ [S1, unofficial].
+ 
+ 2.  **Phase 1: Skip Interior Solid Voxels:**
+@@ -63,5 +64,4 @@
+ 
+ 4.  **Termination:**
+-    *   If `MAX_STEPS` is reached, return `None` [S1, unofficial].
+     *   If the ray exits the world window without hitting a solid voxel, return `None` [S1, unofficial].
+ 
+@@ -71,108 +71,77 @@
+ import math
+ 
+-class TRFRay3:
+-    def __init__(self, origin, direction):
+-        # Defensive normalization and validation
+-        length = math.sqrt(sum(d**2 for d in direction))
+-        if length < 1e-6:
+-            return None # Near-zero direction
+-        
+-        self.origin = origin
+-        self.direction = [d / length for d in direction]
+-        
+-        # Pre-compute constants for DDA
+-        self.inv_direction = [1.0 / d if abs(d) > 1e-9 else float('inf') for d in self.direction]
+-        self.signs = [1 if d > 0 else -1 if d < 0 else 0 for d in self.direction]
+-        self.ood = [o * inv for o, inv in zip(self.origin, self.inv_direction)]
+-        
+-        # Handle zero-direction components
+-        for i in range(3):
+-            if self.direction[i] == 0:
+-                self.inv_direction[i] = float('inf')
+-                self.ood[i] = float('inf')
+-                self.signs[i] = 0
+-
+-    def raycast(self, world_min, world_max, voxel_grid, max_steps=1000):
+-        # Clamp origin to avoid precision issues
+-        p = [o + 1e-3 for o in self.origin]
+-        
+-        # Initial voxel
+-        voxel = [int(math.floor(p[i])) for i in range(3)]
+-        
+-        # Compute tDelta and tMax
+-        t_delta = [abs(self.inv_direction[i]) for i in range(3)]
+-        t_max = [0.0, 0.0, 0.0]
+-        
+-        for i in range(3):
+-            if self.direction[i] > 0:
+-                t_max[i] = (voxel[i] + 1 - p[i]) * t_delta[i]
+-            elif self.direction[i] < 0:
+-                t_max[i] = (p[i] - voxel[i]) * t_delta[i]
+-            else:
+-                t_max[i] = float('inf')
+-                t_delta[i] = float('inf')
+-        
+-        # Phase 1: Skip solid voxels if camera is inside one
+-        while self._is_solid(voxel, voxel_grid, world_min, world_max):
+-            # Advance to next voxel
+-            axis = self._get_min_t_max_axis(t_max)
+-            if axis is None:
+-                return None
+-            voxel[axis] += self.signs[axis]
+-            t_max[axis] += t_delta[axis]
+-            
+-            # Check bounds
+-            if not self._is_in_world(voxel, world_min, world_max):
+-                return None
+-
+-        # Phase 2: Find first solid voxel
+-        for _ in range(max_steps):
+-            if self._is_solid(voxel, voxel_grid, world_min, world_max):
+-                return voxel
+-            
+-            axis = self._get_min_t_max_axis(t_max)
+-            if axis is None:
+-                return None
+-            
+-            voxel[axis] += self.signs[axis]
+-            t_max[axis] += t_delta[axis]
+-            
+-            if not self._is_in_world(voxel, world_min, world_max):
+-                return None
+-                
++def trfray3_raycast(origin, direction, world_min, world_max, world_size, voxel_grid, max_steps=1000):
++    # 1. Defensive normalization and validation [S1, unofficial]
++    length = math.sqrt(sum(d**2 for d in direction))
++    if length < 1e-6:
+         return None
+ 
+-    def _get_min_t_max_axis(self, t_max):
+-        min_t = float('inf')
+-        axis = None
+-        for i in range(3):
+-            if t_max[i] < min_t:
+-                min_t = t_max[i]
+-                axis = i
+-        return axis
++    inv_dir = [1.0 / d if abs(d) > 1e-9 else float('inf') for d in direction]
++    signs = [1 if d > 0 else -1 if d < 0 else 0 for d in direction]
++    ood = [o * inv for o, inv in zip(origin, inv_dir)]
+ 
+-    def _is_in_world(self, voxel, world_min, world_max):
+-        # Toroidal wrapping check
+-        # Assuming world dimensions are known or passed
+-        # For simplicity, checking bounds without wrap for this example
+-        # In actual implementation, use modulo arithmetic for toroidal wrapping
+-        return True # Placeholder for toroidal logic
++    # Clamp origin to prevent precision issues [S1, unofficial]
++    p = [max(o, 1e-3) for o in origin]
+ 
+-    def _is_solid(self, voxel, voxel_grid, world_min, world_max):
+-        # Check occupancy bit and exclude MAT_LEAF_FRINGE
+-        # Placeholder for actual voxel grid lookup
+-        return False
++    # Initial voxel coordinate [S1, unofficial]
++    voxel = [int(math.floor(p[i])) for i in range(3)]
++
++    # Compute tDelta and tMax [S3, unofficial][S2, unofficial]
++    t_delta = [abs(inv_dir[i]) for i in range(3)]
++    t_max = [0.0, 0.0, 0.0]
++    for i in range(3):
++        if direction[i] > 0:
++            t_max[i] = (voxel[i] + 1 - p[i]) * t_delta[i]
++        elif direction[i] < 0:
++            t_max[i] = (p[i] - voxel[i]) * t_delta[i]
++        else:
++            t_max[i] = float('inf')
++            t_delta[i] = float('inf')
++
++    # Ray clipping against world window [S1, unofficial]
++    t0 = [(world_min[i] - p[i]) * inv_dir[i] for i in range(3)]
++    t1 = [(world_max[i] - p[i]) * inv_dir[i] for i in range(3)]
++    t_enter = max(t0)
++    t_exit = min(t1)
++    if t_enter >= t_exit or t_exit < 0.0:
++        return None
++
++    # Helper: Toroidal world check [S1, unofficial]
++    def is_in_world(v):
++        return all(0 <= (v[i] % world_size[i]) < world_size[i] for i in range(3))
++
++    # Helper: Solid voxel check [S1, unofficial]
++    def is_solid(v):
++        # Compute brick index, check occupancy bit, exclude MAT_LEAF_FRINGE
++        # Implementation depends on specific voxel grid layout
++        return False 
++
++    # Phase 1: Skip interior solid voxels [S1, unofficial]
++    while is_solid(voxel):
++        axis = min(range(3), key=lambda i: t_max[i])
++        if t_max[axis] == float('inf'):
++            return None
++        voxel[axis] += signs[axis]
++        t_max[axis] += t_delta[axis]
++        if not is_in_world(voxel):
++            return None
++
++    # Phase 2: Traverse to first solid voxel [S1, unofficial]
++    for _ in range(max_steps):
++        if is_solid(voxel):
++            return voxel
++        
++        axis = min(range(3), key=lambda i: t_max[i])
++        if t_max[axis] == float('inf'):
++            return None
++            
++        voxel[axis] += signs[axis]
++        t_max[axis] += t_delta[axis]
++        
++        if not is_in_world(voxel):
++            return None
++
++    return None
+ ```
+-
+-## Subtopics
+-
+-### Amanatides–Woo Voxel Traversal
+-The foundational DDA algorithm for voxel traversal. TRFRay3 implements this logic but encapsulates it in a C++ class with pre-computed inverse directions and OOD terms for performance [S3, unofficial].
+-
+-### Differentiable DDA Loop
+-A variant of DDA designed for gradient-based optimization. TRFRay3 is non-differentiable and intended for standard raycasting/picking [S2, unofficial].
+-
+-### Multi-level DDA with Adaptive Mip Selection
+-Uses multiple levels of detail for voxel traversal. TRFRay3 operates on a single level of voxel resolution [S2, unofficial].
+ 
+ ## Operating characteristics

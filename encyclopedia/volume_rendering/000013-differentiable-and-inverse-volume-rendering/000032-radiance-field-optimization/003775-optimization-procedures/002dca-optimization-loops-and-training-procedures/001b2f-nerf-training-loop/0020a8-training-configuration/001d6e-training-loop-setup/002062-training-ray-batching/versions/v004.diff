@@ -1,0 +1,259 @@
+--- v003.md
++++ v004.md
+@@ -4,36 +4,33 @@
+ 
+ ## Overview
+-Training Ray Batching is a data loading strategy for Neural Radiance Fields (NeRF) that selects a random subset of pixel coordinates (and thus rays) from the full image grid per training iteration to reduce GPU memory usage during the backward pass of gradient descent [S1, unofficial]. It differs from single-image sampling by globally shuffling rays from all training images, ensuring the network sees a diverse mix of viewpoints in every batch rather than focusing on one image at a time [S2, unofficial]. This method builds on [Training Loop Setup](1522-training-loop-setup.md) by providing the structured ray tensors that are subsequently shuffled and sampled [S2, unofficial].
++Training Ray Batching is a data loading strategy for Neural Radiance Fields (NeRF) that selects a random subset of pixel coordinates (and their corresponding rays) from the full training image grid per iteration [S1, unofficial]. This reduces GPU memory usage during the backward pass of gradient descent by avoiding the computation of full-image gradients simultaneously [S1, unofficial]. It differs from image-based training, which renders complete images per step, by using smaller batches of random rays to improve memory utilization and convergence speed [S5, unofficial]. It builds on [Training Loop Setup](1522-training-loop-setup.md) by providing the structured ray tensors that are subsequently shuffled and sampled [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:**
+-    *   `poses`: Array of camera extrinsic matrices, shape `(num_img, 3, 4)` [S2, unofficial].
+-    *   `images`: Array of target RGB images, shape `(num_img, H, W, 3)` [S2, unofficial].
+-    *   `K`: Camera intrinsic matrix, shape `(3, 3)` [S2, unofficial]. Simplified form: `[[f, 0, W/2], [0, f, H/2], [0, 0, 1]]` where `f` is focal length [S2, unofficial].
+-    *   `i_train`: List of indices for training images [S2, unofficial].
+-    *   `N_rand`: Number of rays to sample per batch (default 4096, often `32x32x4`) [S2, unofficial].
+-    *   `use_batching`: Boolean flag. If `True`, sample from all images globally. If `False`, sample from a single random image per iteration [S2, unofficial].
+-*   **Outputs:**
+-    *   `batch_rays`: Tensor of shape `(2, N_rand, 3)` containing ray origins and directions [S2, unofficial].
+-    *   `target_s`: Tensor of shape `(N_rand, 3)` containing target RGB colors [S2, unofficial].
++**Inputs:**
++- `images`: Array of training images with shape `(num_img, H, W, 3)`.
++- `poses`: Array of camera poses with shape `(num_img, 3, 4)`.
++- `K`: Camera intrinsic matrix with shape `(3, 3)`. Simplified form: `[[f, 0, W/2], [0, f, H/2], [0, 0, 1]]` where `f` is focal length [S2, unofficial].
++- `i_train`: Indices of training images.
++- `N_rand`: Number of random rays per batch. Default is 4096 (32x32x4) [S2, unofficial].
++- `use_batching`: Boolean flag. If `True`, rays are sampled from all training images globally. If `False`, rays are sampled from a single random image per iteration [S2, unofficial].
++
++**Outputs:**
++- `batch_rays`: Tensor of shape `(2, N_rand, 3)` containing ray origins and directions.
++- `target_s`: Tensor of shape `(N_rand, 3)` containing target RGB values.
+ 
+ **Data Structures:**
+-The core data structure is a flat tensor `rays_rgb` of shape `(N_total_rays, 3, 3)` where `N_total_rays = len(i_train) * H * W`. The three channels along the second dimension correspond to:
+-1.  Ray Origin `(x, y, z)`
+-2.  Ray Direction `(x, y, z)`
+-3.  Target RGB `(r, g, b)` [S2, unofficial].
++- `rays_rgb`: A flat tensor of shape `(N_total, 3, 3)` where `N_total = len(i_train) * H * W`. The first dimension indexes the ray, the second dimension indexes the component (0: origin, 1: direction, 2: target RGB), and the third dimension holds the 3D coordinate/value.
+ 
+ **Steps:**
+ 
+-1.  **Generate Rays:** For each training image `i` in `i_train`, compute ray origins and directions using `get_rays_np(H, W, K, poses[i])`. Stack these into a tensor `rays` of shape `(len(i_train), 2, H, W, 3)` [S2, unofficial].
+-2.  **Concatenate Targets:** Concatenate `rays` with the corresponding target images `images[i]` along the channel dimension. Result `rays_rgb` has shape `(len(i_train), 3, H, W, 3)` [S2, unofficial].
+-3.  **Transpose:** Transpose `rays_rgb` to `(len(i_train), H, W, 3, 3)` to group spatial dimensions together [S2, unofficial].
+-4.  **Reshape:** Flatten the spatial and image dimensions into a single list of rays. Reshape to `(-1, 3, 3)`. The total number of rows is `len(i_train) * H * W` [S2, unofficial].
+-5.  **Shuffle:** Randomly shuffle the order of rows in `rays_rgb` using a random permutation [S2, unofficial].
+-6.  **Sample Batch:** In each training iteration, slice the shuffled tensor to get `N_rand` rays. Transpose to separate origins, directions, and targets:
+-    *   `batch_rays = batch[:2]` -> shape `(2, N_rand, 3)`
+-    *   `target_s = batch[2]` -> shape `(N_rand, 3)` [S2, unofficial].
+-7.  **Epoch Management:** Maintain an index `i_batch`. Increment by `N_rand` each step. If `i_batch >= N_total_rays`, reshuffle the entire `rays_rgb` tensor and reset `i_batch` to 0 [S2, unofficial].
++1.  **Generate Rays:** For each training image `i` in `i_train`, compute ray origins and directions using `get_rays_np(H, W, K, poses[i])`. Stack these into a tensor `rays` of shape `(num_img, 2, H, W, 3)` [S2, unofficial].
++2.  **Concatenate Targets:** Concatenate `rays` with the corresponding image pixels `images[i]` along the component axis to form `rays_rgb` of shape `(num_img, 3, H, W, 3)` [S2, unofficial].
++3.  **Transpose:** Transpose `rays_rgb` to shape `(num_img, H, W, 3, 3)` to group spatial dimensions [S2, unofficial].
++4.  **Filter Training Set:** Stack only the images in `i_train` to get shape `(len(i_train), H, W, 3, 3)` [S2, unofficial].
++5.  **Flatten:** Reshape to `(-1, 3, 3)` resulting in shape `(N_total, 3, 3)` [S2, unofficial].
++6.  **Cast and Shuffle:** Cast to `float32` and shuffle the entire array using `np.random.shuffle` [S2, unofficial].
++7.  **Sample Batch:** In each iteration, slice `rays_rgb[i_batch : i_batch + N_rand]` [S2, unofficial].
++8.  **Transpose Batch:** Transpose the batch to `(3, N_rand, 3)` and separate into `batch_rays` (first 2 components) and `target_s` (last component) [S2, unofficial].
++9.  **Update Index:** Increment `i_batch` by `N_rand`. If `i_batch >= N_total`, shuffle `rays_rgb` again and reset `i_batch` to 0 [S2, unofficial].
+ 
+ **Pseudocode:**
+@@ -43,46 +40,47 @@
+ import torch
+ 
+-def prepare_ray_batch(poses, images, K, i_train, H, W):
++def prepare_ray_batch(images, poses, K, i_train, N_rand=4096):
+     """
+-    Prepares the global ray batch tensor for random ray batching.
++    Prepare the ray batch tensor for random ray batching.
+     
+     Args:
+-        poses: (num_img, 3, 4) extrinsic matrices
+-        images: (num_img, H, W, 3) target RGB images
+-        K: (3, 3) intrinsic matrix
+-        i_train: list of training image indices
+-        H, W: image height and width
++        images: np.ndarray of shape (num_img, H, W, 3)
++        poses: np.ndarray of shape (num_img, 3, 4)
++        K: np.ndarray of shape (3, 3)
++        i_train: list of indices for training images
++        N_rand: int, number of rays per batch
+         
+     Returns:
+-        rays_rgb: (N_total_rays, 3, 3) tensor, dtype float32
++        rays_rgb: torch.Tensor of shape (N_total, 3, 3)
+     """
++    num_img = len(poses)
++    H, W = images.shape[1], images.shape[2]
++    
+     # Step 1: Generate rays for all training images
+-    # get_rays_np returns (2, H, W, 3) -> (origins, directions)
++    # get_rays_np(H, W, K, p) returns (2, H, W, 3) -> (origins, directions)
+     rays_list = []
+-    for i in i_train:
+-        p = poses[i]
+-        rays = get_rays_np(H, W, K, p)
+-        rays_list.append(rays)
++    for p in poses[i_train]:
++        rays_list.append(get_rays_np(H, W, K, p))
++    rays = np.stack(rays_list, axis=0)  # (len(i_train), 2, H, W, 3)
+     
+-    # Stack into (len(i_train), 2, H, W, 3)
+-    rays = np.stack(rays_list, axis=0)
+-    
+-    # Step 2: Concatenate with target images
+-    # images[i] is (H, W, 3). Need to add dim to match rays shape
+-    # rays_rgb shape: (len(i_train), 3, H, W, 3)
+-    # Note: The source code uses images[:,None] assuming images is already filtered or indexed.
+-    # Here we assume images is (num_img, H, W, 3) and we index it.
+-    train_images = np.array([images[i] for i in i_train]) # (len(i_train), H, W, 3)
+-    train_images = train_images[:, np.newaxis, :] # (len(i_train), 1, H, W, 3)
+-    
+-    rays_rgb = np.concatenate([rays, train_images], axis=1) # (len(i_train), 3, H, W, 3)
++    # Step 2: Concatenate with target RGB
++    # images[i_train] has shape (len(i_train), H, W, 3)
++    # We need to align dimensions for concatenation
++    rays_rgb_list = []
++    for i, idx in enumerate(i_train):
++        # rays[i] is (2, H, W, 3), images[idx] is (H, W, 3)
++        # Concatenate along axis 0 (component axis)
++        rays_rgb_i = np.concatenate([rays[i], images[idx][None, ...]], axis=0)
++        rays_rgb_list.append(rays_rgb_i)
++        
++    rays_rgb = np.stack(rays_rgb_list, axis=0)  # (len(i_train), 3, H, W, 3)
+     
+     # Step 3: Transpose to (len(i_train), H, W, 3, 3)
+     rays_rgb = np.transpose(rays_rgb, [0, 2, 3, 1, 4])
+     
+-    # Step 4: Reshape to flat list (-1, 3, 3)
++    # Step 4: Flatten to (-1, 3, 3)
+     rays_rgb = rays_rgb.reshape(-1, 3, 3)
+     
+-    # Step 5: Convert to float32
++    # Step 5: Cast to float32
+     rays_rgb = rays_rgb.astype(np.float32)
+     
+@@ -90,76 +88,76 @@
+     np.random.shuffle(rays_rgb)
+     
++    # Convert to tensor
++    rays_rgb = torch.Tensor(rays_rgb)
++    
+     return rays_rgb
+ 
+-def sample_batch(rays_rgb, N_rand, i_batch):
++def sample_ray_batch(rays_rgb, i_batch, N_rand):
+     """
+-    Samples a batch of rays from the pre-shuffled tensor.
++    Sample a batch of rays from the pre-shuffled rays_rgb tensor.
+     
+     Args:
+-        rays_rgb: (N_total_rays, 3, 3) tensor
++        rays_rgb: torch.Tensor of shape (N_total, 3, 3)
++        i_batch: int, current batch index
+         N_rand: int, number of rays per batch
+-        i_batch: int, current batch index
+         
+     Returns:
+-        batch_rays: (2, N_rand, 3)
+-        target_s: (N_rand, 3)
+-        new_i_batch: int
+-        reshuffled: bool
++        batch_rays: torch.Tensor of shape (2, N_rand, 3)
++        target_s: torch.Tensor of shape (N_rand, 3)
++        new_i_batch: int, updated batch index
++        needs_shuffle: bool, whether to shuffle again
+     """
+     N_total = rays_rgb.shape[0]
+     
+-    # Check if we need to reshuffle
+-    if i_batch + N_rand > N_total:
+-        # Reshuffle
+-        indices = torch.randperm(N_total)
+-        rays_rgb = rays_rgb[indices]
+-        i_batch = 0
+-        reshuffled = True
+-    else:
+-        reshuffled = False
++    # Step 7: Slice batch
++    batch = rays_rgb[i_batch : i_batch + N_rand]  # (N_rand, 3, 3)
++    
++    # Step 8: Transpose to (3, N_rand, 3)
++    batch = torch.transpose(batch, 0, 1)
++    
++    # Separate rays and targets
++    batch_rays = batch[:2]  # (2, N_rand, 3)
++    target_s = batch[2]     # (N_rand, 3)
++    
++    # Step 9: Update index
++    new_i_batch = i_batch + N_rand
++    needs_shuffle = new_i_batch >= N_total
++    
++    if needs_shuffle:
++        # Shuffle again
++        rand_idx = torch.randperm(N_total)
++        rays_rgb = rays_rgb[rand_idx]
++        new_i_batch = 0
+         
+-    # Slice batch
+-    batch = rays_rgb[i_batch : i_batch + N_rand] # (N_rand, 3, 3)
+-    
+-    # Transpose to (3, N_rand, 3) then split
+-    batch = torch.transpose(batch, 0, 1) # (3, N_rand, 3)
+-    
+-    batch_rays = batch[:2] # (2, N_rand, 3)
+-    target_s = batch[2]    # (N_rand, 3)
+-    
+-    new_i_batch = i_batch + N_rand
+-    
+-    return batch_rays, target_s, new_i_batch, reshuffled
++    return batch_rays, target_s, new_i_batch, rays_rgb, needs_shuffle
+ ```
+ 
+ **Parameters:**
+-*   `N_rand`: Batch size in rays. Default is 4096 (`32x32x4`) [S2, unofficial]. Controls memory footprint and gradient noise [S1, unofficial].
+-*   `use_batching`: If `True`, enables global random ray batching. If `False`, falls back to single-image sampling [S2, unofficial].
+-*   `image_size`: Resolution `H x W` of the training images [S1, unofficial].
++- `N_rand`: Default 4096 [S2, unofficial].
++- `image_size`: Determines the search space for random sampling [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Memory:** If `N_rand` is too large, the batch may exceed GPU memory limits during the backward pass [S1, unofficial].
+-*   **Boundary Conditions:** The batch index `i_batch` must be reset and data reshuffled when it exceeds the total number of rays to ensure every ray is seen exactly once per epoch [S2, unofficial].
+-*   **Precision:** Data should be cast to `float32` to ensure compatibility with GPU tensors and standard neural network operations [S2, unofficial].
++**Edge Cases:**
++- If `use_batching` is `False`, the method falls back to single-image sampling, selecting one random image and then `N_rand` pixels from it [S2, unofficial].
++- Precision issues may arise if `N_rand` is too large for GPU memory, causing OOM errors [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [NeRF System Data Preparation](2664-nerf-system-data-preparation.md)
+-Prepares training data by loading scenes and precomputing rays. Differs by handling coordinate conventions and background compositing. Builds on Training Ray Batching by providing the structured ray tensors.
++Prepares training data by loading synthetic scenes and precomputing ray origins/directions. Differs by handling coordinate conventions and background compositing. Builds on [Training Ray Batching](2252-training-ray-batching.md) by providing structured ray tensors.
+ 
+ ### [Batch Ray Sampling](2767-batch-ray-sampling.md)
+-Samples a batch of rays for training. Differs by potentially sampling from precomputed buffers or on-the-fly.
++Generates batches by selecting random pixels and computing rays. Differs from image-based training by using smaller batches for better memory and convergence. Standard in modern NeRF methods.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Preprocessing is $O(N_{img} \cdot H \cdot W)$ to generate and shuffle all rays [S2, unofficial]. Sampling is $O(N_{rand})$ per iteration [S2, unofficial].
+-*   **Memory Complexity:** Requires storing all training rays in memory: $O(N_{img} \cdot H \cdot W \cdot C)$ where $C=3$ (origin, direction, target) [S2, unofficial]. This is significantly higher than single-image sampling but allows for efficient batched processing.
+-*   **Performance:** Reduces GPU memory usage compared to rendering full images, enabling larger networks or higher resolutions [S1, unofficial].
+-*   **Strengths:** Ensures global coverage of viewpoints in every batch, improving convergence stability [S2, unofficial].
+-*   **Limitations:** High memory overhead for large datasets. Requires pre-computation and shuffling [S2, unofficial].
+-*   **When to use:** When GPU memory is limited but dataset size is manageable, and global viewpoint mixing is desired [S2, unofficial].
+-*   **When not to use:** When memory is extremely constrained (use single-image sampling) or when dataset is too large to fit in RAM (use on-the-fly sampling) [S2, unofficial].
++- **Time Complexity:** O(N) for shuffling, where N is the total number of rays. Sampling is O(1) per batch.
++- **Memory Complexity:** O(N) to store the pre-computed `rays_rgb` tensor. This is significantly less than storing full image gradients.
++- **Performance:** Reduces GPU memory usage, allowing for larger networks or higher resolutions [S1, unofficial]. Improves convergence speed by providing diverse gradient updates [S5, unofficial].
++- **Strengths:** Memory efficient, simple to implement, works well with stochastic gradient descent.
++- **Limitations:** Requires pre-computation of all rays, which may be prohibitive for very large datasets. Shuffling overhead increases with dataset size.
++- **When to use:** When GPU memory is limited or when training on large datasets.
++- **When not to use:** When training on very small datasets where full-image gradients are feasible and beneficial for stability.
+ 
+ ## Background
+-Originated in the NeRF paper (Mildenhall et al., 2020) as a standard training procedure for Neural Radiance Fields [S2, unofficial]. It addresses the memory bottleneck of rendering full-resolution images for every training step [S1, unofficial]. The method is widely used in differentiable volume rendering pipelines for inverse graphics [S2, unofficial].
++Originated in the NeRF paper (Mildenhall et al., 2020) as a standard technique for training Neural Radiance Fields [S2, unofficial]. It addresses the memory bottleneck of rendering full images during training [S1, unofficial].
+ 
+ ## Sources

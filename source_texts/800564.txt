@@ -1,0 +1,82 @@
+Note: This article explains the intuition behind parallel computation on graphs, and centers around the Ligra graph framework. It assumes you have knowledge in C++ and know the basics of graphs as a…
+
+Parallelize Graph Computations Using Ligra Framework’s EdgeMap Interface | by Ariel Lubonja | Medium
+Open in app
+Sign up
+Sign in
+Write
+Sign up
+Sign in
+Parallelize Graph Computations Using Ligra Framework’s EdgeMap Interface
+Ariel Lubonja
+·
+Follow
+7 min read
+·
+May 8, 2022
+--
+Listen
+Share
+Note: This article explains the intuition behind parallel computation on graphs, and centers around the Ligra graph framework. It assumes you have knowledge in C++ and know the basics of graphs as a data structure. If you’re reading this for autodidactic purposes, I suggest picking a well-known algorithm like Breadth-first Search to implement
+Motivation
+Graphs are in. Graph Neural Networks and frameworks like PyTorch Geometric are all the rage. That’s because graphs are an excellent way of capturing relationships between objects, are well-studied in both Mathematics and Computer Science, and naturally appear in many problems — road, social networks, electricity grids, protein interactions, computer vision etc. GNNs get state of the art performance in many applications [1, 2].
+Because graphs are non-Euclidean structures, and their adjacency-matrix representation is too big to effectively learn on, lower-dimensional embedding is frequently performed before running ML algorithms. I’ll be using one fast and recent embedding method coauthored by my advisor at Johns Hopkins University and authors at the University of Delaware. This method is called Graph Encoder Embedding (GEE) [3]. Other important graph embedders include [5, 6, 7]. The focus of this article is graph parallelism, not GEE.
+How to Parallelize a Graph Algorithm
+Analyze your algorithm in this way before you start writing code. You should know quite well the graph algorithm you want to parallelize (duh!). Let’s work through the Graph Encoder Embedding example.
+Graph Encoder Embedding Algorithm Pseudocode
+Graph Encoder Embedding essentially has two stages: part one is the initialization of the projection matrix W in lines 2–18. The second part is the iteration over the edges of the graph in lines 19–24. Graph algorithms by definition iterate over a set or subset of edges or vertices — that’s why they’re graph algorithms. In the algorithm you’re implementing, try to find the loop over the vertices or edges. Found it? Great, see the following checklist to parallelization. If not, see the Breadth-first Search example further below.
+Which part of the graph algorithm needs parallel execution? Look at your graph algorithm. Determine which section takes the most time to execute. The vast majority of the time, this will be a loop over all or a subset of the vertices n or edges s of the graph. Hopefully you already found this.
+In my Graph Encoder Embedding example, this section would be the loop at line 19. This iterates over all the edges s in the graph, and because graphs have many edges, it constitutes vast majority of the runtime. This loop takes 99%+ of the runtime on bigger graphs. We call this part of the code the critical section.
+Does this need executing in a certain order? Determine whether your loop over vertices or edges relies on information from previous iterations. This requires you have an intuitive grasp of the algorithm you’re implementing. In my GEE case, we see that the Z matrix is built by addition. The access points of the Z matrix are the endpoint nodes of each edge. Because addition is commutative: the order you add things doesn’t matter to the final result, this loop does not depend on a certain order of execution*!
+* Caution: This is only true for undirected graphs. Since directed graphs would have have 2 directed edges (one going u-v and the other v-u) to represent a single bidirected edge between two nodes, then this results in the algorithm adding to Z twice, which isn’t intended.
+Congratulations! Your algorithm is eligible for parallelism! Let’s show you how to exploit this.
+The Ligra Framework
+Ligra [4] is a framework for graph parallelism that exploits a very clever observation that most graph algorithms abide. We will be using it to achieve 10–100x speedup over the stock serial code. Ligra provides parallelized examples of well-known graph algorithms such as Breadth First Search, Betweenness Centrality, PageRank, Bellman-Ford etc. I highly recommend you to see how the authors have implemented these algorithms while trying to implement your own. Let’s talk about the frontier nature of many graph algorithms — what makes parallelizing over graphs so powerful!
+Frontier Graph Algorithms
+Illustrated using the example of Breadth-First Search (BFS) on a tree.
+Frontier nature of Breadth First Search. Image Credit: artint.info
+Breadth-First Search works very intuitively: initially, all nodes start off in the set of unexplored nodes (blue), with the chosen starting point in the “to be explored” active set (green). After one iteration, the starting node is put in the visited set (black), and its unseen but reachable neighbors are added to the active set (red), iterating until all nodes reachable from the starting node have been visited.
+Notice that at any iteration of BFS, only the outgoing edges of the nodes in the active set (red) will be used, and the other nodes and edges are not used at all. This active set is called the frontier. The computation happening along the elements of this frontier (in this case the edges of the nodes in the active set) can be distributed across multiple CPU/GPUs!
+Ligra and parallel computation require a change in perspective. You’re parallelizing over nodes or edges in the graph, not loops in the code. Let me present an example.
+Ligra and parallel computation require a change in perspective.
+Caution: you must be careful to avoid race conditions. In the BFS example, two edges from different sources might arrive at the same node simultaneously, and a decision must be made as to which source node will be chosen as the parent. Race conditions are perhaps the main reason parallelizing code is difficult.
+The EdgeMap/VertexMap model
+Ligra’s authors figured out that many graph algorithms fit this frontier-of-execution model! Betweenness-centrality, PageRank, Bellman-Ford etc all can be parallelized by exploiting this property they all share.
+To make exploiting this easy, Ligra exposes an EdgeMap and a VertexMap function which, as the name suggests, apply whatever code you write to edges or nodes in the graph. So you have to fill those in with your algorithm’s logic, e.g. one iteration of your loop over edges. In my case, I have to use the EdgeMap function and write lines 21–23 in GraphEncoderEmbedding to C++ code in Ligra.
+That is it! Really! You’re all set! Ligra will take care of the rest. In case you’re using EdgeMap, Ligra will feed your function with the pairs on nodes belonging to each edge (edges are denoted by their 2 node endpoints), and provided you’ve followed the above steps, you’ll get the correct result, and you’ll be utilizing the full power of your CPU!
+Results
+Time for the fun stuff! Let’s see how our hard work paid off! Here’s the speedup I saw when running Graph Encoder Embedding in Ligra compared to the stock Python version. Orders of magnitude faster!
+Speedup visualized. Note the log scale on the x-axis.
+Running times over different graphs in seconds
+This article explicitly aimed at being a high-level overview of graph-parallelism and the intuition behind the Ligra framework. Please comment to request a coding tutorial!
+One more thing. It is very helpful to know the algorithms Ligra has already implemented. I noticed very early that Graph Encoder Embedding (GEE) is similar to PageRank in that it runs over all the graph’s edges each iteration. By modifying Ligra’s PageRank code, I managed to get the GEE code running in a couple of days. The more graph algorithms you know and recognize, the more ideas you get.
+References
+[1] John Jumper, Richard Evans, Alexander Pritzel, Tim Green, Michael Figurnov, Olaf Ronneberger, Kathryn Tunyasuvunakool, Russ Bates, Augustin Zˇ´ıdek, Anna Potapenko, Alex Bridgland, Clemens Meyer, Simon A A Kohl, Andrew J Ballard, Andrew Cowie, Bernardino Romera-Paredes, Stanislav Nikolov, Rishub Jain, Jonas Adler, Trevor Back, Stig Petersen, David Reiman, Ellen Clancy, Michal Zielinski, Martin Steinegger, Michalina Pacholska, Tamas Berghammer, Sebastian Bodenstein, David Silver, Oriol Vinyals, Andrew W Senior, Koray Kavukcuoglu, Pushmeet Kohli, and Demis Hassabis, “Highly accurate protein structure prediction with AlphaFold,” Nature, vol. 596, no. 7873, pp. 583–589, Aug. 2021.
+[2] Jie Zhou, Ganqu Cui, Shengding Hu, Zhengyan Zhang, Cheng Yang, Zhiyuan Liu, Lifeng Wang, Changcheng Li, and Maosong Sun, “Graph neural networks: A review of methods and applications,” AI Open, vol. 1, pp. 57–81, 2020.
+[3] Cencheng Shen, Qizhe Wang, and Carey E. Priebe, “Graph encoder embedding,” 2021
+[4] Julian Shun and Guy E. Blelloch, “Ligra: A lightweight graph processing framework for shared memory,” SIGPLAN Not., vol. 48, no. 8, pp. 135–146, feb 2013.
+[5] Bryan Perozzi, Rami Al-Rfou, and Steven Skiena, “Deepwalk: Online learning of social representations,” in Proceedings of the 20th ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, New York, NY, USA, 2014, KDD ’14, p. 701–710, Association for Computing Machinery.
+[6] Aditya Grover and Jure Leskovec, “node2vec: Scalable feature learning for networks,” 07 2016, vol. 2016, pp. 855–864.
+[7] Thomas Kipf and Max Welling, “Semi-supervised classification with graph convolutional networks,” ArXiv, vol. abs/1609.02907, 2017.
+Graph
+Parallelism
+Parallel Processing
+Embedding
+Algorithms
+Follow
+Written by Ariel Lubonja
+9 Followers
+·5 Following
+I am a PhD student in Computer Science at Johns Hopkins University. Area: High Performance Computing, Graph Machine Learning
+Follow
+No responses yet
+Help
+Status
+About
+Careers
+Press
+Blog
+Privacy
+Terms
+Text to speech
+Teams

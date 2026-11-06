@@ -1,0 +1,147 @@
+# Discrete Hartley Transform
+
+Also called: Discrete Hartley Transform Properties
+
+## Overview
+The Discrete Hartley Transform (DHT) is a real-valued linear transform that maps a sequence of $N$ real numbers to $N$ real numbers, serving as an alternative to the complex Discrete Fourier Transform (DFT) for real input data [S1, unofficial]. It is distinguished from its sibling, the Hartley Transform, by operating on discrete sequences rather than continuous functions, and from the DFT by avoiding complex arithmetic, which simplifies implementation for real-valued signals [S1, unofficial]. In volume rendering, it is used for domain-transform methods where real-valued convolution theorems are advantageous [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A sequence of $N$ real values $h_k$ for $k = 0, \dots, N-1$.
+- Output: A sequence of $N$ real values $H_n$ for $n = 0, \dots, N-1$.
+- Parameter: $N$, the size of the input sequence and the number of output coefficients [S1, unofficial].
+
+**Data Structures:**
+- `h`: Array of $N$ floats/doubles.
+- `H`: Array of $N$ floats/doubles.
+- `cas`: Helper function for the cas kernel.
+
+**Core Formula:**
+The transform uses the $\text{cas}$ function, defined as $\text{cas}(\theta) = \cos(\theta) + \sin(\theta)$ [S1, unofficial].
+
+Forward DHT:
+$$ H_n = \sum_{k=0}^{N-1} h_k \text{cas}\left(\frac{2\pi nk}{N}\right) $$
+
+Inverse DHT:
+$$ h_k = \frac{1}{N} \sum_{n=0}^{N-1} H_n \text{cas}\left(\frac{2\pi nk}{N}\right) $$
+
+**Even and Odd Parts:**
+The DHT output $H_n$ can be decomposed into even and odd parts relative to the index $n$ (with periodicity $N$):
+$$ E_n = \frac{H_n + H_{N-n}}{2} $$
+$$ O_n = \frac{H_n - H_{N-n}}{2} $$
+Note: For $n=0$, $H_{N-0} = H_N$. Due to periodicity $H_{N+n} = H_n$, $H_N = H_0$. Thus $E_0 = H_0$ and $O_0 = 0$ [S1, unofficial].
+
+**Conversion to DFT:**
+The DFT $S_n$ can be reconstructed from the DHT parts:
+$$ S_n = E_n + i O_n $$
+Conversely, if the inverse DFT $s_{x,y}$ is known, the inverse DHT is:
+$$ h_{x,y} = \text{Re}[s_{x,y}] - \text{Im}[s_{x,y}] $$
+And the inverse DFT from the 2-D DHT components is:
+$$ s_{x,y} = e_{x,y} - i o_{x,y} $$
+where $e_{x,y}$ and $o_{x,y}$ are the even and odd parts of the spatial domain signal [S1, unofficial].
+
+**Pitfalls:**
+- **Index Wrapping:** The definition of even/odd parts uses $H_{N-n}$. Implementations must handle indices modulo $N$ correctly. Specifically, $H_{N-n}$ for $n=0$ refers to $H_0$ (via $H_N$), not an out-of-bounds index [S1, unofficial].
+- **Periodicity:** The DHT is periodic with period $N$, i.e., $H_{N+n} = H_n$. This must be respected in shift and convolution operations [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def cas(theta):
+    """The cas function: cos(theta) + sin(theta)."""
+    return math.cos(theta) + math.sin(theta)
+
+def dht_forward(h):
+    """
+    Computes the 1D Discrete Hartley Transform.
+    h: list of N real numbers.
+    Returns: list of N real numbers H.
+    """
+    N = len(h)
+    H = [0.0] * N
+    for n in range(N):
+        sum_val = 0.0
+        for k in range(N):
+            angle = 2.0 * math.pi * n * k / N
+            sum_val += h[k] * cas(angle)
+        H[n] = sum_val
+    return H
+
+def dht_inverse(H):
+    """
+    Computes the inverse 1D Discrete Hartley Transform.
+    H: list of N real numbers.
+    Returns: list of N real numbers h.
+    """
+    N = len(H)
+    h = [0.0] * N
+    for k in range(N):
+        sum_val = 0.0
+        for n in range(N):
+            angle = 2.0 * math.pi * n * k / N
+            sum_val += H[n] * cas(angle)
+        h[k] = sum_val / N
+    return h
+
+def dht_even_odd(H):
+    """
+    Decomposes DHT output H into even (E) and odd (O) parts.
+    H: list of N real numbers.
+    Returns: tuple (E, O) of lists of N real numbers.
+    """
+    N = len(H)
+    E = [0.0] * N
+    O = [0.0] * N
+    for n in range(N):
+        # Handle periodicity: index N-n wraps to 0 when n=0
+        idx = (N - n) % N
+        E[n] = (H[n] + H[idx]) / 2.0
+        O[n] = (H[n] - H[idx]) / 2.0
+    return E, O
+
+def dft_from_dht(H):
+    """
+    Converts DHT output H to DFT output S (complex).
+    H: list of N real numbers.
+    Returns: list of N complex numbers S.
+    """
+    E, O = dht_even_odd(H)
+    S = []
+    for n in range(len(H)):
+        S.append(complex(E[n], O[n]))
+    return S
+```
+
+## Subtopics
+
+### 2-D Discrete Hartley Transform
+The 2-D DHT extends the 1-D transform to images of size $M \times N$, producing an output array of the same size. Unlike the DFT, the 2-D DHT kernel $\text{cas}[2\pi(ux/M + vy/N)]$ is **not separable** into a product of 1-D kernels; therefore, it cannot be computed by applying 1-D DHTs to rows and then columns [S1, unofficial].
+
+**Formulas:**
+Forward 2-D DHT:
+$$ H_{u,v} = \sum_{x=0}^{M-1} \sum_{y=0}^{N-1} h_{x,y} \text{cas}\left[2\pi\left(\frac{ux}{M} + \frac{vy}{N}\right)\right] $$
+Inverse 2-D DHT:
+$$ h_{x,y} = \frac{1}{MN} \sum_{u=0}^{M-1} \sum_{v=0}^{N-1} H_{u,v} \text{cas}\left[2\pi\left(\frac{ux}{M} + \frac{vy}{N}\right)\right] $$
+
+**Even/Odd Parts in 2-D:**
+The even and odd parts of the spatial signal $h_{x,y}$ are derived from the transform coefficients:
+$$ e_{x,y} = \frac{h_{x,y} + h_{-x,-y}}{2} = \frac{1}{MN} \sum_{u=0}^{M-1} \sum_{v=0}^{N-1} H_{u,v} \cos\left[2\pi\left(\frac{ux}{M} + \frac{vy}{N}\right)\right] $$
+$$ o_{x,y} = \frac{h_{x,y} - h_{-x,-y}}{2} = \frac{1}{MN} \sum_{u=0}^{M-1} \sum_{v=0}^{N-1} H_{u,v} \sin\left[2\pi\left(\frac{ux}{M} + \frac{vy}{N}\right)\right] $$
+The inverse DFT $s_{x,y}$ is obtained via $s_{x,y} = e_{x,y} - i o_{x,y}$, and the inverse DHT is $h_{x,y} = \text{Re}[s_{x,y}] - \text{Im}[s_{x,y}]$ [S1, unofficial].
+
+## Operating characteristics
+- **Complexity:** The direct computation of the 1-D DHT is $O(N^2)$. Fast algorithms exist but are less standardized than FFTs. The 2-D DHT is $O(M^2 N^2)$ directly.
+- **Memory:** Requires $O(N)$ storage for 1-D and $O(MN)$ for 2-D, same as DFT.
+- **Strengths:** Operates entirely in real arithmetic, avoiding complex number overhead and conjugate symmetry handling required by DFT for real inputs. This can simplify implementation in hardware or constrained environments [S1, unofficial].
+- **Limitations:** The 2-D kernel is not separable, preventing the use of efficient row-column decomposition strategies used in FFTs. This makes 2-D DHT significantly slower than 2-D DFT for large images unless specialized fast algorithms are used [S1, unofficial].
+- **Use Cases:** Suitable for real-valued signal processing where complex arithmetic is undesirable or inefficient, and for convolution operations where one function is even (simplifying the convolution theorem to $F_n = H_n G_n$) [S1, unofficial].
+
+## Background
+The Discrete Hartley Transform was introduced as a real-valued alternative to the DFT. It is used in the software implementation of Fourier Volume Rendering (FVR) [S1, unofficial]. The transform and its properties, including the convolution theorem and shifting theorem, are detailed in the context of volume rendering applications [S1, unofficial].
+
+## Sources
+[S1] Fourier volume rendering, https://shiftleft.com/mirrors/www.hpl.hp.com/techreports/95/HPL-95-73.pdf, fetched 2026-10-31 (unofficial)

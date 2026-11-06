@@ -1,0 +1,129 @@
+# Heightfield Compression with Block-Based Delta Encoding
+
+Also called: Andujar-inspired compression, Block-based delta encoding
+
+## Overview
+This method compresses heightfields by partitioning them into equal-sized blocks, where each block is encoded relative to its minimum height value using a reduced bit-depth for the differences [S1, unofficial]. It solves the primary limitation of standard delta encoding—where accessing any single value requires decompressing the entire dataset—by enabling random access with only two reads: one for the block header and one for the block's data [S1, unofficial].
+
+## How it works
+**Inputs:** A heightfield $H$ partitioned into $w \times h$ blocks of dimensions $m \times n$ [S1, unofficial].
+**Outputs:** A compressed heightfield buffer containing a header, block descriptors, and encoded difference data [S1, unofficial].
+
+**Data Structures:**
+The buffer layout consists of three parts [S1, unofficial]:
+1. **Global Header:** Contains the total number of blocks [S1, unofficial].
+2. **Block Descriptors:** A sequence of descriptors, one per block [S1, unofficial]. Each contains the `base_value` (minimum height in the block), `num_bits` (bits required for height differences), and `address` (bit offset to the block's encoded data) [S1, unofficial].
+3. **Encoded Data:** The actual difference values for each block, stored sequentially in a bit field [S1, unofficial].
+Morton encoding is applied to both block metadata and height differences to provide spatial coherence during access [S1, unofficial].
+
+**Parameters:**
+* Block dimensions: $m \times n$. The sources recommend a "relatively small size" to keep differences close to zero, but do not specify exact numeric values [S1, unofficial].
+
+**Algorithm Steps:**
+1. Partition the heightfield $H$ into $w \times h$ blocks, where each block $B_{i,j}$ has dimensions $m \times n$ [S1, unofficial].
+2. For each block $B_{i,j}$, identify the lower height value as the `base_value` [S1, unofficial].
+3. Compute the difference for each element $v$ in the block: $d = v - \text{base\_value}$ [S1, unofficial].
+4. Determine the minimum number of bits, `num_bits`, required to represent the maximum difference in the block [S1, unofficial].
+5. Encode the differences $d$ using `num_bits` per element [S1, unofficial].
+6. Store the `base_value`, `num_bits`, and the address of the encoded data in the block descriptor [S1, unofficial].
+7. Store the global header and the sequence of block descriptors, followed by the encoded difference data for all blocks [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compress_heightfield(H, block_m, block_n):
+    height, width = len(H), len(H[0])
+    num_blocks_y = height // block_m
+    num_blocks_x = width // block_n
+    total_blocks = num_blocks_y * num_blocks_x
+
+    header = {"num_blocks": total_blocks}
+    block_descriptors = []
+    encoded_data_buffer = []
+    current_bit_offset = 0
+
+    for j in range(num_blocks_y):
+        for i in range(num_blocks_x):
+            y_start = j * block_m
+            x_start = i * block_n
+            block_data = [H[y][x] for y in range(y_start, y_start + block_m)
+                          for x in range(x_start, x_start + block_n)]
+
+            base_value = min(block_data)
+            differences = [v - base_value for v in block_data]
+
+            max_diff = max(differences)
+            num_bits = max(1, max_diff.bit_length())
+
+            packed = []
+            bits_buffer = 0
+            bits_count = 0
+            for d in differences:
+                bits_buffer = (bits_buffer << num_bits) | d
+                bits_count += num_bits
+                if bits_count >= 8:
+                    packed.append(bits_buffer & 0xFF)
+                    bits_buffer >>= 8
+                    bits_count -= 8
+            if bits_count > 0:
+                packed.append(bits_buffer << (8 - bits_count))
+
+            block_descriptors.append({
+                "base_value": base_value,
+                "num_bits": num_bits,
+                "address": current_bit_offset
+            })
+            current_bit_offset += len(packed) * 8
+            encoded_data_buffer.append(packed)
+
+    return header, block_descriptors, encoded_data_buffer
+
+def decompress_heightfield(header, block_descriptors, encoded_data_buffer, target_shape, block_m, block_n):
+    height, width = target_shape
+    num_blocks_y = height // block_m
+    num_blocks_x = width // block_n
+    H = [[0] * width for _ in range(height)]
+
+    for idx, desc in enumerate(block_descriptors):
+        j = idx // num_blocks_x
+        i = idx % num_blocks_x
+        y_start = j * block_m
+        x_start = i * block_n
+
+        packed = encoded_data_buffer[idx]
+        differences = []
+        bits_buffer = 0
+        bits_count = 0
+        mask = (1 << desc["num_bits"]) - 1
+        for byte in packed:
+            bits_buffer = (bits_buffer << 8) | byte
+            bits_count += 8
+            while bits_count >= desc["num_bits"]:
+                bits_count -= desc["num_bits"]
+                differences.append((bits_buffer >> bits_count) & mask)
+                bits_buffer &= mask
+
+        for y in range(y_start, y_start + block_m):
+            for x in range(x_start, x_start + block_n):
+                H[y][x] = differences.pop(0) + desc["base_value"]
+
+    return H
+```
+
+**Edge Cases and Pitfalls:**
+* Standard delta encoding requires decompressing the whole dataset for any access, limiting practical use for efficient queries [S1, unofficial].
+* Block size must be kept relatively small; otherwise, differences may exceed the allocated bits, degrading compression or requiring more bits [S1, unofficial].
+* Random access requires two reads: one to the header and one to the bit field [S1, unofficial].
+
+## Operating characteristics
+* **Time Complexity:** Random access requires two reads [S1, unofficial]. Decompression of a single block is linear in the block size [S1, unofficial].
+* **Memory Complexity:** Compressed size depends on block dimensions and height variance within blocks [S1, unofficial].
+* **Strengths:** Balances compression ratio and access time, enabling efficient queries and real-time visualization [S1, unofficial].
+* **Limitations:** Less efficient than standard delta encoding for sequential access, which decompresses the entire dataset in a single pass [S1, unofficial].
+
+## Background
+Proposed by Andujar et al. as an improvement over standard delta encoding for heightfields in layered datasets [S1, unofficial]. Addresses the practical limitations of delta encoding in applications requiring efficient queries or traversals [S1, unofficial].
+
+## Sources
+[S1] QuadStack: An Efficient Representation and Direct Rendering of Layered Datasets | DCGI, https://dcgi.fel.cvut.cz/publications/2021/graciano-tvcg-quadstack/, fetched 2026-10-29 (unofficial)

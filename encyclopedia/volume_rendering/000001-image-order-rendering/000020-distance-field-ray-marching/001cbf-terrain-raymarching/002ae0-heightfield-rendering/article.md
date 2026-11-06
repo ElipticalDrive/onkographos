@@ -1,0 +1,238 @@
+# Heightfield Rendering
+
+Also called: 2D Raycast Heightmap Renderer, Comanche Heightmap Algorithm, Scanline, View-Z slices
+
+## Overview
+Heightfield Rendering is a CPU-driven, image-order technique for rendering 2D heightmap terrains by casting rays from the camera through discrete depth planes (view-Z slices) and projecting the intersection heights onto a 2D screen buffer [S1, S2, S3, S4, unofficial]. It solves the problem of real-time terrain visualization with hidden surface removal, distinguishing itself from standard raycasting by casting multiple rays per screen column at increasing depth intervals (Level of Detail) rather than one ray per pixel, and from voxel rendering by operating on a 2D height function rather than a 3D occupancy grid [S2, S3, S4, unofficial]. Unlike [Terrain Raymarching](1357-terrain-raymarching.md), which typically marches a single ray per pixel to find the first hit, this method fills vertical screen segments from the calculated terrain height down to the horizon (or previous occlusion buffer) for each column [S2, S3, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   `heightMap`: A 2D raster image (typically square, power-of-two dimensions, e.g., 1024×1024) where pixel intensity (e.g., Red channel) encodes terrain height [S2, S3, S4, unofficial].
+    *   `colorMap`: A 2D raster image (same dimensions as `heightMap`) encoding terrain color [S2, S3, S4, unofficial].
+    *   `camera`: Position $(x, y, z)$, rotation angle $\theta$ (yaw), field of view (FOV), and view distance [S2, S3, S4, unofficial].
+    *   `playerPos`: World coordinates $(x, y, z)$ of the camera/observer [S4, unofficial].
+*   **Outputs:**
+    *   `screenBuffer`: A 1D array of colors indexed by $x + y \times \text{width}$, representing the final image [S2, S4, unofficial].
+
+### Data Structures
+*   **Camera (`vsCamera`):**
+    *   `position`: `vsVector3f` (x, y, z) [S2, unofficial].
+    *   `rotation`: `vsVector2f` (x, y) or scalar angle [S2, S3, unofficial].
+    *   `fov`: Float, field of view in degrees [S2, S4, unofficial].
+    *   `distance`: Float, max view distance [S2, unofficial].
+*   **Map (`vsMap`):**
+    *   `width`, `height`: Integers, dimensions of the height/color maps [S2, unofficial].
+    *   `shift`: Integer, $\log_2(\text{width})$, used for bitwise modulo optimization [S2, unofficial].
+    *   `altitude`: Pointer to height data [S2, unofficial].
+    *   `color`: Pointer to color data [S2, unofficial].
+*   **Screen (`vsScreenData`):**
+    *   `width`, `height`: Integers, screen resolution [S2, unofficial].
+    *   `screen`: Pointer to 1D color array [S2, unofficial].
+*   **Occlusion Buffer (`yBuffer` or `hiddenY`):**
+    *   Array of integers, size equal to screen width [S2, S4, unofficial]. Initialized to `screenHeight` (bottom of screen) [S2, S4, unofficial]. Tracks the lowest drawn pixel (highest Y value in screen coordinates, closest to camera) for each column to handle occlusion [S2, S4, unofficial].
+
+### Parameters and Typical Values
+*   `MAX_DEPTH`: Maximum rendering distance in world units. Default: 1024 [S4, unofficial].
+*   `LOD_DISTANCE`: Distance interval for increasing step size. Default: 256 [S4, unofficial].
+*   `LOD_AMOUNT`: Multiplier for LOD step increase. Default: 1.5 [S4, unofficial].
+*   `FOG_START`: Distance at which fog begins. Default: 256 [S4, unofficial].
+*   `CLOSE_LOD`: Multiplier for near-field column width. Default: 1.0 [S4, unofficial].
+*   `FOV`: Field of view. Default: 90.0 degrees [S4, unofficial].
+*   `WIDTH`, `HEIGHT`: Screen resolution. Default: 800×800 or 320×200 [S3, S4, unofficial].
+*   `deltaZ`: Initial LOD step size. Default: 0.1f [S2, unofficial].
+*   `deltaZ_increment`: LOD step increase per depth layer. Default: 0.00025f [S2, unofficial].
+*   `invz_constant`: Vertical stretch multiplier. Default: 350.0f [S2, unofficial].
+*   `shrinkFactor`: Safety factor for ray stepping (see Pitfalls). Calculated as $\frac{1}{\sqrt{c^2+1}}$ where $c$ is the bound on the heightfield's derivative [S5, unofficial].
+
+### Numbered Steps
+
+1.  **Initialization:**
+    *   Load `heightMap` and `colorMap`. Ensure dimensions are square and power-of-two [S2, unofficial].
+    *   Initialize `yBuffer` array of size `WIDTH` with all values set to `HEIGHT` (bottom of screen) [S2, S4, unofficial].
+    *   Initialize camera parameters: position, rotation, FOV, and view distance [S3, S4, unofficial].
+    *   Calculate `viewFactor` = $\sin(\text{FOV} / 2 \text{ radians})$ [S4, unofficial].
+    *   Calculate `zScale` = $(\text{WIDTH} / \text{HEIGHT}) \times 1.0$ to maintain aspect ratio [S4, unofficial].
+
+2.  **Depth Loop (LOD):**
+    *   Iterate depth $d$ from 1 to `MAX_DEPTH` [S4, unofficial].
+    *   Calculate `colWidth` = $\text{WIDTH} / (\text{viewFactor} \times d \times 2 \times \text{CLOSE\_LOD})$. If `colWidth` < 1, set to 1 [S4, unofficial].
+    *   *LOD Adjustment:* After processing columns for depth $d$, increase $d$ by $(\lfloor d / \text{LOD\_DISTANCE} \rfloor \times \text{LOD\_AMOUNT})$ to skip distant samples [S4, unofficial].
+
+3.  **Column Sampling Loop:**
+    *   For each column start position `sx` from 0 to `WIDTH` with step `colWidth`:
+        *   Calculate sample position in camera space:
+            $$ \text{samplePos}.x = \text{Lerp}(-\text{viewFactor} \times d, \text{viewFactor} \times d, \text{sx} / \text{WIDTH}) $$
+            $$ \text{samplePos}.y = d $$
+        *   Apply camera rotation:
+            $$ \text{tempX} = \cos(\text{rot}) \times \text{samplePos}.x - \sin(\text{rot}) \times \text{samplePos}.y $$
+            $$ \text{tempY} = \sin(\text{rot}) \times \text{samplePos}.x + \cos(\text{rot}) \times \text{samplePos}.y $$
+            $$ \text{samplePos}.x = \text{tempX} + \text{playerPos}.x $$
+            $$ \text{samplePos}.y = \text{tempY} + \text{playerPos}.y $$
+        *   Sample heightmap at `samplePos` (using modulo or bitwise AND for wrapping) [S3, S4, unofficial]:
+            $$ \text{heightVal} = \text{heightMap}[\text{samplePos}] $$
+            $$ \text{worldZ} = -\text{heightVal} \times \text{zScale} + \text{playerPos}.z $$
+            *(Note: Sign of heightVal negation depends on map encoding; S4 negates it)* [S4, unofficial].
+        *   Calculate screen Y coordinate `sy`:
+            $$ \text{sy} = (\text{worldZ} / d) \times \text{HEIGHT} + \text{HEIGHT} / 2 $$
+            *(Alternative formula from S3: $\text{proj\_height} = \lfloor (\text{camera.height} - \text{height}) / z \times \text{SCALE\_FACTOR} + \text{horizon} \rfloor$)* [S3, unofficial].
+        *   Clamp `sy` to $[0, \text{SCREEN\_HEIGHT}-1]$ [S3, unofficial].
+
+4.  **Occlusion Check and Drawing:**
+    *   If `sy` < `yBuffer[sx]` (meaning the terrain is closer to the camera/bottom of screen than previously drawn):
+        *   Sample `colorMap` at `samplePos` [S4, unofficial].
+        *   Apply fog: If $d > \text{MAX\_DEPTH} - \text{FOG\_START}$, set alpha:
+            $$ \text{color}.a = \lfloor 255 \times (\text{MAX\_DEPTH} - d) / \text{FOG\_START} \rfloor $$
+        *   Draw vertical line from `sy` to `yBuffer[sx+i]` for pixels `sx+i` where $i$ ranges from 0 to `colWidth-1` (clamped to `WIDTH`) [S4, unofficial].
+        *   Update `yBuffer[sx+i] = sy` for all drawn pixels $i$ [S4, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def render_heightfield(camera, height_map, color_map, screen_width, screen_height):
+    # Constants
+    MAX_DEPTH = 1024
+    LOD_DISTANCE = 256
+    LOD_AMOUNT = 1.5
+    FOG_START = 256
+    CLOSE_LOD = 1.0
+    FOV = 90.0
+    WIDTH = screen_width
+    HEIGHT = screen_height
+    
+    # Helper functions
+    def radians(deg):
+        return deg * math.pi / 180.0
+
+    def modulo(a, b):
+        res = a % b
+        return res if res >= 0 else res + b
+
+    class Color:
+        def __init__(self, r, g, b, a=255):
+            self.r = r
+            self.g = g
+            self.b = b
+            self.a = a
+
+    # Precompute
+    view_factor = math.sin(radians(FOV / 2.0))
+    z_scale = (WIDTH / HEIGHT) * 1.0
+    cos_rot = math.cos(-camera.rotation)
+    sin_rot = math.sin(-camera.rotation)
+    
+    # Initialize occlusion buffer
+    y_buffer = [HEIGHT] * WIDTH
+    
+    # Clear screen
+    screen = [Color(0, 0, 0, 255)] * (WIDTH * HEIGHT)
+    
+    # Depth Loop
+    d = 1.0
+    while d < MAX_DEPTH:
+        # Calculate column width for LOD
+        col_width = int(WIDTH / (view_factor * d * 2 * CLOSE_LOD))
+        if col_width < 1:
+            col_width = 1
+            
+        # Column Loop
+        sx = 0
+        while sx < WIDTH:
+            # Calculate sample position in camera space
+            fraction = sx / WIDTH
+            sample_x_cam = (-view_factor * d) * (1 - fraction) + (view_factor * d) * fraction
+            sample_y_cam = d
+            
+            # Apply rotation
+            temp_x = cos_rot * sample_x_cam - sin_rot * sample_y_cam
+            temp_y = sin_rot * sample_x_cam + cos_rot * sample_y_cam
+            
+            # Translate to world space
+            sample_x_world = temp_x + camera.position.x
+            sample_y_world = temp_y + camera.position.y
+            
+            # Sample heightmap (wrap coordinates)
+            hx = modulo(int(sample_x_world), height_map.width)
+            hy = modulo(int(sample_y_world), height_map.height)
+            height_val = height_map.get_color(hx, hy).r # Assuming Red channel is height
+            
+            # Calculate world Z (terrain height)
+            world_z = -height_val * z_scale + camera.position.z
+            
+            # Calculate screen Y
+            sy = (world_z / d) * HEIGHT + HEIGHT / 2
+            
+            # Clamp
+            sy = max(0, min(int(sy), HEIGHT - 1))
+            
+            # Occlusion check and drawing for each pixel in the column width
+            for i in range(col_width):
+                col_idx = sx + i
+                if col_idx < WIDTH and sy < y_buffer[col_idx]:
+                    # Sample color
+                    cx = modulo(int(sample_x_world), color_map.width)
+                    cy = modulo(int(sample_y_world), color_map.height)
+                    color = color_map.get_color(cx, cy)
+                    
+                    # Fog
+                    if d > MAX_DEPTH - FOG_START:
+                        fog_factor = (MAX_DEPTH - d) / FOG_START
+                        color.a = int(255 * fog_factor)
+                    
+                    # Draw vertical line from sy to y_buffer[col_idx]
+                    draw_vertical_line(screen, col_idx, sy, y_buffer[col_idx], color, WIDTH, HEIGHT)
+                    y_buffer[col_idx] = sy
+            
+            sx += col_width
+            
+        # LOD Step Increase
+        d += ((int(d) // LOD_DISTANCE) * LOD_AMOUNT)
+
+def draw_vertical_line(screen, x, y_top, y_bottom, color, width, height):
+    """Draws a vertical line from y_top to y_bottom (exclusive) at column x."""
+    start_y = min(y_top, y_bottom)
+    end_y = max(y_top, y_bottom)
+    
+    for y in range(start_y, end_y):
+        if 0 <= y < height:
+            idx = x + y * width
+            screen[idx] = color
+```
+
+### Pitfalls and Edge Cases
+*   **Overshooting:** The naive distance field $D(pos) = h(pos.xz) + pos.y$ can overestimate distance in the ray direction, causing rays to overshoot the heightfield if a step size of $D(pos)$ is taken [S5, unofficial]. Solution: Use a `shrinkFactor` derived from the bound $c$ on the heightfield's derivative: $\text{shrinkFactor} = \frac{1}{\sqrt{c^2+1}}$ [S5, unofficial].
+*   **Coordinate Wrapping:** Heightmap coordinates must wrap around the grid (e.g., 1024x1024). Use modulo or bitwise AND with $(N-1)$ for power-of-two dimensions [S3, unofficial].
+*   **Screen Bounds:** `proj_height` can be negative or exceed screen height; must be clamped to $[0, \text{SCREEN\_HEIGHT}-1]$ [S3, unofficial].
+*   **Map Dimensions:** Height and color maps must be square, same dimensions, and powers of two for bitwise optimization [S2, unofficial].
+*   **Pitch Limits:** Pitch is often limited to $\pm 80^\circ$ and roll disabled to maintain stable view-Z slicing [S1, unofficial].
+*   **Offset Errors:** Line drawing implementations may introduce 1-pixel offsets depending on coordinate system conventions (e.g., `sx+i+1` vs `sx+i`) [S4, unofficial].
+
+## Subtopics
+
+### [Vertical Buffer Terrain Rendering](3924-vertical-buffer-terrain-rendering.md)
+Projects heightmap onto a vertical screen buffer for occlusion, drawing horizontal slices.
+
+### [GBA Voxel Slice Heightmap Renderer](4080-gba-voxel-slice-heightmap-renderer.md)
+Software rendering for constrained hardware using discrete depth/height slices and fixed-point math.
+
+## Operating characteristics
+*   **Time Complexity:** $O(\text{WIDTH} \times (\text{MAX\_DEPTH} / \text{LOD\_step}))$ in the worst case. Optimized by variable column width (`colWidth`), which reduces ray casting density at greater distances [S4, unofficial].
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** CPU-driven, suitable for real-time on modest hardware (e.g., GBA, early PCs) [S3, S4, unofficial]. Performance scales with screen width and max depth; LOD reduces far-field cost [S4, unofficial].
+*   **Strengths:** Real-time perspective, simple implementation, low memory overhead, effective hidden surface removal via per-column buffer [S2, S3, S4, unofficial].
+*   **Limitations:** Limited to heightfield terrains (no overhangs), discrete depth steps can cause aliasing or "popping" if LOD is coarse, pitch/roll restrictions [S1, S5, unofficial].
+
+## Background
+Heightfield Rendering, also known as the Comanche Heightmap Algorithm or Scanline rendering, originated in the *Comanche* series of flight simulation games (e.g., *Comanche: Maximum Overkill*) and the *Voxel Space* engine [S1, S3, S4, unofficial]. It was popularized in the demoscene and indie development for its ability to render large terrains in real-time on limited hardware [S2, S3, unofficial]. The technique relies on projecting 2D height data into screen space using perspective division, a method distinct from modern GPU-based rasterization or voxel rendering [S4, S5, unofficial].
+
+## Sources
+[S1] varganorbert222/VoxelSpace, https://github.com/varganorbert222/VoxelSpace, fetched 2026-10-24 (unofficial)
+[S2] Not-Nik/VoxelSpaceEngine, https://github.com/Not-Nik/VoxelSpaceEngine, fetched 2026-10-27 (unofficial)
+[S3] AndreasVlcek/Voxel-Space-Engine-Comanche-Terrain-Rendering, https://github.com/AndreasVlcek/Voxel-Space-Engine-Comanche-Terrain-Rendering, fetched 2026-10-27 (unofficial)
+[S4] PaigePalisade/HeightmapViewer, https://github.com/PaigePalisade/HeightmapViewer, fetched 2026-10-28 (unofficial)
+[S5] A Note on Ray Marching with Heightfields, https://www.peterstefek.me/ray-marching-heightfields.html, fetched 2026-10-30 (unofficial)

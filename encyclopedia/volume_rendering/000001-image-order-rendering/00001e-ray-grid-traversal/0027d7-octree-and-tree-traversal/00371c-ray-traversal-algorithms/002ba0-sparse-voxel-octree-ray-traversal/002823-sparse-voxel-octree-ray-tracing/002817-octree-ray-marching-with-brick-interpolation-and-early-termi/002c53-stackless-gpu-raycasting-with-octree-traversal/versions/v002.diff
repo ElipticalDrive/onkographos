@@ -1,0 +1,331 @@
+--- v001.md
++++ v002.md
+@@ -1,18 +1,18 @@
+ # Stackless GPU Raycasting with Octree Traversal
+ 
+-Also called: Stackless octree traversal on the GPU
++Also called: Adaptive out-of-core volume rendering, GPU ray-casting with octree, Out-of-Core GPU Volume Ray Casting, Stackless octree traversal on the GPU
+ 
+ ## Overview
+-This method performs volume rendering by traversing a Sparse Voxel Octree (SVO) on the GPU without using a stack, computing the volume rendering integral in front-to-back order. It solves the problem of efficient memory access and traversal overhead in sparse volumetric data by combining space-skipping (via empty node detection) with adaptive sampling density. It sets itself apart from sibling methods like [Two-staged Space-Skipping with Bricking and Octrees](5210-two-staged-space-skipping-with-bricking-and-octrees.md) by performing neighbor lookups implicitly on-the-fly using the octree's regular structure, rather than relying on precomputed neighbor pointers or a two-stage bricking pipeline. It builds on the concepts of [Octree Ray Marching with Brick Interpolation and Early Termination](4147-octree-ray-marching-with-brick-interpolation-and-early-termi.md) but replaces explicit brick interpolation with adaptive sampling based on leaf resolution.
++This method performs volume rendering by traversing a Sparse Voxel Octree (SVO) on the GPU without using a stack, computing the volume rendering integral in front-to-back order [S1]. It solves the problem of efficient memory access and traversal overhead in sparse volumetric data by combining space-skipping (via empty node detection) with adaptive sampling density [S1, S2]. It sets itself apart from sibling methods like [Two-staged Space-Skipping with Bricking and Octrees](5210-two-staged-space-skipping-with-bricking-and-octrees.md) by performing neighbor lookups implicitly on-the-fly using the octree's regular structure, rather than relying on precomputed neighbor pointers or a two-stage bricking pipeline [S2]. It builds on the concepts of [Octree Ray Marching with Brick Interpolation and Early Termination](4147-octree-ray-marching-with-brick-interpolation-and-early-termi.md) but replaces explicit brick interpolation with adaptive sampling based on leaf resolution [S1].
+ 
+ ## How it works
+-The algorithm maintains the state of the current ray segment (entry point $t_{min}$, current node pointer, current bounding box, and octree level) in registers. It traverses the octree from the root to the leaf containing the current sampling point, accumulates color/opacity if the leaf is non-empty, and moves to the next leaf via implicit neighbor calculation when the ray exits the current box.
++The algorithm maintains the state of the current ray segment (entry point $t_{min}$, current node pointer, current bounding box, and octree level) in registers [S2]. It traverses the octree from the root to the leaf containing the current sampling point, accumulates color/opacity if the leaf is non-empty, and moves to the next leaf via implicit neighbor calculation when the ray exits the current box [S1].
+ 
+ ### Inputs and Outputs
+ *   **Inputs:**
+-    *   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (in texture coordinates, normalized to $[0,1]^3$).
+-    *   Spatial Index Texture: A 3D texture storing the octree structure. Each texel is a `float4` (or `vec4`).
+-    *   Leaf Data Texture: A 3D texture storing the actual volume data (density/color) for non-empty leaves.
+-    *   Transfer Function: A 2D texture mapping density and octree level to color and opacity.
++    *   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (in texture coordinates, normalized to $[0,1]^3$) [S2].
++    *   Spatial Index Texture: A 3D texture storing the octree structure [S1].
++    *   Leaf Data Texture: A 3D texture storing the actual volume data (density/color) for non-empty leaves [S1].
++    *   Transfer Function: A 2D texture mapping density and octree level to color and opacity [S2].
+ *   **Outputs:**
+     *   `fragment.color`: Accumulated RGBA color.
+@@ -21,19 +21,18 @@
+ ### Data Structures
+ **Spatial Index Texture Texel Layout (`float4`):**
+-*   `xyz`: Pointer to the first child node (for inner nodes) or to the leaf data (for leaf nodes). Stored as a 3D coordinate offset in the texture.
++*   `xyz`: Pointer to the first child node (for inner nodes) or to the leaf data (for leaf nodes). Stored as a 3D coordinate offset in the texture [S1, S2].
+ *   `w`: Tag/Status.
+-    *   If `w` indicates an **Inner Node**: The `xyz` components point to children. The children are stored consecutively in the texture. The offset to the $i$-th child (where $i \in [0,7]$) is calculated as `dot3(s, float3(1, 2, 4)) * texel_sz`, where `s` is the child index vector.
+-    *   If `w` indicates a **Leaf Node**: The `xyz` components point to the leaf data in the Leaf Data Texture. The `w` component encodes the octree level of the neighbor (see Neighbor Traversal).
+-    *   **Empty Node**: A specific marker (e.g., `w=0` or null pointer) indicating no children or data.
+-    *   **Null Pointer**: Used to terminate traversal.
++    *   If `w` indicates an **Inner Node**: The `xyz` components point to children. The children are stored consecutively in the texture. The offset to the $i$-th child (where $i \in [0,7]$) is calculated as `dot3(s, float3(1, 2, 4)) * texel_sz`, where `s` is the child index vector [S2].
++    *   If `w` indicates a **Leaf Node**: The `xyz` components point to the leaf data in the Leaf Data Texture. The `w` component encodes the octree level of the neighbor (see Neighbor Traversal) [S2].
++    *   **Empty Node**: A specific marker (e.g., `w=0` or null pointer) indicating no children or data [S2].
++    *   **Null Pointer**: Used to terminate traversal [S2].
+ 
+ **Neighbor Pointers:**
+-*   Neighbor pointers are not stored explicitly in the index texel for all 6 neighbors in the primary traversal path described in the code snippet, but the text notes that leaf nodes use RGB components to point to leaf information and 6 consecutive texels store pointers to neighbors. However, the *stackless traversal logic* described relies on **implicit** neighbor calculation for the exit face to avoid extra texture fetches. The text states: "computing neighbor information on-the-fly... exploiting the regular structure of the octree."
+-*   The `w` component of a leaf node's index texel stores the **octree level** of the neighbor in the direction of the exit face. This allows the shader to compute the neighbor's bounding box without fetching the neighbor's index texel first.
++*   Leaf nodes use RGB components to point to leaf information, and 6 consecutive texels store pointers to neighbors [S2]. The `w` component of a leaf node's index texel stores the **octree level** of the neighbor in the direction of the exit face. This allows the shader to compute the neighbor's bounding box without fetching the neighbor's index texel first [S2]. The stackless traversal logic relies on implicit neighbor calculation for the exit face to avoid extra texture fetches [S2].
+ 
+ ### Parameters
+-*   **Early Termination Threshold:** Opacity $\alpha_{thresh} = 0.99$. If accumulated opacity exceeds this, the ray terminates.
+-*   **Box Normalization:** All computations are done in texture coordinates. The octree subdivides the unit cube $[0,1]^3$.
+-*   **Sampling:** Adaptive. Step size is determined by the resolution of the current leaf (box dimension).
++*   **Early Termination Threshold:** Opacity $\alpha_{thresh} = 0.99$. If accumulated opacity exceeds this, the ray terminates [S2].
++*   **Box Normalization:** All computations are done in texture coordinates. The octree subdivides the unit cube $[0,1]^3$ [S2].
++*   **Sampling:** Adaptive. Step size is determined by the resolution of the current leaf (box dimension) [S2].
+ 
+ ### Pseudocode
+@@ -42,159 +41,87 @@
+ ```python
+ # Initialization
+-fragment.color = float4(0.0, 0.0, 0.0, 0.0)
+-fragment.depth = FAR_PLANE
+-
+-# State variables
+-node_ptr = float3(0.0, 0.0, 0.0)  # Current node position in spatial index texture
++color = float4(0.0, 0.0, 0.0, 0.0)
++depth = 1e9  # FAR_PLANE equivalent
++node_ptr = float3(0.0, 0.0, 0.0)
+ octree_level = 0
+ box_min = float3(0.0, 0.0, 0.0)
+ box_dim = float3(1.0, 1.0, 1.0)
+-t_min = ray.t_near              # Initial ray entry t
++t_min = ray.t_near
+ 
+ # Main Traversal Loop
+-while (not is_null(node_ptr) and fragment.color.a < 1.0):
+-    
++while not is_null(node_ptr) and color.a < 1.0:
+     # 1. Find leaf containing current sampling point P
+     P = ray.origin + ray.direction * t_min
+-    
++
+     # Fetch current node
+     node = tex3d(spatial_index, node_ptr)
+-    
++
+     # 2. Down Traversal: Descend to the leaf containing P
+-    while (is_inner(node.w)):
++    while is_inner(node.w):
+         box_dim = box_dim / 2.0
+         box_mid = box_min + box_dim
+-        
+-        # Determine child index based on P's position relative to box_mid
+-        # s[i] = 1 if P[i] >= box_mid[i], else 0
+-        s = step(box_mid, P)
+-        
++
++        # Determine child index: s[i] = 1 if P[i] >= box_mid[i], else 0
++        s = step(P, box_mid)
++
+         # Update box_min to the child's origin
+         box_min = box_min + s * box_dim
+-        
++
+         # Calculate child offset in texture
+-        # Children are ordered: x, y, z bits map to 1, 2, 4
+         child_offset = dot3(s, float3(1.0, 2.0, 4.0)) * texel_sz
+-        node_ptr = node.xyz + float4(child_offset, 0.0, 0.0, 0.0)
+-        
++        node_ptr = node.xyz + float3(child_offset, 0.0, 0.0)
++
+         # Fetch child node
+         node = tex3d(spatial_index, node_ptr)
+-        octree_level = octree_level + 1
+-        
+-        # Clip ray to current box to find exit face
+-        # Returns: t_max (exit t), exit_face_idx (0=x+, 1=y+, 2=z+, 3=x-, 4=y-, 5=z-), exit_dir
+-        (box_t_max, exit_face_idx, exit_dir) = box_clip(ray, t_min, t_far, box_min, box_dim)
+-        
+-        # 3. Accumulate if non-empty
+-        if (not is_empty(node.w)):
+-            # Access leaf data
+-            data_ptr = node.xyz
+-            # Adaptive sampling: step size matches leaf resolution
+-            # Accumulate color and opacity
+-            (fragment.color, fragment.depth) = accumulate(
+-                fragment.color, 
+-                ray, 
+-                t_min, 
+-                box_t_max, 
+-                data_ptr, 
+-                box_min, 
+-                box_min + box_dim
+-            )
+-            
+-            # Check for early termination
+-            if (fragment.color.a >= 0.99):
+-                break # Terminate ray
++        octree_level += 1
+ 
+-        # 4. Move to Neighbor if ray exits current block
+-        # Note: If ray terminated due to opacity, we break above.
+-        # If ray is still active, check if it exited the box.
+-        if (t_min >= box_t_max):
+-            # Compute neighbor offset implicitly
+-            # Shift box origin in direction of exit face
+-            # Neighbor level is stored in node.w (for leaf) or computed for inner?
+-            # The text implies neighbor level info is available.
+-            
+-            # For leaf nodes, node.w contains neighbor level
+-            neighbor_level = node.w 
+-            
+-            # Update state for neighbor
+-            # Shift box_min by exit_dir * box_dim
+-            box_min = box_min + exit_dir * box_dim
+-            
+-            # If neighbor is coarser, coarsen the box
+-            if (neighbor_level < octree_level):
+-                box_dim = exp2(-neighbor_level)
+-                # Snap box_min to neighbor grid
+-                box_min = floor(box_min / box_dim) * box_dim
+-                octree_level = neighbor_level
+-            
+-            # Fetch neighbor node pointer
+-            # The text mentions neighbor pointers are stored, but also says
+-            # "computing neighbor information on-the-fly".
+-            # The code snippet shows:
+-            # neighbor_offset = float3(1+exit_face_idx, 0, 0) * texel_sz; 
+-            # This implies a specific layout or lookup. 
+-            # However, the text emphasizes implicit computation.
+-            # Re-reading snippet: "neighbor=tex3d(spatial_index, node.xyz+neighbor_offset)"
+-            # This suggests neighbor pointers ARE stored in the index texture 
+-            # adjacent to the leaf data pointer or within the leaf's index entry.
+-            
+-            # Let's follow the snippet's explicit neighbor fetch logic:
+-            # exit_face_idx 0-5 maps to neighbor directions.
+-            # The snippet uses a simplified offset calculation.
+-            # We assume the spatial index texture contains neighbor pointers 
+-            # in a predictable location relative to the current node/data pointer.
+-            
+-            # Correcting based on snippet:
+-            # neighbor_offset is calculated based on exit_face_idx.
+-            # The snippet uses: neighbor_offset = float3(1+exit_face_idx, 0, 0) * texel_sz
+-            # This seems to be a placeholder or specific to a 1D neighbor array.
+-            # Given the text "6 consecutive texels storing pointers to neighbors",
+-            # we assume we fetch the neighbor index.
+-            
+-            neighbor_ptr = get_neighbor_ptr(node, exit_face_idx) # [G] Helper to fetch from neighbor array
+-            node_ptr = neighbor_ptr.xyz
+-            octree_level = neighbor_ptr.w # Update level from neighbor tag
+-            box_dim = exp2(-octree_level)
+-            box_min = floor(box_min / box_dim) * box_dim
+-            t_min = box_t_max
+-        else:
+-            # Ray is still inside the current leaf, advance t_min
+-            # Adaptive step size based on box_dim
+-            t_min = t_min + box_dim.x # [G] Assuming isotropic or max dim for step
+-            # Note: The snippet doesn't show explicit t_min update for non-exit case,
+-            # but accumulation requires stepping. 
+-            # In adaptive sampling, we usually step by box_dim.
+-            # If the ray doesn't exit, we might just accumulate once per leaf?
+-            # The text says "adapting sampling density to brick resolution".
+-            # Usually this means multiple samples per leaf or one sample per leaf.
+-            # The snippet accumulates between t_min and box_t_max.
+-            # If it doesn't exit, t_min should advance.
+-            # However, the loop structure suggests we process the whole leaf segment 
+-            # in one go if we don't exit? No, "while" loop continues.
+-            # If we don't exit, we stay in the same leaf.
+-            # To avoid infinite loop, t_min must advance.
+-            # Standard approach: t_min = box_t_max is wrong if not exited.
+-            # Let's assume the accumulation covers the segment [t_min, box_t_max].
+-            # If not exited, we are done with this leaf? No, ray might continue.
+-            # Actually, if we are in a leaf, we accumulate the whole leaf segment 
+-            # in one shot if we assume constant density? 
+-            # Or we step. The text says "adapting sampling density".
+-            # Let's assume one accumulation pass per leaf entry.
+-            break # Exit leaf processing, next iteration handles neighbor or next leaf
++    # 3. Clip ray to current leaf box to find exit face
++    (box_t_max, exit_face_idx, exit_dir) = box_clip(ray, t_min, ray.t_far, box_min, box_dim)
++
++    # 4. Accumulate if non-empty
++    if not is_empty(node.w):
++        data_ptr = node.xyz
++        (color, depth) = accumulate(color, ray, t_min, box_t_max, data_ptr, box_min, box_min + box_dim)
++
++        # Check for early termination
++        if color.a >= 0.99:
++            break
++
++    # 5. Move to Neighbor if ray exits current block
++    if t_min >= box_t_max:
++        # Fetch neighbor pointer. Neighbors are stored at 6 consecutive texels after data pointer.
++        neighbor_offset = float3(1.0 + exit_face_idx, 0.0, 0.0) * texel_sz
++        neighbor = tex3d(spatial_index, node.xyz + neighbor_offset)
++
++        node_ptr = neighbor.xyz
++        octree_level = neighbor.w
++        box_dim = exp2(-octree_level)
++        box_min = floor(box_min / box_dim) * box_dim
++        t_min = box_t_max
++    else:
++        # Ray is still inside the current leaf, advance to exit
++        t_min = box_t_max
+ 
+ # Helper: box_clip
+ def box_clip(ray, t_min, t_far, box_min, box_dim):
+-    # Standard slab method
++    # Compute intersection with box slabs
+     t0 = (box_min - ray.origin) / ray.direction
+     t1 = (box_min + box_dim - ray.origin) / ray.direction
+     t_enter = max(min(t0), min(t1))
+     t_exit = min(max(t0), max(t1))
+-    
++
+     t_max = min(t_exit, t_far)
+-    
+-    # Determine exit face
+-    # Check which component caused t_exit
+-    # ... implementation details ...
++
++    # Determine exit face index and direction
++    if t_exit == t1.x:
++        exit_face_idx = 0 if ray.direction.x > 0 else 3
++        exit_dir = float3(1.0, 0.0, 0.0) if ray.direction.x > 0 else float3(-1.0, 0.0, 0.0)
++    elif t_exit == t1.y:
++        exit_face_idx = 1 if ray.direction.y > 0 else 4
++        exit_dir = float3(0.0, 1.0, 0.0) if ray.direction.y > 0 else float3(0.0, -1.0, 0.0)
++    else:
++        exit_face_idx = 2 if ray.direction.z > 0 else 5
++        exit_dir = float3(0.0, 0.0, 1.0) if ray.direction.z > 0 else float3(0.0, 0.0, -1.0)
++
+     return (t_max, exit_face_idx, exit_dir)
+ 
+@@ -205,22 +132,48 @@
+     # Blend into color
+     return (new_color, new_depth)
++
++# Helper: step
++def step(edge, x):
++    return 0.0 if x < edge else 1.0
++
++# Helper: dot3
++def dot3(a, b):
++    return a.x * b.x + a.y * b.y + a.z * b.z
++
++# Helper: tex3d
++def tex3d(tex, coord):
++    # Standard texture fetch
++    return tex[coord]
++
++# Helper: is_inner
++def is_inner(w):
++    return w != 0
++
++# Helper: is_empty
++def is_empty(w):
++    return w == 0
++
++# Helper: is_null
++def is_null(ptr):
++    return ptr == float3(0.0, 0.0, 0.0)
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Null Pointers:** The last leaf data texel always contains a NULL pointer. This is used to simplify handling of rays that do not exit from the current box (e.g., terminate due to opacity threshold). If traversal reaches a null pointer, the loop terminates.
+-*   **Coarser Neighbors:** When moving to a neighbor with a coarser octree level, the current box must be coarsened. This is done by updating `box_dim` to $2^{-\text{neighbor\_level}}$ and snapping `box_min` to the neighbor's grid: $\lfloor \text{box\_min} / \text{box\_dim} \rfloor \cdot \text{box\_dim}$.
++*   **Null Pointers:** The last leaf data texel always contains a NULL pointer. This is used to simplify handling of rays that do not exit from the current box (e.g., terminate due to opacity threshold) [S2]. If traversal reaches a null pointer, the loop terminates.
++*   **Coarser Neighbors:** When moving to a neighbor with a coarser octree level, the current box must be coarsened. This is done by updating `box_dim` to $2^{-\text{neighbor\_level}}$ and snapping `box_min` to the neighbor's grid: $\lfloor \text{box\_min} / \text{box\_dim} \rfloor \cdot \text{box\_dim}$ [S2].
+ *   **Precision:** All computations are in texture coordinates (unit cube). Floating-point precision issues may arise at deep octree levels.
+-*   **Termination:** Rays that terminate due to the opacity threshold (0.99) must not continue to neighbors. The null pointer check and the opacity check inside the loop handle this.
++*   **Termination:** Rays that terminate due to the opacity threshold (0.99) must not continue to neighbors. The null pointer check and the opacity check inside the loop handle this [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(k)$ per ray, where $k$ is the number of non-empty leaves traversed. The traversal is stackless, reducing memory overhead and instruction count compared to stack-based methods.
+-*   **Memory Complexity:** $O(N)$ for the octree structure, where $N$ is the number of nodes. The spatial index is stored in a 3D texture.
+-*   **Performance:** The method is efficient for sparse data because it skips empty space. Adaptive sampling reduces the number of texture fetches for large empty or uniform regions. The on-the-fly neighbor calculation reduces texture memory bandwidth usage compared to methods storing explicit neighbor pointers for all nodes.
+-*   **Strengths:** No stack required; efficient memory access; adaptive sampling; early termination.
+-*   **Limitations:** Requires a well-constructed octree; implicit neighbor calculation assumes regular octree structure; may have branch divergence on GPU if rays traverse different paths.
++*   **Time Complexity:** $O(k)$ per ray, where $k$ is the number of non-empty leaves traversed [G]. The traversal is stackless, reducing memory overhead and instruction count compared to stack-based methods [G].
++*   **Memory Complexity:** $O(N)$ for the octree structure, where $N$ is the number of nodes. The spatial index is stored in a 3D texture [S1].
++*   **Performance:** The method is efficient for sparse data because it skips empty space. Adaptive sampling reduces the number of texture fetches for large empty or uniform regions. The on-the-fly neighbor calculation reduces texture memory bandwidth usage compared to methods storing explicit neighbor pointers for all nodes [S2].
++*   **Strengths:** No stack required; efficient memory access; adaptive sampling; early termination [S1, S2].
++*   **Limitations:** Requires a well-constructed octree; implicit neighbor calculation assumes regular octree structure; may have branch divergence on GPU if rays traverse different paths [G].
+ 
+ ## Background
+-The method was introduced in "A single-pass GPU ray casting framework for interactive out-of-core volume rendering" (2008) by [S1]. It extends stackless ray traversal techniques previously used for kd-trees [7,16] to octrees. The key innovation is the implicit computation of neighbor bounding boxes using the octree's regular structure, avoiding the need for explicit neighbor pointers in the index structure for all nodes, thus saving memory and texture fetches. It is used in interactive volume rendering systems where out-of-core data handling and high performance are required.
++The method was introduced in "A single-pass GPU ray casting framework for interactive out-of-core volume rendering" (2008) by [S1, S2]. It extends stackless ray traversal techniques previously used for kd-trees [7,16] to octrees. The key innovation is the implicit computation of neighbor bounding boxes using the octree's regular structure, avoiding the need for explicit neighbor pointers in the index structure for all nodes, thus saving memory and texture fetches [S2]. It is used in interactive volume rendering systems where out-of-core data handling and high performance are required [S1].
+ 
+ ## Sources
+-[S1] A single-pass GPU ray casting framework for interactive out-of-core volume rendering, https://www.crs4.it/vic/data/papers/cgi2008-movr.pdf, fetched 2026-10-29+[S1] Towards Advanced Volumetric Display of the Human Musculoskeletal System, https://doi.org/10.2312/localchapterevents/italchap/italianchapconf2008/021-025, fetched 2026-10-26
++[S2] A single-pass GPU ray casting framework for interactive out-of-core volume rendering, https://www.crs4.it/vic/data/papers/cgi2008-movr.pdf, fetched 2026-10-29

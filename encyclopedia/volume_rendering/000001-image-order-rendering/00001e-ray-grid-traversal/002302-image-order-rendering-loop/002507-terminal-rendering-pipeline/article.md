@@ -1,0 +1,159 @@
+# Terminal Rendering Pipeline
+
+Also called: ASCII Raymarcher Display, ASCII/ANSI Volume Rendering, Character-based Screen Buffer, Terminal ASCII Rendering Pipeline
+
+## Overview
+The Terminal Rendering Pipeline renders a 3D scene to a text-based terminal buffer by iterating over pixels, mapping them to Normalized Device Coordinates (NDC), casting rays via a raymarcher, and applying ASCII/ANSI styling based on depth and lighting [S1, unofficial]. It differs from standard terminal rendering by explicitly accounting for character aspect ratio when converting pixel indices to NDC and using ANSI escape codes to modulate brightness based on depth percentage, effectively acting as a low-resolution, text-based raymarcher [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Camera position and orientation, raymarcher instance (with step count, max distance, epsilon), list of lights, screen dimensions (height, aspect ratio), ASCII gradient string.
+- **Outputs:** Terminal screen buffer containing ASCII characters and ANSI escape codes.
+
+**Data Structures:**
+- **Screen Buffer:** Two vectors of size `width * height`.
+  - `pixels_vector`: `std::vector<char>`, stores the ASCII character for each pixel.
+  - `modifiers_vector`: `std::vector<std::string>`, stores per-pixel ANSI escape codes.
+- **Dimensions:**
+  - `height`: Number of rows.
+  - `width`: Number of columns, calculated as `height * aspect * CHAR_ASPECT`.
+  - `CHAR_ASPECT`: Constant value `2.0` to account for character aspect ratio [S1, unofficial].
+  - `pixels`: Total pixel count `width * height`.
+- **NDC Constants:**
+  - `half_pixel_width`: `1.0 / (2.0 * width)`
+  - `half_pixel_height`: `1.0 / (2.0 * height)`
+- **Gradient:**
+  - `gradient`: String of ASCII characters representing brightness levels.
+  - `gradient_size`: Length of the gradient string.
+
+**Numbered Steps:**
+1. **Initialize Screen:**
+   - Determine screen height (e.g., from terminal window size or fixed value).
+   - Calculate width using `width = height * aspect * CHAR_ASPECT`.
+   - Initialize `pixels_vector` with `EMPTY_CHAR` (e.g., space) and `modifiers_vector` with empty strings.
+   - Calculate `half_pixel_width` and `half_pixel_height`.
+   - Set `gradient_size` to the length of the gradient string.
+
+2. **Render Loop (per frame):**
+   - Clear the terminal screen and hide cursor using static methods.
+   - Clear the screen buffer (`pixels_vector` and `modifiers_vector`).
+   - Iterate over all pixel indices $i$ from $0$ to `screen.get_pixel_count() - 1`:
+     a. **Convert Pixel Index to NDC:**
+        - Calculate column and row from index $i$:
+          $$col = i \pmod{width}$$
+          $$row = \lfloor i / width \rfloor$$
+        - Calculate NDC coordinates:
+          $$ndc_x = \frac{col}{width} + \frac{1}{2 \cdot width}$$
+          $$ndc_y = \frac{row}{height} - \frac{1}{2 \cdot height}$$
+     b. **Map NDC to World Position:**
+        - Use camera projection to map $(ndc_x, ndc_y)$ to world position `pixel_wpos`.
+     c. **Raymarch:**
+        - Cast ray from `cam.pos` to `pixel_wpos`.
+        - If hit:
+          - Compute normalized light intensity `light` based on surface normal and lights.
+          - Compute depth percentage:
+            $$D_{perc} = \frac{hit\_distance}{MAX\_DIST}$$
+          - Set pixel color based on brightness and depth:
+            - If $D_{perc} > 0.666$, apply dim modifier `\u001b[2m`.
+            - If $D_{perc} > 0.333$, no modifier.
+            - Else, apply bright modifier `\u001b[1m`.
+          - Map brightness to gradient character index:
+            $$idx = \lfloor \max(brightness - 0.0001, 0.0) \times gradient\_size \rfloor$$
+            - Clamp $idx$ to $[0, gradient\_size - 1]$.
+            - Set `pixels_vector[i]` to `gradient[idx]`.
+            - Set `modifiers_vector[i]` to the selected ANSI modifier.
+        - If no hit:
+          - Set `pixels_vector[i]` to `EMPTY_CHAR`.
+          - Set `modifiers_vector[i]` to empty string.
+
+3. **Output:**
+   - Print the buffer to the terminal using `print_buffer()`, which outputs each character with its corresponding ANSI modifier.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(screen, camera, raymarcher, lights, gradient):
+    # Clear terminal and buffer
+    Screen.clear_terminal()
+    Screen.hide_cursor()
+    screen.clear_buffer()
+    
+    num_pixels = screen.get_pixel_count()
+    gradient_size = len(gradient)
+    
+    for i in range(num_pixels):
+        # Convert pixel index to NDC
+        col = i % screen.width
+        row = i // screen.width
+        
+        ndc_x = (col / screen.width) + (1.0 / (2.0 * screen.width))
+        ndc_y = (row / screen.height) - (1.0 / (2.0 * screen.height))
+        
+        # Map NDC to world position
+        pixel_wpos = camera.ndc_to_world_pos(ndc_x, ndc_y)
+        
+        # Raymarch
+        normal, hit_distance = raymarcher.raymarch(camera.pos, pixel_wpos)
+        
+        if hit_distance is not None:
+            # Compute lighting
+            light = 0.0
+            for light_obj in lights:
+                light += light_obj.calculate_diffuse(normal)
+            
+            # Compute depth percentage
+            max_dist = raymarcher.get_max_dist()
+            depth_percentage = hit_distance / max_dist
+            
+            # Determine ANSI modifier based on depth
+            if depth_percentage > 0.666:
+                modifier = "\u001b[2m"
+            elif depth_percentage > 0.333:
+                modifier = ""
+            else:
+                modifier = "\u001b[1m"
+            
+            # Map brightness to gradient character
+            brightness = light # Assuming light is normalized 0-1
+            idx = int(max(brightness - 0.0001, 0.0) * gradient_size)
+            idx = max(0, min(idx, gradient_size - 1))
+            
+            char = gradient[idx]
+            screen.set_pixel(i, char, modifier)
+        else:
+            screen.set_pixel(i, screen.EMPTY_CHAR, "")
+    
+    # Print buffer
+    screen.print_buffer()
+```
+
+**Parameters:**
+- **FPS:** Target frame rate is 30. `FRAME_TIME = 1.0 / FPS` [S1, unofficial].
+- **CHAR_ASPECT:** 2.0 [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Aspect Ratio:** Failure to account for character aspect ratio (`CHAR_ASPECT`) results in distorted scenes. The width is scaled by `CHAR_ASPECT` to compensate for the taller-than-wide nature of terminal characters [S1, unofficial].
+- **Depth Modifiers:** The depth thresholds (0.333, 0.666) are hardcoded. Scenes with varying depth ranges may require adjustment [S1, unofficial].
+- **Precision:** The brightness mapping uses a small epsilon (`0.0001`) to avoid index out-of-bounds errors due to floating-point inaccuracies [S1, unofficial].
+
+## Subtopics
+
+### [ASCII Rendering with Dithering](4103-ascii-rendering-with-dithering.md)
+ASCII Rendering with Dithering renders 3D scenes to a text-based terminal buffer by casting rays, computing lighting, and mapping the resulting continuous-tone color to a limited set of ASCII characters (typically `#` and space) using ANSI escape codes. It differs from standard terminal rendering by employing ordered dithering via a Bayer matrix to simulate grayscale intensity and color depth within the constraints of a fixed 80x24 character grid, effectively acting as a low-resolution, text-based raymarcher.
+
+## Operating characteristics
+- **Time Complexity:** $O(P)$, where $P$ is the number of pixels. Each pixel requires a constant number of operations (NDC conversion, raymarching, lighting calculation).
+- **Memory Complexity:** $O(P)$, for storing the screen buffer (`pixels_vector` and `modifiers_vector`).
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Performance scales linearly with screen resolution. Higher resolutions require more raymarching steps and buffer updates.
+- **Strengths:** Low hardware requirements, works on any terminal supporting ANSI codes, simple implementation.
+- **Limitations:** Low resolution (limited by terminal size), limited color palette (ASCII characters), no anti-aliasing (unless dithering is used), no transparency or complex lighting effects beyond diffuse.
+- **When to Use:** Educational purposes, retro-style visuals, environments with limited graphics support.
+- **When Not to Use:** High-fidelity rendering, real-time applications requiring high resolution, complex lighting and shadows.
+
+## Background
+The Terminal Rendering Pipeline is an unofficial method described in the GitHub repository [JamesRicher/TerminalSignedDistanceFieldRenderer](https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer) [S1, unofficial]. It demonstrates how to render 3D scenes using only text-based output, leveraging raymarching and ASCII art techniques. The method is part of a broader trend of "ASCII art" rendering and terminal-based graphics, which have been explored in various contexts for their novelty and low resource requirements.
+
+## Sources
+[S1] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)

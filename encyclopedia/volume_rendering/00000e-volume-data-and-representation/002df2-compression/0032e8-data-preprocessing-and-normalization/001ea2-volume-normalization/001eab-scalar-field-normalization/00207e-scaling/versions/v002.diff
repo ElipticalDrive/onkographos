@@ -1,0 +1,159 @@
+--- v001.md
++++ v002.md
+@@ -2,89 +2,100 @@
+ Also called: Scalar Field Scaling
+ ## Overview
+-Scaling is a fundamental scalar field normalization technique that maps input data values to a target range, typically [0, 1], by dividing by a scale factor. It serves as the base linear transformation for volume data representation, ensuring numerical stability and consistent contrast across different datasets. It differs from non-linear methods like [Power Transformation](2346-power-transformation.md) by preserving the linear relationship between input intensity and output value, and from [Scaling and Biasing](2888-scaling-and-biasing.md) by lacking an explicit bias term in its core definition, though biasing is often applied subsequently.
++Scaling is a fundamental normalization technique that maps scalar field data to a target range, typically [0, 1], based on global minimum and maximum values [Parent]. It serves as the base linear transformation for volume data preparation, distinguishing itself from non-linear methods like [Power Transformation](2346-power-transformation.md) by preserving relative distances linearly.
+ ## How it works
+ ### Inputs and outputs
+-- **Input**: A scalar field value $v$ (e.g., voxel intensity, Hounsfield Unit).
+-- **Output**: A normalized scalar value $v'$ in the range $[0, 1]$ or a specific physical unit range.
+-- **Parameters**: A scale factor $s$.
++- **Input**: A scalar field $V$ with global minimum $min$ and maximum $max$.
++- **Output**: A normalized scalar field $V'$ where values are scaled to the target range.
+ 
+ ### Data structures
+-No specific complex data structures are required. The operation is element-wise on the scalar field tensor.
++- **Scalar Field**: A 3D grid or tensor of floating-point values representing the volume data.
+ 
+ ### Steps
+-1. **Retrieve input value**: Obtain the scalar value $v$ from the volume data at the current sampling point.
+-2. **Apply scaling**: Divide the input value by the scale factor $s$ to obtain the normalized value $v'$.
+-   $$ v' = \frac{v}{s} $$
+-3. **Clamping (Optional)**: If the normalized value falls outside the desired range $[0, 1]$, clamp it to the nearest boundary.
+-   $$ v'_{final} = \text{clamp}(v', 0.0, 1.0) $$
+-
+-### Formulas
+-- **Basic Scaling**:
+-  $$ v' = \frac{v}{s} $$
+-  Where:
+-  - $v$: Input scalar value.
+-  - $s$: Scale factor.
+-  - $v'$: Normalized output value.
++1. Determine the global minimum $min$ and maximum $max$ of the input scalar field $V$.
++2. For each voxel value $v$ in $V$, compute the normalized value $v'$ using the linear scaling formula:
++   $$ v' = \frac{v - min}{max - min} $$
++3. If the target range is not [0, 1], apply a bias and scale:
++   $$ v' = v' \cdot (max_{target} - min_{target}) + min_{target} $$
+ 
+ ### Parameters
+-- **Scale factor ($s$)**: Determines the magnitude of the input values relative to the output range. The value of $s$ depends on the data type and expected range of the input. For example, in medical imaging, $s$ might be derived from the maximum Hounsfield Unit value. Not given in the sources for a universal default.
++- **Target Range**: Typically [0, 1].
++- **Clamping**: Optional clamping to handle outliers or NaN values.
+ 
+ ### Edge cases and pitfalls
+-- **Division by zero**: If $s = 0$, the operation is undefined. Ensure $s > 0$.
+-- **Overflow/Underflow**: For very large or small values of $v$, ensure the data type can represent the result without overflow or underflow.
+-- **Clamping artifacts**: Hard clamping can introduce discontinuities if the input data exceeds the expected range significantly.
++- **Zero Denominator**: If $min = max$, the denominator becomes zero. Handle by setting all values to the midpoint of the target range or a default value [G].
++- **Outliers**: Extreme outliers can compress the useful data range. Consider using percentile-based min/max instead of global min/max if outliers are present [G].
++- **Precision**: Ensure sufficient floating-point precision to avoid quantization artifacts in the normalized output.
+ 
+ ### Pseudocode
+ ```python
+-def scale_scalar_field(value: float, scale_factor: float, clamp_to_range: bool = True, min_val: float = 0.0, max_val: float = 1.0) -> float:
++def scale_scalar_field(V, min_val, max_val, target_min=0.0, target_max=1.0):
+     """
+-    Scales a scalar field value by a given scale factor.
++    Scale scalar field V to target range [target_min, target_max].
+     
+     Args:
+-        value: The input scalar value.
+-        scale_factor: The divisor to normalize the value.
+-        clamp_to_range: Whether to clamp the result to [min_val, max_val].
+-        min_val: The minimum value for clamping.
+-        max_val: The maximum value for clamping.
+-        
++    V: Input scalar field (3D tensor or array).
++    min_val: Global minimum of V.
++    max_val: Global maximum of V.
++    target_min: Lower bound of target range.
++    target_max: Upper bound of target range.
++    
+     Returns:
+-        The scaled and optionally clamped value.
++    V_scaled: Scaled scalar field.
+     """
+-    if scale_factor == 0:
+-        raise ValueError("Scale factor cannot be zero.")
++    if max_val == min_val:
++        # Handle zero denominator case
++        midpoint = (target_min + target_max) / 2.0
++        return torch.full_like(V, midpoint)
+     
+-    normalized_value = value / scale_factor
++    # Linear scaling
++    V_scaled = (V - min_val) / (max_val - min_val)
++    V_scaled = V_scaled * (target_max - target_min) + target_min
+     
+-    if clamp_to_range:
+-        normalized_value = max(min_val, min(max_val, normalized_value))
+-        
+-    return normalized_value
++    return V_scaled
+ ```
+ 
+ ## Subtopics
+ 
++### [Power Transformation](2346-power-transformation.md)
++The Power Transformation is a parameterized function used to map metric distance $t$ to a normalized distance $s$, enabling effective resampling and distortion loss calculation in neural radiance fields. It sets itself apart from discrete normalization choices (like pure log or inverse distance) by allowing smooth interpolation between linear, logarithmic, and inverse behaviors via a single shape parameter $\lambda$, while maintaining a linear-like shape near the origin to avoid singularities at the ray start.
++
++### [Scaling and Biasing](2888-scaling-and-biasing.md)
++Scaling and Biasing applies scaling and biasing to texture samples for window/level contrast adjustment. It sets the current sample's volume to $x \cdot 16 + y$. It differs from [Power Transformation](2346-power-transformation.md) by applying a linear transformation rather than a non-linear mapping [G].
++
+ ### Linear HU to Attenuation Map
+-A specific application of scaling and biasing used in medical volume rendering to map Hounsfield Units (HU) to linear attenuation coefficients ($\mu$). It involves a linear transformation followed by clamping.
+-- **Definition**: Maps HU values to attenuation coefficients using a linear equation with clamping.
+-- **Steps**:
+-  1. Calculate intermediate HU value: $hu = vol \times (3024 - (-3524)) + (-3524)$.
+-  2. Calculate attenuation coefficient $\mu$: $\mu = 0.05 \times (1.0 + hu / 800.0)$.
+-- **Code**:
+-  ```python
+-  hu = vol * (3024 - (-3524)) + (-3524)
+-  mu = 0.05 * (1.0 + hu / 800.0)
+-  ```
+-- **Source**: [S2, unofficial]
++#### Definition
++A simple linear mapping from Hounsfield Units (HU) to attenuation coefficients (mu) with clamping [S2, unofficial].
++
++#### Steps
++1. Calculate intermediate HU value: $hu = vol \cdot (3024 - (-3524)) + (-3524)$ [S2, unofficial].
++2. Calculate mu: $mu = 0.05 \cdot (1.0 + hu / 800.0)$ [S2, unofficial].
++
++#### Code
++```python
++def linear_hu_to_mu(vol):
++    """
++    Convert volume data (assumed to be in a specific range) to attenuation coefficients.
++    
++    Args:
++    vol: Input volume data.
++    
++    Returns:
++    mu: Attenuation coefficients.
++    """
++    hu = vol * (3024 - (-3524)) + (-3524)
++    mu = 0.05 * (1.0 + hu / 800.0)
++    return mu
++```
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(1)$ per voxel/sample.
+-- **Memory Complexity**: $O(1)$ additional memory.
+-- **Strengths**: Simple, fast, preserves linear relationships.
+-- **Limitations**: Does not handle non-linear data distributions well; sensitive to outliers if scale factor is not chosen appropriately.
+-- **When to use**: When linear mapping is sufficient and data range is well-known.
+-- **When not to use**: When data has a non-linear distribution or requires contrast enhancement beyond linear scaling.
++- **Time Complexity**: $O(N)$, where $N$ is the number of voxels.
++- **Memory Complexity**: $O(N)$ for storing the normalized field.
++- **Strengths**: Simple, fast, and preserves linear relationships.
++- **Limitations**: Sensitive to outliers; may not enhance subtle features as effectively as non-linear methods.
++- **When to Use**: When linear scaling is sufficient and outliers are not a concern.
++- **When Not to Use**: When non-linear enhancement is needed or outliers significantly affect the range.
+ 
+ ## Background
+-Scaling is a basic mathematical operation widely used in computer graphics and scientific visualization. Its application in volume rendering is foundational for normalizing data before further processing or rendering.
++Scaling is a basic operation in data normalization, widely used in volume rendering for preparing scalar field data. It is often a precursor to more complex normalization techniques.
+ 
+ ## Sources

@@ -1,0 +1,38 @@
+# Optimization Technique
+
+Also called: Shear-Warp Optimization
+
+## Overview
+Optimization techniques in the Shear-Warp family accelerate volume rendering by reducing computational complexity, skipping empty regions, or adapting resolution to maintain frame rates. They set themselves apart from the base [Shear-Warp Algorithm](4304-shear-warp-algorithm.md) by introducing specific hardware-aware or algorithmic shortcuts (such as binary masks or dynamic scaling) rather than just decomposing the view transformation.
+
+## Shared principles
+The shared principles of this family are defined by the [Shear-Warp Algorithm](4304-shear-warp-algorithm.md). All children utilize the decomposition of the viewing transformation into a shear, a projection, and a 2D warp to substitute trilinear interpolation with bilinear interpolation.
+
+## Subtopics
+
+### [Warped Isosurface Extraction (WISE)](1906-warped-isosurface-extraction-wise.md)
+Accelerates visibility tests by projecting geometry onto a warped plane to eliminate perspective nonlinearity for culling.
+
+### [Fast volume rotation using binary shear-warp factorization](2006-fast-volume-rotation-using-binary-shear-warp-factorization.md)
+Accelerates rotation and ray casting by using super cells and binary masks to skip transparent regions.
+
+### Intermediate Image Size Adaptation
+Dynamically adjusts the resolution of the intermediate image to maintain constant frame rates.
+
+### Intermediate Image Size Adaptation
+**Definition**
+A technique to maintain constant frame rates by dynamically adjusting the resolution of the intermediate image rendered during the compositing step [S1, unofficial].
+
+**Steps**
+1. Modify the parameters of matrix $M_{scale}$ to change the size of the intermediate image [S1, unofficial].
+2. Use footprint-based interpolation when reducing image size to ensure no original data values are ignored [S1, unofficial].
+3. Use bilinear interpolation when enlarging the intermediate image [S1, unofficial].
+
+**Parameters**
+*   Target Frame Rate: Usually in the range of 5 to 10 frames per second [S1, unofficial].
+
+## Background
+The concept of optimizing frame rates in virtual environments through reduced sampling rates and dynamic resolution was introduced in the context of the Perspective Shear-Warp Algorithm [S1, unofficial]. The technique addresses the requirement to keep frame rates constant to sustain immersion, noting that rendering speed increases when the intermediate image size is reduced, albeit with potential blurring that is mitigated by footprint-based interpolation [S1, unofficial].
+
+## Sources
+[S1] The Perspective Shear-Warp Algorithm in a Virtual Environment., https://www.researchgate.net/publication/220943822_The_Perspective_Shear-Warp_Algorithm_in_a_Virtual_Environment, fetched 2026-10-29 (unofficial)

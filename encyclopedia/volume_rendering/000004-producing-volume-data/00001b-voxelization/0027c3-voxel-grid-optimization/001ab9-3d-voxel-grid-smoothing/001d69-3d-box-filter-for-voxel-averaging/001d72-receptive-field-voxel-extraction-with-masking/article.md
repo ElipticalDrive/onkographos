@@ -3,20 +3,18 @@
 Also called: Masked Voxel Averaging, Receptive Field Voxel Extraction
 
 ## Overview
-Receptive Field Voxel Extraction with Masking extracts a local neighborhood of voxels around normalized sample points, masking out-of-bounds accesses and computing the mean of the valid neighborhood [S1, unofficial]. It extends the planar 3×3 neighborhood by including depth neighbors, which the planar variant lacks [S1, unofficial]. It builds on [3D Box Filter for Voxel Averaging](1513-3d-box-filter-for-voxel-averaging.md) by explicitly handling boundary conditions via masking rather than simple clamping or zero-padding, ensuring that partial neighborhoods at grid edges do not bias the average with invalid data [S1, unofficial].
+Receptive Field Voxel Extraction with Masking extracts a local neighborhood of voxels around normalized sample points, masking out-of-bounds accesses and computing the mean of the valid neighborhood [S1, unofficial]. It builds on [3D Box Filter for Voxel Averaging](1513-3d-box-filter-for-voxel-averaging.md) by explicitly handling boundary conditions via masking rather than simple clamping or zero-padding, ensuring that partial neighborhoods at grid edges do not bias the average with invalid data [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A 3D voxel grid tensor $G$ of shape $(D, H, W)$, and a set of normalized sample coordinates $P$ of shape $(N, 3)$ where $N$ is the number of samples. Coordinates are assumed to be in the range $[0, 1]$ or $[-0.5, 0.5]$ depending on the specific implementation context, but the masking logic relies on integer index mapping [S1, unofficial].
-- Output: A tensor of averaged voxel values for each sample point.
+- Input: A 3D voxel grid and a set of normalized sample coordinates [S1, unofficial].
+- Output: A tensor of averaged voxel values for each sample point [S1, unofficial].
 
 **Data Structures:**
-- The voxel grid $G$ is stored as a dense 3D tensor.
-- Sample points $P$ are stored as a float tensor.
-- Intermediate index tensors are created for each dimension.
+- Not given in the sources. [S1, unofficial]
 
 **Parameters:**
-- `receptive_field`: The size of the neighborhood to extract. Default value is 1 (implies kernel_size=0, single voxel) [S1, unofficial].
+- `receptive_field`: The size of the neighborhood to extract. Default value is 1 (implies `kernel_size=0`, single voxel) [S1, unofficial].
 
 **Steps:**
 1. Calculate `kernel_size` as `receptive_field // 2` [S1, unofficial].
@@ -38,136 +36,57 @@ def receptive_field_voxel_extraction(grid, points, receptive_field=1):
     masking out-of-bounds accesses and computing the mean of the valid neighborhood.
     
     Args:
-        grid: 3D tensor of shape (D, H, W) containing voxel values.
-        points: 2D tensor of shape (N, 3) containing normalized sample coordinates.
+        grid: 3D array of shape (D, H, W) containing voxel values.
+        points: 2D array of shape (N, 3) containing normalized sample coordinates.
         receptive_field: Size of the neighborhood to extract.
         
     Returns:
-        2D tensor of shape (N,) containing the averaged voxel values.
+        1D array of shape (N,) containing the averaged voxel values.
     """
     # Step 1: Calculate kernel size
     kernel_size = receptive_field // 2
+    offsets = list(range(-kernel_size, kernel_size + 1))
+    K = len(offsets)
+    D, H, W = len(grid), len(grid[0]), len(grid[0][0])
     
-    # Get grid dimensions
-    D, H, W = grid.shape
-    
-    # Step 2: Generate index tensors
-    # Assuming points are in [0, 1] range and need to be mapped to grid indices
-    # This mapping depends on the specific coordinate system. 
-    # For this implementation, we assume points are already scaled to grid indices or 
-    # we map them directly. Let's assume points are in [0, 1] and we scale them.
-    # Note: The source code snippet implies direct indexing, so we assume points 
-    # are already in grid coordinates or the scaling is handled elsewhere.
-    # However, to be precise, let's assume points are normalized [0,1] and we need to convert.
-    # But the source code uses `indices_x` directly from `normalized sample coordinates`.
-    # Let's assume `points` are already in grid index space for simplicity, 
-    # or the caller handles the scaling. 
-    # To be safe, we'll assume points are in [0, 1] and scale them to grid indices.
-    # This is a common pattern.
-    
-    # Scale points to grid indices
-    x_coords = points[:, 0] * (W - 1)
-    y_coords = points[:, 1] * (H - 1)
-    z_coords = points[:, 2] * (D - 1)
-    
-    # Generate offsets
-    offsets = torch.arange(-kernel_size, kernel_size + 1)
-    
-    # Create index tensors for each dimension
-    # Shape: (N, kernel_size*2 + 1)
-    indices_x = x_coords.unsqueeze(1) + offsets.unsqueeze(0)
-    indices_y = y_coords.unsqueeze(1) + offsets.unsqueeze(0)
-    indices_z = z_coords.unsqueeze(1) + offsets.unsqueeze(0)
-    
-    # Step 3: Create boolean masks for each dimension
-    # Valid if index >= 0 and < dimension size
-    mask_x = (indices_x >= 0) & (indices_x < W)
-    mask_y = (indices_y >= 0) & (indices_y < H)
-    mask_z = (indices_z >= 0) & (indices_z < D)
-    
-    # Step 4: Combine masks using logical AND
-    # Reshape masks for broadcasting: (N, 1, 1), (N, 1, 1), (N, 1, 1)
-    # Actually, the source code uses:
-    # mask = mask_x[:, :, None, None] & mask_y[:, None, :, None] & mask_z[:, None, None, :]
-    # This implies the indices are shaped (N, 1, 1, 1) or similar.
-    # Let's adjust the shapes to match the source code's broadcasting logic.
-    
-    # Reshape indices to (N, 1, 1, 1) for broadcasting with masks
-    # But the source code creates masks of shape (N, kernel_size*2 + 1)
-    # Then reshapes them to (N, kernel_size*2 + 1, 1, 1) etc.
-    
-    # Let's follow the source code structure more closely.
-    # indices_x shape: (N, kernel_size*2 + 1)
-    # mask_x shape: (N, kernel_size*2 + 1)
-    
-    # Reshape masks for broadcasting
-    mask_x = mask_x.unsqueeze(2).unsqueeze(3) # (N, K, 1, 1)
-    mask_y = mask_y.unsqueeze(1).unsqueeze(3) # (N, 1, K, 1)
-    mask_z = mask_z.unsqueeze(1).unsqueeze(2) # (N, 1, 1, K)
-    
-    # Combine masks
-    mask = mask_x & mask_y & mask_z # (N, K, K, K)
-    
-    # Step 5: Clamp indices to valid range
-    indices_x = torch.clamp(indices_x, 0, W - 1)
-    indices_y = torch.clamp(indices_y, 0, H - 1)
-    indices_z = torch.clamp(indices_z, 0, D - 1)
-    
-    # Reshape indices for advanced indexing
-    # indices_x: (N, K, 1, 1)
-    # indices_y: (N, 1, K, 1)
-    # indices_z: (N, 1, 1, K)
-    indices_x = indices_x.unsqueeze(2).unsqueeze(3)
-    indices_y = indices_y.unsqueeze(1).unsqueeze(3)
-    indices_z = indices_z.unsqueeze(1).unsqueeze(2)
-    
-    # Step 6: Extract voxel values
-    # grid shape: (D, H, W)
-    # We need to index grid with (indices_z, indices_y, indices_x)
-    # But the source code uses:
-    # result = grid[indices_x[:, :, None, None], indices_y[:, None, :, None], indices_z[:, None, None, :]]
-    # This implies the indices are already in the correct shape for indexing.
-    # Let's assume the indices are reshaped correctly.
-    
-    # Reshape indices to match the source code's indexing pattern
-    # indices_x: (N, K, 1, 1) -> (N, K, 1, 1)
-    # indices_y: (N, 1, K, 1) -> (N, 1, K, 1)
-    # indices_z: (N, 1, 1, K) -> (N, 1, 1, K)
-    
-    # Actually, the source code uses:
-    # result = grid[indices_x[:, :, None, None], indices_y[:, None, :, None], indices_z[:, None, None, :]]
-    # This means indices_x is (N, K), indices_y is (N, K), indices_z is (N, K)
-    # And they are reshaped to (N, K, 1, 1), (N, 1, K, 1), (N, 1, 1, K) for indexing.
-    
-    # Let's assume indices_x, indices_y, indices_z are (N, K)
-    # Reshape for indexing
-    idx_x = indices_x.unsqueeze(2).unsqueeze(3) # (N, K, 1, 1)
-    idx_y = indices_y.unsqueeze(1).unsqueeze(3) # (N, 1, K, 1)
-    idx_z = indices_z.unsqueeze(1).unsqueeze(2) # (N, 1, 1, K)
-    
-    # Extract values
-    # grid is (D, H, W)
-    # We need to index grid with (idx_z, idx_y, idx_x)
-    # But the source code uses (idx_x, idx_y, idx_z) which suggests a different order.
-    # Let's assume the grid is indexed as (x, y, z) which is non-standard.
-    # Standard is (z, y, x) or (depth, height, width).
-    # Let's assume the source code uses (x, y, z) indexing for the grid.
-    # This is a potential pitfall. We'll assume the grid is indexed as (x, y, z) for consistency with the source.
-    
-    result = grid[idx_x, idx_y, idx_z] # (N, K, K, K)
-    
-    # Step 7: Multiply by validity mask
-    result = result * mask # (N, K, K, K)
-    
-    # Step 8: Compute mean along spatial dimensions
-    # Mean over dimensions 1, 2, 3 (the K dimensions)
-    return result.mean(dim=(1, 2, 3)) # (N,)
+    results = []
+    for p in points:
+        x, y, z = p
+        
+        # Step 2: Generate index tensors for x, y, z
+        idx_x = [x + k for k in offsets]
+        idx_y = [y + k for k in offsets]
+        idx_z = [z + k for k in offsets]
+        
+        # Step 3: Create boolean masks for valid indices
+        mask_x = [1 if 0 <= ix < W else 0 for ix in idx_x]
+        mask_y = [1 if 0 <= iy < H else 0 for iy in idx_y]
+        mask_z = [1 if 0 <= iz < D else 0 for iz in idx_z]
+        
+        # Step 5: Clamp indices to valid range [0, dim-1]
+        clamped_x = [max(0, min(W - 1, ix)) for ix in idx_x]
+        clamped_y = [max(0, min(H - 1, iy)) for iy in idx_y]
+        clamped_z = [max(0, min(D - 1, iz)) for iz in idx_z]
+        
+        # Step 6 & 7: Extract voxel values and multiply by validity mask
+        total = 0.0
+        valid_count = 0
+        for i in range(K):
+            for j in range(K):
+                for l in range(K):
+                    # Step 4: Combine masks using logical AND
+                    valid = mask_x[i] & mask_y[j] & mask_z[l]
+                    if valid:
+                        total += grid[clamped_z[l]][clamped_y[j]][clamped_x[i]]
+                        valid_count += 1
+        # Step 8: Compute the mean along spatial dimensions
+        results.append(total / valid_count if valid_count > 0 else 0.0)
+    return results
 ```
 
 **Edge Cases and Pitfalls:**
-- **Precision:** Normalized coordinates must be accurately mapped to grid indices to avoid off-by-one errors.
-- **Boundaries:** The masking logic ensures that out-of-bounds accesses do not contribute to the mean, preventing bias from invalid data.
-- **Degenerate Input:** If `receptive_field` is 0, the kernel size is 0, and the method returns the single voxel value at the sample point.
+- **Boundaries:** The masking logic ensures that out-of-bounds accesses do not contribute to the mean, preventing bias from invalid data [S1, unofficial].
+- **Degenerate Input:** If `receptive_field` is 1, the kernel size is 0, and the method returns the single voxel value at the sample point [S1, unofficial].
 
 ## Subtopics
 
@@ -178,17 +97,17 @@ A spatial reconstruction method that extracts a 3×3×3 neighborhood of froxels 
 Mean-Covered Voxel Intensity Sampling averages voxel intensities across mean-covered regions for each splat, explicitly handling the footprint pooling logic to smooth supervision signals. It computes bounding boxes based on scale indices and coverage masks, extracts sub-volumes, and returns their means.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot K^3)$ where $N$ is the number of samples and $K$ is the kernel size (receptive_field).
-- **Memory Complexity:** $O(N \cdot K^3)$ for storing intermediate index and mask tensors.
-- **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales linearly with the number of samples and cubically with the receptive field size.
-- **Strengths:** Explicitly handles boundary conditions, preventing bias from invalid data. Simple to implement.
-- **Limitations:** Computationally expensive for large receptive fields.
-- **When to use:** When smoothing or downsampling voxel grids with explicit boundary handling is required.
-- **When not to use:** When performance is critical and large receptive fields are needed.
+- **Time Complexity:** Not given in the sources. [S1, unofficial]
+- **Memory Complexity:** Not given in the sources. [S1, unofficial]
+- **Measured Performance:** Not given in the sources. [S1, unofficial]
+- **Scaling:** Not given in the sources. [S1, unofficial]
+- **Strengths:** Not given in the sources. [S1, unofficial]
+- **Limitations:** Not given in the sources. [S1, unofficial]
+- **When to use:** Not given in the sources. [S1, unofficial]
+- **When not to use:** Not given in the sources. [S1, unofficial]
 
 ## Background
-Origin: [S1, unofficial]. History and development: Not given in the sources. Where it is used: Plenoxels [S1, unofficial].
+Origin: Not given in the sources. [S1, unofficial] History and development: Not given in the sources. [S1, unofficial] Where it is used: Not given in the sources. [S1, unofficial]
 
 ## Sources
 [S1] DanJbk/Plenoxels, https://github.com/DanJbk/Plenoxels, fetched 2026-10-27 (unofficial)

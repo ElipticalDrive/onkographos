@@ -1,0 +1,119 @@
+# Normal Regularization
+
+Also called: spatial interpolation of normals
+
+## Overview
+Normal Regularization is a technique to alleviate numerical instability (jitter) of surface normals near the Unsigned Distance Function (UDF) zero-level set (cusps) by replacing naively sampled normals with interpolated normals from the neighborhood [S1]. It prevents highly bright and dark regions in 2D images that occur with high-quality reconstruction without it [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A point $p(t_i)$ on the ray, the UDF $\Psi(\cdot)$, its derivative $\Psi'(\cdot)$ (returning gradients), and a neighbor count $K$.
+*   **Output:** A regularized normal vector $\mathbf{n}(p(t_i))$.
+
+**Data Structures:**
+*   No persistent data structures are required; the method is computed on-the-fly during ray marching.
+
+**Parameters:**
+*   $K$: Number of neighboring points used for interpolation. Typical values are not specified in the sources.
+
+**Steps:**
+1.  Identify $K$ neighboring points along the ray or in the local neighborhood of $p(t_i)$. The source specifies using points $p(t_{i-k})$ for $k=1 \dots K$ [S1].
+2.  For each neighbor $k$, compute the weight $w_{i-k}$ as the squared Euclidean distance from the current point $p(t_i)$ to the neighbor $p(t_{i-k})$:
+    $$w_{i-k} = \|p(t_i) - p(t_{i-k})\|_2^2$$
+3.  Evaluate the UDF gradient at each neighbor: $\mathbf{g}_{i-k} = \Psi'(p(t_{i-k}))$ [S1].
+4.  Compute the weighted sum of the gradients:
+    $$\mathbf{S} = \sum_{k=1}^K w_{i-k} \mathbf{g}_{i-k}$$
+5.  Compute the sum of the weights:
+    $$W = \sum_{k=1}^K w_{i-k}$$
+6.  Compute the regularized normal:
+    $$\mathbf{n}(p(t_i)) = \frac{\mathbf{S}}{W}$$
+7.  (Optional) Renormalize $\mathbf{n}(p(t_i))$ to unit length if required by the downstream shading model.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normal_regularization(p_current, udf_gradient_func, K):
+    """
+    Computes the regularized normal at p_current by interpolating gradients
+    from K previous points along the ray.
+    
+    Args:
+        p_current: Current 3D point on the ray.
+        udf_gradient_func: Function returning the gradient of the UDF at a point.
+        K: Number of neighbors to use for interpolation.
+        
+    Returns:
+        Regularized normal vector.
+    """
+    weighted_sum = [0.0, 0.0, 0.0]
+    weight_total = 0.0
+    
+    # Note: The source implies using points p(t_{i-k}) for k=1 to K.
+    # In a ray marching context, these are typically previous hit points or
+    # points along the ray segment. The exact retrieval of p(t_{i-k}) depends
+    # on the ray marching loop state. [G]
+    
+    for k in range(1, K + 1):
+        # Retrieve the k-th previous point. 
+        # Implementation detail: This requires storing previous points in the ray marcher.
+        p_neighbor = get_previous_point(k) 
+        
+        # Calculate squared Euclidean distance
+        diff = p_current - p_neighbor
+        w = diff.x**2 + diff.y**2 + diff.z**2
+        
+        # Get gradient at neighbor
+        grad = udf_gradient_func(p_neighbor)
+        
+        # Accumulate weighted gradient
+        weighted_sum[0] += w * grad.x
+        weighted_sum[1] += w * grad.y
+        weighted_sum[2] += w * grad.z
+        weight_total += w
+        
+    if weight_total == 0:
+        # Fallback if all neighbors are at the same location (degenerate)
+        return udf_gradient_func(p_current)
+        
+    # Compute average
+    regularized_normal = [
+        weighted_sum[0] / weight_total,
+        weighted_sum[1] / weight_total,
+        weighted_sum[2] / weight_total
+    ]
+    
+    # Renormalize to unit length
+    length = sqrt(regularized_normal[0]**2 + regularized_normal[1]**2 + regularized_normal[2]**2)
+    if length > 0:
+        regularized_normal[0] /= length
+        regularized_normal[1] /= length
+        regularized_normal[2] /= length
+        
+    return regularized_normal
+```
+
+**Edge Cases and Pitfalls:**
+*   **Cusps:** Points in the UDF's zero-level set are cusps that are not first-order differentiable, causing gradients of sampled points in the vicinity of the learned surface to be numerically unstable (jittered) [S1].
+*   **Weight Calculation:** The weight is the squared distance. If neighbors are far away, the influence of the current point's immediate neighborhood is reduced.
+*   **Degenerate Input:** If $W=0$ (all neighbors are at the same location as $p(t_i)$), the division is undefined. A fallback to the naive gradient is required [G].
+
+## Subtopics
+
+### Shepard Normalization for Normal Maps
+A post-processing step to produce normal images for evaluation and visualization by Shepard-normalizing per-surfel unit normals within each surface layer and renormalizing the result [S2, unofficial]. It involves two steps: 1) Shepard-normalize the per-surfel unit normals within each surface layer, and 2) Renormalize the resulting vector to unit length [S2, unofficial]. This method is used to recover smoother normals and more faithful specular highlights in inverse rendering [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(K)$ per point evaluation, where $K$ is the number of neighbors.
+*   **Memory Complexity:** Requires storing $K$ previous points or gradients if not recomputed.
+*   **Strengths:** Alleviates jitter near cusps; prevents highly bright and dark regions in 2D images [S1].
+*   **Limitations:** Introduces spatial smoothing which may reduce high-frequency geometric detail if $K$ is too large or weights are not tuned [S1].
+*   **When to use:** When rendering UDFs with noisy gradients near the zero-level set.
+*   **When not to use:** When exact gradient fidelity is required and jitter is not an issue.
+
+## Background
+Originated in "NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering" [S1]. It is used in differentiable volume rendering for high-fidelity open surface reconstruction.
+
+## Sources
+[S1] NeUDF: Leaning Neural Unsigned Distance Fields with Volume Rendering, https://doi.org/10.1109/cvpr52729.2023.00031, fetched 2026-10-26
+[S2] 3DSS: 3D Surface Splatting for Inverse Rendering, https://doi.org/10.48550/arxiv.2605.05876, fetched 2026-10-26 (unofficial)

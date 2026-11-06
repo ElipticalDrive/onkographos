@@ -1,0 +1,156 @@
+# Ray Angle Computation
+
+Also called: Angular Difference Computation, Ray-to-Ray Angle Calculation
+
+## Overview
+Ray Angle Computation calculates the geometric angular relationship between a query ray and reference rays intersecting the same 3D point. It is primarily used in multi-view stereo and NeRF-based methods to generate features that encode viewing geometry [S1, unofficial]. Unlike methods that rely solely on coordinate transformations, this approach explicitly computes the dot product and difference vectors between ray directions to capture angular similarity [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `xyz`: A tensor of 3D points with shape $(N, 3)$, where $N$ is the number of points.
+- `query_camera`: A tensor containing the query camera pose, typically a $4 \times 4$ transformation matrix (or flattened 16 values) with shape $(1, 4, 4)$ or $(1, 16)$.
+- `train_cameras`: A tensor containing training camera poses, shape $(M, 4, 4)$ or $(M, 16)$, where $M$ is the number of training views.
+
+**Outputs:**
+- `ray_diff_dot`: The dot product between the normalized query ray direction and the normalized training ray direction, shape $(N, M)$.
+- `ray_diff_norm`: The Euclidean norm of the difference vector between the two normalized directions, shape $(N, M)$.
+
+**Data Structures:**
+- Poses are extracted as $4 \times 4$ matrices. The translation component is located at indices `[0:3, 3]` (or flattened indices 12-15).
+- Directions are 3D vectors.
+
+**Steps:**
+1. **Extract Poses:** Reshape `train_cameras` into $(M, 4, 4)$ and `query_camera` into $(1, 4, 4)$. Repeat the query pose $M$ times to align with training views, resulting in `query_pose` of shape $(M, 4, 4)$.
+2. **Compute Query Ray Direction:** Calculate the vector from the query camera center to the point:
+   $$ \mathbf{v}_{query} = \mathbf{p}_{xyz} - \mathbf{t}_{query} $$
+   where $\mathbf{t}_{query}$ is the translation part of `query_pose`. Normalize $\mathbf{v}_{query}$ to get $\mathbf{d}_{query}$:
+   $$ \mathbf{d}_{query} = \frac{\mathbf{v}_{query}}{\|\mathbf{v}_{query}\| + \epsilon} $$
+   where $\epsilon = 10^{-6}$ prevents division by zero [S1, unofficial].
+3. **Compute Training Ray Direction:** Calculate the vector from the training camera center to the point:
+   $$ \mathbf{v}_{train} = \mathbf{p}_{xyz} - \mathbf{t}_{train} $$
+   where $\mathbf{t}_{train}$ is the translation part of `train_pose`. Normalize $\mathbf{v}_{train}$ to get $\mathbf{d}_{train}$:
+   $$ \mathbf{d}_{train} = \frac{\mathbf{v}_{train}}{\|\mathbf{v}_{train}\| + \epsilon} $$
+4. **Compute Difference Vector:** Calculate the vector difference between the normalized directions:
+   $$ \mathbf{v}_{diff} = \mathbf{d}_{query} - \mathbf{d}_{train} $$
+5. **Compute Norm of Difference:** Calculate the Euclidean norm of the difference vector:
+   $$ \text{ray\_diff\_norm} = \|\mathbf{v}_{diff}\| $$
+6. **Compute Dot Product:** Calculate the dot product of the normalized directions:
+   $$ \text{ray\_diff\_dot} = \mathbf{d}_{query} \cdot \mathbf{d}_{train} $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+def compute_ray_angles(xyz, query_camera, train_cameras, device='cuda'):
+    """
+    Compute angular difference features between query and training rays.
+    
+    Args:
+        xyz: Tensor of shape (N, 3) representing 3D points.
+        query_camera: Tensor of shape (1, 16) or (1, 4, 4) representing query pose.
+        train_cameras: Tensor of shape (M, 16) or (M, 4, 4) representing training poses.
+        device: Device to run computation on.
+        
+    Returns:
+        ray_diff_dot: Tensor of shape (N, M) with dot products.
+        ray_diff_norm: Tensor of shape (N, M) with difference norms.
+    """
+    # Ensure inputs are on the correct device
+    xyz = xyz.to(device)
+    query_camera = query_camera.to(device)
+    train_cameras = train_cameras.to(device)
+    
+    # Reshape poses to (N, 4, 4) or (M, 4, 4)
+    # Assuming input is flattened (N, 16) or (1, 16)
+    if query_camera.dim() == 2:
+        query_pose = query_camera.view(-1, 4, 4)
+    else:
+        query_pose = query_camera
+        
+    if train_cameras.dim() == 2:
+        train_poses = train_cameras.view(-1, 4, 4)
+    else:
+        train_poses = train_cameras
+        
+    num_train = train_poses.shape[0]
+    
+    # Repeat query pose to match number of training cameras
+    # query_pose shape: (1, 4, 4) -> (num_train, 4, 4)
+    query_pose_expanded = query_pose.repeat(num_train, 1, 1)
+    
+    # Extract translation vectors (camera centers)
+    # Translation is at indices [0:3, 3] in a 4x4 matrix
+    query_centers = query_pose_expanded[:, :3, 3]  # Shape: (num_train, 3)
+    train_centers = train_poses[:, :3, 3]          # Shape: (num_train, 3)
+    
+    # Expand xyz to match dimensions for broadcasting
+    # xyz shape: (N, 3)
+    # We want to compute for each point against each training camera
+    # Resulting shapes will be (N, num_train, 3)
+    
+    # Compute direction from query camera to point
+    # v_query = xyz - query_center
+    # Broadcasting: (N, 3) - (num_train, 3) -> (N, num_train, 3)
+    # Note: query_centers needs to be broadcastable. 
+    # If query_centers is (num_train, 3), we need to align dimensions.
+    # Let's assume we want output (N, num_train).
+    
+    # Reshape for broadcasting:
+    # xyz: (N, 1, 3)
+    # query_centers: (1, num_train, 3)
+    # train_centers: (1, num_train, 3)
+    
+    xyz_expanded = xyz.unsqueeze(1)  # (N, 1, 3)
+    query_centers_expanded = query_centers.unsqueeze(0)  # (1, num_train, 3)
+    train_centers_expanded = train_centers.unsqueeze(0)  # (1, num_train, 3)
+    
+    # Ray directions (unnormalized)
+    ray2tar_unnorm = xyz_expanded - query_centers_expanded  # (N, num_train, 3)
+    ray2train_unnorm = xyz_expanded - train_centers_expanded  # (N, num_train, 3)
+    
+    # Normalize
+    eps = 1e-6
+    ray2tar_norm = torch.norm(ray2tar_unnorm, dim=2, keepdim=True)  # (N, num_train, 1)
+    ray2train_norm = torch.norm(ray2train_unnorm, dim=2, keepdim=True)  # (N, num_train, 1)
+    
+    ray2tar_pose = ray2tar_unnorm / (ray2tar_norm + eps)  # (N, num_train, 3)
+    ray2train_pose = ray2train_unnorm / (ray2train_norm + eps)  # (N, num_train, 3)
+    
+    # Compute difference vector
+    ray_diff = ray2tar_pose - ray2train_pose  # (N, num_train, 3)
+    
+    # Compute norm of difference
+    ray_diff_norm = torch.norm(ray_diff, dim=2)  # (N, num_train)
+    
+    # Compute dot product
+    ray_diff_dot = torch.sum(ray2tar_pose * ray2train_pose, dim=2)  # (N, num_train)
+    
+    return ray_diff_dot, ray_diff_norm
+```
+
+**Parameters:**
+- $\epsilon = 10^{-6}$: Epsilon added to the norm denominator to prevent division by zero [S1, unofficial].
+
+**Edge Cases:**
+- **Zero-length rays:** If the point coincides with a camera center, the direction vector is zero. The epsilon term ensures stability, but the resulting direction is undefined. In practice, this is rare in rendered scenes.
+- **Precision:** Using floating-point arithmetic for normalization and dot products can introduce small errors. Double precision may be required for high-accuracy applications.
+
+## Subtopics
+
+### [Angle Feature Generation](7126-angle-feature-generation.md)
+Angle Feature Generation creates geometric features based on the angular relationship between rays and camera positions for multi-view stereo rendering. It builds on [Ray Angle Computation](3156-ray-angle-computation.md) by converting angular differences into explicit feature vectors that encode viewing geometry. Unlike Direction Feature Generation, which relies on coordinate transformation, this method explicitly computes the dot product between ray directions to capture angular similarity.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of points and $M$ is the number of training views. The operations are vectorizable and parallelizable.
+- **Memory Complexity:** $O(N \cdot M)$ to store the intermediate direction tensors and results.
+- **Performance:** Highly efficient on GPUs due to tensor operations. The method is lightweight compared to full ray marching.
+- **Strengths:** Explicitly captures angular similarity, which is useful for multi-view consistency.
+- **Limitations:** Requires access to both query and training camera poses and 3D points. Not suitable for single-view rendering without reference views.
+
+## Background
+The method originates from implementations in NeRF-based multi-view stereo frameworks, specifically those utilizing angular features for view synthesis [S1, unofficial]. It is part of the broader family of ray generation and camera model techniques used in differentiable rendering.
+
+## Sources
+[S1] albertgassol1/vf-nerf, https://github.com/albertgassol1/vf-nerf, fetched 2026-10-26 (unofficial)

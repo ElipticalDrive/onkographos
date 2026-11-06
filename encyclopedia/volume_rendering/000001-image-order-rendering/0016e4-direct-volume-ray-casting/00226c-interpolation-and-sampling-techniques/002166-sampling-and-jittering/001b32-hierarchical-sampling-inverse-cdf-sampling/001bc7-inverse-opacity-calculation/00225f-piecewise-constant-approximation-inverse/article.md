@@ -1,0 +1,82 @@
+# Piecewise Constant Approximation Inverse
+
+Also called: Inverse CDF with Piecewise Constant Density, Piecewise Constant Inverse Sampling
+
+## Overview
+This method computes the ray parameter $t$ corresponding to a target cumulative density value $y$ by assuming the density $\rho_{\mathbf{r}}$ is constant within each sample interval $[t_{j-1}, t_j]$ [S1, unofficial]. It serves as the core inversion step in inverse opacity sampling, allowing the generation of sample positions that are uniformly distributed with respect to the accumulated density integral [S1, unofficial]. Unlike [Piecewise Linear Approximation Inverse](2649-piecewise-linear-approximation-inverse.md), which models density as linear within intervals and requires solving a quadratic equation, this approach yields a closed-form linear solution, making it computationally cheaper but less accurate for rapidly varying density fields [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $y$: The target cumulative density value (scalar).
+- $t_{j}$: The positions of $N$ sample points along the ray, where $t_0$ is the start and $t_N$ is the end.
+- $\rho_{\mathbf{r}}(\hat{t}_j)$: The density values sampled at each position $t_j$.
+
+**Outputs:**
+- $t$: The ray parameter such that the integral of density from $t_0$ to $t$ equals $y$.
+
+**Data Structures:**
+- Arrays `t` of size $N+1$ and `rho` of size $N+1$, indexed $0 \dots N$.
+
+**Steps:**
+1. Compute the cumulative density sum for all complete intervals preceding the current interval $i$. Let $S_i$ be the sum of densities multiplied by interval widths for intervals $j=1$ to $i$:
+   $$ S_i = \sum_{j=1}^i \rho_{\mathbf{r}}(\hat{t}_j)(t_j - t_{j-1}) $$
+2. Determine the interval index $i$ such that $S_i \le y < S_{i+1}$. This identifies the interval $[t_i, t_{i+1}]$ containing the target cumulative value.
+3. Calculate $t$ using the linear inversion formula:
+   $$ t = t_i + \frac{y - S_i}{\rho_{\mathbf{r}}(\hat{t}_i)} $$
+   where $\rho_{\mathbf{r}}(\hat{t}_i)$ is the constant density value within the $i$-th interval [S1, unofficial].
+
+**Pitfalls:**
+- If $\rho_{\mathbf{r}}(\hat{t}_i) \approx 0$, the denominator becomes unstable, leading to division by zero or large numerical errors. A small epsilon value $\epsilon$ should be added to the denominator to improve stability [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def piecewise_constant_inverse(y, t, rho):
+    """
+    Solve for t given target cumulative density y.
+    t: array of sample positions [t_0, ..., t_N]
+    rho: array of density values [rho_0, ..., rho_N]
+    y: target cumulative density scalar
+    """
+    n = len(t) - 1
+    cumulative_sum = 0.0
+    
+    # Find the interval i where the target y falls
+    for i in range(n):
+        interval_width = t[i+1] - t[i]
+        interval_density = rho[i]
+        interval_contribution = interval_density * interval_width
+        
+        if cumulative_sum + interval_contribution >= y:
+            # Found the interval [t_i, t_{i+1}]
+            # Stability guard: add epsilon to denominator if density is near zero
+            denom = interval_density + 1e-8
+            t_result = t[i] + (y - cumulative_sum) / denom
+            return t_result
+        
+        cumulative_sum += interval_contribution
+        
+    # Fallback if y exceeds total accumulated density (should not happen if y is valid)
+    return t[n]
+```
+
+## Subtopics
+
+### Inverse CDF Interpolation
+This variant, implemented in libraries like InstantSplat, inverts the CDF defined by bin endpoints `t` and weights `w` at query points `u` in $[0, 1)$ [S2, unofficial]. It involves converting logits to weights via softmax, computing the CDF by integrating weights, and then using sorted interpolation to map `u` to the inverse CDF domain [S2, unofficial]. This approach is often used in differentiable rendering pipelines where gradients through the sampling process are required [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ to find the correct interval, where $N$ is the number of samples. The calculation within the interval is $O(1)$.
+- **Memory Complexity:** $O(N)$ to store the sample positions and densities.
+- **Strengths:** Simple closed-form solution; computationally efficient; easy to implement.
+- **Limitations:** Accuracy degrades if density varies significantly within an interval; unstable when density is near zero without epsilon regularization.
+- **When to use:** When computational efficiency is prioritized over high-fidelity density representation, or when density is relatively smooth.
+- **When not to use:** When density changes rapidly within sample intervals, in which case [Piecewise Linear Approximation Inverse](2649-piecewise-linear-approximation-inverse.md) may be more appropriate.
+
+## Background
+The piecewise constant approximation inverse is derived in the context of differentiable volume rendering, specifically for reparameterized volume sampling [S1, unofficial]. It provides an explicit formula for the density integral inverse, enabling efficient inverse opacity sampling [S1, unofficial]. The method is part of a broader family of inverse CDF sampling techniques used to generate samples proportional to density along a ray [S1, unofficial].
+
+## Sources
+[S1] Differentiable Rendering With Reparameterized Volume Sampling, https://openreview.net/pdf?id=zHSaBQtj-l, fetched 2026-10-29 (unofficial)
+[S2] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)

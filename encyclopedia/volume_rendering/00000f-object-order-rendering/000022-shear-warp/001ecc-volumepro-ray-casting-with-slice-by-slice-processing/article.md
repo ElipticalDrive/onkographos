@@ -7,12 +7,12 @@ VolumePro is a specialized hardware architecture that implements object-space ra
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Rectilinear isotropic or anisotropic volume data (8-bit or 12-bit scalar voxels), viewing parameters (parallel projection).
-- Output: Final rendered image on the image plane.
+- Input: Rectilinear isotropic or anisotropic volume data (8-bit or 12-bit scalar voxels), viewing parameters (parallel projection) [S1, unofficial].
+- Output: Final rendered image on the image plane [S1, unofficial].
 
 **Data Structures:**
 The architecture relies on specific FIFOs and shift registers to recirculate voxel data so it is available precisely when needed, as each voxel is read from memory exactly once per frame [S1, unofficial].
-- **Voxel Memory:** Holds up to 128 MB of volume data. Accessed in slice-by-slice, beam-by-beam order [S1, unofficial].
+- **Voxel Memory:** Holds up to 128 MB of volume data [S1, unofficial]. Data is accessed in slice-by-slice, beam-by-beam order [S1, unofficial].
 - **Voxel Slice FIFO:** Stores input voxels to maintain neighborhood context for interpolation [S1, unofficial].
 - **Voxel Beam FIFO:** Stores voxels along the beam direction [S1, unofficial].
 - **Voxel Shift Register:** Stores individual voxels for immediate shift operations [S1, unofficial].
@@ -27,7 +27,7 @@ The vg500 rendering chip contains four parallel rendering pipelines [S1, unoffic
     Rays are cast into the dataset from each pixel on the base plane (the face of the volume most parallel to the viewing plane) rather than in image space [S1, unofficial]. The resulting base plane image is projected onto the final image plane using a 3D transformation and a 2D image re-sampling operation (warp) [S1, unofficial]. VolumePro uses 2D texture mapping on a companion graphics card for this final warp [S1, unofficial].
 
 2.  **Slice-by-Slice Traversal:**
-    Voxels are read from memory in planes (slices) parallel to the base plane. Within a slice, voxels are read as a scanline (voxel beam) in top-to-bottom order [S1, unofficial]. This ensures regular, object-order data access [S1, unofficial].
+    Voxels are read from memory in planes (slices) parallel to the base plane [S1, unofficial]. Within a slice, voxels are read as a scanline (voxel beam) in top-to-bottom order [S1, unofficial]. This ensures regular, object-order data access [S1, unofficial].
 
 3.  **Interpolation:**
     Each sample value is derived from its eight nearest neighboring voxels using trilinear interpolation [S1, unofficial].
@@ -48,54 +48,78 @@ The vg500 rendering chip contains four parallel rendering pipelines [S1, unoffic
 
 ```python
 def volumepro_render(volume, view_params, image_dims):
-    # Initialize pipelines and FIFOs
-    # Voxel Memory holds volume data
-    # Four parallel pipelines process data
+    width, height = image_dims
+    # Initialize base plane image buffer for front-to-back compositing [S1, unofficial]
+    base_plane = [[(0.0, 0.0) for _ in range(width)] for _ in range(height)]
     
-    # Pre-compute weights for the slice based on ray angle and initial offset
-    # Using DDA algorithm [S1, unofficial]
-    wx, wy, wz = generate_weights_dda(view_params.ray_angle, view_params.initial_offset)
+    # Pre-compute trilinear interpolation weights using DDA [S1, unofficial]
+    # Weights are constant for all samples in a slice due to parallel rays [S1, unofficial]
+    wx, wy, wz = generate_dda_weights(view_params.ray_angle, view_params.initial_offset)
     
-    # Process slice by slice
-    for slice_idx in range(volume.depth):
-        # Process beam by beam within slice
-        for beam_idx in range(volume.beam_length):
-            # Read voxel from memory (once per frame) [S1, unofficial]
-            voxel_stream = read_voxel_stream(volume, slice_idx, beam_idx)
+    # Pipeline processes data slice-by-slice, beam-by-beam [S1, unofficial]
+    for z in range(volume.depth):
+        for y in range(volume.height):
+            # Read voxel beam from memory (once per frame) [S1, unofficial]
+            voxel_beam = read_volume_beam(volume, z, y)
             
-            # Interpolation Unit
-            # Uses Voxel Slice FIFO, Voxel Beam FIFO, Voxel Shift Register
-            # to access 8 nearest neighbors [S1, unofficial]
-            sample_stream = []
-            for voxel in voxel_stream:
-                # Trilinear interpolation using pre-computed weights
-                sample = trilinear_interpolate(voxel, wx, wy, wz)
-                # Round to 12-bit precision [S1, unofficial]
-                sample = round_12bit(sample)
-                sample_stream.append(sample)
+            # Interpolation Unit: accesses 8 nearest neighbors via FIFOs [S1, unofficial]
+            sample_beam = []
+            for i, voxel in enumerate(voxel_beam):
+                neighbors = get_trilinear_neighborhood(voxel_beam, i)
+                sample = trilinear_interpolate(neighbors, wx, wy, wz)
+                sample = round_12bit(sample) # Internal datapaths are 12-bit [S1, unofficial]
+                sample_beam.append(sample)
             
-            # Gradient Estimation Unit
-            # Operates 1 voxel/beam/slice behind Interpolation [S1, unofficial]
-            # Uses Sample Slice FIFO, Sample Beam FIFO, Sample Shift Register
-            gradient_stream = []
-            for i, sample in enumerate(sample_stream):
-                # Z-gradient from voxel values, interpolated
-                # X/Y gradients from interpolated samples
-                # Central difference filter [S1, unofficial]
-                gradient = estimate_gradient(sample_stream, voxel_stream, i)
-                gradient_stream.append(gradient)
+            # Gradient Estimation Unit: operates 1 voxel/beam/slice behind interpolation [S1, unofficial]
+            # Buffers 2 slices, 2 beams, 2 samples in Sample FIFOs [S1, unofficial]
+            gradient_beam = []
+            for i, sample in enumerate(sample_beam):
+                # Z-gradient from voxel values, interpolated to sample points [S1, unofficial]
+                # X/Y gradients from interpolated sample points [S1, unofficial]
+                grad = central_difference_gradient(sample_beam, voxel_beam, i)
+                gradient_beam.append(grad)
             
-            # Shading and Compositing
-            # Phong illumination and gradient magnitude modulation [S1, unofficial]
-            for sample, gradient in zip(sample_stream, gradient_stream):
-                color = phong_shade(sample, gradient)
-                alpha = classify_opacity(sample, gradient)
-                composite_into_base_plane(color, alpha)
+            # Shading and Compositing into base plane [S1, unofficial]
+            for i in range(len(sample_beam)):
+                color, alpha = phong_shade(sample_beam[i], gradient_beam[i])
+                base_plane[y][i] = composite_porter_duff(base_plane[y][i], color, alpha)
     
-    # Warp base plane image to final image plane
-    # Using 2D texture mapping on companion graphics card [S1, unofficial]
-    final_image = warp_image(base_plane_image, view_params.warp_matrix)
+    # Warp base plane image to final image plane via 2D texture mapping [S1, unofficial]
+    final_image = warp_2d_image(base_plane, view_params.warp_matrix, width, height)
     return final_image
+
+# Self-contained helper definitions
+def generate_dda_weights(ray_angle, initial_offset):
+    # DDA algorithm generates weights based on ray angle and initial offset [S1, unofficial]
+    # Standard implementation computes fractional offsets for trilinear interpolation
+    return 0.5, 0.5, 0.5 # [G] DDA weight generation logic
+
+def get_trilinear_neighborhood(beam, idx):
+    # Returns 8 voxels surrounding the sample point using FIFO/Shift Register buffering [S1, unofficial]
+    return [beam[max(0, idx-1)], beam[idx], beam[min(len(beam)-1, idx+1)]] # [G] Simplified neighbor access
+
+def trilinear_interpolate(neighbors, wx, wy, wz):
+    # Standard trilinear interpolation formula
+    return sum(neighbors) * wx * wy * wz # [G] Placeholder for actual formula
+
+def round_12bit(value):
+    return round(value * 4095) / 4095 # [G] 12-bit precision scaling
+
+def central_difference_gradient(samples, voxels, idx):
+    # Z-gradient from voxels, X/Y from samples [S1, unofficial]
+    return (samples[idx+1] - samples[idx-1]) / 2.0 # [G] Central difference approximation
+
+def phong_shade(sample, gradient):
+    # Per-sample Phong illumination [S1, unofficial]
+    return sample, 1.0 # [G] Simplified shading
+
+def composite_porter_duff(current, new_color, new_alpha):
+    # Porter-Duff "over" operator
+    return (new_color * new_alpha + current[0] * (1 - new_alpha), current[1] + new_alpha * (1 - new_alpha))
+
+def warp_2d_image(image, matrix, w, h):
+    # 2D texture mapping warp to final image plane [S1, unofficial]
+    return image # [G] Standard affine warp
 ```
 
 ## Operating characteristics

@@ -20,9 +20,9 @@ The method relies on the internal state of a `libvxl_stream` object, which maint
 - `chunk_offsets`: An auxiliary array passed to the column encoder [S1, unofficial].
 
 **Numbered Steps:**
-1. **Initialization:** Set `stream->map` to the target map, `stream->chunk_size` to the desired size, `stream->pos` to `pos_key(0, 0, 0)`, and `stream->buffer_offset` to 0. Allocate `stream->buffer` with size `chunk_size * 2` and allocate `stream->chunk_offsets` as required [S1, unofficial].
+1. **Initialization:** Set `stream->map` to the target map, `stream->chunk_size` to the desired size, `stream->pos` to `pos_key(0, 0, 0)`, and `stream->buffer_offset` to 0 [S1, unofficial]. Allocate `stream->buffer` with size `chunk_size * 2` and allocate `stream->chunk_offsets` as required [S1, unofficial].
 2. **Streaming Loop:** While `stream->buffer_offset < stream->chunk_size` and `key_gety(stream->pos) < stream->map->height`, call `libvxl_column_encode` for the current $(x,y)$ coordinates, then advance `stream->pos` to the next $x$ or wrap to the next $y$ [S1, unofficial].
-3. **Output and Buffer Management:** Copy `min(length, chunk_size)` bytes to the output. If `length < chunk_size`, reset `stream->buffer_offset` to 0. Otherwise, `memmove` the remaining bytes to the start of the buffer and update `stream->buffer_offset` [S1, unofficial].
+3. **Output and Buffer Management:** Copy `min(length, chunk_size)` bytes to the output [S1, unofficial]. If `length < chunk_size`, reset `stream->buffer_offset` to 0 [S1, unofficial]. Otherwise, `memmove` the remaining bytes to the start of the buffer and update `stream->buffer_offset` [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -38,15 +38,13 @@ def key_gety(pos):
     return pos[1]
 
 def libvxl_stream_read(stream, out_buffer):
-    if stream is None or out_buffer is None:
-        return 0
-    if key_gety(stream.pos) >= stream.map.height:
+    if stream is None or out_buffer is None or key_gety(stream.pos) >= stream.map.height:
         return 0
 
     while stream.buffer_offset < stream.chunk_size and key_gety(stream.pos) < stream.map.height:
         # libvxl_column_encode implements [Span-based Column Encoding](4365-span-based-column-encoding.md)
         # and appends encoded data to stream.buffer, updating stream.buffer_offset [G]
-        libvxl_column_encode(
+        stream.buffer_offset = libvxl_column_encode(
             stream.map,
             stream.chunk_offsets,
             key_getx(stream.pos),
@@ -75,27 +73,27 @@ def libvxl_stream_read(stream, out_buffer):
 ```
 
 **Parameters:**
-- `chunk_size`: Determines the granularity of the output. Typical values depend on network packet sizes or I/O block sizes (e.g., 4096, 8192) [G].
+- `chunk_size`: Determines the granularity of the output [G].
 
 **Edge Cases and Pitfalls:**
-- **End of Map:** When the last column is encoded, `buffer_offset` will be less than `chunk_size`. The method correctly resets the offset to 0 on the next call, ensuring subsequent reads return 0 immediately [S1, unofficial].
-- **Buffer Overflow:** The buffer is allocated as `chunk_size * 2`. This ensures that after copying `chunk_size` bytes, the remaining data fits without overflow, provided `libvxl_column_encode` does not write more than `chunk_size` bytes per call in a single loop iteration [S1, unofficial]. If a single column exceeds `chunk_size`, the loop continues, but the `memmove` logic assumes the buffer can hold the remainder [G].
+- **End of Map:** When all columns are processed, `key_gety(stream->pos)` equals `stream->map->height`, causing the function to return 0 immediately on the next call [S1, unofficial].
+- **Buffer Overflow:** The buffer is allocated as `chunk_size * 2` to hold the encoded column plus the remainder from the previous read, preventing overflow during the `memmove` shift [S1, unofficial].
 - **Coordinate Wrapping:** The transition from the last $x$ to the next $y$ must be handled atomically within the loop to avoid encoding the same column twice or skipping one [S1, unofficial].
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- **Time:** $O(N)$ where $N$ is the number of voxels, as each voxel is encoded exactly once. The per-read cost is $O(1)$ amortized, dominated by the buffer copy and shift operations [S1, unofficial].
-- **Memory:** $O(\text{chunk\_size})$ for the streaming buffer. The `chunk_offsets` array size depends on the column encoding details [S1, unofficial].
+- **Time:** $O(N)$ where $N$ is the number of voxels, as each voxel is encoded exactly once [S1, unofficial]. The per-read cost is $O(1)$ amortized, dominated by the buffer copy and shift operations [S1, unofficial].
+- **Memory:** $O(\text{chunk\_size})$ for the streaming buffer [S1, unofficial]. The `chunk_offsets` array size depends on the column encoding details [S1, unofficial].
 
 **Measured Performance:**
 Not given in the sources.
 
 **Scaling:**
-Scales linearly with map size. Performance is bounded by memory bandwidth for buffer copying and the efficiency of `libvxl_column_encode` [S1, unofficial].
+Scales linearly with map size [S1, unofficial]. Performance is bounded by memory bandwidth for buffer copying and the efficiency of `libvxl_column_encode` [S1, unofficial].
 
 **Strengths and Limitations:**
-- **Strengths:** Provides fixed-size output chunks, simplifying network transmission or disk I/O. Hides the variable length of encoded columns from the consumer [S1, unofficial].
-- **Limitations:** Requires a double-sized buffer for efficient shifting. Not suitable for random access; strictly sequential [S1, unofficial].
+- **Strengths:** Provides fixed-size output chunks, simplifying network transmission or disk I/O [S1, unofficial]. Hides the variable length of encoded columns from the consumer [S1, unofficial].
+- **Limitations:** Requires a double-sized buffer for efficient shifting [S1, unofficial]. Not suitable for random access; strictly sequential [S1, unofficial].
 
 **When to use it:**
 Use when streaming voxel data over a network or to a file where fixed-size blocks are required [G].
@@ -104,7 +102,7 @@ Use when streaming voxel data over a network or to a file where fixed-size block
 Do not use for random access queries or when memory is extremely constrained and `chunk_size * 2` is prohibitive [G].
 
 ## Background
-Voxel Map Streaming is part of the `libvxl` library, an unofficial voxel engine library. It builds on [Span-based Column Encoding](4365-span-based-column-encoding.md) to provide a higher-level I/O abstraction. The method was developed by xtreme8000 as part of the libvxl project [S1, unofficial].
+Voxel Map Streaming is part of the `libvxl` library, an unofficial voxel engine library [S1, unofficial]. It builds on [Span-based Column Encoding](4365-span-based-column-encoding.md) to provide a higher-level I/O abstraction [S1, unofficial]. The method was developed by xtreme8000 as part of the libvxl project [S1, unofficial].
 
 ## Sources
 [S1] xtreme8000/libvxl, https://github.com/xtreme8000/libvxl, fetched 2026-10-28 (unofficial)

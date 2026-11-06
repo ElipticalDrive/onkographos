@@ -1,0 +1,223 @@
+Volume Shaders
+Volume Shaders
+Volume Shading API
+Volume shaders output closures describing absorption, scattering, and emission. These are the available closures:
+Volume Closures
+```
+AI_API AtClosure AiClosureVolumeAbsorption(const AtShaderGlobals* sg, const AtRGB& weight);
+AI_API AtClosure AiClosureVolumeEmission(const AtShaderGlobals* sg, const AtRGB& weight);
+AI_API AtClosure AiClosureVolumeHenyeyGreenstein(const AtShaderGlobals* sg,
+   const AtRGB& absorption, const AtRGB& scattering, const AtRGB& emission, float g = 0.f);
+AI_API AtClosure AiClosureVolumeMatte(const AtShaderGlobals* sg, const AtRGB& weight); 
+```
+You can think of volumes as a sort of point cloud with infinitesimally small motes. When rays of light traverse a volume, they may either hit a mote and be reflected/scattered (think white motes), they may hit a mote and be absorbed (think black motes), or they may traverse the volume without hitting anything at all. Depending on how tightly packed together the motes are, there will be a greater or lesser chance of actually hitting a mote, and this chance increases the greater the distance that the ray traverses in the volume. The weights of the volume closures are the absorption, scattering, and emission coefficients, which are rates with unit \( \dfrac{1}{m}. \)
+The emission coefficient is the rate at which a volume emits light at a given point. A ray traversing a volume with a constant emission coefficient will have radiance added at a rate of emission_coefficient * distance_traveled. The light emitted by a volume is visible to global illumination. It will also be affected by any attenuation, out-scattering, or absorption effects in the volume.
+The scattering coefficient is the rate at which light is scattered (or reflected) at a given point. The greater the rate of scattering, the shorter the average distance a ray of light will travel through a volume before being bounced off its course. There is an optional parameter for the Henyey-Greenstein closure to describe the mean cosine of the direction of the scattered ray with respect to that of the original ray (g). Valid values for g are anywhere between -1 (full back-scatter) and 1 (full forward-scatter), and by default, the mean cosine is set to 0 (isotropic scattering).
+The absorption coefficient is the rate at which light is absorbed at a given point. Summing the absorption and scattering coefficients gives the attenuation coefficient (also called the extinction coefficient), which corresponds to the overall density of the volume.
+Volume shaders often do not expose absorption and scattering coefficients as parameters directly. Instead, it is more intuitive to specify a density (attenuation coefficient) and scattering color (albedo). As long as the scattering color is in the range 0..1, the volume shader will be energy conserving. Values outside the range may be used for non-physically real scattering effects.
+Volume Density and Scattering Color
+```
+ shader_evaluate
+{
+   const float density = AiShaderEvalParamFlt(p_density);
+   const AtRGB scattering_color = AiShaderEvalParamRGB(p_scattering_color);
+   const float anisotropy = AiShaderEvalParamFlt(p_anisotropy);
+ 
+   const AtRGB absorption = density * (1 - scattering_color);
+   const AtRGB scattering = density * scattering_color;
+   const AtRGB emission = AI_RGB_BLACK;
+ 
+   sg->out.CLOSURE() = AiClosureVolumeHenyeyGreenstein(sg,
+      absorption, scattering, emission, anisotropy);
+} 
+```
+Shader Globals
+Volumetric shaders can expect the following shader globals to be readily available for use:
+sg->Rd : direction of ray traversing volume
+sg->Ro : position indicating the beginning of the segment of the volume that is being evaluated
+sg->Rl : length of the segment of the volume that is being evaluated
+sg->P : world-space sample position within the volume segment that is being evaluated
+sg->Po : object-space sample position within the volume segment that is being evaluated
+sg->M : object to world space transform matrix
+sg->Minv : world to object space transform matrix
+sg->Op : pointer to volume's container shape
+sg->dPdx : rate of change of sg->P as samples move along the x-axis of the image plane
+sg->dPdy : rate of change of sg->P as samples move along the y-axis of the image plane
+Here is a diagram of these shader globals:
+Example Shader
+Here is a small example of a volume shader that places a heterogeneous volume, modulated by a procedural noise effect and a spherical bounds, in the object space of the volume's container shape:
+simple_volume.cpp
+```
+#include "ai.h"
+#include <string.h>
+
+AI_SHADER_NODE_EXPORT_METHODS(SimpleVolumeMethods);
+
+
+enum SimpleVolumeParams
+{
+   p_position,
+   p_radius,
+   p_octaves,
+   p_scale
+};
+
+node_parameters
+{
+   AiParameterVec ("position", 0.0f, 0.0f, 0.0f);
+   AiParameterFlt ("radius"  , 1.0f);
+   AiParameterInt ("octaves" , 1);
+   AiParameterFlt ("scale"   , 2.0f);
+}
+
+node_initialize
+{
+}
+
+node_update
+{
+}
+
+node_finish
+{
+}
+
+shader_evaluate
+{
+   AtVector c = AiShaderEvalParamVec(p_position);
+   float r = AiShaderEvalParamFlt(p_radius);
+   int octaves = AiShaderEvalParamInt(p_octaves);
+   float scale = AiShaderEvalParamFlt(p_scale);
+
+   float density = 50.f;
+
+   AtVector p = sg->Po;
+   float rel_dist = AiV3Length(p - c) / r;                         // in [ 0,1]
+   float noise = AiNoise3(p * scale, octaves, 0, 1.92f);           // in [-1,1]
+   float threshold = rel_dist * 2 - 1;                             // in [-1,1]
+   noise = noise > threshold ? density : 0;
+   AtRGB noise_RGB(noise);
+
+   sg->out.CLOSURE() = AiClosureVolumeHenyeyGreenstein(sg, AI_RGB_BLACK, noise_RGB, AI_RGB_BLACK);
+}
+
+node_loader
+{
+   if (i>0)
+      return false;
+   node->methods     = (AtNodeMethods*) SimpleVolumeMethods;
+   node->output_type = AI_TYPE_CLOSURE;
+   node->name        = "simple_volume";
+   node->node_type   = AI_NODE_SHADER;
+   strcpy(node->version, AI_VERSION);
+   return true;
+}
+```
+When applied to two different container shapes, the left shape with a vertical scaling that is twice that of the right shape, the results from this shader could look like this: (remember to set step_size on the bounding shapes, and options.GI_volume_samples if you want indirect lighting on the volume)
+example_scene.ass
+```
+options
+{
+ AA_samples 9
+ outputs "RGBA RGBA /out/arnold1:gaussian_filter /out/arnold1:jpeg"
+ xres 640
+ yres 480
+ GI_diffuse_depth 1
+ GI_specular_depth 1
+ GI_diffuse_samples 3
+}
+
+driver_jpeg
+{
+ name /out/arnold1:jpeg
+ filename "simple.jpg"
+}
+
+gaussian_filter
+{
+ name /out/arnold1:gaussian_filter
+}
+
+persp_camera
+{
+  name mycamera
+  position 0 0.17 0.8
+  look_at 0 -0.05 0
+  up 0 1 0
+  fov 36
+  handedness left
+}
+
+
+skydome_light
+{
+ name mysky
+ intensity 0.1
+ camera 0
+}
+
+lambert 
+{
+  name mylambert
+  Kd_color  1 0.5 0.1
+  Kd 0.93
+}
+
+quad_light
+{
+  name mylight
+  vertices 4 1 POINT -0.0125 0.20 0.0125   -0.0125 0.2 0.0  0.0125 0.2 0.0   0.0125 0.2 0.0125
+  color  0.7931 0.7931 1
+  intensity 1600
+  normalize off
+  samples 1
+  volume_samples 2
+}
+
+simple_volume
+{
+ name myvolume
+ radius 1.0
+ octaves 3
+ scale 5
+}
+
+box
+{
+ name myBox
+ min  -1 -1 -1
+ max   1  1  1
+ step_size 0.05
+ shader myvolume
+ matrix
+  0.1 0 0 0
+  0 0.1  0 0
+  0 0 0.1 0
+  -0.1 -0.1 0 1
+}
+
+box
+{
+ name myBox
+ min  -1 -1 -1
+ max   1  1  1
+ step_size 0.05
+ shader myvolume
+ matrix
+  0.12 0 0 0
+  0 0.2 0 0
+  0 0 0.12 0
+  0.1 -0.05 0 1
+}
+
+
+plane
+{
+ name myplane
+ point 0 -0.2 0
+ normal 0 1 0
+ shader mylambert
+}
+```
+Note that, because volume shaders can be called dozens or even hundreds of times per ray, the shader_evaluate code must be as efficient as possible. Even harmless looking calls like AiShaderEvalParam can add significant overhead if used excessively so you will want to keep those to a minimum or precompute them in node_update when possible.
+Parent page: Shader Nodes

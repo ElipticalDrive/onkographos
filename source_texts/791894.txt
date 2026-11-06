@@ -1,0 +1,144 @@
+Issue Details Background: claude-opus-5-5 found this case while testing a new algorithm for floating point triangle triangle distance in https://github.com/medyan-dev/SimplexCellLists.jl In this case with Exact_predicates_inexact_constru...
+
+squared_distance(Triangle_3, Triangle_3) with Epick returns a large positive value for intersecting triangles · Issue #9814 · CGAL/cgal · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+squared_distance(Triangle_3, Triangle_3) with Epick returns a large positive value for intersecting triangles #9814
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+squared_distance(Triangle_3, Triangle_3) with Epick returns a large positive value for intersecting triangles#9814
+Copy link
+Labels
+Pkg::Kernel_23
+Description
+nhz2
+opened on Nov 1, 2026
+Issue body actions
+Issue Details
+Background: claude-opus-5-5 found this case while testing a new algorithm for floating point triangle triangle distance in https://github.com/medyan-dev/SimplexCellLists.jl
+In this case with Exact_predicates_inexact_constructions_kernel, CGAL::squared_distance(Triangle_3, Triangle_3)
+returns about 0.0136 for triangles that intersect.
+With Exact_predicates_exact_constructions_kernel it correctly returns 0.
+Source Code
+```
+#include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
+#include <CGAL/squared_distance_3.h>
+#include <CGAL/intersections.h>
+#include <iostream>
+
+typedef CGAL::Exact_predicates_inexact_constructions_kernel K;
+typedef K::Point_3 P;
+typedef K::Triangle_3 T;
+
+int main()
+{
+  // Two overlapping triangles in the plane z = 0.4x + 0.8y + 0.1
+  T a(P(0.8, 1.0, 1.22), P(0.0, -0.9, -0.62), P(-0.6, 0.4, 0.18));
+  T b(P(-0.2, 0.3, 0.26), P(0.0, -0.6, -0.38), P(0.2, 0.1, 0.26));
+
+  std::cout << "do_intersect: " << CGAL::do_intersect(a, b) << std::endl;
+  std::cout << "squared_distance: " << CGAL::squared_distance(a, b) << std::endl;
+
+  return 0;
+}
+```
+Output with g++ -std=c++17 -O2 -frounding-math -I<CGAL>/include repro.cpp -lmpfr -lgmp:
+```
+do_intersect: 1
+squared_distance: 0.0135785
+```
+Environment
+Operating system (Windows/Mac/Linux, 32/64 bits): Linux 64-bit x86_64
+Compiler: g++ 11.4.0
+Release or debug mode: -O2 without -DNDEBUG
+Specific flags used (if any): -std=c++17 -O2 -frounding-math
+CGAL version: 6.2.1 from CGAL-6.2.1-library.tar.xz
+Boost version: 1.74
+Other libraries versions if used (Eigen, TBB, etc.): GMP 6.2.1, MPFR 4.1.0
+Activity
+MaelRL
+added
+Pkg::Kernel_23
+on Nov 1, 2026
+prabhavofficial07 commented on Nov 2, 2026
+prabhavofficial07
+on Nov 2, 2026
+More actions
+Hi, I would like to work on this issue. Is it available?
+I will start by reproducing it with Epick and checking how the intersecting triangles case is handled in the Triangle_3 Triangle_3 squared_distance code. Happy to follow any guidance from the maintainers.
+vedpanvar commented on Nov 2, 2026
+vedpanvar
+on Nov 2, 2026
+More actions
+Hi @prabhavofficial07, I'd also like to contribute to this issue. Since you're planning to investigate the implementation, I could focus on reproducing the bug and adding regression tests. Would you be interested in collaborating on a single PR?
+prabhavofficial07 commented on Nov 2, 2026
+prabhavofficial07
+on Nov 2, 2026
+More actions
+Thanks @vedpanvar! I’ll start by reproducing it and looking at the intersecting case. Happy to have regression tests, if I open a PR I’ll tag you and you can add tests to my branch or review it. Let’s wait for a maintainer to confirm before we both dig in.
+prabhavofficial07 commented on Nov 2, 2026
+prabhavofficial07
+on Nov 2, 2026
+More actions
+Hi, I am stepping back from this issue. One note for whoever continues the triangles in the report are coplanar and do_intersect returns true under Epick, so i think the problem seems to be in the squared_distance path , Good luck!.
+👍React with 👍1Reacted by vedpanvar
+Ishaan400 commented on Nov 5, 2026
+Ishaan400
+on Nov 5, 2026
+Contributor
+More actions
+@MaelRL @nhz2 I dug into this a bit. It reproduces on current main, and the 0.0136 comes from the last fallback in Distance_3/include/CGAL/Distance_3/Triangle_3_Triangle_3.h.
+For this input none of the edge pairs is the "best pair", and neither vertex–triangle test finds a vertex projecting inside the other triangle, so we end up here:
+```
+if(are_triangles_known_to_be_disjoint)
+  return global_min_sqd;   // 0.0135785, the closest edge pair
+else
+  return 0;
+```
+The problem is that the flag is set when it shouldn't be. In test_vertex_triangle(tr2, tr1) the scalar products are computed in FT, so in double with Epick, and they come out as -5.55e-17, -5.55e-17, -1.73e-17. Since they all have the same sign, tr2 is considered to be strictly on one side of tr1 and the flag gets set. The exact orientation(a0, a1, a2, b_i) gives -1, +1, -1 though, so tr2 actually crosses the plane of tr1. It's just rounding noise. The separating-distance check in test_edge_pair can be fooled the same way for nearly coplanar triangles (I hit sep = 3.2e-17 > 0 on other inputs). With Epeck everything is exact, which is why it gets 0.
+Since the flag is only used on this last path, a simple fix is to double check it with the predicate before trusting it. The is_degenerate checks are there because this function accepts degenerate triangles but do_intersect doesn't:
+```
+if(are_triangles_known_to_be_disjoint &&
+   (k.is_degenerate_3_object()(tr1) || k.is_degenerate_3_object()(tr2) ||
+    !k.do_intersect_3_object()(tr1, tr2)))
+  return global_min_sqd;
+else
+  return 0;
+```
+With this, the reported case gives 0 in both argument orders, and test_distance_3.cpp and test_compare_distance_3.cpp still pass. The extra check only runs on that fallback path: on 300k random (non-coplanar) pairs it was never reached, and Epick matched Epeck on all of them.
+I also ran Epick against Epeck on ~300k random nearly coplanar pairs. Before the change there were 29 intersecting pairs where Epick returned something nonzero (up to ~1e-7), and after it there were none. There are still some differences on those inputs that the change doesn't touch (they were there before too): pairs that are disjoint but just about touching, where Epick can be off by up to ~5e-3, and one case with a nearly collinear sliver. Those look like general precision limits of inexact constructions on near-degenerate input rather than this bug, so I left them out of scope here.
+nhz2 commented on Nov 5, 2026
+nhz2
+on Nov 5, 2026
+Author
+More actions
+Those look like general precision limits of inexact constructions on near-degenerate input rather than this bug, so I left them out of scope here.
+That is the bug.
+The method in https://github.com/medyan-dev/SimplexCellLists.jl/blob/v0.3.3/src/distances.jl#L406-L441 avoids this.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+Pkg::Kernel_23
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

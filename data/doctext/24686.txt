@@ -1,0 +1,1266 @@
+# Volume rendering using ray casting algorithm
+
+Demo application applying volumetric rendering on CT scans of human skull.
+
+This project implements the volume rendering using Raycasting algorithm with modern OpenGL API and the shading language GLSL using [JOGL](https://jogamp.org/jogl/www/) and [Kotlin](https://kotlinlang.org/).
+
+## Screenshot
+![screenshot](./readme/screenshot.png)
+
+## Run instructions
+To run application your graphic card needs to support OpenGL 3.3 and higher.
+
+```bash
+./gradlew run
+```
+
+## References
+[Volume_Rendering_Using_GLSL](https://github.com/toolchainX/Volume_Rendering_Using_GLSL)
+
+## Volume data source
+[The Stanford volume data archive](http://www.graphics.stanford.edu/data/voldata/)
+
+### src/main/resources/shaders/cube_shader.frag
+```
+#version 330 core
+
+in vec3 vColor;
+
+layout(location = 0) out vec4 fragColor;
+
+void main()
+{
+	fragColor = vec4(vColor, 1);
+}
+```
+
+### src/main/resources/shaders/cube_shader.vert
+```
+#version 330 core
+
+layout(location = 0) in vec3 vVertex;
+
+// combined modelview projection matrix
+uniform mat4 mvp;
+
+out vec3 vColor;
+
+void main()
+{ 	 
+	//get clipspace position
+    vColor = vVertex;
+	gl_Position = mvp*vec4(vVertex.xyz,1);
+}
+```
+
+### src/main/resources/shaders/raycasting.frag
+```
+#version 330 core
+
+precision highp float;
+
+in vec3 entryPoint;
+
+uniform vec2 screenSize;
+uniform sampler2D exitPoints;
+uniform sampler3D volume;
+uniform sampler1D transferFn;
+uniform sampler3D gradients;
+uniform mat4 viewMat;
+uniform mat4 normalMat;
+
+out vec4 fragColor;
+
+const int MAX_ITERATIONS = 2000;
+const float stepSize = 0.005;
+const float specularExp = 128.0;
+const float ambientLight = 0.2;
+const vec4 bgColor = vec4(0.2, 0.2, 0.2, 1.0);
+const vec3 lightPositionWorld = vec3(10.0, 5.0, -10.0);
+
+// light constants
+const vec3 Ls = vec3(1.0, 1.0, 1.0);
+const vec3 Ld = vec3(1.0, 1.0, 1.0);
+const vec3 La = vec3(0.1, 0.1, 0.1);
+
+// surface reflectance
+const vec3 Ks = vec3(1.0, 1.0, 1.0);    // fully reflect specular light
+const vec3 Kd = vec3(0.1, 0.1, 0.1);    // orange diffuse surface reflectance
+const vec3 Ka = vec3(1.0, 1.0, 1.0);    // fully reflect ambient light
+const vec3 Ia = La * Ka;                // ambient intensity
+const float specularExponent = 100.0;   // specular 'power'
+
+// diffuse intensity
+vec3 diffuse(vec3 color, vec3 normal, vec3 directionToLight) {
+    return Ld * color * max(0, dot(normal, directionToLight));
+}
+
+// specular intensity
+vec3 specular(vec3 viewSpacePosition, vec3 viewSpaceLightPosition, vec3 normal, vec3 directionToLight) {
+    vec3 reflectionEye = reflect(-directionToLight, normal);
+    vec3 surfaceToViewerEye = normalize(-viewSpacePosition);
+    float dotProdSpecular = max(dot(reflectionEye, surfaceToViewerEye), 0.0);
+    float specular_factor = pow (dotProdSpecular, specularExponent);
+    return Ls * Ks * specular_factor;
+}
+
+// phong lightning
+vec3 phong(vec3 color, vec3 normal, vec3 viewSpacePosition, vec3 viewSpaceLightPosition)
+{
+  vec3 directionToLight = normalize(viewSpaceLightPosition - viewSpacePosition);
+  vec3 Id = diffuse(color, normal, directionToLight);
+  vec3 Is = specular(viewSpacePosition, viewSpaceLightPosition, normal, directionToLight);
+  return Is + Id + Ia;
+}
+
+float random(vec2 cords) {
+    return 1 * fract(sin(cords.x * 12.9898 + cords.y * 78.233) * 43758.5453);
+}
+
+// depth is calculated from viewing direction
+vec3 calcVoxel(vec3 point, vec2 cords, vec3 deltaDir) {
+    return point + deltaDir * random(cords);
+}
+
+void main()
+{
+    vec3 exitPoint = texture(exitPoints, gl_FragCoord.st / screenSize).xyz;
+
+    // empty space skipping
+    if (entryPoint == exitPoint)
+        discard;
+
+    vec3 dir = (exitPoint - entryPoint);
+    float len = length(dir);
+    vec3 dirN = normalize(dir);
+    vec3 deltaDir = dirN * stepSize;
+    float deltaDirLen = length(deltaDir);
+
+    vec3 voxelCoord = calcVoxel(entryPoint, gl_FragCoord.xy, deltaDir);
+
+    float alphaAcum = 0.0;
+    float lengthAcum = 0.0;
+    vec4 colorAcum = vec4(0.0);
+
+    float intensity;
+    vec4 sampleColor;
+    vec3 gradient;
+
+    vec3 viewSpacePosition;
+    vec3 viewSpaceNormal;
+    vec3 viewSpaceLightPosition = vec3(viewMat * vec4(lightPositionWorld, 1.0));
+
+    for(int i = 0; i < MAX_ITERATIONS; i++)
+    {
+    	intensity = texture(volume, voxelCoord).x;
+        gradient = normalize(texture(gradients, voxelCoord).xyz);
+        sampleColor = texture(transferFn, intensity);
+
+        viewSpacePosition = voxelCoord;
+        viewSpaceNormal = normalize((normalMat * vec4(gradient, 0.0)).xyz);
+
+        if (sampleColor.a > 0.0) {
+            // correction
+    	    sampleColor.a = 1.0 - pow(1.0 - sampleColor.a, stepSize * 100.0f);
+            sampleColor.rbg = phong(sampleColor.rgb, viewSpaceNormal, viewSpacePosition, viewSpaceLightPosition);
+
+            colorAcum.rgb = colorAcum.rbg + (1.0 - colorAcum.a) * sampleColor.rgb * sampleColor.a ;
+            colorAcum.a = colorAcum.a + (1.0 - colorAcum.a) * sampleColor.a;
+    	}
+
+        // increment voxel along viewing direction
+        voxelCoord += deltaDir;
+    	lengthAcum += deltaDirLen;
+
+        if (lengthAcum >= len ) {
+    	    colorAcum.rgb = colorAcum.rgb*colorAcum.a + (1 - colorAcum.a) * bgColor.rgb;
+    	    break;
+    	}else if (colorAcum.a > 1.0) {
+    	    colorAcum.a = 1.0;
+    	    break;
+    	}
+    }
+    fragColor = colorAcum;
+//     test
+//     fragColor = vec4(EntryPoint, 1.0);
+//     fragColor = vec4(exitPoint, 1.0);
+}
+```
+
+### src/main/resources/shaders/raycasting.vert
+```
+#version 330 core
+
+layout (location = 0) in vec3 vVertex;
+
+// combined modelview projection matrix
+uniform mat4 mvp;
+
+out vec3 entryPoint;
+
+void main()
+{
+    gl_Position =  mvp * vec4(vVertex,1);
+    entryPoint = vVertex;
+}
+```
+
+### src/main/kotlin/palasjir/kglm/Mat4.kt
+```
+package palasjir.kglm
+
+import com.hackoeur.jglm.Mat4
+import com.hackoeur.jglm.Vec4
+
+operator fun Mat4.times(right: Mat4): Mat4 = this.multiply(right)
+operator fun Mat4.times(right: Vec4): Vec4 = this.multiply(right)
+```
+
+### src/main/kotlin/palasjir/viewer/Main.kt
+```
+package palasjir.viewer
+
+
+import com.jogamp.opengl.GLCapabilities
+import com.jogamp.opengl.GLProfile
+import com.jogamp.opengl.util.FPSAnimator
+import palasjir.viewer.ui.VisualizationPanel
+
+import javax.swing.*
+import java.awt.*
+import java.awt.event.WindowAdapter
+import java.awt.event.WindowEvent
+
+
+private val TITLE = "CT Viewer"
+private val CANVAS_WIDTH = 500
+private val CANVAS_HEIGHT = 500
+private val FPS = 25
+
+
+fun main(args: Array<String>) {
+
+    // Run the GUI codes in the event-dispatching thread for thread safety
+    SwingUtilities.invokeLater {
+
+        // Create the OpenGL rendering canvas
+        val dimension = Dimension(CANVAS_WIDTH, CANVAS_HEIGHT)
+        val caps = GLCapabilities(GLProfile.getMaxProgrammableCore(true))
+        val canvas = VisualizationPanel(dimension, caps)
+
+        // Create a animator that drives canvas' render() at the specified FPS.
+        val animator = FPSAnimator(canvas, FPS, true)
+
+        // Create the top-level container
+        val frame = JFrame() // Swing's JFrame or AWT's Frame
+        frame.contentPane.add(canvas)
+        val closingThread = Thread {
+            if (animator.isStarted) animator.stop()
+            System.exit(0)
+        }
+        frame.addWindowListener(object : WindowAdapter() {
+            override fun windowClosing(e: WindowEvent?) {
+                closingThread.start()
+            }
+        })
+        frame.title = TITLE
+        frame.pack()
+        frame.isVisible = true
+        animator.start() // start the animation loop
+    }
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/coordinates/Camera.kt
+```
+package palasjir.viewer.coordinates
+
+import com.hackoeur.jglm.Mat4
+import com.hackoeur.jglm.Matrices
+import com.hackoeur.jglm.Matrices.*
+import com.hackoeur.jglm.Vec3
+import palasjir.kglm.*
+
+import java.awt.*
+import java.lang.Math.toRadians
+
+class Camera(zoom: Float) {
+
+    private val up: Vec3 = Vec3(0f, 1f, 0f)
+    private val at: Vec3 = Vec3(0f, 0f, 0f)
+    private var zoomFactor = 1f
+    private var eye: GLSphericalCoordinates
+    
+    var viewMatrix: Mat4
+        private set
+    var viewPortWidth: Int = -1
+    var viewPortHeight: Int = -1
+    
+    private var projectionMatrix: ProjMat
+
+    init {
+        eye = GLSphericalCoordinates(Vec3(0f, 0f, zoom))
+        viewMatrix = updateView()
+        projectionMatrix = ProjMat()
+    }
+
+    fun drag(start: Point?, end: Point?) {
+        if (start != null && end != null) {
+
+            val dx = start.x - end.x
+            val dy = start.y - end.y
+
+            if (dx != 0 || dy != 0) {
+
+                val theta = eye.theta + toRadians(dx.toDouble())
+                var phi = eye.phi + toRadians(dy.toDouble())
+
+                // top lock
+                if (dy < 0 && phi < 0) {
+                    phi = topLock
+                }
+
+                // bottom lock
+                if (phi > Math.PI) {
+                    phi = bottomLock
+                }
+
+                eye = GLSphericalCoordinates(eye.r, theta, phi)
+            }
+        }
+
+        viewMatrix = updateView()
+    }
+
+    private fun updateView(): Mat4 {
+        return lookAt(eye.cartesian, at, up)
+    }
+
+    fun zoom(distance: Double) {
+        zoomFactor += distance.toFloat() * 0.01f
+        projectionMatrix = projectionMatrix.zoom(zoomFactor)
+        viewMatrix = updateView()
+    }
+
+    fun setupProjection(fov: Float, w: Int, h: Int, near: Float, far: Float) {
+        viewPortWidth = w
+        viewPortHeight = h
+        projectionMatrix = ProjMat(fov, w, h, near, far)
+    }
+
+    fun setupDefaultProjection(w: Int, h: Int) = this.setupProjection(45f, w, h, 1f, 500f)
+    
+    var position: Vec3
+        get() = eye.cartesian
+        set(eye) {
+            this.eye = GLSphericalCoordinates(eye)
+            viewMatrix = updateView()
+        }
+
+    val viewDirection: Vec3
+        get() = at.subtract(eye.cartesian).unitVector
+
+    fun mvp(model: Mat4): Mat4 = projectionMatrix * viewMatrix * model
+    fun normalMatrix(model: Mat4): Mat4 = Matrices.invert(viewMatrix * model).transpose()
+    
+    private val topLock = Math.toRadians(0.000000001)
+    private val bottomLock = Math.toRadians(179.999999999)
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/coordinates/GLSphericalCoordinates.kt
+```
+package palasjir.viewer.coordinates
+
+import com.hackoeur.jglm.Vec3
+import org.apache.commons.math3.geometry.euclidean.threed.SphericalCoordinates
+import org.apache.commons.math3.geometry.euclidean.threed.Vector3D
+
+class GLSphericalCoordinates : SphericalCoordinates {
+
+    constructor(v: Vec3) : super(Vector3D(v.z.toDouble(), v.x.toDouble(), v.y.toDouble()))
+
+    constructor(radius: Double, theta: Double, phi: Double) : super(radius, theta, phi)
+
+    val cartesian: Vec3
+        get() {
+            val v = super.getCartesian()
+            return Vec3(v.y.toFloat(), v.z.toFloat(), v.x.toFloat())
+        }
+}
+```
+
+### src/main/kotlin/palasjir/viewer/coordinates/ProjMat.kt
+```
+package palasjir.viewer.coordinates
+
+import com.hackoeur.jglm.Mat4
+import com.hackoeur.jglm.Matrices
+
+class ProjMat {
+
+    private val aspectRatio: Float
+    private val fov: Float
+    private val near: Float
+    private val far: Float
+    private val mat: Mat4 
+    
+    constructor(fov: Float, aspectRatio: Float, near: Float, far: Float) {
+        this.aspectRatio = aspectRatio
+        this.fov = fov
+        this.near = near
+        this.far = far
+        this.mat = Matrices.perspective(fov, aspectRatio, near, far)
+    }
+
+    constructor(fov: Float, w: Int, h: Int, near: Float, far: Float): this(fov, aspect(w, h), near, far)
+    
+    constructor(): this(45f, 1f, 1f, 500f)
+
+    operator fun times(mat: Mat4): Mat4 = this.multiply(mat)
+
+    fun multiply(mat: Mat4): Mat4 = this.mat.multiply(mat)
+    
+    fun zoom(zoomFactor: Float): ProjMat = ProjMat(fov * zoomFactor, aspectRatio, near, far)
+
+}
+
+private fun aspect(w: Int, h: Int): Float {
+    return w.toFloat() / h.toFloat()
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/BoxRenderer.kt
+```
+package palasjir.viewer.render
+
+import com.jogamp.common.nio.Buffers
+import com.jogamp.opengl.GL2GL3
+import com.jogamp.opengl.GL3.*
+import com.jogamp.opengl.GL3
+import palasjir.viewer.utils.VolumeData
+import palasjir.viewer.utils.genBufferId
+import palasjir.viewer.utils.genVertexArraysId
+import java.nio.FloatBuffer
+import java.nio.IntBuffer
+
+
+class BoxRenderer {
+
+    private var verticesId: Int = -1
+    private var vaoId: Int = -1
+
+    /**
+     * Initializes the cube which determines the volume.
+     *
+     * @param gl GL Interface
+     * @return VAO ID
+     */
+    fun init(gl: GL3, verticesId: Int)  {
+
+        this.verticesId = verticesId
+
+        vaoId = genVertexArraysId(gl)
+        val vboVId = genBufferId(gl)
+        val vboIId = genBufferId(gl)
+
+        val box = UnitCube(
+                VolumeData.Companion.IMG_WIDTH.toFloat(),
+                VolumeData.Companion.IMG_HEIGHT.toFloat(),
+                VolumeData.Companion.IMG_DEPTH.toFloat()
+        )
+
+        //now allocate buffers
+        gl.glBindVertexArray(vaoId)
+        gl.glBindBuffer(GL2GL3.GL_ARRAY_BUFFER, vboVId)
+        gl.glBufferData(GL2GL3.GL_ARRAY_BUFFER, (24 * java.lang.Float.SIZE).toLong(), FloatBuffer.wrap(box.vertices), GL2GL3.GL_STATIC_DRAW)
+
+        gl.glEnableVertexAttribArray(this.verticesId)
+        gl.glVertexAttribPointer(this.verticesId, 3, GL2GL3.GL_FLOAT, false, 0, 0)
+
+        gl.glBindBuffer(GL2GL3.GL_ELEMENT_ARRAY_BUFFER, vboIId)
+        gl.glBufferData(GL2GL3.GL_ELEMENT_ARRAY_BUFFER, (36 * Buffers.SIZEOF_INT).toLong(), IntBuffer.wrap(UnitCube.Companion.indices), GL2GL3.GL_STATIC_DRAW)
+        gl.glBindVertexArray(0)
+    }
+
+    fun draw(gl: GL3, face: Int) {
+        gl.glEnable(GL_CULL_FACE)
+        gl.glCullFace(face)
+        gl.glBindVertexArray(vaoId)
+        gl.glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0)
+        gl.glBindVertexArray(0)
+        gl.glDisable(GL_CULL_FACE)
+    }
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/CubeProgram.kt
+```
+package palasjir.viewer.render
+
+import com.hackoeur.jglm.Mat4
+import com.jogamp.opengl.GL4
+import com.jogamp.opengl.GL4.*
+import com.jogamp.opengl.util.glsl.ShaderState
+import palasjir.viewer.utils.ShaderProgramHelper
+
+private val VS = "cube_shader.vert"
+private val FS = "cube_shader.frag"
+
+class CubeProgram : ShaderProgramHelper(VS, FS) {
+
+    private var mvpLoc: Int = -1
+
+    fun init(gl: GL4, st: ShaderState) {
+        super.init(gl)
+        st.attachShaderProgram(gl, program, true)
+        mvpLoc = st.getUniformLocation(gl, "mvp")
+    }
+
+    fun display(gl: GL4, st: ShaderState, mvp: Mat4, boxRenderer: BoxRenderer) {
+        st.attachShaderProgram(gl, program, true) // attach cube program
+        st.useProgram(gl, true)
+        gl.glUniformMatrix4fv(mvpLoc, 1, false, mvp.buffer)
+        boxRenderer.draw(gl, GL_FRONT)
+        st.useProgram(gl, false)
+        st.attachShaderProgram(gl, program, false) // detach cube program
+    }
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/FrameBuffer.kt
+```
+package palasjir.viewer.render
+
+import com.jogamp.opengl.GL3
+import com.jogamp.opengl.GL3.*
+import com.jogamp.opengl.GLException
+import palasjir.viewer.coordinates.Camera
+import palasjir.viewer.utils.*
+
+class FrameBuffer(val camera: Camera) {
+
+    var frameBufferId: Int = -1
+        private set
+    var renderedTextureId: Int = -1
+        private set
+
+    fun init(gl: GL3) {
+        // The framebuffer, which regroups 0, 1, or more textures, and 0 or 1 depth buffer.
+        frameBufferId = genFrameBufferId(gl)
+
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, frameBufferId)
+
+        // The texture we're going to render to
+        renderedTextureId = genTextureId(gl)
+
+        // "Bind" the newly created texture : all future texture functions will modify this texture
+        gl.glBindTexture(GL_TEXTURE_2D, renderedTextureId)
+
+        // Give an empty image to OpenGL ( the last "0" means "empty" )
+        gl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, camera.viewPortWidth, camera.viewPortHeight, 0, GL_RGB, GL_UNSIGNED_BYTE, null)
+
+        // Poor filtering
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+        // The depth buffer
+        val depthRenderBufferId = genRenderBufferId(gl)
+        gl.glBindRenderbuffer(GL_RENDERBUFFER, depthRenderBufferId)
+        gl.glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, camera.viewPortWidth, camera.viewPortHeight)
+        gl.glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, depthRenderBufferId)
+        gl.glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, renderedTextureId, 0)
+
+        // Set the list of draw buffers.
+        val drawBuffers = intArrayOf(GL_COLOR_ATTACHMENT0)
+        gl.glDrawBuffers(1, drawBuffers, 0)
+
+        if (gl.glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            throw GLException("Framebuffer not ok!")
+        }
+
+        gl.glEnable(GL_DEPTH_TEST)
+    }
+
+    fun clear(gl: GL3) {
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        gl.glViewport(0, 0, camera.viewPortWidth, camera.viewPortHeight)
+        gl.glClearColor(0.2f, 0.2f, 0.2f, 1.0f)
+        gl.glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+    }
+
+    fun activate(gl: GL3) {
+        // Render to buffer
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        gl.glBindFramebuffer(GL_FRAMEBUFFER, frameBufferId)
+        // Render on the whole framebuffer, complete from the lower left corner to the upper right
+        gl.glViewport(0, 0, camera.viewPortWidth, camera.viewPortHeight)
+        gl.glClear(GL_COLOR_BUFFER_BIT or GL_DEPTH_BUFFER_BIT)
+    }
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/RaycastingProgram.kt
+```
+package palasjir.viewer.render
+
+import com.hackoeur.jglm.Mat4
+import com.jogamp.opengl.GL2GL3.*
+import com.jogamp.opengl.GL4
+import com.jogamp.opengl.util.glsl.ShaderState
+import palasjir.viewer.coordinates.Camera
+import palasjir.viewer.utils.ShaderProgramHelper
+import palasjir.viewer.utils.VolumeData
+import palasjir.viewer.utils.genTextureId
+
+private val VS = "raycasting.vert"
+private val FS = "raycasting.frag"
+
+class RaycastingProgram(val volumeData: VolumeData): ShaderProgramHelper(VS, FS) {
+
+    private var screenSizeLoc: Int = -1
+    private var transferFuncLoc: Int = -1
+    private var backFaceLoc: Int = -1
+    private var volumeLoc: Int = -1
+    private var gradientsLoc: Int = -1
+    private var viewMatLoc: Int = -1
+    private var normalMatLoc: Int = -1
+    private var rayMvpLoc: Int = -1
+
+    private var tfTextureId: Int = -1
+    private var volumeTextureId: Int = -1
+    private var gradientsTextureId: Int = -1
+
+    fun init(gl: GL4, st: ShaderState) {
+        super.init(gl)
+        st.attachShaderProgram(gl, this.program, true)
+        screenSizeLoc = st.getUniformLocation(gl, "screenSize")
+        transferFuncLoc = st.getUniformLocation(gl, "transferFn")
+        backFaceLoc = st.getUniformLocation(gl, "exitPoints")
+        volumeLoc = st.getUniformLocation(gl, "volume")
+        gradientsLoc = st.getUniformLocation(gl, "gradients")
+        viewMatLoc = st.getUniformLocation(gl, "viewMat")
+        normalMatLoc = st.getUniformLocation(gl, "normalMat")
+        rayMvpLoc = st.getUniformLocation(gl, "mvp")
+
+        tfTextureId = initTransferFunction(gl)
+        volumeTextureId = initVolumeTexture(gl)
+        gradientsTextureId = initGradients(gl)
+
+    }
+
+    fun display(gl: GL4, st: ShaderState, mvp: Mat4, camera: Camera, model: Mat4, boxRenderer: BoxRenderer, renderedTextureId: Int) {
+        st.attachShaderProgram(gl, program, true)
+        st.useProgram(gl, true)
+
+        gl.glUniformMatrix4fv(rayMvpLoc, 1, false, mvp.buffer)
+        gl.glUniform2f(
+                screenSizeLoc,
+                camera.viewPortWidth.toFloat(),
+                camera.viewPortHeight.toFloat()
+        )
+        gl.glUniformMatrix4fv(
+                viewMatLoc,
+                1,
+                false,
+                camera.viewMatrix.buffer
+        )
+
+        val normalMatrix = camera.normalMatrix(model)
+        gl.glUniformMatrix4fv(
+                normalMatLoc,
+                1,
+                false,
+                normalMatrix.buffer
+        )
+
+        // tf uniform
+        gl.glActiveTexture(GL_TEXTURE0)
+        gl.glBindTexture(GL_TEXTURE_1D, tfTextureId)
+        gl.glUniform1i(transferFuncLoc, 0)
+
+        // backface texture
+        gl.glActiveTexture(GL_TEXTURE1)
+        gl.glBindTexture(GL_TEXTURE_2D, renderedTextureId)
+        gl.glUniform1i(backFaceLoc, 1)
+
+        // volume texture
+        gl.glActiveTexture(GL_TEXTURE2)
+        gl.glBindTexture(GL_TEXTURE_3D, volumeTextureId)
+        gl.glUniform1i(volumeLoc, 2)
+
+        // gradients texture
+        gl.glActiveTexture(GL_TEXTURE3)
+        gl.glBindTexture(GL_TEXTURE_3D, gradientsTextureId)
+        gl.glUniform1i(gradientsLoc, 3)
+
+        boxRenderer.draw(gl, GL_BACK)
+
+        st.useProgram(gl, false)
+        st.attachShaderProgram(gl, program, false) // detach exec program
+    }
+
+    private fun initTransferFunction(gl: GL4): Int {
+        val tf = TransferFunction()
+        val id = genTextureId(gl)
+
+        gl.glBindTexture(GL_TEXTURE_1D, id)
+        gl.glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        gl.glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_1D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        gl.glTexImage1D(GL_TEXTURE_1D, 0, GL_RGBA, TransferFunction.Companion.SIZE, 0, GL_RGBA, GL_UNSIGNED_BYTE, tf.buffer)
+
+        return id
+    }
+
+    private fun initGradients(gl: GL4): Int {
+        val id = genTextureId(gl)
+
+        // bind 3D texture target
+        gl.glBindTexture(GL_TEXTURE_3D, id)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT)
+
+        // pixel transfer happens here from client to OpenGL server
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        val data = volumeData.gradientsBuffer()
+        gl.glTexImage3D(GL_TEXTURE_3D, 0, GL_RGB, VolumeData.Companion.IMG_WIDTH, VolumeData.Companion.IMG_HEIGHT, VolumeData.Companion.IMG_DEPTH, 0, GL_RGB, GL_FLOAT, data)
+
+        return id
+    }
+
+    private fun initVolumeTexture(gl: GL4): Int {
+        val id = genTextureId(gl)
+
+        // bind 3D texture target
+        gl.glBindTexture(GL_TEXTURE_3D, id)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_REPEAT)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_REPEAT)
+        gl.glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_REPEAT)
+
+        // pixel transfer happens here from client to OpenGL server
+        gl.glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        val buffer = volumeData.buffer
+        gl.glTexImage3D(
+                GL_TEXTURE_3D,
+                0,
+                GL_RED,
+                VolumeData.Companion.IMG_WIDTH,
+                VolumeData.Companion.IMG_HEIGHT,
+                VolumeData.Companion.IMG_DEPTH,
+                0,
+                GL_RED,
+                GL_UNSIGNED_BYTE,
+                buffer
+        )
+        gl.glGenerateMipmap(GL_TEXTURE_3D)
+        return id
+    }
+
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/ScreenBuffer.kt
+```
+package palasjir.viewer.render
+
+import com.jogamp.opengl.GL3
+import com.jogamp.opengl.GL3.*
+import palasjir.viewer.utils.genBufferId
+import java.nio.FloatBuffer
+
+class ScreenBuffer {
+
+    var id : Int = -1
+        private set
+
+    /**
+     * Initializes screen buffer. Buffer for creating the screen render of rendered texture.
+     *
+     * @param gl GL Interface
+     */
+    fun init(gl: GL3) {
+        // The fullscreen quad's FBO
+        val data = floatArrayOf(-1.0f, -1.0f, 0.0f, 1.0f, -1.0f, 0.0f, -1.0f, 1.0f, 0.0f, -1.0f, 1.0f, 0.0f, 1.0f, -1.0f, 0.0f, 1.0f, 1.0f, 0.0f)
+        id = genBufferId(gl)
+        gl.glBindBuffer(GL_ARRAY_BUFFER, id)
+        gl.glBufferData(GL_ARRAY_BUFFER, (data.size * java.lang.Float.SIZE).toLong(), FloatBuffer.wrap(data), GL_STATIC_DRAW)
+    }
+
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/TransferFunction.kt
+```
+package palasjir.viewer.render
+
+import java.nio.ByteBuffer
+
+class TransferFunction {
+    private val func: IntArray
+
+    init {
+        func = IntArray(SIZE)
+        for (i in 0 until SIZE) {
+            func[i] = i
+        }
+    }
+
+    val buffer: ByteBuffer
+        get() {
+            val rgba = ByteBuffer.allocate(SIZE * Integer.BYTES)
+            for (b in func) {
+                tf3(rgba, b)
+            }
+            rgba.rewind()
+            return rgba
+        }
+
+    private fun tf1(rgba: ByteBuffer, b: Int) {
+        rgba.put(b.toByte()) //r
+        rgba.put(b.toByte()) //g
+        rgba.put(b.toByte()) //b
+        rgba.put(b.toByte()) //a
+    }
+
+    private fun tf2(rgba: ByteBuffer, b: Int) {
+        rgba.put(b.toByte()) //r
+        rgba.put(b.toByte()) //g
+        rgba.put(b.toByte()) //b
+        if (b < 50 || b > 60) {
+            rgba.put(0.toByte()) //a
+        } else {
+            rgba.put(b.toByte())
+        }
+    }
+
+    private fun tf3(rgba: ByteBuffer, b: Int) {
+        when {
+            b in 41..64 -> {
+                rgba.put(220.toByte()) //r
+                rgba.put(100.toByte()) //g
+                rgba.put(0.toByte()) //b
+                rgba.put(b.toByte()) //a
+            }
+            b > 100 -> {
+                rgba.put(220.toByte()) //r
+                rgba.put(220.toByte()) //g
+                rgba.put(220.toByte()) //b
+                rgba.put(200.toByte()) //a
+            }
+            else -> {
+                rgba.put(0.toByte()) //r
+                rgba.put(0.toByte()) //g
+                rgba.put(0.toByte()) //b
+                rgba.put(0.toByte())
+            }
+        }
+    }
+
+    companion object {
+        val SIZE = 256
+    }
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/render/UnitCube.kt
+```
+package palasjir.viewer.render
+
+class UnitCube(
+        x: Float,
+        y: Float,
+        z: Float
+) {
+
+    val vertices: FloatArray
+
+    init {
+        val max = Math.max(x, Math.max(y, z))
+        val mx = x / max
+        val my = y / max
+        val mz = z / max
+        vertices = floatArrayOf(
+                0.0f, 0.0f, 0.0f,
+                0.0f, 0.0f, mz,
+                0.0f, my, 0.0f,
+                0.0f, my, mz,
+                mx, 0.0f, 0.0f,
+                mx, 0.0f, mz,
+                mx, my, 0.0f,
+                mx, my, mz
+        )
+    }
+
+    companion object {
+        val indices = intArrayOf(
+                1, 5, 7,
+                7, 3, 1,
+                0, 2, 6,
+                6, 4, 0,
+                0, 1, 3,
+                3, 2, 0,
+                7, 5, 4,
+                4, 6, 7,
+                2, 3, 7,
+                7, 6, 2,
+                1, 0, 4,
+                4, 5, 1
+        )
+    }
+}
+```
+
+### src/main/kotlin/palasjir/viewer/ui/MouseAdapter.kt
+```
+package palasjir.viewer.ui
+
+import palasjir.viewer.coordinates.Camera
+
+import javax.swing.*
+import javax.swing.event.MouseInputAdapter
+import java.awt.*
+import java.awt.event.MouseEvent
+import java.awt.event.MouseWheelEvent
+
+class MouseAdapter(private val camera: Camera) : MouseInputAdapter() {
+
+    private var start: Point? = null
+    private var end: Point? = null
+
+    override fun mousePressed(e: MouseEvent) {
+        if (SwingUtilities.isLeftMouseButton(e)) {
+            start = e.point
+        }
+    }
+
+    override fun mouseDragged(e: MouseEvent) {
+        end = e.point
+        camera.drag(start, end)
+        start = Point(end)
+    }
+
+    override fun mouseReleased(e: MouseEvent) {
+        start = null
+        end = null
+    }
+
+    override fun mouseWheelMoved(e: MouseWheelEvent) {
+        camera.zoom(e.wheelRotation.toDouble())
+    }
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/ui/VisualizationPanel.kt
+```
+package palasjir.viewer.ui
+
+import com.hackoeur.jglm.Mat4
+import com.hackoeur.jglm.Matrices
+import com.hackoeur.jglm.Vec3
+
+import com.jogamp.opengl.*
+import com.jogamp.opengl.awt.GLCanvas
+import com.jogamp.opengl.util.glsl.ShaderState
+import palasjir.kglm.*
+import palasjir.viewer.coordinates.Camera
+import palasjir.viewer.render.*
+import palasjir.viewer.utils.VolumeData
+import java.awt.Dimension
+
+class VisualizationPanel
+constructor(
+        dimension: Dimension,
+        caps: GLCapabilities
+) : GLCanvas(caps), GLEventListener {
+
+    private val st: ShaderState = ShaderState()
+    private val camera: Camera = Camera(INITIAL_ZOOM_LEVEL)
+    private val rayProgram = RaycastingProgram(VolumeData())
+    private val cubeProgram = CubeProgram()
+    private val boxRenderer = BoxRenderer()
+    private val frameBuffer = FrameBuffer(camera)
+    private val screenBuffer = ScreenBuffer()
+    private val model: Mat4
+
+    init {
+        preferredSize = dimension
+        camera.viewPortWidth = dimension.width
+        camera.viewPortHeight = dimension.height
+        addGLEventListener(this)
+        
+        val mAdapter = MouseAdapter(camera)
+        addMouseListener(mAdapter)
+        addMouseMotionListener(mAdapter)
+        addMouseWheelListener(mAdapter)
+
+        val rotX = Matrices.rotate(90f, X_AXIS)
+
+        model = rotX * Mat4.MAT4_IDENTITY.translate(Vec3(-0.5f, -0.5f, -0.5f))
+    }
+
+    override fun init(drawable: GLAutoDrawable) {
+        val gl = getGL(drawable)
+        initShaderPrograms(gl)
+
+        camera.position = Vec3(1f, 0f, INITIAL_ZOOM_LEVEL)
+
+        boxRenderer.init(gl, verticesID)
+        screenBuffer.init(gl)
+    }
+
+    override fun display(drawable: GLAutoDrawable) {
+        val gl = getGL(drawable)
+
+        val mvp = camera.mvp(model)
+
+        frameBuffer.activate(gl)
+        cubeProgram.display(gl, st, mvp, boxRenderer) // draw cube to frame buffer
+
+        frameBuffer.clear(gl)
+        rayProgram.display(gl, st, mvp, camera, model, boxRenderer, frameBuffer.renderedTextureId)
+    }
+
+    override fun reshape(drawable: GLAutoDrawable, x: Int, y: Int, w: Int, h: Int) {
+        val gl = getGL(drawable)
+        gl.glViewport(0, 0, w, h)
+        camera.setupDefaultProjection(w, h)
+        frameBuffer.init(gl)
+    }
+
+    override fun dispose(drawable: GLAutoDrawable) {
+        val gl = getGL(drawable)
+        st.destroy(gl)
+    }
+
+    private fun initShaderPrograms(gl: GL4) {
+        rayProgram.init(gl, st)
+        cubeProgram.init(gl, st)
+    }
+
+    private fun getGL(drawable: GLAutoDrawable): GL4 {
+        if (DEBUG) {
+            val gl = drawable.gl.gL4
+            drawable.gl = DebugGL4(gl)
+        }
+        return drawable.gl.gL4
+    }
+
+    companion object {
+        private val verticesID = 0 // input of vertexShader
+        private val DEBUG = false
+        private val INITIAL_ZOOM_LEVEL = -2f
+        private val X_AXIS = Vec3(1f, 0f, 0f)
+    }
+
+}
+```
+
+### src/main/kotlin/palasjir/viewer/utils/ShaderProgramHelper.kt
+```
+package palasjir.viewer.utils
+
+import com.jogamp.opengl.GL2ES2.GL_FRAGMENT_SHADER
+import com.jogamp.opengl.GL2ES2.GL_VERTEX_SHADER
+import com.jogamp.opengl.GL4
+import com.jogamp.opengl.util.glsl.ShaderCode
+import com.jogamp.opengl.util.glsl.ShaderProgram
+
+open class ShaderProgramHelper(
+        private val vertexShader: String,
+        private val fragmentShader: String
+) {
+
+    val program: ShaderProgram = ShaderProgram()
+
+    fun init(gl: GL4) {
+        add(gl, GL_VERTEX_SHADER, vertexShader)
+        add(gl, GL_FRAGMENT_SHADER, fragmentShader)
+    }
+
+    private fun shaderName(name: String): String {
+        return "shaders/" + name
+    }
+
+    private fun create(gl: GL4, type: Int, name: String): ShaderCode {
+        return ShaderCode.create(
+                gl,
+                type,
+                1,
+                this.javaClass,
+                arrayOf(shaderName(name)),
+                false
+        )
+    }
+
+    private fun add(gl: GL4, type: Int, name: String) {
+        val code = create(gl, type, name)
+        program.add(gl, code, System.err)
+    }
+}
+```
+
+### src/main/kotlin/palasjir/viewer/utils/Utils.kt
+```
+package palasjir.viewer.utils
+
+import com.jogamp.opengl.GL
+import com.jogamp.opengl.GL3
+
+import java.nio.IntBuffer
+
+fun genBufferId(gl: GL): Int {
+    val buffer = IntBuffer.allocate(1)
+    gl.glGenBuffers(1, buffer)
+    return buffer.get(0)
+}
+
+fun genVertexArraysId(gl: GL3): Int {
+    val buffer = IntBuffer.allocate(1)
+    gl.glGenVertexArrays(1, buffer)
+    return buffer.get(0)
+}
+
+fun genTextureId(gl: GL): Int {
+    val tfIDbuff = IntBuffer.allocate(1)
+    gl.glGenTextures(1, tfIDbuff)
+    return tfIDbuff.get(0)
+}
+
+fun genFrameBufferId(gl: GL): Int {
+    val buffer = IntBuffer.allocate(1)
+    gl.glGenFramebuffers(1, buffer)
+    return buffer.get(0)
+}
+
+fun genRenderBufferId(gl: GL): Int {
+    val buffer = IntBuffer.allocate(1)
+    gl.glGenRenderbuffers(1, buffer)
+    return buffer.get(0)
+}
+```
+
+### src/main/kotlin/palasjir/viewer/utils/VolumeData.kt
+```
+package palasjir.viewer.utils
+
+import java.io.File
+import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.FloatBuffer
+import java.util.logging.Level
+import java.util.logging.Logger
+import javax.imageio.ImageIO
+
+class VolumeData {
+
+    private val pixels: Array<Array<IntArray>> = Array(IMG_WIDTH) { Array(IMG_HEIGHT) { IntArray(IMG_DEPTH) } }
+
+    init {
+        loadImages()
+        interpolateVolume()
+    }
+
+    private fun loadImages() {
+        for (z in 0 until IMG_DEPTH_ORIG) {
+            val file = imageFile(z)
+            try {
+                val tempImage = ImageIO.read(file)
+                for (x in 0 until tempImage.width) {
+                    for (y in 0 until tempImage.height) {
+                        pixels[x][y][z * 2] = tempImage.raster.getSample(x, y, 0)
+                    }
+                }
+            } catch (ex: IOException) {
+                LOGGER.log(Level.SEVERE, "Image loading failed.", ex)
+                return
+            }
+        }
+    }
+
+    private fun interpolateVolume() {
+        var i = 1
+        while (i < IMG_DEPTH - 1) {
+            for (x in 0 until IMG_WIDTH) {
+                for (y in 0 until IMG_HEIGHT) {
+                    pixels[x][y][i] = interpolate(x, y, i)
+                }
+            }
+            i += 2
+        }
+    }
+
+    private fun interpolate(x: Int, y: Int, z: Int) : Int {
+        return (pixels[x][y][z - 1] + pixels[x][y][z + 1]) / 2
+    }
+
+    val buffer: ByteBuffer
+        get() {
+            val size = IMG_WIDTH * IMG_HEIGHT * IMG_DEPTH * PIXELS_IN_BUFFER
+            val buffer = ByteBuffer.allocate(size)
+            for (z in 1 until IMG_DEPTH) {
+                for (y in 0 until IMG_HEIGHT) {
+                    for (x in 0 until IMG_WIDTH) {
+                        buffer.put(scaleToByte(pixels[x][y][z]))
+                    }
+                }
+            }
+            buffer.rewind()
+            return buffer
+        }
+
+    private fun scaleToByte(value: Int): Byte {
+        return (255.0f * (value.toFloat() / MAX_VALUE)).toInt().toByte()
+    }
+
+    fun gradientsBuffer(): FloatBuffer {
+        val size = IMG_VOXELS * CHANNELS
+        val buffer = FloatBuffer.allocate(size)
+        for (z in 0 until IMG_DEPTH) {
+            for (y in 0 until IMG_HEIGHT) {
+                for (x in 0 until IMG_WIDTH) {
+                    buffer.put((if (x == 0 || x == IMG_WIDTH - 1) 0 else pixels[x - 1][y][z] - pixels[x + 1][y][z]).toFloat())
+                    buffer.put((if (y == 0 || y == IMG_HEIGHT - 1) 0 else pixels[x][y - 1][z] - pixels[x][y + 1][z]).toFloat())
+                    buffer.put((if (z == 0 || z == IMG_DEPTH - 1) 0 else pixels[x][y][z - 1] - pixels[x][y][z + 1]).toFloat())
+                }
+            }
+        }
+        buffer.rewind()
+        return buffer
+    }
+
+    private fun imageFile(i: Int): File {
+        return File(IMAGES_DIR + String.format("%03d", i + 1) + ".png")
+    }
+
+    companion object {
+        val CHANNELS = 3
+        val IMG_WIDTH = 256
+        val IMG_HEIGHT = 256
+        val IMG_DEPTH_ORIG = 113
+        val IMG_DEPTH = 2 * IMG_DEPTH_ORIG
+
+        private val PIXELS_IN_BUFFER = 1
+        private val IMG_VOXELS = IMG_WIDTH * IMG_DEPTH * IMG_WIDTH
+        private val MAX_VALUE = 3272.0f
+        private val IMAGES_DIR = "cthead/cthead-16bit"
+        private val LOGGER = Logger.getLogger("Loading")
+    }
+
+}
+```

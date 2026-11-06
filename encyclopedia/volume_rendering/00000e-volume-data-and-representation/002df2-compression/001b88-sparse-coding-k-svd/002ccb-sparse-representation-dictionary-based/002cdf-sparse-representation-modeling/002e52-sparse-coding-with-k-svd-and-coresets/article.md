@@ -40,7 +40,7 @@ This method addresses the prohibitive computational cost of training data-specif
    where $p_j$ is the probability with which block $j$ was selected [S1].
 
 5. **Train Dictionary with K-SVD:**
-   Apply the K-SVD algorithm [AEB06] to the resampled and re-weighted set of $C$ blocks. The K-SVD algorithm iteratively updates the dictionary atoms and the sparse coefficients to minimize the reconstruction error, weighted by $w_j$ [S1][S2, unofficial].
+   Apply the K-SVD algorithm [AEB06] to the resampled and re-weighted set of $C$ blocks. The K-SVD algorithm iteratively updates the dictionary atoms and the sparse coefficients to minimize the reconstruction error, weighted by $w_j$ [S1][S2].
 
 **Pseudocode:**
 
@@ -78,7 +78,7 @@ def train_sparse_coding_coreset(blocks, target_coreset_size C, dict_size K):
     coreset_blocks = blocks[selected_indices]
     
     # Step 5: Train dictionary using K-SVD on the weighted coreset
-    # [S1][S2, unofficial] Apply learning algorithm to the resampled and re-weighted set
+    # [S1][S2] Apply learning algorithm to the resampled and re-weighted set
     # Note: Standard K-SVD implementations may not natively support sample weights.
     # Implementation detail [G]: If the K-SVD solver does not support weights,
     # one must either:
@@ -95,7 +95,7 @@ def train_sparse_coding_coreset(blocks, target_coreset_size C, dict_size K):
 **Edge Cases and Pitfalls:**
 - **Uniform Subsampling Failure:** Uniform sub-sampling is explicitly rejected because material boundaries carry more information than empty or uniform space [S1].
 - **Numerical Instability:** Massive datasets can lead to numerical instabilities during K-SVD calculations [S1]. The coreset approach mitigates this by reducing the dataset size.
-- **Computational Cost:** Direct K-SVD on massive volumes is prohibitively expensive in time and memory [S1][S2, unofficial].
+- **Computational Cost:** Direct K-SVD on massive volumes is prohibitively expensive in time and memory [S1][S2].
 
 ## Operating characteristics
 - **Time Complexity:** The dominant cost is the K-SVD training on the coreset of size $C$. Since $C \ll N$, this is significantly faster than training on $N$ blocks. The sampling step is $O(N)$ for computing standard deviations and $O(C \log N)$ or $O(C)$ for selection.
@@ -107,8 +107,8 @@ def train_sparse_coding_coreset(blocks, target_coreset_size C, dict_size K):
 ## Background
 - **Origin:** The method was introduced by Gobbetti et al. [GIM12] for volume rendering compression, applying the concept of coresets [AHPV05, CS07] to K-SVD dictionary training [S1].
 - **Development:** Prior approaches for BTF compression by Ruiters and Klein [RK09] used truncated SVD for data reduction. Gobbetti et al. improved upon this by using importance sampling based on standard deviation [S1].
-- **Context:** It is part of the global processing techniques for sparse coding, aiming to improve upon vector quantization by using data-specific dictionaries [S1][S2, unofficial].
+- **Context:** It is part of the global processing techniques for sparse coding, aiming to improve upon vector quantization by using data-specific dictionaries [S1][S2].
 
 ## Sources
 [S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)
+[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

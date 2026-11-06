@@ -1,0 +1,1398 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method constructs a sparse voxel octree (SVO) from a triangle mesh while keeping memory usage logarithmic in the size of the SVO, by processing an intermediate high-resolution 3D voxel grid in Morton order in a streaming manner [S1]. It differs from its siblings, such as [Brute Force SVO Construction](1704-brute-force-svo-construction.md), by avoiding complex sorting or streaming logic in favor of a simple recursive subdivision and depth-first search [S2, unofficial]. Unlike [Adaptive Voxelization of Unstructured Grids](3246-adaptive-voxelization-of-unstructured-grids.md), which handles unstructured data, this method is designed for regular voxelization of triangle meshes [S1]. It is chosen when implementation simplicity is prioritized over memory efficiency and construction speed [S2, unofficial].
++This method constructs a sparse voxel octree (SVO) from a triangle mesh while keeping memory usage logarithmic in the size of the SVO, by processing an intermediate high-resolution 3D voxel grid in Morton order in a streaming manner [S1]. It differs from in-core methods like [Laine and Karras 2010a] because the input is consumed and output is produced in a streaming manner with logarithmic memory usage [S1]. It builds on [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md).
+ 
+ ## How it works
+@@ -15,8 +15,8 @@
+ 
+ ### Data Structures
+-1. **Subgrid Partition**: A temporary file on disk storing the subset of triangles intersecting a specific subgrid.
+-2. **Morton Code Stream**: A sequence of 64-bit integers representing the Morton codes of non-empty cells in the intermediate voxel grid.
++1. **Subgrid Partition**: A temporary file on disk storing the subset of triangles intersecting a specific subgrid [S1].
++2. **Morton Code Stream**: A sequence of integers representing the Morton codes of non-empty cells in the intermediate voxel grid [S1].
+ 3. **Level Queues**: An array of queues, one for each level of the octree. Each queue holds at most $2^d$ nodes (where $d=3$ for 3D, so max 8 nodes per level) [S1].
+-4. **SVO Node**: Represents a voxel or internal node. Contains the Morton code and child pointers/flags.
++4. **SVO Node**: Represents a voxel or internal node. Contains the Morton code and child pointers/flags [S1].
+ 
+ ### Parameters
+@@ -29,5 +29,5 @@
+ #### 1. Voxelization Subprocess
+ 1. **Partitioning**: Partition the triangle mesh according to subgrids of the high-resolution 3D voxel grid in a streaming manner by testing each triangle against the bounding box of every subgrid. Store the resulting triangle mesh partitions temporarily on disk [S1].
+-2. **Subgrid Sizing**: Determine subgrid size by regularly subdividing the high-resolution 3D voxel grid until a subgrid fits in available memory. Use only power-of-two resolutions for the high-resolution 3D voxel grid to ensure subgrids correspond to contiguous ranges in Morton order [S1].
++2. **Subgrid Sizing**: Determine subgrid size by regularly subdividing the high-resolution voxel grid until a subgrid fits in available memory. Use only power-of-two resolutions for the high-resolution 3D voxel grid to ensure subgrids correspond to contiguous ranges in Morton order [S1].
+ 3. **Actual Voxelization**: Sequentially process each subgrid. For each subgrid, consume its corresponding triangle mesh partition in a streaming manner. Voxelize triangles using the 6-separability surface voxelization variant of Huang et al. [1998]. Output only the Morton codes of non-empty cells, not boolean values for all cells [S1].
+ 4. **Output Order**: Ensure subgrids are processed in Morton order so that the output of the voxelization subprocess is the intermediate high-resolution 3D voxel grid in Morton order [S1].
+@@ -44,1264 +44,113 @@
+ 
+ ```python
+-def out_of_core_svo_construction(triangle_mesh, available_memory, grid_resolution):
++import math
++from collections import deque
++
++def out_of_core_svo_construction(morton_code_stream, grid_resolution):
+     """
+-    Constructs an SVO from a triangle mesh using out-of-core voxelization and streaming construction.
++    Constructs an SVO from a Morton code stream using bottom-up queue processing.
++    Args:
++        morton_code_stream: Iterator yielding Morton codes of non-empty leaf cells in Morton order.
++        grid_resolution: Power-of-two resolution of the intermediate voxel grid (e.g., 2048).
++    Returns:
++        None (writes SVO nodes to output stream/file).
++    """
++    num_levels = int(math.log2(grid_resolution)) + 1
++    queues = [deque() for _ in range(num_levels)]
++    current_level = num_levels - 1
+     
+-    Args:
+-        triangle_mesh: List of triangles.
+-        available_memory: Size of available RAM in bytes.
+-        grid_resolution: Power-of-two resolution of the intermediate voxel grid (e.g., 2048).
++    # Process leaf level
++    current_children = []
++    current_parent_morton = None
++    
++    for morton_code in morton_code_stream:
++        # Determine parent Morton code for the leaf level
++        # In 3D, each octree level adds 3 bits to the Morton code.
++        parent_morton = morton_code >> 3
+         
+-    Returns:
+-        None (writes SVO to output stream/file).
++        if current_parent_morton is None:
++            current_parent_morton = parent_morton
++            
++        if parent_morton != current_parent_morton:
++            # Parent is complete; create internal node and push to next level queue
++            _process_queue(current_parent_morton, current_children, queues, current_level)
++            current_parent_morton = parent_morton
++            current_children = []
++            
++        current_children.append(morton_code)
++        
++    # Handle the last parent in the stream
++    if current_children:
++        _process_queue(current_parent_morton, current_children, queues, current_level)
++        
++    # Process higher levels until root is written
++    level = current_level - 1
++    while level >= 0:
++        while queues[level]:
++            node = queues[level].popleft()
++            children = node['children']
++            if not children:
++                continue
++                
++            current_parent_morton = children[0] >> 3
++            current_children = [children[0]]
++            
++            for child_morton in children[1:]:
++                p_morton = child_morton >> 3
++                if p_morton != current_parent_morton:
++                    _process_queue(current_parent_morton, current_children, queues, level)
++                    current_parent_morton = p_morton
++                    current_children = []
++                current_children.append(child_morton)
++                
++            if current_children:
++                _process_queue(current_parent_morton, current_children, queues, level)
++        level -= 1
++
++def _process_queue(parent_morton, children, queues, current_level):
+     """
+-    # Step 1: Determine subgrid size
+-    # Regularly subdivide the grid until a subgrid fits in available_memory.
+-    # Assume power-of-two resolution ensures contiguous Morton ranges.
+-    subgrid_size = determine_subgrid_size(grid_resolution, available_memory)
++    Creates an internal SVO node, writes its children to output, 
++    and pushes the new internal node to the parent's level queue.
++    """
++    # Write children to output (sibling locality)
++    for child_morton in children:
++        write_node_to_output(child_morton, is_leaf=True)
++        
++    # Create internal node
++    internal_node = {
++        'morton_code': parent_morton,
++        'children': children,
++        'is_leaf': False
++    }
+     
+-    # Step 2: Voxelization - Partitioning
+-    # Partition triangle mesh by subgrid bounding boxes.
+-    # Store partitions on disk.
+-    subgrid_partitions = partition_mesh_by_subgrids(triangle_mesh, subgrid_size, grid_resolution)
+-    
+-    # Step 3: Voxelization - Actual Voxelization
+-    # Process subgrids in Morton order.
+-    # Output Morton codes of non-empty cells to a stream.
+-    morton_code_stream = []
+-    for subgrid in get_subgrids_in_morton_order(subgrid_size, grid_resolution):
+-        partition = subgrid_partitions[subgrid.id]
+-        # Voxelize triangles in partition using 6-separability method (Huang et al.)
+-        # Output only Morton codes of non-empty cells.
+-        codes = voxelize_partition(partition, subgrid)
+-        morton_code_stream.extend(codes)
+-        
+-    # Step 4: SVO Construction
+-    # Determine number of levels in the octree
+-    num_levels = log2(grid_resolution) + 1
+-    
+-    # Initialize queues for each level
+-    # Queue[i] holds nodes at level i (leaf level is num_levels - 1)
+-    queues = [Queue() for _ in range(num_levels)]
+-    
+-    # Process Morton codes
+-    # The stream contains Morton codes for leaf nodes first, then their parents, etc.
+-    # However, the algorithm reads leaf nodes, builds parents, and pushes parents to next level queue.
+-    
+-    # We need to track which level we are currently reading leaf nodes for.
+-    # In the basic version, we read all leaf nodes first? 
+-    # No, the description says "Read cells with Morton codes corresponding to the current level's leaf nodes".
+-    # This implies we process level by level.
+-    
+-    # Let's assume the stream is organized such that we can process level by level.
+-    # Actually, the stream is just a list of Morton codes for non-empty leaf cells.
+-    # We need to group them by their parent's Morton code.
+-    
+-    # Re-reading [S1]: "The cells with Morton codes 0, 1, 2 and 3... are read... stored in queue of level 2."
+-    # "An internal node with level-1 Morton code 0... is created... stored in queue of level 1."
+-    # This implies we process the stream in chunks corresponding to siblings.
+-    
+-    # Since the stream is in Morton order, siblings are contiguous.
+-    # We can process the stream in groups of 8 (for 3D) to form parents.
+-    
+-    current_level = num_levels - 1 # Start at leaf level
+-    queue_index = current_level
+-    
+-    # We need to handle the fact that the stream might not be perfectly aligned if we skip empty parents.
+-    # But the algorithm says "Read cells... corresponding to the current level's leaf nodes".
+-    # This suggests we read all leaf nodes first? 
+-    # No, "Repeat reading leaf nodes and creating parent nodes level by level".
+-    # This implies a bottom-up approach where we process one level's worth of siblings at a time.
+-    
+-    # Let's implement the queue-based approach as described.
+-    
+-    # Initialize the first queue with leaf nodes.
+-    # We read the entire stream of leaf Morton codes? 
+-    # No, the stream is the intermediate voxel grid.
+-    # The SVO construction consumes this stream.
+-    
+-    # The key insight is that Morton order corresponds to post-order depth-first traversal.
+-    # So, we can process the stream sequentially.
+-    
+-    # However, the pseudocode in [S1] suggests a level-by-level processing.
+-    # Let's follow the queue logic strictly.
+-    
+-    # We need to know the Morton codes of the leaf nodes.
+-    # The stream provides them.
+-    
+-    # Let's assume we have a function to get the next Morton code from the stream.
+-    
+-    # We need to group leaf nodes by their parent.
+-    # Parent Morton code = child Morton code >> 3 (for 3D, removing the last 3 bits).
+-    
+-    # But the algorithm uses queues per level.
+-    
+-    # Let's implement the logic from [S1] directly.
+-    
+-    # Step 1: Read leaf nodes into the leaf queue.
+-    # But how many? All of them?
+-    # The example says "cells with Morton codes 0,1,2,3... stored in queue of level 2".
+-    # Then "internal node... stored in queue of level 1".
+-    # Then "cells with Morton codes 4,5,6,7... stored in queue of level 2".
+-    # This implies we interleave reading leaf nodes and creating parents?
+-    # No, "Repeat reading leaf nodes and creating parent nodes level by level".
+-    # This suggests we finish one level before moving to the next?
+-    # But the example shows level 2 being filled, then cleared, then level 1 filled.
+-    # Then level 2 filled again?
+-    # "3. The cells with Morton codes 4, 5, 6 and 7... are read... stored in the queue of level 2."
+-    # "4. An internal node with level-1 Morton code 1... is created... stored in the queue of level 1."
+-    # This implies we process siblings in groups.
+-    
+-    # Let's assume the stream is processed in chunks of 8 (for 3D) at the leaf level.
+-    # Each chunk forms a parent.
+-    # The parent is added to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction from a sorted list of leaf nodes.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent is empty (no children).
+-    # The stream only contains non-empty leaf nodes.
+-    # If a parent has no children, it is not created.
+-    
+-    # But the algorithm says "When a parent node's children... are processed".
+-    # This implies we wait for all 8 children to be processed?
+-    # No, "When a parent node's children (all nodes in the current level's queue) are processed".
+-    # This implies the queue holds the children of a specific parent.
+-    # When the queue is full (or empty? No, when all children are in), we create the parent.
+-    
+-    # Let's re-read carefully: "When a parent node's children (all nodes in the current level's queue) are processed, create an internal node... Store this internal node in the queue of the parent's level."
+-    # This implies the queue holds the children of a *single* parent?
+-    # No, "queue of at most 2^d nodes per level".
+-    # If the queue holds children of a single parent, it would be size 8.
+-    # If it holds children of multiple parents, it would be larger.
+-    # The example says "queue of level 2" holds nodes 0-3, then cleared.
+-    # Then "queue of level 2" holds nodes 4-7.
+-    # This implies the queue is used to buffer children of a *single* parent.
+-    # But the text says "queue of at most 2^d nodes per level".
+-    # And "11 queues of 8 nodes are needed" for a 2048^3 grid.
+-    # This implies there is one queue per level, not per parent.
+-    
+-    # Let's look at the example again.
+-    # "1. The cells with Morton codes 0, 1, 2 and 3... are read... stored in the queue of level 2."
+-    # "2. An internal node with level-1 Morton code 0... is created... stored in the queue of level 1... non-empty nodes in the queue of level 2 are written to output... queue of level 2 is cleared."
+-    # "3. The cells with Morton codes 4, 5, 6 and 7... are read... stored in the queue of level 2."
+-    # "4. An internal node with level-1 Morton code 1... is created... stored in the queue of level 1."
+-    
+-    # This implies that the queue of level 2 is used to buffer the children of the *current* parent being built.
+-    # Once the parent is built, the queue is cleared.
+-    # But how do we know when all children of a parent are in the queue?
+-    # The stream is in Morton order. Siblings are contiguous.
+-    # So we can read 8 nodes, form a parent, and clear the queue.
+-    # But what if some children are empty?
+-    # The stream only contains non-empty nodes.
+-    # So if we read 8 nodes, they are all non-empty.
+-    # But what if a parent has only 1 non-empty child?
+-    # Then we read 1 node, and we don't have 8 nodes.
+-    # How do we know when to create the parent?
+-    
+-    # The algorithm says "When a parent node's children (all nodes in the current level's queue) are processed".
+-    # This implies the queue holds *all* children of a parent.
+-    # But if the queue is shared across parents, how do we know when a parent is complete?
+-    
+-    # Let's look at the "queue of at most 2^d nodes per level" statement.
+-    # If the queue holds children of multiple parents, it could be larger.
+-    # But the example shows the queue being cleared after each parent is built.
+-    # This implies the queue is used to buffer children of a *single* parent.
+-    # But the text says "queue of level 2", singular.
+-    
+-    # Let's assume the queue is used to buffer children of the *current* parent.
+-    # We read nodes from the stream.
+-    # If the node belongs to the current parent, we add it to the queue.
+-    # If the node belongs to a new parent, we first check if the current parent is complete.
+-    # But how do we know if the current parent is complete?
+-    # We don't know the number of children in advance.
+-    
+-    # This is a contradiction in the description.
+-    # Let's look at the "Morton order corresponds to post-order depth-first traversal" statement.
+-    # In post-order, we visit children before parents.
+-    # So, we visit all children of a parent, then the parent.
+-    # But the stream only contains non-empty nodes.
+-    # So, if a parent has non-empty children, we will see them in the stream.
+-    # The children of a parent are contiguous in Morton order.
+-    # So, we can read nodes until we encounter a node that does not belong to the current parent.
+-    # Then we create the parent.
+-    
+-    # But how do we know if a node belongs to the current parent?
+-    # Parent Morton code = child Morton code >> 3.
+-    # So, we can group nodes by their parent Morton code.
+-    
+-    # Let's implement this grouping approach.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm as follows:
+-    
+-    # 1. Read all leaf nodes from the stream.
+-    # 2. Group them by parent Morton code.
+-    # 3. For each parent, create an internal node if it has children.
+-    # 4. Add the internal node to the next level's queue.
+-    # 5. Repeat until the root is created.
+-    
+-    # But the algorithm uses queues per level.
+-    # This suggests a streaming approach where we don't store all leaf nodes.
+-    
+-    # Let's go back to the queue-based approach.
+-    # The queue holds children of the current parent.
+-    # We read nodes from the stream.
+-    # If the node belongs to the current parent, we add it to the queue.
+-    # If the node belongs to a new parent, we first check if the current parent is complete.
+-    # But how do we know if the current parent is complete?
+-    # We don't.
+-    
+-    # This is a problem.
+-    # Let's look at the example again.
+-    # "1. The cells with Morton codes 0, 1, 2 and 3... are read... stored in the queue of level 2."
+-    # "2. An internal node with level-1 Morton code 0... is created... stored in the queue of level 1... non-empty nodes in the queue of level 2 are written to output... queue of level 2 is cleared."
+-    # "3. The cells with Morton codes 4, 5, 6 and 7... are read... stored in the queue of level 2."
+-    # "4. An internal node with level-1 Morton code 1... is created... stored in the queue of level 1."
+-    
+-    # This implies that the queue is cleared after each parent is built.
+-    # And the next parent's children are added to the same queue.
+-    # But how do we know when a parent is complete?
+-    # The example shows that we read 4 nodes (for 2D) and then create the parent.
+-    # This implies that we know the number of children in advance?
+-    # No, in 3D, it's 8.
+-    # But what if a parent has only 1 child?
+-    # Then we read 1 node, and we don't have 8 nodes.
+-    # How do we know when to create the parent?
+-    
+-    # The algorithm must assume that we read all children of a parent before creating the parent.
+-    # But how do we know when we have read all children?
+-    # We can check if the next node in the stream belongs to a different parent.
+-    # If it does, then the current parent is complete.
+-    
+-    # Let's implement this.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to process the stream level by level.
+-    # But the stream is just a list of leaf nodes.
+-    # We need to build the tree bottom-up.
+-    
+-    # Let's use a list of queues, one for each level.
+-    # We start with the leaf level.
+-    # We read leaf nodes and add them to the leaf queue.
+-    # But the leaf queue is used to buffer children of a single parent.
+-    # So, we read nodes until we encounter a node that belongs to a different parent.
+-    # Then we create the parent and add it to the next level's queue.
+-    # We repeat this until we have processed all leaf nodes.
+-    # Then we move to the next level.
+-    # We read nodes from the next level's queue (which are the parents we just created).
+-    # We group them by their parent Morton code.
+-    # We create the next level's parents and add them to the next level's queue.
+-    # We repeat this until we reach the root level.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where a parent has no children.
+-    # In that case, no nodes are in the stream for that parent.
+-    # So we don't create a node for that parent.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need to read nodes from the stream.
+-    # We group them by parent Morton code.
+-    # For each group, we create a parent node.
+-    # We add the parent node to the next level's queue.
+-    # When the next level's queue is full (8 nodes), we create its parent.
+-    
+-    # This is a standard bottom-up octree construction.
+-    
+-    # Let's implement this.
+-    
+-    # We need to handle the case where the stream is empty.
+-    # In that case, we don't create any nodes.
+-    
+-    # Let's implement the algorithm.
+-    
+-    # We need a function to get the parent Morton code.
+-    def get_parent_morton_code(morton_code, level):
+-        # Remove the last 3 bits for each level up to the parent level.
+-        # For 3D, each level adds 3 bits.
+-        # So, to get the parent at level L-1 from a node at level L, we shift right by 3.
+-        # To get the parent at level L-k, we shift right by 3*k.
+-        return morton_code >> (3 * (num_levels - level))
+-    
+-    # We need to+    # Push to parent's level queue
++    parent_level = current_level - 1
++    if parent_level >= 0:
++        queues[parent_level].append(internal_node)
++    else:
++        # Root node
++        write_node_to_output(parent_morton, is_leaf=False)
++```
++
++## Subtopics
++
++### Out-of-Core Voxelization with Appearance Data
++An extension of the out-of-core SVO construction that handles appearance data (colors, normals, texture coordinates) by interpolating vertex attributes during voxelization and propagating them to higher levels of the octree, provided the data is available locally [S1].
++
++### Sparse-Voxel-Octree (SVO) Voxelization
++A variant of voxel cone tracing that uses a Sparse-Voxel-Octree (SVO) instead of a regular 3D texture to store lighting data, reducing GPU memory usage by dynamically instantiating nodes [S2, unofficial]. The voxelization procedure for SVO undergoes three rasterization passes, once for each spatial axis [S2, unofficial]. The SVO structure is a tree-like hierarchy where each internal node has exactly eight children (octants), with one node representing a voxel and its children representing the subdivision of that voxel into eight others [S2, unofficial]. Storing lighting data in a sparse octree is significantly more challenging to implement and navigate compared to a regular grid [S2, unofficial].
++
++## Operating characteristics
++- **Space Complexity**: The SVO construction process has a space complexity that is logarithmic in the size of the sparse voxel octree [S1].
++- **Time Complexity**: Not given in the sources.
++- **Measured Performance**: Implemented in C++ requiring approximately 1000 lines of code. Tested on a Dell Precision T7500 workstation (Intel Xeon X5650 CPU, 7200 RPM SATA II disk). A grid resolution of $2048^3$ requires 8 GB of memory for the intermediate voxel grid using a 1-byte-per-cell representation [S1].
++- **Scaling**: Handles extremely large triangle meshes larger than available memory by streaming input and output [S1].
++- **Strengths**: Out-of-core operation, logarithmic memory usage, and good locality of reference (siblings are stored next to each other in the output) [S1].
++- **Limitations**: Requires power-of-two resolutions for the high-resolution voxel grid to ensure subgrids correspond to contiguous ranges in Morton order [S1].
++
++## Background
++The method was presented to address the lack of scenes available in the form of sparse voxel octrees for rendering systems, which require benefits and drawbacks analysis, storage space requirements, compact data structures, and efficient ray-casting algorithms [S1]. It builds on the concept of hierarchically subdividing a z-shaped space-filling curve, also called z-order, where the Morton code of a cell in an n-dimensional grid is obtained from Cartesian coordinates using bitwise operations [S1]. It is used in rendering systems for managing highly detailed scenes and compact data structures [S1].
++
++## Sources
++[S1] Out-of-Core Construction of Sparse Voxel Octrees, https://graphics.cs.kuleuven.be/publications/BLD13OCCSVO/BLD13OCCSVO_paper.pdf, fetched 2026-10-27
++[S2] Real-Time Global Illumination Using OpenGL And Voxel Cone Tracing, https://doi.org/10.48550/arxiv.2104.00618, fetched 2026-10-26 (unofficial)

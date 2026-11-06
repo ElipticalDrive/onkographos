@@ -1,0 +1,278 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Uniform Ray Marching generates 3D sample positions along rays within an Axis-Aligned Bounding Box (AABB) using a fixed spacing between samples [S1, S2, unofficial]. It serves as a dense uniform sampler for Line-of-Sight (LOS) integral visualization, replacing coarse sampling to avoid aliasing artifacts such as concentric 'sampling rings' caused by steep gradients near inner radius cuts [S2, unofficial]. It is often used as a fallback strategy in hardware or environments that do not support specialized libraries like nerfacc [S2, unofficial].
++Uniform Ray Marching generates 3D sample positions along rays within an Axis-Aligned Bounding Box (AABB) using a fixed spacing between samples [S1, unofficial]. It serves as a dense uniform sampler for Line-of-Sight (LOS) integral visualization, replacing coarse sampling to avoid aliasing artifacts such as concentric 'sampling rings' caused by steep gradients near inner radius cuts [S2, unofficial]. It is often used as a fallback strategy in hardware or environments that do not support specialized libraries like nerfacc [S2, unofficial].
+ 
+ ## How it works
+@@ -20,158 +20,109 @@
+ *   `ray_idx`: Tensor of shape `(M,)` mapping each segment to its parent ray index [S2, unofficial].
+ *   `valid`: Boolean tensor of shape `(N,)` indicating which original rays had valid intersections [S2, unofficial].
+-*   Where $M$ is the total number of valid samples across all rays.
++*   Where $M$ is the total number of valid samples across all rays [S2, unofficial].
+ 
+ **Data Structures:**
+-*   Rays are represented as separate origin and direction tensors.
+-*   Intersection times `t_min` and `t_max` are stored as 1D tensors of length $N$.
+-*   Indices are managed using integer tensors broadcasted to match the maximum number of steps per ray.
++*   Rays are represented as separate origin and direction tensors [S2, unofficial].
++*   Intersection times `t_min` and `t_max` are stored as 1D tensors of length $N$ [S2, unofficial].
++*   Indices are managed using integer tensors broadcasted to match the maximum number of steps per ray [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Ray-AABB Intersection:**
+-    Compute the intersection of each ray with the AABB to determine the entry (`t_min`) and exit (`t_max`) distances along the ray direction.
+-    $$ t_{min}, t_{max} = \text{intersect\_ray\_aabb}(rays\_o, rays\_d, aabb\_min, aabb\_max) $$
+-    [S1, S2, unofficial]
++1.  **Ray-AABB Intersection:** Compute the intersection of each ray with the AABB to determine the entry (`t_min`) and exit (`t_max`) distances along the ray direction [S2, unofficial].
++2.  **Initial Validity Mask:** Initialize a boolean mask `ok` where rays are potentially valid: $ok = (t_{max} > t_{min})$ [S2, unofficial].
++3.  **Optional Outer Sphere Clipping:** If `r_max_rsun` is provided, clip the ray interval to the intersection with a sphere of radius $\rho = r_{max\_rsun} / aabb\_scale$ [S2, unofficial]. Calculate coefficients for the quadratic equation $|o + t d|^2 = \rho^2$: $A = \sum_{i} (rays\_d_i)^2$, $B = 2.0 \sum_{i} (rays\_o_i \cdot rays\_d_i)$, $C = \sum_{i} (rays\_o_i)^2 - \rho^2$ [S2, unofficial]. Compute the discriminant and handle numerical safety by clamping $A$ to $10^{-20}$ and the discriminant to $0.0$: $disc = B^2 - 4.0 A C$, $A_{safe} = \max(A, 10^{-20})$, $disc_{safe} = \max(disc, 0.0)$ [S2, unofficial]. Solve for intersection times $t_{in}$ and $t_{out}$: $t_{in} = \frac{-B - \sqrt{disc_{safe}}}{2.0 A_{safe}}$, $t_{out} = \frac{-B + \sqrt{disc_{safe}}}{2.0 A_{safe}}$ [S2, unofficial]. Update interval bounds and validity: $t_{min} = \max(t_{min}, t_{in})$, $t_{max} = \min(t_{max}, t_{out})$, $hit = (disc \ge 0)$, $ok = ok \land hit$ [S2, unofficial].
++4.  **Final Validity Check:** Determine final valid rays where the interval is non-empty: $valid = ok \land (t_{max} > t_{min})$ [S2, unofficial].
++5.  **Generate Uniform Segments:** There are two common approaches depending on whether `n_samples` or `render_step_size` is the primary control [S2, unofficial].
++    *Approach A: Fixed Number of Samples (`n_samples`)*: For valid rays, let $a = t_{min}[valid]$ and $b = t_{max}[valid]$ [S2, unofficial]. Create $n_{samples} + 1$ linearly spaced points in $[0, 1]$: $u = \text{linspace}(0.0, 1.0, n_{samples} + 1)$ [S2, unofficial]. Compute edge coordinates (broadcasting $a, b$ to shape $(N_{valid}, 1)$ and $u$ to $(1, n_{samples}+1)$): $edges = a[:, None] + (b - a)[:, None] \cdot u[None, :]$ [S2, unofficial]. Flatten edges into segment starts $t_s$ and ends $t_e$: $t_s = edges[:, :-1].reshape(-1)$, $t_e = edges[:, 1:].reshape(-1)$ [S2, unofficial]. Generate ray indices mapping segments to valid rays: $ray\_idx = \text{repeat\_interleave}(\text{arange}(N_{valid}), n_{samples})$ [S2, unofficial].
++    *Approach B: Fixed Step Size (`render_step_size`)*: Compute the number of steps per ray: $n_{steps} = \max(1, \lceil (t_{max} - t_{min}) / render\_step\_size \rceil)$ [S2, unofficial]. Determine $max\_steps = \max(n_{steps})$ [S2, unofficial]. Create an index tensor $idx$ of shape $(1, max\_steps)$ containing $[0, 1, \dots, max\_steps-1]$ [S2, unofficial]. Broadcast $n_{steps}$ to shape $(N, 1)$ and create a boolean mask where $idx < n_{steps}$ [S2, unofficial]. Compute start times $t_s$ and end times $t_e$: $t_s = (t_{min} + idx \cdot render\_step\_size)$, $t_e = \min(t_{min} + (idx + 1) \cdot render\_step\_size, t_{max})$ [S2, unofficial]. Flatten $t_s$ and $t_e$ using the mask [S2, unofficial]. Construct $ray\_idx$ by expanding ray indices $[0, N-1]$ to shape $(N, max\_steps)$ and flattening with the mask [S2, unofficial].
++6.  **Compute Sample Positions (Post-Processing):** If sample positions are required, compute them from the generated $t$ values: $samples = rays\_o[ray\_idx] + t_s \cdot rays\_d[ray\_idx]$ [S1, unofficial].
+ 
+-2.  **Initial Validity Mask:**
+-    Initialize a boolean mask `ok` where rays are potentially valid:
+-    $$ ok = (t_{max} > t_{min}) $$
+-    [S2, unofficial]
+-
+-3.  **Optional Outer Sphere Clipping:**
+-    If `r_max_rsun` is provided, clip the ray interval to the intersection with a sphere of radius $\rho = r_{max\_rsun} / aabb\_scale$.
+-    
+-    Calculate coefficients for the quadratic equation $|o + t d|^2 = \rho^2$:
+-    $$ A = \sum_{i} (rays\_d_i)^2 $$
+-    $$ B = 2.0 \sum_{i} (rays\_o_i \cdot rays\_d_i) $$
+-    $$ C = \sum_{i} (rays\_o_i)^2 - \rho^2 $$
+-    [S2, unofficial]
+-    
+-    Compute the discriminant and handle numerical safety by clamping $A$ to $10^{-20}$ and the discriminant to $0.0$:
+-    $$ disc = B^2 - 4.0 A C $$
+-    $$ A_{safe} = \max(A, 10^{-20}) $$
+-    $$ disc_{safe} = \max(disc, 0.0) $$
+-    [S2, unofficial]
+-    
+-    Solve for intersection times $t_{in}$ and $t_{out}$:
+-    $$ t_{in} = \frac{-B - \sqrt{disc_{safe}}}{2.0 A_{safe}} $$
+-    $$ t_{out} = \frac{-B + \sqrt{disc_{safe}}}{2.0 A_{safe}} $$
+-    [S2, unofficial]
+-    
+-    Update interval bounds and validity:
+-    $$ t_{min} = \max(t_{min}, t_{in}) $$
+-    $$ t_{max} = \min(t_{max}, t_{out}) $$
+-    $$ hit = (disc \ge 0) $$
+-    $$ ok = ok \land hit $$
+-    [S2, unofficial]
+-
+-4.  **Final Validity Check:**
+-    Determine final valid rays where the interval is non-empty:
+-    $$ valid = ok \land (t_{max} > t_{min}) $$
+-    [S2, unofficial]
+-
+-5.  **Generate Uniform Segments:**
+-    There are two common approaches depending on whether `n_samples` or `render_step_size` is the primary control.
+-
+-    *Approach A: Fixed Number of Samples (`n_samples`)*
+-    For valid rays, let $a = t_{min}[valid]$ and $b = t_{max}[valid]$.
+-    Create $n_{samples} + 1$ linearly spaced points in $[0, 1]$:
+-    $$ u = \text{linspace}(0.0, 1.0, n_{samples} + 1) $$
+-    [S2, unofficial]
+-    
+-    Compute edge coordinates (broadcasting $a, b$ to shape $(N_{valid}, 1)$ and $u$ to $(1, n_{samples}+1)$):
+-    $$ edges = a[:, None] + (b - a)[:, None] \cdot u[None, :] $$
+-    [S2, unofficial]
+-    
+-    Flatten edges into segment starts $t_s$ and ends $t_e$:
+-    $$ t_s = edges[:, :-1].reshape(-1) $$
+-    $$ t_e = edges[:, 1:].reshape(-1) $$
+-    [S2, unofficial]
+-    
+-    Generate ray indices mapping segments to valid rays:
+-    $$ ray\_idx = \text{repeat\_interleave}(\text{arange}(N_{valid}), n_{samples}) $$
+-    [S2, unofficial]
+-
+-    *Approach B: Fixed Step Size (`render_step_size`)*
+-    Compute the number of steps per ray:
+-    $$ n_{steps} = \max(1, \lceil (t_{max} - t_{min}) / render\_step\_size \rceil) $$
+-    [S2, unofficial]
+-    
+-    Determine $max\_steps = \max(n_{steps})$.
+-    Create an index tensor $idx$ of shape $(1, max\_steps)$ containing $[0, 1, \dots, max\_steps-1]$.
+-    Broadcast $n_{steps}$ to shape $(N, 1)$ and create a boolean mask where $idx < n_{steps}$.
+-    [S2, unofficial]
+-    
+-    Compute start times $t_s$ and end times $t_e$:
+-    $$ t_s = (t_{min} + idx \cdot render\_step\_size) $$
+-    $$ t_e = \min(t_{min} + (idx + 1) \cdot render\_step\_size, t_{max}) $$
+-    [S2, unofficial]
+-    
+-    Flatten $t_s$ and $t_e$ using the mask.
+-    Construct $ray\_idx$ by expanding ray indices $[0, N-1]$ to shape $(N, max\_steps)$ and flattening with the mask.
+-    [S2, unofficial]
+-
+-6.  **Compute Sample Positions (Post-Processing):**
+-    If sample positions are required, compute them from the generated $t$ values:
+-    $$ samples = rays\_o[ray\_idx] + t_s \cdot rays\_d[ray\_idx] $$
+-    [S1, unofficial]
+-
+-**Pseudocode (PyTorch-like, Approach A):**
++**Pseudocode (Python, Approach A):**
+ 
+ ```python
++import math
++
++def intersect_ray_aabb(origin, direction, aabb_min, aabb_max):
++    """Standard slab method for ray-AABB intersection."""
++    t_min = []
++    t_max = []
++    for i in range(3):
++        if abs(direction[i]) > 1e-8:
++            t1 = (aabb_min[i] - origin[i]) / direction[i]
++            t2 = (aabb_max[i] - origin[i]) / direction[i]
++            t_min.append(min(t1, t2))
++            t_max.append(max(t1, t2))
++        else:
++            if origin[i] < aabb_min[i] or origin[i] > aabb_max[i]:
++                return -1.0, -1.0
++        t_min.append(0.0)
++        t_max.append(float('inf'))
++    t_near = max(t_min)
++    t_far = min(t_max)
++    return t_near, t_far
++
+ def uniform_ray_marching(rays_o, rays_d, aabb_min, aabb_max, n_samples, r_max_rsun=None, aabb_scale=1.0):
+-    # 1. Ray-AABB Intersection
+-    t_min, t_max = ray_aabb_intersect(rays_o, rays_d, aabb_min, aabb_max)
++    """
++    rays_o: list of (x,y,z) origins
++    rays_d: list of (x,y,z) directions
++    aabb_min, aabb_max: (x,y,z) bounds
++    n_samples: int
++    r_max_rsun: optional float
++    aabb_scale: float
++    Returns: t_s, t_e, ray_idx, valid_mask
++    """
++    t_min_list = []
++    t_max_list = []
++    valid_mask = []
+     
+-    # 2. Initial Validity
+-    ok = t_max > t_min
+-    
+-    # 3. Optional Outer Sphere Clipping
++    for i in range(len(rays_o)):
++        t_near, t_far = intersect_ray_aabb(rays_o[i], rays_d[i], aabb_min, aabb_max)
++        if t_far > t_near:
++            t_min_list.append(t_near)
++            t_max_list.append(t_far)
++            valid_mask.append(True)
++        else:
++            t_min_list.append(0.0)
++            t_max_list.append(0.0)
++            valid_mask.append(False)
++
+     if r_max_rsun is not None:
+         rho = r_max_rsun / aabb_scale
+-        A = (rays_d * rays_d).sum(dim=-1)
+-        B = 2.0 * (rays_o * rays_d).sum(dim=-1)
+-        C = (rays_o * rays_o).sum(dim=-1) - rho * rho
+-        
+-        # Numerical safety
+-        A_safe = torch.clamp(A, min=1e-20)
+-        disc = B * B - 4.0 * A_safe * C
+-        disc_safe = torch.clamp(disc, min=0.0)
+-        
+-        t_in = (-B - torch.sqrt(disc_safe)) / (2.0 * A_safe)
+-        t_out = (-B + torch.sqrt(disc_safe)) / (2.0 * A_safe)
+-        
+-        t_min = torch.maximum(t_min, t_in)
+-        t_max = torch.minimum(t_max, t_out)
+-        
+-        hit = disc >= 0
+-        ok = ok & hit
+-        
+-    # 4. Final Validity
+-    valid = ok & (t_max > t_min)
+-    
+-    # 5. Generate Uniform Segments for valid rays
+-    # Filter rays
+-    valid_rays_o = rays_o[valid]
+-    valid_t_min = t_min[valid]
+-    valid_t_max = t_max[valid]
+-    
+-    # Create interpolation grid
+-    u = torch.linspace(0.0, 1.0, n_samples + 1, device=rays_o.device)
+-    
+-    # Broadcast and compute edges
+-    # valid_t_min shape: (N_valid, 1)
+-    # u shape: (n_samples + 1,)
+-    edges = valid_t_min[:, None] + (valid_t_max[:, None] - valid_t_min[:, None]) * u[None, :]
+-    
+-    # Flatten
+-    t_s = edges[:, :-1].reshape(-1)
+-    t_e = edges[:, 1:].reshape(-1)
+-    
+-    # Ray indices
+-    N_valid = valid.sum()
+-    ray_idx = torch.arange(N_valid, device=rays_o.device).repeat_interleave(n_samples)
+-    
+-    return t_s, t_e, ray_idx, valid
++        for i in range(len(rays_o)):
++            if not valid_mask[i]:
++                continue
++            ox, oy, oz = rays_o[i]
++            dx, dy, dz = rays_d[i]
++            A = dx*dx + dy*dy + dz*dz
++            B = 2.0 * (ox*dx + oy*dy + oz*dz)
++            C = ox*ox + oy*oy + oz*oz - rho*rho
++            A_safe = max(A, 1e-20)
++            disc = B*B - 4.0 * A_safe * C
++            if disc < 0.0:
++                valid_mask[i] = False
++                continue
++            sqrt_disc = math.sqrt(disc)
++            t_in = (-B - sqrt_disc) / (2.0 * A_safe)
++            t_out = (-B + sqrt_disc) / (2.0 * A_safe)
++            t_min_list[i] = max(t_min_list[i], t_in)
++            t_max_list[i] = min(t_max_list[i], t_out)
++            if t_max_list[i] <= t_min_list[i]:
++                valid_mask[i] = False
++
++    valid_indices = [i for i, v in enumerate(valid_mask) if v]
++    valid_t_min = [t_min_list[i] for i in valid_indices]
++    valid_t_max = [t_max_list[i] for i in valid_indices]
++
++    u = [j / n_samples for j in range(n_samples + 1)]
++    t_s = []
++    t_e = []
++    ray_idx = []
++    for i, (a, b) in enumerate(zip(valid_t_min, valid_t_max)):
++        for j in range(n_samples):
++            t_s.append(a + (b - a) * u[j])
++            t_e.append(a + (b - a) * u[j+1])
++            ray_idx.append(valid_indices[i])
++
++    return t_s, t_e, ray_idx, valid_mask
+ ```
+ 
+@@ -182,12 +133,12 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the number of samples per ray. The intersection test is $O(N)$.
+-*   **Memory Complexity:** $O(N \cdot S)$ to store the generated sample positions and indices.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Simple to implement; deterministic; avoids aliasing artifacts associated with coarse sampling [S2, unofficial]; serves as a robust fallback when specialized libraries are unavailable [S2, unofficial].
+-*   **Limitations:** Fixed step size may lead to over-sampling in empty space or under-sampling in high-frequency regions if not adaptive. The "oversampled" variant requires careful slab ownership logic to prevent discontinuities at LOD boundaries [S3, unofficial].
++*   **Limitations:** Fixed step size may lead to over-sampling in empty space or under-sampling in high-frequency regions if not adaptive [S2, unofficial]. The "oversampled" variant requires careful slab ownership logic to prevent discontinuities at LOD boundaries [S3, unofficial].
+ *   **Performance:** Measured whole-image Total Variation (TV) error improvements of -2.7% (x) and -2.2% (y) in browser-based WebGPU rendering with 64 chunks [S3, unofficial].
+ 
+ ## Background
+-Uniform Ray Marching is a fundamental technique in volume rendering, often implemented as a baseline or fallback method. It is cited in the context of the Jax-Volumetric-Renderer [S1, unofficial] and CoroNeRF_public [S2, unofficial]. Recent implementations in niivue have refined the method to handle multi-LOD streaming and slab tiling correctly, addressing specific artifacts in browser-based visualization [S3, unofficial].
++Uniform Ray Marching is a fundamental technique in volume rendering, often implemented as a baseline or fallback method [S1, S2, unofficial]. It is cited in the context of the Jax-Volumetric-Renderer [S1, unofficial] and CoroNeRF_public [S2, unofficial]. Recent implementations in niivue have refined the method to handle multi-LOD streaming and slab tiling correctly, addressing specific artifacts in browser-based visualization [S3, unofficial].
+ 
+ ## Sources

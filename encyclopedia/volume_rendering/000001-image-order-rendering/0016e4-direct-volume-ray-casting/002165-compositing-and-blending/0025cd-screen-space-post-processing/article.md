@@ -3,19 +3,16 @@
 Also called: Composite Shader, Compositing/Post-Processing Pipeline, Screen Post-Processing
 
 ## Overview
-Screen-space post-processing is a full-screen rendering pipeline that applies aspect-ratio preserving UV covering, luminance-based bright passes, color grading, underwater refraction, cross-shaped bloom, and dithering to a scene texture to produce a final display image [S1, unofficial]. It solves the problem of integrating volumetric lighting and environmental effects (such as fog, clouds, or underwater scenes) with the base scene by performing spatial blending and tone adjustment in screen space rather than world space [S1, S2, S3, unofficial]. It differs from [Compositing](2436-compositing.md) by applying specific screen-space artifacts like vignettes and channel splitting, and from [Pre-Integration Lookup](2854-pre-integration-lookup.md) by operating on the final rendered image rather than pre-computed volume integrals [S1, S2, S3, unofficial].
+Screen-space post-processing is a full-screen rendering pass that applies aspect-ratio preserving UV covering, luminance-based bright passes, color grading, specialized refraction effects, bloom, blurring, and dithering to a scene texture to produce the final displayable image [S1, unofficial]. It differs from [Compositing](2436-compositing.md) by operating on the final rendered image rather than accumulating volume samples along rays, and from [HDR Post-Processing Pipeline](4633-hdr-post-processing-pipeline.md) by implementing specific spatial logic (such as underwater refraction and cross-shaped bloom) rather than fusing global tone-mapping and bloom into a single pass [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A scene texture (color buffer), screen resolution (`screen_size`), and uniform parameters (`menu_blur`, `is_underwater`, `time`).
-*   **Output:** A final color buffer with post-processing effects applied.
+*   **Input:** A scene texture (typically the result of the opaque and transparent rendering passes), screen dimensions, and uniform parameters.
+*   **Output:** A final color buffer for display.
 
 **Data Structures:**
-The method uses a single full-screen triangle (or two triangles forming a quad) to cover the viewport.
+The method relies on a uniform buffer containing camera and environment state, and vertex attributes for a full-screen quad.
 
-*   **Vertex Attributes:**
-    *   `positions`: `array<vec2<f32>, 3>` = `{(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)}` [S1, unofficial].
-    *   `uvs`: `array<vec2<f32>, 3>` = `{(0.0, 1.0), (2.0, 1.0), (0.0, -1.0)}` [S1, unofficial].
 *   **Uniforms Struct:**
     *   `view_proj`: `mat4x4<f32>`
     *   `inv_view_proj`: `mat4x4<f32>`
@@ -33,82 +30,106 @@ The method uses a single full-screen triangle (or two triangles forming a quad) 
     *   `rain_factor`: `f32`
     *   `sky_visibility`: `f32`
     *   `menu_blur`: `f32`
-    *   `_pad_uniforms`: `f32` [S1, unofficial].
+    *   `_pad_uniforms`: `f32`
+*   **Vertex Attributes:**
+    *   `positions`: `array<vec2<f32>, 3>` = `{(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)}`
+    *   `uvs`: `array<vec2<f32>, 3>` = `{(0.0, 1.0), (2.0, 1.0), (0.0, -1.0)}`
 
 **Parameters:**
 *   `menu_blur`: `f32`, controls blur intensity and vignette softening. Clamped to `[0.0, 1.0]` in the fragment shader [S1, unofficial].
 *   `is_underwater`: `f32`, enables RGB channel splitting refraction when `> 0.5` and `blur < 0.5` [S1, unofficial].
 
 **Steps:**
+The fragment shader processes each pixel of the full-screen quad. The order of operations is:
 
-1.  **UV Covering:** Compute texture aspect ratio `texture_aspect = texture_size.x / max(texture_size.y, 1.0)` and screen aspect ratio `screen_aspect = screen_size.x / max(screen_size.y, 1.0)` [S1, unofficial].
-    *   If `screen_aspect > texture_aspect`, adjust vertical UV: `covered.y = 0.5 + (uv.y - 0.5) * (texture_aspect / screen_aspect)`.
-    *   Else, adjust horizontal UV: `covered.x = 0.5 + (uv.x - 0.5) * (screen_aspect / texture_aspect)` [S1, unofficial].
+1.  **UV Covering:** Adjust UVs to preserve aspect ratio if the texture and screen dimensions differ.
+    *   Compute `texture_aspect = texture_size.x / max(texture_size.y, 1.0)`.
+    *   Compute `screen_aspect = screen_size.x / max(screen_size.y, 1.0)`.
+    *   If `screen_aspect > texture_aspect`:
+        *   `covered.y = 0.5 + (uv.y - 0.5) * (texture_aspect / screen_aspect)`
+        *   `covered.x = uv.x`
+    *   Else:
+        *   `covered.x = 0.5 + (uv.x - 0.5) * (screen_aspect / texture_aspect)`
+        *   `covered.y = uv.y`
+    *   Use `covered` for subsequent sampling [S1, unofficial].
 
-2.  **Luminance Calculation:** Compute luminance from the input color `color`:
-    $$ luma = \text{dot}(color, \text{vec3}(0.2126, 0.7152, 0.0722)) $$ [S1, unofficial].
+2.  **Luminance Calculation:**
+    *   `luma = dot(color, vec3(0.2126, 0.7152, 0.0722))` [S1, unofficial].
 
-3.  **Bright Pass:** Determine the weight for bright regions using a smoothstep threshold:
-    $$ weight = \text{smoothstep}(0.68, 0.96, luma) $$
-    $$ bright\_pass\_color = color \times weight $$ [S1, unofficial].
+3.  **Bright Pass:**
+    *   `weight = smoothstep(0.68, 0.96, luminance(color))`
+    *   `bright_pass_color = color * weight` [S1, unofficial].
 
-4.  **Vignette:**
-    *   Center the UV: `centered = uv * 2.0 - 1.0`.
-    *   Adjust for aspect ratio: `centered.x *= screen_size.x / max(screen_size.y, 1.0)`.
-    *   Compute vignette falloff: `vignette = 1.0 - smoothstep(0.42, 1.82, dot(centered, centered)) * mix(0.045, 0.025, menu_blur)`.
-    *   Apply: `color = clamp(color * vignette, vec3(0.0), vec3(1.0))` [S1, unofficial].
-
-5.  **Underwater Refraction (Conditional):** If `is_underwater > 0.5` and `menu_blur < 0.5`:
-    *   Compute radial offset: `radial = (sample_uv - vec2(0.5)) * 1.6`.
-    *   Compute shift vector: `shift = radial * texel * (1.2 + 0.25 * sin(time * 0.8))`.
-    *   Split RGB channels:
+4.  **Underwater Refraction (Conditional):**
+    *   If `is_underwater > 0.5` AND `blur < 0.5`:
+        *   `radial = (sample_uv - vec2(0.5)) * 1.6`
+        *   `shift = radial * texel * (1.2 + 0.25 * sin(time * 0.8))`
         *   `color.r = sample_scene(sample_uv + shift).r`
         *   `color.b = sample_scene(sample_uv - shift).b`
-    *   Mix with original: `color = mix(color, color * vec3(0.83, 0.96, 1.08), 0.28)` [S1, unofficial].
+        *   `color = mix(color, color * vec3(0.83, 0.96, 1.08), 0.28)` [S1, unofficial].
 
-6.  **Cross-Shaped Bloom:**
-    *   Define bloom radius: `bloom_radius = texel * 3.25`.
-    *   Initialize bloom accumulator: `bloom = bright_pass_color * 0.28`.
-    *   Add 4 neighbors at offsets `±bloom_radius.x/y` with weight `0.18` each.
-    *   Accumulate: `color += bloom * mix(0.105, 0.025, menu_blur)` [S1, unofficial].
+5.  **Cross-Shaped Bloom:**
+    *   `bloom_radius = texel * 3.25`
+    *   `bloom = bright_pass_color * 0.28`
+    *   Sample 4 neighbors at `±bloom_radius.x/y` with weight `0.18` each.
+    *   `bloom_sum = bloom + sum(neighbors)`
+    *   `bloom_final = bloom_sum * mix(0.105, 0.025, blur)`
+    *   `color += bloom_final` [S1, unofficial].
 
-7.  **17-Tap Box Blur (Conditional):** If `menu_blur > 0.001`:
-    *   Initialize blurred color: `blurred = color * 0.08`.
-    *   Add neighbors with specific weights and offsets:
-        *   `texel * (±4, 0), (0, ±4)` with weight `0.08`.
-        *   `texel * (±5.5, ±5.5)` with weight `0.07`.
-        *   `texel * (±10, 0), (0, ±10)` with weight `0.05`.
-        *   `texel * (±14, ±14)` with weight `0.03`.
-    *   Mix result: `color = mix(color, blurred * 0.82, menu_blur)` [S1, unofficial].
+6.  **17-Tap Box Blur (Conditional):**
+    *   If `blur > 0.001`:
+        *   `blurred = color * 0.08`
+        *   Add neighbors at `texel * (±4,0), (0,±4)` with weight `0.08`.
+        *   Add neighbors at `texel * (±5.5, ±5.5)` with weight `0.07`.
+        *   Add neighbors at `texel * (±10,0), (0,±10)` with weight `0.05`.
+        *   Add neighbors at `texel * (±14, ±14)` with weight `0.03`.
+        *   `color = mix(color, blurred * 0.82, blur)` [S1, unofficial].
+
+7.  **Vignette:**
+    *   `centered = uv * 2.0 - 1.0`
+    *   `centered.x *= screen_size.x / max(screen_size.y, 1.0)`
+    *   `vignette = 1.0 - smoothstep(0.42, 1.82, dot(centered, centered)) * mix(0.045, 0.025, blur)`
+    *   `color = clamp(color * vignette, vec3(0.0), vec3(1.0))` [S1, unofficial].
 
 8.  **Dithering:**
-    *   Quantize pixel coordinate: `pixel = floor(uv * max(screen_size, vec2(1.0)))`.
-    *   Generate hash: `hash = fract(sin(dot(pixel, vec2(12.9898, 78.233))) * 43758.5453)`.
-    *   Compute dither value: `dither = (hash - 0.5) / 255.0`.
-    *   Apply: `color = clamp(color + vec3(dither), vec3(0.0), vec3(1.0))` [S1, unofficial].
+    *   `pixel = floor(uv * max(screen_size, vec2(1.0)))`
+    *   `hash = fract(sin(dot(pixel, vec2(12.9898, 78.233))) * 43758.5453)`
+    *   `dither = (hash - 0.5) / 255.0`
+    *   `color = clamp(color + vec3(dither), vec3(0.0), vec3(1.0))` [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Fragment Shader Logic for Screen-space Post-processing
+# Fragment Shader Logic
 # Inputs: uv (vec2), scene_texture (sampler2D), uniforms (struct)
-# Outputs: final_color (vec3)
+# Outputs: frag_color (vec4)
 
 def screen_space_post_processing(uv, scene_texture, uniforms):
     # 1. UV Covering
-    texture_aspect = uniforms.texture_size.x / max(uniforms.texture_size.y, 1.0)
-    screen_aspect = uniforms.screen_size.x / max(uniforms.screen_size.y, 1.0)
+    texture_aspect = uniforms.screen_size.x / max(uniforms.screen_size.y, 1.0)
+    screen_aspect = uniforms.screen_size.x / max(uniforms.screen_size.y, 1.0) # Note: Source uses screen_size for both, assuming texture matches screen or is passed separately. 
+    # Correction based on source: texture_size is distinct. 
+    # Assuming texture_size is available or uniforms.screen_size represents the source texture dimensions if not specified.
+    # The source says: texture_aspect = texture_size.x / max(texture_size.y, 1.0)
+    # We assume texture_size is passed or derived. For this implementation, we assume uniforms.screen_size is the output, 
+    # and we need texture_size. If not provided, we assume 1:1 or pass it. 
+    # Let's assume texture_size is a uniform or derived from the input texture.
+    # To be self-contained, we assume texture_size is available.
+    
+    tex_aspect = uniforms.texture_size.x / max(uniforms.texture_size.y, 1.0)
+    scr_aspect = uniforms.screen_size.x / max(uniforms.screen_size.y, 1.0)
     
     covered_uv = uv
-    if screen_aspect > texture_aspect:
-        covered_uv.y = 0.5 + (uv.y - 0.5) * (texture_aspect / screen_aspect)
+    if scr_aspect > tex_aspect:
+        covered_uv.y = 0.5 + (uv.y - 0.5) * (tex_aspect / scr_aspect)
     else:
-        covered_uv.x = 0.5 + (uv.x - 0.5) * (screen_aspect / texture_aspect)
+        covered_uv.x = 0.5 + (uv.x - 0.5) * (scr_aspect / tex_aspect)
         
-    # Sample scene color
-    color = texture(scene_texture, covered_uv).rgb
+    # Sample base color
+    color = sample_texture(scene_texture, covered_uv)
+    texel = 1.0 / uniforms.screen_size # Approximation for screen-space texel size
     
     # 2. Luminance
     luma = dot(color, vec3(0.2126, 0.7152, 0.0722))
@@ -117,70 +138,64 @@ def screen_space_post_processing(uv, scene_texture, uniforms):
     weight = smoothstep(0.68, 0.96, luma)
     bright_pass_color = color * weight
     
-    # 4. Vignette
-    centered = uv * 2.0 - 1.0
-    centered.x *= uniforms.screen_size.x / max(uniforms.screen_size.y, 1.0)
-    vignette_factor = 1.0 - smoothstep(0.42, 1.82, dot(centered, centered)) * mix(0.045, 0.025, uniforms.menu_blur)
-    color = clamp(color * vignette_factor, vec3(0.0), vec3(1.0))
-    
-    # 5. Underwater Refraction
-    if uniforms.is_underwater > 0.5 and uniforms.menu_blur < 0.5:
-        texel = 1.0 / uniforms.screen_size
+    # 4. Underwater Refraction
+    blur = uniforms.menu_blur
+    if uniforms.is_underwater > 0.5 and blur < 0.5:
         radial = (covered_uv - vec2(0.5)) * 1.6
         shift = radial * texel * (1.2 + 0.25 * sin(uniforms.time * 0.8))
-        
-        r_sample = texture(scene_texture, covered_uv + shift).r
-        b_sample = texture(scene_texture, covered_uv - shift).b
-        
-        color.r = r_sample
-        color.b = b_sample
+        r_val = sample_texture(scene_texture, covered_uv + shift).r
+        b_val = sample_texture(scene_texture, covered_uv - shift).b
+        color.r = r_val
+        color.b = b_val
         color = mix(color, color * vec3(0.83, 0.96, 1.08), 0.28)
         
-    # 6. Cross-Shaped Bloom
-    texel = 1.0 / uniforms.screen_size
+    # 5. Cross-Shaped Bloom
     bloom_radius = texel * 3.25
+    bloom = bright_pass_color * 0.28
+    # 4 neighbors at +/- bloom_radius.x/y
+    bloom += sample_texture(scene_texture, covered_uv + vec2(bloom_radius.x, 0.0)) * 0.18
+    bloom += sample_texture(scene_texture, covered_uv + vec2(-bloom_radius.x, 0.0)) * 0.18
+    bloom += sample_texture(scene_texture, covered_uv + vec2(0.0, bloom_radius.y)) * 0.18
+    bloom += sample_texture(scene_texture, covered_uv + vec2(0.0, -bloom_radius.y)) * 0.18
     
-    # Accumulate bloom from neighbors
-    bloom_sum = vec3(0.0)
-    # Center
-    bloom_sum += bright_pass_color * 0.28
-    # 4 neighbors at +/- bloom_radius
-    bloom_sum += texture(scene_texture, covered_uv + vec2(bloom_radius.x, 0.0)).rgb * 0.18
-    bloom_sum += texture(scene_texture, covered_uv + vec2(-bloom_radius.x, 0.0)).rgb * 0.18
-    bloom_sum += texture(scene_texture, covered_uv + vec2(0.0, bloom_radius.y)).rgb * 0.18
-    bloom_sum += texture(scene_texture, covered_uv + vec2(0.0, -bloom_radius.y)).rgb * 0.18
+    bloom_final = bloom * mix(0.105, 0.025, blur)
+    color += bloom_final
     
-    color += bloom_sum * mix(0.105, 0.025, uniforms.menu_blur)
-    
-    # 7. 17-Tap Box Blur
-    if uniforms.menu_blur > 0.001:
+    # 6. 17-Tap Box Blur
+    if blur > 0.001:
         blurred = color * 0.08
         # Neighbors at texel * (±4,0), (0,±4) weight 0.08
-        blurred += texture(scene_texture, covered_uv + vec2(4.0 * texel.x, 0.0)).rgb * 0.08
-        blurred += texture(scene_texture, covered_uv + vec2(-4.0 * texel.x, 0.0)).rgb * 0.08
-        blurred += texture(scene_texture, covered_uv + vec2(0.0, 4.0 * texel.y)).rgb * 0.08
-        blurred += texture(scene_texture, covered_uv + vec2(0.0, -4.0 * texel.y)).rgb * 0.08
+        blurred += sample_texture(scene_texture, covered_uv + vec2(4.0, 0.0) * texel) * 0.08
+        blurred += sample_texture(scene_texture, covered_uv + vec2(-4.0, 0.0) * texel) * 0.08
+        blurred += sample_texture(scene_texture, covered_uv + vec2(0.0, 4.0) * texel) * 0.08
+        blurred += sample_texture(scene_texture, covered_uv + vec2(0.0, -4.0) * texel) * 0.08
         
         # Neighbors at texel * (±5.5, ±5.5) weight 0.07
-        blurred += texture(scene_texture, covered_uv + vec2(5.5 * texel.x, 5.5 * texel.y)).rgb * 0.07
-        blurred += texture(scene_texture, covered_uv + vec2(5.5 * texel.x, -5.5 * texel.y)).rgb * 0.07
-        blurred += texture(scene_texture, covered_uv + vec2(-5.5 * texel.x, 5.5 * texel.y)).rgb * 0.07
-        blurred += texture(scene_texture, covered_uv + vec2(-5.5 * texel.x, -5.5 * texel.y)).rgb * 0.07
+        blurred += sample_texture(scene_texture, covered_uv + vec2(5.5, 5.5) * texel) * 0.07
+        blurred += sample_texture(scene_texture, covered_uv + vec2(5.5, -5.5) * texel) * 0.07
+        blurred += sample_texture(scene_texture, covered_uv + vec2(-5.5, 5.5) * texel) * 0.07
+        blurred += sample_texture(scene_texture, covered_uv + vec2(-5.5, -5.5) * texel) * 0.07
         
         # Neighbors at texel * (±10,0), (0,±10) weight 0.05
-        blurred += texture(scene_texture, covered_uv + vec2(10.0 * texel.x, 0.0)).rgb * 0.05
-        blurred += texture(scene_texture, covered_uv + vec2(-10.0 * texel.x, 0.0)).rgb * 0.05
-        blurred += texture(scene_texture, covered_uv + vec2(0.0, 10.0 * texel.y)).rgb * 0.05
-        blurred += texture(scene_texture, covered_uv + vec2(0.0, -10.0 * texel.y)).rgb * 0.05
+        blurred += sample_texture(scene_texture, covered_uv + vec2(10.0, 0.0) * texel) * 0.05
+        blurred += sample_texture(scene_texture, covered_uv + vec2(-10.0, 0.0) * texel) * 0.05
+        blurred += sample_texture(scene_texture, covered_uv + vec2(0.0, 10.0) * texel) * 0.05
+        blurred += sample_texture(scene_texture, covered_uv + vec2(0.0, -10.0) * texel) * 0.05
         
         # Neighbors at texel * (±14, ±14) weight 0.03
-        blurred += texture(scene_texture, covered_uv + vec2(14.0 * texel.x, 14.0 * texel.y)).rgb * 0.03
-        blurred += texture(scene_texture, covered_uv + vec2(14.0 * texel.x, -14.0 * texel.y)).rgb * 0.03
-        blurred += texture(scene_texture, covered_uv + vec2(-14.0 * texel.x, 14.0 * texel.y)).rgb * 0.03
-        blurred += texture(scene_texture, covered_uv + vec2(-14.0 * texel.x, -14.0 * texel.y)).rgb * 0.03
+        blurred += sample_texture(scene_texture, covered_uv + vec2(14.0, 14.0) * texel) * 0.03
+        blurred += sample_texture(scene_texture, covered_uv + vec2(14.0, -14.0) * texel) * 0.03
+        blurred += sample_texture(scene_texture, covered_uv + vec2(-14.0, 14.0) * texel) * 0.03
+        blurred += sample_texture(scene_texture, covered_uv + vec2(-14.0, -14.0) * texel) * 0.03
         
-        color = mix(color, blurred * 0.82, uniforms.menu_blur)
+        color = mix(color, blurred * 0.82, blur)
         
+    # 7. Vignette
+    centered = uv * 2.0 - 1.0
+    centered.x *= uniforms.screen_size.x / max(uniforms.screen_size.y, 1.0)
+    vignette = 1.0 - smoothstep(0.42, 1.82, dot(centered, centered)) * mix(0.045, 0.025, blur)
+    color = clamp(color * vignette, vec3(0.0), vec3(1.0))
+    
     # 8. Dithering
     pixel = floor(uv * max(uniforms.screen_size, vec2(1.0)))
     hash_val = fract(sin(dot(pixel, vec2(12.9898, 78.233))) * 43758.5453)
@@ -190,40 +205,23 @@ def screen_space_post_processing(uv, scene_texture, uniforms):
     return color
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Precision:** The hash function for dithering uses floating-point arithmetic; ensure consistent precision across platforms to avoid visible banding patterns [S1, unofficial].
-*   **Boundaries:** The UV covering logic assumes the input texture and screen dimensions are positive; division by zero is guarded by `max(..., 1.0)` [S1, unofficial].
-*   **Aspect Ratio:** Incorrect aspect ratio handling in vignette calculation can cause elliptical distortion on non-square pixels [S1, unofficial].
-
 ## Subtopics
 
-### [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md)
-This method composites pre-resolved volumetric cloud data with a procedural sky and ground background, then applies tone mapping and gamma correction to produce a final display image. It differs from [HDR Post-Processing Pipeline](4633-hdr-post-processing-pipeline.md) by handling the specific spatial blending of cloud radiance against environmental backgrounds rather than global scene adjustments, and from [Bloom](4906-bloom.md) by operating on the direct cloud pass output rather than a blurred luminance pass.
-
-### [HDR Post-Processing Pipeline](4633-hdr-post-processing-pipeline.md)
-A 16-bit floating-point HDR rendering pipeline for scene post-processing that applies HDR-domain effects, tone mapping, and LDR-domain effects in a fused shader pass to minimize memory bandwidth. It sets itself apart from sibling methods like [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md) by integrating bloom and chromatic distortion directly into the tone-mapping fragment shader rather than using separate library passes, and from [Bloom](4906-bloom.md) by handling the bloom compositing within the same pass as tone mapping.
-
-### [Bloom](4906-bloom.md)
-Bloom is a screen-space post-processing effect that enhances the perception of brightness by blurring the luminous regions of an image and adding them back to the original. It solves the problem of limited dynamic range in display images by simulating the glow of bright light sources bleeding into surrounding darker areas. Unlike [Cloud Compositing & Tone Mapping](3628-cloud-compositing-tone-mapping.md) which focuses on atmospheric scattering and tone curve adjustments, or the [HDR Post-Processing Pipeline](4633-hdr-post-processing-pipeline.md) which handles high-dynamic-range data, Bloom specifically targets the isolation and diffusion of high-intensity pixels.
-
 ### Bilateral Upsampling and Dual-Source Blending
-A post-processing step to upscale and blend volumetric lighting results with the scene, using bilateral upsampling for resolution enhancement and dual-source blending for attenuation [S2, unofficial]. It performs bilateral upsampling on the resolved accumulation buffer, particularly helpful at 1/4 resolution, then additively blends the resolved/filtered output with the scene. It uses dual-source blending to attenuate the result based on medium density and depth [S2, unofficial].
+A post-processing step to upscale and blend volumetric lighting results with the scene, using bilateral upsampling for resolution enhancement and dual-source blending for attenuation [S2, unofficial]. It is particularly helpful at 1/4 resolution [S2, unofficial]. The process involves performing bilateral upsampling on the resolved accumulation buffer, additively blending the resolved/filtered output with the scene, and using dual-source blending to attenuate the result based on medium density and depth [S2, unofficial].
 
 ### Frustum Raycasting and Blending
-A post-processing step that casts rays from the camera through each pixel, intersects them with a cloud volume bounding box, and blends the resulting cloud color with the original scene color [S3, unofficial]. It samples the original scene color, sets the ray origin to the camera world position, and normalizes the ray direction. It calculates ray-box intersection using `RayBoxIntersection(origin, direction, _CloudVolumeMinBound, _CloudVolumeMaxBound)`. If an intersection occurs, it calls `MarchDensity` to get cloud color and returns `lerp(originalColour, cloudColour, cloudColour.a)`. In the C# script `OnRenderImage`, it calculates frustum corners at the far clip plane using `Camera.CalculateFrustumCorners`, transforms them to world space, and passes them to the shader as `_FrustumCornerTR` and `_FrustumCornerBR` [S3, unofficial].
+A post-processing step that casts rays from the camera through each pixel, intersects them with a cloud volume bounding box, and blends the resulting cloud color with the original scene color [S3, unofficial]. It differs from general screen-space effects by performing ray-box intersection in screen space to determine cloud visibility [S3, unofficial]. The steps are: sample the original scene color; set ray origin to camera world position; normalize ray direction; calculate ray-box intersection with cloud volume bounds; if intersection exists, march density to get cloud color; return `lerp(originalColour, cloudColour, cloudColour.a)`; if no intersection, return original color [S3, unofficial]. The frustum corners are calculated in C# using `Camera.CalculateFrustumCorners` and passed to the shader [S3, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** O(1) per pixel for the core pipeline, as it involves a fixed number of texture samples and arithmetic operations. The 17-tap blur and cross-shaped bloom add a constant number of samples (17 + 4 = 21 samples) per pixel [S1, unofficial].
-*   **Memory Complexity:** O(1) auxiliary memory, requiring only the input scene texture and output buffer. The vertex attributes are minimal (3 vertices) [S1, unofficial].
-*   **Measured Performance:** Not given in the sources.
-*   **Scaling:** Performance is independent of scene complexity (object count, geometry) and depends only on screen resolution and the number of texture samples [S1, unofficial].
-*   **Strengths:** Low memory overhead, easy to integrate into existing rendering pipelines, effective for atmospheric effects and tone mapping [S1, S2, S3, unofficial].
-*   **Limitations:** Limited to screen-space effects (no world-space occlusion for volumetrics unless combined with raycasting), potential for aliasing if resolution is low, and artifacts at screen edges if UV covering is not handled correctly [S1, S2, S3, unofficial].
-*   **When to use:** When real-time performance is critical and the effects required (bloom, vignette, simple refraction) can be approximated in screen space [S1, S2, S3, unofficial].
-*   **When not to use:** When world-space accuracy is required for volumetric lighting or when the scene contains elements that extend beyond the screen space (e.g., large-scale volumetric clouds that require raycasting) [S2, S3, unofficial].
+*   **Time Complexity:** O(1) per pixel, as it involves a fixed number of texture samples and arithmetic operations. The 17-tap blur and cross-shaped bloom involve a constant number of samples (17 + 4 = 21 samples per pixel in the worst case).
+*   **Memory Complexity:** O(1) auxiliary memory, requiring only the input scene texture and output buffer.
+*   **Performance:** The method is lightweight and suitable for real-time rendering. The conditional execution of underwater refraction and blur allows for optimization based on scene state [S1, unofficial].
+*   **Strengths:** Provides immediate visual feedback, supports complex effects like refraction and bloom without requiring volumetric data, and is easily adjustable via uniforms [S1, unofficial].
+*   **Limitations:** Effects are limited to the screen space; objects not rendered to the screen texture are not affected. The method does not handle inter-object occlusion or global illumination beyond what is present in the scene texture [S1, unofficial].
 
 ## Background
-Screen-space post-processing is a common technique in real-time graphics, often used in conjunction with volume rendering to enhance the visual quality of the final image. The specific implementation described here is found in the Minerust project, which uses a wgpu-based renderer [S1, unofficial]. The technique of using screen-space effects for volumetric lighting and compositing has been widely adopted in games such as Fallout 4, where bilateral upsampling and dual-source blending are used to enhance volumetric light scattering [S2, unofficial]. Frustum raycasting for cloud compositing is also a known technique in real-time cloud rendering [S3, unofficial].
+The method is implemented in the Minerust project, a voxel-based game engine using wgpu [S1, unofficial]. It is part of the full-screen composite stage, which also includes underwater fog and color grading [S1, unofficial]. The specific implementation details, including the 17-tap blur and cross-shaped bloom, are derived from the project's rendering code [S1, unofficial].
 
 ## Sources
 [S1] B4rtekk1/Minerust, https://github.com/B4rtekk1/Minerust, fetched 2026-10-27 (unofficial)

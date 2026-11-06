@@ -3,85 +3,84 @@
 Also called: Shaded Volume Rendering (SVR)
 
 ## Overview
-Blinn-Phong Shading in Volume Rendering (SVR) is a technique that applies Blinn-Phong lighting models to volume data during ray marching to enhance depth perception and surface detail [S1, unofficial]. It differs from unshaded volume rendering by computing per-sample normals via central differences and combining them with diffuse, specular, and ambient terms, setting it apart from simpler shading models like Distance Color Blending or pure Phong shading with SDF normals by its specific implementation of the half-vector specular component and front-to-back compositing with lighting [S1, unofficial].
+Blinn-Phong Shading in Volume Rendering is a technique that applies the Blinn-Phong lighting model to volume data during ray marching to produce shaded, three-dimensional appearances [S1, unofficial]. It distinguishes itself from unshaded methods (like MPR) by calculating surface normals via volume gradients and combining diffuse, specular, and ambient lighting components, while differing from Phong shading by using the half-vector for specular highlights rather than the reflection vector [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A 3D volume texture (`texture_3d<f32>`), a 1D transfer function texture (`texture_1d<f32>`), a uniform transform matrix, and lighting parameters.
-- **Output:** A 2D color image with shaded volume rendering.
+- **Input:** A 3D volume texture (`volumeTexture`), a 1D transfer function texture (`tfTexture`), a transformation matrix (`transform`), and lighting parameters (`lightPos`, `lightColour`, `diffuse`, `specular`, `ambient`, `tfSize`) [S1, unofficial].
+- **Output:** A 2D color image with alpha blending [S1, unofficial].
 
 **Data Structures:**
 - **Uniforms Struct:**
-  - `transform`: `mat4x4<f32>` (View/Projection matrix).
-  - `lightPos`: `vec3<f32>` (Light position in world space).
-  - `lightColour`: `vec3<f32>` (Light color intensity).
-  - `diffuse`: `f32` (Diffuse lighting coefficient).
-  - `specular`: `f32` (Specular lighting coefficient).
-  - `ambient`: `f32` (Ambient lighting coefficient).
-  - `tfSize`: `f32` (Size of the transfer function texture).
+  - `transform`: `mat4x4<f32>` (4x4 matrix) [S1, unofficial].
+  - `lightPos`: `vec3<f32>` [S1, unofficial].
+  - `lightColour`: `vec3<f32>` [S1, unofficial].
+  - `diffuse`: `f32` [S1, unofficial].
+  - `specular`: `f32` [S1, unofficial].
+  - `ambient`: `f32` [S1, unofficial].
+  - `tfSize`: `f32` [S1, unofficial].
 - **Textures:**
-  - `volumeTexture`: Binding 0, `texture_3d<f32>`.
-  - `volumeSampler`: Binding 1, sampler.
-  - `tfTexture`: Binding 3, `texture_1d<f32>`.
+  - `volumeTexture`: `texture_3d<f32>` at binding 0 [S1, unofficial].
+  - `volumeSampler`: sampler at binding 1 [S1, unofficial].
+  - `tfTexture`: `texture_1d<f32>` at binding 3 [S1, unofficial].
 
-**Numbered Steps:**
+**Steps:**
 
-1.  **Vertex Shader Setup:** Generate a full-screen triangle using vertex indices to produce positions `(-1, 3)`, `(-1, -1)`, and `(3, -1)` in clip space [S1, unofficial]. This covers the screen more efficiently than two triangles [S1, unofficial].
-2.  **Ray Generation:** For each fragment with screen coordinate `coord.xy`, compute the ray origin `pos` and direction `dir` by transforming screen coordinates:
-    - `pos = transform * vec4(coord.xy, 0.0, 1.0)`
-    - `dir = transform * vec4(0.0, 0.0, 1.0, 0.0)` [S1, unofficial]
-3.  **Ray-Box Intersection:** Calculate the entry (`near`) and exit (`far`) distances of the ray with the volume's axis-aligned bounding box (AABB) defined by `bboxMin` (0,0,0) and `bboxMax` (volume dimensions) [S1, unofficial].
-    - Compute `inv_dir = 1.0 / dir`.
-    - Compute `bot = inv_dir * (bboxMin - pos)` and `top = inv_dir * (bboxMax - pos)`.
-    - Compute `rmin = min(top, bot)` and `rmax = max(top, bot)`.
-    - `t_entry = max(rmin.x, max(rmin.y, rmin.z))`
-    - `t_exit = min(rmax.x, min(rmax.y, rmax.z))`
-    - If `t_entry > t_exit`, the ray misses. Otherwise, `near = max(0.0, t_entry)` and `far = t_exit` [S1, unofficial].
-4.  **Ray Marching Loop:** Iterate from `near` to `far` along the ray direction. For each step (or slice, depending on implementation granularity; the source iterates through slices using integer steps `k`):
-    - Compute the current position `current_pos` in volume space.
-    - Normalize coordinates to `[0, 1]` range for texture sampling: `coords = current_pos / volume_dimensions`.
-    - Sample the volume texture: `sample = textureSample(volumeTexture, volumeSampler, coords)`.
-    - Convert the RG8 format sample to a normalized 16-bit intensity value:
-      $$ intensity = \frac{sample.x + sample.y \times 255}{256} $$
-      [S1, unofficial]
-    - **Normal Calculation:** Compute the gradient using central differences. For each axis $i \in \{x, y, z\}$:
-      - Sample intensity at `pos + offset` and `pos - offset`.
-      - Compute gradient component: $\delta_i = intensity(pos + offset_i) - intensity(pos - offset_i)$.
-      - Normalize the resulting vector $\vec{\delta}$ to get the surface normal $\vec{n}$ [S1, unofficial].
-    - **Transfer Function Lookup:** Map the sampled intensity `val` to a 1D texture index:
-      $$ tfIndex = \lfloor val \times tfSize \rfloor $$
-      Load the color from `tfTexture` at `tfIndex` to get `colour` [S1, unofficial].
-    - **Blinn-Phong Lighting:**
-      - Compute light direction $\vec{l}$, view direction $\vec{v}$, and half vector $\vec{h} = \frac{\vec{l} + \vec{v}}{|\vec{l} + \vec{v}|}$ [S1, unofficial].
-      - Diffuse term: $diffuse\_term = \max(0.0, \vec{n} \cdot \vec{l}) \times diffuse$
-      - Specular term: $specular\_term = pow(\max(0.0, \vec{n} \cdot \vec{h}), shininess) \times specular$
-      - Ambient term: $ambient\_term = ambient$
-      - Combined lit color:
-        $$ litColor = lightColour \times (colour.rgb \times (diffuse\_term + ambient\_term) + specular\_term) $$
-        [S1, unofficial]
-    - **Front-to-Back Composition:** Update accumulated color `accColour` using alpha blending:
-      $$ \alpha = (1.0 - accColour.a) \times colour.a $$
-      $$ accColour.rgb += \alpha \times litColor.rgb $$
-      $$ accColour.a += \alpha $$
-      Break if `accColour.a >= 0.95` [S1, unofficial].
+1.  **Vertex Shader Setup:** Generate a full-screen triangle using vertex indices to produce clip-space positions: $(-1, 3)$, $(-1, -1)$, and $(3, -1)$ [S1, unofficial].
+2.  **Ray Generation:** For each fragment with screen coordinate $coord.xy$, compute the ray origin $pos$ and direction $dir$ in volume space:
+    $$ pos = transform \times vec4(coord.xy, 0.0, 1.0) $$
+    $$ dir = transform \times vec4(0.0, 0.0, 1.0, 0.0) $$
+    [S1, unofficial]
+3.  **Ray-Box Intersection:** Calculate entry ($near$) and exit ($far$) distances by intersecting the ray with the volume's axis-aligned bounding box (AABB).
+    - Compute inverse direction: $inv\_dir = 1.0 / dir$ [S1, unofficial].
+    - Compute distances to bounds: $bot = inv\_dir \times (bboxMin - pos)$, $top = inv\_dir \times (bboxMax - pos)$ [S1, unofficial].
+    - Compute min/max intersections: $rmin = min(top, bot)$, $rmax = max(top, bot)$ [S1, unofficial].
+    - Entry: $near = max(0.0, max(rmin.x, rmin.y, rmin.z))$ [S1, unofficial].
+    - Exit: $far = min(rmax.x, rmax.y, rmax.z)$ [S1, unofficial].
+    - If $near > far$, the ray misses the volume [S1, unofficial].
+4.  **Ray Marching Loop:** Iterate from $near$ to $far$ along the ray.
+    - For each step $k$ (representing slice index or distance):
+        - Compute current position: $transformed = transform \times vec4(coord.xy, k, 1.0)$ [S1, unofficial].
+        - Normalize coordinates: $coords = transformed.xyz / size$ [S1, unofficial].
+        - Sample volume: $sample = textureSample(volumeTexture, volumeSampler, coords)$ [S1, unofficial].
+        - Convert intensity: $val = (sample.x + sample.y \times 255) / 256$ [S1, unofficial].
+        - Calculate Normal: Compute gradient using central differences.
+          - Sample neighbors at $pos \pm offset$ for each axis.
+          - $delta = normalize(sample(pos+offset) - sample(pos-offset))$ [S1, unofficial].
+        - Transfer Function Lookup: Map intensity to color.
+          - $tfIndex = val \times tfSize$ [S1, unofficial].
+          - $colour = textureSample(tfTexture, sampler, tfIndex)$ [S1, unofficial].
+        - Blinn-Phong Lighting:
+          - Light direction: $lightDir = normalize(lightPos - pos)$ [S1, unofficial].
+          - View direction: $viewDir = normalize(-pos)$ [S1, unofficial].
+          - Half vector: $halfDir = normalize(lightDir + viewDir)$ [S1, unofficial].
+          - Diffuse: $diff = max(0.0, dot(normal, lightDir)) \times diffuse$ [S1, unofficial].
+          - Specular: $spec = pow(max(0.0, dot(normal, halfDir)), shininess) \times specular$ [S1, unofficial].
+          - Ambient: $amb = ambient$ [S1, unofficial].
+          - Combined Color: $litColor = lightColour \times (colour.rgb \times (diff + amb) + spec)$ [S1, unofficial].
+        - Front-to-Back Composition:
+          - $\alpha = (1.0 - accColour.a) \times colour.a$ [S1, unofficial].
+          - $accColour.rgb += \alpha \times colour.rgb$ [S1, unofficial].
+          - $accColour.a += \alpha$ [S1, unofficial].
+          - Break if $accColour.a \ge 0.95$ [S1, unofficial].
 
 **Parameters:**
-- `shininess`: Exponent for specular lighting, typically set to 10.0 [S1, unofficial].
+- `shininess`: Exponent for specular calculation, typically 10.0 [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- Precision issues may arise when converting between integer slice indices and floating-point positions.
-- Boundary conditions must be handled when sampling near the edges of the volume texture to avoid out-of-bounds access.
-- The central difference normal calculation assumes smooth intensity gradients; noisy data may produce erratic normals [S1, unofficial].
+- Precision issues may arise when converting 8-bit packed samples to 16-bit normalized values [S1, unofficial].
+- Ray-box intersection must handle cases where the ray origin is inside the volume ($near < 0$) by clamping to 0 [S1, unofficial].
+- Degenerate normals (zero-length gradients) should be handled by normalizing only if the length is non-zero [G].
 
 ## Operating characteristics
-- **Time Complexity:** Linear with respect to the number of samples along the ray, which depends on the volume depth and step size.
-- **Memory Complexity:** Constant additional memory for uniforms and accumulated color, plus storage for the volume and transfer function textures.
-- **Performance:** Dependent on GPU capabilities and volume resolution. The use of a full-screen triangle and efficient ray-box intersection helps minimize overhead.
-- **Strengths:** Provides realistic lighting effects, enhancing the perception of 3D structure.
-- **Limitations:** Computationally more expensive than unshaded rendering due to normal calculation and lighting per sample. Sensitive to noise in volume data affecting normal estimation.
+- **Time Complexity:** Linear with respect to the number of samples along the ray, which depends on volume resolution and view angle [S1, unofficial].
+- **Memory Complexity:** Proportional to the size of the 3D volume texture and 1D transfer function texture [S1, unofficial].
+- **Performance:** Efficient for real-time rendering on WebGPU-enabled browsers due to the use of full-screen triangles and early termination based on alpha accumulation [S1, unofficial].
+- **Strengths:** Provides realistic shading and depth cues through specular highlights and diffuse lighting [S1, unofficial].
+- **Limitations:** Computationally more expensive than unshaded methods due to normal calculation and lighting per sample [S1, unofficial].
 
 ## Background
-Blinn-Phong Shading in Volume Rendering is implemented in the `ossium` project, a WebGPU-based application for displaying 3D volumes created from DICOM files in the browser [S1, unofficial]. It was developed by Fraser Love as part of the ossium repository, aiming to provide interactive volume visualization with shading capabilities [S1, unofficial].
+Blinn-Phong Shading in Volume Rendering was implemented in the `ossium` project, a WebGPU-based volume rendering application for displaying DICOM files in the browser [S1, unofficial]. It serves as an alternative to Multi-Planar Reformatting (MPR) by adding shading to enhance the perception of 3D structure [S1, unofficial].
 
 ## Sources
 [S1] fraserlove/ossium, https://github.com/fraserlove/ossium, fetched 2026-10-27 (unofficial)

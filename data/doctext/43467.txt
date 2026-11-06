@@ -1,0 +1,1161 @@
+# Visualization Project – Direct Volume Rendering
+
+This project was developed as part of the Visualization course and implemented in a group of three. The goal was to build an interactive, browser-based 3D volume rendering system using WebGL (via three.js) and d3.js.
+
+The core of the assignment was to implement GPU-based raycasting to visualize 3D medical volume data, alongside a set of interactive tools for exploration and analysis.
+All project requirements are based on the official assignment document.
+
+Programming langauge used: HTML, CSS, JavaScript, Shading Language.
+
+<img width="933" height="408" alt="image" src="https://github.com/user-attachments/assets/dc55d411-063f-4146-b855-17672dfff13f" />
+
+## Features Implemented
+### 1. Direct Volume Rendering (Raycasting)
+
+Implemented single-pass or two-pass raycasting on the GPU.
+
+Visualizes volumetric data using Maximum Intensity Projection (MIP).
+
+Handles sampling, bounding-box intersection, and compositing.
+
+### 2. Density Histogram
+
+Displays the density distribution of the currently loaded dataset.
+
+Updates automatically when data changes.
+
+Built using d3.js with animated transitions for readability.
+
+### 3. Cutting Plane Integration
+
+Adds an interactively movable cutting plane to reveal internal structures.
+
+Raycasting dynamically respects the plane’s position and orientation.
+
+### 4. Interactive Editor
+
+Real-time controls to translate and rotate the cutting plane.
+
+Toggle between rendering above/below the plane.
+
+Color selection for the volume (10–20 colors).
+
+Histogram dynamically adjusts to show only densities of visible voxels.
+
+### 5. Transfer Function (not fully finished)
+
+Supports at least two isosurfaces.
+
+Adjust iso-value, color, and transparency per surface.
+
+Enables material-based visualization (e.g., bone vs. tissue).
+
+### vis-exercise/js/camera.js
+```
+/**
+ * Vis 1 Task 1 Framework
+ * Copyright (C) TU Wien
+ *   Institute of Visual Computing and Human-Centered Technology
+ *   Research Unit of Computer Graphics
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are not permitted.
+ * 
+ * Camera that orbits around a centered object. Only uses mouse input!
+ *
+ * @author Manuela Waldner
+ */
+
+class OrbitCamera {
+    constructor(camera, targetPos, radius, domElement){
+        this.camera = camera;
+        this.targetPos = targetPos;
+        this.camera.lookAt(this.targetPos);
+        this.radius = radius;
+        this.minRadius = radius / 3;
+        this.maxRadius = radius * 2;
+        this.phi = 0;
+        this.theta = 0;
+
+        this.pointerPos = new THREE.Vector2(0, 0);
+        this.drag = false;
+        this.autoRotate= false;
+
+        this.domElement = domElement;
+        this.domElement.addEventListener('pointerdown', event => this.#onMouseDown(event), false);
+        this.domElement.addEventListener('pointerup', event => this.#onMouseUp(event), false);
+        this.domElement.addEventListener('pointermove', event => this.#onMouseMove(event), false);
+        this.domElement.addEventListener('wheel', event => this.#onMouseWheel(event), false);
+        // catch mouse-up outside the browser window
+        window.addEventListener('pointerup', event => this.#onMouseUp(event));
+
+        this.camera.up.set(0, 0, -1);
+        this.#updateCamera(0, 0, 0);
+    }
+
+    update(){
+        if(this.autoRotate){
+            this.#updateCamera(0.5, 0, 0);
+        }
+    }
+
+    #updateCamera(dx, dy, dz){
+        this.phi += dx / 100.0;
+        this.theta += dy / 100.0;
+        this.radius += dz / 10.0;
+
+        const clamp = (num, min, max) => Math.min(Math.max(num, min), max);
+        this.theta = clamp(this.theta, -Math.PI / 2.0, Math.PI / 2.0);
+        this.radius = clamp(this.radius, this.minRadius, this.maxRadius);
+
+        this.camera.position.x = -this.radius * Math.cos(this.theta)* Math.sin(this.phi);
+        this.camera.position.y = -this.radius * Math.cos(this.theta) * Math.cos(this.phi);
+        this.camera.position.z = this.radius * Math.sin(this.theta);
+
+        this.camera.lookAt(this.targetPos);
+
+        requestAnimationFrame(paint);
+    }
+
+    #onMouseDown(event){
+        event.preventDefault(); // no scrolling!
+        let that = this;
+
+        switch(event.button){
+            // left mouse button only
+            case 0:
+                that.drag = true;
+                that.pointerPos.x = event.clientX;
+                that.pointerPos.y = event.clientY;
+                break;
+        }
+    }
+
+    #onMouseUp(event){
+        switch(event.button){
+            case 0:
+                this.drag = false;
+                break;
+        }
+    }
+
+    #onMouseMove(event){
+        let that = this;
+        if(this.drag){
+            let newPointerPos = new THREE.Vector2(event.clientX, event.clientY);
+            let pointerDiff = new THREE.Vector2().subVectors(that.pointerPos, newPointerPos);
+            that.pointerPos = newPointerPos;
+            that.#updateCamera(pointerDiff.x, pointerDiff.y, 0);
+        }
+
+    }
+
+    #onMouseWheel(event){
+        event.preventDefault();
+        this.#updateCamera(0, 0, -event.wheelDelta);
+    }
+}
+```
+
+### vis-exercise/js/histogram.js
+```
+class Histogram {
+
+    constructor(width, height){
+        this.width = width;
+        this.height = height;
+        this.marginTop = 20;
+        this.marginRight = 20;
+        this.marginLeft = 40;
+        this.marginBottom = 30;
+        this.data = null;
+        this.bins = null;
+        this.svgElem = null;
+        this.xScale = null;
+        this.yScale = null;
+        this.binGenerator = d3.bin()
+            .thresholds(100)
+            .value((d) => d);
+    }
+
+    createChart() {
+        
+        this.data = [0.0];
+        this.bins = this.binGenerator(this.data);
+
+        // Declare the x (horizontal position) scale.
+        this.xScale = d3.scaleLinear()
+            .domain([0.0, 1])
+            .range([this.marginLeft, this.width - this.marginRight]);
+
+        // Declare the y (vertical position) scale.
+        this.yScale = d3.scaleSymlog()
+            .domain([0.0, 1.0])
+            .range([this.height - this.marginBottom, this.marginTop]).constant(0.01);
+        
+        this.yScaleDisplay = d3.scaleSymlog()
+            .domain([0.0, 1.0])
+            .range([this.height - this.marginBottom, this.marginTop]);
+
+        // Create the SVG container.
+        this.svgElem = d3.create("svg")
+            .attr("width", this.width)
+            .attr("height", this.height * 2);
+
+        // Add the x-axis.
+        this.svgElem.append("g")
+            .attr("id", "xAxis")
+            .attr("transform", `translate(0,${this.height - this.marginBottom})`)
+            .call(d3.axisBottom(this.xScale))
+            .call((g) => g.append("text")
+            .attr("x", this.width)
+            .attr("y", this.marginBottom - 4)
+            .attr("fill", "currentColor")
+            .attr("text-anchor", "end")
+            .text(" Density →"));
+
+        // Add the y-axis.
+        this.svgElem.append("g")
+            .attr("id", "yAxis")
+            .attr("transform", `translate(${this.marginLeft},0)`)
+            .call(d3.axisLeft(this.yScale))
+            .call((g) => g.append("text")
+            .attr("x", -1 * this.marginLeft)
+            .attr("y", 10)
+            .attr("fill", "currentColor")
+            .attr("text-anchor", "start")
+            .text("↑ Intensity "));
+
+        
+        // create bars
+        this._appendBars();
+
+        // Return the SVG element.
+        return this.svgElem.node();
+    }
+
+    //remove the current bars
+    _removeBars(){
+        const currentRects = d3.select("#bars");
+        currentRects.remove();
+        
+    }
+
+    //appends new bars based on the current bins
+    _appendBars(){
+        console.log(this.bins);
+        let maxLen = 0;
+        for (let idx = 0; idx < this.bins.length; idx++) {
+            if(maxLen < this.bins[idx].length){
+                maxLen = this.bins[idx].length
+            }
+            
+        }
+
+        this.svgElem.append("g")
+            .attr("id", "bars")
+            .attr("fill", "white")
+            .attr("fill-opacity", "0.3")
+            .selectAll()
+            .data(this.bins)
+            .join("rect")
+            .attr("x", (d) => this.xScale(d.x0) + 1)
+            .attr("width", (d) => this.xScale(d.x1) - this.xScale(d.x0) - 3)
+            .attr("y", (d) =>  this.yScale(0.0))
+            .attr("height", (d) => 0)
+            .transition()
+            .duration(500)
+            .ease(d3.easePolyIn)
+            .attr("y", (d) =>  this.yScale(0.0))
+            .attr("height", (d) => this.yScale(0.0) - this.yScale(d.length/maxLen));
+    }
+
+    //replaces the currently displayed Data with a new
+    //dataset
+    replaceData(newData){
+
+        this.data = newData;
+        this.bins = this.binGenerator(this.data);
+
+        this._removeBars();
+        this._appendBars();
+    }
+}
+```
+
+### vis-exercise/js/shader.js
+```
+/**
+ * Vis 1 Task 1 Framework
+ * Copyright (C) TU Wien
+ *   Institute of Visual Computing and Human-Centered Technology
+ *   Research Unit of Computer Graphics
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are not permitted.
+ *
+ * Shader parent class. Loads .essl files from the folder shaders. Provides methods to set uniforms.
+ * The function load() has to be explicitly called from an async function!
+ *
+ * @author Manuela Waldner
+ */
+class Shader {
+    constructor(vertexProgram, fragmentProgram) {
+        this.vertexProgram = vertexProgram;
+        this.fragmentProgram = fragmentProgram;
+        this.material = new THREE.ShaderMaterial
+        ({
+            glslVersion: THREE.GLSL3,
+            uniforms: {},
+            transparent: true
+        });
+    }
+
+    async #loadShader(shader, name){
+        const program = await d3.text("shaders/"+name+".essl");
+        this.material[shader] = program;
+    }
+
+    // this function has to be explicitly called after the constructor from another async function like that:
+    // await yourShader.load();
+    async load(){
+        await this.#loadShader("vertexShader", this.vertexProgram);
+        await this.#loadShader("fragmentShader", this.fragmentProgram);
+    }
+
+    // use the type parameter for array variants that are not supported by THREE.Uniform yet:
+    // e.g., v2v (array of THREE.Vector2), v3v (array of THREE.Vector3) etc.
+    // otherwise only set key and value
+    setUniform(key, value, type){
+        if(typeof type !== 'undefined'){
+            this.material.uniforms[key] = {
+                'type': type,
+                'value': value
+            };
+        }
+        else{
+            this.material.uniforms[key] = new THREE.Uniform(value);
+        }
+    }
+}
+```
+
+### vis-exercise/js/testShader.js
+```
+/**
+ * Vis 1 Task 1 Framework
+ * Copyright (C) TU Wien
+ *   Institute of Visual Computing and Human-Centered Technology
+ *   Research Unit of Computer Graphics
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are not permitted.
+ *
+ * Useless toy shader that just sets a uniform color for the scene. Sends the given color as RGB and BGR.
+ * Illustrates how to initialize new shaders and how to set uniforms.
+ *
+ * @author Manuela Waldner
+ */
+class TestShader extends Shader{
+    constructor(color){
+        super("color_vert", "color_frag");
+        // sends color as RGB or BGR in a Vector3 array
+        this.setUniform("color",
+            [
+                new  THREE.Vector3(color[0], color[1], color[2]),
+                new THREE.Vector3(color[2], color[1], color[0])
+            ],
+            "v3v");
+        // sends whether to use RGB or BGR as index (0: RGB, 1: BGR)
+        this.setUniform("colorIdx", 0);
+    }
+}
+```
+
+### vis-exercise/js/vis1.js
+```
+/**
+ * Vis 1 Task 1 Framework
+ * Copyright (C) TU Wien
+ *   Institute of Visual Computing and Human-Centered Technology
+ *   Research Unit of Computer Graphics
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are not permitted.
+ *
+ * Main script for Vis1 exercise. Loads the volume, initializes the scene, and contains the paint function.
+ *
+ * @author Manuela Waldner
+ * @author Laura Luidolt
+ * @author Diana Schalko
+ */
+let renderer, camera, scene, orbitCamera;
+let canvasWidth,
+  canvasHeight = 0;
+let container = null;
+let volume = null;
+let fileInput = null;
+let testShader = null;
+let twoPassRaycaster = null;
+let histogram = null;
+let transfareFunctionPicker
+let transfareFunctionAlphaPicker
+this.renderAbove = true;
+this.renderPlaneHeight = 50;
+this.renderPlaneY = 90;
+this.renderPlaneX = 90;
+this.renderPlaneColor = "#ffffff";
+
+// Cutting plane parameters
+let cuttingPlane = null;
+let extraPlaneScene = null;
+let cutEnabled = true;
+
+/**
+ * Render the scene and update all necessary shader information.
+ */
+function paint() {
+  if (volume) {
+    
+    // Update cutting plane and pass correct uniforms before rendering
+    cuttingPlane.planeMesh.updateMatrixWorld();
+
+    twoPassRaycaster.quadData.shader.setUniform("u_enableCut", cutEnabled);
+
+    if (cutEnabled) {
+      const origin = new THREE.Vector3();
+      cuttingPlane.planeMesh.getWorldPosition(origin);
+
+      const normal = new THREE.Vector3(0, 0, 1);
+      normal.applyQuaternion(cuttingPlane.planeMesh.quaternion).normalize();
+
+      twoPassRaycaster.quadData.shader.setUniform("u_planeOrigin", origin);
+      twoPassRaycaster.quadData.shader.setUniform("u_planeNormal", normal);
+    }
+
+    twoPassRaycaster.render(renderer, camera);
+
+    renderer.autoClear = false; // DON'T wipe the image from raycaster
+    renderer.render(extraPlaneScene, camera); // render your plane
+    renderer.autoClear = true;
+  }
+}
+
+/**
+ * Load all data and initialize UI here.
+ */
+function init() {
+  // volume viewer
+  container = document.getElementById("viewContainer");
+  canvasWidth = window.innerWidth * 0.6;
+  canvasHeight = window.innerHeight * 0.6;
+
+  // WebGL renderer
+  renderer = new THREE.WebGLRenderer();
+  renderer.setSize(canvasWidth, canvasHeight);
+  container.appendChild(renderer.domElement);
+
+  // read and parse volume file
+  fileInput = document.getElementById("upload");
+  fileInput.addEventListener("change", readFile);
+
+  // dummy shader gets a color as input
+  testShader = new TestShader([255.0, 255.0, 0.0]);
+
+  //initialize histogram
+  histContainer = document.getElementById("histContainer");
+  histogram = new Histogram(600, 400);
+  histContainer.appendChild(histogram.createChart())
+
+  //setup transfare function Input
+  transfareFunctionPicker = new TransfareFunctionPicker("transfareFunctionPicker", paint)
+  transfareFunctionAlphaPicker  = new TransfareFunctionPicker("transfareFunctionPicker2", paint) 
+}
+
+/**
+ * Handles the file reader. No need to change anything here.
+ */
+function readFile() {
+  let reader = new FileReader();
+  reader.onloadend = function () {
+    console.log("data loaded: ");
+
+    let data = new Uint16Array(reader.result);
+    volume = new Volume(data);
+
+    resetVis();
+  };
+  reader.readAsArrayBuffer(fileInput.files[0]);
+}
+
+/**
+ * Construct the THREE.js scene and update histogram when a new volume is loaded by the user.
+ *
+ * Currently renders the bounding box of the volume.
+ */
+async function resetVis() {
+
+  // create new empty scene and perspective camera
+  camera = new THREE.PerspectiveCamera(
+    75,
+    canvasWidth / canvasHeight,
+    0.5,
+    1000
+  );
+
+  twoPassRaycaster = await TwoPassRaycaster.create(
+    {
+      width: canvasWidth,
+      height: canvasHeight,
+    },
+    volume,
+    volume.to3dTexture(),
+    0.2,
+    {
+      color:transfareFunctionPicker,
+      alpha:transfareFunctionAlphaPicker
+    }
+  );
+  document.getElementById("mip").addEventListener("change",(e)=>{
+      const v = e.target.checked;
+      twoPassRaycaster.setMIP(v)
+      paint();
+
+  })
+  document.getElementById("shading").checked = true
+  document.getElementById("shading").addEventListener("change",(e)=>{
+    const v = e.target.checked;
+    twoPassRaycaster.setShading(v)
+    paint();
+  })
+
+  // Create cutting plane and a scene for it
+  extraPlaneScene = new THREE.Scene();
+  cuttingPlane = new CuttingPlane();
+  iEditorValueChanged();
+  extraPlaneScene.add(cuttingPlane.planeMesh);
+
+  // our camera orbits around an object centered at (0,0,0)
+  orbitCamera = new OrbitCamera(
+    camera,
+    new THREE.Vector3(0, 0, 0),
+    2 * volume.max,
+    renderer.domElement
+  );
+  
+  histogram.replaceData(volume.getHistogramData())
+  requestAnimationFrame(paint);
+}
+
+function togglePlaneVisibility() {
+  const showPlane = document.getElementById("iEditorShowPlane").checked;
+  cuttingPlane.planeMesh.visible = showPlane;
+  paint(); // re-render
+}
+
+function toggleVolumeCut() {
+  cutEnabled = document.getElementById("iEditorEnableCut").checked;
+  paint(); // re-render
+}
+
+function iEditorValueChanged() {
+
+  this.renderPlaneColor = document.getElementById("iEditorColor").value;
+  this.renderPlaneY = document.getElementById("iEditorYRotate").value;
+  this.renderPlaneX = document.getElementById("iEditorXRotate").value;
+  this.renderPlaneHeight = document.getElementById("iEditorHeight").value;
+  
+  if(cuttingPlane)
+    cuttingPlane.update(this.renderPlaneHeight, this.renderPlaneX, this.renderPlaneY, this.renderPlaneColor, this.renderAbove);
+  
+  update();
+}
+
+function flipRenderPlane() {
+
+  this.renderAbove = !this.renderAbove;
+  this.renderPlaneY = document.getElementById("iEditorYRotate").value;
+  this.renderPlaneX = document.getElementById("iEditorXRotate").value;
+
+  if(cuttingPlane)
+    cuttingPlane.updateFlip();
+
+  update();
+}
+
+function update(){
+  console.log(this.renderPlaneHeight, this.renderPlaneX, this.renderPlaneY, this.renderPlaneColor, this.renderAbove)
+}
+```
+
+### vis-exercise/js/volume.js
+```
+/**
+ * Vis 1 Task 1 Framework
+ * Copyright (C) TU Wien
+ *   Institute of Visual Computing and Human-Centered Technology
+ *   Research Unit of Computer Graphics
+ * All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are not permitted.
+ *
+ * Volume class handling simple volume.dat files. Loads the volumes as float arrays.
+ *
+ * @author Manuela Waldner
+ * @author Diana Schalko
+ */
+class Volume {
+    constructor(uint16Array) {
+        this.width = uint16Array[0];
+        this.height = uint16Array[1];
+        this.depth = uint16Array[2];
+        this.slice = this.width * this.height;
+        this.size = this.slice * this.depth;
+        this.max = Math.max(this.width, this.height, this.depth);
+        this.scale = new THREE.Vector3(this.width, this.height, this.depth);
+        let floatArray = [];
+        uint16Array.slice(3).forEach(function(voxel){
+            floatArray.push(voxel / 4095.0);
+        });
+        this.voxels = Float32Array.from(floatArray);
+
+        console.log(this.voxels.length + " voxels loaded - ["
+            + this.width + ", " + this.height + ", " + this.depth + "], max: " + this.max);
+    }
+
+    to3dTexture(){
+        const volumeTexture = new THREE.Data3DTexture(
+            volume.voxels,                  
+            volume.width,
+            volume.height,
+            volume.depth
+        );
+        volumeTexture.format = THREE.RedFormat;       
+        volumeTexture.type = THREE.FloatType;
+        volumeTexture.minFilter = THREE.LinearFilter;  
+        volumeTexture.magFilter = THREE.LinearFilter;
+        volumeTexture.needsUpdate = true; 
+        return volumeTexture
+    }
+
+    getHistogramData(){
+        console.log(this.voxels);
+        return this.voxels;
+        
+    }
+}
+```
+
+### vis-exercise/js/CuttingPlane/CuttingPlaneRender.js
+```
+/**
+ * CuttingPlane class for rendering a cutting plane in 3D space.
+ * This class creates a plane mesh and an arrow to represent the normal vector of the plane.
+ * It allows for updating the plane's position, rotation, and color.
+ * 
+ * @author Subair
+ */
+class CuttingPlane {
+    constructor() {
+        // Plane transformation parameters
+        this.planeTransZ = 0;  // Translation along Z-axis
+        this.planeRotX = 0;     // Rotation around X-axis
+        this.planeRotY = 0;     // Rotation around Y-axis
+        this.planeColor = 0xffffff;  // Default color of the plane
+
+        // Create a plane geometry (size 400x400)
+        this.planeGeometry = new THREE.PlaneGeometry(400, 400);
+        
+        // Define material properties
+        this.planeMaterial = new THREE.MeshBasicMaterial({
+            color: this.planeColor,  // Initial plane color
+            side: THREE.DoubleSide,  // Render both sides of the plane
+            transparent: true,       // Enable transparency
+            opacity: 0.5,            // Set transparency level
+            depthTest: false,        // Ensure it's always visible
+            depthWrite: false        // Prevent depth buffer writing
+        });
+
+        // Create the plane mesh using geometry and material
+        this.planeMesh = new THREE.Mesh(this.planeGeometry, this.planeMaterial);
+
+        // Create a normal vector arrow (initial direction along Z-axis)
+        const origin = new THREE.Vector3(0, 0, 0);       // Arrow origin at center
+        const direction = new THREE.Vector3(0, 0, 1).normalize(); // Initial pointing direction along Z-axis
+        const length = 35;  // Arrow length
+        const color = 0xff0000;  // Arrow color (red)
+
+        // Create an ArrowHelper to represent the normal vector
+        this.normalArrow = new THREE.ArrowHelper(direction, origin, length, color);
+        this.normalArrow.setLength(35, 20, 10);  // Adjust arrow head and shaft sizes
+        this.normalArrow.position.set(0, 0, 0);  // Position at the plane's center
+
+        // Ensure arrow always renders on top by disabling depth tests
+        this.normalArrow.line.material.depthTest = false;
+        this.normalArrow.line.material.depthWrite = false;
+        this.normalArrow.cone.material.depthTest = false;
+        this.normalArrow.cone.material.depthWrite = false;
+
+        // Attach the arrow to the plane mesh so it moves with the plane
+        this.planeMesh.add(this.normalArrow);
+    }
+
+    /**
+     * Update the plane's position, rotation, color, and rendering settings.
+     * @param {number} planeHeight - Normalized plane height (0 to 1).
+     * @param {number} planeRotX - Rotation around X-axis in degrees.
+     * @param {number} planeRotY - Rotation around Y-axis in degrees.
+     * @param {number} planeColor - New color for the plane.
+     * @param {boolean} renderAbove - Whether to flip the plane (rotate 180° around Y).
+     */
+    update(planeHeight, planeRotX, planeRotY, planeColor, renderAbove) {
+        // Convert rotations from degrees to radians
+        const rotX = THREE.MathUtils.degToRad(planeRotX);
+        const rotY = THREE.MathUtils.degToRad(planeRotY) + (renderAbove ? Math.PI : 0);  // Flip if renderAbove is true
+
+        // Adjust plane height (mapping 0-1 range to Z-position)
+        this.planeMesh.position.z = 200 - 400 * planeHeight;
+
+        // Set plane rotation
+        this.planeMesh.rotation.set(rotX, rotY, 0);
+
+        // Update the plane's material color
+        this.planeMaterial.color.set(planeColor);
+    }
+
+    /**
+     * Flip the plane by rotating it 180° around the Y-axis.
+     * This reverses its facing direction while maintaining the X and Z rotations.
+     */
+    updateFlip() {
+        const rotX = this.planeMesh.rotation.x;
+        const rotY = this.planeMesh.rotation.y + Math.PI;  // Add 180° rotation to Y
+        this.planeMesh.rotation.set(rotX, rotY, 0);
+    }
+}
+```
+
+### vis-exercise/js/Twopass/RaycastingShader.js
+```
+class RaycastingShader extends Shader{
+    /**
+     * @param {Vector3} size
+
+     * @param {Texture3D} volumeData
+     * @param {number} stepSize
+     * 
+     */
+    constructor( size, volumeData, stepSize){
+        super("TwoPass/raycasting_vert", "TwoPass/raycasting_frag");
+        this.setUniform("size", new THREE.Vector3(size.width, size.height, size.depth))
+     
+        this.setUniform("stepSize",stepSize)
+        this.setUniform("volumeData",volumeData)
+        this.setUniform("shading", true)
+        this.setUniform("mip", false)
+
+        // Cutting plane
+        this.setUniform("u_planeOrigin", new THREE.Vector3(0, 0, 0));
+        this.setUniform("u_planeNormal", new THREE.Vector3(0, 0, 1));
+        this.setUniform("u_enableCut", true);
+    }
+
+    /**
+     * set the Poisition Textures for Front Culled and back culled 
+     * are used to compute current view an need to be update every frame
+     * @param {Texture2D} frontTexture
+     * @param {Texture2D} backTexture
+     */
+    setPositionTextures(frontTexture, backTexture){
+        this.setUniform("tFront", frontTexture)
+        this.setUniform("tBack",backTexture)
+    }
+
+    setTransfareFunction(transfareFunction){
+        this.setUniform("transfareFunction", transfareFunction)
+    }
+
+    setShading(shading){
+        this.setUniform("shading", shading)
+    }
+
+    setMIP(mip){
+        this.setUniform("mip", mip)
+    }
+}
+```
+
+### vis-exercise/js/Twopass/ScreenPositionShader.js
+```
+class ScreenPositionShader extends Shader{
+    /**
+     * @param {boolean} frontSide 
+     * 
+     */
+    constructor(frontSide, size){
+        super("TwoPass/screen_position_vert", "TwoPass/screen_position_frag");
+        this.material.side = frontSide == false?THREE.BackSide :THREE.FrontSide 
+        this.material.flatShading = false;
+        this.setUniform("size", new THREE.Vector3(size.width, size.height, size.depth))
+    }
+}
+```
+
+### vis-exercise/js/Twopass/TwoPassRaycasting.js
+```
+/**
+ * @property {{scene: Scene, target:renderTarget} } frontData
+ * @property {{scene: Scene, target:renderTarget} } backData
+ * @property {{scene:raycastScene, shader:raycastingShader}} quadData
+ */
+class TwoPassRaycaster {
+  /**
+   * @param {{width:number, height:number}} viewDim
+   * @param {{width:number, height:number, depth:numbe}} volumeSize
+   * @param {Texture3D} volumeData
+   * @param {number} stepSize
+   * @param { {color: TransfareFunctionPicker, alpha: TransfareFunctionPicker}} tfPicker
+   */
+  static async create(viewDim, volumeSize, volumeData, stepSize, tfPicker) {
+    const twoPassRaycaster = new TwoPassRaycaster();
+
+    const r = await Promise.all([
+      twoPassRaycaster.createCubeScene(viewDim, volumeSize, true),
+      twoPassRaycaster.createCubeScene(viewDim, volumeSize, false),
+      twoPassRaycaster.createFullScreenQuadScene(
+        volumeSize,
+        volumeData,
+        stepSize
+      ),
+    ]);
+    twoPassRaycaster.frontData = r[0];
+    twoPassRaycaster.backData = r[1];
+    twoPassRaycaster.quadData = r[2];
+    twoPassRaycaster.tfPicker = tfPicker;
+
+    return twoPassRaycaster;
+  }
+
+  /**
+   * Creates a Scenen with a cube of the size of the volume bounding box and the correct shader
+   * used to calulate the values in the first pass
+   * @param {{width:number, height:number}} viewDim
+   * @param {{width:number, height:number, depth:numbe}} volume
+   * @param {boolean} front render cube front or back
+   * @returns { {scene: Scene, target:renderTarget}}
+   */
+  async createCubeScene(viewDim, volume, front) {
+    const renderTarget = new THREE.WebGLRenderTarget(
+      viewDim.width,
+      viewDim.height
+    );
+
+    //init scene with only cube and correct shader
+    const scene = new THREE.Scene();
+    const shader = new ScreenPositionShader(front, volume);
+    await shader.load();
+    const faceMaterial = shader.material;
+    const boxGeometry = new THREE.BoxGeometry(
+      volume.width,
+      volume.height,
+      volume.depth
+    );
+    const cube = new THREE.Mesh(boxGeometry, faceMaterial);
+    scene.add(cube);
+
+    return { scene: scene, target: renderTarget };
+  }
+
+  /**
+   * Creates a Scene with a quad that goes over the complete Screen used to display the result of
+   * the second pass
+   * @param {{width:number, height:number, depth:numbe}} volumeSize
+   * @param {Texture3D} volumeData
+   * @param {number} stepSize
+   * @returns {{scene:raycastScene, shader:raycastingShader}}
+   */
+  async createFullScreenQuadScene(volumeSize, volumeData, stepSize) {
+    const quadGeometry = new THREE.PlaneGeometry(2, 2);
+
+    const raycastingShader = new RaycastingShader(
+      volumeSize,
+      volumeData,
+      stepSize
+    );
+
+    await raycastingShader.load();
+    const raycastingMaterial = raycastingShader.material;
+
+    const quad = new THREE.Mesh(quadGeometry, raycastingMaterial);
+    const raycastScene = new THREE.Scene();
+    raycastScene.add(quad);
+
+    return { scene: raycastScene, shader: raycastingShader };
+  }
+
+  /**
+   *
+   * @param {Rednerer} renderer
+   * 1. Calcualtes Front and Back Testures
+   * 2. Performs Raycasting
+   */
+  render(renderer, camera) {
+    renderer.setRenderTarget(this.frontData.target);
+    renderer.render(this.frontData.scene, camera);
+
+    renderer.setRenderTarget(this.backData.target);
+    renderer.render(this.backData.scene, camera);
+
+    this.quadData.shader.setPositionTextures(
+      this.frontData.target.texture,
+      this.backData.target.texture
+    );
+
+    const tf = this._tfTexture(255);
+    this.quadData.shader.setTransfareFunction(tf);
+
+    renderer.setRenderTarget(null);
+    renderer.render(this.quadData.scene, camera);
+  }
+
+  _tfTexture(resolution) {
+    const color = this.tfPicker.color.getRawColors();
+    const alpha = this.tfPicker.alpha.getRawColors();
+
+    const colorScale = d3
+      .scaleLinear()
+      .domain(color.map((s) => s.pos))
+      .range(color.map((s) => s.col))
+      .interpolate(d3.interpolateRgb);
+
+    const alphaScale = d3
+      .scaleLinear()
+      .domain(alpha.map((s) => s.pos))
+      .range(
+        alpha.map((s) => {
+          const c = d3.color(s.col);
+          return (c.r + c.g + c.b) / 3 / 255;
+        })
+      );
+
+    const tfData = new Uint8Array(resolution * 4);
+    for (let i = 0; i < resolution; i++) {
+      const pos = i / (resolution - 1);
+      const c = d3.color(colorScale(pos));
+      const alpha = alphaScale(pos);
+
+      tfData.set([c.r, c.g, c.b, Math.round(alpha * 255)], i * 4);
+    }
+    const tex = new THREE.DataTexture(tfData, resolution, 1, THREE.RGBAFormat);
+    tex.needsUpdate = true;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    tex.generateMipmaps = false;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+
+    return tex;
+  }
+
+  setShading(shading){
+    this.quadData.shader.setShading(shading)
+}
+
+  setMIP(mip){
+    this.quadData.shader.setMIP(mip)
+  }
+}
+```
+
+### vis-exercise/js/UI/TransfareFunctionPicker.js
+```
+// Tobermory.es6-string-html plugin for vs code
+
+class TransfareFunctionPicker {
+  sliderContainer = null;
+  background = null;
+
+  constructor(id, update) {
+    this.hard = false;
+    const sliderContainer = document.getElementById(id);
+    const background = sliderContainer.querySelector(
+      ".transfareFunctionBackground"
+    );
+
+    this.sliderContainer = sliderContainer;
+    this.background = background;
+
+    background.addEventListener("dblclick", (event) => {
+      this._addHandle(event);
+    });
+
+    sliderContainer
+      .querySelector(".pickerCheck")
+      .addEventListener("click", () => {
+        this.hard = !this.hard;
+        this._updateGradient();
+      });
+
+    this.update = update
+    this._updateGradient()
+    for (let i = 0; i < this.background.children.length; i++) {
+      const child = this.background.children[i];
+      this._addEventsToHandle(child)
+    }
+  }
+
+  /**
+   *
+   * @param {MouseEvent} event
+   */
+  _addHandle(event) {
+    const handleTemplate = document.getElementById("colorHandle");
+
+    /** @type { HTMLInputElement } */
+    const handle = handleTemplate.content.firstElementChild.cloneNode(true);
+
+    const color = this.getRawColors()
+    const colorScale = d3
+      .scaleLinear()
+      .domain(color.map((s) => s.pos))
+      .range(color.map((s) => s.col))
+      .interpolate(d3.interpolateRgb)
+    handle.value = d3.rgb(colorScale(this._silderPosition(handle, event.clientX))).formatHex()
+
+    this.background.appendChild(handle);
+    this._moveHandleTo(handle, event.clientX);
+    this._addEventsToHandle(handle)
+  }
+
+  _addEventsToHandle(handle){
+    
+    handle.addEventListener("pointerdown", (ev) => this._startDrag(ev, handle));
+    handle.addEventListener("input", (event) => {
+      this._updateGradient();
+      handle.style.background = event.target.value;
+    });
+    handle.addEventListener("click", (e) => {
+      if (e.detail === 2) {
+        handle.remove();
+        this._updateGradient();
+        e.preventDefault();
+      }
+    });
+  }
+  _startDrag(ev, handle) {
+    ev.preventDefault();
+    handle.setPointerCapture(ev.pointerId);
+
+    const onMove = (e) => this._moveHandleTo(handle, e.clientX);
+    const onUp = (e) => {
+      handle.releasePointerCapture(e.pointerId);
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    };
+
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }
+
+  _moveHandleTo(handle, clientX) {
+    const pct = this._silderPosition(handle, clientX)
+    handle.style.left = pct * 100 + "%";
+    handle.style.top = "10%";
+    this._updateGradient();
+  }
+
+  _silderPosition(handle, clientX){
+    const box = this.sliderContainer.getBoundingClientRect();
+    const handleBox = handle.getBoundingClientRect();
+
+    const hw = handleBox.width;
+    const bw = box.width;
+
+    const pct = Math.max(
+      0,
+      Math.min(bw - hw, clientX - box.left - hw / 2) / bw
+    );
+    return pct
+  }
+
+  _updateGradient() {
+    const handles = Array.from(
+      this.background.querySelectorAll('input[type="color"]')
+    );
+    if (!handles.length) return;
+
+    const stops = this.getRawColors()
+
+    const gradient =
+      "linear-gradient(to right, " +
+      stops.map((s) => `${s.col} ${s.pos*100}%`).join(", ") + // erste Hälfte
+      ")";
+
+    this.background.style.background = gradient;
+
+    this._callUpdate()
+  }
+
+  getHtmlElement() {
+    document.getElementById(id);
+  }
+
+  /**
+   * @returns { {pos:number, col:string}[]  }
+   */
+  getRawColors() {
+    const handles = Array.from(
+      this.background.querySelectorAll('input[type="color"]')
+    );
+    let stops = handles
+      .map((h) => ({
+        pos: parseFloat(h.style.left) || 0,
+        col: h.value,
+      }))
+      .sort((a, b) => a.pos - b.pos);
+
+    let stopsReal = [];
+
+    for (let i = 0; i < stops.length; i++) {
+      const current = stops[i];
+      current.pos/=100
+      const next = i + 1 < stops.length ? stops[i + 1] : { pos: 1 };
+      stopsReal.push(current);
+      if (this.hard) {
+        stopsReal.push({ pos:( next.pos/100) - 0.001, col: current.col });
+      }
+    }
+
+
+    if (stopsReal.length == 0) {
+      return [
+        { pos: 0, col: "#ffffff" },
+        { pos: 1, col: "#ffffff" },
+      ];
+    } else if (stopsReal.length == 1) {
+      return [
+        { pos: 0, col: stopsReal[0].col },
+        { pos: 1, col: stopsReal[0].col },
+      ];
+    } else {
+
+      stopsReal.push({ pos: 1, col: stopsReal[stopsReal.length - 1].col });
+      stopsReal.unshift({ pos: 0, col: stopsReal[0].col });
+      return stopsReal;
+    }
+  }
+
+  _callUpdate(){
+      if(this.update){
+        this.update()
+      }
+  }
+}
+```

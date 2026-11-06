@@ -1,0 +1,187 @@
+Cone Programming Language. Contribute to jondgoodwin/cone development by creating an account on GitHub.
+
+noise: integer-hashed noise in Cone and Slang, bit-identical CPU vs GPU (chitin horn, PR 1) by jondgoodwin · Pull Request #208 · jondgoodwin/cone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jondgoodwin
+commented
+Sep 27, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+PR 1 of the chitin-horn milestone (reproduction plan, milestone 0): the noise package, in Cone and in Slang, with a CPU-vs-GPU parity test run on both GPUs of this machine.
+What's in it
+packages/noise (over geomath, f32, Vec2/Vec3), multi-file, src/noise.cone the root:
+hash.cone: pcg (one word to one, as Reed gives it), pcg2d, pcg3d, pcg4d (Jarzynski & Olano, JCGT 2020), with UVec2/UVec3/UVec4; the seeded lattice hashes hash1(x, seed), hash2(x, y, seed), hash3(x, y, z, seed) (the seed is one more coordinate); toUnit → [0, 1) and toSigned → [-1, 1), exact (top 24 bits times a power of two).
+lattice.cone: value2, value3, gradient2, gradient3, each returning Noise2/Noise3 (value and analytic derivative, Quilez's formulation, Perlin's quintic fade), and ...Periodic(p, period, seed) forms that tile.
+cellular.cone: cellular2/cellular3(p, jitter, seed) → Cell2/Cell3 (f1, f2, id, toNearest). Exact search: the 3×3(×3) first, then the 5×5(×5) ring pruned by F2.
+fractal.cone: fbm2/3, ridged2/3, billow2/3(p, seed, octaves, lacunarity, gain) with derivatives; warp2/warp3(p, seed, octaves, strength), Quilez's two-level warp.
+phacelle.cone: phacelle2(p, dir, freq, offset, normalization, seed) → Phacelle {value: (cos, sin), side}. Rune Skovbo Johansen's Phacelle noise. Its licence is MPL 2.0, which allows the port as long as the ported files stay MPL. So phacelle.cone and phacelle.slang carry the original notice and are MPL 2.0; everything else is MIT. The port swaps the original float hash for hash2.
+src/noise.slang, src/phacelle.slang: the same functions under the same names, written in the same order of operations; modules (no entry points).
+Tests (6): hashes (known-answer vectors from an independent Python transcription of the published code), lattice (lattice-point values, proved ranges, derivatives against central differences, tiling, seeds), cellular (against a 7×7(×7) brute force, jitter-0 exact distances, ids), fractal (one/two-octave identities, ranges, derivatives away from creases, warp), phacelle (normalization, side, stripes run along dir, derivative ≈ −sin·side), and parity: GPU vs CPU.
+Example: packages/noise/examples/images.cone writes ten 256×256 BMPs (value, gradient, fBm, fBm lit by its analytic derivative, ridged, billow, cells by id, Worley F1, warp, Phacelle stripes steered round the centre).
+packages/noise/README.md: the API, the determinism rules and what was measured, and the sources credited.
+tools/shaders/shaders.py:
+a .slang with no [shader(...)] is a module: it is imported, and it is not compiled alone (so it has no .spv);
+a shader's embedded hash now covers the modules it imports, transitively, so editing noise.slang without recompiling fails --check. A shader that imports nothing hashes exactly as before;
+every packages/*/src is passed to slangc with -I;
+a // slangc: <args> line in a shader adds compile arguments.
+The six existing shaders recompile to identical bytes.
+tools/congo/README.md: noise added to the registry list and the package notes.
+CLAUDE.md: noise in the package map; the shader rules (modules, the include path, imports in the hash, // slangc: lines, -fp-mode precise for shaders importing noise). COPYRIGHT and README.md: the MPL 2.0 files, phacelle.*, named.
+Determinism findings
+CPU: conec targets a generic x86-64 CPU (no FMA) and emits plain fmul/fadd with no fast-math flags, so LLVM neither contracts nor reassociates. Debug and --release builds of the parity test give the same bits.
+Slang's precise keyword emits nothing. With slangc 2026.13.1 (SDK 1.4.357), precise float r = a*b + c; and precise on a function both produce SPIR-V with no NoContraction decoration.
+-fp-mode precise does the job: it decorates every float op NoContraction. It applies per compile, imported modules included, so a shader that imports noise must carry // slangc: -fp-mode precise.
+Drivers do contract. I compiled the parity shader without -fp-mode precise and ran it on both GPUs. About half the samples of every noise differed from the CPU: gradient noise by up to 5e-7, the warps by up to 9.2e-5. The two GPUs also differed from each other. With the option on, both match the CPU exactly.
+Signed % is not portable. OpSRem with a negative operand is not defined in Vulkan. My first periodic wrap was ((i % p) + p) % p. On the RTX 4060 it gave a different lattice from the CPU for periods 3 and 5; period 4 matched. Wrapping now uses an unsigned remainder of a non-negative value, identically on both sides.
+Still inexact:
+sqrt in cellular F1/F2: Vulkan does not require it to be correctly rounded; measured ≤ 1 ulp. The squared distances behind them, the id and toNearest are exact.
+Phacelle's exp/cos/sin/division.
+Denormals: a GPU may flush them; the samples produced none.
+CPU trig: it goes through the C library until geomath's deterministic trig lands.
+No sin hash anywhere. Floats come from words only through toUnit/toSigned. The warp's offsets are quarters (5.25, 1.25, …) rather than iq's 5.2/1.3, so every compiler reads the same constants.
+Parity results
+A 64×256 rgba8unorm target, drawn by a fragment shader (no compute; nothing added to gpu). Each pixel holds one quantity (column) at one sample point (row), its 32 bits spread over the four bytes. Half the points are near (1000, −777, 4096). The readback is compared bit for bit.
+Quantity
+RTX 4060 (driver 592.82)
+UHD 770 (driver 101.6790)
+pcg, pcg2d/3d/4d, hash1, toUnit, toSigned
+256/256 exact
+256/256 exact
+cellular ids (2-D, 3-D)
+exact
+exact
+value2/3, gradient2/3, periodic forms, all derivatives
+exact
+exact
+cellular toNearest
+exact
+exact
+fbm/ridged/billow 2-D and 3-D (with derivatives), warp2, warp3
+exact
+exact
+cellular F1, F2 (sqrt)
+max 1 ulp (203–222/256 exact)
+max 1 ulp (227–240/256 exact)
+Phacelle (cos, sin)
+max diff 6.3e-7
+max diff 2.2e-5
+Phacelle side
+exact
+exact
+The test asserts exactness for all of these, ≤ 3 ulps for F1/F2, and ≤ 0.002 for Phacelle. The 0.002 comes from Vulkan's 2^-11 sin/cos bound, not from the measurement. NOISE_PARITY_REPORT=1 prints the table; GPU_POWER_PREFERENCE=low-power selects the Intel GPU. Validation, including synchronization validation, was on and reported nothing.
+Counts
+before (f2ff3307)
+after (merged with 67bb94f7)
+test/run.py
+431 scenarios, 444 runs: 443 passed, 1 expected failure
+437 scenarios, 450 runs: 449 passed, 1 expected failure (the new ones are master's; this PR changes no compiler code)
+congo test (packages/)
+20 packages, 85 tests, 24 examples
+21 packages, 93 tests, 25 examples (master added 2 thread tests; noise adds 1 package, 6 tests, 1 example)
+shaders.py --check
+6 shaders, all current
+7 shaders (+2 modules), all current, recompiled by slangc and compared
+test_congo.py
+—
+35 tests OK
+Cone gaps
+None hit. For the record:
+Struct fields are private to the type's methods unless pub, even to functions in the same module. That is by design.
+f as u32 reinterprets bits, as doc/reference/reftrust.html says; the trust { } block on that page is not implemented, and the page says so.
+There is no built-in f32 floor/exp/abs; the package uses libc.floorf/expf/fabsf, as geomath does.
+Unruled (choices Jon hasn't ruled on)
+Porting Phacelle under MPL 2.0 rather than implementing phasor noise: two MPL files inside an MIT repo, kept separate.
+Gradients are hashed components in [-1, 1), not unit vectors or Perlin's 12-edge table. This keeps them exact and cheap; the proved ranges are 2-D ±1 and 3-D ±1.5.
+Fractal sums are not normalized (a division would not be exact on a GPU). Ridged is the simple (1−|n|)² with no Musgrave weighting; billow is 2|n|−1. Octave i is seeded by hash1(i, seed).
+Cellular: a jitter parameter; an exact pruned 5×5(×5) search; ties go to the first cell in a fixed order. 3-D F2 is exact except in configurations of vanishing measure (documented).
+Warp constants are changed to exact quarters. The warp returns a value only, no derivative.
+-fp-mode precise is opt-in per shader through the // slangc: line, not global. render's lit/lines are unchanged.
+shaders.py modules: every packages/*/src on the include path; the hash covers imports.
+[noinline] on the large Slang functions: slangc otherwise inlines everything (the parity shader was 614 KB, now 97 KB). No result changes.
+Names: value2/gradient3/fbm2…, Noise2/Noise3, Cell2/Cell3, and UVec2..4 living in noise rather than geomath.
+Not in this PR: simplex noise, 4-D noise, curl/flow noise, and a Slang lint for sin-hashes or missing precise.
+The first package README (no other package has one).
+Parity by byte-packing into rgba8 rather than adding an integer or float texture format to gpu.
+🤖 Generated with Claude Code
+jondgoodwin
+and others
+added 3 commits
+September 27, 2026 14:34
+noise: integer-hashed noise in Cone and Slang, bit-identical CPU vs GPU
+…
+1bb61ce
+```
+A new package, noise, over geomath: the PCG hashes (pcg, pcg2d, pcg3d,
+pcg4d; Jarzynski and Olano), seeded lattice hashes and exact hash-to-float;
+value and gradient noise in 2-D and 3-D with analytic derivatives, and
+periodic forms; cellular noise (F1, F2, cell id, exact search); fBm, ridged
+and billowed sums with derivatives; Quilez's two-level domain warp; and
+Phacelle noise (Rune Skovbo Johansen, MPL 2.0, in its own files). The same
+functions in Slang, src/noise.slang and src/phacelle.slang.
+
+The parity test draws every hash and noise field at 256 points on the GPU
+and compares the bits with the CPU: hashes, cell ids, value, gradient,
+fractal and warp noise are identical on the RTX 4060 and the UHD 770;
+cellular F1/F2 within 1 ulp (sqrt); Phacelle within 2.2e-5. It needs
+slangc's -fp-mode precise: Slang's 'precise' keyword emits no
+NoContraction, and without the option both drivers fuse multiply-adds.
+
+tools/shaders/shaders.py: a .slang with no entry point is a module,
+imported and not compiled alone; a shader's hash covers the modules it
+imports; every package's src/ is on slangc's include path; a
+'// slangc: <args>' line adds compile arguments.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Merge origin/master into noise
+dcb34ab
+noise: CLAUDE.md's package map and shader rules; the MPL files noted
+…
+bf86495
+```
+CLAUDE.md lists noise, and says what shaders.py now does: a .slang with
+no entry point is a module, every packages/*/src is on the include path,
+a shader's hash covers its imports, and a '// slangc:' line adds compile
+arguments, which a shader importing noise needs ('-fp-mode precise').
+COPYRIGHT and README.md name the two MPL 2.0 files, phacelle.*.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+jondgoodwin
+merged commit 439d3ba
+into
+master
+Sep 27, 2026
+jondgoodwin
+deleted the
+noise
+branch
+September 27, 2026 18:38
+jondgoodwin
+mentioned this pull request
+Sep 27, 2026
+sdf: signed distance fields -- primitives, smooth operators, fillets, repetition along a curve, the horn
+#212
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

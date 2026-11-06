@@ -1,0 +1,150 @@
+Contribute to OstappMelnykk/Solvix development by creating an account on GitHub.
+
+Add voxelization: mesh-to-voxel-grid backend + FE preview by OstappMelnykk · Pull Request #10 · OstappMelnykk/Solvix · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+OstappMelnykk
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+New isolated Solvix.Voxelization project: converts an uploaded triangle mesh into a unit-cube voxel grid (SAT triangle-vs-box test + grid-accelerated ray-parity inside test), exposed through a single IVoxelizer seam
+(everything else internal).
+Wired through Solvix.MeshBuilder's existing facade pattern and a new POST /api/meshes/voxelize endpoint in Solvix.Api.
+Both request (mesh) and response (voxel grid) use a packed binary wire format (grid dims + 1-bit-per-cell occupancy bitmask) instead of JSON, since a dense grid's cube-center list would run into tens of MB for realistic
+imports.
+FE: upload the currently-displayed imported reference, decode the binary grid, and render it as an instanced-cube preview (fill + wireframe outline), each with its own opacity slider and a show/hide toggle. Auto re-runs
+(debounced) whenever the underlying reference geometry changes.
+Hardening pass: input validation on the mesh body, integer-overflow-safe cell-count math, cancellation support, and a fix for a false-positive "ghost cube" bug where a flat triangle face landing exactly on a grid boundary
+could register as touching cells on both sides of it (generalized across all 13 SAT axes, not just the 3 box axes, so it also holds for a rotated mesh).
+OstapMelnyk
+added 5 commits
+September 9, 2026 20:46
+add voxelization backend: isolated Solvix.Voxelization project, bina…
+…
+a914ad6
+```
+…ry grid+bitmask wire format
+
+  New Solvix.Voxelization project owns the SAT+ray-parity voxelization algorithm end to end
+  (everything internal except Voxelizer.Voxelize(byte[]) and VoxelizationTooLargeException).
+  Solvix.MeshBuilder wraps it behind IMeshBuilderFacade.Voxelize(byte[]), translating the
+  exception into its own MeshTooLargeException so Solvix.Api never needs to know
+  Solvix.Voxelization exists. Wire format is binary both ways (mesh upload + grid+bitmask
+  response) instead of JSON, since a JSON list of cube centers would run into tens of MB
+  at the largest grid this allows.
+```
+add voxelization frontend: mesh upload, binary grid+bitmask decode, c…
+…
+d07ae58
+```
+…ube preview
+
+  Mirrors the backend's wire contract exactly: geometry/mesh-contract.ts packs the imported
+  reference into the binary mesh format, geometry/voxel-grid-contract.ts decodes the binary
+  grid+bitmask response (isOccupied/voxelCenter/countOccupied derive everything from grid
+  indices - no explicit cube-center list ever crosses the wire), and geometry/voxel-preview.ts
+  builds the InstancedMesh cube fill straight from that grid instead of a materialized
+  centers array. mesh-api.service.ts uses responseType: 'arraybuffer' and parses the
+  too-large error body by hand, since Angular doesn't auto-parse a non-JSON-responseType
+  error as JSON even when the server sends one. state/voxelization.service.ts follows the
+  existing per-session KeyedStore pattern; UI wiring adds a "Вокселізувати" button, status
+  line, and opacity slider to imported-reference-controls, rendered via world-canvas.
+```
+harden and refactor voxelization: input validation, cancellation, DIP…
+…
+7ad3bb6
+```
+… fix, disposal-ordering fix
+
+  Backend:
+  - Fix int32 overflow in cell-count math (countX*countY*countZ) that could wrap past
+    the MaxCells safety check on an attacker-scaled mesh; guard the double->int cast too.
+  - Validate mesh body length and index bounds against the declared vertex/index counts
+    BEFORE allocating (an 8-byte body claiming vertexCount=0xFFFFFFFF used to attempt a
+    ~48GB allocation) - new MalformedMeshException -> MeshBuilder's InvalidMeshException -> 400.
+  - Thread CancellationToken through the whole facade chain + wrap the CPU-bound algorithm
+    in Task.Run, so a disconnected client actually stops a large voxelization early instead
+    of tying up a request thread to compute a response nobody reads.
+  - Fix DIP violation: MeshBuilderFacade depended on the concrete Voxelizer class instead of
+    an abstraction. Added IVoxelizer (public), Voxelizer/MeshBuilderFacade are now internal,
+    both wired via AddVoxelization()/AddMeshBuilder() DI extensions - restores testability
+    (MeshBuilderFacadeTests now uses a fake IVoxelizer instead of double-invoking the real
+    algorithm just to know what to assert against).
+  - Extract TriangleSpatialGrid out of VoxelizationService (SRP) - spatial indexing is a
+    separable concern from deciding cell inclusion.
+  - Named constant for the request-size cap, structured logging around the endpoint
+    (request/response size, duration, rejection reasons).
+
+  Frontend:
+  - voxel-preview.ts: single grid pass instead of two (count then fill).
+  - mesh-contract.ts: drop an Array.from identity-array allocation for non-indexed geometries.
+  - voxel-grid-contract.ts: validate the occupancy buffer is long enough for the declared grid
+    dimensions, instead of silently reading a truncated/corrupted response as "empty".
+  - mesh-api.service.ts: recognize InvalidMeshException's { message } body (new 'invalid-mesh'
+    status), not just the too-large shape - previously fell through to a generic, detail-free error.
+  - Fix a real ordering race: VoxelizationService/ImportedReferenceRenderService used to dispose
+    a preview's shared geometry/material the instant a replacement was built, before
+    WorldCanvasComponent's change-detection-driven swap actually removed the old clone from the
+    scene - a render-loop frame could land in between and draw already-freed GPU buffers.
+    Disposal now happens in WorldCanvasComponent itself, exactly when it removes the clone
+    (fixed for dimensionLines/ruler too, since they shared the same pattern).
+```
+add voxel-preview show/hide toggle, auto re-run voxelization, fix cub…
+…
+c716d9d
+```
+…e rendering z-fight
+
+Show/hide toggle for the voxel cube overlay in ImportedReferenceDisplayService
+(voxelPreviewVisible), same pattern as dimensionsVisible/rulerVisible - the result
+stays computed/cached while hidden, this only gates whether RenderWindowComponent
+hands it to WorldCanvasComponent.
+
+Auto re-run voxelization instead of just hiding a stale result: ImportedReferenceRenderService
+emits referenceChanged$ whenever refreshScaledReference actually rebuilds a live clone
+(density change, rotation commit, reset, new import); VoxelizationService subscribes to
+it grouped+debounced per session (500ms) and re-runs automatically. A run-generation
+guard discards a superseded response instead of letting a stale run clobber a newer result,
+now that runs can overlap (auto + manual).
+
+Fixed a rendering bug this surfaced: the cube fill and the imported reference mesh are
+both transparent and literally overlapping (conservative voxelization touches/encloses
+the surface). Three.js sorts transparent objects by camera distance, and that sort order
+between the two can flip as the camera orbits - whichever draws first wins the depth test
+and the other doesn't draw there at all, reading as the reference mesh randomly vanishing.
+Fixed via a fixed renderOrder (mesh always draws first, cubes blend over it) rather than
+disabling depth writes on the cubes outright - that alternative stopped neighboring cube
+faces from occluding each other too, making the fill's color drift with camera angle.
+```
+fix false-positive ghost cubes from grid-boundary-exact triangle touches
+…
+5ae9e79
+```
+Generalize the boundary-exact SAT check to all 13 axes (not just the 3
+box axes) so a rotated mesh can't hit the same coincidence on an
+edge-cross or normal axis; defer to winding-independent ray-parity
+whenever every touch found is boundary-exact-only.
+```
+OstappMelnykk
+merged commit 7279430
+into
+dev
+Sep 9, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

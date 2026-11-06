@@ -1,0 +1,128 @@
+# Symmetric Pseudo-Inverse Calculation
+
+Also called: Pseudoinverse Calculation
+
+## Overview
+Computes the pseudoinverse of a symmetric matrix given its eigenvectors and diagonal eigenvalues, handling near-zero eigenvalues via a threshold to ensure numerical stability [S1, unofficial][S2, unofficial]. It serves as the core linear algebra primitive for the [Symmetric Least Squares Solver](4723-symmetric-least-squares-solver.md), enabling the solution of symmetric linear systems where the matrix may be singular or ill-conditioned [S1, unofficial].
+
+## How it works
+**Inputs:**
+- $V$: A $3 \times 3$ matrix of eigenvectors (columns), where $A = V D V^T$.
+- $d$: A vector of three diagonal eigenvalues $[d_0, d_1, d_2]$.
+- $tol$: A scalar threshold for singularity detection.
+
+**Outputs:**
+- $A^+$: A $3 \times 3$ pseudoinverse matrix.
+
+**Data Structures:**
+- $V$: Stored as a $3 \times 3$ array where $V_{ik}$ denotes the element at row $i$, column $k$.
+- $d$: Stored as a length-3 array.
+- $A^+$: Stored as a $3 \times 3$ array with explicit fields for all 9 elements.
+
+**Steps:**
+1. **Thresholded Inversion:** For each eigenvalue $d_k$ ($k \in \{0,1,2\}$), compute the inverted value $d_k^+$:
+   $$
+   d_k^+ = \begin{cases} 
+   0 & \text{if } |d_k| < tol \text{ or } |1/d_k| < tol \\
+   1/d_k & \text{otherwise}
+   \end{cases}
+   $$
+   This prevents division by zero or amplification of noise when eigenvalues are near zero [S1, unofficial].
+
+2. **Reconstruction:** Compute the pseudoinverse $A^+$ using the eigenvectors and inverted eigenvalues. Since $A = V D V^T$, then $A^+ = V D^+ V^T$. The elements of $A^+$ are calculated as:
+   $$
+   A^+_{ij} = \sum_{k=0}^{2} V_{ik} d_k^+ V_{jk}
+   $$
+   Explicitly for a $3 \times 3$ matrix, all 9 elements are computed directly to preserve symmetry without relying on triangular mirroring [S1, unofficial]:
+   $$
+   \begin{aligned}
+   A^+_{00} &= V_{00}d_0^+V_{00} + V_{01}d_1^+V_{01} + V_{02}d_2^+V_{02} \\
+   A^+_{01} &= V_{00}d_0^+V_{10} + V_{01}d_1^+V_{11} + V_{02}d_2^+V_{12} \\
+   A^+_{02} &= V_{00}d_0^+V_{20} + V_{01}d_1^+V_{21} + V_{02}d_2^+V_{22} \\
+   A^+_{10} &= V_{10}d_0^+V_{00} + V_{11}d_1^+V_{01} + V_{12}d_2^+V_{02} \\
+   A^+_{11} &= V_{10}d_0^+V_{10} + V_{11}d_1^+V_{11} + V_{12}d_2^+V_{12} \\
+   A^+_{12} &= V_{10}d_0^+V_{20} + V_{11}d_1^+V_{21} + V_{12}d_2^+V_{22} \\
+   A^+_{20} &= V_{20}d_0^+V_{00} + V_{21}d_1^+V_{01} + V_{22}d_2^+V_{02} \\
+   A^+_{21} &= V_{20}d_0^+V_{10} + V_{21}d_1^+V_{11} + V_{22}d_2^+V_{12} \\
+   A^+_{22} &= V_{20}d_0^+V_{20} + V_{21}d_1^+V_{21} + V_{22}d_2^+V_{22}
+   \end{aligned}
+   $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Matrix3x3:
+    def __init__(self):
+        self.m00 = 0.0; self.m01 = 0.0; self.m02 = 0.0
+        self.m10 = 0.0; self.m11 = 0.0; self.m12 = 0.0
+        self.m20 = 0.0; self.m21 = 0.0; self.m22 = 0.0
+
+def pinv(x, tol):
+    """Thresholded inverse of a scalar."""
+    if abs(x) < tol or abs(1.0 / x) < tol:
+        return 0.0
+    return 1.0 / x
+
+def symmetric_pseudo_inverse(V, d, tol):
+    """
+    Computes pseudoinverse of symmetric matrix A = V * diag(d) * V^T.
+    
+    Args:
+        V: List of lists (3x3), eigenvectors (columns).
+        d: List (length 3), eigenvalues [d0, d1, d2].
+        tol: Float, singularity threshold.
+        
+    Returns:
+        Matrix3x3, the pseudoinverse A+.
+    """
+    # Step 1: Thresholded inversion of eigenvalues
+    d0 = pinv(d[0], tol)
+    d1 = pinv(d[1], tol)
+    d2 = pinv(d[2], tol)
+    
+    # Step 2: Reconstruct A+ = V * diag(d+) * V^T
+    Out = Matrix3x3()
+    
+    # Row 0
+    Out.m00 = V[0][0]*d0*V[0][0] + V[0][1]*d1*V[0][1] + V[0][2]*d2*V[0][2]
+    Out.m01 = V[0][0]*d0*V[1][0] + V[0][1]*d1*V[1][1] + V[0][2]*d2*V[1][2]
+    Out.m02 = V[0][0]*d0*V[2][0] + V[0][1]*d1*V[2][1] + V[0][2]*d2*V[2][2]
+    
+    # Row 1
+    Out.m10 = V[1][0]*d0*V[0][0] + V[1][1]*d1*V[0][1] + V[1][2]*d2*V[0][2]
+    Out.m11 = V[1][0]*d0*V[1][0] + V[1][1]*d1*V[1][1] + V[1][2]*d2*V[1][2]
+    Out.m12 = V[1][0]*d0*V[2][0] + V[1][1]*d1*V[2][1] + V[1][2]*d2*V[2][2]
+    
+    # Row 2
+    Out.m20 = V[2][0]*d0*V[0][0] + V[2][1]*d1*V[0][1] + V[2][2]*d2*V[0][2]
+    Out.m21 = V[2][0]*d0*V[1][0] + V[2][1]*d1*V[1][1] + V[2][2]*d2*V[1][2]
+    Out.m22 = V[2][0]*d0*V[2][0] + V[2][1]*d1*V[2][1] + V[2][2]*d2*V[2][2]
+    
+    return Out
+```
+
+**Edge Cases and Pitfalls:**
+- **Singularity:** If an eigenvalue is exactly zero, `pinv` returns 0, effectively removing that dimension from the solution space [S1, unofficial].
+- **Numerical Stability:** The condition `|1/x| < tol` handles cases where $x$ is very small but non-zero, preventing overflow or extreme noise amplification [S1, unofficial].
+- **Symmetry Preservation:** The output matrix is explicitly symmetric by direct calculation of all 9 elements, avoiding reliance on triangular mirroring [S1, unofficial].
+
+## Subtopics
+
+### 3x3 Symmetric Matrix Pseudo-Inverse via Eigen-decomposition
+Computes the pseudo-inverse of a $3 \times 3$ symmetric matrix using eigen-decomposition, specifically designed for minimizing distance to a midpoint in dual contouring contexts [S2, unofficial]. It uses auxiliary arrays `w` for inverse eigenvalues and `u` for eigenvectors [S2, unofficial]. A key variant feature is the handling of degenerate cases: if two dominant eigenvalues are close (ratio $> 0.2$), it may return a pre-computed `expectedNorm` instead of computing the full inverse, optimizing for planar surfaces [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for fixed $3 \times 3$ matrices, dominated by the 9 multiplications and additions for reconstruction [G].
+- **Memory Complexity:** $O(1)$, requiring storage for the input $V$, $d$, and output $A^+$ [G].
+- **Strengths:** Numerically stable for symmetric matrices; handles singular systems gracefully via thresholding; efficient for small fixed-size matrices [G].
+- **Limitations:** Only applicable to symmetric matrices; requires pre-computed eigendecomposition; threshold selection ($tol$) is critical and problem-dependent [G].
+- **When to use:** When solving symmetric linear systems $Ax=b$ where $A$ is derived from quadratic error functions and may be rank-deficient [G].
+- **When not to use:** For non-symmetric matrices or when $A$ is guaranteed to be full-rank and well-conditioned [G].
+
+## Background
+Originated in the context of dual contouring and implicit surface reconstruction, where symmetric quadratic error functions are minimized [S1, unofficial][S2, unofficial]. It leverages the mathematical property that the pseudoinverse of a symmetric matrix can be computed via its eigendecomposition, avoiding the more expensive general SVD [S1, unofficial][S2, unofficial].
+
+## Sources
+[S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)
+[S2] ChessQian/DualContouring, https://github.com/ChessQian/DualContouring, fetched 2026-10-26 (unofficial)

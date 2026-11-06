@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -7,6 +7,6 @@
+ ## How it works
+ **Inputs:**
+-- A spatial hierarchy (e.g., octree) representing the volume.
+-- A set of rays to be evaluated.
++- A spatial hierarchy (e.g., octree) representing the volume [S1].
++- A set of rays to be evaluated [S1].
+ - A stopping depth parameter $d_{stop}$, defined as the number of levels above the leaves where the first traversal terminates [S1].
+ 
+@@ -16,5 +16,5 @@
+ 
+ **Data Structures:**
+-- **Tree Cut Buffer:** A collection of nodes identified at the end of the first pass. These nodes serve as the roots for the second pass [S1].
++- **Coarse Subtree:** A list of nodes identified at the end of the first pass. These nodes serve as the roots for the second pass [S1].
+ - **Tile Grouping:** Rays are grouped into $2 \times 2$ pixel blocks to facilitate sharing of the first pass results [S1].
+ 
+@@ -29,9 +29,9 @@
+     - For each unique ray group (or individual ray if sharing is disabled), traverse the hierarchy from the root.
+     - Continue traversal until the current node's depth is $d_{stop}$ levels above the leaves.
+-    - Collect all such nodes into the **Tree Cut Buffer** [S1].
+-    - If multiple rays share the same group, they share this buffer [S1].
++    - Collect all visited nodes into the **Coarse Subtree** [S1].
++    - If multiple rays share the same group, they share this subtree [S1].
+ 3.  **Second Pass (Fine Traversal):**
+-    - For each ray, restart the traversal starting from the nodes in the **Tree Cut Buffer** corresponding to its path [S1].
+-    - Continue traversing from these nodes until the node satisfies the accuracy criterion (e.g., leaf node or sufficient detail) [S1].
++    - For each ray, restart the traversal starting from the nodes in the **Coarse Subtree** corresponding to its path [S1].
++    - Continue traversing from these nodes until the node satisfies the accuracy criterion [S1].
+     - Compute the scattering or rendering contribution for the ray [S1].
+ 
+@@ -44,12 +44,13 @@
+ 
+ ```python
+-def two_pass_hierarchy_traversal(hierarchy, rays, stopping_depth):
++def two_pass_hierarchy_traversal(hierarchy, rays, stopping_depth, image_width):
+     """
+-    Performs two-pass hierarchy traversal.
++    Performs two-pass hierarchy traversal with 2x2 tile sharing.
+     
+     Args:
+         hierarchy: The spatial hierarchy (e.g., octree).
+-        rays: List of ray objects.
++        rays: List of ray objects, indexed in raster order.
+         stopping_depth: Integer, depth relative to leaves where first pass stops.
++        image_width: Width of the image in pixels.
+         
+     Returns:
+@@ -57,53 +58,29 @@
+     """
+     contributions = [None] * len(rays)
++    tile_size = 2
++    num_tiles_x = image_width // tile_size
++    num_tiles_y = len(rays) // (image_width * tile_size)
+     
+-    # Group rays into 2x2 blocks for sharing
+-    # Assuming rays are indexed in raster order for simplicity
+-    num_rays = len(rays)
+-    tile_size = 2
+-    num_tiles_x = (num_rays // tile_size) // tile_size # Approximate grid dimension
+-    
+-    # Helper to get tile index for a ray
+-    def get_tile_index(ray_idx, width):
+-        y = ray_idx // width
+-        x = ray_idx % width
+-        return (y // tile_size) * (width // tile_size) + (x // tile_size)
+-        
+-    # Precompute tile indices
+-    ray_tile_indices = [get_tile_index(i, width) for i, width in [(len(rays), 0)]] # Placeholder for width
+-    # Note: Width is not explicitly given in sources, assumed known from image dimensions [G]
+-    
+-    # Determine unique tiles to process
+-    unique_tiles = set(ray_tile_indices)
+-    
+-    # Cache for first pass results: tile_index -> list of nodes at stopping_depth
+-    first_pass_cache = {}
+-    
+-    for tile_idx in unique_tiles:
+-        # Get rays belonging to this tile
+-        tile_rays = [rays[i] for i, t in enumerate(ray_tile_indices) if t == tile_idx]
+-        
+-        # Check for material edge condition
+-        # Note: Specific edge detection logic is not detailed in sources, 
+-        # assumed to be a boolean check on the material boundary within the 2x2 block [G]
++    for tile_idx in range(num_tiles_x * num_tiles_y):
++        tile_rays = []
++        for dy in range(tile_size):
++            for dx in range(tile_size):
++                ry = (tile_idx // num_tiles_x) * tile_size + dy
++                rx = (tile_idx % num_tiles_x) * tile_size + dx
++                ray_idx = ry * image_width + rx
++                if ray_idx < len(rays):
++                    tile_rays.append(rays[ray_idx])
++                    
++        # Do not apply sharing when the 2x2 block covers a material edge [S1]
+         if has_material_edge(tile_rays):
+-            # If edge is present, do not share; process each ray individually
+             for ray in tile_rays:
+                 subtree = extract_subtree(hierarchy, ray, stopping_depth)
+                 contributions[ray.id] = second_pass_traverse(subtree, ray)
+         else:
+-            # Perform first pass for the tile (shared)
+-            # Extract a coarse subtree starting from root, stopping at stopping_depth
+-            # Since rays in a tile are close, they likely share the same path to stopping_depth
+-            # We use the first ray in the tile as representative, or merge paths [G]
+-            representative_ray = tile_rays[0]
+-            subtree_nodes = extract_subtree(hierarchy, representative_ray, stopping_depth)
+-            first_pass_cache[tile_idx] = subtree_nodes
+-            
+-            # Perform second pass for each ray in the tile
++            # First pass: extract coarse subtree, shared for the tile [S1]
++            subtree_nodes = extract_subtree(hierarchy, tile_rays[0], stopping_depth)
++            # Second pass: restart traversal from shared nodes for each ray [S1]
+             for ray in tile_rays:
+-                # Restart traversal from the shared subtree nodes
+                 contributions[ray.id] = second_pass_traverse(subtree_nodes, ray)
+-                
+     return contributions
+ 
+@@ -113,9 +90,6 @@
+     Returns list of nodes at that depth.
+     """
+-    nodes_at_depth = []
+     current_nodes = [hierarchy.root]
+     current_depth = 0
+-    
+-    # Calculate max depth of hierarchy to determine stopping depth in absolute terms
+     max_depth = hierarchy.get_max_depth()
+     target_depth = max_depth - stopping_depth
+@@ -125,12 +99,10 @@
+         for node in current_nodes:
+             if node.is_leaf:
+-                break # Should not happen if stopping_depth > 0 and tree is valid
+-            children = node.get_children()
+-            for child in children:
+-                if ray.intersects_node(child):
++                break
++            for child in node.children:
++                if ray.intersects(child):
+                     next_nodes.append(child)
+         current_nodes = next_nodes
+         current_depth += 1
+-        
+     return current_nodes
+ 
+@@ -139,19 +111,11 @@
+     Continues traversal from subtree_nodes until accuracy criterion is met.
+     """
+-    # Continue traversal from the nodes in the tree cut buffer 
+-    # until the node satisfies our criterion for accuracy [S1]
+-    # This typically means traversing to leaves or until a specific density/opacity threshold is met
+-    
++    # Continue traversing from these nodes until the node satisfies the accuracy criterion [S1]
++    # Compute scattering contribution for the ray [S1]
+     result = 0.0
+     for node in subtree_nodes:
+-        result += traverse_node(node, ray)
++        # Standard node evaluation and accumulation logic [G]
++        pass
+     return result
+-
+-def traverse_node(node, ray):
+-    """
+-    Standard single-step traversal logic for a node.
+-    """
+-    # Implementation depends on the specific hierarchy and scattering model [G]
+-    pass
+ 
+ def has_material_edge(tile_rays):
+@@ -159,12 +123,18 @@
+     Checks if the 2x2 block covers an edge of the material.
+     """
+-    # Logic to detect material boundary crossing within the 2x2 pixel block [G]
+-    pass
++    # Check if the 2x2 pixel block covers a material edge [S1]
++    # Implementation depends on material boundary representation [G]
++    return False
+ ```
+ 
++## Subtopics
++
++### Rendering Pipeline
++A two-step rendering pipeline for participating media that separates ray tracing from scattering computation [S1]. In the first step, rays are traced from the camera through the scene, and each time a ray encounters translucent material, it is stored with its starting and ending points in an auxiliary buffer [S1]. In the second step, all rays from this buffer are processed to compute their single, double, and multiple scattering contributions, which are then added to the corresponding pixel values [S1]. The auxiliary buffer contains all paths through the material, including both primary rays and secondary rays that reach the material after one or more bounces [S1]. For each ray, attenuation from material absorption and BRDF reflectance is computed after each bounce, and tracing stops when attenuation exceeds a threshold [S1]. Single scattering contributions are gathered only over a material layer of thickness $\ell$ (one mean-free-path), as they become negligible compared to multiple scattering after roughly one mean-free-path [S1].
++
+ ## Operating characteristics
+-- **Time Complexity:** The method reduces traversal time by up to 30% compared to naive direct implementation [S1]. The gain depends on the stopping depth [S1].
+-- **Performance:** At an optimal stopping depth of 3, the two-pass method alone reduces computation time by 15% [S1]. When combined with tile sharing (2x2 pixels), the reduction is up to 30% [S1]. Overall, it provides a 20% performance improvement over naive hierarchy traversal [S1].
+-- **Memory:** Requires storage for the **Tree Cut Buffer** and potentially caching results for tile sharing [S1].
++- **Time Complexity:** The method reduces traversal time by up to 30% compared to a naive direct implementation [S1]. The gain depends on the stopping depth [S1].
++- **Performance:** At an optimal stopping depth of 3, the two-pass method alone reduces computation time by 15% [S1]. When combined with tile sharing over $2 \times 2$ pixels, the reduction reaches 30% [S1]. Overall, it provides a 20% performance improvement over naive hierarchy traversal [S1].
++- **Memory:** Requires storage for the coarse subtree and potentially caching results for tile sharing [S1].
+ - **Strengths:** Significant speedup for primary rays in single and multiple scattering computations [S1]. Efficient for homogeneous participating media [S1].
+ - **Limitations:** Not applicable to secondary rays [S1]. Sharing is invalid near material edges [S1]. Performance gain diminishes if stopping depth is too small (approaching 0) [S1].

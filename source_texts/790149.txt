@@ -1,0 +1,288 @@
+Contribute to vurimad/DEengine development by creating an account on GitHub.
+
+render: froxel fog, phase C: fog volumes by vurimad · Pull Request #44 · vurimad/DEengine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+vurimad
+commented
+Nov 4, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Froxel fog, phase C: fog volumes artists place, such as mist banks and fog walls.
+The change
+A cell entity can have a fog_volume: box or ellipsoid, with density_per_m up to 4, a soft edge in meters and a tint. Its scale is its half extents. An edge wider than the volume ends at its middle, so its heart always reaches its density. CellAsset goes to format version 2.
+Extraction copies them each frame into RenderFrame::fog_volumes, where they're seen.
+The renderer sends the nearest 64 in view and in the grid's reach, ranked by distance to their bounding sphere, with a 64-bit mask per slice of those whose sphere reaches it. With clear air, volumes out of view don't keep the fog passes on, but their 3D textures stay for 240 frames, so panning across the view's edge doesn't reallocate them.
+fog inject adds their extinction and tint to the froxels they cover, so they're lit, shadowed and reprojected like the rest. Each froxel's middle ray is clipped to the volume and density tested at 3 points through that span, so however thin a volume is the points can't all miss it, and they belong to the volume instead of sliding through it with the camera. They're lit from their first meter, wherever the sun's haze starts, by samples of where they are in the slice, not the air around them, and the world's fog only shares their light within its own span.
+The fog pass corrects for the ground: where a pixel's surface is inside a slice with volumes, it takes the share of the slice really in front of that surface, tested along the pixel's own ray.
+They fade out over the last tenth of the grid's reach.
+The test world gets a mist bank to look at.
+Also in this PR:
+The stats panel (F1) shows the camera's position, yaw and pitch, which is how the bug below was located. It's its own commit.
+The MSVC CI failure seen twice: deengine, de_tests and cooker each copied Slang's module folder to the same place after linking, and collided in a parallel build. One shared target now does it.
+The waving mist
+Backing away from the mist bank from about 94 m, it visibly waved. Measured at that exact view, on the same camera path with and without mist, by each pixel's change over 0.1 to 0.5 s:
+Version
+Wave
+One density point per slice, no ground correction
+33%
+3 points per slice, no ground correction
+7.9%
+3 points per slice, ground correction
+4.1%
+3 points per slice, no ground correction, 128 slices
+4.7%
+3 points per slice, no ground correction, slice offset 8 m
+6.4%
+3 points clipped to the volume, no ground correction
+6.3%
+3 points clipped to the volume, ground correction
+3.1%
+The same, with light sampled where the volume is (this PR)
+2.6%
+The same, with the mist 15 m off the ground
+2.7%
+Causes:
+From that far, a slice is as thick as the mist. One point per slice lands in or out of it as the camera moves.
+A pixel read a share of its slice by depth alone, wherever the mist really was. With mist resting on the ground, that error swept across it as slice edges slid over the ground.
+What's left comes from the grid itself: its boxes move with the camera through mist that stays still. Removing it means a per-pixel raymarch. The next step planned instead is animated noise and shaped edges, which also make it read as mist, and hide what's left. The decision is in docs/design.md.
+Cost
+On an RTX 4080 Laptop at 1600 x 900, at the spawn view, with the volumes clustered near the view's middle:
+Volumes in the cell
+fog inject
+fog integrate
+fog
+fog without the ground correction
+1
+0.16 ms
+0.04 ms
+0.05 ms
+not measured
+9
+0.18 ms
+0.04 ms
+0.06 ms
+not measured
+65 (64 sent)
+0.37 ms
+0.19 ms
+0.31 ms
+0.05 ms
+Those are means over 6 s. The 65 row is a stress case: about 0.9 ms of the 4.17 ms budget on this GPU, of which the ground correction is about 0.26 ms, and it only falls on pixels whose surface is in a slice with volumes. Those two runs were noisier than usual, with single frames up to about 2 ms in each pass, including fog integrate, which volumes don't touch and which read 0.04 ms in the previous run. So I take its rise as the machine, not the code, but I didn't look further. The buffer holding the frame's constants grows by about 6.6 KB.
+Testing
+Render: a box in clear air, no grid, soft edge, an edge past the middle, ellipsoid corners, a turned slab, tint, shadow, sun start, the world's fog past the grid not taking a volume's light, a camera with a scale, over frames, gone, camera inside, culling to each side, reaching into the view, reach by view depth, the fade at the reach, passes off when out of view, textures kept while volumes exist, long along the view, the limit keeping the nearest by surface and replacing the farthest, the most that can stack, a volume in the mask's second word, a wall inside a slice before and behind the mist (in both mask words, and with fog past the grid), and mist, thin walls and thin ellipsoids sliding through slices.
+World: extraction, moving, removal, and spawning from a cell.
+Cooker: reading a cell and all its error messages, including density over 4 and a non-number edge. The fuzz test covers the new array, and the format refuses over-limit density, NaN, a negative edge or tint and an unknown shape.
+Mutations against passing controls: 17 earlier, 16 caught. The survivor makes samples keep to the fog's span in a froxel that only a volume fills, where a test image shows no difference. After the review, 16 more on the new code, all caught; three of them survived at first and led to stronger tests. A control failing once caught a limit of mine that was too tight for ellipsoids: even 32 points vary as much, because a thin ellipsoid really does change along one ray.
+The later reviews' fixes: 5 more mutations, all caught, again after one test that passed for the wrong reason (the render graph's pool lets go of textures over time) was rewritten. The third review repeated the silhouette finding, and suggested speed-ups of the ground correction and its constants that I haven't taken (about 0.26 ms in the 65-volume stress case). That silhouette finding I couldn't reproduce: the ground correction adds 2 levels to a step of 19 that's there anyway, and easing the share made no difference at any setting, so nothing changed for it.
+Tests pass in debug and ship (335 cases); clang-format and clang-tidy clean; smoke runs with 0 validation errors. The user judged the waving by eye in the running game, which is what led to the ground correction.
+Limits
+A little waving remains at a distance (see above), and the tests can't judge how it looks.
+Where world fog and a volume in a slice are comparable, its light samples spread between their spans, so a thin wall's shadow is less exact there. Fine in practice so far, where volumes are far denser than the world's fog.
+Past 64 in view, only stats().fog_volumes_dropped tells you: it isn't on the F1 panel yet.
+The stats panel's camera line reads the last tick's place, not the interpolated view that's drawn.
+de_slang_runtime assumes the presets' multi-config layout.
+A volume thinner than a grid column across the view, about 1 m at 100 m, can still fall between columns: a thin layer seen edge-on pops as the camera rises or falls.
+Volumes need the grid, so with no volume_distance_m they don't exist, and they end at its reach: from about 115 m they fade out, by 128 m they're gone.
+They take the environment's fog colours, so an environment with none gives black mist.
+A moving tinted volume's colour lags by about 20 frames, as light in the grid does.
+Sharpness is limited by the grid's 8-pixel columns and slices. Soft mist suits it; a crisp wall doesn't.
+No animated noise, and no raymarch at screen resolution.
+Over 64 in view, the farthest go, and stats().fog_volumes_dropped counts them.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+vurimad
+and others
+added 14 commits
+November 4, 2026 22:09
+render: froxel fog, phase B: temporal reprojection
+…
+1bd1659
+```
+Each froxel's samples move inside it from frame to frame, and its light keeps 90%
+of last frame's at the same place in the world, for smooth shafts. Extinction is
+exact and takes no history, so fog never lags a change of density. A cut, a frame
+not drawn, or a new reach or size starts again from this frame's light.
+
+The planned filter along depth made no measurable difference in two trial scenes,
+so it isn't built. 0.01 ms more on an RTX 4080 Laptop at 1600 x 900.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+render: fix froxel history review findings
+…
+af87ff9
+```
+Light is stored multiplied by extinction, so filtering across a froxel with no fog
+doesn't dim it, and samples stay inside the fog in a froxel, so none of them misses.
+Samples jitter only with history to average with, so a cut no longer shows one noisy
+frame for 20 more. Each froxel gets its own offset, which steadies the shafts. TAA's
+offset is taken out of the grid's rays, or the history blurs. A NaN in the light
+no longer lives on in the history. The noise function is shared with the shadow mask.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+render: fix second froxel history review
+…
+6e3d3a2
+```
+What's stored is limited so the product fits a half float: over it would be infinite
+from then on, through the history. A froxel without its own history stays in the
+middle, so panning doesn't leave a noisy frame at the screen's edge. A bad value is
+dropped before the blend, keeping the history. The composite reads the grid without
+TAA's offset too. The noise per axis was one number plus constants. Samples stay in
+the fog on the jittered ray.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+wip: fog volumes (local, to be finished)
+1d0f033
+render: fix third froxel history review
+…
+1364be8
+```
+Light is stored with a constant weight rather than the extinction itself, leaving
+room in a half float for bright light in dense fog and no limit that varies with
+density. A bad value already in the history counts as no history. The kept textures
+are freed when the grid is off. The fog's jitter has its own sample count.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+Merge branch 'm0b/froxel-fog-temporal' into m0b/fog-volumes
+…
+6e23ba3
+```
+# Conflicts:
+#	shaders/scene/fog_inject.slang
+```
+render: froxel fog, phase C: fog volumes
+…
+a3f3495
+```
+Cells can place fog volumes: boxes and ellipsoids with a soft edge, a density and a
+tint, their scale as their half extents. Extraction copies them into the frame, and
+the nearest 64 in view and in the grid's reach go to the froxels, with a mask per
+slice so a froxel tests only those at its depth. They're lit, shadowed and reprojected
+like the rest of the grid. 64 cost 0.17 ms more on an RTX 4080 Laptop at 1600 x 900.
+
+Also: Slang's runtime is copied by one shared target, not after each link, where
+parallel builds collided.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+Merge remote-tracking branch 'origin/main' into m0b/fog-volumes
+6593f31
+tests: fog volume helper doesn't shadow the test's x and y
+…
+59d9bcd
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+tools: show the camera's position, yaw and pitch in the stats panel
+…
+c83aca4
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+render: steady fog volumes: 3 points per slice, and what's really in …
+…
+88a4233
+```
+…front
+
+Far off, a slice is as thick as a volume. One density point landed in or
+out of it as the camera moved, and a pixel took a share of its slice by
+depth alone, so with mist on the ground the error swept across it as the
+slices slid. Now 3 fixed points through a slice, and the fog pass tests
+what's in front of the surface along the pixel's own ray.
+
+Also from the review: reach by view depth, rank by distance to a volume's
+surface, light before the sun's start, no fog passes for volumes out of
+view in clear air, and a density limit in the format, cooker and shader.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+render: clip fog volumes' rays, and answer the review
+…
+ec75b40
+```
+Each ray is clipped to a volume and tested through that span, in one
+helper the inject and fog passes share: a thin wall can't fall between
+points, and the points don't slide through a volume with the camera.
+
+Also: the camera's axes without scale when culling volumes; the world's
+fog only shares a volume's light, and weighs on its share of a slice,
+within its own span; 3D textures stay while volumes exist out of view;
+an edge wider than a volume ends at its middle; density_per_m in cell
+files; a heap for the nearest 64, and the camera's basis once a frame.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+render: light fog volumes where they are, and answer the second review
+…
+93284e6
+```
+A volume's light was sampled across its whole slice, so a thin wall in
+shadow read the sunlit air around it. The samples now follow the span
+the rays cover, as far as the fog there is the volumes'.
+
+Also: the 3D textures wait 240 frames for a volume out of view, not for
+as long as one is loaded; a sphere as long as an ellipsoid, not the box
+around it; the ground correction skips rays that miss; the camera's axes
+in glm; the density limit's comment says what it has to hold.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+render: world fog shares a volume's light only within its span
+…
+b333889
+```
+A sample outside where the world's fog starts and ends counted its
+density all the same, wherever the slice had any: a volume just before
+fog that starts partway through a slice was under-lit. Extraction also
+asserts on a code-set volume's density and edge.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01L6cY4pLNgNmnukTnp2a6Su
+```
+Hide details
+View details
+vurimad
+merged commit c203c95
+into
+main
+Nov 5, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,61 @@
+# Standard Image Compression Formats
+
+Also called: Block Compression, BC7, BC7 Quantization, Block-Dictionary Compression, ASTC, Variable-Block Color Compression
+
+## Overview
+Standard Image Compression Formats refers to the application of established 2D texture compression standards (specifically BC7 and ASTC) and specialized variable-block methods to compress volumetric data, typically by mapping 3D structures (like splats or voxels) onto 2D texture atlases or by treating volume slices as texture blocks. This approach solves the problem of high memory bandwidth and storage requirements for dense volumetric representations by leveraging hardware-accelerated decompression. It sets itself apart from general volume compression methods by relying on fixed-rate, block-based codecs originally designed for surface rendering, often requiring spatial mapping (e.g., UV unwrapping or atlas packing) rather than direct 3D transform coding.
+
+## Shared principles
+The methods in this family share the following mechanism:
+
+1.  **Block-Based Quantization:** Data is divided into fixed-size spatial blocks (e.g., $4\times4$ texels for BC7, variable sizes for ASTC). Within each block, values are quantized using a limited set of endpoints and interpolation weights, reducing precision to fit within a fixed bit budget (e.g., 128 bits per $4\times4$ block for BC7) [S1, unofficial].
+2.  **Hardware-Accelerated Decompression:** The compressed bitstream is designed to be decoded directly by GPU texture units. This allows for real-time reconstruction of values during rendering without storing the full decompressed volume in system memory, significantly reducing memory footprint and bandwidth [S1, unofficial][S2, unofficial].
+3.  **Empirical Range Management:** To prevent clipping of data outliers (heavy tails) common in neural or splat-based volumes, the quantization range is often determined empirically (e.g., min/max of samples) rather than statistically (e.g., $\mu \pm k\sigma$). This ensures that extreme values are preserved, maintaining visual fidelity [S1, unofficial].
+4.  **Integer Alignment:** Quantization scales are snapped to ensure that critical reference points (such as zero residual) align with integer quantization levels. This prevents systematic bias (e.g., dimming) caused by half-step rounding errors during interpolation [S1, unofficial].
+
+## Subtopics
+
+### [Variable-Block Color Compression](1878-variable-block-color-compression.md)
+Variable-Block Color Compression is a lossy compression method for sparse 3D color data that groups voxels into variable-length blocks to optimize the compression ratio. It sets itself apart from fixed-size block methods by allowing block boundaries to adapt to local color similarity, thereby reducing the number of headers required for large homogeneous regions while maintaining a strict error threshold [1878-variable-block-color-compression]. It is chosen when data exhibits large homogeneous regions with sharp boundaries, allowing for higher compression ratios than fixed-block methods without exceeding a specified Mean Square Error (MSE) threshold. See [Variable-Block Color Compression](1878-variable-block-color-compression.md).
+
+### [ASTC](5729-astc.md)
+ASTC is a flexible, hardware-supported, fixed-rate lossy compression method that uses various block-size configurations to cover a wide range of bit rates [5729-astc]. It solves the problem of efficient on-the-fly decompression for direct volume rendering by allowing real-time value reconstruction from voxel coordinates without storing the entire decompressed volume in memory [5729-astc]. It sets itself apart by proposing a general method for representing value sequences using a fractional number of bits per value and constructing per-texel color weights from sparse samples, aiming to improve upon standards like DXT, ETC2, and PVRTC [5729-astc]. It is chosen when hardware support for 3D texture compression is available and variable bit rates are needed to balance quality and performance. See [ASTC](5729-astc.md).
+
+### Block-Dictionary Compression
+**Definition:** Optional compression for distribution where the BC7 stream is compressed with a block dictionary [S1, unofficial].
+
+**Steps:**
+1.  Cut atlas into $4 \times 4$ texel blocks [S1, unofficial].
+2.  K-means clustering builds a codebook of $K = 65,536$ block centroids [S1, unofficial].
+3.  Each centroid is encoded as one 16-byte BC7 block [S1, unofficial].
+4.  Every atlas block stores a 16-bit codebook index [S1, unofficial].
+5.  Load time: Indices are gathered back into a dense BC7 stream, so the renderer is unchanged and keeps a single hardware bilinear fetch per fragment [S1, unofficial].
+
+**Numbers:**
+*   Codebook size: 1 MB. Index size: 2 bytes per block. Reduction: 7.0× of the atlas payload (173 MB to 24.7 MB on average for Mip-NeRF 360) [S1, unofficial].
+*   Complete web bundle size: 38.4 MB (dictionary atlas with 8-bit surfels (FP16 positions) and cameras) [S1, unofficial].
+
+**Comparison:**
+*   The dictionary reduces download size, while GPU memory and frame time are those of the raw BC7 atlas [S1, unofficial].
+
+### BC7 Quantization with Empirical Range
+**Definition:** Compression of the baked atlas using BC7 block compression. The residual range is estimated empirically to avoid clipping heavy tails, and the scale is snapped to align zero residual with an integer quantization level [S1, unofficial].
+
+**Steps:**
+1.  Estimate residual range as empirical [min, max] with a 2% margin over ~1.3 million samples (64 random UV positions on 20,000 surfels) [S1, unofficial].
+2.  Quantize uniformly with a single global (offset, scale) pair [S1, unofficial].
+3.  Snap scale so residual zero coincides with an integer quantization level [S1, unofficial].
+4.  Pad data to RGBA to match BC7 $4\times4$ block layout (16 bytes per block, 1 byte per texel) [S1, unofficial].
+
+**Pitfalls:**
+*   Using range estimates of the form $\mu \pm k\sigma$ clips heavy tails, dimming bright peaks uniformly. Using the full empirical range avoids this [S1, unofficial].
+*   If the scale is not snapped to align zero residual with an integer level, halfstep rounding bias propagates through the outer ReLU of Eq. 2, systematically dimming pixels near the activation threshold [S1, unofficial].
+
+**Numbers:**
+*   BC7 RGBA storage uses 1 byte/texel (~173 MB mean atlas size) with ±0.01 dB PSNR change compared to neural FP16 RGB (6 bytes/texel, ~1039 MB) [S1, unofficial].
+
+## Background
+The application of standard image compression formats to volumetric data has emerged with the rise of neural radiance fields (NeRF) and 3D Gaussian Splatting, which often represent scenes as dense texture atlases or large sets of splats. BC7 (Block Compression 7) is a standard from the S3 Texture Compression (S3TC) family, widely supported by GPUs for compressing RGBA textures. ASTC (Adaptive Scalable Texture Compression) is a more flexible standard from ARM, supporting variable block sizes and bit rates. The specific techniques of empirical range estimation and dictionary compression for these formats were detailed in recent preprints addressing the memory bottlenecks of real-time volumetric rendering, such as "Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting" [S1, unofficial].
+
+## Sources
+[S1] Bake It Till You Make It: Ultrafast Spatial Texture-Atlas Splatting, https://doi.org/10.48550/arXiv.2607.13808, fetched 2026-10-29 (unofficial)

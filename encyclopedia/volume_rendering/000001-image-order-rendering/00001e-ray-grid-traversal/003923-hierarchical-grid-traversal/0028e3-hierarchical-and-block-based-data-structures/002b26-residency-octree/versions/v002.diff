@@ -1,0 +1,297 @@
+--- v001.md
++++ v002.md
+@@ -4,164 +4,139 @@
+ 
+ ## Overview
+-The Residency Octree is a hybrid data structure for out-of-core direct volume rendering (DVR) of multi-volume datasets that decouples the cache residency of multi-resolution data from the spatial subdivision determined by the octree [S1, unofficial][S2]. Unlike standard octrees where each node maps to exactly one brick (one-to-one correspondence), each Residency Octree node represents a resolution-independent spatial region and references all resolution levels in a bricked volume hierarchy [S1, unofficial][S2]. This allows efficient mixing of channel resolutions, cache-miss compensation by substituting missing bricks with available resolutions, and fine-grained empty-space skipping independent of the underlying bricking granularity [S2]. It combines the flexible mixed-resolution access of page-table hierarchies with the efficient empty-space skipping of octrees [S1, unofficial][S2].
++The Residency Octree is a hybrid data structure for out-of-core direct volume rendering (DVR) of multi-volume datasets that decouples the cache residency of multi-resolution data from the spatial subdivision determined by the octree tree structure [S1, unofficial][S2]. Unlike standard octrees where each node represents exactly one brick (one-to-one node-to-brick correspondence), each residency octree node represents a resolution-independent spatial region and references all resolution levels in a bricked volume hierarchy [S2]. This allows efficient mixing of channel resolutions and substituting alternative resolutions on cache misses by adaptively choosing and mixing resolutions, adapting sampling rates, and compensating for cache misses [S2]. It combines the advantages of page-table hierarchies (flexible mixed-resolution access) with octrees (efficient empty-space skipping) [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A bricked multi-resolution multi-volume hierarchy with $n$ total channels; a user-defined maximum number of simultaneously visualized channels $m$ ($m \le n$); a target leaf-node size in voxels; a minimum voxel count for metadata computation.
+-*   **Output:** A fully pointerless octree structure stored in a GPU buffer, enabling ray-guided traversal, empty-space skipping, and adaptive resolution selection for $m$ channels.
++*   **Input:** A bricked multi-resolution multi-volume hierarchy with $n$ channels. The brick size in voxels (e.g., $32^3$) is fixed and identical across all resolution levels in the bricked volume hierarchy, independent of the brick's spatial extent [S2].
++*   **Output:** A residency octree data structure stored in GPU memory, enabling ray-guided traversal for rendering [S2].
+ 
+ **Data Structures:**
+-The Residency Octree is implemented as a full, pointerless octree where all nodes are pre-allocated with fixed locations in a storage buffer to remove indirection [S1, unofficial].
++The residency octree is implemented as a full, pointerless octree where all nodes are pre-allocated with fixed locations in a storage buffer to remove indirection and simplify data management [S1, unofficial].
+ 
+-*   **Octree Node Layout:**
+-    Each node consists of $m$ unsigned 32-bit integers, one per visualized channel [S1, unofficial]. For each channel, the 32-bit integer is structured as follows:
+-    *   **Bits 0–15 (16 bits):** Bitmap indicating which resolution levels the node is at least partially mapped in. A node is *partially mapped* if at least one cache-resident brick of that level overlaps the node's spatial extent. A node is *fully mapped* if cache-resident bricks of that level fully cover the node's spatial extent. Fully mapped implies partially mapped [S1, unofficial][S2].
+-    *   **Bits 16–23 (8 bits):** Minimum scalar value in the spatial region (for empty-space skipping).
+-    *   **Bits 24–31 (8 bits):** Maximum scalar value in the spatial region (for empty-space skipping) [S1, unofficial].
+-    
+-    If channel information is not yet initialized (INVALID), the node stores a pointer to the next lower subdivision level node with valid information for that channel, or a special `UNKNOWN` value if none exists. This pointer replaces the metadata to reduce memory usage [S1, unofficial].
++*   **Node Layout:** Each node consists of $m$ unsigned 32-bit integers, where $m$ is the number of channels currently visualized ($m \le n$) [S1, unofficial].
++    *   For each channel, the 32-bit integer is structured as follows:
++        *   **16 bits:** Bitmap indicating which resolution levels the node is at least partially mapped in [S1, unofficial].
++        *   **8 bits:** Minimum scalar value in the spatial region represented by the node [S1, unofficial].
++        *   **8 bits:** Maximum scalar value in the spatial region represented by the node [S1, unofficial].
++    *   *Note:* In multi-channel extensions, if channel information is invalid (not yet initialized), the metadata is replaced by a pointer to the next lower subdivision level node with valid info for that channel, or a special `UNKNOWN` value [S1, unofficial].
++*   **Backing Store:** Internally, the data structure is backed by a multi-channel page table hierarchy and a brick cache [S2]. The page table hierarchy references bricks of different resolution levels and channels [S1, unofficial].
+ 
+-*   **Backing Storage:**
+-    The structure is internally backed by a multi-channel page-table hierarchy and a channel-agnostic brick cache [S1, unofficial][S2]. The brick cache stores data belonging to a single channel per entry, allowing the number of channels to be independent of the texture format [S1, unofficial].
++**Node States:**
++For a given octree node and a given resolution level, the node can be in one of three states [S1, unofficial]:
++1.  **Fully mapped:** Cache-resident bricks of that level fully cover the node's spatial extent. If a node is fully mapped, all its children are also fully mapped in that level [S2].
++2.  **Partially mapped:** At least one brick of that level spatially overlaps with the node's extent and is resident in the cache. If a node is partially mapped, its parent is also partially mapped [S2].
++3.  **Not mapped:** No bricks of that level are resident [S1, unofficial].
+ 
+ **Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Determine the number of subdivision levels by iteratively subdividing the volume until the node size in each dimension is $\le$ the user-specified approximate leaf-node size in voxels [S1, unofficial]. At each step, dimensions are halved if necessary [S1, unofficial].
+-    *   Pre-allocate the pointerless octree buffer [S1, unofficial].
+-    *   Initialize all nodes with `INVALID` status for all $m$ channels [S1, unofficial].
++    *   The user specifies an approximate leaf-node size in voxels at initialization [S1, unofficial].
++    *   The system iteratively subdivides the volume until a subdivision level is reached where the size of a node in voxels is lower or equal to the given leaf-node size in each dimension [S1, unofficial].
++    *   At each subdivision level, each dimension is halved, resulting in eight children per node [S1, unofficial].
++    *   The maximum number of channels $m$ that can be referenced simultaneously is set at initialization [S2].
+ 
+-2.  **Ray Traversal and Request Generation:**
+-    *   Traverse the octree starting at the third level (or resume from the parent of the last visited node) to minimize hierarchy traversal cost [S2].
+-    *   For each sample, check the node's metadata (min/max) for empty-space skipping. If empty/homogeneous, the node is implicitly fully mapped in all levels, and no bricks are needed [S1, unofficial].
+-    *   If the node is not empty, check the residency bitmap for the required resolution levels.
+-    *   If data is missing (cache miss), generate a request to the server during ray traversal (ray-guided) [S2].
++2.  **Incremental Construction (Metadata):**
++    *   When new metadata for a volume region is received, the corresponding octree node is created or updated [S2].
++    *   If created, metadata is initialized as `INVALID` for all channels except the one for which metadata was received [S2].
++    *   Residency info is initialized for that channel by checking if the node is partially mapped in each resolution level [S2].
++    *   Metadata for a parent node is computed from its children: the parent's minimum and maximum are the minimum and maximum values of its children's respective values [S1, unofficial]. This allows parallel bottom-up construction [S1, unofficial].
++    *   *Pitfall:* If the server does not support metadata queries, metadata must be computed on the fly from brick data. A minimum number of voxels must be specified to avoid inaccuracies from too few voxels (e.g., only a single voxel taken into account due to coarse resolution) [S1, unofficial].
+ 
+-3.  **Metadata Computation (if server does not support metadata queries):**
+-    *   If the server is a file server, compute metadata on the fly [S2].
+-    *   Fetch bricks from a resolution level sufficient to meet the *minimum number of voxels* parameter to avoid inaccuracies from too few voxels (e.g., a single voxel in coarse resolution) [S1, unofficial][S2].
+-    *   Compute the node's min/max from the fetched voxel data [S1, unofficial].
+-    *   Upload bricks to the GPU and update residency info [S2].
++3.  **Incremental Construction (Residency):**
++    *   When a new brick is received, an available slot in the brick cache is selected [S2].
++    *   All residency octree leaf nodes whose spatial extent overlaps the brick's spatial extent are marked as partially mapped in the brick's resolution level and channel [S2].
++    *   This update is propagated up the tree to the root node [S2].
+ 
+-4.  **Residency Update (on brick arrival):**
+-    *   When a new brick is received, select an available slot in the brick cache [S2].
+-    *   Identify all residency octree leaf nodes whose spatial extent overlaps the brick's spatial extent [S2].
+-    *   Mark these leaf nodes as *partially mapped* in the brick's resolution level and channel [S2].
+-    *   Propagate this update up the tree to the root node. Note: If a node is fully mapped in a level, all children are also fully mapped; if partially mapped, the parent is also partially mapped [S2].
++4.  **Ray Traversal:**
++    *   Ray traversal is performed for spatial regions corresponding to octree nodes instead of bricks, and this traversal is independent of the number of channels [S2].
++    *   The renderer traverses the octree. If metadata or brick data is missing for a node, it generates a request to the server. This request is generated during ray traversal, making the method ray-guided [S2].
++    *   At each subdivision level, the system checks the bitmap to see which resolution levels are mapped [S1, unofficial].
++    *   If a node is empty or homogeneous (based on min/max metadata), it is implicitly considered fully mapped in all resolution levels during octree traversal, meaning its corresponding bricks do not need to be resident in the cache [S1, unofficial].
++    *   The system keeps bricks of high-resolution levels resident if needed, without requiring lower-resolution bricks in the same region to be resident if unused [S1, unofficial].
++    *   Optimization: Start traversal at the third level instead of the root, and resume from the parent node of the last visited node rather than restarting per sample [S2]. Traverse the octree only once per sample to minimize hierarchy traversal cost during multi-channel rendering [S2].
+ 
+ 5.  **Channel Replacement:**
+-    *   If a channel is replaced by another at runtime, mark all nodes storing valid data for the old channel as `INVALID` for the new channel [S1, unofficial][S2].
+-    *   Nodes with `INVALID` status use the pointer to the next lower subdivision level node with valid info for the new channel [S1, unofficial].
++    *   If a channel is replaced by another one, all nodes storing valid data for the old channel are marked `INVALID` for the new channel [S1, unofficial].
++    *   Residency octrees support changes to the selection of visible channels at run-time by replacing only the parts of their nodes related to the affected channels [S1, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-# Node structure in GPU buffer (m channels)
+-# Each node is an array of m uint32_t values.
+-# Layout per channel: [16-bit bitmap, 8-bit min, 8-bit max]
++# Data Structure Definition
++class ResidencyOctreeNode:
++    # Pre-allocated in a buffer. Index determines position.
++    # m is the number of visualized channels.
++    # Each channel uses 32 bits: 16 for resolution bitmap, 8 for min, 8 for max.
++    channel_data: array[m] of uint32
+ 
+-def get_node_index(node_id, channel_idx):
+-    # Returns the uint32_t value for a specific channel in a node
+-    return node_buffer[node_id * m + channel_idx]
++    def get_min(self, channel_idx: int) -> uint8:
++        return (self.channel_data[channel_idx] >> 8) & 0xFF
+ 
+-def extract_bitmap(node_value):
+-    return node_value & 0xFFFF
++    def get_max(self, channel_idx: int) -> uint8:
++        return self.channel_data[channel_idx] & 0xFF
+ 
+-def extract_min(node_value):
+-    return (node_value >> 16) & 0xFF
++    def get_resolution_bitmap(self, channel_idx: int) -> uint16:
++        return (self.channel_data[channel_idx] >> 16) & 0xFFFF
+ 
+-def extract_max(node_value):
+-    return (node_value >> 24) & 0xFF
++    def set_metadata(self, channel_idx: int, min_val: uint8, max_val: uint8, resolution_bitmap: uint16):
++        # Clear lower 24 bits, keep upper bits if needed for pointers in invalid state
++        self.channel_data[channel_idx] = (self.channel_data[channel_idx] & 0xFF000000) | \
++                                         (resolution_bitmap << 16) | \
++                                         (max_val << 8) | \
++                                         min_val
+ 
+-def update_residency(leaf_node_id, channel_idx, resolution_level):
+-    """
+-    Marks a leaf node as partially mapped for a specific channel and resolution.
+-    Propagates up to the root.
+-    """
+-    node_id = leaf_node_id
+-    while node_id is not None:
+-        current_value = get_node_index(node_id, channel_idx)
+-        bitmap = extract_bitmap(current_value)
+-        
+-        # Set the bit for the resolution level
+-        new_bitmap = bitmap | (1 << resolution_level)
+-        
+-        # Reconstruct the node value (min/max remain unchanged)
+-        min_val = extract_min(current_value)
+-        max_val = extract_max(current_value)
+-        new_value = (new_bitmap & 0xFFFF) | (min_val << 16) | (max_val << 24)
+-        
+-        # Write back to buffer
+-        node_buffer[node_id * m + channel_idx] = new_value
+-        
+-        # Move to parent
+-        node_id = get_parent_node_id(node_id)
+-
+-def traverse_and_render(ray):
+-    """
+-    Ray-guided traversal starting from level 3.
+-    """
+-    current_node = get_node_at_level_3(ray)
++# Traversal Logic
++def traverse_octree(ray: Ray, root_node: ResidencyOctreeNode, brick_cache: BrickCache):
++    # Optimization: Start at level 3 if available, else root
++    current_node = get_node_at_level(root_node, level=3)
+     
+     while current_node is not None:
+-        # Check all m channels
+-        for c in range(m):
+-            node_val = get_node_index(current_node, c)
++        # Check empty space skipping using min/max metadata
++        # Assuming single channel for simplicity of example, or loop over m channels
++        min_val = current_node.get_min(0)
++        max_val = current_node.get_max(0)
++        
++        if is_empty_or_homogeneous(min_val, max_val, transfer_function):
++            # Implicitly fully mapped, skip subtree
++            break
+             
+-            # Check if valid
+-            if is_invalid(node_val):
+-                # Follow pointer to lower level or handle UNKNOWN
+-                next_node = get_valid_pointer(node_val)
+-                if next_node is UNKNOWN:
+-                    continue # No data available
+-                current_node = next_node
+-                continue
++        # Check residency
++        bitmap = current_node.get_resolution_bitmap(0)
++        
++        # Determine which resolution levels are available
++        available_levels = get_set_bits(bitmap)
++        
++        if not available_levels:
++            # Request missing bricks from server (ray-guided)
++            request_bricks(current_node.spatial_extent, ray)
++            # Continue traversal or wait for data
++            continue
+             
+-            min_val = extract_min(node_val)
+-            max_val = extract_max(node_val)
++        # Select best resolution level (e.g., highest available)
++        level = max(available_levels)
++        
++        # Access bricks via backing page table hierarchy
++        bricks = brick_cache.get_bricks_for_node(current_node, level)
++        
++        if bricks are empty:
++            # Cache miss, request specific bricks
++            request_bricks(current_node.spatial_extent, level)
++            continue
+             
+-            # Empty-space skipping
+-            if is_empty(min_val, max_val, transfer_function):
+-                # Implicitly fully mapped, skip children
+-                break 
+-            
+-            # Check residency
+-            bitmap = extract_bitmap(node_val)
+-            required_res = get_required_resolution(c, ray)
+-            
+-            if not (bitmap & (1 << required_res)):
+-                # Cache miss: request brick
+-                request_brick(current_node, c, required_res)
+-                # Continue traversal or wait for data
+-                continue
+-            
+-            # Sample volume data
+-            sample_volume(ray, c, required_res)
++        # Render samples within this node's extent
++        render_samples(ray, bricks, level)
+         
+         # Move to children if not leaf
+         if not is_leaf(current_node):
+-            current_node = get_child_node(current_node, ray)
++            current_node = get_first_child(current_node)
+         else:
+-            break
++            # Move to next sibling or parent's next sibling
++            current_node = get_next_node_in_traversal_order(current_node)
+ ```
+-
+-**Parameters:**
+-*   **Leaf-node size:** Approximate leaf-node size in voxels, defined by the user at initialization [S1, unofficial].
+-*   **m:** Maximum number of channels visualized simultaneously ($m \le n$), set at initialization [S2].
+-*   **n:** Total number of available channels in the dataset [S2].
+-*   **Minimum number of voxels:** Minimum voxels to consider when computing metadata to avoid inaccuracies from coarse resolution [S2].
+-*   **Brick size:** Fixed and identical across all resolution levels (e.g., $32^3$ voxels) [S2].
+-*   **Channel importance:** User-defined weight to guide resolution range selection [S2].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Metadata Inaccuracy:** If the server does not support metadata queries, fetching bricks for metadata computation from too coarse a resolution may result in only a single voxel being considered. A minimum voxel count must be enforced [S1, unofficial][S2].
+-*   **Memory Scaling:** Memory usage scales linearly with the number of channels $m$. This can be mitigated by combining channels via dimensionality reduction, interleaving in four-component textures, or using compressed formats [S2].
+-*   **Bit-width Constraints:** The bit-width of the brick ID data type (32-bit or 64-bit) constrains the maximum volume size and channel count representable by the backing page table. CPU-side mapping is used to translate GPU brick IDs to server requests for runtime channel exchange [S2].
+-*   **Fully/Partially Mapped Logic:** A single brick can fully map some nodes while partially mapping others. If a node is fully mapped, all children are fully mapped; if partially mapped, the parent is partially mapped [S2].
+ 
+ ## Subtopics
+ 
+ ### [Octree-based memory virtualization](5140-octree-based-memory-virtualization.md)
+-An out-of-core rendering approach for multi-channel volume data sets where octree nodes and bricks store information on up to $n$ channels. It extends the single-channel memory virtualization scheme of Crassin et al. [CNLE09] by supporting multiple visible channels, differing from the [Multi-Channel Page-Table Hierarchy](5196-multi-channel-page-table-hierarchy.md) by using hierarchical tree traversal for every channel to ensure subtree residency.
++An out-of-core rendering approach for multi-channel volume data sets where octree nodes and bricks store information on up to $n$ channels. It extends the single-channel scheme of Crassin et al. [CNLE09] by supporting multiple visible channels, solving the problem of managing brick residency and performing address translation for out-of-core volume rendering using a hierarchical tree structure. Unlike the Residency Octree, which uses a more compact representation, this method enforces that the whole subtree is resident in the cache for high-resolution rendering, leading to a higher memory footprint but comparable performance for single-channel data.
+ 
+ ### [Residency Octree Update](5181-residency-octree-update.md)
+@@ -172,23 +147,23 @@
+ 
+ ### Residency Octree with Channel-Agnostic Brick Cache
+-Uses accumulation-level intermixing to combine different channels. The residency octree is backed by a channel-agnostic brick cache where each cache entry only contains data belonging to a single channel. The number of channels is not limited by the texture format used by the brick cache implementation, unlike Brix et al.'s approach. Residency octrees support changes to the selection of visible channels at run-time by replacing only the parts of their nodes related to the affected channels [S1, unofficial].
++Uses accumulation-level intermixing to combine different channels [S1, unofficial]. The residency octree is backed by a channel-agnostic brick cache where each cache entry only contains data belonging to a single channel [S1, unofficial]. The number of channels is thus not limited by the texture format used by the brick cache implementation, unlike Brix et al.'s approach [S1, unofficial]. Residency octrees support changes to the selection of visible channels at run-time by replacing only the parts of their nodes related to the affected channels [S1, unofficial].
+ 
+ ### Residency-Octree Node Classification
+-Classification of octree nodes based on cache residency of bricks covering their spatial extent at a given resolution level. A node is *fully mapped* if cache-resident bricks of that level fully cover the node's spatial extent. A node is *partially mapped* if at least one brick of that level overlaps with the node's spatial extent and is resident in the cache. Fully mapped implies partially mapped, but not vice versa. If a node is fully mapped in a resolution level, all child nodes are also fully mapped in that level. If a node is partially mapped in a resolution level, its parent node is also partially mapped [S1, unofficial].
++Classification of octree nodes based on cache residency of bricks covering their spatial extent at a given resolution level [S1, unofficial]. A node is fully mapped in a resolution level if cache-resident bricks of that level fully cover the node's spatial extent [S1, unofficial]. A node is partially mapped if at least one brick of that level overlaps with the node's spatial extent and is resident in the cache [S1, unofficial]. Fully mapped implies partially mapped, but not vice versa [S1, unofficial]. If a node is fully mapped in a resolution level, all child nodes are also fully mapped in that level [S1, unofficial]. If a node is partially mapped in a resolution level, its parent node is also partially mapped [S1, unofficial].
+ 
+ ### Multi-Channel Residency Octree
+-An extension where all channels share the same octree structure, but each node stores culling and residency information for up to $m \le n$ channels. This allows using the same spatial subdivision for empty-space skipping while rendering each channel in a different resolution. When a channel is replaced by another one, all nodes storing valid data for the old channel are marked as `INVALID` for the new channel. Each node stores for each of the $m$ channels whether the channel information is initialized or not using a special `INVALID` value. If invalid, it stores a pointer to the node in the next lower subdivision level that has valid information for that channel, or a special `UNKNOWN` value if no such node exists. The pointer replaces the metadata for that channel to reduce memory [S1, unofficial].
++An extension where all channels share the same octree structure, but each node stores culling and residency information for up to $m \le n$ channels [S1, unofficial]. This allows using the same spatial subdivision for empty-space skipping while rendering each channel in a different resolution [S1, unofficial]. When a channel is replaced by another one, all nodes storing valid data for the old channel are marked as `INVALID` for the new channel [S1, unofficial]. Each node stores for each of the $m$ channels whether the channel information is initialized or not using a special `INVALID` value [S1, unofficial]. If invalid, it stores a pointer to the node in the next lower subdivision level that has valid information for that channel, or a special `UNKNOWN` value if no such node exists [S1, unofficial]. The pointer replaces the metadata for that channel to reduce memory [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Ray traversal is performed once per sample, starting at the third level and resuming from the parent of the last visited node to minimize hierarchy traversal cost [S2].
+-*   **Memory Complexity:** Scales linearly with the number of simultaneously visualized channels $m$. Each node stores $m$ 32-bit integers [S1, unofficial].
+-*   **Measured Performance:** Implemented as a web-based, pure client-side renderer using WebGPU and WebAssembly, it is faster than prior approaches and efficient for many data channels (e.g., 16-channel rendering of melanoma) [S2].
+-*   **Strengths:** Decouples cache residency from spatial subdivision, allowing adaptive resolution mixing and cache-miss compensation. Supports fine-grained empty-space skipping independent of bricking granularity. Uses minima/maxima for higher precision empty-space skipping compared to histograms [S1, unofficial][S2].
+-*   **Limitations:** Memory usage increases with channel count. Requires a minimum number of voxels for metadata computation if server-side metadata is unavailable.
++*   **Time Complexity:** Ray traversal is performed only once per sample to minimize hierarchy traversal cost during multi-channel rendering [S2]. Traversal starts at the third level instead of the root to reduce overhead [S2].
++*   **Memory Complexity:** Memory usage scales linearly with the number of simultaneously visualized channels $m$ [S2]. Each node stores one bitmask per channel [S2]. This can be mitigated by combining channels via dimensionality reduction, interleaving channels in four-component textures, or using compressed texture formats [S2]. The bit-width of the brick ID data type (e.g., 32-bit or 64-bit) constrains the maximum volume size and the maximum number of channels representable by the multi-channel page table hierarchy [S2].
++*   **Performance:** The method is faster than prior approaches and efficient for many data channels with a flexible and adaptive choice of data resolution [S2]. It enables fine-grained empty-space skipping independent of the data subdivision used for bricking [S2].
++*   **Strengths:** Decouples cache residency from spatial subdivision, allowing adaptive resolution mixing and cache-miss compensation [S2]. Supports efficient empty-space skipping unlike page tables [S2]. Allows substituting missing bricks with available resolutions without requiring all lower resolutions to be resident [S2].
++*   **Limitations:** Memory scales linearly with channel count [S2]. Requires careful management of metadata computation if server-side queries are not supported [S1, unofficial].
+ *   **When to use:** Out-of-core DVR of large-scale volumetric data sets with a large number of channels, such as Immunofluorescence (IF) imaging data [S2].
+-*   **When not to use:** When hardware memory is extremely constrained and channel count is high without mitigation strategies (e.g., dimensionality reduction) [S2].
++*   **When not to use:** When the number of channels is very large and memory is constrained, or when the hardware does not support the required bit-width for brick IDs [S2].
+ 
+ ## Background
+-The Residency Octree was introduced to address the limitations of standard octree-based out-of-core methods, which use a one-to-one mapping between bricks and octree nodes, intrinsically coupling resolution levels and spatial subdivision [S1, unofficial][S2]. It combines the advantages of page-table hierarchies (flexible mixed-resolution access) with octrees (efficient empty-space skipping) [S1, unofficial][S2]. The method is designed for multi-channel immunoﬂuorescence data, which often has unimodal transfer functions, justifying the use of minima/maxima over histograms for empty-space skipping [S1, unofficial]. It has been implemented as a web-based renderer to facilitate collaboration and eliminate local data storage [S2].
++The Residency Octree was introduced as a hybrid data structure for out-of-core multi-volume rendering that combines page-table hierarchies with octrees [S1, unofficial]. It addresses the limitations of previous octree-based out-of-core approaches [CNLE09, BPH14] where each node corresponds to one brick, intrinsically coupling resolution levels to octree subdivision levels [S1, unofficial]. The method was implemented as a web-based, pure client-side renderer using WebGPU and WebAssembly to facilitate collaboration and eliminate local data storage [S2]. It is particularly used for multi-channel immunoﬂuorescence data, where unimodal transfer functions make minima/maxima suitable for empty-space skipping [S1, unofficial].
+ 
+ ## Sources

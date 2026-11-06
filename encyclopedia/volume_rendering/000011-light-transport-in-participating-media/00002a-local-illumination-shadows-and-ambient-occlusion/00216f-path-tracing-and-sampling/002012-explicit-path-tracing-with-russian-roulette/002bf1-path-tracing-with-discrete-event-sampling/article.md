@@ -7,216 +7,215 @@ Path Tracing with Discrete Event Sampling is a path tracing algorithm for partic
 
 ## How it works
 **Inputs:**
-- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$.
-- Density grid $\sigma_t(\mathbf{x})$ (total extinction coefficient).
-- Optional temperature grid $T_{adim}(\mathbf{x})$ (normalized).
-- Parameters: `max_depth` (integer), `henyey_greenstein_g` (float, anisotropy), `le_scale` (float, emission scale), `temperature_scale` (float), `temperature_offset` (float), `infinite_light` (vector and multiplier).
-- Random Number Generator (RNG).
+- Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ [S1, unofficial].
+- Density grid $\sigma_t(\mathbf{x})$ (total extinction coefficient) [S1, unofficial].
+- Optional temperature grid $T_{adim}(\mathbf{x})$ (normalized) [S1, unofficial].
+- Parameters: `max_depth` (integer), `henyey_greenstein_g` (float, anisotropy), `le_scale` (float, emission scale), `temperature_scale` (float), `temperature_offset` (float), `infinite_light` (vector and multiplier) [S1, unofficial].
+- Random Number Generator (RNG) [S1, unofficial].
 
 **Outputs:**
-- Accumulated radiance $L$ (vector).
+- Accumulated radiance $L$ (vector) [S1, unofficial].
 
 **Data Structures:**
-- `MajorantTransmittanceSampler`: Manages the sampling of interaction points along the ray using the majorant density. It provides an iterator or loop over sampled points within the current ray segment.
-- `Event`: Enum or integer representing {Null, Absorption, Scatter}.
+- `MajorantTransmittanceSampler`: Manages the sampling of interaction points along the ray using the majorant density. It provides an iterator or loop over sampled points within the current ray segment [S1, unofficial].
+- `Event`: Enum or integer representing {Null, Absorption, Scatter} [S1, unofficial].
 
 **Constants:**
 - Planck's constant $h = 6.62606957 \times 10^{-34}$ [S1, unofficial].
 - Boltzmann constant $k_b = 1.3806488 \times 10^{-23}$ [S1, unofficial].
-- Speed of light $c$ (standard physical constant).
+- Speed of light $c = 299792458.0$ [G].
 
 **Steps:**
-1. Initialize accumulated radiance $L = \mathbf{0}$ and set `terminated` flag to false.
-2. Loop for `depth` from 0 to `max_depth - 1`:
-    a. Intersect the current ray with the volume grid.
-    b. If no intersection, break the depth loop.
-    c. Initialize `MajorantTransmittanceSampler` with the intersection interval, RNG, density grid, and total extinction coefficient $\sigma_t$.
-    d. Loop through sampled points $\mathbf{x}$ from the majorant sampler:
+1. Initialize accumulated radiance $L = \mathbf{0}$ and set `terminated` flag to false [S1, unofficial].
+2. Loop for `depth` from 0 to `max_depth - 1` [S1, unofficial].
+    a. Intersect the current ray with the volume grid [S1, unofficial].
+    b. If no intersection, break the depth loop [S1, unofficial].
+    c. Initialize `MajorantTransmittanceSampler` with the intersection interval, RNG, density grid, accessor, and total extinction coefficient $\sigma_t$ [S1, unofficial].
+    d. Loop through sampled points $\mathbf{x}$ from the majorant sampler [S1, unofficial].
         i. If temperature grid is available:
-            1. Sample temperature $T_{adim}$ at $\mathbf{x}$.
-            2. Convert to Kelvin: $T_K = T_{adim} \cdot \text{temperature\_scale} + \text{temperature\_offset}$.
+            1. Sample temperature $T_{adim}$ at $\mathbf{x}$ [S1, unofficial].
+            2. Convert to Kelvin: $T_K = T_{adim} \cdot \text{temperature\_scale} + \text{temperature\_offset}$ [S1, unofficial].
             3. Calculate blackbody radiation spectrum $\mathbf{L}_e$ at $T_K$ using Planck's law for wavelength $\lambda$:
                $$ \mathbf{L}_e(\lambda) = \frac{2 h c^2}{\lambda^5} \frac{1}{e^{\frac{hc}{\lambda k_b T_K}} - 1} $$
                [S1, unofficial]
-            4. Add emission contribution to $L$: $L \leftarrow L + p_a \cdot \text{le\_scale} \cdot \mathbf{L}_e$.
-        ii. Calculate probabilities for the three events based on local coefficients (not given in sources, but implied by $p_a, p_s, p_n$) [G]:
+            4. Add emission contribution to $L$: $L \leftarrow L + p_a \cdot \text{le\_scale} \cdot \mathbf{L}_e$ [S1, unofficial].
+        ii. Calculate probabilities for the three events based on local coefficients [S1, unofficial]:
             - $p_s$: Probability of scattering.
             - $p_a$: Probability of absorption.
             - $p_n$: Probability of null event (transmittance).
         iii. Ensure $p_n$ is valid: $p_n = \max(1.0 - p_a - p_s, 0.0)$ [S1, unofficial].
-        iv. Sample a uniform random number $u \in [0, 1)$.
+        iv. Sample a uniform random number $u \in [0, 1)$ [S1, unofficial].
         v. Determine event:
-            - If $u < p_n$: Event is **Null**.
-            - Else if $u < p_n + p_a$: Event is **Absorption**.
-            - Else: Event is **Scatter**.
+            - If $u < p_n$: Event is **Null** [S1, unofficial].
+            - Else if $u < p_n + p_a$: Event is **Absorption** [S1, unofficial].
+            - Else: Event is **Scatter** [S1, unofficial].
         vi. Handle Event:
-            - **Null**: Continue to the next sampled point in the majorant loop.
-            - **Absorption**: Mark path as terminated, break the majorant loop.
+            - **Null**: Continue to the next sampled point in the majorant loop [S1, unofficial].
+            - **Absorption**: Mark path as terminated, break the majorant loop [S1, unofficial].
             - **Scatter**:
-                1. If `depth` == `max_depth` - 1: Log termination, break the majorant loop (path ends).
+                1. If `depth` == `max_depth` - 1: Log termination, break the majorant loop (path ends) [S1, unofficial].
                 2. Sample a new direction $\mathbf{d}'$ using the Henyey-Greenstein phase function with parameter $g$:
                    $$ p(\mathbf{d}'|\mathbf{d}) = \frac{1-g^2}{4\pi (1 + g^2 - 2g(\mathbf{d} \cdot \mathbf{d}'))^{3/2}} $$
                    [G] (Standard HG formula, not explicitly in source but required for implementation).
-                3. Update ray origin to $\mathbf{x}$ and direction to $\mathbf{d}'$.
+                3. Update ray origin to $\mathbf{x}$ and direction to $\mathbf{d}'$ [S1, unofficial].
                 4. Recursively sample scattered radiance $L_{scat}$ (implementation detail for recursive call or next iteration setup) [G].
-                5. Break the majorant loop to continue the path at the next depth level.
-    e. If the path terminated due to Absorption or Max Depth, break the depth loop.
+                5. Break the majorant loop to continue the path at the next depth level [S1, unofficial].
+    e. If the path terminated due to Absorption or Max Depth, break the depth loop [S1, unofficial].
 3. If the path escaped to infinity (ray did not terminate in volume):
-    - Add infinite light contribution: $L \leftarrow L + \text{infinite\_light.xyz} \cdot \text{infinite\_light.multiplier}$.
-4. Add $L$ to the film buffer, scaled by `imaging_ratio`, and increment sample count.
+    - Add infinite light contribution: $L \leftarrow L + \text{infinite\_light.xyz} \cdot \text{infinite\_light.multiplier}$ [S1, unofficial].
+4. Add $L$ to the film buffer, scaled by `imaging_ratio`, and increment sample count [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def path_tracing_discrete_event_sampling(ray_o, ray_d, density_grid, temp_grid, params, rng):
-    """
-    ray_o: Vector3, ray origin
-    ray_d: Vector3, ray direction (normalized)
-    density_grid: Function or object providing sigma_t(x)
-    temp_grid: Function or object providing normalized temperature T_adim(x), or None
-    params: Object with max_depth, henyey_greenstein_g, le_scale, temperature_scale, 
-            temperature_offset, infinite_light (vector, multiplier)
-    rng: Random number generator
-    """
-    L = Vector3(0.0, 0.0, 0.0)
+import math
+
+class Vector3:
+    def __init__(self, x=0.0, y=0.0, z=0.0):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __mul__(self, s): return Vector3(self.x * s, self.y * s, self.z * s)
+    def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
+    def length(self): return math.sqrt(self.x**2 + self.y**2 + self.z**2)
+    def normalized(self):
+        l = self.length()
+        return Vector3(self.x/l, self.y/l, self.z/l) if l > 0 else Vector3()
+
+def intersect_volume_grid(ray_o, ray_d, bounds_min=(-10.0, -10.0, -10.0), bounds_max=(10.0, 10.0, 10.0)):
+    """Simple ray-AABB intersection. Returns (t0, t1) or (None, None)."""
+    t0, t1 = 0.0, float('inf')
+    for i in range(3):
+        if abs(ray_d[i]) < 1e-8:
+            if ray_o[i] < bounds_min[i] or ray_o[i] > bounds_max[i]:
+                return None, None
+        else:
+            t_near = (bounds_min[i] - ray_o[i]) / ray_d[i]
+            t_far = (bounds_max[i] - ray_o[i]) / ray_d[i]
+            if t_near > t_far: t_near, t_far = t_far, t_near
+            t0 = max(t0, t_near)
+            t1 = min(t1, t_far)
+    if t0 > t1: return None, None
+    return t0, t1
+
+class MajorantTransmittanceSampler:
+    def __init__(self, ray_o, ray_d, t0, t1, density_grid, step_size, rng):
+        self.ray_o = ray_o
+        self.ray_d = ray_d.normalized()
+        self.t0 = t0
+        self.t1 = t1
+        self.density_grid = density_grid
+        self.step_size = step_size
+        self.rng = rng
+        self.t = t0
+        self.transmittance = 1.0
+        self.sigma_t = density_grid.get_sigma_t(ray_o + ray_d * t0)
+        
+    def __iter__(self):
+        while self.t < self.t1:
+            yield Point(self.ray_o + self.ray_d * self.t, self.transmittance)
+            dt = self.step_size
+            self.t += dt
+            self.transmittance *= math.exp(-self.sigma_t * dt)
+            self.sigma_t = self.density_grid.get_sigma_t(self.ray_o + self.ray_d * self.t)
+
+class Point:
+    def __init__(self, position, transmittance):
+        self.position = position
+        self.transmittance = transmittance
+
+def blackbody_radiation_xyz(T_K, h, kb, c):
+    """Simplified blackbody radiation. Returns a Vector3 approximation."""
+    if T_K <= 0: return Vector3(0.0, 0.0, 0.0)
+    # Evaluate at representative wavelengths for RGB approximation
+    lambdas = [650e-9, 550e-9, 450e-9]
+    rgb = []
+    for lam in lambdas:
+        exp_term = math.exp((h * c) / (lam * kb * T_K))
+        val = (2 * h * c**2) / (lam**5 * (exp_term - 1))
+        rgb.append(val)
+    return Vector3(rgb[0], rgb[1], rgb[2])
+
+def sample_henyey_greenstein(d, g, rng):
+    """Samples a new direction from the Henyey-Greenstein phase function."""
+    u = rng.uniform(0.0, 1.0)
+    v = rng.uniform(0.0, 1.0)
+    if g == 0:
+        cos_theta = 2 * v - 1
+    else:
+        cos_theta = (1 - g**2) / (1 - g + 2 * g * u)
+    sin_theta = math.sqrt(max(1.0 - cos_theta**2, 0.0))
+    phi = 2 * math.pi * v
     
-    # Constants for Planck's law
+    # Construct orthonormal basis with d as z-axis
+    if abs(d.x) < 0.999:
+        up = Vector3(1.0, 0.0, 0.0)
+    else:
+        up = Vector3(0.0, 1.0, 0.0)
+    right = Vector3().normalized() if d.dot(up) == 0 else Vector3(d.y * up.z - d.z * up.y, d.z * up.x - d.x * up.z, d.x * up.y - d.y * up.x)
+    right = right.normalized()
+    up = Vector3().normalized() if d.dot(right) == 0 else Vector3(d.z * right.y - d.y * right.z, d.x * right.z - d.z * right.x, d.y * right.x - d.x * right.y)
+    up = up.normalized()
+    
+    new_dir = Vector3(
+        sin_theta * math.cos(phi) * right.x + sin_theta * math.sin(phi) * up.x + cos_theta * d.x,
+        sin_theta * math.cos(phi) * right.y + sin_theta * math.sin(phi) * up.y + cos_theta * d.y,
+        sin_theta * math.cos(phi) * right.z + sin_theta * math.sin(phi) * up.z + cos_theta * d.z
+    )
+    return new_dir.normalized()
+
+def path_tracing_discrete_event_sampling(ray_o, ray_d, density_grid, temp_grid, params, rng):
+    L = Vector3(0.0, 0.0, 0.0)
     h = 6.62606957e-34
     kb = 1.3806488e-23
-    c = 299792458.0  # Speed of light
-    
+    c = 299792458.0
+
     for depth in range(params.max_depth):
-        # Intersect ray with volume grid
-        hit = intersect_volume_grid(ray_o, ray_d)
-        if not hit:
+        t0, t1 = intersect_volume_grid(ray_o, ray_d)
+        if t0 is None:
             break
             
-        # Initialize majorant sampler for the segment
-        # This sampler yields points along the ray based on majorant density
-        majorant_sampler = MajorantTransmittanceSampler(hit, rng, density_grid)
+        majorant_sampler = MajorantTransmittanceSampler(ray_o, ray_d, t0, t1, density_grid, params.step_size, rng)
         
         for point in majorant_sampler:
             x = point.position
+            sigma_t = density_grid.get_sigma_t(x)
+            sigma_a = density_grid.get_sigma_a(x)
+            sigma_s = density_grid.get_sigma_s(x)
             
-            # Handle emission if temperature grid is available
+            if sigma_t > 0:
+                p_a = sigma_a / sigma_t
+                p_s = sigma_s / sigma_t
+            else:
+                p_a = 0.0
+                p_s = 0.0
+            p_n = max(1.0 - p_a - p_s, 0.0)
+            
             if temp_grid is not None:
                 T_adim = temp_grid.sample(x)
                 T_K = T_adim * params.temperature_scale + params.temperature_offset
-                
-                # Calculate blackbody radiation
-                # Note: This is a simplified spectral calculation; real implementation 
-                # might integrate over spectrum or use XYZ conversion.
-                # The source uses a specific lambda, but for general radiance, 
-                # we assume this returns a vector or scalar contribution.
-                # For this pseudocode, we assume blackbody_radiation_xyz returns a Vector3
-                # representing the XYZ or RGB contribution.
                 Le = blackbody_radiation_xyz(T_K, h, kb, c)
+                L += p_a * params.le_scale * Le
                 
-                # Add emission contribution scaled by absorption probability and le_scale
-                # Note: The source adds p_a * le_scale * Le. 
-                # This implies Le is the emitted radiance and p_a is the weight for absorption event.
-                # However, in discrete event sampling, emission is often associated with the 
-                # medium itself. The source code snippet shows:
-                # L += p_a * le_scale * blackbody_radiation_xyz(temp_K)
-                # This suggests emission is added when an absorption event is *sampled*? 
-                # Or is it added at every step? The source says "If temperature grid is available... add emission contribution".
-                # It does not condition it on the event type in the snippet provided.
-                # However, physically, emission should be added regardless of event, 
-                # but the source code structure suggests it might be tied to the step.
-                # Let's follow the source literally: it adds it inside the point loop.
-                L += point.probability_absorption * params.le_scale * Le
-
-            # Calculate probabilities
-            # p_s: scattering probability
-            # p_a: absorption probability
-            # These depend on local coefficients sigma_s and sigma_a
-            sigma_s = density_grid.get_sigma_s(x)
-            sigma_a = density_grid.get_sigma_a(x)
-            sigma_t = density_grid.get_sigma_t(x)
-            
-            if sigma_t == 0:
-                p_s = 0.0
-                p_a = 0.0
-            else:
-                p_s = sigma_s / sigma_t
-                p_a = sigma_a / sigma_t
-            
-            # Null probability
-            p_n = max(1.0 - p_a - p_s, 0.0)
-            
-            # Sample discrete event
             u = rng.uniform(0.0, 1.0)
-            
             if u < p_n:
-                # Null event: continue to next point
                 continue
             elif u < p_n + p_a:
-                # Absorption event: terminate path
                 break
             else:
-                # Scatter event
                 if depth == params.max_depth - 1:
-                    # Max depth reached, terminate
                     break
-                
-                # Sample new direction using Henyey-Greenstein
-                g = params.henyey_greenstein_g
-                d_prime = sample_henyey_greenstein(ray_d, g, rng)
-                
-                # Update ray for next iteration
+                d_prime = sample_henyey_greenstein(ray_d, params.henyey_greenstein_g, rng)
                 ray_o = x
                 ray_d = d_prime
-                
-                # Break to continue path at next depth
                 break
         else:
-            # If majorant loop finished without break (e.g. ray exited volume)
             break
     else:
-        # If loop completed without break (escaped to infinity)
         L += params.infinite_light.xyz * params.infinite_light.multiplier
         
     return L
-
-def blackbody_radiation_xyz(T_K, h, kb, c):
-    """
-    Simplified blackbody radiation calculation.
-    The source uses a specific lambda. For a general implementation, 
-    this would typically integrate over the visible spectrum or use precomputed tables.
-    The source snippet shows a calculation for a specific lambda_m.
-    We will return a placeholder vector as the exact spectral integration is not detailed.
-    """
-    # This is a placeholder. The source calculates for a specific lambda.
-    # In a real implementation, one would integrate Planck's law over XYZ color matching functions.
-    return Vector3(0.0, 0.0, 0.0) # [G] Placeholder for spectral integration
-
-def sample_henyey_greenstein(d, g, rng):
-    """
-    Samples a new direction from the Henyey-Greenstein phase function.
-    """
-    # Standard sampling method for HG phase function
-    # cos_theta = ((1 - g^2) / (1 - g + 2*g*u)) if g != 1 else 1
-    # phi = 2 * pi * v
-    # Convert spherical to Cartesian relative to d
-    u = rng.uniform(0.0, 1.0)
-    v = rng.uniform(0.0, 1.0)
-    
-    if g == 0:
-        # Isotropic
-        cos_theta = 2 * v - 1
-        sin_theta = sqrt(1 - cos_theta**2)
-        phi = 2 * pi * u
-    else:
-        cos_theta = (1 - g**2) / (1 - g + 2 * g * u)
-        sin_theta = sqrt(1 - cos_theta**2)
-        phi = 2 * pi * v
-        
-    # Construct new direction
-    # This requires constructing an orthonormal basis with d as the z-axis
-    # [G] Implementation detail for basis construction
-    return Vector3(0.0, 0.0, 0.0) # [G] Placeholder for direction sampling
 ```
 
 **Edge Cases and Pitfalls:**
@@ -225,15 +224,19 @@ def sample_henyey_greenstein(d, g, rng):
 - **Degenerate Input:** If $\sigma_t = 0$, probabilities are undefined; handle by setting $p_s = p_a = 0$ and $p_n = 1$ [G].
 - **Temperature Conversion:** Ensure temperature conversion to Kelvin is correct to avoid negative or zero temperatures in Planck's law [S1, unofficial].
 
+## Subtopics
+
+### Importance Sampling for Discrete Media
+Proposes an importance sampling approach for path tracing in discrete media via precomputation [S2]. In the precomputation stage, a shell function is used to represent the probability density function on a sphere around the center point [S2]. In the rendering process, importance sampling is guided by the precomputed shells to sample at a large distance in the discrete media, rather than via many small steps [S2]. This method reduces the number of sampling steps and improves convergence speed [S2].
+
 ## Operating characteristics
 - **Time Complexity:** Proportional to the number of sampled points along the ray, which depends on the majorant density and path length. Each point involves a discrete event sample and potentially a phase function evaluation [S1, unofficial].
-- **Memory Complexity:** Depends on the density and temperature grids. The algorithm itself uses constant memory per path [S1, unofficial].
 - **Measured Performance:** Not given in the sources.
 - **Scaling:** Scales with the number of samples and path depth. Efficient in sparse media due to explicit null event handling [S1, unofficial].
 - **Strengths:** Explicit handling of absorption and null events improves efficiency in sparse media. Handles temperature-dependent emission [S1, unofficial].
-- **Limitations:** Requires pre-computed probabilities for events. May be less efficient in dense media where scattering is frequent [S1, unofficial].
+- **Limitations:** Requires pre-computed probabilities for events.
 - **When to use:** Suitable for participating media with sparse scattering and temperature-dependent emission.
-- **When not to use:** Not ideal for dense media or when continuous Russian Roulette is preferred for simplicity.
+- **When not to use:** Not ideal when continuous Russian Roulette is preferred for simplicity.
 
 ## Background
 - **Origin:** The method is described in the unofficial source [S1, unofficial], which is a GitHub repository `Shibodd/volume_path_tracer`. The specific paper or author is not cited in the provided notes.
@@ -242,3 +245,4 @@ def sample_henyey_greenstein(d, g, rng):
 
 ## Sources
 [S1] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
+[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26

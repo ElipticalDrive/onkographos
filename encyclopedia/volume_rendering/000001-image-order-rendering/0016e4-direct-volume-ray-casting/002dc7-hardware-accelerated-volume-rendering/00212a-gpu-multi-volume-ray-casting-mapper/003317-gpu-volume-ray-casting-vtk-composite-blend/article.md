@@ -1,0 +1,201 @@
+# GPU Volume Ray Casting (VTK Composite Blend)
+
+Also called: Composite Volume Rendering, GPU Volume Ray Cast, Ray casting for direct volume rendering, vtkGPUVolumeRayCastMapper
+
+## Overview
+GPU Volume Ray Casting with VTK Composite Blend is a hardware-accelerated direct volume rendering technique that visualizes 3D scalar fields by accumulating color and opacity along rays cast through the volume [S1, S2, unofficial]. It sets itself apart from sibling mappers by explicitly using the `Composite` blend mode within VTK's `vtkGPUVolumeRayCastMapper`, which performs standard front-to-back alpha blending to integrate voxel contributions into the final pixel color [S1, S2, unofficial]. Unlike surface-based approaches, it renders the entire volume data directly without intermediate mesh extraction [S1, S2, unofficial].
+
+## How it works
+The method maps voxel intensities to color and opacity using transfer functions, then composites these values along viewing rays on the GPU.
+
+**Inputs and Outputs:**
+*   **Input:** A 3D scalar field (e.g., DICOM medical data) with defined spacing and byte order.
+*   **Outputs:** A 2D image frame with accumulated color and opacity.
+
+**Data Structures:**
+*   **Volume Data:** 3D array of scalar values. Layout is determined by the reader (e.g., LittleEndian).
+*   **Transfer Functions:**
+    *   `vtkColorTransferFunction`: Maps scalar value $s$ to RGB color $(R, G, B)$.
+    *   `vtkPiecewiseFunction` (Scalar): Maps scalar value $s$ to opacity $\alpha_s$.
+    *   `vtkPiecewiseFunction` (Gradient): Maps gradient magnitude $g$ to opacity $\alpha_g$.
+*   **Volume Property:** Stores interpolation type, shading coefficients, and transfer function references.
+
+**Numbered Steps:**
+
+1.  **Load Data:** Read the 3D dataset using `vtkDICOMImageReader`.
+    *   Set byte order to LittleEndian.
+    *   Set directory path to the source data.
+    *   Set data spacing $(dx, dy, dz)$. Typical values: $(3.2, 3.2, 1.5)$ [S1, S2, unofficial].
+2.  **Initialize Renderer:** Create a `vtkRenderer` and `vtkRenderWindow`. Add the renderer to the window [S1, S2, unofficial].
+3.  **Create Mapper:** Instantiate `vtkGPUVolumeRayCastMapper`.
+    *   Set input connection to the reader's output port.
+    *   Set blend mode to `Composite` using `SetBlendModeToComposite()` [S1, S2, unofficial].
+4.  **Define Color Transfer Function:** Create `vtkColorTransferFunction`. Add RGB points mapping scalar values to colors:
+    *   $s=0 \rightarrow (0.0, 0.0, 0.0)$
+    *   $s=500 \rightarrow (R_{500}, G_{500}, B_{500})$ [S1, S2, unofficial]
+    *   $s=1000 \rightarrow (1.0, 0.5, 0.3)$
+    *   $s=1150 \rightarrow (1.0, 1.0, 0.9)$
+    *   The values at $s=500$ are typically adjustable via sliders [S1, S2, unofficial].
+5.  **Define Scalar Opacity Transfer Function:** Create `vtkPiecewiseFunction`. Add points mapping scalar values to opacity:
+    *   $s=0 \rightarrow 0.00$
+    *   $s=500 \rightarrow \alpha_{500}$ [S1, S2, unofficial]
+    *   $s=1000 \rightarrow 0.15$
+    *   $s=1150 \rightarrow 0.85$
+    *   The value at $s=500$ is typically adjustable via sliders [S1, S2, unofficial].
+6.  **Define Gradient Opacity Transfer Function:** Create `vtkPiecewiseFunction`. Add points mapping gradient magnitude to opacity:
+    *   $g=0 \rightarrow 0.0$
+    *   $g=90 \rightarrow 0.5$
+    *   $g=100 \rightarrow 1.0$ [S1, S2, unofficial]
+7.  **Configure Volume Property:** Create `vtkVolumeProperty`.
+    *   Set Color function to the one from Step 4.
+    *   Set Scalar Opacity function to the one from Step 5.
+    *   Set Gradient Opacity function to the one from Step 6.
+    *   Set interpolation type to Linear (`SetInterpolationTypeToLinear()`) [S1, S2, unofficial].
+    *   Enable shading (`ShadeOn()`) [S1, S2, unofficial].
+    *   Set lighting coefficients: Ambient=0.4, Diffuse=0.6, Specular=0.2 [S1, S2, unofficial].
+8.  **Create Volume Actor:** Instantiate `vtkVolume`.
+    *   Set Mapper to the one from Step 3.
+    *   Set Property to the one from Step 7.
+9.  **Add to Renderer:** Add the volume actor to the renderer [S1, S2, unofficial].
+10. **Configure Camera:**
+    *   Get the volume center $C = (C_x, C_y, C_z)$.
+    *   Set focal point to $C$.
+    *   Set camera position to $C + (400, 0, 0)$ [S1, S2, unofficial].
+    *   Set view up vector to $(0, 0, -1)$ [S1, S2, unofficial].
+11. **Render:** Set render window size (e.g., 640x480) and render [S1, S2, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import vtk
+
+def setup_gpu_volume_ray_casting(data_dir, spacing=(3.2, 3.2, 1.5), color_at_500=(1.0, 0.5, 0.3), opacity_at_500=0.15):
+    """
+    Sets up a VTK pipeline for GPU Volume Ray Casting with Composite Blend.
+    
+    Args:
+        data_dir (str): Path to the DICOM directory.
+        spacing (tuple): Data spacing (dx, dy, dz).
+        color_at_500 (tuple): RGB color for scalar value 500.
+        opacity_at_500 (float): Opacity for scalar value 500.
+        
+    Returns:
+        tuple: (renderer, render_window, interactor, volume)
+    """
+    # 1. Read Dataset
+    reader = vtk.vtkDICOMImageReader()
+    reader.SetDataByteOrderToLittleEndian()
+    reader.SetDirectoryName(data_dir)
+    reader.SetDataSpacing(*spacing)
+    reader.Update()
+
+    # 2. Create Mapper
+    volume_mapper = vtk.vtkGPUVolumeRayCastMapper()
+    volume_mapper.SetInputConnection(reader.GetOutputPort())
+    volume_mapper.SetBlendModeToComposite()
+
+    # 3. Define Color Transfer Function
+    volume_color = vtk.vtkColorTransferFunction()
+    volume_color.AddRGBPoint(0, 0.0, 0.0, 0.0)
+    volume_color.AddRGBPoint(500, *color_at_500)
+    volume_color.AddRGBPoint(1000, 1.0, 0.5, 0.3)
+    volume_color.AddRGBPoint(1150, 1.0, 1.0, 0.9)
+
+    # 4. Define Scalar Opacity Transfer Function
+    volume_scalar_opacity = vtk.vtkPiecewiseFunction()
+    volume_scalar_opacity.AddPoint(0, 0.00)
+    volume_scalar_opacity.AddPoint(500, opacity_at_500)
+    volume_scalar_opacity.AddPoint(1000, 0.15)
+    volume_scalar_opacity.AddPoint(1150, 0.85)
+
+    # 5. Define Gradient Opacity Transfer Function
+    volume_gradient_opacity = vtk.vtkPiecewiseFunction()
+    volume_gradient_opacity.AddPoint(0, 0.0)
+    volume_gradient_opacity.AddPoint(90, 0.5)
+    volume_gradient_opacity.AddPoint(100, 1.0)
+
+    # 6. Configure Volume Property
+    volume_property = vtk.vtkVolumeProperty()
+    volume_property.SetColor(volume_color)
+    volume_property.SetScalarOpacity(volume_scalar_opacity)
+    volume_property.SetGradientOpacity(volume_gradient_opacity)
+    volume_property.SetInterpolationTypeToLinear()
+    volume_property.ShadeOn()
+    volume_property.SetAmbient(0.4)
+    volume_property.SetDiffuse(0.6)
+    volume_property.SetSpecular(0.2)
+
+    # 7. Create Volume Actor
+    volume = vtk.vtkVolume()
+    volume.SetMapper(volume_mapper)
+    volume.SetProperty(volume_property)
+
+    # 8. Setup Renderer and Window
+    renderer = vtk.vtkRenderer()
+    render_window = vtk.vtkRenderWindow()
+    render_window.AddRenderer(renderer)
+    
+    interactor = vtk.vtkRenderWindowInteractor()
+    interactor.SetRenderWindow(render_window)
+
+    # 9. Add Volume to Renderer
+    renderer.AddViewProp(volume)
+
+    # 10. Configure Camera
+    camera = renderer.GetActiveCamera()
+    center = volume.GetCenter()
+    camera.SetFocalPoint(center[0], center[1], center[2])
+    camera.SetPosition(center[0] + 400, center[1], center[2])
+    camera.SetViewUp(0, 0, -1)
+
+    # 11. Finalize Setup
+    render_window.SetSize(640, 480)
+    renderer.ResetCameraClippingRange()
+    
+    return renderer, render_window, interactor, volume
+
+# Usage example structure
+# renderer, renWin, iren, vol = setup_gpu_volume_ray_casting("/path/to/dicom")
+# iren.Initialize()
+# renWin.Render()
+# iren.Start()
+```
+
+**Parameters with Typical Values:**
+*   **Data Spacing:** $(3.2, 3.2, 1.5)$ for X, Y, Z [S1, S2, unofficial].
+*   **Color Points:** $(0, 0, 0)$, $(500, R,G,B)$, $(1000, 1.0, 0.5, 0.3)$, $(1150, 1.0, 1.0, 0.9)$ [S1, S2, unofficial].
+*   **Scalar Opacity Points:** $(0, 0.0)$, $(500, \alpha)$, $(1000, 0.15)$, $(1150, 0.85)$ [S1, S2, unofficial].
+*   **Gradient Opacity Points:** $(0, 0.0)$, $(90, 0.5)$, $(100, 1.0)$ [S1, S2, unofficial].
+*   **Lighting:** Ambient=0.4, Diffuse=0.6, Specular=0.2 [S1, S2, unofficial].
+*   **Camera Offset:** 400 units along X-axis from center [S1, S2, unofficial].
+*   **Render Window Size:** 640x480 pixels [S1, S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Transfer function interpolation relies on the underlying VTK implementation. Ensure scalar values fall within the defined range to avoid undefined behavior [G].
+*   **Boundaries:** The gradient opacity function assumes gradient magnitudes are computed correctly. Edge artifacts may occur if gradient estimation is not handled properly by the GPU mapper [G].
+*   **Degenerate Input:** Empty directories or invalid DICOM series will cause the reader to fail. Check reader output validity before connecting to the mapper [G].
+
+## Subtopics
+
+### GPU Isosurface Rendering in VTK/ParaView
+A variant that renders multiple isosurfaces directly on the GPU from a Volume representation without generating a CPU mesh or performing data transfers when contour values change [S3, unofficial]. It uses the `vtkOpenGLGPUVolumeRayCastMapper` and a new blend mode `ISOSURFACE_BLEND` [S3, unofficial]. During compositing, only samples corresponding to the intersection of rays and user-defined contour values (provided via `vtkContourValues` in `vtkVolumeProperty`) are kept [S3, unofficial]. This contrasts with the traditional `Contour` filter, which generates a CPU mesh for one isosurface and requires recomputation and data transfer for each value change [S3, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Linear with respect to the number of rays and samples per ray. Dependent on volume resolution and camera distance.
+*   **Memory Complexity:** Linear with respect to the volume data size. Transfer functions and property objects have negligible memory overhead.
+*   **Measured Performance:** Demonstrated on medical datasets (CT/MRI) with spacing $(3.2, 3.2, 1.5)$ [S1, S2, unofficial]. Performance is hardware-accelerated via the GPU [S2, unofficial].
+*   **Scaling:** Scales with GPU capabilities. Higher resolutions or more complex transfer functions may reduce frame rate.
+*   **Strengths:** Real-time interactive visualization, hardware acceleration, support for multiple transfer functions (color, scalar opacity, gradient opacity) [S1, S2, unofficial].
+*   **Limitations:** Composite blending may suffer from overpainting artifacts if not tuned correctly. Gradient opacity requires gradient computation, which can be expensive [G].
+*   **When to Use:** Interactive exploration of 3D scalar fields, especially medical imaging, where real-time feedback is needed [S1, S2, unofficial].
+*   **When Not to Use:** When surface-based visualization is preferred, or when precise isosurface extraction without ray-casting artifacts is required (use GPU Isosurface Rendering variant or CPU Contour filter) [S3, unofficial].
+
+## Background
+Originated from VTK's `vtkGPUVolumeRayCastMapper` class, which provides a base for GPU-accelerated volume ray casting [Parent, S1, S2]. The composite blend mode is a standard feature for direct volume rendering in VTK [S1, S2, unofficial]. The technique is widely used in medical visualization applications, such as those built with PyQt5 and VTK, for interactive exploration of internal anatomical structures [S2, unofficial]. The isosurface rendering variant was developed by Kitware SAS, France, and supported by Total SA, becoming available in ParaView v5.5 [S3, unofficial].
+
+## Sources
+[S1] MarwaAbdelAal/Medical-Visualization, https://github.com/MarwaAbdelAal/Medical-Visualization, fetched 2026-10-27 (unofficial)
+[S2] mariamashraf731/DICOM-Volume-Renderer-VTK, https://github.com/mariamashraf731/DICOM-Volume-Renderer-VTK, fetched 2026-10-27 (unofficial)
+[S3] GPU rendering of isosurfaces in VTK and ParaView, https://www.kitware.com/gpu-rendering-of-isosurfaces/, fetched 2026-10-27 (unofficial)

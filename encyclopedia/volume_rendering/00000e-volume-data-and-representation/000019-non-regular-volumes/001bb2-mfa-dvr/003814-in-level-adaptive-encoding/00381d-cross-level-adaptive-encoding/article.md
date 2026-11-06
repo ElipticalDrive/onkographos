@@ -1,0 +1,154 @@
+# Cross-level Adaptive Encoding
+
+Also called: Hierarchical Adaptive Encoding
+
+## Overview
+Cross-level Adaptive Encoding is a hierarchical optimization technique that reduces the computational cost of determining the optimal Number of Control Points (NCP) for micro-blocks in multi-resolution volume rendering [S1, unofficial]. It leverages the spatial coherence of data complexity across Levels of Detail (LOD) to avoid exhaustive in-level searches for "simple" regions, thereby accelerating the encoding pipeline [S1, unofficial]. It builds on [In-level Adaptive Encoding](8165-in-level-adaptive-encoding.md) by using its results from lower LODs to constrain or skip searches in higher LODs.
+
+## How it works
+**Inputs:**
+- A set of LODs ranging from $LOD_{low}$ to $LOD_{high}$ [S1, unofficial].
+- The polynomial degree $d$ used for the Functional Approximation (MFA) [S1, unofficial].
+- An error bound $\epsilon$ [S1, unofficial].
+- The maximum possible NCP value $n$ [S1, unofficial].
+
+**Outputs:**
+- For each micro-block at each LOD, the optimal NCP ($NCP^*$) and the set of complex micro-blocks ($ComplexSet$) [S1, unofficial].
+
+**Data Structures:**
+- $ComplexSet_{LOD}$: A set or boolean mask identifying micro-blocks at a specific LOD that require expensive encoding (i.e., $NCP^* > d+2$) [S1, unofficial].
+- $errs$: A temporary list storing the approximation error for each candidate NCP during the search [S1, unofficial].
+
+**Definitions:**
+- **Simple Micro-block:** A micro-block where the optimal NCP is the minimum possible value, defined as $d+2$ [S1, unofficial]. These correspond to regions with constant values or very small deviations [S1, unofficial].
+- **Complex Micro-block:** A micro-block where the optimal NCP is greater than $d+2$ [S1, unofficial]. These correspond to regions with dynamic values [S1, unofficial].
+
+**Algorithm Steps:**
+1. **Initialize Lowest LOD:** Perform standard in-level adaptive encoding on $LOD_{low}$ [S1, unofficial]. This establishes the baseline $NCP^*$ and error mappings for the coarsest resolution [S1, unofficial].
+2. **Identify Complex Blocks at Lowest LOD:** For each micro-block in $LOD_{low}$, if its optimal $NCP^* > d+2$, add it to $ComplexSet_{LOD_{low}}$ [S1, unofficial].
+3. **Iterate Higher LODs:** Loop through each LOD from $LOD_{low} + 1$ to $LOD_{high}$ [S1, unofficial].
+4. **Check Coverage:** For each micro-block in the current LOD, determine if it is spatially covered by any micro-block in $ComplexSet_{LOD-1}$ [S1, unofficial].
+5. **Encode Complex Regions:** If the micro-block is covered by a complex block from the previous LOD:
+   - Initialize an empty list $errs$ [S1, unofficial].
+   - Iterate through candidate NCP values from $n$ down to $d+2$ [S1, unofficial].
+   - For each candidate NCP, compute the approximation error $err$ using the model function $model(NCP, d)$ [S1, unofficial].
+   - Append $err$ to $errs$ [S1, unofficial].
+   - If $err > \epsilon$, stop the search [S1, unofficial].
+   - Select the smallest NCP that satisfied the error bound (or the last valid one if all are within bound) as $NCP^*$ [S1, unofficial].
+   - If the resulting $NCP^* > d+2$, add the current micro-block to $ComplexSet_{LOD}$ [S1, unofficial].
+6. **Encode Simple Regions:** If the micro-block is *not* covered by any complex block from the previous LOD:
+   - Assume the region is simple [S1, unofficial].
+   - Set $NCP^* = d+1$ [S1, unofficial]. Note: The source pseudocode explicitly uses $d+1$ for this case, while the definition of simple blocks uses $d+2$. The implementation follows the pseudocode [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cross_level_adaptive_encoding(LODs, degree, error_bound, max_n):
+    # LODs is a list of LOD objects, indexed from 0 (lowest) to N (highest)
+    # Each LOD object has a list of micro_blocks
+    
+    # Step 1: Process lowest LOD
+    lowest_lod = LODs[0]
+    complex_set_prev = set()
+    
+    for mb in lowest_lod.micro_blocks:
+        # Perform exhaustive in-level search for the lowest LOD
+        errs = []
+        for ncp in range(max_n, degree + 2, -1):
+            err = compute_error(mb, ncp, degree)
+            errs.append(err)
+            if err > error_bound:
+                break
+        
+        # Find optimal NCP from errs
+        # errs[0] corresponds to max_n, errs[-1] corresponds to degree+2
+        # We want the smallest NCP such that error < error_bound
+        # Since we iterated downwards, the first error > bound is at index i
+        # The optimal NCP is the one at index i+1 (if exists) or the last one
+        optimal_ncp = degree + 2
+        for i, err in enumerate(errs):
+            if err > error_bound:
+                # The previous NCP (index i-1) was the last valid one
+                # NCP values are max_n, max_n-1, ..., degree+2
+                # Index 0 is max_n, Index k is max_n - k
+                optimal_ncp = max_n - (i - 1) if i > 0 else degree + 2
+                break
+        else:
+            # All errors were within bound, take smallest NCP (last in list)
+            optimal_ncp = degree + 2
+            
+        mb.ncp = optimal_ncp
+        
+        # Identify complex blocks
+        if optimal_ncp > degree + 2:
+            complex_set_prev.add(mb.id)
+            
+    # Step 2: Process higher LODs
+    for lod_idx in range(1, len(LODs)):
+        current_lod = LODs[lod_idx]
+        complex_set_curr = set()
+        
+        for mb in current_lod.micro_blocks:
+            # Check if covered by complex blocks from previous LOD
+            # Assuming a function to check spatial overlap/coverage
+            is_covered = is_covered_by_complex_set(mb, complex_set_prev)
+            
+            if is_covered:
+                # Perform in-level search
+                errs = []
+                for ncp in range(max_n, degree + 2, -1):
+                    err = compute_error(mb, ncp, degree)
+                    errs.append(err)
+                    if err > error_bound:
+                        break
+                
+                optimal_ncp = degree + 2
+                for i, err in enumerate(errs):
+                    if err > error_bound:
+                        optimal_ncp = max_n - (i - 1) if i > 0 else degree + 2
+                        break
+                else:
+                    optimal_ncp = degree + 2
+                    
+                mb.ncp = optimal_ncp
+                
+                if optimal_ncp > degree + 2:
+                    complex_set_curr.add(mb.id)
+            else:
+                # Skip search, use default for simple blocks
+                mb.ncp = degree + 1 # [G] Source pseudocode uses degree+1 here, 
+                                      # though definition says simple is degree+2.
+                                      # Implementation follows pseudocode.
+        
+        complex_set_prev = complex_set_curr
+```
+
+**Parameters:**
+- $degree$: The polynomial degree of the MFA basis functions [S1, unofficial].
+- $error\_bound$: The maximum acceptable approximation error $\epsilon$ [S1, unofficial].
+- $max\_n$: The upper bound for the number of control points [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- The method relies on the assumption that complex micro-blocks from a lower LOD always spatially cover the complex micro-blocks of a higher LOD [S1, unofficial]. If this assumption fails (e.g., due to noise or aliasing at higher resolutions), simple regions might be incorrectly encoded with higher complexity, or complex regions might be skipped, leading to suboptimal compression or visual artifacts [S1, unofficial].
+- The discrepancy between the definition of "simple" ($NCP = d+2$) and the value assigned in the "else" branch of the pseudocode ($NCP = d+1$) should be resolved based on the specific MFA implementation constraints [S1, unofficial].
+
+## Subtopics
+
+### In-level Adaptive Encoding
+The base method that determines the optimal NCP for a single micro-block by searching through valid NCP values to find the lowest NCP that satisfies a required error bound. [In-level Adaptive Encoding](8165-in-level-adaptive-encoding.md)
+
+### Multi-Resolution Volume Rendering
+The broader framework that utilizes multiple LODs to render large-scale volumes efficiently. [Multi-Resolution Volume Rendering](52-multi-resolution-volume-rendering.md)
+
+## Operating characteristics
+- **Time Complexity:** Reduces the average encoding time compared to performing in-level adaptive encoding on all micro-blocks at all LODs. The complexity depends on the ratio of complex to simple micro-blocks. In the best case (all simple), it approaches $O(1)$ per micro-block for higher LODs. In the worst case (all complex), it matches the in-level adaptive encoding cost [S1, unofficial].
+- **Memory Complexity:** Requires storing the $ComplexSet$ for each LOD, which is proportional to the number of micro-blocks [S1, unofficial].
+- **Strengths:** Significantly speeds up the encoding process for large-scale volumes by avoiding redundant exhaustive searches in smooth regions [S1, unofficial].
+- **Limitations:** Relies on the spatial coherence assumption; may not be optimal for highly noisy or irregular data where complexity does not scale predictably with LOD [S1, unofficial].
+
+## Background
+Cross-level Adaptive Encoding was introduced in the context of Adaptive Multi-Resolution Encoding for Interactive Large-Scale Volume Visualization through Functional Approximation [S1, unofficial]. It addresses the bottleneck of encoding time in multi-resolution volume rendering pipelines by exploiting the hierarchical nature of data complexity [S1, unofficial].
+
+## Sources
+[S1] Adaptive Multi-Resolution Encoding for Interactive Large-Scale Volume ..., https://www.researchgate.net/publication/383700795_Adaptive_Multi-Resolution_Encoding_for_Interactive_Large-Scale_Volume_Visualization_through_Functional_Approximation, fetched 2026-10-30 (unofficial)

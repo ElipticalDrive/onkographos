@@ -1,0 +1,97 @@
+# Incremental Intersection and Texture Coordinates
+
+Also called: ActiveIntersectionList method, Incremental intersection
+
+## Overview
+A method to compute intersection points and texture coordinates for axis-aligned boxes against parallel slicing planes incrementally, avoiding the bottleneck of recomputing intersections for every sub-volume and plane [S1]. It sets itself apart from naive per-plane intersection by leveraging the uniform spacing and parallel nature of slicing planes to update positions via constant deltas, maintaining an `ActiveIntersectionList` to track active edge intersections [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Parallel, uniformly spaced slicing planes; an axis-aligned bounding box (sub-volume); viewing direction; texture coordinate mapping parameters [S1].
+*   **Output:** Updated intersection positions and texture coordinates for the current slicing plane, stored in the `ActiveIntersectionList` [S1].
+
+**Data Structures:**
+*   **ActiveIntersectionList:** A list of intersection objects. Each object contains `position[edgeOrientation]`, `texCoords[edgeOrientation]`, `bUpdated` (boolean flag), and an `edge` reference [S1].
+*   **ConnectionList:** A global data structure indexing edges by their end points and the sign of the view direction projection, used to locate neighbor edges [S1].
+
+**Parameters:**
+*   **deltaPos:** The constant difference in intersection position on the same edge between adjacent slicing planes. It depends only on the viewing direction and is invariant for all sub-volumes [S1].
+*   **deltaTexCoords:** The constant difference in texture coordinates between adjacent slicing planes. It may depend on texture size if scaled to $[0,1]$, but remains constant if sub-volumes are packed into a large 3D texture [S1].
+
+**Steps:**
+1.  **Initialization (First Plane):** Compute intersections and texture coordinates for each box edge against the first slicing plane using the traditional method, then insert all valid intersections into the `ActiveIntersectionList` and sort them [S1].
+2.  **Delta Calculation:** Compute `deltaPos` and `deltaTexCoords` from the viewing direction and texture mapping. Due to axis-aligned geometry, these vectors contain exactly one non-zero element [S1].
+3.  **Incremental Update:** For each subsequent plane, iterate through the `ActiveIntersectionList`. For each unprocessed intersection, compute `newPos = intersection.position[edgeOrientation] + deltaPos[edgeOrientation]` and mark `bUpdated = true` [S1]. If `newPos` lies within the edge bounds, update the position and add `deltaTexCoords[edgeOrientation]` to the texture coordinates [S1]. If `newPos` lies outside the bounds, remove the intersection from the list and invoke neighbor edge intersection [S1].
+4.  **Neighbor Search:** In `IntersectNeighborEdges`, track edges from the current edge in breadth-first order using the `ConnectionList` until two new intersections are found [S1]. Use the `bUpdated` flag to prevent duplicate processing, then add newly found intersections to the `ActiveIntersectionList` at the position of the removed intersection [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def update_intersections(active_list, delta_pos, delta_tex_coords, connection_list):
+    for intersection in active_list:
+        if not intersection.bUpdated:
+            # Compute new position incrementally
+            new_pos = intersection.position[intersection.edge_orientation] + delta_pos[intersection.edge_orientation]
+            intersection.bUpdated = True
+
+            # Check if new position is still within the edge bounds
+            if is_inside_edge(new_pos, intersection.edge):
+                intersection.position[intersection.edge_orientation] = new_pos
+                intersection.texCoords[intersection.edge_orientation] += delta_tex_coords[intersection.edge_orientation]
+            else:
+                # Remove intersection from active list
+                active_list.remove(intersection)
+                # Find new intersections on neighbor edges
+                new_intersections = intersect_neighbor_edges(intersection.edge, connection_list)
+                # Insert new intersections at the removed position
+                for new_int in new_intersections:
+                    if not new_int.bUpdated:
+                        new_int.bUpdated = True
+                        active_list.append(new_int)
+
+def is_inside_edge(new_pos, edge):
+    # Check if new_pos lies between the edge's start and end points along its axis [G]
+    axis = edge.orientation
+    return edge.start[axis] <= new_pos[axis] <= edge.end[axis]
+
+def intersect_neighbor_edges(edge, connection_list):
+    # BFS from edge using connection_list until two new intersections are found [S1]
+    queue = [edge]
+    found = []
+    while queue and len(found) < 2:
+        current_edge = queue.pop(0)
+        # Get neighbor edges from connection list indexed by end point and view direction sign [S1]
+        neighbors = connection_list.get(current_edge.end_point, current_edge.view_sign)
+        for neighbor in neighbors:
+            if not neighbor.bUpdated:
+                # Compute intersection of neighbor with current plane using traditional method [G]
+                new_int = compute_traditional_intersection(neighbor, current_plane)
+                new_int.bUpdated = False
+                found.append(new_int)
+                queue.append(neighbor)
+    return found
+```
+
+**Edge Cases and Pitfalls:**
+*   **Edge Geometry:** Axis-aligned boxes have 12 edges where intersecting pairs form 90-degree angles, ensuring `deltaPos` and `deltaTexCoords` have only one non-zero element [S1].
+*   **Duplicate Intersections:** The `bUpdated` flag is critical to prevent adding the same edge intersection multiple times during the neighbor search [S1].
+*   **Texture Coordinate Scaling:** If texture coordinates are not packed into a large 3D texture, `deltaTexCoords` may vary per sub-volume, requiring careful handling [S1].
+
+## Subtopics
+
+### [Index Texture Cache for Spline Search](3502-index-texture-cache-for-spline-search.md)
+An acceleration technique that caches the indices of spline segments used in previous rendering slices to avoid redundant binary searches for the current slice, leveraging depth-order coherence in front-to-back traversal. Unlike the basic algorithm which requires four spline searches per pixel fragment using binary search, this method uses incremental linear search from the previous slice's position, reducing computational bottleneck.
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the intersection calculation bottleneck from recomputing for every sub-volume and plane to an incremental update, significantly speeding up the process [S1].
+*   **Memory Complexity:** Requires storing the `ActiveIntersectionList` and the global `ConnectionList` [S1].
+*   **Strengths:** Highly efficient for axis-aligned boxes with parallel, uniformly spaced slicing planes. Leverages geometric coherence [S1].
+*   **Limitations:** Specific to axis-aligned boxes; not directly applicable to unstructured grids [S1]. Requires careful management of the active list and neighbor searches [S1].
+*   **When to Use:** Texture-based volume rendering with occlusion clipping where empty space skipping is employed, and slicing planes are parallel and uniform [S1].
+
+## Background
+Originated in the context of "Empty Space Skipping and Occlusion Clipping for Texture-based Volume Rendering" [S1]. The method addresses the performance degradation caused by recomputing intersections for each sub-volume, which can negate the benefits of skipping empty spaces [S1]. It is used in GPU-based cut-off slice generation to offload CPU calculation [Parent].
+
+## Sources
+[S1] Empty Space Skipping and Occlusion Clipping for Texture-based Volume ..., https://www3.cs.stonybrook.edu/~mueller/papers/OcclusionClipping.pdf, fetched 2026-10-26

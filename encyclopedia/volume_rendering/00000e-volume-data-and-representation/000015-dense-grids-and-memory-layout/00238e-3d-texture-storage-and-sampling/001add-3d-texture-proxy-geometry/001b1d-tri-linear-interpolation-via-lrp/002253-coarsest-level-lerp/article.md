@@ -1,0 +1,97 @@
+# Coarsest-Level Lerp
+
+Also called: coarsest-level interpolation, min-level lerp
+
+## Overview
+Coarsest-Level Lerp is a method for computing the value of a coarser-side octant vertex in Adaptive Mesh Refinement (AMR) volume rendering by performing trilinear interpolation on the coarsest refinement level involved in the input data [S1, unofficial]. It solves the problem of defining continuous boundary values for octants that abut coarser regions by ensuring the interpolant is based on the lowest-resolution grid that covers the spatial extent of the query [S1, unofficial]. It sets itself apart from [Finest Level Lerp](2945-finest-level-lerp.md) by prioritizing the coarsest available data rather than the finest, and from [Current-Level Lerp](2945-finest-level-lerp.md#current-level-lerp) by using a fixed global level rather than an adaptive leaf-level lookup [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `oct`: The current octant structure, containing `oct.l` (current refinement level) and `oct[X']` (neighbor octants).
+- `D[0']`: The dual cell or data structure associated with the primary input direction.
+- `D[X']`: The dual cell or data structure associated with the neighbor direction.
+- `oct[X'].p`: The spatial position of the vertex being computed.
+
+**Outputs:**
+- `oct[X'].v`: The interpolated vertex value.
+
+**Data Structures:**
+- `D[l]`: Represents the logical grid at level `l`. Contains `D[l].l` (level index) and `D[l].v` (values).
+- `oct[X']`: Represents a neighbor octant. Contains `oct[X'].v` (value) and `oct[X'].p` (position).
+
+**Steps:**
+1. Determine the logical coordinate index `lX'` by taking the minimum level of the two involved dual cells:
+   $$ lX' = \min(D[0'].l, D[X'].l) $$
+2. Check if this calculated level `lX'` matches the current octant's level `oct.l`.
+3. If `lX' == oct.l`, the vertex lies on a boundary where both inputs are at the current level. Compute the value as the average of the two input values:
+   $$ oct[X'].v = \text{avg}(D[0'].v, D[X'].v) $$
+4. If `lX' != oct.l`, perform trilinear interpolation on the calculated coarsest level `lX'` using the vertex position `oct[X'].p`:
+   $$ oct[X'].v = \text{lerpOnLevel}(lX', oct[X'].p) $$
+
+**Pitfalls:**
+- In most cases, multiple calls to `lerpOnLevel` for different neighbors will resolve to the same dual cell `D`. A performance-optimized implementation should detect this redundancy and replace the interpolation with direct averaging of the respective inputs [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_coarser_side_vertex(oct, D_0, D_X):
+    """
+    Computes the value for a coarser-side octant vertex using Coarsest-Level Lerp.
+    
+    Args:
+        oct: Object with attributes .l (current level) and neighbors.
+        D_0: Dual cell object for primary input, attributes .l (level), .v (value).
+        D_X: Dual cell object for neighbor input, attributes .l (level), .v (value).
+        
+    Returns:
+        The interpolated vertex value.
+    """
+    # Step 1: Calculate logical coordinate index (coarsest level involved)
+    lX_prime = min(D_0.l, D_X.l)
+    
+    # Step 2: Check if the coarsest level matches the current octant level
+    if lX_prime == oct.l:
+        # Step 3: Average inputs if at current level
+        vertex_value = (D_0.v + D_X.v) / 2.0
+    else:
+        # Step 4: Interpolate on the calculated coarsest level
+        # lerpOnLevel performs trilinear interpolation on the grid at level lX_prime
+        # using the position oct[X'].p.
+        vertex_value = lerp_on_level(lX_prime, oct.X_prime_position)
+        
+    return vertex_value
+
+def lerp_on_level(level, position):
+    """
+    Performs trilinear interpolation on a specific AMR level.
+    Note: Implementation details of lerpOnLevel are assumed to handle
+    the logical grid abstraction and cell lookup for the given level.
+    """
+    # Find the dual cell D at the specified level containing the position
+    D = find_dual_cell(level, position)
+    # Perform trilinear interpolation using the cell's values and the position
+    return D.trilinear_interpolate(position)
+```
+
+## Subtopics
+
+### Current-Level Lerp
+A method that performs interpolation on the leaf cell (current level) rather than the coarsest level, making the interpolant adaptive [S1, unofficial]. It calculates `lX' = min(D[0'].l, D[X'].l)`. If `lX' == oct.l`, it averages the inputs. Otherwise, it finds the leaf cell level via `level = findLeafCell(oct[X'].p).l` and interpolates: `oct[X'].v = lerpOnLevel(level, oct[X'].p)` [S1, unofficial]. This strategy allows the interpolant to be adaptive but is no longer continuous across level boundaries [S2, unofficial].
+
+### Finest-Level Interpolation
+Trilinear interpolation performed on a fixed logical level `l`. It views the level as a structured grid where non-existing cells are defined via the Closest Existing Cell (CEC) operator [S2, unofficial]. It is cheap and continuous but not adaptive [S2, unofficial]. The logical grid is cell-centered but can be interpolated using its dual: `lerpOnLevel(l, P)` calls `findDual(l, P)` and returns `D.lerp(P)` [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Depends on the cost of `findDual` and `lerpOnLevel`. Since it operates on the coarsest level, the grid resolution is lower than finest-level methods, potentially reducing interpolation cost, but requires level determination logic.
+- **Memory Complexity:** Requires access to the logical grid structures for all levels up to the coarsest involved level.
+- **Strengths:** Guarantees a continuous, adaptive, accurate, and locally rectilinear interpolant [S1, unofficial]. It is the "most obvious" way to set the coarser-side interpolant [S1, unofficial].
+- **Limitations:** Not as adaptive as current-level lerp [S1, unofficial]. Performance can be improved by detecting redundant `lerpOnLevel` calls [S1, unofficial].
+- **When to use:** When continuity and accuracy across level boundaries are prioritized over maximum adaptivity or speed.
+
+## Background
+Coarsest-Level Lerp was introduced in the context of CPU isosurface ray tracing of Adaptive Mesh Refinement data [S1, unofficial]. It is one of four options introduced to guarantee continuity, adaptivity, accuracy, and local rectilinearity in AMR volume rendering [S1, unofficial]. It builds on the logical grid abstraction where each refinement level is viewed as a structured grid [S1, unofficial].
+
+## Sources
+[S1] PDF CPU Isosurface Ray Tracing of Adaptive Mesh Refinement Da, https://www.sci.utah.edu/~feng/assets/papers/Fen-AMR-VIS18.pdf, fetched 2026-10-26 (unofficial)
+[S2] CPU volume rendering of adaptive mesh refinement data, https://www.researchgate.net/publication/321321949_CPU_volume_rendering_of_adaptive_mesh_refinement_data, fetched 2026-10-26 (unofficial)

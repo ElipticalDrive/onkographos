@@ -3,400 +3,178 @@
 Also called: BuildNodeRecursive, BuildSVO, SVO Build, SVO construction
 
 ## Overview
-The Sparse Voxel Octree (SVO) Builder is an algorithm that constructs a flat-array representation of a Sparse Voxel Octree from a list of input voxels or geometric primitives [S1, S3, unofficial]. It solves the problem of efficiently organizing spatial data for ray marching or pathfinding by creating a hierarchy where empty space is skipped, but internal nodes are explicitly allocated to maintain traversal continuity [S1, S2, S3, unofficial]. It differs from its siblings by focusing on either a recursive depth-first initialization of a dense structure [S1, unofficial] or a parallel, level-by-level GPU-based allocation and merging process [S3, unofficial], whereas the Brute Force method [1704-brute-force-svo-construction.md] typically relies on simpler, less memory-efficient insertion strategies.
+An algorithm to build a dense Sparse Voxel Octree (SVO) structure in a flat array, initializing all nodes to empty and leaf nodes to solid up to a maximum depth [S1, unofficial]. It constructs the hierarchical acceleration structure by recursively or iteratively expanding nodes based on occupancy, mapping non-empty voxels to specific paths in the octree [S1, unofficial][S3, unofficial]. Unlike queue-based methods that merge nodes dynamically, this approach pre-allocates or strictly follows a depth-first expansion pattern to ensure a dense, contiguous memory layout suitable for GPU raycasting [S1, unofficial].
 
 ## How it works
-The method exists in three primary implementations: a CPU-based recursive dense builder [S1, unofficial], a GPU-based parallel level-by-level builder [S3, unofficial], and a recursive subdivision with merging variant for pathfinding [S2, unofficial]. Both the CPU and GPU variants produce a flat array of nodes but differ in memory management and traversal logic [S1, S3, unofficial].
+**Inputs:**
+- `maxDepth`: The maximum depth of the octree. Determines when leaf nodes are created instead of children [S1, unofficial][S2, unofficial].
+- `voxel_list`: A list of occupied voxels (used in GPU variants) [S3, unofficial].
+- `collision_trace` (optional): A custom collision trace channel (e.g., `SVOObstacle`) used for occupancy testing [S2, unofficial].
 
-### Inputs and Outputs
-*   **Inputs:**
-    *   A list of voxels (occupied cells) or geometric primitives to be voxelized [S3, unofficial].
-    *   `maxDepth` (or `octree_resolution`): The maximum depth of the octree [S1, S3, unofficial].
-    *   `volume_size`: The dimensions of the bounding box in voxels [S3, unofficial].
-*   **Outputs:**
-    *   A flat array `_tree` (or `octree_buffer`) containing node metadata [S1, S3, unofficial].
+**Outputs:**
+- `_tree`: A flat array of `uint32_t` representing the SVO nodes [S1, unofficial].
 
-### Data Structures
+**Data Structures:**
+The `_tree` array stores node metadata as `uint32_t` [S1, unofficial]:
+- **Bits 0–16 (17 bits):** Index of the first child node.
+- **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf.
+- **Value `0x0000FFFF`:** Empty node. Child index is 0, leaf flag is 0.
+- **Value `0x00004200`:** Solid leaf node. Indicates an occupied leaf [S1, unofficial].
 
-#### Flat Array Node Layout (CPU/Dense) [S1, unofficial]
-The `_tree` array stores nodes as `uint32_t` values [S1, unofficial].
-*   **Bits 0-16 (17 bits):** Index of the first child node in the `_tree` array.
-*   **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf.
-*   **Empty Node Value:** `0x0000FFFF` (Child index 0, Leaf flag 0).
-*   **Solid Leaf Node Value:** `0x00004200` (Child index 0, Leaf flag 1, plus specific marker bits).
+*Note: Alternative implementations may use a 1-byte struct with 7 bits for Depth and 1 bit for IsLeaf, plus fields for position, size, parent index, and children indices [S2, unofficial]. The following pseudocode follows the dense flat array layout [S1, unofficial].*
 
-#### Node Struct Layout (GPU/Parallel) [S2, unofficial]
-Nodes may also be stored in a struct format for metadata:
-*   **1 Byte Total:**
-    *   Bits 0-6 (7 bits): Depth.
-    *   Bit 7 (1 bit): IsLeaf flag.
-*   **Additional Fields:** Position, Size, Parent Index, Children Indices (stored separately or in extended structs) [S2, unofficial].
+**Algorithm Steps (Recursive/Stack-based Dense Build):**
+1. Initialize `_tree` array.
+2. Push initial root node `0x0000FFFF` to `_tree`.
+3. Initialize a stack with `StackEntry{index=0, depth=0}`.
+4. Loop while stack is not empty:
+    a. Pop top of stack into `current`.
+    b. Set `index = current.index`, `depth = current.depth`.
+    c. Calculate `offset = _tree.size() - index`.
+    d. Update `_tree[index]` with child offset: `_tree[index] |= offset << 17`.
+    e. Increment `index` by `offset`.
+    f. If `depth < maxDepth`:
+        i. Increment `depth`.
+        ii. Loop 8 times (for each octant):
+            1. Push `0x0000FFFF` to `_tree`.
+            2. Push `StackEntry{index + (8 - i), depth}` to stack.
+    g. Else (leaf case):
+        i. Loop 8 times:
+            1. Push `0x00004200` to `_tree`.
+5. Return `_tree`.
 
-### Algorithm 1: Recursive Dense Builder (CPU) [S1, unofficial]
-This method initializes a dense octree up to `maxDepth`, marking leaves as solid [S1, unofficial].
+**Algorithm Steps (GPU Iterative Build):**
+1. Initialize root node (level 0) by clearing memory for the first 8 nodes [S3, unofficial].
+2. Iterate from level 1 to `resolution - 1`:
+    a. Execute `node_flag` shader to determine which nodes at the current level are internal (have children) or leaves, binding the octree buffer and voxel list [S3, unofficial].
+    b. Execute `node_alloc` shader to allocate memory for children of internal nodes using an atomic counter. Output start address is `alloc_start`, count is `alloc_count * 8` [S3, unofficial].
+    c. Update state variables: `start` becomes `alloc_start`, `count` becomes `alloc_count * 8`, `alloc_start` becomes `start + count` [S3, unofficial].
+    d. Clear memory for newly allocated nodes using `node_init` shader [S3, unofficial].
+3. Execute `store_leaf` shader to store leaf node data, binding the octree buffer and voxel list [S3, unofficial].
 
-**Parameters:**
-*   `maxDepth`: Maximum subdivision depth.
-
-**Steps:**
-1.  Initialize `_tree` array.
-2.  Set `offset = 0`, `index = 0`.
-3.  Push `StackEntry{0, 0}` to stack.
-4.  Push initial root node `0x0000FFFF` to `_tree`.
-5.  Loop while stack is not empty:
-    1.  Calculate `offset = _tree.size() - index`.
-    2.  Set `_tree[index] |= offset << 17`.
-    3.  Increment `index` by `offset`.
-    4.  If `depth < maxDepth`:
-        1.  Increment `depth`.
-        2.  Loop 8 times: push `0x0000FFFF` to `_tree`, push `StackEntry{index + (8 - i), depth}` to stack.
-    5.  Else: loop 8 times: push `0x00004200` to `_tree`.
-    6.  Pop top of stack into `current`.
-    7.  Set `index = current.index`, `depth = current.depth`.
-    8.  Pop stack.
-
-**Pseudocode:**
+**Pseudocode (Dense Recursive/Stack-based):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_recursive_dense(max_depth):
+def build_svo_dense(max_depth):
+    # _tree stores uint32_t nodes
+    # 0x0000FFFF = Empty node (child index 0, not leaf)
+    # 0x00004200 = Solid leaf node
+    EMPTY_NODE = 0x0000FFFF
+    LEAF_NODE = 0x00004200
+    
     tree = []
     stack = []
-    index = 0
-    depth = 0
     
-    # Initial root
+    # Push initial root node
+    tree.append(EMPTY_NODE)
+    
+    # StackEntry: {index, depth}
     stack.append({'index': 0, 'depth': 0})
-    tree.append(0x0000FFFF) # Empty node
     
     while stack:
-        # Calculate offset for child pointer
-        offset = len(tree) - index
-        # Set child pointer in current node (bits 17-31)
-        current_node_val = tree[index]
-        tree[index] = (current_node_val & 0x1FFFF) | (offset << 17)
+        current = stack.pop()
+        index = current['index']
+        depth = current['depth']
         
+        # Calculate offset to children
+        offset = len(tree) - index
+        
+        # Update current node with child offset
+        # Bits 0-16: child index, Bit 17: leaf flag
+        tree[index] = (tree[index] & ~0x1FFFF) | (offset << 17)
+        
+        # Advance index for next nodes
         index += offset
         
         if depth < max_depth:
+            # Internal node: create 8 children
             depth += 1
             for i in range(8):
-                # Push placeholder empty nodes
-                tree.append(0x0000FFFF)
-                # Push stack entry for the child
-                stack.append({'index': index + (8 - i), 'depth': depth})
+                # Push placeholder empty node
+                tree.append(EMPTY_NODE)
+                # Push stack entry for this child
+                # The child's index in the tree is current index + (8 - i)
+                # because we are pushing 8 nodes sequentially
+                child_index = index + (8 - i)
+                stack.append({'index': child_index, 'depth': depth})
         else:
-            # Leaf level: push solid leaf placeholders
+            # Leaf node: create 8 solid leaf placeholders
+            # In a real implementation, these would be marked as leaves
+            # and potentially pruned if empty, but this builds the dense structure
             for i in range(8):
-                tree.append(0x00004200)
-        
-        # Pop and backtrack
-        if stack:
-            current = stack.pop()
-            index = current['index']
-            depth = current['depth']
+                tree.append(LEAF_NODE)
+                
+    return tree
 ```
 
-### Algorithm 2: Parallel Level-by-Level Builder (GPU) [S3, unofficial]
-This method processes the voxel list level-by-level using compute shaders [S3, unofficial].
-
-**Parameters:**
-*   `octree_resolution`: Derived from `max_volume_side` via `ceil(log2(max_volume_side))` [S3, unofficial].
-
-**Steps:**
-1.  **Voxelization:** Convert scene primitives to a `voxel_list` [S3, unofficial].
-2.  **Initialization:**
-    *   Clear memory for the first 8 nodes (root children) using `node_init` shader [S3, unofficial].
-    *   Set `start = 0`, `count = 8` [S3, unofficial].
-3.  **Level Loop:** Iterate from level 1 to `octree_resolution - 1`:
-    1.  **Flagging:** Execute `node_flag` shader to determine which nodes at the current level are internal (have children) or leaves. Binds octree buffer and voxel list [S3, unofficial].
-    2.  **Allocation:** Execute `node_alloc` shader to allocate memory for children of internal nodes. Uses an atomic counter. Output start address is `alloc_start`, count is `alloc_count * 8` [S3, unofficial].
-    3.  **State Update:**
-        *   `start` becomes `alloc_start`.
-        *   `count` becomes `alloc_count * 8`.
-        *   `alloc_start` becomes `start + count` [S3, unofficial].
-    4.  **Initialization of New Nodes:** Clear memory for newly allocated nodes using `node_init` shader [S3, unofficial].
-4.  **Leaf Storage:** After the loop, execute `store_leaf` shader to store leaf node data based on the voxel list size [S3, unofficial].
-
-**Pseudocode:**
+**Pseudocode (GPU Iterative):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_parallel_gpu(voxel_list, octree_resolution):
-    # Initialize root children
+def build_svo_gpu(voxel_list, resolution):
+    # Initialize root node (level 0)
+    # Clear memory for first 8 nodes
+    octree_buffer = allocate_buffer(8 * sizeof(uint32_t))
+    node_init(octree_buffer, start=0, count=8)
+    
     start = 0
     count = 8
-    alloc_start = start + count
+    alloc_start = 0
     
-    # Clear initial nodes
-    node_init(start, count)
-    
-    for level in range(1, octree_resolution):
-        # Determine which nodes are internal/leaf
-        node_flag(octree_buffer, voxel_list)
+    for level in range(1, resolution):
+        # Determine which nodes are internal or leaves
+        node_flag(octree_buffer, voxel_list, start, count)
         
         # Allocate memory for children of internal nodes
-        alloc_count = node_alloc(octree_buffer, voxel_list)
+        alloc_start, alloc_count = node_alloc(octree_buffer, start, count)
         
-        # Update state
-        start = alloc_start
-        count = alloc_count * 8
-        alloc_start = start + count
+        # Update state for next iteration
+        new_start = alloc_start
+        new_count = alloc_count * 8
+        next_alloc_start = new_start + new_count
         
-        # Clear new nodes
-        node_init(start, count)
+        # Clear newly allocated nodes
+        node_init(octree_buffer, start=new_start, count=new_count)
         
-    # Store leaf data
+        start = new_start
+        count = new_count
+        alloc_start = next_alloc_start
+        
+    # Store leaf node data
     store_leaf(octree_buffer, voxel_list)
+    
+    return octree_buffer
 ```
 
-### Algorithm 3: Recursive Subdivision with Merging (UE5 Pathfinding) [S2, unofficial]
-This variant handles collision detection and dynamic subdivision [S2, unofficial].
-
 **Parameters:**
-*   `MaxDepth`: Maximum subdivision depth.
-*   `SVOObstacle`: Custom collision trace channel.
+- `maxDepth`: Maximum octree subdivision depth. Root starts at Depth 0. Typical value is not specified in the sources, but determines when leaf nodes are created [S1, unofficial][S2, unofficial].
+- `SVOObstacle`: Custom collision trace channel used exclusively for occupancy testing. Default response is Ignore [S2, unofficial].
 
-**Steps:**
-1.  Start with Root node at Depth 0.
-2.  If root collides with `SVOObstacle`:
-    1.  Recursively subdivide to `MaxDepth`.
-    2.  For each child index 0-7:
-        1.  Compute position using binary mapping: 0 = minus direction, 1 = plus direction relative to center [S2, unofficial].
-        2.  Run recursive build task.
-3.  **Merge:**
-    1.  Calculate total size of child results.
-    2.  Insert root node into Node Array.
-    3.  Iterate through child results.
-    4.  If child's root index is invalid (Blocked), skip it [S2, unofficial].
-    5.  Merge valid subtree into Node Array.
-    6.  Update `ParentIndex` for all newly merged subtree nodes [S2, unofficial].
+**Edge Cases and Pitfalls:**
+- **Work Imbalance:** In parallel implementations, SVO sparsity can cause work imbalance, where one task takes significantly longer. Mitigated by using "Unbalanced" scheduling [S2, unofficial].
+- **Root Collision:** If the root node collides with an obstacle, it must be recursively subdivided to `MaxDepth` [S2, unofficial].
+- **Invalid Child Roots:** Child roots that are invalid (e.g., blocked) should be treated as non-existent and skipped during merge [S2, unofficial].
 
-**Pitfalls:**
-*   **Work Imbalance:** ParallelFor distribution may cause bottlenecks due to SVO sparsity. Mitigate by using Unbalanced scheduling [S2, unofficial].
+## Subtopics
+
+### [GPU-based Octree Generation](5332-gpu-based-octree-generation.md)
+Generates an SVO directly on the GPU by partitioning input volume into fixed-size cubes of $32 \times 32 \times 32$ voxels. Unlike standard SVO builders that only subdivide non-empty regions, this approach subdivides the entire volume space uniformly down to the minimum node size, simplifying compute shader logic by avoiding dynamic branching for empty regions. It solves the problem of constructing a hierarchical acceleration structure for raycasting by mapping every non-empty voxel to a path in a pre-allocated array-based octree.
 
 ## Operating characteristics
-*   **Time Complexity:**
-    *   Recursive Dense [S1, unofficial]: $O(8^{maxDepth})$ worst-case, as it initializes all nodes up to the max depth regardless of occupancy.
-    *   Parallel Level-by-Level [S3, unofficial]: $O(N \cdot R)$ where $N$ is the number of voxels and $R$ is the resolution/depth, dependent on the number of internal nodes.
-*   **Memory Complexity:**
-    *   Dense [S1, unofficial]: Fixed size array of $8^{maxDepth}$ nodes. High memory usage for sparse scenes.
-    *   Sparse/Parallel [S3, S2, unofficial]: Proportional to the number of non-empty nodes and their children. Significantly more memory-efficient for sparse data.
-*   **Strengths:**
-    *   Dense builder [S1, unofficial] is simple to implement and provides fast, predictable traversal for dense volumes.
-    *   Parallel builder [S3, unofficial] leverages GPU compute for high throughput on large voxel lists.
-    *   Recursive merging [S2, unofficial] integrates well with collision detection systems.
-*   **Limitations:**
-    *   Dense builder [S1, unofficial] wastes memory on empty space.
-    *   Parallel builder [S3, unofficial] requires complex shader management and atomic operations.
-    *   Recursive merging [S2, unofficial] can suffer from load imbalance if not scheduled correctly [S2, unofficial].
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths:** Provides a dense, contiguous memory layout suitable for GPU raycasting [S1, unofficial]. Simplifies compute shader logic by avoiding dynamic branching for empty regions in GPU variants [S1, unofficial].
+- **Limitations:** May consume more memory than sparse variants if the volume is not dense [S1, unofficial]. Work imbalance can occur in parallel implementations due to sparsity [S2, unofficial].
+- **When to use:** When a dense, flat array representation is required for efficient GPU raycasting [S1, unofficial].
+- **When not to use:** When memory efficiency is critical for sparse volumes [S1, unofficial].
 
 ## Background
-The Sparse Voxel Octree (SVO) is a fundamental data structure in volume rendering and pathfinding. The recursive dense builder approach [S1, unofficial] is often used in ray marching engines for its simplicity. The GPU-based level-by-level construction [S3, unofficial] is associated with modern voxelization pipelines for real-time rendering. The UE5 pathfinding variant [S2, unofficial] demonstrates the application of SVOs in game development for dynamic obstacle avoidance.
+The Sparse Voxel Octree (SVO) Builder is a method for constructing hierarchical acceleration structures for volume rendering and raycasting. The dense recursive build method is documented in unofficial GitHub repositories [S1, unofficial]. GPU-based iterative builds are also documented in unofficial GitHub repositories [S3, unofficial]. Pathfinding-specific SVO constructions are documented in unofficial video tutorials [S2, unofficial].
 
 ## Sources
 [S1] cianjinks/Sparse-Voxel-Octree, https://github.com/cianjinks/Sparse-Voxel-Octree, fetched 2026-10-26 (unofficial)
 [S2] UE5 Tutorial | Simple SVO Pathfinder for 3D Pathfinding, https://www.youtube.com/watch?v=QmDbX_gZSLA, fetched 2026-10-27 (unofficial)
 [S3] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)
-
-
-# Sparse Voxel Octree (SVO) Builder
-
-Also called: BuildNodeRecursive, BuildSVO, SVO Build, SVO construction, octree_builder
-
-## Overview
-The Sparse Voxel Octree (SVO) Builder is an algorithm that constructs a flat-array representation of a Sparse Voxel Octree from a list of input voxels or geometric primitives [S1, S3, unofficial]. It solves the problem of efficiently organizing spatial data for ray marching or pathfinding by creating a hierarchy where empty space is skipped, but internal nodes are explicitly allocated to maintain traversal continuity [S1, S2, S3, unofficial]. It differs from its siblings by focusing on either a recursive depth-first initialization of a dense structure [S1, unofficial] or a parallel, level-by-level GPU-based allocation and merging process [S3, unofficial], whereas the Brute Force method [1704-brute-force-svo-construction.md] typically relies on simpler, less memory-efficient insertion strategies.
-
-## How it works
-The method exists in three primary implementations: a CPU-based recursive dense builder [S1, unofficial], a GPU-based parallel level-by-level builder [S3, unofficial], and a recursive subdivision with merging variant for pathfinding [S2, unofficial]. Both the CPU and GPU variants produce a flat array of nodes but differ in memory management and traversal logic [S1, S3, unofficial].
-
-### Inputs and Outputs
-*   **Inputs:**
-    *   A list of voxels (occupied cells) or geometric primitives to be voxelized [S3, unofficial].
-    *   `maxDepth` (or `octree_resolution`): The maximum depth of the octree [S1, S3, unofficial].
-    *   `volume_size`: The dimensions of the bounding box in voxels [S3, unofficial].
-*   **Outputs:**
-    *   A flat array `_tree` (or `octree_buffer`) containing node metadata [S1, S3, unofficial].
-
-### Data Structures
-
-#### Flat Array Node Layout (CPU/Dense) [S1, unofficial]
-The `_tree` array stores nodes as `uint32_t` values [S1, unofficial].
-*   **Bits 0-16 (17 bits):** Index of the first child node in the `_tree` array.
-*   **Bit 17 (1 bit):** Leaf flag. If set, the node is a leaf.
-*   **Empty Node Value:** `0x0000FFFF` (Child index 0, Leaf flag 0).
-*   **Solid Leaf Node Value:** `0x00004200` (Child index 0, Leaf flag 1, plus specific marker bits).
-
-#### Node Struct Layout (GPU/Parallel) [S2, unofficial]
-Nodes may also be stored in a struct format for metadata:
-*   **1 Byte Total:**
-    *   Bits 0-6 (7 bits): Depth.
-    *   Bit 7 (1 bit): IsLeaf flag.
-*   **Additional Fields:** Position, Size, Parent Index, Children Indices (stored separately or in extended structs) [S2, unofficial].
-
-### Algorithm 1: Recursive Dense Builder (CPU) [S1, unofficial]
-This method initializes a dense octree up to `maxDepth`, marking leaves as solid [S1, unofficial].
-
-**Parameters:**
-*   `maxDepth`: Maximum subdivision depth.
-
-**Steps:**
-1.  Initialize `_tree` array.
-2.  Set `offset = 0`, `index = 0`.
-3.  Push `StackEntry{0, 0}` to stack.
-4.  Push initial root node `0x0000FFFF` to `_tree`.
-5.  Loop while stack is not empty:
-    1.  Calculate `offset = _tree.size() - index`.
-    2.  Set `_tree[index] |= offset << 17`.
-    3.  Increment `index` by `offset`.
-    4.  If `depth < maxDepth`:
-        1.  Increment `depth`.
-        2.  Loop 8 times: push `0x0000FFFF` to `_tree`, push `StackEntry{index + (8 - i), depth}` to stack.
-    5.  Else: loop 8 times: push `0x00004200` to `_tree`.
-    6.  Pop top of stack into `current`.
-    7.  Set `index = current.index`, `depth = current.depth`.
-    8.  Pop stack.
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def build_recursive_dense(max_depth):
-    tree = []
-    stack = []
-    index = 0
-    depth = 0
-    
-    # Initial root
-    stack.append({'index': 0, 'depth': 0})
-    tree.append(0x0000FFFF) # Empty node
-    
-    while stack:
-        # Calculate offset for child pointer
-        offset = len(tree) - index
-        # Set child pointer in current node (bits 17-31)
-        current_node_val = tree[index]
-        tree[index] = (current_node_val & 0x1FFFF) | (offset << 17)
-        
-        index += offset
-        
-        if depth < max_depth:
-            depth += 1
-            for i in range(8):
-                # Push placeholder empty nodes
-                tree.append(0x0000FFFF)
-                # Push stack entry for the child
-                stack.append({'index': index + (8 - i), 'depth': depth})
-        else:
-            # Leaf level: push solid leaf placeholders
-            for i in range(8):
-                tree.append(0x00004200)
-        
-        # Pop and backtrack
-        if stack:
-            current = stack.pop()
-            index = current['index']
-            depth = current['depth']
-```
-
-### Algorithm 2: Parallel Level-by-Level Builder (GPU) [S3, unofficial]
-This method processes the voxel list level-by-level using compute shaders [S3, unofficial].
-
-**Parameters:**
-*   `octree_resolution`: Derived from `max_volume_side` via `ceil(log2(max_volume_side))` [S3, unofficial].
-
-**Steps:**
-1.  **Voxelization:** Convert scene primitives to a `voxel_list` [S3, unofficial].
-2.  **Initialization:**
-    *   Clear memory for the first 8 nodes (root children) using `node_init` shader [S3, unofficial].
-    *   Set `start = 0`, `count = 8` [S3, unofficial].
-3.  **Level Loop:** Iterate from level 1 to `octree_resolution - 1`:
-    1.  **Flagging:** Execute `node_flag` shader to determine which nodes at the current level are internal (have children) or leaves. Binds octree buffer and voxel list [S3, unofficial].
-    2.  **Allocation:** Execute `node_alloc` shader to allocate memory for children of internal nodes. Uses an atomic counter. Output start address is `alloc_start`, count is `alloc_count * 8` [S3, unofficial].
-    3.  **State Update:**
-        *   `start` becomes `alloc_start`.
-        *   `count` becomes `alloc_count * 8`.
-        *   `alloc_start` becomes `start + count` [S3, unofficial].
-    4.  **Initialization of New Nodes:** Clear memory for newly allocated nodes using `node_init` shader [S3, unofficial].
-4.  **Leaf Storage:** After the loop, execute `store_leaf` shader to store leaf node data based on the voxel list size [S3, unofficial].
-
-**Pseudocode:**
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def build_parallel_gpu(voxel_list, octree_resolution):
-    # Initialize root children
-    start = 0
-    count = 8
-    alloc_start = start + count
-    
-    # Clear initial nodes
-    node_init(start, count)
-    
-    for level in range(1, octree_resolution):
-        # Determine which nodes are internal/leaf
-        node_flag(octree_buffer, voxel_list)
-        
-        # Allocate memory for children of internal nodes
-        alloc_count = node_alloc(octree_buffer, voxel_list)
-        
-        # Update state
-        start = alloc_start
-        count = alloc_count * 8
-        alloc_start = start + count
-        
-        # Clear new nodes
-        node_init(start, count)
-        
-    # Store leaf data
-    store_leaf(octree_buffer, voxel_list)
-```
-
-### Algorithm 3: Recursive Subdivision with Merging (UE5 Pathfinding) [S2, unofficial]
-This variant handles collision detection and dynamic subdivision [S2, unofficial].
-
-**Parameters:**
-*   `MaxDepth`: Maximum subdivision depth.
-*   `SVOObstacle`: Custom collision trace channel.
-
-**Steps:**
-1.  Start with Root node at Depth 0.
-2.  If root collides with `SVOObstacle`:
-    1.  Recursively subdivide to `MaxDepth`.
-    2.  For each child index 0-7:
-        1.  Compute position using binary mapping: 0 = minus direction, 1 = plus direction relative to center [S2, unofficial].
-        2.  Run recursive build task.
-3.  **Merge:**
-    1.  Calculate total size of child results.
-    2.  Insert root node into Node Array.
-    3.  Iterate through child results.
-    4.  If child's root index is invalid (Blocked), skip it [S2, unofficial].
-    5.  Merge valid subtree into Node Array.
-    6.  Update `ParentIndex` for all newly merged subtree nodes [S2, unofficial].
-
-**Pitfalls:**
-*   **Work Imbalance:** ParallelFor distribution may cause bottlenecks due to SVO sparsity. Mitigate by using Unbalanced scheduling [S2, unofficial].
-
-## Operating characteristics
-*   **Time Complexity:**
-    *   Recursive Dense [S1, unofficial]: $O(8^{maxDepth})$ worst-case, as it initializes all nodes up to the max depth regardless of occupancy.
-    *   Parallel Level-by-Level [S3, unofficial]: $O(N \cdot R)$ where $N$ is the number of voxels and $R$ is the resolution/depth, dependent on the number of internal nodes.
-*   **Memory Complexity:**
-    *   Dense [S1, unofficial]: Fixed size array of $8^{maxDepth}$ nodes. High memory usage for sparse scenes.
-    *   Sparse/Parallel [S3, S2, unofficial]: Proportional to the number of non-empty nodes and their children. Significantly more memory-efficient for sparse data.
-*   **Strengths:**
-    *   Dense builder [S1, unofficial] is simple to implement and provides fast, predictable traversal for dense volumes.
-    *   Parallel builder [S3, unofficial] leverages GPU compute for high throughput on large voxel lists.
-    *   Recursive merging [S2, unofficial] integrates well with collision detection systems.
-*   **Limitations:**
-    *   Dense builder [S1, unofficial] wastes memory on empty space.
-    *   Parallel builder [S3, unofficial] requires complex shader management and atomic operations.
-    *   Recursive merging [S2, unofficial] can suffer from load imbalance if not scheduled correctly [S2, unofficial].
-
-## Background
-The Sparse Voxel Octree (SVO) is a fundamental data structure in volume rendering and pathfinding. The recursive dense builder approach [S1, unofficial] is often used in ray marching engines for its simplicity. The GPU-based level-by-level construction [S3, unofficial] is associated with modern voxelization pipelines for real-time rendering. The UE5 pathfinding variant [S2, unofficial] demonstrates the application of SVOs in game development for dynamic obstacle avoidance.
-
-## Sources
-[S1, unofficial] cianjinks/Sparse-Voxel-Octree, https://github.com/cianjinks/Sparse-Voxel-Octree, fetched 2026-10-26 (unofficial)
-[S2, unofficial] UE5 Tutorial | Simple SVO Pathfinder for 3D Pathfinding, https://www.youtube.com/watch?v=QmDbX_gZSLA, fetched 2026-10-27 (unofficial)
-[S3, unofficial] loryruta/voxelizer, https://github.com/loryruta/voxelizer, fetched 2026-10-27 (unofficial)

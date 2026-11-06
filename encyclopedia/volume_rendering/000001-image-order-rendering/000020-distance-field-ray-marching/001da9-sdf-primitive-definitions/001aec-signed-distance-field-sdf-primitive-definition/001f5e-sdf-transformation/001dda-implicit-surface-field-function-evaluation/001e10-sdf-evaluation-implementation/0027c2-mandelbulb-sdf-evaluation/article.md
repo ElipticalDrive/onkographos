@@ -1,0 +1,147 @@
+# Mandelbulb SDF Evaluation
+
+Also called: Fractal SDF, Mandelbulb, Mandelbulb Distance Estimator, Mandelbulb Fractal SDF, Mandelbulb distance function, sdMandelbulb
+
+## Overview
+The Mandelbulb SDF Evaluation computes the signed distance from a 3D point to the boundary of the Mandelbulb fractal, a 3D generalization of the Mandelbrot set. It solves the problem of rendering complex, self-similar fractal geometry efficiently within ray marching pipelines by providing a tight distance bound without explicit mesh generation. It differs from standard primitives (like spheres or boxes) by using an iterative polar coordinate transformation and derivative tracking to approximate the distance to a non-algebraic surface [S1, S3, unofficial].
+
+## How it works
+The method uses the distance estimation technique for iterated function systems (IFS) or fractals, where the distance is approximated by the radius of the current point scaled by the logarithm of its magnitude and divided by the accumulated derivative of the iteration function [S2, S3, unofficial].
+
+### Inputs and Outputs
+*   **Input**:
+    *   `point` (`vec3`): The 3D query point in world space.
+    *   `center` (`vec3`): The center of the Mandelbulb.
+    *   `scale` (`float`): Global scaling factor for the fractal size.
+    *   `power` (`float`): The exponent for the fractal mapping (typically 8.0) [S3, unofficial].
+    *   `max_iterations` (`int`): Maximum number of iterations (typically 6–15) [S1, S3, unofficial].
+    *   `bailout` (`float`): Escape radius threshold (typically 2.0) [S1, S3, unofficial].
+*   **Output**:
+    *   `distance` (`float`): The estimated signed distance from `point` to the Mandelbulb surface. Positive if outside, negative if inside (though the estimator is primarily used for outside points in ray marching) [S2, unofficial].
+
+### Data Structures
+No persistent data structures are required. The algorithm is stateless per point evaluation. Temporary variables include:
+*   `z` (`vec3`): Current position in the transformed space.
+*   `dr` (`float`): Accumulated derivative of the iteration function with respect to the initial position.
+*   `r` (`float`): Magnitude (radius) of `z`.
+*   `theta`, `phi` (`float`): Spherical angles.
+
+### Steps
+1.  **Initialization**:
+    *   Translate and scale the input point: $z = \frac{\text{point} - \text{center}}{\text{scale}}$.
+    *   Initialize derivative: $dr = 1.0$.
+    *   Initialize radius: $r = 0.0$.
+2.  **Iteration Loop**:
+    *   For $i$ from 0 to `max_iterations` - 1:
+        *   Calculate current radius: $r = \|z\|$.
+        *   **Bailout Check**: If $r > \text{bailout}$, break the loop.
+        *   Convert to spherical coordinates:
+            *   $\theta = \arccos\left(\frac{z_z}{r}\right)$
+            *   $\phi = \operatorname{atan2}(z_y, z_x)$
+        *   Update derivative:
+            *   $dr = r^{\text{power} - 1} \cdot \text{power} \cdot dr + 1.0$
+        *   Calculate radial power:
+            *   $z_r = r^{\text{power}}$
+        *   Scale angles:
+            *   $\theta \leftarrow \theta \cdot \text{power}$
+            *   $\phi \leftarrow \phi \cdot \text{power}$
+        *   Transform back to Cartesian coordinates:
+            *   $z_x = z_r \cdot \sin(\theta) \cdot \cos(\phi)$
+            *   $z_y = z_r \cdot \sin(\phi) \cdot \sin(\theta)$
+            *   $z_z = z_r \cdot \cos(\theta)$
+            *   Note: Some implementations use $\sin(\theta)\sin(\phi)$ for Y and $\sin(\theta)\cos(\phi)$ for X, or swap sine/cosine roles depending on axis convention. The standard Mandelbulb definition usually maps $z = r^p (\sin(p\theta)\cos(p\phi), \sin(p\theta)\sin(p\phi), \cos(p\theta))$ [S3, unofficial].
+        *   Add the initial transformed position (feedback):
+            *   $z \leftarrow z + \frac{\text{point} - \text{center}}{\text{scale}}$
+            *   *Correction*: Standard Mandelbulb iteration is $z_{n+1} = z_n^p + c$. In the context of SDF estimation, the "feedback" is often just adding the constant $c$ (which is $(\text{point}-\text{center})/\text{scale}$) at each step if it's a Julia set, or just $c$ at the end if it's a Mandelbrot set. However, the SDF derivation for the *Mandelbulb* (Julia set variant centered at origin) typically iterates $z_{n+1} = z_n^p$. The distance estimator formula $d = \frac{0.5 \ln(r) r}{dr}$ assumes the orbit escapes to infinity. The addition of `pos` in the notes [S1, S3, unofficial] suggests a specific implementation variant or a misunderstanding of the standard Mandelbulb (which is usually $z^p$). Let's stick to the most common SDF implementation for the Mandelbulb fractal which is the Julia set form $z_{n+1} = z_n^p$ with no addition, or the Mandelbrot form $z_{n+1} = z_n^p + c$. The notes [S3, unofficial] explicitly state: `z = zr * vec3(...) + pos`. This implies the Mandelbrot set iteration where `pos` is the constant $c$. We will follow the notes' explicit algorithm.
+3.  **Distance Calculation**:
+    *   If the loop broke due to bailout, use the final $r$ and $dr$.
+    *   Calculate distance: $d = \frac{0.5 \cdot \ln(r) \cdot r}{dr}$.
+    *   Scale the result: $d = d \cdot \text{scale}$.
+    *   Return $d$.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sdMandelbulb(point: vec3, center: vec3, scale: float, power: float, max_iterations: int, bailout: float) -> float:
+    # 1. Initialize
+    z = (point - center) / scale
+    dr = 1.0
+    r = 0.0
+    
+    # 2. Iterate
+    for i in range(max_iterations):
+        r = length(z)
+        if r > bailout:
+            break
+        
+        # Spherical coordinates
+        # Handle edge case where r is 0 to avoid division by zero
+        if r == 0:
+            break
+            
+        theta = acos(z.z / r)
+        phi = atan2(z.y, z.x)
+        
+        # Update derivative
+        # dr = r^(power-1) * power * dr + 1
+        dr = pow(r, power - 1.0) * power * dr + 1.0
+        
+        # Radial power
+        zr = pow(r, power)
+        
+        # Scale angles
+        theta = theta * power
+        phi = phi * power
+        
+        # Transform back to Cartesian
+        # Standard Mandelbulb mapping:
+        # x = r^p * sin(p*theta) * cos(p*phi)
+        # y = r^p * sin(p*theta) * sin(p*phi)
+        # z = r^p * cos(p*theta)
+        # Note: Some sources swap sin/cos for x/y. We follow [S3, unofficial] which uses sin(theta)*cos(phi) for x.
+        z.x = zr * sin(theta) * cos(phi)
+        z.y = zr * sin(phi) * sin(theta) # Note: [S3, unofficial] uses sin(phi)*sin(theta) for y
+        z.z = zr * cos(theta)
+        
+        # Add constant c (pos)
+        c = (point - center) / scale
+        z = z + c
+        
+    # 3. Distance Estimator
+    if r == 0:
+        # Point is at the center, distance is roughly the scale * radius of the bulb
+        # This is a degenerate case. Return a small value or handle based on context.
+        return 0.0 
+        
+    distance = 0.5 * log(r) * r / dr
+    distance = distance * scale
+    
+    return distance
+```
+
+### Parameters
+*   `power`: 8.0 is the classic Mandelbulb exponent [S3, unofficial]. Other values create different fractal shapes.
+*   `max_iterations`: 6–15 is typical. Higher values increase detail but cost more [S1, S3, unofficial].
+*   `bailout`: 2.0 is standard for escape radius [S1, S3, unofficial].
+*   `scale`: Depends on the desired size of the object in the scene.
+
+### Edge Cases and Pitfalls
+*   **Division by Zero**: If $r=0$ (the point is exactly at the origin of the iteration space), $\arccos(z_z/r)$ is undefined. Guard against $r < \epsilon$.
+*   **Precision**: Floating point precision issues can cause jitter in the distance estimate for points very close to the surface, especially with high `power` values.
+*   **Inside the Fractal**: The distance estimator $d = \frac{0.5 \ln(r) r}{dr}$ is valid for points *outside* the fractal (where $r \to \infty$). For points inside, the distance is not well-defined by this formula, and ray marching may fail or require a different estimator (e.g., using the number of iterations to estimate distance to the boundary) [G].
+
+## Operating characteristics
+*   **Time Complexity**: $O(I)$, where $I$ is the number of iterations. Each iteration involves trigonometric functions and vector operations.
+*   **Memory Complexity**: $O(1)$. No auxiliary memory is required.
+*   **Performance**: The Mandelbulb SDF is computationally expensive per evaluation due to the trigonometric functions (`sin`, `cos`, `atan2`, `acos`) and power calculations. It is significantly slower than primitive SDFs (sphere, box) but allows for infinitely detailed geometry.
+*   **Strengths**: Generates complex, organic-looking fractal geometry with a single function. No mesh storage required.
+*   **Limitations**: High computational cost. The distance estimate is an approximation and may not be perfectly tight, potentially leading to slightly larger step sizes in ray marching (slower convergence) or visual artifacts if the derivative is inaccurate.
+
+## Background
+The Mandelbulb was introduced by Daniel Shiffman and others in 2010 as a 3D analogue to the Mandelbrot set, using spherical coordinates to raise complex numbers to a power [S3, unofficial]. The distance estimation technique for fractals, based on the derivative of the iteration function, is a standard method in ray marching for implicit surfaces [S2, unofficial]. It allows for efficient rendering of fractals without tessellation.
+
+## Sources
+[S1] kuvsamja/lidar-sphere-tracing, https://github.com/kuvsamja/lidar-sphere-tracing, fetched 2026-10-26 (unofficial)
+[S2] haydenparker3/3D-Sphere-Tracing, https://github.com/haydenparker3/3D-Sphere-Tracing, fetched 2026-10-26 (unofficial)
+[S3] arguskern/lumina-graphics-lab, https://github.com/arguskern/lumina-graphics-lab, fetched 2026-10-26 (unofficial)

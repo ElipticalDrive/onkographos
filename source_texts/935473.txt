@@ -1,0 +1,555 @@
+Transparent Pointer Compression
+for Linked Data Structures
+Chris Lattner
+Vikram Adve
+lattner@cs.uiuc.edu
+vadve@cs.uiuc.edu
+June 12, 2005
+MSP 2005
+http://llvm.cs.uiuc.edu/
+Growth of 64-bit computing
+n 64-bit architectures are increasingly common:
+v New architectures and chips (G5, IA64, X86-64, …)
+v High-end systems have existed for many years now
+n 64-bit address space used for many purposes:
+v Address space randomization (security)
+v Memory mapping large files (databases, etc)
+v Single address space OS’s
+v Many 64-bit systems have < 4GB of phys memory
+n 64-bits is still useful for its virtual address space
+Chris Lattner
+Cost of a 64-bit virtual address space
+BIGGER POINTERS
+n Pointers must be 64 bits (8 bytes) instead of 32 bits:
+v Significant impact for pointer-intensive programs!
+n Pointer intensive programs suffer from:
+v Reduced effective L1/L2/TLB cache sizes
+v Reduced effective memory bandwidth
+v Increased alignment requirements, etc
+n Pointer intensive programs are increasingly common:
+v Recursive data structures (our focus)
+v Object oriented programs
+Chris Lattner
+Previously Published Approaches
+n Simplest approaches: Use 32-bit addressing
+v Compile for 32-bit pointer size “-m32”
+v Force program image into 32-bits [Adl-Tabatabai ’04]
+v Loses advantage of 64-bit address spaces!
+n Other approaches: Exotic hardware support
+v Compress pairs of values, speculating that pointer
+offset is small [Zhang’02]
+v Compress arrays of related pointers [Takagi ’03]
+v Requires significant changes to cache hierarchy
+No previous fully-automatic compiler
+technique to shrink pointers in RDS’s
+Chris Lattner
+Our Approach (1/2)
+Original heap
+layout
+1. Use Automatic Pool Allocation [PLDI’05] to
+partition heap into memory pools:
+v Infers and captures pool homogeneity information
+Layout after
+pool allocation
+Chris Lattner
+Our Approach (2/2)
+2. Replace pointers with 64-bit integer offsets
+from the start of the pool
+v Change *Ptr into *(PoolBase+Ptr)
+3. Shrink 64-bit integers to 32-bit integers
+v Allows each pool to be up to 4GB in size
+Layout after pointer
+compression
+Chris Lattner
+Talk Outline
+n Introduction & Motivation
+n Automatic Pool Allocation Background
+n Pointer Compression Transformation
+n Experimental Results
+n Conclusion
+Chris Lattner
+Automatic Pool Allocation
+1. Compute points -to graph:
+v Ensure each pointer has one target
+n “unification -based” approach
+Pool 1
+Pool 2
+2. Infer pool lifetimes:
+Pool 3
+v Uses escape analysis
+Pool 4
+3. Rewrite program:
+v malloc à poolalloc, free à poolfree
+v Insert calls to poolinit/pooldestroy
+v Pass pool descriptors to functions
+L1
+L2
+List
+List
+Pool 1
+Pool 2
+For more info: see MSP paper or talk at PLDI tomorrow
+Chris Lattner
+A Simple Pointer-intensive Example
+n A list of pointers to doubles
+Pool allocate
+List *L = 0;
+for (…) {
+List *N = malloc(List);
+N->Next = L;
+N->Data = malloc(double );
+L = N;
+}
+List *L = 0;
+for (…) {
+List *N = poolalloc(PD1, List);
+N->Next = L;
+N->Data = poolalloc(PD2,double);
+L = N;
+}
+L
+L
+List
+double
+List
+List
+List
+double
+Points-to graph
+summary
+double
+PD1
+PD2
+Chris Lattner
+Effect of Automatic Pool Allocation 1/2
+n Heap is partitioned into separate pools
+v Each individual pool is smaller than total heap
+List *L = 0;
+for (…) {
+List *N = malloc(List);
+N->Next = L;
+N->Data = malloc(double );
+L = N;
+}
+List *L = 0;
+for (…) {
+List *N = poolalloc(PD1, List);
+N->Next = L;
+N->Data = poolalloc(PD2,double);
+L = N;
+}
+L
+…
+PD1
+PD2
+…
+List
+double
+Chris Lattner
+Effect of Automatic Pool Allocation 2/2
+n Each pool has a descriptor associated with it:
+v Passed into poolalloc/poolfree
+List *L = 0;
+for (…) {
+List *N = malloc(List);
+N->Next = L;
+N->Data = malloc(double );
+L = N;
+}
+List *L = 0;
+for (…) {
+List *N = poolalloc( PD1, List);
+N->Next = L;
+N->Data = poolalloc( PD2,double);
+L = N;
+}
+n We know which pool each pointer points into:
+v Given the above, we also have the pool descriptor
+v e.g. “N”, “L” à PD1
+and
+N->Data à PD2
+Chris Lattner
+Talk Outline
+n Introduction & Motivation
+n Automatic Pool Allocation Background
+n Pointer Compression Transformation
+n Experimental Results
+n Conclusion
+Chris Lattner
+Index Conversion of a Pool
+n Force pool memory to be contiguous:
+v Normal PoolAlloc runtime allocates memory in chunks
+v Two implementation strategies for this (see paper)
+n Change pointers into the pool to integer
+offsets/indexes from pool base:
+v Replace “*P” with “*(PoolBase
++ P)”
+A pool can be index converted if
+pointers into it only point to heap
+memory (no stack or global mem)
+Chris Lattner
+Index Compression of a Pointer
+n Shrink indexes in type-homogenous pools
+v Shrink from 64-bits to 32-bits
+n Replace structure definition & field accesses
+v Requires accurate type-info and type-safe accesses
+struct List {
+struct List *Next;
+int Data;
+};
+struct List {
+int64 Next;
+int Data;
+};
+struct List {
+int32 Next;
+int Data;
+};
+List *L = malloc(16);
+L = malloc(16);
+L = malloc(8);
+index conversion
+index compression Chris Lattner
+Index Conversion Example 1
+Previous Example
+After Index Conversion
+L
+L
+List
+double
+Two pointers are
+compressible
+Index
+Convert
+Pools
+List
+double
+64-bit
+integer
+indexes
+Index conversion changes
+pointer dereferences, but
+not memory layout
+Chris Lattner
+Index Compression Example 1
+Example after
+index conversion
+L
+L
+List
+List
+double
+64-bit
+integer
+indices
+Compress both indexes
+from 64 to 32-bit ints
+32-bit
+double
+integer
+indices
+Compress pointers,
+change accesses to
+and size of structure
+‘Pointer’ registers
+remain 64-bits
+Chris Lattner
+Impact of Type-Homogeneity/safety
+n Compression requires rewriting structures:
+v e.g. malloc(32) à malloc(16)
+v Rewriting depends on type-safe memory accesses
+n We can’t know how to rewrite unions and other cases
+v Must verify that memory accesses are ‘type-safe’
+n Pool allocation infers type homogeneity:
+v Unions, bad C pointer tricks, etc à non-TH
+v Some pools may be TH, others not
+n Can’t index compress ptrs in non-TH pools!
+Chris Lattner
+Index Conversion Example 2
+unknown
+type
+unknown
+type
+L
+L
+List
+List
+Heap pointer points from TH
+pool to a heap-only pool:
+compress this pointer!
+64-bit
+integer
+indexes
+Index conversion changes
+pointer dereferences, but
+not memory layout
+Compression of TH memory, pointed to by non-TH memory
+Chris Lattner
+Index Compression Example 2
+Example after
+index conversion
+unknown
+type
+unknown
+type
+L
+L
+List
+64-bit
+integer
+indexes
+Next step: compress the
+pointer in the heap
+List
+64-bit
+integer
+indexes
+32-bit
+integer
+index
+Compress pointer in typesafe pool, change offsets
+and size of structure
+Compression of TH memory, pointed to by non-TH memory
+Chris Lattner
+Pointer Compression Example 3
+L
+L
+L
+Array
+Array
+Array
+unknown
+type
+unknown
+type
+unknown
+type
+Index convert non-TH
+pool to shrink TH
+pointers
+Index compress
+array of pointers!
+Compression of TH pointers, pointing to non-TH memory
+Chris Lattner
+Static Pointer Compression Impl.
+n Inspect graph of pools provided by APA:
+v Find compressible pointers
+v Determine pools to index convert
+n Use rewrite rules to ptr compress program:
+v e.g. if P1 and P2 are compressed pointers, change:
+P1 = *P2
+⇒
+P1’ = *(int*)(PoolBase+P2’)
+n Perform interprocedural call graph traversal:
+v Top- down traversal from main()
+Chris Lattner
+Talk Outline
+n Introduction & Motivation
+n Automatic Pool Allocation Background
+n Pointer Compression Transformation
+n Dynamic Pointer Compression
+n Experimental Results
+n Conclusion
+Chris Lattner
+Dynamic Pointer Compression Idea
+n Static compression can break programs:
+v Each pool is limited to 232 bytes of memory
+n Program aborts when 232
+nd
+byte allocated!
+n Expand pointers dynamically when needed!
+nd
+32
+v When 2
+byte is allocated, expand ptrs to 64-bits
+v Traverse/rewrite pool, uses type information
+v Similar to (but a bit simpler than) a copying GC pass
+Chris Lattner
+Dynamic Pointer Compression Cost
+n Structure offset and sizes depend on
+whether a pool is currently compressed:
+P1 = *P2
+⇒
+if (PD->isCompressed)
+P1’ = *(int32*)(PoolBase + P2’*C1 + C2);
+else
+P1’ = *(int64*)(PoolBase + P2’*C3 + C4);
+n Use standard optimizations to address this:
+v Predication, loop unswitching, jump threading, etc.
+n See paper for details
+Chris Lattner
+Talk Outline
+n Introduction & Motivation
+n Automatic Pool Allocation Background
+n Pointer Compression Transformation
+n Experimental Results
+n Conclusion
+Chris Lattner
+Experimental Results: 2 Questions
+1. Does Pointer Compression improve the
+performance of pointer intensive programs?
+n Cache miss reductions, memory bandwidth
+improvements
+n Memory footprint reduction
+2. How does the impact of Pointer Compression
+vary across 64-bit architectures?
+n Do memory system improvements outweigh overhead?
+Built in the LLVM Compiler Infrastructure: http://llvm.cs.uiuc.edu/
+Chris Lattner
+Static PtrComp Performance Impact
+1.0 = Program compiled with LLVM & PA but no PC
+Peak Memory Usage
+1.4
+PA
+PC
+bh
+8MB
+8MB
+1.00
+bisort
+64MB
+32MB
+0.50
+em3d
+47MB
+47MB
+1.00
+perimeter
+299MB
+171MB
+0.57
+power
+882KB
+816KB
+0.93
+treeadd
+128MB
+64MB
+0.50
+tsp
+128MB
+96MB
+0.75
+NoPA Runtime Ratio
+ft
+9MB
+4MB
+0.51
+PtrComp Runtime Ratio
+ks
+47KB
+47KB
+1.00
+llubench
+4MB
+2MB
+0.50
+1.2
+0.8
+0.6
+0.4
+0.2
+llubench
+ks
+ft
+tsp
+treeadd
+power
+perimeter
+em3d
+bisort
+0
+bh
+Runtime Ratio (PA = 1.0)
+1
+PC/PA
+UltraSPARC IIIi w/1MB Cache
+Chris Lattner
+Evaluating Effect of Architecture
+n Pick one program that scales easily:
+v llubench – Linked list micro-benchmark
+v llubench has little computation, many dereferences
+n Best possible case for pointer compression
+n Evaluate how ptrcomp impacts scalability:
+v Compare to native and pool allocated version
+n Evaluate overhead introduced by ptrcomp:
+v Compare PA32 with PC32 (‘compress’ 32 à 32 bits)
+n How close is ptrcomp to native 32-bit pointers?
+v Compare to native-32 and poolalloc -32 for limit study
+Chris Lattner
+SPARC V9 PtrComp (1MB Cache)
+7.E-08
+Time per node dereference
+6.E-08
+5.E-08
+Normal 64
+PoolAlloc 64
+PtrComp 64
+Normal 32
+PoolAlloc 32
+PtrComp 32
+4.E-08
+3.E-08
+2.E-08
+Significant
+scalability impact
+1.E-08
+0.E+00
+0
+PtrComp overhead
+is very low
+500
+1000
+1500
+2000
+2500
+Heap Size (no units)
+Chris Lattner
+AMD64 PtrComp (1MB Cache)
+6.E-08
+Normal 64
+Time per node dereference
+5.E-08
+PoolAlloc 64
+PtrComp 64
+Normal 32
+4.E-08
+PoolAlloc 32
+PtrComp 32
+Similar scalability
+impact
+3.E-08
+2.E-08
+1.E-08
+0.E+00
+0
+200
+See paper for
+IA64 and IBM -SP
+400
+600
+800
+1000
+1200
+Heap Size (no units)
+1400
+1600
+1800
+PtrComp
+is 2000
+faster than
+PA32 on AMD64!
+Chris Lattner
+Pointer Compression Conclusion
+n Pointer compression can substantially reduce
+footprint of pointer-intensive programs:
+v … without specialized hardware support!
+n Significant perf. impact for some programs:
+v Effectively higher memory bandwidth
+v Effectively larger caches
+n Dynamic compression for full generality:
+v Speculate that pools are small, expand if not
+v More investigation needed, see paper!
+n Questions?
+http://llvm.cs.uiuc.edu/
+Chris Lattner

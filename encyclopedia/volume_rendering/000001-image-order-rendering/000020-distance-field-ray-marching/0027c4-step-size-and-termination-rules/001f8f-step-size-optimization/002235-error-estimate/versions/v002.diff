@@ -1,0 +1,154 @@
+--- v001.md
++++ v002.md
+@@ -1,94 +1,91 @@
+ # Error Estimate
+-Also called: Relative Error Metric, Adaptive Stepping Error Metric
++Also called: Relative Error Metric for Adaptive Stepping
+ 
+ ## Overview
+-The Error Estimate method calculates a relative error metric to drive adaptive step sizing in volume rendering, ensuring that the sampling density adapts to the local variation of the scalar field [S1, unofficial]. It distinguishes itself from sibling methods like [Safe Raymarching Step Size](1462-safe-raymarching-step-size.md) by focusing on the magnitude of the field values relative to a threshold rather than geometric distance bounds, and from [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by using a specific component-wise relative error formulation [S1, unofficial].
++This method calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting interpolation error based on the distance to a user-specified isovalue $v_{iso}$ [S1, unofficial]. It sets itself apart from its sibling [Adaptive Step Size Ray Marching](2312-adaptive-step-size-ray-marching.md) by introducing data-dependence on the exploration parameter ($v_{iso}$) rather than relying solely on geometric or field-range properties, significantly reducing computation time in areas far from the isosurface [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A vector of scalar field values $\mathbf{y} = (y_x, y_y, y_z)$ sampled along the ray or at the current position.
+-- Input: A scalar parameter $k$ representing the target error tolerance or scaling factor.
+-- Input: A `threshold` value to prevent division by zero or excessive sensitivity in low-magnitude regions.
+-- Output: A scalar error estimate $E$ used to determine the next step size.
++*   Input: Scalar field values $y$ (vector), interpolation coefficient $k$, threshold value.
++*   Output: Relative error metric $E$ (scalar).
+ 
+ **Data Structures:**
+-- $\mathbf{y}$: A 3-component vector (e.g., `vec3` in GLSL or `numpy` array in Python) containing the scalar values.
+-- $k$: A float scalar.
+-- `threshold`: A float scalar, typically a small positive number (e.g., $10^{-6}$ or similar to machine epsilon depending on precision).
++*   $y$: A vector representing the scalar field values at the current ray step or interpolation points. In the reference implementation, this is treated as a 3-component vector (e.g., `vec3`) [S1, unofficial].
++*   $k$: A scalar coefficient related to the interpolation or step context.
++*   threshold: A small positive constant to prevent division by zero.
+ 
+ **Steps:**
+-1. Compute the absolute value of each component of $\mathbf{y}$: $|\mathbf{y}| = (|y_x|, |y_y|, |y_z|)$.
+-2. Determine the maximum magnitude in the vector, clamped by the threshold: $M = \max(|y_x|, |y_y|, |y_z|, \text{threshold})$.
+-3. Calculate the relative error vector $\mathbf{r_v}$ where each component is the ratio of $k$ to the corresponding absolute value, but normalized by the maximum magnitude $M$:
+-   $$ r_{v,i} = \frac{k}{M} \quad \text{for } i \in \{x, y, z\} $$
+-   *Note: The source code snippet `abs(k / max(abs(y), threshold))` implies a component-wise division where the denominator is the element-wise max of the absolute values and the threshold, or potentially a global max. Given the return statement `max(r_v.x, max(r_v.y, r_v.z))`, it suggests $\mathbf{r_v}$ is computed per component. However, the code `max(abs(y), threshold)` in GLSL usually operates component-wise. Let's look closer at the source logic.*
+-   
+-   Re-evaluating the source code:
+-   `float r_v = abs(k / max(abs(y), threshold));`
+-   In GLSL, `max(vec3, float)` performs component-wise maximum. So `max(abs(y), threshold)` results in a vector where each component is $\max(|y_i|, \text{threshold})$.
+-   Then `k / ...` performs component-wise division.
+-   So, $r_{v,i} = \frac{k}{\max(|y_i|, \text{threshold})}$.
+-   
+-   The return statement is:
+-   `return max(r_v.x, max(r_v.y, r_v.z)) + FLOAT_MIN;`
+-   This takes the maximum of the three relative error components.
+-
+-4. Return the maximum of the relative error components, adding a small constant `FLOAT_MIN` to ensure the result is strictly positive and avoid division by zero in subsequent step size calculations.
++1.  Compute the absolute value of the scalar field vector $y$.
++2.  Determine the maximum absolute value in $y$: $y_{max} = \max(|y_x|, |y_y|, |y_z|)$.
++3.  Calculate the denominator for the relative error: $D = \max(y_{max}, \text{threshold})$.
++4.  Compute the relative error vector components: $r_v = k / D$.
++5.  Return the maximum component of $r_v$ plus a minimal float value to ensure positivity:
++    $$ E = \max(r_v) + \text{FLOAT\_MIN} $$
+ 
+ **Pseudocode:**
+ ```python
+-def error_estimate(y: list[float], k: float, threshold: float, float_min: float) -> float:
++def compute_error_estimate(y: Vector3, k: float, threshold: float) -> float:
+     """
+-    Calculate the relative error metric for adaptive stepping.
++    Calculate relative error metric for adaptive stepping.
+     
+     Args:
+-        y: List of 3 scalar field values [y_x, y_y, y_z].
+-        k: Scaling factor or target error tolerance.
+-        threshold: Minimum value to prevent division by zero.
+-        float_min: Smallest positive float value to ensure positivity.
++        y: Scalar field values (vector).
++        k: Interpolation coefficient.
++        threshold: Minimum denominator value to avoid division by zero.
+         
+     Returns:
+-        The maximum relative error across components.
++        Relative error metric.
+     """
+-    # Step 1 & 2: Compute component-wise max of absolute values and threshold
+-    # max_abs_y = [max(abs(y_i), threshold) for y_i in y]
++    # Get absolute values
++    abs_y = abs(y)
+     
+-    # Step 3: Compute relative error vector r_v
+-    # r_v_i = k / max_abs_y_i
+-    r_v = []
+-    for y_val in y:
+-        denom = max(abs(y_val), threshold)
+-        r_v.append(k / denom)
+-        
+-    # Step 4: Return the maximum component plus a small epsilon
+-    max_r_v = max(r_v)
+-    return max_r_v + float_min
++    # Find maximum absolute value in the vector
++    y_max = max(abs_y.x, max(abs_y.y, abs_y.z))
++    
++    # Compute denominator with threshold guard
++    denominator = max(y_max, threshold)
++    
++    # Compute relative error components
++    # Note: In the source, k is divided by the scalar denominator
++    # resulting in a vector if k is scalar? 
++    # The source says: r_v = abs(k / max(abs(y), threshold))
++    # This implies k is treated as a scalar or broadcast.
++    # Let's assume k is scalar and r_v is a vector where each component is k/denominator?
++    # Or is k a vector? The source snippet: "r_v = abs(k / max(abs(y), threshold))"
++    # If k is scalar, r_v is a vector of identical values k/denominator.
++    # If k is vector, it's element-wise. 
++    # Given "max(r_v.x, max(r_v.y, r_v.z))", r_v is a vector.
++    # Let's assume k is a scalar coefficient for the error bound.
++    
++    r_v = Vector3(k / denominator, k / denominator, k / denominator)
++    
++    # Return max component + FLOAT_MIN
++    FLOAT_MIN = 1e-8  # Typical small epsilon
++    return max(r_v.x, max(r_v.y, r_v.z)) + FLOAT_MIN
+ ```
+ 
+ **Parameters:**
+-- $k$: Not explicitly defined in the source snippet, but typically represents a desired error bound or a scaling factor derived from camera properties (e.g., `rad_pixel` in the source). In the source, `rad_pixel` is passed to `marchingCubesInitialize`, suggesting $k$ might be related to pixel footprint or angular resolution.
+-- `threshold`: Not given in the sources. [G] Typically a small value like $1e-6$ to handle near-zero density regions.
+-- `FLOAT_MIN`: Not given in the sources. [G] Typically the smallest positive normalized float (e.g., $1.17549435 \times 10^{-38}$ for IEEE 754 single precision).
++*   `threshold`: Not given in the sources. Typically a small epsilon (e.g., $10^{-8}$) [G].
++*   `FLOAT_MIN`: Not given in the sources. Typically the smallest positive normalized float (e.g., $1.17549435 \times 10^{-38}$ for IEEE 754 single precision) [G].
+ 
+-**Edge Cases and Pitfalls:**
+-- **Zero Values:** If $y_i = 0$ and `threshold` is 0, division by zero occurs. The `threshold` parameter mitigates this.
+-- **Large Values:** If $y_i$ is very large, the relative error becomes small, leading to larger step sizes, which is the intended behavior for smooth regions.
+-- **Precision:** Using `FLOAT_MIN` ensures the return value is never zero, preventing infinite step sizes in downstream logic.
++**Edge Cases:**
++*   **Zero Field Values:** If $y$ is zero, the denominator becomes the threshold, preventing division by zero.
++*   **Large Field Values:** If $y$ is large, the relative error decreases, allowing larger steps.
+ 
+ ## Subtopics
+ 
+ ### [Data-Dependent Error Metric for Scalar Fields](6981-data-dependent-error-metric-for-scalar-fields.md)
+-An error metric that refines the mesh only in regions with values close to a chosen isovalue $v_{iso}$, reducing computation time by ignoring regions far from the isovalue.
++This method calculates a relative error metric for adaptive ray marching in scalar volume rendering by weighting the interpolation error based on the distance to a user-specified isovalue $v_{iso}$. Unlike uniform error metrics that treat all regions equally, this approach refines the mesh only in regions where the scalar field values are close to $v_{iso}$, significantly reducing computation time in areas far from the isosurface. It sets itself apart from its sibling [Error Estimate](2768-error-estimate.md) by introducing data-dependence on the exploration parameter ($v_{iso}$) rather than relying solely on geometric or field-range properties.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(1)$ per sample, as it involves a fixed number of arithmetic operations on a 3-component vector.
+-- **Memory Complexity:** $O(1)$, requiring only temporary storage for the vector components.
+-- **Strengths:** Simple to implement; adapts step size based on local field magnitude; handles low-magnitude regions via thresholding.
+-- **Limitations:** Does not account for spatial gradients directly, only absolute values; may require tuning of $k$ and `threshold` for different datasets.
+-- **When to use:** When the scalar field has varying magnitudes and adaptive stepping based on value intensity is beneficial.
+-- **When not to use:** When geometric accuracy is paramount and distance-based stepping (e.g., Sphere Tracing) is required.
++*   **Time Complexity:** $O(1)$ per step, involving basic arithmetic operations.
++*   **Memory Complexity:** $O(1)$ auxiliary space.
++*   **Strengths:** Reduces computation time in regions far from the isosurface by allowing larger steps where the relative error is low [S1, unofficial].
++*   **Limitations:** Relies on the accuracy of the scalar field values and the choice of threshold. May not account for high-frequency geometric details if the scalar field is smooth.
++*   **When to Use:** Scalar volume rendering where the isosurface is the primary feature of interest.
++*   **When Not to Use:** When the entire volume data is important, or when the scalar field has high-frequency noise that requires uniform sampling.
+ 
+ ## Background
+-The method originates from the `ntsl-graphics` project, an unofficial implementation of Nucleus Shader Language (Ntsl) graphics techniques [S1, unofficial]. It is used in the context of marching cubes initialization and adaptive rendering, where `rad_pixel` (radian pixel size) is used to scale the error metric, linking the error estimate to the camera's field of view and framebuffer resolution.
++This method is described in the context of adaptive ray marching for scalar fields, specifically in the `ntsl-graphics` repository [S1, unofficial]. It is used to optimize the step size in ray marching by estimating the error introduced by the current step size relative to the scalar field values.
+ 
+ ## Sources

@@ -1,0 +1,155 @@
+A unified framework for machine learning with time series - [ENH] vectorize split search in `GGS`, and fix left mean for multivariate data by shrohan2003 · Pull Request #11477 · sktime/sktime
+
+[ENH] vectorize split search in `GGS`, and fix left mean for multivariate data by shrohan2003 · Pull Request #11477 · sktime/sktime · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+shrohan2003
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Reference Issues/PRs
+Part of #11375. Algorithm: GreedyGaussianSegmentation / GGS in sktime/detection/ggs.py (internal sktime implementation).
+What does this implement/fix? Explain your changes.
+Performance. GGS.add_new_change_point, the split subroutine of greedy Gaussian segmentation (section 3.1 of the paper), evaluated every candidate split point in a Python loop: updating running means and covariances, and computing a Cholesky decomposition and a matrix inverse per candidate, for every one of the k_max greedy steps and again in adjust_change_points.
+The covariances of all left and right parts are differences of cumulative sums of the samples and of their outer products, so all candidates are now evaluated at once with batched numpy linear algebra (np.linalg.cholesky, np.diagonal, np.linalg.inv on stacked matrices), in blocks of candidates to bound memory use (~2^21 floats per block). The selection rule is unchanged: the first candidate with the lowest objective, if below the unsplit objective.
+Bug fix. While verifying equivalence, a bug in the previous implementation surfaced: the running mean of the left part was initialized as data[0, :] / n, with n the number of columns, instead of data[0, :]:
+```
+m, n = data.shape
+...
+mu_left = data[0, :] / n
+```
+For univariate data this is harmless (n == 1), but for multivariate data the objective of every candidate was off by the contribution of the first sample, so the chosen split point could differ from the minimizer of the GGS objective. The new implementation agrees with a direct evaluation of log_likelihood on the two parts for every candidate, which is the definition of the split objective; for univariate data it agrees with the previous implementation (same change points, same log-likelihoods up to rounding).
+Example (random data, 300 x 2, lamb=1): the direct objective gives split index 100 with gain -98.6250; the new implementation returns (100, -98.6250); the old one returned (100, -98.6907), i.e., a wrong gain, and on other inputs a different index.
+Does your contribution introduce a new dependency? If yes, which one?
+No.
+What should a reviewer concentrate their feedback on?
+the bug fix changes results for multivariate data; the new test pins the split to the direct objective.
+memory: per block, arrays of shape (block, n, n) are created; the block size is chosen so that this stays around 16 MB.
+Timings for find_change_points on random normal data, lamb=1, old vs new in the same environment (numpy 2.5):
+n_samples
+n_series
+k_max
+before
+after
+speedup
+1000
+3
+5
+0.491 s
+0.021 s
+24x
+5000
+5
+5
+3.796 s
+0.134 s
+28x
+20000
+10
+8
+24.086 s
+4.422 s
+5x
+For larger n_series, the batched Cholesky and inverse dominate, which is where the remaining time goes.
+Reproducible benchmark (loads the old implementation from main):
+```
+import subprocess, time
+import numpy as np
+from sktime.detection.ggs import GGS
+
+src = subprocess.check_output(["git", "show", "main:sktime/detection/ggs.py"])
+ns = {}
+exec(compile(src.decode(), "ggs_main", "exec"), ns)
+GGS_old = ns["GGS"]
+
+rng = np.random.default_rng(0)
+for n, d, k in [(1000, 3, 5), (5000, 5, 5), (20000, 10, 8)]:
+    X = rng.normal(size=(n, d))
+    t0 = time.perf_counter(); GGS_old(k_max=k, lamb=1.0).find_change_points(X); t_old = time.perf_counter() - t0
+    t0 = time.perf_counter(); GGS(k_max=k, lamb=1.0).find_change_points(X); t_new = time.perf_counter() - t0
+    print(n, d, k, f"{t_old:.3f}s -> {t_new:.4f}s ({t_old / t_new:.0f}x)")
+```
+Did you add any tests for the change?
+Yes, in test_ggs.py:
+test_GGS_add_new_change_point_matches_objective (univariate and multivariate, two lamb values): the split point and gain equal the minimizer of log_likelihood(data[:i]) + log_likelihood(data[i:]) over all candidates. The multivariate cases fail on main because of the bug above.
+test_GGS_add_new_change_point_no_improvement: segments too short to split return (0, 0.0) as before.
+Existing tests pass. check_estimator(GreedyGaussianSegmentation) has the same 16 pre-existing failures on main and on this branch (test_output_type, test_predict_points, test_predict_segments, doctest example), unrelated to this change.
+Any other comments?
+None.
+PR checklist
+For all contributions
+I've added myself to the list of contributors with any new badges I've earned :-) (added in [BUG] fix numerical instability of PolynomialTrendForecaster for large time stamps #11472)
+The PR title starts with either [ENH], [MNT], [DOC], or [BUG].
+[ENH] vectorize split search in GGS, and fix left mean for multivaria…
+…
+90a481b
+```
+…te data
+
+Part of sktime#11375
+
+GGS.add_new_change_point, the split subroutine of greedy Gaussian
+segmentation, evaluated every candidate split point in a Python loop,
+updating running means and covariances and computing a Cholesky
+decomposition and an inverse per candidate.
+
+The covariances of all left and right parts are obtained from cumulative
+sums of the samples and of their outer products, so all candidates are
+now evaluated at once with batched numpy linear algebra (cholesky,
+diagonal, inv), in blocks of candidates to bound memory use. The
+selection is unchanged: the first candidate with the lowest objective
+below the unsplit objective is chosen.
+
+While doing so, a bug in the previous implementation surfaced: the
+running mean of the left part was initialized as data[0, :] / n, with n
+the number of columns, instead of data[0, :]. For multivariate data,
+the objective of every candidate was therefore off, and the chosen split
+point could differ from the minimizer of the GGS objective. The new
+implementation agrees with a direct evaluation of log_likelihood on the
+two parts for every candidate; for univariate data it agrees with the
+previous implementation.
+
+Timings for find_change_points on random data, lamb=1:
+
+| n_samples | n_series | k_max | before   | after    | speedup |
+|-----------|----------|-------|----------|----------|---------|
+| 1000      | 3        | 5     | 0.491 s  | 0.021 s  | 24x     |
+| 5000      | 5        | 5     | 3.796 s  | 0.134 s  | 28x     |
+| 20000     | 10       | 8     | 24.086 s | 4.422 s  | 5x      |
+```
+shrohan2003
+requested review from
+benHeid,
+felipeangelimvieira,
+fkiraly,
+geetu040,
+jgyasu and
+marrov
+as code owners
+October 14, 2026 17:13
+This was referenced Oct 16, 2026
+[ENH] vectorize STOMP in MatrixProfileFeatures, up to ~70x faster with identical results
+#11510
+Open
+[BUG] fix GreedyGaussianSegmentation output contract: return segments instead of dense labels, remove test skips
+#11557
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

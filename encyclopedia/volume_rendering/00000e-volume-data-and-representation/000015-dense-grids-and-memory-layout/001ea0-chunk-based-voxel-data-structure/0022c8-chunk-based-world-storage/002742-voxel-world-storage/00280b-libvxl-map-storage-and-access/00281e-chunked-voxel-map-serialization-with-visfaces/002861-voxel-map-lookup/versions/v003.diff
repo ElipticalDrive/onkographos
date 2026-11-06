@@ -1,0 +1,198 @@
+--- v002.md
++++ v003.md
+@@ -1,126 +1,105 @@
+ # Voxel Map Lookup
++
+ ## Overview
+-Retrieves the color of a voxel at a specific $(x, y, z)$ coordinate within a chunked voxel map [S1, unofficial]. It solves the problem of efficient sparse voxel access by combining global geometry culling with binary search within sorted block arrays [S1, unofficial]. It is distinguished from its sibling [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) by its read-only access pattern and lack of visibility face computation, focusing instead on direct coordinate-to-color mapping [S1, unofficial].
++Retrieves the color of a voxel at specific $(x,y,z)$ coordinates within a chunked voxel map. It solves the problem of efficient sparse voxel access by combining a global geometry bitfield for quick existence checks with a binary search over sorted blocks within a specific chunk. It differs from its parent [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) by providing random-access retrieval rather than sequential serialization, and from [Top Voxel Retrieval](4236-top-voxel-retrieval.md) by returning the exact voxel color rather than the highest surface voxel in a column.
++
+ ## How it works
+-### Inputs and outputs
+-- **Input**: A pointer to a `libvxl_map` structure and integer coordinates $(x, y, z)$ [S1, unofficial].
+-- **Output**: A 32-bit color value (`uint32_t`) [S1, unofficial]. Returns 0 if the map is null, coordinates are out of bounds, or the global geometry bitfield indicates the position is empty [S1, unofficial]. Returns `DEFAULT_COLOR` if the position is solid but no specific block color is found [S1, unofficial].
++**Inputs:**
++- `map`: A pointer to a `libvxl_map` structure containing width, height, depth, a `geometry` bitfield, and an array of `libvxl_chunk` structures.
++- `x, y, z`: Integer coordinates of the target voxel.
+ 
+-### Data structures
+-The method uses the following structures defined in the source [S1, unofficial]:
+-`struct libvxl_map`:
+-- `width`, `height`, `depth`: Map dimensions [S1, unofficial].
+-- `chunks`: Pointer to an array of `libvxl_chunk` [S1, unofficial].
+-- `geometry`: Pointer to an array of `size_t` bits representing solid/empty status [S1, unofficial].
+-- `streamed`: Unused in lookup [S1, unofficial].
+-`struct libvxl_chunk`:
+-- `blocks`: Pointer to an array of `libvxl_block` [S1, unofficial].
+-- `length`: Total capacity of the blocks array [S1, unofficial].
+-- `index`: Number of valid blocks in the array [S1, unofficial].
+-`struct libvxl_block`:
+-- `position`: 32-bit key encoding $(x, y, z)$ [S1, unofficial].
+-- `color`: 32-bit color value [S1, unofficial].
+-`libvxl_span` and `libvxl_kv6` structures are defined in the source but not used in this lookup method [S1, unofficial].
++**Outputs:**
++- `uint32_t`: The color of the voxel if found and solid; otherwise, `DEFAULT_COLOR(x,y,z)` or `0`.
+ 
+-### Coordinate Keying
+-Coordinates are mapped to a unique 32-bit integer key using the macro `pos_key(x, y, z)` [S1, unofficial]:
++**Data Structures:**
++- `libvxl_map`:
++  - `width, height, depth`: Dimensions of the world.
++  - `chunks`: Array of `libvxl_chunk`.
++  - `geometry`: Array of `size_t` acting as a bitfield where bit $i$ is 1 if voxel $i$ is solid.
++- `libvxl_chunk`:
++  - `blocks`: Pointer to an array of `libvxl_block`.
++  - `index`: Number of valid blocks in the chunk.
++- `libvxl_block`:
++  - `position`: `uint32_t` key encoding $(x,y,z)$.
++  - `color`: `uint32_t` color value.
++
++**Key Encoding:**
++Positions are encoded into a 32-bit integer using the macro `pos_key(x,y,z)`:
+ $$ \text{key} = (y \ll 20) \mid (x \ll 8) \mid z $$
+-This layout uses 12 bits for $x$ (bits 8–19), 12 bits for $y$ (bits 20–31), and 8 bits for $z$ (bits 0–7) [S1, unofficial]. The maximum coordinate values are therefore $x, y < 4096$ and $z < 256$ [S1, unofficial].
++This allocates 12 bits for $x$ (bits 8–19), 12 bits for $y$ (bits 20–31), and 8 bits for $z$ (bits 0–7).
+ 
+-### Algorithm Steps
+-1. **Null Check**: If the map pointer is null, return 0 [S1, unofficial].
+-2. **Bounds Check**: Verify $0 \le x < \text{width}$, $0 \le y < \text{height}$, and $0 \le z < \text{depth}$ [S1, unofficial]. If any check fails, return 0.
+-3. **Geometry Check**: Call `libvxl_geometry_get(map, x, y, z)` to check the global geometry bitfield [S1, unofficial]. If the bit at the calculated offset is 0, the position is empty; return 0 [S1, unofficial].
+-4. **Chunk Selection**: Calculate the chunk index using `chunk_fposition(x, y, z)` to map global coordinates to the specific chunk containing the voxel [S1, unofficial]. Retrieve the chunk pointer from `map->chunks` [S1, unofficial].
+-5. **Binary Search**: Perform a binary search on `chunk->blocks` to find a block where `block.position == pos_key(x, y, z)` [S1, unofficial]. The comparison function compares the `position` field of `libvxl_block` structures against the target key [S1, unofficial].
+-6. **Result**: If a matching block is found, return `block.color` [S1, unofficial]. If no matching block is found, return `DEFAULT_COLOR(x, y, z)`, defined as `0x674028` [S1, unofficial].
++**Steps:**
++1. **Bounds Check:** If `map` is null, or $x, y, z$ are outside $[0, \text{width}-1] \times [0, \text{height}-1] \times [0, \text{depth}-1]$, return `0` [S1, unofficial].
++2. **Geometry Check:** Call `libvxl_geometry_get(map, x, y, z)`. This checks if the corresponding bit in `map->geometry` is set. If the bit is not set (voxel is air or out of bounds), return `0` [S1, unofficial].
++3. **Chunk Selection:** Calculate the chunk index using `chunk_fposition(x, y, z)`. Retrieve the `libvxl_chunk` structure at that index. If the chunk is null or empty, return `DEFAULT_COLOR(x,y,z)` [S1, unofficial].
++4. **Binary Search:** Perform a binary search on `chunk->blocks` to find a block where `block.position == pos_key(x,y,z)`. The blocks are sorted by position.
++5. **Result:**
++   - If found, return `block.color`.
++   - If not found (block is solid in geometry but missing from chunk data), return `DEFAULT_COLOR(x,y,z)` [S1, unofficial].
+ 
+-### Pseudocode
++**Parameters:**
++- `DEFAULT_COLOR(x,y,z)`: Defined as `0x674028` [S1, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Missing Block:** If the geometry bitfield indicates a voxel is solid but the block is not present in the chunk's sorted array, the method returns `DEFAULT_COLOR` instead of `0`. This can cause visual artifacts if the background is expected to be transparent or black [S1, unofficial].
++- **Precision:** The key encoding limits $x$ and $y$ to 12 bits (max 4095) and $z$ to 8 bits (max 255). Coordinates exceeding these ranges will wrap or produce invalid keys [S1, unofficial].
++
++**Pseudocode:**
+ ```python
+-BIT_WIDTH = 64  # Standard size_t bit width [G]
+-CHUNK_SIZE = 16 # Standard chunk dimension [G]
+-
+-def chunk_fposition(map, x, y, z):
+-    # [G] Exact chunk indexing formula not provided in sources; assumes standard 2D chunk layout
+-    num_chunks_x = (map.width + CHUNK_SIZE - 1) // CHUNK_SIZE
+-    chunk_idx = (y // CHUNK_SIZE) * num_chunks_x + (x // CHUNK_SIZE)
+-    if chunk_idx < len(map.chunks):
+-        return map.chunks[chunk_idx]
+-    return None
+-
+-def libvxl_geometry_get(map, x, y, z):
+-    offset = z + (x + y * map.width) * map.depth
+-    bit_index = offset // BIT_WIDTH
+-    bit_mask = 1 << (offset % BIT_WIDTH)
+-    if bit_index >= len(map.geometry):
+-        return False
+-    return (map.geometry[bit_index] & bit_mask) != 0
+-
+-def pos_key(x, y, z):
+-    return ((y << 20) | (x << 8) | z)
+-
+ def libvxl_map_get(map, x, y, z):
++    # 1. Bounds check
+     if map is None:
+         return 0
+-    if x < 0 or x >= map.width or y < 0 or y >= map.height or z < 0 or z >= map.depth:
++    if x < 0 or x >= map.width or \
++       y < 0 or y >= map.height or \
++       z < 0 or z >= map.depth:
+         return 0
++
++    # 2. Geometry check
+     if not libvxl_geometry_get(map, x, y, z):
+         return 0
++
++    # 3. Chunk selection
+     chunk = chunk_fposition(map, x, y, z)
+-    if chunk is None:
+-        return 0
+-    target_key = pos_key(x, y, z)
++    if chunk is None or chunk.index == 0:
++        return 0x674028  # DEFAULT_COLOR
++
++    # 4. Binary search
++    key = (y << 20) | (x << 8) | z
+     low = 0
+     high = chunk.index - 1
+-    found_block = None
++    found_color = 0x674028  # Default if not found in block list
++
+     while low <= high:
+         mid = (low + high) // 2
+-        mid_block = chunk.blocks[mid]
+-        if mid_block.position == target_key:
+-            found_block = mid_block
++        block = chunk.blocks[mid]
++        if block.position == key:
++            found_color = block.color
+             break
+-        elif mid_block.position < target_key:
++        elif block.position < key:
+             low = mid + 1
+         else:
+             high = mid - 1
+-    if found_block is not None:
+-        return found_block.color
+-    return 0x674028
++
++    # 5. Result
++    return found_color
+ ```
+-
+-### Parameters and Edge Cases
+-- **DEFAULT_COLOR**: If a voxel is marked solid in the geometry bitfield but no block exists in the chunk's block array, `0x674028` is returned [S1, unofficial]. This can cause visual artifacts if the background is expected to be transparent or black [S1, unofficial].
+-- **Precision**: The key format limits $z$ to 8 bits ($0-255$) [S1, unofficial]. If $z \ge 256$, the key generation will overflow or wrap, leading to incorrect lookups or collisions [S1, unofficial].
+-- **Empty Chunks**: If `chunk->index` is 0, the binary search loop will not execute, and `DEFAULT_COLOR` will be returned [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Chunk Copy
+-Copies a map's geometry bitfield and a specific chunk's block array into a `libvxl_chunk_copy` structure for isolated access [S1, unofficial]. It is used when a subset of the map needs to be processed independently without modifying the original map [S1, unofficial]. It is chosen when temporary, self-contained access to a chunk's data is required [S1, unofficial]. It differs from the main lookup by creating a new structure rather than reading directly from the map [S1, unofficial].
+-**Steps**:
+-1. Check bounds for $x, y$ [S1, unofficial].
+-2. Calculate geometry size: $sg = \lceil \frac{\text{width} \times \text{height} \times \text{depth}}{8 \times \text{sizeof(size_t)}} \rceil \times \text{sizeof(size_t)}$ [S1, unofficial].
+-3. Allocate and copy `map->geometry` into `copy->geometry` [S1, unofficial].
+-4. Get the chunk via `chunk_fposition` [S1, unofficial].
+-5. Allocate `copy->blocks_sorted` of size `c->index * sizeof(struct libvxl_block)` [S1, unofficial].
+-6. Copy `c->blocks` into `copy->blocks_sorted` [S1, unofficial].
+-7. Set `copy->width`, `copy->height`, `copy->depth` [S1, unofficial].
+-**Helper: `libvxl_copy_chunk_is_solid`**:
+-1. If `copy` is null or coordinates out of bounds, return true [S1, unofficial].
+-2. Calculate offset: $z + (x + y \times \text{copy->width}) \times \text{copy->depth}$ [S1, unofficial].
+-3. Return `(copy->geometry[offset / (sizeof(size_t) * 8)] & ((size_t)1 << (offset % (sizeof(size_t) * 8)))) != 0` [S1, unofficial].
++Copies a map's geometry bitfield and a specific chunk's block array into an isolated `libvxl_chunk_copy` structure. It allows for read-only or isolated access to a subset of the world. It calculates the geometry size as $sg = \lceil \frac{\text{width} \times \text{height} \times \text{depth}}{8 \times \text{sizeof(size_t)}} \rceil \times \text{sizeof(size_t)}$ bytes. It allocates `copy->blocks_sorted` of size `c->index * sizeof(struct libvxl_block)`. The helper `libvxl_copy_chunk_is_solid` checks the copied geometry bitfield directly. If the copy is null or coordinates are out of bounds, it returns `true` (solid) [S1, unofficial].
+ 
+-### Top Voxel Retrieval
+-Finds the highest solid voxel at a given $(x, y)$ column and returns its color and $z$-coordinate [S1, unofficial]. It is used for surface detection or sky visibility checks [S1, unofficial]. It differs from standard lookup by iterating or searching for the maximum $z$ rather than a specific coordinate [S1, unofficial].
+-**Pitfall**: Uses `libvxl_chunk_gequal_block` which likely performs a lower-bound search for $z \ge 0$ [S1, unofficial]. If no block exists, assertions may trigger [S1, unofficial].
++### Voxel Setting — libvxl_map_set
++Sets a voxel to solid with a given color and automatically removes non-surface neighbors to prevent floating geometry. It sets the geometry bit to 1, calls `libvxl_map_set_internal`, and then iterates over the 6 neighbors. If a neighbor is not on the surface (`!libvxl_map_onsurface`), it calls `libvxl_map_setair_internal` to remove it. A pitfall is that neighbors already on the surface are preserved even if they become isolated, maintaining structural integrity [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(\log N)$ where $N$ is the number of blocks in the chunk [S1, unofficial]. The geometry check is $O(1)$ [S1, unofficial].
+-- **Memory Complexity**: $O(1)$ auxiliary space for the main lookup [S1, unofficial]. Chunk Copy requires $O(N)$ space for the copy structure [S1, unofficial].
+-- **Strengths**: Efficient sparse access; global geometry culling avoids unnecessary chunk searches for empty space [S1, unofficial].
+-- **Limitations**: Limited $z$ range (8 bits); `DEFAULT_COLOR` artifact if blocks are missing but geometry is set; not suitable for dense grids where linear access might be faster [S1, unofficial].
++- **Time Complexity:** $O(1)$ for bounds and geometry checks. $O(\log N)$ for the binary search within a chunk, where $N$ is the number of blocks in the chunk.
++- **Memory Complexity:** $O(1)$ auxiliary space for lookup. The geometry bitfield scales with world volume ($W \times H \times D / 8$ bytes).
++- **Strengths:** Fast random access to sparse voxel data. The geometry bitfield provides a quick rejection for air blocks.
++- **Limitations:** The fixed key encoding limits world size ($x,y \le 4095, z \le 255$). The `DEFAULT_COLOR` fallback can mask missing data bugs [S1, unofficial].
+ 
+ ## Background
+-The method is part of the `libvxl` library for storing and accessing voxel data in a chunked format [S1, unofficial]. It is designed to work with the serialization format described in [Chunked Voxel Map Serialization with Visfaces](4201-chunked-voxel-map-serialization-with-visfaces.md) [S1, unofficial].
++Originated in the `libvxl` library by xtreme8000, a C library for handling voxel data in the VXL format. It is used in voxel-based game engines and editors for efficient map manipulation. The method relies on the specific binary serialization format where chunks contain sorted block arrays [S1, unofficial].
+ 
+ ## Sources

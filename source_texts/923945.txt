@@ -1,0 +1,204 @@
+iOS application shell for the volumetric_kit family: ARKit capture -> volumetric_kit_recon fusion -> volumetric_kit_gfx rendering, on MoltenVK - fix(scanner): put the orientation zero where the sensor basis actually is by taojin-6 · Pull Request #22 · taojin-6/volumetric_kit_ios
+
+fix(scanner): put the orientation zero where the sensor basis actually is by taojin-6 · Pull Request #22 · taojin-6/volumetric_kit_ios · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+taojin-6
+commented
+Aug 11, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+The scan renders upside down in follow mode, uprights the instant a finger touches it, and turns over again on the double-tap back to following.
+That is one bug, not three. OrbitCamera::view() has two branches:
+```
+if (following_) return glm::inverse(device_pose_);                      // carries the device's roll
+return glm::lookAt(target_ + direction()*distance_, target_, kWorldUp);  // imposes world +Y
+```
+The turntable drops roll by construction, so the drag is not correcting the roll — it is discarding it. 7ad32c2 said exactly this and then took the drag's testimony anyway, one level up.
+The zero is in the wrong place
+The viewport correction's zero sat at raw 0 (interface landscape-left); it belongs at raw 2 (landscape-right). Two independent readings say so, and neither is new to this file:
+ARCamera.transform's prose — +X "always points along the long axis of the device, from the front-facing camera toward the Home button". The Home-button end is to the right exactly in UIDeviceOrientationLandscapeLeft, which is the interface's LandscapeRight (UIApplication.h states that inversion outright).
+The sensor's own image, with no reference to the prose — a back-camera portrait frame is EXIF orientation 6, whose 0th column is the visual top, so image +u runs down the screen in portrait. The camera's +X is +u, since cv_from_gl_camera negates the second and third basis columns and leaves the first alone.
+raw
+orientation
+applied before
+applied now
+0
+landscape-left
+0°
+180°
+1
+portrait
+−90°
++90°
+2
+landscape-right
+−180°
+0°
+3
+upside-down
++90°
+−90°
+Note this is a moved zero, not a flipped sign. A sign flip is 180° in portrait and a no-op in landscape, so it would upright portrait and leave both landscapes over. This is 180° in all four — which is why the symptom was orientation-independent.
+Device-verified
+Measured on an iPad Pro 11-inch (M5), 2026-08-10 — landscape-right and portrait both upright, with orient read off the console at each to confirm the renderer held the value under test. This mapping has carried some form of "not device-verified" since it was first written; it no longer does.
+Two orientations, because one cannot do it, and which two is not arbitrary:
+Landscape-right pins the zero. It is the orientation the constant names, so the turn applied there is 0 — upright is the statement that the sensor basis and the viewport genuinely coincide. The previous build turned 180° here and was upside down: the same observation inverted.
+Portrait pins the step, and is the only orientation that can. The turn is ±90° × (raw − 2), which at both landscapes lands on 0° or 180° — each its own negation — so the landscapes look identical whichever way the step runs, and a sign error there is invisible by construction.
+That is the mirror image of the trap that produced the original bug, where portrait alone could not separate a wrong zero from a wrong sign. It needed one of each. Landscape-left follows: two points determine the line, and it is the same expression evaluated from a zero and a step that were both measured. raw 3 stays untestable — Info.plist does not declare it.
+Also confirmed on device: the orientation value survives a rotation (portrait (1) with a 1668 x 2420 drawable), both camera modes exercised, 6748 frames fused / ~98k verts / 4% jetsam, no render or ARKit failure.
+One caveat, stated rather than assumed away: this was measured on an iPad, and the sighting that sent the mapping the wrong way originally may have been taken on an iPhone. ARCamera.transform documents its basis without reference to the device and both readings behind the constant are device-independent, so there is no reason to expect a difference — but nobody has looked.
+The trap in getting there
+if (quarter_turns) tested the enum value, which coincided with a zero angle only while the zero sat at raw 0. Changing the formula alone would have made landscape-left silently skip the largest turn of the four. It now tests the angle.
+Single source of truth
+A zero and a sign restated in two places is how this went wrong twice, in two directions. So:
+kSensorBasisOrientation is now the only place in the app that turns an orientation into an angle, and carries the derivation and the measurement on it.
+VolumetricRenderer.h documents the enum as which way the interface is facing and defers, rather than restating the rule; the call site points at the constant.
+The arithmetic subtracts two raw values and reads the difference as quarter turns, so that premise is pinned by static_assert rather than assumed. Verified by reordering the enum: the build fails naming the enumerator that moved.
+Swift's read-out label switched from a string array indexed by rawValue — a second encoding of the same ordering, which would have silently relabelled the one line whose job is to say what the renderer holds.
+Build
+iOS arm64 (Debug), no new warnings, pre-commit clean.
+🤖 Generated with Claude Code
+taojin-6
+and others
+added 2 commits
+August 10, 2026 22:58
+fix(scanner): put the orientation zero where the sensor basis actuall…
+…
+d3ba850
+```
+…y is
+
+The scan renders upside down in follow mode, uprights the instant a finger
+touches it, and turns over again on the double-tap back to following. That is
+one bug, not three. OrbitCamera::view() has two branches: following returns
+inverse(device_pose_), which carries the device's roll, while the turntable
+returns lookAt(..., kWorldUp), which imposes world +Y and drops roll by
+construction. So the drag is not correcting the roll, it is discarding it --
+7ad32c2 said exactly this and then took the drag's testimony anyway, one level
+up.
+
+The half turn is in the viewport correction. Its zero sat at raw 0, the
+interface's landscape-left; it belongs at raw 2, landscape-right. Two
+independent readings say so and neither is new to this file:
+
+  - ARCamera.transform's +X "always points along the long axis of the device,
+    from the front-facing camera toward the Home button". The Home-button end is
+    to the right exactly in UIDeviceOrientationLandscapeLeft, which is the
+    interface's LandscapeRight -- UIApplication.h states that inversion outright.
+  - The sensor's own image, with no reference to the prose: a back-camera
+    portrait frame is EXIF orientation 6, whose 0th column is the visual top, so
+    image +u runs down the screen in portrait. The camera's +X is +u, since
+    cv_from_gl_camera negates the second and third basis columns and leaves the
+    first alone.
+
+Both were already written down here. What settles which one the code follows is
+the second device sighting: portrait renders upside down under the -90*raw that
+shipped, and the sighting 7ad32c2 acted on reported portrait upside down under
+the +90*raw before it. The two builds differ by exactly 180 degrees in portrait
+and by nothing at all in landscape, so they cannot both be describing portrait.
+They reconcile if the first was taken in landscape -- which both readings agree
+that build had wrong, and which 7ad32c2 named as its own falsifying check.
+
+Note the fix is a moved zero, not a flipped sign. A sign flip is 180 degrees in
+portrait and a no-op in landscape, so it would upright portrait and leave both
+landscapes over; this is 180 degrees in all four.
+
+The guard was the trap in getting there. `if (quarter_turns)` tested the enum
+*value*, which coincided with a zero angle only while the zero sat at raw 0 --
+change the formula alone and landscape-left silently skips the largest turn of
+the four. It now tests the angle.
+
+Single source of truth, because a zero and a sign restated in two places is how
+this went wrong twice in two directions. kSensorBasisOrientation is now the only
+place in the app that turns an orientation into an angle, and carries the
+derivation and the device check on it; VolumetricRenderer.h documents the enum
+as "which way the interface is facing" and defers rather than restating the
+rule; the call site points at the constant. The arithmetic subtracts two raw
+values and reads the difference as quarter turns, so that premise is pinned by
+static_asserts instead of assumed -- verified by reordering the enum, which
+fails the build naming the enumerator that moved. Swift's read-out label switched
+from a string array indexed by rawValue, a second encoding of the same ordering
+that would have relabelled the one line whose job is to say what the renderer
+holds.
+
+Builds for iOS arm64 (Debug, unsigned), no new warnings, pre-commit clean.
+
+NOT DEVICE-VERIFIED. The check is portrait AND at least one landscape: portrait
+alone cannot separate a wrong zero from a wrong sign, since they agree there and
+differ only in landscape. All four should be upright; if instead portrait comes
+up and the landscapes stay over, the zero is right and something else holds a
+sign. Read `orient` off the read-out while checking -- a renderer that was never
+told its orientation looks exactly like a wrong zero on screen.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+docs(scanner): record the measurement that settled the orientation zero
+…
+2c71aa4
+```
+Verified on an iPad Pro 11-inch (M5): landscape-right and portrait both render
+upright, `orient` read off the console at each to confirm the renderer held the
+value under test. The file has carried some form of "not device-verified" since
+the mapping was first written; it no longer needs to.
+
+Two orientations, because one cannot do it, and which two is not arbitrary:
+
+  - Landscape-right pins the zero. It is the orientation kSensorBasisOrientation
+    names, so the turn applied there is 0, and upright is the statement that the
+    sensor basis and the viewport genuinely coincide. The previous build turned
+    180 degrees here and was upside down -- the same observation inverted.
+  - Portrait pins the step, and is the only orientation that can. The turn is
+    +-90 x (raw - 2), which at both landscapes lands on 0 or 180 -- each its own
+    negation -- so the landscapes look identical whichever way the step runs and
+    a sign error there is invisible by construction.
+
+That is the mirror of the trap that produced the original bug, where portrait
+alone could not separate a wrong zero from a wrong sign. It needed one of each.
+
+Landscape-left follows: two points determine the line, and it is computed by the
+same expression from a zero and a step that were both measured. raw 3 stays
+untestable -- Info.plist does not declare it.
+
+Left standing, and said plainly rather than left for someone to assume away:
+this was measured on an iPad, and the sighting that sent the mapping the wrong
+way originally may have been taken on an iPhone. ARCamera.transform documents
+its basis without reference to the device and both readings behind the constant
+are device-independent, so there is no reason to expect a difference -- but
+nobody has looked.
+
+Comment-only; builds for iOS arm64, pre-commit clean.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+taojin-6
+merged commit 1db5e96
+into
+main
+Aug 11, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

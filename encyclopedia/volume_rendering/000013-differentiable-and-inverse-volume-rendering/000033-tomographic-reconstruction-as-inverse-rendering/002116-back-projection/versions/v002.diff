@@ -1,0 +1,209 @@
+--- v001.md
++++ v002.md
+@@ -1,4 +1,4 @@
+ # Back-projection
+-Also called: 2D → 3D Backward Projection, Adjoint Backprojection, Adjoint Projection, Adjoint of xrt_apply, Differentiable XRT Back-Projection, Fourier Backprojection
++Also called: Adjoint Backprojection, Adjoint Projection, Adjoint of xrt_apply, Cone Beam Adjoint, 2D → 3D Backward Projection, Differentiable XRT Back-Projection, Fourier Backprojection
+ 
+ ## Overview
+@@ -10,21 +10,21 @@
+ *   **Output:** 3D reconstruction volume of shape $[B, D, H_{rec}, W_{rec}/2+1]$, where $D = H_{rec} = W_{rec} = H \cdot \text{oversampling}$, forming a cubic volume [S1, unofficial].
+ *   **Parameters:**
+-    *   `ray_spec`: Tuple of ray anchors $\mathbf{t} \in \mathbb{R}^D$ and directions $\mathbf{n} \in \mathbb{R}^D$ [S2, unofficial].
+-    *   `knot_spec`: UniformSpec defining volume properties $(\mathbf{x}_0, \mathbf{\Delta}, \mathbf{Q})$ [S2, unofficial].
+-    *   `order`: Integer 0, 1, or 2, selecting the basis function $\psi$ for interpolation [S2, unofficial].
+-    *   `data`: Array of shape $(L,)$ containing projections $g_l \in \mathbb{R}$ [S2, unofficial].
+-    *   `buffer`: Flattened C-ordered buffer of shape $(Q_1, \dots, Q_D)$ to accumulate weights $f_{\mathbf{q}} \in \mathbb{R}$ [S2, unofficial].
+-    *   `mode`: Differentiation mode [S2, unofficial].
++    *   `ray_spec`: Tuple of ray anchors $\mathbf{t} \in \mathbb{R}^D$ and directions $\mathbf{n} \in \mathbb{R}^D$ [S3, unofficial].
++    *   `knot_spec`: UniformSpec defining volume properties $(\mathbf{x}_0, \mathbf{\Delta}, \mathbf{Q})$ [S3, unofficial].
++    *   `order`: Integer 0, 1, or 2, selecting the basis function $\psi$ for interpolation [S3, unofficial].
++    *   `data`: Array of shape $(L,)$ containing projections $g_l \in \mathbb{R}$ [S3, unofficial].
++    *   `buffer`: Flattened C-ordered buffer of shape $(Q_1, \dots, Q_D)$ to accumulate weights $f_{\mathbf{q}} \in \mathbb{R}$ [S3, unofficial].
++    *   `mode`: Differentiation mode [S3, unofficial].
+ 
+ **Data Structures:**
+-*   `ArrayNf`: Float array type (e.g., `drjit.Array3f`) [S2, unofficial].
+-*   `ArrayNi`: Int32 array type [S2, unofficial].
+-*   `ArrayNu`: Uint32 array type [S2, unofficial].
+-*   `Float`: Scalar value type [S2, unofficial].
+-*   `Bool`: Mask type [S2, unofficial].
++*   `ArrayNf`: Float array type (e.g., `drjit.Array3f`) [S3, unofficial].
++*   `ArrayNi`: Int32 array type [S3, unofficial].
++*   `ArrayNu`: Uint32 array type [S3, unofficial].
++*   `Float`: Scalar value type [S3, unofficial].
++*   `Bool`: Mask type [S3, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Initialization:** Initialize the accumulation buffer to zeros if `None`, or assert it matches the size `math.prod(knot_spec.num)` [S2, unofficial]. Determine dimension $D$ from `ArrayNf` size; assert $D \in \{2, 3\}$ [S2, unofficial].
++1.  **Initialization:** Initialize the accumulation buffer to zeros if `None`, or assert it matches the size `math.prod(knot_spec.num)` [S3, unofficial]. Determine dimension $D$ from `ArrayNf` size; assert $D \in \{2, 3\}$ [S3, unofficial].
+ 2.  **Coordinate Mapping (2D→3D):** For each projection coordinate $\mathbf{k}_{proj} = (k_r, k_c)$, extend to 3D by setting the third coordinate to zero: $\mathbf{k}_{3D} = (k_c, k_r, 0)$ [S1, Eq. 23, unofficial]. This implements the central slice through the origin [S1, unofficial].
+ 3.  **Rotation Inverse:** Compute the 3D sampling coordinate in the reconstruction $\mathbf{k}_{rec}$ using the inverse of the 3×3 rotation matrix $\mathbf{R}$ used in forward projection: $\mathbf{k}_{rec} = \mathbf{R}^{-1} \mathbf{k}_{3D}$ [S1, Eq. 13, unofficial].
+@@ -33,5 +33,5 @@
+     *   **Trilinear (Order 1):** Distribute contributions to the $2 \times 2 \times 2$ neighborhood around the fractional coordinate [S1, unofficial].
+     *   **Tricubic (Order 2):** Spread contributions across the $4 \times 4 \times 4$ neighborhood according to Catmull-Rom weights [S1, unofficial].
+-    *   **Voxel (Order 0):** Scatter add length $L$ times data to the accumulator at the computed offset [S2, unofficial].
++    *   **Voxel (Order 0):** Scatter add length $L$ times data to the accumulator at the computed offset [S3, unofficial].
+ 6.  **Weight Accumulation (Optional):** Accumulate weights using the absolute values of the 3D interpolation kernel weights, handling 3D Friedel symmetry for real-valued reconstructions [S1, unofficial].
+ 
+@@ -53,36 +53,50 @@
+     buffer: [B, D, H_rec, W_rec/2+1] initialized to 0
+     """
+-    # 1. Extend 2D coords to 3D central slice
+-    # k_proj = (k_r, k_c) -> k_3D = (k_c, k_r, 0)
+-    k_3d = extend_to_3d(projections) 
+-    
+-    # 2. Apply inverse rotation
+-    k_rec = apply_inverse_rotation(k_3d, rotation_matrix)
++    B, P, H, W_half = projections.shape
++    # 1. Extend 2D coords to 3D central slice: k_3D = (k_c, k_r, 0)
++    k_r, k_c = torch.meshgrid(torch.arange(H), torch.arange(W_half), indexing='ij')
++    k_3d = torch.stack([k_c, k_r, torch.zeros_like(k_c)], dim=-1).float()
++    
++    # 2. Apply inverse rotation: k_rec = R^{-1} k_3D
++    k_rec = (rotation_matrix.T @ k_3d.permute(2, 0, 1)).permute(1, 2, 0)
+     
+     # 3. Handle shifts via conjugate phase modulation
+     if shifts is not None:
+-        projections = conjugate_phase_modulate(projections, shifts)
++        phase = -2j * torch.pi * (k_3d[..., :2] * shifts).sum(dim=-1)
++        projections = projections * torch.exp(phase)
+         
+     # 4. Accumulate using interpolation kernel in transpose mode
+-    if interpolation_order == 1: # Trilinear
+-        accumulate_trilinear(buffer, k_rec, projections)
+-    elif interpolation_order == 2: # Tricubic
+-        accumulate_tricubic(buffer, k_rec, projections)
+-        
++    buf_h, buf_w = buffer.shape[2], buffer.shape[3]
++    frac_h = k_rec[..., 0] / buf_h
++    frac_w = k_rec[..., 1] / buf_w
++    
++    if interpolation_order == 1: # Trilinear (2x2x2 neighborhood)
++        scatter_trilinear(buffer, frac_h, frac_w, projections)
++    elif interpolation_order == 2: # Tricubic (4x4x4 neighborhood)
++        scatter_tricubic(buffer, frac_h, frac_w, projections)
+     return buffer
+ 
+-def accumulate_trilinear(buffer, k_rec, projections):
++def scatter_trilinear(buffer, frac_h, frac_w, values):
+     """Distribute contributions to 2x2x2 neighborhood."""
+-    # For each fractional coordinate in k_rec:
+-    #   Compute weights for 8 neighbors
+-    #   Scatter add: buffer[neighbor] += weight * projection_value
+-    pass
+-
+-def accumulate_tricubic(buffer, k_rec, projections):
++    h, w, d = buffer.shape
++    for i in range(frac_h.shape[0]):
++        x, y = frac_h[i], frac_w[i]
++        val = values[i]
++        x0, y0 = floor(x), floor(y)
++        dx, dy = x - x0, y - y0
++        weights = [
++            (1-dx)*(1-dy), dx*(1-dy), (1-dx)*dy, dx*dy,
++            (1-dx)*(1-dy), dx*(1-dy), (1-dx)*dy, dx*dy
++        ]
++        offsets = [(0,0), (1,0), (0,1), (1,1), (0,0), (1,0), (0,1), (1,1)]
++        for (ox, oy), weight in zip(offsets, weights):
++            nx, ny = x0 + ox, y0 + oy
++            if 0 <= nx < h and 0 <= ny < w:
++                buffer[nx, ny, 0] += weight * val
++
++def scatter_tricubic(buffer, frac_h, frac_w, values):
+     """Distribute contributions to 4x4x4 neighborhood using Catmull-Rom."""
+-    # For each fractional coordinate in k_rec:
+-    #   Compute Catmull-Rom weights for 64 neighbors
+-    #   Scatter add: buffer[neighbor] += weight * projection_value
+-    pass
++    # Standard Catmull-Rom weight computation and scatter add to 64 neighbors
++    pass # Implementation follows standard tricubic interpolation logic
+ ```
+ 
+@@ -106,7 +120,6 @@
+     
+     # Stride for 3D buffer
+-    stride = ArrayNu(Q.y * Q.z, Q.z, 1)
+-    
+-    # DDA Loop
++    stride = (Q[1] * Q[2], Q[2], 1)
++    
+     for i in range(L):
+         t = ray_t[i]
+@@ -114,11 +127,7 @@
+         
+         # Ray-BBox Intersection
+-        active, t1, t2 = ray_bbox_intersect(t, n, bbox_ll, bbox_ur)
++        active, t_min, t_max = ray_bbox_intersect(t, n, bbox_ll, bbox_ur)
+         if not active: continue
+         
+-        t_min = min(t1, t2)
+-        t_max = max(t1, t2)
+-        
+-        # Traverse grid cells
+         current_t = t_min
+         while current_t < t_max:
+@@ -127,16 +136,43 @@
+             
+             # Compute length of ray segment in this cell
+-            # L_seg = norm((p_b - p_a) * delta) / prod(delta)
+-            # Simplified for voxel: contribution is proportional to path length
+             path_length = compute_path_length_in_cell(t + current_t * n, n, cell_idx, x0, delta)
+             
+             # Scatter add
+-            offset = dot(cell_idx, stride)
+-            buffer[offset] += path_length * data[i]
++            offset = cell_idx[0] * stride[0] + cell_idx[1] * stride[1] + cell_idx[2] * stride[2]
++            buffer.flat[offset] += path_length * data[i]
+             
+             # Advance
+-            current_t += step_to_next_cell(t + current_t * n, n, cell_idx, delta)
++            current_t += step_to_next_cell(t + current_t * n, n, cell_idx, x0, delta)
+             
+     return buffer
++
++def ray_bbox_intersect(o, d, tmin, tmax):
++    inv_d = 1.0 / d
++    t1 = (tmin - o) * inv_d
++    t2 = (tmax - o) * inv_d
++    t_enter = max(min(t1), min(t2))
++    t_exit = min(max(t1), max(t2))
++    active = t_exit > t_enter and isfinite(t_exit)
++    return active, t_enter, t_exit
++
++def get_cell_index(point, x0, delta):
++    return floor((point - x0) / delta)
++
++def compute_path_length_in_cell(o, d, cell_idx, x0, delta):
++    cell_min = x0 + cell_idx * delta
++    cell_max = cell_min + delta
++    inv_d = 1.0 / d
++    t1 = (cell_min - o) * inv_d
++    t2 = (cell_max - o) * inv_d
++    t_enter = max(min(t1), min(t2))
++    t_exit = min(max(t1), max(t2))
++    return max(0.0, t_exit - t_enter)
++
++def step_to_next_cell(o, d, cell_idx, x0, delta):
++    cell_min = x0 + cell_idx * delta
++    cell_max = cell_min + delta
++    inv_d = 1.0 / d
++    t_exit = min(max((cell_max - o) * inv_d), max((cell_min - o) * inv_d))
++    return t_exit
+ ```
+ 
+@@ -156,5 +192,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Depends on the number of projections $P$, volume resolution $V$, and interpolation kernel size $K$. For direct backprojection, $O(P \cdot V \cdot K^D)$ [S1, S2, unofficial].
++*   **Time Complexity:** Not given in the sources.
+ *   **Memory Complexity:** $O(V)$ for the reconstruction buffer plus $O(P)$ for projections [S3, S4, unofficial].
+ *   **Performance:** Benchmarks on NVIDIA H100, Apple M4 CPU, and M4 Metal show throughput in thousands of projections per second, scaling with box size (32–256 pixels), batch size (1–8), and pose count (8–2048) [S1, unofficial].
+@@ -162,5 +198,5 @@
+ *   **Limitations:** Direct methods like FDK (which uses backprojection) yield worse results than iterative methods (like SIRT) when projections are limited [S4, unofficial]. Exact transposes may be less computationally efficient than approximate methods, though necessary for stability over many iterations [S3, unofficial].
+ *   **When to Use:** Differentiable tomographic reconstruction, iterative optimization requiring stable gradients, cryo-EM reconstruction with CTF correction [S1, S3, unofficial].
+-*   **When Not to Use:** Real-time rendering where approximate methods suffice, or when limited projections make direct backprojection artifacts unacceptable without iterative refinement [S4, unofficial].
++*   **When Not to Use:** When limited projections are available, direct backprojection yields worse results than iterative methods like SIRT [S4, S6, unofficial].
+ 
+ ## Background

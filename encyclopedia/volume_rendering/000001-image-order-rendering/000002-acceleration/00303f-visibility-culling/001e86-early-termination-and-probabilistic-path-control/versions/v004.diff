@@ -1,0 +1,126 @@
+--- v003.md
++++ v004.md
+@@ -1,90 +1,65 @@
+ # Early Termination and Probabilistic Path Control
+ 
+-Also called: Probabilistic Path Control, Uncertainty-based Early Termination, Recursive Rendering, Low Opacity Skipping
++Also called: Probabilistic Termination, Uncertainty-Guided Early Exit
+ 
+ ## Overview
+-Early Termination and Probabilistic Path Control is a family of acceleration techniques for volume rendering that reduce computational cost by terminating the ray integration loop or path traversal when the remaining contribution to the final image is deemed negligible. Unlike deterministic methods that rely solely on accumulated opacity thresholds, this family includes probabilistic strategies (e.g., Russian Roulette) and learning-based mechanisms (e.g., uncertainty prediction) that maintain statistical unbiasedness or leverage learned scene properties to skip redundant samples. It sets itself apart from its siblings by explicitly addressing the trade-off between rendering speed and visual fidelity through either probabilistic weight scaling or learned confidence metrics, whereas [Early ray termination](1019-early-ray-termination.md) uses fixed deterministic thresholds and [Empty-space skipping](1002-empty-space-skipping.md) relies on geometric occupancy data.
++Early Termination and Probabilistic Path Control accelerates volume rendering by terminating ray traversal or path integration when the remaining contribution to the final image becomes negligible, thereby reducing computational cost. It sets itself apart from deterministic acceleration methods like [Empty-space skipping](1002-empty-space-skipping.md) and [Early ray termination](1019-early-ray-termination.md) by introducing probabilistic mechanisms (e.g., Russian Roulette) or learned uncertainty metrics (e.g., Recursive-NeRF) to decide when to stop, aiming to maintain statistical unbiasedness or optimize training/inference efficiency where deterministic thresholds might introduce bias or suboptimal convergence.
+ 
+ ## Shared principles
+-The core mechanism shared by all methods in this family is the modification of the standard front-to-back compositing loop to introduce early exit conditions. The standard loop updates accumulated color $C_{acc}$ and opacity $\alpha_{acc}$ as follows:
+-$$ C_{acc} = C_{acc} + C_{sample} \cdot \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-$$ \alpha_{acc} = \alpha_{acc} + \alpha_{sample} \cdot (1 - \alpha_{acc}) $$
+-These methods break the loop or modify the weight of the current sample based on specific criteria:
+-1.  **Deterministic Thresholds:** Termination occurs when $\alpha_{acc}$ exceeds a predefined value (e.g., 0.95 or 1.0) [S2][S4, unofficial][S10, book].
+-2.  **Probabilistic Termination:** A random variable determines termination, with surviving paths scaled by the inverse of the survival probability to preserve the expected value (unbiasedness) [S1, S2][S3, unofficial].
+-3.  **Learned/Uncertainty-based Termination:** A neural network predicts an uncertainty metric for a query point; if the uncertainty is below a threshold, the point is finalized early [S1].
+-4.  **Opacity-based Skipping:** Samples with opacity below a threshold are skipped entirely during shading/compositing [S2].
++The core mechanism shared by all methods in this family is the modification of the standard integration loop to include a termination condition based on the estimated or measured contribution of the remaining ray segment.
++
++1.  **Contribution Estimation:** The method evaluates a metric that correlates with the remaining radiance contribution. This metric can be:
++    *   **Accumulated Opacity:** Used in deterministic early termination [1019-early-ray-termination.md].
++    *   **Throughput/Transmittance:** Used in Russian Roulette [1371-russian-roulette.md], where the product of scattering coefficients and phase functions determines the weight.
++    *   **Predicted Uncertainty:** Used in Recursive-NeRF [S1], where a neural network predicts an uncertainty value $\delta$ for a query point.
++    *   **Sample Opacity:** Used in Low Opacity Skipping [S2], checking opacity before shading.
++
++2.  **Termination Decision:** A condition is checked at each step (or stage):
++    *   **Deterministic:** If $\alpha_{acc} \ge \tau$ (opacity threshold) or uncertainty $< \epsilon$, terminate.
++    *   **Probabilistic:** Generate a random number $\xi \in [0, 1]$. If $\xi < p_{term}$ (termination probability), terminate. The weight of surviving paths is scaled by $1/(1-p_{term})$ to preserve the expected value [1371-russian-roulette.md].
++
++3.  **Weight Compensation (Probabilistic Only):** In unbiased methods like Russian Roulette, if the path continues, its contribution weight $W$ is scaled:
++    $$ W' = \frac{W}{1 - p_{term}} $$
++    This ensures $E[W'] = W$, maintaining unbiasedness [1371-russian-roulette.md]. Deterministic methods introduce bias by ignoring the tail of the ray [1019-early-ray-termination.md].
+ 
+ ## Subtopics
+ 
+ ### [Empty-space skipping](1002-empty-space-skipping.md)
+-Empty-space skipping minimizes computation by skipping the sampling of empty space in a volumetric dataset. It sets itself apart from its siblings by explicitly using an additional data structure (e.g., octree, occupancy grid, or distance map) to encode empty space and modulate sampling distance or jump over regions, whereas [Early ray termination](1019-early-ray-termination.md) relies on accumulated opacity thresholds and [Bounding Volume Culling](1239-bounding-volume-culling.md) relies on geometric hulls. Choose this method when the volume contains large regions of zero or near-zero density.
++Empty-space skipping minimizes computation by skipping sampling in empty regions using data structures like Occupancy Maps or Distance Maps. It sets itself apart by explicitly identifying volumetric voids to jump over them, rather than stopping based on accumulated opacity. Choose it for sparse volumes with large transparent regions.
+ 
+ ### [Early ray termination](1019-early-ray-termination.md)
+-Early ray termination (ERT) terminates the ray integration loop once the accumulated opacity exceeds a predefined threshold, based on the observation that ray color stabilizes when sufficient opacity is accumulated. It reduces the number of samples or function evaluations per ray by skipping redundant computations for voxels that are occluded by closer, opaque structures. Unlike [Empty-space skipping](1002-empty-space-skipping.md), which skips transparent regions, ERT skips regions behind opaque ones; unlike [Russian Roulette](1371-russian-roulette.md), it is a deterministic check that introduces systematic bias. Choose this method for scenes with opaque surfaces where back-face contributions are negligible.
++Early Ray Termination (ERT) stops ray traversal when accumulated opacity exceeds a threshold (e.g., 0.95–1.0). It sets itself apart by exploiting the optical property that opaque surfaces obscure everything behind them. Choose it for dense volumes where rays quickly become opaque. Note: It is deterministic and introduces systematic bias.
+ 
+ ### [Bounding Volume Culling](1239-bounding-volume-culling.md)
+-Bounding Volume Culling is an optimization that limits raymarching to a specific bounding volume, dropping rays that exceed a certain distance from the eye to speed up rendering. It differs from its siblings, such as [Early ray termination](1019-early-ray-termination.md) which terminates based on accumulated opacity, by terminating based on geometric distance traveled. It is distinct from [Empty-space skipping](1002-empty-space-skipping.md) which skips empty regions, as Bounding Volume Culling actively discards rays that have traveled too far, regardless of whether the space is empty or filled, provided it is outside the defined bounds. Choose this method when the volume of interest is strictly bounded and rays traveling beyond it contribute nothing.
++Bounding Volume Culling limits raymarching to a specific geometric distance from the camera. It sets itself apart by using absolute geometric distance rather than opacity or empty space. Choose it for scenes with limited depth of field or when rays far from the camera are irrelevant.
+ 
+ ### [Russian Roulette](1371-russian-roulette.md)
+-Russian Roulette is a probabilistic technique used to terminate volumetric paths or ray marching loops when their contribution to the final image becomes negligible, thereby reducing computational cost while maintaining statistical unbiasedness. Unlike deterministic early termination which clamps the result and introduces bias, Russian Roulette scales the weight of surviving paths to compensate for the probability of termination, ensuring the expected value remains unchanged. It is applied during the ray marching or path integration loop after opacity or transmittance updates. Choose this method when unbiased rendering is required and the volume has regions of very low transmittance.
++Russian Roulette is a probabilistic technique that terminates paths when their contribution weight becomes negligible, scaling the weight of surviving paths to maintain unbiasedness. It sets itself apart from deterministic ERT by preserving statistical correctness. Choose it for unbiased path tracing or when bias from ERT is unacceptable.
+ 
+ ### [Early Stop](1790-early-stop.md)
+-Early Stop (ES) is an optimization for sphere tracing procedural volumes that limits the computation of noise frequencies ($f_i$) during ray marching to reduce computational cost. It solves the problem of excessive function evaluations by breaking the summation loop early based on the position's relation to Bounding Volume Hierarchy (BVH) bounding volumes. Unlike standard sphere tracing which computes all octaves, ES trades a small increase in per-step function evaluations (in variants like ES+1) for a significant reduction in the total number of BVH traversal steps, avoiding the slow convergence and "grazing ray" penalties associated with ES+0. Choose this method for procedural noise-based volumes (e.g., FBM) where higher frequencies have diminishing visual impact.
+-
+-### [Conservative Early Ray Termination](1949-conservative-early-ray-termination.md)
+-Conservative Early Ray Termination (CERT) is an optimization for the scan conversion phase of volume rendering that prunes the processing of cells by determining if a ray is already sufficiently opaque before the cell is rasterized. It differs from standard Early Ray Termination (ERT) [1019-early-ray-termination.md], which typically requires sequential accumulation from the near plane, by using a lookup table (ERT-table) and subscreen-based aggregation to make visibility decisions based on partially accumulated opacity without per-pixel overhead. This allows the technique to be applied during the parallel scan conversion phase where global ray state is not readily available. Choose this method for hardware-accelerated scan conversion pipelines where per-pixel state tracking is expensive.
++Early Stop limits the evaluation of high-frequency noise components in procedural sphere tracing by using a Bounding Volume Hierarchy (BVH). It sets itself apart by optimizing procedural volume evaluation rather than sampled voxel data. Choose it for procedural noise-based volumes.
+ 
+ ### [Ray Marching with Dithering and Early Termination](3565-ray-marching-with-dithering-and-early-termination.md)
+-This method performs volume rendering by marching rays through a volume dataset, applying dithering to the ray start position to mitigate aliasing artifacts, and using an early termination condition to skip computation in opaque regions. It is distinguished from standard ray marching by the explicit addition of stochastic dithering to the integration path and a hard opacity threshold for loop breakage, offering a trade-off between visual smoothness and rendering performance. It builds on [Early Termination and Probabilistic Path Control](1791-early-termination-and-probabilistic-path-control.md). Choose this method when aliasing artifacts are prominent and performance is constrained by opaque regions.
++This method integrates dithering for anti-aliasing with early termination (opacity > 0.95) in a single-pass fragment shader. It sets itself apart by combining aliasing mitigation with performance optimization in a hardware-friendly manner. Choose it for real-time software/hardware ray casting.
+ 
+ ### Uncertainty-based Early Termination
+-- **Definition:** A mechanism that allows a query coordinate to be finalised early (not processed further) when its predicted uncertainty is less than a certain threshold, avoiding unnecessary calculations [S1].
+-- **Context:** Used in Recursive-NeRF, where a network predicts uncertainty $\delta$ for a query point. If $\delta$ is low, the point enters an output network to predict color and density; otherwise, it is clustered and passed to child branches for further refinement [S1].
++**definition**
++- [S1] A mechanism that allows a query coordinate to be finalised early (not processed further) when its predicted uncertainty is less than a certain threshold, avoiding unnecessary calculations.
+ 
+ ### Recursive Rendering
+-- **Definition:** During training, sample points can exit at multiple stages. During inferencing, points exit only once at a specific stage. Points found earlier to be reliable immediately exit and are rendered. Which branch is taken depends on clustering results [S1].
+-- **Context:** In Recursive-NeRF, uncertain points are clustered and fed to different child-branches with the same structure in the next stage, allowing for dynamic growth of the representation [S1].
++**definition**
++- [S1] During training, sample points can exit at multiple stages. During inferencing, points exit only once at a specific stage. Points found earlier to be reliable immediately exit and are rendered. Which branch is taken depends on clustering results.
+ 
+ ### Low Opacity Skipping
+-- **Definition:** An optimization technique where the opacity of a sample is checked before shading; if opacity is under a threshold, shading and compositing are skipped [S2].
+-- **Steps:**
+-    1. Lookup opacity in transfer function [S2].
+-    2. If sample opacity > threshold, proceed to shading; otherwise skip [S2].
+-- **Context:** Described in the context of software ray casting and texture-mapped volume rendering, where shading operations dominate rendering time [S2].
+-
+-### Early Termination
+-- **Definition:** A test-time rendering function that supports early stopping based on a maximum sample count and an epsilon threshold for accumulated opacity [S3, unofficial].
+-- **Steps:**
+-    1. Reshape ray origins and viewdirs if 3D into 2D, identical to training pipeline [S3, unofficial].
+-    2. Define rgb_sigma_fn to query radiance field for RGB and sigma at midpoints, handling timestamps for temporal scenes [S3, unofficial].
+-- **Parameters:**
+-    - `max_samples`: int, maximum number of samples per ray [S3, unofficial].
+-    - `near_plane`: float, default 0.0 [S3, unofficial].
+-    - `far_plane`: float, default 1e10 [S3, unofficial].
+-    - `render_step_size`: float, default 1e-3 [S3, unofficial].
+-    - `cone_angle`: float, default 0.0 [S3, unofficial].
+-    - `alpha_thre`: float, default 0.0 [S3, unofficial].
+-    - `early_stop_eps`: float, default 1e-4 [S3, unofficial].
+-- **Context:** Implemented in `faster-occgrid` for efficient NeRF rendering using occupancy grids [S3, unofficial].
+-
+-### Early Ray Termination via Depth Buffer
+-- **Definition:** A technique to skip rendering fragments for rays that are already saturated (opaque) by testing against the depth buffer before executing the fragment shader for the brick [S4, unofficial].
+-- **Steps:**
+-    1. Traverse the volume in front-to-back order to enable early termination [S4, unofficial].
+-    2. Before rendering a brick, execute a fragment shader program while drawing a solid bounding box around the brick with back face culling switched on. This shader writes the maximal depth value in the depth buffer for saturated rays [S4, unofficial].
+-    3. When slicing the brick texture, the early z-test prevents fragment operations for rays where the depth test fails (indicating saturation), reducing load on rasterization and fragment shader bottlenecks [S4, unofficial].
+-- **Formula:**
+-    - Color update: $C_{i+1} = (1 - A_i) \cdot \alpha_i \cdot c_i + C_i$
+-    - Opacity update: $A_{i+1} = (1 - A_i) \cdot \alpha_i + A_i$
+-    - Where $C, A$ are current ray color/opacity, $c, \alpha$ are sample color/opacity, and $i$ is the sample index. A ray is saturated when $A_i \approx 1$ [S4, unofficial].
+-- **Pitfall:** Early ray termination is performed only once per brick, not per octree node or sample, because the overhead of changing fragment shaders and performing the test would annihilate benefits [S4, unofficial].
++**definition**
++- [S2] An optimization technique where the opacity of a sample is checked before shading; if opacity is under a threshold, shading and compositing are skipped.
++**step**
++- [S2] Lookup opacity in transfer function.
++- [S2] If sample opacity > threshold, proceed to shading; otherwise skip.
+ 
+ ## Background
+-Early termination techniques have been fundamental to volume rendering since the advent of ray casting. The concept of skipping empty space (space leaping) was introduced to avoid shading computations in regions of insignificant opacity [S2]. Early Ray Termination (ERT) was formalized as a way to terminate front-to-back traversal once full opacity is reached, leveraging the fact that contributions behind opaque surfaces are obscured [S2][S4, unofficial]. Russian Roulette was adapted from path tracing to volume rendering to provide an unbiased alternative to deterministic termination [S1, S2][S3, unofficial]. More recently, with the rise of Neural Radiance Fields (NeRF), uncertainty-based early termination and recursive rendering have been proposed to dynamically allocate computation based on learned confidence metrics [S1]. These methods are widely used in medical imaging, scientific visualization, and real-time rendering of large-scale volumetric datasets [S2][S4, unofficial].
++The concept of early termination in volume rendering originated with the observation that rays become opaque quickly, making further sampling redundant [S2]. Early Ray Termination was formalized in the context of front-to-back compositing [S2]. Russian Roulette was adapted from path tracing to volume rendering to provide an unbiased alternative to deterministic termination [1371-russian-roulette.md]. More recently, uncertainty-based early termination and recursive rendering have been introduced in the context of Neural Radiance Fields (NeRF) to optimize training and inference efficiency by predicting when a query point's contribution is sufficiently determined [S1].
+ 
+ ## Sources
+ [S1] Recursive-NeRF: An Efficient and Dynamically Growing NeRF, https://doi.org/10.1109/tvcg.2022.3204608, fetched 2026-10-26
+-[S2] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27
+-[S3] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)
+-[S4] PDF Optimizing GPU Volume Rendering - Danny Ruijters, https://dannyruijters.nl/docs/OptimizingGPUVolumeRendering_final.pdf, fetched 2026-10-26 (unofficial)+[S2] High-Quality Volume Rendering Using Texture Mapping ..., https://cfcs.pku.edu.cn/baoquan/docs/20180622110034067331.pdf, fetched 2026-10-27

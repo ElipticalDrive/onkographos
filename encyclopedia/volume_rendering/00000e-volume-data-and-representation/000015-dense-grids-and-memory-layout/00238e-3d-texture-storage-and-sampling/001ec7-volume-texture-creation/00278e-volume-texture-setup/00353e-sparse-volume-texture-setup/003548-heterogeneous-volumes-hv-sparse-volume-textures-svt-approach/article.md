@@ -1,0 +1,116 @@
+# Heterogeneous Volumes (HV) / Sparse Volume Textures (SVT) approach
+Also called: Chunked SVT rendering, HV/SVT approach
+
+## Overview
+The Heterogeneous Volumes (HV) approach renders large volumetric datasets by chunking them into multiple Sparse Volume Textures (SVT), each fitting within engine and API limits, and treating the collection as a single logical volume [S1, unofficial]. It solves the problem of DirectX 11's contiguous memory fragmentation limiting single texture allocation to ~1 gigavoxel, while leveraging DirectX 12's reserved resources to support larger theoretical allocations [S1, unofficial]. Unlike a single contiguous texture which avoids lighting discontinuities but exceeds allocation limits, HV enables the display of entire massive datasets at reasonable frame rates by accepting chunked rendering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A large sparse volumetric dataset (e.g., density, color, opacity fields).
+- Input: Graphics API context (DirectX 11 or 12).
+- Output: Rendered image of the composite volume.
+
+**Data Structures:**
+The method relies on the Sparse Volume Texture (SVT) structure defined in [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md). The HV approach organizes the dataset into a grid of SVT chunks.
+- **Chunk Size:** Each chunk must be small enough to fit within the volume texture limits. In DirectX 11, this is constrained by memory fragmentation to approximately 1 gigavoxel [S1, unofficial]. In DirectX 12, using reserved resources, the backing memory can be allocated as a collection of tiles, allowing a virtual address space mapped to these tiles, theoretically supporting up to $2048^3 = 8$ gigavoxels [S1, unofficial].
+- **Compression:** Tile data is compressed. The total compressed tile data (including MIP data and padding for correct interpolation) must not exceed 4 gigavoxels for successful rendering of the largest tested datasets [S1, unofficial].
+
+**Numbered Steps:**
+1. **Chunking:** Divide the large volumetric dataset into chunks. Each chunk is assigned to a separate volume texture resource. The dimensions of each chunk are chosen to ensure they fit within the maximum allocatable size for the target API (e.g., < 1 gigavoxel for DX11, up to 8 gigavoxels for DX12 reserved resources) [S1, unofficial].
+2. **Texture Allocation:**
+   - For DirectX 11: Allocate contiguous memory for each chunk. If VRAM is fragmented, allocation may fail for large chunks [S1, unofficial].
+   - For DirectX 12: Use reserved resources to allocate backing memory as a collection of tiles. Map the virtual address space of the large logical texture to these allocated tiles [S1, unofficial].
+3. **Data Population:** Populate each SVT chunk with the corresponding subset of the dataset. Ensure compressed tile data (including MIP levels and padding) is correctly formatted [S1, unofficial].
+4. **Engine Integration:** Integrate the SVT chunks into the rendering engine (e.g., Unreal Engine 5). This may require modifying engine source code to handle large indices [S1, unofficial].
+5. **Rendering:** Render the volume by sampling from the SVT chunks. The engine treats the collection of chunks as a Heterogeneous Volume [S1, unofficial].
+
+**Parameters:**
+- **Maximum Volume Texture Size (DX11):** ~1 gigavoxel (limited by fragmentation) [S1, unofficial].
+- **Maximum Volume Texture Size (DX12):** $2048^3 = 8$ gigavoxels (theoretical/API limit) [S1, unofficial].
+- **Maximum Compressed Tile Data Size:** 4 gigavoxels (including MIP data and padding) [S1, unofficial].
+- **Maximum Successfully Rendered Sparse Dataset Resolution:** $32k \times 32k \times 16k$ voxels [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Lighting Artifacts:** Incorrect lighting occurs at chunk borders because each chunk is lit separately without neighbor information. This makes borders incorrectly bright [S1, unofficial].
+- **Integer Overflow:** Signed `int32` overflows in the Engine's SVT-related source code cause issues. These must be handled by converting them to unsigned `uint32` or `int64` [S1, unofficial].
+- **VRAM Limitations:** Current implementation is limited by VRAM. Out-of-core rendering is a future goal to overcome this [S1, unofficial].
+- **64-bit Arithmetic:** Performance issues are associated with 64-bit arithmetic in GPU shaders, which is a target for future optimization [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for HV Setup and Rendering
+# Assumes SVT structure and chunking logic are defined elsewhere
+
+def setup_heterogeneous_volume(dataset, api_version="DX12"):
+    """
+    Chunks a large dataset into SVT textures.
+    """
+    chunks = []
+    
+    # Determine max chunk size based on API
+    if api_version == "DX11":
+        max_chunk_voxels = 1e9  # ~1 gigavoxel due to fragmentation
+    elif api_version == "DX12":
+        max_chunk_voxels = 2048**3  # 8 gigavoxels theoretical limit
+    else:
+        raise ValueError("Unsupported API")
+
+    # Chunk the dataset
+    # Note: Exact chunking algorithm (e.g., grid-based) is not specified in sources [G]
+    # We assume a simple grid chunking for pseudocode
+    chunk_size = determine_chunk_size(dataset.resolution, max_chunk_voxels)
+    
+    for chunk_data in chunk_dataset(dataset, chunk_size):
+        # Create SVT for chunk
+        svt = create_svt(chunk_data)
+        
+        # Check compressed size constraint
+        compressed_size = get_compressed_tile_size(svt)
+        if compressed_size > 4e9:  # 4 gigavoxels limit
+            raise ValueError("Compressed tile data exceeds 4 gigavoxels")
+            
+        chunks.append(svt)
+        
+    # Fix engine integer overflows [S1, unofficial]
+    fix_engine_int32_overflows(chunks)
+    
+    return chunks
+
+def render_heterogeneous_volume(chunks, camera, lights):
+    """
+    Renders the heterogeneous volume.
+    """
+    # Iterate through chunks and render
+    # Note: Lighting is calculated per-chunk, leading to border artifacts [S1, unofficial]
+    for chunk in chunks:
+        render_svt_chunk(chunk, camera, lights)
+        
+    # Composite chunks
+    # Note: No specific compositing algorithm is detailed beyond standard SVT rendering [G]
+    composite_rendered_chunks()
+
+def fix_engine_int32_overflows(chunks):
+    """
+    Converts signed int32 indices to uint32 or int64 to prevent overflows.
+    """
+    for chunk in chunks:
+        chunk.indices = convert_to_uint32_or_int64(chunk.indices)
+```
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Depends on the number of chunks and the compressed tile data size. The total compressed tile data (including MIP data and padding) must not exceed 4 gigavoxels for the largest tested datasets [S1, unofficial]. DirectX 12 allows virtual address space mapping to tiled backing memory, mitigating fragmentation issues present in DirectX 11 [S1, unofficial].
+- **Measured Performance:** Achieved 20 fps on an NVIDIA RTX 3500 Ada Generation Laptop GPU for the Kolumbo dataset (4211 × 1501 × 935 ≈ 6 billion total voxels, ~2.6 billion non-empty) [S1, unofficial].
+- **Scaling:** Scaling is limited by VRAM. Out-of-core rendering is planned to overcome VRAM limitations and graphics API constraints [S1, unofficial]. Performance issues with 64-bit arithmetic in GPU shaders may impact scaling [S1, unofficial].
+- **Strengths:** Enables rendering of very large sparse datasets (up to $32k \times 32k \times 16k$ voxels) that would otherwise exceed engine or API limits [S1, unofficial]. DirectX 12 reserved resources allow larger theoretical allocations despite VRAM fragmentation [S1, unofficial].
+- **Limitations:** Introduces lighting artifacts at chunk borders due to lack of neighbor information for lighting calculations [S1, unofficial]. Limited by VRAM in current implementation [S1, unofficial]. Requires engine modifications to fix integer overflows [S1, unofficial].
+- **When to use:** When rendering large sparse volumetric datasets in Unreal Engine 5 that exceed single texture allocation limits, and when lighting artifacts at chunk borders are acceptable or can be mitigated.
+- **When not to use:** When high-fidelity lighting continuity across the entire volume is required, or when VRAM is severely constrained and out-of-core rendering is not available.
+
+## Background
+The HV/SVT approach was implemented in a custom build of Unreal Engine 5.4 for the ARENA2 visualization dome at the GEOMAR Helmholtz Centre for Ocean Research Kiel [S1, unofficial]. It was developed to address the challenges of rendering large volumetric datasets in game engines, specifically overcoming DirectX 11's contiguous memory allocation limits and leveraging DirectX 12's reserved resources [S1, unofficial]. The approach was identified as the most promising among several SVT-based methods for rendering large datasets [S1, unofficial].
+
+## Sources
+[S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.researchgate.net/publication/390671564_Rendering_Large_Volume_Datasets_in_Unreal_Engine_5_A_Survey, fetched 2026-10-28 (unofficial)

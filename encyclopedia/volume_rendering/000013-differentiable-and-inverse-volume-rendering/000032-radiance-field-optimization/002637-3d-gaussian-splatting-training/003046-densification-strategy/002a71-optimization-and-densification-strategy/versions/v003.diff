@@ -1,0 +1,158 @@
+--- v002.md
++++ v003.md
+@@ -4,125 +4,53 @@
+ 
+ ## Overview
+-This method adapts the standard 3D Gaussian Splatting densification strategy to work with ray-splat intersection-based rendering pipelines that lack screen-space gradients [S1]. It replaces screen-space gradient metrics with view-space mean gradients, substitutes opacity resets with exponential decay to prevent over-densification, and integrates visibility-based pruning [S1]. It is distinct from standard 3DGS [KKLD23] by its handling of aliasing via 3D filtering and its specific parameter tuning for hybrid transparency [S1].
++This method defines the training loop and densification mechanics for 3D Gaussian Splatting variants that employ ray-splat intersection-based rendering rather than standard EWA splatting [S1]. It solves the problem of gradient unavailability for densification metrics in inversion-free splat evaluation schemes by replacing screen-space gradients with view-space mean gradients [S1]. It differs from standard 3DGS by substituting opacity resets with exponential decay to prevent over-densification and adapting densification logic to work with visibility-score-based pruning [S1].
+ 
+ ## How it works
+-The method operates on a set of Gaussian primitives $\mathcal{G}_i = \{\mu_i, \Sigma_i, \alpha_i, c_i, \dots\}$. It modifies the standard iterative training loop to accommodate rendering schemes where screen-space derivatives are unavailable or insufficient.
++The method integrates optimization steps with periodic densification triggered every `refineEvery` steps, following a `warmupLength` period [S2, unofficial].
+ 
+ **Inputs:**
+-*   Current set of Gaussians $\mathcal{G}$.
+-*   Training iteration counter $t$.
+-*   Densification interval $N_{dens}$ (e.g., every 100–300 steps, though specific $N$ is not given in sources, the decay is every 50).
+-*   Opacity decay multiplier $\lambda_o = 0.9995$ [S1].
+-*   Decay interval $N_{decay} = 50$ iterations [S1].
++*   Current set of Gaussians $\mathcal{G}_i$ with means $\mu_i$, covariances $\Sigma_i$, opacities $\alpha_i$, and colors.
++*   Camera parameters (view matrix, projection matrix).
++*   Training images and ground truth.
++*   Hyperparameters: $\lambda_o = 0.9995$ (opacity decay multiplier) [S1], tile size $8 \times 8$ [S1], core size $K=16$, threshold $\tau_K = 0.05$ [S1].
+ 
+ **Outputs:**
+-*   Updated set of Gaussians $\mathcal{G}'$ with modified positions, opacities, and potentially new/removed primitives.
++*   Updated Gaussian set $\mathcal{G}'_i$.
++*   Rendered images for loss computation.
+ 
+ **Data Structures:**
+-*   $\mathcal{G}$: List of Gaussian objects. Each object contains:
+-    *   $\mu_i \in \mathbb{R}^3$: Mean position.
+-    *   $\Sigma_i \in \mathbb{R}^{3 \times 3}$: Covariance matrix (or scale/rotation parameters).
+-    *   $\alpha_i \in [0, 1]$: Opacity.
+-    *   $c_i$: Color/sh coefficients.
+-    *   $g_{\mu, i} \in \mathbb{R}^3$: Gradient of the splat mean (accumulated during backprop).
++*   Gaussian buffers pre-allocated to 3x initial count [S2, unofficial].
++*   Per-pixel core tracking using insertion sort [S1].
+ 
+ **Steps:**
++1.  **Rendering:** Render the scene using the ray-splat intersection approach. Use a fast CUDA implementation of the 3D filter by Yu et al. [YCH*24] to handle aliasing, as the inversion-free evaluation prevents the use of screen-space low-pass filters [S1].
++2.  **Loss Computation:** Compute the loss using an optimized SSIM implementation [MGK*24] combined with photometric error.
++3.  **Gradient Computation:** Compute gradients with respect to Gaussian parameters.
++4.  **Densification Trigger:** If current step $t$ satisfies $t > \text{warmupLength}$ and $t \pmod{\text{refineEvery}} == 0$:
++    a. **Metric Computation:** Compute the densification metric for each Gaussian. Since screen-space gradients are unavailable, use the gradient of the splat means $\nabla_{\mu_i} L$ scaled by half the distance to the camera in view space $d_i$ [S1]:
++       $$ \text{Score}_i = \| \nabla_{\mu_i} L \| \cdot \frac{d_i}{2} $$
++    b. **Pruning:** Apply visibility score-based pruning as proposed by Niemeyer et al. [NMR*25]. Remove Gaussians with low visibility or opacity [S1].
++    c. **Splitting/Cloning:** Adapt densification changes from GroupFlow (GOF) [YSG*24] to the ray-splat intersection approach. Split Gaussians with high scores into two, perturbing means along principal axes and reducing scales [S1]. Clone Gaussians in empty regions [S1].
++    d. **Opacity Decay:** Instead of resetting opacities, apply exponential decay to prevent over-densification [RSP*24]. Multiply all splat opacities by $\lambda_o = 0.9995$ every 50 iterations during densification [S1].
++5.  **Optimization Step:** Update Gaussian parameters using the optimizer (e.g., Adam) with the computed gradients.
++6.  **Buffer Management:** Compact buffers to remove pruned Gaussians [S2, unofficial].
+ 
+-1.  **Gradient Accumulation:** During the backward pass of the rendering pipeline, compute the gradient of the loss with respect to the splat means $\mu_i$. Unlike standard 3DGS which uses screen-space gradients, this method uses the gradient of the splat means scaled by half the respective distance to the camera in view space [S1].
+-    $$ \tilde{g}_{\mu, i} = \frac{\partial \mathcal{L}}{\partial \mu_i} \cdot \frac{d_i}{2} $$
+-    where $d_i$ is the distance of $\mu_i$ to the camera in view space [S1].
+-
+-2.  **Densification Decision (Every $N_{dens}$ steps):**
+-    *   Identify Gaussians with high $\|\tilde{g}_{\mu, i}\|$ for splitting (densification).
+-    *   Identify Gaussians with low opacity or low visibility for pruning. The method adapts densification changes from GroupFlow [YSG*24] and applies visibility score-based pruning as proposed by Niemeyer et al. [NMR*25] [S1].
+-    *   *Note:* The specific thresholds for splitting and pruning are not explicitly defined in the provided sources, but they follow the standard 3DGS logic adapted for the new gradient metric [S1].
+-
+-3.  **Opacity Decay (Every 50 iterations):**
+-    To prevent over-densification, apply an exponential decay to the opacity of all existing Gaussians instead of resetting new primitives to a fixed low value [S1].
+-    $$ \alpha_i \leftarrow \alpha_i \cdot \lambda_o $$
+-    where $\lambda_o = 0.9995$ [S1]. This is applied every 50 iterations during the densification phase [S1].
+-
+-4.  **Execution:**
+-    *   Split high-gradient Gaussians into two new Gaussians.
+-    *   Clone low-gradient Gaussians if necessary (standard 3DGS behavior, adapted here).
+-    *   Prune low-visibility Gaussians.
+-    *   Initialize new Gaussians with appropriate scales and opacities. The opacity reset is replaced by the decay strategy, so new Gaussians are initialized with a base opacity which is then subject to the global decay schedule [S1].
+-
+-**Pseudocode:**
+-
+-```python
+-def optimization_step(gaussians, iteration, lambda_o=0.9995, decay_interval=50):
+-    """
+-    Performs one optimization step including gradient accumulation, 
+-    opacity decay, and densification/pruning decisions.
+-    """
+-    # 1. Forward and Backward Pass
+-    # Render image, compute loss, backpropagate
+-    # Accumulate gradients for means
+-    for g in gaussians:
+-        # Standard gradient from loss
+-        grad_mu = g.grad_mu 
+-        
+-        # Scale by half the distance to camera in view space
+-        # d_i is distance of g.mu to camera in view space
+-        d_i = norm(g.mu - camera_position_view)
+-        g.grad_mu_scaled = grad_mu * (d_i / 2.0)
+-
+-    # 2. Opacity Decay (Every 50 iterations)
+-    if iteration % decay_interval == 0:
+-        for g in gaussians:
+-            g.alpha *= lambda_o
+-
+-    # 3. Densification and Pruning (Every N_dens steps)
+-    # Note: N_dens is not specified in sources, assumed to be a configurable interval
+-    if iteration % N_dens == 0:
+-        # Identify candidates for splitting based on scaled gradient norm
+-        split_candidates = [g for g in gaussians if norm(g.grad_mu_scaled) > threshold_split]
+-        
+-        # Identify candidates for pruning based on visibility score
+-        # Adapted from Niemeyer et al. [NMR*25]
+-        prune_candidates = [g for g in gaussians if g.visibility_score < threshold_prune]
+-        
+-        # Execute splits
+-        new_gaussians = []
+-        for g in split_candidates:
+-            # Split logic adapted from GOF [YSG*24]
+-            # Create two new Gaussians from g
+-            g1, g2 = split_gaussian(g)
+-            new_gaussians.extend([g1, g2])
+-            
+-        # Execute pruning
+-        gaussians = [g for g in gaussians if g not in prune_candidates]
+-        
+-        # Add new Gaussians to the set
+-        gaussians.extend(new_gaussians)
+-
+-    return gaussians
+-```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Aliasing:** The inversion-free splat evaluation prevents the use of the screen-space low-pass filter in EWA splatting [ZPvBG01a]. To tackle aliasing, a fast CUDA implementation of the 3D filter by Yu et al. [YCH*24] is employed [S1].
+-*   **Divergence:** The insertion sort used for per-pixel core tracking can cause significant divergence. This is mitigated by reducing the tile size to $8 \times 8$ [S1].
+-*   **Gradient Availability:** Screen-space gradients are not available with the new splat evaluation scheme, necessitating the use of view-space mean gradients [S1].
++**Edge Cases:**
++*   **Divergence:** The insertion sort for per-pixel core tracking causes significant divergence if tile sizes are large. Mitigate by reducing tile size to $8 \times 8$ [S1].
++*   **Aliasing:** Without screen-space low-pass filters, aliasing artifacts may appear. Use the 3D filter from Yu et al. [YCH*24] [S1].
+ 
+ ## Subtopics
+ 
+ ### Anisotropy Regularization
+-This variant removes the structural splitting and training calls associated with needle surgery, keeping only standard densification and pruning [S2, unofficial]. It introduces a log-ratio soft regularization to control anisotropy.
+-*   **Parameters:**
+-    *   `lambda_aniso`: 0.001 (default) [S2, unofficial].
+-    *   `aniso_ratio_max`: 5 (default) [S2, unofficial].
+-*   **When to choose:** When anisotropic artifacts are a concern and the computational overhead of structural splitting is undesirable [S2, unofficial].
++A variant that removes structural splitting and training calls, keeping only standard densification and pruning [S2, unofficial]. It introduces log-ratio soft regularization parameters: `lambda_aniso` = 0.001 (default) and `aniso_ratio_max` = 5 (default) [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Training speedup of $2.1\times$ compared to standard 3DGS [S1]. Rendering is $1.6\times$ faster on average [S1].
+-*   **Memory Complexity:** Not explicitly given, but opacity decay reduces the number of splats over time, potentially lowering memory usage compared to methods with opacity resets [S1].
+-*   **Strengths:** Faster training and rendering than standard 3DGS; handles aliasing effectively with 3D filtering; prevents over-densification via opacity decay [S1].
+-*   **Limitations:** Image quality is comparable to 3DGS but outperformed by Zip-NeRF [BMV*23] [S1]. Requires careful tuning of tile size to avoid divergence [S1].
+-*   **When to use:** When using ray-splat intersection-based rendering pipelines that lack screen-space gradients [S1].
+-*   **When not to use:** When maximum image quality is required and Zip-NeRF is an acceptable alternative [S1].
++*   **Performance:** Achieves a 2.1× training speedup and 1.6× faster rendering compared to standard 3DGS [S1].
++*   **Memory:** Requires pre-allocated buffers 3x the initial Gaussian count [S2, unofficial].
++*   **Quality:** Image quality is comparable to standard 3DGS but outperformed by Zip-NeRF [BMV*23] [S1].
++*   **Limitations:** Relies on specific CUDA implementations for the 3D filter and SSIM, which may increase compilation complexity [S1].
+ 
+ ## Background
+-This method was introduced in "Efficient Perspective‐Correct 3D Gaussian Splatting Using Hybrid Transparency" [S1]. It addresses technical challenges arising from changes to the rendering pipeline, specifically the move to ray-splat intersection-based approaches [S1]. It builds on the original 3DGS optimization pipeline [KKLD23] but modifies it to solve aliasing and gradient availability issues [S1].
++This strategy originates from modifications to the 3D Gaussian Splatting pipeline to support ray-splat intersection-based rendering [S1]. It incorporates techniques from GroupFlow (GOF) [YSG*24], visibility-based pruning [NMR*25], and opacity decay strategies [RSP*24]. The approach addresses technical challenges arising from the inability to use screen-space gradients in inversion-free splat evaluation [S1].
+ 
+ ## Sources

@@ -1,0 +1,118 @@
+Contribute to openvdb/fvdb-core development by creating an account on GitHub.
+
+Fix spurious near-origin hit in ray_implicit_intersection for no-data (zero) voxels by swahtz · Pull Request #698 · openvdb/fvdb-core · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+swahtz
+commented
+Jul 22, 2026
+Copy link
+Copy Markdown
+Contributor
+Fixes #692.
+Problem
+GridBatch.ray_implicit_intersection / Grid.ray_implicit_intersection returned an incorrect intersection for a ray that starts far from the SDF's active narrow band: the reported hit collapsed to a spurious point ~¼ of a voxel from the ray origin instead of the true zero-crossing. Moving the origin close to the surface returned the correct result. This silently breaks ray-marching an SDF from a distant camera/emitter.
+Root cause
+sgn() returned 0 for an exactly-zero SDF value, and the kernel treated that 0 as a valid, distinct sign.
+Sparse SDFs produced by integrate_tsdf + reinitialize_sdf leave every active voxel outside the reinitialised band at exactly 0 — voxels that were never observed (behind the camera, or occluded beyond the truncation distance) carry weight == 0 / tsdf == 0, and a band-limited redistancing cannot invent a sign for a flat-zero region, so it leaves them at 0. That 0 means "no data", not "on the surface".
+A ray from a distant origin therefore walks a long prefix of active-but-uncomputed 0 voxels before reaching real signed data. The first such 0 voxel seeded the sign reference, and the first genuine +/− voxel then read as an immediate sign change — reporting a hit essentially at the ray origin.
+Fix
+Treat an exactly-zero voxel the same as NaN in sgn(): a gap that neither seeds the sign reference nor triggers a crossing. A true on-surface voxel is still bracketed by its signed neighbours, so this only costs bracket-entry (rather than interpolated) precision on the vanishingly rare exactly-0 sample.
+This also aligns the op with the semantics of nanovdb::math::ZeroCrossing, whose v * v0 < 0 product test likewise never treats a zero as a crossing (fvdb OnIndexGrids carry no signed background in inactive voxels, and TSDF-derived grids additionally contain active value-0 no-data voxels, so the "sign field is defined everywhere" assumption of a classic dense level set does not hold here).
+```
+if (val != val || val == T(0)) {   // NaN or exact-zero (no-data) -> gap
+    return INVALID_SIGN;
+}
+```
+Testing
+Adds test_ray_implicit_intersection_no_data_zero_prefix: a synthetic no-data-prefix case (a 0-valued prefix before a +1 -> -1 band, no integrate_tsdf needed) that reports ~t=4.5 on the pre-fix binary and ~t=6.5 (the true crossing) after — verified to fail before and pass after, on both CPU and CUDA.
+All existing ray_implicit_intersection tests continue to pass (fp16/fp32/fp64, CPU + CUDA).
+Confirmed against the issue's reproduction: from origin z=0 the op now returns the true surface (hit z ≈ 2942) instead of the spurious z ≈ 115.
+🤖 Generated with Claude Code
+Fix spurious near-origin hit in ray_implicit_intersection (openvdb#692)
+…
+5a88f9c
+```
+`GridBatch.ray_implicit_intersection` returned an incorrect intersection
+for a ray that starts far from the SDF's active narrow band: the reported
+hit collapsed to a spurious point ~1/4 of a voxel from the ray origin
+instead of the true zero-crossing. Moving the origin close to the surface
+returned the correct result.
+
+Root cause: `sgn()` returned 0 for an exactly-zero SDF value, and the
+kernel treated that 0 as a valid, distinct sign. Sparse SDFs produced by
+`integrate_tsdf` + `reinitialize_sdf` leave every active voxel outside the
+reinitialised band at exactly 0 ("no data", not "on the surface"), so a
+ray from a distant origin walks a long prefix of active-but-uncomputed 0
+voxels before reaching real signed data. The first such 0 voxel seeded the
+sign reference, and the first genuine +/- voxel then read as an immediate
+sign change, reporting a hit essentially at the ray origin.
+
+Fix: treat an exactly-zero voxel the same as NaN in `sgn()` -- a gap that
+neither seeds the sign reference nor triggers a crossing. A true
+on-surface voxel is still bracketed by its signed neighbours, so this only
+costs bracket-entry (rather than interpolated) precision on the
+vanishingly rare exactly-0 sample. This aligns the op with the semantics
+of nanovdb's zeroCrossing, whose `v * v0 < 0` product test likewise never
+treats a zero as a crossing.
+
+Adds `test_ray_implicit_intersection_no_data_zero_prefix`, a synthetic
+no-data-prefix case (no integrate_tsdf needed) that reports ~t=4.5 on the
+pre-fix binary and ~t=6.5 (the true +1 -> -1 crossing) after, on both CPU
+and CUDA.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+Signed-off-by: Jonathan Swartz <jonathan@jswartz.info>
+```
+swahtz
+requested a review
+from a team
+as a code owner
+July 22, 2026 05:26
+swahtz
+requested review from
+fwilliams and
+harrism
+July 22, 2026 05:26
+swahtz
+added
+the
+bug
+Something isn't working
+label
+Jul 22, 2026
+matthewdcong
+approved these changes
+Jul 22, 2026
+View reviewed changes
+Hide details
+View details
+swahtz
+merged commit edaa23b
+into
+openvdb:main
+Jul 22, 2026
+40 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+swahtz
+deleted the
+fix/ray-implicit-zero-crossing-692
+branch
+July 22, 2026 20:39
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bug
+Something isn't working
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

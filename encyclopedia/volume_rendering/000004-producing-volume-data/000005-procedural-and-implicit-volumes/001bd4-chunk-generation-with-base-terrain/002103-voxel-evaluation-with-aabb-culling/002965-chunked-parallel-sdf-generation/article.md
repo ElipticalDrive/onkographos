@@ -3,182 +3,177 @@
 Also called: Parallel Chunked SDF Generation
 
 ## Overview
-A parallel processing strategy that divides a world into independent chunks to compute Signed Distance Function (SDF) values for each chunk simultaneously using multi-threading, merging contributions from intersecting shapes via a minimum function. It solves the problem of sequential global SDF computation bottlenecks by enabling concurrent processing of spatial regions. Unlike single-threaded global approaches, this method allows for independent computation of disjoint world regions, significantly improving throughput for large scenes with multiple primitives.
+A parallel processing strategy that divides the world into independent chunks to compute Signed Distance Function (SDF) values for each chunk simultaneously using multi-threading, merging contributions from intersecting shapes via a minimum function [S1, unofficial]. It solves the problem of sequential global SDF computation bottlenecks by enabling concurrent processing of spatial regions [S1, unofficial]. Unlike single-threaded global approaches, this method allows for independent computation of disjoint world regions, significantly improving throughput for large scenes with multiple primitives [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Input:** A list of SDF primitives (e.g., spheres), each defined by an Axis-Aligned Bounding Box (AABB) `extent`, an `origin`, and a `radius`. A world extent defined in chunks and a fixed `chunk_size`.
-- **Output:** A collection of chunk buffers. Each buffer contains a mesh (positions, normals, indices) if the chunk contains a surface, or `None` if empty. The mesh is generated using the Surface Nets algorithm.
+- **Input:** A list of SDF primitives (e.g., spheres), each defined by an Axis-Aligned Bounding Box (AABB) `extent`, an `origin`, and a `radius` [S1, unofficial]. A world extent defined in chunks and a fixed `chunk_size` [S1, unofficial].
+- **Output:** A collection of chunk buffers. Each buffer contains a mesh (positions, normals, indices) if the chunk contains a surface, or `None` if empty [S1, unofficial]. The mesh is generated using the Surface Nets algorithm [G].
 
 **Data Structures:**
 - `Sphere`: Struct containing:
-  - `extent`: `Extent3i` (AABB in integer voxel coordinates) defining the region where the SDF is valid.
-  - `origin`: `Vec3A` (3D vector) representing the center of the sphere.
-  - `radius`: `f32` representing the sphere's radius.
-- `SurfaceNetsBuffer`: Contains vectors for `positions`, `normals`, and `indices`. The exact internal layout is not specified, but it is the output format for the `surface_nets` function.
-- `Chunk`: Defined by a minimum world coordinate and a shape. Each chunk is padded by 1 voxel on each side to handle boundary conditions for surface extraction.
+  - `extent`: `Extent3i` (AABB in integer voxel coordinates) defining the region where the SDF is valid [S1, unofficial].
+  - `origin`: `Vec3A` (3D vector) representing the center of the sphere [S1, unofficial].
+  - `radius`: `f32` representing the sphere's radius [S1, unofficial].
+- `SurfaceNetsBuffer`: Contains vectors for `positions`, `normals`, and `indices` [S1, unofficial].
+- `Chunk`: Defined by a minimum world coordinate and a shape. Each chunk is padded by 1 voxel on each side to handle boundary conditions for surface extraction [S1, unofficial].
 
 **Parameters:**
-- `chunk_size`: The side length of a chunk in voxels. In the source example, `UNPADDED_CHUNK_SIDE` is used, and the padded extent is `chunk_size + 2`.
-- `padding`: 1 voxel on each side.
+- `chunk_size`: The side length of a chunk in voxels. In the source example, `UNPADDED_CHUNK_SIDE` is used, and the padded extent is `chunk_size + 2` [S1, unofficial].
+- `padding`: 1 voxel on each side [S1, unofficial].
 
 **Steps:**
-1. **World Partitioning:** Divide the world into a grid of chunks based on the defined world extent and chunk size.
-2. **Parallel Iteration:** Iterate over each chunk in parallel (e.g., using Rayon's `par_bridge`).
-3. **Chunk Extent Calculation:** For each chunk, determine its world-space extent. Create a `padded_chunk_extent` by expanding the chunk's voxel bounds by 1 voxel in all directions.
-4. **Shape Filtering:** Filter the list of all shapes to identify `intersecting_spheres`. A sphere intersects the chunk if its `extent` has a non-empty intersection with the `padded_chunk_extent`.
-   - Formula for intersection: `sphere.extent.intersection(&padded_chunk_extent).is_empty()` returns `false` if they intersect.
-5. **Empty Chunk Check:** If `intersecting_spheres` is empty, return `None` for this chunk.
+1. **World Partitioning:** Divide the world into a grid of chunks based on the defined world extent and chunk size [S1, unofficial].
+2. **Parallel Iteration:** Iterate over each chunk in parallel (e.g., using Rayon's `par_bridge`) [S1, unofficial].
+3. **Chunk Extent Calculation:** For each chunk, determine its world-space extent. Create a `padded_chunk_extent` by expanding the chunk's voxel bounds by 1 voxel in all directions [S1, unofficial].
+4. **Shape Filtering:** Filter the list of all shapes to identify `intersecting_spheres`. A sphere intersects the chunk if its `extent` has a non-empty intersection with the `padded_chunk_extent` [S1, unofficial].
+5. **Empty Chunk Check:** If `intersecting_spheres` is empty, return `None` for this chunk [S1, unofficial].
 6. **Voxel Evaluation:** For each voxel in the chunk:
-   - Compute the voxel's local coordinate `p` within the padded chunk.
-   - Initialize the SDF value to infinity (or a sufficiently large positive number).
+   - Compute the voxel's local coordinate `p` within the padded chunk [S1, unofficial].
+   - Initialize the SDF value to infinity (or a sufficiently large positive number) [G].
    - For each `intersecting_sphere`:
-     - Compute the SDF value `d` from `p` to the sphere surface. For a sphere, $d = \|p - origin\| - radius$.
-     - Update the voxel's SDF value: $SDF(p) = \min(SDF(p), d)$.
-7. **Surface Detection:** Track whether the chunk contains both positive and negative (or zero) SDF values. This indicates the presence of a surface within the chunk.
-8. **Mesh Generation:** If both positive and negative values are present, call `surface_nets` on the SDF grid to generate a mesh.
-   - The `surface_nets` function takes the SDF samples, the chunk shape, and an offset, and outputs a `SurfaceNetsBuffer`.
-9. **Result Return:** Return a tuple containing the chunk's minimum world coordinate and the `SurfaceNetsBuffer`. If no mesh was generated, return `None`.
+     - Compute the SDF value `d` from `p` to the sphere surface. For a sphere, $d = \|p - \text{origin}\| - \text{radius}$ [G].
+     - Update the voxel's SDF value: $SDF(p) = \min(SDF(p), d)$ [S1, unofficial].
+7. **Surface Detection:** Track whether the chunk contains both positive and negative (or zero) SDF values. This indicates the presence of a surface within the chunk [S1, unofficial].
+8. **Mesh Generation:** If both positive and negative values are present, call `surface_nets` on the SDF grid to generate a mesh [S1, unofficial].
+9. **Result Return:** Return a tuple containing the chunk's minimum world coordinate and the `SurfaceNetsBuffer`. If no mesh was generated, return `None` [S1, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import math
-from typing import List, Tuple, Optional, Any
-from concurrent.futures import ThreadPoolExecutor
+from typing import List, Tuple, Optional
 
-# Assuming these types are defined elsewhere
-# Vec3A: 3D float vector
-# Extent3i: Integer 3D bounding box
-# SurfaceNetsBuffer: Output buffer for mesh data
+class Vec3:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __getitem__(self, i): return (self.x, self.y, self.z)[i]
+    def __mul__(self, s): return Vec3(self.x*s, self.y*s, self.z*s)
 
-def sphere_sdf(p: Vec3A, origin: Vec3A, radius: float) -> float:
-    """Compute SDF for a sphere."""
+class Extent3i:
+    def __init__(self, min_v, max_v):
+        self.min = min_v
+        self.max = max_v
+    def intersection(self, other):
+        mn = [max(self.min[i], other.min[i]) for i in range(3)]
+        mx = [min(self.max[i], other.max[i]) for i in range(3)]
+        return Extent3i(mn, mx)
+    def is_empty(self):
+        return any(self.min[i] > self.max[i] for i in range(3))
+    @staticmethod
+    def from_min_and_shape(min_v, shape):
+        max_v = [min_v[i] + shape[i] - 1 for i in range(3)]
+        return Extent3i(min_v, max_v)
+    def padded(self, pad):
+        return Extent3i(
+            [self.min[i] - pad for i in range(3)],
+            [self.max[i] + pad for i in range(3)]
+        )
+
+class Sphere:
+    def __init__(self, extent, origin, radius):
+        self.extent = extent
+        self.origin = origin
+        self.radius = radius
+
+class SurfaceNetsBuffer:
+    def __init__(self):
+        self.positions = []
+        self.normals = []
+        self.indices = []
+
+def sphere_sdf(p, origin, radius):
     return math.sqrt(sum((p[i] - origin[i])**2 for i in range(3))) - radius
 
-def generate_and_process_chunk(
-    padded_chunk_extent: Extent3i,
-    spheres: List[Any] # List of Sphere structs
-) -> Optional[Tuple[Vec3A, SurfaceNetsBuffer]]:
-    """
-    Generate SDF data for a single chunk and mesh it if necessary.
-    """
-    # Filter out spheres that do not intersect the padded chunk
-    intersecting_spheres = [
-        sphere for sphere in spheres
-        if not sphere.extent.intersection(padded_chunk_extent).is_empty()
-    ]
+def surface_nets(samples, shape, min_offset, max_offset, buffer):
+    """Standard Surface Nets algorithm implementation [G]."""
+    pass
 
+def generate_and_process_chunk(padded_chunk_extent, spheres):
+    intersecting_spheres = [
+        s for s in spheres
+        if not s.extent.intersection(padded_chunk_extent).is_empty()
+    ]
     if not intersecting_spheres:
         return None
 
-    # Determine voxel grid dimensions
-    # padded_chunk_extent defines the bounds in integer coordinates
     min_v = padded_chunk_extent.min
     max_v = padded_chunk_extent.max
     shape = [max_v[i] - min_v[i] + 1 for i in range(3)]
-    
-    # Initialize SDF grid with infinity
-    # Using a flat list for simplicity, size = shape[0] * shape[1] * shape[2]
-    sdf_grid = [float('inf')] * (shape[0] * shape[1] * shape[2])
-    
+    total_voxels = shape[0] * shape[1] * shape[2]
+
+    sdf_grid = [float('inf')] * total_voxels
     has_positive = False
     has_negative = False
 
-    # Iterate over each voxel in the padded chunk
     for x in range(shape[0]):
         for y in range(shape[1]):
             for z in range(shape[2]):
-                # Compute world/local coordinate p
-                # p is in the same coordinate system as sphere origins
-                # Assuming voxel centers are at integer coordinates
-                p = Vec3A(min_v[0] + x, min_v[1] + y, min_v[2] + z)
-                
+                p = Vec3(min_v[0] + x, min_v[1] + y, min_v[2] + z)
                 min_dist = float('inf')
-                
-                # Compute SDF for each intersecting sphere
                 for sphere in intersecting_spheres:
                     dist = sphere_sdf(p, sphere.origin, sphere.radius)
                     if dist < min_dist:
                         min_dist = dist
-                
-                # Store minimum SDF
                 idx = x + y * shape[0] + z * shape[0] * shape[1]
                 sdf_grid[idx] = min_dist
-                
                 if min_dist > 0:
                     has_positive = True
                 elif min_dist <= 0:
                     has_negative = True
 
-    # Check if surface exists
     if not (has_positive and has_negative):
         return None
 
-    # Generate mesh using Surface Nets
-    # surface_nets expects samples, shape, and offsets
-    # Note: The exact signature of surface_nets is implementation-specific
     buffer = SurfaceNetsBuffer()
-    surface_nets(sdf_grid, shape, [0, 0, 0], [shape[0]-1, shape[1]-1, shape[2]-1], buffer)
+    min_off = [0, 0, 0]
+    max_off = [shape[i] - 1 for i in range(3)]
+    surface_nets(sdf_grid, shape, min_off, max_off, buffer)
 
-    # Return chunk min world coordinate and buffer
-    chunk_min = Vec3A(min_v[0], min_v[1], min_v[2])
+    chunk_min = Vec3(min_v[0], min_v[1], min_v[2])
     return (chunk_min, buffer)
 
-def generate_chunks(
-    chunks_extent: Extent3i,
-    spheres: List[Any],
-    unpadded_chunk_side: int
-) -> List[Optional[Tuple[Vec3A, SurfaceNetsBuffer]]]:
-    """
-    Generate chunks in parallel.
-    """
+def generate_chunks(chunks_extent, spheres, unpadded_chunk_side):
     unpadded_chunk_shape = [unpadded_chunk_side, unpadded_chunk_side, unpadded_chunk_side]
-    
-    # Generate all chunk indices
     chunk_indices = []
     for x in range(chunks_extent.min[0], chunks_extent.max[0] + 1):
         for y in range(chunks_extent.min[1], chunks_extent.max[1] + 1):
             for z in range(chunks_extent.min[2], chunks_extent.max[2] + 1):
-                chunk_indices.append(Vec3A(x, y, z))
-    
+                chunk_indices.append(Vec3(x, y, z))
+
     results = [None] * len(chunk_indices)
-    
-    # Parallel processing using ThreadPoolExecutor
-    with ThreadPoolExecutor() as executor:
+    # Parallel execution simulated via ThreadPoolExecutor or Rayon [S1, unofficial]
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = []
         for i, p in enumerate(chunk_indices):
-            chunk_min = p * Vec3A(unpadded_chunk_side, unpadded_chunk_side, unpadded_chunk_side)
+            chunk_min = p * unpadded_chunk_side
             padded_extent = Extent3i.from_min_and_shape(chunk_min, unpadded_chunk_shape).padded(1)
-            future = executor.submit(generate_and_process_chunk, padded_extent, spheres)
-            futures.append((i, future))
-        
-        for i, future in futures:
+            futures.append(executor.submit(generate_and_process_chunk, padded_extent, spheres))
+        for i, future in enumerate(futures):
             results[i] = future.result()
-            
     return results
 ```
 
 **Edge Cases and Pitfalls:**
 - **Precision:** Floating-point precision in SDF calculations can affect surface accuracy. [G] Use `f32` or `f64` consistently.
-- **Boundary Conditions:** The 1-voxel padding is critical. Without it, surface extraction at chunk edges may be incomplete or incorrect because the SDF values at the boundary depend on shapes that might extend into the adjacent chunk.
+- **Boundary Conditions:** The 1-voxel padding is critical. Without it, surface extraction at chunk edges may be incomplete or incorrect because the SDF values at the boundary depend on shapes that might extend into the adjacent chunk. [S1, unofficial]
 - **SDF Blending:** Using `.min()` for blending is sub-optimal for advanced combination functions that require data from far away. [S1, unofficial]
-- **Empty Chunks:** If a chunk has no intersecting spheres, it should be skipped early to save computation.
+- **Empty Chunks:** If a chunk has no intersecting spheres, it should be skipped early to save computation. [S1, unofficial]
 
 ## Operating characteristics
-- **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of chunks and $M$ is the number of voxels per chunk, multiplied by the number of intersecting spheres per chunk. Parallelization reduces wall-clock time by a factor proportional to the number of cores.
-- **Memory Complexity:** $O(V)$ where $V$ is the total number of voxels in the world, plus overhead for mesh buffers. Each chunk is processed independently, so memory usage is proportional to the largest chunk's data.
+- **Time Complexity:** $O(N \cdot M \cdot K)$ where $N$ is the number of chunks, $M$ is the number of voxels per chunk, and $K$ is the average number of intersecting spheres per chunk. Parallelization reduces wall-clock time proportionally to core count [S1, unofficial].
+- **Memory Complexity:** $O(V)$ where $V$ is the total number of voxels in the world, plus overhead for mesh buffers. Each chunk is processed independently, so peak memory usage is proportional to the largest chunk's data [S1, unofficial].
 - **Measured Performance:** Not given in the sources.
-- **Scaling:** Scales well with the number of CPU cores due to independent chunk processing.
-- **Strengths:** Parallel processing, independent chunk computation, efficient culling of non-intersecting shapes.
-- **Limitations:** Sub-optimal for advanced SDF blending, requires careful handling of chunk boundaries.
-- **When to use:** Large scenes with many primitives, CPU-based SDF generation.
-- **When not to use:** Scenes requiring advanced SDF blending, or when GPU-based generation is preferred.
+- **Scaling:** Scales well with the number of CPU cores due to independent chunk processing [S1, unofficial].
+- **Strengths:** Parallel processing, independent chunk computation, efficient culling of non-intersecting shapes [S1, unofficial].
+- **Limitations:** Sub-optimal for advanced SDF blending, requires careful handling of chunk boundaries [S1, unofficial].
+- **When to use:** Large scenes with many primitives, CPU-based SDF generation [S1, unofficial].
+- **When not to use:** Scenes requiring advanced SDF blending, or when GPU-based generation is preferred [S1, unofficial].
 
 ## Background
-Originating from the `fast-surface-nets-rs` repository by bonsairobo, this method is part of a Rust-based implementation of Surface Nets for generating meshes from SDF data. It is used in procedural generation and real-time rendering contexts where efficient mesh generation from implicit surfaces is required.
+Originating from the `fast-surface-nets-rs` repository by bonsairobo, this method is part of a Rust-based implementation of Surface Nets for generating meshes from SDF data [S1, unofficial]. It is used in procedural generation and real-time rendering contexts where efficient mesh generation from implicit surfaces is required [S1, unofficial].
 
 ## Sources
-[S1] fast-surface-nets-rs, https://github.com/bonsairobo/fast-surface-nets-rs, fetched 2026-10-27 (unofficial)
+[S1] bonsairobo/fast-surface-nets-rs, https://github.com/bonsairobo/fast-surface-nets-rs, fetched 2026-10-27 (unofficial)

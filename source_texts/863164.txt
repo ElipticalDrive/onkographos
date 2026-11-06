@@ -1,0 +1,98 @@
+On Firefox 151.0.4 (64-bit) Windows 11 splats are rendered stretched on WebGPU with Sorting set to "Raster (CPU Sort)" - GPU sorting works fine. Also happens on all Playcanvas examples. Playcanvas version: 2.19.6 and 2.19.7 https://playc...
+
+Firefox: WebGPU with Raster (CPU Sort) stretches splats · Issue #8904 · playcanvas/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Firefox: WebGPU with Raster (CPU Sort) stretches splats #8904
+New issue
+Copy link
+New issue
+Copy link
+Closed
+#9148
+Closed
+Firefox: WebGPU with Raster (CPU Sort) stretches splats#8904
+#9148
+Copy link
+Assignees
+Description
+fimbox
+opened on Jun 15, 2026
+Issue body actions
+On Firefox 151.0.4 (64-bit) Windows 11 splats are rendered stretched on WebGPU with Sorting set to "Raster (CPU Sort)" - GPU sorting works fine.
+Also happens on all Playcanvas examples.
+Playcanvas version: 2.19.6 and 2.19.7
+https://playcanvas.vercel.app/#/gaussian-splatting/global-sorting
+Activity
+mvaligursky commented on Jun 15, 2026
+mvaligursky
+on Jun 15, 2026
+Contributor
+More actions
+Is this something not happening on 2.18 / different versions of FF, or this the only case tested?
+I tried Mac, and all is fine on FF, I'll test Windows as well later.
+mvaligursky
+self-assigned this
+on Jun 15, 2026
+fimbox commented on Jun 15, 2026
+fimbox
+on Jun 15, 2026
+ContributorAuthor
+More actions
+I tried fully updated Firefox on two different Windows 11 machines. So I would say the standard windows-firefox configuration. Sorry not enough time to test further today.
+mvaligursky commented on Jun 15, 2026
+mvaligursky
+on Jun 15, 2026
+Contributor
+More actions
+I tried on two Win11 computes using browserstack and could not repro the issue. It was extremely slow there, so I have not done much testing.
+What GPU have you used @fimbox ? Are the drivers up to date?
+johncyark commented on Jul 29, 2026
+johncyark
+on Jul 29, 2026
+More actions
+We're hitting this too, and it reproduces reliably for us. Engine 2.21.3, Firefox 153.0 on Windows 11.
+Our app runs WebGPU with the renderer explicitly set to GSPLAT_RENDERER_RASTER_CPU_SORT, rendering streamed SOG LOD sets. On Firefox every splat comes out stretched into long thin streaks across the scene. Same machine, same build in Chrome (WebGPU + CPU sort) renders correctly. Switching Firefox to GPU sort also renders correctly.
+We can't just use GPU sort, because for us it consistently drops far-field/environment splats on streamed SOG LOD sets (holes in the sky, same pattern every time — happy to file that separately if useful). So for now we've gated Firefox back to WebGL2, which renders fine.
+mvaligursky commented on Jul 31, 2026
+mvaligursky
+on Jul 31, 2026
+Contributor
+More actions
+Root cause found, and it's a Firefox/Windows WGSL compiler bug rather than anything specific to gaussian splats.
+Filed upstream: https://bugzilla.mozilla.org/show_bug.cgi?id=2059727
+A mat4x4f stored into a member of a function-scope struct is returned transposed when it's read back through ptr<function, T> in another function. Only the D3D12/HLSL backend is affected — Chrome on the same machine and Firefox on macOS (Metal) are both fine — so it looks like a row-major vs column-major mismatch in the shader translation.
+Where the engine hits it: initCenter() computes modelView = matrix_view * matrix_model into a local, uses that local for the splat centres, and stores it into SplatCenter.modelView. initCornerCov() then reads it back by column to build the view basis W for the covariance projection. Because the matrix comes back transposed, W is wrong, the Jacobian (whose third column is zero, i.e. it drops depth) discards the wrong axis, flat gaussian disks project edge-on, and the 2D covariance collapses to near-rank-1 — lambda2 pins at its max(..., 0.1) floor and every splat rasterises as a ~1px-wide needle. The centres stay correct throughout because they come from the local copy, which is what made this so hard to pin down.
+That also explains the rest of the symptoms: it's structural rather than numerical (forcing the covariance math to f32 is pixel-identical), it's stable and purely a function of camera orientation (the transposed matrix carries the view rotation), GPU sort is unaffected because the projector passes the view matrix as a function parameter instead of through a struct member, and WebGL2 is unaffected because GLSL has no pointers.
+Note the same read pattern is used in three other places, so the SH and 2DGS paths are latently affected on this platform too — they just don't show in the reported scenes:
+vert/gsplatCorner.js — W for the covariance (the reported needles)
+vert/gsplat.js — SH view direction, and the 2DGS corner position
+frag/gsplatCopyToWorkbuffer.js — SH direction in the work-buffer copy pass
+An engine-side workaround is straightforward and doesn't depend on Mozilla shipping a fix: recompute matrix_view * matrix_model at the point of use instead of reading it back out of the struct. Confirmed on the affected machine that this makes the artifact disappear.
+❤️React with ❤️1Reacted by johncyark
+mvaligursky
+closed this as completedin #9148on Jul 31, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+mvaligursky
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -1,0 +1,101 @@
+# Normal-based Contextual Shading
+
+Also called: Contextual Shading
+
+## Overview
+Normal-based Contextual Shading is an object-space shading technique applied to isosurfaces to compute surface normals for illumination, offering superior visual quality compared to image-space depth-gradient shading [S1, unofficial]. It solves the problem of inaccurate or artifact-prone normals in volume rendering by fitting a local surface approximation to the 3D intersection points of rays with the isosurface [S1, unofficial]. It differs from its sibling, Surface shading for thresholded volumes, by explicitly estimating surface inclination via local regression rather than relying on thresholded binary data properties [S1, unofficial].
+
+## How it works
+**Inputs:**
+- A set of closest intersection points $\{P_i\}$ for each pixel, where each $P_i = (x_i, y_i, z_i)$ is the 3D coordinate of the ray-isosurface intersection [S1, unofficial].
+- A voxel neighborhood radius or size defining the local region around the central intersection point [S1, unofficial].
+
+**Outputs:**
+- A surface normal vector $\mathbf{n}$ for each pixel, used in the final shading pass [S1, unofficial].
+
+**Data Structures:**
+- A list of 3D points $\{P_i\}$ within the defined voxel neighborhood. No specific bit-packing is mandated; standard floating-point coordinates are implied by the context of voxel space [S1, unofficial].
+
+**Steps:**
+1. **Collect Neighborhood Points:** For a given pixel with intersection point $P_0$, identify all other intersection points $P_i$ that lie within a larger voxel neighborhood around $P_0$ [S1, unofficial].
+2. **Fit Surface Approximation:** Fit a function to the set of points $\{P_i\}$ to estimate the local surface geometry. The function can be:
+   - A linear function (plane): $z = ax + by + c$ [S1, unofficial].
+   - A biquadratic function: $z = ax^2 + by^2 + cxy + dx + ey + f$ [S1, unofficial].
+3. **Compute Normal:** Calculate the normal vector from the coefficients of the fitted function. For a linear fit $z = ax + by + c$, the normal is $\mathbf{n} = (-a, -b, 1)$ normalized [S1, unofficial]. For a biquadratic fit, the normal is derived from the gradient of the surface at $P_0$ [S1, unofficial].
+4. **Assign Normal:** Store the computed normal for the pixel to be used in the deferred shading pass [S1, unofficial].
+
+**Parameters:**
+- **Voxel Neighborhood Size:** A larger voxel neighborhood is taken into account to estimate the surface inclination [S1, unofficial]. The exact size is not specified in the sources [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** Fitting higher-order polynomials (biquadratic) may be sensitive to noise in the intersection points [S1, unofficial].
+- **Boundaries:** At object boundaries or thin structures, the neighborhood may not contain enough points for a stable fit [S1, unofficial].
+- **Degenerate Input:** If the neighborhood contains collinear or coplanar points, the linear fit may be ill-conditioned [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_normal_contextual(intersection_points, neighborhood_radius):
+    """
+    Compute normal for a pixel using normal-based contextual shading.
+    
+    Args:
+        intersection_points: List of 3D points (x, y, z) in the voxel neighborhood.
+        neighborhood_radius: Radius defining the local region.
+        
+    Returns:
+        Normal vector (nx, ny, nz).
+    """
+    # Step 1: Collect points within neighborhood
+    # Note: The central point P0 is assumed to be the first point or identified by ray index.
+    # For simplicity, assume intersection_points contains all relevant points in the neighborhood.
+    if len(intersection_points) < 3:
+        # Not enough points for a linear fit [G]
+        return (0.0, 0.0, 1.0)
+
+    # Step 2: Fit a linear function z = ax + by + c
+    # Using least squares to fit the plane
+    points = np.array(intersection_points)
+    X = points[:, 0]
+    Y = points[:, 1]
+    Z = points[:, 2]
+
+    # Construct matrix A for linear system Ax = b
+    # [x y 1] [a]   [z]
+    # [x y 1] [b] = [z]
+    # [x y 1] [c]   [z]
+    A = np.column_stack((X, Y, np.ones(len(X))))
+    
+    # Solve for coefficients [a, b, c]
+    # Using pseudo-inverse for robustness
+    coeffs, _, _, _ = np.linalg.lstsq(A, Z, rcond=None)
+    a, b, c = coeffs
+
+    # Step 3: Compute normal from linear fit
+    # Normal is (-a, -b, 1) normalized
+    normal = np.array([-a, -b, 1.0])
+    normal = normal / np.linalg.norm(normal)
+
+    return normal
+```
+
+## Subtopics
+
+### [Depth-Gradient Shading](6618-depth-gradient-shading.md)
+Depth-gradient shading is an image-based shading technique that approximates the surface gradient by calculating differences between the depths of a given pixel and its neighbors in the z-buffer. It is used to provide shading cues for isosurfaces or front faces in volume rendering without performing expensive object-space gradient calculations for every voxel. It differs from its parent, Normal-based Contextual Shading, by being purely image-space and context-insensitive, which makes it faster but prone to sharp contour artifacts at object boundaries.
+
+## Operating characteristics
+- **Time Complexity:** Depends on the number of points in the neighborhood and the complexity of the fit (linear vs. biquadratic). Linear fit is $O(N)$ where $N$ is the number of points in the neighborhood [S1, unofficial].
+- **Memory Complexity:** Requires storing the intersection points for the neighborhood [S1, unofficial].
+- **Performance:** Slower than image-space depth-gradient shading due to object-space calculations [S1, unofficial].
+- **Strengths:** Better visual quality than depth-gradient shading; provides accurate normals for complex surfaces [S1, unofficial].
+- **Limitations:** Computationally more expensive; sensitive to neighborhood size and noise [S1, unofficial].
+- **When to Use:** When high-quality shading is required and computational resources allow for object-space calculations [S1, unofficial].
+- **When Not to Use:** When real-time performance is critical and image-space approximations are sufficient [S1, unofficial].
+
+## Background
+Normal-based Contextual Shading is an object-space shading technique applied after finding closest intersection points to achieve better results than image-space depth-gradient shading [S1, unofficial]. It is based on normal computation methods that try to fit a linear or a biquadratic function to the set of points that belong to the same iso-surface [S1, unofficial]. These techniques take a larger voxel neighborhood into account to estimate the surface inclination [S1, unofficial]. The method is discussed in the context of interactive volume-rendering techniques for medical data visualization [S1, unofficial].
+
+## Sources
+[S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)

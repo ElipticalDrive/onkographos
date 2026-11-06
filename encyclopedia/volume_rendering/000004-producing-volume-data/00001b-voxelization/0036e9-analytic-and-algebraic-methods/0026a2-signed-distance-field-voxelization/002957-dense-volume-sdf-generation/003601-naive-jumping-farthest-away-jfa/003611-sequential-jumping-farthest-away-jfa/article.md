@@ -1,0 +1,217 @@
+# Sequential Jumping Farthest Away (JFA)
+Also called: Sequential JFA (Jumping Farthest Away), SequentialJFA
+
+## Overview
+Sequential Jumping Farthest Away (JFA) is a CPU-based algorithm for computing the Signed Distance Field (SDF) and the position of the closest surface point for a voxel grid [S1, unofficial]. It identifies boundary voxels and propagates distance information using a multi-scale search with a halving stride [S1, unofficial]. It differs from its parent, Naive JFA, by executing the propagation loop sequentially on the CPU rather than in parallel on the GPU [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel grid `gridV` containing voxel data. Each voxel has an origin offset (`OriginX`, `OriginY`, `OriginZ`), a `VoxelSize`, and a boolean flag `Voxel` indicating if it is filled.
+*   **Outputs:**
+    *   `sdfV`: A 3D array of floats storing the signed distance for each voxel.
+    *   `positionsV`: A 3D array of 3D vectors storing the world position of the closest surface point for each voxel.
+
+**Data Structures:**
+*   `gridV`: The source voxel grid.
+*   `sdfV`, `positionsV`: Output arrays indexed by `(voxelX, voxelY, voxelZ)`.
+*   `sdfApp`, `positionsApp`: Temporary working arrays used during the propagation loop to avoid race conditions in sequential updates (or to allow atomic updates if adapted, though here used as a double-buffer per stride step).
+
+**Parameters:**
+*   `k`: The search stride. Starts at `gridV.VoxelsPerSide() / 2` and halves in each iteration until `1`.
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    Iterate over all voxels `(voxelZ, voxelY, voxelX)` in the grid.
+    *   If the voxel is empty (`!gridV.Voxel`), skip.
+    *   Calculate the world position of the current voxel:
+        $$pos = (gridV.OriginX() + voxelX \times gridV.VoxelSize(), \quad gridV.OriginY() + voxelY \times gridV.VoxelSize(), \quad gridV.OriginZ() + voxelZ \times gridV.VoxelSize())$$
+    *   Check all 26 neighbors (indices $x, y, z \in \{-1, 0, 1\}$, excluding $0,0,0$).
+    *   If any neighbor is out of bounds or empty (`!neighbor.Voxel`), the current voxel is a boundary voxel.
+        *   Set `sdfV(voxelX, voxelY, voxelZ) = 0.0f`.
+        *   Set `positionsV(voxelX, voxelY, voxelZ) = pos`.
+    *   If no neighbor is empty or out of bounds, the voxel is interior.
+        *   Set `sdfV(voxelX, voxelY, voxelZ) = INFINITY`.
+
+2.  **Processing Loop:**
+    *   Initialize `sdfApp` and `positionsApp` as copies of `sdfV` and `positionsV`.
+    *   Set initial stride $k = \lfloor gridV.VoxelsPerSide() / 2 \rfloor$.
+    *   While $k \ge 1$:
+        *   **Inner Loop:** Iterate over all voxels `(voxelZ, voxelY, voxelX)`.
+            *   Calculate `voxelPos` (same formula as in Initialization).
+            *   Initialize `bestDistance = sdfV(voxelX, voxelY, voxelZ)` and `findNewBest = false`.
+            *   Iterate over neighbor directions with stride $k$: $x, y, z \in \{-1, 0, 1\}$, excluding $(0,0,0)$.
+                *   Calculate neighbor indices:
+                    $$nx = voxelX + (x \times k)$$
+                    $$ny = voxelY + (y \times k)$$
+                    $$nz = voxelZ + (z \times k)$$
+                *   If $(nx, ny, nz)$ is out of bounds, continue.
+                *   Get `seed = sdfV(nx, ny, nz)`.
+                *   If $|seed| < INFINITY$:
+                    *   Get `seedPos = positionsV(nx, ny, nz)`.
+                    *   Calculate Euclidean distance:
+                        $$distance = \sqrt{(voxelPos.x - seedPos.x)^2 + (voxelPos.y - seedPos.y)^2 + (voxelPos.z - seedPos.z)^2}$$
+                    *   If $distance < |bestDistance|$:
+                        *   Set `findNewBest = true`.
+                        *   Set `bestDistance = \text{copysign}(distance, bestDistance)`. (Preserves the sign of the original `bestDistance` if it was negative, otherwise becomes positive).
+                        *   Set `bestPosition = seedPos`.
+            *   If `findNewBest` is true:
+                *   Set `sdfApp(voxelX, voxelY, voxelZ) = bestDistance`.
+                *   Set `positionsApp(voxelX, voxelY, voxelZ) = bestPosition`.
+        *   **Update:**
+            *   Copy `sdfApp` to `sdfV` and `positionsApp` to `positionsV`.
+        *   Halve $k$: $k = \lfloor k / 2 \rfloor$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def sequential_jfa(gridV):
+    """
+    gridV: Object with methods/attributes:
+        - VoxelsPerSide(): int
+        - OriginX(), OriginY(), OriginZ(): float
+        - VoxelSize(): float
+        - View(): returns a 3D array-like object supporting (z, y, x) indexing
+              with .Voxel (bool) attribute for each voxel.
+    Returns:
+        sdfV: 3D array of floats
+        positionsV: 3D array of 3D vectors (tuples)
+    """
+    N = gridV.VoxelsPerSide()
+    
+    # Initialize output arrays
+    sdfV = [[ [0.0 for _ in range(N)] for _ in range(N)] for _ in range(N)]
+    positionsV = [[ [None for _ in range(N)] for _ in range(N)] for _ in range(N)]
+    
+    # Helper to get world position
+    def get_world_pos(x, y, z):
+        return (
+            gridV.OriginX() + x * gridV.VoxelSize(),
+            gridV.OriginY() + y * gridV.VoxelSize(),
+            gridV.OriginZ() + z * gridV.VoxelSize()
+        )
+
+    # Step 1: Initialization
+    for z in range(N):
+        for y in range(N):
+            for x in range(N):
+                if not gridV.View()[z][y][x].Voxel:
+                    continue
+                
+                pos = get_world_pos(x, y, z)
+                is_boundary = False
+                
+                # Check 26 neighbors
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        for dz in [-1, 0, 1]:
+                            if dx == 0 and dy == 0 and dz == 0:
+                                continue
+                            
+                            nx, ny, nz = x + dx, y + dy, z + dz
+                            
+                            # Check bounds
+                            if nx < 0 or nx >= N or ny < 0 or ny >= N or nz < 0 or nz >= N:
+                                is_boundary = True
+                                break
+                            
+                            # Check if neighbor is empty
+                            if not gridV.View()[nz][ny][nx].Voxel:
+                                is_boundary = True
+                                break
+                        if is_boundary: break
+                    if is_boundary: break
+                
+                if is_boundary:
+                    sdfV[z][y][x] = 0.0
+                    positionsV[z][y][x] = pos
+                else:
+                    sdfV[z][y][x] = float('inf')
+
+    # Step 2: Processing Loop
+    k = N // 2
+    while k >= 1:
+        # Initialize working copies
+        sdfApp = [row[:] for row in sdfV]
+        positionsApp = [row[:] for row in positionsV]
+        
+        for z in range(N):
+            for y in range(N):
+                for x in range(N):
+                    voxelPos = get_world_pos(x, y, z)
+                    bestDistance = sdfV[z][y][x]
+                    findNewBest = False
+                    bestPosition = None
+                    
+                    # Iterate neighbors with stride k
+                    for dx in [-1, 0, 1]:
+                        for dy in [-1, 0, 1]:
+                            for dz in [-1, 0, 1]:
+                                if dx == 0 and dy == 0 and dz == 0:
+                                    continue
+                                
+                                nx = x + dx * k
+                                ny = y + dy * k
+                                nz = z + dz * k
+                                
+                                # Check bounds
+                                if nx < 0 or nx >= N or ny < 0 or ny >= N or nz < 0 or nz >= N:
+                                    continue
+                                
+                                seed = sdfV[nz][ny][nx]
+                                
+                                if abs(seed) < float('inf'):
+                                    seedPos = positionsV[nz][ny][nx]
+                                    dist = math.sqrt(
+                                        (voxelPos[0] - seedPos[0])**2 +
+                                        (voxelPos[1] - seedPos[1])**2 +
+                                        (voxelPos[2] - seedPos[2])**2
+                                    )
+                                    
+                                    if dist < abs(bestDistance):
+                                        findNewBest = True
+                                        # copysign(distance, bestDistance)
+                                        if bestDistance < 0:
+                                            bestDistance = -dist
+                                        else:
+                                            bestDistance = dist
+                                        bestPosition = seedPos
+                                    
+                    if findNewBest:
+                        sdfApp[z][y][x] = bestDistance
+                        positionsApp[z][y][x] = bestPosition
+        
+        # Update main arrays
+        for z in range(N):
+            for y in range(N):
+                for x in range(N):
+                    sdfV[z][y][x] = sdfApp[z][y][x]
+                    positionsV[z][y][x] = positionsApp[z][y][x]
+        
+        k = k // 2
+
+    return sdfV, positionsV
+```
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** Neighbors outside the grid bounds are treated as empty, marking adjacent voxels as boundary voxels with SDF 0.0.
+*   **Interior Voxels:** Voxels completely surrounded by other filled voxels are initialized to `INFINITY` and rely on the propagation loop to find a distance.
+*   **Sign Preservation:** The `copysign` operation ensures that if a voxel is inside the surface (negative SDF), the updated distance remains negative, preserving the signed nature of the field.
+*   **Precision:** Floating-point precision in distance calculations may accumulate errors, though the halving stride approach mitigates large jumps.
+
+## Operating characteristics
+*   **Time Complexity:** The algorithm iterates $O(\log N)$ times (where $N$ is the side length of the grid). In each iteration, it visits all $N^3$ voxels and checks 26 neighbors. Thus, the time complexity is $O(N^3 \log N)$.
+*   **Memory Complexity:** $O(N^3)$ for storing the SDF and position arrays.
+*   **Performance:** As a sequential CPU algorithm, it is significantly slower than GPU-based counterparts like Naive JFA for large grids. It is suitable for small to medium-sized grids or when GPU resources are unavailable.
+*   **Strengths:** Simple implementation, no parallel synchronization issues, deterministic results.
+*   **Limitations:** Slow for high-resolution grids.
+
+## Background
+Sequential Jumping Farthest Away is part of the Jumping Farthest Away (JFA) family of algorithms for Signed Distance Field generation. It is implemented in the `cuda-mesh-voxelization` repository by bigmat18 [S1, unofficial]. The method is designed as a sequential alternative to the parallel Naive JFA, allowing for SDF computation on CPU hardware.
+
+## Sources
+[S1] bigmat18/cuda-mesh-voxelization, https://github.com/bigmat18/cuda-mesh-voxelization, fetched 2026-10-26 (unofficial)

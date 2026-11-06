@@ -1,0 +1,194 @@
+--- v001.md
++++ v002.md
+@@ -1,111 +1,102 @@
+ # Model Regularization
+ 
+-Also called: Zero Regularization Loss
++## Overview
++Model regularization refers to the application of penalty terms added to the total optimization objective to constrain the learned radiance field parameters, preventing overfitting and enforcing physical or statistical priors [S1, unofficial][S2]. It differs from photometric losses by targeting the internal state of the model (e.g., density, uncertainty, or geometry) rather than the final rendered pixel values [S1, unofficial][S2].
++## How it works
++### Inputs and outputs
++**Inputs:**
++*   `out`: Dictionary of model outputs (e.g., density $\sigma$, opacity $\alpha$, color $C$, uncertainty $\delta$) for a batch of rays [S1, unofficial][S2].
++*   `config`: Configuration object containing regularization weights $\lambda_k$ [S1, unofficial].
++*   `losses_model_reg`: Dictionary mapping regularization loss names to their computed scalar values [S1, unofficial].
+ 
+-## Overview
+-Model regularization in radiance-field optimization refers to auxiliary loss terms applied directly to the neural network's internal predictions to stabilize training and prevent pathological behaviors, such as uncertainty values exploding or overfitting to noise. Unlike photometric losses that compare rendered images to ground truth, model regularization constrains the latent space or intermediate outputs (e.g., uncertainty, density) based on prior assumptions about the scene or network stability. This article focuses on the specific implementation of uncertainty regularization and the general framework for aggregating these losses, distinguishing it from geometric or perceptual sibling losses.
++**Outputs:**
++*   `total_loss`: Scalar value including the weighted sum of regularization losses [S1, unofficial].
++*   `losses_dict`: Dictionary of logged loss values for monitoring [S1, unofficial].
+ 
+-## How it works
+-The method operates by extracting specific internal variables from the radiance field model after forward propagation and computing penalty terms. These terms are weighted by hyperparameters and added to the total optimization objective.
+-
+-### Inputs and Outputs
+-- **Inputs**: The trained radiance field model (e.g., NeRF), a batch of rays $\mathcal{R}$, and configuration parameters including regularization weights $\lambda$.
+-- **Outputs**: A scalar regularization loss value $\mathcal{L}_{model}$ added to the total loss.
+-
+-### Data Structures
+-The implementation typically uses a dictionary or object to store intermediate model outputs.
+-- `out`: A dictionary or object containing model predictions. Key fields include:
+-  - `uncertainty`: A tensor of shape $(N,)$ or $(B, N)$ containing predicted uncertainty values $\delta_{c_i}$ for each sample point $i$ along rays in batch $B$.
+-- `losses_model_reg`: A dictionary mapping regularization loss names (strings) to their computed scalar values.
++### Data structures
++*   `losses_model_reg`: `Dict[str, float]`. Keys are loss names (e.g., "uncertainty_reg"), values are computed loss scalars.
++*   `config.system.loss`: `Dict[str, float]`. Keys are formatted as `f"lambda_{name}"`, values are scalar weights $\lambda_k$.
+ 
+ ### Steps
+-1. **Forward Pass**: Compute model predictions for the input rays.
+-2. **Extract Regularization Terms**: Call the model's regularization method to compute specific loss components.
+-   - For uncertainty regularization, compute $\mathcal{L}_0$ using the predicted uncertainty $\delta_{c_i}$.
+-3. **Aggregate Losses**: Iterate through the computed regularization losses.
+-4. **Weight and Sum**: Multiply each loss by its corresponding lambda weight from the configuration and sum them to get the total model regularization loss.
++1.  Compute raw regularization losses by calling the model's regularization method:
++    ```python
++    losses_model_reg = self.model.regularizations(out)
++    ```
++    [S1, unofficial]
++2.  Initialize the total loss accumulator and a dictionary for logging:
++    ```python
++    total_loss = 0.0
++    losses_dict = {}
++    ```
++    [G]
++3.  Iterate over each name-value pair in `losses_model_reg`:
++    ```python
++    for name, loss_value in losses_model_reg.items():
++        # Retrieve the corresponding lambda weight
++        lambda_key = f"lambda_{name}"
++        lambda_weight = self.config.system.loss[lambda_key]
++        
++        # Compute weighted loss
++        weighted_loss = loss_value * lambda_weight
++        
++        # Add to total
++        total_loss += weighted_loss
++        
++        # Log the loss
++        losses_dict[name] = weighted_loss
++    ```
++    [S1, unofficial]
++4.  Return `total_loss` and `losses_dict` [S1, unofficial].
+ 
+ ### Formulas
+-The primary model regularization loss cited is the **Zero Regularization Loss** ($\mathcal{L}_0$), designed to prevent predicted uncertainty $\delta_i$ from blowing up to large values.
++The total loss is augmented as:
++$$
++\mathcal{L}_{total} = \mathcal{L}_{photo} + \sum_k \lambda_k \mathcal{L}_{reg}^{(k)}
++$$
++[S1, unofficial][S2]
+ 
+-$$
+-\mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)
+-$$
++Specific regularization formulas found in sources:
++*   **Uncertainty Regularization ($\mathcal{L}_0$):** Encourages predicted uncertainty $\delta_{c_i}$ to be close to zero to prevent it from "blowing up" [S2].
++    $$
++    \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)
++    $$
++    [S2]
++    Where:
++    *   $r$: A ray in the set of rays $\mathcal{R}$.
++    *   $N$: Number of sample points per ray.
++    *   $c_i$: The query coordinate of the $i$-th sample point.
++    *   $\delta_{c_i}$: The predicted uncertainty at coordinate $c_i$.
+ 
+-Where:
+-- $\mathcal{R}$ is the set of rays.
+-- $N$ is the number of sample points per ray.
+-- $c_i$ is the query coordinate of the $i$-th sample point on ray $r$.
+-- $\delta_{c_i}$ is the predicted uncertainty for query coordinate $c_i$.
+-- $\max(\delta_{c_i}, 0)$ ensures only positive uncertainty values contribute to the penalty, encouraging $\delta_i$ to be close to zero.
++*   **Combined Uncertainty Loss:**
++    $$
++    \mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0
++    $$
++    [S2]
++    Where $\alpha_1 = 1.0$ and $\alpha_2 = 0.01$ are weights [S2].
+ 
+-The total uncertainty loss $\mathcal{L}_{unct}$ combines this with a standard uncertainty loss $\mathcal{L}_{SE}$ (not detailed here) as:
++### Parameters
++*   $\lambda_k$: Scalar weights for each regularization term. Default values are not given in the sources; they are retrieved from `config.system.loss` [S1, unofficial].
++*   $\alpha_1, \alpha_2$: Weights for uncertainty loss components. $\alpha_1 = 1.0, \alpha_2 = 0.01$ [S2].
+ 
+-$$
+-\mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0
+-$$
+-
+-Typical weights are $\alpha_1 = 1.0$ and $\alpha_2 = 0.01$ [S2].
+-
+-### Pseudocode
+-```python
+-def compute_model_regularization(model, rays, config):
+-    """
+-    Computes model regularization losses.
+-    
+-    Args:
+-        model: The radiance field model instance.
+-        rays: Input rays for the current batch.
+-        config: Configuration object containing loss weights.
+-        
+-    Returns:
+-        total_reg_loss: Scalar tensor of the total regularization loss.
+-    """
+-    # Step 1: Forward pass and extraction of regularization terms
+-    # The model returns a dictionary/object 'out' containing internal predictions
+-    out = model(rays)
+-    
+-    # Step 2: Obtain regularization losses from the model
+-    # This extracts specific terms like uncertainty regularization
+-    losses_dict = model.regularizations(out)
+-    
+-    total_reg_loss = 0.0
+-    
+-    # Step 3 & 4: Iterate, weight, and sum
+-    for name, loss_value in losses_dict.items():
+-        # Get the lambda weight for this specific regularization term
+-        lambda_key = f"lambda_{name}"
+-        lambda_val = config.system.loss[lambda_key]
+-        
+-        # Add weighted loss to total
+-        weighted_loss = lambda_val * loss_value
+-        total_reg_loss += weighted_loss
+-        
+-        # Logging (optional, for debugging/tracking)
+-        # log_loss(name, weighted_loss)
+-        
+-    return total_reg_loss
+-```
+-
+-### Edge Cases and Pitfalls
+-- **Uncertainty Explosion**: If $\delta_{c_i}$ becomes very large, $\mathcal{L}_0$ provides a linear penalty. Without this, uncertainty predictions might diverge, especially in shallow networks where predicting exact error $E(r)$ is difficult [S2].
+-- **Positive Only**: The use of $\max(\delta_{c_i}, 0)$ means negative uncertainty predictions (if allowed by the network) do not penalize the loss. This assumes uncertainty should be non-negative.
+-- **Weight Sensitivity**: The weight $\alpha_2$ (or $\lambda_{\mathcal{L}_0}$) is typically small (e.g., 0.01) relative to the primary loss. Too high a weight may suppress useful uncertainty estimates.
++### Edge cases and pitfalls
++*   **Uncertainty Blow-up:** Without $\mathcal{L}_0$, uncertainty $\delta_i$ may grow arbitrarily large because predicting error magnitude is difficult for shallow networks [S2].
++*   **Weight Sensitivity:** The choice of $\lambda_k$ significantly impacts convergence. Improper weights can dominate the photometric loss or be ignored [S1, unofficial][S2].
++*   **Non-differentiability:** The $\max(\delta_{c_i}, 0)$ function is non-differentiable at 0. In practice, this is handled by standard autograd frameworks using the subgradient at 0 (typically 0 or 1) [G].
+ 
+ ## Subtopics
+ 
+ ### Zero Regularization Loss
+-A specific regularization term $\mathcal{L}_0$ that penalizes positive predicted uncertainty values to prevent them from growing excessively large during training. It is used in conjunction with other uncertainty losses to stabilize training of neural radiance fields, particularly when the network architecture makes direct error prediction difficult. It is chosen when uncertainty prediction is part of the model's output and stability is a concern [S2].
++A specific regularization term $\mathcal{L}_0$ that penalizes positive uncertainty values to prevent them from growing excessively large during training [S2]. It is used in conjunction with other uncertainty losses (like $\mathcal{L}_{SE}$) to stabilize training of uncertainty-aware NeRFs [S2]. It is chosen when the model predicts uncertainty values that need to be bounded or kept small [S2]. [S2]
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(N \cdot B)$, where $N$ is samples per ray and $B$ is batch size, as it iterates over all sample points to compute the max operation.
+-- **Memory Complexity**: $O(N \cdot B)$ to store intermediate uncertainty values before reduction.
+-- **Strengths**: Simple to implement, computationally cheap, effectively prevents uncertainty blow-up.
+-- **Limitations**: Only addresses uncertainty magnitude, not spatial smoothness or geometric consistency. Does not replace photometric or geometric losses.
+-- **When to use**: When the model predicts uncertainty or other internal variables that can diverge.
+-- **When not to use**: When the model does not output such variables, or when other regularization (e.g., Total Variation) is more appropriate for the artifact being addressed.
++*   **Time Complexity:** Depends on the number of regularization terms and the cost of computing each $\mathcal{L}_{reg}^{(k)}$. Typically $O(N)$ per ray for simple terms like $\mathcal{L}_0$ [S2].
++*   **Memory Complexity:** Minimal overhead; requires storing loss values and weights [S1, unofficial].
++*   **Strengths:** Prevents overfitting, enforces physical priors (e.g., uncertainty bounds), stabilizes training [S1, unofficial][S2].
++*   **Limitations:** Requires careful tuning of weights $\lambda_k$ [S1, unofficial]. May slow convergence if weights are too high [G].
++*   **When to use:** When the model exhibits overfitting, instability, or violates known physical/statistical priors [S1, unofficial][S2].
++*   **When not to use:** When the model is already well-regularized or when computational budget is extremely tight [G].
+ 
+ ## Background
+-The concept of model regularization in this context originates from efforts to stabilize the training of neural radiance fields, particularly those predicting uncertainty. The specific $\mathcal{L}_0$ loss was introduced in the context of Recursive-NeRF to handle the difficulty of predicting error $E(r)$ in shallow networks [S2]. The general framework of aggregating model regularization losses via a dictionary and lambda weights is commonly found in modern NeRF implementations like Instant-NSR-PL [S1, unofficial].
++Model regularization in differentiable volume rendering has been used to stabilize training and improve generalization. The specific uncertainty regularization $\mathcal{L}_0$ was introduced in Recursive-NeRF to address the difficulty of predicting accurate error estimates with shallow networks [S2]. The general framework of adding weighted regularization losses to the total objective is common in many NeRF variants, including Instant-NSR-PL [S1, unofficial].
+ 
+ ## Sources

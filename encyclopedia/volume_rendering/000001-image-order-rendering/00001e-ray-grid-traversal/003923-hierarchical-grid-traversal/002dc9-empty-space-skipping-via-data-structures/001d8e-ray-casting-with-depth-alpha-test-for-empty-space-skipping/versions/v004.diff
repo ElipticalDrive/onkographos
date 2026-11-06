@@ -1,0 +1,244 @@
+--- v003.md
++++ v004.md
+@@ -4,57 +4,55 @@
+ 
+ ## Overview
+-This method accelerates ray-based volume rendering by utilizing the GPU's hardware depth buffer and alpha test to determine the entry and exit points of rays intersecting the volume, thereby skipping empty space intervals without CPU-side preprocessing [S1, S3, unofficial]. It sets itself apart from sibling methods like [Space Leaping](5863-space-leaping.md) or [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by generating the acceleration structure (Slab Silhouette Maps) dynamically on the GPU during rendering passes, rather than relying on pre-computed hierarchical data structures like octrees or occupancy grids [S1, S3, unofficial].
++This method accelerates ray-based volume rendering by using OpenGL’s alpha test and depth test to determine the near and far intersection points of rays with the volume, allowing samples to be taken only between these points [S3, unofficial]. It sets itself apart from sibling methods like [Space Leaping](5863-space-leaping.md) and [Occupancy Grid and Map-Based Empty Space Skipping](3852-occupancy-grid-and-map-based-empty-space-skipping.md) by performing the empty space detection entirely on the GPU using hardware z-occlusion culling, without requiring CPU-side preprocessing or hierarchical data structures like octrees [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A 3D volume dataset, camera parameters (projection matrix $P$, modelview matrix $V$), and transfer function parameters.
+-*   **Output:** A 2D color image where each pixel contains the composited color of the ray passing through the volume.
++The method relies on creating "Slab Silhouette Maps" (SSM) from texture slabs to identify empty spaces and terminated rays, storing this information in the depth buffer [S1, unofficial]. The algorithm proceeds in three main phases: data preparation, silhouette map generation, and ray casting.
+ 
+-**Data Structures:**
+-1.  **Texture Slabs:** The volume is sliced into 2D textures. Slices are grouped into slabs to reduce texture binding overhead [S1, unofficial].
++### Inputs and Outputs
++*   **Inputs:** 3D volume data (density/opacity), camera parameters (projection matrix $P$, modelview matrix $V$), and rendering parameters (number of samples $n$ per ray).
++*   **Outputs:** Final color image in the framebuffer.
++
++### Data Structures
++1.  **Volume Data:** Stored as 2D texture slices. Slices are grouped into "texture slabs" [S1, unofficial].
+ 2.  **Depth Buffer:** Used to store the near and far intersection distances in normalized device coordinates (NDC) [S3, unofficial].
+-3.  **Gradient/Normal Texture:** Pre-computed gradients for each voxel are stored in a texture to allow illumination calculation during the ray casting pass [S3, unofficial].
++3.  **Display Lists:** Created for each set of textures (front-to-back and back-to-front) to optimize rendering order [S3, unofficial].
+ 
+-**Algorithm Steps:**
++### Steps
+ 
+ 1.  **Preprocessing (CPU):**
+-    *   Calculate the gradient for each volume element using central differences [S3, unofficial].
+-    *   Compute illumination and shading based on model variables (lighting model) and store the resulting color/opacity values in main memory or a texture [S3, unofficial]. Note: Unlike Engel, Kraus & Ertl, illumination is calculated uniquely in this initial phase on the CPU [S3, unofficial].
++    *   Calculate the gradient of each volume element using central differences [S3, unofficial].
++    *   Perform illumination and shading based on model variables and store the results in main memory [S3, unofficial]. [G: This step is specific to the implementation described in [S3, unofficial] where lighting is precomputed; other implementations may compute lighting per-sample on the GPU].
+ 
+-2.  **Texture Setup (GPU):**
++2.  **Texture Loading (GPU):**
+     *   For each axis (X, Y, Z), create 2D textures for planes parallel to that axis [S3, unofficial].
+-    *   Load textures into GPU memory.
+-    *   Create display lists for front-to-back and back-to-front rendering orders [S3, unofficial].
++    *   Load textures into GPU memory and create display lists for front-to-back and back-to-front rendering orders [S3, unofficial].
+ 
+-3.  **Camera Orientation and Slab Selection:**
++3.  **Camera Setup:**
+     *   Determine the object axis with the smallest angle to the projection plane [S3, unofficial].
+-    *   Select the farthest texture from the camera in the set corresponding to the selected axis [S3, unofficial].
+-    *   Rotate the camera around the object and draw the set of textures starting from the selected farthest one [S3, unofficial].
++    *   Select the farthest texture from the camera in the selected axis set [S3, unofficial].
++    *   Rotate the camera and draw textures starting from the selected one [S3, unofficial].
+ 
+-4.  **Near Point Identification (Pass 1):**
+-    *   Initialize the depth buffer to 1.0 (maximum NDC value) [S3, unofficial].
+-    *   Enable the Alpha Test with criterion `GL_GREATER` and reference value $> 0$ to discard fully transparent fragments [S3, unofficial].
+-    *   Set the Depth Write criterion to `GL_LESS` [S3, unofficial].
+-    *   Render the volume slabs. This captures the distances of the closest significant fragments (entry points) to the projection plane in the depth buffer [S3, unofficial].
++4.  **Silhouette Map Generation (Two Passes):**
++    *   **Pass 1 (Near Points):**
++        *   Initialize the depth buffer to 1.0 (maximum NDC value) [S3, unofficial].
++        *   Set depth write criterion to `GL LESS` [S3, unofficial].
++        *   Enable alpha test with `GL GREATER` and reference value $> 0$ to discard fragments with zero opacity [S3, unofficial].
++        *   Render the volume slabs. This captures the distances of the closest significant fragments to the projection plane [S3, unofficial].
++    *   **Pass 2 (Far Points):**
++        *   Initialize the depth buffer to 0.0 (minimum NDC value) [S3, unofficial].
++        *   Set depth write criterion to `GL GREATER` [S3, unofficial].
++        *   Keep alpha test enabled [S3, unofficial].
++        *   Render the volume slabs. This captures the distances of the farthest significant fragments from the projection plane [S3, unofficial].
+ 
+-5.  **Far Point Identification (Pass 2):**
+-    *   Initialize the depth buffer to 0.0 (minimum NDC value) [S3, unofficial].
+-    *   Keep Alpha Test enabled (`GL_GREATER`, ref $> 0$) [S3, unofficial].
+-    *   Set the Depth Write criterion to `GL_GREATER` [S3, unofficial].
+-    *   Render the volume slabs again. This captures the distances of the farthest significant fragments (exit points) from the projection plane [S3, unofficial].
+-
+-6.  **Coordinate Transformation:**
+-    *   Read the depth buffer values for each pixel to obtain $(X_{near}, Y_{near}, Z_{near})$ and $(X_{far}, Y_{far}, Z_{far})$ in NDC [S3, unofficial].
+-    *   Transform these NDC coordinates to world coordinates using the inverse projection and modelview matrices [S3, unofficial]:
++5.  **Coordinate Conversion:**
++    *   For each pixel $(X_s, Y_s, Z_s)$ in the depth buffer, convert NDC coordinates to world coordinates using the inverse projection and modelview matrices [S3, unofficial]:
+         $$
+         \begin{bmatrix} x \\ y \\ z \\ w \end{bmatrix} = (P M)^{-1} V \begin{bmatrix} X_s \\ Y_s \\ Z_s \\ 1 \end{bmatrix}
+         $$
+-        where $(X_s, Y_s, Z_s)$ are the screen/NDC coordinates, and $(x, y, z, w)$ are the world homogeneous coordinates [S3, unofficial].
+-    *   Let $P$ be the near point (origin of the ray) and $Q$ be the far point (end of the ray) in world coordinates [S3, unofficial].
++    *   This yields the near point $P = (P_x, P_y, P_z)$ and far point $Q = (Q_x, Q_y, Q_z)$ [S3, unofficial].
+ 
+-7.  **Ray Casting and Compositing:**
++6.  **Ray Casting and Compositing:**
+     *   For each pixel, cast a ray between $P$ and $Q$ [S3, unofficial].
+-    *   Sample the volume along the ray segment defined by $t \in [0, 1]$, where the increment $\Delta t = 1/n$ and $n$ is the number of samples per ray [S3, unofficial].
+-    *   The parametric equations for the ray are:
++    *   Sample the volume along the ray segment using parametric equations for $t \in [0, 1]$ with increment $1/n$:
+         $$
+         \begin{aligned}
+@@ -64,116 +62,18 @@
+         \end{aligned}
+         $$
+-    *   Composite the samples using the volume rendering integral, but restricted to the interval $[t_{entry}, t_{exit}]$ (mapped to $t \in [0, 1]$):
++    *   Composite the samples using the reduced volume rendering integral, skipping contributions from empty space (outside $P$ and $Q$) [S3, unofficial]:
+         $$
+-        L(x) = \int_{x_A'}^{x_B'} e^{-\int_{x_A'}^{x_0} \phi_t(x') dx'} \epsilon(x_0) dx_0
++        L(x) = \int_{x_A'}^{x_B'} \left[ e^{-\int_{x_A'}^{x_0} \phi_t(x')dx'} \epsilon(x_0) dx_0 \right]
+         $$
+-        where contributions from empty space (outside $A'$ and $B'$) are negligible and skipped [S3, unofficial].
+-    *   Draw the final composited color to the framebuffer [S3, unofficial].
++        where $x_A'$ and $x_B'$ correspond to points $P$ and $Q$, $\phi_t$ is the extinction coefficient, and $\epsilon$ is the color [S3, unofficial].
++    *   Draw the final color to the framebuffer [S3, unofficial].
+ 
+-**Pseudocode:**
++### Parameters
++*   **Alpha Test Reference Value:** $> 0$ [S3, unofficial].
++*   **Number of Samples ($n$):** Determines the step size $1/n$ along the ray [S3, unofficial].
+ 
+-```python
+-def render_volume(volume_data, camera_params):
+-    # 1. Preprocessing: Calculate gradients and illumination on CPU
+-    # [S3, unofficial]
+-    gradients = calculate_central_differences(volume_data)
+-    illuminated_volume = apply_lighting_model(volume_data, gradients)
+-    
+-    # 2. Setup GPU Textures
+-    # [S3, unofficial]
+-    slabs = create_texture_slabs(illuminated_volume)
+-    load_textures_to_gpu(slabs)
+-    
+-    # 3. Determine Rendering Axis and Order
+-    # [S3, unofficial]
+-    axis = find_axis_with_smallest_angle_to_projection(camera_params)
+-    slab_order = sort_slabs_by_distance_from_camera(slabs, axis, camera_params)
+-    
+-    # 4. Pass 1: Find Near Points
+-    # [S3, unofficial]
+-    gl_clear_depth(1.0)
+-    gl_enable(GL_ALPHA_TEST)
+-    gl_alpha_func(GL_GREATER, 0.0) # Discard alpha=0
+-    gl_depth_func(GL_LESS)
+-    gl_depth_mask(GL_TRUE)
+-    render_slabs(slab_order, camera_params)
+-    near_depth_buffer = read_depth_buffer()
+-    
+-    # 5. Pass 2: Find Far Points
+-    # [S3, unofficial]
+-    gl_clear_depth(0.0)
+-    gl_enable(GL_ALPHA_TEST)
+-    gl_alpha_func(GL_GREATER, 0.0)
+-    gl_depth_func(GL_GREATER)
+-    gl_depth_mask(GL_TRUE)
+-    render_slabs(slab_order, camera_params)
+-    far_depth_buffer = read_depth_buffer()
+-    
+-    # 6. Transform NDC to World Coordinates
+-    # [S3, unofficial]
+-    inv_proj_model = inverse(camera_params.projection * camera_params.modelview)
+-    near_points_world = []
+-    far_points_world = []
+-    
+-    for y in range(height):
+-        for x in range(width):
+-            z_near = near_depth_buffer[y][x]
+-            z_far = far_depth_buffer[y][x]
+-            
+-            # Convert NDC (x, y, z) to World
+-            ndc_near = vec4(x, y, z_near, 1.0)
+-            ndc_far = vec4(x, y, z_far, 1.0)
+-            
+-            world_near = transform(inv_proj_model, ndc_near)
+-            world_far = transform(inv_proj_model, ndc_far)
+-            
+-            # Homogeneous division
+-            P = world_near.xyz / world_near.w
+-            Q = world_far.xyz / world_far.w
+-            
+-            near_points_world.append((x, y, P))
+-            far_points_world.append((x, y, Q))
+-            
+-    # 7. Ray Casting with Empty Space Skipping
+-    # [S3, unofficial]
+-    final_image = zeros((height, width, 3))
+-    n_samples = 100 # Example parameter
+-    
+-    for i in range(len(near_points_world)):
+-        x, y, P = near_points_world[i]
+-        Q = far_points_world[i][2]
+-        
+-        # If P or Q are invalid (e.g., no intersection), skip
+-        if is_invalid(P) or is_invalid(Q):
+-            continue
+-            
+-        color = vec3(0.0)
+-        transmittance = 1.0
+-        
+-        for k in range(n_samples):
+-            t = k / n_samples
+-            # Ray equation: X(t) = P + (Q - P)t
+-            sample_pos = P + (Q - P) * t
+-            
+-            # Sample volume at sample_pos
+-            # [S3, unofficial]
+-            voxel_value = sample_volume_3d(volume_data, sample_pos)
+-            opacity = transfer_function_opacity(voxel_value)
+-            emission = transfer_function_color(voxel_value)
+-            
+-            # Front-to-back compositing
+-            # [S3, unofficial]
+-            alpha = 1.0 - exp(-opacity * step_size)
+-            color += transmittance * emission * alpha
+-            transmittance *= (1.0 - alpha)
+-            
+-            # Early ray termination optimization (optional but common)
+-            if transmittance < epsilon:
+-                break
+-                
+-        final_image[y, x] = color
+-        
+-    return final_image
+-```
++### Edge Cases and Pitfalls
++*   **Coordinate System Mismatch:** The depth buffer uses NDC ([0,1]), but ray casting requires local volume or world coordinates. A transformation is necessary [S3, unofficial].
++*   **High Data Dispersion:** If the volume has high dispersion (many internal empty spaces), the technique only skips external empty spaces, reducing effectiveness [S3, unofficial].
+ 
+ ## Subtopics
+@@ -182,15 +82,15 @@
+ Impostor Depth Optimization is a rendering acceleration technique that uses camera-facing quads placed at the nearest point of volumetric primitives (such as spheres) to leverage the GPU's depth test for early culling. It solves the performance bottleneck in deep piles of overlapping objects where full shading (including ray tracing) is prohibitively expensive. It sets itself apart from standard ray casting by replacing per-object ray-volume intersection logic with a fixed-screen-space primitive that triggers hardware depth discard, effectively skipping the fragment shader for occluded layers.
+ 
++### Polygon Assisted Ray Casting
++Polygon Assisted Ray Casting (PARC) is an optimization for primary rays in volumetric ray tracing using graphics hardware. It creates a polygonal representation of all objects and projects them into two Z-buffers: one for nearest distance and one for farthest distance. It sets itself apart by bounding the ray segment for intersection calculations using these Z-buffer distances. If no Z-buffer information exists for a pixel, intersection calculations are skipped. PARC typically reduces the computation of primary rays by a factor of four [S4, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity:** The acceleration data structure (Slab Silhouette Maps) generation cost is very small compared to the total rendering time [S1, unofficial]. The technique reduces ray casting time to almost a quarter of the time taken by a naive ray caster that samples along the entire ray extension [S3, unofficial].
+-*   **Performance:** Performance improvement is 3 to 4 times faster when using alpha and depth tests compared to not using them [S3, unofficial].
+-*   **Memory:** Requires GPU memory for texture slabs and depth buffers. The gradient/normal texture adds memory overhead [S3, unofficial].
+-*   **Strengths:** No CPU-side preprocessing for the acceleration structure; relies on hardware z-occlusion culling; reduces framebuffer write operations by discarding transparent fragments [S1, S3, unofficial].
+-*   **Limitations:** High data dispersion reduces effectiveness because the technique only skips external empty spaces; if dispersion is high, the ray length with skipping is similar to the length without optimization [S3, unofficial]. Illumination is calculated on the CPU in the initial phase, which may limit dynamic lighting updates compared to GPU-based methods like Engel, Kraus & Ertl [S3, unofficial].
+-*   **When to use:** Suitable for static volumes with significant empty space outside the object bounds, where dynamic lighting is not required or can be pre-computed.
+-*   **When not to use:** Unsuitable for highly dispersed volumes or scenarios requiring dynamic, per-voxel lighting updates on the GPU.
++*   **Time Complexity:** The cost of generating the acceleration data structure (SSM) is very small compared to the total rendering time [S1, unofficial]. The method reduces ray casting time to almost a quarter of the time taken by a naive ray caster [S3, unofficial].
++*   **Measured Performance:** 3 to 4 times faster when using alpha and depth tests compared to not using them [S3, unofficial].
++*   **Strengths:** No CPU-side preprocessing required; leverages hardware z-occlusion culling; reduces framebuffer write operations by discarding transparent fragments [S1, unofficial][S3, unofficial].
++*   **Limitations:** Only skips external empty spaces; effectiveness degrades with high data dispersion [S3, unofficial]. Illumination calculation is performed on the CPU in the initial phase, limiting dynamic lighting capabilities compared to GPU-based methods like Engel, Kraus & Ertl [S3, unofficial].
+ 
+ ## Background
+-The technique was introduced by Westermann & Sevenich in work [WS01] [S3, unofficial]. It is a hybrid volume rendering technique that uses the GPU's depth buffer to skip empty spaces outside the volume, allowing ray casting to sample only non-transparent material [S3, unofficial]. It differs from Engel, Kraus & Ertl by performing illumination calculation uniquely and in the initial phase on the CPU, whereas Engel's method does it on the GPU [S3, unofficial].
++The technique was introduced by Westermann & Sevenich in work [WS01] [S3, unofficial]. It is a direct volume rendering optimization that accelerates ray casting by skipping empty space intervals in the volume integral, using 2D textures and OpenGL alpha/depth tests to discard non-contributing intervals [S3, unofficial]. Unlike Engel, Kraus & Ertl, this technique performs illumination calculation uniquely and in the initial phase on the CPU [S3, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,348 @@
+# Volume Texture Creation
+
+Also called: 3D Volume Texture Creation
+
+## Overview
+Volume Texture Creation is the process of allocating GPU memory and populating it with volumetric data (scalar fields, gradients, transfer functions) and rendering targets (output images) to enable hardware-accelerated raycasting. It solves the problem of transferring host-side volume representations into GPU-accessible texture objects with specific memory layouts, filtering modes, and coordinate systems required by volume rendering shaders. It differs from [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md) by focusing on the API-level allocation and data upload steps rather than the sampling logic, and from [GPU Data Layout](2469-gpu-data-layout.md) by handling the actual resource generation rather than just logical grouping.
+
+## How it works
+The method varies significantly by API (CUDA, OpenGL, WebGPU, VolPack). The following sections detail the specific implementations found in the sources.
+
+### CUDA Texture Object Creation
+This method creates a 3D CUDA texture object bound to a 3D CUDA array for efficient volume sampling with linear filtering and normalized coordinates [S2, unofficial].
+
+**Inputs:**
+- Host scalar volume data (`hostScalar`): Pointer to contiguous float data.
+- Volume dimensions (`dim`): `cudaExtent` or struct with `x`, `y`, `z`.
+- Transfer function data (optional, handled separately).
+
+**Outputs:**
+- `cudaTextureObject_t`: The created texture object.
+- `cudaArray_t`: The underlying device array.
+
+**Data Structures:**
+- `cudaResourceDesc`: Resource descriptor.
+- `cudaTextureDesc`: Texture descriptor.
+- `cudaMemcpy3DParms`: 3D memory copy parameters.
+
+**Steps:**
+1.  **Create Channel Format:** Define the channel format for float data using `cudaCreateChannelDesc`.
+2.  **Allocate 3D Array:** Allocate a 3D CUDA array with extent defined by volume dimensions (`dim.x`, `dim.y`, `dim.z`) using `cudaMalloc3DArray`.
+3.  **Configure Memory Copy:** Initialize `cudaMemcpy3DParms`:
+    -   `srcPtr`: Pointer to `hostScalar`.
+    -   `srcPitch`: Calculated as `dim.x * sizeof(float)`.
+    -   `dstArray`: The allocated `cudaArray_t`.
+    -   `extent`: Matches volume dimensions.
+    -   `kind`: `cudaMemcpyHostToDevice`.
+4.  **Execute Copy:** Perform the 3D memory copy using `cudaMemcpy3D`.
+5.  **Initialize Resource Descriptor:** Set `resType` to `cudaResourceTypeArray` and `res.array.array` to the target `cudaArray_t`.
+6.  **Initialize Texture Descriptor:**
+    -   `normalizedCoords`: `true`.
+    -   `filterMode`: `cudaFilterModeLinear`.
+    -   `addressMode[0-2]`: `cudaAddressModeClamp`.
+    -   `readMode`: `cudaReadModeElementType`.
+7.  **Create Texture Object:** Call `cudaCreateTextureObject` with the resource and texture descriptors.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def create_cuda_volume_texture(host_scalar_data, dim_x, dim_y, dim_z):
+    # 1. Create channel format description for float data
+    channel_desc = cuda_create_channel_desc_float()
+
+    # 2. Allocate 3D array with extent defined by volume dimensions
+    extent = cuda_make_extent(dim_x, dim_y, dim_z)
+    cuda_array = cuda_malloc_3d_array(channel_desc, extent)
+
+    # 3. Configure cudaMemcpy3DParms for host-to-device copy
+    src_pitch = dim_x * sizeof_float
+    src_ptr = cuda_make_pitched_ptr(host_scalar_data, src_pitch)
+    
+    copy_params = cuda_make_3d_copy_params(
+        src_ptr=src_ptr,
+        dst_array=cuda_array,
+        extent=extent,
+        kind=cuda_memcpy_host_to_device
+    )
+
+    # 4. Execute the 3D memory copy
+    cuda_memcpy_3d(copy_params)
+
+    # 5. Initialize cudaResourceDesc
+    res_desc = cuda_make_resource_desc()
+    res_desc.res_type = cuda_resource_type_array
+    res_desc.res.array.array = cuda_array
+
+    # 6. Initialize cudaTextureDesc
+    tex_desc = cuda_make_texture_desc()
+    tex_desc.normalized_coords = True
+    tex_desc.filter_mode = cuda_filter_mode_linear
+    tex_desc.address_mode[0] = cuda_address_mode_clamp
+    tex_desc.address_mode[1] = cuda_address_mode_clamp
+    tex_desc.address_mode[2] = cuda_address_mode_clamp
+    tex_desc.read_mode = cuda_read_mode_element_type
+
+    # 7. Create the texture object
+    texture_object = cuda_create_texture_object(res_desc, tex_desc)
+
+    return texture_object, cuda_array
+```
+
+### OpenGL Volume Texture Setup
+This method sets up 3D textures for attenuation values, gradients, and transfer functions using OpenGL [S4, unofficial].
+
+**Inputs:**
+- Volume dimensions (`dimX`, `dimY`, `dimZ`).
+- Raw data arrays (`volumeTexMap`, `gradientTexMap`, `transferTex`).
+
+**Outputs:**
+- OpenGL texture IDs bound to `GL_TEXTURE_3D` or `GL_TEXTURE_1D`.
+
+**Steps:**
+1.  **Attenuation Volume:**
+    -   Call `glTexImage3D` with target `GL_TEXTURE_3D`.
+    -   Internal format: `GL_R16`.
+    -   Dimensions: `dimX`, `dimY`, `dimZ`.
+    -   Format: `GL_RED`.
+    -   Type: `GL_UNSIGNED_SHORT`.
+    -   Data: `volumeTexMap` (1D array of `dimX * dimY * dimZ` unsigned shorts, values in [0,1]).
+2.  **Gradient Volume:**
+    -   Call `glTexImage3D` with target `GL_TEXTURE_3D`.
+    -   Internal format: `GL_RGB16F`.
+    -   Dimensions: `dimX`, `dimY`, `dimZ`.
+    -   Format: `GL_RGB`.
+    -   Type: `GL_FLOAT`.
+    -   Data: `gradientTexMap` (1D array of `dimX * dimY * dimZ` floats, each component in [-1, +1]).
+3.  **Transfer Function:**
+    -   Call `glTexImage1D` with target `GL_TEXTURE_1D`.
+    -   Internal format: `GL_RGBA16`.
+    -   Width: 256 (typically sufficient precision).
+    -   Format: `GL_RGBA`.
+    -   Type: `GL_UNSIGNED_SHORT`.
+    -   Data: `transferTex` (1D array of 4-tuples, RGB for $k_d$, Alpha for $\tau'$, values in [0,1]).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_opengl_volume_textures(dim_x, dim_y, dim_z, volume_data, gradient_data, tf_data):
+    # 1. Attenuation Volume
+    vol_tex_id = gl_create_texture_3d(
+        internal_format=GL_R16,
+        width=dim_x, height=dim_y, depth=dim_z,
+        format=GL_RED,
+        type=GL_UNSIGNED_SHORT,
+        data=volume_data
+    )
+
+    # 2. Gradient Volume
+    grad_tex_id = gl_create_texture_3d(
+        internal_format=GL_RGB16F,
+        width=dim_x, height=dim_y, depth=dim_z,
+        format=GL_RGB,
+        type=GL_FLOAT,
+        data=gradient_data
+    )
+
+    # 3. Transfer Function (1D)
+    tf_tex_id = gl_create_texture_1d(
+        internal_format=GL_RGBA16,
+        width=256,
+        format=GL_RGBA,
+        type=GL_UNSIGNED_SHORT,
+        data=tf_data
+    )
+
+    return vol_tex_id, grad_tex_id, tf_tex_id
+```
+
+### WebGPU Volume Texture Creation
+This method creates a GPU texture using the WebGPU API [S3, unofficial].
+
+**Inputs:**
+- `width`, `height`, `slices` (depth).
+- `rawData`: Buffer containing the volume data.
+
+**Outputs:**
+- WebGPU `GPUTexture` object.
+
+**Steps:**
+1.  **Create Texture:** Call `device.createTexture` with:
+    -   `dimension`: `'2d'` (Note: WebGPU uses 2D array for 3D volumes in some contexts, or explicit 3D if supported; source specifies '2d' but implies 3D structure via slices).
+    -   `size`: `{width, height, depthOrArrayLayers: slices}`.
+    -   `format`: `'r16float'`.
+    -   `usage`: `GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST`.
+2.  **Upload Data:** For each slice `i` from 0 to `slices-1`:
+    -   Call `device.queue.writeTexture`.
+    -   `texture`: The created texture.
+    -   `origin`: `{x:0, y:0, z:i}`.
+    -   `data`: `rawData.buffer`.
+    -   `bytesPerRow`: `width * 2` (assuming 16-bit floats).
+    -   `rowsPerImage`: `height`.
+    -   `size`: `{width, height, depthOrArrayLayers: 1}`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def create_webgpu_volume_texture(device, width, height, slices, raw_data_buffer):
+    # 1. Create Texture
+    texture = device.create_texture(
+        dimension='2d',
+        size={'width': width, 'height': height, 'depthOrArrayLayers': slices},
+        format='r16float',
+        usage=GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
+    )
+
+    # 2. Upload Data Slice by Slice
+    bytes_per_row = width * 2  # 16-bit float
+    for i in range(slices):
+        device.queue.write_texture(
+            texture=texture,
+            data=raw_data_buffer,
+            texture_subresource={'aspect': 'all', 'mip_level': 0, 'array_layer': i},
+            texture_copy_view={
+                'texture': texture,
+                'origin': {'x': 0, 'y': 0, 'z': i},
+                'texture_aspects': 'all'
+            },
+            copy_size={
+                'width': width,
+                'height': height,
+                'depthOrArrayLayers': 1
+            },
+            data_layout={
+                'offset': 0,
+                'bytes_per_row': bytes_per_row,
+                'rows_per_image': height
+            }
+        )
+
+    return texture
+```
+
+### VolPack Context Configuration
+This method configures the rendering context for VolPack, defining voxel structure and dimensions [S7].
+
+**Inputs:**
+- Context pointer (`vpContext`).
+- Volume dimensions (`xlen`, `ylen`, `zlen`).
+- Voxel structure definition (bytes per voxel, field counts, offsets).
+
+**Outputs:**
+- Configured `vpContext`.
+
+**Steps:**
+1.  **Create Context:** Call `vpCreateContext()` to get a new context with default values.
+2.  **Set Dimensions:** Call `vpSetVolumeSize(vpc, xlen, ylen, zlen)`.
+3.  **Set Voxel Structure:** Call `vpSetVoxelSize(vpc, bytes_per_voxel, num_voxel_fields, num_shade_fields, num_classify_fields)`.
+4.  **Declare Fields:** For each field:
+    -   Calculate offset using `vpFieldOffset(voxel_ptr, field_name)`.
+    -   Call `vpSetVoxelField(vpc, field_num, field_size, field_offset, field_max)`.
+5.  **Destroy Context:** When done, call `vpDestroyContext(vpc)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_volpack_context(vpc, xlen, ylen, zlen, voxel_struct, fields):
+    # 1. Set Dimensions
+    vp_set_volume_size(vpc, xlen, ylen, zlen)
+
+    # 2. Set Voxel Size
+    bytes_per_voxel = sizeof(voxel_struct)
+    num_voxel_fields = len(fields)
+    num_shade_fields = count_shade_fields(fields)
+    num_classify_fields = count_classify_fields(fields)
+    vp_set_voxel_size(vpc, bytes_per_voxel, num_voxel_fields, num_shade_fields, num_classify_fields)
+
+    # 3. Declare Fields
+    for i, field in enumerate(fields):
+        offset = vp_field_offset(voxel_struct, field.name)
+        vp_set_voxel_field(vpc, i, field.size, offset, field.max)
+
+    return vpc
+```
+
+### VTK Multi-Volume Setup
+This method handles VTK volumes, specifically validating scalar component counts [S1, unofficial].
+
+**Inputs:**
+- `vol`: `vtkVolume` pointer.
+- `numberOfScalarComponents`: Integer.
+
+**Outputs:**
+- Validated volume state.
+
+**Steps:**
+1.  **Validate Components:** Check if `numberOfScalarComponents` is exactly 1 or 4.
+2.  **Error Handling:** If not 1 or 4, raise an error or mark as invalid.
+3.  **Load Transfer Function:** Allocate GPU memory and load the color transfer function table. Reload if changed.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_vtk_volume(vol, number_of_scalar_components):
+    # 1. Validate Scalar Components
+    if number_of_scalar_components not in [1, 4]:
+        raise ValueError("numberOfScalarComponents must be exactly 1 or 4")
+
+    # 2. Load Transfer Function
+    # Allocate GPU memory and load the color transfer function table
+    # Reload if the transfer function changed
+    load_transfer_function(vol)
+
+    return True
+```
+
+## Subtopics
+
+### [GPU Data Layout](2469-gpu-data-layout.md)
+GPU Data Layout defines the host-side memory structures and OpenGL resource IDs required to manage volumetric rendering state on the GPU. It solves the problem of organizing heterogeneous resources—3D scalar textures, 1D transfer function tables, and offscreen framebuffers—into a unified configuration object for raycasting mappers. It differs from [Volume Texture Creation](1857-volume-texture-creation.md) by focusing on the logical grouping and ID management of these resources rather than the API calls to generate them, and from [Volume Texture Setup](4055-volume-texture-setup.md) by handling the broader context including color tables and depth buffers.
+
+### [ClearView Unified Buffer Construction](2475-clearview-unified-buffer-construction.md)
+ClearView Unified Buffer Construction is a preprocessing technique that converts a hexahedral mesh (positions, connectivity, scalars) into four GPU-friendly texture buffers (vertices, edges, faces, cellScalar) for the ClearView volume rendering pipeline. It sets itself apart from siblings like [GPU Data Layout](2469-gpu-data-layout.md) by explicitly organizing topology into a "unified" set of textures optimized for the specific gather/resolve passes of the ClearView renderer, rather than generic storage.
+
+### [Trilinear Volume Sampling for Texture Generation](2726-trilinear-volume-sampling-for-texture-generation.md)
+Samples a 3D attribute volume (color, material properties) at corrected 3D positions using trilinear interpolation, mapping world-space coordinates to volume grid space.
+
+### [Volume Texture Setup](4055-volume-texture-setup.md)
+
+### Device Volume Snapshot
+Creates a compact, immutable snapshot of volume metadata and texture handles for passing to CUDA kernels [S2, unofficial].
+**Layout:** `DeviceVolume` struct contains: `field_tex` (`cudaTextureObject_t`), `grad_tex` (`cudaTextureObject_t`, can be 0), `dim` (`int3`), `voxel_size` (`float3`), `origin` (`float3`), `value_range` (`float2`), `density_scale` (`float`).
+**Steps:** Initialize `DeviceVolume` struct with values from `Volume::Description` and texture handles.
+
+### GPU Volume Rendering Data Setup
+Storage of attenuation values $\tau[x,y,z]$ in a 3D texture of scalar values, typically 16-bit in range [0,1], representing attenuation per distance. Storage of pre-computed gradients $\nabla\tau[x,y,z]$ in a 3D texture of 3-tuples, where each component is a 16-bit float in range [-1,+1]. Storage of transfer function $f: \tau \rightarrow k_d, \tau'$ in a 1D texture of 4-tuples. RGB components store $k_d$, Alpha component stores $\tau'$. Both are 16-bit values in [0,1]. Transfer function texture size is typically 256, providing enough precision. Larger arrays provide more precision [S4, unofficial].
+
+### Texture Generation
+Creates an empty 2D RGBA texture in OpenGL for storing rendered image data [S5, unofficial].
+**Steps:** Generate texture ID, bind to `GL_TEXTURE_2D`, set min/mag filters to `GL_LINEAR`, set wrap modes to `GL_CLAMP_TO_EDGE`. Allocate memory with `glTexImage2D` using `GL_RGBA` format and `GL_UNSIGNED_BYTE` type, width and height parameters.
+
+### Texture Array Loading
+Creates a WebGL texture object bound as `gl.TEXTURE_2D_ARRAY` [S6, unofficial].
+**Steps:** Initialize with a 1x1x1 RGBA texture (magenta) to allocate storage. For each URL in `urls`, load an image, create a canvas of size `width` x `height`, draw the image, extract pixel data using `ctx.getImageData`, flatten into `Uint8Array` and append to `pixels` array. Upload the complete `pixels` array to the texture using `texImage3D` with dimensions `width`, `height`, and `depth` equal to `urls.length`. Generate mipmaps. Set mag filter to `NEAREST` and min filter to `NEAREST_MIPMAP_LINEAR`.
+**Parameters:** `width`: Width of the individual texture layers. `height`: Height of the individual texture layers.
+
+## Operating characteristics
+- **Time Complexity:** Dominated by memory bandwidth during host-to-device transfer. Linear in the number of voxels $N = W \times H \times D$.
+- **Memory Complexity:** Proportional to the volume size and number of textures (volume, gradient, transfer function, output).
+- **Strengths:** Hardware-accelerated sampling (trilinear/bilinear) reduces CPU load. Unified context management (VolPack) simplifies state handling.
+- **Limitations:** CUDA-specific APIs (S2) are not portable. OpenGL setup (S4) requires manual management of multiple texture units. WebGPU (S3) requires slice-by-slice upload in some implementations, which can be slow if not batched.
+- **When to use:** When rendering volumetric data on the GPU using raycasting or raymarching.
+- **When not to use:** For small volumes where CPU rendering is sufficient, or when using voxel-based rendering techniques that do not rely on texture sampling (e.g., marching cubes with explicit mesh generation, though textures may still be used for shading).
+
+## Background
+Volume texture creation is a fundamental step in GPU-based volume rendering, enabling the use of hardware texture units for efficient sampling of 3D scalar fields. The techniques described here span various APIs: CUDA (S2, unofficial), OpenGL (S4, unofficial), WebGPU (S3, unofficial), and VolPack (S7). The VTK approach (S1, unofficial) integrates volume rendering into the VTK pipeline. The methods evolved to support real-time interactive volume rendering, requiring efficient data transfer and structured memory layouts.
+
+## Sources
+[S1] bozorgi/VTKMultiVolumeRayCaster, https://github.com/bozorgi/VTKMultiVolumeRayCaster, fetched 2026-10-26 (unofficial)
+[S2] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
+[S3] dongeronimo/webgpu_volume_renderer_demo, https://github.com/dongeronimo/webgpu_volume_renderer_demo, fetched 2026-10-29 (unofficial)
+[S4] CISC/CMPE 454, GPU Volume Rendering, https://watkins.cs.queensu.ca/~jstewart/454/notes/44/44-gpu-volume-rendering.html, fetched 2026-10-30 (unofficial)
+[S5] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
+[S6] kvxy/exolands, https://github.com/kvxy/exolands, fetched 2026-10-27 (unofficial)
+[S7] VolPack User's Guide, http://www-graphics.stanford.edu/software/volpack/vp_userguide.html, fetched 2026-10-28

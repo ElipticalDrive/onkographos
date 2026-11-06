@@ -1,0 +1,58 @@
+--- v002.md
++++ v003.md
+@@ -1,40 +1,34 @@
+ # Buffer-Based Instancing (SSBO/Instance Buffers)
+ 
+-Also called: GPU-driven Voxel Instancing, SSBO Instancing, Structured Buffer Instancing
++Also called: GPU-Driven Instancing, Structured Buffer Instancing, SSBO-Driven Voxel Rendering
+ 
+ ## Overview
+-Buffer-Based Instancing is a volume rendering technique that renders voxel worlds by storing per-voxel attributes (position, material, orientation) in a GPU-accessible Shader Storage Buffer Object (SSBO) or Structured Buffer, and rendering them via a single instanced draw call using a shared base geometry primitive [S1, S2, S3, unofficial]. It solves the performance bottleneck of generating and uploading individual mesh geometry for millions of voxels by moving attribute resolution and transformation into the vertex shader. It is distinguished from [Surface-based Instancing with Noise Modulation](1582-surface-based-instancing-with-noise-modulation.md) by its explicit geometric rasterization of voxels rather than procedural surface approximation, and from [3D Gaussian Splatting via Instancing](1586-3d-gaussian-splatting-via-instancing.md) by its use of hard-edged cubic primitives rather than soft volumetric splats.
++Buffer-Based Instancing is a technique for rendering large-scale voxel or procedural scenes by storing per-object metadata (position, rotation, material, visibility) in GPU-accessible Shader Storage Buffer Objects (SSBOs) or Structured Buffers, rather than generating geometry on the CPU or using fixed-function instancing with limited attributes. It solves the bottleneck of transferring massive amounts of instance data and managing draw calls by allowing the vertex shader to fetch instance attributes directly from the SSBO during rendering. It differs from [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md) by decoupling the instance data structure from the specific procedural generation logic, allowing for more flexible data layouts, and from [GPU Instancing with Indirect Draw Calls](2205-gpu-instancing-with-indirect-draw-calls.md) by typically relying on a single draw call with an instance count derived from the buffer size or a separate counter buffer, rather than computing draw parameters entirely on the GPU via indirect commands.
+ 
+ ## Shared principles
+-The mechanism relies on three components: a shared base geometry buffer, an instance data buffer, and an instanced draw call.
++The family shares the fundamental mechanism of converting scalar field data into geometric primitives that are submitted to the graphics pipeline.
+ 
+-1.  **Base Geometry**: A static vertex buffer containing the vertices of a single primitive, typically a unit cube centered at the origin or $(0,0,0)$ to $(1,1,1)$. To support flat shading (unique normals per face), the cube is often defined with 24 vertices (4 vertices per face $\times$ 6 faces) rather than 8. An index buffer may define the triangles for the visible faces (e.g., 3 faces $\times$ 2 triangles $\times$ 3 vertices = 18 indices) or all 6 faces (36 indices).
+-2.  **Instance Data Buffer**: A GPU-accessible buffer (e.g., `StructuredBuffer` in HLSL, `std430` buffer in GLSL, or `ComputeBuffer` in Unity) stores per-instance attributes. Common attributes include:
+-    *   **Position**: 3D coordinates $(x, y, z)$.
+-    *   **Occupancy/Visibility**: A scalar flag (e.g., $w$-component of a `float4`) indicating if the voxel is solid or empty.
+-    *   **Material/Color**: Albedo, tint, or texture atlas index.
+-    *   **Orientation/Shape**: Rotation matrices or indices into a precomputed rotation table.
+-    *   **Scale**: Uniform or non-uniform scaling factors.
+-3.  **Instanced Draw Call**: A single draw command (e.g., `glDrawArraysInstanced`, `DrawInstanced`, or `DrawMeshInstancedIndirect`) is issued. The number of instances corresponds to the number of elements in the instance data buffer.
+-4.  **Shader Processing**:
+-    *   **Vertex Shader**: Retrieves per-instance data using `gl_InstanceID` (or equivalent). It transforms the base geometry vertices into world space using the instance's position, rotation, and scale. It may also perform early culling (e.g., discarding empty voxels) or face culling (determining visible faces based on camera position).
+-    *   **Fragment Shader**: Samples textures or computes colors based on the interpolated attributes passed from the vertex shader.
++1.  **Primitive Generation**: Each occupied voxel is represented by one or more geometric primitives. The most common representation is a cube (6 faces, 24 vertices for flat shading, or 8 vertices for shared shading) or a set of quads representing visible faces [S1, S3, S4, unofficial].
++2.  **Coordinate Transformation**: Voxel indices $(i, j, k)$ are transformed into world space. For a dense grid with bounds $P_{min}$ and $P_{max}$ and dimension $N_{dim}$, the world position $P_{world}$ of a voxel center is calculated as [S4, unofficial]:
++    $$
++    P_{world} = P_{min} + \frac{I_{voxel}}{N_{dim}} \times (P_{max} - P_{min})
++    $$
++    For unit voxels, this simplifies to $P_{world} = I_{voxel} \times V_{size}$, where $V_{size}$ is the voxel dimension [S2, S4, unofficial].
++3.  **Rasterization**: The generated primitives are transformed into clip space using the Model-View-Projection (MVP) matrix and rasterized. Visibility is determined by the depth buffer (z-buffer) or a back-to-front painter's algorithm if transparency is required [S2, S3, unofficial].
++4.  **Culling**: To manage performance, frustum culling is applied to exclude voxels outside the camera view [S2, S4, unofficial]. Back-face culling is often enabled to discard faces oriented away from the camera, calculated by the dot product of the view-space normal and the view vector [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md)
+-Replaces baked mesh geometry with a compact instance record per voxel, resolving position, color, and occlusion in the vertex shader using a shared cube template. It separates block data into an instance buffer and geometry data into a vertex buffer, applying transformations in the vertex shader. It uses procedural instancing to render voxel blocks as individual instances where position and clip distance are determined by a structured buffer. It builds on Buffer-Based Instancing by replacing per-voxel mesh generation with a single shared primitive and GPU-driven attribute resolution.
++Procedural instancing for voxel blocks replaces baked mesh geometry with a compact instance record per voxel, resolving position, color, and occlusion in the vertex shader using a shared cube template. It separates block data (position, texture, shape, rotation, tint) into an instance buffer and geometry data (vertices) into a vertex buffer, applying transformations in the vertex shader. The technique uses procedural instancing to render voxel blocks as individual instances where position and clip distance are determined by a structured buffer. It builds on [Buffer-Based Instancing (SSBO/Instance Buffers)](6501-buffer-based-instancing-ssbo-instance-buffers.md) by replacing per-voxel mesh generation with a single shared primitive and GPU-driven attribute resolution.
+ 
+ ### [Cube Rasterization via SSBO](2267-cube-rasterization-via-ssbo.md)
+-Explicitly rasterizes the visible geometry of voxels as triangles using a single large index buffer and an SSBO to drive instanced drawing. It is distinguished by its reliance on explicit triangle buffers and specific face-culling logic based on camera position relative to each voxel, rather than submitting all 6 faces and relying on depth testing or clip distances.
++Cube Rasterization via SSBO is a voxel rendering technique that explicitly rasterizes the visible geometry of voxels as triangles, rather than using point sprites or ray-marching. It solves the problem of rendering large voxel worlds with correct lighting and geometry by using a single large index buffer and a Shader Storage Buffer (SSBO) to drive instanced drawing. It is distinguished from [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md) by its reliance on explicit triangle buffers and from [Instanced Voxel Renderer](4102-instanced-voxel-renderer.md) by its specific face-culling logic based on camera position relative to each voxel.
+ 
+ ### [Instanced Voxel Renderer](4102-instanced-voxel-renderer.md)
+-Packs shape instances into large SSBOs, groups them into spatial chunks, and renders them via instanced drawing with per-chunk frustum culling. It differs by relying on explicit, pre-allocated instance buffers and chunk-based spatial partitioning rather than purely procedural generation during the draw call, introducing a hierarchical chunking structure to manage VRAM allocation and culling efficiency.
++A GPU-driven voxel rendering technique that packs shape instances into large Shader Storage Buffer Objects (SSBOs), groups them into spatial chunks, and renders them via instanced drawing with per-chunk frustum culling. It differs from [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md) by relying on explicit, pre-allocated instance buffers and chunk-based spatial partitioning rather than purely procedural generation during the draw call, and from [Cube Rasterization via SSBO](2267-cube-rasterization-via-ssbo.md) by introducing a hierarchical chunking structure to manage VRAM allocation and culling efficiency.
+ 
+ ## Background
+-The technique leverages the evolution of GPU compute and shader storage capabilities, specifically the introduction of Shader Storage Buffer Objects (SSBOs) in OpenGL 4.3 and equivalent structures in DirectX 11/12. It emerged as a solution to the memory bandwidth and draw call overhead limitations of traditional mesh-based voxel rendering, allowing for the rendering of millions of voxels with minimal CPU-GPU synchronization. It is widely used in voxel-based games and real-time visualization tools where dynamic world modification is required.
++Buffer-based instancing leverages the Shader Storage Buffer Object (SSBO) extension introduced in OpenGL 4.4 and Vulkan, allowing shaders to read and write to large buffers with minimal overhead compared to Uniform Buffer Objects (UBOs) which are limited in size and cache-friendly but not writable. This approach became standard for voxel engines (e.g., Minecraft clones, voxel editors) and large-scale procedural generation where the number of instances exceeds the limits of traditional instancing attribute slots. It allows for dynamic updates to instance data (e.g., changing voxel states) without rebuilding geometry buffers, as the vertex shader fetches the current state directly from the SSBO.
+ 
+-## Sources
+-[S1] Procedural Instancing for Voxel Blocks notes, URL, 2023
+-[S2] Cube Rasterization via SSBO notes, URL, 2023
+-[S3] Instanced Voxel Renderer notes, URL, 2023+## Sources

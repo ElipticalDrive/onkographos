@@ -3,16 +3,16 @@
 Also called: SVDAG, Sparse Voxel Directed Acyclic Graph
 
 ## Overview
-Sparse Voxel DAGs (SVDAGs) are a memory-efficient 3D data structure that extends the Sparse Voxel Octree (SVO) by merging identical subtrees into shared nodes, forming a Directed Acyclic Graph [S1, unofficial][S2]. While SVOs efficiently encode spatial sparsity, they store redundant copies of identical non-empty geometry, leading to high memory consumption at high resolutions [S2]. SVDAGs solve this by allowing multiple parent nodes to share pointers to the same child instance, achieving lossless compression of topological redundancy without decompression overhead during traversal [S2]. This sets them apart from siblings like [Compact pointer tree](844-compact-pointer-tree.md) or [OpenVDB (VDB)](1508-openvdb-vdb.md), which focus on spatial sparsity or pointer compression rather than structural isomorphism.
+Sparse Voxel DAGs (SVDAGs) are a memory-efficient 3D data structure that extends the Sparse Voxel Octree (SVO) by merging identical subtrees into shared nodes, forming a Directed Acyclic Graph [898-bottom-up-svo-to-dag-reduction.md]. While SVOs efficiently encode spatial sparsity, they store redundant copies of identical non-empty geometry, leading to high memory consumption at high resolutions [898-bottom-up-svo-to-dag-reduction.md]. SVDAGs solve this by allowing multiple parent nodes to share pointers to the same child instance, achieving lossless compression of topological redundancy without decompression overhead during traversal [898-bottom-up-svo-to-dag-reduction.md]. This sets them apart from siblings like [Compact pointer tree](844-compact-pointer-tree.md) or [OpenVDB (VDB)](1508-openvdb-vdb.md), which focus on spatial sparsity or pointer compression rather than structural isomorphism [G].
 
 ## Shared principles
-The core mechanism of the SVDAG family is the conversion of a tree structure into a DAG to eliminate duplicate subtrees.
+The core mechanism of the SVDAG family is the conversion of a tree structure into a DAG to eliminate duplicate subtrees [G].
 
-1.  **Node Identity:** Two nodes are considered identical if they have the same `childmask` (encoding the existence of 8 children) and identical pointers to their respective children [S1, unofficial][S2].
-2.  **Bottom-Up Reduction:** The reduction process iterates from the leaves up to the root. At each level, nodes are sorted by their identity key (childmask + child pointers) to group identical nodes together [S1, unofficial][S2].
-3.  **Compaction and Indirection:** Identical nodes are compacted into a single unique instance. An indirection table maps original node positions to their unique counterparts, and parent pointers are updated to reference these unique instances [S1, unofficial][S2].
-4.  **Memory Layout:** Nodes store a `childmask` (8-bit integer) followed by an array of pointers to non-empty children [S1, unofficial][S2]. Node size varies between 8 and 36 bytes depending on the number of children (1 to 8) [S1, unofficial][S2].
-5.  **Traversal:** Ray traversal leverages the DAG structure to traverse voxels in ray order, eliminating the need for contour intersection tests and distance maintenance required in standard SVOs [S1].
+1.  **Node Identity:** Two nodes are considered identical if they have the same `childmask` (encoding the existence of 8 children) and identical pointers to their respective children [898-bottom-up-svo-to-dag-reduction.md].
+2.  **Bottom-Up Reduction:** The reduction process iterates from the leaves up to the root. At each level, nodes are sorted by their identity key (childmask + child pointers) to group identical nodes together [898-bottom-up-svo-to-dag-reduction.md].
+3.  **Compaction and Indirection:** Identical nodes are compacted into a single unique instance. An indirection table maps original node positions to their unique counterparts, and parent pointers are updated to reference these unique instances [898-bottom-up-svo-to-dag-reduction.md].
+4.  **Memory Layout:** Nodes store a `childmask` (8-bit integer) followed by an array of pointers to non-empty children [898-bottom-up-svo-to-dag-reduction.md]. Node size varies between 8 and 36 bytes depending on the number of children (1 to 8) [898-bottom-up-svo-to-dag-reduction.md].
+5.  **Traversal:** Ray traversal leverages the DAG structure to traverse voxels in ray order, eliminating the need for contour intersection tests and distance maintenance required in standard SVOs [1147-sparse-voxel-dag-ray-traversal.md].
 
 ## Subtopics
 
@@ -29,8 +29,6 @@ A GPU-based traversal method for visibility queries and primary ray intersection
 A compression method that reuses structurally identical nodes by converting the Octree into a Directed Acyclic Octal Graph. Choose this as an alternative implementation of the DAG reduction principle.
 
 ## Background
-The Sparse Voxel DAG was introduced by Laine and Karras in 2010 as an extension of the Sparse Voxel Octree [S1, unofficial][S2]. It addresses the memory bottleneck of SVOs at high resolutions (e.g., $128K^3$ grids) by exploiting the fact that complex 3D scenes often contain repeated geometric patterns [S2]. The structure is widely used in high-performance ray tracing and volume rendering where memory bandwidth is a limiting factor.
+The Sparse Voxel DAG was introduced by Laine and Karras in 2010 as an extension of the Sparse Voxel Octree [G]. It addresses the memory bottleneck of SVOs at high resolutions (e.g., $128K^3$ grids) by exploiting the fact that complex 3D scenes often contain repeated geometric patterns [898-bottom-up-svo-to-dag-reduction.md].
 
 ## Sources
-[S1] Laine, S., & Karras, T. (2010). "Efficient Sparse Voxel Octrees." *IEEE Transactions on Visualization and Computer Graphics*.
-[S2] Laine, S., & Karras, T. (2010). "Progressive Refinement of Sparse Voxel Octrees." *High-Performance Graphics*.

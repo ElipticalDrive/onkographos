@@ -1,0 +1,98 @@
+Minimalist ray-tracing leveraging only acceleration structures – AnKi 3D Engine Dev Blog
+Skip to content
+AnKi has had ray-tracing support for quite some time. Beyond managing acceleration structures, the engine uses VK_KHR_ray_tracing_pipeline/DXR 1.0 for shadows (soon deprecated), indirect diffuse, and indirect specular. Upon initialization, the engine reads pre-compiled shader binary blobs and creates ray-tracing pipelines containing a number of ray-generation shaders, one or more miss shaders, and several hit shaders. Currently, two RT libraries are built: one for RT shadows and one for indirect RT. When the engine loads materials, the materials select the appropriate hit shaders, which are then forwarded to the shader binding table during rendering. This approach works well, as materials have the flexibility to choose different RT shaders, just as they choose different combinations of vertex and pixel shaders.
+Some of the problems with VK_KHR_ray_tracing_pipeline/DXR 1.0 are that it’s not widely supported on mobile, and when it is supported, performance might not be great. This motivates the work here: creating a low-quality (“potato” mode) RT implementation to see how it performs on indirect specular and indirect diffuse. But first, let’s look at how VK_KHR_ray_tracing_pipeline/DXR 1.0 works.
+RT using ray_tracing_pipeline/DXR 1.0
+Indirect RT uses hit shaders that are minimal in functionality-they simply return a thin G-Buffer. The ray-generation shaders then take that thin G-Buffer and perform the lighting calculations. Light shading does not happen in the hit shaders. To better understand, here is the ray payload used:
+```
+struct [raypayload] RtMaterialFetchRayPayload
+{
+	Vec3 m_diffuseColor : write(closesthit, miss): read(caller);
+	Vec3 m_worldNormal : write(closesthit, miss): read(caller);
+	Vec3 m_emission : write(closesthit, miss): read(caller);
+	F32 m_textureLod : write(caller): read(closesthit);
+	F32 m_rayT : write(closesthit, miss): read(caller);
+};
+```
+The thin G-Buffer contains only the diffuse color, the world normal of the surface hit, and the emission. The m_rayT is used to calculate the world position of the surface the ray intersected. The m_textureLod controls the texture LOD when the hit shaders read the material textures. For indirect specular, it’s a good idea to use detailed mipmaps, but for indirect diffuse, we can afford to cheat a lot and use low quality mipmaps.
+And here is a debug view of the diffuse color:
+The normals are built from the vertex positions:
+Implementing the “potato” ray-tracing
+Now that we understand how the ray_tracing_pipeline/DXR 1.0 is used, let’s look at the cheap alternative. The idea is simple: use ray queries/inline RT instead of ray_tracing_pipeline/DXR 1.0, and avoid using any textures when building the thin G-Buffer.
+The first change was for AnKi to compute the average color of textures, which happens at asset baking time. Materials then look at their textures and use either the average color of the diffuse texture, or, if there is no diffuse texture, a fallback path is used to infer it. The average diffuse color is then stored directly in the instance of the top-level acceleration structure (TLAS). The TLAS provides 24 bits that can be used for anything, which is enough to store the diffuse color. In Vulkan, the spare bits are in instanceCustomIndex:
+```
+struct AccelerationStructureInstance
+{
+	Mat3x4 m_transform;
+	U32 m_instanceCustomIndex : 24; // Custom value that can be accessed in the shaders.
+	U32 m_mask : 8;
+	U32 m_instanceShaderBindingTableRecordOffset : 24;
+	U32 m_flags : 8;
+	U64 m_accelerationStructureAddress;
+};
+```
+The instanceCustomIndex can be accessed inside shaders by calling the CommittedInstanceID() method of the RayQuery objects:
+```
+RayQuery<...> q;
+...
+U32 id = q.CommittedInstanceID();
+Uvec3 coloru = (UVec3)id >> UVec3(16, 8, 0);
+coloru &= 0xFF;
+Vec3 color = Vec3(coloru) / 255.0;
+```
+Now that we’ve solved the diffuse color, we need to figure out the normals. To achieve this we will be using VK_KHR_ray_tracing_position_fetch, a useful extension that provides the three positions of the primitive that was hit. Unfortunately DX12 doesn’t support something like this. Taking the cross product of those positions and transforming it to world space gives the face normal. Here’s a snippet showing how to use position fetch in HLSL:
+```
+// Define the inline SPIR-V in some header
+#define SpvRayQueryPositionFetchKHR 5391
+#define SpvOpRayQueryGetIntersectionTriangleVertexPositionsKHR 5340
+#define SpvRayQueryCandidateIntersectionKHR 0
+#define SpvRayQueryCommittedIntersectionKHR 1
+
+[[vk::ext_capability(SpvRayQueryPositionFetchKHR)]]
+[[vk::ext_extension("SPV_KHR_ray_tracing_position_fetch")]]
+[[vk::ext_instruction(SpvOpRayQueryGetIntersectionTriangleVertexPositionsKHR)]]
+float3 spvRayQueryGetIntersectionTriangleVertexPositionsKHR([[vk::ext_reference]] RayQuery<RAY_FLAG_FORCE_OPAQUE> query, int committed)[3];
+
+// Access the positions
+Vec3 positions[3] = spvRayQueryGetIntersectionTriangleVertexPositionsKHR(q, SpvRayQueryCommittedIntersectionKHR);
+Vec3 vertNormal = normalize(cross(positions[1] - positions[0], positions[2] - positions[1]));
+```
+To transform the normal to world space we will making use of the TLAS once again to access the transform of the instance:
+```
+Vec3 worldNormal = normalize(mul(q.CommittedObjectToWorld3x4(), Vec4(vertNormal, 0.0)));
+```
+What about the emission? A solution hasn’t been implemented yet, but one idea is to reserve one bit in instanceCustomIndex as a flag that switches the remaining 23 bits from storing diffuse color to storing tone-mapped emission. Not perfect, but potentially workable.
+One important thing to note is that with “potato” RT, there is no need for shader binding tables. This can save some CPU or GPU time, depending on where it’s built. In AnKi, it’s built on the GPU.
+And this is how the diffuse color looks in “potato” RT:
+Ray-tracing pipeline VS “potato” ray-tracing
+Now let’s look at the full blown indirect diffuse term. First we have the RT pipeline:
+And next is the “potato” RT:
+Not much difference really in Sponza but that doesn’t mean that cheating can work on every scene.
+Now let’s look at reflections. We hacked the roughness to be zero and removed the normal maps to create the worst possible reflection scenario-basically making everything as smooth as possible.
+First the RT pipeline:
+And the reflections in “potato” RT:
+Once again, they look similar. The primary reason is that AnKi uses screen-space reflections, which add some detail to the reflections.
+Performance
+And now some numbers, taken from an NVIDIA 4080 running at 4K native. This time, we’re not using Sponza but a more complex scene: Bistro. Unfortunately, it wasn’t possible to gather numbers on AMD due to a driver bug (VK_KHR_ray_tracing_position_fetch not working with ray queries).
+As we can see the “potato” RT is faster but nothing crazy.
+Conclusion
+We presented a method for implementing ray tracing using only ray queries and data stored directly in the top-level acceleration structure-completely eliminating ray pipelines, shader binding tables, and textures. Despite its simplicity, this approach produces surprisingly promising results for indirect diffuse lighting, thanks to the low-frequency nature of indirect diffuse. If emission is properly handled then the results would be even better. Reflections remain more challenging, but in many scenes, creative approximations can still yield visually acceptable results. Overall, this “potato” RT approach demonstrates that lightweight ray tracing is feasible and with often acceptable quality.
+Share this:
+Share on X (Opens in new window)
+X
+Share on Facebook (Opens in new window)
+Facebook
+Related
+One Reply to “Minimalist ray-tracing leveraging only acceleration structures”
+Thanks for the article! One quick thing I spotted — the normal transform should use the inverse transpose of the object-to-world matrix instead of the object-to-world matrix; the difference will be noticeable on objects with skews or non-uniform scaling. In HLSL the inverse transpose is available via CommittedWorldToObject4x3:
+“`
+Vec3 worldNormal = normalize(mul(q.CommittedWorldToObject4x3(), vertNormal).xyz);
+“`
+In GLSL I typically use
+“`
+vec3 worldNormal = normalize((vertNormal * rayQueryGetIntersectionWorldToObjectEXT(rayQuery, true)).xyz);
+“`
+Thanks again!
+Reply
+Leave a Reply Cancel reply
+Loading Comments...

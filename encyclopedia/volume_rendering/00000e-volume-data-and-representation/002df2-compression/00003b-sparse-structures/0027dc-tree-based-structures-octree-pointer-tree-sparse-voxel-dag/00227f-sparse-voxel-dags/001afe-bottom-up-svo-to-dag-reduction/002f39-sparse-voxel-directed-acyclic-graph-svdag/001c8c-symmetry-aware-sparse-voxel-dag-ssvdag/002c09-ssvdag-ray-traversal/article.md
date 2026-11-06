@@ -1,19 +1,19 @@
 # SSVDAG Ray Traversal
 
-Also called: Optimized Octree DDA traversal for SSVDAGs, SSVDAG Rendering, SSVDAG Traversal, Symmetry-aware Sparse Voxel DAG Traversal
+Also called: SSVDAG Rendering, SSVDAG Traversal, Symmetry-aware Sparse Voxel DAG Traversal
 
 ## Overview
 SSVDAG Ray Traversal is a shader-based ray traversal algorithm designed for Symmetry-aware Sparse Voxel Directed Acyclic Graphs (SSVDAGs) [S1, unofficial]. It solves the problem of efficiently rendering high-resolution, compressed voxel data on the GPU by handling variable-size tagged pointers and symmetry transformations (planar reflections) during the traversal process [S1, unofficial]. It sets itself apart from standard SVDAG traversal by supporting 0, 2, and 4-byte pointers and applying mirror masks to access child nodes, while distinguishing itself from sibling methods by its specific integration of Level of Detail (LOD) and beam optimization tailored to the SSVDAG memory layout [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, maximum traversal distance $t_{max}$, SSVDAG data stored in GPU buffers, camera projection matrix (for LOD).
-*   **Output:** Intersection distance $t$ or `NO_INTERSECTION`.
+*   **Input:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, maximum traversal distance $t_{max}$, SSVDAG data stored in GPU buffers, camera projection matrix (for LOD) [S1, unofficial].
+*   **Output:** Intersection distance $t$ or `NO_INTERSECTION` [S1, unofficial].
 
 **Data Structures:**
 *   **SSVDAG Buffer:** Stored in `GL_R16UI` texture buffer objects for inner nodes and leaves [S1, unofficial]. For datasets exceeding buffer addressing limits (e.g., 64K$^3$), 3D textures are used as a fallback [S1, unofficial].
-*   **Stack:** Stores pairs of `(node_index, mirror_mask, level, inner_header)` [S1, unofficial]. The `inner_header` is pushed to avoid refetching when moving up from a child [S1, unofficial].
-*   **Tagged Pointers:** Variable size (0, 2, or 4 bytes). The 3 highest bits of a non-zero pointer encode the transformation code (mirror mask) [S1, unofficial].
+*   **Stack:** Stores tuples of `(node_index, mirror_mask, level, inner_header)` [S1, unofficial]. The `inner_header` is pushed to avoid refetching when moving up from a child [S1, unofficial].
+*   **Tagged Pointers:** Variable size (0, 2, or 4 bytes) [S1, unofficial]. The 3 highest bits of a non-zero pointer encode the transformation code (mirror mask) [S1, unofficial].
 
 **Parameters:**
 *   `MAX_LEVEL`: Maximum depth of the tree.
@@ -25,7 +25,7 @@ SSVDAG Ray Traversal is a shader-based ray traversal algorithm designed for Symm
 1.  **Initialization:**
     *   Set `mirror_mask = 0`.
     *   Set `level = 0`.
-    *   Set `cell_size` to the root voxel size.
+    *   Set `cell_size` to the root voxel size [S1, unofficial].
     *   Compute initial `proj_factor` from the camera perspective transformation [S1, unofficial].
 
 2.  **Traversal Loop:**
@@ -37,7 +37,7 @@ SSVDAG Ray Traversal is a shader-based ray traversal algorithm designed for Symm
         *   If `level < MAX_LEVEL - 1`:
             *   Fetch `inner_hdr` using `fetch_tagged_ptr(node_idx, mirrored_voxidx)` [S1, unofficial].
             *   `fetch_tagged_ptr` computes the offset by summing the sizes of pointers $[0, i-1]$ using a manually unrolled loop, as pointers are 0, 2, or 4 bytes [S1, unofficial].
-            *   Extract the transformation code `m` from the 3 highest bits of the fetched pointer.
+            *   Extract the transformation code `m` from the 3 highest bits of the fetched pointer [S1, unofficial].
             *   Update `mirror_mask ^= m` [S1, unofficial].
             *   Push `(node_idx, mirror_mask, level, inner_hdr)` to the stack [S1, unofficial].
             *   Increment `level`.
@@ -56,8 +56,8 @@ SSVDAG Ray Traversal is a shader-based ray traversal algorithm designed for Symm
     *   Use `mirrored_voxidx` to access occupancy bits or child pointers [S1, unofficial].
 
 4.  **Backtracking:**
-    *   If the stack is not empty, pop `(prev_node_idx, prev_mirror_mask, prev_level, prev_inner_hdr)`.
-    *   Restore `mirror_mask = prev_mirror_mask`.
+    *   If the stack is not empty, pop `(prev_node_idx, prev_mirror_mask, prev_level, prev_inner_hdr)` [S1, unofficial].
+    *   Restore `mirror_mask = prev_mirror_mask` [S1, unofficial].
     *   Restore `level = prev_level`.
     *   Update `cell_size` based on the restored level [S1, unofficial].
 
@@ -66,8 +66,8 @@ SSVDAG Ray Traversal is a shader-based ray traversal algorithm designed for Symm
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def traverse_ssvdag_ray(ray_o, ray_d, t_max, ssvdag_buffer, camera_matrix):
-    mirror_mask = 0
+def traverse_ssvdag_ray(ray_o, ray_d, t_max, ssvdag_buffer, camera_matrix, root_voxel_size, max_level):
+    mirror_mask = (0, 0, 0)
     level = 0
     cell_size = root_voxel_size
     proj_factor = compute_proj_factor(ray_o, ray_d, camera_matrix, cell_size)
@@ -75,47 +75,43 @@ def traverse_ssvdag_ray(ray_o, ray_d, t_max, ssvdag_buffer, camera_matrix):
     
     while True:
         # LOD Check
-        if proj_factor < 1.0: # 1 voxel/pixel threshold
+        if proj_factor < 1.0:
             return NO_INTERSECTION
             
-        # DDA Step
+        # DDA Step to find next node
         t, node_idx, voxidx = dda_step(ray_o, ray_d, t_max, cell_size, level)
-        
         if t > t_max:
             return NO_INTERSECTION
             
-        # Check if we are exiting the current node
+        # Stack Optimization: do not push if next DDA step exits node
         if should_pop(stack, level, cell_size, ray_o, ray_d, voxidx):
             if not stack:
                 return NO_INTERSECTION
             prev_node_idx, prev_mirror_mask, prev_level, prev_inner_hdr = stack.pop()
             mirror_mask = prev_mirror_mask
             level = prev_level
-            cell_size = get_cell_size_for_level(level)
+            cell_size = root_voxel_size * (0.5 ** level)
             continue
             
-        # Fetch Node
-        if level < MAX_LEVEL - 1:
+        # Fetch Node Data
+        if level < max_level - 1:
             # Inner Node
-            # Compute mirrored index for pointer access
             mirrored_voxidx = mirror_index(mirror_mask, voxidx, S=2)
             
             # Fetch tagged pointer
-            # fetch_tagged_ptr sums sizes of pointers [0, i-1] to find offset
-            # Pointer size is 0, 2, or 4 bytes
             tagged_ptr, child_idx = fetch_tagged_ptr(ssvdag_buffer, node_idx, mirrored_voxidx)
             
             if tagged_ptr == 0:
-                # Empty child, continue DDA
                 continue
                 
             # Extract transformation code (3 highest bits)
             m = (tagged_ptr >> 29) & 0x7
-            mirror_mask ^= m
+            m_vec = ((m >> 2) & 1, (m >> 1) & 1, m & 1)
+            mirror_mask = tuple(a ^ b for a, b in zip(mirror_mask, m_vec))
             
             # Push state
             inner_hdr = fetch_inner_hdr(ssvdag_buffer, node_idx)
-            stack.push((node_idx, mirror_mask, level, inner_hdr))
+            stack.append((node_idx, mirror_mask, level, inner_hdr))
             
             level += 1
             cell_size *= 0.5
@@ -137,36 +133,66 @@ def traverse_ssvdag_ray(ray_o, ray_d, t_max, ssvdag_buffer, camera_matrix):
             if leaf_data.occupied:
                 return t
             else:
-                # Leaf empty, backtrack
                 if not stack:
                     return NO_INTERSECTION
                 prev_node_idx, prev_mirror_mask, prev_level, prev_inner_hdr = stack.pop()
                 mirror_mask = prev_mirror_mask
                 level = prev_level
-                cell_size = get_cell_size_for_level(level)
+                cell_size = root_voxel_size * (0.5 ** level)
                 continue
 
 def mirror_index(M, v, S):
-    # M is 3-bit mirroring vector, v is child coordinates, S is cubical size
-    # Formula: ((1, 1, 1) - 2 * M) * v + M * (S - 1)
-    return ((1, 1, 1) - 2 * M) * v + M * (S - 1)
+    # Component-wise application of: ((1,1,1) - 2*M)*v + M*(S-1)
+    return tuple((1 - 2*m)*v_i + m*(S - 1) for m, v_i in zip(M, v))
+
+def dda_step(ray_o, ray_d, t_max, cell_size, level):
+    # Standard 3D DDA advancing ray by one cell boundary
+    # Returns (t, node_idx, voxidx)
+    return 0.0, 0, (0, 0, 0)
+
+def dda_down(ray_o, ray_d, cell_size, level):
+    # Advances ray within leaf node (4x4 grid)
+    return 0.0, (0, 0, 0)
+
+def should_pop(stack, level, cell_size, ray_o, ray_d, voxidx):
+    # Returns True if the next DDA step would exit the current node
+    return False
+
+def compute_proj_factor(ray_o, ray_d, camera_matrix, cell_size):
+    # Computes projected voxel size in pixels from camera projection
+    return 1.0
 
 def fetch_tagged_ptr(buffer, node_idx, voxel_idx):
     # Manually unrolled loop to sum sizes of pointers [0, voxel_idx-1]
-    # Pointers are 0, 2, or 4 bytes
     offset = 0
     for i in range(voxel_idx):
         ptr = read_pointer(buffer, node_idx, i)
         if ptr == 0:
             offset += 0
-        elif ptr < 0x400000: # 2-byte pointer range
+        elif ptr < 0x400000:
             offset += 2
         else:
             offset += 4
-    # Read the actual pointer at offset
     tagged_ptr = read_tagged_ptr_at_offset(buffer, node_idx, offset)
-    child_idx = tagged_ptr & 0x1FFFFFF # Lower 27 bits
+    child_idx = tagged_ptr & 0x1FFFFFF
     return tagged_ptr, child_idx
+
+def read_pointer(buffer, node_idx, i):
+    # Reads raw pointer value from buffer at node_idx, index i
+    return 0
+
+def read_tagged_ptr_at_offset(buffer, node_idx, offset):
+    # Reads tagged pointer from buffer at computed offset
+    return 0
+
+def fetch_inner_hdr(buffer, node_idx):
+    # Fetches inner node header data
+    return {}
+
+def fetch_leaf_data(buffer, node_idx, voxel_idx):
+    # Fetches leaf node occupancy/data
+    class LeafData: occupied = False
+    return LeafData()
 ```
 
 **Edge Cases and Pitfalls:**
@@ -176,8 +202,6 @@ def fetch_tagged_ptr(buffer, node_idx, voxel_idx):
 *   **Buffer Limits:** For very large datasets (e.g., 64K$^3$), `GL_R16UI` texture buffer objects may exceed addressing limits, requiring a fallback to 3D textures [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of visited nodes. With LOD and beam optimization, performance scales significantly better with distance [S1, unofficial].
-*   **Memory Complexity:** Depends on the SSVDAG compression ratio. SSVDAG uses `GL_R16UI` buffers, reducing memory footprint compared to `GL_R32UI` used by SVDAG/USSVDAG [S1, unofficial].
 *   **Performance:**
     *   Crytek Sponza (64K$^3$, 720p): ~100M primary rays/s without optimizations. With LOD, ~300M rays/s. With LOD + beam optimization, performance doubles in walkthroughs [S1, unofficial].
     *   Boeing 777 (64K$^3$): 80M to 300M primary rays/s depending on viewpoint [S1, unofficial].
@@ -185,11 +209,11 @@ def fetch_tagged_ptr(buffer, node_idx, voxel_idx):
 *   **Overhead:**
     *   Reflections: 1-2% overhead compared to SVDAG [S1, unofficial].
     *   Pointer Compression: 14-16% overhead compared to SVDAG due to the complexity of variable-size pointer access [S1, unofficial].
-*   **Strengths:** High compression ratio, real-time rendering capability for massive scenes, GPU-friendly traversal.
-*   **Limitations:** Variable-size pointer access is more costly than fixed-size pointers. LOD and beam optimization add complexity to the traversal logic.
+*   **Strengths:** High compression ratio, real-time rendering capability for massive scenes, GPU-friendly traversal [S1, unofficial].
+*   **Limitations:** Variable-size pointer access is more costly than fixed-size pointers [S1, unofficial].
 
 ## Background
-SSVDAG Ray Traversal was introduced by Alberto Jaspe et al. in 2017 as part of the SSVDAG (Symmetry-aware Sparse Voxel DAG) framework [S1, unofficial]. It extends the original SVDAG traversal [Kämpe et al. 2013] by incorporating symmetry detection and variable-bitrate pointer compression. The method is designed for compression-domain tracing of high-resolution geometric scenes, enabling real-time rendering from GPU-resident data [S1, unofficial]. It builds on the optimization techniques of Laine and Karras [Laine and Karras 2011] for LOD and beam optimization [S1, unofficial].
+SSVDAG Ray Traversal was introduced by Alberto Jaspe et al. in 2017 as part of the SSVDAG (Symmetry-aware Sparse Voxel DAG) framework [S1, unofficial]. It extends the original SVDAG traversal [Kämpe et al. 2013] by incorporating symmetry detection and variable-bitrate pointer compression [S1, unofficial]. The method is designed for compression-domain tracing of high-resolution geometric scenes, enabling real-time rendering from GPU-resident data [S1, unofficial]. It builds on the optimization techniques of Laine and Karras [Laine and Karras 2011] for level-of-detail and beam optimization [S1, unofficial].
 
 ## Sources
 [S1] Symmetry-aware Sparse Voxel DAGs (SSVDAGs) for compression-domain tracing of high-resolution geometric scenes, https://albertojaspe.net/publications/2017-JCGT-ssvdags.pdf, fetched 2026-10-24 (unofficial)

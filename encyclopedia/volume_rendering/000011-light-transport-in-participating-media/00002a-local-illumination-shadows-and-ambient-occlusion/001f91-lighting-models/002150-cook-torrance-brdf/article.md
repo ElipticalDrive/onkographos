@@ -1,234 +1,173 @@
 # Cook-Torrance BRDF
 
-Also called: GGX Cook-Torrance, Microfacet BRDF, PBR Lighting Model
+Also called: Cook-Torrance PBR Lighting Model, GGX Cook-Torrance, Microfacet BRDF, Microfacet PBR, PBR Lighting Model
 
 ## Overview
-The Cook-Torrance BRDF is a physically based rendering (PBR) lighting model for fully opaque materials that determines how light is reflected by a surface given its microgeometry and material type (metal or dielectric) [S1][S2, unofficial]. It distinguishes between metals and dielectrics, conserves energy, and accurately represents real-world reflectance compared to older models like Phong [S1]. It sets itself apart from siblings like [Shading models](837-shading-models.md) by explicitly modeling surface roughness via microfacets rather than empirical exponents, and from [Whitted-Style Shading with Diffuse/Glossy Materials](4896-whitted-style-shading-with-diffuse-glossy-materials.md) by providing a continuous, physically grounded specular lobe rather than discrete reflection rays.
+
+The Cook-Torrance BRDF is a physically based rendering (PBR) lighting model that uses the microfacet surface model to accurately represent real-world reflectance, distinguishing between metals and dielectrics [S1][S3, unofficial]. It solves the problem of unrealistic shading found in older models like Phong by ensuring energy conservation and modeling surface roughness via statistical microfacet alignment [S1][S3, unofficial]. It sets itself apart from siblings like [Shading models](837-shading-models.md) by explicitly separating diffuse and specular lobes with energy-conserving weights and using the Fresnel effect to vary reflectivity based on viewing angle [S1][S3, unofficial].
 
 ## How it works
-The model computes the outgoing radiance $L_o$ as the sum of emitted light $L_e$ and reflected light, where reflected light is the integral of incoming light $L_i$ multiplied by the bidirectional reflectance distribution function (BRDF) $f_r$ and the cosine of the incident angle [S1]:
 
-$$
-L_o = L_e + \int_{\Omega} f_r L_i (\omega_i \cdot n) d\omega_i
-$$
+**Inputs and Outputs:**
+*   **Inputs:** Surface normal $\mathbf{n}$, view vector $\mathbf{v}$, light direction $\mathbf{l}$ (pointing from surface to light), surface albedo $c$ (color), roughness parameter $\alpha$, base reflectivity $F_0$, and light radiance $L_i$.
+*   **Outputs:** Outgoing radiance $L_o$.
 
-where $\Omega$ is the unit hemisphere aligned with the surface normal $n$, $\omega_i$ is the incoming light direction, and $\omega_o$ is the outgoing (view) direction [S1]. The BRDF $f_r$ is a weighted sum of a diffuse term and a specular term [S1]:
+**Data Structures:**
+No specific complex data structures are required beyond standard vector types for $\mathbf{n}, \mathbf{v}, \mathbf{l}, \mathbf{h}$ and scalar floats for $\alpha, F_0, c$.
 
-$$
-f_r = k_d f_{Lambert} + k_s f_{CookTorrance}
-$$
+**Steps:**
 
-where $k_d$ and $k_s$ are the weights for diffuse and specular components, respectively, constrained by $k_d + k_s = 1$ to ensure energy conservation [S1]. The diffuse term is the surface albedo $c$ normalized for integration over the hemisphere:
+1.  **Calculate Halfway Vector:** Compute the normalized halfway vector $\mathbf{h}$ between the light direction $\mathbf{l}$ and view direction $\mathbf{v}$ [S1, S2]:
+    $$ \mathbf{h} = \frac{\mathbf{l} + \mathbf{v}}{\|\mathbf{l} + \mathbf{v}\|} $$
 
-$$
-f_{Lambert} = \frac{c}{\pi}
-$$
+2.  **Compute Diffuse Weight ($k_d$) and Specular Weight ($k_s$):**
+    To ensure energy conservation, the weights must sum to 1. The specular weight $k_s$ is determined by the Fresnel term at normal incidence (often approximated by $F_0$ for metals or a constant for dielectrics), and the diffuse weight is the remainder [S1, S2]:
+    $$ k_s = F(\mathbf{h}, \mathbf{v}, F_0) \quad \text{(approximation for energy split, see Note 1)} $$
+    $$ k_d = 1 - k_s $$
+    *Note 1: Sources [S1, S2] state $k_d = 1 - F$ where $F$ is the Fresnel term. In many implementations, $k_s$ is treated as the specular albedo contribution, often derived from $F_0$ or the full Fresnel term. The sources explicitly link $k_d$ to $(1-F)$.*
 
-The specular term $f_{CookTorrance}$ is defined as the product of three functions—Normal Distribution Function ($D$), Fresnel Function ($F$), and Geometry Function ($G$)—divided by four times the dot products of the normal with the outgoing and incoming directions [S1]:
+3.  **Compute Diffuse Term ($f_{Lambert}$):**
+    The diffuse reflectance is the surface albedo $c$ divided by $\pi$ [S1, S2]:
+    $$ f_{Lambert} = \frac{c}{\pi} $$
 
-$$
-f_{CookTorrance} = \frac{D F G}{4 (\omega_o \cdot n) (\omega_i \cdot n)}
-$$
+4.  **Compute Normal Distribution Function ($D$):**
+    Using the Trowbridge-Reitz GGX approximation, given $\mathbf{n}, \mathbf{h}$, and roughness $\alpha$ [S1, S2][S3, unofficial]:
+    $$ D_{GGX_{TR}}(\mathbf{n}, \mathbf{h}, \alpha) = \frac{\alpha^2}{\pi \left( (\mathbf{n} \cdot \mathbf{h})^2 (\alpha^2 - 1) + 1 \right)^2} $$
+    *Note: Source [S3, unofficial] defines $\alpha = \text{roughness}^2$. Source [S1, S2] use $\alpha$ directly as the roughness parameter in the formula structure provided. We follow the explicit formula in [S1, S2] where $\alpha$ is the roughness parameter.*
 
-### Inputs and Outputs
-**Inputs:**
-*   Surface normal $n$ (unit vector).
-*   Incoming light direction $\omega_i$ (unit vector, pointing towards the surface).
-*   Outgoing view direction $\omega_o$ (unit vector, pointing towards the camera).
-*   Roughness parameter $\alpha$ (scalar, typically $0 \le \alpha \le 1$).
-*   Base reflectivity $F_0$ (vector, typically RGB).
-*   Surface albedo $c$ (vector, typically RGB).
-*   Light radiance $L_i$ (vector).
-*   Emitted light $L_e$ (vector).
+5.  **Compute Geometry Function ($G$):**
+    Using Schlick-GGX with Smith's method for both view and light vectors [S1, S2][S3, unofficial]:
+    $$ G(\mathbf{n}, \mathbf{v}, \mathbf{l}, \alpha) = G_{Schlick}(\mathbf{n}, \mathbf{v}, k) \cdot G_{Schlick}(\mathbf{n}, \mathbf{l}, k) $$
+    Where the geometry parameter $k$ is derived from roughness $\alpha$ [S1, S2][S3, unofficial]:
+    $$ k = \frac{(\alpha + 1)^2}{8} $$
+    And the Schlick geometry term for a vector $\mathbf{i}$ (either $\mathbf{v}$ or $\mathbf{l}$) is [S1, S2][S3, unofficial]:
+    $$ G_{Schlick}(\mathbf{n}, \mathbf{i}, k) = \frac{\mathbf{n} \cdot \mathbf{i}}{(\mathbf{n} \cdot \mathbf{i})(1 - k) + k} $$
 
-**Outputs:**
-*   Outgoing radiance $L_o$ (vector).
+6.  **Compute Fresnel Function ($F$):**
+    Using the Fresnel-Schlick approximation [S1, S2][S3, unofficial]:
+    $$ F(\mathbf{h}, \mathbf{v}, F_0) = F_0 + (1 - F_0)(1 - \mathbf{h} \cdot \mathbf{v})^5 $$
+    Where $F_0$ is the base reflectivity. Default $F_0 = 0.04$ for non-metals (dielectrics) and $F_0 = c$ (albedo) for metals [S1, S2].
 
-### Data Structures
-No specific complex data structures are required beyond standard vector types (vec3, vec4) and scalar floats. The light attenuation model uses coefficients $A_{Constant}, A_{Linear}, A_{Quadratic}$ and light radius $r$ [S1].
+7.  **Compute Cook-Torrance Specular Term ($f_{CookTorrance}$):**
+    $$ f_{CookTorrance} = \frac{D \cdot F \cdot G}{4 (\omega_o \cdot \mathbf{n}) (\omega_i \cdot \mathbf{n})} $$
+    Where $\omega_o$ is the outgoing direction (view vector $\mathbf{v}$, but typically treated as the reflection direction in BRDF evaluation, though sources [S1, S2] use $\omega_o$ and $\omega_i$ in the denominator. In the context of the integral, $\omega_i$ is the light direction $\mathbf{l}$ and $\omega_o$ is the view direction $\mathbf{v}$ projected into the hemisphere. Note: The dot products in the denominator are $\mathbf{n} \cdot \mathbf{v}$ and $\mathbf{n} \cdot \mathbf{l}$ [S1, S2].
 
-### Steps
-1.  **Calculate Halfway Vector:** Compute the normalized halfway vector $h$ between the light direction $l$ (equivalent to $-\omega_i$ in some conventions, but here defined as incoming light vector) and view vector $v$ (equivalent to $\omega_o$) [S1]:
-    $$
-    h = \frac{l + v}{\|l + v\|}
-    $$
-2.  **Compute Normal Distribution Function (D):** Use the Trowbridge-Reitz GGX approximation. The roughness parameter $\alpha$ is often remapped from a user-facing roughness value $r_{user}$ as $\alpha = r_{user}^2$ [S2, unofficial]. The formula is:
-    $$
-    D_{GGX_{TR}}(n, h, \alpha) = \frac{\alpha^2}{\pi ((n \cdot h)^2 (\alpha^2 - 1) + 1)^2}
-    $$
-    Note: Source [S1] provides the denominator as $\pi (n \cdot h)^2 (\alpha^2 - 1) + 1$ without the square on the outer parenthesis, but standard GGX/Trowbridge-Reitz formulation [S1, S2 context] implies the squared term in the denominator's main bracket or the square of the whole denominator term. Source [S1] explicitly writes: $D_{GGX_{TR}}(n, h, \alpha) = \frac{\alpha^2}{\pi (n \cdot h)^2 (\alpha^2 - 1) + 1}$. However, standard GGX is $\frac{\alpha^2}{\pi ((n \cdot h)^2 (\alpha^2 - 1) + 1)^2}$. Source [S1] formula (22) is written as: $D_{GGX_{TR}}(n, h, \alpha) = \frac{\alpha^2}{\pi (n \cdot h)^2 (\alpha^2 - 1) + 1}$. This appears to be a typo in the source text missing the square on the denominator's main term or the parenthesis. Standard implementation uses the squared denominator. We follow the standard GGX form for correctness, noting the source discrepancy [S1].
-3.  **Compute Geometry Function (G):** Use Schlick-GGX with Smith's method. First, compute the roughness parameter $k$ from $\alpha$:
-    $$
-    k = \frac{(\alpha + 1)^2}{8}
-    $$
-    Then compute the geometry attenuation for a vector $i$ (where $i$ is either $v$ or $l$):
-    $$
-    G_{Schlick}(n, i, k) = \frac{n \cdot i}{(n \cdot i)(1 - k) + k}
-    $$
-    The total geometry function is the product of the view and light terms:
-    $$
-    G(n, v, l, \alpha) = G_{Schlick}(n, v, k) G_{Schlick}(n, l, k)
-    $$
-4.  **Compute Fresnel Function (F):** Use the Fresnel-Schlick approximation. $F_0$ is the base reflectivity (0.04 for non-metals, albedo for metals) [S1]:
-    $$
-    F(h, v, F_0) = F_0 + (1 - F_0)(1 - h \cdot v)^5
-    $$
-5.  **Combine Terms:** Calculate the specular BRDF component:
-    $$
-    f_{specular} = \frac{D F G}{4 (\omega_o \cdot n) (\omega_i \cdot n)}
-    $$
-    Calculate the diffuse BRDF component:
-    $$
-    f_{diffuse} = \frac{c}{\pi}
-    $$
-    Determine weights. The diffuse weight $k_d$ is often derived from energy conservation as $1 - F$ (or $1 - F_{average}$), and $k_s = F$ [S1]. Specifically, $k_d = 1 - F$ and $k_s = F$ ensures conservation [S1].
-    $$
-    f_r = (1 - F) \frac{c}{\pi} + \frac{D F G}{4 (\omega_o \cdot n) (\omega_i \cdot n)}
-    $$
-6.  **Calculate Light Radiance $L_i$:** If using a point light with polynomial attenuation, calculate $L_i$ using light color $l_{dehomogenized}$, distance $d$, light radius $r$, and attenuation coefficients $A_{Constant}, A_{Linear}, A_{Quadratic}$ [S1]:
-    $$
-    L_i = l_{dehomogenized} \frac{A_{Constant} + d A_{Linear} + d^2 A_{Quadratic}}{r - d}
-    $$
-    where $l_{dehomogenized}$ is the light color vector $(l_r, l_g, l_b, l_w)$ dehomogenized to RGB [S1].
-7.  **Calculate Outgoing Light:** Integrate over the hemisphere (or sum for discrete lights):
-    $$
-    L_o = L_e + \sum_{lights} f_r L_i (\omega_i \cdot n)
-    $$
+8.  **Combine Terms:**
+    The total BRDF $f_r$ is [S1, S2]:
+    $$ f_r = k_d f_{Lambert} + k_s f_{CookTorrance} $$
 
-### Pseudocode
+9.  **Calculate Outgoing Light ($L_o$):**
+    The outgoing radiance is the sum of emitted light $L_e$ and the integral of incoming light $L_i$ multiplied by the BRDF and the cosine of the incident angle [S1, S2][S3, unofficial]:
+    $$ L_o = L_e + \int_{\Omega} f_r L_i (\omega_i \cdot \mathbf{n}) d\omega_i $$
+    For a single point light source, this simplifies to evaluating the BRDF at the light direction and multiplying by the light's radiance $L_i$ and the cosine term [S1]:
+    $$ L_o = L_e + f_r L_i (\mathbf{l} \cdot \mathbf{n}) $$
+
+10. **Light Radiance Calculation ($L_i$):**
+    If using the specific polynomial attenuation model from [S1, S2]:
+    $$ L_i = \left( \frac{l_{dehomogenized}}{A_{Constant} + d A_{Linear} + d^2 A_{Quadratic}} \right) \left( \frac{r - d}{r} \right) $$
+    Where $l_{dehomogenized} = [l_r/l_w, l_g/l_w, l_b/l_w]$ is the light color vector, $d$ is distance, $r$ is light radius, and $A$ are attenuation coefficients [S1, S2].
+
+**Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def cook_torrance_brdf(n, l, v, roughness, F0, albedo, Le, lights):
-    """
-    Compute outgoing radiance using Cook-Torrance BRDF.
-    
-    Args:
-        n: Surface normal (vec3)
-        l: Light direction vector (vec3, pointing TO surface)
-        v: View direction vector (vec3, pointing TO camera)
-        roughness: Scalar roughness parameter (0.0 to 1.0)
-        F0: Base reflectivity (vec3)
-        albedo: Surface color/albedo (vec3)
-        Le: Emitted light (vec3)
-        lights: List of light objects with pos, color, radius, attenuation_coeffs
-        
-    Returns:
-        Lo: Outgoing radiance (vec3)
-    """
-    # Normalize vectors
+def cook_torrance_brdf(n, v, l, albedo, roughness, F0, Li, Le):
+    # 1. Normalize inputs
     n = normalize(n)
-    l = normalize(l)
     v = normalize(v)
+    l = normalize(l)
     
-    # Halfway vector
+    # 2. Halfway vector
     h = normalize(l + v)
     
-    # Dot products
-    n_dot_l = dot(n, l)
-    n_dot_v = dot(n, v)
-    n_dot_h = dot(n, h)
-    h_dot_v = dot(h, v)
+    # 3. Dot products
+    n_dot_v = max(dot(n, v), 0.0)
+    n_dot_l = max(dot(n, l), 0.0)
+    n_dot_h = max(dot(n, h), 0.0)
+    h_dot_v = max(dot(h, v), 0.0)
     
-    # Cull backfacing surfaces
-    if n_dot_l <= 0 or n_dot_v <= 0:
-        return Le
-
-    # Roughness remapping: alpha = roughness^2
-    alpha = roughness * roughness
+    # 4. Geometry parameter k
+    alpha = roughness # Source [S1, S2] use alpha as roughness in formula
+    k = ((alpha + 1) ** 2) / 8.0
     
-    # 1. Normal Distribution Function (GGX/Trowbridge-Reitz)
-    # Standard GGX formula: alpha^2 / (pi * ((n.h)^2 * (alpha^2 - 1) + 1)^2)
+    # 5. Normal Distribution Function (GGX)
     denom = (n_dot_h * n_dot_h) * (alpha * alpha - 1.0) + 1.0
     D = (alpha * alpha) / (3.141592653589793 * denom * denom)
     
-    # 2. Geometry Function (Schlick-GGX)
-    k = (roughness + 1.0) * (roughness + 1.0) / 8.0
-    G1_v = n_dot_v / (n_dot_v * (1.0 - k) + k)
-    G1_l = n_dot_l / (n_dot_l * (1.0 - k) + k)
-    G = G1_v * G1_l
+    # 6. Geometry Function (Schlick-GGX)
+    def schlick_ggx(n_dot_i, k):
+        return n_dot_i / (n_dot_i * (1.0 - k) + k)
     
-    # 3. Fresnel Function (Schlick)
-    F = F0 + (1.0 - F0) * pow(1.0 - h_dot_v, 5.0)
+    G_v = schlick_ggx(n_dot_v, k)
+    G_l = schlick_ggx(n_dot_l, k)
+    G = G_v * G_l
     
-    # 4. Specular BRDF
-    # Denominator: 4 * (n.o) * (n.i)
-    # Here n.o is n_dot_v, n.i is n_dot_l
-    specular_denom = 4.0 * n_dot_v * n_dot_l
-    F_specular = (D * F * G) / specular_denom
+    # 7. Fresnel Function (Schlick)
+    F = F0 + (1.0 - F0) * ((1.0 - h_dot_v) ** 5)
     
-    # 5. Diffuse BRDF
-    # Energy conservation: k_d = 1 - F, k_s = F
-    # Diffuse term: (1 - F) * albedo / pi
-    diffuse_term = (1.0 - F) * albedo / 3.141592653589793
+    # 8. Specular Term
+    # Denominator: 4 * (wo . n) * (wi . n)
+    # In BRDF context for outgoing view v and incoming light l:
+    # wo is v, wi is l.
+    denom_spec = 4.0 * n_dot_v * n_dot_l
+    if denom_spec < 1e-8:
+        denom_spec = 1e-8 # Guard against division by zero
+    F_CookTorrance = (D * F * G) / denom_spec
     
-    # Total BRDF
-    fr = diffuse_term + F_specular
+    # 9. Diffuse Term
+    F_Lambert = albedo / 3.141592653589793
     
-    # 6. Light Contribution
-    Lo = Le
-    for light in lights:
-        # Calculate light radiance Li
-        # Distance from surface to light
-        # Assuming light.pos is the position of the light source
-        # l is direction TO light, so light.pos = surface.pos + l * dist
-        # We need distance d. If l is normalized direction, we need d.
-        # For point lights, l is usually (light_pos - surface_pos) / dist
-        # Here we assume l is provided as normalized direction, so we need d from context.
-        # If not provided, we assume d is available or light is directional (d=infinity).
-        # For this implementation, we assume d is passed or calculated.
-        # Let's assume d is available in light object or calculated.
-        d = light.distance_to_surface # Placeholder for actual distance calculation
-        
-        # Attenuation
-        # Li = l_dehomogenized * (A_const + d*A_lin + d^2*A_quad) / (r - d)
-        # Note: Source [S1] formula (28) has r - d in denominator.
-        # This implies r > d. If d >= r, light is 0.
-        if d >= light.radius:
-            Li = vec3(0.0)
-        else:
-            # l_dehomogenized is light.color (RGB)
-            # A_const, A_lin, A_quad are light.attenuation_coeffs
-            att = light.A_constant + d * light.A_linear + (d * d) * light.A_quadratic
-            Li = light.color * (att / (light.radius - d))
-        
-        # Add contribution: fr * Li * (n . l)
-        Lo += fr * Li * n_dot_l
-        
+    # 10. Energy Conservation Weights
+    # Source [S1, S2]: kd = 1 - F, ks = F (or derived from F0)
+    # Note: F here is the Fresnel term at the current angle.
+    # Some implementations use F0 for ks. Sources say kd = 1 - F.
+    ks = F
+    kd = 1.0 - ks
+    
+    # 11. Total BRDF
+    fr = kd * F_Lambert + ks * F_CookTorrance
+    
+    # 12. Outgoing Radiance
+    # Li is passed in. If Li is not pre-calculated, see step 10 in text.
+    # L_o = L_e + fr * Li * (l . n)
+    Lo = Le + fr * Li * n_dot_l
+    
     return Lo
 ```
 
-### Parameters
-*   $F_0$: Base reflectivity. Default value is 0.04 for non-metals. Equal to albedo for metallic surfaces (metalness=1) [S1].
-*   $\alpha$: Roughness parameter. Often remapped from user input roughness $r$ as $\alpha = r^2$ [S2, unofficial].
-*   $A_{Constant}, A_{Linear}, A_{Quadratic}$: Polynomial attenuation model coefficients [S1].
-*   $r$: Light radius [S1].
+**Parameters:**
+*   $\alpha$ (Roughness): Controls the spread of microfacets. Typical values 0.0 (smooth) to 1.0 (rough) [S1, S2].
+*   $F_0$ (Base Reflectivity): Default 0.04 for non-metals, equal to albedo for metals [S1, S2].
+*   $A_{Constant}, A_{Linear}, A_{Quadratic}$: Polynomial attenuation coefficients for light distance [S1, S2].
 
-### Edge Cases and Pitfalls
-*   **Backfacing:** If $n \cdot l < 0$ or $n \cdot v < 0$, the surface is not visible to the light or camera. Return 0 or emitted light only [S1].
-*   **Light Radius:** If distance $d \ge r$, the light contribution is zero to avoid division by zero or negative radiance [S1].
-*   **Precision:** At grazing angles ($h \cdot v \to 0$), the Fresnel term approaches 1. Numerical stability in $D$ calculation should handle small $n \cdot h$ values.
-*   **Metallic vs Dielectric:** $F_0$ must be set correctly. For metals, $F_0$ is the albedo. For dielectrics, $F_0$ is typically 0.04 [S1].
+**Edge Cases and Pitfalls:**
+*   **Division by Zero:** If $\mathbf{n} \cdot \mathbf{v}$ or $\mathbf{n} \cdot \mathbf{l}$ is zero, the specular denominator becomes zero. A small epsilon guard is required [G].
+*   **Energy Conservation:** If $k_d$ and $k_s$ are not properly linked (e.g., $k_d = 1 - k_s$), energy may not be conserved, leading to overly bright surfaces [S1, S2].
+*   **Roughness Remapping:** Source [S3, unofficial] mentions $\alpha = \text{roughness}^2$ for the NDF, while [S1, S2] use $\alpha$ directly. Implementers must check which convention the rest of the pipeline uses [S1][S3, unofficial].
 
 ## Subtopics
 
 ### Cook-Torrance GGX BRDF
-A physically based rendering BRDF combining Cook-Torrance specular with Lambertian diffuse, featuring anisotropic GGX normal distribution function, Smith height-correlated geometry term, and Schlick Fresnel approximation [S3, unofficial]. It calculates the specular component using anisotropic GGX NDF, geometry term using Smith height-correlated model, and Fresnel term using Schlick approximation [S3, unofficial]. The diffuse component uses Lambertian model with energy-conserving division by $\pi$ [S3, unofficial]. It applies Fresnel-weighted energy conservation between the diffuse and specular lobes and uses roughness-aware Fresnel for environment map reflections [S3, unofficial].
+A variant that combines Cook-Torrance specular with Lambertian diffuse, featuring an anisotropic GGX normal distribution function, Smith height-correlated geometry term, and Schlick Fresnel approximation [S4, unofficial]. It applies Fresnel-weighted energy conservation between diffuse and specular lobes and uses roughness-aware Fresnel for environment map reflections [S4, unofficial]. It is chosen when anisotropic reflections are required, distinguishing it from the isotropic standard Cook-Torrance model.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per light per pixel, assuming a fixed number of lights. The cost is dominated by the evaluation of $D, F, G$ functions.
-*   **Memory Complexity:** $O(1)$ per pixel for shading variables.
-*   **Performance:** More computationally expensive than Phong due to the evaluation of multiple transcendental functions (pow, sqrt, dot products) [S1].
-*   **Strengths:** Physically accurate, energy-conserving, handles a wide range of materials (metals, dielectrics, rough, smooth) [S1][S2, unofficial].
-*   **Limitations:** Does not account for subsurface scattering or complex inter-reflections within the material (requires additional models) [S2, unofficial]. Computationally heavier than empirical models.
-*   **When to use:** When physically accurate shading is required, especially for metallic and rough surfaces [S1].
-*   **When not to use:** For stylized rendering where physical accuracy is not desired, or in real-time applications with extremely limited compute budget where Phong might suffice [S1].
+
+*   **Time Complexity:** $O(1)$ per light source per pixel/voxel, as it involves a fixed number of trigonometric and arithmetic operations.
+*   **Memory Complexity:** $O(1)$, requiring only a few temporary vectors and scalars.
+*   **Measured Performance:** Not given in the sources.
+*   **Strengths:** Physically accurate, energy-conserving, handles a wide range of materials (metals/dielectrics) and roughness levels [S1][S3, unofficial].
+*   **Limitations:** More computationally expensive than Phong or Lambertian models [S1]. Requires careful handling of energy conservation [S1, S2].
+*   **When to Use:** When realistic material appearance is required, especially for metals and rough surfaces [S1][S3, unofficial].
+*   **When Not to Use:** When performance is critical and visual fidelity is less important (e.g., simple stylized rendering) [S1].
 
 ## Background
-The Cook-Torrance BRDF is based on the microfacet surface model [S1]. It was introduced by Cook and Torrance in 1982 [S1][S2, unofficial]. It is a foundational model in Physically Based Rendering (PBR) [S1]. It is widely used in modern real-time and offline renderers to simulate realistic lighting [S1][S2, unofficial].
+
+The Cook-Torrance BRDF was introduced by Richard L. Cook and Kenneth E. Torrance in 1982 [S1][S3, unofficial]. It is based on the microfacet surface model, which approximates surface roughness statistically [S1][S3, unofficial]. It is widely used in Physically Based Rendering (PBR) pipelines to replace older models like Phong, which fail to conserve energy [S1][S3, unofficial]. It is implemented in various rendering engines and educational projects, such as the CUDA raymarcher [S1, S2] and voxel raytracers [S4, unofficial].
 
 ## Sources
-[S1] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27
-[S2] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)
-[S3] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)
+
+[S1] Raymarching Distance Fields with CUDA, https://doi.org/10.3390/electronics10222730, fetched 2026-10-26
+[S2] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27
+[S3] Voxel Cone Tracing - GitHub, https://raw.githubusercontent.com/righier/gidemo/master/report.pdf, fetched 2026-10-27 (unofficial)
+[S4] NiekMSoftware/bad-apple-voxel-raytracer, https://github.com/NiekMSoftware/bad-apple-voxel-raytracer, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,142 @@
+# RayBatch container
+
+Also called: RayBatch
+
+## Overview
+The RayBatch container is a NumPy-style data structure designed for efficient storage, indexing, and sampling of ray batches during neural volume rendering training [S1, unofficial]. It serves as an intermediate representation that bridges raw NumPy arrays and differentiable rendering engine tensors (specifically Mitsuba 3), enabling batched ray generation and color sampling. It distinguishes itself from the generic [Ray Structure](4026-ray-structure.md) by providing batch-level operations (slicing, random sampling) and explicit conversion logic to Mitsuba tensor types, while differing from the [Ray Bundle](2179-ray-bundle.md) by focusing on training-time batch management rather than just spatial grouping.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** NumPy arrays for ray origins, directions, and colors. Optional arrays for masks, sensor indices, and pixel coordinates.
+*   **Output:** A `RayBatch` object supporting indexing/slicing and a method to convert contents into Mitsuba `mi.Ray3f` and `mi.Color3f` objects.
+
+**Data Structures:**
+The container holds the following fields, all sharing a common batch dimension $N$:
+*   `origins`: `np.ndarray`, shape $(N, 3)$.
+*   `directions`: `np.ndarray`, shape $(N, 3)$. Must be normalized.
+*   `colors`: `np.ndarray`, shape $(N, 3)$.
+*   `masks`: `np.ndarray`, shape $(N, 1)$ or $(N,)$. Optional. [G] If provided as 1D, it is reshaped to $(N, 1)$ for consistency.
+*   `sensor_indices`: `np.ndarray`, shape $(N,)$. Optional.
+*   `pixel_coords`: `np.ndarray`, shape $(N, 2)$. Optional.
+
+**Numbered Steps:**
+1.  **Initialization:** Construct the container by passing the NumPy arrays for origins, directions, and colors.
+2.  **Validation:** Verify that `origins` and `directions` have shape $(N, 3)$, `colors` has shape $(N, 3)$, and `masks` (if present) have shape $(N, 1)$ or $(N,)$. Assert that $N$ is consistent across all provided arrays. [S1, unofficial]
+3.  **Sampling:** To sample a subset of rays, generate random indices using `rng.choice(self.num_rays, size=num_rays, replace=False)` and index the internal arrays to create a new `RayBatch` or view.
+4.  **Conversion:** Convert the batch to Mitsuba types by mapping `origins` to `mi.Point3f`, `directions` to `mi.Vector3f`, and `colors` to `mi.Color3f`.
+
+**Formulas:**
+*   Ray count: $N = \text{origins.shape}[0]$
+*   Normalization check: $\|\text{directions}_i\| = 1$ for all $i \in [0, N-1]$. [S1, unofficial]
+
+**Parameters:**
+*   `num_rays`: Implicitly defined by the batch dimension $N$.
+*   `replace`: Boolean for sampling (default `False`).
+
+**Edge Cases and Pitfalls:**
+*   **Shape Mismatches:** If `origins`, `directions`, and `colors` do not share the same batch dimension $N$, assertion errors will be raised. [S1, unofficial]
+*   **Mask Reshaping:** Masks provided as 1D arrays $(N,)$ must be explicitly reshaped to $(N, 1)$ before assignment to avoid broadcasting issues. [S1, unofficial]
+*   **Normalization:** Directions must be normalized; failure to do so may cause incorrect ray marching or lighting calculations. [S1, unofficial]
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from typing import Tuple, Optional
+import mitsuba as mi
+
+class RayBatch:
+    def __init__(
+        self,
+        origins: np.ndarray,
+        directions: np.ndarray,
+        colors: np.ndarray,
+        masks: Optional[np.ndarray] = None,
+        sensor_indices: Optional[np.ndarray] = None,
+        pixel_coords: Optional[np.ndarray] = None
+    ):
+        # Validate shapes
+        assert origins.shape == (origins.shape[0], 3), "Origins must be (N, 3)"
+        assert directions.shape == (directions.shape[0], 3), "Directions must be (N, 3)"
+        assert colors.shape == (colors.shape[0], 3), "Colors must be (N, 3)"
+        assert origins.shape[0] == directions.shape[0] == colors.shape[0], "Batch dimensions must match"
+        
+        self.num_rays = origins.shape[0]
+        self.origins = origins
+        self.directions = directions
+        self.colors = colors
+        
+        # Handle masks
+        if masks is not None:
+            if masks.ndim == 1:
+                masks = masks.reshape(-1, 1)
+            assert masks.shape[0] == self.num_rays, "Mask batch dimension must match"
+        self.masks = masks
+        
+        self.sensor_indices = sensor_indices
+        self.pixel_coords = pixel_coords
+
+    def sample(self, num_rays: int, rng: np.random.Generator) -> 'RayBatch':
+        """Sample a subset of rays without replacement."""
+        indices = rng.choice(self.num_rays, size=num_rays, replace=False)
+        
+        new_origins = self.origins[indices]
+        new_directions = self.directions[indices]
+        new_colors = self.colors[indices]
+        
+        new_masks = None
+        if self.masks is not None:
+            new_masks = self.masks[indices]
+            
+        new_sensor_indices = None
+        if self.sensor_indices is not None:
+            new_sensor_indices = self.sensor_indices[indices]
+            
+        new_pixel_coords = None
+        if self.pixel_coords is not None:
+            new_pixel_coords = self.pixel_coords[indices]
+            
+        return RayBatch(
+            origins=new_origins,
+            directions=new_directions,
+            colors=new_colors,
+            masks=new_masks,
+            sensor_indices=new_sensor_indices,
+            pixel_coords=new_pixel_coords
+        )
+
+    def to_mitsuba(self) -> Tuple[mi.Ray3f, mi.Color3f]:
+        """Convert to Mitsuba tensor types."""
+        origins_mi = mi.TensorXf(self.origins)
+        directions_mi = mi.TensorXf(self.directions)
+        
+        rays = mi.Ray3f(
+            o=mi.Point3f(origins_mi[:, 0], origins_mi[:, 1], origins_mi[:, 2]),
+            d=mi.Vector3f(directions_mi[:, 0], directions_mi[:, 1], directions_mi[:, 2])
+        )
+        
+        colors_mi = mi.Color3f(
+            mi.Float(self.colors[:, 0]),
+            mi.Float(self.colors[:, 1]),
+            mi.Float(self.colors[:, 2])
+        )
+        
+        return rays, colors_mi
+```
+
+## Operating characteristics
+*   **Time Complexity:** Initialization is $O(N)$. Sampling is $O(K)$ where $K$ is the number of sampled rays. Conversion to Mitsuba types is $O(N)$ due to tensor creation.
+*   **Memory Complexity:** $O(N)$ for storing the arrays. The conversion creates new tensor objects, temporarily doubling memory usage for the batch.
+*   **Performance:** Efficient for training loops due to NumPy's optimized array operations and Mitsuba's tensor integration. [S1, unofficial]
+*   **Strengths:** Simple API, integrates well with PyTorch/NumPy workflows, explicit type conversion.
+*   **Limitations:** Tied to Mitsuba 3 for the conversion method. Not a general-purpose ray container for all renderers. [S1, unofficial]
+*   **When to use:** During neural volume rendering training where rays need to be batched, sampled, and passed to a Mitsuba-based differentiable renderer.
+*   **When not to use:** For inference-only pipelines that do not use Mitsuba, or when ray data needs to be stored in a format compatible with other rendering engines.
+
+## Background
+The RayBatch container was introduced in the `tlir` repository by Jack Zhou as part of a toolkit for neural volume rendering [S1, unofficial]. It addresses the need for efficient batched ray handling in training loops, where random sampling of rays is common. The implementation leverages NumPy for data manipulation and Mitsuba 3 for differentiable rendering.
+
+## Sources
+[S1] tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

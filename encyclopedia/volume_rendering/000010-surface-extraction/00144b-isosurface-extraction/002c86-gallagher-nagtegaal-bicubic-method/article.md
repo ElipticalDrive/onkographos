@@ -1,0 +1,81 @@
+# Gallagher-Nagtegaal Bicubic Method
+
+Also called: GN Bicubic, Unstructured mesh marching cubes variant
+
+## Overview
+The Gallagher-Nagtegaal Bicubic Method is an isosurface extraction technique that replaces the triangular primitives of Marching Cubes with visually continuous bicubic polynomial patches [S1, unofficial]. It solves the problem of geometric discontinuity and aliasing artifacts inherent in piecewise-linear approximations by providing a smooth, curved representation of the implicit surface [S1, unofficial]. Unlike its sibling [Marching Cubes](30-isosurface-extraction.md), which outputs a mesh of triangles, this method outputs a set of parametric surface patches, making it particularly suitable for applications requiring high visual fidelity or further subdivision [S1, unofficial]. It builds on [Isosurface extraction](30-isosurface-extraction.md) by maintaining the cell-based traversal logic but altering the primitive generation step to fit a bicubic function rather than a linear interpolation.
+
+## How it works
+The method operates on both unstructured and rectilinear meshes, processing each volume element (cell) in isolation to minimize data access in the inner loop [S1, unofficial]. This independence allows for efficient microcoding on single workstations and facilitates parallel implementations [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** A discretized domain (rectilinear or unstructured mesh) where each cell contains scalar values at its vertices.
+*   **Output:** A collection of bicubic surface patches representing the isosurface.
+
+**Data Structures:**
+For each cell intersected by the isosurface, the algorithm computes a bicubic polynomial patch. The patch is defined by 16 control points or coefficients. In a standard bicubic patch formulation (e.g., Coons or Bezier), these coefficients are derived from the scalar values at the cell vertices and potentially the gradients or edge tangents. The specific layout of the polynomial is not detailed in the sources, but it maps a unit square domain to the 3D surface geometry [S1, S2, unofficial].
+
+**Steps:**
+1.  **Domain Traversal:** Iterate over all cells in the volume data structure [S1, unofficial].
+2.  **Cell Classification:** For each cell, determine if the isosurface intersects it by comparing vertex scalar values against the isovalue [30-isosurface-extraction.md].
+3.  **Intersection Detection:** Identify the edges of the cell where the scalar value crosses the isovalue [30-isosurface-extraction.md].
+4.  **Patch Generation:** Instead of generating triangles, fit a bicubic polynomial to the cell data. The sources state the method uses "visually continuous bicubic polynomials" [S1, unofficial]. The exact formula for deriving the 16 coefficients from the vertex values is not provided in the sources [G]. [G: Typically, this involves solving a system of equations based on Hermite interpolation or similar, using vertex values and estimated normals/tangents to ensure continuity across cell boundaries.]
+5.  **Output:** Store the generated bicubic patch.
+
+**Parameters:**
+*   **Isovalue:** The scalar threshold for surface extraction.
+*   **Polynomial Degree:** Bicubic (degree 3 in both parametric directions).
+
+**Edge Cases and Pitfalls:**
+*   **Continuity:** Ensuring visual continuity across cell boundaries requires careful handling of the polynomial coefficients at shared edges and vertices. The sources claim "visually continuous" results but do not specify the continuity constraint (e.g., $C^1$ or $C^0$) [S1, unofficial].
+*   **Unstructured Meshes:** The method is claimed to work on unstructured meshes, but the complexity of defining a consistent bicubic basis on arbitrary polyhedral cells is non-trivial and not detailed [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def gallagher_nagtegaal_bicubic(volume_data, isovalue):
+    patches = []
+    for cell in volume_data.cells:
+        # Check if isosurface intersects the cell
+        if cell.intersects_isosurface(isovalue):
+            # Extract vertex values and positions
+            vertex_values = cell.get_vertex_scalars()
+            vertex_positions = cell.get_vertex_positions()
+            
+            # Fit bicubic polynomial to the cell data
+            # The specific derivation of coefficients is not in sources
+            # [G: Implementation requires a bicubic fitting routine, e.g., using Hermite basis]
+            patch = fit_bicubic_patch(vertex_values, vertex_positions, isovalue)
+            
+            patches.append(patch)
+    return patches
+
+def fit_bicubic_patch(values, positions, isovalue):
+    # Placeholder for the specific bicubic fitting algorithm
+    # Sources do not provide the exact formula for coefficient calculation
+    # [G: This step likely involves computing tangents/normals at vertices 
+    # and solving for the 16 control points of a bicubic surface]
+    raise NotImplementedError("Exact bicubic fitting formula not provided in sources")
+```
+
+## Subtopics
+
+### Surface Patches
+Surface patches are the class of surface representation used by the Gallagher-Nagtegaal method, employing non-linear polynomials or splines to map a given surface [S2, unofficial]. They are conceptually simple and render curved surfaces naturally [S2, unofficial]. The most widely used mappings in this family are B-splines and bi-cubic families [S2, unofficial]. Tessellation methods can be used to define the control points (nodes) of the surface patch [S2, unofficial]. Catmull devised a subdivision procedure to display non-linear patches that recursively divides the region into sub-patches until the transformed sub-region covers only one pixel [S2, unofficial]. Scan-line implementations of this algorithm were developed by Blinn and Lane-Carpenter [S2, unofficial]. This approach is chosen when smooth, curved surfaces are required and the computational cost of subdivision is acceptable.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. However, since it processes each cell in isolation, the complexity is linear with respect to the number of cells, $O(N)$, assuming constant-time patch fitting [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources. Depends on the storage of bicubic coefficients per intersected cell.
+*   **Performance:** The method is designed for efficient microcoding on a single workstation due to minimal information access in the inner loop [S1, unofficial]. It is also suitable for parallel implementations because elements are treated independently [S1, unofficial].
+*   **Strengths:** Visually continuous bicubic polynomials provide smoother surfaces than triangular meshes [S1, unofficial]. Works on unstructured and rectilinear meshes [S1, unofficial].
+*   **Limitations:** The exact algorithm for fitting the bicubic patch is not fully specified in the sources, making implementation difficult without additional assumptions [S1, unofficial]. Rendering bicubic patches requires tessellation or ray-tracing, which adds complexity compared to rasterizing triangles [S2, unofficial].
+*   **When to use:** When high visual continuity is required and the hardware supports efficient polynomial evaluation or subdivision [S1, unofficial].
+*   **When not to use:** When real-time performance with simple triangle rasterization is critical, or when the exact fitting algorithm is unavailable [S1, unofficial].
+
+## Background
+The Gallagher-Nagtegaal Bicubic Method was described by Gallagher and Nagtegaal in 1989 [S1, unofficial]. It builds upon the "marching cubes" method but extends it to work on unstructured as well as rectilinear meshes [S1, unofficial]. The work is cited in the context of parallel, feed-forward volume rendering algorithms [S1, unofficial].
+
+## Sources
+[S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
+[S2] Volumetric rendering of medical data : applications to stereotactic neurosurgery planning, https://doi.org/10.82308/10070, fetched 2026-10-26 (unofficial)

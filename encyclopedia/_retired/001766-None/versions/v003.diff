@@ -1,0 +1,228 @@
+--- v002.md
++++ v003.md
+@@ -1,103 +1,153 @@
+ # SVO Ray Tracing
+-
+-Also called: Sparse Voxel Octree Ray Tracing, SVO Walk
++Also called: SVO Walk (Traversal)
+ 
+ ## Overview
+-SVO Ray Tracing renders volumetric data stored in a Sparse Voxel Octree (SVO) by traversing the tree structure along rays, skipping empty space to accelerate rendering [S1, unofficial]. It differs from uniform grid methods (like [DDA](3061-digital-differential-analyzer-dda-traversal.md)) by adapting traversal granularity to data density, and from BVH-based approaches by operating directly on the octree hierarchy without an intermediate bounding volume hierarchy [S1, unofficial].
++SVO Ray Tracing is a depth-first ray traversal algorithm for Sparse Voxel Octrees (SVO) that visits nodes in a specific order relative to the eye position [S1, unofficial]. It differs from pure SVO traversal by explicitly managing a stack to control visitation order based on eye position, and from BVH-based approaches by operating directly on the octree structure without an intermediate bounding volume hierarchy [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A Sparse Voxel Octree (SVO) representing a voxel grid, a camera defined by origin $\mathbf{o}$ and direction $\mathbf{d}$, and rendering parameters (resolution, FOV).
+-- Output: A rendered image where each pixel color is computed by integrating density along the ray path through the SVO.
++*   **Input:** A Sparse Voxel Octree (SVO) structure, a camera (origin, rotation, field of view), and a render target (width, height).
++*   **Output:** A rendered image.
+ 
+ **Data Structures:**
+-The SVO is typically stored as a linear array of nodes. Each node contains:
+-- `type`: Enum indicating if the node is a leaf (voxel) or an internal node (branch).
+-- `data`: If leaf, the voxel value (e.g., density, color). If internal, pointers or indices to children.
+-- `bounds`: Axis-aligned bounding box (AABB) for the node's spatial extent [S1, unofficial].
++The implementation uses a specific buffer layout for GPU execution [S1, unofficial]:
++1.  **Uniform Buffer (`RaytracerShaderUniforms`):**
++    *   `camera_rotation`: `[[f32; 4]; 4]` (4x4 matrix).
++    *   `camera_origin`: `[f32; 4]`.
++    *   `width`: `u32`.
++    *   `height`: `u32`.
++    *   `aspect_ratio`: `f32`.
++    *   `fov`: `f32` (stored as $\tan(\text{fov}_{rad}/2)$).
++    *   `bvh_root`: `u32` (index of the root node).
++2.  **SVO Buffer:** Stores the SVO node pool.
++3.  **BVH Node Buffer:** Stores internal nodes.
++4.  **BVH Leaf Buffer:** Stores leaf nodes.
+ 
+-In the specific implementation cited [S1, unofficial], the SVO is built from a voxel grid and stored in a node pool. The traversal may utilize a stack to manage the depth-first order relative to the eye position [S1, unofficial].
++**Node Layout:**
++*   **BVHNode:**
++    *   `center`: `[f32; 4]` (x, y, z, w).
++    *   `radius`: `f32`.
++    *   `left_child`: `u32`.
++    *   `right_child`: `u32`.
++    *   *Note:* Child indices are stored with the most significant bit set (`| 0x80000000`) to distinguish them from leaf indices [S1, unofficial].
++*   **BVHLeaf:**
++    *   `model_address`: `u32`.
++    *   `inv_model`: `[f32; 4]` (inverse transformation matrix).
+ 
+ **Algorithm Steps:**
+-1. **Initialization**: For each pixel, compute the ray origin $\mathbf{o}$ and direction $\mathbf{d}$ from the camera parameters. Initialize the traversal stack with the SVO root node.
+-2. **Traversal Loop**: While the stack is not empty:
+-   a. Pop the top node $N$ from the stack.
+-   b. Perform a ray-node intersection test. If the ray does not intersect $N$'s bounding box, discard $N$.
+-   c. If $N$ is a leaf node:
+-      - Sample the voxel value at the intersection point.
+-      - Accumulate the contribution to the pixel color (e.g., using front-to-back compositing).
+-      - If the accumulated opacity exceeds a threshold, terminate the ray.
+-   d. If $N$ is an internal node:
+-      - Push its children onto the stack. The order of pushing should respect the ray's direction (front-to-back) to allow early termination [S1, unofficial].
+-3. **Termination**: When the stack is empty or the ray is terminated, store the accumulated color for the pixel.
++1.  **Initialization:** Create a uniform buffer, SVO buffer, BVH node buffer, and BVH leaf buffer with maximum sizes (e.g., 16384 leaves, 32767 nodes) [S1, unofficial]. Bind these to a render pipeline with a quad vertex shader and raytrace fragment shader [S1, unofficial].
++2.  **Scene Construction:**
++    *   Load voxel grid data (e.g., from CSV) [S1, unofficial].
++    *   Convert the voxel grid to an SVO [S1, unofficial].
++    *   For each object, compute its position, scale, and rotation.
++    *   Encode the position into a Morton code [S1, unofficial].
++    *   Create a `BVHLeaf` for each object containing its model address and inverse transformation matrix [S1, unofficial].
++    *   Sort leaves by Morton code [S1, unofficial].
++3.  **BVH Construction (from Leaves):**
++    *   Initialize an empty node at index 0 (`empty_node_idx`) [S1, unofficial].
++    *   Process sorted leaves in pairs:
++        *   For each pair (or single remaining leaf), compute the bounding sphere center and radius [S1, unofficial].
++        *   Create a `BVHNode` with the computed center, radius, and child indices.
++        *   Set `left_child` and `right_child` indices to the leaf indices (ORed with `0x80000000`) or recursively built node indices [S1, unofficial].
++        *   Push the new node index to a queue [S1, unofficial].
++    *   While the queue has more than one node:
++        *   Pop two nodes from the front (`left_child`, `right_child`) [S1, unofficial].
++        *   Compute the bounding sphere for the two children [S1, unofficial].
++        *   Create a new parent `BVHNode` with the combined center, radius, and child indices [S1, unofficial].
++        *   Push the parent index to the queue [S1, unofficial].
++    *   The last node in the queue is the root [S1, unofficial].
++4.  **Rendering Loop:**
++    *   Update the uniform buffer with camera parameters (rotation, origin, width, height, aspect ratio, fov, bvh_root) [S1, unofficial].
++    *   Begin a render pass with a clear color (e.g., white) [S1, unofficial].
++    *   Set the pipeline and bind group [S1, unofficial].
++    *   Draw a quad (4 vertices) to trigger the raytrace fragment shader [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def trace_ray(ray_origin, ray_direction, svo_root):
+-    # Stack stores nodes to visit, ordered by distance from ray origin
+-    stack = []
+-    stack.push(svo_root)
++# BVH Construction Logic
++def build_bvh(leaves):
++    # leaves is a list of (morton_code, leaf_data, transform, scale) sorted by morton_code
++    node_queue = []
++    nodes = []
++    empty_node_idx = 0
+     
+-    accumulated_opacity = 0.0
+-    accumulated_color = (0.0, 0.0, 0.0)
++    # Initialize empty node
++    nodes.append(BVHNode(center=[0,0,0,0], radius=0.0, left_child=0, right_child=0))
+     
+-    while not stack.is_empty():
+-        node = stack.pop()
++    # Process leaves in pairs
++    i = 0
++    while i < len(leaves):
++        leaf1 = leaves[i]
++        center1, radius1 = compute_bounding_sphere(leaf1.transform)
+         
+-        # Check if ray intersects node bounding box
+-        if not ray_intersects_bbox(ray_origin, ray_direction, node.bbox):
+-            continue
++        if i + 1 < len(leaves):
++            leaf2 = leaves[i+1]
++            center2, radius2 = compute_bounding_sphere(leaf2.transform)
++            combined_center, combined_radius = compute_bounding_sphere([center1, center2])
+             
+-        if node.is_leaf():
+-            # Sample voxel value
+-            t = ray_intersection_t(ray_origin, ray_direction, node.bbox)
+-            voxel_value = node.sample(ray_origin + ray_direction * t)
++            # Create leaf nodes for the pair
++            leaf_idx1 = len(nodes) # Assuming leaves are stored in nodes or separate buffer
++            leaf_idx2 = len(nodes) + 1
+             
+-            # Compositing step (front-to-back)
+-            alpha = voxel_value.density * voxel_value.thickness
+-            color_contribution = voxel_value.color * alpha * (1.0 - accumulated_opacity)
++            # Create internal node
++            node_idx = len(nodes)
++            nodes.append(BVHNode(
++                center=combined_center,
++                radius=combined_radius,
++                left_child=leaf_idx1 | 0x80000000,
++                right_child=leaf_idx2 | 0x80000000
++            ))
++            node_queue.append(node_idx)
++            i += 2
++        else:
++            # Single leaf at the end
++            node_idx = len(nodes)
++            nodes.append(BVHNode(
++                center=center1,
++                radius=radius1,
++                left_child=leaf_idx1 | 0x80000000,
++                right_child=empty_node_idx
++            ))
++            node_queue.append(node_idx)
++            i += 1
+             
+-            accumulated_color += color_contribution
+-            accumulated_opacity += alpha * (1.0 - accumulated_opacity)
+-            
+-            if accumulated_opacity >= 0.99: # Threshold for early termination
+-                break
+-        else:
+-            # Internal node: push children
+-            # Children should be pushed in back-to-front order so front ones are popped first
+-            children = node.get_children()
+-            # Sort children by distance from ray origin to ensure correct traversal order
+-            children.sort_by_distance(ray_origin)
+-            for child in reversed(children):
+-                stack.push(child)
+-                
+-    return accumulated_color
++    # Build internal nodes from queue
++    while len(node_queue) > 1:
++        left_idx = node_queue.pop(0)
++        right_idx = node_queue.pop(0)
++        
++        left_node = nodes[left_idx]
++        right_node = nodes[right_idx]
++        
++        combined_center, combined_radius = compute_bounding_sphere([left_node.center, right_node.center])
++        
++        parent_idx = len(nodes)
++        nodes.append(BVHNode(
++            center=combined_center,
++            radius=combined_radius,
++            left_child=left_idx,
++            right_child=right_idx
++        ))
++        node_queue.append(parent_idx)
++        
++    return nodes[0] # Root node
+ ```
+-
+-**Parameters:**
+-- `accumulation_threshold`: Typically 0.99 or 1.0, used to terminate rays early when opacity is sufficient [G].
+-- `stack_size`: Depends on tree depth and scene complexity. In the cited implementation, buffers are sized for up to 32,767 nodes [S1, unofficial].
+-
+-**Edge Cases:**
+-- **Empty Space**: Large empty regions are skipped efficiently by the tree structure, unlike uniform grids.
+-- **Degenerate Rays**: Rays parallel to grid axes may require special handling for boundary crossings, though the tree structure mitigates this by bounding box tests.
+-- **Precision**: Floating-point errors in intersection tests can cause gaps or overlaps; robust intersection tests are recommended [G].
+ 
+ ## Subtopics
+ 
+ ### [SVO Walk (Traversal)](5188-svo-walk-traversal.md)
+-A depth-first traversal variant that explicitly manages a stack to control visitation order based on eye position, ensuring front-to-back rendering for efficient compositing.
++SVO Walk is a depth-first ray traversal algorithm for Sparse Voxel Octrees (SVO) that visits nodes in a specific order relative to the eye position, invoking a callback for each visited node. It differs from pure SVO traversal by explicitly managing a stack to control visitation order based on eye position, and from BVH-based approaches by operating directly on the octree structure without an intermediate bounding volume hierarchy.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(k)$ where $k$ is the number of visited nodes, which is typically much less than the number of voxels in sparse regions. In dense regions, it approaches $O(N)$ where $N$ is the number of voxels.
+-- **Memory Complexity**: $O(M)$ where $M$ is the number of nodes in the SVO. The traversal stack requires $O(D)$ space where $D$ is the tree depth.
+-- **Performance**: Significantly faster than uniform grid traversal for sparse data. Performance degrades as data density increases. The cited implementation uses GPU buffers for SVO nodes and leaves, with max sizes of 16,384 leaves and 32,767 nodes [S1, unofficial].
+-- **Strengths**: Efficient handling of sparse data, adaptive resolution, no need for uniform grid padding.
+-- **Limitations**: Higher overhead per voxel compared to uniform grids due to tree traversal. Building the SVO can be expensive.
+-- **When to Use**: Ideal for large, sparse volumetric datasets (e.g., medical imaging, scientific simulations with voids).
+-- **When Not to Use**: For dense, uniform data where a uniform grid or texture-based approach might be simpler and faster.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
++*   **Measured Performance:** Not given in the sources.
++*   **Strengths:** Operates directly on the octree structure without an intermediate BVH [S1, unofficial].
++*   **Limitations:** Not given in the sources.
++*   **When to use:** When a depth-first traversal order relative to the eye position is required for SVOs [S1, unofficial].
++*   **When not to use:** When an intermediate BVH is preferred for traversal acceleration [S1, unofficial].
+ 
+ ## Background
+-SVO Ray Tracing is based on the Sparse Voxel Octree data structure, which provides an efficient way to represent sparse 3D data. The method leverages the hierarchical nature of the octree to skip empty space during ray traversal. The cited implementation [S1, unofficial] demonstrates a practical application using a GPU-based renderer, building an SVO from a voxel grid and traversing it for ray tracing.
++The method is described in an unofficial source [S1, unofficial]. It is implemented in Rust using the `wgpu` graphics API [S1, unofficial]. The source code demonstrates building an SVO from a voxel grid and rendering it using a raytracer [S1, unofficial].
+ 
+ ## Sources

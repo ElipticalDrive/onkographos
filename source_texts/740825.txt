@@ -1,0 +1,224 @@
+A project abut reverse geocoding form WGS84 coordiates to the city level - CGEODATA version 1: chunks drop their Morton codes (-25.9% on world-high-res) by ferrybig · Pull Request #7 · ferrybig/loc-to-city
+
+CGEODATA version 1: chunks drop their Morton codes (-25.9% on world-high-res) by ferrybig · Pull Request #7 · ferrybig/loc-to-city · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ferrybig
+commented
+Oct 21, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Why
+Nearly every stored code was the end of the record before it: codes[j+1] = codes[j] + 4^(D - depths[j]). Only a gap breaks that. zlib sees codes and depths as separate columns, so it never found the redundancy. On world-high-res.bin the codes deflated to 17.5 MB of the 62.2 MB of chunks.
+The old format could not derive codes from depths, because chunks had gaps (empty cells with no record). A v0 reader couldn't simply skip the codes, so this needs a format version bump.
+What changes
+Format v1 (reader/binary-format.md):
+Records tile the chunk from code 0.
+Empty cells between places become index-0 records; the space after the last record needs none.
+codes_length and codes are gone.
+Sections 8.2, 8.4, 8.5, 9, 10 and 11 are updated, and a new Section 8.6 describes version 0.
+Appendix A is redone as v1 (still 157 bytes; chunk 3 now has 7 records), with an added lookup after the last record. C.8's checksum and record numbers follow.
+Compressor: encodeChunk(records, maxDepth) fills gaps with the fewest aligned cells (gapCells); the writer emits version 1. The quadtree is untouched.
+Reader: reads both versions. For v1, parseChunk(buf, maxDepth, version) derives the codes.
+In plain JavaScript this is deriveCodes.
+With WebAssembly it is a new parseDepths in chunkDecoder.wat. It handles 16 records at a time up to max_depth 13 and uses a scalar loop deeper; the palette-index check is shared with v0's parse.
+v0 keeps its own parser and WebAssembly path.
+Measured
+I transcoded the deployed world-high-res.bin (v0) with the new encoder:
+v0
+v1
+file
+64,244,778 B
+47,620,804 B (-25.9%)
+chunks
+62.2 MB
+45.6 MB (-26.7%)
+records
+106,377,942
++3,770,703 index-0 records (+3.5%)
+decoded size
+668 MB
+691 MB
+All 106,377,942 placed records are identical (code, depth, place) between the two files, decoded through both the JavaScript and WebAssembly paths.
+verify against the v1 transcode: 343 pass, 0 fail, 101 todo.
+Two alternatives measured worse: keeping codes and dropping depths (-26.0%), or replacing codes with a gap-size column (-25.3%).
+Parse time for the 200 largest chunks:
+parse
+v0, WebAssembly
+322 ms
+v1, JavaScript
+464 ms
+v1, WebAssembly
+313 ms
+Inflating v1 is also ~20% faster than v0. The largest chunk decodes in 2.7 ms (v0: 3.2 ms).
+Bench, two runs each (this machine is noisy):
+v0
+v1 JavaScript
+v1 WebAssembly
+burst z10
+197 / 185 ms
+133 / 142 ms
+156 / 123 ms
+burst europe z4
+1931 / 1054 ms
+1174 / 1179 ms
+1188 / 958 ms
+10k lookups, europe
+5289 / 5059 ms
+5400 / 5825 ms
+4604 / 5050 ms
+10k lookupCached, europe
+5079 / 5188 ms
+5355 / 5563 ms
+4608 / 4457 ms
+Tests
+reader: 181 pass, including:
+the browser test, run with the preinstalled Chromium;
+a test that the v0 Appendix A file answers every cell the same as v1;
+three new fuzz tests for the v1 WebAssembly path: random tilings decode identically to JavaScript; 12,000 corrupted blocks are never accepted where JavaScript rejects; misalignment is caught in each byte of a code.
+Mutation-tested: every check in parseDepths makes a test fail when removed. One check that turned out redundant ("last record ends inside the chunk") was dropped from the .wat.
+compressor: 41 pass, including a new chunkEncoder.test.ts.
+demo: unit tests pass, and all 24 e2e tests pass.
+typecheck, biome and docs build are clean.
+Not done here
+No real compressor build was run; a full one needs more memory than this environment has. Please rebuild locally.
+Existing sidecar indexes must be rebuilt: the locate index's checksum covers the header and directory. The search index (rule 0) checksums only the place table and stays valid.
+builds.tsv and the <hash>_world_high_res.bin copy are left for your local build.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01GS4djLityAhMWj3bYd36Kr
+claude
+and others
+added 3 commits
+October 21, 2026 19:27
+CGEODATA version 1: chunks drop their Morton codes
+…
+81b53a0
+```
+A record's code was nearly always the end of the record before it:
+codes[j+1] = codes[j] + 4^(D - depths[j]). It differed only across a
+gap, and zlib, seeing codes and depths as separate columns, never found
+the redundancy. On world-high-res.bin the codes deflated to 17.5 MB of
+the 62.2 MB of chunks.
+
+Version 1 makes the records tile the chunk from code 0: the encoder
+fills each gap with the fewest aligned index-0 records (`gapCells`),
+leaves the space after the last record implicit, and drops
+`codes_length` and `codes`. The reader derives the codes when it parses
+the chunk. It still reads version 0 files, which keep their WebAssembly
+decode path. Spec: Section 8.2/8.4/8.5 rewritten, new Section 8.6 for
+version 0, Appendix A redone as version 1 (still 157 bytes, chunk 3 now
+7 records) with one lookup after the last record, and C.8's checksum
+and record numbers follow.
+
+Measured by transcoding the deployed world-high-res.bin (version 0)
+with the new encoder:
+- 64,244,778 -> 47,620,804 bytes (-25.9%); chunks 62.2 -> 45.6 MB
+  (-26.7%)
+- 106,377,942 placed records, all identical (code, depth, place); plus
+  3,770,703 index-0 records for 1,658,652 gaps (+3.5% records)
+- verify against the transcode: 343 pass, 0 fail, 101 todo
+- decoded size 668 -> 691 MB; largest chunk 3.0 ms either way
+
+Keeping codes and dropping depths (-26.0%), or replacing the codes with
+a gap-size column (-25.3%), measured slightly worse.
+
+Bench (npm run bench -w reader, two runs each, v0 -> v1):
+  burst 32 tiles, initial view z10   222 / 206 ms -> 173 / 148 ms
+  burst 32 tiles, europe z4         1147 / 1160 ms -> 1159 / 1145 ms
+  10k await lookup world, first     1737 / 1617 ms -> 1710 / 1763 ms
+  10k await lookup europe, first    5777 / 5370 ms -> 5804 / 5952 ms
+The first deriveCodes (doubles, every check inline) cost +24% on the
+europe burst and +40% on europe bulk. An Int32Array span table, one
+combined check, and error reporting moved into a separate
+`recordError` brought it level with v0's WebAssembly path.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GS4djLityAhMWj3bYd36Kr
+```
+reader: WebAssembly fast path for version 1 chunks
+…
+654872f
+```
+`parseDepths` in chunkDecoder.wat derives a version 1 chunk's codes
+from its depths and checks what `deriveCodes` checks. It handles 16
+records at a time: spans come from the same byte tables as version 0's
+masks, an exclusive prefix sum runs within each u32x4, and every check
+is vectorised. That path runs up to max_depth 13, where codes stay well
+inside 32-bit lanes; deeper files use a scalar loop. The palette-index
+check is now `$indicesOk`, shared with version 0's `parse`.
+
+Every check in `parseDepths` makes a test fail when removed (each
+broken in turn, rebuilt, rerun). Doing that showed the "last record
+ends inside the chunk" check was redundant: a record that starts inside
+the chunk and is aligned to its span also ends inside it. It is left
+out of the .wat, while the per-record start check stays, since without
+it the 16-record path could wrap its u32 codes. New tests: random
+tilings decoded identically to the JavaScript parser; 12,000 corrupted
+blocks never accepted where JavaScript rejects; misalignment in each
+byte of a code. Every chunk of the transcoded world-high-res.bin still
+matches version 0 record for record, and verify passes (343, 0 fail,
+101 todo).
+
+Parse of the 200 largest chunks: 464 ms in JavaScript -> 313 ms
+(version 0's WebAssembly path: 322 ms). Bench, two runs each, version 1
+JavaScript -> WebAssembly (version 0 for reference):
+  burst 32 tiles, initial view z10   133 / 142 -> 156 / 123 ms  (v0 197 / 185)
+  burst 32 tiles, europe z4         1174 / 1179 -> 1188 / 958 ms (v0 1931 / 1054)
+  10k await lookup world, first     1734 / 1783 -> 2276 / 1477 ms (v0 2702 / 1565)
+  10k await lookup europe, first    5400 / 5825 -> 4604 / 5050 ms (v0 5289 / 5059)
+  10k lookupCached europe, second   5355 / 5563 -> 4608 / 4457 ms (v0 5079 / 5188)
+The machine is noisy (the 2276 and 1931 are first-run outliers); bulk
+lookups gain ~10-15%, bursts are level or better. What is left is
+copying the block in and the codes out.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GS4djLityAhMWj3bYd36Kr
+```
+Revert "reader: WebAssembly fast path for version 1 chunks"
+…
+6764281
+```
+This reverts commit 654872f.
+
+Measured over all 7,608 chunks of world_high_res (106M records),
+the version 1 WebAssembly path parses in 332 ms against 428 ms in
+JavaScript, and inflate + parse is 647 ms against 767 ms. That saves
+about 16 us per chunk, not enough to justify a second code path, its
+fuzz tests and a larger embedded module. Version 1 in JavaScript
+already matches what version 0 needed WebAssembly for (767 vs 764 ms).
+
+Version 0 keeps its WebAssembly path.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+```
+ferrybig
+merged commit 3fe1679
+into
+master
+Oct 22, 2026
+ferrybig
+deleted the
+claude/dreamy-hypatia-1klapb
+branch
+October 22, 2026 06:25
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

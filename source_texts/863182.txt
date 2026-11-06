@@ -1,0 +1,957 @@
+SWinGS: Sliding Windows for
+Dynamic 3D Gaussian Splatting
+Richard Shaw1 , Michal Nazarczuk1 , Jifei Song1 , Arthur Moreau1 , Sibi
+Catley-Chandar1,2 , Helisa Dhamo1 , and Eduardo Pérez-Pellitero1
+Huawei Noah’s Ark Lab
+Queen Mary University Of London
+arXiv:2312.13308v2 [cs.CV] 18 Jul 2024
+1
+2
+MixVoxels
+Ours
+MixVoxels
+HyperReel
+Ours
+HyperReel
+Ours
+Ours
+Fig. 1: Left: SWinGS achieves sharper dynamic 3D scene reconstruction in part thanks
+to a sliding window canonical space that reduces the complexity of the 3D motion
+estimation. Right: Our dynamic real-time viewer allows users to explore the scene.
+Abstract. Novel view synthesis has shown rapid progress recently, with
+methods capable of producing increasingly photorealistic results. 3D
+Gaussian Splatting has emerged as a promising method, producing highquality renderings of scenes and enabling interactive viewing at real-time
+frame rates. However, it is limited to static scenes. In this work, we extend 3D Gaussian Splatting to reconstruct dynamic scenes. We model
+a scene’s dynamics using dynamic MLPs, learning deformations from
+temporally-local canonical representations to per-frame 3D Gaussians.
+To disentangle static and dynamic regions, tuneable parameters weigh
+each Gaussian’s respective MLP parameters, improving the dynamics
+modelling of imbalanced scenes. We introduce a sliding window training
+strategy that partitions the sequence into smaller manageable windows
+to handle arbitrary length scenes while maintaining high rendering quality. We propose an adaptive sampling strategy to determine appropriate
+window size hyperparameters based on the scene’s motion, balancing
+training overhead with visual quality. Training a separate dynamic 3D
+Gaussian model for each sliding window allows the canonical representation to change, enabling the reconstruction of scenes with significant
+geometric changes. Temporal consistency is enforced using a fine-tuning
+step with self-supervising consistency loss on randomly sampled novel
+2
+R. Shaw et al.
+views. As a result, our method produces high-quality renderings of general dynamic scenes with competitive quantitative performance, which
+can be viewed in real-time in our dynamic interactive viewer.
+1
+Introduction
+Photorealistic rendering and generally 3-dimensional (3D) imaging have received
+significant attention in recent years, especially since the seminal work of Neural
+Radiance Fields (NeRF) [37]. This is in part thanks to its impressive novel view
+synthesis results, but also due to its appealing ease of use when coupled with offthe-shelf structure-from-motion camera pose estimation [53]. NeRF’s key insight
+is a fully differentiable volumetric rendering pipeline paired with learnable implicit functions that model a view-dependent 3D radiance field. Dense coverage
+of posed images of the scene provides then direct photometric supervision.
+The original formulation of NeRF and most follow-ups [5,9,37,39,41] assume
+static scenes and thus a fixed radiance field. Some have explored new paradigms
+enabling dynamic reconstruction for radiance fields, including D-NeRF [22] and
+Nerfies [43], optimising an additional continuous volumetric deformation field
+that warps each observed point into a canonical NeRF. Such an approach has
+been popular [12,13,28,32,33,44], and has also been used for dynamic human reconstruction [45, 74]. However, learning 3D deformation fields is inherently challenging, especially for large motions, with increased computational expense in
+training and inference. Moreover, approaches that share a canonical space among
+all frames struggle to maintain reconstruction quality for long sequences, obtaining overly blurred results due to inaccurate deformations and limited representational capacity. Other methods avoid maintaining a canonical representation
+and use explicit per-frame representations of the dynamic scene. Examples are
+tri-plane extensions to 4D (x, y, z, t) [7,14,54,60] with plane decompositions [9] to
+keep memory footprint under control. These approaches can suffer from a lack of
+temporal consistency, especially as they generally are agnostic about the motion
+of the scene. Grid-based methods that share a representation [46], also can suffer
+from degradation due to lack of representational capacity in long sequences.
+This paper proposes a new method that addresses open problems of the stateof-the-art (SoTA) - see Fig. 1. Our method overview is shown in Fig. 2. Firstly,
+we build upon 3D Gaussian Splatting (3DGS) [20] and adapt the 3D Gaussians
+to be dynamic by allowing them to move. Our representation is thus explicit
+and avoids expensive raymarching via fast rasterization. Secondly, we introduce
+a novel paradigm for dynamic neural rendering with temporally-local canonical
+spaces defined in a sliding window fashion. Each window’s length is adaptively
+defined following the amount of scene motion to maintain high-quality reconstruction. By limiting the scope of each canonical space, we can accurately track
+3D displacements (i.e. they are generally smaller displacements) and prevent
+intra-window flickering. Thirdly, we introduce tuneable MLPs (MLP with several sets of weights governed by per-3D Gaussian blending weights) to estimate
+displacements. This tackles scenes with static vs dynamic imbalance. By learning different “modes” of motion estimation, we can separate smoothly between
+SWinGS
+3
+static and dynamic regions with virtually no additional computational cost nor
+any handcrafted heuristics. Lastly, temporal consistency loss computed on overlapping frames of neighbouring windows ensures consistency between windows,
+i.e. avoids inter-window flickering. In summary, our main contributions are:
+1. An adaptive sliding window approach that enables the reconstruction of
+arbitrary length sequences whilst maintaining high rendering quality.
+2. Temporally-local dynamic MLPs that model scene dynamics by learning
+deformation fields from per-window canonical 3D Gaussians to each frame.
+3. Learnable MLP tuning parameters tackle scene imbalance by learning different motion modes; disentangling static canonical and dynamic 3D Gaussians.
+4. A fine-tuning stage ensures temporal consistency throughout the sequence.
+2
+Related work
+Non-NeRF dynamic reconstruction: A number of approaches prior to the
+emergence of NeRF [37] tackled dynamic scene reconstruction. Such methods
+typically relied on dense camera coverage for point tracking and reprojection [19],
+or the presence of additional measurements, i.e. depth [40, 55]. Alternatively,
+some were curated towards specific domains, e.g. car reconstruction in driving
+scenarios [6,34]. Several recent works [3,29,46] followed the idea of Image-Based
+Rendering [63] (direct reconstruction from neighbouring views). Others [30, 69]
+utilize multiplane images [58, 76] with an additional temporal component.
+NeRF-based reconstruction: NeRF [37] has achieved great success for reconstructing static scenes with many works extending it to dynamic inputs. Several
+methods [4, 67] model separate representations per time-step, disregarding the
+temporal component of the input. D-NeRF [22] reconstruct the scene in a canonical representation and model temporal variations with a deformation field. This
+idea was developed upon by many works [12,13,28,32,33,44]. StreamRF [23] and
+NeRFPlayer [56] use time-aware MLPs and a compact 3D grid at each time-step
+for 4D field representation, reducing memory cost for longer videos. Other approaches [7,14,54,60] represent dynamic scenes with a space-time grid, with grid
+decomposition to increase efficiency. DyNeRF [25] represents dynamic scenes by
+extending NeRF with an additional time-variant latent code. HyperReel [2] uses
+an efficient sampling network, modeling the scene around keyframes. MixVoxels [61] represents dynamic and static components with separately processed
+voxels. Several methods [18, 24, 64] rely on an underlying template mesh (e.g.
+human). Some methods [8, 50, 75] aim to improve NeRF quality post rendering.
+3D Gaussian Splatting Much of the development of neural rendering has
+focused on accelerating inference [15,46,49,62,73]. Recently, 3D Gaussian Splatting [20] made strides by modelling the scene with 3D Gaussians, which, when
+combined with tile-based differentiable rasterization, achieves very fast rendering, yet preserves high-quality reconstruction. Luiten et al . [35] extend this to dynamic scenes with shared 3D Gaussians that are optimised frame-by-frame. However, their focus is more on tracking 3D Gaussian trajectories rather than maximizing final rendering quality. Concurrent methods to ours that extend 3D Gaus-
+4
+R. Shaw et al.
+𝑆𝑙𝑖𝑑𝑖𝑛𝑔 𝑊𝑖𝑛𝑑𝑜𝑤 𝑆𝑎𝑚𝑝𝑙𝑖𝑛𝑔
+𝐷𝑦𝑛𝑎𝑚𝑖𝑐 3𝐷 𝐺𝑎𝑢𝑠𝑠𝑖𝑎𝑛𝑠
+(𝑝𝑒𝑟 − 𝑤𝑖𝑛𝑑𝑜𝑤)
+𝑇𝑒𝑚𝑝𝑜𝑟𝑎𝑙 𝐶𝑜𝑛𝑠𝑖𝑠𝑡𝑒𝑛𝑐𝑦
+𝜶
+𝛾(𝒙)
+𝛾(𝑡)
+∆𝒙
+∆𝒓
+∆𝒔
+𝑇𝑟𝑎𝑖𝑛 𝑣𝑖𝑒𝑤
+𝑁𝑜𝑣𝑒𝑙 𝑣𝑖𝑒𝑤
+𝑂𝑝𝑡𝑖𝑐𝑎𝑙 𝐹𝑙𝑜𝑤
+𝐶𝑜𝑛𝑠𝑖𝑠𝑡𝑒𝑛𝑐𝑦 𝐿𝑜𝑠𝑠
+𝑇𝑖𝑚𝑒
+𝑇𝑖𝑚𝑒
+Fig. 2: Method. First, the sequence is partitioned into sliding windows based on
+optical flow. Second, a dynamic 3DGS model is trained per window, where tunable
+MLPs model the deformations. Blending parameters α weigh the MLP’s parameters
+to focus on dynamic parts. Finally, each model is fine-tuned, enforcing inter-window
+temporal consistency with consistency loss on sampled views for overlapping frames.
+sian Splatting to focus on general dynamic scenes include [17, 26, 31, 57, 71, 72]
+amongst others, while other works have focused specifically on dynamic human
+reconstruction [16, 21, 27, 38, 42, 48, 65] and facial animation [11, 47, 52, 68, 70].
+3
+Method
+3.1
+Overview
+We present our method to reconstruct and render novel views of general dynamic
+scenes from multiple calibrated time-synchronized cameras. An overview of our
+method is shown in Fig. 2. We build upon 3D Gaussian Splatting [20] for novel
+view synthesis of static scenes, which we extend to scenes containing motion.
+Our method can be separated into three main steps. First, given a dynamic
+sequence, we split the sequence into separate shorter sliding windows of frames
+for concurrent processing. We adaptively sample windows of varying lengths depending on the amount of motion in the sequence. Each sliding window contains
+an overlapping frame between adjacent windows, enabling temporal consistency
+to be enforced throughout the sequence at a subsequent training stage. Partitioning the sequence into smaller windows enables us to deal with sequences of
+arbitrary length while maintaining high render quality.
+Second, we train separate dynamic 3DGS models for each sliding window in
+turn. We extend the static 3DGS method to model the dynamics by introducing
+a tuneable MLP [36]. The MLP learns the deformation field from a canonical set
+of 3D Gaussians for each frame in a window. Thus each window comprises an
+independent temporally-local canonical 3D Gaussian representation and deformation field. This enables us to handle significant geometric changes and/or if
+new objects appear throughout the sequence, which can be challenging to model
+with a single representation. A tuneable MLP weighting parameter α is learned
+SWinGS
+5
+for each 3D Gaussian to enable the MLP to focus on modelling the dynamic parts
+of the scene, with the static parts encapsulated by the canonical representation.
+Third, once a dynamic 3DGS model is trained for each window in the sequence, we apply a fine-tuning step to enforce temporal consistency throughout
+the sequence. We fine-tune each 3DGS model sequentially and employ a selfsupervising temporal consistency loss on the overlapping frame renders between
+neighbouring windows. This encourages the model of the current window to
+produce similar renderings to the previous window. The result is a set of perframe Gaussian Splatting models enabling high-quality novel view renderings
+of dynamic scenes with real-time interactive viewing capability. Our approach
+enables us to overcome the limitations of training with long sequences and to
+handle complex motions without exhibiting distracting temporal flickering.
+3.2
+Preliminary: 3D Gaussian Splatting
+Our method is built upon 3D Gaussian Splatting (3DGS) [20]. 3DGS uses a 3D
+Gaussian representation to model scenes as they are differentiable and can be
+projected to 2D splats, enabling fast tile-based rasterization. The 3D Gaussians
+are defined by 3D covariance matrix Σ in world space centered at the mean µ:
+G(x) = e^{-\frac {1}{2}(x)^T \Sigma ^{-1} (x)}.
+(1)
+Given a scaling matrix S and rotation matrix R, the corresponding covariance matrix Σ of a 3D Gaussian can be written as Σ = RSS T RT . To represent
+a scene, 3DGS optimizes 3D Gaussian positions x, covariance Σ (scaling S and
+rotation R), opacity o, and colours, represented by spherical harmonic (SH)
+coefficients, capturing view-dependent appearance. The optimization is interleaved with Gaussian adaptive density control (ADC). The model is optimized
+by rendering the learned Gaussians via a differentiable rasterizer, comparing the
+resulting image Ir against the ground truth Igt , and minimizing the loss function:
+\mathcal {L} = (1-\lambda )\mathcal {L}_1(I_r, I_{gt}) + \lambda \mathcal {L}_{\mathrm {SSIM}}(I_r,I_{gt}).
+3.3
+(2)
+Sliding-Window Processing
+Using a single dynamic 3DGS representation to model an entire sequence becomes impractical for longer sequences, simply from a data processing standpoint. Furthermore, representing a lengthy sequence with a single model performs significantly worse than using multiple smaller fixed-sized segments, particularly if the scene has large motion or topological changes that cannot be
+modeled easily with one canonical representation and deformation field (Fig. 4).
+To address this, we use a sliding-window approach, separating the sequence into
+smaller windows with overlapping frames. The window size is a hyperparameter
+whose effect is explored in Section 4.1. Each window comprises an independent
+dynamic 3DGS model, and we allow all 3D Gaussian parameters to change between windows, including the number of Gaussians, their positions, rotations,
+6
+R. Shaw et al.
+scaling, colours and opacities. The advantage of this approach is that independent models can be trained in parallel across multiple GPUs to speed up training.
+Adaptive Window Sampling We propose an adaptive method for choosing
+the appropriate sliding window sizes, balancing training overhead and model
+size with performance and temporal consistency. Given an input sequence of
+frame length Nf , we separate the sequence into smaller windows by adaptively
+sampling windows of different lengths {Nw }, depending on the amount of motion
+in the sequence. In high-motion areas, we aim to sample windows more frequently
+(shorter windows), and in low-motion areas, less frequently (longer windows).
+To do this, we leverage the magnitude of 2D optical flow from each camera viewpoint. We employ a greedy algorithm to adaptively select the sizes of
+windows, prior to training, based on the accumulated optical flow magnitude.
+Specifically, we estimate per-frame optical flow f using a pre-trained RAFT [59]
+model for each camera view j ∈ V and all frames in the sequence i ∈ Nf , and
+compute the mean flow magnitude summed over each frame:
+(3)
+\hat {v}_i = \frac {1}{V} \sum ^{V}_j \sum ^{N_f-1}_i || \boldsymbol {f} (I^j_i, I^j_{i+1} ) ||^2_2
+We iterate over each frame in the sequence with a greedy heuristic; spawning
+a new window when the sum of mean flow v̂i exceeds a pre-defined threshold. This
+ensures that each window contains a similar amount of movement, leading to a
+balanced distribution of the total representational workload. Taking the average
+across viewpoints makes this approach somewhat invariant to the number of
+cameras, while placing a limit on the total flow stops an excessive amount of
+movement within each window. Note, each sampled window overlaps with the
+next window by a single frame, such that neighbouring windows share a common
+image frame. This is to enable inter-window temporal consistency (section 3.6).
+3.4
+Dynamic 3D Gaussians
+To extend static 3DGS to handle dynamic scenes, we introduce a temporallylocal dynamic MLP unique to each sliding window in the sequence (section 3.3).
+Each time-dependent MLP learns a temporally-local deformation field, mapping
+from a learned per-window canonical space to a set of 3D Gaussians for each
+frame in the window. Each deformation field, represented by a small MLP Fθ
+with weights θ, takes as input the normalized frame time t ∈ [0, 1] and 3D
+Gaussian means x (normalized by the scene’s mean and standard deviation),
+and outputs displacements to their positions ∆x, rotations ∆r and scaling ∆s:
+\Delta \boldsymbol {x}(t), \Delta \boldsymbol {r}(t), \Delta \boldsymbol {s}(t) = \mathcal {F}_{\theta } (\gamma ({\boldsymbol {x}}), \gamma (t))
+3
+(4)
+3+6m
+where γ(.) denotes sinusoidal positional encoding γ : R → R
+, γ(x) =
+(x, . . . , sin(2kπx), cos(2kπx), . . . ). We use small MLPs to reduce overfitting, setting the number of frequency components m = 6, MLP depth D = 4 and width
+W = 16, with two skip connections.
+SWinGS
+3.5
+7
+Tunable Dynamic MLPs
+Ideally, time-dependent MLPs model motion in the scene by associating the dynamic parts with the temporal input component γ(t) and thus learn to decouple
+the scene into i) static canonical 3D Gaussians and ii) dynamic 3D Gaussians.
+However, in scenes with an imbalance of static vs dynamic parts, e.g. Neural
+3D Video [25] with mostly static backgrounds, the MLP struggles to disentangle
+static and dynamic regions, resulting in poorly estimated deformation fields.
+To counteract this, we introduce tuneable dynamic MLPs [36] (i.e. MLPs
+with M sets of weights) governed by M sets of learnable blending parameters
+{α ∈ RM ×Ng }. The tuning parameters weigh the respective parameters of the
+MLP for each input Gaussian i ∈ Ng , enabling the learning of M modes of
+variation corresponding to different motion modes. With M = 2, the MLP has
+the ability to decouple static and dynamic Gaussians in a smoothly weighted
+manner. Given the set of blending parameters {αi }M
+m=1 for the i-th input Gaussian xi , the output of a single layer of the dynamic MLP y i can be written as a
+weighted sum over the M sets of weights:
+\boldsymbol {y}_i = \phi \left ( \sum ^M_{m=1} \left ( \alpha _{i,m} \boldsymbol {w}_m^T \boldsymbol {x}_i + \alpha _{i,m} \boldsymbol {b}_m \right ) \right ),
+(5)
+where w and b are the weights and bias, and ϕ is a non-linear activation function.
+The blending parameters {αi }M
+m=1 linearly blend M sets of weights and biases
+of each layer of the MLP for each input Gaussian which, when passed through
+the activation function, enables nonlinear interaction between α and the output.
+Applying α in this way naturally enables the learning different of motion modes
+with a single forward pass of the MLP. Thus the dynamic MLP Fθdyn becomes
+a function of position, time, and blending parameters α:
+\Delta \boldsymbol {x}(t), \Delta \boldsymbol {r}(t), \Delta \boldsymbol {s}(t) = \mathcal {F}^{dyn}_{\theta } (\gamma ({\boldsymbol {x}}), \gamma (t), \boldsymbol {\alpha }).
+(6)
+We implement the dynamic MLP as a single batch matrix multiplication
+(see supplementary). Blending parameters α are initialized as a binary mask of
+dynamic Gaussians (0-static, 1-dynamic) as follows. For a sliding window, we
+project all 3D Gaussians into each camera view: u = Πj (x), obtaining their 2Dpixel coordinates. We compute their L1 pixel differences from the central frame
+to each frame in the window. If the difference is larger than a threshold, we
+label that Gaussian 1, otherwise 0. To be robust to occlusions and mislabelling,
+we average the assigned label over all views and frames in the window. If the
+average is greater than 0.5, we initialize the Gaussian dynamic, otherwise static.
+Once initialized, we set the blending parameter α as a learnable parameter,
+and optimize it via back-propagation together with the rest of the system. We
+assume α is constant for all frames in a sliding window to reduce the complexity
+of the optimization, which is a fair assumption given our adaptive window sampling mechanism. Fig. 3 visualizes the learning of the MLP tuning parameter.
+We observe α providing higher weight to Gaussians likely to be dynamic. Fig. 3
+(right) plots the magnitudes of resulting displacements ∆x output by the MLP.
+8
+R. Shaw et al.
+Note, α does not have to be entirely accurate, as the MLP learns to adjust
+accordingly, yet enables the MLP to handle highly imbalanced scenes (Table 6).
+11
+0.50.5
+00
+Fig. 3: Dynamic MLPs with tunable parameters α weigh the parameters of the MLP
+for each Gaussian. We show renders from two scenes, left: cook spinach [25] and
+right: Train [51]. Shown from left-to-right: image render, tunable α parameters, and
+normalized MLP displacements ∆x. Note, α highlights the scene’s dynamic regions.
+3.6
+Temporal Consistency Fine-tuning
+Due to the non-deterministic nature of the 3DGS optimization, independently
+trained models for each sliding window may produce slightly different results.
+When the resulting renders from each model are played back in sequence, noticeable flickering can be observed, particularly in novel views (though it’s less noticeable in the training views). Consequently, after training models for all sliding
+windows separately, we tackle inter-window temporal flickering by introducing a
+fine-tuning step for temporal consistency. This step uses a self-supervising loss
+function to aid in smooth transitions between the models of separate windows.
+We fine-tune each model for a short period (3000 iterations in our experiments). We initiate the process from the first sliding window and progress
+through the sequence sequentially. For a window comprising Nw frames, we load
+the trained model and the model from the preceding window, with one overlapping frame between them. We then freeze all the parameters of the previous
+model. In order to fine-tune the model, as the flickering is mainly observed in
+novel views, we randomly sample novel test views in between the training views
+by rigidly interpolating the training camera poses Pj = [R|t] ∈ R4×4 in SE(3):
+P_{\mathrm {novel}} = \exp _{\mathrm {M}} \sum ^{V}_j \beta _j \log _{\mathrm {M}} ( P_j )
+(7)
+where expM and logM are the matrix exponential and logarithm [1] respectively,
+PV
+and βj ∈ [0, 1] is a uniformly sampled weighting such that j βj = 1.
+In one fine-tuning step, we render the overlapping frames from a randomly
+sampled novel viewpoint using both the model of the current window w and the
+w
+previous window w −1. This means we use the first frame of current window It=0
+w−1
+and the last frame of the previous window It=Nw −1 . We then apply a consistency
+loss, which is simply the L1 loss on the two image renders from both models:
+SWinGS
+\mathcal {L}_{\mathrm {consistency}} = | I^w_{t=0} - I^{w-1}_{t=N_w-1} |_1
+9
+(8)
+When fine-tuning a model, we only allow the canonical (static) representation
+to change, while freezing the weights of the time-dependent dynamic MLP. Since
+the canonical set of 3D Gaussians is shared for all frames in a sliding window,
+we need to be careful not to negatively impact other frames when refining the
+overlapping frame. To address this, we use an alternating strategy for refinement,
+enforcing temporal consistency on the overlapping frame 75% of the time and
+training with the remaining views and frames as usual for the remaining 25%.
+3.7
+Implementation Details
+We implement our method in PyTorch, building upon the codebase and differentiable rasterizer of 3DGS [20]. We initialize each model with a point cloud
+obtained from COLMAP [53]. Each dynamic 3DGS model is trained for 15K iterations for all sampled windows in a sequence. The initial 2K iterations comprise
+a warm-up stage; training with only the central window frame and freezing the
+weights of the MLP, allowing the canonical representation to stabilize. We optimize the Gaussians’ positions, rotations, scaling, opacities and SH coefficients.
+Afterwards, we unfreeze the MLP and allow the deformation field and tuning
+parameters α to optimize. We find this staggered optimization approach leads
+to better convergence. The number of Gaussians densifies for 8K iterations, after
+which the number of Gaussians is fixed. Inputs to the MLP are normalized by the
+mean and standard deviation of the canonical point cloud post-warm-up stage
+before frequency encoding, leading to faster and stabler convergence. We train
+with Adam optimizer, using different learning rates for each parameter following
+the implementation of [20]. The learning rate for the MLP and α parameters
+are set to 1e-4, with the MLP learning rate undergoing exponential decay by
+factor 1e-2 in 20K iterations. During the initial optimization phase, due to the
+independence of each Gaussian model, we train each model in parallel on eight
+32Gb Tesla V100 GPUs to speed up training. Afterwards, we perform temporal
+fine-tuning of each model sequentially using a single GPU for 3K iterations each.
+Table 2: Quantitative results on Technicolor
+dataset [51] at full resolution. Best and
+second best results are highlighted.
+Method
+PSNR SSIM LPIPS FPS
+DyNeRF [25]
+31.80
+HypeRreel [2]
+32.50
+Dynamic3DG [35] 27.02
+Ours
+33.65
+0.911
+0.902
+0.832
+0.934
+0.142 0.02
+0.113 0.45
+0.228 86.96
+0.117 23.79
+Fig. 4: Comparison in performance
+consistency for Ours and Dynamic3DG in consecutive frames.
+10
+R. Shaw et al.
+Table 1: Quantitative results on the Neural 3D Video dataset [25], averaged over all
+scenes. Best and second best highlighted. Our method performs best overall whilst
+enabling real-time frame rates. Per-scene breakdown of results are given in Table 3.
+Method
+PSNR SSIM LPIPS FPS
+MixVoxels [61]
+30.42
+K-Planes [14]
+30.63
+HexPlane [7]
+30.00
+HyperReel [2]
+30.78
+NeRFPlayer [56] 30.70
+StreamRF [23]
+30.23
+4DGS [65]
+27.61
+31.10
+Ours
+4
+0.923
+0.922
+0.922
+0.931
+0.931
+0.904
+0.916
+0.940
+0.124 4.30
+0.117 0.33
+0.113 0.24
+0.101 3.60
+0.121 0.10
+0.177 9.40
+0.135 30.00
+0.096 71.51
+Results
+We evaluate our method on two real-world multi-view dynamic benchmarks: the
+Neural 3D Video dataset [25] and the Technicolor dataset [51].
+Neural 3D Video comprises real-world dynamic scenes captured with a timesynchronized multi-view system at 2028 × 2704 resolution at 30 FPS. Camera parameters are estimated using COLMAP [53]. We compare our method to
+K-Planes [14], HexPlane [7], MixVoxels [61], HyperReel [2], NeRFPlayer [56],
+StreamRF [23], and 4DGS [65]. We compute quantitative metrics for the central test view at half the original resolution (1014 × 1352) for 300 frames. The
+average results for each method over the dataset are given in Table 1, while Table 3 provides a breakdown of the per-scene performance. The results show that
+our method performs best regarding PSNR and SSIM metrics while offering the
+fastest rendering performance. Qualitative results are shown in Fig. 5.
+Technicolor captures real dynamic scenes from a synchronized 4 × 4 camera array at 2048×1088 resolution. Following [2], we evaluate on the second row second
+column camera on five scenes: Birthday, Fabien, Painter, Theater and Trains.
+We compare to DynNeRF [25], HyperReel [2] and Dynamic 3D Gaussians [35],
+with quantitative and qualitative results in Table 4 and Fig. 6 respectively.
+4.1
+Ablation Studies
+This section provides ablations showing the effectiveness of our sliding window
+and self-supervised temporal consistency fine-tuning strategies. As we train independent models for each window, flickering artifacts can occur in the final
+renders. To visualize this, Fig. 8 plots absolute image error between renders
+of neighbouring frames (overlapping frames outlined in red). Without temporal
+consistency, we observe a spike in absolute error on overlapping frames, resulting in undesirable flickering. However, after fine-tuning, the error in overlapping
+frames is drastically reduced. In Table 5, we compute per-frame image metrics
+and estimate a measure of the temporal consistency using SoTA video quality
+SWinGS
+11
+Table 3: Quantitative results on the Neural 3D Video dataset [25], evaluated for 300
+frames at 1352 × 1014 resolution. †As reported in [2], ‡Natively trained in lower resolution, upscaled. Best and second best results highlighted respectively. Our method
+performs competitively in all metrics, usually coming in either first or second place.
+Scene
+Method
+Cook Spinach
+Cut Roast Beef
+Flame Steak
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+MixVoxels [61]
+31.39
+K-Planes [14]
+31.23
+HexPlane‡ [7]
+31.05
+HyperReel [2]
+31.77
+NeRFPlayer† [56] 30.58
+StreamRF [23]
+30.89
+Ours
+31.96
+0.931
+0.926
+0.928
+0.932
+0.929
+0.914
+0.946
+0.113
+0.114
+0.114
+0.090
+0.113
+0.162
+0.094
+Sear steak
+MixVoxels [61]
+30.85
+K-Planes [14]
+30.28
+HexPlane‡ [7]
+30.00
+HyperReel [2]
+31.88
+NeRFPlayer† [56] 29.13
+StreamRF [23]
+31.60
+Ours
+32.21
+0.940
+0.937
+0.939
+0.942
+0.908
+0.925
+0.950
+31.38
+31.87
+30.83
+32.25
+29.35
+30.75
+31.84
+0.928
+0.928
+0.927
+0.936
+0.908
+0.917
+0.945
+0.111
+0.114
+0.115
+0.086
+0.144
+0.154
+0.099
+Coffee Martini
+0.103
+0.104
+0.105
+0.080
+0.138
+0.147
+0.092
+29.25
+29.30
+28.45
+28.65
+31.53
+28.13
+29.16
+0.901
+0.900
+0.891
+0.897
+0.951
+0.873
+0.921
+0.147
+0.134
+0.149
+0.129
+0.085
+0.219
+0.105
+30.15
+31.49
+30.42
+31.48
+31.93
+31.37
+32.18
+0.938
+0.940
+0.939
+0.939
+0.950
+0.923
+0.953
+0.108
+0.102
+0.104
+0.083
+0.088
+0.152
+0.087
+Flame Salmon
+29.50
+29.58
+29.23
+28.26
+31.65
+28.69
+29.25
+0.898
+0.901
+0.905
+0.941
+0.940
+0.872
+0.925
+0.163
+0.132
+0.088
+0.136
+0.098
+0.229
+0.100
+Table 4: Quantitative results on the Technicolor dataset [51] evaluated at full resolution. Best and second best results highlighted respectively.
+Scene
+Method
+Birthday
+Fabien
+Painter
+PSNR SSIM LPIPS PSNR SSIM LPIPS PSNR SSIM LPIPS
+DyNeRF [25]
+29.20
+HyperReel [2]
+30.79
+Dynamic3DG [35] 27.06
+Ours
+33.44
+0.909
+0.922
+0.859
+0.959
+Scene
+Theater
+DyNeRF [25]
+29.53
+33.67
+HyperReel [2]
+Dynamic3DG [35] 28.05
+Ours
+29.81
+0.875
+0.895
+0.799
+0.884
+0.067
+0.062
+0.113
+0.042
+32.76
+32.28
+26.34
+34.43
+0.909
+0.860
+0.834
+0.925
+0.242
+0.217
+0.268
+0.171
+35.95
+35.68
+25.18
+36.76
+Train
+0.188
+0.104
+0.277
+0.201
+31.58
+30.10
+28.46
+33.99
+0.933
+0.909
+0.908
+0.957
+0.930
+0.926
+0.758
+0.948
+0.147
+0.123
+0.395
+0.128
+Average
+0.067
+0.061
+0.088
+0.043
+31.80
+32.50
+27.02
+33.69
+0.911
+0.902
+0.832
+0.934
+0.142
+0.113
+0.228
+0.117
+12
+R. Shaw et al.
+MixVoxels
+K-Planes
+Ours
+HyperReel
+Ground truth
+Fig. 5: Qualitative results on Neural 3D Video [25]. Scenes top to bottom: i) coffee
+martini, ii) cook spinach, iii) cut roasted beef, iv) flame salmon, v) flame steak.
+HyperReel
+Dynamic3DG
+Ours
+Ground truth
+Fig. 6: Qualitative results on Technicolor [51]. Scenes top to bottom: i) Birthday, ii)
+Painter, iii) Train.
+SWinGS
+13
+assessment metric FAST-VQA [66], where the quality score is in the range [0,1].
+The table provides results averaged over all scenes from the Neural 3D Video
+dataset [25]. Although we incur a minor penalty in some per-frame performance
+metrics (SSIM and LPIPS), we obtain a significantly higher video quality (VQA)
+score. This indicates a substantial improvement in temporal consistency and
+overall perceptual video quality, resulting in more pleasing renderings.
+Table 5: Ablation on temporal fine-tuning. Results averaged over all scenes from [25].
+Temporal consistency is measured using t-LPIPS [10] and FAST-VQA [66] (quality
+score in the range [0,1]). Per-frame performance remains fairly constant, but temporal
+consistency and overall perceptual video quality is significantly improved.
+Method
+PSNR ↑ SSIM ↑ LPIPS ↓ t-LPIPS ↓ VQA ↑
+w/o temporal consistency
+w/ temporal consistency
+Ground truth
+32.01
+32.05
+-
+0.956
+0.949
+-
+0.085
+0.093
+-
+0.0129
+0.0102
+-
+0.666
+0.726
+0.763
+Table 6: Ablation on sliding window size vs adaptive on Birthday scene [51]. We show
+the improvement from the dynamic MLP. Adaptive chooses window sizes that match,
+and in some metrics exceed, the best fixed-size window performance, striking balance
+between performance, temporal consistency (t-LPIPS) and training time (GPU hrs).
+Window Size
+No. Windows
+3
+24
+9
+6
+17
+3
+25
+2
+49
+1
+Adaptive
+5
+Adaptive (w/o dyn. MLP) 5
+Train time
+16.0
+4.0
+2.0
+1.3
+0.7
+3.3
+3.3
+PSNR SSIM LPIPS t-LPIPS
+33.12 0.956 0.048
+33.38 0.959 0.043
+33.01 0.956 0.045
+32.97 0.956 0.043
+32.73 0.955 0.047
+33.44 0.959 0.042
+32.76 0.957 0.045
+0.0076
+0.0053
+0.0049
+0.0048
+0.0051
+0.0051
+0.0062
+Table 6 and Fig. 7 show the impact of the sliding-window size hyperparameter
+and our adaptive sampling strategy. Adaptive sampling automatically chooses
+appropriate window sizes that match and sometimes exceed the best fixed-size
+window performance, striking a good balance between performance, temporal
+consistency (t-LPIPS [10]) and training time. Adaptive performs the best overall
+with fewer windows (less storage requirements). We also show the advantage
+gained from using a dynamic MLP vs a regular MLP, which improves all metrics.
+5
+Conclusion
+We have presented a method to render novel views of dynamic scenes by extending the 3DGS framework. Results show that our method produces high-
+14
+R. Shaw et al.
+w3
+w17
+w25
+w49
+Adapt. w/o dyn. MLP
+Adaptive
+w/ temporal const.
+w/o temporal const.
+Fig. 7: Ablation on sliding window size vs adaptive window sampling (with and without
+dynamic MLP) on scenes from the Technicolor dataset [51]. The single-window scenario
+(w49) has the shortest training time but unsatisfactory visual quality, while adaptive
+windows offer the best balance between quality and training overhead.
+Fig. 8: Ablation on temporal fine-tuning: we display the absolute error between neighbouring frame renders, with overlapping frames highlighted red. After fine-tuning, the
+error is substantially reduced and overall perceptual video quality is improved.
+quality renderings, even with complex motions e.g. flames. Key to our approach
+is sliding-window processing, which adaptively partitions sequences into manageable chunks. Processing each window separately, allowing the canonical representation and deformation field to vary throughout the sequence, enables us to
+handle complex topological changes, and reduces the magnitude and variability
+of the 3D scene flow. In contrast, other methods that learn a single representation
+for whole sequences are impractical for long sequences and degrade in quality
+with increasing length. Introducing an MLP for each window learns the deformation field from each canonical representation to a set of per-frame 3D Gaussians.
+Moreover, learnable tuning parameters help disentangle static and dynamic parts
+of the scene, which we find essential for imbalanced scenes. Our ablations show
+self-supervised temporal consistency fine-tuning reduces temporal flickering and
+improves the overall perceptual video quality, with only a minor impact on perframe performance metrics. Overall, our method performs strongly compared to
+recent SoTA quantitatively and obtains sharper, temporally-consistent results.
+SWinGS
+15
+References
+1. Alexa, M.: Linear Combination of Transformations. ACM Trans. Graph. (2002)
+2. Attal, B., Huang, J.B., Richardt, C., Zollhöfer, M., Kopf, J., O’Toole, M., Kim, C.:
+HyperReel: High-fidelity 6-DoF Video with Ray-conditioned Sampling. In: CVPR
+(2023)
+3. Bansal, A., Vo, M., Sheikh, Y., Ramanan, D., Narasimhan, S.: 4D Visualization of
+Dynamic Events from Unconstrained Multi-view Videos. In: CVPR (2020)
+4. Bansal, A., Zollhöfer, M.: Neural Pixel Composition for 3D-4D View Synthesis
+from Multi-views. In: CVPR (2023)
+5. Barron, J.T., Mildenhall, B., Tancik, M., Hedman, P., Martin-Brualla, R., Srinivasan, P.P.: Mip-NeRF: A Multiscale Representation for Anti-aliasing Neural Radiance Fields. In: ICCV (2021)
+6. Bârsan, I.A., Liu, P., Pollefeys, M., Geiger, A.: Robust Dense Mapping for Largescale Dynamic Environments. In: International Conference on Robotics and Automation (2018)
+7. Cao, A., CV, J.: HexPlane: A Fast Representation for Dynamic Scenes. In: CVPR
+(2023)
+8. Catley-Chandar, S., Shaw, R., Slabaugh, G., Pérez-Pellitero, E.: RoGUENeRF:
+A Robust Geometry-consistent Universal Enhancer for NeRF. arXiv preprint
+arXiv:2403.11909 (2024)
+9. Chen, A., Xu, Z., Geiger, A., Yu, J., Su, H.: TensoRF: Tensorial Radiance Fields.
+In: ECCV (2022)
+10. Chu, M., Xie, Y., Mayer, J., Leal-Taix’e, L., Thuerey, N.: Learning Temporal Coherence via Self-supervision for GAN-based Video Generation. ACM Trans. Graph.
+39, 75:1 – 75:13 (2020)
+11. Dhamo, H., Nie, Y., Moreau, A., Song, J., Shaw, R., Zhou, Y., Pérez-Pellitero, E.:
+HeadGaS: Real-time Animatable Head Avatars via 3D Gaussian Splatting. arXiv
+preprint arXiv:2312.02902 (2023)
+12. Du, Y., Zhang, Y., Yu, H.X., Tenenbaum, J.B., Wu, J.: Neural Radiance Flow for
+4D View Synthesis and Video Processing. In: ICCV (2021)
+13. Fang, J., Yi, T., Wang, X., Xie, L., Zhang, X., Liu, W., Nießner, M., Tian, Q.:
+Fast Dynamic Radiance Fields with Time-aware Neural Voxels. In: SIGGRAPH
+Asia (2022)
+14. Fridovich-Keil, S., Meanti, G., Warburg, F.R., Recht, B., Kanazawa, A.: K-Planes:
+Explicit Radiance Fields in Space, Time, and Appearance. In: CVPR (2023)
+15. Hedman, P., Srinivasan, P.P., Mildenhall, B., Barron, J.T., Debevec, P.: Baking
+Neural Radiance Fields for Real-time View Synthesis. In: ICCV (2021)
+16. Hu, L., Zhang, H., Zhang, Y., Zhou, B., Liu, B., Zhang, S., Nie, L.: GaussianAvatar:
+Towards Realistic Human Avatar Modeling from a Single Video via Animatable
+3D Gaussians. In: CVPR (2024)
+17. Huang, Y.H., Sun, Y.T., Yang, Z., Lyu, X., Cao, Y.P., Qi, X.: SC-GS: SparseControlled Gaussian Splatting for Editable Dynamic Scenes. In: CVPR (2024)
+18. Işık, M., Rünz, M., Georgopoulos, M., Khakhulin, T., Starck, J., Agapito, L.,
+Nießner, M.: HumanRF: High-fidelity Neural Radiance Fields for Humans in Motion. ACM Trans. Graph. 42(4), 1–12 (2023)
+19. Joo, H., Soo Park, H., Sheikh, Y.: MAP Visibility Estimation for Large-scale Dynamic 3D Reconstruction. In: CVPR (2014)
+20. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3D Gaussian Splatting for
+Real-time Radiance Field Rendering. ACM Trans. Graph. 42(4) (2023)
+16
+R. Shaw et al.
+21. Kocabas, M., Chang, J.H.R., Gabriel, J., Tuzel, O., Ranjan, A.: HUGS: Human
+Gaussian Splatting. In: CVPR (2024)
+22. Li, L., Shen, Z., Wang, Z., Shen, L., Tan, P.: D-NeRF: Neural Radiance Fields for
+Dynamic Scenes. In: CVPR (2020)
+23. Li, L., Shen, Z., Wang, Z., Shen, L., Tan, P.: Streaming Radiance Fields for 3D
+Video Synthesis. In: NeurIPS (2022)
+24. Li, R., Tanke, J., Vo, M., Zollhöfer, M., Gall, J., Kanazawa, A., Lassner, C.: TAVA:
+Template-free Animatable Volumetric Actors. In: ECCV (2022)
+25. Li, T., Slavcheva, M., Zollhöfer, M., Green, S., Lassner, C., Kim, C., Schmidt, T.,
+Lovegrove, S., Goesele, M., Newcombe, R., Lv, Z.: Neural 3D Video Synthesis from
+Multi-view Video. In: CVPR (2022)
+26. Li, Z., Chen, Z., Li, Z., Xu, Y.: Spacetime Gaussian Feature Splatting for Real-time
+Dynamic View Synthesis. In: CVPR (2024)
+27. Li, Z., Zheng, Z., Wang, L., Liu, Y.: Animatable Gaussians: Learning Posedependent Gaussian Maps for High-fidelity Human Avatar Modeling. In: CVPR
+(2024)
+28. Li, Z., Niklaus, S., Snavely, N., Wang, O.: Neural Scene Flow Fields for Space-time
+View Synthesis of Dynamic Scenes. In: CVPR (2021)
+29. Li, Z., Wang, Q., Cole, F., Tucker, R., Snavely, N.: DynIBaR: Neural Dynamic
+Image-Based Rendering. In: CVPR (2023)
+30. Lin, K.E., Xiao, L., Liu, F., Yang, G., Ramamoorthi, R.: Deep 3D Mask Volume
+for View Synthesis of Dynamic Scenes. In: ICCV (2021)
+31. Lin, Y., Dai, Z., Zhu, S., Yao, Y.: Gaussian-Flow: 4D Reconstruction with Dynamic
+3D Gaussian Particle. In: CVPR (2024)
+32. Liu, Y.L., Gao, C., Meuleman, A., Tseng, H.Y., Saraf, A., Kim, C., Chuang, Y.Y.,
+Kopf, J., Huang, J.B.: Robust Dynamic Radiance Fields. In: CVPR (2023)
+33. Lombardi, S., Simon, T., Saragih, J., Schwartz, G., Lehrmann, A., Sheikh, Y.:
+Neural Volumes: Learning Dynamic Renderable Volumes from Images. ACM Trans.
+Graph. 38(4) (2019)
+34. Luiten, J., Fischer, T., Leibe, B.: Track to Reconstruct and Reconstruct to Track.
+IEEE Robotics and Automation Letters 5(2), 1803–1810 (2020)
+35. Luiten, J., Kopanas, G., Leibe, B., Ramanan, D.: Dynamic 3D Gaussians: Tracking
+by Persistent Dynamic View Synthesis. In: 3DV (2024)
+36. Maggioni, M., Tanay, T., Babiloni, F., McDonagh, S.G., Leonardis, A.: Tunable
+Convolutions with Parametric Multi-loss Optimization. In: CVPR (2023)
+37. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis. In:
+ECCV (2020)
+38. Moreau, A., Song, J., Dhamo, H., Shaw, R., Zhou, Y., Pérez-Pellitero, E.: Human
+Gaussian Splatting: Real-time Rendering of Animatable Avatars. In: CVPR (2024)
+39. Müller, T., Evans, A., Schied, C., Keller, A.: Instant Neural Graphics Primitives
+with a Multiresolution Hash Encoding. ACM Trans. Graph. 41(4), 102:1–102:15
+(2022)
+40. Newcombe, R.A., Fox, D., Seitz, S.M.: DynamicFusion: Reconstruction and Tracking of Non-rigid Scenes in Real-time. In: CVPR (2015)
+41. Niemeyer, M., Barron, J.T., Mildenhall, B., Sajjadi, M.S.M., Geiger, A., Radwan,
+N.: RegNeRF: Regularizing Neural Radiance Fields for View Synthesis from Sparse
+Inputs. In: CVPR (2021)
+42. Pang, H., Zhu, H., Kortylewski, A., Theobalt, C., Habermann, M.: ASH: Animatable Gaussian Splats for Efficient and Photoreal Human Rendering. In: CVPR
+(2024)
+SWinGS
+17
+43. Park, K., Sinha, U., Barron, J.T., Bouaziz, S., Goldman, D.B., Seitz, S.M., MartinBrualla, R.: Nerfies: Deformable Neural Radiance Fields. ICCV (2021)
+44. Park, K., Sinha, U., Hedman, P., Barron, J.T., Bouaziz, S., Goldman, D.B., MartinBrualla, R., Seitz, S.M.: HyperNeRF: A Higher-dimensional Representation for
+Topologically Varying Neural Radiance Fields. ACM Trans. Graph. 40(6) (2021)
+45. Peng, S., Dong, J., Wang, Q., Zhang, S., Shuai, Q., Zhou, X., Bao, H.: Animatable
+Neural Radiance Fields for Modeling Dynamic Human Bodies. In: ICCV (2021)
+46. Peng, S., Yan, Y., Shuai, Q., Bao, H., Zhou, X.: Representing Volumetric Videos
+as Dynamic MLP Maps. In: CVPR (2023)
+47. Qian, S., Kirschstein, T., Schoneveld, L., Davoli, D., Giebenhain, S., Nießner,
+M.: GaussianAvatars: Photorealistic Head Avatars with Rigged 3D Gaussians. In:
+CVPR (2024)
+48. Qian, Z., Wang, S., Mihajlovic, M., Geiger, A., Tang, S.: 3DGS-Avatar: Animatable
+Avatars via Deformable 3D Gaussian Splatting. In: CVPR (2024)
+49. Reiser, C., Peng, S., Liao, Y., Geiger, A.: KiloNeRF: Speeding up Neural Radiance
+Fields with Thousands of Tiny MLPs. In: ICCV (2021)
+50. Rong, X., Huang, J.B., Saraf, A., Kim, C., Kopf, J.: Boosting View Synthesis with
+Residual Transfer. In: CVPR (2022)
+51. Sabater, N., Boisson, G., Vandame, B., Kerbiriou, P., Babon, F., et al.: Dataset
+and Pipeline for Multi-view Light-Field Video. In: CVPRW (2017)
+52. Saito, S., Schwartz, G., Simon, T., Li, J., Nam, G.: Relightable Gaussian Codec
+Avatars. In: CVPR (2024)
+53. Schönberger, J.L., Frahm, J.M.: Structure-from-Motion Revisited. In: CVPR
+(2016)
+54. Shao, R., Zheng, Z., Tu, H., Liu, B., Zhang, H., Liu, Y.: Tensor4D: Efficient Neural
+4D Decomposition for High-fidelity Dynamic Reconstruction and Rendering. In:
+CVPR (2023)
+55. Slavcheva, M., Baust, M., Cremers, D., Ilic, S.: KillingFusion: Non-rigid 3D Reconstruction without Correspondences. In: CVPR (2017)
+56. Song, L., Chen, A., Li, Z., Chen, Z., Chen, L., Yuan, J., Xu, Y., Geiger, A.: NeRFPlayer: A Streamable Dynamic Scene Representation with Decomposed Neural Radiance Fields. IEEE Transactions on Visualization and Computer Graphics 29(5),
+2732–2742 (2023)
+57. Sun, J., Jiao, H., Li, G., Zhang, Z., Zhao, L., Xing, W.: 3DGStream: On-the-fly
+Training of 3D Gaussians for Efficient Streaming of Photo-realistic Free-viewpoint
+Videos. In: CVPR (2024)
+58. Tanay, T., Maggioni, M.: Global Latent Neural Rendering. In: CVPR (2024)
+59. Teed, Z., Deng, J.: RAFT: Recurrent All-pairs Field Transforms for Optical Flow.
+In: ECCV (2020)
+60. Turki, H., Zhang, J.Y., Ferroni, F., Ramanan, D.: SUDS: Scalable Urban Dynamic
+Scenes. In: CVPR (2023)
+61. Wang, F., Tan, S., Li, X., Tian, Z., Liu, H.: Mixed Neural Voxels for Fast Multiview Video Synthesis. In: ICCV (2023)
+62. Wang, L., Zhang, J., Liu, X., Zhao, F., Zhang, Y., Zhang, Y., Wu, M., Yu, J., Xu,
+L.: Fourier PlenOctrees for Dynamic Radiance Field Rendering in Real-time. In:
+CVPR (2022)
+63. Wang, Q., Wang, Z., Genova, K., Srinivasan, P., Zhou, H., Barron, J.T., MartinBrualla, R., Snavely, N., Funkhouser, T.: IBRNet: Learning Multi-view ImageBased Rendering. In: CVPR (2021)
+18
+R. Shaw et al.
+64. Weng, C.Y., Curless, B., Srinivasan, P.P., Barron, J.T., Kemelmacher-Shlizerman,
+I.: HumanNeRF: Free-viewpoint Rendering of Moving People from Monocular
+Video. In: CVPR (2022)
+65. Wu, G., Yi, T., Fang, J., Xie, L., Zhang, X., Wei, W., Liu, W., Tian, Q., Wang, X.:
+4D Gaussian Splatting for Real-time Dynamic Scene Rendering. In: CVPR (2024)
+66. Wu, H., Chen, C., Hou, J., Liao, L., Wang, A., Sun, W., Yan, Q., Lin, W.: FASTVQA: Efficient End-to-end Video Quality Assessment with Fragment Sampling.
+In: ECCV (2022)
+67. Xian, W., Huang, J.B., Kopf, J., Kim, C.: Space-time Neural Irradiance Fields for
+Free-viewpoint Video. In: CVPR (2021)
+68. Xiang, J., Gao, X., Guo, Y., Zhang, J.: FlashAvatar: High-fidelity Head Avatar
+with Efficient Gaussian Embedding. In: CVPR (2024)
+69. Xing, W., Chen, J.: Temporal-MPI: Enabling Multi-Plane Images for Dynamic
+Scene Modelling via Temporal Basis Learning. In: ECCV (2022)
+70. Xu, Y., Chen, B., Li, Z., Zhang, H., Wang, L., Zheng, Z., Liu, Y.: Gaussian Head
+Avatar: Ultra High-fidelity Head Avatar via Dynamic Gaussians. In: CVPR (2024)
+71. Yang, Z., Yang, H., Pan, Z., Zhang, L.: Real-time Photorealistic Dynamic Scene
+Representation and Rendering with 4D Gaussian Splatting. In: ICLR (2024)
+72. Yang, Z., Gao, X., Zhou, W., Jiao, S., Zhang, Y., Jin, X.: Deformable 3D Gaussians
+for High-fidelity Monocular Dynamic Scene Reconstruction. In: CVPR (2024)
+73. Yu, A., Li, R., Tancik, M., Li, H., Ng, R., Kanazawa, A.: PlenOctrees for Real-time
+Rendering of Neural Radiance Fields. In: ICCV (2021)
+74. Zhao, F., Yang, W., Zhang, J., Lin, P., Zhang, Y., Yu, J., Xu, L.: HumanNeRF:
+Efficiently Generated Human Radiance Field from Sparse Inputs. In: CVPR (2022)
+75. Zhou, K., Li, W., Wang, Y., Hu, T., Jiang, N., Han, X., Lu, J.: NeRFLiX: Highquality Neural View Synthesis by Learning a Degradation-driven Inter-viewpoint
+MiXer. In: CVPR (2023)
+76. Zhou, T., Tucker, R., Flynn, J., Fyffe, G., Snavely, N.: Stereo Magnification: Learning View Synthesis using Multiplane Images. ACM Trans. Graph. 37 (2018)

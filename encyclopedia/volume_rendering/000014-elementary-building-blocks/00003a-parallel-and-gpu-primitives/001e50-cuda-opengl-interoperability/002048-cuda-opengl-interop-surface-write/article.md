@@ -3,63 +3,58 @@
 Also called: Direct GL Texture Write from CUDA, Surface Write via CUDA Interop
 
 ## Overview
-CUDA-OpenGL Interop Surface Write is a technique to render volume data by computing ray casting on the GPU (CUDA) and writing the final image directly into a texture that is registered with OpenGL, avoiding CPU-GPU data transfer for the final image [Parent]. It sets itself apart from standard interop methods by using CUDA surface objects (`cudaSurfaceObject_t`) for write access, which allows for atomic operations and potentially better performance for concurrent writes compared to standard texture memory writes or copies [S1, unofficial].
+CUDA-OpenGL Interop Surface Write writes directly to an OpenGL texture from a CUDA kernel using CUDA graphics interop, avoiding intermediate device buffers [S1, unofficial]. It sets itself apart from standard interop methods by allowing registration with `cudaGraphicsRegisterFlagsSurfaceLoadStore` for read/write access or `cudaGraphicsRegisterFlagsWriteDiscard` for write-only access [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: An OpenGL texture ID (created as RGBA8), CUDA device memory containing scene data (camera, volume, transfer function), and image dimensions ($W, H$).
-- Output: The OpenGL texture updated with the rendered image pixels.
+- Input: An OpenGL texture ID (created as RGBA8), CUDA device memory containing scene data (camera, volume, transfer function), and image dimensions ($W, H$) [S1, unofficial].
+- Output: The OpenGL texture updated with the rendered image pixels [S1, unofficial].
 
 **Data Structures:**
-- `cudaGraphicsResource_t`: Handle to the registered OpenGL resource.
-- `cudaArray_t`: Mapped array representation of the OpenGL texture in CUDA memory.
-- `cudaSurfaceObject_t`: Surface object bound to the `cudaArray_t` for writing.
+- `cudaGraphicsResource_t`: Handle to the registered OpenGL resource [G].
+- `cudaArray_t`: Mapped array representation of the OpenGL texture in CUDA memory [G].
+- `cudaSurfaceObject_t`: Surface object bound to the `cudaArray_t` for writing [G].
 
 **Steps:**
-1. **Create GL Texture:** Generate an OpenGL texture with format `GL_RGBA8` and dimensions $W \times H$.
-2. **Register Resource:** Register the GL texture with CUDA using `cudaGraphicsGLRegisterImage`. The registration flags depend on the access mode:
-   - Use `cudaGraphicsRegisterFlagsSurfaceLoadStore` if surface write is required (allows read/write).
-   - Use `cudaGraphicsRegisterFlagsWriteDiscard` if only writing and discarding previous content is sufficient [S1, unofficial].
-3. **Map Resource:** Before the kernel launch, map the CUDA resource to make it accessible to CUDA kernels using `cudaGraphicsMapResources`.
-4. **Get Mapped Array:** Retrieve the `cudaArray_t` handle for the mapped resource using `cudaGraphicsSubResourceGetMappedArray`.
-5. **Bind Surface:** Create a `cudaSurfaceObject_t` from the `cudaArray_t` using `cudaCreateSurfaceObject`.
-6. **Launch Kernel:** Launch the CUDA kernel passing the surface object. Inside the kernel, use `surfaceStore` functions (e.g., `surfaceStore<uchar4>(surfObj, coord, value)`) to write pixels.
-7. **Unmap Resource:** After the kernel completes (and any necessary synchronization), unmap the resource using `cudaGraphicsUnmapResources` [S1, unofficial].
+1. **Create GL Texture:** Generate an OpenGL texture with format `GL_RGBA8` and dimensions $W \times H$ [S1, unofficial].
+2. **Register Resource:** Register the GL texture with CUDA using `cudaGraphicsGLRegisterImage` [G]. The registration flags depend on the access mode: use `cudaGraphicsRegisterFlagsSurfaceLoadStore` if `useSurfaceWrite_` is true, else use `cudaGraphicsRegisterFlagsWriteDiscard` [S1, unofficial].
+3. **Map Resource:** Before the kernel launch, map the CUDA resource to make it accessible to CUDA kernels using `cudaGraphicsMapResources` [G].
+4. **Get Mapped Array:** Retrieve the `cudaArray_t` handle for the mapped resource using `cudaGraphicsSubResourceGetMappedArray` [G].
+5. **Launch Kernel:** Launch the CUDA kernel passing the mapped array or surface object [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Initialization (once)
-gl_texture_id = create_gl_texture_rgba8(width, height)
-cuda_resource = cudaGraphicsGLRegisterImage(
-    gl_texture_id, 
-    GL_TEXTURE_2D, 
-    cudaGraphicsRegisterFlagsSurfaceLoadStore # or WriteDiscard
-)
+def cuda_opengl_surface_write(gl_texture_id, width, height, use_surface_write):
+    # 1. Create GL RGBA8 texture (assumed done externally)
+    # 2. Register GL texture with CUDA
+    flags = cudaGraphicsRegisterFlagsSurfaceLoadStore if use_surface_write else cudaGraphicsRegisterFlagsWriteDiscard
+    cuda_resource = cudaGraphicsGLRegisterImage(gl_texture_id, GL_TEXTURE_2D, flags)
 
-# Per-frame rendering
-cudaGraphicsMapResources(1, cuda_resource)
-cuda_array = cudaGraphicsSubResourceGetMappedArray(cuda_resource, 0, 0)
-surface_object = cudaCreateSurfaceObject(cuda_array)
+    # 3. Map CUDA resource to get cudaArray_t
+    cudaGraphicsMapResources(1, cuda_resource)
+    dst_array = cudaGraphicsSubResourceGetMappedArray(cuda_resource, 0, 0)
 
-# Launch kernel
-kernel_ray_cast<<<grid, block>>>(scene_data, surface_object, width, height)
+    # 4. Launch kernel
+    if use_surface_write:
+        surface_obj = cudaCreateSurfaceObject(dst_array)
+        kernel_ray_hit(scene_data, surface_obj, width, height)
+        cudaDestroySurfaceObject(surface_obj)
+    else:
+        kernel_ray_hit(scene_data, dst_array, width, height)
 
-# Cleanup
-cudaDeviceSynchronize()
-cudaDestroySurfaceObject(surface_object)
-cudaGraphicsUnmapResources(1, cuda_resource)
+    # 5. Unmap resource (standard interop cleanup)
+    cudaGraphicsUnmapResources(1, cuda_resource)
 ```
 
 **Parameters:**
-- `width`, `height`: Image dimensions.
+- `width`, `height`: Image dimensions [S1, unofficial].
 - `cudaGraphicsRegisterFlags`: `SurfaceLoadStore` or `WriteDiscard` [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Synchronization:** Ensure `cudaDeviceSynchronize()` or an event is used before unmapping if the OpenGL context needs to read the texture immediately, although `cudaGraphicsUnmapResources` is a blocking call for the CUDA side [S1, unofficial].
-- **Format Mismatch:** The GL texture format must match the data type written by the surface (e.g., `uchar4` for `GL_RGBA8`) [S1, unofficial].
-- **Resource Registration:** The GL texture must be bound and valid at the time of registration [S1, unofficial].
+- The GL texture format must match the data type written by the kernel (e.g., `uchar4` for `GL_RGBA8`) [S1, unofficial].
+- The GL texture must be bound and valid at the time of registration [G].
 
 ## Subtopics
 
@@ -74,15 +69,15 @@ Copies a 3D volume of float data from device memory into a registered OpenGL 3D 
 - **Pitfall:** Source pointer must not be null and resource must be registered; throws `std::logic_error` if either condition fails [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(W \times H)$ for the ray casting kernel, plus overhead for mapping/unmapping resources.
-- **Memory Complexity:** $O(W \times H)$ for the texture storage.
-- **Strengths:** Eliminates the final CPU-GPU transfer bottleneck for the rendered image. Surface writes support atomic operations, beneficial for accumulation or blending.
-- **Limitations:** Requires OpenGL-CUDA interop support. Surface writes may have different performance characteristics compared to texture writes depending on the hardware and access patterns.
-- **When to use:** When real-time rendering of volume data is required and the final image needs to be displayed in an OpenGL context without CPU intervention.
-- **When not to use:** If the rendering pipeline requires post-processing on the CPU or if the hardware does not support CUDA-OpenGL interop.
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Strengths:** Eliminates the final CPU-GPU transfer bottleneck for the rendered image [S1, unofficial].
+- **Limitations:** Not given in the sources.
+- **When to use:** Not given in the sources.
+- **When not to use:** Not given in the sources.
 
 ## Background
-Originated from the need to integrate CUDA compute capabilities with OpenGL rendering pipelines efficiently. The technique is demonstrated in the cuVRender project, which implements a CUDA-accelerated volume rendering engine [S1, unofficial]. It is also referenced in fluid effects studios for texture management [S2, unofficial].
+Originated from the need to integrate CUDA compute capabilities with OpenGL rendering pipelines efficiently. The technique is demonstrated in the cuVRender project, which implements a CUDA-accelerated volume rendering engine [S1, unofficial].
 
 ## Sources
 [S1] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)

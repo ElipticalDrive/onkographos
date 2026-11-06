@@ -1,0 +1,121 @@
+# Gradient Scaling for Near-Camera Training
+
+Also called: $s_{\nabla p}$, Clamped Gradient Scaling, Clamped Quadratic Scaling, Gradient Scaling, Proposed Scaling, Radiance Field Gradient Scaling
+
+## Overview
+Gradient scaling is a technique for differentiable volume rendering optimization that prevents background collapse and near-camera floaters by counter-balancing the sampling density imbalance close to cameras [S1]. It sets itself apart from alternatives like near-plane clipping or occlusion losses by addressing the root cause (gradient magnitude imbalance) directly during backpropagation, rather than imposing priors on density distribution or restricting ray origins [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Per-point gradients for color ($\nabla c$), density ($\nabla \sigma$), and ray distance ($\nabla d$) from the loss function; per-point distances from the camera origin ($\delta_{ip}$).
+*   **Output:** Scaled gradients ($\nabla c'$, $\nabla \sigma'$, $\nabla d'$) passed to the optimizer.
+
+**Data Structures:**
+The method operates on tensors of shape $(N, D)$, where $N$ is the number of samples per ray and $D$ is the feature dimension (typically 3 for RGB color, 1 for density). The distance tensor is shape $(N, 1)$.
+
+**Parameters:**
+*   $\sigma$: The typical distance between the camera and captured content (scene scale). Default assumption is 1 unit. If the scene scale differs significantly, $\sigma$ should be estimated from camera calibration [S1].
+*   $\delta_{ip}$: The Euclidean distance between the sample point $p$ and the camera ray origin $c_i$ [S1].
+
+**Algorithm:**
+The scaling factor $s_{\nabla p}$ is computed for each sample based on its distance from the camera. The gradients are then multiplied by this factor.
+
+1.  Compute the squared distance: $d^2 = \delta_{ip}^2$.
+2.  Compute the scaling factor:
+    $$ s_{\nabla p} = \min\left(1, \frac{\delta_{ip}^2}{\sigma^2}\right) $$
+    If $\sigma=1$, this simplifies to $s_{\nabla p} = \min(1, \delta_{ip}^2)$ [S1].
+3.  Scale the gradients:
+    $$ \nabla c' = \nabla c \times s_{\nabla p} $$
+    $$ \nabla \sigma' = \nabla \sigma \times s_{\nabla p} $$
+    $$ \nabla d' = \nabla d \times s_{\nabla p} $$
+
+**Pseudocode:**
+The following PyTorch implementation defines a custom autograd function. It must be inserted after the data structure (MLP, hash-grid, voxels) has been sampled and just before point integration along the ray [S1].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+
+class GradientScaler(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, colors, sigmas, ray_dist, sigma_scale=1.0):
+        """
+        Forward pass: Identity operation.
+        :param colors: Tensor of shape (N, 3) or (N, D)
+        :param sigmas: Tensor of shape (N, 1)
+        :param ray_dist: Tensor of shape (N, 1) containing distance from camera origin
+        :param sigma_scale: Scene scale parameter (default 1.0)
+        :return: Unmodified inputs
+        """
+        ctx.save_for_backward(ray_dist)
+        ctx.sigma_scale = sigma_scale
+        return colors, sigmas, ray_dist
+
+    @staticmethod
+    def backward(ctx, grad_output_colors, grad_output_sigmas, grad_output_ray_dist):
+        """
+        Backward pass: Scale gradients based on distance.
+        """
+        ray_dist, = ctx.saved_tensors
+        sigma_scale = ctx.sigma_scale
+        
+        # Compute squared distance
+        dist_sq = ray_dist ** 2
+        
+        # Compute scaling factor: min(1, dist^2 / sigma^2)
+        # clamp ensures the value does not exceed 1
+        scaling = (dist_sq / (sigma_scale ** 2)).clamp(0, 1)
+        
+        # Scale gradients
+        # Note: grad_output_ray_dist is typically not used for weight updates 
+        # in standard NeRF, but is scaled for consistency if used.
+        grad_colors = grad_output_colors * scaling.unsqueeze(-1)
+        grad_sigmas = grad_output_sigmas * scaling
+        grad_ray_dist = grad_output_ray_dist * scaling
+        
+        return grad_colors, grad_sigmas, grad_ray_dist, None
+```
+
+**Edge Cases and Pitfalls:**
+*   **Uncapped Quadratic Scaling:** Using pure quadratic scaling ($s_{\nabla p} = \delta_{ip}^2$) without the $\min(1, \dots)$ clamp leads to very strong gradients far from the camera. This prevents correct surface learning and causes a bias toward far density, resulting in poor reconstruction of near geometry [S1].
+*   **Near Plane Zero:** Setting the near plane to zero allocates slightly fewer samples to the center of the scene. This can have a slightly negative impact on reconstruction when there is no near-camera geometry [S1].
+*   **Scene Scale:** If the scene scale is significantly different from 1 unit, the default formula fails. The parameter $\sigma$ must be adjusted [S1].
+
+## Subtopics
+
+### Clamped Quadratic Scaling
+The specific variant using $\min(1, \delta_{ip}^2)$. It is chosen over pure quadratic scaling to prevent far-density bias. See [Clamped Quadratic Scaling](3065-nerf-hyperparameters.md#clamped-quadratic-scaling) (if applicable, otherwise link to parent).
+
+### Scene Scale Adaptation
+Using $\sigma$ to adjust for non-unit scenes. Chosen when camera calibration data is available and scene bounds are known. See [Scene Scale Adaptation](3065-nerf-hyperparameters.md#scene-scale-adaptation) (if applicable).
+
+## Operating characteristics
+**Time and Memory Complexity:**
+The operation induces an overhead of approximately 100µs in the backward pass for 300,000 points. This is negligible compared to typical iteration times of ~50ms [S1]. The memory overhead is minimal, requiring only the storage of the distance tensor for the backward pass [S1].
+
+**Measured Performance:**
+*   **DVGOv2, TensoRF, Instant NGP:** Drastically reduces near-camera floaters and prevents density buildup near cameras, leading to more coherent depth and better geometry reconstruction compared to "No Scaling" [S1].
+*   **MipNeRF360 'Stump':** With $L_{dist}$, near plane $np=0$, and scaling $s_{\nabla p}$, the PSNR is 26.62. This is comparable to or better than configurations using $L_{dist}$ alone or near-plane clipping [S1].
+*   **Comparison to Alternatives:**
+    *   vs. **No Scaling:** Reduces floaters and prevents background collapse [S1].
+    *   vs. **Quadratic Scaling (uncapped):** Correctly reconstructs geometry early and prevents near-camera density buildup, whereas uncapped scaling leads to bad reconstruction of far density [S1].
+    *   vs. **$L_{dist}$ Loss:** $L_{dist}$ forces density to concentrate around a single point, which can harm semi-transparent surfaces. Gradient scaling does not impose such priors [S1].
+    *   vs. **FreeNeRF Occlusion Loss:** FreeNeRF penalizes density near the camera, imposing a prior. Gradient scaling addresses the root cause (gradient imbalance) without imposing density priors [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** Compatible with most NeRF implementations (MLP, voxel hash-grid, tensor decomposition, plain voxels); removes the need for near planes; lightweight implementation; improves visual quality and quantitative metrics (PSNR, SSIM) [S1].
+*   **Limitations:** Quantitative metrics like PSNR may not fully reflect visual quality improvements if floaters are only visible in sparse test views. Setting near plane to zero can slightly reduce sample density in the scene center [S1].
+
+## Background
+**Origin:**
+The method was proposed by J. Philip and V. Deschaintre in the paper "Floaters No More: Radiance Field Gradient Scaling for Improved Near-Camera Training" [S1].
+
+**History and Development:**
+NeRF-based methods typically require careful choice of near planes to avoid background collapse, where density builds up close to the cameras, creating floating artifacts [S1]. The authors identified that this is caused by a higher density of samples in regions near cameras due to the $1/\delta_{ip}^2$ visibility decay, leading to disproportionate gradients. The method was demonstrated on DVGOv2, TensoRF, Instant NGP, and MipNeRF 360 [S1].
+
+**Usage:**
+It is used in various neural radiance field optimization pipelines to improve training stability and visual quality, particularly in unbounded scenes or when near-plane constraints are undesirable [S1].
+
+## Sources
+[S1] Floaters No More: Radiance Field Gradient Scaling for Improved Near-Camera Training, https://doi.org/10.2312/sr.20231122, fetched 2026-10-29

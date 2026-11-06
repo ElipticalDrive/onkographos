@@ -1,0 +1,128 @@
+# Hierarchical Space-Filling Curve Data Distribution
+
+Also called: Hilbert curve distribution, Space-filling curve traversal
+
+## Overview
+A data distribution scheme for parallel volume rendering that partitions wavelet-based volume blocks among processors to minimize communication dependencies and ensure load balancing. It differs from sibling methods by combining a hierarchical space-filling curve traversal with error-guided bucketization, ensuring that blocks with similar spatial and temporal reconstruction errors are distributed to different processors to prevent contention during rendering [S1].
+
+## How it works
+**Inputs:**
+*   WTSP tree (Wavelet-based Temporal-Spatial Pyramid) structure.
+*   Spatial error range and temporal error range of the nodes.
+*   Number of processors $P$.
+*   Parameters $k_o$ (spatial levels per distribution unit) and $k_t$ (temporal levels per distribution unit) [S1].
+
+**Outputs:**
+*   Assignment of distribution units to processors.
+
+**Data Structures:**
+*   **Distribution Unit:** A group of volume blocks spanning $k_o$ spatial levels and $k_t$ temporal levels.
+*   **Bucket:** A container for distribution units based on their maximum spatial and temporal errors.
+*   **Processor List:** Array of $P$ processors.
+
+**Parameters:**
+*   $k_o$: Number of spatial levels spanned by each distribution unit. Typical value: 2 [S1].
+*   $k_t$: Number of temporal levels spanned by each distribution unit. Typical value: 2 [S1].
+*   Space-filling curve type: Example: Hilbert curve [S1].
+
+**Steps:**
+1.  **Partition Error Ranges:** Divide the spatial error range and temporal error range of the WTSP tree nodes into discrete intervals. Let $I_s$ be the set of spatial intervals and $I_t$ be the set of temporal intervals [S1].
+2.  **Create Buckets:** Iterate through all combinations of $i \in I_s$ and $j \in I_t$. Create a bucket $B_{i,j}$ for each spatial-temporal error interval combination [S1].
+3.  **Traverse and Assign:** Traverse the WTSP tree using a hierarchical space-filling curve. For each distribution unit encountered:
+    *   Calculate the maximum spatial error $e_s$ and maximum temporal error $e_t$ of all nodes within the unit.
+    *   Identify the bucket $B_{i,j}$ such that $e_s \in i$ and $e_t \in j$.
+    *   Append the distribution unit to $B_{i,j}$. The order of units within the bucket is determined by the space-filling curve traversal order [S1].
+4.  **Adjust Buckets:** Adjust the boundaries of the spatial and temporal intervals so that each bucket holds a similar number of distribution units. This ensures load balancing across error profiles [S1].
+5.  **Distribute:** Distribute all distribution units in each bucket among the $P$ processors in a round-robin fashion [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def distribute_data(wtsp_tree, num_processors, k_o, k_t, curve_type):
+    # 1. Determine error ranges from WTSP tree
+    spatial_errors = [node.spatial_error for node in wtsp_tree.nodes]
+    temporal_errors = [node.temporal_error for node in wtsp_tree.nodes]
+    
+    min_s, max_s = min(spatial_errors), max(spatial_errors)
+    min_t, max_t = min(temporal_errors), max(temporal_errors)
+    
+    # 2. Partition ranges into intervals (Initial uniform partitioning)
+    # Note: Exact number of intervals is not specified, assumed to be sufficient granularity
+    num_intervals = 10 # Placeholder for implementation detail not in source
+    spatial_intervals = partition_range(min_s, max_s, num_intervals)
+    temporal_intervals = partition_range(min_t, max_t, num_intervals)
+    
+    # 3. Create buckets
+    buckets = {}
+    for s_int in spatial_intervals:
+        for t_int in temporal_intervals:
+            buckets[(s_int, t_int)] = []
+            
+    # 4. Traverse tree and assign units to buckets
+    # Generate distribution units spanning k_o spatial and k_t temporal levels
+    distribution_units = generate_distribution_units(wtsp_tree, k_o, k_t)
+    
+    # Traverse using space-filling curve to get ordered list of units
+    ordered_units = traverse_with_curve(distribution_units, curve_type)
+    
+    for unit in ordered_units:
+        max_s_err = max(node.spatial_error for node in unit.nodes)
+        max_t_err = max(node.temporal_error for node in unit.nodes)
+        
+        # Find corresponding bucket
+        s_bucket = find_interval(spatial_intervals, max_s_err)
+        t_bucket = find_interval(temporal_intervals, max_t_err)
+        
+        buckets[(s_bucket, t_bucket)].append(unit)
+        
+    # 5. Adjust intervals for balanced bucket sizes
+    # This is an iterative adjustment process to equalize bucket counts
+    # Implementation detail: Re-partition intervals based on cumulative distribution
+    # of units until variance in bucket sizes is minimized
+    buckets = adjust_bucket_boundaries(buckets, spatial_intervals, temporal_intervals)
+    
+    # 6. Round-robin distribution to processors
+    processor_assignments = [[] for _ in range(num_processors)]
+    
+    for bucket_units in buckets.values():
+        for idx, unit in enumerate(bucket_units):
+            proc_id = idx % num_processors
+            processor_assignments[proc_id].append(unit)
+            
+    return processor_assignments
+
+def partition_range(min_val, max_val, num_intervals):
+    step = (max_val - min_val) / num_intervals
+    intervals = []
+    for i in range(num_intervals):
+        start = min_val + i * step
+        end = min_val + (i + 1) * step
+        intervals.append((start, end))
+    return intervals
+
+def find_interval(intervals, value):
+    for interval in intervals:
+        if interval[0] <= value < interval[1]:
+            return interval
+    return intervals[-1] # Handle edge case
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Error calculations must be precise to correctly assign units to buckets.
+*   **Boundary Conditions:** Nodes with maximum errors exactly on interval boundaries must be handled consistently (e.g., inclusive/exclusive bounds) [S1].
+*   **Empty Buckets:** If certain error combinations do not occur, buckets may be empty. The adjustment step should account for this to avoid skewing load balancing [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Reconstruction time for a data block is $O(c_1 \times k_o + c_2 \times k_o \times k_t)$, where $c_1$ is the time for an inverse 3D wavelet transform, $c_2$ is the time for an inverse 1D wavelet transform, $k_o$ is the number of levels in an octree node group, and $k_t$ is the number of levels in a time tree node group [S1].
+*   **Memory Complexity:** Depends on the caching strategy (EVERY-K scheme). Data blocks are cached in main memory or swapped to disk if storage is insufficient [S1].
+*   **Performance:** On a 32-processor PC cluster, using $k_o=2$ and $k_t=2$ with Hilbert curves provided effective load balancing for large datasets like RMI and SPOT [S1].
+*   **Strengths:** Minimizes inter-processor communication dependencies; balances workload based on actual reconstruction error; efficient reconstruction due to limited wavelet transform depth [S1].
+*   **Limitations:** Requires pre-computation of error ranges and bucket adjustments; dependent on the accuracy of error estimation [S1].
+
+## Background
+Originated in the context of parallel volume rendering for large datasets. The method builds on previous applications of space-filling curves in large data visualization and distributed client-server environments [S1]. It was developed to address load balancing issues in wavelet-based adaptive resolution volume rendering, specifically leveraging the WTSP (Wavelet-based Temporal-Spatial Pyramid) tree structure [S1].
+
+## Sources
+[S1] A Multiresolution Volume Rendering Framework for Large- ..., https://diglib.eg.org/bitstream/handle/10.2312/VG.VG05.011-019/011-019.pdf?sequence=1, fetched 2026-10-26

@@ -3,7 +3,7 @@
 Also called: Spatial beam spread width
 
 ## Overview
-The Beam Spreading Width Model provides a closed-form expression for the spatial width $w$ of a collimated light beam as it propagates through a participating medium, approximating the spatial blurring effects caused by multiple scattering [S1, unofficial]. It distinguishes itself from rigorous methods that lack general closed-form solutions by offering an easy-to-evaluate formula that explicitly accounts for absorption, scattering coefficients, and the mean square scattering angle [S1, unofficial].
+The Beam Spreading Width Model provides a closed-form expression for the spatial width $w$ of a collimated light beam as it propagates through a participating medium, approximating the spatial blurring effects caused by multiple scattering [S1]. It distinguishes itself from rigorous methods that lack general closed-form solutions by offering an easy-to-evaluate formula that explicitly accounts for absorption, scattering coefficients, and the mean square scattering angle [S1].
 
 ## How it works
 **Inputs:**
@@ -19,9 +19,9 @@ The Beam Spreading Width Model provides a closed-form expression for the spatial
 No complex data structures are required; the model is a direct mathematical evaluation.
 
 **Parameters:**
-- $\langle \theta^2 \rangle$: Typical value in simulation is 0.24 (corresponding to Henyey-Greenstein asymmetry factor $g=0.9$) [S1, unofficial].
-- $a$: Typical value in simulation is 0.0003 mm⁻¹ [S1, unofficial].
-- $b$: Variable parameter determining the number of scattering events [S1, unofficial].
+- $\langle \theta^2 \rangle$: Typical value in simulation is 0.24 (corresponding to Henyey-Greenstein asymmetry factor $g=0.9$) [S1].
+- $a$: Typical value in simulation is 0.0003 mm⁻¹ [S1].
+- $b$: Variable parameter determining the number of scattering events [S1].
 
 **Formulas:**
 The core equation for the squared beam width is:
@@ -47,9 +47,9 @@ $$ l^2 = \frac{1}{ab\langle \theta^2 \rangle} $$
     $$ w^2 = \frac{b \langle \theta^2 \rangle S^3}{16} $$
 
 **Pitfalls:**
-- The beam spread width expression has no upper bound [S1, unofficial]. This is mitigated because attenuation increases at an even faster rate than the spread [S1, unofficial].
-- The model assumes a Gaussian profile for the beam core; a wider non-Gaussian component exists in reality but is not captured by this model [S1, unofficial].
-- The formula differs from Tessendorf [Tes87] by a constant factor of 3/2. To align with Tessendorf's rigorous derivation for specific limiting cases, multiply the result by 2/3 [S1, unofficial].
+- The beam spread width expression has no upper bound [S1]. This is mitigated because attenuation increases at an even faster rate than the spread [S1].
+- The model assumes a Gaussian profile for the beam core; a wider non-Gaussian component exists in reality but is not captured by this model [S1].
+- The formula differs from Tessendorf [Tes87] by a constant factor of 3/2. To align with Tessendorf's rigorous derivation for specific limiting cases, multiply the result by 2/3 [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -96,12 +96,12 @@ def beam_spreading_width(S, a, b, theta_sq_mean):
 ## Operating characteristics
 - **Time Complexity:** $O(1)$ per evaluation. The model is a closed-form expression requiring only basic arithmetic operations.
 - **Memory Complexity:** $O(1)$. No precomputed tables or volumes are required.
-- **Strengths:** Easy to evaluate; provides a general closed-form solution unlike rigorous methods; explicitly includes absorption effects which narrow the beam compared to scattering-only models [S1, unofficial].
-- **Limitations:** Lacks an upper bound on width (though mitigated by attenuation); does not capture the wider non-Gaussian component of the beam profile [S1, unofficial]; differs from rigorous derivations (e.g., Tessendorf) by a constant factor [S1, unofficial].
-- **When to use:** When an efficient, approximate spatial blurring model is needed for real-time or interactive applications where rigorous solutions are too slow or unavailable [S1, unofficial].
+- **Strengths:** Easy to evaluate; provides a general closed-form solution unlike rigorous methods; explicitly includes absorption effects which narrow the beam compared to scattering-only models [S1].
+- **Limitations:** Lacks an upper bound on width (though mitigated by attenuation); does not capture the wider non-Gaussian component of the beam profile [S1]; differs from rigorous derivations (e.g., Tessendorf) by a constant factor [S1].
+- **When to use:** When an efficient, approximate spatial blurring model is needed for real-time or interactive applications where rigorous solutions are too slow or unavailable [S1].
 
 ## Background
-The model was derived using a path integration framework and presented in the paper "Practical Rendering of Multiple Scattering Effects in Participating Media" [S1, unofficial]. It builds upon earlier work on beam spread in scattering media, such as McLean et al. [MFW98] and Tessendorf [Tes87], adapting them for computer graphics applications where computational efficiency is critical [S1, unofficial]. The derivation is detailed in a companion document [APRN04].
+The model was derived using a path integration framework and presented in the paper "Practical Rendering of Multiple Scattering Effects in Participating Media" [S1]. It builds upon earlier work on beam spread in scattering media, such as McLean et al. [MFW98] and Tessendorf [Tes87], adapting them for computer graphics applications where computational efficiency is critical [S1]. The derivation is detailed in a companion document [APRN04].
 
 ## Sources
-[S1] Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28 (unofficial)
+[S1] Practical Rendering of Multiple Scattering Effects in Participating Media, https://cseweb.ucsd.edu/~ravir/HRPIEG.pdf, fetched 2026-10-28

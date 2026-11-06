@@ -1,0 +1,251 @@
+# JSurfaceNets
+
+Also called: Constrained Elastic Surface Nets, Naive Surface Nets, SurfaceNets (JSurfaceNets variant)
+
+## Overview
+JSurfaceNets is an isosurface extraction algorithm that generates a quad-mesh by placing vertices at the average of edge-crossing points within grid cells, serving as a substitute for Marching Cubes [S1, unofficial]. It differs from the original Gibson method by using this averaged vertex position for quad-mesh generation, resulting in a topology that is generally simpler and faster to compute while maintaining geometric fidelity for many scalar fields [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** `data`, a 1D array of doubles representing the scalar field values at grid vertices; `dims`, an integer array `[width, height, depth]` specifying the grid dimensions [S1, unofficial].
+- **Output:** A `Mesh` object containing two lists: `vertices` (list of 3D coordinate arrays) and `faces` (list of 4-element integer arrays representing quad indices) [S1, unofficial].
+
+**Data Structures:**
+- **`cube_edges`**: A static integer array of size 24. It stores pairs of vertex indices (0-7) for the 12 edges of a cube. Initialized by iterating $i$ from 0 to 7 and $j$ as powers of 2 ($1, 2, 4$), adding the pair $(i, i \oplus j)$ if $i \le i \oplus j$ [S1, unofficial].
+- **`edge_table`**: A static integer array of size 256. For each possible 8-bit mask $i$, it computes a 12-bit bitmask `em` where bit $k$ is set if the $k$-th edge of the cube is crossed (i.e., the signs of the two vertices defining that edge differ) [S1, unofficial].
+- **`vertexBuffer`**: A dynamically resized integer array used to store vertex indices for the current and previous slices. It is indexed using a layout array `R` [S1, unofficial].
+- **`R`**: A layout array `[1, dims[0]+1, \pm(dims[0]+1)(dims[1]+1)]`. `R[0]` is the x-stride, `R[1]` is the y-stride, and `R[2]` is the z-stride, which toggles sign to handle buffer wrapping [S1, unofficial].
+- **`location`**: An integer array `[x, y, z]` tracking the current cell coordinates [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization**:
+    - Initialize `location` to `[0, 0, 0]` [S1, unofficial].
+    - Initialize `buf_no = 1` (buffer slice selector) [S1, unofficial].
+    - Initialize `R[2] = (dims[0] + 1) * (dims[1] + 1)` [S1, unofficial].
+    - Resize `vertexBuffer` to at least `R[2] * 2` if necessary [S1, unofficial].
+    - Initialize empty lists `vertices` and `faces` [S1, unofficial].
+    - Initialize counter `n = 0` (linear index into `data`) [S1, unofficial].
+
+2.  **Voxel Traversal**:
+    Loop `z` from `0` to `dims[2] - 2`:
+    - Toggle `buf_no` (`buf_no ^= 1`) [S1, unofficial].
+    - Negate `R[2]` (`R[2] = -R[2]`) [S1, unofficial].
+    - Initialize buffer pointer `m = 1 + (dims[0] + 1) * (1 + buf_no * (dims[1] + 1))` [S1, unofficial].
+    
+    Loop `y` from `0` to `dims[1] - 2`:
+    - Increment `n` and `m` by 2 (`n += 1`, `m += 2`) [S1, unofficial].
+    
+    Loop `x` from `0` to `dims[0] - 2`:
+    - Increment `n` and `m` by 1 (`n += 1`, `m += 1`) [S1, unofficial].
+    - Set `location[0] = x`, `location[1] = y`, `location[2] = z` [S1, unofficial].
+
+3.  **Cell Processing**:
+    - Read the 8 scalar values surrounding the current cell into `grid[0..7]`. The index into `data` is computed based on `n` and the grid strides [S1, unofficial].
+    - Compute `mask`: an 8-bit integer where bit $g$ is set if `grid[g] < 0` [S1, unofficial].
+    - **Edge Case**: If `mask == 0` or `mask == 0xff`, the cell does not intersect the isosurface. Skip to the next cell [S1, unofficial].
+    - Compute `edge_mask = edge_table[mask]` [S1, unofficial].
+    - Initialize sum vector `v = {0.0, 0.0, 0.0}` and counter `e_count = 0` [S1, unofficial].
+
+4.  **Vertex Position Calculation**:
+    - Iterate over the 12 edges of the cube (index `i` from 0 to 11):
+        - If `(edge_mask & (1 << i))` is false, the edge is not crossed. Continue [S1, unofficial].
+        - Increment `e_count` [S1, unofficial].
+        - Retrieve the two vertex indices of the edge from `cube_edges`: `e0 = cube_edges[2*i]`, `e1 = cube_edges[2*i+1]` [S1, unofficial].
+        - Retrieve the scalar values: `g0 = grid[e0]`, `g1 = grid[e1]` [S1, unofficial].
+        - Compute interpolation parameter $t$:
+          $$ t = \frac{g_0}{g_0 - g_1} $$
+          If $|g_0 - g_1| \le 10^{-6}$, skip this edge (precision guard) [S1, unofficial].
+        - Accumulate the intersection point into `v`. For each axis $j \in \{0, 1, 2\}$:
+          - Check if the edge vertices differ on bit $j$ of their index (i.e., if the edge is parallel to another axis) [S1, unofficial].
+          - If they differ on bit $j$, the intersection lies along axis $j$. Add $t$ or $1-t$ to `v[j]` depending on which vertex is 0 and which is 1. Specifically, if vertex $e0$ has bit $j$ as 0, add $t$; else add $1-t$ [S1, unofficial].
+          - If they do not differ on bit $j$ (edge is parallel to axis $j$), the coordinate is constant. Add the coordinate value of the vertex (0 or 1) to `v[j]` [S1, unofficial].
+    - Compute the final vertex position relative to the cell origin:
+      $$ v_{final}[j] = \frac{v[j]}{e\_count} $$
+    - Store the new vertex index in `vertexBuffer[m]` [S1, unofficial].
+    - Append the absolute coordinate `location + v_final` to the `vertices` list [S1, unofficial].
+
+5.  **Quad Generation**:
+    - Iterate over the 3 basis axes `i` from 0 to 2:
+        - If `(edge_mask & (1 << i))` is false, the edge along axis `i` is not crossed. Skip [S1, unofficial].
+        - Calculate orthogonal axes `iu = (i + 1) % 3` and `iv = (i + 2) % 3` [S1, unofficial].
+        - Check boundary conditions: If `location[iu] == 0` or `location[iv] == 0`, the quad would be on the grid boundary. Skip [S1, unofficial].
+        - Determine the indices of the four vertices forming the quad in `vertexBuffer`:
+          - Current vertex: `m` [S1, unofficial].
+          - Vertex along `iu`: `m - R[iu]` [S1, unofficial].
+          - Vertex along `iv`: `m - R[iv]` [S1, unofficial].
+          - Vertex along `iu + iv`: `m - R[iu] - R[iv]` [S1, unofficial].
+        - Determine winding order based on `mask & 1` (sign of the first vertex):
+          - If `mask & 1` is true: Order is `(m, m - R[iu], m - R[iu] - R[iv], m - R[iv])` [S1, unofficial].
+          - Else: Order is `(m, m - R[iv], m - R[iu] - R[iv], m - R[iu])` [S1, unofficial].
+        - Append the quad indices to the `faces` list [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def jsurfacenets(data, dims):
+    WIDTH, HEIGHT, DEPTH = dims
+    
+    class Mesh:
+        def __init__(self, vertices, faces):
+            self.vertices = vertices
+            self.faces = faces
+
+    # Precomputed cube edges: 12 edges, 2 vertices each
+    cube_edges = []
+    for i in range(8):
+        for j in [1, 2, 4]:
+            p = i ^ j
+            if i <= p:
+                cube_edges.append((i, p))
+    
+    # Precomputed edge table: 256 masks -> 12-bit edge masks
+    edge_table = [0] * 256
+    for mask in range(256):
+        em = 0
+        for k, (v0, v1) in enumerate(cube_edges):
+            bit0 = (mask >> v0) & 1
+            bit1 = (mask >> v1) & 1
+            if bit0 != bit1:
+                em |= (1 << k)
+        edge_table[mask] = em
+
+    # Buffers
+    vertex_buffer = [0] * (2 * (WIDTH + 1) * (HEIGHT + 1))
+    vertices = []
+    faces = []
+    
+    # Layout strides
+    R = [1, WIDTH + 1, (WIDTH + 1) * (HEIGHT + 1)]
+    
+    n = 0
+    buf_no = 1
+    
+    for z in range(DEPTH - 1):
+        buf_no ^= 1
+        R[2] = -R[2]
+        
+        # m points to the start of the current slice's vertex indices in buffer
+        m = 1 + (WIDTH + 1) * (1 + buf_no * (HEIGHT + 1))
+        
+        for y in range(HEIGHT - 1):
+            n += 1
+            m += 2
+            
+            for x in range(WIDTH - 1):
+                n += 1
+                m += 1
+                
+                # Read 8 grid values and compute mask
+                grid = [0.0] * 8
+                mask = 0
+                # Standard row-major indexing for grid vertices
+                for k in range(2):
+                    for j in range(2):
+                        for i in range(2):
+                            g = k * 4 + j * 2 + i
+                            idx = (z + k) * WIDTH * HEIGHT + (y + j) * WIDTH + (x + i)
+                            val = data[idx]
+                            grid[g] = val
+                            if val < 0:
+                                mask |= (1 << g)
+                
+                if mask == 0 or mask == 0xff:
+                    continue
+                
+                edge_mask = edge_table[mask]
+                v = [0.0, 0.0, 0.0]
+                e_count = 0
+                
+                for i in range(12):
+                    if not (edge_mask & (1 << i)):
+                        continue
+                    
+                    e_count += 1
+                    e0, e1 = cube_edges[i]
+                    g0 = grid[e0]
+                    g1 = grid[e1]
+                    
+                    diff = g0 - g1
+                    if abs(diff) <= 1e-6:
+                        continue
+                    
+                    t = g0 / diff
+                    
+                    # Accumulate intersection point
+                    # Determine which axis the edge spans
+                    diff_bit = -1
+                    for b in range(3):
+                        if ((e0 >> b) & 1) != ((e1 >> b) & 1):
+                            diff_bit = b
+                            break
+                    
+                    if diff_bit != -1:
+                        for axis in range(3):
+                            if axis == diff_bit:
+                                if (e0 >> axis) & 1 == 0:
+                                    v[axis] += t
+                                else:
+                                    v[axis] += (1.0 - t)
+                            else:
+                                coord = (e0 >> axis) & 1
+                                v[axis] += coord
+                    else:
+                        pass
+                
+                if e_count > 0:
+                    v_final = [v[0]/e_count, v[1]/e_count, v[2]/e_count]
+                    abs_v = [x + v_final[0], y + v_final[1], z + v_final[2]]
+                    vertices.append(abs_v)
+                    vertex_buffer[m] = len(vertices) - 1
+                    
+                    # Generate Quads
+                    for i in range(3):
+                        if not (edge_mask & (1 << i)):
+                            continue
+                        
+                        iu = (i + 1) % 3
+                        iv = (i + 2) % 3
+                        
+                        if x == 0 and iu == 0: continue
+                        if y == 0 and iv == 0: continue
+                        
+                        idx_m = m
+                        idx_iu = m - R[iu]
+                        idx_iv = m - R[iv]
+                        idx_both = m - R[iu] - R[iv]
+                        
+                        # Winding order
+                        if mask & 1:
+                            quad = [vertex_buffer[idx_m], vertex_buffer[idx_iu], 
+                                    vertex_buffer[idx_both], vertex_buffer[idx_iv]]
+                        else:
+                            quad = [vertex_buffer[idx_iv], vertex_buffer[idx_m], 
+                                    vertex_buffer[idx_iu], vertex_buffer[idx_both]]
+                        
+                        faces.append(quad)
+
+    return Mesh(vertices, faces)
+```
+
+## Subtopics
+
+### [Multi-Material Surface Nets](4930-multi-material-surface-nets.md)
+Multi-Material Surface Nets is an isosurface extraction algorithm that constructs closed, watertight quad-meshes from multi-label volumetric segmentations while preserving sharp boundaries between different materials. It extends JSurfaceNets by storing material labels at cell corners and associating labels with the top and bottom faces of generated quads, allowing distinct materials to share geometric boundaries without blending. Unlike standard surface extraction methods that assume a single scalar field, this method operates directly on discrete label volumes, ensuring that interfaces between adjacent materials remain sharp and topologically consistent.
+
+## Operating characteristics
+- **Time Complexity**: Linear with respect to the number of voxels $N = W \times H \times D$. Each cell is processed once with a constant number of operations (12 edges, 3 axes) [S1, unofficial].
+- **Memory Complexity**: Linear. Requires storage for the vertex buffer (proportional to grid size) and the output mesh [S1, unofficial].
+- **Strengths**: Produces a quad-dominant mesh which is often desirable for subdivision surfaces or CAD operations. Efficient implementation using 1D arrays and bitwise operations [S1, unofficial]. Generates slightly smaller meshes (less than half as many facets) compared to Marching Cubes [S2, unofficial].
+- **Limitations**: Can create non-manifold vertices, which may be a problem for some applications [S2, unofficial]. The boundary skip condition (`location[iu]==0` or `location[iv]==0`) prevents quad generation on negative orthogonal boundaries, which can cause seams in chunked or tiled volumes [S1, unofficial].
+- **When to use**: When a quad-mesh is required and performance is critical, and the scalar field is relatively smooth [S2, unofficial].
+- **When not to use**: When high geometric accuracy is paramount (use Marching Cubes or Tetrahedral Marching Cubes), or when the input is multi-material with sharp boundaries (use Multi-Material Surface Nets) [S2, unofficial].
+
+## Background
+JSurfaceNets is based on the "Constrained Elastic Surface Nets" algorithm by S.F. Gibson, published in a 1998 MERL Tech Report [S1, unofficial]. The specific implementation described here is a compact JavaScript port by Mikola Lysenko, later adapted into Java by Michael Hoffer for the Mihosoft VRL library [S1, unofficial]. It serves as a lightweight alternative to Marching Cubes for isosurface extraction and supports basic Constructive Solid Geometry (CSG) operations [S1, unofficial]. Gibson's original method formulated vertex placement as global energy minimization using gradient descent, but the JSurfaceNets variant replaces this with the simpler average-of-edge-crossings heuristic [S2, unofficial].
+
+## Sources
+[S1] miho/JSurfaceNets, https://github.com/miho/JSurfaceNets, fetched 2026-10-27 (unofficial)
+[S2] Smooth Voxel Terrain (Part 2) – 0 FPS, https://0fps.net/2012/07/12/smooth-voxel-terrain-part-2/, fetched 2026-10-28 (unofficial)

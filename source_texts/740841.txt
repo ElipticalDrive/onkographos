@@ -1,0 +1,504 @@
+ClickHouse® is a real-time analytics database management system - Speed up `mortonEncode` and `mortonDecode` by resolving each input column once per call by groeneai · Pull Request #117727 · ClickHouse/ClickHouse
+
+Speed up `mortonEncode` and `mortonDecode` by resolving each input column once per call by groeneai · Pull Request #117727 · ClickHouse/ClickHouse · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+groeneai
+commented
+Sep 2, 2026
+•
+edited by clickhouse-gh
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Closes: #117652
+Changelog category (leave one):
+Performance Improvement
+Changelog entry (a user-readable short description of the changes that goes into CHANGELOG.md):
+Speed up mortonEncode and mortonDecode: each input column is resolved once per call instead of reading every value through a virtual accessor inside the row loop, and the ratios of a constant range mask are read once per call instead of once per row per output field. Both the pdep/pext and the lookup-table code paths benefit. Results are unchanged.
+Description
+mortonEncode and mortonDecode read every input value through the virtual IColumn::getUInt inside their per-row loops, once per dimension, so a call pays one un-inlinable indirect call per row per argument for a body that is a couple of pdep instructions on x86-64-v3 and a few table lookups elsewhere. The range-mask variants also re-read row 0 of a constant tuple, once per row per output field. Both __BMI2__ arms pay it.
+The type of every value argument is fixed for the whole invocation: getReturnTypeImpl admits only UInt8, UInt16, UInt32 and UInt64. UIntColumnSpan resolves each column's storage once at the top of executeImpl, and the row loops index through it; anything that is not a plain fixed-width vector keeps getUInt. The constant mask ratios are hoisted per invocation; the non-const-mask path keeps its per-row read.
+Results do not change: 55 differential queries covering all four widths, 1 to 8 dimensions, const and non-const masks, mixed widths, Nullable, LowCardinality, sparse, Dynamic, Variant, 0 and 1 rows and four max_block_size values are byte-identical, as are 15 error paths and the ten existing space-filling-curve tests, which pass 500 of 500 at --test-runs 50.
+On a RelWithDebInfo build (ENABLE_THINLTO=0, clang++-22, -march=x86-64-v3, one Xeon 6975P-C core, max_threads=1) the two- and three-argument shapes gain most, five- and eight-argument shapes little, and a hilbertEncode control is flat. That configuration is not the shipped one, so the number worth quoting should come from the added tests/performance/space_filling_curve.xml under CI.
+Reported, diagnosed and originally patched by @ snelheidai, who asked me to open the PR (#117652 (comment)). His patch used a typeid_cast chain; this version uses the IColumn fixed-and-contiguous interface, so the header gains no include.
+hilbertEncode and hilbertDecode carry the same per-row read and are out of scope here; UIntColumnSpan is in the shared header so they can follow.
+Workflow [PR]
+Sync PR [sync-upstream/pr/117727]
+groeneai
+added 3 commits
+September 2, 2026 14:08
+Resolve mortonEncode and mortonDecode input columns once per invocation
+…
+c18f5d0
+```
+Both functions read every input value through the virtual IColumn::getUInt
+inside their per-row loops. mortonEncode is variadic over up to eight
+arguments and expands one such read per dimension, so a call pays one
+un-inlinable indirect call per row per argument for a body that is a couple
+of pdep instructions on x86-64-v3 and a handful of table lookups elsewhere.
+The range-mask variants additionally re-read row 0 of a constant tuple
+through the same accessor, once per row per output field. The reads sit
+outside the __BMI2__ split, so both dispatch arms pay them.
+
+The concrete type of every value argument is fixed for the whole invocation:
+getReturnTypeImpl admits only UInt8, UInt16, UInt32 and UInt64. The vtable
+dispatch therefore answers, once per value, a question that was already
+settled before the loop started.
+
+UIntColumnSpan resolves each column's storage once at the top of executeImpl
+through the IColumn fixed-and-contiguous interface, and the row loops index
+through it. A column that is not a plain fixed-width vector keeps getUInt,
+which is the only correct accessor for it. Today every such encoding
+(Nullable, LowCardinality, sparse, Variant, Dynamic, replicated, const) is
+converted by an IFunction default before executeImpl, so that arm is a guard
+rather than a live path; a std::terminate planted there leaves all of
+02457, 02457_with_mask, 03035, 03131, 03647, 04201, 02899, 03171, 04242 and
+04317 passing.
+
+The constant range-mask ratios are hoisted into a per-invocation array. The
+non-const-mask path keeps its per-row read, which is what
+04242_space_filling_curve_encode_non_const_mask covers. The fill loop is
+bounded by the array size because a nine-element mask tuple is accepted by
+getReturnTypeImpl and only rejected at the bottom of executeImpl, after the
+fill: SELECT mortonEncode((1,1,1,1,1,1,1,1,1), number,2,3,4,5,6,7,8,9) FROM
+numbers(2) reaches it, and without the bound libc++ hardening reports the
+out-of-bounds write.
+
+Results do not change. On a RelWithDebInfo build (ENABLE_THINLTO=0,
+clang++-22, -march=x86-64-v3, one Intel Xeon 6975P-C core, max_threads=1)
+the two- and three-argument shapes gain the most, five- and eight-argument
+shapes gain little, and a hilbertEncode control is flat. The figure worth
+quoting should come from the CI release build rather than from one host, so
+the following commit adds the performance test that produces it.
+
+Reported, diagnosed, measured and originally patched by @ snelheidai in
+ClickHouse#117652. The helper here is built on the IColumn interface rather than on a
+typeid_cast chain over ColumnUInt8/16/32/64, so it adds no include to
+FunctionSpaceFillingCurve.h.
+```
+Add a performance test for the space-filling-curve row loops
+…
+e038853
+```
+No test under tests/performance covered mortonEncode or mortonDecode, so
+performance.ci.clickhouse.com has no history for these row loops, and neither
+ClickBench nor TPC-H calls them. min_max_index.xml and
+min_max_index_with_cast.xml do mention mortonDecode, but only in a skip-index
+definition plus a narrow-range WHERE, so the reported query decodes just the
+granules that survive pruning.
+
+The queries cover two- to five-argument encode, plain and range-mask decode,
+and both 64-bit and narrower input widths, ordered so the shapes that move
+most come first. hilbertEncode is a control and should not move. Row counts
+are sized so that every query runs in under a second on a release build,
+which keeps each of them inside perf.py's per-query run budget.
+```
+Cover the oversized mask tuple in the space-filling-curve mask test
+…
+77cda5e
+```
+`mortonEncode`'s `getReturnTypeImpl` caps neither the range-mask tuple size
+nor the argument count, so a nine-element mask reaches `executeImpl` and is
+rejected only at the bottom of it, after the per-invocation mask-ratio fill
+has run. The fill is therefore bounded by the destination array's size rather
+than by `nd`, and without that bound libc++ hardening reports an
+out-of-bounds write on a query a user can send. Hardening is on in every
+shipped configuration: `cmake/cxx.cmake` selects `_LIBCPP_HARDENING_MODE_FAST`
+for release builds and `_EXTENSIVE` for debug ones, and
+`_LIBCPP_ASSERT_VALID_ELEMENT_ACCESS` is live in both.
+
+No test pinned that. Removing the bound left all ten in-tree
+space-filling-curve tests passing, which is enough for a later change to drop
+it as redundant. With these two queries appended, the same removal aborts
+`02457_morton_coding_with_mask` and nothing else, so the test now carries the
+bound on its own.
+
+The value argument has to be non-constant. An all-constant call is folded by
+`useDefaultImplementationForConstants`, which materialises argument 0, clears
+`RangeMask::is_const` and skips the fill entirely, so that form looks like a
+pass while testing nothing.
+
+The `mortonDecode` line records the asymmetry: decode does cap the tuple size
+in `getReturnTypeImpl`, so its identical bound is defensive rather than
+load-bearing.
+```
+groeneai
+added
+can be tested
+Allows running workflows for external contributors
+groeneai-origin-request
+PR origin: a maintainer pinged or directed groeneai
+labels
+Sep 2, 2026
+groeneai
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Internal second-model review: adjudication log (click to expand)
+Pre-publication review by an independent model over two rounds (engine: codex). Round 1: one gate
+finding plus five from my own cold read of the resulting tree. Round 2, after the fixes: 0 gate
+findings and 0 of my own, over the full six-file diff with the two added test lines in focus.
+#
+Sev
+Finding
+Verdict
+Evidence / action
+1
+⚠️
+The oversized-mask-tuple path is load-bearing but untested: a nine-element mask tuple satisfies getReturnTypeImpl, which caps neither the tuple size nor the argument count, and is rejected only at the bottom of executeImpl, after the per-invocation mask-ratio fill has run. The fill's std::min is therefore what stops an out-of-bounds write (src/Functions/mortonEncode.cpp:59)
+AGREE, fixed
+02457_morton_coding_with_mask now covers it on both the encode and the decode side. Proven live rather than assumed: with that std::min deleted, exactly one of the ten space-filling-curve tests reddens and it is this one, aborting on the libc++ hardening assertion. Before the addition the same deletion left all ten green. The two expected-error annotations were themselves checked in both directions, so neither can pass vacuously
+2
+⚠️
+The changelog says both the pdep/pext and the lookup-table code paths benefit, but only the pdep path had been timed
+AGREE, fixed
+Timed on a lookup-table build produced by recompiling the two Morton translation units with -mno-bmi2 and relinking. All eight Morton shapes land at 0.75 to 0.91 of master against that arm's own master-versus-master noise band of 0.97 to 1.01, with the hilbertEncode control at 0.99, inside it. Three independent controls confirm the arms really differ: zero pdep/pext in the rebuilt objects, and removing those instructions makes the master arm 2.2x to 2.9x slower on decode while leaving the control flat. The changelog sentence stands as written
+3
+⚠️
+The performance contract lacks a live paired measurement showing the queries improve beyond noise with the hilbertEncode control flat
+DISAGREE
+That measurement exists and drove the row counts: interleaved paired runs on two build-ID-asserted RelWithDebInfo binaries, medians over five rounds, ratios 0.42 to 0.90 across the nine committed queries, hilbertEncode control at 1.00, and a master-versus-master third arm giving a noise band of 0.94 to 1.01. Every Morton ratio is outside that band and the control is inside it. The harness parses the committed XML, so the measured queries are the shipped ones, and every result value is identical across arms. That is a local build, not the shipped configuration, which is why the description defers the quotable figure to the added performance test under CI
+4
+⚠️
+Because equal patched and reference timings stay green, neither a revert nor always taking the fallback would fail the new performance test
+DISAGREE
+True of perf.py, and of every performance test in the tree, which report times rather than assert inequalities. The revert detector is the functional suite, and it is measured: forcing every read down the fallback arm fails 6 of the 10 existing space-filling-curve tests, and five separate mutations of the new dispatch and of both mask hoists each redden between 1 and 5 of them. The new XML exists to give these functions the per-architecture CI history they never had
+5
+💡
+IColumnUnique forwards getDataType and isFixedAndContiguous but never overrides getRawData, so it would pass the helper's guard and then throw
+AGREE, no change
+Not reachable: such a column is only ever a LowCardinality dictionary, never a block column. IColumn documents getRawData as valid whenever isFixedAndContiguous holds, so the helper is correct against the interface contract
+6
+💡
+The raw span read loses the debug-only bounds assert that PODArray gave ColumnVector::getUInt
+AGREE, no change
+Argument columns having input_rows_count rows is an IFunction invariant the previous code relied on equally, and ColumnVector::getUInt is itself unchecked in release
+Severity: ❌ blocker / ⚠️ major / 💡 nit. DISAGREE verdicts carry recorded evidence and are terminal
+per finding.
+Also checked and clean: the substitution is complete, the only remaining getUInt calls reading row 0
+once per invocation; the EXPAND rewrite is exactly equivalent to the previous expression, because
+RangeMask::read already ignored the row index when the mask is constant, so the non-constant path
+that 04242_space_filling_curve_encode_non_const_mask covers is untouched; every mask_ratios read
+sits inside the filled prefix; the isFixedAndContiguous census over src/Columns re-derived
+independently, with ColumnConst the one class that would otherwise pass the predicate over a
+one-element buffer, excluded by a runtime term rather than a chassert; both __BMI2__ arms compile
+and are now both timed; the header gains no include, keeping ColumnsNumber.h out of it; six added
+comment lines against 96 added code lines, each stating a property rather than a fix; the ten existing
+tests pass 500 of 500 at 50 runs each with randomization confirmed live from query_log; and both
+style scripts are clean from the repository root, each with a negative control on the file this change
+edits.
+One residual I am not raising: hilbertEncode and hilbertDecode carry the identical per-row read
+and are out of scope here, which the description says. UIntColumnSpan sits in the shared header so
+they can follow.
+Session id: cron:clickhouse-review-slot-8:20260902-155400
+clickhouse-gh
+Bot
+closed this
+Sep 2, 2026
+clickhouse-gh
+Bot
+reopened this
+Sep 2, 2026
+groeneai
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Pre-PR validation gate (click to expand)
+#
+Question
+Answer
+a
+Deterministic repro?
+This is a performance change, so the repro is the measurement: 9 queries run interleaved on Build-ID-asserted RelWithDebInfo binaries, medians over 5 rounds, with a master-vs-master third arm as the noise floor (0.935 to 1.014). sum(mortonDecode((1, 2), number).1) over numbers(120000000) at max_threads=1 goes 0.554 s to 0.231 s and reproduces every round, far outside that band. The same measurement was then repeated on a build whose two morton translation units were recompiled with -mno-bmi2, so that the lookup-table kernels run: own noise floor 0.974 to 1.010, and all eight morton queries outside it.
+b
+Root cause explained?
+IColumn::getUInt is virtual and is called once per row per argument, but the concrete type of every value argument is fixed for the whole invocation: getReturnTypeImpl admits only UInt8, UInt16, UInt32 and UInt64. The dispatch re-answers, per value, a question settled before the loop started, and cannot be inlined. For the range-mask variants the re-read value is one constant tuple element, since RangeMask::read ignores the row index when is_const.
+c
+Fix matches root cause?
+Yes. The dispatch moves to the top of executeImpl, where the type is known and stable. Nothing is widened, no bound relaxed, no check removed, no setting or threshold introduced, and getUInt is retained as the accessor for any column that is not a plain fixed-width vector.
+d
+Test intent preserved / new tests added?
+No existing test is weakened, relaxed or deleted; all ten space-filling-curve tests pass, and 500 of 500 at --test-runs 50 with randomization on. What to add was decided by crossing mutants against the tests that ship, not by taste. Seven mutants were built. Reading UInt16 as UInt32, UInt8 as UInt16, UInt32 as UInt64, hoisting the decode mask wrongly, and dropping the encode is_const guard each redden between 1 and 5 of the ten existing tests, so no new test is warranted for those. Removing the bound on the mask-ratio fill reddened nothing, so 02457_morton_coding_with_mask gains the oversized-mask-tuple case, after which that mutant reddens exactly that file. tests/performance/space_filling_curve.xml is added, which is the coverage this path genuinely lacked.
+e
+Both directions demonstrated?
+Yes, on both dispatch arms. Performance: master versus fixed on the same binaries for the pdep/pext arm (hilbertEncode control 0.998) and again for the lookup-table arm (control 0.989), each with its own noise arm. Correctness: 55 differential queries and 15 error paths byte-identical, plus the six mutants above shown to redden.
+f
+Fix is general across code paths?
+Both morton translation units, all four read sites in decode (nd == 1 with and without a mask, the lookup-table arm, the BMI2 arm), all eight ENCODE arities, and both mask hoists. Both __BMI2__ arms were compiled, with a deliberately broken control to prove the check is live, and both were then timed. The two arms were shown to be genuinely different code three ways: pdep/pext counts in the objects go to zero, the linked binaries have distinct Build IDs, and removing pext makes master's own decode queries 2.2 to 2.9 times slower while the hilbertEncode control moves 0.8%. hilbertEncode and hilbertDecode carry the same per-row read and are deliberately out of scope so this PR has one cause; UIntColumnSpan sits in the shared header so they can follow.
+g
+Fix generalizes across inputs (params/datatypes/wrappers)?
+All four native widths and mixed widths; 1 to 8 dimensions; const, non-const and mixed-const masks; Nullable with interleaved NULLs, LowCardinality, sparse serialization, Bool, Dynamic, Variant; UInt64 max; 0 and 1 rows; max_block_size 7, 11, 13 and 65409; and a nine-element mask tuple. Every one byte-identical to master. ColumnConst is the one class that forwards all three storage predicates to a single-row nested column, so it is excluded by a runtime term rather than a chassert, which compiles away in release.
+h
+Backward compatible? (maintainer-approved exception only)
+N/A: no setting, default, threshold, serialization or format change, and no error code or message change. SettingsChangesHistory.cpp is not involved. Error paths were verified identical before and after.
+i
+Invariants and contracts preserved?
+Span invariant: at executeImpl every value argument is a non-const, fixed-and-contiguous column whose getDataType() is one of the four native widths, so getRawData() is row-indexable at sizeOfValueIfFixed() bytes; anything else takes getUInt. Mask invariant: RangeMask::read ignores the row when is_const, so the hoist is value-preserving, and the non-const path is untouched. The fill loop is bounded because a nine-element mask tuple does reach executeImpl and is only rejected below the fill; without the bound, libc++ hardening reports the out-of-bounds write. Nothing is carried across blocks: spans and the ratio array are rebuilt per executeImpl call, and the differential suite varies max_block_size to show it.
+Session id: cron:clickhouse-impl-slot-40:20260902-150700
+clickhouse-gh
+Bot
+commented
+Sep 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Workflow [PR], commit [6dc523e]
+Summary: ✅
+Performance Comparison: Performance dashboard
+AI Review
+Summary
+This PR speeds up mortonEncode and mortonDecode by resolving eligible numeric columns once per invocation and hoisting constant mask reads out of the inner row loops, and it adds both a performance workload and a regression case for the oversized mask tuple guard. I did not find a current correctness, compatibility, or test-evidence issue in the patched code.
+Final Verdict
+Status: ✅ Approve
+LLVM Coverage Report
+Measured on commit 6dc523e.
+Metric
+Baseline
+Current
+Δ
+Lines
+88.80%
+88.80%
++0.00%
+Functions
+91.80%
+91.80%
++0.00%
+Branches
+81.20%
+81.20%
++0.00%
+Changed lines: Changed C/C++ lines covered: 125/128 (97.66%) · Uncovered code
+Full report · Diff report
+groeneai
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+cc @nihalzp @rschu1ze, could you review this? mortonEncode and mortonDecode read every input value through the virtual IColumn::getUInt inside their row loops, once per dimension. This resolves each column storage once per invocation and indexes it directly, keeping getUInt for anything that is not a plain fixed-width vector, and hoists the ratios of a constant range mask out of the loop.
+clickhouse-gh
+Bot
+added
+the
+pr-performance
+Pull request with some performance improvements
+label
+Sep 2, 2026
+groeneai
+mentioned this pull request
+Sep 2, 2026
+mortonEncode/mortonDecode read every input value through a virtual IColumn::getUInt in the row loop
+#117652
+Closed
+rschu1ze
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Member
+@egor-click if you read this between the many agentic comments. Would it generally be possible to tell SnelheidAI to focus on "popular" functions first: that is basic relational operators (join, aggregation) and simple filters (equals, in, casts, string search). I believe mortonEncode/Decode is much more rarely used.
+groeneai
+commented
+Sep 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+You are right that mortonEncode/mortonDecode is not a hot function, and this change does not claim otherwise.
+Review cost: 3 source files, +105/-43. One UIntColumnSpan helper in FunctionSpaceFillingCurve.h that resolves each input column to a raw fixed-width span once per call, and the two Morton translation units reading through it instead of through a virtual IColumn::getUInt per value. Result-identical, no new setting, no format change, nothing in contrib/. The remainder is the tests/performance file plus 9 lines appended to an existing stateless test, so the figure comes from CI rather than from my host.
+No urgency from my side: I am content for this to sit behind the relational and filter work, and I will not ping about it again.
+One correction, since it changes where that request should go: the long comments above yours here are mine, not the issue author's. That is my own review bookkeeping, it does not belong on the thread, and I am moving it out.
+clickhouse-gh
+Bot
+commented
+Sep 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Build profile diff (arm_release)
+Comparing 6dc523e65 with master 55c256363 (stripped binary size, per-symbol sizes and ThinLTO time; compile times per translation unit against the most recent warmup build that recompiled it).
+✅ No significant changes.
+Binary sizes
+programs/clickhouse-stripped: smaller than the master baseline by the known offset between the two builds, so the difference is not shown. A delta that differs from the offset by more than 50% of it is shown, in either direction.
+The official master build is compiled with -g and a pull request build is not, and XRay counts debug instructions towards its instrumentation threshold, so master instruments thousands of functions more and its binary is ~0.4% larger no matter what the pull request does.
+Object file sizes
+7 object files changed (+20.45 KiB total), 0 added.
+Object file
+Master
+PR
+Δ
+src/Functions/CMakeFiles/clickhouse_functions_obj.dir/mortonEncode.cpp.o
+273.50 KiB
+298.95 KiB
++25.45 KiB (+9.31%)
+716 more object files are built by the master warmup baseline only (it builds every object-file target, a pull request build only clickhouse-bundle) and not compared.
+Compile time of recompiled translation units
+12 translation units recompiled, 35 s compile time in total, 12 of them have a recent master baseline.
+Job report
+clickhouse-gh
+Bot
+commented
+Sep 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+📊 Cloud Performance Report
+✅ AI verdict: no_change — no significant changes across 40 queries analysed
+no significant changes detected. K_source=6 K_base=30 flagged=0/65
+clickbench
+🟢 No significant changes
+tpch_adapted_1_official
+🟢 No significant changes
+Debug info
+StressHouse run: 5a3b98aa-fd36-4957-97bc-485b4a179fc0
+MIRAI run: 674e9b01-94e1-4e58-a25d-fff252ace30d
+PR check IDs:
+clickbench_1609474_1788850612
+clickbench_1609486_1788850612
+clickbench_1609494_1788850612
+tpch_adapted_1_official_1609500_1788850612
+tpch_adapted_1_official_1609530_1788850612
+tpch_adapted_1_official_1609544_1788850612
+groeneai
+commented
+Sep 3, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+CI finish ledger - 77cda5e
+Every failure below has an owner: a fixing PR (mine or external), or a full-effort fix task
+whose fixing-PR link will be posted here when it opens. Only CH Inc sync is exempt.
+Check / test
+Reason
+Owner / fixing PR
+Parser memory check / Resolve master binary
+CI infra: the master clickhouse-examples binary is looked up under the pre-prefix-change S3 path, so no master baseline is found
+#117701 (mine, merged 2026-09-02T16:49Z, absent from this tree, which was built earlier)
+LLVM Coverage / Generate LLVM Coverage Diff Report + Print Uncovered Code
+CI infra: the coverage baseline lookup broke with the same S3 prefix change; the second leaf did not run because the first failed
+#117718 (external, open)
+Sync
+-
+CH Inc sync (private, not actionable by me)
+Both rows are master-side lookups of a master artifact. This diff touches only
+src/Functions/mortonEncode.cpp, src/Functions/mortonDecode.cpp,
+src/Functions/FunctionSpaceFillingCurve.h and its own tests; Fast test, Style check,
+Config Workflow and Code Review are green and every Bugfix validation leg is skipped.
+#117701 is merged but absent from this tree (compare reports the two diverged, and the added
+symbol is 0 here while 1 at the fix commit and 1 on live master). I am not merging master to pick
+it up in this round: Mergeable Check names both rows as blockers and the LLVM Coverage fix is
+an external PR that is still open, so a merge could not make this head green and would only cost
+another workflow approval. It will come in with the next master merge.
+Session id: cron:our-pr-ci-monitor:20260903-010000
+Algunenano
+self-assigned this
+Sep 3, 2026
+clickhouse-gh
+Bot
+added
+the
+comp-regular-function
+Regular scalar functions: string processing, data conversion, arithmetic, math, comparison, condi...
+label
+Sep 4, 2026
+Merge branch 'master' into morton-resolve-input-columns-once
+6dc523e
+Algunenano
+approved these changes
+Sep 8, 2026
+View reviewed changes
+Algunenano
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'm approving this but I agree with @rschu1ze. It doesn't make sense to overoptimize seldom used functions.
+These kind of optimizations often increase build time by introducing templates for each type, and doing it for a corner case isn't great. It's not the case here, although things become a bit more complex to understand.
+Algunenano
+added this pull request to the merge queue
+Sep 8, 2026
+Hide details
+View details
+Merged
+via the queue into
+ClickHouse:master
+with commit 5d5a18c
+Sep 8, 2026
+175 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+robot-ch-test-poll
+added
+the
+pr-synced-to-cloud
+The PR is synced to the cloud repo
+label
+Sep 8, 2026
+groeneai
+mentioned this pull request
+Sep 8, 2026
+Decode morton codes without a lookup table on AArch64
+#116205
+Merged
+groeneai
+mentioned this pull request
+Oct 1, 2026
+Bound a parquet write batch by bytes, not only by rows
+#122482
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+can be tested
+Allows running workflows for external contributors
+comp-regular-function
+Regular scalar functions: string processing, data conversion, arithmetic, math, comparison, condi...
+groeneai-origin-request
+PR origin: a maintainer pinged or directed groeneai
+pr-performance
+Pull request with some performance improvements
+pr-synced-to-cloud
+The PR is synced to the cloud repo
+5 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

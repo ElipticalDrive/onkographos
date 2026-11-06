@@ -1,0 +1,139 @@
+目标 一比一复刻 NadirRoGue/RenderEngine 中的体积云实现，替换已删除的旧体积云系统。 参考实现结构（已研读源码） RenderEngine 的体积云由四个核心部分组成： NoiseInitializer (volumetricclouds/NoiseInitializer.h/cpp) 使用 Compute Shader 生成四张纹理： PerlinWorleyFBM — 128×128×128 RGBA8（R=Perlin-Worley，G/B...
+
+[volumetric-clouds-v2][RenderEngine] 1:1 复刻 NadirRoGue/RenderEngine 体积云 · Issue #139 · ruochenhua/AetherEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[volumetric-clouds-v2][RenderEngine] 1:1 复刻 NadirRoGue/RenderEngine 体积云 #139
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[volumetric-clouds-v2][RenderEngine] 1:1 复刻 NadirRoGue/RenderEngine 体积云#139
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestgraphicsGraphics renderingGraphics renderingvolumetric-cloudsVolumetric cloud renderingVolumetric cloud rendering
+Description
+ruochenhua
+opened on Jul 6, 2026
+Issue body actions
+目标
+一比一复刻 NadirRoGue/RenderEngine 中的体积云实现，替换已删除的旧体积云系统。
+参考实现结构（已研读源码）
+RenderEngine 的体积云由四个核心部分组成：
+NoiseInitializer (volumetricclouds/NoiseInitializer.h/cpp)
+使用 Compute Shader 生成四张纹理：
+PerlinWorleyFBM — 128×128×128 RGBA8（R=Perlin-Worley，G/B/A=3 层 Worley FBM）
+WorleyFBM — 32×32×32 RGBA8（3 层 Worley FBM 用于侵蚀）
+CurlNoise — 128×128 RGBA8（预留）
+WeatherData — 2048×2048 RGBA8（R=coverage，G=type/rain，B=预留）
+噪声算法直接来自 sebh/TileableVolumeNoise。
+VolumetricCloudProgram (postprocessprograms/VolumetricCloudProgram.h/cpp + shaders/clouds/volumetricclouds.frag)
+全屏后处理 Pass，读取 GBuffer depth 跳过被遮挡像素。
+光线与云层球壳求交（innerSphereRadius / outerSphereRadius / sphereCenter）。
+前向体素 ray-march，步数按路径长度在 48~96 之间插值。
+密度模型：
+Perlin-Worley 基础形状 + Worley FBM 高频侵蚀
+云型高度梯度（Stratus / Stratocumulus / Cumulus）
+Weather map coverage remap
+风向/风速位移 + cloudTopOffset
+光照模型：
+Henyey-Greenstein 相位函数
+Beer law
+Powder effect
+6 步锥形采样 light march + 1 步远距阴影
+环境光由 zenit/horizon 颜色混合
+Bayer 抖动、基于距离的 LOD、early exit。
+交错渲染（interleaved）：每帧只渲染半宽像素，配合 filter 做 temporal。
+输出：color + pixel velocity/position（outPos RGB32F）。
+CloudFilterProgram (postprocessprograms/CloudFilterProgram.h/cpp + shaders/clouds/cloudfilter.frag)
+对半分辨率云结果做 temporal reprojection。
+输入前两帧 color buffer 和 velocity buffer。
+输出 color、emission（bloom）、god rays。
+CloudShadowProgram (programs/CloudShadowProgram.h/cpp + shaders/clouds/cloudshadow.frag)
+从光源视角渲染一片天空平面。
+用 Weather map 的 coverage 决定阴影浓淡。
+复刻阶段
+Phase
+内容
+视觉/测试验收
+0
+噪声生成：将 TileableVolumeNoise 的 hash/noise/cells/Perlin/Worley 算法移植到 Rust；用 wgpu compute shader 生成 PerlinWorleyFBM / WorleyFBM / WeatherData / CurlNoise；保存切片到 tests/output/clouds/phase0/
+生成的 3D/2D 噪声切片图像非空、无 NaN、可复现
+1
+场景配置与 ECS：新增 CloudConfig（字段与 RenderEngine Settings 对应）、Clouds ECS 组件、场景加载/序列化、Launcher Inspector
+SceneDescription RON 可 round-trip；build_world 正确生成 Clouds entity
+2
+VolumetricCloudPass 主体：将 volumetricclouds.frag 翻译成 WGSL，绑定噪声纹理与 uniform，输出 CloudColor 和 velocity/position
+Launcher 启动 scenes/15_clouds.ron 能看到可辨识的白色/灰色云层
+3
+CloudFilterPass 时序重建：实现半分辨率交错渲染 + 历史帧重投影
+云层稳定、无闪烁，720p 下性能可接受
+4
+CloudShadowPass 云影：云阴影投射到地形/物体
+地面出现柔和的云影
+字段映射（CloudConfig 设计）
+```
+pub struct CloudConfig {
+    pub cloud_type: f32,                  // 0=stratus, 0.5=stratocumulus, 1=cumulus
+    pub coverage_multiplier: f32,
+    pub wind_direction: [f32; 3],
+    pub wind_speed: f32,
+    pub cloud_color: [f32; 3],
+    pub inner_sphere_radius: f32,
+    pub outer_sphere_radius: f32,
+    pub sphere_y_offset: f32,
+    pub max_render_distance: f32,
+    pub cloud_top_offset: f32,
+    pub weather_texture_scale: f32,
+    pub base_noise_scale: f32,
+    pub high_frequency_noise_scale: f32,
+    pub high_frequency_noise_uv_scale: f32,
+    pub high_frequency_noise_h_scale: f32,
+    pub quality: CloudQuality,            // Low / Medium / High
+}
+```
+所有字段均对应 RenderEngine Settings 中的同名参数。
+TDD 要求
+每个阶段必须有测试先行或并行：
+噪声函数：值域、tileability、确定性。
+Compute shader 输出：尺寸正确、GPU 上传成功。
+Pass：signature 测试、shader 编译测试、uniform layout 测试。
+场景：RON round-trip、加载器 spawn 测试。
+每个阶段保存截图到 tests/output/clouds/phaseN/。
+总体完成标准
+cargo test -p aether-engine --lib 全过。
+cargo build -p aether-launcher --release 成功。
+target/release/aether-launcher.exe scenes/15_clouds.ron 能渲染出云，且相机默认位置高于地面。
+每个阶段在 tests/output/clouds/ 下留截图。
+此路线图是对 RenderEngine 体积云子系统的 Rust/wgpu 移植，不再沿用之前的 clayjohn/realtime_clouds 方案。
+Reactions are currently unavailable
+Activity
+ruochenhua
+added
+enhancementNew feature or requestNew feature or request
+graphicsGraphics renderingGraphics rendering
+volumetric-cloudsVolumetric cloud renderingVolumetric cloud rendering
+on Jul 6, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestgraphicsGraphics renderingGraphics renderingvolumetric-cloudsVolumetric cloud renderingVolumetric cloud rendering
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

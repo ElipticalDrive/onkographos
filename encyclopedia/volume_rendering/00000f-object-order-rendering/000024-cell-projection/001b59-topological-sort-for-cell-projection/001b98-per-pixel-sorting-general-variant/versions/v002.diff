@@ -1,0 +1,213 @@
+--- v001.md
++++ v002.md
+@@ -8,36 +8,36 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of convex polyhedral cells (or meshes) with their geometric definitions (vertices, faces) and the viewing parameters (camera position, projection matrix, screen resolution).
+-- Output: A list of fragments (face segments) sorted back-to-front for each pixel, ready for alpha compositing.
++- Input: A set of convex polyhedral cells (or meshes) with their geometric definitions (vertices, faces) and the viewing parameters (camera position, projection matrix, screen resolution) [G].
++- Output: A list of fragments (face segments) sorted back-to-front for each pixel, ready for alpha compositing [S1][S3, unofficial].
+ 
+ **Data Structures:**
+ The method adapts scan-line visible surface algorithm techniques using the following structures [S1][S3, unofficial]:
+-1.  **Y-Buckets:** A list of lists indexed by scan line $y$. Each bucket contains faces that intersect that scan line.
+-2.  **Active List:** A list of faces currently intersecting the current scan line $y$.
+-3.  **X-Buckets:** A list of lists indexed by pixel column $x$ within the current scan line. Each bucket contains faces covering that pixel.
+-4.  **Z-Sorted List:** A list of fragments (or face segments) at the current pixel $(x, y)$, sorted by depth $z$.
++1. **Y-Buckets:** A list of lists indexed by scan line $y$. Each bucket stores faces that first cross that scan line.
++2. **Active List:** A list of faces currently intersecting the current scan line $y$.
++3. **X-Buckets:** A list of lists indexed by pixel column $x$ within the current scan line. Each bucket stores faces covering that pixel.
++4. **Z-Sorted List:** A list of fragments (or face segments) at the current pixel $(x, y)$, sorted by depth $z$.
+ 
+ **Steps:**
+-1.  **Initialization:** Create empty Y-Buckets for all scan lines $y$ in the image height.
+-2.  **Scan Line Processing:** Iterate through each scan line $y$ from top to bottom (or bottom to top, consistent with coordinate system):
+-    a.  **Update Active List:** Add faces from the Y-Bucket at $y$ to the Active List. Remove faces from the Active List that no longer intersect $y$ (i.e., their $y$-range has ended).
+-    b.  **Pixel Processing:** Iterate through each pixel $x$ in the scan line:
+-        i.  **Update X-Buckets:** For each face in the Active List, determine if it covers pixel $x$. If so, add the face segment to the X-Bucket at $x$. (Note: Sources describe using X-Buckets for the first pixel a face covers, implying a sweep or incremental update [S1][S3, unofficial]).
+-        ii. **Sort Z-List:** Collect all face segments in the X-Bucket at $x$. Sort these segments by their depth $z$ at the pixel center (or average depth) in back-to-front order. If multiple overlapping meshes are handled, $z$-values must be updated and the sort rechecked or resorted at each new pixel [S2, S3, unofficial].
+-        iii. **Composite:** Perform alpha compositing on the sorted Z-List to produce the final pixel color.
+-        iv. **Cleanup:** Clear the X-Bucket at $x$ for the next pixel.
+-3.  **Termination:** After all scan lines and pixels are processed, the image is complete.
++1. **Initialization:** Create empty Y-Buckets for all scan lines $y$ in the image height [S1][S3, unofficial].
++2. **Scan Line Processing:** Iterate through each scan line $y$ from top to bottom:
++   a. **Update Active List:** Add faces from the Y-Bucket at $y$ to the Active List. Remove faces from the Active List that no longer intersect $y$ (i.e., their $y$-range has ended) [S1][S3, unofficial].
++   b. **Pixel Processing:** Iterate through each pixel $x$ in the scan line:
++      i. **Update X-Buckets:** For each face in the Active List, determine if it covers pixel $x$. If so, add the face segment to the X-Bucket at $x$ [S1][S3, unofficial].
++      ii. **Sort Z-List:** Collect all face segments in the X-Bucket at $x$. Sort these segments by their depth $z$ at the pixel center in back-to-front order. Because multiple overlapping meshes are handled, $z$-values must be updated and resorted (or at least the sort must be rechecked for correctness) at each new pixel [S2, unofficial][S3, unofficial].
++      iii. **Composite:** Perform alpha compositing on the sorted Z-List to produce the final pixel color [G].
++      iv. **Cleanup:** Clear the X-Bucket at $x$ for the next pixel [S1][S3, unofficial].
++3. **Termination:** After all scan lines and pixels are processed, the image is complete [S1][S3, unofficial].
+ 
+ **Formulas:**
+-- Depth $z$ for a face at pixel $(x, y)$ is typically computed via perspective division of the transformed vertex coordinates or interpolated across the face [S1][S3, unofficial].
+-- The sort order is determined by $z_{back} > z_{front}$ (assuming back-to-front compositing).
++- Depth $z$ is computed per pixel for each face segment, and $z$-values are updated and resorted at each new pixel to handle overlapping meshes [S2, unofficial][S3, unofficial].
++- The sort order is determined by $z_{back} > z_{front}$ (assuming back-to-front compositing) [S1][S3, unofficial].
+ 
+ **Parameters:**
+-- $k$: Not applicable directly, but related to [Nearly-Sorted Object-Space Visibility Ordering](1279-mammen-s-technique.md) which relaxes this strict sort.
+-- Resolution: Screen width and height determine the number of pixels and scan lines.
++- Resolution: Screen width and height determine the number of pixels and scan lines [G].
++- $k$: Not applicable directly to this variant, but related to [Nearly-Sorted Object-Space Visibility Ordering](1279-mammen-s-technique.md) which relaxes exact sorting [S4, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+ - **Visibility Cycles:** The method handles cycles gracefully per pixel, as a local sort always exists [S2, unofficial].
+-- **Coherence:** The method takes partial advantage of coherence in $x$ (via X-Buckets/Active List updates) but not in $y$ (since Y-Buckets are accessed sequentially but Active List updates are not fully coherent across scan lines in the same way [S1][S3, unofficial]).
++- **Coherence:** The method takes partial advantage of coherence in $x$ (via X-Buckets/Active List updates) but not in $y$ [S1][S3, unofficial].
+ - **Performance:** Since exterior faces are a small fraction of total faces in most meshes, this method spends far greater effort on per-pixel sorting compared to exterior-face-only methods [S2, unofficial].
+ - **Hardware Status:** Hardware implementations (e.g., R-Buffer) do not exist; software versions repeat sorts from scratch independently at each pixel, doing more work than incremental updates [S3, unofficial].
+@@ -45,112 +45,49 @@
+ **Pseudocode:**
+ ```python
+-def per_pixel_sort_general_variant(cells, screen_width, screen_height):
+-    # Initialize Y-Buckets: list of lists, one per scan line
+-    y_buckets = [[] for _ in range(screen_height)]
+-    
+-    # Populate Y-Buckets with faces
+-    for face in cells:
+-        y_min, y_max = face.get_y_range()
+-        if y_min < screen_height and y_max >= 0:
+-            y_min = max(0, y_min)
+-            y_max = min(screen_height - 1, y_max)
+-            for y in range(y_min, y_max + 1):
+-                y_buckets[y].append(face)
+-                
+-    image = [[None for _ in range(screen_width)] for _ in range(screen_height)]
+-    
+-    for y in range(screen_height):
++def per_pixel_sort_general_variant(faces, width, height):
++    # 1. Initialize Y-Buckets: map scan line y to list of faces starting at y
++    y_buckets = [[] for _ in range(height)]
++    for face in faces:
++        y_min = max(0.0, face.y_min)
++        y_max = min(float(height - 1), face.y_max)
++        if y_min <= y_max:
++            y_buckets[int(y_min)].append(face)
++
++    image = [[None] * width for _ in range(height)]
++
++    for y in range(height):
+         active_list = []
+-        # Add faces starting at this scan line
+-        for face in y_buckets[y]:
+-            active_list.append(face)
+-            
+-        # Remove faces that end before this scan line (if not handled by bucket logic)
+-        # Note: The source implies Y-Buckets store faces for the first scan line they cross.
+-        # We need to manage the active list based on face y-ranges.
+-        # Simplified: Assume y_buckets[y] contains faces that start at y.
+-        # We need a separate mechanism to remove faces that end.
+-        # For completeness, we assume a standard scan-line algorithm structure.
+-        
+-        # Re-initialize active list properly based on face extents
+-        active_list = [face for face in all_faces if face.y_min <= y <= face.y_max]
+-        
+-        for x in range(screen_width):
+-            # Identify faces covering pixel (x, y)
+-            # This requires checking face bounding boxes or rasterization
+-            covering_faces = []
++        # Add faces that start at this scan line
++        active_list.extend(y_buckets[y])
++
++        # X-Buckets: map pixel x to list of face segments covering (x, y)
++        x_buckets = [[] for _ in range(width)]
++
++        for x in range(width):
++            # Update X-Buckets: add faces from active list that cover this pixel
+             for face in active_list:
+-                if face.covers_pixel(x, y):
+-                    covering_faces.append(face)
+-            
+-            # Sort faces by depth z at (x, y)
+-            # Depth calculation depends on projection
+-            sorted_faces = sort_by_depth(covering_faces, x, y)
+-            
+-            # Composite
+-            color = composite_back_to_front(sorted_faces)
++                if face.x_min <= x <= face.x_max:
++                    x_buckets[x].append(face)
++
++            # Remove faces that end before this scan line
++            active_list = [f for f in active_list if f.y_max >= y]
++
++            # Sort Z-List: sort faces in x_buckets[x] by depth z at (x, y)
++            # Evidence: z-values must be updated and resorted at each new pixel [S2, unofficial][S3, unofficial]
++            sorted_faces = sorted(x_buckets[x], key=lambda f: f.compute_depth(x, y), reverse=True)
++
++            # Composite back-to-front [G]
++            color = [0.0, 0.0, 0.0, 0.0]
++            for face in sorted_faces:
++                seg = face.get_segment_at_pixel(x, y)
++                # Standard Porter-Duff 'over' operator [G]
++                a_f, c_f = seg.alpha, seg.color
++                a_b, c_b = color[3], color[:3]
++                out_a = a_f + a_b * (1.0 - a_f)
++                out_c = [c_f[i] + c_b[i] * a_b * (1.0 - a_f) for i in range(3)]
++                color = out_c + [out_a]
++
+             image[y][x] = color
+-            
+-    return image
+ 
+-def sort_by_depth(faces, x, y):
+-    # Calculate depth z for each face at pixel (x, y)
+-    # This is a placeholder for the specific depth calculation (e.g., plane equation)
+-    face_depths = []
+-    for face in faces:
+-        z = face.get_depth_at_pixel(x, y)
+-        face_depths.append((z, face))
+-    
+-    # Sort back-to-front (descending z if z increases away from camera)
+-    # Assuming standard view where larger z is further
+-    face_depths.sort(key=lambda item: item[0], reverse=True)
+-    return [item[1] for item in face_depths]
+-```
+-*Note: The pseudocode above is a high-level representation. The source notes emphasize the use of Y-Buckets, Active Lists, X-Buckets, and Z-Sorted Lists [S1][S3, unofficial]. The exact implementation of "X-Buckets" in the source suggests an incremental update where faces are added to the current pixel's bucket as they are encountered, rather than re-scanning the active list for every pixel. A more efficient implementation would update the active list and x-buckets incrementally.*
+-
+-**Revised Pseudocode (closer to source description):**
+-```python
+-def per_pixel_sort_general_variant_optimized(cells, screen_width, screen_height):
+-    # Y-Buckets: list of lists, one per scan line
+-    y_buckets = [[] for _ in range(screen_height)]
+-    
+-    # Populate Y-Buckets
+-    for face in cells:
+-        y_min, y_max = face.get_y_range()
+-        if y_min < screen_height and y_max >= 0:
+-            y_min = max(0, y_min)
+-            y_max = min(screen_height - 1, y_max)
+-            # Store face in the bucket of its first scan line
+-            y_buckets[y_min].append(face)
+-            
+-    image = [[None for _ in range(screen_width)] for _ in range(screen_height)]
+-    
+-    for y in range(screen_height):
+-        active_list = []
+-        # Add faces starting at this scan line
+-        for face in y_buckets[y]:
+-            active_list.append(face)
+-            
+-        # X-Buckets: list of lists, one per pixel in the current scan line
+-        x_buckets = [[] for _ in range(screen_width)]
+-        
+-        for x in range(screen_width):
+-            # Update X-Buckets: Add faces from active list that cover this pixel
+-            # This is the "incremental" part, taking advantage of x-coherence
+-            for face in active_list:
+-                if face.covers_pixel(x, y):
+-                    x_buckets[x].append(face)
+-            
+-            # Remove faces from active list that no longer cover the current scan line
+-            # This requires checking face y_max
+-            active_list = [face for face in active_list if face.y_max >= y]
+-            
+-            # Sort Z-List: Sort faces in x_buckets[x] by depth
+-            sorted_faces = sort_by_depth(x_buckets[x], x, y)
+-            
+-            # Composite
+-            color = composite_back_to_front(sorted_faces)
+-            image[y][x] = color
+-            
+     return image
+ ```

@@ -1,0 +1,183 @@
+# Drawing Space Separation (DSS)
+
+Also called: Drawing Space Separation (DSS) Volumetric Display, Holographic-laser-excited graphics
+
+## Overview
+
+Drawing Space Separation (DSS) is a volumetric display technique that physically separates the volume where voxels are generated (drawing space) from the volume where the user observes the image (viewing space) using an optical re-projection system [S1, S2]. Unlike previous femtosecond-laser systems that require high pulse energies in air, DSS allows the drawing space to be filled with a material (e.g., xenon gas) that lowers the energy threshold for voxel generation and provides broadband emission, without creating a physical barrier between the user and the graphics [S1, S2]. This separation enables the insertion of a color filter (e.g., an LC color filter) in the re-projection path, allowing arbitrary colors to be extracted from the monochromatic or broadband emission of the voxels [S1, S2].
+
+## How it works
+
+### Inputs and Outputs
+
+**Inputs:**
+1.  **3D Point Cloud Data:** A set of $N$ voxels defined by spatial coordinates $(x_i, y_i, z_i)$ and target color values $(r_i, g_i, b_i)$ for $i = 1 \dots N$ [S1, S2].
+2.  **Laser Source:** A femtosecond laser with center wavelength $\lambda = 800$ nm, pulse duration $\tau = 34$ fs, repetition frequency $f_{rep} = 1$ kHz, and average power $P_{avg} = 7$ W [S1].
+3.  **Drawing Space Medium:** A gas (e.g., Xenon) enclosed in a cylindrical glass cell (diameter 30 mm, height 30 mm) [S1]. The threshold fluence for Xenon emission is $19 \text{ mJ/cm}^2$, which is up to 34% lower than air, and the resulting emission is ~200 times brighter than air luminescence at this threshold [S1, S2].
+4.  **Optical Components:**
+    *   Two centrally apertured parabolic mirrors with focal length $f_m$ [S1, S2].
+    *   A Liquid Crystal on Silicon Spatial Light Modulator (LCOS-SLM) with resolution $1272 \times 1024$ pixels, pixel pitch $12.5 \mu\text{m}$, 8-bit depth, and refresh rate $\sim 10$ Hz [S1].
+    *   A 3D beam scanning system comprising a galvanometer scanner (deflection angle $40^\circ$) and a varifocal lens (aperture 16 mm, focal length range $-500$ to $+333$ mm) [S1].
+    *   An LC color filter placed immediately after the aperture of the upper parabolic mirror [S1].
+
+**Outputs:**
+*   A real, aerial 3D image in the viewing space, visible through the aperture of the upper parabolic mirror, with arbitrary colors and no physical barrier [S1, S2].
+
+### Data Structures
+
+**Voxel List:**
+A list of $N$ voxels. Each voxel $i$ contains:
+*   `position`: Tuple $(x_i, y_i, z_i)$ in the drawing space coordinate system.
+*   `color`: Tuple $(r_i, g_i, b_i)$ representing the target RGB intensity.
+
+**Scan Path:**
+A sequence of indices defining the order in which voxels are generated to minimize travel distance. The path is calculated by finding the shortest scanning distances between vertices in each sliced layer of the 3D point cloud [S1].
+
+### Optical Layout
+
+The re-projection system consists of two parabolic mirrors arranged with their concave sides facing each other [S1, S2].
+1.  **Bottom Mirror:** Contains an aperture. The drawing space (gas cell) is located at this aperture. The vertex of the bottom mirror is at position $z=0$.
+2.  **Top Mirror:** Contains an aperture for the user. The vertex of the top mirror is at position $z = f_m$, where $f_m$ is the focal length of the mirrors [S1, S2].
+3.  **Geometry:** The distance between the vertices of the two mirrors is exactly equal to the focal length $f_m$ [S1, S2]. An object (emission point) placed at the focus of the bottom mirror (the drawing space aperture) is projected as a real image at the focus of the top mirror (the viewing space aperture) [S1, S2].
+
+### Step-by-Step Method
+
+1.  **Preparation:**
+    *   Initialize the LCOS-SLM with a Computer-Generated Hologram (CGH) if parallel voxel generation is desired [S1, S2].
+    *   Fill the drawing space with Xenon gas [S1, S2].
+    *   Align the polarization of the incident laser with the LCOS-SLM orientation for maximum diffraction efficiency [S1].
+
+2.  **Voxel Generation (Spatial Scanning):**
+    *   For each voxel $i$ in the scan path:
+        a.  **Position Control:** Adjust the 3D beam scanning system to focus the femtosecond laser at the target coordinates $(x_i, y_i, z_i)$ in the drawing space. This is achieved by controlling the deflection angle of the galvanometer scanner (horizontal position) and the focal length of the varifocal lens (axial position) [S1, S2].
+        b.  **Emission:** Fire a laser pulse with energy $E_{pulse}$ (e.g., $271 \mu\text{J}$, $203 \mu\text{J}$, $219 \mu\text{J}$, or $117 \mu\text{J}$ depending on the scene) [S1]. The laser interacts with the Xenon gas, generating a broadband emission point (voxel) at $(x_i, y_i, z_i)$ [S1, S2]. The incident fluence must exceed the threshold (e.g., $52 \text{ mJ/cm}^2$ for air, lower for Xe) [S1, S2].
+
+3.  **Color Selection (Temporal Synchronization):**
+    *   Before or during the emission of voxel $i$, set the LC color filter to the transmission profile corresponding to the target color $(r_i, g_i, b_i)$ [S1, S2].
+    *   The LC color filter is placed in the re-projection path, immediately after the aperture of the upper parabolic mirror [S1].
+    *   The filter selectively extracts specific wavelengths from the broadband emission of the femtosecond-laser-excited voxel [S1, S2].
+
+4.  **Re-projection:**
+    *   The light emitted from the voxel at the bottom mirror's aperture travels to the bottom mirror, reflects, and converges toward the top mirror's focus [S1, S2].
+    *   The light passes through the LC color filter.
+    *   The top mirror reflects the filtered light, projecting a real, colored image of the voxel into the viewing space through its aperture [S1, S2].
+
+5.  **Persistence of Vision:**
+    *   The sequence of voxels is generated at the laser repetition frequency (1 kHz) [S1].
+    *   The human eye integrates these rapidly appearing/disappearing colored points into a continuous volumetric image due to persistence of vision [S1, S2].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def draw_dss_volumetric(voxels, laser, mirrors, scanner, slm, lc_filter, gas_cell):
+    """
+    Draw a volumetric image using Drawing Space Separation.
+    
+    Args:
+        voxels: List of dicts with keys 'x', 'y', 'z', 'r', 'g', 'b'.
+        laser: Object with methods 'set_pulse_energy(energy)' and 'fire()'.
+        mirrors: Object representing the two parabolic mirrors.
+        scanner: Object with methods 'set_horizontal_angle(angle)' and 'set_axial_focus(z)'.
+        slm: Object with method 'display_cgh(hologram_data)'.
+        lc_filter: Object with method 'set_color(r, g, b)'.
+        gas_cell: Object representing the Xenon-filled drawing space.
+    """
+    
+    # 1. Setup
+    # Calculate scan path to minimize travel distance between voxels in each layer
+    scan_path = calculate_shortest_scan_path(voxels)
+    
+    # Optional: Load CGH for parallel generation if supported by hardware
+    # If parallel generation is used, the scanner might only handle coarse positioning
+    # or the CGH handles the fine focal point distribution.
+    # For single-point scanning as described in primary sources:
+    
+    for voxel in scan_path:
+        # 2. Position the laser focus in the drawing space
+        # Galvanometer controls horizontal (x, y) deflection
+        # Varifocal lens controls axial (z) position
+        scanner.set_horizontal_angle(voxel['x'], voxel['y'])
+        scanner.set_axial_focus(voxel['z'])
+        
+        # 3. Set the color filter
+        # The filter is in the re-projection path, so it must be set before the light
+        # from this voxel reaches the viewing space.
+        lc_filter.set_color(voxel['r'], voxel['g'], voxel['b'])
+        
+        # 4. Generate the voxel
+        # Set pulse energy based on scene requirements (e.g., 271 uJ, 203 uJ, etc.)
+        # The sources indicate energy varies by scene, not necessarily per voxel,
+        # but the logic allows for per-voxel control if needed.
+        laser.set_pulse_energy(203e-6) # Example value in Joules
+        laser.fire()
+        
+        # The laser pulse excites the Xenon gas in the drawing space,
+        # creating a broadband emission point at (voxel['x'], voxel['y'], voxel['z']).
+        
+        # 5. Re-projection
+        # The emission travels to the bottom mirror, reflects, passes through the
+        # LC filter (which has already been set), and is projected by the top mirror
+        # into the viewing space as a real, colored image.
+        
+        # Wait for persistence of vision / laser repetition rate
+        # The laser fires at 1 kHz, so the next voxel is generated ~1 ms later.
+        pass
+```
+
+### Parameters and Typical Values
+
+*   **Mirror Focal Length ($f_m$):** Not explicitly given as a single number, but the separation between vertices is equal to $f_m$ [S1, S2].
+*   **Laser Wavelength:** 800 nm [S1].
+*   **Laser Pulse Duration:** 34 fs [S1].
+*   **Laser Repetition Frequency:** 1 kHz [S1].
+*   **Laser Average Power:** 7 W [S1].
+*   **Drawing Space Gas:** Xenon (Xe) [S1].
+*   **Drawing Space Dimensions:** Cylindrical glass cell, diameter 30 mm, height 30 mm [S1].
+*   **Xe Emission Threshold:** 19 mJ/cm² [S1, S2].
+*   **Incident Fluence (Air):** 52 mJ/cm² [S1, S2].
+*   **LCOS-SLM Resolution:** $1272 \times 1024$ pixels [S1].
+*   **LCOS-SLM Pixel Pitch:** 12.5 $\mu$m [S1].
+*   **LCOS-SLM Bit Depth:** 8 bit [S1].
+*   **LCOS-SLM Refresh Rate:** ~10 Hz [S1].
+*   **Galvanometer Deflection Angle:** 40° [S1].
+*   **Varifocal Lens Aperture:** 16 mm [S1].
+*   **Varifocal Lens Focal Range:** -500 to +333 mm [S1].
+*   **Camera Exposure Time (for capture):** 20 ms [S1, S2].
+*   **Pulse Energies Used:** 271 $\mu$J, 203 $\mu$J, 219 $\mu$J, 117 $\mu$J [S1].
+
+### Edge Cases and Pitfalls
+
+*   **Physical Barrier:** Filling the drawing space with a material (like Xe gas) normally creates a physical wall, reducing realism. DSS solves this by re-projecting the image into the air, so the user sees the image in free space, not inside the gas cell [S1, S2].
+*   **Energy Threshold:** Previous systems using air required high pulse energies, restricting graphics size to millimeters due to the need for short focal length lenses. DSS allows the use of lower energies (and potentially larger graphics) by using Xe gas, which lowers the threshold by 34% and increases brightness by 200x [S1, S2].
+*   **Color Limitation:** Without the LC filter, femtosecond-laser-excited voxels emit bluish-white monochromatic light. The LC filter is essential for colorization [S1, S2].
+*   **Synchronization:** The color switching of the LC filter must be temporally synchronized with the voxel generation positions. If the filter changes state while the laser is firing or before the light reaches the filter, the color will be incorrect [S1, S2].
+*   **Viewing Angle:** The viewable angle is 360° in the horizontal direction and a specific range in the vertical direction (details in Supplementary Note 1 of [S1]) [S1, S2].
+
+## Operating characteristics
+
+*   **Time Complexity:** The rendering time is dominated by the number of voxels $N$ and the laser repetition rate $f_{rep}$. The minimum time is $N / f_{rep}$ seconds. The scan path optimization reduces mechanical movement time but does not change the fundamental limit imposed by the laser repetition rate if scanning sequentially [S1, S2].
+*   **Memory Complexity:** $O(N)$ to store the voxel list and scan path [S1, S2].
+*   **Measured Performance:**
+    *   Demonstrated graphics sizes are centimeter-order [S1].
+    *   Number of voxels demonstrated: 472 (sphere), 1206 (flower), 2603 (bunny), 5734 (armadillo) [S1].
+    *   Brightness: Voxels are observable under ambient room lighting due to the high brightness of Xe emission [S1, S2].
+*   **Strengths:**
+    *   **Color:** Enables arbitrary voxel colors via LC filter [S1, S2].
+    *   **Interaction:** No physical barrier; graphics are robust and do not disappear upon contact with users or real objects [S2].
+    *   **Brightness:** Xe gas provides high brightness (~200x air) at low energy thresholds [S1, S2].
+    *   **AR:** Suitable for real-world augmented reality (e.g., 3D saber) [S1].
+*   **Limitations:**
+    *   **Resolution:** Limited by laser repetition rate and scanning speed. Parallel generation via CGH can increase voxel count per unit time but adds complexity [S1, S2].
+    *   **Size:** Graphics size is limited by the scanning range of the voxel, which is determined by the focal length of the lens and the varifocal lens range [S1].
+    *   **Complexity:** Requires precise synchronization between laser, scanner, and LC filter [S1, S2].
+
+## Background
+
+Drawing Space Separation (DSS) was introduced to address the limitations of previous femtosecond-laser-excited aerial voxel displays, which were monochromatic and required high pulse energies in air, restricting graphics size and realism [S1, S2]. The technique builds on the concept of aerial re-projection, a method reported in a US patent 50 years prior, which uses two parabolic mirrors to project a real image [S1, S2]. DSS combines this optical layout with spatial beam scanning and CGH-based beam design to enable colorization and lower energy requirements [S1, S2]. It was demonstrated for centimeter-order images, real-time AR, and point cloud visualization under ambient room lighting [S1].
+
+## Sources
+
+[S1] Colour volumetric display based on holographic-laser-excited graphics using drawing space separation., https://doi.org/10.1038/s41598-021-02107-3, fetched 2026-10-26
+[S2] Colour volumetric display based on holographic-laser-excited graphics using drawing space separation, https://www.youtube.com/watch?v=W-CbMq23NKk, fetched 2026-10-28

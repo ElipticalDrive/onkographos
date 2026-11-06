@@ -1,0 +1,172 @@
+# Regular-Adaptive Octree Construction
+
+Also called: Adaptive Octree Construction, Build Octree algorithm, Octree Construction with Complex Cell Criteria, Top-bottom Octree Construction
+
+## Overview
+Regular-Adaptive Octree Construction is an iterative top-down algorithm that builds a Sparse Voxel Octree (SVO) which remains uniformly subdivided up to a specified minimal level (`minLevel`) and adapts its resolution based on surface topology and geometry between `minLevel` and a maximal level (`maxLevel`) [S1, unofficial][S2]. It solves the problem of generating manifold surfaces from implicit or voxelized data by ensuring that no leaf cell intersecting the surface boundary $\partial V$ is "complex," thereby preventing non-manifold configurations [S2]. It differs from purely dynamic growth algorithms (like its parent [Dynamic Octree Growth Algorithm](2375-dynamic-octree-growth-algorithm.md)) by enforcing a fixed regular structure at shallow depths and using explicit topological/curvature criteria for subdivision rather than simple occupancy checks [S1, unofficial][S2].
+
+## How it works
+**Inputs:**
+*   Root cell $c$ of the octree.
+*   Minimal subdivision level `minLevel` (typically 2 or 3) [S1, unofficial][S2].
+*   Maximal subdivision level `maxLevel` [S1, unofficial][S2].
+*   Implicit surface function $F(x)$ or boundary $\partial V$ definition [S1, unofficial][S2].
+*   Curvature threshold parameter $\delta \in [0, 1]$ [S2].
+
+**Outputs:**
+*   An octree that is regular (uniformly subdivided) up to level `minLevel`.
+*   An adaptive octree between `minLevel` and `maxLevel` where no leaf cell intersecting $\partial V$ is complex [S1, unofficial][S2].
+
+**Data Structures:**
+*   `toProcess`: A queue or list of cells to be evaluated.
+*   Cell structure: Contains level, spatial bounds, and status (leaf/branch).
+
+**Definitions:**
+1.  **Complex Cell:** A cell $C$ is complex if at least one of its faces is complex [S2].
+2.  **Complex Face:** A face is complex if:
+    *   It intersects $\partial V$ and all its vertices are either strictly inside or strictly outside $V$ [S2].
+    *   At least one of its edges intersects $\partial V$ more than once [S2].
+3.  **Inhomogeneous:** The cell contains parts of the surface (intersection points exist) [S2].
+4.  **High Curvature:** Determined by Rule 2 below [S2].
+
+**Algorithm Steps:**
+1.  Initialize `toProcess` with the root cell $c$ [S1, unofficial][S2].
+2.  While `toProcess` is not empty:
+    a.  Retrieve `currentCell` from `toProcess` [S1, unofficial][S2].
+    b.  Let $n$ be the level of `currentCell` [S2].
+    c.  If $n < \text{minLevel}$ or $n > \text{maxLevel}$:
+        *   If $n < \text{minLevel}$: Subdivide unconditionally (regular phase) [S1, unofficial][S2]. *Note: The source pseudocode in [S2] implies the loop condition handles the bounds, but [S1, unofficial] explicitly states regular division until minLevel is reached. The logic in [S2] Algorithm 2 skips subdivision if $n < \text{minLevel}$, which contradicts the text "regularly divide... until minLevel". However, [S1, unofficial] Algorithm 1 checks `if GetLevel(minLevel >= GetLevel(currentCell) And currentCell) < maxLevel`. This condition is syntactically ambiguous in the source. Standard interpretation of "Regular-Adaptive" is that levels < minLevel are always subdivided. We follow the explicit text in [S1, unofficial] and [S2] that regular division happens until minLevel. The pseudocode in [S2] appears to assume the caller handles the initial regular expansion or that minLevel is the start of the adaptive phase. To be implementable, we must subdivide if $n < \text{minLevel}$.*
+        *   If $n > \text{maxLevel}$: Stop subdividing this branch. Mark as leaf if not already [S1, unofficial].
+    d.  If $\text{minLevel} \le n \le \text{maxLevel}$:
+        i.  Check if `currentCell` is **Complex**.
+            *   If **Yes**: Set `divide = true` [S2].
+            *   If **No**:
+                1.  Check if `currentCell` is **Inhomogeneous** [S2].
+                2.  If **Yes**, check if it has **High Curvature** using Rule 2.
+                    *   If **Yes**: Set `divide = true` [S2].
+                    *   If **No**: Mark `currentCell` as a **compact leaf** [S2].
+                3.  If **No** (not inhomogeneous): Mark `currentCell` as a **compact leaf** (or empty leaf) [S2].
+        e.  If `divide` is true:
+            i.  Subdivide `currentCell` into 8 children $\{q_1, ..., q_8\}$ [S1, unofficial][S2].
+            ii. Add each child $q_i$ to `toProcess` [S1, unofficial][S2].
+
+**Formulas:**
+*   **Rule 1 (Complexity):** Subdivide if $C$ is complex [S2].
+*   **Rule 2 (Curvature):** Let $I_i$ ($i=0...n$) be the intersection points of cell edges with $\partial V$. Let $n_i$ be the normals at $I_i$. Subdivide if:
+    $$ \min_{i \neq j} (n_i \cdot n_j) \le \delta $$
+    where $\delta \in [0, 1]$ is the curvature threshold [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def build_regular_adaptive_octree(root_cell, min_level, max_level, delta):
+    to_process = [root_cell]
+    
+    while to_process:
+        current_cell = to_process.pop(0)
+        n = current_cell.level
+        
+        # Regular subdivision phase
+        if n < min_level:
+            # Must subdivide to maintain regular structure
+            subdivide_and_enqueue(current_cell, to_process)
+            continue
+            
+        # Max depth reached
+        if n > max_level:
+            current_cell.mark_as_leaf()
+            continue
+            
+        # Adaptive subdivision phase
+        divide = False
+        
+        # Rule 1: Check for complex cells
+        if is_complex(current_cell):
+            divide = True
+        else:
+            # Rule 2: Check for high curvature if inhomogeneous
+            if is_inhomogeneous(current_cell):
+                if has_high_curvature(current_cell, delta):
+                    divide = True
+                else:
+                    current_cell.mark_as_compact_leaf()
+            else:
+                # Not inhomogeneous, safe to be a leaf
+                current_cell.mark_as_compact_leaf()
+                
+        if divide:
+            subdivide_and_enqueue(current_cell, to_process)
+
+def subdivide_and_enqueue(cell, queue):
+    children = cell.divide_into_8_children()
+    for child in children:
+        queue.append(child)
+
+def is_complex(cell):
+    # A cell is complex if at least one face is complex
+    for face in cell.faces:
+        if is_face_complex(face):
+            return True
+    return False
+
+def is_face_complex(face):
+    # Face is complex if:
+    # 1. Intersects boundary and all vertices are inside or all outside
+    intersects_boundary = face.intersects_boundary()
+    if intersects_boundary:
+        vertices_inside = [v for v in face.vertices if is_inside(v)]
+        vertices_outside = [v for v in face.vertices if is_outside(v)]
+        if len(vertices_inside) == 4 or len(vertices_outside) == 4:
+            return True
+    # 2. At least one edge intersects boundary more than once
+    for edge in face.edges:
+        if edge.count_intersections_with_boundary() > 1:
+            return True
+    return False
+
+def is_inhomogeneous(cell):
+    return cell.has_intersection_with_boundary()
+
+def has_high_curvature(cell, delta):
+    # Get intersection points I_i and normals n_i
+    intersections = cell.get_edge_intersections_with_boundary()
+    if len(intersections) < 2:
+        return False # Cannot compute min dot product with < 2 points
+        
+    normals = [get_normal_at_intersection(p) for p in intersections]
+    
+    min_dot = infinity
+    for i in range(len(normals)):
+        for j in range(i + 1, len(normals)):
+            dot = dot_product(normals[i], normals[j])
+            if dot < min_dot:
+                min_dot = dot
+                
+    return min_dot <= delta
+```
+
+**Edge Cases and Pitfalls:**
+*   **Collapsed Cells:** Cells not subdivided to `maxLevel` are marked as "collapsed." These can cause non-manifold configurations if adjacent to higher-resolution cells [S1, unofficial].
+*   **Precision:** The curvature check relies on accurate normal estimation at intersection points [S2].
+*   **Boundary Conditions:** The algorithm assumes the root cell bounds the volume of interest appropriately [S1, unofficial][S2].
+
+## Subtopics
+
+### Local refinement algorithm
+A recursive post-processing algorithm used to fix topological problems (non-manifold configurations) caused by collapsed cells adjacent to higher-resolution cells [S1, unofficial]. It identifies affected cells adjacent to collapsed cells and subdivides them until complex faces are eliminated [S1, unofficial]. It operates on a set of affected cells $A$ (initially containing collapsed cells $T$) and recursively expands $A$ by checking faces of cells in $A$ for complexity, adding adjacent cells to $A$ if complex faces are found [S1, unofficial]. The complexity is linear with respect to the number of affected cells [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The main construction is iterative. The local refinement step has linear complexity over the number of cells affected by induced subdivision [S1, unofficial].
+*   **Memory Complexity:** Depends on the depth of the octree and the surface complexity. The regular phase ensures a predictable base memory usage [S1, unofficial][S2].
+*   **Strengths:** Guarantees manifold surfaces by eliminating complex cells [S2]. The regular phase captures general features efficiently [S2].
+*   **Limitations:** Requires explicit topological checks (complexity, curvature) which are more expensive than simple occupancy checks. The local refinement step adds overhead if many collapsed cells exist [S1, unofficial].
+*   **When to use:** When manifold surface extraction is required from implicit or voxel data, and topological correctness is critical [S1, unofficial][S2].
+*   **When not to use:** When performance is prioritized over strict manifold guarantees, or when the surface is simple enough that standard occupancy-based SVO construction suffices.
+
+## Background
+The method originates from research on adaptive surface extraction from anisotropic volumetric data [S2]. It was developed to address the limitations of standard octree constructions that could produce non-manifold surfaces due to complex cell configurations [S1, unofficial][S2]. The approach combines a regular subdivision phase for efficiency with adaptive rules based on topological (complexity) and geometric (curvature) criteria [S1, unofficial][S2]. The local refinement algorithm was introduced to handle edge cases where collapsed cells interact with higher-resolution neighbors [S1, unofficial].
+
+## Sources
+[S1] SCITEPRESS - SCIENCE AND TECHNOLOGY PUBLICATIONS, https://www.scitepress.org/PublishedPapers/2012/38588/, fetched 2026-10-28 (unofficial)
+[S2] Adaptive surface extraction from anisotropic volumetric data: contouring on generalized octrees, https://doi.org/10.1007/s12243-013-0369-4, fetched 2026-10-29

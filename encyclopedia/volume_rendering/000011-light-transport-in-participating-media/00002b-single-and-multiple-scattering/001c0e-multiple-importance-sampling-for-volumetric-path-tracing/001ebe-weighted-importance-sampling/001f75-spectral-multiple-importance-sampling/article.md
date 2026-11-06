@@ -27,12 +27,11 @@ Spectral Multiple Importance Sampling (MIS) is a technique to sample wavelengths
 4.  Calculate the MIS weight for the sampled wavelength $\lambda_k$ and all other wavelengths $\lambda_i$ using the balance heuristic [S2].
 
 **Formulas:**
-The probability of sampling wavelength $\lambda_i$ is $p_{\lambda_i}$, derived from the normalized throughput-albedo product [S1, unofficial].
-The discrete probability of sampling using a specific wavelength $\lambda_1$ in the estimator's denominator is $q$, which is uniform at $1/n$ where $n$ is the number of spectral samples [S2].
+The probability of sampling wavelength $\lambda_i$ is $p_{\lambda_i}$, derived from the normalized throughput-albedo product [S1, unofficial]. The discrete probability of sampling using a specific wavelength $\lambda_1$ in the estimator's denominator is $q$, which is uniform at $1/n$ where $n$ is the number of spectral samples [S2].
 
 The MIS weight for wavelength $\lambda_i$ given that $\lambda_k$ was sampled is:
-$$ w_{\lambda_i}(x) = \frac{p_{\lambda_i}(x)}{\sum_{j=1}^{n} p_{\lambda_j}(x)} $$
-Since $p_{\lambda_i}$ is already normalized to sum to 1, the denominator equals 1, making the MIS weight numerically equal to the sampling probability $p_{\lambda_i}$ [S2].
+$$ w_{\lambda_i}(x) = \frac{p_{\lambda_i}(x)}{\sum_{j=1}^n p_{\lambda_j}(x)} $$
+Because $p_{\lambda_i}$ are normalized sampling probabilities, the denominator sums to 1, making the MIS weight numerically equal to the sampling probability $p_{\lambda_i}$ [S2].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -93,8 +92,8 @@ def spectral_mis_sample(throughput, albedo, rng):
 *   **Memory Complexity:** $O(n)$ to store the PMF and weights [G].
 *   **Strengths:** Reduces variance in spectrally varying media by sampling wavelengths proportional to their throughput-albedo product while maintaining unbiased evaluation across all wavelengths via MIS weighting [S1, unofficial][S2].
 *   **Limitations:** Requires computing the throughput-albedo product for all spectral channels before sampling [S1, unofficial].
-*   **When to use:** Not given in the sources.
-*   **When not to use:** Not given in the sources.
+*   **When to use:** Not given in the sources [S2].
+*   **When not to use:** Not given in the sources [S2].
 
 ## Background
 The technique is described in the context of volume scattering integrators in the Physically Based Rendering (pbr-book) [S2]. It addresses the limitations of delta tracking, which samples based on a majorant derived from a single wavelength, causing poor sampling efficiency for other wavelengths [S2]. The method leverages the balance heuristic from Multiple Importance Sampling to optimally combine the spectral samples [S2]. An implementation is also found in the unofficial volumetric path tracer `volpt` [S1, unofficial].

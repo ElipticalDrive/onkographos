@@ -1,0 +1,299 @@
+In the scaling issue conversation we started discussion of improving the rendering shader code. Some of this has already been done for sphere objects. For a general overview of the lighting modes Datoviz may support. (As I current unders...
+
+Lights and rendering improvements. · Issue #85 · datoviz/datoviz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Lights and rendering improvements. #85
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Lights and rendering improvements.#85
+Copy link
+Description
+ron-adam
+opened on May 12, 2025
+Issue body actions
+In the scaling issue conversation we started discussion of improving the rendering shader code.
+Some of this has already been done for sphere objects.
+For a general overview of the lighting modes Datoviz may support.
+(As I current understand them... please correct me if this is not correct or is missing items.)
+```
+    Lighting Rendering Modes:
+
+        Basic             A Single light with vec4 material properties, fast, and small.  (As currently used by spheres.)
+                          Red, green, and blue light components are treated equally.  (pending... use textures.)
+
+        Advanced        Has up to 4 lights, mat4 properties for more realistic materials.
+                          May be somewhat slower than basic and use more memory.
+                          Material can react differently to red, green, and blue light components.
+                          Can use textures.
+
+        Volumetric      Render 3D volumes by sampling volume data. (With multiple rendering options.)
+
+        * Realistic       Physical Based rendering with less concern for performance.
+
+        * RayTraceFast   Attempt to be fast enough to render in real time, but may be limited to low resolutions and quality.
+
+        * RayTraceFull   Attempt to produce high quality production level visuals/images.  May be very slow.
+
+    (*) Not implemented yet.
+```
+The mesh objects has it's own rendering shader routine code like the Advanced mode above, but it has a number of things that can be improved.
+```
+It currently does not handle multiple lights well, although it was designed for it.
+```
+```
+The material parameters are currently per light, but should be per object or per object type.
+```
+The advanced material parameters should define how each R, G, B color light component reacts to the surface. (It's not the light that is smooth or rough, and not the light that reflects green more than red.) Each light will have it's own color, and the surface property will determine how to use the lights color.
+I'm also exploring if the user API should use normalized parameter values. This may be easier to work with, but it diverges from what other programs do.
+CONTEXT:
+I'm currently working on a pull request to test if normalized parameters would be good. I wanted to use the mesh objects, but the above issues needed resolving first. Having a good overview to start the discussion seemed like it would be good in order to improve the overall design.
+I'm nearly complete with a preliminary pull request version for discussion that includes a preliminary Advanced mode as described above.
+These modes will be in their own lighting_mode.glsl files to be included.
+More specifics and examples to follow...
+🚀React with 🚀1Reacted by Cyrille Rossant
+Activity
+rossant commented on May 12, 2025
+rossant
+on May 12, 2025
+Contributor
+More actions
+Looks good! A few thoughts:
+Could you provide a bit more detail about "basic" and "advanced"? What are the names of the corresponding lighting models (e.g. Blinn-Phong, etc.)?
+For the mesh visual, one approach could be to define three separate uniform bindings (e.g. bindings 2, 3, and 4, with the texture at 5), each using the dvz_params() API:
+lighting
+material
+contour or wireframes
+Ideally, the lighting binding should be panel-specific rather than visual-specific. That said, I think this is better addressed after the internal changes planned for v0.4. In the meantime, having a separate visual binding for lighting would already be great.
+ron-adam commented on May 12, 2025
+ron-adam
+on May 12, 2025
+ContributorAuthor
+More actions
+I left out in the overview that I'm also testing if the ambient light property can work as emission setting on the upper half of the range. This only requires blending from one to the other as the values increase.
+Here is an mesh object using the Advanced mode and 4 colored lights positioned in a line above it.
+Currently I set the values manually in the shader for testing.
+In the routine, I use a mat4x3 to hold the parameters. It looks like this...
+```
+        //                              R    G    B
+        mat4x3 material = mat4x3( vec3(0.05, 0.05, 0.05),     // ambient-emmission amount
+                                  vec3(0.7, 0.7, 0.7),        // diffuse level
+                                  vec3(1.0, 1.0, 1.0),        // specular amount
+                                  vec3(1.0, 1.0, 1.0) );      // shininess
+```
+The rgb values are all set to be equal here, but could vary according to data from real objects.
+The arangement allows combining the ambient rgb properties to the light rgb colors all at once.
+```
+     ambient_color = color * material[0];      // object color * ambient vec3() rgb component.
+```
+The current properties appear to be arranged as multiple vec4's for use with each light.
+Also it seems the z direction is flipped (or not flipped). -z is behind the camera, +z is forward in the distance. This may be how the object data is arranged, and not a problem with rendering. If so the object loader should detect and correct it.
+rossant commented on May 12, 2025
+rossant
+on May 12, 2025
+Contributor
+More actions
+Beautiful!
+Just a minor note: I’d recommend using a mat4 instead of mat4x3, since components with 3 elements may be unsafe in terms of alignment. This is why it’s typically recommended to use only scalars, vec2, vec4, mat2, mat4, etc., in GLSL uniforms, avoiding all types that include a 3.
+ron-adam commented on May 12, 2025
+ron-adam
+on May 12, 2025
+ContributorAuthor
+More actions
+Both basic and the advanced use Blinn-Phong, as it's both faster and better looking.
+As for wire frame, and other additions, those are more specific to each visual type. The parts I'm working on can be reduced to a single color function call. The color can be modified before that call, or after that depending on if you want the particular effect to be include in the lighting calculation or not. This also means the color function call can be used on 2D visuals as well. This can result in 2D components being lighted in the same way the 3D components are within a panel. (but for now, I'm just getting the lighting functions to work as they should.)
+I'm currently just reading the existing binding and reassigning them in the shader. It's not optimal and I think you will need to change them. Each mode may require slightly different bindings. And those may be assigned in different places, Ie... panel or visual. So is it better to split these layouts/bindings into smaller components, or have one large structure and just not use parts of it. That seems like it may not be optimal memory wise.
+Here's what I have for basic light parameters. This is what the shader needs to know about the light. And is likely to be set by the panel.
+```
+layout(std140, binding = USER_BINDING) uniform BasicLightParams
+{
+    vec4 color;            // default = white
+    vec4 pos;              // default = camera position
+//    vec4 atts;             // power, fov, area, attenuation.
+}
+basic_light;
+```
+The atts (light attributes) entry is needed to support different light types.
+The Advanced mode is similar, but uses mat4s. 1 vec4 each for each light.
+The shaders also need a layouts for the object type or each object. Uniforms for object types, and varies (in) for each object, depending on how fine grained you want the control to be.
+A nice relationship I found is the 'w' component of the position can be sued to determine if it's a position or direction. For directions it will always be 0. (or can be set to 0)
+And for weather or not a light is present, the alpha 'a' component of the light color can be used. If alpha on the light is 0, then skip it.
+I had the parameter set as a mat4x4, but had changed it to help find a bug I was looking for.
+rossant commented on May 12, 2025
+rossant
+on May 12, 2025
+Contributor
+More actions
+For now, I think it will be simpler (though not ideal or optimal) to assume a uniform material and lighting per visual instance. So if we use one visual with a DvzShape that combines multiple objects, they will all share the same material, lighting, and transform. If different materials are needed, separate Visual objects will have to be used.
+One of the improvements I want to make in v0.4 is to add support in the Datoviz Internal Protocol for multiple bindings per visual. This would allow a single visual to swap different materials across draw calls in the command buffer. Once the protocol supports this, we’ll be able to upgrade the visual API accordingly.
+ron-adam commented on May 12, 2025
+ron-adam
+on May 12, 2025
+ContributorAuthor
+More actions
+Ok... so uniforms.
+The multiple bindings improvement will be nice. At some point I expect you will need the ability to load complex objects with multiple material properties and textures in it.
+rossant commented on May 12, 2025
+rossant
+on May 12, 2025
+Contributor
+More actions
+Yes, this will be possible by creating multiple predefined descriptor sets and swapping them during command buffer recording.
+It will also allow reusing the same graphics pipeline across multiple draw calls, changing the viewport, descriptor sets (including bound textures, uniforms, vertex and index buffers), and possibly some fixed-function state via Vulkan dynamic states.
+ron-adam commented on May 14, 2025
+ron-adam
+on May 14, 2025
+ContributorAuthor
+More actions
+I think I got most of it working...
+Currently the visuals setter functions need to be used. The light dir/pos and color should be set in the panel, while the material parameters should remain in the visual. Having a lights object and doing a panel.add(lights) may work.
+```
+    visual = app.mesh_shape(sc, lighting=True)
+    
+    visual.set_light_color((  0,   0, 255), 0)    # Blue
+    visual.set_light_color((  0, 255,   0), 1)    # Green
+    visual.set_light_color((200, 200,   0), 2)    # Yellow
+    visual.set_light_color((255,   0,   0), 3)    # Red
+    
+    visual.set_light_dir(( -9, 1, 5), 0)
+    visual.set_light_dir(( -3, 1, 5), 1)
+    visual.set_light_dir((  3, 1, 5), 2)
+    visual.set_light_dir((  9, 1, 5), 3)
+    
+    # Material affect on color R    G    B  components of light.
+    visual.set_light_params(( .2,  .2,  .2), 0)    # Ambient
+    visual.set_light_params(( .8,  .8,  .8), 1)    # Diffuse
+    visual.set_light_params(( .8,  .8,  .8), 2)    # Specular
+    visual.set_light_params(( .9,  .9,  .9), 3)    # Exponent
+        
+    panel.add(visual)
+```
+Note that the colors and directions are vec3. The functions take vec4, but the extra value seems to be ignored.
+Also the material parematers (light_params) should be set with only 1 call. It's not affected by how many lights are present.
+A library of pre defined materials settings may be useful.
+So for now I'm setting the 'a' and 'w's manually in `graphics_mesh.frag' to enable it to work for testing.
+```
+    // Lighting.
+    if (MESH_LIGHTING > 0)
+    {
+        vec4 cam_pos = inverse(mvp.view) * vec4(0.0, 0.0, 0.0, 1.0);
+
+        mat4 light_pos = params.light_dir;
+        mat4 light_color = params.light_color;
+        mat4 material = params.light_params;
+
+        // Current visual setters don't set w and a.
+        for (int i=0; i<4; i++)
+        {
+            light_pos[i].w = 1.0;      // w greater than 0.0 is a position.
+            light_color[i].a = 1.0;    // Alpha greater than 1.0 is on.
+        }
+
+        out_color = advanced_lighting(in_pos, color, material, normal, cam_pos, light_pos, light_color);
+    }
+```
+The advanced_lighting function is included in a lighting.glsl file. That file also has the basic lighting function.
+I need to go over it again tomorrow.. then I'll do a pull request so you can look at it in more detail.
+rossant commented on May 14, 2025
+rossant
+on May 14, 2025
+Contributor
+More actions
+Awesome! For the vec3/vec4, something we can do is to let the C functions accept a vec3, like dvz_sphere_light_params(..., vec3 params), but in the implementation of these functions, pass a vec4 to the GPU instead, using a fixed fourth component.
+ron-adam commented on May 14, 2025
+ron-adam
+on May 14, 2025
+ContributorAuthor
+More actions
+In the above... that should have been alpha greater than 0.0 means the light is on or visible.
+I was thinking the apha on the lights could be used for a gamma correction value. But this may be better controlled separately. We will need good examples to tune how these work. And with those, it will probably tell us what adjustments are needed to the API.
+I think having predefined lights sets and materials can make datoviz very easy to use. A light set may be "daylight", "nighttime", "fullmoon", "stage_lighting", "photo_lighting", "sunset", "cloudy". "office", ... And later add the possibility to mix them before passing them to the GPU to get values between them. (4.0 for predefined light and material sets.)
+This list looks like a good starting point for testing materials.
+http://devernay.free.fr/cours/opengl/materials.html
+I haven't done any testing with textures yet. (But will soon.)
+In the material parameters... the apha component could be used for a refraction index... But keep it reserved for now until it's needed in the ray trace shaders. So it could do water, plastic, glass, diamond materials. Or possibly lenses with different refraction. (5.0 and 6.0 will probably be the raytrace modes. Lots to do until then.)
+rossant commented on May 14, 2025
+rossant
+on May 14, 2025
+Contributor
+More actions
+Great idea for the presets! Would you see them in the C API, or in the Python wrapper?
+Interesting link! Have you found screenshots somewhere? Otherwise, we could generate some and put them in the documentation once they're implemented.
+ron-adam commented on May 14, 2025
+ron-adam
+on May 14, 2025
+ContributorAuthor
+More actions
+The presets could possibly be similar to how color palettes are done. (I haven't looked at that yet.) If we can make these API work in similar ways it lowers the learning curve for users and programmers.
+For material type examples, I think we should do our own. Once we are able it should be fairly easy.
+Down the road there are other resources we might want to look into. Nvidia has a material MDL SDK... I haven't look into that yet, (Will soon), It looks like it may be useful when we get to the point of Physical Based Rendering.
+https://developer.nvidia.com/rendering-technologies/mdl-sdk
+The parts we are currently working on aim to give some realism while also keeping the API fairly easy to use. And allow us to develop the other parts of Datoviz that will be using it.
+rossant commented on May 14, 2025
+rossant
+on May 14, 2025
+Contributor
+More actions
+Sounds great! Integrating the predefined materials into the C library like we're doing with the colormaps makes sense.
+ron-adam commented on May 15, 2025
+ron-adam
+on May 15, 2025
+ContributorAuthor
+More actions
+Here's the pull request... It will still need a fair amount of work, but can tested as is.
+#86
+rossant commented on May 27, 2025
+rossant
+on May 27, 2025
+Contributor
+More actions
+Can this issue be closed now?
+ron-adam commented on May 28, 2025
+ron-adam
+on May 28, 2025 via email
+ContributorAuthor
+More actions
+Yes
+…
+On Tue, May 27, 2025, 5:35 PM Cyrille Rossant ***@***.***> wrote:
+*rossant* left a comment (datoviz/datoviz#85)
+<#85 (comment)>
+Can this issue be closed now?
+—
+Reply to this email directly, view it on GitHub
+<#85 (comment)>,
+or unsubscribe
+<https://github.com/notifications/unsubscribe-auth/AW7MURXOLIP2IMDVOGDGDQD3ATSB3AVCNFSM6AAAAAB46MFCS2VHI2DSMVQWIX3LMV43OSLTON2WKQ3PNVWWK3TUHMZDSMJUGM2DAMJRGQ>
+.
+You are receiving this because you authored the thread.Message ID:
+***@***.***>
+rossant
+closed this as completedon May 28, 2025
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

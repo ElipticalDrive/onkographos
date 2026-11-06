@@ -4,8 +4,8 @@ Also called: Tetrahedral Adaptive Mesh Refinement Data Structure
 The TET-AMR data structure is a forest of tetrahedral refinement trees designed to store volumetric data for elements across all refinement levels, including child counts, direct face neighbors, and associated scalars [S1, unofficial]. It solves the problem of efficiently identifying which refinement trees to sample during volume rendering by storing a coarse mesh alongside the refined data, enabling the construction of a bounding volume hierarchy (BVH) over the coarse elements [S1, unofficial]. It sets itself apart from general AMR structures by explicitly storing direct face neighbors and child counts within the element data to facilitate fast traversal and neighbor lookups without runtime index resolution [S1, unofficial].
 ## How it works
 **Inputs and Outputs**
-*   **Input:** A set of tetrahedral elements generated via red-refinement subdivision rules, along with their geometric vertices and scalar field values.
-*   **Output:** A `TET_AMR` structure containing the forest of refinement trees, coarse mesh indices, and scalar data.
+*   **Input:** A set of tetrahedral elements organized into a forest of refinement trees, along with their geometric vertices and scalar field values [S1, unofficial].
+*   **Output:** A `TET_AMR` structure containing the forest of refinement trees, coarse mesh indices, and scalar data [S1, unofficial].
 
 **Data Structures**
 The core data structure is defined as follows [S1, unofficial]:
@@ -34,21 +34,18 @@ $$ LB = \frac{L + B}{2}, \quad LR = \frac{L + R}{2}, \quad RB = \frac{R + B}{2} 
 Each tetrahedron is subdivided into eight child tetrahedra using Bey's red-refinement rule [S1, unofficial].
 
 **Algorithm Steps**
-1.  **Store Coarse Mesh:** Store the initial coarse tetrahedral mesh using `coarse_index` and `coarse_vertex` [S1, unofficial].
-2.  **Build Refinement Trees:** For each coarse element, create a refinement tree if it is refined. Store the root ID of each tree in `tree_root_ids` [S1, unofficial].
-3.  **Store Element Data:** For every element in the forest, store:
-    *   `child_counts`: The number of immediate children.
-    *   `neighbors`: Direct face neighbors to allow traversal across element boundaries.
-    *   `cell_data` and `vertex_data`: Associated scalar values [S1, unofficial].
-4.  **Compute Macrocell Values:** Calculate the minimum and maximum densities for each coarse element (macrocell) and store them in `macrocell_values` [S1, unofficial].
-5.  **Build BVH:** Construct a bounding volume hierarchy over the coarse mesh elements using `coarse_index` and `coarse_vertex` to efficiently identify which refinement trees to sample [S1, unofficial].
+1.  Store the initial coarse tetrahedral mesh using `coarse_index` and `coarse_vertex` [S1, unofficial].
+2.  Store element data for all refinement levels, including `child_counts`, `neighbors`, and associated scalars (`cell_data`, `vertex_data`) [S1, unofficial].
+3.  Store root IDs for each refinement tree in `tree_root_ids` [S1, unofficial].
+4.  Compute and store minimum and maximum densities for each coarse element in `macrocell_values` [S1, unofficial].
+5.  Build a bounding volume hierarchy over the coarse mesh to efficiently identify refinement trees for sampling [S1, unofficial].
 
 **Parameters**
-*   `macrocell_values`: Stores min/max densities for tighter majorants during rendering [S1, unofficial].
+*   `macrocell_values`: Stores min/max densities for coarse macrocells to obtain tighter majorants during rendering [S1, unofficial].
 
 **Edge Cases and Pitfalls**
-*   **Boundary Conditions:** Neighbor lookups must handle boundary elements where face neighbors do not exist [S1, unofficial].
-*   **Precision:** Floating-point precision in vertex coordinates and scalar values may affect ray-tetrahedron intersection accuracy [G].
+*   Neighbor lookups rely on precomputed `neighbors` arrays; explicit boundary handling rules are not given in the sources [S1, unofficial].
+*   Floating-point precision in vertex coordinates and scalar values may affect ray-tetrahedron intersection accuracy [G].
 
 ## Subtopics
 
@@ -57,7 +54,7 @@ Transforms leaf-level tetrahedra into ordered refinement trees via bottom-up par
 
 ## Operating characteristics
 *   **Time Complexity:** Point location queries within refinement trees are supported, but exact complexity is not given in the sources [S1, unofficial]. BVH construction over the coarse mesh is required [S1, unofficial].
-*   **Memory Complexity:** Stores data for all elements including child counts, neighbors, and scalars. The exact memory footprint depends on `num_elements` and the size of neighbor lists [S1, unofficial].
+*   **Memory Complexity:** Stores data for all elements including child counts, neighbors, and scalars [S1, unofficial].
 *   **Performance:** Enables efficient identification of refinement trees to sample via BVH over the coarse mesh [S1, unofficial].
 *   **Strengths:** Direct face neighbors and child counts allow fast traversal and neighbor lookups [S1, unofficial].
 *   **Limitations:** Requires storing significant metadata (neighbors, child counts) per element [S1, unofficial].

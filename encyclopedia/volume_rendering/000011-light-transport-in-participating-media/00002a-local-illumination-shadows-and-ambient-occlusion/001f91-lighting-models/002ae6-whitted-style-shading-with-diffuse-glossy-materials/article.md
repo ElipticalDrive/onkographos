@@ -1,14 +1,14 @@
 # Whitted-Style Shading with Diffuse/Glossy Materials
 
-Also called: Diffuse Reflection, Lambertian reflection, Whitted-Style Shading
+Also called: Diffuse Reflection, Lambertian Shading with Shadow Rays, Lambertian reflection, Volume Shading with Shadow Rays, Whitted-Style Shading
 
 ## Overview
 Whitted-style shading with diffuse/glossy materials computes the color of a ray intersection by combining ambient lighting with direct illumination from light sources, using a simplified reflectance model for surfaces [S2, unofficial]. It differs from full path tracing by limiting recursion to a single bounce (or fixed depth) and using analytical approximations for specular/glossy reflections rather than stochastic sampling, and it differs from pure local illumination models by explicitly casting shadow rays to determine visibility [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A ray $\vec{r}$ (origin $\vec{o}$, direction $\vec{d}$), a scene containing a list of objects (`objList`) and light sources (`LightSourceList`), and material properties for each object.
-- Output: A color value (RGB) representing the radiance at the intersection point.
+- Input: A ray $\vec{r}$ (origin $\vec{o}$, direction $\vec{d}$), a scene containing a list of objects (`objList`) and light sources (`LightSourceList`), and material properties for each object [S2, unofficial].
+- Output: A color value (RGB) representing the radiance at the intersection point [S2, unofficial].
 
 **Data Structures:**
 - `Ray`: Contains origin $\vec{o}$, direction $\vec{d}$, minimum distance `minT`, maximum distance `maxT`, and recursion `depth` [S2, unofficial].
@@ -23,8 +23,8 @@ Whitted-style shading with diffuse/glossy materials computes the color of a ray 
 4. **Direct Illumination:** For each light source in `LightSourceList`:
     a. Calculate the vector from the intersection point to the light source.
     b. Compute the reflectance using the material's `getReflectance` method, passing the surface normal, view direction, and light direction [S2, unofficial].
-    c. Cast a shadow ray from the intersection point to the light source. Set the shadow ray's `maxT` to the distance to the light source.
-    d. If the shadow ray does not intersect any object (i.e., the light is visible), add the reflected radiance to the total color.
+    c. Cast a shadow ray from the intersection point to the light source. Set the shadow ray's `maxT` to the distance to the light source [S2, unofficial].
+    d. If the shadow ray does not intersect any object (i.e., the light is visible), add the reflected radiance to the total color [S2, unofficial].
 5. **Glossy Reflection (Optional):** If the material has a glossy component, compute the reflection direction $\vec{R}$ based on the surface normal and view direction. Distribute outgoing rays around $\vec{R}$ using a shininess exponent $\alpha$ to model rough surface reflections [S1, unofficial].
 
 **Formulas:**
@@ -32,13 +32,17 @@ Whitted-style shading with diffuse/glossy materials computes the color of a ray 
   $$L_r(\vec{\omega}_r) = \frac{\rho}{\pi} \int_{\Omega_i} L_i(\vec{\omega}_i) \cos \theta_i d\omega_i$$
   where $\rho$ is the material reflectance fraction, $L_i(\vec{\omega}_i)$ is the incident radiance, $\theta_i$ is the angle between the incident direction and the surface normal, and the integral is over the hemisphere $\Omega_i$ [S1, unofficial]. The BRDF $f_r$ is constant and related to $\rho$ by $\rho = \pi f_r$ [S1, unofficial].
 - **Glossy Reflection:** The contribution is approximated by:
-  $$L_r(\vec{\omega}_r) = L_r d\omega_r (\max(\vec{R} \cdot \vec{\omega}_r), 0)^\alpha$$
+  $$L_r(\vec{\omega}_r) = L_r d\omega_r(\max(\vec{R} \cdot \vec{\omega}_r), 0)^\alpha$$
   where $\vec{R}$ is the perfect mirror reflection vector, $\vec{\omega}_r$ is the view direction, and $\alpha$ is the shininess exponent [S1, unofficial].
 
 **Parameters:**
 - `ambient_constant`: Default $(0.25, 0.25, 0.25)$ [S2, unofficial].
 - $\alpha$ (shininess): Controls the narrowness of glossy highlights; higher values yield sharper highlights [S1, unofficial].
 - `Epsilon`: $10^{-4}$, used to offset shadow ray origins to prevent self-intersection [S2, unofficial].
+- `light_position`: Fixed light source position, typical value $(-3.0, 2.0, 5.0)$ [S3, unofficial].
+- `light_emission`: Light intensity multiplier, typical value $20.0$ [S3, unofficial].
+- `albedo`: Surface reflectance color, typical value $(1.0, 1.0, 1.0)$ [S3, unofficial].
+- Ambient term variant: Some implementations use $0.003 \times \text{albedo}$ for base illumination instead of the $(0.25, 0.25, 0.25)$ constant [S3, unofficial].
 
 **Edge Cases and Pitfalls:**
 - **Self-Shadowing:** Shadow rays must be offset from the surface point by a small epsilon to avoid intersecting the surface they originated from [S2, unofficial].
@@ -49,6 +53,40 @@ Whitted-style shading with diffuse/glossy materials computes the color of a ray 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+
+Epsilon = 1e-4
+
+class Vector3D:
+    def __init__(self, x, y, z):
+        self.x, self.y, self.z = x, y, z
+    def __add__(self, other): return Vector3D(self.x + other.x, self.y + other.y, self.z + other.z)
+    def __sub__(self, other): return Vector3D(self.x - other.x, self.y - other.y, self.z - other.z)
+    def __mul__(self, scalar): return Vector3D(self.x * scalar, self.y * scalar, self.z * scalar)
+    def dot(self, other): return self.x * other.x + self.y * other.y + self.z * other.z
+    def length(self): return math.sqrt(self.dot(self))
+    def normalize(self):
+        l = self.length()
+        return Vector3D(self.x / l, self.y / l, self.z / l) if l > 0 else Vector3D(0, 0, 0)
+
+class Ray:
+    def __init__(self, origin, direction, depth=0, min_t=Epsilon, max_t=float('inf')):
+        self.origin = origin
+        self.direction = direction
+        self.depth = depth
+        self.min_t = min_t
+        self.max_t = max_t
+
+def get_closest_intersection(ray, objects_list):
+    closest = None
+    min_t = ray.max_t
+    for obj in objects_list:
+        t = obj.intersect(ray)
+        if ray.min_t <= t < min_t:
+            min_t = t
+            closest = obj
+    return closest
+
 def whitted_shading(ray, scene):
     # 1. Find closest intersection
     hit = get_closest_intersection(ray, scene.objectsList)
@@ -64,7 +102,7 @@ def whitted_shading(ray, scene):
     # 4. Initialize color with ambient contribution
     color = Vector3D(0.0, 0.0, 0.0)
     ambient_constant = Vector3D(0.25, 0.25, 0.25)
-    color += ambient_constant * hit.material.diffuse_coefficient
+    color = color + ambient_constant * hit.material.diffuse_coefficient
     
     # 5. Direct illumination from lights
     for light in scene.lightSourceList:
@@ -74,9 +112,7 @@ def whitted_shading(ray, scene):
         light_dir = light_dir.normalize()
         
         # Get reflectance
-        reflectance = hit.material.get_reflectance(
-            hit.normal, ray.direction, light_dir
-        )
+        reflectance = hit.material.get_reflectance(hit.normal, ray.direction, light_dir)
         
         # Cast shadow ray
         shadow_origin = hit.point + hit.normal * Epsilon
@@ -85,7 +121,7 @@ def whitted_shading(ray, scene):
         
         # If light is visible, add contribution
         if shadow_hit is None:
-            color += reflectance * light.intensity / (distance ** 2)
+            color = color + reflectance * light.intensity / (distance ** 2)
             
     return color
 ```
@@ -112,3 +148,6 @@ The concept of Lambertian diffuse reflection, where apparent brightness is indep
 ## Sources
 [S1] Real-Time Global Illumination Using OpenGL And Voxel Cone Tracing, https://doi.org/10.48550/arxiv.2104.00618, fetched 2026-10-26 (unofficial)
 [S2] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
+[S3] Mike-Leo-Smith/SolidVoxelization, https://github.com/Mike-Leo-Smith/SolidVoxelization, fetched 2026-10-27 (unofficial)
+[S4] trimesh33/sdf, https://github.com/trimesh33/sdf, fetched 2026-10-27 (unofficial)
+[S5] DanielWLiu07/voxel-engine, https://github.com/DanielWLiu07/voxel-engine, fetched 2026-10-26 (unofficial)

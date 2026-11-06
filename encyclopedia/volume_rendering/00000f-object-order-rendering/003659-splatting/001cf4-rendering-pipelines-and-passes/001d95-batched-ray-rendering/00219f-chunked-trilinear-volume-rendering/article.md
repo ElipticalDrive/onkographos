@@ -1,0 +1,127 @@
+# Chunked Trilinear Volume Rendering
+## Overview
+Chunked Trilinear Volume Rendering is a batched ray rendering technique that processes rays in fixed-size memory chunks to manage GPU memory constraints during neural field evaluation [S1, unofficial]. It differs from standard batched rendering by explicitly iterating over subsets of rays to prevent out-of-memory errors, and from Chunked Ray Rendering by relying on a neural field forward pass rather than explicit geometric traversal [S1, unofficial]. It solves the problem of rendering high-resolution neural radiance fields or large-volume trilinear grids where the full ray batch exceeds available VRAM.
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- `rays`: Tensor of shape `(N_rays_all, ...)` containing ray origins and directions.
+- `chunk`: Integer specifying the number of rays per processing batch.
+- `tensorf`: The neural field or trilinear volume evaluation function.
+- `device`: The compute device (e.g., CUDA).
+- `is_train`: Boolean flag for gradient tracking.
+- `white_bg`: Boolean flag for background color assumption.
+- `ndc_ray`: Boolean flag for NDC coordinate transformation.
+- `N_samples`: Integer for samples per ray.
+
+**Outputs:**
+- `rgbs`: Concatenated RGB color maps.
+- `depth_maps`: Concatenated depth maps.
+- `None`: Placeholder for `alphas`, `weights`, and `uncertainties` to maintain interface compatibility.
+
+### Data Structures
+- `rgbs`: List of tensors, each of shape `(chunk, 3)` or `(remaining_rays, 3)`.
+- `depth_maps`: List of tensors, each of shape `(chunk, 1)` or `(remaining_rays, 1)`.
+- `rays_chunk`: Tensor of shape `(chunk, ...)` or `(remaining_rays, ...)`.
+
+### Steps
+1. Initialize empty lists `rgbs` and `depth_maps`.
+2. Calculate total rays: $N_{rays\_all} = \text{rays.shape}[0]$.
+3. Determine the number of chunks:
+   $$ N_{chunks} = \lfloor N_{rays\_all} / \text{chunk} \rfloor + \mathbb{I}(N_{rays\_all} \pmod{\text{chunk}} > 0) $$
+   where $\mathbb{I}$ is the indicator function.
+4. Iterate `chunk_idx` from $0$ to $N_{chunks} - 1$:
+   a. Extract the chunk of rays:
+      $$ \text{start} = \text{chunk\_idx} \times \text{chunk} $$
+      $$ \text{end} = (\text{chunk\_idx} + 1) \times \text{chunk} $$
+      $$ \text{rays\_chunk} = \text{rays}[\text{start}:\text{end}].\text{to}(\text{device}) $$
+   b. Perform the forward pass through the neural field:
+      $$ \text{rgb\_map}, \text{depth\_map} = \text{tensorf}(\text{rays\_chunk}, \text{is\_train}=\text{is\_train}, \text{white\_bg}=\text{white\_bg}, \text{ndc\_ray}=\text{ndc\_ray}, N\_samples=N\_samples) $$
+   c. Append results to lists:
+      $$ \text{rgbs}.\text{append}(\text{rgb\_map}) $$
+      $$ \text{depth\_maps}.\text{append}(\text{depth\_map}) $$
+5. Concatenate results along the ray dimension:
+   $$ \text{final\_rgbs} = \text{torch.cat}(\text{rgbs}) $$
+   $$ \text{final\_depths} = \text{torch.cat}(\text{depth\_maps}) $$
+6. Return `final_rgbs`, `None`, `final_depths`, `None`, `None`.
+
+### Parameters
+- `N_samples`: Default `-1`. Number of samples per ray. Not given in the sources.
+- `white_bg`: Default `True`. Background color assumption for alpha compositing.
+- `ndc_ray`: Default `False`. Enables NDC coordinate transformation.
+- `is_train`: Default `False`. Enables gradient tracking mode.
+
+### Edge Cases and Pitfalls
+- **Incomplete Return Values:** The method explicitly returns `None` for `alphas`, `weights`, and `uncertainties` [S1, unofficial]. Pipelines expecting full volumetric outputs (5 return values) will crash or produce invalid data if they unpack all five values [S1, unofficial].
+- **Memory Limits:** The chunk size must be chosen such that `rays_chunk` fits in GPU memory along with the neural field activations.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def chunked_trilinear_volume_rendering(rays, chunk, tensorf, device, is_train=False, white_bg=True, ndc_ray=False, N_samples=-1):
+    """
+    Renders rays in chunks to manage memory.
+    
+    Args:
+        rays: Tensor of ray data.
+        chunk: Number of rays per chunk.
+        tensorf: Neural field/trilinear volume function.
+        device: Compute device.
+        is_train: Gradient tracking flag.
+        white_bg: White background flag.
+        ndc_ray: NDC ray flag.
+        N_samples: Samples per ray.
+        
+    Returns:
+        rgbs, None, depth_maps, None, None
+    """
+    rgbs = []
+    depth_maps = []
+    
+    N_rays_all = rays.shape[0]
+    
+    # Calculate number of chunks
+    num_chunks = N_rays_all // chunk + int(N_rays_all % chunk > 0)
+    
+    for chunk_idx in range(num_chunks):
+        start = chunk_idx * chunk
+        end = (chunk_idx + 1) * chunk
+        
+        # Extract and move chunk to device
+        rays_chunk = rays[start:end].to(device)
+        
+        # Forward pass through neural field
+        rgb_map, depth_map = tensorf(
+            rays_chunk, 
+            is_train=is_train, 
+            white_bg=white_bg, 
+            ndc_ray=ndc_ray, 
+            N_samples=N_samples
+        )
+        
+        # Append results
+        rgbs.append(rgb_map)
+        depth_maps.append(depth_map)
+        
+    # Concatenate along ray dimension
+    final_rgbs = torch.cat(rgbs)
+    final_depths = torch.cat(depth_maps)
+    
+    # Return full tuple structure, with Nones for unused outputs
+    return final_rgbs, None, final_depths, None, None
+```
+
+## Operating characteristics
+- **Time Complexity:** $O(N_{rays})$, linear in the number of rays, with overhead from chunking iterations.
+- **Memory Complexity:** $O(\text{chunk} \times \text{ray\_dim})$, independent of total rays, allowing rendering of arbitrarily large scenes given sufficient compute time.
+- **Strengths:** Prevents GPU out-of-memory errors during neural field evaluation.
+- **Limitations:** Returns incomplete volumetric data (no alphas/weights), requiring post-processing or alternative methods if full volume information is needed.
+- **When to use:** When rendering neural radiance fields or large trilinear volumes that exceed GPU memory capacity for a full batch.
+- **When not to use:** When full volumetric metadata (alphas, weights) is required for compositing or analysis.
+
+## Background
+The method originates from implementations of Collaborative Neural Radiance Fields for Novel View Synthesis, where memory-efficient rendering of large-scale neural fields is necessary [S1, unofficial]. It is part of a broader family of batched ray rendering techniques designed to handle the computational and memory demands of neural volume rendering.
+
+## Sources
+[S1] Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,274 @@
+Turn a single photo into a navigable 3D world — Gaussian splats with collision meshes, physics, and a scene editor. Local GPU or World Labs Marble. - Compress the splats, free the VRAM, and run the checks by TingdeLiu · Pull Request #2 · TingdeLiu/Image2world
+
+Compress the splats, free the VRAM, and run the checks by TingdeLiu · Pull Request #2 · TingdeLiu/Image2world · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+TingdeLiu
+commented
+Aug 19, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Four things that were each measurable rather than speculative.
+Send the splats compressed
+Locally generated worlds shipped as uncompressed PLY -- 56 bytes per splat, every field a float32 -- while Marble worlds arrived as .spz. Same viewer, two very different download sizes.
+Spark already ships the encoder and SplatMesh already reads either format, so this changes byte count and nothing else. Measured on this project's own worlds:
+world
+full_res PLY
+full_res SPZ
+singleview-meetingroom
+47.4 MB
+11.6 MB
+4.1x
+room1-cbti0t
+66.1 MB
+16.0 MB
+4.1x
+family-splatfacto-integration
+203.5 MB
+18.8 MB
+10.8x
+full_res.ply is kept: it is the lossless original and /api/extract-prop cuts props out of it at runtime. npm run assets:spz backfills existing worlds; pruning the superseded detail-level PLYs is a separate opt-in flag.
+Equivalence was checked by pushing both formats through Spark's own setPackedSplat -- the four uint32 that actually reach the GPU. Both pipelines come back within 1/255 on every rgb channel and every alpha, positions within 1.22e-4 units (0.12 mm at metric scale), spherical harmonics preserved at degree 3.
+An earlier commit in this branch reported a 4.7% colour deviation on the Splatfacto path. That was wrong and is corrected here: I had read word 3 of the packed buffer as the rgba, and it is not — rgba is word 0. The write-up in PROJECT_REPORT.md keeps the mistake rather than quietly replacing it, because "find out which word holds what before diffing a packed buffer" is the reusable part.
+Let the backend hand its VRAM back
+backend/README.md claimed each inference temporarily unloaded model weights. It never did -- clear_vram() cannot touch weights a module global still references, and all eight models here were lazy-loaded globals that were never cleared. Harmless in-process; not harmless across processes, since ns-train runs as its own subprocess and cannot see what this one holds, so generating a world and then reconstructing a video OOMs on a 16 GB card.
+POST /api/unload now drops them, and reconstruction calls it inside GPU_JOB_LOCK before spawning. Unloading SHARP returns 2816 MB on the 5060 Ti. The registry's real risk is a ninth model being added and forgotten, so the test parses server.py with ast and asserts coverage -- no torch or CUDA needed to run it.
+Run the checks that were only ever run by hand
+npm run check and nine pytest files already existed with nothing running them. The backend job installs what the CPU suites import rather than requirements.txt, which would pull gigabytes of wheels for models no runner can execute. The three suites left out say why at the point they are skipped.
+It earned its keep on the first run, by failing: python-multipart was an undeclared dependency of every UploadFile/Form endpoint, present only transitively, and FastAPI raises for it at import time. It is now in requirements.txt.
+Pin the conventions that keep going subtly wrong
+worldTransform, walkableMap, spawn, placements and dropTargets had no tests between them, and they hold every coordinate convention this project has gotten wrong before -- failures that do not crash, they just put the collider somewhere the splat is not.
+Frontend 62 -> 111 tests; the backend CPU set 86 -> 89.
+🤖 Generated with Claude Code
+TingdeLiu
+and others
+added 8 commits
+August 19, 2026 22:53
+Send the splats compressed instead of raw
+…
+8e2a232
+```
+Marble worlds arrived as .spz; locally generated ones stayed .ply, which
+is every field as a float32 and nothing quantised -- 56 bytes per splat,
+so High quality meant downloading 47-203 MB.
+
+Spark already ships the encoder and SplatMesh already reads either
+format, so this changes how many bytes cross the wire and nothing else.
+Measured on this project's own worlds: 3.7x for SHARP output, 10.8x for
+Splatfacto, whose PLY carries 45 spherical-harmonic floats and three
+normals no one reads. The harmonics survive; the count is unchanged.
+
+full_res.ply stays. It is the lossless original, /api/extract-prop cuts
+props out of it at runtime, and assets:lod rebuilds the detail levels
+from it. Those detail levels lose their PLY: the collision mesh reads
+500k.ply earlier in the same run, so by then nothing needs them.
+
+The scanner used to resolve a level by whichever extension the directory
+listing reached last, which is undefined once both exist. It now prefers
+.spz -- and that gives a way out: delete a world's .spz and it falls
+back to its PLY.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Let the backend hand its VRAM back
+…
+44192ff
+```
+backend/README.md claimed each inference "temporarily unloads model
+weights". It never did. clear_vram() returns the allocator's cached
+blocks, but it cannot touch weights a module global still references,
+and all eight models here are lazy-loaded globals that were never
+cleared.
+
+Harmless inside one process, since run_heavy already serialises the
+work. Not harmless across processes: ns-train runs as its own
+subprocess and cannot see the gigabytes this one is holding, so
+generating a world and then reconstructing a video OOMs on a 16 GB card.
+
+MODEL_GLOBALS registers the eight, unload_models() drops them, and
+POST /api/unload queues behind any inference in flight. Reconstruction
+reaches it through a hook rather than importing server.py, which would
+cycle, and calls it inside GPU_JOB_LOCK -- the one moment nothing is
+mid-inference, and the reason it cannot go through run_heavy on a
+non-reentrant lock. Unloading SHARP returns 2816 MB on the 5060 Ti.
+
+The risk is not that unloading breaks, it is that a ninth model gets
+added and never registered. So the test parses server.py with ast,
+finds every global a function declares and assigns, and asserts the
+registry covers them. Reading the source rather than importing it keeps
+that test runnable without torch or CUDA.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Run the checks that were only ever run by hand
+…
+e1c071d
+```
+npm run check and nine pytest files already existed; nothing ran them
+unless someone remembered to.
+
+The backend job deliberately does not install backend/requirements.txt.
+That pulls torch, diffusers and the whole SAM/TripoSR stack -- several
+gigabytes of wheels for models no runner can execute. It installs what
+the geometry and job-state suites actually import, and runs the six that
+need only a CPU.
+
+Three suites stay out, and the workflow says which and why at the point
+it skips them: an environment smoke script, one that drives a live
+server, and one that reaches torch through multiview_splat.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Pin the conventions that keep going subtly wrong
+…
+7362a79
+```
+worldTransform, walkableMap, spawn, placements and dropTargets had no
+tests, and between them they hold every coordinate convention this
+project has gotten wrong before. Those failures do not crash: the
+collider ends up somewhere the splat is not, and clicking to free an
+object cuts geometry from the wrong place and reports success.
+
+So the tests fix the conventions, not the arithmetic. An explicit
+rotationX has to beat flipY, including when it is zero. groundPlaneOffset
+is already in metres, so the metric scale must not multiply it again. A
+spawn point is [x, z] on the floor plane, not [x, y] -- the same two
+numbers either way, which is why swapping them goes unnoticed. And
+walkableMap's timeout has to join the caller's signal rather than be
+replaced by it, which is how a wedged backend once left a generation
+sitting at 86% forever.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Write down what changed, including what is not settled
+…
+442a5cf
+```
+PROJECT_REPORT gains three sections, README gains the assets:spz script
+and the file it now keeps beside the compressed ones.
+
+The SPZ section records a negative result rather than rounding it off.
+Comparing the first few splats of both formats proves nothing -- they
+agreed to four decimals on a world where 4.7% of splats turned out to
+differ. The comparison that means something runs both through Spark's
+own setPackedSplat, the four uint32 that actually reach the GPU. By that
+measure SHARP output is equivalent and Splatfacto output is not: alpha
+is exact, but rgb deviates by up to 25/255 in a bimodal distribution
+that quantisation noise cannot explain, and out-of-range clipping
+accounts for 0.1% of it. So the SHARP path is written up as verified and
+the Splatfacto path is not.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Call pytest the one way that can find the package
+…
+6df53b6
+```
+Bare `pytest` leaves the repo root off sys.path, so collection failed on
+`No module named 'backend'` before a single test ran. `python -m pytest`
+puts the working directory on the path, which is how these suites are
+run locally and why this was never noticed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Correct the SPZ comparison, and declare python-multipart
+…
+e7298c0
+```
+Two things CI and a second look each caught.
+
+The Splatfacto colour deviation reported in the last commit does not
+exist. Diffing the packed splat buffers, I read word 3 as the rgba and
+built a conclusion on it; word 3 is not the colour. Hold every field
+fixed and vary one and word 3 never moves -- rgba is word 0, where
+cc998066 is exactly opacity 0.8, b 0.6, g 0.5, r 0.4. Read the right
+word and both pipelines agree: rgb and alpha within 1/255 on every
+channel of every splat, positions within 1.22e-4 units.
+
+The tell was there and I missed it. Re-encoding with maxSh: 0 threw the
+harmonics away entirely and the "deviation" came back byte-identical,
+which should have said the measurement was not looking at colour.
+
+Separately, CI found an undeclared dependency on its first run:
+python-multipart. Every UploadFile/Form endpoint needs it, it was only
+ever present transitively, and FastAPI raises at import time -- so a
+fresh environment loses the whole app, not one route. Now in
+requirements.txt as well as the workflow.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Stop a refresh from throwing away a generation
+…
+9a04f6f
+```
+POST /api/generate owned the work it started: progress streamed back down
+that connection and request.signal aborting tore the pipeline down and
+deleted the staged world. So a reload, a closed laptop or a flaky tunnel
+discarded a Marble generation eight minutes in -- one that had already
+been paid for.
+
+The request now creates a job, starts the pipeline detached from itself
+and returns an id. Progress goes to a file the browser polls, the same
+shape the video path has always had, on the Node side because the image
+pipeline is what holds the Marble key. The key stays in the closure; the
+job file records only which backend ran, and a test reads the raw file
+to keep it that way.
+
+The first design kept ownership in a module-level Map and inferred a
+crash from its absence. Unit tests passed; the app disagreed within a
+minute. Next bundles each route handler separately, so the Map in
+/api/generate is not the Map in /api/generate/jobs/[id]: the list route
+declared a demonstrably live job interrupted, and DELETE could not find
+the controller it needed, marking a job cancelled while the pipeline ran
+on. Both now go through the file. A 2 s heartbeat proves liveness -- 60 s
+to call it dead, because a busy event loop is not a corpse -- and the
+same tick re-reads its own status, so a cancel written by any route
+reaches the pipeline.
+
+Starting a second generation answers 409 with the running job's id
+rather than a conflict, because the caller almost always wants to watch
+that one: it is the same path the modal uses to reattach after a reload.
+
+Verified against a stub backend that accepts and never answers, so a job
+stays in flight: the work outlives the connection, stays visible as
+running from another route, refuses a second start, and cancels within
+six seconds with the staged world removed.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+```
+Hide details
+View details
+TingdeLiu
+merged commit f5fc0f2
+into
+main
+Aug 19, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+TingdeLiu
+deleted the
+optimize-assets-and-vram
+branch
+October 9, 2026 15:41
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

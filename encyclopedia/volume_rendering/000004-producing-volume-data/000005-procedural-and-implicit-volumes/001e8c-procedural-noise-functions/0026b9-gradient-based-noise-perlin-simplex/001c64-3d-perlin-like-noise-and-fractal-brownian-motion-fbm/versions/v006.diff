@@ -1,0 +1,412 @@
+--- v005.md
++++ v006.md
+@@ -4,197 +4,130 @@
+ 
+ ## Overview
+-3D Perlin-like Noise generates smooth, pseudo-random scalar values on a 3D unit lattice using hash-derived corner values, Hermite smoothing, and trilinear interpolation [S2, S12, unofficial]. Fractal Brownian Motion (FBM) constructs complex, multi-scale detail by summing multiple octaves of this base noise function at increasing frequencies and decreasing amplitudes [S3][S7, unofficial]. Unlike [Simplex Noise](978-simplex-noise.md), which uses a simplex grid to reduce directional artifacts, this method relies on the standard orthogonal grid and is distinguished by its explicit use of permutation tables for gradient hashing and quintic or Hermite interpolation for continuity [S12, S19, unofficial]. It is the foundational technique for generating organic volumetric structures like clouds, fog, and terrain density [S16, unofficial][S20].
++3D Perlin-like Noise generates smooth pseudo-random scalar values on a 3D unit lattice using hash-derived corner values, Hermite smoothing, and trilinear interpolation [S2, unofficial][S4, unofficial]. Fractal Brownian Motion (FBM) constructs multi-scale fractal noise by summing multiple octaves of a base noise function (typically Perlin or Simplex) with increasing frequency and decreasing amplitude [S3][S4, unofficial]. Together, they solve the problem of generating realistic, continuous, and self-similar volumetric structures (such as clouds, fog, or terrain density) without storing large texture maps [S3][S5, unofficial]. They are distinguished from [Simplex Noise](978-simplex-noise.md) by their reliance on a cubic grid and trilinear interpolation rather than a simplex grid and tetrahedral interpolation, and from [Ridged Multifractal](4249-ridged-multifractal.md) by their linear summation which produces soft, cloud-like volumes rather than sharp ridges [S2, unofficial][S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** Query point $P = (x, y, z) \in \mathbb{R}^3$; Number of octaves $N$; Base frequency $f_0$; Persistence (amplitude decay) $p$; Lacunarity (frequency multiplier) $l$; Seed for permutation table.
+-**Outputs:** Scalar value $V \in [-1, 1]$ (or normalized $[0, 1]$).
++The method consists of two parts: the base 3D noise evaluation and the FBM octave summation.
++
++### Inputs and Outputs
++*   **Input:** A 3D query point $\mathbf{p} = (x, y, z)$, number of octaves $n$, persistence $\beta$ (amplitude decay), and lacunarity $\gamma$ (frequency multiplier).
++*   **Output:** A scalar value $V \in [-1, 1]$ (or normalized $[0, 1]$).
+ 
+ ### Data Structures
+-1.  **Permutation Table:** An array `perm` of size 512 (or 256, doubled for overflow handling) containing a shuffled permutation of integers $0 \dots 255$ [S11, S12, unofficial]. Initialized from a seed [S19, unofficial].
+-2.  **Gradient Vectors (Optional for Gradient Noise):** If using gradient-based Perlin noise (as opposed to value noise), an array `grad` of 256 pre-computed 3D unit vectors is stored [S12, unofficial]. If using value noise (common in shader implementations like [S1, S2, unofficial]), a hash function maps integer coordinates directly to scalar values in $[-1, 1]$ [S1, S4, unofficial]. The following implementation assumes **Gradient Perlin Noise** as it is the canonical "Perlin" method, but notes the value-noise variant where applicable.
+-    *   *Note:* Many modern "Perlin-like" implementations in shaders use Value Noise (hashing corners to scalars) rather than Gradient Noise (dotting corners with vectors) for performance. Both are cited below. Gradient noise provides better directional coherence [S12, unofficial].
+-
+-### Algorithm: Base 3D Noise (Gradient Variant)
+-1.  **Grid Cell Identification:**
+-    Compute integer coordinates $I = (\lfloor x \rfloor, \lfloor y \rfloor, \lfloor z \rfloor)$ and fractional coordinates $F = (x - \lfloor x \rfloor, y - \lfloor y \rfloor, z - \lfloor z \rfloor)$ [S2, S14, unofficial].
+-2.  **Corner Indexing:**
+-    For each of the 8 corners of the unit cube containing $P$, defined by offsets $dx, dy, dz \in \{0, 1\}$:
+-    *   Calculate absolute integer indices: $ix = I.x + dx$, $iy = I.y + dy$, $iz = I.z + dz$ [S12, unofficial].
+-    *   Hash these indices to select a gradient vector. Using the permutation table `perm` (size 512):
+-        $$ h = \text{perm}[\text{perm}[\text{perm}(ix \& 255) + iy \& 255] + iz \& 255] $$
+-        The bitwise AND with 255 ensures wrapping within the first 256 entries [S6, S12, unofficial].
+-    *   Retrieve gradient vector $G_{dx,dy,dz} = \text{grad}[h]$ [S12, unofficial].
+-3.  **Distance Vectors:**
+-    Compute vector from corner to point: $V_{dx,dy,dz} = P - (I + (dx, dy, dz))$ [S14, unofficial].
+-4.  **Dot Products:**
+-    Compute contribution of each corner: $D_{dx,dy,dz} = G_{dx,dy,dz} \cdot V_{dx,dy,dz}$ [S14, unofficial].
+-5.  **Interpolation Weights:**
+-    Apply smoothstep (Hermite) or Quintic interpolation to $F$ to eliminate grid artifacts [S1, S11, unofficial].
+-    *   *Hermite (Smoothstep):* $u = 3t^2 - 2t^3$ [S1, S12, unofficial].
+-    *   *Quintic:* $u = t^3(6t^2 - 15t + 10)$ [S11, unofficial].
+-    Let $u, v, w$ be the interpolated weights for $x, y, z$ respectively [S12, unofficial].
+-6.  **Trilinear Interpolation:**
+-    Interpolate the 8 dot products along the axes:
+-    $$
+-    \begin{aligned}
+-    A &= \text{lerp}(D_{0,0,0}, D_{1,0,0}, u) \\
+-    B &= \text{lerp}(D_{0,1,0}, D_{1,1,0}, u) \\
+-    C &= \text{lerp}(D_{0,0,1}, D_{1,0,1}, u) \\
+-    D &= \text{lerp}(D_{0,1,1}, D_{1,1,1}, u) \\
+-    E &= \text{lerp}(A, B, v) \\
+-    F_{out} &= \text{lerp}(C, D, v) \\
+-    Result &= \text{lerp}(E, F_{out}, w)
+-    \end{aligned}
+-    $$
+-    Where $\text{lerp}(a, b, t) = a + t(b - a)$ [S1, S12, unofficial].
+-
+-### Algorithm: Fractal Brownian Motion (FBM)
+-FBM sums multiple octaves of the base noise function [S3][S7, unofficial].
+-
+-1.  **Initialization:**
+-    *   $Sum = 0$
+-    *   $Amplitude = 1.0$ (or $0.5$ depending on normalization convention) [S5, S8, unofficial].
+-    *   $Frequency = f_0$
+-    *   $Position = P$
+-2.  **Octave Loop:**
+-    For $i = 0$ to $N-1$:
+-    *   Evaluate base noise: $n = \text{Noise}(Position \times Frequency)$ [S8, unofficial].
+-    *   Add to sum: $Sum += n \times Amplitude$ [S5, unofficial].
+-    *   Update Amplitude: $Amplitude *= p$ (Persistence, typically $0.5$) [S6, S7, unofficial].
+-    *   Update Frequency: $Frequency *= l$ (Lacunarity, typically $2.0$) [S7, S8, unofficial].
+-    *   Update Position: $Position *= l$ (or apply a shift/rotation to prevent octave alignment artifacts) [S5, S13, unofficial].
+-3.  **Normalization (Optional):**
+-    To keep the result bounded, divide by the maximum possible amplitude:
+-    $$ MaxAmplitude = \sum_{i=0}^{N-1} p^i = \frac{1 - p^N}{1 - p} $$
+-    $$ FinalResult = \frac{Sum}{MaxAmplitude} $$
+-    This maps the output to $[-1, 1]$ if the base noise is in $[-1, 1]$ [S6, unofficial].
+-
+-### Pseudocode (Gradient Perlin + FBM)
++1.  **Permutation Table:** An array `perm` of size 512 (typically $2 \times 256$) containing a shuffled permutation of integers $0..255$. This handles overflow when indexing gradients [S1, unofficial][S11, unofficial].
++2.  **Gradient Vectors:** A set of pseudo-random unit vectors. In standard Perlin, these are fixed directions (e.g., $(\pm 1, \pm 1, 0)$ permutations) or random vectors normalized to unit length [S12, unofficial]. In "Perlin-like" value noise (common in shaders), these are replaced by scalar hash values $h \in [-1, 1]$ at grid corners [S1, unofficial].
++3.  **Hash Function:** A deterministic function mapping integer coordinates to gradient indices or scalar values. A common GPU-friendly hash is:
++    $$ h(\mathbf{p}) = \text{fract}(\sin(\mathbf{p} \cdot \mathbf{c}) \cdot 43758.5453) $$
++    where $\mathbf{c}$ is a constant vector like $(127.1, 311.7, 74.7)$ [S4, unofficial][S17, unofficial].
++
++### Steps
++
++#### 1. Base 3D Noise Evaluation
++1.  **Grid Localization:** Compute integer lattice coordinates $\mathbf{i} = \lfloor \mathbf{p} \rfloor$ and fractional offset $\mathbf{f} = \mathbf{p} - \mathbf{i}$ [S2, unofficial][S4, unofficial].
++2.  **Corner Hashing:** Compute hash values for the 8 corners of the unit cube containing $\mathbf{p}$. For each corner $(dx, dy, dz) \in \{0, 1\}^3$, calculate index:
++    $$ \text{idx} = \text{perm}[\text{perm}[\text{perm}(\mathbf{i}_x + dx) + \mathbf{i}_y + dy] + \mathbf{i}_z + dz] \pmod{256} $$
++    Retrieve the gradient vector $\mathbf{g}_{dx,dy,dz}$ or scalar $n_{dx,dy,dz}$ [S11, unofficial][S17, unofficial].
++3.  **Distance Vectors:** Compute vectors $\mathbf{d}_{dx,dy,dz} = \mathbf{f} - (dx, dy, dz)$ from each corner to the query point [S14, unofficial].
++4.  **Dot Product (Gradient Noise) or Value Retrieval (Value Noise):**
++    *   *Gradient:* $D_{dx,dy,dz} = \mathbf{g}_{dx,dy,dz} \cdot \mathbf{d}_{dx,dy,dz}$ [S1, unofficial].
++    *   *Value:* $n_{dx,dy,dz}$ is the scalar hash value directly [S1, unofficial].
++5.  **Smoothing:** Apply Hermite smoothing to $\mathbf{f}$:
++    $$ \mathbf{u} = 3\mathbf{f}^2 - 2\mathbf{f}^3 $$
++    (Component-wise: $u_i = f_i^2(3 - 2f_i)$) [S1, unofficial][S12, unofficial].
++6.  **Trilinear Interpolation:** Interpolate the 8 corner values using $\mathbf{u}$:
++    $$ V = \text{mix}(\text{mix}(\text{mix}(n_{000}, n_{100}, u_x), \text{mix}(n_{010}, n_{110}, u_x), u_y), \text{mix}(\text{mix}(n_{001}, n_{101}, u_x), \text{mix}(n_{011}, n_{111}, u_x), u_y), u_z) $$
++    Where $\text{mix}(a, b, t) = a + t(b - a)$ [S1, unofficial][S2, unofficial].
++
++#### 2. Fractal Brownian Motion (FBM) Summation
++1.  **Initialization:** Set `sum = 0`, `amplitude = 0.5` (or 1.0), `frequency = 1.0`, `position = p` [S5, unofficial][S8, unofficial].
++2.  **Octave Loop:** For $i = 0$ to $n-1$:
++    *   Evaluate base noise: $val = \text{Noise}(\text{position} \times \text{frequency})$ [S8, unofficial].
++    *   Accumulate: `sum += val * amplitude` [S5, unofficial].
++    *   Update parameters:
++        *   `frequency *= lacunarity` (typically 2.0) [S7, unofficial][S8, unofficial].
++        *   `amplitude *= persistence` (typically 0.5) [S5, unofficial][S6, unofficial].
++        *   `position` may be shifted or rotated to avoid periodic artifacts (e.g., `position = position * 2.0 + shift`) [S5, unofficial][S16, unofficial].
++3.  **Normalization (Optional):** If the base noise is in $[-1, 1]$, the max possible amplitude sum is $\sum_{i=0}^{n-1} \text{persistence}^i$. Normalize by dividing by this sum to keep output in $[-1, 1]$ [S6, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-import math
+-
+-class PerlinNoise:
+-    def __init__(self, seed=0):
+-        # Initialize permutation table
+-        self.perm = list(range(256))
+-        # Shuffle using seed
+-        import random
+-        random.seed(seed)
+-        random.shuffle(self.perm)
+-        # Double for overflow handling
+-        self.perm += self.perm
++def hash13(p):
++    """Simple hash function for 3D point to scalar in [-1, 1]"""
++    # Using constants from [S4, unofficial][S17, unofficial]
++    q = fract(p * vec3(127.1, 311.7, 74.7))
++    d = dot(q, q.yzx + 33.33)
++    return fract((q.x + q.y) * q.z + d) * 2.0 - 1.0
++
++def fade(t):
++    """Hermite smoothing function"""
++    return t * t * (3.0 - 2.0 * t)
++
++def lerp(a, b, t):
++    """Linear interpolation"""
++    return a + t * (b - a)
++
++def noise3(p):
++    """Base 3D Perlin-like (Value) Noise"""
++    # 1. Grid Localization
++    i = floor(p)
++    f = fract(p)
++    
++    # 2. Corner Hashes
++    # Calculate hash for 8 corners
++    u = fade(f)
++    
++    n000 = hash13(vec3(i.x, i.y, i.z))
++    n100 = hash13(vec3(i.x + 1, i.y, i.z))
++    n010 = hash13(vec3(i.x, i.y + 1, i.z))
++    n110 = hash13(vec3(i.x + 1, i.y + 1, i.z))
++    n001 = hash13(vec3(i.x, i.y, i.z + 1))
++    n101 = hash13(vec3(i.x + 1, i.y, i.z + 1))
++    n011 = hash13(vec3(i.x, i.y + 1, i.z + 1))
++    n111 = hash13(vec3(i.x + 1, i.y + 1, i.z + 1))
++    
++    # 3. Trilinear Interpolation
++    nx00 = lerp(n000, n100, u.x)
++    nx10 = lerp(n010, n110, u.x)
++    nx01 = lerp(n001, n101, u.x)
++    nx11 = lerp(n011, n111, u.x)
++    
++    nxy0 = lerp(nx00, nx10, u.y)
++    nxy1 = lerp(nx01, nx11, u.y)
++    
++    return lerp(nxy0, nxy1, u.z)
++
++def fbm(p, octaves=4, lacunarity=2.0, persistence=0.5):
++    """Fractal Brownian Motion"""
++    total = 0.0
++    amplitude = 0.5
++    frequency = 1.0
++    position = p
++    
++    for i in range(octaves):
++        total += noise3(position * frequency) * amplitude
++        position = position * 2.0 + vec3(100.0) # Shift to avoid repetition [S5, unofficial]
++        amplitude *= persistence
++        frequency *= lacunarity
+         
+-        # Initialize 256 random gradient vectors
+-        self.grads = []
+-        for _ in range(256):
+-            # Random unit vector in 3D
+-            theta = random.uniform(0, 2 * math.pi)
+-            phi = math.acos(2 * random.uniform(-1, 1) - 1)
+-            x = math.sin(phi) * math.cos(theta)
+-            y = math.sin(phi) * math.sin(theta)
+-            z = math.cos(phi)
+-            self.grads.append((x, y, z))
+-
+-    def fade(self, t):
+-        # Quintic smoothstep
+-        return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+-
+-    def lerp(self, t, a, b):
+-        return a + t * (b - a)
+-
+-    def grad(self, hash_val, x, y, z):
+-        g = self.grads[hash_val & 255]
+-        return g[0] * x + g[1] * y + g[2] * z
+-
+-    def noise(self, x, y, z):
+-        # 1. Grid cell
+-        ix = math.floor(x)
+-        iy = math.floor(y)
+-        iz = math.floor(z)
+-        
+-        # 2. Fractional part
+-        fx = x - ix
+-        fy = y - iy
+-        fz = z - iz
+-        
+-        # 3. Fade curves
+-        u = self.fade(fx)
+-        v = self.fade(fy)
+-        w = self.fade(fz)
+-        
+-        # 4. Hashing corners
+-        # Permutation indices for the 8 corners
+-        # Using bitwise AND to wrap around 256
+-        A = self.perm[ix & 255] + iy & 255
+-        AA = self.perm[A] + iz & 255
+-        AB = self.perm[A + 1] + iz & 255
+-        B = self.perm[ix + 1 & 255] + iy & 255
+-        BA = self.perm[B] + iz & 255
+-        BB = self.perm[B + 1] + iz & 255
+-        
+-        # 5. Dot products
+-        # Gradient contributions at each corner
+-        x1 = self.lerp(
+-            self.grad(self.perm[AA], fx, fy, fz),
+-            self.grad(self.perm[BA], fx - 1, fy, fz),
+-            u
+-        )
+-        x2 = self.lerp(
+-            self.grad(self.perm[AB], fx, fy - 1, fz),
+-            self.grad(self.perm[BB], fx - 1, fy - 1, fz),
+-            u
+-        )
+-        
+-        y1 = self.lerp(x1, x2, v)
+-        
+-        x3 = self.lerp(
+-            self.grad(self.perm[AA + 1], fx, fy, fz - 1),
+-            self.grad(self.perm[BA + 1], fx - 1, fy, fz - 1),
+-            u
+-        )
+-        x4 = self.lerp(
+-            self.grad(self.perm[AB + 1], fx, fy - 1, fz - 1),
+-            self.grad(self.perm[BB + 1], fx - 1, fy - 1, fz - 1),
+-            u
+-        )
+-        
+-        y2 = self.lerp(x3, x4, v)
+-        
+-        return self.lerp(y1, y2, w)
+-
+-    def fbm(self, x, y, z, octaves=4, persistence=0.5, lacunarity=2.0):
+-        total = 0.0
+-        amplitude = 1.0
+-        frequency = 1.0
+-        position_x = x
+-        position_y = y
+-        position_z = z
+-        
+-        for _ in range(octaves):
+-            total += self.noise(position_x, position_y, position_z) * amplitude
+-            position_x *= lacunarity
+-            position_y *= lacunarity
+-            position_z *= lacunarity
+-            amplitude *= persistence
+-            
+-        # Normalize to [-1, 1]
+-        max_amplitude = 0.0
+-        for i in range(octaves):
+-            max_amplitude += persistence ** i
+-        return total / max_amplitude
++    return total
+ ```
+ 
++### Parameters
++*   **Octaves ($n$):** Number of layers. Typical values: 4–7 [S12, unofficial][S16, unofficial].
++*   **Persistence ($\beta$):** Amplitude decay per octave. Typical value: 0.5 [S5, unofficial][S6, unofficial].
++*   **Lacunarity ($\gamma$):** Frequency multiplier per octave. Typical value: 2.0 [S7, unofficial][S8, unofficial].
++*   **Seed:** Integer used to initialize permutation tables or hash constants for reproducibility [S19, unofficial].
++
+ ### Edge Cases and Pitfalls
+-*   **Grid Artifacts:** Linear interpolation causes visible seams. Must use Hermite ($3t^2-2t^3$) or Quintic ($6t^5-15t^4+10t^3$) smoothing [S1, S11, unofficial].
+-*   **Integer Overflow:** When computing corner indices, ensure modulo arithmetic or bitwise AND with 255 is used to prevent out-of-bounds access if coordinates are large [S6, S12, unofficial].
+-*   **Division by Zero:** In gradient normalization or vector operations, check for zero vectors [S12, unofficial].
+-*   **Octave Alignment:** If frequency scaling is exactly 2.0 and no shift is applied, octaves may align periodically, creating "grid-like" artifacts. A small random shift or non-integer lacunarity (e.g., 2.02) is often used [S5, S16, unofficial].
+-*   **Single Octave Limit:** Some simplified implementations (e.g., `fbm3` in [S1, unofficial]) only support one octave, reducing detail [S1, unofficial].
++*   **Tiling Artifacts:** Standard Perlin noise is not tileable. To create tiling volumes, use [3D Noise Generation with Box Filtering](#tileable-volume-noise-generation) or wrap coordinates modulo dimension [S22, unofficial].
++*   **GPU Hash Variance:** Hash functions using trigonometric functions (e.g., `sin`) may produce different results across different GPU architectures due to precision differences [S17, unofficial].
++*   **Single Octave Limit:** Some implementations (e.g., `fbm3` in [S1, unofficial]) only support a single octave, reducing detail. Ensure multi-octave loops are implemented [S1, unofficial].
++*   **Division by Zero:** Vector normalization or division operations must guard against zero vectors [S12, unofficial].
++*   **Boundary Conditions:** When sampling outside defined bounds (e.g., cloud height), return 0 or clamp appropriately [S16, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Noise Field Generator](1302-noise-field-generator.md)
+-Produces a 3D scalar field for volumetric rendering by summing multiple octaves of gradient-based noise (typically Simplex or Perlin) with varying frequencies and amplitudes, often combined with a linear vertical gradient. It solves the problem of generating realistic, multi-scale organic structures (such as clouds or terrain) in procedural volumes. It is distinguished from [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by its specific implementation of layered Simplex noise with vertical gradient offsets for volumetric density, and from [Global Cloud Cover with Curl Noise](1711-global-cloud-cover-with-curl-noise.md) by its reliance on scalar summation rather than divergence-free vector fields.
++Produces a 3D scalar field by summing multiple octaves of gradient-based noise (Simplex/Perlin) with varying frequencies and amplitudes, often combined with a linear vertical gradient. It solves the problem of generating realistic, multi-scale organic structures (clouds/terrain) in procedural volumes. It is distinguished from this method by its specific implementation of layered Simplex noise with vertical gradient offsets for volumetric density.
+ 
+ ### [Global Cloud Cover with Curl Noise](1711-global-cloud-cover-with-curl-noise.md)
+@@ -202,51 +135,67 @@
+ 
+ ### [3D Perlin-Worley Noise Texture Generation](2355-3d-perlin-worley-noise-texture-generation.md)
+-This method generates 3D volumetric density maps for procedural textures, specifically targeting cloud-like structures, by combining low-frequency Perlin noise for broad mass with inverted Worley (cellular) noise to carve hollows. It differs from pure Perlin noise by introducing cellular erosion for puffy cumulus appearances and from pure Worley by retaining large-scale continuity. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by adding a secondary Worley noise layer for detail erosion.
++Generates 3D volumetric density maps for procedural textures, specifically targeting cloud-like structures, by combining low-frequency Perlin noise for broad mass with inverted Worley (cellular) noise to carve hollows. It differs from pure Perlin noise by introducing cellular erosion for puffy cumulus appearances and from pure Worley by retaining large-scale continuity. It builds on this method by adding a secondary Worley noise layer for detail erosion.
+ 
+ ### [Voxel World Generation with Perlin Noise](2556-voxel-world-generation-with-perlin-noise.md)
+-This method generates a 3D voxel-based world by evaluating fractal Brownian motion (fBm) noise against a threshold to determine voxel existence and material type (stone, dirt, grass). It differs from sibling methods like the [Noise Field Generator](1302-noise-field-generator.md) by explicitly mapping noise values to discrete material layers based on vertical position and local neighborhood checks, rather than producing a continuous scalar field or texture. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) to provide the underlying pseudo-random noise function.
++Generates a 3D voxel-based world by evaluating fractal Brownian motion (fBm) noise against a threshold to determine voxel existence and material type (stone, dirt, grass). It differs from sibling methods like the [Noise Field Generator](1302-noise-field-generator.md) by explicitly mapping noise values to discrete material layers based on vertical position and local neighborhood checks, rather than producing a continuous scalar field or texture. It builds on this method to provide the underlying pseudo-random noise function.
+ 
+ ### [Ridged Multifractal](4249-ridged-multifractal.md)
+-Ridged Multifractal is a fractal noise technique that generates sharp, ridge-like structures by applying a non-linear transformation to the absolute value of base noise, combined with inter-octave feedback. Unlike standard FBM which produces soft, cloud-like volumes, Ridged Multifractal creates high-contrast linear features suitable for terrain ridges or lightning. It builds on [3D Perlin-like Noise and Fractal Brownian Motion (FBM)](1260-3d-perlin-like-noise-and-fractal-brownian-motion-fbm.md) by replacing the linear summation with a ridge-specific kernel and a multiplicative feedback loop.
++Ridged Multifractal is a fractal noise technique that generates sharp, ridge-like structures by applying a non-linear transformation to the absolute value of base noise, combined with inter-octave feedback. Unlike standard FBM which produces soft, cloud-like volumes, Ridged Multifractal creates high-contrast linear features suitable for terrain ridges or lightning. It builds on this method by replacing the linear summation with a ridge-specific kernel and a multiplicative feedback loop.
+ 
+ ### 3D Noise Generation with Box Filtering
+ Generates a 3D tiling noise volume and applies a 3×3×3 box blur to hide trilinear interpolation grid artifacts, as advised for procedural volume rendering [S22, unofficial].
+-1.  Initialize a 3D array of floats with uniform random values in $[0,1]$ using a seeded PRNG [S22, unofficial].
+-2.  For each voxel $(x,y,z)$, compute the average of its 3×3×3 neighborhood $(dx,dy,dz \in [-1,1])$ [S22, unofficial].
+-3.  Wrap coordinates modulo $dim$ to ensure tiling [S22, unofficial].
+-4.  Convert the averaged float to uint8_t in $[0,255]$ and store in the output buffer [S22, unofficial].
+-Formula: $v_{out}(x,y,z,c) = \frac{1}{27} \sum_{dx=-1}^{1} \sum_{dy=-1}^{1} \sum_{dz=-1}^{1} v_{in}((x+dx)\%d, (y+dy)\%d, (z+dz)\%d, c) \cdot 255$, where $d$ is the noise dimension, $c$ is the RGBA channel, and $\%$ denotes modulo wrapping for tiling [S22, unofficial]. Parameter: `seed` (uint32_t) for reproducible generation [S22, unofficial].
++*   **Steps:** 1. Initialize a 3D array of floats with uniform random values in [0,1] using a seeded PRNG. 2. For each voxel $(x,y,z)$, compute the average of its 3×3×3 neighborhood ($dx,dy,dz \in [-1,1]$). 3. Wrap coordinates modulo $d$ to ensure tiling. 4. Convert the averaged float to uint8_t in [0,255] and store in the output buffer.
++*   **Formula:** $v_{out}(x,y,z,c) = \frac{1}{27} \sum_{dx=-1}^{1} \sum_{dy=-1}^{1} \sum_{dz=-1}^{1} v_{in}((x+dx)\%d, (y+dy)\%d, (z+dz)\%d, c) \cdot 255$, where $d$ is the noise dimension, $c$ is the RGBA channel, and $\%$ denotes modulo wrapping for tiling [S22, unofficial].
++*   **Parameters:** `seed` (uint32_t): Random number generator seed for reproducible noise generation [S22, unofficial].
++*   **Code:**
++    ```python
++    rng = mt19937(seed)
++    dist = uniform_real_distribution(0.0f, 1.0f)
++    n = dim * dim * dim * 4
++    raw = [dist(rng) for _ in range(n)]
++    idx = lambda x, y, z, c: ((z % dim) * dim + (y % dim)) * dim + (x % dim) * 4 + c
++    ```
++    [S22, unofficial]
+ 
+ ### FBM BVH Construction
+ A specific application of the BVH method to Fractional Brownian Motion (FBM), where octaves are presorted by range and have analytic bounds, requiring no memory storage for bounds [S3].
+-1.  Presort octaves by range of values (higher to lower). This provides the optimal evaluation order for FBM [S3].
+-2.  Use the analytic expressions for $\Delta_i$ and $s(i,n)$ to compute BVH bounds. No memory is needed to store them [S3].
+-3.  For FBM with $\beta=1$, all octaves share the same Lipschitz constant. Presorting by range of value corresponds to the optimal pre-sorted order for step size maximization [S3].
+-Formula: For FBM, the function is the octave $o_i$, and the range is $\Delta_{f_i} = \frac{1}{2^{i-1}}$. The sum of ranges from $i$ to $j$ is $s(i, j) = \sum_{m=i}^j \frac{1}{2^{m-1}} = 2 - \frac{1}{2^{j-1}}$ [S3]. For FBM with Lipschitz noise constant $\lambda_{noise}$, the Lipschitz constant of octave $i$ is $\lambda_{f_i} = \lambda_{noise}$, and the total Lipschitz constant is $\lambda_{B_n} = n \cdot \lambda_{noise}$ [S3].
++*   **Steps:** Presort octaves by range of values (higher to lower). This provides the optimal evaluation order for FBM. Use the analytic expressions for $\Delta_i$ and $s(i,n)$ to compute BVH bounds. No memory is needed to store them. For FBM with $\beta=1$, all octaves share the same Lipschitz constant. Presorting by range of value corresponds to the optimal pre-sorted order for step size maximization [S3].
++*   **Formula:** For FBM, the function is the octave $o_i$, and the range is $\Delta_{f_i} = \frac{1}{2^{i-1}}$. The sum of ranges from $i$ to $j$ is $s(i, j) = \sum_{m=i}^j \frac{1}{2^{m-1}} = 2 - \frac{1}{2^{j-1}}$ [S3]. For FBM with Lipschitz noise constant $\lambda_{noise}$, the Lipschitz constant of octave $i$ is $\lambda_{f_i} = \lambda_{noise}$, and the total Lipschitz constant is $\lambda_{B_n} = n \cdot \lambda_{noise}$ [S3].
+ 
+ ### High Frequency Surface Noise Remapping
+ Introducing high frequency noise on cloud surfaces by remapping the noise value using a range defined by low frequency noise, used by Guerilla Games [S21, unofficial].
+-Code: `float density = clamp(remap(noise, 1 - base, 1.0, 0.0, cap), 0.0, cap);` where `remap` linearly maps the original range to the new range [S21, unofficial].
++*   **Code:**
++    ```python
++    density = clamp(remap(noise, 1 - base, 1.0, 0.0, cap), 0.0, cap)
++    def remap(value, original_min, original_max, new_min, new_max):
++        return new_min + (value - original_min) / (original_max - original_min) * (new_max - new_min)
++    ```
++    [S21, unofficial]
+ 
+ ### Derivative Erosion FBM
+ FBM that accumulates derivatives across octaves. The derivative magnitude dampens amplitude via `1/(1+|grad|^2)`, creating realistic erosion patterns where steep slopes stay smooth [S23].
+-1.  Initialize `value=0.0`, `deriv=vec2(0.0)`, `amplitude=0.5` [S23].
+-2.  Loop `octaves` [S23].
+-3.  Get `n = noisedQ(p * frequency)` [S23].
+-4.  Accumulate `deriv += n.yz` [S23].
+-5.  Add `amplitude * n.x / (1.0 + dot(deriv, deriv))` to `value` [S23].
+-6.  Update `frequency *= 2.0`, `amplitude *= 0.5`, `p = rot * p` [S23].
++*   **Steps:** 1. Initialize `value=0.0`, `deriv=vec2(0.0)`, `amplitude=0.5`. 2. Loop `octaves`. 3. Get `n = noisedQ(p * frequency)`. 4. Accumulate `deriv += n.yz`. 5. Add `amplitude * n.x / (1.0 + dot(deriv, deriv))` to `value`. 6. Update `frequency *= 2.0`, `amplitude *= 0.5`, `p = rot * p` [S23].
++
++### Tileable Volume Noise Generation
++A compute shader process that generates four specific noise textures used for volumetric cloud rendering, including Perlin-Worley FBM, Worley FBM, Curl Noise, and Weather Data [S24, unofficial].
++*   **Parameters:** Noise source: The noise algorithms are directly ported from sebh/TileableVolumeNoise [S24, unofficial].
++*   **Layout:**
++    *   PerlinWorleyFBM texture: 128×128×128 resolution, RGBA8 format. Channel mapping: R=Perlin-Worley, G/B/A=3 layers of Worley FBM [S24, unofficial].
++    *   WorleyFBM texture: 32×32×32 resolution, RGBA8 format. Content: 3 layers of Worley FBM used for erosion [S24, unofficial].
++    *   CurlNoise texture: 128×128 resolution, RGBA8 format. Status: Reserved [S24, unofficial].
++    *   WeatherData texture: 2048×2048 resolution, RGBA8 format. Channel mapping: R=coverage, G=type/rain, B=reserved [S24, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per query, where $N$ is the number of octaves. Each octave requires a constant number of hash lookups, dot products, and interpolations [S3][S7, unofficial].
+-*   **Memory Complexity:** $O(1)$ for the noise function itself (excluding the permutation table, which is fixed size, typically 512 integers) [S6, S12, unofficial]. FBM does not require storing intermediate results if computed on-the-fly [S3].
+-*   **Performance:** Computationally inexpensive compared to texture-based noise, as it avoids memory bandwidth bottlenecks for large volumes [S17, unofficial]. However, high octave counts can be costly in real-time raymarching [S17, unofficial].
+-*   **Strengths:** Infinite resolution, seamless tiling (with proper hashing), low memory footprint, and easy parameterization (lacunarity, persistence) [S3][S6, unofficial].
+-*   **Limitations:** Directional artifacts (grid lines) if interpolation is not smooth enough; requires careful handling of periodicity for tiling volumes; can exhibit "blockiness" if octaves are not shifted [S1, S5, unofficial].
+-*   **When to Use:** Procedural terrain, cloud density, fog, and any scenario requiring infinite, continuous, multi-scale detail without pre-baked textures [S3][S16, unofficial].
+-*   **When Not to Use:** When specific, non-repeating features are required (use texture maps); when extreme performance is needed with very high octaves (consider pre-computed 3D textures or lower octave counts) [S20].
++*   **Time Complexity:** $O(n \cdot k)$ per sample, where $n$ is the number of octaves and $k$ is the cost of the base noise evaluation (constant for fixed grid size). FBM requires $n$ evaluations of the base noise function [S3][S6, unofficial].
++*   **Memory Complexity:** $O(1)$ for procedural evaluation (no storage required if computed on-the-fly). If pre-computed into a 3D texture, memory is $O(D^3)$ where $D$ is the resolution [S15, unofficial][S20].
++*   **Measured Performance:** On modern GPUs, procedural FBM is extremely fast for raymarching clouds, avoiding texture fetch latency [S17, unofficial]. Pre-computed 3D textures can cause runtime freezes during generation if not cached [S20].
++*   **Scaling:** Scales well with resolution as it is resolution-independent. Detail increases linearly with the number of octaves [S17, unofficial].
++*   **Strengths:** Resolution-independent, low memory footprint (procedural), easy to animate by shifting input coordinates [S3][S17, unofficial].
++*   **Limitations:** Not naturally tileable without post-processing or specialized hashing [S22, unofficial]. Can exhibit grid artifacts if interpolation is not smooth (mitigated by Hermite/Quintic fade) [S22, unofficial]. Hash function portability issues across GPU architectures [S17, unofficial].
++*   **When to Use:** Real-time volumetric rendering (clouds, fog), procedural terrain generation, and any scenario requiring infinite resolution detail [S3][S19, unofficial].
++*   **When Not to Use:** When exact tiling is required without post-processing, or when specific, non-fractal patterns are needed [S22, unofficial].
+ 
+ ## Background
+-Originated by Ken Perlin in 1985 for the movie *Tron* and later refined in his 1985 paper "Improving Noise" [S1, S6, unofficial]. FBM was introduced by Jules Bernard Lévy in the context of geology and later adapted to computer graphics by Perlin and others to create natural-looking textures [S3][S6, unofficial]. It is widely used in computer graphics to create stochastic patterns with details at potentially many different scales [S3].
++Originated by Ken Perlin in 1985 for the movie *Tron* [S1, unofficial][S19, unofficial]. FBM was introduced by Benoît Mandelbrot in the context of Brownian motion and later adapted to computer graphics by Perlin and others to create natural-looking textures [S3]. It is widely used in computer graphics to create stochastic patterns with details at potentially many different scales [S3]. Common applications include cloud rendering [S16, unofficial][S17, unofficial], terrain generation [S19, unofficial], and fog density [S20].
+ 
+ ## Sources
+@@ -273,3 +222,4 @@
+ [S21] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)
+ [S22] sho3la/GPUGemsVolumeRendering, https://github.com/sho3la/GPUGemsVolumeRendering, fetched 2026-10-26 (unofficial)
+-[S23] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27+[S23] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27
++[S24] [volumetric-clouds-v2][RenderEngine] 1:1 复刻 NadirRoGue/RenderEngine 体积云, https://github.com/ruochenhua/AetherEngine/issues/139, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,152 @@
+Proposed new feature or change: np.interp takes a 1D list of scalars as an input y. When one wishes to interpolate multiple variables with the same basis/lookup points, np.interp() must be called repeatedly. The majority of the cost asso...
+
+ENH: Interpolation should be able to interpolate vectorised inputs · Issue #23434 · numpy/numpy · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+ENH: Interpolation should be able to interpolate vectorised inputs #23434
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+ENH: Interpolation should be able to interpolate vectorised inputs#23434
+Copy link
+Description
+mjclarke94
+opened on Mar 22, 2023
+Issue body actions
+Proposed new feature or change:
+np.interp takes a 1D list of scalars as an input y. When one wishes to interpolate multiple variables with the same basis/lookup points, np.interp() must be called repeatedly. The majority of the cost associated with this is the initial finding of what indexes should be looked at and the ratios of [n] and [n+1] required to get the interpolated value, so this is wasteful.
+A toy example of the above:
+```
+In [1]: import numpy as np
+
+In [2]: N = 10001
+   ...: x = np.linspace(0, 1, N)
+   ...: y1 = np.sort(np.random.normal(0, 1, N))
+   ...: y2 = np.sort(np.random.uniform(0, 1, N))
+
+In [3]: xr = np.random.random(1000000)
+
+In [4]: %%timeit
+   ...: y1i = np.interp(xr, x, y1)
+   ...: y2i = np.interp(xr, x, y2)
+   ...:
+   ...:
+131 ms ± 357 µs per loop (mean ± std. dev. of 7 runs, 10 loops each)
+
+In [5]: %%timeit
+   ...: ycomplex = y1 + (complex(imag=1) * y2)
+   ...: ycomplexi = np.interp(xr, x, ycomplex)
+   ...: y1ic = np.real(ycomplexi)
+   ...: y2ic = np.imag(ycomplexi)
+   ...:
+   ...:
+65.3 ms ± 190 µs per loop (mean ± std. dev. of 7 runs, 10 loops each)
+```
+By combining arrays y1 and y2 in to a complex number, interpolating that, then decomposing them, the same result is achieved in approximately half the time, indicating that the majority of the runtime arises from working out what indexes and ratios are required for each xp.
+There are two issues with this:
+It is limited to pairs of y vectors. In the event you have 1000 y vectors, there is still a ~500X speedup still on the table (assuming the limiting step as described above)
+It is completely ridiculous, and anyone suggesting casting pairs of vectors to a complex number to speed up a production codebase will quite rightly be dismissed as having gone insane.
+Both of these problems can be addressed by allowing the input for y to be an ndarray.
+Activity
+mhvk commented on Mar 22, 2023
+mhvk
+on Mar 22, 2023
+Contributor
+More actions
+Seems sensible to me (possibly with an axis argument to tell which axis of y, the x correspond to). Code is in numpy/core/src/multiarray/compiled_base.c; it is not quite a trivial change, though (possibly it might be better to rewrite as a gufunc, which takes indices as input).
+seberg commented on Mar 24, 2023
+seberg
+on Mar 24, 2023
+Member
+More actions
+Hmmm, yeah. I think it is a reasonable improvement suggestion, thinking about it, I am not sure it is easy to map the desired iteration order to a gufunc. A gufunc could cache index+t (interpolation point), but even then I am not sure it is quite easy, plus you would want to avoid that if you do it only once.
+But, long story short scipy.interpolate has interp1d which looks like it can do this. I am OK with extending this, but maybe the first thing to do is to just add that in the see also section slightly more explicitly. Then, if we can extend things nicely, that still may be on the table.
+WarrenWeckesser commented on Mar 25, 2023
+WarrenWeckesser
+on Mar 25, 2023
+Last edited by WarrenWeckesser
+Member
+More actions
+I experimented with a gufunc implementation called linear_interp1d(x, xp, fp) in ufunclab. The gufunc has signature (),(n),(n)->(). The implementation has a fast(er) code path when the strides of the x and xp arrays are 0, where it only searches for the x indices once.
+This script shows how the gufunc broadcasting can be used to replace looping with numpy.interp. In this example, the fp array has shape (5, N).
+```
+import numpy as np
+import ufunclab as ul
+
+
+rng = np.random.default_rng()
+
+N = 10001
+xp = np.linspace(0, 1, N)
+
+fp = rng.normal(0, 1, size=(5, N))
+
+x = rng.random(1000000)
+
+ynp = np.array([np.interp(x, xp, t) for t in fp])
+
+yul1 = ul.linear_interp1d(x, xp, np.expand_dims(fp, 1))
+yul2 = ul.linear_interp1d(x[:, None], xp, fp).T
+
+assert np.allclose(ynp, yul1, rtol=1e-15, atol=1e-15)
+assert np.allclose(ynp, yul2, rtol=1e-15, atol=1e-15)
+```
+To use the function with higher dimensional arrays requires some familiarity with gufunc broadcasting, and to take advantage of the fast path, you have to know even more about what goes on in a gufunc loop. The two ways that linear_interp1d is used to compute the result above illustrate this. Here's the timing for the three methods:
+```
+In [129]: %timeit ynp = np.array([np.interp(x, xp, t) for t in fp])
+371 ms ± 454 µs per loop (mean ± std. dev. of 7 runs, 1 loop each)
+
+In [130]: %timeit yul1 = ul.linear_interp1d(x, xp, np.expand_dims(fp, 1))
+362 ms ± 836 µs per loop (mean ± std. dev. of 7 runs, 1 loop each)
+
+In [131]: %timeit yul2 = ul.linear_interp1d(x[:, None], xp, fp).T
+90.9 ms ± 67.4 µs per loop (mean ± std. dev. of 7 runs, 10 loops each)
+```
+The version that computes yul1 is barely faster than using a loop with numpy.interp. The version that computes yul2 shapes the input arrays so that the fast code path is activated, and we get a nice speedup.
+mhvk commented on Mar 25, 2023
+mhvk
+on Mar 25, 2023
+Contributor
+More actions
+I wonder if one could make every repeated x case fast by checking whether the input pointer is the same as the last time - though obviously that would mean then allocating memory for the corresponding indices.
+On the other hand, this gufunc would need a wrapper anyway, so perhaps that can do most of the work to ensure the function gets called efficiently.
+vikramsg commented on May 19, 2023
+vikramsg
+on May 19, 2023
+More actions
+Hi folks,
+I would be very interested in this feature. Can you tell me if there is some progress on this? Can I help in any way?
+Tejovan commented on May 25, 2025
+Tejovan
+on May 25, 2025
+More actions
+I am also still interested in this feature. Has there been any progress?
+tim994018
+marked ENH: Allow interp to process multiple signals by passing multidimensional fp #26433 as a duplicate of this issue on May 27, 2025
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

@@ -7,20 +7,20 @@ Multi-Material Quad Vertex Index Mapping maps a cell edge type to a four-element
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Current cell vertex index (`base_index`), grid strides `length` and `area`, and an edge type identifier (one of 12 defined types).
-*   **Output:** A 4-element integer array `quadVtxIndices` containing the vertex indices for the quadrilateral.
+*   **Input:** Current cell vertex index (`base_index`), grid strides `length` and `area`, and an edge type identifier (one of 12 defined types) [S1, unofficial].
+*   **Output:** A 4-element integer array `quadVtxIndices` containing the vertex indices for the quadrilateral [S1, unofficial].
 
 **Data Structures:**
-*   `base_index`: Linear vertex index of the current cell.
-*   `length`: Primary stride (cells along the X-axis).
+*   `base_index`: Linear vertex index of the current cell [S1, unofficial].
+*   `length`: Primary stride (cells along the Y-axis) [S1, unofficial].
 *   `area`: Secondary stride (cells along the Z-axis, typically `length * height`) [S1, unofficial].
-*   `quadVtxIndices`: Array of 4 integers.
+*   `quadVtxIndices`: Array of 4 integers [S1, unofficial].
 
 **Edge Types:**
 The method handles 12 specific edge types: `LeftBottomEdge`, `RightBottomEdge`, `BackBottomEdge`, `FrontBottomEdge`, `LeftTopEdge`, `RightTopEdge`, `BackTopEdge`, `FrontTopEdge`, `LeftBackEdge`, `RightBackEdge`, `LeftFrontEdge`, `RightFrontEdge` [S1, unofficial].
 
 **Algorithm:**
-`quadVtxIndices[0]` is always the current cell's vertex index. The remaining three indices are computed by adding or subtracting offsets (`1`, `area`, `length`) to the current cell's base index to locate adjacent cells' vertex indices [S1, unofficial]. The exact sign/direction mapping assumes a standard orthogonal grid layout [G].
+`quadVtxIndices[0]` is always the current cell's vertex index [S1, unofficial]. The remaining three indices are computed by adding or subtracting offsets (`1`, `area`, `length`) to the current cell's base index to locate adjacent cells' vertex indices [S1, unofficial]. The exact sign/direction mapping for each edge type follows standard orthogonal grid conventions [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -103,8 +103,8 @@ def compute_quad_vertex_indices(base_index, edge_type, length, area):
 ```
 
 **Parameters:**
-*   `length`: Grid width in cells.
-*   `area`: Grid depth multiplied by width (or equivalent 2D stride) in cells.
+*   `length`: Grid width in cells [S1, unofficial].
+*   `area`: Grid depth multiplied by width (or equivalent 2D stride) in cells [S1, unofficial].
 *   Typical values depend on the grid resolution [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
@@ -117,11 +117,11 @@ def compute_quad_vertex_indices(base_index, edge_type, length, area):
 Eliminates per-chunk index data by using one shared quad buffer for the entire world mesh [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** O(1) per edge type lookup.
-*   **Memory Complexity:** O(1) additional memory for the output array.
+*   **Time Complexity:** O(1) per edge type lookup [G].
+*   **Memory Complexity:** O(1) additional memory for the output array [G].
 *   **Performance:** Specific performance metrics for this method in isolation are not given in the sources.
-*   **Strengths:** Direct pointer arithmetic, minimal branching, and straightforward offset calculations.
-*   **Limitations:** Requires valid pre-checked indices to avoid out-of-bounds access; silently degenerates on invalid input.
+*   **Strengths:** Direct pointer arithmetic, minimal branching, and straightforward offset calculations [G].
+*   **Limitations:** Requires valid pre-checked indices to avoid out-of-bounds access; silently degenerates on invalid input [S1, unofficial].
 
 ## Background
 The method is part of the SurfaceNets multi-material implementation for generating surfaces from voxel data [S1, unofficial].

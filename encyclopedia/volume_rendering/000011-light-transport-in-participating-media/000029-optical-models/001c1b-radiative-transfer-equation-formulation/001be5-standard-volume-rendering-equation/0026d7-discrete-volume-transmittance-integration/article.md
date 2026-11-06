@@ -1,0 +1,129 @@
+# Discrete Volume Transmittance Integration
+
+Also called: Transmittance Integration, Transmittance calculation, Visibility function, Volume Rendering Integral (Transmittance), step-wise optical depth, tau integration
+
+## Overview
+Discrete Volume Transmittance Integration computes the fraction of light that survives extinction along a ray segment in a participating medium by numerically integrating the extinction coefficient. It solves the problem of determining visibility through fog, smoke, or neural density fields where the medium properties vary spatially [S3, unofficial]. Unlike [Analytic Transmittance Integration](4909-analytic-transmittance-integration.md), which assumes constant optical properties over segments to allow closed-form solutions, this method handles arbitrary heterogeneity by sampling at fixed intervals [S1, unofficial][S4, book]. It serves as the core visibility calculation for the [Standard volume rendering equation](1165-standard-volume-rendering-equation.md), providing the transmittance term $T$ required to weight emitted and scattered light contributions [S2, unofficial].
+
+## How it works
+**Inputs:**
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized).
+*   Intersection interval $[t_0, t_1]$ defining the entry and exit points of the ray within the volume bounds [S2, unofficial].
+*   Number of integration steps $N$ (typically 16) [S1, unofficial].
+*   Extinction coefficient field $\sigma_t(\mathbf{p})$ (or density field, often combined with absorption/scattering coefficients) [S1, S3, unofficial].
+
+**Outputs:**
+*   Transmittance $T \in [0, 1]$, representing the probability that a photon travels from $\mathbf{o}$ to the end of the interval without being absorbed or scattered [S3, unofficial].
+
+**Data Structures:**
+*   Accumulator $\tau$ (optical depth): A scalar float initialized to 0.0.
+*   Step size $\Delta t$: Calculated as $(t_1 - t_0) / N$ [S1, S2, unofficial].
+
+**Steps:**
+1.  **Ray Validation:** If the ray direction $\mathbf{d}$ has zero length, return $T=0$ immediately to avoid division by zero or invalid sampling [S2, unofficial].
+2.  **Bound Intersection:** Calculate the intersection interval $[t_0, t_1]$ of the ray with the volume's Axis-Aligned Bounding Box (AABB) [S2, unofficial]. If the ray does not intersect the volume bounds, return $T=0$ (fully transparent/empty) [S2, unofficial].
+3.  **Step Size Calculation:** Compute the distance between sample points:
+    $$ \Delta t = \frac{t_1 - t_0}{N} $$
+    Note: Some implementations apply an offset to $t_0$ based on step size to align samples with the grid [S2, unofficial].
+4.  **Optical Depth Accumulation:** Iterate $i$ from $0$ to $N-1$:
+    a. Calculate the sample position along the ray:
+       $$ \mathbf{p}_i = \mathbf{o} + \mathbf{d} \cdot (t_0 + i \cdot \Delta t) $$
+       (Note: Some sources define position as $\mathbf{p}_1 + \mathbf{dir} \cdot (i \cdot \text{step\_size})$ relative to a start point $\mathbf{p}_1$ [S1, unofficial]).
+    b. Evaluate the extinction coefficient $\sigma_t(\mathbf{p}_i)$ at $\mathbf{p}_i$. In many contexts, this is derived from density $\rho$ and absorption/scattering coefficients $\mu_a, \mu_s$ such that $\sigma_t = (\mu_a + \mu_s) \cdot \rho$ [S1, unofficial].
+    c. Add the contribution to the optical depth accumulator:
+       $$ \tau \leftarrow \tau + \sigma_t(\mathbf{p}_i) \cdot \Delta t $$
+5.  **Transmittance Calculation:** Compute the final transmittance by exponentiating the negative accumulated optical depth:
+    $$ T = e^{-\tau} $$
+    [S1, S2, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_discrete_transmittance(ray_origin, ray_direction, t0, t1, num_steps, get_extinction_coefficient):
+    """
+    Computes transmittance through a heterogeneous medium using discrete integration.
+    
+    Args:
+        ray_origin: Vector3D, origin of the ray.
+        ray_direction: Vector3D, normalized direction of the ray.
+        t0: float, entry distance into the volume.
+        t1: float, exit distance from the volume.
+        num_steps: int, number of integration steps (e.g., 16).
+        get_extinction_coefficient: function, takes a point and returns sigma_t.
+        
+    Returns:
+        float, transmittance T.
+    """
+    # Pitfall: Check for zero-length direction [S2, unofficial]
+    if ray_direction.length() == 0:
+        return 0.0
+    
+    # Pitfall: Check for no intersection [S2, unofficial]
+    if t1 <= t0:
+        return 0.0
+    
+    # Calculate step size [S1, S2, unofficial]
+    step_size = (t1 - t0) / num_steps
+    
+    # Initialize optical depth accumulator [S1, unofficial]
+    tau = 0.0
+    
+    # Iterate and accumulate optical depth [S1, S2, unofficial]
+    for i in range(num_steps):
+        # Calculate sample position [S1, S2, unofficial]
+        # Using t0 + i * step_size aligns samples with the start of the interval
+        current_t = t0 + i * step_size
+        pos = ray_origin + ray_direction * current_t
+        
+        # Get extinction coefficient (sigma_t) at position [S1, S2, unofficial]
+        # In some implementations, this involves density * (mu_a + mu_s) [S1, unofficial]
+        sigma_t = get_extinction_coefficient(pos)
+        
+        # Accumulate optical depth: tau += sigma_t * delta_t [S1, S2, unofficial]
+        tau += sigma_t * step_size
+        
+    # Compute transmittance [S1, S2, S3, unofficial]
+    transmittance = exp(-tau)
+    
+    return transmittance
+```
+
+**Parameters:**
+*   `num_steps` (STEPS): The number of integration steps. A typical value is 16 [S1, unofficial]. Higher values increase accuracy but cost more computation.
+*   `step_size`: The distance between sample points. In some specific implementations, this value is multiplied by 2 during the integration call to adjust sampling density [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Zero Ray Direction:** If $\mathbf{d}$ is zero, the function must return 0 immediately to prevent division by zero or invalid memory access during sampling [S2, unofficial].
+*   **No Intersection:** If the ray does not intersect the volume bounds ($t_1 \le t_0$), return 0 transmittance (fully transparent) [S2, unofficial].
+*   **Heterogeneous vs. Homogeneous:** Using a simple homogeneous equation (like $L_y = L_x e^{-\mu|x-y|}$) for heterogeneous media is incorrect because it fails to account for cumulative attenuation variations along the path, leading to incorrect images [S5, unofficial]. Discrete integration is required for non-uniform media [S5, unofficial].
+
+## Subtopics
+
+### [Heterogeneous Medium Transmittance](4909-heterogeneous-medium-transmittance.md)
+Computes the transmittance between two points through a heterogeneous participating medium. It differs from the parent method by explicitly handling the vector geometry and normalization required for heterogeneous sampling, whereas the parent focuses on the discrete summation and exponentiation logic [4909-heterogeneous-medium-transmittance.md]. It is chosen when the medium's extinction coefficient varies significantly between samples, requiring precise per-step evaluation rather than a single average value.
+
+### Analytic Transmittance Integration
+A method to compute radiance along a ray with floating point accuracy by integrating analytically over each segment where optical properties are constant [S4, book]. It is chosen when the medium can be approximated as piecewise homogeneous (e.g., within a single voxel or tetrahedron), allowing for closed-form solutions that are more accurate than Riemann sums when $\tau \Delta s$ is large [S4, book]. It is not suitable for fully arbitrary heterogeneity without segmentation.
+
+### Heterogeneous Volume Absorption via Ray Marching
+A technique for calculating the transmittance of a heterogeneous participating medium between an eye point and a surface intersection by discretely sampling the medium along the ray path [S5, unofficial]. It is an alternative to the analytical Beer-Lambert law used for homogeneous media [S5, unofficial]. It is chosen when tracing rays through complex, non-uniform volumes where analytical integration is impossible, and it serves as the basis for path tracing in such media [S5, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of integration steps. Each step requires a position calculation and a density/extinction lookup [S1, S2, unofficial].
+*   **Memory Complexity:** $O(1)$ auxiliary space, excluding the storage for the density field itself [S1, unofficial].
+*   **Measured Performance:** Performance depends heavily on the cost of `get_extinction_coefficient`. For voxel grids, this is a texture lookup; for neural fields, it is a network evaluation. With $N=16$, it is relatively fast but can become a bottleneck in high-resolution scenes or when using expensive density evaluators [S1, S3, unofficial].
+*   **Strengths:** Simple to implement; handles arbitrary heterogeneity; numerically stable for moderate optical depths [S1, S3, unofficial].
+*   **Limitations:** Accuracy depends on $N$; undersampling leads to aliasing or incorrect transmittance in highly variable media; does not account for in-scattering (only extinction) [S3, unofficial].
+*   **When to use:** Standard volume rendering, neural radiance fields (NeRFs), and fog/smoke simulation where in-scattering is neglected or handled separately [S3, unofficial].
+*   **When not to use:** When high accuracy is needed for highly heterogeneous media with small-scale variations (requires higher $N$ or adaptive stepping); when in-scattering is the dominant effect (requires full RTE solvers) [S3, S5, unofficial].
+
+## Background
+The concept of transmittance as the exponential of the negative optical depth originates from the Beer-Lambert law [S3, S5, unofficial]. The discrete integration approach is widely used in modern volume rendering, including in voxel-based ray tracers and neural rendering pipelines [S1, S2, S3, unofficial]. It is a fundamental component of the emission-absorption model, which simplifies the full Radiative Transfer Equation (RTE) by neglecting in-scattering [S3, unofficial]. The method is prevalent in implementations such as those found in open-source volumetric path tracers and voxel raycasting engines [S1, S2, unofficial].
+
+## Sources
+[S1] ainagutierrez01/Volumetric-Path-Tracing-, https://github.com/ainagutierrez01/Volumetric-Path-Tracing-, fetched 2026-10-26 (unofficial)
+[S2] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S3] Volume Rendering Integral: Definition & AI/ML Use, https://inferensys.com/glossary/neural-radiance-fields-and-spatial-computing/neural-scene-representations/volume-rendering-integral, fetched 2026-10-28 (unofficial)
+[S4] Local and Global Illumination in the Volume Rendering Integral, https://avishek.net/assets/papers/nerfs/local-and-global-illumination-rendering-integral.pdf, fetched 2026-10-27 (book)
+[S5] How to do heterogeneous volume absorption using path tracing?, https://computergraphics.stackexchange.com/questions/5797/how-to-do-heterogeneous-volume-absorption-using-path-tracing, fetched 2026-10-26 (unofficial)

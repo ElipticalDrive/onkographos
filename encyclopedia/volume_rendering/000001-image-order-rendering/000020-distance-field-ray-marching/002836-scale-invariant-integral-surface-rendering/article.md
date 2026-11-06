@@ -1,0 +1,191 @@
+# Scale-Invariant Integral Surface Rendering
+
+Also called: SCALIS rendering, method using homothetic distance and quadratic polynomial interpolation
+
+## Overview
+Scale-Invariant Integral Surface Rendering (SCALIS) is a ray-marching algorithm designed to efficiently render integral surfaces defined by skeletal primitives with varying radii [S1]. It addresses the primary limitation of standard sphere tracing—excessive step counts along grazing rays—by employing an initial sampling strategy based on homothetic distance to segment primitives and a field mapping combined with quadratic polynomial interpolation [S1]. Unlike sphere tracing, which suffers from maximal step counts on grazing rays, SCALIS reduces the maximal number of steps required while maintaining robustness, achieving up to 70% faster rendering times in interactive scenarios [S1].
+
+## How it works
+**Inputs:**
+- A set of skeletal primitives (random or procedural skeletons) with associated radius functions [S1].
+- A camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ [S1].
+- A convergence threshold $\epsilon$ (implied by standard SDF practices, though specific value not given in [S1]) [S1].
+
+**Outputs:**
+- Intersection distance $t$ or surface hit status [S1].
+- Per-ray statistics (average, median, maximal steps) for performance analysis [S1].
+
+**Data Structures:**
+- **Skeletons:** Generated on the CPU, defining the geometry [S1].
+- **Bounding Box:** Axis-aligned bounding box (AABB) computed from sphere-cone supports for each model [S1].
+- **Heap:** A heap data structure used during the ray processing loop to store segment primitives. The heap must be large enough to accommodate all primitives whose supports overlap the initial intervals defined by the argument of the minimum of homothetic distance [S1].
+- **A-buffer:** Used for efficient GPU implementation, though its construction can become expensive for finely tessellated curves due to overlaps [S1].
+
+**Method Steps:**
+1.  **Skeleton Generation:** Generate random or procedural skeletons on the CPU at each parameter change [S1].
+2.  **Bounding Box Computation:** Compute the axis-aligned bounding box from sphere-cone supports for each model [S1].
+3.  **Ray Launching (for statistics/validation):** Launch sets of rays in six directions (three main axes with positive and negative orientations). Sample ray origins uniformly in the associated bounding-box's face such that a total of 10 million rays are launched per model [S1].
+4.  **Field and Gradient Evaluation:** For each ray, compute field and gradient values simultaneously. This allows the evaluation of the directional derivative and costs less than twice the evaluation cost of a single field value [S1]. Segment parameters are fetched only once from memory since field and gradient are computed at once [S1].
+5.  **Ray Processing Loop:**
+    -   Use a heap to store segment primitives during the loop [S1].
+    -   Apply the homothetic distance-based initial sampling strategy to segment primitives [S1].
+    -   Use the field mapping combined with quadratic polynomial interpolation to advance the ray [S1].
+    -   Terminate when the surface is hit or the ray escapes [S1].
+
+**Formulas:**
+-   **Directional Derivative:** Evaluated using the gradient $\nabla f$ and field value $f$. The specific formula for the directional derivative is not explicitly provided, but it relies on the simultaneous computation of $f$ and $\nabla f$ [S1].
+-   **Quadratic Polynomial Interpolation:** Used as part of the field mapping. The exact polynomial coefficients are not given in the sources [S1].
+-   **Homothetic Distance:** Used for initial sampling strategy. The exact formula is not given in the sources [S1].
+
+**Parameters:**
+-   **Convergence Threshold:** Not given in the sources.
+-   **Max Steps:** Not given in the sources.
+-   **Heap Size:** Must be large enough to accommodate all primitives whose supports overlap the initial intervals defined by the argument of the minimum of homothetic distance [S1].
+
+**Edge Cases and Pitfalls:**
+-   **Grazing Rays:** Less than $10^{-3}\%$ of rays miss an isosurface crossing; these are all grazing rays caused by Hermite data configurations where control polygons of the interpolant do not cross the isovalue 0 [S1]. This limits the efficiency of the rational interpolation heuristic [S1].
+-   **Heap Overflow:** The heap used to store segment primitives must be large enough. This limitation could be mitigated by adding an additional break condition in the algorithm based on the current heap size [S1].
+-   **Finely Tessellated Curves:** The A-buffer can become expensive to build for finely tessellated curves due to overlaps between primitive supports [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for SCALIS rendering based on [S1]
+# Note: Specific formulas for homothetic distance and quadratic interpolation are not provided in the source.
+# The following outlines the high-level structure and data flow described.
+
+def render_salis(skeletons, camera_ray):
+    """
+    Renders a scale-invariant integral surface using the SCALIS method.
+    
+    Args:
+        skeletons: List of skeletal primitives with radius functions.
+        camera_ray: Ray structure with origin o and direction d.
+        
+    Returns:
+        Intersection distance t or None if no hit.
+    """
+    # Step 1: Compute bounding box from sphere-cone supports
+    # This is typically done per model, not per ray, but included for completeness
+    bounding_box = compute_aabb_from_sphere_cone_supports(skeletons)
+    
+    # Step 2: Initialize heap for segment primitives
+    # The heap must be large enough to accommodate all primitives whose supports
+    # overlap the initial intervals defined by the argument of the minimum of homothetic distance.
+    heap = initialize_heap()
+    
+    # Step 3: Initial sampling strategy based on homothetic distance
+    # This segments the primitives along the ray
+    # The exact formula for homothetic distance is not provided in [S1]
+    initial_segments = segment_primitives_using_homothetic_distance(skeletons, camera_ray)
+    
+    # Add initial segments to the heap
+    for segment in initial_segments:
+        heap.push(segment)
+        
+    # Step 4: Ray marching loop
+    t = 0.0
+    max_steps = 1000 # Not given in sources, placeholder for implementation
+    epsilon = 0.001 # Not given in sources, placeholder for implementation
+    
+    for step in range(max_steps):
+        if heap.is_empty():
+            break
+            
+        # Get the next segment/primitive to evaluate
+        current_primitive = heap.pop()
+        
+        # Evaluate field and gradient simultaneously
+        # This allows evaluation of directional derivative
+        # Cost is less than twice the evaluation cost of a single field value
+        field_value, gradient = evaluate_field_and_gradient(current_primitive, camera_ray.o + t * camera_ray.d)
+        
+        # Fetch segment parameters only once from memory
+        segment_params = current_primitive.get_params()
+        
+        # Apply field mapping and quadratic polynomial interpolation
+        # The exact interpolation formula is not provided in [S1]
+        step_size = compute_step_size_using_quadratic_interpolation(field_value, gradient, segment_params)
+        
+        # Advance ray
+        t += step_size
+        
+        # Check for surface hit
+        if abs(field_value) < epsilon:
+            return t
+            
+        # Check for escape
+        if t > MAX_DISTANCE: # Not given in sources
+            return None
+            
+        # Update heap with new segments if necessary
+        # This part depends on the specific homothetic distance logic
+        new_segments = get_overlapping_segments(current_primitive, camera_ray, t)
+        for seg in new_segments:
+            heap.push(seg)
+            
+    return None
+
+def compute_aabb_from_sphere_cone_supports(skeletons):
+    """
+    Computes the axis-aligned bounding box from sphere-cone supports.
+    Implementation details not provided in [S1].
+    """
+    # Placeholder for implementation
+    pass
+
+def segment_primitives_using_homothetic_distance(skeletons, ray):
+    """
+    Segments primitives using homothetic distance.
+    Exact formula not provided in [S1].
+    """
+    # Placeholder for implementation
+    pass
+
+def evaluate_field_and_gradient(primitive, point):
+    """
+    Evaluates field and gradient simultaneously.
+    """
+    # Placeholder for implementation
+    pass
+
+def compute_step_size_using_quadratic_interpolation(field, gradient, params):
+    """
+    Computes step size using quadratic polynomial interpolation.
+    Exact formula not provided in [S1].
+    """
+    # Placeholder for implementation
+    pass
+
+def get_overlapping_segments(primitive, ray, t):
+    """
+    Gets segments overlapping the current ray position.
+    """
+    # Placeholder for implementation
+    pass
+```
+
+## Subtopics
+
+### Sphere Tracing
+The parent method, which uses the SDF value directly as the step size. SCALIS improves upon this for grazing rays [S1].
+
+### Directional Lipschitz Bounds
+An alternative approach to alleviate sphere tracing limitations, such as segment-tracing algorithms. SCALIS still provides reduction in maximal steps compared to this [S1].
+
+## Operating characteristics
+-   **Time Complexity:** Not explicitly given, but the method achieves up to 70% faster rendering times compared to revised previous work [S1].
+-   **Memory Complexity:** Depends on the heap size, which must accommodate all primitives whose supports overlap the initial intervals. The A-buffer can become expensive for finely tessellated curves [S1].
+-   **Measured Performance:** Tested with 10 million rays per model in six directions. Statistics include average, median, and maximal number of steps [S1].
+-   **Scaling:** Interactive manipulation of a large range of skeletons is supported [S1].
+-   **Strengths:** Reduction in maximal number of steps along grazing rays, which is a well-known problem for sphere tracing. Robustness with less than $10^{-3}\%$ of rays missing an isosurface crossing [S1].
+-   **Limitations:** Heap size requirements, potential expense of A-buffer for finely tessellated curves, and output invariance could be improved [S1].
+
+## Background
+-   **Origin:** Introduced in "Fast Ray Tracing of Scale‐Invariant Integral Surfaces" [S1].
+-   **History:** The method was developed to allow interactive modeling of integral surfaces, enabling real-time exploration of kernel parameters [S1].
+-   **Usage:** Used for interactive rendering of large ranges of skeletons, both random and procedural [S1].
+
+## Sources
+[S1] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26

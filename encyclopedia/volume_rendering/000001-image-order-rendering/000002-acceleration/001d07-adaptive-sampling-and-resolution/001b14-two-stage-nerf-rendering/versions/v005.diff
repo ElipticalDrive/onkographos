@@ -1,0 +1,329 @@
+--- v004.md
++++ v005.md
+@@ -4,89 +4,258 @@
+ 
+ ## Overview
+-Two-stage NeRF Rendering is a volume rendering method that decouples the estimation of scene density from the final color synthesis by using two distinct neural networks: a coarse network and a fine network [S1]. It solves the problem of balancing rendering fidelity with computational cost by allocating samples hierarchically: the coarse network identifies high-density regions, while the fine network refines the appearance within those regions [S1]. It differs from single-stage NeRF by explicitly separating the density estimation and high-frequency detail capture into two passes, allowing for more efficient sample distribution than uniform sampling [S1].
++Two-stage NeRF Rendering is an image-order volume rendering method that improves view synthesis quality by decoupling the estimation of scene geometry (density) from high-frequency appearance details. It solves the problem of aliasing and blurry textures in standard uniform ray marching by first performing a coarse pass to estimate the transmittance and density distribution along a ray, and then performing a fine pass that concentrates samples in regions of high density identified by the coarse network [S1][S2, unofficial]. This approach distinguishes itself from uniform sampling by adaptively allocating computational budget to visually significant regions, and from single-stage methods by providing an explicit intermediate density estimate that guides the fine sampling distribution [S1][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input:** Camera ray parameters (origin $\mathbf{o}$, direction $\mathbf{d}$), near/far bounds ($t_n, t_f$), and the trained coarse and fine neural networks.
+-*   **Output:** Pixel color $C(\mathbf{r})$ and alpha $\alpha(\mathbf{r})$.
+-
+-**Data Structures**
+-*   **Coarse Network:** A multi-layer perceptron (MLP) taking positional encoding of position $\gamma(\mathbf{x})$ and direction $\gamma(\mathbf{d})$ as input. It outputs density $\sigma$ and RGB color $C$.
+-*   **Fine Network:** A second MLP with similar architecture, taking the same inputs. It outputs refined density $\sigma$ and RGB color $C$.
+-*   **Sample Points:** A list of 1D coordinates $t_i$ along the ray.
+-
+-**Numbered Steps**
+-1.  **Coarse Sampling:** Generate $K_c = 64$ sample points uniformly (or stratified) along the ray segment $[t_n, t_f]$ [S1].
+-2.  **Coarse Network Query:** Evaluate the coarse network at each of the $K_c$ points to obtain density $\sigma_c$ and color $C_c$ [S1].
+-3.  **Coarse Rendering:** Compute the transmittance and accumulated color using the standard volume rendering integral with the coarse samples [S1].
+-4.  **Fine Sampling:** Generate $K_f = 128$ additional sample points. These are typically distributed based on the density estimates from the coarse pass to concentrate samples in opaque regions [S1]. The total number of fine samples is $K_{total\_fine} = 64 + 128 = 192$ [S1].
+-5.  **Fine Network Query:** Evaluate the fine network at all $K_{total\_fine}$ points to obtain refined density $\sigma_f$ and color $C_f$ [S1].
+-6.  **Fine Rendering:** Compute the final pixel color using the volume rendering integral with the fine samples [S1].
+-
+-**Formulas**
+-The volume rendering integral for a ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ is:
+-$$ C(\mathbf{r}) = \sum_{i=1}^{K} T_i (1 - \exp(-\sigma_i \delta_i)) C_i $$
+-$$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+-where $\delta_i = t_{i+1} - t_i$ is the distance between samples, $\sigma_i$ is the density, and $C_i$ is the color at sample $i$ [S1].
+-
+-**Parameters**
+-*   Coarse samples per ray ($K_c$): 64 [S1].
+-*   Additional fine samples ($K_{add}$): 128 [S1].
+-*   Total fine samples ($K_f$): 192 [S1].
+-*   Total network queries per ray: 256 [S1].
+-
+-**Edge Cases and Pitfalls**
+-*   **Precision:** The method relies on accurate density estimation from the coarse network to guide the fine sampling. Poor coarse density estimates may lead to undersampling in complex regions [S1].
+-*   **Boundaries:** The near and far bounds must be carefully chosen to avoid clipping visible geometry or including excessive empty space [S1].
+-
+-**Pseudocode**
++The method renders an image by processing each pixel's ray through two sequential volume rendering passes. The first pass uses a "coarse" neural network to estimate density $\sigma$ at uniformly spaced points. The second pass uses a "fine" neural network to estimate color and density at additional points, which are sampled based on the density distribution derived from the coarse pass [S1][S2, unofficial].
++
++### Inputs and Outputs
++*   **Inputs**: Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, near plane $t_{near}$, far plane $t_{far}$.
++*   **Outputs**: Pixel color $C(\mathbf{r})$, depth $D(\mathbf{r})$, and optionally alpha $\alpha(\mathbf{r})$.
++
++### Data Structures
++The implementation requires two distinct neural networks (or one network with two heads/sets of weights) and specific sampling parameters.
++
++**Network Architecture (Standard MLP)**:
++*   **Input**: Positional encoded position $\gamma(\mathbf{x})$ and viewing direction $\gamma(\mathbf{d})$.
++*   **Coarse Network**:
++    *   Positional Encoding: $\gamma(\mathbf{x})$ passed through 8 fully-connected ReLU layers, each with 256 channels [S1].
++    *   Density Head: A fully-connected layer with 1 unit (output $\sigma$).
++    *   Color Head: A fully-connected layer with 128 channels, followed by a final sigmoid layer outputting RGB [S1].
++*   **Fine Network**:
++    *   Typically shares the same architecture as the coarse network but is trained separately or initialized differently [S1].
++    *   Note: Modern variants (e.g., Hash Grids) may use different structures (see [S4]), but the canonical two-stage method uses MLPs [S1].
++
++**Sampling Parameters**:
++*   $N_{coarse}$: Number of samples in the coarse pass. Default: 64 [S1][S2, unofficial].
++*   $N_{fine}$: Number of *additional* samples in the fine pass. Default: 128 [S1][S2, unofficial].
++*   $N_{total}$: Total samples per ray = $N_{coarse} + N_{fine}$. Default: 192 (or 256 if including coarse queries in total count, see [S1]).
++*   $use\_disp$: Boolean flag. If true, samples are distributed in disparity space ($1/t$) rather than linear depth space $t$. Default: False [S2, unofficial].
++*   $perturb$: Boolean flag. If true, random noise is added to sample positions during training to break symmetry. Default: True [S2, unofficial].
++*   $noise\_std$: Standard deviation of the noise added to sample positions. Default: $1/(2N)$ [S2, unofficial].
++
++### Numbered Steps
++
++1.  **Ray Setup**:
++    For each pixel, compute the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ for $t \in [t_{near}, t_{far}]$.
++
++2.  **Coarse Sampling**:
++    Generate $N_{coarse}$ sample points $t_i$ along the ray.
++    *   If $use\_disp$ is False: Sample uniformly in $[t_{near}, t_{far}]$.
++    *   If $use\_disp$ is True: Sample uniformly in disparity space $[1/t_{far}, 1/t_{near}]$, then convert to depth $t = 1/disp$.
++    *   If $perturb$ is True during training: Add noise $\epsilon \sim U[-\delta, \delta]$ to each $t_i$, where $\delta = (t_{far} - t_{near}) / N_{coarse}$ [S2, unofficial].
++
++3.  **Coarse Network Query**:
++    For each coarse sample $t_i$:
++    *   Compute position $\mathbf{x}_i = \mathbf{o} + t_i \mathbf{d}$.
++    *   Encode $\mathbf{x}_i$ and $\mathbf{d}$.
++    *   Query the Coarse Network to get density $\sigma_i$ and color $\mathbf{c}_i$.
++    *   Apply ReLU to $\sigma_i$ to ensure non-negativity [S1].
++
++4.  **Coarse Volume Rendering**:
++    Compute the transmittance $T_i$ and weight $w_i$ for each coarse sample using the standard volume rendering equations:
++    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \Delta t_j\right) $$
++    $$ w_i = T_i (1 - \exp(-\sigma_i \Delta t_i)) $$
++    where $\Delta t_i = t_{i+1} - t_i$ (or half-intervals at boundaries).
++    Compute the coarse depth estimate $D_{coarse}$:
++    $$ D_{coarse} = \sum_{i=1}^{N_{coarse}} w_i t_i $$
++
++5.  **Fine Sampling (Importance Sampling)**:
++    Generate $N_{fine}$ additional sample points $t'_j$ based on the coarse weights $w_i$.
++    *   The probability of sampling in the interval $[t_i, t_{i+1}]$ is proportional to $w_i$.
++    *   This concentrates samples in regions where the coarse network predicted high density (edges, surfaces) [S1][S2, unofficial].
++    *   If $perturb$ is True: Add noise to these fine samples as well.
++
++6.  **Fine Network Query**:
++    For each fine sample $t'_j$:
++    *   Compute position $\mathbf{x}'_j = \mathbf{o} + t'_j \mathbf{d}$.
++    *   Encode $\mathbf{x}'_j$ and $\mathbf{d}$.
++    *   Query the Fine Network to get density $\sigma'_j$ and color $\mathbf{c}'_j$.
++
++7.  **Fine Volume Rendering**:
++    Combine coarse and fine samples. The final color $C(\mathbf{r})$ is computed by rendering all $N_{coarse} + N_{fine}$ points together, using the fine network's density and color for the fine points, and the coarse network's for the coarse points:
++    $$ C(\mathbf{r}) = \sum_{k=1}^{N_{coarse} + N_{fine}} w_k \mathbf{c}_k $$
++    where $w_k$ is computed using the respective $\sigma_k$ (coarse or fine) for each sample $k$.
++    The final depth $D(\mathbf{r})$ is:
++    $$ D(\mathbf{r}) = \sum_{k=1}^{N_{coarse} + N_{fine}} w_k t_k $$
++
++### Pseudocode
++
+ ```python
+-def render_two_stage_neRF(ray_o, ray_d, t_near, t_far, coarse_net, fine_net):
+-    # Step 1: Coarse Sampling
+-    t_coarse = stratified_sample(t_near, t_far, 64)
+-    
+-    # Step 2: Coarse Network Query
+-    sigma_coarse, color_coarse = coarse_net(t_coarse, ray_o, ray_d)
+-    
+-    # Step 3: Coarse Rendering (Optional, often used for training loss but not final output)
+-    # T_coarse, C_coarse = volume_render(t_coarse, sigma_coarse, color_coarse)
+-    
+-    # Step 4: Fine Sampling
+-    # Generate 128 additional samples based on coarse density
+-    t_fine_extra = importance_sample(t_coarse, sigma_coarse, 128)
+-    t_fine = sort_concatenate(t_coarse, t_fine_extra)
+-    
+-    # Step 5: Fine Network Query
+-    sigma_fine, color_fine = fine_net(t_fine, ray_o, ray_d)
+-    
+-    # Step 6: Fine Rendering
+-    T_fine, C_fine = volume_render(t_fine, sigma_fine, color_fine)
+-    
+-    return C_fine
++import numpy as np
++
++def two_stage_nerf_rendering(ray_origins, ray_directions, near_plane, far_plane, 
++                             coarse_net, fine_net, N_coarse=64, N_fine=128, 
++                             use_disp=False, perturb=True, noise_std=1.0/256.0):
++    """
++    Renders a batch of rays using the two-stage NeRF method.
++    
++    Args:
++        ray_origins: (B, 3) array of ray origins.
++        ray_directions: (B, 3) array of ray directions.
++        near_plane: float, near clipping plane.
++        far_plane: float, far clipping plane.
++        coarse_net: Function/Model for coarse pass.
++        fine_net: Function/Model for fine pass.
++        N_coarse: int, number of coarse samples.
++        N_fine: int, number of fine samples.
++        use_disp: bool, if True, sample in disparity space.
++        perturb: bool, if True, add noise to samples.
++        noise_std: float, standard deviation of noise.
++        
++    Returns:
++        colors: (B, 3) rendered colors.
++        depths: (B,) rendered depths.
++    """
++    B = ray_origins.shape[0]
++    
++    # 1. Coarse Sampling
++    if use_disp:
++        # Sample uniformly in disparity space [1/far, 1/near]
++        disp_samples = np.linspace(1.0/far_plane, 1.0/near_plane, N_coarse, endpoint=False)
++        # Add jitter
++        if perturb:
++            disp_samples += np.random.uniform(0, (1.0/near_plane - 1.0/far_plane)/N_coarse, disp_samples.shape)
++        # Convert to depth
++        t_coarse = 1.0 / disp_samples
++    else:
++        # Sample uniformly in depth space [near, far]
++        t_coarse = np.linspace(near_plane, far_plane, N_coarse, endpoint=False)
++        # Add jitter
++        if perturb:
++            t_coarse += np.random.uniform(0, (far_plane - near_plane)/N_coarse, t_coarse.shape)
++            
++    # Expand for batch: (B, N_coarse)
++    t_coarse = np.tile(t_coarse, (B, 1))
++    
++    # 2. Coarse Network Query
++    # Compute positions: o + t * d
++    # ray_origins: (B, 3), t_coarse: (B, N_coarse), ray_directions: (B, 3)
++    # Need to broadcast t_coarse to (B, N_coarse, 1)
++    positions_coarse = ray_origins[:, np.newaxis, :] + t_coarse[:, :, np.newaxis] * ray_directions[:, np.newaxis, :]
++    
++    # Query coarse network
++    # Assume coarse_net returns (sigma, color) for each point
++    # sigma_coarse: (B, N_coarse), color_coarse: (B, N_coarse, 3)
++    sigma_coarse, color_coarse = coarse_net(positions_coarse, ray_directions)
++    
++    # 3. Coarse Volume Rendering to get weights for fine sampling
++    # Compute deltas
++    deltas = t_coarse[:, 1:] - t_coarse[:, :-1]
++    # Add zero delta at the end for the last sample
++    delta_last = far_plane - t_coarse[:, -1]
++    deltas = np.concatenate([deltas, delta_last[:, np.newaxis]], axis=1) # (B, N_coarse)
++    
++    # Compute transmittance
++    # alpha = 1 - exp(-sigma * delta)
++    # T_i = product(1 - alpha_j) for j < i
++    # Using log-space for stability
++    alpha_coarse = 1.0 - np.exp(-np.maximum(sigma_coarse, 1e-10) * deltas)
++    T_coarse = np.cumprod(1.0 - alpha_coarse, axis=1)
++    # Shift T to the right by 1, fill first element with 1.0
++    T_coarse_shifted = np.concatenate([np.ones((B, 1)), T_coarse[:, :-1]], axis=1)
++    
++    # Weights
++    weights_coarse = T_coarse_shifted * alpha_coarse # (B, N_coarse)
++    
++    # 4. Fine Sampling (Importance Sampling)
++    # Sample N_fine points based on weights_coarse
++    # Resample t_coarse points according to weights_coarse
++    # This is typically done by drawing from the discrete distribution defined by weights_coarse
++    # and then interpolating or adding jitter within the selected intervals.
++    
++    # Simple implementation: CDF-based resampling
++    cdf_coarse = np.cumsum(weights_coarse, axis=1)
++    cdf_coarse = np.concatenate([np.zeros((B, 1)), cdf_coarse], axis=1)
++    cdf_coarse = cdf_coarse / cdf_coarse[:, -1:, np.newaxis] # Normalize
++    
++    # Generate uniform random numbers for fine samples
++    u_fine = np.random.uniform(0, 1, (B, N_fine))
++    
++    # Find which interval each u_fine falls into
++    # This is a vectorized searchsorted operation
++    indices = np.searchsorted(cdf_coarse, u_fine, side='left')
++    indices = np.clip(indices, 0, N_coarse - 1)
++    
++    # Get the bounds of the selected intervals
++    t_lower = t_coarse[np.arange(B)[:, np.newaxis], indices]
++    t_upper = t_coarse[np.arange(B)[:, np.newaxis], indices + 1]
++    
++    # Interpolate within the interval
++    # Map u from [0,1] to [t_lower, t_upper]
++    # However, we need to map u_fine to the local probability within the interval
++    # A simpler approach often used: just sample uniformly within the selected interval
++    # But to preserve the importance sampling property, we should map the uniform u to the 
++    # conditional distribution within the interval.
++    # For simplicity in this pseudocode, we assume uniform sampling within the selected bin
++    # and add jitter.
++    
++    t_fine = t_lower + (t_upper - t_lower) * u_fine
++    
++    # Add jitter if perturb is True
++    if perturb:
++        bin_widths = t_upper - t_lower
++        jitter = np.random.uniform(0, bin_widths)
++        t_fine += jitter
++        
++    # 5. Fine Network Query
++    positions_fine = ray_origins[:, np.newaxis, :] + t_fine[:, :, np.newaxis] * ray_directions[:, np.newaxis, :]
++    sigma_fine, color_fine = fine_net(positions_fine, ray_directions)
++    
++    # 6. Combine Coarse and Fine Samples
++    # Concatenate t, sigma, color
++    t_all = np.concatenate([t_coarse, t_fine], axis=1)
++    sigma_all = np.concatenate([sigma_coarse, sigma_fine], axis=1)
++    color_all = np.concatenate([color_coarse, color_fine], axis=1)
++    
++    # Recompute deltas for all samples
++    deltas_all = t_all[:, 1:] - t_all[:, :-1]
++    delta_last_all = far_plane - t_all[:, -1]
++    deltas_all = np.concatenate([deltas_all, delta_last_all[:, np.newaxis]], axis=1)
++    
++    # Recompute alpha and weights for all samples
++    alpha_all = 1.0 - np.exp(-np.maximum(sigma_all, 1e-10) * deltas_all)
++    T_all = np.cumprod(1.0 - alpha_all, axis=1)
++    T_all_shifted = np.concatenate([np.ones((B, 1)), T_all[:, :-1]], axis=1)
++    weights_all = T_all_shifted * alpha_all
++    
++    # 7. Final Rendering
++    colors = np.sum(weights_all[:, :, np.newaxis] * color_all, axis=1)
++    depths = np.sum(weights_all * t_all, axis=1)
++    
++    return colors, depths
+ ```
+ 
++### Edge Cases and Pitfalls
++*   **Precision**: Computing transmittance $T$ via cumulative product can lead to underflow in deep scenes. Use log-space accumulation or clamp $\sigma$ values [S2, unofficial].
++*   **Boundaries**: The last sample's delta is often set to $t_{far} - t_{last}$, but if the ray exits the volume earlier, this may overestimate density. Clamping $\sigma$ to 0 outside the bounding box is essential [S2, unofficial].
++*   **Degenerate Input**: If $N_{fine} = 0$, the fine network is not used, and the method degrades to single-stage rendering [S2, unofficial].
++*   **Training Stability**: Without perturbation, the coarse and fine networks may learn identical functions, leading to no improvement. Perturbation breaks this symmetry [S2, unofficial].
++
+ ## Subtopics
+ 
+ ### [Combined Sampling (Occupancy Grid + Proposal Network)](1626-combined-sampling-occupancy-grid-proposal-network.md)
+-A method that stacks an occupancy grid on top of a proposal network to reduce the number of rays and shrink the near-far plane for remaining rays, leveraging the transmittance estimation from both.
++Extends the two-stage approach by using an occupancy grid to prune rays and a proposal network to generate samples, further reducing the number of rays and shrinking the near-far plane.
+ 
+ ### [VF-NeRF Rendering Pipeline](3302-vf-nerf-rendering-pipeline.md)
+-The VF-NeRF rendering pipeline is a two-stage volume rendering method that uses a vector field network to predict surface normals, features, and Jacobians for density estimation and shading. It differs from standard NeRF by deriving density from the directional derivative of the vector field rather than a direct scalar field prediction, enabling explicit surface representation within the implicit volume. It builds on [Two-stage NeRF Rendering](925-two-stage-nerf-rendering.md) by integrating vector field-based density computation into the coarse and fine sampling passes.
++Uses a vector field network to predict surface normals and density, integrating vector field-based density computation into the coarse and fine sampling passes for explicit surface representation.
+ 
+ ### [Hierarchical NeRF Rendering](3366-hierarchical-nerf-rendering.md)
+-Hierarchical NeRF Rendering is a two-pass volume rendering pipeline that first estimates scene density with a coarse uniform or stratified pass, then uses the resulting sample weights to importance-sample a fine pass. It distinguishes itself from uniform ray marching by adaptively concentrating samples in high-density regions identified by the coarse network, thereby reducing computational waste in empty space while maintaining high-frequency detail.
++A two-pass pipeline that estimates scene density with a coarse uniform pass and then uses the resulting sample weights to importance-sample a fine pass, distinguishing itself by adaptively concentrating samples in high-density regions.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(K_c + K_f)$ network queries per ray, where $K_c=64$ and $K_f=192$ [S1].
+-*   **Memory Complexity:** Depends on the size of the two MLPs. The original implementation uses fully connected layers with 256 channels [S1].
+-*   **Measured Performance:** On an NVIDIA V100, rendering a frame with 640k rays (synthetic) or 762k rays (real scenes) takes approximately 30 seconds, resulting in 150-200 million network queries per image [S1].
+-*   **Strengths:** Improves visual quality by allowing the fine network to focus on high-frequency details in dense regions [S1].
+-*   **Limitations:** Requires two network evaluations per ray (or at least two passes), increasing computational cost compared to single-stage methods [S1].
+-*   **When to Use:** When high-fidelity novel view synthesis is required and computational resources allow for multiple network queries per ray [S1].
+-*   **When Not to Use:** When real-time performance is critical and the overhead of two network evaluations is prohibitive [S1].
++*   **Time Complexity**: $O(N_{total} \cdot N_{rays})$, where $N_{total} = N_{coarse} + N_{fine}$. The constant factor is higher than single-stage rendering due to two network queries per ray (one coarse, one fine).
++*   **Memory Complexity**: $O(N_{total} \cdot N_{rays})$ to store intermediate densities and colors for the final integration step.
++*   **Measured Performance**: On an NVIDIA V100, rendering a realistic synthetic dataset (640k rays/image) or real scenes (762k rays/image) with 256 total network queries per ray takes approximately 30 seconds per frame [S1]. This results in 150-200 million network queries per image [S1].
++*   **Strengths**: Significantly improves texture sharpness and reduces aliasing compared to uniform sampling [S1][S2, unofficial].
++*   **Limitations**: Requires more network queries than single-stage methods. The coarse pass adds computational overhead, though it is necessary for the fine sampling distribution [S1].
++*   **When to Use**: When high-fidelity texture synthesis is required and computational budget allows for multiple network queries per ray.
++*   **When Not to Use**: In real-time applications where latency is critical, or when the scene is very sparse and uniform sampling is sufficient.
+ 
+ ## Background
+-Two-stage NeRF Rendering was introduced by Mildenhall et al. in the paper "NeRF: Representing Scenes as Neural Radiance Fields for View Synthesis" [S1]. The method was developed to address the limitations of single-stage neural radiance fields, which struggled to capture high-frequency details without excessive sampling [S1]. The approach has become a standard baseline in neural rendering research [S1].
++Two-stage NeRF Rendering was introduced by Mildenhall et al. in the original NeRF paper (2020) [S1]. The method was designed to address the blurriness and aliasing artifacts inherent in uniform sampling of neural radiance fields. By decoupling the density estimation (coarse) from the color estimation (fine), the method allows the fine network to focus on high-frequency details in regions of interest. The approach has become a standard baseline for subsequent NeRF variants and is foundational to many modern implicit scene representation techniques [S1][S2, unofficial].
+ 
+ ## Sources
+-[S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27+[S1] NeRF: Representing scenes as neural radiance fields for view synthesis, http://www.matthewtancik.com/nerf, fetched 2026-10-27
++[S2] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
++[S3] barbararoessle/ganerf, https://github.com/barbararoessle/ganerf, fetched 2026-10-27 (unofficial)
++[S4] PlaNeRF: SVD Unsupervised 3D Plane Regularization for NeRF Large-Scale Urban Scene Reconstruction, https://doi.org/10.1109/3dv62453.2024.00114, fetched 2026-11-04

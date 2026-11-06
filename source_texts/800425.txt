@@ -1,0 +1,160 @@
+Deep dive into how Unity defines the rendering order of objects for a camera and how to control it, with a focus on URP in Unity 2022.3 LTS and Unity 6
+
+Controlling Unity's rendering order - why and how | Toca Boca Tech Blog
+Sitemap
+Open in app
+Sign up
+Sign in
+Medium Logo
+Write
+Sign up
+Sign in
+Toca Boca Tech Blog
+·
+We believe in the power of play. We create experiences together with kids that foster a generation of playful people. We value play, quality, inclusion and innovation.
+Bertrand Guay Paquet
+12 min read
+·
+Sep 26, 2024
+--
+Listen
+Share
+Press enter or click to view image in full size
+ChatGPT’s take on a good header image for this post’s topic
+A colleague recently asked for advice on how to control the order in which Unity renders objects in the game. His question motivated me to do a deep dive into how Unity defines the rendering order of objects for a camera, and to share the results of my research here.
+This post got quite long so I’ll keep its focus mainly on conceptual and reference information. In a follow-up post I’ll present concrete examples of things we achieved in the Toca Boca Days game by controlling the rendering order.
+While the description in Unity’s manual isn’t exhaustive, it does a good job of describing the rendering order in the Built-in Render Pipeline. However the Universal Render Pipeline (URP), and other Scriptable Render Pipelines (SRPs), use a different sorting algorithm, and they offer much more possibilities to control rendering with features such as custom render passes.
+I’m not aware of any comprehensive reference that explains all the sorting criteria that affect the rendering order, so that’s what this post aims to be! I’ll focus on URP in Unity 2022.3 LTS and Unity 6, but most of the information below applies to the High Definition Render Pipeline (HDRP) as well.
+For convenience I embedded numerous links to relevant Unity documentation.
+Why control Unity’s rendering order
+Let’s first state that most of the time you probably don’t need to worry about the specific rendering order of objects in your scene. URP renders opaque objects before transparent objects, makes sure to render its other features such as decals at the appropriate time, and uses a reasonable default rendering order to provide good performance. The depth buffer also makes sure that the opaque objects nearest to the camera hide those behind them.
+However, you might need to customize URP’s default rendering order to achieve a visual effect or to improve the performance of your game. An example of a visual effect is stencil shadows, for which you need to render shadow volumes to the stencil buffer, and then use the results to apply shadows to the scene in a full screen pass.
+To improve performance, it’s sometimes beneficial to render large opaque occluders first so they write to the depth buffer. The depth buffer is then primed to more efficiently use depth tests to reduce the number of pixel shader executions necessary to render other objects in the scene.
+What you’ll need really depends on the specific features and characteristics of your game.
+If you want to control the rendering order to improve performance, make sure to profile your GPU performance beforehand to validate your assumptions. And don’t forget to also profile afterwards to confirm that you did in fact improve things. Additional complexity is only worth it if it measurably achieves gains!
+It’s also important to familiarize yourself with the performance characteristics of your target platform or platforms. Tile-based deferred rendering (TBDR) GPUs for example have significantly different performance best practices compared to discrete desktop GPUs.
+What that said, let’s dive in!
+Macro control of rendering order with render passes
+With URP you can customize the rendering order via custom render passes. I won’t go into depth about how to use them because there are many other great resources out there that cover that topic. And in particular URP’s documentation team really improved that area in the past year!
+I qualify render passes as “macro control” here because they typically serve to control the rendering state and rendering order of a subset of objects. In other words, at a high level render passes do the following:
+Inject themselves into the rendering pipeline in an injection point, normally based on RenderPassEvent.
+Optionally define inputs and outputs, such as the render target.
+Use FilteringSettings to select a subset of the objects included in the current camera’s CullingResults. This optionally reduces which objects to render from those left after frustum culling, occlusion culling, layer masking and LOD level masking.
+Set the required rendering state and global shader variables.
+Schedule draw commands to render objects.
+Other typical uses of custom render passes are full screen effects, blit the framebuffer to a texture, and other framebuffer manipulations. These use-cases still need to be executed at a specific point in the frame, but they often don’t render more than one or a few objects; often only a full screen quad (or triangle).
+To learn more about custom render passes, I recommend looking into the Frame Debugger and the relevant parts of URP’s C# source code. It’s a good source of inspiration for your own render passes. RenderObjectsPass.cs, which implements the Render Objects Renderer Feature, is a good starting point.
+The UniversalRenderer.Setup method is a bit of a behemoth at around 800 lines of code, but it’s interesting to learn how URP orchestrates all its render passes. Set a breakpoint in there and follow the execution flow. It can help clarify some detailed information that’s hard to come by in documentation, such as which exact conditions activate a depth prepass, or precisely when URP copies the depth buffer to a depth texture in a frame.
+Rendering order of objects inside a rendering pass
+In addition to the “macro” ordering with render passes described above, Unity also sorts rendered objects inside a single pass. The sorting algorithm considers many criteria and you can control which ones to apply to draw calls in a render pass with the DrawingSettings.sortingSettings property.
+Technically, the boundaries of individual sets of objects that are sorted together aren’t tied to a rendering pass itself. It’s instead a RendererList that defines those boundaries. In other words, all objects in the RendererList of a draw call are rendered before all objects in other draw commands scheduled after it. For example, if a render pass adds two commands to draw RendererLists, all objects from the first draw command are collectively rendered before those in the second draw command.
+You create RendererList instances in render passes either explicitly for use with CommandBuffer.DrawRendererList or implicitly through one of the ScriptableRenderContext.DrawRenderers methods that each create a RendererList internally. While currently more verbose, the former option has the benefit that you add draw commands directly to a specific CommandBuffer that you can manage.
+You can select some of the criteria that Unity uses to sort rendered objects for your own render passes with the SortingSettings.criteria property. The complete list of criteria ordered by priority is below. Where applicable I specified the SortingCriteria enum flag that activates a criteria. When Unity compares two objects, if they have an equal value for a criteria, it continues the comparison with the next active criteria in the list.
+SortingCriteria.SortingLayer: Sorting layer and order from the Renderer.sortingLayerID and Renderer.sortingOrder properties.
+- Note that the sorting layer here refers to the SortingLayer property, not GameObject.layer.
+- Unity’s documentation describes sorting layers only in the context of sprites, but you can still use them for other renderer types via scripts.
+SortingCriteria.RenderQueue: Render queue from the Material.renderQueue or Shader.renderQueue properties.
+SortingCriteria.RendererPriority: Renderer priority from the Renderer.rendererPriority property.
+SortingCriteria.BackToFront: Back to front sorting based on the distance from the camera.
+- Typically used to render transparent objects.
+- When distances are equal, Unity uses these subcriteria:
+a) Sorting group. Unity refers to them only in the context of sprites, but you can still use them for other renderer types too.
+b) UI canvas order with Canvas.sortingOrder.
+c) Material index in the mesh renderer’s material array, for renderers with multiple materials.
+SortingCriteria.QuantizedFrontToBack: Rough front to back sorting.
+- Typically used for opaque objects to improve Z-culling.
+- Sorts by bucket based on the top mantissa bits of the floating point distance. So for example distances of 42 and 57 land in the same bucket, and are considered equal.
+- Turned off by default for Tile Based Deferred Rendering GPUs with the default value of Rendering.OpaqueSortMode (see below).
+SortingCriteria.OptimizeStateChanges: Sort by drawing state to reduce state changes, including shader changes. The sub-criteria are:
+- Whether the shader and renderer are compatible with the SRP batcher.
+- Type of renderer. In the C++ code the enum type is RendererType. The most interesting renderer types are:
+a) Individual classes that derive from Renderer such as MeshRenderer and SpriteRenderer.
+b) Internal “intermediate renderer” such as a UI canvas batch and those generated from the Graphics.RenderMesh method.
+c) BatchRendererGroup.
+- LODFadeMode for objects in LOD Groups.
+- Static batching state. If both objects have static batching active, there’s a further sort by material, static batch, and mesh position in the static batch.
+- Renderer.lightmapIndex which is the index of the baked lightmap.
+- Material. This check uses an approximation based on the shader’s instance id, a hash of the material’s shader keywords, and the material’s instance id.
+- Mesh. The details of this step depend on factors such as renderer type and usage of static batching.
+SortingCriteria.CanvasOrder: UI canvas order with Canvas.sortingOrder.
+Render node index, or the order in which objects were added to the queue of objects to render.
+Index of the shader pass.
+(Apologies for the list formatting; Medium doesn’t support nested lists)
+If you have access to Unity’s C++ source code, a good starting point to inspect the code of the sorting algorithm is RenderObjectSorter::operator().
+The SortingCriteria.BackToFront and SortingCriteria.QuantizedFrontToBack flags are normally not used together. Another noteworthy detail is that the distances used for sorting can be calculated from an arbitrary point, not only from the “real” camera position. Refer to Rendering.SortingSettings for more information. This can be useful if you want to reuse a CullingResults instance and render it with a different distance sorting from another point of view.
+URP uses a different default combination of sorting criteria for opaque objects and transparent objects.
+Objects in the transparent render queue range use SortingCriteria.CommonTransparent which includes these criteria: SortingLayer, RenderQueue, BackToFront, and OptimizeStateChanges.
+Opaque objects use SortingCriteria.CommonOpaque which includes these criteria: SortingLayer, RenderQueue, QuantizedFrontToBack, OptimizeStateChanges, and CanvasOrder. QuantizedFrontToBack is a special case. URP deactivates it by default on mobile platforms with Tile-based deferred rendering GPUs because the CPU performance cost of sorting by distance usually outweighs any GPU performance gains. URP also deactivates it for cameras with the Camera.opaqueSortMode property set to NoDistanceSort.
+However as stated above, you can use any combination of sorting criteria in your own custom render passes.
+Rendering order for the BatchRendererGroup API
+If you’re interested in the topic of rendering order from a performance point of view, there’s a good chance that you’re also interested in Unity’s BatchRendererGroup (BRG), which is a high-performance lower-level Unity API to submit draw commands.
+The BRG API introduces additional considerations that apply to the sorting criteria I described above.
+Pay close attention to terms in use because they can get confusing:
+A BatchDrawCommand instance is a C# instance of the BatchDrawCommand struct.
+A BatchDrawCommand instance also contains instances, or visible instances. They are instances inside a BatchRendererGroup batch that become individual draw commands for the GPU.
+It’s quite a mouthful, but I hope this helps to disambiguate things!
+The most important thing to understand about rendering order in BRG is that Unity doesn’t sort the individual instances contained in a single BatchDrawCommand. The visibleOffset and visibleCount properties of a command define a slice of the BatchCullingOutputDrawCommands.visibleInstances array that it will draw. The rendering order of the elements in the slice is the same as in the slice itself.
+To sort BatchDrawCommand instances by depth, use the BatchDrawCommandFlags.HasSortingPosition flag and set BatchDrawCommand.visibleCount to 1. In other words this means that each rendered object has its own BatchDrawCommand instance.
+The fact that the BRG API doesn’t sort the instances in a BatchDrawCommand might seem like a limitation, but it’s actually a powerful feature. It allows you to leverage high-performance Burst jobs to sort the instances inside a draw command with any criteria you need. You’re even free to reuse the contents of the visibleInstances array to keep the same sorting order from one frame to the next if that fits your use-case.
+Unity does however sort each BatchDrawCommand instance with other BatchDrawCommand instances and other objects rendered without BRG as described in the previous section.
+In Unity 2022.3, the following sorting criteria work differently for BRG’s BatchDrawCommands:
+SortingCriteria.RendererPriority:
+- rendererPriority is always 0.
+The BatchDrawCommand.sortingPosition property establishes the distance of a BatchDrawCommand instance, taken as a whole, for the purposes of sorting it by distance.
+SortingCriteria.BackToFront:
+- Sorting groups and UI canvas order don’t apply. They don’t really make sense in the context of BRG anyway.
+- Material index is always 0 since BRG doesn’t use multi-material.
+SortingCriteria.OptimizeStateChanges:
+- The Mesh sorting criteria doesn’t apply.
+SortingCriteria.CanvasOrder:
+- Not used, or rather the order is always set to 0.
+Unity 6 adds the following BRG features:
+Since Unity 2023.3.0a3 (which later becomes Unity 6), you can now use the BatchDrawCommandFlags.HasSortingPosition flag with BatchDrawCommands that contain more than one instance.
+BatchFilterSettings.rendererPriority to set the renderer priority of a BatchDrawCommand instance for sorting.
+BatchFilterSettings.batchLayer in combination with FilteringSettings.batchLayerMask adds new filtering capabilities:
+- Assign a batchLayer to batches, similarly to BatchFilterSettings.renderingLayerMask to filter them inside a CullingResults instance.
+- Since objects not rendered with BRG are in batch layer 0, you can use that as a criteria to differentiate BatchDrawCommands from other types of draw commands.
+As an aside, as of writing, BatchFilterSettings.allDepthSorted doesn’t actually do anything in any released Unity version despite what the documentation suggests. For now Unity’s code only has a “TODO” comment where it could potentially be useful. The description of this property got me scratching my head for a while and I still don’t understand its intent. So I’m sharing this random fact here in case it helps someone else!
+Set the render queue of a material in URP
+How to set the render queue of a material in URP depends on a few factors. Since the current documentation for this area as of writing is somewhat incomplete, I’ll provide additional details here.
+In the Editor, URP provides some convenience features to manage the Material.renderQueue property.
+URP’s default behavior is to automatically control the render queue. In that case, the Inspector displays the Sorting Priority property, which becomes an offset to the material’s “base” render queue. If the material has a Surface Type property in its Surface Options, URP uses it to determine the base render queue. Otherwise the base render queue is the shader’s render queue.
+Automatic render queue control with a Shader Graph shader
+The Inspector displays the Sorting Priority property differently if the shader isn’t a Shader Graph shader, but the behavior is the same.
+For materials that use Shader Graph shaders, the Inspector also provides a user override render queue control behavior. In that mode, URP lets you explicitly set the material’s render queue.
+User override render queue control
+At runtime, the convenience features described don’t apply, and you can directly set the render queue of a material with the Material.renderQueue property.
+As a side-note, HDRP manages material render queues in a similar way to implement the transparent material sorting priority feature. HDRP then translates the sorting priority into a positive or negative offset to the applicable “base” render queue of the material based on HDRenderQueue.Priority.
+Rendering order best practices
+With so many options to control Unity’s rendering order, it’s easy to wonder which ones you should use and when. Every part I described above is there for a reason, and there are too many scenarios to list them all. So let’s focus on a few aspects to keep in mind to pick an appropriate strategy.
+First, if you use or plan to use the BatchRendererGroup API, review the differences with “classical” Unity rendering so as to avoid an incompatibility. In particular Unity 2022.3 ignores Renderer.rendererPriority in BatchDrawCommands. BRG does however provide many more sorting possibilities to implement any custom rendering order you need. Prefer Burst jobs for any large or complex sorting requirements for better performance.
+For sprites and UI, the most usual options are well documented and you should strive to use what’s already available to maintain greater developer familiarity and compatibility with other assets.
+To implement an effect that needs to order several draw commands, possibly each drawing several objects, I would prefer a custom render pass for more control. If you use whole framebuffer operations such as blit, or need to overwrite rendering state such as the stencil state, a custom render pass is likely your only option.
+However if you only need to order the rendering of objects inside an existing URP pass such as DrawTransparentObjects, or if you don’t have anyone available to implement a custom pass, you can get pretty far with the sorting layer or render queue properties, or a combination of them. Instead or in addition to sorting layers, you can also consider the Renderer.rendererPriority property to order Renderer instances, but keep in mind the BRG compatibility note above.
+Whichever option you pick, I strongly recommend that you document the resulting sorting strategy at least at a high level! It’s not necessarily easy to piece together after the fact from a collection of assets.
+Sorting layers exist at the Renderer level, whereas the render queue is a material and shader construct. The appropriate option depends on your specific ordering needs. For example, if you make use of the render queue to order rendering, you’ll need to duplicate materials or use material variants to order objects that share the same material.
+Conclusion
+This post explored all the criteria that Unity considers to sort rendered objects. There are many options available if you need to control Unity’s sorting algorithm, but you can usually focus on a small subset for the task at hand.
+In closing, I’ll repeat that if your interest in this topic is to improve performance, make sure to profile before you decide that changing the rendering order is the right optimization to implement!
+Unity
+Rendering
+Urp
+Unity Hdrp
+Published in Toca Boca Tech Blog
+23 followers
+·Last published May 23, 2025
+We believe in the power of play. We create experiences together with kids that foster a generation of playful people. We value play, quality, inclusion and innovation.
+Written by Bertrand Guay Paquet
+7 followers
+·1 following
+No responses yet
+Help
+Status
+About
+Careers
+Press
+Blog
+Privacy
+Rules
+Terms
+Text to speech

@@ -1,0 +1,139 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+feat(texture): R16_UINT textures, 16-bit loading and R16 height fields by fesoliveira014 · Pull Request #170 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Sep 29, 2026
+Copy link
+Copy Markdown
+Owner
+Adds a single-channel 16-bit texture format, a 16-bit image load path and physics height fields that read it. At 2049², a height map stored as R16_UINT takes 8 MiB of CPU pixels plus 8 MiB on the device and has 65 536 levels. RGBA8_UNORM has 256 levels. RGBA32_FLOAT takes 64 + 64 MiB.
+What changed
+PixelFormat.R16_UINT follows RGBA32_FLOAT. Every core format switch and the physics switch handle it.
+Shaders read the format only through gpu_fetch_uint, never through the float texture2D heap. There is no filtered sampling; filtering is manual.
+The store refuses R16_UINT with generate_mips or storage and returns INVALID_ARGUMENT. check_storage_format is renamed check_format_use. It covers the four add_texture* callers and publish_document.
+On upload, the render side copies a single mip and returns UNSUPPORTED for a generated chain, as the volume path does. RGBA chains are unchanged.
+Built-in readers refuse R16_UINT with UNSUPPORTED when the material resolves:
+every built-in material slot (Basic, Standard, Physical and Toon maps);
+the Toon gradient map;
+slot 0 of a masked custom material, which the depth prepass, shadow atlas and traced coverage sample through the float heap.
+Other custom slots accept it.
+New loader image::load_texture_r16. It uses stbi_load_16_from_memory with one component and makes a linear, MIP_ZERO source. An 8-bit file widens as × 257. Radiance files are rejected before decoding.
+Physics: height_texel_bytes and height_map_samples accept R16_UINT, with height = offset + scale × texel / 65535.
+Docs updated: docs/textures.md, docs/materials.md, docs/custom_shaders.md, csrc/README.md.
+Divergences from the plan
+The plan said the render-side R16_UINT arm joins the UNSUPPORTED group. Taken literally, that refuses every R16 upload, because every MIP_ZERO texture goes through create_texture_mips. Instead, the arm copies one mip and faults only for a generated chain.
+publish_document is a fifth caller of the renamed check. It is renamed there too; otherwise a document with an R16 texture and generated mips panics mid-insertion.
+The physics test helper add_height_texture clears generate_mips, because the store now rejects R16 with mips.
+The GPU fetch case has no mipped variant.
+origin/main is merged into the branch, not rebased. The merge was clean.
+Verification
+python3 scripts/build.py --test on the merge commit: 29 targets, 1333 passed, 0 failed. On main: 1328. unit has 4 new tests: 16-bit decode, 8-bit widening, Radiance rejection, and R16 with generated mips is invalid. physics_test has 1 new test: an R16 height map matches the height array.
+GPU acceptance on WSL (llvmpipe, validation on, headless): 124 of 124 before, 126 of 126 after. The two new cases are test_r16_texture_keeps_sixteen_bits_on_the_device and test_r16_texture_is_unsupported_where_built_in_stages_sample_it. No validation message.
+No change under lib/gpu.c3l, abi/, shaders/ or in generated files.
+GPU runs for review (reviewer, RTX 4090, review worktree)
+Run python scripts/build.py, then c3c test acceptance --path test/gpu/render. Every case must pass, and the two new cases must log no validation message. Record the GPU, the driver and the case counts.
+Carried forward
+R16_UNORM: an upstream gpu.c3l change. The trigger is a material manual-filter cost in terrain rendering, or a consumer that needs filtered height sampling.
+Closes #168
+fesoliveira014
+added 5 commits
+September 29, 2026 11:00
+feat(texture): R16_UINT textures, 16-bit loading and R16 height fields
+…
+bf6ad9d
+```
+Add PixelFormat.R16_UINT, one unsigned 16-bit channel for height data.
+load_texture_r16 and decode_image_r16 decode PNG and JPEG through
+stbi_load_16_from_memory: 16-bit files keep every bit, 8-bit files widen
+by 257, colour reduces to luminance, and Radiance input is rejected.
+
+The texture has one mip: the store rejects generated mips and storage for
+it, and the upload copies mip zero. Shaders read it only with
+gpu_fetch_uint, so built-in material slots, the Toon gradient map and slot
+0 of a masked custom material fault UNSUPPORTED instead of sampling it
+through the float heap.
+
+Physics height fields read R16_UINT textures as texel / 65535.
+```
+test(render): R16_UINT fetch acceptance
+…
+9f3148b
+```
+Upload a 2x2 R16_UINT texture and read every texel back through
+gpu_fetch_uint in a dispatch; 1 and 0x1234 rule out an 8-bit path.
+Check that a Basic map, a Toon gradient map and slot 0 of a masked custom
+material refuse the texture, while an opaque custom slot 0 and a masked
+custom slot 1 accept it.
+```
+docs: sixteen-bit single-channel textures
+…
+9a2df9f
+```
+Describe R16_UINT loading, its single mip, the gpu_fetch_uint read path,
+where built-in stages refuse it, and the height convention shared with
+physics height fields. Record the gray16.png fixture and its generator.
+```
+docs(textures): name the Toon base map among slots that refuse R16_UINT
+b496807
+Merge remote-tracking branch 'origin/main' into feat/r16-height-textures
+ca27627
+fesoliveira014
+commented
+Sep 29, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Review of #170 at ca27627: R16_UINT textures, 16-bit loading and R16 height fields.
+No findings.
+Diff against the approved proposal and tasks (with the doc-review fixes)
+The format and every exhaustive switch take the documented arm: texture source, render target, volume, storage and environment.
+check_format_use rejects R16_UINT with generate_mips at insertion on all five paths. publish_document is the fifth, divergence (b), which is right.
+resolve_texture_slot(custom_read:) and resolve_gradient_map fault UNSUPPORTED for built-in reads. The CUSTOM arm allows slot 0 only when the material is not masked, and its comment names the depth stage and the traced coverage.
+Loader: decode_image_r16 and load_texture_r16 match the proposal. Radiance input is rejected before decoding.
+Physics: height_texel_bytes and the height_map_samples switch read texel / 65535. The HeightField docstring is updated.
+docs/textures.md, materials.md, custom_shaders.md and csrc/README.md are updated as listed. The height convention names the node position and local.scale.y as offset and scale, which matches physics.
+Divergences: all accepted.
+(a) is a correction of my instruction. Every MIP_ZERO upload passes through create_texture_mips, so a plain UNSUPPORTED arm would have refused every R16 texture. create_single_texture_mip copies mip zero, and the layer checks come first in create_texture_mips. It is public, so its own generate_mips fault is an entry-point check, not a defensive one.
+(b), (c) and (d) follow from the doc-review answers.
+Tests: these are the contracts that can break.
+CPU: the 16-bit decode, the loader's 8-bit widening, the Radiance rejection, the add-time rejection of generated mips, and an R16 height field against the height array.
+GPU: the fetch of all four texels, and the built-in slot refusals with the opaque-slot-0 and masked-slot-1 acceptances.
+Runs (review worktree, Windows host, NVIDIA GeForce RTX 4090, driver 610.88)
+python scripts/build.py --test: tables checked. 29 results, 1333 passed, 0 failed (main 1328).
+c3c test acceptance --path test/gpu/render: 126 passed, 0 failed, no validation message. test_r16_texture_keeps_sixteen_bits_on_the_device and test_r16_texture_is_unsupported_where_built_in_stages_sample_it pass.
+Verdict: MERGE, once CI is green at ca27627. linux and windows were still running when this review was posted.
+Hide details
+View details
+fesoliveira014
+merged commit 4b7d650
+into
+main
+Sep 29, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,206 @@
+# Blind-Spot Cross-Validation
+
+Also called: Blind-spot cross-validation for Gaussian splat model selection, blind-spot CV, blind-spot validation, luxar gsplat cal
+
+## Overview
+Blind-Spot Cross-Validation is a model selection procedure that determines the optimal number of Gaussians (splat budget) for a 3D Gaussian Splatting reconstruction without requiring noise-free ground truth references [S1, unofficial]. It identifies the point of diminishing returns where additional splats begin to memorize noise rather than signal by monitoring the divergence between training and held-out PSNR metrics [S1, unofficial]. Unlike standard cross-validation, it ensures the masked voxel's noise is unpredictable from its neighbors, guaranteeing that fitting the masked data lowers the held-out score if noise is being memorized [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Original 3D volume $V$ (normalized to $[0, 1]$).
+- Gaussian Splatting fitting parameters: conservative culling (99.9% amplitude retention), maximum iterations $N_{max} = 20,000$, early stopping patience $P = 500$, L1 loss, dynamic operations enabled [S1, unofficial].
+- Masking seed: 42 (numpy RandomState) [S1, unofficial].
+- Masking fraction: 5% of voxels [S1, unofficial].
+
+**Outputs:**
+- Optimal splat count $K^*$ where held-out PSNR peaks.
+- Classification of the held-out curve (peak, plateau, or signal-limited).
+- Estimated ensemble noise-floor PSNR ceiling [S1, unofficial].
+
+**Data Structures:**
+- Volume $V$: 3D array of voxel intensities.
+- Mask $M$: Boolean 3D array of same shape as $V$, with 5% of entries set to True.
+- Filled Volume $V_{filled}$: Copy of $V$ where masked voxels are replaced by the median of their 26 neighbors in a 3x3x3 donut (excluding the center voxel) [S1, unofficial].
+
+**Steps:**
+1. **Mask Generation:** Select 5% of voxels randomly using `numpy.RandomState` with seed 42 to generate mask $M$ [S1, unofficial].
+2. **Volume Filling:** Create $V_{filled}$ by replacing each voxel $v$ where $M[v]$ is True with the median intensity of its 26 spatial neighbors in the 3x3x3 neighborhood excluding $v$ [S1, unofficial].
+   - *Note:* A stricter implementation excludes other held-out voxels from the median calculation, but this changes held-out PSNR by at most 0.25 dB and moves no optimum [S1, unofficial].
+3. **Splat Sweep:** For each splat count $K$ in a geometrically spaced sequence (doubling from 1K to 512K, extended to 1M and 2M):
+   a. Fit Gaussian splats to $V_{filled}$ using the specified fitting parameters [S1, unofficial].
+   b. Compute Training PSNR ($PSNR_{train}$) on unmasked voxels against the original volume $V$.
+   c. Compute Held-out PSNR ($PSNR_{held}$) on masked voxels against the original volume $V$ (using pre-replacement values) [S1, unofficial].
+   - PSNR is computed as $10 \log_{10} (1 / MSE)$ where MSE is averaged over all voxels including background [S1, unofficial].
+4. **Optimum Selection:** Identify $K^*$ as the splat count where $PSNR_{held}$ peaks [S1, unofficial].
+5. **Classification:** Classify the held-out curve shape and estimate the noise-floor PSNR ceiling [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import math
+
+def blind_spot_cross_validation(volume, seed=42, mask_fraction=0.05, 
+                                max_splats=2000000, min_splats=1000):
+    """
+    Performs blind-spot cross-validation to find optimal Gaussian splat count.
+    
+    Args:
+        volume: 3D numpy array of voxel intensities, normalized to [0, 1].
+        seed: Random seed for mask generation.
+        mask_fraction: Fraction of voxels to mask.
+        max_splats: Maximum splat count to test.
+        min_splats: Minimum splat count to test.
+        
+    Returns:
+        optimal_k: The splat count K* where held-out PSNR peaks.
+        psnr_train_curve: List of (k, psnr_train) tuples.
+        psnr_held_curve: List of (k, psnr_held) tuples.
+    """
+    # 1. Mask Generation
+    rng = np.random.RandomState(seed)
+    mask = rng.random(volume.shape) < mask_fraction
+    
+    # 2. Volume Filling
+    # Create filled volume
+    filled_volume = volume.copy()
+    
+    # Get indices of masked voxels
+    masked_indices = np.where(mask)
+    
+    # Calculate median of 26 neighbors for each masked voxel
+    # Note: This is a simplified implementation. In practice, use efficient 
+    # neighborhood operations or libraries like scipy.ndimage.median_filter 
+    # with a specific mask to exclude the center and other masked voxels if strict.
+    # Here we assume a standard 3x3x3 median filter excluding center for the filled value.
+    # To strictly exclude other masked voxels from the median calculation:
+    # neighbors = get_26_neighbors(masked_indices)
+    # valid_neighbors = neighbors[~mask[neighbors]]
+    # filled_values = np.median(valid_neighbors, axis=1)
+    # For simplicity and performance, we use a standard median filter on the 
+    # original volume, but the source specifies "median of their 26 neighbors".
+    
+    # Using scipy for robust median calculation of neighbors
+    from scipy.ndimage import generic_filter
+    
+    def median_26_neighbors(data):
+        # This function is called for each voxel. We need to handle the center exclusion.
+        # However, generic_filter applies to the window. 
+        # A more direct approach for the specific "donut" median:
+        pass
+        
+    # Simplified approach: Replace masked voxels with median of 26 neighbors.
+    # We will iterate for clarity, though inefficient for large volumes.
+    # In production, use vectorized operations.
+    
+    # Get all neighbor offsets for 3x3x3 excluding center
+    offsets = []
+    for dx in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            for dz in [-1, 0, 1]:
+                if dx == 0 and dy == 0 and dz == 0:
+                    continue
+                offsets.append((dx, dy, dz))
+                
+    filled_volume = volume.copy()
+    for i, j, k in zip(*masked_indices):
+        neighbors = []
+        for dx, dy, dz in offsets:
+            ni, nj, nk = i + dx, j + dy, k + dz
+            # Boundary check
+            if 0 <= ni < volume.shape[0] and 0 <= nj < volume.shape[1] and 0 <= nk < volume.shape[2]:
+                neighbors.append(volume[ni, nj, nk])
+        if neighbors:
+            filled_volume[i, j, k] = np.median(neighbors)
+        else:
+            filled_volume[i, j, k] = volume[i, j, k] # Fallback
+            
+    # 3. Splat Sweep
+    # Generate geometrically spaced splat counts
+    splat_counts = []
+    k = min_splats
+    while k <= max_splats:
+        splat_counts.append(k)
+        k *= 2
+    # Ensure max_splats is included if not reached exactly
+    if splat_counts[-1] != max_splats:
+        splat_counts.append(max_splats)
+        
+    psnr_train_curve = []
+    psnr_held_curve = []
+    
+    for k in splat_counts:
+        # Fit Gaussian splats to filled_volume
+        # This step calls the Gaussian Splatting optimizer
+        # Parameters: conservative culling (99.9% amplitude retention), 
+        # 20,000 max iterations, early stopping patience 500, L1 loss, dynamic ops enabled
+        splats = fit_gaussian_splats(filled_volume, k)
+        
+        # Compute Training PSNR on unmasked voxels against original volume
+        train_mask = ~mask
+        train_voxels_orig = volume[train_mask]
+        train_voxels_rendered = render_splats(splats, train_mask)
+        mse_train = np.mean((train_voxels_orig - train_voxels_rendered) ** 2)
+        psnr_train = 10 * np.log10(1.0 / mse_train) if mse_train > 0 else float('inf')
+        
+        # Compute Held-out PSNR on masked voxels against original volume
+        held_mask = mask
+        held_voxels_orig = volume[held_mask]
+        held_voxels_rendered = render_splats(splats, held_mask)
+        mse_held = np.mean((held_voxels_orig - held_voxels_rendered) ** 2)
+        psnr_held = 10 * np.log10(1.0 / mse_held) if mse_held > 0 else float('inf')
+        
+        psnr_train_curve.append((k, psnr_train))
+        psnr_held_curve.append((k, psnr_held))
+        
+    # 4. Optimum Selection
+    # Find k where psnr_held peaks
+    best_idx = np.argmax([p for k, p in psnr_held_curve])
+    optimal_k = psnr_held_curve[best_idx][0]
+    
+    return optimal_k, psnr_train_curve, psnr_held_curve
+
+def fit_gaussian_splats(volume, k):
+    """
+    Fits k Gaussians to the volume using the specified parameters.
+    This is a placeholder for the actual Gaussian Splatting optimization routine.
+    """
+    # Implementation details of Gaussian Splatting optimization are not provided here.
+    # The method assumes a function that returns a set of Gaussians fitted to the volume.
+    pass
+
+def render_splats(splats, mask):
+    """
+    Renders the splats and returns the intensity at the masked voxel locations.
+    """
+    # Implementation details of rendering are not provided here.
+    pass
+```
+
+**Parameters:**
+- Masking seed: 42 [S1, unofficial].
+- Masking fraction: 5% of voxels [S1, unofficial].
+- Filling method: Median of 26 neighbors in 3x3x3 donut [S1, unofficial].
+- Splat sweep range: Geometrically spaced doubling from 1K to 512K, extended to 1M and 2M [S1, unofficial].
+- Fitting constraints: Conservative culling (99.9% amplitude retention), 20,000 max iterations, early stopping patience 500 iterations, L1 loss, dynamic operations enabled [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- If splat count exceeds the optimum, training PSNR continues to rise but held-out PSNR drops, indicating overfitting to noise [S1, unofficial].
+- Correlated noise from processing (deconvolution, denoising) voids the blind-spot guarantee, allowing models to improve held-out scores by reproducing noise rather than signal [S1, unofficial].
+- Strict filling (excluding other held-out voxels) changes held-out PSNR by at most 0.25 dB and moves no optimum compared to canonical filling [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** The method requires fitting Gaussian splats for multiple splat counts (geometrically spaced doubling from 1K to 512K, extended to 1M and 2M). Each fit takes up to 20,000 iterations with early stopping [S1, unofficial].
+- **Memory Complexity:** Depends on the number of splats and the volume size. The method stores the original volume, the filled volume, and the splat parameters for each fit during the sweep [S1, unofficial].
+- **Measured Performance:** On 17 volumes from 12 datasets and four modalities, the method yields a median 99-fold (6–340-fold) size reduction at 26–67 dB PSNR, in minutes per volume on one GPU [S1, unofficial].
+- **Strengths:** Does not require noise-free references; identifies the signal-to-noise boundary; robust to strict filling variations.
+- **Limitations:** Voided by correlated noise from processing (deconvolution, denoising); requires multiple fits for different splat counts.
+- **When to use:** When determining the optimal splat budget for Gaussian Splatting without ground truth; when noise characteristics are unknown.
+- **When not to use:** When the volume has been processed with deconvolution or denoising that correlates noise; when a noise-free reference is available (standard metrics may be more appropriate).
+
+## Background
+Blind-Spot Cross-Validation was introduced in the Luxar paper (2026) for Gaussian splatting in microscopy and scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. It is used to set the splat budget without noise-free references, enabling efficient compression and visualization of large 3D volumes [S1, unofficial].
+
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

@@ -3,133 +3,173 @@
 Also called: atomic-counter MC, indirect-draw MC, r=mesh
 
 ## Overview
-This method is a real-time isosurface extraction technique that maps a 3D scalar grid to a triangle mesh using one compute thread per grid cell, avoiding prefix sums by reserving output slots via atomic addition on indirect draw arguments [S1, unofficial]. It differs from sibling methods like [GPU Marching Cubes with Histogram Pyramid](2317-gpu-marching-cubes-with-histogram-pyramid.md) by using atomic counters instead of hierarchical reduction, and from [GPU Marching Cubes Terrain Pipeline with Indirect Rendering](3803-gpu-marching-cubes-terrain-pipeline-with-indirect-rendering.md) by integrating the counter directly into the draw argument buffer structure [S1, unofficial].
+This method performs real-time isosurface meshing by mapping one compute thread per grid cell to classify density, reserve vertex slots via atomic addition on indirect draw arguments, and write vertices directly into a capped pool, thereby avoiding the overhead of prefix sums [S1, unofficial]. It is distinguished from sibling methods like [GPU Marching Cubes with Histogram Pyramid](2317-gpu-marching-cubes-with-histogram-pyramid.md) and [GPU Marching Cubes (Compute Shader)](4687-gpu-marching-cubes-compute-shader.md) by its use of atomic counters on the indirect-draw buffer for output management rather than histogram pyramids or fixed-size buffers with complex synchronization [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A tent-blurred density grid of dimensions $D_x \times D_y \times D_z$ and an isosurface threshold parameter $\text{iso}$ [S1, unofficial].
-*   **Output:** A triangle mesh rendered via `drawIndirect`, consisting of vertex positions and gradient normals stored in a capped pool buffer [S1, unofficial].
+*   **Input:** A tent-blurred density grid (shared with volume/voxel modules) and an isosurface threshold parameter `?iso=` [S1, unofficial].
+*   **Output:** A triangle mesh rendered via `drawIndirect`, depth-tested against a raytraced scene background [S1, unofficial].
 
 **Data Structures:**
-1.  **Indirect Draw Args Buffer:** A buffer containing standard indirect draw parameters. Word 0-3 contain standard arguments (e.g., vertex count, instance count). Word 4 stores an overflow flag [S1, unofficial].
-2.  **Vertex Pool:** A fixed-size buffer of capacity $N_{pool} = 1.5 \times 10^6$ vertices. Each vertex entry stores a 3D position and a 3D gradient normal (48 MB total for the default capacity) [S1, unofficial].
-3.  **Triangle Table:** A lookup table generated at load time, mapping the 8-bit cube configuration index to a set of cut edges and triangles. It is constructed by generating marching squares faces per cube face, forming closed loops, and applying fan triangulation with a rotation-invariant ambiguity rule [S1, unofficial].
+1.  **Indirect Draw Args Buffer:** Stores draw parameters. Standard `drawIndirect` arguments occupy the first words. Word 4 (offset 16 bytes on 32-bit integers) stores an overflow flag [S1, unofficial].
+2.  **Vertex Pool:** A capped buffer storing vertex positions and gradient normals. Size: 1.5 million vertices (48 MB) [S1, unofficial].
+3.  **MC Triangle Table:** Generated at load time, not hardcoded. Structure: Maps 256 case indices to cut edges and triangle fan definitions [S1, unofficial].
 
-**Numbered Steps:**
+**Algorithm Steps:**
 
-1.  **Dispatch:** Launch one compute thread for each cell in the $D_x \times D_y \times D_z$ grid [S1, unofficial].
-2.  **Classification:** For the current cell, sample the scalar values at its 8 corner vertices. Classify the cell by comparing these values against the isosurface threshold $\text{iso}$ to determine the 8-bit configuration index $I \in [0, 255]$ [S1, unofficial].
-    *   *Edge Case:* If a lattice sample is out-of-range (e.g., at the boundary), treat its density as 0 to cap the isosurface against the walls [S1, unofficial].
-3.  **Lookup:** Use index $I$ to retrieve the set of cut edges from the Triangle Table [S1, unofficial].
-4.  **Slot Reservation:** Perform an atomic addition (`atomicAdd`) on the vertex count field within the Indirect Draw Args Buffer to reserve a contiguous block of slots in the Vertex Pool. The number of slots reserved equals $3 \times N_{triangles}$, where $N_{triangles}$ is the number of triangles generated for index $I$ [S1, unofficial].
-5.  **Vertex Emission:** For each cut edge identified in the lookup:
-    *   Compute the interpolation parameter $\lambda$ along the edge connecting vertices with scalar values $v_1$ and $v_2$:
-        $$
-        \lambda = \frac{\text{iso} - v_1}{v_2 - v_1}
-        $$
-    *   Calculate the vertex position $\mathbf{p}$:
-        $$
-        \mathbf{p} = \text{lerp}(\mathbf{pos}_1, \mathbf{pos}_2, \lambda)
-        $$
-    *   Calculate the normal $\mathbf{n}$ by interpolating the gradients $\mathbf{g}_1$ and $\mathbf{g}_2$ at the edge endpoints:
-        $$
-        \mathbf{n} = \text{normalize}(\text{lerp}(\mathbf{g}_1, \mathbf{g}_2, \lambda))
-        $$
-    *   Write $\mathbf{p}$ and $\mathbf{n}$ into the reserved slots in the Vertex Pool [S1, unofficial].
-    *   *Optimization:* Cache interpolated position and normal per unique cut edge to avoid recomputation per triangle corner [S1, unofficial].
-6.  **Finalization:** Launch a single-thread kernel to clamp the total vertex count in the Indirect Draw Args Buffer to the pool capacity $N_{pool}$. If the pre-clamp count exceeds $N_{pool}$, set the overflow flag in Word 4 of the Indirect Draw Args Buffer [S1, unofficial].
-7.  **Rendering:** Execute `drawIndirect` using the Indirect Draw Args Buffer. The renderer pulls vertices from the Vertex Pool [S1, unofficial].
+1.  **Table Generation (Load Time):**
+    Generate the MC triangle table using the following procedure to ensure crack-free, rotation-invariant results [S1, unofficial]:
+    *   For each of the 6 faces of the cube, compute marching squares faces.
+    *   Connect these faces into closed loops.
+    *   Triangulate the loops using fan triangulation.
+    *   Apply an ambiguity rule that always separates the diagonal for ambiguous faces to ensure consistency.
+    *   Validate against all 256 cases to ensure the cut-edge set matches the classic table (max 5 triangles) [S1, unofficial].
+
+2.  **Compute Dispatch:**
+    Dispatch one compute thread per grid cell (voxel) [S1, unofficial].
+
+3.  **Cell Classification:**
+    *   Read the 8 corner densities of the current cell from the tent-blurred density grid.
+    *   Compare each corner density against the `?iso=` threshold.
+    *   Compute the 8-bit case index $C$ [S1, unofficial].
+
+4.  **Edge Lookup:**
+    *   Use $C$ to index into the generated `triangleTable`.
+    *   Identify which edges are cut by the isosurface [S1, unofficial].
+
+5.  **Slot Reservation:**
+    *   Calculate the number of vertices required for the triangles generated by this cell.
+    *   Perform an `atomicAdd` on the vertex count field within the **Indirect Draw Args Buffer** to reserve slots in the Vertex Pool. This count is used to determine the write offset for the current thread [S1, unofficial].
+
+6.  **Vertex Emission:**
+    *   For each cut edge identified in Step 4:
+        *   Compute the intersection point $\mathbf{p}$ via linear interpolation of corner values (as defined in [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md)).
+        *   Compute the gradient normal $\mathbf{n}$ using trilinear density gradients.
+        *   Write $\mathbf{p}$ and $\mathbf{n}$ into the Vertex Pool at the offset reserved in Step 5.
+    *   **Caching:** Cache interpolated position and normal per unique cut edge to avoid recomputation per triangle corner [S1, unofficial].
+    *   **Boundary Handling:** If a lattice sample is out-of-range (e.g., at lattice index 0), treat it as density 0 to cap the isosurface against the walls. Lattice 0 is treated as "outside" density. Blur bleed outside the walls (cells $2 \dots \text{GRID}-2$) is discarded [S1, unofficial].
+
+7.  **Finalization:**
+    *   Run a finalize kernel with one thread.
+    *   Clamp the vertex count in the Indirect Draw Args Buffer to the pool cap (1.5 million vertices).
+    *   If the pre-clamp count exceeded the cap, set the overflow flag in Word 4 of the Indirect Draw Args Buffer. Note: The flag is *not* placed in `firstInstance` because non-zero `firstInstance` no-ops the indirect draw without the `indirect-first-instance` feature [S1, unofficial].
+
+8.  **Rendering:**
+    *   Execute `drawIndirect` using the Indirect Draw Args Buffer.
+    *   The renderer pulls vertices from the Vertex Pool.
+    *   Depth-test the mesh against the raytraced scene background in the same pass [S1, unofficial].
+
+9.  **Shading:**
+    *   Apply Fresnel reflection over the analytic scene along one refracted ray.
+    *   Apply Beer-Lambert absorption using 6 interior density taps.
+    *   Add momentum foam effects [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Compute Shader: One thread per grid cell (thread_id = x + y*Dx + z*Dx*Dy)
-def mc_atomic_counter_kernel(grid, iso, indirect_args, vertex_pool, table, pool_cap):
-    # 1. Get cell coordinates
-    z = thread_id // (Dx * Dy)
-    y = (thread_id % (Dx * Dy)) // Dx
-    x = thread_id % Dx
-    
-    # 2. Sample 8 corners
-    # Handle out-of-range samples as density 0
-    corners = []
-    for dx in [0, 1]:
-        for dy in [0, 1]:
-            for dz in [0, 1]:
-                cx, cy, cz = x + dx, y + dy, z + dz
-                if 0 <= cx < Dx and 0 <= cy < Dy and 0 <= cz < Dz:
-                    corners.append(grid[cx, cy, cz])
-                else:
-                    corners.append(0.0) # Out-of-range cap
-    
-    # 3. Classify
-    index = 0
-    for i, val in enumerate(corners):
-        if val < iso:
-            index |= (1 << i)
-            
-    # 4. Lookup edges
-    cut_edges = table[index]
-    
-    # 5. Reserve slots
-    # atomicAdd returns the starting index in the pool for this cell's vertices
-    start_idx = atomic_add(indirect_args.vertex_count, len(cut_edges) * 3)
-    
-    # 6. Emit vertices
-    current_vertex_idx = start_idx
-    for edge in cut_edges:
-        v1_idx, v2_idx = edge.vertices
-        pos1 = grid_positions[corners[v1_idx]] # Assuming positions are known or derived from grid coords
-        pos2 = grid_positions[corners[v2_idx]]
-        val1 = corners[v1_idx]
-        val2 = corners[v2_idx]
+# Load-time generation of MC Triangle Table
+def generate_mc_table():
+    table = {}
+    for case_index in range(256):
+        # Determine cut edges for this case based on corner signs
+        cut_edges = get_cut_edges(case_index)
         
-        # Interpolate position
-        lam = (iso - val1) / (val2 - val1)
-        pos = lerp(pos1, pos2, lam)
+        # Generate faces using marching squares on each of the 6 cube faces
+        faces = []
+        for face in cube_faces:
+            face_case = get_face_case(case_index, face)
+            face_edges = get_face_cut_edges(face_case)
+            # Create closed loops from face edges
+            loops = create_closed_loops(face_edges)
+            # Fan triangulate loops
+            tris = fan_triangulate(loops)
+            faces.extend(tris)
         
-        # Interpolate normal (gradient)
-        # Note: Gradients must be available or computed from grid
-        grad1 = grid_gradients[corners[v1_idx]]
-        grad2 = grid_gradients[corners[v2_idx]]
-        normal = normalize(lerp(grad1, grad2, lam))
-        
-        vertex_pool[current_vertex_idx].position = pos
-        vertex_pool[current_vertex_idx].normal = normal
-        current_vertex_idx += 1
+        # Resolve ambiguities: always separate diagonal for ambiguous faces
+        # to ensure rotation-invariant, crack-free results
+        table[case_index] = {
+            'edges': cut_edges,
+            'triangles': faces
+        }
+    return table
 
-# Finalization Kernel: One thread
-def mc_finalize_kernel(indirect_args, pool_cap):
+# Compute Shader Kernel (one thread per cell)
+kernel mc_emit(cell_coords, density_grid, iso_threshold, indirect_args, vertex_pool):
+    # 1. Classify cell
+    corners = read_cell_corners(cell_coords, density_grid)
+    case_index = 0
+    for i in range(8):
+        if corners[i] > iso_threshold:
+            case_index |= (1 << i)
+            
+    # 2. Lookup table
+    mc_data = mc_table[case_index]
+    num_vertices = len(mc_data['triangles']) * 3 # Assuming triangle fan output
+    
+    # 3. Reserve slots atomically
+    # indirect_args[0] is the vertex count
+    start_offset = atomic_add(indirect_args.vertex_count, num_vertices)
+    
+    # 4. Emit vertices
+    for triangle in mc_data['triangles']:
+        for edge_idx in triangle:
+            edge = mc_data['edges'][edge_idx]
+            
+            # Handle boundary: out-of-range samples treated as density 0
+            p1 = get_edge_endpoint(edge, 0, cell_coords, density_grid)
+            p2 = get_edge_endpoint(edge, 1, cell_coords, density_grid)
+            
+            # Interpolate position
+            v1 = get_density(p1, density_grid)
+            v2 = get_density(p2, density_grid)
+            if v2 == v1:
+                t = 0.0
+            else:
+                t = (iso_threshold - v1) / (v2 - v1)
+            
+            pos = lerp(p1, p2, t)
+            
+            # Compute gradient normal
+            normal = compute_gradient_normal(p1, p2, density_grid)
+            
+            # Write to pool
+            idx = start_offset + edge_idx
+            vertex_pool[idx].position = pos
+            vertex_pool[idx].normal = normal
+
+# Finalize Kernel (one thread)
+kernel mc_finalize(indirect_args, vertex_pool_cap):
     count = indirect_args.vertex_count
-    if count > pool_cap:
-        indirect_args.vertex_count = pool_cap
-        indirect_args.overflow_flag = 1
+    if count > vertex_pool_cap:
+        indirect_args.vertex_count = vertex_pool_cap
+        indirect_args.overflow_flag = 1 # Stored in word 4
     else:
         indirect_args.overflow_flag = 0
 ```
 
 **Parameters:**
-*   **Vertex Pool Size:** 1.5 million vertices (1.5M) [S1, unofficial].
-*   **Isosurface Threshold:** Controlled by the `?iso=` parameter [S1, unofficial].
+*   **Vertex Pool Size:** 1.5 million vertices [S1, unofficial].
+*   **Isosurface Threshold:** Controlled by `?iso=` parameter [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Overflow:** If the vertex count exceeds the pool cap, the finalize kernel clamps the count to the cap. The overflow flag is set in Word 4 of the indirect draw args, not in `firstInstance`, because non-zero `firstInstance` no-ops the indirect draw without the `indirect-first-instance` feature [S1, unofficial].
-*   **Wall Capping:** Lattice 0 is treated as outside density (0) to cap the isosurface on all six walls. Blur bleed outside the walls (cells $2 \dots \text{GRID}-2$) is discarded [S1, unofficial].
-*   **Triangle Table Generation:** The table is generated at load time from marching squares faces to closed loops to fan triangulation, ensuring rotation-invariant ambiguity rules and crack-free results, rather than transcribing the classic 256x16 constant table [S1, unofficial].
+*   **Overflow:** If the pre-clamp vertex count exceeds the 1.5M cap, the finalize kernel raises an overflow flag. The count is clamped to the cap to ensure only whole triangles are drawn and no garbage is rendered [S1, unofficial].
+*   **First Instance:** The overflow flag is placed in args word 4, not `firstInstance`, because non-zero `firstInstance` no-ops the indirect draw without the `indirect-first-instance` feature [S1, unofficial].
+*   **Wall Capping:** Lattice 0 is treated as outside density to cap the isosurface on all six walls. Only blur bleed outside the walls (cells $2 \dots \text{GRID}-2$) is discarded [S1, unofficial].
+*   **Out-of-Range Samples:** `mcEmit` treats out-of-range lattice samples as density 0 to cap the isosurface against the walls [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(D_x D_y D_z)$ for the main compute pass, as one thread processes each cell. The finalization is $O(1)$.
-*   **Memory Complexity:** $O(N_{pool})$ for the vertex pool and $O(1)$ for the triangle table (256 entries). The vertex pool size is fixed at 1.5M vertices [S1, unofficial].
-*   **Performance:** 4.12 ms/frame at $128^3$ resolution and $384^2$ screen size on M-series hardware [S1, unofficial].
-*   **Strengths:** Avoids the overhead of prefix sum/histogram calculations. Simple implementation using standard atomic operations.
-*   **Limitations:** Requires a fixed-size vertex pool; overflow handling requires careful buffer management. Atomic contention may occur in highly complex scenes with many cut cells [S1, unofficial].
-*   **When to use:** Real-time applications where prefix sum overhead is prohibitive and a fixed vertex budget is acceptable.
-*   **When not to use:** Scenes requiring guaranteed exact vertex counts without clamping, or where atomic contention is expected to be a bottleneck.
+*   **Time Complexity:** Linear with respect to the number of grid cells, as each cell is processed by one thread. The atomic add operation is $O(1)$ but may contend on the vertex count buffer.
+*   **Memory Complexity:** Dominated by the Vertex Pool (48 MB for 1.5M vertices) and the density grid [S1, unofficial].
+*   **Measured Performance:** 4.12 ms/frame at $128^3$ resolution and $384^2$ screen size on M-series hardware [S1, unofficial].
+*   **Strengths:** Avoids the memory and compute overhead of prefix sums or histogram pyramids. Simple synchronization via atomic add. Real-time capable.
+*   **Limitations:** Fixed pool size requires clamping, which may discard geometry if the scene is too complex. Atomic contention on the vertex count buffer can become a bottleneck at very high resolutions.
+*   **When to use:** Real-time applications where prefix sums are too expensive or complex, and a fixed maximum mesh size is acceptable.
+*   **When not to use:** Scenes requiring exact representation of all geometry without clipping, or where memory bandwidth is severely constrained and prefix sums are preferred for coalesced writes.
 
 ## Background
-This method was introduced in the "waterfall" WebGL2 fluid simulation project as the `r=mesh` renderer, specifically for WebGPU support, with a fallback to screen-space fluid (ssf) for WebGL2 [S1, unofficial]. It was developed by nikolai3d and merged into the main branch in July 2026 [S1, unofficial]. The approach was designed to provide a real-time isosurface meshing technique that integrates seamlessly with raytraced scene backgrounds, using shading techniques like Fresnel reflection and Beer-Lambert absorption [S1, unofficial].
+This method was introduced by nikolai3d in the 'waterfall' WebGL2 fluid simulation project as the `r=mesh` renderer [S1, unofficial]. It was developed as part of a pull request (#17) to add a WebGPU-compatible marching cubes isosurface mesh renderer, addressing issue #9. The method was verified on $64^3$–$128^3$ resolutions with WebGL2 fallback [S1, unofficial].
 
 ## Sources
 [S1] Renderer: marching-cubes isosurface mesh (r=mesh, WebGPU), https://github.com/nikolai3d/waterfall/pull/17, fetched 2026-10-27 (unofficial)

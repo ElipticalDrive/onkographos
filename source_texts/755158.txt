@@ -1,0 +1,2585 @@
+OpenZL: A Graph-Based Model for Compression
+Yann Collet , Nick Terrell , W. Felix Handte , Danielle Rozenblit , Victor Zhang§ , Kevin Zhang , Yaelle
+Goldschlag , Jennifer Lee , Elliot Gorokhovsky , Yonatan Komornik , Daniel Riegel∗ , Stan Angelov∗ , Nadav
+Rotem∗
+Meta Platforms, Inc.
+Manuscript author, ∗ Joint last author
+arXiv:2510.03203v2 [cs.IR] 30 Oct 2025
+§
+Research techniques in the last decade have improved lossless compression ratios by significantly
+increasing processing time. These techniques have remained obscure because production systems
+require high throughput and low resource utilization. In practice, application-specific compression
+algorithms that leverage knowledge of the data structure and semantics are more popular. Applicationspecific compressor systems outperform even the best generic compressors, but these techniques have
+some drawbacks. Application-specific compressors are inherently limited in applicability, have high
+development costs, and are difficult to maintain and deploy.
+In this work, we show that these challenges can be overcome with a new compression strategy. We
+propose the “graph model” of compression, a new theoretical framework for representing compression
+as a directed acyclic graph of modular codecs. OpenZL compresses data into a self-describing wire
+format, any configuration of which can be decompressed by a universal decoder. OpenZL’s design
+enables rapid development of tailored compressors with minimal code; its universal decoder eliminates
+deployment lag; and its investment in a well-vetted standard component library minimizes security
+risks. Experimental results demonstrate that OpenZL achieves superior compression ratios and speeds
+compared to state-of-the-art general-purpose compressors on a variety of real-world datasets. Internal
+deployments at Meta have also shown consistent improvements in size and/or speed, with development
+timelines reduced from months to days. OpenZL thus represents a significant advance in practical,
+scalable, and maintainable data compression for modern data-intensive applications.
+Date: October 6th , 2025
+Correspondence: Yann Collet at cyan@meta.com
+Code: https://github.com/facebook/openzl
+Blog Post: https://engineering.fb.com/2025/10/06/developer-tools/openzl-open-source-
+format-aware-compression-framework
+1
+Introduction
+Compression research over the last decade has largely
+focused on leveraging machine learning to improve
+compression ratios [41, 39, 6, 27, 40, 49]. This benefits
+scenarios where minimizing data size is critical but
+speed is less important [44, 40, 6, 67]. Neural-netbased approaches compress benchmark datasets at
+significantly better ratios than traditional techniques
+but achieve throughput on the order of 1KB/s and
+often require heavy GPU resources [44, 27, 39, 67].
+suitable for latency-sensitive, high-volume environments. Indeed, the last great leap in production-scale
+compression was Zstandard (Zstd) [18], which combines LZ77 with entropy coding, and whose typical
+usage compresses on the order of 100 MB/s and decompresses on the order of 1 GB/s. Many papers
+investigating compression for real-world applications
+say the quiet part out loud: neural-net-based systems
+are too slow and require too many resources to be
+serious contenders in production, despite superior
+ratios [37, 65, 36, 1, 43].
+By contrast, production workloads must strike a balance between compressed size and processing time.
+For this reason, almost all popular compressors on
+the market use a variant of LZ77 [29], as its fast
+speeds and reasonable compression ratio makes it
+As a consequence, domain-specific compressors are
+increasingly the tool of choice for data-intensive workflows. In fields like genomics [54, 55, 4, 14, 42, 13],
+computer graphics [50, 64, 56, 38], and AI models [33], tailored compression algorithms have pushed
+1
+the state of the art in both academic and industry
+applications.
+the writers are allowed to write the new version.
+Thus, without guarantees on library freshness,
+updating the wire format becomes untenable.
+This makes custom compression unsuitable for
+whole swaths of applications, including mobile
+app development and IoT devices.
+Across disparate read/write patterns, data lifetime
+requirements, and data organization, there is a clear
+through-line: knowing anything at all about one’s
+data yields better and faster compression than even
+the best generic compressors. And furthermore, the
+more structure that can be exploited out of the data,
+the better one can be on both axes.
+(vi) High-cardinality applications are hard to support.
+This is an extension of point (ii), mostly focused
+on data warehouses with diverse customer needs.
+Deploying custom compressors for each of your
+clients’ needs quickly becomes untenable once
+you scale past a handful of use cases.
+This then begs the question: why aren’t applicationspecific compressors more common? In other words,
+if there’s a clear way to be both smaller and faster
+than generic compressors, why is it so rare?
+In this paper, we show that these challenges can be
+overcome with a new way of thinking about compression. We introduce OpenZL, a general compression engine that uses a graph-structured compression
+model with a self-describing wire format and a universal decoder. Specifically, OpenZL breaks from
+the typical monolithic compressor architecture by decomposing a compression into a DAG of composable
+codecs.
+(i) Upfront investment is intractable. Designing
+and implementing compression algorithms requires significant expertise and effort. Zstd, for
+instance, contains over 100,000 lines of code,
+representing years of development and handoptimization from a well-funded team. In addition, application-specific compression algorithms
+requires expertise not only in compression techniques, but also in the problem domain.
+1.1
+(ii) Inflexibility of solutions. Most custom compressors are designed to optimize for one benchmark
+dataset. Scale issues are immediate once you try
+to onboard datasets that require compression
+techniques not exploited by the original dataset.
+Additionally, just supporting new wire formats
+of the same data often requires extensive refactoring or even a complete rebuild of the library.
+The Graph Model of Compression
+Our main theoretical contribution is the graph model
+of compression, defined formally in section 3. In
+summary, we define a compression graph as a computational graph [20] where the nodes are codecs and
+edges represent data generated as output of one codec
+and used as input for another. Codecs are defined
+simply to be multivariate functions, so are allowed
+to have multiple inputs and multiple outputs. The
+graph model allows us to think about compressors at
+a higher level of abstraction and enables new ways
+of approaching the task of compression.
+(iii) Security guarantees are hard to make. A codebase
+as complex as a compression library is difficult
+to debug. Coupled with the fact that decompression is often performed on untrusted user input,
+this makes it very likely to contain intrusion
+channels that can be exploited.
+The computational graph also means decompression
+is purely procedural. Apart from the compressed data
+itself, all you need is the graph to decode any valid
+compressed frame. The universality of the decoder is
+an important result of the graph model.
+These constraints prevent smaller teams from adopting custom compression solutions. For larger enterprises that can fund their way out of these challenges,
+a different set of constraints arise when custom solutions are deployed at scale.
+1.2
+Overview of Results
+This paper’s main result is demonstrating that the
+graph model (as implemented) is both easy to use
+and expressive enough to cover a wide range of applications. OpenZL is able to address several pain
+points of application-specific compressors in order to
+simplify their development:
+(iv) Iteration is difficult. Releasing a production library means freezing the wire format and publishing long-term support guidance. Oftentimes
+this inhibits the speed of new development, as
+backwards compatibility limits what you can
+ship. This reduces the efficacy of custom compression because not all gains can be realized.
+(i) Upfront investment is minimal. Compared to
+existing monolithic compressor architectures,
+OpenZL’s modular structure solves the flexibility problem and allows the same developer to
+(v) Deployment is slow. Updating from version n
+to n + 1 requires that all the data readers are
+rolled out to support version n + 1 before any of
+2
+quickly stand up compressors for many different
+formats. We show in section 6 that the production code written to support new datasets is on
+the order of hundreds, and sometimes tens of
+lines of code.
+and speed improvements on a variety of different
+data.
+Section 7 summarizes the benefits we’ve seen from
+using OpenZL internally at Meta.
+Section 8 contains some concluding remarks and a
+look to the future.
+(ii) Solutions are flexible. The composable graph
+model also means diverse datasets can be supported by simply creating new graphs. Our
+benchmark experiments in section 6 demonstrate
+that many disparate data formats can be easily
+parsed to take advantage of OpenZL.
+2
+It is well known that a universal compressor that
+compresses every input does not exist. If some inputs are shortened, others are necessarily lengthened.
+Within those constraints, practical designs converge
+on a common recipe: (i) apply reversible transforms
+to surface structure, (ii) model the transformed symbols to estimate probabilities, and (iii) entropy-code
+them near optimally.
+(iii) The security surface is minimized. By breaking a
+compression job into small, independent chunks,
+we simplify the job of securing the entire compressor to simply securing each individual codec.
+Section A outlines the security hardened Standard Component Library provided by the OpenZL
+library. Compressors composed of these standard
+components inherit the strong security guarantees of the library.
+A more interesting bound is the Shannon limit [58],
+a measure of uncertainty that gives the maximum
+possible compression ratio for a given source distribution. In practice, this limit only matters for the
+last (iii) entropy-coding stage and doesn’t tell you
+what the source is.
+OpenZL is also an enterprise-scale solution for custom
+compression.
+(iv) Iteration is easy. The self-describing wire format
+means you can evolve a compressor’s graph over
+time without needing to make any changes to
+the decoder.
+Significant effort goes into the modeling stage which
+reduces input into a residual error signal, for the
+following entropy stage to encode. An effective model
+minimizes the error and result in data that compresses
+well.
+(v) Deployment is fast. A universal decoder elides
+the rollout calculation. The same core library
+can decode any graph given to it.
+The model does not necessarily need to operate directly on the input data. Various preparation stages
+can be inserted beforehand, as long as they are (i)
+reversible transforms. Such transforms don’t necessarily shrink the data (though some do); they mostly
+massage it to make modelling more efficient.
+(vi) High-cardinality applications are easy to support.
+Serialized graphs are often on the order of kilobytes and can be deployed widely. Training
+can be exploited to scale compression ratio wins
+across many disparate datasets. Section 7 summarizes the adoption of OpenZL within Meta
+and the performance wins we have enjoyed over
+time.
+1.3
+Related Work
+Most compression systems follow this 3-stage design.
+This taxonomy structures our review. We briefly
+list representative transforms, point to modeling–
+coding pairs, note classic general-purpose LZ and
+prediction-centric families, and quickly cover systems
+that treat compression as a programmable composition of stages, foreshadowing the design targeted by
+OpenZL.
+Paper Organization
+Section 2 describes prior work on data compression,
+in particular composable compression engines.
+Section 3 develops the graph model of compression,
+the underlying theoretical framework for OpenZL.
+2.1
+Section 4 explores some common steps in building
+and training OpenZL compressors.
+Reversible Transforms
+Reversible transforms are useful to remove redundancy and expose structure for downstream modeling.
+Section 5 explores the implementation and design
+choices of the OpenZL code.
+For example, the Burrows–Wheeler Transform
+(BWT) [12] clusters similar contexts so nearby symbols look alike. The run-length encoding (RLE) [57]
+Section 6 contains our experimental results, which
+show compressors built in OpenZL that achieve ratio
+3
+collapses symbol runs. The LZ77 family [68] replaces
+repeated substrings with backward references. Match
+selection is non-trivial—overlaps and ties exist—and
+these choices materially affect downstream compressibility (e.g., shorter offsets, fewer distinct symbols).
+Another common strategy is dictionary substitution,
+where frequent substrings are factored into a table
+and the input is rewritten as indices into that table. Other examples include delta coding (replacing
+absolute values by differences) and move-to-front
+(MTF) coding [7], which reorders symbols adaptively
+to expose locality for entropy coding.
+effective for structured and textual data where modest
+ratios suffice but (de-)compression speed is critical.
+DEFLATE/gzip [23, 22] encodes literal/length and dis-
+tance symbols, intertwined in a single Huffman-coded
+stream, using (static or dynamic) Huffman trees.
+Brotli [3] improves on gzip by using context models for literals and offsets. Zstandard [19] factors tokens into four logical streams (literals, literal-lengths,
+match-lengths, offsets) and uses either Huffman or
+FSE depending on mode. Zstandard further exploits
+parallelism at multiple levels (blocks, threads, and
+instruction-level). LZMA (as used in xz) combines LZ
+parsing and a range coder with context models (it is
+not a “pure LZ” design, making it more powerful but
+also markedly slower) [53].
+None of these transforms have to reduce size on their
+own, even if some do. The point is rather to set up
+the following model stage for success, so that it can
+produce a more efficient residual signal.
+2.2
+2.4
+Entropy Coding and Modeling
+Higher compression ratios hinge on accurate symbol prediction. PPM conditions on preceding contexts [15]; DMC learns an adaptive automaton [21];
+context mixing (e.g., PAQ [47], cmix [39]) blends multiple predictors using ideas related to boosting. Today
+these are increasingly neural-net based. NNCP is a
+more recent approach in this vein [6].
+Modeling. The model [8] turns the transformed
+stream into probabilities. Concretely, it defines the
+symbolization exposed by upstream transforms (e.g.,
+literals vs. match tuples), the conditioning (contexts,
+orders, etc.), and the update law (static per-block
+histograms, per-chunk adaptive counts, etc.). It also
+budgets side information (tables/parameters) so the
+bits spent on the model are paid back in the residual.
+Despite excellent ratios, these algorithms remain orders of magnitude slower (KB/s scale) and sequential,
+making them unsuitable for datacenter hot paths,
+where LZ compression techniques achieve orders of
+magnitude higher throughput.
+Entropy coding. Entropy coders map symbols to
+bitstreams given a probability distribution. Huffman remains widely used [34]; arithmetic coding approaches the entropy limit with different latency/state trade-offs [66]. The ANS family offers arithmeticlike compression at higher speed [24], with Zstandard’s FSE [17] as a table-driven tANS example. In
+practice, coders are mature; current work centers
+on high-throughput, optimized implementations and
+careful quantization of probabilities to the coder’s
+precision.
+2.5 A Programmable Composition of Processing Stages
+Modern “LZ + coder” compressors already operate
+as stage pipelines: an LZ-style parser identifies repetitions; a probability model estimates symbol/event
+likelihoods; and an entropy coder (e.g., Huffman,
+ANS, range coder) emits the bitstream. Practical implementations extend this basic pipeline with guard
+rails and fallback stages—e.g., raw/uncompressed
+blocks for incompressible regions (DEFLATE) and
+RLE blocks for degenerate runs or one-byte blocks
+(Zstandard)—and can bypass encoding for tiny inputs
+where headers would dominate.
+In short, the model does most of the work, provided
+that (i) upstream transforms expose the right symbols, (ii) its probability estimates are expressed in
+the limited precision that the coder can handle (using
+smoothing or quantization so they stay well-behaved),
+and (iii) side information (tables/params) is small
+enough and updated sensibly for the target speed
+and latency.
+2.3
+Prediction-Centric Compressors
+This staged idea is explicit in several widely used formats. PNG [10] applies a per-scanline prediction filter
+(None/Sub/Up/Average/Paeth) before DEFLATE,
+turning image structure into locally predictable residuals that the downstream coder compresses well; the
+filter choice is itself a stage decision recorded per
+row. Blosc [5] composes blocking, a shuffle/bitshuffle transform (to decorrelate bytes/bits and surface
+General-Purpose LZ
+For scenarios with strict throughput requirements,
+LZ4 [16] and Snappy [28] apply LZ-style parsing with
+a lightweight tagged format (varint lengths/distances)
+rather than a full entropy-coding stage. They are
+4
+runs), and then a configurable backend codec (LZ4,
+Zstd, etc.), executed in a multithreaded pipeline to
+maximize memory locality and throughput.
+can also be imposed, like requiring all messages in
+the set to be sorted runs of bytes.
+Some systems make the composition selectable. Blosc
+assembles a per-chunk, linear pipeline—e.g., (shuffle | bitshuffle | delta | trunc_prec) → codec (LZ4, Zstd,
+. . . )—with knobs for block size and parallelism. Parquet [26] composes per-column encodings (dictionary,
+delta, RLE/bit-packing) with a backend codec. ZPAQ
+goes further: the archive stores a virtual-machine
+program [48] specifying contexts/transforms and the
+coder. Here, the pipeline is part of the compressed
+frame. BTune [2] explores automatic choice/parameter search across Blosc2 codecs and filters.
+3.2
+Fundamentally, a codec is just a function operating
+on message sets.
+Definition 3.2 (Codec). An input (resp. output) is
+an ordered tuple of messages µ = (µ1 , . . . , µn ), each
+drawn from potentially different message sets µi ∈ Xi .
+The input domain (resp. output domain) is the ordered
+tuple of these message sets, i.e. X = (X1 , . . . , Xn ).
+A codec is a tuple (C, D) of functions. The encoder
+C : I → O is a mapping between a non-empty input
+domain I and a non-empty output domain O. The
+decoder D : O → I ′ maps O to a possibly different
+regenerated domain I ′ . A codec is lossless if this
+mapping is invertible, that is, I ≡ I ′ and
+In practice, these designs are constrained by enumerated stage catalogs and fixed rules on how these
+stages can be composed. Even where plugins exist,
+tuning often focuses on parameters for individual
+stages rather than exploring different stage orderings
+or richer graphs. As a result, a large fraction of the
+transform design space—and the cross-stage interactions that dictate effectiveness—remains practically
+under-explored.
+3
+D(C(µ)) ≡ µ, ∀µ ∈ I .
+This definition intentionally de-emphasizes the inner
+workings of the codec. In our model, the input/output signature matters more than the exact implementation because the signature tells us how the
+information is transformed semantically. This is an
+important abstraction, as it enables us to consider
+composition at a higher level.
+Core Concepts
+OpenZL represents the natural evolution of the staged
+pipeline design. Rather than limit the system to a
+strict linear flow, we introduce the graph model of
+compression. In addition to branching and dynamism,
+this new framing unlocks the possibility of training by
+imposing structure onto the process of compression.
+3.1
+Codecs
+Remark. From an implementation perspective,
+codecs are most useful when they are small and limited in scope. Section 5 describes the implementation
+philosophy in OpenZL.
+Data and Messages
+3.3
+In typical data compression parlance, a message is a
+sequence of bytes. Formally, we denote this
+Composition and Graphs
+In the graph model, compressors are graphs built
+from codec nodes. As a motivating example, consider
+the tokenize codec. Briefly, tokenize searches for
+repeated instances of the same “token”. It works by
+taking a message µ ∈ Σ∗ and outputting 2 messages:
+α, the list of unique tokens in µ; and ν, the “index”
+in α of each token within µ.
+µ ∈ B∗
+where µ is the message and B
+=
+{0x00, 0x01, . . . , 0xff} is the set of 8-bit bytes.
+In the graph model, we adopt a stricter requirement
+for messages.
+µ
+Definition 3.1 (Message Sets). A message set is a
+non-empty subset of the universe of bitstrings.
+alice
+Under this framing, a message is an element drawn
+from a message set. Rather than be any random bitstring, we impose semantic requirements on messages
+by restricting the possibility set. For instance, components may require that messages represent 64-bit
+integer arrays by requiring that all messages have bitlength divisible by 64. More restrictive requirements
+bob
+bob
+eve
+alice
+bob
+alice
+α
+0
+1
+1
+ν
+2
+alice
+0
+1
+0
+bob
+eve
+Figure 1 An example invocation of the tokenize codec.
+5
+Tokenization is sometimes an effective compressor on
+its own (such as when the message is composed of
+many repetitions of a few large tokens). More frequently though, its utility is as an intermediate transformation, which produces outputs better suited for
+subsequent processing. We can attach other codecs
+to each of the tokenize codec’s two outputs, which
+can separately attack the problems of efficiently representing the contents of the tokens and the indices.
+output from the source (Ou )i and an input to the
+target (Iv )j such that (Ou )i ⊆ (Iv )j .
+The sequence of transforms permitted by this model
+allows us to build compressors that exploit the semantics of the data much better than generic compressors. Semantic specialization in intermediate
+streams increases as you traverse the compression
+graph, increasing the efficiency of subsequent codecs.
+For entropy coders, such specialization can result in
+intermediate representations with lower entropy and
+thus a more compact code.
+While the alphabet α has the same type of content as
+the original message µ, the indices in ν are a sequence
+of integers rather than strings. While ν is a partial
+representation of µ, by transforming it into a fixedwidth, integer sequence, we can bring techniques to
+bear on it that can’t be applied directly to µ. For
+instance, we may construct a compressor that sends
+α to an LZ77 compressor and ν to an entropy encoder
+like Huffman. Figure 2 contains a visualization of
+this new compressor.
+3.4
+The compression graph inherits some useful properties from computational graphs. Notably, computational graphs are DAGs. And since every DAG
+admits a topological sort, this ensures that a welldefined compression graph always admits a valid feedforward computation order (for compression) and
+a valid backpropagation order (for decompression).
+Moreover, the proper decode procedure is uniquely
+determined just by knowing the ultimate outputs and
+the graph structure.
+µ
+tokenize
+ν
+huffman
+Universal Decompression
+α
+So long as each codec has a well-defined inverse, the
+DAG structure allows us to treat decompression as a
+procedural exercise. OpenZL exploits this property
+to provide a universal decompressor.
+LZ77
+Figure 2 An example compressor that uses tokenize, Huff-
+man, and LZ77.
+3.5
+Runtime Dynamicity
+As the visualization implies, a compressor with multiple codecs conveniently organizes itself as a graph.
+Informally, a compression graph is a computational
+graph [20, 25] where the nodes represent codecs and
+edges represent input and output sets∗ In particular,
+an edge between a parent and child codec indicates a
+“happens-after” relationship, where one of the outputs
+of the parent is used as one of the inputs of the child.
+Strong guarantees on decodability allow for more flexibility on the compression side. Indeed, so long as a
+compressor generates a compression graph somehow,
+the compressed frame will be decodable. Finding
+an exhaustive list of rules for dynamicity within the
+graph model is likely a hard problem. In this section, we propose one such source of dynamicity by
+extending the graph model slightly.
+Definition 3.3 (Compression Graph). A computational graph is a directed, acyclic, graph (DAG)
+where the nodes are functions and the edges represent function arguments (and data dependencies). A
+compression graph is a computational graph where
+each node v is labelled with a codec Cv : Iv → Ov ,
+and edges u → v are doubly-labelled with both an
+Definition 3.4 (Function graph). Denote by G the
+set of compression graphs. A function graph is a
+function F : I → G. A dynamic compression graph
+is a compression graph where the nodes are either
+codecs or function graphs.
+Function graphs can be described as “selectors”, choosing a graph based on the input, which itself may
+contain additional function graphs. At runtime, this
+expansion naturally modifies the graph being run.
+Figure 3 illustrates this process.
+∗ Technically, this is a reversed computational graph, since
+in typical depictions the feed-forward direction merges multiple
+inputs to produce the output, whereas a compression graph
+generates multiple outputs from the input.
+6
+compression:
+• Specialization without Compromising Support.
+Typically, specialization is always a tradeoff;
+one must weigh the benefits against the obvious drawbacks of less troubleshooting support
+and a sparser tooling environment. However,
+the universality of graph compression means domain experts can develop improved compression
+strategies for specific data while maintaining access to the OpenZL ecosystem and the tools built
+for it.
+• Constraint-Aware Tradeoffs. The flexibility to
+build multiple configs for the same data unlocks
+additional configuration opportunities. One of
+these is the tradeoff between speed and compression ratio. By simply changing the graph chosen
+at runtime, you can shift your usage along this
+tradeoff curve.
+The delegation of decision-making to compressiontime is an important property of OpenZL’s implementation of the graph model. By separating the
+decision-making process from the on-disk representation, progress in compression theory can be made
+while maintaining strict stability of the wire format.
+In particular, offline training of compressors is enabled by this split. This is a generalization of the
+idea of dictionary training and is developed further
+in section 4.6, section 5.5, and section 7.1.
+Figure 3 An example of function graph expansion. Func-
+tion graphs are shaded and their expansions marked in
+dotted lines.
+3.6
+Graph Resolution
+Readers familiar with lambda calculus may draw
+a vague parallel between function graph expansion
+and beta-reduction. Like beta-reduction, the function graph expansion process creates another valid
+graph, which may have more opportunities for function graph expansion. The “beta-normal form” for
+graphs is similarly important.
+4
+The freedom afforded by OpenZL’s graph model is a
+double-edged sword: the capability it offers comes at
+the cost of a combinatorial explosion of choices that
+must be made—namely which components to use
+and how to compose and configure them. There is
+no one-size-fits-all compressor. However, in practice,
+many OpenZL compressors do share the same overall
+structure:
+Definition 3.5 (Resolved Graph). A resolved graph
+is a compression graph that contains no function
+graphs.
+The example graph in figure 2 is by definition a resolved graph, as are all graphs with no dynamism.
+Furthermore, a compression that succeeds will always
+generate a resolved graph. Since the resolved graph
+contains only regular codecs, it also completely specifies how to reconstruct the original input. In the
+graph model, the decoder cannot make any runtime
+decisions based on data presented, so the existence of
+a resolved graph allows us to incorporate dynamism
+into OpenZL.
+3.7
+Building Compressors
+Frontend
+Parse
+Group
+Transform
+Compress
+Backend
+Figure 4 Common abstract compressor structure.
+This pattern emerges because the components of
+OpenZL that are actually good at compressing data—
+its suite of transforms and compressors—work best
+on homogenous streams of data. For inputs that
+aren’t already organized that way, those backend
+Practical Implications
+The graph model enables two new freedoms that
+address pain points common to application-specific
+7
+components require a frontend to parse and group
+the input into streams, which the backend can then
+compress effectively.
+4.1
+parsing function describing how to dispatch each
+byte of the input stream into a set of output streams.
+Alternatively, the Simple Data Description Language
+(SDDL), described in section 5.4, can implement the
+parsing function for you, given an SDDL description
+of the format. Because the dispatch codecs record the
+instructions they’re given into their output streams,
+the parsing logic specific to the file format in question
+is needed only on the compression side and OpenZL’s
+universal decoder can decompress and reconstruct
+the original data without any external instruction
+about the file format.
+A Motivating Example
+Consider a CSV file. The layout of a CSV file is a
+row-major representation of the data, which packs
+data of different types next to each other. A CSV
+parser for OpenZL would likely want to organize the
+input data by column instead of row, by creating
+an output stream for each column and sending all
+the values in that column to that output (and additionally creating an output for the framing commas
+and newlines). Reshaping and separating the input
+this way puts the data in a column-major representation, with streams of like-typed data uninterrupted
+by distractions (commas, whitespace, other values,
+etc.). This structure is likely to significantly improve
+OpenZL’s ability to operate on the data effectively.
+(And in fact, this is exactly how the CSV parser
+bundled in OpenZL works.)
+Some example parsing strategies we have implemented:
+• In vector data, like PyTorch tensors or WAV audio
+files, the interesting contents of the vector (the
+actual weights/features/samples) are extracted
+into their own output, separate from the framing,
+control, and meta-data.
+• In tabular data structures like CSV and Parquet,
+each column is parsed into its own output, and
+there is an additional output for the framing,
+control, and meta-data.
+However, this splitting is likely to be too fine-grained,
+because it has mechanically partitioned every single
+component of the input, even when they might have
+significant exploitable correlations. This parse has
+traded away the ability to use cross-column correlations in order to be able to use cross-row correlations.
+To address this, we can send the parser’s outputs
+to a grouping stage, which searches for cross-stream
+correlations and re-groups them where useful.
+• In tree-shaped data structures, like Thrift and
+Protobuf, each unique path is parsed into its
+own output, and there are a couple additional
+outputs for the framing and control data.
+This stage usually represents the bulk of the work
+of writing an OpenZL compressor for a new format,
+since this is the piece that OpenZL cannot automate.
+Once the structure and semantics of the input have
+been captured via this parsing process, the subsequent stages are much more amenable to automation,
+and OpenZL provides tooling to do so.
+After parsing and grouping, the outputs are ready to
+be sent to OpenZL’s backend graphs. These graphs
+generally begin with some number of transformations
+and end in compression. Loosely, the former try to
+change the representation of data with the goal of
+making it more compressible (e.g., parsing ASCII
+integers to a binary representation, or applying a
+linear predictor to a stream of values), while the
+latter take advantage of the structure and regularity
+that is exposed by the preceding stages to produce
+a compact representation (e.g., LZ compression and
+entropy coding).
+4.2
+Note that a parsing stage isn’t always necessary. This
+is trivially the case when the data in question is already in the format OpenZL’s backends desire (a
+clean, linear vector of data). In addition though,
+while parsing allows OpenZL to operate effectively
+on existing serialization formats, an alternative integration model skips this. Unlike traditional compressors which are limited to operating on a single
+bytestream, OpenZL accepts multiple, typed input
+streams to compress. This enables a more direct integration that skips over both serializing the structured
+data into a linear bytestream and the immediate reversal of that in parsing. Instead users can marshal
+their data directly into a set of typed buffers and pass
+that to OpenZL. Not only does this lessen the work
+OpenZL has to do, it can save a meaningful amount
+of serialization and deserialization work outside of
+OpenZL.
+Parsing Stage
+The job of the parsing stage is to take an input
+stream and separate the data into its logical components. Since OpenZL is a lossless compressor, every
+byte in the input must be reconstructible from the
+parsed outputs. This parse is typically achieved by
+providing a parsing function to OpenZL which can
+be plugged into one of the standard dispatch codecs.
+These codecs apply the instructions produced by the
+8
+4.3
+Grouping Stage
+bytes, which allows for more efficient LZ compression
+of numeric and struct streams.
+The parsing stage often breaks the input up into units
+that are too fine-grained. In order to take advantage
+of correlation between these streams they must be
+grouped back together. For example, that grouping
+can be done by concatenating or interleaving streams.
+4.6
+Even if a compressor conforms to this overall structure, figuring out how to best group, transform, and
+compress a dataset can be a non-trivial exercise.
+There are several approaches to making these decisions:
+The parser could simply not split the data up this
+finely, but we’ve found that separating the concern
+of grouping out of the parser both simplifies the
+parsing logic, and allows us to share the grouping
+logic between compressors for all formats.
+Manually The user can explicitly dictate the structure and configuration of their compressor, based
+on intuition or experimentation. This is how
+application-specific compressors have been built
+historically. This approach has several downsides. It is laborious and difficult and we have
+frequently found (to our surprise) that it produces sub-optimal results.
+OpenZL provides a clustering graph and corresponding trainer that handles this stage. Given samples
+of the parsed data, it searches for correlation and
+determines how streams should be grouped together.
+4.4
+Transformation Stage
+Runtime Automatic Experimentation. The
+runtime dynamicity offered by OpenZL allows
+experimentation with multiple processing
+options to occur at any point in the flow of
+compression. Results can be observed, the best
+option can be selected and the corresponding
+behavior can be executed. While possible for
+highly asymmetric scenarios, naïve brute-force
+approaches to exploration are impractically slow
+for most compression workflows, and even very
+constrained versions of this approach are likely
+to impose significant compression speed costs.
+The transformation stage applies any domain-specific
+transformations to the data. This is where compressor authors can leverage their understanding of
+the data to drastically improve compression. For
+example, the delta codec can be applied to sorted
+integers. Or the parse_int codec can be applied to
+convert ASCII integer strings to integers. Intelligent
+transformation choice often leads to compression that
+is both faster and stronger.
+While compressor authors can determine their own
+transformations, OpenZL provides tooling to make
+this stage easier. First, the generic compression backends detect common patterns and handle them effectively. Second, OpenZL provides the Automatic
+Compression Explorer (ACE) (described in section 5.5),
+which determines the best backend graph for a given
+input.
+4.5
+Construction Strategies
+Offline Automatic Experimentation. When
+tasked with compressing a large, relatively
+homogeneous dataset, a user might want to
+pick a small, representative sample corpus.
+The same automated exploration of options
+described previously, which would be too slow
+to run practically during each compression, may
+be more feasible when run on the much smaller
+selected subset of the data. The results of that
+exploration can be collected and used in the
+compression of the dataset as a whole.
+Compression Stage
+Finally, the compression stage runs generic compression after all domain-specific knowledge has been
+leveraged. Compressor authors are expected to simply use OpenZL’s builtin backend compressors, or
+use the backend graph produced by ACE.
+While OpenZL supports all of these strategies, the
+last in particular has proven particularly effective.
+OpenZL has accumulated several tools that aim to optimize a compressor to compress a given corpus, unified into a training workflow described in section 5.5.
+The backend component is typically a LZ codec or
+an entropy codec. OpenZL provides generic backend
+graphs for these purposes: Compress and Entropy.
+These backends select the right compression or entropy engine for the data.
+5
+In addition to the zstd LZ backend, OpenZL provides the field_lz codec and builtin backend graph.
+This codec operates on struct streams rather than
+Implementation
+This section provides an overview and rationale
+for the structure of the current implementation of
+OpenZL.
+9
+5.1
+The Software Stack
+allocation free; the binding around them handles
+types, bounds, and buffers. The vast majority
+of CPU time is spent in the kernel, so splitting
+in this way simplifies performance optimization
+work.
+The open-source OpenZL implementation is layered,
+with the goal of making the hot path efficient and
+verifiable. At the bottom sits the C11 core library,
+libopenzl, which exposes a stable surface and an
+execution engine for compression graphs. A thin
+C++ façade wraps that surface to provide RAII
+and strong typing. On top, a Python binding offers
+an API that integrates with data-science toolchains
+while preserving the core library’s determinism and
+memory discipline. Two tools complete the stack:
+SDDL (section 5.4), which turns a format description
+into a parser configuration aligned with the core type
+system, and the trainer (section 5.5), which produces
+serialized compressor configurations from samples.
+Message Sets. OpenZL has a partial implementation of message sets. It would be unrealistic to
+allow specifying arbitrarily-specific sets, so we
+approximate it with a type system. There are
+currently 4 types:
+• bytes for opaque serial data.
+• string for sequences of byte strings.
+• struct(k) for fixed-size (k ≥ 1) records.
+• numeric(w) a specialization of struct
+for host-endian 8, 16, 32, and 64-bit numbers.
+The choice of C11 for the core is deliberate: The wide
+portability and ubiquity of C toolchains, predictable
+memory semantics, universal ABI, and clear debuggability expectations are critical at this layer. By
+constraining the core to a narrow contract, higher
+layers can evolve at their own cadence without perturbing the on-wire format or the decoder.
+5.1.1
+Dynamism. We implement function graphs in two
+ways. The selector is a faithful representation
+of the abstract definition. All it does is output a graph based on input data. We found
+an additional construct useful. Named in the
+code as “function graphs”, these are regular codec
+encoders with the restriction that they cannot
+modify the input data, only call other codecs to
+do what they want. This is a happy medium
+between implementation power and abstract correctness.
+Public APIs: C++ and Python
+The C++ layer is intentionally thin. It wraps the
+C handles to manage resource lifetimes, translate
+error codes to exceptions, and make it easier to write
+custom components. Its primary role is to make core
+primitives easy to use in larger C++ systems, while
+still allowing a drop down to C where necessary.
+5.3
+The Python bindings mirror the C++ bindings closely.
+They focus on efficiency, allow zero-copy interaction
+with OpenZL through the buffer protocol, and can
+expose buffers as NumPy arrays, PyTorch tensors,
+dlpack tensors, or bytes. In addition to enabling
+production usage of OpenZL in Python, Python notebooks are a convenient way to experiment with custom OpenZL compressors on new datasets. The
+ability to write custom components in Python speeds
+up the prototyping process.
+5.2
+Versioning and Decoding
+An OpenZL compression session is driven by the
+compressor config. It targets a particular decoder
+profile, which describes—among other things—a specific format version. This makes it possible to enforce
+compatibility in an ecosystem with multiple generations of decoders. Based on the selected policy, it
+produces a compressed frame, or frame for short. The
+frame header declares the format version and capability requirements, that the decoder can check against
+its profile.
+Implementation Details
+A frame is organized into chunks, which can be decoded independently. Each chunk starts with a description of its resolved graph followed by the edge
+payloads (leaf data) and, optionally, integrity checksums. This is enough for the decoder to safely rebuild
+the original payload without sideband information.
+OpenZL’s implementation of the graph model is
+mostly straightforward. We mention some salient
+details here.
+Codecs. Codecs are the lowest level in the OpenZL
+architecture. Each codec does one thing well.
+Codecs are split into two parts: encoder and
+decoder. Implementation-wise, each side is typically organized into two layers: a kernel and a
+binding. Kernels are small, deterministic, and
+5.4
+SDDL: A Parser Builder
+Section 4.2 describes several strategies to tackle the
+problem of getting data into a form on which OpenZL
+10
+can operate effectively. While fancier integration
+options have their benefits, the non-invasive baseline
+is to teach OpenZL how to parse the data in its
+existing format.
+Inputs
+Inputs
+Inputs
+Inputs
+offline
+samples
+compressor
+Outputs
+Outputs
+Outputs
+Outputs
+Trainer
+config
+Figure 5 Abstract compressor training workflow.
+Rather than writing and plugging in a parsing function as a custom component to OpenZL, OpenZL
+offers the Simple Data Description Language (SDDL),
+which allows users to write a textual description of
+the format of their data. The SDDL engine applies
+this description to the input, using it to identify the
+tokens that make up the input and then to dispatch
+them into typed output streams.
+5.5.1
+Orchestration
+The trainer consists of an orchestration framework
+and a registry of training plug-ins. The registry associates configurable codecs and function graphs with
+corresponding logic to train them. During training,
+the orchestrator executes the existing compressor on
+the sample corpus until it reaches a component which
+has a registered training function, which it invokes.
+The component’s training function performs local
+experimentation and uses that to parameterize or
+restructure the component in question and its successors. After applying these changes, the orchestration
+framework resumes the execution of the sample compressions, with the new compressor structure, and
+continues traversing the compression graph until it
+encounters the next trainable component.
+SDDL is composed of several components: a compiler
+which translates the text description into a bytecode,
+an execution engine that applies that bytecode to an
+input, producing a stream of dispatch instructions,
+and the dispatch codecs which actually perform the
+decomposition of the input.
+SDDL’s execution engine offers a sandboxed runtime
+which mitigates the security and stability pitfalls
+typical of custom parsing logic. Despite these constraints, SDDL still offers dynamicity, which means
+descriptions can describe formats rather than specific
+inputs.
+5.5
+Compressions
+Compressions
+Compressions
+Compressions
+online
+Individual component trainers can also return multiple configuration options (at different points in the
+speed/ratio tradeoff space). These options allow the
+orchestration framework to make globally-efficient
+choices concerning where to allocate compression and
+decompression time across the whole compressor.
+Training
+In this way, specialized, local optimization logic can
+be composed into a holistic compressor optimizer† .
+The OpenZL trainer implements the offline experimentation strategy presented in section 4.6 for constructing a compressor. Given a corpus of sample
+inputs and a seed compressor, the trainer mutates
+the compressor in search of configurations that give
+better performance on the given dataset.
+5.5.2
+Components
+This section describes some specific training components that have demonstrated value:
+Clustering Trainer. The clustering trainer is responsible for optimizing the “grouping” stage
+of the compressor. It partitions the input into
+fine-grained units, then picks a grouping for
+these units in a way that optimizes a given cost
+function—typically compressed size. The space
+of possible groupings of inputs is large, and evaluating compressed size is essentially a black box
+function, so we combine heuristic search with
+training to find a good grouping.
+The trainer exploits several convenient properties of
+OpenZL:
+Abstract Structure. OpenZL’s support for the inspection and manipulation of graphs in the abstract facilitates the development of generic algorithms to generate and evaluate candidate compressors.
+Backend Generation. The Automated Compressor Explorer (ACE) uses a genetic algorithm to
+compose codecs together into backend graphs.
+Serializable Compressors. Because OpenZL compressors are serializable, training can be a standalone process. The compressor configuration
+that results from training can be published to
+the use case and adopted seamlessly, without
+rebuilding or restarting applications.
+† Note that the forward pass design described here does
+suffer from a limitation: components can have cyclic training
+dependencies. This remains an area of active experimentation.
+11
+As part of its exploration of possible graphs, it
+attempts to produce a maximally-wide range of
+options across the performance trade-off frontier.
+6.2.1
+The United States Census Bureau publishes a census every ten years. The unsampled 2020 data is
+available via the Privacy-Protected Microdata File
+(PPMF) [11], which anonymizes individual records
+by adding differentially-private statistical noise. The
+PPMF files are huge. The household table (ppmf_unit) is a 54 GB CSV file and the people table
+(ppmf_person) is even larger, at 125 GB. We preprocess the files by breaking them into 100 MB chunks,
+splitting between line breaks. This generates 548
+ppmf_unit files and 1,256 ppmf_person files.
+Selector Training. Classification is a classic machine learning problem. The ML Selector applies
+this to graph selection by using statistical features extracted from the data to choose the best
+graph for a given input. The trainer builds the
+model that the selector uses for inference during
+compression.
+6
+Experimental Results
+The Census Bureau also collects the yearly American
+Community Survey (ACS). The data are available
+via the Public Use Microdata Sample (PUMS) [52], a
+partially-redacted sample of the responses from the
+ACS. We build our corpus from the 5-year PUMS
+data from 2023 [52]. There are two sets of CSV files,
+one for people (10.4 GB) and one for households (4.17
+GB). Each is broken down by state. We refer to these
+datasets as psam_p and psam_h in the rest of this
+section.
+In this section, we demonstrate the flexibility and
+efficacy of OpenZL by building compressors for a
+wide variety of datasets and data formats. Section 6.3
+proves the viability of the graph model by finding
+high-compression ratio compressors for a variety of
+benchmark datasets. Section 6.4 visualizes the Pareto
+frontier of OpenZL’s trained compressors on the axes
+of compression ratio and compression speed. We
+finish with section 6.5, a case study showing some of
+the current limitations of the system.
+6.1
+Hardware and Software
+6.2.2
+All benchmarks were run on a Lenovo P620 desktop
+with an AMD Ryzen Threadripper PRO 3995WX
+CPU, with 256 GB of memory (8×32 GB DDR4
+3200MHz RDIMM ECC memory), and a 2 TB Samsung PM981a SSD‡ . Precision Boost was disabled for
+consistent results.
+Climate Reanalysis
+One widely-used tool in climate study is the climate
+reanalysis. This is a reconstruction of detailed climate
+data using existing recorded data and interpolations
+with modern modelling.
+The European Centre for Medium-Range Weather
+Forecasts (ECMWF) currently maintains the ERA5,
+the fifth-generation of their global reanalysis
+dataset [32]. ERA5 provides hourly estimates of
+many variables with data from 1940 to the present.
+For our benchmark, we used 5 datasets from October 1987: 10m u-component of wind (ERA5_wind),
+mean sea level pressure (ERA5_pressure), snow
+density (ERA5_snow), downward UV radiation at
+the surface (ERA5_flux), and total precipitation
+(ERA5_precip). For each dataset, there are 720
+hourly snapshots, each about 8 MB.
+We compiled OpenZL with GCC 14 on Fedora
+Linux 41. Each dataset is also benchmarked against
+a list of widely-used general compressors. We use
+lzbench, an open-source benchmarking tool for
+open-source compressors [61], for the measurement.
+We chose xz, zstd, and gzip. Table 1 summarizes
+some of their key properties. For some comparisons,
+we also compared against custom compressors. These
+are detailed in their respective sections.
+6.2
+2020 US Census
+Datasets
+We evaluated the compression ratio of OpenZL on a
+number of publicly available datasets. Procedurally,
+we chose datasets with a variety of file formats. We
+anticipated we would perform well against the chosen
+data, but for fairness the file formats and datasets
+were chosen before we created the compressors or
+tested any competitors. Table 2 summarizes these
+datasets.
+The Hans-Ertel Centre for Weather Research at
+Bonn University [59] has published a number of
+European-centric reanalyses. One such reanalysis
+is the COSMO-REA6§ [9] [31]. We used the total precipitation time series from December 2015
+(REA6_precip). There are 744 hourly snapshots,
+each about 5.8 MB.
+‡ Swap was not used. All benchmarks operate in memory.
+§ Source: Hans-Ertel-Centre for Weather Research.
+12
+Compressor
+xz
+zstd
+gzip
+Strategy
+Min Level
+Max Level
+LZ77 + Context Model + Range
+LZ77 + Huffman + ANS
+LZ77 + Huffman
+1
+1
+1
+9
+19
+9
+Table 1 Comparison of selected generic compressors.
+Dataset
+Data Format
+binance_canonical
+tlc_canonical
+era5_flux
+era5_precip
+era5_pressure
+era5_snow
+era5_wind
+psam_p
+psam_h
+ppmf_unit
+ppmf_person
+Parquet
+Parquet
+GRIB
+GRIB
+GRIB
+GRIB
+GRIB
+CSV
+CSV
+CSV
+CSV
+candlestick data for the top 1000 cryptocurrency
+trading pairs on binance.com. For each trading
+pair, the dataset provides a Parquet file containing
+fields like open_time, open, close, high, and low,
+as retrieved from Binance’s official API endpoint for
+historical candlestick data.
+Chunked
+No
+No
+Yes
+Yes
+Yes
+Yes
+Yes
+No
+No
+Yes
+Yes
+Table 2 A summary of the datasets used.
+For our benchmark, we selected 15 Bitcoin candlestick records from the dataset (BTC-AUD, BTC-BIDR,
+BTC-BRL, BTC-BUSD, BTC-DAI, BTC-EUR, BTC-GBP,
+BTC-NGN, BTC-PAX, BTC-RUB, BTC-TRY, BTC-TUSD,
+BTC-UAH, BTC-USDC, BTC-USDT). We convert these
+records to a “canonical” Parquet format, with no compression and default encoding. Each record is about
+64 MB.
+6.2.3
+6.3
+NYC Taxi Trip Records
+For each dataset, we generated a test/train split and
+used the default OpenZL training script to generate
+a compressor targeting the best compression without
+respect to speed. Then we benchmarked the trained
+compressor on the test set to measure compression
+ratio, compression speed, and decompression speed.
+The New York City Taxi and Limousine Commission
+(TLC) is the agency responsible for licensing and
+regulating New York City’s taxis, for-hire vehicles,
+commuter vans, and paratransit vehicles. The TLC
+collects and publishes trip record information for
+each taxi and for-hire vehicle trip completed by their
+licensed drivers or vehicles [51].
+In addition to the generic compressors, we benchmarked the climate reanalyses against Blosc and
+Parquet datasets against the default Parquet compression. Note that all the compression workloads,
+including for OpenZL, were all single-threaded. The
+only parallelism used was in training the OpenZL
+compressor.
+These records capture pickup and drop-off dates and
+times, pickup and drop-off locations, trip distances,
+itemized fares, rate types, payment types, and driverreported passenger counts. As of 2025, they also
+include a congestion fee column.
+For our benchmark, we use Yellow and Green Taxi
+trip data from Q1 2025 (Jan–Mar). We convert these
+records to a “canonical” Parquet format, with no
+compression and default encoding. The average size
+of all records is 228 MB in the canonical format. The
+size distribution is bimodal with the Yellow records at
+about 526 MB each and the Green records at about
+7.12 MB.
+6.2.4
+Best Compression Ratio
+The results we achieved are presented in figure 6 and
+table 3. In every case, OpenZL compressors are able
+to exceed the best compression ratio offered by xz.
+Importantly, this is accomplished while compressing
+at speeds an order of magnitude faster. In the case of
+ppmf_person, a trained OpenZL compressor compresses 55% better than xz-9 and 11 times as fast.
+Decompression speed is much worse, an artifact of the
+extra effort spent in parsing. CSV is a particularly
+time-consuming format to parse; Parquet requires
+less effort to parse, and thus the speeds are competitive even with zstd. In the case of era5_pressure
+and era5_wind, a trained OpenZL compressor is
+even able to beat zstd on both compression and
+decompression speed while achieving ratios double
+Binance
+An important resource in quantitative finance is candlestick data, which describe how the price of an asset
+changes over a given timeframe.
+The Binance dataset [63] is a collection of 1-minute
+13
+ERA5 Flux Dataset
+3
+3
+2.5
+2.5
+2
+2
+10
+100
+100
+Compression Speed [MiB/s]
+14
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+Binance (Canonicalized Parquet) Dataset
+openzl
+xz
+12
+10
+10
+8
+8
+6
+6
+316
+10
+Decompression Speed [MiB/s]
+100
+10
+8
+8
+6
+6
+316
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+10
+10
+8
+8
+6
+6
+4
+4
+1,000
+1
+10
+100
+50
+40
+40
+30
+30
+1,000
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+50
+1,000
+6
+6
+4
+4
+3,160
+1
+10
+100
+Compression Speed [MiB/s]
+Decompression Speed [MiB/s]
+100
+100
+50
+50
+10
+100
+1,000
+Compression Speed [MiB/s]
+100
+50
+50
+10
+1,000
+100
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+6
+6
+4
+4
+100
+100
+8
+8
+6
+6
+4
+4
+1,000
+1
+20
+20
+15
+15
+Compression Speed [MiB/s]
+316
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+25
+1,000
+100
+100
+1,000
+Decompression Speed [MiB/s]
+TLC (Canonicalized Parquet) Dataset
+25
+100
+10
+Compression Speed [MiB/s]
+Decompression Speed [MiB/s]
+REA6 Precip Dataset
+10
+1,000
+Decompression Speed [MiB/s]
+PSAM-P Dataset
+8
+10
+1,000 100
+Compression Speed [MiB/s]
+Decompression Speed [MiB/s]
+8
+Compression Speed [MiB/s]
+1,000
+100
+PSAM-H Dataset
+1
+100
+Decompression Speed [MiB/s]
+PPMF Unit Dataset
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+PPMF Person Dataset
+1
+1,000
+Decompression Speed [MiB/s]
+ERA5 Wind Dataset
+60
+100
+100
+Compression Speed [MiB/s]
+ERA5 Snow Dataset
+Compression Speed [MiB/s]
+Decompression Speed [MiB/s]
+10
+Decompression Speed [MiB/s]
+60
+10
+1,000
+ERA5 Pressure Dataset
+12
+100
+316
+Compression Speed [MiB/s]
+12
+10
+12
+blosc
+ERA5 Precip Dataset
+Compression Speed [MiB/s]
+14
+zstd
+zlib
+10
+10
+8
+8
+6
+6
+10
+1,000
+100
+Compression Speed [MiB/s]
+Decompression Speed [MiB/s]
+316
+Decompression Speed [MiB/s]
+Figure 6 Benchmark results across our test datasets. See also table 7 for a tabular presentation.
+14
+1,000
+xz-9 gzip-6 zstd-19 Blosc Parquet OpenZL
+ppmf-person
+ppmf-unit
+psam-p
+psam-h
+binance-canonical
+tlc-canonical
+rea6-precip
+era5-flux
+era5-precip
+era5-pressure
+era5-snow
+era5-wind
+69.10
+77.05
+6.75
+6.27
+2.62
+10.52
+21.44
+8.73
+11.19
+6.58
+47.76
+4.88
+21.20
+22.11
+4.61
+4.43
+1.84
+7.31
+14.16
+5.82
+7.39
+3.75
+32.16
+3.12
+60.15
+74.99
+6.47
+5.98
+2.15
+8.95
+18.07
+7.45
+9.49
+5.60
+41.01
+4.12
+1.25
+8.09
+16.21
+7.96
+7.86
+6.01
+33.97
+4.17
+116.70
+102.69
+8.59
+7.67
+3.01
+11.42
+24.82
+13.62
+13.00
+11.20
+58.25
+6.82
+Table 3 Compression ratios on various datasets. Trained OpenZL compressors are able to beat all tested alternatives
+on ratio.
+that of zstd.
+6.3.1
+Dataset
+binance_canonical
+tlc_canonical
+era5_flux
+era5_precip
+era5_pressure
+era5_snow
+era5_wind
+psam_p
+psam_h
+ppmf_unit
+ppmf_person
+Trained Compressors
+The training script produces a serialized compressor that is then provided to OpenZL in addition
+to the input file when compressing. Note that unlike dictionary-based compression, which uses the
+dictionary as an out-of-bound communication mechanism between the compressor and decompressor in
+order to permit a more compact representation of
+the message, no such smuggling happens here—the
+compressor does not need to be separately presented
+to the decoder and the compressed frame remains
+fully self-describing.
+9767
+15 268
+1226
+1137
+945
+890
+1098
+46 423
+34 597
+41 830
+44 253
+Table 4 Trained compressor sizes.
+The generated compressors are quite small. Table 4
+shows the compressor size generated for each test
+dataset. Most notably, the compressors for the Census datasets are the largest, because we must encode
+the column clustering instructions in the compressor. Out of these, the psam_p compressor is the
+largest, because there are over 200 columns in that
+table. However, these are outliers. The next largest
+compressor is 15 KB.
+tion 2). Specifically, we used Btune, their genetic
+auto-configure add-on, to optimize the ratio for each
+file. To offer an interesting comparison, we configured the Btune search parameters to prioritize ratio
+over speed. Reproducibility details are documented
+in section B.
+PPMF. Both PPMF_person and unit datasets exhibit
+significant data variation, leading to distinct “banding” of a more compressible section and a less compressible section. This is evident, for instance, by
+running a generic compressor like zstd over the data.
+We were able to exploit this difference in the data to
+train different subgraphs to fit each band. We did not
+do this, but one can imagine a production compressor
+that dynamically selects between these subgraphs at
+runtime. A potential implementation could involve
+auto-detecting the correct band by compressing a
+32 KiB block of the input data file using a fast LZ
+engine. At less than 0.01% of the size of each file,
+this would be a negligible addition to compression
+It’s important to note that the numbers shown are for
+the serialized compressor and not the resolved graph
+in the compressed frame. The compressor is (i) much
+more verbose than the frame format and (ii) must
+contain all the possible variants of dynamism it may
+ever need. The actual footprint of the resolved graph
+is much smaller.
+6.3.2
+Compressor Size
+Special Comparisons
+Blosc-Btune. For the climate reanalysis datasets,
+we also compared against Blosc (covered in sec-
+15
+time and no change for decompression.
+Parquet. By default, Parquet compresses its data.
+For each column, it chooses an “encoding” (e.g. tokenize, RLE, etc.) and a backend compressor (snappy,
+gzip, etc.). We measured the effectiveness of this
+compression by comparing the file sizes of the default
+parquet file against the canonicalized parquet, i.e. no
+encoding, no compression.
+6.4
+Compressor Tradeoff Selection
+Compressor
+Ratio
+Speeds
+Comp. Decomp.
+xz-1
+xz-6
+xz-9
+zstd-1
+zstd-3
+zstd-19
+gzip-1
+gzip-6
+xwrt
+2.99
+3.67
+3.68
+2.44
+2.80
+3.58
+2.34
+2.70
+4.86
+3.04
+10.2
+1.37
+1.36
+228
+124
+1.36
+54.8
+14.5
+0.850
+45.0
+OpenZL
+OpenZL is not limited to pursuing aggressive compression ratios. In addition to the ratio-focused compressors trained in the previous section, we also trained
+compressors focused on speed, and everything in between. As part of the training process, we generated
+a Pareto-optimal frontier for some selected datasets,
+shown in figure 7. Every OpenZL point on the plot
+represents a unique compression config.
+71.2
+84.0
+79.2
+794
+649
+589
+199
+199
+0.811
+449
+Table 5 Compression results on enwik7.
+measured in Megabytes per second (MB/s).
+Speeds are
+the best ratio, beating the next-highest ratio by over
+30% and OpenZL by almost 60%.
+We plot these against the traditional level system featured by other generic compressors. In many cases,
+the OpenZL tradeoff curve for ratio vs. compression
+speed strictly dominates. CSV is a pathological case
+because OpenZL needs to spend a lot of energy parsing column information and deserializing numbers.
+Despite this, some points along the curve are still
+worthy trade offs. Moreover, the composable nature
+of the compressor makes it possible to skip the parsing stage in order to reach higher speeds, an option
+that future iterations of OpenZL are set to employ.
+We present this case study to show that OpenZL is
+not a magic bullet for all use cases. The shortcomings
+are twofold. First, the standard codec library can
+achieve good results for many datasets, but is not
+currently optimized for human text. Second, English
+text is a highly compressible format for which domainspecific transformations are especially useful. xwrt
+combines multiple such transformations to achieve
+its results. With this in mind, we are optimistic
+that porting text-specific codecs and text parsing will
+improve the performance of OpenZL compressors in
+this domain.
+6.5 enwik: A Case Study Where OpenZL
+Performs Poorly
+7
+enwik is a dump of English Wikipedia taken on
+Prior to OpenZL, Zstandard made up the vast majority of compression use at Meta, since it offered
+Pareto-optimal performance across a wide variety of
+use cases and performance tradeoffs. This was the
+result of a more than decade-long pursuit for compression efficiency at Meta, achieved both by converting
+uses of compression to Zstd and by optimizing Zstd’s
+performance. As that process went on, it became
+clear that the headroom for further improvements
+from Zstd, within Zstd, or even with LZ compression in general, was fundamentally limited. Thus,
+OpenZL was born.
+March 6, 2003 [46]. This is a very important corpus
+for natural language processing, and there is an ongoing competition to compress the first 109 bytes of
+it (enwik9) as small as possible [35, 45].
+The file contains an XML dump of English text. This
+is a domain in which we have not spent time developing good codecs for OpenZL. In particular, the
+default behavior for string data is just to run zstd,
+and we don’t expect training to find any gains using the existing suite of numeric and struct-focused
+codecs.
+OpenZL at Meta
+OpenZL has now replaced a meaningful fraction of
+Zstd use in production at Meta. Much of the data at
+Meta is serialized using Thrift [62], both at rest and
+in transit. A custom parser that understands Thrift,
+in conjunction with training tools to specialize the
+compressor for individual use cases, allows OpenZL
+to effectively compress a wide range of traffic.
+To demonstrate this, we benchmarked on the first 107
+bytes of enwik (enwik7). As expected, training does
+not improve the results and the compressor simply
+uses zstd-6 (table 5). We add a comparison in the
+table to xwrt, a compressor specialized to compress
+natural language [60]. Unsurprisingly, xwrt achieves
+16
+ERA5 Precip Dataset
+2
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+Binance (Canonicalized Parquet) Dataset
+2
+openzl
+zstd
+xz
+zlib
+1.5
+1.5
+1
+1
+1
+10
+100
+1,000
+Compression Speed [MiB/s]
+100
+10
+10
+5
+5
+1,000
+10
+Decompression Speed [MiB/s]
+50
+50
+0
+0
+100
+1,000
+Compression Speed [MiB/s]
+100
+1,000
+1,000
+Decompression Speed [MiB/s]
+TLC (Canonicalized Parquet) Dataset
+100
+1,000
+Decompression Speed [MiB/s]
+Compression Ratio [B/B]
+Compression Ratio [B/B]
+PPMF Unit Dataset
+100
+10
+100
+Compression Speed [MiB/s]
+15
+15
+10
+10
+5
+5
+0
+10
+100
+1,000
+Compression Speed [MiB/s]
+316
+1,000
+0
+3,160
+Decompression Speed [MiB/s]
+Figure 7 Compression and decompression Pareto frontiers of different algorithms for selected datasets.
+Here is a short survey of these deployments:
+lization by 5% compared to Zstd level 6. Moreover, this was done solely by reusing existing
+components already built for Scribe.
+Nimble: Integrating OpenZL into a columnar
+database as the backend compressor immediately
+saved 10% compressed size compared to Zstd.
+Most of these gains came from labelling numeric
+data types as such, and stacks on top of the
+transformations that Nimble uses to pre-process
+its data.¶
+Log aggregator: OpenZL was able to reduce compressed size by 18% compared to Zstd. In this
+latency sensitive application, OpenZL’s performance was improved by sending arrays of integers directly to OpenZL, cutting out the need
+to serialize and deserialize.
+Scribe: With training, OpenZL improved compression ratios by ∼15% compared to Zstd. This improves network throughput and improves training data quality through dropping fewer records.
+Scribe data is also constantly changing. Using
+the training functionality described in section 5.5,
+we’ve been able to maintain these ratio wins via
+regular training runs.
+Embedding storage: Compressing bfloat16 embeddings serialized in PyTorch’s torch.save()
+format reduces compressed size by 30%. Traditional compressors struggle with floating-point
+data, so compression was not deemed computationally profitable before this project. The
+development timeline for this new compressor
+was on the order of days due to reuse of existing components developed for PyTorch model
+checkpoints.
+PyTorch model checkpoints: OpenZL leverages
+type information to save an average of 17% on
+storage for model checkpoints, with savings varying based on the floating point data type. Compression with OpenZL also reduces checkpointing
+overhead through reduced network traffic, which
+improves training efficiency.
+Overall, OpenZL has helped Meta bend the curve
+of AI growth. The compression improvements that
+OpenZL offers allow Meta to do more with the same
+amount of hardware—better training data compression means more data can be pushed through the
+same pipe; smaller data means less compute is spent
+reading data from the data warehouse; reduced network traffic for model checkpointing improves GPU
+utilization.
+Feature storage: Similar to Scribe, OpenZL was
+deployed with training for Thrift data. However,
+the Feature storage team chose a different tradeoff point on the speed-ratio curve. Switching to
+OpenZL reduced storage by 10% and CPU uti¶ Nimble applies transformations that improve query efficiency by operating on the encoded data, where OpenZL
+applies transformations that are useful for compression only.
+17
+Project
+Nimble
+Scribe
+Feature storage
+Log aggregator
+Embedding storage
+PyTorch model checkpoints
+Use Case
+Data Format
+Trained
+Data warehouse
+Data warehouse
+Training data
+Training data
+Training data
+Model training
+Raw Columns
+Thrift
+Thrift
+Thrift
+Uncompressed .zip
+Float arrays
+No
+Yes
+Yes
+Yes
+No
+No
+Table 6 An overview of major OpenZL integrations at Meta, as of the time of writing.
+7.1
+Training with Managed Compression
+adoption of OpenZL at all: in the same way that this
+systematic approach to training made Zstd dictionaries frictionless for use-cases to adopt, this infrastructure makes OpenZL easy to integrate, and thousands
+of trained OpenZL compressors are deployed to use
+cases at Meta through Managed Compression.
+As described in section 4.6, OpenZL’s modular treatment of the components of compression, and the
+development of tools that automate the configuration
+and composition of those components, mean that
+OpenZL lends itself well to offline training. Although
+the configurations under consideration internally are
+different and more diverse, treated in the abstract,
+this training workflow nonetheless has the same overall shape as training a dictionary for Zstandard.
+8
+This paper describes a graph model of compression,
+a new conceptual model of compression that encourages composition of small, single-minded codecs. We
+demonstrate its effectiveness with OpenZL, a featurerich implementation of the graph model. The result
+is a scalable, enterprise-ready system that offers unprecedented performance across diverse datasets. For
+a wide range of benchmark datasets, we are able to
+beat the best compression ratio offered by xz at an order of magnitude faster compression, despite needing
+to parse and understand the data. OpenZL demonstrates that the compression efficiency unlocked by
+understanding the data far outweighs the effort spent
+on parsing, and that this can be achieved via composition of a library of relatively simple codecs.
+And in fact, Meta’s Managed Compression system [30], which was originally designed to manage dictionaries for Zstandard compression, has proven adept
+at training compressors for OpenZL. The trainer
+accepts a corpus of representative samples and an
+existing compressor and can configure and parameterize nodes or even construct and replace sub-graphs
+throughout the compressor. After validation and
+benchmarking, the resulting compressor can then be
+re-serialized and deployed to the fleet.
+Users
+Managed
+Compression
+Library
+sa
+We hope that the positive results from Meta-internal
+use cases will motivate data owners to investigate
+their own wins from using OpenZL. In particular, we
+expect the automated training tools presented to be
+more than adequate to achieve compression wins that
+justify the resource investment in OpenZL.
+m
+p
+le
+s
+OpenZL
+Config
+offline Store
+Data
+Store
+online
+co
+n
+fi
+gs
+Conclusions
+Managed
+Compression
+Automation
+8.1
+Future Work
+The unreasonable effectiveness of our first foray into
+training leads us to believe that the graph model is
+uniquely positioned to facilitate ML-guided generation of compressors. We are tempted to view this
+as “the next big thing” in compression. Whereas
+compression research has up to now eluded those
+without domain expertise, we believe the future of
+application-specific compressors will be unlocked via
+investment in automated learning methods.
+OpenZL Trainer
+Figure 8 OpenZL integrated into Managed Compression.
+This architecture has proven useful not only in
+terms of finding useful compression configurations for
+OpenZL use cases at Meta, but also in driving broad
+18
+We are also emboldened to revisit the space of LZbased compressors with the graph model. While it’s
+true that LZ on byte streams is essentially a solved
+problem, the natural extension to typed data still
+remains an open question. Indeed, our implementation of FieldLZ demonstrates that there is significant
+progress yet to be made towards a truly generic LZ
+engine.
+8.2
+Contributing to OpenZL
+OpenZL is open-source. Feedback is welcome and
+encouraged via Github issues. Many things, including
+the wire format, are still under development. If you
+are interested in shaping the evolution of OpenZL,
+feel free to contact us!
+The codec library is an active area of work. We
+expect to add more standard codecs and welcome
+contributors with domain expertise to add domainspecific codecs.
+Governance and steering committees are under discussion, as are efforts for hardware acceleration.
+9
+Acknowledgements
+We would also like to thank our former interns Timothy Oei, Pedro Valero, Aryan Gandevia, and Faizaan
+Baig for their contributions to OpenZL. We would
+like to thank Dr. Evan West for his feedback and
+suggestions on the manuscript. Finally, we would like
+to thank Aras Pranckevičius and Takayuki Matsuoka
+for beta-testing OpenZL. Their input was useful in
+shaping the work presented in this paper.
+19
+References
+Research Report 124, Digital Equipment Corporation, Systems Research Center, Palo Alto, CA, May
+1994. https://www.cs.jhu.edu/~langmea/res
+ources/burrows_wheeler.pdf. SRC Research
+Report 124.
+[1] 2BrightSparks, Jan 2024. https://help.2brig
+htsparks.com/support/solutions/article
+s/43000335985-comparison-of-compressionmethods-and-levels.
+[13] Pritam Chanda, Eran Elhaik, and Joel S Bader.
+Hapzipper: sharing hapmap populations just got easier. Nucleic acids research, 40(20):e159–e159, 2012.
+[2] The Blosc Development Team. Btune: Making compression better. Technical report, IronArray SLU,
+2023.
+[14] Shubham Chandak, Kedar Tatwawadi, Idoia Ochoa,
+Mikel Hernaez, and Tsachy Weissman. Spring: a
+next-generation compressor for fastq data. Bioinformatics, 35(15):2674–2676, 12 2018. ISSN 1367-4803.
+doi: 10.1093/bioinf ormatics/bty1015. https:
+//doi.org/10.1093/bioinformatics/bty1015.
+[3] Jyrki Alakuijala and Zoltan Szabadka. Brotli compressed data format. RFC 7932, RFC Editor, July
+2016. https://www.rfc-editor.org/rfc/rfc
+7932.txt.
+[4] Jarno N. Alanko, Elena Biagi, Joel Mackenzie, and
+Simon J. Puglisi. Batched k-mer lookup on the spectral burrows-wheeler transform. In 2025 Proceedings
+of the Symposium on Algorithm Engineering and
+Experiments (ALENEX), pages 95–106, 2025. doi:
+10.1137/1.9781611978339.8. https://epubs.siam
+.org/doi/abs/10.1137/1.9781611978339.8.
+[15] J. Cleary and I. Witten. Data compression using adaptive coding and partial string matching.
+IEEE Transactions on Communications, 32(4):396–
+402, 1984. doi: 10.1109/TCOM.1984.1096090.
+[16] Yann Collet. LZ4 - Extremely fast compression.
+Open source project, self-published, 2011.
+[5] The Blosc Development Team. Blosc documentation,
+2010. https://www.blosc.org.
+[17] Yann Collet. Finite state entropy - a new breed of
+entropy coder. https://fastcompression.bl
+[6] Fabrice Bellard. Lossless data compression with
+neural networks, 2019. https://bellard.org/nn
+cp/nncp.pdf.
+ogspot.com/2013/12/finite-state-entropynew-breed-of.html, 2013.
+[18] Yann Collet. Zstandard - fast real-time compression
+algorithm. Open source project, Facebook, 2015.
+https://github.com/facebook/zstd.
+[7] Jon Louis Bentley, Daniel D. Sleator, Robert E. Tarjan, and Victor K. Wei. A locally adaptive data
+compression scheme. Commun. ACM, 29(4):320–330,
+April 1986. ISSN 0001-0782. doi: 10.1145/5684.5688.
+https://doi.org/10.1145/5684.5688.
+[19] Yann Collet and Murray Kucherawy. Zstandard
+compression and the application/zstd media type.
+RFC 8878, RFC Editor, October 2018. https:
+//www.rfc- editor.org/rfc/rfc8878.txt.
+RFC8878.
+[8] Guy Blelloch. Introduction to Data Compression.
+Carnegie Mellon University, 2013.
+[9] C. Bollmeyer, J. D. Keller, C. Ohlwein, S. Wahl,
+S. Crewell, P. Friederichs, A. Hense, J. Keune,
+S. Kneifel, I. Pscheidt, S. Redl, and S. Steinke.
+Towards a high-resolution regional reanalysis for
+the european cordex domain. Quarterly Journal
+of the Royal Meteorological Society, 141(686):1–15,
+2015. doi: https://doi.org/10.1002/qj.2486.
+[20] Michael Collins. Computational graphs, and backpropagation. Lecture Notes, Columbia University,
+pages 11–23, 2018.
+https://rmets.onlinelibrary.wiley.com/
+doi/abs/10.1002/qj.2486.
+[21] G. V. Cormack and R. N. S. Horspool. Data compression using dynamic markov modelling. The
+Computer Journal, 30(6):541–550, 12 1987. ISSN
+0010-4620. doi: 10.1093/comjnl/30.6.541. https:
+//doi.org/10.1093/comjnl/30.6.541.
+[10] Thomas Boutell. PNG (Portable Network Graphics)
+Specification Version 1.0. RFC 2083, March 1997.
+https://www.rfc-editor.org/info/rfc2083.
+[22] L. Peter Deutsch. GZIP file format specification
+version 4.3. RFC 1952, May 1996. https://data
+tracker.ietf.org/doc/html/rfc1952.
+[11] US Census Bureau. 2020 census privacy-protected
+microdata file (ppmf) readme, 2024. https://ww
+[23] Peter Deutsch. DEFLATE compressed data format
+specification version 1.3. RFC 1951, RFC Editor,
+May 1996. https://www.rfc-editor.org/rfc
+/rfc1951.txt. RFC1951.
+w2.census.gov/programs-surveys/decennia
+l/2020/data/privacy-protected-microdatafile/2024-08-05-privacy-protected-micr
+odata-file-README.pdf.
+[24] Jarek Duda. Asymmetric numeral systems: entropy coding combining speed of huffman coding
+with compression rate of arithmetic coding, 2014.
+https://arxiv.org/abs/1311.2540.
+[12] Michael Burrows and David J. Wheeler. A blocksorting lossless data compression algorithm. SRC
+20
+[25] Chris Dyer, Yoav Goldberg, and Graham Neubig.
+Practical neural networks for NLP: From theory
+to code. In Bishan Yang and Rebecca Hwa, editors, Proceedings of the 2016 Conference on Empirical Methods in Natural Language Processing: Tutorial Abstracts, Austin, Texas, November 2016. Association for Computational Linguistics. https:
+//aclanthology.org/D16-2001/.
+ing (ICASSP), pages 4427–4431, May 2020. doi:
+10.1109/ICASSP40776.2020.9053178.
+[37] Richard Jumar, Heiko Maaß, and Veit Hagenmeyer.
+Comparison of lossless compression schemes for high
+rate electrical grid time series for smart grid monitoring and analysis. Computers & Electrical Engineering, 71:465–476, 2018. ISSN 0045-7906. doi:
+https://doi.org/10.1016/j.compeleceng.2018.07.008.
+[26] Apache Software Foundation. parquet-format. Technical report, Apache Software Foundation, 2024.
+https://www.sciencedirect.com/science/ar
+ticle/pii/S0045790617334791.
+[27] Mohit Goyal, Kedar Tatwawadi, Shubham Chandak,
+and Idoia Ochoa. Dzip: Improved general-purpose
+lossless compression based on novel neural network
+modeling. In 2020 Data Compression Conference
+(DCC), pages 372–372, March 2020. doi: 10.1109/
+DCC47342.2020.00065.
+[38] Arseny Kapoulkine. meshoptimizer. https://gith
+ub.com/zeux/meshoptimizer, 2017.
+[28] Steinar H. Gunderson. Snappy: A fast compressor/decompressor, 2011. https://github.com/g
+oogle/snappy. Open source project.
+[40] Byron Knoll. lstm-compress. https://github.c
+om/byronknoll/lstm-compress, 2017.
+[39] Byron Knoll. Cmix compressor. https://www.by
+ronknoll.com/cmix.html, 2014. Accessed: 202504-30.
+[41] Byron Knoll and Nando de Freitas. A machine
+learning perspective on predictive coding with paq8.
+In 2012 Data Compression Conference, pages 377–
+386, April 2012. doi: 10.1109/DCC.2012.44.
+[29] Apoorv Gupta, Aman Bansal, and Vidhi Khanduja.
+Modern lossless compression techniques: Review,
+comparison and analysis. In 2017 Second International Conference on Electrical, Computer and
+Communication Technologies (ICECCT), pages 1–8.
+IEEE, 2017.
+[42] Divon Lan, Ray Tobler, Yassine Souilmi, and Bastien
+Llamas. Genozip: a universal extensible genomic
+data compressor. Bioinformatics, 37(16):2225–2230,
+02 2021. ISSN 1367-4803. doi: 10.1093/bioinformati
+cs/btab102. https://doi.org/10.1093/bioinf
+ormatics/btab102.
+[30] W. Felix Handte, Yann Collet, and Nick Terrell. 5
+ways Facebook improved compression at scale with
+Zstandard, 2018. https://engineering.fb.com
+/2018/12/19/core-infra/zstandard/.
+[43] LinuxReviews, 2019. https://linuxreviews.o
+rg/Comparison_of_Compression_Algorithms.
+[31] Hans-Ertel Center for Weather Research. Cosmorea6. https://reanalysis.meteo.uni-bonn.d
+e/?COSMO-REA6, 2015.
+[44] Anji Liu, Stephan Mandt, and Guy Van den Broeck.
+Lossless compression with probabilistic circuits. In
+International Conference on Learning Representations, 2022. https://openreview.net/forum?i
+d=X_hByk2-5je.
+[32] H. Hersbach, B. Bell, P. Berrisford, G. Biavati,
+A. Horányi, J. Muñoz Sabater, J. Nicolas, C. Peubey,
+R. Radu, I. Rozum, D. Schepers, A. Simmons,
+C. Soci, D. Dee, and J-N Thépaut. Era5 hourly
+data on single levels from 1940 to present, 2023.
+[45] Matt Mahoney, 2006. https://www.mattmahone
+y.net/dc/text.html.
+[33] Moshik Hershcovitch, Leshem Choshen, Andrew
+Wood, Ilias Enmouri, Peter Chin, Swaminathan Sundararaman, and Danny Harnik. Lossless and nearlossless compression for foundation models, 2024.
+https://arxiv.org/abs/2404.15198.
+[46] Matt Mahoney. About the test data, 2011. https:
+//www.mattmahoney.net/dc/textdata.html.
+[47] Matt Mahoney. The PAQ data compression programs, 2013. http://mattmahoney.net/dc/paq
+.html. Website documenting various PAQ iterations.
+[34] David A. Huffman. A method for the construction
+of minimum-redundancy codes. Proceedings of the
+IRE, 40(9):1098–1101, 1952. doi: 10.1109/JRPROC
+.1952.273898.
+[48] Matt Mahoney. The zpaq compression algorithm.
+Technical Report ZPAQ-2015-12-29, self-published,
+December 2015. https://mattmahoney.net/dc
+/zpaq_compression.pdf.
+[35] Marcus Hutter. 500’000€ prize for compressing human knowledge, 2020. http://prize.hutter1.
+net.
+[49] Yu Mao, Yufei Cui, Tei-Wei Kuo, and Chun Jason Xue. Trace: A fast transformer-based generalpurpose lossless compressor. In Proceedings of
+the ACM Web Conference 2022, WWW ’22, page
+1829–1838, New York, NY, USA, 2022. Association
+for Computing Machinery. ISBN 9781450390965. doi:
+[36] Khurram Iqbal, Nabeel Khan, and Maria G. Martini. Performance comparison of lossless compression strategies for dynamic vision sensor data. In
+ICASSP 2020 - 2020 IEEE International Conference on Acoustics, Speech and Signal Process-
+21
+10.1145/3485447.3511987. https://doi.org/10
+.1145/3485447.3511987.
+[62] Mark Slee, Aditya Agarwal, and Marc Kwiatkowski.
+Thrift: Scalable cross-language services implementation. Technical report, Facebook, 2007. https:
+[50] Fabian Mentzer, Luc Van Gool, and Michael Tschannen. Learning better lossless compression using
+lossy compression. In 2020 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), pages 6637–6646, June 2020. doi:
+10.1109/CVPR42600.2020.00667.
+//thrift.apache.org/static/files/thrift20070401.pdf.
+[63] J.J.H. Smit. Binance full history. https://www.
+kaggle.com/datasets/jorijnsmit/binancefull-history, 2025.
+[64] David Taubman, Aous Naman, Reji Mathew,
+Michael Smith, O Watanabe, and PA Lemieux. High
+throughput jpeg 2000 (htj2k): Algorithm, performance and potential. International Telecommunications Union (ITU), pages 15444–15, 2019.
+[51] NYC Taxi and Limousine Commission. TLC trip
+record data. https://www.nyc.gov/site/tlc/a
+bout/tlc-trip-record-data.page, 2022.
+[52] American Community Survey Office. 5-year pums
+data (2023), 2024. https://www2.census.gov/
+[65] M. Thevenin, S. Pigoury, O. Thomine, and F. Gouillon. A comparison of lossless compression algorithms for altimeter data. EGUsphere, 2022:1–
+28, 2022. doi: 10.5194/egusphere- 2022- 1094.
+programs- surveys/acs/data/pums/2023/5Year/.
+[53] Igor Pavlov. LZMA algorithm description, 2013.
+https://www.7-zip.org/7z.html. 7-zip documentation.
+https://egusphere.copernicus.org/prepr
+ints/2022/egusphere-2022-1094/.
+[66] Ian H. Witten, Radford M. Neal, and John G. Cleary.
+Arithmetic coding for data compression. Commun.
+ACM, 30(6):520–540, June 1987. ISSN 0001-0782.
+doi: 10.1145/214762.214771. https://doi.org/
+10.1145/214762.214771.
+[54] Giulio Ermanno Pibiri. Sparse and skew hashing
+of k-mers. Bioinformatics, 38(Supplement_1):i185–
+i194, 06 2022. ISSN 1367-4803. doi: 10.1093/bioi
+nformatics/btac245. https://doi.org/10.1093/
+bioinformatics/btac245.
+[67] Boyang Zhang, Daning Cheng, Yunquan Zhang,
+Fangmin Liu, and Wenguang Chen. Compression
+for better: A general and stable lossless compression
+framework, 2024. https://arxiv.org/abs/2412
+.06868.
+[55] Giulio Ermanno Pibiri. On weighted k-mer dictionaries. Algorithms for Molecular Biology, 18(1):3,
+2023. doi: 10.1186/s13015-023-00226-2. https:
+//doi.org/10.1186/s13015-023-00226-2.
+[68] J. Ziv and A. Lempel. A universal algorithm for
+sequential data compression. IEEE Transactions
+on Information Theory, 23(3):337–343, 1977. doi:
+10.1109/TIT.1977.1055714.
+[56] Aras Pranckevičius. Lossless float image compression,
+07 2025. https://aras-p.info/blog/2025/07/
+08/Lossless-Float-Image-Compression/.
+[57] A.H. Robinson and C. Cherry. Results of a prototype television bandwidth compression scheme.
+Proceedings of the IEEE, 55(3):356–364, 1967. doi:
+10.1109/PROC.1967.5493.
+[58] Claude Shannon. A mathematical theory of communication. The Bell System Technical Journal, 27:
+379–423, 1948.
+[59] Clemens Simmer, Gerhard Adrian, Sarah Jones,
+Volkmar Wirth, Martin Göber, Cathy Hohenegger,
+Tijana Janjic, Jan Keller, Christian Ohlwein, Axel
+Seifert, Silke Troemel, Thorsten Ulbrich, Kathrin
+Wapler, Martin Weissmann, Julia Keller, Matthieu
+Masbou, Stefanie Meilinger, Nicole Riß, Annika
+Schomburg, and Christa Weingärtner. Herz - the
+german hans-ertel centre for weather research. Bulletin of the American Meteorological Society, 97:1057–
+1068, 09 2016. doi: 10.1175/BAMS-D-13-00227.1.
+[60] Przemyslaw Skibinski. Xwrt. Open source project,
+self-published, 2015.
+[61] Przemyslaw Skibinski. lzbench. https://github
+.com/inikep/lzbench, 2016.
+22
+Appendix
+A
+stages of the compression can better exploit the
+structure of the data and achieve better compression ratios. The logic that drives these codecs
+often understands the input data schema, but
+because the decisions are written into the compressed frame, the decoder can be oblivious to
+the schema. In this category, OpenZL has the
+following codecs:
+Standard Component Library
+Standard components in OpenZL are components
+that are pre-registered into the compressor. These
+are well tested and reusable components frequently
+used in compressors. There are both standard codecs
+(standalone nodes that can be composed) and standard graphs (prebuilt compression graphs).
+• Dispatch
+• Dispatch string
+The authoritative documentation for these components can be found in the OpenZL documentation
+website, but they are briefly described in the following
+sections. As of the time of writing, OpenZL is still in
+development, so this list is expected to evolve over
+time. Indeed, OpenZL’s format versioning scheme
+allows safe additions and removals over time.
+A.1
+• Concat
+• Interleave
+• Split
+LZ: These codecs implement LZ compression. Today,
+Field LZ is the only native LZ codec, which runs
+LZ on struct streams and finds matches that
+match runs of entire structs rather than bytes.
+OpenZL has the following copy-based codecs:
+Standard Codecs
+Standard Codecs in OpenZL can be classified into 6
+broad categories: conversion, data restructuring, LZ,
+representation interpreting and transforming.
+• Field LZ
+• Zstd
+Representation Interpreting: Representation interpreting codecs perform the role of converting the data from a known representation, to
+the original data representation. When data
+is already pre-compressed, or transformed to a
+representation other codecs are not designed to
+work with, it is often necessary to restore the
+original data representation to achieve better
+compression. OpenZL has the following codecs:
+Conversion: The OpenZL implementation approximates Message Sets with a simple type system
+that allows serial streams of bytes, fixed-width
+struct streams, numeric streams, and streams of
+variable length strings. The conversion codecs
+handle converting from one type to another. The
+following conversion codecs exist:
+• Conversion from serial to {8, 16, 32, 64}bit numeric in both big-endian and littleendian formats.
+• Bitunpack
+• Parse Int
+• Conversion from numeric to serial in the
+little-endian format.
+Transform: Transform codecs transform the data
+(without compressing it) so that following codecs
+can better exploit the data. Certain patterns,
+such as strictly increasing data can only be captured using such codecs.
+• Conversion from serial to fixed-size structs
+of any width.
+• Conversion from struct to serial.
+• Conversion from serial to string by adding
+a lengths stream that describes the length
+of each string in the content stream.
+• Delta
+• Conversion from a string stream to a serial
+and numeric stream describing the content
+and lengths respectively.
+• Float Deconstruct
+• Divide By
+• Prefix Encoding
+• Range Pack
+Data Restructuring: Data restructuring codecs in
+OpenZL perform the role of extracting structure
+out of the original data. These codecs can be
+used to separate out homogenous data, and then
+piece together correlated data so that entropy
+• Transpose
+• Tokenize
+• Zigzag
+23
+Blosc
+Parquet OpenZL
+xz-1
+xz-6
+xz-9
+zlib-1
+zlib-6
+zstd-1
+zstd-3
+zstd-19
+2.50
+2.10
+45.7
+2.62
+1.91
+46.2
+1.80
+37.4
+187
+1.84
+14.6
+194
+1.65
+305.
+663.
+1.85
+124
+586
+2.15
+2.31
+444
+1.25
+binance_canonical
+R
+2.16
+C
+6.88
+D 42.1
+3.01
+53.7
+703
+R
+8.80
+C 25.4
+D 145
+10.5
+3.08
+196
+10.5
+3.03
+196
+6.05
+119
+431
+7.32
+23.5
+471
+6.55
+375.
+938
+7.26
+286
+906
+8.95
+2.04
+1430
+8.09
+tlc_canonical
+11.4
+197
+1180
+rea6_precip
+R 17.8
+C 48.1
+D 254
+21.5
+4.35
+323
+21.5
+4.22
+258
+11.5
+187
+661
+14.2
+50.2
+360
+14.8
+691.
+1450
+13.4
+572
+1280
+18.1
+4.19
+2340
+16.2
+43.8
+1130
+24.8
+237
+2140
+era5_flux
+R
+7.51
+C 22.2
+D 131
+8.73
+2.63
+146
+8.73
+2.57
+123
+5.52
+107
+396
+5.82
+23.8
+292
+6.21
+379.
+881
+5.92
+247
+841
+7.45
+3.32
+909
+7.96
+41.3
+1020
+13.6
+268
+1450
+era5_precip
+R
+9.09
+C 28.0
+D 141
+11.2
+1.99
+207
+11.2
+1.96
+177
+5.99
+124
+429
+7.39
+30.4
+405
+6.57
+343.
+724
+6.61
+305
+720
+9.50
+2.02
+1560
+7.86
+26.3
+616
+13.0
+147
+1570
+era5_pressure
+R
+5.12
+C 14.1
+D 84.9
+6.58
+1.48
+98.1
+6.58
+1.45
+90.5
+3.40
+76.3
+286
+3.75
+14.8
+331
+4.53
+247
+566
+3.97
+171
+504
+5.60
+1.79
+537
+6.01
+66.8
+923.
+11.2
+417.
+873
+era5_snow
+R 42.2
+C 77.6
+D 592
+47.8
+12.7
+627
+47.8
+12.1
+422
+26.1
+269
+1010
+32.2
+88.2
+881
+33.4
+1570
+2800
+32.5
+1160
+3010
+41.0
+19.4
+3370
+33.9
+224
+1580
+58.3
+250
+2160
+era5_wind
+R
+4.11
+C 11.4
+D 75.2
+4.88
+1.39
+90.2
+4.88
+1.37
+83.5
+2.82
+58.3
+237
+3.12
+11.8
+272
+3.01
+211
+506
+3.27
+141
+517
+4.12
+1.73
+630
+4.17
+38.3
+868
+6.82
+248.
+1270
+psam_p
+R
+4.83
+C 16.60
+D 90.7
+6.56
+1.38
+118
+6.75
+1.07
+109
+3.48
+71.2
+246
+4.61
+10.2
+288
+4.52
+247.
+784
+4.53
+176
+714
+6.47
+1.10
+969.
+8.59
+23.8
+49.4
+psam_h
+R
+4.51
+C 15.2
+D 85.9
+6.11
+1.28
+114
+6.27
+1.03
+102
+3.36
+68.7
+244
+4.43
+9.31
+292
+4.35
+241.
+794
+4.33
+162
+724
+5.98
+1.23
+1020
+7.67
+19.3
+54.95
+ppmf_unit
+R 27.9
+C 53.2
+D 491
+76.4
+7.79
+1210
+77.1
+6.81
+752
+14.5
+207
+752
+22.1
+61.6
+869
+27.5
+1070
+3130
+28.2
+882
+3080
+75.0
+4.43
+6170
+103.
+60.3
+121
+ppmf_person
+R 27.5
+C 51.4
+D 483
+66.2
+7.09
+902
+69.1
+6.06
+626
+14.4
+209
+754
+21.2
+62.5
+855
+27.3
+1080
+3310
+25.9
+829
+3160
+60.2
+1.80
+4750
+117.
+68.4
+147
+Table 7 Compression benchmark results on our test datasets. R represents compression ratio, measured as sizeorig/sizecomp .
+C is compression speed measured in MiB/s. D is decompression speed, measured similarly. Bold cells represent the best
+performance for each evaluation axis. See also figure 6 for a graphical presentation.
+24
+Entropy: Entropy codecs exploit similarity inside an
+input to compress the data. Entropy codecs are
+the backbone of compression and in the majority
+of cases, and will be used as the final stage in a
+compressor. OpenZL has the following codecs:
+tools.
+For section 6.3, the benchmark script is included at openzl/contrib/reproducibility/
+watermark for completeness. The expected time
+for completion is around 12-16 hours. Most of the
+time is spent in training, so ensure you have a strong
+machine with plenty of memory and many cores for
+the best results. The lzbench script we used is
+available at openzl/contrib/reproducibility/
+lzbench. This script will take around 5 days to complete the entire benchmark.
+• Constant
+• Huffman
+• FSE
+• Bitpack
+A.2
+Blosc-specific benchmarks can be found here.
+Standard Graphs
+For section 6.4, the results for the Pareto-frontier
+figures were generated by openzl/contrib/
+reproducibility/figures/make-paretooptimal-figures.py. The invocations used to
+generate the charts are saved here.
+Standard graphs are graphs that are automatically
+registered in the compressor with canonical names.
+These are common graphs used in the design of a
+compressor.
+The most fundamental graph is the store graph. This
+graph directly writes the result to the compressed output and does no transformation on the data. There is
+a store graph variant for each data type of OpenZL.
+The datasets for section 6.3 and section 6.4
+are publicly available.
+openzl/contrib/
+reproducibility/dataset_manager
+details
+this process and provides some convenience scripts
+to download and process the data. Some datasets
+require you to apply for an API key before
+downloading.
+OpenZL provides these builtin standard graphs:
+• Bitpack
+• Compress
+For section 6.5, the dataset is publicly available here.
+For speed, we tested with the first 107 bytes. We used
+the same lzbench settings as section 6.3. The xwrt
+results were gathered by downloading and building
+the binary and running with command options
+• Entropy
+• FieldLZ
+• FSE
+• Huffman
+xwrt -l14 -b255 -m96 -s -e40000 -f200
+• Zstd
+Instructions to disable boost varies by CPU. On our
+machine it is as follows:
+Additionally, OpenZL has some specialized graphs to
+support advanced use cases.
+echo "passive" | sudo tee \
+/sys/devices/system/cpu/amd_pstate/status
+echo 0 | sudo tee \
+/sys/devices/system/cpu/cpufreq/boost
+Generic Clustering: this graph is a multi-input
+graph that interprets a config provided and clusters them according to that config then sends
+them to the successors defined in this config.
+This graph can be used with the training api
+provided.
+SDDL: this graph takes a description written in the
+Simple Data Description Language and applies
+it to its input, eventually producing a set of
+dispatch instructions which it sends along with
+the input to a dispatch codec.
+B
+Reproducibility
+OpenZL is open-source and available here. This
+includes the library, training executables, and other
+25

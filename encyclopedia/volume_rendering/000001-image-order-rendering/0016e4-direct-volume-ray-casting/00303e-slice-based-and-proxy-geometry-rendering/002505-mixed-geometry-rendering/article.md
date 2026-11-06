@@ -3,163 +3,173 @@
 Also called: Direct Volume Rendering with Z-Buffer Geometry, Wireframe and Surface Combination
 
 ## Overview
-Mixed Geometry Rendering combines direct volume ray casting with standard Z-buffer surface rendering to visualize scalar fields alongside explicit geometric structures, such as finite element meshes or computational fluid dynamics grids [S1]. It solves the problem of contextualizing volumetric data by allowing users to see the underlying structural boundaries (wireframes or surfaces) while retaining the internal density information of the volume [S1]. Unlike pure volume rendering, it introduces a hybrid occlusion model where explicit geometry can occlude the volume, but the volume correctly transmits light from geometry behind it, distinguishing it from [2D Visualization from 3D Grid (Slow)](1507-2d-visualization-from-3d-grid-slow.md) which lacks this explicit geometric overlay, and [Texture-Based Volume Rendering](4707-texture-based-volume-rendering.md) which relies on texture mapping rather than explicit mesh integration.
+Mixed Geometry Rendering combines direct volume ray casting with explicit geometric primitives (such as wireframes or surfaces) to provide structural context to volumetric data [S1]. It solves the problem of depth perception and structural clarity in scalar fields by rendering the volume's internal density while simultaneously displaying an external or internal geometric skeleton [S1]. Unlike pure volume rendering, which relies solely on shading and opacity for shape cues, this method uses a standard Z-buffer to render geometry that occludes the volume behind it, while the volume correctly transmits light from geometry rendered in front [S1].
 
 ## How it works
-The method integrates two rendering passes: a volume ray casting pass and a Z-buffer surface pass. The volume pass computes gradients to derive normals for lighting, while the surface pass renders explicit geometry (e.g., wireframes) to provide structural context.
+The method integrates two rendering passes: a geometric pass for explicit structures and a ray-casting pass for the scalar volume.
 
-**Inputs and Outputs:**
-*   **Input:** A scalar field defined on a grid or unstructured mesh (e.g., tetrahedral cells); explicit geometric primitives (wireframes or surfaces) representing the domain boundaries or internal structures; a camera view; a 512x512 pixel window [S1].
-*   **Output:** A 2D image where volume density is composited with geometric wireframes/surfaces.
+**Inputs and Outputs**
+*   **Inputs:** A scalar volume dataset (grid or unstructured), a set of geometric primitives (e.g., wireframe edges, surface meshes), a camera position $\mathbf{o}$ and direction $\mathbf{d}$, a transfer function $T$, and a lighting model.
+*   **Outputs:** A final 2D image where volume density and geometric structure are composited.
 
-**Data Structures:**
-*   **Scalar Field:** Stored as node values. For cell-organized data (e.g., tetrahedral meshes), the memory layout requires storing connectivity and node values. The source notes that this approach has high memory usage for cell-organized data, requiring over 50 Megabytes for a model with 381,548 tetrahedral cells [S1].
-*   **Gradient Vector:** Computed per voxel/node to serve as a surface normal for lighting [S1].
-*   **Z-Buffer:** Standard depth buffer used to store the depth of the explicitly rendered geometry [S1].
+**Data Structures**
+*   **Volume Grid:** A 3D array of scalar values. For unstructured data (e.g., tetrahedral cells), the memory layout stores node coordinates and cell connectivity [S1].
+*   **Geometry Buffer:** A standard Z-buffer (depth buffer) storing the depth $z$ of the closest geometric primitive for each pixel [S1].
+*   **Pixel Color Buffer:** Stores the accumulated color $C_{pixel}$ for each pixel [S1].
 
-**Step-by-Step Method:**
+**Numbered Steps**
 
-1.  **Gradient Computation:** Compute the gradient vector $\nabla f = (g_x, g_y, g_z)$ at each voxel or node. This is done by calculating differences in values and coordinates between three pairs of neighboring points [S1].
-    *   The X component $g_x$ is calculated as the ratio of two determinants [S1]:
-        $$ g_x = \frac{\det \begin{pmatrix} A_{f0} & A_{y0} & A_{z0} \\ A_{f1} & A_{y1} & A_{z1} \\ A_{f2} & A_{y2} & A_{z2} \end{pmatrix}}{\det \begin{pmatrix} A_{x0} & A_{y0} & A_{z0} \\ A_{x1} & A_{y1} & A_{z1} \\ A_{x2} & A_{y2} & A_{z2} \end{pmatrix}} $$
-        Where $A$ represents the differences between the current point and its neighbors. Specifically, $A_{x0} = x_1 - x_0$, $A_{f0} = f_1 - f_0$, etc. [S1].
-    *   The Y component $g_y$ is computed by substituting the value differences ($A_f$) into the second column of the numerator determinant [S1].
-    *   The Z component $g_z$ is computed by substituting the value differences ($A_f$) into the third column of the numerator determinant [S1].
+1.  **Initialize Buffers:** Clear the Z-buffer to infinity and the Color buffer to black (or background color) [S1].
+2.  **Render Geometry:** Render the explicit geometric primitives (e.g., wireframe) into the Z-buffer using standard rasterization or ray-triangle intersection [S1]. This establishes the depth of the structural boundaries [S1].
+3.  **Compute Gradients:** For each voxel in the volume, compute the gradient vector $\nabla V$ to serve as a surface normal for lighting [S1].
+    *   The gradient is computed using differences of values and coordinates between three pairs of neighboring points [S1].
+    *   The X component of the gradient is calculated as the ratio of two determinants [S1]:
+        $$
+        \nabla V_x = \frac{\det \begin{pmatrix} A_{f0} & A_{y0} & A_{z0} \\ A_{f1} & A_{y1} & A_{z1} \\ A_{f2} & A_{y2} & A_{z2} \end{pmatrix}}{\det \begin{pmatrix} A_{x0} & A_{y0} & A_{z0} \\ A_{x1} & A_{y1} & A_{z1} \\ A_{x2} & A_{y2} & A_{z2} \end{pmatrix}}
+        $$
+        where $A$ represents differences in values ($A_f$) and coordinates ($A_x, A_y, A_z$) [S1].
+    *   The Y and Z components are computed similarly by substituting value differences into the second and third columns of the numerator determinant, respectively [S1].
+4.  **Ray Casting and Compositing:** For each pixel, cast a ray through the volume [S1].
+    *   Determine the ray segment $[t_{start}, t_{end}]$ within the volume domain [S1].
+    *   Discretize the ray into samples [S1].
+    *   For each sample point $\mathbf{p}_i$:
+        a.  **Classification:** Map the scalar value $V(\mathbf{p}_i)$ to color $C_i$ and opacity $\alpha_i$ using the transfer function [S1].
+        b.  **Shading:** Compute the lighting contribution using the pre-computed gradient $\nabla V$ as the normal and a simple lighting equation (e.g., diffuse reflection) [S1].
+        c.  **Integration:** Accumulate the color and opacity along the ray [S1].
+5.  **Final Composition:** After integrating the volume along the ray, multiply the stored color in the pixel (from the geometry pass) by the transmittance of the volume $(1 - \text{integral of opacity along the ray})$ and add this product to the ray's accumulated color [S1].
+    *   Formula:
+        $$
+        C_{final} = C_{geometry} \cdot (1 - \int \alpha \, dt) + C_{volume}
+        $$
+        where $C_{geometry}$ is the color from the Z-buffer geometry pass [S1].
 
-2.  **Volume Ray Casting (Alpha Blending):**
-    *   For each pixel, cast a ray through the volume [S1].
-    *   Convert scalar values at each sample point along the ray to opacity $\alpha$ and color $C$ using transfer functions (mapping functions) [S1].
-    *   Integrate opacity and color along the ray using standard volume rendering integration (e.g., front-to-back compositing) [S1].
-    *   Let $C_{vol}$ be the accumulated color and $\alpha_{vol}$ be the accumulated opacity from the volume integration [S1].
+**Parameters**
+*   **Resolution:** Performance results cited use a 512x512 pixel window [S1].
+*   **Lighting Model:** Simple lighting equation using gradient normals [S1].
 
-3.  **Geometry Rendering (Z-Buffer):**
-    *   Render the explicit geometric structures (e.g., wireframes of the finite element grid) into the Z-buffer using a standard Z-buffer algorithm [S1].
-    *   This pass establishes the depth of the structural boundaries [S1].
+**Edge Cases and Pitfalls**
+*   **Occlusion Artifacts:** Wireframe geometry completely occludes volume data behind it. If the wireframe is dense, it may hide important internal volume structures [S1].
+*   **Transparency:** Volume data in front of the wireframe correctly transmits colors from the geometry, but the geometry does not transmit through the volume [S1].
+*   **Memory Usage:** High memory usage for cell-organized (unstructured) data. For example, a model with 381,548 tetrahedral cells required over 50 Megabytes [S1].
 
-4.  **Compositing:**
-    *   The final pixel color is determined by combining the volume result with the geometry result. The source describes a specific interaction: "The stored color in the pixel is then multiplied by one minus the integral of the opacity along the ray. This product is added to color of the ray. This is the finished color of the pixel" [S1].
-    *   In practice, this implies that the volume data acts as a semi-transparent layer over the geometry. If the geometry is rendered first (or its depth is known), the volume contribution is modulated by the geometry's presence. However, the text notes a specific artifact: "wireframe geometry completely occludes volume data behind it, although volume data in front of the wireframe correctly transmits colors from the geometry" [S1]. This suggests a specific ordering or blending logic where the wireframe depth test prevents volume pixels behind it from contributing, but volume pixels in front of the wireframe are composited on top of the wireframe's color [S1].
-
-**Pseudocode:**
+**Pseudocode**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mixed_geometry_rendering(volume_data, geometry_mesh, camera, window_size=512):
-    # Initialize buffers
-    z_buffer = [[infinity] * window_size for _ in range(window_size)]
-    final_image = [[(0, 0, 0)] * window_size for _ in range(window_size)]
+def mixed_geometry_render(volume, geometry, camera, transfer_function, lighting_model):
+    # 1. Initialize buffers
+    z_buffer = array(width, height, init=INFINITY)
+    color_buffer = array(width, height, init=(0, 0, 0))
     
-    # Precompute gradients for lighting normals
-    gradients = compute_gradients(volume_data)
+    # 2. Render Geometry into Z-buffer
+    # Standard rasterization or ray-triangle intersection
+    for prim in geometry:
+        render_primitive(prim, z_buffer, color_buffer)
+        
+    # 3. Pre-compute gradients for volume
+    gradients = compute_gradients(volume)
     
-    # Step 1: Render explicit geometry to Z-buffer
-    # This establishes the depth of the wireframe/surface structures
-    render_geometry_to_zbuffer(geometry_mesh, z_buffer)
-    
-    # Step 2: Volume Ray Casting with Z-buffer interaction
-    for y in range(window_size):
-        for x in range(window_size):
-            ray = camera.cast_ray(x, y)
+    # 4. Ray Casting for Volume
+    for y in range(height):
+        for x in range(width):
+            ray_origin, ray_direction = camera.get_ray(x, y)
             
-            # Initialize volume accumulation
-            vol_color = (0, 0, 0)
-            vol_opacity = 0.0
+            # Determine volume bounds
+            t_start, t_end = intersect_volume(ray_origin, ray_direction, volume.bounds)
             
-            # Sample along the ray
-            t = 0.0
-            while t < ray.max_distance:
-                point = ray.origin + ray.direction * t
-                value = interpolate_volume(volume_data, point)
+            accumulated_volume_color = (0, 0, 0)
+            total_opacity = 0.0
+            
+            # Discretize ray
+            num_samples = calculate_samples(t_start, t_end, resolution)
+            for i in range(num_samples):
+                t = t_start + i * (t_end - t_start) / num_samples
+                point = ray_origin + t * ray_direction
                 
-                # Convert scalar to color and opacity
-                alpha, color = transfer_function(value)
+                # Sample volume
+                scalar_value = sample_volume(volume, point)
                 
-                # Compute lighting using gradient as normal
+                # Classification
+                color, opacity = transfer_function(scalar_value)
+                
+                # Shading using gradient
                 normal = gradients[point]
-                light_color = simple_lighting_model(normal)
+                light_color = lighting_model(normal, ray_direction)
                 shaded_color = color * light_color
                 
-                # Standard front-to-back volume compositing
-                # Note: The source implies the geometry occlusion is handled
-                # by the Z-buffer interaction described in the text.
-                # If the ray hits a geometry element closer than the current t,
-                # the volume behind it is occluded.
+                # Compositing (Front-to-Back)
+                # Note: The specific integration formula in [S1] implies 
+                # adding volume color weighted by transmittance, 
+                # but standard over-operator is implied for volume accumulation.
+                # [S1] states: "integrate these values along the ray"
+                # and "Multiply the stored color... by (1 - integral of opacity)"
                 
-                # Check if geometry occludes this volume sample
-                # The source states: "wireframe geometry completely occludes 
-                # volume data behind it"
-                if is_occluded_by_geometry(point, geometry_mesh, z_buffer):
+                # Accumulate volume contribution
+                # Using standard front-to-back for volume part
+                transmittance = 1.0 - total_opacity
+                accumulated_volume_color += transmittance * opacity * shaded_color
+                total_opacity += transmittance * opacity
+                
+                if total_opacity >= 1.0:
                     break
-                
-                # Composite volume contribution
-                # C_final = C_vol + C_ray * (1 - alpha_vol)
-                # Here, we accumulate into vol_color and vol_opacity
-                vol_color = vol_color + shaded_color * alpha * (1 - vol_opacity)
-                vol_opacity = vol_opacity + alpha * (1 - vol_opacity)
-                
-                t += ray.step_size
             
-            # The source describes the final calculation as:
-            # "The stored color in the pixel is then multiplied by one minus 
-            # the integral of the opacity along the ray. This product is added 
-            # to color of the ray."
-            # This phrasing is slightly ambiguous regarding the order of 
-            # geometry vs volume. Based on "volume data in front of the 
-            # wireframe geometry does, however, correctly transmit colors 
-            # from the geometry", the geometry color is likely the base, 
-            # and the volume is added on top, modulated by its own opacity.
+            # 5. Final Composition
+            # Geometry color is already in color_buffer[x, y]
+            geo_color = color_buffer[x, y]
             
-            # Assuming geometry color is stored in a separate buffer or 
-            # retrieved from the Z-buffer pass context:
-            geo_color = get_geometry_color_at_pixel(x, y)
+            # Volume transmittance
+            vol_transmittance = 1.0 - total_opacity
             
-            # Final composite: Geometry is the background, Volume is foreground
-            # C_final = C_geo * (1 - alpha_vol) + C_vol
-            # However, the text says: "stored color ... multiplied by (1 - integral)"
-            # This implies: C_final = C_stored * (1 - alpha_vol) + C_vol_accumulated
-            # Where C_stored is the geometry color.
+            # Combine: Geometry is occluded by volume? 
+            # [S1] says: "wireframe geometry completely occludes volume data behind it"
+            # and "volume data in front ... correctly transmits colors from the geometry"
+            # This implies the geometry is rendered first (background), 
+            # and volume is rendered on top, attenuating the geometry.
             
-            final_image[y][x] = geo_color * (1 - vol_opacity) + vol_color
+            final_color = geo_color * vol_transmittance + accumulated_volume_color
+            
+            color_buffer[x, y] = final_color
+            
+    return color_buffer
 
-    return final_image
-
-def compute_gradients(volume_data):
-    # Computes gradient at each voxel using the determinant method
-    # described in the source.
-    pass
-
-def is_occluded_by_geometry(point, geometry_mesh, z_buffer):
-    # Checks if the point is behind any rendered geometry
-    # The source states wireframe geometry completely occludes 
-    # volume data behind it.
-    pass
+def compute_gradients(volume):
+    gradients = empty_array_like(volume)
+    for each voxel in volume:
+        # Compute differences of values and coordinates
+        # X component
+        num_x = det([Af0, Ay0, Az0], [Af1, Ay1, Az1], [Af2, Ay2, Az2])
+        den_x = det([Ax0, Ay0, Az0], [Ax1, Ay1, Az1], [Ax2, Ay2, Az2])
+        gradients.x = num_x / den_x
+        
+        # Y component (substitute value diffs into 2nd col)
+        num_y = det([Ax0, Af0, Az0], [Ax1, Af1, Az1], [Ax2, Af2, Az2])
+        den_y = det([Ax0, Ay0, Az0], [Ax1, Ay1, Az1], [Ax2, Ay2, Az2])
+        gradients.y = num_y / den_y
+        
+        # Z component (substitute value diffs into 3rd col)
+        num_z = det([Ax0, Ay0, Af0], [Ax1, Ay1, Af1], [Ax2, Ay2, Af2])
+        den_z = det([Ax0, Ay0, Az0], [Ax1, Ay1, Az1], [Ax2, Ay2, Az2])
+        gradients.z = num_z / den_z
+    return gradients
 ```
-
-**Parameters:**
-*   **Resolution:** 512x512 pixel window used for performance results [S1].
-*   **Lighting Model:** Simple lighting equation using the gradient as a normal [S1].
-
-**Edge Cases and Pitfalls:**
-*   **Occlusion Artifact:** Wireframe geometry completely occludes volume data behind it. This can hide important internal structures if the wireframe is dense [S1].
-*   **Memory Usage:** High memory consumption for cell-organized data (e.g., tetrahedral meshes). A model with 381,548 cells required over 50 Megabytes [S1].
-*   **Precision:** The gradient calculation involves determinants, which may be sensitive to numerical precision if the neighboring points are nearly collinear or coplanar [S1].
 
 ## Subtopics
 
 ### Hybrid Scanline A-Buffer Volume Rendering
-A hybrid rendering system that uses a fast scanline a-buffer algorithm for surface-defined objects and volume rendering for procedural gases, combining them via Z-sorted a-buffer fragments [S2, unofficial]. It differs from the standard Mixed Geometry Rendering by using an a-buffer (accumulation buffer) to handle transparency and depth sorting of fragments, allowing for more complex interactions between surfaces and volumes than a simple Z-buffer [S2, unofficial]. It is chosen when rendering procedural gases (modeled via solid texturing) alongside solid surfaces, requiring accurate blending of volumetric shadows and atmospheric attenuation [S2, unofficial]. The system creates an a-buffer for each scanline, performs volume rendering for volumes covering the scanline, and sorts volume a-buffer fragments by average Z-depth before rendering to the final pixel color [S2, unofficial]. It uses a physically-based low-albedo illumination and atmospheric attenuation model for gases, and combines volumetric shadows using three-dimensional shadow tables [S2, unofficial].
+A hybrid rendering system that uses a fast scanline a-buffer algorithm for surface-defined objects and volume rendering for procedural gases, combining them via Z-sorted a-buffer fragments [S2, unofficial]. It creates an a-buffer for a scanline containing a list of fragments for each pixel [S2, unofficial]. Volume rendering is performed for volumes covering the scanline, creating a-buffer fragments for separate sections [S2, unofficial]. Rendering ceases once full coverage is achieved [S2, unofficial]. Fragments are sorted by average Z-depth and rendered to produce the final color [S2, unofficial]. It uses a physically-based low-albedo illumination and atmospheric attenuation model for gases, with volumetric shadows combined via three-dimensional shadow tables [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Performance is heavily dependent on the number of tetrahedral cells and the resolution. On a Stardent ST1000, rendering a 512x512 window took 149.2 seconds for 16,896 tetrahedral cells (Bearing Housing) and 591.6 seconds for 381,548 tetrahedral cells (CFD Analysis) [S1].
-*   **Memory Complexity:** High memory usage for cell-organized data. The CFD model (381,548 cells) required over 50 Megabytes [S1].
-*   **Strengths:** Provides clear structural context for volumetric data (e.g., showing the grid of a Finite Element model) [S1]. Correctly transmits colors from geometry to volume data in front of it [S1].
-*   **Limitations:** Wireframe geometry completely occludes volume data behind it, which can be a significant artifact [S1]. High memory requirements for large unstructured meshes [S1].
-*   **When to Use:** When visualizing scalar fields on coarse volumes or finite element models where the underlying mesh structure is important for interpretation [S1].
-*   **When Not to Use:** When memory is constrained or when the wireframe occlusion artifact is unacceptable for the specific data structure [S1].
+*   **Time Complexity:** Dependent on the number of volume samples and geometric primitives. Performance is heavily influenced by the complexity of the unstructured grid if used.
+*   **Memory Complexity:** High for cell-organized (unstructured) data. A model with 381,548 tetrahedral cells required over 50 Megabytes [S1].
+*   **Measured Performance:** On a Stardent ST1000 (4 processors, 5 Mips each, no vector unit used):
+    *   Bearing Housing (16,896 tetrahedral cells): 149.2 seconds for a 512x512 image [S1].
+    *   CFD Analysis (381,548 tetrahedral cells): 591.6 seconds for a 512x512 image [S1].
+*   **Strengths:** Provides clear structural context (e.g., FEM grid) alongside internal density; simple lighting model enhances shape perception [S1].
+*   **Limitations:** Wireframe geometry can completely occlude volume data behind it, potentially hiding information [S1]. High memory consumption for unstructured data [S1].
 
 ## Background
-The method was developed in the context of visualizing finite element models and computational fluid dynamics (CFD) data. It was presented in a paper by James T. Kajiya and Brian P. Von Herzen (though the source [S1] cites Kajiya and Von Herzen [1984] for raytracing volume densities, the specific technique of mixed geometry with wireframes is attributed to the author of [S1], likely in the context of the 1989 Computer Graphics paper "Raytracing irregular volume data" or related work from that era, specifically referencing the Stardent ST1000 results) [S1]. The technique was used to visualize stress in a tuning fork, a bearing housing, and air density in near-sonic flow around a wing root [S1]. It builds on standard raytracing volume densities [S1] and Z-buffer techniques [S1].
+The method was described in the context of visualizing volumetric data, specifically Finite Element models and Computational Fluid Dynamics (CFD) results [S1]. It was presented as a technique to combine direct volume rendering with standard Z-buffer geometry to show structures like grids or objects about which fluid is flowing [S1]. The work was performed on a Stardent ST1000 and published in 1990 [S1].
 
 ## Sources
 [S1] Raytracing irregular volume data, https://doi.org/10.1145/99307.99316, fetched 2026-10-25

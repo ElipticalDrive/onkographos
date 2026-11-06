@@ -1,9 +1,9 @@
 # Adaptive Frequency Domain Filtering
 
-Also called: Adaptive Filtering in Frequency Domain, Adaptive Slice Extraction Filtering, Adaptive filtering scheme
+Also called: Adaptive Filtering in Frequency Domain, Adaptive Filtering with Conservative Marking, Adaptive Slice Extraction Filtering, Adaptive filtering scheme
 
 ## Overview
-Adaptive Frequency Domain Filtering is an optimization technique for frequency domain volume rendering that reduces interpolation cost by selectively applying larger or smaller interpolation filters based on local spectral properties [S1, S2, unofficial]. It solves the performance bottleneck of slice extraction in Fourier-based rendering by identifying regions of the 3D spectrum where the signal magnitude is sufficiently low to permit coarser approximation without visible quality loss [S2, unofficial]. It sets itself apart from standard frequency domain methods by introducing a preprocessing step that marks voxels, allowing the extraction phase to skip expensive multi-voxel support checks [S1, S2, unofficial].
+Adaptive Frequency Domain Filtering is an optimization technique for frequency domain volume rendering that reduces interpolation cost by selectively applying larger or smaller interpolation filters based on local spectral properties marked during preprocessing [S1, S2, unofficial]. It solves the performance bottleneck of slice extraction in Fourier-based rendering by identifying regions of the 3D spectrum where the signal magnitude is sufficiently low to permit coarser approximation without visible quality loss [S2, unofficial]. It sets itself apart from standard frequency domain methods by introducing a preprocessing step that marks voxels, allowing the extraction phase to skip expensive multi-voxel support checks [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
@@ -13,12 +13,12 @@ Adaptive Frequency Domain Filtering is an optimization technique for frequency d
 
 **Data Structures:**
 *   **Spectrum ($S$):** A 3D grid of complex (or real-valued Hartley) values. The sources note that due to the wide dynamic range, a floating-point format (e.g., 64-bit double) is necessary [S1, S2, unofficial].
-*   **Mark Array ($M$):** A boolean grid of the same dimensions as $S$. $M[i,j,k] = \text{true}$ indicates the voxel is "marked" and eligible for the smaller filter.
+*   **Mark Array ($M$):** A boolean grid of the same dimensions as $S$. $M[i,j,k] = \text{true}$ indicates the voxel is "marked" and eligible for the smaller filter [S1, S2, unofficial].
 
 **Parameters:**
 *   **Larger Filter Size:** $3 \times 3 \times 3$ [S1, S2, unofficial].
 *   **Smaller Filter Size:** $1 \times 1 \times 1$ (point sampling) [S1, S2, unofficial].
-*   **Threshold ($\epsilon$):** The maximum difference in response allowed. The sources specify a value of $0.3$ [S1, S2, unofficial]. This threshold determines the boundary for switching filters.
+*   **Threshold ($\epsilon$):** The maximum difference in response allowed. The sources specify a value of $0.3$ [S1, S2, unofficial]. This threshold determines the boundary for switching filters [S1, S2, unofficial].
 *   **Marking Condition:** A voxel is marked if its magnitude satisfies a specific equation (referred to as Equation 16 in [S1, unofficial] or 1G in [S2, unofficial]) [S1, S2, unofficial]. The exact formula for Equation 16/1G is not provided in the source text, but it is defined as "magnitude is small enough" [S2, unofficial].
 
 **Steps:**
@@ -28,7 +28,7 @@ Adaptive Frequency Domain Filtering is an optimization technique for frequency d
     *   Iterate through every voxel in $S$.
     *   Check if the voxel's magnitude satisfies the threshold condition (Equation 16/1G) [S1, S2, unofficial].
     *   **Optimized Marking:** To avoid testing all neighbors during extraction, mark a voxel $v$ only if:
-        1.  $v$ satisfies the threshold condition.
+        1.  $v$ satisfies the threshold condition [S1, S2, unofficial].
         2.  All neighboring voxels within a distance equal to one-half of the support of the larger filter ($3 \times 3 \times 3$) also satisfy the threshold condition [S1, S2, unofficial].
     *   Store the result in $M$. This process is done only once after transformation [S2, unofficial].
 3.  **Slice Extraction:**
@@ -43,33 +43,24 @@ Adaptive Frequency Domain Filtering is an optimization technique for frequency d
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def adaptive_frequency_domain_filtering(volume_data):
+def adaptive_frequency_domain_filtering(volume_data, slice_plane_samples):
     # Step 1: Transform to frequency domain
-    # Using Hartley transform as suggested for memory efficiency [S1, unofficial]
+    # [G] Standard discrete Hartley or Fourier transform
     spectrum = hartley_transform(volume_data)
-    
+    dim_x, dim_y, dim_z = len(spectrum), len(spectrum[0]), len(spectrum[0][0])
+
     # Step 2: Preprocess - Mark voxels
-    # Dimensions of spectrum
-    dim_x, dim_y, dim_z = spectrum.shape
+    # Initialize 3D boolean grid
+    marked = [[[False for _ in range(dim_z)] for _ in range(dim_x)] for _ in range(dim_y)]
     
-    # Initialize mark array
-    marked = np.zeros((dim_x, dim_y, dim_z), dtype=bool)
-    
-    # Define larger filter support radius
-    # Larger filter is 3x3x3, so radius is 1 (distance <= 1 covers neighbors)
-    # "distance equal to one-half of the support" -> support size 3, half is 1.5?
-    # The text says "neighboring voxels lying within a distance ... equal to one-half of the support".
-    # For a 3x3x3 filter, the support extends 1 voxel in each direction.
-    # Half of support (3) is 1.5. Distance <= 1.5 includes immediate neighbors (dist 1).
-    # We assume integer grid distance.
+    # Larger filter is 3x3x3, so half-support distance covers immediate neighbors (radius 1)
     support_radius = 1 
     
     for x in range(dim_x):
         for y in range(dim_y):
             for z in range(dim_z):
                 # Check if current voxel satisfies threshold condition
-                # Equation 16/1G is not explicitly defined, but implies magnitude check
-                if is_small_enough(spectrum[x, y, z], threshold=0.3):
+                if is_small_enough(spectrum[x][y][z], threshold=0.3):
                     # Check all neighbors within support_radius
                     all_neighbors_ok = True
                     for dx in range(-support_radius, support_radius + 1):
@@ -77,46 +68,55 @@ def adaptive_frequency_domain_filtering(volume_data):
                             for dz in range(-support_radius, support_radius + 1):
                                 if dx == 0 and dy == 0 and dz == 0:
                                     continue
-                                
                                 nx, ny, nz = x + dx, y + dy, z + dz
-                                
-                                # Boundary check
+                                # Boundary Conditions: The marking step requires checking neighbors [G]
                                 if 0 <= nx < dim_x and 0 <= ny < dim_y and 0 <= nz < dim_z:
-                                    if not is_small_enough(spectrum[nx, ny, nz], threshold=0.3):
+                                    if not is_small_enough(spectrum[nx][ny][nz], threshold=0.3):
                                         all_neighbors_ok = False
                                         break
                             if not all_neighbors_ok: break
                         if not all_neighbors_ok: break
                     
                     if all_neighbors_ok:
-                        marked[x, y, z] = True
+                        marked[x][y][z] = True
 
     # Step 3: Slice Extraction
     projection = []
     for sample_point in slice_plane_samples:
-        # Find closest spectrum voxel
-        voxel_coords = get_closest_voxel_coords(sample_point, spectrum)
-        x, y, z = voxel_coords
+        # [G] Standard coordinate rounding to find closest grid voxel
+        x, y, z = round(sample_point.x), round(sample_point.y), round(sample_point.z)
         
-        if marked[x, y, z]:
+        if marked[x][y][z]:
             # Use smaller filter (1x1x1)
-            value = spectrum[x, y, z]
+            value = spectrum[x][y][z]
         else:
             # Use larger filter (3x3x3)
-            # Interpolation logic for 3x3x3 filter would go here
-            # [G] Standard trilinear or box filtering over 3x3x3 neighborhood
+            # [G] Standard box/convolution filter over 3x3x3 neighborhood
             value = interpolate_large_filter(spectrum, x, y, z)
         
         projection.append(value)
     
-    # Inverse transform to get spatial domain image
+    # [G] Standard inverse transform
     image = inverse_hartley_transform(projection)
     return image
 
 def is_small_enough(value, threshold):
-    # Placeholder for Equation 16/1G
-    # Based on context, this checks if magnitude is below threshold
+    # [G] Checks if magnitude satisfies the threshold condition (Equation 16/1G)
     return abs(value) <= threshold
+
+def interpolate_large_filter(spectrum, x, y, z):
+    # [G] Standard 3x3x3 box filter averaging over neighborhood
+    total = 0.0
+    count = 0
+    dim_x, dim_y, dim_z = len(spectrum), len(spectrum[0]), len(spectrum[0][0])
+    for dx in range(-1, 2):
+        for dy in range(-1, 2):
+            for dz in range(-1, 2):
+                nx, ny, nz = x + dx, y + dy, z + dz
+                if 0 <= nx < dim_x and 0 <= ny < dim_y and 0 <= nz < dim_z:
+                    total += spectrum[nx][ny][nz]
+                    count += 1
+    return total / count if count > 0 else 0.0
 ```
 
 **Edge Cases and Pitfalls:**
@@ -125,18 +125,19 @@ def is_small_enough(value, threshold):
 *   **Threshold Selection:** The threshold of 0.3 is specific to the implementation described. Changing it affects the trade-off between speed and accuracy [S1, S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The preprocessing step is $O(N)$ where $N$ is the number of voxels in the spectrum, with a constant factor depending on the filter support size ($3 \times 3 \times 3$). The extraction step is $O(M)$ where $M$ is the number of slice samples, with $O(1)$ cost for marked voxels and $O(K)$ for unmarked voxels ($K$ is filter support size).
+*   **Time Complexity:** The preprocessing step is $O(N)$ where $N$ is the number of voxels in the spectrum, with a constant factor depending on the filter support size ($3 \times 3 \times 3$) [G]. The extraction step is $O(M)$ where $M$ is the number of slice samples, with $O(1)$ cost for marked voxels and $O(K)$ for unmarked voxels ($K$ is filter support size) [S2, unofficial]. The overall frequency domain projection operator is $O(n^2 \log n)$ [S3, unofficial].
 *   **Memory Complexity:** The spectrum requires floating-point storage. The sources note that a double-precision format consumes 16 times more memory than a spatial domain algorithm using 1-byte voxels [S1, unofficial]. Using the Hartley transform and shorter number representations can control this explosion [S1, unofficial].
 *   **Performance:** The scheme reduced the cost of interpolation to about 15% of the non-adaptive case [S1, S2, unofficial].
 *   **Accuracy:** Relative error was always below 40dB, a level at which image differences are not visible [S1, S2, unofficial].
-*   **Strengths:** Significant reduction in interpolation cost; maintains high image quality.
-*   **Limitations:** Requires additional preprocessing step; high memory usage for spectrum storage.
+*   **Strengths:** Significant reduction in interpolation cost; maintains high image quality [S1, S2, unofficial].
+*   **Limitations:** Requires additional preprocessing step; high memory usage for spectrum storage [S1, unofficial].
 
 ## Background
 *   **Origin:** The method was introduced by Takashi Totsuka and Marc Levoy in their 1993 paper "Frequency Domain Volume Rendering" [S1, S2, unofficial].
 *   **History:** It was developed as part of the broader research into Fourier Projection-Slice Volume Rendering. The technique leverages the properties of the Hartley transform to reduce memory costs compared to the standard Fourier transform [S1, unofficial].
-*   **Usage:** It is used in frequency domain volume rendering systems to optimize the slice extraction phase.
+*   **Usage:** It is used in frequency domain volume rendering systems to optimize the slice extraction phase [S1, S2, unofficial].
 
 ## Sources
-[S1] Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)
-[S2] FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27 (unofficial)
+[S1] PDF Frequency Domain Volume Rendering - Stanford University, https://graphics.stanford.edu/papers/fvr/totsuka-fvr-sig93.pdf, fetched 2026-10-27 (unofficial)
+[S2] PDF FREQUENCY DOMAIN VOLUME RENDERING Takashi Totsuka Marc Levoy ..., http://i.stanford.edu/pub/cstr/reports/csl/tr/93/570/CSL-TR-93-570.pdf, fetched 2026-10-27 (unofficial)
+[S3] Frequency Domain Volume Rendering - studylib.net, https://studylib.net/doc/18162906/frequency-domain-volume-rendering, fetched 2026-10-27 (unofficial)

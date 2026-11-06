@@ -1,32 +1,32 @@
 # Position Map and Image-Space Transfer
+
 Also called: Image-Space Voxelization, Position Map Voxelization Family
 
 ## Overview
-This family of techniques converts triangle meshes into voxel grids by leveraging standard 2D rasterization hardware to compute surface intersections, rather than performing geometric clipping or 3D grid traversal. Instead of rasterizing triangles directly into a 3D volume, these methods first generate an intermediate 2D representation—such as a position map or 2D texture worksheets—that stores world-space coordinates or occupancy data. This 2D data is then transferred into the 3D voxel grid via a secondary pass or synthesis step. This approach decouples the intersection computation from the volume resolution, making performance largely insensitive to scene complexity and dependent primarily on the target voxel grid dimensions [S1, unofficial].
+This family of techniques converts 3D geometric data into voxel grids by projecting or transferring information into 2D image space (textures) before reconstructing the 3D volume. Unlike direct 3D rasterization, these methods leverage the GPU's fixed-function rasterizer or image load/store operations on 2D textures to determine voxel occupancy, often trading memory bandwidth for computational simplicity. They are distinguished from direct triangle rasterization by operating on pre-computed surface samples or 2D texture slices, ensuring connectivity or enabling real-time performance insensitive to scene complexity [S1, unofficial].
 
 ## Shared principles
-All methods in this family rely on the following core mechanisms:
+All methods in this family rely on the mapping of world-space coordinates to discrete voxel indices. Given a world position $p = (p_x, p_y, p_z)$, a bounding box defined by minimum $p_{min}$ and maximum $p_{max}$, and a volume resolution $D$, the voxel index $i$ is calculated as:
 
-1.  **Image-Space Intersection:** The primary geometric operation (finding where triangles intersect the volume) is mapped to 2D screen space or texture space. This utilizes the GPU's fixed-function rasterizer to determine coverage, avoiding the computational cost of per-triangle 3D intersection tests.
-2.  **Intermediate 2D Storage:** Results are stored in 2D textures (e.g., `image2D` or Framebuffer Objects) rather than directly in `image3D`. Common formats include `GL_RGBA32F` for high-precision world positions or 8-bit/1-bit depths for occupancy and normals.
-3.  **Coordinate Transformation:** A consistent mapping exists between world-space coordinates and voxel indices. For a voxel grid of dimension $D$ and bounding box defined by min/max bounds $(x_{min}, x_{max})$, the voxel index $i$ for a world coordinate $p$ is:
-    $$ i = D \times \frac{p - p_{min}}{p_{max} - p_{min}} $$
-    Integer truncation or floor is applied to obtain the discrete voxel index [G].
-4.  **Connectivity/Neighbor Handling:** To ensure topological consistency in the resulting voxel mesh, methods often mark not only the primary intersected voxel but also its immediate neighbors (e.g., the 8 surrounding voxels in a 3x3x3 block) as active. This is achieved by offsetting the world position by a `stepSize` (often normalized to unit distance) before indexing [S1, unofficial].
+$$
+i = D \times \frac{p - p_{min}}{p_{max} - p_{min}}
+$$
+
+The result is truncated (floored) to an integer to yield the discrete voxel index [G]. This formula is applied consistently across Position Map Voxelization, Billboard Voxelization, and Hardware-accelerated Surface Voxelization to map continuous geometry to the discrete 3D grid.
 
 ## Subtopics
 
 ### [Position Map Voxelization](2604-position-map-voxelization.md)
-A post-processing technique that rasterizes a pre-computed 2D position map (containing world-space surface points) into a 3D volume texture. It differs from direct triangle rasterization by operating on discrete samples, ensuring connectivity by explicitly marking the primary voxel and its 8 immediate neighbors as active. Best chosen when surface samples are already available or when a two-pass approach allows for decoupled sampling and voxelization.
+A post-processing step that converts a 2D position map (containing world-space coordinates of previously identified surface points) into a 3D voxel grid. It differs from direct triangle rasterization by operating on pre-computed surface samples, ensuring connectivity by marking the primary voxel and its 8 immediate neighbors as active. It uses a full-screen quad to process every sample in the position map, writing directly to a 3D volume texture.
 
 ### [Billboard Voxelization](2659-billboard-voxelization.md)
-A two-pass technique that renders instanced quads (billboards) at each voxel center to map surface geometry to the volume. It differs from siblings like [3D Grid Rasterization](903-3d-grid-rasterization.md) by using instanced geometry per voxel rather than rasterizing triangles directly, and from [GPU Volume Kernel Voxelization](1496-gpu-volume-kernel-voxelization.md) by relying on standard 2D rasterization of billboards rather than compute shaders. Suitable for scenarios where explicit control over voxel placement via instancing is required.
+A two-pass rasterization-based technique that initializes a 3D volume by rendering instanced quads (billboards) into a 2D position map framebuffer object (FBO). It differs from [Position Map Voxelization](2604-position-map-voxelization.md) by explicitly generating billboard geometry per voxel to write nearest-neighbor world positions, rather than relying on standard triangle rasterization into a depth buffer. It is suitable for initializing voxel grids from known voxel centers.
 
 ### [Hardware-accelerated surface voxelization via 2D textures](4042-hardware-accelerated-surface-voxelization-via-2d-textures.md)
-Rasters model surfaces directly into 2D "worksheets" (textures), transferring intersection computation from geometric to image space. It enables real-time collision detection by rasterizing the scene approximately once, making performance insensitive to triangle count. Unlike slicing-based methods, it avoids $N$ render passes. Best for high-resolution volumes where memory bandwidth and rasterization throughput are critical, though it may suffer from aliasing artifacts and bit-operation overhead at very high resolutions (e.g., $512^3$ with 1-bit depth).
+This method transfers the geometric intersection computation from 3D space to 2D image space by rasterizing model surfaces into 2D textures (worksheets). It is distinguished from slicing-based voxelization by rasterizing the scene approximately once rather than $N$ times (where $N$ is the volume resolution), making its performance insensitive to scene complexity and dependent only on volume resolution. It is optimal for real-time collision detection and volumetric rendering of complex models.
 
 ## Background
-The concept of using image-space techniques for volume generation emerged as a solution to the performance bottlenecks of software-based voxelization and slicing-based hardware approaches. Traditional slicing requires rasterizing the model $N$ times (where $N$ is the volume resolution along the projection axis), which scales poorly with resolution and scene complexity [S1, unofficial]. By mapping 3D voxel coordinates to 2D texture coordinates, developers could leverage the GPU's parallel rasterization pipeline to fill voxel data in a single pass or minimal passes. This approach became particularly relevant for real-time applications such as collision detection and volumetric rendering, where the trade-off between memory usage (e.g., 16MB for $256^3$ at 8-bit) and computational speed was critical [S1, unofficial].
+The concept of using image-space techniques for volume generation stems from the efficiency of GPU rasterization hardware. By projecting 3D data into 2D textures, developers can utilize standard graphics pipeline stages for coverage testing and interpolation. This approach is particularly prevalent in real-time applications such as video games and interactive simulations, where performance is critical. The specific variants described here have been developed to address limitations in memory usage, connectivity, and scene complexity sensitivity, with origins in various unofficial graphics programming communities and technical blogs [S1, unofficial].
 
 ## Sources
-[S1] Unofficial notes on Position Map and Image-Space Transfer family methods, accessed 2023-10-27.
+[S1] Unofficial notes on Position Map and Image-Space Transfer techniques, accessed 2023-10-27.

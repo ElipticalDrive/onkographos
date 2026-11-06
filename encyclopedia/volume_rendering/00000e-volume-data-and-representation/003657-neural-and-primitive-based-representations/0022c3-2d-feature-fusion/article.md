@@ -1,0 +1,81 @@
+# 2D Feature Fusion
+
+Also called: Volume Fusion, Voxel Pooling
+
+## Overview
+2D Feature Fusion integrates 2D semantic segmentation and high-dimensional foundation features into a sparse 3D voxel representation. It solves the problem of transferring rich 2D priors into a volumetric scene function while maintaining geometric fidelity. Unlike methods that rely solely on 3D geometry or single-direction projection, this approach uses multi-view ensemble smoothing to correct inconsistent 2D predictions and leverages detailed 3D geometry to render features at higher resolutions [S1].
+
+## How it works
+**Inputs:**
+*   A set of 2D images containing semantic segmentation maps and high-dimensional foundation features.
+*   Camera poses and intrinsics for the input views.
+*   A sparse voxel grid structure (typically initialized from SfM points or coarse geometry).
+
+**Outputs:**
+*   A sparse voxel grid where each active voxel contains fused 3D features (semantic and high-dimensional).
+
+**Data Structures:**
+*   **Sparse Voxel Grid:** A hash map or sparse array mapping 3D coordinates $(x, y, z)$ to feature vectors. The layout is not explicitly defined in the sources, but implies a standard sparse container where only occupied voxels store data [S1].
+
+**Steps:**
+1.  **Voxel Pooling:** Project 2D features from multiple views onto the 3D voxel grid. For each voxel, collect contributions from all views that intersect the voxel's volume.
+2.  **Multi-view Ensemble:** Aggregate the projected features from different views. This step smooths inconsistent 2D predictions by averaging or voting across views [S1].
+3.  **Volume Fusion:** Merge the aggregated features into the final sparse voxel representation. The detailed 3D geometry ensures that the fused features are rendered at higher resolution than the original 2D inputs [S1].
+
+**Parameters:**
+*   Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Topological Inconsistencies:** Using only a single slicing direction (e.g., Z-axis) for feature extraction fails to preserve the topology of complex shapes like a torus, leading to errors inside structures [S2].
+*   **Geometric Bumps:** The method may produce unnecessary geometric bumps for texture details, potentially affecting surface smoothness [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fuse_2d_features(voxel_grid, views):
+    """
+    Fuses 2D features into a sparse voxel grid.
+    
+    Args:
+        voxel_grid: Sparse voxel structure.
+        views: List of view data, each containing image features, camera pose, and intrinsics.
+        
+    Returns:
+        voxel_grid: Updated sparse voxel grid with fused features.
+    """
+    for view in views:
+        # Project 2D features to 3D space
+        projected_features = project_2d_to_3d(view.features, view.camera_pose, view.intrinsics)
+        
+        # Aggregate features into voxels
+        for voxel in voxel_grid.active_voxels:
+            # Collect contributions from this view
+            contributions = get_voxel_contributions(voxel, projected_features)
+            
+            # Store or update voxel features
+            # Note: Multi-view ensemble smoothing is implied to happen across views
+            voxel.features = update_voxel_features(voxel.features, contributions)
+            
+    return voxel_grid
+```
+[G] The `update_voxel_features` function typically involves averaging or weighted averaging of contributions from multiple views to achieve the "multi-view ensemble" smoothing described in [S1].
+
+## Subtopics
+
+### 2D to 3D Merging Strategy
+A strategy to achieve pervoxel features that match similar structures throughout the whole volume by merging features from multiple slicing directions (X, Y, Z). It alleviates topological inconsistencies found in single-direction approaches. Simply using slice-wise features (e.g., from a single slicing direction like Z) results in topological inconsistencies and errors inside structures (e.g., the torus), whereas the merged approach correctly predicts the full 3D structure and avoids these artifacts [S2].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Performance:** Achieves a good balance of accuracy and training time on large-scale datasets like Tanks&Temples and object-scale DTU datasets [S1].
+*   **Strengths:** Multi-view ensemble smooths inconsistent 2D predictions; detailed 3D geometry enables higher-resolution rendering of 2D features [S1].
+*   **Limitations:** May produce unnecessary geometric bumps for texture details; requires sufficient detection of relevant structures in input similarity maps to avoid block artifacts [S1, S2].
+
+## Background
+The method is part of a differentiable radiance field rendering system that integrates an efficient rasterizer with a multi-level sparse voxel scene representation [S1]. It was presented in the context of real-time high-fidelity radiance field rendering [S1]. The topological consistency issues with single-direction 2D-to-3D propagation were investigated in the context of leveraging self-supervised vision transformers for segmentation-based transfer function design [S2].
+
+## Sources
+[S1] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26
+[S2] Leveraging Self-Supervised Vision Transformers for Segmentation-Based Transfer Function Design., https://doi.org/10.1109/tvcg.2024.3401755, fetched 2026-10-26

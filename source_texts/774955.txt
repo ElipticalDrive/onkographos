@@ -1,0 +1,136 @@
+In alpha. The open source image editor that feels good to use. - Color Lookup layers, LUT export and Camera Raw colour grading by IAmJSD · Pull Request #201 · Infrawrench/schist
+
+Color Lookup layers, LUT export and Camera Raw colour grading by IAmJSD · Pull Request #201 · Infrawrench/schist · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+IAmJSD
+commented
+Oct 3, 2026
+Copy link
+Copy Markdown
+Member
+What
+Color Lookup adjustment layer (Adjust ▸ Color Lookup). Loads .cube (1D, 3D up to 129³, DOMAIN_MIN/MAX, Resolve-style 1D shaper + 3D with LUT_*_INPUT_RANGE) and .3dl (blue-fastest, bit depth from the Mesh header or inferred; uneven meshes such as 0, 64, …, 1023 go through a shaper). It uses tetrahedral interpolation. Input can be Document values (what Photoshop does) or Linear light. Opacity, blend mode, mask and clipping come from the layer as usual.
+File ▸ Export ▸ Color Lookup Table… bakes the document's global adjustment stack into a 17³, 33³ or 65³ .cube. It does this by compositing an identity lattice through the active compositor. It can optionally fold in the active RAW layer's per-pixel Camera Raw colour settings.
+Camera Raw colour grading: shadows, midtones, highlights and global wheels (hue and saturation on the wheel, luminance slider), plus Blending and Balance. They persist with the RAW development.
+Design notes
+Storage. The LUT file's original bytes live in the layer's params JSON, zlib-compressed and base64-encoded, so documents are self-contained. The parsed table is shared behind an Arc.
+Caching. schist_adjustments::resolve caches large payloads, keyed by their exact bytes (full compare). The compositor resolves params per tile and would otherwise re-parse the table hundreds of times a frame.
+GPU. A new direct-adjustment kind D_COLOR_LOOKUP (19) sends the shaper and lattice themselves as coefficients, so the GPU interpolates the same data as the CPU. This follows the existing "rather than resampling a 3D LUT" rule in gpu.rs. The destructive buffer path gets the same branch.
+PSD clrL. Written as version 1 + descriptor: lookupType, Nm , Dthr, LUTFormat, dataOrder, tableOrder, LUT3DFileData (the file bytes) and LUT3DFileName. Field names follow the public MIT-licensed ag-psd implementation and our own files; no Adobe headers or SDK sources were read.
+An imported block is written back byte-for-byte until its table or input changes (the same approach as Light/CgEd).
+Abstract/device-link profile lookups, .look files and BGR orders parse as Unsupported: the layer is a no-op and its bytes are preserved.
+Linear-light input has no Photoshop equivalent, so it is baked into a 33³ .cube on save.
+LUT export. Only visible, unmasked, unclipped adjustments at top level or in pass-through groups are included, with layer and group opacity and blend modes. Masked, clipped and isolated-group adjustments are counted and reported in the status message. For RAW layers, temperature, tint and exposure are sensor-domain, and clarity, dehaze, sharpening, noise, vignette and local masks are spatial, so all of those are left out.
+Grading math (plugins/filters-core/src/color_grading.rs) is our own construction, not Adobe's algorithm:
+luma-weighted regions with smoothstep boundaries at ⅓ and ⅔, widened by Blending and shifted by Balance (luma^2^(−balance));
+luma-free hue tints;
+headroom-proportional luminance.
+It runs after presence and before detail, with a CPU reference and a GPU stage (color_grading.wgsl) in the Camera Raw graph.
+Persistence and merge friendliness. Grading is an additive field on RawSettings (grading: ColorGrading), saved in a separate private ScCg block beside ScRw. It follows the ScRm pattern from Camera Raw local adjustments (masks) #197 and leaves ScRw's fixed record alone. Rebased onto main after Camera Raw local adjustments (masks) #197 merged.
+Recorded actions. Color Lookup layer steps record their full params, including the table. Camera Raw steps recorded before grading existed still validate and replay, with neutral wheels.
+Verification done
+cargo fmt --all --check.
+cargo clippy --all-targets -D warnings on core, adjustments, compositor, compositor-gpu, codec-psd, filters-core, app-actions and editor.
+cargo check of mcp, codec-affinity and app.
+Unit tests:
+.cube parsing: identity, affine-exact, grey-axis preservation, a known 33³ function, domains, 1D and shaper+3D;
+malformed input: empty, bad sizes, wrong counts, NaN, bad domain, binary, and a huge declared size with no data;
+.3dl: uniform 12-bit with header, Lustre uneven 10-bit mesh, malformed;
+JSON round trip and compactness, corrupt JSON tables, linear-input behaviour, and the resolve cache.
+Export round trip (compositor/src/lut_bake.rs): a curves + hue/sat + colour balance + 25% invert stack is baked at 33³ and re-applied as a Color Lookup. The worst error is under 0.02. Spatial layers are skipped and counted; pass-through group opacity and the pre-pass hook are covered.
+PSD/PSB (codec-psd/tests/color_lookup.rs):
+a Schist-made layer round-trips in PSD and PSB;
+an untouched or unchanged-commit import is written back verbatim, unknown descriptor fields included;
+an edit regenerates exactly one clrL;
+an abstract-profile lookup is preserved as Unsupported;
+ScCg grading round-trips without duplication.
+GPU vs CPU on lavapipe:
+adjustment_coverage adds four Color Lookup cases (3D alone and shaper+3D, each in both input modes);
+remaining_opportunities Camera Raw variants now set every grading control. Both pass, along with Camera Raw local adjustments (masks) #197's local-mask parity test.
+filters-core grading unit tests and the all_filters suite (before rebase).
+The full check-i18n script suite: strict audit for all locales, sync-i18n --check, test-check-i18n.py, the web node test and schist-i18n crate tests.
+35 new keys, really translated into all 147 non-generated locales (no/sh are generated by sync).
+Not verified
+Not run in the GUI. The Color Lookup dialog, the Load LUT picker, the Export LUT dialog and the grading wheels have not been launched or screenshotted (disk was too tight for an app build). They compile and pass clippy only.
+Editor tests not run after the final changes. The new camera_raw_steps_from_before_grading_still_resolve test compiles under clippy --all-targets, but the editor test binary was not run (disk).
+No third-party reader. No Photoshop, Photopea or ag-psd reader has opened a Schist-written clrL. The interop is structural only, against our own reader.
+No real-world LUT corpus. Real .cube/.3dl files from other tools were not tested, only synthetic ones.
+Translation quality. Many low-resource locales (e.g. mh, ts, nd, sm, bm, wo, dz, pi, tw/ak, ve, ss) use coined technical terms and need native review.
+Known limits
+3D size is capped at 129 and files at 128 MB.
+No log input encodings.
+Color Lookup is not in Image ▸ Adjustments, batch or the MCP catalog: each needs its own file picker.
+A 65³ table in a recorded action can approach the 4 MiB action-library limit.
+The GPU compositor uploads the whole table with each composite: about 3.3 MB for 65³.
+Grading is an approximation of Lightroom's look, not a match.
+🤖 Generated with Claude Code
+IAmJSD
+and others
+added 4 commits
+October 4, 2026 17:44
+Add Color Lookup layers, LUT export and Camera Raw colour grading
+…
+062399b
+```
+Color Lookup adjustment layers load .cube (1D/3D, domains, shapers) and
+.3dl tables, interpolate tetrahedrally on the CPU and GPU, keep the file
+inside the document and map to PSD's clrL block. File > Export > Color
+Lookup Table bakes the adjustment stack (and optionally the active RAW
+layer's per-pixel Camera Raw colour) through the compositor into a .cube.
+Camera Raw gains shadows/midtones/highlights/global grading wheels with
+blending and balance, stored beside ScRw in a private ScCg block.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Translate Color Lookup, LUT export and colour grading strings
+…
+38e5b39
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Note that Camera Raw local masks stay out of exported LUTs
+…
+28ca0e7
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Accept grading values in recorded RAW steps; share browser LUT bytes
+…
+12efea6
+```
+Saved-action shape validation required exactly the fifteen global Camera
+Raw values, so every RAW development step recorded with the grading
+values was refused. Accept the grading keys with their ranges, still
+requiring all fifteen global ones and rejecting unknown keys.
+
+LutTable now shares its source bytes as Arc<Vec<u8>>, so the browser's
+picked-file Arc is used without copying the table.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+IAmJSD
+force-pushed
+the
+feat/luts-colour-grading
+branch
+from
+2a31588 to
+12efea6
+Compare
+October 4, 2026 17:51
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

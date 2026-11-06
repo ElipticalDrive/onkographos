@@ -1,0 +1,29 @@
+# GPU and Parallel Acceleration Voxelization
+
+Also called: GPU Voxelization, Parallel Voxelization
+
+## Overview
+This family encompasses methods that accelerate the conversion of continuous primitives (meshes, points, or parametric curves) into discrete voxel grids by leveraging the massive parallelism of Graphics Processing Units (GPUs) [S1, unofficial]. Unlike CPU-based approaches, these methods typically map individual voxels or primitives to parallel threads to compute occupancy, distance, or geometric attributes simultaneously. They are distinguished from their siblings by their reliance on GPU-specific execution models (such as CUDA kernels or OpenGL compute shaders) to handle the high computational cost of spatial intersection tests and attribute accumulation [S1, unofficial].
+
+## Shared principles
+All methods in this family rely on the coordinate mapping and occupancy determination mechanisms defined in [Voxelization](12-voxelization.md). However, they share specific parallel execution strategies:
+1.  **Thread-to-Voxel Mapping**: A common pattern assigns one thread (or a small block of threads) to a single voxel $(i, j, k)$ in the output grid. This thread computes the voxel's world-space bounds and iterates over input primitives to determine occupancy [S1, unofficial].
+2.  **Thread-to-Primitive Mapping**: Alternatively, threads may be assigned to input primitives (e.g., triangles or vessel segments). Each thread determines the set of voxels intersected by its primitive and atomically updates the voxel grid [S1, unofficial].
+3.  **Atomic Operations**: When multiple threads write to the same voxel (e.g., accumulating density or solving QEF systems), atomic operations or shared memory synchronization are required to prevent race conditions [S1, unofficial].
+4.  **Spatial Acceleration**: To avoid $O(N \cdot V)$ complexity (where $N$ is primitives and $V$ is voxels), GPU methods often use spatial hashing, bounding volume hierarchies (BVH), or precomputed bounding boxes to cull non-intersecting primitives efficiently on the GPU [S1, unofficial].
+
+## Subtopics
+
+### [Vessel Voxelizer](2321-vessel-voxelizer.md)
+A CUDA-accelerated method for converting vascular structures (line segments with radii) into fuzzy voxel volumes. It differs from mesh voxelization by operating on parametric tube primitives and using supersampling to compute fractional occupancy. Choose this for biomedical imaging of blood vessels where continuous density is required.
+
+### [Flexible Dual Grid Mesh Voxelization](2640-flexible-dual-grid-mesh-voxelization.md)
+A GPU method that constructs a dual-grid representation by solving an enhanced Quadratic Error Function (QEF) for active voxels. It differs from binary voxelization by capturing sharp features and open boundaries without watertight meshes. Choose this for high-quality 3D reconstruction and geometry processing where feature preservation is critical.
+
+### [CUDA Voxelizer GPU Voxelization](6757-cuda-voxelizer-gpu-voxelization.md)
+A general-purpose GPU-accelerated voxelizer for polygon meshes. It supports both surface and solid voxelization. Choose this for general-purpose mesh-to-voxel conversion where high throughput on NVIDIA hardware is needed.
+
+## Background
+GPU voxelization emerged with the advent of CUDA and OpenCL, allowing developers to offload the computationally intensive intersection tests of voxelization to thousands of parallel cores [S1, unofficial]. Early methods focused on rasterization-based acceleration, but modern approaches utilize compute shaders and direct CUDA kernels for more flexible geometric processing, such as solving QEF systems or handling non-polygonal primitives like vessels [S1, unofficial].
+
+## Sources

@@ -1,0 +1,307 @@
+Would this package be the right place for fast evaluation of a range of spherical harmonics using recurrence relations? In one algorithm, I need to repeatedly evaluate spherical harmonics at varying angles but for a predetermined range o...
+
+Fast evaluation via recurrence relations · Issue #3 · JuliaApproximation/HarmonicOrthogonalPolynomials.jl · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Fast evaluation via recurrence relations #3
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Fast evaluation via recurrence relations#3
+Copy link
+Description
+jagot
+opened on Apr 6, 2020
+Issue body actions
+Would this package be the right place for fast evaluation of a range of spherical harmonics using recurrence relations? In one algorithm, I need to repeatedly evaluate spherical harmonics at varying angles but for a predetermined range of ells and ms, and I will implement the following "diagonal" and "vertical" recurrence relations:
+http://dx.doi.org/10.1088/0953-4075/49/24/245001
+Would this be a good fit for SphericalHarmonics.jl?
+Activity
+dlfivefifty commented on Apr 7, 2020
+dlfivefifty
+on Apr 7, 2020
+Member
+More actions
+@MikaelSlevinsky Do you have something to say about this, Re:
+https://github.com/MikaelSlevinsky/FastTransforms/compare/feat-recurrence-simd
+That is, it would make sense to use your fast evaluation here.
+Note we would need to think about the right syntax here. The blocks correspond to fixed l. To do fixed m, we would probably need to make the blocks have offset axes, so that one can do something like:
+```
+Y = SphericalHarmonic()
+x = SphericalCoordinate(θ,φ)
+Y[x, getindex.(Block.(m:m+M), m)]
+```
+dlfivefifty commented on Apr 7, 2020
+dlfivefifty
+on Apr 7, 2020
+Member
+More actions
+Perhaps the best solution is if FastTransforms.jl has a function sphericalharmonic that supports broadcast notation, that is the above code would be:
+```
+sphericalharmonic.(θ,φ,m:m+M, m)
+```
+where the broadcast is overloaded to call the optimised C code.
+MikaelSlevinsky commented on Apr 7, 2020
+MikaelSlevinsky
+on Apr 7, 2020
+Member
+More actions
+Yes, we should support that.
+In the branch, only the Clenshaw algorithm for Chebyshev is implemented, but the pattern to write a macro for blazingly fast evaluation for any orthogonal polynomials is there.
+For Chebyshev polynomial evaluation, the interface to C is through this prototype:
+```
+void ft_clenshaw(const int n, const double * c, const int incc, const int m, double * x, double * f);
+```
+That sums a first kind Chebyshev series with n coefficients in c with stride incc at m points in vector x. The result is returned in f, which can safely be aliased to x if one can dispose of the points vector once computed. Because of the stride variable, field extensions are automatically supported with real points. With points in the field extension as well, it's more involved. (Of course, I'm open to suggestions on the C interface to make Julia calls as flexible as possible.)
+MikaelSlevinsky commented on Apr 7, 2020
+MikaelSlevinsky
+on Apr 7, 2020
+Member
+More actions
+The idea behind the prototypes is to have a "BLAS for OPs," though it may go through a couple iterations to get right.
+jagot commented on Apr 7, 2020
+jagot
+on Apr 7, 2020
+MemberAuthor
+More actions
+I came up with the following:
+```
+struct SphericalHarmonicsRecurrence{T,M}
+    Ym₊::Vector{Vector{T}}
+    Ym₋::Vector{Vector{T}}
+    m₊::M
+    m₋::M
+end
+
+function SphericalHarmonicsRecurrence(::Type{T}, ℓmax, ms) where T
+    ℓmax > 0 || throw(ArgumentError("Invalid maximum ℓ $(ℓmax)"))
+    C = complex(T)
+    m₊ = 0:maximum(ms)
+    m₋ = minimum(ms):-1
+
+    Ym₊ = Vector{Vector{C}}()
+    Ym₋ = Vector{Vector{C}}()
+
+    # We need at least one element for each m for the diagonal
+    # recurrence relations, even though the user may have requested a
+    # non-contiguous set of ms.
+    for m in m₊
+        push!(Ym₊, Vector{C}(undef, length(m:(m ∈ ms ? ℓmax : m))))
+    end
+    Ym₊[1][1] = 1/√(4π)
+    for m in m₋
+        push!(Ym₋, Vector{C}(undef, length(abs(m):(m ∈ ms ? ℓmax : m))))
+    end
+
+    SphericalHarmonicsRecurrence(Ym₊, Ym₋, m₊, m₋)
+end
+
+function getm(Y::SphericalHarmonicsRecurrence, m)
+    if m ≥ 0
+        Y.Ym₊[m+1]
+    else
+        Y.Ym₋[m-Y.m₋[1]+1]
+    end
+end
+
+function Base.getindex(Y::SphericalHarmonicsRecurrence, ℓ::Union{Integer,AbstractVector}, m)
+    Ym = getm(Y, m)
+    Ym[ℓ .- abs(m)+1]
+end
+
+Base.getindex(Y::SphericalHarmonicsRecurrence, ::Colon, m) =
+    getm(Y, m)
+
+# Evaluate all spherical harmonics at x,y,z
+function (Y::SphericalHarmonicsRecurrence{T})(x,y,z) where T
+    ϕ = atan(y,x)
+    θ = atan(√(x^2 + y^2),z)
+
+    # Diagonal recurrences
+    begin
+        a = im * exp(im*ϕ)
+        b = sin(θ)
+
+        a,b = a*b, conj(a)*b
+
+        Yprev = Y.Ym₊[1][1]
+        for j = 2:length(Y.Ym₊)
+            ℓ = j - 1
+            f = √((2ℓ+1)/2ℓ)
+            Ym = Y.Ym₊[j]
+            Ym[1] = a*f*Yprev
+            Yprev = Ym[1]
+        end
+
+        Yprev = Y.Ym₊[1][1]
+        for j = reverse(eachindex(Y.Ym₋))
+            ℓ = abs(Y.m₋[j])
+            f = √((2ℓ+1)/2ℓ)
+            Ym = Y.Ym₋[j]
+            Ym[1] = b*f*Yprev
+            Yprev = Ym[1]
+        end
+    end
+
+    # Vertical recurrence
+    for (ms,Yms) in [(Y.m₊,Y.Ym₊),(Y.m₋,Y.Ym₋)]
+        for (j,m) = enumerate(ms)
+            Ym = Yms[j]
+            ℓmax = abs(m) + length(Ym) - 1
+            ℓmax == m && continue
+            Yprev = Ym[1]
+            Ypprev = zero(T)
+            for ℓ = abs(m)+1:ℓmax
+                i = ℓ - abs(m) + 1
+                
+                Ym[i] = im*z*√((4ℓ^2-1) /
+                               (ℓ^2-m^2))*Yprev +
+                    √((2ℓ+1)*((ℓ-1)^2 - m^2) /
+                      ((2ℓ-3)*(ℓ^2-m^2)))*Ypprev
+                
+                Ypprev,Yprev = Yprev,Ym[i]
+            end
+        end
+    end
+end
+
+function (Y::SphericalHarmonicsRecurrence)(𝐫)
+    x,y,z = 𝐫
+    Y(x,y,z)
+end
+```
+but I'm happy with anything that is fast(er) and gives me values consistent with https://juliaatoms.github.io/AngularMomentumAlgebra.jl/dev/definitions/#Spherical-harmonics-1
+MikaelSlevinsky commented on Apr 7, 2020
+MikaelSlevinsky
+on Apr 7, 2020
+Member
+More actions
+The idea is that on Intel processors with a certain level of SIMD, the spherical harmonic recurrences can be sped up by about 25 x.
+👍React with 👍1Reacted by Stefanos Carlström
+jagot commented on Apr 7, 2020
+jagot
+on Apr 7, 2020
+MemberAuthor
+More actions
+Which SIMD extensions are needed? I was thinking about getting a workstation with a Ryzen 3950x which does not have e.g. AVX512.
+MikaelSlevinsky commented on Apr 7, 2020
+MikaelSlevinsky
+on Apr 7, 2020
+Member
+More actions
+The code will dispatch on CPU ID, so for double precision it will try AVX-512, then AVX + FMA, then AVX, then SSE2.
+dlfivefifty commented on Apr 8, 2020
+dlfivefifty
+on Apr 8, 2020
+Last edited by dlfivefifty
+Member
+More actions
+It would be great if it works for sub-ranges that not necessarily start with one or have different strides, e.g., one may wish to do
+```
+chebyshev.(x, 2:2:1000)
+```
+MikaelSlevinsky commented on Apr 8, 2020
+MikaelSlevinsky
+on Apr 8, 2020
+Member
+More actions
+What is 2:2:1000? Is that a stride in the basis or coefficients?
+dlfivefifty commented on Apr 8, 2020
+dlfivefifty
+on Apr 8, 2020
+Member
+More actions
+Oh sorry was talking about recurrence populating a vector, not clenshaw
+MikaelSlevinsky commented on Apr 8, 2020
+MikaelSlevinsky
+on Apr 8, 2020
+Member
+More actions
+That can be done too
+MikaelSlevinsky commented on Apr 28, 2020
+MikaelSlevinsky
+on Apr 28, 2020
+Last edited by MikaelSlevinsky
+Member
+More actions
+Ok so on FastTransforms v0.9, there are routines to speed up Clenshaw summation, hence spherical harmonic evaluation.
+For example, this code offers a significant speedup over broadcasting the scalar routine:
+```
+function sphevaluatepi(θ::Vector{Float64}, L::Integer, M::Integer)
+    mθ = length(θ)
+    phi0 = zeros(Float64, mθ)
+    for i in 1:mθ
+        phi0[i] = sqrt(0.5)
+    end
+    if M < 0 M = -M end
+    c = cospi.(θ)
+    s = sinpi.(θ)
+    for m = 1:M
+        temp = sqrt((m+0.5)/m)
+        for i in 1:mθ
+            phi0[i] *= temp*s[i]
+        end
+    end
+
+    cfs = zeros(Float64, L-M+1)
+    cfs[end] = 1.0
+    A = Vector{Float64}(undef, L-M+1)
+    B = zeros(Float64, L-M+1)
+    C = Vector{Float64}(undef, L-M+2)
+    for l in M:L
+        A[l-M+1] = sqrt(((2.0*l+1.0)*(2.0*l+3.0))/((l-M+1.0)*(l+M+1.0)))
+        C[l-M+1] = sqrt(((l+1.5)*(l-M)*(l+M))/((l-0.5)*(l-M+1.0)*(l+M+1.0)))
+    end
+    C[L-M+2] = sqrt(((L+1.5)*(L-M)*(L+M))/((L-0.5)*(L-M+1.0)*(L+M+1.0)))
+
+    FastTransforms.clenshaw!(cfs, A, B, C, c, phi0, c)
+
+    return c
+end
+```
+Then:
+```
+julia> using BenchmarkTools
+
+julia> N = 1000
+1000
+
+julia> θ = collect((0.5:N-0.5)/N);
+
+julia> @btime FastTransforms.sphevaluatepi.($θ, 1000, 100);
+  19.713 ms (1 allocation: 7.94 KiB)
+
+julia> @btime sphevaluatepi($θ, 1000, 100);
+  316.680 μs (7 allocations: 52.56 KiB)
+
+julia> 
+```
+It can of course be sped up further by caching recurrence coefficients in a plan, among many other Julia-oriented performance enhancements... But crucially, a lot of the heavy lifting is done in the C library now.
+🎉React with 🎉1Reacted by Stefanos Carlström
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

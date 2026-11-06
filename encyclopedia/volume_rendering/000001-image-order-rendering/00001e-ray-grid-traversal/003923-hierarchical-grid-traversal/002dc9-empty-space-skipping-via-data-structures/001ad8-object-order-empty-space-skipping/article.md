@@ -1,0 +1,194 @@
+# Object-Order Empty Space Skipping
+
+Also called: Block min-max culling, Front-to-back ray-casting with bounding box culling, GPU-based Ray-Casting with Object-Order Empty Space Skipping
+
+## Overview
+Object-Order Empty Space Skipping is a GPU-based volume rendering optimization that reduces the number of volume texture samples by skipping inactive regions using a secondary data structure of block min-max values [S1]. It differs from image-order methods (like [Space Leaping](5863-space-leaping.md)) by computing ray entry and exit bounds via rasterized bounding geometry of active blocks, allowing the fragment shader to skip large inactive segments without per-sample overhead [S1]. It builds on [Empty Space Skipping via Data Structures](5619-empty-space-skipping-via-data-structures.md) by using a regular grid subdivision where metadata drives the geometric culling [S1].
+
+## How it works
+**Inputs:**
+*   Volume texture $V$ containing scalar values (e.g., density).
+*   Isovalue threshold $\tau$ defining active regions.
+*   Camera parameters (position $c$, screen coordinates $(x,y)$).
+*   Block size $B$ (e.g., $4^3$ or $8^3$ voxels) [S1].
+
+**Outputs:**
+*   Final image with rays skipping inactive regions.
+
+**Data Structures:**
+1.  **Block Min-Max Structure:** A 3D array storing the minimum and maximum voxel values for each block in the volume. Let $M_{min}(i,j,k)$ and $M_{max}(i,j,k)$ be the min/max values for block at grid index $(i,j,k)$.
+2.  **Bounding Geometry:** A triangle mesh representing the faces of active blocks. A block is active if $M_{max} > \tau$. The geometry consists of quads (or triangles) forming the boundary between active and inactive blocks [S1].
+
+**Steps:**
+
+1.  **Initialization (Pre-computation):**
+    *   Subdivide the volume into regular blocks of size $B \times B \times B$ [S1].
+    *   Compute $M_{min}$ and $M_{max}$ for each block by scanning the volume texture [S1].
+    *   Identify active blocks where $M_{max} > \tau$ [S1].
+    *   Generate bounding geometry: For each pair of neighboring blocks, if one is active and the other is inactive, generate a quad representing the shared face [S2, unofficial]. This geometry represents the "frontier" of active data [S1].
+
+2.  **Ray Start/Exit Depth Computation (Per Frame):**
+    *   Compute ray direction $d(x,y)$ for each pixel from camera position $c$ and screen coordinates $(x,y)$:
+        $$ p(t, x, y) = c + t \cdot d(x, y) $$
+        [S1]
+    *   **Rasterize Front Faces:** Render the front-facing polygons of the bounding geometry to an off-screen buffer (or depth buffer) using a depth test that keeps the closest intersection (e.g., `GL_LESS`). This yields the ray start depth $t_{start}(x,y)$ [S1].
+    *   **Rasterize Back Faces:** Render the back-facing polygons using a depth test that keeps the farthest intersection (e.g., `GL_GREATER`). This yields the ray exit depth $t_{exit}(x,y)$ [S1].
+    *   *Note:* If the volume does not fit in GPU memory, a coarser brick structure is used to manage caching, but the skipping logic remains similar [S1].
+
+3.  **Ray Marching (Fragment Shader):**
+    *   For each pixel, retrieve $t_{start}$ and $t_{exit}$ [S1].
+    *   Initialize ray position $t = t_{start}$ [S1].
+    *   **Loop:** While $t < t_{exit}$:
+        *   Map current ray position $t$ to block coordinates $(i,j,k)$ [S1].
+        *   Query the block min-max structure for the current block [S1].
+        *   **Check Activity:** If $M_{max}(i,j,k) \le \tau$, the block is inactive.
+            *   Skip to the next block boundary along the ray [S1].
+            *   Update $t$ to the exit distance of the current block [S1].
+        *   If $M_{max}(i,j,k) > \tau$, the block is active.
+            *   Perform standard ray marching/sampling within the active block [S1].
+            *   Update $t$ based on the sampling step size [S1].
+    *   *Pitfall:* Inactive blocks enclosed by active blocks (e.g., a hollow shell) are not excluded by the bounding geometry. These samples are skipped on a per-sample basis inside the ray-casting loop when the block min-max check fails [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pre-computation (CPU or GPU compute)
+def compute_block_metadata(volume, block_size, threshold):
+    """
+    Computes min/max values for each block and generates bounding geometry.
+    """
+    num_blocks_x = ceil(volume.width / block_size)
+    num_blocks_y = ceil(volume.height / block_size)
+    num_blocks_z = ceil(volume.depth / block_size)
+    
+    block_min = zeros((num_blocks_x, num_blocks_y, num_blocks_z))
+    block_max = zeros((num_blocks_x, num_blocks_y, num_blocks_z))
+    
+    # Scan volume to fill block metadata
+    for z in range(num_blocks_z):
+        for y in range(num_blocks_y):
+            for x in range(num_blocks_x):
+                min_val = infinity
+                max_val = -infinity
+                for vz in range(z * block_size, (z + 1) * block_size):
+                    for vy in range(y * block_size, (y + 1) * block_size):
+                        for vx in range(x * block_size, (x + 1) * block_size):
+                            val = volume[vx, vy, vz]
+                            if val < min_val: min_val = val
+                            if val > max_val: max_val = val
+                block_min[x, y, z] = min_val
+                block_max[x, y, z] = max_val
+                
+    # Generate bounding geometry (simplified logic)
+    # A face is generated between block (x,y,z) and neighbor if one is active and other is inactive
+    geometry_faces = []
+    for z in range(num_blocks_z):
+        for y in range(num_blocks_y):
+            for x in range(num_blocks_x):
+                is_active = block_max[x, y, z] > threshold
+                if not is_active: continue
+                
+                # Check neighbors to generate faces
+                neighbors = [
+                    (x+1, y, z, 'x'), (x-1, y, z, 'x'),
+                    (x, y+1, z, 'y'), (x, y-1, z, 'y'),
+                    (x, y, z+1, 'z'), (x, y, z-1, 'z')
+                ]
+                for nx, ny, nz, axis in neighbors:
+                    if 0 <= nx < num_blocks_x and 0 <= ny < num_blocks_y and 0 <= nz < num_blocks_z:
+                        neighbor_active = block_max[nx, ny, nz] > threshold
+                        if not neighbor_active:
+                            # Generate quad for the face between (x,y,z) and (nx,ny,nz)
+                            geometry_faces.append(create_quad(x, y, z, nx, ny, nz, block_size))
+                    else:
+                        # Boundary of volume
+                        geometry_faces.append(create_quad(x, y, z, nx, ny, nz, block_size))
+                        
+    return block_min, block_max, geometry_faces
+
+# Fragment Shader Execution
+def fragment_shader(pixel_x, pixel_y, camera_pos, ray_direction, t_start, t_exit, block_min, block_max, block_size, threshold):
+    """
+    Casts ray with object-order empty space skipping.
+    """
+    t = t_start
+    color = vec3(0.0)
+    alpha = 0.0
+    
+    # Determine block step size in world space
+    # Assuming uniform voxel size and block size, calculate distance to next block boundary
+    block_step = calculate_block_step(ray_direction, block_size) 
+    
+    while t < t_exit:
+        # Map current t to block coordinates
+        # This requires inverse ray transformation to voxel space
+        voxel_pos = camera_pos + t * ray_direction
+        block_coords = voxel_pos / block_size
+        
+        bx = floor(block_coords.x)
+        by = floor(block_coords.y)
+        bz = floor(block_coords.z)
+        
+        # Check bounds
+        if bx < 0 or bx >= block_min.shape[0] or \
+           by < 0 or by >= block_min.shape[1] or \
+           bz < 0 or bz >= block_min.shape[2]:
+            break
+            
+        # Query block metadata
+        max_val = block_max[bx, by, bz]
+        
+        if max_val <= threshold:
+            # Block is inactive, skip to next block
+            # Calculate distance to exit current block
+            dist_to_exit = distance_to_block_exit(voxel_pos, ray_direction, block_size)
+            t += dist_to_exit
+        else:
+            # Block is active, perform sampling
+            # Sample within the block until exit or termination
+            while t < t_exit:
+                # Check if we are still in the same block
+                current_block_coords = (camera_pos + t * ray_direction) / block_size
+                if floor(current_block_coords.x) != bx or \
+                   floor(current_block_coords.y) != by or \
+                   floor(current_block_coords.z) != bz:
+                    break # Move to next block iteration
+                
+                # Perform volume integration/sampling here
+                # ... (standard ray casting logic)
+                
+                # Advance t by sample step
+                t += sample_step
+                
+    return color, alpha
+```
+
+## Subtopics
+
+### [Early Shader Termination](969-early-shader-termination.md)
+Early Shader Termination is an optimization technique that discards the execution of complex decoding shaders for fragments likely to represent empty space by using an early z-test in a two-pass rendering approach. It builds on [Object-Order Empty Space Skipping](865-object-order-empty-space-skipping.md) by adding a lightweight pre-check to avoid expensive shader execution in empty regions [G]. Compared to rendering uncompressed data, this approach initially perceives a loss in performance of a factor of 2-3 due to complex shaders and texture indirections; however, in empty regions, it results in a considerable speed-up because only one texture fetch is needed to check the mean.
+
+### [Rasterizing Bounding Geometry for Empty Space Skipping](5141-rasterizing-bounding-geometry-for-empty-space-skipping.md)
+This method exploits hardware-accelerated rasterization to skip over empty space in volume rendering, avoiding the overhead of explicit tree traversal on the GPU. It sets itself apart from sibling methods like [Early Shader Termination](969-early-shader-termination.md) by using the fragment positions of rasterized bounding geometry faces as the start and end points for ray casting, which can lead to fewer look-ups into the empty-space skipping data structure compared to traditional octree structures.
+
+### Overlapped Min-Max Block
+A data structure for empty-space skipping in pre-integrated volume rendering. It modifies the region covered by each block so that each block covers some region of which thickness is at least the sampling distance. By overlapping the region of each block, a line segment formed by two sampling points can be tested for transparency using only one block, avoiding the overhead of determining which of multiple intersecting blocks are transparent [S3]. Unlike previous methods where a line segment may intersect at most three blocks and requires testing all intersecting blocks (creating overhead to determine cases like Fig. 1a vs 1b), this method tests only one block due to the overlapping region design [S3].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of pixels, but with a significantly reduced constant factor due to skipping. The cost is dominated by the rasterization of the bounding geometry (proportional to the surface area of the active isosurface) and the ray marching within active blocks [S1].
+*   **Memory Complexity:** $O(V/B^3)$ for the block min-max structure, where $V$ is the total number of voxels and $B$ is the block size. The bounding geometry size is proportional to the surface area of the active regions [S1].
+*   **Performance:** Reduces overhead by skipping most empty space with no cost using modified ray segments. Only a small number of samples require skipping on a per-sample basis [S1].
+*   **Strengths:** Efficient for large volumes with significant empty space. Works well with isosurface rendering. Simple data structure (regular grid) compared to trees [S1].
+*   **Limitations:** Inactive blocks enclosed by active blocks are not excluded by the bounding geometry and must be skipped per-sample, which can be inefficient for hollow objects [S1]. Performance degrades if the isosurface is very complex or if the volume is mostly active [S1].
+*   **When to use:** When rendering isosurfaces in large volumes with significant empty space and when hardware rasterization is available [S1].
+*   **When not to use:** When the volume is mostly dense or when hollow structures are common and the per-sample skip overhead becomes dominant [S1].
+
+## Background
+Originated in the context of GPU-based ray-casting for real-time visualization of discrete isosurfaces. The method was introduced to overcome the limitations of earlier multi-pass approaches and to reduce the overhead of empty space skipping [S1]. It leverages the graphics pipeline's rasterization capabilities to compute ray bounds, integrating object-order and image-order skipping techniques [S1].
+
+## Sources
+[S1] Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces, https://cgl.ethz.ch/people/archive/siggc/publications/eg05.pdf, fetched 2026-10-26
+[S2] implement volume rendering with object order empty space skipping, https://www.stackoverflow.com/questions/12216008, fetched 2026-10-27 (unofficial)
+[S3] Efficient Interactive Pre-integrated Volume Rendering, https://doi.org/10.1007/11428862_118, fetched 2026-10-26

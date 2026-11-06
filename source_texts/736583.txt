@@ -1,0 +1,88 @@
+When a z/x/y tile is requested past the finest level a COG holds, maplibre-cog-protocol fills the tile from that level by nearest neighbour, so every source cell becomes a flat block and the hillshade computed from the tile draws rings a...
+
+Bilinear resampling when overzooming a COG · Issue #56 · geomatico/maplibre-cog-protocol · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Bilinear resampling when overzooming a COG #56
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+Bilinear resampling when overzooming a COG#56
+Copy link
+Description
+jo-chemla
+opened on Oct 14, 2026
+Issue body actions
+When a z/x/y tile is requested past the finest level a COG holds, maplibre-cog-protocol fills the tile from that level by nearest neighbour, so every source cell becomes a flat block and the hillshade computed from the tile draws rings at the block edges, plus seams at the tile borders. Below shows the same view twice (z22.5 over a 10 cm drone DSM whose finest level is z20, hillshade by MapLibre 6.13; reproduction page, source):
+maplibre-cog-protocol 0.10.0 upsampling (source maxzoom above the COG's finest level)
+MapLibre overzooming the last tile itself (source maxzoom at the finest level)
+Proposal: a resampling option (nearest as today, bilinear, perhaps cubic), as:
+a URL fragment: #dem+resampling=bilinear
+or a cogProtocol({ resampling }) setting
+applied when the requested resolution is finer than the source level. For a DEM the interpolation belongs on the heights before encoding: interpolating the encoded RGB bytes would mix the channels. An app can keep the blocks off screen by setting the source maxzoom to the finest level (right picture: MapLibre magnifies the last tile instead), but that only helps a hillshade. Anything that reads the tiles as heights past that level, a terrain mesh, contours, slope or curvature, an elevation query, still gets flat cells with a cliff between them, where bilinear would give continuous values. MapLibre's own hillshade got the inverse option, a resampling paint property to turn its bilinear magnification off (maplibre/maplibre-style-spec#1447).
+Workaround in terrain-viewer: the source's maxzoom is floored to the COG's finest level (zoomRangeFromMetadata in lib/cog-metadata.ts), so MapLibre stretches the last tile instead of asking the protocol for finer ones. No rings or seams, but the modes that read the heights see the same flat cells.
+Drafted with AI Assistance from Claude Fable
+Activity
+oscarfonts commented on Oct 20, 2026
+oscarfonts
+on Oct 20, 2026
+Member
+More actions
+TL;DR: don't ask the protocol to oversample the COG data, let maplibre overzoom and you'll get the beahviour you want.
+--
+Thanks for the detailed report and the reproduction page, it made this easy to track down.
+The blocks don't come from a missing resampling mode in the protocol. They come from the protocol being asked for zoom levels the COG doesn't have.
+How the overzoom is meant to work
+MapLibre requests tiles from a source only up to the source's maxzoom. Past that, it doesn't ask for new tiles. It reuses the maxzoom tile as an "overscaled" tile and magnifies it on the GPU. The map's own maxZoom only limits how far the user can zoom in, not which tiles are fetched. Terrain-RGB PNG tilesets work the same way.
+This library plugs into that mechanism through TileJSON. When a source is declared with url:
+```
+map.addSource('dem', {type: 'raster-dem', url: `cog://${COG}#dem`, tileSize: 256});
+```
+the protocol internally communicates the COG's native maxzoom level. With a COG built on the GoogleMapsCompatible tiling scheme (as described in the README), every level sits exactly on a web mercator zoom. For example, your Amphipolis DSM has a pixel size of 0.14929107 m, exactly z20. So the source's maxzoom becomes 20, and everything beyond that is not requested, but MapLibre overzooming the z20 tiles, as in your right-hand screenshot.
+The repro page bypasses that in two ways:
+```
+map.addSource("dem", {type: "raster-dem", tiles: [`cog://${COG}#dem/{z}/{x}/{y}`], maxzoom: native + 6, ...});
+```
+tiles: [...] skips the maxzoom autodiscovery mechanism entirely, so the protocol never gets to report the native zoom. Without a maxzoom, MapLibre would fall back to its default of 22.
+An explicit maxzoom always takes precedence over the autodiscovered maxzoom, even with url.
+On overzoom, MapLibre doesn't interpolate heights. It computes slopes once on the native data resolution and then bilinearly interpolates the slopes in GPU. That's why it looks like a smooth, uniform blur rather than blocks.
+About the resampling option
+I'd rather not add it. The fix is to let MapLibre know where the data ends: use url and drop the explicit maxzoom. That's equivalent to your zoomRangeFromMetadata workaround, without having to read the metadata yourself. Interpolating in the protocol would rebuild, tile by tile, what MapLibre already does when overzooming. It would also cost more fetching and decoding with no new information, and it would need a buffer from neighbouring tiles to avoid seams at tile borders.
+❤️React with ❤️1Reacted by Jonathan Chemla
+oscarfonts
+closed this as completedon Oct 20, 2026
+jo-chemla commented on Oct 20, 2026
+jo-chemla
+on Oct 20, 2026
+Last edited by jo-chemla
+Author
+More actions
+Thanks for the detailed analysis and report. It makes total sense to rather be explicit about the maplibre source maxzoom, in order to let the library resample when viewport zooms past that, rather than interpolating tiles at the protocol level, that indeed adds no additional real information, does unnecessary fetches etc.
+Thanks for the resolution you indicated regarding tiles string-vs-array as well as my explicit maxZoom I indeed have to discard for auto-zoom discovery! And as always, thanks for the great COG streaming protocol!
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

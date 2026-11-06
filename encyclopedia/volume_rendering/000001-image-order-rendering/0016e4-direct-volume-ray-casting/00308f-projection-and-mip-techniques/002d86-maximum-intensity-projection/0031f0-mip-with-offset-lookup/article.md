@@ -1,0 +1,204 @@
+# MIP with Offset Lookup
+
+Also called: Binary Density Interval Encoding for MIP, Binary volume mask, Density interval encoding, MaxInterval Search
+
+## Overview
+MIP with Offset Lookup is a preprocessing and acceleration technique for Maximum Intensity Projection (MIP) that avoids unnecessary volume resampling by decomposing the density domain into discrete intervals [S1, unofficial]. It assigns a binary code to each voxel representing its density interval, storing these codes in a compact binary volume mask [S1, unofficial]. The method determines the highest density interval present along a viewing ray using bitwise operations and then uses lookup tables to locate and compare only the voxel densities within that specific interval [S1, unofficial]. It sets itself apart from standard MIP by skipping low-density samples entirely, and from [Local Maximum Intensity Projection](6054-local-maximum-intensity-projection.md) by focusing on global maximums via interval encoding rather than local neighborhood analysis.
+
+## How it works
+
+### Inputs and Outputs
+*   **Input:** A 3D volume array `volume` of size $X \times Y \times Z$ containing density values. Windowing parameters $L$ (lower threshold) and $H$ (higher threshold) defining the relevant density range, where $M$ is the maximum density value in the volume.
+*   **Output:** A rendered image pixel value (maximum density) for each screen coordinate $(i, j)$.
+*   **Preprocessed Data:** A binary volume mask `mask` of size `depth` $\times Y \times X$, where `depth` is calculated based on $Z$ and integer bit-width.
+
+### Data Structures
+
+**1. Binary Volume Mask (`mask`)**
+*   **Type:** 3D integer array `int mask[depth][height][width]`.
+*   **Dimensions:**
+    *   `width` = $X$
+    *   `height` = $Y$
+    *   `depth` = $(2 \times Z + 30) \text{ div } 32$
+*   **Layout:** Each integer element (32 bits) stores the density interval codes of voxels along rows parallel to the $z$-axis. For a volume size $X \times Y \times Z$, the mask packs multiple voxel codes into single integers to enable parallel bitwise processing.
+*   **Code Size:** For $n=4$ intervals, each code is 2 bits. Codes are assigned based on the interval index: $00$ for $I_0$, $01$ for $I_1$, $10$ for $I_2$, $11$ for $I_3$.
+
+**2. Lookup Tables (LUTs)**
+*   **Structure:** Four LUTs, one for each possible interval pattern (00, 01, 10, 11).
+*   **Size:** Each LUT is 256 bytes.
+*   **Content:** For a given pattern, the LUT stores the position (0–7) of the first occurrence of that pattern within a byte. If the pattern is not present in the byte, the LUT stores 8.
+*   **Access:** Addressed by the byte value of the integer segment.
+
+### Parameters
+*   **Intervals ($n$):** The number of density intervals. The source details $n=4$ specifically. For $n=4$, 2 bits per voxel are used.
+*   **Windowing:**
+    *   $I_0 = [0, L)$
+    *   $I_{n-1} = [H, M]$
+    *   Intermediate intervals subdivide $[L, H)$ using uniform or balanced quantization based on the data histogram.
+
+### Algorithm Steps
+
+1.  **Preprocessing (Mask Creation):**
+    *   Divide the density domain into $n$ intervals $I_0, \dots, I_{n-1}$ sorted by borders.
+    *   Assign a unique binary code to each interval corresponding to its index.
+    *   Create the `mask` array. For each voxel $(x, y, z)$, determine which interval its density falls into and store the corresponding code. Pack 16 codes (for 2-bit intervals) into one integer along the $z$-axis.
+
+2.  **Ray Casting Loop (for each pixel $(i, j)$):**
+    *   **Step 1: Find Highest Interval.** Call `MaxInterval(i, j)` to determine the highest density interval code present in the ray.
+    *   **Step 2: Check for Valid Pattern.** If the returned pattern is 0 (interval $I_0$), return 0 (or background color) as no relevant density exists.
+    *   **Step 3: Locate and Compare Densities.**
+        *   Initialize `max` density to 0.
+        *   Iterate through each integer segment `k` in the `mask` along the ray.
+        *   While the current `segment` contains the target pattern:
+            *   Call `Offset(segment, pattern)` to find the bit position `pos` of the first occurrence of the pattern.
+            *   If `pos < 32`:
+                *   Calculate the voxel index: `voxel_z = k * 16 + pos / 2`.
+                *   Retrieve density: `density = volume[voxel_z][j][i]`.
+                *   Update `max`: `if density > max: max = density`.
+                *   Clear the found bit in the segment: `segment &= ~(0xC0000000 >> pos)`.
+            *   Else (pattern not found in this segment): Break loop for this `k`.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def max_interval(mask, depth):
+    """
+    Finds the highest density interval code present in the ray.
+    Assumes 4 intervals (2-bit codes: 00, 01, 10, 11).
+    Returns the index of the highest interval (0-3).
+    """
+    index = 0
+    for k in range(depth):
+        segment = mask[k]
+        if segment != 0:
+            # Check for '01' or '11' patterns
+            # 0x55555555 has bits 010101... set, aligning with the LSB of each 2-bit code
+            i01or11 = segment & 0x55555555
+            if i01or11 != 0:
+                # Check for '11' pattern
+                # (segment >> 1) shifts codes so that the MSB of each 2-bit code aligns with LSB
+                # If both LSB of '01/11' and MSB of '11' are set, '11' exists
+                if (i01or11 & (segment >> 1)) != 0:
+                    return 3
+                else:
+                    if index < 1:
+                        index = 1
+            else:
+                # If no '01' or '11', check for '10'
+                # If segment is non-zero and no '01/11', it must be '10' or '00'
+                # Since segment != 0, it is '10'
+                index = 2
+    return index
+
+def offset(segment, pattern):
+    """
+    Finds the position (0-7) of the first occurrence of 'pattern' in the current byte of segment.
+    Checks bytes from MSB to LSB.
+    Returns 32 if pattern not found in the integer.
+    Assumes 4 LUTs exist, indexed by pattern (0-3).
+    """
+    # Select LUT based on pattern
+    lut = select_lut(pattern)
+    
+    # Check MSB byte
+    pos = lut[(segment >> 24) & 0xFF]
+    if pos < 8:
+        return pos
+    
+    # Check next byte
+    pos = lut[((segment << 8) >> 24) & 0xFF]
+    if pos < 8:
+        return pos + 8
+    
+    # Check next byte
+    pos = lut[((segment << 16) >> 24) & 0xFF]
+    if pos < 8:
+        return pos + 16
+    
+    # Check LSB byte
+    pos = lut[segment & 0xFF]
+    if pos < 8:
+        return pos + 24
+        
+    return 32
+
+def select_lut(pattern):
+    """
+    Returns the pointer to the LUT for the given pattern.
+    In implementation, this is a direct array access.
+    """
+    # LUTs are precomputed. 
+    # LUT[0] for pattern 00, LUT[1] for 01, etc.
+    return LUTS[pattern]
+
+def mip(volume, mask, depth, width, height):
+    """
+    Renders MIP for a single pixel (i, j).
+    """
+    # 1. Find highest interval
+    pattern = max_interval(mask, depth)
+    
+    # If highest interval is 0 (background/low density), return 0
+    if pattern == 0:
+        return 0
+    
+    max_density = 0
+    
+    # 2. Iterate through segments
+    for k in range(depth):
+        segment = mask[k]
+        
+        # 3. Find and process all occurrences of the pattern in this segment
+        while True:
+            pos = offset(segment, pattern)
+            
+            if pos >= 32:
+                break
+            
+            # Calculate voxel z-index
+            # Each integer holds 16 voxels (2 bits each)
+            # pos is bit index 0-31. 
+            # Bit 0,1 -> voxel 0; Bit 2,3 -> voxel 1; ...
+            # pos / 2 gives the voxel index within the 16-voxel block
+            voxel_z = k * 16 + (pos // 2)
+            
+            # Retrieve density
+            density = volume[voxel_z]
+            
+            # Update max
+            if density > max_density:
+                max_density = density
+            
+            # Clear the found bits to find next occurrence
+            # 0xC0000000 is 1100 0000 ... (bits 31,30 set)
+            # Shift right by pos to clear the specific 2-bit code
+            mask[k] &= ~(0xC0000000 >> pos)
+            segment = mask[k] # Update segment for next iteration
+            
+    return max_density
+```
+
+### Edge Cases and Pitfalls
+*   **Complexity with More Intervals:** For $n \ge 4$ intervals requiring more than 2 bits per voxel, the bitwise logic in `MaxInterval` becomes complex. The source suggests using a lookup table approach to find the bit pattern representing the highest density interval instead of pure bitwise operations [S1, unofficial].
+*   **Segment Modification:** The `Offset` function relies on the `segment` variable being modified (`segment &= ...`) to remove processed samples. This allows the same LUT technique to be reused for subsequent samples in the same integer [S1, unofficial].
+*   **Precision:** The method assumes piecewise constant density. Extending to bilinear interpolation requires additional handling not detailed in the core algorithm [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity:** Preprocessing is $O(V)$ where $V$ is the number of voxels. Rendering is $O(R \cdot K)$ where $R$ is the number of rays and $K$ is the number of segments per ray. However, the inner loop only processes voxels belonging to the highest density interval, significantly reducing the number of density lookups and comparisons compared to standard MIP.
+*   **Memory Complexity:** Requires an additional `mask` array of size proportional to the volume, specifically `depth * height * width` integers. For $n=4$, this is roughly $1/16$th the size of the original volume if stored as bits, but stored as integers, it is $1/16$th the number of elements but 32x the size per element, resulting in a net size of $1/2$ the original volume's memory footprint (assuming original volume is 8-bit or 16-bit).
+*   **Strengths:** Eliminates unnecessary resampling of low-density voxels. Fast bitwise operations for interval detection.
+*   **Limitations:** Discretization of density domain may lose precision if intervals are too coarse. Bitwise logic complexity increases with more intervals.
+*   **When to Use:** When the density distribution has a clear separation between background/low-density structures and high-density structures of interest, and windowing parameters $L$ and $H$ are well-defined.
+
+## Background
+
+*   **Origin:** The method was described in the context of interactive volume rendering for medical data visualization [S1, unofficial].
+*   **History:** It is presented as an acceleration technique for MIP, building on the concept of interval encoding to avoid resampling irrelevant data [S1, unofficial].
+*   **Usage:** Primarily used in medical data evaluation where windowing is standard practice to highlight specific tissue types (e.g., bone, soft tissue) [S1, unofficial].
+
+## Sources
+
+[S1] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)

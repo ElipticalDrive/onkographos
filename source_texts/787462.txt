@@ -1,0 +1,303 @@
+Official Vulkanstorm viewer source repository. Contribute to anne-skydancer/vulkanstorm development by creating an account on GitHub.
+
+Alpha OIT: replace the per-pixel linked list with an image-array A-buffer by anne-skydancer · Pull Request #283 · anne-skydancer/vulkanstorm · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+anne-skydancer
+commented
+Nov 2, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Summary
+Replaces the PPLL (shared node pool + global atomic counter + per-pixel head pointers) with a fixed per-pixel slot array held in an RGBA32UI 2D-array image, handed out by a per-pixel atomic count in an R32UI 2D-array image whose other layers accumulate an order-independent tail for fragments past the last slot. The resolve reads at most K slots at fixed addresses, sorts them and composites them over the tail.
+Capture shaders (alphaF, pbralphaF, materialF, fullbrightF): one imageAtomicAdd + one imageStore per fragment; overflow goes to five fixed-point tail accumulators. No fragment falls through to in-place unsorted blending any more.
+Resolve shader: no pointer chase, no traversal cap; sorted slots with the tail composited at the depth of its nearest fragment (alpha groups arrive far to near, so the tail is usually the nearest block; rigged alpha arrives first whatever its depth, so it can also be the farther one).
+pipeline.cpp: node pool, atomic counter and SSBO budget logic removed; K = RenderAlphaOITNodesPerPixel (1..32), reduced to fit RenderAlphaOITMemoryMB. RenderAlphaOITStats now logs a real per-pixel layer histogram every 64th frame (GL 4.5 readback).
+RenderAlphaOITMaxPixelLayers and its spinner removed; the other two settings relabelled. The panel keeps the PPLL name; keys and the RenderAlphaPPLLAvailable flag are unchanged.
+Driver finding: NVIDIA 621.01 applies glClearTexImage after later shader atomics while the texture is still bound to an image unit. Capture unbinds image units 0/1 before the clear; the resolve leaves none bound.
+scripts/perf/test_ppll_capture.py rewritten for the new layout (48 cases pass on NVIDIA). New scripts/perf/bench_alpha_oit.py times both implementations' real shaders offline, plus a no-A-buffer blending floor (used to rule out a single-layer skip: the per-pixel saving would be ~0.12 ms per full screen of single-layer pixels, less than any pre-pass that could identify them).
+Measurements
+Offline, 2560x1440, RTX 5070 Ti, NVIDIA 621.01, median of 20 frames, ms = reset + capture + resolve. "full" = every pixel; "sparse" = 25% of 64x64 blocks.
+scene
+PPLL (devel)
+slots (this PR)
+ratio
+full, 1 layer
+0.45
+0.15
+0.34
+full, 4 layers
+1.19
+0.48
+0.41
+full, 8 layers
+2.50
+0.99
+0.39
+full, 16 layers
+3.62
+1.94
+0.53
+full, 32 layers
+4.68
+4.09
+0.87
+sparse, 8 layers
+0.67
+0.31
+0.47
+sparse, 24 layers
+3.32
+0.71
+0.21
+sparse, 48 layers
+3.53
+1.26
+0.36
+(After the review: the tail also records its nearest depth, one more atomic per overflow fragment; it only shows in the heavily overflowing rows.)
+Memory at 2560x1440: 450 MiB slots + 98 MiB meta (7 layers), versus the PPLL's 450 MiB pool (512 MiB cap) + 15 MiB head. The per-frame clear is limited to the count layer (0.03 ms, same as the old head clear); the resolve zeroes the tail layers it consumed, at the end of the shader (placed mid-shader those stores tripled the resolve cost on overflowing pixels).
+Not measured here: AMD and Intel, Mesa. In-world visual check by the owner: no difference seen against the devel PPLL build.
+Test plan
+scripts/perf/test_ppll_capture.py: 48 cases (four append shaders, detached depth, LEQUAL equality, occlusion, slot fill, tail overflow, reset)
+scripts/perf/bench_alpha_oit.py (table above)
+RelWithDebInfo + LTO build, viewer runs, shaders compile, allocation logged, in-world check
+CI Windows and Linux
+🤖 Generated with Claude Code
+Alpha OIT: replace the per-pixel linked list with an image-array A-bu…
+…
+db631dd
+```
+…ffer
+
+The capture pass no longer appends to a shared node pool through a global atomic
+counter and per-pixel head pointers. Each pixel owns a fixed number of slots
+(RenderAlphaOITNodesPerPixel, default 8) in an RGBA32UI 2D-array image; a
+per-pixel atomic count in layer 0 of an R32UI 2D-array image hands them out, and
+layers 1..5 of that image accumulate an order-independent tail (fixed-point
+atomics: coverage-weighted colour, coverage, log transmittance) for fragments
+past the last slot. The resolve reads at most K slots at fixed addresses,
+depth-sorts them and composites them over the tail. Nothing falls through to
+in-place unsorted blending any more, overflow is confined to the pixels that
+overflow, memory is a fixed function of resolution and K (reduced to fit
+RenderAlphaOITMemoryMB), and the pool, counter, SSBO budget check, traversal cap
+and RenderAlphaOITMaxPixelLayers setting are gone.
+
+Measured offline with scripts/perf/bench_alpha_oit.py (real shaders of both
+implementations, 2560x1440, RTX 5070 Ti, NVIDIA 621.01, median of 20 frames,
+reset + capture + resolve): 0.30 vs 0.42 ms at 1 layer, 1.14 vs 2.51 ms at 8
+layers, 1.92 vs 3.62 ms at 16 layers full screen; 0.78 vs 3.33 ms for 24 layers
+over 25% of the screen in 64x64 blocks, where the pointer chase dominated the old
+resolve. The per-frame clear grows from 0.03 to 0.15 ms (84 MiB meta image).
+
+NVIDIA 621.01 applies glClearTexImage after later shader atomics while the
+texture is still bound to an image unit; capture unbinds both image units before
+the clear and the resolve leaves none bound. RenderAlphaOITStats now reads back
+the per-pixel counts every 64th frame (GL 4.5) and logs coverage, peak depth and
+tail overflow, which is the histogram that tunes K. The preferences panel keeps
+the PPLL name. scripts/perf/test_ppll_capture.py covers the new append for all
+four shader families: detached depth, LEQUAL equality, occlusion, slot fill,
+tail overflow and reset (48 cases pass).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+November 2, 2026 21:32
+github-actions
+Bot
+added
+c/cpp
+llrender
+python
+labels
+Nov 2, 2026
+Copilot started reviewing on behalf of
+anne-skydancer
+November 2, 2026 21:33
+View session
+Copilot
+AI
+reviewed
+Nov 2, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+The overflow resolve can severely suppress near transparent layers, and masked allocation failures can discard transparent fragments instead of triggering a safe fallback.
+3 open issues
+Retain nearest fragments to preserve correct alpha composition · New
+Avoid logging allocation diagnostics on every reused frame · New
+Preserve array allocation errors when checking capture fallback · New
+What changed in this PR
+Replaces the viewer’s linked-list alpha transparency storage with a fixed per-pixel image-array A-buffer, aiming to reduce capture and resolve costs while retaining the legacy rendering fallback.
+Changes:
+Stores fragments in bounded slots, with overflow accumulated into a weighted tail.
+Updates resource allocation, memory budgeting, statistics, and graphics controls.
+Revises capture regression checks and adds an offline comparison benchmark; reported performance results are NVIDIA-only.
+File
+Description
+scripts/​perf/​test_ppll_capture.py
+Checks slot capture, overflow, depth rejection, and reset.
+scripts/​perf/​bench_alpha_oit.py
+Adds offline linked-list versus slot-array timing.
+indra/​newview/​skins/​default/​xui/​en/​panel_preferences_graphics1.xml
+Relabels controls and removes the separate layer limit.
+indra/​newview/​pipeline.h
+Declares array resources and slot-count access.
+indra/​newview/​pipeline.cpp
+Implements allocation, reset, resolve bindings, and layer statistics.
+indra/​newview/​llviewershadermgr.h
+Updates the resolve shader comment.
+indra/​newview/​llviewershadermgr.cpp
+Updates shader implementation comments.
+indra/​newview/​lldrawpoolalpha.h
+Updates the detached-depth comment.
+indra/​newview/​lldrawpoolalpha.cpp
+Passes slot counts to capture shaders.
+indra/​newview/​app_settings/​shaders/​class3/​deferred/​materialF.glsl
+Converts material capture to slots and tail accumulation.
+indra/​newview/​app_settings/​shaders/​class2/​deferred/​pbralphaF.glsl
+Converts PBR alpha capture to slots and tail accumulation.
+indra/​newview/​app_settings/​shaders/​class2/​deferred/​alphaF.glsl
+Converts standard alpha capture to slots and tail accumulation.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​fullbrightF.glsl
+Converts fullbright capture to slots and tail accumulation.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​alphaOITResolveF.glsl
+Sorts stored slots and composites over the tail.
+indra/​newview/​app_settings/​settings.xml
+Revises setting descriptions and removes the old layer limit.
+indra/​llrender/​llshadermgr.cpp
+Updates capability-gating comments.
+doc/​clean_release_base.md
+Documents the replacement transparency implementation.
+Review effort: Balanced
+Comment thread
+indra/newview/app_settings/shaders/class1/deferred/alphaOITResolveF.glsl
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+indra/newview/pipeline.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+indra/newview/pipeline.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Alpha OIT: clear only the count layer per frame; the resolve zeroes t…
+…
+0b5c439
+```
+…he tail
+
+The per-frame glClearTexImage of all six meta layers (84 MiB at 2560x1440,
+0.15 ms) becomes a glClearTexSubImage of layer 0 (0.03 ms). The tail layers are
+written only by overflowing pixels and read only by the resolve in the same
+frame, which now stores zeros back after the composite, so they are clean at
+the next frame start by construction. A full clear remains on allocation and
+whenever a capture ran without its resolve (mAlphaOITTailDirty).
+
+The zeroing stores sit at the end of the resolve shader: placed right after the
+tail reads they made the resolve three times slower on overflowing pixels
+(0.71 -> 2.16 ms at 16 full-screen layers, NVIDIA 621.01); at the end they cost
+nothing measurable. They go through a separate write-only binding (image unit
+2) so the loads keep their read-only image. Benchmark totals vs the PPLL now
+0.34x (1 layer), 0.39x (8), 0.49x (16), 0.78x (32) full screen and 0.20x (24),
+0.32x (48) on a quarter of the screen. bench_alpha_oit.py gains a "direct"
+(no A-buffer) floor and scene/implementation selection through the environment.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+anne-skydancer
+mentioned this pull request
+Nov 2, 2026
+Shader cache: key the binary cache on the shader sources
+#284
+Merged
+1 of 2 tasks
+Alpha OIT: place the tail at its nearest depth; log the budget once; …
+…
+564f50f
+```
+…keep the array GL error
+
+Review of #283. Alpha groups are submitted far to near, so the first K arrivals
+in the slots are the farthest layers and the overflow in the tail is usually
+the nearest block; compositing the tail behind the sorted slots hid near
+layers behind far ones. Each overflow fragment now also records its depth in
+meta layer 6 (imageAtomicMax of the inverted float bits over the zero-cleared
+layer = the minimum depth), and the resolve composites the tail between the
+slots at or behind that depth and the nearer ones. Rigged alpha is captured
+first whatever its depth, so the tail can also be the farther block; the depth
+split covers both. Cost: one more atomic per overflow fragment (16 full-screen
+layers 1.77 -> 2.49 ms, PPLL 4.08; 24 layers on a quarter screen 0.66 -> 0.79,
+PPLL 3.43); non-overflowing scenes unchanged.
+
+The "memory budget allows N of M slots" message moved below the unchanged-
+allocation return: it is logged once per allocation instead of every frame.
+The array allocations' GL error is read before LLRenderTarget::allocate(),
+which clears the error state, so a failed slot array now falls back to legacy
+alpha instead of capturing into nothing.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+```
+Hide details
+View details
+anne-skydancer
+merged commit eb523e1
+into
+vkstorm-devel
+Nov 3, 2026
+13 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+anne-skydancer
+deleted the
+codex/alpha-oit-image-array
+branch
+November 3, 2026 05:58
+This was referenced Nov 3, 2026
+Alpha OIT: bind the resolve's tail-clearing image unit
+#285
+Merged
+Integrate the image-array A-buffer OIT and the source-keyed shader cache into vkstorm-release
+#286
+Merged
+Integrate the image-array A-buffer OIT and the source-keyed shader cache into vkstorm-canary
+#287
+Merged
+Integrate the image-array A-buffer OIT and the source-keyed shader cache into vkstorm-rust
+#288
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+c/cpp
+llrender
+python
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

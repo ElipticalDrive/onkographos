@@ -1,0 +1,187 @@
+# Newton-Raphson for Refraction Point Search
+
+Also called: 1D Newton-Raphson for Refraction Point Search, 1D Newton-Raphson search for triangle without shading normals, Case 1: Triangle without shading normals
+
+## Overview
+This method finds the point $P$ on a triangle boundary where light refracts from a source $L$ to a viewer $V$, using the half-vector formulation from [Half-vector formulation for refracted path finding](4221-half-vector-formulation-for-refracted-path-finding.md). It solves for the root of a function derived from Snell's law. It is distinguished by its use of a specific empirical heuristic for the initial guess and clamping to ensure the solution remains on the triangle edge. It applies when the triangle has constant shading normals (Case 1), reducing the problem to a 1D search, unlike the 2D search required for varying normals [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Viewer position $V$.
+*   Light source position $L$.
+*   Triangle geometry (specifically the edge on which $P$ lies).
+*   Refractive index ratio $\eta = n_1 / n_2$.
+*   Geometric normal $\hat{\mathbf{N}}_g$ and shading normal $\hat{\mathbf{N}}_s$ (assumed identical and constant).
+
+**Outputs:**
+*   The x-coordinate $x$ of the refraction point $P$ in the transformed coordinate system.
+
+### Data Structures
+No complex data structures are required. The method operates on scalar values ($x, x_i$) and 2D/3D vectors ($V, L, P$).
+
+### Coordinate Transformation
+The problem is simplified by transforming the coordinate system such that:
+1.  All relevant points lie in the $z=0$ plane.
+2.  The triangle edge lies on the $y=0$ axis.
+3.  The viewer $V$ lies on the $y$-axis.
+
+In this system:
+*   $V = (0, V_y)$
+*   $P = (x, 0)$
+*   $L = (L_x, L_y)$
+*   $\hat{\mathbf{N}}_g = \hat{\mathbf{N}}_s = (0, 1)$
+
+The solution $P$ must lie on the segment between the viewer's projection and the light source's projection, so $x$ is clamped to $[0, L_x]$ [S1].
+
+### Target Function
+The goal is to find $x$ such that the half-vector $\hat{\mathbf{H}}$ is anti-parallel to the normal $\hat{\mathbf{N}}_g$. Since $\hat{\mathbf{N}}_g = (0,1)$, this is equivalent to finding the root of the x-component of $\hat{\mathbf{H}}$. The normalization term of $\hat{\mathbf{H}}$ is omitted because scaling factors do not affect the zero locations [S1].
+
+The function $f(x)$ is:
+$$ f(x) = \frac{-\eta x}{\sqrt{x^2 + V_y^2}} + \frac{L_x - x}{\sqrt{(L_x - x)^2 + L_y^2}} $$
+
+### Derivative
+The derivative $f'(x)$ with respect to $x$ is required for the Newton-Raphson update. While not explicitly written out as a single formula in the source, it is derived from $f(x)$:
+$$ f'(x) = \frac{d}{dx} \left( \frac{-\eta x}{\sqrt{x^2 + V_y^2}} \right) + \frac{d}{dx} \left( \frac{L_x - x}{\sqrt{(L_x - x)^2 + L_y^2}} \right) $$
+
+### Algorithm Steps
+1.  **Transform Coordinates**: Map $V, L, P$ to the simplified 2D coordinate system described above.
+2.  **Initialize**: Set initial guess $x_0$ using the empirical heuristic:
+    $$ x_0 = \frac{-V_y L_x}{\eta L_y - V_y} \frac{4}{3 + \eta} $$
+3.  **Iterate**: For $i = 0, 1, \dots$:
+    a. Calculate $f(x_i)$ and $f'(x_i)$.
+    b. Update $x_{i+1} = x_i - \frac{f(x_i)}{f'(x_i)}$.
+    c. Clamp $x_{i+1}$ to the range $[0, L_x]$.
+    d. Check for convergence (e.g., $|f(x_{i+1})| < \epsilon$).
+4.  **Output**: Return $x_{i+1}$ as the solution.
+
+Convergence typically occurs in 2 to 4 iterations [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solve_refraction_point_1d(V_y, L_x, L_y, eta, epsilon=1e-6, max_iter=10):
+    """
+    Solves for the x-coordinate of the refraction point P on a triangle edge
+    using 1D Newton-Raphson iteration.
+    
+    Inputs:
+        V_y: y-coordinate of viewer V (V is at (0, V_y))
+        L_x: x-coordinate of light source L (L is at (L_x, L_y))
+        L_y: y-coordinate of light source L
+        eta: refractive index ratio n1/n2
+        epsilon: convergence tolerance
+        max_iter: maximum number of iterations
+        
+    Output:
+        x: the x-coordinate of the refraction point P
+    """
+    
+    # Step 1: Initialize with empirical heuristic
+    # x0 = (-Vy * Lx) / (eta * Ly - Vy) * (4 / (3 + eta))
+    denominator = eta * L_y - V_y
+    if denominator == 0:
+        # Fallback if denominator is zero, though unlikely in valid geometry
+        x = 0.0
+    else:
+        x = (-V_y * L_x) / denominator * (4.0 / (3.0 + eta))
+        
+    # Clamp initial guess to [0, Lx]
+    x = max(0.0, min(x, L_x))
+    
+    for _ in range(max_iter):
+        # Calculate f(x)
+        # f(x) = (-eta * x) / sqrt(x^2 + Vy^2) + (Lx - x) / sqrt((Lx - x)^2 + Ly^2)
+        
+        term1_num = -eta * x
+        term1_den = math.sqrt(x**2 + V_y**2)
+        term1 = term1_num / term1_den
+        
+        dx = L_x - x
+        term2_num = dx
+        term2_den = math.sqrt(dx**2 + L_y**2)
+        term2 = term2_num / term2_den
+        
+        f_x = term1 + term2
+        
+        # Check convergence
+        if abs(f_x) < epsilon:
+            return x
+            
+        # Calculate f'(x)
+        # Derivative of (-eta * x) / sqrt(x^2 + Vy^2)
+        # Let u = -eta * x, v = sqrt(x^2 + Vy^2)
+        # u' = -eta, v' = x / sqrt(x^2 + Vy^2)
+        # (u/v)' = (u'v - uv') / v^2
+        #        = (-eta * sqrt(x^2 + Vy^2) - (-eta * x) * (x / sqrt(x^2 + Vy^2))) / (x^2 + Vy^2)
+        #        = (-eta * (x^2 + Vy^2) + eta * x^2) / (x^2 + Vy^2)^(3/2)
+        #        = (-eta * Vy^2) / (x^2 + Vy^2)^(3/2)
+        
+        df1_dx = (-eta * V_y**2) / (x**2 + V_y**2)**1.5
+        
+        # Derivative of (Lx - x) / sqrt((Lx - x)^2 + Ly^2)
+        # Let u = Lx - x, v = sqrt((Lx - x)^2 + Ly^2)
+        # u' = -1, v' = (Lx - x) * (-1) / sqrt((Lx - x)^2 + Ly^2) = -dx / term2_den
+        # (u/v)' = (u'v - uv') / v^2
+        #        = (-1 * term2_den - dx * (-dx / term2_den)) / term2_den**2
+        #        = (-term2_den**2 + dx**2) / term2_den**3
+        #        = (-(dx**2 + Ly**2) + dx**2) / term2_den**3
+        #        = (-Ly**2) / term2_den**3
+        
+        df2_dx = (-L_y**2) / (term2_den**3)
+        
+        f_prime_x = df1_dx + df2_dx
+        
+        # Newton-Raphson update
+        if f_prime_x == 0:
+            # Avoid division by zero
+            break
+            
+        x_new = x - f_x / f_prime_x
+        
+        # Clamp to [0, Lx]
+        x_new = max(0.0, min(x_new, L_x))
+        
+        x = x_new
+        
+    return x
+```
+
+### Pitfalls and Edge Cases
+*   **Denominator Zero**: The initial guess formula has a denominator $\eta L_y - V_y$. If this is zero, a fallback is needed [S1].
+*   **Derivative Zero**: If $f'(x_i) = 0$, the Newton-Raphson step is undefined. The implementation should handle this (e.g., break or use a fallback) [S1].
+*   **Clamping**: The solution must lie within the triangle edge. Clamping $x$ to $[0, L_x]$ is essential to ensure physical validity [S1].
+*   **Convergence**: The method is robust and usually converges in 2-4 iterations with the specified heuristic [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time**: $O(1)$ per iteration, with typically 2-4 iterations. Thus, $O(1)$ overall.
+*   **Memory**: $O(1)$, requiring only a few scalar variables.
+
+### Measured Performance
+*   Converges in 2 to 4 iterations with the heuristic initial guess [S1].
+*   The heuristic minimizes the average number of iterations compared to other starting points [S1].
+
+### Strengths and Limitations
+*   **Strengths**: Fast convergence, simple implementation, robust with the heuristic initial guess.
+*   **Limitations**: Only applicable to triangles with constant shading normals (Case 1). For varying normals, a 2D search is required [S1].
+
+### When to Use
+*   Use when the triangle has constant shading normals and the refraction point is known to lie on a specific edge.
+*   Do not use when shading normals vary across the triangle; use the 2D Newton-Raphson method instead [S1].
+
+## Background
+
+### Origin
+This method is described in "Single Scattering in Refractive Media with Triangle Mesh Boundaries" by Eric Heitz, Jonathan Dupuy, Stephen Hill, and David Neubelt [S1].
+
+### History and Development
+The method is part of a broader framework for handling refraction in participating media. It addresses the specific case where the shading normal is constant, allowing for a simplified 1D search. The empirical heuristic for the initial guess was developed to minimize the average number of iterations required for convergence [S1].
+
+## Sources
+
+[S1] Single Scattering in Refractive Media with Triangle Mesh Boundaries, https://doi.org/10.1145/1531326.1531398, fetched 2026-10-26

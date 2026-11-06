@@ -1,0 +1,1628 @@
+GPU-accelerated Fractal Flame Renderer, using WGPU and Rust - Solid rendering by calibas · Pull Request #108 · calibas/fflame-rust
+
+Solid rendering by calibas · Pull Request #108 · calibas/fflame-rust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+calibas
+commented
+Jul 17, 2026
+Copy link
+Copy Markdown
+Owner
+Solid Rendering & Lighting for 3D Flames
+Renders 3D fractal flames as opaque, lit, shadowed objects instead of
+transparent ghosts — occlusion, directional lighting, ambient occlusion,
+splat-resolution shadow maps, and depth-of-field, all working across the
+interactive viewport and every export path. Plus a general 2× antialiasing
+export option that applies to 2D, 3D, and solid renders alike.
+56 commits · 68 files · +8.7k/−0.2k · 297 unit tests passing · merges into main.
+What you get
+Solid occlusion — a solid_strength dial (0 = classic transparency,
+1 = hard surface, blendable between) turns the front surface opaque via
+per-pixel nearest-depth culling. A surface_thickness shell controls how
+deep "the surface" reaches.
+Deferred lighting — up to 4 directional lights (azimuth / elevation /
+intensity / color) with Blinn-Phong diffuse + specular, screen-space
+normals, and screen-space ambient occlusion, all computed in a post-pass
+from the depth buffer. Lighting edits don't restart accumulation.
+Shadows — 4 light-space shadow maps at splat resolution (1024²),
+auto-fit to the measured attractor bounds, giving fine per-filament
+shadows a voxel grid could never resolve.
+Depth of field — a proper post-process gather blur from the depth
+buffer (at-splat DoF is incompatible with solid mode by construction),
+matching the look of the classic at-splat DoF.
+2× Antialiasing — an export checkbox that renders the whole pipeline
+at double resolution and box-filters down with a firefly clamp. Works for
+every render mode because the pipeline never knows it's happening.
+JWildfire interop — solid rendering + lighting round-trips through the
+.flame XML sld_render_* block, so JWF solid flames import lit and
+shadowed, and ours export back to JWF.
+Its own dockable panel — Solid Rendering & Lighting moved out of the
+View panel into a first-class panel (Window → 💡 Solid & Lighting).
+Architecture (the "splat-native" pipeline)
+Everything keys off data the chaos game already produces — no meshing, no
+voxel grid, no second spatial structure:
+Occlusion is a 5th u32 per pixel appended to the histogram buffer:
+an inverted-ordered-float nearest depth, written with atomicMax at plot
+time. Samples behind the surface shell have their density weight faded by
+solid_strength.
+Normals / AO are screen-space, reconstructed from that depth field in
+a dedicated normals pass, then edge-aware smoothed by an à-trous chain
+(the sparse chaos game leaves depth noise that must be denoised before
+lighting).
+Shadows are 4 ortho depth maps riding the histogram's tail, splatted
+by the same main pass that plots samples, read back in the shade pass with
+4-tap PCF. Their placement is frozen per accumulation run from measured
+attractor bounds.
+Lighting is a deferred shade pass between accumulate and tonemap,
+consuming the accumulator (albedo + density) + depth + normals + shadow
+maps, emitting an HDR image the tonemap then maps. Fog, when lighting is
+active, is applied inside this pass (post-lighting) so highlights and
+shadows fade into the atmosphere instead of drawing on top of it.
+DoF is a 4-dispatch chain after shade (CoC prepass from smoothed
+depth → separable max-dilate for adaptive loop bounds → dense 2D disk
+gather).
+Zero-cost when off: the SOLID shader-builder flag produces byte-identical
+WGSL when solid rendering is disabled, and the whole shade/DoF chain is
+simply not dispatched. It's supported on all export routes — the direct
+FlameRenderer path, the tiled GPU exporter, and the CPU-histogram
+fallback for very large images (with shadow maps on the two GPU paths).
+Notable problems solved along the way
+The branch went through a real design pivot and several field-reported bugs
+worth flagging for reviewers:
+The density volume was tried and removed. An earlier phase splatted a
+world-space voxel grid for volumetric normals/AO/shadows. It could not
+represent sub-voxel fractal filaments as visible geometry without
+inflating them into lumpy tubes, and its "Volume Extent" dial was the
+single largest performance drain. It was removed wholesale (commit
+9490ceb) in favor of the splat-native pipeline above; volume-off scenes
+verified byte-identical before/after. The historical design log lives in
+docs/projects/solid-rendering.md (Phase 2/3 sections marked RETIRED).
+Shadow auto-refit reset loop — the shadow fit re-measured attractor
+bounds and could ping-pong into an infinite accumulation reset (~250M
+iterations then restart). Fixed with growth-only refits, outlier-clamped
+bounds, and a hard one-refit-per-run cap.
+2× AA dimming — supersampled renders came out dark. The tonemap
+constants are scale-invariant, but 4× the buckets at fixed iterations sit
+lower on the concave log curve (Jensen's inequality). Fixed by scaling
+iterations ×4 for the supersampled render — exact brightness parity, and
+the advertised ~4× cost.
+Depth-effects audit — the brightness renormalization (which cancels
+occlusion dimming) was folding artistic per-sample weights (far-fade,
+depth-density compensation) into its "culled" fraction, so those dials
+shifted global brightness. Replaced with dedicated occlusion-only
+survival counters on all three render paths.
+Config loader skipped migrations — a latent bug (not solid-specific):
+batch/directory config loads used raw serde, bypassing version
+migrations, so pre-v3 3D scenes loaded as 2D through the CLI batch
+exporter. Fixed to route through FractalConfig::from_json.
+DoF quality iterations — the gather went through three revisions
+(sparse jittered spiral = sand → separable Gaussian = axis streaks →
+dense 2D disk = correct) before matching the at-splat reference.
+Testing
+297 unit tests pass (up from the branch base), including new
+coverage: JWildfire sld_render_* round-trip, supersample downsample +
+firefly clamp, and the depth-effects config paths.
+6 solid visual-regression scenes (tests/visual/configs/solid/):
+hard, lit, lit-transparent, translucent, depth-effects, shadows. Solid
+renders are not bit-reproducible (in-batch depth race), so these use
+tolerance compare — see scripts/run_benchmarks.py.
+Fog, brightness-renorm, and DoF changes verified against same-scene
+reference renders (at-splat DoF with solid off, fog with/without
+lighting, renorm fraction invariance under far-fade/depth-comp).
+Pre-merge cleanup
+The last few commits are a review pass: the dead DensityStats reduction
+(superseded by the occlusion counters) and its shader were deleted, a stale
+user-facing tooltip and volume-era doc text were corrected, the JWF solid
+block was scoped to top-level flames only, and two zero-risk shader
+micro-wins were applied (all verified behavior-neutral).
+Deferred work is catalogued in
+docs/projects/solid-rendering-todo.md:
+surface textures / bump mapping / multi-material, positional point lights,
+per-light shadow strength, DoF on the tiled-export path, WASM AA,
+configurable shadow-map resolution, and the ranked performance headroom
+(half-res interactive DoF/shade, bind-group caching, shadow-basis hoisting).
+Key files
+New shaders — shaders/shade.wgsl (deferred lighting),
+shaders/normals.wgsl + shaders/atrous.wgsl (screen-space normals +
+denoise), shaders/dof.wgsl (post-process DoF).
+New host modules — src/renderer/shade_pass.rs,
+src/renderer/dof_pass.rs, src/renderer/density_stats.rs (attractor
+bounds + occlusion counters), src/export/supersample.rs,
+src/ui/solid_panel.rs, src/variations/defs/solid_samplers.rs
+(sphere_volume depth-sealing sampler).
+Core changes — shaders/core/main_template.wgsl + header.wgsl (SOLID
+splat block), src/gpu/buffers.rs (histogram depth region + shadow tail),
+src/renderer/compute_kernel.rs (pass orchestration), src/flame_xml.rs
+(JWF sld_render_* I/O), src/export/high_res.rs (solid on export paths).
+Docs — docs/projects/solid-rendering.md (full design record),
+docs/projects/solid-rendering-todo.md (deferred work),
+docs/projects/3d-volume-surface-planning.md (initial approach survey).
+calibas
+and others
+added 30 commits
+July 11, 2026 13:10
+docs: solid-rendering plan (occlusion + lighting for 3D flames)
+…
+a016036
+```
+Adds the option-space discussion (3d-volume-surface-planning.md) and the
+implementation plan (solid-rendering.md): Phase 0 = per-pixel nearest-depth
+occlusion with blendable solid_strength via the existing density_weight
+channel; Phase 1 = deferred shading pass (normals, lights, SSAO) through
+tonemap_pass_with_input; Phase 2 = world-space density volume for gradient
+normals, volumetric AO and shadow rays. Grounded in a full pipeline survey
+(binding budget, reset/overwrite semantics, export paths). Hard requirement:
+shader-builder gated, byte-identical WGSL when disabled.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+shaders: compute camera_space once per plotted sample (solid Phase 0 …
+…
+33514ea
+```
+…prep)
+
+The four per-sample depth consumers (depth-density compensation, DoF,
+far-density fade, fog) each rebuilt an equivalent camera matrix and
+re-transformed plot_pos — up to five camera transforms per splat counting
+the projection itself. Surface the projection's own camera_space instead:
+new utilities `project_3d_full` returns {pixel, camera_space};
+world_to_pixel_3d becomes a wrapper. The effect blocks read the shared
+camera_space.z (the outermost roll never touches z, so the roll-less matrix
+is z-identical to the ones the blocks built — as their own comments noted).
+
+This is the single definition solid rendering's depth buffer will read.
+
+Verified behavior-identical: deterministic-RNG baseline renders
+(all-four-effects scene + plain 3D scene, output/solid-baselines/) are
+pixel-hash-identical before and after. 289 lib tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 0: nearest-depth occlusion (blendable, zero-cos…
+…
+8156be6
+```
+…t off)
+
+3D flames render as additive transparent ghosts — far structure bleeds
+through near structure. This adds the occlusion foundation from
+docs/projects/solid-rendering.md:
+
+- Depth region: one u32/pixel appended INSIDE the histogram buffer (offset
+  W*H*4) — zero new bind-group entries (the main pass already runs ~10
+  storage buffers against a spec floor of 8). Encoding is inverted
+  ordered-float bits: larger = nearer, 0 = "no sample", so plain zero
+  clears initialize it and atomicMax tracks the nearest depth. The
+  per-batch histogram clear is range-limited to the RGBD words; depth
+  persists across batches and the occlusion test tightens progressively.
+- Splat gating: samples deeper than nearest + surface_thickness get
+  density_weight *= (1 - solid_strength) — 0 is today's transparency,
+  1 drops them (and skips the histogram atomics), between is a translucent
+  solid. Rides the existing per-sample density_weight channel, so all
+  accumulation paths honor it unchanged.
+- Depth priming: the first batch after any reset records depth only, so
+  the accumulator never ingests interior samples gated against an empty
+  depth buffer.
+- SOLID shader-builder flag (from ShaderConstants::solid_enabled, set when
+  config.solid_strength > 0 in 3D): solid-off builds are BYTE-IDENTICAL to
+  before (enforced by solid_off_is_byte_identical) and the depth region
+  isn't allocated. 2D and sample-emit builds self-gate off (>128 MB tiled
+  exports render without solid until the tiled path carries depth). At-splat
+  DoF is compiled out in solid mode (its position jitter would corrupt the
+  depth buffer); post-DoF from depth is the planned replacement.
+- Config solid_strength/surface_thickness (serde skip-default,
+  ConfigPath -> IterationReset, undo/history, en.yml), View-panel sliders,
+  renderer plumbing (update_flame/load_config/resize/reset + histogram
+  region toggle with bind-group recreation).
+
+Verified: deterministic baselines pixel-identical with solid off (zero-
+impact requirement); pentatope A/B shows the front-surface structure with
+per-cell palette colors and occlusion gaps where the transparent render
+washes to white. 291 lib tests pass; bins + wasm clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: reset the depth region per frame in overwrite mode
+…
+156067e
+```
+Interactive param drags render in overwrite mode — no reset, the fractal
+changes shape frame to frame. The per-batch histogram clear preserved the
+solid depth region unconditionally, so new samples were occlusion-tested
+against the OLD shape's surface: dark patches wherever the edited fractal
+sits deeper than it used to, persisting until a manual accumulation reset.
+(The plan's overwrite-semantics section called for single-batch depth in
+overwrite mode; the implementation missed it.)
+
+clear_histogram now takes reset_depth, passed as overwrite_mode by the
+compute pass: dragging renders with per-frame (single-batch) depth that is
+consistent with the single-batch image overwrite mode displays, and
+progressive accumulation keeps the persistent, tightening depth as before.
+Progressive resume after a drag is sound — the last overwrite frame leaves
+current-shape depth in the region.
+
+291 lib tests pass; CLI export path (never overwrite) verified bit-identical
+before/after.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs: solid renders are not bit-reproducible (in-batch depth race)
+…
+05f27bb
+```
+Records the measured run-to-run jitter (~49% of covered pixels at mean
+delta ~4.8/255, sub-visible), its cause (samples racing their own batch's
+atomicMax depth writes; cross-batch depth is deterministic), the
+visual-regression consequence (tolerance compare for solid scenes), and
+the ping-pong depth-region design that would make solid deterministic if
+ever needed. Also corrects commit 156067e's message: its "bit-identical
+export" verification was actually measuring this nondeterminism — the
+overwrite fix itself is unaffected.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: depth occlusion on the tiled + CPU export paths
+…
+30b25b8
+```
+Completes Phase 0 export coverage — >binding-size exports now honor
+solid_strength instead of silently rendering transparent:
+
+- Sample-emit shader (SOLID + sample-emit build): carries camera-space
+  depth in the Sample's spare slot; no in-shader gating (no histogram
+  binding exists there).
+- Tile scatter pass (accumulate_samples.wgsl): each tile's span gains one
+  u32/px nearest-depth region after its RGBD words (5 words/px). Same
+  inverted ordered-float encoding, atomicMax, shell test, and
+  (1 - solid_strength) weighting as the interactive direct path; the
+  export's first dispatch is the depth-priming pass. Runtime-gated on
+  solid_strength (export-only pass, not the interactive hot loop).
+- CPU accumulate fallback: per-pixel nearest-depth vec persisted across
+  dispatches, gated sequentially per row — the one solid path that is
+  fully deterministic.
+- Sizing end to end: histogram_size_bytes / pick_strategy take a solid
+  flag (20 B/px spans; tile-height + offset-alignment math updated),
+  TileLayout carries words_per_pixel, tile bindings and byte offsets
+  scale, readback gathers per-tile RGBD spans past the depth regions,
+  and both app routing sites use the solid-aware size.
+
+Verified: pentatope solid config forced through --engine flamerenderer
+vs --engine highres agrees to within the measured solid run-to-run noise
+(mean 2.3/255); byte-identity test extended to the emit shader (solid
+off = byte-identical there too). 291 lib tests pass; bins + wasm clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: visual regression category (tolerance compare) — Pha…
+…
+93ca545
+```
+…se 0 complete
+
+Solid renders are not bit-reproducible (in-batch depth race), so `solid-*`
+visual regression tests compare with a tolerance instead of a pixel hash:
+mean |delta| <= 8/255 and <= 5% large-delta (>32) channel samples — well
+above the measured run-to-run noise, far below any real regression.
+Comparator validated in both directions: a fresh re-render passes at mean
+0.01; the same scene with solid off fails loudly (mean 15.5, 19.8% big).
+
+Three scenes in tests/visual/configs/solid/ with 800x600 baselines:
+- solid-hard: full occlusion on the pentatope IFS (front-surface cells +
+  occlusion gaps; also exercises NeedsW + solid together)
+- solid-translucent: the 0.5-strength density_weight blend path
+- solid-depth-effects: solid + fog + far-fade + depth-density, plus a
+  deliberately nonzero dof_blur_strength that must have NO effect (locks
+  the DoF-compiled-out-in-solid behavior)
+
+Docs: solid-rendering.md Phase 0 marked complete; CLAUDE.md quick
+reference gains the solid-rendering summary.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+gitignore: __pycache__
+cefae05
+solid rendering Phase 1 core: deferred shade pass (normals, lights, S…
+…
+09e8645
+```
+…SAO)
+
+New compute pass between accumulate and tonemap (via the existing
+tonemap_pass_with_input plumbing, ordered shade -> density effects ->
+tonemap in both the interactive frame and the CLI render path):
+
+- Reads the accumulator (rgb = flame color as albedo, a = density
+  passthrough) + the SOLID depth region; reconstructs camera-space
+  positions by inverting the Apophysis projection (zr = 1 + persp*d).
+- Normals: depth-bilateral 9x9 slope fit windowed at 3x surface_thickness
+  — the nearest-depth field carries Monte-Carlo noise on the order of the
+  shell, so single-pixel gradients are jitter; the wide in-window fit
+  recovers smooth normals without bleeding across silhouettes.
+- Lighting: ambient + up to 4 camera-space directional lights
+  (azimuth/elevation, host-precomputed directions), Blinn-Phong
+  diffuse + specular, 8-tap golden-spiral SSAO with range falloff;
+  final rgb = mix(emissive flame color, lit, shading_strength).
+- Config: nested SolidShadingSettings on FractalConfig (one serde unit,
+  skip-if-default) with a [SolidLight; 4] array — ConfigPaths/UI next.
+- Lighting decoupled from occlusion: depth capture activates when
+  solid_strength > 0 OR shading_strength > 0 (the occlusion gate
+  multiplies by solid_strength, a no-op at 0) — transparent flames can
+  be lit.
+- Zero cost when off: the pass simply isn't dispatched; the main iterate
+  shader is untouched by this commit.
+
+Bug found on the way: the depth sentinel must be OUT-OF-BAND (3e38), not
+sign-based — any object straddling the camera plane has legitimately
+negative front-surface depths, which a `d < 0 = empty` check silently
+passed through unshaded (whole-object no-op).
+
+Verified: diffuse-only sphere test shows correct directional shading
+(bright limb toward the light); Phase 0 solid regression scene still
+passes tolerance vs baseline (shading defaults off); 291 lib tests;
+bins + wasm clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: lighting ConfigPaths + View-panel Lighting UI
+…
+10df2ee
+```
+Makes Phase 1 lighting drivable from the app:
+
+- ConfigPaths: ShadingStrength, SolidAmbient/Diffuse/Specular/Shininess,
+  SsaoStrength/Radius, plus parameterized SolidLightEnabled{index} and
+  SolidLightParam{index, param} ("azimuth"/"elevation"/"intensity"/
+  "color_r|g|b") following the DensityEffectParam pattern — string form
+  "SolidLight.N.param", full to_string/from_string roundtrip (test list
+  extended), json conversion (floats + bool), undo/history i18n keys.
+- All shading paths map to IterationReset: pending-actions gives
+  update_flame (renderer.solid_shading refreshes) with overwrite-mode
+  smoothing during drags, no hard reset. A lighter dedicated UpdateType
+  (lighting only needs shade+tonemap re-run) is noted as a follow-up
+  optimization.
+- View panel: "Lighting" subsection under Solid Rendering — master
+  shading strength; when active: ambient/diffuse/specular/shininess +
+  SSAO sliders and 4 lights, each with enable checkbox, color picker
+  (batched 3-path undo point), azimuth/elevation/intensity sliders.
+
+291 lib tests pass; bins + wasm clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: lighting edits no longer reset iterations (ShadingOnly)
+…
+ade3ac2
+```
+The shade pass runs AFTER accumulation, so lighting parameters never
+invalidate accumulated data — mapping them to IterationReset was pure
+plumbing convenience and cost users their converged render on every
+light tweak.
+
+New UpdateType::ShadingOnly: all lighting paths (shading strength,
+ambient/diffuse/specular/shininess, SSAO, per-light params) now produce
+a lone update_shading action — no flame update, no view update, no
+overwrite mode, no reset. The app refreshes the renderer's
+SolidShadingSettings copy and the per-frame shade+tonemap re-render
+(which runs even when iteration is complete, same as exposure edits)
+picks it up next frame with every accumulated iteration intact.
+
+One structural exception, handled by escalation: a change that flips
+the depth-capture requirement (lighting toggled on/off while
+solid_strength is 0) needs the histogram depth region + SOLID shader —
+the app detects want_capture != has_solid_depth_region() and falls back
+to the full update_flame path for that single edit.
+
+291 lib tests pass; bins clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: lighting animation targets + lit regression scenes
+…
+6c077bb
+```
+- Animation target selector gains the solid/lighting params (strengths,
+  material terms, SSAO, lights 1-2 azimuth/elevation/intensity) — light
+  sweeps animate without resetting accumulation thanks to ShadingOnly.
+- Two regression scenes with baselines: solid-lit (occlusion + key/fill
+  lights + SSAO on the pentatope — the cells render with full 3D relief)
+  and solid-lit-transparent (lighting with solid_strength 0, locking the
+  decoupled depth-capture path). Both use the solid-* tolerance compare;
+  re-render verified within tolerance.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: brightness renormalization for occluded renders
+…
+64cc413
+```
+Hard occlusion culls most dispatched samples, but the tonemap normalizes
+brightness by DISPATCHED iterations — solids rendered dark by exactly
+the culled fraction (a >99% cull rendered near-black at any setting).
+
+Fix by measurement, not estimation: a one-workgroup GPU reduction
+(density_stats.wgsl, 256 threads striding the accumulator) sums the
+alpha channel = total ACCEPTED density. survival_fraction =
+sum / samples_in_buffer scales the tonemap's sample_density (k1/k2
+normalization), restoring the brightness the surviving samples deserve.
+Self-calibrating for any solid_strength — partial occlusion measures
+its own partial fraction; pure-lighting mode (no culling) measures ~1.
+
+- Interactive: async 4-byte readback every 16 frames with an EMA (map
+  state machine spans encode -> submit -> map -> callback frames; no
+  stalls). Fraction forced to 1.0 whenever occlusion isn't culling.
+- CLI export: one exact blocking measurement before the final tonemap.
+- Clamped to [0.005, 1] — at most a 200x boost.
+
+Verified: the Phase 0 "dark cloud" hard-solid scene now renders at full
+exposure; transparent renders are pixel-identical (fraction-1 path);
+solid visual-regression baselines regenerated at the corrected
+brightness. 291 lib tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: lighting + brightness renorm on video and high-res e…
+…
+b0b8c2e
+```
+…xports
+
+Video exports (animation/export.rs) and HighResExporter renders — which
+also serve in-app PNG exports routed by size/duration — rendered unlit
+and, for hard solids, dark. Both now run the full solid finalize.
+
+- shade.wgsl generalized to region rendering: ShadeParams gains
+  depth_word_offset (histogram-embedded vs dedicated depth buffer) and
+  tex_y0/tex_height (strip windows). Depth reads, reconstruction, and
+  SSAO always use full-image coordinates, so strips shade identically
+  to a one-shot; albedo/output stay texture-local. Interactive path
+  verified unchanged (solid-lit within tolerance vs baseline).
+- ShadePass: new_pipeline_only() (no standing output allocation) +
+  run_region(); the interactive run() is now a wrapper.
+- Video export: exact density-fraction measurement + shade pass +
+  tonemap_pass_with_input per frame, mirroring the CLI path.
+- HighResExporter: gathers a full-image encoded-depth buffer BEFORE the
+  tile histogram is freed (per-tile GPU copies, or CPU-encoded from the
+  CPU path's depth vec; skipped with a warning if it exceeds one
+  binding); computes the exact accepted/dispatched fraction on the CPU
+  and applies it to sample_density in both tonemap paths; shades the
+  single-shot accumulation (feeding density effects/tonemap) and each
+  strip of the strip-tiled tonemap (full-image depth + strip albedo).
+
+Engine parity on the lit regression scene: identical mean intensity
+(brightness renorm agrees exactly); per-pixel delta mean 5.4/255 from
+cross-engine sample-stream noise in the normals — inside the solid
+tolerance, and shrinks further with the upcoming normal smoothing.
+291 lib tests pass; bins + wasm clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: à-trous normal smoothing (normal_smoothing 0-3)
+…
+02193d4
+```
+The nearest-depth field carries Monte-Carlo noise on the order of the
+surface shell, and the single-pass 9x9 slope fit left visible speckle in
+lit renders on sparse/thin structure. Proper multi-scale denoising:
+
+- normals.wgsl: extracts the bilateral slope fit into a full-image pass
+  writing (normal.xyz, depth) to an Rgba32Float texture.
+- atrous.wgsl: one edge-aware smoothing iteration — 5x5 B3-spline kernel
+  sampled at a power-of-two stride, weights = depth-gaussian (sigma_z
+  tied to the surface shell) x normal-similarity^8 — so smoothing
+  crosses noise but not silhouettes or creases.
+- ShadePass orchestrates normals -> N atrous iterations (strides 1,2,4,
+  ping-pong; per-iteration uniform buffers since queue writes flatten
+  before dispatches) -> shade consuming the smoothed texture (new
+  binding, use_normal_tex param). The strip-tiled export path keeps the
+  inline estimator (full-image normal textures + apron logic aren't
+  worth it at those sizes); interactive and single-shot exports get the
+  full chain.
+- Config: normal_smoothing (0-3, default 1) on SolidShadingSettings —
+  ConfigPath + UI slider + i18n + string roundtrip; ShadingOnly channel,
+  so it tunes LIVE on a converged render.
+
+Verified: the noisiest test case (sparse solid sphere, grazing light) at
+3 iterations renders a coherent lit hemisphere with a clean terminator
+vs. speckle at 0; the lit regression scene stays within tolerance of its
+baseline at the default (mean 0.96/255). 291 lib tests; bins clean.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: animated lighting in video exports + gap fill
+…
+ae542ad
+```
+Two field-feedback fixes:
+
+1. Video exports dropped animated solid/lighting values: the export
+   path applies track values through a MANUAL ConfigPath->field match
+   (the same match that historically dropped DoF/fog animation), and
+   the solid paths weren't in it — an animated Light-2 azimuth rendered
+   static in the .mp4 while previewing fine in-app. All solid paths
+   (strengths, material terms, SSAO, smoothing, gap fill, light
+   enabled/params) now apply per frame.
+
+2. gap_fill (0-3 px, default 0, ShadingOnly/live): surface closing in
+   the shade pass. Sparse chaos-game coverage leaves see-through
+   pinholes in solid surfaces (worst case: a julian projected onto a
+   sphere via bubble; temporal shimmer in animation). A sample-free
+   pixel is filled when >=5 of its 8 ring neighbors (at radius 1..gap
+   fill) have valid depth with tight spread (one surface — silhouette
+   gaps between DIFFERENT surfaces stay open): depth/normal/albedo/
+   density synthesized from the ring, then lit normally. Requires the
+   full-image normal texture (interactive + single-shot exports).
+
+Also records the field-feedback quality roadmap in the plan doc:
+supersampling/AA, firefly clamp, slope-adaptive thickness (the >0.01
+"ripples"), surface-sampler variations.
+
+291 lib tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 2: world-space density volume splat foundation
+…
+d3bff7e
+```
+Adds the voxel-grid infrastructure the Phase 2 shading upgrades build on
+(gradient normals, volumetric AO, shadow march, occlusion repair):
+
+- VOLUME shader-builder flag (volume_enabled && 3D && direct-histogram);
+  main_template splats one atomicAdd per plotted sample into a flat
+  volume_dim^3 world-space grid at binding 6 (the old iteration_counts
+  gap). Zero-cost when off: volume_off_is_byte_identical test.
+- FlameBuffers::set_density_volume — buffer created/dropped on toggle
+  (desktop 192^3, WASM 128^3), 4-byte dummy bound otherwise; lifecycle
+  mirrors the depth region (persists across progressive batches, cleared
+  on full reset and per-frame in overwrite mode).
+- Config: solid_shading.volume_enabled/volume_extent (skip-if-default);
+  ConfigPaths VolumeEnabled/VolumeExtent (IterationReset) wired through
+  manager get/set, undo/redo roundtrip, animation export match, i18n.
+- View panel: Density Volume toggle + extent slider.
+- GpuParams/header gain volume_dim/volume_extent (appended after
+  post_symmetry; layout mirrored in WGSL).
+
+Smoke-tested: volume-on render matches volume-off within solid tolerance
+(splat is write-only until the consumption pass lands). 292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 2: volume consumption - gradient normals, AO, s…
+…
+f4954be
+```
+…hadows, occlusion repair
+
+The shade pass now reads the world-space density volume (binding 5,
+4-byte dummy when absent; every feature gates on volume_dim > 0):
+
+- OCCLUSION REPAIR: vol_ray_depth() marches the view ray through the
+  grid (integrated-density first-hit) for an authoritative surface
+  depth. Pixels whose nearest sample sits well behind it are leaks
+  (their only samples belong to back structure showing through a
+  sparsely-covered front surface - the case per-pixel depth can't fix);
+  they're rebuilt from front-surface ring neighbors anchored to the
+  volume depth, with a keep-color/move-geometry fallback. Holes get the
+  same volume authority, so gaps close even at gap_fill 0.
+- Gradient normals: trilinear central-difference -grad(rho), blended
+  over the screen-space normal by density-edge confidence. World-space,
+  stable under camera motion.
+- Volumetric AO: 5 hemisphere density taps composed with SSAO.
+- Shadow march toward each light; transmittance attenuates diffuse +
+  specular. New shadow_strength (SolidShadowStrength, ShadingOnly) with
+  UI slider + animation target.
+- Camera inverse: effective_camera_rows() (shade_pass.rs) replicates
+  build_camera_matrix + camera_transform's transposed application; the
+  shade pass reconstructs world positions as E^T . cam + cam_pos.
+- run_shade_pass now takes the camera params; interactive, CLI, and
+  video export all consume the volume (HighResExporter passes None -
+  its tiled path never builds a grid).
+
+Verified on solid-lit at 640x480: inter-tile see-through gaps close,
+facets shade coherently from gradient normals, shadows add depth.
+292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: solid-volume visual regression scene + baseline
+…
+e323129
+```
+solid-lit with volume_enabled + shadow_strength 0.6 — locks in the
+Phase 2 consumption path (gradient normals, volumetric AO, shadow
+march, occlusion repair). Tolerance-compared like all solid-* tests.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 2: view-fit density volume (fixes blocky shadin…
+…
+a068e32
+```
+…g + weak repair)
+
+Field feedback (grand-julian sphere): giant rectangular shadow-like
+facets, and occlusion repair barely helping. Root cause: a fixed
+world-space cube gives a zoomed-in object a handful of voxels (extent
+20 at zoom 8 = 0.21-unit voxels vs 0.01 surface thickness) - single
+voxel faces span a third of the sphere, and the leak margin exceeds
+the whole visible object.
+
+- View-fit placement (volume_auto_fit, default true): the cube centers
+  on the world point at screen center (pan mapped through the inverse
+  camera rotation) and sizes to 2x the visible half-width, so voxels
+  track magnification (~1/100th of the visible width). Camera/zoom/pan
+  changes reset accumulation - which clears and re-splats the volume -
+  so following the view costs nothing. Manual mode keeps the old
+  origin-centered volume_extent cube.
+- volume_center in GpuParams/splat and vol_center in ShadeParams; all
+  volume sampling/marching is center-relative.
+- FlameRenderer::volume_placement is the single source for both the
+  splat params and the shade pass (VolumeShadeInput.center).
+- Shadow march now samples trilinearly (nearest-voxel marching casts
+  voxel-shaped shadow blocks).
+- UI: Auto Fit checkbox; extent slider only in manual mode.
+
+On the reported scenes: the rectangular band is gone, surface relief
+is crisp, see-through speckling greatly reduced. solid-volume baseline
+regenerated. 292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 2: repair/shading stability hardening (4 field-…
+…
+1c28d17
+```
+…feedback rounds)
+
+Each change below removes a specific user-visible artifact on the
+grand-julian-on-bubble scenes; the plan doc documents them as
+load-bearing. The recurring theme: every DISCRETE decision in the
+volume-shading path eventually painted a band, block, streak, or
+strobe — all of them are now continuous, evidence-gated, or clamped.
+
+- Integral ray march (vol_ray_march): occlusion = density integrated in
+  front of the pixel; anchor = opacity-clipped mean depth of the first
+  surface unit. Replaces first-hit depth, which is bistable when a
+  sparse shell hovers at the trip threshold (patch strobing).
+- Saturating repair weight o^2/(o^2+0.25): windowed smoothsteps paint a
+  seam along the iso-occlusion contour where repair fades mid-surface.
+- Opacity-clamped march steps (solid is solid): fractal density spans
+  orders of magnitude - one filament voxel (1000x solid) cast saturated
+  voxel-shaped shadow blocks that danced while converging. Soft-start
+  ramp prevents grazing-angle self-shadowing.
+- NO no-ring fallback: occluders with no sampled pixels (dense plane
+  seen edge-on = 1px image line) were relit into bright streaks; repair
+  only paints what the ring has image evidence for.
+- Density-weighted ring statistics + sparse hand-over: freshly
+  discovered pixels grow into (and out of) the ring average smoothly.
+- Accumulator depth-tightening reset (accumulate.wgsl + accum_depth
+  buffer): when a pixel's nearest depth moves closer by >1.5x
+  thickness, its history (a provably occluded surface) is discarded
+  instead of blended - leaked pixels stop converging through a
+  polluted mix.
+- vol_trust = geometric (derived voxels across visible width) x
+  statistical (ramps over ~12 batches; ~0 in overwrite): every volume
+  feature fades to the Phase 1 look on coarse or thin volumes instead
+  of stamping voxel artifacts. Shadow strength pre-multiplied; manual
+  extent mode gets a UI hint explaining the fade.
+- Temporal EMA (0.85, interactive only) on the shade output with
+  ping-pong history: repaired pixels track the front shell's relative
+  density, which genuinely drifts through the coverage-transition
+  window (~0.5-1G iters on large viewports) - blended it reads as calm
+  drift, not strobing. History resets on lighting edits, accumulation
+  resets, and per video-export frame (no ghosting).
+- Volumetric AO: taps lifted 2 voxels off the shell, per-pixel jittered
+  tangent frame, half weight (stacks on screen-space SSAO) - fixes
+  voxel-rectangle splotches from surface-scale features.
+- volume_closing (0-2, ShadingOnly): morphological closing of the
+  derived occlusion field seals genuine measure holes; volume_mip.wgsl
+  derives smoothed (mean) + closed (max, dilate-erode) half-res fields
+  each shade - the shade pass never samples the raw splat grid.
+
+Verified per artifact with deterministic A/B renders and crops at the
+coverage-transition window; solid-volume baseline regenerated;
+292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+variations: solid_sphere + bubble_solid surface samplers
+…
+69b4857
+```
+Root fix for see-through holes in shell projections (solid rendering
+field feedback): a shell variation like bubble maps the incoming
+measure onto an infinitely thin surface, so wherever the incoming
+fractal is sparse the shell has holes no repair can fill - the data
+was never plotted.
+
+- solid_sphere: ignores the incoming point (blur-family style) and
+  emits volumetrically uniform samples in a spherical shell
+  (radius, thickness 0..1 [1 = solid ball], center). Mix at low
+  weight to guarantee baseline density over an entire sphere.
+- bubble_solid: classic bubble's inverse-stereographic mapping plus
+  real radial thickness and a `fill` probability of sampling the
+  sphere uniformly instead of following the incoming point.
+  thickness 0 + fill 0 = classic bubble.
+
+Both feed the histogram, depth buffer, and Phase 2 density volume, so
+occlusion, lighting, and repair all see a closed shell. Original
+variations (no JWF/Apo counterpart). Verified on the grand-julian
+holes scene: full sphere coverage where the bubble version showed
+see-through holes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs: note surface-sampler v1 shipped in solid-rendering plan
+…
+3ec3965
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 3 Stage A: volume-primary march compositor
+…
+dace9b9
+```
+Architectural inversion, per the original planning doc's "voxel volume
+as the destination architecture": the volume IS now the solid renderer
+when enabled, instead of a depth-buffer renderer consulting the volume
+by threshold rules (the source of every Phase 2 hole / repair-seam /
+banding artifact).
+
+- RGBA volume: the splat carries the sample color (histogram
+  fixed-point scheme, 4 u32/voxel); volume_mip's reduce derives a
+  half-res base-coat color field alongside avg/max.
+- volume_march: front-to-back emission/absorption through the CLOSED
+  density field. solid_strength is the sigma dial (1 = hard surface,
+  lower = translucent); densities opacity-clamped; jittered start;
+  returns weighted base color, coverage, surface depth, mean density.
+- Compositing: the march's base coat (voxels fill ~1000x faster than
+  pixels - complete, hole-free surface long before pixel convergence)
+  + the pixel's chaos-game data as a DETAIL layer via continuous
+  density confidence, gated to samples at or in front of the base
+  surface. Detail keeps 100% of the iteration budget - no more
+  fill-vs-texture tradeoff.
+- Lighting: gradient normals with emissive fallback where the field
+  is dust-like (per planning doc), volumetric AO, opacity-clamped
+  jittered shadow march. Base-coat tonemap alpha scales with the
+  ray's mean density, preserving the flame's log-density range.
+- Phase 2's repair machinery (integral leak march, ring anchoring,
+  sparse hand-over) is replaced by the march and removed; the volume-
+  off path reverts to clean Phase 1 depth-buffer shading + gap_fill.
+
+Visible consequence: ALL density in the view volume renders as solid
+lit geometry - structure the old path left as near-black dust becomes
+volumetric surface. Stage B: light-space shadow grids, brightness
+calibration, march quality tuning.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: fix crash disabling Density Volume (dummy buffer size)
+…
+d35b7a6
+```
+Binding 8 (base-coat color) is array<vec4<f32>> - a 16-byte element -
+but the volume-off dummy buffer was 4 bytes, failing bind validation
+on the first shade after the toggle. One 16-byte dummy now serves
+bindings 5/6/8.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 3: opacity gating, measured-bounds auto-fit, th…
+…
+a33f0d0
+```
+…in dust
+
+Field feedback on Stage A:
+
+- Volume splat now gated on should_plot: opacity-0 (hidden / solo'd)
+  transforms no longer leave ghost geometry in the volume.
+- Measured-bounds auto-fit: the VOLUME block maintains a running world
+  AABB of plotted samples (subsampled ordered-float atomicMax into an
+  8-word tail after the histogram's depth region). BoundsTracker reads
+  it back (async interactive / blocking for exports); volume_placement
+  fits the cube to the FLAME instead of guessing from zoom - including
+  SHRINKING below the view fit for small attractors (the reported
+  scene spans +/-0.2 vs a 0.75 view guess: 3x finer voxels). Placement
+  is frozen per accumulation run (splat coordinates depend on it);
+  interactively a one-time auto-refit fires when the first measurement
+  lands (young runs only); CLI/video exports run a 6-batch warmup +
+  blocking bounds read + reset before the real render.
+- Optically-thin dust: march opacity scales with smoothstep(0.05, 0.8)
+  of raw density - sparse surrounding structure renders as translucent
+  veil instead of solid voxel blocks (the "big ugly blocks around the
+  scene"). Solid shells are unaffected.
+- Volume now requires solid capture (solid_strength > 0 or shading
+  active) - the bounds tail lives in the solid histogram layout.
+- Histogram gains COPY_SRC for the 32-byte bounds readback.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 3: march sigma from mean field + strength-tied …
+…
+0fb7e62
+```
+…dust floor
+
+The march's opacity read the closed/MAX field - a max-pool that
+dilates every dense surface by the window radius, wrapping solids in a
+semi-transparent halo of inflated voxels (field-reported as ugly
+translucent blobs extending from the sphere). Sigma now comes from the
+MEAN field: the shell keeps its true thickness, and the 4-cubed
+smoothing already seals sub-voxel pinholes.
+
+The optically-thin-dust floor now rides solid_strength: at 1.0 the
+user asked for hard surfaces, so only near-solid density renders;
+lower values keep the volumetric haze character.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 3: march opacity on the RAW grid (kills surface…
+…
+4c29868
+```
+… halo)
+
+Field feedback (solid-grand-julia-protrusions): cloudy semi-transparent
+rims protruding from dense regions - worst above the bubble's
+hyper-dense pole cap. Root cause is inherent to marching a smoothed
+field: any smoothing spreads a hard density boundary outward by ~half
+the window, and above dense slabs even clamped bleed clears the dust
+floor. Tightening clamps shaves it; nothing removes it.
+
+- volume_march now reads sigma from the RAW splat grid (trilinear,
+  per-tap opacity clamp, new shade binding 9) at full grid resolution:
+  surface localization tightens 2x and window bleed disappears - the
+  remaining fringe is the one-voxel trilinear footprint. Steps are
+  raw-voxel sized (cap 352, early-out unchanged).
+- The smoothed fields keep the jobs they're right for: gradient
+  normals, AO taps, shadow march, base-coat color.
+- Also: pre-smoothing per-voxel density clamp in the reduce pass
+  (clamp_raw in MipParams, color sums scaled to match) - bounds what a
+  1000x-solid filament can bleed into the derived fields that DO stay
+  smoothed.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 3: iso-surface opacity transfer + view-tracking…
+…
+5715cfb
+```
+… fit
+
+Field measurement on solid-grand-julia-protrusions: at zoom 28 one raw
+voxel spans ~18 screen pixels - the reported ~15px protrusion IS the
+one-voxel trilinear ramp rendered as translucent glow.
+
+- Opacity transfer sharpens with solid_strength: at 1 it approaches an
+  iso-surface step at half-solid (smoothstep 0.45..0.58 of normalized
+  density), localizing hard surfaces SUB-voxel exactly like isosurface
+  raymarchers on coarse grids - the ramp no longer renders as a fringe.
+  Low strengths keep the soft volumetric transfer for haze.
+- Volume placement tracks the VIEWED region when zoomed in past the
+  flame's size (extent = min(bounds, view fit), centered on the view):
+  covering the whole flame at close zoom spent voxels on off-screen
+  structure and coarsened the visible surface.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Phase 3: volume is scaffolding, never visible geometry
+…
+26002bd
+```
+Field feedback settled the architecture question ("are we building a
+voxel engine?"): a practical grid cannot represent the sub-voxel
+filaments flames are made of - as visible geometry it inflates every
+dense filament into a voxel-thick lumpy tube (~18 screen px at close
+zoom), and the base coat painted those regardless of shading strength.
+
+The compositor now uses the march ONLY for what a coarse grid is right
+for: surface depth + coverage (occlusion authority), gradient normals,
+volumetric AO, and shadow marches. Every visible color is PIXEL data:
+- own accumulation when the pixel sits at or in front of the volume
+  surface;
+- ring fill from neighboring pixels anchored at the march depth for
+  holes and occluded leaks;
+- no pixel evidence nearby -> passthrough. Nothing is invented, so
+  voxel lumps/halos/blobs cannot appear, at any zoom.
+Also retires the base-coat brightness-alpha calibration problem
+(alpha is now always pixel-derived).
+
+Perf: run_shade_pass skips the entire march/normals/AO/shadow chain
+when inputs are unchanged and the temporal blend has settled
+(shade_dirty flag set by accumulate/lighting edits/resets + 16-frame
+settle) - lighting no longer costs anything once rendering completes.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+calibas
+and others
+added 26 commits
+July 13, 2026 07:46
+variations: volume-only fill (Feature::VolumeFill) + raw-grid shadows
+…
+e682357
+```
+bubble_solid's fill diluted image colors: fill samples plotted uniform
+sphere coverage that washed out the projected fractal's texture. Fill
+samples are now VOLUME-ONLY: they seal the shell's geometry in the
+density volume (occlusion / lighting / shadows) and never touch the
+image histogram. Measured: mean brightness identical at fill 0.3 vs 0.
+
+- Feature::VolumeFill: builder emits a per-thread `volume_fill_flag`
+  (var<private>, same pattern as point_w) when any active variation
+  lists it; main_template resets it per iteration, and at plot time
+  flagged samples route to the density volume only (or are dropped
+  entirely when no volume exists - 2D, volume off, sample-emit).
+- bubble_solid fill branches set the flag; tooltip updated.
+- Shadow march now reads the RAW grid (trilinear, opacity-clamped,
+  1.5-voxel steps): the smoothed field cast voxel-blurred shadows;
+  raw keeps shadow edges at full grid resolution. Pixel-fine shadow
+  detail beyond the grid = screen-space contact shadows, queued.
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+variations: sphere_volume side-emitter replaces bubble_solid; march cap
+…
+a4f623d
+```
+The fill model was wrong at the root: any scheme that DIVERTS a
+transform's samples to coverage starves the surface texture - fill 0.3
+dimmed it 30%, fill 1.0 made the transform invisible. What the user
+actually wants: plain bubble paints the surface untouched, and volume
+appears INSIDE as a bonus.
+
+- Feature::VolumeSideEmit: a variation can deposit an ADDITIONAL
+  volume-only point each iteration as a pure side effect - it
+  contributes zero to the variation sum, so position, colors and
+  sample budget are completely untouched. Builder emits per-thread
+  volume_side_point/flag; main_template splats it into the density
+  volume (post-affine applied, palette-colored, opacity-honored;
+  finals/post-symmetry not applied - documented).
+- sphere_volume ("Sphere Volume (Solid)"): emits a volumetrically
+  uniform ball/shell (radius, thickness [1 = solid ball], center;
+  defaults match bubble's unit sphere exactly). Pair with plain
+  bubble: bubble textures the surface, this seals the interior for
+  occlusion/lighting/shadows. Measured: image brightness identical
+  with it on vs off.
+- bubble_solid REMOVED (tail registry position - no stable IDs
+  shifted); its consume-a-sample fill was the disease.
+- Perf: volume_march now caps at the pixel's own surface depth
+  (+margin) - covered pixels no longer march the whole cube
+  (field-reported ~3x lighting+volume cost).
+
+292 tests pass; solid-volume baseline regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: sphere_volume seals the DEPTH buffer (splat-native p…
+…
+08841a7
+```
+…ivot 1)
+
+Theory review with field feedback concluded the density volume's
+load-bearing roles all have pixel-resolution splat-native replacements.
+Stage 1: sphere_volume's side-emitted points now write DEPTH-ONLY
+splats into the camera depth buffer (same encoding as the SOLID block),
+so the existing splat-time occlusion culls everything behind the
+emitted surface - no volume required, no voxels involved.
+
+Sealed-but-unsampled pixels render dark: an honest "solid object, not
+yet textured" that fills in with real texture as samples arrive
+(user-requested semantic). Verified: the sealed-pixel map forms a
+crisp disk exactly matching the sphere silhouette; image colors remain
+untouched (side emission still contributes zero to the sum). The
+volume deposit is kept when the volume is enabled.
+
+Stage 2 queued (doc): light-space shadow maps - splat-resolution
+shadows, the original fine-detail goal - after which the density
+volume becomes fully optional.
+
+292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: fix animation-export smearing (temporal history leak)
+…
+3760daf
+```
+The video export path loads a config per frame via load_config()
+WITHOUT calling reset() - and the shade pass's temporal-blend history
+was only dropped in reset(). Each exported frame therefore blended
+~85% of the PREVIOUS animation frame's shading: moving/rotating
+fractals left trails. In-app playback was immune because interactive
+motion runs in overwrite mode, where the blend is disabled.
+
+load_config() now drops the temporal history and forces a fresh shade
+- it is a full reset point in every caller (CLI, video export, preset
+load).
+
+292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering Stage 2: light-space shadow maps (splat-resolution sh…
+…
+b5268f2
+```
+…adows)
+
+Shadows now come from per-light ortho depth maps instead of voxel
+marches - resolving at SPLAT resolution, the branch's original
+"shadows show fine detail" goal that no affordable grid could deliver.
+
+- 4 maps (1024^2 each, 16 MB) ride the solid histogram's tail after
+  the bounds words - no new bindings. The main pass splats every
+  plotted sample AND every side-emitted point (sphere_volume geometry
+  casts real shadows) toward each enabled light via ordered-float
+  atomicMax (shadow_map_splat, core/header.wgsl). Runtime-gated by
+  shadow_count so Shadow Strength stays a cheap ShadingOnly update;
+  gpu_updates escalates when the capture requirement flips.
+- Shadow fit (center + bounding-sphere radius from measured bounds)
+  freezes per accumulation run alongside the volume placement.
+- shade.wgsl shadow_map_factor: 4-tap PCF, 2.5-texel bias. Applied in
+  BOTH shade paths: the volume-off (splat-native) path gains shadows
+  for the first time; the volume branch's raw-grid shadow march is
+  retired. The volume is now optional everywhere.
+- Fix uncovered en route: the shade pass's camera rows/pos were only
+  populated via VolumeShadeInput - zeros with the volume off, which
+  silently broke every world-space lookup. Camera data is now a
+  first-class run_region argument.
+
+Verified: volume-off shadows 0 vs 1 changes 4.7% of pixels with clean
+falloff, no acne/banding at defaults. 292 tests pass; baseline
+regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: shadow maps on the tiled export path
+…
+3c48642
+```
+The GPU-tiled (sample-emit) exporter now writes and reads light-space
+shadow maps, closing Stage 2's documented gap:
+
+- accumulate_samples.wgsl: the scatter splats each sample's shadow
+  contribution (sm_splat) - tiles partition the image, so running it
+  after the tile-bounds check records each sample exactly once, and
+  the priming dispatch contributes too (depth-only data). World
+  positions reconstruct from (pixel, depth) via the shade pass's
+  exact inversion; camera rows/view transform ride AccumulateParams.
+- Maps live in a dedicated 16 MB buffer (new scatter binding 3,
+  16-byte dummy when off), copied into shade_depth_buffer's tail
+  before shading so the shade pass reaches them through its existing
+  histogram binding (shadow_word_offset = W*H).
+- Fit is view-derived (this path has no bounds measurement); light
+  dirs computed at exporter construction with the same camera math as
+  the interactive path.
+- CPU-histogram fallback keeps no maps (v1) and logs a warning.
+
+Verified with --engine highres: shadows 0 vs 1 changes 4.6% of pixels
+(direct engine: 4.7%), and cross-engine divergence with shadows on is
+no larger than with shadows off - shadow maps add zero engine drift.
+292 tests pass (AccumulateParams size test updated to 240 B).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs: tiled-export shadow maps shipped (Stage 2 gap closed)
+…
+28cd145
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+export: OOM fix (GPU histogram VRAM budget) + feature-aware panel model
+…
+fc88603
+```
+Field report: a 19200x10800 in-app export with solid rendering +
+lighting hit a fatal wgpu OOM. The GPU-tiles histogram (3.9 GB with
+the solid depth word) was gated only by max_buffer_size, which modern
+drivers report far beyond physically-free VRAM - the allocation
+itself panicked.
+
+- HighResExporter caps the GPU-tiles histogram at a conservative
+  2.5 GB budget; larger exports take the existing CPU-histogram path
+  (slower but memory-bounded). Verified: a 12000x12000 solid export
+  (2.7 GB histogram) now routes to CPU accumulate and completes.
+  Fallback log names the effective cap.
+- Export panel's per-pixel cost model learns this branch's buffers:
+  solid adds the depth word + accumulator depth tracker (8 B/px),
+  lighting adds the shade-output and normal ping-pongs (64 B/px).
+  Shrinks the WASM cap appropriately (desktop keeps the flat 400 MP
+  cap - its big allocations are now genuinely bounded); the panel's
+  budget readout names the active cost factors.
+
+292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: rebuild shadow maps when lights move (stale-shadow fix)
+…
+19eb176
+```
+Field report: moving a light's azimuth/elevation in-app left shadows
+stale until a manual re-render. Two gaps:
+- Light moves are ShadingOnly (deliberately no-reset), but shadow maps
+  are BAKED from geometry + light direction — rotation invalidates the
+  map and only re-accumulation rebuilds it.
+- The existing shading escalation path called update_flame but never
+  reset accumulation, so even capture flips kept stale baked state.
+
+gpu_updates now escalates when a light's direction/enabled state
+changes while shadows are involved, and every shading escalation
+forces the full accumulation reset. Pure intensity scaling stays a
+no-reset edit (maps are direction-only). Drags of light angles under
+active shadows behave like view drags: overwrite-mode preview, then
+re-accumulate.
+
+Also: remaining-items queue recorded in the plan doc (post-DoF from
+depth assessment: moderate; depth-effects audit; volume disposition;
+AA/supersampling; optional point lights).
+
+292 tests pass.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: remove the density volume (splat-native pipeline final)
+…
+9490ceb
+```
+The voxel grid no longer served any feature at acceptable quality —
+occlusion is depth culling, shadows are light-space maps, AO/normals
+are screen-space — and Volume Extent was the biggest performance drag
+(fine sparse grids defeat the march early-out; ~352-step marches per
+pixel). Removed end to end:
+
+- shaders: VOLUME flag + splat block (main_template/header), the shade
+  march + voxel sampling helpers + bindings 5/6/8/9, volume_mip.wgsl,
+  ShadeParams volume fields (normals.wgsl pads follow)
+- host: density-volume buffer + binding, mip pipelines, vol_derived,
+  VolumeShadeInput, volume placement/trust/refit state
+- config/UI: VolumeEnabled/Extent/AutoFit/Closing paths, view-panel
+  volume section, i18n keys
+
+Kept and rewired:
+- attractor-bounds machinery now feeds the SHADOW-MAP auto-fit
+  (maybe_refit_shadow / refresh_shadow_placement_blocking); bounds
+  recording moved into the SOLID splat block so every solid flame
+  gets bounds-fit shadows (previously volume-gated)
+- sphere_volume / VolumeSideEmit unchanged (they splat depth + shadow
+  maps directly)
+
+Verified: volume-off solid scenes render byte-identical pre/post
+removal (5-scene A/B at 800x600); 291 unit tests pass. solid-volume
+regression scene repurposed as solid-shadows (own flame name — batch
+export names collide otherwise); stale solid baselines (pre-shadow-map
+era) regenerated.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+ui: move Solid Rendering & Lighting into its own dockable panel
+…
+37b37e7
+```
+New PanelType::SolidLighting (src/ui/solid_panel.rs) holding the
+occlusion controls (solid strength, surface thickness) and the full
+lighting stack (shading strength, material/SSAO/normal/gap-fill
+sliders, shadow strength, 4 per-light controls) — previously buried
+inside the View panel's Depth Effects collapsible. Opens from
+Window → Solid & Lighting; shows a 3D-only hint in 2D mode. The View
+panel's Depth Effects section keeps DoF/fog/depth-density/far-fade.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: fix infinite accumulation-reset loop (shadow auto-re…
+…
+3136e69
+```
+…fit)
+
+Field report: interactive renders with lighting reached ~250M
+iterations, reset to 0, and looped forever. Cause: the shadow-fit
+auto-refit used a symmetric "changed by >10%" test. Every reset clears
+the histogram's bounds tail, so the fresh run's first async readback
+returns the young attractor's PARTIAL AABB — which reads as a material
+SHRINK vs the frozen (converged) fit, triggering a refit reset, which
+clears the tail again, ad infinitum. The batches>64 young-run guard
+never engaged because each cycle restarted the count. (The volume-era
+auto-fit had the same defect — the old "patchy dance" strobing.)
+
+Fix: growth-only refits. A mid-run refit is only a correctness matter
+when the measured attractor extends beyond the frozen fit (clipped
+geometry casts no shadow) — tested as bounding-sphere containment with
+5% hysteresis. Shrinkage never refits: an oversized map just wastes
+resolution, and every natural reset already re-freezes from the latest
+bounds (free tightening). One exception: a fit frozen from a view
+GUESS (no measurement ever, e.g. right after load) tightens once when
+the first real measurement lands — tracked via frozen_fit_measured, so
+it cannot re-trigger.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: hard-cap the shadow auto-refit (one per run) + clamp
+…
+9edeeb2
+```
+tail outliers out of the fit
+
+The growth-only refit still re-triggered (field report: resets early in
+renders, less frequent than before). Root cause: chaos-game attractors
+are heavy-tailed — rare far excursions grow the raw min/max AABB for as
+long as the render runs, so "measured bounds exceed the frozen fit"
+keeps re-firing past any hysteresis, and each tail hit also inflates
+the fit (1024^2 texels spread over an outlier at 1e6 = no shadow
+resolution for the visible flame).
+
+Two changes:
+- shadow_placement clamps the measured AABB to +/-12 view-extents
+  around the view center before deriving the fit. Outliers can neither
+  move the fit nor grow it past the window, so growth refits terminate
+  by construction, and map resolution stays proportioned to the view.
+- fit_refit_done latch: the auto-refit may interrupt an accumulation
+  run AT MOST once, whatever the bounds do (cleared at every natural
+  reset/freeze point). Logs old -> new fit when it fires.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: post-process depth of field (gather blur from the de…
+…
+441baa8
+```
+…pth buffer)
+
+At-splat DoF stays compiled out under SOLID by design (position jitter
+corrupts the nearest-depth buffer and the occlusion test). This is the
+replacement: a gather-blur compute pass between shade and tonemap on
+the HDR pre-tonemap image (shade output when lighting is on, else the
+accumulator), reading the per-pixel nearest-depth region.
+
+- CoC matches the at-splat formula exactly (|camera_z - focus| *
+  strength * 0.1 * pixel scale) so the existing DoF sliders mean the
+  same thing in both pipelines; radius clamped at 24 px.
+- Scatter-as-gather with a jittered golden-angle spiral (32 taps):
+  a tap contributes when its own CoC disk reaches the center pixel
+  (foreground bleeds over silhouettes naturally), weighted 1/(coc^2+1)
+  for energy conservation; taps behind the center surface are
+  suppressed to their coverage ratio so background can't bleed over
+  sharp foreground edges. An 8-probe prescan widens the search radius
+  near blurred foreground so bleed is gathered by sharp neighbors.
+- All four channels blur together — alpha carries density for the
+  tonemap's log math; leaving it sharp would re-sharpen brightness.
+- Paths: interactive (dirty-tracked alongside the shade pass, skipped
+  when settled), CLI/FlameRenderer export, and the high-res exporter's
+  full-image path. The strip-tiled export path logs a warning and
+  skips (a gather can't cross strip boundaries without aprons — v2).
+- Export panel pixel budget: +16 B/px when DoF is active with solid.
+
+Verified: solid scene with strength 0.6 shows a sharp focus plane with
+progressive near/far blur; DoF-off renders byte-identical to pre-DoF.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix: batch/preset config loader skipped version migrations; restore
+…
+01ddc6b
+```
+solid baselines corrupted by 9490ceb
+
+scene::assets::load_config deserialized .fflame files with raw serde,
+bypassing FractalConfig::from_json's version migrations. For pre-v3
+files (which store render_mode & friends inside `flame`, lifted to the
+config top level in v3) the nested fields were silently IGNORED —
+every 3D scene loaded through the batch CLI exporter or desktop preset
+auto-load rendered in 2D: flat, unlit, no depth. Single-file exports
+(and the visual-regression harness, which renders per-file) migrate
+correctly, which is why the bug hid: it only bit directory loads.
+
+Consequence: the baseline "refresh" in 9490ceb was produced by the
+batch path, so it overwrote the six solid baselines with 2D renders of
+3D scenes (user-caught). Restored solid-hard/lit/lit-transparent/
+translucent from 9490ceb^ (verified against the current build:
+identical to solid-noise level). solid-shadows is a fresh verified
+render (its pre-9490ceb ancestor was the retired volume look).
+solid-depth-effects is regenerated: its dof_blur_strength=2.0 now
+renders through the new post-process DoF (previous commit) instead of
+compiling out — an intended behavior change.
+
+The loader now routes through FractalConfig::from_json so migrations
+always run.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid DoF v2: dense 2-D disk gather (quality blur; kills sand + streaks)
+…
+d97f34e
+```
+Field feedback across two rounds: v1 (32 jittered spiral taps) read as
+"blobs of sand" — Monte-Carlo undersampling of an up-to-3000 px^2
+kernel on flame-range data; a separable H+V rewrite still streaked,
+because a VARIABLE-radius blur is not separable and a flat 1-D kernel
+run twice has a square, axis-aligned point spread.
+
+Final architecture — four dispatches:
+1. CoC prepass: per-pixel CoC from bilaterally smoothed depth (the
+   raw nearest-depth field carries shell-scale Monte-Carlo noise that
+   otherwise modulates the blur disk pixel-to-pixel).
+2+3. Separable running-max dilate of the CoC field (max IS separable)
+   minus distance -> how far any light can reach INTO each pixel.
+4. Dense TRUE 2-D disk gather, loop bound per pixel from the dilated
+   field: sharp regions cost a few taps, only defocused areas pay the
+   full disk. Zero random sampling -> zero noise; isotropic disk ->
+   no axis streaks.
+
+Kernel matches the at-splat reference (uniform disk via
+sqrt(rand)*coc): flat profile with a soft rim, energy-normalized by
+disk area. Renormalization only when overcomplete — at coverage
+boundaries the spread light partially fills the pixel and alpha fades
+with it, so the log tonemap melts silhouettes like at-splat does.
+Background suppression uses raw depth with a distance-lenient margin
+(sloped surfaces don't suppress their own far taps). Max CoC 32 px.
+
+Verified against the same scene rendered through real at-splat DoF
+(solid off): matching blur character; sharp focus plane, progressive
+near/far blur, soft silhouettes.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+tests: regenerate solid-depth-effects baseline with the final DoF kernel
+…
+b228dec
+```
+Its dof_blur_strength=2.0 renders through the v2 disk gather now; the
+previous baseline captured the retired v1 spiral kernel.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+solid rendering: depth-effects audit fixes — post-lighting fog +
+…
+bba0d43
+```
+occlusion-only brightness renorm
+
+Audit findings (field-confirmed) and fixes:
+
+FOG under lighting: at-splat fog blended sample colors toward the
+background BEFORE accumulation, so the shade pass lit the fogged
+albedo — speculars and shadows drew ON TOP of the fog instead of
+fading into it (field-reported). Now, when solid shading is active,
+the shade pass owns fog: the host zeroes at-splat fog in GpuParams and
+shade.wgsl applies the identical formula AFTER the light loop, so
+distant lit surfaces (highlights, shadows and all) fade into the
+atmosphere. Fog without lighting keeps the at-splat path bit-exact
+(verified). Toggling lighting flips fog ownership, which only a reset
+can reconcile (at-splat fog is baked into accumulated samples) —
+gpu_updates escalates that boundary like the shadow-capture flip.
+
+BRIGHTNESS RENORM pollution: the renorm divided accumulated density by
+dispatched iterations, folding the ARTISTIC per-sample weights into
+the "culled" fraction — far-fade 3.0 shifted it -13% (tonemap then
+re-brightened the whole image against a fade dial), depth-density
+compensation 1.0 shifted it +6% the other way. It also silently folded
+off-screen sample loss, which non-solid renders never compensate. Now
+dedicated occlusion-survival counters (Σ occlusion-factor, Σ 1 over
+plotted samples; subsampled 4-bit fixed point) measure ONLY what the
+renorm exists to cancel:
+- interactive/direct: histogram bounds-tail words 6-7 (rides the
+  existing readback; saturation-guarded ~17B iters)
+- GPU-tiles export: 2 words appended to the shadow-maps buffer (or
+  the small stand-in when shadows are off)
+- CPU-histogram export: exact per-row sums into atomics
+Verified: fraction now identical (0.3055) across no-effect / fade 3.0
+/ comp 1.0 / fog configs on the FlameRenderer path, and
+fade-invariant on the highres engine (0.316 vs 0.314, subsample
+noise). The Sigma-alpha DensityStats reduction is retired from the
+renorm path. Solid baselines regenerated (front-surface brightness now
+matches non-solid semantics — fraction no longer includes off-screen
+loss).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+export: 2x supersampled antialiasing + firefly clamp (2D/3D/solid)
+…
+a5d9005
+```
+Render the ENTIRE existing pipeline at 2Wx2H — histogram, accumulate,
+occlusion, shadows, shade, DoF, density effects, tonemap — and
+box-filter the final TONEMAPPED image down to the requested size.
+Nothing in the pipeline knows supersampling exists, so every feature
+and both engines (FlameRenderer direct, HighResExporter tiled/CPU)
+work unchanged; the routing thresholds see the doubled dimensions and
+fall back exactly as for any big render.
+
+Downsampling after the tonemap is the load-bearing choice: the tonemap
+is logarithmic, so averaging histogram/accumulator densities instead
+(mean-then-log vs log-then-mean) shifts brightness density-dependently
+— the failure mode that sank the earlier attempt at this feature.
+
+The 2x2 downsample kernel doubles as the firefly clamp: each output
+pixel sees exactly its 4 source samples; any sample whose luminance
+towers over the quad's median (>4x + offset) is scaled down before
+averaging. Single lucky buckets die; legitimate bright detail spans
+the quad, keeps the median high, and passes untouched (unit-tested).
+Alpha is coverage and never clamped.
+
+Plumbing: CLI `export --supersample`; export panel "2x Antialiasing"
+checkbox (desktop; pixel budget /4, per-axis ceiling /2); both in-app
+paths (sync GPU + background HighRes) and both headless CLI engines;
+config.filter_radius doubles for the supersampled render (it's in
+histogram pixels — everything else is world/relative units).
+
+Documented trade-offs: ~4x render cost for full quality (4x buckets
+share the iterations, dim regions want more), DoF's 32 px CoC cap
+halves in FINAL pixels at 2x.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+export: fix 2x AA dimming — scale iterations x4 (log-tonemap Jensen b…
+…
+f7eb849
+```
+…ias)
+
+Field report: supersampled exports rendered noticeably dimmer. The
+tonemap CONSTANTS are scale-invariant (sample_density divides by pixel
+count, area cancels), but at 2x the same iterations spread over 4x
+buckets, each holding 1/4 the samples — and the log tonemap is
+concave, so log of a noisier density averages LOWER than log of a
+cleaner one (Jensen's inequality; worst in dim regions where buckets
+are noisiest, matching "very noticeable in certain cases").
+
+Fix: scale_config_for_supersample now quadruples max_iterations, so
+each 2x bucket holds statistically the same density as a 1x pixel —
+measured parity 44.34 vs 44.19 mean (was 41.21, -7%). This IS the
+advertised ~4x cost; the downsample now averages away noise instead of
+averaging away bias.
+
+Also: PNG metadata now embeds the ORIGINAL config (the scaled copy —
+2x filter radius, 4x iterations — only renders), so metadata
+round-trips reproduce the user's actual settings.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+ui: update 2x AA tooltip for the auto-scaled iterations
+…
+33e8707
+```
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+flame_xml: JWildfire solid rendering + lighting import/export
+…
+44a2ca9
+```
+(sld_render_* block)
+
+Attribute names taken verbatim from a JWildfire 8.50 solid flame
+(field-provided reference, output/JWF-rando-solid1.flame) — including
+JWF's own attribute typos, preserved faithfully so JWF parses our
+exports: `sld_render_ligtht_count`, `refl_mappping`, `light_diif_func`.
+Import also accepts the corrected `light_count` spelling in case a
+future JWF fixes it.
+
+Mapping (documented in solid_shading_from_sld; unknown semantics
+deliberately not guessed):
+- sld_render_enabled=1 → solid_strength 1, shading_strength 1 (JWF
+  solid is a hard lit surface)
+- material 0 ambient/diffuse/phong/phong_size → our ambient/diffuse/
+  specular/shininess (single global material; the per-xform material
+  index has no home here)
+- ao_intensity → ssao_strength when AO enabled (JWF's AO radius/
+  samples describe a different sampler — our screen-space radius keeps
+  its default)
+- lights 0..3: altitude/azimuth (degrees) → elevation/azimuth,
+  intensity + rgb direct; existence up to the count = enabled (JWF has
+  no per-light flag); extra lights dropped with a warning
+- shadows: any light with shadows=1 (and shadow_type != OFF) enables
+  our maps; strength = max per-light shadow_intensity (ours is global)
+
+Export writes the inverse block (enabled lights renumbered 0..n,
+shadowmap_size 1024, JWF defaults for unmodeled material attrs) only
+when solid/lighting is active. Round-trip unit test included; the
+reference flame imports and renders lit + occluded + shadowed.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs: solid-rendering queue complete (DoF, depth-effects fixes, 2x AA,
+…
+2c0e584
+```
+JWF solid XML)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+pre-merge review: remove dead DensityStats machinery + stale volume
+…
+6f84dd6
+```
+references; deferred-work TODO doc
+
+Vestige sweep results (solid-rendering branch, pre-merge):
+- DensityStats struct + impl + shaders/density_stats.wgsl: fully dead
+  since the brightness renorm switched to occlusion-survival counters —
+  deleted; density_stats.rs module doc rewritten around the surviving
+  BoundsTracker.
+- locales/en.yml tooltip_shadow_strength still told users shadows
+  "require the Density Volume" (removed feature) — rewritten for the
+  shadow-map reality.
+- docs/projects/solid-rendering.md: RETIRED banner on the Phase 3
+  volume-era design log (VolumeFill etc. read as current); the
+  brightness-renorm section now points at the occlusion-counter
+  mechanism with the old Sigma-alpha text kept as record.
+- flame_xml: the JWF sld_render_* block now writes on the TOP-LEVEL
+  flame only — subflame <flame> elements are IFS payloads and were
+  inheriting scene-level solid attrs.
+
+New docs/projects/solid-rendering-todo.md records everything
+deliberately deferred: textures/bump/multi-material, positional point
+lights, per-light shadow strength, DoF tiled-export + reset-free
+sliders + supersample CoC cap, WASM AA, shadow-map resolution setting,
+and the reviewed performance headroom (half-res interactive
+DoF/shade, bind-group caching, shadow-basis hoist, splat subsampling).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix: viewport-size exports silently ignored the 2x AA checkbox
+…
+d28c9ed
+```
+The viewport fast path reads back the live renderer's texture and
+cannot supersample; with 2x AA checked it now routes through the
+custom-size machinery at the fractal viewport's dimensions (which
+renders at 2x + downsamples like any other supersampled export).
+export_custom_size takes explicit output dims instead of always
+reading self.export_width/height.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+perf: two zero-risk shader micro-wins from the pre-merge review
+…
+b13da48
+```
+- main_template SOLID block: the nearest-depth decode ran even during
+  the priming batch, where its only consumer (the occlusion test) is
+  skipped — moved inside the non-priming branch.
+- dof.wgsl max_main: the center texel was loaded three times (loop i=0,
+  .g fetch, .r fetch) — folded to one load. Runs 65 taps/px twice per
+  DoF frame, so the redundant global loads were pure waste.
+
+Verified behavior-neutral: all six solid baselines match at raster-
+noise level (mean <= 0.01).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+calibas
+merged commit af33aa7
+into
+main
+Jul 17, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

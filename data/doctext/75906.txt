@@ -1,0 +1,478 @@
+# SDF-Test
+An experiment in Signed Distance Field (SDF) raytracing and raymarching
+
+![alt tag](https://raw.githubusercontent.com/zesterer/sdf-test/master/misc/screen.png "The current progress of the SDF raytracer")
+
+This is my attempt at making a high-quality semi-photorealistic raytracer in C++. I use GLM as a maths library, and SDL as a windowing library.
+
+It was hacked together in about 24 hours, so don't expect pretty code. But what it renders is quite pretty in my humble opinion.
+
+It's not quick, it's not optimised. It usually takes about 30 seconds to render an image. Sorry about that.
+
+### src/main.cpp
+```
+#include "stdio.h"
+#include "time.h"
+
+#include "window.h"
+#include "render.h"
+
+int main(int argc, char* argv[])
+{
+	bool quit = false;
+	SDL_Event e;
+
+	Window window;
+	Render render;
+
+	Sphere* sphere0 = new Sphere();
+	sphere0->position = glm::vec3(2.0, -0.1, -0.2);
+	sphere0->colour = glm::vec3(1.0, 0.2, 0.2);
+	sphere0->radius = 0.5;
+
+	sphere0->update();
+	render.shapes.push_back(sphere0);
+
+	Sphere* sphere1 = new Sphere();
+	sphere1->position = glm::vec3(0.8, -0.4, 0.0);
+	sphere1->colour = glm::vec3(1.0, 1.0, 0.2);
+	sphere1->reflection = 0.1f;
+	sphere1->radius = 0.2;
+
+	sphere1->update();
+	render.shapes.push_back(sphere1);
+
+	Sphere* sphere2 = new Sphere();
+	sphere2->position = glm::vec3(0.9, 0.4, 0.1);
+	sphere2->colour = glm::vec3(0.2, 1.0, 0.2);
+	sphere2->reflection = 0.02f;
+	sphere2->radius = 0.1;
+
+	sphere2->update();
+	render.shapes.push_back(sphere2);
+
+	Sphere* sphere3 = new Sphere();
+	sphere3->position = glm::vec3(4.5, -2.3, 0.5);
+	sphere3->colour = glm::vec3(1.0, 1.0, 1.0);
+	sphere3->reflection = 0.9f;
+	sphere3->radius = 0.7;
+
+	sphere3->update();
+	render.shapes.push_back(sphere3);
+
+	Floor* floor0 = new Floor();
+	floor0->position.z = -0.5;
+	floor0->reflection = 0.02f;
+	floor0->colour = glm::vec3(2.0, 2.0, 3.0);
+	floor0->orientation = glm::quat(glm::vec3(0.0, 0.0, 0.0));
+
+	floor0->update();
+	render.shapes.push_back(floor0);
+
+	TorusSquare* torus0 = new TorusSquare();
+	torus0->position = glm::vec3(1.1, 0.5, -0.3);
+	torus0->colour = glm::vec3(0.2, 0.2, 1.2);
+	torus0->properties = glm::vec2(0.13, 0.05);
+	torus0->orientation = glm::quat(glm::vec3(0.0, 0.0, -1.0));
+
+	torus0->update();
+	render.shapes.push_back(torus0);
+
+	SDL_Init(SDL_INIT_VIDEO);
+
+	window.create();
+
+	clock_t start = clock();
+
+	render.renderTo(&window);
+
+	printf("Rendered in %.2fs.\n", (double)(clock() - start) / CLOCKS_PER_SEC);
+
+	while (!quit)
+	{
+		//window.blank();
+
+		//Handle events on queue
+		while(SDL_PollEvent(&e) != 0)
+		{
+			//User requests quit
+			if(e.type == SDL_QUIT)
+			{
+				quit = true;
+			}
+		}
+
+		window.update();
+
+		SDL_Delay(20);
+	}
+
+	return 0;
+}
+```
+
+### src/render.cpp
+```
+#include "render.h"
+
+#include "string"
+
+#define FRAGMENT_SIZE 8
+
+void Render::put_pixel(SDL_Surface* screen, int x, int y, Pixel p)
+{
+	Uint32* p_screen = (Uint32*)screen->pixels;
+	p_screen += y*screen->w+x;
+	*p_screen = SDL_MapRGBA(screen->format, p.r, p.g, p.b, p.a);
+}
+
+void Render::renderTo(Window* window)
+{
+	this->updateMatrix();
+
+	SDL_LockSurface(window->screen_surface);
+
+	for (int x = 0; x < 640; x ++)
+	{
+		printf("Rendering column %d.\n", x);
+		for (int y = 0; y < 480; y ++)
+		{
+			glm::vec3 pos = glm::vec3(1.0f, x / 640.0f, y / 320.0f) * 2.0f - 1.0f;
+
+			glm::vec3 ray_vec = glm::vec3(glm::vec4(pos, 0.0f) * this->perspective);
+
+			glm::vec3 colour = this->marchRay(glm::normalize(ray_vec), this->camera_pos, 3);
+
+			colour /= colour + 1.0f;
+
+			glm::ivec3 rgb = colour * 255.0f;
+
+			this->put_pixel(window->screen_surface, x, y, {rgb.r, rgb.g, rgb.b, 255});
+		}
+	}
+
+	SDL_UnlockSurface(window->screen_surface);
+}
+
+
+glm::vec3 Render::marchRay(glm::vec3 ray_vec, glm::vec3 ray_pos, int reflect, bool shadow)
+{
+	//Decrement the reflection count
+	reflect --;
+
+	float ray_length = 0.0f;
+
+	while(ray_length < MAX_MARCH)
+	{
+		float min_dist = MAX_MARCH;
+
+		for (SDFShape* shape : this->shapes)
+		{
+			//float accelerator = SHAPE_RESOLUTION / glm::abs(shape->getDistance(ray_pos) - shape->getDistance(ray_pos + ray_vec * SHAPE_RESOLUTION));
+
+			//printf("Accelerator is %f.", accelerator);
+
+			min_dist = glm::max(SHAPE_RESOLUTION * 0.1f, glm::min(min_dist, shape->getDistance(ray_pos)));
+
+			if (min_dist < SHAPE_RESOLUTION && ray_length > 0.04f)
+			{
+				if (shadow)
+					return glm::vec3(0.0, 0.0, 0.0);
+
+				float light = this->getLightOf(shape, ray_pos, ray_vec);
+
+				glm::vec3 shape_col = shape->getColour(ray_pos);
+
+				if (reflect > 0 && shape->reflection > 0.0f)
+				{
+					glm::vec3 reflection = this->marchRay(glm::reflect(ray_vec, shape->getNormal(ray_pos)), ray_pos, reflect);
+
+					return glm::mix(glm::vec3(light), reflection, shape->reflection) * shape_col;
+				}
+
+				return light * shape_col;
+			}
+		}
+
+		ray_length += min_dist;
+		ray_pos += min_dist * ray_vec;
+	}
+
+	return glm::vec3(1.0, 1.0, 1.1);
+}
+
+float Render::getLightOf(SDFShape* shape, glm::vec3 ray_pos, glm::vec3 ray_vec)
+{
+	glm::vec3 light_vector = -this->light_vector;
+
+	float beam = this->marchRay(light_vector, ray_pos, 1, true).x;
+
+	float specular = glm::pow(0.005f + glm::max(0.0f, glm::dot(light_vector, glm::reflect(ray_vec, shape->getNormal(ray_pos)))), 30.0f) * 16.0f;
+
+	return glm::max(0.15f, beam * glm::max(0.0f, glm::dot(light_vector, shape->getNormal(ray_pos))) + beam * specular);
+}
+
+void Render::updateMatrix()
+{
+	this->perspective = glm::mat4(1.0);
+
+	this->perspective = glm::toMat4(glm::quat(glm::vec3(-0.05, -0.2, 0.3))) * this->perspective;
+
+	this->perspective = glm::perspective(0.9f, 1.0f, 0.001f, 100.0f) * this->perspective;
+
+	this->perspective_inverse = glm::inverse(this->perspective);
+}
+```
+
+### src/render.h
+```
+#ifndef RENDER_H
+#define RENDER_H
+
+#include "vector"
+
+#include "glm/glm.hpp"
+#include "glm/vec3.hpp"
+#include "glm/gtx/quaternion.hpp"
+#include "glm/mat4x4.hpp"
+#include "glm/gtc/matrix_transform.hpp"
+
+#include "window.h"
+#include "sdfshape.h"
+
+#define MAX_MARCH 50.0f
+
+struct Pixel
+{
+	unsigned char r, g, b, a;
+};
+
+struct Render
+{
+	std::vector<SDFShape*> shapes;
+
+	glm::mat4 perspective;
+	glm::mat4 perspective_inverse;
+
+	glm::vec3 camera_pos = glm::vec3(-0.4, 0.4, 0.2);
+
+	glm::vec3 light_vector = glm::normalize(glm::vec3(-1.5, 1.3, -1.8));
+
+	void renderTo(Window* window);
+	void put_pixel(SDL_Surface* screen, int x, int y, Pixel p);
+	glm::vec3 marchRay(glm::vec3 ray_vec, glm::vec3 ray_pos, int reflect, bool shadow = false);
+	float getLightOf(SDFShape* shape, glm::vec3 ray_pos, glm::vec3 ray_vec);
+	void updateMatrix();
+};
+
+#endif
+```
+
+### src/sdfshape.cpp
+```
+#include "sdfshape.h"
+
+float SDFShape::getDistance(glm::vec3 pos)
+{
+	return 100.0f;
+}
+
+glm::vec3 SDFShape::getNormal(glm::vec3 pos)
+{
+	glm::vec3 norm = glm::vec3(
+	    this->getDistance(pos + glm::vec3(NORMAL_RESOLUTION, 0.0f, 0.0f)) - this->getDistance(pos - glm::vec3(NORMAL_RESOLUTION, 0.0f, 0.0f)),
+	    this->getDistance(pos + glm::vec3(0.0f, NORMAL_RESOLUTION, 0.0f)) - this->getDistance(pos - glm::vec3(0.0f, NORMAL_RESOLUTION, 0.0f)),
+	    this->getDistance(pos + glm::vec3(0.0f, 0.0f, NORMAL_RESOLUTION)) - this->getDistance(pos - glm::vec3(0.0f, 0.0f, NORMAL_RESOLUTION)));
+	return glm::normalize(norm);
+}
+
+glm::vec3 SDFShape::getColour(glm::vec3 pos)
+{
+	return glm::vec3(1.0, 1.0, 1.0);
+}
+
+glm::vec3 SDFShape::getRelative(glm::vec3 pos)
+{
+	pos -= this->position;
+	pos = this->orientation_inverse * pos;
+
+	return pos;
+}
+
+void SDFShape::update()
+{
+	this->orientation_inverse = glm::inverse(this->orientation);
+}
+
+
+
+float Sphere::getDistance(glm::vec3 pos)
+{
+	pos = this->getRelative(pos);
+
+	return glm::length(pos) - this->radius;
+}
+
+glm::vec3 Sphere::getColour(glm::vec3 pos)
+{
+	return this->colour;
+}
+
+
+
+float Floor::getDistance(glm::vec3 pos)
+{
+	pos = this->getRelative(pos);
+
+	return pos.z;
+}
+
+glm::vec3 Floor::getColour(glm::vec3 pos)
+{
+	pos = this->getRelative(pos);
+
+	pos = glm::mod(pos, 2.0f);
+
+	if ((pos.x > 1.0f && pos.y < 1.0f) || (pos.x < 1.0f && pos.y > 1.0f))
+		return this->colour * 1.0f;
+	else
+		return this->colour * 0.4f;
+}
+
+
+
+float Torus::getDistance(glm::vec3 pos)
+{
+	pos = this->getRelative(pos);
+
+	glm::vec2 q = glm::vec2(glm::length(glm::vec2(pos.x, pos.z)) - this->properties.x, pos.y);
+	return glm::length(q) - this->properties.y;
+}
+
+glm::vec3 Torus::getColour(glm::vec3 pos)
+{
+	return this->colour;
+}
+
+
+
+float TorusSquare::getDistance(glm::vec3 pos)
+{
+	pos = this->getRelative(pos);
+
+	float a = glm::pow(glm::pow(pos.x, 6.0) + glm::pow(pos.z, 6.0), 1.0f / 6.0f);
+
+	glm::vec2 q = glm::vec2(a - this->properties.x, pos.y);
+
+	float b = glm::pow(glm::pow(q.x, 6.0) + glm::pow(q.y, 6.0), 1.0f / 6.0f);
+
+	return b - this->properties.y;
+}
+```
+
+### src/sdfshape.h
+```
+#ifndef SDFSHAPE_H
+#define SDFSHAPE_H
+
+#include "glm/glm.hpp"
+#include "glm/vec3.hpp"
+#include "glm/mat4x4.hpp"
+#include "glm/gtx/quaternion.hpp"
+
+#define SHAPE_RESOLUTION 0.001f
+#define NORMAL_RESOLUTION 0.001f
+
+struct SDFShape
+{
+	float reflection = 0.3f;
+
+	glm::vec3 position = glm::vec3(0.0, 0.0, 0.0);
+	glm::quat orientation = glm::quat(glm::vec3(0.0, 0.0, 0.0));
+	glm::quat orientation_inverse;
+
+	void update();
+	glm::vec3 getRelative(glm::vec3 pos);
+
+	virtual float getDistance(glm::vec3 pos);
+	virtual glm::vec3 getNormal(glm::vec3 pos);
+	virtual glm::vec3 getColour(glm::vec3 pos);
+};
+
+struct Sphere : public SDFShape
+{
+	float radius = 1.0;
+	glm::vec3 colour = glm::vec3(1.0, 0.1, 0.1);
+
+	virtual float getDistance(glm::vec3 pos) override;
+	virtual glm::vec3 getColour(glm::vec3 pos) override;
+};
+
+struct Floor : public SDFShape
+{
+	float height = 0.0;
+	glm::vec3 colour = glm::vec3(0.1, 0.1, 1.0);
+
+	virtual float getDistance(glm::vec3 pos) override;
+	virtual glm::vec3 getColour(glm::vec3 pos) override;
+};
+
+struct Torus : public SDFShape
+{
+	glm::vec2 properties = glm::vec2(1.0, 2.0);
+	glm::vec3 colour = glm::vec3(0.1, 0.1, 1.0);
+
+	virtual float getDistance(glm::vec3 pos) override;
+	virtual glm::vec3 getColour(glm::vec3 pos) override;
+};
+
+struct TorusSquare : public Torus
+{
+	virtual float getDistance(glm::vec3 pos) override;
+};
+
+#endif
+```
+
+### src/window.cpp
+```
+#include "window.h"
+#include "cstdio"
+
+void Window::create()
+{
+	this->window = SDL_CreateWindow("SDF Test", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, 640, 480, SDL_WINDOW_SHOWN);
+
+	this->screen_surface = SDL_GetWindowSurface(window);
+}
+
+void Window::blank()
+{
+	SDL_FillRect(screen_surface, NULL, SDL_MapRGB(screen_surface->format, 0xFF, 0xFF, 0xFF));
+}
+
+void Window::update()
+{
+	SDL_UpdateWindowSurface(window);
+}
+```
+
+### src/window.h
+```
+#ifndef WINDOW_H
+#define WINDOW_H
+
+#include "SDL.h"
+
+struct Window
+{
+	SDL_Window* window = NULL;
+	SDL_Surface* screen_surface = NULL;
+
+	void create();
+	void blank();
+	void update();
+};
+
+#endif
+```

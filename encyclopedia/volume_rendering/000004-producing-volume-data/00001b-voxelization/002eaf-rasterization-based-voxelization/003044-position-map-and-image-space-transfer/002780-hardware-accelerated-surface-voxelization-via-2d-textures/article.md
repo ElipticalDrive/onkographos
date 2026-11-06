@@ -3,125 +3,159 @@
 Also called: Image-space voxelization
 
 ## Overview
-This method converts a triangle mesh into a voxelized representation by rasterizing the model's surfaces directly into 2D textures, transferring intersection computation from geometric space to image space [S1, unofficial]. It enables real-time collision detection and volumetric rendering by avoiding the performance bottlenecks of slicing-based or Layered Depth Image (LDI) approaches [S1, unofficial]. Unlike slicing-based voxelization which rasterizes the model $N$ times (where $N$ is the volume resolution along the z-axis), this method rasterizes the scene approximately once, making its performance insensitive to scene complexity and dependent entirely on volume resolution [S1, unofficial].
+This method transfers intersection computation from geometric space to image space by rasterizing model surfaces into 2D textures, enabling collision detection and volumetric rendering at real-time frame rates [S1, unofficial]. It differs from slicing-based voxelization by rasterizing the model approximately once rather than $N$ times (where $N$ is the volume resolution), making performance insensitive to scene complexity [S1, unofficial]. Unlike Layered Depth Image (LDI) extraction, it is view-independent and avoids CPU-side sorting of depth lists [S1, unofficial].
 
 ## How it works
-The method maps 3D voxel coordinates to 2D texture coordinates, allowing the GPU to fill voxel data during standard rasterization.
+**Inputs and Outputs:**
+*   **Input:** Polygonal mesh (vertices, normals, triangles) or implicit surface definition; volume resolution $D$; bounding box parameters ($p_{min}, p_{max}$).
+*   **Output:** 2D texture(s) representing the voxelized volume data in image space.
 
-**Inputs and Outputs**
-*   **Input:** A triangle mesh (vertices, normals, indices) and a target volume resolution $R$ (e.g., $256^3$).
-*   **Output:** A set of 2D textures (worksheets) representing the voxelized volume. Each texel corresponds to a voxel or a column of voxels, depending on the encoding scheme.
+**Data Structures:**
+The volume is stored in 2D textures (worksheets). The bit-depth per voxel depends on the resolution and memory constraints [S1, unofficial]:
+*   **512^3 resolution:** 1 bit per voxel. Stored in one worksheet.
+*   **256^3 resolution:** 8 bits per voxel.
+*   **128^3 resolution:** 16 bits per voxel (used to encode vertex normals).
+*   **64^3 resolution:** 8 bits per voxel.
 
-**Data Structures**
-The volume is stored in "worksheets" (2D textures). The layout depends on the resolution and bit-depth:
-*   **Low Resolution (e.g., $64^3$):** 8-bit depth. Memory usage is low (e.g., 256KB for $64^3$ with 8-bit depth) [S1, unofficial].
-*   **Standard Resolution (e.g., $256^3$):** 8-bit depth is recommended as a good choice under typical hardware conditions (e.g., ATI Radeon 9800 Pro era) [S1, unofficial]. Memory usage is approximately 16MB [S1, unofficial].
-*   **High Resolution (e.g., $512^3$):** 1-bit depth. A voxel is represented using one bit to store the volume in one worksheet [S1, unofficial]. Memory usage is approximately 16MB [S1, unofficial].
-*   **Normal Encoding:** For resolutions like $128^3$, vertex normals may be encoded using 16 bits per vertex to support normal-based classification [S1, unofficial].
+**Steps:**
+1.  **Rasterization:** Rasterize the model surfaces into 2D textures. This step traverses the model approximately once. The performance depends mainly on the number of triangles [S1, unofficial].
+2.  **Texelization and Synthesis:** Convert rasterized fragments into voxel data. This is an image-space operation dominated by volume resolution and bit-depth [S1, unofficial].
+3.  **Collision Query:** Perform collision detection by querying the generated 2D textures in image space [S1, unofficial].
+4.  **Rendering:** Render the volume data and voxelized slices orderly in 3D space to display complex deformable geometric models semi-transparently [S1, unofficial].
 
-**Algorithm Steps**
-1.  **Setup:** Initialize 2D textures (worksheets) with dimensions corresponding to the volume resolution. For a resolution $R$, the texture dimensions are typically $R \times R$ or derived based on the projection axis.
-2.  **Rasterization:** Render the triangle mesh to the 2D textures.
-    *   The geometry is projected onto the 2D plane.
-    *   Fragment shaders write voxel data (e.g., occupancy, color, or normal) into the texels.
-    *   This step is performed approximately once for the entire model, regardless of triangle count [S1, unofficial].
-3.  **Texelization/Synthesis:** Process the 2D textures to resolve the 3D voxel grid. This may involve bit-operations or byte-operations depending on the bit-depth [S1, unofficial].
-4.  **Collision/Rendering:** Use the generated 2D textures for collision queries in image space or render the volume data and voxelized slices in 3D space [S1, unofficial].
+**Formulas:**
+The mapping from world position $p$ to voxel index $i$ follows the standard formula defined in the parent article [G]:
+$$
+i = D \times \frac{p - p_{min}}{p_{max} - p_{min}}
+$$
+For implicit surfaces, the surface is defined by $f(x,y,z) = 0$. The example given is:
+$$
+x^4 - 5x^2 + y^4 - 5y^2 + z^4 - 5z^2 + 11.8 = 0
+$$
+Both surface and solid voxelization for this implicit surface take 25ms at 256^3 resolution [S1, unofficial].
 
-**Pseudocode**
-The following pseudocode illustrates the core rasterization and storage logic. Note that specific GPU shader implementations (e.g., HLSL/GLSL) are abstracted into standard operations.
+**Parameters:**
+*   **Volume Resolution:** 256^3 is identified as a good choice under current hardware conditions (ATI Radeon 9800 Pro) [S1, unofficial].
+*   **Bit-depth:** 8 bits per voxel for the standard 256^3 configuration [S1, unofficial].
+*   **Hardware:** Implemented using Vertex/Pixel Shader 2.0 of Direct3D 9.0b [S1, unofficial].
 
+**Pitfalls:**
+*   **Aliasing:** Aliasing effects exist in solid voxelization for closed polygonal models, appearing as prolonged lines where some voxels at the rasterization stage are missing [S1, unofficial].
+*   **Bit-operations Cost:** Bit-operations are much more expensive than byte-operations. Storing a 512^3 volume in one worksheet using 1-bit depth results in significantly higher processing times compared to 8-bit depth at lower resolutions [S1, unofficial].
+*   **Memory Constraints:** If multivalued voxelization is required for high resolution, multiple worksheets are needed given sufficient video memory. If floating-point texture blending is supported, fewer worksheets are needed [S1, unofficial].
+
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def hardware_accelerated_voxelization(mesh, resolution):
+# Hardware-accelerated surface voxelization via 2D textures
+# Note: This is a high-level representation of the GPU pipeline described in [S1, unofficial].
+# Actual implementation relies on Direct3D 9.0b Vertex/Pixel Shaders.
+
+def hardware_accelerated_voxelization(mesh, volume_resolution, bounding_box):
     """
-    Voxelize a mesh into 2D textures.
+    Voxelize a mesh into 2D textures using hardware rasterization.
     
     Args:
-        mesh: Triangle mesh with vertices and normals.
-        resolution: Integer, the volume resolution R (e.g., 256).
+        mesh: List of triangles (vertices, normals).
+        volume_resolution: Integer D (e.g., 256).
+        bounding_box: Tuple (p_min, p_max).
         
     Returns:
-        worksheets: List of 2D textures representing the voxel volume.
+        2D textures representing the voxelized volume.
     """
-    # Determine bit-depth based on resolution and hardware constraints
-    # [S1, unofficial] 256^3 with 8-bit is standard; 512^3 with 1-bit is used for high res
-    if resolution == 512:
-        bit_depth = 1
-    elif resolution == 256:
-        bit_depth = 8
-    elif resolution == 128:
-        bit_depth = 16 # For normal encoding
-    else:
-        bit_depth = 8 # Default for lower resolutions like 64^3
-        
-    # Initialize worksheets (2D textures)
-    # For 512^3, one worksheet stores 1 bit per voxel
-    # For 256^3, one worksheet stores 8 bits per voxel (1 byte)
-    worksheets = initialize_worksheets(resolution, bit_depth)
+    # 1. Setup 2D texture(s) based on resolution and bit-depth
+    # For 256^3, use 8-bit depth. For 512^3, use 1-bit depth.
+    bit_depth = get_bit_depth(volume_resolution)
+    worksheets = allocate_worksheets(volume_resolution, bit_depth)
     
-    # Rasterize the mesh into the 2D textures
-    # This is done once, unlike slicing-based methods which do it N times
-    for triangle in mesh.triangles:
-        # Project triangle vertices to 2D texture coordinates
-        # The specific projection depends on the axis (e.g., Z-projection for XY textures)
-        tex_coords = project_to_texture(triangle.vertices, resolution)
+    # 2. Rasterize model surfaces into 2D textures
+    # This step traverses the model approximately once.
+    # Performance depends on triangle count.
+    for triangle in mesh:
+        # Project triangle vertices to screen space
+        screen_vertices = project_to_screen(triangle.vertices, camera_matrix)
         
-        # Rasterize the triangle
-        # Fragment shader writes to the worksheet
-        rasterize_triangle(tex_coords, triangle, worksheets, bit_depth)
+        # Rasterize triangle to coverage mask on 2D texture
+        # The GPU handles the rasterization via Pixel Shader 2.0
+        rasterize_triangle_to_texture(screen_vertices, worksheets)
         
-    # Synthesize the final voxel data from the 2D textures
-    # This step may involve bit-operations for 1-bit depth or byte-operations for 8-bit
-    voxel_volume = synthesize_volumes(worksheets, resolution, bit_depth)
+    # 3. Texelization and Synthesis
+    # Convert rasterized fragments to voxel data.
+    # This is an image-space operation dominated by volume resolution.
+    voxel_data = synthesize_voxel_data(worksheets, volume_resolution)
     
-    return voxel_volume
+    return voxel_data
 
-def rasterize_triangle(tex_coords, triangle, worksheets, bit_depth):
+def get_bit_depth(resolution):
     """
-    Rasterize a single triangle into the worksheets.
+    Determine bit-depth based on resolution and hardware constraints.
+    Based on [S1, unofficial]:
+    - 512^3: 1 bit
+    - 256^3: 8 bits
+    - 128^3: 16 bits (for normal encoding)
+    - 64^3: 8 bits
     """
-    # Determine which voxels are covered by the triangle
-    # This is handled by the GPU's rasterizer
-    covered_texels = get_covered_texels(tex_coords)
-    
-    for texel in covered_texels:
-        # Write voxel data to the worksheet
-        # For 1-bit depth: set bit to 1 if occupied
-        # For 8-bit depth: write color/normal value
-        if bit_depth == 1:
-            worksheets[texel.x][texel.y] |= (1 << texel.z_bit)
-        else:
-            worksheets[texel.x][texel.y] = write_value(triangle, texel)
+    if resolution == 512:
+        return 1
+    elif resolution == 256:
+        return 8
+    elif resolution == 128:
+        return 16
+    elif resolution == 64:
+        return 8
+    else:
+        # Not given in the sources.
+        return 8
+
+def project_to_screen(vertices, camera_matrix):
+    """
+    Project 3D vertices to 2D screen coordinates.
+    Standard graphics operation.
+    """
+    # Implementation depends on specific graphics API (Direct3D 9.0b)
+    # [G] Standard perspective projection and viewport transformation.
+    pass
+
+def rasterize_triangle_to_texture(screen_vertices, worksheets):
+    """
+    Rasterize a triangle into the 2D texture worksheets.
+    The GPU handles the actual rasterization.
+    """
+    # [G] This step is handled by the graphics hardware's rasterizer.
+    # The fragment shader writes to the texture based on coverage.
+    pass
+
+def synthesize_voxel_data(worksheets, volume_resolution):
+    """
+    Synthesize final voxel data from worksheets.
+    """
+    # [G] Combine worksheets if necessary.
+    # For 256^3 with 8-bit depth, the data is directly usable.
+    pass
 ```
 
-**Edge Cases and Pitfalls**
-*   **Aliasing:** Aliasing effects exist in solid voxelization for closed polygonal models, appearing as prolonged lines where some voxels at the rasterization stage are missing [S1, unofficial]. This highlights the gap between software-based and hardware-accelerated algorithms.
-*   **Bit-Operation Cost:** Bit-operations are more expensive than byte-operations. Using 1-bit depth for high resolutions ($512^3$) can increase voxelization time significantly compared to 8-bit depth at lower resolutions [S1, unofficial].
-*   **Hardware Support:** The method relies on support for floating-point texture blending or sufficient video memory for multiple worksheets if multivalued voxelization is required at high resolutions [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** The rasterization phase is insensitive to scene complexity (triangle count) and depends primarily on the volume resolution [S1, unofficial]. The total voxelization time consists of rasterization, texelization, and synthesis [S1, unofficial].
-*   **Memory Complexity:** Memory usage is determined by the volume resolution and bit-depth. For example, $256^3$ with 8-bit depth uses ~16MB, while $512^3$ with 1-bit depth also uses ~16MB [S1, unofficial].
-*   **Performance:**
-    *   On a PC with a 2.4 GHz Pentium IV CPU, 2GB RAM, and ATI Radeon 9800 Pro:
-        *   Blade model (1,765,388 triangles) at $256^3$ resolution: 75ms rasterization [S1, unofficial].
-        *   Wagner model (60,246 triangles) at $512^3$ resolution (1-bit): 500ms [S1, unofficial].
-        *   Wagner model at $256^3$ resolution (8-bit): 30ms [S1, unofficial].
-        *   Wagner model at $128^3$ resolution (16-bit): 24ms [S1, unofficial].
-        *   Wagner model at $64^3$ resolution (8-bit): 21ms [S1, unofficial].
-    *   Visualization of the voxelized volume costs about 8ms on average, depending mainly on volume resolution [S1, unofficial].
-    *   Implicit surface voxelization ($x^4-5x^2+y^4-5y^2+z^4-5z^2+11.8=0$) takes 25ms at $256^3$ resolution [S1, unofficial].
-    *   Hybrid volume rendering (transparent cerebra model + MRI head volume $128^3$) achieves about 10 fps [S1, unofficial].
-*   **Comparison with Siblings:**
-    *   **Vs. Slicing-based Voxelization:** Slicing-based methods rasterize the model $N$ times (where $N$ is the volume resolution along z). For the Blade model at $256^3$, slicing-based voxelization costs about 5 seconds ($20.8ms \times 256$), whereas this method takes 75ms [S1, unofficial].
-    *   **Vs. LDI Extraction:** LDI is view-dependent, requires downloading depth images from video memory, and resorting depth lists pixel-by-pixel on the CPU. This method is view-independent and avoids CPU-side sorting [S1, unofficial].
-*   **Strengths:** Real-time performance, view-independent, simple and robust implementation.
-*   **Limitations:** Aliasing artifacts in solid voxelization, bit-operation overhead for high resolutions.
+*   **Time Complexity:** The algorithm traverses the model approximately once, making performance insensitive to scene complexity [S1, unofficial]. Rasterization timings depend mainly on the number of triangles [S1, unofficial]. Texelization and synthesis are image-space operations dominated by volume resolution and bit-depth [S1, unofficial].
+*   **Memory Complexity:** Depends on volume resolution and bit-depth. For 512^3 with 1-bit depth, memory is 16MB [S1, unofficial]. For 256^3 with 8-bit depth, memory is 16MB [S1, unofficial]. For 128^3 with 16-bit depth, memory is 4MB [S1, unofficial]. For 64^3 with 8-bit depth, memory is 256KB [S1, unofficial].
+*   **Measured Performance:**
+    *   **Hardware:** PC with 2.4 GHz Pentium IV CPU, 2GB RAM, ATI Radeon 9800 Pro (256MB RAM) [S1, unofficial].
+    *   **Blade Model (1,765,388 triangles):** 75ms for rasterization at 256^3 resolution [S1, unofficial]. Slicing-based voxelization for the same model at 256^3 costs about 5 seconds (20.8ms x 256) [S1, unofficial].
+    *   **Wagner Model (60,246 triangles):**
+        *   512^3, 1-bit: 500ms [S1, unofficial].
+        *   256^3, 8-bit: 30ms [S1, unofficial].
+        *   128^3, 16-bit: 24ms [S1, unofficial].
+        *   64^3, 8-bit: 21ms [S1, unofficial].
+    *   **Implicit Surface:** 25ms at 256^3 resolution [S1, unofficial].
+    *   **Visualization:** Costs about 8ms on average, depending mainly on volume resolution [S1, unofficial].
+    *   **Hybrid Rendering:** Transparent cerebra model (36,758 triangles) with MRI head volume (128^3) achieves about 10 fps [S1, unofficial].
+*   **Strengths:** Real-time frame rates for collision detection and volumetric rendering; insensitive to scene complexity; simple, robust, and easy-to-implement [S1, unofficial].
+*   **Limitations:** Aliasing effects in solid voxelization for closed polygonal models; bit-operations are expensive; view-independent but requires sufficient video memory for high-resolution multivalued voxelization [S1, unofficial].
+*   **When to Use:** Surgical planning, intra-operation navigation, and radiation therapy [S1, unofficial]. When real-time collision detection and volumetric rendering are required for complex models [S1, unofficial].
+*   **When Not to Use:** When high-resolution multivalued voxelization is required and video memory is insufficient [S1, unofficial]. When aliasing artifacts are unacceptable without post-processing [S1, unofficial].
 
 ## Background
-This technique was presented in "Real-time Voxelization for Complex Models" [S1, unofficial]. It was implemented using Vertex/Pixel Shader 2.0 of Direct3D 9.0b [S1, unofficial]. The method is particularly useful in surgical planning, intra-operation navigation, and radiation therapy [S1, unofficial]. It addresses the need for fast voxelization in interactive graphics applications by leveraging graphics hardware acceleration.
+This technique was presented in "Real-time Voxelization for Complex Models" [S1, unofficial]. It was implemented using Vertex/Pixel Shader 2.0 of Direct3D 9.0b [S1, unofficial]. The method addresses the bottleneck of traditional slicing-based voxelization, which rasterizes the model $N$ times, and LDI extraction, which is view-dependent and requires CPU-side sorting [S1, unofficial]. It is particularly useful in fields requiring fast or real-time voxelization for interactive graphics applications [S1, unofficial].
 
 ## Sources
 [S1] Real-time Voxelization for Complex Models, https://www.researchgate.net/publication/252533918_Real-time_Voxelization_for_Complex_Models, fetched 2026-11-03 (unofficial)

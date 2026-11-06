@@ -6,9 +6,9 @@ Also called: BNB
 Bracketed Newton Bisection is a root-finding algorithm that combines bisection and Newton’s methods with a preliminary step that splits the polynomial into monotonic pieces [S1]. It finds all possible real roots of high-degree polynomials, ensuring no solutions are missed by guaranteeing at most one root per interval [S1]. Unlike simple numerical solvers that may converge to a single root or fail on high-degree cases, this method systematically partitions the domain using derivative roots to isolate and solve each root independently [S1].
 
 ## How it works
-**Inputs:** A polynomial $P(x)$ of degree $n$, its first derivative $P'(x)$, a list of higher-order derivative functions $P^{(k)}(x)$ for $k=2 \dots n-2$, and a search domain $[x_{min}, x_{max}]$.
-**Outputs:** A list of all real roots of $P(x)$ within the domain.
-**Data Structures:** A list of interval boundaries (initially $[x_{min}, x_{max}]$) and a list to accumulate found roots.
+**Inputs:** A polynomial $P(x)$ of degree $n$, its first derivative $P'(x)$, a list of higher-order derivative functions $P^{(k)}(x)$ for $k=2 \dots n-2$, and a search domain $[x_{min}, x_{max}]$ [S1].
+**Outputs:** A list of all real roots of $P(x)$ within the domain [S1].
+**Data Structures:** A list of interval boundaries (initially $[x_{min}, x_{max}]$) and a list to accumulate found roots [S1].
 
 **Steps:**
 1. **Base Interval Resolution:** Start with the $(n-2)$-th derivative $P^{(n-2)}$, which is a quadratic polynomial (degree 2) [S1]. Solve $P^{(n-2)}(x) = 0$ algebraically to find its real roots within the domain [S1]. These roots become the initial interval boundaries for the next level [S1]. If $P^{(n-2)}$ has no real roots, the domain remains a single interval $[x_{min}, x_{max}]$ [S1].
@@ -16,15 +16,15 @@ Bracketed Newton Bisection is a root-finding algorithm that combines bisection a
 3. **Final Root Finding:** After reaching $k=0$, the boundaries define monotonic segments of $P(x)$ [S1]. For each segment $[a, b]$ where $P(a) \cdot P(b) < 0$, apply the Bracketed Newton Bisection method to find the single root of $P(x)$ [S1].
 
 **Root Finding Formula (Mixture of Bisection and Newton):** For a monotonic interval $[x_{min}, x_{max}]$ with $P(x_{min}) \cdot P(x_{max}) < 0$:
-1. Initialize $x = (x_{min} + x_{max}) / 2$.
+1. Initialize $x = (x_{min} + x_{max}) / 2$ [G].
 2. Iterate until convergence:
    - Compute $f = P(x)$ and $f' = P'(x)$.
-   - Compute Newton step: $x_{new} = x - f / f'$.
+   - Compute Newton step: $x_{new} = x - f / f'$ [G].
    - *Bracketing Guard:* If $x_{new} \notin [x_{min}, x_{max}]$ or the Newton step does not reduce $|f|$ sufficiently, fall back to bisection: $x_{new} = (x_{min} + x_{max}) / 2$ [S1].
    - Update interval: If $P(x_{new}) \cdot P(x_{min}) < 0$, set $x_{max} = x_{new}$; else set $x_{min} = x_{new}$ [S1].
    - Set $x = x_{new}$.
 
-**Parameters:** Convergence tolerance and maximum iterations are not given in the sources. Standard numerical defaults (e.g., $10^{-7}$ tolerance, 100 iterations) are typically used [G].
+**Parameters:** Convergence tolerance and maximum iterations are not given in the sources. [G]
 
 **Edge Cases and Pitfalls:** The method can find at most 9 monotonic intervals for a degree-9 polynomial (e.g., tricubic SDFs) [S1]. BNB does not offer an early skip strategy, unlike Affine Arithmetic tests [S1]. High-degree polynomials require evaluating multiple derivative chains, increasing computational cost [S1].
 
@@ -42,15 +42,30 @@ def bracketed_newton_bisection(P, P_prime, derivs, domain, degree):
     degree: integer n
     """
     x_min, x_max = domain
-    # Step 1: Base case - solve quadratic P^(n-2) = 0 algebraically
-    # derivs[n-2] is quadratic: a*x^2 + b*x + c
-    # Extract coefficients (assumed available or computed via finite differences if needed)
-    # For self-contained pseudocode, we assume coefficient access or a helper.
-    # We implement a standard quadratic solver here.
-    a, b, c = get_quadratic_coefficients(derivs[degree - 2])
-    quad_roots = solve_quadratic_roots(a, b, c, x_min, x_max)
     
-    # Initialize boundaries with domain edges and quadratic roots
+    # Step 1: Base case - solve quadratic P^(n-2) = 0 algebraically
+    # Extract coefficients a, b, c for f(x) = ax^2 + bx + c from derivs[degree-2]
+    c = derivs[degree - 2](0)
+    b = (derivs[degree - 2](1) - derivs[degree - 2](-1)) / 2.0
+    a = (derivs[degree - 2](1) + derivs[degree - 2](-1)) / 2.0 - c
+    
+    quad_roots = []
+    if abs(a) < 1e-12:
+        if abs(b) > 1e-12:
+            root = -c / b
+            if x_min <= root <= x_max:
+                quad_roots.append(root)
+    else:
+        disc = b * b - 4 * a * c
+        if disc >= 0:
+            sqrt_d = disc ** 0.5
+            r1 = (-b + sqrt_d) / (2 * a)
+            r2 = (-b - sqrt_d) / (2 * a)
+            if x_min <= r1 <= x_max:
+                quad_roots.append(r1)
+            if x_min <= r2 <= x_max:
+                quad_roots.append(r2)
+    
     boundaries = sorted(list(set([x_min, x_max] + quad_roots)))
     
     # Step 2: Bottom-up refinement from k = n-3 down to 1
@@ -60,55 +75,27 @@ def bracketed_newton_bisection(P, P_prime, derivs, domain, degree):
         f_k_plus_1 = derivs[k + 1]
         
         for i in range(len(boundaries) - 1):
-            a, b = boundaries[i], boundaries[i + 1]
-            fa, fb = f_k(a), f_k(b)
+            a_int, b_int = boundaries[i], boundaries[i + 1]
+            fa, fb = f_k(a_int), f_k(b_int)
             
             if fa * fb < 0:
-                # Root of P^(k) exists in [a, b]
-                root = find_root_bnb(f_k, f_k_plus_1, a, b)
+                root = find_root_bnb(f_k, f_k_plus_1, a_int, b_int)
                 new_boundaries.append(root)
             else:
-                # No sign change; boundaries persist for P^(k-1)
-                new_boundaries.append(a)
-                new_boundaries.append(b)
+                new_boundaries.append(a_int)
+                new_boundaries.append(b_int)
         
         boundaries = sorted(list(set(new_boundaries)))
     
     # Step 3: Final root finding for P^(0) = P
     roots = []
     for i in range(len(boundaries) - 1):
-        a, b = boundaries[i], boundaries[i + 1]
-        if P(a) * P(b) < 0:
-            root = find_root_bnb(P, P_prime, a, b)
+        a_int, b_int = boundaries[i], boundaries[i + 1]
+        if P(a_int) * P(b_int) < 0:
+            root = find_root_bnb(P, P_prime, a_int, b_int)
             roots.append(root)
             
     return roots
-
-def get_quadratic_coefficients(f):
-    """Returns (a, b, c) for f(x) = ax^2 + bx + c."""
-    # Standard algebraic extraction; implementation depends on polynomial representation.
-    # For pseudocode completeness, we assume direct access or a standard routine.
-    raise NotImplementedError("Coefficient extraction depends on polynomial storage format.")
-
-def solve_quadratic_roots(a, b, c, x_min, x_max):
-    """Solves ax^2 + bx + c = 0 algebraically and filters roots within [x_min, x_max]."""
-    roots = []
-    if a == 0:
-        # Linear case bx + c = 0
-        if b != 0:
-            root = -c / b
-            if x_min <= root <= x_max:
-                roots.append(root)
-        return roots
-    discriminant = b * b - 4 * a * c
-    if discriminant < 0:
-        return roots
-    sqrt_d = discriminant ** 0.5
-    r1 = (-b + sqrt_d) / (2 * a)
-    r2 = (-b - sqrt_d) / (2 * a)
-    if x_min <= r1 <= x_max: roots.append(r1)
-    if x_min <= r2 <= x_max: roots.append(r2)
-    return sorted(list(set(roots)))
 
 def find_root_bnb(f, f_prime, x_min, x_max, tol=1e-7, max_iter=100):
     """Mixture of Bisection and Newton's method for a monotonic interval."""
@@ -118,7 +105,7 @@ def find_root_bnb(f, f_prime, x_min, x_max, tol=1e-7, max_iter=100):
         if abs(fx) < tol:
             return x
         fpx = f_prime(x)
-        if fpx == 0:
+        if abs(fpx) < 1e-12:
             x = (x_min + x_max) / 2.0
             continue
         x_new = x - fx / fpx
@@ -140,8 +127,8 @@ def find_root_bnb(f, f_prime, x_min, x_max, tol=1e-7, max_iter=100):
 The Analytic Ray-Intersection Polynomial Solver finds the intersection parameter $t$ where a ray intersects the polynomial approximation of a Signed Distance Function (SDF) leaf node. It solves the problem of slow convergence in sphere marching when rays pass near parallel surfaces or graze the isosurface. Unlike sphere marching, which evaluates the SDF iteratively, this method computes a single polynomial in $t$ per node and solves for its roots, offering a significant performance improvement near the surface at the cost of higher initial coefficient computation.
 
 ## Operating characteristics
-* **Time Complexity:** Not given in the sources.
-* **Memory Complexity:** Not given in the sources.
+* **Time Complexity:** Not given in the sources. [G]
+* **Memory Complexity:** Not given in the sources. [G]
 * **Measured Performance:** BNB provides an average 12% speedup over basic Sphere Marching in the narrow band for trilinear interpolation, primarily by skipping nodes early on silhouettes where Sphere Marching converges slowly [S1]. However, it is the slowest method for tricubic interpolation because it must search monotonic intervals of seven previous derivatives [S1].
 * **Strengths:** Guarantees finding all real roots of high-degree polynomials by splitting into monotonic intervals [S1].
 * **Limitations:** Requires computing and solving lower-degree derivative polynomials iteratively; lacks an early skip strategy [S1].

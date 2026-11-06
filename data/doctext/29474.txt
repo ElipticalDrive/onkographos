@@ -1,0 +1,158 @@
+Part of #561. Maintainer, 2026-10-05: "why is the 2D and 3D rendering slow, are there not shaders available?" Measured: a full-resolution HTR-10 half-section ray trace takes 5-7 s (16-core machine, Xvfb). Cause: both views use outram-ble...
+
+dhoby-ghaut: GPU rendering for the 3D and 2D views (sphere impostors for pebbles; GPU or accelerated CSG ray tracing) · Issue #587 · theodoreOnzGit/outram-park-backend · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+dhoby-ghaut: GPU rendering for the 3D and 2D views (sphere impostors for pebbles; GPU or accelerated CSG ray tracing) #587
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+dhoby-ghaut: GPU rendering for the 3D and 2D views (sphere impostors for pebbles; GPU or accelerated CSG ray tracing)#587
+Copy link
+Labels
+P2Normal priorityNormal priorityenhancementNew feature or requestNew feature or request
+Description
+theodoreOnzGit
+opened on Oct 5, 2026
+Issue body actions
+Part of #561. Maintainer, 2026-10-05: "why is the 2D and 3D rendering slow, are there not shaders available?" Measured: a full-resolution HTR-10 half-section ray trace takes 5-7 s (16-core machine, Xvfb). Cause: both views use outram-blender's CPU port of OpenMC's ray tracer / slice plotter; every pixel walks the CSG through nested lattices (core lattice -> pebble -> TRISO) with no BVH. outram-blender has no GPU rendering (its only wgpu code is a vertex-transform compute kernel) and no CSG tessellator, so there is nothing for a rasteriser to draw.
+Proposed, in order:
+Pebble views (DEM pour, bed overview): instanced sphere impostors in an egui wgpu paint callback (one quad per pebble, sphere shading + depth in the fragment shader). 27 000 pebbles at interactive rates. This draws DEM centres, not solver geometry, and must be labelled so.
+Solver-geometry views and the review gate (must stay a trace of the assembled geometry, drawing HARD RULE): either a WGSL ray-marcher over the CSG primitives (quadrics, planes, rect/hex lattices, translations) with a CPU parity test against the OpenMC-parity plotter, or a BVH / lattice-aware acceleration of the CPU tracer. Pixel parity with the existing tracer is the acceptance gate.
+Reactions are currently unavailable
+Activity
+theodoreOnzGit
+added
+enhancementNew feature or requestNew feature or request
+P2Normal priorityNormal priority
+on Oct 5, 2026
+theodoreOnzGit commented on Oct 5, 2026
+theodoreOnzGit
+on Oct 5, 2026
+OwnerAuthor
+More actions
+Maintainer decision, 2026-10-05: "ray-tracing should be GPU's job in dhoby-ghaut". Both the solver-geometry views (3D and 2D) and the pebble views move to the GPU; the CPU OpenMC-port tracer stays as the parity reference the GPU path is tested against.
+theodoreOnzGit
+added a commit that references this issue on Oct 5, 2026
+dhoby-ghaut: fresh DEM pour in Step 1; ENDF libraries with sub-folder…
+...
+45ceef0
+theodoreOnzGit commented on Oct 5, 2026
+theodoreOnzGit
+on Oct 5, 2026
+OwnerAuthor
+More actions
+Progress (agent, 2026-10-05), branch worktree-agent-a1438422df68d260b, commit 29fc77a. Not pushed, not merged.
+What I checked first. The workspace eframe runs on wgpu (root [workspace.dependencies], wgpu 30.0.1, one copy in the lock). Nothing rendered CSG on the GPU. outram-blender/src/gpu.rs only had the affine-transform kernel. outram-mc-libs/src/gpu/surface_distance.wgsl has ray–surface distances for all 15 surface kinds, but no cells, universes or lattices, and outram-blender may not depend on mc-libs. So its distance switch was copied (with the source cited) into a new tracer in outram-blender, the crate that owns the CSG types.
+Built (item 2 of this issue: a WGSL ray tracer over the assembled geometry)
+outram_blender::csg::gpu::flat: the assembled Geometry as one u32 buffer. It holds the surfaces, the RPN regions, the universes, the rect and hex lattices with their maps and outer, and the translations. It also carries static crossing hints (OpenMC-style neighbour lists) and the universe graph, which is used to skip subtrees that hold no drawn material. It needs no feature and builds for Android and wasm. Tori are refused.
+outram_blender::csg::gpu::render (gpu feature; not built on Android or wasm): CsgGpuRenderer with GpuPlot::{Solid, Wireframe, Slice}, the same plot structs the CPU plotter takes. It covers the Phong solid view with the light, the section ClipPlane with cut faces, per-material visibility, x-ray attenuation with outlines, and material slices. The shader is an f32 transcription of plot::raytrace, plot::slice, geometry, cell and lattice.
+dhoby-ghaut gpu_view.rs: runs on eframe's own device. The geometry is flattened on its own thread, and the result goes into an egui native texture; the UI thread never waits. Both the 3D view and the slices use it, at half resolution while the camera moves. The CPU path is the fallback (no wgpu, a torus, or the moment before the upload) and the reference. PNG export and --render-review stay on the CPU.
+Verified (tests/gpu_csg_parity.rs in both crates, NVIDIA RTX A5000, Vulkan)
+Nested test model (a hex lattice of pebbles, each holding a rect TRISO lattice, plus a complemented reflector): 0 % material-index mismatch and 0 % colour mismatch on solid perspective, solid ortho, section, two slices and x-ray.
+HTR-10 explicit-TRISO lattice bed (43 445 cells): material-index mismatch per view:
+view
+mismatch
+GPU
+CPU
+bed half-section
+0.36 %
+0.41 s
+6.95 s
+reflector half-section
+0.0006 %
+0.41 s
+9.08 s
+pebble section
+0.006 %
+0.013 s
+0.17 s
+slices
+0–0.004 %
+8–50 ms
+0.1–0.8 s
+The CPU times were taken on a machine at load average ~28. The bed differences lie on pebble columns cut by the plane y = 0 and on the silhouette edge, where f32 and f64 round grazing boundaries differently.
+The workbench was run under its own Xvfb. It logs GPU ray tracing on NVIDIA RTX A5000 (Vulkan). The status line read "GPU ray-traced in 643 ms" for Step 3 and 71 ms for Step 2. X-ray of the reflector took 2.2 s. Screenshots are in crates/dhoby-ghaut/verification_and_validation/gpu_csg_parity/.
+Corrected along the way: in the CPU SolidRayTracePlot with a ClipPlane, the shadow ray was blocked by the cut-away half. It is now lit once it passes into that half. On the test section view this changes the shade of 2.5 % of pixels, and no pixel changes material.
+Not done
+The half-sections are not interactive at full resolution (~0.4 s). The cost is about 90 ns per crossing, because the reflector cells hold up to 124 region tokens. A per-cell spatial index or BVH for the root universe would be the next step.
+Not done: the sphere impostors for the DEM pour (item 1), the DEM-poured bed through the GPU path, and any other GPU or driver.
+The slice view on the GPU does not do overlap checks, level or mesh lines (the workbench does not use them).
+theodoreOnzGit
+added a commit that references this issue on Oct 5, 2026
+dhoby-ghaut: ray tracing on the GPU (gh:#587)
+...
+29fc77a
+theodoreOnzGit commented on Oct 5, 2026
+theodoreOnzGit
+on Oct 5, 2026
+OwnerAuthor
+More actions
+Progress (agent, 2026-10-05), branch worktree-agent-a6a39ba6819e9affe, commit d9ab6c2. Not pushed, not merged.
+1. Speed. The earlier diagnosis was wrong. I counted the work per pixel on the GPU. Each pixel made about 10 full scans of the 128-cell root universe. Nearly all of them came from rays outside the model. Such a ray steps from one root-cell surface to the next until it reaches the model. HTR-10's planes, cone and borings extend to infinity, so a ray crossed about 9 of these extensions (half-section) or 22 (whole view), scanning all 1 675 tokens each time. The reported "9 crossings per pixel" were mostly these steps. The 124-token reflector cells were not the cost. Folding them alone made the frame slower (0.32 s against 0.21 s).
+What was built:
+outram_blender::csg::gpu::index: a uniform grid over a universe's cells. Each voxel lists the cells that reach it. Each cell's region is constant-folded down to the surfaces that pass through the voxel. Voxel faces are silent steps for the tracer. HTR-10's root gets 30×30×47 voxels, with 2.07 candidates and 3.7 tokens per voxel.
+The grid is closed: no root cell lies outside it, so a ray outside jumps straight to the grid. Closing it needed tighter bounding boxes. Eight root cells have unbounded OpenMC boxes: the seven absorber-sphere channels (a slot between oblique planes) and the core cell (whose conus is cut from a cone). A vertex enumeration over the plane half-spaces and a bound on the cone radius bound them.
+Indexing covers the root first, then universes by token count, above 512 tokens, within a 16 MB budget. Indexing the 1 500 bed tiles changed no frame time and cost 29 MB, so they are not indexed. set_geometry now returns an error (CPU fallback) instead of panicking when a buffer exceeds the device's 128 MiB binding limit. Without the budget, the DEM bed hit that limit.
+view (900×560)
+mismatch vs CPU, indexed / unindexed
+GPU before
+GPU after
+Şeker bed, half-section
+0.371 % / 0.363 %
+0.36-0.39 s
+24-60 ms (min of 3 runs; 17 ms best of 5 in a separate benchmark)
+Şeker reflector, half-section
+0.0006 % / 0.0006 %
+0.36 s
+19-21 ms
+x-y slice, mid-bed
+0 % / 0 %
+17 ms
+2 ms
+DEM bed, half-section
+0.306 % / 0.297 %
+0.39 s
+33 ms
+DEM reflector, half-section
+0.0008 % / 0.0008 %
+0.35 s
+20 ms
+In the running workbench (Xvfb, Step 3) the status line reads "GPU ray-traced in 27 ms" (was 643 ms) and the X-ray 117 ms (was 2.2 s). The 3D view now traces at full resolution while the camera moves, once a full frame takes under 30 ms. GPU times vary 2-4× from run to run because the GPU is shared with the desktop. An X-ray with every pebble shown is still about 0.64 s, because it walks every TRISO lattice.
+Two defects were found and fixed along the way. outram-blender's new grid_index_matches_the_cpu_plotter test (a bored, sectored reflector) caught both.
+CPU plotter (the reference): plot::raytrace::boundary_token read a crossed surface's side from the region token even under a complement. OpenMC removes complements by De Morgan's laws and signs complex regions from the surface normal. The port did neither. As a result, a ray entering the core of a reflector written box & ~core was re-located in the reflector. The unindexed GPU matched the CPU only because it copied the same rule. Both now sign complex regions from the normal. The outram-mc-libs plot-parity tests (geometry_plot_openmc_parity, geometry_plot, python_plot_parity, xs_and_tracks_plot_parity) pass, and the HTR-10 CPU images are unchanged. Transport was not affected; it already signs every crossing from the normal. The missing virtual-crossing walk of upstream distance_complex is filed as outram-blender csg::cell: complex regions do not walk virtual crossings (upstream Region::distance_complex) #596.
+GPU: after a silent voxel step the tracer kept the token of the last-crossed surface, so a ray inside a bore never left it.
+2. DEM pour view. The 27 000 pebbles are now GPU sphere impostors (gpu_view::PebbleGpu, pebbles.wgsl): instanced quads, an exact orthographic ray-sphere hit per fragment, and a depth buffer, drawn in an offscreen target that egui shows. The half/whole cutaway, orbit, zoom buttons and vessel outline are kept. The egui discs remain the fallback without a wgpu device. Submitting a frame takes 1.2-1.3 ms of CPU time. During a 27 000-pebble pour under Xvfb, orbit drags and the Whole button took effect while positions streamed. Screenshots are in crates/dhoby-ghaut/verification_and_validation/gpu_csg_parity/workbench_step1_dem_pour_*.png. I did not measure the egui painter's frame time for comparison.
+3. A DEM-poured bed goes through the GPU path. The workbench sends the core from Req::AssembleFromCentres to the GPU by the same Gpu::set_core call as the lattice bed. The new dem_bed_views_gpu_match_cpu test checks it. It reads the 27 554 centres of reference-data/liggghts/htr10_conus_presettled_mu10_mur00.csv, assembles them as the engine does (125 620 cells, 248 066 surfaces, 28.7 MB flattened), and compares the same six views. The worst mismatch is 0.31 %. I did not take the running workbench through a finished pour, which takes minutes.
+Also fixed: the 3D view and the slices kept the CPU picture after the GPU became ready, until the camera moved.
+Tests: cargo test --release -p outram-blender -p dhoby-ghaut --lib --tests --bins passes, run with OUTRAM_PARK_REFERENCE_DATA_DIR because this worktree's ACE submodule is empty. outram-blender --no-default-features passes. cargo check --release for wasm32-unknown-unknown and for aarch64-linux-android --all-targets both pass. One unrelated failure on this host: outram-mc-libs stats_move_fingerprints::fhr_explicit_triso_delta gives a value not among the pinned hosts. That test is the libm-dependent case of #578, and the code it runs was not touched here.
+Not done: the CPU plotter still takes the slow entry walk (4-9 s per half-section); filed as #597. The docs/outram-blender-api.md mirror is not regenerated; it already lacked csg::gpu. Nothing has been checked on any other GPU or driver.
+theodoreOnzGit
+added a commit that references this issue on Oct 5, 2026
+GPU CSG tracer: grid index, closed root grid; DEM pour as sphere impo…
+...
+d9ab6c2
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+P2Normal priorityNormal priorityenhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

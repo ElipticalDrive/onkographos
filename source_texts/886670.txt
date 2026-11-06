@@ -1,0 +1,89 @@
+Octree-based 3D Convolutional Neural Networks [SIGGRAPH 2017] - Add sparse Marching Cubes and complete SDF octree support by Ramond-Z · Pull Request #63 · octree-nn/ocnn-pytorch
+
+Add sparse Marching Cubes and complete SDF octree support by Ramond-Z · Pull Request #63 · octree-nn/ocnn-pytorch · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Ramond-Z
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Contributor
+This change completes the core operations for signed distance field (SDF) octrees. These include conversion between dense grids and SDF octrees, SDF interpolation directly on octrees, and mesh extraction directly from octrees. It also adds batched queries and save/load helpers.
+Corner-grid contract
+The existing builder accepts N³ SDF values and treats them as corner samples. Elsewhere in the repository, N = 2**depth counts octants per axis. N octants need N+1 corners, so N³ corner samples leave the outermost cells without their boundary values. The builder now requires (B, N+1, N+1, N+1): a depth-8 tree uses 257³ corner samples for 256³ octants.
+Keeping N³ values as octant-center samples is another option, but requires substantial changes to the existing corner-based storage and interpolation. We retain the corner representation and adjust the input dimensions. Callers must provide the additional boundary samples. The builder does not pad or resample existing inputs.
+Dense reconstruction
+The original Octree.to_sdf() initializes a dense grid with +1 and writes saved SDF samples into it. This leaves unsaved points deep inside an object positive, although their signs must be negative. The incorrect signs create extra zero crossings and false interior mesh surfaces.
+Reconstruction now fills regions with ±1 according to their terminal-node signs before restoring saved samples. This preserves the signs of unsaved interior regions and removes the false surfaces. The output contains N+1 corner samples per axis, consistent with the builder.
+Reconstruction supports both floating-point and quantized fields. It preserves saved samples but does not recover discarded distance magnitudes. Unsaved values represent signs rather than exact distances.
+The sphere example below uses radius 0.35, depth=7 and full_depth=2. Both methods read the same tree and saved samples. All meshes use scikit-image classic Marching Cubes on the same 128³ sample positions to isolate the reconstruction fix.
+The baseline reconstruction produces 33,104 incorrect interior signs and 41,944 triangles across 965 connected components. The corrected reconstruction produces 18,968 triangles and one component. Its vertices and triangles exactly match extraction from the analytic sphere SDF on that grid.
+The top row shows the central field slice. The bottom row shows mesh cutaways. Orange marks incorrect interior signs and false interior surfaces.
+Sparse Marching Cubes
+The sparse Marching Cubes implementation follows cubvh and adapts its approach to PyTorch and Triton. ocnn.sparse_mc.octree_marching_cubes reads finest-level SDF fields directly from the octree and extracts a mesh without constructing a dense grid. It shares vertices across grid edges and returns an OctreeMesh for each batch.
+The PyTorch backend supports CPU and CUDA. Optional Triton kernels accelerate the CUDA path. Extraction uses the classic Marching Cubes table from cubvh and includes its MIT license.
+```
+from ocnn.sparse_mc import octree_marching_cubes
+
+meshes = octree_marching_cubes(tree, backend='auto', world=True)
+vertices, faces = meshes[0]
+```
+Coordinates use sample indices by default. world=True maps output coordinates to [-1, 1]. projects/tools/extract_sdf_mesh.py exports saved SDF octrees as OBJ meshes.
+Exact zero counts as inside, consistent with the builder. Supported inputs are unpruned, non-adaptive trees with float32 fields. The supported depth range is full_depth < depth <= 16.
+Queries and persistence
+octree_query_sdf accepts batched (x, y, z, batch) points in sample-index coordinates within [0, N)^3. It interpolates stored finest-level corner values and returns only the sign where distances are unavailable. Separate valid and has_sdf flags distinguish invalid points from regions that store only signs.
+Queries support CPU, CUDA, coordinate gradients and torch.compile(fullgraph=True). projects/tools/benchmark_sdf_query.py compares queries against dense interpolation. save_sdf_octree and load_sdf_octree preserve SDF topology, fields, configuration and caller metadata.
+Validation and limits
+29 tests passed across test_octree, test_sdf_octree, test_sdf_io and test_marching_cubes, including real CUDA/Triton execution. Coverage includes boundary samples, batches, quantized reconstruction, save/load, exact-zero planes and comparison with scikit-image. This run excludes adaptive pruning and test_sdf_query.
+Four ShapeNet r256 samples ran on an RTX 4090. Extracted meshes matched cubvh's vertex counts and triangle connectivity, with a maximum vertex-position difference of 1.2e-7 in normalized coordinates. All four meshes were watertight and contained no zero-area faces or nonmanifold edges.
+Median octree-to-mesh time was 1.33–1.96 ms, compared with 2.12–4.07 ms for cubvh. Both paths include octree input preparation and exclude disk I/O and first compilation. Each sample used three warmups and 20 synchronized measurements on a shared host.
+Adaptive trees are outside the supported scope, and save/load does not preserve the pruning flag. Extraction provides no ambiguity resolution, mesh repair or autograd support. It does not support fullgraph compilation or CUDA graph capture.
+Ramond-Z
+added 7 commits
+November 4, 2026 20:19
+Add batched SDF queries with compile-friendly interpolation
+a8b9364
+Optimize SDF reconstruction with terminal-node block fills
+…
+a84df16
+```
+Use N+1 corner grids consistently when building and querying SDF octrees. Fill terminal-node regions in blocks before restoring saved samples, avoiding per-corner tree traversal and bounding coordinate temporaries.
+
+Add CPU and CUDA regression coverage for saved samples, sign-only regions, upper boundaries, quantization, and batched node chunks.
+```
+Add validated SDF octree IO and update query benchmark
+…
+b7bc838
+```
+Validate float32 fields before atomically replacing output files and restore batch counts when loading. Cover exact tensor roundtrips, batched queries, invalid inputs, and interrupted writes.
+
+Align the query benchmark with N+1 corner grids and simplify eager/compiled dispatch and timing. Verified CPU and compiled CUDA queries against dense interpolation.
+```
+Simplify SDF IO to direct serialization
+…
+0b259c1
+```
+Remove format validation, version tags, redundant metadata, and temporary-file replacement. Keep roundtrip and batched query tests.
+```
+Add sparse marching cubes for nonadaptive SDF octrees
+821a8ab
+Merge sparse marching cubes into dev
+3186428
+Isolate sparse MC package and remove temporary tooling
+3aff934
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,198 @@
+An open-source C++ library developed and used at Facebook. - Add StableRadixSort improvements and HybridAlloc support by linnjz · Pull Request #2662 · meta/folly
+
+Add StableRadixSort improvements and HybridAlloc support by linnjz · Pull Request #2662 · meta/folly · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+linnjz
+commented
+Jun 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+PR Summary: StableRadixSort + HybridAlloc
+This PR extends StableRadixSort with MSD traversal and OpenMP parallel execution, and introduces HybridAlloc — a lightweight stack-or-heap allocation utility — to support runtime-sized per-thread bucket storage in the parallel path.
+StableRadixSort
+The existing LSD-only implementation is preserved as the default strategy. This PR adds:
+Four execution modes — LSD+Seq, LSD+Par, MSD+Seq, MSD+Par — selectable at compile time via RadixSortOptions
+Sortedness fast-path — the single-pass histogram build also detects if input is already sorted, skipping the sort entirely
+Adaptive MSD — MSD recursion falls back to LSD (or insertion sort) for small sub-problems
+Per‑thread 2D histograms in the OpenMP path to avoid atomic contention (#pragma omp parallel for histogram/scatter, #pragma omp parallel for for bucket recursion)
+Configurable digit width — 8‑bit (256 buckets) or 16‑bit (65536 buckets) per pass
+NaN positioning — configurable AtFirst / AtLast / Unhandled, with a compile-time assumption toggle (Existence / NonExistence) to skip NaN logic when none are present
+All existing entry points (stable_radix_sort, stable_radix_sort_descending) remain available and unchanged — no breaking changes to callers.
+HybridAlloc (folly/memory/HybridAlloc.h)
+A pair of preprocessor macros (FOLLY_HYBRID_ALLOC_THRESHOLD, FOLLY_HYBRID_ALIGNED_ALLOC_THRESHOLD) that allocate on the stack via alloca when the request fits a configurable threshold, falling back to malloc otherwise. A HybridAllocHolder<T> RAII wrapper handles cleanup.
+Motivation:
+the OpenMP parallel path needs per‑thread bucket arrays whose size depends on the runtime thread count. For 8‑bit radix (256 buckets × threads), stack allocation works. For 16‑bit radix (65536 buckets × threads), heap is required. HybridAlloc selects the right backing at the call site with zero abstraction overhead.
+Tests and Benchmarks
+Correctness
+Covers all 4 execution modes across:
+Unsigned / signed integers
+float / double / long double (NaN positioning: first/last/descending)
+char / wchar_t / char16_t / char32_t
+bool
+Custom type sorting
+Edge cases: empty, single‑element, already‑sorted, all‑equal, reverse
+Insertion‑sort threshold boundary (63/64/65)
+16‑bit chunks, 64‑bit counters, reverse iterators
+MSD→LSD fallback
+Stability with duplicate keys
+Benchmarks
+Sequential comparison against std::sort, std::stable_sort, boost::spreadsort, boost::pdqsort, folly::detail::double_radix_sort at sizes 100 – 1M
+Parallel comparison against std::sort(par), std::stable_sort(par), and MSVC parallel_radixsort (when available)
+meta-cla
+Bot
+added
+the
+CLA Signed
+label
+Jun 24, 2026
+linnjz
+closed this
+Jun 24, 2026
+linnjz
+reopened this
+Jun 24, 2026
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+from
+bd1547c to
+1cea4d7
+Compare
+June 24, 2026 21:05
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+from
+1cea4d7 to
+512c0eb
+Compare
+July 8, 2026 11:19
+linnjz
+changed the title
+Add StableRadixSort improvements and hybrid_vector container
+dd StableRadixSort improvements and HybridAlloc support
+Jul 19, 2026
+linnjz
+changed the title
+dd StableRadixSort improvements and HybridAlloc support
+Add StableRadixSort improvements and HybridAlloc support
+Jul 19, 2026
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+5 times, most recently
+from
+2cf4cb1 to
+a87b6fd
+Compare
+July 25, 2026 16:01
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+2 times, most recently
+from
+5dad329 to
+32e2a1b
+Compare
+July 26, 2026 16:19
+linnjz
+marked this pull request as draft
+July 26, 2026 16:20
+linnjz
+marked this pull request as ready for review
+July 26, 2026 16:20
+linnjz
+commented
+Jul 26, 2026
+Copy link
+Copy Markdown
+Author
+Hi maintainers, just a friendly ping on this PR — it's been about a month. The changes include:
+A rewrite of StableRadixSort with LSD/MSD + sequential/parallel modes, compile-time options, sortedness fast-path, and OpenMP support
+New HybridAlloc utility macros (FOLLY_HYBRID_ALLOC_THRESHOLD, HybridAllocHolder) for stack-or-heap aligned allocation, used by the radix sort's per-thread bucket storage
+Meta Import Checks passed, but it's still blocked on Import Status (queued). Happy to rebase or split into smaller PRs if that helps. Thanks!
+cc @ott @rbarnes @yfeldblum @afrind
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+2 times, most recently
+from
+e93c17b to
+6fd44b4
+Compare
+July 31, 2026 09:38
+Add StableRadixSort improvements and HybridAlloc support
+2bde0c7
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+from
+6fd44b4 to
+2bde0c7
+Compare
+July 31, 2026 09:47
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+from
+ffd3d87 to
+a832153
+Compare
+September 11, 2026 19:51
+feat(algorithm): enable constexpr evaluation in StableRadixSort
+…
+dcf0f76
+```
+The sort was previously unusable in static_assert contexts, forcing
+all validation to runtime tests. Compile-time evaluation catches
+incorrect sort results at build time rather than test execution,
+and enables zero-cost correctness guarantees in header-only code.
+
+Verified: MSVC 14.51, GCC 11.2, Clang 22 (Clang has a known bug
+in constexpr allocator lifetime tracking, P0591R4 not yet working).
+```
+linnjz
+force-pushed
+the
+add-stable-radix-sort-hybrid-vector
+branch
+from
+a832153 to
+dcf0f76
+Compare
+September 11, 2026 19:54
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+CLA Signed
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,224 @@
+--- v003.md
++++ v004.md
+@@ -1,116 +1,105 @@
+ # Sparse Voxel Grid Optimization
+ 
+-Also called: Sparse Voxel Rasterization (SVRaster) optimization, Sparse Voxel Grid Training
++Also called: Sparse Voxel Rasterization (SVRaster), SVRecon
+ 
+ ## Overview
+-Sparse Voxel Grid Optimization is a method for optimizing radiance fields using a dynamically managed sparse octree of voxels, enabling real-time novel-view synthesis and surface reconstruction. It differs from dense grid methods (like [Instant NGP](1414-hierarchical-grid-optimization.md)) by storing data only in occupied regions, and from Gaussian splatting ([3D Gaussian Splatting](1414-hierarchical-grid-optimization.md)) by using spatially disjoint, axis-aligned voxels with explicit continuity enforcement. It solves the memory bottleneck of high-resolution dense grids while maintaining high rendering speeds through direct voxel rasterization.
++Sparse Voxel Grid Optimization is a method for optimizing explicit 3D voxel structures to minimize photometric loss between rendered and ground-truth images, building on [Hierarchical Grid Optimization](1414-hierarchical-grid-optimization.md). It differs from siblings like [Plenoxels](7440-plenoxels.md) by using a dynamic sparse octree that grows and prunes during training, allowing it to achieve high fidelity and real-time rendering speeds without requiring a fixed, memory-intensive uniform grid. Unlike [Explicit Radiance Fields](806-explicit-radiance-fields.md) which may use static structures, this method actively manages voxel occupancy to balance detail and performance.
+ 
+ ## How it works
+ **Inputs:** A set of calibrated images with known camera poses.
+-**Outputs:** A sparse octree representation of density and color, optimized for rendering.
++**Outputs:** An optimized sparse octree representation containing density ($\sigma$) and color ($\mathbf{c}$) attributes per voxel, and optionally Signed Distance Function (SDF) values for surface reconstruction.
+ 
+ **Data Structures:**
+-The core structure is a sparse octree. Each node at level $l$ represents a voxel.
+-*   **Morton Code:** Used for sorting and spatial indexing. For 16 levels, each level uses 3 bits, resulting in a 48-bit Morton code for ordering primitives [S1].
+-*   **Voxel Content:**
+-    *   For novel-view synthesis: Density ($\sigma$) and color ($\mathbf{c}$) per sample point.
+-    *   For mesh reconstruction: Signed Distance Function (SDF) values at voxel corners [S2, unofficial].
++The method uses an octree structure. Each node represents a voxel.
++*   **Morton Code:** Used for sorting and spatial indexing. 48-bit Morton codes are used for 16 levels of hierarchy (3 bits per level) [S1].
++*   **Voxel Attributes:**
++    *   Density ($\sigma$): Stored as raw values, initialized to a negative constant.
++    *   Color ($\mathbf{c}$): RGB values.
++    *   SDF (optional): Values at voxel corners for surface reconstruction [S2, unofficial].
+ *   **Hierarchy:** Parent-child and sibling relations are tracked via Morton codes and auxiliary fine-grid indices [S2, unofficial].
+ 
+-**Optimization Steps:**
++**Algorithm Steps:**
+ 
+ 1.  **Initialization:**
+-    *   Start from empty space with raw density $\sigma = -10$ [S1].
+-    *   Initialize the octree level to $h_{lv} = 6$ (64$^3$ voxels) for bounded scenes or the foreground region of unbounded scenes [S1].
+-    *   For unbounded scenes, add $h_{out} = 5$ background shell levels with a ratio $h_{ratio} = 2$ times the number of foreground voxels [S1].
+-    *   [G] Ensure the root node exists and child pointers are initialized to null.
++    *   Start with an empty space.
++    *   Set initial raw density $\sigma_{init} = -10$ [S1].
++    *   Initialize the octree to level $h_{lv} = 6$ (corresponding to a $64^3$ grid) for the foreground main region [S1].
++    *   For unbounded scenes, add $h_{out} = 5$ background shell levels, with a voxel count ratio $h_{ratio} = 2$ times the foreground voxels [S1].
++    *   If using SVRecon for surface reconstruction, initialize SDF signs based on $PI^3$ point-map priors aligned to ground-truth poses, flipping signs to account for visual occlusion [S2, unofficial].
+ 
+-2.  **Rendering (Forward Pass):**
+-    *   Cast rays through the scene.
+-    *   Intersect rays with voxels in 3D space [S1].
+-    *   Sample points inside voxels: $K=1$ point for novel-view synthesis, $K=3$ points for mesh reconstruction [S1].
+-    *   Compute transmittance $T_i$ and color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model [S1][S5]:
+-        $$ \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i $$
+-    *   Apply early ray stopping with threshold $h_T = 10^{-4}$ [S1].
+-    *   For SVRecon, use NeuS CDF for alpha blending and trilinear interpolation of SDFs [S2, unofficial].
++2.  **Rendering (Differentiable Volume Rendering):**
++    *   For each ray $\mathbf{r}$, intersect with the sparse octree to find active voxels.
++    *   Sort voxels along the ray using Morton codes [S1].
++    *   Compute transmittance $T_i$ and color $\hat{C}(\mathbf{r})$ using the standard emission-absorption model:
++        $$
++        \hat{C}(\mathbf{r}) = \sum_{i=1}^N T_i (1 - \exp(-\sigma_i \delta_i)) \mathbf{c}_i
++        $$
++        where $T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right)$ [S1, S5].
++    *   For SVRecon, use Alpha Blending with the NeuS Cumulative Distribution Function (CDF) [S2, unofficial].
++    *   Apply early ray stopping if transmittance $T < h_T = 10^{-4}$ [S1].
++    *   Use supersampling scale $h_{ss} = 1.5$ for standard rendering [S1].
+ 
+ 3.  **Loss Computation:**
+-    *   **Novel-View Synthesis Loss:**
+-        $$ \mathcal{L} = \lambda_{\text{ssim}} \mathcal{L}_{\text{ssim}} + \lambda_{\text{T}} \mathcal{L}_{\text{T}} + \lambda_{\text{dist}} \mathcal{L}_{\text{dist}} + \lambda_{\text{R}} \mathcal{L}_{\text{R}} + \lambda_{\text{tv}} \mathcal{L}_{\text{tv}} $$
+-        where $\mathcal{L}_{\text{T}}$ encourages binary transmittance, $\mathcal{L}_{\text{dist}}$ is distortion loss, $\mathcal{L}_{\text{R}}$ is RGB loss, and $\mathcal{L}_{\text{tv}}$ is total variation on the sparse density grid [S1].
+-    *   **Mesh Reconstruction Loss:**
+-        $$ \mathcal{L}_{\text{mesh}} = \lambda_{\text{n-dmean}} \mathcal{L}_{\text{n-dmean}} + \lambda_{\text{n-dmed}} \mathcal{L}_{\text{n-dmed}} $$
+-        encouraging alignment between rendered normals and depth-derived normals [S1].
+-    *   **SVRecon Specifics:** Includes parent-child continuity, Laplacian loss over fine grid cells, and local Eikonal terms [S2, unofficial].
++    *   Compute photometric loss $\mathcal{L}_R$ (per-point RGB loss) [S1].
++    *   Compute SSIM loss $\mathcal{L}_{ssim}$ [S1].
++    *   Compute transmittance loss $\mathcal{L}_T$ to encourage binary transmittance (0 or 1) [S1].
++    *   Compute distortion loss $\mathcal{L}_{dist}$ [S1].
++    *   Compute total variation loss $\mathcal{L}_{tv}$ on the sparse density grid [S1].
++    *   For mesh reconstruction (SVRecon), add depth-normal consistency losses $\mathcal{L}_{n-dmean}$ and $\mathcal{L}_{n-dmed}$ [S1].
++    *   For SVRecon, add Laplacian loss over fine grid cells and local Eikonal terms enforcing $|\nabla SDF| = 1$ [S2, unofficial].
+ 
+-4.  **Backpropagation:**
+-    *   Compute gradients with respect to voxel densities, colors, and SDF values using the differentiable rendering operator [S1].
++    Total Loss:
++    $$
++    \mathcal{L} = \lambda_{ssim} \mathcal{L}_{ssim} + \lambda_T \mathcal{L}_T + \lambda_{dist} \mathcal{L}_{dist} + \lambda_R \mathcal{L}_R + \lambda_{tv} \mathcal{L}_{tv} + \lambda_{n-dmean} \mathcal{L}_{n-dmean} + \lambda_{n-dmed} \mathcal{L}_{n-dmed}
++    $$
++    where $\lambda$ are loss weights [S1].
+ 
+-5.  **Sparse Structure Management (Pruning and Subdivision):**
+-    *   Perform pruning and subdivision every $h_{every} = 1,000$ iterations [S1].
+-    *   **Pruning:** Remove voxels with density below a threshold $h_{prune}$. Linearly scale $h_{prune}$ from 0.0001 to 0.05 during training [S1].
+-    *   **Subdivision:** Subdivide voxels if they exceed a detail threshold, maintaining a subdivision percentage $h_{percent} = 5$ [S1].
+-    *   [G] When subdividing, initialize child densities based on the parent's value or zero, depending on the specific implementation of the "empty space" start.
++4.  **Optimization and Structure Management:**
++    *   Train for $h_{iter} = 20,000$ iterations [S1].
++    *   Every $h_{every} = 1,000$ iterations, prune and subdivide voxels [S1].
++    *   **Pruning:** Remove voxels with density below a threshold $h_{prune}$. The threshold is linearly scaled from 0.0001 to 0.05 over the training duration [S1].
++    *   **Subdivision:** Subdivide voxels with density above a certain percentile (top $h_{percent} = 5\%$) [S1].
++    *   **Gradient Computation:** Use reverse-mode automatic differentiation or analytic inversion to compute gradients with respect to $\sigma$ and $\mathbf{c}$ [S5].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def optimize_sparse_voxel_grid(images, poses, iterations=20000):
++def sparse_voxel_optimization(images, poses, num_iterations=20000, every=1000):
+     # 1. Initialization
+-    octree = SparseOctree(initial_level=6)
+-    octree.set_raw_density(-10)
++    octree = Octree(level=6) # 64^3 initial grid
++    octree.set_density(-10)  # h_geo = -10
+     
+-    # For unbounded scenes
+-    octree.add_background_shells(levels=5, ratio=2)
+-    
+-    optimizer = Adam(octree.parameters())
+-    
+-    for step in range(iterations):
+-        # 2. Random Ray Sampling
+-        ray = sample_random_ray(images, poses)
++    # 2. Training Loop
++    for iter in range(num_iterations):
++        # 2a. Render
++        rendered_images = []
++        for img, pose in zip(images, poses):
++            rays = generate_rays(pose)
++            # Sort rays/voxels by Morton code
++            sorted_voxels = octree.sort_by_morton(rays)
++            # Differentiable rasterization
++            color = render_volume(sorted_voxels, rays)
++            rendered_images.append(color)
++            
++        # 2b. Compute Loss
++        loss = 0
++        loss += lambda_ssim * ssim_loss(rendered_images, images)
++        loss += lambda_R * rgb_loss(rendered_images, images)
++        loss += lambda_T * transmittance_loss(rendered_images)
++        loss += lambda_dist * distortion_loss(rendered_images)
++        loss += lambda_tv * total_variation_loss(octree.density)
+         
+-        # 3. Forward Rendering
+-        # Intersect ray with sparse voxels
+-        hits = octree.ray_intersect(ray)
++        # 2c. Backpropagation
++        gradients = compute_gradients(loss, octree)
++        update_octree(octree, gradients)
+         
+-        # Sample points within voxels
+-        samples = []
+-        for hit in hits:
+-            if is_mesh_task:
+-                samples.extend(hit.sample_points(K=3))
+-            else:
+-                samples.append(hit.sample_point(K=1))
+-        
+-        # Compute transmittance and color
+-        transmittance = 1.0
+-        color = vec3(0.0)
+-        for sample in samples:
+-            sigma = octree.get_density(sample)
+-            c = octree.get_color(sample)
+-            delta = sample.distance_to_next()
++        # 2d. Structure Management
++        if iter % every == 0:
++            # Linearly scale pruning threshold from 0.0001 to 0.05
++            prune_threshold = 0.0001 + (iter / num_iterations) * (0.05 - 0.0001)
++            octree.prune(prune_threshold)
++            octree.subdivide(percentile=5) # Subdivide top 5% densest voxels
+             
+-            alpha = 1.0 - exp(-sigma * delta)
+-            weight = transmittance * alpha
+-            color += weight * c
+-            transmittance *= (1.0 - alpha)
+-            
+-            if transmittance < 1e-4:
+-                break
+-        
+-        # 4. Loss Calculation
+-        loss = compute_loss(color, ray.gt_color)
+-        if is_mesh_task:
+-            loss += compute_mesh_loss(octree, ray)
+-            
+-        # 5. Backpropagation
+-        optimizer.zero_grad()
+-        loss.backward()
+-        optimizer.step()
+-        
+-        # 6. Structure Management
+-        if step % 1000 == 0:
+-            prune_threshold = linear_scale(0.0001, 0.05, step / iterations)
+-            octree.prune(prune_threshold)
+-            octree.subdivide(percent=5)
++    return octree
+ ```
+ 
+@@ -118,18 +107,20 @@
+ 
+ ### Adaptive Voxel Size
+-Adaptive voxel size subdivides voxels based on detail requirements rather than reaching a fixed uniform grid resolution. It achieves higher quality (LPIPS 0.200, PSNR 28.01) than uniform 512$^3$ grids (LPIPS 0.326, PSNR 25.37) while using less memory, avoiding OOM errors seen at 1024$^3$ resolution. It outperforms Plenoxels (640$^3$) in both quality and speed [S1].
++A technique where voxels are subdivided adaptively based on detail requirements, as opposed to uniform subdivision until a fixed grid resolution is reached. On the Mip-NeRF360 dataset, adaptive voxel size achieves LPIPS 0.200 and PSNR 28.01 at 171 FPS, outperforming uniform $512^3$ grids (LPIPS 0.326, PSNR 25.37, 190 FPS) and significantly beating Plenoxels ($640^3$ grid, LPIPS 0.452, PSNR 23.29, <10 FPS) [S1]. Uniform $1024^3$ grids cause Out Of Memory (OOM) on 24GB GPUs, while adaptive methods avoid this by only refining necessary regions [S1].
+ 
+ ### SVRecon
+-SVRecon generalizes SVRaster to surface reconstruction by parametrizing each voxel with SDF values at its corners. It uses trilinear interpolation for SDFs, NeuS CDF for alpha blending, and bitmask-based neighbor search for Laplacian smoothness. It achieves better Chamfer distance on DTU (5 mm vs 6 mm) and higher F1 score on Tanks-and-Temples than SVRaster density-based methods [S2, unofficial].
++A generalization of SVRaster to surface reconstruction by parametrizing each voxel with SDF values at its corners, enabling implicit geometry regularization and extraction of watertight meshes [S2, unofficial]. It uses trilinear interpolation for SDF values and Alpha Blending with the NeuS CDF [S2, unofficial]. Hierarchical data structures track parent-child relations via Morton codes, with bitmask-based occupancy and neighbor search for cross-voxel Laplacian smoothness [S2, unofficial]. Initialization uses $PI^3$ point-map priors, and regularization combines parent-child continuity, Laplacian loss, and local Eikonal terms [S2, unofficial]. SVRecon achieves a Chamfer distance of <5 mm on DTU (15 scenes) and an F1 score of <7 on Tanks-and-Temples in 12 minutes, outperforming SVRaster density-based reconstruction [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering speed is comparable to 3D Gaussian Splatting, with FPS varying by scene. Sorting 48-bit Morton codes is used for primitive ordering [S1].
+-*   **Memory Complexity:** Uses significantly less memory than dense grids (e.g., 1024$^3$ causes OOM on 24GB GPU) but more than Gaussian splatting due to voxel primitives [S1]. LiteVoxel variant reduces peak VRAM by up to 60% compared to standard SVRaster [S2, unofficial].
+-*   **Performance:** On Mip-NeRF-360, achieves 121 FPS with 15 minutes training time, LPIPS 0.185, PSNR 27.33 [S1]. Fast-render variant achieves >2x FPS with moderate quality reduction [S1]. Fast-train variant achieves >3x speedup [S1].
+-*   **Strengths:** High resolution scalability, real-time rendering, explicit geometry extraction (SVRecon).
+-*   **Limitations:** Struggles with severe exposure variations in training views, leading to brightness boundaries and floaters [S1]. Disjoint voxel design requires explicit continuity losses [S2, unofficial].
++**Time and Memory Complexity:**
++*   **Memory:** Uses significantly less memory than uniform grids (e.g., $1024^3$ causes OOM) but more than Gaussian primitives due to the number of voxel primitives [S1]. LiteVoxel variant reduces peak VRAM by up to 60% compared to standard SVRaster [S2, unofficial].
++*   **Speed:** Rendering speed is comparable to 3DGS, with FPS varying by scene. On Mip-NeRF360, it achieves ~121 FPS (standard) and >2x FPS with fast-render settings ($h_{ss}=1.5, h_{prune}=0.15$) [S1]. Training time is ~15 minutes on Mip-NeRF360, with a fast-train variant achieving >3x speedup by scaling iteration-related hyperparameters by 0.3 [S1].
++
++**Strengths and Limitations:**
++*   **Strengths:** High fidelity (better LPIPS than 3DGS and Zip-NeRF), real-time rendering, scalable to higher resolutions without OOM, compatible with grid-based algorithms (Marching Cubes, Voxel Pooling) [S1][S2, unofficial].
++*   **Limitations:** Struggles with severe exposure variation in training views, leading to brightness boundaries and floaters (worse PSNR/FPS on Tanks&Temples) [S1]. Disjoint voxel design requires explicit continuity losses for smooth geometry [S2, unofficial]. Depth-quantile pruning depends on robust view coverage [S2, unofficial].
+ 
+ ## Background
+-Sparse Voxel Grid Optimization originated from the need to combine the high fidelity of neural radiance fields with the efficiency of sparse voxel structures. It was introduced in "Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering" (CVPR 2025) [S1]. The method builds on hierarchical grid optimization principles [1414-hierarchical-grid-optimization.md] and extends them with dynamic pruning and subdivision. SVRecon, a variant for surface reconstruction, was later proposed by Oh et al. (2025) [S2, unofficial].
++Sparse Voxel Grid Optimization originated from the need for real-time, high-fidelity radiance field rendering. It builds on hierarchical grid optimization and sparse voxel technologies. The method was introduced in "Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering" [S1] and further extended for surface reconstruction in "Sparse Voxel Rasterization (SVRaster)" [S2, unofficial]. It addresses the limitations of uniform grids (memory) and neural implicit fields (speed) by using a dynamic sparse structure.
+ 
+ ## Sources

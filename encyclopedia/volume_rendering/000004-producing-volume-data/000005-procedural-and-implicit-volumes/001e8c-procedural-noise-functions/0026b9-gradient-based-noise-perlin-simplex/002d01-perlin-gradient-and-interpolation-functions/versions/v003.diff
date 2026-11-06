@@ -1,0 +1,215 @@
+--- v002.md
++++ v003.md
+@@ -4,48 +4,53 @@
+ 
+ ## Overview
+-This article defines the core mathematical primitives of classic Perlin noise: the gradient vector selection, the dot product evaluation, and the polynomial interpolation functions (fade and lerp) used to blend corner contributions. It solves the problem of generating smooth, coherent scalar fields from discrete grid points by ensuring $C^1$ continuity (smooth first derivatives) across cell boundaries, which prevents visible grid artifacts in the resulting volume data. It differs from [Simplex Noise](978-simplex-noise.md) by using an axis-aligned hypercubic grid rather than a simplex lattice, and from [Improved Perlin Noise (4D)](3723-improved-perlin-noise-4d.md) by focusing on the foundational 3D implementation details and the specific polynomial choices.
++This article defines the core mathematical primitives—gradient selection, linear interpolation, and smooth fade curves—used to construct classic Perlin noise. It solves the problem of blending directional dot-product contributions from grid vertices into a continuous scalar field. It differs from [Simplex Noise](978-simplex-noise.md) by using a hypercubic grid and axis-aligned gradients, and from [Improved Perlin Noise (4D)](3723-improved-perlin-noise-4d.md) by focusing on the foundational 3D/2D implementations rather than higher-dimensional or specific optimized variants.
+ 
+ ## How it works
+-**Inputs:** A query point $P = (x, y, z)$ in continuous space.
+-**Outputs:** A scalar noise value $V \in [-1, 1]$ and optionally its gradient $\nabla V$.
++**Inputs:**
++- Query point $P = (x, y, z)$ (or $(x, y)$ for 2D).
++- Permutation table $P_{table}$ of size 512 (typically a shuffled $0..255$ array doubled for overflow handling) [S1, unofficial][S2].
++- Gradient set: 12 specific vectors in 3D, derived from permutations [S1, unofficial].
+ 
+-### Data Structures
+-1.  **Permutation Table:** An array of 512 integers (or 256 repeated twice) containing a shuffled permutation of $0..255$. This table maps integer coordinates to hash values, which in turn select gradient vectors. [S1, S3, unofficial][S3, unofficial]
+-2.  **Gradient Vectors (3D):** A fixed set of 12 vectors: $(\pm 1, \pm 1, 0), (\pm 1, 0, \pm 1), (0, \pm 1, \pm 1)$. These are not stored explicitly but generated via bit manipulation of the hash value. [S1, unofficial]
++**Outputs:**
++- Scalar noise value $V$.
++- Optional gradient (derivative) vector $\nabla V$ [S2].
+ 
+-### Steps
+-1.  **Coordinate Decomposition:**
+-    Compute the integer cell coordinates $I = (\lfloor x \rfloor, \lfloor y \rfloor, \lfloor z \rfloor)$ and the fractional coordinates $F = (x - \lfloor x \rfloor, y - \lfloor y \rfloor, z - \lfloor z \rfloor)$. [S1, S4, S5, unofficial][S7]
++**Data Structures:**
++- `PermutationTable`: Array of 512 integers. Index $i$ maps to gradient index $P_{table}[i \pmod{256}]$ [S1, unofficial][S2].
+ 
+-2.  **Hashing:**
+-    Compute the hash for each of the 8 corners of the unit cube containing $P$. The hash function combines the integer coordinates with the permutation table. A common implementation is:
+-    $$ H(i, j, k) = \text{Perm}[\text{Perm}[\text{Perm}[i] + j] + k] $$
+-    where $\text{Perm}$ is the permutation table. [S1, S4, S5, unofficial][S7]
++**Steps:**
+ 
+-3.  **Gradient Selection:**
+-    For each corner hash $h$, select a gradient vector $\vec{g}$ using the following logic (from [S1, unofficial]):
+-    -   $u = (h < 8) ? x : y$
+-    -   $v = (h < 4) ? y : (h == 12 \text{ or } h == 14) ? x : z$
+-    -   $\vec{g} = ((h \& 1) == 0) ? u : -u + ((h \& 2) == 0) ? v : -v$
+-    This maps the 4-bit index $h \pmod{16}$ to one of the 12 gradient directions. [S1, unofficial]
++1.  **Grid Localization:**
++    Compute integer coordinates $I = \lfloor P \rfloor$ and fractional coordinates $F = P - I$. $F \in [0, 1)^n$ [S1, unofficial][S2].
+ 
+-4.  **Dot Product:**
+-    Compute the contribution of each corner $c$ as the dot product of the gradient $\vec{g}_c$ and the distance vector $\vec{d}_c = P - C_c$, where $C_c$ is the corner's integer coordinate.
+-    $$ D_c = \vec{g}_c \cdot \vec{d}_c $$
++2.  **Gradient Selection (`Grad`):**
++    For each corner of the cell, compute a hash index $h = P_{table}[I_x + P_{table}[I_y + P_{table}[I_z]]]$ (for 3D) [S1, unofficial].
++    Select the gradient vector $\mathbf{g}$ based on $h \pmod{16}$ [S1, unofficial]:
++    - Let $u, v$ be components of the distance vector $\mathbf{d} = P - I_{corner}$.
++    - If $h < 8$, $u$ is the x-component, else y-component.
++    - If $h < 4$, $v$ is the y-component; if $h == 12$ or $h == 14$, $v$ is the x-component; else z-component.
++    - Sign of $u$ is negative if $h \& 1$ is true.
++    - Sign of $v$ is negative if $h \& 2$ is true.
++    - $\mathbf{g} = (\text{sign}_u \cdot u, \text{sign}_v \cdot v, \text{sign}_w \cdot w)$ where $w$ is the remaining component [S1, unofficial].
+ 
+-5.  **Interpolation (Fade and Lerp):**
+-    Blend the 8 corner contributions using the fade function and linear interpolation.
+-    -   **Lerp:** $Lerp(a, b, t) = a + (b - a)t$ [S1, unofficial]
+-    -   **Fade:** $Fade(t) = 6t^5 - 15t^4 + 10t^3$ [S3, unofficial]
+-    
+-    The final value is computed by interpolating along the $x$, then $y$, then $z$ axes. For example, in 2D:
+-    $$ V = Lerp(Lerp(D_{00}, D_{10}, u), Lerp(D_{01}, D_{11}, u), v) $$
+-    where $u = Fade(F_x)$ and $v = Fade(F_y)$. [S1, S3, unofficial]
++3.  **Dot Product Evaluation:**
++    Compute contribution $D = \mathbf{g} \cdot \mathbf{d}$ for each of the $2^n$ corners [S1, unofficial][S2].
+ 
+-### Pseudocode
++4.  **Smooth Interpolation (`Fade`):**
++    Apply a fade function to $F$ to obtain interpolation weights $U = \text{Fade}(F)$ [S1, unofficial][S3, unofficial].
++    - **Hermite (Classic):** $f(t) = 3t^2 - 2t^3$ [S3, unofficial].
++    - **Quintic (Improved):** $f(t) = 6t^5 - 15t^4 + 10t^3$ [S2][S3, unofficial].
++
++5.  **Linear Interpolation (`Lerp`):**
++    Blend the dot products using $U$ via $n(a, b, t) = a + (b - a)t$ [S1, unofficial].
++    - In 1D: $n = \text{Lerp}(D_0, D_1, U)$.
++    - In 2D: $n = \text{Lerp}(\text{Lerp}(D_{00}, D_{10}, U_x), \text{Lerp}(D_{01}, D_{11}, U_x), U_y)$.
++    - In 3D: Extend similarly across the z-axis [S1, unofficial].
++
++**Pseudocode (3D, Classic Perlin):**
++
+ ```python
+ def fade(t):
+-    # Quintic interpolation for C2 continuity, preferred for better visual results
+-    # Old Hermite was 3t^2 - 2t^3
++    # Classic Hermite fade: 3t^2 - 2t^3
+     return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+ 
+@@ -54,20 +59,28 @@
+ 
+ def grad(hash_val, x, y, z):
++    # Select gradient from 12 directions based on hash & 15
+     h = hash_val & 15
+     u = x if h < 8 else y
+     v = y if h < 4 else (x if h == 12 or h == 14 else z)
+-    return ((-u) if (h & 1) else u) + ((-v) if (h & 2) else v)
++    
++    # Apply sign based on bits 0 and 1
++    if h & 1:
++        u = -u
++    if h & 2:
++        v = -v
++        
++    return u + v
+ 
+ def perlin_3d(x, y, z, perm_table):
+-    # 1. Integer and fractional parts
+-    xi = int(floor(x))
+-    yi = int(floor(y))
+-    zi = int(floor(z))
++    # 1. Grid Localization
++    xi = int(x) & 255
++    yi = int(y) & 255
++    zi = int(z) & 255
+     
+-    xf = x - floor(x)
+-    yf = y - floor(y)
+-    zf = z - floor(z)
++    xf = x - int(x)
++    yf = y - int(y)
++    zf = z - int(z)
+     
+-    # 2. Fade curves
++    # 2. Fade
+     u = fade(xf)
+     v = fade(yf)
+@@ -75,29 +88,28 @@
+     
+     # 3. Hashing corners
+-    # Note: perm_table should be size 512 or handled with modulo 256
+-    A = perm_table[xi & 255] + yi
++    A = perm_table[xi] + yi
+     AA = perm_table[A] + zi
+     AB = perm_table[A + 1] + zi
+-    B = perm_table[xi + 1 & 255] + yi
++    B = perm_table[xi + 1] + yi
+     BA = perm_table[B] + zi
+     BB = perm_table[B + 1] + zi
+     
+-    # 4. Gradient contributions
+-    g000 = grad(perm_table[AA], xf, yf, zf)
+-    g100 = grad(perm_table[BA], xf - 1, yf, zf)
+-    g010 = grad(perm_table[AB], xf, yf - 1, zf)
+-    g110 = grad(perm_table[BB], xf - 1, yf - 1, zf)
+-    g001 = grad(perm_table[AA + 1], xf, yf, zf - 1)
+-    g101 = grad(perm_table[BA + 1], xf - 1, yf, zf - 1)
+-    g011 = grad(perm_table[AB + 1], xf, yf - 1, zf - 1)
+-    g111 = grad(perm_table[BB + 1], xf - 1, yf - 1, zf - 1)
++    # 4. Dot Products
++    d000 = grad(perm_table[AA], xf, yf, zf)
++    d100 = grad(perm_table[BA], xf - 1, yf, zf)
++    d010 = grad(perm_table[AB], xf, yf - 1, zf)
++    d110 = grad(perm_table[BB], xf - 1, yf - 1, zf)
++    d001 = grad(perm_table[AA + 1], xf, yf, zf - 1)
++    d101 = grad(perm_table[BA + 1], xf - 1, yf, zf - 1)
++    d011 = grad(perm_table[AB + 1], xf, yf - 1, zf - 1)
++    d111 = grad(perm_table[BB + 1], xf - 1, yf - 1, zf - 1)
+     
+     # 5. Interpolation
+-    x1 = lerp(g000, g100, u)
+-    x2 = lerp(g010, g110, u)
++    x1 = lerp(d000, d100, u)
++    x2 = lerp(d010, d110, u)
+     y1 = lerp(x1, x2, v)
+     
+-    x1 = lerp(g001, g101, u)
+-    x2 = lerp(g011, g111, u)
++    x1 = lerp(d001, d101, u)
++    x2 = lerp(d011, d111, u)
+     y2 = lerp(x1, x2, v)
+     
+@@ -105,27 +117,29 @@
+ ```
+ 
+-### Parameters and Edge Cases
+--   **Permutation Table:** Must be a valid permutation of $0..255$ repeated twice to handle wrapping easily. [S3, unofficial]
+--   **Precision:** Using `float` is standard; `double` improves precision for large coordinate values. [G]
+--   **Boundaries:** The hash function must handle negative coordinates correctly (e.g., using bitwise AND with 255 for wrapping). [G]
++**Parameters:**
++- Permutation table size: 512 integers [S1, unofficial][S2].
++- Gradient set size: 12 vectors in 3D [S1, unofficial].
++
++**Edge Cases:**
++- Boundary conditions: The permutation table is doubled to 512 to handle index overflow when computing $P_{table}[i+1]$ at the boundary of the 256-element cycle [S1, unofficial][S2].
++- Precision: Floating point errors in $F$ calculation can cause discontinuities if not handled; using `floor` and subtraction as shown avoids this [G].
+ 
+ ## Subtopics
+ 
+ ### Quintic Noise
+-Uses the quintic interpolation function $6t^5 - 15t^4 + 10t^3$ instead of the cubic Hermite $3t^2 - 2t^3$. This provides $C^2$ continuity (continuous second derivatives), which eliminates visible grid artifacts in the derivatives of the noise field, making it superior for applications requiring smooth gradients like terrain erosion or fluid simulation. [S2][S3, unofficial]
++Uses the quintic interpolation function $f(t) = 6t^5 - 15t^4 + 10t^3$ instead of Hermite. This provides $C^2$ continuity (continuous second derivative), eliminating visible grid artifacts in derivatives compared to Hermite's $C^1$ continuity [S2]. It allows for exact analytical derivative computation, useful for erosion simulations or gradient-based effects [S2]. Choose this when smooth derivatives are required for physical simulation or higher-order visual effects. Link: [Improved Smoothing Function](3723-improved-perlin-noise-4d.md) (conceptually related via smoothing).
+ 
+ ### Improved Smoothing Function
+-Refers to the replacement of the original Perlin smoothing function $f(x) = 3x^2 - 2x^3$ with the quintic function $f(x) = 6x^5 - 15x^4 + 10x^3$. This change was introduced to improve the curve of the interpolation and achieve better visual results by reducing the "blocky" appearance of the noise. [S3, unofficial]
++Refers specifically to the replacement of the classic $3t^2 - 2t^3$ fade curve with $6t^5 - 15t^4 + 10t^3$. This change improves the curve's shape and visual results by reducing directional artifacts more effectively than the cubic Hermite spline [S3, unofficial]. It is a direct parameter/variant choice within the Perlin framework.
+ 
+ ## Operating characteristics
+--   **Time Complexity:** $O(1)$ per query point, with a constant number of arithmetic operations (approx. 20-30 multiplications/additions depending on dimensionality). [S3, unofficial]
+--   **Memory Complexity:** $O(1)$ auxiliary space, requiring only the permutation table (1KB for 256 entries). [S3, unofficial]
+--   **Strengths:** Simple to implement, produces visually pleasing coherent noise, widely supported in graphics APIs. [S3, unofficial]
+--   **Limitations:** Exhibits directional artifacts (grid-aligned streaks) due to the axis-aligned grid structure. Computational cost scales poorly with dimensionality compared to Simplex Noise. [S3, unofficial]
+--   **When to use:** When $C^1$ continuity is sufficient and simplicity is prioritized. When $C^2$ continuity is needed, use the Quintic variant.
+--   **When not to use:** For high-dimensional noise (4D+) where Simplex Noise is more efficient, or when directional artifacts are unacceptable.
++- **Time Complexity:** $O(1)$ per query point, but with a high constant factor due to multiple hash lookups, dot products, and interpolations. 3D Perlin requires 8 gradient evaluations and 15 linear interpolations [S1, unofficial].
++- **Memory Complexity:** $O(1)$ auxiliary space, plus the fixed 512-integer permutation table [S1, unofficial].
++- **Performance:** Slower than Simplex Noise due to the hypercubic grid requiring $2^n$ evaluations in $n$ dimensions (8 in 3D vs 4 in Simplex) [S3, unofficial].
++- **Strengths:** Simple to implement, widely supported, good visual coherence [S1, unofficial].
++- **Limitations:** Directional artifacts (grid lines) are visible if the fade function is not smooth enough (hence the move to Quintic) [S3, unofficial]. Computational cost grows exponentially with dimensionality [S3, unofficial].
+ 
+ ## Background
+-The original Perlin noise was introduced by Ken Perlin in 1985 for the movie *Tron*. The initial implementation used a cubic Hermite interpolation function $3t^2 - 2t^3$. Later, Perlin improved the noise by replacing the smoothing function with the quintic polynomial $6t^5 - 15t^4 + 10t^3$ to improve visual quality. This variant is often referred to as "Improved Perlin Noise" and is the standard implementation found in most graphics libraries today. [S3, unofficial]
++Originated with Ken Perlin's 1985 paper "Improving Noise" and later refined in "The Perlin Noise" (1985/2002). The original smoothing function was $3x^2 - 2x^3$. Perlin later improved it to $6x^5 - 15x^4 + 10x^3$ to reduce artifacts [S3, unofficial]. The gradient selection method using 12 vectors in 3D was introduced to ensure isotropy and reduce directional bias [S1, unofficial]. It is the standard for procedural texture generation in volume rendering and terrain mapping [S3, unofficial].
+ 
+ ## Sources

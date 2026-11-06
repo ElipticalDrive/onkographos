@@ -1,0 +1,232 @@
+--- v001.md
++++ v002.md
+@@ -4,146 +4,114 @@
+ 
+ ## Overview
+-This method applies a regularization loss to predicted depth maps by penalizing second-order spatial derivatives (curvature) of the depth, weighted exponentially by the local image gradient magnitude. It solves the problem of noisy or jagged depth predictions in differentiable rendering pipelines by enforcing smoothness in textureless regions while preserving sharp discontinuities at object boundaries. It differs from sibling methods like [Laplacian Grid Computation](3160-laplacian-grid-computation.md) by explicitly incorporating image gradient information to create a spatially adaptive smoothing mask, rather than applying uniform or purely geometric smoothing.
++This method applies a spatial regularization loss to a predicted depth map by penalizing second-order derivatives (curvature) weighted by the local image gradient magnitude. It solves the problem of noisy or inconsistent depth predictions in regions of high texture by suppressing curvature penalties where image gradients are strong, thereby preserving sharp edges while smoothing flat regions. It differs from standard Laplacian regularization by introducing an adaptive weighting mechanism based on the input image intensity, rather than applying a uniform smoothness prior.
+ 
+ ## How it works
+-**Inputs and Outputs**
+-- **Input**: A predicted depth map $D$ of size $H \times W$, where $D[\mathbf{u}]$ is the depth value at pixel coordinate $\mathbf{u} = (x, y)$. An input image $\mathbf{I}$ of size $H \times W$, where $\mathbf{I}[\mathbf{u}]$ is the pixel intensity (scalar or per-channel) at $\mathbf{u}$.
+-- **Output**: A scalar regularization loss value $\mathcal{L}_{\text{reg. depth}}$.
++The method operates on a 2D depth map $D$ and a corresponding 2D image intensity map $\mathbf{I}$, both defined on a pixel grid with coordinates $\mathbf{u} = (u_x, u_y)$. The output is a scalar regularization loss value $\mathcal{L}_{\text{reg. depth}}$ for each pixel, which can be summed for global optimization.
+ 
+-**Data Structures**
+-- $D$: 2D array of floats, shape $(H, W)$.
+-- $\mathbf{I}$: 2D array of floats, shape $(H, W)$ or $(H, W, C)$. If multi-channel, the gradient magnitude is computed per channel and aggregated (typically max or mean, though the source implies a scalar intensity context or per-pixel max).
++**Inputs:**
++- $D$: A 2D grid of depth values.
++- $\mathbf{I}$: A 2D grid of image intensities (grayscale or per-channel magnitude).
++- $\alpha$: The exponential weighting scale factor (default 8.0).
+ 
+-**Definitions**
+-- $\mathbf{u}_{x-1} = (x-1, y)$, $\mathbf{u}_{x+1} = (x+1, y)$, $\mathbf{u}_{y-1} = (x, y-1)$, $\mathbf{u}_{y+1} = (x, y+1)$.
+-- Boundary conditions: For pixels on the image border, neighbors outside the image are assumed to have the same depth/intensity as the boundary pixel (clamp-to-edge) or the term is omitted. The source does not explicitly specify boundary handling, but standard finite difference implementations clamp. [G] We assume clamp-to-edge padding for robustness.
++**Data Structures:**
++- The grids are treated as dense arrays. Boundary handling for neighbors outside the grid is not explicitly defined in the source; standard practice implies clamping or ignoring, but the source does not specify [G].
+ 
+-**Formulas**
+-1. **Horizontal Depth Second Derivative**:
+-   $$ D_x^{\Delta}[\mathbf{u}] = D[\mathbf{u}_{x-1}, \mathbf{u}_y] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_{x+1}, \mathbf{u}_y] $$
+-2. **Vertical Depth Second Derivative**:
+-   $$ D_y^{\Delta}[\mathbf{u}] = D[\mathbf{u}_x, \mathbf{u}_{y-1}] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_x, \mathbf{u}_{y+1}] $$
+-3. **Horizontal Image Gradient Magnitude (L-infinity norm)**:
+-   $$ \mathbf{I}_x^{\Delta}[\mathbf{u}] = \max\left( |\mathbf{I}[\mathbf{u}_{x-1}, \mathbf{u}_y] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]|, |\mathbf{I}[\mathbf{u}_{x+1}, \mathbf{u}_y] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]| \right) $$
+-4. **Vertical Image Gradient Magnitude (L-infinity norm)**:
+-   $$ \mathbf{I}_y^{\Delta}[\mathbf{u}] = \max\left( |\mathbf{I}[\mathbf{u}_x, \mathbf{u}_{y-1}] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]|, |\mathbf{I}[\mathbf{u}_x, \mathbf{u}_{y+1}] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]| \right) $$
+-5. **Regularization Loss**:
+-   $$ \mathcal{L}_{\text{reg. depth}}[\mathbf{u}] = D_x^{\Delta}[\mathbf{u}] \exp\left(8 \cdot \mathbf{I}_x^{\Delta}[\mathbf{u}]\right) + D_y^{\Delta}[\mathbf{u}] \exp\left(8 \cdot \mathbf{I}_y^{\Delta}[\mathbf{u}]\right) $$
+-   The total loss is the sum (or mean) of $\mathcal{L}_{\text{reg. depth}}[\mathbf{u}]$ over all valid pixels $\mathbf{u}$.
++**Steps:**
+ 
+-**Parameters**
+-- Weighting factor in exponential: $8$ [S1].
++1.  **Compute Horizontal Depth Curvature ($D_x^{\Delta}$):**
++    For each pixel $\mathbf{u}$, calculate the second-order finite difference along the x-axis:
++    $$ D_x^{\Delta}[\mathbf{u}] = D[\mathbf{u}_{x-1}, \mathbf{u}_y] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_{x+1}, \mathbf{u}_y] $$
++    where $\mathbf{u}_{x-1}$ and $\mathbf{u}_{x+1}$ are the left and right neighbors.
+ 
+-**Pseudocode**
++2.  **Compute Vertical Depth Curvature ($D_y^{\Delta}$):**
++    For each pixel $\mathbf{u}$, calculate the second-order finite difference along the y-axis:
++    $$ D_y^{\Delta}[\mathbf{u}] = D[\mathbf{u}_x, \mathbf{u}_{y-1}] - 2D[\mathbf{u}_x, \mathbf{u}_y] + D[\mathbf{u}_x, \mathbf{u}_{y+1}] $$
++    where $\mathbf{u}_{y-1}$ and $\mathbf{u}_{y+1}$ are the top and bottom neighbors.
++
++3.  **Compute Horizontal Image Gradient Magnitude ($\mathbf{I}_x^{\Delta}$):**
++    Calculate the L-infinity norm of the first-order differences along the x-axis:
++    $$ \mathbf{I}_x^{\Delta}[\mathbf{u}] = \max\left(|\mathbf{I}[\mathbf{u}_{x-1}, \mathbf{u}_y] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]|, |\mathbf{I}[\mathbf{u}_{x+1}, \mathbf{u}_y] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]|\right) $$
++
++4.  **Compute Vertical Image Gradient Magnitude ($\mathbf{I}_y^{\Delta}$):**
++    Calculate the L-infinity norm of the first-order differences along the y-axis:
++    $$ \mathbf{I}_y^{\Delta}[\mathbf{u}] = \max\left(|\mathbf{I}[\mathbf{u}_x, \mathbf{u}_{y-1}] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]|, |\mathbf{I}[\mathbf{u}_x, \mathbf{u}_{y+1}] - \mathbf{I}[\mathbf{u}_x, \mathbf{u}_y]|\right) $$
++
++5.  **Compute Regularization Loss:**
++    Combine the curvatures and gradient weights using an exponential function:
++    $$ \mathcal{L}_{\text{reg. depth}}[\mathbf{u}] = D_x^{\Delta}[\mathbf{u}] \exp\left(\alpha \cdot \mathbf{I}_x^{\Delta}[\mathbf{u}]\right) + D_y^{\Delta}[\mathbf{u}] \exp\left(\alpha \cdot \mathbf{I}_y^{\Delta}[\mathbf{u}]\right) $$
++
++**Pseudocode:**
++
+ ```python
+-import numpy as np
+-
+-def depth_gradient_regularization(D: np.ndarray, I: np.ndarray) -> float:
++def depth_gradient_regularization(D: Grid2D, I: Grid2D, alpha: float = 8.0) -> Grid2D:
+     """
+-    Compute depth regularization loss weighted by image gradients.
++    Computes the depth regularization loss weighted by image gradients.
+     
+     Args:
+-        D: Depth map of shape (H, W).
+-        I: Image intensity of shape (H, W) or (H, W, C).
++        D: 2D grid of depth values.
++        I: 2D grid of image intensities.
++        alpha: Exponential weighting factor (default 8.0).
+         
+     Returns:
+-        Scalar regularization loss.
++        2D grid of regularization loss values.
+     """
+     H, W = D.shape
++    loss_grid = zeros((H, W))
+     
+-    # Pad inputs with clamp-to-edge to handle boundaries
+-    D_pad = np.pad(D, pad_width=1, mode='edge')
+-    I_pad = np.pad(I, pad_width=1, mode='edge')
+-    
+-    # Extract neighbors for horizontal differences
+-    D_left = D_pad[1:-1, :-2]
+-    D_right = D_pad[1:-1, 2:]
+-    D_center = D_pad[1:-1, 1:-1]
+-    
+-    I_left = I_pad[1:-1, :-2]
+-    I_right = I_pad[1:-1, 2:]
+-    I_center = I_pad[1:-1, 1:-1]
+-    
+-    # Horizontal depth second derivative
+-    Dx = D_left - 2 * D_center + D_right
+-    
+-    # Horizontal image gradient magnitude (L-infinity)
+-    # Handle multi-channel I by taking max over channels if needed, 
+-    # but source implies scalar or per-pixel max. Assuming I is scalar or 
+-    # we compute magnitude per channel and take max.
+-    if I_pad.ndim == 3:
+-        # Compute abs diff for each channel
+-        diff_left = np.abs(I_left - I_center)
+-        diff_right = np.abs(I_right - I_center)
+-        # Max over spatial neighbors, then max over channels if necessary?
+-        # Source says max(|I[x-1]-I[x]|, |I[x+1]-I[x]|). 
+-        # If I is multi-channel, we assume scalar intensity or max over channels.
+-        # Let's assume I is converted to scalar intensity (e.g. luminance) or 
+-        # the formula applies to each channel and we aggregate. 
+-        # Given "I[ux, uy]" notation, let's assume scalar for simplicity or 
+-        # that I is already a single channel intensity map.
+-        pass
+-    
+-    # Compute horizontal gradient magnitude
+-    diff_left = np.abs(I_left - I_center)
+-    diff_right = np.abs(I_right - I_center)
+-    Ix = np.maximum(diff_left, diff_right)
+-    
+-    # Extract neighbors for vertical differences
+-    D_up = D_pad[:-2, 1:-1]
+-    D_down = D_pad[2:, 1:-1]
+-    
+-    I_up = I_pad[:-2, 1:-1]
+-    I_down = I_pad[2:, 1:-1]
+-    
+-    # Vertical depth second derivative
+-    Dy = D_up - 2 * D_center + D_down
+-    
+-    # Vertical image gradient magnitude
+-    diff_up = np.abs(I_up - I_center)
+-    diff_down = np.abs(I_down - I_center)
+-    Iy = np.maximum(diff_up, diff_down)
+-    
+-    # Compute exponential weights
+-    # Note: Source uses exp(8 * I). If I is large, this can overflow.
+-    # In practice, I might be normalized.
+-    weight_x = np.exp(8 * Ix)
+-    weight_y = np.exp(8 * Iy)
+-    
+-    # Compute loss per pixel
+-    loss_x = Dx * weight_x
+-    loss_y = Dy * weight_y
+-    
+-    total_loss = np.sum(loss_x + loss_y)
+-    
+-    return total_loss
++    for y in range(1, H - 1):
++        for x in range(1, W - 1):
++            # 1. Horizontal Depth Curvature
++            d_x = D[y, x-1] - 2 * D[y, x] + D[y, x+1]
++            
++            # 2. Vertical Depth Curvature
++            d_y = D[y-1, x] - 2 * D[y, x] + D[y+1, x]
++            
++            # 3. Horizontal Image Gradient Magnitude (L-infinity)
++            grad_x = max(
++                abs(I[y, x-1] - I[y, x]),
++                abs(I[y, x+1] - I[y, x])
++            )
++            
++            # 4. Vertical Image Gradient Magnitude (L-infinity)
++            grad_y = max(
++                abs(I[y-1, x] - I[y, x]),
++                abs(I[y+1, x] - I[y, x])
++            )
++            
++            # 5. Weighted Loss
++            loss_grid[y, x] = d_x * exp(alpha * grad_x) + d_y * exp(alpha * grad_y)
++            
++    return loss_grid
+ ```
+ 
+-**Edge Cases and Pitfalls**
+-- **Overflow**: The term $\exp(8 \cdot \mathbf{I}^{\Delta})$ can overflow if image gradients are large. Ensure $\mathbf{I}$ is normalized to a small range (e.g., [0, 1]) before computation.
+-- **Boundary Pixels**: The finite difference stencil requires neighbors. Clamp-to-edge padding is a standard choice [G].
+-- **Sign of Loss**: The depth second derivative $D_x^{\Delta}$ can be positive or negative. The loss is not an absolute value, so it penalizes curvature in a signed manner. This may encourage specific curvature directions. The source does not specify taking the absolute value of the depth derivative.
++**Parameters:**
++- $\alpha = 8.0$: The scaling factor for the exponential weight. This value is taken directly from the source [S1].
++
++**Edge Cases and Pitfalls:**
++- **Boundary Pixels:** The stencil requires neighbors at $x \pm 1$ and $y \pm 1$. The source does not specify how to handle pixels at the grid boundary ($x=0, x=W-1, y=0, y=H-1$). Implementation must define a strategy (e.g., zero-padding, clamping, or skipping) [G].
++- **Sign of Curvature:** The formula uses the raw second derivative $D_x^{\Delta}$, not its absolute value. This means the regularization penalizes positive and negative curvature differently depending on the sign of the derivative. If the goal is to minimize "roughness" regardless of direction, the absolute value $|D_x^{\Delta}|$ might be intended, but the source explicitly writes $D_x^{\Delta}$ [S1].
++- **Exponential Overflow:** If image gradients are large, $\exp(\alpha \cdot \mathbf{I})$ can overflow. Clamping gradients or the exponent is recommended [G].
+ 
+ ## Subtopics
+ 
+-### [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md)
+-Computes mean curvature using normal vectors. Choose when surface geometry is explicitly modeled via normals rather than depth maps.
++### Mean Curvature Grid Computation
++Computes the sum of principal curvatures (trace of the Hessian) without image gradient weighting. Use when uniform smoothness is desired across the entire depth map, regardless of texture. [Mean Curvature Grid Computation](3126-mean-curvature-grid-computation.md)
+ 
+-### [Divergence Grid Computation](3151-divergence-grid-computation.md)
+-Computes divergence of a vector field. Choose when regularizing flow or vector fields.
++### Divergence Grid Computation
++Computes the divergence of a vector field. Use when regularizing flow fields or velocity vectors rather than scalar depth maps. [Divergence Grid Computation](3151-divergence-grid-computation.md)
+ 
+-### [Laplacian Grid Computation](3160-laplacian-grid-computation.md)
+-Computes the Laplacian (sum of second derivatives) without gradient weighting. Choose when uniform smoothing is sufficient and image content is irrelevant.
++### Laplacian Grid Computation
++Computes the standard Laplacian (sum of second derivatives) with uniform weights. Use when image information is unavailable or when a simple isotropic smoothness prior is sufficient. [Laplacian Grid Computation](3160-laplacian-grid-computation.md)
+ 
+ ## Operating characteristics
+-- **Time Complexity**: $O(H \cdot W)$ for computing derivatives and the loss. The exponential and multiplication are element-wise.
+-- **Memory Complexity**: $O(H \cdot W)$ for storing intermediate gradient maps and padded inputs.
+-- **Strengths**: Preserves sharp depth edges where image gradients are high (object boundaries), while smoothing depth in textureless regions.
+-- **Limitations**: Sensitive to noise in the image $\mathbf{I}$; noisy images may lead to incorrect gradient masks. The exponential weighting can be aggressive if not normalized.
+-- **When to use**: Differentiable rendering pipelines where depth consistency with image edges is critical, such as in [PixelSplat](https://doi.org/10.1109/cvpr52733.2024.01840).
+-- **When not to use**: When the image is noisy or lacks texture, as the gradient mask may fail to preserve true depth discontinuities.
++- **Time Complexity:** $O(N)$ where $N$ is the number of pixels, as it requires a constant number of operations per pixel.
++- **Memory Complexity:** $O(N)$ to store the input grids and the output loss grid.
++- **Strengths:** Preserves sharp edges in depth maps corresponding to object boundaries in the image, preventing "bleeding" of depth values across edges.
++- **Limitations:** Only applicable to 2D depth maps derived from images. Sensitive to noise in the image intensity map $\mathbf{I}$, which can cause erratic weighting.
++- **When to use:** In differentiable rendering pipelines (e.g., 3D Gaussian Splatting) where depth consistency with the input image is critical.
++- **When not to use:** When the depth map is not aligned with the image, or when the image is grayscale and lacks sufficient gradient information.
+ 
+ ## Background
+-This method was introduced in the context of 3D Gaussian Splatting from image pairs, specifically in the [PixelSplat](https://doi.org/10.1109/cvpr52733.2024.01840) paper [S1]. It is used to regularize the predicted depth maps during the training of generalizable 3D reconstruction models, ensuring that the depth predictions are smooth but respect the edges present in the input images.
++This method was introduced in the context of "PixelSplat," a technique for scalable generalizable 3D reconstruction from image pairs using 3D Gaussian splats [S1]. The regularization is applied to the predicted depth map to ensure it remains consistent with the input image structure, leveraging the fact that depth discontinuities often align with image gradients.
+ 
+ ## Sources

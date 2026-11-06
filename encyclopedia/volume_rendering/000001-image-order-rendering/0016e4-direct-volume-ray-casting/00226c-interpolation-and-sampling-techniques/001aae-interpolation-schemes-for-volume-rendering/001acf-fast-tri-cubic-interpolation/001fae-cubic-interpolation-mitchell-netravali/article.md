@@ -1,121 +1,115 @@
 # Cubic Interpolation (Mitchell-Netravali)
-
 Also called: Mitchell-Netravali, Mitchell-Netravali Cubic Filter
 
 ## Overview
-Mitchell-Netravali cubic interpolation is a family of C0 and C1 continuous cubic filters defined by parameters B and C, used to reconstruct volume data while preventing high-frequency leakage artifacts [S1, unofficial]. It distinguishes itself from simpler schemes by offering a tunable trade-off between blurring and ringing, and from fixed B-splines by allowing the generation of Catmull-Rom splines [S1, unofficial]. It builds on [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) by providing the specific kernel weights for the convolution sum [S1, unofficial].
+Mitchell-Netravali cubic interpolation is a parameterized family of reconstruction filters used in volume rendering to approximate scalar values at arbitrary positions within a 3D grid [S1, unofficial]. It solves the problem of high-frequency leakage artifacts (ringing, aliasing) caused by discontinuities in lower-order methods, while offering a tunable trade-off between blurring and ringing [S1, unofficial]. It sets itself apart from its parent [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md) by defining the specific mathematical kernel and parameter space ($B, C$) rather than the hardware-accelerated fetch reduction technique, and from its sibling [Adaptive Filter Size for Rendering Time Reduction](861-adaptive-filter-size-for-rendering-time-reduction.md) by using a fixed spatial extent [S1, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- Input: A 3D volume texture $V$, a sampling position $P$, and tuning parameters $B$ and $C$ [S1, unofficial].
-- Output: A single interpolated scalar value at $P$ [G].
-- Parameters: Tuning parameters $B$ and $C$ [S1, unofficial].
+**Inputs and Outputs**
+- Input: A 3D scalar field (volume texture), a query point $\mathbf{p} = (x, y, z)$ in continuous texture coordinates, and two tuning parameters $B$ and $C$.
+- Output: A single interpolated scalar value $V(\mathbf{p})$.
 
-**Data Structures:**
-- The kernel $k(x)$ is a scalar function [S1, unofficial].
-- The volume $V$ is accessed via integer voxel coordinates [G].
+**Data Structures**
+- The volume is stored as a 3D array of voxels.
+- The query point $\mathbf{p}$ is decomposed into integer indices $(i, j, k)$ and fractional offsets $(\delta_x, \delta_y, \delta_z)$ where $\delta \in [0, 1)$.
+- The kernel requires a $4 \times 4 \times 4$ neighborhood of 64 voxels centered around the query point.
 
-**Method:**
-1. For each sample point $P$ along the ray, compute the fractional offset $x$ from the nearest voxel center [G].
-2. Compute the kernel weight $k(x)$ using the Mitchell-Netravali formula [S1, unofficial].
-3. Fetch the 64 nearest voxel values in 3D (4 samples per dimension) [S1, unofficial].
-4. Compute the weighted sum of these 64 samples [G].
-5. Clamp the result to the valid input range to prevent out-of-bounds values [S1, unofficial].
+**Kernel Definition**
+The 1D reconstruction kernel $k(x)$ is defined piecewise based on the absolute distance $|x|$ from the sample center [S1, unofficial]:
 
-**Kernel Formula:**
-The kernel $k(x)$ is defined piecewise based on $|x|$:
+$$
+k(x) = \frac{1}{6} \begin{cases} 
+(12 - 9B - 6C)|x|^3 + (-18 + 12B + 6C)|x|^2 + (6 - 2B), & \text{if } |x| < 1; \\
+(-B - 6C)|x|^3 + (6B + 30C)|x|^2 + (-12B - 48C)|x| + (8B + 24C), & \text{if } 1 \le |x| < 2; \\
+0, & \text{otherwise.}
+\end{cases}
+$$
 
-$$k(x) = \frac{1}{6} \begin{cases} (12 - 9B - 6C)|x^3| + (-18 + 12B + 6C)|x^2| + (6 - 2B), & \text{if } |x| < 1; \\ (-B - 6C)|x^3| + (6B + 30C)|x^2| + (-12B - 48C)|x| + (8B + 24C), & \text{if } 1 \le |x| < 2; \\ 0, & \text{otherwise.} \end{cases}$$ [S1, unofficial]
+The filter satisfies the partition of unity constraint $\sum_{n=-\infty}^{\infty} k(x-n) = 1$ to prevent sample frequency ripple [S1, unofficial].
 
-**Symbol Definitions:**
-- $x$: The distance from the sample point to the voxel center, normalized such that voxel centers are at integers [S1, unofficial].
-- $B, C$: Tuning parameters that trade off aliasing effects (blurring, ringing, anisotropy) [S1, unofficial].
-- $|x|$: Absolute value of $x$ [G].
+**Parameters**
+- $B, C$: Tuning parameters that control the trade-off between aliasing effects (blurring, ringing, anisotropy) [S1, unofficial].
+- Typical values:
+  - Cubic B-splines: $B=1.0, C=0.0$ [S1, unofficial].
+  - Catmull-Rom splines: $B=0.0, C=0.5$ [S1, unofficial].
 
-**Parameters:**
-- $B=1.0, C=0.0$: Generates Cubic B-splines [S1, unofficial].
-- $B=0.0, C=0.5$: Generates Catmull-Rom splines [S1, unofficial].
-- Typical values trade off aliasing effects (blurring, ringing, anisotropy) [S1, unofficial].
+**Algorithm Steps**
+1.  **Decomposition**: For each dimension $d \in \{x, y, z\}$, compute the integer base index $idx_d = \lfloor p_d \rfloor$ and the fractional offset $\delta_d = p_d - idx_d$.
+2.  **Neighborhood Selection**: Identify the 4 indices along each dimension: $idx_d - 1, idx_d, idx_d + 1, idx_d + 2$. This defines a $4 \times 4 \times 4$ grid of 64 voxel coordinates.
+3.  **Weight Calculation**: For each dimension, compute the 1D kernel weights for the 4 offsets relative to the query point. The distance $|x|$ for the offset $\delta_d$ is $\delta_d$ for the first two indices and $1-\delta_d$ or $2-\delta_d$ for the outer indices. Specifically, for a query at $p$, the distances to the samples at $idx-1, idx, idx+1, idx+2$ are $1+\delta, \delta, 1-\delta, 2-\delta$ respectively.
+4.  **Trilinear Convolution**: Compute the interpolated value by convolving the voxel values with the tensor product of the 1D weights. For each of the 64 voxels $V_{ijk}$, multiply by the product of its three 1D weights $w_x \cdot w_y \cdot w_z$.
+5.  **Clamping**: Sum the weighted values. If the result lies outside the valid range of the input data (e.g., $[0, 1]$ for normalized floats), clamp it to that range [S1, unofficial].
 
-**Pitfalls:**
-- General cubic interpolation can produce values outside the range of the inputs; these must be clamped [S1, unofficial].
-- The filter satisfies $\sum_{n=-\infty}^{\infty} h(x-n) = 1$ to prevent sample frequency ripple [S1, unofficial].
+**Pseudocode**
 
-**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def mitchell_netravali_kernel(x, B, C):
-    abs_x = abs(x)
-    if abs_x < 1.0:
-        return ((12.0 - 9.0 * B - 6.0 * C) * abs_x**3 +
-                (-18.0 + 12.0 * B + 6.0 * C) * abs_x**2 +
-                (6.0 - 2.0 * B)) / 6.0
-    elif abs_x < 2.0:
-        return ((-B - 6.0 * C) * abs_x**3 +
-                (6.0 * B + 30.0 * C) * abs_x**2 +
-                (-12.0 * B - 48.0 * C) * abs_x +
-                (8.0 * B + 24.0 * C)) / 6.0
-    else:
-        return 0.0
-
-def sample_volume_mitchell(V, x_frac, y_frac, z_frac, B, C):
-    # x_frac, y_frac, z_frac are fractional coordinates in [0, 1) relative to base voxel
-    base_x = math.floor(x_frac)
-    base_y = math.floor(y_frac)
-    base_z = math.floor(z_frac)
+def mitchell_netravali(volume, p, B, C):
+    """
+    volume: 3D array of voxel values
+    p: tuple (x, y, z) of continuous coordinates
+    B, C: filter parameters
+    """
+    result = 0.0
     
-    weighted_sum = 0.0
-    total_weight = 0.0
-    
+    # Iterate over the 4x4x4 neighborhood
     for dx in range(-1, 3):
         for dy in range(-1, 3):
             for dz in range(-1, 3):
-                dist_x = x_frac - dx
-                dist_y = y_frac - dy
-                dist_z = z_frac - dz
+                # Calculate distance from query point for each dimension
+                dist_x = abs(p[0] - (floor(p[0]) + dx))
+                dist_y = abs(p[1] - (floor(p[1]) + dy))
+                dist_z = abs(p[2] - (floor(p[2]) + dz))
                 
-                w_x = mitchell_netravali_kernel(dist_x, B, C)
-                w_y = mitchell_netravali_kernel(dist_y, B, C)
-                w_z = mitchell_netravali_kernel(dist_z, B, C)
+                # Get voxel value, handling boundaries with clamping or zero-padding
+                # Note: Boundary handling is implementation-specific; 
+                # standard practice is clamping coordinates to valid range [G]
+                ix = clamp(floor(p[0]) + dx, 0, volume.width - 1)
+                iy = clamp(floor(p[1]) + dy, 0, volume.height - 1)
+                iz = clamp(floor(p[2]) + dz, 0, volume.depth - 1)
+                val = volume[ix, iy, iz]
                 
-                weight = w_x * w_y * w_z
-                voxel_val = V[base_x + dx, base_y + dy, base_z + dz]
+                # Calculate 1D kernel weights
+                wx = kernel_1d(dist_x, B, C)
+                wy = kernel_1d(dist_y, B, C)
+                wz = kernel_1d(dist_z, B, C)
                 
-                weighted_sum += weight * voxel_val
-                total_weight += weight
+                result += val * wx * wy * wz
                 
-    result = weighted_sum / total_weight if total_weight > 0 else 0.0
-    return max(0.0, min(1.0, result))
+    # Clamp output to input range
+    return clamp(result, min_value, max_value)
+
+def kernel_1d(x, B, C):
+    abs_x = abs(x)
+    if abs_x < 1:
+        term3 = (12 - 9*B - 6*C) * (abs_x**3)
+        term2 = (-18 + 12*B + 6*C) * (abs_x**2)
+        term1 = (6 - 2*B)
+        return (term3 + term2 + term1) / 6.0
+    elif abs_x < 2:
+        term3 = (-B - 6*C) * (abs_x**3)
+        term2 = (6*B + 30*C) * (abs_x**2)
+        term1 = (-12*B - 48*C) * abs_x
+        term0 = (8*B + 24*C)
+        return (term3 + term2 + term1 + term0) / 6.0
+    else:
+        return 0.0
 ```
 
 ## Subtopics
 
-### Cubic Interpolation
-A higher-order polynomial interpolation scheme for smoother results than linear interpolation, requiring more samples [S2, unofficial]. In 3D, it requires sampling 64 voxels ($2^4$) [S2, unofficial]. It produces smoother results than linear interpolation but increases render time [S2, unofficial].
+### [Cubic Interpolation](2438-cubic-interpolation.md)
+Refers to the general class of tri-cubic schemes utilizing a $4 \times 4 \times 4$ neighborhood, whereas Mitchell-Netravali is a specific parameterized subset.
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- In 3D, cubic interpolation requires sampling 64 nearest samples [S1, unofficial].
-- Spatial extent is $4N$ samples, where $N$ is the dimension of the input (i.e., 4, 16, or 64 for 1D, 2D, or 3D cases) [S1, unofficial].
-- As complexity increases, quality increases, but so does computation [S1, unofficial].
-
-**Strengths and Limitations:**
-- Strengths: C0 and C1 continuity prevents high-frequency leakage artifacts [S1, unofficial].
-- Tunable parameters allow trade-offs between blurring, ringing, and anisotropy [S1, unofficial].
-- Limited spatial extent [S1, unofficial].
-- Limitations: Higher computational cost than linear or nearest-neighbor [S1, unofficial].
-- Can produce values outside the input range, requiring clamping [S1, unofficial].
-
-**When to Use:**
-- Use when smoother results than linear interpolation are needed and computational resources allow for 64 samples per point [S2, unofficial].
-- Use when specific artifact characteristics (ringing vs. blurring) need to be tuned via B and C parameters [S1, unofficial].
+- **Complexity**: In 3D, the method requires 64 nearest samples [S1, unofficial]. The spatial extent is $4^3 = 64$ samples [S1, unofficial].
+- **Performance**: Higher computational cost than linear (8 samples) or nearest-neighbor (1 sample) methods [S1, unofficial].
+- **Quality**: Produces smoother results than linear methods, avoiding $C^1$ discontinuities and star patterns [S1, unofficial]. Prevents high-frequency leakage artifacts through $C^0$ and $C^1$ continuity [S1, unofficial].
+- **Limitations**: Can produce values outside the input range, requiring clamping [S1, unofficial].
 
 ## Background
-Originated from Mitchell and Netravali's work on reconstruction filters [Mitchell 88], as cited in [S1, unofficial]. The method is designed to provide C0 and C1 continuity to prevent high-frequency leakage artifacts [S1, unofficial]. It is used in volume rendering for publication-quality imagery [S1, unofficial].
+The Mitchell-Netravali filter was defined by Mitchell and Netravali in 1988 [S1, unofficial]. It is widely used in volume rendering and image processing for reconstruction-quality imagery [S1, unofficial].
 
 ## Sources
 [S1] A Parallel, Feed-Forward Volume Rendering Algorithm, https://www.cs.unc.edu/techreports/91-029.pdf, fetched 2026-10-27 (unofficial)
-[S2] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)

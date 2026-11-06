@@ -1,0 +1,165 @@
+# Voxel Chunk Meshing with Culling
+
+Also called: Face Culling, Exposed Face Extraction, Naive Voxel Meshing (when culling is omitted)
+
+## Overview
+Voxel Chunk Meshing with Culling is a surface extraction technique that generates a triangle mesh from a 3D voxel grid by iterating through every voxel and emitting geometry only for faces adjacent to empty space (air) or the chunk boundary [S1, S3, S5, S9, S11, unofficial]. It solves the problem of excessive geometry and draw calls inherent in naive per-voxel meshing by culling internal faces shared between adjacent solid voxels [S1, S7, S10, unofficial]. Unlike [Greedy Meshing](3670-gpu-voxel-mesh-generation.md), which merges adjacent coplanar faces into larger rectangles to reduce triangle count, this method generates exactly one quad (two triangles) per exposed face, resulting in a simpler, faster algorithm that produces a larger number of triangles [S2, S7, S10, unofficial]. It serves as the "oracle" or ground-truth reference for verifying the correctness of more complex merging algorithms [S10, unofficial].
+
+## Shared principles
+The method operates on a 3D voxel grid where each voxel has a state (e.g., material ID or solid/empty flag). The grid dimensions are typically $W \times H \times D$ (e.g., $32 \times 32 \times 32$ or $16 \times 64 \times 16$) [S5, S6, S11, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid:** A 3D array or hash map storing voxel states. In array-based implementations, the index for $(x, y, z)$ is often linearized as $x + y \cdot W + z \cdot W \cdot H$ or similar, depending on memory layout [S2, S6, unofficial].
+*   **Quad Representation:** Each generated face is represented by its axis, direction, slice coordinate, position, dimensions, and material ID [S1, S12, unofficial]. A minimal quad struct includes:
+    *   `axis`: The normal axis (0=X, 1=Y, 2=Z).
+    *   `dir`: The direction sign (+1 or -1).
+    *   `slice`: The integer coordinate along the axis where the face lies.
+    *   `u, v`: The starting coordinates on the plane's local axes.
+    *   `w, h`: The width and height of the face (always 1 for naive culling).
+    *   `material`: The ID of the voxel material.
+    [S1, S12, unofficial]
+
+**Boundary Policy:**
+The behavior at chunk edges is defined by a policy parameter [S1, S2, unofficial]:
+*   **Air:** Treats out-of-bounds neighbors as empty (material 0). This exposes the chunk's outer surface, creating a visible boundary. If adjacent chunks both use "Air", double walls may appear at the seam [S1, unofficial].
+*   **Solid:** Treats out-of-bounds neighbors as solid. This hides the chunk's outer surface, requiring the renderer to handle multiple chunks seamlessly without gaps or double geometry [S1, unofficial].
+
+**Algorithm Steps:**
+1.  Initialize an empty list for quads.
+2.  Iterate through every voxel $(x, y, z)$ in the chunk grid.
+3.  If the current voxel is empty (state 0), skip to the next voxel [S1, S9, S11, unofficial].
+4.  For each of the 6 face directions (e.g., $\pm X, \pm Y, \pm Z$):
+    a. Calculate the neighbor's coordinates $(nx, ny, nz)$.
+    b. Determine the neighbor's state:
+        i. If $(nx, ny, nz)$ is outside the chunk bounds, apply the Boundary Policy (return 0 for Air, non-0 for Solid).
+        ii. If inside bounds, lookup the voxel state at $(nx, ny, nz)$.
+    c. If the neighbor is empty (state 0), the face is exposed. Generate a quad for this face.
+    d. If the neighbor is solid, the face is internal and is culled (not generated) [S1, S6, S11, unofficial].
+5.  Return the list of generated quads.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def face_culling_meshing(chunk_width, chunk_height, chunk_depth, get_voxel, boundary_policy="air"):
+    """
+    Generates a mesh for a voxel chunk using face culling.
+    
+    Args:
+        chunk_width, chunk_height, chunk_depth: Dimensions of the chunk.
+        get_voxel(x, y, z): Function returning the material ID of a voxel.
+                           Returns 0 for empty/air.
+        boundary_policy: "air" or "solid".
+        
+    Returns:
+        A list of Quad objects.
+    """
+    quads = []
+    
+    # Define the 6 face directions: (axis_index, direction_sign, neighbor_offset_axis, neighbor_offset_sign)
+    # axis_index: 0=X, 1=Y, 2=Z
+    # direction_sign: +1 for positive axis face, -1 for negative axis face
+    # neighbor_offset: how to get to the neighbor (e.g., +1 in X for +X face)
+    faces = [
+        (0, 1, 1, 0, 0),  # +X face: normal +X, neighbor at x+1
+        (0, -1, -1, 0, 0), # -X face: normal -X, neighbor at x-1
+        (1, 1, 0, 1, 0),  # +Y face: normal +Y, neighbor at y+1
+        (1, -1, 0, -1, 0), # -Y face: normal -Y, neighbor at y-1
+        (2, 1, 0, 0, 1),  # +Z face: normal +Z, neighbor at z+1
+        (2, -1, 0, 0, -1)  # -Z face: normal -Z, neighbor at z-1
+    ]
+    
+    for z in range(chunk_depth):
+        for y in range(chunk_height):
+            for x in range(chunk_width):
+                # Step 3: Skip empty voxels
+                current_material = get_voxel(x, y, z)
+                if current_material == 0:
+                    continue
+                
+                # Step 4: Check each of the 6 faces
+                for axis, dir_sign, nx_off, ny_off, nz_off in faces:
+                    # Calculate neighbor coordinates
+                    nx = x + nx_off
+                    ny = y + ny_off
+                    nz = z + nz_off
+                    
+                    # Determine neighbor state
+                    # Check bounds
+                    if nx < 0 or nx >= chunk_width or \
+                       ny < 0 or ny >= chunk_height or \
+                       nz < 0 or nz >= chunk_depth:
+                        # Apply boundary policy
+                        if boundary_policy == "air":
+                            neighbor_material = 0
+                        else: # solid
+                            neighbor_material = 1 # Non-zero implies solid
+                    else:
+                        neighbor_material = get_voxel(nx, ny, nz)
+                    
+                    # Step 4c: If neighbor is empty, generate face
+                    if neighbor_material == 0:
+                        # Determine slice coordinate and local u,v
+                        # For axis 0 (X), slice is x (for -X) or x+1 (for +X)
+                        # Local axes u, v are the other two dimensions
+                        if axis == 0:
+                            slice_coord = x if dir_sign == -1 else x + 1
+                            u, v = y, z
+                        elif axis == 1:
+                            slice_coord = y if dir_sign == -1 else y + 1
+                            u, v = z, x
+                        else: # axis == 2
+                            slice_coord = z if dir_sign == -1 else z + 1
+                            u, v = x, y
+                            
+                        quads.append({
+                            "axis": axis,
+                            "dir": dir_sign,
+                            "slice": slice_coord,
+                            "u": u,
+                            "v": v,
+                            "w": 1,
+                            "h": 1,
+                            "material": current_material
+                        })
+                        
+    return quads
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Integer coordinates are used for slice and position, avoiding floating-point errors in face placement [S1, unofficial].
+*   **Boundaries:** Incorrect handling of out-of-bounds checks leads to crashes or incorrect culling. The boundary policy must be consistent across adjacent chunks to avoid gaps or double geometry [S1, S6, unofficial].
+*   **Translucency:** The basic algorithm assumes opaque voxels. If translucent blocks (e.g., water, glass) are present, the culling logic must be extended to check if the neighbor is opaque vs. translucent, as translucent faces may need to be rendered even if adjacent to another translucent block [S7, S10, unofficial].
+
+## Subtopics
+
+### [Face Culling Voxel Meshing](2268-face-culling-voxel-meshing.md)
+Generates a static triangle mesh by iterating through every voxel and emitting geometry only for faces adjacent to empty space. It is simpler and faster than greedy meshing but produces more triangles. It serves as the ground-truth reference for verifying correctness.
+
+### [Naive Voxel Meshing](2376-naive-voxel-meshing.md)
+A brute-force baseline that emits all six faces for every solid voxel, ignoring adjacency. It produces redundant geometry and is used for educational contexts or as a fallback before optimization.
+
+### [GPU Marching Cubes (Face-based)](3674-gpu-marching-cubes-face-based.md)
+A GPU-based method that processes each voxel independently on the GPU, outputting vertices and indices into global buffers using atomic counters. It generates axis-aligned quads at voxel boundaries where a solid voxel meets an empty neighbor, effectively performing face-based culling in parallel.
+
+### [Voxel Mesh Rendering with Texture Atlas & Per-Vertex Lighting](2185-voxel-mesh-rendering-with-texture-atlas-per-vertex-lighting.md)
+Renders voxel chunks as triangle meshes by mapping block faces to a horizontal texture atlas and applying per-vertex lighting. It builds on this family to generate geometry, then optimizes rendering by batching materials into a single atlas and computing lighting values (ambient occlusion and smooth light) at the vertex level.
+
+### Voxel Mesh Triangulation and Rendering
+- [S1, unofficial] The `TriangulatorSystem` filters for entities with `DynamicVoxelMesh` components that are `dirty` and have a valid atlas. It limits processing to `triangulation_limit` meshes per frame.
+- [S1, unofficial] For each dirty mesh, retrieve the `DynamicVoxelMesh`, its `atlas`, and optionally its parent `VoxelWorld` context. Call `build_mesh` with the voxel data, context, transform, atlas, queue ID, and factory.
+- [S1, unofficial] The `VoxelMeshProcessor` processes `DynamicVoxelMeshData` assets by calling `build_voxel` to create `NestedVoxel` data and loading the atlas. It processes `VoxelMesh` assets by building voxels for all submodels, creating contexts, and calling `build_mesh`.
+- [S1, unofficial] `build_voxel` maps submodel voxel instances to materials, creating an `AtlasMaterialHandle` for each unique material. It initializes a `NestedVoxel::Detail` with empty voxels, then fills specific coordinates based on the submodel dimensions and voxel index.
+- [S1, unofficial] `build_mesh` initializes a `Triangulation` object. It iterates over voxel, context, and transform tuples, builds shared vertex data, and appends the voxel to the triangulation. Finally, it converts the triangulation to a mesh.
+
+### Convex Collision Mesh Generation
+- [S2, unofficial] Asynchronously collect voxel data around the player. Store solid/non-solid status in a single bit per voxel.
+- [S2, unofficial] On the CPU, build a convex collision mesh using a culling algorithm that generates a single quad for every face separating solid from non-solid data.
+- [S2, unofficial] Collider rebuild frequency: A couple of times per second.
+
+## Background
+The technique is widely used in voxel-based games and simulations where performance is critical. It is often the first step in a rendering pipeline before more advanced optimizations like greedy meshing are applied. The method is fundamental to the visual representation of voxel worlds, providing the geometry that is subsequently textured and lit.
+
+## Sources
+[S1] Kurble/amethyst_voxel, https://github.com/Kurble/amethyst_voxel, fetched 2026-10-27 (unofficial)
+[S2] Ray-Marched Voxel Simulation - Joris Rijsdijk, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)

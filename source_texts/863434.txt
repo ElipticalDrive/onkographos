@@ -1,0 +1,78 @@
+Leaving a Gaussian splat tileset running with a moving camera eventually stops rendering: An error occurred while rendering. Rendering has stopped. RangeError: Array buffer allocation failed at arrayBufferConstructor_DoNotInitialize (<an...
+
+Long Gaussian splat sessions crash with RangeError: Array buffer allocation failed · Issue #13810 · CesiumGS/cesium · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Long Gaussian splat sessions crash with RangeError: Array buffer allocation failed #13810
+New issue
+Copy link
+New issue
+Copy link
+Open
+#13814
+Open
+Long Gaussian splat sessions crash with RangeError: Array buffer allocation failed#13810
+#13814
+Copy link
+Description
+diegomazala
+opened on Sep 17, 2026
+Issue body actions
+Leaving a Gaussian splat tileset running with a moving camera eventually stops rendering:
+```
+An error occurred while rendering. Rendering has stopped.
+RangeError: Array buffer allocation failed
+    at arrayBufferConstructor_DoNotInitialize (<anonymous>)
+    at new Float32Array (<anonymous>)
+    at GaussianSplatPrimitive.generateSplatTexture
+    at GaussianSplatPrimitive.update
+```
+It is not the request path — it reproduces with maximumRequestsPerServer=1.
+What's going on
+GaussianSplatPrimitive.generateSplatTexture copies all four attribute arrays on every snapshot rebuild:
+```
+const promise = GaussianSplatTextureGenerator.generateFromAttributes({
+  attributes: {
+    positions: new Float32Array(snapshot.positions),
+    scales: new Float32Array(snapshot.scales),
+    rotations: new Float32Array(snapshot.rotations),
+    colors: new Uint8Array(snapshot.colors),
+  },
+  count: snapshot.numSplats,
+});
+```
+The copies exist for a reason: generateFromAttributes transfers the buffers to the worker, and the snapshot's own arrays are still read afterwards (sorting, and the hard-cap truncation in processGeneratedSplatTextureData). But that prices every rebuild at ~44 bytes per splat — at 4.2M splats, ~185 MB of fresh contiguous allocations while the originals are still live. The primitive rebuilds whenever the selected tile set changes, so a moving camera does this over and over; the transferred buffers die in the worker each time, and the heap fragments until one of the four allocations fails. The memcpy plus allocations also land on the frame that kicks off the rebuild, right when the viewer is busiest.
+Related to #13503 — this churn is invisible to the cacheBytes accounting.
+Suggested fix
+Keep the copy, drop the allocations: the worker returns the four buffers in its transfer list, and each primitive reuses one staging set sized to its high-water splat count. Steady state then allocates nothing, the output is byte-identical, and the set dies with the primitive. A lost worker task (transfer went out, no result back) just costs one re-allocation later.
+This touches the same files as #13669 — the changes are orthogonal, but whichever lands second needs a rebase.
+PR incoming.
+Repro / environment
+Any splat tileset with a few million splats, a free camera, and time; it presents as "long sessions eventually crash". Chrome 152 / macOS. Reproduced on 1.145; the code is unchanged on current main (08a0d8db4b).
+Activity
+diegomazala
+changed the title [-]Gaussian splat snapshot rebuilds allocate four fresh attribute copies (~44 bytes/splat) every rebuild, fragmenting the heap until ArrayBuffer allocation fails[/-] [+]Long Gaussian splat sessions crash with RangeError: Array buffer allocation failed[/+] on Sep 18, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

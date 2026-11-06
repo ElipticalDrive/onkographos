@@ -1,0 +1,210 @@
+# Enhanced Sphere Tracing
+
+Also called: Aggressive Marching, Aggressive Ray Marching, Aggressive Sphere Tracing, Over-relaxed sphere tracing, Sphere tracing with over-relaxation
+
+## Overview
+Enhanced Sphere Tracing is a ray marching strategy that updates the ray position using a multiple of the queried signed distance value to accelerate convergence and allow controlled surface penetration [S1][S3, unofficial]. It solves the problem of slow convergence at grazing angles and vanishing geometry under non-uniform scaling by over-stepping along the ray, checking for overlap between consecutive spheres, and defaulting to conventional sphere tracing on failure [S2][S3, unofficial]. Unlike conventional sphere tracing, which uses the distance value directly as the step size, this method multiplies the step by a factor $\alpha > 1$ (or $\omega > 1$) to reduce the number of steps required to reach the surface, while maintaining robustness through safety checks [S1][S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A conservative signed distance field (SDF) function $f(p)$, a ray origin $o$, a ray direction $v$, a global Lipschitz bound $\lambda$ (optional, depending on variant), an over-relaxation/over-stepping factor ($\alpha$ or $\omega$ or $\sigma$), and a convergence threshold $\epsilon$.
+*   **Output:** The intersection point $p$ on the surface or the ray parameter $t$ where $|f(p)| < \epsilon$.
+
+**Data Structures:**
+*   **Ray State:** Current position $p$, current ray parameter $t$.
+*   **History:** Previous step size $t_e$ (or previous position) for overlap checking.
+*   **Constants:** $\alpha$ (aggressive factor), $\omega$ (over-relaxation factor), $\sigma$ (overstepping factor), $\lambda$ (global Lipschitz bound), $e$ (overstep factor in some implementations).
+
+**Numbered Steps:**
+
+1.  **Initialization:** Set current position $p = o$ and ray parameter $t = 0$. Initialize previous step size $t_e = 0.0$ [S4, unofficial]. Set maximum step count (e.g., 1024) [S3, unofficial].
+2.  **Loop:** While $t < b$ (max distance) and step count < max steps:
+    1.  **Query SDF:** Evaluate $d = f(p)$ [S1][S3, S4, unofficial].
+    2.  **Check Convergence:** If $|d| < \epsilon$, return $p$ (or $t$) [S1][S4, unofficial].
+    3.  **Calculate Step Size:**
+        *   *Variant A (Aggressive Marching [S1]):* Calculate step size $s = \alpha \cdot d$, where $\alpha > 1$ (default 1.5) [S1].
+        *   *Variant B (Over-relaxation [S3, unofficial]):* Calculate standard step $d_{std} = |d|$. Apply over-relaxation: $s = \omega \cdot d_{std}$, where $\omega = 1.6$ [S3, unofficial].
+        *   *Variant C (Over-stepping with Global Bound [S2]):* Calculate safe distance $s_{safe} = |d| / \lambda$. Calculate over-stepping distance $o(p) = (1 + \sigma) \cdot s_{safe}$, where $\sigma \in [0, 1]$ (practically $\approx 1.2$) [S2]. Set $s = o(p)$.
+        *   *Variant D (Lipschitz-based [S4, unofficial]):* Compute safe Lipschitz distance $t_k = |d| / k$, where $k$ is the local Lipschitz constant. Check if previous step $t_e$ was too large: if $t_k < (e - 1.0) \cdot t_e$, backtrack by subtracting $(e - 1.0) \cdot t_e$ from $t$ and reset $t_e = 0.0$. If check passes, update $t_e = t_k$ and advance $t$ by $\max(t_k \cdot e, \epsilon)$, where $e \in [1.0, 2.0]$ (e.g., 1.25) [S4, unofficial].
+    4.  **Safety Check (Overlap/Backtrack):**
+        *   *For Variants A & B:* Check if the new position $p_{new} = p + s \cdot \hat{v}$ (where $\hat{v}$ is the normalized ray direction) violates the safety of the previous sphere. Specifically, check if the spheres of two consecutive marching steps overlap [S2]. If the over-relaxed step overshoots the field's safe radius (i.e., the new position is further from the surface than the current safe sphere allows, or effectively if the step is too large relative to local geometry), retreat the position back to the last known safe sphere boundary to ensure the surface is never skipped [S3, unofficial]. If overlap check fails, default to conventional sphere tracing (set step size to $d$ or $|d|/\lambda$) [S2].
+        *   *For Variant C:* Compare the original Minimum Distance Sphere (MDS) with the new MDS. If they overlap, continue marching. If they do not overlap, step back to the edge of the first MDS and continue normally [S6, unofficial].
+    5.  **Update Position:** If safety check passes, update $p \leftarrow p + s \cdot \hat{v}$ (or $t \leftarrow t + s$) [S1][S3, S4, unofficial].
+    6.  **Increment Step Count.**
+3.  **Termination:** If max steps reached or max distance exceeded, return failure or last position [S3, S4, unofficial].
+
+**Formulas:**
+*   **Convergence Condition (Aggressive Marching):** The distance to the surface after $k$ steps is $|d(1 - \alpha \sin \theta)^k| < \epsilon$, where $d$ is the initial ray distance, $\alpha$ is the aggressive factor, $\theta$ is the angle between the camera ray and the surface normal, and $\epsilon$ is the convergence threshold [S1].
+*   **Minimum Steps:** $k > k_{min} = \frac{\log \epsilon - \log d}{\log |1 - \alpha \sin \theta|}$, derived when $|1 - \alpha \sin \theta| < 1$ [S1].
+*   **Over-stepping Distance (Global Bound):** $o(p) = (1 + \sigma) \frac{|f(p)|}{\lambda}$, where $\sigma$ is the overstepping factor and $\lambda$ is the global Lipschitz bound [S2].
+
+**Parameters:**
+*   $\alpha$ (Aggressive Factor): Multiplier for the signed distance step size. Typical value: 1.5. Range 1.2 to 1.8 produces effective results. Small $\alpha$ causes slow convergence; large $\alpha$ causes holes in thin areas [S1].
+*   $\omega$ (Over-relaxation Factor): Multiplier for the absolute distance step. Value: 1.6 [S3, unofficial].
+*   $\sigma$ (Overstepping Factor): Value in range $[0, 1]$. In practice, $\sigma \approx 1.2$ is used [S2].
+*   $e$ (Overstep Factor): Constant in range $[1.0, 2.0]$. Implementation value: 1.25 [S4, unofficial].
+*   $\lambda$ (Global Lipschitz Bound): Required for Variant C [S2].
+*   $k$ (Local Lipschitz Constant): Required for Variant D [S4, unofficial].
+*   Step Cap: Maximum number of steps. Value: 1024 [S3, unofficial]. Note: The cap is headroom; the fix is the over-relaxation/backtrack logic [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Thin Geometry:** If geometry is super thin, a single aggressive step may trespass two surfaces, leaving the ray front end outside the shape. This causes infinite marching and artifacts (small holes) [S1].
+*   **Non-Conservative Fields:** Precondition: The distance field must be conservative (never overstate distance). If the field overstates distance, over-relaxation is unsound and may skip surfaces [S3, unofficial].
+*   **Grazing Angles:** Standard sphere tracing becomes unexpectedly slow when the angle between the camera ray and the surface is small (grazing incidence). Enhanced sphere tracing mitigates this [S1].
+*   **Global vs Local Bound:** Over-stepping is not directly compatible with local Lipschitz bound approaches because it relies on a global bound $\lambda$ [S2].
+*   **Precision:** Ensure floating-point precision is sufficient for small $\epsilon$ and large $\alpha$ to avoid jitter or missed intersections [G].
+
+**Pseudocode (Aggressive Marching Variant [S1]):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def enhanced_sphere_tracing(sdf, ray_origin, ray_direction, alpha=1.5, epsilon=1e-5, max_steps=1024):
+    """
+    Enhanced Sphere Tracing using aggressive marching factor alpha.
+    
+    Args:
+        sdf: Function f(p) returning signed distance.
+        ray_origin: Vector3, start of ray.
+        ray_direction: Vector3, normalized direction of ray.
+        alpha: Float, aggressive factor (> 1.0). Default 1.5.
+        epsilon: Float, convergence threshold.
+        max_steps: Int, maximum number of steps.
+        
+    Returns:
+        Vector3: Intersection point, or ray_origin + ray_direction * infinity if not found.
+    """
+    p = ray_origin
+    for i in range(max_steps):
+        # 1. Query SDF
+        d = sdf(p)
+        
+        # 2. Check Convergence
+        if abs(d) < epsilon:
+            return p
+            
+        # 3. Calculate Step Size
+        # Aggressive step: multiply distance by alpha
+        step_size = alpha * d
+        
+        # 4. Safety Check (Overlap)
+        # Check if the sphere at p with radius |d| and sphere at p_new with radius |d_new| overlap.
+        # Simplified check: ensure step_size does not exceed the distance to the surface 
+        # in a way that skips it. For aggressive marching, we assume the field is well-behaved 
+        # and alpha is chosen to prevent skipping in most cases. 
+        # If strict overlap check is needed (as in [S2]), we would compute p_new, 
+        # query d_new, and check if |p_new - p| <= |d| + |d_new|.
+        # Here we follow [S1] which relies on alpha and convergence condition.
+        
+        # 5. Update Position
+        p = p + step_size * ray_direction
+        
+    # Max steps reached
+    return p + ray_direction * float('inf')
+```
+
+**Pseudocode (Over-relaxation Variant [S3, unofficial]):**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def over_relaxed_sphere_tracing(sdf, ray_origin, ray_direction, omega=1.6, epsilon=1e-5, max_steps=1024):
+    """
+    Enhanced Sphere Tracing using over-relaxation and backtrack on overshoot.
+    
+    Args:
+        sdf: Function f(p) returning signed distance.
+        ray_origin: Vector3, start of ray.
+        ray_direction: Vector3, normalized direction of ray.
+        omega: Float, over-relaxation factor. Default 1.6.
+        epsilon: Float, convergence threshold.
+        max_steps: Int, maximum number of steps.
+        
+    Returns:
+        Vector3: Intersection point, or ray_origin + ray_direction * infinity if not found.
+    """
+    p = ray_origin
+    prev_p = ray_origin
+    
+    for i in range(max_steps):
+        # 1. Query SDF
+        d = sdf(p)
+        
+        # 2. Check Convergence
+        if abs(d) < epsilon:
+            return p
+            
+        # 3. Calculate Step Size
+        # Standard sphere tracing step
+        safe_dist = abs(d)
+        # Over-relax the step
+        step_size = omega * safe_dist
+        
+        # 4. Safety Check (Backtrack if overshoot)
+        # Calculate new position
+        p_new = p + step_size * ray_direction
+        
+        # Check if the new position is further from the surface than the current safe sphere allows.
+        # This is a heuristic for "overshooting the field's safe radius".
+        # A robust check: query SDF at p_new. If the distance at p_new is significantly larger 
+        # than the distance we "jumped over", we might have skipped the surface.
+        # However, [S3, unofficial] specifies: "retreat the position back to the last known safe sphere boundary".
+        # The last known safe sphere boundary is p + safe_dist * ray_direction (if moving forward)
+        # or more precisely, the point where the sphere of radius |d| centered at p touches the ray.
+        
+        # Simplified backtrack logic based on [S3, unofficial]:
+        # If the step is too large relative to the local geometry, retreat.
+        # We can approximate this by checking if the new SDF value is much larger than expected.
+        # But [S3, unofficial] implies a geometric check: "overshoots the field's safe radius".
+        # Let's implement the retreat to the last safe sphere boundary.
+        # The last safe sphere boundary is p + sign(d) * safe_dist * ray_direction? 
+        # No, the safe sphere is centered at p with radius |d|. The ray exits this sphere at p + sign(d)*|d|*ray_direction?
+        # Actually, the safe step is |d|. So the boundary is p + sign(d)*|d|*ray_direction.
+        # If we stepped further, we are outside.
+        
+        # Let's use the overlap check from [S2] as a proxy for safety, as [S3, unofficial] is less explicit on the exact formula 
+        # but emphasizes the retreat.
+        # Overlap check: |p_new - p| <= |d| + |sdf(p_new)|
+        d_new = sdf(p_new)
+        if abs(p_new - p) > abs(d) + abs(d_new):
+            # Overshoot detected, retreat to last safe sphere boundary
+            # The last safe sphere is centered at p with radius |d|.
+            # The ray intersects this sphere at p + sign(d) * |d| * ray_direction.
+            # We retreat to this point.
+            p = p + sign(d) * abs(d) * ray_direction
+            # Continue to next iteration from this safe point
+            continue
+        else:
+            # Safe to advance
+            p = p_new
+            
+    return p + ray_direction * float('inf')
+```
+
+## Subtopics
+
+### [Parallel Sphere Carving Algorithm](4165-parallel-sphere-carving-algorithm.md)
+The Parallel Sphere Carving Algorithm is a method for automatically computing tight bounding volumes for objects defined by a conservative signed distance field (SDF). It solves the problem of accelerating implicit surface queries (such as sphere tracing or polygonization) by generating a lightweight bounding proxy function $f_e$ that avoids expensive SDF evaluations outside the object. Unlike sphere tracing, which discards empty segments along a ray to find an intersection, Sphere Carving discards empty volumes (spheres) in space to find a bounding volume of the surface. It is agnostic of the function representation, requiring only a conservative SDF query, and provides strict bounding guarantees that neural or interval-arithmetic methods may lack.
+
+### Overstepping
+A technique where you march a small distance further outside the Minimum Distance Sphere (MDS) edge to decrease the number of times marched, increasing performance [S6, unofficial]. March to the edge of the MDS, then march a small distance further outside. Compare the original MDS with the new MDS; if they overlap, continue marching further. If the two MDSs do not overlap, step back to the edge of the first MDS and continue normally [S6, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Reduces the number of steps $k$ required for convergence compared to conventional sphere tracing, especially at grazing angles [S1]. For $d=1.0$, $\epsilon=5 \times 10^{-5}$, and $\theta=10$ degrees, minimum steps decrease from 52 (conventional) to 33 (aggressive with $\alpha=1.5$) [S1]. Using $\sigma \approx 1.2$ reduces field function queries by a factor of 1.2 and speeds up computation time by the same factor [S2].
+*   **Memory Complexity:** No additional memory overhead beyond standard sphere tracing, as it only modifies the step size calculation and adds a few variables for history/overlap checking [S2][S3, unofficial].
+*   **Measured Performance:** On a 432x756 resolution using ANGLE/Metal backend, the performance cost at the worst angle increased from 0.105 ms/frame to 0.165 ms/frame [S3, unofficial]. Coverage improvement for conditioning ratio 60: 0.00% (before) to 12.42% (after) [S3, unofficial]. Coverage improvement for conditioning ratio 120: 0.00% (before) to 12.78% (after) [S3, unofficial].
+*   **Strengths:** Accelerates convergence for rays grazing surfaces; allows sampling behind the surface to stabilize training; prevents valid geometry from vanishing at grazing angles under high non-uniform scaling ratios [S1][S3, unofficial].
+*   **Limitations:** Can cause holes in thin areas if $\alpha$ is too large; requires conservative SDFs for over-relaxation to be sound; not directly compatible with local Lipschitz bound approaches if using global bound over-stepping [S1, S2][S3, unofficial].
+*   **When to Use:** When rendering with neural SDFs or complex implicit surfaces where convergence speed is critical, and the SDF is known to be conservative. Particularly useful for training differentiable rendering pipelines [S1].
+*   **When Not to Use:** When the SDF is not conservative (may skip surfaces); when rendering extremely thin geometry with high $\alpha$ (may cause holes); when local Lipschitz bounds are available and preferred over global bounds [S2][S3, unofficial].
+
+## Background
+Enhanced Sphere Tracing, also known as Aggressive Marching or Over-relaxed Sphere Tracing, was attributed to Keinert et al. 2014 [S3, unofficial]. It was developed to address the inefficiencies of standard sphere tracing, particularly at grazing angles and under non-uniform scaling [S1][S3, unofficial]. It is used in differentiable rendering pipelines, such as DIST (Deep Implicit Signed Distance Function) [S1], and in real-time renderers like Sinter [S3, unofficial].
+
+## Sources
+[S1] DIST: Rendering Deep Implicit Signed Distance Function With Differentiable Sphere Tracing, https://doi.org/10.1109/cvpr42600.2020.00209, fetched 2026-10-26
+[S2] Segment Tracing Using Local Lipschitz Bounds, https://doi.org/10.1111/cgf.13951, fetched 2026-10-26
+[S3] Over-relax the viewport sphere tracer so scaled fields stop dropping out, https://github.com/kmatzen/sinter/pull/79, fetched 2026-10-27 (unofficial)
+[S4] aparis69/Segment-Tracing, https://github.com/aparis69/Segment-Tracing, fetched 2026-10-27 (unofficial)
+[S5] Modelado de geometría mediante "Signed Distance Functions" y desarrollo de algoritmos para su intersección, https://core.ac.uk/download/478827061.pdf, fetched 2026-10-30 (unofficial)
+[S6] Sphere Tracing GPU An evaluation of the Sphere Tracing algorithm and a GPU designed to run it, https://odr.chalmers.se/items/37b0e53f-fc76-4b0e-96d8-8e864573ada9/full, fetched 2026-10-29 (unofficial)

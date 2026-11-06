@@ -1,0 +1,308 @@
+--- v004.md
++++ v005.md
+@@ -1,138 +1,196 @@
+ # Ray-box intersection
+-Also called: Slab Test, Slab Method, Smits' method, AABB Slab Method, Slab intersection, AABB Ray Intersection, Ray-AABB Intersection, Ray-BBox Intersection, Kay and Kajiya slab test, Smits' Ray-Box Intersection, Ray-Bounding Box Intersection, Ray-Axis-Aligned Bounding Box Intersection
++
++Also called: AABB Ray Intersection, AABB Slab Method, Divide and Conquer Ray/Box Intersection, Ray-AABB Intersection, Slab Test, Ray/Box Intersection Test, Slab intersection, Slab intersection test, Slab-based Ray/Box Intersection, Smits' Ray-Box, Smits' method
+ 
+ ## Overview
+-The ray-box intersection method determines whether a ray intersects an axis-aligned bounding box (AABB) by treating the box as the intersection of three pairs of parallel planes, known as slabs [S1, S3, unofficial]. It computes the entry ($t_{near}$) and exit ($t_{far}$) distances for each slab pair and checks for overlap across all three axes [S1, S3, unofficial]. Unlike general primitive intersection methods, this approach exploits the axis-aligned nature of the box to reduce the problem to simple scalar comparisons and vector operations, making it the dominant technique for bounding volume hierarchy traversal in ray tracing [S2, S3, unofficial].
++
++Ray-box intersection computes the parametric entry ($t_{near}$) and exit ($t_{far}$) distances of a ray intersecting an Axis-Aligned Bounding Box (AABB), returning the interval $[t_{near}, t_{far}]$ along the ray parameter $t$ [S2, S3, S14, S16, S21, S28, S44, S55, unofficial]. It solves the problem of determining the valid sampling range for volume rendering or the traversal bounds for acceleration structures, enabling early rejection of rays that miss the volume entirely [S1, S11, S23, S26, S38, unofficial]. Unlike [Ray-primitive intersection](769-ray-primitive-intersection.md) siblings that return boolean hits or complex normals, this method provides the precise scalar interval required for subsequent volume sampling or traversal [S6, S14, S21, S23, S28, S55, unofficial]. It differs from [Ray-OBB Intersection Test](6603-ray-obb-intersection-test.md) by assuming axis alignment, which allows the use of the efficient slab method without rotation matrices [S6603].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Inputs:**
+-*   **Ray:** Defined by origin $\mathbf{o} = (o_x, o_y, o_z)$ and direction $\mathbf{v} = (v_x, v_y, v_z)$, parameterized as $\mathbf{p}(t) = \mathbf{o} + t\mathbf{v}$ [S1, S3, unofficial].
+-*   **AABB:** Defined by minimum corner $\mathbf{p}_0 = (x_0, y_0, z_0)$ and maximum corner $\mathbf{p}_1 = (x_1, y_1, z_1)$ [S1, S2, S3, unofficial].
+-*   **Ray Interval (Optional):** A valid hit distance interval $[t_{min}, t_{max}]$ representing the range of $t$-values on the ray that count as a hit [S3, S4, unofficial].
+ 
+-**Outputs:**
+-*   Boolean indicating intersection.
+-*   If intersecting, the entry distance $t_{near}$ and exit distance $t_{far}$ [S1, S4, unofficial].
++**Inputs and Outputs**
++*   **Input:** Ray origin $\mathbf{o} = (o_x, o_y, o_z)$, ray direction $\mathbf{d} = (d_x, d_y, d_z)$ (non-zero), and AABB bounds defined by minimum corner $\mathbf{b}_{min} = (b_{min,x}, b_{min,y}, b_{min,z})$ and maximum corner $\mathbf{b}_{max} = (b_{max,x}, b_{max,y}, b_{max,z})$ [S46, S48, unofficial][S50, S54].
++*   **Output:** A boolean indicating intersection and the interval $[t_{near}, t_{far}]$ where $t_{near} = \max(t_{min,x}, t_{min,y}, t_{min,z})$ and $t_{far} = \min(t_{max,x}, t_{max,y}, t_{max,z})$ [S2, S3, S14, S28, S44, S55, unofficial]. If no intersection, returns $(\infty, -\infty)$ or a miss flag [S3, unofficial][S56].
+ 
+-### Data Structures
+-The method operates on scalar values or 3D vectors [S2, S3, unofficial].
+-*   **Inverse Ray Direction:** $\mathbf{invV} = (1/v_x, 1/v_y, 1/v_z)$ [S3, S4, unofficial].
+-*   **Interval Vectors:** Vectors storing the computed $t$-values for the lower and upper bounds of each axis [S3, S4, unofficial].
++**Data Structures**
++The AABB is typically stored as two 3D vectors or six floats: `box_min` and `box_max` [S6, S14, S16, S23, S24, S28, S48, unofficial][S54]. Some implementations use an array of three pairs `x_minmax[2]`, `y_minmax[2]`, `z_minmax[2]` to facilitate component-wise operations [S52, unofficial].
+ 
+-### Algorithm Steps
+-The method can be implemented in two primary styles: the iterative scalar approach (Kay and Kajiya original) and the compact vector approach (widely used in modern kernels) [S2, S3, unofficial].
++**Steps**
++1.  **Precompute Inverse Direction:** Calculate $\mathbf{inv\_d} = (1/d_x, 1/d_y, 1/d_z)$ to replace division with multiplication [S8, S12, S15, S29, S45, S48, unofficial][S50][S58, S62, unofficial]. Handle near-zero direction components to avoid division by zero. Common strategies include:
++    *   Clamping: If $|d_i| < \epsilon$, set $inv\_d_i = \text{sign}(d_i) \cdot \epsilon^{-1}$ or a large constant like $10^{32}$ [S26, S37, S41, S43, S59, unofficial].
++    *   Epsilon addition: Add $\epsilon$ to $d_i$ before inversion [S22, S36, S39, S61, unofficial].
++    *   Explicit check: If $d_i = 0$, check if the ray origin lies within the box bounds for that axis; if not, return miss [S2, S3, S5, S6, S17, S51, unofficial].
++2.  **Compute Slab Intersections:** For each axis $i \in \{x, y, z\}$, calculate the intersection parameters with the near and far planes of the slab:
++    $$ t_{i1} = (b_{min,i} - o_i) \cdot inv\_d_i $$
++    $$ t_{i2} = (b_{max,i} - o_i) \cdot inv\_d_i $$
++    [S4, S12, S14, S19, S24, unofficial][S27][S28, S30, S35, S37, S41, S43, S49, S51, S59, S60, S62, unofficial].
++3.  **Order Slab Intervals:** Ensure $t_{i1} \le t_{i2}$ for each axis. If $d_i < 0$, the ray enters at $b_{max,i}$ and exits at $b_{min,i}$, so swap $t_{i1}$ and $t_{i2}$ [S2, S4, S6, S10, S15, S19, S32, S46, unofficial][S56]. Alternatively, compute $t_{min,i} = \min(t_{i1}, t_{i2})$ and $t_{max,i} = \max(t_{i1}, t_{i2})$ [S7, S23, S24, S28, S39, S51, S55, unofficial].
++4.  **Intersect Slabs:** Compute the global entry and exit distances:
++    $$ t_{near} = \max(t_{min,x}, t_{min,y}, t_{min,z}) $$
++    $$ t_{far} = \min(t_{max,x}, t_{max,y}, t_{max,z}) $$
++    [S2, S7, S14, S23, S24, S28, S39, S44, unofficial][S54][S55, unofficial].
++5.  **Check Intersection:** The ray intersects the box if $t_{near} \le t_{far}$ and $t_{far} \ge 0$ [S2, S23, S55, unofficial]. If $t_{near} < 0$, the ray origin is inside the box; $t_{near}$ is often clamped to 0 or a small epsilon to avoid self-intersection [S4, S26, S35, S44, unofficial].
+ 
+-#### 1. Iterative Scalar Approach
+-This approach processes each axis (X, Y, Z) sequentially, updating global $t_{near}$ and $t_{far}$ values [S1, unofficial].
++**Pseudocode**
++```python
++def ray_box_intersection(ray_origin, ray_direction, box_min, box_max, epsilon=1e-8):
++    """
++    Computes the intersection interval [t_near, t_far] of a ray with an AABB.
++    
++    Args:
++        ray_origin: tuple (ox, oy, oz)
++        ray_direction: tuple (dx, dy, dz)
++        box_min: tuple (xmin, ymin, zmin)
++        box_max: tuple (xmax, ymax, zmax)
++        epsilon: tolerance for near-zero direction components
++        
++    Returns:
++        (bool, float, float): (hit, t_near, t_far)
++    """
++    # 1. Precompute inverse direction with robustness
++    inv_dir = []
++    for i in range(3):
++        d = ray_direction[i]
++        if abs(d) < epsilon:
++            # Handle parallel ray: check if origin is within bounds
++            if not (box_min[i] <= ray_origin[i] <= box_max[i]):
++                return False, float('inf'), float('-inf')
++            # Use a large value for inverse to effectively ignore this axis in min/max logic
++            # or handle via explicit bounds check in step 4. 
++            # Here we use a large constant to simulate 1/0 without division by zero,
++            # but the sign matters for swapping. 
++            # A robust approach is to set inv_dir to 0 and handle parallel case separately,
++            # or use the explicit check above and return early if out of bounds.
++            # For this implementation, we assume the explicit check above handles misses.
++            # If we are here, the ray is inside the slab for this axis.
++            inv_dir.append(0.0) 
++        else:
++            inv_dir.append(1.0 / d)
+ 
+-1. Initialize $t_{near} = -\infty$ and $t_{far} = \infty$ [S1, unofficial].
+-2. For each axis $i \in \{x, y, z\}$:
+-    a. Let $o_i$ be the ray origin component, $v_i$ be the ray direction component, $min_i$ be the box minimum coordinate, and $max_i$ be the box maximum coordinate [S1, S3, unofficial].
+-    b. Check for parallelism: If $v_i = 0$:
+-        i. If $o_i < min_i$ or $o_i > max_i$, the ray is outside the slab. Return `false` (miss) [S1, unofficial].
+-        ii. Otherwise, the ray is inside the slab along this axis; continue to the next axis [S1, unofficial].
+-    c. Compute intersection distances with the near and far planes of the slab:
+-        $$t_1 = \frac{min_i - o_i}{v_i}$$
+-        $$t_2 = \frac{max_i - o_i}{v_i}$$
+-    d. Ensure $t_1$ is the smaller value (entry) and $t_2$ is the larger value (exit). If $t_1 > t_2$, swap $t_1$ and $t_2$ [S1, unofficial].
+-    e. Update the global intersection interval:
+-        $$t_{near} = \max(t_{near}, t_1)$$
+-        $$t_{far} = \min(t_{far}, t_2)$$
+-    f. Check for miss: If $t_{near} > t_{far}$, the intervals do not overlap. Return `false` [S1, unofficial].
+-    g. Check if the box is behind the ray: If $t_{far} < 0$, the entire box is behind the ray origin. Return `false` [S1, unofficial].
+-3. If the loop completes without returning `false`, the ray intersects the box. Return `true` [S1, unofficial].
+-
+-#### 2. Compact Vector Approach
+-This approach computes all intersections in parallel using vector operations, often branchless [S2, S3, unofficial].
+-
+-1. Compute the inverse ray direction: $\mathbf{invV} = (1/v_x, 1/v_y, 1/v_z)$ [S3, S4, unofficial].
+-2. Compute the $t$-values for the lower and upper bounds of the box:
+-    $$\mathbf{t}_{lower} = (\mathbf{p}_0 - \mathbf{o}) \odot \mathbf{invV}$$
+-    $$\mathbf{t}_{upper} = (\mathbf{p}_1 - \mathbf{o}) \odot \mathbf{invV}$$
+-    where $\odot$ denotes component-wise multiplication [S3, S4, unofficial].
+-3. Determine the entry and exit $t$-values for each slab by taking the component-wise minimum and maximum of $\mathbf{t}_{lower}$ and $\mathbf{t}_{upper}$:
+-    $$\mathbf{t}_{min\_slabs} = \min(\mathbf{t}_{lower}, \mathbf{t}_{upper})$$
+-    $$\mathbf{t}_{max\_slabs} = \max(\mathbf{t}_{lower}, \mathbf{t}_{upper})$$
+-4. Incorporate the ray's valid hit interval $[t_{min}, t_{max}]$ as a fourth dimension (or separate scalar check) [S3, S4, unofficial].
+-    $$t_{box\_min} = \max(\mathbf{t}_{min\_slabs}.x, \mathbf{t}_{min\_slabs}.y, \mathbf{t}_{min\_slabs}.z, t_{min})$$
+-    $$t_{box\_max} = \min(\mathbf{t}_{max\_slabs}.x, \mathbf{t}_{max\_slabs}.y, \mathbf{t}_{max\_slabs}.z, t_{max})$$
+-5. The ray intersects the box if $t_{box\_min} \le t_{box\_max}$ [S3, S4, unofficial].
+-
+-### Pseudocode (Compact Vector Style)
+-The following Python-like pseudocode implements the robust compact vector approach, handling zero direction components and negative zeros correctly per IEEE 754 standards [S6, unofficial][S14][S16, unofficial].
+-
+-```python
+-def slabs_box_test(p0, p1, ray_origin, ray_dir, ray_t_min, ray_t_max):
+-    """
+-    Determines if a ray intersects an AABB.
+-    Handles zero direction components and negative zeros robustly.
+-    """
+-    t_near = float('-inf')
+-    t_far = float('inf')
++    # 2. Compute slab intersections
++    # t_min_vals and t_max_vals will store the entry and exit t for each axis slab
++    t_min_vals = []
++    t_max_vals = []
+     
+     for i in range(3):
+-        if ray_dir[i] == 0.0:
+-            if ray_origin[i] < p0[i] or ray_origin[i] > p1[i]:
+-                return False, None, None
+-            continue
++        # Calculate t values for min and max bounds
++        t1 = (box_min[i] - ray_origin[i]) * inv_dir[i]
++        t2 = (box_max[i] - ray_origin[i]) * inv_dir[i]
+         
+-        inv_d = 1.0 / ray_dir[i]
+-        t1 = (p0[i] - ray_origin[i]) * inv_d
+-        t2 = (p1[i] - ray_origin[i]) * inv_d
+-        
+-        if inv_d >= 0.0:
+-            t_near = max(t_near, t1)
+-            t_far = min(t_far, t2)
++        # 3. Order slab intervals
++        if t1 <= t2:
++            t_min_vals.append(t1)
++            t_max_vals.append(t2)
+         else:
+-            t_near = max(t_near, t2)
+-            t_far = min(t_far, t1)
+-            
+-        if t_near > t_far:
+-            return False, None, None
+-        if t_far < 0.0:
+-            return False, None, None
+-            
+-    return True, max(t_near, ray_t_min), min(t_far, ray_t_max)
++            t_min_vals.append(t2)
++            t_max_vals.append(t1)
++
++    # 4. Intersect slabs
++    t_near = max(t_min_vals)
++    t_far = min(t_max_vals)
++
++    # 5. Check intersection
++    # Intersection is valid if the intervals overlap and the exit is in the future
++    if t_near <= t_far and t_far >= 0.0:
++        # Clamp t_near to 0 if ray starts inside
++        if t_near < 0.0:
++            t_near = 0.0
++        return True, t_near, t_far
++    else:
++        return False, float('inf'), float('-inf')
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Ray Direction:** Must be normalized in many applications, but the algorithm works with unnormalized directions as long as `inv_ray_dir` is computed correctly [S3, S4, unofficial].
+-*   **Box Corners:** $\mathbf{p}_0$ and $\mathbf{p}_1$ must satisfy $p_{0,i} \le p_{1,i}$ for all $i \in \{x,y,z\}$ [S1, S2, S3, unofficial].
+-*   **Ray Interval:** The interval $[t_{min}, t_{max}]$ represents the valid hit distances on the ray [S3, S4, unofficial]. Typical values are not given in the sources [G].
++**Parameters**
++*   `epsilon`: Floating-point tolerance for near-zero direction components. Typical value: $1.0 \times 10^{-6}$ or $1.0 \times 10^{-8}$ [S2, S6, S39, unofficial].
++*   `t_near_clip`: Minimum t value to avoid self-intersection. Typical value: $10^{-4}$ [S26, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Zero Direction Components:** The algorithm produces correct results for rays with zero direction components (parallel to axes) provided the hardware is IEEE floating-point compliant [S3, S4, unofficial]. The division by zero in `inv_ray_dir` results in infinity, which is handled correctly by the min/max logic [S3, S4, unofficial]. Explicit checks for $v_i = 0$ prevent `NaN` generation when the ray origin lies exactly on a box boundary [S6, unofficial][S14].
+-*   **Negative Zero Direction:** If a direction component is `-0.0`, testing the sign of the direction itself fails due to IEEE 754 rules. The robust implementation tests the sign of the reciprocal direction component instead [S14][S16, unofficial].
+-*   **Ray Origin on Box Face:** If the ray origin lies exactly on the box surface and the direction points along the face, naive implementations may result in `NaN` (Not a Number), causing the test to return `false` [S3, S4, unofficial]. This behavior can be modified if specific handling is required [S3, S4, unofficial].
+-*   **Branchless Optimization:** Removing early exit checks (like `if t_near > t_far`) creates a branchless implementation. While this performs more arithmetic operations, it significantly increases performance on modern hardware by avoiding branch mispredictions [S3, unofficial].
++**Edge Cases and Pitfalls**
++*   **Parallel Rays:** If a ray direction component is zero, the ray is parallel to the slab planes. If the ray origin is outside the box bounds for that axis, there is no intersection [S2, S3, S5, S6, S17, S51, unofficial]. If inside, the slab imposes no constraint on $t$ [S51, unofficial].
++*   **Ray Origin Inside Box:** If $t_{near} < 0$, the ray starts inside the box. The intersection interval should be adjusted to $[0, t_{far}]$ or $[\epsilon, t_{far}]$ to prevent self-intersection in subsequent sampling [S4, S26, S35, S44, unofficial].
++*   **Precision:** Using precomputed inverse direction is faster but can introduce precision issues if not handled carefully with epsilon [S8, S15, S58, unofficial]. IEEE floating-point properties can be used to handle -0.0 direction components correctly [S56].
+ 
+ ## Subtopics
+ 
+ ### Annulus Box Bounds Conversion
+-Converts an inner bounding box to a list of bounds relative to an enclosing box, adding entries for sides where the inner box is strictly contained [S3, unofficial]. It initializes a counter, loops over dimensions to count boundaries, allocates an array of `ANNorthHalfSpace` structs, and populates them with dimension index, cutting value, and sign (+1 or -1) based on whether the inner box's lower or upper bound is strictly inside the enclosing box [S3, unofficial].
++Converts an inner bounding box to a list of bounds relative to an enclosing box, adding entries for sides where the inner box is strictly contained [S25, unofficial]. It is used to define clipping planes for ray-box intersection in specific traversal contexts. The data structure `ANNorthHalfSpace` stores the dimension index `cd`, cutting value `cv`, and sign `sd` (+1 or -1) [S25, unofficial].
+ 
+-### Ray-Box Intersection via OpenGL Geometry Shaders
+-Computes entry and exit points of rays intersecting a bounding box by rendering the box geometry to textures using OpenGL, storing hit positions in 16-bit floating point textures [S17, unofficial]. It creates a Framebuffer Object (FBO) with `GL_RGBA16F` color attachments and a `GL_DEPTH_COMPONENT16` depth renderbuffer, enables face culling and depth testing, and draws the cube geometry using a hit shader program passing the MVP matrix as a uniform [S17, unofficial]. The depth buffer must be cleared along with the color buffer, and correct depth writing from the geometry shader is required [S17, unofficial].
++### AABB Representation (Min/Max)
++An AABB represented by storing the minimum and maximum coordinate values for each axis [S52, unofficial]. This representation is preferred over point-plus-dimensions because computing the bounding box enclosing two other boxes is trivial (component-wise min/max) [S52, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The algorithm performs a fixed number of arithmetic operations and comparisons regardless of scene complexity [S3, S4, unofficial].
+-*   **Performance:** The slabs test is the dominant method for AABB intersection due to its simplicity and efficiency [S3, S4, unofficial]. Branchless implementations are preferred in high-performance ray tracing kernels (e.g., Embree) to maximize throughput on SIMD units and GPUs [S3, unofficial].
+-*   **Strengths:** Fast, robust, easy to implement, works well with SIMD/vectorization [S3, S4, unofficial].
+-*   **Limitations:** Only applicable to axis-aligned boxes [S3, S4, unofficial].
++
++*   **Time Complexity:** $O(1)$ per ray-box test, involving a constant number of arithmetic operations (6 subtractions, 6 multiplications, 6 comparisons, 3 max/min operations) [S8, S49, S58, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary space [S8, unofficial].
++*   **Performance:** The slab method is highly efficient and branchless when implemented with SIMD instructions (e.g., SSE) [S49, S60, unofficial]. Precomputing the inverse direction replaces divisions with multiplications, offering a significant speedup [S8, S15, S58, unofficial]. Transformations to axis-normalized space can further reduce branch mispredictions and instruction fetches [S57, S58, unofficial].
++*   **Strengths:** Simple, robust, and fast. Handles parallel rays and rays starting inside the box correctly [S2, S3, S5, S6, unofficial][S56].
++*   **Limitations:** Assumes axis alignment. For oriented boxes, transformation to local space is required, increasing cost [S6603].
++*   **When to use:** As the primary intersection test for volume bounding boxes, voxel grids, and acceleration structures (octrees, BVHs) in volume rendering and ray tracing [S1, S8, S10, S11, S19, S26, S38, S42, S44, unofficial].
+ 
+ ## Background
+-*   **Origin:** The method was introduced by T. L. Kay and J. T. Kajiya in their 1986 paper "Ray tracing complex scenes" presented at SIGGRAPH [S2, S3, unofficial].
+-*   **Development:** The algorithm has become the standard for AABB intersection in ray tracing. It is widely used in modern ray tracing kernels such as Embree and in astronomical simulation tools like raytheia [S3, S4, unofficial].
+-*   **Usage:** It is used for primary ray-scene intersection testing, shadow ray occlusion testing, frustum culling, and spatial traversal of octree and grid acceleration structures [S5, unofficial].
++
++The slab method for ray-AABB intersection is a fundamental technique in computer graphics, originating from the work of Kay and Kajiya (1986) and popularized by Williams et al. (2005) [S5, S10, unofficial][S47]. It is widely used in volume rendering for determining the entry and exit points of rays into the volume dataset, enabling efficient voxel traversal [S1, S3, S8, S11, S13, S21, S23, S28, S38, S44, unofficial]. The method is also a core component of ray tracing acceleration structures like BVHs and octrees [S10, S42, S44, unofficial].
+ 
+ ## Sources
+-[S1] Ray‐Box Intersection Using the Slab Method | Every Algorithm, https://every-algorithm.github.io/2024/11/09/slab_method.html, fetched 2026-10-29 (unofficial)
+-[S2] Ray - Box Intersection - ACM SIGGRAPH, https://education.siggraph.org/static/HyperGraph/raytrace/rtinter3.htm, fetched 2026-10-29 (unofficial)
+-[S3] (PDF) Ray Axis-Aligned Bounding Box Intersection - ResearchGate, https://www.researchgate.net/publication/354064987_Ray_Axis-Aligned_Bounding_Box_Intersection, fetched 2026-10-30 (unofficial)
+-[S4] RAY AXIS-ALIGNED BOUNDING BOX INTERSECTION, https://link.springer.com/content/pdf/10.1007/978-1-4842-7185-8_2.pdf, fetched 2026-10-29 (unofficial)
+-[S5] intersect: AABB Ray Intersection Algorithm - glre.dev, https://glre.dev/addons/geometry/aabb/intersect/, fetched 2026-10-29 (unofficial)
+-[S6] Fast, Branchless Ray/Bounding Box Intersections - tavianator.com, https://tavianator.com/2011/ray_box.html, fetched 2026-10-29 (unofficial)
+-[S14] PDF An Efficient and Robust Ray-Box Intersection Algorithm, https://people.csail.mit.edu/amy/papers/box-jgt.pdf, fetched 2026-10-29
+-[S16] (PDF) An Efficient and Robust Ray-Box Intersection Algorithm, https://www.researchgate.net/publication/220494140_An_Efficient_and_Robust_Ray-Box_Intersection_Algorithm, fetched 2026-11-01 (unofficial)
+-[S17] franjaviersans/VRCUDA, https://github.com/franjaviersans/VRCUDA, fetched 2026-10-27 (unofficial)+
++[S1] Volume Rendering Based On 3D Voxel Grids, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-voxel-grids.html, fetched 2026-10-24 (unofficial)
++[S2] hectorpiteau/sparse-voxels, https://github.com/hectorpiteau/sparse-voxels, fetched 2026-10-24 (unofficial)
++[S3] Noah-Everett/Fast-Voxel-Traversal-Python, https://github.com/Noah-Everett/Fast-Voxel-Traversal-Python, fetched 2026-10-24 (unofficial)
++[S4] newDINO/voxel_ray_demo, https://github.com/newDINO/voxel_ray_demo, fetched 2026-10-24 (unofficial)
++[S5] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)
++[S6] RMonica/basic_next_best_view, https://github.com/RMonica/basic_next_best_view, fetched 2026-10-24 (unofficial)
++[S7] Nelarius/vxray, https://github.com/Nelarius/vxray, fetched 2026-10-24 (unofficial)
++[S8] This Tiny Algorithm Can Render BILLIONS of Voxels in Real Time, https://www.youtube.com/watch?v=ztkh1r1ioZo, fetched 2026-10-25 (unofficial)
++[S9] Raycasting-basiertes Voxelrendering, https://serwiss.bib.hs-hannover.de/frontdoor/index/index/docId/2250, fetched 2026-10-25 (unofficial)
++[S10] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
++[S11] Volume Raycasting mit OpenCL, https://arxiv.org/abs/1609.01317v1, fetched 2026-10-26 (unofficial)
++[S12] Show HN: Volume rendering 3D data in Three.js and GLSL, https://github.com/SuboptimalEng/volume-rendering, fetched 2026-10-26 (unofficial)
++[S13] kkhese/Volume-Rendering, https://github.com/kkhese/Volume-Rendering, fetched 2026-10-26 (unofficial)
++[S14] pengliu916/DynamicVolumeRayCasting, https://github.com/pengliu916/DynamicVolumeRayCasting, fetched 2026-10-26 (unofficial)
++[S15] thoniorf/volumeraycasting, https://github.com/thoniorf/volumeraycasting, fetched 2026-10-26 (unofficial)
++[S16] ShashwatC/Ray, https://github.com/ShashwatC/Ray, fetched 2026-10-26 (unofficial)
++[S17] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)
++[S18] hexhowells/GoTracer, https://github.com/hexhowells/GoTracer, fetched 2026-10-26 (unofficial)
++[S19] nerfstudio-project/nerfacc, https://github.com/nerfstudio-project/nerfacc, fetched 2026-10-26 (unofficial)
++[S20] Fictionarry/ER-NeRF, https://github.com/Fictionarry/ER-NeRF, fetched 2026-10-26 (unofficial)
++[S21] indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, https://github.com/indira654/implementing-basic-X-Ray-and-MIP-volume-rendering-using-ray-casting, fetched 2026-10-26 (unofficial)
++[S22] vulekhanh/VolumeRendering, https://github.com/vulekhanh/VolumeRendering, fetched 2026-10-26 (unofficial)
++[S23] tzhazuma/Fluid_simulation, https://github.com/tzhazuma/Fluid_simulation, fetched 2026-10-26 (unofficial)
++[S24] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
++[S25] bouguerra-khalil/DualContouring-3DRendring, https://github.com/bouguerra-khalil/DualContouring-3DRendring, fetched 2026-10-26 (unofficial)
++[S26] GitHub - narnia-ai-mason/iso-surface-rendering: Robust iso-surface ..., https://github.com/narnia-ai-mason/iso-surface-rendering, fetched 2026-10-26 (unofficial)
++[S27] (PDF) A Comparison between GPU-based Volume Ray Casting ..., https://www.researchgate.net/publication/321454253_A_Comparison_between_GPU-based_Volume_Ray_Casting_Implementations_Fragment_Shader_Compute_Shader_OpenCL_and_CUDA, fetched 2026-10-26
++[S28] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
++[S29] M4trixStrike/WebGL-Volumetric-clouds, https://github.com/M4trixStrike/WebGL-Volumetric-clouds, fetched 2026-10-27 (unofficial)
++[S30] itsyouyi/Voxelizer, https://github.com/itsyouyi/Voxelizer, fetched 2026-10-27 (unofficial)
++[S31] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
++[S32] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
++[S33] GitHub - clayjohn/voxel-renderer: A short experiment in high ..., https://github.com/clayjohn/voxel-renderer, fetched 2026-10-27 (unofficial)
++[S34] ldarnbr/volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)
++[S35] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
++[S36] megvii-research/cv-master-ex, https://github.com/megvii-research/cv-master-ex, fetched 2026-10-27 (unofficial)
++[S37] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
++[S38] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)
++[S39] InanXR/FLASH, https://github.com/InanXR/FLASH, fetched 2026-10-27 (unofficial)
++[S40] HaouchatY/differentiable_xrt, https://github.com/HaouchatY/differentiable_xrt, fetched 2026-10-27 (unofficial)
++[S41] AlanHsu314/CoroNeRF_public, https://github.com/AlanHsu314/CoroNeRF_public, fetched 2026-10-27 (unofficial)
++[S42] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
++[S43] Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, https://github.com/Loveof1ife7/cuVRender-A-CUDA-Accelerated-Volume-Rendering-Engine, fetched 2026-10-27 (unofficial)
++[S44] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)
++[S45] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)
++[S46] Ray‐Box Intersection Using the Slab Method | Every Algorithm, https://every-algorithm.github.io/2024/11/09/slab_method.html, fetched 2026-10-29 (unofficial)
++[S47] Ray - Box Intersection - ACM SIGGRAPH, https://education.siggraph.org/static/HyperGraph/raytrace/rtinter3.htm, fetched 2026-10-29
++[S48] (PDF) Ray Axis-Aligned Bounding Box Intersection - ResearchGate, https://www.researchgate.net/publication/354064987_Ray_Axis-Aligned_Bounding_Box_Intersection, fetched 2026-10-30 (unofficial)
++[S49] Fast, Branchless Ray/Bounding Box Intersections - tavianator.com, https://tavianator.com/2011/ray_box.html, fetched 2026-10-29 (unofficial)
++[S50] RAY AXIS-ALIGNED BOUNDING BOX INTERSECTION, https://link.springer.com/content/pdf/10.1007/978-1-4842-7185-8_2.pdf, fetched 2026-10-29
++[S51] Optimize STL ray-box intersection, https://github.com/AMReX-Codes/amrex/pull/5609, fetched 2026-10-29 (unofficial)
++[S52] A Couple 3D AABB Tricks, https://gpfault.net/posts/aabb-tricks.html, fetched 2026-10-29 (unofficial)
++[S53] GitHub - stackgl/ray-aabb-intersection: Determine the point of ..., https://github.com/stackgl/ray-aabb-intersection, fetched 2026-10-29 (unofficial)
++[S54] intersect: AABB Ray Intersection Algorithm - glre.dev, https://glre.dev/addons/geometry/aabb/intersect/, fetched 2026-10-29
++[S55] Ray-AABB (Axis Aligned Bounding Box) intersection. · GitHub, https://gist.github.com/DomNomNom/46bb1ce47f68d255fd5d, fetched 2026-10-29 (unofficial)
++[S56] PDF An Efficient and Robust Ray-Box Intersection Algorithm, https://people.csail.mit.edu/amy/papers/box-jgt.pdf, fetched 2026-10-29
++[S57] (PDF) Axis‐Normalized Ray‐Box Intersection - ResearchGate, https://www.researchgate.net/publication/390921688_Axis-Normalized_Ray-Box_Intersection, fetched 2026-10-30 (unofficial)
++[S58] (PDF) An Efficient and Robust Ray-Box Intersection Algorithm, https://www.researchgate.net/publication/220494140_An_Efficient_and_Robust_Ray-Box_Intersection_Algorithm, fetched 2026-11-01 (unofficial)
++[S59] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
++[S60] http://www.flipcode.com/archives/SSE_RayBox_Intersection_Test.shtml, http://www.flipcode.com/archives/SSE_RayBox_Intersection_Test.shtml, fetched 2026-10-29 (unofficial)
++[S61] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
++[S62] GitHub - saurlax/model_voxelizer: A 3D model voxelization tool that ..., https://github.com/saurlax/model_voxelizer, fetched 2026-10-30 (unofficial)

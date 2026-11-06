@@ -1,0 +1,451 @@
+--- v003.md
++++ v004.md
+@@ -4,72 +4,93 @@
+ 
+ ## Overview
+-Sparse Marching Cubes generates a triangle mesh from a sparse set of voxels defined by integer coordinates and scalar values at their corners, avoiding the memory overhead of dense 3D grids [S1, unofficial]. It differs from standard Marching Cubes by dynamically gathering corner values for active voxels from a point cloud or sparse grid, rather than iterating over a fixed dense volume [S1, unofficial].
++Sparse Marching Cubes generates a triangle mesh from a sparse set of 3D points with associated scalar values (e.g., Signed Distance Fields), avoiding the memory overhead of dense 3D grids [S1, unofficial]. It differs from standard Marching Cubes by dynamically gathering corner values for active voxels via lookup, rather than iterating over a fixed dense volume [S1, unofficial].
+ 
+ ## How it works
+-Sparse Marching Cubes operates on two primary input modes: pre-computed voxel corners or raw points with scalar values. It relies on the standard Marching Cubes Lookup and Configuration tables (`edgeTable` and `triangleTable`) defined in the parent article [Parent](2518-marching-cubes-lookup-and-configuration.md).
+-
+-### Inputs and Outputs
+-**Mode 1: Sparse Voxel Input**
+-*   `coords`: Integer tensor of shape $[N, 3]$, containing the $(x, y, z)$ coordinates of the $N$ active voxels [S1, unofficial].
+-*   `corners`: Float tensor of shape $[N, 8]$, containing the scalar values at the 8 corners of each voxel [S1, unofficial].
+-*   `iso`: Float value representing the iso-level [S1, unofficial].
+-*   `ensure_consistency`: Boolean flag; if `True`, averages corner values at shared locations to ensure topological consistency [S1, unofficial].
+-
+-**Mode 2: Sparse Points Input**
+-*   `coords`: Integer tensor of shape $[N, 3]$, containing the coordinates of the $N$ points [S1, unofficial].
+-*   `point_values` (or `sdfs`): Float tensor of shape $[N]$ or $[N, 1]$, containing the scalar value at each coordinate [S1, unofficial].
+-*   `iso`: Float value representing the iso-level [S1, unofficial].
+-*   `default_value`: Float value assumed for corner points not present in the input `coords`. Typically $1.0$ (assuming points are inside the surface and missing corners are outside) [S1, unofficial].
+-
+-**Outputs**
+-*   `verts`: Float tensor of shape $[V, 3]$ with vertex positions [S1, unofficial].
+-*   `tris` (or `faces`): Int tensor of shape $[T, 3]$ with triangle indices [S1, unofficial].
+-
+-### Data Structures
+-The method uses the standard LUTs from the parent article. Additionally, it requires a hash map or sparse grid structure to map integer coordinates $(x,y,z)$ to scalar values for the "Points" mode [S1, unofficial].
+-
+-### Algorithm Steps
+-
+-#### Step 1: Gather Corner Values (Points Mode Only)
+-If input is points, construct the `corners` tensor for each active voxel.
+-1.  Identify active voxels. In sparse implementations, active voxels are typically those where at least one corner has a defined value, or explicitly provided. For `sparse_marching_cubes_from_points`, the implementation implicitly defines active voxels based on the provided points.
+-2.  For each active voxel at integer coordinate $(x,y,z)$, identify its 8 corners:
+-    $$ C_i = (x + b_x, y + b_y, z + b_z) $$
+-    where $b_x, b_y, b_z \in \{0, 1\}$ and $i = 4b_z + 2b_y + b_x$ (matching the standard vertex ordering $0..7$) [S12, unofficial].
+-3.  Look up the scalar value $V(C_i)$ for each corner.
+-    *   If $C_i$ exists in the input `coords`, use the corresponding `point_value`.
+-    *   If $C_i$ does not exist, use `default_value` [S1, unofficial].
+-4.  Store the 8 values in the `corners` tensor for that voxel [S1, unofficial].
+-
+-#### Step 2: Calculate Case Index
+-For each voxel, calculate the 8-bit case index $C$ [S7, S8, S12, unofficial].
+-1.  Compare corner values $V_i$ against `iso`.
+-2.  Set bit $i$ of $C$ to 1 if $V_i < iso$, else 0 [S1, unofficial].
+-    *   Note: The source code explicitly uses `v < iso` [S1, unofficial]. This must match the vertex ordering assumed by the LUT generation [S12, unofficial].
+-    *   Formula:
+-        $$ C = \sum_{i=0}^{7} \mathbb{I}(V_i < iso) \cdot 2^i $$
+-        where $\mathbb{I}$ is the indicator function [S1, unofficial].
+-
+-#### Step 3: Lookup and Triangulate
+-For each voxel with $C \neq 0$ and $C \neq 255$:
+-1.  Retrieve the edge intersection mask from `edgeTable[C]` [Parent](2518-marching-cubes-lookup-and-configuration.md).
+-2.  Retrieve the triangle connection sequence from `triangleTable[C]` [Parent](2518-marching-cubes-lookup-and-configuration.md).
+-3.  Iterate through the triplets $(a, b, c)$ in `triangleTable[C]` until the terminator `-1` is reached [Parent](2518-marching-cubes-lookup-and-configuration.md).
+-4.  For each edge index $e \in \{a, b, c\}$, calculate the intersection point $P_e$ on the corresponding cube edge.
+-    *   Let the edge connect vertices $v_j$ and $v_k$ with values $V_j$ and $V_k$.
+-    *   The intersection point is:
+-        $$ P_e = v_j + \frac{iso - V_j}{V_k - V_j} (v_k - v_j) $$
+-    *   [G] Guard against division by zero if $V_j \approx V_k$. If values are equal, the edge is parallel to the isosurface; standard practice is to skip or handle via epsilon, though the source does not specify this edge case handling explicitly [S1, unofficial].
+-5.  Generate triangle vertices using $P_a, P_b, P_c$.
+-
+-#### Step 4: Consistency Handling (Optional)
+-If `ensure_consistency` is `True`:
+-1.  Identify shared corners between adjacent active voxels.
+-2.  Average the scalar values at these shared locations before Step 2 [S1, unofficial].
+-3.  This prevents cracks caused by inconsistent interpolation when adjacent voxels resolve the isosurface differently [S1, unofficial].
+-
+-### Pseudocode
++**Inputs:**
++1.  `coords`: Integer tensor of shape $[N, 3]$ containing the $(x, y, z)$ coordinates of active voxels or points.
++2.  `corners` OR `point_values`:
++    *   Option A: `corners` Float tensor of shape $[N, 8]$ containing pre-computed scalar values at the 8 corners of each voxel.
++    *   Option B: `point_values` Float tensor of shape $[N]$ or $[N, 1]$ containing scalar values at the coordinates in `coords`.
++3.  `iso`: Float value representing the iso-level threshold.
++4.  `default_value`: Float value assumed for corner points not present in the input set (typically $1.0$ for SDFs, indicating "outside") [S1, unofficial].
++5.  `ensure_consistency`: Boolean flag; if `True`, averages corner values at shared locations to ensure topological consistency [S1, unofficial].
++
++**Outputs:**
++1.  `verts`: Float tensor of shape $[V, 3]$ with vertex positions.
++2.  `tris` (or `faces`): Int tensor of shape $[T, 3]$ with triangle indices [S1, unofficial].
++
++**Data Structures:**
++*   The method operates on a list of active voxels defined by integer coordinates.
++*   Corner values are stored in a dense tensor $[N, 8]$ for the direct input mode, or gathered on-the-fly for the point input mode.
++
++**Steps:**
++
++1.  **Input Validation and Preparation:**
++    *   Ensure `coords` and `corners` (or `point_values`) have the same number of elements $N$ [S1, unofficial].
++    *   Move tensors to the target device (e.g., CUDA) and ensure they are contiguous [S1, unofficial].
++    *   Cast `coords` to integer and `corners`/`point_values` to float [S1, unofficial].
++
++2.  **Corner Value Gathering (if using `sparse_marching_cubes_from_points`):**
++    *   If input is `point_values` (shape $[N]$) rather than `corners` (shape $[N, 8]$), the algorithm must construct the corner values for each voxel.
++    *   For each voxel $i$ at `coords[i]`, identify its 8 corner coordinates:
++        $$ C_{ijk} = \text{coords}[i] + (i, j, k) \quad \text{for } i,j,k \in \{0, 1\} $$
++    *   Look up the scalar value for each corner coordinate in the input `point_values` set.
++    *   If a corner coordinate exists in `coords`, use its corresponding `point_values` entry.
++    *   If a corner coordinate does not exist, use `default_value` [S1, unofficial].
++    *   Store the resulting 8 values in a tensor `corners` of shape $[N, 8]$.
++
++3.  **Consistency Enforcement (Optional):**
++    *   If `ensure_consistency` is `True`, identify shared corner coordinates among adjacent active voxels.
++    *   Average the scalar values assigned to these shared corners across all voxels that share them. This prevents topological artifacts caused by inconsistent scalar assignments at shared vertices [S1, unofficial].
++
++4.  **Case Index Calculation:**
++    *   For each voxel $i$, determine the marching cubes case index based on its 8 corner values $v_0, \dots, v_7$ and the iso-level `iso`.
++    *   Compute a binary mask for each corner:
++        $$ b_k = \begin{cases} 1 & \text{if } v_k < \text{iso} \\ 0 & \text{otherwise} \end{cases} $$
++    *   Calculate the case index $I_i$ as a weighted sum:
++        $$ I_i = \sum_{k=0}^{7} b_k \cdot 2^k $$
++    *   This results in an integer tensor of shape $[N]$ containing the case index for each voxel [S1, unofficial].
++
++5.  **Mesh Generation:**
++    *   For each voxel, use the standard Marching Cubes lookup table (or equivalent logic) to determine which edges are intersected by the isosurface based on $I_i$.
++    *   Interpolate vertex positions on the intersected edges.
++    *   Generate triangles connecting these interpolated vertices.
++    *   Handle vertex merging to ensure a watertight mesh. If `ensure_consistency` was used, shared vertices are already averaged; otherwise, standard vertex merging based on spatial proximity is applied [S1, unofficial].
++
++6.  **Output Assembly:**
++    *   Collect all generated vertices into `verts` $[V, 3]$.
++    *   Collect all generated triangles into `tris` $[T, 3]$ [S1, unofficial].
++
++**Pseudocode:**
+ 
+ ```python
++def sparse_marching_cubes(coords, corners, iso, ensure_consistency=False):
++    """
++    Performs sparse marching cubes on a set of voxels.
++    
++    Args:
++        coords: Integer tensor of shape [N, 3] with voxel coordinates.
++        corners: Float tensor of shape [N, 8] with scalar values at the 8 corners of each voxel.
++        iso: Float iso-level.
++        ensure_consistency: Boolean flag to average shared corner values.
++        
++    Returns:
++        verts: Float tensor of shape [V, 3].
++        tris: Int tensor of shape [T, 3].
++    """
++    # 1. Ensure consistency if requested
++    if ensure_consistency:
++        corners = average_shared_corners(coords, corners)
++        
++    # 2. Calculate case indices
++    cube_indices = calculate_case_indices(corners, iso)
++    
++    # 3. Generate mesh using standard Marching Cubes logic on sparse voxels
++    # This step is typically implemented in a backend (e.g., CUDA kernel)
++    # for performance, iterating only over active voxels in `coords`.
++    verts, tris = backend_sparse_marching_cubes(coords, corners, cube_indices)
++    
++    return verts, tris
++
+ def sparse_marching_cubes_from_points(coords, point_values, iso, default_value=1.0):
+     """
+@@ -77,184 +98,116 @@
+     
+     Args:
+-        coords: Tensor [N, 3], integer coordinates of points.
+-        point_values: Tensor [N], scalar values at points.
+-        iso: Float, iso-level.
+-        default_value: Float, value for missing corners.
+-        
+-    Returns:
+-        verts: Tensor [V, 3]
+-        tris: Tensor [T, 3]
+-    """
+-    # 1. Build a hash map for O(1) lookup of point values
+-    # Map (x,y,z) -> value
+-    point_map = {}
+-    for i in range(coords.shape[0]):
+-        key = tuple(coords[i].tolist())
+-        point_map[key] = point_values[i].item()
+-        
+-    # 2. Identify active voxels
+-    # In this implementation, active voxels are those that have at least one corner
+-    # present in the point set. We collect all unique voxel coordinates.
+-    voxel_coords = set()
+-    for key in point_map.keys():
+-        x, y, z = key
+-        # A point at (x,y,z) is the corner (0,0,0) of voxel (x,y,z)
+-        # It is also corner (1,0,0) of (x-1,y,z), etc.
+-        # To be safe, we consider the voxel defined by min(x,y,z) as the anchor
+-        # However, standard sparse MC usually takes explicit voxel list or infers from points.
+-        # The source implies we process voxels defined by the points.
+-        # Let's assume we process the voxel whose (0,0,0) corner is the point.
+-        voxel_coords.add((x, y, z))
+-        
+-    # 3. Gather corners and compute case indices
+-    active_voxels = []
+-    for vx, vy, vz in voxel_coords:
+-        corners = []
+-        for dx in [0, 1]:
+-            for dy in [0, 1]:
+-                for dz in [0, 1]:
+-                    cx, cy, cz = vx + dx, vy + dy, vz + dz
+-                    key = (cx, cy, cz)
+-                    if key in point_map:
+-                        corners.append(point_map[key])
+-                    else:
+-                        corners.append(default_value)
+-        
+-        # Calculate case index C
+-        # Bit i corresponds to corner i. 
+-        # Corner ordering: 
+-        # 0:(0,0,0), 1:(1,0,0), 2:(1,1,0), 3:(0,1,0)
+-        # 4:(0,0,1), 5:(1,0,1), 6:(1,1,1), 7:(0,1,1)
+-        # This matches the standard ordering used in get_cube_indices in source [S1, unofficial]
+-        case_index = 0
+-        for i, val in enumerate(corners):
+-            if val < iso:
+-                case_index |= (1 << i)
++        coords: Integer tensor of shape [N, 3].
++        point_values: Float tensor of shape [N] or [N, 1].
++        iso: Float iso-level.
++        default_value: Float value for missing corners.
++        
++    Returns:
++        verts: Float tensor of shape [V, 3].
++        tris: Int tensor of shape [T, 3].
++    """
++    # 1. Gather corner values
++    corners = gather_corners(coords, point_values, default_value)
++    
++    # 2. Call standard sparse marching cubes
++    return sparse_marching_cubes(coords, corners, iso, ensure_consistency=False)
++
++def gather_corners(coords, point_values, default_value):
++    """
++    Gathers scalar values for the 8 corners of each voxel.
++    
++    Args:
++        coords: Integer tensor of shape [N, 3].
++        point_values: Float tensor of shape [N].
++        default_value: Float value for missing corners.
++        
++    Returns:
++        corners: Float tensor of shape [N, 8].
++    """
++    N = coords.shape[0]
++    corners = torch.full((N, 8), default_value, dtype=torch.float32)
++    
++    # Create a hash map or sorted array for fast lookup of point_values by coordinate
++    # In a real implementation, this is done efficiently in CUDA
++    point_map = create_point_map(coords, point_values)
++    
++    for i in range(N):
++        voxel_coord = coords[i]
++        for k in range(8):
++            # Determine corner offset (0 or 1 for each dimension)
++            offset = get_corner_offset(k)
++            corner_coord = voxel_coord + offset
++            
++            # Look up value
++            if corner_coord in point_map:
++                corners[i, k] = point_map[corner_coord]
++            else:
++                corners[i, k] = default_value
+                 
+-        if case_index != 0 and case_index != 255:
+-            active_voxels.append({
+-                'coord': (vx, vy, vz),
+-                'corners': corners,
+-                'case_index': case_index
+-            })
+-            
+-    # 4. Triangulate
+-    verts = []
+-    tris = []
+-    
+-    # Cache for vertex positions to handle shared edges
+-    # Key: edge index (voxel_coord, edge_id), Value: vertex position
+-    edge_vertices = {}
+-    
+-    for voxel in active_voxels:
+-        vx, vy, vz = voxel['coord']
+-        corners = voxel['corners']
+-        case_index = voxel['case_index']
+-        
+-        # Get edge mask and triangle table from parent article LUTs
+-        edge_mask = edgeTable[case_index]
+-        tri_seq = triangleTable[case_index]
+-        
+-        # Helper to get intersection point for an edge
+-        def get_edge_vertex(edge_id):
+-            # Edge mapping from parent article:
+-            # 0:(0,1), 1:(1,2), 2:(2,3), 3:(3,0)
+-            # 4:(4,5), 5:(5,6), 6:(6,7), 7:(7,4)
+-            # 8:(0,4), 9:(1,5), 10:(2,6), 11:(3,7)
+-            
+-            edge_key = (vx, vy, vz, edge_id)
+-            if edge_key in edge_vertices:
+-                return edge_vertices[edge_key]
+-                
+-            # Determine vertex indices for this edge
+-            if edge_id == 0: v1, v2 = 0, 1
+-            elif edge_id == 1: v1, v2 = 1, 2
+-            elif edge_id == 2: v1, v2 = 2, 3
+-            elif edge_id == 3: v1, v2 = 3, 0
+-            elif edge_id == 4: v1, v2 = 4, 5
+-            elif edge_id == 5: v1, v2 = 5, 6
+-            elif edge_id == 6: v1, v2 = 6, 7
+-            elif edge_id == 7: v1, v2 = 7, 4
+-            elif edge_id == 8: v1, v2 = 0, 4
+-            elif edge_id == 9: v1, v2 = 1, 5
+-            elif edge_id == 10: v1, v2 = 2, 6
+-            elif edge_id == 11: v1, v2 = 3, 7
+-            else: return None
+-            
+-            val1 = corners[v1]
+-            val2 = corners[v2]
+-            
+-            # Vertex positions in local space (0 or 1)
+-            # Map local index to global corner coordinate
+-            def local_to_global(idx):
+-                return (vx + (idx & 1), vy + ((idx >> 1) & 1), vz + (idx >> 2))
+-                
+-            p1 = local_to_global(v1)
+-            p2 = local_to_global(v2)
+-            
+-            # Interpolate
+-            # Guard against division by zero
+-            denom = val2 - val1
+-            if abs(denom) < 1e-8:
+-                # If values are equal, use midpoint or one of the vertices?
+-                # Standard MC assumes distinct values for intersection.
+-                # If equal, the edge is parallel. We can skip or use midpoint.
+-                # Using midpoint for stability [G]
+-                t = 0.5
+-            else:
+-                t = (iso - val1) / denom
+-                
+-            # Clamp t to [0,1] to stay within edge
+-            t = max(0.0, min(1.0, t))
+-            
+-            # Global position
+-            x = p1[0] + t * (p2[0] - p1[0])
+-            y = p1[1] + t * (p2[1] - p1[1])
+-            z = p1[2] + t * (p2[2] - p1[2])
+-            
+-            vertex_pos = (x, y, z)
+-            edge_vertices[edge_key] = vertex_pos
+-            return vertex_pos
+-
+-        # Generate triangles
+-        tri_count = 0
+-        for i in range(0, 15, 3):
+-            a = tri_seq[i]
+-            b = tri_seq[i+1]
+-            c = tri_seq[i+2]
+-            
+-            if a == -1:
+-                break
+-                
+-            pa = get_edge_vertex(a)
+-            pb = get_edge_vertex(b)
+-            pc = get_edge_vertex(c)
+-            
+-            if pa and pb and pc:
+-                # Add vertices to global list
+-                # In a real implementation, we would map local positions to global vertex indices
+-                # Here we just append for simplicity of description
+-                verts.append(pa)
+-                verts.append(pb)
+-                verts.append(pc)
+-                tris.append((len(verts)-3, len(verts)-2, len(verts)-1))
+-                
+-    return verts, tris
++    return corners
++
++def calculate_case_indices(corners, iso):
++    """
++    Calculates the marching cubes case index for each voxel.
++    
++    Args:
++        corners: Float tensor of shape [N, 8].
++        iso: Float iso-level.
++        
++    Returns:
++        cube_indices: Integer tensor of shape [N].
++    """
++    # Binary mask: 1 if corner value < iso, else 0
++    v = corners.float()
++    binary_mask = (v < iso).int()
++    
++    # Weighted sum to create case index
++    cube_indices = (
++        binary_mask[:, 0] * 1 |
++        binary_mask[:, 1] * 2 |
++        binary_mask[:, 2] * 4 |
++        binary_mask[:, 3] * 8 |
++        binary_mask[:, 4] * 16 |
++        binary_mask[:, 5] * 32 |
++        binary_mask[:, 6] * 64 |
++        binary_mask[:, 7] * 128
++    ).int()
++    
++    return cube_indices
++
++def average_shared_corners(coords, corners):
++    """
++    Averages corner values at shared locations among adjacent voxels.
++    
++    Args:
++        coords: Integer tensor of shape [N, 3].
++        corners: Float tensor of shape [N, 8].
++        
++    Returns:
++        averaged_corners: Float tensor of shape [N, 8].
++    """
++    # Implementation detail: [G]
++    # This requires identifying which corners are shared between voxels.
++    # A common approach is to create a global map of corner coordinates to a list of (voxel_index, corner_index) pairs.
++    # Then, for each unique corner coordinate, average the values from all associated voxels.
++    # Finally, assign the averaged value back to each voxel's corner.
++    pass
+ ```
+ 
+-### Edge Cases and Pitfalls
+-*   **Missing Corners**: If a corner is not in the input point set, `default_value` is used. This value must be consistently inside or outside the surface to avoid artifacts [S1, unofficial].
+-*   **Consistency**: Without `ensure_consistency`, shared corners between voxels may have slightly different values if they are derived from different point sets or if the point set is sparse, leading to cracks [S1, unofficial].
+-*   **Ambiguity**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain topological ambiguities. The standard LUT uses a fixed triangulation, which can cause cracks if adjacent voxels resolve the ambiguity differently [Parent](2518-marching-cubes-lookup-and-configuration.md).
+-
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of active voxels. Each voxel is processed independently.
+-*   **Memory Complexity**: $O(N)$ for storing the voxel data and output mesh. Significantly lower than dense MC for sparse data.
+-*   **Performance**: The implementation is CUDA-accelerated, leveraging massive parallelism to process thousands of voxels simultaneously [S1, unofficial].
+-*   **Strengths**: Ideal for sparse SDF representations where only a list of points and their SDF values are available. Avoids the memory overhead of dense 3D grids [S1, unofficial].
+-*   **Limitations**: Requires careful handling of missing corners. Topological consistency is not guaranteed without additional processing (`ensure_consistency`) [S1, unofficial].
++*   **Time Complexity:** Depends on the number of active voxels $N$ and the complexity of the lookup/gathering step. The gathering step is $O(N)$ with an efficient hash map or sorted array. The Marching Cubes step is $O(N)$ as it processes each active voxel once.
++*   **Memory Complexity:** $O(N)$ for storing coordinates, corner values, and the resulting mesh. This is significantly lower than dense Marching Cubes, which requires $O(V_x V_y V_z)$ memory for the volume grid.
++*   **Performance:** The method is typically implemented on GPUs (CUDA) to leverage parallelism for thousands of voxels simultaneously [S1, unofficial].
++*   **Strengths:**
++    *   Memory efficient for sparse data.
++    *   No need to allocate dense 3D grids.
++    *   High performance on GPUs.
++*   **Limitations:**
++    *   Requires careful handling of shared corners to ensure topological consistency (`ensure_consistency` flag).
++    *   Performance may degrade if the sparse set is very dense, approaching the cost of dense methods.
++    *   Dependent on the quality of the `default_value` for missing corners.
+ 
+ ## Background
+-Sparse Marching Cubes is an adaptation of the classic Marching Cubes algorithm designed for sparse data structures. It is implemented in the `spcumc` library, which provides PyTorch and CUDA bindings for efficient processing of sparse voxel data [S1, unofficial].
++Sparse Marching Cubes is an adaptation of the classic Marching Cubes algorithm designed for sparse data structures. It is particularly useful in applications involving sparse Signed Distance Fields (SDFs) or point-based representations where the domain is not uniformly sampled. The method described here is implemented in the `spcumc` library, which provides CUDA-accelerated implementations for both triangle and quad mesh generation from sparse voxel data [S1, unofficial].
+ 
+ ## Sources

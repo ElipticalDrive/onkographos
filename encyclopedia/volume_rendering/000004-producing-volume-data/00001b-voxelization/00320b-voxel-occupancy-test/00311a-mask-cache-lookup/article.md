@@ -1,0 +1,90 @@
+# Mask Cache Lookup
+## Overview
+Mask Cache Lookup tests if query points lie within occupied voxels by indexing a 3D boolean occupancy grid. It converts world coordinates to grid indices and performs a direct memory lookup. It differs from [Point-in-Box Inclusion Test](1400-point-in-box-inclusion-test.md) by using a discrete grid structure rather than continuous bounding volumes, and from [Voxel Filled Check](1705-voxel-filled-check.md) by explicitly handling the coordinate transformation and bounds checking in a single pass.
+## How it works
+**Inputs:**
+- `world`: 3D boolean grid of shape `(sz_i, sz_j, sz_k)`.
+- `xyz`: Array of shape `(n_pts, 3)` containing world coordinates $(x, y, z)$ for $n_{pts}$ points.
+- `xyz2ijk_scale`: Array of shape `(3)` containing scaling factors $(s_x, s_y, s_z)$.
+- `xyz2ijk_shift`: Array of shape `(3)` containing shift offsets $(t_x, t_y, t_z)$.
+
+**Outputs:**
+- `out`: Boolean array of shape `(n_pts)`, where `out[i]` is true if the $i$-th point is inside an occupied voxel.
+
+**Data Structures:**
+- The `world` grid is stored in row-major order. The linear index for a voxel at $(i, j, k)$ is calculated as $i \cdot sz_j \cdot sz_k + j \cdot sz_k + k$.
+
+**Algorithm:**
+1. For each point $p$ with world coordinates $(x, y, z)$ in `xyz`:
+   a. Calculate grid indices $(i, j, k)$ using the scale and shift parameters:
+      $$i = \text{round}(x \cdot s_x + t_x)$$
+      $$j = \text{round}(y \cdot s_y + t_y)$$
+      $$k = \text{round}(z \cdot s_z + t_z)$$
+      where $\text{round}(\cdot)$ denotes rounding to the nearest integer.
+   b. Check bounds:
+      If $0 \le i < sz_i$ AND $0 \le j < sz_j$ AND $0 \le k < sz_k$:
+         i. Calculate linear index: $idx = i \cdot sz_j \cdot sz_k + j \cdot sz_k + k$.
+         ii. Set `out[p]` to `world[idx]`.
+      Else:
+         i. Set `out[p]` to `False` (or handle as out-of-bounds, typically false for occupancy).
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mask_cache_lookup(world, xyz, xyz2ijk_scale, xyz2ijk_shift, sz_i, sz_j, sz_k):
+    n_pts = xyz.shape[0]
+    out = [False] * n_pts
+    
+    s_x, s_y, s_z = xyz2ijk_scale[0], xyz2ijk_scale[1], xyz2ijk_scale[2]
+    t_x, t_y, t_z = xyz2ijk_shift[0], xyz2ijk_shift[1], xyz2ijk_shift[2]
+    
+    stride_jk = sz_j * sz_k
+    stride_k = sz_k
+    
+    for p in range(n_pts):
+        x = xyz[p, 0]
+        y = xyz[p, 1]
+        z = xyz[p, 2]
+        
+        # Convert to grid indices
+        i = round(x * s_x + t_x)
+        j = round(y * s_y + t_y)
+        k = round(z * s_z + t_z)
+        
+        # Bounds check
+        if 0 <= i < sz_i and 0 <= j < sz_j and 0 <= k < sz_k:
+            idx = i * stride_jk + j * stride_k + k
+            out[p] = world[idx]
+        else:
+            out[p] = False
+            
+    return out
+```
+
+**Parameters:**
+- `sz_i`, `sz_j`, `sz_k`: Dimensions of the 3D boolean world grid.
+
+**Edge Cases:**
+- Points outside the grid bounds result in `False`.
+- Precision issues in coordinate transformation may cause points near voxel boundaries to be assigned to incorrect voxels if rounding is not handled consistently with the grid generation.
+
+## Subtopics
+
+### CPU-side 3D Boolean Grid
+A variant where the occupancy grid is stored and accessed on the CPU using nested vectors (`vector<vector<vector<bool>>>`). The grid is iterated explicitly to transfer occupancy data to chunks. The resolution `dim` is typically 32, 64, 128, 256, or 512, with higher values increasing computation time [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(n_{pts})$ for the lookup phase, assuming $O(1)$ grid access.
+- **Memory Complexity:** $O(sz_i \cdot sz_j \cdot sz_k)$ for the boolean grid.
+- **Strengths:** Fast lookup for dense grids; simple implementation.
+- **Limitations:** Memory usage grows cubically with resolution; inefficient for sparse volumes.
+- **When to use:** When the volume is dense or the grid resolution is moderate, and points are frequently queried.
+- **When not to use:** For very large, sparse volumes where sparse data structures (like [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md)) are more appropriate.
+
+## Background
+Originated in voxel-based rendering pipelines, specifically in implementations like DirectVoxGO [S1, unofficial]. It is commonly used in neural radiance field (NeRF) rendering and voxelization steps to quickly cull empty space.
+
+## Sources
+[S1] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
+[S2] 3D-Mesh-Voxelizer - GitHub, https://github.com/Talkative-Banana/3D-Mesh-Voxelizer, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,178 @@
+# Dual Vertex Positioning via Least Squares
+
+Also called: Dual Vertex Localization via Quadratic Error Minimization, Ju et al. 2002 Method, Least Squares Dual Vertex, Minimizing Distance to Intersections, Quadratic Error Function (QEF) Vertex Placement
+
+## Overview
+This method computes the position of a dual vertex within a leaf cell by minimizing the squared algebraic distance to all edge intersection points on the isosurface boundary of that cell [S1, unofficial]. It solves the problem of determining a single representative point for the isosurface intersection within a voxel, which is a critical step in dual contouring. Unlike [Mass Point Centering for Dual Contouring](3939-mass-point-centering-for-dual-contouring.md), which adjusts the linear system to center the solution around the centroid, this method defines the core minimization objective and the specific handling of the center of mass as a fallback and regularization term. It sets itself apart from [Dual Vertex Localization via Mass Point Centering](6561-dual-vertex-localization-via-mass-point-centering.md) by relying on algebraic distance minimization (QEF) rather than physical mass conservation.
+
+## How it works
+**Inputs:**
+*   A set of edge intersection points $\{p_i\}$ for all edges of the cell intercepted by the isosurface $\partial V$.
+*   A set of normals $\{n_i\}$ corresponding to each intersection point $p_i$.
+*   The center of mass $p$ of the intersection points within the cell.
+
+**Outputs:**
+*   The dual vertex position $x$.
+
+**Data Structures:**
+*   Matrix $A$: An $n \times 3$ matrix where each row $i$ is the normal vector $n_i = [n_{ix}, n_{iy}, n_{iz}]$.
+*   Vector $b$: An $n$-dimensional vector where each element $i$ is the dot product $b_i = n_i \cdot p_i$.
+*   Vector $p$: A 3-dimensional vector representing the center of mass (mean of $p_i$ coordinates).
+
+**Steps:**
+
+1.  **Compute Intersection Points ($p_i$):**
+    For each edge of the cell intercepted by the isosurface $\partial V$:
+    a. Identify the two transition voxels belonging to the edge.
+    b. Perform linear interpolation between these two voxels using their coordinates and scalar values to determine the exact coordinate $p_i$ of the intersection [S1, unofficial].
+
+2.  **Compute Normals ($n_i$):**
+    For each intersection point $p_i$:
+    a. Apply the Prewitt operator on the voxels surrounding the intersection to approximate the gradient.
+    b. The Prewitt operator is a difference operator that calculates a gradient approximation by applying $3 \times 3 \times 3$ masks convolved with the volume data [S1, unofficial].
+    c. Normalize the resulting gradient vector to obtain $n_i$.
+
+3.  **Compute Center of Mass ($p$):**
+    Calculate the arithmetic mean of all intersection point coordinates:
+    $$ p = \frac{1}{n} \sum_{i=1}^{n} p_i $$
+
+4.  **Construct Linear System:**
+    Formulate the system $Ax = b$ where the goal is to minimize the quadratic error function:
+    $$ E[x] = \sum_i (n_i \cdot (x - p_i))^2 $$
+    This is equivalent to minimizing $\|Ax - b\|^2$ [S1, unofficial].
+
+5.  **Solve for Offset ($c$):**
+    Compute the Moore-Penrose pseudo-inverse $(A^T A)^+$ of the matrix $A^T A$ using Singular Value Decomposition (SVD) [S1, unofficial].
+    Calculate the offset vector $c$ using the formula:
+    $$ c = (A^T A)^+ (A^T b - A^T A p) $$
+
+6.  **Compute Final Position ($x$):**
+    Calculate the candidate position:
+    $$ x = c + p $$
+
+7.  **Boundary Check:**
+    If the calculated position $x$ falls outside the spatial bounds of the cell, discard $x$ and use the center of mass $p$ directly as the dual vertex position [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def compute_dual_vertex(intersection_points, volume_data, cell_bounds):
+    """
+    Computes the dual vertex position for a cell using Least Squares QEF.
+    
+    Args:
+        intersection_points: List of (point, edge_index) tuples where point is the 
+                             interpolated intersection coordinate on the edge.
+        volume_data: 3D array of scalar values.
+        cell_bounds: Tuple (min_coord, max_coord) defining the cell's spatial limits.
+        
+    Returns:
+        numpy array: The 3D position of the dual vertex.
+    """
+    if not intersection_points:
+        return None
+
+    normals = []
+    points = []
+    
+    for p_i, edge_idx in intersection_points:
+        # Step 1: Compute normal using Prewitt operator
+        # Note: In a real implementation, Prewitt requires accessing neighbors.
+        # Here we assume a helper function that returns the gradient at p_i.
+        n_i = compute_prewitt_normal(volume_data, p_i)
+        
+        # Normalize the normal
+        norm_val = np.linalg.norm(n_i)
+        if norm_val > 1e-8:
+            n_i = n_i / norm_val
+        else:
+            # Fallback if gradient is zero (degenerate case)
+            n_i = np.array([0.0, 0.0, 0.0])
+            
+        normals.append(n_i)
+        points.append(p_i)
+
+    normals = np.array(normals)
+    points = np.array(points)
+    
+    # Step 3: Compute Center of Mass
+    p = np.mean(points, axis=0)
+    
+    # Step 4: Construct Linear System Ax = b
+    # A is n x 3 matrix of normals
+    A = normals
+    # b is n vector of n_i . p_i
+    b = np.dot(A, points.T) # This computes dot product for each row
+    
+    # Step 5: Solve for c using Pseudo-inverse via SVD
+    # Compute A^T A
+    ATA = A.T @ A
+    
+    # Compute A^T b
+    ATb = A.T @ b
+    
+    # Compute Moore-Penrose pseudo-inverse of ATA using SVD
+    # ATA is 3x3 symmetric positive semi-definite
+    U, S, Vt = np.linalg.svd(ATA)
+    
+    # Handle singular values: invert non-zero values, keep zero as zero
+    # Threshold for singularity
+    threshold = 1e-10
+    S_inv = np.where(S > threshold, 1.0 / S, 0.0)
+    
+    # Pseudo-inverse (ATA)+ = V * S_inv * U^T
+    ATA_pinv = (Vt.T * S_inv) @ U.T
+    
+    # Calculate c
+    # c = (ATA)+ (ATb - ATA p)
+    term = ATb - ATA @ p
+    c = ATA_pinv @ term
+    
+    # Step 6: Compute final position
+    x = c + p
+    
+    # Step 7: Boundary Check
+    if np.any(x < cell_bounds[0]) or np.any(x > cell_bounds[1]):
+        return p
+        
+    return x
+
+def compute_prewitt_normal(volume_data, point):
+    """
+    Computes the gradient at a point using the Prewitt operator.
+    This is a placeholder for the specific voxel indexing logic required 
+    to apply 3x3x3 masks to the volume data.
+    """
+    # Implementation detail: [G]
+    # The Prewitt operator in 3D involves convolving the volume with 
+    # specific 3x3x3 kernels to approximate partial derivatives dx, dy, dz.
+    # For a point on an edge, one typically samples the two adjacent voxels 
+    # or a small neighborhood around the intersection.
+    # Since the source specifies "applying 3x3x3 masks convolved with the volume",
+    # we assume access to the local voxel grid.
+    
+    # Simplified gradient approximation for demonstration:
+    # In practice, this requires precise voxel coordinate mapping.
+    # We return a zero vector if not implemented, but the source mandates Prewitt.
+    return np.array([0.0, 0.0, 0.0])
+```
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the SVD of the $3 \times 3$ matrix $A^T A$. SVD on a fixed small matrix is $O(1)$ per cell, but involves constant overhead. Normal computation is $O(1)$ per intersection.
+*   **Memory Complexity:** $O(1)$ auxiliary memory per cell (storing $A, b, p$).
+*   **Strengths:** Robust to noise compared to simple midpoint placement; provides a smooth surface representation by minimizing algebraic error.
+*   **Limitations:** The solution $x$ may fall outside the cell bounds, requiring clamping to the center of mass, which can introduce artifacts if the QEF is ill-conditioned. The Prewitt operator provides a coarse normal approximation [S1, unofficial].
+*   **When to use:** When a smooth isosurface is required and the isosurface intersects multiple edges of the cell.
+*   **When not to use:** When strict containment within the cell is required without fallback, or when higher-order normal estimation is needed (e.g., using central differences or higher-order kernels).
+
+## Background
+The method originates from the work of Ju et al. (2002) on robust reconstruction of polyhedra from samples [S1, unofficial]. It was later adopted in various dual contouring implementations, including those described in the thesis "EXTRAÇÃO DE ISOSUPERFÍCIES DE DOMOS DE SAL EM VOLUMES BINÁRIOS MASSIVOS" (2026) [S1, unofficial]. The approach relies on the Quadratic Error Function (QEF) minimization technique introduced by Garland and Heckbert (1998) [S1, unofficial]. The use of the Moore-Penrose pseudo-inverse traces back to Moore (1920) [S1, unofficial].
+
+## Sources
+[S1] EXTRAÇÃO DE ISOSUPERFÍCIES DE DOMOS DE SAL EM VOLUMES BINÁRIOS MASSIVOS, https://doi.org/10.17771/pucrio.acad.51290, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,159 @@
+# Amanatides–Woo grid traversal
+
+Also called: traverseGridSegmentFloat
+
+## Overview
+The Amanatides–Woo grid traversal algorithm determines the sequence of grid cells intersected by a line segment defined by two endpoints, invoking a visitor function for each cell [S1, unofficial]. It distinguishes itself from its siblings by using a floating-point implementation that computes `t-max` values to determine the next cell boundary intersection, offering a straightforward approach for uniform grids where high-precision fixed-point arithmetic is not strictly required [S1, unofficial].
+
+## How it works
+**Inputs and outputs:**
+- `start`: The starting point of the line segment (`vec2f`).
+- `end`: The ending point of the line segment (`vec2f`).
+- `visitor`: A callable object with a `visit(int, int)` method called for each traversed cell [S1, unofficial].
+
+**Data structures:**
+The algorithm uses scalar floating-point variables for coordinates, deltas, and `t-max` values, and integer variables for current cell indices and step directions. No complex data structures are required [S1, unofficial].
+
+**Steps:**
+1. Compute initial cell coordinates:
+   $$x_0 = \lfloor \text{start}.x \rfloor, \quad y_0 = \lfloor \text{start}.y \rfloor$$
+   $$x_1 = \lfloor \text{end}.x \rfloor, \quad y_1 = \lfloor \text{end}.y \rfloor$$
+   [S1, unofficial]
+
+2. Compute step directions:
+   $$\text{stepX} = \begin{cases} 1 & \text{if } x_1 > x_0 \\ -1 & \text{if } x_1 < x_0 \\ 0 & \text{otherwise} \end{cases}$$
+   $$\text{stepY} = \begin{cases} 1 & \text{if } y_1 > y_0 \\ -1 & \text{if } y_1 < y_0 \\ 0 & \text{otherwise} \end{cases}$$
+   [S1, unofficial]
+
+3. Compute deltas:
+   $$dx = \text{end}.x - \text{start}.x$$
+   $$dy = \text{end}.y - \text{start}.y$$
+   [S1, unofficial]
+
+4. Compute t-deltas (inverse step size in $t$):
+   $$\text{tDeltaX} = \begin{cases} |1/dx| & \text{if } dx \neq 0 \\ \text{FL\_FLT\_MAX} & \text{otherwise} \end{cases}$$
+   $$\text{tDeltaY} = \begin{cases} |1/dy| & \text{if } dy \neq 0 \\ \text{FL\_FLT\_MAX} & \text{otherwise} \end{cases}$$
+   [S1, unofficial]
+
+5. Compute next intersection coordinates:
+   $$\text{nextX} = \begin{cases} \lfloor \text{start}.x \rfloor + 1 & \text{if } \text{stepX} > 0 \\ \lfloor \text{start}.x \rfloor & \text{otherwise} \end{cases}$$
+   $$\text{nextY} = \begin{cases} \lfloor \text{start}.y \rfloor + 1 & \text{if } \text{stepY} > 0 \\ \lfloor \text{start}.y \rfloor & \text{otherwise} \end{cases}$$
+   [S1, unofficial]
+
+6. Compute initial t-max values:
+   $$\text{tMaxX} = \begin{cases} |(\text{nextX} - \text{start}.x) / dx| & \text{if } dx \neq 0 \\ \text{FL\_FLT\_MAX} & \text{otherwise} \end{cases}$$
+   $$\text{tMaxY} = \begin{cases} |(\text{nextY} - \text{start}.y) / dy| & \text{if } dy \neq 0 \\ \text{FL\_FLT\_MAX} & \text{otherwise} \end{cases}$$
+   [S1, unofficial]
+
+7. Initialize `maxT = 1.0f`, `currentX = x0`, `currentY = y0` [S1, unofficial].
+
+8. Loop:
+   - Call `visitor.visit(currentX, currentY)` [S1, unofficial].
+   - Compute $t = \min(\text{tMaxX}, \text{tMaxY})$ [S1, unofficial].
+   - If $t > \text{maxT}$, break [S1, unofficial].
+   - If $\text{tMaxX} < \text{tMaxY}$:
+     - $\text{tMaxX} += \text{tDeltaX}$
+     - $\text{currentX} += \text{stepX}$
+   - Else:
+     - $\text{tMaxY} += \text{tDeltaY}$
+     - $\text{currentY} += \text{stepY}$
+   [S1, unofficial]
+
+9. Ensure the end cell $(x_1, y_1)$ is visited at least once:
+   If $\text{currentX} \neq x_1$ or $\text{currentY} \neq y_1$, call `visitor.visit(x1, y1)` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_grid_segment_float(start_x, start_y, end_x, end_y, visitor):
+    import math
+
+    # 1. Compute initial cell coordinates
+    x0 = math.floor(start_x)
+    y0 = math.floor(start_y)
+    x1 = math.floor(end_x)
+    y1 = math.floor(end_y)
+
+    # 2. Compute step directions
+    if x1 > x0:
+        step_x = 1
+    elif x1 < x0:
+        step_x = -1
+    else:
+        step_x = 0
+
+    if y1 > y0:
+        step_y = 1
+    elif y1 < y0:
+        step_y = -1
+    else:
+        step_y = 0
+
+    # 3. Compute deltas
+    dx = end_x - start_x
+    dy = end_y - start_y
+
+    # 4. Compute t-deltas
+    FLT_MAX = 1e30  # Placeholder for FL_FLT_MAX
+    t_delta_x = abs(1.0 / dx) if dx != 0.0 else FLT_MAX
+    t_delta_y = abs(1.0 / dy) if dy != 0.0 else FLT_MAX
+
+    # 5. Compute next intersection coordinates
+    next_x = math.floor(start_x) + 1 if step_x > 0 else math.floor(start_x)
+    next_y = math.floor(start_y) + 1 if step_y > 0 else math.floor(start_y)
+
+    # 6. Compute initial t-max values
+    t_max_x = abs((next_x - start_x) / dx) if dx != 0.0 else FLT_MAX
+    t_max_y = abs((next_y - start_y) / dy) if dy != 0.0 else FLT_MAX
+
+    # 7. Initialize
+    max_t = 1.0
+    current_x = x0
+    current_y = y0
+
+    # 8. Loop
+    while True:
+        visitor.visit(current_x, current_y)
+        t = min(t_max_x, t_max_y)
+        if t > max_t:
+            break
+
+        if t_max_x < t_max_y:
+            t_max_x += t_delta_x
+            current_x += step_x
+        else:
+            t_max_y += t_delta_y
+            current_y += step_y
+
+    # 9. Ensure end cell is visited
+    if current_x != x1 or current_y != y1:
+        visitor.visit(x1, y1)
+```
+[S1, unofficial]
+
+**Parameters:**
+- `start`: `vec2f` [S1, unofficial]
+- `end`: `vec2f` [S1, unofficial]
+- `visitor`: Callable with `visit(int, int)` [S1, unofficial]
+
+**Edge cases and pitfalls:**
+- If the loop terminates before reaching the final cell $(x_1, y_1)$, the end cell must be explicitly visited to ensure completeness [S1, unofficial].
+- Division by zero is handled by setting `tDelta` and `tMax` to `FL_FLT_MAX` when the corresponding delta is zero [S1, unofficial].
+
+## Subtopics
+
+### [Amanatides–Woo grid traversal (fixed-point Q24.8 variant)](5006-amanatides-woo-grid-traversal-fixed-point-q24-8-variant.md)
+Implements the algorithm using 32-bit signed integers with 8 fractional bits (Q24.8) to improve performance and avoid floating-point precision issues.
+
+### [Compiled Per-Ray Triangle Grid Walk](5198-compiled-per-ray-triangle-grid-walk.md)
+Walks a triangle grid using a compiled loop with one iteration per ray, replacing array-based approaches.
+
+## Operating characteristics
+Not given in the sources.
+
+## Background
+The algorithm is implemented in the FastLED library's `traverse_grid.h` file [S1, unofficial]. The specific floating-point variant is named `traverseGridSegmentFloat` [S1, unofficial].
+
+## Sources
+[S1] FastLED: fl/traverse_grid.h Source File, https://fastled.io/docs/d9/d42/traverse__grid_8h_source.html, fetched 2026-10-30 (unofficial)

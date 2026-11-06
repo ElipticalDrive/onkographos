@@ -1,0 +1,330 @@
+Pure Rust Inference Engine. Contribute to Avarok-Cybersecurity/atlas development by creating an account on GitHub.
+
+qsa: device radix-select top-k + dense-attention skip for prefill selection (~3.2x prefill) by rsafier · Pull Request #820 · Avarok-Cybersecurity/atlas · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rsafier
+commented
+Aug 30, 2026
+Copy link
+Copy Markdown
+Collaborator
+Two independent QSA prefill optimisations, measured together on qwen4_exp
+(Qwen3.8-Flash-Next NVFP4) on GB10. Both are off the critical path for other
+models — the changes are confined to the QSA selection path.
+Measured: ~210 -> 672 tok/s prefill at 36K context.
+1. Device radix-select top-k (the large win, ~2.8x)
+QSA prefill selection ("stage 2") picked its top-K blocks per query on the
+host: the score matrix was copied device->host, sorted in Rust, and the
+indices copied back. That is a synchronous round-trip per layer per chunk, and
+it dominated the prefill profile — not the dense attention, which is where I
+first (wrongly) looked.
+qsa_topk_rows in qsa_indexer.cu replaces it with a radix select over four
+fixed 8-bit passes, one block per row, 256 threads.
+Three properties of this problem make the simple version correct:
+Scores are relu(q·k), so they are non-negative and their IEEE-754 bit
+patterns compare as uint32 directly — no sign-flip transform needed.
+The consumer softmaxes over the selected set, so output order is
+irrelevant; only set membership matters. No sort after select.
+relu floors at 0.0, so ties are common and must break lowest-index-first
+to match the host path bit-for-bit. Done with a warp ballot walk over the
+final radix bucket.
+ATLAS_QSA_HOST_TOPK=1 restores the host path for A/B.
+2. Skip the dense attention stage 2 immediately overwrites (~13%)
+The prefill path computed dense attention for all rows, then let stage 2
+overwrite the selective rows. For rows stage 2 is going to overwrite, the dense
+result is dead on arrival.
+Gated conservatively — it only engages when all of:
+ATLAS_QSA_SKIP_DENSE=1 (opt-in, default off)
+seq_len_start >= inert_bound (below the inert bound QSA is inert and dense
+is the answer)
+batched_meta.is_none() (the batched path has different row provenance)
+prefill_select_active() (mirrors ATLAS_QSA_NO_PREFILL_SELECT)
+So a config where stage 2 is not actually overwriting cannot silently lose its
+attention output.
+Testing
+cargo build --all-targets and cargo clippy --all-targets clean.
+Device vs host top-k A/B'd on a live 36K prefill: identical selected sets.
+Served end-to-end under the EP=2 qwen4_exp config (200K ctx) with the flag on;
+output coherent.
+Correctness on non-qwen4_exp models is by construction rather than by test —
+both changes sit behind QSA-specific paths and the second behind an opt-in env
+flag. Worth a reviewer's eye on the gate conditions in particular.
+rsafier
+added 2 commits
+August 30, 2026 00:12
+qsa: device radix-select top-k for prefill selection (2.8x prefill)
+…
+0e01d63
+```
+Stage-2 selection did its top-k on the HOST: D2H every block score, then sort
+per query row on the CPU. At 36K context that is ~18 MB copied and 8192 sorts
+of 562 elements PER attention layer PER chunk, serialized against the GPU.
+
+MEASURED, 36031-token prefill, needle recall PASS on both arms:
+
+    host top-k     TTFT 152.1 s   237 tok/s
+    device top-k   TTFT  53.6 s   672 tok/s   (2.8x)
+
+moe_topk.cu was the only existing top-k and its shape is wrong here: top-10
+of 512 by iterative argmax, i.e. K sweeps over N. Ours is top-512 of ~9000
+blocks (25000 at 100K), so that would be 512 sweeps per row. qsa_topk_rows
+does a radix select instead — 4 fixed passes to find the exact K-th value,
+one to emit.
+
+Three properties of this workload made it tractable, all read out of the
+existing code rather than assumed:
+  * scores are relu(q.k), hence NON-NEGATIVE, so the IEEE bit pattern as
+    uint32 is already monotonically ordered — no sign-flip mapping;
+  * output ORDER is irrelevant (qsa_prefill_attn softmaxes over the selected
+    SET), so the 512 need not be sorted;
+  * the TIE-BREAK is not irrelevant — relu floors at 0.0 so ties are common,
+    and the host takes lowest-index-first. Emitting strictly-greater via
+    atomics then walking ties in index order with a warp ballot reproduces
+    that; racing on the atomic would pick a different set and change the
+    attention.
+
+Falls back to the host path when the kernel is absent; ATLAS_QSA_HOST_TOPK=1
+forces it for A/B.
+
+Claude-Session: https://claude.ai/code/session_01PE72NZ6oBfrjVKZEmPoUHd
+```
+qsa: skip the dense prefill attention stage 2 is about to overwrite
+…
+c8f60bb
+```
+Long-context prefill was quadratic despite QSA: on BOTH prefill paths the
+dense attention computes every row, then stage-2 selection (section 8b)
+recomputes rows past the inert bound sparsely and OVERWRITES them. Nothing
+was skipped, so the O(chunk x prefix) term was paid in full and the sparse
+pass was pure addition.
+
+Fit to a live 99K prefill: t(chunk) = 9.8 s + 1.22 ms per 1K of context.
+The fixed 9.8 s is ~836 tok/s and matches this model's short-prompt figure;
+the slope is the dense pass, and by 57K it is ~87% of the chunk.
+
+When seq_len_start >= inert_bound EVERY row of the chunk is selective, so
+stage 2 writes all of attn_out and the dense dispatch is dead work. At an 8K
+chunk size that is every chunk after the first.
+
+Guard is strict because a wrong skip leaves attn_out UNINITIALISED rather
+than wrong-but-plausible: stage 2 must be enabled (new prefill_select_active
+mirrors the ATLAS_QSA_NO_PREFILL_SELECT kill switch), seq_len_start must be
+past the bound, and batched metadata must be absent (8b refuses it).
+ATLAS_QSA_SKIP_DENSE=1 arms it; default off.
+
+NOT YET MEASURED — built but not run; the box is serving.
+
+Claude-Session: https://claude.ai/code/session_01PE72NZ6oBfrjVKZEmPoUHd
+```
+rsafier
+requested review from
+SeedSource and
+tbraun96
+as code owners
+August 30, 2026 04:33
+github-actions
+Bot
+mentioned this pull request
+Aug 30, 2026
+META: PR Telemetry Tracker
+#434
+Open
+rsafier
+mentioned this pull request
+Aug 30, 2026
+fix(qsa,ple): free per-sequence device state on sequence teardown (~739 MB/request leak)
+#821
+Closed
+style: cargo fmt
+…
+58067bf
+```
+Collapse three single-expression `get_or_init` closures and reindent the
+host top-k fallback block that gained a level when the device path was
+added. Formatting only -- `git diff -w` shows nothing but the closure
+collapses.
+```
+rsafier
+mentioned this pull request
+Aug 30, 2026
+test(cutlass): SFB swizzle parity harness at real MoE shapes + CUTLASS grouped-MoE evaluation notes
+#822
+Draft
+Merge branch 'main' into feat/qsa-prefill-select-perf
+7348f73
+rsafier
+added a commit
+that referenced
+this pull request
+Sep 2, 2026
+Merge PR #820 (QSA device radix-select) + two measured C>1 decode fixes
+…
+1a76b19
+```
+Concurrent decode on qwen4_exp was flat: aggregate throughput 11.2 -> 16.2
+tok/s from C=1 to C=8 while per-sequence collapsed 12.7 -> 2.3, i.e. the step
+cost grew linearly with the batch. An instrumented investigation
+(.research/c_concurrency_diagnosis.md) showed decode IS batched at the
+scheduler — one dispatch per step, contiguous SSM slots, batched GDN
+projections — but both mHC layer kinds ran the MoE FFN as a PER-SEQUENCE
+LOOP, so the dominant part of the step scaled with C. The engine
+self-documented the gap at boot ("mHC highway model: concurrency N via the
+per-seq highway decode loop (batched highway kernels are the perf
+follow-up)", #753 item B): GDN projections and attention were batched, the
+MoE loop was left per-row.
+
+1. hc_ffn_plan + batched MoE decode. One n-row FFN dispatch replaces the
+   per-row loops in qwen3_ssm/trait_decode_multi_seq/hc.rs and
+   qwen3_attention/trait_impl/multi_seq/mod.rs, through the batched arm that
+   already existed (forward_token_major_decode -> EXL3/NVFP4/FP8/LoRA/dense).
+   The plan is a pure function (layers/hc_ffn_plan.rs) so the dispatch count
+   is unit-testable without a GPU: n=8 must be ONE dispatch, the kill switch
+   must be n, n=1 must be unchanged.
+
+2. QSA decode selection fully on device. PR #820 added a radix-select top-k
+   kernel (4 fixed 8-bit passes, one block per row) but wired it to PREFILL
+   only; decode still did copy_d2h(scores) -> host sort -> copy_h2d(sel) per
+   QSA layer per sequence per step — ~96 stream drains per step at C=8 across
+   12 attention layers. A new qsa_expand_sel kernel sorts the selected blocks
+   ascending and expands them into the token-index array on device, so the
+   path is now zero-D2H/zero-H2D. n_sel stays host-computable (a pure
+   function of block_topk/ratio/complete/visible), so nothing is read back.
+
+MEASURED (dgx-00, distinct prompts per slot — the shared-prompt bench dedupes
+through the prefix cache — ISL 1024 / OSL 256, server step medians as ground
+truth). Aggregate tok/s:
+
+  C  control   hc-batched   qsa-device   both
+  1    11.2       11.1         11.1      11.3
+  2    13.6       13.3         13.4      13.3
+  4    15.1       20.2         15.1      23.4  (+55%)
+  8    16.2       33.1         15.8      32.5  (+101%)
+
+Per-seq at C=8: 2.3 -> 5.5 tok/s; TPOT 296 -> 106 ms; step p50 404 -> 159 ms.
+C=1 is unchanged in every arm — the single-user path is the regression risk
+and it did not move. QSA-device alone is within noise at ISL 1024 because the
+indexer is inert below 2051 context tokens; its value is at long context and
+it is what makes a rows>1 batched selection possible later.
+
+NOT fixed here, and the next thing worth doing: above ~2051 tokens
+QSA-active batches abandon the batched path entirely for a per-sequence
+staging loop (hc_perseq, decode_a2.rs), and C=4 at ISL 4096 collapses to
+~4 tok/s aggregate — "no ATLAS_DECODE_BATCH lines" appears in the
+long-context section of every arm including both fixes.
+
+Validation: 187 EXL3 parity legs PASS; a new qsa_decode_select_parity example
+proves the device selection equals the host path (set AND order of sel[],
+including the ties that relu-floored scores make common) over 200 cases;
+703 + 295 + 104 lib tests; clippy --all-targets. The #820 merge conflicted
+once (it added prefill_select_active where this branch had added
+release_seq_state from #821) — both kept.
+```
+rsafier
+mentioned this pull request
+Sep 2, 2026
+EXL3 checkpoint support: native kernels and Qwen MTP verification
+#834
+Draft
+rsafier
+added a commit
+that referenced
+this pull request
+Sep 2, 2026
+fix(qsa): canonicalise the prefill top-k list — the second temp-0 non…
+…
+c904cae
+```
+…determinism source
+
+With the MoE prefill epilogue made deterministic (e76b349), prefill was
+bit-reproducible below 2051 tokens but still 8/8 bit-distinct above it. That
+boundary is `index_topk + index_compress_ratio - 1`, the QSA activation
+bound, and the second source is in the device radix-select itself: the
+"emit everything strictly greater" pass assigns output slots with
+`atomicAdd(&s_emitted, 1u)`, so the selected SET came back in a different
+ORDER every run.
+
+Order is bit-significant here, contrary to the comment this replaces.
+`qsa_prefill_attn` reads the block-id list directly and its online softmax
+rescales `m`/`l`/`acc` as it walks the list, so a permuted list changes the
+fp32 accumulation order. Softmax is order-invariant in exact arithmetic; it
+is not bit-invariant in fp32. (Decode was never affected because
+`qsa_expand_sel` already sorts the ids ascending — that sort is exactly what
+made decode's order canonical.)
+
+The list is now canonicalised ascending with a shared-memory bitonic sort
+before the kernel returns — the same trick decode already uses. The emit and
+tie-fill passes are untouched, so the SET and the tie-break ("top-k by score,
+ties broken by lower index", matching the host path this kernel replaced) are
+bit-unchanged; only the order becomes a pure function of the set. The
+alternative — an index-ordered ballot-walk emit — was rejected: same final
+order, no measurable saving, and it would put a two-level ballot prefix with
+a cross-warp tie quota into the exact code under repair. `QsaIndexer::new`
+now refuses `block_topk > 512` loudly rather than letting the kernel's sort
+bound skip silently (decode's expand sort always relied on that cap).
+
+MEASURED (dgx-00, 2.05bpw, temp 0, echo-probe = 8 identical requests whose
+PROMPT logprobs are compared bit-for-bit):
+
+  prompt tokens   pre-fix    fixed    fixed, prefix cache ON
+  93 / 1938       1/8        1/8      —
+  2103           8/8        1/8      1/8
+  2213 / 2323    8/8        1/8      —
+  5513           8/8        1/8      1/8
+
+TTFT median 2323 tok 4256 -> 4264 ms (+0.2%), 5513 tok 11374 -> 11386 ms
+(+0.1%) — inside run spread, so PR #820's prefill win survives. Set
+preservation proven three ways: a host-reference leg including a tie-heavy
+case (scores are relu-floored, so ties are the common case),
+`qsa_prefill_select_sets_match_reference` on real-checkpoint golden fixtures,
+and `qsa_decode_select_parity` (200 cases, device == host). New test
+`qsa_prefill_topk_bit_deterministic` runs the select twice on identical
+scores and asserts bit-equality of the list: it FAILS pre-fix, passes fixed.
+
+No kill switch: the change is semantics-preserving with unmeasurable cost, and
+a switch would exist only to re-enable a race.
+
+Together with e76b349, temp-0 prefill is now bit-reproducible at every
+length tested (93 to 5513 tokens), with the prefix cache on or off. 730 lib
+tests, clippy --all-targets, exl3_native_parity PASS at every leg. Notes:
+.research/qsa_prefill_determinism.md.
+```
+github-actions
+Bot
+added
+the
+needs-rebase
+Conflicts with main — its green checks are NOT real (GitHub skips merge-commit workflows)
+label
+Sep 8, 2026
+TheTom
+mentioned this pull request
+Sep 16, 2026
+Qwen3.8-Flash-Next on 2x GB10: EP=2, native EXL3, and TP=2 x EP=2 (+9.1% C=1 decode, 2.4x KV)
+#1063
+Open
+tbraun96
+mentioned this pull request
+Sep 21, 2026
+Nine PRs are blocked by the Atlas→Avarok crate rename (#1101) — what each one actually needs
+#1206
+Open
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+needs-rebase
+Conflicts with main — its green checks are NOT real (GitHub skips merge-commit workflows)
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

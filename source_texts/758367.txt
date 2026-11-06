@@ -1,0 +1,97 @@
+## Rendering pipeline — high-level overview
+
+Software renderer running on numpy + matplotlib. Coordinate spaces follow standard GPU convention:
+
+```
+local → world → view → clip → NDC → 2D screen
+```
+
+The matplotlib `Axes` is configured with `set_xlim(-1, 1)` / `set_ylim(-1, 1)` in [`Renderer.__init__`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer.py), so **NDC maps directly to the axis** — matplotlib effectively handles the final viewport (NDC → pixels) transform.
+
+## Entry point: `Renderer.render`
+
+[`Renderer.render(scene, camera)`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer.py):
+
+1. `scene.update_world_matrix()` — recompute world matrices for every [`Object3D`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/core/object_3d.py), top-down through the scene graph.
+2. `scene.traverse()` — yield all objects depth-first.
+3. For each object, dispatch in [`Renderer._render_object`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer.py) to a per-type renderer (`Points`, `Lines`, `Mesh`, `Polygons`, `Sprite`, `Text`).
+4. Wrap each call in `pre_rendering` / `post_rendering` events.
+
+Returns the list of changed matplotlib artists (for blit-based animation).
+
+## Mesh path: `RendererMesh.render` (the first pass)
+
+[`RendererMesh.render`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_mesh.py) is the **transform pass** — it computes the coordinate transforms once, then hands off to a material-specific renderer for shading/drawing.
+
+```python
+# 1. world-space vertices (for lighting, normals, centroids, back-face culling)
+world_matrix         = mesh.get_world_matrix()
+vertices_world       = GeometryUtils.apply_transform(vertices, world_matrix)
+faces_vertices_world = vertices_world[indices]      # [F, 3, 3]
+
+# 2. NDC vertices (for the actual 2D drawing)
+mvp_matrix                  = TransformUtils.compute_mvp_matrix(camera, mesh)
+vertices_ndc, vertices_clip = GeometryUtils.apply_mvp_matrix(vertices, mvp_matrix)
+faces_vertices_ndc          = vertices_ndc[indices] # [F, 3, 3]
+
+# 3. drop z → 2D
+faces_vertices_2d = faces_vertices_ndc[..., :2]     # [F, 3, 2]
+```
+
+Then dispatch to one of:
+
+| Material | Receives |
+|---|---|
+| [`MeshBasicMaterial`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_mesh_basic_material.py) | `faces_vertices_ndc`, `faces_vertices_2d` |
+| [`MeshNormalMaterial`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_mesh_normal_material.py) | `faces_vertices_world`, `faces_vertices_ndc`, `faces_vertices_2d` |
+| [`MeshDepthMaterial`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_mesh_depth_material.py) | `faces_vertices_ndc`, `faces_vertices_2d` |
+| [`MeshPhongMaterial`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_mesh_phong_material.py) | `faces_vertices_world`, `faces_vertices_ndc`, `faces_vertices_2d` |
+| [`MeshTexturedMaterial`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_mesh_textured_material.py) | `faces_vertices_world`, `faces_vertices_2d`, `faces_uvs` |
+
+Materials that need lighting (`Phong`, `Normal`, `Textured`) receive `faces_vertices_world` so they can compute centroids/normals in world space.
+
+## MVP matrix construction
+
+[`TransformUtils.compute_mvp_matrix(camera, object3d)`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/math/transform_utils.py):
+
+```python
+model_matrix      = object3d.get_world_matrix()
+view_matrix       = camera.get_view_matrix()
+projection_matrix = camera.get_projection_matrix()
+
+mvp = I · model · view · projection         # pyrr matrix44.multiply, left-to-right
+```
+
+Row-vector / right-multiplied convention (pyrr `matrix44`) — applied later as `v_clip = v_hom @ mvp`.
+
+## Vertex transform: `apply_mvp_matrix`
+
+[`GeometryUtils.apply_mvp_matrix(vertices, mvp_matrix)`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/geometry/geometry_utils.py):
+
+1. Promote `[N, 3]` vertices to homogeneous `[N, 4]` by appending a column of `1`.
+2. Multiply: `v_hom @ mvp` → clip-space `[N, 4]`.
+3. Split: `xyz` → `vertices_clip [N, 3]`; `w` → `[N, 1]` (zeros clamped to `1e-6`).
+4. **Perspective divide**: `vertices_ndc = vertices_clip / w`.
+5. Returns `(vertices_ndc, vertices_clip)`.
+
+After the divide, `vertices_ndc[:, :2]` is the 2D screen position and `vertices_ndc[:, 2]` is NDC depth (used for depth sorting and `MeshDepthMaterial`).
+
+## Helpers in `RendererUtils`
+
+[`RendererUtils`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/renderers/renderer_utils.py) provides shared mesh utilities consumed by the material renderers:
+
+- `compute_faces_centroids(faces_vertices_world)` → `[F, 3]`
+- `compute_faces_normal_unit(faces_vertices_world)` → `[F, 3]` unit normal per face (cross of two edges)
+- `compute_faces_visible(faces_vertices_2d, face_culling)` → 2D winding-based back-face culling using the sign of the 2D edge cross product (degenerate threshold `1e-6`)
+- `shade_faces_flat(...)` → flat shading: ambient + Lambert diffuse + Phong specular, iterating over `AmbientLight` / `DirectionalLight` / `PointLight`. View vector uses `camera.get_world_position()`. Point lights apply `1 / d²` attenuation.
+- `update_single_artist_zorder(camera, object3d, artist)` → sets matplotlib zorder from distance-to-camera (whole-object painter sort, for single-artist objects)
+
+## Observations
+
+1. [`GeometryUtils.apply_transform`](https://github.com/jeromeetienne/matplotlib_scenegraph/blob/main/src/mpl_graph/geometry/geometry_utils.py) and `apply_mvp_matrix` are near-duplicates — `apply_transform` even runs a perspective divide, which is a no-op for an affine model matrix (w=1) but conceptually wrong. A `TODO` in the code already flags this for unification.
+2. `vertices_clip` returned from `apply_mvp_matrix` is never used by `RendererMesh` — only `vertices_ndc` is consumed.
+3. `MeshTexturedMaterial` is the only material that doesn't receive `faces_vertices_ndc` — only `faces_vertices_2d` + world + uvs.
+4. Per-face painter's algorithm (centroid depth) is handled inside each material renderer; `update_single_artist_zorder` is only for objects that produce one matplotlib artist.
+5. No explicit viewport (NDC → pixel) transform exists — matplotlib's `[-1, 1]` axis limits absorb it.
+
+> Per-material rendering details (Phong shading path, Normal/Depth colormaps, Textured UV sampling) deferred to a follow-up issue.

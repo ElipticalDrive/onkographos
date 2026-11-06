@@ -1,0 +1,162 @@
+# Jacobi Eigendecomposition for 3x3 Symmetric Matrices
+
+Also called: Jacobi method
+
+## Overview
+Computes the eigenvalues and eigenvectors of a 3x3 symmetric matrix using the Jacobi iterative diagonalization method [S1, unofficial]. It sets itself apart from direct algebraic solvers by using a sequence of orthogonal Givens rotations to zero out off-diagonal elements, ensuring numerical stability for ill-conditioned matrices, though it is generally slower than closed-form solutions for small fixed dimensions [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A 3x3 symmetric matrix $A$ (stored as a 3x3 array or flattened 9-element array). The input matrix $A$ is destroyed (modified in-place) during computation [S1, unofficial].
+- Output: Array $d$ of size 3 holding eigenvalues sorted by decreasing modulus [S1, unofficial]. Matrix $V$ of size 3x3 holding the corresponding eigenvectors as columns [S1, unofficial].
+
+**Data Structures:**
+- $A$: 3x3 symmetric matrix. Fields: $A_{ij}$ for $i,j \in \{0,1,2\}$.
+- $d$: 1D array of 3 floats.
+- $V$: 3x3 matrix. Fields: $V_{ij}$ for $i,j \in \{0,1,2\}$.
+
+**Parameters:**
+- `TOLERANCE`: Convergence threshold for the iterative method. Typical value: $0.0001f$ [S1, unofficial].
+
+**Algorithm Steps:**
+1. Initialize the eigenvector matrix $V$ to the identity matrix $I$ [S1, unofficial].
+2. Compute the sum of the absolute values of the off-diagonal elements of $A$, denoted as $P$ (or "off-diagonal norm"):
+   $$ P = |A_{01}| + |A_{02}| + |A_{12}| $$
+3. Iterate until $P < \text{TOLERANCE}$ or a maximum iteration count is reached:
+   a. Find the pair of indices $(p, q)$ with the largest off-diagonal element magnitude $|A_{pq}|$. For a 3x3 matrix, the candidates are $(0,1), (0,2), (1,2)$.
+   b. If $|A_{pq}| < \text{TOLERANCE}$, break the loop.
+   c. Compute the rotation angle $\theta$ to zero out $A_{pq}$. Let:
+      $$ \text{theta} = 0.5 \cdot \text{atan2}(2 A_{pq}, A_{qq} - A_{pp}) $$
+      $$ c = \cos(\text{theta}) $$
+      $$ s = \sin(\text{theta}) $$
+   d. Apply the Givens rotation to $A$ to zero out $A_{pq}$ and $A_{qp}$:
+      $$ A'_{pp} = c^2 A_{pp} - 2cs A_{pq} + s^2 A_{qq} $$
+      $$ A'_{qq} = s^2 A_{pp} + 2cs A_{pq} + c^2 A_{qq} $$
+      $$ A'_{pq} = A'_{qp} = 0 $$
+      Update other elements in rows/columns $p$ and $q$ using the rotation matrix $R$:
+      $$ A'_{ik} = c A_{ik} - s A_{qk} \quad \text{for } i \in \{p,q\}, k \notin \{p,q\} $$
+      $$ A'_{ki} = c A_{ki} - s A_{kq} \quad \text{for } k \notin \{p,q\}, i \in \{p,q\} $$
+      (Note: $A$ is symmetric, so only update upper/lower triangle consistently).
+   e. Update the eigenvector matrix $V$:
+      $$ V'_{ip} = c V_{ip} - s V_{iq} \quad \text{for all } i $$
+      $$ V'_{iq} = s V_{ip} + c V_{iq} \quad \text{for all } i $$
+   f. Recompute $P$ based on the new off-diagonal elements.
+4. After convergence, copy the diagonal elements of $A$ to $d$.
+5. Sort $d$ in decreasing order of modulus and permute columns of $V$ accordingly [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def jacobi_eigen_3x3(A):
+    # A is a 3x3 symmetric matrix, will be modified
+    # d is output eigenvalues, V is output eigenvectors (columns)
+    
+    # Initialize V to identity
+    V = [[1.0, 0.0, 0.0],
+         [0.0, 1.0, 0.0],
+         [0.0, 0.0, 1.0]]
+    
+    TOLERANCE = 0.0001
+    MAX_ITER = 100
+    
+    for _ in range(MAX_ITER):
+        # Find max off-diagonal element
+        max_val = abs(A[0][1])
+        p, q = 0, 1
+        if abs(A[0][2]) > max_val:
+            max_val = abs(A[0][2])
+            p, q = 0, 2
+        if abs(A[1][2]) > max_val:
+            max_val = abs(A[1][2])
+            p, q = 1, 2
+            
+        # Check convergence
+        if max_val < TOLERANCE:
+            break
+            
+        # Compute rotation angle
+        theta = 0.5 * atan2(2.0 * A[p][q], A[q][q] - A[p][p])
+        c = cos(theta)
+        s = sin(theta)
+        
+        # Apply rotation to A
+        # Update diagonal elements
+        A_pp_new = c*c*A[p][p] - 2*c*s*A[p][q] + s*s*A[q][q]
+        A_qq_new = s*s*A[p][p] + 2*c*s*A[p][q] + c*c*A[q][q]
+        A_pq_new = 0.0
+        
+        # Update off-diagonal elements involving p or q
+        # Indices not in {p, q}
+        r = 3 - p - q
+        
+        # Update row/col p and q for index r
+        # A[p][r], A[q][r], A[r][p], A[r][q]
+        # Since A is symmetric, we update A[p][r], A[q][r], A[r][p], A[r][q]
+        # A[p][r] = c*A[p][r] - s*A[q][r]
+        # A[q][r] = s*A[p][r] + c*A[q][r]
+        # Note: A[r][p] = A[p][r], A[r][q] = A[q][r]
+        
+        old_Apr = A[p][r]
+        old_Aqr = A[q][r]
+        
+        A[p][r] = c * old_Apr - s * old_Aqr
+        A[q][r] = s * old_Apr + c * old_Aqr
+        A[r][p] = A[p][r]
+        A[r][q] = A[q][r]
+        
+        # Update diagonal elements
+        A[p][p] = A_pp_new
+        A[q][q] = A_qq_new
+        A[p][q] = A_pq_new
+        A[q][p] = A_pq_new
+        
+        # Apply rotation to V
+        # V[i][p] = c*V[i][p] - s*V[i][q]
+        # V[i][q] = s*V[i][p] + c*V[i][q]
+        for i in range(3):
+            old_Vip = V[i][p]
+            old_Viq = V[i][q]
+            V[i][p] = c * old_Vip - s * old_Viq
+            V[i][q] = s * old_Vip + c * old_Viq
+            
+    # Extract eigenvalues
+    d = [A[0][0], A[1][1], A[2][2]]
+    
+    # Sort by decreasing modulus
+    # Simple bubble sort for 3 elements
+    for i in range(3):
+        for j in range(i+1, 3):
+            if abs(d[j]) > abs(d[i]):
+                d[i], d[j] = d[j], d[i]
+                # Swap columns in V
+                for k in range(3):
+                    V[k][i], V[k][j] = V[k][j], V[k][i]
+                    
+    return d, V
+```
+
+**Edge Cases and Pitfalls:**
+- If the matrix is already diagonal, the loop terminates immediately [S1, unofficial].
+- Precision issues may arise if eigenvalues are very close; the tolerance threshold handles this [S1, unofficial].
+- The input matrix $A$ is destroyed; make a copy if the original is needed [S1, unofficial].
+
+## Subtopics
+
+### 3x3 Symmetric Matrix Pseudo-Inverse via SVD
+A method to compute the pseudo-inverse of a 3x3 symmetric matrix using SVD via Givens rotations, used to solve Quadratic Error Function (QEF) systems for vertex positioning in dual contouring [S2, unofficial]. It initializes $V$ as identity, computes $V^T A V$, performs 4 sweeps of Givens rotations on pairs $(0,1), (0,2), (1,2)$, and inverts singular values below a threshold of $1e-6f$ [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(n^3)$ per iteration for 3x3, but typically converges in a small number of iterations (e.g., < 10) [S1, unofficial].
+- **Memory Complexity:** $O(1)$ for 3x3 matrices, as it operates in-place [S1, unofficial].
+- **Strengths:** Numerically stable, handles ill-conditioned matrices well [S1, unofficial].
+- **Limitations:** Slower than closed-form solutions for 3x3 matrices [S1, unofficial].
+- **When to use:** When numerical stability is critical or when the matrix is part of a larger iterative process where stability is preferred over speed [S1, unofficial].
+- **When not to use:** When performance is critical and the matrix is well-conditioned [S1, unofficial].
+
+## Background
+The Jacobi method is a classical iterative algorithm for finding eigenvalues and eigenvectors of symmetric matrices [S1, unofficial]. It was popularized by Carl Gustav Jacob Jacobi in the 19th century [S1, unofficial]. It is widely used in computer graphics for tasks such as principal component analysis and normal estimation [S1, unofficial].
+
+## Sources
+[S1] ChessQian/DualContouring, https://github.com/ChessQian/DualContouring, fetched 2026-10-26 (unofficial)
+[S2] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,190 @@
+3D geometry processing SDK: fast mesh boolean, mesh repair, decimation, remeshing, offset, point cloud triangulation and ICP registration. C++ with Python, C#, C and JavaScript bindings. - rayMeshIntersectAll( Line3d ): round segment ends from double, expand boxes by two integer steps by Grantim · Pull Request #7028 · MeshInspector/MeshLib
+
+rayMeshIntersectAll( Line3d ): round segment ends from double, expand boxes by two integer steps by Grantim · Pull Request #7028 · MeshInspector/MeshLib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Grantim
+commented
+Oct 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+rayMeshIntersectAll( mp, Line3d, ... ) decides every ray-triangle intersection exactly, in integer coordinates of the segment's ends and the triangle's vertices, with simulation of simplicity. But the boxes it used to clip the ray and to cull triangles were only one float ulp larger than the triangles (computeFaceBox expands leaf boxes by one ulp). Near zero coordinate, one float ulp is smaller than one step of the integer grid, which has about 2^31 steps along the largest dimension of the mesh's box. This broke the count in two ways:
+The segment is the ray clipped by the root box. If a face lies in the plane of the box, the clipped end landed exactly on that face in integer coordinates. Simulation of simplicity then put the end inside the mesh, and the crossing of that face was lost. For the cube [-1,0]^3, every ray along X got 1 intersection instead of 2.
+A box could be culled although its triangle touched the segment in integer coordinates. A ray passing 1e-12 from a vertex at zero coordinate lost the crossing near that vertex.
+Both cases give an odd number of crossings of a closed mesh. They break everything that decides inside/outside by this count:
+makeInsideMeshVolume and the distance volumes with SignDetectionMode::OddCrossings: every voxel inside the cube [-1,0]^3 came out outside;
+signedDistanceToMesh with OddCrossings;
+findDisorientedFaces.
+Case 1 needs a face in the plane of the bounding box near zero coordinate, as in the cube [-1,0]^3, but not in [-0.5,0.5]^3 or [0,1]^3. Case 2 can happen near any vertex with a coordinate close to zero, so meshes centered at zero are affected too.
+Now the double version works as follows:
+The segment's ends are rounded to integers directly from double. Before, they were rounded to float first, which could move them by many integer steps.
+All boxes, both for clipping the ray and for culling, are expanded by two integer steps. Rounding to the nearest integer moves the ends and the vertices by at most half a step each, so in integers they can come closer than in double by at most one step. The second step covers the errors of computations in double, which stay far below a step while the ray starts near the mesh.
+The intersection point is computed from the same integer coordinates by the new findTriangleSegmentIntersectionPreciseInt. findTriangleSegmentIntersectionPrecise now calls it and returns the same results as before.
+Every hit accepted by the precise test is reported. The segment is already limited by [rayStart, rayEnd], and the former check of the distance, computed from the hit point rounded to float, could drop a hit near a range end, e.g. on the face where a ray starts. So the distanceAlongLine of a hit at a finite range end can be slightly outside the range.
+The float version is unchanged.
+Tests:
+MRMesh.MeshIntersectAllPrecise checks both cases. On master it finds 1 intersection instead of 2 in each case. It also checks that rays starting exactly on a face give the same parity in both directions.
+MRMesh.findTriangleSegmentIntersectionPreciseInt checks the new function.
+Local checks, not committed:
+120,000 lines through vertices and edge midpoints of closed meshes, or 1e-17 to 1e-8 of the mesh size away from them, over two cubes and a marching-cubes mesh placed centered, ending at zero and far from the origin. All lines now cross the meshes an even number of times. On master, 4,208 lines got an odd count, 6 of them on the centered mesh.
+Cubes in 9 placements: makeInsideMeshVolume and signedDistanceToMesh with OddCrossings are now correct for all of them. On master, 5 placements were wrong, all with a face at a max coordinate of 0 or 1e-4.
+makeInsideMeshVolume still reproduces the voxels of marching-cubes meshes exactly, also in negative coordinates and far from the origin.
+🤖 Generated with Claude Code
+rayMeshIntersectAll( Line3d ): expand boxes beyond rounding to float …
+…
+d645357
+```
+…and int
+
+The double version decides every intersection precisely in integer coordinates,
+but the boxes were exact up to one float ulp, which is less than one integer step
+for coordinates near zero:
+1) the segment's end clipped by the root box landed exactly on a face lying in
+   the plane of the box (e.g. a cube [-1,0]^3 crossed along X), simulation of
+   simplicity put that end inside the mesh, and the crossing was lost;
+2) a box was culled although its triangle touched the segment in integer
+   coordinates (a ray passing 1e-12 from a vertex at zero coordinate).
+Both gave an odd number of crossings of a closed mesh, breaking
+SignDetectionMode::WindingRule and makeInsideMeshVolume (all voxels of [-1,0]^3
+came out empty).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Grantim
+mentioned this pull request
+Oct 5, 2026
+SignDetectionMode::OddCrossings (was WindingRule): one ray per row of voxels
+#7030
+Merged
+Fedr
+approved these changes
+Oct 5, 2026
+View reviewed changes
+Fedr
+mentioned this pull request
+Oct 5, 2026
+Add rayMeshIntersectAllPrecise; rayMeshIntersectAll( Line3d ) no longer uses precise predicates
+#7033
+Closed
+Grantim
+and others
+added 3 commits
+October 5, 2026 18:50
+Merge remote-tracking branch 'origin/master' into agent/mlib-ray-mesh…
+…
+322bb1f
+```
+…-intersect-all-boxes
+
+# Conflicts:
+#	source/MRTest/MRMeshIntersectTests.cpp
+```
+Merge remote-tracking branch 'origin/master' into agent/mlib-ray-mesh…
+…
+8a2bf1e
+```
+…-intersect-all-boxes
+```
+rayMeshIntersectAll( Line3d ): round segment ends from double, expand…
+…
+b4d4d47
+```
+… boxes by two integer steps
+
+The segment's ends are rounded to integers directly from double instead of via float,
+so all boxes (for clipping and for culling) need only a margin of two integer steps:
+one for rounding the ends and the vertices to the nearest integers, and one for the errors
+of computations in double. The margin no longer depends on the distance from the origin.
+The intersection point is computed from the same integer coordinates
+by the new findTriangleSegmentIntersectionPreciseInt.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Grantim
+changed the title
+rayMeshIntersectAll( Line3d ): expand boxes beyond rounding to float and int
+rayMeshIntersectAll( Line3d ): round segment ends from double, expand boxes by two integer steps
+Oct 6, 2026
+Fedr
+marked this pull request as ready for review
+October 6, 2026 10:29
+Fedr
+reviewed
+Oct 6, 2026
+View reviewed changes
+Comment thread
+source/MRMesh/MRMeshIntersect.cpp
+Outdated
+// no intersection point only if the segment lies in the plane of the triangle without crossing its sides
+found.proj.point = ip ? convToFloat( *ip ) : Vector3f( ( dP + eP ) * 0.5 );
+const auto t = dot( Vector3d( found.proj.point ) - line.p, line.d ) * invDirLenSq;
+if ( t < rayEnd && t > rayStart )
+Fedr
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This rayStart/rayEnd check is now redundant in the precise branch, and it can only do harm. The integer segment is already cut to [rayStart, rayEnd] (through s and e), so doTriangleSegmentIntersect has already decided whether a hit lies in the range. The check repeats that decision with t computed from the float-rounded hit point, so near a segment end it can drop a hit that the exact test accepted, and the number of crossings becomes odd.
+In practice this matters only with a finite range and a hit within float rounding of a range end, e.g. signedDistanceToMesh with OddCrossings for a query point within float rounding of the surface (rayStart = 0). makeInsideMeshVolume passes an infinite range, and findDisorientedFaces skips its own face anyway.
+Suggestion: drop the check in the precise branch and always report the hit, so the count follows the exact test alone.
+Grantim
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Agreed, removed in 6acfe06: the precise branch now reports every hit the exact test accepts. A ray starting exactly on the face x=-0.5 of a cube shows it: with the check it got 1 crossing along +X and 0 along -X, now both directions agree (2 and 0). This case is added to MeshIntersectAllPrecise.
+rayMeshIntersectAll( Line3d ): report every hit accepted by the preci…
+…
+6acfe06
+```
+…se test
+
+The segment is already limited by [rayStart, rayEnd], so the precise test decides
+whether a hit is in the range. The check of the distance computed from the hit point
+rounded to float could drop a hit near a range end, e.g. on the face where a ray starts,
+making the number of crossings odd.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Fedr
+approved these changes
+Oct 6, 2026
+View reviewed changes
+Grantim
+merged commit dd9150a
+into
+master
+Oct 6, 2026
+Grantim
+deleted the
+agent/mlib-ray-mesh-intersect-all-boxes
+branch
+October 6, 2026 12:06
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

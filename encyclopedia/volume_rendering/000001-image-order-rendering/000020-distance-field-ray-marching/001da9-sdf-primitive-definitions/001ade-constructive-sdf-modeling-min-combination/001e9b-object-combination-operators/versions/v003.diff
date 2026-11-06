@@ -1,0 +1,116 @@
+--- v002.md
++++ v003.md
+@@ -4,92 +4,43 @@
+ 
+ ## Overview
+-Object Combination Operators are a family of functions that combine two signed distance functions (SDFs), $a$ and $b$, to produce specific geometric features such as rounded edges, chamfers, stairs, or pipes, rather than the sharp edges produced by standard boolean operations [S1, unofficial][S2, unofficial]. Unlike the standard `min` operator used in [Constructive SDF Modeling (Min Combination)](871-constructive-sdf-modeling-min-combination.md) or the blending-focused [SDF Smooth Union](1817-sdf-smooth-union.md), these operators aim to produce correct distance values or tight distance bounds that preserve Lipschitz continuity when the gradients of the input SDFs are orthogonal [S1, unofficial][S2, unofficial].
++Object Combination Operators are constructive operators that combine two Signed Distance Function (SDF) values, $a$ and $b$, to produce features such as rounded edges, chamfers, stairs, or other geometric details, rather than the sharp boolean edges produced by standard `min` or `max` operations [S1, unofficial][S2, unofficial]. They are distinguished from generic "smooth minimum" approximations (like the standard `smoothstep` blend) by their specific geometric construction, which aims to preserve Lipschitz continuity (gradient magnitude $\le 1$) and correct distance field properties in more cases [S1, unofficial][S2, unofficial]. While [SDF Smooth Union](1817-sdf-smooth-union.md) focuses on a continuous differentiable transition, these operators often provide specific geometric shapes (chamfers, rounds) or preserve sharp logic with material tracking [S1, unofficial][S2, unofficial].
+ 
+ ## Shared principles
+-All operators in this family take two scalar distance values, $a$ and $b$, and a radius parameter $r$ (and occasionally $n$) as inputs, and return a single scalar distance value [S1, unofficial][S2, unofficial]. The parameter $r$ specifies the radius of the resulting feature (e.g., the fillet radius) and must be significantly smaller than the size of the objects to maintain validity [S1, unofficial][S2, unofficial].
++All operators in this family take two scalar SDF inputs, $a$ and $b$, representing the distance from a query point to two primitives, and a parameter $r$ (or $k$) controlling the feature size [S1, unofficial][S2, unofficial].
+ 
+-The core mathematical property distinguishing these operators from generic smooth minimums is their preservation of Lipschitz continuity. Standard smooth minimums can violate the Lipschitz condition (where the gradient magnitude exceeds 1) when combining SDFs, leading to ray marching artifacts [S1, unofficial][S2, unofficial]. These operators are designed such that Lipschitz continuity is preserved provided the gradients of the two SDFs are at right angles (orthogonal) [S1, unofficial][S2, unofficial]. If the gradients are off by more than 30 degrees, or if the surfaces are parallel and close to each other, the Lipschitz condition may no longer hold, causing artifacts [S1, unofficial][S2, unofficial].
++**Parameter Constraints:**
++- $r$: The radius or smoothing factor. It must be significantly smaller than the size of the objects to maintain validity and prevent geometric distortion [S1, unofficial][S2, unofficial].
++- $n$: In stair/column operators, $n$ specifies the number of columns or stairs ($n-1$ features produced) [S2, unofficial].
+ 
+-The family includes operators for various intersection features:
+-- **Chamfer:** `fOpUnionChamfer(a, b, r) = min(min(a, b), (a - r + b) * sqrt(0.5))` [S1, unofficial][S2, unofficial]
+-- **Intersection Chamfer:** `fOpIntersectionChamfer(a, b, r) = max(max(a, b), (a + r + b) * sqrt(0.5))` [S1, unofficial][S2, unofficial]
+-- **Difference Chamfer:** `fOpDifferenceChamfer(a, b, r) = fOpIntersectionChamfer(a, -b, r)` [S1, unofficial][S2, unofficial]
+-- **Round:** `u = max(vec2(r - a, r - b), vec2(0))`; `fOpUnionRound(a, b, r) = max(r, min(a, b)) - length(u)` [S1, unofficial][S2, unofficial]
+-- **Intersection Round:** `u = max(vec2(r + a, r + b), vec2(0))`; `fOpIntersectionRound(a, b, r) = min(-r, max(a, b)) + length(u)` [S1, unofficial][S2, unofficial]
+-- **Difference Round:** `fOpDifferenceRound(a, b, r) = fOpIntersectionRound(a, -b, r)` [S1, unofficial][S2, unofficial]
+-- **Stairs:** `s = r/n`; `u = b - r`; `fOpUnionStairs(a, b, r, n) = min(min(a, b), 0.5 * (u + a + abs(mod(u - a + s, 2 * s) - s)))` [S1, unofficial][S2, unofficial]
+-- **Intersection Stairs:** `fOpIntersectionStairs(a, b, r, n) = -fOpUnionStairs(-a, -b, r, n)` [S1, unofficial][S2, unofficial]
+-- **Difference Stairs:** `fOpDifferenceStairs(a, b, r, n) = -fOpUnionStairs(-a, b, r, n)` [S1, unofficial][S2, unofficial]
+-- **Soft Union:** `e = max(r - abs(a - b), 0)`; `fOpUnionSoft(a, b, r) = min(a, b) - e * e * 0.25 / r` [S1, unofficial][S2, unofficial]
+-- **Pipe:** `fOpPipe(a, b, r) = length(vec2(a, b)) - r` [S1, unofficial][S2, unofficial]
+-- **Engrave:** `fOpEngrave(a, b, r) = max(a, (a + r - abs(b)) * sqrt(0.5))` [S1, unofficial][S2, unofficial]
+-- **Groove:** `fOpGroove(a, b, ra, rb) = max(a, min(a + ra, rb - abs(b)))` [S1, unofficial][S2, unofficial]
+-- **Tongue:** `fOpTongue(a, b, ra, rb) = min(a, max(a - ra, abs(b) - rb))` [S1, unofficial][S2, unofficial]
+-- **Columns:** `fOpUnionColumns` and `fOpDifferenceColumns` produce a series of columns or pillars at the intersection, controlled by $n$ [S1, unofficial].
++**Lipschitz Continuity:**
++The primary theoretical advantage of these specific operators over generic smooth blends is the preservation of Lipschitz continuity under specific conditions. The operator preserves Lipschitz continuity (gradient magnitude $\le 1$) when the gradients of the two SDFs are orthogonal (at right angles) [S1, unofficial][S2, unofficial].
+ 
+-```python
+-import math
++**Failure Conditions:**
++Lipschitz continuity is lost, causing ray marching artifacts, if:
++1. The gradients of the two SDFs deviate by more than $30^\circ$ [S1, unofficial][S2, unofficial].
++2. The surfaces are parallel and close to each other [S1, unofficial][S2, unofficial].
+ 
+-def fOpUnionColumns(a: float, b: float, r: float, n: float) -> float:
+-    if a < r and b < r:
+-        p_x = a
+-        p_y = b
+-        sqrt2 = math.sqrt(2.0)
+-        p_x = (a - b) / sqrt2
+-        p_y = (a + b) / sqrt2
+-        p_x = p_x - (sqrt2 / 2.0) * r
+-        columnradius = (r * sqrt2) / ((n - 1) * 2 + sqrt2)
+-        p_x = p_x + columnradius * sqrt2
+-        if n % 2 == 1:
+-            p_y = p_y + columnradius
+-        period = columnradius * 2
+-        p_y = p_y - math.floor(p_y / period) * period
+-        result = math.sqrt(p_x**2 + p_y**2) - columnradius
+-        result = min(result, p_x)
+-        result = min(result, a)
+-        return min(result, b)
+-    else:
+-        return min(a, b)
+-
+-def fOpDifferenceColumns(a: float, b: float, r: float, n: float) -> float:
+-    a_neg = -a
+-    m = min(a_neg, b)
+-    if a_neg < r and b < r:
+-        p_x = a_neg
+-        p_y = b
+-        sqrt2 = math.sqrt(2.0)
+-        p_x = (a_neg - b) / sqrt2
+-        p_y = (a_neg + b) / sqrt2
+-        columnradius = (r * sqrt2) / ((n - 1) * 2 + sqrt2)
+-        p_y = p_y + columnradius
+-        p_x = p_x - (sqrt2 / 2.0) * r
+-        p_x = p_x - (columnradius * sqrt2) / 2.0
+-        if n % 2 == 1:
+-            p_y = p_y + columnradius
+-        period = columnradius * 2
+-        p_y = p_y - math.floor(p_y / period) * period
+-        result = -math.sqrt(p_x**2 + p_y**2) + columnradius
+-        result = max(result, p_x)
+-        result = min(result, a_neg)
+-        return -min(result, b)
+-    else:
+-        return -m
+-```
++**Data Structures:**
++The operations are element-wise on scalar distances. No complex data structures are required for the core distance calculation [G]. If material information is carried (as in [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)), the operator may also blend or select material attributes, but the core distance calculation remains scalar [G].
+ 
+ ## Subtopics
+ 
+ ### [SDF Smooth Union](1817-sdf-smooth-union.md)
+-Combines two SDFs into a single smooth field using polynomial or LogSumExp approximations, avoiding sharp edges. It is chosen when organic, metaball-like merges are desired without branching or trigonometry.
++Blends two SDFs into a single smooth distance field with a rounded transition controlled by $k$. It provides a continuous, differentiable transition, differing from the sharp `min` operator. Choose this for general soft blending where geometric precision of the corner shape is less critical than smoothness.
+ 
+ ### [Smooth Intersection](1839-smooth-intersection.md)
+-Approximates the boolean intersection of two shapes by blending their overlap region with a radius parameter. It is chosen when a smooth transition is needed instead of the sharp corner of the standard `min` operator.
++Blends the boolean intersection into a rounded feature controlled by radius $r$. It is distinguished by its specific geometric construction (S-Intersection) aimed at preserving distance field properties better than generic smooth minimums. Choose this for creating rounded internal corners.
+ 
+ ### [Multi-Material Distance Fields](1943-multi-material-distance-fields.md)
+-Extends standard SDFs by associating material properties with primitives, returning a vector of distance and material ID for shading. It is chosen when distinct visual identification of objects within a combined scene is required.
++Extends SDFs to return both distance and a material identifier. Unlike geometric blending operators, it preserves sharp boolean logic (min/max) while propagating shading data. Choose this when per-object material assignment is required within CSG scenes.
++
++### [Linear SDF Blend](3004-linear-sdf-blend.md)
++Creates a morphing transition by linearly interpolating distance values. It preserves the individual geometry of both shapes within the blend region. Choose this for shape morphing rather than geometric feature generation.
+ 
+ ## Background
+-These operators were developed to address the limitations of standard boolean SDF operations, which produce sharp, non-smooth edges that can cause artifacts in ray marching if not handled with complex logic [S1, unofficial][S2, unofficial]. The specific formulations are documented in community resources and shader libraries for real-time ray marching, such as the `RayMarching` repository [S1, unofficial] and the `TD-Raymarching-System` [S2, unofficial]. The preservation of Lipschitz continuity for orthogonal gradients is a key theoretical contribution allowing these operators to be used safely in sphere tracing without the gradient blow-up associated with generic smooth minimums [S1, unofficial][S2, unofficial].
++The concept of constructive operators for SDFs originated in the context of ray marching and implicit modeling, where standard boolean operations (`min`, `max`) produce non-smooth surfaces. The specific "Object Combination Operators" described here, particularly those preserving Lipschitz continuity (chamfers, rounds, stairs), were popularized in shader coding communities and unofficial repositories such as `kushchevd/RayMarching` and `yeataro/TD-Raymarching-System` [S1, unofficial][S2, unofficial]. They represent a refinement over earlier "smooth minimum" approximations (like the cubic or log-sum-exp blends) by offering geometrically accurate rounded features (chamfers, rounds) rather than just smooth transitions.
+ 
+ ## Sources
++
+ [S1] kushchevd/RayMarching, https://github.com/kushchevd/RayMarching, fetched 2026-10-26 (unofficial)
+ [S2] yeataro/TD-Raymarching-System, https://github.com/yeataro/TD-Raymarching-System, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,113 @@
+# Spherical Background Sampling
+
+Also called: Spherical Map Sampling
+
+## Overview
+Spherical Background Sampling converts a 3D ray direction vector into 2D UV coordinates suitable for sampling a background environment map [S1, S2, unofficial]. It assumes the ray origin lies inside the background sphere, mapping the direction directly to spherical coordinates [S2, unofficial]. Unlike [Uniform Sphere Sampling](1669-uniform-sphere-sampling.md), which generates random directions, this method deterministically maps existing directions to texture space [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- `v`: A 3D direction vector (normalized unit vector) [S1, unofficial].
+- `rays_o`: Ray origins, shape `[N, 3]` (optional, used in some implementations to verify inside-sphere assumption) [S2, unofficial].
+- `rays_d`: Ray directions, shape `[N, 3]` [S2, unofficial].
+- `radius`: Radius of the background sphere (optional, used in some implementations) [S2, unofficial].
+
+**Outputs:**
+- `coords`: 2D UV coordinates, shape `[N, 2]`, typically in range `[0, 1]` or `[-1, 1]` depending on the texture coordinate system [S1, S2, unofficial].
+
+**Data Structures:**
+- Input vectors are standard 3D floats.
+- Output coordinates are 2D floats.
+
+**Steps:**
+1. Calculate intermediate UV components using spherical coordinate conversion:
+   $$ u_{raw} = \text{atan2}(v_z, -v_x) $$
+   $$ v_{raw} = \text{asin}(v_y) $$
+   [S1, unofficial]
+2. Scale the coordinates to map the range of `atan2` and `asin` to `[0, 1]`:
+   $$ u = u_{raw} \times 0.1591 $$
+   $$ v = v_{raw} \times 0.3183 $$
+   [S1, unofficial]
+   Note: $0.1591 \approx \frac{1}{2\pi}$ and $0.3183 \approx \frac{1}{\pi}$.
+3. Offset the coordinates to center them:
+   $$ u = u + 0.5 $$
+   $$ v = v + 0.5 $$
+   [S1, unofficial]
+4. Flip the coordinates to match standard texture coordinate systems (where Y is often inverted):
+   $$ u_{final} = 1 - u $$
+   $$ v_{final} = 1 - v $$
+   [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def spherical_background_sampling(v):
+    """
+    Converts a 3D direction vector to 2D UV coordinates for environment map sampling.
+    
+    Args:
+        v: tuple or list of 3 floats (x, y, z) representing the direction vector.
+        
+    Returns:
+        tuple: (u, v) coordinates in range [0, 1].
+    """
+    x, y, z = v
+    
+    # Step 1: Calculate raw UV components
+    # atan2(z, -x) maps the azimuthal angle
+    # asin(y) maps the polar angle
+    u_raw = math.atan2(z, -x)
+    v_raw = math.asin(y)
+    
+    # Step 2: Scale
+    # 0.1591 is approximately 1/(2*pi)
+    # 0.3183 is approximately 1/pi
+    u = u_raw * 0.1591
+    v = v_raw * 0.3183
+    
+    # Step 3: Offset
+    u = u + 0.5
+    v = v + 0.5
+    
+    # Step 4: Flip
+    u_final = 1.0 - u
+    v_final = 1.0 - v
+    
+    return (u_final, v_final)
+```
+
+**Edge Cases and Pitfalls:**
+- The input vector `v` must be normalized. If not, `asin(v.y)` may return NaN if `|v.y| > 1` [S1, S2, unofficial].
+- The method assumes the ray origin is inside the background sphere. If the origin is outside, the mapping may be incorrect for rays that do not intersect the sphere in the expected manner [S2, unofficial].
+- Precision issues may arise near the poles where `asin` is steep, but this is generally manageable with standard float32 precision [S1, S2, unofficial].
+
+## Subtopics
+
+### Random Hemisphere Sampling
+- **What it is:** Generates random directions within a hemisphere.
+- **Difference:** Produces stochastic directions, whereas Spherical Background Sampling is deterministic.
+- **When to choose:** When sampling light sources or reflections within a hemisphere.
+- **Link:** [Random Hemisphere Sampling](2034-random-hemisphere-sampling.md)
+
+### Rejection Sampling for Uniform Sphere Sampling
+- **What it is:** A method to generate uniform random directions on a sphere using rejection sampling.
+- **Difference:** Stochastic generation vs. deterministic mapping.
+- **When to choose:** When random directions are needed, not mapping existing ones.
+- **Link:** [Rejection Sampling for Uniform Sphere Sampling](3286-rejection-sampling-for-uniform-sphere-sampling.md)
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per ray. The operations are basic trigonometric functions and arithmetic.
+- **Memory Complexity:** $O(1)$ auxiliary memory.
+- **Performance:** Very fast, suitable for real-time rendering.
+- **Strengths:** Simple, deterministic, easy to implement.
+- **Limitations:** Only works for background sampling assuming inside-sphere origins. Not suitable for generating random directions.
+
+## Background
+The method is commonly used in neural radiance fields (NeRF) and real-time rendering engines to sample environment maps for background lighting. The specific scaling factors and flipping are derived from standard spherical coordinate conversions adapted for texture coordinates [S1, S2, unofficial]. The implementation in [S2, unofficial] is based on `torch-ngp`, indicating its use in GPU-accelerated neural rendering pipelines [S2, unofficial].
+
+## Sources
+[S1] HectorArellanoDev/WebGPUVoxelConeTracing, https://github.com/HectorArellanoDev/WebGPUVoxelConeTracing, fetched 2026-10-26 (unofficial)
+[S2] NeRF-Factory/IDDR-NGP, https://github.com/NeRF-Factory/IDDR-NGP, fetched 2026-10-27 (unofficial)

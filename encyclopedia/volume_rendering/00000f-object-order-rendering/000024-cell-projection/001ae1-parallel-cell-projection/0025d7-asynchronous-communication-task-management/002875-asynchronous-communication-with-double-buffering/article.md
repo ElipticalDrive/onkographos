@@ -1,0 +1,94 @@
+# Asynchronous Communication with Double-Buffering
+
+Also called: Asynchronous Send/Receive with Double-Buffering, Double-Buffering with Asynchronous Communication
+
+## Overview
+A communication strategy that uses double-buffering in conjunction with asynchronous send and receive operations to reduce overheads and overlap communication of ray segments with rendering calculations [S1, unofficial]. It sets itself apart from synchronous alternatives by allowing processors to proceed independently, multiplexing object-space cell computations with image-space ray merging, and overlapping computation with communication using end buffering [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Local subset of unstructured grid data cells (e.g., tetrahedral meshes) assigned to the processor; global image space parameters.
+*   **Output:** Completed subimage sent to a host computer for assembly [S1, unofficial].
+
+**Data Structures:**
+*   **Double-Buffered Communication Buffers:** Two buffers per communication channel or logical stream. One buffer is active for writing (sending) or reading (receiving) while the other is idle or being processed. The exact layout is not specified beyond the concept of two alternating buffers [S1, unofficial].
+*   **Ray Segment Queue:** Implicit structure holding ray segments generated during scan conversion, destined for specific image-space locations [S1, unofficial].
+
+**Steps:**
+1.  **Initialize Double-Buffering:** Allocate two communication buffers for asynchronous operations [S1, unofficial].
+2.  **Multiplexed Execution Loop:**
+    a.  **Scan Conversion:** Each processor scan converts its local data cells to produce many ray segments. Data cells are not pre-sorted in depth order; instead, segments are routed to their final destinations in image space for merging [S1, unofficial].
+    b.  **Asynchronous Communication:** Perform asynchronous send and receive operations for ray segments using the double-buffering scheme. This overlaps communication of ray segments with rendering computations [S1, unofficial].
+    c.  **Ray Segment Merging:** Merge incoming ray segments in image space.
+    d.  **Progress:** Scan conversion of data cells and merging of ray segments proceed together in a multiplexed fashion [S1, unofficial].
+3.  **Finalization:** When scan conversion and ray-segment merging are finished, each processor sends its completed subimage to a host computer [S1, unofficial].
+4.  **Assembly:** The host computer assembles the subimages for display [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Initialize double buffers for communication
+send_buffer_1 = allocate_buffer()
+send_buffer_2 = allocate_buffer()
+recv_buffer_1 = allocate_buffer()
+recv_buffer_2 = allocate_buffer()
+
+current_send_buf = send_buffer_1
+current_recv_buf = recv_buffer_1
+
+# Multiplexed loop
+while not all_cells_processed:
+    # 1. Scan convert local cells to produce ray segments
+    ray_segments = scan_convert_local_cells(local_cells)
+    
+    # 2. Route segments to destinations and prepare for async send
+    # Note: No pre-sorting in depth order
+    prepare_async_send(ray_segments, current_send_buf)
+    
+    # 3. Perform asynchronous send (non-blocking)
+    async_send_handle = start_async_send(current_send_buf)
+    
+    # 4. Merge incoming ray segments from previous async receive
+    if has_completed_receive():
+        merge_ray_segments(recv_buffer)
+        swap_recv_buffers() # Swap to current_recv_buf for next iteration
+        
+    # 5. Overlap computation with communication
+    # Rendering computations proceed while async operations are in flight
+    perform_rendering_computations()
+    
+    # 6. Swap send buffers for next iteration
+    swap_send_buffers() # Swap to current_send_buf for next iteration
+
+# Finalization
+# Send completed subimage to host
+send_completed_subimage_to_host(completed_subimage)
+```
+
+**Parameters:**
+*   **Buffer Count:** 2 (Double-buffering) [S1, unofficial].
+*   **Communication Mode:** Asynchronous (Non-blocking) [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** Not given in the sources.
+*   **Degenerate Input:** Not given in the sources.
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Requires additional memory for double-buffering communication buffers [S1, unofficial].
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Designed for scalability by reducing communication overheads and overlapping communication with computation [S1, unofficial].
+*   **Strengths:** Reduces communication overheads; overlaps communication of ray segments with rendering calculations; allows independent processor progress [S1, unofficial].
+*   **Limitations:** Not given in the sources.
+*   **When to Use:** When communication overhead is significant and can be effectively overlapped with computation; suitable for parallel cell-projection volume rendering on unstructured data [S1, unofficial].
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+Originated in the context of scalable parallel cell-projection volume rendering algorithms for three-dimensional unstructured data [S1, unofficial]. It is part of a pipeline where data cells are scan converted and ray segments are merged in image space, utilizing asynchronous communication to improve efficiency [S1, unofficial].
+
+## Sources
+[S1] DTIC ADA329328: A Scalable Parallel Cell-Projection Volume Rendering Algorithm for Three-Dimensional Unstructured Data, https://archive.org/details/DTIC_ADA329328, fetched 2026-10-26 (unofficial)

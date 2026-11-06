@@ -1,0 +1,221 @@
+# Simplified Dual Contouring
+
+Also called: Dual Contouring (Simplified/Naive), naive dual contouring
+
+## Overview
+Simplified Dual Contouring is an isosurface extraction method that places a single vertex at the center of every voxel cell where the scalar field values at the eight corners exhibit a sign change along any axis-aligned edge, and constructs a quad mesh by connecting these vertices based on their relative grid positions [S1, unofficial]. Unlike standard Dual Contouring, which minimizes a Quadratic Error Function (QEF) to place vertices optimally within cells, this method uses a fixed geometric placement (cell center) and fixed connectivity rules, resulting in a simpler but potentially less accurate or topologically robust mesh [S1, unofficial]. It builds on [Dual Contouring](778-dual-contouring.md) by removing the QEF solver and complex topology handling in favor of a direct grid-based quad construction [G].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** An object implementing the `DCInput` trait, providing bounds, scalar values at grid points, and gradients (normals) at grid points [S1, unofficial].
+- **Output:** A `DCOutput` struct containing lists of vertices, normals, and triangle indices [S1, unofficial].
+
+**Data Structures:**
+- `DCBounds`: Struct with fields `x`, `y`, `z`, each being a tuple `(i32, i32)` representing inclusive start and exclusive end bounds for each axis [S1, unofficial].
+- `DCInput`: Trait requiring methods `get_bounds() -> DCBounds`, `get_value(x, y, z) -> f32`, and `get_gradient(x, y, z) -> [f32; 3]` [S1, unofficial].
+- `DCOutput`: Struct with fields `vertices: Vec<[f32; 3]>`, `normals: Vec<[f32; 3]>`, and `indices: Vec<u32>` [S1, unofficial].
+- `vertex_map`: A hash map (`HashMap<IVec3, u32>`) mapping grid integer coordinates to vertex indices in the `vertex_buffer` [S1, unofficial].
+
+**Algorithm Steps:**
+1. Initialize `vertex_buffer`, `normal_buffer`, `index_list` as empty vectors, and `vertex_map` as an empty hash map [S1, unofficial].
+2. Define fixed plane basis vectors to ensure outward-facing quads:
+   $$ \text{planes} = [(\mathbf{X}, \mathbf{Y}), (\mathbf{Z}, \mathbf{X}), (\mathbf{Y}, \mathbf{Z})] $$
+   where $\mathbf{X}=(1,0,0)$, $\mathbf{Y}=(0,1,0)$, $\mathbf{Z}=(0,0,1)$ [G]. Changing this order causes mesh faces to invert [S1, unofficial].
+3. Iterate over each voxel cell $(x, y, z)$ within the bounds:
+   - $x$ from `bounds.x.0` to `bounds.x.1 - 1`
+   - $y$ from `bounds.y.0` to `bounds.y.1 - 1`
+   - $z$ from `bounds.z.0` to `bounds.z.1 - 1` [S1, unofficial].
+4. For each cell, call `dc_place_vertex(input, x, y, z)`:
+   - Retrieve scalar values at the 8 corners of the cell:
+     $$
+     \begin{aligned}
+     p_0 &= \text{get\_value}(x, y, z) \\
+     p_1 &= \text{get\_value}(x+1, y, z) \\
+     p_2 &= \text{get\_value}(x+1, y+1, z) \\
+     p_3 &= \text{get\_value}(x, y+1, z) \\
+     p_4 &= \text{get\_value}(x, y, z+1) \\
+     p_5 &= \text{get\_value}(x+1, y, z+1) \\
+     p_6 &= \text{get\_value}(x+1, y+1, z+1) \\
+     p_7 &= \text{get\_value}(x, y+1, z+1)
+     \end{aligned}
+     $$ [S1, unofficial].
+   - Check for sign changes along the 7 edges connecting these corners in a specific sequence (indices 0 to 6, comparing $p_i$ and $p_{i+1}$):
+     $$ \text{sign\_change}(a, b) = (\max(a, b) > 0 \land \min(a, b) < 0) \lor (a = 0 \land b \neq 0) \lor (a \neq 0 \land b = 0) $$ [S1, unofficial].
+   - If any sign change is detected, return the cell center as the vertex position:
+     $$ \mathbf{v} = (x + 0.5, y + 0.5, z + 0.5) $$ [S1, unofficial].
+   - If no sign change is found, return `None` [G].
+5. If `dc_place_vertex` returns a vertex $\mathbf{v}$:
+   - Let $\mathbf{p} = (x, y, z)$ [G].
+   - Insert $\mathbf{p}$ into `vertex_map` with value `vertex_buffer.len()` (as `u32`) [S1, unofficial].
+   - Append $\mathbf{v}$ to `vertex_buffer` [S1, unofficial].
+   - Append `input.get_gradient(x, y, z)` to `normal_buffer` [S1, unofficial].
+   - For each basis pair $(\mathbf{b}_1, \mathbf{b}_2)$ in `planes`:
+     - Compute quad corner positions relative to $\mathbf{p}$:
+       $$
+       \begin{aligned}
+       \text{top\_left} &= \mathbf{p} - \mathbf{b}_1 \\
+       \text{top\_right} &= \mathbf{p} \\
+       \text{bottom\_left} &= \mathbf{p} - \mathbf{b}_1 - \mathbf{b}_2 \\
+       \text{bottom\_right} &= \mathbf{p} - \mathbf{b}_2
+       \end{aligned}
+       $$ [S1, unofficial].
+     - Check if `bottom_left` is within bounds (strictly greater than lower bounds for all axes) and if `top_left`, `bottom_left`, and `bottom_right` all exist in `vertex_map` [S1, unofficial].
+     - If so, call `create_quad` with the indices from `vertex_map` for these four positions, and a `clockwise` flag determined by:
+       $$ \text{clockwise} = \text{input.get\_value}(x, y, z) > 0 $$ [S1, unofficial].
+     - The `create_quad` function adds two triangles to `index_list` forming the quad, ordered to respect the `clockwise` flag for correct face culling [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+from typing import List, Tuple, Optional, Dict
+
+class DCBounds:
+    def __init__(self, x: Tuple[int, int], y: Tuple[int, int], z: Tuple[int, int]):
+        self.x = x
+        self.y = y
+        self.z = z
+
+class DCInput:
+    def get_bounds(self) -> DCBounds:
+        raise NotImplementedError
+    def get_value(self, x: int, y: int, z: int) -> float:
+        raise NotImplementedError
+    def get_gradient(self, x: int, y: int, z: int) -> List[float]:
+        raise NotImplementedError
+
+class DCOutput:
+    def __init__(self, vertices: List[List[float]], normals: List[List[float]], indices: List[int]):
+        self.vertices = vertices
+        self.normals = normals
+        self.indices = indices
+
+def sign_change(a: float, b: float) -> bool:
+    if (max(a, b) > 0.0 and min(a, b) < 0.0):
+        return True
+    if (a == 0.0 and b != 0.0):
+        return True
+    if (a != 0.0 and b == 0.0):
+        return True
+    return False
+
+def dc_place_vertex(input: DCInput, x: int, y: int, z: int) -> Optional[List[float]]:
+    points = [
+        input.get_value(x, y, z),
+        input.get_value(x + 1, y, z),
+        input.get_value(x + 1, y + 1, z),
+        input.get_value(x, y + 1, z),
+        input.get_value(x, y, z + 1),
+        input.get_value(x + 1, y, z + 1),
+        input.get_value(x + 1, y + 1, z + 1),
+        input.get_value(x, y + 1, z + 1)
+    ]
+    for i in range(7):
+        if sign_change(points[i], points[i + 1]):
+            return [float(x) + 0.5, float(y) + 0.5, float(z) + 0.5]
+    return None
+
+def create_quad(indices: List[int], clockwise: bool, index_list: List[int]) -> None:
+    if clockwise:
+        index_list.extend([indices[0], indices[1], indices[2], indices[0], indices[2], indices[3]])
+    else:
+        index_list.extend([indices[0], indices[2], indices[1], indices[0], indices[3], indices[2]])
+
+def dc_meshing(input: DCInput) -> DCOutput:
+    bounds = input.get_bounds()
+    vertex_buffer: List[List[float]] = []
+    normal_buffer: List[List[float]] = []
+    index_list: List[int] = []
+    vertex_map: Dict[Tuple[int, int, int], int] = {}
+    
+    planes = [
+        ((1, 0, 0), (0, 1, 0)),
+        ((0, 0, 1), (1, 0, 0)),
+        ((0, 1, 0), (0, 0, 1))
+    ]
+    
+    for x in range(bounds.x[0], bounds.x[1] - 1):
+        for y in range(bounds.y[0], bounds.y[1] - 1):
+            for z in range(bounds.z[0], bounds.z[1] - 1):
+                vertex = dc_place_vertex(input, x, y, z)
+                if vertex is not None:
+                    position = (x, y, z)
+                    vertex_map[position] = len(vertex_buffer)
+                    vertex_buffer.append(vertex)
+                    normal_buffer.append(input.get_gradient(x, y, z))
+                    
+                    for basis_1, basis_2 in planes:
+                        top_left = (position[0] - basis_1[0], position[1] - basis_1[1], position[2] - basis_1[2])
+                        top_right = position
+                        bottom_left = (position[0] - basis_1[0] - basis_2[0], position[1] - basis_1[1] - basis_2[1], position[2] - basis_1[2] - basis_2[2])
+                        bottom_right = (position[0] - basis_2[0], position[1] - basis_2[1], position[2] - basis_2[2])
+                        
+                        if (bottom_left[0] > bounds.x[0] and 
+                            bottom_left[1] > bounds.y[0] and 
+                            bottom_left[2] > bounds.z[0]):
+                            
+                            if (top_left in vertex_map and 
+                                bottom_left in vertex_map and 
+                                bottom_right in vertex_map):
+                                
+                                indices = [
+                                    vertex_map[top_left],
+                                    vertex_map[top_right],
+                                    vertex_map[bottom_left],
+                                    vertex_map[bottom_right]
+                                ]
+                                
+                                clockwise = input.get_value(x, y, z) > 0
+                                create_quad(indices, clockwise, index_list)
+                                
+    return DCOutput(vertex_buffer, normal_buffer, index_list)
+```
+
+## Subtopics
+
+### [Dual Contouring with Adaptive Split Selection](3667-dual-contouring-with-adaptive-split-selection.md)
+A mesh extraction method that converts voxel grid data into a triangle mesh by constructing quads from connected voxels and splitting them based on geometric alignment or weight products. It sets itself apart by replacing the fixed diagonal split with a dynamic selection process that minimizes surface distortion or respects user-defined weights. Choose this when quad planarity or vertex importance is critical.
+
+### [Topologically Accurate Dual Isosurfacing Using Ray Intersection](800-topologically-accurate-dual-isosurfacing-using-ray-intersect.md)
+Uses ray intersection for topological accuracy. Choose this when guaranteed manifold topology is required.
+
+### [Linear Edge Intersection for Dual Contouring](926-linear-edge-intersection-for-dual-contouring.md)
+Uses linear edge intersection for vertex placement. Choose this for higher geometric accuracy than cell-center placement.
+
+### [Dual Contouring with Octree](1271-dual-contouring-with-octree.md)
+Adapts the method to octree structures. Choose this for hierarchical data or LOD.
+
+### [Dual Contouring QEF Solver](1424-dual-contouring-qef-solver.md)
+Provides the QEF solver used in standard Dual Contouring. Choose this if you need the full Dual Contouring method instead of the simplified version.
+
+### [Neural Dual Contouring](2183-neural-dual-contouring.md)
+Uses neural networks for vertex placement. Choose this for learned surface representations.
+
+### [Occupancy Dual Contouring](3665-occupancy-dual-contouring.md)
+Uses occupancy grids. Choose this for binary voxel data.
+
+### [Dual Contouring 2D](3668-dual-contouring-2d.md)
+2D variant. Choose this for 2D isosurfaces.
+
+### [Dual Contouring Leaf Processing](3817-dual-contouring-leaf-processing.md)
+Focuses on leaf node processing in octrees. Choose this for octree-based implementations.
+
+### [Dual Contouring on Octree](4469-dual-contouring-on-octree.md)
+General octree implementation. Choose this for octree-based data.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel is processed once [G]. Hash map operations are $O(1)$ on average [G].
+- **Memory Complexity:** $O(V)$ where $V$ is the number of vertices, proportional to the number of voxels with sign changes [G].
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Scales linearly with voxel count. Performance is limited by memory bandwidth for accessing scalar values and gradients [G].
+- **Strengths:** Simple implementation, fast, no complex solver required [G].
+- **Limitations:** Vertices are fixed at cell centers, leading to potential geometric inaccuracies. Topology is not guaranteed to be manifold or correct in complex cases. Face orientation depends on strict basis vector ordering [S1, unofficial].
+- **When to use:** When speed and simplicity are prioritized over geometric accuracy and topological robustness. Suitable for simple scalar fields or when used as a base for more advanced methods [G].
+- **When not to use:** When high geometric fidelity or guaranteed manifold topology is required [G].
+
+## Background
+Simplified Dual Contouring is an unfinished attempt at general-purpose dual-contouring isosurface extraction, as described in an unofficial GitHub repository [S1, unofficial]. It references tutorials and blogs from 2016-2018 [S1, unofficial]. The method is presented as a simpler alternative to full Dual Contouring, omitting the QEF minimization step [S1, unofficial].
+
+## Sources
+[S1] dual_contouring, https://github.com/soundeffects/dual_contouring, fetched 2026-10-26 (unofficial)

@@ -1,39 +1,42 @@
 # Polyhedral Primitives
-Also called: Polyhedral SDFs, Polyhedron Signed Distance Functions
+Also called: Polyhedral SDFs, Convex Polyhedron Signed Distance Functions
 
 ## Overview
-This family provides exact signed distance functions for convex polyhedra, prisms, and pyramids, enabling precise ray marching [S1, S2, unofficial]. It distinguishes itself from [SDF Primitives](1731-sdf-primitives.md) by focusing on multi-faceted shapes with planar faces rather than simple quadratic forms or domain manipulations [G]. It provides closed-form analytic solutions that exploit geometric symmetries to reduce 3D distance queries to simpler 2D or 1D projections [G].
+This family computes the exact signed distance from a query point to the surface of convex polyhedral primitives. It solves the problem of rendering sharp-edged, faceted geometry within a distance-field ray marching framework, avoiding the tessellation overhead of triangle-based methods. It sets itself apart from [SDF Primitives](1731-sdf-primitives.md) by handling non-smooth vertices and edges with exact Euclidean distance calculations rather than smooth blends, and from [Cone Signed Distance Function](2594-cone-signed-distance-function.md) by supporting arbitrary planar faces rather than rotational symmetry.
 
 ## Shared principles
-All polyhedral SDFs in this family share a common computational structure based on symmetry reduction and extrusion [S1, S2, unofficial].
-1. **Symmetry Folding**: Most polyhedra possess reflectional symmetries across coordinate planes. The first step is typically computing the absolute value of the query point components ($q = |p|$) [S1, S2, unofficial]. This folds the 3D space into a fundamental octant (or sector), reducing the number of cases the algorithm must handle [S1, S2, unofficial]. For shapes with rotational symmetry (like prisms), additional reflections or rotations map the point into a smaller fundamental domain (e.g., a 30° sector for hexagons) [S1, S2, unofficial].
-2. **Separation of Axes**: For prisms, the distance calculation separates the axial component (usually Z) from the cross-sectional component (XY) [S1, S2, unofficial]. The total distance is computed by combining the distance to the infinite prism ($d_{xy}$) and the distance to the caps ($d_z$) using the extruded shape formula: $d = \min(\max(d_{xy}, d_z), 0) + \text{length}(\max(d_{xy}, d_z, 0))$ [S1, S2, unofficial].
-3. **Fundamental Domain Projection**: For non-prismatic polyhedra (octahedra, pyramids), the algorithm projects the folded point onto the closest face, edge, or vertex [S1, S2, unofficial]. This often involves comparing the point's position against linear inequalities defining the faces to determine which region of the Voronoi cell the point lies in [S1, S2, unofficial].
-4. **Branch-Free Optimization**: Where possible, implementations use `max`, `min`, and `clamp` operations to replace conditional branches, ensuring consistent performance on GPU architectures [G].
+All primitives in this family adhere to the computational framework of [Basic Primitive Definitions](5346-basic-primitive-definitions.md). Specifically:
+1.  **Canonical Definition**: Primitives are defined centered at the origin with specific orientations (e.g., octahedron axes aligned with coordinate axes, prisms aligned with the Z-axis) [SDF Primitives](1731-sdf-primitives.md).
+2.  **Transformations**: To place a primitive at a different location, orientation, or scale:
+    *   **Translate**: Replace query point $p$ with $p - c$, where $c$ is the center [SDF Primitives](1731-sdf-primitives.md).
+    *   **Rotate**: Multiply $p$ by the inverse rotation matrix $R^{-1}$ before evaluation: $p' = R^{-1} p$ [SDF Primitives](1731-sdf-primitives.md).
+    *   **Scale**: Uniformly scale by $s$ using $d(p/s) \cdot s$ [SDF Primitives](1731-sdf-primitives.md).
+3.  **Output**: A scalar signed distance $d \in \mathbb{R}$, where $d < 0$ indicates inside and $d > 0$ indicates outside [SDF Primitives](1731-sdf-primitives.md).
 
 ## Subtopics
 
 ### [Octahedron Signed Distance Function](2339-octahedron-signed-distance-function.md)
-Computes the exact signed distance to a regular octahedron. It is distinguished by its specific symmetry group and face geometry, offering a distinct aesthetic for procedural geometry. Choose this when a smooth, faceted sphere-like shape with 8 triangular faces is required.
+Computes the exact signed distance from a point to a regular octahedron centered at the origin with size parameter $s$. It is distinguished from its siblings, the [Hexagonal Prism](2348-hexagonal-prism-signed-distance-function.md) and [Triangular Prism](2865-triangular-prism-signed-distance-function.md), by its specific symmetry group and face geometry.
 
 ### [Hexagonal Prism Signed Distance Function](2348-hexagonal-prism-signed-distance-function.md)
-Computes the signed Euclidean distance to a hexagonal prism. It differs from the triangular prism by utilizing six-fold rotational symmetry to fold the query point into a fundamental sector, reducing the distance calculation to a simpler 2D case. Choose this for hexagonal columns or honeycomb structures.
+Computes the signed distance from a query point to a hexagonal prism aligned with the Z-axis, defined by its cross-sectional radius and half-height. It differs from the [Triangular Prism SDF](2865-triary-prism-signed-distance-function.md) by using a 6-sided symmetry reduction, allowing for a branch-free calculation of the hexagonal cross-section distance via coordinate folding.
 
 ### [Triangular Prism Signed Distance Function](2865-triangular-prism-signed-distance-function.md)
-Computes the signed distance to an equilateral triangular prism. It exploits the symmetry of the equilateral base to provide a closed-form, branch-free solution using absolute values and max operations, avoiding iterative projection or complex geometric decomposition [G]. Choose this for tent-like structures or triangular beams.
-
-### Pyramid Signed Distance Function
-Computes the signed distance function for a pyramid with height $h$ [S1, unofficial]. It folds the base into a fundamental domain by swapping X and Z if $Z > X$, then transforms the coordinates to project the point onto the pyramid's faces and edges [S1, unofficial]. It calculates distances to the side faces and the base using a combination of linear projections and clamping, returning the minimum squared distance adjusted for the pyramid's geometry [S1, unofficial].
-
-### Rhombus Signed Distance Function
-Computes the signed distance function for a rhombus with semi-axes $s$ and height $h$ [S1, unofficial]. It uses a dot product to determine the position relative to the rhombus edges, clamping the result to $[-1, 1]$ [S1, unofficial]. It then constructs a 2D vector representing the distance to the edge and the height, combining them using the standard extruded shape SDF pattern to return the final signed distance [S1, unofficial].
+Computes the signed distance from a query point to an infinite triangular prism aligned with the Z-axis, defined by an equilateral cross-section and a finite height. It differs from other polyhedral SDFs by relying on a fixed 60° rotational symmetry reduction rather than general Voronoi region projection, making it computationally cheaper than hexagonal or dodecahedral variants while maintaining exact distance properties for right-prisms.
 
 ### [Dodecahedron Modulo](3737-dodecahedron-modulo.md)
-Transforms a point $p$ to fold space into a dodecahedron cell using a sequence of reflections and rotations. Not given in the sources.
+The Dodecahedron Modulo method computes the signed distance field (SDF) for a regular dodecahedron by folding 3D space into a single fundamental domain using a sequence of reflections and rotations, then computing the distance to the boundary of that domain. It sets itself apart from sibling polyhedral primitives like the [Octahedron](2339-octahedron-signed-distance-function.md) or [Hexagonal Prism](2348-hexagonal-prism-signed-distance-function.md) by relying on a complex, multi-step symmetry reduction specific to the dodecahedron's icosahedral symmetry group, rather than simple axial separation or basic planar projections.
+
+#### Pyramid Signed Distance Function
+- **Definition**: Computes the signed distance function for a pyramid with height $h$ [S1, unofficial].
+- **Steps**: Calculate $m^2 = h^2 + 0.25$. Take the absolute value of the XZ components of $p$. Swap X and Z if $Z > X$ to fold the pyramid into a fundamental domain. Subtract 0.5 from X and Z. Calculate $q$ as a transformed vector. Calculate $s$ as the positive part of $-q.x$. Calculate $t$ as the clamp of $(q.y - 0.5 p.z) / (m^2 + 0.25)$ to $[0, 1]$. Calculate $a$ and $b$ as squared distances to edges. Calculate $b$ as squared distance to the other edge. Calculate $d^2$ as the minimum of $a$ and $b$, or 0 if inside. Return the final signed distance [S1, unofficial].
+
+#### Rhombus Signed Distance Function
+- **Definition**: Computes the signed distance function for a rhombus with semi-axes $s$ and height $h$ [S1, unofficial].
+- **Steps**: Calculate $f$ using the dot product of $s$ and $s - 2 p.xz$, clamped to $[-1, 1]$. Calculate $q.x$ as the length of the vector from the rhombus edge minus the radius, multiplied by the sign. Return the signed distance using the min/max/length formula for box-like shapes [S1, unofficial].
 
 ## Background
-Signed distance functions for polyhedra are a staple of procedural geometry in computer graphics, popularized by articles such as those by Inigo Quilez [S1, unofficial]. The techniques rely on analytical geometry to derive closed-form solutions for the Euclidean distance to convex polytopes [G]. These methods are widely used in ray marching for real-time rendering, allowing for the creation of complex, smooth, and infinitely detailed geometric structures without the overhead of mesh data structures [G]. The specific implementations for octahedra, prisms, and pyramids are derived from the geometric properties of these shapes, particularly their symmetries and face normals [S1, S2, unofficial].
+The mathematical foundations of Signed Distance Fields for basic primitives were popularized by Inigo Quilez in his online articles [S1, unofficial]. The specific implementations for polyhedral primitives, including the octahedron, hexagonal prism, triangular prism, and dodecahedron, are derived from these principles and implemented in various open-source ray tracing and SDF libraries. The "modulo" or "folding" technique for complex polyhedra like the dodecahedron relies on exploiting the symmetry groups of the shapes to reduce the computational domain to a fundamental region, a method detailed in [S1, unofficial].
 
 ## Sources
 [S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
-[S2] tdhooper/glsl-marching-cubes, https://github.com/tdhooper/glsl-marching-cubes, fetched 2026-10-26 (unofficial)

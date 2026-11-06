@@ -1,0 +1,161 @@
+# Mark Invisible Cells
+## Overview
+Mark Invisible Cells is a preprocessing method used in voxel grid optimization to identify and mark voxels that are not visible to any training camera. It sets the occupancy value of these invisible cells to -1, effectively excluding them from the training process. This method is executed once before training begins. It differs from sibling methods like [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md) by focusing on visibility culling rather than density-based block detection.
+
+## How it works
+The method determines visibility by projecting voxel centers into the camera space of all training views. A voxel is considered visible if it projects within the image bounds and lies in front of the near plane for at least one camera.
+
+**Inputs:**
+- `K`: Camera intrinsics tensor of shape $(N, 3, 3)$ or $(1, 3, 3)$, where $N$ is the number of cameras.
+- `c2w`: Camera-to-world pose tensor of shape $(N, 3, 4)$ or $(N, 4, 4)$.
+- `width`: Image width in pixels.
+- `height`: Image height in pixels.
+- `near_plane`: Near plane distance. Default: $0.0$.
+- `chunk`: Chunk size for processing to avoid out-of-memory errors. Default: $32^3$.
+
+**Data Structures:**
+- `self.occs`: Occupancy tensor storing cell states.
+- `self.grid_coords`: Tensor of voxel coordinates.
+- `self.aabbs`: Axis-aligned bounding boxes for each level, shape $(L, 6)$, where $L$ is the number of levels. `aabbs[lvl, :3]` is the minimum corner, `aabbs[lvl, 3:]` is the maximum corner.
+- `self.resolution`: Grid resolution.
+- `self.cells_per_lvl`: Number of cells per level.
+
+**Steps:**
+1. Validate inputs:
+   - Assert `K.dim() == 3` and `K.shape[1:] == (3, 3)`.
+   - Assert `c2w.dim() == 3` and `(c2w.shape[1:] == (3, 4) or c2w.shape[1:] == (4, 4))`.
+   - Assert `K.shape[0] == c2w.shape[0]` or `K.shape[0] == 1`.
+2. Compute world-to-camera rotation `w2c_R` and translation `w2c_T`:
+   - `w2c_R = c2w[:, :3, :3].transpose(2, 1)` with shape $(N, 3, 3)$.
+   - `w2c_T = -w2c_R @ c2w[:, :3, 3:]` with shape $(N, 3, 1)$.
+3. Get all cell indices across levels: `lvl_indices = self._get_all_cells()`.
+4. For each level `lvl` and its corresponding indices in `lvl_indices`:
+   a. Retrieve voxel coordinates: `grid_coords = self.grid_coords[indices]`.
+   b. Process in chunks of size `chunk`:
+      i. For each chunk `i` from $0$ to `len(indices)` with step `chunk`:
+         - Extract chunk coordinates: `x = grid_coords[i : i + chunk] / (self.resolution - 1)`.
+         - Extract chunk indices: `indices_chunk = indices[i : i + chunk]`.
+         - Convert normalized voxel coordinates to world space:
+           $$xyzs_w = (self.aabbs[lvl, :3] + x \times (self.aabbs[lvl, 3:] - self.aabbs[lvl, :3])).T$$
+           Shape: $(3, \text{chunk})$.
+         - Transform to camera space for all cameras:
+           $$xyzs_c = w2c_R @ xyzs_w + w2c_T$$
+           Shape: $(N, 3, \text{chunk})$.
+         - Project to UV coordinates:
+           $$uvd = K @ xyzs_c$$
+           Shape: $(N, 3, \text{chunk})$.
+         - Normalize UV:
+           $$uv = uvd[:, :2] / uvd[:, 2:]$$
+           Shape: $(N, 2, \text{chunk})$.
+         - Compute `in_image` mask:
+           $$(uvd[:, 2] \ge 0) \ \& \ (uv[:, 0] \ge 0) \ \& \ (uv[:, 0] < \text{width}) \ \& \ (uv[:, 1] \ge 0) \ \& \ (uv[:, 1] < \text{height})$$
+           Shape: $(N, \text{chunk})$.
+         - Compute `covered_by_cam` mask:
+           $$(uvd[:, 2] \ge \text{near\_plane}) \ \& \ \text{in\_image}$$
+           Shape: $(N, \text{chunk})$.
+         - Compute `count` of cameras covering each voxel:
+           $$\text{count} = \text{covered\_by\_cam.sum}(0) / N$$
+           Shape: $(\text{chunk})$.
+         - Compute `too_near_to_cam` mask:
+           $$(uvd[:, 2] < \text{near\_plane}) \ \& \ \text{in\_image}$$
+           Shape: $(N, \text{chunk})$.
+         - Compute `too_near_to_any_cam`:
+           $$\text{too\_near\_to\_any\_cam} = \text{too\_near\_to\_cam.any}(0)$$
+           Shape: $(\text{chunk})$.
+         - Compute `valid_mask`:
+           $$\text{valid\_mask} = (\text{count} > 0) \ \& \ (\sim \text{too\_near\_to\_any\_cam})$$
+           Shape: $(\text{chunk})$.
+         - Update occupancy:
+           $$\text{cell\_ids\_base} = \text{lvl} \times \text{self.cells\_per\_lvl}$$
+           $$\text{self.occs}[\text{cell\_ids\_base} + \text{indices\_chunk}] = \text{torch.where}(\text{valid\_mask}, 0.0, -1.0)$$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def mark_invisible_cells(K, c2w, width, height, near_plane=0.0, chunk=32**3):
+    # Input validation
+    assert K.dim() == 3 and K.shape[1:] == (3, 3)
+    assert c2w.dim() == 3 and (c2w.shape[1:] == (3, 4) or c2w.shape[1:] == (4, 4))
+    assert K.shape[0] == c2w.shape[0] or K.shape[0] == 1
+    
+    N_cams = c2w.shape[0]
+    
+    # Compute world-to-camera matrices
+    w2c_R = c2w[:, :3, :3].transpose(2, 1)  # (N_cams, 3, 3)
+    w2c_T = -w2c_R @ c2w[:, :3, 3:]         # (N_cams, 3, 1)
+    
+    # Get all cell indices
+    lvl_indices = get_all_cells()  # Implementation dependent
+    
+    for lvl, indices in lvl_indices:
+        grid_coords = self.grid_coords[indices]
+        num_cells = len(indices)
+        
+        for i in range(0, num_cells, chunk):
+            end_i = min(i + chunk, num_cells)
+            x = grid_coords[i:end_i] / (self.resolution - 1)
+            indices_chunk = indices[i:end_i]
+            
+            # Convert to world space
+            # x shape: (chunk, 3)
+            # aabb_min: (3,), aabb_max: (3,)
+            aabb_min = self.aabbs[lvl, :3]
+            aabb_max = self.aabbs[lvl, 3:]
+            xyzs_w = (aabb_min + x * (aabb_max - aabb_min)).T  # (3, chunk)
+            
+            # Transform to camera space
+            # w2c_R: (N_cams, 3, 3), xyzs_w: (3, chunk)
+            xyzs_c = w2c_R @ xyzs_w + w2c_T  # (N_cams, 3, chunk)
+            
+            # Project to UV
+            # K: (N_cams, 3, 3) or (1, 3, 3)
+            # If K is (1, 3, 3), broadcast to N_cams
+            if K.shape[0] == 1:
+                K_broadcast = K.expand(N_cams, -1, -1)
+            else:
+                K_broadcast = K
+            uvd = K_broadcast @ xyzs_c  # (N_cams, 3, chunk)
+            
+            # Normalize UV
+            uv = uvd[:, :2] / uvd[:, 2:]  # (N_cams, 2, chunk)
+            
+            # Compute in_image mask
+            in_image = (uvd[:, 2] >= 0) & (uv[:, 0] >= 0) & (uv[:, 0] < width) & (uv[:, 1] >= 0) & (uv[:, 1] < height)
+            
+            # Compute covered_by_cam mask
+            covered_by_cam = (uvd[:, 2] >= near_plane) & in_image
+            
+            # Compute count
+            count = covered_by_cam.sum(0) / N_cams
+            
+            # Compute too_near_to_cam mask
+            too_near_to_cam = (uvd[:, 2] < near_plane) & in_image
+            
+            # Compute too_near_to_any_cam
+            too_near_to_any_cam = too_near_to_cam.any(0)
+            
+            # Compute valid_mask
+            valid_mask = (count > 0) & (~too_near_to_any_cam)
+            
+            # Update occupancy
+            cell_ids_base = lvl * self.cells_per_lvl
+            self.occs[cell_ids_base + indices_chunk] = torch.where(valid_mask, 0.0, -1.0)
+```
+
+**Edge Cases and Pitfalls:**
+- Precision issues in UV normalization when depth is very small.
+- Boundary conditions for image width/height.
+- Degenerate input where `K` or `c2w` shapes are incorrect.
+
+## Operating characteristics
+- **Time Complexity:** $O(N \cdot C)$, where $N$ is the number of cameras and $C$ is the number of cells.
+- **Memory Complexity:** $O(N \cdot C)$ for intermediate tensors.
+- **Strengths:** Efficiently culls invisible voxels, reducing training time and memory usage.
+- **Limitations:** Requires all training camera poses and intrinsics. Does not account for occlusions within the scene.
+
+## Background
+Mark Invisible Cells is part of the voxel grid optimization pipeline in neural radiance fields. It helps in reducing the computational load by ignoring voxels that do not contribute to the rendered images.
+
+## Sources
+[S1] Yosshi999/faster-occgrid, https://github.com/Yosshi999/faster-occgrid, fetched 2026-10-24 (unofficial)

@@ -1,0 +1,205 @@
+# Signed Distance Field (SDF) Generation from Scanned Surfaces
+
+Also called: 3D Texture Distance Field for Implicit Surfaces, Mesh SDF Generation, Mesh to SDF Voxelization, MeshDistance conversion, SDF Texture Generation from Mesh, SDF Voxelization, Signed distance to triangulated surface
+
+## Overview
+This method converts a triangulated surface mesh (typically from 3D scanning) into a 3D Signed Distance Field (SDF) texture or implicit function, where the scalar value at any grid point represents the signed Euclidean distance to the nearest surface triangle [S1][S2, unofficial][S4, unofficial]. The sign is negative inside the mesh and positive outside [S1]. It differs from [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md) by evaluating the distance field directly from the explicit mesh geometry rather than projecting 2D slices [S2, unofficial][S4, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A triangulated surface mesh in polygon (PLY) format containing vertices and triangles [S1].
+*   **Output:** A 3D texture (or grid) where each voxel stores the signed distance. In GPU implementations, this is stored in the red channel of the fragment shader output [S2, unofficial].
+
+**Data Structures:**
+*   **Mesh:** Stored as a 1D array of vertices with a stride (e.g., 16384 bytes per vertex in some GPU implementations) [S2, unofficial].
+*   **Grid/Texture:** A 3D grid of resolution $N \times N \times N$ (or $res \times res \times res$) [S3, unofficial]. The domain is bounded by texture coordinates in the $[0, 1]$ range, representing a $1 \times 1 \times 1$ cube [S3, unofficial].
+*   **Parameters:**
+    *   `textureBoundary`: Defines the box centered at origin bounded by $|x| \le (0.5, 0.5, 0.5)$ [S3, unofficial].
+    *   `textureShell`: A small value (e.g., $0.05$) defining a boundary region around the texture where distance values might be invalid [S3, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Pre-processing:** Close any holes in the input mesh (e.g., the 5 holes in the Stanford Bunny) to ensure correct distance representation from the conversion tool [S3, unofficial].
+2.  **Grid Initialization:** For each grid point (voxel center) in the 3D texture:
+    a.  Map UV coordinates to 3D grid coordinates: $co = texCoord \times vec2(res, res^2)$, where $res$ is the resolution [S2, unofficial].
+    b.  Convert to integer grid position $pos$ in range $[0, res)$ for x and y, and $[0, res^2)$ for z [S2, unofficial].
+    c.  Normalize grid position to range $[-1, 1]$: $pos = (pos / res) \times 2.0 - 1.0$ [S2, unofficial].
+3.  **Distance Calculation:**
+    a.  Initialize `dist = 10000.0` [S2, unofficial].
+    b.  Iterate through all triangles in the mesh [S2, unofficial]. For each triangle with vertices $a, b, c$:
+        i.  Compute the Euclidean distance $d$ from the current grid point $pos$ to the triangle surface using a point-to-triangle distance routine [S2, unofficial].
+        ii. Update `dist = min(dist, d)` [S2, unofficial].
+    c.  Assign the sign: negative for interior points, positive for exterior points [S1].
+4.  **Boundary Handling (Texture Lookup):**
+    When querying the SDF at runtime or finalizing the texture, handle points outside the primary texture bounds using the `textureBoundary` and `textureShell` parameters [S3, unofficial]:
+    a.  Calculate initial difference: $di = |x| - textureBoundary + textureShell$ [S3, unofficial].
+    b.  If point $x$ is outside the 3D texture space (determined by $di$), calculate distance as the L2 norm of the positive components of $(di + textureShell)$: $res = ||\max(di + textureShell, 0)||_2$ [S3, unofficial].
+    c.  Calculate maximum component $c = \max(di_x, \max(di_y, di_z))$ [S3, unofficial].
+    d.  If $c < 0$ (point is inside the texture space), adjust coordinate $x = x + textureBoundary$ and lookup the distance from the 3D texture: $res = lookupTexture(texture, x)$ [S3, unofficial].
+    e.  Return $res$ [S3, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def generate_sdf_from_mesh(mesh, resolution):
+    """
+    Generates a 3D SDF texture from a triangulated mesh.
+    
+    Args:
+        mesh: List of triangles, each triangle is a list of 3 vertices (vec3).
+        resolution: Integer, the dimension of the cubic grid (N x N x N).
+        
+    Returns:
+        A 3D array of size (resolution, resolution, resolution) containing signed distance values.
+    """
+    # Initialize grid with a large value
+    grid = [[[10000.0 for _ in range(resolution)] for _ in range(resolution)] for _ in range(resolution)]
+
+    # Pre-process mesh: close holes to ensure correct distance representation [S3, unofficial]
+    # (Hole-closing algorithm not specified in sources)
+
+    for z in range(resolution):
+        for y in range(resolution):
+            for x in range(resolution):
+                # Map grid position to [-1, 1] range [S2, unofficial]
+                px = (x / resolution) * 2.0 - 1.0
+                py = (y / resolution) * 2.0 - 1.0
+                pz = (z / resolution) * 2.0 - 1.0
+                point = (px, py, pz)
+
+                min_dist = 10000.0
+                closest_normal = (0.0, 0.0, 0.0)
+
+                # Iterate through all triangles to find minimum distance [S2, unofficial]
+                for tri in mesh:
+                    a, b, c = tri[0], tri[1], tri[2]
+                    d, normal = point_to_triangle_distance(point, a, b, c)
+                    if d < min_dist:
+                        min_dist = d
+                        closest_normal = normal
+
+                # Determine sign: negative inside, positive outside [S1]
+                # Use standard ray-casting parity test [G]
+                inside = ray_casting_parity(point, mesh)
+
+                if inside:
+                    grid[z][y][x] = -min_dist
+                else:
+                    grid[z][y][x] = min_dist
+
+    return grid
+
+def point_to_triangle_distance(p, a, b, c):
+    """Standard point-to-triangle distance routine [G]"""
+    ab = (b[0]-a[0], b[1]-a[1], b[2]-a[2])
+    ac = (c[0]-a[0], c[1]-a[1], c[2]-a[2])
+    ap = (p[0]-a[0], p[1]-a[1], p[2]-a[2])
+    d1 = ab[0]*ap[0] + ab[1]*ap[1] + ab[2]*ap[2]
+    d2 = ac[0]*ap[0] + ac[1]*ap[1] + ac[2]*ap[2]
+    if d1 <= 0.0 and d2 <= 0.0:
+        return (math.sqrt(ap[0]**2 + ap[1]**2 + ap[2]**2), (a[0]-p[0], a[1]-p[1], a[2]-p[2]))
+    bp = (p[0]-b[0], p[1]-b[1], p[2]-b[2])
+    d3 = ab[0]*bp[0] + ab[1]*bp[1] + ab[2]*bp[2]
+    d4 = ab[0]*ac[0] + ab[1]*ac[1] + ab[2]*ac[2]
+    if d1 > 0.0 and d3 <= 0.0:
+        vc = d1*d4 - d1*d1
+        if vc <= 0.0:
+            return (math.sqrt(ap[0]**2 + ap[1]**2 + ap[2]**2), (a[0]-p[0], a[1]-p[1], a[2]-p[2]))
+        v = d1 / d4
+        closest = (a[0]+v*ab[0], a[1]+v*ab[1], a[2]+v*ab[2])
+        return (math.sqrt((p[0]-closest[0])**2 + (p[1]-closest[1])**2 + (p[2]-closest[2])**2), (closest[0]-p[0], closest[1]-p[1], closest[2]-p[2]))
+    cp = (p[0]-c[0], p[1]-c[1], p[2]-c[2])
+    d5 = ac[0]*cp[0] + ac[1]*cp[1] + ac[2]*cp[2]
+    d6 = ac[0]*ac[0] + ac[1]*ac[1] + ac[2]*ac[2]
+    if d2 <= 0.0 and d5 <= 0.0:
+        return (math.sqrt(cp[0]**2 + cp[1]**2 + cp[2]**2), (c[0]-p[0], c[1]-p[1], c[2]-p[2]))
+    d7 = ac[0]*ab[0] + ac[1]*ab[1] + ac[2]*ab[2]
+    d8 = ac[0]*ac[0] + ac[1]*ac[1] + ac[2]*ac[2]
+    if d2 > 0.0 and d8 <= 0.0:
+        vb = d2*d8 - d2*d2
+        if vb <= 0.0:
+            return (math.sqrt(cp[0]**2 + cp[1]**2 + cp[2]**2), (c[0]-p[0], c[1]-p[1], c[2]-p[2]))
+        v = d2 / d8
+        closest = (a[0]+v*ac[0], a[1]+v*ac[1], a[2]+v*ac[2])
+        return (math.sqrt((p[0]-closest[0])**2 + (p[1]-closest[1])**2 + (p[2]-closest[2])**2), (closest[0]-p[0], closest[1]-p[1], closest[2]-p[2]))
+    num = d1*d8 - d2*d7
+    den = d4*d8 - d7*d7
+    v = num / den
+    w = (d2*v + d5) / d8
+    closest = (a[0]+v*ab[0]+w*ac[0], a[1]+v*ab[1]+w*ac[1], a[2]+v*ab[2]+w*ac[2])
+    return (math.sqrt((p[0]-closest[0])**2 + (p[1]-closest[1])**2 + (p[2]-closest[2])**2), (closest[0]-p[0], closest[1]-p[1], closest[2]-p[2]))
+
+def ray_casting_parity(point, mesh):
+    """Standard ray-casting parity test [G]"""
+    intersections = 0
+    for tri in mesh:
+        a, b, c = tri[0], tri[1], tri[2]
+        # Ray from point along +X axis
+        # Check intersection with triangle plane
+        n = cross(ab, ac)
+        denom = n[0]
+        if denom == 0.0: continue
+        t = (a[0] - point[0]) / denom
+        if t <= 0.0: continue
+        # Intersection point
+        ix = point[0] + t
+        iy = point[1] + t * (b[1]-a[1]) / denom
+        iz = point[2] + t * (b[2]-a[2]) / denom
+        # Barycentric check
+        v0 = (b[0]-a[0], b[1]-a[1], b[2]-a[2])
+        v1 = (c[0]-a[0], c[1]-a[1], c[2]-a[2])
+        v2 = (ix-a[0], iy-a[1], iz-a[2])
+        dot00 = v0[0]*v0[0] + v0[1]*v0[1] + v0[2]*v0[2]
+        dot01 = v0[0]*v1[0] + v0[1]*v1[1] + v0[2]*v1[2]
+        dot02 = v0[0]*v2[0] + v0[1]*v2[1] + v0[2]*v2[2]
+        dot11 = v1[0]*v1[0] + v1[1]*v1[1] + v1[2]*v1[2]
+        dot12 = v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+        invDenom = 1.0 / (dot00 * dot11 - dot01 * dot01)
+        u = (dot11 * dot02 - dot01 * dot12) * invDenom
+        v = (dot00 * dot12 - dot01 * dot02) * invDenom
+        if u >= 0.0 and v >= 0.0 and u + v <= 1.0:
+            intersections += 1
+    return intersections % 2 == 1
+
+def cross(u, v):
+    return (u[1]*v[2] - u[2]*v[1], u[2]*v[0] - u[0]*v[2], u[0]*v[1] - u[1]*v[0])
+```
+
+**Edge Cases and Pitfalls:**
+*   **Holes in Mesh:** Open meshes (e.g., Stanford Bunny with 5 holes) will produce incorrect distances if not closed [S3, unofficial].
+*   **Boundary Values:** The `textureShell` value is not universal and must be adjusted for different textures to balance between avoiding invalid boundary data and maximizing the valid lookup area [S3, unofficial].
+*   **Scanner Accuracy:** The accuracy of the SDF depends on the surface scanner and the accuracy of the signed distance computation [S1].
+*   **Resolution:** Low resolution can lose detail. For complex meshes, higher resolutions (e.g., $N=128$) may be required [S1].
+
+## Subtopics
+
+### [Signed Distance Field from Mesh](1327-signed-distance-field-from-mesh.md)
+Converts a triangulated surface mesh into a 3D SDF texture or implicit function, evaluating distance directly from explicit mesh geometry via raycasting or spatial acceleration structures, allowing for exact analytical distances without rasterization artifacts.
+
+### [Slice-based SDF Voxelization](1736-slice-based-sdf-voxelization.md)
+Computes an SDF by iterating over a 3D grid, determining inside/outside status via ray-casting parity on 2D slices, and sampling the exact mesh distance at each voxel center, explicitly using 2D slice intersections for topological containment.
+
+### Shell SDF
+An unsigned distance field minus a shell half-thickness. Negative within `shell_voxels` of any triangle, positive beyond. Works on open, non-manifold, self-intersecting, and inconsistently wound meshes. Extracts a thin solid around every triangle: two walls around an open sheet, and an outer surface plus an inner one for a closed solid [S4, unofficial]. Parameter `shell_voxels` is the shell half-thickness in voxels, default 1.5f, must be $\ge \sqrt{3}/2$ (0.866) to prevent holes between voxels, and must be $<$ `trunc_dist` [S4, unofficial]. This is the unsigned offset field from Xu & Barbic, 'Signed Distance Fields for Polygon Soup Meshes' (GI 2014), before their interior-component removal step [S4, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** $O(N^3)$ for storing the 3D texture/grid [S3, unofficial].
+*   **Measured Performance:** For the Stanford Bunny (35,947 vertices, 69,451 triangles) and an automobile part (156,229 vertices, 312,458 triangles), the method was applied to grids of varying resolutions [S1]. For tetrahedral grids, resolution was increased to $N=128$ to avoid losing detail [S1].
+*   **Strengths:** Not given in the sources.
+*   **Limitations:** Not given in the sources.
+*   **When to Use:** Not given in the sources.
+*   **When Not to Use:** Not given in the sources.
+
+## Background
+The method originates from the need to represent complex scanned surfaces as implicit functions for rendering and simulation [S1][S3, unofficial]. The Stanford Bunny mesh (35,947 vertices, 69,451 triangles) and an aluminum alloy A413 automobile part (156,229 vertices, 312,458 triangles) are commonly used test cases [S1]. The approach involves placing the model in a bounded 3D grid and sampling the distance values to the surface for every point in that grid, storing the raw floating-point data as a 3D distance texture [S3, unofficial]. Tools like MeshDistance from the GEL (GEometry and Linear algebra) framework have been used for this conversion [S3, unofficial]. The accuracy of the extraction depends on the surface scanner and signed distances accuracies [S1].
+
+## Sources
+[S1] A new isosurface extraction method on arbitrary grids, https://doi.org/10.1016/j.jcp.2021.110579, fetched 2026-10-26
+[S2] yeataro/TD-Raymarching-System, https://github.com/yeataro/TD-Raymarching-System, fetched 2026-10-27 (unofficial)
+[S3] GPU Ray Marching of Distance Fields, https://www2.compute.dtu.dk/pubdb/edoc/imm6392.pdf, fetched 2026-10-27 (unofficial)
+[S4] taojin-6/volumetric_kit_grid, https://github.com/taojin-6/volumetric_kit_grid, fetched 2026-10-28 (unofficial)

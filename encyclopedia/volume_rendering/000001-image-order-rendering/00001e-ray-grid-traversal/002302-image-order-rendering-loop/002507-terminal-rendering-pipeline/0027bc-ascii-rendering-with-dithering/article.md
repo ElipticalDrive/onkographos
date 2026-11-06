@@ -1,0 +1,228 @@
+# ASCII Rendering with Dithering
+
+Also called: ASCII Ray Tracing, ASCII Tracing with Ordered Dithering, Terminal Ray Tracing, Terminal Raymarching, VT100 Rendering
+
+## Overview
+ASCII Rendering with Dithering renders 3D scenes to a text-based terminal buffer by casting rays, computing lighting, and mapping the resulting continuous-tone color to a limited set of ASCII characters (typically `#` and space) using ANSI escape codes [S1, unofficial]. It differs from standard terminal rendering by employing ordered dithering via a Bayer matrix to simulate grayscale intensity and color depth within the constraints of a fixed 80x24 character grid, effectively acting as a low-resolution, text-based raymarcher [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Scene defined by Signed Distance Functions (SDFs) for primitives (e.g., planes, tori, spheres) [S1, unofficial].
+*   Camera position (`campos`) and orientation [S1, unofficial].
+*   Light position (`lightpos`) and color (`lcol`) [S1, unofficial].
+*   Material properties: diffuse color (`mcol`) and shininess (`mshiny`) for each material index [S1, unofficial].
+*   Resolution: Fixed at 80 columns (x) and 24 rows (y) [S1, unofficial].
+
+**Outputs:**
+*   A terminal buffer containing ANSI escape sequences for foreground/background colors and ASCII characters (`#` or space) [S1, unofficial].
+
+### Data Structures
+*   **Bayer Matrix:** A 4x4 integer array used for ordered dithering offsets. Stored in row-major order [S1, unofficial]:
+    ```text
+    {1, 9, 3, 11,
+     13, 5, 15, 7,
+     4, 12, 2, 10,
+     16, 8, 14, 6}
+    ```
+*   **Color Lookup Table (LUT):** A precomputed table `color_LUT[16*16*16]` mapping quantized RGB indices (0-15 per channel) to a packed integer representing foreground and background ANSI color indices [S1, unofficial].
+*   **Material Arrays:**
+    *   `mcol`: Array of `vec3` for diffuse colors. Example values: `{1.5, 1.5, 1.5}` (floor), `{0.6, 0.6, 0.6}` (checker), `{0.0, 0.4, 1.0}` (logo) [S1, unofficial].
+    *   `mshiny`: Array of floats for shininess exponent. Example values: `{100, 10, 10}` [S1, unofficial].
+*   **Light Color:** `lcol = {0.7, 0.5, 0.5}` [S1, unofficial].
+
+### Steps
+1.  **Initialization:** Call `render_init()` to populate the `color_LUT`. This involves iterating over all 16^3 possible quantized RGB combinations, finding the nearest ANSI foreground/background pair using a brute-force search over 17 palette entries (indices 0-16) with an error metric based on squared Euclidean distance in RGB space, and storing the result [S1, unofficial].
+2.  **Loop:** Iterate through each frame.
+3.  **Camera Setup:** Define camera position `campos` and view direction `camz = normalize(campos * -1)`. Compute camera basis vectors:
+    *   `camx = normalize(cross(camz, vec3(0, 1, 0)))`
+    *   `camy = normalize(cross(camx, camz))` [S1, unofficial].
+4.  **Pixel Loop:** For each pixel `(x, y)` where `x ∈ [0, 79]` and `y ∈ [0, 23]`:
+    5.  **Accumulate Color:** Initialize `color = vec3(0, 0, 0)`.
+    6.  **Multi-sampling (AA):** Perform 8 samples per pixel to reduce aliasing [S1, unofficial].
+        *   Iterate `xx` in `{-0.25, 0.25}` (2 samples).
+        *   Iterate `yy` in `{-0.75, -0.25, 0.25, 0.75}` (4 samples).
+        *   Construct ray direction `dir` in screen space:
+            $$dir_{screen} = \text{normalize}(v3(x - 40.0 + xx, 25.0 - 2.0 \cdot y + yy, 40.0))$$
+            *(Note: The z-component is 40.0 in some variants, 70.0 in others; 40.0 is used in the primary Square Logo demo code)* [S1, unofficial].
+        *   Transform `dir` to camera space:
+            $$dir = camx \cdot dir.x + camy \cdot dir.y + camz \cdot dir.z$$
+        *   **Ray Marching:**
+            *   Initialize `t = 0`, `m = -1` (no material).
+            *   Loop up to 64 iterations or until `t > 1e6` (or 6000 in some variants):
+                *   Compute point `p = dir * t + campos`.
+                *   Compute distance `d = dist(p, &m)` using SDFs.
+                *   If `d < 0.001`, a hit occurred. Compute lighting `L = lighting(p, m, lightpos)` and add to accumulator: `color = color + L`. Break loop.
+                *   Else, `t += d`.
+    7.  **Scale:** Multiply accumulated color by `0.125` (divide by 8) to average the 8 samples [S1, unofficial].
+    8.  **Dithering and Color Mapping:**
+        *   Compute dithering offset `o` using the Bayer matrix `B`:
+            $$o = B[(x \bmod 4) + (y \bmod 4) \cdot 4] \cdot \frac{1}{8}$$
+            *(Note: The source code uses `1.0/8.0`, while the notes mention `-48 + 4*B[...]`. The code implementation `c.x*15.0 - o` with `o` derived from `B/8` is the operational method)* [S1, unofficial].
+        *   Quantize RGB channels to 0-15 range with offset:
+            $$r = \text{clamp}(\lfloor c.x \cdot 15.0 - o \rfloor, 0, 15)$$
+            $$g = \text{clamp}(\lfloor c.y \cdot 15.0 - o \rfloor, 0, 15)$$
+            $$b = \text{clamp}(\lfloor c.z \cdot 15.0 - o \rfloor, 0, 15)$$
+        *   Lookup ANSI codes in `color_LUT[r + g*16 + b*256]` to get `fg` and `bg` [S1, unofficial].
+    9.  **Render Character:**
+        *   If `fg` is valid (>=0), print `#` with ANSI foreground color `30 + (fg & 7)` and bold flag `!!(fg & 8)`.
+        *   If `fg` is invalid (-1), print space.
+        *   Manage ANSI state to minimize escape sequence emissions (e.g., only print `\x1b[...m` if `fg` or `bg` changes from previous pixel) [S1, unofficial].
+    10. **End of Row:** After `x` loop, print newline `\n` and reset attributes `\x1b[0m` [S1, unofficial].
+11. **Frame Update:** Flush stdout, sleep 20ms, increment frame counter, and move cursor up 24 lines (`\x1b[24A`) to redraw [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Constants
+RES_X = 80
+RES_Y = 24
+BAYER_MATRIX = [
+    [1, 9, 3, 11],
+    [13, 5, 15, 7],
+    [4, 12, 2, 10],
+    [16, 8, 14, 6]
+]
+LCOL = vec3(0.7, 0.5, 0.5)
+MCOL = [vec3(1.5, 1.5, 1.5), vec3(0.6, 0.6, 0.6), vec3(0.0, 0.4, 1.0)]
+MSHINY = [100, 10, 10]
+
+def render_init():
+    # Precompute color_LUT: 16x16x16 entries
+    # For each r, g, b in 0..15:
+    #   color = vec3(r/15.0, g/15.0, b/15.0)
+    #   fg, bg = nearest_color(color) # Brute force over 17 ANSI palette entries
+    #   color_LUT[r + g*16 + b*256] = (bg << 5) | fg
+
+def dist(p, m_out):
+    # SDF implementation (e.g., plane, torus, sphere)
+    # Returns distance and sets m_out to material index
+    # Example: Plane at y=-50
+    d_plane = p.y + 50.0
+    m_out[0] = ((int(p.x * 0.01) & 1) ^ (int(p.z * 0.01) & 1))
+    d = d_plane
+    # Add other SDFs (torus, etc.) and update d, m_out if closer
+    return d
+
+def lighting(p, m, lightpos):
+    lightdir = normalize(lightpos - p)
+    # Approximate normal using SDF gradient
+    eps = 0.1
+    m_temp = -1
+    diffuse = max(0.0, 10.0 * dist(p + lightdir * eps, [m_temp]))
+    # Shadow
+    s = shadow(p, lightdir, 0.01, length(lightpos - p))
+    l = max(0.1, diffuse * s)
+    return MCOL[m] * l + LCOL * pow(l, MSHINY[m])
+
+def shadow(ro, rd, mint, maxt):
+    res = 1.0
+    t = mint
+    while t < maxt:
+        m_temp = -1
+        h = dist(ro + rd * t, [m_temp])
+        if h < 0.001:
+            return 0.0
+        res = min(res, 10.0 * h / t)
+        t += h
+    return res
+
+def render_frame(frame):
+    # Camera setup
+    campos = vec3(120 * sin(frame * 0.01), 40 + 30 * sin(frame * 0.03), -120 * cos(frame * 0.01))
+    camz = normalize(campos * -1)
+    camx = normalize(cross(camz, vec3(0, 1, 0)))
+    camy = normalize(cross(camx, camz))
+    
+    cur_fg = 7
+    cur_bg = 0
+    
+    for y in range(RES_Y):
+        for x in range(RES_X):
+            color = vec3(0, 0, 0)
+            
+            # 8 samples for AA
+            for xx in [-0.25, 0.25]:
+                for yy in [-0.75, -0.25, 0.25, 0.75]:
+                    # Screen space direction
+                    dir_screen = normalize(vec3(x - 40.0 + xx, 25.0 - 2.0 * y + yy, 40.0))
+                    # Camera space direction
+                    dir = camx * dir_screen.x + camy * dir_screen.y + camz * dir_screen.z
+                    
+                    t = 0.0
+                    m = -1
+                    hit = False
+                    for iter in range(64):
+                        if t > 1e6:
+                            break
+                        p = dir * t + campos
+                        d = dist(p, [m])
+                        if d < 0.001:
+                            color = color + lighting(p, m, vec3(0, 40, 0)) # lightpos example
+                            hit = True
+                            break
+                        t += d
+                    if not hit:
+                        # Background color or ambient? Source adds to color only on hit.
+                        pass
+            
+            # Average samples
+            color = color * 0.125
+            
+            # Dithering
+            bayer_val = BAYER_MATRIX[(x & 3) + ((y & 3) * 4)]
+            o = bayer_val * (1.0 / 8.0)
+            
+            r = clamp(int(color.x * 15.0 - o), 0, 15)
+            g = clamp(int(color.y * 15.0 - o), 0, 15)
+            b = clamp(int(color.z * 15.0 - o), 0, 15)
+            
+            entry = color_LUT[r + g * 16 + b * 256]
+            fg = entry & 31
+            bg = entry >> 5
+            
+            # Output ANSI codes
+            if fg >= 0:
+                # Determine if attributes need changing
+                # Print '#' with appropriate ANSI codes
+                pass
+            else:
+                # Print space
+                pass
+            
+            # Update cur_fg, cur_bg to minimize escapes
+        print("\n")
+        print("\x1b[0m") # Reset attributes
+    print("\x1b[24A") # Move cursor up
+    flush()
+    sleep(0.02)
+```
+
+### Parameters
+*   **Resolution:** 80x24 characters [S1, unofficial].
+*   **Samples per Pixel:** 8 (2 in x, 4 in y) [S1, unofficial].
+*   **Gamma Correction:** Not explicitly applied in the provided code, but standard gamma is 2.2 [S1, unofficial].
+*   **Color Scaling:** 0.125 for AA averaging [S1, unofficial].
+*   **Light Color:** `{0.7, 0.5, 0.5}` [S1, unofficial].
+*   **Shininess:** `{100, 10, 10}` for materials 0, 1, 2 respectively [S1, unofficial].
+*   **Material Colors:** `mcol[0]={1.5, 1.5, 1.5}`, `mcol[1]={0.6, 0.6, 0.6}`, `mcol[2]={0.0, 0.4, 1.0}` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Precision:** The distance field check uses a threshold of `0.001`. If the ray step `t` accumulates floating-point errors, the ray might miss the surface or jitter. The source uses a fixed iteration limit (64) and a max distance (`1e6` or `6000`) to prevent infinite loops [S1, unofficial].
+*   **Color Mapping:** The nearest color function uses a brute-force search over 17 palette entries. If no close match is found, it returns -1, resulting in a space character (background) [S1, unofficial].
+*   **ANSI State:** Failing to track `cur_fg` and `cur_bg` correctly will result in excessive escape sequence emission, slowing down rendering. The source code optimizes this by only printing escape codes when attributes change [S1, unofficial].
+*   **Camera Basis:** The camera basis calculation `camx = normalize(cross(camz, vec3(0,1,0)))` assumes the camera is not looking exactly up or down (parallel to the Y-axis). If `camz` is parallel to `(0,1,0)`, the cross product is zero, causing a division by zero in normalization [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(W \cdot H \cdot S \cdot I)$, where $W=80$, $H=24$, $S=8$ (samples), and $I=64$ (max ray march iterations). The complexity is dominated by the ray marching loop.
+*   **Memory Complexity:** $O(1)$ for the scene (SDFs are procedural), plus $O(1)$ for the LUT ($16^3$ entries).
+*   **Performance:** Described as "pretty slow and unoptimized" [S1, unofficial]. The use of Python-like pseudocode suggests it is intended for clarity rather than speed, but the original C implementation runs in real-time on modern CPUs for simple scenes.
+*   **Strengths:** Simple implementation, no external assets, portable to any terminal.
+*   **Limitations:** Low resolution (80x24), limited color palette, no transparency/reflections (only diffuse/specular), fixed camera movement.
+
+## Background
+ASCII Rendering with Dithering is a technique popularized by obfuscated C programming contests and terminal art enthusiasts. The specific implementation described here is from the `a1k0n/asciitracing` repository, which demonstrates raymarching in a terminal using ANSI escape codes [S1, unofficial]. It builds on the principles of raymarching (as seen in Shadertoy) but adapts the output to a text-based medium using ordered dithering to simulate grayscale [S1, unofficial].
+
+## Sources
+[S1] a1k0n/asciitracing, https://github.com/a1k0n/asciitracing, fetched 2026-10-26 (unofficial)

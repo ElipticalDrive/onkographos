@@ -1,0 +1,1005 @@
+Contribute to RemixProjGroup/dxvk-remix development by creating an account on GitHub.
+
+Numos physical atmosphere + volumetric cloud system by Kim2091 · Pull Request #38 · RemixProjGroup/dxvk-remix · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Kim2091
+commented
+Jun 21, 2026
+Copy link
+Copy Markdown
+Summary
+Brings the Numos physical-atmosphere path to a full procedural volumetric cloud
+system with physically-based lighting, cloud-on-terrain shadows, a unified
+cloud-motion model, and several perf passes. The entire atmosphere/cloud stack is
+gated behind rtx.skyMode = 1 (default 0 = legacy skybox), so it is inert for
+existing content until opted in. Behaviour changes outside Numos are listed under
+"Global changes."
+43 commits · 56 files · ~+5,900 / −2,700.
+Volumetric clouds (Numos)
+Procedural field from a prebaked 3D Perlin/Worley-FBM noise volume (tile-wraps at
+cloudNoiseTileKm, 12 km) — no cloud assets.
+Per-frame D_sun / D_ambient 256×256×32 optical-depth voxel grids; screen-space
+cloud render RT with Nubis Cubed 2023 lighting; secondary-ray cloud dome LUT so
+indirect/PSR/reflection rays see clouds without a per-ray march.
+Per-column cloud model (baked placement map → coherent towers, not stacked puffs);
+hex de-tiling of the noise (Heitz–Neyret, kills the tile period); edge detail via
+coverage-threshold modulation; cloud height LUT; optional second high-altitude
+deck ("layer 2" echo deck); ghost-rejecting cloud history smoother.
+Cloud & sky lighting
+Physical Hillaire multiscatter as the default; multiscattering LUT switched to a
+full-sphere 8×8 quadrature (fixes a single-azimuth gather that washed out the
+sunset horizon) — magnitude-neutral.
+Bidirectional sky↔cloud coupling, energy-conserving dual-lobe direct, Mie/aerosol
+extinction in cloud+moon sun transmittance, widened daytime-light rolloff through
+sunset, artistic sunset-colour knobs.
+Cloud-on-terrain shadows
+Cloud shadow folds per-pixel onto the SUN's radiance pre-denoise: on the surface
+via the real atmosphere-sun distant light in the direct/indirect integrators
+(gated on atmosphereCloudShadowed + cloudVoxelShadowsEnable), and in fog via
+sampleAtmosphereSunLightVolume. This replaced an earlier screen-space
+PrimaryCloudShadowFactor texture (and its geometry-compensation stack) — it is
+automatically correct indoors / viewmodels / decals. Default
+cloudShadowStrength = 0.5, contrast via cloudShadowFactorStrength.
+Cloud motion
+Unified per-frame integrator for wind advection + in-place field-evolution morph +
+edge boil (offset += velocity·dt), fixing a stateless speed·timeSeconds that
+snapped the field when wind changed. Clouds form/dissolve in place instead of an
+earlier ~30 s global "breathing." Weather-parameter drift de-pulsed and renamed
+"Weather Variation"; __weather.drift_* plugin keys unchanged.
+Sun & moon as real distant lights
+The sun and each enabled, above-horizon moon are injected as real RtDistantLights
+driven by the atmosphere model and lit through the standard NEE/RTXDI path — the
+sole sun/moon path in Numos. SSS / decals / viewmodels are handled correctly by the
+unified pipeline; cloud-on-terrain shadows fold onto these lights (above). The older
+bespoke atmosphere sun/moon NEE shader path was removed (~760 LOC). Also: thin-opaque
+subsurface translucency (backlit glow outdoors); soft-shadow cone + physical sun/moon
+angular size; directionalLightRadianceScale tuning multiplier.
+Performance
+Split sky-LUT cache keys; sky-view + voxel-grid re-bake granularity (re-bake on
+motion step, not every frame); NEE shadow-ray budget clamps; half-res cloud render
+RT; secondary-ray cloud LUT. Validated defaults pinned, workstream toggles retired.
+Global changes (all sky modes)
+Overlay: fixes doubled keyboard input (gates the game-wndproc keyboard fallback
+on raw-input recency) — independent input fix.
+Volumetrics: new volumetricConsumerGain (default 0.008) so the froxel cache
+lights alpha-blended particles/decals/PSR/SAB consumers that were previously unlit;
+fogSunVisibilityGain default 5.0 → 1.0; physical-atmosphere sun NEE +
+cloud-occluded sky-ambient wired into the RTXDI volume integrator (submodule bump);
+new "Atmosphere Sun Fog Scale" UI.
+Docs & submodule
+New docs/CloudSystem.md; updated weather-preset guide, fork-touchpoints.md,
+regenerated RtxOptions.md. submodules/rtxdi bumped to the fork's volumetrics
+commits (physical-atmosphere sun NEE, cloud-occluded sky-ambient, fog/gain knobs).
+Kim2091
+and others
+added 30 commits
+June 10, 2026 17:55
+atmosphere: cloud realism — edge detail erosion, bottom darkening, ve…
+…
+dbf1d7e
+```
+…rtical stretch
+
+Three live-tunable cloud upgrades, each reverting to the prior look at
+its zero/identity value:
+
+- Edge detail erosion (cloudDetailStrength 0.6, cloudDetailScale 4.3):
+  second tap of the prebaked Worley-carved volume at detailScale x base
+  frequency, applied to the density field BEFORE the coverage gate so it
+  displaces the silhouette iso-surface (60-500 m cauliflower teeth).
+  Saturated cores clamp to 1 and stay solid. Pre-gate ordering is
+  load-bearing: post-gate erosion has a ~binary field to chew on and is
+  visually inert (rev-1 lesson, confirmed in-game).
+
+- Bottom darkening (cloudBottomDarkening 0.55, height 0.65): vertical
+  light gradient on the Nubis Cubed multi-scatter M and ambient terms.
+  The paper's M term barely attenuates (sigma_ms ~ 0.05-0.25) and
+  pow(1 - dim_profile, 0.5) is top/bottom symmetric, so undersides read
+  uniformly lit. Direct beam exempt - silver linings survive.
+
+- Vertical stretch (cloudVerticalStretch 1.6): lowers Y noise frequency
+  vs horizontal in BOTH density samplers (view march + voxel-bake must
+  agree) so cloud bodies become convective columns, not round blobs.
+
+New args ride in repurposed CB pad slots (pad_cloudVoxel0..2,
+pad_nubisCubed0, pad_cloudLayer2_0) - layout unchanged. ImGui: Edge
+Detail + Vertical Stretch under Coverage & Shape, Bottom Darkening
+under Lighting; fine-tune knobs stay user.conf-only per the 2026-05-19
+menu-simplification discipline.
+```
+atmosphere: cloud march/bake perf pass + vertical-coherence rework
+…
+b3b9deb
+```
+Perf pass on per-frame cloud noise evaluation, validated piece-by-piece
+in-game (bisect ladder from dbf1d7e after an all-at-once landing broke
+the cloudscape):
+
+- Anti-tile warp hoisted to once per ray in the D_sun/D_ambient bake
+  integrals via new offset-form computeCloudNoiseWarpOffsetKm. Was 4
+  perlin evals per tap x 8 taps x 2.1M voxels x 2 grids EVERY frame;
+  the warp's ~25 km shortest wavelength vs a few-km ray span makes
+  per-tap recompute pure waste. sampleCloudDensityForShadow gains a
+  caller-provided warpOffsetKm parameter.
+
+- Warp octaves moved from constant-z perlinNoise3D planes to a new
+  perlinNoise2D (4 corners, branch-free gradient pick, ~2.5x cheaper),
+  with kWarp2DGain = 1.4 compensating unit-length 2D gradients vs the
+  3D version's sqrt(2) edge gradients. The uncompensated swap visibly
+  weakened the warp - whose Jacobian shred the entire tuned cloud look
+  is calibrated against (load-bearing, documented in-line).
+
+- Removed the per-sample 720 cycles/km analytic perlin detail: 1.4 m
+  wavelength vs >= 100 m march steps can never resolve - it was pure
+  per-sample grain costing an 8-corner perlin per view sample. Its
+  hidden -0.05 mean bias is preserved as a constant so the coverage
+  calibration doesn't shift.
+
+- Coverage/type Worley control fields hoisted out of the view-march
+  loop: slab entry + exit evals, lerped per step (was 2 x 9-hash evals
+  per step x 32 steps; fields vary at ~300 km wavelength).
+
+- cloudVerticalStretch rev 2: the rev-1 Y-domain stretch (stacked-puffs
+  artifact) is replaced by a fixed-Y-slice coherence blend with
+  variance re-expansion anchored on the bake's ~0.4 mean, mirrored in
+  both density samplers so the self-shadow grids match. Shipped
+  EXPERIMENTAL with default 1.0 = bit-exact identity: the look at high
+  values (vertical smearing) isn't approved; towering cumulus likely
+  needs a sky-system-level solution.
+```
+atmosphere: secondary-ray cloud LUT (perf)
+…
+2e67d55
+```
+Every indirect / PSR / reflection ray that reached sky-miss ran the
+full analytical evalClouds march in evalSkyRadiance -- a hidden
+per-ray cost estimated to rival the visible cloud pass. Those rays
+now sample a 256x128 RGBA16F dome LUT (azimuth x elevation,
+horizon-concentrated elevation = (pi/2) v^2) baked once per frame
+with the same Nubis Cubed march the visible cloud RT uses.
+
+- cloud_march_common.slangh (new): marchCloudSlab / marchCloudLayers /
+  buildCloudShadeContext / the moon-shadow tap, extracted verbatim
+  from cloud_render.comp.slang so both passes share one march.
+  cloud_render now calls the shared path with 0/0 distance clamps --
+  behavior-neutral, bit-identical output.
+- cloud_secondary_lut.comp.slang (new): per-frame dome bake, bindings
+  in lockstep with cloud_render, cloudViewSamples steps,
+  frame-constant per-texel jitter (no temporal accumulation hides
+  shimmer on secondary rays).
+- evalSkyRadiance: new middle branch -- non-primary rays sample
+  AtmosphereCloudSecondaryLut (REPEAT-U sky-view sampler wraps the
+  azimuth seam) with the same alpha reconciliation as the cloud-RT
+  branch. rtx.atmosphere.cloudSecondaryLutEnable = False restores the
+  legacy per-ray march for A/B ("Fast Cloud Reflections" checkbox in
+  the Clouds menu).
+- New common binding BINDING_ATMOSPHERE_CLOUD_SECONDARY_LUT (215);
+  gate rides the former pad_c5_0 CB slot (layout unchanged).
+
+Deliberate look change: reflected / indirect clouds now match the
+primary Nubis look instead of the legacy Wrenninge analytical
+approximation. Cloud parallax across scene-scale ray origins is
+negligible vs km-scale cloud distances.
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: half-res cloud render RT (perf)
+…
+4c35b8f
+```
+The visible cloud march ran once per DLSS-input pixel at up to 32
+steps. Clouds are soft, low-frequency content, so the cloud RT is now
+allocated at cloudRenderResolutionScale (default 0.5) of the downscale
+extent and bilinearly upsampled at the sky-miss composite -- ~4x fewer
+marched pixels at the default. The temporal-smoothing path runs after
+the upsample at full downscale resolution, so its stabilization is
+unchanged.
+
+- ensureCloudRenderRT records the full downscale extent
+  (m_cloudRenderFullExtent, published as args.cloudRenderFullDimX/Y in
+  the former pad_c5_1/2 slots) and allocates the RT at the clamped
+  scale; a live scale change reallocates through the existing
+  extent-mismatch path.
+- evalSkyRadiance's primary-ray branch normalizes pixelCoord by the
+  full extent and bilinearly samples the RT via the sky-view sampler,
+  uv clamped a half-texel inside so screen content never wraps through
+  REPEAT-U. At scale 1.0 the uv lands on texel centers and matches the
+  legacy Load to float precision; zero dims (first frames) fall back
+  to Load.
+- "Cloud Render Scale" slider in the Clouds menu for live A/B
+  (0.25..1.0).
+
+Known cosmetic side effect: the cloud-RT debug view (876) now shows
+the smaller texture.
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: hex de-tiling of the cloud noise field (stage A)
+…
+6db68fb
+```
+Root-cause fix for the prebaked noise volume's periodic repeat -- the
+artifact the anti-tile warp was added to hide. The horizontal plane is
+partitioned into an equilateral-triangle lattice (golden-ratio multiple
+of the tile period so lattice and texture can't resonate); each vertex
+carries a hash-derived random texture-space XZ offset, and samples
+blend their triangle's three offset taps with Heitz & Neyret 2018's
+variance-preserving operator:
+
+  G = mean + sum(w_i (x_i - mean)) / sqrt(sum(w_i^2))
+
+Mean and variance of the field are preserved, so the cloud look is
+unchanged -- but two world positions one tile apart land in cells with
+decorrelated offsets, so the repeat can never show. Weights are pow-4
+sharpened: triangle interiors (~70% of area) take a 1-tap fast path
+(tricubic in the view sampler), only edge bands pay 3 trilinear taps.
+
+Applied identically in sampleCloudDensityTextured and
+sampleCloudDensityForShadow so the baked D_sun / D_ambient grids
+shadow the same de-tiled field; the vertical-coherence footprint slice
+follows the dominant vertex's offset in both. The detail-erosion tap
+stays single-tap (its sub-3 km repeat is not the visible artifact).
+
+Gate: rtx.atmosphere.cloudHexTilingEnable (default on, "Seamless
+Cloud Field" checkbox; off = legacy periodic field, live A/B). Rides
+the former padCloudLook0 CB slot; layout unchanged.
+
+Stage A ships with the anti-tile warp UNCHANGED. Stage B (separate
+build, after in-game validation) walks the warp down with
+bake-frequency compensation -- the warp's frequency-multiplying
+Jacobian is load-bearing for the tuned look and must be replaced
+deliberately, not just removed.
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: live-rebake bake-frequency scale (de-tile stage B enabler)
+…
+8baead1
+```
+Exposes the cloud noise bake's base/detail FBM frequency as
+rtx.atmosphere.cloudNoiseBaseFreqScale (default 1.0 = bit-identical
+bake), wired into the existing live re-bake gate so dragging the new
+"Noise Frequency" slider re-bakes the 256^3 volume in-game.
+
+Purpose: the anti-tile warp's Jacobian multiplies the field's
+horizontal frequency 2-3x and the tuned cloud look is calibrated on
+that shred -- the warp can only be walked down (now that hex
+de-tiling handles repetition at the source) if equivalent frequency
+content is folded into the bake itself. The walk-down is an in-game
+tuning session: lower Anti-Tile Warp, raise Noise Frequency toward
+1.5-2.5 to preserve feature size, judge, repeat.
+
+baseFreq/detailFreq keep their 4x ratio under the scale; the periodic
+lattice snapping already handles non-default products (min period 2).
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: retire the anti-tile warp by default (de-tile stage B lan…
+…
+a1ee20d
+```
+…ded)
+
+The in-game warp walk-down validated at warp 0 with the bake frequency
+left at its 1.0 default: hex-tiling (6db68fb) kills the noise repeat at
+the source, and no bake-frequency compensation turned out to be needed.
+
+- cloudNoiseWarpStrength default 0.75 -> 0.0. The knob survives as a
+  pure organic-distortion effect; de-tiling is owned by
+  cloudHexTilingEnable. Warp 0 takes the early-out in
+  applyCloudNoiseAntiTileWarp, refunding 4 perlin2D evals per march
+  sample.
+- cloudNoiseBaseFreqScale doc string updated: 1.0 is the validated
+  post-retirement default, the option remains a live-rebake feature-
+  size knob.
+- fork-touchpoints.md: stage B landing entry.
+```
+atmosphere: remove the anti-tile warp (dead code after hex de-tiling)
+…
+71f2d01
+```
+With the warp retired at 0 (a1ee20d) and hex de-tiling user-validated
+as the root-cause fix for the noise repeat, the warp implementation is
+dead code. Remove it entirely:
+
+- atmosphere_common.slangh: delete perlinGradient2D / perlinNoise2D
+  (warp-only helpers), computeCloudNoiseWarpOffsetKm /
+  applyCloudNoiseAntiTileWarp, the warp call in
+  sampleCloudDensityTextured, the warpOffsetKm parameter from both
+  sampleCloudDensityForShadow overloads, and the per-ray warp hoists
+  in the D_sun / D_ambient bake integrals.
+- atmosphere_args.h: cloudNoiseWarpStrength reverts to padding
+  (padCloudC2, its original slot) -- CB layout unchanged.
+- rtx_options.h: drop the cloudNoiseWarpStrength RTX_OPTION; scrub
+  warp pairing references from cloudHexTilingEnable /
+  cloudNoiseBaseFreqScale doc strings.
+- rtx_atmosphere.cpp: getAtmosphereArgs zeroes the pad slot.
+- rtx_fork_atmosphere.cpp: drop the "Anti-Tile Warp" slider; scrub
+  warp references from the neighboring tooltips.
+- rtx_cloud_noise_baker.comp.slang: comment-only cleanup.
+
+Existing rtx.atmosphere.cloudNoiseWarpStrength conf lines become
+unknown-option no-ops.
+```
+atmosphere: split sky-LUT cache keys (perf)
+…
+860c497
+```
+The three sky LUT bakes (transmittance / multiscatter / sky-view) shared
+one memcmp gate over the whole normalized AtmosphereArgs. Two per-frame
+failure modes: the game-driven sidereal starRotation (pushed per frame
+at night, feeds no LUT bake) re-baked the full cascade every frame, and
+a moving time-of-day sun re-baked the heavy transmittance+multiscatter
+pair (32x32 texels x 64 dirs x 20 steps of LUT taps) even though
+neither reads sun direction.
+
+Each bake now compares a key normalized down to the fields it actually
+reads: normalizeForSkyViewLutKey zeroes the star / Milky Way fields on
+top of the existing per-frame normalization; normalizeForTransmittanceMsKey
+additionally zeroes sun direction / illuminance / disk size, Mie g, the
+MS blend weight, and all moon fields. tms-dirty implies sky-view-dirty;
+barrier ordering unchanged. Both gate paths keep the other path's caches
+coherent so the option toggles live without a spurious re-bake.
+
+Gated by rtx.atmosphere.skyLutCacheKeySplitEnable (default on; legacy
+single-gate path preserved verbatim). ImGui: Atmosphere > Advanced >
+"Minimal Sky LUT Re-bakes". In-game validated: no visual change.
+```
+atmosphere: NEE shadow-ray budget clamps + perf-bisect toggles
+…
+6c82959
+```
+Sky perf workstream: the skyMode A/B frame-time delta (~4.5 ms day /
+~5.5 ms night) was attributed by a live per-dispatch bisect, which this
+commit's diagnostic toggles enabled:
+
+- All atmosphere compute dispatches together measure ~1.8 ms (cloud
+  render ~1.3 at the default half-res scale, D_sun+D_ambient voxel
+  bakes ~0.5, cloud-sky-transmittance ~0) -- i.e. the already-accepted
+  cloud budget. None of the remaining sky cost is in a dispatch.
+- The remainder lives in the integrators, gated on skyMode==1: sun NEE
+  traces an anisotropy-driven 1-12 soft-shadow visibility rays per
+  primary pixel (getSunSoftShadowParams; ~4 at typical Mie g) plus
+  half that per indirect bounce vertex, and moon NEE adds a constant
+  4 (+2 indirect) per pixel at night -- matching both the day delta
+  and the extra ~1 ms at night.
+
+Two clamp knobs cap the loop counts at the single source
+(sampleAtmosphereSunLight / sampleAtmosphereMoonLight), so the primary
+and half-rate secondary paths both inherit:
+
+  rtx.atmosphere.sunShadowMaxSamples   (0 = legacy uncapped, default)
+  rtx.atmosphere.moonShadowMaxSamples  (0 = legacy constant 4, default)
+
+The rays are already blue-noise jittered inside the sun/moon cone, so
+the denoised pipeline (NRD / DLSS-RR) temporally converges one ray per
+frame to the same penumbra; the multi-ray loop predates that reliance.
+In-game validated at cap 1/1: large frame-time win, no penumbra
+smudging or boiling in motion. Defaults stay 0 (bit-identical legacy);
+the CB fields ride the former padMoonNee0/1 slots (layout unchanged).
+
+Also: three default-ON debugDispatch* diagnostic toggles (cloud voxel
+grids / cloud render / cloud-sky-transmittance) under a new ImGui
+"Perf Bisect (Diagnostic)" tree -- the per-dispatch skip switches used
+for the attribution above. Note dispatchCloudRender runs independently
+of cloudRenderRTEnable, so its toggle is the only lever that actually
+removes that pass's cost. Skipping leaves consumers reading stale data
+(frozen clouds / shadows): measurement aid, not a quality setting.
+
+ImGui: Atmosphere > Advanced > "Sun/Moon Shadow Ray Cap";
+Atmosphere > "Perf Bisect (Diagnostic)".
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: shader-path perf-bisect toggles (diagnostic)
+…
+6936d1c
+```
+Extends the per-dispatch bisect kit into the integrators. With dispatch
+costs known (~1.8 ms ~= the accepted cloud budget) and NEE rays capped,
+the residual skyMode frame-time delta splits across shader paths that
+host-side dispatch toggles cannot reach. Two default-true diagnostic
+options pack into one CB gate word (debugSkyBisectFlags, former
+padMoonNee2 slot -- layout unchanged):
+
+  bit 0 (debugEnableAtmosphereNee = false): skip atmosphere sun + moon
+        NEE at both integrator call sites (sun/moon lighting goes black;
+        delta = total NEE visibility-ray cost at current caps)
+  bit 1 (debugEnableSkyMissShading = false): evalSkyRadiance returns
+        flat grey immediately (isolates the full per-ray miss-path cost;
+        the skipped temporal-history write self-heals on re-enable via
+        the frame-id age check)
+
+Defaults = bits clear = production paths, bit-identical.
+
+Decomposition measured with these (day, clouds disabled, caps 1/1,
+skyMode delta ~4 ms): atmosphere NEE ~1.5 ms (visually load-bearing --
+it IS the sunlight), sky-miss shading ~0 ms, voxel grid bakes ~0.5 ms,
+other dispatches ~0. The sky-miss result retires the planned star-dome
+and register-pressure work. The ~2 ms remainder is suspected to be the
+per-froxel atmosphere sun visibility rays in the volumetrics integrator
+(submodules/rtxdi volume_integrator.slangh, gated cb.skyMode == 1) --
+confirmation pending via a volumetrics-off skyMode A/B.
+
+Upstream files integrator_direct.slangh / integrator_indirect.slangh
+get one-line condition edits on their existing skyMode==1 gates;
+fork-touchpoints.md updated accordingly.
+
+ImGui: Atmosphere > Perf Bisect (Diagnostic) > "Atmosphere Sun/Moon
+NEE" / "Full Sky Miss Shading".
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: sky-LUT-cascade perf-bisect toggle (diagnostic)
+…
+9e472e3
+```
+Sixth and final bisect toggle: debugDispatchSkyLuts (default true) freezes the transmittance / multiscatter / sky-view bake cascade -- the last untoggleable GPU piece of the atmosphere. With a continuously-animating time-of-day sun the sky-view LUT re-bakes every frame by design; the in-game bisect read an objective frame-time improvement with the cascade frozen and no visual hit, identifying the per-frame sky-view re-bake as the remaining reducible sky cost. computeLuts short-circuits the whole gate block when off, leaving caches untouched so re-enabling resumes normal gating. ImGui: Atmosphere > Perf Bisect (Diagnostic) > Sky LUT Bakes.
+
+Production fix lands separately (sun-direction granularity on the sky-view cache key).
+```
+atmosphere: sky-view re-bake granularity (perf)
+…
+cd4d75f
+```
+With a continuously-animating time-of-day sun, the sky-view LUT re-baked every frame: its cache key saw a new sunDirection each frame. The frozen-cascade bisect read an objective frame-time improvement, so the re-bakes were the last reducible chunk of the sky cost (the freeze itself is not shippable -- sky colors stop tracking the sun).
+
+skyViewRebakeGranularityDeg quantizes the sun and moon directions INSIDE the sky-view cache key (component snap at the granularity step in radians), so continuous motion flips the memcmp only when a direction crosses a step -- one re-bake per ~granularity degrees of travel instead of one per frame. The bake itself always uses exact current values: every re-bake is exact, staleness between re-bakes is bounded by the step. Non-direction fields stay exact, so slider/preset changes re-bake the same frame. Applies to the split-key path (on by default).
+
+Default 0 = legacy every-frame behavior in this commit; in-game validated at 0.1 (sky tracks the sun smoothly, no visible stepping, objective frame-time win). Default pinned to 0.1 in the follow-up defaults commit. ImGui: Atmosphere > Advanced > Sky Re-bake Granularity (removed in the follow-up; conf-tunable).
+```
+atmosphere: pin validated sky-perf defaults, retire workstream UI
+…
+2fea09f
+```
+Closes the sky perf workstream. In-game validation confirmed the two production levers deliver the measured wins with no visual hit, so their defaults are pinned: sunShadowMaxSamples 0 -> 1, moonShadowMaxSamples 0 -> 1 (one blue-noise-jittered shadow ray per pixel, denoiser-converged), skyViewRebakeGranularityDeg 0.0 -> 0.1 (sky-view LUT re-bakes per 0.1 deg of sun/moon travel instead of per frame).
+
+The workstream's ImGui surface is removed per user decision: the Minimal Sky LUT Re-bakes checkbox, both Shadow Ray Cap ints, the Sky Re-bake Granularity float, and the whole Perf Bisect (Diagnostic) tree. Every underlying option (including the six debug* bisect skip toggles) stays declared and conf-tunable for future regression hunting; 0 still selects legacy behavior on each.
+
+Not regenerated here: RtxOptions.md (requires a game run with DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: cloud voxel-grid re-bake granularity (perf)
+…
+357d23c
+```
+The D_sun / D_ambient cloud lighting grids (256x256x32, 8/6 density taps per voxel) re-baked every frame; the perf-bisect freeze showed a large win with only slowly-accumulating staleness, since the bake inputs (wind scroll, camera position, sun direction) move slowly. Same pattern as the sky-view re-bake granularity: normalizeForVoxelGridKey quantizes wind scroll + camera position by cloudVoxelGridRebakeGranularityKm and sun/moon directions by the existing skyViewRebakeGranularityDeg inside a cache key, so the grids re-bake once per step of actual motion instead of once per frame -- staleness bounded by the step, every re-bake exact. Cloud parameter changes stay exact in the key (same-frame re-bake); a cloud-noise volume re-bake force-clears the cached key.
+
+In-game validated at the 0.1 km default: ~0.7 ms saved, no visible stepping in cloud-body lighting or terrain cumulus shadows. 0 = legacy every-frame via conf. Distinction from the rejected 2026-05-19 8-frame round-robin: that was fixed-cadence (visible periodic stepping regardless of motion); this is bounded-error per unit of motion. Conf-only like the other sky-perf workstream knobs (no UI).
+
+Not regenerated here: RtxOptions.md (requires a game run with DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: per-column cloud model (column-shaping rework)
+…
+7c51ea0
+```
+Root-cause rework of the "stacked separated layers" read that made the
+volumetric cloud system look like flat 2D planes. Previously every
+vertical shaping signal -- the height-LUT density envelope (which at
+cumulus types even baked TWO density peaks separated by a thinner
+neck), the coverage-threshold scale band, the anvil pow gate, the Nubis
+dim profile and the bottom-darkening gradient -- keyed on the GLOBAL
+slab height fraction: one vertical recipe pinned to absolute altitude
+across the whole sky, every cloud cut by the same two global base/top
+planes, lighting painted in horizontal bands. Meanwhile the thresholded
+isotropic 3D noise placed mass independently per altitude, so a single
+column could hold vertically disconnected stacked puffs. The eye
+integrates all of it as stacked flat layers.
+
+The column model gives each cloud its own identity:
+
+* New baked 512x512 RGBA8 cloud placement map
+  (cloud_placement_map_baker.comp.slang): R = Worley-cell cluster field
+  (where clouds are, at cloud scale), G = per-cloud top-height jitter,
+  B = base lift. Tiled at cloudNoiseTileKm and de-tiled by the SAME hex
+  lattice as the 3D noise so cluster and texture travel together.
+  Re-baked live when cloudCellSizeKm / cloudNoiseTileKm change.
+* Per column: presence = coverage remap of the cluster field over a
+  feather band; local base/top derived from base lift, presence and the
+  top jitter. Cloud edges feather to nothing because their tops sink to
+  their bases; tops vary per cloud instead of all ending at the slab
+  top.
+* The sample height re-normalizes to each column's own [base, top] and
+  ALL vertical shaping (envelope, anvil pow, threshold scale) plus the
+  Nubis lighting proxies (dim profile, SDF proxy, bottom darkening) key
+  on that per-cloud height. The 3D noise keeps its texture/erosion role
+  but no longer decides placement -- vertical coherence holds by
+  construction.
+* Height-LUT envelope becomes a single lobe in column mode (smooth rise
+  from the cloud base, fall reaching exactly zero at the cloud top);
+  the legacy two-peak neck+anvil family -- itself a baked-in two-strata
+  structure -- survives only on the gate-off path. The G channel
+  (threshold widening near each cloud's own top) now carries the anvil
+  look alone.
+* Both density samplers early-out before any 3D taps when the column is
+  empty -- a perf win at partial coverage that more than refunds the
+  placement tap. The shadow sampler mirrors everything so the baked
+  D_sun / D_ambient grids shadow the same column shapes; the analytical
+  evalClouds fallback and the secondary-ray dome LUT get the column
+  model automatically through the shared samplers.
+
+Gated by cloudColumnShapingEnable (default on); the legacy global-slab
+path is preserved bit-exact for the off position, including a live
+height-LUT re-bake back to the legacy curve family. New knobs: Cloud
+Cell Size (re-bakes placement live), Top Variation, Top Shape, Base
+Undulation, Edge Feather -- all in a new "Cloud Columns" ImGui group.
+New args ride repurposed CB pad slots (padCloudLook2, padCloudC2,
+pad_cr0..2, pad_c6_0) -- layout unchanged. New common binding 216 for
+the placement map serves the raytrace-side fallback path.
+
+Known limitation: layer 2 (cirrus, default off) shares layer 1's
+placement pattern; cirrus is thin enough that this is invisible, and a
+seed-decorrelated placement tap can follow if layer 2 returns to use.
+
+Not regenerated here: RtxOptions.md (requires a game run with
+DXVK_DOCUMENTATION_WRITE_RTX_OPTIONS_MD=1).
+```
+atmosphere: per-column underside contrast (column-shaping rev 2)
+…
+33b13ba
+```
+First in-game pass on the column model reported a residual layered read
+on the overcast underside. Diagnosis: the deck base is lit almost
+entirely by the Nubis multi-scatter M term, which is horizontally
+near-uniform at production settings (sigma_ms is tiny so
+exp(-sigma_ms * D_sun) stays ~1, and the bottom-darkening gradient is a
+pure function of height) -- so the underside renders as one flat-lit
+sheet with only the fine erosion lace on top: a dark lace plane over a
+bright plane still reads as two stacked 2D layers.
+
+Real deck undersides carry km-scale cellular relief because base
+brightness follows per-column water depth: thick columns occlude the
+down-welling light (dark bases), thin columns transmit it (bright
+bases). The column model already derives each sample's column span, so
+expose it (new out param on the primary density-sampler overload, 1.0
+in legacy mode) and scale the bottom-darkening amount by
+mix(1, span, cloudColumnUndersideContrast) inside evalNubisCubedSample.
+The underside brightness is then driven by the same placement field
+that shapes the clouds -- it moves with wind and matches the baked
+shadows. Contrast 0 (or column mode off) reproduces the uniform legacy
+darkening exactly.
+
+New RTX_OPTION cloudColumnUndersideContrast (default 0.65, Underside
+Contrast slider in the Cloud Columns group), riding the former
+pad_c6_1 slot -- CB layout unchanged.
+
+Not regenerated here: RtxOptions.md.
+```
+atmosphere: analytic underside light field + adaptive march sampling
+…
+5077106
+```
+Root cause of the layered read: under a deck the per-point illumination
+is nearly constant, so only opacity patterns show against a flat
+backdrop. Fix 1: height LUT gains a cumulative-envelope channel; the
+column model turns it into exact per-sample overlying water, and
+exp(-cloudUndersideLightSigma * downTau) now lights the multi-scatter +
+ambient terms (replaces bottom darkening in column mode; sigma 0 =
+legacy). Fix 2: the march holds a target step LENGTH (cloudViewStepKm,
+0 = legacy fixed count, capped by cloudViewSamplesMax) so horizon
+spans stop aliasing 2 km features with 1.6 km steps -- that aliasing
+was the horizon banding. Both independently toggleable. Supersedes
+rev 2's cloudColumnUndersideContrast (removed).
+
+Not regenerated here: RtxOptions.md.
+```
+atmosphere: perf-explicit naming for adaptive cloud sampling controls
+…
+163fca7
+```
+User-validated fix, accepted perf cost - so say it plainly: slider renamed to Cloud Sample Spacing with a PERFORMANCE tooltip paragraph (cost up to cap/32 = 4x on horizon-heavy views, how to trade it back), cap exposed as Max Cloud Samples DragInt, option docstrings matched.
+```
+atmosphere: Numos rebrand + additive edge detail + finer cloud sampling
+…
+734e571
+```
+Rename the SkyMode::PhysicalAtmosphere sky mode to Numos (enum, UI combo/
+tooltips, comments, docs); numeric rtx.skyMode stays 1 so existing .conf
+files are unaffected. Flip edge-detail from erosion to additive — bias
+mirrored across the noise field mean (0.6->0.2) so detail grows billows
+outward instead of carving teeth in (coverage now leans slightly up).
+Lower default cloud sample spacing 0.3->0.1 km and max samples 128->64
+for finer near-field detail under a tighter far cap. RtxOptions.md
+regenerated.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+atmosphere: fix soft cloud-edge halo + expose edge-tuning sliders
+…
+3de8157
+```
+The grey-brown halo around cloud silhouettes was the coverage-gate
+transition band (a wide sub-threshold skirt) lit by horizon-tinted
+ambient on thin samples — amplified by the new additive edge detail.
+Narrow the VIEW-path coverage band 0.25->0.15 (the shadow/optical-depth
+gate stays 0.25 so self-shadow bakes are unchanged), fade the ambient
+term toward 0 on the thinnest edge samples so the skirt goes transparent
+instead of dirty, and edge-window the additive detail to the silhouette.
+Both halo levers (cloudEdgeSoftness, cloudEdgeAmbientFade) are now live
+ImGui sliders + rtx.atmosphere .conf options. RtxOptions.md regenerated.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+atmosphere: compile-gate legacy analytical clouds out of the path tracer
+…
+24543a8
+```
+evalClouds (the legacy analytical cloud view-march) is only the runtime
+fallback in evalSkyRadiance, taken when the cloud RT (primary) and
+secondary-LUT (non-primary) paths are both off — never the validated
+default. But it compiled into every path-tracer megakernel that includes
+atmosphere_sky.slangh (geometry_resolver, integrate_indirect), so any
+cloud-math edit forced a full ~3-min pipeline recompile on next launch.
+Fence evalClouds (definition + call site) behind ATMOSPHERE_CLOUD_VIEW_MARCH,
+defined nowhere by default. Verified: a real edit to sampleCloudDensityTextured
+now changes 0/365 megakernel SPIR-V binaries (only the cloud compute passes
+rebuild), and the runtime DLL shrank ~18MB. Default look is unchanged; the
+analytical A/B fallback yields no cloud unless the macro is defined.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+atmosphere: rebase night cloud-lighting knobs to O(1) (+ batched tree…
+…
+b7c1ef1
+```
+… state)
+
+Night clouds read too bright; the dominant term was the star-ambient
+coupling (added uniformly and uncolored to every cloud sample, so it
+lifts the whole deck and tints it blue via nightSkyColor), not the moon.
+The sub-0.01 night-radiance scale is now folded into internal shader
+constants (kStarCloudCoupling, kMoonAirglowScale) so
+starAmbientCouplingStrength and moonAmbientAirglow are O(1) knobs; star
+default 0.03 -> 0.25 (user-tested). The RT march and the legacy
+evalClouds get the identical edit so the day->night crossfade stays
+bit-matched. See the fork-touchpoints entry for detail. This commit also
+lands previously-uncommitted working-tree state: the issue #33 day/night
+dayFactor gate, the nightSky/cloudMoon tuning, and the in-flight issue
+#35 (atmosphereSunVolumetricRadianceScale) and issue NVIDIAGameWorks#37
+(cloudShadowIndirectStrength) controls. NOTE: #35's companion
+volume_integrator/volume_lighting edits live in the rtxdi submodule and
+are NOT in this commit (third-party pin), so #35 lands incomplete.
+```
+atmosphere: cloud edge detail via threshold modulation (rev 4)
+…
+20128e2
+```
+The additive edge-detail (rev 3) was trapped in a thin rind hugging the
+silhouette because its containment window was one-sided on the pre-detail
+base density, so detail could only displace the iso-surface from inside;
+widening the window traded the rind for a half-res smear halo. Rev 4
+wobbles the coverage threshold (the gate position) instead of adding to
+the density field, zero-mean about kCloudNoiseFieldMean. That beats both
+modes: the threshold can drop below the base value so billows grow
+outward past the silhouette (no rind), and the gate self-localizes the
+effect so far-outside samples stay hard-0 (no faint margin to smear) and
+far-inside stay 1 (no interior holes) -- no explicit edge window needed.
+Unlike the rejected erosion remap it never touches the noise field; it
+only moves the gate, the same anvil lever step 4a uses at low frequency.
+cloudDetailStrength=0 is bit-identical and the shadow sampler still skips
+detail. See the fork-touchpoints entry. User-validated in-game.
+```
+atmosphere: artistic sunset color knobs + fog gain default 1.0
+…
+5752a28
+```
+Add multiScatterStrength and sunsetSaturation knobs (with ImGui sliders)
+to recover sunset warmth the physical two-term multiscatter model renders
+undersaturated; both apply in the sky-view LUT bake so clouds inherit the
+warmer ambient. Lower fogSunVisibilityGain default 5.0 to 1.0 (physical,
+no boost). Bump the rtxdi pin to fcbc290 (sun-fog + consumer-gain knobs,
+issue #35/NVIDIAGameWorks#36). Details in fork-touchpoints.md.
+```
+atmosphere: regroup cloud ImGui controls into a collapsible tree
+…
+1cde655
+```
+Restructure the flat ~45-control Clouds menu (non-collapsible dividers,
+always expanded) into workflow-grouped collapsible sub-trees: Basic,
+Shaping (Variation / Detail & Edges / Columns), Lighting, Wind, Layer 2,
+Performance, Horizon & Haze. Mode-inert controls grey out via
+BeginDisabled (Columns sliders, Bottom Darkening, Layer 2 body). Curvature
+moves to Horizon & Haze; the Color control becomes a ColorEdit3 picker;
+the experimental Vertical Stretch slider is retired from the menu
+(option stays conf-only). No option / CB / shader changes.
+```
+fix(overlay): gate Path A keyboard forwarding on Path B raw-input rec…
+…
+468fd6d
+```
+…ency
+
+Keyboard reached ImGui through both the legacy game-WndProc forward
+(Path A) and the raw WM_INPUT stream the fork backend decodes via
+RIM_TYPEKEYBOARD (Path B), so every key and character was delivered
+twice ("dual keyboard input"). The bf6e685 mouse fix assumed keyboard
+was Path A only because RIDEV_NOLEGACY suppresses the legacy keys, but
+the raw path stays live. Gate Path A keyboard on isRawInputRecent() —
+the same gate the mouse case uses — so Path A skips while raw input is
+live and picks up the fallback when it goes silent.
+```
+atmosphere: re-architect cloud shadows as sun-NEE attenuation
+…
+b2227d9
+```
+A cloud shadow is attenuation of the sun, so apply it where the sun is
+evaluated: fold the D_sun cloud transmittance onto the sun's radiance inside
+the sun NEE (sampleAtmosphereSunLight / sampleAtmosphereSunLightVolume) as
+result.radiance *= pow(transmittance, cloudShadowFactorStrength), before the
+sun is summed with other lights and before denoising. Darkening only the sun
+makes interiors automatically correct for every surface type (walls, decals,
+viewmodels, particles) with no per-pixel geometry test, never touches lamps,
+and gives correct bounce off cloud-shadowed ground via the shared secondary
+NEE with no double-count. Deletes the whole geometry-blind compensation stack:
+the screen-space PrimaryCloudShadowFactor texture + composite apply + debug
+view 878, the sealed-interior zenith up-ray gate, the viewmodel/decal
+camera-origin corrections and the isDecalCategory surface flag, and the dusk
+horizon gate. Accepted tradeoff: the cumulus pattern now passes through
+NRD/DLSS-RR (may soften edges); a dedicated denoised sun-direct buffer is the
+documented follow-up if needed.
+```
+atmosphere: remove legacy cloud paths, rework underside darkening
+…
+41337ea
+```
+Drop both dead cloud code paths — the compile-gated analytical evalClouds
+view-march and the legacy global-slab shaping (cloudColumnShapingEnable)
+— making the volumetric column model unconditional. Rework cloud bottom
+darkening into the column path as a realistic underside light field driven
+by cloud density (analytic downwelling) and sun position: the darkening is
+strongest with the sun overhead and fades out toward the horizon so low
+sun lights the bases (sunset glow). cloudBottomDarkening is now the
+strength knob (default 1.0 = prior high-sun look bit-for-bit);
+cloudBottomDarkeningHeight removed. Removed CB fields reverted to pads
+(layout unchanged). Full rationale in docs/fork-touchpoints.md.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+atmosphere: physically-correct sky + cloud sunset lighting
+…
+21726e9
+```
+Squashed sky/cloud lighting overhaul, validated in-game. Makes the physical
+Hillaire multiscatter the default and couples sky<->clouds in both directions
+(sky-dome fill onto clouds + cloud-color bleed into sky, the latter sampled from
+a blurred coarse mip to avoid faceting). Fixes the multiscatter LUT gather, which
+sampled a single azimuth 90deg from the sun and so missed the warm sunset horizon
+(pale-blue fill), by switching to a full sphere quadrature. Energy-conserves the
+cloud direct dual-lobe so lit clouds stop out-brightening the sky. Adds the
+missing Mie/aerosol extinction to the cloud+moon sun transmittance, and widens the
+cloud daytime-light rolloff through the sunset approach so the reddest light is no
+longer the brightest -- together fixing the flat/over-bright/over-saturated "neon
+orange" clouds in the final glow before sunset.
+```
+Kim2091
+added 15 commits
+June 21, 2026 02:20
+atmosphere: thin-opaque SSS in sun/moon NEE (physical-atmosphere mode)
+…
+7362bca
+```
+In skyMode==1 the fork sun/moon NEE is the only sun path and never handled
+thin-opaque subsurface: it traced shadow rays without
+visibilityModeEnableSubsurfaceMaterials and early-out on NdotL<=0, killing
+backlit translucency outdoors. Gate both on isThinOpaqueSubsurface so normal
+opaque surfaces are untouched. Minimal fix; superseded if the sun moves to a
+real distant light.
+```
+atmosphere: sun + moons as real distant lights [experiment]
+…
+3a88510
+```
+When rtx.atmosphere.useDirectionalLights is on (skyMode==Numos), inject the
+sun and each enabled moon as externally-tracked RtDistantLights driven by the
+atmosphere model, so they flow through the standard NEE/RTXDI path instead of
+the bespoke evalAtmosphereSunNEE/MoonNEE. SSS, decals, and viewmodels are then
+handled by the unified pipeline. CPU-ports getAtmosphericTransmittanceForDir
+(closed-form, preserves sunset reddening) and the sun/moon radiance ÷ pi
+(distant-light irradiance convention). Bespoke sun/moon NEE gated off via
+debugSkyBisectFlags bit 2. Tuning knob directionalLightRadianceScale.
+Known v1 limitation: no cloud-on-terrain shadow.
+```
+atmosphere: mark injected sun/moon lights dynamic [experiment]
+…
+14539fd
+```
+Externally-tracked lights default to isDynamic=false, so updateLightStaticSleep
+put them to sleep after getNumFramesToPutLightsToSleep() frames and stopped
+applying *light = newLight — freezing the sun's direction so it no longer
+tracked sunRotation/sunElevation (same for moons). Set isDynamic=true so the
+geometry updates every frame.
+```
+atmosphere: soft-shadow cone for distant sun/moon [experiment]
+…
+b6425aa
+```
+The injected distant sun used the physical sun radius (~0.27deg half-angle),
+giving much sharper shadows than the old bespoke NEE, which widened the cone
+via mieAnisotropy (getSunSoftShadowParams: mix(0.6, 0.008, g^2), ~2.5deg at
+g=0.97). Mirror that cone as the distant light's half-angle (floored at the
+physical sun radius); moon uses the old clamp(angularRadius*0.5, 0.005, 0.6).
+Half-angle does not affect brightness (contribution ~= pi * m_radiance), so no
+re-tuning needed.
+```
+atmosphere: physical sun/moon angular size for shadows [experiment]
+…
+aacbe1c
+```
+Keep the physically-correct shadow sharpness: sun half-angle = sunSize/2
+(~0.27deg disc), moon = its angular radius. Real sun shadows are crisp near
+contact and soften with distance; the old mieAnisotropy-driven ~2.5deg cone was
+an artistic over-softening (and noise-hiding) the RTXDI/DLSS-RR denoiser no
+longer needs. Reverts the previous soft-cone match.
+```
+atmosphere: moon silver-lining + halo glow default 2.0
+…
+7578405
+```
+In-game tuned: moonSilverLiningIntensity 1.0 -> 2.0 and moonHaloGlowStrength
+1.0 -> 2.0 (moonCloudAnisotropy already 0.85). Brighter cloud silver lining and
+moon halo as the calibrated baseline.
+```
+atmosphere: cloud-on-terrain shadows for the real sun light
+…
+abab901
+```
+Now that the sun is a real distant light, restore per-pixel cloud shadows the
+clean way — as a scalar on the sun light's NEE contribution rather than the old
+screen-space stack.
+
+- Gate the bespoke secondary (indirect) atmosphere sun/moon NEE on debugSkyBisectFlags
+  bit 2 to match the primary, so the bounced sun/moon is not double-counted with the
+  real distant light's indirect bounce.
+- Add an atmosphereCloudShadowed light flag (distant-light GPU flags bit 2; RtLight +
+  writeGPUData + copyFrom, decoded in polymorphic_light). The injected sun light sets
+  it. In the primary and indirect NEE, when the sampled light carries the flag
+  (skyMode==Numos + cloudVoxelShadowsEnable), fold
+  pow(sampleCloudGroundShadow_OptionB(surfacePos, dirToSun), cloudShadowFactorStrength)
+  onto its radiance — same math as the bespoke fold, relocated onto the real light:
+  per-pixel, correct indoors, denoised, every surface type free.
+- Force the D_sun voxel grid to re-bake every frame while cloud shadows are on so the
+  terrain shadow has no granularity stepping; gated re-bake when off.
+- cloudShadowStrength default 0.10 -> 0.5.
+```
+atmosphere: decoupled sun shadow softness knob
+…
+95c4938
+```
+Add rtx.atmosphere.sunShadowSoftnessDeg (+ "Shadow Softness" dev-menu slider in
+the Sun tree). 0 = physical: the sun distant light's half-angle tracks sunSize/2
+so shadow softness follows the visible disc. When > 0 it overrides the half-angle
+in degrees WITHOUT changing the visible sun disc — soft sun shadows under a small,
+crisp sun. CPU-only (sets the distant light half-angle at injection); no brightness
+change (contribution ~= pi * radiance regardless of half-angle).
+```
+atmosphere: rework layer 2 as a lean "echo deck"
+…
+4cb5073
+```
+Replace the fully-independent layer-2 slab pass with a cheap echo deck: the
+same cloud-slab model at a gapped altitude, low adjustable step budget
+(cloudLayer2StepFloor/Max), analytic sun shadow, and moonlight. Density,
+thickness, type, and color are decoupled from layer 1 (new cloudLayer2Color);
+coverage spread is forced uniform and its option removed to kill the Worley
+tiling. The constant buffer grows only in vec4-aligned blocks. See
+docs/fork-touchpoints.md for the full touchpoint breakdown.
+```
+atmosphere: remove dead sky/cloud code + fix stale docs
+…
+cf6c289
+```
+Remove unused evalSunDisk / uvToSkyViewLutParams / sunDisc option (+ its
+RemixSkyAPI row and a changelog entry); demote dead cloudVoxelGrid* arg fields
+to pads; correct comments and three RTX_OPTION descriptions that referenced the
+removed analytical evalClouds path; regenerate RtxOptions.md. No behavior
+change. See docs/fork-touchpoints.md.
+```
+atmosphere: overhaul cloud drift into a unified motion system
+…
+4db4419
+```
+Replaces the ~30s whole-sky "breathing" (the weather-parameter drift's
+30s fast layer, all fields cresting in lockstep) with in-field evolution:
+the base 3D noise scrolls slowly to morph formations in place, and an
+independent edge-boil scroll churns the billow silhouettes. Folds wind
+advection, morph, and boil into one per-frame accumulator
+(offset += velocity*dt), fixing the stateless speed*timeSeconds that
+snapped/rotated the whole field whenever the now-slow weather drift varied
+wind. Weather-parameter drift de-pulsed and trimmed to 3 weather-scale
+fields (coverage mean, wind speed/direction). Layer-2 echo-deck step cap
+16->32. No constant-buffer growth (reused pad slots); docs updated.
+```
+atmosphere: rename weather "Cloud Drift" UI to "Weather Variation"
+…
+d0e2318
+```
+Pure dev-menu/label rename to stop the word collision with the new
+Atmosphere -> Clouds -> "Cloud Motion" tree: the weather-parameter wander
+(slow, preset-driven modulation of coverage + wind) is a different layer
+from the per-frame field motion. Renames the subtree title, slider/button
+labels, and tooltips, updates the Cloud Motion cross-reference, and syncs
+the docs. The __weather.drift_* GameStateStore API keys and the internal
+m_drift* members are unchanged, so plugin integrations are unaffected.
+```
+atmosphere: remove the bespoke sun/moon NEE; directional lights are t…
+…
+8e885e9
+```
+…he sole path
+
+The sun/moon "real distant lights" path was landed as an experiment that only
+gated OFF the older bespoke atmosphere NEE (dead at runtime whenever
+useDirectionalLights was on, the default). This deletes that dead fallback for
+real: the four evalAtmosphere*NEE* functions and their gated call sites, the
+now-orphaned surface samplers (sampleAtmosphereSunLight / sampleAtmosphereMoonLight
+and their pickMoon helper), the useDirectionalLights toggle (injection is now
+unconditional in Numos), the dead debugEnableAtmosphereNee diagnostic, and the
+retired debugSkyBisectFlags bits 0 and 2. Runtime-neutral at default settings.
+Cloud-on-terrain shadows are unaffected -- they fold per-pixel onto the real sun
+distant light in the integrators (gated on atmosphereCloudShadowed); the
+volumetric fold via sampleAtmosphereSunLightVolume is unchanged. Net ~760 lines
+removed. Docs updated; CloudSystem.md cloudShadowStrength default corrected 0 -> 0.5.
+```
+atmosphere: remove dead cloud sliders/options + orphaned NEE soft-sha…
+…
+a317db1
+```
+…dow helpers
+
+Dead-code pass (audit-verified, no behaviour change). Removes a cluster of
+cloud controls that were fully plumbed CPU-side but whose AtmosphereArgs fields
+no shader ever reads: the weather "Shadow Tint" / "Shadow Tint Strength" /
+"Sunset Warmth" / "Anisotropy" sliders (cloud lighting uses cloudPhaseG1/G2), end
+to end -- sliders, base + per-preset RTX_OPTIONs, the WeatherSnapshot field and
+its lerp/snapshot/preset/write sites; plus the conf-only cloudMultiScatterStrength
+(the live knob is cloudMsScale). Also removes two orphaned shader helpers
+(getSunSoftShadowParams, getJitteredSunDirection) and the now-unused
+AtmosphereSunSample struct, leftovers of the removed bespoke sun/moon NEE. The CB
+fields are renamed to reclaimable pad_* slots so the constant-buffer layout is
+byte-identical. Verified live via the rtxdi submodule and NOT touched:
+sampleAtmosphereSunLightVolume, atmosphereSunVolumetricRadianceScale,
+cloudSkyAmbientStrength. Net ~190 lines removed.
+```
+atmosphere: remove dead NEE soft-shadow ray-cap options
+…
+1676f49
+```
+sunShadowMaxSamples / moonShadowMaxSamples capped the bespoke sun/moon NEE
+soft-shadow ray loops, which were removed with that NEE path — verified across
+src and the rtxdi submodule to have zero remaining shader readers. Removes both
+RTX_OPTIONs and their CPU writes; the CB fields become reclaimable pad_* slots so
+the constant-buffer layout is byte-identical. Also corrects the now-stale
+debugSkyBisectFlags bit-0 ("skip atmosphere NEE") comment in atmosphere_args.h
+and drops the two names from the conf-only-knobs note.
+```
+Hide details
+View details
+Kim2091
+merged commit 7750094
+into
+RemixProjGroup:main
+Jun 21, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

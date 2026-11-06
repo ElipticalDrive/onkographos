@@ -1,0 +1,124 @@
+# Isotropic Total Variation
+
+Also called: GroupL1Norm TV, Isotropic TV Reconstruction
+
+## Overview
+Isotropic Total Variation (ITV) is a regularization prior for volumetric data that sums the magnitude of the gradient at each voxel, treating the three spatial gradient components as a single group [S2, unofficial]. It differs from Anisotropic Total Variation (ATV) by using the Euclidean norm ($L_2$) on the gradient vector rather than the sum of absolute differences ($L_1$), which prevents directional bias and produces smoother, more natural edges in reconstructed volumes [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- $\mathbf{f}$: The volume data vector of size $n$, where $n = N_x \times N_y \times N_z$.
+- $\mu$: Regularization weight (typical value: 0.26 for GroupL1Norm TV [S1, unofficial]).
+
+**Outputs:**
+- Regularization energy $h(\mathbf{f})$.
+- Gradient of the regularization with respect to $\mathbf{f}$ (for optimization).
+
+**Data Structures:**
+- $\mathbf{f}$: Array of shape $(N_x, N_y, N_z)$ or flattened vector of size $n$.
+- $\mathbf{q}$: Gradient vector of size $3n$, containing forward differences in $x, y, z$ directions for each voxel.
+- $\mathbf{E}$: A sparse matrix or implicit operator mapping $\mathbf{q}$ to per-voxel gradient magnitudes. Explicit storage is not required; operations are computed on-the-fly [S2, unofficial].
+
+**Formulas:**
+The ITV energy function is defined as:
+$$ h(\mathbf{f}) = \sum_{i,j,k} \sqrt{|\mathbf{f}_{i+1,j,k} - \mathbf{f}_{i,j,k}|^2 + |\mathbf{f}_{i,j+1,k} - \mathbf{f}_{i,j,k}|^2 + |\mathbf{f}_{i,j,k+1} - \mathbf{f}_{i,j,k}|^2} $$
+where $\mathbf{f}_{i,j,k}$ is the value at voxel $(i,j,k)$ [S2, unofficial].
+
+Let $\mathbf{D}$ be the forward difference matrix and $\mathbf{q} = \mathbf{Df}$. The norm $\|\mathbf{q}\|_E$ is defined as:
+$$ \|\mathbf{w}\|_E = \|\sqrt{\mathbf{E}^T \mathbf{w}^2}\|_1 = \sum_v \|\mathbf{w}^v\|_2 $$
+where $\mathbf{w}^v$ is the 3D gradient vector at voxel $v$, and the square root and square are component-wise [S2, unofficial].
+
+The proximal operator for the convex conjugate $\tilde{g}^*$ is the projection onto the unit ball of the dual norm:
+$$ \text{prox}_{\mu \tilde{g}^*}(\mathbf{q}) = \Pi_{B^*}(\mathbf{q}) = \frac{\mathbf{q}}{\mathbf{E}_{\max}\left(\sqrt{\mathbf{E}^T \mathbf{q}^2}, 1\right)} $$
+where division and max are component-wise [S2, unofficial].
+
+**Steps:**
+1. Compute forward differences $\mathbf{q} = \mathbf{Df}$ for all voxels. For voxel $(i,j,k)$, $\mathbf{q}^v = [\mathbf{f}_{i+1,j,k}-\mathbf{f}_{i,j,k}, \mathbf{f}_{i,j+1,k}-\mathbf{f}_{i,j,k}, \mathbf{f}_{i,j,k+1}-\mathbf{f}_{i,j,k}]^T$. Handle boundary conditions by clamping or zero-padding [G].
+2. Compute the squared gradient magnitude per voxel: $m_v = \|\mathbf{q}^v\|_2 = \sqrt{q_{x}^2 + q_{y}^2 + q_{z}^2}$.
+3. The energy is $h(\mathbf{f}) = \sum_v m_v$.
+4. For optimization (e.g., Primal-Dual), compute the proximal step on $\mathbf{q}$ using the formula above, which scales each voxel's gradient vector by $\min(1, 1/m_v)$ if $m_v > 0$, else 1 [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def isotropic_tv_energy(f):
+    """
+    Computes the Isotropic Total Variation energy for volume f.
+    f: numpy array of shape (Nx, Ny, Nz)
+    """
+    # Compute forward differences
+    # Handle boundaries by assuming zero outside or clamping [G]
+    fx = np.zeros_like(f)
+    fy = np.zeros_like(f)
+    fz = np.zeros_like(f)
+    
+    fx[:-1, :, :] = f[1:, :, :] - f[:-1, :, :]
+    fy[:, :-1, :] = f[:, 1:, :] - f[:, :-1, :]
+    fz[:, :, :-1] = f[:, :, 1:] - f[:, :, :-1]
+    
+    # Compute magnitude of gradient vector at each voxel
+    grad_mag = np.sqrt(fx**2 + fy**2 + fz**2)
+    
+    # Sum over all voxels
+    energy = np.sum(grad_mag)
+    return energy
+
+def prox_isotropic_tv(q, mu):
+    """
+    Proximal operator for the ITV prior on gradient vector q.
+    q: numpy array of shape (3, Nx, Ny, Nz) or (3*Nx*Ny*Nz,)
+    mu: regularization weight
+    Returns: proximal result
+    """
+    # Reshape if necessary to (3, Nx, Ny, Nz)
+    if q.ndim == 1:
+        q = q.reshape(3, -1)
+        
+    # Compute magnitude of gradient vector at each voxel
+    # q[0] is x-diff, q[1] is y-diff, q[2] is z-diff
+    grad_mag = np.sqrt(q[0]**2 + q[1]**2 + q[2]**2)
+    
+    # Avoid division by zero
+    grad_mag_safe = np.where(grad_mag > 0, grad_mag, 1.0)
+    
+    # Projection onto unit ball: scale by min(1, 1/mag)
+    # Formula: q / max(sqrt(E^T q^2), 1) -> q / max(mag, 1)
+    scale = np.minimum(1.0, 1.0 / grad_mag_safe)
+    
+    prox_q = q * scale
+    
+    return prox_q
+```
+
+**Edge Cases and Pitfalls:**
+- **Zero Gradient:** If $\mathbf{q}^v = \mathbf{0}$, the proximal operator is undefined by division. The formula handles this by using $\max(\dots, 1)$, effectively leaving zero gradients unchanged [S2, unofficial].
+- **Boundary Conditions:** Forward differences at the last voxel in each dimension require boundary handling. Common approaches include zero-padding, clamping, or periodic boundaries [G].
+- **Precision:** Squaring small gradient values may lead to underflow; squaring large values may lead to overflow. Use stable computation if necessary [G].
+
+## Subtopics
+
+### [Anisotropic Total Variation](3273-anisotropic-total-variation.md)
+Uses $L_1$ norm on gradient components (sum of absolute differences). Cheaper to compute but introduces directional bias. Choose when computational cost is critical and directional artifacts are acceptable.
+
+### [Plenoxels regularization ablation](901-plenoxels-regularization-ablation.md)
+Ablation study of regularization methods in Plenoxels. Compare ITV's smoothing effect with other priors in neural radiance fields.
+
+### [Space-Time Tomographic Projection (STP) Regularizer](3265-space-time-tomographic-projection-stp-regularizer.md)
+Regularizer for space-time tomography. ITV is a component or alternative for spatial smoothness in dynamic scenes.
+
+## Operating characteristics
+- **Time Complexity:** $O(n)$ for energy computation, where $n$ is the number of voxels. Proximal operator is also $O(n)$.
+- **Memory Complexity:** $O(n)$ to store the volume and gradients. No explicit matrix storage required [S2, unofficial].
+- **Performance:** ITV produces smoother reconstructions than ATV, reducing directional artifacts [S1, unofficial]. However, it is slightly more expensive due to square root and vector norm computations.
+- **Strengths:** Directionally invariant smoothing, effective at removing noise while preserving edges.
+- **Limitations:** May oversmooth fine details compared to anisotropic methods. Computationally more intensive than ATV.
+- **When to Use:** When isotropic smoothing is desired, such as in CT reconstruction or volume rendering regularization where directional bias is undesirable [S1, S2, unofficial].
+- **When Not to Use:** When computational resources are extremely limited, or when directional features are important and should be preserved differently.
+
+## Background
+Isotropic Total Variation was introduced in the context of CT reconstruction and sparse view super-resolution [S2, unofficial]. It is based on the work of Zang et al. (2018-2019) on space-time tomography and warp-and-project tomography [S2, unofficial]. The method uses proximal algorithms for optimization, leveraging the convex conjugate and proximal operator of the ITV prior [S2, unofficial]. It is widely used in tomographic reconstruction and volume rendering regularization to prevent artifacts [S1, S2, unofficial].
+
+## Sources
+[S1] adler-j/learned_gradient_tomography, https://github.com/adler-j/learned_gradient_tomography, fetched 2026-10-27 (unofficial)
+[S2] Space-Time Tomographic Reconstruction of Deforming Objects, https://vccimaging.org/Publications/Zang2020Thesis/Zang2020Thesis.pdf, fetched 2026-10-30 (unofficial)

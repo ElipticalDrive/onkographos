@@ -1,0 +1,101 @@
+# Multi-Grid Merging
+
+Also called: Merging Multiple Grids, Min Compositing
+
+## Overview
+Multi-Grid Merging combines two sparse hash grids into a single grid by taking the union of their active voxels. It resolves overlaps by applying a compositing operator (typically minimum, but also maximum, sum, or product) to the values at shared coordinates [S1, unofficial]. This method is distinct from simple concatenation because it actively resolves spatial conflicts between overlapping cells, ensuring a consistent density or opacity representation across merged data structures [S1, unofficial].
+
+## How it works
+**Inputs:** Two sparse hash grids, `grid_a` and `grid_b`, containing active voxels with associated scalar values.
+**Outputs:** A new sparse hash grid, `data`, containing the merged result.
+
+**Data Structures:**
+The implementation uses a hash map (dictionary) where keys are voxel coordinates (e.g., integer triplets or hashed indices) and values are the scalar data stored at those coordinates.
+
+**Steps:**
+1.  **Initialize:** Create an empty hash map `data`.
+2.  **Copy Grid A:** Iterate through all active voxels in `grid_a`. For each voxel at coordinate `c` with value `v`, insert `(c, v)` into `data`.
+3.  **Merge Grid B:** Iterate through all active voxels in `grid_b`. For each voxel at coordinate `c` with value `v`:
+    *   If `c` exists in `data`, let `existing` be the value currently stored at `data[c]`. Update `data[c]` using the compositing operator: `data[c] = operator(existing, v)`.
+    *   If `c` does not exist in `data`, insert `(c, v)` into `data`.
+4.  **Upsampling (Optional/Contextual):** In specific contexts involving propagation grids with arbitrary orientations, the merged grid may be upsampled to double the resolution of the individual propagation grids to prevent undersampling [S2]. This step is performed after merging if the resulting grid is used for subsequent propagation calculations [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def merge_grids(grid_a, grid_b, operator=min):
+    """
+    Merges two sparse hash grids.
+    
+    Args:
+        grid_a: Iterable of (coordinate, value) tuples.
+        grid_b: Iterable of (coordinate, value) tuples.
+        operator: Function taking two values and returning one. Defaults to min.
+        
+    Returns:
+        dict: A hash map of coordinate -> value.
+    """
+    data = {}
+    
+    # Step 1: Copy grid_a
+    for coord, val in grid_a:
+        data[coord] = val
+        
+    # Step 2: Merge grid_b
+    for coord, val in grid_b:
+        if coord in data:
+            existing = data[coord]
+            data[coord] = operator(existing, val)
+        else:
+            data[coord] = val
+            
+    return data
+```
+
+**Parameters:**
+*   `operator`: The compositing function. Common values are `min`, `max`, `add`, `mul` [S1, unofficial].
+*   `upsample`: Boolean flag indicating whether to double the resolution post-merge. Default is `False` unless specified by the propagation context [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** When using floating-point values, repeated compositing operations (especially multiplication or summation) may lead to precision loss or overflow/underflow. [G] Ensure appropriate data types are chosen based on the expected value range.
+*   **Boundaries:** The hash map handles arbitrary coordinates, but if the grids represent bounded volumes, ensure that coordinates outside the intended domain are filtered or handled appropriately before merging.
+*   **Degenerate Input:** If one grid is empty, the result is a copy of the other grid.
+
+## Subtopics
+
+### Grid Deformation with Entropy Coding
+This variant applies entropy coding to compress the data differences between registered adjacent data slices after merging or deformation [S3, unofficial]. It uses grid deformation techniques to align adjacent slices, then compresses the residual data using entropy coding (e.g., arithmetic coding) [S3, unofficial]. This approach is suitable for scenarios requiring high compression ratios while maintaining the ability to selectively decompress data for visualization [S3, unofficial].
+
+### Max Compositing
+Returns a new grid whose active voxels are the union of two grids, taking the maximum value at overlapping coordinates [S1, unofficial].
+**Steps:**
+1. Copy all active voxels from grid `a` to `data`.
+2. Iterate active voxels from grid `b`. If `c` exists in `data`, update `data[c] = max(existing, v)`. Else, set `data[c] = v` [S1, unofficial].
+
+### Multiply Compositing
+Returns a new grid whose active voxels are the union of two grids. Overlapping values are multiplied [S1, unofficial].
+**Steps:**
+1. Copy all active voxels from grid `a` to `data`.
+2. Iterate active voxels from grid `b`. If `c` exists in `data`, update `data[c] = existing * v`. Else, set `data[c] = v` [S1, unofficial].
+
+### Sum Compositing
+Returns a new grid whose active voxels are the union of two grids. Overlapping values are summed [S1, unofficial].
+**Steps:**
+1. Copy all active voxels from grid `a` to `data`.
+2. Iterate active voxels from grid `b`. If `c` exists in `data`, update `data[c] = existing + v`. Else, set `data[c] = v` [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(N_A + N_B)$, where $N_A$ and $N_B$ are the number of active voxels in grid A and grid B, respectively. Each voxel is visited once for insertion or lookup [S1, unofficial].
+**Memory Complexity:** $O(N_A + N_B)$ in the worst case (no overlaps). Memory usage scales with the number of unique active voxels in the merged grid.
+**Performance:** The merging process is generally fast, dominated by hash map operations. Upsampling, if required, adds a cost proportional to the number of voxels in the upsampled grid [S2].
+**Strengths:** Efficiently combines sparse data structures; flexible compositing operators allow for various physical interpretations (e.g., density, opacity).
+**Limitations:** Does not inherently handle interpolation or smoothing between overlapping cells; relies on the discrete voxel values. Upsampling increases memory and computational cost [S2].
+
+## Background
+Multi-Grid Merging is a technique used in volume rendering and sparse data processing to combine multiple levels or sources of data into a unified representation. The specific implementation details, including the use of hash grids and compositing operators, are documented in the Lyr.jl repository [S1, unofficial]. The context of upsampling to prevent undersampling in propagation grids is described in the Principal-Ordinates Propagation paper [S2]. The broader context of compressing and merging volume data slices using entropy coding is discussed in the survey on volume data compression techniques [S3, unofficial].
+
+## Sources
+[S1] Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
+[S2] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29
+[S3] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

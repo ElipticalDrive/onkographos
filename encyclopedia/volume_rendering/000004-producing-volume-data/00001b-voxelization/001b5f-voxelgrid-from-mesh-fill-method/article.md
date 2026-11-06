@@ -1,0 +1,80 @@
+# VoxelGrid from Mesh (Fill Method)
+## Overview
+The Fill Method produces a voxel grid from a mesh by first computing the surface occupancy and then filling the interior holes using morphological operations [S1, unofficial]. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) and [Conservative Voxelization](3247-conservative-voxelization.md) by relying on binary morphological closing rather than geometric intersection tests or rasterization coverage to determine interior voxels [S1, unofficial]. It is distinct from [Interior Voxelize](995-interior-voxelize.md) in that it explicitly uses a two-step process of surface extraction followed by dilation/filling [S1, unofficial].
+## How it works
+**Inputs and Outputs**
+- Input: A mesh object (vertices and faces) and a target grid resolution (integer).
+- Output: A 3D boolean occupancy grid where `True` indicates a filled voxel.
+
+**Data Structures**
+- `occ`: A 3D NumPy array of shape `(resolution, resolution, resolution)` with boolean dtype.
+
+**Steps**
+1. **Validate Bounds**: Check if the mesh bounds are within the normalized range $[-0.5, 0.5]$. If any bound $b$ satisfies $|b| \ge 0.5$, raise a `ValueError` [S1, unofficial].
+2. **Surface Voxelization**: Compute the surface occupancy grid by voxelizing the mesh surface. Let this be $occ_{surf}$ [S1, unofficial].
+   - Implementation note: This typically involves mapping mesh vertices to grid indices and marking voxels intersected by triangles or using a surface voxelizer [S1, unofficial].
+3. **Fill Holes**: Apply binary morphological hole filling to $occ_{surf}$ to produce the final occupancy grid $occ_{final}$ [S1, unofficial].
+   - Formula: $occ_{final} = \text{binary\_fill\_holes}(occ_{surf})$ [S1, unofficial].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy import ndimage
+
+def voxelize_fill(mesh, resolution):
+    """
+    Voxelize a mesh by filling holes in the surface voxel representation.
+    
+    Args:
+        mesh: Object with vertices and faces.
+        resolution: Integer, number of voxels per axis.
+        
+    Returns:
+        occ: 3D boolean numpy array of shape (resolution, resolution, resolution).
+    """
+    # Step 1: Validate bounds
+    # Assuming mesh has a method or property to get bounds in [-0.5, 0.5]
+    bounds = get_mesh_bounds(mesh) # Returns min and max coordinates
+    if np.any(np.abs(bounds) >= 0.5):
+        raise ValueError("Bounds must be within [-0.5, 0.5]")
+
+    # Step 2: Compute surface occupancy
+    # This step depends on the specific surface voxelization implementation.
+    # We assume a function voxelize_surface exists that returns a boolean grid.
+    occ = voxelize_surface(mesh, resolution)
+
+    # Step 3: Fill holes
+    # binary_fill_holes fills holes in the binary image
+    occ = ndimage.morphology.binary_fill_holes(occ)
+
+    return occ
+```
+
+**Parameters**
+- `resolution`: The number of voxels along each axis. Typical values depend on the desired detail level [S1, unofficial].
+
+**Edge Cases and Pitfalls**
+- **Bounds Validation**: The method strictly requires bounds within $[-0.5, 0.5]$. Out-of-bounds meshes will cause errors [S1, unofficial].
+- **Hole Size**: Morphological filling may fill large holes that are not actually interior, potentially distorting the shape if the surface voxelization is noisy or sparse [S1, unofficial].
+- **Surface Voxelization Quality**: The accuracy of the final filled grid depends heavily on the quality of the initial surface voxelization [S1, unofficial].
+
+## Subtopics
+
+### [Morphological Dilation](3346-morphological-dilation.md)
+A morphological dilation operation that expands the foreground voxels in the image based on neighborhood connectivity. Used in the filling process to ensure connectivity and fill small gaps.
+
+## Operating characteristics
+- **Time Complexity**: Dominated by the surface voxelization step and the morphological operation. The morphological operation is generally efficient, $O(N)$ where $N$ is the number of voxels [S1, unofficial].
+- **Memory Complexity**: $O(R^3)$ for a grid of resolution $R$ [S1, unofficial].
+- **Strengths**: Simple to implement; effectively fills small holes and ensures watertightness if the surface is reasonably well-sampled [S1, unofficial].
+- **Limitations**: May overfill large holes or distort geometry if the surface voxelization is inaccurate; not suitable for complex internal structures that should remain empty [S1, unofficial].
+- **When to Use**: When a watertight, filled volume is required from a mesh surface, and the mesh is relatively simple or well-sampled [S1, unofficial].
+- **When Not to Use**: When preserving internal voids or complex internal geometry is critical [S1, unofficial].
+
+## Background
+The method is part of the differentiable volumetric rendering pipeline, specifically used for generating voxel grids from meshes for training neural networks [S1, unofficial]. It was introduced in the context of differentiable rendering to provide a differentiable or at least robust way to convert mesh representations to voxel representations [S1, unofficial].
+
+## Sources
+[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

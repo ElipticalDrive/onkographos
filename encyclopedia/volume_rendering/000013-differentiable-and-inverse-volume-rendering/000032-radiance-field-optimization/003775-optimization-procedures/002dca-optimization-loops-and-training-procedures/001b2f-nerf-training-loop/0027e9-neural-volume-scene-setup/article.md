@@ -1,0 +1,113 @@
+# Neural Volume Scene Setup
+
+Also called: Mitsuba Scene Construction for Neural Volumes
+
+## Overview
+Constructs a Mitsuba scene containing a volumetric cube and a custom neural radiance field integrator, initializing the density grid and spherical harmonics coefficients [S1, unofficial]. It differs from generic training setups by directly binding the neural network parameters to the scene graph's heterogeneous volume and integrator components [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `integrator_type`: String specifying the neural integrator variant. Supported values: `'prb_volpath'`, `'rf_prb'`, `'rf_prb_rt'`, `'rf_prb_drt'`, `'rf_eikonal'` [S1, unofficial].
+- `grid_res`: Integer base resolution for the density grid. Default: 16 [S1, unofficial].
+- `sh_degree`: Integer degree for spherical harmonics basis. Default: 2 [S1, unofficial].
+- `use_relu`: Boolean flag enabling ReLU activation in the network. Default: True [S1, unofficial].
+- `max_initial_density`: Float upper bound for density scaling. Default: 5.0 [S1, unofficial].
+
+**Outputs:**
+- A configured scene object ready for training [S1, unofficial].
+
+**Data Structures:**
+- **Density Grid**: A 3D tensor of shape `(grid_res, grid_res, grid_res)` storing the initial scattering coefficient $\sigma_t$, initialized to a constant value [S1, unofficial].
+- **Spherical Harmonics Coefficients**: Parameters associated with the radiance field, determined by `sh_degree` [S1, unofficial].
+
+**Steps:**
+1. If `integrator_type` is `'prb_volpath'`, create a scene dictionary containing a `'cube'` object with a `'heterogeneous'` interior, attaching a `'gridvolume'` for $\sigma_t$ initialized to 0.002 at resolution `grid_res^3` [S1, unofficial].
+2. If `integrator_type` is `'rf_prb'`, `'rf_prb_rt'`, `'rf_prb_drt'`, or `'rf_eikonal'`, instantiate the corresponding integrator class with `grid_res`, `sh_degree`, `use_relu`, and `initial_density` [S1, unofficial]. Calculate `initial_density` as $\text{initial\_density} = \text{max\_initial\_density} / \text{grid\_res}$ [S1, unofficial].
+3. Load the scene dictionary with the created integrator and a constant emitter [S1, unofficial].
+4. Return the constructed scene [S1, unofficial].
+
+**Pitfalls:**
+- The `'rf_eikonal'` integrator is not implemented in the codebase; the function falls back to `'RadianceFieldPRB'` with a warning comment [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def create_neural_volume_scene(
+    integrator_type: str,
+    grid_res: int = 16,
+    sh_degree: int = 2,
+    use_relu: bool = True,
+    max_initial_density: float = 5.0
+) -> dict:
+    """
+    Construct a scene for neural volume rendering.
+    
+    Args:
+        integrator_type: Type of neural integrator.
+        grid_res: Base resolution for density grid.
+        sh_degree: Degree of spherical harmonics.
+        use_relu: Whether to use ReLU activation.
+        max_initial_density: Upper bound for density scaling.
+        
+    Returns:
+        Configured scene dictionary.
+    """
+    initial_density = max_initial_density / grid_res
+    scene_dict = {}
+    
+    if integrator_type == 'prb_volpath':
+        scene_dict['cube'] = {
+            'type': 'cube',
+            'interior': {
+                'type': 'heterogeneous',
+                'gridvolume': {
+                    'type': 'gridvolume',
+                    'resolution': grid_res,
+                    'values': 0.002
+                }
+            }
+        }
+        integrator = None
+    elif integrator_type in ['rf_prb', 'rf_prb_rt', 'rf_prb_drt', 'rf_eikonal']:
+        if integrator_type == 'rf_eikonal':
+            print("Warning: rf_eikonal not implemented, falling back to RadianceFieldPRB")
+            integrator_class = RadianceFieldPRB
+        else:
+            integrator_class = RadianceFieldPRB
+        integrator = integrator_class(
+            grid_res=grid_res,
+            sh_degree=sh_degree,
+            use_relu=use_relu,
+            initial_density=initial_density
+        )
+        scene_dict['integrator'] = integrator
+        scene_dict['emitter'] = {'type': 'constant'}
+    else:
+        raise ValueError(f"Unsupported integrator_type: {integrator_type}")
+        
+    scene = load_scene(scene_dict)
+    return scene
+
+class RadianceFieldPRB:
+    def __init__(self, grid_res, sh_degree, use_relu, initial_density):
+        self.grid_res = grid_res
+        self.sh_degree = sh_degree
+        self.use_relu = use_relu
+        self.initial_density = initial_density
+
+def load_scene(scene_dict):
+    return scene_dict
+```
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Strengths**: Provides a standardized way to initialize differentiable volume rendering scenes with configurable neural network parameters [S1, unofficial].
+- **Limitations**: Limited to specific integrator types; `'rf_eikonal'` is not functional [S1, unofficial].
+
+## Background
+Used to set up training environments for neural radiance fields and volume rendering optimization loops [S1, unofficial].
+
+## Sources
+[S1] JackZhouSz/tlir, https://github.com/JackZhouSz/tlir, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,200 @@
+# Homogeneous Medium Sampling
+
+Also called: Homogeneous Volume Tracking, Tracking in Homogeneous Volumes
+
+## Overview
+Homogeneous Medium Sampling determines the distance to the next interaction (scattering or absorption) for a ray traversing a participating medium with uniform optical properties [S1, unofficial][S4, unofficial]. It solves the problem of efficiently simulating light transport in volumes like fog or smoke by probabilistically selecting interaction points based on the extinction coefficient, rather than integrating over the entire volume [S4, unofficial]. It differs from [Delta tracking](985-delta-tracking.md) by using the exact inverse CDF of the exponential distribution for constant density, which is more efficient than rejection sampling, and from [Heterogeneous Medium Sampling](6654-heterogeneous-medium-sampling.md) by assuming constant coefficients, allowing for closed-form solutions without numerical integration [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{o}$ is the origin, $\mathbf{d}$ is the direction, and $t_{\text{max}}$ is the maximum distance (often the distance to the nearest surface intersection or medium boundary).
+*   **Input:** Medium coefficients: absorption $\sigma_a$, scattering $\sigma_s$, and extinction $\sigma_t = \sigma_a + \sigma_s$ [S4, unofficial][S5, unofficial]. These are constant throughout the volume. For spectral rendering, these are vectors per wavelength channel [S6].
+*   **Input:** Random samples from a sampler.
+*   **Output:** A `MediumInteraction` object if a scattering event occurs within $t_{\text{max}}$, or a signal indicating the ray exits the medium without interaction (hitting the surface/boundary) [S6].
+*   **Output:** A throughput weight (Spectrum) to update the path contribution [S6].
+
+**Data Structures**
+*   **MediumInteraction:** Stores position $\mathbf{p}$, incoming direction $\mathbf{d}$, time, pointer to the medium, and a phase function instance (e.g., Henyey-Greenstein) [S6]. The `IsValid()` method checks if the phase function pointer is non-null [S6].
+*   **Spectrum:** A vector of floating-point values representing radiance/coefficients per spectral channel (typically 3 for RGB) [S6].
+
+**Steps**
+1.  **Select Spectral Channel (Spectral MIS):** If the medium has wavelength-dependent coefficients, uniformly select a channel index $c \in [0, N-1]$ where $N$ is the number of samples [S3, unofficial][S6].
+    *   $c = \lfloor N \cdot u_1 \rfloor$, clamped to $[0, N-1]$ [S3, unofficial][S6].
+    *   Probability of selecting channel $c$ is $p_{\text{wavelength}} = 1/N$ [S3, unofficial].
+2.  **Sample Free Path Length:** Generate a uniform random number $u_2 \in [0, 1]$ [S1, unofficial][S4, unofficial]. Compute the distance $d$ to the next interaction using the inverse CDF of the exponential distribution for the selected channel's extinction coefficient $\sigma_t[c]$ [S1, unofficial][S4, unofficial][S6]:
+    $$ d = -\frac{\ln(1 - u_2)}{\sigma_t[c]} $$
+    *   Note: $\ln(1-u_2)$ is equivalent to $\ln(u')$ where $u'$ is uniform in $(0,1]$. Using $1-u_2$ avoids $\ln(0)$ if $u_2=0$ [S2][S6].
+3.  **Convert to Ray Parameter:** Compute the distance along the ray $t$ [S5, unofficial][S6]:
+    $$ t = \min\left( \frac{d}{\|\mathbf{d}\|}, t_{\text{max}} \right) $$
+    *   If $\mathbf{d}$ is normalized, $\|\mathbf{d}\|=1$, so $t = \min(d, t_{\text{max}})$ [S6].
+4.  **Determine Interaction Type:**
+    *   If $t < t_{\text{max}} - \epsilon$ (where $\epsilon$ is a small epsilon to avoid self-intersection artifacts), a medium interaction occurs [S3, unofficial][S6].
+    *   Otherwise, the ray exits the medium or hits the surface before interacting [S2][S6].
+5.  **Handle Medium Interaction:**
+    *   Set position $\mathbf{p} = \mathbf{o} + t\mathbf{d}$ [S2].
+    *   Initialize `MediumInteraction` with $\mathbf{p}$, incoming direction $-\mathbf{d}$, and a phase function (e.g., Henyey-Greenstein with asymmetry parameter $g$) [S6].
+    *   Compute transmittance from origin to $\mathbf{p}$:
+        $$ T_r = e^{-\sigma_t \cdot d} $$
+        (Using the full vector $\sigma_t$ for spectral weighting, or scalar for monochromatic) [S6].
+    *   Determine if the event is scattering or absorption [S4, unofficial]:
+        *   Generate $u_3 \in [0, 1]$.
+        *   If $u_3 < \frac{\sigma_s}{\sigma_t}$, it is scattering. The ray continues.
+        *   Else, it is absorption. The ray terminates [S4, unofficial].
+    *   If scattering, sample a new outgoing direction $\omega$ using the phase function [S4, unofficial].
+6.  **Handle Surface/Boundary Exit:**
+    *   If no medium interaction occurred, the ray hits the surface at $t_{\text{max}}$ [S2].
+    *   The contribution is attenuated by the transmittance through the medium to the surface: $T_r = e^{-\sigma_t \cdot t_{\text{max}}}$ [S2].
+7.  **Compute PDF and Weight:**
+    *   The PDF for the sampled distance $t$ (given channel $c$) is:
+        $$ p_t(t) = \sigma_t[c] e^{-\sigma_t[c] \cdot d} $$
+    *   The marginal PDF for the channel selection is $1/N$ [S3, unofficial].
+    *   The combined PDF for a medium interaction is:
+        $$ p_{\text{med}} = \frac{1}{N} \sigma_t[c] e^{-\sigma_t[c] \cdot d} $$
+    *   The probability of hitting the surface (no medium interaction) is the complement of the integral of the medium PDF over $[0, t_{\text{max}}]$:
+        $$ p_{\text{surf}} = e^{-\sigma_t[c] \cdot d_{\text{max}}} $$
+        (where $d_{\text{max}} = t_{\text{max}} \|\mathbf{d}\|$) [S2][S6].
+    *   The returned throughput weight $\beta$ updates the path:
+        *   If medium interaction: $\beta = \frac{T_r \cdot \sigma_s}{p_{\text{med}}}$ [S6]. (Note: $\sigma_s$ accounts for the scattering coefficient in the source term, and the phase function PDF is handled separately during direction sampling or included in the estimator if using direct lighting sampling) [S6].
+        *   If surface hit: $\beta = \frac{T_r}{p_{\text{surf}}}$ [S6].
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def sample_homogeneous_medium(ray, sampler, sigma_a, sigma_s, g, spectrum_n_samples=3):
+    """
+    Samples a homogeneous medium for a given ray.
+    
+    Args:
+        ray: Ray object with origin 'o', direction 'd', and max distance 't_max'.
+        sampler: Sampler object with method 'get1d()' returning uniform [0,1).
+        sigma_a: Absorption coefficient (Spectrum or Vec3).
+        sigma_s: Scattering coefficient (Spectrum or Vec3).
+        g: Henyey-Greenstein asymmetry parameter.
+        spectrum_n_samples: Number of spectral channels.
+        
+    Returns:
+        tuple: (interaction_occurred: bool, medium_interaction: dict or None, throughput: Spectrum)
+    """
+    sigma_t = sigma_a + sigma_s
+    
+    # 1. Select spectral channel
+    u1 = sampler.get1d()
+    channel = int(u1 * spectrum_n_samples)
+    channel = max(0, min(channel, spectrum_n_samples - 1))
+    pmf_wavelength = 1.0 / spectrum_n_samples
+    
+    # 2. Sample free path length for selected channel
+    u2 = sampler.get1d()
+    # Avoid log(0)
+    u2 = max(u2, 1e-8) 
+    dist = -log(1.0 - u2) / sigma_t[channel]
+    
+    # 3. Convert to ray parameter t
+    # Assuming ray.d is normalized, ||d|| = 1. If not, divide by length.
+    ray_len = length(ray.d)
+    t = min(dist / ray_len, ray.t_max)
+    
+    # 4. Determine if medium interaction occurred
+    # Use a small epsilon to prevent self-intersection or precision issues
+    epsilon = 1e-4
+    sampled_medium = t < (ray.t_max - epsilon)
+    
+    # 5. Compute Transmittance
+    # Distance traveled in the medium
+    d_traveled = t * ray_len
+    # Use the full sigma_t for transmittance calculation if spectral, 
+    # but the PDF depends on the specific channel sampled.
+    # For spectral MIS, we compute transmittance per channel for the weight.
+    tr = exp(-sigma_t * d_traveled)
+    
+    # 6. Compute PDFs
+    # PDF of distance given channel
+    pdf_distance_channel = sigma_t[channel] * exp(-sigma_t[channel] * d_traveled)
+    
+    # Total PDF for medium interaction
+    pdf_med = pmf_wavelength * pdf_distance_channel
+    
+    # Probability of surface hit (complement of medium interaction CDF)
+    # P(t >= t_max) = exp(-sigma_t * t_max)
+    # For spectral, we use the sampled channel's sigma_t for the probability of 
+    # NOT interacting in that channel's distribution, but the actual transmittance 
+    # is weighted by all channels in the return value logic in some implementations.
+    # However, standard MIS for spectral homogeneous medium (S6) uses:
+    # density = sampledMedium ? (sigma_t * Tr) : Tr
+    # This implies the PDF for the surface term is just the transmittance 
+    # (probability of no interaction) averaged or weighted? 
+    # Let's follow S6 exactly:
+    
+    # S6 computes density as:
+    # Spectrum density = sampledMedium ? (sigma_t * Tr) : Tr
+    # Then pdf = mean(density)
+    
+    if sampled_medium:
+        density = sigma_t * tr
+    else:
+        density = tr
+        
+    pdf = sum(density) / spectrum_n_samples
+    
+    # 7. Compute Throughput Weight
+    if sampled_medium:
+        # Weight for medium scattering
+        # S6: return sampledMedium ? (Tr * sigma_s / pdf) : (Tr / pdf)
+        throughput = (tr * sigma_s) / pdf
+        # Initialize MediumInteraction
+        mi = {
+            'position': ray.o + ray.d * t,
+            'direction': -ray.d,
+            'phase_function': HenyeyGreenstein(g),
+            'medium': self
+        }
+        return True, mi, throughput
+    else:
+        # Weight for surface hit
+        throughput = tr / pdf
+        return False, None, throughput
+```
+
+**Parameters**
+*   $\sigma_a, \sigma_s$: Absorption and scattering coefficients. Typical values for fog: $\sigma_t \approx 0.1 - 1.0 \, m^{-1}$ [S4, unofficial].
+*   $g$: Henyey-Greenstein asymmetry parameter. $g=0$ is isotropic, $g>0$ forward scattering, $g<0$ backward scattering. Typical values: $0.7$ for smoke, $0.9$ for forward-scattering fog [S4, unofficial][S7, unofficial].
+*   $t_{\text{max}}$: Distance to the nearest surface or medium boundary.
+
+**Edge Cases and Pitfalls**
+*   **Precision:** If $u_2=0$, $\ln(1)$ is 0, leading to $d=0$. Clamp $u_2$ away from 0 or use $-\ln(u_2)$ with $u_2 \in (0,1]$ [S6].
+*   **Self-Intersection:** If the sampled distance is extremely small, the interaction point may intersect the previous surface due to floating-point errors. Use a small epsilon offset or check $t > \epsilon$ [S7, unofficial].
+*   **Spectral Consistency:** When using spectral MIS, the PDF must account for the channel selection probability ($1/N$) [S3, unofficial][S6].
+*   **Boundary Handling:** If the ray originates inside the medium, $t_{\text{max}}$ is the distance to the exit boundary. If outside, it is the distance to the entry boundary or the first surface [S2].
+
+## Subtopics
+
+### [Free-path sampling](1844-free-path-sampling.md)
+Generalizes the distance sampling to heterogeneous media by integrating the extinction coefficient. Homogeneous sampling is the base case where the integral simplifies to $\sigma_t t$.
+
+### [Majorant Iterator Ray Sampling](3075-majorant-iterator-ray-sampling.md)
+Handles heterogeneous media by iterating through segments with a majorant bound. Homogeneous sampling is a single-segment case with no iteration overhead.
+
+### [Heterogeneous Medium Sampling](6654-heterogeneous-medium-sampling.md)
+Handles spatially varying density. Homogeneous sampling is a special case where $\sigma_t$ is constant, allowing the use of the simple exponential inverse CDF instead of numerical integration.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per ray segment. It involves a few arithmetic operations and a logarithm [S4, unofficial].
+*   **Memory Complexity:** $O(1)$. No additional data structures are required beyond the ray and medium coefficients [S6].
+*   **Performance:** Extremely fast compared to delta tracking or heterogeneous sampling, as it avoids rejection loops or numerical integration [S4, unofficial].
+*   **Strengths:** Exact sampling for constant density; unbiased; efficient for simple volumes like fog or smoke [S4, unofficial][S7, unofficial].
+*   **Limitations:** Only applicable to homogeneous media. Cannot handle complex density variations without voxelization or approximation [S1, unofficial].
+*   **When to use:** Scenes with uniform participating media (e.g., fog, smoke, clouds with constant density) [S7, unofficial].
+*   **When not to use:** Heterogeneous media (e.g., smoke plumes with varying density) [S1, unofficial].
+
+## Background
+Homogeneous medium sampling is a fundamental technique in volumetric rendering, derived from the Beer-Lambert law and the theory of radiative transfer [S1, unofficial][S4, unofficial]. It was formalized in early computer graphics literature for simulating atmospheric effects like fog and smoke [S7, unofficial]. The method is widely used in path tracers and photon mapping algorithms for participating media [S4, unofficial][S5, unofficial]. It is implemented in standard rendering libraries and educational path tracers [S3, unofficial][S6].
+
+## Sources
+[S1] wangyuehi/VolumeSingleScattering, https://github.com/wangyuehi/VolumeSingleScattering, fetched 2026-10-26 (unofficial)
+[S2] PDF Volumetric Path Tracing - University of California, San Diego, https://cseweb.ucsd.edu/~tzli/cse272/wi2023/homework2.pdf, fetched 2026-10-30
+[S3] GitHub - yumcyaWiz/volpt: Volumetric path tracer written in C++, https://github.com/yumcyaWiz/volpt, fetched 2026-10-27 (unofficial)
+[S4] Volumetric Rendering using Path Tracing, https://zydak.github.io/Clouds/index.html, fetched 2026-10-27 (unofficial)
+[S5] PDF Volumetric Path Tracing, https://jugoodma.github.io/docs/740-paper.pdf, fetched 2026-10-27 (unofficial)
+[S6] Light Transport II: Volume Rendering / Sampling Volume Scattering, https://www.pbr-book.org/3ed-2018/Light_Transport_II_Volume_Rendering/Sampling_Volume_Scattering.html, fetched 2026-10-28
+[S7] Constant-density participating media (fog), https://github.com/adriendjn/mypbr/pull/4, fetched 2026-10-28 (unofficial)

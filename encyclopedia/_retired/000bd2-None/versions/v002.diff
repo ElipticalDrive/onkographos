@@ -1,0 +1,422 @@
+--- v001.md
++++ v002.md
+@@ -4,246 +4,211 @@
+ 
+ ## Overview
+-Hierarchical Sampling with Occupancy Grid is a two-stage volume rendering method that accelerates Neural Radiance Field (NeRF) training and inference by combining empty-space skipping with importance-based sample refinement [S1, unofficial]. It uses an occupancy grid to skip empty regions during coarse sampling, then employs hierarchical sampling to refine sample positions based on coarse weights, combining coarse and fine samples for the final render [S1, unofficial]. This approach distinguishes itself from siblings like [Distance Map Acceleration](972-distance-map-acceleration.md) by using a binary occupancy structure rather than distance fields, and from [Two-stage Ray Marching with Empty-Space Skipping](2985-two-stage-ray-marching-with-empty-space-skipping.md) by explicitly weighting fine samples against coarse transmittance rather than just skipping empty intervals [S1, unofficial].
++Hierarchical Sampling with Occupancy Grid is a two-stage volume rendering method that accelerates Neural Radiance Field (NeRF) training and inference by combining empty-space skipping with importance-based sample refinement [S1, unofficial]. It uses a precomputed occupancy grid to skip empty regions during coarse sampling, then uses hierarchical sampling to refine sample positions based on coarse weights, combining coarse and fine samples for the final render [S1, unofficial]. It sets itself apart from siblings like [Distance Map Acceleration](972-distance-map-acceleration.md) by using a binary occupancy flag rather than distance metrics for skipping, and from [Two-stage Ray Marching with Empty-Space Skipping](2985-two-stage-ray-marching-with-empty-space-skipping.md) by explicitly integrating the coarse and fine samples into a single sorted list for the final compositing pass rather than just using fine samples [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- **Inputs:** Ray origins `rays_o` (shape `[num_rays, 3]`), ray directions `rays_d` (shape `[num_rays, 3]`), near/far clipping planes `near` (float, default 2.0) and `far` (float, default 6.0) [S1, unofficial]. Optional `occupancy_grid` structure [S1, unofficial]. Coarse model `model_coarse` and fine model `model_fine` (typically the same network with shared weights or a merged state) [S1, unofficial].
+-- **Outputs:** Rendered RGB `rgb_fine`, depth `depth_fine`, accumulated opacity `acc_fine`, and fine weights `weights_fine` [S1, unofficial].
+-
+-**Data Structures:**
+-- **OccupancyGrid:**
+-  - `resolution` (int): Grid dimension $N \times N \times N$.
+-  - `aabb_min` (tensor `[3]`): Minimum corner of the axis-aligned bounding box.
+-  - `aabb_max` (tensor `[3]`): Maximum corner of the axis-aligned bounding box.
+-  - `density_threshold` (float): Threshold for marking a voxel as occupied.
+-  - `grid` (bool tensor `[resolution, resolution, resolution]`): Binary occupancy status of each voxel.
+-  - `voxel_size` (tensor `[3]`): Size of each voxel in world units [S1, unofficial].
+-
+-**Numbered Steps:**
+-
+-1. **Normalize Ray Directions:**
+-   Normalize input ray directions to unit length:
+-   $$ \mathbf{d}_{norm} = \frac{\mathbf{d}}{\|\mathbf{d}\|} $$
+-   [S1, unofficial]
+-
++### Inputs and Outputs
++**Inputs:**
++- Ray origins $O$ and normalized directions $D$ for each pixel.
++- Near ($near$) and far ($far$) clipping distances [S1, unofficial].
++- Occupancy Grid structure (optional) [S1, unofficial].
++- Neural network model (coarse and fine, or shared) [S1, unofficial].
++- Number of coarse samples ($N_c$) and fine samples ($N_f$) [S1, unofficial].
++
++**Outputs:**
++- Rendered RGB color, depth, accumulated alpha, and weights for each ray [S1, unofficial].
++
++### Data Structures
++**OccupancyGrid:**
++- `resolution`: Integer, the dimension of the cubic grid $d_{\text{occ}}$ [S1, unofficial].
++- `aabb_min`: Tensor of shape $[3]$, minimum bounds of the scene [S1, unofficial].
++- `aabb_max`: Tensor of shape $[3]$, maximum bounds of the scene [S1, unofficial].
++- `density_threshold`: Float, threshold for determining occupancy [S1, unofficial].
++- `grid`: Boolean tensor of shape $[resolution, resolution, resolution]$, storing occupancy flags [S1, unofficial].
++- `voxel_size`: Tensor of shape $[3]$, size of each voxel [S1, unofficial].
++
++### Steps
++1. **Normalize Ray Directions:** Normalize ray directions to unit length [S1, unofficial].
++   $$ D = \frac{D}{\|D\|} $$
+ 2. **Coarse Sampling:**
+-   If `occupancy_grid` is present, call `occupancy_grid.sample_occupied_regions(rays_o, rays_d, near, far, num_coarse_samples, randomize)` to generate coarse t-values `t_coarse` [S1, unofficial]. Otherwise, call `sample_stratified_batch(near, far, num_coarse_samples, randomize)` [S1, unofficial].
+-   - `num_coarse_samples` (int, default 32) [S1, unofficial].
+-   - `randomize` (bool): If true, add jitter to samples [S1, unofficial].
+-
+-3. **Render Coarse Samples:**
+-   Evaluate the coarse model at positions derived from `t_coarse` to get `rgb_coarse` and `density_coarse`. Compute transmittance and weights:
+-   - Compute distances between samples:
+-     $$ \text{dists}_i = t_{i+1} - t_i $$
+-     Append a large value ($10^{10}$) to the end of `dists` to handle the last segment [S1, unofficial].
+-   - Compute alpha:
+-     $$ \alpha_i = 1 - \exp(-\text{density}_i \cdot \text{dists}_i) $$
+-     [S1, unofficial]
+-   - Compute transmittance:
+-     $$ T_i = \prod_{j=0}^{i-1} (1 - \alpha_j + \epsilon) $$
+-     where $\epsilon = 10^{-10}$ for numerical stability, and $T_0 = 1$ [S1, unofficial].
+-   - Compute weights:
+-     $$ w_i = T_i \cdot \alpha_i $$
+-     [S1, unofficial]
+-   - Integrate RGB:
+-     $$ \text{rgb}_{integrated} = \sum_i w_i \cdot \text{rgb}_i $$
+-     [S1, unofficial]
+-   - Compute depth and accumulation:
+-     $$ \text{depth} = \sum_i w_i \cdot t_i $$
+-     $$ \text{acc} = \sum_i w_i $$
+-     [S1, unofficial]
+-   - Apply background:
+-     $$ \text{rgb}_{final} = \text{rgb}_{integrated} + (1 - \text{acc}) \cdot \text{bg\_color} $$
+-     where `bg_color` is white (1.0) if `white_background` is True, else 0.0 [S1, unofficial].
+-
+-4. **Compute Midpoints and Bins:**
+-   Calculate midpoints between coarse samples:
+-   $$ t_{mid, i} = \frac{t_{coarse, i} + t_{coarse, i+1}}{2} $$
+-   [S1, unofficial]
+-   Construct bins by concatenating the start of the ray, midpoints, and end of the ray:
+-   $$ \text{bins} = [t_{coarse, 0}, t_{mid, 0}, \dots, t_{mid, N-2}, t_{coarse, N-1}] $$
+-   [S1, unofficial]
+-
+-5. **Hierarchical Fine Sampling:**
+-   Sample fine t-values `t_fine` within the bins using the coarse weights `weights_coarse` (detached from the computation graph) as importance probabilities [S1, unofficial].
+-   - `num_fine_samples` (int, default 64) [S1, unofficial].
+-   - `deterministic` (bool): If true, use stratified sampling; otherwise, use random sampling [S1, unofficial].
+-
+-6. **Combine and Sort:**
+-   Concatenate coarse and fine t-values:
+-   $$ t_{combined} = \text{sort}([t_{coarse}, t_{fine}]) $$
+-   [S1, unofficial]
+-
+-7. **Render Combined Samples:**
+-   Evaluate the fine model at `t_combined` positions. Repeat the volume rendering integration steps (3) using `t_combined`, `rgb_fine`, and `density_fine` to produce the final output [S1, unofficial].
+-
+-**Pseudocode:**
+-
++   - If an Occupancy Grid is present, sample $N_c$ points along the ray, skipping empty regions defined by the grid. This involves checking the occupancy flag at the current position and jumping to the next occupied block boundary if empty [S1, unofficial].
++   - If no Occupancy Grid is present, use stratified sampling between $near$ and $far$ [S1, unofficial].
++   - Let the coarse sample positions be $t_{\text{coarse}} = [t_0, t_1, \dots, t_{N_c-1}]$ [S1, unofficial].
++3. **Coarse Rendering:**
++   - Evaluate the coarse model at positions $P_{\text{coarse}} = O + t_{\text{coarse}} \cdot D$ to get RGB and density [S1, unofficial].
++   - Compute distances between samples: $d_i = t_{i+1} - t_i$ for $i=0 \dots N_c-2$, and $d_{N_c-1} = far - t_{N_c-1}$ (or a large value if not defined) [S1, unofficial].
++   - Compute alpha: $\alpha_i = 1 - \exp(-\sigma_i \cdot d_i)$ [S1, unofficial].
++   - Compute transmittance: $T_i = \prod_{j=0}^{i-1} (1 - \alpha_j)$ with $T_0 = 1$ [S1, unofficial].
++   - Compute weights: $w_i = T_i \cdot \alpha_i$ [S1, unofficial].
++   - Compute coarse RGB: $C_{\text{coarse}} = \sum w_i C_i$ [S1, unofficial].
++4. **Hierarchical Sampling:**
++   - Compute midpoints of coarse intervals: $m_i = \frac{t_i + t_{i+1}}{2}$ for $i=0 \dots N_c-2$ [S1, unofficial].
++   - Construct bins: $bins = [t_0, m_0, m_1, \dots, m_{N_c-2}, t_{N_c-1}]$ [S1, unofficial].
++   - Sample $N_f$ points from these bins using the coarse weights $w$ as probabilities [S1, unofficial].
++   - Let the fine sample positions be $t_{\text{fine}}$ [S1, unofficial].
++5. **Combine and Sort:**
++   - Combine coarse and fine samples: $t_{\text{combined}} = \text{sort}(t_{\text{coarse}} \cup t_{\text{fine}})$ [S1, unofficial].
++6. **Fine Rendering:**
++   - Evaluate the fine model at positions $P_{\text{combined}} = O + t_{\text{combined}} \cdot D$ [S1, unofficial].
++   - Compute distances $d_i$ between sorted samples [S1, unofficial].
++   - Compute alpha, transmittance, and weights using the same formulas as step 3 [S1, unofficial].
++   - Compute final RGB: $C_{\text{final}} = \sum w_i C_i$ [S1, unofficial].
++   - If white background is assumed, add $(1 - \sum w_i)$ to the RGB [S1, unofficial].
++
++### Pseudocode
+ ```python
+ import torch
+-import torch.nn.functional as F
+-
+-def hierarchical_render_with_occupancy(
+-    rays_o, rays_d, near, far, 
+-    model, occupancy_grid, 
+-    num_coarse_samples=32, num_fine_samples=64,
+-    white_background=True, randomize=True
+-):
+-    """
+-    Renders a batch of rays using hierarchical sampling with occupancy grid skipping.
+-    
+-    Args:
+-        rays_o: Tensor [num_rays, 3], ray origins.
+-        rays_d: Tensor [num_rays, 3], ray directions.
+-        near: Float, near clipping plane.
+-        far: Float, far clipping plane.
+-        model: Neural network model returning (rgb, density).
+-        occupancy_grid: OccupancyGrid object with sample_occupied_regions method.
+-        num_coarse_samples: Int, number of coarse samples.
+-        num_fine_samples: Int, number of fine samples.
+-        white_background: Bool, if True, add white background to unoccupied space.
+-        randomize: Bool, if True, add jitter to samples.
++import math
++
++def hierarchical_sampling_with_occupancy_grid(rays_o, rays_d, near, far, 
++                                            num_coarse_samples, num_fine_samples,
++                                            occupancy_grid, model_coarse, model_fine):
++    """
++    rays_o: [num_rays, 3]
++    rays_d: [num_rays, 3]
++    near: float
++    far: float
++    num_coarse_samples: int
++    num_fine_samples: int
++    occupancy_grid: OccupancyGrid object or None
++    model_coarse: Coarse NeRF model
++    model_fine: Fine NeRF model
++    """
++    # 1. Normalize Ray Directions
++    rays_d = torch.nn.functional.normalize(rays_d, dim=-1)
++    
++    # 2. Coarse Sampling
++    if occupancy_grid is not None:
++        # Use occupancy grid to skip empty regions
++        # This is a simplified representation; actual implementation depends on grid structure
++        t_coarse = sample_occupied_regions(rays_o, rays_d, near, far, num_coarse_samples, occupancy_grid)
++    else:
++        # Stratified sampling
++        t_coarse = sample_stratified_batch(near, far, num_coarse_samples)
+         
+-    Returns:
+-        rgb_fine: Tensor [num_rays, 3]
+-        depth_fine: Tensor [num_rays]
+-        acc_fine: Tensor [num_rays]
+-    """
+-    num_rays = rays_o.shape[0]
+-    
+-    # Step 1: Normalize rays
+-    rays_d = F.normalize(rays_d, dim=-1)
+-    
+-    # Step 2: Coarse Sampling
+-    if occupancy_grid is not None:
+-        t_coarse = occupancy_grid.sample_occupied_regions(
+-            rays_o, rays_d, near, far, num_coarse_samples, randomize
+-        )
+-    else:
+-        # Fallback to stratified sampling if no grid
+-        t_coarse = sample_stratified_batch(near, far, num_coarse_samples, randomize)
+-        
+-    # Step 3: Render Coarse
++    # 3. Coarse Rendering
++    # Expand dimensions for batch processing
++    # rays_o: [num_rays, 1, 3], rays_d: [num_rays, 1, 3], t_coarse: [num_rays, num_coarse_samples]
+     positions_coarse = rays_o.unsqueeze(1) + t_coarse.unsqueeze(2) * rays_d.unsqueeze(1)
+-    positions_coarse_flat = positions_coarse.reshape(-1, 3)
+-    directions_coarse_flat = rays_d.unsqueeze(1).expand(-1, num_coarse_samples, -1).reshape(-1, 3)
+-    
+-    # Handle model input compatibility: if model expects directions but we only need density, pass zeros
+-    # This is a pitfall guard [G]
+-    rgb_coarse_flat, density_coarse_flat = model(positions_coarse_flat, directions_coarse_flat)
+-    
+-    rgb_coarse = rgb_coarse_flat.reshape(num_rays, num_coarse_samples, 3)
+-    density_coarse = density_coarse_flat.reshape(num_rays, num_coarse_samples)
++    positions_flat = positions_coarse.view(-1, 3)
++    directions_flat = rays_d.unsqueeze(1).expand(-1, num_coarse_samples, -1).view(-1, 3)
++    
++    rgb_coarse_flat, density_coarse_flat = model_coarse(positions_flat, directions_flat)
++    
++    # Reshape back
++    rgb_coarse = rgb_coarse_flat.view(rays_o.shape[0], num_coarse_samples, 3)
++    density_coarse = density_coarse_flat.view(rays_o.shape[0], num_coarse_samples)
+     
+     # Compute distances
+     dists = t_coarse[:, 1:] - t_coarse[:, :-1]
+-    dists = torch.cat([dists, torch.full((num_rays, 1), 1e10, device=dists.device)], dim=-1)
+-    
+-    # Compute Alpha
+-    alpha_coarse = 1.0 - torch.exp(-density_coarse * dists)
+-    
+-    # Compute Transmittance
+-    # Add epsilon for stability [S1, unofficial]
+-    transmittance_coarse = torch.cumprod(
+-        torch.cat([torch.ones((num_rays, 1), device=alpha_coarse.device), 1.0 - alpha_coarse + 1e-10], dim=-1), 
+-        dim=-1
+-    )[:, :-1]
+-    
+-    # Compute Weights
+-    weights_coarse = transmittance_coarse * alpha_coarse
+-    
+-    # Integrate RGB
+-    rgb_integrated_coarse = torch.sum(weights_coarse.unsqueeze(-1) * rgb_coarse, dim=1)
+-    
+-    # Step 4: Compute Bins
++    dists = torch.cat([dists, torch.full((dists.shape[0], 1), 1e10, device=dists.device)], dim=-1)
++    
++    # Compute alpha, transmittance, weights
++    alpha = 1.0 - torch.exp(-density_coarse * dists)
++    # Add small epsilon for numerical stability
++    transmittance = torch.cumprod(torch.cat([torch.ones((dists.shape[0], 1), device=alpha.device), 1.0 - alpha + 1e-10], dim=-1), dim=-1)[:, :-1]
++    weights = transmittance * alpha
++    
++    # 4. Hierarchical Sampling
++    # Compute midpoints
+     t_mid = 0.5 * (t_coarse[:, :-1] + t_coarse[:, 1:])
++    # Construct bins
+     bins = torch.cat([t_coarse[:, :1], t_mid, t_coarse[:, -1:]], dim=-1)
+     
+-    # Step 5: Hierarchical Fine Sampling
+-    # Sample from bins weighted by coarse weights
+-    t_fine = sample_hierarchical(bins, weights=weights_coarse.detach(), num_fine_samples, deterministic=not randomize)
+-    
+-    # Step 6: Combine and Sort
++    # Sample fine t-values based on weights
++    t_fine = sample_hierarchical(bins, weights=weights.detach(), num_fine_samples)
++    
++    # 5. Combine and Sort
+     t_combined = torch.cat([t_coarse, t_fine], dim=-1)
+     t_combined, _ = torch.sort(t_combined, dim=-1)
+     
+-    # Step 7: Render Combined
++    # 6. Fine Rendering
+     positions_combined = rays_o.unsqueeze(1) + t_combined.unsqueeze(2) * rays_d.unsqueeze(1)
+-    positions_combined_flat = positions_combined.reshape(-1, 3)
+-    directions_combined_flat = rays_d.unsqueeze(1).expand(-1, t_combined.shape[1], -1).reshape(-1, 3)
+-    
+-    rgb_combined_flat, density_combined_flat = model(positions_combined_flat, directions_combined_flat)
+-    
+-    rgb_combined = rgb_combined_flat.reshape(num_rays, t_combined.shape[1], 3)
+-    density_combined = density_combined_flat.reshape(num_rays, t_combined.shape[1])
+-    
++    positions_flat_combined = positions_combined.view(-1, 3)
++    directions_flat_combined = rays_d.unsqueeze(1).expand(-1, t_combined.shape[1], -1).view(-1, 3)
++    
++    rgb_fine_flat, density_fine_flat = model_fine(positions_flat_combined, directions_flat_combined)
++    
++    rgb_fine = rgb_fine_flat.view(rays_o.shape[0], t_combined.shape[1], 3)
++    density_fine = density_fine_flat.view(rays_o.shape[0], t_combined.shape[1])
++    
++    # Compute distances for combined samples
+     dists_combined = t_combined[:, 1:] - t_combined[:, :-1]
+-    dists_combined = torch.cat([dists_combined, torch.full((num_rays, 1), 1e10, device=dists_combined.device)], dim=-1)
+-    
+-    alpha_combined = 1.0 - torch.exp(-density_combined * dists_combined)
+-    transmittance_combined = torch.cumprod(
+-        torch.cat([torch.ones((num_rays, 1), device=alpha_combined.device), 1.0 - alpha_combined + 1e-10], dim=-1), 
+-        dim=-1
+-    )[:, :-1]
+-    
++    dists_combined = torch.cat([dists_combined, torch.full((dists_combined.shape[0], 1), 1e10, device=dists_combined.device)], dim=-1)
++    
++    alpha_combined = 1.0 - torch.exp(-density_fine * dists_combined)
++    transmittance_combined = torch.cumprod(torch.cat([torch.ones((dists_combined.shape[0], 1), device=alpha_combined.device), 1.0 - alpha_combined + 1e-10], dim=-1), dim=-1)[:, :-1]
+     weights_combined = transmittance_combined * alpha_combined
+     
+-    rgb_integrated = torch.sum(weights_combined.unsqueeze(-1) * rgb_combined, dim=1)
+-    depth = torch.sum(weights_combined * t_combined, dim=-1)
++    # Compute final RGB
++    rgb_integrated = torch.sum(weights_combined.unsqueeze(-1) * rgb_fine, dim=1)
+     acc = torch.sum(weights_combined, dim=-1)
+     
+-    # Background
+-    if white_background:
+-        rgb_final = rgb_integrated + (1.0 - acc.unsqueeze(-1))
+-    else:
+-        rgb_final = rgb_integrated
+-        
+-    return rgb_final, depth, acc
+-
+-def sample_stratified_batch(near, far, num_samples, randomize):
+-    """Generates stratified samples between near and far."""
+-    # Not given in the sources. Standard implementation:
+-    # t = near + (far - near) * (torch.rand(num_rays, num_samples) + torch.arange(num_samples)) / num_samples
+-    # However, since the source doesn't provide this, we leave it as a comment.
+-    raise NotImplementedError("sample_stratified_batch implementation not provided in source [S1, unofficial]")
+-
+-def sample_hierarchical(bins, weights, num_samples, deterministic):
+-    """Samples t-values from bins based on weights."""
+-    # Not given in the sources. Standard implementation involves inverse CDF sampling.
+-    # Since the source doesn't provide this, we leave it as a comment.
+-    raise NotImplementedError("sample_hierarchical implementation not provided in source [S1, unofficial]")
++    # White background assumption
++    rgb_final = rgb_integrated + (1.0 - acc.unsqueeze(-1))
++    
++    return rgb_final, acc
++
++def sample_occupied_regions(rays_o, rays_d, near, far, num_samples, occupancy_grid):
++    """
++    Simplified placeholder for occupancy grid sampling.
++    In practice, this involves ray marching through the occupancy grid,
++    skipping empty blocks and sampling within occupied ones.
++    """
++    # This function would use the occupancy_grid.grid, aabb_min, aabb_max, etc.
++    # to determine which parts of the ray are empty and skip them.
++    # For the purpose of this article, we assume it returns num_samples points
++    # within the occupied regions of the ray.
++    pass
++
++def sample_stratified_batch(near, far, num_samples):
++    """
++    Stratified sampling between near and far.
++    """
++    # Generate random samples within each interval
++    t = torch.linspace(near, far, num_samples + 1)
++    t_rand = torch.rand_like(t)
++    t_samples = t[:-1] + (t[1:] - t[:-1]) * t_rand
++    return t_samples
++
++def sample_hierarchical(bins, weights, num_samples):
++    """
++    Sample from bins based on weights.
++    """
++    # This function would use the weights to sample points from the bins.
++    # A common approach is to use inverse CDF sampling.
++    pass
+ ```
+ 
+-**Parameters:**
+-- `near`: Float, default 2.0. Near clipping plane distance [S1, unofficial].
+-- `far`: Float, default 6.0. Far clipping plane distance [S1, unofficial].
+-- `num_coarse_samples`: Int, default 32. Number of coarse samples per ray [S1, unofficial].
+-- `num_fine_samples`: Int, default 64. Number of fine samples per ray [S1, unofficial].
+-- `occupancy_grid`: Optional `OccupancyGrid` object. Used to skip empty regions [S1, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-- **Division by Zero in Ray-AABB Intersection:** When computing ray-AABB intersections for the occupancy grid, add $10^{-8}$ to ray directions to prevent division by zero [S1, unofficial].
+-- **Numerical Stability in Transmittance:** Add $10^{-10}$ to $(1 - \alpha)$ before computing `cumprod` to prevent NaNs when $\alpha \approx 1$ [S1, unofficial].
+-- **Model Input Compatibility:** If the model requires direction inputs but only density is needed for the coarse stage (or vice versa), dummy zero directions may be passed to satisfy input requirements [S1, unofficial].
++### Parameters
++- `near`: Float, default 2.0. The near clipping plane distance for ray sampling [S1, unofficial].
++- `far`: Float, default 6.0. The far clipping plane distance for ray sampling [S1, unofficial].
++- `num_coarse_samples`: Int, default 32. Number of samples taken along each ray in the coarse stage [S1, unofficial].
++- `num_fine_samples`: Int, default 64. Number of samples taken along each ray in the fine stage [S1, unofficial].
++- `occupancy_grid`: Optional OccupancyGrid. An optional grid structure used to skip empty regions during sampling [S1, unofficial].
++
++### Edge Cases and Pitfalls
++- **Division by Zero in Ray-AABB Intersection:** Use `rays_d + 1e-8` to prevent division by zero when computing ray-AABB intersections [S1, unofficial].
++- **Numerical Stability in Transmittance:** Add `1e-10` to `(1 - alpha)` before `cumprod` to ensure numerical stability [S1, unofficial].
++- **Model Input Compatibility:** If the model lacks a `forward_with_density_only` method, dummy zero directions are passed to satisfy input requirements [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Distance Map Acceleration](972-distance-map-acceleration.md)
+-Uses distance fields to skip empty space. Choose when smooth distance information is available and beneficial for early ray termination.
++Uses distance maps to skip empty space. Choose when you need more precise empty-space skipping than binary occupancy allows.
+ 
+ ### [Two-stage Ray Marching with Empty-Space Skipping](2985-two-stage-ray-marching-with-empty-space-skipping.md)
+-Skips empty intervals but does not use hierarchical importance sampling. Choose when simplicity is preferred over adaptive refinement.
++Uses a two-stage approach but may not combine coarse and fine samples in the same way. Choose when you want a simpler two-stage pipeline without hierarchical refinement.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_{rays} \cdot (N_{coarse} + N_{fine}))$ per frame, where $N_{coarse}$ and $N_{fine}$ are the number of samples. The occupancy grid lookup is $O(1)$ per ray if implemented with hash maps or efficient 3D indexing.
+-- **Memory Complexity:** $O(N_{grid}^3)$ for the occupancy grid, where $N_{grid}$ is the resolution. The grid is typically sparse, but the boolean tensor is dense.
+-- **Measured Performance:** On a single GPU, FLASH achieves training times of 10-15 minutes for 5000 iterations on synthetic datasets (e.g., Lego), compared to 5+ hours for vanilla NeRF [S1, unofficial]. On CPU, it takes ~25 minutes [S1, unofficial].
+-- **Strengths:** Significantly faster training and inference than vanilla NeRF. Effective empty-space skipping reduces the number of samples needed. Hierarchical sampling improves image quality by concentrating samples in high-weight regions.
+-- **Limitations:** Requires an occupancy grid to be pre-computed or maintained. Performance depends on the quality of the occupancy grid. The method is specific to NeRF-like architectures and may not generalize to other volume rendering methods without modification.
+-- **When to Use:** When training NeRFs on limited hardware or time budgets, and when the scene has significant empty space.
+-- **When Not to Use:** When the scene is fully dense (no empty space to skip) or when the overhead of maintaining the occupancy grid outweighs the benefits.
++- **Time Complexity:** The coarse stage is $O(N_c)$ and the fine stage is $O(N_c + N_f)$. The occupancy grid lookup is $O(1)$ per sample. Overall, it is faster than uniform sampling for sparse scenes due to empty-space skipping.
++- **Memory Complexity:** The occupancy grid requires $O(d_{\text{occ}}^3)$ memory, where $d_{\text{occ}}$ is the resolution of the grid. The model memory is independent of the sampling strategy.
++- **Measured Performance:** FLASH achieves training times of 10-15 minutes on a single GPU for 5000 iterations, compared to 5 hours 12 minutes for vanilla NeRF [S1, unofficial].
++- **Strengths:** Fast training and inference, effective empty-space skipping, improved sample distribution via hierarchical sampling.
++- **Limitations:** Requires precomputation of the occupancy grid, which can be memory-intensive for large scenes. The quality of the occupancy grid affects the performance of the empty-space skipping.
++- **When to Use:** When training NeRFs on large, sparse scenes where empty-space skipping provides significant speedups.
++- **When Not to Use:** When memory is constrained and the occupancy grid cannot fit, or when the scene is dense and empty-space skipping provides little benefit.
+ 
+ ## Background
+-Hierarchical Sampling with Occupancy Grid is an experimental implementation of Instant-NGP for Neural Radiance Fields, presented in the FLASH project [S1, unofficial]. It was developed to enable high-performance NeRF training in 10-15 minutes on a single GPU, leveraging multi-resolution hash encoding and occupancy grids for acceleration [S1, unofficial]. The method builds on the principles of Instant-NGP, which introduced hash encoding for fast feature lookup, and combines it with hierarchical sampling and occupancy grids for efficient ray marching [S1, unofficial].
++Hierarchical Sampling with Occupancy Grid is an experimental implementation of Instant-NGP for Neural Radiance Fields (NeRF), known as FLASH [S1, unofficial]. It was developed to enable fast learning for accurate scene hashing, allowing 3D scenes to be trained from 2D images in 10-15 minutes on a single GPU [S1, unofficial]. The method combines techniques from Instant-NGP, such as multi-resolution hash encoding, with hierarchical sampling and occupancy grid-based empty-space skipping to achieve significant speedups over vanilla NeRF [S1, unofficial].
+ 
+ ## Sources

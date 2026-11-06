@@ -3,168 +3,164 @@
 Also called: Cloud Density Field Generation, Density Sampling and Weather
 
 ## Overview
-Procedural Volume Cloud Modeling constructs the volumetric density field of clouds by evaluating mathematical noise functions and weather parameters at arbitrary world-space coordinates [S1, S2, unofficial]. It solves the problem of generating realistic, infinite-extent cloud geometry without storing massive pre-baked 3D textures, allowing for dynamic control over cloud type, coverage, and erosion via 2D maps [S2, unofficial]. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by focusing on the *generation* of the density value rather than the integration of light through it, and from [Atmospheric Height Gradient](4813-atmospheric-height-gradient.md) by incorporating specific cloud-type logic and erosion mechanics beyond simple vertical falloff [S1, S2, unofficial].
+Procedural Volume Cloud Modeling constructs a volumetric density field for clouds by evaluating analytic functions and sampling noise textures at arbitrary world-space coordinates, rather than relying on pre-baked voxel grids or physical simulations [S1, S2, unofficial]. It solves the problem of generating realistic, large-scale cloud formations with varying types (e.g., cumulus, cirrus) and dynamic details (erosion, flow) efficiently on GPU hardware [S2, unofficial]. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by focusing on the *generation* of the density values themselves rather than the integration of light through them, and from [Atmospheric Height Gradient](4813-atmospheric-height-gradient.md) by incorporating multi-channel weather maps and specific cloud-type logic rather than a simple vertical falloff [S1, S2, unofficial].
 
 ## How it works
-**Inputs:**
-*   World-space position $P_{world} = (x, y, z)$.
-*   Time $t$ for animation.
-*   Wind vector $\vec{W} = (w_x, w_y, w_z)$.
-*   2D Weather Map texture $T_{weather}$ (RGBA).
-*   3D Shape Noise texture $T_{shape}$ (Perlin-Worley).
-*   3D Detail Noise texture $T_{detail}$ (Perlin).
-*   Cloud LUT texture $T_{lut}$ (RGB).
+The method maps a 3D world-space position to a scalar density value (and optionally color/occlusion) using a combination of height-based attenuation, weather map lookups, and fractal noise sampling.
 
-**Outputs:**
-*   Scalar cloud density $\rho \in [0, 1]$.
+### Inputs and Outputs
+*   **Inputs**:
+    *   `P`: World-space position $(x, y, z)$ [S1, S2, unofficial].
+    *   `t`: Simulation time [S1, S2, unofficial].
+    *   `Wind`: 3D wind vector $(u, v, w)$ for advection [S1, S2, unofficial].
+    *   `CloudMap`: 2D texture storing coverage, type, erosion, and wetness [S2, unofficial].
+    *   `ShapeNoise`: Tileable 3D texture containing fractal Perlin-Worley noise [S2, unofficial].
+    *   `DetailNoise`: Tileable 3D texture containing fractal Perlin noise [S2, unofficial].
+    *   `CloudLut`: 2D texture mapping cloud type/height to density, erosion, and ambient occlusion [S2, unofficial].
+*   **Outputs**:
+    *   `Density`: Scalar cloud density value [S1, S2, unofficial].
+    *   `Color`: Optional RGB color derived from density and occlusion [S2, unofficial].
 
-**Data Structures:**
-1.  **Weather Map ($T_{weather}$):** A 2D texture where channels store:
-    *   $R$: Cloud Coverage (0.0–1.0).
-    *   $G$: Cloud Type (0.0–1.0).
-    *   $B$: Cloud Erosion (0.0–1.0).
-    *   $A$: Cloud Wetness (0.0–1.0) [S2, unofficial].
-2.  **Cloud LUT ($T_{lut}$):** A 1D or 2D texture mapping Cloud Type and Height to:
-    *   $R$: Density multiplier.
-    *   $G$: Erosion multiplier.
-    *   $B$: Ambient Occlusion [S2, unofficial].
+### Data Structures
+1.  **CloudMap** (2D Texture, RGBA):
+    *   `R`: Cloud Coverage (0.0–1.0) [S2, unofficial].
+    *   `G`: Cloud Type (0.0–1.0). Mapped to layers: 0–0.125 Cirrus, 0.125–0.25 Cirrus+Cumulus, 0.25–0.5 Cumulus, 0.5–1.0 Cumulonimbus [S2, unofficial].
+    *   `B`: Cloud Erosion (0.0–1.0) [S2, unofficial].
+    *   `A`: Cloud Wetness (0.0–1.0) [S2, unofficial].
+2.  **CloudLut** (2D Texture, RGB):
+    *   `R`: Density [S2, unofficial].
+    *   `G`: Erosion [S2, unofficial].
+    *   `B`: Ambient Occlusion [S2, unofficial].
+3.  **Noise Textures**:
+    *   Must be tileable to support large-scale tiling across kilometers [S2, unofficial].
 
-**Steps:**
+### Algorithm Steps
+1.  **Sample Weather Map**:
+    *   Project `P` to 2D (typically XZ plane) to get UV coordinates `UV`.
+    *   Sample `CloudMap` at `UV` to get `Coverage`, `CloudType`, `ErosionMap`, and `Wetness` [S1, S2, unofficial].
+2.  **Height Gradient Attenuation**:
+    *   Apply a vertical remap function to `P.y` to enforce flat cloud bases and rounded tops. This attenuates density based on altitude [S1, unofficial].
+    *   *Note*: For complex types like Cumulonimbus, adjust noise coverage and erosion based on height: high altitude has low coverage and high erosion; low altitude has high coverage and low erosion [S2, unofficial].
+3.  **Base Noise Sampling (Shape)**:
+    *   Calculate shape noise coordinates `UV_shape`.
+    *   Apply wind advection: `UV_shape += Wind.xz * t * Scale` [S1, S2, unofficial].
+    *   Sample `ShapeNoise` (Fractal Perlin-Worley) at `UV_shape` to get `BaseShape` [S1, S2, unofficial].
+    *   Scale `BaseShape` by `Coverage` from the Weather Map [S2, unofficial].
+4.  **Detail Noise Sampling (Erosion)**:
+    *   Calculate detail noise coordinates `UV_detail`.
+    *   Apply wind advection: `UV_detail += Wind.xz * t * DetailScale` [S1, S2, unofficial].
+    *   Sample `DetailNoise` (Fractal Perlin) at `UV_detail` to get `Detail` [S1, S2, unofficial].
+    *   Combine `Detail` with `ErosionMap` from Weather Map and `Erosion` from `CloudLut` (G channel) to erode the edges of `BaseShape` [S1, S2, unofficial].
+    *   *Pitfall*: The `CloudLut` G channel (Erosion) affects both detail noise and shape noise calculations [S2, unofficial].
+5.  **Final Density Calculation**:
+    *   Combine the eroded shape noise with height attenuation and `CloudLut` density (R channel) based on `CloudType` [S1, S2, unofficial].
+    *   Result is the final `Density` [S1, S2, unofficial].
 
-1.  **Sample Weather Map:**
-    Sample $T_{weather}$ at the projected 2D horizontal position of $P_{world}$ (typically $x, z$ coordinates, possibly scaled by a world size factor). Let the result be $C_{weather} = (c_{cov}, c_{type}, c_{ero}, c_{wet})$.
-
-2.  **Determine Cloud Type:**
-    Map $c_{type}$ to a specific cloud layer using the following ranges [S2, unofficial]:
-    *   $[0.0, 0.125)$: Cirrus (High-level).
-    *   $[0.125, 0.25)$: Cirrus + Cumulus (Multi-layer).
-    *   $[0.25, 0.5)$: Cumulus.
-    *   $[0.5, 1.0]$: Cumulonimbus.
-
-3.  **Apply Height Gradient:**
-    Calculate a vertical attenuation factor $H_{grad}$ based on the height $y$ of $P_{world}$ relative to the cloud layer's base and top. This enforces flat bases and rounded tops [S1, unofficial].
-    $$ H_{grad} = \text{RemapVertical}(y, y_{base}, y_{top}) $$
-    *Note: Specific remap function is not given in sources [G: Typically a smoothstep or polynomial curve that is 0 below base, rises to 1, and falls to 0 above top.]*
-
-4.  **Sample Base Shape Noise:**
-    Compute the sampling coordinate for the shape noise. This coordinate must tile across kilometers [S1, unofficial].
-    $$ P_{shape} = P_{world} \cdot S_{shape} + \vec{W}_{shape} \cdot t $$
-    where $S_{shape}$ is a scaling factor for tiling.
-    Sample the Perlin-Worley texture:
-    $$ N_{shape} = \text{SamplePerlinWorley}(T_{shape}, P_{shape}) $$
-
-5.  **Sample Detail Noise:**
-    Compute the sampling coordinate for detail noise. This is scaled up by frequency to erode edges [S1, unofficial].
-    $$ P_{detail} = P_{world} \cdot S_{detail} + \vec{W}_{detail} \cdot t $$
-    Sample the Perlin texture:
-    $$ N_{detail} = \text{SamplePerlin}(T_{detail}, P_{detail}) $$
-
-6.  **Calculate Erosion:**
-    The erosion factor $E$ is influenced by the Weather Map's erosion channel, the Cloud LUT's erosion channel (G), and the detail noise [S2, unofficial].
-    $$ E = \text{Lerp}(1.0, N_{detail}, c_{ero} \cdot \text{SampleLUT}(T_{lut}, c_{type}, y).G) $$
-    *Note: Sources indicate Cloud LUT G channel affects both detail and shape noise calculations [S2, unofficial].*
-
-7.  **Combine Density:**
-    The final density $\rho$ is a product of coverage, height gradient, shape noise, and erosion.
-    $$ \rho = c_{cov} \cdot H_{grad} \cdot N_{shape} \cdot (1.0 - E) $$
-    *Note: For Cumulonimbus (high complexity), adjust coverage and erosion based on height: high altitude has low coverage and high erosion; low altitude has high coverage and low erosion [S2, unofficial].*
-
-8.  **Output:**
-    Return $\rho$. If a color is required, replicate $\rho$ to RGB or modulate by wetness [S1, S2, unofficial].
-
-**Pseudocode:**
-
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def SampleCloudDensity(P_world, time, wind, T_weather, T_shape, T_detail, T_lut):
-    # 1. Project to 2D and sample weather map
-    # Assuming P_world.xz are the horizontal coordinates
-    uv_weather = P_world.xz * WORLD_SCALE
-    c_cov, c_type, c_ero, c_wet = T_weather.sample(uv_weather)
+def SampleCloudDensity(P: Vec3, t: float, Wind: Vec3, 
+                       CloudMap: Texture2D, ShapeNoise: Texture3D, 
+                       DetailNoise: Texture3D, CloudLut: Texture2D) -> float:
+    # 1. Sample Weather Map (Project P to XZ plane)
+    UV = Vec2(P.x, P.z)
+    weather = CloudMap.Sample(UV)
+    coverage = weather.R
+    cloud_type = weather.G
+    erosion_map = weather.B
     
-    # 2. Determine cloud type index for LUT lookup
-    # Map c_type to a representative value or use directly if LUT is 2D
-    cloud_type_val = c_type
+    # 2. Height Gradient
+    # Enforce flat base and rounded top. 
+    # Specific logic for Cumulonimbus (type > 0.5): 
+    # High altitude -> low coverage, high erosion.
+    # Low altitude -> high coverage, low erosion.
+    height_factor = ApplyHeightGradient(P.y, cloud_type)
     
-    # 3. Height Gradient
-    # Enforce flat base and rounded top
-    h_grad = remap_vertical(P_world.y, CLOUD_BASE_Y, CLOUD_TOP_Y)
+    # 3. Base Noise (Shape)
+    # Low frequency, tiling across kilometers
+    shape_scale = 0.001 # Example scale
+    shape_uv = P.xz * shape_scale
+    shape_uv += Wind.xz * t * 0.1 # Global wind advection
     
-    # 4. Base Shape Noise (Perlin-Worley)
-    # Tiling across kilometers
-    P_shape = P_world * SHAPE_SCALE + wind * time
-    n_shape = T_shape.sample_perlin_worley(P_shape)
+    # Fractal Perlin-Worley noise
+    base_shape = SampleFractalPerlinWorley(ShapeNoise, shape_uv)
     
-    # 5. Detail Noise (Perlin)
-    # Scaled up by frequency for erosion
-    P_detail = P_world * DETAIL_SCALE + wind * time
-    n_detail = T_detail.sample_perlin(P_detail)
+    # Apply coverage and cloud type influence
+    # CloudLut R channel provides base density for the type
+    lut_density = CloudLut.Sample(Vec2(cloud_type, 0.0)).R
+    shape_density = base_shape * coverage * lut_density
     
-    # 6. LUT Lookup for Density and Erosion multipliers
-    # LUT G channel affects both detail and shape noise [S2, unofficial]
-    lut_r, lut_g, lut_b = T_lut.sample(cloud_type_val, P_world.y)
+    # 4. Detail Noise (Erosion)
+    # Higher frequency, erodes edges
+    detail_scale = 0.01 # Example scale
+    detail_uv = P.xz * detail_scale
+    detail_uv += Wind.xz * t * 0.2 # Faster wind for details
     
-    # 7. Calculate Erosion
-    # Combine weather erosion, LUT erosion, and detail noise
-    erosion_factor = lerp(1.0, n_detail, c_ero * lut_g)
+    # Fractal Perlin noise
+    detail = SampleFractalPerlin(DetailNoise, detail_uv)
     
-    # 8. Special handling for Cumulonimbus (complex shapes)
-    # High altitude: low coverage, high erosion
-    # Low altitude: high coverage, low erosion
-    if cloud_type_val > 0.5:
-        height_factor = smoothstep(CLOUD_BASE_Y, CLOUD_TOP_Y, P_world.y)
-        c_cov = lerp(c_cov * 2.0, c_cov * 0.5, height_factor)
-        erosion_factor = lerp(erosion_factor * 0.5, erosion_factor * 2.0, height_factor)
-        
-    # 9. Final Density
-    density = c_cov * h_grad * n_shape * (1.0 - erosion_factor)
+    # Combine erosion sources
+    # CloudLut G channel affects both shape and detail [S2, unofficial]
+    lut_erosion = CloudLut.Sample(Vec2(cloud_type, 0.0)).G
+    total_erosion = max(erosion_map, lut_erosion)
     
-    return density
+    # Erode the shape
+    eroded_shape = shape_density * (1.0 - detail * total_erosion)
+    
+    # 5. Final Density
+    final_density = eroded_shape * height_factor
+    
+    return max(0.0, final_density)
+
+def ApplyHeightGradient(y: float, cloud_type: float) -> float:
+    # Simplified height remap
+    # Flat base at y=0, rounded top
+    if y < 0.0:
+        return 0.0
+    # Example Gaussian-like falloff for top
+    return exp(-pow(y, 2))
 ```
 
-**Parameters:**
-*   `WORLD_SCALE`: Scaling factor for weather map UVs. Not given in the sources.
-*   `SHAPE_SCALE`: Scaling factor for base noise tiling. Not given in the sources.
-*   `DETAIL_SCALE`: Scaling factor for detail noise, typically higher than `SHAPE_SCALE`. Not given in the sources.
-*   `CLOUD_BASE_Y`, `CLOUD_TOP_Y`: Vertical bounds of the cloud layer. Not given in the sources.
+### Parameters
+*   **Noise Scale**: Low frequency for shape (kilometer scale), high frequency for detail [S1, S2, unofficial].
+*   **Wind Speed**: Controls advection rate for shape and detail noise [S1, S2, unofficial].
+*   **Tileable**: Noise textures must be tileable to avoid seams at boundaries [S2, unofficial].
 
-**Pitfalls:**
-*   **Noise Tiling:** Noise textures must be tileable to avoid seams at kilometer scales [S2, unofficial].
-*   **LUT Channel Usage:** The Cloud LUT G channel (Erosion) affects both detail noise and shape noise calculations, which can lead to unexpected density artifacts if not carefully tuned [S2, unofficial].
-*   **Precision:** High-frequency erosion on large scales can cause aliasing if not mipmapped or filtered correctly.
+### Edge Cases and Pitfalls
+*   **Seams**: Non-tileable noise textures cause visible seams in large clouds [S2, unofficial].
+*   **Erosion Interaction**: The `CloudLut` G channel (Erosion) influences both detail and shape noise; incorrect mapping leads to unnatural cloud structures [S2, unofficial].
+*   **Height Logic**: Cumulonimbus clouds require height-dependent coverage and erosion adjustments to avoid uniform cylindrical shapes [S2, unofficial].
 
 ## Subtopics
 
+### [Cumulus Cloud Rendering Configuration](2897-cumulus-cloud-rendering-configuration.md)
+Defines specific procedural noise parameters for cumulus clouds within the Ray-Guided Streaming framework, tailored for multiple scattering simulations.
+
 ### [IsimCloudTexture density evaluation](3530-isimcloudtexture-density-evaluation.md)
-IsimCloudTexture density evaluation computes the volumetric density of a cloud at a given point in space by combining geometric primitives (text segments or implicit cloud bodies), fractal Brownian motion (FBM) noise, and depth-based fading. It differs from general procedural gas modeling by focusing on specific cloud structures (text-based or layered bodies) and from simple cloud density sampling by generating the density field procedurally via CUDA kernels rather than sampling pre-baked data. The method outputs a grayscale density value (replicated to RGB) suitable for volume rendering.
+Computes density using geometric primitives, FBM noise, and depth-based fading via CUDA kernels, outputting grayscale density suitable for volume rendering.
 
 ### [Procedural Gas Modeling via Turbulence](3551-procedural-gas-modeling-via-turbulence.md)
-Procedural Gas Modeling via Turbulence is a method for generating volumetric gas density by evaluating a turbulence function and mapping the result through a precomputed power table. It solves the problem of efficiently computing realistic gas density fields for volume rendering by replacing expensive per-sample power function calls with a lookup table. Unlike sibling methods that may rely on 3D textures or distance fields, this approach computes density analytically at any point in space using mathematical shaping functions.
+Generates gas density using a turbulence function and a precomputed power table lookup to replace expensive power function calls.
 
 ### [Cloud Density Sampling](4806-cloud-density-sampling.md)
-Cloud Density Sampling generates the base volumetric density of clouds by combining low-frequency 3D noise textures using a weighted sum (Fractal Brownian Motion, FBM) and remapping the result to control cloud shape and coverage. It differs from its siblings by explicitly separating the generation of the base cloud structure (via low-frequency textures and height gradients) from high-frequency detail (via curl noise displacement and high-frequency textures) and by using a specific channel-weighted FBM from a single RGBA texture sample rather than procedural noise functions. It builds on [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by providing the specific evaluation routine for the density field.
+Generates base density using weighted sum of low-frequency 3D noise textures (FBM) and remapping, handling wind skew and basic height gradients.
 
-### Cumulus Cloud Rendering Configuration
-Uses $N = 2$, $M = 32$, and 5 octaves of Perlin noise to simulate enhanced cumulus cloud, with a virtual resolution of $2048^3$ [S3, unofficial]. Used to encode cloud details in [BNM* 08] for multiple scattering in clouds [S3, unofficial].
-
-### Physical Cloud Model (Cumulus Convection)
-A physical model where a constant heat source is applied at the base, representing sunlight heating the earth [S4, unofficial]. Evaporation occurs until air is saturated or all liquid water is evaporated [S4, unofficial]. The saturation mixing ratio is defined by $q_s = A \exp(-\alpha z)$ [S4, unofficial]. The liquid water mixing ratio is $q_l = \max(q - q_s, 0)$ [S4, unofficial]. Parameters include latent heat of vaporization $L_v$, specific heat of air $c_p$, and friction timescale $t_s$ [S4, unofficial]. Boundary conditions are $q_0 = 0.02$ at the bottom level and $q_0 = 0.002$ at the top level [S4, unofficial]. Coriolis effects are ignored for computational efficiency [S4, unofficial].
+### [Finite Layer Cloud Shape Generation](8292-finite-layer-cloud-shape-generation.md)
+Constructs 3D volume shapes of layer clouds (Cirrus, Stratus, etc.) by assembling connected 3D ellipsoidal lobes to ensure vertical presence variation and horizontal tapering.
+*   Physical Cloud Model (Cumulus Convection): A physical simulation approach applying a constant heat source at the base, calculating evaporation and condensation based on saturation mixing ratio $q_s = A \exp(-\alpha z)$ and liquid water mixing ratio $q_l = \max(q - q_s, 0)$, ignoring Coriolis effects.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per sample, as it involves a fixed number of texture lookups and noise evaluations. The cost depends on the number of octaves in the noise function.
-*   **Memory Complexity:** $O(1)$ auxiliary memory, plus the storage for the 2D Weather Map, 3D Noise Textures, and Cloud LUT.
-*   **Measured Performance:** Not given in the sources.
-*   **Strengths:** Infinite resolution, no storage limits for cloud extent, dynamic control over cloud types and weather patterns.
-*   **Limitations:** Requires careful tuning of noise parameters to avoid repetitive patterns. Performance can degrade if high-frequency noise requires many octaves.
-*   **When to use:** Real-time rendering of large-scale atmospheric clouds where memory bandwidth is a constraint for storing 3D textures.
-*   **When not to use:** When highly specific, non-repeating cloud formations are required that cannot be achieved through noise variation.
+*   **Time Complexity**: $O(1)$ per sample, as it involves texture lookups and mathematical operations. No simulation steps are required [S1, S2, unofficial].
+*   **Memory Complexity**: Depends on the resolution of the noise textures and CloudMap/CloudLut. Typically fits in GPU VRAM [S2, unofficial].
+*   **Performance**: Highly efficient for real-time rendering on PC/Console hardware, as it avoids expensive voxelization or physical simulation [S2, unofficial].
+*   **Strengths**: Flexible, supports dynamic wind and time-based animation, allows artistic control via textures [S1, S2, unofficial].
+*   **Limitations**: Lacks physical consistency (e.g., mass conservation) compared to simulation-based methods [S3, unofficial]. Requires careful tuning of noise parameters to avoid repetitive patterns [S2, unofficial].
 
 ## Background
-Procedural volume cloud modeling has evolved from simple height-based gradients to complex noise-driven systems. Early methods relied on 3D textures storing density or distance fields [S2, unofficial]. Modern approaches, such as those in Unity HDRP, utilize Perlin-Worley noise for shape and Perlin noise for detail, combined with 2D weather maps for artistic control [S1, S2, unofficial]. The technique is widely used in PC and console games for real-time sky rendering [S2, unofficial].
+The method originated from real-time rendering requirements for PC and console games, with notable implementations in Unity HDRP (version 12.0+) and games like Horizon and Red Dead Redemption 2 [S2, unofficial]. It evolved from earlier static cloud textures to dynamic, noise-based procedural generation to support large-scale, animated cloud layers [S2, unofficial]. The physical cloud model variant traces back to SIGGRAPH '84 work on ray tracing volume densities, which used a convective model with latent heat of vaporization and frictional effects [S3, unofficial].
 
 ## Sources
 [S1] Volumetric Clouds with 3D Perlin-Worley Noise in OpenGL, https://salivity.github.io/opengl/article/volumetric-clouds-with-3-d-perlin-worley-noise-in-open-gl, fetched 2026-10-29 (unofficial)
 [S2] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)
-[S3] [PDF] Ray-Guided Streaming for Efficient and Detailed Voxel Rendering, https://www-sop.inria.fr/reves/Basilic/2009/CNLE09/CNLE09.pdf, fetched 2026-10-26 (unofficial)
-[S4] Ray Tracing for Volume Densities, https://www.scribd.com/document/746685923/ray-tracking-volume-densities, fetched 2026-10-25 (unofficial)
+[S3] Ray Tracing for Volume Densities, https://www.scribd.com/document/746685923/ray-tracking-volume-densities, fetched 2026-10-25 (unofficial)

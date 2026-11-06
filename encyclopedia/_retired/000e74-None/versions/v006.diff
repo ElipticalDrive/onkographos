@@ -1,0 +1,150 @@
+--- v005.md
++++ v006.md
+@@ -4,63 +4,65 @@
+ 
+ ## Overview
+-Two-level nested ray marching is a volume rendering technique that renders Adaptive Mesh Refinement (AMR) data by performing a coarse mesh traversal to identify active regions, followed by a fine-level ray march within the descendant elements of each coarse element [S1, unofficial]. It solves the problem of efficiently visualizing sparse, multi-resolution simulation data without the memory blow-up of uniform grid resampling, ensuring computational cost scales with the actual simulation data rather than the bounding box [S1, unofficial]. Unlike uniform grid resampling, which incurs memory, time, and quality costs, this method maintains native resolution [S2, unofficial]. It builds on [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md) by using a constant adjustable step size for the inner loop rather than hierarchical traversal for the fine level.
++Two-level Nested Ray Marching is a volume rendering technique that performs front-to-back compositing by traversing a coarse mesh of tetrahedral clusters and then marching through the fine-level tetrahedra contained within each active cluster [S1, unofficial]. It solves the problem of efficiently visualizing sparse, multi-resolution Adaptive Mesh Refinement (AMR) data by avoiding the memory blow-up of uniform grid resampling while maintaining native resolution [S1, unofficial]. Unlike its sibling [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md) which may use different sampling strategies, this method explicitly uses a constant adjustable step size for the inner loop and relies on macrocell density statistics for early-out culling [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a coarse mesh BVH; macrocell density values $\text{macrocellValues}$; a transfer function $\text{tf}$; a constant step size $s$; a background color $\mathbf{c}_{bg}$.
+-*   **Output:** Final pixel color $\mathbf{c}_{out}$.
++*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a coarse mesh BVH; macrocell values (scalar statistics per coarse element); a refinement tree mapping coarse elements to descendant tetrahedra; a transfer function $tf$; a constant step size $s$; a background color $\mathbf{c}_{bg}$; and an opacity threshold $\alpha_{thresh} = 0.99$ [S1, unofficial].
++*   **Output:** The final accumulated color $\mathbf{c}_{out}$ and opacity $\alpha_{out}$ for the pixel [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Coarse Mesh:** A BVH where leaves are macrocells. Each macrocell stores a maximum density value used for culling.
+-*   **Refinement Tree:** A tetrahedral hierarchy. Each node (tetrahedron) stores vertex positions.
+-*   **Transfer Function:** Maps scalar values to color $\mathbf{c}_{tf}$ and opacity $\alpha_{tf}$.
+-
+-**Parameters:**
+-*   **Step Size ($s$):** A constant adjustable step size. No adaptive adjustments are implemented [S1, unofficial].
+-*   **Opacity Threshold:** The marching loop continues while accumulated alpha $\alpha < 0.99$ [S1, unofficial].
++*   **Coarse Mesh:** Indexed by a BVH. Each node/leaf represents a cluster of tetrahedra.
++*   **Macrocell Values:** An array `macrocellValues` where `macrocellValues[id]` stores the maximum density or scalar value for coarse element `id` [S1, unofficial].
++*   **Refinement Tree:** A structure allowing lookup of tetrahedra descendants for a given coarse element ID.
++*   **Transfer Function:** Provides color $\mathbf{c}_{tf}$ and opacity $\alpha_{tf}$ for a given scalar value [S1, unofficial].
+ 
+ **Algorithm Steps:**
+-1.  Initialize output color $\mathbf{c} = \{0,0,0\}$ and accumulated alpha $\alpha = 0$.
+-2.  Loop while $\alpha < 0.99$:
+-    a.  Traverse the coarse mesh BVH with the ray to find the current coarse element ID ($\text{coarseID}$), the back distance of the element ($t_{back}$), and the distance to the next face ($t_{nextFace}$). If $\text{coarseID} = -1$, break the loop [S1, unofficial].
+-    b.  Check if $\text{macrocellValues}[\text{coarseID}] \le 0$. If true, the element is empty; skip processing [S1, unofficial].
+-    c.  If not empty, call the inner marching function `MarchElement` with the ray, current color/alpha, $t_{back}$, $\text{coarseID}$, $s$, and $\text{tf}$ [S1, unofficial].
+-    d.  Update the ray parameter $t \leftarrow \max(t_{nextFace}, t)$ to advance to the next coarse element [S1, unofficial].
+-3.  Return $\mathbf{c}_{out} = (1 - \alpha) \mathbf{c}_{bg} + \mathbf{c}$ [S1, unofficial].
+ 
+-**Inner Loop (`MarchElement`):**
+-1.  Initialize $t_{exit} = 0$, $\text{sampleTetID} = 0$, and $\text{tetVertices} = \{\}$ [S1, unofficial].
+-2.  Loop while $t < t_{max}$ (where $t_{max}$ is the exit distance of the coarse element):
+-    a.  Calculate sample point $\mathbf{p} = \mathbf{o} + t \mathbf{d}$ [S1, unofficial].
+-    b.  If $t > t_{exit}$:
+-        i.  Traverse the refinement tree starting from $\text{sampleTetID}$ to find the current tetrahedron ID and its vertices [S1, unofficial].
+-        ii. Calculate $t_{exit}$ by intersecting the ray with the faces of the current tetrahedron [S1, unofficial].
+-    c.  Sample the scalar value $v$ at $\mathbf{p}$ using the current tetrahedron [S1, unofficial].
+-    d.  Advance $t \leftarrow t + s$ [S1, unofficial].
+-    e.  If $v$ is not in the transfer function range, continue to the next iteration [S1, unofficial].
+-    f.  Get transfer function color $\mathbf{c}_{tf}$ and opacity $\alpha_{tf}$ for $v$ [S1, unofficial].
+-    g.  Adjust opacity: $\alpha_{tf} \leftarrow \alpha_{tf} \times \text{tf.opacity}$ [S1, unofficial].
+-    h.  Accumulate using front-to-back compositing:
+-        $$ \mathbf{c} \leftarrow \mathbf{c} + (1 - \alpha) \alpha_{tf} \mathbf{c}_{tf} $$
+-        $$ \alpha \leftarrow \alpha + \alpha_{tf} (1 - \alpha) $$
+-    i.  Continue to next iteration [S1, unofficial].
+-3.  Return $\mathbf{c}, \alpha$ [S1, unofficial].
++1.  **Initialization:** Set accumulated color $\mathbf{c} = \{0, 0, 0\}$ and accumulated opacity $\alpha = 0$ [S1, unofficial].
++2.  **Coarse Traversal Loop:** While $\alpha < \alpha_{thresh}$:
++    a.  Call `TraverseCoarseMesh(ray)` to find the current coarse element ID `coarseID`, the entry distance $t_{back}$, and the exit distance to the next face $t_{nextFace}$ [S1, unofficial].
++    b.  If `coarseID` is $-1$ (no more intersections), break the loop [S1, unofficial].
++    c.  **Culling:** Check if `macrocellValues[coarseID] <= 0`. If true, the element is empty or inactive. Skip processing and update `ray.t = max(t_{nextFace}, ray.t)` to advance to the next coarse element [S1, unofficial].
++    d.  **Fine Traversal:** If not skipped, call `MarchElement(ray, c, \alpha, t_{back}, coarseID, s, tf)` [S1, unofficial].
++    e.  **Advance:** Update `ray.t = max(t_{nextFace}, ray.t)` [S1, unofficial].
++3.  **Final Compositing:** Return $\mathbf{c}_{out} = (1 - \alpha) \mathbf{c}_{bg} + \mathbf{c}$ [S1, unofficial].
++
++**Inside `MarchElement`:**
++1.  Initialize local exit distance $t_{exit} = 0$ and tetrahedron ID `sampleTetID` [S1, unofficial].
++2.  **Fine Loop:** While `ray.t < t_{max}` (where $t_{max}$ is the exit of the coarse element):
++    a.  Calculate sample point: $\mathbf{p} = \mathbf{o} + \text{ray}.t \cdot \mathbf{d}$ [S1, unofficial].
++    b.  **Tetrahedron Lookup:** If `ray.t > t_{exit}`:
++        i.  Call `traverse(\mathbf{p}, coarseTetID)` to get the current tetrahedron ID `sampleTetID` and its vertices `tetVertices` [S1, unofficial].
++        ii. Calculate $t_{exit}$ by intersecting the ray with the faces of `tetVertices` [S1, unofficial].
++    c.  **Sampling:** Sample the scalar value $v$ at $\mathbf{p}$ using `sampleData(\mathbf{p}, sampleTetID, tetVertices)` [S1, unofficial].
++    d.  **Step Advance:** Update `ray.t = ray.t + s` [S1, unofficial].
++    e.  **Transfer Function Check:** If $v$ is not in the transfer function range (`!tf.inRange(v)`), continue to the next iteration [S1, unofficial].
++    f.  **Compositing:**
++        i.  Get transfer function color and opacity: $\mathbf{c}_{tf}, \alpha_{tf} = tf.getColor(v)$ [S1, unofficial].
++        ii. Apply global opacity: $\alpha_{tf} = \alpha_{tf} \cdot tf.opacity$ [S1, unofficial].
++        iii. Accumulate color: $\mathbf{c} = \mathbf{c} + (1 - \alpha) \cdot \alpha_{tf} \cdot \mathbf{c}_{tf}$ [S1, unofficial].
++        iv. Accumulate opacity: $\alpha = \alpha + \alpha_{tf} \cdot (1 - \alpha)$ [S1, unofficial].
++3.  Return updated $\mathbf{c}$ and $\alpha$ [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def ray_march_coarse(ray, macrocell_values, step_size, tf, bg_color):
++def ray_march_coarse(ray, macrocell_values, step_size, tf, bg_color, alpha_thresh=0.99):
+     color = [0.0, 0.0, 0.0]
+     alpha = 0.0
+-    while alpha < 0.99:
++    
++    while alpha < alpha_thresh:
+         coarse_id, t_back, t_next_face = traverse_coarse_mesh(ray)
++        
+         if coarse_id == -1:
+             break
++            
+         if macrocell_values[coarse_id] <= 0:
+             ray.t = max(t_next_face, ray.t)
+             continue
+-        
++            
+         color, alpha = march_element(ray, color, alpha, t_back, coarse_id, step_size, tf)
+         ray.t = max(t_next_face, ray.t)
+-    
++        
+     return (1.0 - alpha) * bg_color + color
+ 
+@@ -74,7 +76,7 @@
+         
+         if ray.t > t_exit:
+-            sample_tet_id, tet_vertices = traverse_refinement_tree(sample_point, coarse_tet_id)
+-            t_exit = intersect_faces(ray.t, sample_point, ray.dir, tet_vertices)
+-        
++            sample_tet_id, tet_vertices = traverse(sample_point, coarse_tet_id)
++            t_exit = intersect_faces(ray.t, sample_point, ray.direction, tet_vertices)
++            
+         scalar = sample_data(sample_point, sample_tet_id, tet_vertices)
+         ray.t = ray.t + step_size
+@@ -92,23 +94,21 @@
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** The use of a constant step size means that regions with very high frequency detail may be undersampled if the step size is too large, while sparse regions may be oversampled [S1, unofficial].
+-*   **Boundary Handling:** The transition between coarse elements relies on $t_{nextFace}$. If $t$ is not correctly advanced, rays may re-sample the same element or miss gaps [S1, unofficial].
+-*   **Empty Elements:** The check `macrocellValues[coarseID] <= 0` is critical for performance. If macrocell values are inaccurate, empty regions may be processed unnecessarily [S1, unofficial].
++**Parameters:**
++*   **Step Size ($s$):** A constant adjustable step size. Smaller values increase accuracy but reduce performance [S1, unofficial].
++*   **Opacity Threshold:** The loop terminates when accumulated opacity exceeds 0.99 [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [AMR Volume Ray-Casting](4032-amr-volume-ray-casting.md)
+-AMR Volume Ray-Casting is a volume rendering technique that ray-marches Adaptive Mesh Refinement (AMR) octrees directly without resampling to a uniform grid, avoiding the $(2^{l_{max}})^3$ memory blow-up. It solves the problem of efficiently visualizing sparse, multi-resolution simulation data by storing each leaf once in a per-level hash and stepping by the local cell size, ensuring computational cost scales with the actual simulation data rather than the bounding box. Unlike uniform grid resampling, which incurs memory, time, and quality costs, this method maintains native resolution.
++A variant that ray-marches AMR octrees directly without resampling, storing leaves in per-level hashes to scale cost with actual data rather than bounding box volume.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The coarse traversal is $O(\log N)$ for $N$ macrocells. The inner march is $O(L \cdot \frac{D}{s})$ where $L$ is the number of tetrahedra intersected, $D$ is the path length, and $s$ is the step size. The total cost is proportional to the number of samples taken within active coarse elements.
+-*   **Memory Complexity:** $O(N)$ for the coarse mesh and $O(M)$ for the refinement tree, where $M$ is the number of tetrahedra. No uniform grid storage is required [S1, unofficial].
+-*   **Performance:** Performance is highly dependent on the step size and the sparsity of the data. Smaller step sizes increase accuracy but reduce performance [S1, unofficial].
+-*   **Strengths:** Avoids memory blow-up of uniform grids; maintains native resolution; efficient culling of empty regions via macrocells [S1, unofficial].
+-*   **Limitations:** Constant step size may lead to aliasing or inefficiency; no adaptive step size is implemented [S1, unofficial].
++*   **Complexity:** Time complexity depends on the number of coarse elements intersected and the number of fine tetrahedra sampled within them, scaled by the inverse of the step size [S1, unofficial]. Memory complexity is proportional to the size of the AMR data structure and the coarse mesh BVH [S1, unofficial].
++*   **Performance:** Performance is impacted by the choice of step size; smaller steps yield more samples and higher quality but slower rendering [S1, unofficial].
++*   **Strengths:** Avoids memory blow-up associated with uniform grid resampling ($2^{l_{max}})^3$) and maintains native resolution of the simulation data [S1, unofficial].
++*   **Limitations:** Uses a constant step size, lacking the adaptive adjustments that could optimize sampling density in complex regions [S1, unofficial].
+ 
+ ## Background
+-The method was described in a thesis by a researcher at Bilkent University, focusing on direct volume rendering of tree-based tetrahedral AMR data [S1, unofficial]. It addresses the limitations of uniform grid rendering for sparse AMR data.
++The method originates from research on direct volume rendering of tree-based tetrahedral adaptive mesh refinement (AMR) data [S1, unofficial]. It was developed to address the inefficiencies of resampling sparse AMR data onto uniform grids, which incurs significant memory and time costs [S1, unofficial]. The approach builds on the principles of hierarchical traversal and macrocell-based culling established in the parent [Coarse Mesh Traversal](3062-coarse-mesh-traversal.md) [S1, unofficial].
+ 
+ ## Sources

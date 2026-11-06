@@ -1,0 +1,167 @@
+--- v002.md
++++ v003.md
+@@ -3,5 +3,5 @@
+ 
+ ## Overview
+-A GPU-based surface extraction method that generates a triangle mesh from a voxel grid by processing each voxel independently on the GPU [S1, unofficial]. It outputs vertices and indices into global buffers using atomic counters for parallel write safety [S1, unofficial]. Unlike traditional Marching Cubes which interpolates vertices along edges, this method generates axis-aligned quads (two triangles) at voxel boundaries where a solid voxel meets an empty neighbor, effectively performing face-based culling in parallel [S1, unofficial]. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md).
++A GPU-based surface extraction method that generates a triangle mesh from a voxel grid by processing each voxel independently on the GPU [S1, unofficial]. It outputs vertices and indices into global buffers using atomic counters for parallel write safety [S1, unofficial]. Unlike traditional Marching Cubes which interpolates vertices along edges, this method generates axis-aligned quads (two triangles) at voxel boundaries where a solid voxel meets an empty neighbor, effectively performing face-based culling in parallel [S1, unofficial]. It builds on [Voxel Chunk Meshing with Culling](2523-voxel-chunk-meshing-with-culling.md) [G].
+ 
+ ## How it works
+@@ -13,5 +13,5 @@
+ 
+ **Outputs:**
+-*   **Vertex Buffer:** A global buffer containing vertex data (position, normal) [S1, unofficial].
++*   **Vertex Buffer:** A global buffer containing vertex data (position, texcoord, normal) [S1, unofficial].
+ *   **Index Buffer:** A global buffer containing triangle indices [S1, unofficial].
+ *   **Updated Feedback:** Updated vertex and index offsets and counts for each chunk [S1, unofficial].
+@@ -19,6 +19,7 @@
+ ### Data Structures
+ **Vertex Layout:**
+-Each vertex consists of 10 floats:
++Each vertex consists of 10 floats packed as:
+ *   `position`: $(px, py, pz)$ [S1, unofficial]
++*   `texcoord`: $(tx, ty)$ [S1, unofficial]
+ *   `normal`: $(nx, ny, nz)$ [S1, unofficial]
+ 
+@@ -52,17 +53,17 @@
+     where $x, y, z$ are the 3D coordinates within the chunk derived from `gl_GlobalInvocationID` [S1, unofficial]. If `uVoxels.data[globalVoxelIndex] > 0`, the thread proceeds to extract faces; otherwise, it skips [S1, unofficial].
+ 
+-3.  **Face Extraction:** For each of the 6 faces of the current voxel, the thread checks if the immediate neighbor in that direction is empty. The neighbor check includes a boundary check to ensure coordinates are within $[0, CHUNK\_SIZE)$ [S1, unofficial].
++3.  **Face Extraction:** For each of the 6 faces of the current voxel, the thread checks if the immediate neighbor in that direction is empty [S1, unofficial]. The neighbor check includes a boundary check to ensure coordinates are within $[0, CHUNK\_SIZE)$ [S1, unofficial].
+     *   If the neighbor is empty, the thread allocates 4 vertices and 6 indices using `atomicAdd` on `sVertexOffset` and `sIndexOffset` [S1, unofficial].
+-    *   The 4 vertices are set at positions relative to the current voxel coordinate, forming a quad on the voxel boundary.
++    *   The 4 vertices are set at positions relative to the current voxel coordinate, forming a quad on the voxel boundary [S1, unofficial].
+     *   The normal is set to the face direction (e.g., $(1.0, 0.0, 0.0)$ for +X) [S1, unofficial].
+     *   The indices are set to `[0, 1, 2, 2, 3, 0]`, forming two triangles [S1, unofficial].
+ 
+     The 6 face checks are:
+-    *   **+X:** Neighbor at `coord + ivec3(1, 0, 0)` is empty. Normal: $(1.0, 0.0, 0.0)$ [S1, unofficial].
+-    *   **-X:** Neighbor at `coord + ivec3(-1, 0, 0)` is empty. Normal: $(-1.0, 0.0, 0.0)$ [S1, unofficial].
+-    *   **+Y:** Neighbor at `coord + ivec3(0, 1, 0)` is empty. Normal: $(0.0, 1.0, 0.0)$ [S1, unofficial].
+-    *   **-Y:** Neighbor at `coord + ivec3(0, -1, 0)` is empty. Normal: $(0.0, -1.0, 0.0)$ [S1, unofficial].
+-    *   **+Z:** Neighbor at `coord + ivec3(0, 0, 1)` is empty. Normal: $(0.0, 0.0, 1.0)$ [S1, unofficial].
+-    *   **-Z:** Neighbor at `coord + ivec3(0, 0, -1)` is empty. Normal: $(0.0, 0.0, -1.0)$ [S1, unofficial].
++    *   **+X:** Neighbor at `coord + ivec3(1, 0, 0)` is empty [S1, unofficial].
++    *   **-X:** Neighbor at `coord + ivec3(-1, 0, 0)` is empty [S1, unofficial].
++    *   **+Y:** Neighbor at `coord + ivec3(0, 1, 0)` is empty [S1, unofficial].
++    *   **-Y:** Neighbor at `coord + ivec3(0, -1, 0)` is empty [S1, unofficial].
++    *   **+Z:** Neighbor at `coord + ivec3(0, 0, 1)` is empty [S1, unofficial].
++    *   **-Z:** Neighbor at `coord + ivec3(0, 0, -1)` is empty [S1, unofficial].
+ 
+ 4.  **Feedback Update:** After all threads in the workgroup have processed their voxels, the updated `sVertexOffset`, `sIndexOffset`, `sVertexCount`, and `sIndexCount` are written back to the `ChunkFeedbackBuffer` [S1, unofficial].
+@@ -70,5 +71,4 @@
+ ### Pseudocode
+ ```python
+-# Simulated GPU environment
+ CHUNK_SIZE = 80
+ voxels_1d = [...]  # 1D array of voxel states
+@@ -76,5 +76,4 @@
+ index_buffer = []
+ chunk_feedback = [...]  # List of feedback structs
+-feedback_lock = threading.Lock()
+ 
+ def to1D(x, y, z):
+@@ -87,12 +86,9 @@
+ 
+ def atomic_add(counter, value):
+-    """Simulates GPU atomicAdd for shared memory counters."""
+-    with feedback_lock:
+-        old = counter[0]
+-        counter[0] += value
+-        return old
++    old = counter[0]
++    counter[0] += value
++    return old
+ 
+ def process_chunk(workgroup_id, chunk_idx):
+-    # Shared memory variables (initialized by Thread 0)
+     s_vertex_offset = [0]
+     s_index_offset = [0]
+@@ -108,60 +104,34 @@
+         s_index_count[0] = fb.indexCount
+ 
+-    # Synchronize to ensure shared memory is loaded
+-    # barrier()
+-
+-    # Each thread processes one voxel
+-    # Simulating gl_GlobalInvocationID mapping to 3D coordinates
+-    thread_id = workgroup_id * (CHUNK_SIZE ** 3) + (thread_local_id)
+-    x = thread_id % CHUNK_SIZE
+-    y = (thread_id // CHUNK_SIZE) % CHUNK_SIZE
+-    z = thread_id // (CHUNK_SIZE * CHUNK_SIZE)
++    # Simulate gl_GlobalInvocationID mapping to 3D coordinates within the chunk
++    x = workgroup_id % CHUNK_SIZE
++    y = (workgroup_id // CHUNK_SIZE) % CHUNK_SIZE
++    z = workgroup_id // (CHUNK_SIZE * CHUNK_SIZE)
+ 
+     # Voxel Check
+     if hasVoxel(x, y, z):
+-        # Face Extraction (+X)
+-        if not hasVoxel(x + 1, y, z):
+-            v_off = atomic_add(s_vertex_offset, 4)
+-            i_off = atomic_add(s_index_offset, 6)
+-            # Write 4 vertices with normal (1.0, 0.0, 0.0) relative to (x, y, z)
+-            # Write 6 indices [0,1,2, 2,3,0] relative to v_off and i_off
+-
+-        # Face Extraction (-X)
+-        if not hasVoxel(x - 1, y, z):
+-            v_off = atomic_add(s_vertex_offset, 4)
+-            i_off = atomic_add(s_index_offset, 6)
+-            # Write 4 vertices with normal (-1.0, 0.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0]
+-
+-        # Face Extraction (+Y)
+-        if not hasVoxel(x, y + 1, z):
+-            v_off = atomic_add(s_vertex_offset, 4)
+-            i_off = atomic_add(s_index_offset, 6)
+-            # Write 4 vertices with normal (0.0, 1.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0]
+-
+-        # Face Extraction (-Y)
+-        if not hasVoxel(x, y - 1, z):
+-            v_off = atomic_add(s_vertex_offset, 4)
+-            i_off = atomic_add(s_index_offset, 6)
+-            # Write 4 vertices with normal (0.0, -1.0, 0.0)
+-            # Write 6 indices [0,1,2, 2,3,0]
+-
+-        # Face Extraction (+Z)
+-        if not hasVoxel(x, y, z + 1):
+-            v_off = atomic_add(s_vertex_offset, 4)
+-            i_off = atomic_add(s_index_offset, 6)
+-            # Write 4 vertices with normal (0.0, 0.0, 1.0)
+-            # Write 6 indices [0,1,2, 2,3,0]
+-
+-        # Face Extraction (-Z)
+-        if not hasVoxel(x, y, z - 1):
+-            v_off = atomic_add(s_vertex_offset, 4)
+-            i_off = atomic_add(s_index_offset, 6)
+-            # Write 4 vertices with normal (0.0, 0.0, -1.0)
+-            # Write 6 indices [0,1,2, 2,3,0]
+-
+-    # Synchronize to ensure all atomics are complete
+-    # barrier()
++        # Face Extraction for all 6 directions
++        faces = [
++            (1, 0, 0, 1.0, 0.0, 0.0),
++            (-1, 0, 0, -1.0, 0.0, 0.0),
++            (0, 1, 0, 0.0, 1.0, 0.0),
++            (0, -1, 0, 0.0, -1.0, 0.0),
++            (0, 0, 1, 0.0, 0.0, 1.0),
++            (0, 0, -1, 0.0, 0.0, -1.0)
++        ]
++        for dx, dy, dz, nx, ny, nz in faces:
++            if not hasVoxel(x + dx, y + dy, z + dz):
++                v_off = atomic_add(s_vertex_offset, 4)
++                i_off = atomic_add(s_index_offset, 6)
++                # Write 4 vertices at positions relative to (x, y, z) with normal (nx, ny, nz)
++                # [G] Standard quad vertex generation relative to voxel face
++                vertex_buffer.extend([
++                    (float(x), float(y), float(z), 0.0, 0.0, nx, ny, nz),
++                    (float(x+1), float(y), float(z), 0.0, 0.0, nx, ny, nz),
++                    (float(x+1), float(y+1), float(z), 0.0, 0.0, nx, ny, nz),
++                    (float(x), float(y+1), float(z), 0.0, 0.0, nx, ny, nz)
++                ])
++                # Write 6 indices forming two triangles
++                index_buffer.extend([v_off, v_off+1, v_off+2, v_off+2, v_off+3, v_off])
+ 
+     # Thread 0 writes back feedback

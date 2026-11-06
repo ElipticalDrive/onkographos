@@ -1,0 +1,167 @@
+# Morton-coded Sparse Voxel Tree
+
+
+## Overview
+A Morton-coded Sparse Voxel Tree is a flat-array sparse voxel tree that uses Morton codes for spatial ordering and an 8-bit mask per node to track children [S1, unofficial]. It avoids recursive pointers by storing nodes in contiguous blocks of 8 elements, indexed via `node_format::_block_index` [S1, unofficial]. This structure is designed for zero-tolerance overhead in traversal, distinguishing it from pointer-based SVO trees by eliminating indirection costs [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: A 3D coordinate space (typically unsigned even integers) and a target voxel position.
+*   Output: A traversal path to the leaf node or a determination of child existence at a given node.
+
+**Data Structures:**
+
+1.  **`node_format`**: Stores metadata for each tree node.
+    *   `_block_index`: `uint32_t`. Index into the memory pool's block array.
+    *   `_depth`: `uint8_t`. Depth of the node in the tree.
+    *   `_mask`: `uint8_t`. Bitmask representing the existence of 8 children (one bit per octant). Bit $i$ is set if child $i$ exists.
+    *   `has_children()`: Returns `true` if `_mask & 0xFF` is non-zero.
+
+2.  **`mem_pool<T>`**: Manages contiguous memory allocation.
+    *   `_blocks`: `std::vector<std::array<T, 8>>`. Stores nodes in fixed-size blocks of 8.
+    *   `_free`: `std::queue<uint32_t>`. Queue of available block indices.
+    *   `alloc()`: Pops an index from `_free`. If empty, appends a new block to `_blocks` and returns the new index.
+    *   `dealloc()`: Pushes a block index onto `_free`.
+
+3.  **`morton_util<BIT_WIDTH>`**: Handles coordinate conversions.
+    *   `BIT_WIDTH`: Template parameter.
+        *   `morton_16b`: Axis bit width 5, max extent $32^3$. `morton_type` is `uint16_t`, `component_type` is `uint8_t`.
+        *   `morton_32b`: Axis bit width 10, max extent $1024^3$. `morton_type` is `uint32_t`, `component_type` is `uint16_t`.
+    *   `AXIS_MAX`: `32` for 16b, `1024` for 32b.
+    *   `pos_to_morton()`: Converts 3D position to Morton code using `libmorton::m3D_e_sLUT`.
+    *   `morton_to_pos()`: Converts Morton code to 3D position using `libmorton::m3D_d_sLUT`.
+
+**Numbered Steps for Child Traversal:**
+Given a current node `node_` at `node_position` with `node_extent`, and a target `voxel_transformed`:
+
+1.  Transform the node position: `node_transformed = node_position << 1`.
+2.  Compute the distance vector: `dist_vector = voxel_transformed - node_transformed`.
+3.  Compute the cell vector (octant index components): `cell_vector = dist_vector / node_extent`.
+4.  Compute the linear octant index: `index = (cell_vector[0] << 2) + (cell_vector[1] << 1) + cell_vector[2]`.
+5.  Compute the child bit mask: `child_bit = 1 << index`.
+6.  Check existence: `exist = (node_->_mask & child_bit) != 0`.
+7.  Compute next node position (if child exists): `next_node_position = node_position + (cell_vector * node_extent / 2)`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+# Constants from source
+# LOOP_UNROLL pragma is implementation detail, handled by compiler
+# SVO_NODE_RELATION_MATH_IMPL is a macro, implemented as function below
+
+def compute_child_relation(node_position, node_extent, voxel_transformed, node_mask):
+    """
+    Computes the octant index and checks child existence.
+    node_position: tuple (x, y, z)
+    node_extent: int
+    voxel_transformed: tuple (x, y, z)
+    node_mask: int (8-bit)
+    Returns: (index, exists, next_node_position)
+    """
+    # (1) Transform node position
+    node_transformed = (node_position[0] << 1, 
+                        node_position[1] << 1, 
+                        node_position[2] << 1)
+    
+    # (2) Distance vector
+    dist_vector = (voxel_transformed[0] - node_transformed[0],
+                   voxel_transformed[1] - node_transformed[1],
+                   voxel_transformed[2] - node_transformed[2])
+    
+    # (3) Cell vector (integer division)
+    # Note: Source uses unsigned even integer space. 
+    # Assuming standard integer division for cell_vector calculation as per source logic.
+    cell_vector = (dist_vector[0] // node_extent,
+                   dist_vector[1] // node_extent,
+                   dist_vector[2] // node_extent)
+    
+    # (4) Octant index
+    index = (cell_vector[0] << 2) + (cell_vector[1] << 1) + cell_vector[2]
+    
+    # (5) Child bit
+    child_bit = 1 << index
+    
+    # (6) Existence check
+    exists = (node_mask & child_bit) != 0
+    
+    # (7) Next node position
+    # Only valid if exists is true, but computed for completeness
+    next_node_position = (
+        node_position[0] + (cell_vector[0] * node_extent) // 2,
+        node_position[1] + (cell_vector[1] * node_extent) // 2,
+        node_position[2] + (cell_vector[2] * node_extent) // 2
+    )
+    
+    return index, exists, next_node_position
+
+def pos_to_morton_16b(x, y, z):
+    """
+    Converts 3D position to 16-bit Morton code.
+    Uses libmorton::m3D_e_sLUT<uint16_t>.
+    """
+    # Implementation of m3D_e_sLUT is complex bit interleaving.
+    # For implementation, use a standard Morton encoding function.
+    return morton_encode_3d(x, y, z)
+
+def morton_to_pos_16b(morton):
+    """
+    Converts 16-bit Morton code to 3D position.
+    Uses libmorton::m3D_d_sLUT<uint16_t>.
+    """
+    return morton_decode_3d(morton)
+
+def morton_encode_3d(x, y, z):
+    """Standard 16-bit Morton encoding."""
+    # Interleave bits of x, y, z
+    x = x & 0x1F
+    y = y & 0x1F
+    z = z & 0x1F
+    m = 0
+    for i in range(5):
+        m |= (x & 1) << (3 * i)
+        m |= (y & 1) << (3 * i + 1)
+        m |= (z & 1) << (3 * i + 2)
+        x >>= 1
+        y >>= 1
+        z >>= 1
+    return m
+
+def morton_decode_3d(m):
+    """Standard 16-bit Morton decoding."""
+    x = 0
+    y = 0
+    z = 0
+    for i in range(5):
+        x |= (m & 1) << i
+        y |= (m & 2) << (i - 1)
+        z |= (m & 4) << (i - 2)
+        m >>= 3
+    return (x, y, z)
+```
+
+**Parameters:**
+*   `BIT_WIDTH`: `morton_16b` or `morton_32b`.
+*   `SPACE_ABSOLUTE_MAX_DEPTH`: 5 for 16b, 10 for 32b.
+
+**Edge Cases and Pitfalls:**
+*   **Overhead:** The implementation explicitly avoids relying on compiler inlining for the node relation macro due to zero tolerance for overhead [S1, unofficial]. It uses `#define LOOP_UNROLL` for pragma unrolling [S1, unofficial].
+*   **Coordinate Space:** Works in unsigned even integer space to reduce complexity [S1, unofficial].
+*   **Precision:** Integer division is used for cell vector calculation. Ensure inputs are aligned to the grid.
+
+## Operating characteristics
+*   **Time Complexity:** Traversal is $O(1)$ per level due to direct index calculation and bitmask check. No pointer chasing.
+*   **Memory Complexity:** Nodes are stored in contiguous blocks of 8. Each node uses 6 bytes (`uint32_t` + `uint8_t` + `uint8_t`). Memory pool overhead is minimal.
+*   **Performance:** Designed for minimal overhead. No recursive calls or pointer indirection.
+*   **Strengths:** Cache-friendly due to contiguous memory layout. Fast traversal.
+*   **Limitations:** Fixed block size of 8. Limited by Morton code bit width (max extent $32^3$ or $1024^3$).
+*   **When to use:** High-performance volume rendering where traversal speed is critical.
+*   **When not to use:** Scenes requiring extents larger than $1024^3$ without 32b Morton code support.
+
+## Background
+Originated in the `rapid-svo` library by Severi Suominen [S1, unofficial]. The library emphasizes zero-overhead traversal and efficient memory management for sparse voxel octrees.
+
+## Sources
+[S1] SeveriSuominen/rapid-svo, https://github.com/SeveriSuominen/rapid-svo, fetched 2026-10-26 (unofficial)

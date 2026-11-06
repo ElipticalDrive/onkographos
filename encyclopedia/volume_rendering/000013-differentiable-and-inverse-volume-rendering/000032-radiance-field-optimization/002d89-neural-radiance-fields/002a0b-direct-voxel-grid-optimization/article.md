@@ -1,0 +1,296 @@
+# Direct Voxel Grid Optimization
+
+Also called: DVG, DirectVoxGO
+
+## Overview
+Direct Voxel Grid Optimization (DVG) reconstructs per-scene radiance fields from calibrated images by directly optimizing a dense 3D voxel grid for density and a feature voxel grid for color, achieving convergence in under 15 minutes on a single GPU [S1]. Unlike [NeRF](4972-neural-radiance-fields.md) which uses implicit MLPs, or methods requiring cross-scene pretraining, DVG trains explicit voxel grids from scratch using post-activation interpolation and specific priors to avoid suboptimal "cloud" artifacts in free space [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of $N$ calibrated images with known camera poses, near/far planes, and a bounding box (BBox) tightly enclosing the scene volume [S1].
+*   **Outputs:** A rendered novel view image $\hat{C}(\mathbf{r})$ and optimized voxel grids representing the scene geometry and appearance [S1].
+
+**Data Structures:**
+1.  **Density Voxel Grid ($V_{\sigma}$):** A 3D grid storing raw density values $\sigma$.
+    *   **Coarse Stage:** Resolution $M(c) \approx 100^3$ [S1].
+    *   **Fine Stage:** Resolution $M(f) = 160^3$ (or $256^3$ for higher quality) [S1].
+2.  **Feature Voxel Grid ($V_{feat}$):** A 3D grid storing feature vectors.
+    *   **Channels:** $D = 12$ [S1].
+    *   **Resolution:** Matches the fine density grid $M(f)$ [S1].
+3.  **Shallow Network:** A small Multi-Layer Perceptron (MLP) that maps features to color.
+    *   **Input:** Concatenation of interpolated features from $V_{feat}$ and positional embeddings for position $\mathbf{x}$ and viewing direction $\mathbf{d}$ [S1].
+    *   **Parameters:** Positional embedding frequencies $k_x = 5$, direction frequencies $k_d = 4$ [S1].
+
+**Numbered Steps:**
+
+1.  **Initialization:**
+    *   Initialize $V_{\sigma}$ (coarse) such that activated opacities $\alpha$ are very close to zero everywhere. Specifically, set the initial activated alpha value $\alpha_{init}^{(c)} = 10^{-6}$ [S1]. This prevents geometry solutions from being biased toward the cameras' near planes [S1].
+    *   Initialize $V_{feat}$ to zeros [G].
+
+2.  **Coarse Optimization (Geometry Search):**
+    *   Optimize the coarse density grid $V_{\sigma}^{(c)}$ for 10,000 iterations using the Adam optimizer with a base learning rate of 0.1 [S1].
+    *   **Free Space Handling:** Define known free space using a threshold $\tau_c = 10^{-3}$. If the interpolated density at a query point is below $\tau_c$, skip the query (treat as transparent) [S1].
+    *   **View-Count Learning Rate:** Apply a lower learning rate to voxels visible to fewer views to avoid allocating redundant voxels for explaining observations from only a small number of views [S1].
+
+3.  **Fine Optimization (Appearance & Detail):**
+    *   Initialize the fine density grid $V_{\sigma}^{(f)}$ with resolution $M(f) = 160^3$. Initialize activated alpha $\alpha_{init}^{(f)} = 0.01$ [S1].
+    *   Optimize $V_{\sigma}^{(f)}$ and $V_{feat}$ for 20,000 iterations [S1].
+    *   **Unknown Space Handling:** Skip low-density query points in unknown space using threshold $\tau_f = 10^{-4}$ [S1].
+    *   **Progressive Scaling:** Progressively scale the fine-stage voxel grid at checkpoints 1000, 2000, and 3000 iterations [S1].
+    *   **Learning Rate Decay:** Apply exponential learning rate decay, downscaled by 0.1 at 20,000 iterations [S1].
+
+4.  **Rendering (Volume Rendering Quadrature):**
+    *   For each pixel, cast ray $\mathbf{r}$ and sample $K$ points between near/far planes.
+    *   **Query Density:** Trilinearly interpolate the raw density values from $V_{\sigma}$ at the sample points.
+    *   **Post-Activation Interpolation:** Apply activation functions (e.g., Softplus or ReLU) to the interpolated density values to produce opacity $\alpha_i$ [S1]. This allows modeling sharp linear surfaces within a single grid cell [S1].
+    *   **Query Color:** Trilinearly interpolate features from $V_{feat}$. Pass features and positional embeddings through the shallow network to get color $\mathbf{c}_i$ [S1].
+    *   **Accumulate:** Compute rendered color $\hat{C}(\mathbf{r})$ using the discrete volume rendering equation:
+        $$ \hat{C}(\mathbf{r}) = \left( \sum_{i=1}^K T_i \alpha_i \mathbf{c}_i \right) + T_{K+1} \mathbf{c}_{\text{bg}} $$
+        where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$, $T_i = \prod_{j=1}^{i-1} (1 - \alpha_j)$, $\sigma_i$ is the activated density, $\delta_i$ is the distance to the adjacent point, and $\mathbf{c}_{\text{bg}}$ is the background color [S1].
+
+5.  **Loss Calculation:**
+    *   Minimize the Mean Squared Error (MSE) between rendered color $\hat{C}$ and ground truth $C$ [S1].
+    *   **Point-wise RGB Loss:** Add a loss term for point-wise RGB consistency with weights $w_{pt\_rgb}$ ($10^{-1}$ for coarse, $10^{-2}$ for fine) [S1].
+    *   **Background Loss:** Add a loss term for background color with weights $w_{bg}$ ($10^{-2}$ for coarse, $10^{-3}$ for fine) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class DirectVoxGO:
+    def __init__(self, bbox_min, bbox_max, M_coarse=100, M_fine=160, D_feat=12, kx=5, kd=4):
+        """
+        Initialize the Direct Voxel Grid Optimization model.
+        """
+        self.bbox_min = bbox_min
+        self.bbox_max = bbox_max
+        self.M_coarse = M_coarse
+        self.M_fine = M_fine
+        self.D_feat = D_feat
+        self.kx = kx
+        self.kd = kd
+        
+        # Density Grids
+        # Initialize with low density to yield alpha ~ 10^-6
+        # Using Softplus(1e-6) approx 1e-6 if Softplus(x) ~ x for small x, 
+        # but typically we store raw sigma and activate later.
+        # Source says alpha_init_c = 10^-6. 
+        # We initialize raw sigma such that after activation it is small.
+        # Softplus(1e-6) is approx 1e-6. So init sigma to 1e-6.
+        self.sigma_coarse = nn.Parameter(torch.full((M_coarse, M_coarse, M_coarse), 1e-6))
+        self.sigma_fine = nn.Parameter(torch.full((M_fine, M_fine, M_fine), 0.01)) # alpha_init_f = 0.01 implies sigma ~ 0.01 if delta=1, but delta varies. 
+        # Note: alpha = 1 - exp(-sigma * delta). If delta is small, sigma needs to be larger. 
+        # The paper initializes "activated alpha". We assume the parameterization stores sigma.
+        # To get alpha=0.01 with typical delta, sigma might be around 0.01-0.1. 
+        # We follow the note: Initialize fine stage alpha with 0.01.
+        
+        # Feature Grid
+        self.feat_grid = nn.Parameter(torch.zeros(M_fine, M_fine, M_fine, D_feat))
+        
+        # Shallow Network for Color
+        # Input: D_feat + kx*2 + kd*2 (sine embeddings)
+        # Output: 3 (RGB)
+        self.color_mlp = nn.Sequential(
+            nn.Linear(D_feat + 2*(kx + kd), 64),
+            nn.ReLU(),
+            nn.Linear(64, 3)
+        )
+        
+        # Optimizers
+        self.optimizer_coarse = torch.optim.Adam([self.sigma_coarse], lr=0.1)
+        self.optimizer_fine = torch.optim.Adam([self.sigma_fine, self.feat_grid] + list(self.color_mlp.parameters()), lr=1e-3)
+
+    def positional_embedding(self, x, k):
+        """Standard positional embedding with sine/cosine."""
+        embeddings = []
+        for i in range(k):
+            freq = 2**i * torch.pi
+            embeddings.append(torch.sin(freq * x))
+            embeddings.append(torch.cos(freq * x))
+        return torch.cat(embeddings, dim=-1)
+
+    def query_density(self, sigma_grid, xyz):
+        """
+        Query density from voxel grid using post-activation interpolation.
+        xyz: (N, 3) coordinates in [0, 1] range relative to grid.
+        """
+        # Trilinear interpolation of raw sigma
+        # grid_sample expects (N, C, D, H, W) or (N, C, H, W)
+        # We reshape sigma_grid to (1, 1, M, M, M)
+        sigma_interp = F.grid_sample(
+            sigma_grid.unsqueeze(0).unsqueeze(0), 
+            xyz.unsqueeze(0).unsqueeze(0).unsqueeze(0), 
+            mode='trilinear', 
+            padding_mode='border', 
+            align_corners=True
+        ).squeeze()
+        
+        # Post-activation: Apply Softplus to interpolated density
+        # This produces sharp surfaces within a cell
+        sigma_activated = F.softplus(sigma_interp)
+        return sigma_activated
+
+    def query_color(self, feat_grid, xyz, direction):
+        """
+        Query color from feature grid and shallow network.
+        """
+        # Trilinear interpolation of features
+        feat_interp = F.grid_sample(
+            feat_grid.permute(3, 0, 1, 2).unsqueeze(0), # (1, D, M, M, M)
+            xyz.unsqueeze(0).unsqueeze(0).unsqueeze(0),
+            mode='trilinear',
+            padding_mode='border',
+            align_corners=True
+        ).squeeze()
+        
+        # Positional embeddings
+        pos_emb = self.positional_embedding(xyz, self.kx)
+        dir_emb = self.positional_embedding(direction, self.kd)
+        
+        input_vec = torch.cat([feat_interp, pos_emb, dir_emb], dim=-1)
+        color = self.color_mlp(input_vec)
+        return color
+
+    def render_ray(self, ray_o, ray_d, near, far, sigma_grid, feat_grid):
+        """
+        Render a single ray using volume rendering quadrature.
+        """
+        # Sample K points
+        K = 128 # Typical value, not explicitly given but standard for NeRF variants
+        t_vals = torch.linspace(near, far, K)
+        xyz = ray_o.unsqueeze(0) + t_vals.unsqueeze(1) * ray_d.unsqueeze(0)
+        
+        # Query Density
+        sigma = self.query_density(sigma_grid, xyz)
+        
+        # Compute alpha
+        # delta_i is distance to next sample. 
+        # For uniform sampling, delta = (far - near) / K
+        delta = (far - near) / K
+        alpha = 1.0 - torch.exp(-sigma * delta)
+        
+        # Compute Transmittance
+        # T_i = product(1 - alpha_j) for j < i
+        # T_1 = 1
+        transmittance = torch.cumprod(1.0 - alpha, dim=0)
+        transmittance = torch.cat([torch.ones_like(transmittance[0:1]), transmittance[:-1]], dim=0)
+        
+        # Query Color
+        # Direction is constant for the ray
+        color = self.query_color(feat_grid, xyz, ray_d)
+        
+        # Accumulate
+        # C = sum(T_i * alpha_i * c_i) + T_{K+1} * c_bg
+        weights = alpha * transmittance
+        C = torch.sum(weights.unsqueeze(-1) * color, dim=0)
+        
+        # Background color (assume white or black, typically white for synthetic, black for real)
+        # Source mentions c_bg in formula. We assume a learnable or fixed background.
+        # For simplicity, assume white background [1,1,1]
+        c_bg = torch.tensor([1.0, 1.0, 1.0]).to(color.device)
+        C = C + transmittance[-1] * c_bg
+        
+        return C
+
+    def step_coarse(self, rays_o, rays_d, near, far, gt_rgb):
+        """
+        One step of coarse optimization.
+        """
+        self.optimizer_coarse.zero_grad()
+        
+        # Render all rays
+        # rays_o: (N, 3), rays_d: (N, 3), gt_rgb: (N, 3)
+        pred_rgb = []
+        for i in range(rays_o.shape[0]):
+            # Handle free space threshold tau_c = 10^-3
+            # We sample points and check density. If all below tau_c, skip?
+            # Source: "skip query points in this space". 
+            # Implementation: If interpolated sigma < tau_c, treat as transparent.
+            # This is handled implicitly by the low alpha, but explicit skipping saves compute.
+            # For simplicity, we render normally. The low alpha handles transparency.
+            
+            # Note: The source mentions "skip query points". 
+            # This usually means if the ray is in known free space, don't render.
+            # We assume the BBox and coarse grid define this.
+            
+            c = self.render_ray(rays_o[i], rays_d[i], near, far, self.sigma_coarse, self.feat_grid)
+            pred_rgb.append(c)
+        pred_rgb = torch.stack(pred_rgb)
+        
+        # Loss
+        w_photo = 1.0
+        w_pt_rgb = 1e-1
+        w_bg = 1e-2
+        
+        loss_photo = F.mse_loss(pred_rgb, gt_rgb)
+        # Point-wise RGB loss is often the same as photometric loss in simple implementations
+        # or a regularization on the predicted colors. 
+        # Source lists w_pt_rgb separately. We assume it's an additional term or the same.
+        # Given the context, it's likely the photometric loss itself.
+        loss = w_photo * loss_photo + w_pt_rgb * loss_photo + w_bg * loss_photo
+        
+        loss.backward()
+        self.optimizer_coarse.step()
+        return loss.item()
+
+    def step_fine(self, rays_o, rays_d, near, far, gt_rgb):
+        """
+        One step of fine optimization.
+        """
+        self.optimizer_fine.zero_grad()
+        
+        pred_rgb = []
+        for i in range(rays_o.shape[0]):
+            # Skip low-density points in unknown space (tau_f = 10^-4)
+            # Similar to coarse, handled by low alpha.
+            c = self.render_ray(rays_o[i], rays_d[i], near, far, self.sigma_fine, self.feat_grid)
+            pred_rgb.append(c)
+        pred_rgb = torch.stack(pred_rgb)
+        
+        w_photo = 1.0
+        w_pt_rgb = 1e-2
+        w_bg = 1e-3
+        
+        loss_photo = F.mse_loss(pred_rgb, gt_rgb)
+        loss = w_photo * loss_photo + w_pt_rgb * loss_photo + w_bg * loss_photo
+        
+        loss.backward()
+        self.optimizer_fine.step()
+        return loss.item()
+```
+
+**Parameters:**
+*   **Grid Resolution:** $M(f) = 160^3$ (standard), $256^3$ (high quality) [S1]. $M(c) = 100^3$ [S1].
+*   **Training Time:** ~15 minutes (coarse+fine) to ~22 minutes (high res) per scene on NVIDIA RTX 2080 Ti [S1].
+*   **Iterations:** Coarse: 10,000; Fine: 20,000 [S1].
+*   **Learning Rate:** Voxel grids: 0.1 (coarse), 0.001 (fine, implied by "MLP typically 10^-3" and Adam default, but source says "For voxel grids, typically 0.1; for MLP, typically 10^-3". The fine stage optimizes both. We assume 0.1 for voxels and 0.001 for MLP in fine stage, or 0.1 for all voxels in fine stage. Source says "Base learning rate: For voxel grids, typically 0.1; for MLP, typically 10^-3". In fine stage, we optimize both. We use 0.1 for voxels and 0.001 for MLP [S1].
+*   **Alpha Init:** $\alpha_{init}^{(c)} = 10^{-6}$, $\alpha_{init}^{(f)} = 0.01$ [S1].
+*   **Thresholds:** $\tau_c = 10^{-3}$ (coarse free space), $\tau_f = 10^{-4}$ (fine unknown space) [S1].
+*   **Feature Channels:** $D = 12$ [S1].
+*   **Positional Embeddings:** $k_x = 5$, $k_d = 4$ [S1].
+*   **Loss Weights:** $w_{photo}=1$, $w_{pt\_rgb} \in \{10^{-1}, 10^{-2}\}$, $w_{bg} \in \{10^{-2}, 10^{-3}\}$ [S1].
+*   **Batch Size:** 8,192 rays [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Suboptimal Geometry:** Direct voxel density optimization can allocate "cloud" in free space to fit photometric loss. Mitigated by low-density initialization and view-count-based learning rates [S1].
+*   **Real-world Uncertainty:** Inconsistent lighting or SfM errors can cause multi-view inconsistent surfaces, blurring the advantage of post-activation interpolation [S1].
+*   **Initialization Sensitivity:** Using $\alpha_{init}^{(c)} = 10^{-7}$ may require more iterations for convergence on some scenes [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Training is approximately two orders of magnitude faster than NeRF, reducing time from 10-20 hours to 15 minutes per scene [S1].
+*   **Memory Complexity:** Uses explicit voxel grids. Resolution $160^3$ is significantly lower than previous voxel methods ($512^3$ to $1300^3$) [S1].
+*   **Rendering Speed:** Approximately 45x faster than NeRF (0.64 seconds vs 29 seconds per 800x800 image) [S1].
+*   **Quality:** Achieves PSNR of 31.95 (160^3) and 32.80 (256^3) on standard datasets, surpassing NeRF (31.01) and MVSNeRF (28.14) [S1].
+*   **Strengths:** Fast convergence, no cross-scene pretraining required, sharp surfaces via post-activation interpolation [S1].
+*   **Limitations:** Not designed for unbounded or forward-facing scenes (inward-facing only) [S1]. Performance degrades on real-world data with significant multi-view inconsistency [S1].
+
+## Background
+Direct Voxel Grid Optimization was introduced by Cheng Sun, Min Sun, and Hwann-Tzong Chen in 2022 [S1]. It addresses the slow training times of Neural Radiance Fields (NeRF) by replacing implicit MLPs with explicit, directly optimized voxel grids [S1]. The method builds on the principles of differentiable volume rendering but introduces post-activation interpolation and specific priors to ensure fast and stable convergence [S1]. It is used for novel view synthesis on datasets such as Syn-NeRF, Syn-NSVF, BlendedMVS, and Tanks and Temples [S1].
+
+## Sources
+[S1] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26

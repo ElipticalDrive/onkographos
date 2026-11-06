@@ -3,219 +3,236 @@
 Also called: Photon Mapping in Participating Media, Real-time volume rendering for three-dimensional fetal ultrasound using volumetric photon mapping, Screen-space volumetric photon mapping, Volume Photon Map Creation, Volumetric Photon Mapping (VPM) for Fetal Ultrasound, Volumetric Photon Mapping (VPM) for Real-Time Fetal Ultrasound, Volumetric photon mapping with screen-space destiny estimation
 
 ## Overview
-
-Volumetric Photon Mapping (VPM) is a global illumination technique for participating media that simulates light transport by separating direct (single scattering) and indirect (multiple scattering) illumination [S1]. It solves the Radiative Transfer Equation (RTE) using a two-pass pipeline: a preprocess pass traces photons through the volume to build a density map, and a rendering pass estimates in-scattered radiance at sample points along camera rays via local density estimation [S2]. Unlike conventional surface photon mapping which relies on KD-trees for nearest-neighbor searches, this method stores photons in a 3D volume texture and uses screen-space destiny estimation to accelerate computation, specifically targeting real-time performance in noisy medical imaging contexts like 3D fetal ultrasound [S1]. It differs from half-angle slice rendering by using random photon propagation to eliminate wood-grain artifacts [S1].
+Volumetric Photon Mapping (VPM) is a global illumination technique for participating media that simulates light transport by separating direct (single-scattering) and indirect (multiple-scattering) illumination [S1]. It solves the problem of realistic in-scattering in volumes by storing photon interactions in a spatial data structure and estimating radiance via density estimation [S2]. Unlike [Point-Based Light Transport in Participating Media](3763-point-based-light-transport-in-participating-media.md) which may use different storage or estimation primitives, VPM specifically generalizes Jensen's surface photon mapping to volumes using a 3D kernel for point-to-point density estimation [S2]. It differs from [Beam Radiance Estimate](1283-beam-radiance-estimate.md) by estimating incident radiance at discrete points via spherical queries rather than integrating along the entire camera ray [S2].
 
 ## How it works
-
-**Inputs:**
-*   3D volume dataset (e.g., ultrasound voxels) with scattering coefficient $\lambda_s$ and extinction $\tau_t$.
-*   Light source positions and intensities.
-*   Camera ray origin and direction.
-*   Parameters: `num_photons`, `exposure`, `samples` (ray march steps), `collect_r` (search radius).
-
-**Outputs:**
-*   Rendered image with direct and indirect illumination.
+**Inputs:** Volume density/scattering coefficients, light source positions/directions, camera ray, anisotropy coefficient $g$, exposure, number of photons, sample count.
+**Outputs:** Rendered image with direct and indirect illumination.
 
 **Data Structures:**
-*   **Volume Texture:** A 3D texture storing photon data. Each voxel or grid cell stores photon flux/power. This replaces the KD-tree used in traditional VPM to reduce storage overhead and gathering time [S1].
-*   **Photon List (Preprocess):** A temporary list of photons containing position, incidence direction, and power, generated during the trace phase before being stored in the volume texture [S1].
-
-**Formulas:**
-The total scattered radiance $L_s(x', \omega_0)$ is the sum of single-scattering (direct) $L_{ss}$ and multiple-scattering (indirect) $L_{ms}$ components [S1]:
-$$ L_{s}(x',\omega _{0})=L_{ss}({x}^{\prime},\omega _{0})+L_{ms}({x}^{\prime},\omega _{0}) $$
-
-For ultrasound rendering, emission is ignored. The radiance reaching a sample $x_s$ along ray direction $\omega_0$ is [S1]:
-$$ L(x_{s},\omega _{0}) = L_{0}(x_{0},\omega _{0})T(x_{0},x_{s}) + \int _{x_{0}}^{x_{s}}\left[ \lambda _{s}(x^{\prime})L_{s}(x^{\prime},\omega _{0})\right] T(x^{\prime},x_{s})dx^{\prime} $$
-where $L_0$ is background energy, $\lambda_s$ is scattering coefficient, and $T(x_i, x_j)$ is transmittance [S1].
-
-Transmittance between samples $x_i$ and $x_j$ is [S1]:
-$$ T(x_{i},x_{j})=e^{-\int _{x_{i}}^{x_{j}}\tau _{t}dt} $$
-
-The Henyey-Greenstein phase function models scattering probability by angle $\theta$ [S1]:
-$$ p(\theta )=\frac{1-{g}^{2}}{{(1+{g}^{2}-2g\cos\theta )}^{\frac{2}{3}}} $$
-where $g \in [-1,1]$ is the anisotropy coefficient [S1].
+*   **Volume Texture (Photon Map):** A 3D texture storing photon data. Each voxel or texel stores the flux/power of photons interacting at that location. This replaces the traditional KD-tree to avoid storage overhead and time-consuming gathering [S1].
+*   **Photon Record:** Contains position, incidence direction, and power (flux) [S1].
 
 **Steps:**
 
-1.  **Preprocessing (Photon Emission and Storage):**
-    1.  Initialize a shared counter `Count` to 0.
-    2.  For each GPU thread, while `Count` < `num_photons`:
-        a.  Increment `Count`.
-        b.  Emit a photon from the light source. Cast rays onto the volume’s boundary voxels to prevent wastage [S1].
-        c.  Trace the photon through the volume using a Markov random-walk process [S1][S2].
-        d.  At each step, determine interaction using the cumulative distribution function [S5, unofficial].
-        e.  If interaction occurs, determine fate (absorption/scattering) using Russian roulette (50% termination probability after 3 bounces) [S1][S5, unofficial].
-        f.  If scattered, update direction using the phase function [S1].
-        g.  Record collision position, incidence direction, and incident energy [S1].
-        h.  Store photon data in a temporary list.
-    3.  Populate the 3D Volume Texture with the stored photons to minimize storage space and avoid KD-tree gathering [S1].
+1.  **Preprocessing (Photon Emission and Tracing):**
+    *   Emit photons from light sources into the volume [S1].
+    *   Cast a ray from the light source. If it intersects the volume, divide the path into steps of constant size with jitter [S6, unofficial].
+    *   For each step, determine interaction using the cumulative distribution function (CDF) based on extinction coefficient [S6, unofficial].
+    *   Upon interaction:
+        *   Record the photon's position, incidence direction, and power in the volume texture [S1].
+        *   Determine fate (absorption or scattering) using Russian roulette. After three interactions, the ray has a 50% chance of termination [S6, unofficial].
+        *   If scattered, sample a new direction using the Henyey-Greenstein phase function [S1].
+        *   If the ray hits a surface, store surface photons or handle reflection/transmission [S6, unofficial].
+    *   Continue until photon is absorbed or terminated [S1].
 
-2.  **Rendering (Direct Illumination):**
-    1.  Cast rays from the camera.
-    2.  Calculate direct illumination $L_{ss}$ at each sample point $x'$ using the reduced incident light undergoing its first scattering interaction [S1]:
-        $$ L_{ss}(x', \omega_0)=\int _{\Omega}s({x}^{\prime},{\omega }_{i},{\omega }_{0}){L}_{i}({x}^{\prime},{\omega }_{i})d{\omega }_{i} $$
-    3.  Store direct illumination in a separate illumination volume [S1].
+2.  **Rendering (Radiance Estimation):**
+    *   Cast camera rays into the volume [S2].
+    *   Refract camera rays into the volume and sample along the ray [S2].
+    *   For each sample point $x'$ along the ray:
+        *   Calculate direct illumination $L_{ss}$ using single scattering [S1].
+        *   Calculate indirect illumination $L_{ms}$ using VPM density estimation [S1].
+        *   Combine with transmittance to get final radiance [S1].
 
-3.  **Rendering (Indirect Illumination via Screen-Space Destiny Estimation):**
-    1.  For each camera ray, march through the volume with `samples` steps (fixed at 800 in tested datasets) [S1].
-    2.  For each sample point $x_j$ along the ray, calculate the indirect radiance contribution $L_{ms}$ using the photon map [S1]:
-        $$ L_{ms}({x}^{\prime},{\omega }_{0})=\int _{\Omega}s({x}^{\prime},{\omega }_{i},{\omega }_{0}){L}({x}^{\prime},{\omega }_{i})d{\omega }_{i} $$
-    3.  The discrete approximation for the ray integral is [S1]:
-        $$ L_{x_n}=\sum _{j=1}^{n}\prod _{i=j}^{n-1}T\left( {x}_{i},{x}_{i+1} \right) \int _{{x}_{j-1}}^{{x}_{j}}T\left( {x}^{\prime},{x}_{j} \right) {\sigma }_{s}\left( {x}^{\prime} \right) {L}_{ms}\left( {x}^{\prime} \right) d{x}^{\prime} $$
-    4.  Estimate $L_{ms}$ at $x'$ by gathering photons from the volume texture within a spherical neighborhood of radius `collect_r` (e.g., 0.7) [S3, unofficial].
-    5.  Accumulate energy from nearby photons. Note: In some implementations, the normal-based weighting term is ineffective if the normal is zeroed, resulting in a uniform weight distribution based on power and distance [S3, unofficial].
-    6.  Apply HDR tone mapping to handle intensity ranges exceeding display capabilities [S1].
+**Formulas:**
 
-4.  **Compositing:**
-    1.  Combine direct and indirect illumination volumes to produce the final image [S1].
+The total scattered radiance $L_s(x', \omega_0)$ is the sum of single-scattering (direct) $L_{ss}$ and multiple-scattering (indirect) $L_{ms}$ components [S1]:
+$$ L_{s}(x',\omega _{0})=L_{ss}({x}^{\prime},\omega _{0})+L_{ms}({x}^{\prime},\omega _{0}) $$
+
+Direct illumination $L_{ss}(x', \omega_0)$ is the reduced incident light undergoing its 1st scattering interaction at $x'$ [S1]:
+$$ L_{ss}(x^{\prime},\omega _{0})=\int _{\Omega}s({x}^{\prime},{\omega }_{i},{\omega }_{0}){L}_{i}({x}^{\prime},{\omega }_{i})d{\omega }_{i} $$
+where $\omega_i$ are directions on a local sphere at $x'$, $s$ is the material shading function, and $L_i$ is attenuated incident radiance [S1].
+
+Multi-scattering illumination $L_{ms}(x', \omega_0)$ is calculated as [S1]:
+$$ L_{ms}({x}^{\prime},{\omega }_{0})=\int _{\Omega}s({x}^{\prime},{\omega }_{i},{\omega }_{0}){L}({x}^{\prime},{\omega }_{i})d{\omega }_{i} $$
+where photons scatter several times before reaching $x'$ [S1].
+
+The Henyey-Greenstein phase function models scattering probability by angle $\theta$ [S1]:
+$$ p(\theta )=\frac{1-{g}^{2}}{{(1+{g}^{2}-2gcos\theta )}^{\frac{2}{3}}} $$
+where $g \in [-1,1]$ is the anisotropy coefficient [S1].
+
+Radiance reaching a sample $x_s$ along ray direction $\omega_0$ is given by [S1]:
+$$ L(x_{s},\omega _{0}) = L_{0}(x_{0},\omega _{0})T(x_{0},x_{s}) + \int _{x_{0}}^{x_{s}}\left[ \lambda _{a} (x^{\prime})L_{e}(x^{\prime},\omega _{0})+\lambda _{s}(x^{\prime})L_{s}(x^{\prime},\omega _{0})\right] T(x^{\prime},x_{s})dx^{\'} $$
+where $L_{0}(x_{0}, \omega _{0})$ is background energy, $\lambda _{a}$ is absorption coefficient, $\lambda _{s}$ is scattering coefficient, $L_{e}$ is emitted radiance, $L_{s}$ is scattered radiance, and $T(x_{i},x_{j})$ is transmittance [S1].
+
+Transmittance between samples $x_i$ and $x_j$ is calculated as [S1]:
+$$ T(x_{i},x_{j})=e^{-\int _{x_{i}}^{x_{j}}\tau _{t}dt} $$
+where $\tau _{t}$ denotes extinction [S1].
+
+For the indirect illumination rendering using ray casting (as opposed to ray marching for small volumes), the radiance at sample $x_n$ is [S1]:
+$$ L_{x_n}=\sum _{j=1}^{n}\prod _{i=j}^{n-1}T\left( {x}_{i},{x}_{i+1} \right) \int _{{x}_{j-1}}^{{x}_{j}}T\left( {x}^{\prime},{x}_{j} \right) {\sigma }_{s}\left( {x}^{\prime} \right) {L}_{ms}\left( {x}^{\prime} \right) d{x}^{\prime} $$
+where $x_j$ is the j-th sample along the ray. If $j=n$, the product term equals 1 [S1].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def volumetric_photon_mapping(volume_data, light_sources, camera, num_photons, exposure, samples, collect_r):
-    # Step 1: Preprocess - Photon Emission
-    photon_list = []
+# Photon Emission
+def emit_photons(light_sources, volume_texture, total_photons):
     count = 0
-    # Parallel emission across GPU threads
-    while count < num_photons:
-        # Thread-safe increment
-        current_count = atomic_add(count, 1)
-        if current_count >= num_photons:
-            break
+    while count < total_photons:
+        # Co-completion strategy: threads share the count variable
+        # to minimize idle time [S1]
+        photon = create_photon(light_sources)
+        ray = Ray(photon.position, photon.direction)
         
-        # Emit photon from light source
-        photon = emit_photon(light_sources)
-        
-        # Trace photon through volume
-        current_pos = photon.origin
-        current_dir = photon.direction
-        current_power = photon.power
-        
-        while current_power > 0:
-            # Check interaction with volume
-            hit, dist = ray_march_volume(current_pos, current_dir, volume_data)
-            
-            if hit:
-                # Determine fate (Russian Roulette)
-                # Termination probability 50% after 3 bounces (simplified here)
-                if random() < 0.5:
-                    break
-                
-                # Store interaction
-                photon_list.append({
-                    'pos': current_pos,
-                    'dir': current_dir,
-                    'power': current_power
-                })
-                
-                # Update direction using phase function (Henyey-Greenstein)
-                current_dir = sample_phase_function(current_dir, volume_data.anisotropy)
-                
-                # Update power
-                current_power *= volume_data.scattering_coefficient # Simplified energy conservation
-                
-                # Advance
-                current_pos = current_pos + current_dir * dist
-            else:
+        while photon.power > 0:
+            # Check intersection with volume
+            hit, t = ray.intersect_volume()
+            if not hit:
                 break
-                
-    # Step 2: Store photons in Volume Texture
-    volume_texture = create_3d_texture(volume_data.resolution)
-    for p in photon_list:
-        volume_texture.set_flux(p.pos, p.power)
-        
-    # Step 3: Rendering
-    image = empty_image(camera.resolution)
+            
+            # Step through volume
+            step_size = get_step_size()
+            current_pos = ray.origin
+            
+            while current_pos < hit.point:
+                # Determine interaction using CDF [S6, unofficial]
+                if random() < extinction_coefficient * step_size:
+                    # Interaction occurs
+                    store_photon(volume_texture, current_pos, photon.direction, photon.power)
+                    
+                    # Russian roulette for termination [S6, unofficial]
+                    if photon.bounces > 3:
+                        if random() > 0.5:
+                            break
+                    
+                    # Sample new direction using Henyey-Greenstein [S1]
+                    theta = sample_henyey_greenstein(photon.anisotropy_g)
+                    photon.direction = rotate_direction(photon.direction, theta)
+                    photon.power *= scattering_coefficient
+                    
+                    current_pos += step_size
+                else:
+                    current_pos += step_size
+            
+            # Handle surface interaction if hit surface [S6, unofficial]
+            if ray.hit_surface:
+                handle_surface_photon(photon)
+                break
+            
+            ray.origin = current_pos
+            ray.direction = photon.direction
+            photon.bounces += 1
+        count += 1
+
+# Rendering
+def render_camera_ray(camera_ray, volume_texture, exposure, num_vol):
+    energy = 0.0
+    sqRadius = 0.7 # Typical value [S4, unofficial]
     
-    for pixel in camera.rays:
-        ray = pixel.ray
-        total_radiance = 0.0
-        transmittance = 1.0
+    # Ray march or cast through volume
+    for sample_point in camera_ray.samples:
+        # Direct illumination calculation [S1]
+        L_ss = calculate_direct_illumination(sample_point)
         
-        # Ray marching
-        for step in range(samples):
-            sample_pos = ray.origin + ray.direction * (step * step_size)
-            
-            # Direct Illumination (Single Scattering)
-            L_ss = calculate_direct_illumination(sample_pos, light_sources, volume_data)
-            
-            # Indirect Illumination (Multiple Scattering) via Density Estimation
-            L_ms = 0.0
-            # Gather photons within collect_r radius
-            nearby_photons = volume_texture.query_sphere(sample_pos, collect_r)
-            
-            for p in nearby_photons:
-                dist_sq = distance_sq(sample_pos, p.pos)
-                if dist_sq < collect_r * collect_r:
-                    # Weight calculation
-                    # Note: Some implementations use normal alignment, but if N=0, weight is uniform
-                    weight = p.power / len(nearby_photons) 
-                    weight *= (1.0 - sqrt(dist_sq)) / exposure
-                    L_ms += weight
-            
-            # Accumulate radiance
-            # L(x_s) = L_0 * T + integral(lambda_s * L_s * T)
-            scattering_term = volume_data.scattering_coefficient * (L_ss + L_ms)
-            total_radiance += scattering_term * transmittance * step_size
-            
-            # Update transmittance
-            extinction = volume_data.extinction_coefficient
-            transmittance *= exp(-extinction * step_size)
-            
-            if transmittance < 0.01:
-                break
-                
-        image[pixel] = tone_map(total_radiance)
+        # Indirect illumination via VPM density estimation [S1]
+        L_ms = gather_photons_volume(sample_point, volume_texture, sqRadius, exposure, num_vol)
         
-    return image
+        # Combine
+        L_s = L_ss + L_ms
+        
+        # Transmittance and background [S1]
+        T = calculate_transmittance(camera_ray.origin, sample_point)
+        radiance = background_energy * T + L_s * T * scattering_coefficient
+        
+        energy += radiance
+        
+    return energy / num_samples
+
+def gather_photons_volume(query_point, volume_texture, sqRadius, exposure, num_vol):
+    energy = 0.0
+    # Iterate through volume photons (or use texture filtering if optimized) [S4, unofficial]
+    # Note: In the specific implementation cited, this iterates all photons [S4, unofficial]
+    for i in range(num_vol):
+        vol_photon = volume_texture.get_photon(i)
+        dist_sq = distance_sq(query_point, vol_photon.position)
+        
+        if dist_sq < sqRadius:
+            # Weight calculation
+            # Note: In the cited code, N is zero vector, so dot product is 0 [S4, unofficial]
+            # Weight is overwritten by power/num_vol [S4, unofficial]
+            weight = vol_photon.power / num_vol
+            
+            # Apply exposure [S4, unofficial]
+            weight *= (1.0 - dist_sq) / exposure
+            
+            energy += vol_photon.power * weight
+            
+    return energy
 ```
 
 **Parameters:**
-*   `num_photons`: Controls scattering realism. Higher counts improve realism but reduce FPS. Large datasets require higher counts [S1].
-*   `exposure`: Luminance value assigned to each photon. Influences brightness. Tested values: 0.3 to 0.4 [S1].
-*   `samples`: Number of samples during rendering. Fixed at 800 in tested datasets [S1].
-*   `collect_r`: Search radius for photon gathering. Set to 0.7 in some implementations [S3, unofficial].
-*   `g` (anisotropy coefficient): Controls scattering behavior. $g \in [-1,1]$. Negative: back scattering, 0: isotropic, positive: forward scattering [S1].
+*   $g$ (Anisotropy coefficient): $g \in [-1,1]$. Negative values produce back scattering, 0 isotropic, positive forward scattering [S1].
+*   exposure: Luminance value assigned to each photon; influences brightness. Tested values: 0.3 to 0.4 [S1].
+*   number of photons: Controls scattering realism and speed. Higher counts improve realism but reduce FPS. Large datasets require higher counts [S1].
+*   samples: Number of samples during rendering. Fixed at 800 in tested datasets [S1].
+*   sqRadius: Search radius for photons. Set to 0.7 in cited implementations [S4, unofficial].
 
 **Edge Cases and Pitfalls:**
-*   **Speckle Noise:** Ultrasound speckle noise degrades signal-to-noise ratio, making gradient-based normal calculation unreliable. VPM is less sensitive to this than local illumination methods [S1].
-*   **Storage Overhead:** Traditional KD-trees are memory-intensive and slow for gathering. Using a volume texture mitigates this [S1].
-*   **Thread Scheduling:** Creating a thread per photon causes idle time. Co-completing emission tasks using a shared counter minimizes idle time [S1].
-*   **Ineffective Normal Weighting:** In some code implementations, the surface normal $N$ is initialized to zero, rendering the dot-product weighting term zero. The weight falls back to a uniform distribution based on power and count [S3, unofficial].
-*   **GPU Requirement:** Requires GPU acceleration for real-time performance due to high photon counts [S1].
+*   **Speckle Noise:** Ultrasound images have speckle noise that degrades signal-to-noise ratio and makes gradient-based normal calculation unreliable. VPM is less sensitive to this than local illumination methods [S1].
+*   **Storage Overhead:** Traditional VPM uses KD-trees which are memory-intensive and slow for gathering. Using a volume texture mitigates this [S1].
+*   **GPU Thread Scheduling:** Creating a thread per photon leads to resource wastage. Co-completing emission tasks using a shared counter minimizes idle time [S1].
+*   **Ineffective Normal Weighting:** In some implementations, the normal $N$ is initialized to zero, making the dot product term in weight calculation zero, rendering normal-based weighting ineffective [S4, unofficial].
+*   **Emission Term:** In fetal ultrasound rendering, emissions are often not considered, simplifying the RTE [S1].
 
 ## Subtopics
 
 ### [Beam Radiance Estimate](1283-beam-radiance-estimate.md)
-The Beam Radiance Estimate (BRE) is a photon-based technique for estimating accumulated in-scattered radiance along an entire camera ray in participating media, serving as the core gathering step for Volumetric Photon Mapping. Unlike conventional volumetric photon mapping, which estimates incident radiance at discrete points along a ray via spherical neighborhood queries, BRE queries all photons intersecting the ray line simultaneously, replacing Dirac delta and Heaviside functions with a 2D smoothing kernel perpendicular to the ray. This approach eliminates redundant photon gathering and noise associated with large step sizes in ray marching, concentrating computational effort only where photons intersect the viewing path. See [Beam Radiance Estimate](1283-beam-radiance-estimate.md).
+The Beam Radiance Estimate (BRE) is a photon-based technique for estimating accumulated in-scattered radiance along an entire camera ray in participating media, serving as the core gathering step for Volumetric Photon Mapping. Unlike conventional volumetric photon mapping, which estimates incident radiance at discrete points along a ray via spherical neighborhood queries, BRE queries all photons intersecting the ray line simultaneously, replacing Dirac delta and Heaviside functions with a 2D smoothing kernel perpendicular to the ray. This approach eliminates redundant photon gathering and noise associated with large step sizes in ray marching, concentrating computational effort only where photons intersect the viewing path.
 
 ### [Photon Emission and Storage](3880-photon-emission-and-storage.md)
-The process of generating photons from a light source, tracing them through the scene via reflection and refraction, and storing their positions, directions, and energies at intersection points. In VPM, this involves a Markov random-walk process and storing data in a global structure (traditionally a KD-tree, or a volume texture in real-time variants). See [Photon Emission and Storage](3880-photon-emission-and-storage.md).
+Photon Emission and Storage is the data generation phase of Volumetric Photon Mapping, responsible for tracing photons from light sources through participating media and surfaces to populate a spatial data structure with scattering events. It solves the problem of approximating indirect illumination and inscattering by storing photon positions, directions, and energies. It differs from its sibling [Beam Radiance Estimate](1283-beam-radiance-estimate.md) by storing discrete point samples rather than beam-like structures, and from [Photon Beam Tracing](5401-photon-beam-tracing.md) by using standard ray-object intersection for storage rather than beam tracing through volumes.
 
 ### [Photon Beam Tracing](5401-photon-beam-tracing.md)
-A volumetric radiance estimation method where photon paths are stored as beams (segments) rather than points, allowing for density estimation via beam intersection. This variant optimizes the storage and querying of photon paths in participating media. See [Photon Beam Tracing](5401-photon-beam-tracing.md).
+Photon Beam Tracing is a volumetric radiance estimation method where photon paths are stored as beam segments rather than discrete points, allowing for density estimation via beam intersection. It differs from standard volumetric photon tracing by storing the photon energy up to the point of intersection with solid geometry, rather than discarding the photon upon collision. This approach provides a superset of the information contained in a standard photon map, enabling more efficient handling of boundaries between participating media and opaque surfaces.
+
+### [Progressive Photon Mapping](6672-progressive-photon-mapping.md)
+Progressive Photon Mapping is a multipass rendering technique that continuously emits photons into the image to gradually reduce illumination inaccuracy. It builds on [Volumetric Photon Mapping](2190-volumetric-photon-mapping.md) by addressing the memory limitations of storing a single huge volumetric photon map, which is costly for participating media. Unlike single-pass methods, it iteratively refines the estimate by discarding intermediate data structures after each pass.
+
+### Surface Photon Mapping
+A method for estimating surface illumination by accumulating energy from photons stored on the same object surface, weighted by distance and surface normal alignment [S4, unofficial]. It initializes an energy accumulator and sets `sqRadius` to 0.7 [S4, unofficial]. It iterates through photons stored for the object, calculating the distance from the query point $p$ to the photon position. If the distance is less than `sqRadius`, it calculates the weight as `max(0.0, -dot(N, photons[id][i][1]))`, representing the cosine of the angle between the surface normal and photon direction [S4, unofficial]. The weight is multiplied by `(1.0 - cur_dist) / exposure` and added to the energy accumulator [S4, unofficial].
+
+### Proposed Fetal Ultrasound Rendering Method
+A rendering process for ultrasound data that renders direct and indirect lighting separately using a raycaster, with indirect illumination computed via VPM [S1]. Direct illumination is rendered separately [S1]. The rendering equation for ultrasound data (where emissions are not considered) is split into direct and indirect components:
+$$ L(x_{s},\omega _{0}) = L_{0}(x_{0},\omega _{0})T(x_{0},x_{s}) + \int _{x_{0}}^{x_{s}}\lambda _{s}(x^{\prime})L_{ss}(x^{\prime},\omega _{0})T(x^{\prime},x_{s})dx^{\'} + \int _{x_{0}}^{x_{s}}\lambda _{s}(x^{\prime})L_{ms}(x^{\prime},\omega _{0})T(x^{\prime},x_{s})dx^{\'} $$
+A high dynamic range (HDR) technique is proposed to tackle the wide range of intensities resulting from varying lighting conditions [S1].
+
+### GPU Texture Photon Mapping
+A method proposed by Czuczor et al. that stores photon collision information in GPU texture memory and uses texture filtering instead of KD tree nearby-seeking [S1]. This method is only effective for surface rendering, not volume rendering [S1].
+
+### Homogeneous RTE Approximation
+For homogeneous media, the in-scattered radiance term in the RTE is approximated by summing contributions over discrete segments along the camera ray [S3]. The segment sample points are $x_0, ..., x_{s-1}$, where $x_0$ and $x_{s-1}$ are the first and last points within the medium, and $x_s$ is a surface point past the medium [S3].
+
+### Reverse Photon Mapping
+A modification to conventional photon mapping introduced by Havran et al. to speed up calculations at the last collection stage [S1].
+
+### Hierarchical Photon Mapping
+A method proposed by Spencer and Jones that increases illumination accuracy by passing photon energy layer-by-layer through a binary tree system [S1].
+
+### Interactive Photon Map Update
+A modification by Daniel et al. to produce interactive character for real-time realistic volume rendering, creating a data format for assessing scene areas affected by altering the transfer function to allow effective updates to the photon map [S1].
+
+### Volumetric Photon Mapping with Radiance Transfer
+A study by Zhang et al. that incorporated the volumetric photon mapping algorithm into the customary predesigned radiance transfer procedure [S1].
 
 ## Operating characteristics
-
-*   **Time Complexity:** The preprocessing phase is $O(N)$ where $N$ is the number of photons, involving tracing and storage. The rendering phase is $O(R \cdot S \cdot K)$ where $R$ is the number of rays, $S$ is the number of samples per ray, and $K$ is the number of photons in the search neighborhood. Using a volume texture allows for $O(1)$ spatial lookup but requires scanning a neighborhood, whereas KD-trees offer $O(\log N)$ search but with higher constant factors and memory overhead [S1].
-*   **Memory Complexity:** $O(N)$ for storing photon data. Storing photons in a 3D volume texture reduces overhead compared to KD-trees but scales with the volume resolution [S1].
-*   **Measured Performance:** On an Intel E5 CPU with 8GB RAM and GPU acceleration, real-time performance (200+ FPS) was achieved for fetal ultrasound datasets (e.g., 289x212x266 resolution, 800 samples, 17-26 photons) [S1]. The method claims real-time performance even with up to ten million photons [S1].
-*   **Strengths:** Handles global illumination (indirect lighting) in participating media; robust against speckle noise in ultrasound; eliminates wood-grain artifacts of slice-based rendering; real-time capable with GPU acceleration [S1].
-*   **Limitations:** Requires GPU for real-time performance; high photon counts needed for large volumes to avoid unrealistic results; traditional KD-tree implementations are slow and memory-heavy (mitigated by volume texture variant) [S1].
-*   **When to use:** Real-time volume rendering of participating media, specifically in medical imaging (ultrasound) where noise sensitivity of local illumination is a problem and global illumination effects are desired [S1].
-*   **When not to use:** CPU-only environments requiring real-time performance; scenes where single scattering is sufficient; scenarios where memory bandwidth is severely constrained and volume texture storage is prohibitive.
+*   **Time Complexity:** The photon tracing phase is $O(N_p \cdot N_s)$ where $N_p$ is the number of photons and $N_s$ is the number of steps per photon [S1]. The rendering phase depends on the gathering method. Using a volume texture allows for faster gathering than KD-trees, but iterating all photons is $O(N_p)$ per sample [S4, unofficial].
+*   **Memory Complexity:** Memory costly due to the requirement of a huge volumetric photon map [S2]. Storing photons in a volume texture minimizes storage space compared to KD-trees [S1].
+*   **Measured Performance:** On Intel E5, 8GB RAM, GPU: Fetus 1 (289x212x266, 800 samples, exposure 0.4, 17 photons) -> 217 FPS; Fetus 2 (183x115x126, 800 samples, exposure 0.4, 22 photons) -> 222 FPS; Fetus 3 (209x175x209, 800 samples, exposure 0.3, 18 photons) -> 218 FPS; Fetus 4 (196x128x122, 800 samples, exposure 0.4, 20 photons) -> 220 FPS [S1]. Narrative claims real-time performance is maintained even when photon count increases to ten million [S1].
+*   **Strengths:** Simulates realistic lighting effects (scattering) and provides more depth information than local illumination methods [S1]. Less sensitive to speckle noise [S1]. Real-time performance achievable with GPU acceleration [S1].
+*   **Limitations:** Requires GPU acceleration for real-time performance due to high photon counts [S1]. Insufficient photons on large volumes produce unrealistic rendering [S1]. Traditional VPM is memory costly [S2].
+*   **When to use:** When realistic global illumination in participating media is required, especially for ultrasound or similar noisy volumetric data [S1].
+*   **When not to use:** When memory is severely constrained and progressive methods are not viable, or when surface-only rendering is sufficient [S1].
 
 ## Background
-
-Volumetric Photon Mapping is based on the common photon mapping algorithm developed by Jensen [S1][S2]. Jensen and Christensen [1998] solved the RTE using a combination of photon tracing, ray marching, and density estimation [S2]. The method was adapted for real-time volume rendering in 3D fetal ultrasound to address the limitations of local illumination methods, which produce plastic-like visuals and are sensitive to speckle noise [S1]. The specific variant using screen-space destiny estimation and volume textures was proposed to accelerate computation and avoid complicated storage structures like KD-trees [S1].
+Volumetric Photon Mapping was developed based on the common photon mapping algorithm by Jensen [29], which includes photon-tracing and rendering steps [S1]. It generalizes photon mapping from surface light travel to volume light transport by storing volumetric interactions as photons and estimating density using a 3D kernel [S2]. It is used in 3D fetal ultrasound visualization to improve visual impression with anti-noise ability [S1].
 
 ## Sources
-
 [S1] Real-time volume rendering for three-dimensional fetal ultrasound using volumetric photon mapping., https://doi.org/10.1186/s42492-024-00177-4, fetched 2026-10-26
-[S2] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26
-[S3] jacklv123/Volumetric-photon-mapping, https://github.com/jacklv123/Volumetric-photon-mapping, fetched 2026-10-27 (unofficial)
-[S4] The Beam Radiance Estimate for Volumetric Photon Mapping, http://graphics.ucsd.edu/~henrik/papers/beam_radiance_estimate/, fetched 2026-10-30
-[S5] CS348b Final Project - Rendering Underwater Scenes, http://www.graphics.stanford.edu/courses/cs348b-competition/cs348b-04/underwater/index.html, fetched 2026-10-30 (unofficial)
+[S2] A survey on rendering homogeneous participating media, https://doi.org/10.1007/s41095-021-0249-1, fetched 2026-10-26
+[S3] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26
+[S4] jacklv123/Volumetric-photon-mapping, https://github.com/jacklv123/Volumetric-photon-mapping, fetched 2026-10-27 (unofficial)
+[S5] The Beam Radiance Estimate for Volumetric Photon Mapping, http://graphics.ucsd.edu/~henrik/papers/beam_radiance_estimate/, fetched 2026-10-30
+[S6] CS348b Final Project - Rendering Underwater Scenes, http://www.graphics.stanford.edu/courses/cs348b-competition/cs348b-04/underwater/index.html, fetched 2026-10-30 (unofficial)

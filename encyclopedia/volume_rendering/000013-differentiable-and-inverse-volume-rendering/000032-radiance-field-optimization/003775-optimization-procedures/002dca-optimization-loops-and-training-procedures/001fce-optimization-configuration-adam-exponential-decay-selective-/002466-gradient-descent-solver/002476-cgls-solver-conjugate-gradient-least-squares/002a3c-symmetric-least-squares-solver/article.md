@@ -1,0 +1,153 @@
+# Symmetric Least Squares Solver
+
+Also called: Symmetric SVD Solver, Symmetric Pseudoinverse Solver
+
+## Overview
+The Symmetric Least Squares Solver solves the linear system $Ax = b$ where $A$ is a symmetric matrix, typically arising from the normal equations $A^T A x = A^T b$ in least squares problems. It distinguishes itself from the [General Least Squares Solver](4941-general-least-squares-solver.md) by exploiting the symmetry of $A$ to use eigen-decomposition rather than full SVD or QR factorization, reducing computational cost. It serves as the core linear algebra primitive for the [CGLS Solver (Conjugate Gradient Least Squares)](3285-cgls-solver-conjugate-gradient-least-squares.md), providing a direct, numerically stable solution for small symmetric systems (e.g., $3 \times 3$) where iterative methods might be overkill or where a robust fallback is needed.
+
+## How it works
+The method computes the solution $x$ by explicitly forming the pseudoinverse of $A$ using its spectral decomposition.
+
+**Inputs:**
+- $A$: A symmetric matrix (stored in compact form for $3 \times 3$: $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$).
+- $b$: A vector of the same dimension as $A$.
+- $svd\_tol$: Tolerance for determining rank during SVD/eigen-decomposition.
+- $svd\_sweeps$: Number of Jacobi sweeps for the eigenvalue solver.
+- $pinv\_tol$: Threshold for inverting eigenvalues in the pseudoinverse step.
+
+**Outputs:**
+- $x$: The solution vector.
+- $r$: The residual error $\|Ax - b\|^2$.
+
+**Data Structures:**
+- `SMat3`: Symmetric $3 \times 3$ matrix storing 6 floats: $m_{00}, m_{01}, m_{02}, m_{11}, m_{12}, m_{22}$.
+- `Mat3`: General $3 \times 3$ matrix storing 9 floats.
+- `Vector3`: 3-element vector.
+
+**Steps:**
+1. **Symmetric SVD (Eigen-decomposition):** Decompose $A$ into $A = V D V^T$, where $V$ is an orthogonal matrix of eigenvectors and $D$ is a diagonal matrix of eigenvalues.
+   - The implementation uses a Jacobi eigenvalue algorithm with `svd_sweeps` iterations.
+   - Eigenvalues smaller than `svd_tol` are treated as zero to determine the effective rank.
+   - Output: $V$ (eigenvectors), $D$ (eigenvalues, stored in `VTAV` as a symmetric diagonal matrix).
+
+2. **Pseudoinverse Calculation:** Compute $A^+ = V D^+ V^T$.
+   - For each eigenvalue $\lambda_i$ in $D$:
+     - If $\lambda_i > pinv\_tol$, set $\lambda_i^+ = 1/\lambda_i$.
+     - Otherwise, set $\lambda_i^+ = 0$.
+   - Construct $D^+$ and compute the product $V D^+ V^T$ to form the pseudoinverse matrix $P$.
+
+3. **Solution:** Compute $x = P b$ using matrix-vector multiplication.
+
+4. **Residual:** Compute $r = \|Ax - b\|^2$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def solve_symmetric_least_squares(A: SMat3, b: Vector3, svd_tol: float, svd_sweeps: int, pinv_tol: float) -> Tuple[Vector3, float]:
+    """
+    Solves Ax = b for symmetric A using SVD-based pseudoinverse.
+    A is stored as SMat3 (6 floats: m00, m01, m02, m11, m12, m22).
+    """
+    # Step 1: Symmetric SVD / Eigen-decomposition
+    # V: 3x3 matrix of eigenvectors
+    # VTAV: Diagonal matrix of eigenvalues (stored as SMat3)
+    V, VTAV = get_symmetric_svd(A, svd_tol, svd_sweeps)
+    
+    # Step 2: Compute Pseudoinverse
+    # VTAV contains eigenvalues d0, d1, d2 on diagonal
+    d0 = VTAV.m00
+    d1 = VTAV.m11
+    d2 = VTAV.m22
+    
+    # Invert eigenvalues with threshold
+    inv_d0 = 1.0 / d0 if d0 > pinv_tol else 0.0
+    inv_d1 = 1.0 / d1 if d1 > pinv_tol else 0.0
+    inv_d2 = 1.0 / d2 if d2 > pinv_tol else 0.0
+    
+    # Construct P = V * diag(inv_d) * V^T
+    # V is stored as Mat3 (9 floats: v00..v22)
+    v00, v01, v02 = V.m00, V.m01, V.m02
+    v10, v11, v12 = V.m10, V.m11, V.m12
+    v20, v21, v22 = V.m20, V.m21, V.m22
+    
+    # Compute P elements
+    p00 = v00*inv_d0*v00 + v01*inv_d1*v01 + v02*inv_d2*v02
+    p01 = v00*inv_d0*v10 + v01*inv_d1*v11 + v02*inv_d2*v12
+    p02 = v00*inv_d0*v20 + v01*inv_d1*v21 + v02*inv_d2*v22
+    p11 = v10*inv_d0*v10 + v11*inv_d1*v11 + v12*inv_d2*v12
+    p12 = v10*inv_d0*v20 + v11*inv_d1*v21 + v12*inv_d2*v22
+    p22 = v20*inv_d0*v20 + v21*inv_d1*v21 + v22*inv_d2*v22
+    
+    # P is symmetric, so p10=p01, p20=p02, p21=p12
+    P = Mat3(p00, p01, p02, p01, p11, p12, p02, p12, p22)
+    
+    # Step 3: Compute x = P * b
+    x = vmul(P, b)
+    
+    # Step 4: Compute residual ||Ax - b||^2
+    residual = calc_error(A, x, b)
+    
+    return x, residual
+
+def get_symmetric_svd(A: SMat3, tol: float, sweeps: int) -> Tuple[Mat3, SMat3]:
+    """
+    Computes eigen-decomposition of symmetric matrix A.
+    Returns V (eigenvectors) and VTAV (diagonal eigenvalues).
+    Uses Jacobi iteration.
+    """
+    # Initialize V as identity
+    V = Mat3.identity()
+    
+    # Copy A to work matrix W
+    W = A.to_dense() # Convert SMat3 to Mat3
+    
+    for _ in range(sweeps):
+        # Apply Jacobi rotations to diagonalize W
+        # Find largest off-diagonal element
+        # Compute rotation angle
+        # Apply rotation to W and update V
+        pass # Implementation details of Jacobi method [G]
+        
+    # Extract eigenvalues from diagonal of W
+    VTAV = SMat3(W.m00, 0, 0, W.m11, 0, W.m22)
+    
+    return V, VTAV
+
+def calc_error(A: SMat3, x: Vector3, b: Vector3) -> float:
+    """Computes ||Ax - b||^2."""
+    Ax = vmul(A, x) # Matrix-vector multiplication for symmetric A
+    diff = subtract(Ax, b)
+    return dot(diff, diff)
+```
+
+**Parameters:**
+- `pinv_tol`: Threshold for inverting eigenvalues. Values below this are treated as zero. Typical value: $10^{-6}$ to $10^{-8}$ depending on scale.
+- `svd_tol`: Tolerance for rank determination.
+- `svd_sweeps`: Number of Jacobi sweeps. Typical value: 10-20 for convergence.
+
+**Edge Cases:**
+- **Singular Matrix:** If $A$ is singular, eigenvalues will be zero. The `pinv_tol` ensures these are not inverted, resulting in a minimum-norm solution.
+- **Ill-conditioned Matrix:** Small eigenvalues may be amplified by inversion. The thresholding in `pinv_tol` stabilizes the solution.
+- **Precision:** Floating-point errors in Jacobi iteration may cause $V$ to lose orthogonality. Re-orthogonalization or sufficient sweeps are required.
+
+## Subtopics
+
+### [General Least Squares Solver](4941-general-least-squares-solver.md)
+Solves $Ax=b$ for non-symmetric $A$ by forming normal equations. Slower but more general.
+
+### [Symmetric Pseudo-Inverse Calculation](5517-symmetric-pseudo-inverse-calculation.md)
+The core primitive used by this solver to compute $A^+$ from eigen-decomposition.
+
+## Operating characteristics
+- **Time Complexity:** $O(n^3)$ for $n \times n$ matrix. For $3 \times 3$, this is constant and very fast.
+- **Memory Complexity:** $O(n^2)$ for storing matrices.
+- **Strengths:** Numerically stable for symmetric systems; handles singular/ill-conditioned matrices via pseudoinverse; simple implementation for small matrices.
+- **Limitations:** Only works for symmetric $A$; $O(n^3)$ cost makes it unsuitable for large systems compared to iterative methods like CGLS.
+- **When to use:** Small symmetric systems ($3 \times 3$); fallback for ill-conditioned problems; when a direct solution is preferred over iterative approximation.
+
+## Background
+The method is derived from the Dual Contouring implementation in [S1, unofficial]. It leverages the spectral theorem for symmetric matrices to provide a robust solution for local quadratic optimization problems in surface reconstruction.
+
+## Sources
+[S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)

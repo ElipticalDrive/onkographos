@@ -1,0 +1,136 @@
+--- v001.md
++++ v002.md
+@@ -7,11 +7,11 @@
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: A set of 3D Gaussians, camera poses, and training images.
+-- Output: An updated set of 3D Gaussians with controlled density.
++- Input: A set of 3D Gaussians, camera poses, and training images [S1, S2].
++- Output: An updated set of 3D Gaussians with controlled density [S1, S2].
+ 
+ **Data Structures:**
+-- Gaussian primitives: Position $\mathbf{p}$, covariance $\Sigma$ (or scale/rotation), opacity $\alpha$, color $\mathbf{c}$.
+-- Accumulated position gradients: $\mathbf{g}_{pos}$ per primitive.
+-- Current Gaussian count: $N$.
++- Gaussian primitives: Position $\mathbf{p}$, covariance $\Sigma$ (or scale/rotation), opacity $\alpha$, color $\mathbf{c}$ [S1, S2].
++- Accumulated position gradients: $\mathbf{g}_{pos}$ per primitive [S1, S2].
++- Current Gaussian count: $N$ [S1].
+ 
+ **Parameters:**
+@@ -20,17 +20,14 @@
+ - Opacity removal threshold: $T_{op} = 0.025$ [S2].
+ - Size removal threshold: $T_{size\_scene} = 40\%$ of scene size or $T_{size\_pixel} = 20$ pixels [S2].
+-- Duplication size threshold: $T_{dup} = 1\%$ of scene size [S2].
++- Duplication size threshold: $1\%$ of scene size [S2].
+ - Split relative size: $1.2^{-1}$ (i.e., scaled by $1/1.2$) [S2].
+ 
+ **Steps:**
+-1. **Gradient Accumulation:** During training, accumulate position gradients for each Gaussian primitive. Do not propagate gradients through the density normalization factor [S2].
+-2. **Pruning:**
+-   - Remove primitives with opacity $\alpha < T_{op}$ [S2].
+-   - Remove primitives with size larger than $T_{size\_scene}$ or $T_{size\_pixel}$ [S2].
+-3. **Densification Decision:**
+-   - Identify primitives with accumulated position gradient magnitude $\|\mathbf{g}_{pos}\| > T_{grad}$ [S2].
++1. **Gradient Accumulation:** During training, accumulate position gradients for each Gaussian primitive [S2]. Do not propagate gradients through the density normalization factor [S2].
++2. **Pruning:** Remove primitives with opacity $\alpha < T_{op}$ [S2]. Remove primitives with size larger than $T_{size\_scene}$ or $T_{size\_pixel}$ [S2].
++3. **Densification Decision:** Identify primitives with accumulated position gradient magnitude $\|\mathbf{g}_{pos}\| > T_{grad}$ [S2].
+ 4. **Densification Action:**
+-   - For primitives smaller than $T_{dup}$: Duplicate the primitive [S2].
+-   - For primitives larger than or equal to $T_{dup}$: Replace the primitive with two new primitives [S2].
++   - For primitives smaller than $1\%$ of the scene size: Duplicate the primitive [S2].
++   - For primitives larger than or equal to $1\%$ of the scene size: Replace the primitive with two new primitives [S2].
+      - The new primitives have a relative size of $1.2^{-1}$ compared to the original [S2].
+      - **Position Sampling:**
+@@ -41,15 +38,19 @@
+ **Pseudocode:**
+ ```python
++import random
++
++def copy_primitive(g):
++    """Returns a new primitive with identical attributes."""
++    return Gaussian(p=g.p, sigma=g.sigma, alpha=g.alpha, c=g.c, type=g.type, dim_distances=g.dim_distances, max_distance=g.max_distance)
++
++def sample_normal(mean, std_dev):
++    """Returns a sample from a normal distribution N(mean, std_dev)."""
++    return random.gauss(mean, std_dev)
++
+ def ots_sats_densification_step(gaussians, gradients, scene_size, max_gaussians):
+     # Step 2: Pruning
+-    to_remove = []
+-    for g in gaussians:
+-        if g.opacity < 0.025:
+-            to_remove.append(g)
+-        elif g.size > 0.4 * scene_size or g.size > 20: # 20 pixels
+-            to_remove.append(g)
+-    
+-    gaussians = [g for g in gaussians if g not in to_remove]
+-    
++    to_remove = set(id(g) for g in gaussians if g.alpha < 0.025 or g.size > 0.4 * scene_size or g.size > 20)
++    gaussians = [g for g in gaussians if id(g) not in to_remove]
++
+     # Step 3 & 4: Densification
+     new_gaussians = []
+@@ -58,39 +59,38 @@
+             if g.size < 0.01 * scene_size:
+                 # Duplicate
+-                new_g = copy(g)
++                new_g = copy_primitive(g)
+                 new_gaussians.append(new_g)
+             else:
+                 # Split into two
+                 scale_factor = 1.0 / 1.2
+-                # Determine sampling strategy based on primitive type
+                 if g.type == "octahedron":
+-                    std_dev = g.dim_distances # distances in each dimension
++                    std_dev = g.dim_distances
+                 elif g.type == "tetrahedron":
+-                    std_dev = 0.5 * g.max_distance # half of largest distance
++                    std_dev = 0.5 * g.max_distance
+                 else:
+-                    std_dev = g.dim_distances # [G] Default fallback
+-                    
+-                pos1 = sample_normal(g.position, std_dev)
+-                pos2 = sample_normal(g.position, std_dev)
+-                
+-                g1 = copy(g)
+-                g1.position = pos1
++                    std_dev = g.dim_distances # [G] Default fallback for standard Gaussians
++
++                pos1 = sample_normal(g.p, std_dev)
++                pos2 = sample_normal(g.p, std_dev)
++
++                g1 = copy_primitive(g)
++                g1.p = pos1
+                 g1.scale *= scale_factor
+-                
+-                g2 = copy(g)
+-                g2.position = pos2
++
++                g2 = copy_primitive(g)
++                g2.p = pos2
+                 g2.scale *= scale_factor
+-                
++
+                 new_gaussians.append(g1)
+                 new_gaussians.append(g2)
+         else:
+             new_gaussians.append(g)
+-            
++
+     gaussians = new_gaussians
+-    
++
+     # Step 5: Termination check
+     if len(gaussians) >= max_gaussians:
+         return gaussians, False # Stop densification
+-        
++
+     return gaussians, True
+ ```
+@@ -102,5 +102,5 @@
+ 
+ ### LinPrim Densification and Anti-Aliasing
+-LinPrim Densification uses linear primitives (octahedra and tetrahedra) instead of Gaussians. During densification, primitives smaller than 1% of the scene are duplicated, while larger ones are replaced with two newer ones with a relative size of $1.2^{-1}$ [S2]. Position sampling is normal, with standard deviations aligned with dimension distances for octahedra or half the largest distance for tetrahedra [S2]. Gradients are not propagated through the density normalization factor [S2]. For anti-aliasing, a 2D filter kernel size of 0.1 is used, moving the ray space vector by half that amount (0.05) for octahedra, while the 3D filter remains consistent with Mip-Splatting [S2].
++LinPrim Densification uses linear primitives (octahedra and tetrahedra) instead of Gaussians [S2]. During densification, primitives smaller than 1% of the scene are duplicated, while larger ones are replaced with two newer ones with a relative size of $1.2^{-1}$ [S2]. Position sampling is normal, with standard deviations aligned with dimension distances for octahedra or half the largest distance for tetrahedra [S2]. Gradients are not propagated through the density normalization factor [S2]. For anti-aliasing, a 2D filter kernel size of 0.1 is used, moving the ray space vector by half that amount (0.05) for octahedra, while the 3D filter remains consistent with Mip-Splatting [S2].
+ 
+ ## Operating characteristics

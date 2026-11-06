@@ -1,0 +1,108 @@
+Parent scene: implement what a mesh stores What to build The normal and the tangent each drop from twelve and sixteen bytes to four, decoded in WGSL from a published includable source. Twenty-four bytes per vertex become eight, and a mir...
+
+scene: the normal and tangent narrow to four bytes each · Issue #218 · dvoyni/cog · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+scene: the normal and tangent narrow to four bytes each #218
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+scene: the normal and tangent narrow to four bytes each#218
+Copy link
+Labels
+enhancementNew feature or requestNew feature or requestready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+Description
+dvoyni
+opened on Sep 10, 2026
+Issue body actions
+Parent
+scene: implement what a mesh stores
+What to build
+The normal and the tangent each drop from twelve and sixteen bytes to four, decoded in WGSL from a published includable source. Twenty-four bytes per vertex become eight, and a mirrored surface still shades correctly under a structured environment.
+The normal is oct32 in a two-component 16-bit unorm, not the fetch unit's packed 10/10/10/2. At an identical four bytes oct32 is 26x more accurate — 0.0037° mean against 0.042°. Two things settled it beyond the error bound: the packed format is a late-2023 spec addition that shipped silently broken on a wgpu GL backend for ~20 months, and with no pixel readback that failure looks like a missing mesh; and an oct decode is stateless, adding no binding, no CPU-side table and nothing for the update path to keep in sync.
+Four bytes for the normal is earned on an artefact, not a margin — and that took two prototype tickets. The first found no visible difference at any rung and concluded the choice was "a margin argument, not an artefact argument". That reversed: put a structured environment in front of it and oct16 moves 14% of a mirrored sphere, 3% of it by more than half the dynamic range, lands a hard reflected edge 2 px out of register, and returns a regular reflected bar pattern wavy, kinked and uneven in width. oct32 at the same measurement is 0.52% of pixels, peak 16/255 — nothing. Do not re-litigate this rung; it has been looked at twice.
+The tangent is one 32-bit word: 15 bits per octahedral axis, one handedness bit, one reserved bit. Handedness has to ride in the vertex — every w in the corpus is exactly ±1 and constant across a primitive in 10 of 11, but WaterBottle carries both signs inside one primitive, and one counter-example is enough.
+The tangent does not need 15/15 and keeps it anyway. Measurement puts its usable floor near 8 bits per axis, so the word carries roughly 14 bits of slack beyond the declared reserved bit. That slack is unspendable: a two-byte tangent gives a stride of 30, and WebGPU requires arrayStride to be a multiple of 4, so it pads straight back. What blocks a narrower tangent is packing, not fidelity. Record it; do not chase it.
+The reserved bit stays reserved, and there is no absence sentinel. The zero-length case falls out of the encoding rather than being chosen: the encoder guards a zero L1 norm and returns the octahedral origin, which decodes to +Z. Magnitude is discarded silently as contract — these are directions, and a length-1.0001 normal draws correctly, so a check would fire on correct code.
+Normal and tangent decode differently, one straight to a two-component float and one by bit extraction. That asymmetry is the price of not paying four more bytes for symmetry, and it is deliberate.
+Two shipping demo shaders break, and this is the mismatch ticket 1 exists to catch. Both declare a three-component float at the normal's location against what becomes a two-component unorm. They include the new decode source and read two components instead.
+See Per attribute and Where decoding runs in scene/docs/specs/mesh.md.
+Acceptance criteria
+A new includable WGSL source publishes the oct decode for both the normal and the tangent, exported as a path constant beside the existing shader paths.
+The normal stores as oct32 in four bytes; the tangent as one 32-bit word carrying 15/15 oct plus handedness plus one reserved bit.
+Decoding runs at the top of the vertex stage, before morph and before skin.
+An unwritten normal or tangent decodes to +Z with positive handedness, with no NaN and no special case.
+Handedness survives a primitive carrying both signs.
+The two demo shaders reading the normal as a three-component float are updated to include the decode source.
+The stride drops by 20 bytes (84 → 64 — the ticket said 24, see the resolution comment); every offset stays 4-aligned and the stride stays a multiple of 4.
+Normal-mapped and mirrored assets are inspected by eye against captures of the current engine and show no visible change.
+Blocked by
+gfx: report a shader input the vertex layout does not supply
+scene: pack the vertex at bake, with the layout unchanged
+Activity
+dvoyni
+added
+enhancementNew feature or requestNew feature or request
+ready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+on Sep 10, 2026
+dvoyni
+added a parent issue on Sep 10, 2026
+scene: implement what a mesh stores #213
+dvoyni
+marked this as blocked by 2 issues on Sep 10, 2026
+scene: pack the vertex at bake, with the layout unchanged #217
+gfx: report a shader input the vertex layout does not supply #214
+dvoyni
+marked this as blocking on Sep 10, 2026
+Confirm the narrowed engine by eye across the vendored assets #223
+dvoyni commented on Sep 11, 2026
+dvoyni
+on Sep 11, 2026
+OwnerAuthor
+More actions
+Done in 0479e4f, with a companion commit 891cccf in dvoyni/cog-examples.
+What now works. The normal and the tangent each store in four bytes. Stride 84 → 64.
+scene/vertexoct.go — the octahedral encode. packNormal writes two 16-bit unorm codes; packTangent writes one word: 15 bits x, 15 bits y from bit 15, handedness at bit 30, bit 31 reserved and never written. The zero/NaN/Inf guard is !(l1 > 0), so an unwritten direction falls to the octahedral origin rather than needing a special case — +Z with positive handedness, no NaN, by construction.
+scene/builtin/scene/vertexdecode.wgsl (new) publishes sceneOctDecode, sceneDecodeNormal, sceneDecodeTangent — no bindings, no structs, includable by any material — exported as VertexDecodePath beside sceneShaderPath. scene.wgsl decodes at the top of vs_main, before morph and before skin; sceneDeformVertex now takes the already-decoded vertex.
+scene/vertexpack.go — offsets 0/12/16/20/28/36/40/48, layout rows Unorm16x2 and Uint32, plus a compile-time guard on the storage stride.
+scene: pack the vertex at bake, with the layout unchanged #217's two hand-offs are discharged. bakeModelGeometry moved off uploadBytes onto a new packOverAuthored, which packs over the converted vertices' own memory — the storage vertex is smaller, so the read walk runs strictly ahead of its writes and the load still allocates no second buffer, honouring the peak-memory concern rather than trading it away. TestTheStorageOffsetsStillAgreeWithTheAuthoringStruct is deleted, as its comment instructed.
+How it was verified. go build ./..., go vet ./..., go test ./... — all 14 packages ok. go test ./scene/ ./wgpu/ ./gfx/ -count=10 — stable (the race detector cannot build in this environment, so -count=10 stands in for it).
+Precision, measured rather than asserted — 20,000 Fibonacci-sphere directions: normal mean 0.00133°, worst 0.00368°; tangent mean 0.00261°, worst 0.00710°. The tangent is ~2× the normal, exactly as the spec predicts for 15 bits against 16.
+Measured over the real corpus (throwaway in-package test, since deleted, driving convertPrimitive over every .glb in cog-examples/assets) — 52 primitives, 38,391 vertices:
+38,370 real normals: mean 0.00133°, worst 0.00368°.
+2,710 file-authored tangents: mean 0.00219°, worst 0.00609°; zero non-unit w.
+WaterBottle mesh 0 primitive 0 is the only file-authored primitive carrying both handedness signs, and every vertex's sign round-tripped — so the both-signs criterion is met against real content, not only a fixture.
+packOverAuthored was byte-identical to the arena pack on every primitive.
+Vertex bytes 3,224,844 → 2,457,024, a 767,820-byte (23.8%) saving.
+#214's safety net was fired on purpose to check it works. A throwaway wgpu test (deleted) flattened the two demo shaders' actual text, reflected them and ran CheckVertexInterface. Both pass now; the pre-change declaration was refused with gfx: shader "obelisk_old" reads vec3<f32> normal at @location(1), which the bound vertex layout supplies as vec2<f32> — which is the exact wrong-shading-that-looks-like-art failure #214 exists to convert into an error.
+The ticket's arithmetic was wrong and I followed the spec instead. Criterion 7 said "the stride drops by 24 bytes". The float normal is 12 bytes and the float tangent 16 — 28 bytes becoming 8 saves 20, so the stride goes 84 → 64, which is what mesh.md's own end-state table implies. I have corrected the criterion text in place rather than leaving the two documents disagreeing. Nothing else about it changes: every offset is 4-aligned and 64 is a multiple of 4.
+Seven of eight criteria are met and ticked. The eighth — normal-mapped and mirrored assets inspected by eye against captures — needs a GPU, and cog-examples/internal/headless is broken independently (missing method TakeCapture), so no demo test package builds. It is #223's A normal-mapped surface … is inspected, with the numbers above as the offline evidence.
+Two things for whoever is next.
+The demo shader change landed in a second repo. cog-examples 891cccf updates cmd/scene/cameras/obelisk.go and cmd/scene/loading/repaint.go to include the decode; without it those demos are a refused pipeline the moment they run. go build ./cmd/... there is clean.
+The tangent word carries ~14 bits of slack beyond the reserved bit, unspendable until a partner 2-byte saving appears. Packing, not fidelity — noted, not acted on.
+dvoyni
+closed this as completedon Sep 11, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+enhancementNew feature or requestNew feature or requestready-for-agentSelf-contained ticket an agent can pick upSelf-contained ticket an agent can pick up
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

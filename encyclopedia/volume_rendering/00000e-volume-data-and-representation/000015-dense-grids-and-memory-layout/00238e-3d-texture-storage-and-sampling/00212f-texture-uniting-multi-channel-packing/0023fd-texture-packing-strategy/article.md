@@ -1,0 +1,121 @@
+# Texture Packing Strategy
+
+Also called: Separate Scalar Textures for Bandwidth Optimization
+
+## Overview
+Texture Packing Strategy is a memory optimization technique that maps a single underlying volume dataset to multiple distinct GPU textures, each scaled by a specific scalar multiplier. It solves the problem of excessive GPU memory consumption when rendering high-resolution volumes with multiple attribute channels (e.g., emission, absorption, reflection) by avoiding the duplication of raw voxel data. Unlike [Texture Uniting (Multi-Channel Packing)](2470-texture-uniting-multi-channel-packing.md), which combines attributes into a single RGBA texture to optimize bandwidth for simultaneous access, this strategy separates attributes into individual scalar textures to minimize bandwidth usage when attributes are accessed independently or with different scaling factors.
+
+## How it works
+The method relies on the GPU's texture mapping capabilities to treat a single volume as multiple logical textures with different scaling factors.
+
+**Inputs and Outputs:**
+*   **Input:** A single base volume dataset (e.g., emission volume $V_{em}$).
+*   **Input:** Scalar multipliers $k_{em}$ (emission), $k_{ab}$ (absorption), and $k_{ref}$ (reflection).
+*   **Output:** Multiple texture objects ($T_{em}, T_{ab}, T_{ref}$) that return $k \cdot V$ upon sampling.
+
+**Data Structures:**
+*   **Base Volume:** Stored once in GPU memory.
+*   **Texture Objects:** Each texture object references the same underlying memory buffer but applies a different scalar multiplier during the sampling operation.
+*   **Scalar Multipliers:** Floating-point values defined by the renderer configuration.
+
+**Steps:**
+1.  **Volume Mapping:** Map the single base volume to multiple texture objects. For example, map $V_{em}$ to $T_{ab}$ and $T_{ref}$.
+2.  **Scalar Configuration:** Set the scalar multipliers for each texture object:
+    *   $k_{em}$ for the emission texture.
+    *   $k_{ab}$ for the absorption texture.
+    *   $k_{ref}$ for the reflection texture.
+3.  **Sampling:** Perform texture lookups using trilinear interpolation. The value returned by a texture lookup $T(x,y,z)$ is effectively $k \cdot V(x,y,z)$, where $k$ is the scalar multiplier associated with that texture object.
+4.  **Gradient Computation (Optional):** To further save memory, gradients ($\nabla_{x,y,z}$) can be computed on the fly during rendering rather than stored in a separate texture. This increases computational expense but reduces memory footprint [S2].
+5.  **Data Transfer:** Copy volumes to GPU memory only if they have been modified since the last rendering process. This minimizes host-to-GPU transactions [S2].
+
+**Formulas:**
+The sampled value $S$ for a texture $T$ with scalar $k$ is:
+$$ S = k \cdot V(x, y, z) $$
+Where:
+*   $V(x, y, z)$ is the value from the base volume at coordinates $(x, y, z)$.
+*   $k$ is the scalar multiplier ($k_{em}, k_{ab},$ or $k_{ref}$).
+
+**Parameters:**
+*   **Interpolation:** Trilinear interpolation is used for all texture lookups [S2].
+*   **Scalar Multipliers:** $k_{em}, k_{ab}, k_{ref}$ are configurable per texture object.
+
+**Edge Cases and Pitfalls:**
+*   **Computational Cost:** Computing gradients on the fly is computationally expensive, particularly for movie sequences [S2].
+*   **Memory vs. Compute Trade-off:** While mapping one volume to multiple textures saves GPU memory, it may increase computational load if gradients are not pre-computed.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Assume base_volume is a 3D array on GPU
+# scalar_multipliers is a dict: {'em': k_em, 'ab': k_ab, 'ref': k_ref}
+
+def create_textures(base_volume, scalar_multipliers):
+    """
+    Maps a single base volume to multiple texture objects with scalar multipliers.
+    """
+    textures = {}
+    for key, k in scalar_multipliers.items():
+        # Create a texture object that references base_volume
+        # and applies scalar multiplication during sampling
+        tex = TextureObject(source=base_volume, scalar=k)
+        textures[key] = tex
+    return textures
+
+def sample_texture(texture, x, y, z):
+    """
+    Samples a texture using trilinear interpolation and applies the scalar multiplier.
+    """
+    # Get base value from underlying volume
+    base_val = trilinear_interpolate(texture.source, x, y, z)
+    # Apply scalar multiplier
+    return texture.scalar * base_val
+
+def render_scene(volumes, scalar_multipliers, compute_gradients_on_fly=False):
+    """
+    Renders a scene using the texture packing strategy.
+    """
+    # Copy volumes to GPU only if modified
+    if volumes.needs_update:
+        copy_to_gpu(volumes)
+        volumes.needs_update = False
+
+    # Create packed textures
+    textures = create_textures(volumes.base_volume, scalar_multipliers)
+
+    # Render loop
+    for pixel in pixels:
+        # Sample emission
+        em_val = sample_texture(textures['em'], pixel.u, pixel.v, pixel.depth)
+        
+        # Sample absorption
+        ab_val = sample_texture(textures['ab'], pixel.u, pixel.v, pixel.depth)
+        
+        # Sample reflection
+        ref_val = sample_texture(textures['ref'], pixel.u, pixel.v, pixel.depth)
+        
+        # If gradients are needed and not pre-computed, compute on fly
+        if compute_gradients_on_fly:
+            grad = compute_gradient_on_fly(volumes.base_volume, pixel.u, pixel.v, pixel.depth)
+        
+        # Proceed with shading using em_val, ab_val, ref_val
+```
+
+## Subtopics
+
+### Separate Scalar Textures for Bandwidth Optimization
+A specific application of the strategy where frequently accessed attributes (like inside-outside information for pressure solves) are kept in their own scalar textures to minimize bandwidth. This is chosen when attributes are accessed independently or when packing them into a single RGBA texture would cause unnecessary memory transfer (e.g., transferring velocity data when only inside-outside is needed) [S1, unofficial]. It is distinct from multi-channel packing, which is optimal for simultaneous access to all channels.
+
+## Operating characteristics
+*   **Memory Complexity:** Reduces GPU memory consumption by storing the base volume only once, regardless of the number of scalar multipliers. This is beneficial for high-resolution volumes [S2].
+*   **Bandwidth:** Optimizes bandwidth by avoiding the transfer of unused data. For example, keeping inside-outside in a scalar texture avoids transferring velocity data during pressure solving [S1, unofficial].
+*   **Performance:** Rendering performance increases for scenes with multiple images if volumes are only copied to the GPU when modified [S2]. However, computing gradients on the fly increases computational expense [S2].
+*   **Strengths:** Significant memory savings for high-resolution volumes; flexible scalar multiplication; reduced host-to-GPU traffic.
+*   **Limitations:** Increased computational cost if gradients are computed on the fly; requires GPU texture mapping support for scalar multiplication.
+
+## Background
+The technique is described in the context of GPU-enabled volume rendering for use with MATLAB, where it was employed to save GPU memory by mapping one volume to multiple textures with scalar multipliers [S2]. It is also discussed in the context of real-time fluid simulation, where avoiding the packing of multiple cell attributes into a single texture is recommended to prevent unnecessary memory bandwidth degradation [S1, unofficial].
+
+## Sources
+[S1] Real-Time Simulation and Rendering of 3D Fluids, https://wo1fsea.github.io/files/About_NavMesh/P5_GPU_Gems_3_Real-Time_Simulation_and_Rendering_of_3D_Fluids.pdf, fetched 2026-10-27 (unofficial)
+[S2] GPU-Enabled Volume Renderer for Use with MATLAB, https://doi.org/10.3390/digital4040049, fetched 2026-10-29

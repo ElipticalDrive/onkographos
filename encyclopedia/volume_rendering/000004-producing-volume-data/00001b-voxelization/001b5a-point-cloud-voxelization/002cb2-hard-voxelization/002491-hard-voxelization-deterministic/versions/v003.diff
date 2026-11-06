@@ -1,0 +1,127 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Hard Voxelization (Deterministic) converts a 3D point cloud into a fixed-size voxel grid by assigning each point to a discrete voxel based on its coordinates and a specified voxel size and range [S2, unofficial]. It handles duplicate points within the same voxel and limits the number of points per voxel and total voxels [S2, unofficial]. Unlike the non-deterministic variant which uses atomic operations for speed at the cost of reproducibility, this method guarantees bit-identical output by using stable sorting and explicit ordering logic [S2, unofficial]. It builds on [Hard Voxelization](5345-hard-voxelization.md).
++Hard Voxelization (Deterministic) converts a 3D point cloud into a fixed-size voxel grid by assigning each point to a discrete voxel based on its coordinates and a specified voxel size and range [S2, unofficial]. It handles duplicate points within the same voxel and limits the number of points per voxel and total voxels [S2, unofficial]. Unlike the non-deterministic variant which uses atomic operations for speed at the cost of reproducibility, this method guarantees bit-identical output by using stable sorting and explicit ordering logic [S2, unofficial].
+ 
+ ## How it works
+@@ -33,5 +33,5 @@
+     Store these in `temp_coors` [S2, unofficial].
+ 
+-2.  **Invalid Coordinate Handling:** Identify points outside the `coors_range`. These are mapped to invalid coordinates (e.g., $(-1, -1, -1)$) [S2, unofficial]. Filter out these invalid coordinates from `temp_coors` and decrement all values in `coors_map` by 1 to adjust for the removed entry [S2, unofficial].
++2.  **Invalid Coordinate Handling:** Identify points outside the `coors_range`. These are mapped to invalid coordinates (e.g., $(-1, -1, -1)$) and must be filtered out before the unique operation and handled by adjusting the mapping indices [S2, unofficial].
+ 
+ 3.  **Unique Voxel Identification:** Use a stable unique operation on `temp_coors` to find unique voxel coordinates and generate a mapping from original point indices to unique voxel indices (`coors_map`) [S2, unofficial].
+@@ -64,51 +64,55 @@
+     coors[:, 2] = np.floor((points[:, 2] - zmin) / vz).astype(np.int32)
+     
+-    # Mark invalid coordinates
++    # Mark invalid coordinates (outside range) as -1
++    dim_x = int(np.ceil((xmax - xmin) / vx))
++    dim_y = int(np.ceil((ymax - ymin) / vy))
++    dim_z = int(np.ceil((zmax - zmin) / vz))
+     invalid_mask = (
+-        (coors[:, 0] < 0) | (coors[:, 0] >= (xmax - xmin) / vx) |
+-        (coors[:, 1] < 0) | (coors[:, 1] >= (ymax - ymin) / vy) |
+-        (coors[:, 2] < 0) | (coors[:, 2] >= (zmax - zmin) / vz)
++        (coors[:, 0] < 0) | (coors[:, 0] >= dim_x) |
++        (coors[:, 1] < 0) | (coors[:, 1] >= dim_y) |
++        (coors[:, 2] < 0) | (coors[:, 2] >= dim_z)
+     )
+     coors[invalid_mask] = -1
+     
+-    # Step 2: Find unique voxels and map points to them
++    # Step 2: Find unique voxel coordinates and map points to them
++    # Use a stable unique to preserve original point order for deterministic output
+     unique_coors, inverse_indices = np.unique(coors, axis=0, return_inverse=True)
+     
+-    # Filter out the (-1, -1, -1) entry if present
+-    if unique_coors[0, 0] == -1:
++    # Handle invalid (-1, -1, -1) if present
++    if np.all(unique_coors[0] == -1):
+         unique_coors = unique_coors[1:]
+-        inverse_indices[inverse_indices == 0] = -1
+-        inverse_indices[inverse_indices > 0] -= 1
++        # Adjust inverse_indices: map 0 to -1, shift others down by 1
++        mask_zero = (inverse_indices == 0)
++        inverse_indices[mask_zero] = -1
++        inverse_indices[~mask_zero] -= 1
+         
+     # Filter out points with inverse_indices == -1
+-    valid_point_mask = (inverse_indices >= 0)
+-    valid_points = points[valid_point_mask]
+-    valid_voxel_indices = inverse_indices[valid_point_mask]
++    valid_mask = (inverse_indices >= 0)
++    valid_points = points[valid_mask]
++    valid_voxel_indices = inverse_indices[valid_mask]
+     
+-    # Step 3: Determine voxel order and counts
+-    # Get unique voxel IDs in order of first appearance
+-    seen = set()
+-    ordered_unique_voxels = []
+-    for vid in valid_voxel_indices:
++    # Step 3: Determine voxel order (preserving first appearance) and counts
++    seen = {}
++    ordered_voxel_list = []
++    for idx, vid in enumerate(valid_voxel_indices):
+         if vid not in seen:
+-            seen.add(vid)
+-            ordered_unique_voxels.append(vid)
+-    ordered_unique_voxels = np.array(ordered_unique_voxels, dtype=np.int32)
++            seen[vid] = len(ordered_voxel_list)
++            ordered_voxel_list.append(vid)
++            
++    ordered_voxel_indices = np.array(ordered_voxel_list, dtype=np.int32)
++    voxel_to_pos = {vid: i for i, vid in enumerate(ordered_voxel_indices)}
++    point_to_voxel_pos = np.array([voxel_to_pos[vid] for vid in valid_voxel_indices], dtype=np.int32)
+     
+-    # Map each point to its position in ordered_unique_voxels
+-    voxel_to_pos = {vid.item(): i for i, vid in enumerate(ordered_unique_voxels)}
+-    point_to_voxel_pos = np.array([voxel_to_pos[vid.item()] for vid in valid_voxel_indices], dtype=np.int32)
+-    
+-    # Step 4: Assign features
+-    M = len(ordered_unique_voxels)
++    # Step 4: Apply max_voxels limit
++    M = len(ordered_voxel_indices)
+     if M > max_voxels:
++        drop_mask = (point_to_voxel_pos >= max_voxels)
++        point_to_voxel_pos[drop_mask] = -1
++        valid_mask = valid_mask & ~drop_mask
++        valid_points = points[valid_mask]
++        point_to_voxel_pos = point_to_voxel_pos[valid_mask]
+         M = max_voxels
+-        ordered_unique_voxels = ordered_unique_voxels[:M]
+-        drop_mask = (point_to_voxel_pos >= M)
+-        point_to_voxel_pos[drop_mask] = -1
+-        valid_point_mask = valid_point_mask & ~drop_mask
+-        valid_points = points[valid_point_mask]
+-        point_to_voxel_pos = point_to_voxel_pos[valid_point_mask]
+         
++    # Step 5: Assign features
+     voxels = np.zeros((M, max_points, C), dtype=points.dtype)
+     coors_out = np.zeros((M, 3), dtype=np.int32)
+@@ -124,13 +128,6 @@
+             num_points_per_voxel[voxel_idx] += 1
+             
+-    # Fill coors_out with the actual voxel coordinates
+-    # ordered_unique_voxels are indices into unique_coors (excluding -1)
+-    # We need to map them back to coordinates. Since unique_coors was sorted,
+-    # we can reconstruct the mapping or just store the coordinates directly.
+-    # For simplicity, we assume unique_coors is sorted and we can index it.
+-    # However, ordered_unique_voxels are indices into the *original* unique_coors array.
+-    # We need to map them to the filtered unique_coors.
+-    # Let's just use the coordinates directly from the original unique_coors array.
+-    coors_out = unique_coors[ordered_unique_voxels]
++    # Fill coors_out with the actual voxel coordinates corresponding to the order
++    coors_out = unique_coors[ordered_voxel_indices]
+     
+     return voxels, coors_out, num_points_per_voxel
+@@ -155,5 +152,5 @@
+ 
+ ### Hard Voxelization (Non-Deterministic)
+-A faster, non-reproducible variant of hard voxelization that uses atomic operations or parallel reductions to assign points to voxels, avoiding the sorting/unique step of the deterministic version [S2, unofficial]. It filters out invalid coordinates, finds unique voxel coordinates using `at::unique_dim`, and uses `nondisterministic_get_assign_pos` and `nondisterministic_assign_point_voxel` kernels for assignment [S2, unofficial]. Choose this when speed is more important than bit-identical reproducibility.
++A faster, non-reproducible variant of hard voxelization that uses atomic operations or parallel reductions to assign points to voxels, avoiding the sorting/unique step of the deterministic version [S2, unofficial]. It filters out invalid coordinates, finds unique voxel coordinates using `at::unique_dim`, and uses `nondisterministic_get_assign_pos` and `nondisterministic_assign_point_voxel` kernels for assignment [S2, unofficial]. Choose this when speed is more important than bit-identical reproducibility [S2, unofficial].
+ 
+ ## Operating characteristics

@@ -1,0 +1,132 @@
+--- v001.md
++++ v002.md
+@@ -4,78 +4,86 @@
+ 
+ ## Overview
+-Ray ID Caching is an optimization technique used during ray-primitive intersection testing to eliminate redundant intersection calculations when a single ray intersects the same object multiple times across different voxels in a grid [S1, unofficial]. It solves the "multiple intersection problem" by maintaining a unique identifier for each ray and storing the last ray ID that tested each object, allowing the renderer to skip intersection tests that have already been performed for that specific ray-object pair [S1, unofficial]. Unlike methods that require precise voxel-object containment checks (such as Glassner's method), this technique allows for looser voxel lists because redundant intersections are filtered by the ID check rather than geometric precision [S1, unofficial].
++Ray ID Caching is an optimization technique used in volume rendering and ray tracing to eliminate redundant intersection tests when a single ray intersects the same geometric object multiple times across different voxels [S1, unofficial]. It solves the problem of "multiple intersection" overhead by storing a unique identifier (`rayID`) on each ray and the last intersecting `rayID` on each object [S1, unofficial]. Unlike methods that require precise voxel-object containment checks (such as Glassner's method), this technique allows for looser voxel lists because redundant intersections are filtered by the ID comparison rather than geometric precision [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs**
+-- **Input**: A ray with a unique identifier (`rayID`), a list of candidate objects (primitives) potentially intersecting the current voxel, and the current intersection state.
+-- **Output**: A set of valid intersection tests, skipping those already performed by the current ray.
++- **Input**: A set of rays, each with a unique `rayID`; a set of objects, each with a stored `object_rayID`; and a voxel traversal structure providing candidate objects for each ray.
++- **Output**: A reduced set of actual intersection tests performed, skipping those where the object has already been tested by the current ray.
+ 
+ **Data Structures**
+-1.  **Ray Structure**: Contains an integer field `rayID`.
+-    -   `rayID`: A unique integer value assigned to each ray shot through the grid. It must be distinct for every ray [S1, unofficial].
+-2.  **Object Structure**: Contains an integer field `last_rayID`.
+-    -   `last_rayID`: An integer variable stored with each object, initialized to `0`. It holds the `rayID` of the ray that most recently performed an intersection test with this object [S1, unofficial].
+-    -   Constraint: `0` is a reserved value that no valid ray is ever allowed to have [S1, unofficial].
++1.  **Ray Structure**:
++    -   `rayID`: An integer variable holding a unique value for that specific ray [S1, unofficial].
++2.  **Object Structure**:
++    -   `object_rayID`: An integer variable storing the `rayID` of the ray that most recently performed an intersection test with this object [S1, unofficial].
++    -   Initialization: `object_rayID` is initialized to 0. No valid ray is ever allowed to have a `rayID` of 0 [S1, unofficial].
+ 
+ **Algorithm Steps**
+-1.  For each candidate object in the current voxel's list:
+-    a.  Retrieve the current ray's `rayID` and the object's `last_rayID`.
+-    b.  Compare `rayID` with `last_rayID`.
+-    c.  If `rayID == last_rayID`:
+-        -   The object has already been intersected by this specific ray.
+-        -   Skip the intersection test for this object [S1, unofficial].
+-    d.  If `rayID != last_rayID`:
+-        -   Perform the full geometric intersection test between the ray and the object.
+-        -   If an intersection occurs (or regardless of outcome, depending on implementation strictness, but typically only on test completion to ensure state consistency for future rays), update the object's `last_rayID` to the current ray's `rayID` [S1, unofficial].
++1.  For each ray $r$ with `rayID` $R$, iterate through the list of candidate objects $o$ provided by the voxel traversal.
++2.  Let $O$ be the `object_rayID` stored in object $o$.
++3.  Compare $R$ and $O$:
++    -   If $R == O$: The object $o$ has already been intersected (or tested) by ray $r$. Skip the intersection test for $o$ [S1, unofficial].
++    -   If $R \neq O$: Perform the geometric intersection test between ray $r$ and object $o$ [S1, unofficial].
++4.  If an intersection occurs (or if the test is performed regardless of outcome, depending on implementation intent to mark as "tested"):
++    -   Update the object's stored ID: Set $o.\text{object\_rayID} = R$ [S1, unofficial].
++    -   *Note*: The source states "If an intersection occurs, update the object's stored rayID" in one instance, but also says "If not [match], the intersection test is performed and the object's rayID is set to that of the ray's" in another. The primary goal is to prevent *multiple* tests. If the test is performed, the ID is updated to prevent a *second* test in the same traversal pass. If the test fails, the ID is still updated to prevent re-testing in the same pass, as the object is known to be "visited" by this ray in this context [S1, unofficial].
+ 
+ **Pseudocode**
+ ```python
+-def process_candidate_objects(ray, candidate_objects):
++def process_ray(ray, candidate_objects):
+     """
+     ray: object with attribute rayID (int)
+-    candidate_objects: list of objects, each with attribute last_rayID (int)
++    candidate_objects: list of objects, each with attribute object_rayID (int)
+     """
+     current_ray_id = ray.rayID
+     
+     for obj in candidate_objects:
+-        # Check if this object has already been tested by this specific ray
+-        if obj.last_rayID == current_ray_id:
+-            # Redundant intersection test; skip it
++        # Step 1: Compare rayID with object's stored rayID
++        if obj.object_rayID == current_ray_id:
++            # Object already tested by this ray; skip intersection test
+             continue
+         
+-        # Perform the actual intersection test
+-        # Note: The source implies the update happens if the test is performed.
+-        # To ensure correctness for subsequent rays, we update last_rayID 
+-        # after the test, regardless of hit/miss, or specifically on hit.
+-        # The text says: "Otherwise, the intersection test is performed and 
+-        # the object’s rayID is set to that of the ray’s."
+-        
++        # Step 2: Perform intersection test
++        # Note: The source implies the test is performed if IDs don't match.
++        # The update happens after the test to prevent future redundant tests
++        # in the same traversal pass.
+         intersection = perform_intersection_test(ray, obj)
+         
+-        # Update the object's cached rayID to the current ray's ID
+-        obj.last_rayID = current_ray_id
++        # Step 3: Update object's stored rayID
++        # This marks the object as "tested" by the current ray.
++        # This prevents redundant tests even if the intersection failed,
++        # ensuring the object is only tested once per ray per traversal.
++        obj.object_rayID = current_ray_id
+         
++        # If intersection is successful, process hit (e.g., update closest hit)
+         if intersection:
+-            process_intersection(intersection)
++            update_closest_hit(ray, intersection)
++
++def initialize_objects(objects):
++    """
++    Initialize object_rayID to 0 for all objects.
++    """
++    for obj in objects:
++        obj.object_rayID = 0
+ ```
+ 
+-**Parameters and Initialization**
+--   **Initialization**: All object `last_rayID` fields must be initialized to `0` before rendering begins [S1, unofficial].
+--   **Ray ID Assignment**: Each ray must be assigned a unique integer `rayID` before traversal begins. The value `0` is prohibited for valid rays [S1, unofficial].
++**Parameters**
++-   `rayID`: Unique integer identifier for each ray [S1, unofficial].
++-   `object_rayID`: Integer identifier for the last ray that tested the object [S1, unofficial].
++-   Initial `object_rayID`: 0 [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls**
+--   **Initialization**: If `last_rayID` is not initialized to `0`, a ray with `rayID == 0` (if allowed) or a mismatched initial state could cause incorrect skipping or redundant tests. The sources explicitly state `0` is reserved and no ray has this ID [S1, unofficial].
+--   **Precision**: The comparison is integer-based, avoiding floating-point precision issues associated with geometric checks for redundancy [S1, unofficial].
+--   **State Consistency**: The `last_rayID` must be updated after the intersection test is performed, not just when a hit occurs, to ensure that if the same ray hits the same object again in a different voxel (due to loose voxel lists), it is skipped [S1, unofficial].
++-   **Initialization**: `object_rayID` must be reset to 0 (or a value distinct from any valid `rayID`) between frame renders or traversal passes to ensure correctness [S1, unofficial].
++-   **Precision**: The method relies on integer comparison, avoiding floating-point precision issues associated with geometric containment checks [S1, unofficial].
++-   **Memory**: Requires storing an additional integer per object [S1, unofficial].
+ 
+ ## Operating characteristics
+ -   **Time Complexity**: Adds one integer comparison per potential intersection. This is negligible compared to the cost of a full geometric intersection test, which is typically several orders of magnitude more expensive [S1, unofficial].
+--   **Memory Complexity**: Requires storing one additional integer (`last_rayID`) per object in the scene [S1, unofficial].
+--   **Performance**: Significantly reduces the number of objects that must be intersected, especially as the level of grid subdivision increases and objects cover more voxels [S1, unofficial].
+--   **Strengths**: Allows for looser, faster-to-compute voxel-object lists (avoiding the non-trivial computation of exact voxel occupancy required by Glassner's method) [S1, unofficial].
+--   **Limitations**: Does not reduce the memory overhead of voxel initialization or traversal time itself, which can become significant with high subdivision rates [S1, unofficial].
++-   **Memory Complexity**: Adds one integer field per object [S1, unofficial].
++-   **Performance**: Significantly reduces the number of objects that must be intersected, especially as grid subdivision increases and objects span more voxels [S1, unofficial]. In test scenes with up to 3540 objects, the number of actual intersections remained small [S1, unofficial].
++-   **Strengths**: Allows for looser voxel lists (faster voxelization/traversal setup) because redundant intersections are filtered by ID rather than requiring tight voxel-object containment [S1, unofficial].
++-   **Limitations**: Requires memory for the `object_rayID` field. Does not reduce the cost of the initial voxel traversal or voxelization [S1, unofficial].
+ 
+ ## Background
+-The technique was described in the context of fast voxel traversal for ray tracing, specifically addressing the multiple intersection problem where a single ray intersects the same object across multiple voxels [S1, unofficial]. It is contrasted with Glassner's method, which requires determining the minimal number of voxels an object occupies, a process that is non-trivial for complicated objects [S1, unofficial]. The implementation described was in C on a Sun 3/75 running Unix, testing scenes with resolutions up to 512x512 [S1, unofficial].
++The technique was described in the context of "Fast Voxel Traversal for Ray Tracing" [S1, unofficial]. It addresses the "multiple intersection problem" where a ray intersects the same object multiple times as it traverses different voxels. The paper contrasts this with Glassner's method, which required computing the exact voxels an object occupies—a non-trivial task for complicated objects [S1, unofficial]. The implementation was tested on a Sun 3/75 running Unix, with scenes rendered at 512x512 resolution [S1, unofficial]. Future research directions mentioned include reducing reliance on floating-point calculations and adapting the algorithm to other space partitioning structures [S1, unofficial].
+ 
+ ## Sources

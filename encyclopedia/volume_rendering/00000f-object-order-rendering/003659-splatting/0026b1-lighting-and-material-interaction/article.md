@@ -1,0 +1,38 @@
+# Lighting and Material Interaction
+
+Also called: Per-Splat Relighting, Photon Splatting, Splat Painting
+
+## Overview
+This family defines how photometric properties and illumination are computed for splatted primitives, addressing the gap between raw geometric density and visually plausible appearance. It differs from sibling methods like [EWA Splatting](1069-ewa-splatting.md) or [Ray-Driven Splatting](1156-ray-driven-splatting.md) by explicitly decoupling the shading model from the rasterization footprint, allowing for dynamic lighting, baked global illumination, or direct user editing of material properties per primitive [S1, 3371-per-splat-relighting.md].
+
+## Shared principles
+The splatting family shares the fundamental mechanism of treating volumetric data as a set of geometric or parametric primitives that are transformed and rasterized [S1, S3, S4, unofficial].
+
+1.  **Primitive Representation:** The volume is decomposed into primitives. These may be explicit geometric shapes (cubes, cells, splats) or implicit functions sampled via texture hardware [S1, S3, S4, unofficial]. Each primitive $k$ is defined by its position $\mathbf{p}_k$, density/extinction coefficient $g_k$ or $\rho_k$, and a reconstruction kernel $h$ (typically a Gaussian) [S1][S6][S10, unofficial].
+2.  **Transformation:** Primitives are transformed from volume space to screen space using the Model-View-Projection (MVP) matrix or specific factorizations (e.g., shear-warp) [S2, S3, S4, unofficial]. For perspective projections, the kernel shape may be distorted (e.g., EWA splatting) to account for foreshortening [S6][S10, unofficial].
+3.  **Rasterization:** The transformed primitives are projected onto the 2D image plane. This step leverages hardware-accelerated scan-conversion, depth testing, and blending [S1, S2, S3, S4, unofficial]. The contribution of a voxel $D$ to a screen point $(x,y)$ is determined by the footprint function $F(x,y)$, which is the integral of the 3D kernel along the view direction [S2, unofficial][S6][S10, unofficial]:
+    $$ F(x,y) = \int h(x-x_D, y-y_D, z) \, dz $$
+    The intensity written to the pixel is modulated by the voxel density:
+    $$ P(x,y) = \text{weight}(x,y) \cdot \rho(D) $$
+    where $\text{weight}(x,y) = F(x-x_D, y-y_D)$ [S10, unofficial].
+4.  **Compositing:** Contributions are accumulated to form the final image. This is typically done using alpha blending in back-to-front or front-to-back order to handle transparency correctly [S1, S2, S3, unofficial][S7, book]. Splatting compositing is performed along sheets (all pixels at once for a set of voxels), whereas ray-casting composites along rays (one sample at a time) [S10, unofficial].
+5.  **Hardware Acceleration:** Most methods in this family rely on GPU rasterization pipelines for performance, enabling real-time interactivity [S1, S2, S3, unofficial].
+
+## Subtopics
+
+### [Photon Splatting](2832-photon-splatting.md)
+Photon Splatting captures direct illumination by rasterizing a light-view map and projecting photons into a sparse voxel octree structure [2832-photon-splatting.md]. It solves the problem of efficiently storing incoming radiance as a direction distribution and energy proportional to the subtended solid angle of the light source [2832-photon-splatting.md]. It differs from [Per-Splat Relighting](3371-per-splat-relighting.md) by baking lighting information directly into the voxel data structure during a pre-computation phase, rather than computing shading dynamically per splat during rendering [2832-photon-splatting.md, 3371-per-splat-relighting.md].
+
+### [Per-Splat Relighting](3371-per-splat-relighting.md)
+Per-Splat Relighting computes a dynamic lighting multiplier for each Gaussian splat based on its world position, normal, ambient occlusion, and confidence, enabling real-time dynamic illumination [3371-per-splat-relighting.md]. It differs from pre-shading by deferring photometric calculations to the rendering pass, allowing interactive light changes while avoiding the complexity of full path tracing by treating each splat as an independent shading unit [3371-per-splat-relighting.md].
+
+### Splat Painting
+**Definition:** Recolorization or shadow additions by checking if a splat center intersects with a spherical brush and adjusting its color value [S1].
+**Parameters:** Color channels are stored in 16-bit format to support brushes with smooth falloff and low opacity [S1].
+**Pitfalls:** Splat models often do not lend themselves well to painting detailed features (text, lines, symbols) because they represent sparse geometry; models from images use few splats on clean surfaces, preventing detailed color changes [S1]. Color leaks may occur into differently colored parts of a surface if state-of-the-art Gaussian splat reconstructions rarely feature clean and opaque surfaces [S1].
+
+## Background
+The techniques described herein originate from the practical requirements of editing and rendering large-scale Gaussian Splat models, specifically detailed in the development of "Splatshop" [S1]. While standard splatting focuses on geometric reconstruction and rasterization efficiency, these methods address the need for dynamic lighting, global illumination approximation, and artistic control over the resulting visual appearance.
+
+## Sources
+[S1] Splatshop: Efficiently Editing Large Gaussian Splat Models, https://doi.org/10.1111/cgf.70214, fetched 2026-10-31

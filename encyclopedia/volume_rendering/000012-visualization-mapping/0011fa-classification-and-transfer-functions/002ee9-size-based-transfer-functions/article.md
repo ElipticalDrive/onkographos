@@ -1,0 +1,110 @@
+# Size-Based Transfer Functions
+
+Also called: sbTF, Size-based TF, Size-based classification, Scale-based volume rendering
+
+## Overview
+Size-Based Transfer Functions (SBTF) map the local scale (relative size) of volumetric features to color and opacity, allowing the classification and segmentation of data based on spatial extent rather than scalar intensity alone [S2][S3, unofficial]. Unlike standard 1D transfer functions that treat all voxels with the same scalar value identically, SBTF distinguishes features with similar or identical scalar values by their size, enabling the highlighting of specific structures (e.g., veins) while hiding others (e.g., skin) [S2]. It sets itself apart from pyramid-based multi-scale approaches by using continuous scale-space analysis to derive high-quality, continuous scale maps for a single dimension (size) orthogonal to scalar value [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A scalar volume $F$ (data values) and a precomputed **Scale Field** $S$. $S$ is a 3D scalar field where each voxel represents the local scale or size of the feature containing that voxel [S2][S3, unofficial].
+*   **Output:** Optical properties $O$, typically a 4D tuple $(r, g, b, \alpha)$ representing color and opacity [S2].
+
+**Data Structures:**
+1.  **Scale Field ($S$):** A 3D volume of the same dimensions as the input data $F$, storing the computed scale for each voxel [S2].
+2.  **Lookup Table (LUT):** A 2D texture or table mapping the Cartesian product of the scale field and scalar data fields to optical properties [S1]. The source notes a "2D look-up table" for sbTF, implying a mapping from $(S, F)$ pairs to $(Color, Opacity)$ [S1].
+3.  **Preprocessing Volumes:** The scale-space computation requires intermediate storage. The source notes "3 volumes" for preprocessing data structures [S1].
+
+**Algorithm Steps:**
+
+1.  **Scale Space Computation (Preprocessing):**
+    Compute the scale field $S$ from the input data $F$ using continuous scale-space analysis [S2][S3, unofficial].
+    *   Apply a set of detection filters (diffusion-based) to the volume [S2].
+    *   The process involves Gaussian smoothing at multiple scales followed by detection of Local Extrema (e.g., Laplacian of Gaussian) to determine the scale at which a feature is most prominent [S2][S3, unofficial].
+    *   This step is computationally intensive and is typically performed on the GPU for interactive rates [S1][S3, unofficial].
+    *   *Note:* The source mentions a "backprojection" stage following the scale-space computation [S3, unofficial].
+
+2.  **Visibility Test (Optional):**
+    Apply a visibility threshold $\tau$ to refine the scale field or the final rendering [S2][S3, unofficial].
+    *   $\tau$ controls the sensitivity of the visibility test.
+    *   $\tau = 0$: No visibility test is performed; all sizes are visible [S3, unofficial].
+    *   $\tau > 0$ (e.g., 0.3): A visibility test is applied to remove small features or occluded structures [S3, unofficial].
+    *   *Implementation:* A voxel is not visible from a Local Extrema if, at some point in the ray connecting the two positions, the intensity is below a threshold (based on scalar value or gradient magnitude) [S2].
+
+3.  **Transfer Function Evaluation (Rendering):**
+    For each sample point during ray casting, evaluate the optical properties $O$ based on the scale $S$ and scalar value $F$ [S2].
+    *   The mapping is defined as a Cartesian product: $S \times F_1 \times \dots \times F_n \mapsto O$, where $F_1 \dots F_n$ are scalar fields (typically just $F$) [S2].
+    *   **Opacity Calculation:** In most examples, opacity $\alpha$ is the product of the size $S$ and the original scalar values $F$ [S2].
+        $$ \alpha = S \cdot F $$
+        *(Note: This formula implies $S$ and $F$ are normalized or scaled appropriately to remain within $[0,1]$ or a valid weight range. If $F$ is raw intensity, $S$ acts as a modifier.)*
+    *   **Color Mapping:** Color is mapped based on $S$ (and potentially $F$), allowing different sizes with the same scalar value to have distinct colors [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Preprocessing: Compute Scale Field S from Data F
+# This is typically done on the GPU using scale-space filters
+def compute_scale_field(F):
+    # Apply Gaussian smoothing at multiple scales
+    # Detect Local Extrema (e.g., Laplacian of Gaussian)
+    # Backproject extrema to create continuous scale field S
+    # Return S
+    pass
+
+# Rendering: Evaluate Optical Properties
+def evaluate_sbtf(scale_field, data_volume, tau=0.0):
+    """
+    scale_field: 3D array S, precomputed scale values
+    data_volume: 3D array F, original scalar data
+    tau: visibility threshold (0.0 to 1.0)
+    """
+    # 1. Visibility Test (Optional)
+    # If tau > 0, check if the voxel is occluded or below threshold
+    # This requires ray-casting context or precomputed visibility mask
+    # For simplicity, we assume a precomputed visibility mask V is available
+    # V = check_visibility(data_volume, tau) 
+    
+    # 2. Retrieve Scale and Scalar Value
+    # In a ray-casting loop, for each sample point x:
+    # s = scale_field[x]
+    # f = data_volume[x]
+    
+    # 3. Calculate Opacity
+    # Formula: alpha = S * F
+    # Note: Ensure S and F are normalized to [0,1] or appropriate range
+    alpha = s * f
+    
+    # 4. Calculate Color
+    # Map (s, f) to color C
+    # This is often done via a 2D LUT or shader function
+    color = map_scale_color(s, f)
+    
+    return color, alpha
+```
+
+**Edge Cases and Pitfalls:**
+*   **Isotropic Diffusion Limitation:** The filter tags features according to the smallest size of their local structure (width rather than length for narrow structures) [S3, unofficial]. This works best with figure/ground separation.
+*   **Hole Detection:** Smooth density variations require thresholding. Holes/cracks are not detected because diffusion moves from high to low intensity [S3, unofficial].
+    *   *Solution:* Use figure/ground reversal for hole detection [S3, unofficial].
+*   **Precision:** The scale field computation is sensitive to noise, but the scale-space approach is described as "less error-prone to noise" compared to other methods [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The preprocessing (scale-space computation) is $O(N \cdot K)$ where $N$ is the number of voxels and $K$ is the number of scales. The rendering step is $O(N)$ with 2 3D texture lookups per sample (data + scale) [S1].
+*   **Memory Complexity:** Requires 1 additional volume for the scale field during rendering, not necessarily full size if compressed or computed on-the-fly [S1]. Preprocessing may require 3 intermediate volumes [S1].
+*   **Performance:** On an Intel Core 2 Duo 2.4 GHz with 2GB RAM and nVidia GeForce 8800 GTX (768 MB texture memory), the GPU implementation is two orders of magnitude faster than the CPU implementation for scale-space computation and backprojection across datasets of size $64^3$, $128^3$, and $256^3$ [S3, unofficial].
+*   **Preprocessing Time:** 261s or 233s for a dataset of $256^2 \times 128$ with 128 scales (CPU) [S1].
+*   **Strengths:** Interactive rates for scale computation on GPU; distinguishes features with similar scalar values based on size; comparable quality to segmented data sets but faster [S2].
+*   **Limitations:** Isotropic filter limits shape analysis (width vs. length); holes are not detected without figure/ground reversal [S3, unofficial].
+
+## Background
+*   **Origin:** Introduced by Carlos Correa and Kwan-Liu Ma in 2008 [S2][S3, unofficial].
+*   **Paper:** "Size-based Transfer Functions: A New Volume Exploration Technique" [S2][S3, unofficial].
+*   **History:** Built upon scale-space theory from computer vision [S2]. Contrasts with pyramid representations which subsample data in space and scale, resulting in discrete and disperse scale representation [S2].
+*   **Usage:** Used in medical visualization (e.g., highlighting veins, segmenting brain tissue, knee MRI analysis) [S2][S3, unofficial].
+
+## Sources
+[S1] A Survey of Transfer Functions Suitable for Volume Rendering, https://doi.org/10.2312/vg/vg10/077-083, fetched 2026-10-26
+[S2] Size-based Transfer Functions: A New Volume Exploration Technique, http://carloscorrea.com/docs/vis08.pdf, fetched 2026-10-29
+[S3] Size-based Transfer Functions: A New Volume Exploration Technique, https://www.researchgate.net/publication/23456199_Size-based_Transfer_Functions_A_New_Volume_Exploration_Technique, fetched 2026-10-30 (unofficial)

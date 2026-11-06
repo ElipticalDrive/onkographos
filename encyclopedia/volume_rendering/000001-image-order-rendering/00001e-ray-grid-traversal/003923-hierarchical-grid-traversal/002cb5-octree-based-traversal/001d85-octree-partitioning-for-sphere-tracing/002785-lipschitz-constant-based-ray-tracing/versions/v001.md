@@ -1,0 +1,62 @@
+# Lipschitz Constant Based Ray Tracing
+Also called: Octree-Accelerated Sphere Tracing
+
+## Overview
+Lipschitz Constant Based Ray Tracing accelerates sphere tracing by partitioning the domain into an octree where each cell stores a local Lipschitz bound of the field function [S1, S2]. This allows the ray tracer to cull empty or fully interior nodes without evaluating the implicit surface, solving the problem of slow convergence in regions with high gradient magnitudes [S1]. It differs from Segment Tracing by using static cell bounds rather than dynamic segment-specific bounds, making it susceptible to field function queries at every cell intersection [S1].
+
+## How it works
+**Inputs:** Implicit field function $f(\mathbf{x})$, its gradient $\nabla f(\mathbf{x})$, and its Hessian or second derivatives (required for bound calculation) [S2]. An octree structure where each node corresponds to a cubic cell $C$ [S1].
+
+**Outputs:** A set of intersection points between a ray and the implicit surface $f(\mathbf{x}) = 0$ [S2].
+
+**Data Structures:**
+The octree nodes store a scalar value: the local Lipschitz bound $\lambda(C)$ [S1].
+*   **Field:** `lambda` (float): The Lipschitz constant for the cell.
+*   **Geometry:** Implicitly defined by the octree hierarchy; each cell $C$ has a bounding sphere $S \supset C$ [S1].
+
+**Method Steps:**
+1.  **Preprocessing (Octree Construction):**
+    For each cell $C$ in the octree:
+    a. Identify the bounding sphere $S$ of the cubic cell $C$ [S1].
+    b. Compute the local Lipschitz bound $\lambda(S)$ for the field function over the region $S$ [S1]. This requires evaluating the maximum magnitude of the gradient or using second derivatives to bound the rate of change [S2].
+    c. Store $\lambda(S)$ in the octree node corresponding to $C$ [S1].
+
+2.  **Ray Traversal:**
+    For a given ray $\Delta$:
+    a. Traverse the octree to find all cells intersected by the ray [S1].
+    b. For each intersected cell $C$ with stored bound $\lambda(C)$:
+       i. Evaluate the field function $f(\mathbf{x})$ at the entry point of the ray into $C$ [S1].
+       ii. Apply the Lipschitz criterion to determine if the cell straddles the implicit surface [S1]. A cell is considered empty or completely inside if the field value does not change sign or if the Lipschitz bound indicates the surface cannot be reached within the cell given the current field value [S2].
+       iii. If the cell straddles the surface, perform sphere tracing within the cell using the local bound $\lambda(C)$ to step towards the root [S2].
+       iv. If the cell does not straddle, prune it (skip further traversal into children or the cell interior) [S1].
+
+3.  **Root Isolation:**
+    Once a straddling cell is identified, isolate the root by investigating changes in the gradient and the sign of the field function within that cell [S2].
+
+**Formulas:**
+*   **Lipschitz Bound:** $\lambda(S) = \sup_{\mathbf{x} \in S} \|\nabla f(\mathbf{x})\|$ [S1, S2]. The bound is computed using the query $\lambda(S)$ where $S$ is the bounding sphere of cell $C$ [S1].
+*   **Sphere Tracing Step:** $t_{next} = t_{current} + \frac{f(\mathbf{x}_{current})}{\lambda(C)}$ [S2]. The step size is a function of the current field value and the local Lipschitz constant [S2].
+
+**Parameters:**
+*   **Octree Depth ($\delta$):** The depth of the octree partitioning. Typical values depend on model density. For sparse models, $\delta \approx 5$ may suffice. For dense models like "Temple", $\delta \ge 9$ is needed for competitiveness [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Derivative Availability:** The method requires the existence and calculability of the first and second derivatives of the field function [S2]. If these are not available, the bound cannot be computed accurately [S2].
+*   **Bound Accuracy:** The bound $\lambda(S)$ is a global bound for the sphere $S$ containing the cell, which is less accurate than the segment-specific bound $\lambda(e)$ used in Segment Tracing [S1]. This can lead to larger step sizes and more iterations if the bound is loose [S1].
+*   **Query Overhead:** Field function queries are performed for all intersections between the ray and the cells, which can be a performance bottleneck compared to methods that minimize queries [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on octree depth and model density. Performance improves with higher octree depths for sparse models, but dense models require deeper trees ($\delta \ge 9$) to be competitive with Segment Tracing [S1].
+*   **Memory Complexity:** Extra memory cost of 1 to 4 MB depending on the geometry of the implicit model and octree depth [S1].
+*   **Performance:** For sparse models (e.g., "Chandelier"), the octree prunes empty space effectively and performs slightly faster than Segment Tracing even at shallow depths ($\delta \approx 5$) [S1]. For dense models, Segment Tracing is generally faster unless the octree depth is high [S1].
+*   **Strengths:** Effective pruning of empty space in sparse scenes; robust convergence guaranteed by Lipschitz bounds [S2].
+*   **Limitations:** Requires differentiable field functions; static bounds are less accurate than dynamic segment bounds; high memory overhead for deep octrees [S1, S2].
+*   **When to use:** Sparse implicit models where empty space pruning is beneficial; scenes where pre-processing time is acceptable [S1].
+*   **When not to use:** Dense models with complex primitives unless deep octrees are feasible; scenes where field derivatives are not available or expensive to compute [S1, S2].
+
+## Background
+The principle of Lipschitz continuity was first used by [KB89] for guaranteed localization of intersections between a ray and an implicit surface [S2]. The existence of a global Lipschitz constant for signed distance fields was used by [Har96] to define a robust ray-tracing algorithm known as sphere tracing [S2]. This method is widely used for direct content creation in shaders [S2]. The specific application of storing local Lipschitz bounds in an octree for acceleration was compared against Segment Tracing in [S1].
+
+## Sources
+[S1] Segment Tracing Using Local Lipschitz Bounds, https://doi.org/10.1111/cgf.13951, fetched 2026-10-26
+[S2] Fast Ray Tracing of Scale‐Invariant Integral Surfaces, https://doi.org/10.1111/cgf.14208, fetched 2026-10-26

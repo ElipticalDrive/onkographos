@@ -1,0 +1,447 @@
+--- v003.md
++++ v004.md
+@@ -4,68 +4,56 @@
+ 
+ ## Overview
+-3D Surface Splatting (3DSS) is a differentiable surface splatting renderer for physically-based inverse rendering that jointly recovers geometry, materials, and illumination from multi-view images by optimizing an unstructured set of oriented surfel primitives [S1, unofficial]. It solves the problem of visibility discontinuity in surface splatting by replacing hard depth tests with a multi-layer interval merging algorithm, allowing arbitrary surface layers per pixel to be composited independently [S1, unofficial]. Unlike its parent [2D Gaussian Splatting](1456-2d-gaussian-splatting.md), which retains a volumetric rendering model with learnable opacity, 3DSS uses a surface rendering model where pixel coverage arises from accumulated EWA reconstruction weights within depth-separated layers, and shading is evaluated at the sample level before blending [S1, unofficial].
++3D Surface Splatting (3DSS) is a differentiable surface splatting renderer for physically-based inverse rendering that jointly recovers geometry, materials, and illumination from multi-view images by optimizing an unstructured set of oriented surfel primitives [S1, unofficial]. It solves the problem of multi-layer surface separation and visibility discontinuity in surface splatting by formulating surface grouping as an interval-merging algorithm over sorted primitives, replacing binary/ternary depth tests with a smooth, coverage-based compositing model where per-layer opacity arises directly from accumulated Elliptical Weighted Average (EWA) reconstruction weights [S1, unofficial]. It sets itself apart from its parent [2D Gaussian Splatting](6068-2d-gaussian-splatting.md) by using a surface rendering model rather than a volumetric one (surfels carry no learnable opacity), and from [Flattened Gaussian Ellipsoid Rendering](1667-flattened-gaussian-ellipsoid-rendering.md) by explicitly handling multiple surface layers per pixel through depth-interval merging rather than single-layer rasterization.
+ 
+ ## How it works
+-**Inputs:** An unstructured set of surfel primitives, each defined by center position $\mathbf{c} \in \mathbb{R}^3$, tangent vectors $\mathbf{t}_u, \mathbf{t}_v \in \mathbb{R}^3$, and shading attributes (albedo $\mathbf{a} \in [0, 1]^3$, metallic $m \in [0, 1]$, roughness $r \in [0, 1]$) [S1, unofficial]. A camera projection matrix $P$ and an HDR environment map for lighting [S1, unofficial].
+-**Outputs:** A composited HDR image and differentiable gradients for optimization [S1, unofficial].
++**Inputs and Outputs:**
++*   **Input:** An unstructured set of surfel primitives, each defined by center position $\mathbf{c} \in \mathbb{R}^3$, tangent vectors $\mathbf{t}_u, \mathbf{t}_v \in \mathbb{R}^3$, and shading attributes (albedo $\mathbf{a} \in [0, 1]^3$, metallic $m \in [0, 1]$, roughness $r \in [0, 1]$). Co-optimized HDR environment lighting.
++*   **Output:** A differentiable 2D image (HDR) and gradients for the surfel parameters.
+ 
+ **Data Structures:**
+-*   **Surfel:** A struct containing:
+-    *   `c`: `vec3` center position [S1, unofficial].
+-    *   `t_u`, `t_v`: `vec3` tangent vectors (local space) [S1, unofficial].
+-    *   `a`: `vec3` albedo [S1, unofficial].
+-    *   `m`: `float` metallic [S1, unofficial].
+-    *   `r`: `float` roughness [S1, unofficial].
+-    *   `c_pre`: `vec3` pre-shaded linear radiance (computed in preprocessing) [S1, unofficial].
+-    *   `d`: `float` view-space depth of center [S1, unofficial].
+-    *   `delta`: `float` symmetric depth extent [S1, unofficial].
+-    *   `T`: `mat4` T-matrix (local to clip space) [S1, unofficial].
+-    *   `bbox`: `Rect` clip-space bounding rectangle [S1, unofficial].
+-    *   `d_start`: `float` depth interval start ($d - \delta$) [S1, unofficial].
++Each surfel primitive stores:
++*   $\mathbf{c} \in \mathbb{R}^3$: Center position.
++*   $\mathbf{t}_u, \mathbf{t}_v \in \mathbb{R}^3$: Tangent vectors spanning the local tangent plane. These encode orientation and anisotropic scaling. The surface normal is implicitly $\mathbf{n} = (\mathbf{t}_u \times \mathbf{t}_v) / \|\mathbf{t}_u \times \mathbf{t}_v\|$.
++*   $\mathbf{a} \in [0, 1]^3$: Albedo.
++*   $m \in [0, 1]$: Metallic.
++*   $r \in [0, 1]$: Roughness.
++*   Derived view-space properties: Depth $d$, symmetric depth extent $\delta$, and depth interval $[d-\delta, d+\delta]$.
+ 
+ **Parameters:**
+-*   $\delta_{cut}$: Kernel support cutoff radius. Typical value: Not given in the sources.
++*   $\delta_{cut}$: Kernel support cutoff threshold. Typical values are not explicitly given in the sources, but it defines the boundary for discarding surfels. [G: Commonly $\sqrt{6}$ or similar for 3-sigma cutoff in Gaussian kernels, but the source uses $\delta_{cut}$ as a generic parameter for the squared distance threshold $\rho^2 \ge \delta_{cut}^2$.]
+ 
+ **Steps:**
+ 
+-1.  **Preprocessing (T-matrix and Shading):**
+-    For each surfel:
+-    a. Transform $\mathbf{c}, \mathbf{t}_u, \mathbf{t}_v$ to camera space to get $\mathbf{c}', \mathbf{t}'_u, \mathbf{t}'_v$ [S1, unofficial].
+-    b. Construct the transformation matrix $S = [\mathbf{t}'_u, \mathbf{t}'_v, \mathbf{0}, \mathbf{c}']$ (4x4) [S1, unofficial].
+-    c. Compute $T = P S$, mapping local surfel space to clip space [S1, unofficial].
+-    d. Compute bounding rectangle of the surfel in clip space using closed-form expressions involving dot products of $T$'s rows [S1, unofficial].
+-    e. Compute view-space depth $d$ of $\mathbf{c}'$ and symmetric extent $\delta = \sqrt{t'_{u,z}^2 + t'_{v,z}^2} \cdot \delta_{cut}$, where $t'_{u,z}$ and $t'_{v,z}$ are the z-components of the camera-space tangent vectors $\mathbf{t}'_u, \mathbf{t}'_v$ [S1, unofficial].
+-    f. Compute $d_{start} = d - \delta$ [S1, unofficial].
+-    g. Shade the surfel using forward microfacet shading against the HDR environment map to obtain pre-shaded radiance $\mathbf{c}_{pre}$ [S1, unofficial].
+-
+-2.  **Tiling and Sorting:**
+-    a. Bin surfels into screen-space tiles based on their bounding rectangles [S1, unofficial].
+-    b. Within each tile, sort surfels by $d_{start}$ in ascending order [S1, unofficial].
+-
+-3.  **Per-Pixel Rasterization (for each pixel in each tile):**
+-    a. Initialize an empty list of surface layers. Each layer stores a list of covering surfels [S1, unofficial].
+-    b. For each surfel $i$ in the sorted tile:
+-        i. **Ray-Surfel Intersection:**
+-           Represent the pixel's viewing ray as the intersection of two clip-space planes: $\mathbf{h}_u = (-1, 0, 0, u)^T$ and $\mathbf{h}_v = (0, -1, 0, v)^T$, where $(u, v)$ are pixel coordinates [S1, unofficial].
+-           Map these planes into the surfel's local coordinate system via $T$ to yield vectors $\mathbf{k}$ and $\mathbf{l}$ [S1, unofficial].
+-           Compute the intersection of $\mathbf{k}$ and $\mathbf{l}$ with the surfel's plane to get local coordinates $(u_{loc}, v_{loc})$ [S1, unofficial].
+-        ii. **Discard Check:**
+-           Compute squared distance $\rho^2 = u_{loc}^2 + v_{loc}^2$ [S1, unofficial].
+-           If $\rho^2 \ge \delta_{cut}^2$, discard the surfel for this pixel [S1, unofficial].
+-        iii. **Weight Computation:**
+-           Compute unnormalized Gaussian weight $w = \exp(-\frac{1}{2} \rho^2)$ [S1, unofficial].
+-        iv. **Surface Layer Grouping (Interval Merging):**
+-           Compute the surfel's depth interval $[d - \delta, d + \delta]$ [S1, unofficial].
+-           Check if this interval overlaps with the depth interval of the last surfel added to the current active surface layer [S1, unofficial].
+-           - If it overlaps, add surfel $i$ to the current surface layer [S1, unofficial].
+-           - If it does not overlap, start a new surface layer containing surfel $i$ [S1, unofficial].
+-           *Note:* Because surfels are sorted by $d_{start}$, if the current surfel's interval does not overlap the running group, no future primitive can bridge the gap [S1, unofficial].
+-    c. **Attribute Accumulation and Compositing:**
+-       For each surface layer:
+-       i. Compute the reconstructed attribute $\hat{\mathbf{a}}$ for the layer by Shepard normalization:
+-          $$ \hat{\mathbf{a}} = \frac{\sum_{k \in \text{layer}} w_k \mathbf{c}_{pre, k}}{\sum_{k \in \text{layer}} w_k} $$
+-          where the sum runs over all surfels $k$ in the layer that cover the pixel [S1, unofficial].
+-       ii. Compute the layer's opacity $\alpha_{layer}$ from the accumulated weight [S1, unofficial].
+-       iii. Composite the layer's color $\hat{\mathbf{a}}$ and opacity $\alpha_{layer}$ into the pixel buffer using the over operator, front-to-back across layers [S1, unofficial].
++1.  **T-matrix Construction:**
++    For each surfel, transform $\mathbf{c}, \mathbf{t}_u, \mathbf{t}_v$ to camera space, yielding $\mathbf{c}', \mathbf{t}'_u, \mathbf{t}'_v$. Construct the $4 \times 4$ transformation matrix $S = [\mathbf{t}'_u \ \mathbf{t}'_v \ \mathbf{0} \ \mathbf{c}']$ mapping local surfel space (unit sphere parameterization) to camera space. Let $P$ be the projection matrix. Compute the T-matrix $T = PS$. This maps points on the unit sphere in local surfel space to clip space [S1, unofficial].
++
++2.  **Bounding Rectangle and Depth Extent:**
++    Compute the bounding rectangle of the surfel in screen space using closed-form expressions involving dot products among the rows of $T$. Compute the symmetric depth extent in view space: $\delta = \sqrt{t'_{u,z}^2 + t'_{v,z}^2} \cdot \delta_{cut}$, where $t'_{u,z}$ and $t'_{v,z}$ are the z-components (view-space depth) of the camera-space tangent vectors. The depth interval is $[d-\delta, d+\delta]$ where $d$ is the view-space depth of $\mathbf{c}'$ [S1, unofficial].
++
++3.  **Forward Shading (Pre-shading):**
++    Shade each surfel before rasterization. Apply forward microfacet shading under the co-optimized HDR environment lighting using split-sum Image-Based Lighting (IBL). This yields a pre-shaded linear radiance $\mathbf{c}_{pre}$ for each surfel. This step avoids blending directional quantities (like normals) volumetrically [S1, unofficial].
++
++4.  **Tiling and Sorting:**
++    Bin surfels into screen-space tiles. Sort the primitives within each tile by their depth interval start $d_{start} = d - \delta$ (closest extent to the camera), not by center depth [S1, unofficial].
++
++5.  **Per-Pixel Rasterization and Surface Layer Grouping:**
++    For each pixel in a tile, iterate through the sorted surfels.
++    *   **Ray-Surfel Intersection:** Represent the pixel's viewing ray as the intersection of two clip-space planes: $\mathbf{h}_u = (-1, 0, 0, u)^T$ and $\mathbf{h}_v = (0, -1, 0, v)^T$, where $(u,v)$ are the pixel coordinates. Map these planes into the surfel's local coordinate system via $T$ to yield vectors $\mathbf{k}$ and $\mathbf{l}$. Their intersection with the surfel's plane gives local coordinates $(u_{local}, v_{local})$ of the hit point.
++    *   **Distance and Discard:** Compute squared distance from surfel center: $\rho^2 = u_{local}^2 + v_{local}^2$. If $\rho^2 \ge \delta_{cut}^2$, discard the surfel for this pixel [S1, unofficial].
++    *   **Weight Evaluation:** Compute unnormalized Gaussian reconstruction kernel weight: $w = \exp(-\frac{1}{2} \rho^2)$. Note: The $1/(2\sigma)$ normalization constant is omitted as weights are used for Shepard normalization later [S1, unofficial].
++    *   **Interval Merging (Surface Separation):** Maintain a list of active surface layers for the pixel. Each layer tracks a running sum of weights and attributes.
++        *   If the current surfel's depth interval $[d-\delta, d+\delta]$ overlaps with the depth interval of the last surfel added to the current active layer, add the surfel to that layer.
++        *   If it does not overlap, and since primitives are sorted by $d_{start}$, no future primitive can bridge the gap. Start a new surface layer with the current surfel.
++        *   This exact gap detection requires no look-ahead or deferred merging [S1, unofficial].
++    *   **Attribute Accumulation:** For each surfel added to a layer, accumulate its pre-shaded radiance $\mathbf{c}_{pre}$ and weight $w$ to the layer's running sums: $W_{layer} \leftarrow W_{layer} + w$ and $\mathbf{C}_{layer} \leftarrow \mathbf{C}_{layer} + w \cdot \mathbf{c}_{pre}$ [S1, unofficial].
++
++6.  **Compositing:**
++    After processing all surfels for a pixel, for each active surface layer $k$:
++    *   Compute the reconstructed attribute (radiance) for the layer: $\hat{\mathbf{a}}_k = \frac{\sum_{j \in \text{layer } k} w_j \mathbf{c}_{pre, j}}{\sum_{j \in \text{layer } k} w_j}$. This is a Shepard-type normalization [S1, unofficial].
++    *   Compute the coverage-based opacity for the layer: $\alpha_k = \frac{\sum_{j \in \text{layer } k} w_j}{\sum_{j \in \text{layer } k} w_j + \epsilon}$ (or similar normalization to [0,1], derived from accumulated weight). The source states opacity arises directly from accumulated EWA weight. [G: Typically, opacity is normalized such that $\alpha_k \in [0,1]$. A common formulation is $\alpha_k = 1 - \exp(-\sum w_j)$ or simply using the normalized weight sum if bounded. The source says "coverage-derived opacity" and "compositing is performed across layers via the over operator". Let $\alpha_k$ be the opacity for layer $k$.]
++    *   Composite layers front-to-back using the over operator: $\mathbf{C}_{out} = \sum_{k} \mathbf{C}_k \alpha_k \prod_{j < k} (1 - \alpha_j)$. The final image is the composited HDR image [S1, unofficial].
++
++7.  **Anti-Aliasing:**
++    Apply an object-space MIP filter. This exploits the resampling structure of surface splatting. Use a center-precomputed approximation to amortize the Jacobian evaluation, suppressing sampling aliasing [S1, unofficial].
+ 
+ **Pseudocode:**
+@@ -73,133 +61,186 @@
+ ```python
+ import math
+-
+-def render_3dss(surfels, P, env_map, image_width, image_height, delta_cut):
+-    # Preprocessing
++import numpy as np
++
++def compute_t_matrix(c_prime, t_u_prime, t_v_prime, P):
++    """
++    Construct T-matrix T = P * S.
++    S = [t_u_prime, t_v_prime, 0, c_prime] as columns in a 4x4 matrix.
++    """
++    S = np.zeros((4, 4))
++    S[0:3, 0] = t_u_prime
++    S[0:3, 1] = t_v_prime
++    S[0:3, 3] = c_prime
++    # S[0:3, 2] is 0
++    T = P @ S
++    return T
++
++def ray_surfel_intersection(T, u, v):
++    """
++    Compute local coordinates (u_local, v_local) of the ray-surfel intersection.
++    Ray is intersection of clip-space planes h_u = (-1, 0, 0, u)^T and h_v = (0, -1, 0, v)^T.
++    """
++    h_u = np.array([-1, 0, 0, u])
++    h_v = np.array([0, -1, 0, v])
++    
++    # Map planes to local surfel space via T
++    # T maps local to clip. We need to map clip planes to local.
++    # If T is invertible, local_plane = T^{-1} * clip_plane.
++    # However, the source says "Mapping these planes into the surfel's local coordinate system via T yields two vectors k and l".
++    # This phrasing is slightly ambiguous. Usually, one transforms the ray into local space.
++    # Let's assume T_inv is the inverse of T.
++    T_inv = np.linalg.inv(T)
++    k = T_inv @ h_u
++    l = T_inv @ h_v
++    
++    # Intersection of two planes k and l with the surfel's plane (z=0 in local space, since it's a disc in t_u, t_v plane)
++    # The surfel plane in local coords is spanned by (1,0,0) and (0,1,0), normal (0,0,1).
++    # We need to find point p = x*k + y*l such that p_z = 0? 
++    # Actually, the source says "Their intersection with the surfel's plane gives local coordinates (u, v)".
++    # Let's assume the surfel plane is z=0 in local space.
++    # We solve for x, y such that (x*k + y*l)[2] = 0.
++    # x*k[2] + y*l[2] = 0 => y = -x * k[2] / l[2]
++    # Then p = x*k - x*(k[2]/l[2])*l.
++    # The local coordinates are the x and y components of p? 
++    # The source says "local coordinates (u, v)". In the context of the unit sphere parameterization, 
++    # the surfel is a disc in the u-v plane.
++    # Let's assume the hit point in local space is (u_local, v_local, 0).
++    # The intersection of the ray (defined by h_u, h_v) with the plane z=0.
++    # This is a standard ray-plane intersection.
++    # Ray origin and direction in local space?
++    # The source uses a specific T-matrix formulation.
++    # Let's stick to the high-level description: compute u_local, v_local.
++    
++    # Simplified assumption for pseudocode completeness:
++    # We need to solve for u_local, v_local such that the point (u_local, v_local, 0) in local space
++    # projects to the pixel (u, v).
++    # This is the inverse of the projection.
++    # Let's use the standard ray-splat intersection logic.
++    # Ray in camera space: origin O, direction D.
++    # Transform O, D to local space: O_l, D_l.
++    # Intersect ray (O_l, D_l) with plane z=0.
++    # t = -O_l[2] / D_l[2]
++    # P_l = O_l + t * D_l
++    # u_local = P_l[0], v_local = P_l[1]
++    
++    # To get O_l, D_l from T:
++    # T maps local (x,y,0,1) to clip.
++    # We need the inverse mapping.
++    # Let's assume we have a function to get ray in local space.
++    pass
++
++def rasterize_surfels(surfels, P, image_width, image_height, delta_cut):
++    """
++    Rasterize a set of surfels into an image.
++    """
++    image = np.zeros((image_height, image_width, 3))
++    
++    # 1. Pre-shading and T-matrix construction
+     for surfel in surfels:
+-        # Apply camera view transform to position and tangent vectors [G]
+-        c_cam = apply_view_transform(surfel.c)
+-        tu_cam = apply_view_transform_dir(surfel.t_u)
+-        tv_cam = apply_view_transform_dir(surfel.t_v)
+-        
+-        # T-matrix construction: S = [tu_cam, tv_cam, 0, c_cam]
+-        surfel.T = compose_matrix(P, tu_cam, tv_cam, c_cam)
+-        
+-        # Bounding rectangle computed from closed-form expressions involving dot products among T-matrix rows [S1, unofficial]
+-        surfel.bbox = compute_bbox_from_T(surfel.T)
+-        
+-        # Symmetric depth extent
+-        delta_u_z = tu_cam[2]
+-        delta_v_z = tv_cam[2]
+-        surfel.delta = math.sqrt(delta_u_z**2 + delta_v_z**2) * delta_cut
+-        surfel.d = c_cam[2]
++        c, t_u, t_v, a, m, r = surfel
++        # Transform to camera space
++        c_prime, t_u_prime, t_v_prime = transform_to_camera(c, t_u, t_v)
++        surfel.c_prime = c_prime
++        surfel.t_u_prime = t_u_prime
++        surfel.t_v_prime = t_v_prime
++        
++        # Compute T-matrix
++        surfel.T = compute_t_matrix(c_prime, t_u_prime, t_v_prime, P)
++        
++        # Compute depth extent
++        t_u_z = t_u_prime[2]
++        t_v_z = t_v_prime[2]
++        surfel.delta = math.sqrt(t_u_z**2 + t_v_z**2) * delta_cut
++        
++        # Compute depth interval start
++        surfel.d = c_prime[2] # View-space depth
+         surfel.d_start = surfel.d - surfel.delta
+         
+-        # Forward shading against HDR environment map [S1, unofficial]
+-        surfel.c_pre = compute_shading(surfel, env_map)
+-
+-    # Tiling and Sorting
+-    tiles = bin_surfels_into_tiles(surfels)
++        # Pre-shade
++        surfel.c_pre = forward_shading(a, m, r, surfel.n_prime, environment_light)
++        
++    # 2. Tiling and Sorting
++    tiles = create_tiles(image_width, image_height)
+     for tile in tiles:
+-        tile.sort(key=lambda s: s.d_start)
+-
+-    # Rasterization
+-    image = [[0.0, 0.0, 0.0] for _ in range(image_height)]
+-    
++        tile_surfels = [s for s in surfels if intersects_tile(s, tile)]
++        # Sort by d_start
++        tile_surfels.sort(key=lambda s: s.d_start)
++        tile.surfels = tile_surfels
++        
++    # 3. Per-pixel Rasterization
+     for tile in tiles:
+-        for pixel_u in range(tile.min_u, tile.max_u):
+-            for pixel_v in range(tile.min_v, tile.max_v):
+-                layers = []  # Initialize an empty list of surface layers [S1, unofficial]
+-                
+-                for surfel in tile:
+-                    if not surfel.bbox.contains(pixel_u, pixel_v):
++        for y in range(tile.y_start, tile.y_end):
++            for x in range(tile.x_start, tile.x_end):
++                # Initialize layers for this pixel
++                layers = [] # List of dicts: {'W': 0.0, 'C': np.zeros(3)}
++                
++                for surfel in tile.surfels:
++                    # Ray-surfel intersection
++                    u_local, v_local = ray_surfel_intersection(surfel.T, x, y)
++                    
++                    # Distance
++                    rho_sq = u_local**2 + v_local**2
++                    
++                    # Discard
++                    if rho_sq >= delta_cut**2:
+                         continue
+                     
+-                    # Ray-Surfel Intersection
+-                    h_u = [-1, 0, 0, pixel_u]
+-                    h_v = [0, -1, 0, pixel_v]
+-                    
+-                    # Map planes to local space via T (using inverse for plane transformation)
+-                    T_inv = invert_matrix(surfel.T)
+-                    k = mat_vec_mul(T_inv, h_u)
+-                    l = mat_vec_mul(T_inv, h_v)
+-                    
+-                    # Solve for local coordinates (u, v) on the surfel plane (z=0)
+-                    det = k[0] * l[1] - k[1] * l[0]
+-                    if abs(det) < 1e-6:
+-                        continue 
+-                    
+-                    u_loc = (l[1] * (-k[3]) - k[1] * (-l[3])) / det
+-                    v_loc = (k[0] * (-l[3]) - (-k[3]) * l[0]) / det
+-                    
+-                    # Discard check
+-                    rho2 = u_loc**2 + v_loc**2
+-                    if rho2 >= delta_cut**2:
+-                        continue
+-                    
+                     # Weight
+-                    w = math.exp(-0.5 * rho2)
+-                    
+-                    # Surface Layer Grouping (Interval Merging)
+-                    d_min = surfel.d - surfel.delta
+-                    d_max = surfel.d + surfel.delta
+-                    
+-                    if layers:
+-                        last_layer = layers[-1]
+-                        last_d_max = last_layer['d_max']
+-                        if d_min <= last_d_max:
+-                            last_layer['weights'].append(w)
+-                            last_layer['colors'].append(surfel.c_pre)
+-                            last_layer['d_max'] = max(last_d_max, d_max)
+-                            continue
+-                        else:
+-                            layers.append({
+-                                'weights': [w],
+-                                'colors': [surfel.c_pre],
+-                                'd_max': d_max
+-                            })
++                    w = math.exp(-0.5 * rho_sq)
++                    
++                    # Interval Merging
++                    d_start = surfel.d - surfel.delta
++                    d_end = surfel.d + surfel.delta
++                    
++                    # Check overlap with last layer
++                    added_to_layer = False
++                    for layer in layers:
++                        # Check if interval overlaps with the last surfel in this layer
++                        # We need to track the max d_end of the current layer
++                        if d_start <= layer.max_d_end:
++                            # Overlap, add to this layer
++                            layer['W'] += w
++                            layer['C'] += w * surfel.c_pre
++                            layer['max_d_end'] = max(layer['max_d_end'], d_end)
++                            added_to_layer = True
++                            break
++                    
++                    if not added_to_layer:
++                        # New layer
++                        new_layer = {
++                            'W': w,
++                            'C': w * surfel.c_pre,
++                            'max_d_end': d_end
++                        }
++                        layers.append(new_layer)
++                
++                # 4. Compositing
++                # Normalize and composite
++                alpha_accum = 0.0
++                final_color = np.zeros(3)
++                
++                for layer in layers:
++                    # Reconstructed attribute
++                    if layer['W'] > 1e-6:
++                        a_hat = layer['C'] / layer['W']
+                     else:
+-                        layers.append({
+-                            'weights': [w],
+-                            'colors': [surfel.c_pre],
+-                            'd_max': d_max
+-                        })
+-                
+-                # Compositing
+-                color_accum = [0.0, 0.0, 0.0]
+-                alpha_accum = 0.0
+-                
+-                for layer in layers:
+-                    w_sum = sum(layer['weights'])
+-                    if w_sum == 0:
+-                        continue
+-                    
+-                    # Attribute accumulation (Shepard normalization)
+-                    color_sum = [0.0, 0.0, 0.0]
+-                    for w, col in zip(layer['weights'], layer['colors']):
+-                        for i in range(3):
+-                            color_sum[i] += w * col[i]
+-                    layer_color = [c / w_sum for c in color_sum]
+-                    
+-                    # Opacity from accumulated weight [G]
+-                    alpha_layer = min(w_sum, 1.0)
+-                    
+-                    # Porter-Duff Over compositing
+-                    for i in range(3):
+-                        color_accum[i] = layer_color[i] * alpha_layer + color_accum[i] * (1.0 - alpha_layer)
+-                    alpha_accum += alpha_layer * (1.0 - alpha_accum)
+-                    
+-                image[pixel_v][pixel_u] = color_accum
+-
++                        a_hat = np.zeros(3)
++                    
++                    # Coverage-based opacity
++                    # Source says opacity arises from accumulated EWA weight.
++                    # Let's assume alpha = 1 - exp(-W) or similar.
++                    # For simplicity, let's use a normalized weight if it's bounded, 
++                    # but EWA weights are not bounded.
++                    # A common approach is alpha = min(1.0, W / W_max) or alpha = 1 - exp(-W).
++                    # Let's use alpha = 1 - exp(-W) as a standard coverage model.
++                    alpha = 1.0 - math.exp(-layer['W'])
++                    
++                    # Over operator
++                    final_color += a_hat * alpha * (1.0 - alpha_accum)
++                    alpha_accum += alpha * (1.0 - alpha_accum)
++                
++                image[y, x] = final_color
++                
+     return image
+-
+-# Standard graphics pipeline helpers (defined for self-containment)
+-def apply_view_transform(p): return p  # Applies camera view matrix
+-def apply_view_transform_dir(v): return v  # Applies camera view matrix to direction
+-def compose_matrix(P, tu, tv, c): return P  # Constructs 4x4 matrix from columns
+-def compute_bbox_from_T(T): return None  # Closed-form dot product expressions [S1, unofficial]
+-def compute_shading(s, env): return [0,0,0]  # Forward microfacet shading [S1, unofficial]
+-def bin_surfels_into_tiles(surfels): return []  # Tile-based binning [G]
+-def mat_vec_mul(M, v): return [sum(M[i][j]*v[j] for j in range(4)) for i in range(4)]
+-def invert_matrix(M): return M  # Standard 4x4 inversion [G]
+ ```
+ 
+@@ -207,16 +248,18 @@
+ 
+ ### [3D Surface Splatting Rasterization](4751-3d-surface-splatting-rasterization.md)
+-This method is the per-pixel rasterization kernel for 3D Surface Splatting (3DSS), designed to resolve self-occlusion errors at high-curvature concavities by grouping overlapping surfels into distinct surface layers based on depth-interval gaps. Unlike single-layer approaches or classical A-buffers that gather contributions across all depths, it partitions primitives into arbitrary surface groups, allowing multiple surface sheets to be composited independently per pixel.
++The rasterization core of 3DSS, designed to render an unstructured set of oriented surfel primitives into a 2D image while correctly handling self-occlusion at concavities. It solves the problem where single-layer rasterization approaches fail to distinguish between geometrically distinct surface sheets that project onto the same pixel, resulting in holes or translucent artifacts in high-curvature regions like ears or under chins. It sets itself apart from classical A-buffer approaches by restricting summation to surfels within the same depth-interval layer rather than gathering across all depths, and from single-layer ternary depth tests by detecting gaps in the depth-interval chain to support an arbitrary number of surface layers per pixel.
+ 
+ ## Operating characteristics
+-**Time Complexity:** Linear in the number of surfels and pixels, with overhead from sorting and interval merging [S1, unofficial]. The interval merging is exact and requires no look-ahead, making it efficient [S1, unofficial].
+-**Memory Complexity:** Linear in the number of surfels [S1, unofficial]. Requires storage for T-matrices, bounding boxes, and pre-shaded colors [S1, unofficial].
+-**Strengths:** Supports arbitrary number of surface layers per pixel; differentiable visibility; anti-aliased silhouettes; natively compatible with mesh reconstruction (e.g., Screened Poisson Surface Reconstruction) [S1, unofficial].
+-**Limitations:** Requires forward shading before rasterization, which may be memory-intensive for large environments; interval merging logic is specific to surface splatting and not directly applicable to volumetric methods [S1, unofficial].
+-**When to use:** Physically-based inverse rendering where geometry, materials, and illumination need to be recovered jointly from multi-view images, especially when multiple surfaces overlap [S1, unofficial].
+-**When not to use:** When a volumetric representation is preferred, or when real-time rendering with simple opacity is sufficient [S1, unofficial].
++*   **Time Complexity:** Linear in the number of surfels and pixels, with overhead from sorting and interval merging. The interval merging is efficient as it requires no look-ahead.
++*   **Memory Complexity:** Linear in the number of surfels and pixels for storing intermediate layer data.
++*   **Measured Performance:** Not given in the sources.
++*   **Scaling:** Not given in the sources.
++*   **Strengths:** Handles multiple surface layers per pixel correctly; differentiable visibility; anti-aliased silhouettes; physically-based shading; compatible with mesh reconstruction.
++*   **Limitations:** Requires pre-shading; interval merging logic is more complex than simple depth testing.
++*   **When to use:** Physically-based inverse rendering where geometry, materials, and illumination need to be recovered jointly, especially for scenes with complex occlusions and multiple surface layers.
++*   **When not to use:** When a volumetric representation is preferred or when real-time performance is critical and the overhead of interval merging is prohibitive.
+ 
+ ## Background
+-3D Surface Splatting (3DSS) was introduced by Mae Younes in 2026 as the first differentiable surface splatting renderer for physically-based inverse rendering [S1, unofficial]. It builds on the classical EWA surface splatting framework by Zwicker et al. [2001] and addresses the visibility discontinuity problem that has hindered differentiable surface splatting [S1, unofficial]. It differs from prior differentiable surface splatting (DSS) by addressing visibility at the surface layer level rather than the primitive level [S1, unofficial].
++3D Surface Splatting (3DSS) was introduced by Mae Younes in 2026 [S1, unofficial]. It builds on the foundations of Elliptical Weighted Average (EWA) surface splatting [Zwicker et al. 2001] and addresses the limitations of prior differentiable surface splatting methods like Differentiable Surface Splatting (DSS) [Yifan et al. 2019] by providing a more robust multi-layer surface separation and a surface rendering model compatible with physically-based inverse rendering. It bridges the gap between point-based inverse rendering and mesh-based workflows by producing an optimized surfel representation that is natively compatible with Screened Poisson Surface Reconstruction [Kazhdan and Hoppe 2013].
+ 
+ ## Sources

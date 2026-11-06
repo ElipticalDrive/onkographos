@@ -1,0 +1,119 @@
+Rime — a free, open-source, AAA-grade game engine (C++ core + Rust tooling, Vulkan-first). - feat(render): geometric specular anti-aliasing in the shared BRDF (ADR-0078 step 1a) by LucaSct · Pull Request #276 · LucaSct/rime
+
+feat(render): geometric specular anti-aliasing in the shared BRDF (ADR-0078 step 1a) by LucaSct · Pull Request #276 · LucaSct/rime · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+LucaSct
+commented
+Oct 7, 2026
+Copy link
+Copy Markdown
+Owner
+ADR-0078 step 1a (#274). The first half of the answer to "why is everything flickering".
+The ordering is the part worth reading
+ADR-0078 puts specular AA before the temporal resolve, not after, and that is not a scheduling preference. A smooth metal (α ≈ 0.002) under a point-like light lights only the sliver of normals that align with the half-vector — a highlight far smaller than one pixel. We shade one normal per pixel, so whether that sliver is caught depends on where the pixel centre falls, and that changes every frame as the camera moves. The highlight flickers at full contrast.
+Fed that signal, a temporal resolve either clamps the spike away (the highlight dims or vanishes) or smears it into a streak. By then the information is gone — no amount of averaging restores the lobe that should have been integrated over the pixel. Widening the lobe at the source is a different operation, not a weaker TAA, so it has to run first.
+What landed
+One function in brdf.glsl, called from pbr_forward.frag and pbr_forward_shadowed.frag. Technique: Kaplanyan, Hill, Hoffman & Pettineo, HPG 2016, in the cheap isotropic form of Tokuyoshi & Kaplanyan, I3D 2019 — two dot products, no matrix, no extra texture, no extra pass. Always on; no toggle, no uniform, no pipeline variant.
+The spread is added in α², not α, because convolution adds variances, not standard deviations. Adding to α directly over-widens a smooth surface by a factor that looks almost right at low roughness and is wrong everywhere.
+It uses the perturbed normal, not the interpolated vertex normal: normal-map detail is the dominant source of sub-pixel normal variance, and filtering only the geometric normal misses exactly the sparkle this exists for.
+Measured
+property
+result
+P1 flat quad, highlight peak
+8928 vs 9225 analytic unfiltered (ratio 0.968)
+P2 sphere, pixel-to-pixel specular difference energy
+5.08e8 → 9.05e4 with the filter on, ~5600×
+P2 hottest pixel near the silhouette
+15940 → 158
+P2b rim
+2.88 vs a 0.159 ceiling had α saturated to 1
+P2's threshold is set from both measured arms, with the numbers and the date in a comment in the test, so a future reader sees what it was derived from rather than guessing.
+P1's limitation, stated plainly: it also passes with the filter switched off. It proves the filter is inert on flat surfaces — which is what stops it quietly dulling every flat surface in the game — not that it is strong enough. P2 is the test that proves strength. P2b likewise only guards against saturation; it does not pin the clamp's value.
+Two call sites, not four
+terrain.frag was tried and removed. It rebuilds n as a per-triangle face normal from the derivatives of world position, so inside a facet that normal is constant, dFdx(n) is zero, and the filter does nothing — while across a facet edge the 2×2 quad straddles two facets, so the derivative is large for a reason that is not curvature and the filter widens roughness along a one-pixel line at every triangle edge. An artefact bought for no benefit. The reason is left in the shader, because "terrain is missing its specular AA" is what the next reader will notice; terrain needs a smooth normal first, differentiated from the heightfield or baked, and then the filter becomes correct there. Separate brick.
+ssr_resolve.frag is deliberately not a call site, with a one-line comment saying why: it is a fullscreen pass over a G-buffer, so its screen-space normal step crosses object silhouettes instead of measuring curvature — filtering there would blur roughness along every object edge in the frame.
+Verification, and one correction to how it was gated
+rime_render_tests -tc="specular aa*" → 3 cases, 18 assertions, 0 failed. Full build, rime_render_tests, rime_terrain_render_tests and block_render_test → 12/12, exit 0 throughout, judged by exit status.
+Worth recording: two of the four gates in the original brief matched no tests and exited 0 — ctest -R specular_aa and ctest -R "pbr_pipeline|ssr|gbuffer" both print "No tests were found!!!" and still return success, because every render case lives inside the single rime_render_tests ctest entry. They were false green. The real gate is the suite plus a doctest -tc= filter, and that is what the numbers above come from.
+Ran on an RTX 3060; no lavapipe driver is installed on this machine, so the lavapipe arm is CI's.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01EsMbnb6yXqizRcydPduBTM
+LucaSct
+and others
+added 2 commits
+October 7, 2026 12:33
+feat(render): geometric specular anti-aliasing in the shared BRDF (AD…
+…
+751c2a1
+```
+…R-0078 step 1a)
+
+filter_specular_alpha() in brdf.glsl (Tokuyoshi & Kaplanyan 2019, the isotropic form of
+Kaplanyan et al. 2016) widens GGX alpha in alpha^2 by the screen-space spread of the shading
+normal, clamped at 0.18. Called once, in uniform control flow, from pbr_forward.frag,
+pbr_forward_shadowed.frag (on the perturbed normal) and terrain.frag (after its face normal is
+formed). No toggle, uniform or variant. ssr_resolve.frag is deliberately not a call site.
+
+Proofs (tests/render/specular_aa_test.cpp), structural, no golden images:
+P1 flat quad matches the unfiltered analytic GGX (ratio 0.968, identical with the filter off);
+P2 sphere pixel-to-pixel specular difference energy 5.08e8 -> 9.05e4 (filter off -> on);
+P2b the rim stays well above the alpha = 1 ceiling.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EsMbnb6yXqizRcydPduBTM
+```
+fix(render): terrain does not get specular AA — its normal is per-facet
+…
+fb8d118
+```
+The filter measures how fast the SHADING normal turns across a pixel.
+terrain.frag rebuilds `n` as a per-triangle FACE normal from the derivatives of
+world position, so inside one facet that normal is constant, dFdx(n) is zero,
+and the filter does nothing at all. Across a facet edge the 2x2 quad straddles
+two facets, so the derivative is large for a reason that is not curvature, and
+the filter widens roughness along a one-pixel line at every triangle edge.
+
+That is an artefact bought for no benefit, so the call site is removed rather
+than kept for symmetry with pbr_forward. The reason is left in the shader,
+because "terrain is missing its specular AA" is what the next reader will see,
+and the answer is that terrain needs a SMOOTH normal first — differentiated
+from the heightfield analytically, or sampled from a baked normal map. Then
+this filter becomes correct there. Separate brick.
+
+`alpha` goes back to const, since nothing reassigns it now.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01EsMbnb6yXqizRcydPduBTM
+```
+LucaSct
+mentioned this pull request
+Oct 7, 2026
+feat(render): camera jitter and the previous-frame view, switched off (ADR-0078 step 1b)
+#277
+Merged
+Hide details
+View details
+LucaSct
+merged commit 66eaa3b
+into
+main
+Oct 7, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

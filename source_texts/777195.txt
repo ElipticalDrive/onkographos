@@ -1,0 +1,740 @@
+Contribute to hiroyuki/FloatingVectorsICC development by creating an account on GitHub.
+
+TSDF: smooth-union (smin) bench for two instants (issue #27) · hiroyuki/FloatingVectorsICC@3157da9 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+File tree
+Expand file treeCollapse file tree
+Open diff view settings
+Filter options
+Assets/Scripts/TSDF
+Debug
+TSDFDebugSession.cs
+Resources
+TSDFSmoothUnion.compute.meta
+TSDFSmoothUnion.compute
+Expand file treeCollapse file tree
+Open diff view settings
+Collapse file
+‎Assets/Scripts/TSDF/Debug/TSDFDebugSession.cs‎
+Copy file name to clipboardExpand all lines: Assets/Scripts/TSDF/Debug/TSDFDebugSession.cs
++203-12Lines changed: 203 additions & 12 deletions
+Original file line numberDiff line numberDiff line change
+@@ -66,6 +66,19 @@ public sealed class TSDFDebugSession : MonoBehaviour
+6666
+public bool colorByInstant = true;
+6767
+public Color instant1Color = Color.red;
+6868
+public Color instant2Color = Color.blue;
+69+
+[Header("Smooth-union (issue #27)")]
+70+
+[Tooltip("Method B: instead of folding the two instants into ONE RetainGhost " +
+71+
+"buffer, integrate them as TWO SEPARATE SDFs and blend with " +
+72+
+"smin(A,B,k) so the shells grow an organic neck. Only the fixed-frame " +
+73+
+"bench (Build Fixed Frames) uses this; the realtime trailing red/blue " +
+74+
+"(B) path stays RetainGhost. While the bench is frozen, dragging " +
+75+
+"smoothUnionK re-blends the cached pair live (no re-integration).")]
+76+
+public bool smoothUnion = false;
+77+
+[Tooltip("smin neck radius k in METRES. Larger = fatter / longer neck (and more " +
+78+
+"outward bulge when the two shells sit far apart — the documented " +
+79+
+"caveat). ~1-4 voxels is a sensible start. Drag while frozen to watch " +
+80+
+"the neck change live.")]
+81+
+[Range(0.001f, 0.3f)] public float smoothUnionK = 0.03f;
+6982
+[Tooltip("Tick true (or hit \"Build Fixed Frames\" context menu / key B) to " +
+7083
+"run the bench. Auto-resets after it runs.")]
+7184
+public bool buildRequested = false;
+@@ -131,6 +144,22 @@ private sealed class Snapshot
+131144
+private TSDFVolume.AccumulationMode _savedAccum;
+132145
+private bool _savedIntegEnabled;
+133146
+147+
+// --- Smooth-union (issue #27): two instants held as separate SDFs ---
+148+
+// _suVoxA/_suColA and _suVoxB/_suColB cache the two integrated instants so
+149+
+// the smin compose can be re-run for a new k without re-integrating. The
+150+
+// result lands in the volume's write buffer (so MC extracts it normally).
+151+
+private ComputeShader _suShader;
+152+
+private int _suCopyKernel = -1, _suUnionKernel = -1;
+153+
+private ComputeBuffer _suVoxA, _suColA, _suVoxB, _suColB;
+154+
+private int _suBufCount = -1;
+155+
+private bool _haveInstants;
+156+
+private float _lastComposedK = float.NaN;
+157+
+// Grid mapping the cached instants were integrated against. If the volume
+158+
+// rebuilds (bbox transform / voxelSize) with the SAME voxel count, the cached
+159+
+// SDFs no longer match the new world<->voxel mapping, so invalidate them.
+160+
+private Matrix4x4 _suWorldFromVoxel;
+161+
+private float _suVoxelSizeAtBuild;
+162+
+134163
+private void OnEnable()
+135164
+{
+136165
+if (volume == null) volume = FindAnyObjectByType<TSDFVolume>(FindObjectsInactive.Include);
+@@ -176,6 +205,7 @@ private void OnDisable()
+176205
+_subscribedRecorder = null;
+177206
+_handler = null;
+178207
+}
+208+
+ReleaseSmoothUnionBuffers();
+179209
+}
+180210
+181211
+// Cache every cam's latest depth as it arrives. The main TSDFIntegrator
+@@ -217,6 +247,33 @@ private void Update()
+217247
+if (Input.GetKeyDown(buildFixedFramesKey)) ToggleBMode();
+218248
+if (Input.GetKeyDown(removeNoiseKey) && volume != null) volume.RemoveSmallComponents();
+219249
+if (buildRequested) BuildFixedFrames(); // context-menu / tick = one-shot frozen pair
+250+
+251+
+// Live k tuning: while the smin bench is frozen (paused / idle), dragging
+252+
+// smoothUnionK re-blends the cached A/B pair without re-integrating. Skip
+253+
+// while actively playing so we don't fight the realtime trailing path (the
+254+
+// trailing path also clears _haveInstants when it runs, so this only ever
+255+
+// touches a freshly-built, still-current smin cache).
+256+
+if (smoothUnion && SmoothUnionCacheValid()
+257+
+&& !Mathf.Approximately(smoothUnionK, _lastComposedK)
+258+
+&& !IsRecorderActivelyPlaying())
+259+
+ComposeSmoothUnion();
+260+
+}
+261+
+262+
+private bool IsRecorderActivelyPlaying()
+263+
+=> recorder != null
+264+
+&& recorder.CurrentState == PointCloudRecorder.State.Playing
+265+
+&& !recorder.IsPaused;
+266+
+267+
+// The cached instants are usable only while the volume still has the same
+268+
+// voxel count AND the same world<->voxel mapping they were integrated against
+269+
+// (a bbox/voxelSize edit rebuilds the grid and the cache would project wrong).
+270+
+private bool SmoothUnionCacheValid()
+271+
+{
+272+
+if (!_haveInstants || volume == null) return false;
+273+
+int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+274+
+if (_suBufCount != total) return false;
+275+
+if (!Mathf.Approximately(_suVoxelSizeAtBuild, volume.voxelSize)) return false;
+276+
+return _suWorldFromVoxel == volume.WorldFromVoxel;
+220277
+}
+221278
+222279
+[ContextMenu("Remove Small Components (noise)")]
+@@ -363,31 +420,158 @@ public void BuildFixedFrames()
+363420
+Debug.LogWarning("[TSDFDebugSession] Second instant equals the first (skip clamped) — " +
+364421
+"you'll see only one shell.", this);
+365422
+366-
+volume.ClearWrite(); // clear ONCE; both instants accumulate
+367-
+368423
+int done = 0;
+369-
+if (colorByInstant) integrator.colorOverride = instant1Color;
+370-
+done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s");
+424+
+bool smin = smoothUnion && EnsureSmoothUnionShader();
+425+
+if (smin)
+426+
+{
+427+
+// Method B (issue #27): integrate each instant into its OWN sdf+colour
+428+
+// buffer (clear the write buffer BEFORE each one), snapshot it out, then
+429+
+// smin(A,B,k) -> write buffer. The two shells stay independent so the
+430+
+// blend produces an organic neck instead of two flat RetainGhost shells.
+431+
+int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+432+
+EnsureSmoothUnionBuffers(total);
+433+
+434+
+volume.ClearWrite();
+435+
+if (colorByInstant) integrator.colorOverride = instant1Color;
+436+
+done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s (SDF A)");
+437+
+SnapshotWriteBuffer(_suVoxA, _suColA, total);
+438+
+439+
+recorder.SeekToPlayheadSeconds(secondSec);
+440+
+volume.ClearWrite();
+441+
+if (colorByInstant) integrator.colorOverride = instant2Color;
+442+
+done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f, SDF B)");
+443+
+SnapshotWriteBuffer(_suVoxB, _suColB, total);
+444+
+445+
+if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+446+
+447+
+_haveInstants = true;
+448+
+_suWorldFromVoxel = volume.WorldFromVoxel; // mapping the cache is valid for
+449+
+_suVoxelSizeAtBuild = volume.voxelSize;
+450+
+ComposeSmoothUnion(); // smin(A,B,k) -> write buffer + Publish
+451+
+}
+452+
+else
+453+
+{
+454+
+// Method-neutral baseline: both instants fold into ONE RetainGhost
+455+
+// buffer as two co-existing shells (the raw "overlap or apart?" view).
+456+
+_haveInstants = false;
+371457
+372-
+recorder.SeekToPlayheadSeconds(secondSec);
+373-
+if (colorByInstant) integrator.colorOverride = instant2Color;
+374-
+done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f)");
+458+
+volume.ClearWrite(); // clear ONCE; both instants accumulate
+375459
+376-
+// Reset so live integration / later builds use camera colour again.
+377-
+if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+460+
+if (colorByInstant) integrator.colorOverride = instant1Color;
+461+
+done += IntegrateAllCached(serials, $"instant1 @ {startPlayheadSec:0.000}s");
+378462
+379-
+volume.Publish();
+463+
+recorder.SeekToPlayheadSeconds(secondSec);
+464+
+if (colorByInstant) integrator.colorOverride = instant2Color;
+465+
+done += IntegrateAllCached(serials, $"instant2 @ {secondSec:0.000}s (+{skipFrames}f)");
+466+
+467+
+// Reset so live integration / later builds use camera colour again.
+468+
+if (colorByInstant) integrator.colorOverride = new Color(0f, 0f, 0f, 0f);
+469+
+470+
+volume.Publish();
+471+
+}
+380472
+381473
+string who = !string.IsNullOrEmpty(validateSerial)
+382474
+? validateSerial.Substring(System.Math.Max(0, validateSerial.Length - 6))
+383475
+: $"ALL x{serials.Length}";
+384-
+lastReplayKind = $"fixed[{done}] ({who})";
+476+
+string mode = smin ? $"smooth-union k={smoothUnionK:0.000}m (separate SDFs)" : "RetainGhost (one buffer)";
+477+
+lastReplayKind = $"fixed[{done}] ({who}) {(smin ? "smin" : "ghost")}";
+385478
+Debug.Log($"[TSDFDebugSession] Built two instants on {who}: " +
+386479
+$"start={startPlayheadSec:0.000}s (cursor {refCursor}) + {skipFrames}f " +
+387-
+$"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, RetainGhost. " +
+480+
+$"-> {secondSec:0.000}s (cursor {targetCursor}). {done} integrations, {mode}. " +
+388481
+"Integrator FROZEN — set integrator.integrationEnabled=true to resume live.", this);
+389482
+}
+390483
+484+
+// ---------------- Smooth-union (issue #27) ----------------
+485+
+486+
+private bool EnsureSmoothUnionShader()
+487+
+{
+488+
+if (_suShader != null) return true;
+489+
+_suShader = Resources.Load<ComputeShader>("TSDFSmoothUnion");
+490+
+if (_suShader == null)
+491+
+{
+492+
+Debug.LogError("[TSDFDebugSession] Compute shader \"Resources/TSDFSmoothUnion.compute\" " +
+493+
+"not found — falling back to RetainGhost.", this);
+494+
+return false;
+495+
+}
+496+
+_suCopyKernel = _suShader.FindKernel("Copy");
+497+
+_suUnionKernel = _suShader.FindKernel("SmoothUnion");
+498+
+return true;
+499+
+}
+500+
+501+
+private void EnsureSmoothUnionBuffers(int total)
+502+
+{
+503+
+if (total <= 0) return;
+504+
+if (_suBufCount == total && _suVoxA != null) return;
+505+
+ReleaseSmoothUnionBuffers();
+506+
+_suVoxA = new ComputeBuffer(total, sizeof(float) * 2);
+507+
+_suColA = new ComputeBuffer(total, sizeof(float) * 4);
+508+
+_suVoxB = new ComputeBuffer(total, sizeof(float) * 2);
+509+
+_suColB = new ComputeBuffer(total, sizeof(float) * 4);
+510+
+_suBufCount = total;
+511+
+_haveInstants = false; // freshly (re)allocated — no valid instants cached yet
+512+
+}
+513+
+514+
+private void ReleaseSmoothUnionBuffers()
+515+
+{
+516+
+_suVoxA?.Release(); _suColA?.Release();
+517+
+_suVoxB?.Release(); _suColB?.Release();
+518+
+_suVoxA = _suColA = _suVoxB = _suColB = null;
+519+
+_suBufCount = -1;
+520+
+_haveInstants = false;
+521+
+}
+522+
+523+
+// Copy the freshly-integrated instant out of the volume's write buffer into
+524+
+// a scratch (sdf, colour) pair so the next instant can reuse the write buffer.
+525+
+private void SnapshotWriteBuffer(ComputeBuffer dstVox, ComputeBuffer dstCol, int total)
+526+
+{
+527+
+if (_suShader == null || _suCopyKernel < 0) return;
+528+
+if (volume == null || volume.WriteBuffer == null) return;
+529+
+SuDispatchDims(total, out int gx, out int gy);
+530+
+_suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+531+
+_suShader.SetInt("_DispatchWidth", gx * 64);
+532+
+_suShader.SetBuffer(_suCopyKernel, "_SrcVoxels", volume.WriteBuffer);
+533+
+_suShader.SetBuffer(_suCopyKernel, "_SrcColors", volume.WriteColorBuffer);
+534+
+_suShader.SetBuffer(_suCopyKernel, "_DstVoxels", dstVox);
+535+
+_suShader.SetBuffer(_suCopyKernel, "_DstColors", dstCol);
+536+
+_suShader.Dispatch(_suCopyKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+537+
+}
+538+
+539+
+// smin(A, B, k) -> volume write buffer, then publish so MC re-extracts. Used
+540+
+// both by BuildFixedFrames and by the live-k recompose in Update.
+541+
+private void ComposeSmoothUnion()
+542+
+{
+543+
+if (!_haveInstants || volume == null || volume.WriteBuffer == null) return;
+544+
+if (!EnsureSmoothUnionShader()) return;
+545+
+int total = volume.Dim.x * volume.Dim.y * volume.Dim.z;
+546+
+if (total <= 0 || _suBufCount != total) return; // grid changed under us — re-run Build
+547+
+548+
+SuDispatchDims(total, out int gx, out int gy);
+549+
+_suShader.SetInts("_Dim", volume.Dim.x, volume.Dim.y, volume.Dim.z);
+550+
+_suShader.SetFloat("_Tau", volume.Tau);
+551+
+_suShader.SetFloat("_K", smoothUnionK);
+552+
+_suShader.SetInt("_DispatchWidth", gx * 64);
+553+
+_suShader.SetBuffer(_suUnionKernel, "_VoxelsA", _suVoxA);
+554+
+_suShader.SetBuffer(_suUnionKernel, "_ColorsA", _suColA);
+555+
+_suShader.SetBuffer(_suUnionKernel, "_VoxelsB", _suVoxB);
+556+
+_suShader.SetBuffer(_suUnionKernel, "_ColorsB", _suColB);
+557+
+_suShader.SetBuffer(_suUnionKernel, "_VoxelsOut", volume.WriteBuffer);
+558+
+_suShader.SetBuffer(_suUnionKernel, "_ColorsOut", volume.WriteColorBuffer);
+559+
+_suShader.Dispatch(_suUnionKernel, Mathf.Max(1, gx), Mathf.Max(1, gy), 1);
+560+
+561+
+volume.Publish();
+562+
+_lastComposedK = smoothUnionK;
+563+
+}
+564+
+565+
+// 2D dispatch grid (mirrors TSDFVolume/Integrator): keeps large volumes under
+566+
+// the 65535 threadgroup-per-axis D3D limit; the kernels linearise via
+567+
+// _DispatchWidth = gx * 64.
+568+
+private static void SuDispatchDims(int total, out int gx, out int gy)
+569+
+{
+570+
+int groups = Mathf.CeilToInt(total / 64f);
+571+
+gx = Mathf.Max(1, Mathf.Min(groups, 65535));
+572+
+gy = Mathf.Max(1, Mathf.CeilToInt(groups / (float)gx));
+573+
+}
+574+
+391575
+/// <summary>Integrate the currently-cached snapshot of every serial in
+392576
+/// <paramref name="serials"/>. Returns how many integrated.</summary>
+393577
+private int IntegrateAllCached(string[] serials, string label)
+@@ -503,6 +687,13 @@ private void RebuildAtCurrent()
+503687
+504688
+private void RebuildTrailing(string[] serials)
+505689
+{
+690+
+// The realtime RetainGhost trailing path now owns the write buffer, so any
+691+
+// cached smooth-union instants are stale — invalidate them so a later
+692+
+// smoothUnionK drag can't republish the smin bench over this trailing
+693+
+// result (the existing B-mode path must stay RetainGhost). Re-run Build
+694+
+// Fixed Frames to go back to the smin bench.
+695+
+_haveInstants = false;
+696+
+506697
+int skip = Mathf.Max(1, skipFrames);
+507698
+volume.ClearWrite();
+508699
+Collapse file
+‎Assets/Scripts/TSDF/Resources/TSDFSmoothUnion.compute‎
+Copy file name to clipboard
++103Lines changed: 103 additions & 0 deletions
+Original file line numberDiff line numberDiff line change
+@@ -0,0 +1,103 @@
+1+
+// Smooth-union (smin / metaball) composition of two separate TSDF instants —
+2+
+// issue #27 (parent #25). Holds two fixed moments as SEPARATE sdf+colour
+3+
+// buffers (A and B), then blends them with a polynomial smooth-min so the two
+4+
+// shells grow an organic neck toward each other (k tunes the neck thickness).
+5+
+//
+6+
+// Copy : snapshot one freshly-integrated instant out of the volume's
+7+
+// write buffer into a scratch A/B buffer pair.
+8+
+// SmoothUnion : result = smin(sdfA, sdfB, k) written back into the B buffer
+9+
+// (= the volume write buffer), with colour blended by the same
+10+
+// smin weight so the seam is a natural A/B colour mix.
+11+
+//
+12+
+// Notes:
+13+
+// - smin <= min, so the seam bulges OUTWARD. This only looks clean where the
+14+
+// two shells overlap / nearly touch; far-apart shells bridge with a global
+15+
+// outward swell (the documented caveat — method A is better when far apart).
+16+
+// - The dip term only kicks in where |sdfA - sdfB| < k, so empty free-space
+17+
+// voxels (both clamped to +tau) stay above the iso level as long as k stays
+18+
+// well under 4*tau — no phantom surface in open space.
+19+
+// - A voxel observed by only one instant passes that instant straight through
+20+
+// (no smin), so single-sided regions are unchanged.
+21+
+22+
+#pragma kernel Copy
+23+
+#pragma kernel SmoothUnion
+24+
+25+
+// = groupsX * 64; linearises the 2D dispatch grid so large volumes stay under
+26+
+// the 65535 threadgroup-per-axis D3D limit (matches TSDFClear / TSDFIntegrate).
+27+
+int _DispatchWidth;
+28+
+int3 _Dim;
+29+
+float _Tau; // truncation distance (metres) — the "no observation" sdf seed
+30+
+float _K; // smooth-min blend radius (metres). Larger = fatter neck.
+31+
+32+
+// ---- Copy: _Src* -> _Dst* (snapshot an instant out of the write buffer) ----
+33+
+StructuredBuffer<float2> _SrcVoxels;
+34+
+StructuredBuffer<float4> _SrcColors;
+35+
+RWStructuredBuffer<float2> _DstVoxels;
+36+
+RWStructuredBuffer<float4> _DstColors;
+37+
+38+
+[numthreads(64, 1, 1)]
+39+
+void Copy(uint3 id : SV_DispatchThreadID)
+40+
+{
+41+
+uint lin = id.y * (uint)_DispatchWidth + id.x;
+42+
+uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+43+
+if (lin >= total) return;
+44+
+_DstVoxels[lin] = _SrcVoxels[lin];
+45+
+_DstColors[lin] = _SrcColors[lin];
+46+
+}
+47+
+48+
+// ---- SmoothUnion: smin(A, B) -> Out ----
+49+
+// A and B are the two cached instant snapshots; Out is the volume write buffer
+50+
+// that Marching Cubes extracts. Keeping A/B separate from Out lets the caller
+51+
+// re-run this kernel for a new k without re-integrating either instant.
+52+
+StructuredBuffer<float2> _VoxelsA;
+53+
+StructuredBuffer<float4> _ColorsA;
+54+
+StructuredBuffer<float2> _VoxelsB;
+55+
+StructuredBuffer<float4> _ColorsB;
+56+
+RWStructuredBuffer<float2> _VoxelsOut;
+57+
+RWStructuredBuffer<float4> _ColorsOut;
+58+
+59+
+[numthreads(64, 1, 1)]
+60+
+void SmoothUnion(uint3 id : SV_DispatchThreadID)
+61+
+{
+62+
+uint lin = id.y * (uint)_DispatchWidth + id.x;
+63+
+uint total = (uint)(_Dim.x * _Dim.y * _Dim.z);
+64+
+if (lin >= total) return;
+65+
+66+
+float2 va = _VoxelsA[lin];
+67+
+float2 vb = _VoxelsB[lin];
+68+
+bool aValid = va.y > 0.0;
+69+
+bool bValid = vb.y > 0.0;
+70+
+71+
+if (aValid && bValid)
+72+
+{
+73+
+float a = va.x;
+74+
+float b = vb.x;
+75+
+float k = max(_K, 1e-6);
+76+
+// Polynomial smooth-min (Inigo Quilez). h is the A-vs-B blend weight:
+77+
+// h -> 1 picks A, h -> 0 picks B, h ~ 0.5 is the smoothed seam.
+78+
+float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+79+
+float s = lerp(b, a, h) - k * h * (1.0 - h);
+80+
+float3 col = lerp(_ColorsB[lin].rgb, _ColorsA[lin].rgb, h);
+81+
+float w = max(va.y, vb.y);
+82+
+_VoxelsOut[lin] = float2(s, w);
+83+
+_ColorsOut[lin] = float4(col, w);
+84+
+}
+85+
+else if (aValid)
+86+
+{
+87+
+// Only instant 1 observed this voxel — pass it through unchanged.
+88+
+_VoxelsOut[lin] = va;
+89+
+_ColorsOut[lin] = _ColorsA[lin];
+90+
+}
+91+
+else if (bValid)
+92+
+{
+93+
+// Only instant 2 observed this voxel — pass it through unchanged.
+94+
+_VoxelsOut[lin] = vb;
+95+
+_ColorsOut[lin] = _ColorsB[lin];
+96+
+}
+97+
+else
+98+
+{
+99+
+// Neither instant observed it: keep it empty so MC's weight gate skips.
+100+
+_VoxelsOut[lin] = float2(_Tau, 0.0);
+101+
+_ColorsOut[lin] = float4(0.0, 0.0, 0.0, 0.0);
+102+
+}
+103+
+}
+Collapse file
+‎Assets/Scripts/TSDF/Resources/TSDFSmoothUnion.compute.meta‎
+Copy file name to clipboardExpand all lines: Assets/Scripts/TSDF/Resources/TSDFSmoothUnion.compute.meta
++7Lines changed: 7 additions & 0 deletions
+Load diffSome generated files are not rendered by default. Learn more about customizing how changed files appear on GitHub.
+0 commit comments
+Comments
+0 (0)
+You can’t perform that action at this time.

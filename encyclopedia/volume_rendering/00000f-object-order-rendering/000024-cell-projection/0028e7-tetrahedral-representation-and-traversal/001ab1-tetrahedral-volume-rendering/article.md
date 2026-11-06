@@ -3,168 +3,188 @@
 Also called: BT Volume Rendering, Basis Tensor Volume Rendering, Cell Projection with GPGPU, DiffTetVR Tetrahedral Volume Rendering, Differentiable Tetrahedral Volume Rendering, GPU-Accelerated Cell Projection (Tetrahedral), Isosurface rendering using BT volumes, PTINT
 
 ## Overview
-Tetrahedral Volume Rendering (TetVR) is a cell-projection method that renders unstructured tetrahedral meshes by projecting individual tetrahedra onto the screen and compositing them in depth order [S3]. It solves the problem of accurately visualizing complex, non-uniform volumetric data (such as finite element analysis results or dark matter simulations) where regular grid-based ray marching fails or introduces sampling artifacts [S5, unofficial]. Unlike [Projected Tetrahedra](877-projected-tetrahedra.md) which often relies on explicit isosurface extraction or simpler blending, TetVR supports arbitrary isosurface values and partial pre-integration directly within the projection pipeline, enabling hybrid volume/isosurface visualization [S2]. It differs from [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) by using hardware rasterization and screen-space classification to determine visibility order, trading exact topological correctness for GPU acceleration [S3].
+Tetrahedral Volume Rendering is a cell-projection method that renders unstructured tetrahedral grids by projecting individual tetrahedra onto the screen and accumulating color and opacity in screen space. It solves the problem of rendering complex, non-convex, or disconnected meshes with high accuracy and interactivity, avoiding the approximations of ray-marching on regular grids. It is distinguished from [Projected Tetrahedra](877-projected-tetrahedra.md) by its specific use of Basis Tensor (BT) volumes for isosurface selection and its two-pass GPU pipeline architecture, and from [Marching Tetrahedrons Algorithm](940-marching-tetrahedrons-algorithm.md) by computing isosurfaces per fragment rather than generating explicit polygonal cuts.
 
 ## How it works
-The method typically employs a two-pass GPU pipeline (or a rasterization-based forward pass with CPU/GPU sorting) to project tetrahedra, compute intersection parameters, and render final colors [S3].
+The method typically employs a two-pass GPU pipeline (often referred to as PTINT when using Partial Pre-Integration) or a rasterization-based differentiable approach (DiffTetVR). The following describes the standard PTINT pipeline, which supports both volume rendering and isosurface extraction.
 
 ### Inputs and Outputs
-*   **Inputs:** Tetrahedral mesh (vertices, connectivity), scalar field values (stored per vertex or in a Tetrahedral Texture), gradient vectors (precomputed per vertex), transfer function (TF), camera parameters (view, projection matrices).
-*   **Outputs:** Final color and opacity image.
+**Inputs:**
+*   Tetrahedral mesh topology and vertex data (positions, scalar values, gradients).
+*   Transfer function (mapping scalar values to color and opacity).
+*   Camera parameters (view, projection matrices).
+*   Isosurface value (optional, for isosurface rendering).
+
+**Outputs:**
+*   Final image with accumulated color and opacity.
 
 ### Data Structures
-1.  **Tetrahedral Texture:** 1D or 2D texture where each texel corresponds to one tetrahedron. Contains 4 `uint` indices pointing to vertex data [S3].
-2.  **Vertex Texture:** RGBA texture, 32 bits per component. RGB fields store vertex coordinates $(x, y, z)$; A field stores the scalar value $s$ [S3].
-3.  **Gradient Texture:** RGB texture, 32 bits per component. Stores precomputed gradient vectors $\nabla s$ at vertices. Same size and indexing as Vertex Texture [S3].
-4.  **Classification Texture:** 1D texture (8 bits per component) containing a Ternary Truth Table. Maps combined cross-product test results to projection class indices [S3].
-5.  **MRT Frame Buffers (First Pass Output):** Four 2D RGBA textures (32 bits per component):
-    *   Texture 1: Intersection coords $(x_{vi}, y_{vi})$ (Class 2 only), centroid $c_z$, Truth Table index $id_{TTT}$ [S3].
-    *   Texture 2: Front/back scalars $s_f, s_b$, thickness $l$, triangle count [S3].
-    *   Texture 3: Front gradient vector $g_f$ [S3].
-    *   Texture 4: Back gradient vector $g_b$ [S3].
-6.  **Global Arrays (Intermediate CPU Pass):**
-    *   Vertex Array: Stores $\{x, y, z\}$ coordinates.
-    *   Color Array: Stores $\{s_f, s_b, l\}$ for on-the-fly color computation.
-    *   Gradient Arrays: Stored in normal and secondary color arrays. For thin vertices, $s_f=s_b, l=0, g_f=g_b$ [S3].
-    *   Indices Array: Divided into $n$ groups (one per tetrahedron). Each group has 6 integers defining the vertex order for the triangle fan.
-    *   Count Array (`cnt`): Stores number of vertices in each fan. Max vertices is 6 (Class 2, 4 triangles) [S3].
+The method relies on several GPU textures and CPU arrays.
+
+**GPU Textures (First Pass Inputs):**
+1.  **Tetrahedral Texture:** 1D or 2D texture. Each texel corresponds to one tetrahedron and contains 4 unsigned integer indices pointing to the four vertices in the Vertex Texture [S3].
+2.  **Vertex Texture:** RGBA texture, 32 bits per component. RGB fields store vertex coordinates $(x, y, z)$; A field stores the scalar value $s$. Indexed by the Tetrahedral Texture [S3].
+3.  **Gradient Texture:** RGB texture, 32 bits per component. Stores precomputed gradient vectors at vertices. Same size and indexing as Vertex Texture [S3].
+4.  **Classification Texture:** 1D texture (8 bits per component). Contains a Ternary Truth Table mapping projection test results to projection class indices [S3].
+
+**GPU Textures (First Pass Outputs / MRTs):**
+Four 2D RGBA textures (32 bits per component) store per-tetrahedron data:
+1.  **MRT 1:** $x_{vi}, y_{vi}$ (intersection coords, Class 2 only), $c_z$ (centroid), $id_{TTT}$ (Truth Table index) [S3].
+2.  **MRT 2:** $s_f, s_b$ (front/back scalars), $l$ (thickness), count (number of triangles) [S3].
+3.  **MRT 3:** $g_f$ (front gradient vector) [S3].
+4.  **MRT 4:** $g_b$ (back gradient vector) [S3].
+
+**CPU Global Arrays (Intermediate Pass):**
+Arrays storing vertex information for the second pass. Each tetrahedron is grouped into 5 elements: 1 thick vertex + 4 original vertices [S3].
+*   **Vertex Array:** Stores $\{x, y, z\}$ coordinates.
+*   **Color Array:** Stores $\{s_f, s_b, l\}$. Actual colors are computed on-the-fly in the second shader [S3].
+*   **Gradient Arrays:** Stored in normal and secondary color arrays. For thin vertices, $s_f=s_b, l=0, g_f=g_b$ [S3].
+*   **Indices Array:** Divided into $n$ groups (one per tetrahedron). Each group has 6 integers defining the vertex order for the triangle fan [S3].
+*   **Count Array (cnt):** Stores number of vertices in each fan. Max vertices is 6 (Class 2, 4 triangles) [S3].
 
 ### Steps
 
-1.  **Preprocessing (CPU):**
-    *   For each tetrahedron, determine if it contributes to the isosurface or volume. Check if the minimum and maximum scalar weights (extrema) are on the same side of the interesting density range. If so, discard the tetrahedron [S2].
-    *   Transform the Basis Tensor (BT) into Euclidean space using Equation 8 and into tetrahedral indexing form [S2].
-    *   Store valid tetrahedra in a vertex buffer interpreted as a point list. Position semantic is set to the middle of the voxel space [S2].
+#### 1. Preprocessing (CPU)
+For each tetrahedron, determine if it contributes to the isosurface or volume.
+1.  **Culling:** Check if the minimum and maximum scalar weights (extrema) of the tetrahedron are on the same side of the interesting density range. If so, discard the tetrahedron [S2].
+2.  **BT Transformation (for BT Volume methods):** If using BT volumes, transform the Basis Tensor $\mathbf{B}$ into Euclidean space using Equation 8:
+    $$ \hat{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} = \mathbf{T}^{-1} \frac{\alpha_2}{\beta_1} \mathbf{T}^{-1} \frac{\alpha_3}{\beta_2} \mathbf{T}^{-1} \frac{\alpha_2}{\beta_3} \mathbf{B}_{\alpha_1, \alpha_2, \alpha_3} $$
+    [S2].
+3.  **Geometry Setup:** Compute screen-space triangle strips for each tetrahedron mapping $\kappa$. This is done once per frame on the CPU. This optimization requires orthogonal projection [S2].
 
-2.  **First Pass: Projecting Tetrahedra (GPU Fragment Shader):**
-    *   Render the Tetrahedral Texture as a quadrilateral with screen-space size. This ensures one fragment shader invocation per tetrahedron [S3].
-    *   For each tetrahedron:
-        *   Perform 4 texture lookups using indices from the Tetrahedral Texture to get vertex positions, scalars, and gradients from Vertex and Gradient Textures [S3].
-        *   Project the 4 vertices to screen space.
-        *   Compute 4 cross-product tests to determine projection class and vertex layout:
-            ```python
-            vec1 = v_proj1 - v_proj0
-            vec2 = v_proj2 - v_proj0
-            vec3 = v_proj3 - v_proj0
-            vec4 = v_proj1 - v_proj2
-            vec5 = v_proj1 - v_proj3
-            t1 = sign((vec1 × vec2).z) + 1
-            t2 = sign((vec2 × vec3).z) + 1
-            t3 = sign((vec3 × vec4).z) + 1
-            t4 = sign((vec4 × vec5).z) + 1
-            ```
-            Where `sign` returns -1, 0, or 1. The results $t_i \in \{0, 1, 2\}$ are combined to form an index for the Classification Texture lookup [S3].
-        *   Determine triangle count based on degeneracy:
-            *   If one test result is 1: Class 3, project as two triangles.
-            *   If two test results are 1: Class 4, project as one triangle.
-            *   If three or four tests yield 1: Discard the tetrahedron [S3].
-        *   Compute scalar values for thick vertex ($s_f, s_b$), gradient vectors for entry/exit ($g_f, g_b$), cell thickness ($l$), and cell centroid ($c_z$) [S3].
-        *   Write computed data to the 4 MRT frame buffer color attachments [S3].
+#### 2. First Pass: Projection and Data Computation (GPU Fragment Shader)
+Render the Tetrahedral Texture as a quadrilateral with screen-space size to ensure one fragment shader invocation per tetrahedron [S3].
 
-3.  **Intermediate Pass (CPU/GPU):**
-    *   Retrieve data from MRT textures.
-    *   Sort the tetrahedra in front-to-back order. Use bucket-based sort for rotating models or mergesort for static models [S3].
-    *   Store sorted data in global arrays (Vertex, Color, Gradient, Indices, Count) [S3].
+1.  **Texture Lookups:** For each tetrahedron, perform 4 texture lookups using indices from the Tetrahedral Texture to get vertex positions, scalars, and gradients from Vertex and Gradient Textures [S3].
+2.  **Projection Classification:** Project vertices to screen space ($v_{proj}$). Compute 4 cross-product tests to determine the projection class and vertex layout:
+    ```python
+    vec1 = v_proj1 - v_proj0
+    vec2 = v_proj2 - v_proj0
+    vec3 = v_proj3 - v_proj0
+    vec4 = v_proj1 - v_proj2
+    vec5 = v_proj1 - v_proj3
+    t1 = sign((vec1 × vec2).z) + 1
+    t2 = sign((vec2 × vec3).z) + 1
+    t3 = sign((vec3 × vec4).z) + 1
+    t4 = sign((vec4 × vec5).z) + 1
+    ```
+    [S3]. The results $t_i \in \{0, 1, 2\}$ are combined to index the Classification Texture (Ternary Truth Table) [S3].
+3.  **Triangle Count Determination:**
+    *   If one test result is 1: Project as two triangles (Class 3).
+    *   If two test results are 1: Project as one triangle (Class 4).
+    *   If three or four tests yield 1: Discard the tetrahedron (degenerate) [S3].
+4.  **Scalar and Gradient Computation:** Compute front and back scalar values ($s_f, s_b$), gradient vectors ($g_f, g_b$), cell thickness ($l$), and cell centroid ($c_z$) [S3].
+    *   For isosurface rendering, associate isovalue with scalar function $f(s)$. Check if isovalue is within range of interpolated front/back scalar values. If so, isosurface crosses tetrahedron [S3].
+    *   For isosurface lighting, use Phong illumination. Interpolated gradients act as normal vectors. Combine front and back gradients with weights relative to the distance between the isosurface and the front/back intersection points [S3].
+5.  **Output:** Write computed data to the 4 MRT frame buffer color attachments [S3].
 
-4.  **Second Pass: Rendering Primitives (GPU Geometry/Fragment Shader):**
-    *   Draw primitives using `glMultiDrawElements` (or equivalent). Pass indices and count arrays. Use triangle fans [S3].
-    *   **Geometry Shader (Optional/Alternative):** Expand each input point (grid vertex) into tetrahedron screen-space triangles. Calculate z-extents. Unpack BT to tensor form, apply Equation 9 (add density), apply Equation 10 (screen transform), pack back to tetrahedral form, and output to screen-space triangles [S2]. *Note: The two-pass MRT approach [S3] avoids this geometry shader overhead by doing classification in the fragment shader.*
-    *   **Fragment Shader:**
-        *   Linearly interpolate vertex colors ($s_f, s_b, l$) across the triangle using thick and two thin vertices [S3].
-        *   Compute final opacity using a 1D texture lookup. The texture stores $e^{-u}$ for $u \in [0,1]$. Lookup $u = \tau \cdot l$ (where $\tau$ is related to scalar values) [S3].
-        *   **Partial Pre-Integration (PT):** Instead of average scalar values, use the $\psi$ table [MA04]. Retrieve colors $C_f$ and $C_b$ from a 1D transfer function texture based on $s_f$ and $s_b$. Use $C_f, C_b$, and $l$ to index a 2D $\psi$ table. Retrieve value for final color [S3].
-        *   **Isosurface Rendering:** If an isovalue is specified, check if it is within the range of interpolated front/back scalar values. If so, the isosurface crosses the tetrahedron. Use Phong illumination. Interpolated gradients act as normal vectors. Combine front and back gradients with weights relative to the distance between the isosurface and the intersection points [S3].
+#### 3. Intermediate Pass (CPU)
+1.  **Retrieval and Sorting:** Retrieve data from MRT textures. Sort and store in global arrays. Use bucket-based sort for rotating models, mergesort for static models [S3].
+2.  **Array Construction:** Populate the Vertex, Color, Gradient, Indices, and Count arrays as described in Data Structures. Recreate arrays only when a transfer function control point reaches or leaves the zero opacity level to optimize performance [S3].
+
+#### 4. Second Pass: Rendering (GPU Geometry/Fragment Shader)
+Draw primitives using `glMultiDrawElements` (or equivalent) with triangle fans [S3].
+
+1.  **Geometry Shader (Optional/Alternative):** In some implementations (e.g., BT Volume), a geometry shader expands each input point (grid vertex) into tetrahedron screen-space triangles. It unpacks the BT, applies Equation 9 (add density $d$ if $(\beta_1, \beta_2, \beta_3) = (3,3,3)$), applies Equation 10 (screen transform), and outputs screen-space triangles [S2].
+2.  **Fragment Shader Interpolation:** Linearly interpolate vertex colors ($s_f, s_b, l$) across the triangle using the thick and two thin vertices [S3].
+3.  **Opacity Computation:** Compute final opacity using a 1D texture lookup. The texture stores $e^{-u}$ for $u \in [0,1]$. Lookup $u = \tau \cdot l$ (where $\tau$ is related to scalar values) [S3].
+4.  **Color Computation (Partial Pre-Integration):**
+    *   Retrieve colors $C_f$ and $C_b$ from a 1D transfer function texture based on $s_f$ and $s_b$.
+    *   Use $C_f, C_b$, and $l$ to index a 2D $\psi$ table.
+    *   Retrieve value for final color [S3].
+    *   *Note:* If no isosurface/lighting is desired, skip gradient computations and MRT writes to buffers 2 and 3 in the first pass, and gradient interpolation in the second pass [S3].
+
+#### 5. Differentiable Variant (DiffTetVR)
+For differentiable rendering, the method uses a rasterization-based renderer with per-pixel linked lists [S1, unofficial].
+1.  **Forward Pass:** Accumulate color along view rays using a simplified formula more accurate than simple alpha blending but numerically stable on GPUs [S1, unofficial].
+2.  **Backward Pass:** Deduce derivatives for the rendering process to enable backpropagation regarding vertex colors and positions [S1, unofficial].
+3.  **Regularization:** Introduce a differentiable regularization term to avoid degeneration of tetrahedral elements during optimization [S1, unofficial].
+4.  **Subdivision:** Allow local mesh refinement for coarse-to-fine optimization [S1, unofficial].
 
 ### Formulas
-
-**Basis Tensor Transformations [S2]:**
-Transform BT into Euclidean space:
-$$ \hat{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} = \mathbf{T}^{-1} \frac{\alpha_2}{\beta_1} \mathbf{T}^{-1} \frac{\alpha_3}{\beta_2} \mathbf{T}^{-1} \frac{\alpha_2}{\beta_3} \mathbf{B}_{\alpha_1, \alpha_2, \alpha_3} \quad (8) $$
-
-Add density $d$ for isosurface level selection (only affects weight at $(3,3,3)$):
-$$ \mathbf{B}_{\beta_1, \beta_2, \beta_3} = \begin{cases} \hat{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} + d & \text{if } (\beta_1, \beta_2, \beta_3) = (3, 3, 3) \\ \hat{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} & \text{otherwise} \end{cases} \quad (9) $$
-
-Transform scaled tensor into screen space:
-$$ \tilde{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} = \mathbf{W}\mathbf{V}\mathbf{P}^{-1\alpha_1}_{\beta_1} \mathbf{W}\mathbf{V}\mathbf{P}^{-1\alpha_2}_{\beta_2} \mathbf{W}\mathbf{V}\mathbf{P}^{-1\alpha_3}_{\beta_3} \tilde{\mathbf{B}}_{\alpha_1, \alpha_2, \alpha_3} \quad (10) $$
-
-**Color Accumulation [S1, unofficial]:**
+**Accumulated Color (Constant Opacity Approximation):**
 For a sub-interval with constant opacity $\alpha$ and optical depth $t$:
 $$ c_{acc}(t, c_0, c_1, \alpha) = (1 - e^{-\alpha t}) c_0 + \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right) (c_0 - c_1) $$
-Where $c_0$ is entry color, $c_1$ is exit color.
+where $c_0$ is entry color, $c_1$ is exit color [S1, unofficial].
 
-**Gradients for Backpropagation (DiffTetVR) [S1, unofficial]:**
-Gradient of accumulated color w.r.t entry color $c_0$:
-$$ \frac{\partial c_{acc}}{\partial c_0} = (1 - e^{-\alpha t}) + \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right) $$
-Gradient of accumulated color w.r.t exit color $c_1$:
-$$ \frac{\partial c_{acc}}{\partial c_1} = - \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right) $$
-Gradient of accumulated color w.r.t opacity $\alpha$:
-$$ \frac{\partial c_{acc}}{\partial \alpha} = t e^{-\alpha t} c_0 + \left( \frac{1}{\alpha^2} - \left( t^2 + \frac{1}{\alpha^2} + \frac{t}{\alpha} \right) e^{-\alpha t} \right) (c_0 - c_1) $$
-Gradient of accumulated color w.r.t optical depth $t$:
-$$ \frac{\partial c_{acc}}{\partial t} = (\alpha c_0 + (\alpha c_1 - \alpha c_0) t) e^{-\alpha t} $$
-Gradient of accumulated opacity w.r.t opacity $\alpha$:
-$$ \frac{\partial a_{acc}}{\partial \alpha} = t e^{-\alpha t} $$
-Limit as $\alpha \rightarrow 0$:
-$$ \lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}}{\partial \alpha} = t c_0 + \frac{1}{2}t^2 (c_1 - c_0) $$
-$$ \lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}}{\partial c_0} = \lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}}{\partial c_1} = 0 $$
+**Gradients for Backpropagation (DiffTetVR):**
+*   $\frac{\partial c_{acc}}{\partial c_0} = (1 - e^{-\alpha t}) + \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right)$
+*   $\frac{\partial c_{acc}}{\partial c_1} = - \left( \left( t + \frac{1}{\alpha} \right) e^{-\alpha t} - \frac{1}{\alpha} \right)$
+*   $\frac{\partial c_{acc}}{\partial \alpha} = t e^{-\alpha t} c_0 + \left( \frac{1}{\alpha^2} - \left( t^2 + \frac{1}{\alpha^2} + \frac{t}{\alpha} \right) e^{-\alpha t} \right) (c_0 - c_1)$
+*   $\frac{\partial c_{acc}}{\partial t} = (\alpha c_0 + (\alpha c_1 - \alpha c_0) t) e^{-\alpha t}$
+*   $\frac{\partial a_{acc}}{\partial \alpha} = t e^{-\alpha t}$ [S1, unofficial].
 
-**Inversion Trick for Backward Pass [S1, unofficial]:**
-Recover previous ray color:
-$$ c_{ray,i} = c_{ray,i+1} - (1 - \alpha_{ray,i})c_{acc,i} $$
-Recover previous ray opacity:
-$$ \alpha_{ray,i} = \frac{\alpha_{acc,i} - \alpha_{ray,i+1}}{\alpha_{acc,i} - 1} $$
+**Limits for $\alpha \to 0$:**
+*   $\lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}}{\partial \alpha} = t c_0 + \frac{1}{2}t^2 (c_1 - c_0)$
+*   $\lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}}{\partial c_0} = \lim_{\alpha \rightarrow 0} \frac{\partial c_{acc}}{\partial c_1} = 0$ [S1, unofficial].
+
+**Inversion Trick (Backward Pass):**
+*   $c_{ray,i} = c_{ray,i+1} - (1 - \alpha_{ray,i})c_{acc,i}$
+*   $\alpha_{ray,i} = \frac{\alpha_{acc,i} - \alpha_{ray,i+1}}{\alpha_{acc,i} - 1}$ [S1, unofficial].
+
+**BT Transformations (BT Volume Method):**
+*   Euclidean Space: $\hat{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} = \mathbf{T}^{-1} \frac{\alpha_2}{\beta_1} \mathbf{T}^{-1} \frac{\alpha_3}{\beta_2} \mathbf{T}^{-1} \frac{\alpha_2}{\beta_3} \mathbf{B}_{\alpha_1, \alpha_2, \alpha_3}$ [S2].
+*   Density Addition: If $(\beta_1, \beta_2, \beta_3) = (3, 3, 3)$, add density $d$ to the weight; otherwise, keep $\hat{\mathbf{B}}$ [S2].
+*   Screen Space: $\tilde{\mathbf{B}}_{\beta_1, \beta_2, \beta_3} = \mathbf{W}\mathbf{V}\mathbf{P}^{-1\alpha_1}_{\beta_1} \mathbf{W}\mathbf{V}\mathbf{P}^{-1\alpha_2}_{\beta_2} \mathbf{W}\mathbf{V}\mathbf{P}^{-1\alpha_3}_{\beta_3} \tilde{\mathbf{B}}_{\alpha_1, \alpha_2, \alpha_3}$ [S2].
 
 ### Parameters
-*   **N_sub:** Number of subdivision steps for the ray segment within a tetrahedron. Typical value not specified, but used to approximate constant opacity [S1, unofficial].
+*   **N_sub:** Number of subdivision steps for the ray segment within a tetrahedron. Used to approximate constant opacity. Typical value not specified [S1, unofficial].
+*   **Projection Type:** Orthogonal projection is required for the screen-space triangle computation optimization in the BT Volume method. The PTINT method works for perspective projection except for the pre-computed triangle strip step [S2].
 *   **β:** Regularization parameter for tetrahedron quality. Value $\beta = 10$ is mentioned [S1, unofficial].
-*   **Projection Type:** Orthogonal projection is required for the screen-space triangle computation optimization in the geometry shader approach [S2]. The MRT approach [S3] works with perspective projection except for the specific pre-computed triangle strip optimization.
-*   **Graphics API:** DirectX 10 with Shader Model 4.0 (for geometry shaders) [S2]; OpenGL 2.0/GLSL (for MRT approach) [S3]; Vulkan (for DiffTetVR) [S1, unofficial].
+*   **Graphics API:** DirectX 10 with Shader Model 4.0 (BT Volume); OpenGL 2.0/GLSL (PTINT); Vulkan (DiffTetVR) [S2][S3][S1, unofficial].
 
 ### Edge Cases and Pitfalls
-*   **Numerical Instability:** The exact formula for linearly varying opacity involves the imaginary error function (erfi), which is numerically unstable on GPUs due to large values ($10^{20}$) and cancellation effects. This is handled by assuming constant opacity within sub-intervals [S1, unofficial].
-*   **Degenerate Cases:** The method handles degenerate projections by adding 24 class 3 cases and 12 class 4 cases to Wylie's 14 class 1 and 2 cases. Tests yielding result '1' (z=0) indicate degeneracy [S3].
-*   **Zero Opacity Discard:** Early discard test bypasses tetrahedra with zero opacity. Only discard if ALL vertices have zero opacity (scalar values map to zero opacity in TF) [S3].
-*   **Perspective Projection Limitation:** The optimization of pre-computing screen-space triangle strips per tetrahedron index fails under perspective projection because screen-space triangles change for different BTs with the same tetrahedron number [S2].
-*   **Tetrahedron Quality:** Tetrahedra must not self-intersect, invert (negative volume), or degenerate (zero volume) during optimization. This is enforced via regularization [S1, unofficial].
+*   **Numerical Instability:** The exact formula for linearly varying opacity involves the imaginary error function (erfi), which is numerically unstable on GPUs due to large values (magnitude $10^{20}$) and cancellation effects. This is handled by assuming constant opacity within sub-intervals (DiffTetVR) or using the constant opacity approximation [S1, unofficial].
+*   **Perspective Projection:** The optimization of pre-computing screen-space triangle strips per tetrahedron index fails under perspective projection because screen-space triangles change for different BTs with the same tetrahedron number [S2].
+*   **Degenerate Cases:** The method handles degenerate projections by adding class 3 and class 4 cases to Wylie's classes. Tests yielding result '1' (z=0) indicate degeneracy. Three or four '1's indicate a discardable tetrahedron [S3].
+*   **Zero Opacity:** Early discard test bypasses tetrahedra with zero opacity. Only discard if ALL vertices have zero opacity [S3].
+*   **Tetrahedron Quality:** Tetrahedra must not self-intersect, invert (negative volume), or degenerate (zero volume). This is enforced via regularization [S1, unofficial].
 *   **Ray Intersection Bounds:** Only intersections of the viewing ray and tensor BT inside the bounds of the tetrahedron count as hits [S2].
 
 ## Subtopics
 
 ### [Viewpoint-dependent subdivision of non-planar faces](835-viewpoint-dependent-subdivision-of-non-planar-faces.md)
-This method handles non-planar quadrilateral faces in curvilinear or irregular grids by performing view-dependent subdivision of "problem" faces and cells into triangles and tetrahedra, respectively, to prevent visibility sort failures and bow-tie projections. It approximates ray integration by projecting cells onto the screen, computing integrated opacity and color at vertices, and interpolating these values across screen-space polygons using standard graphics hardware. Unlike methods requiring resampling of curvilinear grids, cell projection works directly on the general grid topology.
+This method handles non-planar quadrilateral faces in curvilinear or irregular grids by performing view-dependent subdivision of problem faces and cells into triangles and tetrahedra, respectively, to prevent visibility sort failures and bow-tie projections. It approximates ray integration by projecting cells onto the screen, computing integrated opacity and color at vertices, and interpolating these values across screen-space polygons using standard graphics hardware. Unlike methods requiring resampling of curvilinear grids, cell projection works directly on the general grid topology.
 
 ### [Approximate Cell Sampling](974-approximate-cell-sampling.md)
-A method to sample cell-centered data by approximating neighbor centroids using volume ratios and face normals, avoiding full tree traversal.
+Approximate Cell Sampling is a method for sampling cell-centered data in tetrahedral volume rendering that estimates the contribution of neighboring tetrahedra without performing a full tree traversal to locate their vertices. It solves the problem of accessing neighbor geometry when vertex data is not stored for non-coarse elements, using volume ratios and face normals to approximate neighbor centroids. It is distinguished from [Simple Cell Sampling](1037-vertex-centered-data-sampling.md) by weighting samples by the inverse distance to the estimated centroids, and from [Vertex-centered Data Sampling](1037-vertex-centered-data-sampling.md) by operating on cell-centered data rather than vertex-centered data.
+
+### [Vertex-centered Data Sampling](1037-vertex-centered-data-sampling.md)
+Vertex-centered Data Sampling reconstructs scalar field values at arbitrary points within a tetrahedron by interpolating the scalar values stored at the tetrahedron's four vertices using the sample point's barycentric coordinates. It is chosen when the underlying dataset provides scalar data associated with mesh vertices rather than cell centers, ensuring linear continuity across element boundaries in the rendered volume.
+
+### [High Accuracy Volume Rendering for Unstructured Data](1076-high-accuracy-volume-rendering-for-unstructured-data.md)
+High Accuracy Volume Rendering (HIAC) is a software-based cell projection renderer designed for high-quality batch-mode generation of images from unstructured finite element data. It solves the problem of rendering complex, non-convex, or disconnected meshes with mathematical exactness, avoiding the approximations typically introduced for efficiency. Unlike its siblings, which may prioritize interactivity or approximate sampling, HIAC guarantees high accuracy by using exact solutions for radiance integrals and interpolation, extending hardware-assisted projection to arbitrary convex polyhedra.
 
 ### [BT Volume as Reconstruction Filter](1419-bt-volume-as-reconstruction-filter.md)
-A method to represent the result of convolving an arbitrary scalar volume with a reconstruction filter as a BT Volume, provided the filter itself is a BT Volume sharing a similar $\kappa$ function.
-
-### Vertex-centered Data Sampling
-Samples scalar values by interpolating vertex-centered scalar data at the vertices of the current element using the barycentric coordinates of the sample point [S4, unofficial]. Vertex-centered data is stored duplicated per element during TET-AMR construction, allowing direct access via element ID [S4, unofficial].
+This method represents the result of convolving an arbitrary scalar-valued volumetric function with a reconstruction filter as a BT Volume, provided the filter itself is a BT Volume sharing a similar $\kappa$ function. It solves the problem of generating high-quality, continuous volumetric data from discrete samples by exploiting the closure of BT Volumes under addition. Unlike standard convolution which sums kernel functions, this method ensures that the discrete convolution produces a single BT Volume where each tetrahedron is covered by one tetrahedron from each piecewise BT kernel in the sum.
 
 ### DiffTetVR
-A differentiable volume rendering solution for tetrahedral meshes that enables optimization of vertex positions and local mesh subdivision without multigrid methods, solving the limitation of regular grids in previous differentiable volume rendering works [S1, unofficial]. It derives equations for more accurate accumulation of color along view rays than simple alpha blending, implements a fast rasterization-based renderer based on per-pixel linked lists, and deduces derivatives for the rendering process to enable backpropagation regarding parameters such as vertex colors and positions [S1, unofficial]. It introduces a differentiable regularization term for avoiding degeneration of tetrahedral elements during the optimization process [S1, unofficial]. The exact formula by Williams and Max involving the difference of two imaginary error functions has far too high numerical instability to be usable in real-world workflows on GPUs when using only 32-bit floating point precision [S1, unofficial].
-
-### High Accuracy Volume Rendering for Unstructured Data
-A volume rendering system for unstructured data (especially finite element data) that creates images with very high accuracy without compromises or approximations for the sake of efficiency [S5, unofficial]. It uses exact mathematical solutions for the radiance integrals involved and for interpolation whenever possible. It handles meshes whose cells are either linear or quadratic tetrahedra, and meshes with mixed cell types (tetrahedra, bricks, prisms, wedges, and pyramids, but not with high accuracy). It embeds accurate semi-transparent shaded isosurfaces in the volume rendering. For very small cells, it uses subpixel accumulation by splatting to avoid sampling error. It extends hardware assisted projection and compositing from tetrahedra to arbitrary convex polyhedra. It uses a revision to an existing accurate visibility ordering algorithm, which includes a correction and a method for dramatically increasing its efficiency [S5, unofficial].
+A differentiable volume rendering solution for tetrahedral meshes that enables optimization of vertex positions and local mesh subdivision without multigrid methods, solving the limitation of regular grids in previous differentiable volume rendering works [S1, unofficial]. It derives equations for more accurate accumulation of color along view rays than simple alpha blending of locally sampled colors using ray marching [S1, unofficial]. It implements a fast rasterization-based renderer for tetrahedral meshes based on per-pixel linked lists [S1, unofficial]. It deduces derivatives for the rendering process to enable backpropagation regarding parameters such as vertex colors and positions [S1, unofficial]. It introduces a differentiable regularization term for avoiding degeneration of tetrahedral elements during the optimization process [S1, unofficial]. It shows how the tetrahedral mesh can be locally refined to enable a coarse-to-fine optimization approach [S1, unofficial]. The exact formula by Williams and Max involving the difference of two imaginary error functions has far too high numerical instability to be usable in real-world workflows on GPUs when using only 32-bit floating point precision [S1, unofficial].
 
 ### Volume Rendering of Dark Matter Simulations
-A volume rendering approach for phase space tessellations that combines state-of-the-art order-independent transparency methods to manage the extreme depth complexity of tetrahedral meshes [S5, unofficial]. It proposes a view-dependent multiresolution representation of the data and a tile-based rendering strategy. Phase space tessellation techniques for N-body dark matter simulations yield density fields with a vast amount of elements and self-intersections, causing interactive visualization methods to either employ simplified rendering integrals or suffer from artifacts [S5, unofficial].
+A volume rendering approach for phase space tessellations that combines state-of-the-art order-independent transparency methods to manage the extreme depth complexity of tetrahedral meshes [S4, unofficial]. It proposes a view-dependent multiresolution representation of the data [S4, unofficial]. It proposes a tile-based rendering strategy [S4, unofficial]. Phase space tessellation techniques for N-body dark matter simulations yield density fields with a vast amount of elements and self-intersections, causing interactive visualization methods to either employ simplified rendering integrals or suffer from artifacts [S4, unofficial].
+
+### Direct Volume Rendering on Tetrahedral Meshes
+A direct volume rendering method for high-resolution irregular tetrahedral grids that supports current and upcoming graphics hardware architectures, large and deformable grids, and arbitrary encoding of deformations within the mesh [S5, unofficial]. It uses a 3D texture storing the volume data, bound to the tetrahedral mesh (e.g., $256^2 \times 110$ for an engine data set) [S5, unofficial]. It handles meshes with high element counts, e.g., 1600k tetrahedral elements [S5, unofficial]. The method must support arbitrary encoding of deformations within the mesh, allowing for dynamic changes to the volume geometry during rendering [S5, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The first pass is $O(N)$ where $N$ is the number of tetrahedra, performed in parallel on the GPU. The sorting step is $O(N \log N)$ or $O(N)$ depending on the sort algorithm (bucket sort for rotating, mergesort for static) [S3]. The second pass is $O(P)$ where $P$ is the number of pixels, as each pixel is shaded once [S3].
-*   **Memory Complexity:** Requires storage for the Tetrahedral, Vertex, Gradient, and Classification textures, plus MRT frame buffers and global arrays. The space requirement is very large, limiting the size of volumes that can be rendered on graphics cards with less memory [S2].
-*   **Measured Performance:** On a Intel Pentium IV 3.6 GHz, 2 GB RAM, with a nVidia GeForce 6800 256 MB graphics card, PTINT achieved 11.30 fps on the Blunt Fin dataset and 4.07 fps on the Oxygen Post dataset (512x512 viewport, rotating model) [S3]. This compared favorably to GATOR (5.20 fps, 1.82 fps), VICP GPU (4.10 fps, 4.47 fps), and HARC (6.09 fps, 2.36 fps) [S3].
-*   **Strengths:** Supports arbitrary isosurface values and partial pre-integration. Handles unstructured grids directly. GPU-accelerated. Differentiable variants allow for optimization of mesh parameters [S1, unofficial][S2].
-*   **Limitations:** Large memory footprint. Orthogonal projection is required for certain optimizations (geometry shader approach) [S2]. Numerical instability of exact integration formulas requires approximation (sub-intervals) [S1, unofficial]. Degenerate cases must be handled explicitly [S3].
-*   **When to use:** When rendering unstructured tetrahedral meshes with high accuracy is required, especially for finite element data or dark matter simulations. When differentiable rendering is needed for mesh optimization [S1, S5, unofficial].
-*   **When not to use:** When memory is severely constrained. When perspective projection is required and the geometry shader optimization is critical (use MRT approach instead) [S2]. When real-time performance on low-end hardware is critical without simplification [S3].
+*   **Time Complexity:** The first pass is $O(N)$ where $N$ is the number of tetrahedra, as each tetrahedron is processed once in the fragment shader. The intermediate sort is $O(N \log N)$ or $O(N)$ with bucket sort. The second pass is $O(P)$ where $P$ is the number of pixels/fragments.
+*   **Memory Complexity:** Requires storage for the tetrahedral mesh, textures (Vertex, Gradient, Classification, Tetrahedral), and MRTs. The BT Volume method requires significant graphics memory due to large BT Volume sizes, mitigated by graphics memory virtualization [S2].
+*   **Measured Performance:** On a Intel Pentium IV 3.6 GHz, 2 GB RAM, with a nVidia GeForce 6800 256 MB graphics card:
+    *   Blunt Fin dataset: PTINT achieved 11.30 fps, compared to GATOR (5.20 fps), VICP GPU (4.10 fps), HARC (6.09 fps) [S3].
+    *   Oxygen Post dataset: PTINT achieved 4.07 fps, compared to GATOR (1.82 fps), VICP GPU (4.47 fps), HARC (2.36 fps) [S3].
+*   **Scaling:** Performance is generally good for interactive visualization. Using 1D texture for exponential opacity is slightly faster than computing exp() in the fragment shader [S3]. Partial pre-integration is slower than average scalar method but faster than full pre-integration [S3].
+*   **Strengths:** Supports arbitrary isosurface values, handles unstructured grids, high accuracy, interactive transfer function editing, differentiable rendering capability (DiffTetVR).
+*   **Limitations:** Requires orthogonal projection for certain optimizations (BT Volume method), numerical instability of exact linear opacity formulas, high memory usage for BT Volumes, complexity of handling degenerate cases.
+*   **When to use:** Interactive visualization of unstructured grids, isosurface rendering, differentiable rendering optimization.
+*   **When not to use:** When perspective projection is strictly required for the triangle strip optimization (BT Volume method), or when extreme accuracy of linearly varying opacity is needed without subdivision (DiffTetVR uses approximation).
 
 ## Background
-Tetrahedral Volume Rendering originated from the need to visualize unstructured volumetric data, such as finite element analysis results, which cannot be efficiently represented by regular grids. The Basis Tensor (BT) volume representation was introduced to support arbitrary isosurface values and efficient rendering [S2]. The method was implemented on Direct3D 10 graphics API running on NVIDIA 8800 GTS GPU, leveraging geometry shaders [S2]. Later, GPU-Accelerated Cell Projection (PTINT) was developed using OpenGL 2.0 and GLSL under Linux, achieving higher performance on older hardware (Intel Pentium IV, GeForce 6800) [S3]. More recently, DiffTetVR introduced differentiable rendering for tetrahedral meshes, enabling optimization of vertex positions and local mesh subdivision [S1, unofficial]. The method is used in scientific visualization, particularly for phase space tessellations in dark matter simulations and high-accuracy finite element data [S5, unofficial].
+Tetrahedral Volume Rendering originated from the need to render unstructured finite element data and complex meshes efficiently. The Basis Tensor (BT) Volume method was introduced to support arbitrary isosurface values and leverage GPU geometry shaders [S2]. The PTINT method (GPU-Accelerated Cell Projection) was developed to provide interactive volume and isosurface rendering using a two-pass pipeline [S3]. DiffTetVR was introduced to enable differentiable rendering on tetrahedral meshes, allowing for optimization of mesh parameters [S1, unofficial]. The method is used in scientific visualization, particularly for dark matter simulations and high-resolution irregular grids [S4, unofficial][S5, unofficial].
 
 ## Sources
 [S1] DiffTetVR: Differentiable Tetrahedral Volume Rendering, https://doi.org/10.48550/arxiv.2601.00114, fetched 2026-10-26 (unofficial)
 [S2] Interactive volume isosurface rendering using BT volumes, https://doi.org/10.1145/1342250.1342257, fetched 2026-10-30
 [S3] PDF Volume and Isosurface Rendering with GPU-Accelerated Cell Projection*, https://graphics.tudelft.nl/~marroquim/publications/pdfs/marroquim-CGF2008.pdf, fetched 2026-10-27
-[S4] Direct volume rendering of tree-based tetrahedral adaptive mesh refinement data, https://repository.bilkent.edu.tr/items/fcbc592a-2646-49af-8b84-67308b6fd3e9, fetched 2026-10-27 (unofficial)
-[S5] Tetrahedral projection using vertex shaders - ResearchGate, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
+[S4] (PDF) Tetrahedral projection using vertex shaders - ResearchGate, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
+[S5] These images show direct volume rendering of a ..., https://www.researchgate.net/figure/These-images-show-direct-volume-rendering-of-a-tetrahedral-mesh-consisting-of-1600k_fig3_6715638, fetched 2026-10-28 (unofficial)

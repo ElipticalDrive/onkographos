@@ -1,0 +1,208 @@
+Slang Render Hardware Interface. Contribute to shader-slang/slang-rhi development by creating an account on GitHub.
+
+D3D12: materialize structural records through local CBVs by kaizhangNV · Pull Request #875 · shader-slang/slang-rhi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kaizhangNV
+commented
+Sep 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Motivation
+A compiler-generated structural ray-tracing Record has an ordinary constant-buffer ABI, but its
+value comes from the selected shader-table record. Consider the equivalent legacy HLSL:
+```
+struct Record
+{
+    float3 color;
+    float opacity;
+};
+
+ConstantBuffer<Record> closestARecord : register(b0, space2);
+ConstantBuffer<Record> closestBRecord : register(b1, space2);
+ConstantBuffer<Record> anyHitRecord   : register(b2, space2);
+
+[shader("closesthit")]
+void ClosestHitA(inout Payload payload, Attributes attributes)
+{
+    payload.color = closestARecord.color;
+}
+
+[shader("closesthit")]
+void ClosestHitB(inout Payload payload, Attributes attributes)
+{
+    payload.color = closestBRecord.color;
+}
+
+[shader("anyhit")]
+void SharedAnyHit(inout Payload payload, Attributes attributes)
+{
+    if (anyHitRecord.opacity < 0.5)
+        IgnoreHit();
+}
+```
+If HitGroupA contains ClosestHitA + SharedAnyHit and HitGroupB contains
+ClosestHitB + SharedAnyHit, DXR requires compatible local root-signature associations for both
+groups and the reused SharedAnyHit export. The application supplies one logical Record value
+per SBT entry, but each local root CBV needs a GPU virtual address rather than inline structure
+bytes. The current D3D12 shader-table path has no materialization step for that representation.
+Fixes #874.
+Proposed solution
+Read the compiler-reflected structural Record type, layout, and bN, spaceM binding for each
+selected stage. Hit groups connected through a reused closest-hit, any-hit, or intersection export
+receive the same sorted union of bindings and therefore the same local root signature.
+For each shader-table entry that declares a structural Record, copy the semantic application bytes
+into RHI-owned, 256-byte-aligned constant-buffer storage and write that storage's GPU virtual
+address once for every CBV in the export's local signature. Groups that only inherit a component
+signature through a shared Record-free stage keep the existing inline legacy record ABI.
+This is a draft stacked on #856, which introduces ShaderRecordData. Until #856 merges, GitHub
+shows its commit in this PR as well; afterward this PR reduces to the D3D12 local-CBV commit. The
+reflection API is supplied by shader-slang/slang#12691. Standalone Slang RHI CI currently fetches
+Slang 2026.12.2, which predates that API, so this draft remains blocked until #12691 lands and the
+fetched Slang version is updated. No compatibility workaround is added. The separately compiled
+entry-point runtime case also uses the independent fix in #873.
+Change summary
+Area
+Change
+Public record contract
+Clarifies semantic structural Record data versus absolute native-record overwrites.
+Pipeline reflection
+Collects each selected stage's Record layout and compiler-reserved D3D binding.
+Hit-group associations
+Forms connected components through shared hit-stage exports and creates one compatible union local root signature per component.
+Shader-table materialization
+Allocates owned constant-buffer storage, copies Record bytes, and writes root-CBV addresses into native SBT records.
+Lifetime and state
+Retains the backing buffer with pipeline data and transitions it for constant-buffer use.
+Compatibility
+Preserves inline legacy records for inherited-only signatures and rejects legacy overwrites that would corrupt a generated CBV address.
+Concepts and vocabulary
+Structural Record: typed per-SBT-entry application data declared by a structural ray-tracing
+stage and reflected by the compiler.
+Connected hit-group component: hit groups joined by reuse of a closest-hit, any-hit, or
+intersection export. DXR requires their local root associations to agree.
+Inherited-only signature: a group receives a component-wide local root signature even though
+none of its own stages declares the corresponding structural Record.
+Native overwrite: the existing absolute byte patch applied to a native record after ordinary
+inline data. It is not semantic structural Record storage.
+Process report
+DeviceImpl::createRayTracingPipeline2() reads the Record contract from selected entry-point
+reflection. This is the canonical producer data: the compiler already chose the constant-buffer
+register, space, target layout, and physical export name. The RHI does not reconstruct those facts
+from source names or generic types.
+Consider the two hit groups above. A disjoint-set pass joins them through SharedAnyHit, unions
+{b0}, {b1}, and {b2}, sorts the resulting (register, space) pairs, and associates the same
+local root signature with both hit groups. Direct miss, callable, and unused hit-stage exports are
+associated with their own binding sets. Conflicting Record sizes or binding contracts are rejected
+while the pipeline is created.
+ShaderTableImpl::createDeviceBuffers() validates each semantic Record against its reflected size,
+allocates one 256-byte-aligned constant-buffer range per physical entry, and writes the same range
+address into every CBV slot in that entry. Keeping the backing buffer in PipelineData gives it the
+same lifetime as the uploaded shader table and lets command submission transition it to constant-
+buffer state before dispatch.
+An explicitly carried hasStructuralRecord bit distinguishes Record = void, a possibly
+zero-sized non-void Record, and a hit group that merely inherits another group's signature. This
+input shape is intentional DXR behavior, not malformed reflection: an inherited-only group can
+leave unused local-root arguments uninitialized, so its application bytes retain the legacy inline
+layout. Conversely, an actual structural Record rejects ShaderRecordOverwrite; applying an
+absolute overwrite after generating root-CBV addresses would silently corrupt the native record.
+Validation, with native builds capped at eight jobs and logical CPUs:
+Windows integration run 20260915-212203: 10/10 D3D12 structural ray-tracing runtime tests
+passed, including repeated physical records, shared-stage hit groups, and separately linked
+entry points.
+The same run passed 125/125 applicable compiler tests and 12/12 structural reflection tests.
+Linux Slang RHI shader-table tests: 6/6 cases and 620 assertions passed.
+Linux structural compiler suite: 398/398 passed; Vulkan runtime 9/9 and OptiX runtime 8/8.
+Formatting and git diff --check pass, and focused compiler/RHI audits found no remaining
+actionable correctness issue.
+kaizhangNV
+added 2 commits
+September 12, 2026 00:56
+Add application data to shader table records
+6bea990
+Materialize structural records through D3D12 local CBVs
+dddee69
+coderabbitai
+Bot
+commented
+Sep 16, 2026
+Copy link
+Copy Markdown
+Important
+Draft PR not reviewed
+Draft PRs are not automatically reviewed by default.
+Trigger a manual review
+To automatically review draft PRs, update your CodeRabbit configuration:
+```
+reviews:
+  auto_review:
+    drafts: true
+```
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+This was referenced Sep 16, 2026
+D3D12: materialize shader-record ConstantBuffer data through compatible local root signatures
+#874
+Open
+Add application data to shader table records
+#856
+Draft
+WIP: Implement structural ray-tracing API
+shader-slang/slang#12691
+Draft
+kaizhangNV
+added
+bug
+Something isn't working
+pr: non-breaking
+labels
+Sep 16, 2026
+kaizhangNV
+self-assigned this
+Sep 16, 2026
+Support released Slang reflection headers
+1f3e0ce
+skallweitNV
+commented
+Oct 29, 2026
+Copy link
+Copy Markdown
+Collaborator
+@kaizhangNV Are you planning further work on this D3D12 structural-record PR? Please update the remaining work and dependency status, particularly #856, #873, and shader-slang/slang#12691, and let us know when you expect to resume. An explicit dependency and plan would help us understand why this should remain open as a draft.
+We're reviewing inactive drafts, so please give us a status update by November 12. If no further work is planned or we haven't heard back by then, we'll close this for now; it can be reopened when work resumes.
+kaizhangNV
+mentioned this pull request
+Oct 30, 2026
+[RT Backend] Add portable ray-tracing backends and reflection
+kaizhangNV/slang#25
+Draft
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+bug
+Something isn't working
+pr: non-breaking
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

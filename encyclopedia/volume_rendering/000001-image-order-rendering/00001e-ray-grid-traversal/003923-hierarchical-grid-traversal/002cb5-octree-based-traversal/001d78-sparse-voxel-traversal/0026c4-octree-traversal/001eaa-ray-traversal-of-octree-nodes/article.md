@@ -1,0 +1,164 @@
+# Ray Traversal of Octree Nodes
+
+Also called: Child Octant Traversal, Interior Node Traversal, Mid-plane Intersection Traversal, Octree Node Traversal Order, Octree Traversal (OT), Octree Traversal with Mid-Plane Sorting, e-space coordinate traversal
+
+## Overview
+This method determines the exact sequential order in which a ray intersects the eight child octants of an interior octree node by computing and sorting the ray's intersection distances with the X, Y, and Z mid-planes of the current node [S3][S5, unofficial]. It solves the problem of efficiently traversing hierarchical sparse voxel structures without pointer chasing or stack overhead for descent, by replacing recursive descent with a deterministic, sorted march through children [S1, S3]. Unlike [Stack-based Octree Traversal with Direction Flipping](5007-stack-based-octree-traversal-with-direction-flipping.md) which uses explicit stacks, or [IEEE-754 Bit Manipulation Octree Traversal](3907-ieee-754-bit-manipulation-octree-traversal.md) which uses bit-level arithmetic, this method relies on geometric mid-plane sorting [S1, S3][S5, unofficial]. It is particularly effective in [Octree Traversal](1587-octree-traversal.md) contexts where empty space skipping is utilized, as it allows the solver to start at the node border and skip nodes that do not contain the isosurface [S1].
+
+## How it works
+**Inputs:**
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (normalized or unnormalized, consistent with $t$ parameterization) [G].
+*   Current octree node defined by its depth $L$ and node index $I$ [S5, unofficial].
+*   Global octree structure allowing retrieval of node bounding box or spatial extent [G].
+*   Entry parameter $t_{enter}$ and exit parameter $t_{exit}$ for the current node (initially computed for the root node via a box test) [S5, unofficial].
+
+**Outputs:**
+*   A sequence of child octant indices (0–7) to visit, in the exact order the ray intersects them [S5, unofficial].
+*   For each child, the entry and exit $t$ values within that child's bounds [G].
+
+**Data Structures:**
+*   `axis_isects[]`: An array used to store sorted $t_{center}$ intersection distances for sequential marching [S5, unofficial].
+*   `axisbit`: A bitmask (integer) representing the current child octant index [S3].
+*   `midplane_coords`: Temporary storage for the e-space coordinates of the mid-planes [S3].
+
+**Definitions:**
+*   **e-space**: The coordinate system of the octree node's local space, where the node spans $[0, 1]^3$ or a similar unit cube. The sources refer to "octree-space coordinates" [S3][S5, unofficial]. We assume the node bounds are known. Let the node's bounding box in world space be $[x_{min}, x_{max}] \times [y_{min}, y_{max}] \times [z_{min}, z_{max}]$ [G].
+*   **Mid-planes**: The planes $x = x_{mid}$, $y = y_{mid}$, $z = z_{mid}$ that divide the current node into 8 equal child octants, where $x_{mid} = (x_{min} + x_{max})/2$, etc. [S5, unofficial]
+*   **penter**: The point on the ray at $t_{enter}$, i.e., $\mathbf{p}_{enter} = \mathbf{o} + t_{enter} \mathbf{d}$ [G].
+*   **tcenter**: The $t$ parameter where the ray intersects the mid-plane [S5, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Retrieve Node Bounds**: Retrieve the octree node given by depth and node index, then compute its octree-space coordinates of the mid-planes [S3][S5, unofficial].
+2.  **Compute Mid-Plane Coordinates**: Calculate the coordinates of the three mid-planes dividing the node:
+    $$ x_{mid} = \frac{x_{min} + x_{max}}{2} $$
+    $$ y_{mid} = \frac{y_{min} + y_{max}}{2} $$
+    $$ z_{mid} = \frac{z_{min} + z_{max}}{2} $$
+    [S3][S5, unofficial]
+3.  **Compute Mid-Plane Intersections**: Calculate the $t$ parameter where the ray intersects each mid-plane. For a plane with normal $\mathbf{n}$ and distance $d$ from origin (or simply solving $x(t) = x_{mid}$):
+    $$ t_{x} = \frac{x_{mid} - o_x}{d_x} \quad \text{if } d_x \neq 0 $$
+    $$ t_{y} = \frac{y_{mid} - o_y}{d_y} \quad \text{if } d_y \neq 0 $$
+    $$ t_{z} = \frac{z_{mid} - o_z}{d_z} \quad \text{if } d_z \neq 0 $$
+    If $d_i = 0$, the ray is parallel to the mid-plane; handle as a special case (e.g., $t = \infty$ or skip, depending on direction) [G].
+4.  **Sort Intersections**: Store these $t$ values in `axis_isects[]` and sort them in ascending order. This sorted array determines the sequence in which the ray crosses the mid-planes [S5, unofficial].
+5.  **Determine First Child Octant**: Compute the index of the first child octant intersected by the ray. This is done using the same constant shifting and binary-or operations as point location. Determine which side of each mid-plane the entry point $\mathbf{p}_{enter}$ lies on:
+    $$ bit_x = 0 \text{ if } p_{enter,x} < x_{mid} \text{ else } 1 $$
+    $$ bit_y = 0 \text{ if } p_{enter,y} < y_{mid} \text{ else } 1 $$
+    $$ bit_z = 0 \text{ if } p_{enter,z} < z_{mid} \text{ else } 1 $$
+    The child index is computed using constant shifting and binary-or as in point location [S3][S5, unofficial].
+6.  **Traverse Children Sequentially**:
+    *   Initialize `current_child` = `child` [G].
+    *   For each step in the sorted `axis_isects[]` array:
+        *   Identify which axis (X, Y, or Z) corresponds to the current smallest intersection distance in `axis_isects[]` [G].
+        *   Update `current_child` by flipping the bit corresponding to that axis. This is achieved by inverting the `axisbit` along the corresponding mid-plane axis traversed [S3].
+            $$ current\_child = current\_child \oplus (1 \ll axis\_index) $$
+        *   The new `current_child` is the next octant to visit [S5, unofficial].
+        *   Compute the new entry $t$ for this child as the intersection distance just processed (from `axis_isects[]`) and the exit $t$ as the next intersection in the sorted list or $t_{exit}$ of the parent node [G].
+    *   Stop when all children have been visited or the ray has exited the node ($t > t_{exit}$) [G].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def traverse_octree_node(ray_origin, ray_dir, node_bounds, t_enter, t_exit):
+    """
+    Traverses the 8 child octants of a node in the order the ray intersects them.
+    
+    Args:
+        ray_origin: (ox, oy, oz)
+        ray_dir: (dx, dy, dz)
+        node_bounds: (xmin, xmax, ymin, ymax, zmin, zmax)
+        t_enter: float, entry t for the current node
+        t_exit: float, exit t for the current node
+        
+    Returns:
+        List of tuples: (child_index, child_t_enter, child_t_exit)
+    """
+    xmin, xmax, ymin, ymax, zmin, zmax = node_bounds
+    
+    # 1. Compute mid-planes
+    x_mid = (xmin + xmax) / 2.0
+    y_mid = (ymin + ymax) / 2.0
+    z_mid = (zmin + zmax) / 2.0
+    
+    # 2. Compute intersection t values with mid-planes
+    def safe_div(num, den):
+        return float('inf') if den == 0.0 else num / den
+
+    t_x = safe_div(x_mid - ray_origin[0], ray_dir[0])
+    t_y = safe_div(y_mid - ray_origin[1], ray_dir[1])
+    t_z = safe_div(z_mid - ray_origin[2], ray_dir[2])
+    
+    # 3. Filter and sort mid-plane crossings that occur strictly within the node
+    axis_isects = []
+    if t_enter < t_x < t_exit: axis_isects.append((t_x, 0))
+    if t_enter < t_y < t_exit: axis_isects.append((t_y, 1))
+    if t_enter < t_z < t_exit: axis_isects.append((t_z, 2))
+    axis_isects.sort(key=lambda item: item[0])
+    
+    # 4. Determine first child octant based on entry point
+    p_enter = (
+        ray_origin[0] + t_enter * ray_dir[0],
+        ray_origin[1] + t_enter * ray_dir[1],
+        ray_origin[2] + t_enter * ray_dir[2]
+    )
+    
+    bit_x = 0 if p_enter[0] < x_mid else 1
+    bit_y = 0 if p_enter[1] < y_mid else 1
+    bit_z = 0 if p_enter[2] < z_mid else 1
+    
+    current_child = (bit_z << 2) | (bit_y << 1) | bit_x
+    
+    # 5. Sequentially march through children
+    visited_children = []
+    prev_t = t_enter
+    
+    for t_cross, axis in axis_isects:
+        visited_children.append((current_child, prev_t, t_cross))
+        # Invert the bitmask along the corresponding mid-plane axis traversed
+        current_child ^= (1 << axis)
+        prev_t = t_cross
+        
+    # Last segment to t_exit
+    if prev_t < t_exit:
+        visited_children.append((current_child, prev_t, t_exit))
+        
+    return visited_children
+```
+
+**Edge Cases and Pitfalls:**
+*   **Parallel Rays**: If the ray direction component is zero, the ray is parallel to the mid-plane. The intersection $t$ is infinite. These should be handled by sorting such that they are effectively ignored or processed last, as they do not define a boundary crossing within the node [G].
+*   **Precision**: Floating-point precision errors in computing $t$ values can lead to incorrect sorting or order of traversal. Use epsilon comparisons if necessary [G].
+*   **Empty Nodes**: The method assumes the node is an interior node. If the node is empty, the traversal should skip it entirely using the "empty octree strategy" [S1].
+*   **Degenerate Input**: If $t_{enter} \ge t_{exit}$, the ray does not intersect the node. [G]
+
+## Subtopics
+
+### [Ray-Octree Traversal (Gargantini and Atkinson variant)](1890-ray-octree-traversal-gargantini-and-atkinson-variant.md)
+A single-ray octree traversal algorithm that determines the exact order of child octant intersection by sorting the ray's crossings with the X, Y, and Z mid-planes of the current node. It builds on [Ray Traversal of Octree Nodes](1841-ray-traversal-of-octree-nodes.md) by fully sorting these mid-plane intersections to march through children sequentially, exploiting binary arithmetic on integer coordinates for efficient child index updates. Unlike coherent techniques (SIMD, packets, frustum-based traversal), it avoids unnecessary work in highly variant scenes where a pixel covers multiple voxels.
+
+### [IEEE-754 Bit Manipulation Octree Traversal](3907-ieee-754-bit-manipulation-octree-traversal.md)
+This method performs ray traversal through a sparse voxel octree by interpreting the IEEE-754 bit representation of floating-point coordinates to determine node depth and child indices, thereby avoiding explicit pointer chasing or coordinate division. It differs from sibling methods like [Ray-Octree Traversal (Gargantini and Atkinson variant)](1890-ray-octree-traversal-gargantini-and-atkinson-variant.md) by replacing arithmetic division and modulo operations with bitwise shifts and masks on the mantissa, and from [Stack-based Octree Traversal with Direction Flipping](5007-stack-based-octree-traversal-with-direction-flipping.md) by using a deterministic bit-indexing scheme that inherently encodes the traversal path without requiring a dynamic stack for descent.
+
+### [Stack-based Octree Traversal with Direction Flipping](5007-stack-based-octree-traversal-with-direction-flipping.md)
+A stack-based algorithm for traversing an octree structure along a ray, handling arbitrary ray directions by flipping the coordinate system and ray parameters to ensure positive traversal direction. It differs from [Ray Traversal of Octree Nodes](1841-ray-traversal-of-octree-nodes.md) by using an explicit stack to manage non-linear traversal paths and direction flipping to simplify child selection logic, and from [IEEE-754 Bit Manipulation Octree Traversal](3907-ieee-754-bit-manipulation-octree-traversal.md) by relying on floating-point comparisons and explicit stack management rather than bit-level integer arithmetic for step determination.
+
+## Operating characteristics
+*   **Time Complexity**: The initial cost per node is moderate due to the computation and sorting of mid-plane intersections (constant time for 8 children, but involves 3 divisions and a sort of 3 elements). Subsequent traversal within the node is trivial, involving only bitwise operations [S2, S3].
+*   **Memory Complexity**: Low. Requires only a small fixed-size array (`axis_isects[]`) and a few scalar variables per node traversal. No stack is needed for descent [S3].
+*   **Measured Performance**: In comparisons with Sphere Marching (SM), Octree Traversal (OT) was found to be faster on average despite requiring more iterations, because it utilizes empty octree nodes with smaller average depth [S1]. The method produces a grid pattern in iteration counts due to dependence on node location [S1].
+*   **Strengths**: Efficient for sparse data; avoids stack overhead; deterministic order; good for isosurface extraction where empty space skipping is critical [S1, S3].
+*   **Limitations**: Moderate initial cost per node [S2, S3].
+*   **When to Use**: When traversing sparse voxel octrees for isosurface rendering or empty space skipping [S1, S3].
+*   **When Not to Use**: When ray coherence is high and packet-based traversal is more efficient, or when the overhead of sorting mid-plane intersections outweighs the benefits of empty space skipping [S2].
+
+## Background
+The method originates from the work on Interactive Isosurface Ray Tracing of Large Octree Volumes by Wald et al. (2006) [S2, S3][S5, unofficial]. It was developed to efficiently traverse large octree structures for isosurface rendering, leveraging the hierarchical nature of the octree to skip empty space [S2, S3]. The approach was further refined and applied in various contexts, including rendering piecewise approximations of SDFs [S1] and implicit surface ray tracing [S5, unofficial]. The duality between voxels and cells, mapping voxels to the lower-left corner of a cell, was also observed in this context [S4, unofficial].
+
+## Sources
+[S1] Rendering piecewise approximations of SDFs through analytic intersections, https://doi.org/10.1016/j.cag.2024.103981, fetched 2026-10-27
+[S2] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+[S3] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
+[S4] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+[S5] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

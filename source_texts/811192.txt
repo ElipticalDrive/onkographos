@@ -1,0 +1,163 @@
+Cone Programming Language. Contribute to jondgoodwin/cone development by creating an account on GitHub.
+
+Compute on the GPU: compute pipelines, storage buffers and textures, 3-D textures, noise baked by compute by jondgoodwin · Pull Request #223 · jondgoodwin/cone · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jondgoodwin
+commented
+Sep 27, 2026
+Copy link
+Copy Markdown
+Owner
+The first PR of compute on the GPU: gpu runs compute shaders in WebGPU's shape, with 3-D and storage textures, indirect commands, timestamps and its own barriers between compute and drawing; noise fBm is baked into a 3-D texture by compute and matches the CPU at every voxel on both GPUs.
+What's in it
+vulkan: compute pipelines, cmdDispatch / cmdDispatchIndirect, cmdDrawIndirect / cmdDrawIndexedIndirect, query pools (createQueryPool, cmdResetQueryPool, cmdWriteTimestamp2, cmdCopyQueryPoolResults), QueryPool, ComputePipelineCreateInfo, the indirect command structs, QueryPoolCreateInfo, FORMAT_R32_UINT, the storage access bits. The layout test (layout.c / layout.out) covers the new structs; the loader test counts 76 device functions.
+gpu: compute (below), 3-D textures, r32float / r32uint, storage textures, writeTexture and copyTextureToBuffer for any of these formats and whole 3-D textures, barriers between compute and drawing, and WebGPU's default limits enforced. The new file is compute.cone.
+Synchronization validation now runs with syncval_shader_accesses_heuristic. Without it, the Khronos layer (SDK 1.4.357) does not see what shaders write through storage buffers and textures. With the between-dispatch barrier removed, the layer reported nothing, although the GPU really raced and got wrong answers. With the heuristic on, removing each of the three compute barriers is reported:
+between dispatches: write-after-write, and read-after-write on the indirect arguments;
+at a pass's end: read-after-write by a later draw;
+at a pass's start: write-after-read.
+Every existing test and example still reports 0 messages with it on.
+tools/shaders/shaders.py: compute entry points are documented. [numthreads] is checked against WebGPU's limits, when compiling and in --check.
+Tests:
+gpu/tests/compute: storage buffers, one read-only; chained dispatches; GPU-written indirect arguments driving an indirect dispatch (an integer-atomic count) and an indirect draw; timestamps; six limit breaches refused.
+gpu/tests/volume: 3-D storage textures in r32float, r32uint and rgba16float. One is filled by writeTexture then read and written in place. One is sampled by a render pass and written again after it, which exercises both pass-edge barriers.
+noise/tests/bake: the parity test.
+Example: noise/examples/volume.cone. It bakes the volume at start-up and times the bake with GPU timestamps. Each frame it draws a slice (4 × 4 pixels a voxel) and a turning sphere textured through the volume, using trilinear interpolation from Loads. Three voxels are read back and checked.
+CLAUDE.md: the package map, and determinism rules for compute beside the shader rules: integer hashes, -fp-mode precise, unsigned remainders, a fixed reduction order with no float atomics, and a parity test. Visual-only work is exempt.
+gpu API additions
+device.createComputePipeline(&ComputePipelineDescriptor[layout, module, entryPoint = "computeMain"]) ComputePipeline
+encoder.beginComputePass() ComputePassEncoder, with:
+setPipeline, setBindGroup, setImmediates;
+dispatchWorkgroups(x, y = 1, z = 1) and dispatchWorkgroupsIndirect(&buffer, offset);
+end.
+RenderPass.drawIndirect(&buffer, offset), RenderPass.drawIndexedIndirect(&buffer, offset)
+BindGroupLayoutEntry:
+kind: BINDING_KIND_STORAGE_TEXTURE with format and storageAccess (STORAGE_TEXTURE_ACCESS_WRITE_ONLY / _READ_ONLY / _READ_WRITE);
+sampleType (TEXTURE_SAMPLE_TYPE_FLOAT / _UNFILTERABLE_FLOAT / _UINT);
+storage buffers via bufferType BUFFER_BINDING_TYPE_STORAGE / _READ_ONLY_STORAGE.
+BindGroupEntry.texture also binds storage textures.
+TextureDescriptor.dimension (TEXTURE_DIMENSION_2D / _3D), TEXTURE_VIEW_DIMENSION_3D, TEXTURE_FORMAT_R32_FLOAT, TEXTURE_FORMAT_R32_UINT, TEXTURE_USAGE_STORAGE_BINDING, and Texture.dimension.
+Buffer usages: BUFFER_USAGE_STORAGE and BUFFER_USAGE_INDIRECT (both now used), and BUFFER_USAGE_QUERY_RESOLVE.
+Timestamps:
+device.createQuerySet(QUERY_TYPE_TIMESTAMP, count) QuerySet and QuerySet.none();
+encoder.writeTimestamp(&set, i);
+encoder.resolveQuerySet(&set, first, count, &buffer, offset);
+device.timestampPeriod, in ns per tick; 0 when the queue keeps no time.
+Immediates are visible to the compute stage too.
+Parity (262,144 voxels, 64³, fBm 4 octaves)
+Quantity
+RTX 4060
+UHD 770
+hash3 (r32uint 3-D texture)
+all exact
+all exact
+fBm (r32float 3-D texture, and storage buffer)
+all exact, max diff 0
+all exact, max diff 0
+fBm derivative x, y, z (storage buffer)
+all exact, max diff 0
+all exact, max diff 0
+As a control, the same shader compiled without -fp-mode precise matched the CPU at only 18–27% of voxels on both GPUs. fBm was off by up to 1.3e-6 and its derivative by up to 2.7e-6. Recorded in noise/README.md.
+Bake time, from timestamps: 0.07 ms on the RTX 4060, 3.1–3.7 ms on the UHD 770.
+Limits relied on (WebGPU defaults, enforced)
+Limit
+Value
+Checked by
+workgroup size
+≤ 256 × 256 × 64, and ≤ 256 invocations
+SPIR-V LocalSize in createShaderModule; [numthreads] in shaders.py
+workgroups per dimension
+≤ 65,535
+dispatchWorkgroups
+storage buffers per stage
+≤ 8
+createPipelineLayout
+storage textures per stage
+≤ 4
+createPipelineLayout
+storage-buffer binding size
+≤ 128 MiB
+createBindGroup
+storage-buffer offset alignment
+256
+createBindGroup
+3-D texture size
+≤ 2048 each way
+createTexture
+workgroup shared memory
+16 KiB
+documented only, not checked
+createBindGroupLayout also enforces two WebGPU rules: read-write storage textures only in r32float or r32uint, and nothing the vertex stage writes. The shaders use the formats WGSL needs (WTexture3D for write-only). slangc -target wgsl on volume.slang emits texture_storage_3d<rgba16float, write>, so the browser path stays open.
+Counts, before → after
+Suite: 480 scenarios, 497 runs: 496 passed, 1 expected failure → unchanged.
+congo test: 116 tests, 29 examples → 119 tests, 30 examples, all passing.
+shaders.py --check: 14 shaders → 18, all current, recompiled byte for byte by slangc.
+Both GPUs, validation and synchronization validation on, 0 messages:
+gpu compute, volume, levels and offscreen;
+noise bake and parity;
+sdf parity;
+render offscreen and lighting;
+the examples cube, triangle, noise volume, pipevk, pipepbr, hornmarch, hornmesh and horn (--frames).
+The tests that hard-code the high-performance adapter ran on the RTX both times.
+Cone gaps
+None met. The only surprise was a rule, not a gap: a temporary cannot be borrowed (&tex.createView()), so views go into locals first.
+Unruled choices
+The pass is ComputePassEncoder (WebGPU's name, as asked), while the render one stays RenderPass.
+Compute barriers are global memory barriers at each pass's start and end and between every pair of dispatches, not tracked per resource. This is conservative, like the graphics side. A storage texture rests in the GENERAL layout and never moves.
+Synchronization validation's shader-accesses heuristic is turned on for everything (the layer warns it may give false positives; none seen).
+Timestamps come from encoder.writeTimestamp between passes, with a reset recorded before each. They resolve to ticks plus device.timestampPeriod. WebGPU resolves to nanoseconds and has moved timestamps into pass timestampWrites.
+Storage formats offered: r32float, r32uint, rgba16float and rgba8unorm. A storage or 3-D texture cannot yet be a render attachment.
+drawIndirect and drawIndexedIndirect were added alongside indirect dispatch; only dispatch was asked for.
+copyTextureToBuffer keeps tight rows, where WebGPU pads each row to 256 bytes (an existing departure, now documented).
+The bake test demands bit-exact fBm and derivatives, not a tolerance, because both GPUs deliver it.
+The demo lives in noise/examples, since gpu cannot import noise.
+The async compute queue is noted in the header as later work. frame's per-phase GPU time is not wired yet; the timestamps it needs are here.
+🤖 Generated with Claude Code
+Compute on the GPU: compute pipelines, storage buffers and textures, …
+…
+5e5af26
+```
+…3-D textures
+
+gpu gains WebGPU-shaped compute: createComputePipeline, ComputePassEncoder
+(setPipeline, setBindGroup, setImmediates, dispatchWorkgroups,
+dispatchWorkgroupsIndirect), storage buffers and storage textures in bind
+group layouts, 3-D textures and r32float / r32uint storage formats,
+drawIndirect and drawIndexedIndirect, and timestamp query sets. Barriers
+between compute and drawing are the layer's; synchronization validation now
+runs with its shader accesses heuristic, without which it did not see
+storage writes. WebGPU's default compute limits are enforced (and checked by
+shaders.py for [numthreads]).
+
+noise's bake test bakes fBm into a 64^3 3-D texture by compute and matches
+the CPU at every voxel on both GPUs; its volume example draws it. CLAUDE.md
+gains the determinism rules for compute.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+jondgoodwin
+merged commit 4f3ab0a
+into
+master
+Sep 27, 2026
+jondgoodwin
+deleted the
+compute
+branch
+September 27, 2026 22:21
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

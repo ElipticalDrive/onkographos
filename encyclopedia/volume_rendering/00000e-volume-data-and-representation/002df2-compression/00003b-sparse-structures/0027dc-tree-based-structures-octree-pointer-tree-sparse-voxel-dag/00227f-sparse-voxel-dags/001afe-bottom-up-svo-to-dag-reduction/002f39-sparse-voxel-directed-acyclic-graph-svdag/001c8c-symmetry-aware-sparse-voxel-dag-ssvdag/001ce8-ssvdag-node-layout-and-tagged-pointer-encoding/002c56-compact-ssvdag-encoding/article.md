@@ -24,7 +24,7 @@ Compact SSVDAG Encoding is a GPU-friendly memory layout for Symmetry-aware Spars
 
 **Inner Node Layout:**
 Each inner node begins with a 16-bit header containing eight 2-bit tags, one for each of the 8 potential children [S1, unofficial].
-*   **Tag 00 (Null):** The child is not stored. No pointer data follows [S1, unofficial].
+*   **Tag 00 (Null):** The child is not stored [S1, unofficial]. No pointer data follows [S1, unofficial].
 *   **Tag 01 (16-bit Child):** Followed by a 16-bit child pointer [S1, unofficial].
     *   Bits [15:13]: 3-bit transformation code [S1, unofficial].
     *   Bits [12:0]: 13-bit offset (in level-words) from the start of the next level's array [S1, unofficial].
@@ -42,10 +42,10 @@ Each inner node begins with a 16-bit header containing eight 2-bit tags, one for
 *   For leaf level: 1 level-word = 8 bytes (64 bits) [S1, unofficial].
 
 **Algorithm Steps:**
-1.  **Leaf Grouping:** Coarsen the construction graph by one level. Instead of storing $2^3$ leaves as individual nodes, group $4^3$ grids into simple grids (bricks) stored in a single array. Each brick occupies 64 bits [S1, unofficial]. This avoids new matching passes; it operates on the graph from the bottom-up construction [S1, unofficial].
+1.  **Leaf Grouping:** Coarsen the construction graph by one level [S1, unofficial]. Instead of storing $2^3$ leaves as individual nodes, group $4^3$ grids into simple grids (bricks) stored in a single array [S1, unofficial]. Each brick occupies 64 bits [S1, unofficial]. This avoids new matching passes; it operates on the graph from the bottom-up construction [S1, unofficial].
 2.  **Frequency Analysis:** Count the reference count for every node at each level in the DAG [S1, unofficial].
-3.  **Reordering:** Sort the nodes at each level in descending order of their reference counts. Most referenced nodes appear first in the level's array [S1, unofficial].
-4.  **Offset Calculation:** Replace absolute pointers with offsets from the beginning of the respective level's array. Calculate the offset in level-words [S1, unofficial].
+3.  **Reordering:** Sort the nodes at each level in descending order of their reference counts [S1, unofficial]. Most referenced nodes appear first in the level's array [S1, unofficial].
+4.  **Offset Calculation:** Replace absolute pointers with offsets from the beginning of the respective level's array [S1, unofficial]. Calculate the offset in level-words [S1, unofficial].
 5.  **Pointer Compaction:** Determine the number of bits required for each offset based on its magnitude and the available bit slots in the encoding format (16-bit or 32-bit child pointers) [S1, unofficial]. Assign the smallest valid tag (01, 10, or 11) that can represent the offset [S1, unofficial].
 6.  **Encoding:** Write the 16-bit header with the 2-bit tags for each of the 8 children [S1, unofficial]. Write the child pointer data (transformation + offset) immediately after the header for each non-null child [S1, unofficial]. Pack the resulting bytes into 16-bit half-words for memory alignment [S1, unofficial].
 7.  **Indexing:** Construct the indexing structure with `max_level` and the starting offsets for each level in the inner node array [S1, unofficial].
@@ -57,7 +57,7 @@ Each inner node begins with a 16-bit header containing eight 2-bit tags, one for
 ```python
 def encode_compact_ssvdag(nodes_by_level):
     """
-    nodes_by_level: List of lists. nodes_by_level[l] is a list of node objects.
+    nodes_by_level: List of lists. nodes_by_level[l] contains node objects.
     Each node has:
       - children: list of 8 child references (or None)
       - ref_count: integer
@@ -66,11 +66,6 @@ def encode_compact_ssvdag(nodes_by_level):
     inner_arrays = []
     leaf_array = []
     level_offsets = []
-
-    # Step 1: Leaf Grouping
-    # Leaves are grouped into bricks. The input already represents this
-    # after the bottom-up construction coarsens the graph by one level.
-    # We process levels 0 to L-1 as inner, and the last level as leaves.
 
     for level_idx, level_nodes in enumerate(nodes_by_level):
         # Step 2 & 3: Frequency Analysis and Reordering
@@ -98,7 +93,7 @@ def encode_compact_ssvdag(nodes_by_level):
                         # Tag 00: Null
                         header |= (0x00 << (child_idx * 2))
                     else:
-                        # Calculate offset in level-words
+                        # Calculate offset in level-words (2-byte units)
                         child_idx_in_next = node_to_idx[id(child)]
                         offset_words = child_idx_in_next
 
@@ -154,8 +149,8 @@ def encode_compact_ssvdag(nodes_by_level):
 *   **Degenerate Input:** Nodes with all null children still consume a 16-bit header word [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Not given in the sources.
-*   **Memory Complexity:** Not given in the sources.
+*   **Time Complexity:** Not given in the sources [S1, unofficial].
+*   **Memory Complexity:** Not given in the sources [S1, unofficial].
 *   **Addressable Space:** >2 GB for inner levels, 8 GB for leaves [S1, unofficial].
 *   **Performance:** Optimized for GPU ray tracing. The memory-aligned encoding simplifies decoding on GPUs [S1, unofficial].
 *   **Strengths:** Low memory footprint, fast tracing, no decompression overhead [S1, unofficial].

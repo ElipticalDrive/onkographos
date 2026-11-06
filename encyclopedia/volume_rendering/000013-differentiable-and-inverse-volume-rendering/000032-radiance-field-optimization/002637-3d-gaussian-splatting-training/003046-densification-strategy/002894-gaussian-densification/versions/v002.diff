@@ -1,0 +1,291 @@
+--- v001.md
++++ v002.md
+@@ -4,64 +4,61 @@
+ 
+ ## Overview
+-Gaussian Densification is a dynamic optimization strategy in 3D Gaussian Splatting that increases the density of Gaussian primitives $\mathcal{G}_i$ in regions of high geometric or photometric complexity during training [S1, unofficial]. It solves the problem of under-reconstruction in complex areas by splitting existing primitives into new ones, thereby refining the representation without manual parameter tuning [S1, unofficial]. It is distinguished from sibling methods like [Optimization and Densification Strategy](4777-optimization-and-densification-strategy.md) by its specific use of SSIM-based error back-projection and tetrahedral variance metrics to select split locations, and from [GroupFlow](6351-groupflow.md) by its discrete, iterative split-and-clone mechanism rather than continuous flow-based adaptation [S1, unofficial][S2, unofficial].
++Gaussian Densification is a heuristic-based strategy used during the training of 3D Gaussian Splatting to dynamically increase the density of Gaussian primitives in regions with high reconstruction error or low initial coverage [S1, unofficial]. It solves the problem of under-represented geometry by splitting existing primitives into new ones, thereby refining the radiance field representation [S1, unofficial]. It sets itself apart from sibling methods like [Optimization and Densification Strategy](4777-optimization-and-densification-strategy.md) by explicitly combining SSIM-based error back-projection with a total variance metric to detect thin structures, and by using a geometric intersection of high-error camera rays to determine the precise location of new primitives [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- Current set of Gaussian primitives $\mathcal{G}_i$ (positions, covariances, opacities, colors).
+-- Training dataset of cameras $\{\pi_n\}$ and ground truth images.
+-- Optimization step counter `step`.
+-- Configuration parameters: `refineEvery`, `warmupLength`, `stopSplitAt`, `densifyGradThresh`, `densifySizeThresh`, `splitScreenSize`, `resetInterval`, `resetLogit`.
+-
+-**Outputs:**
+-- Updated set of Gaussian primitives $\mathcal{G}_i'$ with increased count in selected regions.
+-- Updated GPU buffers for rendering.
++**Inputs and Outputs:**
++*   **Inputs:** Current set of Gaussian primitives $\mathcal{G}$, training dataset sample $\{\pi_n\}$, current training step, and configuration parameters (thresholds, intervals).
++*   **Outputs:** Updated set of Gaussian primitives $\mathcal{G}'$ with new means added, and updated opacity states.
+ 
+ **Data Structures:**
+-The implementation relies on several GPU buffers of size `buf_capacity` (typically 3x the current active Gaussian count to accommodate worst-case splitting) [S2, unofficial]:
+-- `densify_split_flag`: Boolean flag indicating if a primitive should be split.
+-- `densify_dup_flag`: Boolean flag indicating if a primitive should be duplicated (kept).
+-- `densify_split_prefix`: Prefix sum of split flags.
+-- `densify_dup_prefix`: Prefix sum of dup flags.
+-- `densify_keep_flag`: Boolean flag for primitives to keep (not split, not removed).
+-- `densify_keep_prefix`: Prefix sum of keep flags.
+-- `densify_block_totals`: Array of size `(buf_capacity + 1023) / 1024` for block-level aggregation.
+-- `densify_compact_scratch`: Scratch space of size `buf_capacity * featuresRest_stride`.
+-- `densify_random_samples`: Array of size `buf_capacity x 3` storing random perturbations.
++The implementation relies on GPU buffers to manage the densification state efficiently [S2, unofficial]. Key buffers include:
++*   `densify_split_flag`, `densify_dup_flag`, `densify_split_prefix`, `densify_dup_prefix`, `densify_keep_flag`, `densify_keep_prefix`: Boolean/integer flags of size `buf_capacity` indicating the fate of each primitive [S2, unofficial].
++*   `densify_block_totals`: Size `(buf_capacity + 1023) / 1024` for parallel reduction [S2, unofficial].
++*   `densify_compact_scratch`: Size `buf_capacity * featuresRest_stride` for temporary storage during compaction [S2, unofficial].
++*   `densify_random_samples`: Size `buf_capacity x 3`, storing random perturbations generated on CPU using a normal distribution (mean 0, std 1) seeded by the current step [S2, unofficial].
++*   **Capacity Constraint:** Before densification, the GPU buffer capacity must be at least 3x the current active Gaussian count to accommodate worst-case splitting scenarios [S2, unofficial].
+ 
+-**Steps:**
++**Parameters:**
++*   `refineEvery`: Interval between densification steps (e.g., 500 iterations) [S1, unofficial][S2, unofficial].
++*   `warmupLength`: Number of initial iterations before densification begins [S2, unofficial].
++*   `stopSplitAt`: Maximum step for splitting, typically `maxSteps / 2` [S2, unofficial].
++*   `densifyGradThresh`: Gradient norm threshold for splitting [S2, unofficial].
++*   `densifySizeThresh`: Size threshold for splitting [S2, unofficial].
++*   `resetInterval`: Interval for opacity reset, calculated as `resetAlphaEvery * refineEvery` [S2, unofficial].
++*   `resetLogit`: Opacity reset threshold, typically -1.3862943611198906 (logit of 0.25) [S2, unofficial].
++*   `splitScreenSize`: Screen-space size threshold for splitting [S2, unofficial].
+ 
+-1. **Trigger Check:** Densification is triggered every `refineEvery` steps, after a `warmupLength` period, and before `stopSplitAt` (defined as `maxSteps / 2`) [S2, unofficial]. If `step % resetInterval` is within `numCameras + refineEvery` of the start of the interval, densification is skipped [S2, unofficial].
++**Step-by-Step Method:**
+ 
+-2. **Metric Computation:** For a sample of $M$ training images:
+-   - **SSIM Split Score ($\mathcal{S}_k$):** Back-project SSIM error $s$ onto primitives based on their weight $w_k$ and opacity $\alpha_k$. Compute the normalization factor $\nu_k^{\pi_n}$ for each camera $\pi_n$:
+-     $$ \nu_k^{\pi_n} = \left[ \sum_i \{ \mathbb{1}[w_k \alpha_k > 0] \}_i \right]_{\pi_n} $$
+-     Compute the score for primitive $k$:
+-     $$ \mathcal{S}_k = \text{mean} \left( \text{top2} \left[ \frac{1}{\nu_k^{\pi_n}} \sum_i \{ w_k \alpha_k s \}_i \right]_{\pi_n} \right) $$
+-     Select primitives with $\mathcal{S}_k > 0.5$ [S1, unofficial].
+-   - **Variance Split Score ($T_k$):** For regions with low density, compute the variance of residuals $\delta = C - C_{gt}$ within each tetrahedron. Compute the expectation $\mathbb{E}[\mathbf{x}]$:
+-     $$ \mathbb{E}[\mathbf{x}] = \frac{\sum_{\pi_n} [\sum_i \{\alpha_k w_k \mathbf{x}\}]_i}{\sum_{\pi_n} [\sum_i \{\alpha_k w_k\}]_i}_{\pi_n} $$
+-     Compute variance $\sigma_k^2 = \mathbb{E}[\delta^2] - \mathbb{E}[\delta]^2$. The score $T_k$ is derived from this variance. Select primitives with $T_k > 2.0$ [S1, unofficial].
++1.  **Trigger Check:** Densification is performed every `refineEvery` steps, starting after `warmupLength` and stopping before `stopSplitAt` [S2, unofficial]. It is skipped if the current step modulo `resetInterval` is within `numCameras + refineEvery` of the start of the interval [S2, unofficial].
+ 
+-3. **Selection:** Combine scores to select primitives for splitting. Primitives meeting either threshold are candidates [S1, unofficial].
++2.  **Metric Computation:** For a sample of $M$ training images $\{\pi_n\}$, compute two scores for each primitive $k$:
++    *   **SSIM Split Score ($\mathcal{S}_k$):** Back-project SSIM error $s$ onto primitives based on their contribution weight $w_k \alpha_k$.
++        $$ \nu_k^{\pi_n} = \left[ \sum_i \{ \mathbb{1}[w_k \alpha_k > 0] \}_i \right]_{\pi_n} $$
++        $$ \mathcal{S}_k = \text{mean} \left( \text{top2} \left[ \frac{1}{\nu_k^{\pi_n}} \sum_i \{ w_k \alpha_k s \}_i \right]_{\pi_n} \right) $$
++        Primitives with $\mathcal{S}_k > 0.5$ are selected for densification [S1, unofficial]. The `top2` operation selects the two highest scores across the sample images, ensuring at least two views are available for triangulation [S1, unofficial].
++    *   **Total Variance Split Score ($T_k$):** Detects low-density regions by analyzing the variance of residuals $\delta = C - C_{gt}$ within tetrahedra formed by primitives.
++        $$ \sigma_k^2 = \mathbb{E}[\delta^2] - \mathbb{E}[\delta]^2 $$
++        $$ \mathbb{E}[\mathbf{x}] = \frac{\sum_{\pi_n} [\sum_i \{\alpha_k w_k \mathbf{x}\}]_i}{\sum_{\pi_n} [\sum_i \{\alpha_k w_k\}]_i}_{\pi_n} $$
++        Primitives with $T_k > 2.0$ are selected [S1, unofficial].
+ 
+-4. **New Point Generation:** For each selected primitive (tetrahedron):
+-   - Identify the two cameras with the highest SSIM error scores.
+-   - Compute mean ray entrance and exit centroids for these cameras:
+-     $$ \mu_k^{\text{in}} = \frac{\sum_i \{w_k \alpha_k \mathbf{r}(t_k^{\text{in}})\}_i}{\sum_i \{w_k \alpha_k\}_i}, \quad \mu_k^{\text{out}} = \frac{\sum_i \{w_k \alpha_k \mathbf{r}(t_k^{\text{out}})\}_i}{\sum_i \{w_k \alpha_k\}_i} $$
+-   - Form line segments between $\mu_k^{\text{in}}$ and $\mu_k^{\text{out}}$ for the two top cameras.
+-   - Find the midpoint of the shortest line between these two segments. This midpoint is the new vertex added to the vertex set $\{v_i\}$ [S1, unofficial].
+-   - If the intersection lies outside the tetrahedron, fall back to a random point within the tetrahedron [S1, unofficial].
++3.  **Location Selection:** For selected primitives, determine the insertion point for the new Gaussian:
++    *   Identify the two cameras with the highest SSIM error scores.
++    *   Compute the mean ray entrance and exit centroids for primitive $k$ in each of these cameras:
++        $$ \mu_k^{\text{in}} = \frac{\sum_i \{w_k \alpha_k \mathbf{r}(t_k^{\text{in}})\}_i}{\sum_i \{w_k \alpha_k\}_i}, \quad \mu_k^{\text{out}} = \frac{\sum_i \{w_k \alpha_k \mathbf{r}(t_k^{\text{out}})\}_i}{\sum_i \{w_k \alpha_k\}_i} $$
++    *   Form line segments between $\mu_k^{\text{in}}$ and $\mu_k^{\text{out}}$ for both cameras.
++    *   Find the approximate intersection by calculating the midpoint of the shortest line segment connecting the two rays [S1, unofficial].
++    *   If the intersection lies outside the tetrahedron, fall back to a random point within the tetrahedron [S1, unofficial].
+ 
+-5. **Split and Clone:**
+-   - Generate random perturbations for split perturbations on CPU using a normal distribution (mean 0, std 1) seeded by the current step, stored in `densify_random_samples` [S2, unofficial].
+-   - Call `msplat_densify` with parameters: `densifyGradThresh`, `densifySizeThresh`, `splitScreenSize`, `check_screen` (1 if step < `stopScreenSizeAt` else 0), constants 0.1, 0.5, 0.15, `checkHuge` (1 if step > `refineEvery * resetAlphaEvery` else 0), gradient norms, visibility counts, max 2D size, half max screen dimension, and all Gaussian/Adam buffers [S2, unofficial].
+-   - Update `num_active` to the new count returned by `msplat_densify` and refresh GPU views [S2, unofficial].
++4.  **Execution:**
++    *   Call the densification kernel (e.g., `msplat_densify`) with the computed flags, gradient norms, visibility counts, and size thresholds [S2, unofficial].
++    *   Update the active Gaussian count and refresh GPU views [S2, unofficial].
+ 
+-6. **Opacity Reset:** Every `resetInterval` steps, specifically when `step % resetInterval == refineEvery`, opacities greater than `resetLogit` (-1.3862943611198906, logit of 0.25) are clamped to this value. Adam state for opacities (group 5) is zeroed [S2, unofficial].
++5.  **Opacity Reset:** Every `resetInterval` steps (specifically when `step % resetInterval == refineEvery`), clamp opacities greater than `resetLogit` to `resetLogit` and zero the Adam state for opacities to stabilize optimization [S2, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def gaussian_densification(step, primitives, dataset, config):
++def gaussian_densification_step(step, primitives, dataset_sample, config):
+     # 1. Trigger Check
+     if step < config.warmup_length:
+@@ -72,98 +69,70 @@
+         return primitives
+     
++    # Check reset interval skip condition
+     reset_interval = config.reset_alpha_every * config.refine_every
+-    if (step % reset_interval) < (len(dataset.cameras) + config.refine_every):
++    if (step % reset_interval) < (config.num_cameras + config.refine_every):
+         return primitives
+ 
+     # 2. Metric Computation
+-    ssim_scores = []
+-    variance_scores = []
+-    
+-    for cam_idx in sample(dataset.cameras, config.sample_size):
+-        cam = dataset.cameras[cam_idx]
+-        gt_image = dataset.get_gt(cam)
+-        rendered_image = render(primitives, cam)
+-        ssim_error = compute_ssim(rendered_image, gt_image)
++    split_flags = []
++    for prim in primitives:
++        ssim_scores = []
++        variance_scores = []
+         
+-        # Back-project SSIM error
+-        for prim in primitives:
+-            weight = prim.weight(cam)
+-            alpha = prim.opacity
+-            if weight * alpha > 0:
+-                # Accumulate error weighted by contribution
+-                prim.ssim_accumulator += weight * alpha * ssim_error
+-                prim.visibility_count += 1
+-                
+-    # Normalize and compute SSIM score
+-    for prim in primitives:
+-        if prim.visibility_count > 0:
+-            prim.ssim_score = prim.ssim_accumulator / prim.visibility_count
++        for cam in dataset_sample:
++            # Compute SSIM score for this camera
++            # Back-project SSIM error s onto primitives
++            # Calculate nu_k and S_k
++            ssim_scores.append(compute_ssim_score(prim, cam))
++            
++            # Compute Variance score
++            # Calculate E[delta^2] and E[delta]^2
++            variance_scores.append(compute_variance_score(prim, cam))
++        
++        # Top 2 SSIM scores
++        top2_ssim = sorted(ssim_scores, reverse=True)[:2]
++        s_k = mean(top2_ssim)
++        
++        # Variance threshold
++        t_k = max(variance_scores) # Or aggregate as per source
++        
++        # Selection
++        if s_k > 0.5 or t_k > 2.0:
++            split_flags.append(True)
+         else:
+-            prim.ssim_score = 0
++            split_flags.append(False)
++
++    # 3. Location Selection & Execution
++    new_primitives = []
++    for i, prim in enumerate(primitives):
++        if split_flags[i]:
++            # Find top 2 cameras for SSIM
++            top_cameras = get_top_cameras_by_ssim(prim, dataset_sample)
+             
+-    # Compute variance score
+-    for prim in primitives:
+-        # Compute expectation of residuals
+-        residual_mean = compute_residual_expectation(primitives, dataset)
+-        residual_var = compute_residual_variance(primitives, dataset, residual_mean)
+-        prim.variance_score = residual_var
++            # Compute centroids
++            mu_in_1, mu_out_1 = compute_centroids(prim, top_cameras[0])
++            mu_in_2, mu_out_2 = compute_centroids(prim, top_cameras[1])
++            
++            # Find intersection
++            new_mean = find_midpoint_shortest_line(mu_in_1, mu_out_1, mu_in_2, mu_out_2)
++            
++            # Fallback if outside tetrahedron
++            if not is_inside_tetrahedron(new_mean, prim.tetrahedron):
++                new_mean = random_point_in_tetrahedron(prim.tetrahedron)
++            
++            # Create new primitive with perturbed mean
++            perturbation = get_random_sample(step)
++            new_prim = create_primitive(prim, new_mean + perturbation)
++            new_primitives.append(new_prim)
+         
+-    # 3. Selection
+-    split_candidates = []
+-    for prim in primitives:
+-        if prim.ssim_score > 0.5 or prim.variance_score > 2.0:
+-            split_candidates.append(prim)
+-            
+-    # 4. New Point Generation
+-    new_points = []
+-    for prim in split_candidates:
+-        # Find top 2 cameras for this primitive
+-        top_cameras = get_top_cameras_by_error(prim, dataset)
+-        
+-        # Compute centroids
+-        mu_in = compute_centroid(prim, top_cameras[0], 'in')
+-        mu_out = compute_centroid(prim, top_cameras[0], 'out')
+-        mu_in_2 = compute_centroid(prim, top_cameras[1], 'in')
+-        mu_out_2 = compute_centroid(prim, top_cameras[1], 'out')
+-        
+-        # Form segments
+-        seg1 = Segment(mu_in, mu_out)
+-        seg2 = Segment(mu_in_2, mu_out_2)
+-        
+-        # Find approximate intersection
+-        intersection = find_midpoint_shortest_line(seg1, seg2)
+-        
+-        # Check if intersection is inside tetrahedron
+-        if is_inside_tetrahedron(intersection, prim.tetrahedron):
+-            new_points.append(intersection)
+-        else:
+-            # Fallback to random point
+-            new_points.append(random_point_in_tetrahedron(prim.tetrahedron))
+-            
+-    # 5. Split and Clone
+-    # Generate random samples
+-    random_samples = generate_random_samples(len(split_candidates), seed=step)
+-    
+-    # Call densification kernel
+-    new_primitives = msplat_densify(
+-        primitives,
+-        split_candidates,
+-        new_points,
+-        random_samples,
+-        config.densify_grad_thresh,
+-        config.densify_size_thresh,
+-        config.split_screen_size,
+-        step < config.stop_screen_size_at,
+-        step > config.refine_every * config.reset_alpha_every,
+-        config.constants
+-    )
+-    
+-    # 6. Opacity Reset
++        new_primitives.append(prim)
++
++    # 4. Opacity Reset
+     if step % reset_interval == config.refine_every:
+         for prim in new_primitives:
+-            if prim.opacity > config.reset_logit:
+-                prim.opacity = config.reset_logit
+-        zero_adam_state_opacities(new_primitives)
+-        
++            if prim.opacity_logit > config.reset_logit:
++                prim.opacity_logit = config.reset_logit
++                zero_adam_state(prim, group=5)
++
+     return new_primitives
+ ```
+@@ -172,17 +141,17 @@
+ 
+ ### [Multi-View Density Control Criterion](5663-multi-view-density-control-criterion.md)
+-A variant that incorporates multi-view consistency checks into the density control, ensuring that densification only occurs where multiple views agree on the presence of detail. It is chosen when multi-view consistency is critical for reducing artifacts in complex scenes.
++The Multi-View Density Control Criterion is a heuristic used during the densification phase of 3D Gaussian Splatting training to control the number and distribution of Gaussian primitives. It addresses the problem of over-densification by evaluating gradient magnitudes across multiple views, ensuring that new Gaussians are only spawned in regions with significant multi-view reconstruction error. It sets itself apart from standard positional-gradient rules by requiring consistency across views, which yields higher rendering quality with significantly fewer primitives.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Densification is triggered every `refineEvery` steps, making it an intermittent operation. The metric computation is $O(N \cdot M)$ where $N$ is the number of primitives and $M$ is the sample size. The split operation is $O(K)$ where $K$ is the number of split candidates.
+-- **Memory Complexity:** Requires additional GPU buffers of size `buf_capacity`, typically 3x the current active Gaussian count [S2, unofficial].
+-- **Performance:** On an M4 Max, training can be completed in ~90s with native Metal acceleration [S2, unofficial].
+-- **Strengths:** Efficiently refines complex regions without over-smoothing. SSIM-based scoring aligns with perceptual quality.
+-- **Limitations:** Can lead to over-densification in noisy regions if not properly thresholded. Requires careful tuning of `densifyGradThresh` and `densifySizeThresh`.
+-- **When to use:** When reconstructing scenes with high-frequency details or thin structures that are under-represented by the initial Gaussian distribution.
+-- **When not to use:** For simple scenes with low geometric complexity, or when computational resources are severely constrained.
++*   **Time Complexity:** Densification is triggered sparsely (e.g., every 500 iterations), making its per-step cost negligible compared to rendering and optimization [S1, unofficial]. However, the buffer management and compaction steps require $O(N)$ operations where $N$ is the number of primitives [S2, unofficial].
++*   **Memory Complexity:** Requires additional GPU buffers for flags and scratch space, with capacity scaled to 3x the active primitive count to handle worst-case splits [S2, unofficial].
++*   **Performance:** Significantly improves reconstruction quality in complex or thin structures by adapting density to error [S1, unofficial].
++*   **Strengths:** Effective at refining geometry where initial coverage is sparse; uses multi-view consistency to avoid spurious splits [S1, unofficial].
++*   **Limitations:** Can lead to over-densification if thresholds are not carefully tuned; requires careful management of primitive count to avoid memory exhaustion [S1, unofficial][S2, unofficial].
++*   **When to Use:** During the training phase of 3D Gaussian Splatting when high-fidelity reconstruction is required [S1, unofficial].
++*   **When Not to Use:** In real-time inference where primitive count must be fixed, or in scenarios with very limited GPU memory [S2, unofficial].
+ 
+ ## Background
+-Gaussian Densification was introduced in the context of 3D Gaussian Splatting to address the limitations of static Gaussian distributions. The method was developed by researchers in the field of differentiable rendering and inverse graphics, with key contributions detailed in "Radiance Meshes for Volumetric Reconstruction" [S1, unofficial]. The implementation details, including GPU acceleration and specific parameter tuning, are further elaborated in the "Msplat" project [S2, unofficial].
++Gaussian Densification was introduced as part of the 3D Gaussian Splatting framework to address the limitations of static initialization. The method was detailed in "Radiance Meshes for Volumetric Reconstruction" [S1, unofficial], which proposed using tetrahedral meshes and adaptive splitting to improve volumetric reconstruction quality. The implementation details, including buffer management and specific parameter values, are further documented in the "Msplat" project [S2, unofficial], which provides a native Metal implementation for high-speed training.
+ 
+ ## Sources

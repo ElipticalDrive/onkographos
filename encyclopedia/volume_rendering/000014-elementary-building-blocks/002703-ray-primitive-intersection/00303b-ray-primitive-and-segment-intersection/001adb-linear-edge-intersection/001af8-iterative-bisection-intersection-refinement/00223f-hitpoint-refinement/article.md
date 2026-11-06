@@ -10,7 +10,7 @@ Hitpoint Refinement is an iterative technique to achieve higher quality in detec
 - Output: A refined intersection parameter [S1, unofficial].
 
 **Data structures:**
-- Not given in the sources.
+- Not given in the sources. [G]
 
 **Numbered steps:**
 1. Sample along the ray with a relatively small sampling rate (large steps between sampling points) to detect a rough intersection [S1, unofficial].
@@ -20,8 +20,8 @@ Hitpoint Refinement is an iterative technique to achieve higher quality in detec
 5. Repeat steps 3–4 five to six times [S1, unofficial].
 
 **Formulas:**
-Let $t$ be the ray parameter and $\Delta t$ be the current step size.
-- Initial coarse hit: $t_0$, coarse step: $\Delta t_0$.
+Let $t$ be the ray parameter and $\Delta t$ be the current step size [S1, unofficial].
+- Initial coarse hit: $t_0$, coarse step: $\Delta t_0$ [S1, unofficial].
 - Backstep: $t_1 = t_0 - \frac{\Delta t_0}{2}$, $\Delta t_1 = \frac{\Delta t_0}{2}$ [S1, unofficial].
 - Iteration $i = 1$ to $k$ (where $k \in \{5, 6\}$):
   - Evaluate surface at $t_i$. Compare absolute error to target.
@@ -34,7 +34,7 @@ Let $t$ be the ray parameter and $\Delta t$ be the current step size.
 - Iteration count: 5 to 6 times [S1, unofficial].
 
 **Edge cases and pitfalls:**
-- Not given in the sources.
+- Not given in the sources. [G]
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -87,10 +87,10 @@ def hitpoint_refinement(t_init, dt_coarse, surface_func, target=0.0, iterations=
 
 ## Operating characteristics
 - **Time complexity:** $O(k)$ where $k$ is the number of iterations (typically 5–6) [S1, unofficial].
-- **Memory complexity:** Not given in the sources.
+- **Memory complexity:** Not given in the sources. [G]
 - **Measured performance:** Using Hitpoint Refinement allows the initial sampling distance to be increased to 400% or 500% of the original, significantly increasing rendering speed [S1, unofficial]. The refinement yields a 64-fold better intersection accuracy compared to the initially chosen point [S1, unofficial].
 - **Strengths:** High accuracy with minimal additional cost; allows for coarser initial sampling [S1, unofficial].
-- **Limitations:** Not given in the sources.
+- **Limitations:** Not given in the sources. [G]
 
 ## Background
 Hitpoint Refinement was introduced as an optimization technique for raycasters to improve intersection detection quality without sacrificing rendering speed [S1, unofficial]. It is described in the context of volume raycasting optimization [S1, unofficial].

@@ -1,0 +1,124 @@
+--- v001.md
++++ v002.md
+@@ -1,67 +1,83 @@
+ # Top Voxel Retrieval
+ 
+-
+ ## Overview
+-Top Voxel Retrieval finds the highest solid voxel at a given $(x,y)$ column and returns its color and $z$-coordinate [S1, unofficial]. It serves as a fast, column-based alternative to full ray marching for determining surface visibility and occlusion [S2, unofficial]. Unlike the parent [Voxel Map Lookup](4226-voxel-map-lookup.md), which retrieves a specific voxel's color, this method searches for the maximum $z$ value within a chunk's sorted block list [S1, unofficial].
++Top Voxel Retrieval finds the highest solid voxel at a given $(x,y)$ column within a chunked voxel map and returns its color and $z$-coordinate [S1, unofficial]. It differs from standard [Voxel Map Lookup](4226-voxel-map-lookup.md) by performing a vertical search for the maximum occupied $z$ rather than retrieving a specific $z$, and from [2D Voxel Shadow Map](5769-2d-voxel-shadow-map.md) by providing the raw data rather than a pre-computed texture [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** A pointer to the `libvxl_map` structure, and integer coordinates $(x, y)$ representing the column to query.
+-**Outputs:** The color (integer) and $z$-coordinate (short) of the topmost solid voxel. If no solid voxel exists, the behavior is undefined or triggers an assertion [S1, unofficial].
++**Inputs:** A pointer to the `libvxl_map` structure, and integer coordinates $(x, y)$ defining the column.
++**Outputs:** The color (integer) and $z$-coordinate of the topmost solid voxel. If no solid voxel exists, the behavior is undefined per source notes.
+ 
+ **Data Structures:**
+-The method relies on the `libvxl_map` structure [S1, unofficial]:
++The map is defined as [S1, unofficial]:
+ ```c
+ struct libvxl_map {
+-    size_t* chunk_offsets; // Offsets into the buffer for each chunk
+-    size_t chunk_size;     // Size of a single chunk in bytes
+-    void* buffer;          // Raw memory buffer containing chunk data
+-    size_t buffer_offset;  // Offset of the current chunk's data within buffer
+-    size_t pos;            // Current position in the buffer
++    size_t* chunk_offsets;
++    size_t chunk_size;
++    void* buffer;
++    size_t buffer_offset;
++    size_t pos;
+ };
+ ```
+-Each chunk contains a sorted array of blocks (`blocks_sorted`) and a geometry bitfield (`geometry`) [S1, unofficial]. The block structure is:
++Blocks within chunks are packed as [S1, unofficial]:
+ ```c
+ struct __attribute__((packed)) libvxl_kv6_block {
+-    int color;           // Voxel color
+-    short z;             // Z-coordinate
+-    unsigned char visfaces; // Visibility flags
+-    unsigned char normal; // Normal vector index
++    int color;
++    short z;
++    unsigned char visfaces;
++    unsigned char normal;
+ };
+ ```
++The `geometry` bitfield in a chunk copy indicates solid voxels.
+ 
+ **Steps:**
+-1.  **Calculate Chunk Index:** Determine which chunk contains the column $(x, y)$. This is typically derived from the global coordinates divided by the chunk dimensions.
+-2.  **Access Chunk Data:** Use `chunk_offsets` to find the start of the chunk data in `buffer`. Cast the data to a `libvxl_chunk_copy` structure [S1, unofficial].
+-3.  **Check Geometry Bitfield:** The parent [Voxel Map Lookup](4226-voxel-map-lookup.md) uses a global geometry bitfield to quickly check if a voxel exists. For top retrieval, the chunk's `geometry` bitfield (or equivalent) should be checked to see if the column $(x, y)$ has any solid voxels. If the bit is unset, no solid voxel exists [S1, unofficial].
+-4.  **Binary Search for Top Voxel:** The chunk's `blocks_sorted` array is sorted by $z$ coordinate. Perform a binary search (specifically a lower-bound search for $z \ge 0$ or the maximum $z$) to find the highest block [S1, unofficial]. The function `libvxl_chunk_gequal_block` is likely used for this comparison [S1, unofficial].
+-5.  **Return Result:** Return the `color` and `z` fields of the found block.
++1.  Determine the chunk index containing $(x, y)$ using `chunk_offsets` and `chunk_size` [S1, unofficial].
++2.  Load the chunk data into a `libvxl_chunk_copy` structure using `libvxl_copy_chunk` [S1, unofficial].
++3.  Perform a lower-bound search for blocks where $z \ge 0$ using `libvxl_chunk_gequal_block` [S1, unofficial].
++4.  Identify the block with the highest $z$ value among those marked solid in the `geometry` bitfield.
++5.  Return the `color` and `z` fields of that block.
+ 
+ **Pitfalls:**
+-*   **Assertion Failure:** If no block exists at the queried column, `libvxl_chunk_gequal_block` may trigger an assertion because it expects a valid lower-bound match [S1, unofficial]. Always check the geometry bitfield first.
+-*   **Precision:** The $z$ coordinate is stored as a `short`. Ensure that the world coordinates fit within the range of a signed 16-bit integer [-32768, 32767] [S1, unofficial].
++If no block exists satisfying the condition, assertions will trigger [S1, unofficial]. Precision issues may arise if $z$ values are not strictly monotonic in the sorted array, though the source implies a sorted structure.
++
++**Pseudocode:**
++```python
++def get_top_voxel(map: libvxl_map, x: int, y: int) -> tuple[int, int]:
++    # 1. Find chunk index
++    chunk_idx = find_chunk_index(map.chunk_offsets, x, y, map.chunk_size)
++    
++    # 2. Load chunk
++    copy = libvxl_chunk_copy()
++    libvxl_copy_chunk(map, copy, x, y)
++    
++    # 3. Search for top solid block
++    # Note: libvxl_chunk_gequal_block performs lower-bound search for z >= 0
++    # We must iterate or binary search the blocks_sorted array
++    top_z = -1
++    top_color = 0
++    
++    for i in range(copy.blocks_sorted_count):
++        block = copy.blocks_sorted[i]
++        # Check if solid using geometry bitfield
++        if is_solid(copy.geometry, x, y, block.z):
++            if block.z > top_z:
++                top_z = block.z
++                top_color = block.color
++                
++    # 4. Return result
++    # If no solid block found, assertion triggers per source [S1, unofficial]
++    return top_color, top_z
++```
+ 
+ ## Subtopics
+ 
+-### 2D Voxel Shadow Map
+-A 2D shadow map storing the highest occupied voxel Y-coordinate per $(X, Z)$ column to determine occlusion for lighting without ray marching [S2, unofficial]. It is chosen when real-time lighting occlusion is needed and full ray marching is too expensive [S2, unofficial].
+-*   **Definition:** Stores max Y height for each $(X, Z)$ column [S2, unofficial].
+-*   **Layout:** `uint16_t*` array of size `shadow_map_size[0] * shadow_map_size[1]` [S2, unofficial].
+-*   **Index Calculation:** `index = (ws[0] + ws[1]) + (SH_MAX_X * ws[2])`, where `ws[0]` is X, `ws[1]` is Y, `ws[2]` is Z, and `SH_MAX_X` is the shadow map width [S2, unofficial].
+-*   **Occlusion Test:** A voxel at world space `ws` is in shadow if `shadow_map[index] >= ws[1]+1` OR `shadow_map[index+1] >= ws[1]+1` [S2, unofficial].
+-*   **Parameter:** `root_bitw` is the log2 scaling factor for world to shadow map coordinates. Typical value: 3 (scaling factor of 8) [S2, unofficial].
+-*   **Pitfall:** The index calculation adds `ws[1]` to `ws[0]`, shearing the coordinate space. Careful alignment of world bounds and shadow map dimensions is required to avoid out-of-bounds access [S2, unofficial].
++### [2D Voxel Shadow Map](5769-2d-voxel-shadow-map.md)
++A 2D Voxel Shadow Map is a rendering optimization that stores the highest occupied voxel Y-coordinate for each (X, Z) column in a 2D texture, enabling fast shadow determination without ray marching. It differs from standard depth buffers by storing world-space height values rather than view-space depth, and from ray-marched shadows by using a single texture lookup per fragment instead of iterative sampling. This method builds on [Top Voxel Retrieval](4236-top-voxel-retrieval.md) to provide occlusion data.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(\log N)$ where $N$ is the number of blocks in the chunk, due to the binary search [S1, unofficial].
+-*   **Memory Complexity:** $O(1)$ additional memory, as it operates on the existing chunk data [S1, unofficial].
+-*   **Strengths:** Extremely fast for column-based queries; avoids ray marching overhead [S2, unofficial].
+-*   **Limitations:** Only provides the top voxel; does not handle internal structures or multiple surfaces per column [S1, unofficial].
+-*   **When to Use:** For shadow mapping, sky visibility checks, or fast surface culling [S2, unofficial].
+-*   **When Not to Use:** When internal voxel properties or multiple hits are required [S1, unofficial].
++Time complexity is dominated by chunk loading and block iteration, which is $O(N)$ where $N$ is the number of blocks in the column, or $O(\log N)$ if binary search is used on the sorted $z$ values. Memory complexity is $O(1)$ auxiliary space per query if the chunk copy is reused. Performance is high for sparse columns but degrades if many blocks exist. Strengths include direct access to world-space height. Limitations include the assertion failure on empty columns and the overhead of chunk copying. Use when shadow maps or height queries are needed; avoid when specific $z$ retrieval is required.
+ 
+ ## Background
+-Top Voxel Retrieval is part of the `libvxl` library, an unofficial voxel engine implementation [S1, unofficial]. It was developed to provide efficient access to voxel data for rendering and game logic [S1, unofficial]. The 2D Voxel Shadow Map variant is part of the `voxplat` project, which focuses on voxel platformer mechanics [S2, unofficial].
++Originated in the `libvxl` library by xtreme8000 [S1, unofficial]. It is used in voxel-based game engines for efficient height queries.
+ 
+ ## Sources
+-[S1] xtreme8000/libvxl, https://github.com/xtreme8000/libvxl, fetched 2026-10-28 (unofficial)
+-[S2] kosshi-net/voxplat, https://github.com/kosshi-net/voxplat, fetched 2026-10-27 (unofficial)+[S1] xtreme8000/libvxl, https://github.com/xtreme8000/libvxl, fetched 2026-10-28 (unofficial)

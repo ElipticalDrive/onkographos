@@ -1,0 +1,29 @@
+# Pose-free and Feed-forward Training
+
+Also called: Pose-free training, Feed-forward 3DGS, Generalizable 3D Gaussian Splatting
+
+## Overview
+This family of methods eliminates the dependency on pre-computed camera poses (typically from Structure-from-Motion) by either predicting them jointly with the scene representation or by using a feed-forward network to generate Gaussian primitives directly from input images. It solves the problem of requiring calibrated input data, enabling reconstruction from uncalibrated, sparse, or casual image collections [S1, 6888-joint-pose-optimization.md, unofficial]. Unlike standard [Base 3DGS Optimization](7549-base-3dgs-optimization.md) which assumes known poses, these methods treat camera parameters as either learnable variables or implicit outputs of a neural network [S1, 6888-joint-pose-optimization.md, unofficial].
+
+## Shared principles
+All methods in this family output a set of 3D Gaussian primitives $\{G_i\}$ defined by mean $\mu_i$, covariance $\Sigma_i$, opacity $\alpha_i$, and spherical harmonics coefficients $c_{i,lm}$ [6136-instantsplat.md][6464-pixelsplat.md]. The rendering process remains differentiable with respect to the scene representation [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. In feed-forward variants, gradients flow through the network weights during training; in prior-based variants, gradients update Gaussian attributes while poses remain fixed or are ignored [S1, 6136-instantsplat.md, 6464-pixelsplat.md, unofficial]. Loss functions typically combine photometric reconstruction error, such as $\mathcal{L}_{L1}$ or $\mathcal{L}_{MSE}$, with perceptual or structural metrics like $\mathcal{L}_{MS-SSIM}$ or $\mathcal{L}_{LPIPS}$ [6136-instantsplat.md][6464-pixelsplat.md].
+
+## Subtopics
+
+### [InstantSplat](6136-instantsplat.md)
+InstantSplat is a pose-free, sparse-view 3D Gaussian Splatting (3DGS) training method that leverages MASt3R or VGGT geometry priors to initialize Gaussian primitives without requiring camera pose annotations. It distinguishes itself from sibling methods like [pixelSplat](6464-pixelsplat.md) by optimizing Gaussian attributes via gradient descent rather than generating them via a feed-forward network, and from [Joint Pose Optimization](6888-joint-pose-optimization.md) by fixing poses to priors instead of optimizing them jointly. It trains in seconds on sparse views.
+
+### [pixelSplat](6464-pixelsplat.md)
+pixelSplat is a feed-forward model that reconstructs a 3D radiance field parameterized by 3D Gaussian primitives from a pair of input images. It solves the problem of generalizable novel view synthesis by enabling real-time, memory-efficient rendering and fast 3D reconstruction at inference time. Unlike light-field transformers which produce black-box ray fields, pixelSplat generates an explicit, editable 3D representation. It is distinguished from its siblings by its specific use of an epipolar transformer to resolve scale ambiguity and a probabilistic sampling mechanism to avoid local minima in primitive regression.
+
+### [Joint Pose Optimization](6888-joint-pose-optimization.md)
+Joint Pose Optimization (JPO) refers to methods that simultaneously optimize camera poses and the scene representation (e.g., neural radiance fields or 3D Gaussians) to eliminate the dependency on pre-computed camera parameters from external Structure-from-Motion (SfM) pipelines. Unlike methods that assume known poses or rely on fixed priors, JPO treats camera extrinsics as learnable variables updated via gradient descent alongside the scene geometry and appearance. This approach is distinct from incremental methods that leverage mono-depth priors or temporal continuity to estimate poses.
+
+### AnySplat
+AnySplat is a pose-free feed-forward network where a single forward pass over uncalibrated image collections yields 3D Gaussian primitives plus per-image intrinsics and extrinsics [S1, unofficial]. It scales to casual dense or sparse multi-view captures with no pose annotations, matching pose-aware baselines and surpassing prior pose-free methods (NoPoSplat-class) in zero-shot evaluations at real-time rendering latency [S1, unofficial].
+
+## Background
+The family emerged from the need to remove the bottleneck of Structure-from-Motion (SfM) pipelines in 3D Gaussian Splatting. Standard 3DGS requires calibrated camera poses, which are not always available for casual or sparse image collections. Early work like [pixelSplat](6464-pixelsplat.md) introduced feed-forward architectures for 2-view synthesis, while [InstantSplat](6136-instantsplat.md) demonstrated that sparse-view reconstruction could be achieved in seconds using geometric priors from foundation models like MASt3R or VGGT [S1, 6136-instantsplat.md, unofficial]. [Joint Pose Optimization](6888-joint-pose-optimization.md) approaches treat poses as differentiable variables, allowing end-to-end optimization without external pose estimation [S1, unofficial]. Recent developments like [AnySplat](6136-instantsplat.md) extend these concepts to handle uncalibrated multi-view inputs directly [S1, unofficial].
+
+## Sources
+[S1] Gaussian Splatting — All Variants Cheat Sheet, https://www.chengjianglong.com/ml/3D-Gaussian_Splatting_SOTA_Updated.html, fetched 2026-10-27 (unofficial)

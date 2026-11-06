@@ -1,0 +1,327 @@
+--- v003.md
++++ v004.md
+@@ -4,184 +4,171 @@
+ 
+ ## Overview
+-Triadic frequency band decomposition is a volume data compression method that partitions a scalar field into disjoint $4^3$ blocks and decomposes each block into a multiresolution representation of three triadic frequency bands: high-frequency differences, mid-frequency differences, and mean [S1, unofficial]. It solves the problem of efficient storage and rendering of large volumetric datasets by reducing data size through vector quantization of these bands [S1, unofficial]. What sets it apart from its siblings, such as [Wavelet-based Volume Rendering](1052-wavelet-based-volume-rendering.md) or [Laplacian Pyramid](2250-laplacian-pyramid.md), is its specific use of a fixed $4^3$ block size with a two-level hierarchical downsampling (factor of 2) to generate exactly three bands (64, 8, and 1 components), and its reliance on a specific GPU-friendly texture-based decoding architecture using dependent texture fetches [S1, unofficial].
++Triadic frequency band decomposition is a lossy compression method for volumetric scalar fields that partitions data into disjoint blocks and decomposes each block into three hierarchical frequency bands (high-frequency details, mid-frequency details, and mean) [S1, unofficial]. It differs from standard scalar quantization by encoding spatially correlated differences into low-dimensional vectors, and from pure transform coding by using discrete codebooks for efficient hardware decoding [S1, unofficial]. The method is designed for compression domain rendering, allowing reconstruction of the volume data directly on the GPU via texture lookups and arithmetic operations [S1, unofficial].
+ 
+ ## How it works
+-### Inputs and Outputs
+-**Input:** A 3D scalar field $V$ of dimensions $N_x \times N_y \times N_z$ [S1, unofficial].
+-**Output:** An RGB index texture $I$ of size $(N_x/4) \times (N_y/4) \times (N_z/4)$, and two codebook textures $C_1$ and $C_2$, and an address texture $A$ [S1, unofficial].
++**Inputs:** A 3D scalar field of size $N_x \times N_y \times N_z$.
++**Outputs:** An RGB index texture $I$, two codebook textures $C_1$ and $C_2$, and an address texture $A$.
+ 
+-### Data Structures
+-The method relies on four primary data structures stored in GPU textures:
++**Data Structures and Layout:**
++1.  **Index Texture $I$:** A 3D texture of size $(N_x/4) \times (N_y/4) \times (N_z/4)$. Each texel stores three 8-bit values:
++    *   **R-component:** The mean value of the corresponding $4^3$ block.
++    *   **G-component:** An 8-bit index into codebook $C_1$ (high-frequency band).
++    *   **B-component:** An 8-bit index into codebook $C_2$ (mid-frequency band).
++2.  **Codebook $C_1$:** A 2D texture of size $256 \times 64$. The s-coordinate is the index from $I$'s G-component. The t-coordinate is determined by the Address Texture $A$. It stores 64-component codewords representing high-frequency differences.
++3.  **Codebook $C_2$:** A 2D texture of size $256 \times 8$. The s-coordinate is the index from $I$'s B-component. The t-coordinate is determined by the Address Texture $A$. It stores 8-component codewords representing mid-frequency differences.
++4.  **Address Texture $A$:** A 2D texture of size $4^3$ (matching the encoded texel region size).
++    *   **R-component:** Stores 64 different addresses to index $C_1$.
++    *   **G-component:** Stores 8 different addresses to index $C_2$.
++    *   Mapped via nearest-neighbor interpolation.
+ 
+-1.  **Index Texture $I$**:
+-    *   Dimensions: $(N_x/4) \times (N_y/4) \times (N_z/4)$ [S1, unofficial].
+-    *   Format: RGB 8-bit per channel [S1, unofficial].
+-    *   Layout:
+-        *   $R$: 8-bit mean value of the block [S1, unofficial].
+-        *   $G$: 8-bit index into Codebook $C_1$ (high-frequency band) [S1, unofficial].
+-        *   $B$: 8-bit index into Codebook $C_2$ (mid-frequency band) [S1, unofficial].
++**Algorithm Steps:**
++1.  **Block Partitioning:** Partition the original scalar field into disjoint blocks of size $4^3$ voxels [S1, unofficial].
++2.  **First Decomposition (High-Frequency):**
++    *   Down-sample the $4^3$ block by a factor of two by averaging disjoint sets of $2^3$ voxels each. This produces a $2^3$ mean representation [S1, unofficial].
++    *   Calculate the difference between the original 64 data samples and the respective down-sampled value (replicated to $4^3$ size).
++    *   Store these 64 difference values in a 64-component vector $V_{high}$ [S1, unofficial].
++3.  **Second Decomposition (Mid-Frequency):**
++    *   Apply the same down-sampling process to the $2^3$ mean values from Step 2. This produces one single value representing the mean of the entire block [S1, unofficial].
++    *   Calculate the difference between the $2^3$ mean values and the final single mean value (replicated to $2^3$ size).
++    *   Store these 8 difference values in an 8-component vector $V_{mid}$ [S1, unofficial].
++4.  **Mean Storage:** Store the single mean value in a 1-component vector $V_{mean}$ [S1, unofficial].
++5.  **Thresholding:** Apply thresholding to $V_{high}$ and $V_{mid}$. If detail coefficients are small or zero (indicating homogeneous or empty regions), map the respective vector to the zero vector. This maximizes codeword usage for significant non-zero vectors and simplifies quantization [S1, unofficial].
++6.  **Vector Quantization:**
++    *   Quantize $V_{high}$ using a codebook $C_1$ of length 256. The result is an 8-bit index $idx_1$ [S1, unofficial].
++    *   Quantize $V_{mid}$ using a codebook $C_2$ of length 256. The result is an 8-bit index $idx_2$ [S1, unofficial].
++    *   The mean $V_{mean}$ is stored directly as an 8-bit value [S1, unofficial].
++7.  **Assembly:** Assemble the RGB index texture $I$ where each texel contains $(V_{mean}, idx_1, idx_2)$ [S1, unofficial].
+ 
+-2.  **Codebook $C_1$**:
+-    *   Dimensions: $256 \times 64$ (2D texture) [S1, unofficial].
+-    *   Format: Floating-point per component [S1, unofficial].
+-    *   Layout: Indexed by $s$ (0-255) and $t$ (0-63). The $s$-coordinate comes from the $G$-component of $I$, and the $t$-coordinate comes from the $R$-component of Address Texture $A$ [S1, unofficial]. Stores 64-component codewords representing high-frequency differences [S1, unofficial].
+-
+-3.  **Codebook $C_2$**:
+-    *   Dimensions: $256 \times 8$ (2D texture) [S1, unofficial].
+-    *   Format: Floating-point per component [S1, unofficial].
+-    *   Layout: Indexed by $s$ (0-255) and $t$ (0-7). The $s$-coordinate comes from the $B$-component of $I$, and the $t$-coordinate comes from the $G$-component of Address Texture $A$ [S1, unofficial]. Stores 8-component codewords representing mid-frequency differences [S1, unofficial].
+-
+-4.  **Address Texture $A$**:
+-    *   Dimensions: $4^3 = 64$ texels (mapped as a 2D texture) [S1, unofficial].
+-    *   Format: RGB [S1, unofficial].
+-    *   Layout:
+-        *   $R$: 64 distinct addresses (indices into $C_1$'s $t$-coordinate) [S1, unofficial].
+-        *   $G$: 8 distinct addresses (indices into $C_2$'s $t$-coordinate) [S1, unofficial].
+-        *   $B$: Unused or padding.
+-    *   Interpolation: Nearest-neighbor [S1, unofficial]. Blocks of $2^3$ adjacent texels are assigned the same address for $C_2$ to yield the 8 necessary values [S1, unofficial].
+-
+-### Algorithm Steps
+-
+-1.  **Partitioning**: Divide the input volume $V$ into disjoint blocks of size $4^3$ voxels [S1, unofficial].
+-2.  **First Downsampling (High-Frequency Band)**: Down-sample each $4^3$ block by a factor of 2 by averaging disjoint sets of $2^3$ voxels each to create a coarser $2^3$ representation [S1, unofficial]. Calculate the difference between each of the 64 original data samples and the respective down-sampled value, storing these in a 64-component vector $D_1$ [S1, unofficial].
+-3.  **Second Downsampling (Mid-Frequency Band)**: Apply the same down-sampling process to the $2^3$ mean values to produce one single value representing the mean of the entire block [S1, unofficial]. Store the $2^3$ difference values (carrying information lost when going from the $2^3$ mean values to the final one) in an 8-component vector $D_2$ [S1, unofficial].
+-4.  **Mean Storage**: Store the single mean value of the entire block in a 1-component vector [S1, unofficial].
+-5.  **Thresholding**: Apply thresholding to vectors $D_1$ and $D_2$: if detail coefficients are small or zero (in homogeneous or empty regions), map the vector to the zero vector to maximize codeword usage for significant non-zero vectors and increase quantization performance [S1, unofficial].
+-6.  **Vector Quantization**: Quantize each frequency band separately using vector quantization, then assemble the original signal from these contributions to enhance fidelity [S1, unofficial]. Quantize $D_1$ using codebook $C_1$ (length 256) and $D_2$ using codebook $C_2$ (length 256), storing the resulting indices as 8-bit values [S1, unofficial]. Quantize the mean directly as an 8-bit value without a codebook lookup [S1, unofficial].
+-7.  **Packaging**: Store the 8-bit mean in the $R$-component of $I$, the $C_1$ index in the $G$-component, and the $C_2$ index in the $B$-component [S1, unofficial].
+-
+-### Pseudocode
++**Pseudocode:**
+ 
+ ```python
+-def triadic_decomposition(volume, codebook_c1, codebook_c2, threshold=0.0):
++def triadic_decomposition(volume, block_size=4):
+     """
+-    Compresses a volume using Triadic Frequency Band Decomposition.
+-    Args:
+-        volume: 3D list/array of shape (Nx, Ny, Nz)
+-        codebook_c1: 2D list/array of shape (256, 64)
+-        codebook_c2: 2D list/array of shape (256, 8)
+-        threshold: Minimum absolute value to keep a difference vector non-zero [G]
+-    Returns:
+-        index_texture: 3D list/array of shape (Nx/4, Ny/4, Nz/4), dtype uint8, RGB
++    Decomposes a 3D volume into triadic frequency bands.
++    volume: 3D numpy array of shape (Nx, Ny, Nz)
++    Returns: mean_texture, idx1_texture, idx2_texture, address_texture
+     """
+-    Nx, Ny, Nz = len(volume), len(volume[0]), len(volume[0][0])
+-    assert Nx % 4 == 0 and Ny % 4 == 0 and Nz % 4 == 0
++    Nx, Ny, Nz = volume.shape
++    # Ensure dimensions are divisible by block_size
++    assert Nx % block_size == 0 and Ny % block_size == 0 and Nz % block_size == 0
++    
++    # Pre-compute address texture for decoding (simplified for encoding context)
++    # In practice, this is generated to map local coordinates to codebook indices
++    address_texture = generate_address_texture(block_size)
++    
++    # Initialize output textures
++    # Size is reduced by block_size factor
++    out_mean = np.zeros((Nx // block_size, Ny // block_size, Nz // block_size), dtype=np.uint8)
++    out_idx1 = np.zeros((Nx // block_size, Ny // block_size, Nz // block_size), dtype=np.uint8)
++    out_idx2 = np.zeros((Nx // block_size, Ny // block_size, Nz // block_size), dtype=np.uint8)
++    
++    # Codebooks (assumed pre-trained or provided)
++    # C1: shape (256, 64), C2: shape (256, 8)
++    # For implementation, we assume a quantization function exists
++    def vector_quantize(vector, codebook):
++        # Find index of codeword in codebook that minimizes distance to vector
++        # Returns index in [0, 255]
++        pass 
+ 
+-    index_texture = [[[0, 0, 0] for _ in range(Nz // 4)] for _ in range(Ny // 4)]
+-
+-    for x in range(0, Nx, 4):
+-        for y in range(0, Ny, 4):
+-            for z in range(0, Nz, 4):
+-                # Extract 4x4x4 block
+-                block = [[[volume[x+dx][y+dy][z+dz] for dz in range(4)] for dy in range(4)] for dx in range(4)]
+-
++    for x in range(0, Nx, block_size):
++        for y in range(0, Ny, block_size):
++            for z in range(0, Nz, block_size):
++                # Extract block
++                block = volume[x:x+block_size, y:y+block_size, z:z+block_size]
++                
+                 # Step 1: High-frequency band (64 components)
+-                # Downsample by averaging disjoint 2x2x2 sets
+-                downsampled_2x2x2 = [[[0.0 for _ in range(2)] for _ in range(2)] for _ in range(2)]
++                # Down-sample by averaging 2x2x2 sets
++                # block shape: (4, 4, 4)
++                # downsampled_2x2x2 shape: (2, 2, 2)
++                downsampled_2 = np.zeros((2, 2, 2))
+                 for i in range(2):
+                     for j in range(2):
+                         for k in range(2):
+-                            region_sum = 0.0
+-                            for di in range(2):
+-                                for dj in range(2):
+-                                    for dk in range(2):
+-                                        region_sum += block[2*i+di][2*j+dj][2*k+dk]
+-                            downsampled_2x2x2[i][j][k] = region_sum / 8.0
+-
+-                # Calculate differences for the 64 voxels
+-                d1 = [0.0] * 64
+-                for dx in range(4):
+-                    for dy in range(4):
+-                        for dz in range(4):
+-                            region_i = dx // 2
+-                            region_j = dy // 2
+-                            region_k = dz // 2
+-                            diff = block[dx][dy][dz] - downsampled_2x2x2[region_i][region_j][region_k]
+-                            idx = dx * 16 + dy * 4 + dz
+-                            d1[idx] = diff
+-
++                            # Average the 2x2x2 cube corresponding to this voxel
++                            downsampled_2[i, j, k] = np.mean(
++                                block[2*i:2*i+2, 2*j:2*j+2, 2*k:2*k+2]
++                            )
++                
++                # Calculate high-frequency differences
++                # Expand downsampled_2 to 4x4x4 for subtraction
++                expanded_2 = np.repeat(np.repeat(np.repeat(downsampled_2, 2, axis=0), 2, axis=1), 2, axis=2)
++                high_freq_vec = (block - expanded_2).flatten() # 64 components
++                
++                # Thresholding for high freq
++                # Map small/zero vectors to zero vector
++                if np.max(np.abs(high_freq_vec)) < threshold_high:
++                    high_freq_vec = np.zeros_like(high_freq_vec)
++                
++                # Quantize high freq
++                idx1 = vector_quantize(high_freq_vec, C1)
++                
+                 # Step 2: Mid-frequency band (8 components)
+-                # Downsample 2x2x2 to 1x1x1 (global mean)
+-                global_mean = 0.0
+-                for i in range(2):
+-                    for j in range(2):
+-                        for k in range(2):
+-                            global_mean += downsampled_2x2x2[i][j][k]
+-                global_mean /= 8.0
+-
+-                # Calculate differences for the 8 downsampled values
+-                d2 = [0.0] * 8
+-                for i in range(2):
+-                    for j in range(2):
+-                        for k in range(2):
+-                            idx = i * 4 + j * 2 + k
+-                            d2[idx] = downsampled_2x2x2[i][j][k] - global_mean
+-
+-                # Step 3: Mean
+-                mean_val = global_mean
+-
+-                # Step 4: Thresholding
+-                if max(abs(v) for v in d1) < threshold:
+-                    d1 = [0.0] * 64
+-                if max(abs(v) for v in d2) < threshold:
+-                    d2 = [0.0] * 8
+-
+-                # Step 5: Vector Quantization
+-                idx1 = find_best_codebook_entry(d1, codebook_c1)
+-                idx2 = find_best_codebook_entry(d2, codebook_c2)
+-
+-                # Step 6: Quantize mean to 8-bit [S1, unofficial]
+-                # Assuming input volume is normalized to [0, 255] range for 8-bit storage [G]
+-                mean_8bit = int(round(mean_val))
+-                mean_8bit = max(0, min(255, mean_8bit))
+-
+-                # Step 7: Store in Index Texture
+-                index_texture[x//4][y//4][z//4] = [mean_8bit, idx1, idx2]
+-
+-    return index_texture
+-
+-def find_best_codebook_entry(vector, codebook):
+-    """Finds the index of the codeword minimizing Euclidean distance."""
+-    best_idx = 0
+-    min_dist = float('inf')
+-    for i in range(len(codebook)):
+-        dist = sum((vector[k] - codebook[i][k])**2 for k in range(len(vector)))
+-        if dist < min_dist:
+-            min_dist = dist
+-            best_idx = i
+-    return best_idx
++                # Down-sample downsampled_2 (2x2x2) to single mean
++                mean_val = np.mean(downsampled_2)
++                
++                # Calculate mid-frequency differences
++                # Expand mean_val to 2x2x2
++                expanded_mean_2 = np.full((2, 2, 2), mean_val)
++                mid_freq_vec = (downsampled_2 - expanded_mean_2).flatten() # 8 components
++                
++                # Thresholding for mid freq
++                if np.max(np.abs(mid_freq_vec)) < threshold_mid:
++                    mid_freq_vec = np.zeros_like(mid_freq_vec)
++                
++                # Quantize mid freq
++                idx2 = vector_quantize(mid_freq_vec, C2)
++                
++                # Store results
++                # Mean is stored directly as 8-bit value
++                out_mean[x//block_size, y//block_size, z//block_size] = np.clip(mean_val, 0, 255).astype(np.uint8)
++                out_idx1[x//block_size, y//block_size, z//block_size] = idx1
++                out_idx2[x//block_size, y//block_size, z//block_size] = idx2
++                
++    return out_mean, out_idx1, out_idx2, address_texture
+ ```
+ 
+-### Parameters
+-*   **Block Size**: $4^3$ voxels [S1, unofficial].
+-*   **Down-sampling Factor**: 2 [S1, unofficial].
+-*   **Codebook Length**: 256 entries for both $C_1$ and $C_2$ [S1, unofficial].
+-*   **Index Size**: 8-bit per index [S1, unofficial].
+-*   **Mean Size**: 8-bit [S1, unofficial].
+-*   **Threshold**: Not given in the sources. [G] A small epsilon or a fraction of the data range is typically used.
++**Parameters:**
++*   **Block Size:** $4^3$ voxels [S1, unofficial].
++*   **Down-sampling Factor:** 2, using disjoint sets of $2^3$ voxels for averaging [S1, unofficial].
++*   **Codebook Length:** 256 entries for both $C_1$ and $C_2$, allowing indices to be stored as one 8-bit value [S1, unofficial].
++*   **Thresholds:** Not given in the sources. [G] Typical values depend on the noise floor and desired compression ratio; often set to a small epsilon or derived from the standard deviation of the training data.
+ 
+-### Edge Cases and Pitfalls
+-*   **Homogeneous Regions**: Thresholding maps these to zero vectors [S1, unofficial]. This maximizes the usage of codewords for significant non-zero vectors and increases quantization performance [S1, unofficial].
+-*   **Boundary Conditions**: The source assumes volume dimensions are divisible by 4 for uniform block partitioning [S1, unofficial]. Handling non-divisible dimensions is not specified in the sources [G]. Standard practice is to pad the volume to the nearest multiple of 4.
+-*   **Precision**: The mean is stored as an 8-bit value, which may introduce quantization error for the DC component. The AC components are reconstructed from codebooks, which also have quantization error. [G]
++**Edge Cases and Pitfalls:**
++*   **Boundary Conditions:** The method assumes the volume dimensions are divisible by the block size ($4^3$). Padding or cropping may be required for arbitrary sizes [S1, unofficial].
++*   **Precision:** Mean values are stored as 8-bit values. If the original data has higher precision, quantization error is introduced at the mean level [S1, unofficial].
++*   **Degenerate Input:** Homogeneous or empty regions result in zero difference vectors, which map to a specific "zero" codeword. This is handled by the thresholding step [S1, unofficial].
+ 
+ ## Subtopics
+ 
+-### Compression Domain Rendering
+-This method is designed to be rendered directly from the compressed domain using GPU fragment shaders, avoiding full decompression [S1, unofficial]. It builds on [Value compression](6-value-compression.md) [G].
++### Spectral decomposition and error band partitioning
++Spectral decomposition and error band partitioning is a variant that computes centered Fourier spectra and partitions frequency coordinates into low, mid, and high bands to measure spectral magnitude reconstruction errors [S2, unofficial]. It differs from the spatial block-based triadic decomposition by operating in the frequency domain using 2D Discrete Fourier Transforms (DFT) [S2, unofficial]. It is chosen when spectral analysis is required for error measurement rather than spatial compression [S2, unofficial].
+ 
+-### Vector Quantization
+-The core quantization technique used for the difference bands. See [Vector Quantization](907-vector-quantization.md).
++**Definition:** Computes centered Fourier spectra and partitions frequency coordinates into low, mid, and high bands to measure spectral magnitude reconstruction errors [S2, unofficial].
++
++**Steps:**
++1.  Compute the 2D discrete Fourier transform $\mathcal{F}(I)$ of the grayscale image $I$ [S2, unofficial].
++2.  Apply `fftshift` to center the zero-frequency component, yielding the centered complex spectrum $\hat{I}$ [S2, unofficial].
++3.  Extract the magnitude spectrum $A_I$ from $\hat{I}$ [S2, unofficial].
++4.  For each frequency coordinate $(\xi, \eta)$, compute the Euclidean radial distance $D(\xi, \eta)$ from the centered zero-frequency location [S2, unofficial].
++5.  Partition coordinates into three bands: low if $D \leq 30$, mid if $30 < D \leq 80$, high if $D > 80$ [S2, unofficial].
++
++**Formulas:**
++$$ \hat{I} = \text{fftshift}(\mathcal{F}(I)), \quad A_I = |\hat{I}| $$
++$$ \Omega_{\text{low}} = \{(\xi, \eta) : D(\xi, \eta) \leq 30\}, \quad \Omega_{\text{mid}} = \{(\xi, \eta) : 30 < D(\xi, \eta) \leq 80\}, \quad \Omega_{\text{high}} = \{(\xi, \eta) : D(\xi, \eta) > 80\} $$
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Encoding processes each voxel once in block-wise fashion [S1, unofficial], yielding $O(N)$ time complexity [G]. Decoding performs $O(1)$ texture lookups and additions per voxel during rendering [S1, unofficial].
+-*   **Memory Complexity**: The index texture occupies $3 \times (N_x/4)(N_y/4)(N_z/4)$ bytes [S1, unofficial]. Codebooks $C_1$ and $C_2$ occupy $256 \times 64$ and $256 \times 8$ elements respectively [S1, unofficial]. This yields a compressed size significantly smaller than the original $N_x N_y N_z$ voxels [G].
+-*   **Measured Performance**: The method was tested on an ATI 9700 GPU [S1, unofficial]. The use of dependent texture fetches allows for efficient on-chip decoding [S1, unofficial].
+-*   **Strengths**: High compression ratio, efficient GPU rendering, enhanced fidelity through separate quantization of bands [S1, unofficial].
+-*   **Limitations**: Fixed block size, requires specific GPU features (dependent texture fetches), codebook training is required [S1, unofficial].
++*   **Time Complexity:** Encoding involves block-wise operations (averaging, subtraction, thresholding, vector quantization). The complexity is linear with respect to the number of voxels, $O(N_x N_y N_z)$, assuming constant-time codebook lookup [S1, unofficial].
++*   **Memory Complexity:** The compressed representation size is $3 \times (N_x/4)(N_y/4)(N_z/4)$ bytes for the index texture, plus the size of the codebooks ($256 \times 64 \times \text{bytes} + 256 \times 8 \times \text{bytes}$) and address texture [S1, unofficial]. This results in a significant compression ratio compared to the original $N_x N_y N_z$ voxels.
++*   **Measured Performance:** Not given in the sources. [S1, unofficial]
++*   **Scaling:** The method scales well with volume size as it is block-based. The GPU rendering aspect allows for efficient parallel reconstruction [S1, unofficial].
++*   **Strengths:** High compression ratios due to vector quantization and thresholding; efficient hardware decoding via texture lookups; enhanced fidelity by assembling signal from multiple bands [S1, unofficial].
++*   **Limitations:** Lossy compression; requires pre-computed codebooks; block artifacts may be visible if thresholding is too aggressive; limited to scalar fields [S1, unofficial].
++*   **When to use:** Suitable for compression domain volume rendering where memory bandwidth is a bottleneck and high compression ratios are needed [S1, unofficial].
++*   **When not to use:** When lossless compression is required or when the data does not exhibit the spatial correlation assumed by the block-based decomposition [S1, unofficial].
+ 
+ ## Background
+-The method was introduced in the paper "Compression Domain Volume Rendering" [S1, unofficial]. It was developed to enable real-time volume rendering of large datasets by compressing the data in a way that is compatible with GPU hardware, specifically leveraging the ATI 9700's capabilities for per-fragment arithmetic and dependent texture fetches [S1, unofficial].
++Triadic frequency band decomposition, also known as hierarchical quantization, was introduced in the context of compression domain volume rendering [S1, unofficial]. It exploits the capabilities of modern GPUs (specifically ATI 9700 at the time of publication) to perform arithmetic operations and dependent texture fetches on a per-fragment basis [S1, unofficial]. The method was developed to enable efficient rendering of large volumetric datasets by reducing memory footprint and bandwidth requirements [S1, unofficial].
+ 
+ ## Sources
+-[S1] Compression Domain Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Compression_Domain_Volume_Rendering/vis03-vq.pdf, fetched 2026-10-26 (unofficial)+[S1] Compression Domain Volume Rendering, https://www.cs.cit.tum.de/fileadmin/w00cfj/cg/Research/Publications/2003/Compression_Domain_Volume_Rendering/vis03-vq.pdf, fetched 2026-10-26 (unofficial)
++[S2] EffGS: Efficient and High-Fidelity Gaussian Splatting, https://arxiv.org/abs/2609.39553, fetched 2026-10-29 (unofficial)

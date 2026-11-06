@@ -1,0 +1,410 @@
+Interactive WebGPU 3D explorer for SDSS, GLADE, and 2MRS galaxy catalogs. - feat(volumes): raymarch acceleration — GPU pyramids, TF-adaptive skipping, cone LOD by rulkens · Pull Request #556 · rulkens/skymap
+
+feat(volumes): raymarch acceleration — GPU pyramids, TF-adaptive skipping, cone LOD by rulkens · Pull Request #556 · rulkens/skymap · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+rulkens
+commented
+Aug 12, 2026
+Copy link
+Copy Markdown
+Owner
+Implements docs/superpowers/specs/2026-08-12-volume-raymarch-acceleration-design.md via docs/superpowers/plans/2026-08-13-volume-raymarch-acceleration.md (8 tasks, subagent-driven).
+Why: 95.2% of the scalar-volume raymarch's samples are provably zero under the shipped transfer function; the pass is cheap today only because it runs at 1/3 resolution with a hard 128-step cap.
+What:
+generateMipChain3d — new gpu/lib primitive filling 3D-texture mip chains via depthSlice render passes (box variant for display mips, deviation-space max variant for skipping)
+Per-field max pyramid (dims/8) stored in deviation space — skip cutoff derived in-shader from live contrast/trim uniforms, so slider changes retune skipping with nothing to rebuild, correct for sequential (MCPM) and divergent (CF-4) palettes
+Cone-footprint LOD + step sizing from the LOD'd voxel size — sample density tracks screen content, not camera distance; attacks the stationary-shimmer/aliasing at its cause
+volume-inside perf scenario as the measurement gate; volume target raised 1/3 → 1/2 res only if the harness numbers allow
+Wire compression (spec Stage 0) is separate: #554.
+🤖 Generated with Claude Code
+rulkens
+added 3 commits
+August 12, 2026 22:38
+docs(spec): volume raymarch acceleration — GPU pyramids, TF-adaptive …
+…
+4dc70c0
+```
+…skipping, cone LOD
+```
+docs(plan): volume raymarch acceleration — tasks for pyramids, skippi…
+…
+ffefa64
+```
+…ng, LOD
+```
+docs(plan): store the max pyramid in deviation space — divergent pale…
+…
+1d5662b
+```
+…ttes skip safely
+```
+cloudflare-workers-and-pages
+Bot
+commented
+Aug 12, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Deploying with Cloudflare Workers
+The latest updates on your project. Learn more about integrating Git with Workers.
+Status
+Name
+Latest Commit
+Preview URL
+Updated (UTC)
+✅ Deployment successful!
+View logs
+skymap
+7acc2ce
+Commit Preview URL
+Branch Preview URL
+Aug 19 2026, 01:50 AM
+rulkens
+and others
+added 14 commits
+August 13, 2026 01:48
+perf(volumes): add volume-inside scenario, prep for raymarch accelera…
+…
+679de1b
+```
+…tion
+
+Task 1 of the volume-raymarch-acceleration plan — a camera pose embedded
+in the MCPM cosmic-web cube, gating Stages 1-3's before/after harness runs.
+```
+feat(volumes): add generateMipChain3d, wire box mip chain into upload…
+…
+5965657
+```
+…Cube
+
+mipLevelCount3d + generateMipChain3d fill a 3D texture's mip chain via
+per-(level, z-slice) render passes (GPURenderPassColorAttachment.depthSlice),
+mirroring the 2D generateMipChain. Exports downsampleLevel3d so Task 3's
+cross-texture max pyramid can reuse the same per-slice mechanism.
+
+uploadCube now sizes the volume texture's mip chain and fills it with the
+'box' filter after upload; the raymarch still samples level 0 only, so this
+is a no-visible-change groundwork step (confirmed via before/after
+screenshot diff at the volume-inside perf pose).
+```
+fix(volumes): cover the trailing odd-dimension slice in fs_max's mip …
+…
+17c3b28
+```
+…reduction
+
+fs_max's fixed 2-wide per-axis footprint (srcZLow/srcZHigh for z, the same
+clamp inline for x/y) silently dropped the last parent slice/row/column
+whenever a parent dimension was odd -- floor-sizing makes the destination
+edge unreachable by the old min(2d+1, dim-1) clamp. On MCPM's real dims
+(178x300x182) this dropped z=90 and x=88 on level1->level2. fs_box was
+unaffected and is untouched.
+
+Replace the fixed footprint with a tapRange(d, parentDim) helper that widens
+to 3-wide (2d, 2d+1, parentDim-1) at the last destination index on an odd
+axis, applied uniformly to x/y/z via three nested dynamic loops. Parent dims
+now come from textureDimensions(srcTex) for all three axes (fs_max already
+relied on this for x/y), which drops the need for srcZLow/srcZHigh --
+MipBlit3dUniforms shrinks to boxZ/dstZ/center/halfRange (16 bytes, still
+unpadded).//
+```
+feat(volumes): build the per-field max-value pyramid in deviation space
+…
+6e93d14
+```
+Task 3 of the volume-raymarch-acceleration plan. Adds `maxPyramidTexture`
+to FieldEntry and binding 5 to the shared @group(0) bind-group layout
+(textureLoad-only, no sampler). `upload()` reduces the raw cube (not the
+display chain's box-filtered mips, which could hide a thin bright
+filament) through three chained 2x max-reductions via two upload-time
+scratch textures, then fills the pyramid's own chain via
+generateMipChain3d. Only the first reduction converts raw values to
+normalised deviation (abs(value - contrastCenter) / halfRange); the rest
+compose via plain max since deviation is non-negative by construction.
+
+No shader declares binding 5 yet (Task 5) — the explicit (non-'auto')
+pipeline layout allows a bind group to carry unused entries.
+```
+feat(volumes): bump per-field uniform 256 -> 272, add voxelSizeLocal …
+…
+7ecdd69
+```
+…+ pixelConeTan
+
+Plumbs Task 5's skip-march and Task 6's cone-LOD inputs ahead of use:
+voxelSizeLocal (per-cube static, 1/max(dims), from FieldEntry) and
+pixelConeTan (per-frame, per-pixel cone half-angle tangent at the
+downscaled volume target, mirroring the drawPxPerRad idiom). No shader
+logic change yet — both fields are unread in fragment.wesl.
+```
+fix(volumes): review round 1 — zero the new uniform pads, un-mirror t…
+…
+7a0521f
+```
+…he pixelConeTan test
+
+Explicitly zero scratch[66]/scratch[67] (the new _pad2/_pad3) since the
+scratch array is reused across the draw() field loop, matching the
+existing scratch[18]/scratch[19] convention. Replace the pixelConeTan
+test's formula-mirroring assertion with a hand-computed literal against
+a hand-friendly fixture. Fix a wrong "small-angle approximation" claim
+in the pixelConeTan derivation comment — the formula is exact.
+```
+feat(volumes): TF-adaptive empty-space skip in the scalar-volume marc…
+…
+34d6127
+```
+…h loop
+
+Declares binding 5 (Task 3's max pyramid) in fragment.wesl and consults it
+coarse-to-fine (pyramid level 1, then level 0) before paying for a full-res
+sample: a cell whose stored max deviation is below the same
+contrast/trim-derived cutoff applyContrastWindow uses (deadband - 0.05)
+provably contributes zero opacity, so skipping it changes nothing about the
+accumulated integral. Skips land back on the fixed step grid
+(tMin + jitter + k*stepLength) so every surviving sample stays
+bit-identical to the un-accelerated march.
+
+Visual gate (before/after, default settings, .superpowers/.../task-5-visual/):
+meanAbsDiff 0.882/255 (volume-inside), 0.269/255 (local-group), 0.675/255
+isolated (galaxies hidden) - all well under the 2/255 gate, no holes or
+missing filaments. Slider sweep confirms live retuning (no rebuild).
+
+Perf (paired same-session, 30f dpr2, volume-inside pose): volume.COSMO
+MERGED 1.5ms -> 2.2ms (+47%), scalar-volume per-layer 1.7ms -> 2.8ms
+(+65%) - a reproduced NET REGRESSION at this pose. Root cause: volume-inside
+sits deep in dense cosmic-web structure (per perfScenarios.ts), where the
+coarse+fine pyramid check rarely proves a cell empty and just adds two
+textureLoad+slab-test pairs per step with no skip payoff. local-group shows
+no reliable signal (floor-dominated, per Task 1's ledger note). Flagged for
+review - not fixed here since correctness was this task's stated priority
+and any mitigation (cheaper check, coarser starting level, per-ray gating)
+is a design decision beyond the brief's "two levels for a first pass" scope.
+
+Full report: .superpowers/sdd/2026-08-13-volume-raymarch-acceleration/task-5-report.md
+```
+feat(volumes): cone-footprint LOD + honest step sizing in the scalar-…
+…
+0218c61
+```
+…volume march
+
+Replaces stepLength = (tMax-tMin)/STEP_COUNT (sample density ∝ camera
+distance, the aliasing/shimmer source) with sample density ∝ what's
+actually on screen: coneLod(t) picks the mip whose texel size matches
+one pixel's footprint at march distance t, textureSampleLevel samples
+at that LOD, and stepLength tracks the LOD'd texel size (voxelSizeLocal
+* 2^lod * STEP_QUALITY). STEP_COUNT (128->256) is now an iteration
+safety cap only. The pyramid skip check is throttled to every 4th
+iteration (SKIP_CHECK_STRIDE) since near-camera LOD-0 steps are
+voxel-sized and re-testing membership every step is redundant; the
+skip jump now lands directly on the cell's exit point since there's no
+fixed step-grid left to stay phase-aligned to.
+
+Visual: volume-inside and local-group match Task 5's look (no LOD
+popping, near-camera detail unchanged); captures in task-6-visual/.
+
+Perf (paired A/B against Task 5's 34d6127, 3 rounds, volume-inside):
+  volume·COSMO MERGED:      1.1ms (T1) -> 2.2ms (T5) -> 1.4ms (T6)
+  scalar-volume per-layer:  1.4ms (T1) -> 2.8ms (T5)  -> 2.2ms (T6)
+  TOTAL merged:             8.6ms (T1) -> 9.8ms (T5)  -> 8.8ms (T6)
+Recovers most of Task 5's skip-adversarial regression at this pose;
+full-survey unaffected either way (floor-dominated). Single-run
+absolute perf numbers were unreliable this session (up to 5x swings on
+an unchanged baseline) -- see task-6-report.md for the paired-A/B
+methodology and full numbers.
+
+STEP_QUALITY=2.0 and SKIP_CHECK_STRIDE=4 kept as tuned by the prior
+session; spot-checked STEP_QUALITY=1.0 against 2.0 (+68% cost, no
+visible quality gain at these poses).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+fix(volumes): fix round 1 — trilinear mips, guaranteed ray coverage, …
+…
+ffad994
+```
+…skip re-jitter
+
+Addresses task-6-review's three Important findings against the cone-LOD
+scalar-volume march (0218c61):
+
+1. volumeSampler omitted mipmapFilter (WebGPU default 'nearest'), so the
+   fractional cone-LOD snapped between mips instead of blending -- hard
+   detail-shell edges that slide with the camera. Set mipmapFilter: 'linear'.
+
+2. STEP_COUNT=256 could truncate a ray mid-cube at tier large: honest
+   LOD-driven steps near the camera are voxel-sized, and 256 of them fall
+   short of a large-tier cube's diagonal, silently dropping the far half of
+   the cosmic web. Added a per-iteration step floor,
+   stepLength = max(lodStep, (tMax - t) / (STEP_COUNT - i)) -- a no-op
+   whenever the LOD step already fits the remaining budget, growing only as
+   the cap approaches, guaranteeing every ray reaches tMax.
+
+3. The skip-jump's direct t = skipExitT + eps re-synchronised every ray that
+   skipped the same pyramid cell onto that cell's exit plane, undoing the
+   entry jitter's decorrelation -- stationary banding at MCPM's
+   densityScale=18. Re-jitters on resume with the ray's own hash, salted by
+   iteration count so consecutive skips on one ray don't repeat an offset.
+
+Visual: volume-inside and local-group (tier medium) match the prior build;
+no new popping or banding. New tier-large volume-inside capture shows no
+obvious "missing far half" wall (consistent with the review's own
+prediction that the truncation reads as dimming, not a hard edge).
+
+Perf: paired A/B vs Task 5 base (34d6127), --tier large --scenario
+volume-inside, 8 rounds. Base is stable at 2.16-2.23 ms volume-COSMO
+every round. The fix ranges 1.38-3.77 ms (median 2.13, mean 2.24) --
+bimodal/trimodal rather than noisy-continuous, consistent with the
+step-floor's early-completion break interacting with the entry-jitter
+phase. Net: recovers the pre-fix build's clean +27% regression (2.2 -> 2.8
+ms, stable) into a wider-variance cost that averages back to parity with
+baseline -- sometimes better (3/8 rounds ~1.4 ms), sometimes matching the
+old regression (4/8 rounds ~2.8-3.8 ms). Not a clean win at this pose/tier,
+but the ray now provably reaches tMax at every tier instead of silently
+truncating.
+
+Covering tests: scalarVolumeLayer + volumeFieldRenderer suites (17/17),
+npm run typecheck green, full npm test green (1023 files / 6903 tests).
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+Merge origin/main into worktree-volume-raymarch-acceleration
+…
+88e34fb
+```
+Resolved conflicts in src/services/engine/frame/passes/scalarVolumeLayer.ts
+and tests/services/engine/frame/passes/scalarVolumeLayer.test.ts: kept
+main's sizeOf('volume')-based viewport derivation and re-grafted this
+branch's pixelConeTan computation (formula and draw-call argument
+unchanged) on top of it; dropped the branch's redundant min-1px clamp
+test since that clamp now lives in renderTargets.ts and is covered by
+renderTargets.test.ts.
+```
+perf(volume): add void-inside scenario — skip-favorable MCPM pose
+…
+a3834fb
+```
+Same cube as volume-inside but targeting a near-corner region confirmed
+(by direct .scfd sampling) to read near-zero density along most view
+rays, giving the raymarch acceleration a genuinely sparse pose to
+measure against.
+```
+perf(volume): measure scale 2, revert — volume-inside regresses over …
+…
+e8f2607
+```
+…budget
+
+Task 7 of the volume-raymarch-acceleration plan: flip the 'volume'
+render-target row from scale 3 to scale 2 (2.25x the fragment count) and
+apply the decision rule — keep iff TOTAL merged regression stays under
+1 ms at every one of volume-inside/local-group/full-survey vs the
+post-Task-6 scale-3 numbers.
+
+Paired measurement (alternating scale 3/2 in place, same session, dev
+server localhost:5175, shipped defaults: tier medium, MCPM on):
+
+- volume-inside: scale 3 median 10.011 ms, scale 2 median 11.354 ms
+  (stable rounds 3-8 of 8; consistent +regression every round) —
+  TOTAL delta +1.343 ms, OVER the 1 ms budget.
+- local-group: 22.512 ms -> 22.381 ms, delta -0.131 ms (volume culled
+  at this pose — no volume·COSMO slot in the merged output).
+- full-survey: 23.298 ms -> 21.823 ms, delta -1.475 ms (volume also
+  culled).
+
+One pose regresses >= 1 ms, so per the rule this is a revert, not a
+keep. The file is back at scale: 3 (identical to post-Task-6 HEAD); the
+only lasting diff is a landmine comment recording the measurement so a
+future pass doesn't retry scale 2 without remeasuring. Full per-round
+table, decision arithmetic, and a large-tier addendum in
+.superpowers/sdd/2026-08-13-volume-raymarch-acceleration/task-7-report.md
+(workspace-local, gitignored).
+
+Verification: npm run typecheck green; renderTargets.test.ts 14/14;
+npm test 1046 files / 7025 tests passed.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+docs(renderer): add scalar-volume renderer to the quick map
+…
+074269d
+```
+Task 8 of the volume-raymarch-acceleration plan: the pyramid/skip/LOD
+shape landed over tasks 2-6 with no entry in RENDERER.md's renderer
+map. Documents the two GPU-built mip pyramids per field (display box
+chain + deviation-space max pyramid), the cone-footprint LOD tying
+sample density to on-screen footprint via pixelConeTan, and the
+STEP_COUNT-is-a-cap-not-a-divisor landmine, pointing at the spec/plan
+for the full design rather than restating it.
+```
+docs(renderer): fix CF-4 field name and max-pyramid build path in the…
+…
+7acc2ce
+```
+… scalar-volume bullet
+
+Review round 1: "CF-4 flow" misnamed the field the raymarch renders —
+that's CF4_DENSITY_ENTRY (type 'volume'), not the unrelated FLOW_ENTRY
+particle-advection source. Also tightened the max-pyramid construction
+claim: its dims/8 base comes from three direct downsampleLevel3d
+cross-texture reductions in buildMaxPyramid, not generateMipChain3d's
+own loop, which only fills the levels above that base.
+```
+rulkens
+commented
+Aug 19, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Parked — measured conclusion (2026-08-19)
+All 8 plan tasks executed and review-clean (branch tip 7acc2ce2d, suite 1046 files / 7025 tests green), but the measured win does not justify the maintenance surface — this closes as knowledge, not code.
+Numbers (volume·COSMO median, paired A/B — single runs swing up to 5× on the bench machine, only paired runs are trustworthy):
+configuration
+pre-plan / pre-accel
+this branch
+shipped defaults (medium tier, MCPM, volume-inside)
+1.1 ms
+~1.4 ms
+large tier · 2 fields · void-inside (sparse)
+2.23 ms
+1.25 ms (−44%)
+large tier · 2 fields · void-inside · full-res volume target
+27.85 ms
+18.22 ms (−35%)
+large tier · 2 fields · volume-inside (dense)
+2.16 ms
+2.97 ms (+38%)
+large tier · 2 fields · volume-inside · full-res
+17.01 ms
+24.58 ms (+44%)
+The stack's value is pose-dependent: real wins only where emptiness dominates (clamped fields, voids); a consistent tax inside dense structure; no difference at the far view (floor-pinned). Task 7's scale 3→2 resolution raise was rejected by its own decision rule (+1.34 ms > 1 ms budget at volume-inside).
+Why parked: extra code is extra maintenance surface. The machinery (two GPU pyramids, TF-adaptive skip, cone-LOD + step floor, 2 uniforms, 4 tuning constants, a landmine section in RENDERER.md) is not paid for by a neutral-to-negative result at shipped defaults. The likely future is a representation pivot for the filament fields (point splatting / sparse-brick proxy march / skeleton LOD) that supersedes this machinery entirely.
+Reusable yield if revisited (all on this branch): deviation-space max pyramid + 3D mip primitives (generateMipChain3d), the fixed traps any future raymarch will hit (large-tier ray truncation by step caps, nearest-mip LOD snapping, post-skip jitter correlation), void-inside + volume-inside perf poses in tools/perf/perfScenarios.ts, and the clamp insight: zeroing sub-deadband voxels (tools --clamp, #580) frees bricks held unskippable by the skip cutoff's safety margin, visually losslessly.
+Branch left unmerged at 7acc2ce2d. Full execution ledger + per-task reports in the worktree's SDD workspace.
+🤖 Generated with Claude Code
+rulkens
+closed this
+Aug 19, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,57 @@
+# Sparse Volume Texture Setup
+
+Also called: Heterogeneous Volume (Modified Unreal Engine), SVT approach, Sparse Volume Texture approach
+
+## Overview
+Sparse Volume Texture (SVT) setup is a method for rendering large volumetric datasets in Unreal Engine 5 by storing data in sparse tiles within a single large volume texture, circumventing the DirectX 12 API limit of 2048 voxels per dimension [S1, unofficial]. It solves the problem of contiguous memory fragmentation limiting single texture allocation to ~1 gigavoxel in earlier approaches, allowing the display of massive datasets (up to ~6 gigavoxels) at reasonable frame rates by accepting chunked rendering [S1, unofficial]. Unlike a single contiguous texture which avoids lighting discontinuities but exceeds allocation limits, SVT enables the display of entire massive datasets by treating a collection of sparse tiles as a single logical volume [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A volumetric dataset (e.g., Kolumbo dataset, 5.9 gigavoxels, 8-bit/voxel) and scene configuration.
+*   **Output:** A rendered image with lighting and shadows, utilizing a precomputed lighting cache.
+
+**Data Structures:**
+1.  **Sparse Tile:** A $16^3$ voxel block of data. To allow correct trilinear interpolation at tile borders, each tile is padded to $18^3$ voxels ($16+1+1$) within the texture [S1, unofficial].
+2.  **Volume Texture:** A single texture resource with maximum dimensions $2048^3$ voxels. It holds all sparse tiles and their mipmap hierarchy [S1, unofficial].
+3.  **Lighting Cache:** A precomputed cache for lighting information. The type and number of lights do not impact rendering performance, but the cache consumes resources [S1, unofficial].
+
+**Parameters:**
+*   **DownsampleFactor:** Controls the resolution of the lighting cache. Typical value: 4. Set via console command `r.HeterogeneousVolumes.LightingCache.DownsampleFactor = 4` or in `DefaultEngine.ini` [S1, unofficial].
+*   **MaxStepCount:** Maximum number of steps per ray during volume rendering. Typical value: 1024. Set via console command `r.HeterogeneousVolumes.MaxStepCount = 1024` or in `DefaultEngine.ini` [S1, unofficial].
+
+**Steps:**
+1.  **Tile Creation:** Divide the volumetric dataset into $16^3$ voxel sparse tiles.
+2.  **Padding:** Pad each tile to $18^3$ voxels to handle boundary interpolation [S1, unofficial].
+3.  **Texture Allocation:** Allocate a single volume texture resource with dimensions up to $2048^3$ voxels [S1, unofficial].
+4.  **Data Placement:** Place the padded sparse tiles into the volume texture. The usable payload is calculated as:
+    $$ \text{Payload} = \frac{2048^3 \times 16^3}{(1 + 16 + 1)^3} \approx 5.6 \text{ gigavoxels} $$
+    Including the mipmap hierarchy, the net voxel count is reduced by a factor of $\sum_{n=0}^{\infty} (1/2^n)^3 \approx 1.143$, resulting in a net voxel count of approximately 4.9 G:
+    $$ \text{Net Voxel Count} \approx \frac{2048^3 \times 16^3}{(1 + 16 + 1)^3 \times 1.143} \approx 4.9 \text{ G} $$
+    [S1, unofficial]
+5.  **Lighting Cache Precomputation:** Precompute lighting into the cache. The resolution is controlled by `DownsampleFactor` [S1, unofficial].
+6.  **Runtime Exploration:** Use Material Parameter Collections (MPC) and Dynamic Material Instances (DMI) to change material parameters (density, emission, color maps) at runtime. Note: Graphical curve editing for transfer functions is only available in-editor, not at runtime [S1, unofficial].
+
+**Pitfalls and Edge Cases:**
+*   **Signed int32 Overflow:** The engine crashed for datasets approaching 2 gigavoxels due to signed int32 usage causing overflow at 2 gigabyte data size. Fixes were applied to source code to extend importing capabilities to the theoretical limit [S1, unofficial].
+*   **Shadow Flickering:** Enabling the 'cast shadow' property causes flickering artifacts. Mitigation: Increase Shadow Bias Factor (reduces but does not eliminate) or disable the feature entirely [S1, unofficial].
+*   **CPU-Side Overflow:** For 32-bit floating point precision datasets, the CPU-side representation size (including padding and MIPs) can exceed 4 GB, caught by the message "SVT streaming data overflowed the uint32 range!" [S1, unofficial].
+
+## Subtopics
+
+### [Heterogeneous Volumes (HV) / Sparse Volume Textures (SVT) approach](7474-heterogeneous-volumes-hv-sparse-volume-textures-svt-approach.md)
+The Heterogeneous Volumes (HV) approach renders large volumetric datasets by chunking them into multiple Sparse Volume Textures (SVT), each fitting within engine and API limits, and treating the collection as a single logical volume. It solves the problem of DirectX 11's contiguous memory fragmentation limiting single texture allocation to ~1 gigavoxel, while leveraging DirectX 12's reserved resources to support larger theoretical allocations. Unlike a single contiguous texture which avoids lighting discontinuities but exceeds allocation limits, HV enables the display of entire massive datasets at reasonable frame rates by accepting chunked rendering.
+
+## Operating characteristics
+*   **Performance:** Renders a sparse dataset of 5.9 gigavoxels (8 bit/voxel) at ~10 fps on RTX 5000 and ~20 fps on RTX 3500 Ada Generation Laptop GPU [S1, unofficial].
+*   **Memory Usage:** For the Kolumbo dataset, the engine allocates a volume texture with ~1872^3 voxels for tile data, reporting 6.7x10^9 bytes of reserved memory [S1, unofficial].
+*   **Scaling:** The SVT representation is not necessarily smaller than a hypothetical dense texture for fully dense datasets like Kolumbo. The advantage is circumventing the API limit of 2048 voxels per dimension rather than performance gain or less memory consumption [S1, unofficial].
+*   **Strengths:** Circumvents DirectX 12 API limit of 2048 voxels per dimension; supports large datasets (up to ~6 gigavoxels); lighting precomputation ensures type and number of lights have no impact on rendering performance [S1, unofficial].
+*   **Limitations:** No performance gain over dense textures for fully dense data; shadow casting causes flickering artifacts; graphical curve editing for transfer functions is not available at runtime; potential for int32 overflow crashes if source code is not patched [S1, unofficial].
+*   **When to use:** When rendering large volumetric datasets (e.g., Kolumbo, Manganese nodule scan) in Unreal Engine 5 where the dataset size exceeds the contiguous memory limits of previous approaches [S1, unofficial].
+*   **When not to use:** When graphical curve editing for transfer functions is required at runtime; when shadow casting is critical and flickering cannot be mitigated [S1, unofficial].
+
+## Background
+The Sparse Volume Texture (SVT) approach is a volume rendering method in Unreal Engine 5 that uses Sparse Volume Textures to render large datasets (up to ~6 gigavoxels) by storing data in sparse tiles within a large volume texture, allowing circumvention of the DirectX 12 API limit of 2048 voxels per dimension [S1, unofficial]. It was developed and used in the ARENA2 project for rendering large volumetric datasets in a dome environment, specifically for the Kolumbo dataset and Manganese nodule scan [S1, unofficial]. The approach addresses the limitations of earlier methods that encountered practical limits at less than 1 gigavoxel [S1, unofficial].
+
+## Sources
+[S1] Rendering Large Volume Datasets in Unreal Engine 5: A Survey, https://www.researchgate.net/publication/390671564_Rendering_Large_Volume_Datasets_in_Unreal_Engine_5_A_Survey, fetched 2026-10-28 (unofficial)

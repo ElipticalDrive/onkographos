@@ -1,0 +1,263 @@
+Gaussian Splat Renderer for the Godot Engine. Contribute to klausi3D/godotGS development by creating an account on GitHub.
+
+gaussian_splatting: sorter-init failures back off and recover instead of permanently disabling GPU sorting (GPU-003, refs #922) by klausi3D · Pull Request #925 · klausi3D/godotGS · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+klausi3D
+commented
+Aug 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+GPU-003 (refs #922): the GPU-sorter init path tripped a one-way latch — after kSorterInitMaxFailures (5) failed creation attempts, RenderSortingOrchestrator::refresh_gpu_sorter() early-returned forever ("GPU sorting permanently disabled for this session"), the success-path counter reset was unreachable once latched, and initialize_sorting() never cleared the latch either. With the instance route's fallback policy being REUSE_PREVIOUS_SORT → FAIL (no CPU sort), ~5 seconds of transient VRAM pressure at startup left splats frozen at the last sorted order or not rendering for the rest of the session, with only log lines as signal.
+Base: 1abc46684cb (branch contains exactly 2 commits on top of it; review against the immutable 1abc46684cb..head diff).
+Finding verified at head (not just at the audit snapshot)
+Audit finding GS-AUDIT-GPU-003 was taken at 55bd3953475; every cited line re-verified at 1abc46684cb before work started:
+renderer/render_sorting_orchestrator.cpp:276-289 — permanent early-return once sorter_init_failure_count >= kSorterInitMaxFailures; :318 increment; :333-336 reset unreachable after the latch.
+renderer/render_types/render_state_types.h:140-143 — counter + kSorterInitBackoffFrames=60, kSorterInitMaxFailures=5; repo grep confirms no other reset site.
+renderer/sort_fallback_policy.h:178-185 — instance pipeline: REUSE_PREVIOUS_SORT then FAIL, no CPU sort.
+initialize_sorting() (render_sorting_orchestrator.cpp:350-397) sets sorter_needs_rebuild but routes back into the latched refresh_gpu_sorter, so explicit re-init could not recover either.
+Fix (commit 2)
+The retry decision is extracted into pure helpers in sort_fallback_policy.h (the file that already owns sort-lifecycle policy, with existing unit-test coverage conventions):
+sorter_init_backoff_frames(n) — doubles per consecutive failure (60, 120, 240, 480, 960 frames), capped at 1800 frames (~30 s @ 60 fps).
+should_attempt_sorter_init(n, frames_since_failure) — invariant: for every failure count, returns true once the capped interval has elapsed. The cap bounds the retry rate (the old latch's OOM-thrash concern); nothing bounds the retry count.
+sorter_init_degraded(n) — the old "permanently disabled" threshold, now an observability threshold only.
+refresh_gpu_sorter() consumes the policy. Two repairs from Codex review round 1 are part of the fix: a failed build now leaves sorter_needs_rebuild armed (the per-frame path sort_gaussians_for_view only calls refresh_gpu_sorter while that flag is true, so clearing it on failure - as both the base code and the first draft did - would strand the probes after the first failure; the backoff gate, not the flag, rate-limits attempts), and the backoff delta is computed in uint32 modular arithmetic so a frame_counter wrap cannot bypass the window. Entering the degraded state is surfaced once per episode as a RECOVERABLE RenderingError through record_rendering_error (→ diagnostics orchestrator), with failure count / retry interval / frame context and recovery steps — not only a log line. The degraded ERROR log re-fires once per probe interval (mirroring should_warn_unsorted_composite's not-one-shot contract). A successful rebuild resets the counter and the reported flag, so a later episode reports again.
+No change to sort math, sort keys, culling, or any healthy-session path: with sorter_init_failure_count == 0 the flow is byte-identical to before. Visual output on real-scan content is therefore expected unchanged on any session whose sorter initializes; no screenshots were produced for this PR — if the maintainer wants eyes on a degraded-VRAM session, that needs a controlled OOM rig this PR does not build.
+Evidence
+Repro test (commit 1), RED on base by construction — [GaussianSplatting][GpuSort][RequiresGPU] Sorter init failure backoff recovers instead of permanently disabling GPU sorting (tests/test_gpu_sorting.h): drives five REAL sorter-init failures through refresh_gpu_sorter via a null-pipeline orchestrator sharing the renderer's central SortingState (the audit's OOM-injection stand-in), then gives the renderer's own working pipeline a recovery window far past any backoff, asserting the failure path leaves sorter_needs_rebuild armed (the property that makes production probing reachable - the test never re-arms it by hand), retry + counter reset after the backoff window, and RenderingError surfaced. A sanity step first proves the environment can build a sorter, so the recovery assertion discriminates latch-vs-environment; missing preconditions FAIL rather than skip (#595 ratchet — this PR adds no environment-skip site).
+RED on base, measured (RTX 3090; base renderer files + the pre-wrap-block test, i.e. the round-1 13-assertion revision — measured before the Codex R2 wrap block was added): 4 assertions fail — rebuild flag not left armed, no RenderingError, no retry (gpu_sorter invalid), counter stuck at 5; 9 pass, including "5 forced failures all recorded" and the sanity sorter build.
+RED on base, final 18-assertion test, MEASURED (RTX 3090; base renderer files + final test compiled in, after this PR's own CI lanes finished on the shared runner): 7 fail / 11 pass — exactly the independent verifier's trace prediction. Failing CHECKs at test_gpu_sorting.h:1499 (flag not armed), :1502 (no RenderingError), :1512 (no retry), :1514 (counter stuck at 5), and the wrap block :1528 (wrap failure not recorded — latched counter never increments), :1538/:1539 (no wrap recovery / no reset). The wrap-window CHECK at :1533 passes trivially against the latch, as the trace expected. Head re-verified GREEN 18/18 immediately after restoring the fix files and rebuilding.
+GREEN with fix: 18/18 assertions.
+Mutation 1 (latch reintroduced): re-adding the count >= 5 early-return to refresh_gpu_sorter and rebuilding turns the case RED again (no retry, counter not reset), proving the test detects the latch shape itself, not incidental wiring.
+Mutation 2 (wrap repair reverted): reverting the backoff delta to the naive zero-extended uint64 subtraction turns exactly the wrap assertion RED (probe reopens early across a frame-counter wrap), proving the Codex R2 coverage discriminates that regression too.
+Wiring: the case is selected by the required GpuSorting harness batch (*Sort*][RequiresGPU]* — the [GpuSort] tag sits before [RequiresGPU] exactly for this, same as the GpuSorting harness batch matches 0 tests: real [RequiresGPU] sort-order tests in test_gpu_sorting.cpp never run in CI #622 order oracles); --list-test-cases under the batch filter shows it as the 7th selected case (batch grew 6 → 7).
+Pure policy tests (tests/test_sort_fallback_policy.h): backoff doubling + cap + monotonicity, and the no-permanent-latch invariant for counts up to UINT32_MAX. These run in the headless module lanes.
+Suite runs at head (RTX 3090, this machine):
+Full GPU harness (tests/ci/run_gpu_harness.py): exit 0, all batches SUCCESS; GpuSorting 7/7 cases, 7410/7410 assertions.
+Full module lanes (tests/ci/run_module_tests.py --godot-binary …): exit 0; 28 lanes, 22 strict, 0 failures, 0 quarantine.
+Guard-only suite: exit 0 after satisfying two registries this PR is required to update:
+environment-skip ratchet (REQUIRE_GPU_DEVICE-style macros early-return as doctest PASS, not skip (34 uses / 13 files) — silent-pass surface #595): preconditions FAIL instead of skip → 0 new sites;
+renderer release gate requires_gpu_test_snapshot: re-pinned 155 → 156 (batched 87 → 88, backlog unchanged at 66), counts and digest recomputed with the repo's own functions (_requires_gpu_snapshot, _batch_membership) and documented in sha256_last_changed_by.
+Codex review rounds (budget 3, used 2)
+codex exec -s read-only on the immutable diff found 3 findings, all accepted and repaired in place before this push: P1 — failure path cleared sorter_needs_rebuild, stranding the per-frame probes (fixed: flag stays armed on failure; verified against call site render_sorting_orchestrator.cpp sort_gaussians_for_view, which gates on the flag); P2 — the repro manually re-armed the flag, masking P1 (fixed: manual re-arms removed, flag-armed assertion added; the base-RED anchor was re-established with the final test); P3 — frame-counter wrap could zero-extend into a huge uint64 delta and bypass the backoff (fixed: uint32 modular delta). Full RED/GREEN/mutation cycle and all suites re-run after the repairs.
+Round 2 (on the repaired diff): no P1; confirmed all three round-1 repairs complete, including the behavioral coupling of the armed flag at the cache-reuse/fast-path/benchmark gates (holding it true during a failure episode intentionally prevents stale cache reuse and drives the probes; success clears it). One P2: the wrap repair had no regression coverage at the production integration point. Accepted and fixed: the repro now records a failure just below UINT32_MAX, crosses the wrap inside the backoff window and asserts the probe stays closed (modular delta), then crosses the boundary and asserts recovery — mutation 2 above proves this coverage discriminates.
+Risk class
+The agentic-pr-gate on the current head f5dd58913a8 (run 31936134650) printed "risk_class": "R3" with the identical per-path classification it printed for the previous head (run 31934537508), quoted verbatim:
+```
+"risk_class": "R3",
+"paths": [
+  {"path": "docs/reference/renderer_release_gate_manifest.json", "class": "R3", "reason": "Release / security / CI workflow surface"},
+  {"path": "modules/gaussian_splatting/renderer/render_sorting_orchestrator.cpp", "class": "R2", "reason": "Renderer / shaders / compute / streaming / performance"},
+  {"path": "modules/gaussian_splatting/renderer/render_types/render_state_types.h", "class": "R2", "reason": "Renderer / shaders / compute / streaming / performance"},
+  {"path": "modules/gaussian_splatting/renderer/sort_fallback_policy.h", "class": "R2", "reason": "Renderer / shaders / compute / streaming / performance"},
+  {"path": "modules/gaussian_splatting/tests/test_gpu_sorting.h", "class": "R1", "reason": "Local module or test change"},
+  {"path": "modules/gaussian_splatting/tests/test_sort_fallback_policy.h", "class": "R1", "reason": "Local module or test change"}
+]
+```
+The R3 driver is the release-gate manifest re-pin — a change this PR is required to make because it adds a [RequiresGPU] case to a required batch (the snapshot is a shrink-guarded inventory); the pin became stricter, not weaker.
+R3 deterministic checks (.agentic/policy.json), all run locally at head, all green:
+python tests/ci/run_module_tests.py --guard-only — exit 0
+python -m unittest discover -s tests/agentic — 84 tests, OK
+python tests/runtime/run_runtime_validation.py --profile streaming-gpu-ci --skip-cpp --fail-on-skip — exit 0, 3/3 scenarios passed (GPU Streaming Stress across tiers 250k/1m/2.5m, World Streaming Gate, Streaming Residency API; not vacuous)
+python tests/ci/validate_automation.py --contracts-only — PASS
+R3 evidence requirements: design record — the audit finding GS-AUDIT-GPU-003 quoted verbatim in anchor issue #922 is the design-change record for this remediation (maintainer judges sufficiency at disposition); backward-compatibility — no format, serialization, or public API change in this diff (one private state field added, two private constants moved to a policy header); two independent reviews + CODEOWNER/human approval — Codex CLI review is review one (rounds documented above), the second independent review and approval are owned by humans on this PR.
+R3 disposition: this diff touches modules/gaussian_splatting/renderer/ (render_sorting_orchestrator.cpp, render_types/render_state_types.h, sort_fallback_policy.h), module tests, and one governed manifest (docs/reference/renderer_release_gate_manifest.json). It changes failure-path retry scheduling and diagnostics only; no shader, no persistence/format, no engine (upstream Godot) files, no thresholds or gates weakened — both touched registries became stricter or equal (a new required-batch case; skip→FAIL). Runtime/GPU evidence: the RED→GREEN→mutation-RED cycle above plus full-harness and full-lane runs on real hardware. Humans own the merge; review blockers stay open until fixed or explicitly waived by the maintainer.
+This PR fully discharges GS-AUDIT-GPU-003 as filed in #922 (latch → capped backoff + recovery probe, diagnostics surface, mutation-proven); closure of #922 is the maintainer's call at disposition.
+refs #922
+🤖 Generated with Claude Code
+chatgpt-codex-connector
+Bot
+reviewed
+Aug 16, 2026
+View reviewed changes
+chatgpt-codex-connector
+Bot
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+💡 Codex Review
+Here are some automated review suggestions for this pull request.
+Reviewed commit: 5a1ccadf1e
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review".
+If Codex has suggestions, it will comment; otherwise it will react with 👍.
+Codex can also answer questions or update the PR. Try commenting "@codex address that feedback".
+Comment thread
+modules/gaussian_splatting/renderer/render_sorting_orchestrator.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+force-pushed
+the
+gs/gpu003-sorter-latch
+branch
+from
+5a1ccad to
+85a816d
+Compare
+August 16, 2026 07:41
+klausi3D
+and others
+added 2 commits
+August 16, 2026 10:13
+gaussian_splatting: add GPU-003 sorter-init latch repro test (refs #922)
+…
+8c29aab
+```
+Drives five real sorter-init failures through refresh_gpu_sorter via a
+null-pipeline orchestrator sharing the renderer's SortingState, then asserts
+(a) the failure path leaves sorter_needs_rebuild armed - the property that
+keeps the per-frame sort path routing into the recovery probe (Codex R1 P2:
+no manual re-arming, so the test cannot pass if production probing is
+stranded), (b) the degraded state surfaced a RenderingError, (c) the
+renderer's working pipeline is retried and the counter reset after the
+backoff window, and (d) a frame-counter wrap inside the backoff window does
+not reopen the probe early while the modular boundary still does (Codex R2
+P2). Lives in test_gpu_sorting.h so the [GpuSort][RequiresGPU] tags place it
+in the GPU harness's required GpuSorting batch (batch grew 6 -> 7 selected
+cases); missing preconditions FAIL rather than skip (#595). Re-pins the
+release-gate RequiresGPU snapshot 155 -> 156 (batched 87 -> 88, backlog
+unchanged at 66) with counts recomputed by the repo's own functions. RED on
+base 1abc466 by design: the permanent latch never retries, clears the
+rebuild flag, and surfaces no RenderingError.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+gaussian_splatting: replace the sorter-init permanent latch with capp…
+…
+f5dd589
+```
+…ed-backoff recovery probes (refs #922)
+
+GPU-003: five sorter-init failures (~5 s of transient VRAM pressure at
+startup given the 60-frame backoff) permanently disabled GPU sorting for
+the session; the success-path counter reset was unreachable once latched,
+and the instance route has no CPU fallback, so splats froze at the last
+sorted order or stopped rendering with only log lines as signal.
+
+The retry decision now lives in sort_fallback_policy.h as pure helpers:
+backoff doubles per consecutive failure (60..960 frames), caps at 1800
+frames (~30 s at 60 fps), and past the old threshold the capped interval
+becomes a periodic recovery probe - the cap bounds the retry RATE (the
+old latch's OOM-thrash concern), never the retry COUNT. A failed build
+leaves sorter_needs_rebuild armed so the per-frame gate in
+sort_gaussians_for_view keeps routing into the probe (Codex R1 P1); the
+backoff window delta is computed in uint32 modular arithmetic so a
+frame-counter wrap cannot bypass the backoff (Codex R1 P3, wrap coverage
+added for Codex R2 P2). Entering the degraded state is surfaced once per
+episode as a RECOVERABLE RenderingError through record_rendering_error
+(diagnostics), and the degraded ERROR log re-fires once per probe interval
+instead of once per process. A successful rebuild resets both the counter
+and the reported flag.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+klausi3D
+force-pushed
+the
+gs/gpu003-sorter-latch
+branch
+from
+85a816d to
+f5dd589
+Compare
+August 16, 2026 08:18
+Hide details
+View details
+klausi3D
+merged commit 116b45a
+into
+master
+Aug 16, 2026
+18 of 19 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+klausi3D
+deleted the
+gs/gpu003-sorter-latch
+branch
+August 16, 2026 10:08
+This was referenced Aug 16, 2026
+GPU-003: GPU-sorter init failure latches sorting off for the whole session (5 failed attempts, no recovery trigger) — instance route left with no first-frame fallback
+#922
+Closed
+Two pre-existing sorter-init exit paths disarm the recovery probe (device-unavailable, compute-unsupported) — same stranding shape as GPU-003, different triggers
+#926
+Open
+gaussian_splatting: composite splats at the pre-upscale seam so scaled/temporal viewports present them (GPU-001, Option B) (refs #921)
+#924
+Merged
+klausi3D
+added a commit
+that referenced
+this pull request
+Aug 16, 2026
+Merge origin/master (116b45a) into ci/t4-gpu-retag-partition
+…
+10198c6
+```
+Single conflict: docs/reference/renderer_release_gate_manifest.json, where
+#925 (GPU-003) re-pinned requires_gpu_test_snapshot to 156 cases while T4
+re-pinned the same block for the #908 rename at 155. Resolved by RE-RUNNING
+the documented derivation flows on the merged tree, never by picking a side:
+_requires_gpu_snapshot -> (156, 50aecb38c222...), _batch_membership -> 90
+running in a named batch; coverage_snapshot 156/90/3/63 (sum holds); backlog
+pins unchanged (63, fingerprint identical - #925's case is batched, not
+backlogged). All pin-guards re-run green on the merged tree.
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>
+```
+klausi3D
+mentioned this pull request
+Aug 16, 2026
+T4: GPU [Streaming] retag, ComputeInfrastructure batch deletion, 59-case quarantine wildcard split, skip-marker case-retag ledger
+#920
+Merged
+This was referenced Sep 5, 2026
+gaussian_splatting: reject the frame instead of compositing translucent splats unsorted (refs #586, PR 1 of 3)
+#976
+Merged
+gaussian_splatting: retry tile-sorter creation on the shared GPU-003 backoff instead of latching (refs #586, PR 2 of 3)
+#977
+Merged
+v1.0: classify tile-sorter creation failures (transient vs deterministic) and lift the retry latch on config change, instead of the rate-capped re-probe adopted for alpha
+#979
+Open
+gaussian_splatting: build the replacement before retiring the working tile sorter on a grow, and back the grow off (refs #586, PR 3 of 3)
+#982
+Merged
+This was referenced Sep 17, 2026
+Instance sorter permanently disabled after init failures; correcting the setting cannot restore it (twin of #852)
+#860
+Closed
+Issue-ledger audit 2026-09-17: all 281 open issues classified against master; 32 closed
+#1021
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

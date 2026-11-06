@@ -1,0 +1,144 @@
+--- v001.md
++++ v002.md
+@@ -1,38 +1,29 @@
+ # Color-Corrected Error Metrics
+ 
+-Also called: Per-image quadratic color correction, Photometric variation mitigation metrics
+ 
+ ## Overview
+-Color-Corrected Error Metrics are an evaluation procedure designed to mitigate photometric variations—such as autoexposure, white balance shifts, and RGB clipping—in "in the wild" datasets like Tanks and Temples [S1]. By solving a per-image least squares problem to fit a quadratic polynomial expansion of rendered RGB values to ground truth, the method neutralizes global brightness and color shifts, making view synthesis models quantitatively comparable despite uncontrolled camera settings [S1].
++Color-Corrected Error Metrics are an evaluation procedure designed to mitigate photometric variations—such as autoexposure, white balance shifts, and RGB clipping—in "in the wild" datasets like Tanks and Temples [S1]. By solving a per-image least squares problem to fit a quadratic polynomial expansion of the rendering's RGB values to the true image, the method neutralizes global brightness and color shifts, making view synthesis models quantitatively comparable [S1].
+ 
+ ## How it works
+-**Inputs:** Rendered image $I_{render}$ (RGB), Ground truth image $I_{true}$ (RGB), and a mask $M_{valid}$ identifying non-saturated pixels.
+-**Outputs:** Corrected error metrics (PSNR, SSIM, LPIPS) computed on the color-adjusted render.
++**Inputs:** Rendered image $I_{render}$ (RGB), ground truth image $I_{true}$ (RGB), and a validity mask for non-saturated pixels [G].
++**Outputs:** Corrected error metrics (e.g., PSNR, SSIM, LPIPS) computed on the color-adjusted render [G].
+ 
+ **Data Structures:**
+-- $I_{render}, I_{true}$: 2D arrays of shape $(H, W, 3)$, values in $[0, 1]$.
+-- $M_{valid}$: Boolean mask of shape $(H, W)$, true where pixel is not saturated/clipped.
++- $I_{render}$ and $I_{true}$: 2D arrays of shape $(H, W, 3)$ with values in $[0, 1]$ [G].
++- $M_{valid}$: Boolean mask of shape $(H, W)$ identifying pixels to include in the fit [G].
+ 
+ **Steps:**
+-1. **Mask Saturated Pixels:** Identify pixels where any channel in $I_{true}$ or $I_{render}$ is clipped (e.g., $\ge 1.0$ or $\le 0.0$). These are excluded from the fitting process [S1].
+-2. **Construct Design Matrix:** For each valid pixel $p$, construct a feature vector $x_p$ representing the quadratic expansion of the rendered RGB values. For a pixel with rendered color $r = [R, G, B]$, the expansion includes terms for linear components, squared components, and cross-products:
+-   $$ x_p = [1, R, G, B, R^2, G^2, B^2, RG, RB, GB]^T $$
+-   The constant term $1$ accounts for bias/offset [S1].
+-3. **Solve Least Squares:** Solve for the coefficient vector $c$ that minimizes the squared error between the transformed render and the ground truth for all valid pixels:
+-   $$ \min_c \sum_{p \in M_{valid}} \| I_{true}[p] - X_p c \|^2 $$
+-   where $X_p$ is the row vector $x_p^T$. This is solved via the normal equation:
+-   $$ c = (X^T X)^{-1} X^T Y $$
+-   where $X$ is the matrix of all $x_p$ and $Y$ is the vector of all $I_{true}[p]$ for valid pixels [S1].
+-4. **Apply Correction:** Compute the corrected rendered image $I_{corrected}$ by applying the fitted polynomial to every pixel in $I_{render}$:
+-   $$ I_{corrected}[p] = X_p c $$
+-5. **Compute Metrics:** Calculate standard error metrics (PSNR, SSIM, LPIPS) between $I_{corrected}$ and $I_{true}$ [S1].
++1. **Identify Valid Pixels:** Exclude pixels where any RGB channel in $I_{render}$ or $I_{true}$ is saturated or clipped [S1].
++2. **Fit Polynomial:** Solve a per-image least squares problem to find coefficients for a quadratic polynomial expansion of the rendered RGB values that best predicts the true image values for the valid pixels [S1].
++3. **Apply Correction:** Transform the entire rendered image using the fitted polynomial coefficients [S1].
++4. **Compute Metrics:** Evaluate standard error metrics between the corrected render and the ground truth [S1].
+ 
+ **Parameters:**
+ - Polynomial degree: Quadratic (order 2) [S1].
+-- Saturated pixel threshold: Typically 0.0 or 1.0, depending on data normalization [S1].
++- Saturated pixel threshold: Not given in the sources.
+ 
+ **Edge Cases:**
+-- **No Valid Pixels:** If all pixels are saturated, the least squares problem is ill-posed. The sources do not specify a fallback, but logically, metrics cannot be computed [S1].
+-- **Precision:** Inverting $X^T X$ may be numerically unstable if the rendered colors are highly correlated or degenerate. Standard numerical linear algebra routines should be used [G].
++- **No Valid Pixels:** If all pixels are saturated, the least squares problem is ill-posed. Not given in the sources.
++- **Precision:** Inverting $X^T X$ may be numerically unstable if rendered colors are highly correlated. Standard numerical linear algebra routines (e.g., QR decomposition or SVD) should be used [G].
+ 
+ ```python
+@@ -43,24 +34,19 @@
+     render: (H, W, 3) array, values in [0, 1]
+     true: (H, W, 3) array, values in [0, 1]
+-    saturated_threshold: float, pixels with any channel >= this are ignored
++    saturated_threshold: float, pixels with any channel >= this are ignored [G]
+     """
+-    # 1. Mask saturated pixels
+-    # Assuming saturation is defined as values close to 1.0 or 0.0. 
+-    # The source mentions "ignoring saturated pixels" and "clipped RGB".
+-    # We define valid pixels as those not near the boundaries.
++    # 1. Mask saturated pixels [G]
+     valid_mask = (render < saturated_threshold).all(axis=-1) & \
+                  (render > 1.0 - saturated_threshold).all(axis=-1) & \
+                  (true < saturated_threshold).all(axis=-1) & \
+                  (true > 1.0 - saturated_threshold).all(axis=-1)
+-    
+-    # Flatten valid pixels
+-    render_flat = render[valid_mask] # (N, 3)
+-    true_flat = true[valid_mask]     # (N, 3)
+-    
++
++    render_flat = render[valid_mask]
++    true_flat = true[valid_mask]
++
+     if render_flat.shape[0] == 0:
+         raise ValueError("No valid non-saturated pixels found.")
+ 
+-    # 2. Construct Design Matrix for quadratic expansion
+-    # Terms: 1, R, G, B, R^2, G^2, B^2, RG, RB, GB
++    # 2. Construct quadratic expansion features [G]
+     R, G, B = render_flat[:, 0], render_flat[:, 1], render_flat[:, 2]
+     X = np.column_stack([
+@@ -70,18 +56,23 @@
+         R*G, R*B, G*B
+     ])
+-    
+-    # 3. Solve Least Squares: min || Xc - Y ||^2
+-    # Using numpy's least squares solver for numerical stability
+-    # Y is true_flat (N, 3)
+-    c, residuals, rank, s = np.linalg.lstsq(X, true_flat, rcond=None)
+-    
+-    # 4. Apply Correction
+-    render_corrected_flat = X @ c # (N, 3)
+-    
+-    # 5. Compute Metrics (Placeholder for actual metric implementation)
+-    # In practice, one would compute PSNR, SSIM, LPIPS between 
+-    # render_corrected_flat and true_flat, then reshape or average.
+-    # Here we just return the corrected image for metric calculation.
+-    return render_corrected_flat
++
++    # 3. Solve least squares for polynomial coefficients [S1]
++    c, _, _, _ = np.linalg.lstsq(X, true_flat, rcond=None)
++
++    # 4. Apply correction to all pixels [S1]
++    R_all, G_all, B_all = render[:, :, 0], render[:, :, 1], render[:, :, 2]
++    X_all = np.column_stack([
++        np.ones_like(R_all).flatten(),
++        R_all.flatten(), G_all.flatten(), B_all.flatten(),
++        R_all.flatten()**2, G_all.flatten()**2, B_all.flatten()**2,
++        R_all.flatten()*G_all.flatten(), R_all.flatten()*B_all.flatten(), G_all.flatten()*B_all.flatten()
++    ])
++    render_corrected_flat = X_all @ c
++    render_corrected = render_corrected_flat.reshape(render.shape)
++
++    # 5. Compute metrics on corrected image [G]
++    mse = np.mean((render_corrected - true) ** 2)
++    psnr = 10.0 * np.log10(1.0 / mse) if mse > 0 else float('inf')
++    return render_corrected, psnr
+ ```
+ 
+@@ -92,13 +83,13 @@
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(N)$ where $N$ is the number of valid pixels, dominated by the matrix construction and the least squares solve. The least squares solve is typically $O(N \cdot D^2)$ or $O(N \cdot D^3)$ where $D=10$ is the number of polynomial terms, which is constant and small.
+-**Memory Complexity:** $O(N)$ to store the design matrix and intermediate vectors.
+-**Strengths:** Effectively neutralizes global brightness and color shifts caused by autoexposure and white balance variations in "in the wild" datasets, allowing for fair comparison between models [S1].
+-**Limitations:** Does not correct for local photometric variations or non-linear tone mapping curves. It assumes a global quadratic relationship between the render and the ground truth, which may not hold for all scenes or camera responses [S1].
+-**When to use:** Evaluating view synthesis on datasets with uncontrolled camera settings (e.g., Tanks and Temples) where autoexposure/white balance varies between images [S1].
+-**When not to use:** When the dataset has fixed, calibrated camera settings, or when local color accuracy is more important than global color consistency [S1].
++**Time Complexity:** Not given in the sources.
++**Memory Complexity:** Not given in the sources.
++**Strengths:** Effectively neutralizes global brightness and color shifts caused by autoexposure and white balance variations, allowing fair comparison between models [S1].
++**Limitations:** Not given in the sources.
++**When to use:** Evaluating view synthesis on datasets with uncontrolled camera settings where autoexposure/white balance varies between images [S1].
++**When not to use:** Not given in the sources.
+ 
+ ## Background
+-The method was introduced in the context of evaluating Neural Radiance Fields (NeRF) on the Tanks and Temples dataset, where photometric variation (autoexposure, white balance, clipping) makes standard evaluation metrics ill-posed [S1]. It builds on earlier work by Martin-Brualla et al. who investigated specialized training and evaluation procedures for such datasets [S1]. The approach was used to compare the Mip-NeRF 360 model with Stable View Synthesis (SVS) [S1].
++The method was introduced in the context of evaluating Neural Radiance Fields on the Tanks and Temples dataset, where photometric variation makes standard evaluation metrics ill-posed [S1]. It builds on earlier work by Martin-Brualla et al. who investigated specialized training and evaluation procedures for such datasets [S1]. The approach was used to compare the Mip-NeRF 360 model with Stable View Synthesis (SVS) [S1].
+ 
+ ## Sources

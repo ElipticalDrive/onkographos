@@ -6,8 +6,7 @@ Also called: 3D Textures, Volume Header, Voxel Data Structure and Indexing, Voxe
 3D Texture Representation stores voxel data in a dense 3D texture (or equivalent linear array) with dimensions matching the voxel grid, providing the simplest storage mechanism for volume rendering [S1, unofficial]. Unlike tree-based structures like octrees, it fully leverages hardware acceleration for 3D textures, including caching and filtering, offering high runtime performance but low memory efficiency due to its inability to address sparse memory [S1, unofficial].
 
 ## How it works
-**Inputs:** 3D coordinates (cubic or normalized), volume dimensions ($Size.X, Size.Y, Size.Z$).
-**Outputs:** Linear array index, voxel value (e.g., density, normal).
+The method takes 3D coordinates (cubic or normalized) and volume dimensions ($Size.X, Size.Y, Size.Z$) as inputs, and produces a linear array index and the corresponding voxel value (e.g., density or normal) as outputs [S3][S2, unofficial]. 
 
 **Data Structures:**
 *   **CPU (C#-like):**
@@ -25,21 +24,18 @@ Also called: 3D Textures, Volume Header, Voxel Data Structure and Indexing, Voxe
 **Indexing Formulas:**
 The linear index $I$ from cubic coordinates $(X, Y, Z)$ is calculated as [S3]:
 $$I = X + (Y \times Size.X) + (Z \times Size.X \times Size.Y)$$
+A cube-specific variant uses a single dimension $dim$: $index = x + y \times dim + z \times dim \times dim$ [S2, unofficial].
 
 The cubic coordinates from a linear index $I$ are [S3]:
-$$X = I \mod Size.X$$
-$$Y = (I / Size.X) \mod Size.Y$$
-$$Z = (I / (Size.X \times Size.Y)) \mod Size.Z$$
+$$X = (I \div 1) \bmod Size.X$$
+$$Y = (I \div Size.X) \bmod Size.Y$$
+$$Z = (I \div (Size.X \times Size.Y)) \bmod Size.Z$$
+where $\div$ denotes integer division.
 
 **Steps:**
-1.  **Coordinate Conversion:** Convert input coordinates to integer voxel indices.
-    *   On CPU, use `VolumeHeader.CubicToLinearIndex` [S3].
-    *   On GPU, convert normalized coordinates $coord$ to integer indices: $intIndex3 = \lfloor coord \times _VolBufferSize \rfloor$ [S3].
-    *   Handle negative coordinates by wrapping: if $x < 0$, $x = (x + dim) \mod dim$ [S2, unofficial].
-2.  **Linear Index Calculation:** Compute the 1D index using the formula above [S3].
-3.  **Data Access:**
-    *   **Read:** Retrieve value from `DataArray[index]` (CPU) or `_VolBuffer[index]` (GPU) [S3]. Density can be extracted from alpha channels, e.g., `density = pTexels[index].a / 128.0f` [S2, unofficial].
-    *   **Write:** During voxelization, calculate the voxel cell index and write directly into it without extra steps or tree traversals [S1, unofficial]. Normals can be stored in RGB channels, e.g., `pTexels[index].r = (char)(normal.r * 128.0f)` [S2, unofficial].
+1.  **Coordinate Conversion:** Convert input coordinates to integer voxel indices [S3][S2, unofficial]. On CPU, use `VolumeHeader.CubicToLinearIndex` [S3]. On GPU, convert normalized coordinates $coord$ to integer indices: $intIndex3 = \lfloor coord \times _VolBufferSize \rfloor$ [S3]. Handle negative coordinates by wrapping: if $x < 0$, $x = (x + dim) \bmod dim$ [S2, unofficial].
+2.  **Linear Index Calculation:** Compute the 1D index using the forward formula [S3].
+3.  **Data Access:** Read or write `DataArray[index]` (CPU) or `_VolBuffer[index]` (GPU) [S3]. Density can be extracted from alpha channels, e.g., `density = (float)pTexels[index].a / 128.0f` [S2, unofficial]. Normals can be stored in RGB channels, e.g., `pTexels[index].r = (char)(normal.r * 128.0f)` [S2, unofficial]. During voxelization, calculate the voxel cell index and write directly into it without extra steps or tree traversals [S1, unofficial].
 
 **Pseudocode (CPU):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -76,27 +72,25 @@ class VolumeBuffer:
         self.DataArray[self.Header.CubicToLinearIndex(pos)] = val
 ```
 
-**Pseudocode (GPU HLSL):**
+**Pseudocode (GPU):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
-```hlsl
-float3 _VolBufferSize;
+```python
+VolBufferSize = (width, height, depth)
+VolBuffer = [...]  # StructuredBuffer<float>
 
-int3 UnitVolumeToIntVolume(float3 coord) {
-    return (int3)(coord * _VolBufferSize.xyz);
-}
+def unit_volume_to_int_volume(coord):
+    return (int(coord[0] * VolBufferSize[0]),
+            int(coord[1] * VolBufferSize[1]),
+            int(coord[2] * VolBufferSize[2]))
 
-int IntVolumeToLinearIndex(int3 coord, int3 size) {
-    return coord.x + (coord.y * size.x) + (coord.z * (size.x * size.y));
-}
+def int_volume_to_linear_index(coord, size):
+    return coord[0] + (coord[1] * size[0]) + (coord[2] * (size[0] * size[1]))
 
-StructuredBuffer<float> _VolBuffer;
-
-float SampleVol(float3 coord3) {
-    int3 intIndex3 = UnitVolumeToIntVolume(coord3);
-    int index1D = IntVolumeToLinearIndex(intIndex3, _VolBufferSize.xyz);
-    return _VolBuffer[index1D];
-}
+def sample_vol(coord3):
+    int_index3 = unit_volume_to_int_volume(coord3)
+    index1d = int_volume_to_linear_index(int_index3, VolBufferSize)
+    return VolBuffer[index1d]
 ```
 
 ## Operating characteristics

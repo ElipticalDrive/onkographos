@@ -1,0 +1,107 @@
+# Hemispherical Fibonacci AO Sample Generation
+
+Also called: AO Sample Buffer Generation
+
+## Overview
+Generates a fixed set of 3D direction vectors for screen-space ambient occlusion (SSAO) using a hemispherical Fibonacci mapping, stored in a compute buffer [S1, unofficial]. It differs from its parent, [Quadratic Scale Hemisphere Sampling](3988-quadratic-scale-hemisphere-sampling.md), by using a deterministic Fibonacci lattice for uniform hemisphere coverage rather than a Halton sequence with quadratic scaling [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- Input: `AmbientOcclusionSamples` (integer, range [1, 32], default 5) [S1, unofficial].
+- Output: A `ComputeBuffer` containing `AmbientOcclusionSamples * 360` vectors.
+
+**Data Structures:**
+- **AO Sample Buffer**: A contiguous array of `Vector3` (x, y, z floats).
+- **Stride**: 12 bytes (3 * sizeof(float)).
+- **Element Count**: `AmbientOcclusionSamples * 360` [S1, unofficial].
+
+**Parameters:**
+- `samplesPerStep`: Fixed at 360 [S1, unofficial].
+- `AmbientOcclusionSamples`: Number of AO sample steps/iterations [S1, unofficial].
+
+**Steps:**
+1. Initialize `samplesPerStep = 360`.
+2. Calculate `sampleCount = AmbientOcclusionSamples * samplesPerStep`.
+3. Allocate a `ComputeBuffer` of size `sampleCount` with stride 12 bytes.
+4. Initialize an index counter `c = 0`.
+5. Loop `i` from 0 to `AmbientOcclusionSamples - 1`:
+    a. Initialize `deg = 0`.
+    b. Loop `deg` from 0 to 359:
+        i. Update `deg` by multiplying by `360 / samplesPerStep` (which is 1, yielding integer degrees 0-359) [S1, unofficial].
+        ii. Convert `deg` to radians: `rad = deg * Mathf.Deg2Rad`.
+        iii. Compute sample direction using `Utils.Sampling.HemisphericalFibonacciMapping(i, AmbientOcclusionSamples, rad)`.
+        iv. Store the resulting `Vector3` in the buffer array at index `c`.
+        v. Increment `c`.
+6. Upload the `samples` array to the compute buffer using `SetData` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def generate_hemispherical_fibonacci_ao_samples(ambient_occlusion_samples: int) -> list:
+    """
+    Generates AO sample vectors using Hemispherical Fibonacci mapping.
+    
+    Args:
+        ambient_occlusion_samples: Number of AO sample steps (1-32).
+        
+    Returns:
+        List of Vector3 tuples representing sample directions.
+    """
+    samples_per_step = 360
+    sample_count = ambient_occlusion_samples * samples_per_step
+    samples = []
+    c = 0
+    
+    for i in range(ambient_occlusion_samples):
+        deg = 0
+        for _ in range(360):
+            # Redundant multiplication as per source, yields integer degrees 0-359
+            deg = deg * (360 / samples_per_step)
+            rad = deg * (3.141592653589793 / 180.0)  # Mathf.Deg2Rad equivalent
+            
+            # Call to external utility function for Fibonacci mapping
+            # Note: Implementation of HemisphericalFibonacciMapping is not provided in source
+            # [G] Assuming standard Fibonacci sphere mapping logic for hemisphere
+            sample = hemispherical_fibonacci_mapping(i, ambient_occlusion_samples, rad)
+            
+            samples.append(sample)
+            c += 1
+            
+    return samples
+
+def hemispherical_fibonacci_mapping(i: int, total_samples: int, rad: float) -> tuple:
+    """
+    Placeholder for Utils.Sampling.HemisphericalFibonacciMapping.
+    Standard Fibonacci sphere mapping for hemisphere.
+    """
+    # [G] Standard implementation details not in source. 
+    # Typical formula: y = 1 - (2*i + 1)/total_samples, r = sqrt(1 - y^2), theta = rad
+    # This is a generic placeholder as the source does not define the mapping function.
+    y = 1.0 - (2.0 * i + 1.0) / total_samples
+    r = (1.0 - y * y) ** 0.5
+    x = r * math.cos(rad)
+    z = r * math.sin(rad)
+    return (x, y, z)
+```
+
+**Edge Cases and Pitfalls:**
+- The inner loop modifies `deg` in-place (`deg *= ...`), which is redundant since `samplesPerStep` is 360 and the loop increments by 1. This yields exact integer degree steps 0-359 [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: O(AmbientOcclusionSamples * 360) for generation.
+- **Memory Complexity**: O(AmbientOcclusionSamples * 360 * 12) bytes for the buffer.
+- **Measured Performance**: Not given in the sources.
+- **Scaling**: Linear with `AmbientOcclusionSamples`.
+- **Strengths**: Deterministic, uniform hemisphere coverage via Fibonacci lattice.
+- **Limitations**: Fixed number of samples per step (360), less flexible than stochastic methods.
+- **When to use**: When deterministic, uniform hemisphere sampling is required for SSAO.
+- **When not**: When adaptive sampling or fewer samples are needed.
+
+## Background
+Origin: Not given in the sources.
+History and development: Not given in the sources.
+Where it is used: Screen-space ambient occlusion (SSAO) [S1, unofficial].
+
+## Sources
+[S1] SphereTracing, https://github.com/nicoell/SphereTracing, fetched 2026-10-26 (unofficial)

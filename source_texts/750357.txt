@@ -1,0 +1,374 @@
+Contribute to fesoliveira014/c3d.c3l development by creating an account on GitHub.
+
+Sky: shadow the sun by the cloud layer by fesoliveira014 · Pull Request #465 · fesoliveira014/c3d.c3l · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+fesoliveira014
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Part of #357. A volumetric cloud layer can now shadow the sun on the scene and in the volumetric fog.
+Change
+Switch. CloudLayer.cast_shadows is true in CLOUD_LAYER_DEFAULT and false for a bare CloudLayer{}.
+Pass. When the switch is on and the sun is above the horizon, Pass.CLOUD_SHADOWS writes one transmittance map per view, every frame. It runs before the fog volume and the shading passes, and keeps no cache.
+Map. One 512² R16F map (CLOUD_SHADOW_SIZE) per view.
+Contents. Each texel holds the transmittance along the sun through the layer, on the layer's bottom plane. The shell is treated as flat over the map.
+Coverage. It covers CLOUD_SHADOW_EXTENT (16,384 m, 32 m a texel).
+Placement. It is centred on the camera's footprint along the sun and snapped to the world's texel grid, so it does not swim.
+Edge. It fades to full light over the outer CLOUD_SHADOW_EDGE_BAND (10%) of its half extent, so there is no seam.
+March. Each texel takes CLOUD_SHADOW_STEPS (16) samples with the detail octave.
+Receivers. A receiver projects along the sun onto the bottom plane.
+Below the layer it takes the map's value. Inside the layer it takes the value raised to the share of the layer above it. Above the layer it takes 1.
+The divisor is floored at CLOUD_SUN_FLOOR, which moved into the ABI so the march, the map and the receivers share it.
+shadow_visibility and shadow_transmittance multiply the result into the sun's visibility. Forward and deferred shading, the froxel fog inject (plain and temporal) and custom stages therefore receive it.
+A draw that does not receive shadows (DRAW_RECEIVE_SHADOW off) receives no cloud shadow either.
+ABI.
+FrameRoot.cloud_shadow (a GpuAddress, zero when absent) takes the two pad words at offset 568. FrameRoot stays 576 B.
+New CloudShadowRoot (64 B).
+LIGHT_CLOUD_SHADOW marks the sun's packed light, and light_casts_shadow accepts the mark.
+Refactor. The cloud density moved to shaders/common/cloud_density.glsl, shared by the march and the map writer.
+Serial. CloudLayer's layout fingerprint changes. No released tag includes CloudLayer (v0.1.0 predates it), so no v1 reader is needed.
+Example. sky --clouds gains a "Cloud shadows" checkbox. Wind moves the shadows.
+Docs. sky.md describes the map, its placement, extent and edge band, the receivers, the memory (CLOUD_SHADOW_SIZE² × 2 B per view) and the exclusions. custom_shaders.md notes that the shadow helpers include the clouds.
+Exclusions (documented). The path tracer, traced-reflection and probe hits, probe updates and the atmosphere's lighting cubes see no cloud shadow. The cloud march keeps its own light march for self-shadowing.
+Divergences from the brief
+Map centre. The map is centred on the camera's footprint along the sun, taken at the lower of the camera's altitude and the layer's bottom.
+For a camera below the layer, this is the camera's projection onto the bottom plane.
+For a camera above the layer, projecting the camera itself would push the ground below it out of the map at a low sun.
+LIGHT_CLOUD_SHADOW. The brief names only FrameRoot.cloud_shadow. The receivers also need to know which light the map belongs to, because shadow_visibility takes a LightGpu and no index.
+A sun without shadow layers still reaches the map, and so do custom stages that gate on light_casts_shadow.
+Ray-hit shading keeps its former test, so hits stay excluded.
+Constants. CLOUD_SHADOW_EXTENT 16,384 m, CLOUD_SHADOW_STEPS 16 and CLOUD_SHADOW_EDGE_BAND 0.1. Each is in the ABI file with a why/cost comment.
+Cost
+Lavapipe (CPU Vulkan, environment only, 640×360, three runs of 24 frames, medians): CLOUD_SHADOWS 13.2-13.4 ms, against CLOUDS 8.5-8.6 ms in the same runs.
+Fixed size. The map is fixed at 512² texels, so the pass's cost does not depend on the view's resolution.
+Levers:
+CLOUD_SHADOW_SIZE: cost scales with the texel count.
+CLOUD_SHADOW_STEPS: cost scales with the step count.
+The detail octave: about half the noise samples.
+CLOUD_SHADOW_EXTENT: trades reach against texel size.
+Memory. 512 KiB per view, plus a 64 B root and a 128 B march root in the frame's upload ring.
+Receivers. One map sample per shadowed sun lookup, only for the flagged sun.
+Owed. GPU timings for the pass and the receivers are owed on the RTX 4090.
+Verification
+All runs are on lavapipe, headless, with validation on and 0 validation messages, at head 0823578 against main 24a91a3.
+Identity.
+With no layer, the main-view and mirror md5 equal main in 10 of 10 scenarios: noon, twilight, orbit, plain and temporal volumetric fog, deferred, traced shadows and three ground views.
+With a layer and cast_shadows false, the same 10 of 10 hold.
+Fog history (S4). Temporal volumetric fog over 30 frames gives 1 rejection in 30 recordings (the first frame), for the main view and the mirror. Five conditions were run:
+wind 5 m a frame;
+wind 5 m plus camera 0.5 m a frame;
+wind 40 m plus camera 8 m a frame;
+shadows off;
+no wind.
+The control, fog density +1% a frame, gives 30 of 30. Toggling cast_shadows resets the history once by construction; that was not run.
+Pan. The snapped map leaves at most 1 level of residual with 0 pixels over 1 level. An unsnapped control leaves up to 3-4 levels and over 13,000 pixels over 1 level.
+Projection. With the sun overhead, the ground shadow correlates 0.84 with the cloud seen from below, flipped.
+Horizon. At 0° and −5° sun elevation the image equals shadows off. At 1-12° the map is written.
+Unit filters. shader 40, abi 1, sky 11, light 22, view 64, shadow 44, describe 38.
+Serial targets. serial_test 23, serial_order_forward 2, serial_order_reverse 2, serial_text_test 25, serial_described_test 104, serial_core_policy_test 1, serial_all_test 2.
+Render acceptance. 41 of 41 cases with sky, fog, atmosphere or shadow in the name, one per run.
+Build. Shaders verify (160 stages); sky builds.
+Screenshots (lavapipe)
+Ground at noon: before, after, and |before − after| × 8.
+Volumetric fog: before, after, and the difference × 8. At the example's cloud scale the shadowed bands in the fog are broad.
+Pan: top-down at 1 px a metre, snapped against unsnapped, with the residual × 32.
+Sun overhead: the ground shadow looking down, beside the cloud looking up, flipped.
+Remaining work
+Cloud temporal accumulation follows in a later PR.
+fesoliveira014
+added 6 commits
+October 12, 2026 15:45
+feat(light): add a switch for the cloud layer's shadow
+…
+d55eb4c
+```
+CloudLayer.cast_shadows is positive: CLOUD_LAYER_DEFAULT sets it and a
+bare CloudLayer{} casts none. The serialization layout fingerprint of the
+component follows its new field.
+```
+feat(render): shadow the sun by the cloud layer
+…
+e8eea82
+```
+Pass.CLOUD_SHADOWS writes one R16F map per view every frame, before the
+fog volume and the shading passes: the transmittance along the sun
+through the layer on its bottom plane, centred on the camera's footprint
+and snapped to the world's texel grid. shadow_visibility and
+shadow_transmittance multiply it into the sun's visibility, so forward,
+deferred, the froxel fog inject and custom stages receive it.
+
+FrameRoot.cloud_shadow takes the two pad words and stays 576 bytes;
+LIGHT_CLOUD_SHADOW marks the sun, and light_casts_shadow accepts the
+mark. Ray hits keep their own test, so traced reflections, probe updates
+and the path tracer see no cloud shadow. The cloud density moves into a
+shared include for the march and the map.
+```
+feat(examples): switch the cloud shadows in the sky example
+…
+286deb3
+```
+The clouds panel gains a Cloud shadows checkbox, and the timing report
+lists the new pass.
+```
+docs(sky): describe the cloud shadow map
+…
+945fe99
+```
+Covers the map and its extent, placement, projection of receivers inside
+and above the layer, the edge band, the receivers, the memory formula and
+what the map leaves out.
+```
+docs(benchmarking): name the cloud shadow pass line
+…
+656d008
+```
+The sky benchmark's pass report lists CLOUD_SHADOWS beside CLOUDS.
+```
+Merge remote-tracking branch 'origin/main' into feat/issue-357-cloud-…
+…
+0823578
+```
+…shadows
+```
+fesoliveira014
+commented
+Oct 12, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: HOLD at 0823578
+S1-S6 are met, and the 4090 says the cost is not an issue. One Required item: the placement comment and its sky.md bullet claim more coverage than the code gives. One Optional docs note. Both are inline.
+Review
+S1. The map lives on the layer's bottom plane and receivers project along the sun with the floored cosine the writer uses, so the two agree.
+A receiver below the layer reads T, one inside it reads T^share, and one above it reads 1.
+No pass runs with the sun at or below the horizon.
+CLOUD_SUN_FLOOR now lives in the ABI, shared by the march, the map and the receivers.
+S2. CLOUD_SHADOW_EDGE_BAND fades the map to 1 over its outer band.
+S3. cloud_shadow takes the two pads at 568; FrameRoot stays 576 B.
+S4. One rejection in 30 frames, the first, as you report. The packed sun carries LIGHT_CLOUD_SHADOW every frame, so the temporal fog's light hash stays stable.
+S5. cast_shadows is true in CLOUD_LAYER_DEFAULT, the docs state that CloudLayer{} casts none, and the CLOUD_LAYOUT hash moves. v0.1.0 predates CloudLayer, so no v1 reader is needed.
+S6. The map is recomputed every frame.
+Divergences
+Placement at min(camera altitude, bottom). Accepted for cameras below the deck, which is the common case: the ground under them sits at the centre. But see the Required comment: above the deck the claim fails at a low sun.
+LIGHT_CLOUD_SHADOW. Accepted. shadow_visibility has no light index, so a flag is the cheapest mark. hit_light_visibility keeps the old explicit test, so RT hits still ignore the map, as documented.
+Constants. Accepted: 16,384 m (32 m a texel), 16 steps, a 10% band.
+Native run, RTX 4090
+sky --benchmark, offscreen at 2560 × 1440, -O3. The reference is main 24a91a3, built the same way.
+No layer. md5 equals main for --volumetric-fog --local-lights 16 --lamp-range 400 (06d546cc…) and for --shading deferred --taa --auto-exposure --ssgi --reflections on --volumetric-fog (2170fdc7…).
+Cost. --clouds --volumetric-fog, noon segment, main view, two alternating runs, medians in ms:
+Pass
+main, forward
+PR, forward
+main, deferred
+PR, deferred
+CLOUD_SHADOWS
+—
+0.061 / 0.061
+—
+0.061 / 0.061
+FOG_SCATTERING
+0.0275 / 0.0276
+0.0297 / 0.0297
+0.0283 / 0.0287
+0.0307 / 0.0307
+FORWARD_OPAQUE
+0.0532 / 0.0532
+0.0563 / 0.0573
+0.0082 / 0.0082
+0.0092 / 0.0092
+LIGHTING
+—
+—
+0.100 / 0.101
+0.100 / 0.100
+CLOUDS
+0.452 / 0.452
+0.451 / 0.453
+0.454 / 0.453
+0.452 / 0.452
+frame
+1.643 / 1.648
+1.785 / 1.788
+1.769 / 1.770
+1.907 / 1.913
+The map costs 0.061 ms per view, fixed size.
+Receivers add about 0.002 ms to the fog inject and 0.003-0.004 ms to forward opaque; deferred lighting is unchanged.
+The frame grows by about 0.14 ms with the mirror view's own map.
+The lavapipe 13 ms is environment only. No lever needs to move.
+Validation. With VK_KHRONOS_VALIDATION_VALIDATE_SYNC=true, on --clouds --volumetric-fog --fog-temporal --shading deferred --taa --local-lights 16 and --clouds --volumetric-fog --shadows traced: 0 VUIDs and 0 hazards.
+Look. In the windowed noon --clouds view, the visible ground near the camera is in a gap, so it shows no shadow there. Your overhead pair shows the shadow following the deck.
+Render acceptance at 0823578: 369/369.
+CI: linux passed at 0823578; windows was still running.
+Comment thread
+src/c3d/render/clouds.c3
+Outdated
+};
+}
+// Centred on the camera's footprint along the sun, from the lower of its altitude and the layer's bottom, so the ground
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Required (accuracy; also sky.md:450). "so the ground under a camera above the layer stays inside" holds only for a high sun. Above the bottom the lean is 0, so the map centres on the camera's own x/z on the plane. The ground under the camera projects bottom · |to_sun.xz| / max(sun_up, CLOUD_SUN_FLOOR) away: with the default 1,500 m bottom, about 7.3 km at 11.5° (inside the edge band) and 15 km at the floor, past the 8,192 m half extent. Either state that limit in the comment and the bullet, or centre cameras above the bottom on the datum footprint (lean = bottom / sun_up), which keeps the ground under any camera at the centre at the cost of a step when the camera crosses the bottom. Your call; the text has to match the behaviour.
+Comment thread
+docs/sky.md
+extent, so the border never shows as a seam; a narrower band shows it on the ground.
+- **Temporal fog.** The map's motion is not part of the fog history's rejection key. It changes the in-scatter the clamp sees, as
+a moving shadow edge does, so wind and camera motion do not reset the history.
+- **Memory.** `CLOUD_SHADOW_SIZE² × 2 B` per view, 512 KiB, allocated the first frame the view casts the shadow and kept until the
+fesoliveira014
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Optional (accuracy). The map is in view_targets, so a reconfiguration that reallocates the view's images (a resize) releases it, and the next frame reallocates it. "kept until the view is destroyed or its images are reallocated" matches the line above it for the cloud targets.
+fesoliveira014
+added 3 commits
+October 12, 2026 16:22
+fix(render): centre the cloud shadow map on the ground under a camera…
+…
+3b1a753
+```
+… above the layer
+
+A camera at or above the layer's bottom now centres the map on the point
+the datum under it reaches along the sun, so the ground under it stays
+inside the window at any sun elevation. Below the bottom the centre is
+still the camera's own footprint. The window steps when the camera
+crosses the bottom; the content is anchored to the world, so a receiver
+inside both windows reads the same value. The placement text states the
+behaviour for both cases.
+```
+docs(sky): say when the cloud shadow map is released
+…
+9eb547f
+```
+The map is one of the view's images, so a reallocation of them releases it
+and the next frame allocates it again.
+```
+fix(render): treat a camera below the datum as on it for the cloud sh…
+…
+8815d84
+```
+…adow map
+
+A camera below the datum, such as a mirror view's reflected camera under a
+high main camera, centres the map on the datum footprint like a camera at
+or above the layer's bottom. Its own footprint put the window up to 50 km
+from the ground at a low sun. The placement text states the case.
+```
+fesoliveira014
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Fixes for review 5496551022, at 8815d84. Each is in its own commit.
+Required (clouds.c3:222, sky.md:450), 3b1a753. The claim held only for a high sun. I took option B.
+At or above the layer's bottom, the map centres on the point the datum under the camera reaches along the sun: lean = bottom / max(sun_up, 0.1). The ground under the camera is then at the centre at any sun.
+Between the datum and the bottom, nothing changed.
+The comment and the sky.md Placement bullet describe both cases exactly. They also say:
+the window steps when the camera crosses the bottom;
+a receiver inside both windows reads the same value, because the content is world-anchored and texel-snapped;
+the limit for a camera below the bottom: the ground under it sits a · |sun.xz| / max(sun_up, 0.1) off the centre, about 6.9 km for a = 1,400 m at 11.5°.
+Evidence: a camera 3,500 m up looking straight down. The table gives the share of the ground shadowed against shadows off.
+Sun
+Before
+After
+20°
+77.8%
+77.8%
+11.5°
+73.2%
+77.1%
+5.74° (the floor)
+0%
+100%
+Across the crossing of the bottom, the window steps by 3.8 km at 20°. Over the shared ground the shadow differs by at most 1 level, on fewer than 0.1% of pixels: the 0.01 m between the two camera heights.
+Optional (sky.md:467), 9eb547f. The Memory bullet now says "kept until the view is destroyed or its images are reallocated".
+Cameras below the datum, 8815d84. This came up while checking the mirror view. A camera below the datum, such as the sky example's reflected mirror camera under a high main camera, took the below-the-bottom branch with a negative altitude. Its window sat up to 35 km from the ground under it at the floor. Such a camera now counts as on the datum, so its window centres on the datum footprint: 10 m from the ground's projection at 11.5° and 16 m at the floor.
+Re-checks on 8815d84:
+Images with no layer, and with a layer and cast_shadows false, are byte-identical to main 24a91a3 in 10 of 10 scenarios each, main view and mirror.
+Filters shader, abi, sky, light, view and shadow pass.
+41 of 41 acceptance cases pass, 0 validation messages.
+fesoliveira014
+commented
+Oct 12, 2026
+View reviewed changes
+fesoliveira014
+left a comment
+Copy link
+Copy Markdown
+Owner
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Verdict: MERGE at 8815d84, once CI is green
+Required (3b1a753, 8815d84). Option B is in.
+A camera between the datum and the bottom keeps its own-altitude footprint.
+At or above the bottom, or below the datum, the map centres on the footprint of the datum under the camera (lean = bottom / max(sun_up, CLOUD_SUN_FLOOR)), so the ground beneath it stays at the centre at any sun.
+Your numbers show the gain where the old placement failed: 0% to 100% of the ground shadowed at the floor, 73.2% to 77.1% at 11.5°, unchanged at 20°.
+The step at the crossings is bounded: the content is world-snapped, and the shared ground differs by at most 1 level on under 0.1% of pixels.
+The comment and the Placement bullet now state both branches, the crossing step and the below-the-bottom limit. The 6.9 km example comes from the formula, not a measurement, so it fits the docs.
+Found in passing (8815d84). A reflected mirror camera sits below the datum and took the below-bottom branch with a negative altitude, up to 35 km off. Treating it as on the datum puts it 10-16 m from the ground's projection. Good catch: this is the example's own mirror view.
+Optional (9eb547f). The memory bullet now says the map is released when the view's images are reallocated.
+Evidence. The change is the CPU placement expression and the docs only. The 4090 results from 0823578 still hold: no-layer identity, the 0.061 ms map, the receiver cost, sync validation and render acceptance 369/369. Your no-layer and cast_shadows-false identity on 10 of 10 scenarios at this head covers the rest.
+CI was still running at 8815d84 when I posted this. Merge once linux and windows are green at this head.
+Hide details
+View details
+fesoliveira014
+merged commit 43aff93
+into
+main
+Oct 12, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+fesoliveira014
+deleted the
+feat/issue-357-cloud-shadows
+branch
+October 12, 2026 22:54
+fesoliveira014
+mentioned this pull request
+Oct 13, 2026
+Render: extend volumetric fog, clouds and atmosphere coverage
+#357
+Closed
+8 tasks
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

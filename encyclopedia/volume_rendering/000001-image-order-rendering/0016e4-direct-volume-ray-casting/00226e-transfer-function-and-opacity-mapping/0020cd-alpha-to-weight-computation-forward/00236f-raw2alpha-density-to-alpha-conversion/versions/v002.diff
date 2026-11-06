@@ -1,0 +1,195 @@
+--- v001.md
++++ v002.md
+@@ -1,94 +1,135 @@
+ # Raw2Alpha Density to Alpha Conversion
+ 
+-Also called: Raw2Alpha, density to alpha
++Also called: Brightness Control Raycast, Raw Density to Alpha Conversion, Raw2Alpha, density to alpha
+ 
+ ## Overview
+-Raw2Alpha converts raw density values (often called "raw" or "sigma") into per-sample alpha values for direct volume ray casting. It solves the problem of mapping unbounded scalar fields to bounded opacity values suitable for front-to-back compositing. It is distinguished from its parent [Alpha-to-Weight Computation (Forward)](2373-alpha-to-weight-computation-forward.md) by performing the non-linear activation *before* weight/transmittance accumulation, whereas the parent handles the integration step.
++Raw2Alpha converts raw scalar density values into per-sample alpha (transmittance absorption) values for direct volume ray casting [S1, S2, unofficial]. It solves the problem of mapping unbounded or arbitrary density outputs (e.g., from neural networks or voxel grids) to physically plausible opacity values suitable for front-to-back compositing [S1, S2, unofficial]. It is distinguished from its parent [Alpha-to-Weight Computation (Forward)](2373-alpha-to-weight-computation-forward.md) by performing the density-to-opacity mapping *before* weight computation, allowing for non-linear activation (exponential) and handling of variable sampling intervals [S1, S3, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- `density`: Tensor of raw density values $\sigma$ (shape: $N$).
+-- `shift`: Scalar bias term $b$.
+-- `interval`: Scalar segment length $\delta$ (step size along the ray).
++- `density`: Raw density values. Can be a scalar tensor (uniform) or per-point tensor (non-uniform) [S1, S3, unofficial].
++- `shift`: A float added to density before exponentiation [S1, unofficial].
++- `interval`: Sampling distance. Can be a scalar (uniform) or a tensor of per-point intervals (non-uniform) [S1, S3, unofficial].
+ 
+ **Outputs:**
+-- `alpha`: Tensor of alpha values $\alpha$ (shape: $N$).
++- `alpha`: Per-sample alpha values in range $[0, 1]$ [S1, S3, unofficial].
++- `exp`: Intermediate exponential density values, saved for backward pass [S3, unofficial].
+ 
+ **Data Structures:**
+-- `density`: Floating point tensor.
+-- `alpha`: Floating point tensor.
+-
+-**Formulas:**
+-The conversion uses a shifted softplus-like activation followed by an exponential decay based on segment length:
+-$$ \alpha = 1 - (1 + \exp(\sigma + b))^{-\delta} $$
+-
+-The derivative required for backpropagation is:
+-$$ \frac{\partial \alpha}{\partial \sigma} = \delta \cdot (1 + \exp(\sigma + b))^{-(\delta + 1)} \cdot \exp(\sigma + b) $$
++- `density`: Tensor of shape $(N)$, where $N$ is the number of samples [S1, S3, unofficial].
++- `interval`: Scalar or Tensor of shape $(N)$ [S1, S3, unofficial].
++- `exp`: Tensor of shape $(N)$, storing $\exp(\text{density} + \text{shift})$ [S3, unofficial].
+ 
+ **Parameters:**
+-- `shift` ($b$): Bias. Typical values are not explicitly fixed in the source but are learned or tuned hyperparameters [S1, unofficial].
+-- `interval` ($\delta$): Distance between samples. Must be positive [S1, unofficial][S2].
++- `shift`: Float. Typical value not specified in sources, but used to control the activation threshold [S1, S3, unofficial].
++- `interval`: Float or Tensor. Represents the distance between samples along the ray [S1, S3, unofficial].
++- `brightness`: Float. A constant scaling factor for alpha, typically set to 50.0 [S2, unofficial].
++- `val_threshold`: Float. A uniform parameter used to scale alpha contribution [S2, unofficial].
++
++**Steps:**
++
++1. **Compute Exponential Density:**
++   Calculate the shifted exponential density $e$ for each sample $i$:
++   $$ e_i = \exp(\text{density}_i + \text{shift}) $$
++   [S1, S3, unofficial]
++
++2. **Compute Alpha (Uniform):**
++   If `interval` is a scalar:
++   $$ \alpha_i = 1 - (1 + e_i)^{-\text{interval}} $$
++   [S1, S3, unofficial]
++
++3. **Compute Alpha (Non-Uniform):**
++   If `interval` is a per-point tensor:
++   $$ \alpha_i = 1 - (1 + e_i)^{-\text{interval}_i} $$
++   [S1, unofficial]
++
++4. **Backward Pass (Gradient Computation):**
++   Given gradient of loss w.r.t. alpha, `grad_back`:
++   $$ \text{grad}_i = \min(e_i, 10^{10}) \cdot (1 + e_i)^{-\text{interval}_i - 1} \cdot \text{interval}_i \cdot \text{grad\_back}_i $$
++   [S1, S3, unofficial]
++   Note: $e_i$ is clamped to $10^{10}$ to prevent overflow [S1, S3, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+ import torch
+-import torch.nn.functional as F
++import math
+ 
+-def raw2alpha_forward(density: torch.Tensor, shift: float, interval: float) -> torch.Tensor:
++def raw2alpha_forward(density: torch.Tensor, shift: float, interval) -> tuple:
+     """
+-    Computes alpha from raw density.
+-    :param density: Raw density values (sigma).
+-    :param shift: Bias term.
+-    :param interval: Segment length (delta).
+-    :return: Alpha values.
++    Converts raw density to alpha.
++    :param density: Tensor of raw density values.
++    :param shift: Float shift parameter.
++    :param interval: Float (uniform) or Tensor (non-uniform) of sampling distances.
++    :return: alpha tensor, exp tensor (for backward pass)
+     """
+-    # Compute shifted softplus: log(1 + exp(sigma + shift))
+-    # Note: The formula is 1 - (1 + exp(sigma + shift))^-delta
+-    # We compute the base term first
+-    base = 1.0 + torch.exp(density + shift)
+-    alpha = 1.0 - torch.pow(base, -interval)
+-    return alpha
++    # Step 1: Compute exponential density
++    exp_d = torch.exp(density + shift)
++    
++    # Step 2 & 3: Compute alpha
++    # Handle both uniform (scalar) and non-uniform (tensor) interval
++    if isinstance(interval, torch.Tensor):
++        # Non-uniform
++        alpha = 1.0 - torch.pow(1.0 + exp_d, -interval)
++    else:
++        # Uniform
++        alpha = 1.0 - torch.pow(1.0 + exp_d, -interval)
++        
++    return alpha, exp_d
+ 
+-def raw2alpha_backward(grad_back: torch.Tensor, density: torch.Tensor, shift: float, interval: float) -> torch.Tensor:
++def raw2alpha_backward(grad_back: torch.Tensor, exp_d: torch.Tensor, interval) -> torch.Tensor:
+     """
+-    Computes gradient of alpha w.r.t density.
+-    :param grad_back: Gradient from subsequent layers (dL/d_alpha).
+-    :param density: Raw density values (sigma).
+-    :param shift: Bias term.
+-    :param interval: Segment length (delta).
+-    :return: Gradient dL/d_sigma.
++    Computes gradient of alpha w.r.t. density.
++    :param grad_back: Gradient flowing back from loss w.r.t. alpha.
++    :param exp_d: Pre-computed exponential density from forward pass.
++    :param interval: Same interval type as forward pass.
++    :return: Gradient w.r.t. density.
+     """
+-    # Derivative: delta * (1 + exp(sigma + shift))^(-delta - 1) * exp(sigma + shift)
+-    exp_term = torch.exp(density + shift)
+-    base = 1.0 + exp_term
++    # Clamp exp_d to prevent overflow in gradient calculation
++    exp_d_clamped = torch.min(exp_d, torch.tensor(1e10))
+     
+-    # Compute d_alpha/d_sigma
+-    # Note: pow(base, -interval - 1) is equivalent to base^(-interval) / base
+-    d_alpha_d_sigma = interval * torch.pow(base, -interval - 1.0) * exp_term
+-    
+-    # Chain rule: dL/d_sigma = dL/d_alpha * d_alpha/d_sigma
+-    grad_density = grad_back * d_alpha_d_sigma
+-    return grad_density
++    # Compute gradient
++    # Formula: grad = min(e, 1e10) * (1 + e)^(-interval - 1) * interval * grad_back
++    if isinstance(interval, torch.Tensor):
++        # Non-uniform
++        grad = exp_d_clamped * torch.pow(1.0 + exp_d, -interval - 1.0) * interval * grad_back
++    else:
++        # Uniform
++        grad = exp_d_clamped * torch.pow(1.0 + exp_d, -interval - 1.0) * interval * grad_back
++        
++    return grad
+ ```
+ 
+-**Edge Cases:**
+-- If `interval` is 0, alpha is 0 [S1, unofficial].
+-- Numerical stability: `exp(density + shift)` can overflow if the argument is large. In practice, `shift` is often negative to keep values in a safe range [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Overflow:** The exponential $e$ can become infinite if `density + shift` is large. This is handled by clamping $e$ to $10^{10}$ in the backward pass [S1, S3, unofficial].
++- **Boundary Checks:** In shader implementations, the code assumes the volume has a cube-like shape (normalized 0.0 to 1.0) for boundary checks [S2, unofficial].
++- **Discard Fragments:** If the accumulated color is exactly black with zero alpha, the fragment is discarded [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Post-activation Trilinear Interpolation
+-A variant where trilinear interpolation of raw values is performed *before* the Raw2Alpha activation, rather than after. This is used in voxel-based methods to maintain smoothness in the raw field before opacity calculation. The formula is identical to the standard Raw2Alpha but applied to the interpolated raw value $V_{interp}$: $\alpha = 1 - (1 + \exp(V_{interp} + b))^{-\delta}$ [S2].
++A method where the exponential activation function is applied *after* trilinear interpolation of raw values, rather than before [S4]. The post-activated alpha is computed as $\alpha_{\text{post}} = 1 - (1 + \exp(\text{interp}(x, V)))^{-\delta}$, where $\text{interp}(x, V)$ is the trilinear interpolation of raw values $V$ at position $x$, and $\delta$ is the segment length [S4]. This contrasts with pre-activation methods where interpolation happens after activation [S4].
++
++### Raw Density to Alpha Backward Pass (Uniform)
++Computes the gradient of the alpha conversion with respect to the input density for uniform sampling intervals [S1, unofficial]. It uses the pre-computed exponential density values and the gradient flowing back from the loss [S1, unofficial]. The gradient is calculated as $\text{grad}_i = \min(e_i, 10^{10}) \cdot (1 + e_i)^{-\text{interval}-1} \cdot \text{interval} \cdot \text{grad\_back}_i$ [S1, unofficial].
++
++### Grayscale to RGBA Threshold Conversion
++Converts a 1D grayscale volume buffer to a 4D RGBA buffer by replicating the scalar value to RGB channels and applying a hard alpha threshold [S5, unofficial]. The alpha channel is set to 0 if the input value is less than 30, and 255 otherwise [S5, unofficial]. This is a simple thresholding method distinct from the continuous Raw2Alpha conversion [S5, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ for forward and backward passes, where $N$ is the number of samples. The operations are element-wise and highly parallelizable on GPU [S1, unofficial].
+-- **Memory Complexity:** $O(N)$ to store intermediate `exp` and `base` terms if gradients are needed [S1, unofficial].
+-- **Strengths:** Differentiable, smooth transition from density to alpha, avoids hard thresholds [S1, unofficial].
+-- **Limitations:** Sensitive to the choice of `shift` and `interval`. Poorly chosen parameters can lead to vanishing or exploding gradients [S1, unofficial].
++- **Time Complexity:** $O(N)$ for $N$ samples, as it involves element-wise operations [S1, S3, unofficial].
++- **Memory Complexity:** $O(N)$ to store intermediate exponential values for the backward pass [S3, unofficial].
++- **Strengths:** Handles non-linear density mappings effectively; supports both uniform and non-uniform sampling intervals [S1, S3, unofficial].
++- **Limitations:** Requires careful tuning of `shift` and `interval` parameters to avoid saturation or transparency [S1, S2, unofficial].
++- **When to Use:** When raw density outputs need to be converted to alpha for ray casting, especially in neural volume rendering [S1, S3, unofficial].
++- **When Not to Use:** When simple linear scaling is sufficient or when hardware does not support the required floating-point operations [S2, unofficial].
+ 
+ ## Background
+-The method is central to Direct Voxel Grid Optimization (DVGO) and its variants like Ref-DVGO. It allows for efficient training of neural radiance fields by operating on voxel grids rather than implicit MLPs, leveraging the speed of trilinear interpolation and the differentiability of the activation function [S1, unofficial][S2].
++The method originates from Direct Voxel Grid Optimization (DirectVoxGO) [S1, unofficial][S4]. It was introduced to enable fast convergence in radiance field reconstruction by optimizing density values directly [S4]. The implementation is available in the DirectVoxGO repository [S1, unofficial] and its reference implementation [S3, unofficial]. It is also used in Visualization Library for GPU raycast volume rendering [S2, unofficial].
+ 
+ ## Sources
+-[S1] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
+-[S2] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26+[S1] sunset1995/DirectVoxGO, https://github.com/sunset1995/DirectVoxGO, fetched 2026-10-26 (unofficial)
++[S2] GPU Raycast Volume Rendering with Transfer ... - Visualization Library, https://visualizationlibrary.org/documentation/pag_guide_raycast_volume.html, fetched 2026-10-26 (unofficial)
++[S3] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
++[S4] Direct Voxel Grid Optimization: Super-fast Convergence for Radiance Fields Reconstruction, https://doi.org/10.1109/cvpr52688.2022.00538, fetched 2026-10-26
++[S5] abhishektrip/SliceBasedVolumeRendering, https://github.com/abhishektrip/SliceBasedVolumeRendering, fetched 2026-10-27 (unofficial)

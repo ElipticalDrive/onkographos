@@ -1,0 +1,120 @@
+# Best Viewpoint Selection via Opacity Entropy
+
+Also called: Camera Optimization via Opacity Entropy, Differentiable Opacity Entropy, Differentiable Viewpoint Selection, Opacity Entropy, Opacity Entropy Loss, Viewpoint Sampling with Entropy Evaluation, Visual Entropy
+
+## Overview
+Best Viewpoint Selection via Opacity Entropy optimizes camera parameters to maximize the visual information captured in a volume rendering by maximizing the entropy of the rendered alpha channel [S2]. It differs from its sibling [Best Viewpoint Selection via Visibility Entropy](1367-best-viewpoint-selection-via-visibility-entropy.md) by using raw opacity accumulation rather than a normalized visibility distribution, making it sensitive to the distribution of absorbed and transmitted light rather than geometric visibility [S2]. It builds on [Radiance-field optimization](44-radiance-field-optimization.md) by treating camera pose as a differentiable variable optimized via automatic differentiation [S2].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A differentiable volume renderer that takes camera parameters and volume data to produce an image $C$ [S2].
+*   **Input:** Initial camera parameters (longitude $\lambda$, latitude $\phi$) [S2].
+*   **Output:** Optimized camera parameters $(\lambda^*, \phi^*)$ that maximize the Opacity Entropy [S2].
+
+**Data Structures:**
+*   **Image $C$:** A 3D array of shape $H \times W \times 4$, where $H$ and $W$ are image height and width. $C[x, y, c]$ represents color channel $c$ (0: Red, 1: Green, 2: Blue, 3: Alpha) at pixel coordinates $(x, y)$ [S2]. The alpha channel must be linearized [S2].
+*   **Camera Parameters:** A vector $p = [\lambda, \phi]$ representing longitude and latitude [S2]. The camera is placed on a sphere enclosing the volume and faces toward the object center [S2].
+
+**Formulas:**
+The Opacity Entropy $OE(C)$ is defined as the normalized entropy of the alpha channel vector $\mathbf{x} = C[:,:,3]$ [S2]:
+
+$$
+OE(C) = H(\mathbf{x}) = \frac{1}{\log_2 N} \sum_{i=1}^{N} p_i \log_2 p_i
+$$
+
+where:
+*   $N = H \times W$ is the total number of pixels [S2].
+*   $p_i = \frac{\mathbf{x}_i}{\sum_{j=1}^{N} \mathbf{x}_j}$ is the normalized opacity at pixel $i$ [S2].
+
+**Steps:**
+1.  **Initialization:** Place the camera at uniformly seeded positions on the enclosing sphere. Typical initial longitudes are $\{45^\circ, 135^\circ, 225^\circ, 315^\circ\}$ and latitudes are $\pm 45^\circ$ [S2]. Multiple optimization runs may be started in parallel from different seeds to avoid local minima [S2].
+2.  **Rendering:** Render the volume from the current camera parameters to obtain image $C$ [S2].
+3.  **Loss Calculation:** Compute the Opacity Entropy $OE(C)$ using the formula above [S2].
+4.  **Gradient Computation:** Compute the gradient of the entropy with respect to the camera parameters $\nabla_p OE(C)$ using Automatic Differentiation (AD) [S2]. This can be done via the adjoint method or forward differences [S2].
+5.  **Optimization:** Perform gradient descent optimization (e.g., 20 iterations) to maximize the opacity entropy [S2].
+6.  **Selection:** Select the camera parameters from the optimization run that achieved the highest final entropy value [S2].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_opacity_entropy(alpha_channel):
+    """
+    Computes normalized opacity entropy from the linearized alpha channel.
+    Args:
+        alpha_channel: list or array of shape (N,) representing linearized alpha values.
+    Returns:
+        float: Normalized entropy value in range [-1.0, 0.0].
+    """
+    n = len(alpha_channel)
+    if n == 0:
+        return 0.0
+    total_alpha = sum(alpha_channel)
+    if total_alpha == 0.0:
+        return 0.0  # Guard against division by zero [G]
+    p = [x / total_alpha for x in alpha_channel]
+    entropy_sum = sum(val * math.log2(val) for val in p if val > 0.0)
+    return entropy_sum / math.log2(n) if n > 1 else 0.0
+
+def optimize_viewpoint(render_fn, initial_params, num_iterations=20, learning_rate=0.1):
+    """
+    Optimizes camera longitude and latitude to maximize opacity entropy.
+    Args:
+        render_fn: Callable taking (lon, lat) -> image array of shape (H, W, 4).
+        initial_params: tuple (lon, lat) in degrees.
+        num_iterations: int, number of optimization steps.
+        learning_rate: float, step size for gradient updates.
+    Returns:
+        tuple: (best_params, best_entropy)
+    """
+    lon, lat = initial_params
+    best_entropy = -float('inf')
+    best_params = (lon, lat)
+    for _ in range(num_iterations):
+        image = render_fn(lon, lat)
+        alpha_flat = [image[y][x][3] for y in range(len(image)) for x in range(len(image[0]))]
+        current_entropy = compute_opacity_entropy(alpha_flat)
+        # Compute gradients via Automatic Differentiation [S2]
+        grad_lon, grad_lat = compute_gradients(render_fn, lon, lat, current_entropy)
+        # Gradient ascent to maximize entropy
+        lon += learning_rate * grad_lon
+        lat += learning_rate * grad_lat
+        if current_entropy > best_entropy:
+            best_entropy = current_entropy
+            best_params = (lon, lat)
+    return best_params, best_entropy
+```
+
+**Parameters:**
+*   **Initial Viewpoints:** Uniformly seeded longitudes $\{45^\circ, 135^\circ, 225^\circ, 315^\circ\}$ and latitudes $\pm 45^\circ$ [S2].
+*   **Iterations:** 20 iterations of gradient descent [S2].
+*   **Camera Model:** Camera on a sphere enclosing the volume, facing the center [S2].
+
+**Edge Cases and Pitfalls:**
+*   **Local Minima:** The optimization is sensitive to initial views and may converge to local minima [S2]. Multiple parallel runs with different seeds are recommended [S2].
+*   **Zero Alpha:** If the volume is empty or fully transparent from a viewpoint, the alpha channel sum is zero, leading to division by zero in normalization [G]. Guard against this by returning 0 entropy or skipping the step.
+*   **Precision:** Rounding errors may cause slight differences between adjoint and forward methods, but they compute the same gradients theoretically [S2].
+
+## Subtopics
+
+### [Best Viewpoint Selection via Visibility Entropy](1367-best-viewpoint-selection-via-visibility-entropy.md)
+Uses a probabilistic information channel model where visibility is normalized, focusing on geometric information distribution rather than raw opacity. Choose when robustness to discretization is required.
+
+## Operating characteristics
+*   **Time Complexity:** The cost is dominated by the volume rendering pass and the backward pass [S2]. On an NVIDIA RTX 2070 (Intel Xeon 8x@3.60Ghz CPU, 64GB RAM, Windows 10, CUDA 11.1), a single forward/backward pass takes 14.6 ms / 9.5 ms respectively, totaling 24.1 ms for 20 iterations [S2].
+*   **Memory Complexity:** The adjoint method requires storing the computation graph or intermediate variables for the backward pass, which can be memory-intensive [S2]. Forward-immediate stores forward variables for reuse, while forward-delayed re-traces the volume, requiring more time but potentially less memory than the adjoint method in some contexts [S2].
+*   **Performance:** Forward-immediate is slightly faster than the adjoint method (21.3 ms vs 24.1 ms total for 20 iterations in one comparison) [S2]. Forward-delayed is approximately 30% slower due to re-tracing [S2].
+*   **Strengths:** Differentiable, allowing gradient-based optimization. Can find viewpoints with high visual information (entropy) more efficiently than uniform sampling [S2].
+*   **Limitations:** Sensitive to initialization (local minima). Computationally expensive compared to non-differentiable sampling if many views are needed [S2].
+*   **When to Use:** When a single or few optimal viewpoints are needed for visualization or analysis, and computational resources allow for gradient-based optimization [G].
+*   **When Not to Use:** When real-time performance is critical, or when the volume is very large and rendering is too slow for many iterations [G].
+
+## Background
+The method was proposed by Ji et al. [19] and applied to volume rendering optimization in the context of Differentiable Direct Volume Rendering (DiffDVR) [S2]. It is used to select the best sampled view for volume visualization by maximizing visual entropy [S2]. The approach leverages Automatic Differentiation (AD) to optimize camera parameters (longitude and latitude) [S2].
+
+## Sources
+[S1] iVR-GS: Inverse Volume Rendering for Explorable Visualization via Editable 3D Gaussian Splatting., https://doi.org/10.1109/tvcg.2025.3567121, fetched 2026-10-26
+[S2] Differentiable Direct Volume Rendering, https://arxiv.org/abs/2107.12672v1, fetched 2026-10-26
+[S3] (PDF) Differentiable Direct Volume Rendering - ResearchGate, https://www.researchgate.net/publication/353510271_Differentiable_Direct_Volume_Rendering, fetched 2026-10-30 (unofficial)

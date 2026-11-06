@@ -1,0 +1,90 @@
+# Space Repetition
+Also called: Modulo Tiling, Tiling via Modulo, Infinite Repetition, Infinite Domain Repetition, repeat2d
+
+## Overview
+Space Repetition is a domain-transform technique that creates infinite, periodic repetitions of a signed distance field (SDF) in 3D space by wrapping query coordinates using modulo arithmetic [S1, S3, S4, unofficial]. It allows rendering an infinite grid of primitives "for free" by modifying the position before querying the base SDF [S4, unofficial]. Unlike [Polar Modulo](3358-polar-modulo.md), which repeats objects in a polar/cylindrical arrangement, Space Repetition tiles space with a rectangular (Cartesian) cell structure [S3, unofficial].
+
+## How it works
+**Inputs:**
+- `p`: The 3D query position vector ($p \in \mathbb{R}^3$) [S3, unofficial].
+- `c`: The repetition period vector (spacing) defining the size of each tile in each dimension ($c \in \mathbb{R}^3, c_i > 0$) [S2, S3, unofficial].
+
+**Outputs:**
+- `p_rep`: The wrapped position vector ($p_{rep} \in \mathbb{R}^3$) mapped into the fundamental domain (typically centered at the origin) [S2, S3, unofficial].
+
+**Data Structures:**
+- Vectors are standard 3D Cartesian coordinates. No complex data structures are required; the operation is element-wise [S3, unofficial].
+
+**Steps:**
+1.  Divide the query position `p` by the period `c` [S2, S3, unofficial].
+2.  Round each component of the result to the nearest integer [S2, S3, unofficial].
+3.  Multiply the rounded vector by the period `c` [S2, S3, unofficial].
+4.  Subtract the result from the original position `p` [S2, S3, unofficial].
+
+**Formula:**
+The repeated position $p_{rep}$ is calculated as:
+$$ p_{rep} = p - c \cdot \text{round}\left(\frac{p}{c}\right) $$
+where the division and multiplication are component-wise [S2, S3, unofficial].
+
+**Parameters:**
+- `c` (spacing): A vector defining the repetition period in each dimension. For uniform tiling, $c = (s, s, s)$ [S2, unofficial]. For non-uniform tiling, components can differ [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The `round` function maps coordinates to the center of the tile. If the object is not centered at the origin within its tile, the visual result will be shifted. To center an object of size $s$ in a tile of period $c$, the object should be defined such that its center aligns with the tile center after wrapping [S3, unofficial].
+- **Boundary Continuity:** The SDF is continuous across tile boundaries because the wrapping function is continuous (modulo with rounding). However, the derivative (gradient) may be discontinuous at the exact boundaries where $p_i/c_i$ is exactly $k + 0.5$, potentially causing artifacts in normal-based shading [S4, G, unofficial].
+- **Degenerate Input:** If any component of `c` is zero, division by zero occurs. `c` must be non-zero [S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def space_repetition(p: list[float], c: list[float]) -> list[float]:
+    """
+    Wraps position p into the fundamental domain defined by period c.
+    
+    Args:
+        p: List of 3 floats [x, y, z] representing the query position.
+        c: List of 3 floats [cx, cy, cz] representing the repetition period.
+        
+    Returns:
+        List of 3 floats representing the wrapped position.
+    """
+    # Component-wise division
+    ratio = [p[i] / c[i] for i in range(3)]
+    
+    # Component-wise rounding to nearest integer
+    rounded = [round(ratio[i]) for i in range(3)]
+    
+    # Component-wise multiplication by period
+    shifted = [c[i] * rounded[i] for i in range(3)]
+    
+    # Component-wise subtraction
+    p_rep = [p[i] - shifted[i] for i in range(3)]
+    
+    return p_rep
+```
+
+## Subtopics
+
+### 2D Space Repetition
+A variant that operates on 2D coordinates ($p \in \mathbb{R}^2$), useful for infinite floor tiles or 2D SDF patterns. The formula is identical but applied to 2 components [S3, unofficial].
+
+### Infinite Spheres
+A common application where a single sphere primitive is repeated infinitely in all directions using this method [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ per query. The operation involves a constant number of arithmetic operations (division, rounding, multiplication, subtraction) regardless of scene complexity [S2, S3, unofficial].
+- **Memory Complexity:** $O(1)$. No additional data structures are stored; the state is purely functional [S3, unofficial].
+- **Strengths:** Extremely efficient for creating infinite environments or dense grids without increasing the number of primitives in the scene graph [S4, unofficial]. It is "cheating" in the sense that it reuses a single primitive definition [S4, unofficial].
+- **Limitations:** Only supports rectangular grid tiling. Cannot create complex periodic structures like hexagonal grids without additional transformations [S3, unofficial]. Normal calculation requires care at tile boundaries due to potential gradient discontinuities [S4, unofficial].
+- **When to use:** When an infinite grid of identical objects is needed (e.g., a floor, a wall of pillars, a starfield) [S2, S4, unofficial].
+- **When not to use:** When objects need to vary in position, scale, or type within the grid, or when non-rectangular periodicity is required [S3, unofficial].
+
+## Background
+Space Repetition is a fundamental technique in Signed Distance Field (SDF) raymarching, popularized by the "inigo quilez" style of GLSL shaders and widely documented in online SDF tutorials [S4, unofficial]. It is a direct application of modulo arithmetic to coordinate space [S3, unofficial]. The technique is often referred to as "cheating" because it avoids the computational cost of rendering multiple distinct objects by reusing a single SDF evaluation [S4, unofficial]. It is a specific case of Domain Repetition [Parent].
+
+## Sources
+[S1] skmhrk1209/Torch-Sphere-Tracer, https://github.com/skmhrk1209/Torch-Sphere-Tracer, fetched 2026-10-26 (unofficial)
+[S2] JamesRicher/TerminalSignedDistanceFieldRenderer, https://github.com/JamesRicher/TerminalSignedDistanceFieldRenderer, fetched 2026-10-27 (unofficial)
+[S3] bhubbard/sdf-math-rs, https://github.com/bhubbard/sdf-math-rs, fetched 2026-10-27 (unofficial)
+[S4] Introduction to Raymarching Distance Functions, https://observablehq.com/@gre/introduction-to-raymarching-distance-functions, fetched 2026-10-29 (unofficial)

@@ -1,0 +1,140 @@
+# Direct Light Sampling
+
+Also called: Direct Illumination Sampling, Iluminación directa
+
+## Overview
+Direct Light Sampling is a local illumination technique that explicitly shoots a ray from a surface or volume intersection point toward a light source to determine direct visibility and contribution [S1, unofficial][S2, unofficial]. It solves the problem of visualizing shadows and light contributions in scenes with participating media or geometry by testing occlusion along the light path [S1, unofficial]. Unlike sibling methods such as [Lighting Models](2056-lighting-models.md) which may use precomputed approximations, or [Two-Pass Shadow Casting](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) which uses global buffers, Direct Light Sampling performs per-sample visibility tests against specific light sources [S1, unofficial][S2, unofficial]. It differs from [Shadow Ray Casting](2796-shadow-ray-casting.md) in that it is often integrated into a broader path tracing or ray marching loop where the light direction is derived from the current intersection, and from [Light Sampling for NEE](2616-light-sampling-for-nee.md) by focusing on the immediate geometric visibility rather than complex multiple importance sampling weights for next-event estimation in deep media.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Current intersection point $\mathbf{p}$, scene geometry $O$, light source $L$ (or list of lights), material properties at $\mathbf{p}$.
+*   **Output:** Direct illumination color contribution $C_{direct}$ at $\mathbf{p}$.
+
+**Data Structures:**
+*   **Ray:** Defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+*   **Intersection Test:** Returns the distance $t$ to the closest hit object or light, or $\infty$ if no hit occurs.
+*   **Light Hit:** Contains color, direction, distance, and probability density function (PDF) of the sampling.
+
+**Steps:**
+1.  **Light Direction Calculation:** Compute the normalized direction vector $\mathbf{d}_l$ from the intersection point $\mathbf{p}$ to the light source position $\mathbf{p}_L$:
+    $$ \mathbf{d}_l = \text{normalize}(\mathbf{p}_L - \mathbf{p}) $$
+    [S1, unofficial]
+
+2.  **Shadow Ray Creation:** Create a shadow ray $\mathbf{r}_s$ originating at $\mathbf{p}$ (offset slightly to avoid self-intersection) in direction $\mathbf{d}_l$:
+    $$ \mathbf{r}_s = \text{ray}(\mathbf{p}, \mathbf{d}_l) $$
+    [S1, unofficial]
+
+3.  **Light Intersection Test:** Test for intersection between $\mathbf{r}_s$ and the light source $L$. Let $t_L$ be the distance to the light hit.
+    $$ t_L = \text{intersection\_test}(\mathbf{r}_s, L) $$
+    [S1, unofficial]
+
+4.  **Occlusion Test:** Test for intersection between $\mathbf{r}_s$ and all scene objects $O \in \mathcal{O}$. Find the minimum positive distance $t_O$:
+    $$ t_O = \min \{ t \mid \exists o \in \mathcal{O}, t = \text{intersection\_test}(\mathbf{r}_s, o) \land t > 0 \} $$
+    [S1, unofficial]
+
+5.  **Visibility Determination:** The light is visible if it is hit ($t_L < \infty$) and is closer than any occluding object ($t_L \le t_O$).
+    $$ \text{visible} = (t_L < \infty) \land (t_L \le t_O) $$
+    [S1, unofficial]
+
+6.  **Contribution Calculation:** If visible, compute the direct light contribution.
+    *   **Simple Model:** Add the light's color scaled by intensity and material response [S1, unofficial].
+    *   **Unbiased Model (S2):** Use the power heuristic to weight the sample if multiple lights are sampled uniformly.
+        $$ \text{weight} = \frac{f(x)^2}{f(x)^2 + g(x)^2} $$
+        where $f(x)$ is the PDF of the light hit and $g(x)$ is the PDF of the current sampling strategy. The contribution is:
+        $$ C_{direct} = \text{material\_evaluate}(\mathbf{p}) \cdot \frac{\text{lightHit.colour} \cdot \text{weight}}{\text{lightHit.pdf}} $$
+        [S2, unofficial]
+    *   **Scaling:** If uniform sampling over $N$ lights is used, scale the result by $N$ [S2, unofficial].
+
+7.  **Specular Handling:** If the material has specular lobes and the light direction does not align with the reflection vector, the contribution may be zero or handled separately depending on the shading model [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def direct_light_sampling(p, normal, material, lights, objects):
+    """
+    Computes direct illumination for point p.
+    """
+    total_direct = 0.0
+    
+    # Select a light to sample (simplified: pick first or random)
+    # In a full path tracer, this would be part of a loop over lights or a single sample
+    light = lights[0] # Placeholder for selection logic
+    
+    # 1. Calculate direction to light
+    light_pos = light.position
+    dl = normalize(light_pos - p)
+    
+    # 2. Create shadow ray
+    # Offset p slightly along normal to prevent self-intersection
+    p_offset = p + normal * 1e-4
+    shadow_ray = Ray(p_offset, dl)
+    
+    # 3. Test intersection with light
+    t_light = intersection_test(shadow_ray, light)
+    
+    # 4. Test occlusion by scene objects
+    min_t_obj = infinity
+    for obj in objects:
+        t_obj = intersection_test(shadow_ray, obj)
+        if t_obj > 0 and t_obj < min_t_obj:
+            min_t_obj = t_obj
+            
+    # 5. Check visibility
+    is_visible = (t_light < infinity) and (t_light <= min_t_obj)
+    
+    if is_visible:
+        # 6. Calculate contribution
+        # Simple direct lighting model
+        # C = Material * LightColor * max(0, N . L)
+        ndl = dot(normal, dl)
+        if ndl > 0:
+            # Using simple model from S1
+            light_color = light.color * light.intensity
+            material_color = material.evaluate(p, normal, dl)
+            total_direct = material_color * light_color * ndl
+            
+            # If using unbiased PDF weighting (S2), additional logic required:
+            # pdf = light.pdf(p, dl)
+            # weight = power_heuristic(1, pdf, 1, current_pdf)
+            # total_direct = material_color * (light_color * weight / pdf)
+            
+    return total_direct
+```
+
+**Parameters:**
+*   **Offset:** Small epsilon ($10^{-4}$) to prevent self-intersection [G].
+*   **Light Selection:** Uniform random or deterministic [S2, unofficial].
+
+**Edge Cases:**
+*   **No Lights:** Return zero contribution [S2, unofficial].
+*   **Self-Intersection:** Ensure shadow ray origin is offset from the surface [G].
+*   **Degenerate Light:** Point lights with zero intensity return zero [S2, unofficial].
+
+## Subtopics
+
+### [Light Sampling for NEE](2616-light-sampling-for-nee.md)
+Focuses on unbiased estimation using PDFs for multiple importance sampling.
+
+### [Direct Illumination Sampling with Mesh Intersection](4450-direct-illumination-sampling-with-mesh-intersection.md)
+Specialized for explicit triangle meshes.
+
+### [Light Ray Sampling](4885-light-ray-sampling.md)
+Integrates density through participating media for soft shadows.
+
+### [Direct Light Contribution Estimation](5411-direct-light-contribution-estimation.md)
+Splits occlusion into local and global segments.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of lights sampled and $M$ is the number of objects tested per shadow ray. This is expensive for complex scenes with many objects or lights.
+*   **Memory Complexity:** $O(1)$ per sample, assuming geometry is accessible via acceleration structures (BVH/KD-Tree) which are pre-built.
+*   **Performance:** High noise in real-time applications if insufficient samples are used due to hardware limitations [S1, unofficial]. Requires bilinear or Gaussian filtering to reduce noise [S1, unofficial].
+*   **Strengths:** Accurate hard shadows, simple to implement, works with any geometry type.
+*   **Limitations:** Slow for large scenes, noisy with few samples, does not account for indirect lighting or soft shadows from area lights without multiple samples.
+
+## Background
+Originated in early ray tracing literature as a method to compute direct illumination. The specific implementation details cited here come from educational resources on Sparse Voxel Octree compression and global illumination [S1, unofficial] and open-source path tracer implementations [S2, unofficial]. It is a fundamental component of modern path tracers and real-time volumetric renderers.
+
+## Sources
+[S1] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
+[S2] thewildnath/PathTracer, https://github.com/thewildnath/PathTracer, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,80 @@
+# Prefiltering
+Also called: Adaptive Prefiltering, Anisotropy Prefiltering
+
+## Overview
+Prefiltering is a technique used in volume rendering and participating media simulation to remove singularity-like artifacts and avoid discretization artifacts by replacing them with a smooth approximation [S1]. It is particularly critical for media with insufficient optical thickness to naturally blur sampled illumination, where naive prefiltering would obscure background features [S1]. Unlike naive prefiltering of source illumination, this method is adaptive, allowing the perception of background illumination features while maintaining smoothness [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of discrete ordinates (directions) $\Omega_n$ with associated importance weights $w_n$, and a scalar factor $\beta$.
+*   **Output:** An initial anisotropy value $a_{n,i}$ for each ordinate $i$ in the set, used to initialize the scattering propagation or splatting process.
+
+**Data Structures:**
+*   **Ordinates:** A list of directional vectors. Each ordinate $n$ has an associated importance $w_n \in (0, 1)$.
+*   **Importance Mapping:** The importance $w_n$ is proportional to the solid angle $\Omega_n$ of the ordinate [S1].
+
+**Parameters:**
+*   **$\beta$**: A scalar factor defining the proportionality in the anisotropy mapping heuristic. Value: Tuned empirically once for each environment map [S1].
+
+**Steps:**
+1.  **Calculate Importance:** Determine the importance $w_n$ for each ordinate $n$. This is mapped from the solid angle proportion, where important ordinates (those contributing significantly to the image) have higher importance and smaller solid angles [S1].
+2.  **Compute Anisotropy:** For each ordinate $i$, calculate the initial anisotropy $a_{n,i}$ using the following formula:
+    $$ a_{n,i} = \left(1 - \frac{w_n}{N}\right)^\beta $$
+    where:
+    *   $N$ is the total number of ordinates.
+    *   $w_n$ is the importance of ordinate $n$.
+    *   $\beta > 0$ is the scalar factor [S1].
+3.  **Interpretation:** Important ordinates (high $w_n$) result in lower anisotropy values (denser in the directional domain), while less important ordinates (low $w_n$) result in higher anisotropy values (sparser, larger solid angles) [S1].
+4.  **Clamping (Optional):** Apply clamping to reduce any remaining singularities after the initial calculation [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_prefilter_anisotropy(ordinates, beta):
+    """
+    Computes initial anisotropy for prefiltering.
+    
+    Args:
+        ordinates: List of objects, each having an 'importance' attribute (w_n).
+        beta: Scalar factor > 0.
+        
+    Returns:
+        List of anisotropy values corresponding to each ordinate.
+    """
+    N = len(ordinates)
+    anisotropies = []
+    
+    for ord in ordinates:
+        w_n = ord.importance
+        # Formula: a_n,i = (1 - w_n / N) ^ beta
+        # Note: w_n is in (0, 1). N is total count.
+        base = 1.0 - (w_n / N)
+        a_n_i = base ** beta
+        anisotropies.append(a_n_i)
+        
+    return anisotropies
+```
+
+**Edge Cases and Pitfalls:**
+*   **Singularity Artifacts:** Without prefiltering, thin media with strong scattering anisotropy (e.g., $g=0.98$) and low ordinate counts exhibit singularity-like artifacts [S1].
+*   **Empirical Tuning:** The parameter $\beta$ must be tuned empirically for each environment map; it is not a universal constant [S1].
+*   **Discretization:** The method addresses artifacts arising from insufficient optical thickness to blur sampled illumination [S1].
+
+## Subtopics
+
+### Quasi-Interpolation Prefilter
+A prefilter applied to reduce aliasing artifacts, specifically preventing 'valleys' of rims from becoming shallower due to oversmoothing [S2]. This variant is used in the context of PDF GPU Isosurface Raycasting of FCC Datasets to maintain reconstruction quality [S2].
+
+## Operating characteristics
+*   **Performance:** The sources do not provide specific time or memory complexity metrics for the core anisotropy calculation [S1, S2].
+*   **Strengths:** Removes singularity-like artifacts in media with insufficient optical thickness; adaptive nature preserves background illumination features [S1].
+*   **Limitations:** Requires empirical tuning of $\beta$ for each environment map [S1].
+*   **When to use:** When rendering participating media with high scattering anisotropy and low ordinate counts, or when naive prefiltering would obscure important background features [S1].
+
+## Background
+The method was proposed in the context of Principal-Ordinates Propagation (POP) for real-time rendering of participating media [S1]. It addresses the shortcomings of current methods in handling highly anisotropic scattering, which is common in natural and artificial media [S1]. The technique was introduced to improve rendering quality in scenarios where light transport simulation suffers from discretization artifacts [S1].
+
+## Sources
+[S1] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29
+[S2] PDF GPU Isosurface Raycasting of FCC Datasets, https://minho-kim-uos.github.io/papers/kim12gpu.pdf, fetched 2026-10-29

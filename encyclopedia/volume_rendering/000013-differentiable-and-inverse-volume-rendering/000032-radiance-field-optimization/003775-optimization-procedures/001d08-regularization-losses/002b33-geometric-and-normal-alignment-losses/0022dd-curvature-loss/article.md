@@ -1,0 +1,106 @@
+# Curvature Loss
+
+Also called: Curvature Regularization, Geometric Curvature Loss
+
+## Overview
+Curvature Loss is a regularization term used in differentiable volume rendering and implicit surface reconstruction to enforce geometric smoothness by penalizing high-frequency variations in the predicted field values. It operates by applying a discrete curvature operator to the model output (such as density or SDF values) and scaling the result by a configurable weight [S1, unofficial]. It sets itself apart from sibling methods like [Normal Smoothness Loss](4190-normal-smoothness-loss.md) by operating on the scalar field values directly rather than on derived normal vectors, and from [Surface Curvature Regularization](6510-surface-curvature-regularization.md) by typically being applied to the volumetric or grid-based representation rather than explicitly on the extracted mesh surface [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** The model output field values (e.g., density $\sigma$ or Signed Distance Field $SDF$) at grid vertices or sample points.
+*   **Input:** A curvature operator $C$ (typically a discrete Laplacian or finite difference kernel).
+*   **Input:** A scalar weight $\lambda_{curvature}$.
+*   **Output:** A scalar loss value $L_{curvature}$.
+
+**Data Structures:**
+*   The field values are stored as a tensor of shape $(N, 1)$ or $(N, D)$ where $N$ is the number of points/vertices and $D$ is the dimensionality (usually 1 for scalar fields).
+*   The curvature operator $C$ is a sparse matrix or a convolution kernel defined by the grid topology.
+
+**Steps:**
+1.  Retrieve the model output tensor $\mathbf{v}$ containing the scalar field values at the relevant points.
+2.  Apply the curvature operator $C$ to $\mathbf{v}$ to compute the discrete curvature $\mathbf{k}$:
+    $$ \mathbf{k} = C \mathbf{v} $$
+    *Note: In implementation, $C$ is often a 1D, 2D, or 3D Laplacian kernel depending on the grid structure.*
+3.  Compute the mean squared curvature (or L2 norm) of $\mathbf{k}$:
+    $$ L_{raw} = \frac{1}{N} \sum_{i=1}^N \mathbf{k}_i^2 $$
+4.  Scale by the curvature loss weight $\lambda_{curvature}$:
+    $$ L_{curvature} = \lambda_{curvature} \cdot L_{raw} $$
+
+**Parameters:**
+*   $\lambda_{curvature}$: The weight for the curvature loss term. Retrieved from configuration (e.g., `self.config.system.loss.lambda_curvature`) [S1, unofficial]. Typical values are small (e.g., $10^{-4}$ to $10^{-2}$) to prevent over-smoothing [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** The curvature operator $C$ must handle boundary vertices correctly. Standard finite differences may produce biased results at boundaries if not padded or masked.
+*   **Scale Sensitivity:** The magnitude of the curvature depends on the grid resolution. If the grid spacing changes, the operator $C$ must be normalized by the step size $\delta$ (e.g., dividing by $\delta^2$ for Laplacian) to maintain consistent regularization strength [G].
+*   **Degenerate Input:** If the field is constant, curvature is zero. If the field is noisy, curvature will be high, leading to strong smoothing.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_curvature_loss(field_values, curvature_operator, lambda_curvature):
+    """
+    Computes the curvature loss for a given field.
+    
+    Args:
+        field_values: Tensor of shape (N, 1) containing scalar field values.
+        curvature_operator: Sparse matrix or function representing the discrete Laplacian.
+        lambda_curvature: Float weight for the loss term.
+        
+    Returns:
+        Scalar loss value.
+    """
+    # Apply curvature operator to get discrete curvature
+    # curvature_operator is assumed to be a sparse matrix C
+    # k = C @ field_values
+    # If curvature_operator is a kernel, use convolution or finite differences
+    curvature = apply_curvature_operator(field_values, curvature_operator)
+    
+    # Compute mean squared curvature
+    # Note: Using mean to normalize by number of points
+    mean_squared_curvature = torch.mean(curvature ** 2)
+    
+    # Scale by weight
+    loss = lambda_curvature * mean_squared_curvature
+    
+    return loss
+
+def apply_curvature_operator(field_values, operator):
+    """
+    Applies the curvature operator to the field values.
+    This is a placeholder for the specific implementation of the Laplacian
+    based on the grid topology (1D, 2D, or 3D).
+    """
+    # Example for 1D uniform grid with spacing h:
+    # k[i] = (v[i+1] - 2*v[i] + v[i-1]) / h^2
+    # This must be adapted for the specific grid structure in the model.
+    # For a general sparse matrix C:
+    return operator @ field_values
+```
+
+## Subtopics
+
+### SDF Edge Regularization Loss
+A loss function that penalizes SDF values at edges where the sign changes, encouraging sharp features or correct topology at boundaries [S2, unofficial]. It is a variant of curvature/regularization loss specifically tailored for Signed Distance Fields in the FlexiCubes framework [S2, unofficial].
+*   **Definition:** It computes a binary cross-entropy loss on the signs of SDF values at the endpoints of edges that cross the zero level set [S2, unofficial].
+*   **Steps:**
+    1.  Gather SDF values at edge endpoints: `sdf_f1x6x2 = sdf[all_edges.reshape(-1)].reshape(-1, 2)` [S2, unofficial].
+    2.  Create a mask for edges where signs differ: `mask = sign(sdf_f1x6x2[:, 0]) != sign(sdf_f1x6x2[:, 1])` [S2, unofficial].
+    3.  Filter SDF values to only those edges with sign changes: `sdf_f1x6x2 = sdf_f1x6x2[mask]` [S2, unofficial].
+    4.  Compute binary cross-entropy loss between the first endpoint and the boolean second endpoint, and vice versa [S2, unofficial].
+*   **When to choose:** Use when reconstructing explicit meshes from SDFs and ensuring correct topology at boundaries is critical [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$ where $N$ is the number of points/vertices, assuming the curvature operator is applied efficiently (e.g., via sparse matrix-vector multiplication or convolution).
+*   **Memory Complexity:** $O(N)$ to store the field values and the resulting curvature tensor.
+*   **Strengths:** Simple to implement; effectively reduces high-frequency noise in the reconstructed geometry; differentiable.
+*   **Limitations:** Can over-smooth fine details if the weight is too high; sensitive to grid resolution without proper normalization.
+*   **When to use:** When the reconstructed geometry is noisy or exhibits jagged artifacts; when using implicit representations (SDFs, densities) that benefit from smoothness priors.
+*   **When not to use:** When preserving sharp features is more important than smoothness; when the grid resolution is very coarse and the curvature operator is not properly scaled.
+
+## Background
+Curvature Loss is commonly used in differentiable rendering frameworks such as Instant-NSR-PL [S1, unofficial] and in implicit surface reconstruction methods like FlexiCubes [S2, unofficial]. It originates from the broader field of geometric regularization in computer vision and graphics, where Laplacian smoothing is a standard technique for mesh and field denoising.
+
+## Sources
+[S1] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+[S2] GitHub - nv-tlabs/FlexiCubes, https://github.com/nv-tlabs/FlexiCubes, fetched 2026-10-27 (unofficial)

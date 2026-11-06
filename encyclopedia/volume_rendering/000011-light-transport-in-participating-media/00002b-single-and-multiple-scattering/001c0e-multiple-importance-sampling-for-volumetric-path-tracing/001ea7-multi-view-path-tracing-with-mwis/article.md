@@ -1,0 +1,177 @@
+# Multi-View Path Tracing with MWIS
+
+Also called: MVPT, MWIS estimator, Multi-View Importance Sampling (MWIS), multi-view path tracing, self-normalizing MWIS
+
+## Overview
+Multi-View Path Tracing with MWIS (MVPT) accelerates the rendering of heterogeneous participating media by exploiting redundancy across multiple camera views, such as in animated sequences or light fields [S1]. It jointly renders a sequence by reusing computation during simulation, specifically by transforming light paths from a base view to other views and generating a shared path suffix [S1]. Unlike standard multi-view methods that use unbiased Multiple Importance Sampling (MIS) or discard shifted paths based on strict selection criteria, MVPT uses a self-normalized Multiple Weighted Importance Sampling (MWIS) estimator [S1]. This approach reweights samples to match a target probability density function (PDF), reducing variance caused by non-contributing strategies and large Jacobian variations, while remaining consistent with a rapidly vanishing bias [S1].
+
+## How it works
+The method combines path prefix shifting with a self-normalized estimator to amortize the cost of path suffix evaluation across multiple cameras.
+
+### Inputs and Outputs
+*   **Inputs:** A set of $K$ camera views (base and target), a heterogeneous participating medium defined by extinction coefficient $\mu_t(x)$, phase function $f_S$, and emission $L_e$.
+*   **Outputs:** Radiance estimates $I_j$ for each pixel $j$ in the target views.
+
+### Data Structures
+*   **Path Prefix:** A chain of random events starting from the camera film, through the lens, and through the medium to a **pivot point** (the last interaction, either on a surface or a real medium interaction) [S1].
+*   **Path Suffix:** The subpath starting from the pivot point to a light source or the end of the path [S1].
+*   **Shift Mapping ($S$):** A deterministic transformation that maps a base prefix to a shifted prefix for a target camera [S1].
+*   **MWIS Weights:** Computed ratios of PDFs and Jacobians, accumulated per prefix [S1].
+
+### Algorithm Steps
+
+1.  **Base Prefix Sampling:**
+    For each pixel $i$ in the base view:
+    a.  Generate a ray by importance sampling the camera shutter, lens, and film [S1].
+    b.  If a medium boundary is found, use delta tracking to sample interaction distances and event sampling to determine interaction types [S1].
+    c.  Sample a homogenized version of the participating medium using a majorant extinction coefficient $\bar{\mu}$ (an upper bound of $\mu_t$) [S1].
+    d.  If a null interaction is sampled (probability equal to the ratio between fictitious and homogenized extinctions), continue sampling until leaving the medium or finding a real interaction [S1].
+    e.  Identify the **pivot point** $x_1$, which is the last interaction of the base prefix $\bar{\mathbf{x}}_i$ [S1].
+
+2.  **Prefix Shifting:**
+    For each target camera $k$ (where the pivot is visible):
+    a.  Shift the base lens interaction to the lens of the target camera [S1].
+    b.  Check that the pivot is not occluded and falls within the target camera's view frustum [S1].
+    c.  Construct the shifted prefix $\bar{\mathbf{x}}_j$ by transforming all events of the base prefix using the shift mapping $S_{i \to j}$ [S1].
+    d.  The shifted prefix must have the same number of random events as the base prefix to be defined on the same probability space [S1].
+
+3.  **PDF and Jacobian Evaluation:**
+    For each shifted prefix $\bar{\mathbf{x}}_j$:
+    a.  Compute the PDF of the transformed sample:
+        $$ p(\bar{\mathbf{x}}_j) = p(\bar{\mathbf{x}}_i) |S'_{i \to j}(\bar{\mathbf{x}}_i)|^{-1} $$
+        where $p(\bar{\mathbf{x}}_i)$ is the base prefix PDF and $|S'_{i \to j}|$ is the Jacobian determinant of the shift mapping [S1].
+    b.  To avoid precision issues with large PDFs in dense volumes, compute ratios of PDFs and Jacobians event-by-event as the chain is transformed [S1].
+
+4.  **MWIS Weight Computation:**
+    Compute the MWIS weight $w_{i \to j}(\bar{\mathbf{x}}_j)$ for the shifted prefix contributing to pixel $j$ from base pixel $i$. Using the balance heuristic, the weight simplifies to:
+    $$ w_{i \to j}(\bar{\mathbf{x}}_j) = \frac{p_{i \to j}(\bar{\mathbf{x}}_j)}{\sum_k p_{k \to j}(\bar{\mathbf{x}}_j)} $$
+    where $p_{i \to j}(\bar{\mathbf{x}}_j)$ is the effective PDF of the shifted prefix for pixel $j$, incorporating the base PDF and Jacobian [S1].
+    *Note: The source text provides a numerically stable formulation for this ratio accumulation (Eq. 23 in [S1]), which sums ratios of source/target PDFs multiplied by Jacobians.*
+
+5.  **Path Suffix Generation:**
+    Generate a shared path suffix starting from the pivot point. This suffix is evaluated for all views where the pivot is visible, amortizing the cost [S1]. The suffix contributes to both direct illumination (via next event estimation) and indirect illumination [S1].
+
+6.  **Accumulation:**
+    Accumulate contributions using the MWIS estimator. For pixel $j$, the estimate $\tilde{I}_j$ is the sum of contributions from all base pixels $i$ that can reach $j$:
+    $$ \tilde{I}_j = \sum_{i} w_{i \to j}(\bar{\mathbf{x}}_j) \frac{f_j(\bar{\mathbf{x}}_j)}{p_{i \to j}(\bar{\mathbf{x}}_j)} $$
+    The final pixel value is $I_j = \frac{1}{n} \tilde{I}_j$, where $n$ is the number of samples [S1].
+    The measurement contribution function (MCF) $f_j(\bar{\mathbf{x}})$ is defined as:
+    $$ f_j(\bar{\mathbf{x}}) = W_j(x_0, x_1) G(x_0, x_1) T(x_0, x_1) L_e(x_k, x_{k-1}) \times \left[ \prod_{i=1}^{k-1} f_S(x_{i-1}, x_i, x_{i+1}) G(x_i, x_{i+1}) T(x_i, x_{i+1}) \right] $$
+    where $W_j$ is the filter response, $G$ is the geometric term, $T$ is the transmittance, and $f_S$ is the phase function [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def multi_view_path_tracing_with_mwis(cameras, medium, num_samples):
+    # Initialize accumulators for each pixel
+    pixel_weights = {j: 0.0 for j in range(len(cameras))}
+    pixel_estimates = {j: 0.0 for j in range(len(cameras))}
+
+    for sample_idx in range(num_samples):
+        for base_pixel_i, base_camera in enumerate(cameras):
+            # 1. Sample base prefix
+            base_prefix, base_pdf = sample_base_prefix(base_camera, medium)
+            pivot = base_prefix.last_interaction()
+
+            # 2. Shift prefixes to other cameras
+            shifted_prefixes = []
+            shifted_pdfs = []
+            jacobian_ratios = []
+            
+            for target_pixel_j, target_camera in enumerate(cameras):
+                # Check visibility and shift
+                if is_visible(pivot, target_camera):
+                    shifted_prefix = shift_prefix(base_prefix, base_camera, target_camera)
+                    shifted_pdf = base_pdf * abs(jacobian_determinant(shift_prefix, base_camera, target_camera))
+                    
+                    # Store for weight computation
+                    shifted_prefixes.append((target_pixel_j, shifted_prefix))
+                    shifted_pdfs.append(shifted_pdf)
+                    
+                    # Compute ratio for denominator sum (Eq 23 logic)
+                    # Ratio of shifted PDF to target PDF (here target is base PDF for simplicity in ratio)
+                    # In practice, sum over all k of (p_k->j / p_k->i) * |J|
+                    # Simplified: accumulate shifted_pdf for denominator
+                    pass 
+            
+            # 3. Compute MWIS weights and accumulate
+            # Denominator Sr is sum of shifted PDFs (or weighted PDFs) for all target cameras
+            Sr = sum(shifted_pdfs)
+            
+            for idx, (target_pixel_j, shifted_prefix) in enumerate(shifted_prefixes):
+                shifted_pdf = shifted_pdfs[idx]
+                
+                # MWIS Weight: w = p_shifted / sum(p_all_shifted)
+                # Note: Source Eq 23 implies a more complex ratio involving c_i, but 
+                # for equal sample counts c_i=1, it reduces to PDF ratios.
+                if Sr > 0:
+                    weight = shifted_pdf / Sr
+                else:
+                    weight = 0.0
+                
+                # 4. Evaluate Suffix (Shared)
+                # The suffix is generated from the pivot. 
+                # Direct and Indirect illumination are computed.
+                radiance = evaluate_suffix(pivot, medium, target_pixel_j)
+                
+                # 5. Accumulate
+                # Contribution = weight * (radiance / shifted_pdf)
+                # Note: The estimator form in [S1] Eq 17 is sum(w * f/p) / sum(w).
+                # Here we accumulate the numerator term w * f/p and the denominator term w separately?
+                # Or use the self-normalizing form directly.
+                # Pseudocode follows Alg 2 in [S1]:
+                
+                pixel_weights[target_pixel_j] += weight
+                pixel_estimates[target_pixel_j] += weight * (radiance / shifted_pdf)
+
+    # Final normalization
+    for j in range(len(cameras)):
+        if pixel_weights[j] > 0:
+            pixel_estimates[j] /= pixel_weights[j]
+        else:
+            pixel_estimates[j] = 0.0
+
+    return pixel_estimates
+```
+
+### Parameters
+*   $\bar{\mu}$: Upper bound of the extinction coefficient $\mu_t$, used in the null scattering framework [S1].
+*   $p(\bar{\mathbf{x}})$: Target PDF, chosen to be a good strategy w.r.t the integrand (e.g., the base prefix PDF) [S1].
+*   $q_i(\bar{\mathbf{x}})$: Source PDF for strategy $i$ [S1].
+
+### Edge Cases and Pitfalls
+*   **Precision Issues:** Large PDFs in dense heterogeneous volumes can cause precision issues. Compute ratios of PDFs and Jacobians event-by-event as the chain is transformed [S1].
+*   **Anisotropic Volumes:** Reusing all prefixes disregarding scattering components results in noisier estimates than the baseline in anisotropic volumes [S1].
+*   **Bias:** The WIS estimator is biased ($E[X/Y] \ge E[X]/E[Y]$) but consistent (asymptotically unbiased with bias vanishing at rate $O(n^{-1})$) [S1].
+*   **Convergence:** Requires $p(\bar{\mathbf{x}}) > 0$ whenever $f(\bar{\mathbf{x}}) > 0$ and there exists $i$ such that $q_i(\bar{\mathbf{x}}) > 0$ whenever $p(\bar{\mathbf{x}}) > 0$ [S1].
+
+## Subtopics
+
+### [Fraboni et al. Prefix Selection](1835-fraboni-et-al-prefix-selection.md)
+Fraboni et al. Prefix Selection is a stochastic filtering mechanism for multi-view path tracing that rejects shifted path prefixes when their scattering distributions at the pivot point significantly mismatch the base prefix. It addresses the variance explosion caused by large Jacobian variations and scattering function differences when reusing paths across different camera views. Unlike methods that reuse all prefixes regardless of scattering properties, this method ensures that only prefixes with similar scattering behavior are included in the Multiple Importance Sampling (MIS) estimator, thereby reducing noise and preventing the bias artifacts associated with naive reuse.
+
+### [Multiple Importance Sampling without Selection (mismvpt)](1848-multiple-importance-sampling-without-selection-mismvpt.md)
+Multiple Importance Sampling without Selection (mismvpt) is a multi-view rendering estimator that combines base paths and shifted paths (reused from other cameras) using standard MIS weights. It solves the problem of integrating light transport contributions across multiple viewpoints by reusing geometric prefixes, avoiding the bias and complexity of prefix selection mechanisms. Unlike its sibling [Multi-View Path Tracing with MWIS](1834-multi-view-path-tracing-with-mwis.md), which uses a self-normalized estimator to reweight samples toward a target pdf, mismvpt uses a standard unbiased MIS estimator, resulting in higher variance when the distribution of shifted prefixes does not follow ideal importance sampling.
+
+### Adaptive Multi-View Path Tracing
+An adaptive variant of multi-view rendering that distributes samples in undersampled areas to handle strongly view-dependent scattering functions where path reuse is less effective [S1]. It uses a phase function anisotropy factor $g = 0.98$ for strongly forward anisotropic volumes [S1]. Strongly view-dependent scattering functions reduce path reuse effectiveness in standard multi-view rendering [S1]. The adaptive variant (amvpt) has a small overhead due to error and sample maps evaluation compared to standard multi-view rendering (mvpt), but improves sample distribution in undersampled areas [S1].
+
+### Multiple View Path Construction
+The complete path prefix is a chain of random events: film interaction, lens interaction, 0 to $m$ null interactions in the medium, and a last interaction (pivot) either on a surface or a real medium interaction [S1]. The pivot is the last interaction of the base prefix and is the key to the work because it can be visible from other points of view [S1]. The method generates a ray by importance sampling a camera shutter, lens, and film [S1]. If a medium boundary is found, delta tracking is used to sample interaction distances and event sampling to determine interaction types, sampling a homogenized version of the participating medium [S1]. If a null interaction is sampled (probability equal to the ratio between fictitious and homogenized extinctions), the sampling routine continues until leaving the medium or finding a real interaction [S1]. Every camera is connected to the pivot by shifting (transforming) all events composing the base prefix to form shifted prefixes [S1]. The majorant extinction coefficient is an upper-bound of the real extinction expressed as the sum of the real extinction and a fictitious complementary one [S1].
+
+## Operating characteristics
+*   **Time Complexity:** The construction cost of the path suffix is amortized as the number of cameras increases, since the suffix is shared among cameras [S1].
+*   **Memory Complexity:** Requires storing path prefixes and shifted prefixes for each view, but the suffix is shared [S1].
+*   **Measured Performance:** MVPT exhibits lower levels of noise and no visible bias compared to independent path tracing (VPT) and Multiple Importance Sampling without Selection (mismvpt) [S1]. It reduces variance compared to MIS by reweighting samples to match a target PDF closer to the integrand [S1].
+*   **Strengths:** Consistent estimator, allows combining direct illumination techniques via the null scattering framework, reduces variance significantly when views overlap [S1].
+*   **Limitations:** Biased (though consistent and imperceptible at low sample counts), requires careful handling of Jacobians and PDFs in dense volumes [S1].
+*   **When to Use:** Rendering sequences with overlapping views (animated camera paths, motion blur, light-fields) in heterogeneous participating media [S1].
+*   **When Not to Use:** Single view rendering, or scenes with strongly anisotropic scattering where path reuse is ineffective without adaptive refinement [S1].
+
+## Background
+Multi-view path tracing with MWIS was introduced by Nicolas Bonneel and Jean-Claude Iehl from INSA Lyon and CNRS/LIRIS, France [S1]. The method builds upon the null-scattering path integral formulation of light transport by Miller et al. [MGJ19] and delta tracking techniques by Novak et al. [NGHJ18]. It addresses the limitations of existing multi-view rendering methods that require exact PDFs of path prefixes and do not handle heterogeneous media efficiently [S1]. The method was presented in the paper "Volumetric Multi-View Rendering" [S1].
+
+## Sources
+[S1] Volumetric Multi‐View Rendering, https://doi.org/10.1111/cgf.14481, fetched 2026-10-26

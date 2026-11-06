@@ -1,0 +1,1507 @@
+arXiv:2601.12020v1 [cs.CV] 17 Jan 2026
+DIAMOND-SSS: Diffusion-Augmented Multi-View Optimization for
+Data-efficient SubSurface Scattering
+Guillermo Figueroa-Araneda *
+Technical University of Munich
+Iris Diana Jimenez*
+Ludwig-Maximilians-Universität Munich
+guillermo.figueroaa@usm.cl
+jimenez@lmu.de
+Florian Hofherr
+Technical University of Munich
+Manny Ko
+Independent Researcher
+Hector Andrade-Loarca
+Technical University of Munich
+florian.hofherr@tum.de
+man961@yahoo.com
+hector.andrade@tum.de
+Daniel Cremers
+Technical University of Munich
+cremers@tum.de
+Abstract
+Subsurface scattering (SSS) gives translucent materials—such as wax, jade, marble, and skin—their characteristic soft shadows, color bleeding, and diffuse glow. Modeling
+these effects in neural rendering remains challenging due to
+complex light transport and the need for densely captured
+multi-view, multi-light datasets (often > 100 views and 112
+OLATs).
+We present DIAMOND-SSS, a data-efficient framework
+for high-fidelity translucent reconstruction from extremely
+sparse supervision—even as few as ten images. We finetune diffusion models for novel-view synthesis and relighting,
+conditioned on estimated geometry and trained on less than
+7% of the dataset, producing photorealistic augmentations
+that can replace up to 95% of missing captures. To stabilize reconstruction under sparse or synthetic supervision,
+we introduce illumination-independent geometric priors: a
+multi-view silhouette consistency loss and a multi-view depth
+consistency loss. Across all sparsity regimes, DIAMONDSSS achieves state-of-the-art quality in relightable Gaussian
+rendering, reducing real capture requirements by up to 90%
+compared to SSS-3DGS.
+Figure 1. We propose a data-efficient framework for re-lightable
+3D with subsurface scattering. Unlike prior work [7] requiring
+many viewpoints under multiple illuminations, our method uses
+diffusion models to synthesize novel views and lighting from sparse
+observations. The baseline [7] massively overfits in the second row,
+for the only given light condition.
+1. Introduction
+Rendering translucent materials such as skin, wax, or jade remains challenging in graphics and vision. Their appearance
+is governed by subsurface scattering (SSS)—light entering
+a surface, scattering within the medium, and exiting else-
+where—producing soft glows, color bleeding, and blurred
+shadows. Accurately capturing these effects requires jointly
+modeling geometry, illumination, and volumetric transport,
+* Equal contribution.
+1
+making data acquisition costly and dependent on dense, controlled multi-view and multi-light setups.
+Neural rendering methods such as NeRF [21] and 3D
+Gaussian Splatting (3DGS) [17] enable high-quality novelview synthesis, but entangle lighting and appearance, limiting relighting. Physically based extensions incorporate
+BRDF models [4, 5, 22] under known [2, 3, 30, 39] or unknown [1, 9, 15, 37, 38] illumination, or account for indirect
+lighting [25, 43, 44]. While effective for opaque materials, these methods cannot reproduce the spatially decoupled
+transport characteristic of translucent media.
+Modeling SSS requires volumetric light transport. Classical BSSRDF (Bidirectional Scattering Surface Reflectance
+Distribution Function) models [6, 8, 12, 13] offer analytic
+approximations but struggle with real-world complexity.
+Learning-based SSS methods [18, 31, 32, 46] provide more
+flexibility but still require dense, calibrated data.
+KiloOSF [36] learns object-centric scattering functions
+yet remains surface-bound. The current state of the art, SSS3DGS [7], augments Relightable 3DGS [9] with a residual
+MLP to capture volumetric scattering, achieving photorealistic translucency—but at the cost of dense supervision: over
+100 calibrated views and 112 OLAT illuminations per object.
+translucent objects. This enables photometrically and geometrically consistent supervision even under extremely
+sparse captures (Secs. 3.2 and 3.4).
+• We design two multi-view geometric consistency
+losses—silhouette and depth—that complement diffusionbased data augmentation by enforcing structural alignment
+across viewpoints and improving stability under limited or
+synthetic supervision (Sec. 3.3).
+• We demonstrate that by combining our diffusion-based
+data augmentation with geometric consistency losses,
+DIAMOND-SSS achieves high-quality translucent reconstructions with up to 90% less real data than prior SSS3DGS approaches, while maintaining fidelity across varying sparsity regimes (Sec. 4).
+2. Related Work
+2.1. Neural Rendering and Physically-Based Relighting
+Neural Radiance Fields (NeRF) [21] and 3D Gaussian Splatting (3DGS) [17] have established high-quality novel-view
+synthesis by combining scene representation as radiance
+fields with volumetric rendering. While they show impressive results they entangle appearance and illumination and
+effectively bake a static lighting into the scene representation,
+which does not allow for relighting.
+To address this limitation large body of work extends
+these methods with physically based reflectance modeling.
+Approaches integrate microfacet [5] or Disney BRDFs [4]
+under known [2, 3, 30, 39] or unknown [1, 9, 15, 37, 38]
+lighting conditions, or incorporate indirect illumination
+[44] and more general appearance decompositions [25, 43].
+These methods achieve relightable reconstructions but remain focused on opaque materials where light transport is
+surface-bounded.
+Our approach. We present DIAMOND-SSS, a dataefficient extension of SSS-3DGS [7] for relightable reconstruction of translucent materials from sparse supervision. While SSS-3DGS requires tens of thousands of
+images across ∼100 views and 112 OLAT illuminations,
+DIAMOND-SSS attains comparable or superior quality using as little as ten views and one light.
+Our key component is a diffusion-based augmentation
+pipeline that synthesizes missing viewpoints and lighting via
+two geometry-conditioned diffusion models—one for novelview generation and one for relighting—fine-tuned on less
+than 7% of the dataset yet producing photorealistic, geometrically aligned augmentations. To stabilize reconstruction
+under sparse or synthetic data, we introduce two illuminationinvariant geometric priors: multi-view silhouette consistency
+and multi-view depth consistency, which regularize structure
+across viewpoints and complement diffusion-based augmentation.
+Across all supervision regimes, DIAMOND-SSS surpasses prior work. Geometric priors alone improve fidelity, and combined with diffusion-based relighting enable
+high-quality reconstructions with up to 95% fewer real captures. Even under extreme sparsity (3% views, 3% lights),
+our method faithfully reproduces subsurface scattering effects—unattainable with previous approaches.
+2.2. Subsurface Scattering Models
+Subsurface scattering (SSS) describes light entering a surface, scattering within a medium, and exiting elsewhere.
+Classical BSSRDF models—dipole [13], multipole [12],
+spectral/multilayer skin models [8], and quantized diffusion [6]—are efficient but rely on strong assumptions that
+limit realism.
+Learning-based alternatives, including Neural SSS [32],
+Li et al. [18], Zhu et al. [46], and TG et al. [31], relax these
+assumptions but still require dense multi-view, multi-light supervision. KiloOSF [36] introduces object-centric scattering
+functions but remains surface-bound, while SSS-3DGS [7]
+models volumetric SSS via a residual MLP atop Gaussian
+splats, still demanding dense captures. Our method leverages
+diffusion-based synthetic augmentation and illuminationinvariant geometric priors to achieve comparable or superior
+quality with up to 90% less real data.
+Contributions.
+• We introduce a diffusion-based augmentation pipeline for
+subsurface scattering reconstruction, with fine-tuned models for novel-view synthesis and relighting synthesis of
+2
+2.3. Diffusion Models for Novel View Synthesis and
+Relighting
+3.1. Recap: SSS-3DGS
+Vanilla 3DGS. 3D Gaussian Splatting represents a scene
+as a set of N anisotropic Gaussians:
+Diffusion models have recently advanced novel view synthesis (NVS). Single-view methods such as Zero-1-to-3 [19]
+generate pose-controlled views from one RGB input, while
+multi-view–consistent models including SyncDreamer [20],
+MVDream [28], Free3D [45], and Cat3D [10] produce coherent view sets and can augment sparse observations for
+3D reconstruction. Controllable diffusion frameworks like
+ControlNet [40] enable conditioning on geometric cues, and
+Poirier-Ginter et al. [23] use such conditioning for OLATbased relighting via lighting-direction controls.
+Building on these advances, our augmentation pipeline
+(Sec. 3.2) employs two geometry-conditioned diffusion
+models—one for novel-view synthesis and one for
+relighting—fine-tuned on a small subset of translucent
+objects. Integrated into our reconstruction framework
+(Sec. 3.4), these models produce photometrically and geometrically aligned augmentations. To our knowledge,
+DIAMOND-SSS is the first to combine diffusion-based augmentation with Gaussian Splatting for data-efficient translucent reconstruction.
+G = {(µi , Σi , ci , oi )}N
+i=1 ,
+where µi ∈ R3 is the mean position, Σi ∈ R3×3 is the covariance matrix defining scale and orientation, ci is the color,
+and oi ∈ [0, 1] is the opacity. The covariance matrix is parameterized via Cholesky decomposition to ensure positive
+semi-definiteness, and eigenvalue clamping constrains the
+spatial extent.
+Extended Shading with BRDF and SSS. To model standard surface appearance in Gaussian splatting, each Gaussian
+is typically augmented with physically motivated material
+attributes ci ∈ [0, 1]3 (albedo), ri ∈ [0, 1] (roughness), and
+mi ∈ [0, 1] (metalness) [9]. Shading is then computed in a
+deferred pass using a microfacet BRDF:
+Csurf (x) = Csurf (x; c, r, m, n, ℓ),
+(3.1)
+where n is the surface normal, and ℓ the light direction.
+Dihlmann et al. [7] extend this formulation to handle translucent materials by introducing an additive neural residual term
+that models subsurface scattering. The final pixel intensity
+becomes
+2.4. Geometric Supervision under Sparse and Synthetic Settings
+Cross-view geometric constraints provide strong cues for
+3D reconstruction, particularly under sparse or inconsistent photometric supervision. Silhouette consistency, used
+since early visual hull methods, has been applied to neural
+fields [18] to improve shape regularity, while multi-view
+depth consistency enforces alignment across illuminations.
+In our framework (Sec. 3.3), we extend these ideas with
+illumination-invariant multi-view silhouette and depth consistency losses that stabilize optimization when real data are
+limited or synthetic supervision is used. Together with our
+diffusion-based augmentation (Sec. 3.2), these geometric priors form the foundation of DIAMOND-SSS’s data efficiency
+and reconstruction fidelity.
+I(x) = Csurf (x) + Csss (x; ℓ, v, ϕ),
+(3.2)
+where v is the view direction and ϕ denotes learned latent
+features capturing material-dependent scattering behavior.
+Surface Shading. Under OLAT lighting with directional
+source ℓ and radiance L(ℓ), surface shading is given by:
+Csurf = L(ℓ) · fr (n, v, ℓ; c, r, m) · max(0, n · ℓ),
+(3.3)
+where the BRDF is composed of diffuse and specular components:
+fr = fdiff + fspec ,
+3. Method
+c
+fdiff = (1 − m) ,
+π
+We build on Subsurface Scattering Gaussian Splatting
+(SSS-3DGS) [7], which extends 3D Gaussian Splatting
+(3DGS) [17] to represent translucent materials. Our method
+improves data efficiency through two main contributions: (i)
+a diffusion-based data augmentation strategy for generating
+novel views and relighting, and (ii) multi-view geometric
+consistency losses that enhance reconstruction fidelity under
+sparse captures.
+fspec =
+DGGX · GSmith · FSchlick
+.
+4(n · v)+ (n · ℓ)+
+v+ℓ
+Here α = r2 , h = ∥v+ℓ∥
+is the half-vector, and F0 =
+(1 − m) · 0.04 + m · c. For complete expressions of DGGX ,
+GSmith , and FSchlick , we refer the reader to [26, 29, 33].
+Neural Subsurface Residual. To model volumetric scattering, a learned residual term adds view- and lightdependent translucency:
+Csss (x) = sss(x) · fϕ (µ(x), Σ(x), n(x), ℓ, v),
+3
+Figure 2. Overview of our data augmentation pipeline. From a few posed input images, we generate additional viewpoints using a novel-view
+diffusion model (green) and synthetic OLAT variants using a relighting model (yellow). The combined real and synthetic data are used to
+train SSS-3DGS [7] with an MLP for subsurface scattering, stabilized by our geometric consistency losses (Sec. 3.3).
+where sss(x) ∈ [0, 1] is a learned scalar controlling subsurface strength, and fϕ is a small MLP. This residual effectively
+encodes the radiance contribution of translucent transport for
+a single Gaussian, allowing for soft shadows, color bleeding,
+and glow effects beyond the surface BRDF.
+Fine-Tuning Strategy. We adapt two publicly available
+latent diffusion models for our purpose: one for novel-view
+synthesis (Free3D [45]) and one for relighting (inspired by
+ControlNet [40] and Poirier et al. [23]). Both were originally
+trained on large-scale datasets of predominantly opaque objects. To adapt them for translucent appearance effects, we
+fine-tune each model on less than 7% of the total OLAT
+dataset (see Sec. 4.1), using only a subset of images from
+four distinct translucent objects captured under controlled
+directional lighting and multiple viewpoints. All images
+used for fine-tuning are drawn exclusively from the training
+split, ensuring that no evaluation views or lights are seen by
+the diffusion models. Fine-tuning uses the original diffusion
+objectives with perceptual supervision (L1, SSIM, LPIPS)
+under fixed illumination and deterministic sampling, which
+encourages geometric consistency and reduces view-to-view
+drift. We discuss our finetuning trategy with more detail in
+the supplement, see Sec. C.
+3.2. Diffusion-Based Data Augmentation
+To enable high-quality translucent reconstruction from
+sparse captures, we introduce a data-driven augmentation
+strategy based on pretrained diffusion models. We use these
+models synthesize photometrically plausible novel views and
+lighting conditions that supplement the limited input data
+during SSS-3DGS optimization (Sec. 3.1). Both diffusion
+models are fine-tuned once on a small subset of translucent
+objects and subsequently applied to all unseen objects, ensuring broad generalization without per-object retraining
+(Fig. 2). An extended discussion of the architecture and
+training procedure is provided in the Supplementary Material.
+4
+Novel-View Diffusion. For view synthesis, we employ
+fine-tune Free3D [45] architecture conditioned on the input
+image and camera pose through ray-conditioning normalization layers, without architectural modifications. The model
+learns to preserve object identity while improving parallax
+and silhouette coherence across novel viewpoints. During
+inference, it takes as input the source image and relative camera transformation and generates a geometrically consistent
+view from the target pose. The resulting synthetic views
+are used for photometric and geometric supervision during
+SSS-3DGS optimization.
+Relighting Diffusion. For illumination augmentation, we
+extend the relighting model of Poirier-Ginter et al. [23] by
+enriching its conditioning. In addition to the source image, depth map, and target lighting code (encoded as 9D
+spherical harmonics), we also concatenate predicted surface
+normals [16] and depth [35]. Additional details are provided
+in Sec. C. Training follows the v-parameterization objective combined with perceptual (L1, SSIM, LPIPS), cycleconsistency, and blur-aware losses to encourage smooth irradiance transitions and stable light-transport behavior. This
+enables the synthesis of relit images that reproduce soft shadows, diffuse scattering, and low-frequency volumetric effects
+characteristic of translucent materials.
+We emphasize that all conditioning maps are estimated
+automatically—no ground-truth normals or depths are required—making the pipeline applicable to casual or legacy
+captures.
+Figure 3. Visualization of the proposed geometric consistency
+losses. Silhouette consistency enforces cross-view contour alignment, while depth consistency stabilizes global geometry under
+varying lighting.
+where αk (x) is the opacity contribution at pixel x from
+the k-th 3D Gaussian, we define the multi-view silhouette
+consistency loss:
+X X
+LMV
+Si (x) − Sj (x′i,j ) 1 .
+(3.5)
+sil = λsil
+3.3. Multi-View Geometric Consistency
+(i,j) x∈Ωi
+To further improve Gaussian splatting reconstruction from
+diffusion-generated images—which may exhibit minor spatial or photometric inconsistencies inherent to generative
+synthesis (e.g., known geometric failures of diffusion models [24])—we introduce two illumination-invariant geometric losses. These consist of a silhouette consistency loss and
+a depth consistency loss that enforce cross-view structural
+alignment, thereby stabilizing optimization under both real
+and synthetic supervision. See Fig. 3 for an illustration.
+This loss encourages consistent contours across views and
+improves boundary fidelity. See Fig. 3 for an illustration.
+Depth Consistency. We additionally enforce cross-view
+agreement in depth. For back-projected point Xi (see
+Eq. (3.4)) and target camera center Cj , we compute:
+ẑi,j = ∥Xi − Cj ∥2 ,
+and compare it with the rendered depth Dj (x′i,j ), computed
+with [35], defining the loss:
+X X
+LMV
+ẑi,j − Dj (x′i,j ) 1 .
+(3.6)
+depth = λdepth
+Silhouette Consistency. For a pixel x in view i, we compute its 3D location Xi using depth Di (x) (which is obtained
+by using DepthAnythingv2 [35]) as well as its reprojection
+x′i,j to view j:
+Xi = πi−1 (x, Di (x)),
+x′i,j = πj (Xi ),
+(i,j) x∈Ωi
+This loss reduces floating geometry and improves global
+coherence.
+(3.4)
+where πi is the projection function to view i. Using the soft
+silhouette in view i, computed from the Gaussian opacities:
+Si (x) = 1 −
+K
+Y
+x′i,j = πj (Xi ),
+Total Loss. Our final training objective extends Relightable 3D Gaussians (R3DGS) [9] by integrating
+diffusion-augmented supervision and our illuminationinvariant geometric priors (Sec. 3.3). The total loss combines photometric, regularization, and geometric consistency
+(1 − αk (x)),
+k=1
+5
+terms:
+inspired by prior work. Beginning with the full OLAT capture (∼100 viewpoints, 112 lights per viewpoint), we progressively subsample camera poses and their associated illuminations while ensuring uniform coverage in pose–light
+space. This controlled reduction yields capture regimes ranging from full data to 3% of views and lights, enabling us to
+quantify how reconstruction quality and geometric stability
+degrade across sparsity levels and to identify the practical
+breakpoints where competing methods fail.
+We focus on six capture regimes that isolate each component of DIAMOND-SSS:
+1. All views, all lights: ∼100 views and 112 OLAT illuminations per viewpoint (probes the effect of geometric
+losses, Sec. 3.3).
+2. All views, 1 light per view: ∼100 views and 1 OLAT
+per view (tests diffusion-based relighting, Sec. 3.2).
+3. 5% views, 5% lights: ∼5% of views and 5% of lights
+(joint sparse, tests both diffusion modules and geometric
+losses).
+4. 3% views, 3% lights: ∼3% of views and 3% of lights
+(extreme sparse).
+5. 5% views, full lights: ∼5% of views and all lights (tests
+diffusion novel-view synthesis, Sec. 3.2).
+6. 3% views, full lights: ∼3% of views and all lights (extreme sparse views; isolates novel-view diffusion).
+Following [7], all comparisons are made against SSS-3DGS,
+the strongest prior baseline. We omit KiloOSF [36] from
+our quantitative tables since it performs significantly below
+SSS-3DGS and our approach already surpasses this state-ofthe-art method across all regimes.
+Ltotal =(1 − λdssim )L1 + λdssim (1 − SSIM) + λlpips LLPIPS
++ λmask Lmask + λsmooth Lsmooth + λenh Lenh
+MV
++ λray Lray + λsil LMV
+sil + λdepth Ldepth .
+(3.7)
+Here, Lphoto is a combination of pixel-wise and perceptual
+losses (L1, SSIM, LPIPS) balancing structural and appearance fidelity. Regularization terms Lmask , Lsmooth , Lenh , and
+Lray follow prior work [9], enforcing spatial coherence, contrast preservation, and physical consistency in transmittance
+and shading.
+3.4. DIAMOND-SSS Reconstruction Procedure
+After fine-tuning, we freeze the diffusion models and use
+them to augment each scene before 3DGS optimization. For
+every real view, we synthesize 2–4 novel viewpoints, and for
+each real and synthetic view we generate 4–8 relit variants
+under novel OLAT conditions. This yields an expanded
+set of real images, diffusion-generated views, and synthetic
+relightings.
+We then optimize a 3DGS model with an SSS residual on
+this augmented dataset. Photometric losses (L1 , SSIM [34],
+LPIPS [42]) are applied to all images, with synthetic ones
+down-weighted by α = 0.5 to mitigate diffusion artifacts.
+Geometric losses (multi-view silhouette and depth consistency) are applied uniformly to real and synthetic images to
+enforce cross-view structural alignment.
+This joint supervision enables robust learning of both
+shape and appearance from as few as ten real captures per
+object, significantly reducing acquisition cost. Once adapted,
+the diffusion models can be reused for many reconstructions, enabling scalable capture of translucent materials in
+unconstrained settings.
+4.1. Datasets
+We use synthetic and real translucent objects from the SSS3DGS dataset [7], captured under ∼100 viewpoints and 112
+one-light-at-a-time (OLAT) illuminations. o our knowledge,
+this is the only publicly available dataset with these characteristics. Objects include wax candles, jade figurines, plastic
+toys, and marble statues. For our six evaluation regimes,
+we subsample the original capture following the previously
+presented overview. Silhouettes are obtained from provided
+masks or automatic background subtraction. Depth and normal maps are estimated using off-the-shelf predictors: Depth
+Anything [35] and Marigold [16], respectively. These cues
+supervise our geometric consistency terms and condition the
+diffusion models (Secs. 3.2 and 3.3). In the supplementary
+material we present a visual overview of the dataset. As described in Sec. 3.2, both diffusion models are fine-tuned once
+using ≤ 7% of the total dataset, drawn proportionally from
+four representative translucent objects (car, jam jar, red candle, head). This ensures robustness across material/transport
+variations while avoiding per-object retraining.
+4. Experiments
+We evaluate DIAMOND-SSS on translucent object benchmarks following the SSS-3DGS dataset setup [7]. Our experiments are designed to validate three key aspects of our
+approach: (1) the effectiveness of diffusion-based augmentation for replacing real multi-light captures (Sec. 3.2), (2) the
+stabilizing effect of multi-view geometric consistency losses
+under sparse or synthetic supervision (Sec. 3.3), and (3) the
+overall reconstruction quality and data efficiency compared
+to state-of-the-art SSS reconstruction methods. A high-level
+overview of our pipeline is provided in Fig. 2 and detailed
+in Sec. 3.
+Experimental Protocol. To analyze robustness under limited supervision, we adopt a view–light pruning strategy
+6
+Statue
+GT
+Ours
+Candle
+SSS-3DGS [7]
+GT
+Ours
+Soap
+SSS-3DGS [7]
+GT
+Ours
+all views, single light
+all views, single light
+all views, single light
+5% views, 5% lights
+5% views, 5% lights
+5% views, 5% lights
+3% views, 3% lights
+3% views, 3% lights
+3% views, 3% lights
+SSS-3DGS [7]
+Figure 4. Qualitative comparison of reconstructed translucent appearance under different supervision conditions, the first row shows the
+setting: all views, all lights.
+SSS-3DGS
+DIAMOND-SSS (ours)
+Regime
+PSNR↑
+SSIM↑
+LPIPS↓
+PSNR↑
+SSIM↑
+LPIPS↓
+Full views, full lights
+Full views, 1 light / view
+5% views, 5% lights
+3% views, 3% lights
+5% views, full lights
+3% views, full lights
+35.01
+21.94
+20.10
+18.15
+25.32
+25.32
+0.97
+0.88
+0.64
+0.58
+0.86
+0.86
+0.040
+0.177
+0.215
+0.319
+0.060
+0.060
+36.79
+35.14
+24.56
+21.34
+32.15
+31.31
+0.99
+0.98
+0.89
+0.86
+0.96
+0.96
+0.022
+0.030
+0.035
+0.039
+0.020
+0.020
+Table 1. All capture regimes (compact). Metrics averaged over held-out test views/lights.
+4.2. Implementation Details
+SSS residual MLP has four layers with 64 hidden units and
+ReLU activations (see Sec. 3.1). A more detailed implementation road-map can be found in the Supplementary section,
+as well as a table with all the hyperparemters used.
+We initialize 3D Gaussians from COLMAP reconstructions following [7]. Unless otherwise stated, each object
+is optimized with Adam (5×10−3 for Gaussian parameters,
+1×10−3 for the MLP, decayed by 0.1 after 50k steps). The
+7
+Category
+Variant
+PSNR↑
+SSIM↑
+LPIPS↓
+Geometric (10%, 3% lights)
+w/o silhouette loss (Depth only)
+w/o depth loss (Silhouette only)
+w/o both (geom) (Vanilla)
+Full DIAMOND-SSS (Depth+Sil.)
+20.697
+20.765
+20.222
+21.342
+0.621
+0.844
+0.591
+0.853
+0.331
+0.036
+0.319
+0.039
+Diffusion Augmentation (100% views, 1 light p/v)
+w/o relighting diffusion
+w/o novel-view diffusion
+w/o both (diffusion)
+Full DIAMOND-SSS (Depth+Sil.)
+23.20
+35.05
+23.10
+35.14
+0.90
+0.98
+0.90
+0.98
+0.150
+0.031
+0.152
+0.030
+Table 2. Unified ablation of geometric consistency and diffusion augmentation. Geometric losses are evaluated on real data (10% views,
+3% lights), and diffusion variants on the full views, 1 light per view regime.
+Diffusion-Based Augmentation. We fine-tune the official
+Free3D [45] checkpoint on our OLAT multi-view data using the original architecture, loss, and linear noise schedule
+(0.00085 → 0.0120 over 1000 steps). We train for ∼500
+epochs with lr 1×10−4 , 100 warm-up steps, batches of 16
+views from 4 objects, and 32×32 latents (scale 0.18215),
+using gradient checkpointing. Synthetic views are used during reconstruction with photometric losses down-weighted
+by α = 0.5. For relighting, we adopt the implementation
+of Poirier-Ginter et al. [23], fine-tuning a ControlNet-style
+diffusion model conditioned on light direction to generate
+synthetic OLAT data from single-illumination captures. This
+augmented data trains a relightable 3DGS model with an
+MLP for light/view conditioning and per-image latent vectors for consistency.
+lighting (Sec. 3.2) is used to compensate for missing OLAT
+captures. More results are depicted in the Supplementary
+section.
+4.4. Quantitative Results Across Capture Regimes
+We report PSNR, SSIM, and LPIPS averaged over held-out
+views and illuminations. Tab. 1 consolidates all six regimes,
+comparing SSS-3DGS and DIAMOND-SSS. Across all
+data regimes, DIAMOND-SSS consistently improves fidelity—especially under sparse supervision—demonstrating
+that diffusion-based augmentation and geometric priors complement each other.
+4.5. Data Efficiency and Ablations
+We assess each component via ablations disabling geometric
+losses and/or diffusion augmentation (Table 2). Removing geometric consistency causes depth and silhouette drift,
+while omitting diffusion reduces photometric diversity and
+harms relighting. The full DIAMOND-SSS model offers the
+best stability–fidelity trade-off and consistently matches or
+surpasses SSS-3DGS, with the largest gains under sparse
+supervision (Tab. 1). Novel-view diffusion is particularly important when views are limited. Together with Fig. 4, these
+results show that diffusion-based relighting and geometric
+regularization enable high-quality translucent reconstruction
+with up to 90% less real data. Additional qualitative ablations appear in the Supplementary section.
+Geometric Consistency. We implement the multi-view
+silhouette and depth consistency losses from Sec. 3.3 using
+depth-based reprojection: each pixel in a source view is
+back-projected into 3D, transformed into the target camera,
+and bilinearly sampled to obtain the corresponding silhouette
+and depth values. Consistency is enforced only on geometrically valid correspondences, filtered by visibility checks and
+per-pixel validity masks derived from depth reprojection. Silhouette alignment is supervised with a binary cross-entropy
+loss, and depth agreement with an ℓ1 loss, both normalized
+by the number of valid pixels. Unless stated otherwise, we
+use weights λsil = 0.5 and λdepth = 0.3.
+5. Limitations and conclusion
+4.3. Qualitative Results
+While DIAMOND-SSS achieves high-fidelity translucent
+reconstruction under sparse supervision, several limitations
+remain.
+Figure 4 compares reconstructions across the regimes. Under
+full supervision, SSS-3DGS already produces high-quality
+translucency, but suffers from slight geometric inconsistencies and blurry boundaries. Adding our geometric consistency losses (Sec. 3.3) sharpens silhouettes and improves
+depth coherence. As views and lights become sparse, the
+baselines exhibit strong degradation, whereas DIAMONDSSS maintains realistic subsurface scattering, color bleeding, and soft shadows, particularly when diffusion-based re-
+Diffusion realism. Diffusion-augmented views and relit samples, though visually consistent, are not strictly physically
+accurate and may exhibit slight color or scattering biases.
+Incorporating physics-based priors could enhance their realism.
+Efficiency and scalability. Diffusion-based augmentation
+8
+adds computational cost, partly offset by reduced capture
+needs. Lighter architectures or shared scene-level finetuning
+may alleviate this overhead.
+[10] Ruiqi Gao, Aleksander Hołyński, Philipp Henzler, Arthur
+Brussee, Ricardo Martin-Brualla, Pratul Srinivasan,
+Jonathan T Barron, and Ben Poole. Cat3d: create anything
+in 3d with multi-view diffusion models. In Proceedings of
+the 38th International Conference on Neural Information
+Processing Systems, pages 75468–75494, 2024.
+[11] Hanzhe Hu, Zhizhuo Zhou, Varun Jampani, and Shubham
+Tulsiani. Mvd-fusion: Single-view 3d via depth-consistent
+multi-view generation, 2024.
+[12] Steven L. Jacques. Optical properties of biological tissues: a
+review. Physics in Medicine and Biology, 58(11):R37–R61,
+2013. Erratum in: Phys Med Biol. 2013 Jul 21;58(14):5007–
+5008. PMID: 23666068.
+[13] Henrik Wann Jensen, Stephen R Marschner, Marc Levoy, and
+Pat Hanrahan. A practical model for subsurface light transport.
+In Proceedings of the 28th annual conference on Computer
+graphics and interactive techniques, pages 511–518, 2001.
+[14] Haian Jin, Yuan Li, Fujun Luan, Yuanbo Xiangli, Sai Bi,
+Kai Zhang, Zexiang Xu, Jin Sun, and Noah Snavely. Neural
+gaffer: Relighting any object via diffusion, 2024.
+[15] Joanna Kaleta, Kacper Kania, Tomasz Trzciński, and Marek
+Kowalski. Lumigauss: Relightable gaussian splatting in the
+wild. In 2025 IEEE/CVF Winter Conference on Applications
+of Computer Vision (WACV), pages 1–10. IEEE, 2025.
+[16] Bingxin Ke, Anton Obukhov, Shengyu Huang, Nando Metzger, Rodrigo Caye Daudt, and Konrad Schindler. Repurposing diffusion-based image generators for monocular depth
+estimation. In Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2024.
+[17] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler, and
+George Drettakis. 3d gaussian splatting for real-time radiance
+field rendering, 2023.
+[18] Chenhao Li, Trung Thanh Ngo, and Hajime Nagahara. Inverse
+rendering of translucent objects using physical and neural
+renderers, 2023.
+[19] Ruoshi Liu, Rundi Wu, Basile Van Hoorick, Pavel Tokmakov,
+Sergey Zakharov, and Carl Vondrick. Zero-1-to-3: Zero-shot
+one image to 3d object. In Proceedings of the IEEE/CVF
+international conference on computer vision, pages 9298–
+9309, 2023.
+[20] Yuan Liu, Cheng Lin, Zijiao Zeng, Xiaoxiao Long, Lingjie
+Liu, Taku Komura, and Wenping Wang. Syncdreamer: Generating multiview-consistent images from a single-view image.
+In The Twelfth International Conference on Learning Representations, 2024.
+[21] Ben Mildenhall, Pratul P. Srinivasan, Matthew Tancik,
+Jonathan T. Barron, Ravi Ramamoorthi, and Ren Ng. Nerf:
+Representing scenes as neural radiance fields for view synthesis. In European Conference on Computer Vision (ECCV),
+pages 405–421. Springer, 2020.
+[22] Bui Tuong Phong. Illumination for computer generated pictures. Communications of the ACM, 18(6):311–317, 1975.
+[23] Y. Poirier-Ginter, A. Gauthier, J. Philip, J.-F. Lalonde, and G.
+Drettakis. A diffusion approach to radiance field relighting
+using multi-illumination synthesis. Computer Graphics Forum (Proc. Eurographics Symposium on Rendering), 43(4),
+2024.
+Conclusion.
+In summary, DIAMOND-SSS couples
+diffusion-based augmentation with geometric priors to
+achieve photometrically consistent, data-efficient reconstruction of translucent materials. It reduces real capture requirements by orders of magnitude while preserving quality,
+paving the way toward scalable acquisition of complex appearance in unconstrained settings.
+6. Acknowledgments
+This work was supported by the ERC Advanced Grant SIMULACRON and the Munich Center for Machine Learning
+(MCML). In addition, the work of G. Figueroa-Araneda was
+also supported by Universidad Técinca Federico Santa Marı́a
+and Centro Nacional de Inteligencia Artificial in Chile.
+References
+[1] Mark Boss, Raphael Braun, Varun Jampani, Jonathan T. Barron, Ce Liu, and Hendrik P. A. Lensch. Nerd: Neural reflectance decomposition from image collections, 2021.
+[2] Mohammed Brahimi, Bjoern Haefner, Zhenzhang Ye, Bastian
+Goldluecke, and Daniel Cremers. Sparse views, near light:
+A practical paradigm for uncalibrated point-light photometric stereo. IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2024.
+[3] Mohammed Brahimi, Bjoern Haefner, Tarun Yenamandra,
+Bastian Goldluecke, and Daniel Cremers. Supervol: Superresolution shape and reflectance estimation in inverse volume
+rendering. In IEEE/CVF Winter Conference on Applications
+of Computer Vision (WACV), 2024.
+[4] Brent Burley and Walt Disney Animation Studios. Physicallybased shading at disney. In International Conference on
+Computer Graphics and Interactive Techniques (SIGGRAPH),
+2012.
+[5] Robert L. Cook and Kenneth E. Torrance. A reflectance model
+for computer graphics. ACM Transactions on Graphics, 1(1):
+7–24, 1982.
+[6] Eugene d’Eon and Geoffrey Irving. A quantized-diffusion
+model for rendering translucent materials. ACM transactions
+on graphics (TOG), 30(4):1–14, 2011.
+[7] Jan-Niklas Dihlmann, Arjun Majumdar, Andreas Engelhardt,
+Raphael Braun, and Hendrik P. A. Lensch. Subsurface scattering for 3d gaussian splatting, 2024.
+[8] Craig Donner and Henrik Wann Jensen. A spectral bssrdf for
+shading human skin. Rendering techniques, 2006:409–418,
+2006.
+[9] Jian Gao, Chun Gu, Youtian Lin, Zhihao Li, Hao Zhu, Xun
+Cao, Li Zhang, and Yao Yao. Relightable 3d gaussians: Realistic point cloud relighting with brdf decomposition and ray
+tracing. In European Conference on Computer Vision, pages
+73–89. Springer, 2024.
+9
+[24] Ayush Sarkar, Hanlin Mai, Amitabh Mahapatra, Svetlana
+Lazebnik, D. A. Forsyth, and Anand Bhattad. Shadows don’t
+lie and lines can’t bend! generative models don’t know projective geometry...for now. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+pages 28140–28149, 2024.
+[25] Kripasindhu Sarkar, Marcel C. Bühler, Gengyan Li, Daoye
+Wang, Delio Vicini, Jérémy Riviere, Yinda Zhang, Sergio
+Orts-Escolano, Paulo F. U. Gotardo, Thabo Beeler, and Abhimitra Meka. LitNeRF: Intrinsic radiance decomposition
+for high-quality view synthesis and relighting of faces. In
+SIGGRAPH Asia, 2023.
+[26] Christophe Schlick. An inexpensive BRDF model for
+physically-based rendering. In Proceedings of the Eurographics Workshop on Rendering, pages 219–226, London, UK,
+1994. Springer.
+[27] Ruoxi Shi, Hansheng Chen, Zhuoyang Zhang, Minghua Liu,
+Chao Xu, Xinyue Wei, Linghao Chen, Chong Zeng, and
+Hao Su. Zero123++: A single image to consistent multiview diffusion base model. arXiv preprint arXiv:2310.15110,
+2023.
+[28] Yichun Shi, Peng Wang, Jianglong Ye, Long Mai, Kejie Li,
+and Xiao Yang. Mvdream: Multi-view diffusion for 3d generation. In The Twelfth International Conference on Learning
+Representations, 2024.
+[29] B. G. Smith. Geometrical shadowing of a random rough
+surface. IEEE Transactions on Antennas and Propagation,
+15(5):668–671, 1967.
+[30] Pratul P Srinivasan, Boyang Deng, Xiuming Zhang, Matthew
+Tancik, Ben Mildenhall, and Jonathan T Barron. NeRV:
+Neural reflectance and visibility fields for relighting and view
+synthesis. In IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2021.
+[31] Thomson TG, Jeppe Revall Frisvad, Ravi Ramamoorthi, and
+Henrik Wann Jensen. Neural BSSRDF: Object appearance
+representation including heterogeneous subsurface scattering.
+arXiv, 2023.
+[32] TG Thomson, D. M. Tran, Henrik Wann Jensen, Ravi Ramamoorthi, and J. Frisvad. Neural sss: Lightweight object
+appearance representation. Computer Graphics Forum, 2024.
+[33] Bruce Walter, Stephen R. Marschner, Hongsong Li, and Kenneth E. Torrance. Microfacet models for refraction through
+rough surfaces. In Proceedings of the 18th Eurographics
+Symposium on Rendering (EGSR ’07), pages 195–206, Airela-Ville, Switzerland, 2007. Eurographics Association.
+[34] Zhou Wang, Alan C. Bovik, Hamid R. Sheikh, and Eero P.
+Simoncelli. Image quality assessment: From error visibility to
+structural similarity. IEEE Transactions on Image Processing,
+13(4):600–612, 2004.
+[35] Lihe Yang, Bingyi Kang, Zilong Huang, Zhen Zhao, Xiaogang Xu, Jiashi Feng, and Hengshuang Zhao. Depth anything
+v2. Advances in Neural Information Processing Systems, 37:
+21875–21911, 2024.
+[36] Hong-Xing Yu, Michelle Guo, Alireza Fathi, Yen-Yu Chang,
+Eric Ryan Chan, Ruohan Gao, Thomas Funkhouser, and
+Jiajun Wu. Learning object-centric neural scattering functions for free-viewpoint relighting and scene composition.
+Transactions on Machine Learning Research (TMLR), 2023.
+arXiv:2303.06138.
+[37] Jingyang Zhang, Yao Yao, Shiwei Li, Jingbo Liu, Tian Fang,
+David McKinnon, Yanghai Tsin, and Long Quan. Neilf++:
+Inter-reflectable light fields for geometry and material estimation, 2023.
+[38] Kai Zhang, Fujun Luan, Qianqian Wang, Kavita Bala, and
+Noah Snavely. PhySG: Inverse rendering with spherical
+gaussians for physics-based material editing and relighting.
+In IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2021.
+[39] Kai Zhang, Fujun Luan, Zhengqi Li, and Noah Snavely.
+IRON: inverse rendering by optimizing neural sdfs and materials from photometric images. In IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2022.
+[40] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Adding
+conditional control to text-to-image diffusion models. In
+Proceedings of the IEEE/CVF International Conference on
+Computer Vision (ICCV), pages 3836–3847, 2023.
+[41] Lvmin Zhang, Anyi Rao, and Maneesh Agrawala. Scaling
+in-the-wild training for diffusion-based illumination harmonization and editing by imposing consistent light transport. In
+The Thirteenth International Conference on Learning Representations, 2025.
+[42] Richard Zhang, Phillip Isola, Alexei A. Efros, Eli Shechtman, and Oliver Wang. The unreasonable effectiveness of
+deep features as a perceptual metric. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 586–595, 2018.
+[43] Xiuming Zhang, Pratul P. Srinivasan, Boyang Deng, Paul E.
+Debevec, William T. Freeman, and Jonathan T. Barron. NeRFactor: neural factorization of shape and reflectance under
+an unknown illumination. ACM Transactions on Graphics
+(TOG), 2021.
+[44] Yuanqing Zhang, Jiaming Sun, Xingyi He, Huan Fu, Rongfei
+Jia, and Xiaowei Zhou. Modeling indirect illumination for
+inverse rendering. In IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), 2022.
+[45] Chuanxia Zheng and Andrea Vedaldi. Free3d: Consistent
+novel view synthesis without 3d representation. In IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 9720–9731, 2024.
+[46] Shizhan Zhu, Shunsuke Saito, Aljaz Bozic, Carlos Aliaga,
+Trevor Darrell, and Christoph Lassner. Neural relighting
+with subsurface scattering by learning the radiance transfer
+gradient, 2023.
+10
+Supplementary Material
+We employ a mixed photometric objective
+This Supplementary Material provides additional technical
+details, ablation studies, and qualitative evaluations that
+complement the main paper. Section A reports the full implementation details and hyperparameters for all modules
+in DIAMOND-SSS. Section B provides additional qualitative reconstructions under a wide range of capture regimes,
+demonstrating the robustness of DIAMOND-SSS, particularly in sparse-view and sparse-light settings where SSS3DGS fails severely. Section C details the fine-tuning procedures for the diffusion-based components—multi-view
+and relighting diffusion—and presents extended qualitative
+comparisons against off-the-shelf NVS and relighting baselines. Section D expands on the formulation and practical
+considerations of the multi-view geometric losses, including
+visibility handling, depth normalization, sampling strategy,
+and targeted ablation studies on both synthetic and real objects. Finally, Section E summarizes compute requirements,
+reproducibility notes, and implementation considerations to
+facilitate future research and adoption.
+Ltotal =(1 − λdssim )L1 + λdssim (1 − SSIM) + λlpips LLPIPS
++ λmask Lmask + λsmooth Lsmooth + λenh Lenh
+MV
++ λray Lray + λsil LMV
+sil + λdepth Ldepth ,
+(A.1)
+The regularization objective proposed in [7] combines
+several auxiliary losses that improve stability, material
+fidelity, and geometric consistency. First, a normalconsistency term enforces agreement between the predicted
+normals N and pseudo-normals Ñ derived from the rendered
+depth map D under a local planarity assumption:
+Lnormals = λnormals ∥N − Ñ∥2 .
+(A.2)
+To supervise incident radiance, we constrain the clamped predicted illumination Lin (x, ωi ) to match the learned sphericalharmonics visibility VSH (x, ωi ) via an L1 loss
+Lincident = λincident Lin (x, ωi ) − VSH (x, ωi ) 1 .
+A. Implementation and Hyperparameters
+(A.3)
+Foreground consistency is enforced with a spatial masking
+loss, penalizing the contribution of Gaussians outside the
+image mask Imask :
+In this appendix we provide implementation and optimization details that complement the main paper (see Sec. 4.2).
+Lmask = −λmask [Imask log(α) + (1 − Imask ) log(1 − α)] .
+(A.4)
+Material smoothness is encouraged using bilateral smoothing
+on metalness m, roughness r, subsurfaceness sss, and base
+(q)
+color b, each with its own weight λsmooth ; for a generic
+attribute P Iq the loss is
+A.1. Optimization and Training Schedule
+We jointly optimize the 3D Gaussian parameters and the
+SSS residual MLP (see Sec. 3.1) using the Adam optimizer,
+with separate learning rates for geometry (5 × 10−3 ) and
+appearance (1 × 10−3 ). Both learning rates are reduced by a
+factor of 0.1 after 50k iterations. Training runs for 80k–100k
+steps depending on the object and capture regime.
+Gaussian initialization, densification, and pruning follow the SSS-3DGS pipeline [7]. To ensure fair comparison
+across ablations, we keep the number of Gaussians fixed
+throughout optimization.
+All experiments are implemented in PyTorch 2.2 with
+mixed precision and executed either on a single NVIDIA
+RTX A6000 (48 GB) or on a workstation equipped with a
+GPU with at least 24 GB VRAM, 32 GB RAM, and roughly
+100 GB of disk space. The environment uses CUDA 11.6 for
+compatibility with our training framework.
+
+1X
+M (x, y) ∥∇P Iq (x, y)∥ exp −∥∇I(x, y)∥ ,
+N x,y
+(A.5)
+where I(x, y) is the input image and M (x, y) denotes the
+valid mask. To improve highlight and shadow reconstruction,
+the authors in [7] adopt the R3DGS enhancement loss [9],
+comparing the predicted base color b to a pseudo-target T
+constructed from the input RGB image Irgb using a sigmoidbased blending weight sw:
+(q)
+Lsmooth =
+Lenhance = λenhance ∥T − b∥1 ,
+
+
+2
+T = sw · Irgb
++ (1 − sw) · 1 − (1 − Irgb )2 .
+(A.6)
+Finally, we supervise learned visibility using ray-traced
+ground-truth visibility VRT :
+A.2. Loss Weights
+The main paper defines the full objective Ltotal in Sec. 3.3,
+combining photometric, regularization, and geometric consistency terms. For completeness, we summarize the scalar
+weights used in all experiments.
+Lraytrace = λraytrace VSH (x, ωi ) − VRT (x, ωi ) 1 . (A.7)
+Together, these terms form the complete regularization objective used during optimization. All hyperparameters used
+in our experiments are presented in Tab. 3.
+11
+A.3. Hyperparameter Tuning
+that more flexible modeling of specular behavior combined with milder regularization on base color yields
+better fidelity.
+• The densification strategy favors a shorter and more
+aggressive phase: densify until iter is reduced
+from 15000 to 10000, densification interval is
+slightly increased, and densify grad threshold is
+relaxed. The opacity reset interval is also reduced from
+3000 to 1000. Together, these changes promote faster
+adaptation of the Gaussian set and help avoid early overfitting.
+Overall, the tuned configuration reflects a nuanced rebalancing of perceptual, structural, and regularization terms,
+leading to improved performance under the aggregated objective Ltotal while remaining close in spirit to the original
+SSS-3DGS design.
+The goal in this section is to understand how different configurations affect the custom objective Ltotal (see Eq. A.1),
+which aggregates photometric and regularization terms into
+a single performance metric for translucent scenes.
+A.3.1. Parallel Coordinate Analysis
+Figure 5 shows a parallel coordinate plot where each polyline
+corresponds to one hyperparameter configuration, and each
+vertical axis represents a different hyperparameter. The color
+encodes performance: lighter lines denote higher Ltotal (better configurations), while darker lines correspond to lowerperforming settings.
+Several trends emerge:
+• Mid-range values of λdssim (0.25,0.3) and λincident light
+(0.01-0.012) tend to perform best, suggesting that moderate weighting of structural similarity and incident-light
+regularization provides a good trade-off for reconstruction
+quality.
+• Higher values of λnormal (0.045>) and λbase color smooth
+(0.018>) correlate with better performance, indicating that
+emphasizing surface consistency and base-color smoothness can enhance overall fidelity.
+• For
+λroughness smooth
+(0.002<)
+and
+densify until iter (10K<), the best configurations cluster towards lower values, suggesting that
+overly strong roughness smoothing or excessively long
+densification phases can harm fine detail and lead to
+suboptimal reconstructions.
+Overall, these patterns provide guidance on how to balance detail preservation, smoothness, and physical plausibility in SSS-3DGS-style reconstructions.
+B. Additional Qualitative Reconstructions
+To complement the quantitative evaluations presented in the
+main paper, we provide additional qualitative reconstructions
+across a variety of translucent objects and capture regimes.
+These visual comparisons illustrate how DIAMOND-SSS
+behaves under different levels of supervision, ranging from
+full-view OLAT captures to extremely sparse pose–light
+subsets.
+Comparison across objects and capture regimes. Figure 6 presents reconstructions for three representative objects—Plastic Bottle, Crystal, and Massage Ball—under
+four supervision levels: (i) all views and all lights, (ii) all
+views with a single light per view, (iii) 5% of views and 5%
+of lights, and (iv) 3% of views and 3% of lights.
+In all settings, DIAMOND-SSS produces sharper boundaries, more stable silhouettes, and more faithful subsurfacescattering cues than SSS-3DGS [7]. In the sparse regimes
+(5%/5% and 3%/3%), SSS-3DGS fails severely—exhibiting
+strong boundary leakage, collapsed geometry, and inconsistent opacity—while DIAMOND-SSS remains stable and
+reconstructs the correct translucent appearance.
+A.3.2. Best Configuration vs. Original
+Table 4 compares the original hyperparameter configuration
+from [7] with the best-performing combination identified by
+our tuning procedure.
+A few observations:
+• The perceptual loss weight λlpips decreases from 0.2 to
+0.171, suggesting that a slightly reduced emphasis on perceptual similarity can improve the aggregate objective
+when combined with other terms.
+• In contrast, the structural loss weight λdssim increases substantially from 0.2 to 0.492, indicating that stronger structural supervision plays a key role in achieving better reconstructions.
+• The normal-consistency term λnormal is tuned upward from
+0.02 to 0.037, reinforcing the benefit of encouraging local
+surface coherence.
+• Among regularization terms, λmetallic smooth and
+λroughness smooth increase, whereas λbase color and
+λbase color smooth are slightly reduced. This suggests
+Fine-grained appearance comparisons. Figure 7 provides additional close-up views highlighting translucent appearance, color diffusion, and internal glow. Across objects,
+DIAMOND-SSS preserves the soft radiance falloff characteristic of translucent materials while maintaining geometric
+fidelity. In contrast, SSS-3DGS often exhibits noisy silhouettes, incorrect color bleeding near boundaries, or inconsistent opacity when supervision becomes sparse.
+These qualitative results reinforce the core claim of the
+paper: by integrating diffusion-based augmentation with
+multi-view geometric consistency, DIAMOND-SSS remains
+12
+Figure 5. Parallel coordinate plot of the hyperparameter search. Each line corresponds to one configuration; lighter colors indicate
+higher values of the aggregated objective Ltotal , as defined in Eq. A.1.
+Training and learning rate parameters
+Configuration
+Value [7]
+iterations
+10,000
+batch size
+4
+Gaussian learning rate
+5 × 10−3
+MLP learning rate
+1 × 10−3
+0.00016
+position lr init
+position lr final
+0.0000016
+position lr delay mult
+0.01
+position lr max steps
+30,000
+normal lr
+0.01
+0.01
+normals lr
+sh lr
+–
+feature lr
+0.0025
+0.0025
+color lr
+opacity lr
+0.05
+0.005
+scaling lr
+rotation lr
+0.001
+env lr
+0.1
+env rest lr
+0.001
+base color lr
+0.01
+roughness lr
+0.01
+metallic lr
+0.01
+subsurfaceness lr
+0.01
+light lr
+0.001
+light rest lr
+0.0001
+light init
+-1.0
+visibility lr
+0.0025
+visibility rest lr
+0.0025
+sss lr
+0.001
+Densification and loss parameters
+Configuration
+SValue
+percent dense
+0.01
+densification interval
+150
+opacity reset interval
+3000
+500
+densify from iter
+densify until iter
+10000
+densify grad threshold
+0.0010
+densify grad normal threshold
+–
+normal densify from iter
+0
+random background
+False
+sss width
+32
+λdssim
+0.492
+λlpips
+0.171
+λmask
+0.1
+λsmooth
+[0.002, 0.002, 0.002, 0.006]
+λenh
+0.005
+λray
+0.01
+λsil
+0.5
+λdepth
+0.3
+α (synthetic weight)
+0.5
+λnormal
+0.037
+λvisibility
+0.01
+λincident light
+0.015
+λmask entropy
+0.1
+λbase color
+0.002
+λbase color smooth
+0.005
+0.007
+λmetallic smooth
+λroughness smooth
+0.003
+λsubsurfaceness smooth
+0.002
+Table 3. DIAMOND-SSS configuration Training and densification hyperparameters for DIAMOND-SSS.
+robust even under highly incomplete OLAT captures, provid-
+ing state-of-the-art reconstructions of translucent materials.
+13
+Plastic Bottle
+GT
+Ours
+Crystal
+SSS-3DGS [7]
+GT
+Ours
+Massage Ball
+SSS-3DGS [7]
+GT
+all views, single light
+all views, single light
+all views, single light
+5% views, 5% lights
+5% views, 5% lights
+5% views, 5% lights
+3% views, 3% lights
+3% views, 3% lights
+3% views, 3% lights
+Ours
+SSS-3DGS [7]
+Figure 6. Qualitative comparison of reconstructed translucent appearance under different supervision conditions, the first row shows the
+setting: all views, all lights.
+Hyperparameter
+λdssim
+λlpips
+λnormal
+λvisibility
+λincident light
+λbase color
+λbase color smooth
+λmetallic smooth
+λroughness smooth
+λsubsurfaceness smooth
+densification interval
+opacity reset interval
+densify from iter
+densify until iter
+densify grad threshold
+Original
+0.200
+0.200
+0.020
+0.010
+0.020
+0.005
+0.006
+0.002
+0.002
+0.002
+100
+3000
+500
+15000
+0.0002
+C. Diffusion Fine-Tuning Details
+Best
+0.492
+0.171
+0.037
+0.010
+0.015
+0.002
+0.005
+0.007
+0.003
+0.002
+150
+1000
+500
+10000
+0.0010
+The diffusion-based augmentation pipeline is introduced in
+Sec. 3.2 and integrated into the reconstruction procedure in
+Sec. 3.4. Here we provide additional training and conditioning details for the two diffusion models used in DIAMONDSSS: a multi-view (novel-view) diffusion model and a relighting diffusion model. Both models are fine-tuned once
+on a small OLAT subset and are then reused across all test
+objects and capture regimes, without any per-object retraining.
+C.1. Training Data for Diffusion Models
+Figure 8 shows an overview of the dataset and Fig. 9 depicts
+the OLAT capture setup used by [7] to generate the dataset.
+As described in Secs. 4.1 and 4.2, both diffusion models
+are fine-tuned on a small subset (≤ 7%) of the full OLAT
+training data from SSS-3DGS [7]. We select four representative translucent objects—red car, jam jar, wax candle, and
+marble head—covering a range of scattering behaviors and
+specularities.
+Table 4. Original vs. tuned hyperparameter configuration. The
+“Best” setting corresponds to the highest Ltotal found in our search,
+as illustrated in Fig. 5.
+14
+Marmalade
+GT
+Ours
+Tupperware
+SSS-3DGS [7]
+GT
+Ours
+Soap Bottle
+SSS-3DGS [7]
+GT
+all views, single light
+all views, single light
+all views, single light
+5% views, 5% lights
+5% views, 5% lights
+5% views, 5% lights
+3% views, 3% lights
+3% views, 3% lights
+3% views, 3% lights
+Ours
+SSS-3DGS [7]
+Figure 7. Qualitative comparison of reconstructed translucent appearance under different supervision conditions, the first row shows the
+setting: all views, all lights.
+We emphasize that:
+• Fine-tuning uses only training views and illuminations; no
+evaluation frames are seen by the diffusion models.
+• The same fine-tuned models are reused across all test
+objects and capture regimes (no per-object or per-regime
+retraining).
+• Illumination is kept fixed for multi-view diffusion (to isolate geometry) and view is kept fixed for relighting diffusion (to isolate light transport).
+Together, these two diffusion models are used to expand
+a sparse OLAT capture into a denser multi-view, multiillumination training set for DIAMOND-SSS.
+els in inference mode—Zero123 [19], Zero123++ [27],
+MVD-Fusion [11], and Free3D [45]. On SSS-3DGS OLAT
+data, Free3D showed the strongest geometry and silhouette
+consistency out of the box, and we adopt it as our baseline
+prior. Representative comparisons are provided in Figs. 10
+to 12. See Fig. 2 for an overview of the architecture.
+Training procedure. We fine-tune the official Free3D
+checkpoint [45] (latent-diffusion UNet, 32×32 latents, scaling 0.18215) using the original denoising objective and linear noise schedule (0.00085 → 0.0120 over 1000 steps).
+Training sequences are sampled under fixed illumination so
+that the model learns geometric variation without entangling
+lighting.
+Camera poses are injected through ray-conditioning normalization layers, and lightweight multi-view attention and
+noise-sharing modules promote cross-view consistency. No
+architectural changes are introduced; only the weights are
+adapted to the OLAT domain.
+Fine-tuning hyperparameters:
+• Batch size: 16 target views sampled from 4 distinct objects,
+C.2. Multi-View Diffusion (Novel-View Synthesis)
+Purpose and model selection. Given a reference image
+Ivr from viewpoint vr and a target pose Pv = (K, Tv ), the
+multi-view diffusion module synthesizes the corresponding
+novel view Iˆv . This densifies the camera trajectory under
+fixed illumination, enabling cross-combination with the relighting module to obtain synthetic multi-view, multi-light
+supervision within DIAMOND-SSS.
+We first benchmarked several diffusion-based NVS mod-
+15
+• Learning rate: 1 × 10−4 with 100 warm-up steps,
+• Training duration: ≈ 500 epochs on the OLAT subset,
+• Memory optimization: Gradient checkpointing enabled.
+Use within DIAMOND-SSS. During reconstruction, the
+relighting diffusion module produces synthetic OLAT variants for each view. As with multi-view diffusion outputs,
+synthetic photometric losses are down-weighted by α, but
+these augmented illuminations still contribute meaningfully
+to multi-view silhouette and depth consistency, improving
+supervision across illumination conditions.
+Use within DIAMOND-SSS. During reconstruction, synthetic views generated by the multi-view diffusion module
+are rendered through the same camera poses as real observations. Photometric losses on synthetic images are downweighted by the factor α defined in Sec. 3.4, while geometric
+consistency losses (e.g., silhouette or depth consistency) benefit fully from the increased viewpoint density.
+C.4. Setup: Use with Real, Relighted, and Fully
+Synthetic Data
+Real OLAT captures. We use native OLAT images with
+provided (Kv , Tv ) without modification.
+C.3. Relighting Diffusion
+Purpose and model selection. Given a single-view RGB
+input Iv,ls under source illumination ls , together with auxiliary conditioning maps Cv (depth and normals), the relighting diffusion module predicts the same view under a
+novel target light ltgt . This expands the illumination coverage under fixed geometry and is especially useful in regimes
+such as “all views, 1 light per view,” where synthetic OLAT
+variants provide dense lighting supervision.
+We adopt a ControlNet-style conditional diffusion framework inspired by [23, 40], starting from the public implementation of Poirier-Ginter et al. [23]. An architectural overview
+is included in Fig. 2.
+Relighting augmentation. For settings such as “all views,
+1 light per view,” missing illuminations are synthesized using the relighting diffusion model (Sec. C.3). The camera
+parameters (Kv , Tv ) remain unchanged.
+Training procedure. We augment the model original
+model to receive the following conditioning signals:
+• Source RGB image: Iv,ls ,
+• Estimated depth map: from Depth Anything v2 [35],
+• Estimated surface normals: from Marigold [16],
+• Target illumination: 9D spherical harmonic encoding
+Φ(ltgt ).
+Depth and normals are resized and normalized to match
+the UNet resolution. SH features are injected into both the
+ControlNet branch and the denoiser’s timestep and crossattention embeddings. The architecture itself is unchanged;
+only the training data and conditioning inputs are adapted to
+OLAT captures. In Fig. 13 depicts examples of the conditions used per object.
+C.5. Benchmarking and ablation studies
+Fully synthetic multi-view sets. When using multi-view
+diffusion + relighting, we generate:
+• novel poses Pv from the Free3D-based NVS model
+(Sec. C.2),
+• relighted OLAT equivalents under all target directions.
+Generated data is aligned with the original OLAT lattice
+(same lights, comparable poses).
+We evaluate the effect of diffusion fine-tuning for both the
+multi-view synthesis module and the relighting module. Figures 10–12 summarize the multi-view synthesis behavior
+across several baselines, while Figures 14 and 15 focus on
+the relighting model. In addition, Table 2 shows our numerical results for the ablation studies.
+Multi-view diffusion (NVS). We compare our fine-tuned
+Free3D model with: (1) off-the-shelf Free3D, (2) Zero123,
+(3) Zero123-XL, and (4) MVD-Fusion.
+Across synthetic and real objects (Figures 10, 11, 12), our
+fine-tuned model consistently produces:
+• sharper and more stable silhouettes,
+• reduced geometric drift across viewpoints,
+• fewer distortions in thin structures,
+• better preservation of object identity under large viewpoint
+changes.
+This justifies using Free3D as the backbone for DIAMONDSSS and highlights the importance of domain adaptation to
+OLAT capture conditions.
+Training objective. We employ the v-parameterization
+objective combined with a mixture of L1, SSIM, and LPIPS
+losses, as well as cycle-consistency and blur-aware terms to
+encourage stable low-frequency light transport and reduce
+high-frequency artifacts. Training samples follow:
+(Iv,ls , Dv , Nv , Φ(ltgt ), Iv,ltgt ),
+Relighting diffusion. We further ablate the effects of progressively increasing conditioning and supervision:
+1. Baseline RGB-only conditioning,
+2. + depth and normal conditioning,
+where Iv,ltgt is the corresponding OLAT ground truth. The
+implementation follows [23], with modifications only to the
+data and conditioning.
+16
+3. + L1 and perceptual losses.
+As illustrated in Figures 14 and 15, each addition improves physical realism:
+• depth improves global shadow placement,
+• normals sharpen high-frequency surface cues,
+• perceptual losses reduce haloing and over-sharp reflections,
+• the full model best reproduces soft-scattering cues, achieving smooth light transitions characteristic of SSS material
+appearance.
+bleeding, and improving cross-view alignment of object outlines.
+Depth Consistency. Silhouette alignment alone does not
+provide depth information. The depth consistency loss addresses this by enforcing agreement between the predicted
+metric depth in view j and the back-projected/reprojected
+depth from view i (see Eq. (3.6) in the main paper). This
+ensures that the same physical surface point occupies a consistent 3D position across camera viewpoints, thereby improving global geometric coherence.
+Together, these losses constrain both where the surface
+should appear (silhouette) and how far it should lie along
+each viewing ray (depth), reducing cross-view inconsistencies and improving stability under downstream relighting.
+Summary. The ablations show that diffusion models benefit substantially from fine-tuning under our OLAT dataset
+and conditioning strategy. For NVS, fine-tuning improves
+geometric coherence and silhouette stability. For relighting, deeper conditioning leads to more faithful subsurfacescattering behavior and reduced artifacts. These findings
+support the design choices adopted in DIAMOND-SSS and
+demonstrate that diffusion-based augmentation becomes reliable only after domain adaptation.
+D.2. Visibility and Correspondence Filtering
+MV
+Both LMV
+sil and Ldepth rely on correspondences obtained via
+back-projection from a source view i to a target view j using
+the camera models. In practice, we improve robustness by:
+• Domain filtering: Correspondences whose reprojected
+coordinates x′i,j fall outside the target image plane are
+discarded.
+• Silhouette filtering: Pixels reprojected outside the target
+soft silhouette (beyond a small tolerance) are ignored.
+• Depth validity: Correspondences with invalid or missing
+depth (e.g., occlusions or empty space) in either view are
+removed.
+• Normalization: Each loss term is normalized by the number of valid correspondences to avoid biasing toward dense
+or front-facing views.
+This visibility-aware masking substantially reduces artifacts near occlusion boundaries and improves stability in
+sparse-view settings.
+D. Multi-View Geometric Losses: Practical Details
+The multi-view geometric consistency losses introduced in
+Sec. 3.3—namely multi-view silhouette consistency and
+multi-view depth consistency—play a central role in stabilizing reconstructions under sparse or synthetic supervision.
+This section provides additional implementation details, motivation, and qualitative analyses that complement the main
+text.
+D.1. Motivation and Intuition
+Multi-view photometric supervision alone does not sufficiently constrain the geometry of translucent objects, in
+particular in our very sparse setting with synthetic data augmentation. Small inconsistencies in predicted depth or occupancy can lead to view-dependent artifacts, such as boundary
+bleeding or inconsistent surface placement, which propagate
+into both shading and appearance, especially under SSS
+transport.
+The two geometric consistency terms complement each
+other:
+D.3. Depth Normalization and Numerical Stability
+Depth values depend on the scene scale and camera intrinsics.
+To improve numerical conditioning, both the reprojection
+depth ẑi,j and the rendered depth Dj (x′ ) are linearly normalized to [0, 1] using scene-specific near/far clipping planes.
+This removes the need for per-object tuning of λdepth and
+yields consistent gradients across scenes.
+D.4. Ablation Studies
+Silhouette Consistency. The silhouette-consistency term
+enforces that pixels corresponding to the object’s foreground
+in one view remain foreground when reprojected into another view. Concretely, for a pixel x in view i, we backproject it using its predicted depth and reproject it into view
+j (see Eq. (3.5)). The loss penalizes cases where this reprojected point falls outside the soft silhouette mask of view
+j, thereby stabilizing object boundaries, reducing opacity
+We evaluate the contribution of each multi-view geometric term through controlled ablations on synthetic and real
+OLAT data. The quantitative results are summarized in Table 2, and qualitative comparisons appear in Figures 16–21.
+Silhouette-only supervision. Adding only the silhouette
+consistency term improves boundary alignment by ensuring
+that reprojected points fall within the target-view silhouette.
+17
+Code base. Our implementation builds on:
+• 3DGS [17] for the base Gaussian renderer,
+• Relightable 3DGS [9] for material and lighting branches,
+• SSS-3DGS [7] for subsurface-scattering modeling,
+• Free3D [45] for multi-view diffusion,
+• Poirier-Ginter et al. [23] for relighting diffusion
+(ControlNet-style conditioning).
+All components required to reproduce our results are open
+source.
+As shown in Figure 16 (second column), this reduces edge
+bleeding and stabilizes contours but does not fully resolve
+metric inconsistencies.
+Depth-only supervision. The depth consistency loss enforces agreement between the reprojected depth ẑj (X) and
+the rendered depth Dj (x′ ) in the target view. Figure 16
+(third column) shows that this significantly reduces geometric drift across views, improving spatial coherence even in
+sparse-view settings.
+Training schedule and runtime. Reconstruction of each
+scene (including multi-view geometric consistency) requires
+approximately:
+• 1–1.5 hour for full-view OLAT settings,
+• 0.5–1 hours for sparse-view settings,
+measured on an RTX A6000. Fine-tuning the diffusion
+models is performed once:
+• Free3D NVS fine-tuning: ≈15 hours for 500 epochs,
+• Relighting model: ≈12–20 hours depending on object
+subset size.
+These models are then reused for all experiments without
+per-object retraining.
+Combined silhouette + depth supervision. Using both
+terms yields the most stable reconstructions. As seen in
+Figures 16 (fourth column) and 17, the combination delivers
+accurate geometry and clean boundaries, with fewer viewdependent artifacts than either component alone.
+Generalization across objects. Figures 18 and 19 demonstrate that these improvements generalize across diverse synthetic and real objects, including highly translucent materials.
+The combined loss consistently produces sharper silhouettes
+and more metrically consistent shapes.
+Scene reuse and caching. Rendered depth, normals, and
+intermediate diffusion results are cached to reduce repeated
+compute. Gaussian densification schedules and multi-view
+loss masks (Sec. D) are shared across experiments to ensure
+comparability.
+Isolated silhouette effects. Figures 20 and 21 highlight
+the specific gain from silhouette consistency alone—most
+notably the suppression of boundary haloing and improved
+contour sharpness.
+Summary. Across all experiments, multi-view geometric supervision (i) sharpens boundaries, (ii) improves metric alignment, and (iii) reduces view-dependent distortions.
+These trends match the improvements reported quantitatively in Table 2 and play a central role in the reliability
+of DIAMOND-SSS under sparse or noisy view regimes.
+Randomness and determinism. All experiments use fixed
+seeds for camera sampling, appearance model initialization,
+and diffusion noise, ensuring repeatability with no run-to-run
+variations.
+Reconstruction pipeline consistency. Evaluation scripts,
+loss computation, and image-space metrics (PSNR, SSIM,
+LPIPS) follow the same routines across synthetic and real
+scenes for consistent reporting.
+E. Reproducibility and Compute
+DIAMOND-SSS is built entirely on publicly released components in 3D Gaussian Splatting and diffusion architectures.
+To facilitate reproducibility, we summarize below the practical considerations, compute settings, and implementation
+choices that complement the hyperparameters in Tab. 3 and
+the training details provided in Secs. C and 4.2.
+Overall, DIAMOND-SSS can be reproduced on a single
+high-memory GPU and relies only on publicly available
+components. The training schedules, hyperparameters, and
+data augmentations are fully documented in the main paper
+and this supplementary material.
+Hardware. All experiments were conducted on a single NVIDIA RTX A6000 GPU (49 GB VRAM) using PyTorch 2.2 with automatic mixed precision. A local workstation with 32 GB RAM and ∼100 GB of disk storage
+(datasets, checkpoints, intermediate outputs) is sufficient
+to reproduce every experiment. Training the Free3D finetuning and the relighting model does not require multi-GPU
+setups.
+18
+Figure 8. Dataset overview showing synthetic (top) and real (bottom) objects under different illumination and viewpoints.
+19
+Figure 9. Overview of OLAT capture setup. A hemispherical lighting rig sequentially illuminates the object with one light at a time,
+capturing per-light images from fixed viewpoints.
+20
+Condition
+Generated Views
+Free3D (ours,
+fine-tuned) [45]
+Free3D (off-theshelf) [45]
+Zero123 [19]
+Zero123-XL [27]
+MVDFusion [11]
+Figure 10. Multi-view diffusion: comparison on a synthetic “statue” object. Each row shows novel views generated from a single
+conditioning image (first column) by different NVS models. Our Free3D fine-tuning better preserves object identity and silhouette coherence
+than off-the-shelf Free3D and improves geometric consistency over other baselines.
+21
+Condition
+Generated Views
+Free3D (ours,
+fine-tuned) [45]
+Free3D (off-theshelf) [45]
+Zero123 [19]
+Zero123-XL [27]
+MVDFusion [11]
+Figure 11. Multi-view diffusion on a real “bunny” object. Comparison between our fine-tuned Free3D model and several off-the-shelf
+NVS baselines. Fine-tuning improves viewpoint coherence and reduces geometric distortions while preserving appearance across views.
+22
+Condition
+Generated Views
+Free3D (ours,
+fine-tuned) [45]
+Free3D (off-theshelf) [45]
+Zero123 [19]
+Zero123-XL [27]
+MVDFusion [11]
+Figure 12. Multi-view diffusion on a translucent “soap” object. Our fine-tuned Free3D model better respects the global shape and
+translucency cues across viewpoints than off-the-shelf Free3D and other NVS baselines, while remaining suitable as an augmentation prior
+for DIAMOND-SSS.
+23
+input image
+depth w/o alpha
+depth w alpha
+normal w/o alpha normal w alpha albedo w/o alpha albedo w alpha
+thickness
+Figure 13. Samples illustrating the compositing conventions for different conditions. Each row shows the input RGB image and its
+corresponding map before and after applying the foreground mask.
+24
+Condition
+Ground Truth
+Relighting (ours)
+NeuralGaffer [14]
+IC-Light [41]
+NVS + Relighting (ours)
+Figure 14. Qualitative relighting comparison. For three representative objects (two real, one synthetic), we compare our relighting-only
+model and our full NVS+relighting pipeline against NeuralGaffer [14] and IC-Light [41] under matched target illumination. Our method
+better preserves geometry and material appearance, and produces more consistent subsurface scattering cues (e.g., soft shadows and glow)
+across diverse lighting conditions.
+25
+baseline
+baseline + depth + normals
+baseline + depth + normals +
+L1 + perceptual losses
+ground truth
+Figure 15. Relighting ablation. Effect of progressively adding geometric conditioning (depth, normals) and pixel/perceptual losses to the
+relighting diffusion model. Additional conditioning and perceptual supervision improve shadow placement, reduce halo artifacts, and better
+reproduce the soft scattering patterns of translucent materials.
+SSS-3DGS [7]
++ Silhouette
++ Depth
++ Depth + Silhouette
+Ground Truth
+Figure 16. Synthetic-data ablation of multi-view geometric losses. Silhouette and depth consistency each improve boundary stability and
+metric alignment, with the combination yielding the most coherent results.
+26
+Ground Truth
+Ours
+SSS-3DGS [7] + Synthetic
+augmentation
+Figure 17. Real-data reconstruction comparison. Multi-view geometric losses significantly improve boundary correctness and reduce
+view-dependent distortions. In this images we are showing the full sampling setting.
+27
+(a) Ground Truth
+(b) SSS [7] Tuned
+(c) Ours
+(d) SSS 3DGS [7] + Losses
+Figure 18. Multi-view geometric losses on real objects. The full multi-view supervision produces sharper boundaries and reduces positional
+drift. Here we also compare the original method with our tuned hyperparemeters.
+28
+(a) Ground Truth
+(b) SSS 3DGS [7] Tuned
+(c) Ours
+(d) SSS 3DGS [7] Multi-View
+Figure 19. Synthetic vs. tuned multi-view results. Combining parameter tuning with multi-view losses yields the most stable reconstructions.
+Here we also compare the original method with our tuned hyperparemeters.
+29
+(a) Ground Truth
+(b) Ours
+(c) SSS 3DGS [7] Tuned
+Figure 20. Silhouette loss effect on synthetic data. The addition of silhouette regularization reduces boundary bleeding and sharpens
+object contours.
+30
+(a) Ground Truth
+(b) Ours
+(c) SSS 3DGS [7]
+Figure 21. Silhouette loss effect on synthetic data. The addition of silhouette regularization reduces boundary bleeding and sharpens
+object contours.
+31

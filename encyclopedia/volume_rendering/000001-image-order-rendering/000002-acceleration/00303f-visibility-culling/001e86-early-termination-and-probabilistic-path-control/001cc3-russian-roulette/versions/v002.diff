@@ -1,0 +1,125 @@
+--- v001.md
++++ v002.md
+@@ -3,30 +3,26 @@
+ 
+ ## Overview
+-Russian Roulette is a probabilistic technique used to terminate volumetric paths or ray marching loops when their contribution to the final image becomes negligible, thereby reducing computational cost while maintaining statistical unbiasedness [S1, S2, unofficial][S3]. Unlike deterministic early termination which clamps the result and introduces bias, Russian Roulette scales the weight of surviving paths to compensate for the probability of termination, ensuring the expected value remains unchanged [S1, S2, unofficial]. It is distinct from [Empty-space skipping](1002-empty-space-skipping.md) (which avoids sampling empty regions) and [Early ray termination](1019-early-ray-termination.md) (which stops based on opacity thresholds without compensation) by explicitly handling the variance and bias trade-off through random sampling [S2, unofficial].
++Russian Roulette is a probabilistic technique used to terminate volumetric paths or ray marching loops when their contribution to the final image becomes negligible, thereby reducing computational cost while maintaining statistical unbiasedness [S1, S2, unofficial][S3]. Unlike deterministic early termination which clamps the result and introduces bias, Russian Roulette scales the weight of surviving paths to compensate for the probability of termination, ensuring the expected value remains unchanged [S1, S2, unofficial]. It is applied during the ray marching or path integration loop after opacity or transmittance updates [S1, S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- Input: Current path throughput/weight $W$ (or transmittance $T$), random number generator.
+-- Output: Updated weight $W'$ (or $T'$) and a boolean indicating whether the path continues or terminates.
++- Input: Current path throughput/weight $W$ (or transmittance $T$), random number generator, current path depth [S1, S2, unofficial][S3].
++- Output: Updated weight $W'$ (or $T'$) and a boolean indicating whether the path continues or terminates [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-- Random number generator producing uniform samples $\xi \in [0, 1]$.
+-- Accumulated throughput/transmittance variable (scalar or spectral vector).
++- Random number generator producing uniform samples $\xi \in [0, 1]$ [S1, S2, unofficial].
++- Accumulated throughput/transmittance variable (scalar or spectral vector) [S1, unofficial][S3].
++- Path depth counter [S3].
+ 
+ **Parameters:**
+-- Termination probability $p_{rr}$: The probability of killing the path.
++- Termination probability $p_{rr}$: The probability of killing the path, often derived from the weight or transmittance [S1, S2, unofficial].
+ - Threshold: A minimum value for transmittance/weight below which RR is considered (e.g., $10^{-3}$) [S2, unofficial].
+-- Depth: Current path depth, used to prevent termination at the first bounce [S3].
++- Minimum depth: Current path depth, used to prevent termination at the first bounce [S3].
+ 
+ **Steps:**
+-1. Evaluate the current contribution weight $W$ (or transmittance $T$) after a scattering event or step.
+-2. Determine the termination probability $p_{rr}$. Common strategies include:
+-   - Using the maximum component of the spectral weight/transmittance [S1, unofficial][S3].
+-   - Using a fixed constant (e.g., $0.5$) if the weight is below a threshold [S2, unofficial].
+-   - Using the transmittance value itself for pure transmittance calculations [S1, unofficial].
+-3. Generate a uniform random number $\xi \in [0, 1]$.
+-4. Compare $\xi$ with $p_{rr}$:
+-   - If $\xi \geq p_{rr}$ (or $\xi > 1/d$ in some formulations where $d=1/p_{rr}$), terminate the path. Set $W' = 0$.
+-   - Otherwise, continue the path. Scale the weight: $W' = W / p_{rr}$.
++1. Evaluate the current contribution weight $W$ (or transmittance $T$) after a scattering event or step [S1, S2, unofficial].
++2. Determine the termination probability $p_{rr}$ (or survival probability $1-p_{rr}$). Common strategies include: using the maximum component of the spectral weight/transmittance [S1, unofficial][S3]; using a fixed constant (e.g., $0.5$) if the weight is below a threshold [S2, unofficial]; or using the transmittance value itself for pure transmittance calculations [S1, unofficial].
++3. Generate a uniform random number $\xi \in [0, 1]$ [S1, S2, unofficial].
++4. Compare $\xi$ with $p_{rr}$: if $\xi \geq p_{rr}$ (or $\xi > 1/d$ in some formulations where $d=1/p_{rr}$), terminate the path and set $W' = 0$ [S1, S2, unofficial]. Otherwise, continue the path and scale the weight: $W' = W / p_{rr}$ [S1, S2, unofficial].
+ 
+ **Formulas:**
+@@ -45,11 +41,20 @@
+ **Pseudocode:**
+ ```python
+-def russian_roulette(weight, sampler, min_threshold=1e-3, min_depth=1, current_depth=1):
++import random
++
++class Spectral:
++    def __init__(self, components):
++        self.components = components
++    def max_component(self):
++        return max(self.components)
++    def divide(self, scalar):
++        return Spectral([c / scalar for c in self.components])
++
++def russian_roulette(weight, min_threshold=1e-3, min_depth=1, current_depth=1):
+     """
+     Applies Russian Roulette to a volumetric path.
+     
+     Args:
+-        weight: Current throughput/transmittance (scalar or spectral).
+-        sampler: Random number generator with Get1D() method.
++        weight: Current throughput/transmittance (scalar or Spectral).
+         min_threshold: Minimum weight to consider termination.
+         min_depth: Minimum path depth before allowing termination.
+@@ -58,5 +63,5 @@
+     Returns:
+         new_weight: Scaled weight if continuing, 0 if terminated.
+-        continue: Boolean indicating if the path continues.
++        continue_path: Boolean indicating if the path continues.
+     """
+     # Do not terminate at the first bounce or if weight is high
+@@ -65,5 +70,4 @@
+ 
+     # Determine termination probability based on weight
+-    # Strategy 1: Use max component for spectral weights [S3]
+     if isinstance(weight, Spectral):
+         max_comp = weight.max_component()
+@@ -71,5 +75,4 @@
+             # Probability of continuing is max_comp
+             # Probability of terminating q = 1 - max_comp
+-            # Note: If max_comp is 0, q=1, path always dies
+             q = max(0.0, 1.0 - max_comp)
+         else:
+@@ -79,5 +82,4 @@
+         if weight < min_threshold:
+             # d=2 implies continueProb=0.5, so p_rr (termination) = 0.5
+-            # Or generally, if weight < threshold, set p_rr = 0.5
+             p_rr = 0.5
+             q = p_rr
+@@ -86,9 +88,7 @@
+ 
+     # Sample
+-    u_rr = sampler.get_1d()
++    u_rr = random.random()
+ 
+     # Terminate if u_rr < q (where q is prob of termination)
+-    # Note: S3 uses uRR < q to break. S1 uses xi >= p_rr to terminate.
+-    # If q is termination prob, then terminate if u_rr < q.
+     if u_rr < q:
+         return 0.0, False
+@@ -96,5 +96,5 @@
+         # Scale weight by 1 / (1 - q) which is 1 / continue_prob
+         # If q = 1 - max_comp, then 1-q = max_comp
+-        new_weight = weight / (1.0 - q)
++        new_weight = weight.divide(1.0 - q) if isinstance(weight, Spectral) else weight / (1.0 - q)
+         return new_weight, True
+ ```
+@@ -125,5 +125,5 @@
+ ## Operating characteristics
+ - **Time Complexity:** Reduces the average number of ray marching steps, especially in dense volumes where transmittance drops quickly [S2, unofficial].
+-- **Memory Complexity:** No additional memory overhead beyond random number state.
++- **Memory Complexity:** No additional memory overhead beyond random number state [G].
+ - **Measured Performance:** In a cloud example, rendering with Russian Roulette took 161s (unbiased) compared to 2556s without it (biased, max depth 200) [S1, unofficial].
+ - **Scaling:** More effective in dense volumes where transparency drops rapidly [S2, unofficial].
+@@ -131,5 +131,4 @@
+ - **Limitations:** Adds variance due to the random termination; requires careful tuning of termination probability [S1, unofficial].
+ - **When to Use:** In path tracing or ray marching for volumes where paths can become very long or contribute negligibly [S1, S2, unofficial].
+-- **When Not to Use:** When strict deterministic results are required, or in very sparse volumes where the overhead of RR is not justified [S2, unofficial].
+ 
+ ## Background

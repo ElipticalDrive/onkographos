@@ -1,5 +1,3 @@
-]
-
 # Terrain Chunk Generation
 
 Also called: FBM Terrain Synthesis, terrainChunk

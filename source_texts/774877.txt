@@ -1,0 +1,254 @@
+Simple DirectMedia Layer. Contribute to libsdl-org/SDL development by creating an account on GitHub.
+
+render: Initial attempt at adding SDL_GenerateTextureMipmap(). by icculus · Pull Request #10254 · libsdl-org/SDL · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+icculus
+commented
+Jul 13, 2024
+Copy link
+Copy Markdown
+Collaborator
+This is only implemented for the OpenGL and OpenGL ES 2 backends currently, and is completely untested, beyond it compiles on my laptop.
+This is a draft until it gets comments and more backends. Metal is easy to implement, Vulkan and D3D11+ probably are (...?), and Direct3D 9 will need us to roll our own, to which I say we should probably just leave it unimplemented there.
+Fixes #4156.
+icculus
+mentioned this pull request
+Jul 13, 2024
+[Feature request] Generate texture mipmap
+#4156
+Open
+slime73
+commented
+Jul 13, 2024
+Copy link
+Copy Markdown
+Contributor
+Some notes:
+I think every graphics API except OpenGL needs a texture to be created with mipmap support specified up front, since it affects how much memory is allocated for the texture. If a creation flag or something isn't on the table then SDL_Render could recreate the API's texture object behind the scenes when GenerateMipmap is first called I suppose, if the contents can be preserved.
+Being able to manually put your own data into each mipmap level is a thing that has some use cases, but I'd say it's even more niche than basic support, in a 2D API.
+Trilinear filtering (blending between mipmap levels instead of picking the closest, when drawing) could be useful, since there can be a noticeable visual change when it switches levels if you're animating the scale or something, without it.
+slouken
+commented
+Jul 14, 2024
+Copy link
+Copy Markdown
+Collaborator
+We could easily add mipmaps as a texture creation property, and trilinear filtering to the blend mode (that’s where it would go, right?)
+slime73
+commented
+Jul 14, 2024
+Copy link
+Copy Markdown
+Contributor
+For mipmap filtering, it's pretty much a SDL_ScaleMode but applied to the mipmap filter part of texture sampler state instead of the minification/magnification filter part. Some APIs like D3D11 have them all in the same enum, most others have them independently set (but still part of the same state group).
+So there could be a SDL_SetTextureMipmapScaleMode, or the SDL_ScaleMode enum could have extra values (although that'd be weird in the other places where it's used aside from SDL_SetTextureScaleMode), or something else like that.
+icculus
+commented
+Jul 14, 2024
+Copy link
+Copy Markdown
+Collaborator
+Author
+Maybe we make the creation flag/property that says "this texture wants mipmapping" and we create the texture appropriately, and then automatically (re)generate mipmaps when the app changes a texture (SDL_UpdateTexture, SDL_UnlockTexture, or unbinds it as a render target), and remove the SDL_GenerateTextureMipmap function call entirely.
+danpla
+reviewed
+Jul 14, 2024
+View reviewed changes
+Comment thread
+src/render/opengl/SDL_render_gl.c
+Comment on lines
++1787
+to
++1789
+if (glmajorver >= 3) {
+data->glGenerateMipmap = (PFNGLGENERATEMIPMAPPROC)SDL_GL_GetProcAddress("glGenerateMipmap");
+renderer->GenMipmaps = (data->glGenerateMipmap != NULL) ? GL_GenMipmaps : NULL;
+danpla
+Jul 14, 2024
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+For OpenGL < 3, glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP, GL_TRUE) can be used as a fallback.
+danpla
+reviewed
+Jul 14, 2024
+View reviewed changes
+Comment thread
+src/render/opengl/SDL_render_gl.c
+renderdata->drawstate.texture = texture;
+}
+renderdata->glGenerateMipmap(renderdata->textype);
+danpla
+Jul 14, 2024
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Mipmaps need one of GL_*_MIPMAP_* modes (e.g GL_LINEAR_MIPMAP_LINEAR) for GL_TEXTURE_MIN_FILTER to have effect. See https://www.khronos.org/opengl/wiki/Common_Mistakes#Automatic_mipmap_generation
+danpla
+reviewed
+Jul 14, 2024
+View reviewed changes
+Comment thread
+src/render/opengl/SDL_render_gl.c
+Comment on lines
++863
+to
++864
+renderdata->glGenerateMipmap(renderdata->textype);
+return 0; // GL does not report failure here.
+danpla
+Jul 14, 2024
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+In fact, glGenerateMipmap does report errors (in particular, for NPOT textures):
+https://registry.khronos.org/OpenGL-Refpages/es2.0/xhtml/glGenerateMipmap.xml
+danpla
+commented
+Jul 14, 2024
+Copy link
+Copy Markdown
+So there could be a SDL_SetTextureMipmapScaleMode, or the SDL_ScaleMode enum could have extra values (although that'd be weird in the other places where it's used aside from SDL_SetTextureScaleMode), or something else like that.
+In terms of OpenGL, trillinerar filtering is GL_LINEAR_MIPMAP_LINEAR for GL_TEXTURE_MIN_FILTER. As I understand it, GL_NEAREST_MIPMAP_LINEAR will be used with SDL_ScaleModeNearest and GL_LINEAR_MIPMAP_LINEAR is for SDL_ScaleModeLinear, so extra functions/enums are not necessary.
+slouken
+commented
+Jul 14, 2024
+Copy link
+Copy Markdown
+Collaborator
+Maybe we make the creation flag/property that says "this texture wants mipmapping" and we create the texture appropriately, and then automatically (re)generate mipmaps when the app changes a texture (SDL_UpdateTexture, SDL_UnlockTexture, or unbinds it as a render target), and remove the SDL_GenerateTextureMipmap function call entirely.
+This seems like a good idea to me.
+dingogames
+commented
+Jul 16, 2024
+Copy link
+Copy Markdown
+Thoughts on filter modes:
+GL_LINEAR_MIPMAP_LINEAR (“trilinear”) is the most important filter mode to support - I believe it's usually what the user would want if they have mipmaps enabled.
+GL_LINEAR_MIPMAP_NEAREST (often called “bilinear”) - More performant than trilinear and could have better clarity/crispness in some cases. Could be useful if you aren’t actively scaling up and down graphics so don't have to worry about the “pop” between different mipmap levels.
+GL_NEAREST_MIPMAP_NEAREST - Most performant. Doesn’t seem that useful to me unless you really need the that performance. Or maybe if you have a texture atlas with a mixture of different asset types, and you want a pixelated look on some.. Not sure.
+GL_NEAREST_MIPMAP_LINEAR - This seems like a super weird filter mode to me, not sure what it would be useful for.
+That said, I've always just ended up using trilinear. For my use cases the quality is usually the best and the performance hit has never mattered for me (the performance bottleneck is always somewhere else).
+Maybe we make the creation flag/property that says "this texture wants mipmapping" and we create the texture appropriately, and then automatically (re)generate mipmaps when the app changes a texture (SDL_UpdateTexture, SDL_UnlockTexture, or unbinds it as a render target), and remove the SDL_GenerateTextureMipmap function call entirely.
+Yes, I also agree that this is a good way to do it.
+danpla
+commented
+Jul 16, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+In practice, GL_NEAREST_MIPMAP_LINEAR is useful in modern source ports of old games (e.g. Quake 1996) when you need the aesthetics of the original software renderer (i.e., using GL_NEAREST for pixelated textures), but still want mipmapping with minimum visual artifacts.
+But this case is irrelevant for 2D drawing, so GL_LINEAR_MIPMAP_LINEAR is probably a better choice even for SDL_ScaleModeNearest. At the same time, for consistency, this would also require using GL_LINEAR for GL_TEXTURE_MIN_FILTER when mipmapping is disabled.
+slouken
+modified the milestones:
+3.x,
+3.0 ABI
+Jul 16, 2024
+render: Initial attempt at adding SDL_GenerateTextureMipmap().
+…
+d227640
+```
+This is only implemented for the OpenGL and OpenGL ES 2 backends currently,
+and is completely untested, beyond it compiles on my laptop.
+
+Fixes libsdl-org#4156.
+```
+icculus
+force-pushed
+the
+sdl3-genmipmaps-2dapi
+branch
+from
+b83aab8 to
+d227640
+Compare
+July 16, 2024 18:40
+icculus
+commented
+Jul 16, 2024
+Copy link
+Copy Markdown
+Collaborator
+Author
+(Just force-pushed to resolve conflicts, no changes to this yet.)
+slouken
+modified the milestones:
+3.0 ABI,
+3.x
+Jul 31, 2024
+iryont
+commented
+Aug 17, 2024
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Mipmaps can be generated in software to have better control over all backends and how mipmaps are looking when rendered to the screen (regardless of chosen backend).
+For example, I do manually generate mipmaps because I have a fallback renderer of SDL2 software which does not support mipmaps (and probably will never support with your current approach in this pull request). However, with some clever tricks it can by choosing underlying texture to render depending on the scaled rectangle (mipmap level). In my case when I want to draw something using software renderer in SDL I do the following:
+```
+Rect mipMapSrc = src;
+if(texture->hasMipmaps()) {
+    int level = mipmap(src.width(), dst.width());
+    texture->setMipMap(level);
+    mipMapSrc >>= level; // just divide the rectangle by power of 2 depending on the mipmap level since the source texture is now smaller
+}
+
+draw(texture, dst, mipMapSrc);
+
+/*
+.......
+.......
+.......
+*/
+
+#if defined(__clang__) || defined(__GNUC__)
+inline int log2_fast(float d) { return 8 * sizeof(unsigned long long) - __builtin_clzll(d) - 1; }
+#else
+inline int log2_fast(float d) { int r; std::frexp(d, &r); return r - 1; }
+#endif
+
+inline int mipmap(float src, float dst) { return std::max<int>(log2_fast(src / dst), 0); }
+       
+```
+Perhaps it would be worth to consider such approach. It purely depends on your goals. Of course this is simplified idea when drawing 2D quads (width equals height).
+slouken
+mentioned this pull request
+May 6, 2025
+Will SDL_Renderer ever support vertex shader uniforms or programmable vertex shading?
+#12966
+Open
+v1993
+mentioned this pull request
+Oct 4, 2025
+Use mipmaps for better zooming out
+lincity-ng/lincity-ng#332
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+6 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

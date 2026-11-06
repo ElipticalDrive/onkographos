@@ -1,0 +1,106 @@
+# GPU-based Projected Tetrahedra
+
+Also called: Two-Shader PT, Vertex Shader PT, Tetrahedral Projection using Vertex Shaders
+
+## Overview
+GPU-based Projected Tetrahedra is a direct volume rendering method for unstructured tetrahedral data that achieves interactive rates by treating each tetrahedron as a distinct geometric primitive and rasterizing it using hardware operations [S1, S2, S3, unofficial]. It differs from traditional ray casting by leveraging hardware rasterization and blending to compute pixel color, avoiding explicit per-pixel ray-tetrahedron intersection tests [S1, unofficial]. It builds on [Projected Tetrahedra](877-projected-tetrahedra.md) by mapping the classification and decomposition logic into programmable vertex shaders, allowing tetrahedral elements to be volume scan-converted within the GPU without pre-processing or additional data structures [S1, S2, S3, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Unstructured tetrahedral mesh data (vertices and connectivity), transfer function (color/opacity mapping), Model-View-Projection (MVP) matrix.
+*   **Output:** 2D color and depth buffer (framebuffer).
+
+**Data Structures:**
+*   **Basis Graph:** A fixed topology used for all tetrahedra. It consists of four vertices representing the cell's corners and one additional "phantom" vertex [S2, S3, unofficial].
+*   **Vertex Buffer:** Contains the four real vertices and one invalid/placeholder phantom vertex for each tetrahedron, sent as a triangle fan [S2, S3, unofficial].
+*   **Texture Memory:** Stores the model data to avoid redundant projections and enable fast access [S1, unofficial].
+
+**Algorithm Steps:**
+1.  **Data Upload:** Upload the tetrahedral mesh data to texture memory or vertex buffers on the GPU [S1, unofficial]. No pre-processing of the data is required [S1, unofficial].
+2.  **Primitive Submission:** For each tetrahedron, send the four vertices and an invalid phantom vertex to the GPU as a triangle fan [S2, S3, unofficial].
+3.  **Vertex Shader Classification:** A vertex program performs a series of geometric tests on the projected vertices to determine the classification of the cell (i.e., how the ray intersects the tetrahedron) [S2, S3, unofficial].
+4.  **Phantom Vertex Calculation:** Based on the classification, the vertices are mapped to the basis graph, and the position of the phantom vertex is calculated [S2, S3, unofficial].
+5.  **Thickness Interpolation:** The thickness of the cell at the phantom vertex is determined by linearly interpolating the values (e.g., density) of the four real vertices [S2, S3, unofficial].
+6.  **Attribute Assignment:** Using the calculated thickness, color and opacity are assigned to the phantom vertex from a lookup table (transfer function) [S2, S3, unofficial].
+7.  **Rasterization:** The modified faces (defined by the basis graph and the computed phantom vertex attributes) are rasterized [S2, S3, unofficial].
+8.  **Compositing:** The rasterized fragments are composited into the framebuffer using hardware-accelerated alpha blending, typically in back-to-front order [S2, S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Vertex Shader Program
+def process_tetrahedron(vertices_3d, mvp_matrix, transfer_function):
+    # 1. Project vertices to screen space
+    vertices_2d = []
+    for v in vertices_3d:
+        v_clip = mvp_matrix * v
+        vertices_2d.append(v_clip.xy / v_clip.w)
+    
+    # 2. Perform geometric classification tests
+    # Determine which edges/faces are pierced by the viewing ray
+    classification = classify_tetrahedron(vertices_2d)
+    
+    # 3. Calculate phantom vertex position and attributes
+    # The phantom vertex represents the "exit" or "entry" point depending on classification
+    # Interpolate the scalar value (e.g., density) at the phantom vertex
+    phantom_value = linear_interpolate_scalar(vertices_3d, classification)
+    
+    # 4. Map to basis graph topology
+    # The basis graph always has 5 vertices: 4 real + 1 phantom
+    # The vertex shader outputs the 5 vertices in the fixed basis graph order
+    output_vertices = map_to_basis_graph(vertices_3d, classification)
+    
+    # 5. Assign color and opacity to the phantom vertex
+    # Real vertices may have default or interpolated attributes
+    phantom_color, phantom_opacity = transfer_function.lookup(phantom_value)
+    
+    # 6. Output the triangle fan
+    # The GPU rasterizer handles the rest
+    return output_vertices, phantom_color, phantom_opacity
+
+# Fragment Shader Program
+def render_fragment(color, opacity, depth):
+    # Hardware blending handles the accumulation
+    # This shader may perform additional per-fragment lighting or fog
+    return color, opacity
+```
+
+**Parameters:**
+*   **Transfer Function:** Maps scalar values to color and opacity. Typical values depend on the dataset [S2, S3, unofficial].
+*   **MVP Matrix:** Standard projection matrix [S2, S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Topology Constraints:** Current GPUs cannot change the topology of graphics primitives dynamically. Therefore, the most general topology (the basis graph with 5 vertices) must always be sent, even if the classification would result in fewer visible faces [S2, S3, unofficial].
+*   **Data Persistence:** No data can be saved across vertex primitives. Each primitive must be sent with all relevant data structures, increasing bandwidth usage [S2, S3, unofficial].
+*   **Precision:** Linear interpolation of thickness may introduce artifacts if the tetrahedra are large or highly distorted [S2, S3, unofficial].
+
+## Subtopics
+
+### Cell Projection with 3D/2D Textures
+This variant stores color and opacity in a 3D texture map computed during pre-processing, enabling concurrent use of transfer functions encoded directly in the texture [S4, unofficial]. To reduce memory consumption, the approach can be adapted to use 2D texture maps: dependencies of the volume rendering integral with respect to the length between sample points are approximated linearly and stored in one 2D texture map, while the remaining parts depending only on sample values are stored in another [S4, unofficial]. Vertices of projected tetrahedra are assigned all associated triangles, which are blended into the framebuffer using back-to-front compositing [S4, unofficial].
+
+### Hardware Caching for Projected Tetrahedra
+This variant optimizes performance by maintaining a buffer holding the four vertices of the current tetrahedron and the additional fifth vertex created by the algorithm [S5, unofficial]. It swaps vertices in the buffer to follow the direction of the strip and caches edge lengths and face areas computed for the current tetrahedron, as these are required by the algorithm and reused by the next tetrahedron in a strip [S5, unofficial]. A pitfall is that computing edge lengths and face areas requires a square root, which impacts running time and complexity [S5, unofficial].
+
+### Bunyk Tetrahedral Projection
+A hybrid approach that projects the complete mesh onto the screen to simplify the problem from 3D to 2D [S6, unofficial]. It uses precomputed adjacency information for correct accumulation order [S6, unofficial].
+
+## Operating characteristics
+*   **Performance:** Capable of rendering over 2.0 million tetrahedra per second (Tet/s) on current graphics hardware [S1, unofficial].
+*   **Memory Footprint:** Occupies a substantially smaller memory footprint compared to ray-casting approaches [S1, unofficial].
+*   **Pre-processing:** Requires no pre-processing of the data and no additional data structures [S1, unofficial].
+*   **Scalability:** Allows interactive viewing of large unstructured datasets on a desktop personal computer [S1, unofficial].
+*   **Strengths:** Leverages hardware rasterization for speed; avoids explicit per-pixel intersection tests; simple implementation on commodity graphics cards [S1, S2, S3, unofficial].
+*   **Limitations:** Fixed topology requirement increases vertex data size; no data persistence across primitives increases bandwidth usage; potential artifacts from linear interpolation [S2, S3, unofficial].
+
+## Background
+The method was introduced by Wylie et al. in 2002 as an extension of the Projected Tetrahedra (PT) algorithm [S2, S3, unofficial]. It was designed to map geometric computations into GPUs using programmable vertex shaders, allowing tetrahedral elements to be volume scan-converted within the graphics processing unit [S1, S2, S3, unofficial]. The technique was further refined by Marroquim et al. in 2006, who employed two fragment shaders to compute tetrahedra projections and render elements, achieving interactive rates by storing the model in texture memory and avoiding redundant projections [S1, unofficial].
+
+## Sources
+[S1] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)
+[S2] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S3] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
+[S4] Interactive volume ray tracing, https://doi.org/10.22028/d291-25931, fetched 2026-10-26 (unofficial)
+[S5] (PDF) An Architecture For Interactive Tetrahedral Volume ..., https://www.researchgate.net/publication/221257851_An_Architecture_For_Interactive_Tetrahedral_Volume_Rendering, fetched 2026-11-01 (unofficial)
+[S6] Interactive Volume Rendering Techniques, https://www.scribd.com/document/479714183/Interactive-Volume-Rendering-with-Ray-Tracing, fetched 2026-10-25 (unofficial)

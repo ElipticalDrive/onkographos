@@ -1,0 +1,88 @@
+# NanoVDB Linear Representation
+
+Also called: Linear VDB, NanoVDB
+
+## Overview
+NanoVDB is a linear, GPU-optimized implementation of the OpenVDB sparse voxel structure [S1]. It solves the problem of efficiently transferring and sampling large, sparse volumetric datasets on the GPU by eliminating CPU-dependent memory pointers and enabling compact memory copying via `memcpy` [S1]. Unlike its parent [OpenVDB (VDB)](1508-openvdb-vdb.md), which supports complex runtime modifications, NanoVDB is designed as an immutable "linear snapshot" optimized strictly for fast retrieval and on-the-fly decompression during rendering [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** An OpenVDB grid (typically created and compressed on the CPU).
+*   **Output:** A contiguous, 32-byte aligned block of memory representing the VDB structure, suitable for transfer to GPU global memory.
+
+**Data Structures and Layout:**
+The NanoVDB structure is a linearized version of the OpenVDB tree. It explicitly avoids memory pointers, replacing them with offsets or implicit indexing to ensure the entire dataset is contiguous in memory [S1].
+*   **Alignment:** The entire structure is aligned to 32-byte boundaries [S1].
+*   **Memory:** The representation is linear in memory, allowing it to be copied using standard memory copy operations (e.g., `cudaMemcpy`) [S1].
+*   **Compatibility:** The layout is compatible with CUDA and other GPGPU/shading languages [S1].
+
+**Steps for Conversion and Usage:**
+1.  **Creation:** Generate the sparse voxel data using OpenVDB tools on the CPU.
+2.  **Conversion:** Use the builtin NanoVDB conversion tools to transform the OpenVDB grid into the NanoVDB format [S1]. This process linearizes the tree structure.
+3.  **Transfer:** Copy the resulting linear memory block to the GPU using `cudaMemcpy` [S1].
+4.  **Sampling:** On the GPU, use NanoVDB accessor and sampler classes to retrieve voxel data [S1].
+    *   The samplers support 0th-order (nearest neighbor) and 1st-order (trilinear) interpolation [S1].
+    *   Higher-order interpolation (up to 3rd order/cubic) and gradient computation are also supported via specific sampler utilities [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for CPU-side conversion and GPU transfer
+# Note: Actual implementation relies on C++ NanoVDB libraries
+
+def convert_and_transfer_openvdb_to_nanovdb(openvdb_grid):
+    """
+    Converts an OpenVDB grid to NanoVDB format and transfers to GPU.
+    """
+    # 1. Convert OpenVDB to NanoVDB linear representation
+    # The builtin tool handles the linearization and pointer removal
+    nanovdb_buffer = NanoVDB.convert(openvdb_grid)
+    
+    # 2. Verify alignment (32-byte)
+    # The NanoVDB format guarantees 32-byte alignment
+    assert nanovdb_buffer.is_aligned(32)
+    
+    # 3. Transfer to GPU
+    # Since it is a linear snapshot without pointers, memcpy is safe
+    gpu_ptr = cuda_malloc(nanovdb_buffer.size)
+    cuda_memcpy(gpu_ptr, nanovdb_buffer.data, nanovdb_buffer.size)
+    
+    return gpu_ptr
+
+def sample_nanovdb_on_gpu(gpu_ptr, ray_origin, ray_direction):
+    """
+    GPU-side sampling using NanoVDB accessors.
+    """
+    # Create accessor from GPU pointer
+    accessor = NanoVDB.Accessor(gpu_ptr)
+    
+    # Create sampler with desired interpolation order
+    # Options: 0 (nearest), 1 (trilinear), 3 (cubic)
+    sampler = NanoVDB.Sampler(accessor, order=1)
+    
+    # Sample along ray
+    value = sampler.sample(ray_origin)
+    gradient = sampler.gradient(ray_origin) # If supported
+    
+    return value, gradient
+```
+
+**Edge Cases and Pitfalls:**
+*   **Modification:** NanoVDB does not support arbitrary modification. It is optimized for retrieval/sampling only [S1]. Modification support is rudimentary and essentially limited to altering the values of voxels that are already in the VDB and are active [S1].
+*   **Immutability:** Once converted, the NanoVDB representation is immutable [S1].
+
+## Subtopics
+
+## Operating characteristics
+*   **Time Complexity:** Retrieval is optimized for GPU execution, leveraging on-the-fly decompression [S1].
+*   **Memory Complexity:** Compact representation due to lossy compression (if applied in OpenVDB) and linear layout [S1].
+*   **Performance:** Fast, low-overhead retrieval suitable for Monte Carlo path tracing and real-time contexts [S1].
+*   **Strengths:** Drop-in replacement for 3D texture-based renderers; significantly reduces memory requirements; compatible with CUDA [S1].
+*   **Limitations:** No arbitrary modification; requires CPU-side conversion step [S1].
+
+## Background
+NanoVDB was proposed by Museth [Mus21] as NVIDIA's linear VDB implementation [S1]. It was designed to address the challenges of handling ever-growing volumetric data sizes in GPU rendering [S1]. It serves as a bridge between the authoring capabilities of OpenVDB and the performance requirements of GPU-based volume rendering [S1].
+
+## Sources
+[S1] GPU Volume Rendering with Hierarchical Compression Using VDB, https://arxiv.org/pdf/2504.04564, fetched 2026-10-26

@@ -1,0 +1,457 @@
+Toolchain Automatizado para la Integración de
+Kernels CUTLASS en Motores TensorRT
+Alejandro Ripoll Acosta, José Flich Cardo, Carles Hernández Luz1
+Resumen— Este trabajo presenta el diseño, implementación y evaluación de un toolchain automatizado para la integración de kernels CUTLASS personalizados en motores de inferencia NVIDIA TensorRT. A diferencia de las implementaciones nativas
+—comúnmente denominadas “caja negra”—, el sistema propuesto otorga control granular sobre el código ejecutado en la GPU, sustituyendo las convoluciones estándar por kernels optimizados generados con
+CUTLASS. El núcleo del sistema automatiza un pipeline de cuatro etapas: perfilado de kernels convolucionales por capa, modificación topológica del grafo
+ONNX, generación de código C++/CUDA especializado, e integración dinámica como plugin IPluginV2Ext
+en TensorRT.
+Los resultados experimentales han sido obtenidos
+sobre un dispositivo NVIDIA Jetson AGX Orin con
+el modelo YOLOv8n a 256 × 256 px en FP16, mostrando una latencia de 0,760 ms frente a los 0,711 ms del
+motor nativo (∼7 % de penalización). Sin embargo,
+el tiempo neto de cómputo convolucional es incluso
+inferior en el motor CUTLASS, validando la calidad
+de los kernels seleccionados. La penalización global se
+atribuye al overhead de las operaciones de transposición de layout (NHWC ↔ NCHW). Estos resultados
+demuestran que el enfoque propuesto constituye una
+alternativa viable y competitiva al compilador propietario de NVIDIA. Al aportar trazabilidad absoluta y
+control granular bajo un paradigma de caja blanca,
+este sistema sienta las bases necesarias para futuras
+optimizaciones y para la inyección de técnicas de tolerancia a fallos a nivel de kernel.
+Palabras clave— TensorRT, CUTLASS, kernel optimization, neural network inference, edge computing,
+Jetson Orin, YOLOv8, ONNX, GEMM, operator fusion, fault tolerance, white-box inference
+I. Introduccion
+L
+A inferencia de redes neuronales convolucionales
+(CNN) en dispositivos de computación embebida de alto rendimiento, como las plataformas NVIDIA Jetson [1], constituye uno de los retos centrales
+de los sistemas de visión artificial en tiempo real. El
+despliegue de modelos SSD (Single Shot MultiBox
+Detector) de detección de objetos como los de la arquitectura YOLO [2] (You Only Look Once) sobre
+hardware con recursos limitados exige maximizar la
+eficiencia de cada operación, siendo la convolución
+el núcleo computacional dominante en la mayoría de
+estas arquitecturas.
+NVIDIA TensorRT [3] es el compilador y motor
+de inferencia de referencia en el ecosistema CUDA.
+A partir de un grafo ONNX [4] (Open Neural Network Exchange), TensorRT aplica optimizaciones como fusión de operaciones, cuantización de precisión
+(FP32, FP16, INT8) y selección automática de kernels mediante su propio algoritmo de autoajuste. Sin
+embargo, este proceso es relativamente opaco, ofre1 Contacto:
+aripaco@etsinf.upv.es,
+carherlu@upv.es.
+jflich@disca.upv.es,
+ciendo escaso control al desarrollador sobre que implementación concreta se ejecuta para cada capa convolucional (caja negra).
+Por otro lado, CUTLASS [5] (CUDA Templates
+for Linear Algebra Subroutines and Solvers) es la biblioteca de referencia de NVIDIA para implementar operaciones matriciales y convoluciones de alta
+eficiencia directamente sobre el hardware tensorial
+(Tensor Cores) [6] de las GPUs. CUTLASS expone
+una jerarquía de plantillas en C++ que permite instanciar kernels parametrizados, así como el soporte
+integral para precisión mixta, la fusión de operaciones (como sesgos y activaciones) para reducir accesos
+a memoria, y el manejo eficiente de tensores dispersos y operaciones por lotes.
+Este trabajo propone un sistema integral que une
+ambos enfoques mediante un pipeline automatizado
+estructurado en cuatro fases principales: (1) perfila y selecciona los kernels de convolución de mayor rendimiento para un hardware específico utilizando el evaluador de CUTLASS; (2) modifica topológicamente el grafo ONNX original para inyectar
+nodos personalizados, optimizar el layout de memoria y fusionar operadores mediante la librería onnxgraphsurgeon [7]; (3) genera automáticamente el código C++/CUDA altamente especializado para cada
+capa; y (4) compila e integra esta lógica en TensorRT
+a través de un plugin dinámico para la construcción
+del motor de inferencia.
+El objetivo principal es evaluar en qué medida la
+inyección de kernels CUTLASS, ajustados específicamente para cada capa, puede igualar la velocidad
+de inferencia del mecanismo de autoajuste nativo
+de TensorRT, así como identificar y comprender las
+fuentes de sobrecarga (overhead ) que puedan limitar dicho rendimiento. Esta aproximación aporta el
+valor añadido de un control absoluto sobre el flujo
+de ejecución (paradigma de caja blanca). Dicha trazabilidad es un requisito indispensable en entornos
+críticos para poder, en última instancia, implementar e inyectar técnicas de tolerancia a fallos directamente a nivel de kernel, algo inviable sobre el motor
+compilado propietario.
+El resto del artículo se organiza de la siguiente manera: la Sección II revisa el trabajo relacionado en el
+campo; la Sección III describe en detalle el diseño
+e implementación del sistema; la Sección IV expone
+y analiza los resultados experimentales obtenidos al
+validar la metodología con un modelo YOLOv8n [8]
+sobre hardware NVIDIA Jetson Orin AGX [1]; y, finalmente, la Sección V recoge las conclusiones, las
+principales aportaciones y las posibles líneas de trabajo futuro.
+II. Trabajo Relacionado
+La optimización de la inferencia de redes neuronales convolucionales en hardware embebido ha sido abordada desde distintas perspectivas. Los compiladores de ML de propósito general como Apache TVM [9] y OpenAI Triton [10] automatizan la
+búsqueda de kernels eficientes mediante autotuning,
+pero su proceso de compilación resulta igualmente
+opaco y su integración nativa con el ecosistema TensorRT no es directa. NVIDIA mantiene un repositorio oficial de plugins de referencia para TensorRT [11]
+que cubre operadores ausentes del grafo estándar mediante la interfaz IPluginV2Ext; sin embargo, estos
+plugins no sustituyen convoluciones ya soportadas
+por kernels especializados por capa. La biblioteca
+CUTLASS [5] ha sido adoptada como backend en
+trabajos sobre aceleración de transformers [12], donde la fusión de operaciones en el epílogo del kernel
+reduce drásticamente los accesos a memoria global,
+pero su uso sistemático como sustituto capa a capa
+dentro de un motor TensorRT para inferencia convolucional en edge no ha sido documentado en la literatura pública. El presente trabajo cubre ese hueco:
+proporciona un pipeline automatizado que selecciona, instancia e integra kernels CUTLASS para cada
+capa convolucional del modelo dentro de TensorRT,
+con plena trazabilidad del código ejecutado.
+III. Diseño del Sistema
+El sistema propuesto sigue el pipeline de cuatro
+etapas ilustrado en la Fig. 1. A continuación se describe cada etapa con detalle técnico.
+salida, tamaño del filtro, padding, stride, etc.).
+Con estos datos, se define un espacio de búsqueda
+basado en los principales parámetros de optimización de la GPU: el tamaño del bloque computacional (tile), el número de etapas (stages), el nivel de
+particionado paralelo (Split-K) y el alineamiento de
+memoria.
+Dado que evaluar empíricamente todo el abanico de combinaciones posibles resultaría ineficiente,
+el perfilador aplica una heurística adaptativa para
+podar el espacio de búsqueda en función de la forma
+y el tamaño de la capa:
+Capas de baja carga (tiny layers): Correspondientes a mapas de características muy reducidos (ej. 8×8). En estas capas se activa un modo
+especial que restringe el uso de tiles grandes y
+fuerza la exploración de técnicas como Split-K
+para compensar la falta de paralelismo espacial.
+Capas medias y masivas: La exploración se
+filtra según el volumen total de operaciones
+(MACs) de la capa. En las capas más pesadas,
+se descartan de antemano las configuraciones de
+bloques pequeños, ya que la GPU no lograría
+amortizar el overhead de lanzarlos, restringiendo la búsqueda únicamente a las plantillas de
+alta eficiencia.
+Finalmente, las combinaciones candidatas que superan este filtrado se ejecutan y miden iterativamente en el hardware destino mediante el evaluador (profiler ) nativo de CUTLASS. La configuración que registra el menor tiempo de ejecución (Runtime) se
+selecciona como ganadora. Sus parámetros óptimos
+se serializan en un archivo CSV, el cual servirá como
+plano de construcción para guiar la modificación del
+grafo y la posterior generación de código.
+B. Etapa 2: Modificación del grafo ONNX
+Una vez encontrados los kernels óptimos, se procede a modificar la estructura del grafo ONNX [4]
+original. El proceso consiste en reemplazar los
+nodos estándar de convolución por nodos personalizados, identificados como CustomConvCutlass.
+Esta modificación se realiza con la librería
+onnx-graphsurgeon [7], que permite operar a nivel
+de nodo, facilitando la creación o eliminación de estos y la redirección del flujo del grafo, entre otras
+operaciones.
+Fig. 1: Pipeline de construcción del motor TensorRT a partir
+del modelo ONNX original con kernels CUTLASS personalizados.
+A. Etapa 1: Exploración y perfilado de kernels
+CUTLASS
+El objetivo de esta etapa es determinar empíricamente cuál es la configuración de kernel CUTLASS
+de mayor rendimiento para cada capa convolucional
+del modelo. Para ello, el sistema extrae y analiza la
+geometría y los atributos básicos de cada nodo Conv
+del grafo (dimensiones de los tensores de entrada y
+1. Sustitución de nodos Conv: Cada nodo
+Conv del grafo (identificado por su índice de capa
+según el mapeo del archivo CSV) se reemplaza
+por un nodo CustomConvCutlass con los atributos necesarios: nombre del kernel seleccionado, pesos, sesgos (bias) y todos los parámetros
+geométricos propios de la operación de convolución (canales de entrada y salida, tamaño del
+kernel, padding, stride, etc.). Además, los pesos
+originales en formato NCHW se transponen a
+NHWC y se aplanan en un vector contiguo en
+FP32 antes de ser inyectados como atributo del
+nodo plugin. Cuando el kernel seleccionado ope-
+ra en otra precisión, los pesos se mantienen en
+FP32 para que TensorRT realice la conversión
+correspondiente internamente.
+2. Gestión del layout: Para garantizar la alineación en memoria de los tensores —requisito
+indispensable para maximizar el ancho de banda y mantener la coherencia a la hora de integrar los kernels CUTLASS en el grafo—, se
+inserta una transpuesta NCHW→NHWC antes
+del primer nodo plugin de cada secuencia continua, y una transpuesta NHWC→NCHW tras el
+último. Las operaciones elementales (Add, Mul,
+SiLU, Concat, Split) se clasifican como compatibles con NHWC, por lo que no requieren transpuestas intermedias. Las operaciones incompatibles (MaxPool, Resize, Reshape, Flatten) sí
+las requieren, lo que provoca que el sistema inyecte automáticamente nuevos nodos de transposición para mantener la coherencia. Además,
+se realiza un ajuste de ejes: los nodos Concat y
+Split con eje 1 (canal en NCHW) se reasignan
+al eje 3 (canal en NHWC). Por último, para la
+restauración de las salidas del modelo: tras el
+proceso de propagación, cualquier tensor de salida del grafo que permanezca en NHWC recibe
+una transpuesta final NHWC→NCHW, garantizando que la interfaz exterior del modelo respete el formato NCHW que esperan las etapas
+de postprocesamiento (downstream).
+3. Fusión de operadores: Asimismo, se han
+aplicado patrones de fusión de operadores (Conv
+→ Sigmoid → Mul, equivalente a la activación
+SiLU [13]: x · σ(x)), reduciendo drásticamente
+el número de accesos a memoria global y la sobrecarga asociada al lanzamiento de múltiples
+kernels de forma individual.
+(a) Grafo Nativo
+(b) Grafo con Plugin
+Fig. 2: Modificación topológica de la red neuronal.
+Este re-diseño optimiza integralmente el modelo:
+sustituye las convoluciones nativas por los kernels alta eficiencia, fusiona operadores para reducir drásticamente los accesos a memoria y gestiona el layout
+para minimizar las transposiciones. Una vez completada esta transformación, el grafo se limpia eliminando los tensores huérfanos y se reordena topológicamente antes de la serialización. El resultado final es
+un grafo ONNX híbrido completamente equivalente
+al original, donde las operaciones fusionadas y las
+convoluciones se ejecutan mayoritariamente en formato NHWC de forma continua y eficiente, minimizando las operaciones que no corresponden a cómputo útil.
+C. Etapa 3: Generación automática de código
+Una vez generado el grafo modificado, TensorRT no puede interpretar nativamente los nodos
+CustomConvCutlass: el ONNX define qué hacer, pero no cómo ejecutarlo. El sistema de exportación lee
+el CSV de perfilado y genera automáticamente el código C++/CUDA necesario. Cada kernel queda especializado en tiempo de compilación a partir de cuatro grupos de parámetros:
+Tile
+y
+stages:
+el
+tile
+(p. ej.,
+GemmShape<64,64,64>) fija el bloque de
+cómputo procesado por cada grupo de hilos,
+controlando el compromiso entre reutilización
+de datos en SMEM y ocupación de la GPU. El
+número de stages solapa la carga de tiles con
+el cómputo en los Tensor Cores; este trade-off
+se evalúa empíricamente durante el perfilado.
+Split-K y reducción paralela: en capas profundas con mapas de características pequeños (8×8), el paralelismo espacial es insuficiente para saturar la GPU. El parámetro
+split_k_slices divide la dimensión de acumulación K en fragmentos procesados en paralelo. El modo Serial acumula resultados parciales mediante operaciones atómicas; el modo Parallel usa un buffer temporal para evitar contención. Dado que SiLU [13] no es
+distributiva, la activación se aplica únicamente sobre la partición final (k_partition_ ==
+k_partition_count_ - 1).
+Swizzle: reorganiza el orden de lanzamiento de
+los bloques en el grid para mejorar la localidad
+en caché L2. Su valor óptimo se determina automáticamente en función del tamaño del grid de
+cada capa.
+Alineamiento: determina cuántos elementos se
+cargan por transacción de memoria (8, 4, 2 ó 1).
+Se selecciona automáticamente en función de la
+divisibilidad de C y K por el ancho del vector
+de memoria, que depende de la precisión manejada: a mayor tamaño por elemento, menor es
+el alineamiento óptimo alcanzable. Valores no
+alineados fuerzan plantillas de menor eficiencia,
+con impacto especialmente notable en capas con
+dimensiones de canal reducidas o no potencia de
+dos.
+D. Etapa 4: Integración del plugin y construcción del
+motor
+La librería encapsula el código generado mediante
+la interfaz IPluginV2Ext [11] y cubre tres fases del
+ciclo de vida de TensorRT:
+Registro (Plugin Creator ): una clase
+PluginCreator se registra automáticamente
+al cargarse en memoria, notificando al parser
+que la librería provee la implementación de
+CustomConvCutlass y que TensorRT no debe
+optimizar dichos nodos.
+Configuración y Deserialización: durante el
+build, el plugin recibe los datos del ONNX (pesos, strides, padding), valida los formatos de entrada/salida y transforma los pesos al layout
+NHWC requerido por CUTLASS, dejándolos listos en VRAM.
+Ejecución (Enqueue): la función enqueue
+despacha los kernels CUTLASS al stream de
+CUDA construyendo previamente el objeto
+Conv2dProblemSize con los parámetros exactos de la capa. El despacho se realiza a través
+de un wrapper de plantillas C++ generado automáticamente, que instancia de forma quirúrgica GemmShape, stages, alignment y swizzle
+por capa, haciendo el sistema escalable a otras
+arquitecturas sin intervención manual.
+Finalmente, la librería (.so) se compila con nvcc y
+g++ enlazando contra nvinfer, cudart y cublas. Un
+script de construcción la carga dinámicamente vía
+ctypes, parsea el grafo ONNX híbrido y serializa el
+motor de inferencia en el archivo .engine definitivo,
+listo para su despliegue.
+B. Análisis de rendimiento global
+Como se observa en la comparativa de métricas
+(Figura 3) y en la distribución de latencias por capa (Figura 4), ambas implementaciones ofrecen un
+rendimiento sobresaliente, adecuado para aplicaciones de visión en tiempo real.
+En lo que respecta al tiempo de cómputo puro, el motor nativo de TensorRT logra una media
+de 0,711 ms, mientras que el motor con el plugin
+CUTLASS registra 0,760 ms. Esta diferencia de apenas 49 µs (un ∼7 % de incremento) demuestra que el
+código C++/CUDA generado (el plugin CUTLASS)
+es capaz de competir con el compilador propietario
+de NVIDIA. El gráfico de violín (Figura 3, derecha)
+confirma la estabilidad de ambas soluciones ya que
+la varianza es mínima en los dos motores.
+El histograma de latencia por capa (Figura 4) revela además una distribución bimodal en ambas implementaciones, con un grupo de capas de ejecución
+rápida (concentradas en torno a 0,006–0,008 ms) y un
+segundo grupo de capas más costosas (alrededor de
+0,013–0,016 ms). En ambos casos la cola derecha es
+larga pero poco poblada, lo que indica que las capas
+atípicas no llegan a dominar el tiempo total de inferencia. No obstante, destaca que el motor CUTLASS
+concentra una mayor proporción de capas en los valores bajos de latencia, resultando en una distribución más leptocúrtica en ese rango, lo que sugiere
+una mayor concentración en el número de capas más
+rápidas.
+IV. Resultados Experimentales
+A. Entorno de evaluación
+Las pruebas se han ejecutado sobre un dispositivo NVIDIA Jetson AGX Orin [1] con las siguientes especificaciones: GPU Ampere [6] con 1792
+núcleos CUDA y 56 Tensor Cores (arquitectura
+sm_80), 32 GB LPDDR5 de memoria unificada a
+204,8 GB/s y entorno JetPack 5.x (CUDA 11.4, TensorRT 8.5, cuDNN 8.6 [14]). El modelo evaluado es
+YOLOv8n [8] con una entrada de 256×256 píxeles
+en modo inferencia (batch = 1, precisión FP16 [15]).
+La precisión de acumulación en todos los kernels
+CUTLASS [5] es FP32, al igual que en el motor nativo de TensorRT [3]. Todos los experimentos se ejecutaron en modo maxn (nvpmodel) con relojes fijados al máximo mediante jetson_clocks, eliminando
+cualquier throttling dinámico que pudiera enmascarar diferencias arquitectónicas entre motores.
+La herramienta de medición empleada es trtexec
+de NVIDIA. A continuación, se evalúan dos escenarios para la comparativa: el motor nativo (generado
+por el autotuner de TensorRT) y el motor exportado
+con el toolchain desarrollado.
+Fig. 3: Comparativa de tiempos de inferencia (media y distribución)
+Fig. 4: Distribución de latencia por capa (histograma con estimación de densidad): Nativo vs. CUTLASS.
+C. Desglose por categorías y convoluciones
+Para comprender el origen de la ligera diferencia en
+la latencia global, es necesario analizar el tiempo de
+ejecución desglosado por tipo de operación (Figura 5
+y 6).
+El análisis revela que el tiempo neto invertido en
+operaciones de convolución es comparable en ambos motores: la suma de las convoluciones fused
+(Conv+SiLU [13]) y no-fused asciende a 0,742 +
+0,212 = 0,954 ms en el motor nativo, frente a
+0,902 + 0,017 = 0,919 ms en el motor con el plugin
+CUTLASS, lo que valida la calidad del explorador
+y de las plantillas seleccionadas por el perfilador de
+CUTLASS.
+En cuanto a la composición porcentual, las convoluciones dominan en ambos casos, representando
+el 64,8 % del tiempo total en el motor nativo frente al 60,0 % en el motor CUTLASS. La penalización del motor híbrido radica, por tanto, en la sobrecarga (overhead ) de las operaciones auxiliares (Reformat y Transpose), que suponen un 26,3 % del
+tiempo frente al 21,0 % del motor nativo. Como se
+anticipó en la metodología, la inserción de nodos
+CustomConvCutlass añade un ligero aumento en el
+número de nodos de transposición originalmente no
+previstos en el grafo, con el objetivo de mantener la
+coherencia para compatibilizar los layouts de memoria entre las capas nativas y los plugins NHWC. Si
+bien el análisis de la Figura 7 revela que el tiempo
+dedicado a las operaciones de Reformat es menor en
+el modelo híbrido, los nodos Transpose inyectados
+en ambos sentidos introducen cierta latencia. Esto
+se traduce en penalización de 0,1 ms en comparación
+con el motor nativo de TensorRT.
+Un hallazgo analítico relevante radica en las estrategias de fusión de operadores. Mientras que el
+compilador de TensorRT opta heurísticamente por
+no fusionar ciertas convoluciones, la estrategia implementada en nuestro exportador fuerza la fusión
+siempre que se detecta el patrón topológico compatible. Este comportamiento explica la drástica reducción temporal de las convoluciones no fusionadas en
+el escenario CUTLASS (apenas 0,017 ms frente a los
+0,212 ms del nativo). Como consecuencia directa, se
+produce una divergencia en el peso de las operaciones Elementwise (operaciones aritméticas elementales independientes, como sumas o multiplicaciones):
+al no aplicar una fusión tan exhaustiva, el motor nativo arrastra una mayor cantidad de estos nodos aislados.
+En cuanto al resto de operaciones de la red (MaxPool, Resize, Split y DFL), representan una fracción minoritaria del tiempo de inferencia. Su impacto
+temporal y sus proporciones se mantienen prácticamente idénticos en ambos escenarios, debido a que
+son una parte más estructural del grafo, habiendo
+sido menos manipulados en ambas técnicas de exportación.
+Entrando en mayor detalle dentro de las convoluciones del modelo, los kernels de CUTLASS seleccionados logran igualar o superar al motor nativo en
+Fig. 5: Desglose del tiempo de ejecución total acumulado por
+categoría de operación.
+Fig. 6: Desglose relativo ( %) del tiempo de ejecución acumulado por categoría de operación.
+Fig. 7: Desglose del tiempo de Overhead.
+la mayoría de capas del backbone, donde los tensores
+son suficientemente grandes para amortizar el coste
+de lanzamiento del plugin. Sin embargo, se observa
+una desaceleración clara en las últimas convoluciones
+del modelo, especialmente en las correspondientes al
+head o cabeza del modelo, por ello se identifican tres
+categorías de capas donde nuestro explorador no es
+competitivo:
+1. Las capas de detección final con k = 14 canales
+de salida: al no ser k múltiplo de 16 —el tamaño
+del tile de tensor core—, el explorador de kernels
+rebaja automáticamente el alineamiento y selecciona una plantilla de menor eficiencia (align2
+en lugar de align8), con un coste por GFLOP
+hasta 30 veces superior al de una capa normal
+del backbone.
+2. Las convoluciones 3×3 con resolución espacial
+8×8 y canales asimétricos (c = 256, k = 64):
+con tan solo 64 posiciones espaciales, los CTAs
+de CUTLASS quedan infrautilizados y los warps
+permanecen ociosos, resultando en una intensidad aritmética de apenas 31 FLOP/byte.
+3. Las convoluciones 1×1 de baja intensidad aritmética en resoluciones 8×8 y 16×16 presentan
+un ratio de entre 21 y 28 FLOP/byte, situándolas en régimen memory-bound, donde CUTLASS
+—diseñado para operaciones compute-bound —
+no puede competir con los kernels escalares que
+TensorRT selecciona de cuDNN [14] para estas
+formas.
+D. Utilización de GPU
+La utilización de la GPU se ha medido mediante
+dos métodos complementarios. tegrastats [16] reporta GR3D_FREQ, que marca la GPU como activa
+en cuanto existe cualquier kernel en vuelo: el motor
+nativo alcanza el 95,9 % y el CUTLASS el 94,8 %,
+manteniéndose ambos en régimen de ocupación prácticamente continua. Los registros CUPTI de Nsight
+Systems [17], que miden la densidad real de cómputo
+en ventanas de 5 ms, arrojan un 43,0 % para el nativo y un 40,8 % para CUTLASS; la diferencia refleja
+los breves intervalos adicionales introducidos por las
+transposiciones NHWC↔NCHW del motor híbrido.
+Ambos valores confirman que el pipeline propuesto
+satura los recursos del dispositivo de forma comparable al compilador propietario.
+2. Aportaciones del enfoque. Si bien el motor nativo conserva una ligera ventaja absoluta de
+rendimiento gracias a su profunda integración y a
+la ausencia de overhead de interoperabilidad, el sistema basado en CUTLASS se consolida como una
+alternativa viable y altamente competitiva. La leve
+penalización en la latencia global es el costo asumible
+por adoptar un diseño deliberadamente más genérico y transparente. Por otro lado, una optimización
+demasiado rígida o específica podría mermar la capacidad de adaptación de la solución frente a otras
+arquitecturas de redes neuronales. Por tanto, su principal valor —a diferencia del compilador propietario
+de NVIDIA— radica en la evolución del paradigma
+de inferencia hacia un entorno de caja blanca, asegurando así la predictibilidad y una trazabilidad absoluta del código.
+A. Trabajo futuro
+El toolchain desarrollado abre una línea de trabajo especialmente relevante para entornos críticos: la
+integración de técnicas de tolerancia a fallos directamente en el código de inferencia. Esta posibilidad
+es exclusiva del enfoque de caja blanca adoptado en
+este trabajo —un motor TensorRT nativo no expone
+los puntos de intervención necesarios— y constituye
+una de las aportaciones más valiosas del toolchain
+desarrollado.
+Entre las técnicas a implementar destacan la
+protección por redundancia a nivel de bit en pesos (FP/VP Bit-Level Redundancy) [18], el recorte dinámico de activaciones dentro del epílogo (NaN/Inf Trapping) y verificación algebraica mediante
+ABFT [19]. La meta es combinar estas aproximaciones bajo un modelo de Selective Layer Hardening,
+permitiendo una aplicación estratégica de las protecciones en las capas computacionalmente más críticas
+y vulnerables.
+Agradecimientos
+Este trabajo ha sido realizado en el marco del
+proyecto Chips Joint Undertaking EdgeAITrust no.
+101139892, con financiación del programa Horizonte
+Europa de la Unión Europea, y de la Agencia Estatal de Investigación, proyecto PCI2024-155056-2.
+La financiación para el acceso abierto ha sido proporcionada por la CRUE-Universitat Politècnica de
+València.
+V. Conclusiones
+Este trabajo ha presentado un sistema completo
+para la integración de kernels CUTLASS [5] personalizados en motores TensorRT [3] para inferencia,
+evaluado sobre YOLOv8n [8] en Jetson Orin [1]. Las
+principales conclusiones son:
+1. Viabilidad técnica demostrada. El pipeline
+propuesto (perfilado → modificación → generación
+de código → plugin) es completamente automatizado y produce un motor totalmente funcional, compatible con CUDA Graph y serializable. El diseño
+modular facilita su aplicación a cualquier CNN.
+Referencias
+[1]
+[2]
+[3]
+[4]
+[5]
+[6]
+NVIDIA Corporation, “NVIDIA Jetson AGX Orin Technical Reference Manual,” 2022.
+Joseph Redmon, Santosh Divvala, Ross Girshick, and Ali
+Farhadi, “You Only Look Once: Unified, Real-Time Object Detection,” in Proceedings of the IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR),
+2016, pp. 779–788.
+NVIDIA Corporation, “TensorRT Developer Guide,”
+2024.
+ONNX Community, “ONNX: Open Neural Network Exchange,” 2019.
+NVIDIA Corporation, “CUTLASS: CUDA Templates for
+Linear Algebra Subroutines and Solvers,” 2023.
+NVIDIA Corporation, “NVIDIA Ampere GA102 GPU
+Architecture Whitepaper,” 2021.
+[7]
+NVIDIA Corporation, “onnx-graphsurgeon: A Library
+for Modifying ONNX Graphs,” 2023.
+[8] Glenn Jocher, Ayush Chaurasia, and Jing Qiu, “Ultralytics YOLOv8,” 2023.
+[9] Tianqi Chen, Thierry Moreau, Ziheng Jiang, Lianmin
+Zheng, Eddie Yan, Haichen Shen, Meghan Cowan, Leyuan Wang, Yuwei Hu, Luis Ceze, Carlos Guestrin, and
+Arvind Krishnamurthy, “TVM: An Automated End-toEnd Optimizing Compiler for Deep Learning,” in Proceedings of the 13th USENIX Symposium on Operating
+Systems Design and Implementation (OSDI), 2018, pp.
+578–594.
+[10] Philippe Tillet, H. T. Kung, and David Cox, “Triton: An
+Intermediate Language and Compiler for Tiled Neural
+Network Computations,” in Proceedings of the 3rd ACM
+SIGPLAN International Workshop on Machine Learning
+and Programming Languages (MAPL), 2019, pp. 10–19.
+[11] NVIDIA Corporation, “TensorRT Open Source Software
+– Sample Plugins Repository,” 2023.
+[12] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and
+Christopher Ré, “FlashAttention: Fast and MemoryEfficient Exact Attention with IO-Awareness,” in Advances in Neural Information Processing Systems (NeurIPS), 2022, vol. 35.
+[13] Prajit Ramachandran, Barret Zoph, and Quoc V. Le,
+“Searching for Activation Functions,” arXiv preprint arXiv:1710.05941, 2017.
+[14] Sharan Chetlur, Cliff Woolley, Philippe Vandermersch,
+Jonathan Cohen, John Tran, Bryan Catanzaro, and Evan
+Shelhamer, “cuDNN: Efficient Primitives for Deep Learning,” 2014.
+[15] Paulius Micikevicius, Sharan Narang, Jonah Alben, Gregory Diamos, Erich Elsen, David Garcia, Boris Ginsburg,
+Michael Houston, Oleksii Kuchaiev, Ganesh Venkatesh,
+and Hao Wu, “Mixed Precision Training,” in Proceedings
+of the International Conference on Learning Representations (ICLR), 2018.
+[16] NVIDIA
+Corporation,
+“Tegrastats
+utility,”
+https://docs.nvidia.com/jetson/archives/r35.1/
+DeveloperGuide/text/AT/JetsonLinuxToolchain/
+Tegrastats.html, 2023.
+[17] NVIDIA Corporation, “Nsight systems user guide,”
+https://docs.nvidia.com/nsight-systems/, 2024.
+[18] Izan Catalán, José Flich, and Carles Hernández, “Exploiting neural networks bit-level redundancy to mitigate the
+impact of faults at inference,” The Journal of Supercomputing, vol. 81, pp. 183, 2025.
+[19] Kuang-Hua Huang and Jacob A. Abraham, “AlgorithmBased Fault Tolerance for Matrix Operations,” IEEE
+Transactions on Computers, vol. C-33, no. 6, pp. 518–
+528, 1984.

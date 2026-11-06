@@ -1,0 +1,132 @@
+# N-Dimensional Slice Membership and Geometry Resolution
+Also called: Hidden Dimension Attenuation, nD Slab Clipping
+## Overview
+N-Dimensional Slice Membership and Geometry Resolution is a method for rendering $N$-dimensional data by intersecting primitives with a 3D display hyperplane, allowing users to navigate non-displayed dimensions via sliders or toggles [S1, unofficial]. It solves the problem of visualizing higher-dimensional spatial data by computing the geometric intersection and attribute attenuation of primitives relative to the slice, differing from standard 3D rendering by handling the "hidden" dimensions explicitly rather than ignoring them [S1, unofficial]. It builds on [Exact Half-Space Clipping](3395-exact-half-space-clipping.md) by providing specific intersection logic for various primitive types (points, splats, lines, triangles) within an $N$-dimensional context.
+## How it works
+The method processes different geometry types by determining their membership in the display hyperplane or their intersection with the $N$-dimensional slab defined by the slice thickness.
+
+**Inputs:**
+- Primitive geometry (point, Gaussian splat, line segment, triangle).
+- Display hyperplane definition (normal vector $\mathbf{n}$ and distance $d_0$ from origin, or equivalent parameterization).
+- Primitive parameters (center $\mathbf{c}$, radius $r$, covariance $\Sigma$, vertices $\mathbf{v}_i$).
+
+**Outputs:**
+- Clipped or attenuated primitive geometry ready for rasterization.
+- Zero if the primitive is completely outside the slice.
+
+**Data Structures:**
+- Points: Center $\mathbf{c} \in \mathbb{R}^N$, radius $r$.
+- Gaussian Splats: Center $\mathbf{c} \in \mathbb{R}^N$, covariance matrix $\Sigma \in \mathbb{R}^{N \times N}$, opacity $\alpha$.
+- Line Segments: Endpoints $\mathbf{p}_1, \mathbf{p}_2 \in \mathbb{R}^N$, attributes $\mathbf{a}_1, \mathbf{a}_2$.
+- Triangles: Vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3 \in \mathbb{R}^N$.
+
+**Steps:**
+
+1. **Point Clouds:**
+   Calculate the Euclidean distance $d$ from the point center $\mathbf{c}$ to the display hyperplane.
+   If $d > r$, discard the point.
+   Otherwise, compute the effective radius $r_{eff}$:
+   $$ r_{eff} = \sqrt{r^2 - d^2} $$
+   Render the point with radius $r_{eff}$ [S1, unofficial].
+
+2. **Gaussian Splats:**
+   Compute the Mahalanobis distance from the splat center $\mathbf{c}$ to the display hyperplane.
+   Attenuate the splat's opacity and scale based on the marginal density along the hidden dimensions. This is modeled as a shifted Gaussian in the Mahalanobis distance [S1, unofficial].
+   Let $D_M$ be the Mahalanobis distance. The attenuation factor $A$ is derived from the Gaussian CDF or PDF evaluated at $D_M$.
+   Update splat parameters: $\alpha' = \alpha \cdot A$, $\Sigma' = \Sigma \cdot A$ (or similar scaling depending on implementation details not fully specified in sources) [S1, unofficial].
+
+3. **Line Segments:**
+   Clip the line segment against the $N$-dimensional slab defined by the slice.
+   Determine the intersection parameters $t_1, t_2$ where the line enters and exits the slab.
+   If no intersection, discard.
+   Otherwise, interpolate all attributes (color, opacity, etc.) at $t_1$ and $t_2$ to form the clipped segment [S1, unofficial].
+
+4. **Triangles:**
+   Perform a slab membership test for each of the three vertices $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$.
+   If all three vertices pass the test (i.e., are within the slab), draw the triangle.
+   If none pass, discard.
+   If some pass and some do not, this method acts as a whole-triangle cull instead of performing $N$-dimensional polygon clipping. The triangle is either fully drawn or fully discarded [S1, unofficial].
+
+**Parameters:**
+- Slice thickness: Not explicitly defined in the notes, but implied by the "slab" concept for lines and triangles.
+- Reference nominal primitive size: 4 px for points/splats, 1.5 px for lines [S1, unofficial].
+
+**Edge Cases:**
+- $d = r$: Effective radius becomes 0.
+- Degenerate triangles: Handled by standard rasterization.
+- Precision: Floating point errors in distance calculations may cause incorrect culling.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def nD_slice_membership(primitive, hyperplane_normal, hyperplane_dist, slice_thickness):
+    """
+    primitive: dict with type ('point', 'splat', 'line', 'triangle') and geometry data
+    hyperplane_normal: vector N
+    hyperplane_dist: scalar
+    slice_thickness: scalar
+    """
+    if primitive['type'] == 'point':
+        c = primitive['center']
+        r = primitive['radius']
+        # Distance from point to hyperplane
+        d = abs(dot(c, hyperplane_normal) - hyperplane_dist)
+        if d > r:
+            return None
+        r_eff = sqrt(r**2 - d**2)
+        return {'type': 'point', 'center': c, 'radius': r_eff}
+    
+    elif primitive['type'] == 'splat':
+        c = primitive['center']
+        sigma = primitive['covariance']
+        alpha = primitive['opacity']
+        # Mahalanobis distance calculation would go here
+        # D_M = sqrt(dot(c - proj, inv(sigma) * (c - proj)))
+        # Attenuation A = exp(-0.5 * D_M**2) or similar
+        # Note: Exact formula for Mahalanobis distance to hyperplane in N-D is complex
+        # and not fully detailed in sources. [G]
+        # Assuming a simplified attenuation factor A based on distance
+        d = abs(dot(c, hyperplane_normal) - hyperplane_dist)
+        A = exp(-0.5 * d**2) # Placeholder for marginal density attenuation
+        return {'type': 'splat', 'center': c, 'covariance': sigma, 'opacity': alpha * A}
+    
+    elif primitive['type'] == 'line':
+        p1 = primitive['p1']
+        p2 = primitive['p2']
+        # Clip line against slab [-slice_thickness/2, slice_thickness/2] relative to hyperplane
+        # This requires solving for t where dot(p1 + t*(p2-p1), n) is within bounds
+        # Standard Liang-Barsky or Cohen-Sutherland in N-D
+        # Interpolate attributes at clip parameters
+        # Note: Exact clipping algorithm not specified. [G]
+        return clipped_line
+    
+    elif primitive['type'] == 'triangle':
+        v1, v2, v3 = primitive['v1'], primitive['v2'], primitive['v3']
+        # Slab membership test
+        def in_slab(v):
+            d = abs(dot(v, hyperplane_normal) - hyperplane_dist)
+            return d <= slice_thickness / 2
+        
+        if in_slab(v1) and in_slab(v2) and in_slab(v3):
+            return primitive
+        else:
+            return None
+```
+## Subtopics
+
+### [4D Block Geometry Slicing](5091-4d-block-geometry-slicing.md)
+Renders a 3D cross-section of a 4D voxel world by intersecting 4D primitives with a 3D hyperplane. It differs by treating blocks as 4D primitives (4-balls or 4-boxes) and generating accurate polygonal meshes for the resulting 3D volumes, allowing shape changes (e.g., rectangle to hexagon) as the hyperplane moves.
+
+## Operating characteristics
+- **Time Complexity:** Depends on primitive type. Point and splat tests are $O(N)$. Line clipping is $O(N)$. Triangle culling is $O(1)$ per triangle.
+- **Memory Complexity:** $O(1)$ per primitive.
+- **Performance:** Frame rate is held at the cost of sharpness. Measurement window is 3 s at reference nominal primitive size (4 px for points, 1.5 px for lines) [S1, unofficial].
+- **Strengths:** Allows interactive navigation of $N$-dimensional data. Simple culling for triangles avoids complex polygon clipping.
+- **Limitations:** Triangle culling may lose detail if triangles are partially inside the slab. Sharpness is reduced for points near the edge of the slice.
+- **When to use:** Interactive visualization of multidimensional scientific data where navigation speed is critical.
+- **When not to use:** When high-fidelity rendering of partial primitives is required.
+## Background
+Originated in the context of Gaussian splatting for microscopy and scalable interactive web visualization of multidimensional scientific data [S1, unofficial]. The method enables viewers to display three spatial dimensions and navigate non-displayed dimensions via sliders (continuous) or toggles (categorical/boolean) [S1, unofficial].
+## Sources
+[S1] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)

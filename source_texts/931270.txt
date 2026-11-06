@@ -1,0 +1,76 @@
+A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.8 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes. - Fix invisible MC GPU chunks with caves (buffer-overflow guard) by draquel · Pull Request #11 · draquel/VoxelWorlds
+
+Fix invisible MC GPU chunks with caves (buffer-overflow guard) by draquel · Pull Request #11 · draquel/VoxelWorlds · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+draquel
+commented
+Jul 2, 2026
+Copy link
+Copy Markdown
+Owner
+Fix: invisible Marching Cubes GPU chunks when caves are enabled
+Symptom (reported): with MeshingMode = MarchingCubes + bUseGPUMeshing + bEnableCaves (DemoWorldConfig, chunkSize 64), some chunks are visually missing — they still generate and collide (traversable) but don't render.
+Root cause: the GPU MC shader had no output-buffer overflow protection, unlike the GPU DC shader. MC is triangle-soup (3 verts/tri, no vertex sharing), so a chunk needs ~10x DC's vertex count; with caves (interior surface) at 64³ it blows past the fixed 65536-vertex buffer. The atomic vertex/index counters ran past the buffer end → out-of-bounds writes dropped + in-bounds index slots referencing vertices beyond the clamped count → the renderer discarded the whole section (invisible), while collision (separate path) kept it traversable.
+Fix (mirrors VoxelGPUDualContourMesher's existing overflow guard):
+MarchingCubesMeshGeneration.usf — add MaxVertexCount/MaxIndexCount params; after each InterlockedAdd in MainCS + TransitionCS, skip emitting the cell if it would exceed either buffer (no OOB writes, no dangling indices).
+VoxelGPUMarchingCubesMesher.cpp — declare the two params + set them from config.
+VoxelChunkManager.cpp — size the MC output buffers by chunk volume (32³ stays 65536; 64³ → 524288; indices == vertices for soup). DC unchanged.
+Verification: rebuilt; on VoxelWorldsTest (MC + GPU meshing + caves, chunkSize 64) the terrain renders complete with no missing chunks (survey / top-down / post-dig); a runtime cave dig re-meshes and renders without vanishing. No shader/meshing errors, no crash.
+🤖 Generated with Claude Code
+Fix invisible MC GPU chunks with caves (buffer-overflow guard + sizing)
+…
+643c2a0
+```
+The GPU Marching Cubes mesher had no output-buffer overflow protection (the DC
+mesher does). MC is triangle-soup (3 verts/tri, no sharing), so with caves
+enabled - especially at chunkSize 64 - a chunk's interior surface blows past the
+fixed 65536-vertex buffer. The atomic counters ran past the buffer end,
+out-of-bounds writes were dropped, and surviving in-bounds index slots
+referenced vertices beyond the clamped count, so the renderer discarded the
+whole section: the chunk went invisible while collision (a separate path) still
+worked, so it stayed traversable. Reported as "visually missing chunks, only
+with caves on GPU meshing".
+
+Fix (mirrors VoxelGPUDualContourMesher's proven pattern):
+- MarchingCubesMeshGeneration.usf: add MaxVertexCount/MaxIndexCount params and,
+  after each InterlockedAdd in MainCS + TransitionCS, skip emitting the
+  cube/ribbon cell if it would exceed either buffer (no OOB writes, no dangling
+  indices). Counters still clamp on readback.
+- VoxelGPUMarchingCubesMesher.cpp: declare the two params + set them from config.
+- VoxelChunkManager.cpp: size the MC output buffers by chunk volume (MC needs
+  ~10x DC's vertex count). 32^3 stays 65536; 64^3 -> 524288. Indices == vertices
+  (soup). DC unchanged.
+
+Verified: rebuilt; VoxelWorldsTest (MarchingCubes + GPU meshing + caves,
+chunkSize 64) renders complete terrain with no missing chunks across survey /
+top-down / post-dig views; a runtime cave dig re-meshes and renders without
+vanishing. No shader/meshing errors; no crash.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+```
+draquel
+merged commit 47d3b96
+into
+main
+Jul 2, 2026
+draquel
+deleted the
+fix/mc-gpu-cave-overflow
+branch
+July 2, 2026 05:20
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

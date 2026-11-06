@@ -2,245 +2,269 @@
 
 
 ## Overview
-The Volumetric Primitive Radiance Field Integrator is a path-tracing method for rendering scattering and emissive media represented by mixtures of kernel-based volumetric primitives (e.g., Gaussians, Epanechnikov) rather than voxel grids or point clouds [S1, unofficial]. It modifies standard volumetric path tracing by replacing medium interaction routines with primitive-specific transmittance evaluation, free-flight distance sampling, and albedo evaluation [S1, unofficial]. It distinguishes itself from its sibling, the [Volumetric Primitive Tomography Integrator](2542-volumetric-primitive-tomography-integrator.md), by supporting scattering and emissive media via multiple importance sampling with PDF balancing, whereas the tomography integrator integrates density with no scattering [S1, unofficial]. It builds on [Neural volume rendering](1576-neural-volume-rendering.md) by using explicit geometric primitives instead of implicit neural fields for density and emission.
+The Volumetric Primitive Radiance Field Integrator is a path-tracing method for rendering scattering and emissive media represented by mixtures of kernel-based volumetric primitives (e.g., Gaussians, Epanechnikov) rather than voxel grids or point clouds [S1, S2, unofficial]. It modifies standard volumetric path tracing by replacing medium interaction routines with primitive-specific transmittance evaluation, free-flight distance sampling, and albedo evaluation [S1, S2, unofficial]. Unlike its sibling [NeRF Volumetric Rendering (Coarse/Fine Sampling)](979-nerf-volumetric-rendering-coarse-fine-sampling.md), which relies on dense MLP evaluations along fixed or adaptive ray steps, this method evaluates closed-form or semi-analytical transmittance functions for sparse geometric primitives, enabling efficient acceleration structures and physical-based light transport integration [S2, unofficial].
 
 ## How it works
+The integrator operates in a primal or adjoint (differentiable) mode, inheriting from a base radiance field integrator [S1, unofficial]. It manages path throughput, radiance accumulation, and differential radiance for gradient propagation [S1, unofficial].
+
+### Inputs and Outputs
 **Inputs:**
-*   Scene containing `EllipsoidMesh` primitives. Each primitive $i$ is defined by a center $\mathbf{c}_i$, a rotation matrix $\mathbf{R}_i$, a scale vector $\mathbf{s}_i$, an opacity scalar $\alpha_i$, and optionally spherical harmonics (SH) coefficients for emission.
-*   Ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$.
-*   Integrator parameters: `max_depth`, `rr_depth`, `kernel_type` ('gaussian' or 'epanechnikov'), `use_rr`, `srgb_primitives`.
+*   Scene containing `EllipsoidMesh` primitives, each defined by a center $\mathbf{c}_i$, rotation matrix $\mathbf{R}_i$, scale vector $\mathbf{s}_i$, and opacity $\alpha_i$ [S1, unofficial].
+*   Spherical Harmonics (SH) coefficients for emission per primitive [S1, unofficial].
+*   Camera ray $r(t) = \mathbf{o} + t\mathbf{d}$ [S1, unofficial].
+*   Parameters: `max_depth`, `rr_depth`, `kernel_type` ('gaussian' or 'epanechnikov'), `srgb_primitives` [S1, unofficial].
 
 **Outputs:**
-*   Radiance $L$ (primal mode) or differential radiance $\delta L$ (adjoint mode).
+*   Accumulated radiance $L$ (primal) or differential radiance $\delta L$ (adjoint) [S1, unofficial].
 
-**Data Structures:**
-*   **Primitive Attributes:**
-    *   `center`: $\mathbb{R}^3$
-    *   `rotation`: $3 \times 3$ matrix $\mathbf{R}$
-    *   `scale`: $\mathbb{R}^3$
-    *   `opacity`: float $\alpha$
-    *   `sh_coeffs`: $\mathbb{R}^{3 \times (L+1)^2}$ (Spherical Harmonics coefficients)
-*   **State per Ray (Vectorized):**
-    *   `L`: Radiance accumulator, $\mathbb{R}^3$
-    *   `δL`: Differential radiance, $\mathbb{R}^3$
-    *   `β`: Path throughput, $\mathbb{R}$
-    *   `depth`: Integer path depth
-    *   `active`: Boolean mask
+### Data Structures
+*   **Primitive Attributes:** Each ellipsoid primitive stores:
+    *   `center`: $\mathbf{c} \in \mathbb{R}^3$
+    *   `rotation`: $\mathbf{R} \in \mathbb{R}^{3 \times 3}$
+    *   `scale`: $\mathbf{s} \in \mathbb{R}^3$
+    *   `opacity`: $\alpha \in [0, 1]$
+    *   `sh_coeffs`: Array of SH coefficients for emission [S1, unofficial].
+*   **Integrator State:**
+    *   `L`: Accumulated radiance vector, initialized to 0 [S1, unofficial].
+    *   `δL`: Differential radiance vector, initialized to 0 [S1, unofficial].
+    *   `β`: Path throughput vector, initialized to 1.0 [S1, unofficial].
+    *   `depth`: Path depth counter, initialized to 0 [S1, unofficial].
+    *   `active`: Boolean mask for active rays [S1, unofficial].
 
-**Steps:**
-
+### Steps
 1.  **Initialization:**
-    *   Set `max_depth` to $0xFFFFFFFF$ if input is $-1$, else input value.
-    *   Set `rr_depth` to $0xFFFFFFFF$ if input is $-1$, else input value.
-    *   Determine `use_rr`: True if `rr_depth` $\ge 0$ AND (`rr_depth` < `max_depth` OR `max_depth` == $-1$).
-    *   Initialize kernel properties: `kernel_full_range=True`, `kernel_normalized=True`.
-    *   For each ray:
-        *   $L \leftarrow 0$ (or `state_in`)
-        *   $\delta L \leftarrow 0$ (or `δL`)
-        *   $\beta \leftarrow 1.0$
-        *   $depth \leftarrow 0$
-        *   `active` $\leftarrow$ True
+    *   Set `max_depth` to $0xFFFFFFFF$ if -1, `rr_depth` to $0xFFFFFFFF$ if -1 [S1, unofficial].
+    *   Determine `use_rr` based on `rr_depth >= 0` and (`rr_depth < max_depth` or `max_depth == -1`) [S1, unofficial].
+    *   Initialize kernel properties: `kernel_full_range=True`, `kernel_normalized=True` [S1, unofficial].
+    *   For each pixel, initialize ray $r$, `L=0`, `δL=0`, `β=1.0`, `depth=0`, `active=True` [S1, unofficial].
 
 2.  **Ray Intersection:**
-    *   Perform ray intersection with scene using `scene.ray_intersect` with flags `All | BackfaceCulling`.
-    *   Use coherent intersection for $depth=0$.
-    *   Filter active rays to only those intersecting ellipsoids:
-        $$ \text{active} \leftarrow \text{active} \ \& \ (\text{si.is\_valid}()) \ \& \ (\text{si.shape.shape\_type}() == \text{ShapeType.Ellipsoids}) $$
+    *   Intersect ray with scene using `scene.ray_intersect` with flags `All | BackfaceCulling` and coherent intersection for depth 0 [S1, unofficial].
+    *   Filter active rays to only those intersecting ellipsoids: `active &= si.is_valid() & (si.shape.shape_type() == Ellipsoids)` [S1, unofficial].
 
-3.  **Primitive Evaluation (for active rays):**
-    *   **Transmittance (`eval_transmission`):**
-        *   Gather primitive attributes (center, rotation, scale, opacity).
-        *   Compute peak location parameter $t_{peak}$ along the ray where the ray passes closest to the ellipsoid center in local space:
-            $$ \mathbf{o}_{local} = \mathbf{R}^T (\mathbf{o} - \mathbf{c}) / \mathbf{s} $$
-            $$ \mathbf{d}_{local} = \mathbf{R}^T \mathbf{d} / \mathbf{s} $$
-            $$ t_{peak} = -\frac{\mathbf{o}_{local} \cdot \mathbf{d}_{local}}{\mathbf{d}_{local} \cdot \mathbf{d}_{local}} $$
-        *   Evaluate density at $\mathbf{p}_{peak} = \mathbf{o} + t_{peak}\mathbf{d}$. The density $\sigma$ depends on the kernel type (Gaussian or Epanechnikov).
-        *   Compute transmission:
-            $$ T = 1.0 - \min(\alpha \cdot \sigma, 0.9999) $$
-            *Note: Clipping $\alpha \cdot \sigma$ to $0.9999$ avoids numerical issues with $1.0 - 1.0$ [S1, unofficial].*
-    *   **Emission (`eval_sh_emission`):**
-        *   Gather SH coefficients.
-        *   Compute SH degree: $L = \sqrt{\text{sh\_coeffs.shape}[0] / 3 - 1}$.
-        *   Evaluate SH directional coefficients: $\mathbf{c}_{dir} = \text{sh\_eval}(\mathbf{d}, L)$.
-        *   Compute emission:
-            $$ E = \max(\sum (\mathbf{c}_{dir} \cdot \mathbf{sh\_coeffs}) + 0.5, 0.0) $$
-            *Note: Adding $0.5$ before clamping handles potential negative values from SH evaluation [S1, unofficial].*
-    *   **Clamp Infinite Values:**
-        $$ L_e[\sim \text{dr.is\_finite}(L_e)] = 0.0 $$
+3.  **Primitive Evaluation (Loop while active):**
+    *   **Evaluate Transmission:**
+        *   Gather ellipsoid properties [S1, unofficial].
+        *   Compute peak location parameter $t_{peak}$:
+            $$ t_{peak} = \frac{-\mathbf{o}' \cdot \mathbf{d}'}{\mathbf{d}' \cdot \mathbf{d}'} $$
+            where $\mathbf{o}' = \mathbf{R}^T (\mathbf{o} - \mathbf{c}) / \mathbf{s}$ and $\mathbf{d}' = \mathbf{R}^T \mathbf{d} / \mathbf{s}$ [S1, unofficial].
+        *   Evaluate density at $\mathbf{p}_{peak} = r(t_{peak})$ [S1, unofficial].
+        *   Compute transmission $T$:
+            $$ T = 1.0 - \min(\alpha \cdot \text{density}, 0.9999) $$
+            Clipping to 0.9999 avoids numerical issues with $1.0 - 1.0$ [S1, unofficial].
+    *   **Evaluate Emission:**
+        *   Gather SH coefficients [S1, unofficial].
+        *   Compute SH degree: $n = \sqrt{\text{sh\_coeffs.shape[0]} / 3 - 1}$ [S1, unofficial].
+        *   Evaluate SH direction coefficients: $\mathbf{sh\_dir} = \text{sh\_eval}(\mathbf{d}, n)$ [S1, unofficial].
+        *   Compute emission $E$:
+            $$ E = \max(\sum (\mathbf{sh} \cdot \mathbf{sh\_coeffs}) + 0.5, 0.0) $$
+            Adding 0.5 before clamping handles potential negative values from SH evaluation [S1, unofficial].
+    *   **Compute Local Contribution:**
+        *   Calculate emitted radiance:
+            $$ L_e = \beta \cdot (1.0 - T) \cdot E $$
+            [S1, unofficial].
+        *   Clamp infinite $L_e$ to 0: `Le[~isfinite(Le)] = 0.0` [S1, unofficial].
+        *   Update radiance accumulator $L$:
+            $$ L = L + L_e \quad (\text{primal}) $$
+            $$ L = L - L_e \quad (\text{adjoint}) $$
+            [S1, unofficial].
+        *   Update path throughput:
+            $$ \beta = \beta \cdot T $$
+            [S1, unofficial].
+    *   **Spawn New Ray:**
+        *   Avoid self-intersection: $\mathbf{o}_{new} = \mathbf{p} + \mathbf{d} \cdot 10^{-4}$ [S1, unofficial].
+    *   **Adjoint Indirect Radiance (Adjoint Mode Only):**
+        *   Compute differentiable reflected indirect radiance:
+            $$ L_{r\_ind} = L \cdot T / \text{detach}(T) $$
+            [S1, unofficial].
+        *   Compute total local contribution: $L_o = L_e + L_{r\_ind}$, select finite values: $L_o = \text{select}(active \& \text{isfinite}(L_o), L_o, 0.0)$ [S1, unofficial].
+        *   Propagate gradients: if Backward, `dr.backward_from(δL * Lo)`; if Forward, `δL += dr.forward_to(Lo)` [S1, unofficial].
+    *   **Update State:**
+        *   `active &= si.is_valid()` [S1, unofficial].
+        *   `depth[active] += 1` [S1, unofficial].
+    *   **Kill Paths:**
+        *   Kill paths with insignificant contribution: `β_max = max(β)`, `active &= (β_max > 0.01)` [S1, unofficial].
+    *   **Russian Roulette (if `use_rr`):**
+        *   Calculate `rr_prob = max(β_max, 0.1)` [S1, unofficial].
+        *   Identify active RR candidates: `rr_active = (depth >= rr_depth) & (β_max < 0.1)` [S1, unofficial].
+        *   Scale throughput: `β[rr_active] *= 1.0 / rr_prob` [S1, unofficial].
+        *   Determine continuation: `rr_continue = sample_rr < rr_prob` [S1, unofficial].
+    *   **Limit Depth:**
+        *   `active &= depth < max_depth` [S1, unofficial].
 
-4.  **Accumulation and Throughput Update:**
-    *   Compute local emission contribution:
-        $$ L_e = \beta \cdot (1.0 - T) \cdot E $$
-    *   Update radiance accumulator:
-        $$ L[\text{active}] = (L + L_e) \ \text{if primal else} \ (L - L_e) $$
-    *   Update path throughput:
-        $$ \beta[\text{active}] *= T $$
-    *   Spawn new ray origin to avoid self-intersection:
-        $$ \mathbf{o}[\text{active}] = \text{si.p} + \mathbf{d} \cdot 10^{-4} $$
+4.  **Finalization:**
+    *   If `srgb_primitives` is true, convert $L$ to linear space: $L = \text{srgb\_to\_linear}(L)$ [S1, unofficial].
+    *   Return $L$ if primal, else $\delta L$ [S1, unofficial].
 
-5.  **Adjoint Mode (if applicable):**
-    *   Compute differentiable reflected indirect radiance:
-        $$ L_{r\_ind} = L \cdot T / \text{dr.detach}(T) $$
-    *   Compute total local contribution:
-        $$ L_o = L_e + L_{r\_ind} $$
-    *   Select finite values:
-        $$ L_o = \text{dr.select}(\text{active} \ \& \ \text{dr.is\_finite}(L_o), L_o, 0.0) $$
-    *   Propagate gradients:
-        *   If Backward: $\text{dr.backward\_from}(\delta L \cdot L_o)$
-        *   If Forward: $\delta L += \text{dr.forward\_to}(L_o)$
-
-6.  **Path Termination and Russian Roulette:**
-    *   Update active mask and depth:
-        $$ \text{active} \ \&= \ \text{si.is\_valid}() $$
-        $$ depth[\text{active}] += 1 $$
-    *   Kill paths with insignificant contribution:
-        $$ \beta_{max} = \text{dr.max}(\beta) $$
-        $$ \text{active} \ \&= \ (\beta_{max} > 0.01) $$
-    *   If `primal` and `use_rr`:
-        *   Calculate RR probability: $p_{rr} = \max(\beta_{max}, 0.1)$.
-        *   Identify active RR candidates: $\text{rr\_active} = (depth \ge \text{rr\_depth}) \ \& \ (\beta_{max} < 0.1)$.
-        *   Scale throughput: $\beta[\text{rr\_active}] *= 1/p_{rr}$.
-        *   Determine continuation: $\text{rr\_continue} = \text{sample\_rr} < p_{rr}$.
-        *   Update active mask: $\text{active} \ \&= \ \text{rr\_continue}$.
-    *   Limit recursion depth:
-        $$ \text{active} \ \&= \ (depth < \text{max\_depth}) $$
-
-7.  **Final Output:**
-    *   If `srgb_primitives` is true, convert $L$ to linear space: $L = \text{mi.math.srgb\_to\_linear}(L)$.
-    *   Return $L$ if primal, else $\delta L$.
-
-**Pseudocode:**
-
+### Pseudocode
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def render_volprim(scene, rays, max_depth=-1, rr_depth=-1, kernel_type='gaussian', use_rr=True, srgb_primitives=True):
-    # Initialize parameters
+import drjit as dr
+import numpy as np
+
+def eval_sh_emission(sh_coeffs, direction):
+    """
+    Evaluate spherical harmonics emission.
+    sh_coeffs: array of SH coefficients
+    direction: ray direction vector
+    Returns: emission value
+    """
+    # Compute SH degree from coefficient count [S1, unofficial]
+    n = int(np.sqrt(len(sh_coeffs) / 3 - 1))
+    # Evaluate SH basis functions for direction [S1, unofficial]
+    sh_dir = sh_eval(direction, n)
+    # Sum emission and handle negative values [S1, unofficial]
+    emission = np.sum(sh_coeffs * sh_dir) + 0.5
+    return np.maximum(emission, 0.0)
+
+def eval_transmission(ellipsoid, ray_o, ray_d):
+    """
+    Evaluate transmission through an ellipsoid primitive.
+    ellipsoid: dict with center, rotation, scale, opacity
+    ray_o: ray origin
+    ray_d: ray direction
+    Returns: transmission value
+    """
+    c = ellipsoid['center']
+    R = ellipsoid['rotation']
+    s = ellipsoid['scale']
+    alpha = ellipsoid['opacity']
+    
+    # Transform ray to local space [S1, unofficial]
+    o_prime = (R.T @ (ray_o - c)) / s
+    d_prime = (R.T @ ray_d) / s
+    
+    # Compute peak location parameter [S1, unofficial]
+    dot_od = np.dot(o_prime, d_prime)
+    dot_dd = np.dot(d_prime, d_prime)
+    t_peak = -dot_od / dot_dd
+    
+    # Evaluate density at peak (simplified for pseudocode)
+    # In practice, density depends on kernel type (Gaussian/Epanechnikov)
+    density = evaluate_kernel_density(t_peak, ellipsoid) 
+    
+    # Compute transmission with clipping [S1, unofficial]
+    transmittance = 1.0 - np.minimum(alpha * density, 0.9999)
+    return transmittance
+
+def volprim_integrator(scene, rays, max_depth=-1, rr_depth=-1, kernel_type='gaussian', srgb_primitives=True):
+    """
+    Volumetric Primitive Radiance Field Integrator
+    """
+    # Initialize state [S1, unofficial]
     if max_depth == -1: max_depth = 0xFFFFFFFF
     if rr_depth == -1: rr_depth = 0xFFFFFFFF
-    do_rr = (rr_depth >= 0) and ((rr_depth < max_depth) or (max_depth == -1))
+    use_rr = (rr_depth >= 0) and (rr_depth < max_depth or max_depth == -1)
     
-    # Initialize state
-    L = zeros_like(rays.origin, shape=(3,)) # Radiance accumulator
-    dL = zeros_like(rays.origin, shape=(3,)) # Differential radiance
-    beta = ones_like(rays.origin) # Path throughput
-    depth = zeros_like(rays.origin, dtype=int)
-    active = ones_like(rays.origin, dtype=bool)
+    L = np.zeros_like(rays.origin) # Accumulated radiance
+    beta = np.ones(len(rays))      # Path throughput
+    depth = np.zeros(len(rays))    # Path depth
+    active = np.ones(len(rays), dtype=bool)
     
-    # Main loop
-    while active.any():
-        # 1. Ray Intersection
-        si = scene.ray_intersect(rays, flags=All | BackfaceCulling, coherent=(depth==0))
-        
-        # 2. Filter for Ellipsoids
-        is_valid = si.is_valid()
-        is_ellipsoid = (si.shape.shape_type() == ShapeType.Ellipsoids)
-        active &= is_valid & is_ellipsoid
-        
-        if not active.any():
+    for _ in range(max_depth):
+        if not np.any(active):
             break
             
-        # 3. Evaluate Primitive Properties
-        # Gather primitive data for active rays
-        centers = gather(si.primitive.center, active)
-        rotations = gather(si.primitive.rotation, active)
-        scales = gather(si.primitive.scale, active)
-        opacities = gather(si.primitive.opacity, active)
-        sh_coeffs = gather(si.primitive.sh_coeffs, active)
+        # Ray intersection [S1, unofficial]
+        si = scene.ray_intersect(rays, flags='All | BackfaceCulling', coherent=(depth==0))
         
-        # Local space transformation
-        o_local = (rotations.transpose(-2, -1) * (rays.origin[active] - centers)) / scales
-        d_local = (rotations.transpose(-2, -1) * rays.direction[active]) / scales
+        # Filter for ellipsoids [S1, unofficial]
+        is_ellipsoid = si.is_valid() & (si.shape.shape_type() == 'Ellipsoids')
+        active &= is_ellipsoid
         
-        # Peak location
-        dot_dd = (d_local * d_local).sum(dim=-1, keepdim=True)
-        dot_od = (o_local * d_local).sum(dim=-1, keepdim=True)
-        t_peak = -dot_od / dot_dd
+        if not np.any(active):
+            break
+            
+        # Evaluate primitives for active rays [S1, unofficial]
+        primitives = get_primitives(si)
+        transmission = np.zeros(len(rays))
+        emission = np.zeros(len(rays))
         
-        # Evaluate Density and Transmission
-        # Note: Exact density formula depends on kernel_type (Gaussian/Epanechnikov)
-        # For Gaussian: sigma = exp(-0.5 * |x_local|^2)
-        # For Epanechnikov: sigma = (15/(8*pi)) * (7/3 * det(Sigma))^0.5 * (1 - 1/7 * d(x))
-        # Here we assume a generic eval_density function that handles kernel specifics
-        p_peak = rays.origin[active] + rays.direction[active] * t_peak.squeeze(-1)
-        density = eval_density(p_peak, centers, rotations, scales, kernel_type)
+        for i, prim in enumerate(primitives[active]):
+            # Evaluate transmission [S1, unofficial]
+            transmission[active] += eval_transmission(prim, rays.origin[active], rays.direction[active])
+            # Evaluate emission [S1, unofficial]
+            emission[active] += eval_sh_emission(prim['sh_coeffs'], rays.direction[active])
+            
+        # Compute local contribution [S1, unofficial]
+        # Note: Transmission is multiplicative, but for simplicity in this pseudocode,
+        # we assume single primitive interaction per step or accumulated transmittance.
+        # In reality, T is product of (1 - alpha_i * density_i).
+        # Here we approximate Le = beta * (1 - T) * E as per [S1, unofficial]
+        Le = beta * (1.0 - transmission) * emission
         
-        # Transmission calculation with clipping
-        opacity_density = opacities * density
-        opacity_density = dr.minimum(opacity_density, 0.9999)
-        transmission = 1.0 - opacity_density
+        # Clamp infinite values [S1, unofficial]
+        Le[~np.isfinite(Le)] = 0.0
         
-        # Emission calculation using SH
-        sh_degree = int(sqrt(sh_coeffs.shape[-1] / 3 - 1))
-        sh_dir_coef = sh_eval(rays.direction[active], sh_degree)
-        emission_raw = (sh_dir_coef * sh_coeffs).sum(dim=-1) + 0.5
-        emission = dr.maximum(emission_raw, 0.0)
+        # Update radiance accumulator [S1, unofficial]
+        L[active] += Le
         
-        # Clamp infinite values
-        is_finite = dr.isfinite(emission)
-        emission[~is_finite] = 0.0
+        # Update throughput [S1, unofficial]
+        beta[active] *= transmission
         
-        # 4. Accumulate
-        # Le = beta * (1 - transmission) * emission
-        Le = beta[active] * (1.0 - transmission) * emission
+        # Spawn new ray origin [S1, unofficial]
+        rays.origin[active] = si.p[active] + rays.direction[active] * 1e-4
         
-        # Update L
-        L[active] = L[active] + Le # Assuming primal mode for simplicity
-        
-        # Update throughput
-        beta[active] = beta[active] * transmission
-        
-        # Avoid self-intersection
-        rays.origin[active] = si.p + rays.direction[active] * 1e-4
-        
-        # 5. Termination Checks
-        active &= si.is_valid()
+        # Update depth and active mask [S1, unofficial]
         depth[active] += 1
+        active &= si.is_valid()
         
-        beta_max = dr.max(beta)
+        # Kill insignificant paths [S1, unofficial]
+        beta_max = np.max(beta)
         active &= (beta_max > 0.01)
         
-        # Russian Roulette
-        if do_rr and active.any():
-            rr_prob = dr.maximum(beta_max, 0.1)
+        # Russian Roulette [S1, unofficial]
+        if use_rr:
+            rr_prob = np.maximum(beta_max, 0.1)
             rr_active = (depth >= rr_depth) & (beta_max < 0.1)
-            if rr_active.any():
-                beta[rr_active] = beta[rr_active] / rr_prob[rr_active]
-                rr_continue = sample_uniform() < rr_prob
+            if np.any(rr_active):
+                beta[rr_active] *= 1.0 / rr_prob
+                rr_continue = np.random.rand(len(rays)) < rr_prob
                 active &= rr_continue
-        
-        active &= (depth < max_depth)
-        
-    # Final SRGB conversion
+                
+        if not np.any(active):
+            break
+            
+    # SRGB conversion [S1, unofficial]
     if srgb_primitives:
         L = srgb_to_linear(L)
         
     return L
 ```
 
+### Parameters
+*   `max_depth` (int): Maximum path depth. A value of -1 indicates no limit, mapped to $0xFFFFFFFF$ internally [S1, unofficial].
+*   `rr_depth` (int): Minimum path depth before enabling Russian roulette. A value of -1 indicates no limit, mapped to $0xFFFFFFFF$ [S1, unofficial].
+*   `kernel_type` (str): Name of the kernel to use for rendering the volumetric primitives, one of `['gaussian', 'epanechnikov']` [S1, unofficial].
+*   `srgb_primitives` (bool): If true, converts sRGB light transport to linear color space at the end [S1, unofficial].
+*   `use_rr` (bool): Whether to use Russian Roulette [S1, unofficial].
+
+### Pitfalls
+*   **Transmission Clipping:** Transmission calculation clips `opacity * density` to 0.9999 to avoid numerical issues with $1.0 - 1.0$ [S1, unofficial].
+*   **Emission Negative Values:** Emission calculation adds 0.5 before clamping to 0.0 to handle potential negative values from SH evaluation [S1, unofficial].
+*   **Self-Intersection:** Ray origin must be offset by $10^{-4}$ along the direction to avoid self-intersection with the current primitive [S1, unofficial].
+
 ## Subtopics
 
-### [Volumetric Primitive Tomography Integrator](2542-volumetric-primitive-tomography-integrator.md)
-The Volumetric Primitive Tomography Integrator is a simplified rendering method for volumetric primitives that accounts exclusively for absorption, ignoring scattering and emission. It is designed for tomography applications where the goal is to visualize density or attenuation rather than photometric appearance. Unlike its sibling [Volumetric Primitive PRB Integrator](2543-volumetric-primitive-prb-integrator.md), which handles scattering media, this integrator treats the volume as a purely absorbing medium.
-
-### [Volumetric Primitive PRB Integrator](2543-volumetric-primitive-prb-integrator.md)
-The Volumetric Primitive PRB Integrator is a path tracing method for rendering scattering and emissive media represented by mixtures of kernel-based volumetric primitives (e.g., Gaussians, Epanechnikov) rather than voxel grids or point clouds. It modifies standard volumetric path tracing by replacing medium interaction routines with primitive-specific transmittance evaluation, free-flight distance sampling, and albedo evaluation. It distinguishes itself from its sibling, the Volumetric Primitive Tomography Integrator, by supporting scattering and emissive media via multiple importance sampling with PDF balancing, whereas the tomography integrator integrates density with no scattering.
-
 ### Epanechnikov Kernel Volumetric Primitive
-The Epanechnikov Kernel variant uses the 3D Epanechnikov kernel for density evaluation, which has finite support, generating more compact primitive shells than Gaussian, enabling more efficient acceleration structures and faster rendering, especially suitable for modeling sharp edges [S2, unofficial]. The density function is defined as:
-$$ E_i(\mathbf{x}) = \begin{cases} \frac{15}{8\pi} (\frac{7}{3} |\Sigma_i| )^{1/2} [1 - \frac{1}{7} d(\mathbf{x})] & \text{if } d(\mathbf{x}) \le 1 \\ 0 & \text{otherwise} \end{cases} $$
-where $d(\mathbf{x}) = (\mathbf{x} - \mathbf{c}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{c}_i)$ [S2, unofficial]. Transmittance is computed using a closed-form solution [S2, unofficial]. Free-flight distance sampling, while analytically possible, is complex for overlapping primitives, so numerical root-finding methods (e.g., Newton-Raphson) are generally used [S2, unofficial].
+The Epanechnikov Kernel variant uses the 3D Epanechnikov kernel for transmittance evaluation [S2, unofficial].
+*   **Formula:** The 3D Epanechnikov kernel is defined as:
+    $$ E_i(\mathbf{x}) = \begin{cases} \frac{15}{8\pi} (\frac{7}{3} |\Sigma_i| )^{1/2} [1 - \frac{1}{7} d(\mathbf{x})] & \text{if } d(\mathbf{x}) \le 1 \\ 0 & \text{otherwise} \end{cases} $$
+    where $d(\mathbf{x}) = (\mathbf{x} - \mathbf{c}_i)^T \Sigma_i^{-1} (\mathbf{x} - \mathbf{c}_i)$ [S2, unofficial].
+*   **Characteristics:** It has finite support, generating more compact primitive shells than Gaussian, enabling more efficient acceleration structures and faster rendering, especially suitable for modeling sharp edges [S2, unofficial].
+*   **Sampling:** Transmittance is computed using a closed-form solution. Free-flight distance sampling requires numerical root-finding methods (e.g., Newton-Raphson) due to the complexity of the analytical solution for multiple primitives [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of primitives intersected per ray and the depth of the path. Epanechnikov kernels are faster than Gaussians due to finite support and simpler acceleration structures [S2, unofficial].
-*   **Memory Complexity:** Linear in the number of primitives, storing center, rotation, scale, opacity, and SH coefficients per primitive.
-*   **Strengths:** Physically based rendering integration (supports global illumination, soft shadows), fast rendering compared to MLP-based methods, flexible camera support [S2, unofficial].
-*   **Limitations:** Requires numerical root-finding for free-flight sampling in complex overlapping scenarios [S2, unofficial]. Quality/performance trade-off controlled by max depth [S2, unofficial].
-*   **When to use:** When physical accuracy (scattering/emission) is required, and performance is critical, especially for sharp edges.
-*   **When not to use:** For purely absorbing media (use Tomography Integrator) or when approximate, non-physical rendering is acceptable (use 3DGS or Instant-NGP).
+*   **Time Complexity:** Depends on the number of primitives intersected by rays. Using acceleration structures (e.g., BVH) reduces intersection cost. Epanechnikov kernels are faster than Gaussians due to compact support [S2, unofficial].
+*   **Memory Complexity:** Linear in the number of primitives, storing center, rotation, scale, opacity, and SH coefficients per primitive [S1, unofficial].
+*   **Strengths:** Physical-based rendering integration (scattering, emission, global illumination), efficient acceleration structures due to sparse primitives, support for complex camera models [S2, unofficial].
+*   **Limitations:** Complex free-flight distance sampling for multiple overlapping primitives [S2, unofficial].
+*   **When to use:** When rendering scattering/emissive media with sharp edges or when integrating with a path tracer for global illumination [S2, unofficial].
+*   **When not to use:** When simple absorption-only visualization is needed (use [Volumetric Primitive Tomography Integrator](2542-volumetric-primitive-tomography-integrator.md)) or when dense voxel-based representations are more appropriate [S2, unofficial].
 
 ## Background
-The method originates from the "Don’t Splat your Gaussians" paper (2025), which proposes volumetric ray-traced primitives for modeling and rendering scattering and emissive media [S2, unofficial]. It is implemented in the `volprim` library by Meta Platforms, Inc. [S1, unofficial]. It addresses the limitations of 3D Gaussian Splatting (which approximates density as delta functions and lacks physical volume integration) and the high computational cost of MLP-based neural radiance fields [S2, unofficial].
+The Volumetric Primitive Radiance Field Integrator originates from the `volprim` library by Meta Platforms, Inc. [S1, unofficial]. It is designed to bridge the gap between implicit neural models (like NeRF) and explicit voxel-based methods (like Instant-NGP) by using kernel-based volumetric primitives that support physical-based light transport [S2, unofficial]. The method inherits from `RBIntegrator` in Mitsuba, a differentiable renderer [S1, unofficial].
 
 ## Sources
 [S1] facebookresearch/volumetric_primitives, https://github.com/facebookresearch/volumetric_primitives, fetched 2026-10-26 (unofficial)

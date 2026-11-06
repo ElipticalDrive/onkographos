@@ -1,0 +1,312 @@
+# Procedural Volumetric Cloud Rendering (GPU Shader)
+
+Also called: CloudRendererProcedural, Procedural GPU Implementation
+
+## Overview
+This method renders volumetric clouds directly in the fragment shader by ray-marching through a procedural noise field, typically implemented as a camera component (e.g., `CloudRendererProcedural` in Unity) [S1, unofficial]. It solves the problem of generating realistic, animated cloud formations without requiring pre-computed voxel grids or heavy geometry, relying instead on 3D noise textures and physical scattering models [S1, unofficial]. It differs from standard Direct Volume Ray Casting [19-direct-volume-ray-casting.md] by replacing scalar voxel interpolation with procedural noise evaluation (specifically Worley noise combined with FBM) and using a simplified, single-pass brightness accumulation model rather than full radiative transfer integration [S1, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   **Camera State:** World position ($\mathbf{o}$), normalized ray direction ($\mathbf{d}$) per pixel, and near/far clip plane distances [S1, unofficial].
+*   **Volume Bounds:** Axis-aligned bounding box (AABB) defined by minimum ($\mathbf{B}_{min}$) and maximum ($\mathbf{B}_{max}$) world coordinates [S1, unofficial].
+*   **Lighting:** Sun direction ($\mathbf{s}$) and Sun color ($\mathbf{C}_{sun}$) [S1, unofficial].
+*   **Procedural Parameters:**
+    *   `_CloudScale`: World-space scaling factor for noise coordinates [S1, unofficial].
+    *   `_OctaveCount`: Number of Fractal Brownian Motion (FBM) layers [S1, unofficial].
+    *   `_WindSpeed`: Offset applied to noise coordinates for animation [S1, unofficial].
+    *   `_AbsorptionCoefficient`: Controls light attenuation (Beer-Lambert) [S1, unofficial].
+    *   `_ScatterFactor`: Controls forward scattering intensity (Henyey-Greenstein) [S1, unofficial].
+    *   `_NoiseTex`: A 3D texture containing Worley noise values [S1, unofficial].
+*   **Background:** The original scene color sampled from the main texture (`_MainTex`) [S1, unofficial].
+
+**Outputs:**
+*   **Final Pixel Color:** A `float4` containing the cloud color tinted by sunlight and the cloud's opacity (alpha) [S1, unofficial].
+
+### Data Structures
+The method relies on standard shader data types:
+*   `float3`: 3D vector for positions, directions, and colors.
+*   `float2`: 2D vector for ray-box intersection entry/exit distances.
+*   `float`: Scalar for density, transmittance, and loop counters.
+*   `tex3D`: Hardware-accelerated 3D texture sampler for procedural noise [S1, unofficial].
+
+No explicit voxel grids or bricking structures are used; the "volume" is implicit in the noise function domain [S1, unofficial].
+
+### Numbered Steps
+
+1.  **Ray Initialization:**
+    *   Retrieve the camera world position $\mathbf{o}$ [S1, unofficial].
+    *   Retrieve the unnormalized ray direction $\mathbf{d}_{raw}$ from the vertex shader or screen coordinates [S1, unofficial].
+    *   Normalize the direction: $\mathbf{d} = \frac{\mathbf{d}_{raw}}{\|\mathbf{d}_{raw}\|}$ [S1, unofficial]. *Pitfall:* Failure to normalize causes the ray to step past the volume instantly due to large distance values relative to the far clip plane [S1, unofficial].
+
+2.  **Ray-Box Intersection:**
+    *   Compute the intersection of ray $r(t) = \mathbf{o} + t\mathbf{d}$ with the cloud volume AABB $[\mathbf{B}_{min}, \mathbf{B}_{max}]$ using the slab method [S1, unofficial].
+    *   Calculate entry distance $t_{entry}$ and exit distance $t_{exit}$:
+        $$
+        t_{entry} = \max \left( \max \left( \frac{B_{min,x} - o_x}{d_x}, \frac{B_{min,y} - o_y}{d_y} \right), \frac{B_{min,z} - o_z}{d_z} \right)
+        $$
+        $$
+        t_{exit} = \min \left( \min \left( \frac{B_{max,x} - o_x}{d_x}, \frac{B_{max,y} - o_y}{d_y} \right), \frac{B_{max,z} - o_z}{d_z} \right)
+        $$
+        *(Note: Division by zero is handled by standard slab method logic where $d_i=0$ implies infinite extent along that axis, effectively ignoring that bound check if the origin is inside, or rejecting if outside. The source code uses `min`/`max` of `entryDist`/`exitDist` arrays derived from these formulas [S1, unofficial].)*
+    *   If $t_{entry} \ge t_{exit}$, the ray misses the volume; return the background color [S1, unofficial].
+
+3.  **Light Transmittance Pre-computation (March Light):**
+    *   To determine how much sunlight reaches each point in the cloud, march from the current ray position $\mathbf{p}$ towards the sun $\mathbf{s}$ [S1, unofficial].
+    *   Initialize `lightDensity = 0` [S1, unofficial].
+    *   Iterate up to `stepLimit` (typically 200) with a fixed `stepSize` (typically 20.0 world units) [S1, unofficial]:
+        *   Update position: $\mathbf{p}_{light} = \mathbf{p} + \mathbf{s} \times \text{stepSize}$ [S1, unofficial].
+        *   Check if $\mathbf{p}_{light}$ is inside the cloud volume bounds. If yes, sample the noise texture at the scaled world position $\mathbf{p}_{light} \times \text{_CloudScale}$ and add the result to `lightDensity` [S1, unofficial].
+    *   Calculate sun transmittance at $\mathbf{p}$ using Beer-Lambert law:
+        $$
+        T_{sun}(\mathbf{p}) = e^{-\text{lightDensity} \times \text{_AbsorptionCoefficient}}
+        $$
+        [S1, unofficial]
+
+4.  **Density Marching (Cloud Appearance):**
+    *   Initialize ray position $\mathbf{p} = \mathbf{o} + \mathbf{d} \times t_{entry}$ [S1, unofficial].
+    *   Initialize accumulated density `densityTotal = 0` and brightness `brightness = 0` [S1, unofficial].
+    *   Iterate up to `stepLimit` (typically 64) [S1, unofficial]:
+        *   If current distance traveled exceeds $t_{exit}$, break loop [S1, unofficial].
+        *   Advance ray: $\mathbf{p} = \mathbf{p} + \mathbf{d} \times \text{stepSize}$ [S1, unofficial].
+        *   Calculate world-scaled coordinates: $\mathbf{c} = \mathbf{p} \times \text{_CloudScale}$ [S1, unofficial].
+        *   **Procedural Noise Evaluation (Worley + FBM):**
+            *   Sample the 3D noise texture at $\mathbf{c}$ to get base Worley density [S1, unofficial].
+            *   Apply Fractal Brownian Motion (FBM) by summing multiple octaves:
+                *   For `octave` from 0 to `_OctaveCount - 1`:
+                    *   Sample noise at $\mathbf{c} \times 2^{\text{octave}}$.
+                    *   Add to `worleyDensity` weighted by amplitude (starting at 1.0, halving each octave).
+                    *   Accumulate `amplitudeTotal`.
+                *   Normalize `worleyDensity` by `amplitudeTotal` [S1, unofficial].
+            *   Apply `_WindSpeed` by offsetting $\mathbf{c}$ with time [S1, unofficial].
+        *   **Accumulate Brightness:**
+            *   Calculate scattering factor $S$ using Henyey-Greenstein phase function (see Formula below) [S1, unofficial].
+            *   Calculate camera transmittance $T_{cam}$ from the accumulated density so far: $T_{cam} = e^{-\text{densityTotal} \times \text{_AbsorptionCoefficient}}$ [S1, unofficial].
+            *   Update brightness:
+                $$
+                \text{brightness} = \text{brightness} + \text{worleyDensity} \times T_{sun}(\mathbf{p}) \times T_{cam} \times S \times \text{stepSize} \times 0.5
+                $$
+                [S1, unofficial]
+            *   Update total density: `densityTotal += worleyDensity * stepSize` [S1, unofficial].
+
+5.  **Final Compositing:**
+    *   Calculate cloud transmittance:
+        $$
+        T_{cloud} = e^{-\text{densityTotal} \times \text{_AbsorptionCoefficient}}
+        $$
+        [S1, unofficial]
+    *   Calculate cloud color:
+        $$
+        \mathbf{C}_{cloud} = \text{brightness} \times \mathbf{C}_{sun}
+        $$
+        [S1, unofficial]
+    *   Return final color with alpha representing opacity ($1 - T_{cloud}$):
+        $$
+        \mathbf{C}_{final} = \text{lerp}(\mathbf{C}_{background}, \mathbf{C}_{cloud}, 1 - T_{cloud})
+        $$
+        [S1, unofficial]
+
+### Formulas
+
+**Henyey-Greenstein Scattering Factor:**
+$$
+S(\theta) = \frac{1 - g^2}{4\pi (1 + g^2 - 2g \cos \theta)^{3/2}}
+$$
+Where:
+*   $g$ is `_ScatterFactor` [S1, unofficial].
+*   $\theta$ is the angle between the view direction $\mathbf{d}$ and the sun direction $\mathbf{s}$, such that $\cos \theta = \mathbf{d} \cdot \mathbf{s}$ [S1, unofficial].
+
+**Beer-Lambert Transmittance:**
+$$
+T = e^{-\sigma \cdot d}
+$$
+Where:
+*   $\sigma$ is `_AbsorptionCoefficient` [S1, unofficial].
+*   $d$ is the accumulated density (optical depth) along the path [S1, unofficial].
+
+**Brightness Accumulation:**
+$$
+B_{new} = B_{old} + \rho \cdot T_{sun} \cdot T_{cam} \cdot S \cdot \Delta t \cdot 0.5
+$$
+Where:
+*   $\rho$ is the local noise density value [S1, unofficial].
+*   $T_{sun}$ is the transmittance from the sun to the current point [S1, unofficial].
+*   $T_{cam}$ is the transmittance from the current point to the camera (based on accumulated density) [S1, unofficial].
+*   $\Delta t$ is the step size [S1, unofficial].
+*   The factor $0.5$ is a hardcoded constant in the implementation [S1, unofficial].
+
+### Parameters and Typical Values
+*   **_AbsorptionCoefficient:** Controls darkness. Higher values = darker clouds [S1, unofficial].
+*   **_ScatterFactor:** Controls silver lining strength. Higher values = stronger forward scattering [S1, unofficial].
+*   **_CloudScale:** Controls feature size. Higher values = smaller clouds [S1, unofficial].
+*   **_OctaveCount:** Controls edge detail. Higher values = more detailed edges [S1, unofficial].
+*   **_WindSpeed:** Controls animation speed [S1, unofficial].
+*   **Step Size:** Fixed at 20.0 units for light marching; variable or fixed for cloud marching (source implies fixed step logic but does not explicitly name the cloud march step size constant, though it uses `stepSize` variable) [S1, unofficial].
+*   **Step Limits:** 200 for light marching, 64 for cloud marching [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Unnormalized Rays:** If $\mathbf{d}$ is not normalized, the distance $t$ calculated in ray-box intersection and marching will be incorrect relative to the clip plane, causing the ray to skip the volume entirely [S1, unofficial].
+*   **Degenerate Intersection:** If $t_{entry} \ge t_{exit}$, the ray misses the box. The shader must handle this to avoid marching outside the volume bounds [S1, unofficial].
+*   **Noise Tiling:** The noise is sampled at world-scaled coordinates ($\mathbf{p} \times \text{_CloudScale}$). If the volume box is adjusted without updating `_CloudScale`, the noise may stretch or tile unnaturally [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Helper: Henyey-Greenstein Phase Function
+def hg_scatter(ray_dir, sun_dir, scatter_factor):
+    cos_angle = dot(normalize(ray_dir), normalize(sun_dir))
+    g = scatter_factor
+    g2 = g * g
+    numerator = 1.0 - g2
+    denominator = pow(1.0 + g2 - 2.0 * g * cos_angle, 1.5)
+    return numerator / (4.0 * 3.14159 * denominator)
+
+# Helper: Ray-Box Intersection (Slab Method)
+def ray_box_intersection(origin, direction, box_min, box_max):
+    # Calculate t for each slab
+    t1 = (box_min - origin) / direction
+    t2 = (box_max - origin) / direction
+    
+    # Entry is max of mins, Exit is min of maxs
+    entry = max(max(t1.x, t1.y), t1.z)
+    exit = min(min(t2.x, t2.y), t2.z)
+    
+    return entry, exit
+
+# Main Shader Function
+def render_cloud_pixel(camera_pos, ray_dir_raw, box_min, box_max, sun_dir, sun_color, 
+                       noise_tex, cloud_scale, absorption_coeff, scatter_factor, 
+                       octave_count, wind_speed, background_color):
+    
+    # 1. Normalize Ray
+    ray_dir = normalize(ray_dir_raw)
+    
+    # 2. Intersect with Volume
+    t_entry, t_exit = ray_box_intersection(camera_pos, ray_dir, box_min, box_max)
+    
+    if t_entry >= t_exit:
+        return background_color
+        
+    # 3. Pre-compute Sun Transmittance for the whole ray (Simplified: assumes uniform sun path or samples center)
+    # Note: The source implementation marches light from the *current* ray position. 
+    # For a single pixel, we can compute this once or per step. The source code structure 
+    # suggests MarchLight is called per sample or pre-calculated. 
+    # Based on "MarchLight" function in source, it takes a position. 
+    # We will compute sun transmittance for the entry point as a baseline, 
+    # or ideally per step if high fidelity is needed. 
+    # However, the source snippet shows MarchLight being called with rayPosition inside the loop? 
+    # Actually, the source snippet shows MarchLight as a separate function. 
+    # Let's assume we calculate T_sun for the current sample point inside the loop for accuracy.
+    
+    # 4. March Cloud
+    ray_pos = camera_pos + ray_dir * t_entry
+    distance_travelled = t_entry
+    density_total = 0.0
+    brightness = 0.0
+    
+    step_size = 20.0 # Typical value from source
+    step_limit = 64
+    
+    for i in range(step_limit):
+        if distance_travelled > t_exit:
+            break
+            
+        ray_pos = ray_pos + ray_dir * step_size
+        distance_travelled += step_size
+        
+        # Sample Noise
+        world_scaled_ray = ray_pos * cloud_scale
+        # Apply wind
+        world_scaled_ray += wind_speed * time # 'time' is implicit in wind speed usage
+        
+        # FBM Worley Noise
+        worley_density = 0.0
+        amplitude = 1.0
+        amplitude_total = 0.0
+        frequency = 1.0
+        
+        for octave in range(octave_count):
+            # Sample 3D texture
+            # tex3D returns a float (R channel)
+            sample = sample_3d_texture(noise_tex, world_scaled_ray * frequency)
+            worley_density += sample * amplitude
+            amplitude_total += amplitude
+            amplitude *= 0.5
+            frequency *= 2.0
+            
+        if amplitude_total > 0:
+            worley_density /= amplitude_total
+        else:
+            worley_density = 0.0
+            
+        # Calculate Transmittances
+        # Camera Transmittance (from accumulated density so far)
+        t_cam = exp(-density_total * absorption_coeff)
+        
+        # Sun Transmittance (march from current ray_pos to sun)
+        # This is expensive. Source code shows a loop for this.
+        light_density = 0.0
+        light_step_size = 20.0
+        light_step_limit = 200
+        current_light_pos = ray_pos
+        
+        for j in range(light_step_limit):
+            current_light_pos = current_light_pos + sun_dir * light_step_size
+            # Check bounds
+            uvw = (current_light_pos - box_min) / (box_max - box_min)
+            if all(0 <= uvw[k] <= 1 for k in [0,1,2]):
+                light_density += sample_3d_texture(noise_tex, current_light_pos * cloud_scale).r * light_step_size
+                
+        t_sun = exp(-light_density * absorption_coeff)
+        
+        # Scattering
+        scatter = hg_scatter(ray_dir, sun_dir, scatter_factor)
+        
+        # Accumulate Brightness
+        brightness += worley_density * t_sun * t_cam * scatter * step_size * 0.5
+        
+        # Accumulate Density
+        density_total += worley_density * step_size
+        
+    # 5. Final Output
+    cloud_transmittance = exp(-density_total * absorption_coeff)
+    cloud_color = brightness * sun_color
+    alpha = 1.0 - cloud_transmittance
+    
+    # Composite with background
+    final_color = lerp(background_color, cloud_color, alpha)
+    
+    return float4(final_color, alpha)
+```
+
+## Subtopics
+
+### Worley Noise Generation
+A procedural noise function based on Voronoi cells, used to create the cellular structure of clouds. It differs from Perlin/Simplex noise by producing more distinct, blob-like shapes suitable for cumulus clouds [S1, unofficial].
+
+### Fractal Brownian Motion (FBM)
+A technique that sums multiple octaves of noise at different frequencies and amplitudes to create detailed, self-similar structures. It sets apart the cloud edges from the smooth core [S1, unofficial].
+
+### Henyey-Greenstein Phase Function
+A mathematical model describing how light is scattered by particles. It is chosen for its computational efficiency compared to full Mie scattering, providing a good approximation of forward scattering (silver linings) [S1, unofficial].
+
+## Operating characteristics
+
+*   **Time Complexity:** $O(N \cdot M)$ per pixel, where $N$ is the number of cloud marching steps (typically 64) and $M$ is the number of light marching steps (typically 200) if sun transmittance is recalculated per sample. This is computationally expensive. Optimizations often involve caching sun transmittance or reducing $M$ [S1, unofficial].
+*   **Memory Complexity:** $O(1)$ per pixel, as it relies on a 3D texture lookup and scalar accumulators. The 3D texture size depends on the resolution of the noise map, not the scene complexity [S1, unofficial].
+*   **Performance:** Runs on the GPU fragment shader. Performance is heavily dependent on the number of octaves and the cost of the 3D texture sampling. The fixed step sizes and limits provide predictable frame times but may result in aliasing if the step size is too large relative to the cloud features [S1, unofficial].
+*   **Strengths:** No pre-computation required; clouds are infinite and infinite resolution (limited by noise function); easy to animate via wind offset; physically plausible lighting (sun tinting, scattering) [S1, unofficial].
+*   **Limitations:** No occlusion between clouds (each pixel is independent); no indirect lighting between clouds; fixed step size can cause banding or aliasing; expensive due to per-sample light marching [S1, unofficial].
+*   **When to use:** Real-time rendering of sky clouds where performance allows for per-pixel noise evaluation and where infinite resolution is desired.
+*   **When not to use:** Scenes requiring cloud-to-cloud occlusion, global illumination, or very high performance on low-end hardware [S1, unofficial].
+
+## Background
+
+This method was implemented in Unity as the `CloudRendererProcedural` component [S1, unofficial]. It is based on the techniques described in "Physically Based Sky, Atmosphere and Cloud Rendering in Frostbite" by Sebastien Hillaire (EA Frostbite) [S1, unofficial]. The implementation adapts the Frostbite approach for a procedural, shader-based environment, utilizing Worley noise instead of the voxel-based approach often seen in the original paper [S1, unofficial].
+
+## Sources
+
+[S1] ldarnbr/volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)

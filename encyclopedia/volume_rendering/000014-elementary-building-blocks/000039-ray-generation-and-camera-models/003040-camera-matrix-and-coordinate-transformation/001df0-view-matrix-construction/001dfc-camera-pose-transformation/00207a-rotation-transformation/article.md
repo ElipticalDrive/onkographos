@@ -5,15 +5,13 @@
 Rotation Transformation constructs a 4×4 homogeneous rotation matrix to rotate a shape or vector around a specified axis by a given angle [S1, unofficial]. It sets itself apart from [Quaternion Rotation](2302-quaternion-rotation.md) by yielding an explicit matrix representation rather than using quaternion algebra, and from [SE2 Lie Group Implementation](3144-se2-lie-group-implementation.md) by operating in 3D space rather than 2D [G].
 
 ## How it works
-**Inputs:**
+**Inputs and Outputs:**
 1.  Rotation specification: Either a single axis index $i \in \{0, 1, 2\}$ (0: x, 1: y, 2: z) and an angle $\theta$ in radians [S1, unofficial], or three angles $\alpha_X, \alpha_Y, \alpha_Z$ in degrees for combined Euler rotation [S3, unofficial].
 2.  (Optional) Two vectors `from_vec` and `to_vec` to compute the rotation aligning one to the other [S4, unofficial].
-
-**Outputs:**
-A 4×4 rotation matrix $R$ in row-major layout [S1, unofficial][S3, unofficial].
+Outputs: A 4×4 rotation matrix $R$ in row-major layout [S1, unofficial][S3, unofficial].
 
 **Data Structures:**
-The rotation matrix is a 4×4 array of floating-point numbers.
+The rotation matrix is a 4×4 array of floating-point numbers [S1, unofficial][S3, unofficial].
 Layout for single-axis rotation about axis $i$:
 $$
 R = \begin{bmatrix}
@@ -23,9 +21,9 @@ R = \begin{bmatrix}
 0 & 0 & 0 & 1
 \end{bmatrix}
 $$
-Where $R_{3\times3}$ is the 3×3 rotation submatrix. The 4th row and column are identity elements $[0, 0, 0, 1]$ to preserve homogeneous coordinates [S1, unofficial][S3, unofficial].
+Where $R_{3\times3}$ is the 3×3 rotation submatrix [S1, unofficial][S3, unofficial]. The 4th row and column are identity elements $[0, 0, 0, 1]$ to preserve homogeneous coordinates [S1, unofficial][S3, unofficial].
 
-**Steps for Single-Axis Rotation:**
+**Numbered Steps:**
 1.  Validate inputs [S1, unofficial].
 2.  Initialize a 4×4 matrix `mat` with zeros [S1, unofficial].
 3.  Compute indices for the plane perpendicular to axis $i$:
@@ -41,65 +39,53 @@ Where $R_{3\times3}$ is the 3×3 rotation submatrix. The 4th row and column are 
 6.  Set all other elements in rows/cols $i, j, k$ to 0 (already initialized) [S1, unofficial].
 7.  Return `mat` [S1, unofficial].
 
-**Steps for Combined Euler Rotation (X-Y-Z order):**
+**Combined Euler Rotation (X-Y-Z order):**
 1.  Convert angles from degrees to radians:
     $$ \text{rad}_X = \alpha_X \times \frac{\pi}{180} $$
     $$ \text{rad}_Y = \alpha_Y \times \frac{\pi}{180} $$
     $$ \text{rad}_Z = \alpha_Z \times \frac{\pi}{180} $$
     [S3, unofficial]
-2.  Construct individual rotation matrices $R_X, R_Y, R_Z$:
-    $$
-    R_X = \begin{bmatrix}
-    1 & 0 & 0 & 0 \\
-    0 & \cos(\text{rad}_X) & -\sin(\text{rad}_X) & 0 \\
-    0 & \sin(\text{rad}_X) & \cos(\text{rad}_X) & 0 \\
-    0 & 0 & 0 & 1
-    \end{bmatrix}
-    $$
-    $$
-    R_Y = \begin{bmatrix}
-    \cos(\text{rad}_Y) & 0 & \sin(\text{rad}_Y) & 0 \\
-    0 & 1 & 0 & 0 \\
-    -\sin(\text{rad}_Y) & 0 & \cos(\text{rad}_Y) & 0 \\
-    0 & 0 & 0 & 1
-    \end{bmatrix}
-    $$
-    $$
-    R_Z = \begin{bmatrix}
-    \cos(\text{rad}_Z) & -\sin(\text{rad}_Z) & 0 & 0 \\
-    \sin(\text{rad}_Z) & \cos(\text{rad}_Z) & 0 & 0 \\
-    0 & 0 & 1 & 0 \\
-    0 & 0 & 0 & 1
-    \end{bmatrix}
-    $$
-    [S3, unofficial]
+2.  Construct individual rotation matrices $R_X, R_Y, R_Z$ using the single-axis layout [S3, unofficial].
 3.  Multiply matrices in order:
     $$ R_{\text{combined}} = R_X \times R_Y $$
     $$ R_{\text{final}} = R_{\text{combined}} \times R_Z $$
     [S3, unofficial]
 
-**Steps for Vector-to-Vector Rotation:**
+**Vector-to-Vector Rotation:**
 1.  Compute the cross product $v = \text{from\_vec} \times \text{to\_vec}$ [S4, unofficial].
 2.  Compute the dot product $c = \text{from\_vec} \cdot \text{to\_vec}$ [S4, unofficial].
 3.  Compute the scaling factor $k$:
     $$ k = \frac{1.0}{1.0 + c} $$
     [S4, unofficial]
-4.  Construct the 3×3 rotation matrix components using $v$ and $k$:
-    $$
-    \begin{aligned}
-    R_{0,0} &= v_0^2 k + c \\
-    R_{0,1} &= v_0 v_1 k - v_2 \\
-    R_{0,2} &= v_0 v_2 k + v_1 \\
-    R_{1,0} &= v_0 v_1 k + v_2 \\
-    R_{1,1} &= v_1^2 k + c \\
-    R_{1,2} &= v_1 v_2 k - v_0 \\
-    R_{2,0} &= v_0 v_2 k - v_1 \\
-    R_{2,1} &= v_1 v_2 k + v_0 \\
-    R_{2,2} &= v_2^2 k + c
-    \end{aligned}
-    $$
-    [S4, unofficial]
-5.  Handle edge cases: if $v$ is zero, check $c$. If $c > 0$, set $R$ to the identity matrix. If $c < 0$, set $R$ to the negative identity matrix [S4, unofficial].
+4.  Construct the 3×3 rotation matrix components using $v$ and $k$ [S4, unofficial].
+5.  Return the 4×4 homogeneous matrix embedding the 3×3 result [S4, unofficial].
+
+**Formulas:**
+For single-axis rotation about axis $i$, let $j=(i+1)\%3$, $k=(j+1)\%3$. The non-zero entries are:
+$$ R_{jj}=\cos\theta, \quad R_{jk}=-\sin\theta, \quad R_{kj}=\sin\theta, \quad R_{kk}=\cos\theta, \quad R_{ii}=1 $$
+All other entries in rows/cols $i,j,k$ are 0 [S1, unofficial].
+
+For vector-to-vector rotation, the 3×3 submatrix $R$ is:
+$$
+\begin{aligned}
+R_{0,0} &= v_0^2 k + c \\
+R_{0,1} &= v_0 v_1 k - v_2 \\
+R_{0,2} &= v_0 v_2 k + v_1 \\
+R_{1,0} &= v_0 v_1 k + v_2 \\
+R_{1,1} &= v_1^2 k + c \\
+R_{1,2} &= v_1 v_2 k - v_0 \\
+R_{2,0} &= v_0 v_2 k - v_1 \\
+R_{2,1} &= v_1 v_2 k + v_0 \\
+R_{2,2} &= v_2^2 k + c
+\end{aligned}
+$$
+where $v_0, v_1, v_2$ are the components of $v$, and $c$ is the dot product [S4, unofficial].
+
+**Parameters:**
+Typical values are not given in the sources. Angles are provided in degrees for Euler rotation and converted to radians internally [S3, unofficial].
+
+**Edge Cases and Pitfalls:**
+If the cross product $v$ is zero (vectors are parallel), check $c$ [S4, unofficial]. If $c > 0$, set $R$ to the identity matrix [S4, unofficial]. If $c < 0$, set $R$ to the negative identity matrix [S4, unofficial]. Division by zero in $k = 1.0/(1.0+c)$ occurs when $c = -1$ (opposite vectors), which is handled by the $c < 0$ branch [S4, unofficial].
 
 **Pseudocode (Single Axis):**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.

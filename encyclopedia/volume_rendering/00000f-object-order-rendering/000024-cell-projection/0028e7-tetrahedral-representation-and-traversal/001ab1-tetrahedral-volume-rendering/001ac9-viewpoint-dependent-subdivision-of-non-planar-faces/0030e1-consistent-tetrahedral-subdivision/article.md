@@ -1,0 +1,256 @@
+# Consistent Tetrahedral Subdivision
+
+Also called: Linear order diagonal selection, Nielson and Sung (1997) method simplification
+
+## Overview
+Consistent Tetrahedral Subdivision is a method for decomposing non-convex problem cells (such as hexahedra with non-planar quadrilateral faces) into tetrahedra using diagonals that are consistent across shared faces. It solves the problem of visibility sort failures and geometric gaps/overlaps in curvilinear grid rendering by ensuring that adjacent cells sharing a quadrilateral face agree on the diagonal used to split that face, without requiring explicit mesh connectivity data. It differs from view-independent methods by relying on a static linear vertex order rather than geometric projection properties, and from other view-dependent methods by its deterministic, topology-based consistency guarantee.
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+1. A set of cells (pyramids, prisms, or hexahedra) to be subdivided.
+2. A linear order on the set of all vertices in the grid, typically derived from integer indices assigned to each vertex [S1].
+
+**Outputs:**
+1. A set of tetrahedra that exactly fill the volume of the original cells.
+2. Consistent diagonal choices for all quadrilateral faces shared between adjacent cells.
+
+### Data Structures
+*   **Vertex Index:** Each vertex $v$ has an associated integer index $I(v)$ representing its position in the linear order.
+*   **Cell Vertices:** Each cell is defined by its vertices. For a hexahedron, vertices are labeled $A$ through $H$, where $A$ is the smallest vertex in the linear order, and $G$ is the vertex farthest from $A$ (the opposite corner).
+
+### Decision Rule
+For any quadrilateral face defined by four vertices, the diagonal is chosen based on the linear order:
+1.  Identify the vertex with the smallest index among the four vertices of the quadrilateral. Let this vertex be $V_{min}$.
+2.  The chosen diagonal connects $V_{min}$ to the vertex opposite it in the quadrilateral.
+This rule is applied independently to each quadrilateral face. Because the decision depends only on the four vertices of the face, adjacent cells sharing that face will always select the same diagonal, ensuring consistency without connectivity pointers [S1].
+
+### Subdivision Steps
+
+#### 1. Pyramid Subdivision
+A pyramid consists of a quadrilateral base and an apex vertex.
+1.  Apply the Decision Rule to the quadrilateral base to select the diagonal starting from the smallest base vertex.
+2.  The plane defined by this diagonal and the apex vertex divides the pyramid into two tetrahedra.
+**Result:** 2 tetrahedra.
+
+#### 2. Triangular Prism Subdivision
+A triangular prism has two triangular bases and three quadrilateral lateral faces.
+1.  Identify the unique smallest vertex $L$ in the linear order among all vertices of the prism.
+2.  Identify the two quadrilateral faces that share vertex $L$.
+3.  Apply the Decision Rule to these two faces. Since $L$ is the smallest vertex in the entire prism, it is also the smallest in these two faces. Thus, both diagonals start at $L$.
+4.  The plane defined by these two diagonals divides the prism into:
+    *   One tetrahedron.
+    *   One pyramid.
+5.  Subdivide the resulting pyramid using the Decision Rule on its quadrilateral base (as in Step 1).
+**Result:** 3 tetrahedra.
+
+#### 3. Hexahedron Subdivision
+A hexahedron has 8 vertices. Let $A$ be the vertex with the smallest index in the linear order. Let $G$ be the vertex farthest from $A$ (the opposite corner).
+1.  **Initial Diagonals:** Apply the Decision Rule to the three quadrilateral faces that meet at vertex $A$. The diagonals on these faces start at $A$.
+2.  **Count Diagonals at G:** Examine the diagonals chosen for the remaining three quadrilateral faces (those not meeting at $A$). Count how many of these diagonals have $G$ as an endpoint. Let this count be $k$.
+
+**Case 0: $k = 0$**
+1.  The three diagonals chosen for the faces not meeting at $A$, combined with the three diagonals already chosen for the faces meeting at $A$, form the six edges of a central tetrahedron.
+2.  The vertices of this central tetrahedron are the four vertices that are endpoints of these diagonals.
+3.  Removing this central tetrahedron leaves four other tetrahedra filling the remaining volume.
+**Result:** 5 tetrahedra (1 central + 4 surrounding).
+
+**Case $k > 0$:**
+1.  At least one diagonal among the remaining three faces has $G$ as an endpoint. Let this diagonal be $d$.
+2.  This diagonal $d$, together with the parallel face diagonal starting at $A$ (from the initial step), defines a quadrilateral "slice" that cuts through the hexahedron.
+3.  This slice divides the hexahedron into two triangular prisms.
+4.  Apply the Hexahedron Subdivision logic to the slice quadrilateral: Since $A$ is the smallest vertex of the hexahedron, it is also the smallest in the slice. The Decision Rule selects the diagonal connecting $A$ to the opposite vertex in the slice (which is $G$ if the diagonal $d$ connects to $G$, or another vertex if not, but the slice is defined by the parallel diagonals).
+5.  Subdivide each of the two resulting triangular prisms using the Prism Subdivision method (Step 2).
+**Result:** 6 tetrahedra (3 from each prism).
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def get_smallest_vertex(vertices):
+    """
+    Returns the vertex with the minimum index from a list of vertices.
+    Assumes vertices have an attribute 'index' representing the linear order.
+    """
+    return min(vertices, key=lambda v: v.index)
+
+def choose_diagonal_quad(v1, v2, v3, v4):
+    """
+    Chooses the diagonal for a quadrilateral defined by four vertices.
+    The diagonal starts from the smallest vertex.
+    Returns the two vertices forming the diagonal.
+    """
+    smallest = get_smallest_vertex([v1, v2, v3, v4])
+    # The opposite vertex is the one not adjacent to smallest in the quad topology.
+    # Note: This assumes a known topology of the quadrilateral (v1-v2-v3-v4).
+    # If smallest is v1, opposite is v3. If v2, opposite is v4, etc.
+    if smallest == v1:
+        return (v1, v3)
+    elif smallest == v2:
+        return (v2, v4)
+    elif smallest == v3:
+        return (v3, v1)
+    elif smallest == v4:
+        return (v4, v2)
+    else:
+        raise ValueError("Vertex not in quadrilateral")
+
+def subdivide_pyramid(base_vertices, apex):
+    """
+    Subdivides a pyramid into 2 tetrahedra.
+    base_vertices: list of 4 vertices forming the quadrilateral base.
+    apex: vertex opposite the base.
+    """
+    diag = choose_diagonal_quad(*base_vertices)
+    # The plane through the diagonal and the apex creates two tetrahedra.
+    # Tetrahedron 1: apex + diagonal[0] + two base vertices adjacent to diagonal[0]
+    # Tetrahedron 2: apex + diagonal[1] + two base vertices adjacent to diagonal[1]
+    # Implementation detail: The specific tetrahedra depend on the quad topology.
+    # For a quad v1-v2-v3-v4, if diag is (v1, v3):
+    # T1 = (apex, v1, v2, v3)
+    # T2 = (apex, v1, v3, v4)
+    # This assumes standard ordering.
+    return [Tetrahedron(apex, diag[0], base_vertices[0], base_vertices[1]), # Placeholder logic
+            Tetrahedron(apex, diag[1], base_vertices[2], base_vertices[3])] # Placeholder logic
+
+def subdivide_prism(vertices):
+    """
+    Subdivides a triangular prism into 3 tetrahedra.
+    vertices: list of 6 vertices.
+    """
+    L = get_smallest_vertex(vertices)
+    # Identify the two quadrilateral faces sharing L.
+    # This requires topology knowledge of the prism.
+    # Let the two quads be Q1 and Q2.
+    diag1 = choose_diagonal_quad(*Q1.vertices)
+    diag2 = choose_diagonal_quad(*Q2.vertices)
+    
+    # The plane through diag1 and diag2 splits the prism into a tetrahedron and a pyramid.
+    # The tetrahedron is formed by L and the endpoints of the diagonals that are not L.
+    # The pyramid is the remainder.
+    # Subdivide the pyramid using subdivide_pyramid.
+    
+    # Simplified logic:
+    # 1. Find the two vertices opposite L in the two quads.
+    # 2. Form tetrahedron with L and these two vertices and the vertex connecting them?
+    # The source states: "The plane through these two diagonals divides the prism into a tetrahedron and a pyramid."
+    # We need to identify the specific vertices.
+    
+    # Let's assume we can identify the tetrahedron directly.
+    # The tetrahedron uses L and the two non-L endpoints of the diagonals.
+    # Let the diagonals be (L, X) and (L, Y).
+    # The tetrahedron is (L, X, Y, Z) where Z is the vertex connecting X and Y in the prism structure?
+    # Actually, the source says the pyramid is divided using a diagonal of its quadrilateral base.
+    
+    # For implementation, we need to know the topology.
+    # Let's assume a helper function that returns the tetrahedra given the topology.
+    return [Tetrahedron(L, X, Y, Z), Tetrahedron(...), Tetrahedron(...)]
+
+def subdivide_hexahedron(vertices):
+    """
+    Subdivides a hexahedron into 5 or 6 tetrahedra.
+    vertices: list of 8 vertices.
+    """
+    A = get_smallest_vertex(vertices)
+    # Identify G, the vertex farthest from A.
+    # In a standard hexahedron, G is the opposite corner.
+    # This requires topology knowledge.
+    G = get_opposite_vertex(A, vertices)
+    
+    # Identify the three quadrilateral faces meeting at A.
+    # Let them be Q_A1, Q_A2, Q_A3.
+    diag_A1 = choose_diagonal_quad(*Q_A1.vertices)
+    diag_A2 = choose_diagonal_quad(*Q_A2.vertices)
+    diag_A3 = choose_diagonal_quad(*Q_A3.vertices)
+    
+    # Identify the remaining three quadrilateral faces.
+    # Let them be Q_Rem1, Q_Rem2, Q_Rem3.
+    diag_Rem1 = choose_diagonal_quad(*Q_Rem1.vertices)
+    diag_Rem2 = choose_diagonal_quad(*Q_Rem2.vertices)
+    diag_Rem3 = choose_diagonal_quad(*Q_Rem3.vertices)
+    
+    # Count diagonals with G as an endpoint among the remaining three.
+    k = 0
+    if G in diag_Rem1: k += 1
+    if G in diag_Rem2: k += 1
+    if G in diag_Rem3: k += 1
+    
+    if k == 0:
+        # Case 0: 5 tetrahedra
+        # The three diagonals from Q_Rem and the three from Q_A form a central tetrahedron.
+        # Identify the central tetrahedron vertices.
+        # The central tetrahedron is formed by the four vertices that are endpoints of these diagonals.
+        # Let the endpoints of diag_Ai be (A, X_i).
+        # Let the endpoints of diag_Remj be (Y_j, Z_j).
+        # If k=0, G is not an endpoint of any diag_Rem.
+        # The central tetrahedron vertices are the four vertices that are not A and not G?
+        # Actually, the source says: "the three diagonals in this set plus the three diagonals already shown... are the six edges of a central tetrahedron."
+        # This implies the central tetrahedron is formed by the four vertices that are the non-A endpoints of the Q_A diagonals and the non-G endpoints of the Q_Rem diagonals?
+        # No, the central tetrahedron's edges are the diagonals.
+        # So the vertices of the central tetrahedron are the endpoints of these 6 diagonals.
+        # Since there are 6 diagonals and 4 vertices, each vertex must be an endpoint of 3 diagonals.
+        # A is an endpoint of 3 diag_A.
+        # The other 3 vertices of the central tetrahedron must be the other endpoints.
+        # Let's call them V1, V2, V3.
+        # The central tetrahedron is (A, V1, V2, V3).
+        # The remaining 4 tetrahedra fill the rest.
+        return [Tetrahedron(A, V1, V2, V3), Tetrahedron(...), Tetrahedron(...), Tetrahedron(...), Tetrahedron(...)]
+    else:
+        # Case >0: 6 tetrahedra
+        # Find a diagonal among Q_Rem that has G as an endpoint.
+        # Let this be diag_G = (G, X).
+        # The slice is defined by diag_G and the parallel diagonal starting at A.
+        # The parallel diagonal to diag_G (which is on a face not meeting A) is on the face meeting A.
+        # Let the face containing diag_G be Q_Rem_k. The parallel face is Q_A_m.
+        # The diagonal on Q_A_m starting at A is diag_A_m.
+        # The slice is the quadrilateral formed by the endpoints of diag_G and diag_A_m.
+        # This slice divides the hexahedron into two prisms.
+        # Subdivide each prism.
+        return subdivide_prism(prism1_vertices) + subdivide_prism(prism2_vertices)
+```
+
+### Parameters
+*   **Linear Order:** The integer index assigned to each vertex. This is the primary parameter controlling the subdivision geometry.
+
+### Edge Cases and Pitfalls
+*   **Precision:** The method relies on integer indices, so floating-point precision issues in vertex coordinates do not affect the consistency of the diagonal selection. However, the geometric validity of the resulting tetrahedra depends on the input grid being well-formed (non-degenerate).
+*   **Boundaries:** The method assumes a closed or properly bounded grid. Boundary faces do not have adjacent cells, so consistency is not required, but the diagonal choice is still made for the purpose of subdivision.
+*   **Degenerate Input:** If a hexahedron is degenerate (e.g., volume zero), the subdivision may produce degenerate tetrahedra. The method does not explicitly handle this, but the resulting tetrahedra will have zero volume.
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Time:** $O(N)$, where $N$ is the number of cells. Each cell is processed independently in constant time (for a fixed cell type).
+*   **Memory:** $O(N)$, to store the resulting tetrahedra. The method does not require additional connectivity data structures.
+
+### Measured Performance
+*   Not given in the sources.
+
+### Scaling
+*   The method scales linearly with the number of cells. It is suitable for large grids because it avoids global connectivity analysis.
+
+### Strengths and Limitations
+*   **Strengths:**
+    *   Ensures consistent diagonals across shared faces without mesh connectivity.
+    *   Simple to implement.
+    *   Deterministic.
+*   **Limitations:**
+    *   The resulting tetrahedra may not be optimal for rendering (e.g., they may be sliver-like).
+    *   The number of tetrahedra per hexahedron varies (5 or 6), which may complicate data structures.
+    *   Does not guarantee visibility sort correctness for all view directions, only that the subdivision is consistent.
+
+### When to Use
+*   Use when rendering curvilinear grids with non-planar faces and when mesh connectivity is not available or expensive to compute.
+*   Use when a consistent tetrahedral decomposition is required for volume rendering or finite element analysis.
+
+### When Not to Use
+*   Use when optimal tetrahedra quality is critical.
+*   Use when the grid is already well-connected and a more sophisticated subdivision method can be applied.
+
+## Background
+The method was developed as a simplification of the Nielson and Sung (1997) method, which was originally designed for a more specific purpose. The authors of the current method discovered this simplification independently. It is used in the context of approximate volume rendering for curvilinear and unstructured grids, specifically to handle problem cells that cause visibility cycles due to non-convex projections. The method contradicts part of the report by Guy and Crawfis (1997) regarding the subdivision of cubes.
+
+## Sources
+[S1] Approximate volume rendering for curvilinear and unstructured grids by hardware-assisted polyhedron projection, https://doi.org/10.1002/(sici)1098-1098(2000)11:1<53::aid-ima6>3.0.co;2-7, fetched 2026-10-25

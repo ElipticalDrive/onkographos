@@ -1,0 +1,1884 @@
+GHARP: Real-time Gaussian Head Animation
+from Large-scale Reconstruction Prior
+arXiv:2610.10945v1 [cs.CV] 7 Oct 2026
+Ali Benlalah† , Sepehr Johari† , Patricia Vitoria† , Armin Kappeler† ,
+Artem Sevastopolsky, Alexander Jung, Gabriele Fanelli, Kevin Mader,
+Manuel Breitenstein, Claudia Plüss, Jan Rüegg, Simon Biland,
+Thomas Etterlin, Dmitry Kostiaev, Mathias Deschler, Brian Amberg, and
+Sebastian Martin
+Apple
+{abenlalah,johari,p_vitoriacarrera,akappeler}@apple.com
+Abstract. We present GHARP (Real-time Gaussian Head Animation
+from Large-scale Reconstruction Prior), a method that animates 3D human heads in real time from a few input images of a subject and a driving
+expression signal. We decouple the problem into an identity stage that
+builds a representation of the subject’s geometry and appearance offline,
+and an animation stage that predicts expression-dependent residuals on
+top of it at runtime. This separation offers a favorable trade-off with
+respect to fidelity, quality and runtime: the identity stage can be expensive while the animation stage runs a lightweight network, optimized for
+mobile devices. Our method performs animation in a semantically structured latent space of a pretrained reconstruction model, where expression
+changes remain spatially contained, making residual prediction efficient.
+This reconstruction prior provides a consistent spatial layout, allowing
+fusion of multiple input views into a compact, fixed-size canonical Gaussian representation. While this two-stage design improves the runtimequality trade-off, it still inherits a problem common to all expressiondriven avatar methods: expression codes describe only the face and thus
+omit body pose and clothing position, making these regions underspecified in the input. The animation network faces an ill-posed mapping and
+resorts to averaging over conflicting body appearances, producing blur
+and temporal flicker. We address this with a body alignment network
+that learns to align the person’s body in the target image with the input
+reference images, removing the ambiguity from the training signal. Our
+method achieves state-of-the-art quality on the Ava-256 benchmark while
+running up to 13× faster on an A100 GPU with 8× fewer Gaussians.
+Keywords: Fast Avatar Generation · Efficient On-Device Rendering ·
+Parametric Head Model · Real-Time Avatar Animation
+1
+Introduction
+Creating photorealistic, real-time animated head avatars is a central challenge in
+computer vision and graphics, with applications in telepresence, VR, and digital
+†
+These authors contributed equally to this research.
+2
+A. Benlalah et al.
+FPS
+100
+1000
+10
+65K
+Quality (PSNR)
+GHARP
+21.5
+4
+# Gaussians
+Ours
+2
+FastGHA
+21
+1
+1
+Expression
+Animation
+Retargeting
+2
+2
+20.5
+Input
+4
+4
+1
+1
+730K
+Avat3r
+1,2,4: # Input Images
+10
+Runtime (ms)
+100
+Fig. 1: Left: GHARP animates a subject from a set of input images and an expression
+code. Additionally, GHARP enables retargeting of the same expression to new subjects
+with state-of-the-art quality. Right: runtime on A100 vs. reconstruction quality on Ava256 for 1, 2 and 4 input images. GHARP is an order of magnitude faster.
+communication. Recent advances in 3D Gaussian Splatting [26] have made realtime, high-quality rendering of 3D scenes practical, spurring a growing body of
+work on Gaussian-based head avatars.
+Per-subject optimization methods [1, 33, 52] achieve impressive quality by
+fitting a Gaussian Splatting model to dense multi-view captures, but require
+expensive light-stage hardware and hours of per-subject optimization, making
+them impractical for scalable deployment. Feed-forward methods remove this
+requirement: a neural network takes a few input images of a subject paired
+with an expression code and directly predicts an animated avatar. Avat3r [30]
+and FastGHA [22] demonstrated high-quality feed-forward reconstruction and
+animation, yet both predict pixel-aligned Gaussians for each input view, causing
+the total Gaussian count and inference cost to grow linearly with the number of
+input images, precluding deployment on resource-constrained devices.
+These limitations share a common root: jointly learning reconstruction and
+animation couples the cost of animation to the reconstruction complexity. In this
+work, we show that performing animation in a structured latent space of a pretrained reconstruction model decouples these two processes while also providing
+a strong prior for animation. We use HeadsUp [46] as a reconstruction prior to
+encode input images into 2D latents. A convolutional decoder then maps these
+latents into Gaussian UV maps, i.e. UV-parameterized Gaussians anchored to a
+neutral head template. The convolutional nature of the decoder ensures that a
+2D position in the latent maps to a fixed facial region. Therefore, latents from
+input images with different expressions are semantically aligned. This structure
+allows us to model a change in expression as a localized delta rather than a global
+transformation. However, running the decoder per frame would be too costly. Instead, we build a canonical Gaussian UV map once, then predict a residual on
+top at animation time. Since the number of Gaussians remains constant, this
+decouples the animation cost from both the reconstruction model’s complexity
+and the number of input views.
+This residual formulation benefits from a canonical representation that is as
+close to the target as possible, thereby reducing the variance of the residuals predicted at runtime. We construct this canonical representation by fusing multiple
+GHARP: Real-time Gaussian Head Animation
+3
+input views in the latent space into a compact representation that captures the
+subject’s face geometry and appearance across viewpoints and expressions. This
+representation is then decoded into the canonical Gaussian UV map. To further
+model person-specific facial motion across expressions, we introduce a deformation latent that encodes subject-specific facial dynamics. Both the canonical
+representation and the deformation latent are pre-computed once per subject.
+Consequently, runtime inference requires only a lightweight convolutional network that takes as input the canonical Gaussian UV map, the deformation latents
+and a target expression code to predict the residual.
+Body pose and clothing may also vary across input images independently
+of facial expression. Since the expression code does not explain these variations,
+the network averages over conflicting body appearances, which manifests as temporal jittering during animation. To resolve this ambiguity, we introduce a body
+alignment network (BAN) that composites supervision targets in the shared UValigned latent space, taking the facial expression from the target and the body
+appearance from a reference image. To summarize, our main contributions are:
+1. A real-time, animation-focused head avatar method, based on a decoupled identity and animation design. With the identity network running
+only once per subject, the approach achieves a faster runtime by using a
+lightweight animation network that animates the avatar at a constant cost,
+independent of the number of input views.
+2. A body alignment network (BAN) that resolves the ill-posed animation
+of body regions not described by the expression signal, improving temporal
+stability at animation time.
+3. We show that the UV-parameterized latent space of a pretrained face reconstruction model is a structured prior for avatar animation: its spatial
+alignment across different input images enables identity construction, animation, and body alignment to all operate within a single shared representation.
+Our experiments show state-of-the-art results at a fraction of the cost: on an
+A100, we are up to 13× faster than FastGHA [22] and 86× faster than Avat3r [30];
+on an iPhone 17 Pro, we are 31× faster than FastGHA with 8× fewer Gaussians,
+achieving 522 FPS on an A100 and 690 FPS on an iPhone 17 Pro.
+2
+Related Work
+Subject-Specific Avatar Creation. Pioneering works on real-time head avatars
+used differentiable 3D Morphable Face Models (3DMMs) [4, 13, 19, 35, 50] to enable efficient optimization frameworks for both tracking and rendering of faces;
+the relatively low-dimensionality of these models however prevents faithful representation of complex details in geometry and appearance such as hair or clothing.
+Volumetric methods like NeRF-based approaches [3, 14, 49, 72, 84] have gained
+popularity recently as they allow for more complex modeling and photorealistic results at the cost of expensive, per-scene optimization and, in most cases,
+rendering speeds far below real-time. Alternative representations including deformable point clouds [82], implicit surfaces [76, 81], and mesh-based neural rendering [17] improved efficiency or geometric coverage but still fall short of real-
+4
+A. Benlalah et al.
+Input Images I1..N
+Canonical Gaussian
+UV map C
+Encoder
+❄
+HE
+Identity Network
+FC, FD
+❄ : Frozen
+Decoder
+HD
+❄
+Deformation
+latent D
+Driving
+expression
+ARKit
+❄
+concat
+Expression
+Code w
+Animation
+Network E
+Realtime
+Render
+Animated Gaussian
+UV map U
+Prediction
+Fig. 2: Architecture. Input images are encoded into per-view latents that are aggregated by FC into a fixed-size canonical Gaussian UV map C and by FD into a
+deformation latent D, both independent of the number of input views N . At runtime,
+only the lightweight animation network operates on C, D, and an expression code w
+to produce the animated Gaussian UV map.
+time performance. Neural Parametric Head Models [15, 16, 77] learn non-linear
+expressive shape and appearance latent spaces, yet remain too slow for real-time
+use and require per-subject optimization. The highest-fidelity head avatars to
+date [32,33,37,41,56] are obtained from dense, multi-view light-stage captures of
+a person. A fast-growing body of work [1, 10, 40, 45, 52, 57, 60–62, 67, 70, 71, 78, 83]
+has in recent years embraced 3D Gaussian Splatting as the representation of
+choice for head avatars, achieving real-time rendering with high visual fidelity,
+but at the cost of per-subject optimization that prevents generalization to unseen identities. In contrast, our method employs a feed-forward architecture,
+largely inspired by [46], that generalizes to unseen subjects without per-subject
+optimization.
+Feed-forward Avatar Creation.
+Animation in 2D. A parallel line of work performs head reenactment directly
+in 2D or with shallow 3D proxies [8, 9, 11, 18, 27, 39, 42, 54, 63, 75], achieving
+fast and generalizable animation, but without true viewpoint control or explicit
+3D geometry. In contrast, our method produces explicit 3D geometry with true
+viewpoint control — a combination lacking in 2D reenactment approaches.
+Animation in 3D. Recent feed-forward methods have shown that cross-subject
+generalization and sparse-input reconstruction are achievable from multiple images [6, 22, 30, 68, 80] or even a single image [5, 21, 25, 38]. However, most approaches either struggle with real-time animation or rely on per-pixel Gaussian
+representations [22, 30] that compromise view and temporal consistency, with
+rendering cost and memory that grow linearly with the number of input views.
+In contrast, we introduce a fixed-size identity representation that decouples animation cost from the input count and a body alignment network that maintains
+consistent geometry across views and time.
+Accelerated Avatars. Several methods specifically target real-time or ondevice inference, mainly focused on subject-specific settings [12, 23, 36, 44, 53,
+64, 69, 73]. While these works demonstrate that speed and quality can coexist,
+GHARP: Real-time Gaussian Head Animation
+5
+they require per-identity optimization and thus cannot scale to multiple unseen subjects without retraining. Some of the very recent works improve along
+both quality and speed axes while operating in the generalized setting, such
+as [21, 29, 34, 51, 68], with performance ranging from ∼2 FPS for [51] to a more
+attractive 30 FPS [29] on a consumer GPU to very competitive FPS numbers
+of [21, 34, 68]. The latter group of methods, however, relies on linear blend skinning (LBS) for animation — a reasonable choice for full-body modeling but
+limiting facial expression rigging to linear motion of an underlying coarse parametric model. Our method offers a lightweight feed-forward network that generalizes across subjects and produces sophisticated, non-linear facial expression
+animations while maintaining real-time animation cost.
+3
+Method
+An overview of our method can be seen in Fig. 2. We use a learned prior based
+on an encoder HE and decoder HD architecture. The encoder HE compresses
+calibrated input views into a compact UV-aligned 2D latent representation Z ∈
+R32×32×512 . The decoder HD maps latents to UV-parameterized 3D Gaussians
+anchored to a neutral head mesh template. We refer to it as a Gaussian UV
+map with spatial dimensions HU V and WU V . Each Gaussian is characterized
+by a position µ ∈ R3 , a scale s ∈ R3+ , a unit quaternion rotation q ∈ R4 , an
+opacity α ∈ [0, 1], and spherical harmonic color coefficients k ∈ R12 (SH degree
+1), for a total of dG = 3+3+4+1+12 attributes per Gaussian. Our method takes
+N input images of a subject {I1 , . . . , IN | Ii ∈ RH×W ×3 } and an expression
+code w and produces an animated avatar represented as a Gaussian UV map
+U ∈ RHU V ×WU V ×dG .
+We formulate animation as residual learning in the canonical Gaussian space.
+A change of expression between two frames corresponds to a localized delta on
+top of the Gaussian attributes. This residual deforms non-rigid regions of the
+face, such as the cheeks, mouth, and eyelids, while keeping attributes like skin
+texture and pores almost intact. Let C ∈ RHU V ×WU V ×dG denote a canonical
+Gaussian UV map, a set of splats that encode the subject’s static appearance
+and geometry. We learn a lightweight animation network E such that:
+U = E(w, D) + C,
+(1)
+where w is an expression code and D denotes the deformation latent.
+While C is a learned canonical representation that combines identity information from the input images (Sec.3.1), D encodes face deformations across
+expressions. This decomposition minimizes the workload of E by offloading as
+much information as possible into C. We detail the architecture of E in Sec.3.2.
+3.1
+Offline Identity Subspace Learning
+The canonical Gaussian UV map C and the deformation latent D together
+form a subject’s identity subspace, a compact representation that captures both
+6
+A. Benlalah et al.
+Input Images
+Blending Weights
+Canonical UV Canonical Render
+Fig. 3: Canonical latent blending. The canonical Gaussian UV map consistently
+combines input view details (e.g. teeth, hair) with high fidelity.
+static appearance and expression-dependent motion. During training, the canonical map is shared across all of a subject’s expressions and therefore captures
+expression-invariant identity, while the deformation latent, trained end-to-end
+with the animation network, captures expression-dependent motion. At inference time, both are constructed from the input images once per subject offline.
+The canonical path fuses appearance information from the input images into C,
+and the deformation path encodes how the subject’s face deforms across expressions. We use a reconstruction objective that anchors the canonical map during
+training (Sec. 3.3).
+Canonical Gaussian UV Map. The quality of the residual decomposition in
+Eq. (1) depends on how well C captures the subject’s identity: a more complete
+canonical representation yields smaller residuals, which simplifies the task of E
+and results in higher-fidelity animation. We encode each input image into a latent
+Zi = HE (Ii ) yielding a set of latents {Zi }N
+i=1 . These latents are concatenated
+with their corresponding 6D Plücker [59] embeddings to encode camera geometry
+and are fed to a canonical fusion network FC that predicts per-view spatial
+blending weights {bi }N
+i=1 and a correction term δ c . The resulting latents Cℓ are
+then decoded with HD to obtain the canonical Gaussian UV map C:
+C = HD (Cℓ ),
+Cℓ =
+N
+X
+σ(bi ) · Zi + δ c
+(2)
+i=1
+where σ is the sigmoid function. By operating in the latent space, the blending
+learns to optimally combine geometry, appearance, and fine details from all input
+views (see Fig. 3), while δ c allows small adjustments beyond the span of the input
+latents, such that the resulting C maximally offloads work from the animation
+network.
+Deformation Latent. While C encodes the subject’s static identity by fusing
+all input views, it does not encode expression-dependent motion, i.e., how this
+subject’s face deforms across expressions. To supply this missing information,
+we first decode each per-view latent Zi to Gi = HD (Zi ). Then, a convolutional
+deformation encoder FD processes these maps together with C from Eq. (2) to
+produce the deformation latent:
+
+D = FD {Gi }N
+(3)
+i=1 , sg(C) ,
+where sg(·) denotes the stop-gradient operator. FD is a U-Net that aggregates
+per-view Gaussian UV maps into a fixed-size tensor D ∈ R64×64×96 . We detach
+GHARP: Real-time Gaussian Head Animation
+7
+C from the computation graph of FD so that the canonical path receives no
+gradients through the deformation encoder. This drives the canonical map to
+specialize in expression-agnostic appearance and geometry, while the deformation latent, trained end-to-end with the animation network, learns to encode
+expression-dependent deformation. We refer to Supp. Mat. A.1 for architecture
+details.
+3.2
+Animation Network
+The animation network E in Eq. (1) takes as input w and D, and outputs a
+residual for each Gaussian parameter in the canonical UV map. The expression
+code w ∈ RM , where M is the dimension of the expression code, is processed by
+an MLP, then tiled and concatenated with D along the channel dimension. E
+is implemented as a ResNet [20] decoder which processes this input to produce
+a residual delta map E(w, D) ∈ RHU V ×WU V ×dG . This architecture is a natural
+choice for this decoder as it exploits the spatial structure of the UV layout while
+executing efficiently on GPU for real-time animation. We refer to Supp. Mat. A.1
+for architecture details.
+3.3
+Passthrough Auxiliary Loss
+To further encourage the identity network FC to preserve texture details and
+facial geometry, we introduce a passthrough loss that anchors C to the input
+reference images, providing a direct reconstruction signal. Given the latents Zi ,
+a lightweight encoder-decoder network predicts small corrections ∆Pi (details
+in Supp. Mat. A.1) on top of the canonical:
+Ĝi = C + M ⊙ ∆Pi ,
+(4)
+where Ĝi is the reconstructed Gaussian UV map for the corresponding input
+view, ⊙ denotes element-wise multiplication. M is a binary channel mask that
+restricts the correction to Gaussian positions and opacities only, zeroing out
+rotations, scales, and color coefficients. Together with the narrow bottleneck,
+this limits the correction capacity and encourages the canonical map to focus on
+the appearance attributes, rather than relying on per-view reconstruction. Îpass
+i
+is rendered from Ĝi and supervised against Ii from the same viewpoint. The
+passthrough auxiliary loss is defined as:
+Lpass =
+N
+X
+pass
+· ∥Îpass
+− Ii ∥1 + λpass
+, Ii ).
+λpass
+1
+i
+lpips · LPIPS(Îi
+(5)
+i=1
+3.4
+Training Losses
+We supervise our network through differentiable rendering. We render the Gaussians in U from the same viewpoint as the target image IGT to obtain image Î.
+The total training loss for FC , FD and E is:
+L = λ1 L1 + λssim Lssim + λlpips Llpips + λregion Lregion + λreg Lreg + Lpass .
+(6)
+8
+A. Benlalah et al.
+Reference
+Target
+Body-aligned
+Reference
+Target
+Body-aligned
+Option 3
+Reference
+Blending
+weights
+HE
+❄
+Target
+HE(Iref )
+1 − σ(m)
+BAN
+Network
+σ(m)
+⊙
+⊙
+HE
+❄
+HE(IGT)
+Reference
+HE(Iref )
+Body aligned
+image
+Body aligned
+latents
+HD
+HE(IGT)
+Aℓ
+Correction Termδa
+❄
+Render
+Target
+Masked losses
+❄ : Frozen
+Fig. 4: Body Alignment Network (BAN). Top row: BAN takes the body pose from
+the reference image and the facial expression from the target image, producing a target
+that is consistent in body appearance with the reference (see cyan boxes). Bottom row:
+BAN Architecture. Reference and target images are encoded into a shared latent space
+and blended by predicted weights σ(m) and a correction δ a into an aligned latent
+Aℓ . Decoding yields the aligned Gaussian UV map A, which carries the body from
+the reference and the face from the target. Face- and body-region image losses and an
+adversarial loss drive the blending (Supp. Mat. A.5).
+L1 , Lssim , and Llpips [79] are standard image reconstruction losses applied between Î and IGT . Lreg is an opacity and scale regularization following [56], and
+Lregion applies reconstruction losses on the eye and mouth regions. More details
+can be found in the Supp. Mat. A.3.
+3.5
+Body Alignment Network (BAN)
+Body pose and clothing vary between input reference images independently of
+facial expression. Since the expression code cannot explain these variations, supervising against raw captures forces the network to average over conflicting
+body appearances, which manifests as temporal jitter at inference (Fig. 5) and a
+loss of details. The body alignment network (BAN) addresses this by compositing face and body information in the latent space to produce aligned supervision
+targets.
+As shown in Fig. 4, BAN takes as input the reference latent HE (Iref ), where
+Iref is one of the N input images, and a target latent HE (IGT ) and predicts spatial blending weights m and a correction term δa . The aligned latent is computed
+as:
+Aℓ = σ(m) ⊙ HE (IGT ) + (1 − σ(m)) ⊙ HE (Iref ) + δ a ,
+(7)
+where δ a allows the output to deviate from a pure interpolation of the two
+inputs. The aligned latent is decoded with the frozen decoder to produce an
+aligned Gaussian UV map A = HD (Aℓ ). Compositing in the latent space keeps
+A on the decoder’s data manifold, so any blended latent decodes to a plausible
+Gaussian head. Image-space compositing would instead introduce seams and
+GHARP: Real-time Gaussian Head Animation
+9
+lighting mismatches that propagate into the animation output. BAN is trained
+separately and frozen when producing supervision targets. During the animation
+network training, we replace the raw target IGT in Eq. (6) with the rendering of
+A at the same viewpoint providing a consistent supervision signal. We refer to
+Supp. Mat. A.5 for training details.
+4
+Experiments
+4.1
+Datasets and Expression Codes
+Internal10K Dataset. We use an internal multi-view dataset of over 10K subjects captured with a head-focused rig comprising 16 calibrated RGB cameras
+at a resolution of 1000 × 750 pixels. Each recording session includes a range of
+facial expressions and speech sequences. For training, we sample 100 expressiondiverse frames per subject across all 10K identities. Evaluation is performed on
+100 frames from a held-out set of 50 subjects.
+Ava-256 Dataset. We additionally finetune and evaluate on Ava-256 [43], a
+public multi-view dataset containing 256 subjects captured with 80 RGB cameras at 1024 × 667 resolution. We use the 4TB variant of the dataset. Following
+the protocol of Avat3r [30], we train on 244 subjects with 1000 frames each and
+evaluate on the remaining 12 subjects using approximately 1000 sampled frames.
+Expression Codes. We generate the expression codes using the ARKit [2] face
+tracker, which fits a set of 51 blendshape bases to each frame, yielding per-frame
+weights w ∈ R51 . Each dimension corresponds to a semantically meaningful
+facial action (e.g. left eye blink or jaw open).
+4.2
+Experimental Setup
+Training Setup. We follow a two-stage training strategy. First, we freeze the
+HE and HD (see Fig. 2) pretrained on Internal10K with HU V = WU V = 256 and
+train the remaining modules, FC , FD and E, with N input frames and one target
+frame sampled from random viewpoints and expressions. In the second stage, we
+first finetune HE and HD and then the remaining modules on Ava-256. In this
+stage, we use furthest distance viewpoint sampling for input frame selection in
+both training and validation, following [22, 30], and a random target frame. We
+use HeadsUp [46] as a prior HE and HD . The input frames are downsampled to
+500 × 375 for Internal10K and to 512 × 334 for Ava-256. More training details in
+the Supp. Mat. A.2.
+Metrics. We evaluate rendering quality using Peak Signal-to-Noise Ratio (PSNR),
+Structural Similarity (SSIM), and Learned Perceptual Image Patch Similarity (LPIPS) [79]. Following Avat3r [30], we also report two face-specific metrics:
+Average Keypoint Distance (AKD) which measures the distance in pixels between 2D keypoints estimated from PIPNet [24], and cosine similarity (CSIM) of
+t
+, the
+ArcFace identity embeddings [7]. To measure body stability, we report σbody
+mean per-pixel standard deviation of the body-view render (on the 0–255 RGB
+10
+A. Benlalah et al.
+t
+σbody
+↓ #G↓ LPIPS↓ SSIM↑ AKD↓ CSIM↑ PSNR↑ ms↓
+Avat3r
+FastGHA
+18.8
+22.9
+671K
+534K
+0.23
+0.23
+0.69
+0.75
+3.5
+3.7
+0.62
+0.51
+21.7
+21.3
+166
+26.2
+Ours+BAN
+Ours
+0.7
+6.0
+65K
+65K
+0.21
+0.20
+0.74
+0.76
+3.1
+3.1
+0.67
+0.67
+21.9
+22.2
+1.92
+1.92
+Table 1: Results on Ava-256 using 4 input views. #G is the number of Gaussians;
+t
+σbody
+measures body stability, the mean per-pixel standard deviation of the body-view
+render across expressions (0–255 scale, lower is more stable); runtime in ms on A100
+GPU. Ours and Ours+BAN achieve state-of-the-art results across metrics.
+scale), computed across the different expressions of a subject. We report complementary perceptual and flow-based variants of this metric in Supp. Mat. A.6.
+To measure cross-identity retargeting we compute Average Expression Distance
+(AED), calculated as the Euclidean distance between the reference and predicted
+expression codes extracted using ARKit [2].
+Baselines. We compare against Avat3r [30], a feed-forward method that fuses
+multi-view DUSt3R [66] and Sapiens [28] features via cross-attention conditioned
+on expression tokens. We also compare against FastGHA [22], which predicts
+pixel-aligned Gaussians using a transformer conditioned on DINOv3 [58] and
+Stable Diffusion VAE [55] features with per-Gaussian deformation MLPs for
+reenactment. Due to the absence of publicly available code for both methods,
+they were implemented as closely as possible to the corresponding publications.
+We refer to Supp. Mat. A.4 and A.14 for the reimplementation details and an
+additional comparison with UIKA [68].
+4.3
+Main Results
+We report Ours+BAN , supervised on body-aligned targets (Sec. 3.5), and Ours,
+supervised against raw captures, matching the supervision regime of prior feedforward methods, to enable direct pixel-metric comparison with baselines.
+Quantitative Results. Tab. 1 and Tab. 2 report metrics on Ava-256 and Internal10K. Our method consistently achieves the best AKD and CSIM scores on
+both datasets across all input counts, indicating superior expression driving and
+identity preservation while using 8× fewer Gaussians and maintaining constant
+runtime. LPIPS and SSIM remain close to the best baseline across datasets.
+t
+Ours+BAN also has the most temporally stable body, with σbody
+more than an
+order of magnitude below the baselines (Tab. 1).
+Qualitative Results. Fig. 7 shows visual comparisons on Ava-256. Our method
+produces sharper facial details and more accurate expression transfer. FastGHA
+tends to produce over-smoothed textures and Avat3r does not preserve the identity well. Fig. 12 in Supp. Mat. compares all methods on Internal10K for different
+numbers of input images. Our method shows better identity preservation and
+passthrough details with high fidelity. We further illustrate the improvements
+of BAN in Fig. 5 and Fig. 6, where Ours+BAN produces a sharper body and
+GHARP: Real-time Gaussian Head Animation
+A100
+#I
+#G
+LPIPS↓ SSIM↑ AKD↓ CSIM↑ PSNR↑
+11
+iPhone 17 Pro
+ms↓
+FPS↑
+Avat3r
+FastGHA
+Ours
+1 182K
+1 150K
+1 65K
+0.26
+0.27
+0.27
+0.73
+0.76
+0.76
+9.1
+9.6
+7.9
+0.44
+0.56
+0.62
+20.5
+20.3
+20.8
+43.20
+6.81
+1.92
+ms↓ FPS↑
+23
+–
+147 11.80
+522 1.45
+–
+85
+690
+Avat3r
+FastGHA
+Ours
+2 365K
+2 301K
+2 65K
+0.26
+0.27
+0.26
+0.74
+0.77
+0.76
+8.8
+9.3
+7.4
+0.56
+0.58
+0.65
+20.8
+20.7
+21.3
+83.79
+12.97
+1.92
+12
+–
+77 24.36
+522 1.45
+–
+41
+690
+Avat3r
+FastGHA
+Ours+BAN
+Ours
+4 730K
+4 602K
+4 65K
+4 65K
+0.24
+0.26
+0.28
+0.24
+0.74
+0.77
+0.73
+0.77
+8.3
+9.3
+7.5
+7.4
+0.60
+0.58
+0.66
+0.67
+21.1
+20.9
+19.8
+21.6
+166.23
+26.25
+1.92
+1.92
+6
+–
+38 45.14
+522 1.45
+522 1.45
+–
+22
+690
+690
+Table 2: Quality and runtime on Internal10K across varying numbers of
+input images (#I). #G is the number of Gaussians. Runtime is the animation-stage
+time; Ours is up to 13× faster than FastGHA on the A100 and 31× on iPhone 17
+Pro Neural Engine (ANE). Pixel-aligned metrics for Ours+BAN degrade because the
+predicted body is aligned with a reference image instead of the ground truth. This does
+not affect animation (AKD) and identity preservation (CSIM) quality.
+eliminates jitter. The Supp. Mat. provides videos and an in-the-wild comparison
+(Supp. Mat. A.12).
+4.4
+Analysis and Ablation Study
+Ablation over the number of input images. As shown in Tab. 2, increasing
+the number of input views improves quality for all methods. Our method achieves
+superior AKD and CSIM at every view count, with comparable SSIM and LPIPS,
+while using up to 8× fewer Gaussians than the baselines and constant runtime.
+Qualitative comparison can be found in the Supp. Mat. A.9.
+Canonical Representation. We ablate the learned canonical representation
+by replacing C in Eq. (1) with the Gaussian UV map corresponding to one of
+the input images. This means that E(w, D) must account for the full range
+of expression variations. As shown in Tab. 4 and Fig. 8(c), this leads to worse
+metrics, as E must learn larger residuals to animate an arbitrary G1 and correct
+identity inconsistencies.
+Deformation Latents. We remove the deformation latents and feed only the
+expression code to the animation network in Eq. (1). As shown in Tab. 4 and
+Fig. 8(e), this leads to loss of subject-specific details and worse identity preservation across expressions, as the expression codes are subject-agnostic.
+Body Alignment Network. BAN composites supervision targets that combine the reference body pose with the target facial expression (Fig. 4). It removes
+residual pose misalignments from the supervisory signal. Training against these
+targets eliminates expression-independent body jitter at inference time, reducing
+t
+σbody
+by nearly an order of magnitude (Fig. 5, Tab. 1), and produces a sharper
+body (Fig. 6). This does not degrade the face: face-specific metrics (AKD, CSIM)
+remain superior (Tab. 1, Tab. 2). The full-image pixel-aligned metrics (LPIPS,
+12
+A. Benlalah et al.
+Ours → Ours+BAN
+Dataset
+Ava-256
+Internal10K
+Face Region
+Body Region
+SSIM↑
+PSNR↑
+SSIM↑
+PSNR↑
+0.75 → 0.75
+0.87 → 0.87
+23.4 → 23.4
+28.4 → 28.1
+0.87 → 0.83
+0.84 → 0.80
+24.5 → 23.8
+24.5 → 23.9
+Table 3: Regional image quality (Ava-256, Internal10K). We report SSIM and
+PSNR on GT mask-segmented face and body regions at a fixed cropped frontal camera
+view. Note that these regional metrics do not directly compare to Tab. 1 or Tab. 2.
+Input
+Sample Frame Avat3r
+FastGHA
+Ours
+Ours+BAN
+Fig. 5: Temporal stability. The colors show the per-pixel temporal standard deviation across a sequence driven by an expression code See zoomed cyan boxes for jitter
+unrelated to the expression. Avat3r [30], FastGHA [22], and Ours all exhibit this jitter,
+whereas Ours+BAN , trained against body-aligned supervision targets (Fig. 4), keeps
+the body stable. The full video is provided in the Supp. Mat.
+Input
+Avat3r
+FastGHA
+Ours
+Ours+BAN
+GT
+Fig. 6: Qualitative results with BAN. Ours+BAN cleanly recovers fine body details
+(earrings, tattoos) without the blur or geometric distortion seen in other approaches.
+GHARP: Real-time Gaussian Head Animation
+Input
+Avat3r
+FastGHA
+Ours
+Ours+BAN
+13
+GT
+Fig. 7: Qualitative comparison on Ava-256. Our method produces sharper facial
+details (e.g. eyes/teeth/wrinkles) and better expression transfer. FastGHA [22] tends
+to produce over-smoothed textures and Avat3r [30] does not preserve identity as well.
+The boxes mark the zoom-in region shown as an inset in each panel.
+Configuration
+Internal10K Dataset
+PSNR↑ SSIM↑ LPIPS↓ AKD↓ CSIM↑
+Full model (Ours)
+w/o canonical representation
+w/o passthrough loss
+w/o deformation latent
+Full model + BAN
+21.6
+21.2
+21.3
+21.3
+19.8
+0.77
+0.76
+0.77
+0.75
+0.73
+0.24
+0.27
+0.25
+0.25
+0.28
+7.4
+7.5
+7.5
+9.3
+7.5
+0.67
+0.65
+0.66
+0.59
+0.66
+Table 4: Design choices ablation. We individually ablate key components of our
+pipeline. Each w/o row disables one component while keeping all others at default.
+SSIM, PSNR) drop slightly because the body is aligned to a reference instead of
+the ground truth, not because face quality is compromised. A regional breakdown
+(Tab. 3) shows that only the body-region scores change, while the face-region
+quality is essentially unchanged, so identity and animation quality are preserved.
+The drop is larger on Internal10K (Tab. 2) than on Ava-256 (Tab. 1). Its validation set has more extreme viewpoints, where the body fills more of the frame
+and the body-alignment cost is larger than at the frontal camera.
+Passthrough Loss. As shown in Tab. 4 and Fig. 8(d), the passthrough auxiliary
+loss further improves results by encouraging the network to preserve texture
+details and enforce geometric consistency with the input images.
+Cross-Identity Retargeting. In Fig. 9, we demonstrate the cross-identity retargeting. Avat3r shows artifacts around the shoulders while FastGHA loses fine
+details like wrinkles. Our method transfers the expressions while keeping sharpness and details. The table on the right quantitatively confirms that our method
+better preserves expressivity, as measured by AED.
+Runtime Performance. We benchmark the inference time on an NVIDIA
+A100 GPU and iPhone 17 Pro (ANE), reporting only the animation runtime
+for all methods, after precomputing all expression-independent parts (i.e., the
+canonical representation for FastGHA and ours). As shown in Tab. 2 and Fig. 1
+(right), our method achieves constant latency regardless of the number of input
+14
+A. Benlalah et al.
+(a) GT
+(b) Full
+(c) w/o Can.
+(d) w/o Pass.
+(e) w/o Def.
+Fig. 8: Qualitative evaluation of our design choices. We compare (a) the ground
+truth (GT) against (b) our full model and ablations removing (c) the canonical representation, (d) the passthrough loss, and (e) the deformation latents. Cyan boxes mark
+the zoom-in region shown in the bottom-left of each panel.
+Input
+Expression
+Avat3r
+FastGHA
+Ours
+Ours+BAN
+Method
+AED×10−2 ↓
+Avat3r
+FastGHA
+5.97
+6.00
+Ours
+Ours+BAN
+5.43
+5.35
+Fig. 9: Cross-identity retargeting. For each pair, the identity input is shown in the
+first column, and the expression is driven by the subject in the second column. Right
+table: Average Expression Distance (AED) metric.
+frames, while FastGHA scales linearly. We run 3× to 31× faster with up to
+8× fewer Gaussians while improving animation quality across evaluated setups
+(A100 to iPhone 17 Pro ANE). Including rendering, our end-to-end latency on an
+A100 is 3.25 ms, 8.5× faster than FastGHA and 52× faster than Avat3r (Supp.
+Tab. 15). Supp. Mat. A.8 and A.11 report further runtime analyses.
+5
+Conclusion
+We presented GHARP, a method for real-time animation of 3D Gaussian head
+avatars on top of a learned canonical Gaussian representation. This formulation
+allows us to capture the subject appearance and geometry in a fixed-size set of
+Gaussians, thus decoupling animation cost from the number of input views. Additionally, a body alignment network (BAN) resolves appearance inconsistencies
+in the body region during training, improving temporal stability at animation
+time. Experiments demonstrate state-of-the-art quality while animating up to
+8x fewer Gaussians with an order of magnitude lower inference cost. Limitations
+of the proposed method include the dependence on the calibrated camera poses;
+therefore, inaccurate estimates could propagate through the encoder. Future extensions could include robustness to temporal variations or noise in the input
+signal and material factorization for portrait relighting.
+GHARP: Real-time Gaussian Head Animation
+15
+References
+1. Aneja, S., Weiss, S., Baeza, I., Chandran, P., Zoss, G., Nießner, M., Bradley,
+D.: Scaffoldavatar: High-fidelity gaussian avatars with patch expressions (2025),
+https://arxiv.org/abs/2507.10542 2, 4
+2. Apple: ARKit. https://developer.apple.com/documentation/arkit 9, 10, 33
+3. Athar, S., Xu, Z., Sunkavalli, K., Shechtman, E., Shu, Z.: RigNeRF: Fully Controllable Neural 3D Portraits. In: Proceedings of the IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 20364–20373 (2022) 3
+4. Blanz, V., Vetter, T.: A morphable model for the synthesis of 3d faces. In: Proceedings of the 26th Annual Conference on Computer Graphics and Interactive Techniques. p. 187–194. SIGGRAPH ’99, ACM Press/Addison-Wesley Publishing Co., USA (1999). https://doi.org/10.1145/311535.311556, https:
+//doi.org/10.1145/311535.311556 3
+5. Chu, X., Harada, T.: Generalizable and animatable gaussian head avatar. Advances
+in Neural Information Processing Systems 37, 57642–57670 (2024) 4
+6. Chu, X., Li, Y., Zeng, A., Yang, T., Lin, L., Liu, Y., Harada, T.: Gpavatar: Generalizable and precise head avatar from image (s). arXiv preprint arXiv:2401.10215
+(2024) 4
+7. Deng, J., Guo, J., Xue, N., Zafeiriou, S.: Arcface: Additive angular margin loss for
+deep face recognition. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. pp. 4690–4699 (2019) 9
+8. Deng, Y., Wang, D., Ren, X., Chen, X., Wang, B.: Portrait4D: Learning One-Shot
+4D Head Avatar Synthesis using Synthetic Data. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR) (2024) 4
+9. Deng, Y., Wang, D., Wang, B.: Portrait4D-v2: Pseudo Multi-View Data Creates Better 4D Head Synthesizer. In: European Conference on Computer Vision
+(ECCV). pp. 303–321. Springer (2024) 4
+10. Dhamo, H., Nie, Y., Moreau, A., Song, J., Shaw, R., Zhou, Y., Pérez-Pellitero,
+E.: Headgas: Real-time animatable head avatars via 3d gaussian splatting. In:
+Proceedings of the European Conference on Computer Vision (ECCV) (2024) 4
+11. Drobyshev, N., Chelishev, J., Khakhulin, T., Ivakhnenko, A., Lempitsky, V., Zakharov, E.: Megaportraits: One-shot megapixel neural head avatars. In: Proceedings of the 30th ACM International Conference on Multimedia. pp. 2663–2671
+(2022) 4
+12. Duan, H.B., Wang, M., Shi, J.C., Chen, X.C., Cao, Y.P.: Bakedavatar: Baking
+neural fields for real-time head avatar synthesis. ACM Transactions on Graphics
+42(6), 1–17 (Dec 2023). https://doi.org/10.1145/3618399, http://dx.doi.
+org/10.1145/3618399 4
+13. Egger, B., Smith, W.A., Tewari, A., Wuhrer, S., Zollhoefer, M., Beeler, T., Bernard,
+F., Bolkart, T., Kortylewski, A., Romdhani, S., et al.: 3d morphable face models—past, present, and future. ACM Transactions on Graphics (ToG) 39(5), 1–38
+(2020) 3
+14. Gao, X., Zhong, C., Xiang, J., Hong, Y., Guo, Y., Zhang, J.: Reconstructing
+personalized semantic facial nerf models from monocular video. ACM Transactions on Graphics (Proceedings of SIGGRAPH Asia) 41(6) (2022). https:
+//doi.org/10.1145/3550454.3555501 3
+15. Giebenhain, S., Kirschstein, T., Georgopoulos, M., Rünz, M., Agapito, L., Nießner,
+M.: MonoNPHM: Dynamic Head Reconstruction from Monocular Videos. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR). pp. 21051–21061 (2024) 4
+16
+A. Benlalah et al.
+16. Giebenhain, S., Kirschstein, T., Rünz, M., Agapito, L., Nießner, M.: Npga: Neural
+parametric gaussian avatars. In: SIGGRAPH Asia 2024 Conference Papers. p. 1–11.
+ACM (Dec 2024). https://doi.org/10.1145/3680528.3687689, http://dx.doi.
+org/10.1145/3680528.3687689 4
+17. Grassal, P.W., Prinzler, M., Leistner, T., Rother, C., Nießner, M., Thies, J.: Neural head avatars from monocular rgb videos. In: Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition. pp. 18653–18664 (2022) 3
+18. Guo, J., Zhang, D., Liu, X., Zhong, Z., Zhang, Y., Wan, P., Zhang, D.: Liveportrait:
+Efficient portrait animation with stitching and retargeting control (2025), https:
+//arxiv.org/abs/2407.03168 4
+19. Guo, J., Zhu, X., Yang, Y., Yang, F., Lei, Z., Li, S.Z.: Towards fast, accurate and
+stable 3d dense face alignment (2021), https://arxiv.org/abs/2009.09960 3
+20. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition. In:
+Proceedings of the IEEE conference on computer vision and pattern recognition.
+pp. 770–778 (2016) 7
+21. He, Y., Gu, X., Ye, X., Xu, C., Zhao, Z., Dong, Y., Yuan, W., Dong, Z., Bo, L.:
+Lam: large avatar model for one-shot animatable gaussian head. In: Proceedings
+of the Special Interest Group on Computer Graphics and Interactive Techniques
+Conference Conference Papers. pp. 1–13 (2025) 4, 5, 31, 32
+22. Ji, X., Weiss, S., Kansy, M., Naruniec, J., Cao, X., Solenthaler, B., Bradley, D.:
+Fastgha: Generalized few-shot 3d gaussian head avatars with real-time animation.
+In: The 14th International Conference on Learning Representations (2026) 2, 3, 4,
+9, 10, 12, 13, 26, 31, 32, 33
+23. Jiang, J., Lin, G., Rong, Z., Liang, C., Zhu, Y., Yang, J., Zhong, T.: Mobileportrait:
+Real-time one-shot neural head avatars on mobile devices. In: Proceedings of the
+Computer Vision and Pattern Recognition Conference. pp. 15920–15929 (2025) 4
+24. Jin, H., Liao, S., Shao, L.: Pixel-in-pixel net: Towards efficient facial landmark
+detection in the wild. International Journal of Computer Vision 129(12), 3174–
+3194 (2021) 9
+25. Kant, Y., Weber, E., Kim, J.K., Khirodkar, R., Zhaoen, S., Martinez, J., Gilitschenski, I., Saito, S., Bagautdinov, T.: Pippo: High-resolution multi-view humans from
+a single image. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition. pp. 16418–16429 (2025) 4
+26. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. ACM Trans. Graphic. 42(4) (July 2023), https:
+//repo-sam.inria.fr/fungraph/3d-gaussian-splatting/ 2
+27. Khakhulin, T., Sklyarova, V., Lempitsky, V., Zakharov, E.: Realistic one-shot
+mesh-based head avatars. In: European Conference on Computer Vision. pp. 345–
+362. Springer (2022) 4
+28. Khirodkar, R., Bagautdinov, T., Martinez, J., Zhaoen, S., James, A., Selednik, P.,
+Anderson, S., Saito, S.: Sapiens: Foundation for human vision models. In: European
+Conference on Computer Vision. pp. 206–228. Springer (2024) 10, 26, 33
+29. Kirschstein, T., Giebenhain, S., Nießner, M.: Flexavatar: Learning complete 3d
+head avatars with partial supervision. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 18193–18203 (2026) 5
+30. Kirschstein, T., Romero, J., Sevastopolsky, A., Nießner, M., Saito, S.: Avat3r: Large
+animatable gaussian reconstruction model for high-fidelity 3d head avatars. In:
+Proceedings of the IEEE/CVF International Conference on Computer Vision. pp.
+12089–12100 (2025) 2, 3, 4, 9, 10, 12, 13, 26, 31, 32, 33
+GHARP: Real-time Gaussian Head Animation
+17
+31. Krizhevsky, A., Sutskever, I., Hinton, G.E.: Imagenet classification with deep convolutional neural networks. In: Advances in neural information processing systems.
+vol. 25, pp. 1097–1105 (2012) 24
+32. Li, G., Gotardo, P., Bolkart, T., Garbin, S., Sarkar, K., Meka, A., Lattas, A.,
+Beeler, T.: Tega: Texture space gaussian avatars for high-resolution dynamic head
+modeling. In: Proceedings of the Special Interest Group on Computer Graphics
+and Interactive Techniques Conference Conference Papers. pp. 1–12 (2025) 4
+33. Li, J., Cao, C., Schwartz, G., Khirodkar, R., Saito, S., et al.: URAvatar: Universal Relightable Gaussian Codec Avatars. In: SIGGRAPH Asia 2024 Conference
+Papers. ACM (2024) 2, 4
+34. Li, J., Khirodkar, R., Zakharov, E., Lee, J., Su, Z., Dong, Y., Martinez, J., Li,
+K., Tan, Q., Shiratori, T., et al.: Large-scale codec avatars: The unreasonable
+effectiveness of large-scale avatar pretraining. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition. pp. 18204–18215 (2026)
+5
+35. Li, T., Bolkart, T., Black, M.J., Li, H., Romero, J.: Learning a model of facial
+shape and expression from 4d scans. ACM Trans. Graphic. 36(6), 194–1 (2017) 3,
+27
+36. Liang, H., Ge, Z., Majee, S., Tiwari, A., Godaliyadda, G.D., Veeraraghavan, A.,
+Balakrishnan, G.: FastAvatar: Instant 3D Gaussian Splatting for Faces from Single
+Unconstrained Poses. arXiv preprint arXiv:2508.18389 (2025) 4
+37. Lombardi, S., Saragih, J., Simon, T., Sheikh, Y.: Deep Appearance Models for
+Face Rendering. ACM Transactions on Graphics (TOG) 37(4), 1–13 (2018) 4
+38. Lyu, W., Zhou, Y., Yang, M.H., Shu, Z.: Facelift: Single image to 3d head with
+view generation and gs-lrm. arXiv preprint arXiv:2412.17812 (2024) 4
+39. Ma, H., Zhang, T., Sun, S., Yan, X., Han, K., Xie, X.: Cvthead: One-shot controllable head avatar with vertex-feature transformer. In: Proceedings of the
+IEEE/CVF Winter Conference on Applications of Computer Vision. pp. 6131–
+6141 (2024) 4
+40. Ma, S., Weng, Y., Shao, T., Zhou, K.: 3d gaussian blendshapes for head avatar
+animation. In: Special Interest Group on Computer Graphics and Interactive Techniques Conference Conference Papers 24. p. 1–10. ACM (Jul 2024). https://doi.
+org/10.1145/3641519.3657462, http://dx.doi.org/10.1145/3641519.3657462
+4
+41. Ma, S., Simon, T., Saragih, J., Wang, D., Li, Y., De La Torre, F., Sheikh, Y.: Pixel
+Codec Avatars. In: Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR). pp. 64–73 (2021) 4
+42. Ma, Z., Zhu, X., Qi, G.J., Lei, Z., Zhang, L.: Otavatar: One-shot talking face avatar
+with controllable tri-plane rendering. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 16901–16910 (2023) 4
+43. Martinez, J., Kim, E., Romero, J., Bagautdinov, T., Saito, S., Yu, S.I., Anderson,
+S., Zollhöfer, M., Wang, T.L., Bai, S., et al.: Codec avatar studio: Paired human
+captures for complete, driveable, and generalizable avatars. Advances in Neural
+Information Processing Systems 37, 83008–83023 (2024) 9
+44. Medin, S.C., Li, G., Bai, Z., Du, R., Helminger, L., Zhang, Y., Garbin, S.J., Davidson, P.L., Wornell, G.W., Beeler, T., Meka, A.: Legacyavatars: Volumetric face
+avatars for traditional graphics pipelines (2026), https://arxiv.org/abs/2601.
+12285 4
+45. Mendiratta, M., Deshmukh, M., Teotia, K., Golyanik, V., Kortylewski, A.,
+Theobalt, C.: Grmm: Real-time high-fidelity gaussian morphable head model with
+18
+A. Benlalah et al.
+learned residuals. In: 2026 International Conference on 3D Vision (3DV). pp. 1702–
+1716. IEEE (2026) 4
+46. Ntavelis, E., Wu, S., Shahbazi, M., Maninchedda, F., Kostiaev, D., Sevastopolsky,
+A., Megaro, V., Phillips, T., Blumentals, A., Ravikumar, S., Gupta, M., Knothe,
+R., Bayer, J., Vestner, M., Schaefer, S., Etterlin, T., Zimmermann, C., Artemov,
+A., Deschler, M., Kaufmann, P., Brugger, S., Martin, S., Amberg, B., Runia, T.:
+Large-scale high-quality 3d gaussian head reconstruction from multi-view captures.
+In: European Conference on Computer Vision (ECCV). Springer (2026) 2, 4, 9,
+23, 26, 27
+47. Oquab, M., Darcet, T., Moutakanni, T., Vo, H., Szafraniec, M., Khalidov, V.,
+Fernandez, P., Haziza, D., Massa, F., El-Nouby, A., et al.: Dinov2: Learning robust
+visual features without supervision. arXiv preprint arXiv:2304.07193 (2023) 26
+48. Oroz, A., Nießner, M., Kirschstein, T.: Perchead: Perceptual head model for singleimage 3d head reconstruction & editing. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 4097–4108 (2026) 26
+49. Park, K., Sinha, U., Barron, J.T., Bouaziz, S., Goldman, D.B., Seitz, S.M., MartinBrualla, R.: Nerfies: Deformable Neural Radiance Fields. In: Proceedings of the
+IEEE/CVF International Conference on Computer Vision (ICCV). pp. 5865–5874
+(2021) 3
+50. Paysan, P., Knothe, R., Amberg, B., Romdhani, S., Vetter, T.: A 3d face model
+for pose and illumination invariant face recognition. In: 2009 sixth IEEE international conference on advanced video and signal based surveillance. pp. 296–301.
+Ieee (2009) 3
+51. Prinzler, M., Gotardo, P., Tang, S., Bolkart, T.: Feed-forward gaussian registration
+for head avatar creation and editing. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 25270–25280 (2026) 5
+52. Qian, S., Kirschstein, T., Schoneveld, L., Davoli, D., Giebenhain, S., Nießner, M.:
+Gaussianavatars: Photorealistic head avatars with rigged 3d gaussians. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition
+(CVPR) (2024) 2, 4
+53. Raina, P., Taubner, F., Tuli, M., Teh, E.W., Ferreira, K.: Prismavatar: Real-time
+animated 3d neural head avatars on edge devices (2025), https://arxiv.org/abs/
+2502.07030 4
+54. Ren, H.P., Duan, W., Li, W.Y., Liu, Y., Guo, Y.D., Huang, S.S., Zhang, J.Y.,
+Huang, H.: Egavatar: Efficient gan inversion for generalizable head avatar from fewshot images. IEEE Transactions on Visualization and Computer Graphics 31(10),
+8654–8667 (2025) 4
+55. Rombach, R., Blattmann, A., Lorenz, D., Esser, P., Ommer, B.: High-Resolution
+Image Synthesis with Latent Diffusion Models. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). pp. 10684–
+10695 (June 2022) 10, 26, 27
+56. Saito, S., Schwartz, G., Simon, T., Li, J., Nam, G.: Relightable Gaussian Codec
+Avatars. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). pp. 13535–13545 (2024) 4, 8, 25
+57. Shao, Z., Wang, Z., Li, Z., Wang, D., Lin, X., Zhang, Y., Fan, M., Wang, Z.: SplattingAvatar: Realistic Real-Time Human Avatars with Mesh-Embedded Gaussian
+Splatting. In: Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR). pp. 16922–16932 (2024) 4
+58. Siméoni, O., Vo, H.V., Seitzer, M., Baldassarre, F., Oquab, M., Jose, C., Khalidov, V., Szafraniec, M., Yi, S., Ramamonjisoa, M., et al.: Dinov3. arXiv preprint
+arXiv:2508.10104 (2025) 10, 26, 27, 33
+GHARP: Real-time Gaussian Head Animation
+19
+59. Sitzmann, V., Rezchikov, S., Freeman, B., Tenenbaum, J., Durand, F.: Light field
+networks: Neural scene representations with single-evaluation rendering. Advances
+in Neural Information Processing Systems 34, 19313–19325 (2021) 6
+60. Sun, Y., Wang, X., Wang, C., Zhang, W., Fan, Y., Guo, Y., Wang, F.: Fine-grained
+3d gaussian head avatars modeling from static captures via joint reconstruction
+and registration. In: Proceedings of the IEEE/CVF International Conference on
+Computer Vision. pp. 14293–14304 (2025) 4
+61. Tang, J., Davoli, D., Kirschstein, T., Schoneveld, L., Niessner, M.: Gaf: Gaussian
+avatar reconstruction from monocular videos via multi-view diffusion. In: Proceedings of the Computer Vision and Pattern Recognition Conference. pp. 5546–5558
+(2025) 4
+62. Teotia, K., Kim, H., Garrido, P., Habermann, M., Elgharib, M., Theobalt, C.:
+GaussianHeads: End-to-End Learning of Drivable Gaussian Head Avatars from
+Coarse-to-fine Representations. ACM Transactions on Graphics (SIGGRAPH
+Asia) 43(6) (2024) 4
+63. Tran, P., Zakharov, E., Ho, L.N., Hu, L., Karmanov, A., Agarwal, A., Goldwhite,
+M., Venegas, A.B., Tran, A.T., Li, H.: Voodoo xp: Expressive one-shot head reenactment for vr telepresence (2024), https://arxiv.org/abs/2405.16204 4
+64. Wang, H., Tan, F., Bai, Z., Zhang, Y., Liu, S., Xu, Q., Chai, M., Prabhu, A.,
+Pandey, R., Fanello, S., et al.: Lightavatar: Efficient head avatar as dynamic neural
+light field. In: European Conference on Computer Vision. pp. 183–201. Springer
+(2024) 4
+65. Wang, J., Chen, M., Karaev, N., Vedaldi, A., Rupprecht, C., Novotny, D.: VGGT:
+Visual Geometry Grounded Transformer. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (2025) 26
+66. Wang, S., Leroy, V., Cabon, Y., Chidlovskii, B., Revaud, J.: Dust3r: Geometric
+3d vision made easy. In: Proceedings of the IEEE/CVF conference on computer
+vision and pattern recognition. pp. 20697–20709 (2024) 10, 26
+67. Wang, Y., Wang, X., Yi, R., Fan, Y., Hu, J., Zhu, J., Ma, L.: 3d gaussian head
+avatars with expressive dynamic appearances by compact tensorial representations.
+In: Proceedings of the Computer Vision and Pattern Recognition Conference. pp.
+21117–21126 (2025) 4
+68. Wu, Z., Zhou, B., Hu, L., Liu, H., Sun, Y., Wang, X., Cao, X., Shen, Y., Zhu,
+H.: Uika: Fast universal head avatar from pose-free images. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (2026) 4, 5,
+10, 26, 27, 31, 34, 35
+69. Xiang, J., Gao, X., Guo, Y., Zhang, J.: FlashAvatar: High-fidelity head avatar
+with efficient gaussian embedding. In: Proceedings of the IEEE/CVF Conference
+on Computer Vision and Pattern Recognition. pp. 1802–1812 (2024) 4
+70. Xu, Y., Chen, B., Li, Z., Zhang, H., Wang, L., Zheng, Z., Liu, Y.: Gaussian head
+avatar: Ultra high-fidelity head avatar via dynamic gaussians. In: Proceedings of
+the IEEE/CVF conference on computer vision and pattern recognition. pp. 1931–
+1941 (2024) 4
+71. Xu, Y., Su, Z., Wu, Q., Liu, Y.: Gphm: Gaussian parametric head model for monocular head avatar reconstruction. IEEE Transactions on Pattern Analysis and Machine Intelligence (2025) 4
+72. Xu, Y., Wang, L., Zhao, X., Zhang, H., Liu, Y.: Avatarmav: Fast 3d head avatar
+reconstruction using motion-aware neural voxels. In: Special Interest Group on
+Computer Graphics and Interactive Techniques Conference Conference Proceedings. p. 1–10. ACM (Jul 2023). https://doi.org/10.1145/3588432.3591567,
+http://dx.doi.org/10.1145/3588432.3591567 3
+20
+A. Benlalah et al.
+73. Yan, P., Ward, R., Tang, Q., Du, S.: Architecthead: Continuous level of detail
+control for 3d gaussian head avatars. In: Proceedings of the IEEE/CVF Winter
+Conference on Applications of Computer Vision. pp. 1632–1642 (2026) 4
+74. Ye, V., Li, R., Kerr, J., Turkulainen, M., Yi, B., Pan, Z., Seiskari, O., Ye, J., Hu, J.,
+Tancik, M., Kanazawa, A.: gsplat: An open-source library for gaussian splatting.
+Journal of Machine Learning Research 26(34), 1–17 (2025) 31, 32
+75. Ye, Z., Zhong, T., Ren, Y., Yang, J., Li, W., Huang, J., Jiang, Z., He, J., Huang,
+R., Liu, J., Zhang, C., Yin, X., Ma, Z., Zhao, Z.: Real3d-portrait: One-shot realistic
+3d talking portrait synthesis (2024), https://arxiv.org/abs/2401.08503 4
+76. Yenamandra, T., Tewari, A., Bernard, F., Seidel, H.P., Elgharib, M., Cremers,
+D., Theobalt, C.: i3dmm: Deep implicit 3d morphable model of human heads.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition. pp. 12803–12813 (2021) 3
+77. Zanfir, M., Alldieck, T., Sminchisescu, C.: Phomoh: Implicit photorealistic 3d models of human heads. In: 2024 International Conference on 3D Vision (3DV). pp.
+1229–1239. IEEE (2024) 4
+78. Zhang, D., Liu, Y., Lin, L., Zhu, Y., Chen, K., Qin, M., Li, Y., Wang, H.: Hravatar:
+High-quality and relightable gaussian head avatar. In: Proceedings of the Computer
+Vision and Pattern Recognition Conference. pp. 26285–26296 (2025) 4
+79. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The unreasonable
+effectiveness of deep features as a perceptual metric. In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. pp. 586–595 (2018) 8, 9,
+24
+80. Zheng, X., Wen, C., Li, Z., Zhang, W., Su, Z., Chang, X., Zhao, Y., Lv, Z., Zhang,
+X., Zhang, Y., et al.: HeadGAP: Few-shot 3D head avatar via generalizable gaussian priors. In: 2025 International Conference on 3D Vision (3DV). pp. 946–957.
+IEEE (2025) 4
+81. Zheng, Y., Abrevaya, V.F., Bühler, M.C., Chen, X., Black, M.J., Hilliges, O.: I
+M Avatar: Implicit Morphable Head Avatars from Videos. In: Proceedings of the
+IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+pp. 13545–13555 (2022) 3
+82. Zheng, Y., Yifan, W., Wetzstein, G., Black, M.J., Hilliges, O.: PointAvatar: Deformable Point-based Head Avatars from Videos. In: Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR). pp. 21057–
+21067 (2023) 3
+83. Zielonka, W., Bolkart, T., Beeler, T., Thies, J.: Gaussian eigen models for human
+heads. In: Proceedings of the Computer Vision and Pattern Recognition Conference. pp. 15930–15940 (2025) 4
+84. Zielonka, W., Bolkart, T., Thies, J.: Instant volumetric head avatars. In: Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. pp.
+4574–4584 (2023) 3
+GHARP: Real-time Gaussian Head Animation
+A
+Supplementary Material
+A.1
+Network Architecture
+21
+Canonical Fusion Network FC . FC is a fully convolutional residual network
+operating at 32×32 spatial resolution. It receives the concatenation of per-view
+32×32×512
+latents {Zi = HE (Ii )}N
+together with the concatenation
+i=1 , each Zi ∈ R
+of their respective 6D Plücker embeddings, along the channel dimension, yielding
+an input ∈ R32×32×2072 (for N =4 views). The output ∈ R32×32×2560 is split
+32×32×512
+into N spatial blending weight maps {bi }N
+and a correction
+i=1 ∈ R
+term δ c ∈ R32×32×512 . The last convolution is zero-initialized so the network
+initially outputs the unweighted mean of the input latents. We describe the full
+architecture in Tab. 5.
+Type
+Input (concat latents)
+Conv 3×3
+ResNetBlock ×8
+GN16→SiLU→Conv 1×1
+Channels
+N ×(512 + 6) = 2072
+2072 → 512
+512 → 512
+512 → 2560
+ResNetBlock = GN16→SiLU→Conv 3×3, repeated twice, with skip connection.
+GN = Group Normalization layer with 16 groups
+Table 5: Architecture of FC (canonical fusion network). Resolution is constant at
+32×32.
+Deformation Encoder FD . FD consists of two stages. First, a U-Net with
+shared weights processes each Gaussian UV map Gi for i = 1, . . . , N and the
+canonical C independently, each ∈ R256×256×dG with dG =23, producing per-map
+feature maps ∈ R64×64×192 . Second, the (N +1) feature maps are concatenated
+along the channel dimension into a tensor ∈ R64×64×(N +1)·192 and consolidated
+by a residual network into the deformation latent D ∈ R64×64×96 . We describe
+the full architecture in Tab. 6 and 7.
+Animation Network E. E takes the deformation latent D ∈ R64×64×96 and
+the expression code w ∈ R51 . The expression code is first expanded via an MLP
+to 128 dimensions, then tiled spatially to 64×64 and concatenated with D. A 1×1
+convolution fuses the concatenated input, followed by 6 residual blocks and 2 upsampling stages that produce the residual delta map E(w, D) ∈ RHU V ×WU V ×dG .
+We describe the full architecture in Tab. 8. While Eq. (1) in the main paper
+describes the residual formulation conceptually in terms of activated Gaussian
+parameters, in practice we perform the addition in the pre-activation parameter
+space before applying per-attribute activation functions. (see paragraph below
+for definition). We denote the raw (unactivated) canonical map as Craw , such
+that C = activate(Craw ). To improve training convergence, we scale the delta
+22
+A. Benlalah et al.
+Type
+Channels
+Resolution
+U-Net Encoder
+Input (Gi or C)
+Conv 2×2 s2, BN, ReLU
+Conv 3×3 s2
+DownBlock
+DownBlock
+DownBlock
+DownBlock
+DownBlock
+dG = 23
+23 → 64
+64 → 128
+128 → 128
+128 → 256
+256 → 256
+256 → 256
+256 → 256
+2562
+256 → 1282
+1282 → 642
+642 → 322
+322 → 162
+162 → 82
+82 → 42
+42 → 22
+U-Net Decoder
+UpBlock
+UpBlock + skip
+UpBlock + skip
+UpBlock + skip
+UpBlock + skip
+256 → 256
+512 → 256
+512 → 256
+512 → 128
+256 → 64
+22 → 42
+42 → 82
+82 → 162
+162 → 322
+322 → 642
+64+128 → 192
+642
+Concat skip
+2
+DownBlock = Conv→BN→ReLU→AvgPool2 ;
+UpBlock = Upsample2 →Conv 3×3→BN→ReLU; + = skip concatenation.
+Table 6: Architecture of FD (deformation encoder). Per-Gaussian U-Net applied
+independently to each Gi and C.
+Type
+Channels
+Input (concat all maps)
+Conv 3×3
+ResNetBlock ×2
+GN16→SiLU→Conv 1×1
+(N +1)×192 = 960
+960 → 512
+512 → 512
+512 → 96
+ResNetBlock = GN16→SiLU→Conv 3×3, repeated twice, with skip connection.
+GN = Group Normalization layer with 16 groups
+Table 7: Architecture of FD . Consolidation network applied to the concatenated
+features from all N +1 maps. Resolution is constant at 64×64.
+by a small constant λd = 0.01:
+Û = Craw + ∆U,
+∆U = λd · E(w, D)
+(8)
+where Û is the combined unactivated Gaussian UV map that is subsequently
+passed through per-attribute activations to produce the final Gaussian UV map
+U = activate(Û) of Eq. (1) in the main paper. This scaling ensures that in the
+early stages of training, Û ≈ Craw , effectively passing through the canonical
+frame’s details (e.g. skin texture, freckles, hair) while the network gradually
+learns to predict expression-dependent offsets. We find that this significantly
+improves both detail preservation and convergence speed.
+GHARP: Real-time Gaussian Head Animation
+Type
+Channels
+Input w
+51
+MLP (FC→ReLU→FC) 51 → 128
+Tile to spatial
+128
+Concat (D, tiled w)
+96+128 → 224
+Conv 1×1
+224 → 128
+ResBlock ×6
+128 → 128
+UpBlock
+128 → 64
+UpBlock
+64 → 32
+Conv 3×3
+32 → 23
+23
+Resolution
+—
+—
+642
+642
+642
+642
+2
+64 → 1282
+1282 → 2562
+2562
+ResBlock = Conv 3×3→BN→ReLU→Conv 3×3→BN, with skip connection.
+UpBlock = Upsample2 →Conv 3×3→BN→ReLU.
+Table 8: Architecture of E (animation network).
+Gaussian Activations. After applying the residual predicted by E to Craw ,
+we map the raw predictions to Gaussian parameters using the same activation
+functions as in [46]. For each spatial location (u, v) in the UV map:
+µu,v = Û(µ)
+u,v ,
+
+
+su,v = exp Û(s)
+u,v
+
+
+qu,v = normalize Û(q)
+u,v
+
+
+(α)
+αu,v = σ Ûu,v
+(12)
+ku,v = Û(k)
+u,v ,
+(13)
+(9)
+(10)
+(11)
+where σ denotes the sigmoid function. Positions are anchored to a template mesh
+with an offset. Scales and opacities are mapped to positive values via exponential
+and sigmoid, respectively. Rotations are normalized to unit quaternions, and
+spherical harmonic coefficients are left unconstrained.
+Passthrough Network. The passthrough network takes a latent Zi ∈ R32×32×512
+and produces the correction ∆Pi ∈ R256×256×dG of Eq. (4) in the main paper. It
+has three stages (Tab. 9): a residual convolutional encoder followed by an MLP
+that compresses the input to a 128-dimensional narrow bottleneck; a latentfusion module that combines the bottleneck with the detached deformation latent D to produce 256-channel features at 64×64; and a residual convolutional
+decoder that upsamples to the Gaussian UV resolution.
+A.2
+Training Setup
+For pretraining, we sample 100 expression-diverse frames per subject across all
+10K identities. Evaluation is performed on 100 frames from a held-out set of
+50 subjects. The frozen HeadsUp network, our newly trained modules, and the
+reimplemented Avat3r and FastGHA baselines all use the same train/val splits.
+24
+A. Benlalah et al.
+Type
+Channels
+Resolution
+Encoder + MLP bottleneck
+Input (Zi )
+512
+DownBlock
+512 → 512
+DownBlock
+512 → 256
+DownBlock
+256 → 256
+Flatten
+4096
+FC + LReLU
+4096 → 256
+FC + LReLU
+256 → 256
+FC
+256 → 128
+322
+32 → 162
+162 → 82
+82 → 42
+—
+—
+—
+—
+2
+Latent fusion (with deformation latent D)
+Tile bottleneck spatially
+128
+Concat with D
+128+96 → 224
+Conv 1×1
+224 → 256
+Residual decoder
+Input
+UpBlock
+UpBlock
+Conv 3×3
+256
+256 → 256
+256 → 128
+128 → dG
+642
+642
+642
+642
+64 → 1282
+1282 → 2562
+2562 → 2562
+2
+DownBlock = Conv 3×3 s2 → BN → ReLU.
+UpBlock = Upsample2 →Conv 3×3→BN→ReLU.
+Table 9: Architecture of the passthrough network.
+The dataset is not publicly available. All participants gave written informed
+consent for the use of their data. Subjects shown in this paper provided additional explicit consent for publication of their images. Tab. 10 summarizes the
+hyperparameters for both stages.
+A.3
+Training Losses
+The loss L is defined as follows:
+L = λ1 L1 + λssim Lssim + λlpips Llpips + λregion Lregion + λreg Lreg + Lpass .
+Image Reconstruction Loss. We use L1 and structural similarity loss between
+the rendered images:
+L1 = ∥Î − IGT ∥1 ,
+Lssim = 1 − SSIM(Î, IGT ).
+(14)
+Perceptual Loss. An LPIPS perceptual loss [79] on the rendered image:
+X
+Llpips =
+∥ϕl (Î) − ϕl (IGT )∥1 ,
+(15)
+l
+where ϕl denotes the feature map at layer l of a pretrained AlexNet [31] network.
+GHARP: Real-time Gaussian Head Animation
+Pretraining
+25
+Finetuning
+Dataset
+Internal10K
+Ava-256
+Image size (H×W )
+500×375
+512×334
+UV map size (HU V ×WU V )
+256×256
+256×256
+HeadsUp (HE , HD )
+frozen
+finetuned on Ava-256
+Trained modules
+FC , FD , E
+FC , FD , E
+Steps
+200K
+15K
+Input frames (N )
+4
+4
+Input sampling
+random
+furthest distance
+Target frames
+1 (random)
+1 (random)
+Batch size
+32
+32
+Optimizer
+Adam
+Adam
+Learning rate
+2×10−4
+2×10−4
+Schedule
+constant
+constant
+Precision
+fp32
+fp32
+Hardware
+8× A100 80GB
+8× A100 80GB
+Training time
+∼3 days
+∼1 day
+Loss weights (both stages)
+λ1
+1.0
+λssim
+100
+λlpips
+10
+λregion
+20
+λreg
+10−2
+λpass
+1
+λpass
+lpips
+8
+80
+Table 10: Training hyperparameters.
+Gaussian Regularization Loss. To encourage Gaussians to stay opaque and
+have reasonable scales, we apply opacity and scales regularization losses similar
+to [56]:
+Lreg = mean(ℓreg ),
+
+−7
+
+1/ max(s, 10 ) if s < 0.1,
+ℓreg = ∥1 − α∥1 + (s − 10.0)2
+if s > 10,
+
+
+0
+otherwise
+(16)
+where α and s denote the opacity and scale of splats in U.
+Region-based losses. To increase the gradient signal on expressive regions, we
+apply L1 and LPIPS reconstruction losses on cropped eye and mouth regions:
+Îeyes , Îmouth = crop(Î, p),
+mouth
+Ieyes
+= crop(IGT , p),
+GT , IGT
+where p denotes 2D facial landmarks detected in the target frame.
+(17)
+26
+A. Benlalah et al.
+A.4
+Baselines
+For our baseline comparison, we evaluate our method against Avat3r [30] and
+FastGHA [22], representing state-of-the-art methods in feed-forward 3D head
+animation. For both baselines, we first pretrain on Internal10K and finetune on
+Ava-256, following the same two-stage protocol as our method. On Ava-256, we
+also compare against the concurrent UIKA [68].
+Avat3r [30]. Since the official Avat3r code is not available, we built upon the
+reimplementation used by the authors of HeadsUp [46], provided to us. This
+reimplementation follows the corresponding publications as closely as possible.
+The original method precomputes DUSt3R [66] and Sapiens [28] features only
+for a subset of 10 frames per subject due to the computational cost of running
+DUSt3R, as it operates on pairs of images, introducing O(n2 ) DUSt3R evaluations. Our setup requires all 1000 frames per subject, making DUSt3R extraction
+prohibitive. We replace it with DINOv3 [58], a universal feature extractor which
+operates on single images and scales to per-frame extraction while retaining geometric awareness. For Sapiens [28], we took a publicly available 1B checkpoint.
+On top of the HeadsUp implementation that does not require rigging with the
+same model, here we add expression conditioning, the way it is proposed in the
+original Avat3r work. Specifically, we transform expression codes through a shallow MLP into 20 tokens fed to the generator’s cross-attention layers, following
+the Avat3r recipe, using the same expression codes as our method for driving.
+Confidence-based masking in skip connections of Avat3r has been implemented
+through known foreground masks that already give us foreground/background
+separation and remove the need to estimate it. On top of L1, SSIM, and LPIPS
+used in Avat3r, we also add DINOv2 [47] perceptual loss similar to [48] that,
+as we found, significantly improved the results. Additionally, we found it important to introduce two regularizations that significantly improve initialization and
+convergence: a scale penalty to prevent Gaussians from becoming too large and
+a silhouette loss that encourages the Gaussians opacity to be close to the target
+foreground mask (only enabled during the first few epochs). While DINOv2 loss
+and these additional regularizations were found to improve performance compared to literal reimplementation, we added them to reach better photorealism
+of Avat3r than reported, which makes that baseline even stronger. Without those
+changes, our Avat3r implementation is still producing plausible results.
+FastGHA [22]. FastGHA predicts pixel-aligned Gaussians with a feed-forward
+transformer conditioned on DINOv3 [58] and Stable Diffusion VAE features [55].
+To support sparse-view reenactment, Gaussians are predicted in the canonical
+head frame and rigged with per-Gaussian deformations predicted from expression codes and parameterized by a dedicated shallow MLP. FastGHA relies on
+position maps from VGGT [65] as geometry supervision that acts as a regularization, unlike in Avat3r using similar feature matching maps from DUSt3R [66]
+as an additional input. Precomputing VGGT maps on sets of multi-view images
+would require infeasible compute time, as it would require O(nd ) evaluations (n
+GHARP: Real-time Gaussian Head Animation
+27
+being the overall number of frames and d the number of input views to VGGT),
+and it was omitted for that reason. However, this component should have a
+smaller effect on the final result, due to its regularization nature. Since the code
+of FastGHA is also not available publicly, similar to Avat3r, we relied on a FastGHA reimplementation that fully builds upon the one created by HeadsUp [46]
+authors. Following HeadsUp, we made two modifications to improve the convergence and generalization of FastGHA. First, we added an extra learnable encoder
+in parallel to the frozen DINOv3 [58] and Stable Diffusion VAE [55] encoders.
+Second, we replaced the frozen Stable Diffusion VAE decoder with a learnable
+residual decoder to improve gradient.
+Training is stage-wise: in the beginning of training, we train FastGHA for
+a number of epochs in a reconstruction-only setting (i.e. when for every individual sample, inputs and targets are always from the same timestamp – as in
+HeadsUp), and only then continue in standard reenactment setting, as we observed the optimization was not as stable if training directly for reenactment.
+Also, we introduce a silhouette loss (during the first few epochs) and a scale
+penalty for better convergence and initialization, the same way as for Avat3r.
+Incorporated changes only marginally improve quality and were added to make
+FastGHA an even stronger baseline on top of the literal reimplementation.
+UIKA [68]. UIKA reconstructs an animatable Gaussian head avatar from a
+given number of input images in a single forward pass. It reprojects each input
+image into the FLAME UV space, fuses all views with learnable UV tokens in a
+transformer, and decodes them into canonical Gaussians that are animated with
+linear blend skinning. Like our method, it builds a fixed-size UV representation
+that is independent of the number of input views and animates in real time. This
+makes it the most closely related concurrent baseline. We start from the authors’
+released checkpoint that was trained on public monocular and multi-view head
+datasets. This checkpoint takes the role of the Internal10K pretraining used for
+the other baselines and keeps UIKA’s prior public and reproducible. We finetune
+it on Ava-256 with the official training code and use the same training data
+and held-out subjects as for our method. We keep UIKA’s architecture, frozen
+DINOv3 encoder, losses and optimizer unchanged. Unlike our method, UIKA
+is driven by FLAME parameters instead of ARKit codes. We therefore add a
+small MLP, trained jointly with UIKA, to map our ARKit codes to FLAME [35]
+expression, jaw, eye and neck parameters. The head pose is given by the cameras,
+expressed in the per-frame head coordinate frame. To bring the Ava-256 data
+into UIKA’s canonical FLAME space, we register the FLAME template to the
+Ava-256 mesh template and fit per-subject FLAME shape parameters to the
+tracked Ava-256 meshes. Each training sample uses 1 to 4 input views and 4
+supervision views. We train on 2 H100 GPUs with a batch size of 2 per GPU.
+We sweep the learning rate over {5 × 10−5 , 10−4 , 5 × 10−4 } and keep 5 × 10−5 ,
+as it gives the best LPIPS, PSNR and CSIM. We report the checkpoint at 8k
+iterations, after the metrics have plateaued. At test time, UIKA uses the same 4
+28
+A. Benlalah et al.
+Avat3r Ours
+Avat3r from HeadsUp
+input views as our method and renders its 134K Gaussians at the same 512×334
+resolution as our method.
+Fig. 10: Qualitative comparison between Avat3r implementation in HeadsUp and in
+our method in a setting without rigging. Main differences in our Avat3r implementation include DINOv2 loss (which explains sharper detail), as well as relaxing feature
+extractor choice from DUSt3R to DINOv3 (while keeping Sapiens in place), and training with expression conditioning.
+A.5
+Body Alignment Network (BAN)
+Fig. 4 in the main paper shows an overview of BAN training. This section provides more details on the network architecture and supervision losses.
+Blending network. The blending network is a 6-layer convolutional network
+operating at 32×32 resolution. It takes the concatenated latents [Zref , ZGT ] ∈
+R32×32×1024 and outputs a 1024-channel tensor split channel-wise into the blending weights m and correction δ a . The final convolution is zero-initialized so the
+network starts at a 50/50 average of Zref and ZGT .
+GHARP: Real-time Gaussian Head Animation
+29
+Training supervision. The aligned Gaussian UV map A is rendered from
+multiple viewpoints. Pretrained face-parsing and person-segmentation networks
+operate on the renderings to produce binary masks for the face region and the
+body region. The face region of the aligned rendering is supervised against the
+target rendering, while the body region is supervised against the reference rendering. Mask boundaries are randomized stochastically per iteration to prevent
+seam artifacts.
+Losses. L1 and LPIPS reconstruction losses are applied to the masked face and
+body regions, while an adversarial loss is applied to the full rendering (Tab. 11).
+The adversarial loss is a hinge GAN applied on 256×256 random crops of the rendering. The discriminator is conditioned on a separate reference-view rendering
+to encourage subject-specific realism. A gradient penalty is applied periodically
+during training for stability.
+Loss Weight
+L1
+Llpips
+Ladv
+1.0
+10.0
+0.25
+Table 11: BAN loss weights.
+Training. BAN is trained for 20K iterations with Adam (learning rate 5 × 10−5 ,
+batch size 16).
+A.6
+Body Temporal Stability Analysis
+t
+Beyond the RGB body-stability metric σbody
+reported in the main paper, we
+report two variants on the same body-view renders: ∆E76 applies the identical
+per-pixel temporal-deviation computation in CIELAB rather than RGB, giving
+a perceptual color-flicker measure; and TCE (Temporal Consistency Error) measures geometric drift as the mean dense optical-flow magnitude (OpenCV DIS,
+in pixels) from each subject’s first render to its others. Tab. 12 reports all three;
+they agree that Ours+BAN is the most stable.
+A.7
+Stable vs. Frozen Body
+t
+A low σbody
+alone cannot separate a stable body from a frozen one: a frozen body
+t
+gives σbody = 0, whereas Ours+BAN gives 0.7 (Tab. 1) and retains realistic neck
+motion (see Supp. videos). A natural alternative to BAN is to freeze the body
+at inference time. We tried this by blending a frozen body Gaussian UV map
+from a single frame into the animated Gaussian UV map of Ours with a smooth
+ramp across the neck. As shown in Fig. 11, a narrow ramp leaves a seam at the
+neck when the mouth opens, while widening the frozen and blended range to
+30
+A. Benlalah et al.
+t
+σbody
+↓
+∆E76 ↓
+TCE↓
+18.8
+22.9
+6.0
+0.7
+10.0
+12.1
+2.8
+0.2
+11.7
+13.4
+2.8
+0.2
+Avat3r
+FastGHA
+Ours
+Ours+BAN
+Table 12: Body Temporal Stability on Ava-256. Per-pixel temporal standard
+t
+deviation of the body-view render in RGB (σbody
+) and CIELAB (∆E76 ), and opticalflow drift (TCE, in pixels), computed across each subject’s expressions; lower is more
+stable. Ours+BAN is the most stable across all three metrics. Best in bold, second best
+underlined.
+hide the seam alters the chin shape and reduces expression fidelity. BAN avoids
+this trade-off: since the body is aligned in the supervision targets (Sec. 3.5), the
+animation network predicts a single consistent Gaussian UV map without any
+blending boundary.
+Body Source
+Ours+BAN
+Frozen Body
+Ours
+Fig. 11: Frozen-body blending vs. BAN. At a mouth opening, a narrow ramp
+leaves a seam at the neck (top), and a wider ramp changes the chin shape and reduces
+expression fidelity (bottom). Ours+BAN avoids both.
+A.8
+Runtime Performance
+Tab. 13 shows additional animation runtime analysis on H100 and iPhone 17
+Pro (GPU) for 1, 2, and 4 input views. As demonstrated in Tab. 2 in the main
+paper and Tab. 13, the animation time for our method remains constant with
+the number of input views unlike Avat3r and FastGHA. For 1 view, our method
+GHARP: Real-time Gaussian Head Animation
+31
+is 2× faster than FastGHA on H100 and 3.5× faster on iPhone 17 Pro GPU
+while it is 7.7× faster for 4 views than FastGHA on H100 and 13× faster on
+iPhone 17 Pro GPU.
+Avat3r [30] FastGHA [22]
+Ours
+Device
+N ms
+FPS
+ms
+FPS
+ms FPS
+H100
+1 21.33 47
+2 41.15 24
+4 78.44 13
+2.39
+4.67
+9.14
+418
+214
+109
+1.18 851
+1.18 851
+1.18 851
+17.6
+31.76
+66.88
+57
+31
+15
+5.1 196
+5.1 196
+5.1 196
+1
+iPhone 17 Pro
+2
+(GPU)
+4
+–
+–
+–
+–
+–
+–
+Table 13: Animation runtime (ms) and FPS. Additional results for animation
+runtime (ms) and FPS for our method, FastGHA, and Avat3r on different devices
+across varying numbers of input views (N ).
+Number of Gaussians. To disentangle the number of Gaussians from the
+animation architecture, we increase the number of Gaussians of our method by
+4×, from 65K to 260K (Ours260). As shown in Tab. 14, Ours260 remains 2–3.5×
+faster than FastGHA at its fastest setting of 150K Gaussians.
+Method
+#G A100 iPhone 17 Pro (ANE)
+FastGHA [22] (N =1) 150K 6.81
+Ours260
+260K 3.3
+Ours
+65K 1.92
+11.80
+3.4
+1.45
+Table 14: Animation runtime (ms) with 4× more Gaussians (Ours260).
+End-to-End Latency. Tab. 15 reports the complete online latency. Rendering
+with gsplat [74] on an A100 takes 1.91 ms for Avat3r, 1.53 ms for FastGHA
+and 1.33 ms for our method, giving end-to-end latencies of 168.14 ms, 27.78 ms
+and 3.25 ms. The end-to-end latency is dominated by the animation stage. As a
+reference point, the end-to-end latency reported in LAM [21] (which is reported
+to be significantly behind in quality compared to the concurrent UIKA [68]) is
+3.56 ms.
+A.9
+Further Number of Input Views Ablation
+Fig. 12 shows a qualitative comparison across numbers of input views.
+32
+A. Benlalah et al.
+Animation Rendering End-to-end
+Avat3r [30]
+FastGHA [22]
+LAM † [21]
+Ours
+166.23
+26.25
+1.92
+1.91
+1.53
+1.33
+168.14
+27.78
+3.56
+3.25
+Table 15: End-to-end online latency (ms) on an A100 with N =4 input views.
+Rendering uses gsplat [74]; animation times are from Tab. 2. † Reported by the authors
+for their 80K-Gaussian model.
+N =1
+Avat3r FastGHA Ours
+N =2
+Avat3r FastGHA Ours
+N =4
+Avat3r FastGHA Ours
+GT
+Fig. 12: Impact of the number of input views. Reconstruction quality scales
+naturally with the number of input images. Even with N = 1, Ours produces sharper
+reconstruction and preserves identity better compared to prior work.
+A.10
+Prior Contribution
+To isolate the contribution of the prior from the animation network, we evaluated
+how a weaker prior affects quality in Tab. 16. Specifically, we trained our method
+using a HeadsUp prior trained on only 1k subjects (Ours1k) instead of 10k
+(Ours). While reconstruction quality decreases, it remains comparable on SSIM
+and CSIM with the Avat3r and FastGHA baselines in Tab. 2. Crucially, Ours1k
+still achieves an AKD of 7.8, outperforming Avat3r (8.3) and FastGHA (9.3),
+demonstrating that it retains high animation fidelity even under a constrained
+prior.
+Method LPIPS↓ SSIM↑ AKD↓ CSIM↑ PSNR↑
+Ours1k
+Ours
+0.28
+0.24
+0.76
+0.77
+7.8
+7.4
+0.60
+0.67
+20.7
+21.6
+Table 16: Ablation on weaker priors. Impact of reducing the training data for the
+HeadsUp prior from 10k (Ours) to 1k (Ours1k) subjects.
+GHARP: Real-time Gaussian Head Animation
+A.11
+33
+Identity Network Performance
+We additionally compared the latency of our identity network to the analogous
+appearance-encoding stages of Avat3r [30] and FastGHA [22]. In each method we
+measured all steps from the input images up to the decoding stage: for ours, up
+to the canonical Gaussian UV maps and deformation latents; for Avat3r, up to
+(but excluding) the cross-view transformer; for FastGHA, up to (but excluding)
+the Gaussian decoder. All measurements were performed on a single A100, using
+one batch of four input views.
+Measurements. Our identity network runs in 71 ms, compared to 242 ms for
+FastGHA and 2384 ms for Avat3r. The identity network is executed only once per
+identity, while subsequent animation is significantly faster (see Tab. 13). For the
+baselines, the main bottlenecks are the image encoders: Sapiens [28] in Avat3r
+and DINOv3 [58] in FastGHA (or even heavier VGGT). When we reduced the
+Sapiens input resolution in Avat3r from 1024×1024 to 512×512 or 512×320, its
+latency dropped to 588 ms and 437 ms, respectively, which is still in both cases
+significantly larger than for our method.
+A.12
+In-The-Wild Setting
+In this section, we evaluate our algorithm on in-the-wild data. Fig. 13 shows
+an example of self-reenactment for our algorithm compared with Avat3r and
+FastGHA. We extract the expression codes using ARKit from a video recorded
+with an iPhone 15. The video frames are shown in the bottom row. Then we
+captured an image of the same subject that we used as input for the identity
+generation (left column). We use the models trained for one input view for this
+experiment. All the models receive the exact same inputs. The self-reenactment
+rows show the animated avatar with the expressions from the bottom row and
+the identity from the left column. Since ARKit [2] is robust to in-the-wild data,
+and we abstract the driving expression into expression codes, the algorithms
+can handle in-the-wild reference expressions without issues. Our model reconstructs identity with a high level of detail from a single input image, whereas
+FastGHA [22] and Avat3r [30] exhibit substantially greater degradation in fine
+detail and identity preservation. Our model relies on the HeadsUp prior, which
+was trained on studio data with specific camera configurations and focal lengths.
+Jointly adapting the prior and our model to more diverse capture settings is an
+interesting direction for future work.
+A.13
+Cross-Identity Retargeting
+Fig. 14 shows more results for cross-identity retargeting. Similar to Fig. 9 in
+the main paper, our method shows better expression transfer across different
+identities than Avat3r and FastGHA (more extreme expression and expressiondependent details like wrinkles).
+34
+A. Benlalah et al.
+Self-reenactment
+Driving
+expression FastGHA
+Avat3r
+Ours
+Input
+Fig. 13: In-the-wild driving image. The bottom row shows images captured with
+an iPhone. We use ARKit to extract expression codes from these images and drive the
+avatar from the input image of the same subject (left column).
+A.14
+Comparison with UIKA
+We compare our method with the concurrent UIKA [68], using the authors’
+official code and checkpoint finetuned on Ava-256 to convergence. As shown in
+Tab. 17, our method obtains the best AKD and PSNR using half the Gaussians
+of UIKA (65K vs. 134K), while UIKA is slightly better on LPIPS and SSIM.
+Our animation stage is also faster than UIKA on every device where both can
+run. UIKA cannot run on the iPhone ANE because of the large LBS matrix
+multiplications.
+GHARP: Real-time Gaussian Head Animation
+Input
+Driving
+expression
+Avat3r
+FastGHA
+Ours
+35
+Ours+BAN
+Fig. 14: More results for cross-identity retargeting. For each pair, the identity
+input is shown in the first column, and the expression is driven by the subject in the
+second column.
+Method
+#G LPIPS↓ SSIM↑ AKD↓ CSIM↑ PSNR↑
+UIKA [68] 134K
+Ours
+65K
+Method
+#G
+0.19
+0.20
+A100
+ms / FPS
+UIKA [68] 134K 2.13 / 470
+Ours
+65K 1.92 / 522
+0.79
+0.76
+3.9
+3.1
+0.67
+0.67
+21.3
+22.2
+iPhone 17 Pro (ANE) iPhone 17 Pro (GPU)
+ms / FPS
+ms / FPS
+–
+1.45 / 690
+9.99 / 100
+5.10 / 196
+Table 17: Comparison with UIKA on Ava-256 with 4 input views. Top: reconstruction quality. Bottom: animation runtime. #G is the number of Gaussians. UIKA
+cannot run on the ANE because of the large LBS matrix multiplications.

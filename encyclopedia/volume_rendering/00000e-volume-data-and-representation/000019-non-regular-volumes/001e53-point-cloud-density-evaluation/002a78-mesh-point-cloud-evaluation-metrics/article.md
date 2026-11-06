@@ -1,0 +1,152 @@
+# Mesh/Point Cloud Evaluation Metrics
+
+
+## Overview
+This method computes a comprehensive suite of geometric quality metrics to evaluate the fidelity of a predicted mesh or point cloud against a ground truth representation. It calculates Chamfer Distance (CD), Normal Consistency (NC), F1 score, Edge Chamfer Distance (ECD), Edge F1 (EF1), aspect ratio, radius ratio, angle regularity, and self-intersection percentage [S1, unofficial]. It distinguishes itself from simpler metrics like Chamfer Distance by incorporating edge-aware evaluations and mesh-specific topological checks, providing a more holistic assessment of surface reconstruction quality [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Ground truth mesh/point cloud (GT).
+- Predicted mesh/point cloud (Pred).
+- Parameters: `f1_threshold` (default 0.001), `ef1_threshold` (default 0.005), `ef1_radius` (default 0.004), `ef1_dotproduct_threshold` (default 0.2), `num_points` (default 100,000) [S1, unofficial].
+
+**Outputs:**
+- Dictionary of metrics: CD1, CD2, NC, F1, ECD, EF1, aspect ratio, radius ratio, angle regularity, self-intersection % [S1, unofficial].
+
+**Data Structures:**
+- KDTree structures for GT and Pred points to enable efficient nearest-neighbor queries.
+- Arrays of points and normals for both GT and Pred.
+
+**Steps:**
+1. **Sampling:** If inputs are meshes, sample `num_points` points uniformly from the surface to generate point clouds for GT and Pred. If inputs are already point clouds, use them directly [S1, unofficial].
+2. **KDTree Construction:** Build a KDTree for the GT point cloud and another for the Pred point cloud [S1, unofficial].
+3. **Nearest Neighbor Query:** For each point in GT, find the nearest neighbor in Pred (distance $d_{gt \to pred}$). For each point in Pred, find the nearest neighbor in GT (distance $d_{pred \to gt}$) [S1, unofficial].
+4. **Chamfer Distance (CD):** Compute CD1 (L1) and CD2 (L2) metrics:
+   $$ CD1 = \frac{1}{N_{gt}} \sum_{p \in GT} \min_{q \in Pred} \|p - q\|_1 + \frac{1}{N_{pred}} \sum_{q \in Pred} \min_{p \in GT} \|p - q\|_1 $$
+   $$ CD2 = \frac{1}{N_{gt}} \sum_{p \in GT} \min_{q \in Pred} \|p - q\|_2^2 + \frac{1}{N_{pred}} \sum_{q \in Pred} \min_{p \in GT} \|p - q\|_2^2 $$
+   where $N_{gt}$ and $N_{pred}$ are the number of points in GT and Pred respectively [S1, unofficial].
+5. **Normal Consistency (NC):** Compute the dot product between the normal of each GT point and the normal of its nearest neighbor in Pred. Normalize by the product of their magnitudes to handle potential non-unit normals:
+   $$ \text{dotproduct} = \frac{\sum (\mathbf{n}_{gt} \cdot \mathbf{n}_{pred})}{\|\mathbf{n}_{gt}\| \|\mathbf{n}_{pred}\|} $$
+   NC is typically the mean of these dot products [S1, unofficial].
+6. **F1 Score:** Determine precision and recall using `f1_threshold`:
+   $$ \text{recall} = \frac{\sum_{p \in GT} (\min_{q \in Pred} \|p - q\| < \text{f1\_threshold})}{N_{gt}} $$
+   $$ \text{precision} = \frac{\sum_{q \in Pred} (\min_{p \in GT} \|p - q\| < \text{f1\_threshold})}{N_{pred}} $$
+   $$ F1 = \frac{2 \cdot \text{recall} \cdot \text{precision}}{\text{recall} + \text{precision}} $$
+   [S1, unofficial].
+7. **Edge Point Identification:** Identify edge points for both GT and Pred. A point is considered an edge point if it has neighbors within `ef1_radius` and the dot product of their normals is below `ef1_dotproduct_threshold` [S1, unofficial].
+8. **Edge Chamfer Distance (ECD) and Edge F1 (EF1):** Compute CD and F1 metrics exclusively on the identified edge points using `ef1_threshold` for the F1 calculation [S1, unofficial].
+9. **Mesh Quality Metrics:** If inputs are meshes, calculate aspect ratio and radius ratio using a library like `pyvista`, and angle regularity using `trimesh` [S1, unofficial].
+10. **Self-Intersection:** Compute the percentage of self-intersections in the predicted mesh [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+from scipy.spatial import KDTree
+
+def evaluate_mesh_point_cloud(gt_points, gt_normals, pred_points, pred_normals, 
+                              f1_threshold=0.001, ef1_threshold=0.005, 
+                              ef1_radius=0.004, ef1_dotproduct_threshold=0.2):
+    # 1. Build KDTree
+    gt_tree = KDTree(gt_points)
+    pred_tree = KDTree(pred_points)
+    
+    # 2. Query nearest neighbors
+    dist_gt_to_pred, idx_gt_to_pred = gt_tree.query(pred_points, k=1)
+    dist_pred_to_gt, idx_pred_to_gt = pred_tree.query(gt_points, k=1)
+    
+    # 3. Compute Chamfer Distance
+    cd1 = np.mean(dist_gt_to_pred) + np.mean(dist_pred_to_gt)
+    cd2 = np.mean(dist_gt_to_pred**2) + np.mean(dist_pred_to_gt**2)
+    
+    # 4. Compute Normal Consistency
+    # Get normals of nearest neighbors
+    pred_normals_at_gt = pred_normals[idx_pred_to_gt]
+    gt_normals_at_pred = gt_normals[idx_gt_to_pred]
+    
+    # Dot product normalization
+    dot_products = np.sum(gt_normals * pred_normals_at_gt, axis=1) / \
+                   (np.linalg.norm(gt_normals, axis=1) * np.linalg.norm(pred_normals_at_gt, axis=1))
+    nc = np.mean(dot_products)
+    
+    # 5. Compute F1 Score
+    recall = np.mean(dist_pred_to_gt < f1_threshold)
+    precision = np.mean(dist_gt_to_pred < f1_threshold)
+    if recall + precision == 0:
+        f1 = 0.0
+    else:
+        f1 = 2 * recall * precision / (recall + precision)
+        
+    # 6. Identify Edge Points
+    # For GT points, find neighbors within ef1_radius
+    gt_edge_indices = []
+    for i, p in enumerate(gt_points):
+        neighbors = gt_tree.query_ball_point(p, r=ef1_radius)
+        if len(neighbors) > 1: # At least one neighbor
+            # Check normal consistency with neighbors
+            neighbor_normals = gt_normals[neighbors]
+            dot_prods = np.sum(gt_normals[i] * neighbor_normals, axis=1) / \
+                        (np.linalg.norm(gt_normals[i]) * np.linalg.norm(neighbor_normals, axis=1))
+            if np.any(dot_prods < ef1_dotproduct_threshold):
+                gt_edge_indices.append(i)
+                
+    # Repeat for Pred points
+    pred_edge_indices = []
+    for i, p in enumerate(pred_points):
+        neighbors = pred_tree.query_ball_point(p, r=ef1_radius)
+        if len(neighbors) > 1:
+            neighbor_normals = pred_normals[neighbors]
+            dot_prods = np.sum(pred_normals[i] * neighbor_normals, axis=1) / \
+                        (np.linalg.norm(pred_normals[i]) * np.linalg.norm(neighbor_normals, axis=1))
+            if np.any(dot_prods < ef1_dotproduct_threshold):
+                pred_edge_indices.append(i)
+                
+    gt_edge_points = gt_points[gt_edge_indices]
+    gt_edge_normals = gt_normals[gt_edge_indices]
+    pred_edge_points = pred_points[pred_edge_indices]
+    pred_edge_normals = pred_normals[pred_edge_indices]
+    
+    # 7. Compute ECD and EF1
+    if len(gt_edge_points) > 0 and len(pred_edge_points) > 0:
+        gt_edge_tree = KDTree(gt_edge_points)
+        pred_edge_tree = KDTree(pred_edge_points)
+        
+        dist_edge_gt_to_pred, _ = gt_edge_tree.query(pred_edge_points, k=1)
+        dist_edge_pred_to_gt, _ = pred_edge_tree.query(gt_edge_points, k=1)
+        
+        ecd = np.mean(dist_edge_gt_to_pred) + np.mean(dist_edge_pred_to_gt)
+        
+        recall_edge = np.mean(dist_edge_pred_to_gt < ef1_threshold)
+        precision_edge = np.mean(dist_edge_gt_to_pred < ef1_threshold)
+        if recall_edge + precision_edge == 0:
+            ef1 = 0.0
+        else:
+            ef1 = 2 * recall_edge * precision_edge / (recall_edge + precision_edge)
+    else:
+        ecd = 0.0
+        ef1 = 0.0
+        
+    return {
+        'CD1': cd1,
+        'CD2': cd2,
+        'NC': nc,
+        'F1': f1,
+        'ECD': ecd,
+        'EF1': ef1
+    }
+```
+
+## Operating characteristics
+- **Time Complexity:** Dominated by KDTree construction $O(N \log N)$ and nearest neighbor queries $O(N \log N)$, where $N$ is the number of points. Edge detection adds overhead proportional to the number of points and their local neighborhood size.
+- **Memory Complexity:** $O(N)$ for storing points, normals, and KDTree structures.
+- **Strengths:** Provides a multi-faceted evaluation including edge fidelity, which is critical for applications requiring sharp features. Normal consistency adds geometric smoothness assessment.
+- **Limitations:** Computationally expensive for very large point clouds due to edge detection. Sensitive to sampling density; uneven sampling can skew metrics. Self-intersection detection can be costly for complex meshes.
+- **When to use:** When detailed geometric fidelity, especially around edges and normals, is required.
+- **When not to use:** For quick, high-level comparisons where Chamfer Distance alone suffices, or for extremely large datasets where computational resources are limited.
+
+## Background
+The method is implemented in the TetWeave project, which focuses on tetrahedralization and surface reconstruction from signed distance fields (SDFs) [S1, unofficial]. It was developed to provide robust evaluation metrics for neural implicit surface representations and mesh reconstruction algorithms [S1, unofficial].
+
+## Sources
+[S1] AlexandreBinninger/TetWeave, https://github.com/AlexandreBinninger/TetWeave, fetched 2026-10-27 (unofficial)

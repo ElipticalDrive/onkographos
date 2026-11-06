@@ -1,0 +1,4300 @@
+arXiv:2610.39399v1 [cs.CV] 29 Oct 2026
+ACD-GS: Asymmetric Curvature-aware Densiﬁcation
+for 3D Gaussian Splatting
+Houqiang Zhong1∗ Tianchi Zhu1,3∗ Qiang Hu2† Xiaoyun Zhang2
+Li Song1† Wenjun Zhang1
+1
+School of Information Science and Electronic Engineering
+2
+Cooperative Medianet Innovation Center
+3
+SJTU Paris Elite Institute of Technology
+Shanghai Jiao Tong University, Shanghai, China
+{zhonghouqiang,zhutianchi,qiang.hu,xiaoyun.zhang}@sjtu.edu.cn
+{song_li,zhangwenjun}@sjtu.edu.cn
+Abstract
+3D Gaussian Splatting (3DGS) has emerged as a powerful paradigm for real-time
+photorealistic novel view synthesis. However, its training-time densiﬁcation remains largely heuristic, often resulting in redundant Gaussian proliferation and
+inaccurate geometric reconstruction. Existing methods predominantly rely on ﬁrstorder screen-space gradients to trigger cloning and splitting, which fail to distinguish true geometric discontinuities from high-frequency textures or noisy residuals. To address this limitation, we propose ACD-GS, an Asymmetric Curvatureaware Densiﬁcation framework for compact and geometry-aware 3D Gaussian
+optimization. Our key insight is that second-order depth responses provide a
+more reliable structural prior for density control, enabling asymmetric regulation
+of cloning and splitting to better capture geometric discontinuities. Building on
+this, we introduce a multi-view photometric consistency constraint to suppress
+transient single-view errors, together with a capacity-aware adaptive regulation
+strategy that balances densiﬁcation and pruning during training. Unlike post-hoc
+compression or quantization-based approaches, ACD-GS directly prevents redundant Gaussian generation during training, yielding inherently compact representations. Extensive experiments demonstrate that our method reduces nearly 60%
+of Gaussian count and storage while maintaining competitive rendering ﬁdelity,
+consistently outperforming existing methods across multiple datasets. Our code is
+available in https://waveviewer.github.io/ACD-GS/.
+1
+Introduction
+3D Gaussian Splatting (3DGS) [1] has rapidly emerged as a powerful paradigm for real-time photorealistic novel view synthesis. Unlike implicit neural radiance ﬁelds, 3DGS represents a scene as an
+explicit collection of anisotropic Gaussian primitives and renders them through differentiable rasterization, achieving both high rendering ﬁdelity and remarkable efﬁciency. Beneﬁting from its explicit
+representation and fast optimization, 3DGS has inspired extensive advances in anti-aliasing [2–4],
+surface reconstruction [5–9], dynamic scene modeling [10–14], compression [15–19], and hybrid
+implicit-explicit representations [20–25]. Despite these advances, the efﬁciency and scalability of
+3DGS still critically depend on how Gaussian primitives are created and evolved during optimization.
+In standard 3DGS, densiﬁcation is mainly driven by accumulated screen-space positional gradients,
+where Gaussians are cloned or split once the gradient magnitude exceeds predeﬁned thresholds.
+∗ Equal contributions.
+† Corresponding authors.
+40th Conference on Neural Information Processing Systems (NeurIPS 2026).
+Figure 1: The point-cloud visualizations show our ACD-GS produces sparser Gaussians while
+preserving scene structure. The right plot (training time vs. storage, color-coded by PSNR) conﬁrms
+that we achieve lower storage and faster training without sacriﬁcing rendering quality.
+While simple and effective in practice, this mechanism remains largely geometry-agnostic, as ﬁrstorder gradients primarily reﬂect local optimization pressure rather than underlying scene structure.
+Consequently, regions with high-frequency textures, smoothly varying surfaces, and sharp geometric boundaries may all produce similarly large gradients despite requiring fundamentally different
+density-control behaviors. A ﬂat textured wall, for example, should avoid excessive Gaussian proliferation, whereas thin structures and depth discontinuities require localized geometric reﬁnement.
+This reveals an intrinsic ambiguity in gradient-driven densiﬁcation, where ﬁrst-order photometric
+signals alone are insufﬁcient for reliable density control.
+This ambiguity leads to a persistent trade-off in existing densiﬁcation strategies [26–30]. Aggressive
+thresholds tend to trigger excessive Gaussian growth in textured regions, resulting in redundant
+primitives, increased storage overhead, unstable optimization, and ﬂoating artifacts near foregroundbackground transitions. Conversely, conservative thresholds often fail to reconstruct ﬁne structures
+and sharp depth discontinuities. Recent approaches attempt to improve densiﬁcation stability by
+incorporating pixel-aware gradients [27], absolute gradient magnitudes [28], or gradient-direction
+statistics [29, 30]. Although these methods alleviate optimization instability to some extent, they
+still rely primarily on ﬁrst-order, single-view photometric signals and therefore remain insufﬁcient
+for disentangling true geometric complexity from texture-induced residuals. As a result, existing
+methods struggle to simultaneously achieve compact representations, geometric ﬁdelity, and stable
+optimization. These limitations motivate the need for a geometry-aware density-control prior that
+directly reﬂects scene structure rather than relying solely on photometric optimization cues.
+In this work, we propose ACD-GS, an Asymmetric Curvature-aware Densiﬁcation framework that
+reformulates Gaussian densiﬁcation as a geometry-aware optimization process. Our key insight is
+that second-order depth responses provide a more reliable structural cue for identifying geometric discontinuities than ﬁrst-order screen-space gradients. Compared with gradient magnitude alone,
+depth curvature is more sensitive to local geometric changes such as occlusion boundaries, thin structures, and high-curvature regions, while remaining less responsive to purely planar textured areas.
+Based on this observation, ACD-GS introduces an asymmetric densiﬁcation mechanism that explicitly decouples cloning and splitting behaviors according to curvature-aware structural priors. Specifically, cloning is suppressed near depth discontinuities to avoid ambiguous foreground-background
+duplication and ﬂoating artifacts, whereas splitting is promoted to reﬁne boundary-crossing Gaussians into ﬁner geometric primitives.
+To further resolve the ambiguity between geometry and appearance, we introduce a multi-view photometric error gating strategy that enforces cross-view consistency instead of relying on volatile
+single-view residuals. Furthermore, we design a capacity-constrained adaptive optimization scheme
+that dynamically regulates primitive growth and lifecycle-aware pruning throughout training. Together, these designs establish a uniﬁed geometry-aware density-control framework that enables
+native sparsiﬁcation, where redundant Gaussian primitives are prevented during training rather than
+removed through post-hoc compression or quantization pipelines. Extensive experiments demonstrate that ACD-GS reduces nearly 60% of Gaussian primitives and storage while maintaining competitive rendering ﬁdelity across multiple datasets, consistently achieving a favorable quality and
+compactness trade-off compared with existing methods.
+Our contributions are summarized as follows:
+2
+• We propose ACD-GS, an asymmetric curvature-aware densiﬁcation framework that leverages second-order depth priors to explicitly decouple cloning and splitting behaviors for
+geometry-aware Gaussian evolution.
+• We introduce a multi-view photometric error gating strategy and a capacity-constrained
+adaptive optimization scheme to suppress transient photometric noise, regulate primitive
+growth, and encourage compact yet high-ﬁdelity representations.
+• Extensive experiments demonstrate that ACD-GS signiﬁcantly reduces Gaussian count and
+model storage natively during training while maintaining competitive rendering quality
+across multiple datasets.
+2
+Related Work
+2.1
+3D Gaussian Splatting Representation
+3D Gaussian Splatting (3DGS) [1] represents a scene as anisotropic Gaussian primitives and renders
+them through differentiable rasterization. Its explicit formulation has inspired extensions for antialiasing [2–4], surface reconstruction [5–9], dynamic scenes [10–14], and appearance modeling [31–
+34]. Hybrid representations such as Scaffold-GS [20], SplatNet [23], and Octree-GS [21] further
+organize primitives with learned features or hierarchical structures, while implicit ﬁelds [35–38]
+provide complementary scene parameterizations. These methods mainly change representation or
+rendering; the number and placement of Gaussians still depend on training-time density control,
+which is the focus of this work. Because all of them retain a primitive-based rendering pipeline,
+their efﬁciency and ﬁdelity are also affected by how many Gaussians remain after optimization.
+2.2
+Gradient-Driven Density Control
+Standard 3DGS [1] densiﬁes Gaussians using accumulated screen-space positional gradients. PixelGS [27] accounts for pixel coverage, AbsGS [28] uses absolute gradients to reduce cancellation,
+and GDAGS [29] incorporates gradient-direction information; other methods add external constraints [26, 30]. FastGS [39] instead estimates Gaussian importance from multi-view reconstruction
+errors inside projected footprints and uses this score for both densiﬁcation and pruning. ACD-GS
+shares the use of multi-view evidence but assigns it a different role: rendered-depth curvature modulates cloning and splitting, while center-projected RGB residuals only verify whether a candidate is
+consistently under-reconstructed across views. This separates structural guidance from photometric
+veriﬁcation and avoids using a footprint error score as the direct densiﬁcation criterion.
+2.3
+3DGS Compression
+Post-hoc compression reduces Gaussian storage through signiﬁcance-based pruning and vector quantization [40, 41, 15, 42–44], while context models and entropy coding target rate–distortion efﬁciency [17, 18, 45–47]. Mini-Splatting [48] studies compact representations under constrained
+primitive budgets. These approaches mainly operate after or around training and may require codebooks or ﬁne-tuning. ACD-GS instead reduces redundant primitive generation during optimization,
+without a post-hoc quantization stage. Because it changes where capacity is allocated rather than
+how parameters are encoded, it can be combined with downstream compression; this combination
+is not evaluated here. This distinction also delimits the scope of our experiments, which measure
+training-time sparsiﬁcation rather than gains from entropy coding or quantization.
+3
+Method
+3.1
+Problem Formulation and Overview
+3D Gaussian Splatting (3DGS) represents a scene as a set of anisotropic Gaussian primitives G =
+{Gi }N
+i=1 optimized through differentiable alpha blending. During training, standard 3DGS densiﬁes
+visible Gaussians according to their accumulated view-space positional gradients:
+X ∂L
+,
+(1)
+gi =
+∂µ2D
+i
+3
+Figure 2: Overview of ACD-GS. Curvature-guided asymmetric densiﬁcation suppresses cloning
+and promotes splitting near depth boundaries; multi-view photometric gating veriﬁes candidates;
+capacity-aware thresholding and opacity pruning regulate growth. Depth is rendered from the current Gaussians rather than input.
+where µ2D
+is the projected 2D center of Gi . A Gaussian is cloned or split once gi exceeds a ﬁxed
+i
+threshold τgrad , with the operation determined by scale-based heuristics. However, such ﬁrst-order
+gradient-driven densiﬁcation is geometry-agnostic. Large photometric gradients may be caused by
+ﬂat textures, smooth slopes, or true depth discontinuities, although these cases require different
+density-control behaviors. This ambiguity often leads to redundant primitives on planar or textured
+regions, while sharp boundaries and thin structures may remain under-reﬁned.
+We propose Asymmetric Curvature-aware Densiﬁcation for 3D Gaussian Splatting (ACD-GS),
+a plug-and-play density-control module that replaces the heuristic densiﬁcation step in 3DGS to
+prevent redundant primitive generation at its source (Fig. 2). At its core, ACD-GS utilizes a secondorder depth curvature prior, which is highly responsive to structural discontinuities but robust to planar textures, to asymmetrically suppress cloning near geometric edges while actively promoting the
+splitting of boundary-crossing Gaussians. To further resolve the geometry-texture trade-off, a multiview photometric gate restricts growth to candidates exhibiting consistent cross-view RGB residuals, effectively ﬁltering transient noise. Finally, capacity-constrained adaptive thresholding and
+lifecycle-aware opacity pruning dynamically regulate the global primitive scale under a scene-aware
+quota. By fundamentally curbing proliferation during optimization, ACD-GS yields highly compact
+representations without the need to compress an already overgrown Gaussian set post-training.
+3.2
+Curvature-Guided Asymmetric Densiﬁcation
+To distinguish geometric structures from texture-induced photometric variations, we introduce a
+curvature-guided structural prior. Given a rendered depth map D, we compute a curvature proxy
+using the magnitude of the discrete Laplacian:
+D(2) = ∇2 D .
+(2)
+This second-order response is less sensitive to high-frequency textures on locally planar surfaces,
+while producing strong responses at depth discontinuities and high-curvature regions.
+To improve robustness against isolated depth spikes, we clip and normalize the curvature response:
+
+
+D̃(2) = clip D(2) , 0, µD(2) + 3σD(2) ,
+(3)
+D̂(2) =
+D̃(2)
+.
+max(D̃(2) ) + ϵ
+4
+(4)
+Weak responses are further suppressed by soft thresholding:
+E=
+max(D̂(2) − τ, 0)
+,
+1−τ
+(5)
+yielding a depth-edge conﬁdence map E ∈ [0, 1]. We use τ = 0.15. For each visible Gaussian, we
+sample this conﬁdence at its projected center:
+ei ∈ [0, 1].
+ei = E(µ2D
+i ),
+(6)
+Standard 3DGS uses the same gradient statistic for both cloning and splitting, despite their different
+geometric effects. Cloning increases local representation capacity and is useful for texture-rich
+smooth regions, but may duplicate ambiguous primitives near foreground-background transitions.
+Splitting, instead, decomposes large Gaussians and is more suitable for reﬁning primitives that span
+multiple depth layers.
+We therefore introduce operation-speciﬁc asymmetric gradient modulation:
+gisplit = gi (1 + βei ),
+giclone = gi (1 − αei ),
+(7)
+where α = 0.8 and β = 1.5 control the suppression and enhancement strengths. Near structural
+boundaries, cloning is suppressed to avoid duplicating ambiguous primitives, while splitting is ampliﬁed to encourage ﬁne-grained boundary reﬁnement. In smooth regions, the modulated gradients
+reduce to the original gi , preserving the baseline capacity for appearance modeling.
+3.3
+Multi-view Photometric Error Gating
+Although curvature provides a useful structural prior, photometric signals remain necessary for densifying texture-rich ﬂat regions. However, single-view residuals may be unstable due to occlusion,
+view-dependent effects, or transient optimization noise. We therefore verify photometric necessity
+across multiple views.
+Before each densiﬁcation step, we sample K = 8 auxiliary cameras from the training set. For each
+(k)
+(k)
+view k, we render an image Irender and compare it with the ground-truth image Igt using the mean
+absolute RGB residual:
+3
+1 X (k)
+(k)
+(k)
+(k)
+I
+− Igt,c ⊙ Mvalid ,
+(8)
+Ergb =
+3 c=1 render,c
+(k)
+where Mvalid is the valid image mask. The residual map is binarized as
+
+
+(k)
+(k)
+(k)
+Brgb = I Ergb > τrgb ⊙ Mvalid .
+(9)
+For each Gaussian Gi , we project its 3D center µi to view k and sample the binary residual map:
+(k)
+ergb
+i,k = Brgb (pi,k ) ,
+(10)
+where pi,k is the projected screen-space coordinate. Let vi,k ∈ {0, 1} indicate whether the projection lies in the valid image region. The multi-view RGB error score is then
+PK
+vi,k ergb
+i,k
+rgb
+k=1
+.
+Si =
+(11)
+PK
+max
+k=1 vi,k , 1
+We deﬁne the photometric gate as
+
+
+= I Sirgb ≥ τmv .
+Mrgb
+i
+(12)
+Only Gaussians satisfying Mrgb
+= 1 are admitted into the densiﬁcation candidate pool. This crossi
+view veriﬁcation suppresses transient single-view residuals while preserving under-reconstructed
+appearance details. The valid-projection indicator checks image support and should not be interpreted as an explicit geometric occlusion test.
+5
+3.4
+Capacity-Constrained Adaptive Optimization
+Fixed densiﬁcation and pruning thresholds are suboptimal because gradient distributions and primitive scales vary across scenes and training stages. We therefore regulate both primitive growth and
+removal according to the current optimization state.
+Capacity-Adaptive Densiﬁcation. At each densiﬁcation interval, we estimate an adaptive threshold from the valid gradient distribution. Let Ntotal denote the current number of Gaussians, and
+let Gvalid = {gi | gi > 0} contains the positive accumulated position gradients used for threshold
+estimation. We impose a scene-dependent growth quota:
+Nallow = ⌊µNtotal ⌋ ,
+(13)
+where µ = 0.008 (0.8%) is the default quota ratio. Let M = |Gvalid |, and sort the candidate gradients
+as g(1) ≥ g(2) ≥ · · · ≥ g(M ) . The base adaptive threshold is
+
+g(Nallow ) , M > Nallow ,
+τ̂dyn =
+ktop = max(1, ⌈0.1M ⌉).
+(14)
+g(ktop ) ,
+M ≤ Nallow ,
+When the number of candidates exceeds the quota, this threshold directly bounds the number of
+densiﬁcation operations. Otherwise, the top-10% fallback avoids selecting marginal gradients. The
+ﬁnal threshold is lower-bounded by a relaxed baseline threshold:
+τdyn = max (0.8τbase , τ̂dyn ) .
+(15)
+Lifecycle-Aware Opacity Pruning. We further adapt opacity pruning according to training
+progress. Let
+
+
+t
+,1 ,
+(16)
+p = min
+T
+where t and T are the current and total training iterations. The opacity pruning threshold is annealed
+as
+αprune (p) = αmin + (αmax − αmin )p.
+(17)
+This preserves exploratory low-opacity primitives in early training, while enforcing stricter removal
+of redundant primitives near convergence.
+Overall, ACD-GS couples structural densiﬁcation, cross-view photometric veriﬁcation, and capacityaware optimization. The resulting training process produces compact Gaussian representations without relying on post-hoc compression.
+4
+Experiments
+Experimental Setup. We evaluate ACD-GS on the Mip-NeRF 360 [49], Tanks & Temples [50], and
+Deep Blending [51] datasets against vanilla 3DGS [1] and representative baselines including MipSplatting [2], Mini-Splatting [48], AbsGS [28], GDAGS [29], and Pixel-GS [27]. All models are
+trained for 30K iterations on a single NVIDIA RTX 5090 GPU. Our curvature-aware density control
+operates every 100 steps from iteration 600 until training completion to strictly regulate primitive
+proliferation. We report rendering metrics (PSNR, SSIM, LPIPS) and efﬁciency statistics (storage
+size, Gaussian count, training time). Further implementation details are provided in the Appendix.
+4.1
+Quantitative Comparison
+Rendering Fidelity. On the Deep Blending dataset (Tab. 1), ACD-GS achieves the best overall rendering quality among all evaluated methods, obtaining the highest PSNR (25.12) and SSIM (0.834).
+This demonstrates that our compact representation does not compromise the reconstruction of visually important structures. Compared with vanilla 3DGS, ACD-GS consistently produces sharper
+reconstructions while avoiding representation size bloat caused by unconstrained densiﬁcation. For
+the large-scale indoor and outdoor scenes in Mip-NeRF 360 and Tanks & Temples (Tab. 2), ACD-GS
+maintains highly competitive visual quality and matches or exceeds strong gradient-based baselines
+6
+Table 1: Quantitative Comparison on Deep Blending
+Aquarium
+Bedroom
+Method
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+Mip-Splatting
+Mini-Splatting
+AbsGS
+GDAGS
+Pixel-GS
+ACD-GS
+0.869
+0.851
+0.851
+0.806
+0.842
+0.865
+0.874
+Method
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+Mip-Splatting
+Mini-Splatting
+AbsGS
+GDAGS
+Pixel-GS
+ACD-GS
+0.892
+0.886
+0.868
+0.882
+0.889
+0.884
+0.891
+22.66
+22.52
+23.81
+21.82
+22.18
+25.77
+26.42
+0.161
+0.176
+0.166
+0.229
+0.186
+0.158
+0.166
+177.44
+272.31
+810.17
+183.16
+159.86
+268.57
+41.76
+0.907
+0.904
+0.901
+0.901
+0.907
+0.904
+0.907
+28.86
+28.68
+28.28
+28.85
+29.05
+28.82
+29.04
+CreepyAttic
+30.52
+30.16
+29.41
+30.16
+30.43
+30.24
+30.70
+0.225
+0.221
+0.280
+0.220
+0.214
+0.222
+0.244
+0.274
+0.274
+0.295
+0.275
+0.270
+0.275
+0.290
+316.93
+473.69
+981.14
+253.97
+283.22
+719.19
+111.74
+Hugo
+758.95
+1142.25
+1172.18
+704.01
+711.70
+1558.26
+165.98
+0.843
+0.830
+0.841
+0.789
+0.821
+0.836
+0.847
+Library
+23.85
+22.80
+23.24
+22.58
+23.39
+23.43
+24.45
+0.139
+0.149
+0.143
+0.180
+0.160
+0.139
+0.161
+321.95
+494.73
+873.89
+344.76
+318.72
+496.32
+110.88
+Museum-1
+Method
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+Mip-Splatting
+Mini-Splatting
+AbsGS
+GDAGS
+Pixel-GS
+ACD-GS
+0.781
+0.763
+0.762
+0.731
+0.768
+0.777
+0.780
+Method
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+Mip-Splatting
+Mini-Splatting
+AbsGS
+GDAGS
+Pixel-GS
+ACD-GS
+0.897
+0.896
+0.905
+0.880
+0.899
+0.898
+0.900
+Method
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+Mip-Splatting
+Mini-Splatting
+AbsGS
+GDAGS
+Pixel-GS
+ACD-GS
+0.655
+0.641
+0.639
+0.581
+0.637
+0.667
+0.661
+23.87
+23.32
+23.33
+23.49
+23.72
+23.73
+24.10
+0.352
+0.358
+0.394
+0.416
+0.357
+0.358
+0.359
+501.54
+829.34
+1129.81
+738.66
+568.79
+998.51
+245.24
+0.836
+0.836
+0.845
+0.793
+0.834
+0.835
+0.845
+23.32
+23.28
+23.20
+21.73
+22.69
+23.15
+23.49
+Museum-2
+25.34
+25.81
+27.50
+25.48
+25.64
+26.58
+27.61
+0.099
+0.098
+0.089
+0.111
+0.095
+0.093
+0.106
+0.295
+0.316
+0.316
+0.352
+0.308
+0.282
+0.297
+567.26
+807.78
+938.93
+568.56
+554.20
+841.11
+223.28
+Tree
+333.72
+477.92
+877.42
+310.55
+299.60
+561.85
+121.68
+0.797
+0.789
+0.804
+0.746
+0.770
+0.796
+0.805
+20.75
+21.06
+21.98
+21.03
+21.26
+21.76
+22.22
+Yellowhouse
+17.11
+16.75
+16.27
+16.29
+16.63
+17.61
+18.09
+0.135
+0.135
+0.135
+0.169
+0.138
+0.134
+0.145
+0.170
+0.176
+0.171
+0.210
+0.205
+0.167
+0.165
+223.22
+289.15
+798.00
+216.07
+192.28
+327.29
+84.78
+Mean
+176.08
+238.22
+749.61
+236.54
+180.94
+267.99
+95.58
+0.831
+0.822
+0.824
+0.790
+0.819
+0.829
+0.834
+24.03
+23.82
+24.11
+23.49
+23.89
+24.56
+25.12
+0.205
+0.211
+0.221
+0.240
+0.215
+0.203
+0.215
+375.23
+558.38
+925.68
+395.14
+363.26
+671.01
+133.44
+such as AbsGS and GDAGS. These results suggest that the proposed curvature-aware prior effectively preserves essential structural and textural details, enabling compactness without sacriﬁcing
+rendering ﬁdelity.
+Model Compactness and Training Efﬁciency. Tab. 3 reports the efﬁciency comparison in terms
+of storage footprint, Gaussian count, and training time. Across all three dataset groups, ACD-GS
+consistently achieves the smallest model size and the fastest training among the compared methods.
+This indicates that our native sparsiﬁcation strategy controls redundancy during optimization rather
+than relying on post-hoc compression. Compared with GDAGS, ACD-GS reduces average storage
+from 360.6 MB to 151.9 MB on Deep Blending, corresponding to a 57.8% reduction; from 707.1
+MB to 274.3 MB on Mip-NeRF 360, corresponding to a 61.2% reduction; and from 319.5 MB to
+150.4 MB on Tanks & Temples, corresponding to a 52.9% reduction. The Gaussian count is reduced
+by roughly 60% across the datasets, which further lowers memory usage and computational cost
+during training.
+7
+Table 2: Quantitative Comparison on Tanks & Temples and Mip-NeRF 360
+Train
+Method
+Truck
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+0.8202
+Mip-Splatting 0.8266
+Mini-Splatting 0.7099
+AbsGS
+0.8166
+GDAGS
+0.8129
+Pixel-GS
+0.8279
+ACD-GS
+0.8103
+22.04
+21.87
+18.77
+21.64
+21.53
+22.13
+22.01
+0.1963
+0.1893
+0.3234
+0.1942
+0.2068
+0.1780
+0.2298
+258.35
+354.45
+937.32
+230.86
+223.96
+906.22
+123.27
+0.8851
+0.8930
+0.8573
+0.8874
+0.8858
+0.8868
+0.8813
+25.47
+25.74
+23.66
+25.71
+25.49
+25.48
+25.51
+Bicycle
+Method
+0.1418
+0.1231
+0.1583
+0.1314
+0.1380
+0.1203
+0.1434
+487.82
+784.70
+1084.63
+388.02
+415.07
+1228.62
+177.46
+Stump
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+0.7666
+Mip-Splatting 0.7924
+Mini-Splatting 0.7165
+AbsGS
+0.7817
+GDAGS
+0.7899
+Pixel-GS
+0.7617
+ACD-GS
+0.7861
+25.28
+25.55
+23.57
+25.26
+25.42
+25.26
+25.47
+0.2081
+0.1669
+0.2508
+0.1720
+0.1696
+0.1720
+0.1799
+1154.55
+1977.66
+1425.72
+1411.36
+1437.29
+2142.21
+543.99
+0.7714
+0.7902
+0.7601
+0.7768
+0.7743
+0.7768
+0.7856
+26.66
+26.89
+26.03
+26.66
+26.96
+26.66
+26.83
+Treehill
+Method
+0.2163
+0.1883
+0.2282
+0.1967
+0.1874
+0.1967
+0.2051
+1026.20
+1440.26
+1274.58
+1106.18
+949.72
+1618.47
+318.65
+Mean
+SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓ SSIM↑ PSNR↑ LPIPS↓ Size(MB)↓
+3DGS
+0.6335
+Mip-Splatting 0.6387
+Mini-Splatting 0.6244
+AbsGS
+0.6139
+GDAGS
+0.6246
+Pixel-GS
+0.6139
+ACD-GS
+0.6457
+22.49
+22.34
+22.06
+21.96
+22.06
+21.96
+22.36
+0.3251
+0.2744
+0.3254
+0.2795
+0.2786
+0.2795
+0.2936
+770.88
+1223.14
+135.32
+1221.96
+1171.14
+1868.62
+472.37
+0.7754
+0.7882
+0.7336
+0.7753
+0.7775
+0.7734
+0.7818
+24.39
+24.48
+22.82
+24.25
+24.29
+24.30
+24.44
+0.2175
+0.1884
+0.2572
+0.1948
+0.1961
+0.1893
+0.2104
+739.56
+1156.04
+971.51
+871.68
+839.44
+1552.83
+327.15
+Table 3: Efﬁciency Metrics Comparison
+Deep Blending
+Method
+3DGS
+Mip-Splatting
+Mini-Splatting
+AbsGS
+GDAGS
+Pixel-GS
+ACD-GS
+Mip-NeRF 360
+Tanks & Temples
+Time(s)↓ Size(MB)↓ Points(M)↓ Time(s)↓ Size(MB)↓ Points(M)↓ Time(s)↓ Size(MB)↓ Points(M)↓
+842
+1007
+1125
+795
+628
+978
+545
+367.30
+563.20
+959.10
+400.40
+360.60
+694.80
+151.90
+1.5500
+2.3400
+4.1300
+1.6900
+1.5800
+2.9400
+0.6420
+683
+956
+893
+683
+517
+1083
+345
+638.40
+991.10
+1108.60
+716.40
+707.10
+1315.10
+274.30
+2.7000
+4.1200
+4.6900
+3.0300
+2.9900
+5.5600
+1.1600
+552
+716
+857
+433
+350
+946
+333
+373.10
+569.60
+1011.00
+309.40
+319.50
+1067.40
+150.40
+1.5800
+2.3700
+4.2700
+1.3100
+1.3500
+4.5100
+0.6357
+Trade-off Advantage. The key advantage of ACD-GS lies in its favorable quality and compactness trade-off. Recent density-control methods, such as Pixel-GS, often improve rendering quality by introducing excessive numbers of primitives, reaching 5.56M Gaussians on Mip-NeRF 360.
+In contrast, ACD-GS suppresses redundant Gaussian generation at its optimization source through
+curvature-aware asymmetric clone and split modulation and multi-view gating. As conﬁrmed by the
+storage–quality plot in Fig. 1, ACD-GS occupies the most favorable region of the trade-off space,
+achieving competitive ﬁdelity with substantially lower storage. This demonstrates that our method
+effectively separates geometrically necessary densiﬁcation from texture-induced or view-speciﬁc
+noise, leading to a compact yet expressive Gaussian representation.
+4.2
+Qualitative Comparison
+Visual Rendering Fidelity. As shown in Fig. 3, ACD-GS achieves novel view synthesis quality
+that is highly comparable to, and occasionally surpasses, the unconstrained vanilla 3DGS model.
+Gradient-based baselines like AbsGS and GDAGS frequently suffer from texture degradation to
+maintain a lower point count, our method consistently preserves high-frequency details. Crucially,
+vanilla 3DGS is notoriously prone to generating severe ﬂoating artifacts in empty spaces (visibly
+evident in the sky region of the Tree scene) due to its geometric blindness. In contrast, by rigorously
+suppressing redundant densiﬁcation at its source, ACD-GS effectively eliminates these ﬂoaters and
+reconstructs remarkably clean backgrounds and sharp object boundaries.
+8
+Figure 3: Qualitative comparison of novel view synthesis on the Deep Blending dataset.
+Figure 4: Visualization of Gaussians distribution
+Primitive Distribution Analysis. To uncover the structural rationale behind our efﬁciency and
+rendering quality, we visualize the spatial density of Gaussian primitives in Fig. 4. Vanilla 3DGS
+exhibits extreme redundancy, indiscriminately populating ﬂat homogeneous surfaces with overly
+dense primitives. Other density-control baselines often fail to cleanly separate textures from geometry, leading to either noisy distributions or over-pruned structures. Conversely, the primitive
+allocation in ACD-GS strongly aligns with the underlying scene geometry. Guided by our secondorder curvature prior, ACD-GS allocates dense and highly precise Gaussians strictly along structural
+edges and complex details. Meanwhile, it elegantly covers planar regions (such as the building facades in the Aquarium scene and the walls in the Bedroom scene) with much larger and highly
+sparse primitives. This structurally aware evolution precisely explains why ACD-GS achieves extreme model compactness and fewer ﬂoating artifacts without compromising visual ﬁdelity. More
+results are shown in Appendix.
+4.3
+Parameter Sensitivity Analysis
+Tab. 4 analyzes the sensitivity of ACD-GS to α and β. We vary one parameter at a time: α with
+β = 1.5 ﬁxed, and β with α = 0.8 ﬁxed. Increasing α from 0.5 to 0.8 improves PSNR and SSIM
+while reducing LPIPS and storage. Setting α = 1.0 yields the highest PSNR and SSIM, but also a
+larger LPIPS and model size. For β, the default β = 1.5 gives the best PSNR, SSIM, LPIPS, and
+storage among the tested values. Overall, (α, β) = (0.8, 1.5) provides the best quality–compactness
+balance, while α = 1.0 offers higher PSNR and SSIM at a larger model size.
+4.4
+Ablation Studies
+We conduct an incremental ablation study integrating our three core modules: Curvature-Guided
+Asymmetric Densiﬁcation (CAD), Multi-view Photometric Error Gating (MPG), and Capacity9
+Table 4: Comparison of different settings for α
+and β, varying one parameter at a time.
+α
+Table 5: Quantitative ablation on DeepBlending.
+CAD, MPG, and CAO denote the three components.
+β PSNR↑ SSIM↑ LPIPS↓ Size(MB)↓
+0.5 1.5 25.5890 0.8424 0.2387
+0.8 1.5 25.5913 0.8450 0.2363
+1.0 1.5 25.8259 0.8469 0.2520
+161.37
+151.85
+162.54
+0.8 1.0 25.4263 0.8412 0.2451
+0.8 2.5 25.4441 0.8415 0.2436
+157.35
+164.87
+CAD MPG CAO Size(MB)↓ PSNR↑ SSIM↑ LPIPS↓
+×
+✓
+✓
+✓
+×
+×
+✓
+✓
+×
+×
+×
+✓
+360.60
+302.40
+159.70
+151.90
+25.22
+25.38
+25.38
+25.59
+0.838
+0.840
+0.841
+0.845
+0.225
+0.223
+0.221
+0.236
+Table 6: Sensitivity to the number of auxiliary views K and quota ratio µ.
+Setting
+PSNR↑
+SSIM↑
+LPIPS↓
+Points↓
+Size(MB)↓
+K=4
+K=8
+K = 12
+25.3380
+25.5914
+25.3605
+0.8432
+0.8450
+0.8440
+0.2393
+0.2363
+0.2390
+550,173
+642,045
+661,947
+136.44
+151.85
+156.88
+µ = 0.004
+µ = 0.008
+µ = 0.012
+25.5145
+25.5913
+25.4211
+0.8444
+0.8450
+0.8432
+0.2363
+0.2363
+0.2372
+641,737
+642,044
+642,241
+151.78
+151.85
+151.90
+Constrained Adaptive Optimization (CAO). We evaluate the model storage requirements and rendering ﬁdelity on the DeepBlending dataset. As shown in Tab. 5, the baseline 3DGS suffers from
+severe memory bloat (360.6 MB) due to unconstrained primitive proliferation. Integrating the CAD
+module effectively addresses this by penalizing redundant cloning in ﬂat regions and promoting
+boundary-aware splitting, which immediately reduces storage to 302.4 MB while improving PSNR.
+Subsequently, incorporating MPG further slashes the memory footprint to 159.7 MB. By demanding
+cross-view residual consensus, MPG prevents the model from blindly overﬁtting to transient singleview photometric noise, concurrently yielding strict improvements in SSIM and LPIPS. Through
+dynamic growth quotas and lifecycle-aware pruning, CAO curtails ﬂoating artifacts and reduces the
+ﬁnal model size to a remarkable 151.9 MB, representing a 58% reduction from the baseline.
+4.5
+Sensitivity Analysis
+We additionally evaluate the number of auxiliary views K and the candidate quota ratio µ on the
+complete Deep Blending dataset. Increasing K from 4 to 8 improves PSNR, SSIM, and LPIPS, but
+retains more Gaussians; increasing K to 12 provides no consistent quality beneﬁt and increases the
+model size, so we use K = 8. For the quota ratio, µ = 0.004 yields a marginally smaller model,
+whereas µ = 0.008 achieves higher PSNR and SSIM with the same LPIPS; µ = 0.012 provides no
+additional quality improvement. We therefore use µ = 0.008 as the default.
+5
+Discussion and Limitations
+While ACD-GS achieves signiﬁcant native sparsiﬁcation, extreme compression inevitably degrades
+high-frequency texture ﬁdelity due to the inherent capacity limits of pure explicit representations. To
+address this bottleneck, future work could explore hybrid architectures, replacing explicit spherical
+harmonics with lightweight Multi-Layer Perceptrons (MLPs) to maintain rendering quality under
+stricter point budgets. Furthermore, because ACD-GS operates orthogonally to post-hoc compression pipelines, seamlessly integrating it with downstream quantization and entropy coding frameworks presents a promising direction to unlock ultra-compact assets for low-bandwidth streaming.
+6
+Conclusion
+We present ACD-GS, an Asymmetric Curvature-aware Densiﬁcation framework for compact 3D
+Gaussian Splatting. Second-order depth priors decouple cloning and splitting, suppressing unnecessary cloning in planar regions while promoting splitting along geometric boundaries. A multi-view
+photometric gate ﬁlters transient noise, and adaptive thresholding with lifecycle-aware pruning regulates capacity. Experiments show that ACD-GS reduces Gaussian count and storage by nearly
+60% across benchmarks while preserving competitive rendering ﬁdelity. By directly preventing redundancy during training, ACD-GS offers a practical, memory-efﬁcient foundation for scalable 3D
+Gaussian representations.
+10
+Acknowledgments and Disclosure of Funding
+This work is supported by National Natural Science Foundation of China(62431015, 62571322,
+62571317),STCSM ( 24ZR1432000, 22DZ2229005), 111 plan (BP0719010), and State Key Laboratory of UHD Video and Audio Production and Presentation.
+References
+[1] B. Kerbl, G. Kopanas, T. Leimkuehler, and G. Drettakis, “3d gaussian splatting for real-time radiance
+ﬁeld rendering,” ACM Trans. Graph., vol. 42, no. 4, July 2023.
+[2] Z. Yu, A. Chen, B. Huang, T. Sattler, and A. Geiger, “Mip-splatting: Alias-free 3d gaussian splatting,”
+in 2024 IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2024, pp. 19 447–
+19 456.
+[3] H. Zhong, Z. Wu, S. Fu, Z. Zheng, X. Jin, X. Zhang, L. Song, and Q. Hu, “Prismgs: Physically-grounded
+anti-aliasing for high-ﬁdelity large-scale 3d gaussian splatting,” in 2025 International Conference on
+Visual Communications and Image Processing (VCIP), 2025, pp. 1–5.
+[4] Z. Liang, Q. Zhang, W. Hu, L. Zhu, Y. Feng, and K. Jia, “Analytic-splatting: Anti-aliased 3d gaussian
+splatting via analytic integration,” in Computer Vision ECCV 2024: 18th European Conference, Milan,
+Italy, September 29October 4, 2024, Proceedings, Part XVII. Berlin, Heidelberg: Springer-Verlag, 2024,
+p. 281297.
+[5] Y. Gao, H. Zhong, T. Zhu, Z. Cheng, Q. Hu, and L. Song, “Aligngs: Aligning geometry and semantics
+for robust indoor reconstruction from sparse views,” in 2025 International Conference on Visual Communications and Image Processing (VCIP), 2025, pp. 1–5.
+[6] A. Guédon and V. Lepetit, “Sugar: Surface-aligned gaussian splatting for efﬁcient 3d mesh reconstruction
+and high-quality mesh rendering,” in Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), June 2024, pp. 5354–5363.
+[7] B. Huang, Z. Yu, A. Chen, A. Geiger, and S. Gao, “2d gaussian splatting for geometrically accurate
+radiance ﬁelds,” in ACM SIGGRAPH 2024 Conference Papers, ser. SIGGRAPH ’24. New York, NY,
+USA: Association for Computing Machinery, 2024.
+[8] Y. Wolf, A. Bracha, and R. Kimmel, “GS2Mesh: Surface reconstruction from Gaussian splatting via novel
+stereo views,” in European Conference on Computer Vision (ECCV), 2024.
+[9] D. Chen, H. Li, W. Ye, Y. Wang, W. Xie, S. Zhai, N. Wang, H. Liu, H. Bao, and G. Zhang, “Pgsr:
+Planar-based gaussian splatting for efﬁcient and high-ﬁdelity surface reconstruction,” IEEE Transactions
+on Visualization and Computer Graphics, pp. 1–12, 2024.
+[10] Q. Hu, Z. Zheng, H. Zhong, S. Fu, L. Song, XiaoyunZhang, G. Zhai, and Y. Wang, “4dgc: Rate-aware 4d
+gaussian compression for efﬁcient streamable free-viewpoint video,” in 2025 IEEE/CVF Conference on
+Computer Vision and Pattern Recognition (CVPR), 2025.
+[11] Z. Zheng, Z. Wu, H. Zhong, Y. Tian, N. Cao, L. Xu, J. Yao, X. Zhang, Q. Hu, and W. Zhang, “4DGCPro:
+Efﬁcient hierarchical 4d gaussian compression for progressive volumetric video streaming,” in The
+Thirty-ninth Annual Conference on Neural Information Processing Systems, 2026. [Online]. Available:
+https://openreview.net/forum?id=MbqPKsVe1d
+[12] Z. Li, Z. Chen, Z. Li, and Y. Xu, “Spacetime gaussian feature splatting for real-time dynamic view synthesis,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+June 2024, pp. 8508–8520.
+[13] G. Wu, T. Yi, J. Fang, L. Xie, X. Zhang, W. Wei, W. Liu, Q. Tian, and X. Wang, “4d gaussian splatting
+for real-time dynamic scene rendering,” in Proceedings of the IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), June 2024, pp. 20 310–20 320.
+[14] J. Luiten, G. Kopanas, B. Leibe, and D. Ramanan, “Dynamic 3d gaussians: Tracking by persistent dynamic view synthesis,” in 3DV, 2024.
+[15] J. C. Lee, D. Rho, X. Sun, J. H. Ko, and E. Park, “Compact 3d gaussian representation for radiance ﬁeld,”
+in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), June
+2024, pp. 21 719–21 728.
+[16] M. T. Bagdasarian, P. Knoll, Y. Li, F. Barthel, A. Hilsmann, P. Eisert, and W. Morgenstern, “3dgs.zip: A
+survey on 3d gaussian splatting compression methods,” Computer Graphics Forum, p. e70078, 2025.
+[17] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Hac: Hash-grid assisted context for 3d gaussian splatting
+compression,” in European Conference on Computer Vision, 2024.
+11
+[18] Y. Wang, Z. Li, L. Guo, W. Yang, A. Kot, and B. Wen, “ContextGS : Compact 3d gaussian splatting with
+anchor level context model,” in The Thirty-eighth Annual Conference on Neural Information Processing
+Systems, 2024. [Online]. Available: https://openreview.net/forum?id=W2qGSMl2Uu
+[19] Y. Chen, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Hac++: Towards 100x compression of 3d gaussian
+splatting,” IEEE Transactions on Pattern Analysis and Machine Intelligence, vol. 47, no. 11, pp. 10 210–
+10 226, 2025.
+[20] T. Lu, M. Yu, L. Xu, Y. Xiangli, L. Wang, D. Lin, and B. Dai, “Scaffold-gs: Structured 3d gaussians for
+view-adaptive rendering,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), June 2024, pp. 20 654–20 664.
+[21] K. Ren, L. Jiang, T. Lu, M. Yu, L. Xu, Z. Ni, and B. Dai, “Octree-gs: Towards consistent real-time rendering with lod-structured 3d gaussians,” IEEE Transactions on Pattern Analysis and Machine Intelligence,
+2025.
+[22] Y. Xin, Y. Liu, X. Xie, and X. Li, “Learning uniﬁed representation of 3d gaussian splatting,” in International Conference on Learning Representations, 2026.
+[23] xilong zhou, B.-H. Nguyen, L. Magne, V. Golyanik, T. Leimkuehler, and C. Theobalt, “Splat the
+net: Radiance ﬁelds with splattable neural primitives,” in The Fourteenth International Conference on
+Learning Representations, 2026. [Online]. Available: https://openreview.net/forum?id=v3ejhJxT1W
+[24] A. Bouzidi, H. Laga, H. Wannous, and F. Sohel, “Gnf: Gaussian neural ﬁelds for multidimensional signal
+representation and reconstruction,” in Computer Graphics Forum, vol. 44, no. 7. Wiley Online Library,
+2025, p. e70232.
+[25] Z. Tang, C. Feng, X. Cheng, W. Yu, J. Zhang, Y. Liu, X.-X. Long, W. Wang, and L. Yuan, “Neuralgs:
+Bridging neural ﬁelds and 3d gaussian splatting for compact 3d representations,” in Proceedings of the
+AAAI Conference on Artiﬁcial Intelligence, vol. 40, no. 11, 2026, pp. 9493–9501.
+[26] G. Grubert, F. Barthel, A. Hilsmann, and P. Eisert, “Improving adaptive density control for 3d gaussian
+splatting,” in Proceedings of the 20th International Joint Conference on Computer Vision, Imaging and
+Computer Graphics Theory and Applications. SCITEPRESS - Science and Technology Publications,
+2025, p. 610621. [Online]. Available: http://dx.doi.org/10.5220/0013308500003912
+[27] Z. Zhang, W. Hu, Y. Lao, T. He, and H. Zhao, “Pixel-gs: Density control with pixel-aware gradient
+for 3d gaussian splatting,” in Computer Vision ECCV 2024: 18th European Conference, Milan, Italy,
+September 29October 4, 2024, Proceedings, Part XIX. Berlin, Heidelberg: Springer-Verlag, 2024, p.
+326342. [Online]. Available: https://doi.org/10.1007/978-3-031-72655-2_19
+[28] Z. Ye, W. Li, S. Liu, P. Qiao, and Y. Dou, “Absgs: Recovering ﬁne details in 3d gaussian
+splatting,” in Proceedings of the 32nd ACM International Conference on Multimedia, ser. MM ’24.
+New York, NY, USA: Association for Computing Machinery, 2024, p. 10531061. [Online]. Available:
+https://doi.org/10.1145/3664647.3681361
+[29] Z. Zhou, Y.-J. Xiong, J.-C. Zhang, C.-M. Xia, X. Qiu, and H. Zhan, “Gradient-direction-aware
+density control for 3d gaussian splatting,” in The Fourteenth International Conference on Learning
+Representations, 2026. [Online]. Available: https://openreview.net/forum?id=6qDxK4Gz7F
+[30] P. Wang, Y. Wang, D. Wang, S. Mohan, Z. Fan, L. Wu, R. Cai, Y.-Y. Yeh, Z. Wang, Q. Liu, and R. Ranjan,
+“Steepest descent density control for compact 3d gaussian splatting,” in Proceedings of the Computer
+Vision and Pattern Recognition Conference (CVPR), June 2025, pp. 26 663–26 672.
+[31] G. Seriﬁ and M. C. Buehler, “Hypergaussians: High-dimensional gaussian splatting for high-ﬁdelity animatable face avatars,” in Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2026.
+[32] C. Thirgood, O. Mendez, E. Ling, J. Storey, and S. Hadﬁeld, “Hypergs: Hyperspectral 3d gaussian splatting,” in Proceedings of the Computer Vision and Pattern Recognition Conference (CVPR), June 2025, pp.
+5970–5979.
+[33] R. Lu, H. Chen, Z. Zhu, Y. Qin, M. Lu, L. zhang, C. Yan, and anke xue, “Thermalgaussian: Thermal
+3d gaussian splatting,” in The Thirteenth International Conference on Learning Representations, 2025.
+[Online]. Available: https://openreview.net/forum?id=ybFRoGxZjs
+[34] Z. Gao, B. Planche, M. Zheng, A. Choudhuri, T. Chen, and Z. Wu, “7dgs: Uniﬁed spatial-temporalangular gaussian splatting,” in 2025 IEEE/CVF International Conference on Computer Vision (ICCV),
+2025, pp. 26 316–26 325.
+[35] B. Mildenhall, P. P. Srinivasan, M. Tancik, J. T. Barron, R. Ramamoorthi, and R. Ng, “Nerf: representing
+scenes as neural radiance ﬁelds for view synthesis,” Commun. ACM, vol. 65, no. 1, p. 99106, December
+2021.
+[36] T. Müller, A. Evans, C. Schied, and A. Keller, “Instant neural graphics primitives with a multiresolution
+hash encoding,” ACM Trans. Graph., vol. 41, no. 4, pp. 102:1–102:15, Jul. 2022.
+12
+[37] Z. Chen, T. Funkhouser, P. Hedman, and A. Tagliasacchi, “Mobilenerf: Exploiting the polygon rasterization pipeline for efﬁcient neural ﬁeld rendering on mobile architectures,” in Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition (CVPR), 2023, pp. 16 569–16 578.
+[38] P. Hedman, P. P. Srinivasan, B. Mildenhall, J. T. Barron, and P. Debevec, “Baking neural radiance ﬁelds
+for real-time view synthesis,” in IEEE/CVF International Conference on Computer Vision (ICCV), 2021,
+pp. 5875–5884.
+[39] S. Ren, T. Wen, Y. Fang, and B. Lu, “FastGS: Training 3D Gaussian Splatting in 100 seconds,” in
+Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2026,
+pp. 26 094–26 103. [Online]. Available: https://openaccess.thecvf.com/content/CVPR2026/html/Ren_
+FastGS_Training_3D_Gaussian_Splatting_in_100_Seconds_CVPR_2026_paper.html
+[40] Z. Fan, K. Wang, K. Wen, Z. Zhu, D. Xu, Z. Wang et al., “Lightgaussian: Unbounded 3d gaussian compression with 15x reduction and 200+ fps,” Advances in neural information processing systems, vol. 37,
+pp. 140 138–140 158, 2024.
+[41] S. Girish, K. Gupta, and A. Shrivastava, “Eagles: Efﬁcient accelerated 3d gaussians with lightweight
+encodings,” in Computer Vision ECCV 2024: 18th European Conference, Milan, Italy, September
+29October 4, 2024, Proceedings, Part LXIII. Berlin, Heidelberg: Springer-Verlag, 2024, p. 5471.
+[Online]. Available: https://doi.org/10.1007/978-3-031-73036-8_4
+[42] S. Almuhammad Alali, M. Qamar, S.-H. Bae, and E. Tartaglione, “Trimming the Fat: Efﬁcient
+Compression of 3D Gaussian Splats through Pruning,” in British Machine Vision Conference 2024,
+Glasgow (Ecosse), United Kingdom, Nov. 2024. [Online]. Available: https://telecom-paris.hal.science/
+hal-05208876
+[43] S. Liu, X. Tang, Z. Li, Y. He, C. Ye, J. Liu, B. Huang, S. Zhou, and X. Wu, “Occlugaussian: Occlusionaware gaussian splatting for large scene reconstruction and rendering,” in Proceedings of the IEEE/CVF
+International Conference on Computer Vision (ICCV), October 2025, pp. 26 643–26 652.
+[44] A. Hanson, A. Tu, V. Singla, M. Jayawardhana, M. Zwicker, and T. Goldstein, “Pup 3d-gs: Principled
+uncertainty pruning for 3d gaussian splatting,” in Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR), June 2025, pp. 5949–5958.
+[45] H. Wang, H. Zhu, T. He, R. Feng, J. Deng, J. Bian, and Z. Chen, “End-to-end rate-distortion optimized
+3d gaussian representation,” in European Conference on Computer Vision, 2024.
+[46] Y. Chen, M. Li, Q. Wu, W. Lin, M. Harandi, and J. Cai, “Pcgs: Progressive compression of 3d gaussian
+splatting,” in The 40th Annual AAAI Conference on Artiﬁcial Intelligence, 2026.
+[47] Y.-T. Zhan, C.-Y. Ho, H. Yang, Y.-H. Chen, J. C. Chiang, Y.-L. Liu, and W.-H. Peng, “CAT-3DGS: A
+context-adaptive triplane approach to rate-distortion-optimized 3DGS compression,” in Proceedings of
+the Thirteenth International Conference on Learning Representations (ICLR), 2025.
+[48] G. Fang and B. Wang, “Mini-splatting: Representing scenes with a constrained number of gaussians,” in
+European Conference on Computer Vision. Springer, 2024, pp. 173–190.
+[49] B. Mildenhall, D. Verbin, P. P. Srinivasan, P. Hedman, R. Martin-Brualla, and J. T. Barron,
+“MultiNeRF: A Code Release for Mip-NeRF 360, Ref-NeRF, and RawNeRF,” 2022. [Online]. Available:
+https://github.com/google-research/multinerf
+[50] A. Knapitsch, J. Park, Q.-Y. Zhou, and V. Koltun, “Tanks and temples: Benchmarking large-scale scene
+reconstruction,” ACM Transactions on Graphics, vol. 36, no. 4, 2017.
+[51] P. Hedman, J. Philip, T. Price, J.-M. Frahm, G. Drettakis, and G. Brostow, “Deep blending for freeviewpoint image-based rendering,” in ACM Transactions on Graphics (Proc. SIGGRAPH Asia), vol. 37,
+no. 6. ACM, 2018, pp. 257:1–257:15.
+13
+A
+Hyperparameter Sensitivity Analysis
+We further evaluate the sensitivity of ACD-GS to three key hyperparameters, including the soft
+threshold τ , the capacity-control parameters (α, β), and the rate of lifecycle-aware opacity pruning.
+As shown in Tables A1–A3, ACD-GS exhibits stable rendering quality across different hyperparameter settings, while the representation size and the number of Gaussians vary more noticeably. For
+the soft threshold τ , all tested settings achieve comparable average PSNR, SSIM, and LPIPS, indicating that the proposed soft modulation is not overly sensitive to the exact threshold value. The
+default setting τ = 0.15 provides a balanced trade-off, maintaining competitive rendering quality
+while yielding fewer Gaussians on average than the alternatives.
+For the capacity-control parameters (α, β), the default conﬁguration (0.8, 1.5) consistently produces the most compact representations across almost all scenes. Compared with both smaller and
+larger parameter settings, it substantially reduces the average storage and Gaussian count while
+preserving the best average PSNR and SSIM. This suggests that moderate capacity regulation is
+important: overly conservative control may retain redundant primitives, whereas overly aggressive
+densiﬁcation-pruning schedules can increase representation size without clear quality gains.
+Finally, varying the lifecycle-aware pruning rate leads to only minor changes in reconstruction quality. The average metrics remain very close across different rates, demonstrating that the pruning
+schedule is robust within a reasonable range. Although a smaller rate can slightly reduce the average model size, the default rate achieves the best overall PSNR, SSIM, and LPIPS, indicating
+a favorable balance between compactness and ﬁdelity. Overall, these results show that ACD-GS
+is robust to hyperparameter variations and that the chosen default conﬁguration provides a stable
+quality-efﬁciency trade-off across diverse scenes.
+Table A1: Quality and efﬁciency under different depth soft thresholds.
+Scene
+Setting
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Aquarium-20
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8722
+0.8738
+0.8726
+26.16
+26.42
+26.03
+0.1673
+0.1655
+0.1656
+52.04
+41.76
+51.73
+0.2777
+0.1766
+0.2764
+Bedroom
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.9070
+0.9073
+0.9076
+29.00
+29.04
+29.04
+0.2897
+0.2899
+0.2903
+121.89
+111.74
+121.59
+0.5731
+0.4724
+0.5718
+Boats
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.9101
+0.9087
+0.9102
+26.41
+26.15
+26.47
+0.2209
+0.2213
+0.2197
+167.23
+158.20
+163.70
+0.7648
+0.6689
+0.7499
+Bridge
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.7873
+0.7904
+0.7897
+24.09
+24.18
+23.91
+0.3102
+0.3104
+0.3103
+163.37
+149.19
+161.57
+0.7484
+0.6308
+0.7409
+CreepyAttic
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8903
+0.8908
+0.8904
+30.62
+30.70
+30.65
+0.2457
+0.2442
+0.2453
+177.24
+165.98
+175.90
+0.8071
+0.7018
+0.8014
+Hugo-1
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8464
+0.8468
+0.8423
+24.53
+24.45
+23.92
+0.1613
+0.1608
+0.1637
+124.61
+110.88
+122.62
+0.5846
+0.4688
+0.5762
+Library
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.7814
+0.7798
+0.7820
+23.98
+24.10
+24.10
+0.3597
+0.3592
+0.3592
+254.96
+245.24
+256.48
+1.1357
+1.0369
+1.1421
+Lumber
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.7842
+0.7867
+0.7843
+22.28
+22.46
+22.34
+0.2653
+0.2634
+0.2661
+508.99
+495.92
+466.31
+2.2098
+2.0968
+2.0293
+Museum-1
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8445
+0.8450
+0.8442
+23.64
+23.49
+23.45
+0.1469
+0.1452
+0.1456
+198.21
+223.28
+234.51
+0.8958
+0.9440
+1.0493
+Museum-2
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.9013
+0.9002
+0.8987
+28.07
+27.61
+27.55
+0.1065
+0.1056
+0.1066
+108.91
+121.68
+132.65
+0.5182
+0.5145
+0.6186
+Continued on next page
+14
+Table A1 (continued)
+Scene
+Setting
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+NightSnow
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.9055
+0.9054
+0.9062
+30.16
+30.22
+30.33
+0.2242
+0.2200
+0.2199
+61.68
+64.62
+73.96
+0.3185
+0.2732
+0.3704
+Playroom
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8949
+0.8960
+0.8952
+29.67
+30.07
+29.92
+0.2921
+0.2883
+0.2888
+112.51
+129.12
+137.39
+0.5334
+0.5459
+0.6386
+Ponche
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8211
+0.8191
+0.8234
+23.11
+23.07
+23.24
+0.2558
+0.2537
+0.2494
+103.84
+114.83
+123.42
+0.4968
+0.4855
+0.5796
+SaintAnne
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8195
+0.8203
+0.8189
+25.60
+25.51
+25.34
+0.3372
+0.3309
+0.3309
+135.70
+160.94
+171.86
+0.6315
+0.6805
+0.7844
+Shed
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.9338
+0.9295
+0.9347
+28.32
+27.28
+28.39
+0.1956
+0.1963
+0.1912
+96.72
+107.75
+117.14
+0.4666
+0.4556
+0.5530
+Tree-18
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8027
+0.8052
+0.8044
+22.18
+22.22
+22.33
+0.1747
+0.1650
+0.1658
+81.61
+84.78
+95.18
+0.4028
+0.3584
+0.4602
+Yellowhouse-12
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.6536
+0.6608
+0.6485
+17.58
+18.09
+17.06
+0.3066
+0.2975
+0.2972
+90.42
+95.58
+109.54
+0.4400
+0.4041
+0.5209
+Mean
+τ = 0.05
+τ = 0.15
+τ = 0.25
+0.8445
+0.8451
+0.8113
+25.61
+25.59
+25.53
+0.2388
+0.2363
+0.2362
+150.58
+151.85
+151.43
+0.6944
+0.6420
+0.7331
+Table A2: Quality and efﬁciency under different settings of α and β.
+Scene
+Setting
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Aquarium-20
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8517
+0.8738
+0.8486
+23.38
+26.42
+24.40
+0.1751
+0.1655
+0.1760
+132.12
+41.76
+140.75
+0.5586
+0.1766
+0.5951
+Bedroom
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.9068
+0.9073
+0.9072
+28.87
+29.04
+28.92
+0.2729
+0.2899
+0.2719
+185.58
+111.74
+197.59
+0.7847
+0.4724
+0.8355
+Boats
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.9122
+0.9087
+0.9136
+26.57
+26.15
+26.72
+0.2074
+0.2213
+0.2020
+224.80
+158.20
+238.70
+0.9505
+0.6689
+1.0092
+Bridge
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.7830
+0.7904
+0.7823
+23.86
+24.18
+23.41
+0.3175
+0.3104
+0.3147
+152.05
+149.19
+168.09
+0.6429
+0.6308
+0.7107
+CreepyAttic
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8910
+0.8908
+0.8910
+30.64
+30.70
+30.55
+0.2176
+0.2442
+0.2166
+463.91
+165.98
+483.30
+1.9615
+0.7018
+2.0435
+Hugo-1
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8319
+0.8468
+0.8276
+23.87
+24.45
+23.61
+0.1498
+0.1608
+0.1504
+256.77
+110.88
+312.31
+1.0857
+0.4688
+1.3205
+Library
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.7722
+0.7798
+0.7705
+23.84
+24.10
+23.86
+0.3580
+0.3592
+0.3566
+371.66
+245.24
+405.50
+1.5714
+1.0369
+1.7145
+Lumber
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.7899
+0.7867
+0.7924
+22.63
+22.46
+22.56
+0.2479
+0.2634
+0.2364
+560.72
+495.92
+681.21
+2.3708
+2.0968
+2.8802
+Continued on next page
+15
+Table A2 (continued)
+Scene
+Setting
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Museum-1
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8348
+0.8450
+0.8354
+22.81
+23.49
+22.82
+0.1373
+0.1452
+0.1359
+395.33
+223.28
+414.99
+1.6715
+0.9440
+1.7546
+Museum-2
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.9016
+0.9002
+0.9022
+26.62
+27.61
+27.15
+0.0925
+0.1056
+0.0909
+212.18
+121.68
+228.20
+0.8971
+0.5145
+0.9648
+NightSnow
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.9147
+0.9054
+0.9151
+30.49
+30.22
+30.51
+0.1912
+0.2200
+0.1888
+94.44
+64.62
+101.40
+0.3993
+0.2732
+0.4287
+Playroom
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8960
+0.8960
+0.8954
+30.18
+30.07
+30.07
+0.2675
+0.2883
+0.2671
+287.29
+129.12
+300.31
+1.2147
+0.5459
+1.2697
+Ponche
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8194
+0.8191
+0.8148
+22.54
+23.07
+21.89
+0.2289
+0.2537
+0.2291
+181.75
+114.83
+196.96
+0.7684
+0.4855
+0.8328
+SaintAnne
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8225
+0.8203
+0.8236
+25.61
+25.51
+25.68
+0.3109
+0.3309
+0.2955
+199.34
+160.94
+238.51
+0.8428
+0.6805
+1.0084
+Shed
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.9484
+0.9295
+0.9489
+32.21
+27.28
+32.37
+0.1536
+0.1963
+0.1510
+168.72
+107.75
+174.77
+0.7134
+0.4556
+0.7389
+Tree-18
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.7722
+0.8052
+0.7873
+20.85
+22.22
+22.28
+0.2055
+0.1650
+0.1778
+164.06
+84.78
+200.11
+0.6937
+0.3584
+0.8461
+Yellowhouse-12
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.6240
+0.6608
+0.6397
+15.33
+18.09
+17.16
+0.3198
+0.2975
+0.3077
+154.89
+95.58
+145.98
+0.6549
+0.4041
+0.6172
+Mean
+(0.5, 1.0)
+(0.8, 1.5)
+(1.0, 2.5)
+0.8395
+0.8451
+0.8409
+25.31
+25.59
+25.53
+0.2267
+0.2363
+0.2217
+247.39
+151.85
+272.28
+1.0460
+0.6420
+1.1512
+Table A3: Quality and efﬁciency under different opacity-pruning rates.
+Scene
+Setting
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Aquarium-20
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8739
+0.8738
+0.8729
+26.20
+26.42
+26.28
+0.1652
+0.1655
+0.1647
+40.21
+41.76
+42.01
+0.1700
+0.1766
+0.1776
+Bedroom
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.9078
+0.9073
+0.9084
+29.10
+29.04
+29.07
+0.2898
+0.2899
+0.2891
+111.66
+111.74
+111.76
+0.4721
+0.4724
+0.4725
+Boats
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.9105
+0.9087
+0.9093
+26.37
+26.15
+26.25
+0.2207
+0.2213
+0.2222
+158.79
+158.20
+153.99
+0.6714
+0.6689
+0.6511
+Bridge
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.7887
+0.7904
+0.7888
+24.16
+24.18
+23.89
+0.3110
+0.3104
+0.3107
+153.40
+149.19
+150.39
+0.6486
+0.6308
+0.6358
+CreepyAttic
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8902
+0.8908
+0.8902
+30.60
+30.70
+30.71
+0.2449
+0.2442
+0.2455
+167.08
+165.98
+167.41
+0.7064
+0.7018
+0.7078
+Hugo-1
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8454
+0.8468
+0.8451
+24.51
+24.45
+24.65
+0.1621
+0.1608
+0.1620
+111.38
+110.88
+114.41
+0.4709
+0.4688
+0.4837
+Continued on next page
+16
+Table A3 (continued)
+Scene
+Setting
+B
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Library
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.7775
+0.7798
+0.7818
+23.98
+24.10
+23.96
+0.3600
+0.3592
+0.3601
+244.56
+245.24
+247.66
+1.0340
+1.0369
+1.0471
+Lumber
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.7775
+0.7867
+0.7808
+21.81
+22.46
+21.99
+0.2704
+0.2634
+0.2670
+469.24
+495.92
+480.98
+1.9840
+2.0968
+2.0336
+Museum-1
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8435
+0.8450
+0.8443
+23.41
+23.49
+23.55
+0.1469
+0.1452
+0.1457
+223.95
+223.28
+223.91
+0.9469
+0.9440
+0.9467
+Museum-2
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8996
+0.9002
+0.8978
+27.56
+27.61
+27.58
+0.1061
+0.1056
+0.1082
+120.31
+121.68
+120.43
+0.5087
+0.5145
+0.5092
+NightSnow
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.9034
+0.9054
+0.9053
+29.98
+30.22
+30.45
+0.2216
+0.2200
+0.2199
+63.16
+64.62
+65.45
+0.2671
+0.2732
+0.2767
+Playroom
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8962
+0.8960
+0.8957
+30.12
+30.07
+29.93
+0.2888
+0.2883
+0.2891
+127.31
+129.12
+129.34
+0.5383
+0.5459
+0.5469
+Ponche
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8236
+0.8191
+0.8223
+23.22
+23.07
+23.09
+0.2491
+0.2537
+0.2505
+114.69
+114.83
+116.27
+0.4849
+0.4855
+0.4916
+SaintAnne
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8209
+0.8203
+0.8216
+25.74
+25.51
+25.66
+0.3277
+0.3309
+0.3284
+168.31
+160.94
+161.27
+0.7116
+0.6805
+0.6819
+Shed
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.9320
+0.9295
+0.9273
+27.67
+27.28
+27.41
+0.1943
+0.1963
+0.1999
+106.29
+107.75
+104.45
+0.4494
+0.4556
+0.4416
+Tree-18
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8056
+0.8052
+0.8028
+22.28
+22.22
+22.24
+0.1656
+0.1650
+0.1678
+87.19
+84.78
+92.55
+0.3686
+0.3584
+0.3913
+Yellowhouse-12
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.6540
+0.6608
+0.6537
+17.82
+18.09
+17.65
+0.3058
+0.2975
+0.3009
+96.52
+95.58
+97.89
+0.4081
+0.4041
+0.4139
+Mean
+Rate = 0.5
+Ours (Rate = 1.0)
+Rate = 1.5
+0.8441
+0.8451
+0.8440
+25.56
+25.59
+25.55
+0.2371
+0.2363
+0.2372
+150.83
+151.85
+151.77
+0.6377
+0.6420
+0.6417
+Detailed Results
+We provide detailed per-scene results on three benchmark datasets in the appendix. Speciﬁcally,
+Tables A4, A5, and A6 report per-scene rendering quality together with model size, Gaussian count,
+and training time for Deep Blending, Mip-NeRF 360, and Tanks & Temples, respectively.
+Table A4: Per-scene quality and efﬁciency on Deep Blending.
+Scene
+Method
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Time(s)↓
+Aquarium-20
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8060
+0.8692
+0.8507
+0.8653
+0.8418
+0.8509
+0.8738
+21.82
+22.66
+22.52
+25.77
+22.18
+23.81
+26.42
+0.2288
+0.1607
+0.1764
+0.1582
+0.1865
+0.1659
+0.1655
+183.16
+177.44
+272.31
+268.57
+159.86
+810.17
+41.76
+0.7700
+0.7500
+1.1300
+1.1400
+0.7900
+3.4300
+0.1800
+828
+942
+1034
+900
+743
+1329
+649
+Continued on next page
+17
+Table A4 (continued)
+Scene
+Method
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Time(s)↓
+Bedroom
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9012
+0.9072
+0.9045
+0.9041
+0.9070
+0.9007
+0.9073
+28.85
+28.86
+28.68
+28.82
+29.05
+28.28
+29.04
+0.2751
+0.2743
+0.2744
+0.2748
+0.2701
+0.2955
+0.2899
+253.97
+316.93
+473.69
+719.19
+283.22
+981.14
+111.74
+1.0700
+1.3400
+1.9700
+3.0400
+1.2200
+4.1500
+0.4700
+854
+691
+791
+834
+476
+976
+405
+Boats
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9036
+0.9122
+0.9159
+0.9145
+0.9137
+0.9054
+0.9087
+26.61
+26.68
+26.75
+26.98
+26.67
+25.73
+26.15
+0.2162
+0.2099
+0.1934
+0.1967
+0.2018
+0.2133
+0.2213
+399.18
+389.69
+629.55
+846.92
+344.09
+1063.13
+158.20
+1.6900
+1.6500
+2.6200
+3.5800
+1.4800
+4.5000
+0.6700
+737
+766
+930
+975
+568
+1111
+509
+Bridge
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7694
+0.8103
+0.8062
+0.8056
+0.7834
+0.7301
+0.7904
+22.65
+25.13
+24.41
+25.77
+23.59
+21.32
+24.18
+0.3123
+0.2884
+0.2848
+0.3049
+0.3078
+0.4274
+0.3104
+245.33
+259.22
+332.83
+305.77
+232.13
+952.32
+149.19
+1.0400
+1.1000
+1.3800
+1.2900
+0.9900
+4.0300
+0.6300
+701
+817
+921
+780
+593
+1269
+586
+CreepyAttic
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8821
+0.8924
+0.8860
+0.8841
+0.8890
+0.8682
+0.8908
+30.16
+30.52
+30.16
+30.24
+30.43
+29.41
+30.70
+0.2199
+0.2245
+0.2208
+0.2216
+0.2138
+0.2800
+0.2442
+704.01
+758.95
+1142.25
+1558.26
+711.70
+1172.18
+165.98
+2.9800
+3.2100
+4.7500
+6.5900
+2.9400
+4.9600
+0.7000
+829
+968
+1235
+1329
+596
+1005
+422
+Hugo-1
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7891
+0.8429
+0.8304
+0.8355
+0.8208
+0.8412
+0.8468
+22.58
+23.85
+22.80
+23.43
+23.39
+23.24
+24.45
+0.1804
+0.1394
+0.1486
+0.1393
+0.1597
+0.1433
+0.1608
+344.76
+321.95
+494.73
+496.32
+318.72
+873.89
+110.88
+1.4600
+1.3600
+2.0600
+2.1000
+1.4800
+3.6900
+0.4700
+811
+830
+1030
+923
+699
+1075
+574
+Library
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7311
+0.7806
+0.7629
+0.7767
+0.7682
+0.7616
+0.7798
+23.49
+23.87
+23.32
+23.73
+23.72
+23.33
+24.10
+0.4162
+0.3520
+0.3576
+0.3577
+0.3570
+0.3941
+0.3592
+738.66
+501.54
+829.34
+998.51
+568.79
+1129.81
+245.24
+3.1200
+2.1200
+3.4500
+4.2200
+2.5100
+4.7800
+1.0400
+991
+900
+1144
+1099
+682
+1216
+570
+Lumber
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7691
+0.7705
+0.7947
+0.7777
+0.7907
+0.7576
+0.7867
+22.04
+22.03
+22.61
+22.24
+22.67
+21.77
+22.46
+0.2559
+0.2787
+0.2381
+0.2638
+0.2445
+0.2694
+0.2634
+1163.96
+861.48
+1411.98
+1549.63
+921.82
+1275.84
+495.92
+4.9200
+3.6400
+5.8800
+6.5500
+3.9700
+5.3900
+2.1000
+1188
+1042
+1442
+1414
+755
+1208
+623
+Museum-1
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7931
+0.8364
+0.8363
+0.8346
+0.8339
+0.8451
+0.8450
+21.73
+23.32
+23.28
+23.15
+22.69
+23.20
+23.49
+0.1689
+0.1346
+0.1354
+0.1340
+0.1384
+0.1351
+0.1452
+568.56
+567.26
+807.78
+841.11
+554.20
+938.93
+223.28
+2.4000
+2.4000
+3.3600
+3.5600
+2.6700
+3.9700
+0.9400
+1005
+1272
+1451
+1321
+829
+1207
+691
+Museum-2
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8798
+0.8970
+0.8964
+0.8982
+0.8988
+0.9053
+0.9002
+25.48
+25.34
+25.81
+26.58
+25.64
+27.50
+27.61
+0.1109
+0.0985
+0.0976
+0.0932
+0.0951
+0.0891
+0.1056
+310.55
+333.72
+477.92
+561.85
+299.60
+877.42
+121.68
+1.3100
+1.4100
+1.9900
+2.3800
+1.2900
+3.9700
+0.5100
+782
+904
+1045
+1006
+676
+1140
+557
+Continued on next page
+18
+Table A4 (continued)
+Scene
+Method
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Time(s)↓
+NightSnow
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9033
+0.9095
+0.9160
+0.9119
+0.9153
+0.9080
+0.9054
+30.09
+30.53
+30.37
+30.13
+30.63
+29.56
+30.22
+0.2016
+0.1962
+0.1765
+0.1925
+0.1857
+0.1901
+0.2200
+145.95
+166.04
+251.49
+285.68
+131.93
+877.21
+64.62
+0.6200
+0.7000
+1.0500
+1.2100
+0.5400
+3.7100
+0.2700
+601
+625
+747
+658
+517
+1113
+465
+Playroom
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8893
+0.8919
+0.8906
+0.8892
+0.8949
+0.8858
+0.8960
+30.00
+29.99
+29.68
+29.62
+30.22
+29.59
+30.07
+0.2644
+0.2763
+0.2688
+0.2763
+0.2634
+0.2979
+0.2883
+405.12
+499.96
+797.40
+959.15
+444.93
+1080.89
+129.12
+1.7100
+2.1100
+3.3200
+4.0600
+1.9200
+4.5700
+0.5500
+679
+856
+1044
+995
+544
+962
+432
+Ponche
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8000
+0.8204
+0.8201
+0.8123
+0.8148
+0.8341
+0.8191
+22.31
+22.25
+21.80
+21.57
+22.09
+22.86
+23.07
+0.2376
+0.2464
+0.2250
+0.2360
+0.2333
+0.2067
+0.2537
+254.42
+205.92
+337.44
+404.74
+225.64
+848.29
+114.83
+1.0800
+0.8700
+1.4000
+1.7100
+0.9800
+3.5900
+0.4900
+690
+672
+842
+834
+589
+1094
+543
+SaintAnne
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8054
+0.8208
+0.8216
+0.8251
+0.8232
+0.8177
+0.8203
+25.09
+25.60
+25.27
+25.67
+25.58
+25.44
+25.51
+0.3259
+0.3398
+0.3238
+0.3082
+0.3078
+0.3163
+0.3309
+286.99
+171.70
+261.31
+757.02
+252.59
+893.32
+160.94
+1.2100
+0.7300
+1.0900
+3.2000
+1.2100
+3.7800
+0.6800
+704
+814
+819
+1055
+593
+1160
+576
+Shed
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9420
+0.9474
+0.9489
+0.9507
+0.9501
+0.9384
+0.9295
+32.32
+32.22
+32.32
+32.58
+32.34
+30.76
+27.28
+0.1593
+0.1657
+0.1452
+0.1487
+0.1474
+0.1547
+0.1963
+349.88
+312.16
+526.94
+664.38
+307.70
+983.32
+107.75
+1.4800
+1.3200
+2.1900
+2.8100
+1.1800
+4.1600
+0.4600
+713
+735
+912
+906
+563
+1126
+490
+Tree-18
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7458
+0.7974
+0.7887
+0.7958
+0.7705
+0.8036
+0.8052
+21.03
+20.75
+21.06
+21.76
+21.26
+21.98
+22.22
+0.2105
+0.1695
+0.1765
+0.1668
+0.2049
+0.1714
+0.1650
+216.07
+223.22
+289.15
+327.29
+192.28
+798.00
+84.78
+0.9100
+0.9400
+1.2000
+1.3800
+0.8800
+3.3700
+0.3600
+751
+838
+946
+884
+679
+1167
+639
+Yellowhouse-12
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.5812
+0.6554
+0.6414
+0.6670
+0.6371
+0.6394
+0.6608
+16.29
+17.11
+16.75
+17.61
+16.63
+16.27
+18.09
+0.3517
+0.2949
+0.3157
+0.2816
+0.3081
+0.3155
+0.2975
+236.54
+176.08
+238.22
+267.99
+180.94
+749.61
+95.58
+1.0000
+0.7400
+0.9900
+1.1300
+0.8500
+4.1600
+0.4000
+655
+642
+780
+709
+575
+970
+537
+Mean
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8171
+0.8448
+0.8418
+0.8440
+0.8384
+0.8349
+0.8451
+24.86
+25.34
+25.15
+25.63
+25.22
+24.94
+25.59
+0.2433
+0.2265
+0.2211
+0.2208
+0.2250
+0.2392
+0.2363
+400.42
+367.25
+563.20
+694.85
+360.60
+959.15
+151.85
+1.6900
+1.5500
+2.3400
+2.9400
+1.5800
+3.3700
+0.6400
+795
+842
+1006
+977
+628
+1125
+545
+19
+Table A5: Per-scene quality and efﬁciency on Mip-NeRF 360.
+Scene
+Method
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Time(s)↓
+Bicycle
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7817
+0.7666
+0.7924
+0.7817
+0.7899
+0.7165
+0.7861
+25.26
+25.28
+25.55
+25.26
+25.42
+23.57
+25.36
+0.1720
+0.2081
+0.1669
+0.1720
+0.1696
+0.2508
+0.1799
+1411.36
+1154.55
+1977.66
+2142.21
+1437.29
+1425.72
+543.99
+5.9700
+4.8800
+8.2300
+9.0600
+6.0800
+6.0300
+2.3000
+1084
+1084
+1674
+1639
+807
+1031
+597
+Bonsai
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9575
+0.9434
+0.9588
+0.9575
+0.9552
+0.9353
+0.9455
+32.67
+31.54
+32.95
+32.67
+32.22
+29.05
+31.07
+0.0847
+0.0964
+0.0819
+0.0847
+0.0901
+0.1055
+0.1143
+198.66
+253.60
+385.98
+481.79
+184.95
+882.88
+76.09
+0.8400
+1.0700
+1.6100
+2.0400
+0.7800
+3.7300
+0.3200
+360
+360
+485
+499
+261
+715
+249
+Counter
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9216
+0.9212
+0.9249
+0.9216
+0.9174
+0.8804
+0.9127
+29.35
+28.43
+29.62
+29.35
+28.95
+26.38
+28.83
+0.1073
+0.1121
+0.1042
+0.1073
+0.1136
+0.1465
+0.1251
+190.66
+235.90
+343.31
+574.00
+188.99
+880.19
+69.44
+0.8100
+1.0000
+1.4300
+2.4300
+0.8000
+3.7200
+0.2900
+411
+411
+494
+613
+283
+770
+254
+Flowers
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.6210
+0.6044
+0.6404
+0.6210
+0.6224
+0.5724
+0.6199
+21.26
+21.50
+21.68
+21.26
+21.34
+20.85
+21.32
+0.2706
+0.3366
+0.2732
+0.2706
+0.2746
+0.3516
+0.2811
+907.98
+686.30
+1104.81
+1774.43
+878.11
+1152.61
+379.47
+3.8400
+2.9000
+4.6000
+7.5000
+3.7100
+4.8700
+1.6000
+732
+732
+1044
+1433
+622
+967
+530
+Garden
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8716
+0.8680
+0.8772
+0.8716
+0.8715
+0.8300
+0.8689
+27.55
+27.45
+27.66
+27.55
+27.44
+25.73
+27.49
+0.0991
+0.1063
+0.0945
+0.0991
+0.1006
+0.1476
+0.1056
+896.76
+981.85
+1499.50
+2075.27
+1042.35
+1375.65
+461.87
+3.7900
+4.1500
+6.2400
+8.7700
+4.4100
+5.8200
+1.9500
+1003
+1003
+1472
+1654
+767
+1136
+613
+Kitchen
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9495
+0.9488
+0.9498
+0.9495
+0.9483
+0.9208
+0.9359
+32.58
+32.25
+32.26
+32.58
+32.12
+28.93
+30.59
+0.0652
+0.0667
+0.0638
+0.0652
+0.0676
+0.0969
+0.0843
+245.16
+363.99
+492.76
+720.13
+249.48
+864.55
+84.22
+1.0400
+1.5400
+2.0500
+3.0400
+1.0500
+3.6600
+0.3600
+483
+483
+589
+710
+321
+791
+258
+Room
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.9448
+0.9343
+0.9464
+0.9448
+0.9431
+0.9238
+0.9385
+32.23
+32.40
+32.49
+32.23
+31.97
+29.64
+31.87
+0.1068
+0.1118
+0.1040
+0.1068
+0.1097
+0.1347
+0.1230
+268.59
+272.45
+452.25
+581.21
+262.01
+966.48
+62.42
+1.1400
+1.1500
+1.8800
+2.4600
+1.1100
+4.0900
+0.2600
+400
+400
+509
+542
+275
+730
+227
+Stump
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.7768
+0.7714
+0.7902
+0.7768
+0.7943
+0.7601
+0.7830
+26.66
+26.66
+26.89
+26.66
+26.96
+26.03
+26.83
+0.1967
+0.2163
+0.1883
+0.1967
+0.1874
+0.2282
+0.2051
+1106.18
+1026.20
+1440.26
+1618.47
+949.72
+1274.58
+318.65
+4.6800
+4.3400
+5.9900
+6.8400
+4.0200
+5.3900
+1.3500
+869
+869
+1218
+1262
+613
+949
+455
+Treehill
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.6139
+0.6335
+0.6387
+0.6139
+0.6246
+0.6244
+0.6253
+21.96
+22.49
+22.34
+21.96
+22.06
+22.05
+21.79
+0.2795
+0.3251
+0.2744
+0.2795
+0.2786
+0.3254
+0.2936
+1221.96
+770.88
+1223.14
+1868.62
+1171.14
+1154.33
+472.37
+5.1700
+3.2600
+5.0900
+7.9000
+4.9500
+4.8800
+2.0000
+807
+807
+1118
+1396
+700
+944
+552
+Continued on next page
+20
+Table A5 (continued)
+Scene
+Method
+Mean
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Time(s)↓
+0.8265
+0.8213
+0.8354
+0.8265
+0.8296
+0.7960
+0.8240
+27.72
+27.56
+27.94
+27.72
+27.61
+25.80
+27.24
+0.1535
+0.1755
+0.1501
+0.1535
+0.1546
+0.1986
+0.1680
+716.37
+638.41
+991.07
+1315.13
+764.32
+1108.55
+274.28
+3.0300
+2.7000
+4.1200
+5.5600
+2.9900
+4.6900
+1.1600
+683
+683
+955
+1083
+516
+892
+415
+Table A6: Per-scene quality and efﬁciency on Tanks & Temples.
+C
+Scene
+Method
+SSIM↑
+PSNR↑
+LPIPS↓
+Size(MB)↓
+Points(M)↓
+Time(s)↓
+Train
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8166
+0.8202
+0.8266
+0.8279
+0.8129
+0.7099
+0.8103
+21.64
+22.04
+21.87
+22.13
+21.53
+18.77
+21.54
+0.1942
+0.1963
+0.1893
+0.1780
+0.2068
+0.3234
+0.2298
+230.86
+258.35
+354.45
+906.22
+223.96
+937.32
+123.27
+0.9800
+1.0900
+1.4700
+3.8300
+0.9500
+3.9600
+0.5200
+401
+510
+611
+838
+326
+855
+335
+Truck
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8874
+0.8851
+0.8930
+0.8868
+0.8858
+0.8573
+0.8813
+25.71
+25.47
+25.74
+25.48
+25.49
+23.66
+25.21
+0.1314
+0.1418
+0.1231
+0.1203
+0.1380
+0.1583
+0.1434
+388.02
+487.82
+784.70
+1228.62
+415.07
+1084.63
+177.46
+1.6400
+2.0600
+3.2700
+5.1900
+1.7500
+4.5900
+0.7500
+464
+593
+820
+1053
+374
+859
+331
+Mean
+AbsGS
+3DGS
+Mip-Splatting
+Pixel-GS
+GDAGS
+Mini-Splatting
+ACD-GS
+0.8520
+0.8527
+0.8598
+0.8574
+0.8494
+0.7836
+0.8458
+23.68
+23.76
+23.80
+23.81
+23.51
+21.22
+23.37
+0.1628
+0.1691
+0.1562
+0.1492
+0.1724
+0.2409
+0.1866
+309.44
+373.09
+569.58
+1067.42
+319.51
+1010.98
+150.37
+1.3100
+1.5800
+2.3700
+4.5100
+1.3500
+4.2700
+0.6400
+432
+551
+715
+945
+350
+857
+333
+More Visual comparison
+Figure 5: Qualitative comparison of Gaussian distributions. Our curvature-aware strategy allocates
+sparse and elongated Gaussians to smooth surfaces, while preserving sharp boundaries with compact
+ﬁne-scale primitives.
+D
+Geometric Reconstruction
+To verify whether the proposed geometry-aware densiﬁcation preserves reconstructed geometry, we
+conduct an additional surface reconstruction evaluation. Speciﬁcally, we extract meshes from the
+reconstructed Gaussian representations and evaluate them using Precision, Recall, and F-score. The
+results are reported in Table A7.
+Our method primarily aims to obtain a more compact Gaussian representation while maintaining
+comparable novel-view synthesis quality, without introducing additional geometric supervision or
+21
+Table A7: Geometric reconstruction evaluation using Precision, Recall, and F-score.
+Method
+ACD-GS
+AbsGS
+3DGS
+GDAGS
+Mini-Splatting
+Mip-Splatting
+Pixel-GS
+Precision(%)↑
+Recall(%)↑
+F-score(%)↑
+Points↓
+66.34
+69.58
+60.52
+66.13
+56.04
+66.02
+68.16
+91.21
+93.33
+79.08
+88.80
+85.58
+88.60
+86.41
+76.81
+79.72
+68.57
+75.81
+67.72
+78.03
+76.21
+642,044
+1,693,016
+1,552,777
+1,582,823
+4,495,856
+2,343,461
+2,937,890
+explicit constraints on reconstruction accuracy. ACD-GS uses only approximately 38% and 41%
+of the Gaussian primitives required by AbsGS and GDAGS, respectively. Moreover, because ACDGS tends to represent planar regions with fewer and larger Gaussians, TSDF-based surface extraction may be more susceptible to holes and local reconstruction errors. Nevertheless, ACD-GS still
+achieves competitive geometric reconstruction quality, indicating that curvature-aware densiﬁcation
+preserves essential scene structures despite the substantially reduced Gaussian budget.
+22
+NeurIPS Paper Checklist
+1. Claims
+Question: Do the main claims made in the abstract and introduction accurately reﬂect the
+paper’s contributions and scope?
+Answer: [Yes]
+Justiﬁcation: The abstract and introduction reﬂect the papers contributions and scope.
+Guidelines:
+• The answer [N/A] means that the abstract and introduction do not include the claims
+made in the paper.
+• The abstract and/or introduction should clearly state the claims made, including the
+contributions made in the paper and important assumptions and limitations. A [No] or
+[N/A] answer to this question will not be perceived well by the reviewers.
+• The claims made should match theoretical and experimental results, and reﬂect how
+much the results can be expected to generalize to other settings.
+• It is ﬁne to include aspirational goals as motivation as long as it is clear that these
+goals are not attained by the paper.
+2. Limitations
+Question: Does the paper discuss the limitations of the work performed by the authors?
+Answer: [Yes]
+Justiﬁcation: We discuss the limitations of this work in a single section.
+Guidelines:
+• The answer [N/A] means that the paper has no limitation while the answer [No] means
+that the paper has limitations, but those are not discussed in the paper.
+• The authors are encouraged to create a separate “Limitations” section in their paper.
+• The paper should point out any strong assumptions and how robust the results are to
+violations of these assumptions (e.g., independence assumptions, noiseless settings,
+model well-speciﬁcation, asymptotic approximations only holding locally). The authors should reﬂect on how these assumptions might be violated in practice and what
+the implications would be.
+• The authors should reﬂect on the scope of the claims made, e.g., if the approach was
+only tested on a few datasets or with a few runs. In general, empirical results often
+depend on implicit assumptions, which should be articulated.
+• The authors should reﬂect on the factors that inﬂuence the performance of the approach. For example, a facial recognition algorithm may perform poorly when image
+resolution is low or images are taken in low lighting. Or a speech-to-text system might
+not be used reliably to provide closed captions for online lectures because it fails to
+handle technical jargon.
+• The authors should discuss the computational efﬁciency of the proposed algorithms
+and how they scale with dataset size.
+• If applicable, the authors should discuss possible limitations of their approach to address problems of privacy and fairness.
+• While the authors might fear that complete honesty about limitations might be used by
+reviewers as grounds for rejection, a worse outcome might be that reviewers discover
+limitations that aren’t acknowledged in the paper. The authors should use their best
+judgment and recognize that individual actions in favor of transparency play an important role in developing norms that preserve the integrity of the community. Reviewers
+will be speciﬁcally instructed to not penalize honesty concerning limitations.
+3. Theory assumptions and proofs
+Question: For each theoretical result, does the paper provide the full set of assumptions and
+a complete (and correct) proof?
+Answer: [Yes]
+23
+Justiﬁcation: The assumptions for each theoretical result are clearly stated.
+Guidelines:
+• The answer [N/A] means that the paper does not include theoretical results.
+• All the theorems, formulas, and proofs in the paper should be numbered and crossreferenced.
+• All assumptions should be clearly stated or referenced in the statement of any theorems.
+• The proofs can either appear in the main paper or the supplemental material, but if
+they appear in the supplemental material, the authors are encouraged to provide a
+short proof sketch to provide intuition.
+• Inversely, any informal proof provided in the core of the paper should be complemented by formal proofs provided in appendix or supplemental material.
+• Theorems and Lemmas that the proof relies upon should be properly referenced.
+4. Experimental result reproducibility
+Question: Does the paper fully disclose all the information needed to reproduce the main
+experimental results of the paper to the extent that it affects the main claims and/or conclusions of the paper (regardless of whether the code and data are provided or not)?
+Answer: [Yes]
+Justiﬁcation: We provide sufﬁcient information to reproduce the main experimental results
+and the code will be released.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• If the paper includes experiments, a [No] answer to this question will not be perceived well by the reviewers: Making the paper reproducible is important, regardless
+of whether the code and data are provided or not.
+• If the contribution is a dataset and/or model, the authors should describe the steps
+taken to make their results reproducible or veriﬁable.
+• Depending on the contribution, reproducibility can be accomplished in various ways.
+For example, if the contribution is a novel architecture, describing the architecture
+fully might sufﬁce, or if the contribution is a speciﬁc model and empirical evaluation,
+it may be necessary to either make it possible for others to replicate the model with
+the same dataset, or provide access to the model. In general. releasing code and data
+is often one good way to accomplish this, but reproducibility can also be provided via
+detailed instructions for how to replicate the results, access to a hosted model (e.g., in
+the case of a large language model), releasing of a model checkpoint, or other means
+that are appropriate to the research performed.
+• While NeurIPS does not require releasing code, the conference does require all submissions to provide some reasonable avenue for reproducibility, which may depend
+on the nature of the contribution. For example
+(a) If the contribution is primarily a new algorithm, the paper should make it clear
+how to reproduce that algorithm.
+(b) If the contribution is primarily a new model architecture, the paper should describe
+the architecture clearly and fully.
+(c) If the contribution is a new model (e.g., a large language model), then there should
+either be a way to access this model for reproducing the results or a way to reproduce the model (e.g., with an open-source dataset or instructions for how to
+construct the dataset).
+(d) We recognize that reproducibility may be tricky in some cases, in which case authors are welcome to describe the particular way they provide for reproducibility.
+In the case of closed-source models, it may be that access to the model is limited in
+some way (e.g., to registered users), but it should be possible for other researchers
+to have some path to reproducing or verifying the results.
+5. Open access to data and code
+24
+Question: Does the paper provide open access to the data and code, with sufﬁcient instructions to faithfully reproduce the main experimental results, as described in supplemental
+material?
+Answer: [Yes]
+Justiﬁcation: We provide the implementation code of our method and model checkpoints.
+Guidelines:
+• The answer [N/A] means that paper does not include experiments requiring code.
+• Please see the NeurIPS code and data submission guidelines (https://neurips.cc/
+public/guides/CodeSubmissionPolicy) for more details.
+• While we encourage the release of code and data, we understand that this might not
+be possible, so [No] is an acceptable answer. Papers cannot be rejected simply for not
+including code, unless this is central to the contribution (e.g., for a new open-source
+benchmark).
+• The instructions should contain the exact command and environment needed to run to
+reproduce the results. See the NeurIPS code and data submission guidelines (https:
+//neurips.cc/public/guides/CodeSubmissionPolicy) for more details.
+• The authors should provide instructions on data access and preparation, including how
+to access the raw data, preprocessed data, intermediate data, and generated data, etc.
+• The authors should provide scripts to reproduce all experimental results for the new
+proposed method and baselines. If only a subset of experiments are reproducible, they
+should state which ones are omitted from the script and why.
+• At submission time, to preserve anonymity, the authors should release anonymized
+versions (if applicable).
+• Providing as much information as possible in supplemental material (appended to the
+paper) is recommended, but including URLs to data and code is permitted.
+6. Experimental setting/details
+Question: Does the paper specify all the training and test details (e.g., data splits, hyperparameters, how they were chosen, type of optimizer) necessary to understand the results?
+Answer: [Yes]
+Justiﬁcation: We specify all the training and test details.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The experimental setting should be presented in the core of the paper to a level of
+detail that is necessary to appreciate the results and make sense of them.
+• The full details can be provided either with the code, in appendix, or as supplemental
+material.
+7. Experiment statistical signiﬁcance
+Question: Does the paper report error bars suitably and correctly deﬁned or other appropriate information about the statistical signiﬁcance of the experiments?
+Answer: [No]
+Justiﬁcation: The paper does not include hypothesis testing or statistical signiﬁcance analysis, and error bars are not a focus of the experiments.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The authors should answer [Yes] if the results are accompanied by error bars, conﬁdence intervals, or statistical signiﬁcance tests, at least for the experiments that support
+the main claims of the paper.
+• The factors of variability that the error bars are capturing should be clearly stated (for
+example, train/test split, initialization, random drawing of some parameter, or overall
+run with given experimental conditions).
+• The method for calculating the error bars should be explained (closed form formula,
+call to a library function, bootstrap, etc.)
+25
+• The assumptions made should be given (e.g., Normally distributed errors).
+• It should be clear whether the error bar is the standard deviation or the standard error
+of the mean.
+• It is OK to report 1-sigma error bars, but one should state it. The authors should preferably report a 2-sigma error bar than state that they have a 96% CI, if the hypothesis of
+Normality of errors is not veriﬁed.
+• For asymmetric distributions, the authors should be careful not to show in tables or ﬁgures symmetric error bars that would yield results that are out of range (e.g., negative
+error rates).
+• If error bars are reported in tables or plots, the authors should explain in the text how
+they were calculated and reference the corresponding ﬁgures or tables in the text.
+8. Experiments compute resources
+Question: For each experiment, does the paper provide sufﬁcient information on the computer resources (type of compute workers, memory, time of execution) needed to reproduce
+the experiments?
+Answer: [Yes]
+Justiﬁcation: The computational resources are discussed in the Implementation section,
+providing sufﬁcient information to reproduce the experiments.
+Guidelines:
+• The answer [N/A] means that the paper does not include experiments.
+• The paper should indicate the type of compute workers CPU or GPU, internal cluster,
+or cloud provider, including relevant memory and storage.
+• The paper should provide the amount of compute required for each of the individual
+experimental runs as well as estimate the total compute.
+• The paper should disclose whether the full research project required more compute
+than the experiments reported in the paper (e.g., preliminary or failed experiments
+that didn’t make it into the paper).
+9. Code of ethics
+Question: Does the research conducted in the paper conform, in every respect, with the
+NeurIPS Code of Ethics https://neurips.cc/public/EthicsGuidelines?
+Answer: [Yes]
+Justiﬁcation: The research conducted in the paper conﬁrms the NeurIPS code of Ethics.
+Guidelines:
+• The answer [N/A] means that the authors have not reviewed the NeurIPS Code of
+Ethics.
+• If the authors answer [No], they should explain the special circumstances that require
+a deviation from the Code of Ethics.
+• The authors should make sure to preserve anonymity (e.g., if there is a special consideration due to laws or regulations in their jurisdiction).
+10. Broader impacts
+Question: Does the paper discuss both potential positive societal impacts and negative
+societal impacts of the work performed?
+Answer: [N/A]
+Justiﬁcation: Our work mainly focuses on the improvement of algorithms and models,
+rather than areas directly related to social or ethical issues.
+Guidelines:
+• The answer [N/A] means that there is no societal impact of the work performed.
+• If the authors answer [N/A] or [No], they should explain why their work has no societal impact or why the paper does not address societal impact.
+26
+• Examples of negative societal impacts include potential malicious or unintended uses
+(e.g., disinformation, generating fake proﬁles, surveillance), fairness considerations
+(e.g., deployment of technologies that could make decisions that unfairly impact speciﬁc groups), privacy considerations, and security considerations.
+• The conference expects that many papers will be foundational research and not tied
+to particular applications, let alone deployments. However, if there is a direct path to
+any negative applications, the authors should point it out. For example, it is legitimate
+to point out that an improvement in the quality of generative models could be used to
+generate Deepfakes for disinformation. On the other hand, it is not needed to point out
+that a generic algorithm for optimizing neural networks could enable people to train
+models that generate Deepfakes faster.
+• The authors should consider possible harms that could arise when the technology is
+being used as intended and functioning correctly, harms that could arise when the
+technology is being used as intended but gives incorrect results, and harms following
+from (intentional or unintentional) misuse of the technology.
+• If there are negative societal impacts, the authors could also discuss possible mitigation strategies (e.g., gated release of models, providing defenses in addition to attacks,
+mechanisms for monitoring misuse, mechanisms to monitor how a system learns from
+feedback over time, improving the efﬁciency and accessibility of ML).
+11. Safeguards
+Question: Does the paper describe safeguards that have been put in place for responsible
+release of data or models that have a high risk for misuse (e.g., pre-trained language models,
+image generators, or scraped datasets)?
+Answer: [N/A]
+Justiﬁcation: The paper poses no such risks.
+Guidelines:
+• The answer [N/A] means that the paper poses no such risks.
+• Released models that have a high risk for misuse or dual-use should be released with
+necessary safeguards to allow for controlled use of the model, for example by requiring that users adhere to usage guidelines or restrictions to access the model or
+implementing safety ﬁlters.
+• Datasets that have been scraped from the Internet could pose safety risks. The authors
+should describe how they avoided releasing unsafe images.
+• We recognize that providing effective safeguards is challenging, and many papers do
+not require this, but we encourage authors to take this into account and make a best
+faith effort.
+12. Licenses for existing assets
+Question: Are the creators or original owners of assets (e.g., code, data, models), used in
+the paper, properly credited and are the license and terms of use explicitly mentioned and
+properly respected?
+Answer: [Yes]
+Justiﬁcation: All resources used in our paper, including code, data, and models, strictly
+adhere to appropriate licenses and terms of use, and have been appropriately authored by
+the original owner
+Guidelines:
+• The answer [N/A] means that the paper does not use existing assets.
+• The authors should cite the original paper that produced the code package or dataset.
+• The authors should state which version of the asset is used and, if possible, include a
+URL.
+• The name of the license (e.g., CC-BY 4.0) should be included for each asset.
+• For scraped data from a particular source (e.g., website), the copyright and terms of
+service of that source should be provided.
+27
+• If assets are released, the license, copyright information, and terms of use in the package should be provided. For popular datasets, paperswithcode.com/datasets has
+curated licenses for some datasets. Their licensing guide can help determine the license of a dataset.
+• For existing datasets that are re-packaged, both the original license and the license of
+the derived asset (if it has changed) should be provided.
+• If this information is not available online, the authors are encouraged to reach out to
+the asset’s creators.
+13. New assets
+Question: Are new assets introduced in the paper well documented and is the documentation provided alongside the assets?
+Answer: [Yes]
+Justiﬁcation: The code is provided and includes accompanying documentation.
+Guidelines:
+• The answer [N/A] means that the paper does not release new assets.
+• Researchers should communicate the details of the dataset/code/model as part of their
+submissions via structured templates. This includes details about training, license,
+limitations, etc.
+• The paper should discuss whether and how consent was obtained from people whose
+asset is used.
+• At submission time, remember to anonymize your assets (if applicable). You can
+either create an anonymized URL or include an anonymized zip ﬁle.
+14. Crowdsourcing and research with human subjects
+Question: For crowdsourcing experiments and research with human subjects, does the paper include the full text of instructions given to participants and screenshots, if applicable,
+as well as details about compensation (if any)?
+Answer: [N/A]
+Justiﬁcation: This work does not involve crowdsourcing nor research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Including this information in the supplemental material is ﬁne, but if the main contribution of the paper involves human subjects, then as much detail as possible should
+be included in the main paper.
+• According to the NeurIPS Code of Ethics, workers involved in data collection, curation, or other labor should be paid at least the minimum wage in the country of the
+data collector.
+15. Institutional review board (IRB) approvals or equivalent for research with human
+subjects
+Question: Does the paper describe potential risks incurred by study participants, whether
+such risks were disclosed to the subjects, and whether Institutional Review Board (IRB)
+approvals (or an equivalent approval/review based on the requirements of your country or
+institution) were obtained?
+Answer: [N/A]
+Justiﬁcation: the paper does not involve crowdsourcing nor research with human subjects.
+Guidelines:
+• The answer [N/A] means that the paper does not involve crowdsourcing nor research
+with human subjects.
+• Depending on the country in which research is conducted, IRB approval (or equivalent) may be required for any human subjects research. If you obtained IRB approval,
+you should clearly state this in the paper.
+28
+• We recognize that the procedures for this may vary signiﬁcantly between institutions
+and locations, and we expect authors to adhere to the NeurIPS Code of Ethics and the
+guidelines for their institution.
+• For initial submissions, do not include any information that would break anonymity
+(if applicable), such as the institution conducting the review.
+16. Declaration of LLM usage
+Question: Does the paper describe the usage of LLMs if it is an important, original, or
+non-standard component of the core methods in this research? Note that if the LLM is used
+only for writing, editing, or formatting purposes and does not impact the core methodology,
+scientiﬁc rigor, or originality of the research, declaration is not required.
+Answer:[N/A]
+Justiﬁcation: We use LLM for writing, editing, and formatting purposes. Coding Agents
+are only used to manage training tasks.
+Guidelines:
+• The answer [N/A] means that the core method development in this research does not
+involve LLMs as any important, original, or non-standard components.
+• Please refer to our LLM policy in the NeurIPS handbook for what should or should
+not be described.
+29

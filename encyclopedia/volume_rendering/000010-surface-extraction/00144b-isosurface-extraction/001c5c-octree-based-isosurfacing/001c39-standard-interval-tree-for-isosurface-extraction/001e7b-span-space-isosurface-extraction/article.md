@@ -3,165 +3,101 @@
 Also called: Span Space Algorithm, Livat, Shen, and Johnson method
 
 ## Overview
-Span Space Isosurface Extraction is a method for rapidly locating cells intersecting an isosurface in large scalar datasets by mapping cell extrema to a 2D "span space" and indexing them with a kd-tree [S1, book]. It solves the problem of efficient interval search by reducing the dimensionality of the query from interval containment to point location relative to the diagonal $y=x$ [S1, book]. Unlike the Standard Interval Tree for Isosurface Extraction, which achieves $O(\log n + k)$ query complexity, this method achieves a worst-case search complexity of $O(\sqrt{n} + k)$ [S1, book]. It is chosen when a simpler, pointerless kd-tree implementation is preferred over complex interval tree structures, accepting a slightly higher worst-case asymptotic bound for potentially better constant factors and memory locality [S1, book].
+Span Space Isosurface Extraction is a method for rapidly locating all volume cells intersecting a specific isovalue by mapping cell scalar extrema into a 2D coordinate system known as "span space" [S1, book]. It solves the problem of efficient active cell identification in large datasets by reducing the search to a 2D range query, achieving a worst-case search complexity of $O(\sqrt{n} + k)$, where $n$ is the dataset size and $k$ is the number of cells in the isosurface [S1, book]. It differs from sibling methods by explicitly leveraging the geometric properties of min/max value pairs in a 2D plane rather than relying solely on hierarchical spatial subdivision of the domain [6891-span-space-decomposition.md].
 
 ## How it works
+**Inputs and Outputs**
+*   **Input:** A volume dataset consisting of $n$ cells. For each cell $i$, the minimum scalar value $a_i$ and maximum scalar value $b_i$ among its vertices are precomputed. An isovalue $v$ (or $t$) defining the surface.
+*   **Output:** A list of all cells $i$ such that $a_i < v < b_i$ [S1, book].
 
-### Inputs and Outputs
-**Inputs:**
-*   A scalar volume dataset consisting of $n$ cells.
-*   For each cell $i$, the minimum vertex value $a_i$ and maximum vertex value $b_i$.
-*   An isovalue $v$ (or $t$).
+**Data Structures**
+The core data structure is a kd-tree built over the span space points [S1, book].
 
-**Outputs:**
-*   A list of all cells $i$ such that $a_i < v < b_i$ (active cells).
+1.  **Span Space Point:** Each cell $c_i$ is represented as a point $p_i = (a_i, b_i)$ in $\mathbb{R}^2$, where $a_i = \min_j \{v_j\}_i$ and $b_i = \max_j \{v_j\}_i$ [S1, book]. All points lie on or above the line $y=x$ because $a_i \le b_i$ [S1, book].
+2.  **Kd-Tree Node:**
+    *   **Standard Layout:** Each node stores one span point coordinate (alternating between min and max dimensions at each level) and two child pointers [S1, book].
+    *   **Pointerless Layout:** To reduce memory overhead, the tree can be stored in a 1D array. The root is at the middle index. The left subtree occupies the first $n/2$ nodes, and the right subtree occupies the last $(n-1)/2$ nodes [S1, book].
+    *   **Per-Cell Storage (Pointerless):** 2 bytes for $v_{min}$, 2 bytes for $v_{max}$, and 4 bytes for a pointer back to the original cell data, totaling 8 bytes per cell [S2, unofficial].
 
-### Data Structures
-
-**Span Space Point:**
-Each cell $i$ is represented as a point $p_i = (a_i, b_i)$ in 2D span space, where $a_i = \min_j \{v_j\}_i$ and $b_i = \max_j \{v_j\}_i$ [S1, book]. By definition, $a_i \le b_i$, so all points lie on or above the line $y=x$ [S1, book].
-
-**Kd-Tree Node (Pointerless Layout):**
-The kd-tree is stored as a 1D array to save pointer overhead [S1, book].
-*   **Structure:** A completely balanced binary tree.
-*   **Root:** Placed at the middle index of the array.
-*   **Children:** For a node at index $m$ in a subtree of size $N$, the left child occupies the first $N/2$ nodes of the remaining space, and the right child occupies the last $(N-1)/2$ nodes [S1, book].
-*   **Fields per Node:**
-    1.  `min`: The minimum value $a_i$ of the cell (stored at odd levels of recursion, alternating with max).
-    2.  `max`: The maximum value $b_i$ of the cell.
-    3.  `cell_ptr`: A pointer/reference to the original cell data [S1, book].
-*   **Memory:** 2 real numbers + 1 pointer per node. If values are 2 bytes and pointer is 4 bytes, this totals 8 bytes per cell plus tree structure overhead [S2, unofficial].
-
-### Construction Phase
-
-1.  **Compute Extrema:** For every cell $i$ in the dataset, calculate $a_i = \min(\text{vertex values})$ and $b_i = \max(\text{vertex values})$ [S1, book].
-2.  **Build Kd-Tree:** Recursively partition the set of span points $P = \{p_i\}$ into a kd-tree [S1, book].
-    *   At each level, alternate the splitting dimension between the minimum coordinate ($x$) and maximum coordinate ($y$) [S1, book].
-    *   Select the median value of the current dimension using a Quicksort-based selection algorithm [S1, book].
-        *   *Note:* While worst-case is $O(n^2)$, average case is $O(n)$, requiring no additional memory [S1, book].
-    *   Partition points into left subtree (values $<$ median) and right subtree (values $>$ median) [S1, book].
-    *   Store the median value in the current node.
+**Construction Phase**
+1.  Compute $a_i$ and $b_i$ for all $n$ cells.
+2.  Recursively build a balanced kd-tree:
+    *   At each level, select a dimension to split on (alternating between min-coordinate and max-coordinate) [S1, book].
+    *   Find the median value of the data points along the current dimension. The sources suggest using a Quicksort-based selection algorithm, which has an average case complexity of $O(n)$ and requires no additional memory [S1, book].
+    *   Partition the data into two subsets: those with values less than the median and those greater [S1, book].
     *   Repeat recursively until leaf nodes are reached [S1, book].
-3.  **Flatten:** Store the resulting balanced kd-tree in a 1D array using the pointerless layout described above [S1, book].
+    *   Total construction complexity is $O(n \log n)$ [S1, book].
 
-### Query Phase
+**Query Phase**
+Given an isovalue $v$, the goal is to find all points $(x_i, y_i)$ such that $x_i < v < y_i$ [S1, book]. Geometrically, this corresponds to finding points to the left of the vertical line $x=v$ and above the horizontal line $y=v$ (i.e., upper-left of $(v,v)$) [S2, unofficial].
 
-Given an isovalue $v$, the goal is to find all points $(a_i, b_i)$ such that $a_i < v < b_i$ [S1, book]. Geometrically, this corresponds to points strictly to the left of the vertical line $x=v$ and strictly above the horizontal line $y=v$ (upper-left of $(v,v)$) [S2, unofficial].
+The search uses two recursive routines: `SearchMinMax` and `SearchMaxMin`. The first name indicates the dimension currently being checked; the second indicates the dimension still needing search [S1, book].
 
-**Search Routines:**
-Two recursive routines are defined based on the current splitting dimension:
-1.  `SearchMinMax(isovalue, node)`: Used when the current node splits on the **minimum** dimension ($x$).
-2.  `SearchMaxMin(isovalue, node)`: Used when the current node splits on the **maximum** dimension ($y$).
+1.  **SearchMinMax(isovalue, node):**
+    *   Check `node.min` against `isovalue`.
+    *   If `node.min < isovalue`:
+        *   The minimum condition is satisfied. Check `node.max`.
+        *   If `node.max > isovalue`, the cell intersects the isosurface. Construct polygon(s) from the node [S1, book].
+        *   Recursively call `SearchMaxMin(isovalue, node.right)`.
+    *   Recursively call `SearchMaxMin(isovalue, node.left)` [S1, book].
 
-**Logic:**
-*   If the region corresponding to a node is entirely contained in the area upper-left of $(v,v)$, report all cells in that subtree as active [S2, unofficial].
-*   If the region is disjoint from that area, report them as empty [S2, unofficial].
-*   Otherwise, traverse children.
+2.  **SearchMaxMin(isovalue, node):**
+    *   Check `node.max` against `isovalue`.
+    *   If `node.max > isovalue`:
+        *   The maximum condition is satisfied. Check `node.min`.
+        *   If `node.min < isovalue`, the cell intersects. Construct polygon(s) [S1, book].
+        *   Recursively call `SearchMinMax(isovalue, node.left)`.
+    *   Recursively call `SearchMinMax(isovalue, node.right)` [S1, book].
 
-**Pseudocode:**
+**Optimized Search (Search-Min / Search-Max)**
+To improve performance, the algorithm can skip levels when one condition is already known to be satisfied [S1, book].
 
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+1.  **Search-Min(isovalue, node):**
+    *   Used when the maximum condition is already satisfied (e.g., we are in a subtree where all points have $y > v$).
+    *   If `isovalue > node.min`:
+        *   The left subtree's minimum condition is satisfied for all its nodes.
+        *   Skip odd levels for the left subtree and sequentially traverse the contiguous block of nodes representing that subtree to report active cells [S1, book].
+    *   Recursively call `Search-Max(isovalue, node.right)` [S1, book].
 
-```python
-def search_min_max(isovalue, node):
-    """
-    Called when 'node' splits on the minimum dimension (x).
-    We check if node.min < isovalue.
-    """
-    if node.min < isovalue:
-        # The minimum condition is satisfied for this node and potentially its left subtree.
-        if node.max > isovalue:
-            # This specific cell intersects the isosurface.
-            construct_polygon_from_cell(node.cell_ptr)
-        
-        # Since node.min < isovalue, the left subtree (all values < node.min)
-        # also satisfies the min condition. We can skip checking min for them.
-        # We switch to SearchMaxMin for the left subtree.
-        search_max_min(isovalue, node.left)
-        
-        # For the right subtree, node.min > isovalue is NOT guaranteed.
-        # We must check min again.
-        search_min_max(isovalue, node.right)
-    else:
-        # node.min >= isovalue.
-        # The left subtree (values < node.min) might still have min < isovalue?
-        # No, left subtree values are < node.min. If node.min >= isovalue,
-        # left subtree values could be < isovalue.
-        # However, standard kd-tree logic for range queries:
-        # If we are splitting on X, and node.val >= isovalue,
-        # the left child (vals < node.val) MUST be checked.
-        # The right child (vals > node.val) CANNOT satisfy min < isovalue.
-        
-        # Correction based on standard kd-tree search:
-        # If splitting on X:
-        # Left child: vals < node.val. If node.val >= isovalue, left child might contain valid points.
-        # Right child: vals > node.val. If node.val >= isovalue, right child min >= isovalue. Invalid.
-        
-        search_min_max(isovalue, node.left)
-        # Right subtree is skipped because its min values are >= node.min >= isovalue
+2.  **Search-Max(isovalue, node):**
+    *   Used when the minimum condition is already satisfied.
+    *   If `isovalue < node.max`:
+        *   The right subtree's maximum condition is satisfied.
+        *   Skip odd levels for the right subtree and sequentially traverse [S1, book].
+    *   Recursively call `Search-Min(isovalue, node.left)` [S1, book].
 
-def search_max_min(isovalue, node):
-    """
-    Called when 'node' splits on the maximum dimension (y).
-    We check if node.max > isovalue.
-    """
-    if node.max > isovalue:
-        # The maximum condition is satisfied.
-        if node.min < isovalue:
-            construct_polygon_from_cell(node.cell_ptr)
-        
-        # Splitting on Y.
-        # Left child: vals < node.val (max). Left child max < node.max.
-        # If node.max > isovalue, left child max might still be > isovalue.
-        # Right child: vals > node.val. Right child max > node.max > isovalue.
-        # Right child definitely satisfies max condition.
-        
-        # Optimization from source: "skip odd levels for the left subtree"
-        # This implies switching to search_min for subtrees where one condition is met.
-        
-        search_max_min(isovalue, node.left)
-        search_max_min(isovalue, node.right)
-    else:
-        # node.max <= isovalue.
-        # Right child (vals > node.val) has max > node.max. Might be > isovalue.
-        # Left child (vals < node.val) has max < node.max <= isovalue. Invalid.
-        search_max_min(isovalue, node.right)
-```
+**Pruning**
+*   If the region corresponding to a node in span space is entirely contained in the area to the upper left of $(t,t)$, report all cells in that node as active [S2, unofficial].
+*   If the region is disjoint from that rectangle, report them as empty [S2, unofficial].
 
-*Note: The source provides a simplified pseudocode for `SearchMinMax` [S1, book]. The full implementation requires alternating between `SearchMinMax` and `SearchMaxMin` based on the tree depth/dimension, and utilizing the "skip" optimization where one condition is already known to be true.*
+**Edge Cases and Pitfalls**
+*   **Degenerate Cells:** Cells with more than one vertex sharing the minimum or maximum value may have points lying exactly on the lines $x=v$ or $y=v$ [S1, book].
+*   **Intersection vs. Touch:** If the isovalue equals the extremum, the surface touches but does not strictly intersect the cell [S1, book].
+    *   Ignoring face-touching cases causes holes in the isosurface [S1, book].
+    *   Ignoring edge/vertex cases is safe [S1, book].
+*   **Solutions:**
+    1.  Perturb the isovalue by a small amount to ensure strict inequality [S1, book].
+    2.  Check both sides of the kd-tree for equality (costly) [S1, book].
 
-### Parameters
-*   **Median Selection:** Quicksort-based selection is recommended for its average $O(n)$ performance and low memory overhead [S1, book].
-*   **Isovalue Perturbation:** To handle degenerate cells, the isovalue may be perturbed by a small amount [S1, book].
+## Subtopics
 
-### Edge Cases and Pitfalls
-*   **Degenerate Cells:** Cells with multiple vertices sharing the minimum or maximum value. If the isovalue equals the extremum, the surface touches but does not intersect the cell interior [S1, book].
-    *   *Pitfall:* Ignoring face-touching cases causes holes in the isosurface; ignoring edge/vertex cases is safe [S1, book].
-    *   *Solution:* Perturb the isovalue slightly to force intersection with only one side, or perform expensive equality checks on both sides of the kd-tree [S1, book].
-*   **Precision:** Floating-point comparisons must be strict ($<$ and $>$) to exclude points on the boundary lines $x=v$ and $y=v$ unless degenerate handling is implemented [S1, book].
+### [Span Space Decomposition](6891-span-space-decomposition.md)
+A family of methods partitioning volume cells by mapping extreme scalar values into a 2D coordinate system. It reduces the search to a 2D range query with $O(\sqrt{n} + k)$ complexity. It differs from siblings by leveraging geometric properties of min/max pairs in 2D rather than hierarchical spatial subdivision.
 
 ## Operating characteristics
-
 *   **Time Complexity:**
+    *   **Search:** Worst-case $O(\sqrt{n} + k)$ [S1, book]. This is based on Lee and Wong's analysis where visited nodes are not part of the final result [S1, book].
+    *   **Average-case:** $O(k)$ for typical applications where $k \sim n^{2/3}$, making the algorithm optimal $\theta(k)$ as it is bounded below by output size [S1, book].
     *   **Construction:** $O(n \log n)$ [S1, book].
-    *   **Query (Worst-case):** $O(\sqrt{n} + k)$, where $n$ is the number of cells and $k$ is the number of active cells [S1, book]. This bound was established by Lee and Wong [S1, book].
-    *   **Query (Average-case):** $O(k)$ for typical applications where $k \sim n^{2/3}$, making the algorithm optimal $\theta(k)$ [S1, book].
-*   **Memory Complexity:** $O(n)$ [S1, book]. Using a pointerless kd-tree, the overhead is approximately 8 bytes per cell (2 bytes min, 2 bytes max, 4 bytes pointer) [S2, unofficial].
-*   **Strengths:**
-    *   Simple data structure (kd-tree) compared to interval trees.
-    *   Pointerless layout improves cache locality and reduces memory overhead [S1, book].
-    *   Near-optimal performance for large datasets [S1, book].
-*   **Limitations:**
-    *   Worst-case complexity $O(\sqrt{n} + k)$ is asymptotically worse than the Standard Interval Tree's $O(\log n + k)$ [S1, book].
-    *   Degenerate cells require special handling to avoid topological errors [S1, book].
-*   **When to use:** Large-scale datasets where implementation simplicity and memory locality are prioritized over worst-case query guarantees.
-*   **When not to use:** When strict worst-case query time bounds are required, or when the dataset has many degenerate cells and perturbation is not acceptable.
+*   **Memory Complexity:** $O(n)$, where $n$ is the number of cells [S1, book]. Using a pointerless kd-tree reduces overhead to 8 bytes per cell (2 bytes min, 2 bytes max, 4 bytes pointer) [S2, unofficial].
+*   **Strengths:** Near-optimal search complexity; efficient for large datasets; pointerless implementation reduces memory footprint [S1, book].
+*   **Limitations:** Degenerate cells require special handling; worst-case performance depends on data distribution [S1, book].
+*   **When to use:** Large-scale imaging datasets requiring near-interactive extraction rates [S1, book].
+*   **When not to use:** Small datasets where simpler methods suffice; scenes with many degenerate cells if perturbation is not acceptable [S1, book].
 
 ## Background
-
-The Span Space Isosurface Extraction method, also known as the NOISE (Near Optimal Isosurface Extraction) algorithm, was developed by Livat, Shen, and Johnson [S1, book]. It addresses the limitations of earlier interval-based methods that required maintaining separate sorted lists for minimum and maximum values [S1, book]. By introducing the "span space" representation and utilizing kd-trees, the method allows for simultaneous ordering of cells by both extrema [S1, book]. The worst-case complexity analysis was provided by Lee and Wong [S1, book]. It is primarily used in medical imaging and large-scale scientific visualization where near-interactive rates for high-resolution datasets are required [S1, book].
+The method was developed by Livat, Shen, and Johnson as part of the NOISE (Near Optimal Isosurface Extraction) algorithm [S1, book]. It addresses the limitations of previous interval search methods that ordered intervals by only one dimension (min or max), requiring complex merging of lists [S1, book]. By using span space and kd-trees, it simultaneously orders cells by both minimum and maximum values [S1, book]. The worst-case search complexity analysis was developed by Lee and Wong [S1, book].
 
 ## Sources
-
 [S1] Fast Isosurface Extraction Methods for Large Image Data sets, https://publications.sci.utah.edu/publications/livnat08/Large-scale-isosurface08.pdf, fetched 2026-10-28 (book)
 [S2] Optimal hybrid memory constrained isosurface extraction, http://nbn-resolving.de/urn:nbn:de:bsz:352-130091, fetched 2026-10-30 (unofficial)

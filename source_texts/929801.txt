@@ -1,0 +1,148 @@
+Motivation Even a consistent multi-key read does not help if the following write is unconditional, because it can overwrite a concurrent change. A worker needs to compare the complete read set and commit the related writes together. The ...
+
+Add atomic multi-key operations and `AtomicKvStore` · Issue #1363 · fedify-dev/fedify · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add atomic multi-key operations and AtomicKvStore #1363
+New issue
+Copy link
+New issue
+Copy link
+Open
+Feature
+Open
+Add atomic multi-key operations and AtomicKvStore#1363
+Feature
+Copy link
+Labels
+component/kvKey–value store relatedKey–value store relatedcomponent/testingTesting utilities (@fedify/testing)Testing utilities (@fedify/testing)
+Milestone
+Fedify 2.5
+Description
+dahlia
+opened on Nov 3, 2026
+Issue body actions
+Motivation
+Even a consistent multi-key read does not help if the following write is unconditional, because it can overwrite a concurrent change. A worker needs to compare the complete read set and commit the related writes together. The same operation is needed to remove a retired record while advancing its replay cutoff.
+Extend the existing KV abstraction so callers can express those transitions without backend-specific storage APIs. Preserve ordinary KvStore usage for callers that only need the existing operations.
+Proposed API
+Add these optional methods and supporting types to @fedify/fedify. The declaration below omits existing KvStore members, including optional cas().
+```
+interface KvStoreSetEntry {
+  readonly key: KvKey;
+  readonly value: unknown;
+  readonly options?: KvStoreSetOptions;
+}
+interface KvStoreCasEntry {
+  readonly key: KvKey;
+  readonly expectedValue: unknown;
+  readonly newValue: unknown;
+  readonly options?: KvStoreSetOptions;
+}
+interface KvStore {
+  getMany?<T = unknown>(keys: readonly KvKey[]): Promise<(T | undefined)[]>;
+  setMany?(entries: readonly KvStoreSetEntry[]): Promise<void>;
+  deleteMany?(keys: readonly KvKey[]): Promise<void>;
+  casMany?(entries: readonly KvStoreCasEntry[]): Promise<boolean>;
+}
+interface AtomicKvStore extends KvStore {
+  cas(
+    key: KvKey,
+    expectedValue: unknown,
+    newValue: unknown,
+    options?: KvStoreSetOptions,
+  ): Promise<boolean>;
+  getMany<T = unknown>(keys: readonly KvKey[]): Promise<(T | undefined)[]>;
+  setMany(entries: readonly KvStoreSetEntry[]): Promise<void>;
+  deleteMany(keys: readonly KvKey[]): Promise<void>;
+  casMany(entries: readonly KvStoreCasEntry[]): Promise<boolean>;
+}
+function isAtomicKvStore(store: KvStore): store is AtomicKvStore;
+```
+TypeScript permits making optional base members required in a subinterface. The guard checks that methods exist; it cannot certify their semantics or persistence.
+Operation contract
+getMany() returns an input-ordered snapshot across the specified keys. Missing or logically expired entries are undefined; stored null remains null. Duplicate read keys repeat the same snapshot value. This is not a snapshot of list() or a mechanism for discovering keys added concurrently.
+setMany() and deleteMany() apply their complete batches atomically. casMany() checks every expected value and commits every change as one operation. One mismatch returns false without changing any key. A call must not be silently split into several commits to fit a backend limit.
+For cas() and casMany(), expected undefined means absence and new undefined means deletion. undefined is not a stored value. Reject time to live (TTL) options on a deletion. Use the same documented comparison and supported-value/codec rules in single and multi-key compare-and-swap (CAS); audit existing implementations before promising equivalence. In particular, Redis currently compares encoded bytes. State that must detect ABA changes, where a value changes and changes back, needs a non-reused version in its value.
+Reject duplicate keys in mutation batches before writing. Empty reads return [], empty writes/deletes are no-ops, and an empty conditional batch returns true. Document per-entry TTL, logical expiry, mutation size limits and atomic scope. false means only a comparison mismatch. Unsupported scope, invalid input and backend failures are errors. A lost response can leave commit status unknown, so clients still need version checks or operation receipts. Atomic execution does not establish crash durability.
+For example, an application can retire a value and advance a generation together:
+```
+const valueKey = ["example", "retired"] as const;
+const generationKey = ["example", "generation"] as const;
+const [value, generation] = await store.getMany([valueKey, generationKey]);
+const committed = await store.casMany([
+  { key: valueKey, expectedValue: value, newValue: undefined },
+  { key: generationKey, expectedValue: generation, newValue: nextGeneration },
+]);
+```
+store is an AtomicKvStore; the application computes nextGeneration from the read state. If this returns false, it must re-evaluate eligibility as well as recompute the write.
+Implementation and alternatives
+Implement all five required methods in MemoryKvStore and provide a shared conformance helper in @fedify/testing, following its existing queue-test helper pattern. A proposed helper accepts a factory that returns two clients sharing an isolated backing store plus a dispose callback, and runs each case against a fresh pair:
+```
+function testAtomicKvStore(
+  createPair: () => Promise<{
+    first: AtomicKvStore;
+    second: AtomicKvStore;
+    dispose(): Promise<void>;
+  }>,
+): Promise<void>;
+```
+A memory test can return the same store as both clients; persistent adapter tests must use the actual shared backend. Add conformance for concurrent snapshots/CAS, absent rows, mixed updates/deletes, TTL, comparison, empty/duplicate inputs and limits. The helper is a public testing feature and needs its own declarations and example.
+Do not emulate atomic batches with Promise.all() or an unlocked get/set loop. BatchKvStore would describe grouping without the chosen atomic guarantee, while TransactionalKvStore would suggest a transaction across separate calls. Keep AtomicKvStore and the declarative batch contract.
+Shipping criteria
+Ship the types, guard, working Memory operations and shared tests together. Old custom stores must still type-check as KvStore; a store implementing only base KvStore methods must not type-check as AtomicKvStore. Revise docs/manual/kv.md, docs/manual/test.md, packages/testing/README.md, JSDoc, affected framework skill guidance, and changelog fragments for the public core/testing changes. Explain that Memory remains development-only. Persistent implementations are independent child issues rather than prerequisites for releasing these general-purpose operations.
+In docs/manual/kv.md, add “Implement the AtomicKvStore interface” as a separate section at the same heading level (###) as “Implement the KvStore interface”. Move the existing “Implement ~KvStore.cas() method (optional)” explanation into the new section as a #### subsection titled “Implement ~AtomicKvStore.cas() method”, and document the other required atomic methods there too. Keep the KvStore section clear that these methods remain optional on KvStore, while all five are required on AtomicKvStore. This gives implementers one place to find the atomic contract without making it appear mandatory for ordinary stores.
+Activity
+dahlia
+added this to the Fedify 2.5 milestone on Nov 3, 2026
+dahlia
+added
+component/kvKey–value store relatedKey–value store related
+component/testingTesting utilities (@fedify/testing)Testing utilities (@fedify/testing)
+on Nov 3, 2026
+dahlia
+added the
+Feature
+issue type on Nov 3, 2026
+dahlia
+added a parent issue on Nov 3, 2026
+Provide atomic multi-key operations across KV adapters #1361
+dahlia
+marked this as blocking 9 issues on Nov 3, 2026
+Implement AtomicKvStore in PostgresKvStore #1364
+Implement AtomicKvStore in RedisKvStore #1365
+Implement AtomicKvStore in PgliteKvStore #1366
+Implement AtomicKvStore in SqliteKvStore #1367
+Implement AtomicKvStore in MysqlKvStore #1368
+Publish and manage delivery-suspension notices #1371
+Honor authenticated delivery-suspension notices #1372
+Add an optional durable outbound delivery backlog #1376
+Implement AtomicKvStore in WorkersD1KvStore #1379
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+component/kvKey–value store relatedKey–value store relatedcomponent/testingTesting utilities (@fedify/testing)Testing utilities (@fedify/testing)
+Type
+Feature
+Fields
+Priority
+None yet
+Effort
+None yet
+Projects
+No projects
+Milestone
+Fedify 2.5No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

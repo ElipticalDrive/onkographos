@@ -1,0 +1,238 @@
+--- v003.md
++++ v004.md
+@@ -4,159 +4,102 @@
+ 
+ ## Overview
+-This method performs volume rendering by marching rays through a volume dataset, applying shading and compositing in a single pass, while using dithering to mitigate aliasing artifacts from undersampling and early termination to optimize performance. It distinguishes itself from standard ray marching by explicitly integrating a random offset at the ray origin to hide staircase aliasing and a deterministic opacity threshold to break the integration loop early, balancing visual quality against computational cost.
++This method performs volume rendering by marching rays through a volume texture, applying shading and compositing in a single pass, while using dithering to reduce aliasing artifacts and early termination to improve performance [S1, unofficial]. It is distinguished from its siblings by its specific implementation of front-to-back alpha blending with a fixed early termination threshold and its reliance on screen-space dithering to mitigate undersampling artifacts, rather than probabilistic path control or empty-space skipping [S1, unofficial]. Unlike [Russian Roulette](1371-russian-roulette.md), it is a deterministic early termination method that introduces bias by ignoring the ray tail beyond the opacity threshold [1019-early-ray-termination.md].
+ 
+ ## How it works
+-The method executes a front-to-back ray casting loop within a fragment shader. It calculates ray parameters, applies a random dither to the starting position, and iterates through the volume, sampling density, computing shading (conditionally), and compositing color. The loop terminates early if the accumulated opacity exceeds a threshold.
+-
+ **Inputs:**
+-- Volume texture (`voltex`): 3D texture containing density/intensity values.
+-- Transfer function texture (`tftex`): 2D or 1D texture mapping intensity to RGBA color.
+-- Normal matrix (`normalmatrix`): 3x3 matrix for transforming normals.
+-- Light vector (`L`) and View vector (`V`): In world space.
+-- Shading mode: Integer (0: Blinn-Phong, 1: Blinn-Phong + Edge Enhancement, 2: Toon).
+-- Parameters: `nsamples` (number of steps), `SHADING_THRES` (0.10), `DELTA` (0.005), Early Termination Threshold (0.95).
++*   Volume texture (`voltex`): 3D texture containing scalar density/intensity values.
++*   Transfer function texture (`tftex`): 1D or 2D texture mapping intensity to RGBA color.
++*   Camera parameters: `start` (ray origin), `end` (ray end point), `screen_width`, `screen_height`.
++*   Rendering parameters: `nsamples` (number of steps), `SHADING_THRES` (opacity threshold for shading), `DELTA` (gradient step size), `early_term_thresh` (opacity threshold for termination).
+ 
+ **Outputs:**
+-- Final fragment color (`outcolor`): RGBA vector.
++*   Fragment color (`outcolor`): The final RGBA color for the pixel.
+ 
+ **Data Structures:**
+-- `pos`: Current ray position (vec3).
+-- `delta`: Step vector (vec3).
+-- `outcolor`: Accumulated color (vec4), initialized to `(0.0, 0.0, 0.0, 0.0)`.
+-- `color`: Current sample color (vec4).
+-- `intensity`: Sampled density value (float).
++*   `pos`: Current ray position in world space (vec3).
++*   `delta`: Step vector (vec3).
++*   `color`: Current sample color (vec4).
++*   `outcolor`: Accumulated color (vec4).
++*   `N`: Surface normal (vec3).
++*   `L`: Light vector (vec3).
++*   `V`: View vector (vec3).
+ 
+ **Steps:**
+-1.  **Ray Setup:**
+-    - Calculate normalized screen coordinates: `norm_coord = gl_FragCoord.st / vec2(screen_width, screen_height)`.
+-    - Determine ray start (`start`) and end (`end`) points based on camera and geometry.
+-    - Calculate ray direction: `direction = end - start`.
+-    - Calculate ray length: `len = length(direction)`.
+-    - Calculate step size: `stepsize = len / nsamples`.
+-    - Normalize direction: `direction = normalize(direction)`.
+-    - Calculate delta vector: `delta = direction * stepsize`.
+ 
+-2.  **Dithering:**
+-    - Apply dithering to the starting position to reduce aliasing: `pos = start + delta * rand()`, where `rand()` is a random float in $[0, 1)$. [S1, unofficial]
++1.  **Initialize Ray:**
++    Calculate normalized screen coordinates:
++    $$ \text{norm\_coord} = \frac{\text{gl\_FragCoord.st}}{\text{vec2}(\text{screen\_width}, \text{screen\_height})} $$
++    Calculate ray direction and length:
++    $$ \text{direction} = \text{end} - \text{start} $$
++    $$ \text{len} = \|\text{direction}\| $$
++    Calculate step size:
++    $$ \text{stepsize} = \frac{\text{len}}{\text{nsamples}} $$
++    Normalize direction and calculate delta vector:
++    $$ \text{direction} = \frac{\text{direction}}{\|\text{direction}\|} $$
++    $$ \text{delta} = \text{direction} \times \text{stepsize} $$
+ 
+-3.  **Initialization:**
+-    - Initialize loop variables: `pos = start`, `outcolor = vec4(0.0)`, `color = vec4(0.0)`. [S1, unofficial]
++2.  **Apply Dithering:**
++    To hide staircase aliasing from undersampling, perturb the starting position:
++    $$ \text{pos} = \text{start} + \text{delta} \times \text{rand}() $$
++    Where $\text{rand}()$ generates a random number in $[0, 1)$ [S1, unofficial].
++
++3.  **Initialize Accumulators:**
++    $$ \text{pos} = \text{start} $$
++    $$ \text{outcolor} = \text{vec4}(0.0) $$
++    $$ \text{color} = \text{vec4}(0.0) $$
++    $$ f\_max\_i = 0 $$
+ 
+ 4.  **Marching Loop:**
+-    - Iterate `i` from 0 to `nsamples - 1` while `len > 0`:
+-        - Advance position: `pos = pos + delta`.
+-        - Decrement remaining length: `len = len - stepsize`.
+-        - Sample volume intensity: `intensity = texture(voltex, pos).r`.
+-        - Map intensity to color using transfer function: `color = texture(tftex, intensity)`.
++    Loop $i$ from $0$ to $\text{nsamples}$ while $\text{len} > 0$:
++    a.  **Advance Position:**
++        $$ \text{pos} = \text{pos} + \text{delta} $$
++        $$ \text{len} = \text{len} - \text{stepsize} $$
++    b.  **Sample Volume:**
++        $$ \text{intensity} = \text{texture}(\text{voltex}, \text{pos}).r $$
++    c.  **Transfer Function:**
++        $$ \text{color} = \text{texture}(\text{tftex}, \text{intensity}) $$
++    d.  **Shading (Conditional):**
++        If $\text{color}.a > \text{SHADING\_THRES}$ AND $\text{shading\_mode} \neq 3$ AND $\text{nsamples} > 500$:
++        i.  Compute normal using central differences:
++            $$ \mathbf{N}_{local} = \text{gradient\_central\_diff}(\text{voltex}, \text{pos}, \text{DELTA}) $$
++        ii. Transform to world space:
++            $$ \mathbf{N} = \text{normalize}(\text{normalmatrix} \times \text{vec3}(\mathbf{N}_{local})) $$
++        iii. Calculate light vector $\mathbf{L}$ and view vector $\mathbf{V}$ in world space.
++        iv. Apply shading based on mode:
++            *   Mode 0: Blinn-Phong.
++            *   Mode 1: Blinn-Phong + Edge Enhancement.
++            *   Mode 2: Toon shading.
++            *   Mode 3: No shading [S1, unofficial].
++    e.  **Compositing:**
++        Apply compositing based on mode:
++        *   Mode 0: Front-to-Back Alpha Blending.
++        *   Mode 1: Maximum Intensity Projection (MIP).
++        *   Mode 2: Minimum Intensity Projection (MIDA) [S1, unofficial].
++    f.  **Early Termination:**
++        If $\text{outcolor}.a > \text{early\_term\_thresh}$, terminate loop [S1, unofficial].
+ 
+-5.  **Shading (Conditional):**
+-    - If `color.a > SHADING_THRES` (0.10) AND `shading_mode != 3` AND `nsamples > 500`:
+-        - Compute surface normal using central differences with `DELTA` (0.005): `N = gradient_central_diff(pos, DELTA)`. [S1, unofficial]
+-        - Transform normal to world space and normalize: `N = normalize(vec3(normalmatrix * N))`.
+-        - Calculate light vector `L` and view vector `V` in world space.
+-        - Apply shading based on `shading_mode`:
+-            - Mode 0: Blinn-Phong.
+-            - Mode 1: Blinn-Phong + Edge Enhancement.
+-            - Mode 2: Toon shading.
+-        - Update `color` with shaded result.
++5.  **Return Result:**
++    Return $\text{outcolor}$ [S1, unofficial].
+ 
+-6.  **Compositing:**
+-    - Apply compositing based on `shading_mode` (interpreted as compositing mode here, as per source logic):
+-        - Mode 0: Front-to-Back Alpha Blending.
+-        - Mode 1: Maximum Intensity Projection (MIP).
+-        - Mode 2: Multi-Intensity Data Accumulation (MIDA).
+-    - Update `outcolor` with the result of the compositing operation using `color`. [S1, unofficial]
++**Parameters:**
++*   `SHADING_THRES`: 0.10 [S1, unofficial].
++*   `DELTA`: 0.005 [S1, unofficial].
++*   `early_term_thresh`: 0.95 [S1, unofficial].
+ 
+-7.  **Early Termination:**
+-    - If `outcolor.a > 0.95`, break the loop. [S1, unofficial]
+-
+-**Pseudocode:**
+-```python
+-def ray_march_dithered_early_term(start, end, nsamples, voltex, tftex, normalmatrix, shading_mode):
+-    # 1. Ray Setup
+-    direction = end - start
+-    len = length(direction)
+-    stepsize = len / nsamples
+-    direction = normalize(direction)
+-    delta = direction * stepsize
+-    
+-    # 2. Dithering
+-    # rand() returns a random float in [0, 1)
+-    pos = start + delta * rand()
+-    
+-    # 3. Initialization
+-    outcolor = vec4(0.0)
+-    
+-    # 4. Marching Loop
+-    for i in range(nsamples):
+-        if len <= 0:
+-            break
+-            
+-        # Advance position
+-        pos = pos + delta
+-        len = len - stepsize
+-        
+-        # Sample volume
+-        intensity = texture(voltex, pos).r
+-        color = texture(tftex, intensity)
+-        
+-        # 5. Shading (Conditional)
+-        if color.a > 0.10 and shading_mode != 3 and nsamples > 500:
+-            # Compute normal using central differences
+-            # gradient_central_diff is a helper that computes gradient at pos with delta=0.005
+-            N_local = gradient_central_diff(pos, 0.005)
+-            # Transform to world space
+-            N = normalize(vec3(normalmatrix * N_local))
+-            
+-            # Calculate L and V in world space (assumed available in context)
+-            L = get_light_vector_world()
+-            V = get_view_vector_world()
+-            
+-            # Apply shading
+-            if shading_mode == 0:
+-                color = blinn_phong(N, L, V, color)
+-            elif shading_mode == 1:
+-                color = blinn_phong_edge(N, L, V, color)
+-            elif shading_mode == 2:
+-                color = toon_shading(N, L, V, color)
+-        
+-        # 6. Compositing
+-        if shading_mode == 0:
+-            # Front-to-Back
+-            outcolor = outcolor + color * (1.0 - outcolor.a)
+-        elif shading_mode == 1:
+-            # MIP
+-            outcolor = max(outcolor, color)
+-        elif shading_mode == 2:
+-            # MIDA (simplified as accumulation or specific logic)
+-            # Note: Source mentions MIDA but does not provide explicit formula.
+-            # Assuming standard accumulation or specific MIDA logic.
+-            # For implementation, this step requires specific MIDA definition.
+-            # [G] Placeholder for MIDA logic if not standard.
+-            outcolor = outcolor + color * (1.0 - outcolor.a)
+-            
+-        # 7. Early Termination
+-        if outcolor.a > 0.95:
+-            break
+-            
+-    return outcolor
+-```
++**Pitfalls:**
++*   Dithering reduces geometric aliasing (woodgrain/staircase) but does not prevent aliasing in the transfer function or shading calculations [S1, unofficial].
++*   Early termination introduces bias by discarding the remaining ray contribution, which can lead to darkening in translucent regions if the threshold is too high [1019-early-ray-termination.md].
+ 
+ ## Subtopics
+ 
+-### [Dynamic Volume Raycasting with Accumulated Shading](3570-dynamic-volume-raycasting-with-accumulated-shading.md)
+-A GPU-based technique that performs front-to-back alpha blending and shading accumulation in a single fragment shader pass using dynamic branching. It extends this method by supporting procedurally generated dynamic density fields and Shader Model 3.0 features.
+-
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples (`nsamples`). Early termination reduces the average number of samples per ray, depending on volume opacity distribution.
+-- **Memory Complexity:** $O(1)$ per pixel for the accumulation buffer, plus storage for the volume and transfer function textures.
+-- **Performance:** Early termination significantly improves performance in transparent or sparse volumes. Dithering allows for lower `nsamples` without severe aliasing, further reducing cost.
+-- **Strengths:** Simple implementation, effective reduction of staircase aliasing, good performance in opaque regions.
+-- **Limitations:** Dithering does not prevent aliasing in the transfer function or shading. Early termination can cause artifacts if the threshold is too high or too low. MIDA compositing mode lacks a detailed formula in the source.
+-- **When to use:** Real-time volume rendering where performance is critical and some aliasing is acceptable or mitigated by dithering.
+-- **When not to use:** High-fidelity offline rendering requiring precise anti-aliasing without temporal accumulation, or when the volume is uniformly dense (early termination provides little benefit).
++*   **Time Complexity:** $O(N)$ where $N$ is the number of samples per ray. Early termination reduces the average number of steps, but worst-case remains $N$.
++*   **Memory Complexity:** $O(1)$ per pixel for accumulators, plus storage for volume and transfer function textures.
++*   **Performance:** Improves rendering speed by skipping shading calculations for low-opacity samples and terminating rays that are sufficiently opaque. The specific implementation in [S1, unofficial] requires `nsamples > 500` to enable shading, which may impact performance on lower sample counts.
++*   **Strengths:** Simple to implement in a fragment shader; effective at reducing aliasing artifacts from undersampling; reduces computational cost for opaque regions.
++*   **Limitations:** Deterministic early termination is biased; dithering does not fix all aliasing types; shading is only applied if opacity exceeds a threshold, potentially missing subtle details in low-opacity regions.
+ 
+ ## Background
+-This method is implemented in the `qvrc` project by Fargiolas, which demonstrates volume rendering using OpenGL and Qt. It utilizes a two-pass approach: a first pass to determine ray endpoints and a second pass for raycasting. The technique is rooted in standard ray casting principles but incorporates specific optimizations for real-time rendering on GPUs.
++This method is described in the context of a GPU-based volume rendering implementation using OpenGL and Qt [S1, unofficial]. It leverages Shader Model 3.0 features to perform ray marching within the fragment shader, extending earlier techniques by integrating dynamic branching for early termination and dithering for aliasing reduction [S1, unofficial]. The specific codebase is part of the `qvrc` project [S1, unofficial].
+ 
+ ## Sources

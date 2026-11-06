@@ -3,233 +3,196 @@
 Also called: Task Shader: Cell Classification and Task Generation
 
 ## Overview
-Task Shader Cell Classification is a GPU-driven preprocessing stage for blocky meshing that identifies occupied cells within a volume block and generates compact workgroup lists for downstream mesh extraction [S1, S2]. It solves the performance bottleneck of invoking mesh shaders on empty or sparse geometry by filtering out non-occupied cells before geometry generation begins [S1, S2]. Unlike [Boolean Voxel Meshing](971-boolean-voxel-meshing.md) or [Cuberille Method](1718-cuberille-method.md), which often process entire blocks or rely on CPU-side culling, this method operates entirely on the GPU using the task shader pipeline to minimize mesh shader invocations, thereby increasing warp occupancy and reducing memory bandwidth pressure [S1, S2].
+Task Shader Cell Classification is a GPU-driven pipeline stage that identifies occupied cells within a volume block, compacts their indices, and generates workgroups for a subsequent mesh shader. It solves the problem of excessive mesh shader invocations on empty or sparse volume data by ensuring that geometry extraction only occurs for cells containing isosurface geometry [S1, S2]. Unlike [Blocky meshing](31-blocky-meshing.md) methods that extract static face sets, this method dynamically partitions work for transient isosurface extraction, acting as a filter that minimizes the number of mesh shader invocations to significantly improve performance [S1, S2].
 
 ## How it works
-The method processes a single block of volume data to classify cells, compact their indices, and partition them into lists suitable for mesh shader workgroups.
+The method processes a volume block of 256 cells using a task shader workgroup. It classifies cells, compacts their indices into a dense buffer, and partitions them into lists for mesh shader workgroups based on vertex count limits.
 
 ### Inputs and Outputs
 **Inputs:**
-- A block of $256$ cells (indices $0$ to $255$).
-- Scalar field values for the voxels defining the block boundaries.
-- The Marching Cubes (MC) lookup table for cell state determination.
+*   Volume scalar field $V$ (accessed via texture/sampler).
+*   Block index (32-bit integer) identifying the $256$-cell block to process.
+*   Isosurface threshold (implicit in MC classification).
 
 **Outputs (Memory Interface Block):**
-- `dense_occupancy_index`: A buffer containing a compacted list of indices of all occupied cells in the block.
-- `occupied_cell_list_offset`: An array of size $32$ storing the start index in `dense_occupancy_index` for each mesh shader workgroup's list.
-- `occupied_list_length`: An array of size $32$ storing the number of cells in each mesh shader workgroup's list.
-- `gl_TaskCountNV`: An output variable indicating the total number of mesh shader workgroups emitted.
+*   `dense_occupancy_index`: Buffer containing a compact list of indices of occupied cells within the block.
+*   `occupied_cell_list_offset`: Buffer of size 32, storing the start index in `dense_occupancy_index` for each mesh shader workgroup's list.
+*   `occupied_list_length`: Buffer of size 32, storing the number of cells in each mesh shader workgroup's list.
+*   `gl_TaskCountNV`: Output variable indicating the number of mesh shader workgroups emitted.
 
 ### Data Structures
-The implementation uses shared memory within the task shader workgroup and global memory buffers for the interface block.
+The task shader workgroup uses shared memory for intermediate storage during classification and reduction.
 
-1.  **Shared Memory Buffers (per workgroup):**
-    -   `occupancy_flags`: Array of $256$ booleans (or bytes), one per cell, indicating if the cell is occupied.
-    -   `vertex_counts`: Array of $256$ integers, storing the number of vertices required for the MC extraction of each cell.
-    -   `local_offsets`: Array of $32$ integers, used during the reduction phase to store local offsets for each subgroup of 32 cells.
-
-2.  **Global Memory Buffers (interface block):**
-    -   `dense_occupancy_index`: Dynamic size, up to $256$ entries. Stores indices of occupied cells.
-    -   `occupied_cell_list_offset`: Fixed size $32$. Stores start offsets.
-    -   `occupied_list_length`: Fixed size $32$. Stores lengths.
+1.  **Occupancy Flags**: A boolean array of size 256 (one per cell in the block) stored in shared memory.
+2.  **Vertex Counts**: An integer array of size 256 (one per cell) stored in shared memory, holding the number of vertices required by the MC algorithm for each cell.
+3.  **Local Offsets**: An integer array of size 32 (one per thread) used during stream compaction to store the local offset of each thread's first occupied cell within its subgroup of 32 cells.
 
 ### Parameters
--   **Block Size:** $256$ cells. This allows indexing any cell within the block using a single 8-bit integer, minimizing interface block memory overhead [S1, S2].
--   **Workgroup Size:** $32$ threads. Each thread processes multiple cells during classification [S1, S2].
--   **Max Vertices per Mesh Workgroup:** $96$. Empirically determined optimal limit for the test datasets [S1, S2].
--   **Min Cells per Mesh Workgroup:** $8$. Ensures that even in the worst-case scenario (12 vertices per cell, e.g., 4 disconnected triangles), the vertex limit is not exceeded ($8 \times 12 = 96$) [S1, S2].
--   **Max Lists per Block:** $32$. Calculated as $256 \text{ cells} / 8 \text{ cells per list}$ [S1, S2].
+*   **Block Size**: 256 cells. This allows indexing all cells within a block with a single 8-bit integer, reducing interface block memory overhead [S1, S2].
+*   **Workgroup Size**: 32 threads. Each thread processes multiple cells during classification; each mesh shader workgroup processes up to 32 cells [S1, S2].
+*   **Max Output Vertices per Mesh Workgroup**: 96. This is the empirically determined locally optimal limit for the test datasets [S1, S2].
+*   **Min Cells per Mesh Workgroup**: 8. Ensures the vertex limit is not exceeded even if every cell produces 12 vertices (4 disconnected triangles) ($8 \times 12 = 96$) [S1, S2].
+*   **Max Lists per Block**: 32. Calculated as $256 / 8$ [S1, S2].
 
-### Algorithm Steps
+### Steps
 
 1.  **Individual Cell Classification and Vertex Count Generation**
-    The task shader workgroup (32 threads) processes the 256 cells. Each thread handles a subset of cells (e.g., 8 cells per thread).
-    -   Each thread samples the required voxel values to determine the cell state.
-    -   Using the MC algorithm, the thread determines if the cell is occupied (non-zero topology).
-    -   If occupied, the thread calculates the number of vertices required for the isosurface in that cell.
-    -   The thread writes the occupancy flag to `occupancy_flags` and the vertex count to `vertex_counts`.
-    -   **Note:** The MC algorithm is terminated after determining the vertex count. Primitives are not extracted here to avoid sending large indexed vertex buffers through the interface block, which would degrade performance [S1, S2].
+    The 32-thread workgroup processes the 256 cells. Each thread handles a subset of cells (8 cells per thread).
+    *   Each thread samples the 8 voxels required by the Marching Cubes (MC) algorithm for its assigned cells.
+    *   The thread determines the cell state (occupied/empty) and the number of vertices required for the isosurface.
+    *   The task shader **stops** the MC algorithm after determining the vertex count. It does **not** extract primitives or indices [S1, S2].
+    *   Occupancy flags and vertex counts are stored in shared memory buffers.
 
 2.  **Stream Compaction (Reduction)**
-    The workgroup performs a reduction to compact the list of occupied cells into `dense_occupancy_index`.
-    -   The 256 cells are processed in groups of 32 (since there are 32 threads).
-    -   For each group of 32 cells, threads compute a local offset within the group based on the number of occupied cells preceding the current cell in that group.
-    -   The last thread in the workgroup (thread 31) determines the total number of occupied cells in the current group of 32.
-    -   This total is shared with all threads in the workgroup using `subgroupBroadcast` operations. This avoids expensive atomic operations [S1, S2].
-    -   Each thread calculates its global offset by adding the sum of occupied counts from previous groups to its local offset.
-    -   Each thread writes the index of its occupied cell into `dense_occupancy_index` at the calculated global offset.
+    A reduction is performed to compact the indices of occupied cells into `dense_occupancy_index`.
+    *   The 256 cells are processed in groups of 32 (one per thread).
+    *   Each thread calculates the number of occupied cells in its group.
+    *   The last thread in the workgroup shares the total count for its group using `subgroupBroadcast` operations. This avoids expensive atomic operations [S1, S2].
+    *   Each thread calculates a global offset for its group's occupied cells.
+    *   Threads write the indices of occupied cells into `dense_occupancy_index` at their calculated offsets.
+    *   Local offsets are stored in a shared buffer for task generation.
 
 3.  **Task Generation**
-    A single thread (e.g., thread 0) traverses the `dense_occupancy_index` buffer to partition the occupied cells into lists for mesh shader workgroups.
-    -   Initialize `current_list_index = 0`, `current_cell_count = 0`, `current_vertex_count = 0`.
-    -   Iterate through each occupied cell index in `dense_occupancy_index`.
-    -   Retrieve the `vertex_count` for the current cell from the shared `vertex_counts` buffer (or re-calculate/lookup if not stored, but sources imply it was computed in step 1).
-    -   Check if adding this cell exceeds the limits:
-        -   If `current_cell_count == 32` OR `current_vertex_count + vertex_count > 96`:
-            -   Finalize the current list:
-                -   `occupied_cell_list_offset[current_list_index] = start_offset_of_current_list`
-                -   `occupied_list_length[current_list_index] = current_cell_count`
-                -   Increment `current_list_index`.
-                -   Reset `current_cell_count = 0`, `current_vertex_count = 0`.
-                -   Update `start_offset_of_current_list` to the current position in `dense_occupancy_index`.
-    -   Add the current cell to the current list:
-        -   `current_cell_count += 1`
-        -   `current_vertex_count += vertex_count`
-    -   After the loop, finalize the last list if it contains any cells.
-    -   Write `current_list_index` to `gl_TaskCountNV`.
+    A single thread (e.g., thread 0) traverses the `dense_occupancy_index` buffer to partition occupied cells into lists for mesh shader workgroups.
+    *   The thread iterates through the compacted occupied cells.
+    *   It accumulates the vertex counts for each cell.
+    *   A new list is started when:
+        *   The current list contains 32 cells, OR
+        *   Adding the next cell would exceed the 96-vertex limit.
+    *   For each completed list, the thread writes the start offset (from `dense_occupancy_index`) to `occupied_cell_list_offset` and the length (number of cells) to `occupied_list_length`.
+    *   The thread writes the total number of lists (mesh shader workgroups) to `gl_TaskCountNV` [S1, S2].
 
 ### Pseudocode
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# Shared memory variables (initialized to 0/false)
-occupancy_flags = [False] * 256
-vertex_counts = [0] * 256
-local_offsets = [0] * 32
+# Shared memory buffers
+shared occupancy_flags[256] : bool
+shared vertex_counts[256] : int
+shared local_offsets[32] : int
 
-# Step 1: Individual Cell Classification
-# Each thread t (0..31) processes cells t*8 to (t+1)*8 - 1
-for t in range(32):
-    for i in range(8):
-        cell_idx = t * 8 + i
-        # Sample voxels and determine MC state
-        mc_state = compute_mc_state(cell_idx)
+# Global memory buffers
+global dense_occupancy_index[] : int
+global occupied_cell_list_offset[32] : int
+global occupied_list_length[32] : int
+
+# Constants
+BLOCK_SIZE = 256
+WORKGROUP_SIZE = 32
+MAX_VERTICES_PER_WORKGROUP = 96
+MAX_CELLS_PER_WORKGROUP = 32
+MIN_CELLS_PER_WORKGROUP = 8
+
+def task_shader(block_index):
+    thread_id = get_thread_id()
+    lane_id = get_lane_id() # 0-31 within subgroup
+    
+    # Step 1: Individual Cell Classification
+    # Each thread processes 8 cells
+    start_cell = thread_id * 8
+    end_cell = start_cell + 8
+    
+    my_occupied_count = 0
+    
+    for c in range(start_cell, end_cell):
+        # Sample 8 voxels for cell c
+        voxels = sample_voxels_for_cell(V, c)
         
-        if mc_state != 0: # Cell is occupied
-            occupancy_flags[cell_idx] = True
-            # Calculate vertices required for this cell
-            v_count = get_mc_vertex_count(mc_state)
-            vertex_counts[cell_idx] = v_count
-        else:
-            occupancy_flags[cell_idx] = False
-            vertex_counts[cell_idx] = 0
-
-# Step 2: Stream Compaction
-# Process groups of 32 cells. Since we have 32 threads, we can process
-# one group of 32 cells per iteration, but the source describes processing
-# the whole block via reductions. We assume a standard parallel reduction
-# structure for compaction.
-# Note: The source specifies "each group of 32 cells is processed in successive iterations".
-# With 32 threads, we can process one group of 32 cells in parallel.
-# However, to compact 256 cells, we need to handle the offsets correctly.
-# The source implies a specific reduction where the last thread shares the count.
-
-# Let's assume we process the 256 cells in 8 groups of 32.
-# But the workgroup has 32 threads. The source says "each group of 32 cells is processed in successive iterations".
-# This implies the workgroup might iterate, or we use a different reduction strategy.
-# Given the constraint of 32 threads, a common approach is to use the threads to process
-# the 256 cells in chunks. Let's follow the source's description of "last thread shares total".
-
-# Re-reading source: "Since the reduction is performed by 32 threads inside a workgroup, 
-# each group of 32 cells is processed in successive iterations."
-# This suggests the workgroup might not process all 256 cells in one parallel step if 
-# the reduction logic is per-group. However, standard GPU reductions can handle 256 items.
-# Let's implement a standard parallel prefix sum (scan) for compaction, adapted to the source's 
-# "subgroupBroadcast" optimization.
-
-# Simplified Compaction Logic based on Source Description:
-# 1. Compute local occupancy counts for each thread's 8 cells.
-# 2. Perform a warp-level scan to get local offsets.
-# 3. Use subgroupBroadcast to share the total count of the previous group to calculate global offsets.
-
-# Since implementing a full 256-element scan in pure Python-like pseudocode without 
-# assuming specific GPU intrinsics is verbose, we will outline the logic as described.
-
-# Global offset calculation
-# Let occupied_count[t] be the number of occupied cells in thread t's 8 cells.
-# We need a prefix sum of occupied_count to determine the start index for each thread's contribution.
-
-# Step 2a: Local Scan within Thread's 8 cells (not detailed in source, assumed standard)
-# Step 2b: Global Offset Calculation
-# The source emphasizes omitting atomics via subgroupBroadcast.
-# Let's assume a standard parallel reduction to compute the total number of occupied cells,
-# then a scan to get offsets.
-
-total_occupied = 0
-# ... (Parallel reduction to compute total_occupied) ...
-
-# For each thread t, calculate the starting index in dense_occupancy_index
-# This requires a prefix sum of the number of occupied cells per thread.
-# Let thread_occupied[t] be the count of occupied cells for thread t.
-# prefix_sum[t] = sum(thread_occupied[0]...thread_occupied[t-1])
-
-# The source says: "From each iteration, a cell obtains a local offset within its group of 32 cells."
-# "The last thread in the workgroup shares the total number of occupied cells within each group"
-# This phrasing is slightly ambiguous. It likely refers to a reduction across the 32 threads 
-# to get the count for the *previous* group of 32 cells (if processing in chunks) or 
-# simply that the threads collaborate to compute the global offsets.
-
-# Implementation of the compaction write:
-write_idx = 0
-for t in range(32):
-    # Determine how many cells this thread contributes
-    count = sum(1 for i in range(8) if occupancy_flags[t*8 + i])
-    
-    # Calculate start index for this thread's cells
-    # This requires a prefix sum. Let's assume we have a function prefix_sum(t)
-    start_idx = prefix_sum(t) 
-    
-    for i in range(8):
-        cell_idx = t * 8 + i
-        if occupancy_flags[cell_idx]:
-            dense_occupancy_index[write_idx + start_idx + i_offset] = cell_idx
-            i_offset += 1 # This is tricky in parallel. 
-            # Actually, each thread writes to its own range.
-            # The local offset within the thread's 8 cells is needed.
-            pass
+        # Determine MC state and vertex count
+        # Returns (is_occupied, num_vertices)
+        is_occ, num_v = marching_cubes_classify(voxels)
+        
+        occupancy_flags[c] = is_occ
+        vertex_counts[c] = num_v
+        
+        if is_occ:
+            my_occupied_count += 1
             
-# Corrected Compaction Logic (Standard Parallel Compaction):
-# 1. Each thread computes a local prefix sum of its 8 cells.
-# 2. Each thread computes a global prefix sum of the thread counts.
-# 3. Each thread writes its occupied cells to the global buffer at the calculated global offset + local offset.
-
-# Step 3: Task Generation
-# Single thread (e.g., thread 0)
-if thread_id == 0:
-    occupied_cell_list_offset = [0] * 32
-    occupied_list_length = [0] * 32
+    # Step 2: Stream Compaction (Reduction)
+    # Calculate local offset within the thread's group of 32 cells
+    # This is a simplified reduction logic assuming subgroup operations
     
-    num_lists = 0
-    current_list_start = 0
-    current_cell_count = 0
-    current_vertex_count = 0
+    # Calculate prefix sum of occupied counts within the thread's 8 cells
+    # For simplicity, we assume a standard warp reduction pattern
+    # In practice, this involves shuffle/broadcast instructions
     
-    # Iterate through the compacted list
-    num_occupied = total_occupied # From reduction
+    # Determine global offset for this thread's first occupied cell
+    # This requires a reduction across the 32 threads to get prefix sums
+    # of the per-thread occupied counts.
     
-    for i in range(num_occupied):
-        cell_idx = dense_occupancy_index[i]
-        v_count = vertex_counts[cell_idx]
-        
-        # Check if we need to start a new list
-        if current_cell_count == 32 or current_vertex_count + v_count > 96:
-            if current_cell_count > 0:
-                occupied_cell_list_offset[num_lists] = current_list_start
-                occupied_list_length[num_lists] = current_cell_count
-                num_lists += 1
+    # Let's assume we have a function `warp_prefix_sum` that returns
+    # the sum of occupied counts for threads 0..thread_id-1
+    global_offset_start = warp_prefix_sum(my_occupied_count)
+    
+    # Write occupied cell indices to dense_occupancy_index
+    current_dense_idx = global_offset_start
+    for c in range(start_cell, end_cell):
+        if occupancy_flags[c]:
+            dense_occupancy_index[current_dense_idx] = c
+            current_dense_idx += 1
             
-            current_list_start = i
-            current_cell_count = 0
-            current_vertex_count = 0
+    # Store local offset for task generation (offset of first occupied cell in this thread's range)
+    # If no cells are occupied, this might be undefined or handled by the single thread logic
+    if my_occupied_count > 0:
+        local_offsets[thread_id] = global_offset_start
+    else:
+        local_offsets[thread_id] = global_offset_start + my_occupied_count # Placeholder for logic
+
+    # Step 3: Task Generation
+    # Only thread 0 performs this
+    if thread_id == 0:
+        num_workgroups = 0
+        current_list_start = 0
+        current_list_vertex_count = 0
+        current_list_cell_count = 0
         
-        current_cell_count += 1
-        current_vertex_count += v_count
-    
-    # Finalize last list
-    if current_cell_count > 0:
-        occupied_cell_list_offset[num_lists] = current_list_start
-        occupied_list_length[num_lists] = current_cell_count
-        num_lists += 1
+        # Iterate through all occupied cells in dense_occupancy_index
+        # We need to know the total number of occupied cells first
+        # This can be obtained from the last thread's reduction result or a separate pass
+        # For this pseudocode, assume total_occupied is known or computed via reduction
+        total_occupied = warp_sum(my_occupied_count) # Sum across all threads
         
-    gl_TaskCountNV = num_lists
+        idx = 0
+        while idx < total_occupied:
+            cell_index = dense_occupancy_index[idx]
+            v_count = vertex_counts[cell_index]
+            
+            # Check if adding this cell exceeds limits
+            if current_list_cell_count == MAX_CELLS_PER_WORKGROUP or \
+               current_list_vertex_count + v_count > MAX_VERTICES_PER_WORKGROUP:
+               
+               # Save current list
+               if current_list_cell_count > 0:
+                   occupied_cell_list_offset[num_workgroups] = current_list_start
+                   occupied_list_length[num_workgroups] = current_list_cell_count
+                   num_workgroups += 1
+               
+               # Start new list
+               current_list_start = idx
+               current_list_vertex_count = 0
+               current_list_cell_count = 0
+               
+            # Add cell to current list
+            current_list_vertex_count += v_count
+            current_list_cell_count += 1
+            idx += 1
+            
+        # Save last list
+        if current_list_cell_count > 0:
+            occupied_cell_list_offset[num_workgroups] = current_list_start
+            occupied_list_length[num_workgroups] = current_list_cell_count
+            num_workgroups += 1
+            
+        # Emit task count
+        gl_TaskCountNV = num_workgroups
 ```
 
 ### Edge Cases and Pitfalls
--   **Interface Block Memory:** Extracting primitives in the task shader would require storing up to 12 vertices per cell in the interface block, drastically increasing memory usage and reducing performance [S1, S2]. The method avoids this by only passing 8-bit cell indices [S1, S2].
--   **Atomic Operations:** Expensive atomic operations for offset calculation are omitted. Instead, offsets are shared among threads using `subgroupBroadcast` operations, which is more efficient [S1, S2].
--   **Vertex Limit:** The limit of 96 vertices per mesh shader workgroup is empirically determined. Exceeding this limit would require splitting workgroups differently, potentially reducing efficiency [S1, S2].
--   **Block Size:** The block size of 256 cells is chosen to allow 8-bit indexing. Changing this size would require larger indices and larger interface buffers [S1, S2].
+*   **Empty Blocks**: If a block has no occupied cells, `gl_TaskCountNV` should be 0. The task generation logic must handle this gracefully [S1, S2].
+*   **Vertex Count Variance**: The number of vertices per cell varies between 3 and 12. The dynamic partitioning ensures the 96-vertex limit is respected [S1, S2].
+*   **Memory Efficiency**: Extracting primitives in the task shader would require storing 12 vertices per cell in the interface block, drastically increasing memory usage and reducing performance. Only 8-bit indices are sent [S1, S2].
+*   **Atomic Operations**: Expensive atomic operations are omitted by using `subgroupBroadcast` for offset sharing, which is more efficient [S1, S2].
 
 ## Subtopics
 
@@ -240,14 +203,14 @@ A GPU-driven occlusion culling technique that identifies volume blocks containin
 Transient isosurface extraction is a rasterization-based method that extracts isosurface geometry "on the fly" using task and mesh shader pipelines, passing primitives directly to the rasterizer without intermediate explicit mesh storage. It solves the high memory bandwidth and storage costs of indirect methods (like standard Marching Cubes) and the resolution-dependent performance penalties of ray marching. Unlike its parent method, [Task Shader Cell Classification](1535-task-shader-cell-classification.md), which only classifies cells and emits workgroups, this method performs the actual geometry extraction and projection within the mesh shader stage.
 
 ## Operating characteristics
--   **Time Complexity:** The classification step is $O(N)$ where $N$ is the number of cells in the block (256). The stream compaction is also $O(N)$ using parallel reduction. Task generation is $O(M)$ where $M$ is the number of occupied cells. Overall, the preprocessing is linear with respect to the block size.
--   **Memory Complexity:** The interface block memory is fixed per block: `dense_occupancy_index` (up to 256 bytes), `occupied_cell_list_offset` (32 * 4 bytes), `occupied_list_length` (32 * 4 bytes). Shared memory is minimal (256 bytes for flags, 256 * 4 bytes for vertex counts).
--   **Performance:** The method significantly reduces the number of mesh shader invocations by only processing occupied cells, leading to higher warp occupancy and better performance compared to processing all cells [S1, S2]. The use of `subgroupBroadcast` for offset calculation avoids the latency of atomic operations [S1, S2].
--   **Strengths:** Efficient filtering of empty space, low memory overhead for interface block, high warp occupancy.
--   **Limitations:** Requires support for task and mesh shaders (NVIDIA NV_shader_thread_group extension or similar). The fixed block size and vertex limits may not be optimal for all datasets.
+*   **Time Complexity**: The classification step is $O(N)$ where $N$ is the number of cells in the block (256). The stream compaction is also $O(N)$ with a small constant factor due to the reduction. Task generation is $O(M)$ where $M$ is the number of occupied cells. Overall, it is linear with respect to the block size.
+*   **Memory Complexity**: The interface block memory is fixed per block: `dense_occupancy_index` (up to 256 bytes if 8-bit indices are used, but typically 32-bit indices are implied by "32-bit index denotes the block" and standard practices, though the text says "8-bit integer" for indexing cells, the buffer likely stores indices. The text says "capacity for 12 vertices per cell" would be bad, implying indices are small. The text says "dense_occupancy_index buffer contains a compact list". The size depends on the number of occupied cells. The offset/length buffers are fixed at 32 elements each [S1, S2].
+*   **Performance**: Minimizes mesh shader invocations, which has a significant positive effect on performance [S1, S2]. The use of `subgroupBroadcast` avoids atomic operations, improving efficiency [S1, S2].
+*   **Strengths**: High performance on sparse volumes; efficient use of GPU tree expansion; minimal interface block memory usage.
+*   **Limitations**: Requires support for task and mesh shaders (NV/ARB extensions); empirical vertex limit (96) may not be optimal for all hardware or data sets.
 
 ## Background
-The method was introduced in the paper "Efficient Direct Isosurface Rasterization of Scalar Volumes" [S1, S2]. It leverages the NVIDIA Task and Mesh Shader extensions to optimize the isosurface extraction pipeline for scalar volumes. The approach builds on the concept of blocky meshing and face culling, as described in [Blocky meshing](31-blocky-meshing.md), by adding a GPU-driven classification stage to further optimize the rendering of sparse volumes.
+The method was introduced in the paper "Efficient Direct Isosurface Rasterization of Scalar Volumes" [S1, S2]. It leverages the task and mesh shader pipeline features introduced in NVIDIA's RTX architecture to optimize isosurface extraction. The approach builds on the principles of [Blocky meshing](31-blocky-meshing.md) but adapts them for transient, GPU-driven extraction.
 
 ## Sources
 [S1] Efficient Direct Isosurface Rasterization of Scalar Volumes, https://doi.org/10.1111/cgf.14670, fetched 2026-10-27

@@ -1,0 +1,187 @@
+--- v001.md
++++ v002.md
+@@ -11,5 +11,5 @@
+ - Cloud volume bounds: `cloudBottom` and `cloudTop` (Y-coordinates) [S1, unofficial].
+ - Cloud coverage parameter `coverage` (float, typically 0.52) [S1, unofficial].
+-- Extinction coefficient $\sigma_t$ (float, typically 0.035–0.04) [S1, unofficial].
++- Extinction coefficient $\sigma_t$ (float, typically 0.035) [S1, unofficial].
+ - FBM parameters: `octaves` (default 3), `scale` (default 0.0008) [S1, unofficial].
+ 
+@@ -21,11 +21,13 @@
+ 
+ **Steps:**
+-1. **Height Culling:** Check if the world Y-coordinate $y$ is within `[cloudBottom, cloudTop]`. If $y < \text{cloudBottom}$ or $y > \text{cloudTop}$, return density $0.0$ [S1, unofficial].
+-2. **Coordinate Scaling:** Scale the input coordinates by `scale` to define the base frequency of the noise field [S1, unofficial].
+-3. **Inverted Worley FBM Calculation:** Compute the base noise value using multi-octave inverted Worley noise (see `worleyFBM` pseudocode below) [S1, unofficial].
+-4. **Height Gradient:** Compute the normalized height $h$ relative to the cloud layer bounds, then apply a sinusoidal gradient to attenuate density at the top and bottom edges [S1, unofficial].
+-5. **Coverage Thresholding:** Subtract the inverse coverage term from the gradient-scaled noise to define the cloud base [S1, unofficial].
+-6. **Normalization and Clamping:** Normalize the result by the coverage parameter and clamp to $[0, \infty)$ [S1, unofficial].
+-7. **Extinction Scaling:** Multiply the final density by $\sigma_t$ to obtain the volumetric extinction coefficient [S1, unofficial].
++1. Initialize FBM accumulators: `sum = 0.0`, `freq = 1.0`, `amp = 1.0`, `totalAmp = 0.0` [S1, unofficial].
++2. Loop `i` from 0 to `octaves` (default 3): compute inverted Worley value $w = 1.0 - \text{worley3D}(x \cdot \text{freq}, y \cdot \text{freq}, z \cdot \text{freq})$, add to sum `sum += w * amp`, accumulate amplitude `totalAmp += amp`, update frequency `freq *= 2.0`, update amplitude `amp *= 0.5` [S1, unofficial].
++3. Return normalized FBM sum: `sum / totalAmp` [S1, unofficial].
++4. Check height bounds: if world Y coordinate $y$ is outside `[cloudBottom, cloudTop]`, return density $0.0$ [S1, unofficial].
++5. Scale coordinates: `scale = 0.0008`, compute `baseNoise = worleyFBM(x * scale, y * scale, z * scale, octaves)` [S1, unofficial].
++6. Compute height normalization: $h = \frac{y - \text{cloudBottom}}{\text{cloudTop} - \text{cloudBottom}}$ [S1, unofficial].
++7. Compute height gradient: `heightGrad = sin(π * h)` [S1, unofficial].
++8. Compute raw density: `rawDensity = (baseNoise * heightGrad) - (1.0 - coverage)` [S1, unofficial].
++9. Return clamped and normalized density: `max(0.0, rawDensity / (coverage + 1e-4)) * σ_t` [S1, unofficial].
+ 
+ **Formulas:**
+@@ -43,78 +45,39 @@
+ import math
+ 
++def hash_3d(x: int, y: int, z: int) -> float:
++    """Deterministic integer hash mapped to [0, 1). Standard implementation detail [G]."""
++    h = (x * 374761393 + y * 668265263 + z * 1274126177) & 0xFFFFFFFF
++    h = (h ^ (h >> 13)) * 1274126177
++    h = h ^ (h >> 16)
++    return abs(h) / 4294967296.0
++
+ def worley3D(x: float, y: float, z: float) -> float:
+-    """
+-    Computes the distance to the nearest cell center in Worley noise.
+-    Uses a 3x3 grid of integer lattice points around the input coordinate.
+-    """
+-    # Determine the integer grid cell containing the point
+-    ix = math.floor(x)
+-    iy = math.floor(y)
+-    iz = math.floor(z)
+-    
++    """Distance to the nearest cell center in a 3x3x3 grid."""
++    ix, iy, iz = math.floor(x), math.floor(y), math.floor(z)
+     min_dist_sq = float('inf')
+-    
+-    # Iterate over the 3x3x3 neighborhood of cells
+     for dx in range(-1, 2):
+         for dy in range(-1, 2):
+             for dz in range(-1, 2):
+-                # Generate a pseudo-random vector for the cell center
+-                # Using a simple hash function for determinism
+-                cell_x = ix + dx
+-                cell_y = iy + dy
+-                cell_z = iz + dz
+-                
+-                # Hash function to get a random vector in [0, 1)^3
+-                # This is a placeholder for a specific hash implementation;
+-                # standard Worley implementations use a pre-computed lattice or hash.
+-                # For implementation from text, we assume a deterministic hash H.
+-                rx = hash_3d(cell_x, cell_y, cell_z)
+-                ry = hash_3d(cell_y, cell_z, cell_x)
+-                rz = hash_3d(cell_z, cell_x, cell_y)
+-                
+-                # Distance from point to cell center
++                rx = hash_3d(ix + dx, iy + dy, iz + dz)
++                ry = hash_3d(iy + dy, iz + dz, ix + dx)
++                rz = hash_3d(iz + dz, ix + dx, iy + dy)
+                 dist_sq = (x - rx)**2 + (y - ry)**2 + (z - rz)**2
+                 if dist_sq < min_dist_sq:
+                     min_dist_sq = dist_sq
+-                    
+     return math.sqrt(min_dist_sq)
+ 
+-def hash_3d(x: int, y: int, z: int) -> float:
+-    """
+-    Simple deterministic hash to generate a float in [0, 1).
+-    """
+-    # Using a standard integer hash and mapping to float
+-    h = x * 374761393 + y * 668265263 + z * 1274126177
+-    h = (h ^ (h >> 13)) * 1274126177
+-    h = h ^ (h >> 16)
+-    return abs(h % 10000) / 10000.0
+-
+ def worleyFBM(x: float, y: float, z: float, octaves: int = 3) -> float:
+-    """
+-    Computes multi-octave inverted Worley FBM.
+-    """
++    """Multi-octave inverted Worley FBM."""
+     sum_val = 0.0
+     freq = 1.0
+     amp = 1.0
+     total_amp = 0.0
+-    
+-    for i in range(octaves):
+-        # Compute inverted Worley value: 1.0 - distance
++    for _ in range(octaves):
+         w = 1.0 - worley3D(x * freq, y * freq, z * freq)
+-        
+-        # Add to sum weighted by amplitude
+         sum_val += w * amp
+-        
+-        # Accumulate total amplitude for normalization
+         total_amp += amp
+-        
+-        # Update frequency and amplitude for next octave
+         freq *= 2.0
+         amp *= 0.5
+-        
+-    # Return normalized sum
+-    if total_amp == 0:
+-        return 0.0
+-    return sum_val / total_amp
++    return sum_val / total_amp if total_amp != 0 else 0.0
+ 
+ def compute_cloud_density(x: float, y: float, z: float, 
+@@ -122,45 +85,25 @@
+                           coverage: float, sigma_t: float,
+                           scale: float = 0.0008, octaves: int = 3) -> float:
+-    """
+-    Computes the final cloud density using Procedural 3D Worley-Perlin Fractal Noise.
+-    """
+-    # Step 1: Height Culling
++    """Procedural 3D Worley-Perlin Fractal Noise Density."""
+     if y < cloud_bottom or y > cloud_top:
+         return 0.0
+-    
+-    # Step 2: Coordinate Scaling
+-    sx = x * scale
+-    sy = y * scale
+-    sz = z * scale
+-    
+-    # Step 3: Base Noise
+-    base_noise = worleyFBM(sx, sy, sz, octaves)
+-    
+-    # Step 4: Height Gradient
++    base_noise = worleyFBM(x * scale, y * scale, z * scale, octaves)
+     h_norm = (y - cloud_bottom) / (cloud_top - cloud_bottom)
+     height_grad = math.sin(math.pi * h_norm)
+-    
+-    # Step 5: Raw Density
+     raw_density = (base_noise * height_grad) - (1.0 - coverage)
+-    
+-    # Step 6: Normalization and Clamping
+-    # Avoid division by zero
+     epsilon = 1e-4
+     normalized_density = max(0.0, raw_density / (coverage + epsilon))
+-    
+-    # Step 7: Extinction Scaling
+     return normalized_density * sigma_t
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Division by Zero:** The normalization step divides by `coverage`. If `coverage` is 0, the result is undefined. A small epsilon ($10^{-4}$) is added to the denominator [S1, unofficial].
+-- **Height Normalization:** If `cloudBottom` equals `cloudTop`, the height normalization $h$ is undefined. This should be prevented by input validation [S1, unofficial].
+-- **Precision:** Worley noise involves square roots and distance calculations. Using single-precision floats may introduce minor artifacts in the noise field, but is generally acceptable for real-time rendering [S1, unofficial].
+-- **Boundary Conditions:** The height gradient $\sin(\pi h)$ naturally goes to 0 at $h=0$ and $h=1$, ensuring smooth falloff at cloud boundaries [S1, unofficial].
++- **Height Culling:** Check if the world Y-coordinate $y$ is within `[cloudBottom, cloudTop]` [S1, unofficial].
++- **Division by Zero:** The normalization step divides by `coverage` [S1, unofficial]. If `coverage` is 0, the result is undefined [S1, unofficial]. A small epsilon ($10^{-4}$) is added to the denominator to prevent division by zero [S1, unofficial].
++- **Height Normalization:** If `cloudBottom` equals `cloudTop`, the height normalization $h$ is undefined [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Worley Noise
+-A cell-based noise function that uses the distance to the nearest seed point. It produces cellular, puffy structures ideal for clouds [S1, unofficial].
++A cell-based noise function that uses the distance to the nearest seed point [S1, unofficial]. It produces cellular, puffy structures ideal for clouds [S1, unofficial].
+ 
+ ### Fractal Brownian Motion (FBM)
+@@ -171,7 +114,7 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(O \cdot N^3)$ per sample, where $O$ is the number of octaves and $N$ is the neighborhood size (typically $3^3=27$ for Worley) [S1, unofficial].
+-- **Memory Complexity:** $O(1)$, as the method is procedural and requires no texture lookups or data structures [S1, unofficial].
+-- **Performance:** The method is computationally expensive per sample due to the hash function and distance calculations in Worley noise. However, it is efficient in terms of memory bandwidth compared to texture-based methods [S1, unofficial].
++- **Time Complexity:** Not given in the sources.
++- **Memory Complexity:** Not given in the sources.
++- **Performance:** Not given in the sources.
+ - **Strengths:** Produces realistic, billowy cloud shapes; fully procedural and resolution-independent; no texture memory required [S1, unofficial].
+ - **Limitations:** Computationally intensive; lacks the fine-scale turbulence of Perlin noise; requires careful tuning of coverage and height parameters [S1, unofficial].

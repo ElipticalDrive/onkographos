@@ -1,0 +1,182 @@
+--- v001.md
++++ v002.md
+@@ -3,124 +3,81 @@
+ 
+ ## Overview
+-View-aligned slicing is a proxy geometry technique that divides a 3D volume into planar slices and rotates them to align with the view plane, minimizing sampling artifacts and maintaining consistent slice thickness relative to the camera [S2, S1, unofficial]. It is chosen when consistent sampling distance is required across viewpoints, offering a trade-off of slower performance but higher memory efficiency compared to fixed-step ray casting [S1, unofficial].
++View-aligned slicing is a proxy geometry technique that divides a 3D volume into planar slices aligned with the view plane to minimize sampling artifacts and maintain consistent slice thickness relative to the camera [S2, S1, unofficial]. Unlike standard ray casting which samples along the ray direction, this method renders pre-aligned geometric primitives, offering a trade-off of slower performance but higher memory efficiency compared to texture-based approaches [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** 3D volume data, volume bounding box, number of slices $n$ (sampling rate), camera view matrix, projection matrix.
+-*   **Output:** 2D image with accumulated color and opacity.
++- Input: 3D scalar volume data, camera position and orientation, number of slices $n$ [S2, S1, unofficial].
++- Output: 2D image with accumulated color and opacity [S1, S2, unofficial].
+ 
+ **Data Structures:**
+-*   **3D Texture:** Stores the volume data. Clamping mode must be set to `GL_CLAMP_TO_BORDER` to avoid artifacts from texture coordinate transformation [S2, unofficial].
+-*   **Proxy Geometry:** A unit quad (or triangle fan) representing a single slice. The geometry is stationary in screen space (or view space aligned with the view plane), while texture coordinates are transformed [S2, unofficial].
+-*   **Shader Uniforms (per slice):**
+-    *   `sliceNumber` (float): Index of the current slice.
+-    *   `totalSlices` (float): Total number of slices $n$.
+-    *   `MVPMatrix` (Matrix4f): Model-View-Projection matrix.
+-    *   `ModelMatrix` (Matrix4f): Model matrix.
+-    *   `ViewMatrix` (Matrix4f): View matrix.
+-    *   `TextureMatrix` (Matrix4f): Rotation matrix transforming texture coordinates to align with the view [S2, unofficial].
++- **3D Texture:** Stores the volume data. Clamping mode must be set to `GL_CLAMP_TO_BORDER` to prevent artifacts during texture coordinate transformation [S2, unofficial].
++- **Proxy Geometry:** A unit cube scaled to the volume's dimensions, divided into $n$ slices along the z-direction [S2, unofficial]. Each slice is represented as a polygon primitive (triangle fan) constructed from the centroid, with vertices sorted in counter-clockwise order [S1, unofficial].
++- **Shader Uniforms:** Passed per slice in the rendering loop: `sliceNumber` (float), `totalSlices` (float), `MVPMatrix` (Matrix4f), `ModelMatrix` (Matrix4f), `ViewMatrix` (Matrix4f), `TextureMatrix` (Matrix4f) [S2, unofficial].
+ 
+ **Steps:**
+-1.  **Load Volume:** Load 3D volume data into a 3D texture [S2, unofficial].
+-2.  **Scale Geometry:** Scale a unit cube (or quad) with the volume's dimensions [S2, unofficial].
+-3.  **Divide Volume:** Divide the volume into $n$ slices along the z-direction, where $n$ is the sampling rate [S2, unofficial].
+-4.  **Intersect Bounding Box:** Intersect the slicing planes with the volume bounding box to determine the extent of each slice [S1, unofficial].
+-5.  **Sort Vertices:** Sort the resulting vertices in counter-clockwise order [S1, unofficial].
+-6.  **Construct Primitive:** Construct a polygon primitive (e.g., triangle fan) from the centroid [S1, unofficial].
+-7.  **Align Slices:** Align slices to the view plane (X-Y plane) by stacking them in the negative z-direction [S2, unofficial]. This is achieved by using a rotation matrix that transforms texture coordinates, keeping the slice geometry stationary while changing the texture content [S2, unofficial].
+-8.  **Render Loop:** For each slice $i$ from 1 to $n$:
+-    a. Calculate the slice position and pass `sliceNumber`, `totalSlices`, and transformation matrices to the shader [S2, unofficial].
+-    b. Transform texture coordinates in the vertex shader using the `TextureMatrix` [S2, unofficial].
+-    c. Render the slice primitive.
+-    d. **Compositing:** Perform front-to-back compositing using hardware alpha blending. The "Over" operator is used:
+-       $$ C_{out} = C_{src} + (1 - \alpha_{src}) C_{dst} $$
+-       $$ \alpha_{out} = \alpha_{src} + (1 - \alpha_{src}) \alpha_{dst} $$
+-       Where Source is the current slice and Destination is the accumulated result [S1, unofficial].
+-9.  **Transfer Function:** In the fragment shader, sample the 3D texture using the transformed texture coordinates. Apply a 1D transfer function (e.g., cubic spline fit to manual points) to map the scalar value to color and opacity [S2, unofficial].
++1.  **Volume Loading:** Load the 3D volume data into a 3D texture [S2, unofficial].
++2.  **Geometry Setup:** Scale a unit cube to match the volume's dimensions [S2, unofficial]. Divide the volume into $n$ slices in the z-direction, where $n$ is the sampling rate [S2, unofficial].
++3.  **View Alignment:** Align the slices to the view plane (typically the X-Y plane). The slices stack up in the negative z-direction relative to the camera [S2, unofficial].
++4.  **Transformation:** Use a rotation matrix to transform texture coordinates. This allows the slice geometry (unit quad) to remain stationary while the texture content changes to align with the view [S2, unofficial]. The texture coordinates are transformed in the vertex shader [S2, unofficial].
++5.  **Clamping:** Ensure the 3D texture uses `GL_CLAMP_TO_BORDER` clamping mode to avoid artifacts caused by the transformation of texture coordinates [S2, unofficial].
++6.  **Rendering Loop:** For each slice:
++    a. Calculate the slice position [S2, unofficial].
++    b. Pass the slice position and uniforms to the shader [S2, unofficial].
++    c. Render the slice geometry.
++7.  **Classification:** In the fragment shader, use the value from the 3D texture to look up color and alpha. A 1D transfer function is used, defined by a manual array of points fitted with a cubic spline [S2, unofficial].
++8.  **Compositing:** Accumulate color and alpha using the over operator in back-to-front order [S1, unofficial]. The hardware alpha blending settings are: Source = 1, Destination = 1 - Source Alpha [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-import math
++# Initialization
++volume_data = load_volume_data()
++texture_3d = create_3d_texture(volume_data)
++texture_3d.set_clamping_mode(GL_CLAMP_TO_BORDER) # [S2, unofficial]
+ 
+-def vec3(x, y, z):
+-    return [x, y, z]
++# Geometry Setup
++unit_cube = create_unit_cube()
++scaled_cube = scale(unit_cube, volume_dimensions) # [S2, unofficial]
++slices = divide_into_slices(scaled_cube, n) # [S2, unofficial]
+ 
+-def mat4_identity():
+-    return [[1,0,0,0], [0,1,0,0], [0,0,1,0], [0,0,0,1]]
++# Rendering Loop
++for i in range(n):
++    # Calculate slice position and transform
++    slice_transform = calculate_view_aligned_transform(i, n, camera) # [S2, unofficial]
++    
++    # Set Shader Uniforms
++    set_uniform("sliceNumber", i)
++    set_uniform("totalSlices", n)
++    set_uniform("MVPMatrix", slice_transform.mvp)
++    set_uniform("ModelMatrix", slice_transform.model)
++    set_uniform("ViewMatrix", slice_transform.view)
++    set_uniform("TextureMatrix", slice_transform.texture)
++    
++    # Render Slice
++    render_geometry(slices[i])
+ 
+-def mat4_multiply(a, b):
+-    # Standard 4x4 matrix multiplication [G]
+-    res = [[0]*4 for _ in range(4)]
+-    for i in range(4):
+-        for j in range(4):
+-            for k in range(4):
+-                res[i][j] += a[i][k] * b[k][j]
+-    return res
+-
+-def rotate_texture_matrix(view_direction):
+-    # Create a rotation matrix to align texture coordinates with the view plane [G]
+-    # Simplified: assumes view direction is along Z, rotates around Z to align X-Y
+-    # In practice, this matrix transforms the 3D texture coordinates to match the slice's orientation
+-    # relative to the camera. [S2, unofficial]
+-    return mat4_identity() # Placeholder for specific rotation logic based on view
+-
+-def view_aligned_slicing(volume_texture, volume_dims, num_slices, camera_view_matrix, camera_proj_matrix):
+-    """
+-    Renders volume using view-aligned slicing.
+-    """
+-    # 1. Load 3D volume data into 3D texture [S2, unofficial]
+-    # 2. Scale unit cube with volume dimensions [S2, unofficial]
+-    
+-    # Initialize accumulated color and alpha for the image
+-    # Note: Hardware alpha blending handles the compositing [S1, unofficial]
+-    
+-    # 3. Divide volume into n slices in z-direction [S2, unofficial]
+-    # 4. Intersect slicing planes with bounding box [S1, unofficial]
+-    # 5. Sort vertices in counter-clockwise order [S1, unofficial]
+-    # 6. Construct polygon primitive (triangle fan) from centroid [S1, unofficial]
+-    
+-    for i in range(1, num_slices + 1):
+-        # 7. Align slices to view (X-Y plane) [S2, unofficial]
+-        # Calculate slice position and transformation matrices
+-        texture_matrix = rotate_texture_matrix(camera_view_matrix)
+-        
+-        # 8. Pass uniforms to shader: sliceNumber, totalSlices, MVPMatrix, ModelMatrix, ViewMatrix, TextureMatrix [S2, unofficial]
+-        shader_uniforms = {
+-            'sliceNumber': i,
+-            'totalSlices': num_slices,
+-            'MVPMatrix': mat4_multiply(camera_proj_matrix, camera_view_matrix),
+-            'ModelMatrix': mat4_identity(), # Or scaled volume matrix
+-            'ViewMatrix': camera_view_matrix,
+-            'TextureMatrix': texture_matrix
+-        }
+-        
+-        # Render the slice primitive
+-        # Vertex shader transforms texture coordinates [S2, unofficial]
+-        # Fragment shader samples 3D texture and applies transfer function [S2, unofficial]
+-        # Compositing is done via hardware alpha blending (Over operator) [S1, unofficial]
+-        render_slice(volume_texture, shader_uniforms)
+-
+-def render_slice(texture, uniforms):
+-    # Simulate hardware rendering step [G]
+-    pass
+-
++# Fragment Shader Logic (Conceptual)
++def fragment_shader():
++    tex_value = sample_3d_texture(tex_coord) # [S2, unofficial]
++    color, alpha = apply_transfer_function(tex_value) # [S2, unofficial]
++    return color, alpha
+ ```
+ 
+ **Parameters:**
+-*   `numberOfSlices` ($n$): The number of slices to divide the volume into, determining the sampling rate [S2, unofficial].
++- `numberOfSlices` ($n$): The number of slices to divide the volume into, determining the sampling rate [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Texture Coordinate Artifacts:** Using `GL_CLAMP_TO_BORDER` is required to avoid artifacts due to the transformation of texture coordinates [S2, unofficial].
+-*   **Sorting:** Vertices must be sorted in counter-clockwise order to ensure correct rasterization and compositing [S1, unofficial].
++- Texture coordinate transformation artifacts: Mitigated by using `GL_CLAMP_TO_BORDER` [S2, unofficial].
++- Sorting order: Vertices must be sorted in counter-clockwise order to ensure correct rendering [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Slower than fixed-step ray casting due to the overhead of rendering multiple primitives and managing texture coordinate transformations [S1, unofficial].
+-*   **Memory Complexity:** More memory efficient than ray casting as it does not require storing large intermediate buffers for ray marching, relying instead on hardware alpha blending [S1, unofficial].
+-*   **Strengths:** Maintains consistent sampling distance relative to the camera, reducing intensity variations as the camera moves [S1, unofficial].
+-*   **Limitations:** Slower performance; requires careful handling of texture coordinate transformations and clamping modes [S2, unofficial].
+-*   **When to Use:** When consistent sampling distance is critical and memory efficiency is preferred over raw speed [S1, unofficial].
++- **Time Complexity:** Slower than texture-based volume rendering [S1, unofficial].
++- **Memory Complexity:** More memory efficient than texture-based volume rendering [S1, unofficial].
++- **Strengths:** Consistent sampling distance regardless of viewpoint; minimizes sampling artifacts by aligning slices with the view plane [S1, S2, unofficial].
++- **Limitations:** Slower performance; requires complex proxy geometry construction [S1, unofficial].
++- **When to use:** When memory efficiency is critical and consistent sampling is required despite slower performance [S1, unofficial].
++- **When not to use:** When high performance is required and memory is not a constraint [S1, unofficial].
+ 
+ ## Background
+-View-aligned slicing is a proxy geometry technique used in GPU-based volume rendering. It is discussed in the context of comparing different volume rendering methods, highlighting its role in maintaining consistent sampling distance [S1, unofficial]. The implementation details, including the use of 3D textures and rotation matrices for view alignment, are described in a GitHub repository [S2, unofficial].
++View-aligned slicing is a proxy geometry technique used in GPU volume rendering. It was described in unofficial sources detailing slice-based volume rendering implementations [S1, S2, unofficial].
+ 
+ ## Sources

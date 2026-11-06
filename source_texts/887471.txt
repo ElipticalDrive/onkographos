@@ -1,0 +1,224 @@
+UntoldEngine is an open-source Swift/Metal XR engine for high-performance Apple-platform spatial visualization apps, giving developers full control over rendering, shaders, and the engine pipeline. - [Feature] Temporal anti-aliasing by miogds · Pull Request #1343 · untoldengine/UntoldEngine
+
+[Feature] Temporal anti-aliasing by miogds · Pull Request #1343 · untoldengine/UntoldEngine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+miogds
+commented
+Oct 10, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Temporal anti-aliasing: setRendering(.antiAliasing(.taa)) and .msaaTaa (4× MSAA on the G-buffer plus the temporal resolve).
+Why now: with foveation on (#1342) the Vision Pro draws each eye at full panel density where the eyes look, and the remaining visible aliasing is sub-pixel detail flickering in the periphery, where the compositor's rate map spans several screen pixels per texel and moves with the gaze: a dartboard's 1.4 mm wires and the embossed PET of the flights shimmer slightly until you look straight at them. That is temporal noise, and temporal accumulation is the general fix — for any model, instead of fattening wires or softening normal maps asset by asset.
+How it works (TemporalAntiAliasing.swift, TAAShader.metal)
+Before each frame's graph is built, applyJitter offsets the projection by a sub-pixel Halton (2, 3) amount — in the projection's third column, so for a perspective projection it is a constant NDC shift — after taking last frame's offset out (the macOS projection persists across frames; projectionDidChange resets the bookkeeping where the projection is set afresh). The offset is measured in screen pixels, which under a rate map is the map's screen size, not the texture's.
+After the look pass, the taa resolve (FXAA's slot) reprojects each pixel through the depth buffer and the unjittered view-projections of this frame and the history's, clips the history colour to the YCoCg box of the pixel's 3×3 neighbourhood — the mean ± TAAParams.shared.clipGamma (1.25) standard deviations, variance clipping, so a pixel-thin wire or line of text survives the jittered frames that miss it — and blends with TAAParams.shared.historyWeight (0.9). One pass writes both the anti-aliasing texture and the eye's next history texture (two colour targets); the history is per eye, ping-ponged, and invalidated by a resize or a mode change.
+Foveated XR frames: the colour, depth and history textures are in physical space and every frame's rate map differs, so the reprojection goes physical → screen (this frame's map) → world → previous screen → previous physical (the history frame's map) through both maps' decoders, using the map the history was drawn with. The history's weight is also cut by the ratio of the two maps' local rates, taken per axis on the axis where the history is coarsest: a spot the gaze has just moved onto has a history from the periphery, coarser than the new frame, and at full weight it showed as a blurry shadow fading over twenty frames (first headset round). The compositor's rates are quantized per axis, so a zone can be 2.4× coarser in y with the same x rate as the frame before; a single-axis comparison judged such a history equal and let it wipe thin edges on alternate frames (third round, below).
+The history is sampled with a Catmull-Rom filter (nine bilinear taps), which resampling every frame smears less than bilinear. A pixel at the clear depth — the background pass, a transparent quad over passthrough — has no position to reproject from and keeps its own frame; reprojected from the far plane it ghosted or vanished under a moving camera (the HUD pill and label of the test app flickered on and off).
+Only the primary drawable advances the eye's history and the depth pyramid: visionOS 26 can hand a second, capture drawable per frame (TemporalAntiAliasing.historyUpdatesEnabled), and rendering it fully overwrote each eye's history from the capture's pose every frame.
+Camera motion is handled through the reprojection; objects moving on their own rely on the clip (no motion vectors yet — the natural next step if ghosting on fast objects shows).
+The rate map on renderInfo.xrFoveation now also goes on the scene passes of the macOS path, so the foveated resolve is testable on a Mac.
+Device result (Vision Pro, visionOS 26, Oche with foveation on, render quality 1.0, .msaaTaa)
+Log: ✓ TAA resolve: 2624×2560, history weight 0.88, clip gamma 1.25 (variance clip), rate-map reprojection, rate-weighted history.
+Round 1 (plain clip, full-weight history): the flights stopped shimmering and the inner wires improved, but whatever the gaze landed on carried a fading blurry shadow (coarse peripheral history blended at full weight), and the HUD's pixel-thin label flickered on and off at distance (a min/max clip wiping it). Fixed by the variance clip and the rate-weighted history.
+Round 2: the developer's words — the darts "look awesome", "the external circle and the number are sharper like never before"; inner wires much softer than with MSAA alone, a slight shimmer far away remains. One artefact left: the HUD pill vanished on alternate frames at one medium distance.
+Round 3: that blink reproduced on a Mac with a rate map coarse in both axes (the moving-map test now asserts, with the jitter off, that no lit pixel loses its colour through the moving maps; it failed before the per-axis ratio and passes after). On the headset the pill now holds at every distance.
+GPU time per frame: 12 ms on average, 9 ms to 18 ms (whole command buffer, render quality 1.0, 2624×2560 per eye, .msaaTaa); the 90 Hz budget is 11.1 ms.
+Builds on #1342 (the rate map plumbing it reuses); its commits appear here until that lands, after which this rebases to the one commit.
+Checklist
+This project follows the Engineering Principles.
+Relevant tests have been added or updated — TemporalAntiAliasingTests: the jitter sequence, the jitter going into and out of the projection (and leaving it untouched when the mode is not temporal), a resolve on a still scene that settles (frame-to-frame mean difference under 0.4 %) while staying within 2 % of the single-sample frame, a still scene drawn through a real rate map whose dense zone jumps every frame (the history reprojected through both maps lands where the new map puts the scene: residual at the held-still floor), and a camera moving every frame in both temporal modes (residual at the floor, no shadow of earlier poses). The reserved-pass-ID test covers the new modes.
+Existing functionality and API compatibility have been considered — two new enum cases (.taa, .msaaTaa, also in the scene serializer), TAAParams; other modes unchanged.
+Relevant builds and tests pass locally — kernels rebuilt for every platform, swift build --build-tests, the post-FX, MSAA, graph and serializer suites, xcodebuild of UntoldEngineXR for the visionOS simulator.
+Recoverable failures are handled appropriately — a missing texture, pipeline or camera skips the resolve with the usual error; the first frame after a history invalidation outputs the frame as is.
+Significant architectural changes and trade-offs are explained below
+Documentation has been updated where necessary — docs/Architecture/renderingSystem.md, docs/API/UsingEngineAPI.md.
+Performance-sensitive changes have been measured — one full-screen pass (3×3 neighbourhood, nine history taps, two rate map decodes). GPU time per frame on the headset (Oche, foveation on, render quality 1.0, 2624×2560 per eye, .msaaTaa, the whole command buffer as the Controls line reports it): 12 ms on average, 9 ms to 18 ms; the compositor's 90 Hz budget is 11.1 ms, so quality 1.0 with 4× MSAA and the temporal resolve sits at the edge of it and the game's render quality setting is what trades it off.
+Architectural notes / trade-offs
+Tonemapped-space resolve. The resolve runs on the look output rather than on linear HDR colour: it needs no extra HDR history, and fireflies are already compressed, at the cost of slightly less accurate averaging of very bright edges.
+Clip instead of motion vectors. The G-buffer has no velocity target; adding one touches every geometry pass and the memoryless tile layout. The neighbourhood clip keeps ghosting on moving objects small; motion vectors are the follow-up if it is not small enough.
+One history per eye, not per drawable target. A capture drawable of a different size is presented cleared by the XR path; one of the eye's size is resolved against the eye's history without advancing it, so recording never disturbs what the wearer sees.
+Javier Segura
+added 9 commits
+October 10, 2026 17:26
+[Feature] Draw the XR frame through the compositor's rasterization ra…
+…
+4590f9a
+```
+…te maps (foveation)
+
+With foveation enabled in the layer configuration, visionOS hands each eye a
+rasterization rate map and textures of its physical size; the engine ignored
+the maps, so apps had to keep foveation off, which also forbids a render
+quality above the platform default. The stereo path now attaches the eye's map
+to every pass that rasterizes the scene at drawable size and sets the eye's
+screen-space viewport there; the full-screen passes keep copying physical
+pixels one to one. SSAO rebuilds view positions from a texel's screen position,
+and the occlusion culls (mesh, Gaussian chunk, per-splat) move their projected
+rects into the pyramid's physical layout through the map the pyramid was drawn
+with, so culling stays on under foveation. The Gaussian fragment takes its
+offset from the splat centre from a varying rather than from its position.
+On by default when the drawable provides maps; `.foveatedRendering(.disabled)`
+ignores them for diagnosis. Kernels rebuilt for every platform.
+```
+[Bugfix] Query the frame's drawables with queryDrawables on visionOS 26
+…
+444c308
+```
+A layer configured with foveation or a render quality aborts the app when
+the frame is queried with the single-drawable queryDrawable() ("BUG IN
+CLIENT: called cp_frame_query_drawable() which does not support setting
+render quality or fovea"). The frame now takes the drawable array on
+visionOS 26 (the old call on visionOS 2), presents every drawable, and
+draws the scene into a capture drawable only while its textures match the
+frame's resources; otherwise it is presented cleared rather than
+reallocating every sizeable resource twice a frame.
+```
+[Bugfix] Leave the render target size to the attachments while a rate…
+…
+9ed204a
+```
+… map is attached
+
+Under a rasterization rate map Metal reads a descriptor's renderTargetWidth
+and renderTargetHeight, like the viewport, in screen pixels. The scene
+descriptors carried the physical texture size there, which clipped every
+foveated frame to the top-left physical-size corner of the screen: on the
+headset a screen-fixed rectangle, different in each eye, outside which the
+board vanished. The attached descriptors now leave the size at 0 (the
+attachments' own) and get the texture size back when the map is detached;
+the eye's viewport is taken from the map's screen size.
+```
+[Feature] Temporal anti-aliasing (.taa and .msaaTaa)
+…
+baed0e4
+```
+The projection is jittered by a sub-pixel Halton offset before each frame's
+graph is built, and a resolve pass after the look pass blends the frame with
+the eye's history, reprojected through the depth buffer and the two frames'
+unjittered view-projections and clipped to the colour box of the pixel's
+neighbourhood. Sub-pixel detail a single sample flickers on — thin wires,
+fine normal maps, the periphery of a foveated frame where a texel spans
+several screen pixels — averages out over frames. Under a rasterization
+rate map the reprojection goes physical → screen → world → previous screen →
+previous physical through both frames' maps. Camera motion is handled;
+moving objects rely on the clip. Kernels rebuilt for every platform.
+```
+[Patch] TAA: variance clipping and a history weight that follows the …
+…
+9876375
+```
+…rate map
+
+A pixel-thin feature — a wire, a line of text — is rasterized in some jittered
+frames and not others, and a min/max box of a frame that missed it clipped it
+out of the history, so it flickered at distance; the clip box is now the 3×3
+mean ± clipGamma (1.25) standard deviations. Under foveation a spot the gaze
+has just moved onto has a history from the periphery, coarser than the new
+frame, which showed as a shadow fading over twenty frames; the history's
+weight is cut by the ratio of the two maps' local rates. Kernels rebuilt.
+```
+[Chores] Log the temporal resolve's parameters once
+551e8b4
+[Patch] TAA: keep depth-less pixels, Catmull-Rom history, moving-map …
+…
+271edfd
+```
+…and moving-camera tests
+
+A pixel at the clear depth — the background pass, a transparent quad drawn
+over passthrough — has no position to reproject from; fetched from the far
+plane its history ghosted or wiped it under a moving camera (the HUD pill
+and label flickered on and off). Such a pixel now keeps its own frame. The
+history is sampled with a Catmull-Rom filter (nine bilinear taps), which
+resampling every frame smears less than bilinear. The rate map on
+renderInfo.xrFoveation now also goes on the scene passes of the macOS path,
+so the foveated resolve is testable on a Mac: the new tests draw a still
+scene through a rate map whose dense zone jumps every frame, and move the
+camera, in both temporal modes; the residuals sit at the held-still floor.
+Kernels rebuilt.
+```
+[Chores] TAA: a jitter scale for diagnosis (TAAParams.jitterScale)
+edb7f83
+[Bugfix] XR: a capture drawable does not advance the temporal history…
+…
+0e1c7ae
+```
+… or the depth pyramid
+
+On visionOS 26 a frame carries a second drawable while the view is recorded
+or streamed. The engine drew the scene into it as into the built-in display,
+so each eye's temporal history and the occlusion pyramid were overwritten
+from the capture's pose on every frame: the display's next resolve read a
+history that alternated between its own pose and the capture's, and thin
+objects blinked while recording. A secondary drawable now resolves its frame
+as is and leaves the history, the matrices, the map and the pyramid to the
+built-in display. The frame's drawable count is logged when it changes.
+```
+miogds
+force-pushed
+the
+feature/taa
+branch
+from
+9e14783 to
+0e1c7ae
+Compare
+October 11, 2026 10:00
+[Bugfix] TAA: take the rate ratio on the axis where the history is co…
+…
+5cea34c
+```
+…arsest
+
+A rate map is coarser in one axis than the other wherever its rows and
+columns differ, and Metal quantizes the requested rates, so a frame can be
+0.6 texels per screen pixel in y where the history's frame was 0.25. The
+history weight was scaled by a ratio taken from the larger step of the two
+axes and judged such frames equal in rate, keeping a history 2.4× coarser at
+full weight: its blurred edge overrode the frame's and a thin object lost
+its edge rows on alternate frames (a headset HUD strip blinked at the one
+distance where it sat on such a zone). The ratio is now per axis, the
+smaller taken. The moving-map test now draws a map coarse in both axes and
+asserts, with the jitter off, that no lit pixel loses its colour to a
+history drawn through the other map. Kernels rebuilt.
+```
+miogds
+mentioned this pull request
+Oct 14, 2026
+Headset rendering: foveation, temporal anti-aliasing, a forward path, and RealityKit's look in a mixed space
+#1359
+Merged
+miogds
+commented
+Oct 14, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Superseded by #1359, which carries this work linearised together with the rest of the headset rendering set.
+miogds
+closed this
+Oct 14, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

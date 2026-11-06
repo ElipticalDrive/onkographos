@@ -1,0 +1,179 @@
+# Single-Scattering Differentiable Volume Rendering
+
+Also called: Ours
+
+## Overview
+Single-Scattering Differentiable Volume Rendering is a differentiable renderer that reconstructs smoke density fields using a single-scattering assumption, enabling analytical gradient computation with respect to density $\rho$ [S1]. It solves the inverse problem of recovering volumetric density from multi-view images by computing gradients directly via the differential form of the Radiative Transfer Equation (RTE) [S1]. It sets itself apart from Differential Ray Tracing (DRT) by pre-computing view-independent radiance terms, achieving a 50-100x speedup, and from full multiple-scattering methods by trading absolute accuracy for interactive reconstruction speeds [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A set of $N$ reference images captured from different viewpoints, a volume grid of resolution $R_x \times R_y \times R_z$, and a scattering coefficient $\sigma_t$.
+*   **Output:** A reconstructed density field $\rho(x)$ and its analytical gradients $\frac{\partial L_{out}}{\partial \rho}$ with respect to the rendered image loss.
+
+**Data Structures:**
+*   **Density Field:** A 3D grid of floating-point values representing $\rho(x)$ at voxel centers. The grid is accessed via trilinear interpolation during ray marching [S1].
+*   **Pre-computed Radiance:** A set of radiance values computed for $N_d$ directional samples. These are view-independent and stored to accelerate the inverse pass [S1].
+
+**Parameters:**
+*   **Learning Rate ($\alpha$):** 0.01 for gradient descent optimization [S1].
+*   **Directional Samples ($N_d$):** 30, determined as the optimal balance between accuracy and computational efficiency [S1].
+*   **Iterations:** 200 iterations for reconstruction experiments [S1].
+*   **Scattering Coefficient ($\sigma_t$):** Constant, relating optical thickness to density via $\kappa_t(x) = \sigma_t \rho(x)$ [S1].
+
+**Algorithm Steps:**
+
+1.  **Pre-computation:**
+    For each of the $N_d$ directional light samples:
+    a. Compute the radiance contribution for the current direction assuming single scattering.
+    b. Store these radiance terms. This step scales linearly with $N_d$ because radiance is computed for each sample direction independently [S1].
+
+2.  **Primal Rendering (Forward Pass):**
+    For each pixel in each view:
+    a. Cast a ray through the volume.
+    b. Perform ray marching using trilinear interpolation to sample $\rho(x)$ [S1].
+    c. Compute the transmitted radiance using the single-scattering approximation and the pre-computed directional terms.
+    d. Output the rendered image $L_{out}$ [S1].
+
+3.  **Gradient Computation (Inverse Pass):**
+    a. Compute the loss $L$ between the rendered image $L_{out}$ and the reference image.
+    b. Compute the analytical gradient $\frac{\partial L_{out}}{\partial \rho}$ using the differential form of the RTE derived in the source [S1].
+    c. The density directly influences optical properties through $\kappa_t(x) = \sigma_t \rho(x)$, allowing the gradient to be expressed analytically [S1].
+
+4.  **Optimization:**
+    a. Update the density field $\rho$ using gradient descent: $\rho_{new} = \rho_{old} - \alpha \frac{\partial L}{\partial \rho}$ [S1].
+    b. Repeat for the specified number of iterations (e.g., 200) [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def single_scattering_differentiable_rendering(reference_images, volume_resolution, sigma_t, num_directional_samples=30, learning_rate=0.01, num_iterations=200):
+    """
+    Reconstructs density field from reference images using single-scattering differentiable rendering.
+    
+    Args:
+        reference_images: List of reference images from different viewpoints.
+        volume_resolution: Tuple (Rx, Ry, Rz) of the volume grid.
+        sigma_t: Scattering coefficient.
+        num_directional_samples: Number of directional samples for pre-computation.
+        learning_rate: Gradient descent learning rate.
+        num_iterations: Number of optimization iterations.
+        
+    Returns:
+        Reconstructed density field rho.
+    """
+    # Initialize density field [G]
+    rho = np.zeros(volume_resolution)
+    
+    # Step 1: Pre-computation of radiance terms
+    # Pre-computation scales linearly with directional samples
+    precomputed_radiance = []
+    for i in range(num_directional_samples):
+        # Compute radiance for direction i assuming single scattering
+        # This is view-independent
+        radiance_i = compute_single_scattering_radiance(volume_resolution, sigma_t, direction=i)
+        precomputed_radiance.append(radiance_i)
+        
+    # Step 2 & 3: Optimization Loop
+    for iteration in range(num_iterations):
+        total_loss = 0
+        total_gradient = np.zeros(volume_resolution)
+        
+        for view_idx, ref_image in enumerate(reference_images):
+            # Primal Rendering
+            rendered_image = render_view(rho, precomputed_radiance, view_idx, volume_resolution, sigma_t)
+            
+            # Compute Loss
+            loss = compute_loss(rendered_image, ref_image)
+            total_loss += loss
+            
+            # Inverse Rendering: Compute Gradient
+            # Gradient is computed analytically using the differential form of RTE
+            # dL_out / d_rho is computed directly
+            gradient = compute_gradient(rendered_image, ref_image, rho, precomputed_radiance, view_idx, volume_resolution, sigma_t)
+            total_gradient += gradient
+            
+        # Update Density
+        rho = rho - learning_rate * total_gradient
+        
+    return rho
+
+def compute_single_scattering_radiance(volume_resolution, sigma_t, direction):
+    """
+    Computes radiance for a specific direction under single-scattering assumption.
+    This is a placeholder for the specific physics implementation detailed in [S1].
+    """
+    # Implementation details for single-scattering radiance calculation
+    # Radiance is computed for each sample direction independently [S1]
+    pass
+
+def render_view(rho, precomputed_radiance, view_idx, volume_resolution, sigma_t):
+    """
+    Renders a single view using ray marching and pre-computed radiance.
+    """
+    # Cast rays for the view
+    # Use trilinear interpolation to sample rho [S1]
+    # Combine with precomputed radiance terms
+    pass
+
+def compute_loss(rendered_image, ref_image):
+    """
+    Computes Mean Squared Error between rendered and reference image.
+    """
+    return np.mean((rendered_image - ref_image) ** 2)
+
+def compute_gradient(rendered_image, ref_image, rho, precomputed_radiance, view_idx, volume_resolution, sigma_t):
+    """
+    Computes the analytical gradient of the loss with respect to density.
+    Uses the differential form of the RTE [S1].
+    """
+    # dL_out / d_rho is computed analytically [S1]
+    # The density influences optical properties through kappa_t(x) = sigma_t * rho(x) [S1]
+    pass
+```
+
+**Edge Cases and Pitfalls:**
+*   **Gradient Noise:** The method exhibits higher gradient noise compared to Finite Difference (FD) and Differential Ray Tracing (DRT) due to ray marching being a biased sampling technique [S1]. Gradient standard deviations are 0.000269 for this method vs. 0.000175 (FD) and 0.000202 (DRT) [S1].
+*   **Spatial Bias:** Reconstruction fidelity is higher in outer volume regions (e.g., $z=84$) than in inner regions (e.g., $z=76$) because image-based reconstruction provides stronger constraints for regions directly influencing pixel appearances [S1].
+*   **Grid Artifacts:** Regular patterns may appear due to the discrete voxel representation combined with trilinear interpolation. The gradient scattering process preserves the voxel-grid structure rather than promoting smooth transitions [S1].
+*   **Flat Density Regions:** Optically thin areas may exhibit unnaturally flat density distributions due to insufficient gradient information from the single-scattering model (where multiple scattering would contribute detail) and the under-constrained nature of the inverse problem [S1].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   **Pre-computation:** Scales linearly with the number of directional samples $N_d$ and cubically with volume resolution $O(n^3)$ due to the voxel count [S1].
+*   **Primal Rendering:** Scales favorably with resolution; consistently fast (21-28 ms for 256³ resolution) regardless of directional sampling count [S1].
+*   **Inverse Rendering:** Stable time (91-95 ms for 256³ resolution) due to direct gradient computation [S1].
+*   **Memory:** Reasonable usage even for high-resolution volumes (e.g., 2.73 GB for 256³ resolution) [S1].
+
+**Measured Performance:**
+*   **Hardware:** NVIDIA GeForce RTX 2080 Ti [S1].
+*   **Resolution:** Experiments conducted at 128³ and 256³ resolutions [S1].
+*   **Speedup:** 6x speedup over DRT for single-view at 512 samples per pixel, and 27x for multi-view [S1]. Overall 50-100x speedup compared to DRT [S1].
+*   **Accuracy:** MSE ranges from 3.1 to 8.88 (pixel intensities 0-255). SSIM values are above 0.8 for all views, with some close to 0.95 [S1].
+
+**Strengths and Limitations:**
+*   **Strengths:** High computational efficiency, enabling interactive reconstruction workflows. Suitable for moderately dense smoke and scenarios prioritizing speed over absolute accuracy [S1].
+*   **Limitations:** Decreased absolute accuracy compared to full multiple-scattering methods. Susceptible to grid artifacts and spatial bias [S1].
+
+**When to Use:**
+*   Moderately dense smoke reconstruction.
+*   Scenarios prioritizing reconstruction speed over absolute accuracy.
+*   Applications where approximate density distributions are sufficient for downstream processing [S1].
+
+**When Not to Use:**
+*   Scenarios requiring high-fidelity reconstruction of optically thick or highly scattering media where multiple scattering effects are significant.
+*   Applications where grid artifacts are unacceptable.
+
+## Background
+**Origin:**
+The method is described in "A High-Efficiency Physics-Based Differentiable Renderer for Smoke Reconstruction" [S1]. It is based on the differential form of the RTE derived in Section 3.2 of the source [S1].
+
+**History and Development:**
+The method was developed to address the computational cost of differentiable volume rendering. It validates its gradient computation approach against Finite Difference and Differential Ray Tracing [S1]. It is compared against Laplacian Projection, a physics-based tomographic reconstruction method [S1].
+
+**Usage:**
+The method is used for smoke reconstruction using the ScalarFlow dataset [S1]. Reconstructed density fields are relit using a standard volumetric path tracker to demonstrate adaptability across diverse lighting conditions [S1].
+
+## Sources
+[S1] A High-Efficiency Physics-Based Differentiable Renderer for Smoke Reconstruction, https://doi.org/10.26599/cvm.2026.9450546, fetched 2026-10-27

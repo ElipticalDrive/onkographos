@@ -1,0 +1,108 @@
+# Volumetric Normal Mapping
+
+Also called: Normal vector glyphs, Volumetric bump mapping, Volumetric normal maps
+
+## Overview
+Volumetric Normal Mapping is a technique for direct volume rendering (DVR) that introduces high-frequency visual features into 3D volume data by perturbing the surface normals of the primary volume data using a 3D texture of normal vector glyphs [S1, unofficial]. It solves the problem of visualizing multiple attributes (specifically a secondary functional attribute) in 3D volume data where resolutions may differ, without requiring explicit iso-surface extraction or surface reconstruction [S1, unofficial]. Unlike [Direct Volume Rendering](1184-direct-volume-rendering.md) which treats data as a transparent gel, this method warps the gradients derived from the primary scalar field to simulate surface detail, distinguishing it from [Indirect Volume Rendering](3314-indirect-volume-rendering.md) which relies on explicit mesh extraction.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input 1:** Primary volume data (scalar field) from which the object surface normal $N_O$ is derived via gradients.
+*   **Input 2:** Tertiary attribute data (multivariate field) providing the modulation parameter $\beta$ (or $\eta$ in some contexts, though the source uses $\beta$ for the weight in the final blend equation).
+*   **Input 3:** 3D Normal Map Texture containing volumetric normal vector glyphs (e.g., spherical glyphs).
+*   **Output:** Rendered image with perturbed shading based on the blended normal.
+
+**Data Structures:**
+*   **3D Normal Map Texture:** An RGBA 3D texture.
+    *   **RGB Components:** Store the normal vector $\vec{N_G}$ of the glyph at each voxel.
+    *   **Alpha Component:** Stores the distance $r$ from the center of the spherical glyph to its surface [S1, unofficial].
+    *   **Layout:** The texture is repeated periodically along all axes depending on the size of the original data volume [S1, unofficial].
+    *   **Glyph Definition:** Spherical glyphs are rasterized into the 3D normal map. Voxels inside a spherical glyph contain a normal vector definition pointing radially outward from the glyph center [S1, unofficial].
+
+**Numbered Steps:**
+1.  **Sample Glyph Normal:** During rendering, sample the normal vector $\vec{N_G}$ from the 3D normal map at the current fragment's location.
+2.  **Retrieve Object Normal:** Retrieve the object's original surface normal $\vec{N_O}$ derived from the gradient of the primary volume data at the current fragment.
+3.  **Retrieve Modulation Parameter:** Retrieve the tertiary attribute value $\beta$ from the multivariate data set at the current voxel location. This parameter controls the weight of the glyph normal and the maximum bump size [S1, unofficial].
+4.  **Calculate Angle:** Compute the angle $\alpha$ between the object surface normal $\vec{N_O}$ and the glyph normal $\vec{N_G}$:
+    $$ \alpha = \cos^{-1} (\vec{N_O} \cdot \vec{N_G}) $$
+    where $\vec{N_O}$ and $\vec{N_G}$ are normalized vectors [S1, unofficial].
+5.  **Calculate Distance:** Calculate the distance $d$ from the center of the bump (glyph) as seen from the observer/fragment:
+    $$ d = r \sin(\alpha) $$
+    where $r$ is the distance from the center of the spherical glyph to its surface, retrieved from the alpha component of the 3D normal map texture [S1, unofficial].
+6.  **Evaluate Bump Size:** Compare the calculated distance $d$ with the modulation parameter $\beta$. If $d > \beta$, volumetric normal mapping is denied (suppressed), and only the object surface normal contributes to shading. This controls the maximum bump size [S1, unofficial].
+7.  **Blend Normals:** If the bump is active, calculate the final normal $\vec{N}$ by linearly blending the object normal $\vec{N_O}$ and the glyph normal $\vec{N_G}$ weighted by $\beta$:
+    $$ \vec{N} = \vec{N_O} + \beta \vec{N_G} $$
+    Note: The source equation (1) is $\vec{N} = \vec{N_O} + \beta \vec{N_G}$. The notes mention $\eta$ as a parameter representing a tertiary attribute controlling the weight, and the example uses a constant 1.0 for $\beta$ [S1, unofficial]. The blending is linear.
+8.  **Shade:** Use the final normal $\vec{N}$ for illumination calculations in the fragment shader.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def volumetric_normal_mapping(fragment_position, primary_volume, tertiary_volume, normal_map_texture):
+    # 1. Sample Glyph Normal
+    # normal_map_texture stores (Nx, Ny, Nz, r) in RGBA
+    glyph_data = normal_map_texture.sample(fragment_position)
+    N_G = normalize(glyph_data.rgb)
+    r = glyph_data.a
+
+    # 2. Retrieve Object Normal
+    # Derived from gradient of primary volume data
+    N_O = normalize(gradient(primary_volume, fragment_position))
+
+    # 3. Retrieve Modulation Parameter
+    beta = tertiary_volume.sample(fragment_position)
+
+    # 4. Calculate Angle
+    # Dot product of two normalized vectors
+    dot_product = dot(N_O, N_G)
+    # Clamp to [-1, 1] to avoid numerical errors in acos
+    dot_product = clamp(dot_product, -1.0, 1.0)
+    alpha = acos(dot_product)
+
+    # 5. Calculate Distance
+    # d is the distance from the center of the bump as seen from the fragment
+    # Using symmetry of spherical glyph
+    d = r * sin(alpha)
+
+    # 6. Evaluate Bump Size
+    # If distance exceeds threshold beta, deny normal mapping
+    if d > beta:
+        N_final = N_O
+    else:
+        # 7. Blend Normals
+        # Linear blend weighted by beta
+        N_final = N_O + beta * N_G
+        # Normalize the result to maintain unit length for shading
+        N_final = normalize(N_final)
+
+    # 8. Shade
+    # Use N_final for lighting model
+    return shade(N_final, fragment_position)
+```
+
+**Parameters:**
+*   $\beta$: A parameter from the tertiary attribute field. It controls the maximum bump size by comparing the fragment distance to the bump's center. In the teapot example, it was chosen to be constant 1.0 [S1, unofficial].
+*   $\vec{N_O}$: Object's surface normal vector.
+*   $\vec{N_G}$: Glyph's normal vector.
+*   $r$: Distance from the center of the spherical glyph to its surface (stored in alpha channel).
+*   $\alpha$: Angle between $\vec{N_O}$ and $\vec{N_G}$.
+
+**Edge Cases and Pitfalls:**
+*   **Simple Blending Limitation:** Simple blending (Eq. 1) has limited use because the size and convexity of the resulting bumps depend on where the object intersects the spherical glyphs, not just on $\beta$ [S1, unofficial]. The distance-based suppression (Eq. 2, 3) is required to control bump size effectively.
+*   **Planar Assumption:** Size control of the normal glyphs according to equation (2) is valid only if the surface of the primary object is almost planar with respect to the area of intersection with the spherical normal glyph. This condition is considered true for intended applications where glyphs introduce high-frequency features [S1, unofficial].
+*   **Convexity:** The convexity of the bumps (convex vs concave) depends on which hemisphere of the glyph the object's surface intersects with [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Depends on the number of samples per fragment for the 3D normal map and primary volume. The calculation of angle and distance is constant time per fragment.
+*   **Memory Complexity:** Requires storage for the primary volume, tertiary volume, and the 3D normal map texture. The 3D normal map resolution affects memory usage (e.g., 128^3 voxels in the example) [S1, unofficial].
+*   **Strengths:** Visualizes multiple attributes without explicit surface reconstruction. Introduces high-frequency visual features. Works with multivariate data of different resolutions.
+*   **Limitations:** Limited to spherical glyphs in the described implementation. Relies on the planar surface assumption. The effect of $\beta$ on bump size is only effective when combined with the distance-based suppression.
+*   **When to use:** When visualizing secondary functional attributes in 3D volume data where iso-surface extraction is undesirable or difficult due to resolution mismatches.
+*   **When not to use:** When precise geometric control of bump size independent of intersection location is required without the distance-based suppression mechanism.
+
+## Background
+Volumetric Normal Mapping was introduced by S. Seipel in 2007 [S1, unofficial]. The work was presented at the Eurographics Symposium on Visualization 2007. The method addresses the challenge in medical functional imaging (e.g., PET) where multiple variables (anatomical structure and functional property) are captured at different resolutions. Unlike engineering simulations where variables share the same grid, medical imaging requires techniques to visualize these disparate attributes together. The method builds on the concept of normal mapping but extends it to 3D volumes without the need for explicit surface extraction (like Marching Cubes [LC87]), which is difficult to parameterize stably for varying iso-surface levels [S1, unofficial].
+
+## Sources
+[S1] Volumetric Normal Mapping in Rendering of Multivariate Volume Data, https://doi.org/10.2312/egs.20071031, fetched 2026-10-26 (unofficial)

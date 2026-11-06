@@ -1,0 +1,222 @@
+--- v004.md
++++ v005.md
+@@ -4,105 +4,148 @@
+ 
+ ## Overview
+-Computes the gradient (normal vector) of a Signed Distance Function (SDF) grid at every voxel center using a 4th-order accurate finite difference scheme to provide smooth normals for ray marching and shading [S1, unofficial]. It sets itself apart from standard central differences by maintaining 4th-order accuracy even at volume boundaries through specific extrapolation, whereas siblings like the [Sobel Operator](1416-sobel-operator.md) or [Jacobian Estimation via Central Differences](2650-jacobian-estimation-via-central-differences.md) typically degrade to lower orders or require different boundary handling.
++Computes the gradient (normal vector) of a Signed Distance Function (SDF) grid at every voxel center using a 4th-order accurate finite difference scheme [S1, unofficial]. This method provides smooth normals for ray marching and shading, distinguishing itself from lower-order stencils by maintaining high accuracy even at volume boundaries through specific extrapolation techniques [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:**
+-- `grid`: A 3D tensor of shape $(N_x, N_y, N_z)$ containing scalar field values (e.g., SDFs) at voxel centers.
+-- `voxel_size`: The physical spacing $h$ between adjacent voxels.
+-- `grid_res_x`, `grid_res_y`, `grid_res_z`: The integer dimensions of the grid.
+-
+-**Outputs:**
+-- A list of three 3D tensors `[grid_normal_x, grid_normal_y, grid_normal_z]`, each of shape $(N_x, N_y, N_z)$, representing the partial derivatives $\frac{\partial f}{\partial x}$, $\frac{\partial f}{\partial y}$, and $\frac{\partial f}{\partial z}$.
++**Inputs and Outputs:**
++- **Input:** A 3D grid of scalar values $V$ (typically an SDF) with dimensions $N_x \times N_y \times N_z$, and a scalar `voxel_size` $h$ representing the physical spacing between voxels.
++- **Output:** Three 3D grids representing the gradient components $\nabla f = [\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z}]$.
+ 
+ **Data Structures:**
+-- The grid is stored as a dense 3D array. No auxiliary structures are required beyond the input grid itself.
++The grid is stored as a dense 3D array. For implementation, it is treated as a tensor where indexing $V[i, j, k]$ corresponds to the value at voxel coordinates $(i, j, k)$.
+ 
+-**Algorithm:**
+-The gradient is computed independently for each axis. For each axis, the method calculates a forward difference approximation ($X_1$) and a backward difference approximation ($X_2$), then combines them to achieve central difference accuracy with 4th-order boundary conditions.
++**Algorithm Steps:**
++The gradient is computed component-wise. For each axis, two approximations are generated: one shifted forward ($X_1$) and one shifted backward ($X_2$). The final gradient is the central difference of these two approximations.
+ 
+-1.  **Boundary Extrapolation Formula:**
+-    To maintain 4th-order accuracy at the boundaries, values outside the grid are extrapolated using the formula [S1, unofficial]:
+-    $$ V_{n+1} = 3V_n - 3V_{n-1} + V_{n-2} $$
+-    where $n$ is the largest index in the dimension.
++1.  **X-Axis Gradient:**
++    -   Compute forward approximation $X_1$: Concatenate the interior slice $V[1:N_x, :, :]$ with a boundary extrapolation term at the last index $N_x-1$.
++    -   Compute backward approximation $X_2$: Concatenate a boundary extrapolation term at the first index $0$ with the interior slice $V[0:N_x-1, :, :]$.
++    -   Calculate $G_x = (X_1 - X_2) / (2h)$.
+ 
+-2.  **X-Axis Computation:**
+-    - Let $n_x = N_x - 1$.
+-    - Compute $X_1$ (forward shift with boundary extrapolation):
+-      $$ X_1 = \text{concat}(\text{grid}[1:, :, :], \text{extrapolated\_last\_x}) $$
+-      where $\text{extrapolated\_last\_x} = 3 \cdot \text{grid}[n_x, :, :] - 3 \cdot \text{grid}[n_x-1, :, :] + \text{grid}[n_x-2, :, :]$.
+-    - Compute $X_2$ (backward shift with boundary extrapolation):
+-      $$ X_2 = \text{concat}(\text{extrapolated\_first\_x}, \text{grid}[:n_x, :, :]) $$
+-      where $\text{extrapolated\_first\_x} = -3 \cdot \text{grid}[1, :, :] + 3 \cdot \text{grid}[0, :, :] + \text{grid}[2, :, :]$.
+-    - Compute gradient:
+-      $$ \text{grid\_normal\_x} = \frac{X_1 - X_2}{2 \cdot \text{voxel\_size}} $$
++2.  **Y-Axis Gradient:**
++    -   Compute forward approximation $Y_1$: Concatenate $V[:, 1:N_y, :]$ with a boundary extrapolation term at index $N_y-1$ along the second dimension.
++    -   Compute backward approximation $Y_2$: Concatenate a boundary extrapolation term at index $0$ with $V[:, 0:N_y-1, :]$.
++    -   Calculate $G_y = (Y_1 - Y_2) / (2h)$.
+ 
+-3.  **Y-Axis and Z-Axis Computation:**
+-    - Repeat the logic for $y$ and $z$ axes, adjusting tensor slicing dimensions and concatenation axes accordingly.
+-    - For $y$: $n_y = N_y - 1$. $Y_1$ slices `grid[:, 1:, :]` and extrapolates along dim 1. $Y_2$ slices `grid[:, :n_y, :]` and extrapolates along dim 1.
+-    - For $z$: $n_z = N_z - 1$. $Z_1$ slices `grid[:, :, 1:]` and extrapolates along dim 2. $Z_2$ slices `grid[:, :, :n_z]` and extrapolates along dim 2.
++3.  **Z-Axis Gradient:**
++    -   Compute forward approximation $Z_1$: Concatenate $V[:, :, 1:N_z]$ with a boundary extrapolation term at index $N_z-1$ along the third dimension.
++    -   Compute backward approximation $Z_2$: Concatenate a boundary extrapolation term at index $0$ with $V[:, :, 0:N_z-1]$.
++    -   Calculate $G_z = (Z_1 - Z_2) / (2h)$.
++
++**Boundary Extrapolation Formula:**
++To maintain 4th-order accuracy at the boundaries, values outside the grid are extrapolated using a quadratic fit derived from the last (or first) three interior points. For the last element in a dimension with index $n$ (where $n = N-1$), the extrapolated value $V_{n+1}$ is:
++$$ V_{n+1} = 3V_n - 3V_{n-1} + V_{n-2} $$
++For the first element (index $0$), the extrapolated value $V_{-1}$ is:
++$$ V_{-1} = -3V_0 + 3V_1 + V_2 $$
+ 
+ **Pseudocode:**
+ ```python
+-def compute_4th_order_gradient(grid, voxel_size, nx, ny, nz):
++def compute_4th_order_gradient(grid, voxel_size):
+     """
+-    Computes 4th-order gradient of a 3D grid.
+-    grid: numpy array of shape (nx, ny, nz)
+-    voxel_size: float
+-    nx, ny, nz: int
+-    Returns: list of 3 arrays (gx, gy, gz)
++    Computes the gradient of a 3D grid using 4th-order finite differences.
++    
++    Args:
++        grid: 3D numpy array or tensor of shape (Nx, Ny, Nz).
++        voxel_size: Scalar float, the physical spacing h.
++        
++    Returns:
++        Tuple of 3 arrays (grad_x, grad_y, grad_z) of the same shape as grid.
+     """
+-    # X-axis
+-    # Forward shift X1: interior [1:] + extrapolated last
+-    last_x = 3 * grid[nx-1, :, :] - 3 * grid[nx-2, :, :] + grid[nx-3, :, :]
+-    X1 = np.concatenate([grid[1:, :, :], last_x[np.newaxis, :, :]], axis=0)
++    Nx, Ny, Nz = grid.shape
+     
+-    # Backward shift X2: extrapolated first + interior [:nx-1]
+-    first_x = -3 * grid[1, :, :] + 3 * grid[0, :, :] + grid[2, :, :]
+-    X2 = np.concatenate([first_x[np.newaxis, :, :], grid[:nx-1, :, :]], axis=0)
++    # --- X-Axis ---
++    # Interior slices
++    interior_x = grid[1:Nx-1, :, :]
+     
+-    gx = (X1 - X2) / (2.0 * voxel_size)
+-
+-    # Y-axis
+-    last_y = 3 * grid[:, ny-1, :] - 3 * grid[:, ny-2, :] + grid[:, ny-3, :]
+-    Y1 = np.concatenate([grid[:, 1:, :], last_y[:, np.newaxis, :]], axis=1)
++    # Boundary extrapolation for the end (index Nx-1)
++    # V_{Nx} = 3*V_{Nx-1} - 3*V_{Nx-2} + V_{Nx-3}
++    # Note: grid indices are 0-based. Last index is Nx-1.
++    # We need the value at index Nx (virtual) to complete the forward shift
++    # The source code uses grid[n_x] where n_x = Nx-1.
++    # X_1 = cat(grid[1:], extrapolated_end)
++    # X_2 = cat(extrapolated_start, grid[:-1])
+     
+-    first_y = -3 * grid[:, 1, :] + 3 * grid[:, 0, :] + grid[:, 2, :]
+-    Y2 = np.concatenate([first_y[:, np.newaxis, :], grid[:, :ny-1, :]], axis=1)
++    # End boundary extrapolation for X
++    # grid[n_x] is grid[Nx-1], grid[n_x-1] is grid[Nx-2], grid[n_x-2] is grid[Nx-3]
++    end_x = 3 * grid[Nx-1, :, :] - 3 * grid[Nx-2, :, :] + grid[Nx-3, :, :]
++    end_x = end_x.reshape(1, Ny, Nz) # Reshape for concatenation
+     
+-    gy = (Y1 - Y2) / (2.0 * voxel_size)
+-
+-    # Z-axis
+-    last_z = 3 * grid[:, :, nz-1] - 3 * grid[:, :, nz-2] + grid[:, :, nz-3]
+-    Z1 = np.concatenate([grid[:, :, 1:], last_z[:, :, np.newaxis]], axis=2)
++    # Start boundary extrapolation for X
++    # grid[0] is grid[0], grid[1] is grid[1], grid[2] is grid[2]
++    start_x = -3 * grid[0, :, :] + 3 * grid[1, :, :] + grid[2, :, :]
++    start_x = start_x.reshape(1, Ny, Nz)
+     
+-    first_z = -3 * grid[:, :, 1] + 3 * grid[:, :, 0] + grid[:, :, 2]
+-    Z2 = np.concatenate([first_z[:, :, np.newaxis], grid[:, :, :nz-1]], axis=2)
++    # Construct X_1 and X_2
++    # X_1: shift left, pad right with extrapolated end
++    X_1 = np.concatenate((grid[1:, :, :], end_x), axis=0)
++    # X_2: shift right, pad left with extrapolated start
++    X_2 = np.concatenate((start_x, grid[:-1, :, :]), axis=0)
+     
+-    gz = (Z1 - Z2) / (2.0 * voxel_size)
+-
+-    return [gx, gy, gz]
++    grad_x = (X_1 - X_2) / (2 * voxel_size)
++    
++    # --- Y-Axis ---
++    interior_y = grid[:, 1:Ny-1, :]
++    
++    # End boundary extrapolation for Y
++    end_y = 3 * grid[:, Ny-1, :] - 3 * grid[:, Ny-2, :] + grid[:, Ny-3, :]
++    end_y = end_y.reshape(Nx, 1, Nz)
++    
++    # Start boundary extrapolation for Y
++    start_y = -3 * grid[:, 0, :] + 3 * grid[:, 1, :] + grid[:, 2, :]
++    start_y = start_y.reshape(Nx, 1, Nz)
++    
++    Y_1 = np.concatenate((grid[:, 1:, :], end_y), axis=1)
++    Y_2 = np.concatenate((start_y, grid[:, :-1, :]), axis=1)
++    
++    grad_y = (Y_1 - Y_2) / (2 * voxel_size)
++    
++    # --- Z-Axis ---
++    interior_z = grid[:, :, 1:Nz-1]
++    
++    # End boundary extrapolation for Z
++    end_z = 3 * grid[:, :, Nz-1] - 3 * grid[:, :, Nz-2] + grid[:, :, Nz-3]
++    end_z = end_z.reshape(Nx, Ny, 1)
++    
++    # Start boundary extrapolation for Z
++    start_z = -3 * grid[:, :, 0] + 3 * grid[:, :, 1] + grid[:, :, 2]
++    start_z = start_z.reshape(Nx, Ny, 1)
++    
++    Z_1 = np.concatenate((grid[:, :, 1:], end_z), axis=2)
++    Z_2 = np.concatenate((start_z, grid[:, :, :-1]), axis=2)
++    
++    grad_z = (Z_1 - Z_2) / (2 * voxel_size)
++    
++    return grad_x, grad_y, grad_z
+ ```
+ 
+ **Parameters:**
+-- `voxel_size`: Physical size of a single voxel. Used to normalize the finite difference result to physical units [S1, unofficial].
++- `voxel_size`: The physical size of a single voxel in the grid. Used to normalize the finite difference result to physical units [S1, unofficial].
+ 
+-**Edge Cases:**
+-- **Grid Dimensions:** The extrapolation formula requires at least 3 voxels in each dimension ($N \ge 3$) to access indices $n, n-1, n-2$ and $1, 0, 2$. If $N < 3$, the method is undefined or requires fallback to lower-order schemes [G].
+-- **Boundary Continuity:** While the extrapolation ensures 4th-order accuracy at the immediate boundary, the transition from interior to boundary gradients may exhibit discontinuities if the field is not smooth [G].
++**Edge Cases and Pitfalls:**
++- **Grid Size:** The extrapolation formula requires at least 3 voxels in each dimension ($N \ge 3$) to access indices $n, n-1, n-2$ and $0, 1, 2$. If $N < 3$, the method fails or requires fallback to lower-order schemes [G].
++- **Precision:** Using floating-point arithmetic for extrapolation may introduce small errors at boundaries, potentially affecting normal smoothness in critical regions [G].
+ 
+ ## Subtopics
+ 
+-### Boundary Extrapolation
+-A technique to extend grid values beyond bounds using polynomial extrapolation to maintain high-order accuracy. Chosen when boundary gradient accuracy is critical for surface reconstruction. See [Finite Difference Stencils (Central/Forward/Backward)](3858-finite-difference-stencils-central-forward-backward.md).
++### [Sobel Operator](1416-sobel-operator.md)
++A 3x3 convolution-based gradient estimator. Simpler to implement but lower order of accuracy and sensitive to noise compared to 4th-order finite differences.
++
++### [Jacobian Estimation via Central Differences](2650-jacobian-estimation-via-central-differences.md)
++Uses 2nd-order central differences. Less accurate than 4th-order but requires fewer neighboring points and is computationally cheaper.
++
++### [Forward Difference Gradient](3362-forward-difference-gradient.md)
++First-order accurate. Biased and less smooth, but useful for real-time applications where speed is prioritized over normal quality.
++
++### [Gauss-Seidel with Successive Over-Relaxation (SOR)](6904-gauss-seidel-with-successive-over-relaxation-sor.md)
++An iterative solver for Poisson equations, not a direct gradient stencil. Used for integrating gradients, not computing them from a grid.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N_x N_y N_z)$, as it performs a constant number of operations per voxel.
+-- **Memory Complexity:** $O(N_x N_y N_z)$ for the output gradient tensors. No significant auxiliary memory is required beyond temporary slices.
+-- **Performance:** Computationally efficient on GPUs due to tensor operations. The specific implementation in [S1, unofficial] uses PyTorch tensor concatenation and slicing, which is highly optimized.
+-- **Strengths:** Provides higher accuracy than standard central differences at boundaries, reducing artifacts in normal-based shading and ray marching near volume edges.
+-- **Limitations:** Requires a minimum grid size of 3 voxels per dimension. Sensitive to noise in the input grid, as higher-order derivatives amplify high-frequency noise.
++- **Time Complexity:** $O(N_x N_y N_z)$, as each voxel is processed a constant number of times.
++- **Memory Complexity:** $O(N_x N_y N_z)$ for storing the input grid and three output gradient grids.
++- **Performance:** Provides higher quality normals than Sobel or 2nd-order central differences, reducing artifacts in ray marching. The boundary extrapolation adds minimal computational overhead compared to the benefit of maintaining accuracy at edges.
++- **Strengths:** High accuracy (4th-order) throughout the volume, including boundaries. Smooth normals improve shading and ray marching stability.
++- **Limitations:** Requires at least 3 voxels per dimension. More complex to implement than simple central differences due to boundary handling.
+ 
+ ## Background
+-The method is implemented in the SDFDiff repository, associated with CVPR 2020 work on differentiable rendering of Signed Distance Functions [S1, unofficial]. It addresses the need for smooth, accurate normals in neural rendering pipelines where standard finite differences fail at boundaries.
++The method is implemented in the SDFDiff repository, which focuses on differentiable rendering of Signed Distance Functions [S1, unofficial]. It is used to compute normals for SDF grids to enable gradient-based optimization in neural rendering pipelines.
+ 
+ ## Sources

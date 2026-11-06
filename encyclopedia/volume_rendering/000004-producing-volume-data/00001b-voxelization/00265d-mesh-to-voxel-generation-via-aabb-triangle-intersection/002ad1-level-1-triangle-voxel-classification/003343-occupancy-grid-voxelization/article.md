@@ -1,0 +1,125 @@
+# Occupancy Grid Voxelization
+
+Also called: Discretize, Scene Discretization to Occupancy Grid
+
+## Overview
+Occupancy Grid Voxelization converts a target mesh shape into a binary occupancy grid aligned with the sensor resolution, serving as an optimization reference for inverse rendering or volumetric manufacturing [S1, unofficial]. It computes this grid by checking if each voxel box intersects with any mesh triangle [S2, unofficial]. It differs from its parent [Level 1 Triangle-Voxel Classification](4872-level-1-triangle-voxel-classification.md) by explicitly iterating over the voxel space to populate a dense binary tensor, rather than classifying triangles into sparse voxel lists. It is distinct from [Level 2 Triangle-Voxel Classification](5512-level-2-triangle-voxel-classification.md) by its focus on binary occupancy (or face-index mapping) rather than detailed geometric overlap metrics.
+
+## How it works
+**Inputs:**
+*   `vertices`: List of 3D vertex coordinates ($V \in \mathbb{R}^{N_v \times 3}$).
+*   `faces`: List of triangle indices ($F \in \mathbb{Z}^{N_f \times 3}$).
+*   `resolution`: Tuple $(H, W, D)$ defining the grid dimensions.
+*   `bounds`: Bounding box extents or min/max coordinates defining the spatial domain.
+
+**Outputs:**
+*   `occ`: A 3D tensor of shape $(H, W, D)$ storing binary occupancy values (0 or 1) or face indices. In C++ implementations, this is often `Eigen::Tensor<int, 3, Eigen::RowMajor>` [S2, unofficial].
+
+**Data Structures:**
+*   **Voxel Grid**: A 3D array where each cell corresponds to a voxel.
+*   **Coordinate Grids**: Generated using `dr.meshgrid` with 'ij' indexing to map voxel indices to physical coordinates [S1, unofficial].
+
+**Steps:**
+1.  **Compute Voxel Size**: Calculate voxel dimensions by dividing the sensor bounding box extents by the resolution $(H, W, D)$ [S1, unofficial].
+2.  **Initialize Grid**: Create an empty occupancy grid of size $H \times W \times D$, initialized to 0 (empty) [S2, unofficial].
+3.  **Iterate Voxels**: Loop over all voxel indices $i$ from $0$ to $H \times W \times D - 1$ [S2, unofficial].
+    *   Decode linear index $i$ to 3D coordinates $(h, w, d)$:
+        $$ d = i \pmod D $$
+        $$ w = \lfloor i / D \rfloor \pmod W $$
+        $$ h = \lfloor i / (W \times D) \rfloor $$
+    *   Define voxel bounds in index space:
+        $$ \text{min\_idx} = (w, h, d) $$
+        $$ \text{max\_idx} = (w + 1, h + 1, d + 1) $$
+    *   Convert index bounds to physical coordinates using the voxel size and origin [S1, unofficial].
+4.  **Check Intersection**: For each voxel, iterate over all faces $f$ from $0$ to $N_f - 1$ [S2, unofficial].
+    *   Retrieve vertices $v_1, v_2, v_3$ for face $f$.
+    *   Perform triangle-box intersection test:
+        $$ \text{overlap} = \text{triangle\_box\_intersection}(\text{voxel\_min}, \text{voxel\_max}, v_1, v_2, v_3) $$
+    *   If `overlap` is true:
+        *   Set `occ(h, w, d) = 1` (for binary) or store face index $f$ (for color-preserving).
+        *   Break the face loop for this voxel [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def occupancy_grid_voxelization(vertices, faces, resolution, bounds):
+    H, W, D = resolution
+    # bounds is assumed to be (min_x, min_y, min_z, max_x, max_y, max_z)
+    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+    
+    # Compute voxel size
+    dx = (max_x - min_x) / W
+    dy = (max_y - min_y) / H
+    dz = (max_z - min_z) / D
+    
+    # Initialize occupancy grid
+    occ = [[[[0 for _ in range(D)] for _ in range(W)] for _ in range(H)]]
+    
+    # Precompute face vertices
+    face_vertices = []
+    for f in faces:
+        v1 = vertices[f[0]]
+        v2 = vertices[f[1]]
+        v3 = vertices[f[2]]
+        face_vertices.append((v1, v2, v3))
+        
+    # Iterate over all voxels
+    for i in range(H * W * D):
+        d = i % D
+        w = (i // D) % W
+        h = (i // (W * D)) % H
+        
+        # Define voxel physical bounds
+        voxel_min = [min_x + w * dx, min_y + h * dy, min_z + d * dz]
+        voxel_max = [min_x + (w + 1) * dx, min_y + (h + 1) * dy, min_z + (d + 1) * dz]
+        
+        # Check intersection with all faces
+        for f_idx, (v1, v2, v3) in enumerate(face_vertices):
+            if triangle_box_intersection(voxel_min, voxel_max, v1, v2, v3):
+                occ[h][w][d] = 1
+                break # Found intersection, no need to check other faces for this voxel
+                
+    return occ
+
+def triangle_box_intersection(box_min, box_max, v1, v2, v3):
+    """
+    Checks if the triangle defined by v1, v2, v3 intersects the axis-aligned box.
+    This is a placeholder for the specific SAT or slab test implementation.
+    [G] Standard implementation uses Separating Axis Theorem or slab intersection.
+    """
+    # Implementation details depend on the specific intersection library or algorithm used.
+    # Common approach: Check if any vertex is inside the box, or if any edge intersects the box planes.
+    # For brevity, we assume a helper function exists.
+    return False # Placeholder
+```
+
+**Parameters:**
+*   `resolution`: Typical values depend on the sensor or target precision (e.g., $128^3$, $256^3$) [S1, unofficial].
+*   `bounds`: Defined by the sensor bounding box extents [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision**: Floating-point errors in intersection tests may cause missed voxels or false positives.
+*   **Boundaries**: Voxels on the boundary of the bounding box must be handled carefully to avoid out-of-bounds access or missed intersections [S2, unofficial].
+*   **Degenerate Input**: Triangles with zero area or vertices outside the bounding box should be handled or filtered [S2, unofficial].
+
+## Subtopics
+
+### Color-Preserving Occupancy Voxelization
+Computes an occupancy grid where voxel values store the index of the first face that intersects the voxel, preserving color information by mapping face indices to voxel values [S2, unofficial]. It follows the same iteration and intersection logic as the binary variant but stores `f` (or `num_faces()` if `f==0`) instead of `1` [S2, unofficial]. **Pitfall**: Face index 0 is treated as 'not voxelized' space by default. If face 0 overlaps, store `num_faces()` in the voxel instead of 0 to distinguish it from empty space [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(H \times W \times D \times N_f)$, where $H, W, D$ are grid dimensions and $N_f$ is the number of faces. This is a brute-force approach and can be slow for high-resolution grids and complex meshes.
+*   **Memory Complexity**: $O(H \times W \times D)$ for the occupancy grid.
+*   **Performance**: Performance is heavily dependent on the efficiency of the `triangle_box_intersection` test. Parallelization over voxels is straightforward [S2, unofficial].
+*   **Strengths**: Simple to implement; provides a dense, aligned grid suitable for optimization references [S1, unofficial].
+*   **Limitations**: Computationally expensive for large scenes or high resolutions; does not capture partial voxel occupancy information.
+*   **When to use**: When a binary or face-indexed occupancy grid is required for optimization or visualization, and the mesh complexity is manageable.
+*   **When not to use**: For real-time applications or very large meshes where sparse representations or hierarchical structures (like Octrees) are more appropriate.
+
+## Background
+Originating from the need for inverse rendering in tomographic volumetric additive manufacturing, this method discretizes target shapes into occupancy grids for optimization [S1, unofficial]. It is also used in general mesh processing for converting polygonal models into voxel-based representations [S2, unofficial].
+
+## Sources
+[S1] Dr. TVAM – Inverse Rendering for Tomographic Volumetric Additive Manufacturing, https://github.com/rgl-epfl/drtvam, fetched 2026-10-26 (unofficial)
+[S2] Mesh Voxelization - GitHub, https://github.com/davidstutz/mesh-voxelization, fetched 2026-10-26 (unofficial)

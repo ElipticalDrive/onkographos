@@ -1,0 +1,168 @@
+--- v003.md
++++ v004.md
+@@ -1,80 +1,111 @@
+ # Bounding Spheres Optimization
++
++Also called: Bounding Sphere Grouping, Enclosing Sphere Optimization
++
+ ## Overview
+-Bounding Spheres Optimization is an acceleration technique for volume rendering and Signed Distance Field (SDF) raymarching that eliminates unnecessary distance computations during ray traversal by culling rays that miss a scene object's bounding sphere [S1]. It is a specific application of bounding volume optimization, which minimizes the cost of the map function by skipping SDF evaluations for objects that do not contribute to the minimal distance field [S2].
++Bounding Spheres Optimization reduces the computational cost of sphere tracing by grouping scene objects into larger enclosing spheres, thereby eliminating unnecessary distance calculations during ray traversal [S1][S2, unofficial]. It differs from its parent, [Bounding Volume Culling](1239-bounding-volume-culling.md), which typically discards rays entirely based on geometric bounds, by deferring the evaluation of individual object distances until the ray actually penetrates the enclosing volume [S2, unofficial]. Unlike [Orthogonal Culling Optimization](4034-orthogonal-culling-optimization.md), which pre-computes object visibility via orthogonal projection to reduce per-step evaluations, Bounding Spheres Optimization dynamically manages the active set of distance fields based on ray proximity [S1][S2, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin $\mathbf{o}$ and direction $\mathbf{d}$; a scene object defined by its SDF map function $f(\mathbf{p})$ and its bounding sphere defined by center $\mathbf{c}$ and radius $r$ [G].
+-*   **Output:** A boolean indicating whether the ray intersects the bounding sphere, determining whether $f(\mathbf{p})$ must be evaluated [G].
++*   **Input:** A scene graph containing primitive objects and a hierarchy of Bounding Spheres. Each Bounding Sphere $S$ is defined by a center $C_S$, a radius $R_S$, and a list of enclosed objects $O_S$.
++*   **Output:** The final rendered image with reduced number of Signed Distance Function (SDF) evaluations.
+ 
+ **Data Structures:**
+-*   **Bounding Sphere:** Defined by a 3D vector $\mathbf{c} = (c_x, c_y, c_z)$ and a scalar radius $r$ [G].
+-*   **Ray:** Defined by origin $\mathbf{o}$ and normalized direction $\mathbf{d}$ [G].
++A Bounding Sphere is implemented as a scene object with the following fields:
++*   `center`: 3D vector $(x, y, z)$ representing the mean position of all enclosed objects [S2, unofficial].
++*   `radius`: Scalar value large enough to encompass all enclosed objects [S2, unofficial].
++*   `enclosed_objects`: List of child objects (primitives or nested Bounding Spheres) [S2, unofficial].
+ 
+-**Algorithm:**
+-1.  Compute the vector from the ray origin to the sphere center: $\mathbf{v} = \mathbf{o} - \mathbf{c}$ [G].
+-2.  Project $\mathbf{v}$ onto the ray direction to find the distance to the closest point on the ray line to the sphere center: $t_{ca} = \mathbf{v} \cdot \mathbf{d}$ [G].
+-3.  Calculate the squared distance from the closest point on the ray line to the sphere center: $d^2 = \|\mathbf{v}\|^2 - t_{ca}^2$ [G].
+-4.  Check for intersection:
+-    *   If $d^2 > r^2$, the ray does not intersect the sphere [G].
+-    *   If $d^2 \le r^2$, the ray intersects the sphere [G].
+-    *   *Note:* If the ray originates inside the sphere, $t_{ca}$ may be negative, but the intersection check $d^2 \le r^2$ still holds [G].
++**Algorithm Steps:**
++1.  **Initialization:** For each ray, initialize the current minimum distance $d_{min}$ to infinity and the active object set to the root Bounding Spheres of the scene [S2, unofficial].
++2.  **Distance Evaluation:** At each march step, evaluate the distance to all active Bounding Spheres. The distance to a sphere $S$ from ray origin $O$ at step $t$ is:
++    $$ d_S = \max(0, \| (O + t \cdot \vec{d}) - C_S \| - R_S) $$
++    where $\vec{d}$ is the ray direction [S2, unofficial].
++3.  **Step Advancement:** Advance the ray by the smallest distance found among all active Bounding Spheres:
++    $$ t_{new} = t_{old} + \min_{S \in \text{Active}} d_S $$
++    Note: Individual object distances are *not* calculated at this stage [S2, unofficial].
++4.  **Hit Detection and Expansion:** If the ray hits a Bounding Sphere (i.e., $d_S \approx 0$ or $t$ is within the sphere's bounds):
++    *   Remove the Bounding Sphere $S$ from the active set [S2, unofficial].
++    *   Add all objects in $O_S$ to the active set [S2, unofficial].
++    *   Re-evaluate distances for the newly added objects using their specific SDFs.
++5.  **Termination:** If the ray hits an individual object (distance $\approx 0$), compute color/shading and terminate the ray. If the ray exceeds a maximum distance (e.g., clipping sphere), terminate [S1].
+ 
+ **Pseudocode:**
+ ```python
+-def bounding_sphere_cull(ray_origin, ray_direction, sphere_center, sphere_radius):
+-    """
+-    Determines if a ray intersects a bounding sphere.
+-    Returns True if intersection occurs (SDF evaluation needed), False otherwise.
+-    """
+-    # Vector from ray origin to sphere center
+-    v = ray_origin - sphere_center
++def sphere_trace_with_bounding_spheres(ray_origin, ray_direction, scene_root_spheres, max_steps):
++    t = 0.0
++    active_spheres = scene_root_spheres
+     
+-    # Project v onto ray direction
+-    t_ca = dot(v, ray_direction)
+-    
+-    # Squared distance from ray line to sphere center
+-    # ||v||^2 - t_ca^2
+-    d_squared = dot(v, v) - (t_ca * t_ca)
+-    
+-    # Check if distance is within radius squared
+-    return d_squared <= (sphere_radius * sphere_radius)
++    for step in range(max_steps):
++        min_dist = infinity
++        hit_sphere = None
++        
++        # Evaluate distances only for active bounding spheres
++        for sphere in active_spheres:
++            # Vector from ray point to sphere center
++            to_center = sphere.center - (ray_origin + t * ray_direction)
++            # Distance from ray point to sphere surface
++            dist = length(to_center) - sphere.radius
++            
++            if dist < min_dist:
++                min_dist = dist
++                hit_sphere = sphere
++        
++        # Advance ray
++        t += min_dist
++        
++        # Check for hit on bounding sphere
++        if hit_sphere is not None and min_dist < epsilon:
++            # Remove bounding sphere from active set
++            active_spheres.remove(hit_sphere)
++            
++            # Add enclosed objects to active set
++            # Note: These objects are now evaluated in the next iteration
++            active_spheres.extend(hit_sphere.enclosed_objects)
++            
++            # Re-evaluate distances for new objects in this step
++            # This loop is implicit in the next iteration's distance calculation
++            pass
++            
++        # Check for hit on individual object (if any active objects are primitives)
++        # This requires evaluating SDFs of active primitives
++        # If a primitive is hit, return color and break
++        if is_hit_on_primitive(ray_origin, ray_direction, t, active_spheres):
++            return compute_color(ray_origin, ray_direction, t)
++            
++        # Check max distance or max steps
++        if t > max_distance:
++            return background_color
++            
++    return background_color
+ ```
+ 
+ **Parameters:**
+-*   **Sphere Radius ($r$):** Must tightly bound the object to maximize culling efficiency [G].
+-*   **Threshold:** The comparison $d^2 \le r^2$ is exact. No tolerance is typically applied in the culling step itself, though precision issues may arise with very large coordinates [G].
+-*   **Typical Values:** Not given in the sources. [G]
++*   `epsilon`: Small threshold for hit detection. Not given in the sources.
++*   `max_distance`: Clipping sphere radius. Example: 1000 [S1].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** For scenes with large coordinate values, floating-point precision errors in $d^2$ calculation may lead to incorrect culling. Using double precision for the culling test may be necessary in extreme cases [G].
+-*   **Degenerate Input:** If the ray direction is not normalized, the projection $t_{ca}$ is invalid. The direction must be normalized before use [G].
+-*   **Overhead:** The cost of the sphere intersection test must be less than the cost of the SDF evaluation it replaces. If the SDF is trivial, the culling overhead may negate benefits [G].
++**Edge Cases:**
++*   **Nested Bounding Spheres:** The implementation supports nested spheres, but this was not tested [S2, unofficial].
++*   **Precision:** Large radius spheres may suffer from floating-point precision issues if the scene scale is large. Not given in the sources.
+ 
+ ## Subtopics
+ 
+-### Bounding Volume Optimization
+-An optimization technique that minimizes the cost of the map function by skipping the evaluation of Signed Distance Fields (SDFs) for objects that do not contribute to the minimal distance field, using bounding volumes [S2]. Without this optimization, computation cost is uniform across the frame; with it enabled, expensive computations are localized to areas where complex geometry is present [S2]. It is chosen when a scene contains dozens or hundreds of expensive primitives [S2]. A pitfall to note is that modern GPUs are MIMD rather than pure SIMD, allowing different Streaming Multiprocessors to process different instruction streams simultaneously, which helps distribute expensive threads after cheaper parts finish early [S2]. In a scene with 20 expensive primitives at 720p, enabling this optimization reduced average frame duration from 41 ms (24 fps) to 21 ms (48 fps) [S2].
++### [Orthogonal Culling Optimization](4034-orthogonal-culling-optimization.md)
++Pre-computes object visibility via orthogonal projection to reduce per-step SDF evaluations. Choose when the scene is static and pre-computation is feasible.
++
++### [Frustum Culling (Sphere vs Frustum)](4835-frustum-culling-sphere-vs-frustum.md)
++Discards bounding volumes outside the camera's view frustum. Choose when the camera moves frequently and CPU-side culling is efficient.
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** The culling test is $O(1)$ per object per ray. The total time saved is proportional to the number of rays that miss the bounding volumes [G]. In the zeno logo scene, execution time was reduced from 26:29 to 5:28 (21% relative time) [S1]. In a scene with 20 expensive primitives at 720p, average frame duration dropped from 41 ms (24 fps) to 21 ms (48 fps) [S2].
+-*   **Memory:** Requires storing the center and radius for each object's bounding sphere [G].
+-
+-**Measured Performance:**
+-*   **Zeno Logo:** Bounding spheres reduced execution time to 21% of the unenhanced time [S1].
+-*   **20 Primitives Scene:** Frame rate doubled from 24 fps to 48 fps at 720p resolution [S2].
+-
+-**Scaling:**
+-*   Performance gains scale with the number of objects and the complexity of their SDF evaluations [G].
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Significantly reduces the number of SDF evaluations, especially in scenes with sparse geometry or large empty spaces [G]. Modern GPUs, being MIMD, can efficiently distribute the remaining expensive threads after cheaper culling operations finish early [S2].
+-*   **Limitations:** Requires pre-computation of bounding volumes [G]. If the bounding volumes are loose, culling efficiency drops [G].
++*   **Time Complexity:** Reduces the number of SDF evaluations per step from $N$ (all objects) to $K$ (active bounding spheres), where $K \ll N$. However, when a sphere is hit, the number of active objects increases, potentially increasing the cost of subsequent steps until the objects are traversed [S2, unofficial].
++*   **Memory Complexity:** Requires storing the hierarchy of bounding spheres and their enclosed objects. Not given in the sources.
++*   **Measured Performance:** For the Zeno logo scene, execution time reduced from 26:29 to 5:28 (21% relative time) [S1]. For a single sphere, convexity enhancement reduced time from 2:00 to 1:23 (69% relative time) [S1]. For 9 spheres/plane, triangle inequality reduced time from 2:53 to 1:19 (46% relative time) [S1].
++*   **Strengths:** Significantly reduces distance calculations for sparse scenes or scenes with large empty spaces [S1].
++*   **Limitations:** Overhead of managing the active set; nested spheres were not tested [S2, unofficial]. May not benefit simple scenes [S1].
+ 
+ ## Background
+-Bounding spheres optimization was introduced as part of the sphere tracing method for rendering implicit surfaces [S1]. It was demonstrated in the context of the "zeno" logo and other geometric primitives, showing significant speedups by eliminating unnecessary distance computations [S1]. The broader concept of bounding volume optimization for SDFs was further explored in CUDA-based raymarching implementations, highlighting the benefits of skipping SDF evaluations for non-contributing objects [S2].
++Bounding Spheres Optimization was introduced in the context of sphere tracing for antialiased ray tracing of implicit surfaces [S1]. It was developed as part of the Zeno renderer project [S1]. The technique is described in detail in a thesis evaluating sphere tracing on GPUs [S2, unofficial].
+ 
+ ## Sources
+-[S1] Sphere Tracing: A Geometric Method for the Antialiased Ray ..., https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
+-[S2] Raymarching Distance Fields with CUDA, https://www.mdpi.com/2079-9292/10/22/2730, fetched 2026-10-27+[S1] Sphere Tracing: A Geometric Method for the Antialiased Ray Tracing of Implicit Surfaces, https://www.researchgate.net/publication/2792108_Sphere_Tracing_A_Geometric_Method_for_the_Antialiased_Ray_Tracing_of_Implicit_Surfaces, fetched 2026-10-27
++[S2] Sphere Tracing GPU An evaluation of the Sphere Tracing algorithm and a GPU designed to run it, https://odr.chalmers.se/items/37b0e53f-fc76-4b0e-96d8-8e864573ada9/full, fetched 2026-10-29 (unofficial)

@@ -18,7 +18,7 @@ The world state is represented by a `World` struct containing:
 2. **Render Cached:** If the mesh exists, upload it once and draw it using a single draw call [S1, unofficial].
 3. **Rebuild if Invalid:** If `world.mesh` is `none`:
    a. Initialize an empty vertex list.
-   b. Iterate through every position in `world.voxels`.
+   b. Iterate through every position in `world.voxels` [S1, unofficial].
    c. For each position, generate the 36 vertices (6 faces × 6 vertices) of a unit cube centered at that position [G].
    d. Append these vertices to the list.
    e. Construct a new `Mesh` from the accumulated vertices and assign it to `world.mesh` [S1, unofficial].
@@ -43,8 +43,8 @@ class World:
     def _create_mesh(self) -> Mesh:
         vertices = []
         for voxel_pos in self.voxels:
-            # Generate 36 vertices for a unit cube at voxel_pos [G]
-            vertices.extend(draw_cube(voxel_pos))
+            # [G] Generate 36 vertices for a unit cube at voxel_pos and append to vertices
+            pass
         return Mesh.from_vertices(vertices)
 
     def flip_voxel(self, position: IVec3):
@@ -57,7 +57,7 @@ class World:
 
 **Edge Cases and Pitfalls:**
 - **Visual Discrepancies:** Modifying `world.voxels` without setting `world.mesh` to `none` causes the renderer to display stale geometry [S1, unofficial].
-- **Performance Cost:** Rebuilding the entire mesh is computationally expensive for large worlds. For example, a 2048x2048 world contains over 4 million cubes; rebuilding this geometry for a single block change is prohibitive [S1, unofficial].
+- **Performance Cost:** Rebuilding the entire mesh is computationally expensive for large worlds [S1, unofficial]. For example, a 2048x2048 world contains over 4 million cubes; rebuilding this geometry for a single block change is prohibitive [S1, unofficial].
 
 ## Subtopics
 
@@ -68,10 +68,10 @@ Splits the voxel world into independent chunks to allow localized mesh rebuildin
 - **Time Complexity:** $O(V)$ for mesh creation, where $V$ is the number of voxels. $O(1)$ for rendering if the mesh is valid. $O(1)$ for invalidation, but $O(V)$ for the subsequent rebuild [G].
 - **Memory Complexity:** $O(V)$ to store vertex data for all voxels [G].
 - **Performance:** Significantly reduces draw calls from $V$ (or number of chunks) to 1. However, it incurs high CPU cost during updates [S1, unofficial].
-- **Strengths:** Minimal draw call overhead; simple implementation.
+- **Strengths:** Minimal draw call overhead; simple implementation [S1, unofficial].
 - **Limitations:** Cannot handle dynamic worlds efficiently. Rebuilding the entire mesh for a single change is too slow for large resolutions (e.g., > 32x32) [S1, unofficial].
-- **When to use:** Small, static, or rarely changing voxel worlds.
-- **When not to use:** Large, dynamic voxel worlds where frequent block placement/removal occurs.
+- **When to use:** Small, static, or rarely changing voxel worlds [S1, unofficial].
+- **When not to use:** Large, dynamic voxel worlds where frequent block placement/removal occurs [S1, unofficial].
 
 ## Background
 Originated in tutorials for building voxel engines from scratch, specifically highlighted in "Make yourself a Voxel Engine THIS weekend" [S1, unofficial]. It serves as a foundational optimization step before introducing more complex techniques like face culling or chunking [S1, unofficial].

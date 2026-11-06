@@ -1,0 +1,436 @@
+The modern AEC Studio. Contribute to kennguy3n/AEC-Studio development by creating an account on GitHub.
+
+fix(gltf_export): camera lookAt matrix layout matches mat3_to_quat column-major contract by kennguy3n · Pull Request #68 · kennguy3n/AEC-Studio · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+kennguy3n
+commented
+May 26, 2026
+Copy link
+Copy Markdown
+Owner
+Summary
+Follow-up to PR #58 — fixes the camera-quaternion inversion bug flagged in Devin Review on crates/aec_export/src/gltf_export.rs:800.
+The bug. camera_lookat_components built the 3×3 rotation matrix m in row-major order (m[row][col]), but mat3_to_quat documents and implements the column-major convention (m[col][row]) — using the standard qx = (m[1][2] - m[2][1]) / s extraction formula. Feeding a row-major matrix into a column-major extractor computes the quaternion of Rᵀ, which is the inverse rotation. Every camera node in the exported glTF therefore had an inverted orientation: rotating glTF's local forward (0,0,-1) by that quaternion produced a vector pointing away from the target instead of toward it.
+Concrete example (from Devin Review): camera at (5, 0, 0), target (0, 0, 0), up (0, 1, 0):
+Correct R (columns = right, up, -forward) maps local -Z → world (-1, 0, 0) — toward origin.
+Buggy R (row-major fed to col-major extractor) maps local -Z → world (+1, 0, 0) — away from origin.
+Light orientations were unaffected (they use direction_to_quat, which is axis-angle / matrix-convention-independent).
+The fix. Restructure the matrix construction so each top-level array element is a column (basis vector), not a row:
+```
+// OLD (row-major, wrong):
+let m = [
+    [right[0], recomputed_up[0], -forward[0]],
+    [right[1], recomputed_up[1], -forward[1]],
+    [right[2], recomputed_up[2], -forward[2]],
+];
+
+// NEW (column-major, matches mat3_to_quat):
+let m = [
+    right,
+    recomputed_up,
+    [-forward[0], -forward[1], -forward[2]],
+];
+```
+This is the architecturally correct fix (matrix convention now matches at the construction site) rather than a workaround that transposes at the boundary.
+Why no regression test caught this on the original PR. The existing 16 unit tests and 5 integration tests in gltf_export only asserted on translation, camera intrinsics (yfov / znear / zfar / aspect), and structural fields (mesh / material / light counts) — none of them exercised the quaternion value. This PR adds 3 regression tests that close the gap.
+Tests
+Three new regression tests + one helper in gltf_export::tests:
+rotate_by_quat(q, v) — applies a unit-quaternion rotation to a vector using the standard v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v) formula. Used by every camera-orientation test.
+camera_lookat_quaternion_rotates_local_forward_toward_target — 4 concrete cases (+X→origin, +Z→origin, diagonal, off-axis with non-origin target). For each, asserts rotate_by_quat(q, [0,0,-1]) aligns with the (target − position) unit vector to within 1e-5. This is the direct functional contract of camera_lookat_components.
+camera_lookat_quaternion_is_not_the_inverse_rotation — explicitly checks dot(rotated, to_target) > 0 for a known-buggy case. The old row-major code would have produced dot ≈ -1 here; the fixed code produces dot ≈ +1. This test would fail loudly under the previous bug.
+camera_lookat_quaternion_recomputed_up_matches_world_up — verifies the rotated local +Y aligns with the recomputed_up vector (Gram-Schmidt orthogonalization output), confirming the second column of the matrix is correctly placed.
+All checks local on 6d5900e:
+cargo test -p aec_export --all-targets — 19/19 gltf_export tests pass (including all 3 new regression tests + the original 16)
+cargo clippy -p aec_export --all-targets -- -D warnings — clean
+cargo fmt --check — clean
+Review & Testing Checklist for Human
+Re-export one of the integration-test glTF scenes and load it in Blender / three.js / Khronos gltf-validator. With the bug fix, cameras should now point at the intended target instead of facing the opposite direction.
+Confirm light orientations are still correct (they should be — direction_to_quat was never affected, but worth eyeballing in the viewer).
+Notes
+The matrix layout convention is now explicitly documented inline (each m[i] is a column), so future edits don't regress.
+Devin Review thread on PR Phase 11 Group C (Task 20): real glTF 2.0 export — meshes, PBR materials, cameras, lights #58 that flagged this: see the camera lookAt finding on crates/aec_export/src/gltf_export.rs:800-806.
+The bug shipped to main when PR Phase 11 Group C (Task 20): real glTF 2.0 export — meshes, PBR materials, cameras, lights #58 was merged (Devin Review's automated review at the time reported "No Issues Found" — the camera-quaternion finding came in a later review pass after merge). This PR closes that gap.
+Link to Devin session: https://uney.devinenterprise.com/sessions/ba8abae6f2b8424c8baa3de5663a4b38
+Requested by: @kennguy3n
+fix(gltf_export): camera lookAt matrix layout matches mat3_to_quat co…
+…
+6d5900e
+```
+…lumn-major contract
+
+`camera_lookat_components` previously laid out the lookAt rotation
+matrix in row-major form (m[row][col], with each top-level array
+holding the x/y/z components of right/up/-forward respectively) but
+fed it into `mat3_to_quat`, which indexes its input as m[col][row]
+— the standard column-major convention used by glTF, GLM, and other
+rendering libraries.
+
+The two indexing conventions disagree on a rotation matrix R by
+exactly the transpose. Since R is orthogonal, R^T = R^{-1}, so the
+extracted quaternion was the INVERSE of the intended rotation. Every
+camera node in every exported glTF file had its local -Z (the glTF
+camera 'forward' axis) pointing AWAY from the target instead of
+toward it. Lights are unaffected because they use direction_to_quat
+(axis-angle, independent of matrix convention).
+
+The fix rewrites the matrix construction so each top-level element
+of `m` is a column basis vector:
+
+  m[0] = right       (image of local +X)
+  m[1] = recomputed_up  (image of local +Y)
+  m[2] = -forward    (image of local -Z)
+
+This produces exactly the m[col][row] layout mat3_to_quat expects;
+the extracted quaternion is now R, not R^{-1}.
+
+3 new regression tests rotate (0, 0, -1) by the camera quaternion
+and assert the result aligns with (target - position):
+
+- camera_lookat_quaternion_rotates_local_forward_toward_target —
+  four position/target/up cases including the bug-report example.
+- camera_lookat_quaternion_is_not_the_inverse_rotation — pins the
+  dot-product sign so the row/col layout can't silently regress.
+- camera_lookat_local_up_aligns_with_world_up — pins the local +Y
+  → world +Y contract for the standard up vector.
+
+19/19 gltf_export tests pass; full aec_export crate test suite
+green; cargo clippy -D warnings clean; cargo fmt --check clean.
+```
+devin-ai-integration
+Bot
+assigned
+kennguy3n
+May 26, 2026
+devin-ai-integration
+Bot
+commented
+May 26, 2026
+Copy link
+Copy Markdown
+Contributor
+🤖 Devin AI Engineer
+I'll be helping with this pull request! Here's what you should know:
+✅ I will automatically:
+Address comments on this PR. Add '(aside)' to your comment to have me ignore it.
+Look at CI failures and help fix them
+Note: I can only respond to comments from users who have write access to this repository.
+⚙️ Control Options:
+Disable automatic comment and CI monitoring
+devin-ai-integration
+Bot
+reviewed
+May 26, 2026
+View reviewed changes
+devin-ai-integration
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Devin Review found 3 potential issues.
+Comment thread
+crates/aec_export/src/gltf_export.rs
+Comment on lines
+815
+to
+819
+let m = [
+[right[0], recomputed_up[0], -forward[0]],
+[right[1], recomputed_up[1], -forward[1]],
+[right[2], recomputed_up[2], -forward[2]],
+right,
+recomputed_up,
+[-forward[0], -forward[1], -forward[2]],
+];
+devin-ai-integration
+Bot
+May 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+📝 Info: Old matrix layout was the transpose — produced inverse rotation
+The old code at crates/aec_export/src/gltf_export.rs:802-804 (removed lines) built the matrix as m[row] = [right[row], recomputed_up[row], -forward[row]], meaning each outer element was a row of the rotation matrix. Since mat3_to_quat (crates/aec_export/src/gltf_export.rs:845) indexes as m[col][row] (column-major), this effectively fed in the transpose R^T, extracting the inverse rotation. This caused glTF cameras to face away from their target — a real behavioral bug in production exports. The fix correctly stores each basis vector as an outer element (i.e., a column), matching mat3_to_quat's convention. The comment on the old code ("columns are (right, up, -forward)") was aspirationally correct but the data layout contradicted it.
+Was this helpful? React with 👍 or 👎 to provide feedback.
+devin-ai-integration
+Bot
+May 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for the confirmation. Yes — m[i] is now a column of R (the image of local basis vector e_i under the rotation), matching mat3_to_quat's m[col][row] indexing. The old "columns are (right, up, -forward)" comment described intent; the new comment + layout actually carries that intent.
+Verified in the regression test camera_lookat_quaternion_rotates_local_forward_toward_target — rotating local [0,0,-1] by the extracted quaternion yields the unit (target − position) vector for 4 distinct positions. The previous (row-major) layout would have produced the negation of that vector on every case.
+Comment thread
+crates/aec_export/src/gltf_export.rs
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+crates/aec_export/src/gltf_export.rs
+[-forward[0], -forward[1], -forward[2]],
+];
+let rot = mat3_to_quat(m);
+(position, rot)
+devin-ai-integration
+Bot
+May 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+📝 Info: camera_lookat_components returns the scaled position unchanged — not a new issue
+At crates/aec_export/src/gltf_export.rs:821, camera_lookat_components returns position as-is (already scaled by the caller at line 492). I verified the caller at line 491-494 passes scale_vec(c.position_mm, scale) for position and target, and the raw c.up_mm for up (direction vectors don't need position scaling). This is correct — the translation is already in metres when it reaches the function, and the function just passes it through.
+Was this helpful? React with 👍 or 👎 to provide feedback.
+devin-ai-integration
+Bot
+May 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Confirmed — position is in metres by the time it reaches camera_lookat_components. The caller at gltf_export.rs:491-494 does scale_vec(c.position_mm, scale) and scale_vec(c.target_mm, scale) before passing in. The up vector is unscaled because it's a direction (only orientation matters, not magnitude). The function correctly treats position as opaque translation and only uses target / up for orientation extraction.
+No action needed.
+test(gltf_export): add near-degenerate + exactly-degenerate camera lo…
+…
+68c2521
+```
+…okAt cases
+
+Follow-up to the column-major fix and the Devin Review coverage
+observation: the existing lookAt regression sweep didn't exercise the
+`forward ≈ ±up` corner where `cross(forward, up)` collapses toward
+zero and the `normalize` near-zero fallback at gltf_export.rs:887-888
+engages. Adds two tests:
+
+1. `camera_lookat_near_degenerate_forward_parallel_to_up_does_not_panic`
+   — Two cases (`forward ≈ -up` and `forward ≈ +up`) where the
+   forward vector is within 0.2° of the up axis. Asserts the
+   quaternion is finite and unit-magnitude, AND that rotated local
+   -Z still aligns with (target - position) to within dot > 0.99.
+   This pins the fallback as 'consistent, not undefined'.
+
+2. `camera_lookat_exactly_degenerate_forward_equals_up_returns_finite_quaternion`
+   — Hardcase: `forward` exactly anti-parallel to `up`. The right
+   axis is genuinely ambiguous here, so we only require finiteness
+   and unit-magnitude (no panic, no NaN). This case is unreachable
+   from a sensible content pipeline but reachable from
+   procedurally-generated test fixtures, so degrading gracefully is
+   the contract.
+
+21 gltf_export unit tests pass (was 19). Clippy + fmt clean.
+
+Closes the coverage gap flagged in
+#68 (comment)
+```
+devin-ai-integration
+Bot
+reviewed
+May 26, 2026
+View reviewed changes
+devin-ai-integration
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Devin Review found 1 new potential issue.
+Comment thread
+crates/aec_export/src/gltf_export.rs
+devin-ai-integration
+Bot
+May 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+📝 Info: Gram-Schmidt fallback correctly handles degenerate forward ∥ up case
+When forward is (anti-)parallel to up, cross(forward, up) collapses to near-zero. The old code's normalize fallback (line 925-926) returns [0, 0, 1] which is NOT guaranteed to be perpendicular to forward, producing a non-orthonormal rotation matrix. The new fallback at lines 823-847 picks the world basis axis with the smallest |forward[i]| component (guaranteed to be linearly independent from forward), then applies Gram-Schmidt to make it exactly orthogonal. I traced this through the pathological case forward=[0,-1,0], up=[0,1,0]: abs_x=0 is the smallest, so alt=[1,0,0], proj=0, effective_up=[1,0,0] — correctly perpendicular to forward. The threshold 0.999_999 (~0.08° from parallel) provides adequate margin for float noise.
+Was this helpful? React with 👍 or 👎 to provide feedback.
+devin-ai-integration
+Bot
+May 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for the confirmation — the Gram-Schmidt route was the architecturally correct fix here vs. the easier-but-broken "just return [0,0,1] and hope" fallback. Two notes for completeness:
+Why the smallest-|forward[i]| heuristic, not a fixed axis: picking a fixed axis (say always [1,0,0]) would fail when forward happens to be parallel to that axis (e.g. camera pointing along +X with up [1,0,0] — pathological but representable in a procedurally generated test fixture). Choosing the axis with the smallest |forward[i]| guarantees the projection residual alt - proj·forward has magnitude sqrt(1 - min(|forward[i]|²)) >= sqrt(2/3) ≈ 0.816, which is well-conditioned for the subsequent normalize.
+Why threshold 0.999_999 (~0.08°) instead of a tighter or looser bound: below ~0.08°, cross(forward, up) has magnitude sin(angle) < 1.4e-6, which after normalization amplifies float noise by ~7e5×. Above that, the standard cross(forward, up) path remains numerically stable. The orthonormality test I added (camera_lookat_rotation_matrix_is_orthonormal_even_in_degenerate_case) pins the boundary case at forward = -up exactly, so any regression in either branch trips the test.
+Follow-up 57d79e7 normalizes recomputed_up for symmetry with right per the sibling Devin Review thread.
+fix(gltf_export): guarantee orthonormal lookAt when forward ∥ up
+…
+b2cf2bc
+```
+When the requested forward direction is (anti-)parallel to the supplied
+`up` (a common case: plan-view camera looking straight down at a floor
+plan with world +Y up), `cross(forward, up)` collapses to zero and
+`normalize` returns a fallback `[0, 0, 1]` that is not perpendicular
+to forward. The resulting 3x3 matrix is non-orthonormal and the
+extracted quaternion is a slightly distorted rotation.
+
+Fix: detect the degenerate case via `|dot(forward, up)| > 0.999_999`
+and replace `up` with a Gram-Schmidt-orthogonalized alternate world
+basis axis — picking the axis with the smallest |forward[i]| component
+so the projection residual is well-conditioned. The remaining cross
+product is then well-defined and the matrix is guaranteed orthonormal.
+
+Adds two regression tests that pin the new contract:
+- `camera_lookat_exactly_degenerate_forward_equals_up_returns_finite_quaternion`
+  now also asserts the lookAt invariant (rotated local -Z aligns with
+  target direction) — previously only finite/unit was required.
+- `camera_lookat_rotation_matrix_is_orthonormal_even_in_degenerate_case`
+  probes the three local basis vectors and verifies unit length +
+  mutual perpendicularity after rotation.
+
+Addresses Devin Review 0002 on PR #68.
+```
+devin-ai-integration
+Bot
+reviewed
+May 26, 2026
+View reviewed changes
+devin-ai-integration
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Devin Review found 1 new potential issue.
+Comment thread
+crates/aec_export/src/gltf_export.rs
+Outdated
+up
+};
+let right = normalize(cross(forward, effective_up));
+let recomputed_up = cross(right, forward);
+devin-ai-integration
+Bot
+May 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+📝 Info: Adding normalize to recomputed_up is a behavioral change beyond the matrix fix
+The old code at the equivalent of line 856 was let recomputed_up = cross(right, forward); (no normalize). The new code adds normalize(cross(right, forward)). While cross(right, forward) is analytically unit-length when both inputs are unit and orthogonal, floating-point rounding can cause the result to differ from 1.0 by a few ULPs. The normalize call ensures the rotation matrix fed to mat3_to_quat is orthonormal to within float precision. This is a strict improvement — the old omission was a minor pre-existing deficiency. The comment at lines 849-855 documents the rationale well.
+Was this helpful? React with 👍 or 👎 to provide feedback.
+devin-ai-integration
+Bot
+May 26, 2026
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Good observation — applied as 57d79e7. recomputed_up is now normalized for symmetry with the adjacent right construction.
+Rationale: while mathematically |cross(right, forward)| = |right| · |forward| · sin(90°) = 1 exactly, the cross product itself accumulates a few ULPs of float noise (~1e-7 at f32 precision). The downstream mat3_to_quat uses sqrt(trace + 1) and divides — both numerically stable, but the residual still propagates into |q| - 1 by a couple of ULPs. Normalizing here:
+Keeps the rotation matrix orthonormal to f32 precision (rather than to cross-product residual)
+Matches the pattern at the adjacent let right = normalize(cross(forward, effective_up)) line
+Costs one sqrt + 3 muls per camera (negligible — there's only a handful per export)
+Tightens the orthonormality test bound (camera_lookat_rotation_matrix_is_orthonormal_even_in_degenerate_case now passes with < 1e-7 rather than < 1e-5, though I left the test threshold at the broader bound to avoid spurious failures on different f32 implementations)
+The code is now belt-and-braces against precision regressions — if this helper is ever reused in a context that does require higher precision (e.g. baked into a constraint solver), it'll Just Work.
+fix(gltf_export): normalize recomputed_up for symmetry with right
+…
+57d79e7
+```
+cross(right, forward) is analytically unit-length when both inputs
+are unit and orthogonal, but float rounding can shave off a few
+ULPs. Normalizing matches the pattern at the adjacent right-vector
+construction and keeps the rotation matrix orthonormal to f32
+precision (rather than to cross-product residual).
+
+Addresses Devin Review 0003 on PR #68.
+```
+Hide details
+View details
+kennguy3n
+merged commit 5ad80c0
+into
+main
+May 26, 2026
+8 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+devin-ai-integration Bot
+pushed a commit
+that referenced
+this pull request
+May 26, 2026
+merge: resolve conflicts with main after #54/#55/#62/#63/#64/#66/#68 …
+…
+2be519f
+```
+…merges
+
+Two files conflicted, both doc-only:
+
+- crates/aec_bridge/src/napi_api.rs: PR #65 and main both added the
+  legacy_hash_version_rejected break-reason to the ChainVerificationJs
+  doc comment. main has the more precise wording explaining when the
+  variant is producible (only via strict VerifyOptions, not via the
+  default bridge path). Taking main's version.
+
+- apps/desktop/electron/bridge.ts: identical situation on the TS-side
+  BridgeBackend.projectAuditVerify JSDoc. Taking main's wording.
+
+No code conflicts. cargo build --workspace --all-targets and
+cargo test -p aec_governor --all-targets both pass on the merge
+result. The phase2_journey integration tests fail identically on
+origin/main (pre-existing failures unrelated to this branch — verified
+by checking out fc16bdc into a worktree and running the same tests).
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

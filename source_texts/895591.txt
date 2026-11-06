@@ -1,0 +1,219 @@
+A WGPU-based GPU Monte Carlo path tracing library, - Make metal a GGX microfacet conductor by DanielPettersson · Pull Request #80 · DanielPettersson/solstrale-rust
+
+Make metal a GGX microfacet conductor by DanielPettersson · Pull Request #80 · DanielPettersson/solstrale-rust · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+DanielPettersson
+commented
+Sep 19, 2026
+Copy link
+Copy Markdown
+Owner
+ray_trace.wgsl's conductor was the Ray Tracing in One Weekend metal: a sphere offset around the mirror direction, throughput *= albedo, and a break on any scatter that landed below the horizon. No Fresnel, no pdf -- so no MIS, so no next-event estimation however rough the metal was -- and energy lost outright, with the loss growing with fuzz.
+Two commits, because the second is a correction to the first that the first's test is built to measure.
+Make metal a GGX microfacet conductor
+Isotropic GGX with the height-correlated Smith term and Schlick's Fresnel on f0 = albedo. Sampling is Dupuy & Benyoub 2023, "Sampling Visible GGX Normals with Spherical Caps", rather than Heitz 2018: same distribution, no stretched frame to build, no special case for a wo the shading normal disagrees with. The sample weight collapses to F * G2 / G1(wo) -- the standard VNDF cancellation -- which is what removes the uncompensated break. A wi below the horizon still ends the path, but that is the single-scatter shadowing term rather than a loss, and it is exactly what the furnace test measures. The pdf G1(wo) * D(h) / (4 cos_o) feeds prev_bsdf_pdf and the MIS denominator, so a rough metal takes a shadow ray like any other spread lobe.
+alpha = fuzz * fuzz, with a Dirac path below alpha < 1e-3 so Metal::new(.., 0.) stays an exact mirror. trace_guide now ends its specular chain on a rough metal too: a rough reflection is not a sharp image, and following it would make neighbouring pixels record unrelated guides.
+Put back what single-scatter GGX loses
+Turquin 2019's 1 + f0 * (1 / E - 1), applied to f alone in both bsdf_sample and bsdf_eval and never to the sampling density, so both estimators at a vertex scale identically and the MIS algebra is untouched. E is a sixteen-term fit in fuzz and cos_o, fitted in log space against E computed from the BRDF's own definition by quadrature, rather than Kulla-Conty's table and the question of how naga handles a large const array initialiser.
+What it measures
+before
+single-scatter
+compensated
+Furnace, fuzz 0 / 0.25 / 0.5 / 0.75 / 1
+—
+1.0000 / 0.9942 / 0.8976 / 0.6318 / 0.3503
+1.0000 / 0.9970 / 0.9983 / 0.9980 / 0.9975
+Rough metal, 64 spp, relative RMSE
+0.886
+0.346
+0.256
+test_ggx_metal_is_energy_conserving_in_a_furnace puts a white metal under a uniform unit environment with no lights at all, where an energy-conserving BRDF must read exactly 1, and averages only the pixels inside the sphere's projected disc -- the whole-image mean is dominated by background pixels that read 1.0 whatever the BRDF does. A CPU quadrature of the BRDF's definition agrees with the single-scatter column to 0.0015, so that column pins the model rather than this implementation of it. An albedo-1 Lambertian control in the same furnace reads 1.0000, which is what says a departure is the BRDF and not the mask, the stride or a tone mapper. A sphere is convex, so every path is one bounce and the background: Russian roulette never runs and the firefly clamp is never approached, and neither is disabled for the test.
+test_rough_metal_converges_with_nee renders the new create_rough_metal_scene -- five metals from mirror to nearly diffuse under one small quad light -- at 64 spp against its own 1024 spp reference. Relative to the reference's own mean, not absolute: the old metal's image was six times darker, and an absolute error would have scored it better for being dark. The golden harness provably cannot see this, since it downscales to 100x50 first, which averages away exactly the defect being fixed.
+Two calls worth flagging
+Metal's parameters changed meaning. fuzz is a perceptual roughness with alpha = fuzz * fuzz -- the convention every other renderer's slider means -- so the same number reads noticeably sharper and a scene sitting at fuzz ~ 0.3 changes appearance. albedo is now f0, so every metal has a rim going white at a grazing angle. Both are documented on Metal::new and in LIMITATIONS.md.
+Renderer::new no longer rejects a scene whose only light is its background, which is what a furnace is. A scene with no light of either kind still is, and test_render_scene_without_light moved to a black background to keep asserting it.
+Cost
+cargo bench -- render on the diffuse test scene, which contains no metal at all, runs 192.29 ms against the old shader's 192.67 ms on the same machine in the same session (p = 0.78) -- the drift from the 188.7 ms recorded under #79 is the machine, not this change. The new rough_metal_800x600_64spp arm records 37.25 ms, and the compensation costs nothing measurable within it. VGPRs 128 and 8 subgroups/SIMD throughout, no VGPR spills, SGPR spills 11 -> 14, code size 35024 -> 37316 bytes.
+test_bsdf_refactor_is_image_preserving and its reference buffers go out as #42 said they would, metal's draws having changed on purpose.
+Closes #43.
+🤖 Generated with Claude Code
+DanielPettersson
+and others
+added 2 commits
+September 19, 2026 22:51
+Make metal a GGX microfacet conductor
+…
+b1a6cac
+```
+`ray_trace.wgsl`'s conductor was the Ray Tracing in One Weekend metal: a
+sphere offset around the mirror direction, `throughput *= albedo`, and a
+`break` on any scatter that landed below the horizon. Four things were
+wrong with it. No Fresnel, so a metal reflected its own colour at every
+angle instead of going white at a grazing one. No pdf, so it could not
+participate in MIS, so `prev_specular` was set and a rough metal got no
+next-event estimation however rough it was -- a fuzzy metal lit by a
+small light had to find that light by chance through its own lobe. The
+`break` lost energy outright, and the loss grew with fuzz. And `fuzz`
+was a sphere radius calibrated against nothing, so it could not be
+matched against another renderer.
+
+The conductor arms of `bsdf_sample` and `bsdf_eval` are now isotropic
+GGX with the height-correlated Smith term and Schlick's Fresnel on
+`f0 = albedo`. Sampling is Dupuy & Benyoub 2023, "Sampling Visible GGX
+Normals with Spherical Caps", rather than Heitz 2018: same distribution,
+no stretched frame to build, and no special case for a `wo` the shading
+normal disagrees with. The sample weight collapses to `F * G2 / G1(wo)`
+-- the standard VNDF cancellation -- which is what removes the
+uncompensated `break`. A `wi` below the horizon still ends the path, but
+that is the single-scatter shadowing term rather than a loss: it is
+exactly what the furnace test below measures. The sampling pdf is
+`G1(wo) * D(h) / (4 cos_o)`, and it is what feeds `prev_bsdf_pdf` and
+the MIS denominator, so a rough metal now takes a shadow ray like any
+other spread lobe.
+
+`alpha = fuzz * fuzz`, the squared-roughness convention every other
+renderer's slider means, with a Dirac path below `alpha < 1e-3` so
+`Metal::new(.., 0.)` stays an exact mirror. Small fuzz values therefore
+read noticeably sharper than they did, and a scene sitting at
+`fuzz ~ 0.3` changes appearance; `alpha = fuzz` would have been closer
+to the old spread, and the square won because the old parameter matched
+nothing. `albedo` becomes f0 rather than a flat multiplier, documented
+on `Metal::new`. `trace_guide` now ends its specular chain on a rough
+metal as well: a rough reflection is not a sharp image, and following it
+would make neighbouring pixels record unrelated guides.
+
+Tests. `create_rough_metal_scene` is five metal spheres at fuzz 0 /
+0.15 / 0.3 / 0.5 / 0.8 over the textured floor under one small quad
+light -- the configuration the old metal rendered as pure noise.
+`test_rough_metal_converges_with_nee` renders it at 64 spp against its
+own 1024 spp reference and measures RMSE over the spheres, relative to
+the reference's own mean rather than absolute: the old metal's image was
+six times darker, and an absolute error would have scored it better for
+being dark. The old model ran 0.886 of its mean, GGX with next-event
+estimation runs 0.346, and the bound is pinned at 0.45. The golden
+harness provably cannot see this -- it downscales to 100x50 first, which
+averages away exactly the defect being fixed.
+
+`test_ggx_metal_is_energy_conserving_in_a_furnace` puts a white metal
+under a uniform unit environment with no lights at all, where an
+energy-conserving BRDF must read exactly 1, and averages only the
+pixels inside the sphere's projected disc -- the whole-image mean is
+dominated by background pixels that read 1.0 whatever the BRDF does. It
+reads 1.0000 / 0.9942 / 0.8976 / 0.6318 / 0.3503 at fuzz 0 / 0.25 / 0.5
+/ 0.75 / 1, and a CPU quadrature of the BRDF's definition agrees with
+every one to 0.0015. That deficit is the multiple scattering this model
+does not carry, and compensating for it is the next commit. An albedo-1
+Lambertian sphere in the same furnace reads 1.0000, which is what says
+a departure is the BRDF rather than the mask, the stride or a tone
+mapper. A sphere is convex, so every path is one bounce and the
+background: Russian roulette (depth 3) never runs and the firefly clamp
+(10.0) is never approached, so the shipping estimator is measured
+without either being disabled.
+
+`Renderer::new` no longer rejects a scene whose only light is its
+background, which is what a furnace is; a scene with no light of either
+kind still is. `test_bsdf_refactor_is_image_preserving` and its
+reference buffers go out as #42 said they would, metal's draws having
+changed on purpose: GGX draws one pair where the fuzz sphere drew a
+pair and a scalar. `random_in_unit_sphere` and `random_unit_vector` had
+no other caller and are deleted.
+
+The ISA dump prices the bigger shader at nothing that matters: VGPRs
+128 and 8 subgroups/SIMD either way, no VGPR spills, SGPR spills 11 ->
+14, code size 35024 -> 36896 bytes, 6793 -> 7105 instructions.
+`cargo bench -- render` on the diffuse test scene, which contains no
+metal at all, runs 192.29 ms against the old shader's 192.67 ms on the
+same machine in the same session (p = 0.78) -- the drift from the 188.7
+ms recorded under #42 is the machine, not this change. The new arm,
+`rough_metal_800x600_64spp`, records 37.55 ms.
+
+Part of #43.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Put back what single-scatter GGX loses
+…
+1f1a713
+```
+The furnace test the previous commit added reads 1.0000 / 0.9942 /
+0.8976 / 0.6318 / 0.3503 at fuzz 0 / 0.25 / 0.5 / 0.75 / 1: a fully
+rough white metal keeps a third of the light it is given. The rest is
+every ray a microfacet reflected onto another microfacet, which a
+single-scatter model drops on the floor.
+
+Turquin 2019, "Practical multiple scattering compensation for microfacet
+models", puts it back with one multiplicative factor,
+`1 + f0 * (1 / E - 1)`, where `E` is the directional albedo of the
+single-scatter lobe with F = 1. The f0 weighting is what makes a
+coloured metal saturate rather than merely brighten -- light that
+bounces twice between microfacets is tinted twice. It multiplies `f`
+alone in both `bsdf_sample` and `bsdf_eval`, never the sampling density,
+so both estimators at a vertex are scaled identically and the MIS
+algebra is untouched.
+
+`E` is an analytic fit rather than Kulla-Conty's table, which would
+raise the question of how naga handles a large `const` array
+initialiser. Sixteen terms in `fuzz` and `cos_o`, fitted in log space --
+relative error is what matters when the factor divides by E -- against
+`E` computed from the BRDF's own definition by quadrature. In `fuzz`
+rather than `alpha` because the same sixteen terms are worth 1.4%
+against 1.8% for `cos_o >= 0.4` and 3.3% against 6.8% over the whole
+range: in `alpha` nearly all of the variation is crowded into the first
+quarter. The residual 3.3% is the last few degrees of the silhouette,
+where `E` is nearly 1 everywhere except a narrow dip no low-order
+polynomial follows.
+
+The furnace now reads 1.0000 / 0.9970 / 0.9983 / 0.9980 / 0.9975, and
+the test gains a second assert -- above 0.98 whatever the pinned table
+says -- so that the criterion is energy conservation rather than
+agreement with a recorded number. `albedo = 1` is the hardest case for
+the fit and not the easiest: with f0 = 1 the factor is exactly `1 / E`,
+so the reading is `E_true / E_fit` with the fit's error undiluted. The
+disc average does better than the pointwise fit because it cancels
+errors of both signs.
+
+`test_rough_metal_converges_with_nee` improves from 0.346 to 0.256 of
+the reference's mean, the compensation having raised the mean the error
+is measured against, and the bound tightens from 0.45 to 0.35. The
+rough metal golden is regenerated: the three roughest spheres are
+visibly brighter and more saturated.
+
+Costs nothing measurable. `render/rough_metal_800x600_64spp` moves
+37.55 ms -> 37.25 ms, inside the noise threshold; the ISA grows by 420
+bytes and 64 instructions, with VGPRs, spills and occupancy unchanged.
+
+Closes #43.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+DanielPettersson
+merged commit f614954
+into
+main
+Sep 19, 2026
+3 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+DanielPettersson
+deleted the
+ggx-metal
+branch
+September 19, 2026 21:07
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

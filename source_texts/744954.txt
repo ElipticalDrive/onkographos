@@ -1,0 +1,164 @@
+A high-performance, GPU-driven voxel terrain system for Unreal Engine 5.8 featuring pluggable LOD strategies, hybrid rendering architecture, and support for multiple world modes. - G23: heightmap scatter and PCG far points read the generated surface by draquel · Pull Request #105 · draquel/VoxelWorlds
+
+G23: heightmap scatter and PCG far points read the generated surface by draquel · Pull Request #105 · draquel/VoxelWorlds · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+draquel
+commented
+Oct 18, 2026
+Copy link
+Copy Markdown
+Owner
+Fixes G23 (world modes review, Documentation/WORLD_MODES_REVIEW_PLAN.md §14.1; full write-up in §19.3): two heightmap readers of the analytic surface took the natural height where they meant the ground the generator makes (the natural height plus the terrain conditioning zones of POI pads and their falloff rings). Planets have read the conditioned surface since spherical Phase 5; this applies the same rule on heightmaps.
+What was wrong (reproduced on VoxelDemo, base build)
+Scatter's buried-chunk test (column scan, cubic scan, GPU path's classifier) compared a chunk's top with GetTerrainHeightAt. A pad cut below a chunk layer's top buried the chunk holding the pad's ground. The Village at (−104,312, 331,034): 4,969 points on the generated ground classified underground; chunk (−25,57,−1) had ground in all 4,096 columns and 0 instances. Under a raised pad it went the other way: another village had 5,315 points classified open surface inside the ground.
+PCG far points (beyond the edit-aware band) stood at the natural height. A probe volume over the Village: 900 far points a median 346 uu off the ground (p90 774); 362 floating more than 150 uu above, 333 buried more than 150 uu below.
+An analytic scan of 1,766 zones within 40 km of the spawn: 275 have columns where the generated ground sits in a chunk the natural test buries.
+Changes
+FScatterExtractionContext::ConditioningZones (was PlanetZones) carries the chunk's zones in every world mode, from UVoxelScatterManager::SetConditioningGatherer (was SetPlanetConditioningGatherer). The chunk manager gathers by the chunk's XY footprint on a heightmap and by the chunk's cap on a planet, as before. All three heightmap paths compare with FScatterExtractionContext::GetGeneratedTerrainHeight.
+FVoxelSurfaceQuery::SampleSurface takes optional zones (height, gradient, water and height rules). SampleSurfacePoint forwards them on heightmaps, and the Voxel Surface Sampler gathers the zones over its bounds.
+Generation does not change, so no GenerationVersion bump. Without zones every path computes exactly what it did before.
+Tooling (kept): voxel.Scatter.ConditioningAudit [maxLines] [drawSeconds] and its scan [radiusKm] mode; voxel.Scatter.Digest file (one CSV line per chunk).
+Test seams: UVoxelScatterManager::ExtractHeightmapSurfacePoints; ClassifySurfacePointsUnderground is now public.
+Tests
+VoxelWorlds.Scatter.Conditioning.CutPadAndRing: 0 of 59,226 ground points underground across every heightmap path; 6,200 against the natural height.
+VoxelWorlds.Scatter.Conditioning.FilledPad: the chunk under a raised pad is underground (it was open surface).
+VoxelWorlds.Scatter.Conditioning.ManagerWiring: through the manager's own pipeline, 0 of 1,018 ground points underground; 1,018 of 1,018 without the gatherer.
+VoxelWorlds.PCG.FarPointsOnConditionedSurface: far points within 0.4 uu of the generated isosurface; up to 2,867 uu off without the zones.
+Each test fails on the old behaviour. Suites VoxelWorlds+VoxelWorldSave+VoxelCharacter+WorldClock+InteractionPlugin+Dungeon: 509/509 headless and 509/509 in the editor (GPU tests running). The 87 GPU parity lines are identical to Phase 5's by CRC.
+VoxelDemo A/B (this deliberately changes heightmap scatter and PCG output near POIs)
+I ran the A/B six times: base behaviour three times (the base build, plus twice the fixed build with a temporary switch that removed the zones, deleted before commit) and fixed behaviour three times. Each run visits the spawn, two villages, a tower and a city.
+The map capture PNG is byte-identical in all six runs, and so is the spawn digest.
+Within 200 m of the five stops, 824 chunks appear in every run. 15 of them differ between runs of the same behaviour, so they are capture noise. Of the 809 stable chunks, 11 change with the fix, and every one lies in a zone:
+3 at the Village gain instances on the cut pad's ground.
+3 at the Tower gain instances from G26 (below).
+5 at the second village lose instances that were inside the ground.
+Without the distance filter, every changed chunk is still a zone chunk.
+Fixed build: 0 ground points underground at the Village, 0 surface points inside the ground at the second village. PCG far points sit a median 0.4 uu off the ground (p99 1.9).
+Found along the way: G26 (open, not fixed here)
+The column scan treats the voxel above a chunk as air. Wherever the ground lies within 1.5 voxels above a chunk's top face, that face produces a second row of surface points, up to 1.5 voxels under the real ground. This already happens on natural terrain along every chunk-layer contour. Under cut pads the old natural-height test happened to hide it; with the fix, pads behave like natural terrain (the Tower: 850 more such points).
+Fixing it changes heightmap scatter everywhere along those contours, so it needs its own A/B.
+Not changed: the cubic world's voxel trees (FVoxelTreeInjector) still stand at the natural height. That is generation-time code, and cubic is terrain-only (D1).
+🤖 Generated with Claude Code
+draquel
+and others
+added 4 commits
+October 17, 2026 21:29
+G23 tooling: voxel.Scatter.ConditioningAudit, per-chunk scatter digest
+…
+20e16f6
+```
+voxel.Scatter.ConditioningAudit (heightmap worlds): for every cached scatter
+chunk a terrain conditioning zone reaches, count the surface points on the
+generated ground (natural height plus the chunk's zones) that are classified
+underground, the points the buried-chunk test buries against the natural vs
+the generated height, and the largest natural-vs-generated gap at a ground
+point (where a far point at the natural height would stand). Logs the
+disagreeing chunks and their zones; writes every zone chunk to
+Saved/VoxelAudit/ConditioningAudit_<world>_<time>.csv.
+
+voxel.Scatter.Digest file: also writes one X,Y,Z,count,crc line per chunk to
+Saved/VoxelAudit/ScatterDigest_<world>_<time>.csv, so two builds' scatter can
+be compared chunk by chunk. The logged digest is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G23: heightmap scatter and PCG far points read the generated surface
+…
+177054b
+```
+Two heightmap readers of the analytic surface took the natural height where
+they meant the ground the generator makes (the natural height plus the
+terrain conditioning zones of POI pads and their falloff rings):
+
+- Scatter's buried-chunk test (the column scan, the cubic scan and the GPU
+  path's classifier) compared a chunk's top with GetTerrainHeightAt. A pad cut
+  below a chunk's top buried the chunk holding the pad's ground (no surface
+  scatter on it); under a raised pad the chunk below read as open surface.
+  The extraction context now carries the chunk's conditioning zones for every
+  world mode (FScatterExtractionContext::ConditioningZones, was PlanetZones;
+  UVoxelScatterManager::SetConditioningGatherer, was
+  SetPlanetConditioningGatherer: the chunk manager gathers by the chunk's XY
+  footprint on a heightmap, by its cap on a planet) and the test reads
+  FScatterExtractionContext::GetGeneratedTerrainHeight.
+- The PCG sampler's far points (beyond its edit-aware band) stood at the
+  natural height. FVoxelSurfaceQuery::SampleSurface takes optional zones
+  (height, gradient, water and height rules on the generated surface),
+  SampleSurfacePoint forwards them on heightmaps, and the sampler gathers the
+  zones over its bounds.
+
+Generation does not change (no GenerationVersion bump). Outside zones every
+path computes exactly what it did.
+
+Tests: VoxelWorlds.Scatter.Conditioning.{CutPadAndRing,FilledPad,
+ManagerWiring} (a hillside with a cut and a raised pad; every heightmap path;
+each fails against the natural height) and
+VoxelWorlds.PCG.FarPointsOnConditionedSurface (far points within 0.4 uu of the
+generated isosurface on real terrain; up to 2,867 uu off without the zones).
+New test seams: UVoxelScatterManager::ExtractHeightmapSurfacePoints, and
+ClassifySurfacePointsUnderground is public.
+
+Audit: voxel.Scatter.ConditioningAudit separates the real ground from the
+column scan's top-face row (it takes the voxel above a chunk for air), counts
+surface points in chunks the generated test buries, can draw them, and has a
+"scan" mode that judges every zone within a radius analytically.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G23 docs: review plan §19.3 (reproduction, fix, tests, A/B), G23 fixe…
+…
+4b03d16
+```
+…d, G26
+
+§14.1: G23 fixed; G26 recorded (the column scan's top-face row under the
+ground kept as surface by the buried test's 1.5-voxel margin; open).
+§19.3: the reproduction on VoxelDemo (the conditioning audit and its scan, a
+village whose cut pad left 4,969 ground points underground, a raised pad's
+5,315 surface points inside the ground, a PCG probe's far points a median
+346 uu off the ground), what changed, the tests, the fixed build (0 and 0,
+PCG far points a median 0.4 uu off), and the A/B over six runs (map PNG and
+spawn digest identical; 11 changed chunks within 200 m of five stops, all
+zone chunks, each explained; 15 chunks that differ between runs of the same
+behaviour are noise). Suites 509/509 headless and in the editor, GPU parity
+lines identical to Phase 5's.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+G23 docs: PR numbers in §19.3
+…
+c21700d
+```
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+draquel
+merged commit 31bacf0
+into
+main
+Oct 18, 2026
+draquel
+mentioned this pull request
+Oct 18, 2026
+G26: the voxel over a heightmap chunk's top layer (no sunken surface copies)
+#107
+Merged
+draquel
+deleted the
+fix/g23-heightmap-conditioning
+branch
+October 31, 2026 17:16
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

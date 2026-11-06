@@ -1,0 +1,112 @@
+# Principal Axis Transformation for Quadratic Surfaces
+
+Also called: Eigenvalue Analysis of Quadratic Forms, Principal Component Analysis of Quadrics
+
+## Overview
+The Principal Axis Transformation (PAT) decomposes a general quadratic surface into its canonical form by diagonalizing its quadratic form matrix, thereby identifying the principal curvatures and axes. This method solves the problem of mapping a generic quadratic function to a standard prototype (paraboloid or hyperbolic paraboloid) to enable optimal, error-bounded triangulation of its zero-level set. It is distinguished from general meshing methods by its reliance on analytical eigenvalue decomposition to preserve error bounds, and from the parent [Quadric SDF (First-Order Approximation)](2682-quadric-sdf-first-order-approximation.md) by providing the geometric basis for discrete surface representation rather than just distance evaluation.
+
+## How it works
+**Inputs and Outputs:**
+- Input: A quadratic function $f(x, y)$ defined by coefficients $c_{20}, c_{11}, c_{02}, c_{10}, c_{01}, c_{00}$.
+- Output: Eigenvalues $\lambda_1, \lambda_2$, normalized eigenvectors $\mathbf{e}_1, \mathbf{e}_2$, and the classification of the surface type (Elliptic, Hyperbolic, or Parabolic).
+
+**Data Structures:**
+- Matrix $C$: A $2 \times 2$ symmetric matrix representing the quadratic form.
+  $$ C = \begin{pmatrix} c_{20} & c_{11} \\ c_{11} & c_{02} \end{pmatrix} $$
+- Eigenvalues: Scalars $\lambda_1, \lambda_2$.
+- Eigenvectors: Normalized 2D vectors $\mathbf{e}_1 = (e_{11}, e_{12})^T$, $\mathbf{e}_2 = (e_{21}, e_{22})^T$.
+
+**Steps:**
+1. **Construct Matrix C:** Extract the quadratic coefficients from the input function $f(x, y) = \mathbf{x}^T C \mathbf{x} + \mathbf{b}^T \mathbf{x} + c_{00}$, where $\mathbf{x} = (x, y)^T$. The linear and constant terms do not affect the principal axes or curvature classification [S1, unofficial].
+2. **Compute Eigenvalues:** Solve the characteristic equation $\det(C - \lambda I) = 0$ for $\lambda_1$ and $\lambda_2$.
+3. **Compute Eigenvectors:** For each $\lambda_i$, solve $(C - \lambda_i I)\mathbf{v} = 0$ and normalize the resulting vector $\mathbf{v}$ to obtain $\mathbf{e}_i$.
+4. **Classify Surface:** Determine the surface type based on the product of the eigenvalues:
+   - Elliptic if $\lambda_1 \lambda_2 > 0$.
+   - Hyperbolic if $\lambda_1 \lambda_2 < 0$.
+   - Parabolic if $\lambda_1 \lambda_2 = 0$ [S1, unofficial].
+
+**Formulas:**
+The quadratic function is represented as:
+$$ f(x, y) = (x \ y) \begin{pmatrix} c_{20} & c_{11} \\ c_{11} & c_{02} \end{pmatrix} \begin{pmatrix} x \\ y \end{pmatrix} + (c_{10} \ c_{01}) \begin{pmatrix} x \\ y \end{pmatrix} + c_{00} $$
+The quadratic form is $\mathbf{x}^T C \mathbf{x} = 0$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def principal_axis_transformation(c20, c11, c02, c10, c01, c00):
+    # Step 1: Construct Matrix C
+    # C is symmetric: [[c20, c11], [c11, c02]]
+    # Linear and constant terms are ignored for axis determination [S1, unofficial]
+    
+    # Step 2: Compute Eigenvalues
+    # Characteristic equation: lambda^2 - trace(C)*lambda + det(C) = 0
+    trace_C = c20 + c02
+    det_C = c20 * c02 - c11 * c11
+    discriminant = trace_C**2 - 4 * det_C
+    
+    if discriminant < 0:
+        raise ValueError("Negative discriminant implies complex eigenvalues, invalid for real quadratic surfaces.")
+        
+    sqrt_disc = sqrt(discriminant)
+    lambda1 = (trace_C + sqrt_disc) / 2
+    lambda2 = (trace_C - sqrt_disc) / 2
+    
+    # Step 3: Compute Eigenvectors
+    # For lambda1
+    if abs(c11) > 1e-9:
+        e1 = (1, (lambda1 - c20) / c11)
+    else:
+        e1 = (0, 1) if abs(lambda1 - c02) < 1e-9 else (1, 0)
+    e1 = normalize(e1)
+    
+    # For lambda2
+    if abs(c11) > 1e-9:
+        e2 = (1, (lambda2 - c20) / c11)
+    else:
+        e2 = (0, 1) if abs(lambda2 - c02) < 1e-9 else (1, 0)
+    e2 = normalize(e2)
+    
+    # Step 4: Classify Surface
+    product = lambda1 * lambda2
+    if product > 0:
+        surface_type = "Elliptic"
+    elif product < 0:
+        surface_type = "Hyperbolic"
+    else:
+        surface_type = "Parabolic"
+        
+    return {
+        "lambda1": lambda1,
+        "lambda2": lambda2,
+        "e1": e1,
+        "e2": e2,
+        "surface_type": surface_type
+    }
+```
+
+**Edge Cases and Pitfalls:**
+- **Precision:** If $c_{11}$ is near zero, eigenvector calculation may suffer from division by zero; handle via conditional checks [G].
+- **Degenerate Input:** If both eigenvalues are zero, the surface is planar. The method assumes a non-degenerate quadratic form for curvature analysis [S1, unofficial].
+
+## Subtopics
+
+### [Elliptic Case Triangulation](5516-elliptic-case-triangulation.md)
+Generates a mesh for elliptic quadrics ($\lambda_1 \lambda_2 > 0$) by mapping an optimal equilateral prototype triangle from a canonical paraboloid space ($g = \bar{x}^2 + \bar{y}^2$) to the target surface. It is distinguished by its use of the paraboloid prototype and reliance on PAT to preserve error bounds analytically. See [Elliptic Case Triangulation](5516-elliptic-case-triangulation.md).
+
+### Hyperbolic Case Triangulation
+Generates a mesh for hyperbolic quadrics ($\lambda_1 \lambda_2 < 0$) by placing vertices exactly on the surface to minimize interpolation error. It uses the prototype $h = \bar{x}^2 - \bar{y}^2$ and transforms edges via matrix $H$. See [Hyperbolic Case Triangulation](5517-hyperbolic-case-triangulation.md).
+
+## Operating characteristics
+- **Time Complexity:** Dominated by eigenvalue decomposition of a $2 \times 2$ matrix, which is $O(1)$ constant time.
+- **Memory Complexity:** $O(1)$ for storing eigenvalues, eigenvectors, and classification.
+- **Strengths:** Provides exact analytical principal axes and curvatures, enabling optimal, error-bounded triangulation for specific surface types.
+- **Limitations:** Only applicable to quadratic surfaces; does not handle higher-order polynomials directly. Requires careful handling of degenerate cases (parabolic/planar).
+- **When to use:** When generating meshes for quadratic SDF primitives where error bounds are critical.
+- **When not to use:** For non-quadratic surfaces or when approximate distance evaluation (not meshing) is sufficient.
+
+## Background
+Originated in the context of multiresolution modeling for scientific visualization, specifically for the triangulation of quadratic surface graphs [S1, unofficial]. The method leverages classical linear algebra techniques (eigenvalue decomposition) to simplify quadratic forms, a standard approach in geometry processing and computer graphics for analyzing surface curvature and orientation.
+
+## Sources
+[S1] Multiresolution modeling for scientific visualization, https://escholarship.org/uc/item/5317385v, fetched 2026-10-26 (unofficial)

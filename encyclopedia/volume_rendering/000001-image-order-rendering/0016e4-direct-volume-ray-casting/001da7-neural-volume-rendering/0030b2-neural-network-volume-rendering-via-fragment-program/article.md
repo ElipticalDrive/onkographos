@@ -1,0 +1,99 @@
+# Neural Network Volume Rendering via Fragment Program
+
+Also called: GPU Neural Network Classification
+
+## Overview
+This method renders volumetric data by executing a neural network classifier directly within the GPU's fragment shader during rasterization [S1]. It solves the problem of real-time interactive classification and visualization by offloading the computational burden of the neural network from the CPU to the graphics hardware [S1]. Unlike traditional ray casting which samples a 3D texture at discrete points along rays, this approach renders a stack of view-aligned polygons that sample the volume, using the fragment program to perform the classification logic for each pixel [S1]. It is distinguished from other neural volume rendering methods by its reliance on fixed-function rasterization of polygons rather than explicit ray marching or implicit field evaluation, allowing for interactive feedback during training [S1].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A 3D volume texture, neural network weights (floating-point numbers), and a stack of view-aligned polygons covering the view frustum [S1].
+*   **Output:** A 2D image where each pixel's color and opacity are determined by the neural network's classification of the underlying volume data [S1].
+
+**Data Structures:**
+*   **Weights:** Stored as floating-point parameters passed to the fragment program. For small networks, these fit in parameter registers; for larger networks, they must be stored in textures, requiring additional texture lookups [S1].
+*   **Hidden Nodes:** Represented as a vector $H = (H_1, H_2, H_3, H_4)$ for a 4-node hidden layer [S1].
+*   **Weights Vector:** For input node $n$, the weights are $W_n = (w(n, 1), w(n, 2), w(n, 3), w(n, 4))$ [S1].
+
+**Steps:**
+1.  **Rasterization Setup:** Render a stack of view-aligned polygons that sample the 3D volume texture [S1].
+2.  **Fragment Program Execution:** For each pixel, the fragment program executes the neural network logic [S1].
+3.  **Data Retrieval:** Retrieve the center voxel value and its neighbors from the 3D texture. This requires seven texture lookups to obtain the inputs for the neural network [S1].
+4.  **Position Derivation:** Derive the 3D volume position of the sample from the texture coordinates of the pixel [S1].
+5.  **Hidden Node Calculation:** Compute the hidden nodes using vectorized Multiply-Add (MAD) instructions. For a network with 4 input nodes and 4 hidden nodes, the calculation for hidden node $H_m$ is:
+    $$ H_m = \sum_{n=1}^{4} I_n \cdot w(n, m) \quad \text{for } m \in \{1, 2, 3, 4\} $$
+    where $I_n$ is the input node value and $w(n, m)$ is the weight between input node $n$ and hidden node $m$ [S1].
+6.  **Activation:** Apply the sigmoid excitation function to the computed hidden nodes to complete one layer of computation [S1].
+7.  **Lighting Estimation:** Estimate lighting gradients using the same nearest neighbors used for the neural network calculation, avoiding the need for separate normal map textures [S1].
+8.  **Weight Update:** Asynchronously query the training PC for the most recent neural network weights (typically under one kilobyte) for each frame [S1].
+
+**Pseudocode:**
+The following pseudocode illustrates the fragment program logic for a single layer of the neural network, assuming weights are available as parameters or textures.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def fragment_program(center_voxel, neighbors, weights, bias):
+    """
+    Implements one layer of the neural network in the fragment program.
+    
+    Args:
+        center_voxel: Scalar value of the center voxel.
+        neighbors: Array of scalar values of the 6 neighboring voxels.
+        weights: Array of weights for the current layer.
+        bias: Bias term for the layer.
+        
+    Returns:
+        Output of the sigmoid activation function.
+    """
+    # Combine center and neighbors to form input vector I
+    # Assuming 7 inputs: center + 6 neighbors
+    inputs = [center_voxel] + list(neighbors)
+    
+    # Number of hidden nodes (example: 4)
+    num_hidden = 4
+    
+    # Compute hidden nodes using MAD instructions
+    # H_m = sum(I_n * w(n, m)) + bias
+    hidden_nodes = []
+    for m in range(num_hidden):
+        sum_val = bias
+        for n in range(len(inputs)):
+            # Vectorized MAD: multiply-add
+            sum_val += inputs[n] * weights[n * num_hidden + m]
+        hidden_nodes.append(sum_val)
+        
+    # Apply sigmoid activation function
+    output = []
+    for h in hidden_nodes:
+        # Sigmoid: 1 / (1 + exp(-h))
+        # Note: In hardware, exp might be approximated
+        sigmoid_val = 1.0 / (1.0 + math.exp(-h))
+        output.append(sigmoid_val)
+        
+    return output
+```
+
+**Parameters:**
+*   **Hardware:** Tested on an ATI Radeon 9700 Pro graphics card [S1].
+*   **Texture Lookups:** Seven texture lookups are required per fragment [S1].
+*   **Performance:** Approximately 1.5 frames per second for a $256 \times 256 \times 256$ volume rendered to a $512 \times 512$ window using one slice per voxel [S1].
+
+**Edge Cases and Pitfalls:**
+*   **Parameter Limits:** Large neural networks exceed the limit of input parameters for fragment programs. Weights must be stored in textures, which adds overhead from redundant texture reads [S1].
+*   **Precision:** The use of vectorized MAD instructions and hardware sigmoid approximations may introduce precision errors compared to software implementations [S1].
+
+## Operating characteristics
+*   **Time Complexity:** Limited by the rasterization time of the textured polygons and the length of the fragment program [S1]. The number of texture lookups (7) and the complexity of the neural network operations (MAD + sigmoid) are the primary bottlenecks [S1].
+*   **Memory Complexity:** Low data transfer overhead. Only the neural network weights (under one kilobyte) need to be sent to the renderer for each frame, allowing for asynchronous updates from a training PC [S1].
+*   **Performance:** On an ATI Radeon 9700 Pro, rendering a $256^3$ volume to a $512 \times 512$ window yields ~1.5 fps [S1].
+*   **Strengths:** Enables interactive feedback during training, which is not feasible with software-based classification due to the sheer number of voxels [S1]. Easier to implement in graphics hardware than SVMs [S1].
+*   **Limitations:** Performance is hampered by the necessary seven texture lookups and fragment program length [S1]. Large networks require texture storage for weights, increasing overhead [S1].
+*   **When to Use:** When interactive classification and visualization of volume data is required, and the neural network is small enough to fit within hardware parameter limits or can tolerate the overhead of texture-based weight storage [S1].
+*   **When Not to Use:** For very large neural networks where the overhead of texture reads becomes prohibitive, or when higher frame rates are required than the hardware can provide with the given fragment program complexity [S1].
+
+## Background
+This method was introduced in the paper "An Intelligent System Approach to Higher-Dimensional Classification of Volume Data" [S1]. It leverages the structure of neural networks, which is more easily implemented in graphics hardware than support vector machines (SVMs) [S1]. The approach allows users to evaluate the result of neural network training on the entire volume during the application of paint, steering the network to implement the desired classification function [S1]. It has been tested on various medical data sets, including knee, chest, and brain MRI data [S1].
+
+## Sources
+[S1] An Intelligent System Approach to Higher-Dimensional Classification of Volume Data, https://doi.org/10.1109/tvcg.2005.38, fetched 2026-10-27

@@ -15,13 +15,13 @@ Inverse Distance Weighted (IDW) Interpolation is a spatial interpolation method 
 - The interpolated scalar value $F(Q)$ [S1].
 
 **Data Structures:**
-- A spatial index (e.g., uniform 3D hash grid) supporting neighbor queries like `queryRadius` and `queryKNearest` for $O(1)$ or $O(\log N)$ lookup [S2, unofficial].
+- A spatial index (e.g., uniform 3D hash grid) supporting neighbor queries for $O(1)$ or $O(\log N)$ lookup [S2, unofficial].
 - An array of sample objects containing coordinates and values [S2, unofficial].
 
 **Steps:**
-1. **Query Neighbors:** Retrieve candidate points $S$ from the spatial index. If `searchRadius` is specified, select points within that distance. If `maxNeighbors` is specified, cap the result to the $k$ nearest neighbors [S2, unofficial].
+1. **Query Neighbors:** Retrieve candidate points $S$ from the spatial index [S2, unofficial]. If `searchRadius` is specified, select points within that distance [S2, unofficial]. If `maxNeighbors` is specified, cap the result to the $k$ nearest neighbors [S2, unofficial].
 2. **Handle Empty Case:** If $S$ is empty, return a nodata sentinel value (e.g., $< -10^{29}$) to allow the renderer to skip these voxels [S2, unofficial].
-3. **Exact Hit Check:** For each $P_i \in S$, calculate $d_i = \|Q - P_i\|$. If $d_i = 0$ (or $< \epsilon$), return $V_i$ immediately to avoid division by zero [S2, unofficial].
+3. **Exact Hit Check:** For each $P_i \in S$, calculate $d_i = \|Q - P_i\|$ [S2, unofficial]. If $d_i = 0$ (or $< \epsilon$), return $V_i$ immediately to avoid division by zero [S2, unofficial].
 4. **Compute Weights:** For each $P_i \in S$, compute $w_i = 1 / d_i^{\text{power}}$ [S2, unofficial].
 5. **Normalize and Interpolate:** Compute $F(Q) = \frac{\sum_{i \in S} w_i V_i}{\sum_{i \in S} w_i}$ [S1][S2, unofficial].
 
@@ -46,55 +46,63 @@ where $d_j(Q)$ is the Euclidean distance between the $j$-th vertex and $Q$ [S1].
 ```python
 import math
 
-def idw_interpolate(query_point, samples, spatial_index, power=2.0, search_radius=None, max_neighbors=16, epsilon=1e-6):
-    # Step 1: Query neighbors
-    candidates = spatial_index.query_k_nearest(query_point, max_neighbors)
-    
-    # If search_radius is provided, filter candidates
-    if search_radius is not None:
-        candidates = [p for p in candidates if math.sqrt(sum((q - c)**2 for q, c in zip(query_point, p.coords))) <= search_radius]
-        
+def idw_interpolate(query_point, samples, power=2.0, search_radius=None, max_neighbors=16, epsilon=1e-6):
+    # Step 1: Query neighbors from spatial index [G]
+    candidates = query_neighbors(samples, query_point, search_radius, max_neighbors)
+
     # Step 2: Handle empty case
     if not candidates:
-        return -1e29  # Nodata sentinel
-        
+        return -1e29  # Nodata sentinel [S2, unofficial]
+
     # Step 3 & 4: Compute weights with exact-hit check
     weights = []
     values = []
     for sample in candidates:
         d = math.sqrt(sum((q - c)**2 for q, c in zip(query_point, sample.coords)))
         if d < epsilon:
-            return sample.value  # Exact hit short-circuit
+            return sample.value  # Exact-hit short-circuit [S2, unofficial]
         w = 1.0 / (d ** power)
         weights.append(w)
         values.append(sample.value)
-        
+
     # Step 5: Normalize and interpolate
     numerator = sum(w * v for w, v in zip(weights, values))
     denominator = sum(weights)
-    
+
     if denominator == 0:
-        return -1e29  # Fallback for numerical issues
-        
+        return -1e29  # Fallback for numerical issues [G]
+
     return numerator / denominator
+
+def query_neighbors(samples, query_point, search_radius, max_neighbors):
+    # Standard spatial index query logic [G]
+    # Computes distances, filters by radius, sorts, and caps by max_neighbors
+    dists = []
+    for s in samples:
+        d = math.sqrt(sum((q - c)**2 for q, c in zip(query_point, s.coords)))
+        dists.append((d, s))
+    dists.sort(key=lambda x: x[0])
+    if search_radius is not None:
+        dists = [x for x in dists if x[0] <= search_radius]
+    return [s for _, s in dists[:max_neighbors]]
 ```
 
 ## Subtopics
 
 ### [Frequency Domain Volume Rendering with Sinc Resampling](826-frequency-domain-volume-rendering-with-sinc-resampling.md)
-Uses sinc functions for ideal reconstruction in the frequency domain; suitable for regular grids but computationally expensive.
+Uses sinc functions for ideal reconstruction in the frequency domain; suitable for regular grids but computationally expensive. Choose when aliasing must be eliminated and performance is secondary.
 
 ### [Fast tri-cubic interpolation](848-fast-tri-cubic-interpolation.md)
-Higher-order polynomial interpolation on regular grids; smoother than trilinear but more complex to implement.
+Higher-order polynomial interpolation on regular grids; smoother than trilinear but more complex to implement. Choose when high-frequency detail preservation is needed on structured data.
 
 ### [Bilinear Interpolation](858-bilinear-interpolation.md)
-2D linear interpolation; simpler than trilinear but not applicable to 3D volumes directly.
+2D linear interpolation; simpler than trilinear but not applicable to 3D volumes directly. Choose for 2D slice rendering or as a component in 3D schemes.
 
 ### [Hardware Interpolation Approximation](1027-hardware-interpolation-approximation.md)
-Uses GPU texture hardware for fast, low-precision interpolation; limited by hardware constraints.
+Uses GPU texture hardware for fast, low-precision interpolation; limited by hardware constraints. Choose when maximum throughput is required and slight blurring is acceptable.
 
 ### [Trilinear Interpolation](1531-trilinear-interpolation.md)
-Standard 3D linear interpolation on regular grids; efficient and $C^0$ continuous along faces, but requires structured data.
+Standard 3D linear interpolation on regular grids; efficient and $C^0$ continuous along faces, but requires structured data. Choose for uniform voxel grids where continuity and speed are prioritized over handling irregular samples.
 
 ## Operating characteristics
 - **Time Complexity:** $O(k)$ per query for interpolation, plus spatial index lookup cost ($O(1)$ for hash grids, $O(\log N)$ for trees) [S2, unofficial].

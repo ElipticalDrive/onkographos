@@ -1,0 +1,135 @@
+# Direction-dependent Morton Order Mapping
+
+Also called: Direction-dependent Morton Order
+
+## Overview
+Direction-dependent Morton Order Mapping is a remapping function that converts a standard Octree Morton code into a sorting key aligned with the near-to-far rendering order for a specific ray direction [S1]. It solves the problem of correct occlusion culling and blending order in sparse voxel rasterization by ensuring that voxels are processed from closest to furthest relative to the camera, regardless of the viewing angle [S1]. Unlike [Point Location](2076-point-location.md) which determines spatial containment, or [Fast Projection for Octree Nodes](2178-fast-projection-for-octree-nodes.md) which estimates bounding volumes, this method specifically addresses the topological sorting requirement for volume rendering by adapting the Morton space-filling curve to the ray's sign vector [S1].
+
+## How it works
+The method maps the 3-bit octant index at each level of the Octree Morton code to a permuted index based on the signs of the ray direction components [S1]. This ensures that the resulting integer key preserves the near-to-far order for all rays sharing the same sign pattern [S1].
+
+**Inputs and Outputs:**
+- Input: `octpath`, the Octree Morton code of a voxel (integer) [S1].
+- Input: `rd`, the ray direction vector $\mathbf{r}_d = (r_x, r_y, r_z)$ [S1].
+- Output: `order`, the direction-dependent Morton order integer [S1].
+
+**Data Structures:**
+- `order_tables`: A lookup table of size $8 \times 8$. It contains eight permutations of the integers $0$ to $7$. Each row corresponds to one of the eight possible ray sign bit patterns [S1].
+- `signbits`: An integer from $0$ to $7$ representing the signs of the ray direction components [S1].
+
+**Step-by-Step Method:**
+
+1.  **Compute Ray Sign Bits:**
+    Determine the sign bits $k$ from the ray direction $\mathbf{r}_d$ [S1]. The bits are assigned such that the x-component corresponds to the most significant bit of the triplet, y to the middle, and z to the least significant:
+    $$
+    \text{signbits} = 4 \cdot (r_x < 0) + 2 \cdot (r_y < 0) + 1 \cdot (r_z < 0)
+    $$
+    where $(r_i < 0)$ evaluates to $1$ if true and $0$ if false [S1].
+
+2.  **Initialize Output:**
+    Set `order` to $0$ [S1].
+
+3.  **Iterate Over Octree Levels:**
+    For each level $i$ from $0$ to $\text{MAX\_NUM\_LEVELS} - 1$:
+    a. Extract the lowest 3 bits of the current `octpath`:
+       $$
+       \text{octant} = \text{octpath} \ \& \ 0\text{b}111
+       $$
+    b. Look up the mapped value from the permutation table corresponding to `signbits`:
+       $$
+       \text{mapped\_octant} = \text{order\_tables}[\text{signbits}][\text{octant}]
+       $$
+    c. Shift the mapped value to its correct position in the output order (3 bits per level) and OR it into `order`:
+       $$
+       \text{order} = \text{order} \ | \ (\text{mapped\_octant} \ll (3 \cdot i))
+       $$
+    d. Right-shift `octpath` by 3 bits to process the next level:
+       $$
+       \text{octpath} = \text{octpath} \gg 3
+       $$
+    [S1]
+
+4.  **Return Result:**
+    Return `order` [S1].
+
+**Formula:**
+The mapping function $f^{(k)}: [0 \dots 7] \to [0 \dots 7]$ is one of eight permutation mappings applied to each triplet of bits $(b_x b_y b_z)$ from the Octree Morton code [S1]. The full remapping for a code with bits $\dots b_x b_y b_z \ a_x a_y a_z$ is:
+$$
+\dots b_x b_y b_z \ a_x a_y a_z \mapsto \dots f^{(k)}(b_x b_y b_z) \ f^{(k)}(a_x a_y a_z)
+$$
+where $k$ is determined by the ray direction signs [S1].
+
+**Parameters:**
+- `MAX_NUM_LEVELS`: The maximum depth of the Octree. Not given in the sources.
+- `order_tables`: Hard-coded permutations. For the $(+, +, +)$ ray direction (signbits=0), the identity permutation $[0, 1, 2, 3, 4, 5, 6, 7]$ is used [G]. The other seven permutations are derived to maintain near-to-far order for the respective sign combinations [S1].
+
+**Edge Cases and Pitfalls:**
+- **Precision:** The Morton code can grow large with deep trees. Ensure the integer type used for `order` has sufficient bits to hold the result (3 bits per level) [G].
+- **Optimization:** In practice, the mapping from Octree Morton code to direction-dependent Morton order can be optimized to a single bitwise XOR operation instead of a loop [S1].
+- **Degenerate Input:** Ray directions with zero components are undefined for sign bits [G].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def to_rd_signbits(rd):
+    """
+    Compute ray sign bits from ray direction.
+    Input: rd - Ray direction vector (x, y, z)
+    Output: signbits - Integer 0-7 representing signs
+    """
+    signbits = 4 * (1 if rd[0] < 0 else 0) + \
+               2 * (1 if rd[1] < 0 else 0) + \
+               1 * (1 if rd[2] < 0 else 0)
+    return signbits
+
+def to_dir_dep_morton_order(octpath, signbits, MAX_NUM_LEVELS, order_tables):
+    """
+    Map Octree Morton code to direction-dependent Morton order.
+    Input: octpath - Voxel Octree Morton code
+           signbits - The signbits the voxel cares about
+           MAX_NUM_LEVELS - Maximum number of Octree levels
+           order_tables - 8x8 lookup table of permutations
+    Output: order - The order for sorting
+    """
+    table = order_tables[signbits]
+    order = 0
+    
+    for i in range(MAX_NUM_LEVELS):
+        # Extract lowest 3 bits
+        octant = octpath & 0b111
+        
+        # Look up mapped value
+        mapped_octant = table[octant]
+        
+        # Shift and OR into order
+        order |= mapped_octant << (3 * i)
+        
+        # Shift octpath for next level
+        octpath = octpath >> 3
+        
+    return order
+```
+
+## Subtopics
+
+### [Direction-dependent Morton Order Sorting](3438-direction-dependent-morton-order-sorting.md)
+This method sorts sparse voxels into a near-to-far order for each image tile by replacing primitive z-depth with a direction-dependent Morton order, ensuring correct rendering order for all ray directions. Unlike [3D Gaussian Splatting](3d-gaussian-splatting.md) which duplicates primitives per tile and sorts by z-depth, this technique duplicates voxels per ray sign bit pattern and sorts by Morton order to handle arbitrary viewing angles without popping artifacts.
+
+### Proof of Correct Ordering by Induction
+A proof by induction that the direction-dependent Morton order aligns with the near-to-far rendering order for all rays with $(+, +, +)$ direction signs, generalizable to other signs by flipping the scene [S1]. Base case ($\ell=1$): For the first Octree level, the direction-dependent Morton order of the eight voxels for $(+, +, +)$ rays is correct because the most significant bit corresponds to $x$, then $y$, then $z$, matching the ray direction [S1]. Induction hypothesis: Assume $S(\ell)$ is true for some positive integer $\ell$, meaning direction-dependent Morton order is correct for all sparse voxel sets in $V_\ell$ [S1]. Induction step: For $V_{\ell+1}$, voxels in $V_\ell$ evolve by subdividing some voxels and removing others [S1]. Subdivision appends three zero bits to the least significant bit, preserving order [S1]. Subdivided voxels share the same most significant $3\ell$ bits, and their 8 children follow the base case Morton order, preserving relative order [S1]. Removing voxels does not affect remaining order [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(L)$ per voxel, where $L$ is the number of Octree levels [G].
+- **Memory Complexity:** $O(1)$ auxiliary space for the mapping function itself, plus $O(1)$ for the fixed $8 \times 8$ lookup table [S1].
+- **Measured Performance:** The method is extremely fast, often optimized to a single XOR operation in practice, making it negligible compared to the cost of ray traversal or voxel shading [S1].
+- **Strengths:** Guarantees correct occlusion order for all viewing angles without expensive depth sorting or z-buffering during the initial sort phase [S1].
+- **Limitations:** Requires pre-computation of sign bits per ray or tile. The sorting key is only valid for the specific ray direction used to compute it; a different ray direction requires a different sort order [S1].
+- **When to use:** When rendering sparse voxel representations (e.g., Radiance Fields) where correct front-to-back blending is critical and the number of voxels is large [S1].
+- **When not to use:** For simple opaque geometry where z-buffering is sufficient, or when ray directions are static and can be pre-sorted by standard depth [S1].
+
+## Background
+The method originates from the work on Sparse Voxels Rasterization for real-time high-fidelity Radiance Field rendering [S1]. It addresses the limitation of standard Morton ordering, which assumes a fixed viewing direction (typically $+,+,+$), by generalizing the space-filling curve permutation to eight possible octants defined by ray direction signs [S1]. The correctness of the ordering is proven by induction on the Octree level, showing that the base case ($\ell=1$) aligns with the ray direction and that subdivision preserves this order [S1].
+
+## Sources
+[S1] Sparse Voxels Rasterization: Real-time High-fidelity Radiance Field Rendering, https://doi.org/10.1109/cvpr52734.2025.01509, fetched 2026-10-26

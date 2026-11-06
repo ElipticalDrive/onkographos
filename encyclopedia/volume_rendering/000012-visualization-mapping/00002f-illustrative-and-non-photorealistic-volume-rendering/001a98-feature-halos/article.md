@@ -1,0 +1,187 @@
+# Feature Halos
+
+Also called: Halo Effects, Null Halos
+
+## Overview
+Feature Halos is a non-photorealistic volume rendering technique that reinforces depth perception by darkening and increasing opacity in regions just outside strong volumetric features, thereby obscuring background elements [S1][S2, S3, unofficial]. It distinguishes itself from sibling methods like [Geometric Buffers](781-geometric-buffers-g-buffers.md) or [Line and Edge Detection](5341-line-and-edge-detection.md) by generating these effects directly during the illumination pass using local spatial properties, rather than relying on post-processing or explicit surface extraction [S1][S2, unofficial]. The method is inherently view-dependent, ensuring that features do not cast halos on themselves, which avoids the self-obscuration issues common in other techniques [S1][S2, unofficial].
+
+## How it works
+The method computes a halo intensity value for each voxel based on the gradient magnitudes and orientations of neighboring voxels, then modulates the final color and opacity using this intensity.
+
+### Inputs and Outputs
+*   **Inputs**:
+    *   Scalar volume field $f$.
+    *   Normalized view direction vector $V$ (unit length).
+    *   Pre-computed gradient $\nabla f$ at each voxel.
+    *   Base color $c_{base}$ and base opacity $\alpha_{base}$ derived from transfer functions.
+    *   Parameters: $k_{hpe}$ (halo potential exponent), $k_{hse}$ (halo separation exponent), $s_{dark}$ (darkening scalar), $s_{opaque}$ (opacity increase scalar).
+*   **Outputs**:
+    *   Final color $c_{final}$ and final opacity $\alpha_{final}$ for the voxel.
+
+### Data Structures
+*   **Volume Grid**: 3D array storing scalar values $f(x,y,z)$.
+*   **Gradient Field**: 3D array storing 3D vectors $\nabla f(x,y,z)$.
+*   **Neighborhood**: A set of neighbor indices $n$ relative to the current voxel $i$. The sources do not specify the exact kernel size (e.g., 3x3x3, 5x5x5) or shape. [G] A standard 3x3x3 cubic neighborhood (26 neighbors) is implied by "specified neighborhood" in typical implementations of this era, but the exact radius is not given in the sources.
+
+### Formulas and Definitions
+1.  **Halo Potential ($h_n$)**: The maximum potential halo contribution of a neighbor $n$ is determined by how directly its gradient points toward the current voxel $i$ and how orthogonal its displacement is to the view direction [S2, unofficial]:
+    $$
+    h_n = \left( \nabla f_n \cdot \frac{P_i - P_n}{\|P_i - P_n\|} \right)^{k_{hpe}} \cdot \left( 1 - \nabla f_n \cdot V \right)^{k_{hse}}
+    $$
+    Where:
+    *   $P_i, P_n$ are the 3D positions of voxel $i$ and neighbor $n$.
+    *   $\nabla f_n$ is the gradient vector at neighbor $n$.
+    *   $V$ is the normalized view direction vector.
+    *   $k_{hpe}$ controls how directly the neighbor's gradient must be oriented toward the current location. Typical value: 1.0 [S1][S2, unofficial].
+    *   $k_{hse}$ controls how tightly halos are kept in the plane orthogonal to the view direction. Typical value: 2.0 [S1][S2, unofficial].
+    *   Note: The term $(1 - \nabla f_n \cdot V)$ assumes $\nabla f_n$ is normalized or the dot product is scaled appropriately. If $\nabla f_n$ is not normalized, the dot product represents the cosine of the angle scaled by magnitude. The source text implies $\nabla f_n$ is used as a direction vector here. [G] To ensure physical validity, $\nabla f_n$ should be normalized before the dot product, or the term should be $\left( 1 - \frac{\nabla f_n}{\|\nabla f_n\|} \cdot V \right)$. The source formula omits normalization explicitly, but "gradient magnitude" is used elsewhere. We assume $\nabla f_n$ in the dot product is treated as a direction.
+
+2.  **Halo Effect ($h(i)$)**: The total halo intensity at voxel $i$ is the distance-weighted sum of halo potentials from all neighbors, weighted by the complement of the voxel's own gradient magnitude [S1][S2, unofficial]:
+    $$
+    h(i) = \left( \sum_{n \in \text{neighbors}} \frac{h_n}{\|P_i - P_n\|^2} \right) \cdot (1 - \|\nabla f_i\|)
+    $$
+    Where:
+    *   $\|\nabla f_i\|$ is the magnitude of the gradient at voxel $i$.
+    *   The weight $(1 - \|\nabla f_i\|)$ restricts halos to less interesting regions (low gradient areas) [S2, unofficial].
+    *   The distance weight is inverse-square $\frac{1}{\|P_i - P_n\|^2}$ [S1].
+
+3.  **Visual Adjustment**: The halo effect modulates brightness and opacity [S1][S2, unofficial]:
+    $$
+    c_{final} = c_{base} \cdot (1 - s_{dark} \cdot h(i))
+    $$
+    $$
+    \alpha_{final} = \min(1.0, \alpha_{base} + s_{opaque} \cdot h(i))
+    $$
+    Where $s_{dark}$ and $s_{opaque}$ are user-defined scalars.
+
+### Parameters
+*   $k_{hpe}$: Halo potential exponent. Typical value: 1.0 [S1][S2, unofficial].
+*   $k_{hse}$: Halo separation exponent. Typical value: 2.0 [S1][S2, unofficial].
+*   $s_{dark}$: Darkening scalar. Not given in the sources.
+*   $s_{opaque}$: Opacity increase scalar. Not given in the sources.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_feature_halos(volume, gradients, view_direction, k_hpe=1.0, k_hse=2.0, s_dark=0.5, s_opaque=0.5):
+    """
+    Computes feature halos for a volume.
+    
+    Args:
+        volume: 3D array of scalar values.
+        gradients: 3D array of 3D vectors (gradients).
+        view_direction: 3D vector (assumed normalized).
+        k_hpe: Halo potential exponent.
+        k_hse: Halo separation exponent.
+        s_dark: Scalar for darkening.
+        s_opaque: Scalar for opacity increase.
+        
+    Returns:
+        halo_map: 3D array of halo intensities.
+    """
+    import numpy as np
+    
+    # Get dimensions
+    D, H, W = volume.shape
+    
+    # Initialize halo map
+    halo_map = np.zeros((D, H, W))
+    
+    # Define neighborhood offsets (3x3x3 cube excluding center)
+    # This is a standard assumption [G] as exact neighborhood is not specified
+    offsets = []
+    for dz in [-1, 0, 1]:
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dz == 0 and dy == 0 and dx == 0:
+                    continue
+                offsets.append((dz, dy, dx))
+                
+    # Pre-normalize view direction
+    v_norm = view_direction / np.linalg.norm(view_direction)
+    
+    for z in range(D):
+        for y in range(H):
+            for x in range(W):
+                current_pos = np.array([x, y, z], dtype=float)
+                current_grad = gradients[z, y, x]
+                current_grad_mag = np.linalg.norm(current_grad)
+                
+                # Weight for current voxel (complement of gradient magnitude)
+                # Clamp to [0, 1] if gradient magnitude > 1
+                current_weight = max(0.0, 1.0 - current_grad_mag)
+                
+                halo_sum = 0.0
+                
+                for dz, dy, dx in offsets:
+                    nz, ny, nx = z + dz, y + dy, x + dx
+                    
+                    # Boundary check
+                    if not (0 <= nz < D and 0 <= ny < H and 0 <= nx < W):
+                        continue
+                        
+                    neighbor_pos = np.array([nx, ny, nz], dtype=float)
+                    neighbor_grad = gradients[nz, ny, nx]
+                    
+                    # Vector from neighbor to current
+                    diff = current_pos - neighbor_pos
+                    dist_sq = np.dot(diff, diff)
+                    
+                    if dist_sq == 0:
+                        continue
+                        
+                    # Distance weight
+                    dist_weight = 1.0 / dist_sq
+                    
+                    # Normalize diff for direction calculation
+                    diff_norm = diff / np.sqrt(dist_sq)
+                    
+                    # Halo potential calculation
+                    # Term 1: Gradient alignment with direction to current voxel
+                    # Source uses dot product directly. Assuming neighbor_grad is not normalized,
+                    # this might scale with magnitude. However, "gradient magnitude" is used in the
+                    # current voxel weight. The source formula for hn does not normalize neighbor_grad.
+                    # We follow the source formula exactly.
+                    grad_alignment = np.dot(neighbor_grad, diff_norm)
+                    
+                    # Term 2: Orthogonality to view direction
+                    # Source: (1 - grad_n . V)
+                    view_orthogonality = 1.0 - np.dot(neighbor_grad, v_norm)
+                    
+                    # Apply exponents
+                    # Note: If grad_alignment is negative, raising to power might be complex.
+                    # Halos are typically positive contributions. We assume max(0, ...) or similar.
+                    # Source implies strong halos from neighbors with large gradient in direction of sample.
+                    # If dot product is negative, the neighbor is "behind" the gradient vector relative to current.
+                    # We clamp to 0 to avoid negative potentials.
+                    h_n = max(0.0, grad_alignment) ** k_hpe * max(0.0, view_orthogonality) ** k_hse
+                    
+                    halo_sum += h_n * dist_weight
+                
+                # Final halo effect
+                halo_map[z, y, x] = halo_sum * current_weight
+                
+    return halo_map
+```
+
+### Edge Cases and Pitfalls
+*   **Self-Obscuration**: Since halos are view-dependent and computed based on neighbors orthogonal to the view, features do not cast halos on themselves [S1][S2, unofficial]. No special processing is needed.
+*   **Gradient Magnitude**: The term $(1 - \|\nabla f_i\|)$ assumes $\|\nabla f_i\|$ is normalized or bounded in $[0,1]$. If gradients are large, this term becomes negative, potentially inverting the halo effect. [G] Clamp $\|\nabla f_i\|$ to $[0,1]$ or normalize gradients before use.
+*   **Negative Dot Products**: The term $\nabla f_n \cdot \frac{P_i - P_n}{\|P_i - P_n\|}$ can be negative. Raising negative numbers to non-integer powers is undefined in real arithmetic. [G] Clamp the dot product to $[0, \infty)$ before exponentiation.
+*   **View Direction**: $V$ must be normalized.
+
+## Operating characteristics
+*   **Time Complexity**: $O(N \cdot K)$, where $N$ is the number of voxels and $K$ is the number of neighbors in the kernel. For a fixed 3x3x3 kernel, this is linear $O(N)$.
+*   **Memory Complexity**: $O(N)$ for storing the halo map. Requires storage for gradients and volume data.
+*   **Performance**: The method is computationally lightweight compared to ray-casting or texture-based splatting with complex shading, as it operates on a per-voxel basis with a small neighborhood. It can be implemented efficiently in a fragment shader or a pre-pass.
+*   **Strengths**: Enhances depth perception effectively; view-dependent nature prevents self-occlusion; applicable to any volume data type [S1][S2, unofficial].
+*   **Limitations**: Requires pre-computed gradients; halo intensity depends on neighborhood size and gradient normalization; parameters ($s_{dark}, s_{opaque}$) require tuning for different datasets.
+
+## Background
+Feature Halos was introduced in the context of non-photorealistic volume rendering to address the difficulty of perceiving depth in volumetric data. It builds on earlier work by Interrante and Grosch, adapting their concepts to a more general illumination process [S1][S2, unofficial]. The method was presented in papers by Rheingans et al. around 2000-2001, specifically in "Non-Photorealistic Rendering of Volume Models" and "Volume Illustration: Nonphotorealistic Rendering of Volume Models" [S1][S2, S3, unofficial]. It is used in medical visualization (e.g., CT volumes of liver and kidneys) to make foreground structures stand out [S1][S2, unofficial].
+
+## Sources
+[S1] PDF Volume illustration: nonphotorealistic rendering of volume models ..., https://www.csee.umbc.edu/~rheingan/pubs/volillus.tvcg01.pdf, fetched 2026-10-27
+[S2] Non-Photorealistic Rendering of Volume Models, https://www.cs.umbc.edu/~rheingan/pubs/volillus00.pdf, fetched 2026-10-27 (unofficial)
+[S3] Non-Photorealistic Rendering of Volume Models, https://userpages.cs.umbc.edu/ebert/npr/volillus.pdf, fetched 2026-10-27 (unofficial)

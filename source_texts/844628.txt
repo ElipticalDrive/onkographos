@@ -1,0 +1,237 @@
+Xindeler on the renamed, original Veloren-derived engine — successor track to the Bevy port (see docs/design/backlog/new-horizon.md in xindeler-design) - feat(world): guard authored voids from the procedural cave layer (COW-23 Phases 1+2) by Matute289 · Pull Request #367 · Matute289/xindeler-new-horizon
+
+feat(world): guard authored voids from the procedural cave layer (COW-23 Phases 1+2) by Matute289 · Pull Request #367 · Matute289/xindeler-new-horizon · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Matute289
+commented
+Sep 18, 2026
+Copy link
+Copy Markdown
+Owner
+COW-23 Phases 1 and 2: the AuthoredVoids protection index, and the one
+policy-aware guard that consumes it. The toggle is not flipped —
+cromatolis_v0_procedural_layers.ron still has caves: false, so this ships
+dead in production and every test drives the query functions directly.
+What this is
+Authored underground geometry and the purely-procedural cave lattice both write
+into the same block volumes and neither can see the other. Today the only way to
+stop a hash-derived tunnel punching through a hand-authored vault is to switch
+the whole procedural layer off for the region — which is what Cromatolis does, at
+the cost of its entire procedural underground (cave biomes, cave fauna, and every
+Iron/Coal/Cobalt/Silver and gem deposit in the game, all of which come from that
+one layer).
+world/src/layer/authored_voids.rs is the narrow alternative: an exact-shape
+protection index the procedural layers consult at one choke point.
+Exact shape, not a bound. A disc for a chamber or room; a capsule following
+the real bowed quadratic spline for a tunnel, connection or water feature.
+The bow is load-bearing — authored tunnels leave their rooms along a control
+offset that can sit ~60° off the chord, so a chord-based capsule would protect
+substantially the wrong volume.
+A capsule knows which end its z anchors. An air passage is floor-anchored
+and the surface cap lowers only its ceiling; a liquid body is surface-anchored
+and the cap lowers the whole band. Modelling water the first way under-protects
+it exactly where the terrain is shallowest.
+Every shape carries a ProceduralContact. Seal dilates by 16 blocks
+(plus the carve's own edge slack) in x, y and z and cuts the tunnel back at
+that column. Connect has no margin — structurally, not as a tuning
+choice: the clip's unit is a column, so any dilation of a connected void would
+delete a ring of tunnel outside the chamber and strand the rest of it as a
+sealed air pocket inside. Seal wins ties, because a promise beats a
+permission.
+Connect needs no blend or join code. apply_caves_to runs before the
+authored carve, and the authored carve is an unconditional overwrite of its own
+whole footprint. The join is produced by pass ordering; what survives is the
+tunnel's own cross-section, which tapers to zero at its lateral edge, so the
+opening always reads as a lens-shaped mouth rather than a rectangular punch.
+The guard
+One edit, in tunnel_bounds_at_from and nowhere else. That is the single
+function apply_caves_to, tree.rs and shrub.rs all read tunnel z-ranges
+through, so carving and vegetation suppression stay consistent by
+construction under both policies — any other placement recreates COW-15's
+"treeless corridor over a tunnel that is not there", scoped to authored
+footprints.
+Vegetation suppression deliberately does not track authored footprints: an
+authored ceiling is capped four blocks below the surface and can never reach the
+bands tree.rs/shrub.rs test, so suppressing there would clear trees over
+intact ground — the same bug with the sign flipped.
+Layering
+The index imports no authored layer. world/src/layer/authored_regions.rs is the
+one content-aware site that decides which authored layers contribute shapes; the
+authored layers expose their resolved geometry through narrow accessors and know
+nothing about the index. A future authored region inherits the index, the choke
+point, the tie-break, the margin and the tests, and touches only the registration
+site. procedural_contact is authored content — a RON enum literal,
+#[serde(default)] to Seal, so an asset predating the field (including the one
+shipped today) is protected rather than exposed.
+Interiors hard-code Seal and get no RON field: they already author real surface
+accesses, so they never needed a procedural tunnel to be reachable, and their
+shape accessors deliberately over-approximate the carve — only sound for a shape
+that gets dilated.
+Cost
+Per column: one OnceLock load, one bucket hash, then a bounding-box reject per
+candidate shape before any spline solve. The bucket grid is chunk-granular over
+a bowed segment's box, so most shapes a bucket hands back are not actually over
+the column; without that reject the cubic solve would dominate exactly inside
+authored footprints.
+EDGE_SOFTNESS and SURFACE_MARGIN now have one definition each, read by both
+carve sites, because the index is defined as the volume those carves produce.
+For the same reason a unit test pins the three copies of the spline sample
+against each other.
+Measured (real authored region, seed 0)
+indexed shapes
+1 411 — 1 363 from 279 caves, 48 from the two interiors
+bucket grid
+12 372 chunk buckets, 30 887 entries, largest bucket 19
+authored columns sampled
+43 019
+sealed caves breached before the guard
+17
+sealed caves breached after
+0
+surface cave markers
+150, unchanged (the guard never touches node_at)
+per-column query, uniform 20 000 columns
+167.9 ms → 168.2 ms (+0.20 %)
+per-column query, 20 000 in-footprint columns
+126.1 ms → 127.1 ms (+0.75 %)
+interior spline-vs-bounds deficit
+−25.4 blocks over 20 connections × 64 samples
+Two figures differ slightly from the design pass's own sweep and the difference
+is methodological, not a regression: 17 vs. 18 breached caves is an 8-block
+sampling grid against a full voxel sweep, and 150 vs. 149 markers is
+surface_entrances counted directly rather than off a rendered map. Both were
+re-measured here rather than copied.
+Every cave is Seal today because the shipped asset predates the field. The
+regenerated asset that declares 193 of the 279 generic caves Connect lands
+separately as a data-only diff, and the exporter change for it is in
+xindeler-open-world#32.
+Verification
+All three CI clippy invocations + cargo fmt --all -- --check: clean.
+cargo test -p xindeler-world: 288 pass. One failure,
+site::economy::context::tests::test_economy_moderate_standalone, is
+pre-existing on the base commit — verified by stashing the whole change and
+re-running it. Same for the ignored test_economy1 (a RON parse error).
+New tests: 19 unit tests on synthetic shapes (both policies, the margin, the
+Connect zero-margin exactness, end caps, the surface-cap clamp, the water
+anchor, the Seal-wins tie-break in both registration orders, a brute-force
+cross-check of the bucket grid, the three-way spline parity) plus 5 #[ignore]d
+real-asset tests carrying the measurements above.
+Reviewed locally before this PR by game-architecture-reviewer,
+rust-perf-reviewer and ecs-design-reviewer; every blocking and
+merge-with-minors finding is fixed in the branch.
+Known and bounded, recorded rather than fixed
+A Connect void that sits inside a neighbouring Seal void's 19-block shell is
+re-sealed, silently. That is the tie-break working as designed; the real-asset
+test now reports the count (0 today) so the intent-loss is a number.
+An interior water feature's narrow waterfall column is not indexed; a drop
+deeper than the margin would leave its lower part unguarded. No authored
+waterfall is that deep.
+The index builds lazily inside a OnceLock on first query, so the first wave of
+chunk-gen workers can convoy on it once. Same shape as the two existing
+Cromatolis caches; worth warming eagerly before caves: true ships.
+feat(world): guard authored voids from the procedural cave layer
+…
+d936beb
+```
+Adds `world/src/layer/authored_voids.rs`: an engine-general index of every
+block volume an authored feature carves, plus the policy a purely-procedural
+layer must obey when it meets one, and `world/src/layer/authored_regions.rs`:
+the one content-aware site that decides which authored layers contribute
+shapes. The index imports no authored layer, so a future authored region
+inherits the whole mechanism and touches only the registration site.
+
+Each authored shape is registered exactly as it is carved -- a disc for a
+chamber or room, a capsule following the real bowed quadratic spline for a
+tunnel, connection or water feature -- so the protected volume is the carved
+volume dilated by one margin rather than a bounding circle several times too
+big. The bow matters: authored tunnels leave their rooms along a control
+offset that can sit ~60 degrees off the chord, so a chord-based capsule would
+protect substantially the wrong volume. A capsule also records whether its
+endpoint z anchors its floor (an air passage; the surface cap lowers only the
+ceiling) or its surface (a liquid body; the cap lowers the whole band), so a
+shallow water feature is not under-protected.
+
+Every shape carries a `ProceduralContact`:
+
+- `Seal` dilates by 16 blocks (plus the carve's own edge slack) in x, y and z,
+  and cuts the procedural tunnel back at that column, leaving a solid plug.
+- `Connect` has *no* margin, structurally rather than as a tuning choice: the
+  clip's unit is a column, so any dilation of a connected void would delete a
+  ring of tunnel outside the chamber and strand the rest of it as a sealed air
+  pocket inside. It is tested against its exact carved volume and is a total
+  no-op at the clip site -- the authored carve runs afterwards and
+  unconditionally overwrites its own footprint, so the mouth the player sees
+  is produced by pass ordering alone, with no blend or join code.
+
+Where several shapes claim a column the strongest policy wins: `Seal` is a
+promise, `Connect` only a permission.
+
+The guard goes in `tunnel_bounds_at_from` and nowhere else. That is the single
+function `apply_caves_to`, `tree.rs` and `shrub.rs` all read tunnel z-ranges
+through, so carving and vegetation suppression stay consistent by
+construction under both policies. Vegetation suppression deliberately does
+*not* track authored footprints: an authored ceiling is capped four blocks
+below the surface and can never reach the bands those two layers test, so
+suppressing there would clear trees over intact ground.
+
+Per column the guard is one `OnceLock` load, one bucket hash, and then a
+bounding-box reject per candidate shape before any spline solve -- the bucket
+grid is chunk-granular over a bowed segment's box, so most shapes it hands
+back are not actually over the column. `EDGE_SOFTNESS` and `SURFACE_MARGIN`
+now have one definition each, read by both carve sites, because the index is
+defined as the volume those carves produce; a unit test pins the three copies
+of the spline sample against each other for the same reason.
+
+Cached on `Index` as a per-world `OnceLock`, `None` when no authored region is
+loaded -- which makes every consumer a no-op, and generation bit-identical,
+for a purely procedural world.
+
+Measured on the real authored region: 1411 indexed shapes (1363 from 279
+caves, 48 from the two interiors) across 12372 chunk buckets, largest bucket
+19; 17 sealed caves breached by a procedural tunnel before the guard, 0 after,
+over 43019 sampled authored columns; 150 surface cave markers unchanged;
++0.20% on the per-column tunnel query over a uniform 20000-column sweep and
++0.75% over 20000 columns drawn from the authored caves' own footprints;
+worst interior spline-vs-bounds deficit -25.4 blocks.
+
+The toggle stays off: the guard ships dead until `caves: true`.
+```
+Matute289
+mentioned this pull request
+Sep 18, 2026
+data(cromatolis): declare a procedural-contact policy per authored cave (COW-23 T33)
+#368
+Merged
+Matute289
+merged commit 02e20b9
+into
+new-horizon/open-world-cromatolis
+Sep 19, 2026
+This was referenced Sep 19, 2026
+feat(world): keep boulders from sealing the passages they land in
+#369
+Merged
+fix(world): close the three authored-void findings left open by review (COW-23)
+#370
+Merged
+Matute289
+deleted the
+cow23-authored-voids
+branch
+September 26, 2026 16:27
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

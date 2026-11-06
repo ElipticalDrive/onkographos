@@ -3,92 +3,63 @@
 Also called: Geometry Shader Marching Cubes, Marching Cubes Geometry Shader Variant, Marching Cubes with Brush Deformation
 
 ## Overview
-This method extracts an isosurface from a 3D scalar field using a GPU geometry shader, applying a real-time Gaussian-based deformation to the resulting mesh vertices based on a user-defined force vector [S1, unofficial]. It differs from standard GPU Marching Cubes implementations by integrating the deformation calculation directly into the geometry shader's primitive generation loop, allowing for dynamic, brush-like sculpting of the terrain during rendering [S1, unofficial]. Unlike methods that rely on compute shaders for pre-processing or atomic counters for output buffering, this approach processes voxel primitives directly, discarding empty cubes early and emitting triangles on-the-fly [S1, unofficial].
+This method extracts an isosurface from a scalar field using a Geometry Shader to perform triangle generation and apply a Gaussian-based deformation to the resulting mesh vertices [S1, S2, unofficial]. It differs from standard GPU Marching Cubes implementations by integrating a continuous deformation function driven by a user-provided force vector directly into the geometry shader pipeline, allowing for real-time interactive modification of the extracted surface [S1, unofficial].
 
 ## How it works
-The algorithm operates on a grid of voxel positions passed as point primitives to the geometry shader. It evaluates a scalar field, classifies each voxel cube, and generates triangles only for non-empty cubes, applying a Gaussian deformation to the vertex positions before emission.
+The method builds on [Marching Cubes Lookup and Configuration](2518-marching-cubes-lookup-and-configuration.md) and [GPU Acceleration and Parallel Pipelines](4136-gpu-acceleration-and-parallel-pipelines.md). It processes a grid of point primitives (one per voxel) to generate a triangle mesh.
 
 ### Inputs and Outputs
-*   **Input**: A buffer of 3D points representing the voxel grid centers. Each point is treated as the center of a cube.
-*   **Uniforms**:
-    *   `gridSize` (`float`): The edge length of a voxel. Typical value: `0.25f` [S1, unofficial].
-    *   `i_force` (`vec3`): The direction and magnitude of the deformation force [S1, unofficial].
-    *   `sigma` (`float`): The width of the Gaussian falloff. Constant value: `0.8` [S1, unofficial].
-    *   `edgeTableTex`, `triTableTex`: 2D integer textures storing the standard Marching Cubes lookup tables (256 entries each) [S1, unofficial].
-*   **Output**: A `TriangleStream` of deformed vertices.
+**Inputs:**
+*   **Voxel Grid:** A set of point primitives, where each point represents the center or corner of a voxel in the scalar field. The grid is defined by a region (`region_small`, `region_big`) and a `gridSize` [S1, unofficial].
+*   **Scalar Field:** Defined implicitly by a sphere function $f(\mathbf{p})$ [S1, unofficial].
+*   **Lookup Tables:** `edgeTable` and `triangleTable` stored in 2D integer textures (`edgeTableTex`, `triTableTex`) [S1, unofficial].
+*   **Deformation Parameters:**
+    *   `i_force`: A uniform `vec3` defining the direction and magnitude of the deformation force [S1, unofficial].
+    *   `sigma`: A constant float (typically 0.8) controlling the width of the Gaussian falloff [S1, unofficial].
+    *   `gridSize`: Uniform float defining voxel edge length (typical value 0.25f) [S1, unofficial].
+*   **Transform Matrices:** Model, View, Projection, and World-to-Object matrices for rendering [S2, unofficial].
+
+**Outputs:**
+*   A `TriangleStream` of vertices in clip space, with positions deformed by the Gaussian function, normals, and UVs passed to the fragment shader [S1, S2, unofficial].
 
 ### Data Structures
-The lookup tables are stored in 2D textures to allow parallel access in the geometry shader [S1, unofficial].
-*   `edgeTableTex`: Dimensions $256 \times 1$. Format: `GL_R16I` (signed 16-bit integer). Each entry at index $i$ contains a bitmask of the 12 edges intersected by the isosurface.
-*   `triTableTex`: Dimensions $256 \times 1$. Format: `GL_R16I`. Each entry at index $i$ contains a sequence of vertex indices (0-15) defining the triangles, terminated by -1.
+1.  **Cube Vertex Indices (`cube_diff_indices`):** A static integer array of size 24, mapping the 12 edges of a cube to their 8 vertices. Index $i$ corresponds to vertices `cube_diff_indices[i*2]` and `cube_diff_indices[i*2+1]` [S1, unofficial].
+    *   Values: `{0,1, 1,2, 2,3, 3,0, 4,5, 5,6, 6,7, 7,4, 0,4, 1,5, 2,6, 3,7}` [S1, unofficial].
+2.  **Lookup Tables:** Stored as `GL_R16I` 2D textures. Accessed via `texelFetch(tex, ivec2(index, 0), 0).r` [S1, unofficial].
+3.  **Geometry Shader Input/Output Structure:** Contains `float4 pos`, `float3 normal`, and `float2 tex0` (or `uv`) [S2, unofficial].
 
-The edge connectivity is defined by a static mapping `cube_diff_indices` of size 24 (12 edges $\times$ 2 vertices), mapping edge index $i$ to its two vertex indices $v_1, v_2$ [S1, unofficial]:
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+### Algorithm Steps
 
-```python
-cube_diff_indices = [
-    0, 1, 1, 2, 2, 3, 3, 0,  # Bottom face edges
-    4, 5, 5, 6, 6, 7, 7, 4,  # Top face edges
-    0, 4, 1, 5, 2, 6, 3, 7   # Vertical edges
-]
-```
-
-### Step-by-Step Method
-
-1.  **Cube Index Calculation**:
-    For each input voxel center $\mathbf{p}_{center}$, compute the scalar field value $f(\mathbf{p})$ at the 8 corners of the cube. The corners are defined by offsets $\pm \frac{gridSize}{2}$ along x, y, and z axes.
-    The scalar field is defined as [S1, unofficial]:
-    $$
-    f(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - (r + s\sqrt{3})
-    $$
-    where $\mathbf{c} = (0, 0, -20)$ is the center, $r = 4.0$ is the radius, and $s$ is the grid size (interpreted as `gridSize`) [S1, unofficial].
-    Construct an 8-bit cube index $I$: if $f(\mathbf{p}_k) < 0.0$, set bit $k$ (where $k$ corresponds to the vertex index in the standard MC ordering).
-
-2.  **Edge Table Lookup**:
-    Fetch the edge mask $E$ from `edgeTableTex` at index $I$. If $E == 0$, discard the primitive (no intersection) [S1, unofficial].
-
-3.  **Vertex Interpolation**:
-    Iterate over the 12 edges of the cube. For each edge $i$ (0 to 11):
-    *   Check if the $i$-th bit is set in $E$.
-    *   If set, retrieve the two vertex indices $v_1, v_2$ from `cube_diff_indices` ($v_1 = \text{cube\_diff\_indices}[2i]$, $v_2 = \text{cube\_diff\_indices}[2i+1]$).
-    *   Calculate the scalar values $f_1 = f(\mathbf{p}_{v_1})$ and $f_2 = f(\mathbf{p}_{v_2})$.
-    *   Compute the interpolation parameter $\alpha$:
-        $$
-        \alpha = \frac{|f_1|}{|f_1| + |f_2|}
-        $$
-        [S1, unofficial].
-    *   Compute the undeformed intersection point $\mathbf{v}_{raw}$:
-        $$
-        \mathbf{v}_{raw} = (1 - \alpha)\mathbf{p}_{v_1} + \alpha\mathbf{p}_{v_2}
-        $$
-        [S1, unofficial].
-
-4.  **Gaussian Deformation**:
-    Apply the deformation to $\mathbf{v}_{raw}$ to get $\mathbf{p}'$.
-    *   Calculate the squared perpendicular distance $d_{\perp}^2$ from the point to the force vector line passing through $\mathbf{c}$:
-        $$
-        d_{\perp}^2 = \|\mathbf{v}_{raw} - \mathbf{c}\|^2 - \frac{((\mathbf{v}_{raw} - \mathbf{c}) \cdot \mathbf{F})^2}{\|\mathbf{F}\|^2}
-        $$
-        where $\mathbf{F} = \text{i\_force}$ [S1, unofficial].
-    *   Compute the Gaussian weight $W$:
-        $$
-        W = 5 \cdot \frac{e^{-d_{\perp}^2 / (2\sigma^2)}}{\sigma\sqrt{2\pi}}
-        $$
-        [S1, unofficial].
-    *   Apply deformation:
-        $$
-        \mathbf{p}' = \mathbf{v}_{raw} + \mathbf{F} \cdot W
-        $$
-        [S1, unofficial].
-    *   **Guard**: If $\|\mathbf{F}\|^2 \approx 0$, skip deformation (return $\mathbf{v}_{raw}$) to avoid division by zero [S1, unofficial]. If the dot product $((\mathbf{v}_{raw} - \mathbf{c}) \cdot \mathbf{F}) \le 0$, skip deformation to prevent backward pushing [S1, unofficial].
-
-5.  **Triangle Generation**:
-    Fetch the triangle configuration $T$ from `triTableTex` at index $I$.
-    Iterate through $T$ in steps of 3. For each triplet $(idx_1, idx_2, idx_3)$:
-    *   If any index is -1, stop (end of configuration).
-    *   Retrieve the three undeformed intersection points $\mathbf{v}_1, \mathbf{v}_2, \mathbf{v}_3$ corresponding to the edge indices stored in $T$. Note: The table stores edge indices (0-11), not vertex indices. Use `cube_diff_indices` to map edge indices to the actual 3D points calculated in Step 3.
-    *   Apply the Gaussian deformation (Step 4) to each of the three points to get $\mathbf{p}'_1, \mathbf{p}'_2, \mathbf{p}'_3$.
-    *   Emit the three vertices to the `TriangleStream` in order.
+1.  **Scalar Field Evaluation:** For each voxel center $\mathbf{p}_{center}$, evaluate the scalar field at the 8 corners $\mathbf{p}_i$ of the cube. The field is defined as:
+    $$f(\mathbf{p}) = \|\mathbf{p} - \mathbf{c}\| - (r + s\sqrt{3})$$
+    where $\mathbf{c} = (0, 0, -20)$ is the center, $r = 4.0$ is the radius, and $s$ is the `gridSize` [S1, unofficial].
+2.  **Case Index Calculation:** Construct the 8-bit case index $C$. If $f(\mathbf{p}_i) < 0.0$, set the $i$-th bit of $C$ [S1, unofficial].
+3.  **Edge Intersection Check:** Look up `edgeTable[C]`. If the result is 0, discard the primitive (no intersection) [S1, unofficial].
+4.  **Vertex Interpolation:** For each of the 12 edges $i$ where the $i$-th bit of `edgeTable[C]` is set:
+    *   Identify the two endpoints $\mathbf{p}_1, \mathbf{p}_2$ using `cube_diff_indices` [S1, unofficial].
+    *   Compute the interpolation factor:
+        $$\alpha = \frac{|f(\mathbf{p}_1)|}{|f(\mathbf{p}_1)| + |f(\mathbf{p}_2)|}$$
+    *   Compute the undeformed intersection point:
+        $$\mathbf{v}_{undeformed} = (1 - \alpha)\mathbf{p}_1 + \alpha\mathbf{p}_2$$
+    *   **Pitfall:** If $f(\mathbf{p}_1) = 0.0$ and $f(\mathbf{p}_2) = 0.0$, the denominator is zero. The source code does not explicitly guard against this [S1, unofficial].
+5.  **Gaussian Deformation:** Apply the deformation to $\mathbf{v}_{undeformed}$ to get $\mathbf{v}_{deformed}$:
+    $$\mathbf{v}_{deformed} = \mathbf{v}_{undeformed} + \mathbf{F} \cdot 5 \cdot \mathcal{N}(\sigma, d_{\perp}^2)$$
+    where $\mathbf{F}$ is `i_force`, and $\mathcal{N}$ is the Gaussian distribution:
+    $$\mathcal{N}(\sigma, x) = \frac{e^{-x / (2\sigma^2)}}{\sigma\sqrt{2\pi}}$$
+    The squared perpendicular distance $d_{\perp}^2$ is:
+    $$d_{\perp}^2 = \|\mathbf{v}_{undeformed} - \mathbf{c}\|^2 - \frac{((\mathbf{v}_{undeformed} - \mathbf{c}) \cdot \mathbf{F})^2}{\|\mathbf{F}\|^2}$$
+    *   **Pitfall:** If $\mathbf{F} = \mathbf{0}$, division by $\|\mathbf{F}\|^2$ causes NaN. The source code does not explicitly guard against this [S1, unofficial].
+    *   **Optimization:** If $((\mathbf{v}_{undeformed} - \mathbf{c}) \cdot \mathbf{F}) \le 0$, the deformation is skipped (early return) to prevent backward pushing [S1, unofficial].
+6.  **Triangle Generation:** Look up `triangleTable[C]`. Iterate through the table in steps of 3. For each valid triangle vertex index $k$:
+    *   Retrieve the corresponding deformed vertex $\mathbf{v}_{deformed}$ computed in Step 4-5.
+    *   Set the output position.
+    *   Emit the vertex.
+    *   After 3 vertices, end the primitive [S1, unofficial].
+7.  **Transform and Render:**
+    *   **Vertex Shader:** Transform vertex position to world space using `unity_ObjectToWorld`. Pass normal and texcoord unchanged [S2, unofficial].
+    *   **Geometry Shader:** Transform each vertex position to clip space.
+        *   **Pitfall:** The source code uses `mul(UNITY_MATRIX_MVP, unity_WorldToObject)`. Standard transformation is `VP * World * Vertex`. This order is likely incorrect and produces wrong clip-space positions [S2, unofficial].
+    *   **Fragment Shader:** Compute diffuse lighting using a normalized light vector $\mathbf{L}$ from `lightPos` and input position. Calculate `max(dot(N, L), 0)`. Sample a sprite texture and multiply by diffuse light [S2, unofficial].
 
 ### Pseudocode
 
@@ -97,118 +68,99 @@ cube_diff_indices = [
 ```python
 # Constants
 SIGMA = 0.8
-CENTER = vec3(0.0, 0.0, -20.0)
+CENTER = (0, 0, -20)
 RADIUS = 4.0
 
-# Lookup table access helpers
-def fetch_edge_mask(cube_index):
-    # Returns integer bitmask from edgeTableTex
-    pass
+def gaussian_deformation(p_undeformed, force, sigma, center):
+    """
+    Applies Gaussian deformation to a vertex.
+    Returns deformed position.
+    """
+    # Pitfall: Check for zero force to avoid division by zero
+    force_norm_sq = dot(force, force)
+    if force_norm_sq == 0:
+        return p_undeformed # Or handle error
 
-def fetch_tri_config(cube_index):
-    # Returns array of 16 integers from triTableTex
-    pass
+    # Calculate perpendicular distance squared
+    diff = p_undeformed - center
+    proj_factor = dot(diff, force) / force_norm_sq
+    proj_vec = force * proj_factor
+    perp_vec = diff - proj_vec
+    d_perp_sq = dot(perp_vec, perp_vec)
 
-# Edge to vertex mapping
-CUBE_DIFF_INDICES = [
-    0, 1, 1, 2, 2, 3, 3, 0,
-    4, 5, 5, 6, 6, 7, 7, 4,
-    0, 4, 1, 5, 2, 6, 3, 7
-]
+    # Gaussian term
+    gaussian_val = exp(-d_perp_sq / (2 * sigma * sigma)) / (sigma * sqrt(2 * PI))
 
-def get_edge_vertices(edge_idx):
-    v1_idx = CUBE_DIFF_INDICES[edge_idx * 2]
-    v2_idx = CUBE_DIFF_INDICES[edge_idx * 2 + 1]
-    return v1_idx, v2_idx
+    # Apply deformation
+    # Pitfall: Skip if dot product is non-positive to prevent backward pushing
+    if proj_factor <= 0:
+        return p_undeformed
+
+    return p_undeformed + force * 5.0 * gaussian_val
 
 def scalar_field(p, grid_size):
-    # f(p) = ||p - c|| - (r + s*sqrt(3))
+    """
+    Evaluates the implicit sphere scalar field.
+    """
     dist = length(p - CENTER)
-    return dist - (RADIUS + grid_size * sqrt(3.0))
+    return dist - (RADIUS + grid_size * sqrt(3))
 
-def interpolate_vertex(p1, p2, f1, f2):
-    # Linear interpolation
-    denom = abs(f1) + abs(f2)
-    if denom == 0.0:
-        return (p1 + p2) / 2.0 # Guard against div by zero [S1, unofficial]
-    alpha = abs(f1) / denom
-    return (1.0 - alpha) * p1 + alpha * p2
-
-def gaussian_deformation(p, force, sigma):
-    # p: undeformed vertex position
-    # force: i_force uniform
-    # sigma: 0.8
-    
-    if length_sq(force) < 1e-6:
-        return p
-    
-    diff = p - CENTER
-    dist_sq = length_sq(diff)
-    proj_sq = dot(diff, force) ** 2 / length_sq(force)
-    d_perp_sq = dist_sq - proj_sq
-    
-    # Guard: prevent backward pushing
-    if dot(diff, force) <= 0.0:
-        return p
-        
-    weight = 5.0 * exp(-d_perp_sq / (2.0 * sigma * sigma)) / (sigma * sqrt(2.0 * PI))
-    return p + force * weight
-
-def process_voxel(voxel_center, grid_size, force):
+def marching_cubes_gaussian_deformation(voxel_center, grid_size, force, edge_table_tex, tri_table_tex):
+    """
+    Processes a single voxel to generate triangles.
+    """
     # 1. Evaluate scalar field at 8 corners
-    half = grid_size / 2.0
-    corners = []
-    f_vals = []
-    for x in [-1, 1]:
-        for y in [-1, 1]:
-            for z in [-1, 1]:
-                p = voxel_center + vec3(x * half, y * half, z * half)
-                corners.append(p)
-                f_vals.append(scalar_field(p, grid_size))
+    corners = get_cube_corners(voxel_center, grid_size)
+    field_values = [scalar_field(c, grid_size) for c in corners]
     
-    # 2. Compute cube index
-    cube_index = 0
-    for i in range(8):
-        if f_vals[i] < 0.0:
-            cube_index |= (1 << i)
+    # 2. Calculate case index
+    case_index = 0
+    for i, val in enumerate(field_values):
+        if val < 0.0:
+            case_index |= (1 << i)
             
-    # 3. Lookup edge mask
-    edge_mask = fetch_edge_mask(cube_index)
+    # 3. Check edge table
+    edge_mask = texel_fetch(edge_table_tex, case_index)
     if edge_mask == 0:
-        return []
-        
-    # 4. Compute intersection points for all intersected edges
-    intersections = {} # Map edge_idx -> deformed_pos
-    
-    for edge_idx in range(12):
-        if (edge_mask >> edge_idx) & 1:
-            v1_idx, v2_idx = get_edge_vertices(edge_idx)
+        return [] # No intersection
+
+    # 4. Compute interpolated vertices
+    # cube_diff_indices maps edge index i to vertex indices (i*2, i*2+1)
+    interpolated_vertices = {}
+    for edge_i in range(12):
+        if (edge_mask >> edge_i) & 1:
+            v1_idx = cube_diff_indices[edge_i * 2]
+            v2_idx = cube_diff_indices[edge_i * 2 + 1]
             p1 = corners[v1_idx]
             p2 = corners[v2_idx]
-            f1 = f_vals[v1_idx]
-            f2 = f_vals[v2_idx]
+            f1 = field_values[v1_idx]
+            f2 = field_values[v2_idx]
             
-            raw_pos = interpolate_vertex(p1, p2, f1, f2)
-            deformed_pos = gaussian_deformation(raw_pos, force, SIGMA)
-            intersections[edge_idx] = deformed_pos
-            
+            # Pitfall: Handle division by zero if both are 0
+            denom = abs(f1) + abs(f2)
+            if denom == 0:
+                alpha = 0.5 # Default or skip
+            else:
+                alpha = abs(f1) / denom
+                
+            p_undeformed = (1 - alpha) * p1 + alpha * p2
+            p_deformed = gaussian_deformation(p_undeformed, force, SIGMA, CENTER)
+            interpolated_vertices[edge_i] = p_deformed
+
     # 5. Generate triangles
-    tri_config = fetch_tri_config(cube_index)
     triangles = []
+    tri_table = texel_fetch(tri_table_tex, case_index)
     
     i = 0
-    while i < 16:
-        idx1 = tri_config[i]
-        idx2 = tri_config[i+1]
-        idx3 = tri_config[i+2]
+    while tri_table[i] != -1:
+        v1_edge = tri_table[i]
+        v2_edge = tri_table[i+1]
+        v3_edge = tri_table[i+2]
         
-        if idx1 == -1:
-            break
-            
-        # Map edge indices to deformed positions
-        p1 = intersections[idx1]
-        p2 = intersections[idx2]
-        p3 = intersections[idx3]
+        # Retrieve deformed positions
+        p1 = interpolated_vertices[v1_edge]
+        p2 = interpolated_vertices[v2_edge]
+        p3 = interpolated_vertices[v3_edge]
         
         triangles.append((p1, p2, p3))
         i += 3
@@ -216,19 +168,16 @@ def process_voxel(voxel_center, grid_size, force):
     return triangles
 ```
 
-### Edge Cases and Pitfalls
-*   **Zero Force Vector**: If `i_force` is zero, the term $\|\mathbf{F}\|^2$ in the deformation formula becomes zero, causing division by zero and NaN results. The implementation must check for this and skip deformation [S1, unofficial].
-*   **Zero Scalar Values**: If both endpoints of an edge have scalar values of exactly 0.0, the interpolation denominator $|f_1| + |f_2|$ is zero. This causes division by zero. The code does not explicitly guard against this in the source, but a robust implementation should handle it (e.g., by returning the midpoint) [S1, unofficial].
-*   **Backward Pushing**: The deformation logic includes a check on the dot product of the displacement vector and the force. If non-positive, deformation is skipped to prevent vertices from being pushed in the opposite direction of the force [S1, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity**: $O(1)$ per voxel processed by the geometry shader, as it performs a fixed number of texture fetches and arithmetic operations regardless of grid resolution. Total complexity is $O(N)$ for $N$ voxels [S1, unofficial].
-*   **Memory Complexity**: Minimal GPU memory usage for the lookup tables (256 integers each). No large output buffers are required as triangles are emitted directly to the stream [S1, unofficial].
-*   **Strengths**: Real-time deformation is integrated into the rendering pipeline without CPU-GPU synchronization. Simple implementation using standard OpenGL 3.3+ geometry shaders [S1, unofficial].
-*   **Limitations**: Geometry shaders are deprecated in modern OpenGL/Vulkan core profiles. The matrix multiplication order in the variant described in [S2, unofficial] is incorrect for standard MVP transformation, likely producing incorrect clip-space positions. The method does not handle dynamic output sizing via atomics or histograms, relying on the fixed primitive stream [S1, unofficial].
+*   **Time Complexity:** $O(1)$ per voxel processed by the geometry shader, as it performs a fixed number of texture fetches and arithmetic operations regardless of grid resolution. Total complexity is $O(N)$ for $N$ voxels [S1, unofficial].
+*   **Memory Complexity:** Depends on the size of the voxel grid and the storage of the lookup tables in GPU texture memory [S1, unofficial].
+*   **Strengths:** Real-time interactive deformation of the isosurface; leverages GPU parallelism for both classification and deformation [S1, unofficial].
+*   **Limitations:** The Gaussian deformation is applied per-vertex after interpolation, which may introduce artifacts if the deformation is large relative to the voxel size. The implementation contains known bugs regarding matrix multiplication order and lack of guards for zero vectors [S1, S2, unofficial].
+*   **When to use:** Real-time applications requiring interactive sculpting or deformation of volumetric data, such as terrain modification or fluid interaction simulations [S1, unofficial].
+*   **When not to use:** High-fidelity offline rendering where deformation artifacts are unacceptable, or when the force vector might be zero without external guards.
 
 ## Background
-This method was implemented in the NtslMaterial geometry shader for real-time deformable terrain/mesh interaction in a custom OpenGL 3.3+ application [S1, unofficial]. It builds on the standard Marching Cubes algorithm [1211-primal-grid-marching-cubes] by adding a Gaussian deformation function. A related variant using Unity's geometry shader infrastructure for sprite-based rendering is also documented [S2, unofficial], though it focuses on vertex transformation rather than scalar field deformation.
+This method was implemented in the NtslMaterial geometry shader for real-time deformable terrain/mesh interaction in a custom OpenGL 3.3+ application [S1, unofficial]. It represents a variant of the Marching Cubes algorithm that integrates a Gaussian-based deformation along a user-provided force vector [S1, S2, unofficial]. The approach demonstrates how geometry shaders can be used not just for topology generation but also for vertex transformation and deformation in real-time graphics pipelines.
 
 ## Sources
 [S1] tink-expo/ntsl-graphics, https://github.com/tink-expo/ntsl-graphics, fetched 2026-10-26 (unofficial)

@@ -1,0 +1,529 @@
+Official Vulkanstorm viewer source repository. Contribute to anne-skydancer/vulkanstorm development by creating an account on GitHub.
+
+Replace PPLL with stochastic transparency by anne-skydancer · Pull Request #320 · anne-skydancer/vulkanstorm · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+anne-skydancer
+commented
+Nov 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Replaces PPLL with depth-based stochastic transparency (Enderton, Sintorn, Shirley and Luebke, I3D 2010, §3.4), ported from the owner's Aurora Viewer feat/alpha-oit implementation, following the owner's decision of 2026-11-05. After this PR the viewer has two alpha methods: sorted alpha (0) and stochastic transparency (1, the default). Details: doc/oit/stochastic-transparency.md.
+Commits
+(Later: review fixes; alpha-only shading as Aurora's st_material_alpha and lighter binds in the alpha-only passes; the bench's shading proxy and sorted-alpha reference.)
+Stochastic transparency added beside PPLL as method 2 (pipeline targets and passes, pool passes, alpha-only shader variants, face seeds, glow).
+Offscreen test and bench (test_alpha_stochastic.py, bench implementation st); a compile check of the alpha shaders.
+Method 1 becomes stochastic transparency; Preferences entry renamed.
+PPLL's C++ code paths removed.
+PPLL's shaders, node pack, settings and Preferences parameters removed; test_ppll_capture.py replaced.
+Docs.
+The method in this renderer
+The deferred scene is single-sampled (FXAA/SMAA after it), so, as Aurora does without MSAA, the passes over blended faces run on their own multisampled targets, at up to 8 samples per pass (NVIDIA 621.01 honours only the low 4 bits of a texture-fetched gl_SampleMask at 16): RGBA16F accumulation, RG16F transparency + glow, D24 stochastic depth; S = 16 by default, run as two passes of 8.
+Opaque depth spread to every sample; total alpha (prod(1 − a), ZERO / ONE_MINUS_SRC_ALPHA) through each program's alpha-only variant.
+Per iteration: stochastic depth (variant writes gl_SampleMask, R = floor(aS + ξ) bits from the 2048 × (S+1) mask table, seeded by pixel, face identity and gl_PrimitiveID), then accumulation with the ordinary programs (SRC_ALPHA, ONE; early-Z kept) and the faces' glow into the green channel.
+Composite: scene dimmed by the transparency (glow in alpha dimmed alike), colour × total/accumulated alpha, then the corrected glow added to the scene alpha.
+As PPLL: the rigged depth replay, then residual draws (particles, custom blend), selection highlight, DoF depth.
+A face lying on an opaque surface (decal) would fail half its samples (pixel-centre opaque depth vs per-sample face depth), so the passes use glPolygonOffset(-1, -1) (accumulation −2 units, glow −3); the offscreen test shows the failure without it.
+Path mapping (same draws, same exclusions as PPLL)
+Draw
+Before (PPLL)
+Now
+Blended simple, fullbright, legacy blend materials, PBR/glTF blend; static and rigged; main view, post-water pool
+captured
+stochastic passes
+Their glow
+re-added unsorted after the resolve, alpha masked
+accumulated with them, scene glow dimmed by the layers in front (closer to sorted alpha)
+Particles, custom blend functions
+residual, stock path
+same
+Pre-water alpha, mirrors/hero probes, water reflections, cube snapshots, HUDs, impostors
+sorted alpha
+same
+Selection highlight, DoF depth replay
+stock path after
+same
+Settings and UI
+RenderAlphaSortMethod kept: 1 now means stochastic transparency, so users who chose PPLL get it; default stays 1.
+New RenderAlphaStochasticSamples (4/8/16, default 16 as in Aurora, where it stays until the owner decides; S = 8 costs about what sorted alpha does, with more grain) and runtime RenderAlphaStochasticAvailable.
+Removed RenderAlphaOITNodesPerPixel, RenderAlphaOITMemoryMB, RenderAlphaOITStats, RenderAlphaPPLLAvailable.
+Preferences › Graphics › Rendering 2: "Sorted alpha" / "Stochastic transparency", and "Samples per pixel" in place of PPLL's parameters. Only the English skin listed PPLL. Neither method was in the feature tables or graphics presets; unchanged.
+Gate: Windows/Linux, GL 4.0 / GLSL 4.00, ≥ 2 samples, every variant built; otherwise sorted alpha.
+Tests
+scripts/perf/test_alpha_stochastic.py (viewer shaders, viewer pass structure): mask table; every covered sample equals a Python model of the mask (16 in 2×8, 8, 4); total alpha; exact visibility case and a converging noisy case; occluder; glow; decal with and without offset; the four alpha shaders compile plain and as variants. 25 cases + 8 compiles pass on NVIDIA 621.01 and Mesa Zink.
+scripts/tests/check_release_hooks.py passes; test_oit_bench_scenes.py passes.
+RelWithDebInfo build (--lto, LL_TESTS) completes and stages.
+Measurements
+Against sorted alpha (OIT off), with shading — the owner's comparison
+Sorted alpha (method 0, "OIT off") shades every blended fragment once. The stochastic
+accumulation shades only the fragments at or in front of the stochastic depth (the early depth
+test stays on), and the alpha-only passes shade for alpha alone, so the figures depend on what a
+fragment costs. The bench cannot run the viewer's alpha programs (their lighting, probes and
+atmospherics need the whole viewer); OIT_BENCH_SHADE=heavy gives direct (sorted alpha), the
+PPLL capture and the accumulation a proxy of that cost: diffuse, normal and specular fetches, a
+4-tap shadow, eight scattered probe lookups, seven point lights and fog. It does not cover draw
+calls: each blended draw is issued once by sorted alpha, five times by stochastic transparency
+at S = 16 (total alpha, two depth and two accumulation runs) and three times at S = 8, CPU time
+the bench does not see.
+RTX 5070 Ti, NVIDIA 621.01, GPU ms per frame, 20-frame medians, OIT_BENCH_SHADE=heavy:
+Scene
+Sorted alpha
+PPLL
+S = 16
+S = 8
+1080p full, 8 layers
+2.56
+2.89
+5.71
+3.07
+1080p full, 32 layers
+10.24
+11.80
+10.78
+5.85
+1080p sparse, 24 layers
+1.96
+2.20
+2.90
+1.72
+1080p foliage (hair-like cards), 32 layers
+6.19
+7.79
+7.60
+4.30
+1080p, sum of 17 scenes
+78.3
+91.2
+107.4 (1.37x)
+59.5 (0.72x)
+1440p full, 8 layers
+4.56
+5.15
+10.40
+5.66
+1440p full, 32 layers
+18.27
+21.27
+20.09
+10.88
+1440p sparse, 24 layers
+3.63
+4.04
+5.07
+3.00
+1440p foliage, 32 layers
+11.12
+13.96
+15.24
+8.39
+1440p, sum of 17 scenes
+140.1
+163.3
+200.1 (1.43x)
+109.7 (0.76x)
+Summed, S = 8 costs less than sorted alpha (most where the layers are many; at 8 full-screen
+layers about the same), as Aurora found on its hair fly-through; S = 16 runs the shaded
+accumulation twice and costs about 1.4x. The split per pass, total alpha / depth / accumulation /
+composite, ms:
+Scene
+S = 16
+S = 8
+1080p full, 8 layers
+0.24 / 1.34 / 3.94 / 0.19
+0.24 / 0.66 / 1.99 / 0.19
+1080p foliage, 32 layers
+0.72 / 2.45 / 4.24 / 0.19
+0.72 / 1.29 / 2.12 / 0.17
+1440p full, 8 layers
+0.44 / 2.67 / 6.95 / 0.34
+0.42 / 1.31 / 3.58 / 0.35
+1440p foliage, 32 layers
+1.26 / 5.98 / 7.68 / 0.31
+1.27 / 3.05 / 3.78 / 0.30
+The bench has no glowing layers; in the viewer the glow pass runs only for groups with a glowing
+blended face, and the glow composite only when one was drawn.
+The alpha-only shading of the total alpha and depth passes, before (OIT_BENCH_ST_ALPHAONLY=0:
+the proxy's full cost in those passes) and after, sum of 17 scenes: 1080p S = 16 114.2 to 107.4
+ms, S = 8 64.7 to 59.5; 1440p S = 16 206.0 to 200.1, S = 8 115.1 to 109.7 (3 to 8 %). This is the
+cost of shading those passes in full, not of what a given driver would have left in. The CPU-side
+reductions (no light, shadow, probe or material-map binds in the alpha-only passes) cannot be
+measured offline.
+Not done, Aurora's listed next step: one accumulation testing both runs' depths in the shader,
+which would halve the accumulation at S = 16. Here that means every alpha program reading both
+stochastic depths per sample in its fragment shader, giving up the early depth test the
+accumulation relies on; it is left for a later change.
+Against PPLL, trivially shaded (superseded as the main comparison: it flatters PPLL)
+Scene
+1080p PPLL
+1080p S=16
+1080p S=8
+1440p PPLL
+1440p S=16
+1440p S=8
+full, 8 layers
+0.43
+3.35
+1.84
+0.78
+6.24
+3.40
+full, 32 layers
+1.85
+9.47
+5.12
+3.47
+17.72
+9.53
+sparse, 24 layers
+0.38
+2.50
+1.49
+0.67
+4.39
+2.62
+foliage, 32 layers
+4.05
+6.83
+3.86
+8.30
+13.62
+7.58
+sum, 17 scenes
+21.7
+84.7
+47.2
+44.0
+157.4
+86.6
+Stochastic transparency is slower than PPLL's fixed slots on every bench scene (3.6–3.9× summed at S = 16, 2.0–2.2× at S = 8; Zink 4.8×), least where PPLL overflows (foliage). Quality: noisier where PPLL is exact (≤ 8 layers: RMSE 4.0 vs 0.7 8-bit steps at S = 16), better where PPLL overflows (32 layers 3.9 vs 12.2; foliage 1.0 vs 11.2). The owner's Aurora evidence compared against per-pixel linked lists with overflow handling, not this viewer's fixed slots. In-viewer timer queries were not taken: no grid login here. Memory: 128 B/px (253 MiB at 1080p, 450 MiB at 1440p) vs PPLL's 92 B/px.
+Needs the owner's in-world check
+Glass and glass behind glass, hair (grain at S = 16 vs 8), clothing layers, particles over transparent faces, water reflections and underwater views, glow on blended faces (now dimmed by the layers in front, like sorted alpha), selection highlight, depth of field, decals on sloped surfaces, and the frame time against the previous release.
+🤖 Generated with Claude Code
+anne-skydancer
+and others
+added 7 commits
+November 5, 2026 02:49
+Add stochastic transparency beside PPLL (RenderAlphaSortMethod 2)
+…
+d100a9f
+```
+Depth-based stochastic transparency (Enderton, Sintorn, Shirley and Luebke,
+I3D 2010, section 3.4), ported from the owner's Aurora Viewer feat/alpha-oit
+implementation and brought in by its author under the dual licence. The
+blended faces PPLL captures (simple, fullbright, legacy materials, PBR blend,
+static and rigged, main post-water view) are drawn in four passes over
+multisampled targets at up to 8 samples: total alpha, stochastic depth with a
+stratified coverage mask (gl_SampleMask, the 2048 x (S + 1) mask table, seeded
+by pixel, face identity and gl_PrimitiveID), accumulation with the glowing
+faces' glow, then the alpha-corrected composite and the glow into the scene
+alpha. 16 samples run as two passes of 8. The alpha programs get alpha-only
+variants (ALPHA_STOCHASTIC); the ordinary programs are unchanged. Particles,
+custom blend functions, HUDs, mirrors, probes and pre-water alpha keep the
+stock path, as with PPLL. Selected with RenderAlphaSortMethod 2 for now.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Test and bench stochastic transparency offscreen
+…
+f5d16f2
+```
+test_alpha_stochastic.py runs the viewer's stochastic transparency shaders
+with the viewer's passes on a small target: the mask table, every covered
+sample against a Python model of the coverage mask (16 samples in two passes
+of 8, 8, 4), the total alpha, visibility weighting and composite, an opaque
+occluder, the glow, and a decal on a sloped plane with and without the
+passes' polygon offset. 25 cases pass on NVIDIA 621.01 and Mesa Zink.
+
+bench_alpha_oit.py gains "st", the viewer's shaders and pass structure, and
+reads "slots" (PPLL) from git ref a5290e8 so that it outlives PPLL.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+test_alpha_stochastic: compile the alpha shaders plain and as their s…
+…
+b63a3d2
+```
+…tochastic variants
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Make stochastic transparency the OIT method: RenderAlphaSortMethod 1
+…
+38871d2
+```
+RenderAlphaSortMethod keeps its values: 1, the default, now selects
+stochastic transparency, so users who had chosen PPLL get the new method; 0
+stays sorted alpha. The pool no longer dispatches to PPLL, and Preferences ›
+Graphics › Rendering 2 lists "Sorted alpha" and "Stochastic transparency".
+PPLL's own code, shaders and settings go in the following commits.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Remove PPLL's code paths
+…
+7564a41
+```
+The fixed-slot image array, its allocation, capture, resolve and statistics
+(LLPipeline), the capture phase, setOITMode and the detached opaque depth
+(LLDrawPoolAlpha), the resolve program and the node pack's attachment and the
+ALPHA_OIT define (shader managers) go. The residual pass no longer re-adds the
+captured faces' glow: stochastic transparency accumulates it with them.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Remove PPLL's shaders, node pack, settings and Preferences parameters
+…
+45be975
+```
+alphaOITPackF.glsl and alphaOITResolveF.glsl go, with the ALPHA_OIT capture
+blocks, the dormant depth-peel code and the image load/store extension line of
+the four alpha shaders, whose ordinary output is unchanged.
+RenderAlphaOITNodesPerPixel, RenderAlphaOITMemoryMB, RenderAlphaOITStats and
+RenderAlphaPPLLAvailable go; Preferences › Rendering 2 shows the stochastic
+transparency's samples per pixel (4, 8, 16) in place of PPLL's parameters.
+test_ppll_capture.py is replaced by test_alpha_stochastic.py; the bench keeps
+its ppll and slots implementations, read from git refs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+doc: stochastic transparency in this viewer, its settings and provenance
+…
+aca7654
+```
+doc/oit/stochastic-transparency.md: the method, its targets and passes, what
+takes it and what does not (the same draws as PPLL), the settings and the
+migration from PPLL, the tests and the bench figures; the provenance (the
+owner's Aurora Viewer feat/alpha-oit commits, relicensed by their author
+under the dual licence; Enderton et al. 2010). The Vulkan study's index notes
+that PPLL, which it describes, was replaced.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Copilot
+AI
+balanced review requested due to automatic review settings
+November 5, 2026 03:03
+github-actions
+Bot
+added
+c/cpp
+llrender
+python
+labels
+Nov 5, 2026
+Copilot started reviewing on behalf of
+anne-skydancer
+November 5, 2026 03:03
+View session
+Copilot
+AI
+reviewed
+Nov 5, 2026
+View reviewed changes
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🟡 Changes recommended
+The mask helper is now required, so its compilation failure can prevent the viewer from starting even when sorted alpha is selected, rather than disabling only stochastic rendering.
+4 open issues
+Make the mask helper an optional shader · New
+Fall back to sorted alpha after allocation failure · New
+Allocate targets for the effective sample count · New
+Query the depth-texture sample limit, not integer samples · New
+What changed in this PR
+Replaces PPLL with stochastic transparency as the viewer’s default alpha method, while retaining sorted alpha for unsupported hardware and excluded rendering paths.
+Changes:
+Adds multisampled transparency passes, shader variants, stable face seeds, and integrated glow.
+Replaces PPLL settings and Preferences controls with stochastic sample selection.
+Adds offscreen regression coverage and benchmarks, documenting measured tradeoffs and outstanding in-world checks.
+File
+Description
+scripts/​perf/​test_ppll_capture.py
+Removes the obsolete PPLL regression script.
+scripts/​perf/​test_alpha_stochastic.py
+Adds coverage, compositing, glow, decal, and shader checks.
+scripts/​perf/​bench_alpha_oit.py
+Benchmarks stochastic transparency against historical PPLL implementations.
+indra/​newview/​skins/​default/​xui/​en/​panel_preferences_graphics1.xml
+Replaces PPLL controls with stochastic method and sample selection.
+indra/​newview/​pipeline.h
+Declares stochastic resources and rendering operations.
+indra/​newview/​pipeline.cpp
+Implements allocation, mask generation, depth spreading, and compositing.
+indra/​newview/​llvovolume.cpp
+Generates stable face seeds for coverage masks.
+indra/​newview/​llviewershadermgr.h
+Exposes stochastic programs and readiness state.
+indra/​newview/​llviewershadermgr.cpp
+Builds and manages stochastic shader variants.
+indra/​newview/​llspatialpartition.h
+Stores the stochastic seed in draw batches.
+indra/​newview/​llenvironment.cpp
+Marks stochastic variants for environment-uniform updates.
+indra/​newview/​lldrawpoolalpha.h
+Declares stochastic phases and pool helpers.
+indra/​newview/​lldrawpoolalpha.cpp
+Runs stochastic passes, glow accumulation, and residual draws.
+indra/​newview/​app_settings/​shaders/​class3/​deferred/​materialF.glsl
+Replaces PPLL capture with material alpha-only variants.
+indra/​newview/​app_settings/​shaders/​class2/​deferred/​pbralphaF.glsl
+Adds PBR alpha-only stochastic output.
+indra/​newview/​app_settings/​shaders/​class2/​deferred/​alphaF.glsl
+Adds simple-alpha stochastic output.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​pbrglowF.glsl
+Also outputs PBR glow in green for accumulation.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​fullbrightF.glsl
+Replaces legacy capture paths with stochastic alpha output.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​emissiveF.glsl
+Also outputs legacy glow in green for accumulation.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​alphaStochasticF.glsl
+Generates seeded stochastic coverage masks.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​alphaStochasticExpandF.glsl
+Spreads opaque depth across samples.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​alphaStochasticCompositeF.glsl
+Resolves transparency, corrected color, and glow.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​alphaOITResolveF.glsl
+Removes the PPLL resolve shader.
+indra/​newview/​app_settings/​shaders/​class1/​deferred/​alphaOITPackF.glsl
+Removes PPLL node encoding helpers.
+indra/​newview/​app_settings/​settings.xml
+Replaces PPLL parameters with stochastic settings.
+indra/​llrender/​llshadermgr.h
+Declares reserved stochastic uniforms.
+indra/​llrender/​llshadermgr.cpp
+Registers stochastic uniforms and attaches coverage helpers.
+indra/​llrender/​llglslshader.h
+Adds the stochastic-variant pointer.
+doc/​vulkan/​README.md
+Marks historical PPLL documentation as superseded.
+doc/​oit/​stochastic-transparency.md
+Documents provenance, implementation, settings, and measurements.
+Review effort: Balanced
+Comment thread
+indra/newview/llviewershadermgr.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+indra/newview/pipeline.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+scripts/perf/bench_alpha_oit.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+scripts/perf/test_alpha_stochastic.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+anne-skydancer
+and others
+added 3 commits
+November 5, 2026 06:32
+Address review: optional mask helper, no allocation retry loop, bench…
+…
+1442dca
+```
+… and test fixes
+
+- alphaStochasticF.glsl is no longer a required basic shader: it is built
+  after them, and a failure only leaves the stochastic variants unbuilt
+  (sorted alpha), never stops the viewer.
+- A failed target allocation selects sorted alpha (RenderAlphaSortMethod 0),
+  as PPLL's allocator did, instead of retrying on every frame.
+- bench_alpha_oit.py: the st targets are made per sample count,
+  min(OIT_BENCH_ST_PASS, S), for the timed run and the error sweep alike.
+- test_alpha_stochastic.py queries GL_MAX_DEPTH_TEXTURE_SAMPLES (0x910F),
+  not GL_MAX_INTEGER_SAMPLES.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+Stochastic transparency: alpha alone in the alpha-only passes, lighte…
+…
+0e04e3b
+```
+…r binds
+
+As the owner's Aurora commit 9424d986 does (st_material_alpha): the blended
+material variant returns right after the diffuse fetch and the alpha mask,
+before the specular and normal maps; the simple-alpha variant takes no shadow
+sample. In the total alpha and depth passes a variant already fully bound this
+frame is bound without the light function, shadow maps and reflection probes,
+and TexSetup binds no material normal or specular map.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+bench: shading cost and sorted alpha as the reference; doc figures
+…
+5290df2
+```
+OIT_BENCH_SHADE=heavy gives sorted alpha (direct), the PPLL capture and the
+accumulation a proxy of the alpha programs' shading cost;
+OIT_BENCH_ST_ALPHAONLY=0 shades the alpha-only passes in full (before the
+optimisation); totals and ratios against direct are printed. The doc now
+leads with the comparison against sorted alpha with shading: S = 8 costs
+0.72x (1080p) and 0.76x (1440p) of sorted alpha summed over the scenes, S = 16
+1.37x and 1.43x; per-pass split, before and after the alpha-only shading, and
+the next step Aurora lists (one accumulation for both runs) left undone.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+```
+anne-skydancer
+mentioned this pull request
+Nov 5, 2026
+Replace PPLL with stochastic transparency (replaces #320)
+#321
+Merged
+anne-skydancer
+commented
+Nov 5, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Replaced by #321: this branch conflicted with vkstorm-devel after #307 (the round-2 OIT bench) was merged. #321 carries the same commits cherry-picked onto vkstorm-devel with -x, with bench_alpha_oit.py reconciled so #307's variants and this PR's st / shading proxy run together. The Copilot review here (four comments, all fixed and resolved) stays as the history; the branch codex/alpha-stochastic is kept.
+anne-skydancer
+closed this
+Nov 5, 2026
+anne-skydancer
+added a commit
+that referenced
+this pull request
+Nov 5, 2026
+Merge pull request #321 from anne-skydancer/codex/alpha-stochastic-2
+…
+864fb61
+```
+Replace PPLL with stochastic transparency (replaces #320)
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+c/cpp
+llrender
+python
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

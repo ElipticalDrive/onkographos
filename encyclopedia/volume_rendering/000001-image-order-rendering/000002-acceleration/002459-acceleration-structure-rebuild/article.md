@@ -1,0 +1,164 @@
+# Acceleration Structure Rebuild
+Also called: Per-Frame Grid Rebuild
+
+## Overview
+Acceleration Structure Rebuild is a method for maintaining spatial coherence in animated volume and triangle rendering by discarding the previous frame's acceleration structure and constructing a new one from scratch every frame. It solves the problem of supporting arbitrary, unrestricted animation types without the complexity or limitations of incremental or hierarchical update schemes. It differs from siblings like [Adaptive Multi-Step Empty Voxel Skipping](6289-adaptive-multi-step-empty-voxel-skipping.md) or [Temporal Coherence and Caching](6372-temporal-coherence-and-caching.md) by rejecting temporal reuse of the structure itself, relying instead on the speed of full reconstruction and parallel processing to maintain performance.
+
+## How it works
+### Inputs and Outputs
+- **Inputs**: 
+  - $N$: Number of triangles (or primitives) in the scene.
+  - $V$: Volume of the grid bounding box.
+  - $\mathbf{d}$: Diagonal vector of the grid bounding box.
+  - $\lambda$: Multiplier parameter for grid resolution.
+  - Previous frame's macrocell information (optional, for optimization).
+  - Triangle list (positions, normals, etc.).
+- **Outputs**: 
+  - A new acceleration grid (hash map or array of lists) mapping grid cells to triangle references.
+  - Derived data structures for triangle intersection tests (e.g., Wald's derived data).
+
+### Data Structures
+1.  **Grid**: A hash map or sparse array where keys are 3D cell coordinates $(i, j, k)$ and values are lists of triangle indices. The grid dimensions $(N_x, N_y, N_z)$ are calculated per frame.
+2.  **Triangle List**: An array of triangle primitives.
+3.  **Derived Data**: Precomputed data for fast triangle-ray intersection, typically including barycentric coordinates or plane equations for each triangle [S1, S2].
+4.  **Macrocell Map**: A coarse grid structure from the previous frame, used to identify which fine cells might contain changed geometry.
+
+### Parameters
+- $\lambda$: The multiplier determining the total number of cells relative to the number of triangles. Optimal performance is typically achieved around $\lambda \approx 5$ for most scenes [S1, S2].
+
+### Steps
+1.  **Calculate Grid Resolution**:
+    Determine the number of cells along each axis to approximate cubic cells, which minimize the surface-area-to-volume ratio and thus expected ray-tracing cost [S1, S2].
+    $$ N_x = d_x \sqrt[3]{\frac{\lambda N}{V}} $$
+    $$ N_y = d_y \sqrt[3]{\frac{\lambda N}{V}} $$
+    $$ N_z = d_z \sqrt[3]{\frac{\lambda N}{V}} $$
+    where $d_x, d_y, d_z$ are the components of the grid diagonal $\mathbf{d}$, and $V$ is the grid volume [S1, S2].
+
+2.  **Clear Grid**:
+    Initialize the new grid. To optimize, use macrocell information from the previous frame to identify only the cells that need to be cleared or updated, rather than clearing the entire grid if it is sparse [S1, S2].
+
+3.  **Insert Triangles**:
+    For each triangle in the scene:
+    a. Compute the triangle's axis-aligned bounding box (AABB).
+    b. Determine all grid cells overlapped by this AABB.
+    c. Add a reference to the triangle to each of these cells.
+    *Note*: A conservative bounding box test is used instead of an exact triangle-in-box test. While the exact test reduces triangle references by more than one third, it increases rebuild cost significantly with only a few percent gain in ray-triangle test reduction [S1, S2]. For scenes with dominantly long, skinny, diagonal triangles, an exact test may be preferable [S2].
+
+4.  **Build Derived Data**:
+    Create derived data structures for triangle intersection tests (e.g., as described by Wald [S1, S2]). This step is parallelizable and can be executed concurrently with the grid rebuild [S1, S2].
+    *Note*: Storage-free triangle tests (e.g., Möller-Trumbore) were found to be slightly inferior in overall performance compared to derived data, even when accounting for rebuild time [S1, S2].
+
+5.  **Memory Management**:
+    Use a preallocated pooled-memory scheme for cell lists to prevent per-cell memory allocations and fragmentation during the frame-to-frame transition [S1, S2].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rebuild_acceleration_structure(triangles, grid_bounds, lambda_param, prev_macrocells=None):
+    """
+    Rebuilds the acceleration grid from scratch for an animated scene.
+    
+    Args:
+        triangles: List of triangle objects with positions and normals.
+        grid_bounds: Bounding box of the grid (min, max).
+        lambda_param: Multiplier for grid resolution (default ~5).
+        prev_macrocells: Optional macrocell map from previous frame.
+        
+    Returns:
+        new_grid: Hash map mapping cell coords to list of triangle indices.
+        derived_data: Precomputed data for triangle intersection.
+    """
+    # 1. Calculate Grid Resolution
+    # Compute diagonal and volume
+    diag = grid_bounds.max - grid_bounds.min
+    volume = diag.x * diag.y * diag.z
+    num_triangles = len(triangles)
+    
+    # Cubic cell assumption
+    cell_count_factor = (lambda_param * num_triangles / volume) ** (1/3)
+    
+    nx = round(diag.x * cell_count_factor)
+    ny = round(diag.y * cell_count_factor)
+    nz = round(diag.z * cell_count_factor)
+    
+    # Ensure at least 1 cell per dimension
+    nx = max(1, nx)
+    ny = max(1, ny)
+    nz = max(1, nz)
+    
+    # 2. Initialize Grid
+    # Use pooled memory scheme to avoid fragmentation
+    new_grid = {} # Or a pre-allocated array if dense
+    
+    # Optional: Use prev_macrocells to clear only relevant cells if sparse
+    if prev_macrocells:
+        clear_relevant_cells(new_grid, prev_macrocells, grid_bounds, nx, ny, nz)
+    else:
+        new_grid.clear()
+        
+    # 3. Insert Triangles
+    # Precompute triangle AABBs
+    triangle_aabbs = [tri.compute_aabb() for tri in triangles]
+    
+    for tri_idx, aabb in enumerate(triangle_aabbs):
+        # Determine cells overlapped by AABB
+        cells = get_cells_overlapped_by_aabb(aabb, grid_bounds, nx, ny, nz)
+        
+        for cell in cells:
+            if cell not in new_grid:
+                new_grid[cell] = []
+            new_grid[cell].append(tri_idx)
+            
+    # 4. Build Derived Data (Parallelizable)
+    # Create derived data for fast intersection (e.g., Wald's method)
+    derived_data = build_derived_data(triangles)
+    
+    return new_grid, derived_data
+
+def get_cells_overlapped_by_aabb(aabb, grid_bounds, nx, ny, nz):
+    """
+    Conservative bounding box test.
+    Returns list of (x, y, z) cell indices overlapped by the triangle's AABB.
+    """
+    # Map AABB min/max to grid coordinates
+    min_cell = world_to_grid(aabb.min, grid_bounds, nx, ny, nz)
+    max_cell = world_to_grid(aabb.max, grid_bounds, nx, ny, nz)
+    
+    cells = []
+    for x in range(min_cell.x, max_cell.x + 1):
+        for y in range(min_cell.y, max_cell.y + 1):
+            for z in range(min_cell.z, max_cell.z + 1):
+                cells.append((x, y, z))
+    return cells
+
+def world_to_grid(point, grid_bounds, nx, ny, nz):
+    """
+    Convert world point to grid cell index.
+    """
+    t = (point - grid_bounds.min) / (grid_bounds.max - grid_bounds.min)
+    return (
+        int(t.x * nx),
+        int(t.y * ny),
+        int(t.z * nz)
+    )
+```
+
+### Edge Cases and Pitfalls
+- **Long, Skinny, Diagonal Triangles**: The conservative bounding box test may insert too many references for such triangles. In these specific cases, an exact triangle-in-box test might be justified despite the higher rebuild cost [S2].
+- **Large Scenes**: The performance characteristics described (e.g., derived data superiority) are based on medium-size scenes. For much larger scenes, storage-free tests or bricking techniques might yield different results [S1, S2].
+- **Memory Fragmentation**: Without a pooled memory scheme, frequent rebuilds can lead to significant fragmentation and allocation overhead [S1, S2].
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot C)$, where $N$ is the number of triangles and $C$ is the average number of cells overlapped by a triangle's AABB. The grid resolution is chosen to balance $N$ and cell count.
+- **Memory Complexity**: $O(N \cdot C)$ for storing triangle references in the grid.
+- **Performance**: Optimal $\lambda \approx 5$ for most scenes [S1, S2]. The rebuild time is generally less than the time saved by efficient traversal in animated scenes. Parallel execution of triangle rebuild and derived data construction improves throughput [S1, S2].
+- **Strengths**: Supports any type of animation without restrictions; simple implementation; no need for complex incremental update logic.
+- **Limitations**: High build cost per frame compared to incremental updates; not suitable for static scenes where incremental or hierarchical updates would be more efficient; conservative bounding box test may lead to more ray-triangle intersections than necessary.
+
+## Background
+The method was introduced in "Ray Tracing Animated Scenes using Coherent Grid Traversal" by Wald et al. (2006) [S1, S2]. It was chosen over incremental [Reinhard et al. 2000] or hierarchical [Lext and Akenine-Moller 2001] updates to support arbitrary animations without restrictions. The grid resolution formula is based on the work of Cleary et al. (1983) [S1, S2].
+
+## Sources
+[S1] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~thiago/papers/grid.pdf, fetched 2026-10-25
+[S2] Ray Tracing Animated Scenes using Coherent Grid Traversal, https://www.sci.utah.edu/~wald/Publications/2006/CGT/grid.pdf, fetched 2026-10-25

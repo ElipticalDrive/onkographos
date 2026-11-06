@@ -1,0 +1,227 @@
+--- v001.md
++++ v002.md
+@@ -3,106 +3,144 @@
+ 
+ ## Overview
+-Splat Raycasting Dispatch is a parallel GPU/CPU dispatch method that computes ray-splat intersections for 3D Gaussian Splatting by batching splat records into fixed-size buffers and invoking a low-level kernel to solve the ray-ellipsoid intersection problem. It differs from naive per-splat raycasting by using pre-allocated, contiguous memory layouts and batched execution to minimize overhead and maximize throughput [S1, unofficial]. It serves as the core intersection engine within the [Ray-primitive intersection](769-ray-primitive-intersection.md) family, specifically handling the quadratic intersection tests required for Gaussian ellipsoids.
++Splat Raycasting Dispatch is the core computational kernel that performs ray-splat intersection tests for Gaussian primitives, returning hit distances and primitive indices. It solves the problem of efficiently determining which splats intersect a given ray within a specified depth range, serving as the bridge between high-level scene management and low-level geometric intersection logic. It is distinguished from its siblings by its specific implementation as a batched, buffer-oriented dispatch function (often compiled to WebAssembly) that operates on pre-extracted subbuffers, whereas [Ray-Splat Intersection](6816-ray-splat-intersection.md) describes the general geometric algorithm and [Spherical Panoramic Gaussian Splatting (SPaGS)](3042-spherical-panoramic-gaussian-splatting-spags.md) adapts the coordinate space for spherical projections.
+ 
+ ## How it works
+-The method operates in two phases: buffer population (host-side or high-level API) and kernel dispatch (low-level WASM/Rust or GPU compute). The kernel solves for the distance $t$ along the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$ where the ray intersects the implicit surface of a Gaussian splat, defined by its covariance matrix.
++The method takes a batch of splat records and a single ray, computing intersections for all splats in the batch against the ray. It outputs two arrays: one for the squared distances (or depths) of hits, and one for the corresponding splat indices.
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-- $\mathbf{o} = (o_x, o_y, o_z)$: Ray origin in mesh space [S1, unofficial].
+-- $\mathbf{d} = (d_x, d_y, d_z)$: Ray direction vector in mesh space [S1, unofficial].
+-- $\text{min\_opacity}$: Threshold for inclusion; splats with opacity below this value at the intersection point are discarded [S1, unofficial].
+-- $\text{near}, \text{far}$: Clipping plane distances along the ray [S1, unofficial].
+-- $\text{tables}$: Precomputed lookup tables for optimization (e.g., inverse covariance components or opacity mappings) [S1, unofficial].
+-- $\text{splats}$: Array of splat records, packed as 4 uint32 values per splat [S1, unofficial].
+-- $\text{splats2}$: Secondary buffer for auxiliary data, packed as 4 uint32 values per splat [S1, unofficial].
+-- $\text{count}$: Number of splats in the current batch [S1, unofficial].
+-
+-**Outputs:**
+-- $\text{distances}$: Array of $f32$ values storing the intersection distance $t$ for each hit splat [S1, unofficial].
+-- $\text{indices}$: Array of $u32$ values storing the original splat index corresponding to each hit [S1, unofficial].
++*   **Inputs**:
++    *   `subbuffer`: Array of `u32` containing splat data (positions, covariances, etc.), size $4 \times \text{count}$.
++    *   `subbuffer2`: Array of `u32` containing auxiliary splat data, size $4 \times \text{count}$.
++    *   `origin`: Ray origin $(O_x, O_y, O_z)$ as `f32`.
++    *   `dir`: Ray direction $(D_x, D_y, D_z)$ as `f32`.
++    *   `min_opacity`: `f32` threshold for inclusion.
++    *   `tables`: Precomputed lookup tables (e.g., for opacity or color) of type `RaycastTables`.
++    *   `near`, `far`: `f32` clipping plane distances.
++*   **Outputs**:
++    *   `distances`: `Vec<f32>` of size `RAYCAST_BUFFER_COUNT`, populated with hit distances.
++    *   `indices`: `Vec<u32>` of capacity `RAYCAST_BUFFER_COUNT`, populated with splat indices.
+ 
+ ### Data Structures
+-The implementation relies on fixed-capacity buffers to avoid dynamic allocation during the critical path.
++The implementation relies on a fixed-capacity buffer structure to manage memory efficiently, particularly in constrained environments like WebAssembly.
+ 
+-**Constants:**
+-- $\text{RAYCAST\_BUFFER\_COUNT} = 65536$: Maximum number of splats per dispatch batch [S1, unofficial].
++*   **`RAYCAST_BUFFER_COUNT`**: Constant `usize` set to $65536$ [S1, unofficial].
++*   **`RaycastBuffers` struct**:
++    *   `splats`: `Vec<u32>`, size $65536 \times 4$.
++    *   `splats2`: `Vec<u32>`, size $65536 \times 4$.
++    *   `distances`: `Vec<f32>`, size $65536$.
++    *   `indices`: `Vec<u32>`, capacity $65536$.
++    *   `tables`: `RaycastTables` object.
+ 
+-**Structures:**
+-1.  **RaycastBuffers**:
+-    -   $\text{splats}$: `Vec<u32>`, size $\text{RAYCAST\_BUFFER\_COUNT} \times 4$. Stores primary splat attributes (e.g., mean position, covariance, color, opacity) in a Structure of Arrays (SoA) or Array of Structures (AoS) layout, packed into 32-bit integers for memory efficiency [S1, unofficial].
+-    -   $\text{splats2}$: `Vec<u32>`, size $\text{RAYCAST\_BUFFER\_COUNT} \times 4$. Stores secondary attributes or transformed data [S1, unofficial].
+-    -   $\text{distances}$: `Vec<f32>`, size $\text{RAYCAST\_BUFFER\_COUNT}$. Output buffer for intersection distances [S1, unofficial].
+-    -   $\text{indices}$: `Vec<u32>`, capacity $\text{RAYCAST\_BUFFER\_COUNT}$. Output buffer for hit splat indices [S1, unofficial].
+-    -   $\text{tables}$: `RaycastTables`. Auxiliary data structures for optimization [S1, unofficial].
++### Steps
++1.  **Validation**: Ensure the number of splats `count` (as `usize`) does not exceed `RAYCAST_BUFFER_COUNT` ($65536$). If it does, throw an error [S1, unofficial].
++2.  **Buffer Extraction**: Extract the relevant subbuffers from the main splat arrays. Specifically, take `splats[0..(4 * count)]` and `splats2[0..(4 * count)]` [S1, unofficial].
++3.  **Buffer Clearing**: Clear the `distances` and `indices` buffers to ensure no stale data from previous frames or batches remains [S1, unofficial].
++4.  **Dispatch**: Call the core intersection function `raycast_splat_ellipsoids` with the extracted subbuffers, ray parameters, and clipping bounds [S1, unofficial].
++    *   Function signature: `raycast_splat_ellipsoids(subbuffer, subbuffer2, distances, indices, origin, dir, min_opacity, tables, near, far)`
++5.  **Return**: Return the `distances` array as a `Float32Array` view [S1, unofficial].
+ 
+-2.  **raycastVisibleIndices** (High-level wrapper):
+-    -   `Uint32Array`: Maps buffer slot indices to original splat indices. Size is $\text{buffer.length} / 4$. Reallocated if capacity changes [S1, unofficial].
++### Pseudocode
++```python
++# Constants
++RAYCAST_BUFFER_COUNT = 65536
+ 
+-### Algorithm Steps
++def splat_raycast_dispatch(splats, splats2, count, origin, direction, min_opacity, tables, near, far):
++    """
++    Dispatches ray-splat intersection tests for a batch of splats.
++    
++    Args:
++        splats: List of u32, size >= count * 4
++        splats2: List of u32, size >= count * 4
++        count: usize, number of splats to process
++        origin: Tuple (f32, f32, f32), ray origin
++        direction: Tuple (f32, f32, f32), ray direction
++        min_opacity: f32, minimum opacity threshold
++        tables: RaycastTables, lookup tables
++        near: f32, near clipping plane
++        far: f32, far clipping plane
++        
++    Returns:
++        Float32Array view of distances
++    """
++    # Step 1: Validation
++    if count > RAYCAST_BUFFER_COUNT:
++        raise ValueError(f"Count {count} exceeds buffer capacity {RAYCAST_BUFFER_COUNT}")
++    
++    # Step 2: Extract subbuffers
++    # Note: In the source, splats and splats2 are u32 arrays. 
++    # We slice them to the required size.
++    subbuffer = splats[0 : 4 * count]
++    subbuffer2 = splats2[0 : 4 * count]
++    
++    # Step 3: Clear output buffers
++    # Assuming distances and indices are pre-allocated or managed by the caller
++    # In a pure Python implementation, we would initialize them.
++    # The source implies these are cleared before the WASM call.
++    distances = [0.0] * RAYCAST_BUFFER_COUNT
++    indices = [0] * RAYCAST_BUFFER_COUNT
++    
++    # Step 4: Call core intersection function
++    # This function is implemented in Rust/WASM in the source.
++    # We define a placeholder for the geometric logic which is not detailed in the source.
++    raycast_splat_ellipsoids(
++        subbuffer, 
++        subbuffer2, 
++        distances, 
++        indices, 
++        origin[0], origin[1], origin[2],
++        direction[0], direction[1], direction[2],
++        min_opacity, 
++        tables, 
++        near, 
++        far
++    )
++    
++    # Step 5: Return distances as Float32Array view
++    # In Python, this is just the list, but conceptually it's a typed view.
++    return distances
+ 
+-1.  **Initialization**:
+-    -   Clear $\text{distances}$ and $\text{indices}$ buffers to zero or invalid values.
+-    -   Validate that $\text{count} \le \text{RAYCAST\_BUFFER\_COUNT}$. If $\text{count} > \text{RAYCAST\_BUFFER\_COUNT}$, throw an error or split the batch [S1, unofficial].
++def raycast_splat_ellipsoids(subbuffer, subbuffer2, distances, indices, ox, oy, oz, dx, dy, dz, min_opacity, tables, near, far):
++    """
++    Core intersection logic. Not fully detailed in source, but represents the WASM call.
++    [G] This function would iterate over the splats, transform the ray into splat space,
++    solve the quadratic equation for the Gaussian ellipsoid intersection, and populate
++    distances and indices if the hit is valid and opacity > min_opacity.
++    """
++    # Implementation details are in the WASM module.
++    pass
++```
+ 
+-2.  **Buffer Population** (Host/Wrapper Side):
+-    -   Extract subbuffers from the full splat arrays: $\text{subbuffer} = \text{splats}[0 \dots (4 \times \text{count})]$ and $\text{subbuffer2} = \text{splats2}[0 \dots (4 \times \text{count})]$ [S1, unofficial].
+-    -   If using the high-level wrapper, transform $\mathbf{o}$ and $\mathbf{d}$ from world space to mesh space using the inverse of $\text{matrixWorld}$ [S1, unofficial].
+-    -   Iterate over splat ranges. For each range, copy splat records into the local buffers using $\text{splats.copySplatRecords}$, mapping original indices to $\text{raycastVisibleIndices}$ [S1, unofficial].
+-    -   Flush to the WASM/GPU buffer when capacity is reached [S1, unofficial].
+-
+-3.  **Kernel Dispatch**:
+-    -   Call the low-level kernel:
+-        ```python
+-        raycast_splat_ellipsoids(
+-            subbuffer, 
+-            subbuffer2, 
+-            distances, 
+-            indices, 
+-            [o_x, o_y, o_z], 
+-            [d_x, d_y, d_z], 
+-            min_opacity, 
+-            tables, 
+-            near, 
+-            far
+-        )
+-        ```
+-    -   The kernel performs the following for each splat $i$ in the batch:
+-        a.  Retrieve splat parameters from $\text{subbuffer}[i]$ and $\text{subbuffer2}[i]$.
+-        b.  Construct the ray $\mathbf{r}(t) = \mathbf{o} + t\mathbf{d}$.
+-        c.  Solve the quadratic equation derived from the Gaussian ellipsoid implicit function $f(\mathbf{x}) = (\mathbf{x} - \mathbf{\mu})^T \Sigma^{-1} (\mathbf{x} - \mathbf{\mu}) = 1$.
+-        d.  Compute the discriminant $\Delta$. If $\Delta < 0$, no intersection.
+-        e.  If $\Delta \ge 0$, compute the smallest positive root $t$.
+-        f.  Check if $t \in [\text{near}, \text{far}]$.
+-        g.  Evaluate the opacity at the intersection point. If opacity $\ge \text{min\_opacity}$, store $t$ in $\text{distances}[k]$ and the original index in $\text{indices}[k]$, where $k$ is the hit counter [S1, unofficial].
+-
+-4.  **Result Retrieval**:
+-    -   Return $\text{distances}$ as a `Float32Array` view [S1, unofficial].
+-    -   For each hit, compute the world-space point $\mathbf{p} = \mathbf{o}_{world} + t \cdot \mathbf{d}_{world}$ and store the distance, point, object reference, and original splat index in the intersection list [S1, unofficial].
+-
+-### Parameters and Typical Values
+--   $\text{min\_opacity}$: Defaults to $0.1$. Must be strictly less than $1.0$ [S1, unofficial].
+--   $\text{near}, \text{far}$: Standard camera clipping distances [S1, unofficial].
+--   $\text{RAYCAST\_BUFFER\_COUNT}$: $65536$ [S1, unofficial].
++### Parameters
++*   `origin_x, origin_y, origin_z` (`f32`): Ray origin coordinates [S1, unofficial].
++*   `dir_x, dir_y, dir_z` (`f32`): Ray direction vector [S1, unofficial].
++*   `min_opacity` (`f32`): Minimum opacity threshold for ray-splat intersection [S1, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+--   **Buffer Overflow**: $\text{count}$ must not exceed $\text{RAYCAST\_BUFFER\_COUNT}$. Exceeding this limit throws an error [S1, unofficial].
+--   **Opacity Threshold**: $\text{min\_opacity}$ must be $< 1.0$ to avoid degenerate cases where no splats are considered visible [S1, unofficial].
+--   **Coordinate Space**: Ray origin and direction must be transformed to mesh space before dispatch if the splats are stored in mesh space [S1, unofficial].
++*   **Buffer Overflow**: The `count` parameter must not exceed `RAYCAST_BUFFER_COUNT` ($65536$). Exceeding this limit throws an error [S1, unofficial].
++*   **Precision**: The source uses `f32` for coordinates and distances. Implementers should be aware of potential precision issues with very large scene coordinates or very small splats, though no specific mitigation is mentioned in the source [S1, unofficial].
++*   **Empty Batches**: If `count` is 0, the function should return empty buffers without error.
+ 
+ ## Subtopics
+ 
+ ### Splat Raycasting Implementation
+-A high-level wrapper that manages the transformation of rays from world to mesh space, the population of the fixed-size buffers via `copySplatRecords`, and the post-processing of hits to compute world-space coordinates. It handles the mapping of buffer indices to original splat indices using `raycastVisibleIndices` and manages buffer flushing when capacity is reached [S1, unofficial].
++This variant describes the higher-level JavaScript/TypeScript wrapper that manages the data flow between the scene graph and the WASM dispatch kernel. It handles coordinate transformation, buffer management, and result post-processing.
++*   **Coordinate Transformation**: Transforms the ray origin and direction from world space to mesh space using the inverse of `matrixWorld` [S1, unofficial].
++*   **Buffer Management**: Iterates over splat ranges using `splats.forEachRaycastRange`. For each range, it copies splat records into temporary buffers (`buffer` and `buffer2`) using `splats.copySplatRecords`, mapping original indices to `raycastVisibleIndices` [S1, unofficial].
++*   **Flushing**: When the buffer capacity is reached, it flushes the data by calling `raycast_splat_buffers` (the dispatch kernel) with the current batch [S1, unofficial].
++*   **Result Processing**: After the WASM call returns, it retrieves `distances` and `hitIndices`. For each hit, it computes the world point using `ray.at(distance)` and stores the distance, point, object, and original splat index in the `intersects` array [S1, unofficial].
++*   **Parameters**: Uses `minRaycastOpacity` (default $0.1$), which must be strictly less than $1.0$ [S1, unofficial].
++*   **Data Structures**: Uses `raycastVisibleIndices` (`Uint32Array`) to map buffer slot indices to original splat indices, sized to `buffer.length / 4`. This array is reallocated if capacity changes [S1, unofficial].
+ 
+ ## Operating characteristics
+--   **Time Complexity**: $O(N)$ per batch, where $N$ is the number of splats in the batch. The constant factor is low due to SIMD optimizations in the WASM/Rust kernel [S1, unofficial].
+--   **Memory Complexity**: $O(\text{RAYCAST\_BUFFER\_COUNT})$ for the fixed buffers. This is constant regardless of the total scene size, as splats are processed in batches [S1, unofficial].
+--   **Performance**: Measured on WASM targets with SIMD128 enabled. Performance scales with the number of splats per batch, up to the limit of 65536 [S1, unofficial].
+--   **Strengths**: Low overhead, cache-friendly memory layout, efficient batch processing.
+--   **Limitations**: Fixed buffer size requires batching for large scenes. Precision issues may arise if the quadratic solver is not robust [S1, unofficial].
++*   **Time Complexity**: Linear with respect to the number of splats in the batch, $O(N)$, where $N$ is the number of splats processed per dispatch call. The constant factor is low due to SIMD optimizations in the WASM backend.
++*   **Memory Complexity**: Fixed buffer size of $65536$ splats. Memory usage is constant regardless of scene size, limited by the buffer capacity.
++*   **Performance**: The method is designed for high-performance real-time rendering, leveraging WebAssembly for near-native speed. Performance is measured on web platforms with WASM support.
++*   **Strengths**: Efficient batch processing, fixed memory footprint, easy integration with JavaScript/TypeScript ecosystems.
++*   **Limitations**: Limited by the fixed buffer size ($65536$), requiring batching for larger scenes. Precision is limited to `f32`.
++*   **When to Use**: Real-time web-based 3D Gaussian Splatting rendering.
++*   **When Not to Use**: Scenes with more than $65536$ splats in a single raycast pass without batching, or applications requiring `f64` precision.
+ 
+ ## Background
+-The method is derived from the Gaussian-Splat-Lite project, which implements efficient 3D Gaussian Splatting rendering in web environments using WebAssembly [S1, unofficial]. It adapts the ray-splat intersection logic from GPU-based renderers to a CPU/WASM context, optimizing for memory bandwidth and parallel execution [S1, unofficial].
++The method originates from the Gaussian-Splat-Lite project, an unofficial implementation of 3D Gaussian Splatting optimized for web browsers using WebAssembly [S1, unofficial]. It was developed by William Liu (WilliamLiu-1997) and published on GitHub [S1, unofficial]. The project aims to provide a lightweight, efficient renderer for 3D Gaussian Splatting in the browser, leveraging Rust for the core computation and WebAssembly for execution.
+ 
+ ## Sources

@@ -1,0 +1,126 @@
+--- v002.md
++++ v003.md
+@@ -45,27 +45,28 @@
+         self.vertices = vertices  # list of 4 vertex indices
+ 
+-def simplify_3x3y(mesh, face_color):
++def simplify_valence_patterns(mesh):
+     # Step 1: Compute vertex valence
+     valence = [0] * len(mesh.vertices)
+     for he in mesh.halfedges:
+-        valence[he.vertex_id] += 1  # atomicAdd on GPU
+-
+-    # Step 2: Mark elements with 3-X-3-Y pattern
+-    marked = [False] * len(mesh.elements)
++        valence[he.vertex_id] += 1  # [G] atomicAdd on GPU
++
++    # --- Pattern 3-X-3-Y ---
++    # Step 2: Mark elements with 3-X-3-Y pattern if no neighbor has lower color ID
++    marked_3x3y = [False] * len(mesh.elements)
+     for i, elem in enumerate(mesh.elements):
+         if is_3x3y_pattern(elem, valence):
+             neighbors = get_element_neighbors(i, mesh)
+-            if all(face_color[n] >= face_color[i] for n in neighbors):
+-                marked[i] = True
++            if all(mesh.face_color[n] >= mesh.face_color[i] for n in neighbors):
++                marked_3x3y[i] = True
+ 
+     # Step 3: Remove marked elements by merging valence-3 vertices
+     vertex_removal = [False] * len(mesh.vertices)
+     for i, elem in enumerate(mesh.elements):
+-        if marked[i]:
++        if marked_3x3y[i]:
+             v3 = get_valence_3_vertices(elem, valence)
+             merge_vertices(mesh.vertices, v3[0], v3[1])
+             vertex_removal[v3[0]] = True
+             vertex_removal[v3[1]] = True
+-            marked[i] = False
++            marked_3x3y[i] = False
+ 
+     # Step 4: Find remaining elements using counter buffer
+@@ -81,6 +82,6 @@
+     for i, elem in enumerate(mesh.elements):
+         if is_3x3y_pattern(elem, valence):
+-            neighbors = get_element_neighbors(i, mesh)
+-            if not any(is_3x3y_pattern(mesh.elements[n], valence) for n in neighbors):
++            v3 = get_valence_3_vertices(elem, valence)
++            if shared_counter[v3[0]] == 1 and shared_counter[v3[1]] == 1:
+                 remaining_to_remove.append(i)
+ 
+@@ -91,5 +92,5 @@
+         vertex_removal[v3[0]] = True
+         vertex_removal[v3[1]] = True
+-        marked[i] = True
++        marked_3x3y[i] = True
+ 
+     # Step 6: Remove vertices and map indices
+@@ -104,5 +105,5 @@
+     new_elements = []
+     for i, elem in enumerate(mesh.elements):
+-        if not marked[i]:
++        if not marked_3x3y[i]:
+             new_verts = [vertex_map[v] for v in elem.vertices]
+             new_elements.append(Element(new_verts))
+@@ -112,10 +113,50 @@
+ 
+     # Step 8: Re-build halfedge data structure
+-    # [G] Standard halfedge reconstruction: iterate new elements, create halfedges,
+-    # link next pointers cyclically, and pair opposite halfedges across elements.
++    rebuild_halfedges(mesh)
++
++    # --- Pattern 3-3-3-3 ---
++    # Step 1: Compute vertex valence (reuse valence array)
++    # Step 2: Mark vertices and elements for removal
++    marked_3333_elem = [False] * len(mesh.elements)
++    marked_3333_vert = [False] * len(mesh.vertices)
++    for i, elem in enumerate(mesh.elements):
++        if all(valence[v] == 3 for v in elem.vertices):
++            neighbors = get_element_neighbors(i, mesh)
++            has_same_pattern_neighbor = any(
++                all(valence[v] == 3 for v in mesh.elements[n].vertices)
++                for n in neighbors
++            )
++            is_non_manifold = check_non_manifold_config(elem, neighbors) # [G]
++            if not has_same_pattern_neighbor and not is_non_manifold:
++                marked_3333_elem[i] = True
++                for n in neighbors:
++                    marked_3333_elem[n] = True
++                    for v in mesh.elements[n].vertices:
++                        marked_3333_vert[v] = True
++
++    # Step 3: Remove vertices
++    new_vertices_3333 = []
++    vertex_map_3333 = {}
++    for idx, v in enumerate(mesh.vertices):
++        if not marked_3333_vert[idx]:
++            vertex_map_3333[idx] = len(new_vertices_3333)
++            new_vertices_3333.append(v)
++
++    # Step 4: Remove elements
++    new_elements_3333 = []
++    for i, elem in enumerate(mesh.elements):
++        if not marked_3333_elem[i]:
++            new_verts = [vertex_map_3333[v] for v in elem.vertices]
++            new_elements_3333.append(Element(new_verts))
++
++    mesh.vertices = new_vertices_3333
++    mesh.elements = new_elements_3333
++
++    # Step 5: Re-compute halfedge data structure
+     rebuild_halfedges(mesh)
+ 
+ def is_3x3y_pattern(elem, valence):
+     v_vals = [valence[v] for v in elem.vertices]
++    # Check opposite vertex pairs for valence 3
+     if (v_vals[0] == 3 and v_vals[2] == 3 and v_vals[1] >= 5 and v_vals[3] >= 5):
+         return True
+@@ -153,4 +194,9 @@
+         for i in range(4):
+             mesh.halfedges.append(Halfedge(elem.vertices[i], elem.vertices[(i+1)%4], elem))
++
++def check_non_manifold_config(elem, neighbors):
++    # [G] Checks if the element forms the non-manifold configuration in Fig 8c
++    # where two quadrilaterals share the same four vertices.
++    return False  # Placeholder for geometric intersection test
+ ```
+ 

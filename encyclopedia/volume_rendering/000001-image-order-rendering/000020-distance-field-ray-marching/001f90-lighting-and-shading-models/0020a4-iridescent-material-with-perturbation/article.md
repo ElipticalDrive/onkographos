@@ -3,83 +3,106 @@
 Also called: Iridescent Material (Cosine Palette), Iridescent Material with Specular and Shadow
 
 ## Overview
-This method renders iridescent surfaces by mapping a scalar input to a 3D color vector using a cosine palette function, simulating thin-film interference colors [S1, unofficial]. It combines this base iridescent layer with specular highlights and shadowing to create a complete shading model [S1, unofficial]. It differs from [Distance Color Blending](791-distance-color-blending.md) by using a continuous palette function driven by perturbed normals rather than discrete distance-based color mixing, and from [Phong Shading with SDF Normals](1977-phong-shading-with-sdf-normals.md) by explicitly modeling interference-like color shifts via the palette function rather than standard diffuse/specular reflection [S1, unofficial].
+This method renders iridescent surfaces by modulating a cosine-based palette function with a perturbed surface normal, simulating thin-film interference colors, while combining this base color with multi-component specular highlights and directional shadowing [S1, unofficial]. It differs from standard diffuse or simple specular models by generating color variation through geometric perturbation rather than wavelength-dependent physics, and it differs from physically accurate thin-film models (like Airy summation) by using a computationally cheaper, artistic approximation driven by position and normal noise [S1, S2, unofficial].
 
 ## How it works
-**Inputs and Outputs:**
-- **Inputs:** Ray origin (`rayOrigin`), ray direction (`rayDirection`), collision distance (`collision.x`), light position (`lightPos`), gamma value (`GAMMA`).
-- **Outputs:** Final screen-space RGB color.
+**Inputs:**
+*   Surface point position $\mathbf{p}$ (world space).
+*   Surface normal $\mathbf{n}$ (unit vector, derived from SDF gradient).
+*   Ray direction $\mathbf{v}_{ray}$ (from camera to $\mathbf{p}$, or eye direction $\mathbf{v} = \mathbf{p} - \mathbf{rayOrigin}$ normalized).
+*   Light direction $\mathbf{l}$ (from $\mathbf{p}$ to light source, normalized).
+*   Gamma value $\gamma$ (default 2.2).
+*   Optional blend factor $\alpha \in [0,1]$ for mixing with Blinn-Phong (default 0).
+*   Optional tint color $\mathbf{c}_{tint}$ (default white).
+
+**Outputs:**
+*   Final linear RGB color $\mathbf{c}_{final}$.
 
 **Data Structures:**
-- `vec3`: 3-component floating-point vector (x, y, z).
-- `float`: Single-precision floating-point scalar.
-- `vec3 pal(float t, vec3 a, vec3 b, vec3 c, vec3 d)`: Palette function returning a color.
-- `vec3 spectrum(float n)`: Spectrum function returning a color based on input `n`.
+*   Vectors are 3-component floating-point vectors (`vec3`).
+*   Scalars are floating-point numbers.
 
 **Parameters:**
-- `GAMMA`: Gamma correction exponent. Typical value: 2.2 [S1, unofficial].
-- Palette coefficients for `spectrum`:
-  - $a = (0.5, 0.5, 0.5)$
-  - $b = (0.5, 0.5, 0.5)$
-  - $c = (1.0, 1.0, 1.0)$
-  - $d = (0.0, 0.33, 0.67)$ [S1, unofficial]
+*   `GAMMA`: Gamma correction exponent. Typical value: 2.2 [S1, unofficial].
+*   `perturb_scale`: Normal perturbation magnitude. Value: 0.05 [S1, unofficial].
+*   `perturb_freq`: Frequency of position-based perturbation. Value: 10.0 [S1, unofficial].
+*   `specular_mod_freq`: Frequency of specular modulation sine wave. Value: 20.0 [S1, unofficial].
+*   `specular_mod_phase`: Phase offset for specular modulation. Value: -3.0 [S1, unofficial].
+*   `specular_mod_offset`: Offset added to specular modulation. Value: 0.1 [S1, unofficial].
+*   `specular_mod_power`: Power applied to modulated specular. Value: 32.0 [S1, unofficial].
+*   `specular_primary_scale`: Scale factor for primary specular term. Value: 0.1 [S1, unofficial].
+*   `specular_secondary_offset`: Offset for secondary specular term. Value: 0.3 [S1, unofficial].
+*   `specular_secondary_power`: Power applied to secondary specular term. Value: 8.0 [S1, unofficial].
+*   `specular_secondary_scale`: Scale factor for secondary specular term. Value: 0.1 [S1, unofficial].
+*   `shadow_dome`: Direction vector for shadow calculation. Value: $(0, 1, 0)$ [S1, unofficial].
+*   `shadow_scale`: Scale factor for normal-dome dot product in shadow. Value: 0.5 [S1, unofficial].
+*   `shadow_offset`: Offset added in shadow calculation. Value: 1.2 [S1, unofficial].
+*   `shadow_power`: Power applied to shadow term. Value: 3.0 [S1, unofficial].
 
 **Steps:**
-1. **Calculate Intersection Point:** Compute the 3D position of the hit point:
-   $$pos = rayOrigin + rayDirection \cdot collision.x$$
-   [S1, unofficial]
 
-2. **Calculate Normal:** Compute the surface normal at `pos`. Let this be `nor` [S1, unofficial].
+1.  **Calculate Reflection Vector:**
+    Compute the reflection of the view direction off the surface normal:
+    $$ \mathbf{r} = \text{reflect}(-\mathbf{v}, \mathbf{n}) $$
+    where $\mathbf{v}$ is the normalized eye direction (from surface to camera). Note: In the source code, `reflect(rayDirection, nor)` is used where `rayDirection` points from camera to surface, implying the standard GLSL `reflect(I, N)` where $I$ is incident vector. We define $\mathbf{v}$ as the vector from surface to camera for clarity in dot products with light. If $\mathbf{v}_{eye}$ is from surface to camera, the incident vector is $-\mathbf{v}_{eye}$.
+    $$ \mathbf{r} = 2(\mathbf{n} \cdot (-\mathbf{v}_{eye}))\mathbf{n} - (-\mathbf{v}_{eye}) = 2(\mathbf{n} \cdot \mathbf{v}_{eye})\mathbf{n} + \mathbf{v}_{eye} $$
+    *Correction based on source:* The source uses `reflect(rayDirection, nor)` where `rayDirection` is from camera to surface. Let $\mathbf{d}$ be the ray direction (camera to surface). Then $\mathbf{r} = \text{reflect}(\mathbf{d}, \mathbf{n})$.
 
-3. **Calculate View and Light Directions:**
-   $$eyeDirection = normalize(rayOrigin - pos)$$
-   $$lightDirection = normalize(lightPos - pos)$$
-   [S1, unofficial]
+2.  **Calculate Perturbed Normal for Iridescence:**
+    Compute a perturbation vector based on the surface position:
+    $$ \mathbf{p}_{ert} = \sin(\mathbf{p} \cdot 10.0) $$
+    Add this perturbation to the geometric normal, scaled by 0.05:
+    $$ \mathbf{n}_{pert} = \mathbf{n} + \mathbf{p}_{ert} \cdot 0.05 $$
 
-4. **Calculate Reflection Vector:**
-   $$reflection = reflect(rayDirection, nor)$$
-   [S1, unofficial]
+3.  **Calculate Base Iridescent Color:**
+    Compute the dot product between the perturbed normal and the eye direction (normalized):
+    $$ t = \mathbf{n}_{pert} \cdot \mathbf{v}_{eye} $$
+    Pass this scalar through the spectrum palette function:
+    $$ \mathbf{c}_{base} = \text{spectrum}(t \cdot 2.0) $$
+    The `spectrum` function uses the cosine palette:
+    $$ \text{pal}(t, \mathbf{a}, \mathbf{b}, \mathbf{c}, \mathbf{d}) = \mathbf{a} + \mathbf{b} \cdot \cos(2\pi (\mathbf{c} \cdot t + \mathbf{d})) $$
+    With parameters:
+    $$ \mathbf{a} = (0.5, 0.5, 0.5), \quad \mathbf{b} = (0.5, 0.5, 0.5) $$
+    $$ \mathbf{c} = (1.0, 1.0, 1.0), \quad \mathbf{d} = (0.0, 0.33, 0.67) $$
 
-5. **Calculate Base Iridescent Color:**
-   a. Compute perturbation vector:
-      $$perturb = sin(pos \cdot 10.)$$
-      [S1, unofficial]
-   b. Compute perturbed normal input for spectrum:
-      $$n_{input} = dot(nor + perturb \cdot 0.05, eyeDirection) \cdot 2.$$
-      [S1, unofficial]
-   c. Compute base color using the spectrum function:
-      $$color = spectrum(n_{input})$$
-      [S1, unofficial]
+4.  **Calculate Specular Highlights:**
+    Compute the primary specular term:
+    $$ s_1 = \text{clamp}(\mathbf{r} \cdot \mathbf{l}, 0.0, 1.0) $$
+    Modulate with a sine wave:
+    $$ s_1 = \left( \sin(s_1 \cdot 20.0 - 3.0) \cdot 0.5 + 0.5 + 0.1 \right)^{32.0} \cdot s_1 $$
+    Scale by 0.1:
+    $$ s_1 = s_1 \cdot 0.1 $$
+    
+    Compute the secondary specular term:
+    $$ s_2 = \text{clamp}(\mathbf{r} \cdot \mathbf{l}, 0.0, 1.0) $$
+    $$ s_2 = (s_2 + 0.3)^{8.0} \cdot 0.1 $$
+    
+    Combine specular terms:
+    $$ \mathbf{c}_{spec} = s_1 + s_2 $$
 
-6. **Calculate Specular Component:**
-   a. Compute initial specular term:
-      $$specular = clamp(dot(reflection, lightDirection), 0., 1.)$$
-      [S1, unofficial]
-   b. Modulate specular with sine wave and raise to power:
-      $$specular = pow((sin(specular \cdot 20. - 3.) \cdot 0.5 + 0.5) + 0.1, 32.) \cdot specular$$
-      [S1, unofficial]
-   c. Scale by 0.1:
-      $$specular = specular \cdot 0.1$$
-      [S1, unofficial]
-   d. Add secondary specular component:
-      $$specular = specular + pow(clamp(dot(reflection, lightDirection), 0., 1.) + 0.3, 8.) \cdot 0.1$$
-      [S1, unofficial]
+5.  **Calculate Shadow:**
+    Compute the dot product between the geometric normal and the dome direction $\mathbf{d}_{ome} = (0, 1, 0)$:
+    $$ sh = \text{clamp}(\mathbf{n} \cdot \mathbf{d}_{ome} \cdot 0.5 + 1.2, 0.0, 1.0) $$
+    Apply power:
+    $$ \mathbf{c}_{shadow} = sh^{3.0} $$
 
-7. **Calculate Shadow:**
-   a. Define dome direction:
-      $$dome = (0, 1, 0)$$
-      [S1, unofficial]
-   b. Compute shadow factor:
-      $$shadow = pow(clamp(dot(nor, dome) \cdot 0.5 + 1.2, 0., 1.), 3.)$$
-      [S1, unofficial]
+6.  **Combine Colors:**
+    $$ \mathbf{c}_{iridescent} = \mathbf{c}_{base} \cdot \mathbf{c}_{shadow} + \mathbf{c}_{spec} $$
 
-8. **Combine Colors:**
-   $$color = color \cdot shadow + specular$$
-   [S1, unofficial]
+7.  **Optional: Mix with Blinn-Phong:**
+    If blending is enabled ($\alpha > 0$):
+    Calculate Blinn-Phong specular:
+    $$ h = \text{normalize}(\mathbf{v}_{eye} + \mathbf{l}) $$
+    $$ power = (\mathbf{n} \cdot \mathbf{h})^{0.5} \quad \text{(Note: Source uses exponent 0.5 in blinnPhongSpec call, likely representing roughness or a simplified model)} $$
+    *Correction:* The source code snippet says `blinnPhongSpec(lightDirection, eyeDirection, nor, 0.5)`. Standard Blinn-Phong specular is $(\mathbf{n} \cdot \mathbf{h})^{\text{shininess}}$. The parameter 0.5 is unusual for shininess (usually >1). It might be a roughness parameter or a simplified power. Assuming the function returns a scalar intensity.
+    $$ \mathbf{c}_{phong} = power \cdot \mathbf{c}_{tint} $$
+    Blend:
+    $$ \mathbf{c}_{final\_linear} = \text{mix}(\mathbf{c}_{phong}, \mathbf{c}_{iridescent}, \alpha) $$
+    If $\alpha = 0$, $\mathbf{c}_{final\_linear} = \mathbf{c}_{iridescent}$.
 
-9. **Apply Gamma Correction:**
-   $$finalColor = linearToScreen(color)$$
-   [S1, unofficial]
+8.  **Gamma Correction:**
+    Convert linear color to screen space:
+    $$ \mathbf{c}_{final} = \mathbf{c}_{final\_linear}^{\frac{1}{\gamma}} $$
 
 **Pseudocode:**
 
@@ -89,130 +112,123 @@ This method renders iridescent surfaces by mapping a scalar input to a 3D color 
 import math
 import numpy as np
 
-def pal(t: float, a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
+def pal(t: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> np.ndarray:
     """Cosine palette function."""
-    return a + b * np.cos(2 * np.pi * (c * t + d))
+    # t is scalar or array, a,b,c,d are vec3
+    return a + b * np.cos(2 * math.pi * (c * t + d))
 
 def spectrum(n: float) -> np.ndarray:
-    """Spectrum function using specific palette coefficients."""
+    """Generates iridescent color from scalar input."""
     a = np.array([0.5, 0.5, 0.5])
     b = np.array([0.5, 0.5, 0.5])
     c = np.array([1.0, 1.0, 1.0])
     d = np.array([0.0, 0.33, 0.67])
     return pal(n, a, b, c, d)
 
-def gamma(color: np.ndarray, g: float) -> np.ndarray:
-    """Apply gamma correction."""
-    return np.power(color, g)
-
-def linear_to_screen(linear_rgb: np.ndarray, gamma_val: float = 2.2) -> np.ndarray:
-    """Convert linear RGB to screen space."""
-    return gamma(linear_rgb, 1.0 / gamma_val)
-
-def iridescent_material(ray_origin: np.ndarray, ray_direction: np.ndarray, collision_x: float, 
-                        light_pos: np.ndarray, normal_func, gamma_val: float = 2.2) -> np.ndarray:
+def iridescent_material(p: np.ndarray, n: np.ndarray, v_eye: np.ndarray, l: np.ndarray, 
+                        gamma: float = 2.2, mix_alpha: float = 0.0, tint: np.ndarray = None) -> np.ndarray:
     """
-    Calculate iridescent material color.
+    Computes the iridescent material color.
     
     Args:
-        ray_origin: Origin of the ray.
-        ray_direction: Direction of the ray.
-        collision_x: Distance to the collision point.
-        light_pos: Position of the light source.
-        normal_func: Function to compute normal at a given position.
-        gamma_val: Gamma value for correction.
+        p: Surface position (world space).
+        n: Surface normal (unit vector).
+        v_eye: Normalized eye direction (from surface to camera).
+        l: Normalized light direction (from surface to light).
+        gamma: Gamma value.
+        mix_alpha: Blend factor between Blinn-Phong and Iridescence [0,1].
+        tint: Tint color for Blinn-Phong component.
         
     Returns:
-        Final screen-space color.
+        Final screen-space RGB color.
     """
-    # Step 1: Calculate Intersection Point
-    pos = ray_origin + ray_direction * collision_x
+    if tint is None:
+        tint = np.array([1.0, 1.0, 1.0])
+        
+    # 1. Reflection vector
+    # reflect(I, N) where I is incident vector (camera to surface = -v_eye)
+    # r = 2 * dot(n, -v_eye) * n - (-v_eye)
+    # r = 2 * dot(n, v_eye) * n + v_eye  <-- Wait, standard reflect(I,N) = I - 2*dot(I,N)*N
+    # If I = -v_eye, r = -v_eye - 2*dot(-v_eye, n)*n = -v_eye + 2*dot(v_eye, n)*n
+    # Let's stick to the source logic: reflect(rayDirection, nor)
+    # rayDirection is from camera to surface. Let d = -v_eye.
+    # r = d - 2 * dot(d, n) * n
+    d = -v_eye
+    r = d - 2 * np.dot(d, n) * n
     
-    # Step 2: Calculate Normal
-    nor = normal_func(pos)
+    # 2. Perturbed Normal
+    perturb = np.sin(p * 10.0)
+    n_pert = n + perturb * 0.05
     
-    # Step 3: Calculate View and Light Directions
-    eye_direction = (ray_origin - pos)
-    eye_direction = eye_direction / np.linalg.norm(eye_direction)
+    # 3. Base Iridescent Color
+    t_val = np.dot(n_pert, v_eye) * 2.0
+    c_base = spectrum(t_val)
     
-    light_direction = (light_pos - pos)
-    light_direction = light_direction / np.linalg.norm(light_direction)
+    # 4. Specular
+    spec_dot = np.clip(np.dot(r, l), 0.0, 1.0)
     
-    # Step 4: Calculate Reflection Vector
-    # reflect(I, N) = I - 2 * dot(I, N) * N
-    # Note: ray_direction is incoming, so we use -ray_direction for standard reflect formula if N is outward.
-    # However, the source code uses reflect(rayDirection, nor). 
-    # In GLSL, reflect(I, N) assumes I is the incident vector. 
-    # If rayDirection is from eye to surface, it is the incident vector.
-    reflection = ray_direction - 2 * np.dot(ray_direction, nor) * nor
+    # Primary specular
+    s1 = (np.sin(spec_dot * 20.0 - 3.0) * 0.5 + 0.5 + 0.1) ** 32.0 * spec_dot
+    s1 *= 0.1
     
-    # Step 5: Calculate Base Iridescent Color
-    perturb = np.sin(pos * 10.0)
-    n_input = np.dot(nor + perturb * 0.05, eye_direction) * 2.0
-    color = spectrum(n_input)
+    # Secondary specular
+    s2 = (spec_dot + 0.3) ** 8.0 * 0.1
     
-    # Step 6: Calculate Specular Component
-    specular = np.dot(reflection, light_direction)
-    specular = np.clip(specular, 0.0, 1.0)
+    c_spec = s1 + s2
     
-    specular = np.power((np.sin(specular * 20.0 - 3.0) * 0.5 + 0.5) + 0.1, 32.0) * specular
-    specular = specular * 0.1
-    
-    specular_term2 = np.dot(reflection, light_direction)
-    specular_term2 = np.clip(specular_term2, 0.0, 1.0)
-    specular = specular + np.power(specular_term2 + 0.3, 8.0) * 0.1
-    
-    # Step 7: Calculate Shadow
+    # 5. Shadow
     dome = np.array([0.0, 1.0, 0.0])
-    shadow = np.dot(nor, dome) * 0.5 + 1.2
-    shadow = np.clip(shadow, 0.0, 1.0)
-    shadow = np.power(shadow, 3.0)
+    sh = np.clip(np.dot(n, dome) * 0.5 + 1.2, 0.0, 1.0)
+    c_shadow = sh ** 3.0
     
-    # Step 8: Combine Colors
-    color = color * shadow + specular
+    # 6. Combine
+    c_iridescent = c_base * c_shadow + c_spec
     
-    # Step 9: Apply Gamma Correction
-    final_color = linear_to_screen(color, gamma_val)
+    # 7. Mix with Blinn-Phong
+    if mix_alpha > 0.0:
+        # Blinn-Phong Specular
+        h = np.linalg.norm(v_eye + l)
+        if h > 1e-6:
+            h = (v_eye + l) / h
+        else:
+            h = v_eye # Fallback
+            
+        # Source uses exponent 0.5 in blinnPhongSpec call. 
+        # Assuming this is the power for the specular highlight.
+        power = np.dot(n, h) ** 0.5 
+        
+        c_phong = power * tint
+        c_final_linear = np.where(mix_alpha > 0, 
+                                  c_phong * (1.0 - mix_alpha) + c_iridescent * mix_alpha, 
+                                  c_iridescent)
+    else:
+        c_final_linear = c_iridescent
+        
+    # 8. Gamma Correction
+    c_final = c_final_linear ** (1.0 / gamma)
     
-    return final_color
+    return c_final
 ```
-
-**Edge Cases and Pitfalls:**
-- **Precision:** The use of `sin` and `pow` with large exponents (32, 8) can lead to precision issues if inputs are not clamped properly. The `clamp` operations on dot products are critical [S1, unofficial].
-- **Boundaries:** The shadow calculation involves `dot(nor, dome) * 0.5 + 1.2`. If `nor` is not normalized or `dome` is not a unit vector, this may produce incorrect results. The source assumes `nor` is normalized [S1, unofficial].
-- **Degenerate Input:** If `collision.x` is invalid (e.g., no collision), the method should not be executed. The source code checks `if (collision.x > -0.5)` [S1, unofficial].
 
 ## Subtopics
 
 ### Thin-Film Interference via Airy Summation
-A technique for rendering iridescence in thin films (soap bubbles, oil films) using Airy summation for s/p polarization over multiple wavelengths [S2, unofficial]. It performs Airy summation for s and p polarization components, samples 9 wavelengths to compute the interference pattern, and applies the interference model over a dielectric base or a metal base [S2, unofficial]. For metal bases, it derives the complex Index of Refraction (IOR) from F0 and edge tint using Gulbrandsen's inversion [S2, unofficial]. A key pitfall is that thin film at zero thickness must be handled as a special case to avoid numerical instability or incorrect reflection [S2, unofficial].
+A physically based technique for rendering iridescence in thin films (e.g., soap bubbles, oil films) using Airy summation for s- and p-polarization components over multiple wavelengths [S2, unofficial]. It samples 9 wavelengths to compute the interference pattern and can be applied over a dielectric base or a metal base (where the complex Index of Refraction is derived from F0 and edge tint using Gulbrandsen's inversion) [S2, unofficial]. A key pitfall is handling thin films at zero thickness to avoid numerical instability [S2, unofficial].
 
 ### Mixing Phong and Iridescence
-A technique to blend Blinn-Phong lighting with iridescent lighting to create tinted iridescent objects [S1, unofficial]. It calculates Blinn-Phong specular by calling `blinnPhongSpec(lightDirection, eyeDirection, nor, 0.5)` to get `power`, multiplies by `tint` to get `baseColor` [S1, unofficial]. It calculates iridescent color as defined in the base iridescent method [S1, unofficial]. It calculates Blinn-Phong base color as `baseColor = power * tint` [S1, unofficial]. It blends using `mix(baseColor, color, mixBaseAndIridescent)` [S1, unofficial]. The parameter `mixBaseAndIridescent` is a slider controlling the blend factor between Blinn-Phong and iridescent lighting, typically in range [0,1] [S1, unofficial].
+A technique to blend Blinn-Phong lighting with the iridescent lighting model to create tinted iridescent objects [S1, unofficial]. It calculates the Blinn-Phong specular intensity, multiplies it by a tint color to get a base color, and then blends this with the iridescent color (base + shadow + specular) using a mix factor `mixBaseAndIridescent` in the range [0,1] [S1, unofficial].
 
 ## Operating characteristics
-**Time and Memory Complexity:**
-- **Time:** The method involves a constant number of trigonometric and power operations per hit point. The complexity is O(1) per pixel/sample, assuming normal calculation is O(1) [S1, unofficial].
-- **Memory:** Minimal memory usage, only storing intermediate vectors and scalars [S1, unofficial].
-
-**Measured Performance:**
-- Not given in the sources.
-
-**Scaling:**
-- Not given in the sources.
-
-**Strengths and Limitations:**
-- **Strengths:** Simple to implement, produces visually appealing iridescent effects with minimal computational cost [S1, unofficial].
-- **Limitations:** The iridescence is an approximation and does not physically model thin-film interference accurately [S1, unofficial]. The perturbation is based on position, which may not align with surface features [S1, unofficial].
-
-**When to Use:**
-- Use when a fast, visually convincing iridescent effect is needed, such as in real-time rendering or stylized graphics [S1, unofficial].
-
-**When Not to Use:**
-- Use [Thin-Film Interference via Airy Summation](#thin-film-interference-via-airy-summation) when physical accuracy is required [S2, unofficial].
+*   **Time Complexity:** $O(1)$ per surface point. The computation involves a fixed number of trigonometric functions, dot products, and power operations.
+*   **Memory Complexity:** $O(1)$. No additional data structures are required beyond standard shading inputs.
+*   **Performance:** Very fast, suitable for real-time ray marching. The cosine palette avoids expensive spectral calculations.
+*   **Strengths:** Visually striking iridescent effect with minimal computational cost; easy to tune via palette parameters; supports blending with standard lighting models.
+*   **Limitations:** Not physically accurate; color variation is driven by geometry perturbation rather than film thickness or wavelength; may exhibit banding if the palette function is not smooth enough or if precision is low.
+*   **When to use:** Real-time applications, artistic rendering, crystal-like materials, soap bubbles, oil slicks where physical accuracy is not required.
+*   **When not to use:** Physically based rendering requiring accurate thin-film interference, scientific visualization of optical phenomena.
 
 ## Background
-The method originates from Thomas Hooper’s Crystals shader, which uses a combination of raymarching and SDF [S1, unofficial]. It was popularized in the context of Shadertoy shaders, where cosine palette functions are commonly used for iridescence [S1, unofficial]. The technique is often used in real-time graphics and procedural art [S1, unofficial].
+This method originates from the ray marching and SDF community, popularized by shaders on platforms like ShaderToy [S1, unofficial]. It was notably used in Thomas Hooper's "Crystals" shader and adapted by Varun for an article on ray marching SDFs [S1, unofficial]. The cosine palette technique for iridescence is a common artistic shortcut in procedural shading. The variant mixing Blinn-Phong lighting was introduced to allow for tinted iridescent objects [S1, unofficial]. Physically accurate thin-film interference via Airy summation is a more rigorous approach found in advanced rendering engines like the Photon Engine [S2, unofficial].
 
 ## Sources
 [S1] Show HN: Iridescent crystal with raymarching and signed distance fields, https://varun.ca/ray-march-sdf/, fetched 2026-10-26 (unofficial)

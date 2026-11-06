@@ -3,209 +3,167 @@
 Also called: adaptive grid refinement for isosurfaces, isomesh octree building
 
 ## Overview
-This method constructs an adaptive octree for implicit surface extraction by refining a 3D grid based on implicit function sign changes and geometric features, while enforcing a strict 2:1 balance constraint (no face-adjacent leaves differ by more than 1 depth level) and ensuring manifold connectivity through surface propagation rules [S1, unofficial]. It sets itself apart from sibling methods like [Adaptive Subdivision in DiffTetVR](807-adaptive-subdivision-in-difftetvr.md) by explicitly resolving cross-depth gaps via Rule 3 subdivision and ensuring edge completeness, rather than relying on post-processing or differentiable tetrahedral regularization [S1, unofficial].
+This method constructs an adaptive octree for isosurface extraction by refining a 3D grid based on implicit function sign changes and geometric features, enforcing a 2:1 balance constraint (no face-adjacent leaves differ by more than 1 depth level) and ensuring manifold connectivity through surface propagation rules [S1, unofficial]. It sets itself apart from sibling methods like [Homogeneity-Based KD-Tree Construction](1325-homogeneity-based-kd-tree-construction.md) by explicitly maintaining octree topology integrity during refinement, and from [Adaptive Subdivision in DiffTetVR](807-adaptive-subdivision-in-difftetvr.md) by operating on a structured octree hierarchy rather than unstructured tetrahedra.
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** A vectorized implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ (optionally returning gradients $\nabla f$), bounding box $(bbox_{min}, bbox_{max})$, and parameters $min\_depth, max\_depth, angle\_threshold\_deg, iso\_value$.
-*   **Output:** An adaptive octree data structure where leaf nodes satisfy the 2:1 balance constraint and surface propagation rules, ready for mesh extraction (e.g., Dual Contouring).
+**Inputs:**
+- Implicit function $f: \mathbb{R}^3 \to \mathbb{R}$ and optional gradient $\nabla f$.
+- Bounding box defined by `bbox_min` and `bbox_max`.
+- Parameters: `min_depth`, `max_depth`, `angle_threshold_deg`, `iso_value`.
+
+**Outputs:**
+- An adaptive octree where leaf nodes are classified as Empty, Full, or Surface.
+- Surface leaves are guaranteed to be at `max_depth` to eliminate T-junctions [S1, unofficial].
 
 **Data Structures:**
-*   **Octree Node:** Contains a depth integer, a type enum (Branch/Leaf), and pointers to 8 children (if Branch).
-*   **Leaf Cell:** Stores coordinates $(cx, cy, cz)$ and depth.
-*   **EvalCache:** Stores computed implicit values and gradients for grid points to avoid redundant evaluation.
+- **Octree Node:** Contains spatial bounds, depth, and a child pointer (if not a leaf).
+- **Leaf Classification:** Enum {Empty, Full, Surface}.
+- **EvalCache:** Stores computed values and gradients for grid corners to avoid redundant evaluations.
+- **all_leaves:** Vector of leaf cells with coordinates $(cx, cy, cz)$ and depth.
 
 **Parameters:**
-*   $min\_depth$: Minimum subdivision depth. Typical value: 3 [S1, unofficial].
-*   $max\_depth$: Maximum subdivision depth. Typical value: 7 [S1, unofficial].
-*   $angle\_threshold\_deg$: Threshold in degrees for sharp feature detection. Typical value: 30.0 [S1, unofficial].
-*   $iso\_value$: Scalar value defining the isosurface. Typical value: 0.0 [S1, unofficial].
+- `min_depth`: u8. Minimum subdivision depth. Typical: 3 [S1, unofficial].
+- `max_depth`: u8. Maximum subdivision depth. Typical: 7 [S1, unofficial].
+- `angle_threshold_deg`: f64. Threshold for sharp feature detection. Typical: 30.0 [S1, unofficial].
+- `iso_value`: f64. Isosurface level. Typical: 0.0 [S1, unofficial].
 
 **Steps:**
 
-1.  **Initialization:** Initialize the octree with the bounding box $(bbox_{min}, bbox_{max})$. Build a uniform grid up to $min\_depth$. If adaptive mode is enabled, initiate the adaptive build process which internally calls `enforce_balance_2to1` [S1, unofficial].
+1. **Initialization:** Initialize the octree with the bounding box. Build a uniform grid up to `min_depth`. If adaptive mode is enabled, call `build_adaptive` which internally invokes `enforce_balance_2to1` [S1, unofficial].
 
-2.  **Balance Enforcement (`enforce_balance_2to1`):**
-    *   Collect all current leaf cells into a list `all_leaves`, storing their coordinates $(cx, cy, cz)$ and depth $d$ [S1, unofficial].
-    *   Iterate through `all_leaves` to identify cells requiring subdivision based on neighbor relationships:
-        *   **Rule 3 (Cross-Depth Gap Prevention):** If a current cell is a surface cell (contains sign changes or is near the isosurface), and a face-adjacent neighbor is at the same depth but is a Branch node containing surface descendants, and the current cell's depth $d < max\_depth$, then the current cell must be subdivided [S1, unofficial]. This prevents gaps in mesh extraction at depth boundaries.
-    *   Mark all identified cells for subdivision.
+2. **Balance Enforcement (`enforce_balance_2to1`):**
+   a. Collect all current leaf cells into `all_leaves`, storing their coordinates $(cx, cy, cz)$ and depth $d$ [S1, unofficial].
+   b. Iterate through `all_leaves` to identify cells requiring subdivision based on balance rules:
+      - **Rule 3 (Surface Propagation):** If a current cell is classified as **Surface**, and a face-adjacent neighbor is at the same depth but is a **Branch** containing surface descendants, and the current cell's depth $d < max\_depth$, then the current cell must subdivide. This prevents cross-depth gaps where a coarse neighbor abuts a fine surface region [S1, unofficial].
+   c. For each cell marked for subdivision:
+      i. Compute the 8 child octants.
+      ii. Compute the 8 corner grid positions for each octant.
+      iii. Convert grid positions to world coordinates using `cache::grid_to_world` [S1, unofficial].
+      iv. Batch evaluate the implicit function and gradients at these new points using `bridge::batch_evaluate` [S1, unofficial].
+      v. If gradients are not provided by the function, estimate them using finite differences with step size $h = \text{cell\_size\_at\_max} \times 0.01$. Store values and gradients in `EvalCache` [S1, unofficial].
+      vi. Classify each child as Empty, Full, or Surface based on sign changes relative to `iso_value` and feature metrics (e.g., normal angle spread) [S1, unofficial].
+      vii. Subdivide the marked cells in the octree structure using `subdivide_cell_for_balance` [S1, unofficial].
+   d. Repeat balance enforcement until no further subdivisions are required or `max_depth` is reached.
 
-3.  **Subdivision and Evaluation:**
-    *   For each marked cell, compute its 8 child octants.
-    *   For each child octant, compute the 8 corner grid positions in local space.
-    *   Convert these grid positions to world coordinates using a transformation function `cache::grid_to_world` [S1, unofficial].
-    *   Batch evaluate the implicit function at these new points using `bridge::batch_evaluate` [S1, unofficial].
-    *   **Gradient Handling:** If the implicit function does not return gradients, estimate them using finite differences with a step size of $cell\_size\_at\_max \times 0.01$ [S1, unofficial]. Store the values and gradients in `EvalCache` [S1, unofficial].
-    *   Subdivide the marked cells in the octree structure using `subdivide_cell_for_balance` [S1, unofficial].
+3. **Edge Completeness:** After the balance loop, call `ensure_edge_completeness`. This ensures every sign-change edge has all 4 sharing cells present as surface leaves, eliminating gaps at depth boundaries. It also checks for non-canonical edges (1-3, 5-7, 9-11) because surface cells that don't own a canonical edge still participate in quads generated by neighbors [S1, unofficial].
 
-4.  **Edge Completeness:**
-    *   After the balance loop, call `ensure_edge_completeness` [S1, unofficial].
-    *   This step ensures that every sign-change edge has all 4 sharing cells present as surface leaves. This eliminates gaps at depth boundaries caused by non-canonical edges (edges 1-3, 5-7, 9-11 in the cube indexing) which do not own a canonical edge but participate in quads generated by neighbors [S1, unofficial].
+4. **Finalization:** Force all surface leaves to `max_depth` to guarantee watertight output and eliminate T-junction holes [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def build_adaptive_octree(func, bbox_min, bbox_max, min_depth=3, max_depth=7, angle_threshold_deg=30.0, iso_value=0.0):
-    """
-    Constructs an adaptive octree with 2:1 balance and surface propagation.
+def build_adaptive_octree(func, bbox_min, bbox_max, min_depth, max_depth, angle_threshold_deg, iso_value):
+    # 1. Initialize uniform grid up to min_depth
+    octree = Octree(bbox_min, bbox_max, min_depth)
     
-    Args:
-        func: Vectorized implicit function f(positions: np.ndarray) -> (values, gradients)
-        bbox_min: Tuple of 3 floats
-        bbox_max: Tuple of 3 floats
-        min_depth: int
-        max_depth: int
-        angle_threshold_deg: float
-        iso_value: float
+    # 2. Adaptive refinement loop
+    if adaptive_mode:
+        enforce_balance_2to1(octree, func, max_depth, angle_threshold_deg, iso_value)
         
-    Returns:
-        Octree structure
-    """
-    # Step 1: Initialize uniform grid up to min_depth
-    octree = Octree()
-    octree.initialize_uniform(bbox_min, bbox_max, min_depth)
+    # 3. Ensure topological correctness
+    ensure_edge_completeness(octree, func, iso_value)
     
-    if not adaptive_mode:
-        return octree
-        
-    # Step 2 & 3: Enforce balance and refine
-    # Loop until no more cells need subdivision or max_depth is reached
-    while True:
-        all_leaves = octree.get_all_leaves() # Returns list of (cx, cy, cz, depth)
-        cells_to_subdivide = []
-        
-        for leaf in all_leaves:
-            cx, cy, cz, d = leaf
-            
-            # Check Rule 3: Cross-depth gap prevention
-            # Identify face-adjacent neighbors
-            neighbors = get_face_adjacent_neighbors(octree, leaf)
-            
-            is_surface = is_surface_cell(leaf, iso_value) # Check for sign changes or proximity
-            
-            for neighbor in neighbors:
-                if neighbor.is_branch and neighbor.has_surface_descendants:
-                    if neighbor.depth == d and d < max_depth:
-                        if is_surface:
-                            cells_to_subdivide.append(leaf)
-                            break # No need to check other neighbors for this cell
-            
-        if not cells_to_subdivide:
-            break
-            
-        for cell in cells_to_subdivide:
-            # Compute 8 child octants
-            children = get_child_octants(cell)
-            
-            # Compute 8 corner grid positions for each child
-            corner_positions = []
-            for child in children:
-                corners = get_child_corners(child)
-                corner_positions.extend(corners)
-                
-            # Convert to world coordinates
-            world_positions = [grid_to_world(pos) for pos in corner_positions]
-            
-            # Batch evaluate
-            values, gradients = batch_evaluate(func, world_positions)
-            
-            # Handle missing gradients
-            if gradients is None:
-                step_size = get_cell_size_at_max() * 0.01
-                gradients = estimate_gradients_finite_diff(func, world_positions, step_size)
-                
-            # Store in cache
-            eval_cache.store(world_positions, values, gradients)
-            
-            # Subdivide the cell
-            octree.subdivide_cell(cell, children)
-            
-    # Step 4: Ensure edge completeness
-    ensure_edge_completeness(octree, iso_value)
+    # 4. Force surface leaves to max_depth
+    force_surface_to_max_depth(octree, max_depth)
     
     return octree
 
-def is_surface_cell(leaf, iso_value):
-    """
-    Determines if a leaf cell is a surface cell.
-    [G] Implementation detail: Check if the implicit function values at the cell corners
-    span the iso_value (sign change) or if the cell center is within a threshold distance.
-    """
-    corners = get_cell_corners(leaf)
-    values = eval_cache.get_values(corners)
-    # Simple sign change check
-    min_val = min(values)
-    max_val = max(values)
-    return (min_val - iso_value) * (max_val - iso_value) <= 0
+def enforce_balance_2to1(octree, func, max_depth, angle_threshold_deg, iso_value):
+    all_leaves = []
+    collect_leaves(octree, all_leaves)
+    
+    changed = True
+    while changed:
+        changed = False
+        cells_to_subdivide = []
+        
+        for leaf in all_leaves:
+            if leaf.depth >= max_depth:
+                continue
+                
+            # Rule 3: Check if neighbor is a Branch with surface descendants
+            if leaf.is_surface():
+                neighbor = get_face_neighbor(leaf)
+                if neighbor.is_branch() and neighbor.has_surface_descendants():
+                    if leaf.depth < max_depth:
+                        cells_to_subdivide.append(leaf)
+        
+        for cell in cells_to_subdivide:
+            subdivide_cell(cell, func, angle_threshold_deg, iso_value)
+            changed = True
+            # Update all_leaves with new children
+            update_leaves(all_leaves, cell)
 
-def get_face_adjacent_neighbors(octree, leaf):
-    """
-    Returns the 6 face-adjacent neighbors of a leaf cell.
-    [G] Implementation detail: Calculate neighbor coordinates by incrementing/decrementing
-    cx, cy, cz. Handle boundary conditions.
-    """
-    cx, cy, cz, d = leaf
-    neighbors = []
-    directions = [
-        (1, 0, 0), (-1, 0, 0),
-        (0, 1, 0), (0, -1, 0),
-        (0, 0, 1), (0, 0, -1)
-    ]
-    for dx, dy, dz in directions:
-        nx, ny, nz = cx + dx, cy + dy, cz + dz
-        neighbor = octree.find_cell(nx, ny, nz)
-        if neighbor:
-            neighbors.append(neighbor)
-    return neighbors
+def subdivide_cell(cell, func, angle_threshold_deg, iso_value):
+    # Compute 8 child octants
+    children = compute_octants(cell)
+    
+    for child in children:
+        # Get 8 corners
+        corners = get_corners(child)
+        
+        # Convert to world coords
+        world_corners = [grid_to_world(c) for c in corners]
+        
+        # Batch evaluate
+        values, gradients = batch_evaluate(func, world_corners)
+        
+        # Handle missing gradients
+        if gradients is None:
+            h = cell_size_at_max * 0.01
+            gradients = estimate_gradients(values, world_corners, h)
+            
+        # Store in cache
+        EvalCache.store(world_corners, values, gradients)
+        
+        # Classify child
+        child.classify(values, gradients, iso_value, angle_threshold_deg)
+        
+    # Subdivide in tree structure
+    cell.subdivide(children)
 
-def ensure_edge_completeness(octree, iso_value):
-    """
-    Ensures that every sign-change edge has all 4 sharing cells present as surface leaves.
-    [G] Implementation detail: Iterate over all edges of the grid. If an edge has a sign change,
-    identify the 4 cells sharing that edge. If any of these cells are not surface leaves,
-    refine them until they are leaves and are marked as surface.
-    """
-    # Iterate over all grid edges
-    edges = get_all_grid_edges(octree)
-    for edge in edges:
-        if has_sign_change_on_edge(edge, iso_value):
-            sharing_cells = get_sharing_cells_for_edge(edge)
+def ensure_edge_completeness(octree, func, iso_value):
+    # Iterate over all edges in the octree
+    for edge in get_all_edges(octree):
+        if edge.has_sign_change():
+            # Ensure all 4 sharing cells are surface leaves
+            sharing_cells = get_sharing_cells(edge)
             for cell in sharing_cells:
-                if not cell.is_surface_leaf:
-                    # Refine cell if not already at max_depth
-                    if cell.depth < max_depth:
-                        octree.subdivide_cell(cell, get_child_octants(cell))
-                        # Recursively ensure edge completeness for new children
-                        # [G] This may require a loop or queue-based approach to propagate
-                        pass
+                if not cell.is_surface_leaf():
+                    refine_to_surface(cell, func, iso_value)
+                    
+    # Check non-canonical edges
+    for edge in get_non_canonical_edges(octree):
+        if edge.has_sign_change():
+            refine_adjacent_cells(edge, func, iso_value)
 ```
 
 ## Subtopics
 
 ### [Octree Balance Subdivision](847-octree-balance-subdivision.md)
-Octree Balance Subdivision is a variant that focuses on maintaining the 2:1 balance constraint during the refinement process, ensuring that no two adjacent leaves differ by more than one depth level. It sets itself apart from other variants by prioritizing geometric balance over topological complexity, making it suitable for scenes where uniform resolution distribution is desired. Choose this when memory efficiency and regular data access patterns are more important than capturing fine topological details. Link: [Octree Balance Subdivision](847-octree-balance-subdivision.md).
+The core recursive refinement step that splits a parent node into eight children and classifies them, ensuring tree integrity and 2:1 balance. Choose this when you need the fundamental splitting logic.
+
+### [Error Data Generation](1324-error-data-generation.md)
+Computes quantitative approximation error to guide refinement. Choose this when numerical fidelity of data values is the primary concern over topological balance.
 
 ### [Constrained Octree Refinement](2426-constrained-octree-refinement.md)
-Constrained Octree Refinement is a post-processing or construction-phase strategy that enforces a maximum depth-disparity of one between face-adjacent octree nodes. It solves the problem of excessive geometric simplification in unconstrained adaptive octrees by preventing coarse nodes from abutting fine nodes, thereby ensuring a more uniform grid structure. It sets itself apart from its parent method, [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md), by explicitly applying a refinement pass to resolve any remaining disparity violations that the initial balance and surface propagation rules might not fully resolve, or by serving as the specific constraint mechanism within such a framework. Link: [Constrained Octree Refinement](2426-constrained-octree-refinement.md).
+Enforces a maximum depth-disparity of one between face-adjacent nodes. Choose this as a post-processing step to resolve remaining disparity violations after initial balance enforcement.
 
 ### [Topological Octree Construction](4698-topological-octree-construction.md)
-Topological Octree Construction is an adaptive subdivision strategy that refines a 3D grid based on topological complexity to ensure the extracted implicit surface is manifold (free of non-manifold edges or vertices). It distinguishes itself from sibling methods by explicitly defining "complex" cells via edge and face connectivity analysis, whereas siblings like [Octree Balance Subdivision](847-octree-balance-subdivision.md) focus on geometric balance and [Constrained Octree Refinement](2426-constrained-octree-refinement.md) on general constraints. It builds on [Adaptive Octree Construction with 2:1 Balance and Surface Propagation](830-adaptive-octree-construction-with-2-1-balance-and-surface-pr.md) by providing the specific topological criteria for leaf refinement. Link: [Topological Octree Construction](4698-topological-octree-construction.md).
+Refines based on topological complexity to ensure manifold connectivity. Choose this when explicit topological criteria (edge/face connectivity) are required to prevent non-manifold artifacts.
 
 ## Operating characteristics
-*   **Time Complexity:** Depends on the number of leaves $L$ and the depth of refinement. Each refinement step involves evaluating the implicit function at 8 corners per new cell. The balance enforcement loop may iterate multiple times, but typically converges quickly.
-*   **Memory Complexity:** Proportional to the number of nodes in the octree. Adaptive refinement reduces memory usage compared to uniform grids for smooth surfaces, as shown by the 16x reduction in vertex count for a sphere [S1, unofficial].
-*   **Measured Performance:** For a sphere, adaptive refinement (depth 4->6) uses 536 vertices compared to 8,600 for a uniform grid (depth 6), a 16x reduction [S1, unofficial]. For complex shapes like chamfered spheres, the reduction is 1x (no benefit), indicating that adaptive refinement is most effective for smooth surfaces with varying curvature.
-*   **Strengths:** Guarantees manifold and watertight output without post-processing [S1, unofficial]. Preserves sharp edges exactly via QEF vertex placement [S1, unofficial]. Handles thin features automatically via Lipschitz guard [S1, unofficial].
-*   **Limitations:** Requires vectorized implicit function evaluation. Finite difference gradients are unreliable for neural SDFs, necessitating autodiff gradients [S1, unofficial]. Over-refinement can occur if `angle_threshold_deg` is set too low [S1, unofficial].
-*   **When to use:** Ideal for extracting meshes from SDF-based 3D generative models (e.g., DeepSDF, SDF-Diffusion) where manifold output and sharp feature preservation are critical [S1, unofficial].
-*   **When not to use:** Not suitable for non-vectorized implicit functions or when gradients cannot be provided and finite differences are insufficient.
+- **Time Complexity:** Depends on the number of surface cells and the depth of refinement. Adaptive refinement reduces the number of evaluated cells compared to uniform grids for smooth shapes. For a sphere, adaptive refinement can reduce vertex count by 16x compared to uniform grids at equivalent accuracy [S1, unofficial].
+- **Memory Complexity:** Proportional to the number of octree nodes. Adaptive structures use less memory than uniform grids for sparse or smooth fields.
+- **Strengths:** Guarantees watertight, manifold output. Handles sharp features and thin walls effectively. Eliminates T-junctions by forcing surface leaves to `max_depth`.
+- **Limitations:** Requires vectorized implicit function evaluation. Finite difference gradients are unreliable for neural SDFs; autodiff gradients are recommended [S1, unofficial]. Over-refinement can occur if `angle_threshold_deg` is set too low (below 25°) due to noisy neural gradients [S1, unofficial].
+- **When to use:** Isosurface extraction from SDFs, especially for mechanical parts or shapes with sharp features where manifold connectivity is critical.
+- **When not to use:** When uniform grid resolution is sufficient and simplicity is preferred, or when the implicit function cannot be evaluated in batches.
 
 ## Background
-The method is based on the `isomesh` library, which implements Dual Contouring on an adaptive octree [S1, unofficial]. Dual Contouring was introduced by Ju, Losasso, Schaefer, and Warren in "Dual Contouring of Hermite Data" (SIGGRAPH 2002) [S1, unofficial]. Manifold Dual Contouring was further developed by Schaefer, Ju, and Warren in "Manifold Dual Contouring" (IEEE TVCG 13(3), 2007) [S1, unofficial]. The quadric error metrics used in QEF vertex placement are based on Garland and Heckbert's "Surface Simplification Using Quadric Error Metrics" (SIGGRAPH 1997) [S1, unofficial]. The adaptive resolution data representation and error data generation concepts are discussed in "IsoSurface Rendering of Adaptive Resolution Data" [S2, unofficial].
+The method is implemented in the `isomesh` library, which uses Dual Contouring for mesh extraction [S1, unofficial]. Dual Contouring was introduced by Ju et al. in "Dual Contouring of Hermite Data" (SIGGRAPH 2002) and extended to manifold dual contouring by Schaefer et al. (IEEE TVCG 2007) [S1, unofficial]. The adaptive octree construction with 2:1 balance is designed to support efficient extraction from SDF-based 3D generative models like DeepSDF and SDF-Diffusion [S1, unofficial].
 
 ## Sources
 [S1] narnia-ai-mason/isomesh, https://github.com/narnia-ai-mason/isomesh, fetched 2026-10-27 (unofficial)
-[S2] IsoSurface Rendering of Adaptive Resolution Data, https://www.cs.unh.edu/~rdb/papers/ARiso.pdf, fetched 2026-10-29 (unofficial)

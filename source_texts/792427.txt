@@ -1,0 +1,169 @@
+Title: Implement PLY header parsing to support pre-allocation and dynamic schemas Description The read_ply_binary function currently reads the PLY header into a buffer but does not parse it. It relies on reading the file stream until EOF...
+
+[Feature]: Implement PLY header parsing to support pre-allocation and dynamic schemas · Issue #672 · kornia/kornia-rs · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+[Feature]: Implement PLY header parsing to support pre-allocation and dynamic schemas #672
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+[Feature]: Implement PLY header parsing to support pre-allocation and dynamic schemas#672
+Copy link
+Assignees
+Labels
+good first issueGood for newcomersGood for newcomershelp wantedExtra attention is neededExtra attention is neededtriagewait for a maintainer to approve and assign this ticketwait for a maintainer to approve and assign this ticket
+Description
+sidd-27
+opened on Jan 27, 2026
+Issue body actions
+Title: Implement PLY header parsing to support pre-allocation and dynamic schemas
+Description
+The read_ply_binary function currently reads the PLY header into a buffer but does not parse it. It relies on reading the file stream until EOF to determine the number of points.
+This approach causes two main issues:
+Performance: Vectors (points, colors, normals) are initialized with zero capacity, causing frequent reallocations as they grow. We need to parse the element vertex <count> line to pre-allocate memory.
+Correctness: The code assumes a fixed property layout. It should parse the header to validate the schema or adapt to different PLY property definitions.
+The goal is to implement a proper parser for the header metadata to resolve the TODO and enable these optimizations.
+Activity
+sidd-27
+added
+enhancementNew feature or requestNew feature or request
+help wantedExtra attention is neededExtra attention is needed
+on Jan 27, 2026
+github-actions
+added
+triagewait for a maintainer to approve and assign this ticketwait for a maintainer to approve and assign this ticket
+on Jan 27, 2026
+github-actions commented on Jan 27, 2026
+github-actionsBot
+on Jan 27, 2026 – with GitHub Actions
+More actions
+⚠️ Before Submitting a PR
+Please wait for a maintainer to approve and assign this issue to you or someone else before submitting a PR. PRs submitted without prior approval and assignment may be closed. See our Contributing Guide for details.
+sidd-27
+added
+good first issueGood for newcomersGood for newcomers
+and removed
+enhancementNew feature or requestNew feature or request
+on Jan 28, 2026
+mathurojus commented on Jan 28, 2026
+mathurojus
+on Jan 28, 2026
+More actions
+Hi @sidd-27 , could you please assign this issue to me? I’d like to work on implementing the PLY header parsing for read_ply_binary, including pre-allocation based on element vertex and handling dynamic property schemas according to the description.
+sidd-27 commented on Jan 28, 2026
+sidd-27
+on Jan 28, 2026
+CollaboratorAuthor
+More actions
+How do you plan to fix it?
+mathurojus commented on Jan 29, 2026
+mathurojus
+on Jan 29, 2026
+More actions
+How do you plan to fix it?
+My plan is to extend read_ply_binary with PLY header parsing that reads lines up to end_header, extracts the element vertex entry to obtain the vertex count, and collects the corresponding property lines for the vertex element. Using this information, I will pre-allocate the output buffers (points, colors, normals, etc.) with the exact vertex capacity instead of growing them dynamically. I will also build a small schema from the property lines (name, type, and order) so the reader can handle different valid vertex layouts, including optional normals and colors. The binary read loop will then use this schema to map each field into the correct output arrays and return a clear error if required properties for points are missing. Finally, I will add tests with multiple PLY headers (varying property order and subsets) to confirm that pre-allocation and dynamic schemas work as intended.
+👍React with 👍1Reacted by Sidd
+sidd-27
+assigned
+mathurojus
+on Jan 29, 2026
+mathurojus commented on Jan 29, 2026
+mathurojus
+on Jan 29, 2026
+More actions
+Hi @sidd-27 , I’ve pushed the changes for PR #684 with the PLY header parsing and dynamic schemas implementation.
+​
+When you get a chance, could you please review it, let me know if anything else is needed, and merge if everything looks good?
+ArnabiDutta commented on Feb 8, 2026
+ArnabiDutta
+on Feb 8, 2026
+More actions
+Good morning @sidd-27,
+I’ve been digging into the read_ply_binary implementation. After testing it against some real-world datasets like the Artec Golden Tiger, I noticed a few things that I think we should address. Since I am still relatively new to Rust, I tried my best to implement these fixes idiomatically, but I would really appreciate your constructive feedback on the approach.
+As per my understanding, I think these are the main issues with the current code and how I've tried to address them:
+Data Integrity (Element Context): The current reader doesn't distinguish between vertex and face elements. In models with large face lists, it keeps reading past the vertex section and interprets face indices as points.
+The Fix: I added a state tracker to the header loop to calculate the exact header_stride and ensure we only parse data strictly within the element vertex scope.
+Memory Efficiency: Without parsing the vertex count from the header, the vectors are growing dynamically.
+The Fix: I'm now using Vec::with_capacity based on the parsed vertex count to eliminate reallocations and unnecessary memory copies.
+Stride Alignment & Robustness: The current logic is fragile if the file schema doesn't perfectly match our structs (e.g., missing normals or extra properties).
+The Fix: I rewrote the reading loop to use a zero-filled buffer. It reads min(header_stride, property_size) bytes, which allows files with partial schemas (like missing normals) to load safely without panicking.
+Security (DoS Prevention): There’s currently no check to verify if the file on disk is actually large enough to hold the data the header claims.
+The Fix: I added a metadata correlation check to prevent "PLY Bombs." It verifies the expected data size against the actual file metadata before any allocation happens.
+Summary of Changes I propose:
+In parser.rs:
+Implemented a state machine in the header loop to strictly isolate vertex properties.
+Added a security check to validate claimed vertex_count * stride against file size on disk.
+Switched to a count-based reading loop using read_exact and consume to handle extra properties (like intensity) without losing alignment.
+In properties.rs:
+I plan to add Dynamic variant to the PlyType enum to support arbitrary schemas:
+```
+pub enum PlyType {
+    OpenSplat,
+    XYZRgbNormals,
+    Dynamic {
+        stride: usize,
+        offsets: std::collections::HashMap<String, usize>,
+    },
+}
+```
+Updated size_of() and deserialize() to handle varying buffer sizes and the new dynamic stride logic.
+Benchmarks (Golden Tiger model - 976,257 vertices)
+Metric
+Original Implementation
+Proposed Refactor
+Point Count
+1,486,239 (Incorrect)
+976,257 (Correct)
+Integrity
+Failed (Read faces as points)
+Passed (Stateful element check)
+Load Time
+629 ms
+416 ms (~33% faster)
+Safety (PLY Bomb)
+Vulnerable (OOM risk)
+Protected (caught in ~36µs)
+I have some questions regarding the implementation
+Partial Data Policy: If a file has no colors or normals, my code currently zero-fills those fields so the cloud still loads. Do you want to allow these "partial" loads, or should the reader be strict and return an error if the file doesn't perfectly match the target struct?
+Format Constraints: For now, I've restricted this to binary_little_endian. Should I keep it that way, or is there a plan to handle Big Endian or ASCII in this same function?
+The Security Aspect: Is the "PLY Bomb" check something you want in the core IO module? I felt it was a simple way to make the library more robust against malformed files.
+Any suggestions or help on implementing the Dynamic variant to the enum properly.
+I've tried to keep the refactor minimal but stable.
+Please let me know if this aligns with what you had in mind for the library!
+sidd-27
+assigned
+ArnabiDutta
+and unassigned
+mathurojus
+on Feb 9, 2026
+styczen commented on Jul 10, 2026
+styczen
+on Jul 10, 2026
+More actions
+@ArnabiDutta Are you still implementing that feature?
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+ArnabiDutta
+Labels
+good first issueGood for newcomersGood for newcomershelp wantedExtra attention is neededExtra attention is neededtriagewait for a maintainer to approve and assign this ticketwait for a maintainer to approve and assign this ticket
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

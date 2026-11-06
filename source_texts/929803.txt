@@ -1,0 +1,175 @@
+Open MPI main development repository. Contribute to open-mpi/ompi development by creating an account on GitHub.
+
+oshmem: atomic/ucx: progress the worker after fetching atomics by jeffhammond · Pull Request #14617 · open-mpi/ompi · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+jeffhammond
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Contributor
+mca_atomic_ucx_fop() only enters the UCX progress loop when the request is still pending. A fetching atomic that completes immediately (the normal case for a PE reading its own symmetric variable) never calls ucp_worker_progress().
+shmem_signal_fetch() is shmem_uint64_atomic_fetch() on the local PE, so a PE polling a signal word in a loop never progressed its worker. Other PEs doing shmem_put_signal(..., SHMEM_SIGNAL_ADD, ...) block in the strong fence (ucp_worker_fence) between the put and the signal, which cannot complete without the target making progress. With three or more PEs the fence never finished and the signal total stayed below the expected sum (for example tests-sos signal_fetch hung and each PE saw sig=1 instead of N*(N-1)/2).
+Call ucp_worker_progress() after every fetching atomic so that polling with atomic fetches keeps the worker serviced.
+Tests: add oshmem/test/shmem (check-shmem harness) with signal_add_total.c (many SHMEM_SIGNAL_ADD put_signal/_nbi, default and ctx, from all PEs to one target; final signal must equal the total) and signal_add_data.c (per-sender data+signal pairs; receiver waits on the signal then checks data).
+oshmem: atomic/ucx: progress the worker after fetching atomics
+…
+4544bbd
+```
+mca_atomic_ucx_fop() only enters the UCX progress loop when the request
+is still pending. A fetching atomic that completes immediately (the
+normal case for a PE reading its own symmetric variable) never calls
+ucp_worker_progress().
+
+shmem_signal_fetch() is shmem_uint64_atomic_fetch() on the local PE, so a
+PE polling a signal word in a loop never progressed its worker. Other PEs
+doing shmem_put_signal(..., SHMEM_SIGNAL_ADD, ...) block in the strong
+fence (ucp_worker_fence) between the put and the signal, which cannot
+complete without the target making progress. With three or more PEs the
+fence never finished and the signal total stayed below the expected sum
+(for example tests-sos signal_fetch hung and each PE saw sig=1 instead of
+N*(N-1)/2).
+
+Call ucp_worker_progress() after every fetching atomic so that polling
+with atomic fetches keeps the worker serviced.
+
+Signed-off-by: Jeff Hammond <jehammond@nvidia.com>
+
+Tests: add oshmem/test/shmem (check-shmem harness) with signal_add_total.c
+(many SHMEM_SIGNAL_ADD put_signal/_nbi, default and ctx, from all PEs to
+one target; final signal must equal the total) and signal_add_data.c
+(per-sender data+signal pairs; receiver waits on the signal then checks
+data).
+
+Signed-off-by: Jeff Hammond <JEHAMMOND@nvidia.com>
+```
+github-actions
+Bot
+added
+the
+Target: main
+label
+Oct 12, 2026
+oshmem/test: treat a skipped check-shmem run as a skip
+…
+74e1505
+```
+The runner exits with status 77 when shmemcc, oshrun or a temporary
+directory is not available.  The check-shmem recipe propagated that
+status to make, which reported the target as failed.  Translate it the
+same way check-memheap does: 77 is a skip, zero is a pass and any other
+status fails the target.
+
+Signed-off-by: Jeff Hammond <JEHAMMOND@nvidia.com>
+```
+bosilca
+requested changes
+Oct 13, 2026
+View reviewed changes
+bosilca
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The diagnosis is right, but the fix is incomplete in a way I think should be addressed before this lands.
+mca_atomic_ucx_cswap() has the identical bug and is not fixed. oshmem/mca/atomic/ucx/atomic_ucx_cswap.c:71 ends in the same opal_common_ucx_wait_request(), which returns at the UCS_OK == request fast path in common_ucx.h:200 without ever entering MCA_COMMON_UCX_WAIT_LOOP. It is registered as module->super.atomic_cswap, so shmem_atomic_compare_swap() is affected exactly like the fetching atomics this PR fixes.
+That matters more than it might look, because compare-and-swap is the canonical polling primitive: spin-on-cswap is what OSHMEM's own MCS lock does in _shmem_mcs_test_lock(), and #14618 is independently working around this very root cause by adding an opal_progress() call inside that function. Fixing cswap here would address it at the source for every caller — the MCS lock, the ticket lock's polling, and user-written test-and-set loops — rather than patching call sites one at a time as each one is discovered.
+Separately: there is no docs/release-notes/changelog/v6.1.x.rst entry, and this is a hang fix in the default path.
+Comment thread
+oshmem/mca/atomic/ucx/atomic_ucx_module.c
+enters the UCX progress loop. A PE that polls a symmetric variable with
+fetching atomics, such as shmem_signal_fetch(), would then never serve
+incoming operations or flushes from other PEs, stalling them. */
+ucp_worker_progress(ucx_ctx->ucp_worker[0]);
+bosilca
+Oct 13, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This is unconditional, so it also runs on the path where opal_common_ucx_wait_request() already executed MCA_COMMON_UCX_WAIT_LOOP. On that path the extra ucp_worker_progress() is pure overhead added to remote atomic latency, which is a headline metric.
+The gap you identified is specifically the inline-completion path, so gating on it is strictly more targeted and leaves remote atomics untouched: capture UCS_OK == status_ptr before wait_request consumes the request, and only progress in that case.
+Comment thread
+oshmem/test/shmem/signal_add_total.c
+#define TIMEOUT_SEC 30
+static uint64_t sigs[NVARIANTS];
+static int data[NVARIANTS][64];
+bosilca
+Oct 13, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+data[NVARIANTS][64] is indexed by me and by pe with no check against np, so this writes out of bounds above 64 PEs — and the harness will run whatever the NP: header asks for, or whatever a user passes. signal_add_data.c handles this correctly with MAXPES plus a np > MAXPES skip; the same treatment here would be consistent.
+Comment thread
+oshmem/test/shmem/signal_add_total.c
+#define ITERS 50
+#define NVARIANTS 4
+#define TIMEOUT_SEC 30
+bosilca
+Oct 13, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Four variants at 30 s each is 120 s, which is exactly OSHRUN_TIMEOUT in the harness. A regression therefore gets killed by the launcher rather than reported as four clean failures with the diagnostics you wrote. Same arithmetic in signal_add_data.c:29. Dropping this to something like 10 s would leave room for the test to report its own result.
+Comment thread
+oshmem/test/shmem/signal_add_data.c
+LEN, &sigs[v][me], 1,
+SHMEM_SIGNAL_ADD, dst);
+/* sbuf is rewritten for the next destination */
+shmem_ctx_quiet(c);
+bosilca
+Oct 13, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This quiet is unnecessary, and it removes the coverage the variant exists for. sbuf[r] is indexed by round and written exactly once per variant, so it is never reused within a variant, and the cross-variant reuse the comment is worried about is already covered by the shmem_ctx_quiet(c) and shmem_barrier_all() at lines 130-131. As written, variants 1 and 3 are indistinguishable from 0 and 2, so the non-blocking put-with-signal path is not really being exercised.
+Comment thread
+oshmem/test/shmem/signal_add_data.c
+/* Receive: wait for each sender's round r, then check the data. */
+{
+time_t start = time(NULL);
+bosilca
+Oct 13, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+start is hoisted outside both the sender loop and the round loop, so TIMEOUT_SEC becomes a single budget shared across all senders times all rounds. Once it expires, every later while body is skipped without performing a single fetch, which leaves got at zero and produces a cascade of misleading "got 0" failures that hide which wait actually timed out. Resetting start before each wait would make the reported failure point meaningful.
+bosilca
+mentioned this pull request
+Oct 13, 2026
+oshmem: treat zero-length put/get as a no-op
+#14616
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+Target: main
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

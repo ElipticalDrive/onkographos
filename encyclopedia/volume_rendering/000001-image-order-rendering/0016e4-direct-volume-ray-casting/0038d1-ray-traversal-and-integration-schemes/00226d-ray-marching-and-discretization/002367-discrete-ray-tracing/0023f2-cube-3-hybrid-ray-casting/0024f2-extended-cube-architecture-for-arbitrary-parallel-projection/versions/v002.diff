@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -7,19 +7,19 @@
+ 
+ ## How it works
+-The method transforms arbitrary parallel projection rays into a format suitable for parallel hardware processing. It operates on a dataset stored in a Cubic Frame Buffer (CFB) and produces a 2D projected image.
++The method transforms arbitrary parallel projection rays into a format suitable for parallel hardware processing [S1]. It operates on a dataset stored in a Cubic Frame Buffer (CFB) and produces a 2D projected image [S1].
+ 
+ ### Inputs and Outputs
+-*   **Input:** A volumetric dataset of size $n \times n \times n$ voxels stored in the CFB. The viewing direction is arbitrary (parallel projection).
+-*   **Output:** A 2D image where each pixel corresponds to a projection ray passing through the volume.
++*   **Input:** A volumetric dataset of size $n \times n \times n$ voxels stored in the CFB. The viewing direction is arbitrary (parallel projection) [S1].
++*   **Output:** A 2D image where each pixel corresponds to a projection ray passing through the volume [S1].
+ 
+ ### Data Structures
+ 
+ **1. Cubic Frame Buffer (CFB)**
+-*   **Layout:** A 3D modular memory organization.
++*   **Layout:** A 3D modular memory organization [S1].
+ *   **Size:** For a $512^3$ dataset, the CFB holds 128M voxels [S1].
+ *   **Access:** Supports conflict-free access to full beams of $n$ voxels in any orthographic direction [S1].
+ 
+ **2. 2D Skewed Buffer (2DSB)**
+-*   **Purpose:** Stores the slanted Projection Ray Plane (PRP) and performs de-skewing.
++*   **Purpose:** Stores the slanted Projection Ray Plane (PRP) and performs de-skewing [S1].
+ *   **Layout:** Physically divided into $n$ modules, diagonally skewed to allow conflict-free writing of horizontal beams and reading of vertical rays [S1].
+ *   **Dimensions:** Width is at least $2n-1$ columns to accommodate parallel rays entering the slanted PRP [S1].
+@@ -28,12 +28,12 @@
+ 
+ **3. Ray Projection Tree (RPT)**
+-*   **Purpose:** Parallel processing of viewing rays to compute pixel values.
++*   **Purpose:** Parallel processing of viewing rays to compute pixel values [S1].
+ *   **Layout:** A hierarchical binary tree of $n-1$ Voxel Combination Units (VCUs) [S1].
+-*   **Leaves:** Accept $n$ voxels along a viewing ray.
+-*   **Root:** Produces the final color for the corresponding pixel.
++*   **Leaves:** Accept $n$ voxels along a viewing ray [S1].
++*   **Root:** Produces the final color for the corresponding pixel [S1].
+ 
+ **4. Voxel Combination Unit (VCU)**
+-*   **Input:** Two voxel values.
+-*   **Operation:** Combines inputs into an output voxel value.
++*   **Input:** Two voxel values [S1].
++*   **Operation:** Combines inputs into an output voxel value [S1].
+ *   **Latency:** 7 time units per combination [S1].
+ 
+@@ -46,7 +46,5 @@
+ 5.  **Retrieve Rays:** Retrieve vertical viewing rays from the 2DSB in parallel [S1].
+ 6.  **Transfer to RPT:** Transfer rays to the RPT. Shift rays during transfer to ensure the closest voxel appears at the desired position in the tree [S1].
+-7.  **Process Rays:** Process rays in parallel through the RPT.
+-    *   *Standard:* Each VCU combines two voxels in 7 time units. The tree processes $\log n$ rays simultaneously in a pipeline fashion after initialization [S1].
+-    *   *Neighborhood (Optional):* For algorithms requiring a 27-voxel neighborhood (central voxel + 26 neighbors), use multiple parallel 2DSBs. Extract the 27-voxel cube and transfer it to the RPT in parallel [S1].
++7.  **Process Rays:** Process rays in parallel through the RPT [S1]. Each VCU combines two voxels in 7 time units. The tree processes $\log n$ rays simultaneously in a pipeline fashion after initialization [S1]. For algorithms requiring a 27-voxel neighborhood (central voxel + 26 neighbors), use multiple parallel 2DSBs. Extract the 27-voxel cube and transfer it to the RPT in parallel [S1].
+ 8.  **Pipeline:** Use a fourth plane in the 2DSB to load the next slanted PRP while three planes are used for extracting the 27-voxel cube for concurrent projection [S1].
+ 
+@@ -54,77 +52,72 @@
+ 
+ ```python
+-# Constants
+-N = 512  # Dataset dimension
+-NUM_MODULES = N
+-NUM_PLANES = 4  # For pipelining
+-
+-def extended_cube_projection(cfb, view_direction):
++def extended_cube_projection(volume, view_dir, n):
+     """
+     Perform arbitrary parallel projection using Extended Cube Architecture.
+-    cfb: Cubic Frame Buffer (3D array)
+-    view_direction: Vector defining the parallel projection rays
++    volume: 3D list of voxels [z][y][x]
++    view_dir: (dx, dy, dz) normalized vector defining parallel projection rays
++    n: Dataset dimension size
+     """
+-    # 1. Identify Projection Ray Planes (PRPs)
+-    # PRPs are slanted planes of rays belonging to the same scan line.
+-    # All PRPs are made parallel to one major axis by fixing a degree of freedom.
+-    prps = get_prps(cfb, view_direction)
+-    
+-    # Initialize 2DSB with multiple planes for pipelining
+-    dsb = initialize_2d_skewed_buffer(width=2*N-1, height=N, planes=NUM_PLANES)
+-    
+-    # Initialize RPT
+-    rpt = initialize_ray_projection_tree(n=N)
+-    
+-    # 2. Process each PRP
+-    for i, prp in enumerate(prps):
+-        # 3. Fetch PRP as beams from CFB
+-        # Fetch n beams parallel to a primary axis in O(n) cycles
+-        beams = fetch_beams_from_cfb(cfb, prp)
++    pixel_values = []  # Initialize to prevent UnboundLocalError
++    dsb_width = 2 * n - 1
++    dsb_height = n
++    num_planes = 4
++    dsb = [[[None for _ in range(dsb_width)] for _ in range(dsb_height)] for _ in range(num_planes)]
++
++    # Process each scan line (Projection Ray Plane)
++    for scan_y in range(n):
++        current_plane = scan_y % num_planes
+         
+-        # 4. Store and De-skew in 2DSB
+-        # Load one beam at a time, closest to furthest
++        # 1. Fetch PRP as n beams parallel to primary axis (Z)
++        beams = []
++        for beam_x in range(n):
++            beam = []
++            for z in range(n):
++                x = beam_x + int(view_dir[0] * z)
++                y = scan_y + int(view_dir[1] * z)
++                if 0 <= x < n and 0 <= y < n:
++                    beam.append(volume[z][y][x])
++                else:
++                    beam.append(0)
++            beams.append(beam)
++
++        # 2. Store and De-skew in 2DSB
+         for beam_idx, beam in enumerate(beams):
+-            # Shift beam left/right to align viewing rays vertically
+-            shift_amount = calculate_shift(beam_idx, view_direction)
+-            dsb.store_beam(beam, shift=shift_amount, plane=i % NUM_PLANES)
++            shift = int(beam_idx * view_dir[0])
++            col_start = (dsb_width // 2) + shift
++            for z, val in enumerate(beam):
++                col = col_start + z
++                if 0 <= col < dsb_width:
++                    dsb[current_plane][z][col] = val
++
++        # 3. Retrieve vertical viewing rays from 2DSB
++        rays = []
++        for col in range(dsb_width):
++            ray = []
++            for z in range(n):
++                val = dsb[current_plane][z][col]
++                if val is not None:
++                    ray.append(val)
++            rays.append(ray)
++
++        # 4. Transfer to RPT and Process
++        for ray in rays:
++            # Shift ray during transfer to ensure closest voxel is at index 0
++            # (Handled by hardware conveyor during transfer)
+             
+-        # 5. Retrieve and Transfer to RPT
+-        # Retrieve vertical viewing rays in parallel
+-        rays = dsb.retrieve_vertical_rays(plane=i % NUM_PLANES)
+-        
+-        # Shift rays during transfer to align closest voxel
+-        processed_rays = []
+-        for ray in rays:
+-            aligned_ray = shift_ray_for_rpt(ray)
+-            processed_rays.append(aligned_ray)
+-            
+-        # 6. Process Rays in RPT
+-        # Pipeline: RPT processes log(n) rays simultaneously
+-        # Each VCU combines 2 voxels in 7 time units
+-        pixel_values = rpt.process_rays(processed_rays)
+-        
+-        # 7. Pipeline Optimization
+-        # While 3 planes are used for extraction, 4th plane loads next PRP
+-        # This is handled by the hardware scheduling of dsb planes
+-        
++            # Process through RPT (VCU tree)
++            current_level = ray[:]
++            while len(current_level) > 1:
++                next_level = []
++                for i in range(0, len(current_level), 2):
++                    v1 = current_level[i]
++                    v2 = current_level[i+1] if i+1 < len(current_level) else 0
++                    # VCU combines two voxels in 7 time units
++                    combined = v1 * 0.5 + v2 * 0.5  # Standard compositing [G]
++                    next_level.append(combined)
++                current_level = next_level
++            pixel_values.append(current_level[0])
++
+     return pixel_values
+-
+-def calculate_shift(beam_idx, view_direction):
+-    """
+-    Calculate the horizontal shift required to align the beam's viewing rays vertically.
+-    The 2DSB must be at least 2n-1 columns wide to handle parallel rays entering the slanted PRP.
+-    """
+-    # Implementation detail: The shift aligns the slanted PRP into a vertical orientation
+-    # within the 2D memory structure.
+-    # Exact formula depends on the specific skewing scheme and view direction.
+-    # [G] Placeholder for specific geometric calculation based on view vector components.
+-    return 0 
+-
+-def shift_ray_for_rpt(ray):
+-    """
+-    Shift the ray during transfer to ensure the closest voxel appears at the desired position.
+-    """
+-    # [G] Placeholder for ray alignment logic.
+-    return ray
+ ```
+ 
+@@ -145,5 +138,5 @@
+ 
+ ### Extended Viewing Architecture for Arbitrary Projections
+-An architecture variant using three additional 2D buffers to accommodate arbitrary parallel and perspective projections [S2, book]. Unlike the rotation technique which distorts the CFB image, this method generates arbitrary projections without distortion but requires fetching a whole projection ray plane and rearranging it [S2, book]. It fetches $n$ beams in $O(n)$ cycles, stores them in a 2D temporary buffer, and rearranges them into 26-connected discrete ray representations using a $O(\log n)$ barrel shifter twice [S2, book]. Each ray is fed into the VMWB for selection of the first opaque voxel in $O(\log n)$ time [S2, book]. Total time is $O(n^2 \mod n \log n)$, allowing real-time arbitrary projection [S2, book].
++An architecture variant using three additional 2D buffers to accommodate arbitrary parallel and perspective projections [S2, book]. Unlike the rotation technique which distorts the CFB image, this method generates arbitrary projections without distortion but requires fetching a whole projection ray plane and rearranging it [S2, book]. It fetches $n$ beams in $O(n)$ cycles, stores them in a 2D temporary buffer, and rearranges them into 26-connected discrete ray representations using a $O(\log n)$ barrel shifter twice [S2, book]. Each ray is fed into the VMWB for selection of the first opaque voxel in $O(\log n)$ time [S2, book]. Total time is $O(n^2 \log n)$, allowing real-time arbitrary projection [S2, book].
+ 
+ ## Operating characteristics
+@@ -151,11 +144,11 @@
+ *   **Memory Complexity:** High. Requires significant hardware resources (e.g., 1,024 chips for memory in a $512^3$ system) [S1].
+ *   **Performance:** Enables interactive rendering rates for $512^3$ datasets [S1].
+-*   **Strengths:** Supports real-time arbitrary parallel projection without image distortion; conflict-free access to beams and rays; pipeline-friendly.
++*   **Strengths:** Supports real-time arbitrary parallel projection without image distortion; conflict-free access to beams and rays; pipeline-friendly [S1][S2, book].
+ *   **Limitations:** Extremely high hardware complexity and intermodule communication requirements; difficult routing; not suitable for perspective projection without more complex architecture [S1].
+-*   **When to Use:** When real-time arbitrary parallel projection of high-resolution volumes is required and hardware resources are available.
++*   **When to Use:** When real-time arbitrary parallel projection of high-resolution volumes is required and hardware resources are available [S1].
+ *   **When Not to Use:** When hardware simplicity is preferred, or for perspective projection (requires more complex architecture) [S1].
+ 
+ ## Background
+-The Extended Cube Architecture was developed as an extension of the original Cube architecture, which was a special-purpose computer architecture for volume visualization supporting only orthographic projection [S1]. The original Cube used a Cubic Frame Buffer (CFB) and beam projection mechanisms [S1]. Arbitrary parallel projections were previously created by rotating the scene and viewing it through a principal orthographic direction, but this distorted the CFB image [S1]. The extended architecture was presented to support real-time arbitrary viewing without distortion [S1]. It builds on the Cube-3 Hybrid Ray-Casting method [3143-cube-3-hybrid-ray-casting.md].
++The Extended Cube Architecture was developed as an extension of the original Cube architecture, which was a special-purpose computer architecture for volume visualization supporting only orthographic projection [S1]. The original Cube used a Cubic Frame Buffer (CFB) and beam projection mechanisms [S1]. Arbitrary parallel projections were previously created by rotating the scene and viewing it through a principal orthographic direction, but this distorted the CFB image [S1]. The extended architecture was presented to support real-time arbitrary viewing without distortion [S1]. It builds on the Cube-3 Hybrid Ray-Casting method [3143-cube-3-hybrid-ray-casting.md] [S1].
+ 
+ ## Sources

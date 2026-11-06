@@ -1,0 +1,176 @@
+:sparkles:  An advanced 3D Gaussian Splatting renderer for THREE.js - Fix f32 precision loss in ray/ellipsoid intersection by n3ur0m4n · Pull Request #469 · sparkjsdev/spark
+
+Fix f32 precision loss in ray/ellipsoid intersection by n3ur0m4n · Pull Request #469 · sparkjsdev/spark · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+n3ur0m4n
+commented
+Oct 5, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+raycast_ellipsoid computes the quadratic discriminant in f32 after mapping the ray into the splat's unit-sphere frame. When the ray origin is far from the splat relative to its size (|o| >> 1, e.g. small splats seen from a few meters away), b^2 - ac suffers catastrophic cancellation. Real hits get rejected, or come back at the wrong distance: in the included test, a 5 mm splat at ~1.4 km is hit about 40 cm short of its surface.
+This replaces it with the Lagrange identity a - |o × d|^2, which equals b^2 - ac for a unit sphere and does not cancel. Everything stays in f32: the change is limited to the two discriminant lines plus the test. The signature and the degenerate/flat-splat branches are unchanged.
+In a random sweep (8M rays, distance/scale ratio 1e2–1e7), the old discriminant starts returning wrong hits around a ratio of ~3e2; with the Lagrange identity this moves to ~2e5. Evaluating it in f64 gives no measurable gain (same threshold, error rates within ~1%), because the remaining error comes from the f32 center subtraction and rotation.
+Found while building a faster picker (see #468). In our tests the fix doubled the share of picks landing within 5 cm of the true surface (12% → 24%) on a multi-million-splat scan.
+Related: #75, #468
+🤖 Generated with Claude Code
+Evaluate ray/ellipsoid discriminant in f64 to avoid cancellation
+…
+93ed240
+```
+b^2 - ac in f32 loses precision when |o| >> 1 in the unit-sphere frame
+(small splats seen from far away), so raycast() rejects real hits or
+returns a wrong distance (about 40 cm off for a 5 mm splat at ~1.4 km in
+the new test). Use the Lagrange identity a - |o x d|^2 in f64.
+
+Refs sparkjsdev#468
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01AMz2xpnJWHh3D72Gy8NsRY
+```
+mrxz
+reviewed
+Oct 5, 2026
+View reviewed changes
+Comment thread
+rust/spark-rs/src/raycast.rs
+Outdated
+Comment on lines
++104
+to
++110
+let o = [local_origin[0] as f64 / scale[0] as f64, local_origin[1] as f64 / scale[1] as f64, local_origin[2] as f64 / scale[2] as f64];
+let d = [local_dir[0] as f64 / scale[0] as f64, local_dir[1] as f64 / scale[1] as f64, local_dir[2] as f64 / scale[2] as f64];
+let a = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+let b = o[0] * d[0] + o[1] * d[1] + o[2] * d[2];
+let cross = [o[1] * d[2] - o[2] * d[1], o[2] * d[0] - o[0] * d[2], o[0] * d[1] - o[1] * d[0]];
+let discriminant = a - (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+mrxz
+Oct 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+For readability the vec3_mul and vec3_dot can be made generic, allowing it to work with both f32 and f64. That way they can be used in the updated code.
+n3ur0m4n
+Oct 5, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Done in d1055fc: vec3_mul, vec3_dot (and vec3_cross) are now generic over f32/f64 and used in the f64 branch instead of the hand-written arithmetic. No behavior change; tests pass.
+n3ur0m4n
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Follow-up: after @oscarlorentzon's suggestion everything is back in f32 (2f68880), so the generic helpers are no longer needed and vec3_mul/vec3_dot are unchanged from main.
+Make vec3 helpers generic over f32/f64
+…
+d1055fc
+```
+Address review: vec3_mul, vec3_dot and vec3_cross are now generic and
+used in the f64 ellipsoid branch instead of the hand-written arithmetic.
+No behavior change.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+oscarlorentzon
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Collaborator
+Thanks for finding and fixing this.
+The new discriminant calculation looks like the key part of the fix. Would it also work to keep it in f32, without converting the origin, direction and scale to f64? In a random sweep that version started getting rays wrong at the same distance as the f64 one and stayed close to it well beyond that. Since the rest of the Rust code does its geometry in f32, that would keep the code unified on f32 and limit the change to the two discriminant lines and the test.
+Keep ray/ellipsoid discriminant in f32
+…
+2f68880
+```
+The Lagrange identity alone fixes the cancellation; evaluating it in f64
+gives no measurable gain because the remaining error comes from the f32
+center subtraction and rotation. Revert the f64 conversion and generic
+helpers so the change is limited to the discriminant and the test.
+
+Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+```
+n3ur0m4n
+commented
+Oct 6, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Agreed, thanks. I checked it with a random sweep (8M rays, distance/scale 1e2–1e7): the f32 Lagrange version starts failing at the same ratio as the f64 one (~2e5) and stays within ~1% of it beyond that; the residual error is dominated by the f32 center subtraction and rotation, not by the discriminant. Switched back to f32 in 2f68880, so the change is now just the two discriminant lines plus the test.
+oscarlorentzon
+approved these changes
+Oct 6, 2026
+View reviewed changes
+oscarlorentzon
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Great, thanks for the changes.
+n3ur0m4n
+mentioned this pull request
+Oct 7, 2026
+Proposal: fast and precise raycast/picking in Spark (non-LoD and LoD/paged)
+#468
+Open
+Hide details
+View details
+dmarcos
+merged commit 1df80ca
+into
+sparkjsdev:main
+Oct 12, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+dmarcos
+commented
+Oct 12, 2026
+Copy link
+Copy Markdown
+Contributor
+Awesome. Thanks so much!
+n3ur0m4n
+mentioned this pull request
+Oct 25, 2026
+Collaboration proposal: spark-next — a WebGPU-first Spark fork
+n3ur0m4n/spark-next#1
+Open
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

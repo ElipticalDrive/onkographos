@@ -1,25 +1,23 @@
 # Adaptive Blending
-
-
 ## Overview
 Adaptive blending is a temporal anti-aliasing technique that reduces ghosting artifacts in volumetric rendering by constraining the maximum amount the historical buffer can be updated per frame [S1, unofficial]. Unlike methods that modify history validity or reject stale data, this approach limits the blend factor itself, ensuring gradual convergence rather than instant replacement [S1, unofficial]. It is distinct from variance clipping, which reduces ghosting more effectively while exhibiting similar temporal instability [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Inputs: current frame color $C_{curr}$, historical frame color $C_{hist}$, nominal blend factor $\alpha$, maximum blend factor $\alpha_{max}$.
-- Output: updated history $C_{hist}^{new}$.
+- Inputs: current frame color $C_{curr}$, historical frame color $C_{hist}$, nominal blend factor $\alpha$, maximum blend factor $\alpha_{max}$ [S1, unofficial].
+- Output: updated history $C_{hist}^{new}$ [S1, unofficial].
 
 **Data Structures:**
-- History buffer storing accumulated color values per froxel. Not given in the sources.
+- History buffer storing accumulated color values per froxel [S1, unofficial].
 
 **Parameters:**
 - $\alpha_{max}$: maximum fraction of the difference allowed per frame. Tested value: 50% ($0.5$) [S1, unofficial].
 
 **Algorithm:**
 The method modifies the standard temporal accumulation update by capping the effective blend factor [S1, unofficial].
-1. Compute the difference between the current frame and the history: $\Delta = C_{curr} - C_{hist}$.
-2. Determine the effective blend factor by capping the nominal factor: $\alpha_{eff} = \min(\alpha, \alpha_{max})$.
-3. Update the history using the limited factor: $C_{hist}^{new} = C_{hist} + \alpha_{eff} \cdot \Delta$.
+1. Compute the difference between the current frame and the history: $\Delta = C_{curr} - C_{hist}$ [S1, unofficial].
+2. Determine the effective blend factor by capping the nominal factor: $\alpha_{eff} = \min(\alpha, \alpha_{max})$ [S1, unofficial].
+3. Update the history using the limited factor: $C_{hist}^{new} = C_{hist} + \alpha_{eff} \cdot \Delta$ [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.

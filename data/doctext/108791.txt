@@ -1,0 +1,1639 @@
+# Voxel Space in C
+
+## Description
+
+Comanche's Voxel Space rendering algorithm written in C using SDL. You can try it [here](https://igvx.ru/vs_sdl/) (browser demo).
+
+![Code_2022-02-02_14-48-09](https://user-images.githubusercontent.com/40758030/152148072-e869ee1a-53e6-4c21-9900-de16a2f9fc67.png)
+
+
+## Bindings
+
+### Keyboard + Mouse
+
+* G - Toggle gravitation
+* LMB (hold) - Free look
+* LMB (double click) - Enable persist free look
+* ESC - Close application
+* W/S - Move camera forward/backward
+* A/D - Rotate camera or strafe (if LMB pressed)
+* E/Q - Adjust camera height (Jump if gravtitation enabled)
+* R/F - Adjust camera pitch
+* J/K - Adjust details level
+* LShift - Increase camera movement speed
+* C - Reset camera pitch
+* Space - Increase render distance
+* Shift + Space - Decrease render distance
+* LCTRL + Space - Reset render distance to default value
+* Alt + Enter - Toggle fullscreen
+
+### Game Controller
+
+* BACK - Toggle gravitation
+* LS - Move camera
+* RS - Rotate camera
+* RSB - Reset camera pitch
+* LT - Increase camera movement speed
+* RT - Increase camera rotation speed
+* LB - Decrease render distance
+* RB - Increase render distance
+* A - Jump (if gravitation enabled)
+* B - Close application
+* Y - Reset render distance to default value
+* D-Pad Up/Down - Adjust camera height
+* Touchpad - Free look
+
+## Building
+
+### Arguments supported by build scripts
+
+* ``dbg`` - Build with debug symbols;
+* ``wall`` - Enable all compiler warnings;
+* ``winf`` - Increase warning level;
+* ``woff`` - Disable all compiler warnings;
+* ``threaded`` - Build with multithreaded renderer;
+* ``sdlimage`` - Build with png/jpg/... images support;
+* ``overlay`` - Build with onscreen information module;
+* ``web`` - Build for browsers using [emscripten](https://emscripten.org/);
+* ``run`` - Run compiled app if build successful.
+
+### Build scripts usage
+
+* On Windows you need to run the ``build.bat`` batch script in Visual Studio Developer Environment. Or... just open Visual Studio Code and press F5 button. If you need png image support, run ``build.bat sdlimage``.
+* On Linux you need to run the ``build.sh`` bash script. If you need png image support, run ``build.sh sdlimage``;
+* Almost all build agrguments can be combined.
+
+## Notes
+
+* You can change map by dropping two images (height map and diffuse map) on the Voxel Space window;
+* The first letter in file name tells to the VoxelSpace how to use dropped file. ``D`` - use as a height map, and ``C`` - use as a diffuse map;
+* Also you can change default map by passing commandline arguments to VoxelSpace: ``vs.exe -dm "path/to/diffuse.png"  -hm "path/to/height.png"`` or ``vs.exe /diffuse "path/to/image.png" /height "path/to/image.png"``;
+* So far there are no VoxelSpace commandline arguments list, see ``src/argparse.c`` for more information.
+
+## Thanks
+
+Thanks to [s-macke](https://github.com/s-macke/VoxelSpace/) for the inspiration and excellent technology explanation :)
+
+## License
+
+The software part of the repository is under the MIT license. Please read the license file for more information. Please keep in mind, that the Voxel Space technology might be still [patented](https://patents.justia.com/assignee/novalogic-inc) in some countries. The color and height maps are reverse engineered from the game Comanche and are therefore excluded from the license.
+
+### src/argparse.c
+```
+#include "engine.h"
+#include "argparse.h"
+#include <SDL_log.h>
+
+#ifdef _WIN32
+#include <direct.h>
+#define chdir _chdir
+#else
+#include <unistd.h>
+#endif
+
+static int TestArg(char *arg, char *test, char *alias) {
+	return SDL_strcasecmp(arg, test) == 0 ||
+	SDL_strcasecmp(arg, alias) == 0;
+}
+
+// TODO: Доделать когда-нибудь
+static char *HelpLines[] = {
+	"",
+	NULL
+};
+
+static int ShowHelp(void) {
+	for(int i = 0; HelpLines[i]; i++)
+		SDL_Log("%s", HelpLines[i]);
+	return 1;
+}
+
+int CommandArgs_Parse(int argc, char *argv[], EngineSettings *es) {
+	char *pathend = SDL_strrchr(argv[0], '\\');
+	if(!pathend) pathend = SDL_strrchr(argv[0], '/');
+	if(pathend) {
+		*pathend = '\0';
+		if(chdir(argv[0]) == -1)
+			SDL_LogWarn(0, "Failed to change directory");
+	}
+
+	int cursor = 1;
+	while(cursor < argc) {
+		char pre, *argstr = argv[cursor++];
+		if((pre = *argstr++) != '/' && pre != '-') {
+			return ShowHelp();
+		}
+		if(TestArg(argstr, "diffuse", "dm")) {
+			es->diffusemap = argv[cursor++];
+		} else if(TestArg(argstr, "height", "hm")) {
+			es->heightmap = argv[cursor++];
+		} else if(TestArg(argstr, "novsync", "nv")) {
+			es->vsync = 0;
+		} else if(TestArg(argstr, "winwidth", "ww")) {
+			es->width = SDL_atoi(argv[cursor++]);
+			if(!es->width) return ShowHelp();
+		} else if(TestArg(argstr, "winheight", "wh")) {
+			es->height = SDL_atoi(argv[cursor++]);
+			if(!es->height) return ShowHelp();
+#ifdef USE_THREADED_RENDER
+		} else if(TestArg(argstr, "numthreads", "nt")) {
+			es->numthreads = SDL_atoi(argv[cursor++]);
+#endif
+		} else return ShowHelp();
+	}
+
+	return 0;
+}
+```
+
+### src/argparse.h
+```
+#ifndef VSARGPARSE_H
+#define VSARGPARSE_H
+#include "engine.h"
+int CommandArgs_Parse(int argc, char *argv[], EngineSettings *es);
+#endif
+```
+
+### src/camera.h
+```
+#ifndef VSCAMERA_H
+#define VSCAMERA_H
+#include <SDL_stdinc.h>
+#include "defines.h"
+
+typedef struct sCamera {
+	Point position; // Текущая позиция камеры
+	float height; // Высота камеры над картой
+	float distance; // Дальность прорисовки
+	float maxhorizon; // Максимальный уровень горизонта
+	float horizon; // Уровень горизонта
+	float angle; // Угол поворота камеры
+	float zstep; // Шаг по оси Z
+} Camera;
+
+static inline void Camera_AdjustDistance(Camera *cam, float value) {
+	cam->distance += value;
+	if(cam->distance < CAMERA_DISTANCE_MIN)
+		cam->distance = CAMERA_DISTANCE_MAX;
+	else if (cam->distance > CAMERA_DISTANCE_MAX)
+		cam->distance = CAMERA_DISTANCE_MIN;
+}
+
+static inline void Camera_AdjustZStep(Camera *cam, float dir) {
+	cam->zstep += dir * CAMERA_ZSTEP_MOD;
+	cam->zstep = min(max(cam->zstep, CAMERA_ZSTEP_MIN), CAMERA_ZSTEP_MAX);
+}
+
+static inline void Camera_ResetDistance(Camera *cam) {
+	cam->distance = CAMERA_DISTANCE_DEFAULT;
+}
+
+static inline void Camera_StrafeHoriz(Camera *cam, float spd) {
+	cam->position.x +=  spd * CAMERA_MOVE_STEP * SDL_cosf(cam->angle);
+	cam->position.y +=  spd * CAMERA_MOVE_STEP * SDL_sinf(-cam->angle);
+}
+
+static inline void Camera_StrafeVert(Camera *cam, float spd) {
+	cam->height += spd * CAMERA_MOVE_STEP;
+}
+
+static inline void Camera_Pitch(Camera *cam, float spd) {
+	cam->horizon -= spd * cam->maxhorizon * CAMERA_HORIZON_STEP;
+	// Ограничиваем горизонт камеры размерностью окна
+	cam->horizon = max(-cam->maxhorizon, min(cam->horizon, cam->maxhorizon));
+}
+
+static inline void Camera_ResetPitch(Camera *cam) {
+	cam->horizon = cam->maxhorizon / 2.0f;
+}
+
+static inline void Camera_Rotate(Camera *cam, float spd) {
+	cam->angle -= spd * CAMERA_ANGLE_STEP;
+}
+
+static inline void Camera_MoveForward(Camera *cam, float spd, int modHeight) {
+    float low = cam->horizon / cam->maxhorizon * 2 - 1;
+    float low_module = SDL_sqrtf(1 + low*low);
+    cam->position.x += spd * CAMERA_MOVE_STEP * SDL_sinf(cam->angle) / low_module;
+    cam->position.y += spd * CAMERA_MOVE_STEP * SDL_cosf(cam->angle) / low_module;
+    if(!modHeight)
+        cam->height -= spd * CAMERA_MOVE_STEP * low / low_module;
+}
+#endif
+```
+
+### src/defines.h
+```
+#ifndef VSCONSTANTS_H
+#define VSCONSTANTS_H
+#ifndef min
+#define min(a, b) (((a)<(b))?(a):(b))
+#define max(a, b) (((a)>(b))?(a):(b))
+#endif
+
+#ifndef NULL
+#define NULL (void *)0
+#endif
+
+#define POINT_ADD(a, b) (a).x += (b).x; (a).y += (b).y;
+#define POINT_MAKE(_x, _y) {.x=_x, .y=_y}
+
+#ifdef USE_THREADED_RENDER
+#define GRAPHICS_TITLE "VoxelSpace SDL (MT)"
+#else
+#define GRAPHICS_TITLE "VoxelSpace SDL"
+#endif
+#define GRAPHICS_WIDTH 800 // Ширина SDL окна
+#define GRAPHICS_HEIGHT ((int)(GRAPHICS_WIDTH * 0.75)) // Высота SDL окна
+
+#define INPUT_MOUSE_SENS 0.0022f // Чувствительность мыши при управлении камерой
+#define INPUT_TOUCH_SENS 80.0f // Чувствительность тач панели геймпада
+#define INPUT_MAX_PADS 8 // Максимально возможное количество обрабатываемых геймпадов
+#define INPUT_MAX_KEYBINDS 4 // Наборы клавиш, обрабатываемые движком
+#define INPUT_GRAVITATION_MULT 9.81f // Множитель гравитации
+#define INPUT_JUMP_VELOCITY 3.0f // Сила прыжка в режиме гравитации
+
+#define CAMERA_MOVE_STEP 4.0f // Скорость передвижения камеры
+#define CAMERA_ANGLE_STEP 0.08f // Шаг вращения камеры
+#define CAMERA_HORIZON_STEP 0.0383f // Шаг изменения угла наклона
+#define CAMERA_HEIGHT_DEFAULT 178.0f // Высота камеры по умолчанию
+#define CAMERA_HEIGHT_MAX 30000.0f // Максимальная высота камеры
+#define CAMERA_HEIGHT_MOD 0.02f // Влияние линии горизонта на вектор движения камеры
+#define CAMERA_DISTANCE_DEFAULT 750.0f // Дальность прорисовки по умолчанию
+#define CAMERA_DISTANCE_MIN 300.0f // Минимальная дальность прорисовки
+#define CAMERA_DISTANCE_MAX 30000.0f // Максимальная дальность прорисовки
+#define CAMERA_DISTANCE_STEP 150.0f // Шаг изменения дальности прорисовки
+#define CAMERA_POSITION_DEFAULT POINT_MAKE(512.0f, 800.0f) // Стартовая позиция камеры
+#define CAMERA_ZSTEP_DEFAULT 0.002f // Шаг по оси Z по умолчанию
+#define CAMERA_ZSTEP_MIN 0.001f // Минимальный шаг по оси Z
+#define CAMERA_ZSTEP_MAX 0.16f // После этого значения изображение становится месивом из пикселей
+#define CAMERA_ZSTEP_MOD 0.001f // Название этого дефайна звучит устрашающе
+#endif
+```
+
+### src/engine.c
+```
+#include "engine.h"
+#include "defines.h"
+#include <SDL.h>
+#ifdef USE_SDL_IMAGE
+#include <SDL_image.h>
+#endif
+#ifdef USE_SDL_TTF
+#include <SDL_ttf.h>
+#endif
+#include "camera.h"
+#include "map.h"
+
+struct sContext {
+	Uint64 lastTime, currTime;
+	float deltaTime;
+	Uint32 stopped;
+	SDL_Window *wnd;
+	SDL_Renderer *render;
+	SDL_Texture *screen;
+	struct sListener {
+		void(*func)(void *);
+		struct sListener *next;
+	} *listeners[LISTEN_TYPES_MAX];
+	Camera camera;
+	Map map;
+} ctx = {
+	.camera = {
+		.zstep = CAMERA_ZSTEP_DEFAULT,
+		.position = CAMERA_POSITION_DEFAULT,
+		.height = CAMERA_HEIGHT_DEFAULT,
+		.distance = CAMERA_DISTANCE_DEFAULT
+	}
+};
+
+static void CompareSDLVersions(const char *libname, const SDL_version *cv, const SDL_version *lv) {
+	if(SDL_VERSIONNUM(cv->major, cv->minor, cv->patch) != SDL_VERSIONNUM(lv->major, lv->minor, lv->patch)) {
+		SDL_LogWarn(0, "%s library version mismatch. Expected: %d.%d.%d, loaded: %d.%d.%d",
+			libname, cv->major, cv->minor, cv->patch, lv->major, lv->minor, lv->patch
+		);
+	} else SDL_Log("%s library version: %d.%d.%d", libname, cv->major, cv->minor, cv->patch);
+}
+
+static int SpawnScreen(void) {
+	int width, height;
+	SDL_GetWindowSize(ctx.wnd, &width, &height);
+	if(ctx.screen) SDL_DestroyTexture(ctx.screen);
+	ctx.screen = SDL_CreateTexture(ctx.render,
+		SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING,
+		width, height
+	);
+	ctx.camera.maxhorizon = (float)height;
+	ctx.camera.horizon = height / 2.0f;
+	Map_SetScreen(&ctx.map, ctx.screen);
+	return ctx.screen == NULL;
+}
+
+int Engine_Start(EngineSettings *es) {
+	SDL_SetMainReady();
+	// Инициализируем SDL
+	if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) != 0) {
+		if(SDL_Init(SDL_INIT_VIDEO) != 0) {
+			SDL_LogCritical(0, "SDL_Init failed: %s", SDL_GetError());
+			return 1;
+		}
+	}
+
+	SDL_version cver, lver;
+	SDL_GetVersion(&lver);
+	SDL_VERSION(&cver);
+	CompareSDLVersions("SDL", &cver, &lver);
+
+#ifdef USE_SDL_IMAGE
+	SDL_IMAGE_VERSION(&cver);
+	CompareSDLVersions("SDL Image", &cver, IMG_Linked_Version());
+	if(IMG_Init(IMG_INIT_JPG | IMG_INIT_PNG) < 0) {
+		SDL_LogCritical(0, "Failed to init SDL2_image: %s.", IMG_GetError());
+		return 1;
+	}
+#endif
+
+#ifdef USE_SDL_TTF
+	SDL_TTF_VERSION(&cver);
+	CompareSDLVersions("SDL TTF", &cver, TTF_Linked_Version());
+#endif
+
+	if((ctx.wnd = SDL_CreateWindow(GRAPHICS_TITLE,
+		SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+		es->width, es->height, SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
+	)) == NULL) {
+		SDL_LogCritical(0, "Failed to create SDL window: %s", SDL_GetError());
+		return 2;
+	}
+	Engine_CallListeners(LISTEN_SDL_WINDOW, ctx.wnd);
+
+	/*
+		Ищем у пользователя рендерер, подходящий
+		под наши рендерерские запросы.
+	*/
+	Uint32 rflags = SDL_RENDERER_TARGETTEXTURE;
+	if(es->vsync) rflags |= SDL_RENDERER_PRESENTVSYNC;
+
+	if((ctx.render = SDL_CreateRenderer(ctx.wnd, -1, rflags)) == NULL) {
+		SDL_LogCritical(0, "Failed to create SDL renderer: %s", SDL_GetError());
+		return 3;
+	} else {
+		SDL_RendererInfo ri;
+		if(SDL_GetRendererInfo(ctx.render, &ri) == 0)
+			SDL_Log("Using %s %s renderer", ri.flags & SDL_RENDERER_ACCELERATED ? "hardware" : "software", ri.name);
+		else
+			SDL_LogError(0, "Failed to retrieve SDL renderer info: %s", SDL_GetError());
+	}
+
+#ifdef USE_THREADED_RENDER
+	/*
+		Устанавливаем количество потоков, используемых для рисования картинки.
+		TODO: Сделать установку этого значения не настолько через жопу.
+	*/
+	ctx.map.rctxcnt = es->numthreads;
+#endif
+
+	/*
+		Создаём текстуру, которая будет использоваться
+		для хранения последнего отрисованного кадра.
+	*/
+	if(SpawnScreen()) {
+		SDL_LogCritical(0, "Failed to create SDL texture: %s", SDL_GetError());
+		return 4;
+	}
+
+	if(es->diffusemap && es->heightmap)
+		Map_Open(&ctx.map, es->diffusemap, es->heightmap);
+
+	Engine_CallListeners(LISTEN_ENGINE_START, NULL);
+	return 0;
+}
+
+void Engine_AddListener(Listeners type, void(*func)(void *)) {
+	struct sListener *newlistener = SDL_calloc(1, sizeof(struct sListener));
+	if(ctx.listeners[type]) newlistener->next = ctx.listeners[type];
+	ctx.listeners[type] = newlistener;
+	newlistener->func = func;
+}
+
+void Engine_CallListeners(Listeners type, void *arg) {
+	struct sListener *listener = ctx.listeners[type];
+
+	while(listener) {
+		listener->func(arg);
+		listener = listener->next;
+	}
+}
+
+int Engine_Update(void) {
+	if(ctx.stopped) return 0;
+	// Обрабатываем накопившиеся эвенты SDL
+	SDL_Event ev;
+	while(SDL_PollEvent(&ev)) {
+		switch(ev.type) {
+			case SDL_QUIT:
+				return 0;
+			case SDL_WINDOWEVENT:
+				if(ev.window.event == SDL_WINDOWEVENT_RESIZED && SpawnScreen()) {
+					SDL_LogCritical(0, "Failed to create SDL texture: %s", SDL_GetError());
+					exit(1);
+				}
+
+			default:
+				Engine_CallListeners(LISTEN_SDL_EVENT, &ev);
+				break;
+		}
+	}
+
+	// Выполняем все функции, ждущие события UPDATE
+	Engine_CallListeners(LISTEN_ENGINE_UPDATE, &ctx.deltaTime);
+
+	// Перерисовываем мир
+	Map_Draw(&ctx.map, &ctx.camera);
+
+	// Рисуем в SDL окне нашу текстуру
+	SDL_RenderClear(ctx.render);
+	SDL_RenderCopy(ctx.render, ctx.screen, NULL, NULL);
+	Engine_CallListeners(LISTEN_ENGINE_DRAW, ctx.render);
+	SDL_RenderPresent(ctx.render);
+
+	// Считаем время, затраченное на полный тик
+	ctx.lastTime = ctx.currTime;
+	ctx.currTime = SDL_GetPerformanceCounter();
+	if(ctx.lastTime > 0) {
+		ctx.deltaTime = (float)((ctx.currTime - ctx.lastTime) * 1000) / SDL_GetPerformanceFrequency();
+		ctx.deltaTime = max(0.1f, min(ctx.deltaTime, 1000.0f));
+	}
+	return 1;
+}
+
+void Engine_ToggleFullscreen(void) {
+	Uint32 flags = SDL_GetWindowFlags(ctx.wnd);
+	flags ^= SDL_WINDOW_FULLSCREEN_DESKTOP;
+	SDL_SetWindowFullscreen(ctx.wnd, flags);
+	if(SpawnScreen()) {
+		SDL_LogCritical(0, "Failed to create SDL texture: %s", SDL_GetError());
+		exit(1);
+	}
+}
+
+void *Engine_GetWindow(void) {
+	return ctx.wnd;
+}
+
+void Engine_GetObjects(Camera **cam, Map **map) {
+	if(cam) *cam = &ctx.camera;
+	if(map) *map = &ctx.map;
+}
+
+float Engine_GetDeltaTime(void) {
+	return ctx.deltaTime;
+}
+
+void Engine_Stop(void) {
+	ctx.stopped = 1;
+}
+
+void Engine_End(void) {
+	if(ctx.wnd) {
+		SDL_DestroyWindow(ctx.wnd);
+		ctx.wnd = NULL;
+	}
+	if(ctx.render) {
+		SDL_DestroyRenderer(ctx.render);
+		ctx.render = NULL;
+	}
+	if(ctx.screen) {
+		SDL_DestroyTexture(ctx.screen);
+		ctx.screen = NULL;
+	}
+
+#ifdef USE_SDL_IMAGE
+	IMG_Quit();
+#endif
+
+	Map_SetScreen(&ctx.map, NULL);
+	Map_Close(&ctx.map);
+	SDL_Quit();
+}
+```
+
+### src/engine.h
+```
+#ifndef VSENGINE_H
+#define VSENGINE_H
+// Говорим SDL, что не нужно переписывать main
+#define SDL_MAIN_HANDLED
+typedef struct sPoint {
+	float x, y;
+} Point;
+
+#include "map.h"
+#include "camera.h"
+
+typedef struct sEngineSettings {
+	int vsync, width, height;
+	char *diffusemap, *heightmap;
+#ifdef USE_THREADED_RENDER
+	int numthreads;
+#endif
+} EngineSettings;
+
+typedef enum eListeners {
+	LISTEN_ENGINE_START, // Вызвать при запуске движка
+	LISTEN_ENGINE_UPDATE, // Вызывать каждый тик
+	LISTEN_ENGINE_DRAW, // Вызывать перед отправкой данных рендереру
+	LISTEN_ENGINE_STOP, // Вызвать при остановке движка
+	LISTEN_CONTROLLER_FAIL, // Вызвать при ошибке чтения геймпада
+	LISTEN_CONTROLLER_ADD, // Вызвать при подключении геймпада к компьютеру
+	LISTEN_CONTROLLER_DEL, // Вызвать при отключении геймпада от компьютера
+	LISTEN_SDL_WINDOW, // Вызвать при создании SDL окна
+	LISTEN_SDL_EVENT, // Вызывать при получении события от SDL
+	LISTEN_TYPES_MAX
+} Listeners;
+
+
+int Engine_Start(EngineSettings *es);
+int Engine_Update(void);
+void Engine_Stop(void);
+void Engine_End(void);
+
+void Engine_ToggleFullscreen(void);
+void *Engine_GetWindow(void);
+void Engine_GetObjects(Camera **cam, Map **map);
+float Engine_GetDeltaTime(void);
+void Engine_AddListener(Listeners type, void(*func)(void *));
+void Engine_CallListeners(Listeners type, void *arg);
+#endif
+```
+
+### src/error.h
+```
+#ifndef VSERROR_H
+#define VSERROR_H
+typedef enum eErrors {
+	ERROR_OK,
+	ERROR_MAPLOAD_FILE,
+	ERROR_MAPLOAD_IMGSIZE,
+	ERROR_MAPLOAD_WIDTHINVALID,
+	ERROR_MAPLOAD_SCALE,
+	ERROR_MAPLOAD_MAPSMISMATCH,
+	ERROR_MALLOC_FAIL,
+	ERROR_MAX
+} Errors;
+
+#ifdef VSERROR_STRINGS
+static const char *Errors_Strings[ERROR_MAX] = {
+	"ERROR_OK",
+	"ERROR_MAPLOAD_FILE",
+	"ERROR_MAPLOAD_IMGSIZE",
+	"ERROR_MAPLOAD_WIDTHINVALID",
+	"ERROR_MAPLOAD_SCALE",
+	"ERROR_MAPLOAD_MAPSMISMATCH",
+	"ERROR_MALLOC_FAIL"
+};
+#endif
+#endif
+```
+
+### src/input.c
+```
+#include <SDL_events.h>
+#include <SDL_stdinc.h>
+#include "defines.h"
+#include "engine.h"
+#include "camera.h"
+#include "map.h"
+#include "input.h"
+
+static int isGravitationEnabled = 0, isOnTheGround = 0;
+static float velocity = 0.0f;
+
+#include "input/kbmouse.c"
+#include "input/gamepad.c"
+
+void Input_Update(void *ptr) {
+	float delta = *(float *)ptr;
+	Map *map = NULL;
+	Camera *cam = NULL;
+	Engine_GetObjects(&cam, &map);
+
+	// Запрашиваем перерисовку мир, если была нажата какая-либо кнопка
+	if(PollControllers(cam, delta * 0.03f) || ProcessKeyboard(cam, delta * 0.03f))
+		map->redraw = 1;
+
+	float minHeight = (float)Map_GetHeight(map, &cam->position);
+	if(isGravitationEnabled) {
+		minHeight += 9.0f;
+		if(!isOnTheGround) {
+			velocity -= delta * INPUT_GRAVITATION_MULT * 0.001f;
+			cam->height += velocity;
+		}
+
+		if(cam->height > minHeight) {
+			isOnTheGround = 0;
+			map->redraw = 1;
+		} else if(!isOnTheGround) {
+			cam->height = minHeight;
+			isOnTheGround = 1;
+			velocity = 0.0f;
+			map->redraw = 1;
+		}
+	} else minHeight += 2.0f;
+
+	// Вытаскиваем камеру из-под земли, если она там
+	cam->height = max(minHeight, min(cam->height, CAMERA_HEIGHT_MAX));
+	// Обнуляем угл камеры, если она прошла полный круг
+	if(SDL_fabsf(cam->angle) > M_PI * 2) cam->angle = 0;
+}
+
+void Input_Event(void *ptr) {
+	SDL_Event *ev = (SDL_Event *)ptr;
+	switch(ev->type) {
+		case SDL_CONTROLLERDEVICEADDED:
+			AddController(ev->cdevice.which);
+			break;
+		case SDL_CONTROLLERDEVICEREMOVED:
+			RemoveController(ev->cdevice.which);
+			break;
+		case SDL_KEYDOWN:
+			ProcessKeyDown(ev->key.keysym.scancode, ev->key.keysym.mod);
+			break;
+		case SDL_KEYUP:
+			ProcessKeyUp(ev->key.keysym.scancode);
+			break;
+		case SDL_MOUSEBUTTONUP:
+			persistGrab = ev->button.clicks > 1;
+			if(persistGrab) isMouseGrabbed = 0;
+		case SDL_MOUSEBUTTONDOWN:
+			if(ev->button.button == SDL_BUTTON_LEFT)
+				ToggleMouseGrab();
+			break;
+		case SDL_MOUSEMOTION:
+			if(isMouseGrabbed)
+				ProcessMouseMotion(ev->motion.xrel, ev->motion.yrel);
+			break;
+	}
+}
+```
+
+### src/input.h
+```
+#ifndef VSINPUT_H
+#define VSINPUT_H
+void Input_Update(void *ptr);
+void Input_Event(void *ptr);
+#endif
+```
+
+### src/main.c
+```
+#include <SDL_log.h>
+#include <SDL_stdinc.h>
+#include <SDL_gamecontroller.h>
+#ifdef EMSCRIPTEN
+#include <emscripten.h>
+#else
+/*
+	На данный момент drag'n'drop в emscripten не поддерживается,
+	соответственно и подключать его нет особой нужды.
+*/
+#include "modules/dragndrop.h"
+#endif
+#ifdef USE_SDL_TTF
+#include "modules/overlay.h"
+#endif
+#include "defines.h"
+#include "engine.h"
+#include "map.h"
+#include "input.h"
+#include "argparse.h"
+
+static void AddController(void *ptr) {
+	SDL_Log("Found controller: %s", SDL_GameControllerName((SDL_GameController *)ptr));
+}
+
+static void FailController(void *ptr) {
+	SDL_Log("Failed to open controller #%d: %s", *(Sint32 *)ptr, SDL_GetError());
+}
+
+static void RemoveController(void *ptr) {
+	SDL_Log("Controller disconnected: %s", SDL_GameControllerName((SDL_GameController *)ptr));
+}
+
+int main(int argc, char *argv[]) {
+	EngineSettings es = {
+		.vsync = 1,
+		.width = GRAPHICS_WIDTH,
+		.height = GRAPHICS_HEIGHT,
+		.diffusemap = "maps/C1W.bmp",
+		.heightmap = "maps/D1.bmp",
+	};
+
+	if(CommandArgs_Parse(argc, argv, &es))
+		return 999;
+
+	Engine_AddListener(LISTEN_ENGINE_UPDATE, Input_Update);
+	Engine_AddListener(LISTEN_SDL_EVENT, Input_Event);
+#ifndef EMSCRIPTEN
+	Engine_AddListener(LISTEN_SDL_WINDOW, DND_Window);
+	Engine_AddListener(LISTEN_SDL_EVENT, DND_Event);
+#endif
+#ifdef USE_SDL_TTF
+	Engine_AddListener(LISTEN_ENGINE_START, Overlay_Init);
+	Engine_AddListener(LISTEN_ENGINE_UPDATE, Overlay_Update);
+	Engine_AddListener(LISTEN_ENGINE_DRAW, Overlay_Draw);
+#endif
+	Engine_AddListener(LISTEN_CONTROLLER_ADD, AddController);
+	Engine_AddListener(LISTEN_CONTROLLER_FAIL, FailController);
+	Engine_AddListener(LISTEN_CONTROLLER_DEL, RemoveController);
+
+	int ret;
+	if((ret = Engine_Start(&es)) != 0) {
+		Engine_End();
+		return ret;
+	}
+
+#ifdef EMSCRIPTEN
+	emscripten_set_main_loop((em_callback_func)Engine_Update, 0, 1);
+#else
+	while(Engine_Update());
+#endif
+
+	Engine_CallListeners(LISTEN_ENGINE_STOP, NULL);
+	Engine_End();
+	return 0;
+}
+```
+
+### src/map.c
+```
+#include <SDL_render.h>
+#include <SDL_log.h>
+#ifdef USE_SDL_IMAGE
+#include <SDL_image.h>
+#endif
+#include "defines.h"
+#include "engine.h"
+#include "error.h"
+#include "camera.h"
+#include "map.h"
+
+static SDL_Surface *ReencodeSurface(SDL_Surface *old) {
+	if(old == NULL) return NULL;
+	SDL_Surface *new = old;
+
+	if(old->format->format != SDL_PIXELFORMAT_ARGB8888) {
+		new = SDL_ConvertSurfaceFormat(old, SDL_PIXELFORMAT_ARGB8888, 0);
+		SDL_FreeSurface(old);
+	}
+
+	return new;
+}
+
+static SDL_Surface *ScaleSurface(SDL_Surface *old, int side) {
+	SDL_Surface *new;
+	if((new = SDL_CreateRGBSurfaceWithFormat(0, side, side, 32, SDL_PIXELFORMAT_ARGB8888)) == NULL)
+		return NULL;
+
+	SDL_Rect rct = {.w = side, .h = side};
+	if(SDL_BlitScaled(old, NULL, new, &rct) != 0) {
+		SDL_FreeSurface(new);
+		return NULL;
+	}
+
+	SDL_FreeSurface(old);
+	return new;
+}
+
+int Map_Open(Map *map, const char *diffuse, const char *height) {
+	SDL_Surface *sDiffuse = NULL, *sHeight = NULL;
+	map->redraw = 1;
+
+#ifndef USE_SDL_IMAGE
+	sDiffuse = ReencodeSurface(SDL_LoadBMP(diffuse));
+	sHeight = ReencodeSurface(SDL_LoadBMP(height));
+#else
+	sDiffuse = ReencodeSurface(IMG_Load(diffuse));
+	sHeight = ReencodeSurface(IMG_Load(height));
+#endif
+
+	if(sDiffuse == NULL || sHeight == NULL)
+		return ERROR_MAPLOAD_FILE;
+
+	if((sDiffuse->w != sDiffuse->h) || (sHeight->w != sHeight->h))
+		return ERROR_MAPLOAD_IMGSIZE;
+
+	if((sHeight->w & (sHeight->w - 1)) != 0)
+		return ERROR_MAPLOAD_WIDTHINVALID;
+
+	if(sHeight->w < sDiffuse->w) {
+		if((sHeight = ScaleSurface(sHeight, sDiffuse->w)) == NULL)
+			return ERROR_MAPLOAD_SCALE;
+	} else if(sDiffuse->w < sHeight->w)
+		return ERROR_MAPLOAD_MAPSMISMATCH;
+
+	map->width = sHeight->w;
+	map->height = sHeight->h;
+	map->shift = (int)(SDL_log10(sHeight->w) / SDL_log10(2));
+	map->color = SDL_calloc(4, sHeight->w * sHeight->h);
+	map->altitude = SDL_calloc(1, sHeight->w * sHeight->h);
+	if(!map->color || !map->altitude)
+		return ERROR_MALLOC_FAIL;
+
+	const unsigned char *datah = sHeight->pixels;
+	unsigned int *datac = sDiffuse->pixels;
+	for(int i = 0; i < sHeight->w * sHeight->h; i++) {
+		map->color[i] = datac[i];
+		map->altitude[i] = datah[i << 2];
+	}
+
+	/*
+		Высвобождаем память, выделенную
+		под два surface объекта, так как
+		они больше не нужны.
+	*/
+	SDL_FreeSurface(sDiffuse);
+	SDL_FreeSurface(sHeight);
+
+	map->ready = 1;
+	return ERROR_OK;
+}
+
+static inline void PrepareToDraw(SDL_Texture *screen, int **pixels, int *pitch, int *height) {
+	SDL_LockTexture(screen, NULL, (void **)pixels, pitch);
+	SDL_QueryTexture(screen, NULL, NULL, NULL, height);
+	*pitch /= sizeof(int);
+
+	// Заливаем экран одним цветом
+	for(int i = 0; i < (*pitch) * (*height); i++)
+		(*pixels)[i] = 0x9090E0FF;
+}
+
+static inline void DrawVerticalLine(int *pixels, int pitch, int x, int top, int bottom, int color) {
+	// Линия за пределами окна? Низя такое.
+	if(top < 0) top = 0;
+	if(top > bottom) return;
+
+	int offset = ((top * pitch) + x);
+	for(int i = top; i < bottom; i++) {
+		pixels[offset] = color;
+		offset += pitch;
+	}
+}
+
+static void DrawFromTo(Map *map, Camera *cam, int *pixels, int pitch, int start, int end) {
+	if(!map->ready) return;
+	float scale = cam->maxhorizon / 2.5f,
+	sinang = SDL_sinf(cam->angle),
+	cosang = SDL_cosf(cam->angle),
+	deltaz = 1.0f;
+
+	for(float z = 1.0f; z < cam->distance; z += deltaz) {
+		Point pLeft = {-cosang * z - sinang * z, sinang * z - cosang * z},
+		pRight = {cosang * z - sinang * z, -sinang * z - cosang * z},
+		pDelta = {
+			(pRight.x - pLeft.x) / (float)pitch,
+			(pRight.y - pLeft.y) / (float)pitch
+		};
+		pLeft.x += pDelta.x * start;
+		pLeft.y += pDelta.y * start;
+		POINT_ADD(pLeft, cam->position);
+		for(int i = start; i < end; i++) {
+			int offset = (((int)pLeft.y & (map->width - 1)) << map->shift) + ((int)pLeft.x & (map->height - 1));
+			int top = (int)((cam->height - (float)map->altitude[offset]) / z * scale + cam->horizon);
+			DrawVerticalLine(pixels, pitch, i, top, map->hiddeny[i], map->color[offset]);
+			/*
+				Слегка ускоряем рендер путём скрытия
+				накладываемых друг на друга частей линий
+			*/
+			if(top < map->hiddeny[i]) map->hiddeny[i] = (int)top;
+			POINT_ADD(pLeft, pDelta);
+		}
+		deltaz += cam->zstep;
+		if(map->optimize && z > map->optdist)
+			deltaz += cam->zstep * (z / 2.0f);
+	}
+}
+
+#ifndef USE_THREADED_RENDER
+void Map_Draw(Map *map, Camera *cam) {
+	if(!map->redraw) return;
+	int *pixels = NULL, pitch = 0, height = 0;
+	PrepareToDraw((SDL_Texture *)map->screen, &pixels, &pitch, &height);
+	for(int i = 0; i < pitch; i++)
+		map->hiddeny[i] = height;
+	DrawFromTo(map, cam, pixels, pitch, 0, pitch);
+
+	SDL_UnlockTexture((SDL_Texture *)map->screen);
+	map->redraw = 0;
+}
+#else
+#include <SDL_cpuinfo.h>
+
+static int RenderThread(void *ptr) {
+	struct sMapRenderCtx *ctx = (struct sMapRenderCtx *)ptr;
+	struct SMapRenderGlobCtx *gctx = ctx->global;
+	SDL_mutex *mtx = SDL_CreateMutex();
+
+	while(1) {
+		SDL_LockMutex(mtx);
+		SDL_CondWait(gctx->unlockcond, mtx);
+		if(gctx->endwork) break;
+		DrawFromTo(
+			gctx->self, gctx->cam,
+			gctx->pixels, gctx->pitch,
+			ctx->start, ctx->end
+		);
+		SDL_SemPost(ctx->semaphore);
+		SDL_UnlockMutex(mtx);
+	}
+
+	SDL_DestroyMutex(mtx);
+	SDL_SemPost(ctx->semaphore);
+	return 0;
+}
+
+void Map_Draw(Map *map, Camera *cam) {
+	if(!map->redraw) return;
+	int *pixels = NULL, pitch = 0, height = 0, failed = 0;
+	PrepareToDraw((SDL_Texture *)map->screen, &pixels, &pitch, &height);
+	if(map->ready) {
+		map->rgctx.cam = cam;
+		map->rgctx.pixels = pixels;
+		map->rgctx.pitch = pitch;
+		for(int i = 0; i < pitch; i++)
+			map->hiddeny[i] = height;
+		SDL_CondBroadcast(map->rgctx.unlockcond);
+		for(int i = 0; i < map->rctxcnt && !failed; i++)
+			failed = SDL_SemWaitTimeout(map->rctxs[i].semaphore, 600) != 0;
+	}
+
+	SDL_UnlockTexture((SDL_Texture *)map->screen);
+	if(failed) {
+		SDL_LogWarn(0, "Failed to draw map, retrying...");
+		return;
+	}
+	map->redraw = 0;
+}
+
+static void DestroyThreads(Map *map) {
+	if(!map->rctxs) return;
+	map->rgctx.endwork = 1;
+	SDL_CondBroadcast(map->rgctx.unlockcond);
+	for(int i = 0; i < map->rctxcnt; i++) {
+		SDL_sem *sem = map->rctxs[i].semaphore;
+		SDL_SemWait(sem);
+		SDL_DestroySemaphore(sem);
+	}
+
+	SDL_free(map->hiddeny);
+	SDL_free(map->rctxs);
+	map->rctxs = NULL;
+}
+#endif
+
+void Map_SetScreen(Map *map, void *screen) {
+	map->screen = screen;
+#ifdef USE_THREADED_RENDER
+	DestroyThreads(map);
+#endif
+	if(!screen) return;
+	int width = 0;
+	if(SDL_QueryTexture(screen, NULL, NULL, &width, NULL) == 0) {
+		map->hiddeny = SDL_calloc(4, width);
+		map->redraw = 1;
+#ifdef USE_THREADED_RENDER
+		map->rgctx.self = map;
+		map->rgctx.endwork = 0;
+		map->rgctx.unlockcond = SDL_CreateCond();
+		// Если это значение не было установлено извне, то ставим его самостоятельно
+		if(!map->rctxcnt) map->rctxcnt = max(SDL_GetCPUCount() - 1, 1);
+		map->rctxs = SDL_calloc(map->rctxcnt, sizeof(struct sMapRenderCtx));
+
+		int perthwidth = (width / map->rctxcnt) + 1;
+		for(int i = 0; i < map->rctxcnt; i++) {
+			struct sMapRenderCtx *ctx = &map->rctxs[i];
+			ctx->semaphore = SDL_CreateSemaphore(0);
+			ctx->global = &map->rgctx;
+			ctx->start = i * perthwidth;
+			ctx->end = min(ctx->start + perthwidth, width);
+			ctx->self = SDL_CreateThread(RenderThread, NULL, ctx);
+		}
+#endif
+	} else {
+		SDL_LogCritical(0, "Failed to query screen texture");
+		exit(1);
+	}
+}
+
+void Map_Close(Map *map) {
+	if(map->altitude) {
+		SDL_free(map->altitude);
+		map->altitude = NULL;
+	}
+	if(map->color) {
+		SDL_free(map->color);
+		map->color = NULL;
+	}
+
+	map->ready = 0;
+}
+```
+
+### src/map.h
+```
+#ifndef VSMAP_H
+#define VSMAP_H
+#include "camera.h"
+#ifdef USE_THREADED_RENDER
+#include <SDL_thread.h>
+#endif
+
+typedef struct sMap {
+	int ready; // Была ли карта успешно загружена
+	int redraw; // Нужно ли перерисовывать карту
+	int width, height; // Размерность карты
+	int shift; // Побитовое смещение ширины карты
+	int optimize; // Оптимизировать отрисовку
+	float optdist; // Дистанция урезания качества
+	int *hiddeny; // Спрятанные линии
+	int *color; // Текстура карты
+	unsigned char *altitude; // Высоты карты
+	void *screen; // Экран отрисовки карты
+
+#ifdef USE_THREADED_RENDER
+	struct SMapRenderGlobCtx {
+		SDL_cond *unlockcond; // Условие разблокировки потоков
+		struct sMap *self; // Указатель на карту
+		Camera *cam; // Указатель на камеру
+		int endwork; // Если равно 1, то все разблокированные потоки завершатся
+		int *pixels; // Указатель на массив пикселей экрана
+		int pitch; // Длина одной строки массива пикселей
+	} rgctx; // Глобальный контекст
+	int rctxcnt; // Количество потоков рендеринга
+	struct sMapRenderCtx {
+		SDL_sem *semaphore; // Семафор для ожидания сигнала от потока
+		struct SMapRenderGlobCtx *global; // Глобальный контекст, одинаков для всех потоков
+		SDL_Thread *self; // Указатель на объект потока
+		int start, end; // Начало и конец куска, который отрисовывает поток
+	} *rctxs;
+#endif
+} Map;
+
+void Map_SetScreen(Map *map, void *screen);
+int Map_Open(Map *map, const char *diffuse, const char *height);
+static inline Uint8 Map_GetHeight(Map *map, Point *p) {
+	if(!map->ready) return 0;
+	unsigned int offset = (((int)p->y & (map->width - 1)) << map->shift) + ((int)p->x & (map->height - 1));
+	return map->altitude[offset];
+}
+void Map_Draw(Map *map, Camera *cam);
+void Map_Close(Map *map);
+#endif
+```
+
+### src/input/gamepad.c
+```
+#include <SDL_gamecontroller.h>
+#include <SDL_version.h>
+#include <SDL_log.h>
+
+#include "../defines.h"
+#include "../engine.h"
+#include "../camera.h"
+
+extern int isGravitationEnabled, isOnTheGround;
+extern float velocity;
+
+static SDL_GameController *pads[INPUT_MAX_PADS] = {0};
+static int padButtonState[SDL_CONTROLLER_BUTTON_MAX] = {0};
+
+static inline void AddController(Sint32 id) {
+	if(id < INPUT_MAX_PADS && SDL_IsGameController(id)) {
+		SDL_GameController *pad = SDL_GameControllerOpen(id);
+		if(pad) {
+			pads[id] = pad;
+			Engine_CallListeners(LISTEN_CONTROLLER_ADD, pad);
+		} else Engine_CallListeners(LISTEN_CONTROLLER_FAIL, &id);
+	}
+}
+
+static inline void RemoveController(Sint32 id) {
+	if(id < INPUT_MAX_PADS && pads[id]) {
+		Engine_CallListeners(LISTEN_CONTROLLER_DEL, pads[id]);
+		SDL_GameControllerClose(pads[id]);
+		pads[id] = NULL;
+	}
+}
+
+static int ProcessControllerButtonDown(Camera *cam, SDL_GameControllerButton btn) {
+	switch(btn) {
+		case SDL_CONTROLLER_BUTTON_B:
+			Engine_Stop();
+			break;
+		case SDL_CONTROLLER_BUTTON_Y:
+			Camera_ResetDistance(cam);
+			return 1;
+		case SDL_CONTROLLER_BUTTON_LEFTSHOULDER:
+		case SDL_CONTROLLER_BUTTON_RIGHTSHOULDER:
+			Camera_AdjustDistance(cam, (btn == SDL_CONTROLLER_BUTTON_LEFTSHOULDER ? -1.0f : 1.0f) * CAMERA_DISTANCE_STEP);
+			return 1;
+		case SDL_CONTROLLER_BUTTON_RIGHTSTICK:
+			Camera_ResetPitch(cam);
+			return 1;
+		case SDL_CONTROLLER_BUTTON_BACK:
+			isGravitationEnabled = !isGravitationEnabled;
+			return 1;
+		default: break;
+	}
+
+	return 0;
+}
+
+static int ProcessControllerButtonHold(Camera *cam, SDL_GameControllerButton btn, float dm) {
+	switch (btn) {
+		case SDL_CONTROLLER_BUTTON_DPAD_UP:
+		case SDL_CONTROLLER_BUTTON_DPAD_DOWN:
+			if(!isGravitationEnabled)
+				Camera_StrafeVert(cam, (btn == SDL_CONTROLLER_BUTTON_DPAD_UP ? dm : -dm));
+			return 1;
+		case SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+		case SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+			Camera_StrafeHoriz(cam, (btn == SDL_CONTROLLER_BUTTON_DPAD_LEFT ? -dm : dm));
+			return 1;
+		case SDL_CONTROLLER_BUTTON_A:
+			if(isGravitationEnabled && isOnTheGround) {
+				velocity += INPUT_JUMP_VELOCITY;
+				isOnTheGround = 0;
+			}
+			return 1;
+
+		default: break;
+	}
+
+	return 0;
+}
+
+static int PollController(SDL_GameController *pad, Camera *cam, float dm) {
+	Point leftStick = {
+		.x = (float)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX) / 32767.0f,
+		.y = (float)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY) / 32767.0f
+	};
+
+	Point rightStick = {
+		.x = (float)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTX) / 32767.0f,
+		.y = (float)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_RIGHTY) / 32767.0f
+	};
+
+	Point trigger = {
+		.x = (float)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT) / 32767.0f,
+		.y = (float)SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) / 32767.0f
+	};
+
+	int handled = 0;
+
+	if(SDL_fabsf(leftStick.x) > 0.15f || SDL_fabsf(leftStick.y) > 0.15f) {
+		float speedup = 1.0f + trigger.x;
+		if(isGravitationEnabled) speedup /= 3.0f;
+		Camera_MoveForward(cam, leftStick.y * speedup * dm, isGravitationEnabled);
+		Camera_StrafeHoriz(cam, leftStick.x * speedup * dm);
+		handled = 1;
+	}
+
+	if(SDL_fabsf(rightStick.x) > 0.15f || SDL_fabsf(rightStick.y) > 0.15f) {
+		float speedup = 1.0f + trigger.y;
+		Camera_Rotate(cam, rightStick.x * speedup * dm);
+		Camera_Pitch(cam, rightStick.y * speedup * dm);
+		handled = 1;
+	}
+
+	for(SDL_GameControllerButton i = 0; i < SDL_CONTROLLER_BUTTON_MAX; i++) {
+		if(SDL_GameControllerGetButton(pad, i)) {
+			if(!padButtonState[i]) {
+				if(ProcessControllerButtonDown(cam, i)) handled = 1;
+				padButtonState[i] = 1;
+			} else if(ProcessControllerButtonHold(cam, i, dm)) handled = 1;
+		} else if(padButtonState[i]) padButtonState[i] = 0;
+	}
+
+#if SDL_VERSION_ATLEAST(2, 0, 14)
+	if(SDL_GameControllerGetNumTouchpads(pad) > 0) {
+		Uint8 state = 0;
+		static float ox = 0.0f, oy = 0.0f;
+		float x = 0.0f, y = 0.0f, dx = 0.0f, dy = 0.0f;
+		if(SDL_GameControllerGetTouchpadFinger(pad, 0, 0, &state, &x, &y, NULL) == 0) {
+			if(state == 1) {
+				if(ox == 0.0f && oy == 0.0f)
+					ox = x, oy = y;
+				dx = x - ox, dy = y - oy;
+				Camera_Rotate(cam, dx * dm * INPUT_TOUCH_SENS);
+				Camera_Pitch(cam, dy * dm * INPUT_TOUCH_SENS);
+				ox = x, oy = y;
+				handled = 1;
+			} else ox = 0.0f, oy = 0.0f;
+		}
+	}
+#endif
+
+	return handled;
+}
+static int PollControllers(Camera *cam, float dm) {
+	for(Sint32 id = 0; id < INPUT_MAX_PADS; id++) {
+		SDL_GameController *pad = pads[id];
+		if(pad && PollController(pad, cam, dm)) return 1;
+	}
+
+	return 0;
+}
+```
+
+### src/input/kbmouse.c
+```
+#include <SDL_scancode.h>
+#include <SDL_keycode.h>
+
+#include "../defines.h"
+#include "../engine.h"
+#include "../camera.h"
+
+extern int isGravitationEnabled, isOnTheGround;
+extern float velocity;
+
+static SDL_Scancode input[INPUT_MAX_KEYBINDS] = {0};
+static int isMouseGrabbed = 0, persistGrab = 0, isSprintActive = 0;
+
+static inline void ToggleMouseGrab(void) {
+	isMouseGrabbed = !isMouseGrabbed || persistGrab;
+	SDL_SetRelativeMouseMode(isMouseGrabbed);
+	SDL_SetWindowGrab(Engine_GetWindow(), isMouseGrabbed);
+}
+
+static void ProcessKeyDown(SDL_Scancode code, Uint16 mod) {
+	Camera *cam = NULL;
+	Map *map = NULL;
+	Engine_GetObjects(&cam, &map);
+	switch(code) {
+		case SDL_SCANCODE_W:
+		case SDL_SCANCODE_S:
+			input[0] = code;
+			break;
+		case SDL_SCANCODE_A:
+		case SDL_SCANCODE_D:
+			input[1] = code;
+			break;
+		case SDL_SCANCODE_E:
+		case SDL_SCANCODE_Q:
+			input[2] = code;
+			break;
+		case SDL_SCANCODE_R:
+		case SDL_SCANCODE_F:
+			input[3] = code;
+			break;
+		case SDL_SCANCODE_SPACE:
+			map->redraw = 1;
+			if(mod & KMOD_CTRL)
+				Camera_ResetDistance(cam);
+			else
+				Camera_AdjustDistance(cam, (mod & KMOD_SHIFT ? -1.0f : 1.0f) * CAMERA_DISTANCE_STEP);
+			break;
+		case SDL_SCANCODE_LSHIFT:
+			isSprintActive = 1;
+			break;
+		case SDL_SCANCODE_C:
+			Camera_ResetPitch(cam);
+			map->redraw = 1;
+			break;
+		case SDL_SCANCODE_J:
+		case SDL_SCANCODE_K:
+			Camera_AdjustZStep(cam, code == SDL_SCANCODE_J ? -1.0f : 1.0f);
+			map->redraw = 1;
+			break;
+		case SDL_SCANCODE_G:
+			isGravitationEnabled = !isGravitationEnabled;
+			velocity = 0.0f;
+			break;
+		case SDL_SCANCODE_O:
+			map->optdist = 3000.0f;
+			map->optimize ^= 1;
+			map->redraw = 1;
+			break;
+		case SDL_SCANCODE_RETURN:
+			if((mod & KMOD_ALT) != 0)
+				Engine_ToggleFullscreen();
+			break;
+		case SDL_SCANCODE_ESCAPE:
+			if(persistGrab) {
+				persistGrab = 0;
+				isMouseGrabbed = 1;
+				ToggleMouseGrab();
+				break;
+			}
+
+			Engine_Stop();
+			break;
+		default: break;
+	}
+}
+
+static void ProcessKeyUp(SDL_Scancode code) {
+	switch(code) {
+		case SDL_SCANCODE_W:
+		case SDL_SCANCODE_S:
+			if(input[0] == code) input[0] = 0;
+			break;
+		case SDL_SCANCODE_A:
+		case SDL_SCANCODE_D:
+			if(input[1] == code) input[1] = 0;
+			break;
+		case SDL_SCANCODE_E:
+		case SDL_SCANCODE_Q:
+			if(input[2] == code) input[2] = 0;
+			break;
+		case SDL_SCANCODE_R:
+		case SDL_SCANCODE_F:
+			if(input[3] == code) input[3] = 0;
+			break;
+		case SDL_SCANCODE_LSHIFT:
+			isSprintActive = 0;
+			break;
+		default: break;
+	}
+}
+
+static int ProcessKeyboard(Camera *cam, float dm) {
+	if(input[3])
+		Camera_Pitch(cam, (input[3] == SDL_SCANCODE_R ? -dm : dm));
+	if(input[2]) {
+		if(isGravitationEnabled) {
+			if(isGravitationEnabled && isOnTheGround) {
+				velocity += INPUT_JUMP_VELOCITY;
+				isOnTheGround = 0;
+			}
+		} else
+			Camera_StrafeVert(cam, (input[2] == SDL_SCANCODE_Q ? -dm : dm));
+	}
+
+	if(input[1]) {
+		float direction = (input[1] == SDL_SCANCODE_A ? -dm : dm);
+		if(isMouseGrabbed)
+			Camera_StrafeHoriz(cam, direction);
+		else
+			Camera_Rotate(cam, direction);
+	}
+	if(input[0]) {
+		float speedMod = isGravitationEnabled ? 2.5f : 1.0f;
+		if (isSprintActive) speedMod *= 0.3f;
+		Camera_MoveForward(cam, (input[0] == SDL_SCANCODE_W ? -dm : dm) / speedMod, isGravitationEnabled);
+	}
+
+	/*
+		Рисуем мир заново, если была нажата
+		хоть какая-то кнопка из зарезервированных.
+	*/
+	for(int i = 0; i < INPUT_MAX_KEYBINDS; i++)
+		if(input[i]) return 1;
+
+	return 0;
+}
+
+static void ProcessMouseMotion(Sint32 rx, Sint32 ry) {
+	Map *map = NULL;
+	Camera *cam = NULL;
+	Engine_GetObjects(&cam, &map);
+	cam->angle -= (float)rx * INPUT_MOUSE_SENS;
+	cam->horizon -= (float)ry * cam->maxhorizon * INPUT_MOUSE_SENS;
+	map->redraw = 1;
+}
+```
+
+### src/modules/dragndrop.c
+```
+#include <SDL_events.h>
+#include <SDL_stdinc.h>
+#include <SDL_log.h>
+#include "dragndrop.h"
+#include "../engine.h"
+#define VSERROR_STRINGS
+#include "../error.h"
+#include "../map.h"
+
+char *droppedFile = NULL, droppedFileType = 0;
+
+void DND_Window(void *ptr) {
+	if(ptr) SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+}
+
+void DND_Event(void *ptr) {
+	SDL_Event *ev = (SDL_Event *)ptr;
+	char *tmpsymptr = NULL, typesym = 0;
+	const char *diffuse = NULL, *height = NULL;
+	Camera *cam = NULL;
+	Map *map = NULL;
+	switch(ev->type) {
+		case SDL_DROPFILE:
+			tmpsymptr = SDL_strrchr(ev->drop.file, '\\');
+			if(!tmpsymptr) tmpsymptr = SDL_strrchr(ev->drop.file, '/');
+			typesym = tmpsymptr ? *++tmpsymptr : *ev->drop.file;
+			if(typesym == 'C' || typesym == 'c' || typesym == 'D' || typesym == 'd') {
+				if(droppedFile) {
+					if(droppedFileType == typesym) {
+						SDL_free(droppedFile);
+						droppedFile = NULL;
+						return;
+					}
+				} else {
+					droppedFile = ev->drop.file;
+					droppedFileType = typesym;
+					return;
+				}
+
+				Engine_GetObjects(&cam, &map);
+				Map_Close(map);
+				if(typesym == 'C' || typesym == 'c')
+					diffuse = ev->drop.file, height = droppedFile;
+				else
+					diffuse = droppedFile, height = ev->drop.file;
+
+				Errors ret;
+				if((ret = Map_Open(map, diffuse, height)) != ERROR_OK)
+					SDL_LogError(0, "Failed to load map: %s", Errors_Strings[ret]);
+
+				SDL_free(ev->drop.file);
+				SDL_free(droppedFile);
+				droppedFile = NULL;
+			}
+			break;
+	}
+}
+```
+
+### src/modules/dragndrop.h
+```
+#ifndef VSDND_H
+#define VSDND_H
+void DND_Window(void *ptr);
+void DND_Event(void *ptr);
+#endif
+```
+
+### src/modules/overlay.c
+```
+#include "../engine.h"
+#include "overlay.h"
+#include <SDL_ttf.h>
+#include <SDL_log.h>
+
+TTF_Font* font = NULL;
+SDL_Color fgcolor = {0, 0, 0};
+float overlaytimer = 0;
+
+struct OverlayContext {
+	float delta;
+	char buffer[48];
+	Camera *cam;
+	Map *map;
+};
+
+struct OverlayLine {
+	const char *format;
+	int(*update)(struct OverlayLine *self, struct OverlayContext *ctx);
+	SDL_Surface *surf;
+	SDL_Texture *tex;
+	SDL_Rect rect;
+	int updated;
+};
+
+static int LineOneUpdate(struct OverlayLine *self, struct OverlayContext *ctx) {
+	return SDL_snprintf(
+		ctx->buffer, 48,
+		self->format,
+		1000.0f / ctx->delta,
+		ctx->delta,
+		ctx->cam->distance
+	);
+}
+
+static int LineTwoUpdate(struct OverlayLine *self, struct OverlayContext *ctx) {
+	return SDL_snprintf(
+		ctx->buffer, 48,
+		self->format,
+		ctx->cam->position.x,
+		ctx->cam->position.y,
+		ctx->cam->height,
+		ctx->cam->angle
+	);
+}
+
+static int LineThreeUpdate(struct OverlayLine *self, struct OverlayContext *ctx) {
+		return SDL_snprintf(
+		ctx->buffer, 48,
+		self->format,
+		ctx->map->width,
+		ctx->map->height
+#ifdef USE_THREADED_RENDER
+		, ctx->map->rctxcnt
+#endif
+	);
+}
+
+static struct OverlayLine lines[] = {
+	{
+		.format = "%.2f (%.2f ms), d: %.0f",
+		.update = LineOneUpdate
+	},
+	{
+		.format = "x: %.2f, y: %.2f, h: %.2f, a: %.2f",
+		.update = LineTwoUpdate
+	},
+	{
+#ifdef USE_THREADED_RENDER
+		.format = "%dx%d | %d",
+#else
+		.format = "%dx%d",
+#endif
+		.update = LineThreeUpdate
+	}
+};
+
+#define LINES_COUNT sizeof(lines) / sizeof(struct OverlayLine)
+
+void Overlay_Init(void *unused) {
+	(void)unused;
+	if(TTF_Init() < 0) {
+		SDL_LogWarn(0, "Failed to init TTF: %s", TTF_GetError());
+		return;
+	}
+
+	if((font = TTF_OpenFont("Roboto-Regular.ttf", 16)) == NULL) {
+		SDL_LogWarn(0, "Failed to load font: %s", TTF_GetError());
+		return;
+	}
+}
+
+void Overlay_Update(void *ptr) {
+	if(!font) return;
+	struct OverlayContext ctx = {
+		.delta = *(float *)ptr
+	};
+
+	if((overlaytimer += ctx.delta) > 500.0f) {
+		Engine_GetObjects(&ctx.cam, &ctx.map);
+		for(int i = 0; i < LINES_COUNT; i++) {
+			struct OverlayLine *line = &lines[i];
+			if(line->surf) continue;
+
+			if(line->update) {
+				if(line->update(line, &ctx) > 0)
+					line->surf = TTF_RenderText_Blended(font, ctx.buffer, fgcolor);
+			} else if(!line->tex)
+				line->surf = TTF_RenderText_Blended(font, line->format, fgcolor);
+
+			if(line->surf) {
+				line->rect.w = line->surf->w, line->rect.h = line->surf->h;
+				line->rect.y = i * line->surf->h;
+			}
+		}
+		overlaytimer = 0;
+	}
+}
+
+void Overlay_Draw(void *ptr) {
+	if(!font) return;
+	SDL_Renderer *renderer = (SDL_Renderer *)ptr;
+	for(int i = 0; i < LINES_COUNT; i++) {
+		struct OverlayLine *line = &lines[i];
+		if(line->surf) {
+			if(line->tex) SDL_DestroyTexture(line->tex);
+			line->tex = SDL_CreateTextureFromSurface(renderer, line->surf);
+			SDL_FreeSurface(line->surf);
+			line->surf = NULL;
+		}
+
+		SDL_RenderCopy(renderer, line->tex, NULL, &line->rect);
+	}
+}
+
+void Overlay_Stop(void *unused) {
+	(void)unused;
+	if(font) TTF_CloseFont(font);
+	for(int i = 0; i < LINES_COUNT; i++) {
+		struct OverlayLine *line = &lines[i];
+		if(line->surf) SDL_free(line->surf);
+		if(line->tex) SDL_free(line->tex);
+	}
+	TTF_Quit();
+}
+```
+
+### src/modules/overlay.h
+```
+#ifndef VSOVERLAY_H
+#define VSOVERLAY_H
+void Overlay_Init(void *unused);
+void Overlay_Update(void *ptr);
+void Overlay_Draw(void *ptr);
+void Overlay_Stop(void *unused);
+#endif
+```

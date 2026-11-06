@@ -1,0 +1,126 @@
+# Hierarchical Marching Cubes Enumeration
+
+Also called: Dual Marching Cubes Tree Traversal
+
+## Overview
+Hierarchical Marching Cubes Enumeration is a recursive octree traversal algorithm that enumerates voxel faces, edges, and vertices to extract isosurface meshes, delegating to a standard Marching Cubes routine at leaf nodes [S1, unofficial]. It solves the problem of adapting Marching Cubes to non-uniform octrees by explicitly traversing adjacent voxels across potentially mismatched tree depths, ensuring consistent geometric context for surface extraction without requiring a globally uniform grid [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+- **Input:** Octree root node, scalar field values, and configuration parameters [S1, unofficial].
+- **Output:** Isosurface mesh (vertices and triangles) [S1, unofficial].
+
+**Data Structures:**
+The tree node structure contains the following fields [S1, unofficial]:
+- `vector_type minimum_`: Minimum coordinate of the voxel.
+- `config_type config_`: Configuration flags.
+- `std::size_t grid_size_`: Grid size within the voxel.
+- `scalar_type grid_width_`: Physical width of the grid.
+- `vector<std::size_t, 3> size_`: Voxel dimensions in grid units.
+- `std::vector<node_type*> children_`: Pointers to child nodes.
+- `std::vector<boost::object_pool<branch_node_type>> branch_pool_`: Memory pool for branch nodes.
+- `std::vector<boost::object_pool<leaf_node_type>> leaf_pool_`: Memory pool for leaf nodes.
+
+**Parameters:**
+- `grid_width`: Default 1.0 [S1, unofficial].
+- `tolerance`: Default 0.1 [S1, unofficial].
+- `maximum_depth`: Default `max(std::size_t)` [S1, unofficial].
+- `nominal_weight`: Default 0.1 [S1, unofficial].
+
+**Algorithm Steps:**
+The algorithm uses specialized recursive functions for faces (`f_x`, `f_y`, `f_z`), edges (`e_xy`, `e_yz`, `e_xz`), and vertices (`v`) [S1, unofficial]. Each function takes two or more tree nodes and a receiver, checks if any node is a branch, and recurses with mapped child indices [S1, unofficial].
+1. **Face Enumeration (`f_x`, `f_y`, `f_z`):** Takes two nodes representing adjacent voxels sharing a face [S1, unofficial]. For `f_x`, the recursion maps child indices to traverse adjacent voxels: `children[2]` with `children[0]`, `children[3]` with `children[1]`, `children[6]` with `children[4]`, and `children[7]` with `children[5]` [S1, unofficial]. Similar index mappings apply for `f_y` and `f_z` based on face orientation [S1, unofficial]. If both nodes are leaves, it calls the Marching Cubes routine for the face [S1, unofficial].
+2. **Edge Enumeration (`e_xy`, `e_yz`, `e_xz`):** Takes four nodes representing voxels sharing an edge [S1, unofficial]. It recurses on specific child index pairs to traverse the edge and eventually calls `enumerate_impl_v` with eight nodes [S1, unofficial].
+3. **Vertex Enumeration (`v`):** Takes eight nodes representing the eight voxels sharing a vertex [S1, unofficial]. If any node is a branch, it recurses with child indices `[7, 6, 5, 4, 3, 2, 1, 0]` [S1, unofficial]. If all eight nodes are leaves, it extracts vertex pointers and calls the standard Marching Cubes routine [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def is_branch(node):
+    """Returns True if the node has children (is a branch node)."""
+    return node.children_ is not None and len(node.children_) > 0
+
+def get_node(node, index):
+    """Falls back to the current node if the child does not exist (handles mismatched depths)."""
+    return node.children_[index] if is_branch(node) else node
+
+def traverse_face(n1, n2, face_type, receiver):
+    """Enumerates a face shared by two voxels."""
+    if is_branch(n1) or is_branch(n2):
+        # Map child indices based on face_type
+        # Exact mappings for f_y and f_z are not specified in the sources
+        face_mappings = {
+            'x': [(2, 0), (3, 1), (6, 4), (7, 5)]
+        }
+        pairs = face_mappings.get(face_type, [(2, 0), (3, 1), (6, 4), (7, 5)])
+        for i1, i2 in pairs:
+            traverse_face(get_node(n1, i1), get_node(n2, i2), face_type, receiver)
+    else:
+        receiver.process_face(n1, n2, face_type)
+
+def traverse_edge(n1, n2, n3, n4, edge_type, receiver):
+    """Enumerates an edge shared by four voxels."""
+    if any(is_branch(n) for n in [n1, n2, n3, n4]):
+        # Recurses on specific child index pairs to traverse the edge
+        # Exact child index pairs for edges are not specified in the sources
+        pass # Not given in the sources.
+    else:
+        traverse_vertex(n1, n2, n3, n4, receiver)
+
+def traverse_vertex(n1, n2, n3, n4, n5, n6, n7, n8, receiver):
+    """Enumerates a vertex shared by eight voxels (corresponds to enumerate_impl_v)."""
+    if any(is_branch(n) for n in [n1, n2, n3, n4, n5, n6, n7, n8]):
+        # Recurses with child indices [7, 6, 5, 4, 3, 2, 1, 0]
+        indices = [7, 6, 5, 4, 3, 2, 1, 0]
+        nodes = [get_node(n, i) for n, i in zip([n1, n2, n3, n4, n5, n6, n7, n8], indices)]
+        traverse_vertex(*nodes, receiver)
+    else:
+        receiver.process_vertex(n1, n2, n3, n4, n5, n6, n7, n8)
+```
+
+**Edge Cases and Pitfalls:**
+- **Mismatched Tree Depths / Boundary Conditions:** The algorithm handles this by using the ternary operator `b1 ? *b1->children()[i] : n1` to fall back to the current node `n1` when a child does not exist [S1, unofficial].
+
+## Subtopics
+
+### [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md)
+Uses interval trees for traversal instead of explicit face/edge/vertex enumeration.
+
+### [Marching Cubes with Octree](1259-marching-cubes-with-octree.md)
+Applies Marching Cubes directly on an octree, risking cracks if depth mismatches are not resolved.
+
+### [IsoOctree](1744-isooctree.md)
+Uses a purpose-built octree structure with different traversal and data layouts.
+
+### [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md)
+Early octree method focusing on efficient traversal and memory packing.
+
+### [Ashida and Badla Octree Contouring](2117-ashida-and-badla-octree-contouring.md)
+Specialized contouring method with distinct edge-case handling.
+
+### [Unconstrained Isosurface Extraction on Arbitrary Octrees](2413-unconstrained-isosurface-extraction-on-arbitrary-octrees.md)
+Allows arbitrary octree structures without strict depth constraints.
+
+### [Consistent Isovertex Definition via Edge-Trees](2427-consistent-isovertex-definition-via-edge-trees.md)
+Uses edge-trees to guarantee consistent vertex definitions across the surface.
+
+### [Adaptive Octree Generation with Flatness Criterion](2482-adaptive-octree-generation-with-flatness-criterion.md)
+Generates octrees based on a flatness metric rather than raw scalar thresholds.
+
+### [Sampled DMC](3813-sampled-dmc.md)
+Applies sampling strategies to the Dual Marching Cubes traversal pipeline.
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Measured Performance:** Not given in the sources.
+- **Scaling:** Not given in the sources.
+- **Strengths and Limitations:** Not given in the sources.
+- **When to use / When not to use:** Not given in the sources.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] planaria/dmc, https://github.com/planaria/dmc, fetched 2026-10-26 (unofficial)

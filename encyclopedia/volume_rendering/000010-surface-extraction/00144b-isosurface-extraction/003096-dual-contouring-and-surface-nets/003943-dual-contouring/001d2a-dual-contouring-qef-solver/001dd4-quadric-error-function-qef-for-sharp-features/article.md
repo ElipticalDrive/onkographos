@@ -1,0 +1,240 @@
+# Quadric Error Function (QEF) for Sharp Features
+
+Also called: QEF for Sharp Features, QEF Solver, Quadric Error Function Solver, QEF Solver using SVD
+
+## Overview
+Quadric Error Function (QEF) for Sharp Features is a vertex relocation technique used in Dual Contouring to position a single vertex within an octree cell such that it accurately represents sharp features (edges and corners) of the isosurface [S1, unofficial]. It solves the problem of standard Dual Contouring producing smoothed or inaccurate vertices at high-curvature regions by minimizing the sum of squared distances from the vertex to the tangent planes defined by isosurface intersection points [S1, unofficial]. It sets itself apart from its siblings, such as [Brute-Force QEF Solver](4403-brute-force-qef-solver.md) and [QEF Solver Initialization](4722-qef-solver-initialization.md), by explicitly constructing "supporting planes" in addition to tangent planes to stabilize the minimization process and prevent numerical instabilities inherent in standard Quadric Error Metric (QEM) approaches [S1, unofficial].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A set of $N$ intersection point-normal pairs $\{(p_i, n_i)\}$ for $i=0 \dots N-1$, where $p_i$ is the position where the isosurface intersects an edge of the cell, and $n_i$ is the gradient normal at that point.
+*   **Output:** A 3D vertex position $v$ that minimizes the combined quadric error function.
+
+**Data Structures**
+The method accumulates constraints into a symmetric data structure. Based on [S2, unofficial], the `QefData` structure holds the following fields:
+*   `ata_00`, `ata_01`, `ata_02`, `ata_11`, `ata_12`, `ata_22`: Elements of the symmetric $3 \times 3$ matrix $A^T A$ (or $ATA$).
+*   `atb_x`, `atb_y`, `atb_z`: Elements of the vector $A^T b$ (or $ATB$).
+*   `btb`: Scalar value representing the accumulated squared dot products.
+*   `massPoint_x`, `massPoint_y`, `massPoint_z`: The accumulated sum of intersection points (used to compute the centroid).
+*   `numPoints`: Integer count of intersection points $N$.
+
+**Algorithm Steps**
+
+1.  **Compute Mass Point and Normal:**
+    Calculate the mass point $p_{mass}$ as the arithmetic mean of all intersection points $p_i$:
+    $$ p_{mass} = \frac{1}{N} \sum_{i=0}^{N-1} p_i $$
+    Calculate the mass normal $n_{mass}$ as the average of all intersection normals $n_i$, normalized:
+    $$ n_{mass} = \frac{\sum_{i=0}^{N-1} n_i}{\left\| \sum_{i=0}^{N-1} n_i \right\|} $$
+    [S1, unofficial]
+
+2.  **Construct Tangent Plane Quadrics ($Q_I$):**
+    For each intersection point $p_i$ with normal $n_i$, define a tangent plane equation $n_i^T (v - p_i) = 0$. This corresponds to the standard QEM formulation [S3, unofficial].
+    The quadric for a single plane $n^T v + d = 0$ (where $d = -n^T p_i$) is defined by:
+    $$ A = n n^T $$
+    $$ b = d n $$
+    $$ c = d^2 $$
+    Accumulate these into the global $ATA$, $ATB$, and $btb$ matrices/vectors. Specifically, for each $i$:
+    *   Normalize $n_i$.
+    *   Compute $d_i = -n_i \cdot p_i$.
+    *   Update $ATA \leftarrow ATA + n_i n_i^T$.
+    *   Update $ATB \leftarrow ATB + d_i n_i$.
+    *   Update $btb \leftarrow btb + d_i^2$.
+    [S2, unofficial] [S1, unofficial]
+
+3.  **Construct Supporting Plane Quadrics ($Q_S$):**
+    To stabilize the solution for sharp features, construct supporting planes for each intersection point [S1, unofficial].
+    For each $i$:
+    *   Compute the edge vector $e$:
+        $$ e = \frac{p_{mass} - p_i}{\| p_{mass} - p_i \|} $$
+        *Pitfall:* If $p_{mass} = p_i$, $e$ is zero. Skip this supporting plane or handle as degenerate [S1, unofficial].
+    *   Compute the intermediate normal $n_e$:
+        $$ n_e = \frac{n_{mass} + n_i}{\| n_{mass} + n_i \|} $$
+    *   Compute the supporting plane normal $n_s$:
+        $$ n_s = \frac{n_e \times e}{\| n_e \times e \|} $$
+        *Pitfall:* If $e$ is parallel to $n_e$, the cross product is zero. Skip this supporting plane [S1, unofficial].
+    *   The supporting plane passes through $p_{mass}$ with normal $n_s$. The plane equation is $n_s^T (v - p_{mass}) = 0$.
+    *   Let $d_s = -n_s \cdot p_{mass}$.
+    *   Accumulate the supporting plane quadric into $ATA$, $ATB$, and $btb$ using the same logic as Step 2, but scaled by a factor $a$.
+
+4.  **Combine Quadrics:**
+    The final error function $E(v)$ is the sum of the tangent quadrics $Q_I$ and the supporting quadrics $Q_S$, weighted by factor $a$:
+    $$ Q = Q_I + a Q_S $$
+    The parameter $a$ controls feature sharpness. A typical value is $0.5$ [S1, unofficial]. Small values produce sharper features but may introduce instability; large values smooth the feature more.
+
+5.  **Solve the Linear System:**
+    The problem is to minimize $E(v) = v^T (ATA) v - 2 (ATB)^T v + btb$. This is equivalent to solving the linear system:
+    $$ (ATA) v = ATB $$
+    Since $ATA$ may be rank-deficient or ill-conditioned (especially for edges where $N < 3$), use Singular Value Decomposition (SVD) [S2, unofficial] [S3, unofficial].
+    
+    *Centering:* To improve numerical stability, shift the coordinate system to the mass point.
+    Let $v = x + p_{mass}$.
+    The system becomes:
+    $$ (ATA) x = ATB - (ATA) p_{mass} $$
+    Let $b' = ATB - (ATA) p_{mass}$.
+    
+    *SVD Solve:*
+    Compute the SVD of $ATA = U D V^T$. Since $ATA$ is symmetric, $U=V$.
+    Compute the pseudoinverse of the diagonal matrix $D$, denoted $D^+$, where singular values $\sigma_j < \text{pinv\_tol}$ are treated as zero.
+    $$ x = V D^+ U^T b' $$
+    [S2, unofficial]
+    
+    *Final Position:*
+    $$ v = x + p_{mass} $$
+    [S2, unofficial]
+
+**Parameters**
+*   $a$: Scaling factor for supporting planes. Typical value: $0.5$ [S1, unofficial].
+*   `svd_tol`: Tolerance for SVD convergence/singular value thresholding. Not specified in sources.
+*   `svd_sweeps`: Maximum number of Givens rotation sweeps for the SVD algorithm. Not specified in sources.
+*   `pinv_tol`: Tolerance for pseudoinverse computation. Singular values below this are treated as zero. Not specified in sources.
+
+**Pseudocode**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import numpy as np
+
+def solve_qef_sharp_features(intersection_points, intersection_normals, a=0.5):
+    """
+    Solves the QEF for sharp features using supporting planes and SVD.
+    
+    Args:
+        intersection_points: List of 3D vectors (p_i).
+        intersection_normals: List of 3D vectors (n_i).
+        a: Weight for supporting planes (default 0.5).
+        
+    Returns:
+        Vertex position v.
+    """
+    n = len(intersection_points)
+    if n == 0:
+        raise ValueError("No intersection points provided")
+
+    # Step 1: Compute Mass Point and Mass Normal
+    mass_point = np.zeros(3)
+    mass_normal = np.zeros(3)
+    
+    for i in range(n):
+        mass_point += intersection_points[i]
+        mass_normal += intersection_normals[i]
+        
+    mass_point /= n
+    norm_mass_normal = np.linalg.norm(mass_normal)
+    if norm_mass_normal == 0:
+        # Degenerate case: all normals are zero or cancel out.
+        # Fallback to mass point.
+        return mass_point
+    mass_normal /= norm_mass_normal
+
+    # Initialize ATA, ATB, btb
+    ata = np.zeros((3, 3))
+    atb = np.zeros(3)
+    btb = 0.0
+
+    # Step 2 & 3: Accumulate Tangent and Supporting Plane Quadrics
+    for i in range(n):
+        p_i = intersection_points[i]
+        n_i = intersection_normals[i]
+        
+        # Normalize normal
+        norm_n_i = np.linalg.norm(n_i)
+        if norm_n_i == 0:
+            continue
+        n_i = n_i / norm_n_i
+
+        # --- Tangent Plane Quadric (Q_I) ---
+        # Plane: n_i . (v - p_i) = 0 => n_i . v - n_i . p_i = 0
+        # d = -n_i . p_i
+        d_i = -np.dot(n_i, p_i)
+        
+        # A = n_i * n_i^T
+        ata += np.outer(n_i, n_i)
+        # b = d_i * n_i
+        atb += d_i * n_i
+        # c += d_i^2 (not needed for solving Ax=b, but part of E(v))
+        btb += d_i ** 2
+
+        # --- Supporting Plane Quadric (Q_S) ---
+        # Compute edge vector e
+        diff = mass_point - p_i
+        norm_diff = np.linalg.norm(diff)
+        
+        if norm_diff > 1e-8:
+            e = diff / norm_diff
+            
+            # Compute intermediate normal n_e
+            n_e_raw = mass_normal + n_i
+            norm_n_e = np.linalg.norm(n_e_raw)
+            
+            if norm_n_e > 1e-8:
+                n_e = n_e_raw / norm_n_e
+                
+                # Compute supporting normal n_s = n_e x e
+                n_s = np.cross(n_e, e)
+                norm_n_s = np.linalg.norm(n_s)
+                
+                if norm_n_s > 1e-8:
+                    n_s = n_s / norm_n_s
+                    
+                    # Plane: n_s . (v - mass_point) = 0
+                    # d_s = -n_s . mass_point
+                    d_s = -np.dot(n_s, mass_point)
+                    
+                    # Accumulate with weight a
+                    ata += a * np.outer(n_s, n_s)
+                    atb += a * d_s * n_s
+                    btb += a * d_s ** 2
+
+    # Step 5: Solve (ATA) v = ATB using SVD with centering
+    
+    # Centering: v = x + mass_point
+    # ATA * (x + mass_point) = ATB
+    # ATA * x = ATB - ATA * mass_point
+    tmp = ata @ mass_point
+    rhs = atb - tmp
+    
+    # SVD of ATA
+    # Since ATA is symmetric, U = V
+    u, s, vh = np.linalg.svd(ata)
+    
+    # Pseudoinverse of singular values
+    pinv_tol = 1e-8
+    s_inv = np.zeros_like(s)
+    for j in range(len(s)):
+        if s[j] > pinv_tol:
+            s_inv[j] = 1.0 / s[j]
+        else:
+            s_inv[j] = 0.0
+            
+    # x = V * D^+ * U^T * rhs
+    # vh is V^T, so V = vh.T
+    # x = vh.T @ diag(s_inv) @ u.T @ rhs
+    x = vh.T @ (s_inv * (u.T @ rhs))
+    
+    v = x + mass_point
+    return v
+```
+
+## Subtopics
+
+### [QEF Boundary Constrained Vertex Placement](1740-qef-boundary-constrained-vertex-placement.md)
+A fallback strategy for when the unconstrained QEF solution lies outside the voxel cell. It constrains the search space hierarchically (interior -> faces -> edges -> corners). It sets itself apart by handling boundary violations explicitly rather than relying solely on SVD minimization.
+
+## Operating characteristics
+*   **Time Complexity:** Dominated by the SVD of a $3 \times 3$ matrix, which is constant time $O(1)$ per cell. Accumulating the quadrics is $O(N)$ where $N$ is the number of intersection points (typically 3 to 12).
+*   **Memory Complexity:** $O(1)$ per cell for storing the accumulated $ATA$, $ATB$, and $btb$ values.
+*   **Performance:** Computationally efficient compared to general-purpose QEF solvers or iterative methods [S1, unofficial].
+*   **Strengths:** Preserves sharp features (edges and corners) better than standard Dual Contouring or Marching Cubes. Stabilizes the solution against numerical instabilities that occur with standard QEM when planes are nearly parallel or coincident [S1, unofficial].
+*   **Limitations:** Requires careful handling of degenerate cases (zero vectors, parallel normals) to avoid division by zero or invalid cross products [S1, unofficial]. The choice of parameter $a$ affects sharpness vs. stability trade-off.
+*   **When to use:** When extracting isosurfaces with sharp features using Dual Contouring and vertex accuracy at corners/edges is critical.
+*   **When not to use:** For smooth surfaces where feature preservation is not desired, or when computational resources are extremely limited and approximate smoothing is acceptable.
+
+## Background
+The Quadric Error Metric (QEM) was introduced by Garland and Heckbert in 1997 [S1, unofficial]. It was originally designed for mesh simplification but was adapted for isosurface extraction in Dual Contouring by Ju et al. (2002) [S1, unofficial]. The specific variation using supporting planes to stabilize sharp feature extraction was detailed in later works on Dual Contouring for terrain and complex surface modeling [S1, unofficial].
+
+## Sources
+[S1] Generating Smooth High-Quality Isosurfaces for Interactive Modeling and Visualization of Complex Terrains, https://doi.org/10.2312/pe/vmv/vmv12/079-086, fetched 2026-10-26 (unofficial)
+[S2] nickgildea/DualContouringSample, https://github.com/nickgildea/DualContouringSample, fetched 2026-10-26 (unofficial)
+[S3] http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, http://www.oocities.org/tzukkers/isosurf/isosurfaces.html, fetched 2026-10-30 (unofficial)

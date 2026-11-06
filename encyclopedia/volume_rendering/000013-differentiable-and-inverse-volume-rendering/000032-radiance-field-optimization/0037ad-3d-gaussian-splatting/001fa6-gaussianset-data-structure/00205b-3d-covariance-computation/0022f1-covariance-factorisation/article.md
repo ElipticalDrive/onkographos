@@ -1,0 +1,68 @@
+# Covariance Factorisation
+
+Also called: RQ Decomposition for Covariance, Rotation and Scale Parameterization
+
+## Overview
+Covariance Factorisation parameterizes the 3D Gaussian covariance matrix by decomposing it into unconstrained rotation and scale components, ensuring the resulting matrix remains positive semi-definite (PSD) during gradient-based optimization [S1, unofficial]. This approach distinguishes itself from direct covariance optimization by decoupling geometric shape (scale) from orientation (rotation), allowing stable unconstrained gradient descent without requiring projection steps to enforce PSD constraints [S1, unofficial]. It builds on [3D Covariance Computation](2231-3d-covariance-computation.md) and differs from [Pre-computed Covariance and Color Buffer Generation](2817-pre-computed-covariance-and-color-buffer-generation.md) by keeping the covariance parameters differentiable and optimized end-to-end rather than precomputed.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Unconstrained optimization variables representing rotation and scale. [S1, unofficial]
+*   **Output:** A $3 \times 3$ symmetric positive semi-definite covariance matrix $\Sigma$. [S1, unofficial]
+
+**Data Structures:**
+The method relies on two primary parameter sets per Gaussian primitive:
+1.  **Scale ($s$):** A vector of 3 unconstrained values representing the standard deviations along the principal axes. [G]
+2.  **Rotation ($R$):** A representation of orientation, typically derived from unconstrained parameters that map to a rotation matrix or quaternion. [G]
+
+**Steps:**
+1.  **Parameterize Scale:** The scale parameters are optimized directly. To ensure numerical stability, the diagonal elements are constrained using a softplus activation and a minimum floor: $\sigma_i = \sigma_{\min} + \text{softplus}(s_i)$ [S2, unofficial].
+2.  **Parameterize Rotation:** The rotation parameters are optimized unconstrained and converted into a rotation matrix $R$ representing the orientation of the Gaussian ellipsoid [S1, unofficial].
+3.  **Reconstruct Covariance:** The covariance matrix $\Sigma$ is reconstructed from the scale and rotation parameters to guarantee positive semi-definiteness: $\Sigma = R \cdot \text{diag}(s)^2 \cdot R^T$ [G].
+
+**Formulas:**
+*   **Covariance Reconstruction:** $\Sigma = R \cdot \text{diag}(s)^2 \cdot R^T$ [G].
+*   **Scale Floor:** $\sigma_i = \sigma_{\min} + \text{softplus}(s_i)$ [S2, unofficial].
+    *   $\sigma_{\min} = 1/\sqrt{12}$ voxels [S2, unofficial].
+
+**Parameters:**
+*   **$\sigma_{\min}$:** Minimum standard deviation, set to $1/\sqrt{12}$ voxels. This value represents the standard deviation of a uniform voxel, ensuring no splat is narrower than a voxel’s own spread [S2, unofficial].
+*   **$a_{\max}$:** A configurable maximum amplitude bound. Amplitudes are made non-negative by a softplus activation and upper-bounded by $a_{\max}$ [S2, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The reconstruction $R \cdot \text{diag}(s)^2 \cdot R^T$ must be computed with sufficient precision to maintain symmetry. Numerical noise may break exact symmetry, requiring a symmetrization step ($\Sigma = (\Sigma + \Sigma^T)/2$) before use in rendering [G].
+*   **Degenerate Scales:** The $\sigma_{\min}$ floor ensures the Gaussian remains well-defined and prevents splats from becoming narrower than a voxel’s spread [S2, unofficial].
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def reconstruct_covariance(s, R):
+    # s: (3,) scale vector, R: (3,3) rotation matrix
+    diag_s = torch.diag(s)
+    Sigma = R @ diag_s @ diag_s @ R.T
+    return (Sigma + Sigma.T) / 2.0  # Symmetrize [G]
+```
+
+## Subtopics
+
+### Cholesky Parameterisation for Gaussian Splats
+A method to parameterize the covariance matrix using Cholesky decomposition to guarantee positive-definiteness by construction [S2, unofficial]. It stores $D(D+1)/2$ elements per splat (6 for 3D) [S2, unofficial]. The diagonal of the covariance is parameterised as $\sigma_{\min} + \text{softplus}(\cdot)$, where $\sigma_{\min} = 1/\sqrt{12}$ voxels, ensuring no splat is narrower than a voxel’s own spread [S2, unofficial]. Amplitudes are made non-negative by a softplus activation and upper-bounded by a configurable maximum $a_{\max}$ [S2, unofficial].
+
+### Gamma-Decomposed Covariance Update
+A numerical stability technique for computing the new covariance matrix after recycling, replacing the unsupported $\beta()$ function with $\Gamma()$ and $\ln(\Gamma())$ to prevent overflow [S3].
+
+## Operating characteristics
+*   **Time Complexity:** The reconstruction of $\Sigma$ from $R$ and $S$ is $O(1)$ per Gaussian (constant time for fixed dimension 3) [G].
+*   **Memory Complexity:** Stores 3 scale values and 3 rotation parameters per Gaussian, totaling 6 values, compared to 6 values for the full symmetric covariance matrix [G].
+*   **Strengths:** Ensures positive semi-definite property automatically, simplifying optimization by removing constraints and allowing unconstrained gradient descent [S1, unofficial].
+*   **Limitations:** The separation of rotation and scale can lead to non-intuitive gradients if the scale is very small or rotation is near singularities [G]. The Cholesky variant requires careful handling of the diagonal floor [S2, unofficial].
+*   **When to use:** Standard 3D Gaussian Splatting pipelines where stable optimization is critical [G].
+*   **When not to use:** Not given in the sources.
+
+## Background
+Originating from the 3D Gaussian Splatting (3DGS) framework, this method was introduced to enable fast, high-quality rendering of radiance fields [S1, unofficial]. The factorization of the covariance into rotation and scale was identified as one of the four key components making 3DGS viable, alongside spherical-harmonic colour, EWA projection, and tile-based rasterization [S1, unofficial].
+
+## Sources
+[S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
+[S2] Luxar: Gaussian splatting for microscopy and scalable interactive web visualisation of multidimensional scientific data, https://doi.org/10.64898/2026.09.22.753676, fetched 2026-10-26 (unofficial)
+[S3] 3D Student Splatting and Scooping, https://doi.org/10.1109/cvpr52734.2025.01960, fetched 2026-10-29

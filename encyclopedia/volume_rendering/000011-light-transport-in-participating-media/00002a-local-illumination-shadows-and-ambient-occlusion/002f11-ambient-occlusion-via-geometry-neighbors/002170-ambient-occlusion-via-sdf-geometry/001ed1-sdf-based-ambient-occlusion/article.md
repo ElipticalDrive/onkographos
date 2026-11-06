@@ -3,121 +3,61 @@
 Also called: Signed Distance Field AO, Distance Field Ambient Occlusion, Raymarched AO
 
 ## Overview
-SDF-based Ambient Occlusion (AO) estimates local occlusion by sampling a Signed Distance Field (SDF) along the surface normal at increasing distances, weighting closer samples more heavily to simulate ambient light blockage [S1, S2, S3, S4, unofficial][S5]. It approximates ambient occlusion by using the distance field itself to simulate light occlusion based on object proximity, avoiding the unrealistic results of Screen Space Ambient Occlusion (SSAO) which relies on depth buffers and surface normals in screen space [S5]. This method is capable of producing visually pleasing results by leveraging the geometric accuracy of the SDF representation [S1, unofficial].
+SDF-based Ambient Occlusion estimates local occlusion by sampling a Signed Distance Field (SDF) along the surface normal at increasing distances, weighting closer samples more heavily to simulate ambient light blockage [S1, S2, S3, S4, unofficial][S5]. It approximates ambient occlusion by using the distance field itself to simulate light occlusion based on object proximity, avoiding the unrealistic results of Screen Space Ambient Occlusion (SSAO) which relies on depth buffers and surface normals in screen space [S5]. This method is capable of producing visually pleasing results by leveraging the geometric accuracy of the SDF representation [S1, unofficial].
 
 ## How it works
-The method relies on the fundamental property of Signed Distance Fields (SDFs) or structured geometry representations: the value at a point $p$ represents the shortest distance to the surface of the object, with a sign indicating whether the point is inside (negative) or outside (positive) the object.
+**Inputs and Outputs**
+The method takes a surface point $\mathbf{p}$, the surface normal $\mathbf{n}$ at $\mathbf{p}$, and an SDF query function $d(\mathbf{x})$ that returns the distance to the nearest geometry from any point $\mathbf{x}$ [S2, unofficial]. It outputs a scalar occlusion factor $AO \in [0, 1]$, where $1$ represents fully lit and $0$ represents fully occluded [S2, unofficial].
 
-### Inputs and Outputs
-*   **Input**: A point $p$ on the surface, the surface normal $\mathbf{n}$ at $p$, and an SDF query function $d(\mathbf{x})$ that returns the distance to the nearest geometry from any point $\mathbf{x}$.
-*   **Output**: A scalar occlusion factor $AO \in [0, 1]$, where $1$ is fully lit and $0$ is fully occluded.
+**Data Structures**
+The SDF is stored as a 3D grid where each position stores the distance to the nearest object surface [S1, unofficial]. Negative values indicate the grid location is inside the object, and positive values indicate it is outside [S1, unofficial].
 
-### Data Structures
-The SDF is typically stored as a 3D grid where each position stores the distance to the nearest object surface. Negative values indicate the grid location is inside the object, and positive values indicate it is outside [S1, unofficial].
+**Algorithm Steps**
+1. Initialize the accumulated occlusion `occ` to $0.0$ and a weight factor `w` to $1.0$ [S2, unofficial].
+2. Loop $i$ from $0$ to $N-1$, where $N$ is the number of samples [S2, unofficial].
+3. Calculate the sample distance $len_i = 0.01 + 0.02 \cdot i^2$ [S2, unofficial].
+4. Calculate the sample point $\mathbf{p}_i = \mathbf{p} + len_i \cdot \mathbf{n}$ [S2, unofficial].
+5. Query the SDF to get the distance to the nearest geometry: $d_i = d(\mathbf{p}_i)$ [S2, unofficial].
+6. Accumulate occlusion: `occ += (len_i - d_i) * w` [S2, unofficial].
+7. Decay the weight for the next sample: `w *= 0.85` [S2, unofficial].
+8. Return the final AO factor: `1.0 - clamp(0.6 * occ, 0.0, 1.0)` [S2, unofficial].
 
-### Parameters
-Typical parameter values found in implementations include:
-*   **Number of Samples ($N$)**: Commonly 4 to 8 samples [S2, S3, S4, unofficial].
-*   **Maximum Distance ($R$)**: The extent of the AO calculation, e.g., $0.25$ [S3, unofficial].
-*   **Weight Decay**: Factors such as $0.85$ or $0.92$ to reduce the influence of distant samples [S2, S4, unofficial].
-*   **Strength/Scale**: Multipliers like $0.6$ or $3.0$ to adjust the final intensity [S2, S4, unofficial].
+**Formulas**
+The occlusion accumulation follows $AO = 1.0 - \text{clamp}(scale \cdot \sum_{i=0}^{N-1} (len_i - d_i) \cdot w_i, 0.0, 1.0)$, where $len_i = 0.01 + 0.02 \cdot i^2$ and $w_i = 0.85^i$ [S2, unofficial]. Alternative implementations use linear spacing $len_i = \frac{R}{N} \cdot i$ [S3, unofficial] or different final normalizations such as $\text{clamp}(1.0 - strength \cdot occ, 0.0, 1.0)$ [S4, unofficial].
 
-### Algorithm Steps
-The core mechanism involves sampling the distance field along a set of directions, typically concentrated in the upper hemisphere relative to the surface normal $\mathbf{n}$. While some variants sample in multiple directions [S5], the most common and cited approach samples along the surface normal at increasing distances [S1, S2, S3, S4, unofficial].
+**Parameters**
+Typical parameter values found in implementations include a sample count $N$ of 4 to 8 [S2, S3, S4, unofficial], a maximum sampling distance $R$ of $0.25$ [S3, unofficial], weight decay factors of $0.85$ or $0.92$ [S2, S4, unofficial], and final scale/strength multipliers of $0.6$ or $3.0$ [S2, S4, unofficial].
 
-1.  Initialize the accumulated occlusion `occ` to $0.0$ and a weight factor `w` to $1.0$.
-2.  Loop $i$ from $0$ to $N-1$ (where $N$ is the number of samples):
-    a. Calculate the sample distance $len_i$. Variations include quadratic spacing $len_i = 0.01 + 0.02 \cdot i^2$ [S2, unofficial] or linear spacing $len_i = \frac{R}{N} \cdot i$ [S3, unofficial].
-    b. Calculate the sample point $\mathbf{p}_i = \mathbf{p} + len_i \cdot \mathbf{n}$.
-    c. Query the SDF to get the distance to the nearest geometry: $d_i = d(\mathbf{p}_i)$.
-    d. Calculate the occlusion contribution. If the geometry is closer than the sample point ($d_i < len_i$), it contributes to occlusion. A common heuristic is:
-       $$ \Delta = \max(0.0, len_i - d_i) $$
-       [S2, S3, S4, unofficial].
-    e. Accumulate the weighted contribution: `occ` += $\Delta \cdot w$.
-    f. Decay the weight for the next sample: $w = w \cdot \text{decay}$, where decay is typically $0.85$ [S2, unofficial] or $0.92$ [S4, unofficial].
-3.  Compute the final AO value. Variations exist in the final normalization:
-    *   $AO = 1.0 - \text{clamp}(scale \cdot occ, 0.0, 1.0)$, where scale is $0.6$ [S2, unofficial].
-    *   $AO = \text{clamp}(1.0 - strength \cdot occ, 0.0, 1.0)$, where strength is $3.0$ [S4, unofficial].
-    *   $AO = occ / (R \cdot N \cdot factor)$ [S3, unofficial].
-
-### Pseudocode
-The following pseudocode combines the most detailed implementation details from the sources [S2, S3, S4, unofficial]. It uses quadratic spacing and a specific decay factor as described in [S2, unofficial], which provides a complete, self-contained algorithm.
-
+**Pseudocode**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def sdf_ambient_occlusion(p, normal, sdf_query, num_samples=8, max_dist=0.25, decay=0.85, scale=0.6):
-    """
-    Calculate SDF-based Ambient Occlusion.
-    
-    Args:
-        p: Current surface point (vec3).
-        normal: Surface normal at p (vec3).
-        sdf_query: Function returning distance to nearest geometry from a point (vec3 -> float).
-        num_samples: Number of samples along the normal (int).
-        max_dist: Maximum distance for sampling (float).
-        decay: Weight decay factor per sample (float).
-        scale: Final occlusion strength multiplier (float).
-        
-    Returns:
-        AO factor between 0.0 (fully occluded) and 1.0 (fully lit).
-    """
+def sdf_ambient_occlusion(p, normal, sdf_query, num_samples=8, scale=0.6, decay=0.85):
     occ = 0.0
     weight = 1.0
-    
     for i in range(num_samples):
-        # Quadratic spacing as per [S2, unofficial]
-        # Note: [S3, unofficial] uses linear spacing, [S4, unofficial] uses linear spacing.
-        # Using quadratic as it is explicitly detailed in [S2, unofficial].
         len_i = 0.01 + 0.02 * (i * i)
-        
-        # Sample point along normal
         sample_point = p + normal * len_i
-        
-        # Query SDF
         dist = sdf_query(sample_point)
-        
-        # Accumulate occlusion if geometry is closer than sample point
-        # [S2, unofficial]: occ += (len - dist) * weight
-        # [S3, unofficial]: occlusion += max(-(d - distance), 0.0) which is equivalent to max(0, distance - d)
-        # Here, 'len' is the sample distance, 'dist' is the actual distance to geometry.
-        # If dist < len, the object is closer, contributing to occlusion.
-        contribution = len_i - dist
-        if contribution > 0:
-            occ += contribution * weight
-            
-        # Decay weight
+        occ += (len_i - dist) * weight
         weight *= decay
-        
-    # Final AO calculation
-    # [S2, unofficial]: 1.0 - clamp(0.6 * occ, 0.0, 1.0)
-    # [S4, unofficial]: clamp(1.0 - 3.0 * occ * u_ao, 0.0, 1.0)
-    # Using the specific constants from [S2, unofficial] as it is a complete example.
-    ao = 1.0 - clamp(scale * occ, 0.0, 1.0)
-    
-    return ao
+    return 1.0 - max(0.0, min(scale * occ, 1.0))
 
-def clamp(value, min_val, max_val):
-    return max(min_val, min(value, max_val))
+def max(a, b):
+    return a if a > b else b
+
+def min(a, b):
+    return a if a < b else b
 ```
 
-### Edge Cases and Pitfalls
-*   **Precision**: Floating-point precision errors in SDF queries can lead to jittering or incorrect occlusion values, especially at small distances.
-*   **Boundaries**: The method assumes the SDF is valid within the sampling range. If the sampling points go outside the defined SDF volume, undefined behavior or incorrect distances may occur.
-*   **Degenerate Input**: If the normal is not normalized, the sample points will be incorrectly spaced, leading to inaccurate AO.
-*   **Inside Geometry**: If the point $p$ is inside the geometry (negative SDF value), the standard AO heuristic may need adjustment, as the concept of "occlusion" from the outside differs. The sources do not explicitly detail handling for points strictly inside the volume, only that negative values indicate inside [S1, unofficial].
+**Edge Cases and Pitfalls**
+Floating-point precision errors in SDF queries can lead to jittering or incorrect occlusion values, especially at small distances [G]. If sampling points go outside the defined SDF volume, undefined behavior or incorrect distances may occur [G]. If the normal is not normalized, sample points will be incorrectly spaced, leading to inaccurate AO [G]. If the point $\mathbf{p}$ is inside the geometry (negative SDF value), the standard AO heuristic may need adjustment, as the concept of occlusion from the outside differs [G].
 
 ## Operating characteristics
-*   **Time Complexity**: $O(N)$ per sample point, where $N$ is the number of samples. The SDF query itself is typically $O(1)$ for grid-based SDFs or $O(\log M)$ for hierarchical structures [S1, unofficial].
-*   **Memory Complexity**: Depends on the SDF storage. A dense 3D grid requires $O(V)$ memory, where $V$ is the volume of the grid.
-*   **Performance**: Capable of producing visually pleasing results in real-time [S1, unofficial]. It is generally faster than full ray tracing but may be slower than screen-space techniques if the SDF query is expensive.
-*   **Strengths**: Provides geometrically accurate occlusion based on actual scene geometry, avoiding the artifacts of SSAO [S5]. It works well with voxel-based or implicit representations.
-*   **Limitations**: Limited to the resolution and extent of the SDF. Cannot account for occlusion from geometry not represented in the SDF. Performance can degrade with high sample counts or large sampling distances.
-*   **When to use**: When geometric accuracy is important and the scene is represented by an SDF. When SSAO artifacts are unacceptable.
-*   **When not to use**: When performance is critical and the SDF is expensive to query. When the scene geometry is not available as an SDF.
+The time complexity is $O(N)$ per shading point, where $N$ is the number of samples [G]. The SDF query itself is typically $O(1)$ for dense grids or $O(\log M)$ for hierarchical structures [S1, unofficial]. The memory complexity depends on SDF storage, with a dense 3D grid requiring $O(V)$ memory, where $V$ is the volume of the grid [G]. The method is capable of producing visually pleasing results [S1, unofficial]. It is generally faster than full ray tracing but may be slower than screen-space techniques if the SDF query is expensive [G]. It provides geometrically accurate occlusion based on actual scene geometry, avoiding the artifacts of SSAO [S5]. It works well with voxel-based or implicit representations [G]. It is limited to the resolution and extent of the SDF [G]. It cannot account for occlusion from geometry not represented in the SDF [S1, unofficial]. Performance degrades with high sample counts or large sampling distances [G]. It should be used when geometric accuracy is important and the scene is represented by an SDF [G]. It should not be used when performance is critical and the SDF is expensive to query, or when the scene geometry is not available as an SDF [G].
 
 ## Background
-The technique was introduced by Evans [12] as a method based on signed distance fields where objects are embedded into a 3D grid [S1, unofficial]. Hoberock [18] improved upon this method's image quality, but at a performance cost tradeoff [S1, unofficial]. Wright [61] expanded on this approach, substituting Evans' ad hoc heuristic with cone tracing, approximating it by utilizing spheres of increasing radius to check for intersections [S1, unofficial].
+The technique was introduced by Evans as a method based on signed distance fields where objects are embedded into a 3D grid [S1, unofficial]. Hoberock improved upon this method's image quality, but at a performance cost tradeoff [S1, unofficial]. Wright expanded on this approach, substituting Evans' ad hoc heuristic with cone tracing, approximating it by utilizing spheres of increasing radius to check for intersections [S1, unofficial].
 
 ## Sources
 [S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)

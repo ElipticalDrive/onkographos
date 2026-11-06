@@ -1,0 +1,166 @@
+--- v001.md
++++ v002.md
+@@ -4,105 +4,87 @@
+ 
+ ## Overview
+-Next Event Estimation (NEE) for Emissive Volumes is a technique used in path tracing to directly sample light sources within participating media, reducing noise in scenes with volumetric emission [S1, unofficial]. It differs from standard direct volume ray casting [19-direct-volume-ray-casting.md] by explicitly estimating the contribution of emissive media at specific points along a ray, rather than relying solely on the accumulated emission from the volume rendering integral discretization. This method is particularly useful for reducing variance in scenes where emissive volumes are sparse or highly anisotropic.
++Next Event Estimation (NEE) for Emissive Volumes is a technique used in path tracing to directly sample light sources within participating media, reducing noise and variance compared to standard path tracing which relies on indirect bounces to reach emissive volumes. It sets itself apart from standard direct volume ray casting by integrating emission contributions via importance sampling of the volume geometry rather than uniform discretization, though it introduces complexity in PDF normalization and consistency with the rest of the path tracer.
+ 
+ ## How it works
+-The method integrates NEE into the path tracing loop for volumes. It requires tracking the ray's entry and exit points within the volume to calculate the exact directional probability density function (PDF) for sampling points on the ray segment [S1, unofficial].
++This method extends the emission-absorption optical model [S1, S5, S9, unofficial] by treating the emissive volume as a geometric primitive for light sampling. Instead of relying solely on the front-to-back compositing integration along the primary or scattered ray [S1, S12, S16, S23, S24, S43, S50, unofficial], NEE explicitly samples points within the volume to estimate the direct lighting contribution from emissive regions.
+ 
+ ### Inputs and Outputs
+-*   **Inputs**: Current path vertex position (inside or near the volume), volume geometry (bounding shape), volume density/emission data, current path throughput.
+-*   **Outputs**: Estimated direct lighting contribution from the emissive volume segment, updated path throughput.
++- **Input**: The current path vertex position $\mathbf{x}$, the incoming direction $\vec{\omega}_i$ (from the previous vertex to $\mathbf{x}$), the volume geometry (bounding box or implicit shape), and the volume density/emission fields.
++- **Output**: The estimated direct radiance contribution from the emissive volume to the current vertex, weighted by the Multiple Importance Sampling (MIS) weights.
+ 
+ ### Data Structures
+-*   **Ray Segment**: Defined by entry point $t_{start}$ and exit point $t_{end}$ along the ray direction $D$ [S1, unofficial].
+-*   **Directional PDF**: A function $p(\vec{\omega})$ representing the probability density of sampling a direction $\vec{\omega}$ towards the emissive segment [S1, unofficial].
++The implementation requires tracking the ray entry and exit points within the emissive shape to calculate the exact directional PDF [S1, unofficial]. This typically involves:
++1.  **Ray-Shape Intersection**: Computing $t_{start}$ and $t_{end}$ where the ray intersects the volume domain [S1, S7, S15, S22, S33, S55, unofficial].
++2.  **PDF State**: Storing the solid angle PDF $p(\vec{\omega})$ associated with the sampled direction and the derived volume PDF.
+ 
+ ### Steps
+-1.  **Ray-Volume Intersection**: Determine the entry point $t_{start}$ and exit point $t_{end}$ of the ray segment intersecting the emissive volume [S1, unofficial].
+-2.  **Sample Direction**: Sample a direction $\vec{\omega}$ towards the emissive segment. This is often done by sampling a point uniformly on the segment or using a solid angle distribution [S1, unofficial].
+-3.  **Calculate Volume PDF**: Compute the PDF for the sampled point on the ray. The key insight is that the standard conversion from solid angle PDF $p(\vec{\omega})$ to volume PDF $p(\vec{x})$ involves a factor of $r^{-2}$, where $r$ is the distance from the sampling point to the volume segment [S1, unofficial].
+-    $$ p(\vec{x}) \propto r^{-2} p(\vec{\omega}) $$
+-    However, this PDF is non-normalizable over the entire volume because $\int_V r^{-2} p(\vec{\omega}) \mathrm{dV}$ does not converge to 1 [S1, unofficial].
+-4.  **Evaluate Emission**: Evaluate the emission $L_e$ along the entire ray segment from $t_{start}$ to $t_{end}$ to ensure consistency with the direction sampling used in the Multiple Importance Sampling (MIS) calculation [S1, unofficial].
+-5.  **MIS Weighting**: Compute the MIS weight to balance between the volume PDF and the directional PDF. The weight is computed as:
+-    $$ \mathrm{MIS}(r^{-2}p(\vec\omega), p(\vec x)) $$
+-    where $r^{-2}p(\vec\omega)$ represents the volume PDF derived from the solid angle PDF, and $p(\vec x)$ is the standard volume PDF [S1, unofficial].
+-6.  **Accumulate Contribution**: Add the weighted emission contribution to the path throughput.
++1.  **Ray Intersection**: Determine the entry parameter $t_{start}$ and exit parameter $t_{end}$ of the ray segment within the emissive volume [S1, unofficial]. If the ray does not intersect the volume, the contribution is zero.
++2.  **Direction Sampling**: Sample a direction $\vec{\omega}$ towards the emissive volume or a point within it. In the context of NEE for volumes, this often involves sampling a point $\mathbf{y}$ on the volume boundary or within the volume volume itself, relative to the current vertex $\mathbf{x}$.
++3.  **PDF Calculation**:
++    -   Calculate the solid angle PDF $p(\vec{\omega})$ for the sampled direction.
++    -   Derive the corresponding volume PDF $p_V(\mathbf{y})$. The relationship involves the distance $r = \|\mathbf{y} - \mathbf{x}\|$.
++    -   **Critical Note**: Simply converting the solid angle PDF to a volume PDF using the differential element $r^{-2}\frac{\mathrm{dV}}{\mathrm{d\Omega}}$ yields incorrect results and is inconsistent with previous results obtained without NEE [S1, unofficial]. The term $r^{-2}p(\vec{\omega})dV$ is a non-normalisable PDF because the integral $\int_V r^{-2} p(\vec{\omega}) \mathrm{dV}$ expands to $\int_V p(\vec{\omega})\mathrm{\sin\theta dr d\theta d\phi}$, which does not converge to 1 in the same manner as a standard normalized PDF [S1, unofficial].
++    -   The correct MIS weight computation uses $\mathrm{MIS}(r^{-2}p(\vec\omega), p(\vec x))$, where $r^{-2}p(\vec\omega)$ represents the volume PDF derived from the solid angle PDF $p(\vec\omega)$ at distance $r$, and $p(\vec x)$ is the standard volume PDF used for the path tracing step [S1, unofficial].
++4.  **Emission Evaluation**: Evaluate the emission along the entire ray segment to ensure consistency with the direction sampling used in the MIS calculation [S1, unofficial]. This involves integrating the emission coefficient $\sigma_e$ along the path from $\mathbf{x}$ to the sampled point, accounting for transmittance.
++5.  **MIS Weighting**: Apply Multiple Importance Sampling to combine the NEE estimate with the standard path tracing estimate. The weight is computed based on the ratio of the PDFs [S1, unofficial].
++6.  **Accumulation**: Add the weighted contribution to the pixel color.
+ 
+ ### Pseudocode
+ ```python
+-def next_event_estimation_emissive_volume(ray_origin, ray_direction, volume_bounds, volume_emission_function, mis_weight_func):
+-    """
+-    Estimates direct lighting from an emissive volume using NEE.
+-    """
+-    # 1. Ray-Volume Intersection [S1, unofficial]
+-    t_start, t_end = compute_ray_segment_intersection(ray_origin, ray_direction, volume_bounds)
++def next_event_estimation_emissive_volume(ray_origin, ray_direction, volume_geometry, emission_field, transmittance_field):
++    # 1. Intersect ray with volume to get entry and exit points
++    t_start, t_end = volume_geometry.intersect(ray_origin, ray_direction)
+     
+-    if t_start >= t_end:
+-        return 0.0, 0.0 # No intersection
++    if t_start == t_end:
++        return 0.0  # No intersection
+     
+-    # 2. Sample Direction/Point on Segment [S1, unofficial]
+-    # Sample a point uniformly on the segment [t_start, t_end]
+-    t_sample = random.uniform(t_start, t_end)
+-    sample_point = ray_origin + t_sample * ray_direction
+-    r = t_sample # Distance from origin to sample point along the ray
++    # 2. Sample a point within the volume or on its boundary
++    # This step depends on the specific sampling strategy (e.g., uniform in volume, uniform in solid angle)
++    # For NEE, we typically sample a direction towards the volume or a point on the volume
++    sampled_point, sampled_direction, pdf_solid_angle = volume_geometry.sample_emissive(ray_origin)
+     
+-    # 3. Calculate PDFs [S1, unofficial]
+-    # Solid angle PDF p(omega) for sampling the segment
+-    p_omega = compute_solid_angle_pdf(ray_origin, sample_point, volume_bounds)
++    if sampled_point is None:
++        return 0.0
++        
++    # 3. Calculate distance
++    r = distance(ray_origin, sampled_point)
+     
+-    # Volume PDF derived from solid angle PDF
+-    # Note: r^-2 * p(omega) is non-normalizable over the whole volume [S1, unofficial]
+-    p_volume_directional = (1.0 / (r * r)) * p_omega
++    # 4. Calculate Volume PDF from Solid Angle PDF
++    # Note: r^-2 * p(omega) is not a normalized PDF over the volume
++    # The MIS weight handles the normalization ratio
++    pdf_volume_derived = (1.0 / (r * r)) * pdf_solid_angle
+     
+-    # Standard volume PDF p(x) for the sampled point
+-    p_volume_standard = compute_volume_pdf(sample_point, volume_bounds)
++    # 5. Evaluate Emission and Transmittance
++    # Integrate emission along the segment from ray_origin to sampled_point
++    # This must be consistent with the direction sampling
++    emission_contribution = integrate_emission(ray_origin, sampled_point, emission_field, transmittance_field)
+     
+-    # 4. Evaluate Emission along the segment [S1, unofficial]
+-    # Integrate emission from t_start to t_end
+-    emission_contribution = integrate_emission_along_segment(ray_origin, ray_direction, t_start, t_end, volume_emission_function)
++    # 6. Get PDF for the path tracing step (p(x))
++    # This is the PDF used to generate the current path vertex
++    pdf_path = get_path_pdf() 
+     
+-    # 5. MIS Weighting [S1, unofficial]
+-    # Compute MIS weight between the two PDFs
+-    weight = mis_weight_func(p_volume_directional, p_volume_standard)
++    # 7. Compute MIS Weight
++    # MIS(r^-2 * p(omega), p(x))
++    mis_weight = compute_mis_weight(pdf_volume_derived, pdf_path)
+     
+-    # 6. Accumulate Contribution
+-    # The contribution is the emission evaluated at the sample point, weighted by MIS
+-    # Note: The source suggests evaluating emission along the *entire* segment for consistency [S1, unofficial]
+-    # However, typically NEE evaluates the light at the sampled point. 
+-    # Based on the source, the emission evaluation must be consistent with the direction sampling.
+-    # We assume the emission_contribution above is the relevant term, scaled by the PDF and weight.
+-    
+-    # Simplified contribution calculation based on source description
+-    # Contribution = (Emission * Weight) / PDF
+-    # Since p_volume_directional is used for the direction sampling, we divide by it.
+-    
+-    if p_volume_directional > 0:
+-        contribution = (emission_contribution * weight) / p_volume_directional
+-    else:
+-        contribution = 0.0
+-        
+-    return contribution, weight
++    # 8. Return weighted contribution
++    return emission_contribution * mis_weight
+ ```
+ 
+-### Parameters
+-*   **MIS Weight Function**: Typically the balance heuristic or power heuristic [S1, unofficial].
+-*   **Sampling Strategy**: Uniform sampling along the ray segment is a simple method [S1, unofficial].
+-
+-### Edge Cases and Pitfalls
+-*   **Non-normalizable PDF**: Simply converting the solid angle PDF to a volume PDF using $r^{-2}$ yields incorrect results if not handled correctly with MIS, as the resulting PDF is non-normalizable over the entire volume [S1, unofficial].
+-*   **Performance**: Integrating the volume PDF over the ray length is significantly slower (20x-40x) due to required ray casts and can raise warnings in CUDA modes (e.g., OptiX) [S1, unofficial].
+-*   **Implementation Discrepancies**: In some implementations (e.g., llvm_* modes), using ray entry/exit points can lead to different results compared to other modes (e.g., cuda_* modes), likely due to differences in ray intersection handling (Embree vs. OptiX) [S1, unofficial].
+-*   **Speed**: The NEE implementation is slower than not using NEE (approx. 5x slower in llvm_* modes, 1.5x slower in cuda_* modes) but reduces noise [S1, unofficial].
++### Parameters and Edge Cases
++-   **Performance**: Integrating the volume PDF over the ray length is significantly slower (20x-40x) due to required ray casts and raises OptiX warnings in CUDA modes [S1, unofficial].
++-   **Mode Discrepancy**: In `llvm_*` modes, the implementation using NEE is approximately 5x slower than not using NEE. In `cuda_*` modes, it is approximately 1.5x slower [S1, unofficial].
++-   **Intersection Handling**: There is a known issue where `llvm_*` modes (using Embree) and `cuda_*` modes (using OptiX) handle ray intersections differently, leading to different results. The current implementation gives correct results primarily for `cuda_*` modes [S1, unofficial].
++-   **PDF Normalization**: The non-normalizability of $r^{-2}p(\vec{\omega})dV$ requires careful handling in the MIS weight calculation to avoid bias [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: Slower than standard volume rendering without NEE. In llvm_* modes, it is approximately 5x slower; in cuda_* modes, it is approximately 1.5x slower [S1, unofficial].
+-*   **Memory Complexity**: Requires storing ray segment intersection data and potentially additional buffers for emission integration [S1, unofficial].
+-*   **Strengths**: Significantly reduces noise for the same sample count in scenes with emissive volumes [S1, unofficial].
+-*   **Limitations**: Higher computational cost per sample; potential implementation inconsistencies across different ray tracing backends [S1, unofficial].
+-*   **When to Use**: When rendering scenes with emissive volumes where noise reduction is critical and performance budget allows for the overhead [S1, unofficial].
+-*   **When Not to Use**: When performance is the primary constraint and noise levels are acceptable without NEE [S1, unofficial].
++-   **Time Complexity**: NEE adds overhead due to additional ray-volume intersections and PDF calculations. In CUDA modes, it is ~1.5x slower than standard path tracing without NEE; in LLVM modes, ~5x slower [S1, unofficial].
++-   **Memory Complexity**: Requires storing ray intersection data and PDF states. No significant additional memory compared to standard path tracing.
++-   **Strengths**: Reduces noise for emissive volumes by directly sampling light sources.
++-   **Limitations**: Implementation complexity regarding PDF consistency and performance overhead. Potential inconsistencies between different backend implementations (Embree vs OptiX) [S1, unofficial].
++-   **When to Use**: When rendering scenes with significant emissive volumes where direct lighting from the volume is important and noise reduction is desired.
+ 
+ ## Background
+-This method was developed as part of the Mitsuba 3 renderer, specifically in the context of adding emissive volume rendering support [S1, unofficial]. The implementation was contributed by Microno95 and reviewed by dvicini in June 2023 [S1, unofficial]. It addresses the challenge of correctly sampling and weighting emissive media in path tracing, ensuring consistency with Multiple Importance Sampling (MIS) [S1, unofficial].
++This method was developed as part of the Mitsuba 3 renderer, specifically in the context of adding support for emissive media rendering. The implementation and associated discussions regarding PDF normalization and MIS weights were documented in a GitHub pull request [S1, unofficial].
+ 
+ ## Sources

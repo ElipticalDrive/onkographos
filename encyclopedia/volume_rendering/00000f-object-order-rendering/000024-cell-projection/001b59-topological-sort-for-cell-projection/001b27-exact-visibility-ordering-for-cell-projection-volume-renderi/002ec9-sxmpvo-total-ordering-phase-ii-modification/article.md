@@ -1,0 +1,153 @@
+# SXMPVO Total Ordering (Phase II Modification)
+
+Also called: Phase II of MPVO with modifications
+
+## Overview
+This method completes the Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO) algorithm by generating a global topological sort of mesh cells. It extends the standard MPVO Phase II by incorporating Pseudo-Neighbor (PN) relations derived from image-space occlusion, ensuring a correct segment sorting order for volume rendering on unstructured meshes. It differs from its sibling [BSP-XMPVO](1160-bsp-xmpvo.md) by using image-space scan conversion to determine occlusion rather than spatial partitioning.
+
+## How it works
+The method operates on the data structures and intermediate results (PIX lists) produced by the SXMPVO Phase I (scan conversion).
+
+**Inputs:**
+- A set of mesh cells.
+- For each cell, a `sink_cell_flag` (boolean).
+- For each cell, a `PN_list` (linked list of PN entries).
+- The PIX lists in the A-Buffer, where each PIX entry contains:
+  - `z`: distance from screen to intersection point (float/double).
+  - `face_ptr`: pointer to the exterior face.
+  - `next`: pointer to the next PIX entry in the list.
+
+**Outputs:**
+- A total ordering of all cells in the mesh, suitable for front-to-back or back-to-front volume rendering.
+
+**Data Structures:**
+- **PN Entry**: Contains `occluded_cell_number` (integer) and `next` (pointer).
+- **PIX List**: A singly linked list of PIX entries, sorted by decreasing `z`.
+
+**Algorithm Steps:**
+
+1. **Extract Pseudo-Neighbor (PN) Relations:**
+   Iterate through every PIX list in the A-Buffer. For each PIX list:
+   a. Discard the first entry (back-facing face where ray exits mesh) and the last entry (back-facing face where ray enters mesh, if viewpoint is outside).
+   b. Iterate through the remaining consecutive pairs of entries.
+   c. Identify pairs where one entry refers to a front-facing face and the next refers to a back-facing face.
+   d. Let $C_{back}$ be the cell owning the back-facing face (occluding PN) and $C_{front}$ be the cell owning the front-facing face (occluded PN).
+   e. Add a PN entry containing $C_{front}$ to the `PN_list` of $C_{back}$.
+   f. Apply the move-to-front heuristic: if $C_{front}$ is already in $C_{back}$'s `PN_list`, move it to the head.
+   g. Set `sink_cell_flag` of $C_{front}$ to `false`.
+
+2. **Identify Sink Cells:**
+   Traverse all cells in the mesh. A cell is a sink cell if its `sink_cell_flag` is `true`. These cells have no outbound PN or MPVO relations pointing away from them in the dependency graph.
+
+3. **Perform Recursive Depth-First Search (DFS):**
+   Initialize an empty output list `ordered_cells`.
+   Define a function `RECURSIVE-DFS(cell c)`:
+   a. Mark `c` as visited.
+   b. For each neighbor $n$ in the union of:
+      - MPVO neighbors (from Phase I/standard MPVO relations).
+      - PN neighbors (cells listed in `c`'s `PN_list`).
+   c. If $n$ is not visited, call `RECURSIVE-DFS(n)`.
+   d. Append `c` to `ordered_cells`.
+
+4. **Finalize Order:**
+   The `ordered_cells` list contains the cells in reverse topological order (back-to-front). Reverse this list to obtain the front-to-back rendering order.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def extract_pn_relations(a_buffer):
+    """
+    a_buffer: dict mapping pixel_id -> list of PIX entries sorted by decreasing z
+    """
+    for pixel_id, pix_list in a_buffer.items():
+        # Discard first and last entries as per definition
+        if len(pix_list) < 2:
+            continue
+        
+        # Iterate through consecutive pairs from index 1 to len-2
+        # Note: The text says "Except for the first and last entries... consecutive entries alternate"
+        # We process pairs (i, i+1) for i in range(1, len-1)
+        for i in range(1, len(pix_list) - 1):
+            entry_front = pix_list[i]
+            entry_back = pix_list[i+1]
+            
+            # Determine if this is a front/back pair
+            # The text implies alternating front/back. 
+            # entry_front is front-facing, entry_back is back-facing in the pair context described
+            # "The PN cell that contributes the back-facing face is called the occluding PN"
+            
+            cell_occluding = entry_back.face_ptr.owning_cell
+            cell_occluded = entry_front.face_ptr.owning_cell
+            
+            # Add to PN list of occluding cell
+            pn_list = cell_occluding.pn_list
+            
+            # Check for duplicate and apply move-to-front
+            if cell_occluded not in pn_list:
+                pn_list.insert_head(cell_occluded)
+            else:
+                pn_list.move_to_head(cell_occluded)
+            
+            # Mark occluded cell as not a sink
+            cell_occluded.sink_cell_flag = False
+
+def sxmpvo_total_ordering(cells, a_buffer):
+    # Step 1: Extract PN relations
+    extract_pn_relations(a_buffer)
+    
+    # Step 2: Identify sink cells (flags already set by Phase I and PN extraction)
+    # Sink cells are those with sink_cell_flag == True
+    
+    # Step 3: DFS
+    visited = set()
+    ordered_cells = []
+    
+    def recursive_dfs(c):
+        visited.add(c)
+        
+        # Neighbors are MPVO neighbors + PN neighbors
+        # MPVO neighbors are assumed to be stored in c.mpvo_neighbors
+        # PN neighbors are in c.pn_list
+        
+        all_neighbors = c.mpvo_neighbors + c.pn_list.to_list()
+        
+        for n in all_neighbors:
+            if n not in visited:
+                recursive_dfs(n)
+        
+        ordered_cells.append(c)
+        
+    # Start DFS from all sink cells
+    for c in cells:
+        if c.sink_cell_flag:
+            if c not in visited:
+                recursive_dfs(c)
+                
+    # The order is back-to-front. Reverse for front-to-back.
+    return ordered_cells[::-1]
+```
+
+**Edge Cases and Pitfalls:**
+- **Overlapping Faces:** If faces overlap but are not sampled at points within the overlap region, the generated sort may not be a strict visibility ordering. However, the image-space rendering remains correct because faces are sampled at actual pixel locations [S1].
+- **Viewpoint Position:** If the viewpoint is outside the mesh, the PIX lists have an even number of entries. The first entry (exit) and last entry (entry) are discarded. If the viewpoint is inside, the logic adapts based on the alternating front/back pattern [S1].
+
+## Subtopics
+
+### Pseudo-Neighbor (PN) Relation Extraction
+This is the core modification of Phase II. It defines occlusion relations based on consecutive front-facing/back-facing face pairs on a PIX list. The cell contributing the back-facing face is the "occluding PN," and the other is the "occluded PN." This method captures image-space occlusion that may not be represented by explicit mesh topology (MPVO relations). It is chosen when exact image-space visibility is required for unstructured meshes with complex boundaries or disconnected components. It relies on the coherence of scan conversion to keep PN lists short and efficient via the move-to-front heuristic [S1].
+
+## Operating characteristics
+- **Time Complexity:** Dominated by the scan conversion (Phase I) and the DFS. The PN extraction iterates through PIX lists. The move-to-front heuristic ensures that frequently encountered PN relations are found quickly, keeping list traversal efficient. The DFS is linear in the number of cells and relations.
+- **Memory Complexity:** Requires storage for PIX lists (proportional to image resolution and mesh complexity) and PN lists (proportional to the number of PN relations).
+- **Strengths:** Handles nonconvex boundaries and disconnected components. Provides exact image-space visibility ordering.
+- **Limitations:** Requires image-space sampling (scan conversion). Performance depends on the coherence of the scan conversion process.
+- **When to use:** Unstructured mesh volume rendering where exact visibility is critical and the mesh is acyclic.
+- **When not to use:** Structured grids where simpler sorting methods suffice, or when the mesh contains cycles (SXMPVO requires an acyclic mesh).
+
+## Background
+The SXMPVO algorithm was introduced by [S1] to address the limitations of MPVO in handling complex unstructured meshes. It extends the MPVO algorithm by incorporating image-space information (PIX lists) to derive additional occlusion relations (PN relations). This allows for a more accurate visibility ordering in image space, particularly for meshes with nonconvex boundaries or disconnected components. The method builds on the MPVO algorithm's Phase II but modifies the neighbor definition to include PN neighbors.
+
+## Sources
+[S1] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://doi.org/10.1109/tvcg.2004.45, fetched 2026-10-25

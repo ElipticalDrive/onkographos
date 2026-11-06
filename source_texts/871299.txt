@@ -1,0 +1,134 @@
+Turn DJI drone video into GPS-registered 3D gaussian splats — geotag frames, map coverage, plan missions, and reconstruct, with WebODM/OpenDroneMap-ready output. - fix(metal): reject incomplete COLMAP binaries and unusable quaternion norms by BrandonRobare · Pull Request #925 · BrandonRobare/telemetry-frame-mapper
+
+fix(metal): reject incomplete COLMAP binaries and unusable quaternion norms by BrandonRobare · Pull Request #925 · BrandonRobare/telemetry-frame-mapper · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+BrandonRobare
+commented
+Sep 26, 2026
+Copy link
+Copy Markdown
+Owner
+Why
+Part of #850 (invalid artifacts fail safely). On main:
+Metal training passes the selected COLMAP submodel to msplat's native loader without parsing it. A missing, truncated or empty cameras.bin / images.bin / points3D.bin reaches native code unchecked.
+The COLMAP BIN readers let struct.error escape on a truncated record, and they silently accept a file whose last record is cut short (images.bin / points3D.bin skip 2D points and tracks by offset arithmetic without a bounds check). struct.error is not a ValueError, so it gets past the except (OSError, RuntimeError, ValueError) fallbacks in GET /calibration-drift-report (a 500) and in georeferencing _correspondences.
+The exported-PLY gate counts zero float32 quaternion norms, but a finite quaternion whose float32 norm overflows to inf (e.g. [1e30, 0, 0, 0]) passes validation. write_splat then normalises it to a zero rotation.
+This ports the intent of b99b969 and the preserved WIP 9c9eed3 from codex/v3-metal-correctness, rewritten for current main: #855 replaced that branch's _staged_colmap_model with _selected_model_view, and #851 put export validation in metal_msplat.validate_exported_ply.
+Change
+colmap_io: _unpack turns struct.error into ValueError("truncated COLMAP binary record"). Each of the three BIN readers raises ValueError if the file doesn't end exactly on a record boundary. read_points3d_bin also rejects a point count the file can't hold before it allocates arrays for it.
+metal_msplat._selected_model_view: before building the loader view, parses the selected cameras.bin, images.bin and points3D.bin with those readers and requires at least one record in each. OSError / ValueError map to Metal selected COLMAP model N requires binary X; re-run COLMAP or convert the selected model to BIN format. The reconstruction: Metal trainer loads sparse/0 instead of the selected COLMAP submodel #855 points3D.ply fallback is kept: points3D.bin is only required when it exists or when there's no points3D.ply. With no numbered model, the function still returns None, same as before.
+metal_msplat._cloud_invalid_counts: computes the float32 quaternion norm once, the same way write_splat normalises. It keeps zero_norm_quaternions and adds non_finite_quaternion_norms for finite rows whose norm overflows.
+Reader callers checked
+Caller
+Handling on a malformed BIN
+routers/reconstruction.py calibration-drift report
+catches ValueError → empty report (previously struct.error → 500)
+georeferencing_solve._correspondences
+catches ValueError → not georeferenced (previously struct.error escaped to _compute_geo_transform's broad except)
+cuda_gsplat._train (CUDA path)
+exception propagates to the pipeline's outer except Exception → job failed, same outcome as the old struct.error
+reconstruction.compute_semantic_labels
+broad except → semantic_status=failed, unchanged
+scripts/benchmark_metal_presets.py, scripts/benchmark_heldout_parity.py
+CLI; still a traceback, now ValueError
+No caller relied on lenient parsing. COLMAP writes exact records, so the stricter checks only change behaviour for truncated or trailing-byte files.
+Behaviour notes
+Metal now rejects a selected model with a non-PINHOLE/SIMPLE_PINHOLE camera before load. The reader's own Unsupported COLMAP camera model: ... RuntimeError propagates unmapped, matching the CUDA path. Before, main handed such a model to msplat unchecked. The pipeline defaults to PINHOLE, and camera_model in config is the only way to get another.
+The existing test_metal_submodel_selection fixtures wrote count-only .bin headers (e.g. images.bin claiming N records with none present). _write_model now writes well-formed models, since the new gate correctly rejects the old ones. The real-msplat integration fixture already parses cleanly under the strict readers.
+Verification
+Fail-before: git checkout main -- backend/services/colmap_io.py backend/services/splat_backends/metal_msplat.py, run the new tests, then git checkout HEAD -- …:
+test_metal_rejects_truncated_final_binary_record[cameras|images|points3D]: 3/3 failed before, pass after
+test_metal_rejects_binary_model_without_records[…]: 3/3 failed before, pass after
+test_bin_readers_reject_incomplete_records: 8/9 failed before. cameras-truncated_tail already raised ValueError from np.frombuffer on main.
+test_metal_rejects_quaternion_unusable_by_float32_splat_normalization[1e30]: failed before, passes after. The [1e-30] case already passed on main because its norm was already float32; it stays as a guard that the zero diagnostic is kept.
+test_selected_model_view_keeps_points3d_ply_fallback: guard, passes on both
+Gate:
+uv run --frozen --no-sync python tests/test_supply_chain_configuration.py (exit 0)
+uv lock --check (pass)
+uv run --frozen --no-sync pytest -q (1374 passed, 32 skipped)
+uv run --frozen --no-sync ruff check . (pass)
+fix(metal): reject incomplete COLMAP binaries and unusable quaternion…
+…
+818ee8d
+```
+… norms
+
+The COLMAP BIN readers now raise ValueError when a record is truncated
+(struct.error from _unpack, or a points3D count larger than the file can
+hold) and when a file does not end on a complete record boundary.
+Previously struct.error escaped the graceful-degradation handlers in the
+calibration-drift route and georeferencing, and a short final record was
+silently accepted.
+
+Metal training parses the selected submodel's cameras.bin, images.bin and
+points3D.bin with those readers before building the loader view and
+requires at least one record in each, so a missing, truncated or empty
+model fails the job with a clear message instead of reaching the native
+loader. The points3D.ply fallback from #855 is kept.
+
+The exported-PLY gate also rejects rows whose float32 quaternion norm
+overflows to inf on finite components, which write_splat would normalise
+to a zero rotation. The existing zero_norm_quaternions diagnostic is kept.
+
+Refs #850
+```
+BrandonRobare
+mentioned this pull request
+Sep 26, 2026
+docs(release): bring v3.0.0 release notes to tag-ready
+#926
+Merged
+BrandonRobare
+added a commit
+that referenced
+this pull request
+Sep 26, 2026
+docs(release): cover LAZ export and Metal COLMAP validation fixes
+…
+aaac2f1
+```
+Add #930 (laspy 2.x LAZ export and atomic point-cloud writes) and #925
+(selected COLMAP binary validation, float32 quaternion norm check,
+ValueError on truncated records, PINHOLE/SIMPLE_PINHOLE before Metal
+load) to the v3.0.0 release notes and CHANGELOG.
+```
+Merge branch 'main' into fix/metal-colmap-binary-validation
+bedc31f
+Hide details
+View details
+BrandonRobare
+merged commit 10eae2e
+into
+main
+Sep 26, 2026
+16 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+BrandonRobare
+mentioned this pull request
+Sep 27, 2026
+v3: make Metal splat training release-ready
+#850
+Open
+6 tasks
+BrandonRobare
+deleted the
+fix/metal-colmap-binary-validation
+branch
+September 27, 2026 02:58
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

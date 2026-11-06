@@ -1,0 +1,118 @@
+Powerful web graphics runtime built on WebGL, WebGPU, WebXR and glTF - perf: Flat per-splat gsplat varyings and fix ComputeRadixSort reallocation on growth by slimbuck · Pull Request #9372 · playcanvas/engine
+
+perf: Flat per-splat gsplat varyings and fix ComputeRadixSort reallocation on growth by slimbuck · Pull Request #9372 · playcanvas/engine · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+slimbuck
+commented
+Sep 12, 2026
+Copy link
+Copy Markdown
+Member
+Overview
+Two follow-ups from profiling the hybrid gsplat pipeline (compute projector → GPU radix sort → instanced quad draw) on WebGPU. The first removes per-fragment interpolation work for varyings that are constant across each splat quad. The second fixes a buffer sizing bug in ComputeRadixSort that writes past the end of its key/value buffers when the element count grows without crossing a partition boundary.
+Changes
+gaussianColor, id and vLinearDepth are now flat varyings in gsplatVS, gsplatHybridVS and gsplatPS (WGSL) and in gsplatVS / gsplatPS (GLSL). They are computed once per splat and written identically to all four quad vertices, so the output is bit-identical; only gaussianUV still interpolates.
+ComputeRadixSort reallocates its ping-pong key/value buffers whenever the effective element count grows, not only when the workgroup / thread-block count changes. Previously a sort growing from e.g. 2304 to 2560 elements (both within one 2048-element partition on the portable backend) kept 2304-element buffers and wrote the tail out of bounds, producing a wrong order for the last elements under WebGPU robustness clamping. The hybrid renderer hits this whenever totalActiveSplats grows by less than a partition.
+Shrinking still only reallocates when a lowered capacity drops the partition count, so frame-to-frame count changes below the high-water mark never churn.
+capacity is now an accessor. Raising it above the current allocation releases the undersized buffers so sortedIndices / sortedKeys return null until the next sort allocates at the new size. Lowering it keeps the existing larger buffers until the next sort, as before.
+New test test/scene/graphics/radix-sort/compute-radix-sort.test.mjs drives the public sort() on both backends through the facade on a stubbed NullGraphicsDevice: growth within a partition, shrink without reallocation, raise capacity → null result, lower capacity → shrink at next sort.
+Technical details
+ComputeRadixSortBase tracks _allocatedElementCount, recorded in _allocatePingPongElementBuffers and reset in _destroyPingPongBuffers. Both backends' _allocateBuffers reallocate when effectiveCount > _allocatedElementCount, when the buffers do not exist, when forceRealloc is set, or when the allocated partition count drops. The partition count still sizes _blockSums / _passHist but no longer triggers reallocation on its own.
+The backends write _capacity directly after allocation so the setter's invalidation does not re-enter during allocation.
+Behaviour change (internal API)
+ComputeRadixSort is @ignore but consumers that reuse the sorter's result buffer outside sort() (SuperSplat's stochastic draw order does this) rely on the new capacity contract:
+```
+sorter.sort(keys, n, 16);
+sorter.capacity = n + 1;
+sorter.sortedIndices; // before: stale buffer sized for n   after: null until the next sort
+```
+latest
+ace67ab
+slimbuck
+requested review from
+mvaligursky
+and
+a balanced review from Copilot
+September 12, 2026 19:44
+slimbuck
+self-assigned this
+Sep 12, 2026
+slimbuck
+added
+the
+area: graphics
+Graphics related issue
+label
+Sep 12, 2026
+Copilot
+AI
+reviewed
+Sep 12, 2026
+Copilot
+AI
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Copilot was unable to review this pull request because the user who requested the review has reached their quota limit.
+mvaligursky
+reviewed
+Sep 14, 2026
+View reviewed changes
+mvaligursky
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Automated PR review by Codex (GPT-5).
+[P2] Please provide the byte-exact evidence for the stated bit-identical rendering result. Marking these floating/half varyings flat changes the rasterizer's interpolation operation; the fact that the default vertex path computes the same source value for each quad vertex makes equivalence plausible, but source inspection alone does not establish identical finite-precision output across WebGL and WebGPU. The added tests cover only radix-sort allocation. For this performance-only shader change, run a deterministic same-build repeat followed by base/head raw-backbuffer comparisons and report the differing-pixel counts. Coverage should include the standard WebGL and WebGPU gsplat paths plus the WebGPU hybrid path, with variants that exercise gaussianColor, dither id, and linear-depth/prepass use.
+I found no code-level defect in the radix-sort fix. _allocatedElementCount closes the within-partition growth overflow on both backends; capacity growth invalidation, delayed shrinking, destructive-key ownership, ancillary-buffer resizing, and facade forwarding are internally consistent. The flat qualifiers also match between vertex/fragment declarations in both shader languages.
+Verification on head ace67ab2b: git diff --check; ESLint on all changed files; new focused tests (10 passing); full unit suite (2872 passing, 2 pending). All GitHub CI jobs pass. The two Vercel preview statuses fail at authorization URLs and appear infrastructural rather than code failures.
+mvaligursky
+approved these changes
+Sep 14, 2026
+View reviewed changes
+Hide details
+View details
+mvaligursky
+merged commit 0c2ab99
+into
+playcanvas:main
+Sep 14, 2026
+8 of 10 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+hjwatts91-ui
+mentioned this pull request
+Oct 2, 2026
+gsplat: WebGPU GPU-sort draws newly streamed LOD chunks black before they pop in (Adreno); stochastic and CPU sort are clean
+#9658
+Open
+slimbuck
+deleted the
+gsplat-fixes
+branch
+October 15, 2026 13:04
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+area: graphics
+Graphics related issue
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

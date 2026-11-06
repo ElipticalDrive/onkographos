@@ -1,0 +1,156 @@
+--- v001.md
++++ v002.md
+@@ -4,77 +4,107 @@
+ 
+ ## Overview
+-The Tree Marcher is a ray traversal algorithm for generic hierarchical grids, specifically designed to integrate with the OpenVDB data structure. It solves the problem of efficiently stepping through sparse voxel data by combining hierarchical empty-space skipping with Digital Differential Analyzer (DDA) logic at the leaf level. Unlike sibling methods that may rely on geometric intersection tests for child selection, Tree Marcher utilizes a hierarchical DDA (HDDA) approach to determine traversal order, making it distinct from [Octree Path Computation](897-octree-path-computation.md) and [Sparse Voxel Octree Ray Traversal](2451-sparse-voxel-octree-ray-traversal.md).
++The Tree Marcher is a hierarchical ray traversal algorithm designed for generic grid structures, specifically optimized for OpenVDB grids [S1]. It solves the problem of efficiently sampling sparse volumetric data by combining hierarchical empty-space skipping with Digital Differential Analyzer (DDA) stepping within occupied regions [S1]. Unlike sibling methods that may rely on fixed-step traversal or specific path-computation heuristics, the Tree Marcher explicitly manages the transition between tree-level traversal and voxel-level stepping using a specialized DDA, allowing it to handle arbitrary grid topologies defined by template parameters [S1].
+ 
+ ## How it works
+-The algorithm operates on a hierarchical grid structure where nodes represent volumes of varying sizes. It uses a template-based design to support different ray types, coordinate types, and accessor interfaces.
++The method operates on a generic grid structure where the topology is defined by a `NodeT` type, while the ray, coordinate system, and data access are handled by `RayT`, `CoordT`, and `AccT` respectively [S1].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** A ray defined by origin and direction, a grid accessor providing access to node data, and the root node of the hierarchical grid.
+-*   **Output:** A sequence of voxel coordinates ($ijk$) and values ($v$) encountered along the ray, along with the intersection time ($t$) if a zero-crossing is detected.
++*   **Input:** A ray defined by `RayT`, an accessor interface `AccT` providing grid data, and the root of the grid tree.
++*   **Output:** Intersection points, voxel indices (`ijk`), and grid values (`v`) at those intersections.
+ 
+ **Data Structures:**
+-The implementation relies on the `NodeT` template parameter, which defines the node layout. The `AccT` accessor provides methods to retrieve voxel values and determine node occupancy. The `RayT` structure contains the ray origin, direction, and inverse direction. The `CoordT` type represents integer coordinates.
++The implementation relies on template specialization rather than fixed memory layouts, allowing it to adapt to various node types (`NodeT`) [S1]. The core state involves the current ray parameter $t$, the current voxel index $\mathbf{ijk}$, and the grid value $v$ [S1].
+ 
+ **Algorithm Steps:**
+-1.  **Initialization:** Initialize the ray parameters and the current node pointer to the grid root.
+-2.  **Hierarchical Descent:** Use the HDDA mechanism to traverse the tree. The HDDA maintains the entry and exit parameters ($t_{min}, t_{max}$) for the current node's bounding box relative to the ray.
+-3.  **Empty Space Skipping:** If the current node is marked as empty or uniform, skip directly to the next potentially occupied node. This is achieved by advancing the ray parameter $t$ to the exit of the current node or using neighbor pointers if available [G].
+-4.  **Leaf Traversal:** Upon reaching a leaf node, switch to a fixed-step DDA. The DDA uses a step size defined by the template parameter `Dim` (typically the voxel size of the leaf) to step through the voxels along the ray [S1].
+-5.  **Zero-Crossing Detection:** For each voxel visited, check for zero-crossings in the scalar field. The `ZeroCrossing` function updates the voxel index $ijk$, the value $v$, and the intersection time $t$ if a crossing is found [S1].
+-6.  **Termination:** Continue traversal until the ray exits the grid or a maximum depth/step count is reached.
++1.  **Hierarchical Descent:** The traversal begins at the root. It uses a Hierarchical DDA (HDDA) to step through the tree levels [S1]. This involves determining which child node the ray intersects, similar to the principles in [Octree and Tree Traversal](4134-octree-and-tree-traversal.md).
++2.  **Empty Space Skipping:** If a node is marked as empty, the HDDA advances the ray parameter $t$ to the exit of the current node's bounding box, effectively skipping the entire subtree [S1].
++3.  **Voxel-Level Stepping:** Upon reaching a leaf node or an occupied region, the method switches to a fixed-step DDA. Unlike the HDDA, this DDA uses a fixed step size defined by the template parameter `Dim` (dimension) [S1].
++4.  **Zero-Crossing Detection:** At each voxel step, the algorithm checks for zero-crossings in the scalar field. This is performed by the `ZeroCrossing` function [S1].
++    *   If a zero-crossing is detected, the function returns `true`.
++    *   The voxel index $\mathbf{ijk}$ is updated to the index of the closest voxel *after* the intersection point.
++    *   The grid value $v$ at $\mathbf{ijk}$ is returned.
++    *   The ray parameter $t$ is set to the time of intersection [S1].
++5.  **Continuation:** If no zero-crossing is found, the DDA continues stepping through the leaf voxels until the leaf is exhausted or a zero-crossing is found. If the leaf is exhausted, the traversal backtracks to the parent node [S1, G].
+ 
+ **Pseudocode:**
++The following pseudocode illustrates the core logic derived from the `ZeroCrossing` and `TreeMarcher` descriptions [S1].
++
+ ```python
+-def TreeMarcher(RayT ray, AccT acc, NodeT root):
+-    # Initialize HDDA state for the root node
+-    hdda = HDDA(ray, root.bounding_box)
++def TreeMarcher(ray, accessor, grid_root):
++    # Initialize ray parameter t to start of ray
++    t = ray.origin_t
+     
+-    while hdda.is_valid():
+-        node = hdda.current_node()
++    # Traverse the tree using HDDA logic (simplified)
++    node = grid_root
++    while node is not None:
++        if node.is_empty():
++            # Skip empty subtree
++            t = max(t, node.exit_t)
++            node = node.next_sibling_or_parent()
++            continue
+         
+-        if node.is_empty():
+-            # Skip empty node by advancing HDDA
+-            hdda.advance_to_next_node()
+-            continue
++        # Reached occupied region, switch to voxel-level DDA
++        # DDA uses fixed step size defined by Dim
++        voxel_step = get_fixed_step_size(Dim)
++        
++        current_ijk = ray_to_voxel_index(ray, t)
++        
++        while current_ijk is within node.bounds:
++            # Check for zero-crossing at current voxel
++            found_intersection, v, intersection_t = ZeroCrossing(ray, accessor, current_ijk)
+             
+-        if node.is_leaf():
+-            # Switch to leaf-level DDA
+-            leaf_dda = DDA(ray, node, Dim=node.voxel_size)
+-            while leaf_dda.is_valid():
+-                voxel = leaf_dda.current_voxel()
+-                v = acc.get_value(voxel)
+-                
+-                # Check for zero-crossing
+-                if ZeroCrossing(ray, acc, voxel.ijk, v, t):
+-                    yield (voxel.ijk, v, t)
+-                    
+-                leaf_dda.step()
+-        else:
+-            # Descend into children using HDDA logic
+-            hdda.descend()
++            if found_intersection:
++                # Update state with intersection details
++                t = intersection_t
++                # Return or process intersection
++                return current_ijk, v, t
++            
++            # Step to next voxel
++            current_ijk = dda_step(current_ijk, ray.direction, voxel_step)
++        
++        # Leaf exhausted, backtrack
++        node = node.next_sibling_or_parent()
++        if node is None:
++            break
++
++def ZeroCrossing(ray, accessor, ijk):
++    # Sample grid values at current and next voxel along ray
++    v_current = accessor.get_value(ijk)
++    v_next = accessor.get_value(ijk + ray.direction_sign)
++    
++    # Check for sign change (zero-crossing)
++    if v_current * v_next < 0:
++        # Interpolate to find precise intersection t
++        # Note: Exact interpolation formula not provided in sources [G]
++        t_intersect = interpolate_zero_crossing(v_current, v_next, ray)
++        return True, v_next, t_intersect
++    else:
++        return False, v_current, ray.t
+ ```
+ 
+ **Parameters:**
+-*   `NodeT`: The node type template parameter [S1].
+-*   `RayT`: The ray type template parameter [S1].
+-*   `AccT`: The accessor type template parameter [S1].
+-*   `CoordT`: The coordinate type template parameter [S1].
+-*   `Dim`: The fixed step size for the DDA at leaf nodes [S1].
++*   `NodeT`: Template parameter for the node type [S1].
++*   `RayT`: Template parameter for the ray type [S1].
++*   `AccT`: Template parameter for the accessor type [S1].
++*   `CoordT`: Template parameter for the coordinate type [S1].
++*   `Dim`: Template parameter defining the fixed step size for the DDA [S1].
+ 
+ **Edge Cases:**
+-*   **Precision:** Floating-point precision issues may arise when computing ray-node intersections, especially for long rays or small voxels.
+-*   **Boundaries:** Ensure the ray origin is correctly handled if it lies exactly on a node boundary.
+-*   **Degenerate Input:** Empty grids or rays that do not intersect the grid should be handled gracefully by returning no results.
++*   **Precision:** The fixed step size in the DDA may lead to missed intersections if the step is too large relative to the feature size [S1].
++*   **Boundaries:** The algorithm must handle ray exits from the grid volume gracefully [S1].
+ 
+ ## Subtopics
+ 
+ ### PointTreeMarcher
+-A specialized Tree Marcher for Point Grids. It differs from the generic Tree Marcher by operating on point-based data structures rather than volumetric grids. It is chosen when the underlying data is a set of points rather than a scalar field. Parameters include `AccT`, `RayT`, and `CoordT` [S1].
++A specialized variant of the Tree Marcher designed for point grids [S1]. It differs from the generic `TreeMarcher` by omitting the `NodeT` template parameter, as point grids do not have the same hierarchical node structure as generic grids [S1]. It relies on `AccT`, `RayT`, and `CoordT` for operation [S1].
+ 
+ ## Operating characteristics
+-The Tree Marcher provides efficient traversal for sparse grids by skipping empty space at multiple levels of the hierarchy. Its performance depends on the sparsity of the grid and the distribution of the ray. In dense regions, it behaves similarly to a standard DDA, while in sparse regions, it offers significant speedups due to empty space skipping. Memory usage is proportional to the depth of the tree and the number of active nodes visited.
++*   **Complexity:** Time complexity depends on the sparsity of the grid and the depth of the tree. Empty space is skipped efficiently via HDDA, reducing the number of voxel samples [S1].
++*   **Memory:** Memory usage is dominated by the grid structure itself. The algorithm itself uses minimal stack space for traversal [S1].
++*   **Performance:** Optimized for OpenVDB grids, which are commonly used in visual effects for sparse data [S1].
++*   **Limitations:** The fixed step size in the DDA may not be optimal for all grid resolutions, potentially requiring tuning of the `Dim` parameter [S1].
+ 
+ ## Background
+-The Tree Marcher is part of the OpenVDB library, developed by DreamWorks Animation for visual effects production. It is designed to work with the Hierarchical Digital Differential Analyzer (HDDA) for efficient ray traversal in large-scale volumetric data. The method is documented in the OpenVDB header file `HDDA.h` [S1].
++The Tree Marcher is part of the OpenVDB library, specifically defined in `nanovdb/util/HDDA.h` [S1]. It is designed to work with the NVIDIA OpenVDB (nanovdb) implementation, which is optimized for GPU rendering [S1]. The method builds on the principles of Digital Differential Analyzers (DDA) and Hierarchical DDA (HDDA) [S1].
+ 
+ ## Sources

@@ -1,0 +1,331 @@
+--- v001.md
++++ v002.md
+@@ -4,196 +4,165 @@
+ 
+ ## Overview
+-Raymarched SDF Volume Rendering is a technique to display a 2D projection of a 3D object defined by a mathematical distance function (SDF) by casting rays from the camera and stepping along them until they intersect the surface [S2, unofficial]. It creates an image from equations rather than rasterized geometry, allowing for complex, analytic shapes without explicit mesh data [S1, unofficial]. Unlike traditional Unity Raycasting, which is not available in shaders, this method implements its own ray-intersection logic using distance queries [S2, unofficial].
++Raymarched SDF Volume Rendering renders 3D geometry defined by analytic Signed Distance Functions (SDFs) by casting rays from the camera and stepping along them until they intersect the surface [S1, unofficial][S2, unofficial]. Unlike traditional rasterization or mesh-based raycasting, this method constructs the image directly from equations, allowing for complex, continuous geometry without explicit polygonal meshes [S1, unofficial][S2, unofficial]. It differs from its parent [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md) by often incorporating specific shading, lighting, and fog calculations within the raymarching loop to produce the final pixel color, rather than just returning a binary hit/miss or surface normal [S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** A quad covering the screen (positioned at $z=0.32$ or beyond the camera's near clipping plane) [S2, unofficial]. Camera parameters: origin $\mathbf{o}$, basis vectors $\mathbf{r}$ (right), $\mathbf{u}$ (up), $\mathbf{f}$ (forward), and focal length [S2, unofficial]. Scene parameters: object positions, sizes, and material IDs [S1, S2, unofficial].
+-*   **Output:** A color buffer where each pixel contains the color and alpha of the first surface hit by the ray [S2, unofficial].
++**Inputs:**
++*   Ray origin $o$ (camera position) and normalized direction $\hat{r}$ for each pixel [S1, unofficial][S2, unofficial].
++*   Scene SDF function $S(p)$ that returns the signed distance to the nearest surface at point $p$ [S1, unofficial].
++*   Parameters: `MAX_STEPS` (maximum iterations), `HIT_THRESHOLD` (epsilon for surface detection), `MAX_RANGE` (maximum travel distance), and `STEP_SCALE` (optional multiplier for step size safety) [S1, unofficial][S2, unofficial].
++
++**Outputs:**
++*   Final pixel color (and optionally alpha) [S2, unofficial].
+ 
+ **Data Structures:**
+-*   **Scene Map:** A function `map(p)` that returns a `vec2` (or `float2`). The x-component is the signed distance to the nearest surface. The y-component is the material ID (e.g., 0.0 for wing, 1.0 for body/antenna) [S1, unofficial].
+-*   **Vertex Shader Output (`v2f`):**
+-    *   `uv`: `float2` (TEXCOORD0), texture coordinates from input [S2, unofficial].
+-    *   `vertex`: `float4` (SV_POSITION), transformed vertex position [S2, unofficial].
++*   The scene is defined by a single callable function $S(p)$ [S1, unofficial]. In complex scenes, this function may return a pair $(d, \text{material\_id})$ where $d$ is the distance and $\text{material\_id}$ identifies the object for shading [S1, unofficial].
++*   Camera parameters: `_CamPos`, `_CamRight`, `_CamUp`, `_CamForward` [S2, unofficial].
++*   Lighting parameters: `_LightColor0`, `_WorldSpaceLightPos0` [S2, unofficial].
+ 
+ **Numbered Steps:**
++1.  **Ray Construction:** For each pixel with UV coordinates $uv \in [0,1]$, transform to $[-1,1]$ and construct the ray direction $\hat{r}$ using camera basis vectors and a focal length $f$:
++    $$ \hat{r} = \text{normalize}(\text{_CamUp} \cdot uv_y + \text{_CamRight} \cdot uv_x + \text{_CamForward} \cdot f) $$
++    [S2, unofficial]
++    The ray origin $o$ is the camera position `_CamPos` [S2, unofficial].
+ 
+-1.  **Vertex Shader:** Transform vertex position using model-view-projection matrix and pass texture coordinates to the fragment shader [S2, unofficial].
+-    $$ \text{vertex} = \text{mul}(\text{UNITY\_MATRIX\_MVP}, \text{v.vertex}) $$
+-    $$ \text{uv} = \text{v.texcoord} $$
++2.  **Initialization:** Set current position $p = o$ and iteration counter $i = 0$ [S1, unofficial][S2, unofficial].
+ 
+-2.  **Fragment Shader - Ray Setup:** Transform UV coordinates from $[0,1]$ to $[-1,1]$ [S2, unofficial]. Construct the ray direction $\hat{r}$ using camera basis vectors and a focal length $f$ [S2, unofficial].
+-    $$ \text{uv}_{\text{ndc}} = \text{uv} \times 2.0 - 1.0 $$
+-    $$ \hat{r} = \text{normalize}(\mathbf{u} \cdot \text{uv}_{\text{ndc}.y} + \mathbf{r} \cdot \text{uv}_{\text{ndc}.x} + \mathbf{f} \cdot f) $$
+-    Typical focal length: $0.62$ [S2, unofficial].
++3.  **Marching Loop:** While $i < \text{MAX\_STEPS}$:
++    a.  **Evaluate SDF:** Compute $d = S(p)$ [S1, unofficial][S2, unofficial].
++    b.  **Hit Test:** If $d \le \text{HIT\_THRESHOLD}$ (or $d < 0$ indicating inside the surface), the ray has hit the object [S1, unofficial][S2, unofficial].
++        i.  Compute the surface normal $n$ at $p$ using numerical differentiation (gradient approximation) with epsilon $\epsilon$:
++            $$ n = \text{normalize}\left( \begin{bmatrix} S(p + \epsilon_{yxx}) - S(p - \epsilon_{yxx}) \\ S(p + \epsilon_{xyx}) - S(p - \epsilon_{xyx}) \\ S(p + \epsilon_{xxy}) - S(p - \epsilon_{xxy}) \end{bmatrix} \right) $$
++            where $\epsilon_{yxx} = (0.0, \epsilon, 0.0)$, etc. [S2, unofficial]
++        ii. Compute lighting:
++            $$ \text{diffuse} = \text{_LightColor0.rgb} \cdot \max(\text{dot}(\text{lightDir}, n), 0.0) $$
++            $$ \text{ambient} = \text{UNITY\_LIGHTMODEL\_AMBIENT.xyz} \cdot 2.0 $$
++            $$ \text{final\_light} = \text{diffuse} + \text{ambient} $$
++            [S2, unofficial]
++        iii. Compute fog:
++            $$ \text{dist} = \| p - \text{_CamPos} \| $$
++            $$ f_{\text{fog}} = \exp(-\text{dist} \cdot \text{fogDensity}) $$
++            $$ \text{fog\_color} = \text{fogColor} \cdot (1.0 - f_{\text{fog}}) + \text{color} \cdot f_{\text{fog}} $$
++            [S2, unofficial]
++        iv. Return the computed color and break the loop [S2, unofficial].
++    c.  **Miss/Far Test:** If $d > \text{MAX\_RANGE}$, the ray has missed the scene bounds. Break the loop and return background color [S2, unofficial].
++    d.  **Advance:** Update position:
++        $$ p \leftarrow p + \hat{r} \cdot d \cdot \text{STEP\_SCALE} $$
++        [S2, unofficial]
++        Note: Standard sphere tracing uses $\text{STEP\_SCALE}=1.0$. Some implementations use a conservative scale (e.g., 0.5) to prevent tunnelling through thin structures or due to non-rigid transforms [S1, unofficial][S2, unofficial].
++    e.  Increment $i$.
+ 
+-3.  **Raymarching Loop:** Iterate up to a maximum number of steps $N$ (typically 64 [S2, unofficial] or 130 [S1, unofficial]). Initialize position $\mathbf{p}$ to the camera origin $\mathbf{o}$ [S2, unofficial].
+-    $$ \text{for } i = 0 \text{ to } N-1: $$
+-
+-4.  **Distance Query:** Evaluate the SDF at the current position $\mathbf{p}$ to get distance $d$ [S2, unofficial].
+-    $$ d = \text{map}(\mathbf{p}).x $$
+-
+-5.  **Hit Test:** If $d < \epsilon_{\text{hit}}$ (e.g., $0.005$), the ray has hit the surface. Compute color and break [S2, unofficial].
+-    $$ \text{if } d < 0.005: \text{color} = \text{getColor}(\mathbf{p}); \text{break} $$
+-
+-6.  **Far Plane Test:** If $d > \epsilon_{\text{far}}$ (e.g., $400.0$), the ray is too far away. Break [S2, unofficial].
+-    $$ \text{if } d > 400.0: \text{break} $$
+-
+-7.  **Step Forward:** Advance position along the ray. A safety factor (e.g., $0.5$) is often applied to prevent tunnelling, especially in non-rigid transforms [S1, S2, unofficial].
+-    $$ \mathbf{p} \leftarrow \mathbf{p} + \hat{r} \cdot d \cdot \text{safety\_factor} $$
+-
+-8.  **Color Computation:** If a hit occurred, compute the final color using lighting, fog, and alpha [S2, unofficial].
++4.  **Fallback:** If the loop terminates without a hit, return the background color or transparent color [S2, unofficial].
+ 
+ **Formulas:**
+-
+-*   **Ray Equation:**
+-    $$ p(s) = o + s\,\hat{r} $$
+-    where $p(s)$ is the point on the ray at distance $s$, $o$ is the ray origin, and $\hat{r}$ is the normalized ray direction [S1, unofficial].
+-
+-*   **Sphere SDF:**
+-    $$ d_{\text{sphere}} = \lVert \mathbf{p} - \mathbf{c} \rVert - r $$
+-    where $\mathbf{c}$ is the center and $r$ is the radius [S2, unofficial].
+-
+-*   **Box SDF:**
+-    $$ d_{\text{box}} = \lVert \max(\lvert \mathbf{p} - \mathbf{c} \rvert - \mathbf{s}, 0.0) \rVert $$
+-    where $\mathbf{c}$ is the center and $\mathbf{s}$ is the half-extents (size) [S2, unofficial].
+-
+-*   **Normal Approximation (Numerical Gradient):**
+-    Using epsilon $\epsilon = (0.00, 0.02)$ for x and y components respectively [S2, unofficial]:
+-    $$ \mathbf{n} = \text{normalize} \begin{pmatrix} d(\mathbf{p} + \epsilon_y \mathbf{e}_x) - d(\mathbf{p} - \epsilon_y \mathbf{e}_x) \\ d(\mathbf{p} + \epsilon_x \mathbf{e}_y) - d(\mathbf{p} - \epsilon_x \mathbf{e}_y) \\ d(\mathbf{p} + \epsilon_x \mathbf{e}_z) - d(\mathbf{p} - \epsilon_x \mathbf{e}_z) \end{pmatrix} $$
+-    *Note: The source code uses `eps.yxx` for x-gradient, `eps.xyx` for y-gradient, and `eps.xxy` for z-gradient, implying $\epsilon_x=0.00$ and $\epsilon_y=0.02$ [S2, unofficial].*
+-
+-*   **Lighting:**
+-    $$ \mathbf{L}_{\text{diffuse}} = \mathbf{C}_{\text{light}} \cdot \max(\mathbf{l} \cdot \mathbf{n}, 0.0) $$
+-    $$ \mathbf{L}_{\text{ambient}} = \mathbf{C}_{\text{ambient}} \times 2.0 $$
+-    $$ \mathbf{C}_{\text{final}} = (\mathbf{C}_{\text{base}} \cdot (\mathbf{L}_{\text{diffuse}} + \mathbf{L}_{\text{ambient}})) \cdot \mathbf{C}_{\text{base\_color}} $$
+-    where $\mathbf{l}$ is the normalized light direction [S2, unofficial].
+-
+-*   **Fog:**
+-    $$ f = e^{-d_{\text{cam}} \cdot \rho} $$
+-    $$ \mathbf{C}_{\text{fogged}} = \mathbf{C}_{\text{fog}} (1 - f) + \mathbf{C}_{\text{final}} f $$
+-    where $d_{\text{cam}} = \lVert \mathbf{p} - \mathbf{o} \rVert$, $\rho = 0.1$ [S2, unofficial].
+-
+-*   **Alpha (Transparency):**
+-    $$ \alpha = \max(\mathbf{l} \cdot \mathbf{n}, 0.0) $$
+-    This makes shadows transparent [S2, unofficial].
++*   Ray: $p(s) = o + s\,\hat{r}$ [S1, unofficial].
++*   Sphere SDF: $d(p) = \|p - c\| - r$ [S2, unofficial].
++*   Box SDF: $d(p) = \| \max(|p - c| - b, 0.0) \|$ [S2, unofficial].
++*   Union: $d_{union}(p) = \min(d_1(p), d_2(p))$ [S1, unofficial][S2, unofficial].
++*   Intersection: $d_{intersect}(p) = \max(d_1(p), d_2(p))$ [S1, unofficial][S2, unofficial].
++*   Subtraction: $d_{sub}(p) = \max(d_1(p), -d_2(p))$ [S1, unofficial][S2, unofficial].
+ 
+ **Parameters:**
+-*   `MARCH_STEPS`: 130 [S1, unofficial] or 64 [S2, unofficial].
+-*   `Focal Length`: 0.62 [S2, unofficial].
+-*   `Fog Density`: 0.1 [S2, unofficial].
+-*   `Hit Threshold`: 0.005 [S2, unofficial].
+-*   `Far Threshold`: 400.0 [S2, unofficial].
+-*   `Safety Factor`: 0.5 [S2, unofficial].
++*   `MAX_STEPS`: Typically 64 to 130 [S1, unofficial][S2, unofficial].
++*   `HIT_THRESHOLD`: Typically 0.001 to 0.005 [S1, unofficial][S2, unofficial].
++*   `MAX_RANGE`: Typically 400.0 or similar scene-bound dependent value [S2, unofficial].
++*   `focalLength`: Experimentally determined, e.g., 0.62 [S2, unofficial].
++*   `fogDensity`: e.g., 0.1 [S2, unofficial].
++*   `STEP_SCALE`: 1.0 for standard sphere tracing; <1.0 (e.g., 0.5) for conservative stepping [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Tunnelling:** In non-rigid transforms (e.g., bending wings), distances are overstated. Rays may tunnel through thin membranes. Solution: Use conservative steps (smaller step size or more iterations) [S1, unofficial].
+-*   **Clipping:** The quad rendering the volume must be positioned at $z=0.32$ or beyond the camera's near clipping plane (typically 0.3) to be visible [S2, unofficial].
+-*   **Layer Culling:** Use a separate camera with 'depth only' clear flags for the volume layer, and ensure the main camera excludes that layer from its culling mask to ensure correct backgrounding [S2, unofficial].
++*   **Tunnelling:** In non-rigid transforms (e.g., bending thin wings), distances may be overstated. Using a conservative step scale or increasing `MAX_STEPS` prevents rays from passing through thin geometry [S1, unofficial].
++*   **Clipping:** The rendering quad must be positioned beyond the camera's near clipping plane (e.g., $z=0.32$ if near clip is $0.3$) [S2, unofficial].
++*   **Layer Culling:** To render SDF volumes in the background, use a separate camera with "depth only" clear flags and exclude the volume layer from the main camera's culling mask [S2, unofficial].
++*   **Normal Accuracy:** Numerical differentiation requires a small epsilon. Too large an epsilon causes jagged normals; too small causes noise [S2, unofficial].
+ 
+ **Pseudocode:**
++```python
++def raymarch_sdf_volume_rendering(cam_pos, cam_right, cam_up, cam_forward, focal_length, scene_sdf, max_steps=64, hit_threshold=0.005, max_range=400.0, step_scale=0.5, fog_density=0.1, fog_color=(0.8, 0.8, 0.8), light_color=(1.0, 1.0, 1.0), light_dir=(0.0, 1.0, 0.0)):
++    """
++    Renders a single ray using SDF volume rendering techniques.
++    Note: This is a simplified procedural representation. In practice, 
++    scene_sdf, lighting, and fog parameters are often shader uniforms.
++    """
++    # 1. Ray Construction (Assumed pre-computed per pixel)
++    # uv is in [-1, 1]
++    # ray_dir = normalize(cam_up * uv.y + cam_right * uv.x + cam_forward * focal_length)
++    # ray_orig = cam_pos
++    
++    # For the sake of this self-contained function, we assume ray_orig and ray_dir are inputs
++    # or we construct a default ray for demonstration. 
++    # Let's assume the caller passes ray_orig and ray_dir.
++    pass
+ 
+-```python
+-def raymarch_sdf_volume_rendering(camera_origin, camera_right, camera_up, camera_forward, focal_length, scene_map, max_steps=64, hit_threshold=0.005, far_threshold=400.0, safety_factor=0.5):
+-    """
+-    Renders a scene defined by an SDF map function.
++def render_pixel(uv, cam_pos, cam_right, cam_up, cam_forward, focal_length, scene_sdf, max_steps=64, hit_threshold=0.005, max_range=400.0, step_scale=0.5, fog_density=0.1, fog_color=(0.8, 0.8, 0.8), light_color=(1.0, 1.0, 1.0), light_dir=(0.0, 1.0, 0.0)):
++    # Transform UV from [0,1] to [-1,1]
++    uv = uv * 2.0 - 1.0
+     
+-    Args:
+-        camera_origin: float3, position of the camera.
+-        camera_right: float3, right vector of the camera.
+-        camera_up: float3, up vector of the camera.
+-        camera_forward: float3, forward vector of the camera.
+-        focal_length: float, focal length for ray direction calculation.
+-        scene_map: function, takes a float3 position, returns a float2 (distance, material_id).
+-        max_steps: int, maximum number of ray marching iterations.
+-        hit_threshold: float, distance below which a hit is considered.
+-        far_threshold: float, distance above which the ray is considered too far.
+-        safety_factor: float, multiplier for step size to prevent tunnelling.
+-        
+-    Returns:
+-        float4, the final color and alpha for the pixel.
+-    """
++    # Construct ray
++    ray_dir = normalize(cam_up * uv.y + cam_right * uv.x + cam_forward * focal_length)
++    ray_orig = cam_pos
+     
+-    # 1. Ray Setup
+-    # Assuming uv is already transformed to [-1, 1]
+-    # ray_direction = normalize(camera_up * uv.y + camera_right * uv.x + camera_forward * focal_length)
+-    # For this self-contained example, we assume a generic ray direction is passed or computed externally.
+-    # Here we define the loop structure.
+-    
+-    ray_direction = normalize(camera_right + camera_up + camera_forward) # Placeholder for actual UV-based direction
+-    position = camera_origin
++    p = ray_orig
++    color = (0.0, 0.0, 0.0, 0.0) # Default transparent/background
+     
+     for i in range(max_steps):
+-        # 2. Distance Query
+-        result = scene_map(position)
+-        distance = result.x
+-        material_id = result.y
++        # Evaluate SDF
++        d = scene_sdf(p)
+         
+-        # 3. Hit Test
+-        if distance < hit_threshold:
+-            return compute_color(position, material_id, camera_origin)
++        # Hit test
++        if d <= hit_threshold:
++            # Compute Normal via numerical differentiation
++            eps = 0.02
++            eps_yxx = (0.0, eps, 0.0)
++            eps_xyx = (0.0, 0.0, eps)
++            eps_xxy = (eps, 0.0, 0.0)
++            
++            nx = scene_sdf(p + eps_yxx) - scene_sdf(p - eps_yxx)
++            ny = scene_sdf(p + eps_xyx) - scene_sdf(p - eps_xyx)
++            nz = scene_sdf(p + eps_xxy) - scene_sdf(p - eps_xxy)
++            normal = normalize((nx, ny, nz))
++            
++            # Lighting
++            diffuse = light_color * max(dot(light_dir, normal), 0.0)
++            ambient = (0.5, 0.5, 0.5) # Placeholder for UNITY_LIGHTMODEL_AMBIENT * 2.0
++            final_light = diffuse + ambient
++            
++            # Base color (e.g., gray)
++            base_color = (0.7, 0.7, 0.7)
++            lit_color = base_color * final_light
++            
++            # Fog
++            dist = length(p - ray_orig)
++            fog_factor = exp(-dist * fog_density)
++            fog_result = fog_color * (1.0 - fog_factor) + lit_color * fog_factor
++            
++            # Alpha (optional, based on lighting)
++            alpha = max(dot(light_dir, normal), 0.0)
++            
++            color = (fog_result[0], fog_result[1], fog_result[2], alpha)
++            break
++            
++        # Far test
++        if d > max_range:
++            break
++            
++        # Advance
++        p = p + ray_dir * d * step_scale
+         
+-        # 4. Far Plane Test
+-        if distance > far_threshold:
+-            return float4(0.0, 0.0, 0.0, 0.0) # Transparent/Background
+-        
+-        # 5. Step Forward
+-        position = position + ray_direction * distance * safety_factor
+-        
+-    return float4(0.0, 0.0, 0.0, 0.0) # Did not hit
+-
+-def compute_color(position, material_id, camera_origin):
+-    """
+-    Computes lighting, fog, and alpha for a hit point.
+-    """
+-    # 1. Normal Approximation
+-    eps = float2(0.00, 0.02)
+-    
+-    # Helper to get distance from scene_map
+-    def get_dist(p):
+-        return scene_map(p).x
+-        
+-    dx = get_dist(position + float3(eps.y, 0.0, 0.0)) - get_dist(position - float3(eps.y, 0.0, 0.0))
+-    dy = get_dist(position + float3(0.0, eps.x, 0.0)) - get_dist(position - float3(0.0, eps.x, 0.0))
+-    dz = get_dist(position + float3(0.0, 0.0, eps.x)) - get_dist(position - float3(0.0, 0.0, eps.x))
+-    
+-    normal = normalize(float3(dx, dy, dz))
+-    
+-    # 2. Lighting
+-    light_direction = normalize(float3(1.0, 1.0, 1.0)) # Placeholder for actual light dir
+-    light_color = float3(1.0, 1.0, 1.0) # Placeholder for actual light color
+-    ambient_color = float3(0.5, 0.5, 0.5) # Placeholder for actual ambient color
+-    
+-    diffuse = light_color * max(dot(light_direction, normal), 0.0)
+-    ambient = ambient_color * 2.0
+-    final_light = diffuse + ambient
+-    
+-    base_color = float3(0.7, 0.7, 0.7) # Placeholder for material color
+-    color = base_color * final_light
+-    
+-    # 3. Fog
+-    distance_to_cam = length(position - camera_origin)
+-    fog_density = 0.1
+-    fog_color = float3(0.8, 0.8, 0.8)
+-    fog_factor = exp(-distance_to_cam * fog_density)
+-    color = fog_color * (1.0 - fog_factor) + color * fog_factor
+-    
+-    # 4. Alpha
+-    alpha = max(dot(light_direction, normal), 0.0)
+-    
+-    return float4(color, alpha)
++    return color
+ ```
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels and $M$ is the maximum number of ray marching steps per pixel.
+-*   **Memory Complexity:** $O(1)$ per pixel, as no geometry buffers are stored; the scene is defined by the SDF function [S1, unofficial].
+-*   **Performance:** Performance depends heavily on the complexity of the SDF function and the number of steps. Conservative stepping (safety factor < 1.0) increases accuracy but requires more steps or smaller steps, potentially reducing performance [S1, S2, unofficial].
+-*   **Strengths:** No mesh generation required; infinite resolution; easy to create complex, analytic shapes; supports boolean operations (union, intersection, subtraction) via min/max functions [S1, S2, unofficial].
+-*   **Limitations:** No direct support for transparency within the volume (only surface transparency via alpha); tunnelling artifacts in non-rigid transforms; limited to scenes that can be efficiently represented by SDFs [S1, S2, unofficial].
+-*   **When to use:** Ideal for procedural geometry, analytic shapes, and scenes where mesh generation is impractical or too expensive [S1, S2, unofficial].
+-*   **When not to use:** Not suitable for highly detailed, organic geometry that is better represented by meshes; not suitable for scenes requiring complex volumetric effects (e.g., participating media) without significant extension [S1, S2, unofficial].
++*   **Time Complexity:** $O(N \cdot M)$ where $N$ is the number of pixels and $M$ is the average number of raymarch steps per pixel. $M$ depends on scene complexity and `MAX_STEPS` [S1, unofficial][S2, unofficial].
++*   **Memory Complexity:** $O(1)$ auxiliary memory per ray, as the SDF is analytic and does not require storing a 3D texture or voxel grid [S1, unofficial].
++*   **Performance:** Performance is heavily dependent on the cost of the SDF evaluation. Complex SDFs (e.g., with many boolean operations or deformations) slow down the loop [S1, unofficial][S2, unofficial].
++*   **Strengths:** Infinite resolution geometry, no mesh artifacts, easy to create complex shapes via boolean operations, compact code [S1, unofficial][S2, unofficial].
++*   **Limitations:** No inherent support for transparency/translucency without complex accumulation (this article focuses on opaque surface rendering via SDFs), aliasing on thin structures if step size is not conservative, no direct support for shadows from other objects without additional raycasts [S1, unofficial][S2, unofficial].
++*   **When to use:** Stylized rendering, procedural geometry, real-time effects where mesh generation is prohibitive [S1, unofficial][S2, unofficial].
++*   **When not to use:** Photorealistic rendering requiring complex light transport (global illumination), scenes with highly detailed static geometry better represented by meshes [S1, unofficial][S2, unofficial].
+ 
+ ## Background
+-Raymarched SDF Volume Rendering is a technique popularized in real-time graphics for creating procedural geometry. It is distinct from traditional rasterization and mesh-based ray tracing. The method relies on the mathematical properties of Signed Distance Fields to efficiently determine ray-surface intersections. The technique is often used in demoscene productions and shader art for its ability to render complex shapes with minimal code [S1, S2, unofficial].
++*   **Origin:** The technique is rooted in the work of Inigo Quilez and others on raymarching with SDFs in fragment shaders [S1, unofficial][S2, unofficial].
++*   **History:** Popularized in the demoscene and real-time graphics communities for creating procedural art and effects without traditional modeling tools [S1, unofficial][S2, unofficial].
++*   **Usage:** Used in real-time shaders for visual effects, procedural generation, and educational demonstrations of ray tracing principles [S1, unofficial][S2, unofficial].
+ 
+ ## Sources

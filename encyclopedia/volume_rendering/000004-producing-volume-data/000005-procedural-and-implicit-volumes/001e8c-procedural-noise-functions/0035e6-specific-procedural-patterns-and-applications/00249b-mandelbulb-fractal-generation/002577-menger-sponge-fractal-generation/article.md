@@ -1,0 +1,158 @@
+# Menger Sponge Fractal Generation
+
+Also called: Fractal sponge voxelization, Menger Sponge Fractal, Menger sponge procedural generation, SDF Menger Sponge
+
+## Overview
+Generates a 3D voxel grid or Signed Distance Field (SDF) representing a Menger sponge by iteratively dividing space into $3 \times 3 \times 3$ subcubes and removing those where two or more coordinates fall into the middle third [S1, S2, unofficial]. It differs from its parent [Mandelbulb Fractal Generation](3327-mandelbulb-fractal-generation.md), which uses polar coordinate power transformations, by relying on discrete coordinate modulo arithmetic and axis-aligned box subtraction [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- `p`: 3D point $(x, y, z)$ in world space.
+- `ITERATIONS`: Integer number of fractal iterations (typically 3) [S2, unofficial].
+- `box_size`: Extent of the initial cube (typically 1.0, centered at origin) [S2, unofficial].
+
+**Outputs:**
+- `d`: Signed distance from `p` to the Menger sponge surface.
+- `filled`: Boolean indicating if `p` is inside the solid material.
+
+**Data Structures:**
+- No persistent data structures; the method is stateless and procedural.
+
+**Steps:**
+1. Initialize `filled = true` [S1, unofficial].
+2. Initialize distance `d` to the distance of `p` to the initial box: $d = \text{sdBox}(p, \vec{1.0})$ [S2, unofficial].
+3. Initialize scale factor $s = 1.0$ [S2, unofficial].
+4. Iterate $m$ from $0$ to $ITERATIONS - 1$:
+   a. Calculate local coordinate `a`:
+      $$a = \text{mod}(p \cdot s, 2.0) - 1.0$$
+      where $\text{mod}$ is the floating-point modulo operation [S2, unofficial].
+   b. Update scale: $s \leftarrow s \cdot 3.0$ [S2, unofficial].
+   c. Calculate absolute local coordinate `r`:
+      $$r = |1.0 - 3.0 \cdot |a||$$
+      This maps the local coordinate into the $[0, 1]$ range, identifying the position within the $3 \times 3 \times 3$ grid cell [S2, unofficial].
+   d. Calculate corner distances to identify if the point is in the "removed" central cross:
+      $$d_a = \max(r_x, r_y)$$
+      $$d_b = \max(r_y, r_z)$$
+      $$d_c = \max(r_z, r_x)$$
+   e. Calculate the distance contribution `c` for this iteration:
+      $$c = \frac{\min(d_a, \min(d_b, d_c)) - 1.0}{s}$$
+      If the point is in the removed region, this value will be negative or small, reducing the overall distance [S2, unofficial].
+   f. Update the global distance:
+      $$d = \max(d, c)$$
+      The SDF is the maximum of the box distance and the iterative subtraction distances [S2, unofficial].
+   g. Determine if the point is inside the removed volume for this iteration. A point is removed if two or more coordinates of the integer grid position fall into the middle third. This is equivalent to checking if the modulo of the scaled position indicates the middle slice:
+      $$k_x = \lfloor \frac{p_x \cdot s_{prev}}{3} \rfloor \bmod 3$$
+      $$k_y = \lfloor \frac{p_y \cdot s_{prev}}{3} \rfloor \bmod 3$$
+      $$k_z = \lfloor \frac{p_z \cdot s_{prev}}{3} \rfloor \bmod 3$$
+      If $(k_x == 1) \lor (k_y == 1) \lor (k_z == 1)$, the point is in the middle slice of that axis. If two or more of these conditions are true, the point is in a removed cube [S1, unofficial].
+      Alternatively, using the `r` values: if $\min(d_a, d_b, d_c) < 1.0$, the point is close to the center of a subcube. However, the boolean `filled` logic in [S1, unofficial] explicitly sums the boolean results of the modulo checks.
+      
+      Let's refine the boolean check based on [S1, unofficial]:
+      For each iteration $k$ (where $s_{prev} = 3^k$):
+      Check if $\lfloor p_x \cdot s_{prev} \rfloor \bmod 3 == 1$ OR $\lfloor p_y \cdot s_{prev} \rfloor \bmod 3 == 1$ OR $\lfloor p_z \cdot s_{prev} \rfloor \bmod 3 == 1$.
+      Sum these boolean results. If sum $> 1$, set `filled = false` and break [S1, unofficial].
+
+5. If `filled` remains true, the point is inside the sponge. Return distance 0 (or a small negative value for inside) and color [S1, unofficial].
+6. If `filled` is false, the point is outside. Return distance `d` [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def menger_sponge_sdf(p, iterations=3):
+    """
+    Computes the Signed Distance Field for a Menger Sponge.
+    p: vec3, point in space
+    iterations: int, number of recursive steps
+    Returns: float, signed distance (negative if inside)
+    """
+    # Initialize distance to the bounding box
+    # Assuming box centered at 0 with size 2 (from -1 to 1)
+    # sdBox(p, vec3(1.0))
+    d = max(max(abs(p.x) - 1.0, abs(p.y) - 1.0), abs(p.z) - 1.0)
+    
+    filled = True
+    s = 1.0
+    
+    for m in range(iterations):
+        # Calculate local coordinate in the 3x3x3 grid
+        # a = mod(p * s, 2.0) - 1.0
+        a = ((p * s) % 2.0) - 1.0
+        
+        # Update scale for next iteration
+        s *= 3.0
+        
+        # r = abs(1.0 - 3.0 * abs(a))
+        r = abs(1.0 - 3.0 * abs(a))
+        
+        # Calculate corner distances
+        da = max(r.x, r.y)
+        db = max(r.y, r.z)
+        dc = max(r.z, r.x)
+        
+        # Calculate distance contribution
+        c = (min(da, min(db, dc)) - 1.0) / s
+        
+        # Update distance
+        d = max(d, c)
+        
+        # Check if point is in a removed cube
+        # Using integer division to find grid position
+        # Note: s_prev is the scale before this iteration's update
+        s_prev = s / 3.0
+        
+        # Check middle third condition for each axis
+        # floor(p * s_prev) % 3 == 1
+        ix = int(floor(p.x * s_prev)) % 3
+        iy = int(floor(p.y * s_prev)) % 3
+        iz = int(floor(p.z * s_prev)) % 3
+        
+        middle_count = 0
+        if ix == 1:
+            middle_count += 1
+        if iy == 1:
+            middle_count += 1
+        if iz == 1:
+            middle_count += 1
+            
+        if middle_count > 1:
+            filled = False
+            break
+            
+    if filled:
+        return -0.001 # Inside
+    else:
+        return d
+```
+
+**Parameters:**
+- `ITERATIONS`: Number of fractal iterations. Typical value: 3 [S2, unofficial].
+- `box_size`: Size of the initial cube. Typical value: 2.0 (from -1 to 1) [S2, unofficial].
+
+**Edge Cases:**
+- Precision: Floating point modulo operations can suffer from precision errors at high iteration counts. [S1, S2, unofficial]
+- Boundaries: Points exactly on the boundary of removed cubes may have distance 0. [S2, unofficial]
+- Degenerate Input: None specific, but high iteration counts increase computational cost exponentially. [S2, unofficial]
+
+## Subtopics
+
+### [Mandelbulb Fractal Generation](3327-mandelbulb-fractal-generation.md)
+Generates a 3D fractal by iteratively applying a polar coordinate power transformation to a complex 3D point.
+
+### [Bristorbrot Fractal Generation](3328-bristorbrot-fractal-generation.md)
+Generates a 3D fractal using a different iterative formula.
+
+## Operating characteristics
+- **Time Complexity:** $O(ITERATIONS)$ per voxel/ray march step.
+- **Memory Complexity:** $O(1)$ auxiliary space.
+- **Strengths:** Simple to implement, no pre-computed data structures required, suitable for real-time ray marching [S2, unofficial].
+- **Limitations:** High iteration counts lead to visual artifacts due to floating point precision [S1, S2, unofficial].
+- **When to use:** When a procedural, infinite-resolution fractal is needed without storing large voxel grids [S2, unofficial].
+- **When not to use:** When exact boolean operations or CSG with other primitives are required, as the SDF is an approximation [S2, unofficial].
+
+## Background
+The Menger sponge is a classic fractal curve first described by Karl Menger in 1926 [S1, S2, unofficial]. It is a 3D generalization of the Cantor set and the Sierpinski carpet. The procedural generation method described here is a common implementation in computer graphics for real-time rendering [S1, S2, unofficial].
+
+## Sources
+[S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)
+[S2] nopjia/WebGL-RayMarch, https://github.com/nopjia/WebGL-RayMarch, fetched 2026-10-26 (unofficial)

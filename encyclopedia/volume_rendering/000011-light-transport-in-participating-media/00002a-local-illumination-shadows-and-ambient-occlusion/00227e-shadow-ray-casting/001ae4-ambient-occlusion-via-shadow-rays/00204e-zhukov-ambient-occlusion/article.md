@@ -3,7 +3,7 @@
 Also called: Ambient Occlusion (Empirical Model), Geometric Obscurance, Obscurance
 
 ## Overview
-Zhukov Ambient Occlusion is an empirical ambient light illumination model that simulates indirect illumination by computing the geometric obscurance of a surface point, representing how open the point is to the environment [S1, unofficial]. It approximates darkening effects in obscured areas by attenuating the constant ambient term of the Phong lighting model, rather than calculating the intensity of secondary reflections as in radiosity [S1, unofficial]. This approach is computationally cheaper and aesthetically driven, aiming to achieve illumination effects similar to radiosity in a shorter time period [S1, unofficial].
+Zhukov Ambient Occlusion is an empirical illumination model that simulates indirect lighting by computing the geometric obscurance of a surface point, representing how open it is to the environment [S1, unofficial]. Unlike radiosity, which measures secondary reflection intensity, it attenuates the constant ambient term of the Phong model based on local geometric occlusion, prioritizing computational speed and aesthetic appeal over physical accuracy [S1, unofficial]. It builds on [Ambient Occlusion via Shadow Rays](878-ambient-occlusion-via-shadow-rays.md) by incorporating a cosine-weighted hemisphere integration directly into the sampling scheme.
 
 ## How it works
 **Inputs and Outputs:**
@@ -11,18 +11,16 @@ Zhukov Ambient Occlusion is an empirical ambient light illumination model that s
 *   **Output:** Ambient Occlusion factor $OA(x, n)$, a value in $[0, 1]$.
 
 **Data Structures:**
-*   The method relies on hemisphere sampling. No specific complex data structures are defined in the source for the core integration; standard ray-scene intersection routines are assumed [S1, unofficial].
+*   The source does not specify scene acceleration structures, assuming standard ray-scene intersection routines [S1, unofficial].
 
 **Steps:**
-1.  Define a hemisphere $\Omega$ oriented with normal $n$ centered at surface point $x$.
-2.  Sample directions $\omega$ over the hemisphere $\Omega$.
-3.  For each direction $\omega$, cast a ray from $x$ in direction $\omega$.
-4.  Determine the visibility function $V(x, \omega)$:
-    *   $V(x, \omega) = 1$ if an occluding surface is found in direction $\omega$.
-    *   $V(x, \omega) = 0$ otherwise [S1, unofficial].
-5.  Compute the integrand using the absolute value of the dot product $|\omega \cdot n|$ [S1, unofficial].
-6.  Integrate over the hemisphere to compute $OA(x, n)$.
-7.  Apply the factor to the Phong ambient term: $I_{ambient} = I_a k_a (1 - OA(x, n))$ [S1, unofficial].
+1.  Define a hemisphere $\Omega$ oriented with normal $n$ centered at surface point $x$ [S1, unofficial].
+2.  Sample directions $\omega$ uniformly over the hemisphere $\Omega$ [S1, unofficial].
+3.  For each direction $\omega$, cast a ray from $x$ in direction $\omega$ [S1, unofficial].
+4.  Evaluate the visibility function $V(x, \omega)$: set $V(x, \omega) = 1$ if an occluding surface is found, and $0$ otherwise [S1, unofficial].
+5.  Compute the integrand term $V(x, \omega) |\omega \cdot n|$ [S1, unofficial].
+6.  Approximate the integral over $\Omega$ to compute $OA(x, n)$ [S1, unofficial].
+7.  Multiply the constant ambient term of the Phong model by $(1 - OA(x, n))$ to approximate global illumination effects [S1, unofficial].
 
 **Formula:**
 The ambient occlusion factor is defined as:
@@ -41,46 +39,54 @@ Where:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
+import math
+import random
+
+def cross(a, b):
+    return (a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0])
+
+def dot(a, b):
+    return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]
+
+def normalize(v):
+    l = math.sqrt(dot(v, v))
+    return (v[0]/l, v[1]/l, v[2]/l)
+
+def sample_uniform_hemisphere(n):
+    u1 = random.uniform(0, 1)
+    u2 = random.uniform(0, 1)
+    z = u1
+    r = math.sqrt(1.0 - z * z)
+    theta = 2.0 * math.pi * u2
+    if abs(n[2]) < 0.999:
+        u = normalize(cross(n, (0.0, 0.0, 1.0)))
+    else:
+        u = normalize(cross(n, (1.0, 0.0, 0.0)))
+    v = normalize(cross(n, u))
+    return normalize((u[0]*r*math.cos(theta) + v[0]*r*math.sin(theta) + n[0]*z,
+                      u[1]*r*math.cos(theta) + v[1]*r*math.sin(theta) + n[1]*z,
+                      u[2]*r*math.cos(theta) + v[2]*r*math.sin(theta) + n[2]*z))
+
 def compute_zhukov_ao(x, n, scene, num_samples):
-    """
-    Computes Zhukov Ambient Occlusion for point x with normal n.
-    """
+    """Computes Zhukov Ambient Occlusion for point x with normal n."""
     total_occlusion = 0.0
-    
-    # Sample directions over the hemisphere oriented by n
-    for i in range(num_samples):
-        # Generate a random direction omega on the hemisphere
-        omega = sample_hemisphere(n)
-        
-        # Cast ray to find intersection
+    for _ in range(num_samples):
+        omega = sample_uniform_hemisphere(n)
         hit_distance = scene.ray_intersect(x, omega)
-        
-        # Visibility function: 1 if occluder found, 0 otherwise
-        # Note: Source defines V=1 if surface found, V=0 otherwise.
-        # This implies V represents "occlusion presence".
-        if hit_distance is not None:
-            v = 1.0
-        else:
-            v = 0.0
-            
-        # Compute dot product term
+        v = 1.0 if hit_distance is not None else 0.0
         dot_product = abs(dot(omega, n))
-        
-        # Accumulate integrand
         total_occlusion += v * dot_product
-        
-    # Normalize by pi (area of hemisphere is 2*pi, but formula uses 1/pi)
-    # The source formula divides by pi.
-    oa = total_occlusion / (num_samples * pi)
-    
-    return oa
+    # The source formula is OA = (1/pi) * integral.
+    # Monte Carlo approximation over hemisphere (area 2pi) with uniform PDF (1/2pi) yields:
+    # OA approx (1/pi) * (2pi / N) * sum(V * |w.n|) = (2 / N) * sum(...) [G]
+    # The source formula is an integral, not an estimator, and does not specify the PDF [G]
+    return (2.0 / num_samples) * total_occlusion
 ```
-*[G] The normalization factor $1/\pi$ is taken directly from the source formula. Standard Monte Carlo integration over a hemisphere usually divides by the area ($2\pi$) or uses a specific PDF. The source explicitly writes $1/\pi$. The pseudocode assumes a uniform sampling strategy where the sum is divided by the number of samples, and the constant $1/\pi$ is applied. If the sampling PDF is $1/(2\pi)$, the estimator would be $\frac{1}{N} \sum \frac{V |\omega \cdot n|}{1/(2\pi)} = \frac{2\pi}{N} \sum V |\omega \cdot n|$. The source formula is an integral, not an estimator. The implementation detail of the PDF is not given in the sources. The pseudocode reflects the direct evaluation of the integral's structure as presented.]*
 
 **Edge Cases and Pitfalls:**
-*   **Precision:** The visibility function is binary. Small errors in ray origin (self-intersection) can cause incorrect occlusion.
-*   **Boundaries:** The integration is strictly over the hemisphere defined by the normal.
-*   **Degenerate Input:** If the point is inside geometry, the visibility function behavior depends on the ray intersection logic (first hit vs. any hit). The source assumes standard exterior surface points [S1, unofficial].
+*   **Precision:** Small errors in ray origin (self-intersection) can cause incorrect occlusion [S1, unofficial].
+*   **Boundaries:** The integration is strictly over the hemisphere defined by the normal [S1, unofficial].
+*   **Degenerate Input:** The source assumes standard exterior surface points; behavior inside geometry is not specified [S1, unofficial].
 
 ## Subtopics
 
@@ -119,7 +125,7 @@ Choose Zhukov Obscurance when a smooth falloff based on distance is preferred ov
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-*   Time complexity is proportional to the number of samples and the cost of ray intersection tests. It is generally faster than full radiosity because it does not compute global light transport, only local geometric obscurance [S1, unofficial].
+*   Time complexity is proportional to the number of samples and the cost of ray intersection tests; it is generally faster than full radiosity because it computes only local geometric obscurance [S1, unofficial].
 *   Memory complexity is low, typically storing the result as vertex attributes or texture maps for later use [S1, unofficial].
 
 **Measured Performance:**

@@ -1,0 +1,260 @@
+# Adaptive Densification
+
+Also called: Adaptive Density Control, Gaussian Cloning, Splitting, and Pruning, Gradient-based densification
+
+## Overview
+Adaptive Densification is a mechanism that dynamically adjusts the number, position, and scale of 3D Gaussians during optimization to improve reconstruction quality while maintaining a fixed budget [S2]. It addresses the limitation of standard gradient descent, which can only move, stretch, or fade existing primitives but cannot create new Gaussians in empty regions or cleanly remove useless ones [S1, unofficial]. By inspecting view-space positional gradients at fixed intervals, the method triggers cloning, splitting, or pruning actions to densify the representation exactly where the scene is complex [S1, unofficial]. It differs from its siblings by relying on a specific set of thresholds for gradient magnitude and Gaussian size to classify primitives into "under-reconstructed" (clone) or "over-reconstructed" (split) categories, whereas alternatives may use loss accumulation [3298-loss-accumulation-guided-lag-densification.md] or attention mechanisms [1488-ots-satn-densification.md].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Mean positions $\boldsymbol{\mu} \in \mathbb{R}^{n \times d}$, standard deviations $\boldsymbol{\sigma} \in \mathbb{R}^{n \times 1}$, intensities/opacities $\mathbf{I} \in \mathbb{R}^{n \times 1}$, current iteration count, accumulated gradients $\boldsymbol{\mu}.grad$, maximum Gaussian count $n_{max}$, gradient threshold $\tau$, size threshold $\theta$, and box size $size$.
+*   **Outputs:** Updated arrays $\boldsymbol{\mu}, \boldsymbol{\sigma}, \mathbf{I}$ and updated count $n$.
+
+**Data Structures:**
+The method operates on parallel arrays representing the Gaussian primitives. Each primitive $i$ has a mean position $\boldsymbol{\mu}_i$, a standard deviation $\sigma_i$ (derived from the covariance $\Sigma_i$), and an intensity $\mathbf{I}_i$. The gradients $\boldsymbol{\mu}.grad$ are accumulated per primitive during backpropagation. Note that gradients are typically not propagated through the density normalization factor to ensure stable optimization [S2].
+
+**Parameters:**
+*   $n_{max}$: Maximum allowed quantity of Gaussians. Default: 500,000 [S2].
+*   $\tau$: Minimum average gradient value for densification. Default: $2 \times 10^{-4}$ [S2].
+*   $\theta$: Threshold for classifying a Gaussian as small or large. Defined as 0.005 of the body diagonal length. Default: 0.005 [S2].
+*   $size$: Box size of each Gaussian. Default: 17 [S2].
+
+**Algorithm Steps:**
+The densification is applied periodically, typically every 100 iterations, starting from iteration 100 up to the maximum iteration count [S2].
+
+1.  **Calculate Average Gradient:** Compute the average gradient magnitude for each Gaussian:
+    $$ \text{avg grad}_i = \frac{\boldsymbol{\mu}.grad_i}{\text{iteration}} $$
+    [S2]
+
+2.  **Clone Phase (Under-reconstructed regions):**
+    *   Identify Gaussians with high gradients and small size:
+        $$ \text{mask}_{clone} = (\text{avg grad} \ge \tau) \land (\sigma \le \theta) $$
+        [S2]
+    *   Calculate available slots: $n_{available} = n_{max} - n$.
+    *   Determine number of clones: $n_{clone} = \min(n_{available}, |\text{mask}_{clone}|)$.
+    *   Select the top $n_{clone}$ Gaussians from $\text{mask}_{clone}$ based on descending average gradient magnitude (using `argsort`) [S2].
+    *   For each selected Gaussian:
+        *   Create a clone with identical position $\boldsymbol{\mu}$ and covariance $\Sigma$ (or $\sigma$).
+        *   Halve the intensity: $\mathbf{I}_{clone} = \mathbf{I}_{original} / 2$ to maintain total intensity [S2].
+        *   Detach gradients from the clone (set to zero) [S2].
+        *   Append the clone to the arrays.
+    *   Update $n \leftarrow n + n_{clone}$ [S2].
+
+3.  **Split Phase (Over-reconstructed regions):**
+    *   Identify Gaussians with high gradients and large size:
+        $$ \text{mask}_{split} = (\text{avg grad} \ge \tau) \land (\sigma > \theta) $$
+        [S2]
+    *   Recalculate available slots: $n_{available} = n_{max} - n$.
+    *   Determine number of splits: $n_{split} = \min(n_{available}, |\text{mask}_{split}|)$.
+    *   Select the top $n_{split}$ Gaussians from $\text{mask}_{split}$ based on descending average gradient magnitude [S2].
+    *   For each selected Gaussian:
+        *   Remove the original Gaussian from the arrays.
+        *   Generate two new Gaussians.
+        *   **Positions:** Sample new positions $\boldsymbol{\mu}_{new}$ from the Probability Density Function (PDF) of the original Gaussian [S2].
+        *   **Scale:** Divide the standard deviation by $\sqrt{3}/2$ to maintain total volume:
+            $$ \sigma_{new} = \frac{\sigma_{original}}{\sqrt{3}/2} $$
+            [S2]
+        *   **Intensity:** Assign intensity $\mathbf{I}_{new} = \mathbf{I}_{original}$ (distributed between the two new Gaussians, typically halved or shared, though the source specifies $\mathbf{I}_{new} = \mathbf{I}_{masksplit}$ implying the original intensity is carried by the new set, effectively splitting the contribution) [S2]. *Note: The source pseudocode shows `I_new <- I[masksplit]` and appends/removes, implying the total intensity of the split pair equals the original.*
+        *   Append the two new Gaussians to the arrays.
+    *   Update $n \leftarrow n + n_{split}$ (since one is removed and two added, net +1 per split) [S2].
+
+4.  **Prune Phase:**
+    *   Identify Gaussians to remove:
+        $$ \text{mask}_{prune} = (\text{avg grad} \le \tau) \lor (\sigma > 3 \times size) $$
+        [S2]
+    *   Remove all Gaussians in $\text{mask}_{prune}$ from the arrays.
+    *   Update $n$ accordingly [S2].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def adaptive_densification(mu, sigma, I, mu_grad, iteration, n_max, tau, theta, size):
+    """
+    mu: array of shape (n, d), mean positions
+    sigma: array of shape (n,), standard deviations
+    I: array of shape (n,), intensities
+    mu_grad: array of shape (n, d), accumulated gradients
+    iteration: int, current training iteration
+    n_max: int, maximum number of Gaussians
+    tau: float, gradient threshold
+    theta: float, size threshold
+    size: float, box size for pruning
+    """
+    n = len(mu)
+    
+    # 1. Calculate average gradient
+    # Note: mu_grad is assumed to be accumulated over iterations.
+    # We divide by the current iteration count to get the average.
+    avg_grad = mu_grad / iteration
+    
+    # 2. Clone Phase
+    # Mask for cloning: high gradient AND small size
+    mask_clone = (avg_grad >= tau) & (sigma <= theta)
+    
+    available = n_max - n
+    n_clone_candidates = np.sum(mask_clone)
+    n_clone = min(available, n_clone_candidates)
+    
+    if n_clone > 0:
+        # Get indices of candidates
+        candidate_indices = np.where(mask_clone)[0]
+        # Sort by average gradient descending
+        sorted_indices = candidate_indices[np.argsort(avg_grad[candidate_indices])[::-1]]
+        # Select top n_clone
+        clone_indices = sorted_indices[:n_clone]
+        
+        # Halve intensity of originals before cloning to preserve total intensity
+        # The source says "I[maskclone] <- I[maskclone]/2"
+        I[clone_indices] /= 2.0
+        
+        # Create clones
+        mu_clone = mu[clone_indices].copy()
+        sigma_clone = sigma[clone_indices].copy()
+        I_clone = I[clone_indices].copy() # Already halved
+        
+        # Gradients of clones are set to zero (detached)
+        # We don't need to store gradients for clones if they are zero, 
+        # but we must ensure they don't accumulate.
+        
+        # Append to arrays
+        mu = np.concatenate([mu, mu_clone])
+        sigma = np.concatenate([sigma, sigma_clone])
+        I = np.concatenate([I, I_clone])
+        n += n_clone
+        
+        # Reset gradients for clones to zero (if gradient array is maintained)
+        # Assuming mu_grad is updated externally or we zero it here for the new entries
+        # Since mu_grad is passed in, we assume it's updated by the optimizer.
+        # We must zero out the gradients for the newly added clones.
+        # This requires access to the gradient array or resetting it.
+        # For self-contained pseudocode, we assume mu_grad is also extended.
+        # However, the source says "gradients of cloned Gaussians are set to zero".
+        # We will assume mu_grad is extended with zeros.
+        zeros_grad = np.zeros((n_clone, mu.shape[1]))
+        mu_grad = np.concatenate([mu_grad, zeros_grad])
+
+    # 3. Split Phase
+    # Mask for splitting: high gradient AND large size
+    mask_split = (avg_grad >= tau) & (sigma > theta)
+    
+    available = n_max - n
+    n_split_candidates = np.sum(mask_split)
+    n_split = min(available, n_split_candidates)
+    
+    if n_split > 0:
+        candidate_indices = np.where(mask_split)[0]
+        sorted_indices = candidate_indices[np.argsort(avg_grad[candidate_indices])[::-1]]
+        split_indices = sorted_indices[:n_split]
+        
+        # Prepare new Gaussians
+        # Positions sampled from PDF of original Gaussians
+        # sigma_new = sigma / (sqrt(3)/2)
+        # I_new = I (total intensity preserved)
+        
+        mu_split_orig = mu[split_indices]
+        sigma_split_orig = sigma[split_indices]
+        I_split_orig = I[split_indices]
+        
+        # Sample 2 new positions per split Gaussian
+        # Assuming a multivariate normal distribution defined by mu and sigma (and implicit covariance)
+        # For simplicity, we assume sigma represents the scale along principal axes or isotropic
+        # The source says "sampled from the PDF".
+        mu_new = sample_from_pdf(mu_split_orig, sigma_split_orig, count=2) 
+        
+        # Scale adjustment
+        sigma_new = sigma_split_orig / (np.sqrt(3) / 2)
+        
+        # Intensity: The source says Inew <- I[masksplit]. 
+        # This implies the two new Gaussians together carry the original intensity.
+        # We split the intensity between them or assign the full intensity to the pair?
+        # Usually, splitting preserves total opacity/intensity. 
+        # If we have 2 new Gaussians, and they replace 1, we need to define I for each.
+        # The source pseudocode: "I_new <- I[masksplit]" and "mu <- mu U mu_new - mu_split".
+        # This suggests the array operation replaces the old I with the new I values.
+        # If Inew is the intensity of the *new* Gaussians, and there are 2 per split,
+        # we likely halve the intensity for each new Gaussian to preserve sum.
+        I_new = I_split_orig / 2.0
+        
+        # Construct new arrays
+        # We need to remove the split indices and add the new ones
+        keep_mask = np.ones(n, dtype=bool)
+        keep_mask[split_indices] = False
+        
+        mu = mu[keep_mask]
+        sigma = sigma[keep_mask]
+        I = I[keep_mask]
+        
+        # Add new Gaussians
+        mu = np.concatenate([mu, mu_new])
+        sigma = np.concatenate([sigma, sigma_new])
+        I = np.concatenate([I, I_new])
+        
+        # Update gradients: new Gaussians start with zero gradients
+        zeros_grad = np.zeros((2 * n_split, mu.shape[1]))
+        mu_grad = np.concatenate([mu_grad[keep_mask], zeros_grad])
+        
+        n = len(mu)
+
+    # 4. Prune Phase
+    # Mask for pruning: low gradient OR too large
+    mask_prune = (avg_grad <= tau) | (sigma > 3 * size)
+    
+    keep_mask = ~mask_prune
+    mu = mu[keep_mask]
+    sigma = sigma[keep_mask]
+    I = I[keep_mask]
+    mu_grad = mu_grad[keep_mask]
+    
+    return mu, sigma, I, mu_grad
+
+def sample_from_pdf(mu, sigma, count):
+    """
+    Samples 'count' positions from a Gaussian distribution defined by mu and sigma.
+    Assumes sigma is the standard deviation.
+    """
+    # In 3D, if sigma is a scalar, it might be isotropic.
+    # If sigma is a vector, it might be axis-aligned.
+    # The source implies sampling from the PDF.
+    # We assume a simple isotropic sampling for the pseudocode.
+    # In practice, this uses the covariance matrix derived from scale and rotation.
+    # Here we simplify to sampling from N(mu, sigma^2 * I)
+    samples = np.random.normal(loc=mu, scale=sigma, size=(count, mu.shape[1]))
+    return samples
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The division by $\sqrt{3}/2$ for splitting must be handled carefully to avoid numerical instability if $\sigma$ is very small.
+*   **Boundaries:** The pruning condition $\sigma > 3 \times size$ uses a global box size. If the scene scale varies significantly, this threshold may need adaptation.
+*   **Degenerate Input:** If $n_{max}$ is reached, no new Gaussians can be added. The algorithm prioritizes cloning and splitting based on gradient magnitude, but if no slots are available, densification is skipped for that step.
+*   **Gradient Accumulation:** The average gradient calculation assumes gradients are accumulated from the start. If gradients are reset, the formula $\text{avg grad} = \boldsymbol{\mu}.grad / \text{iteration}$ must be adjusted or the accumulation history maintained.
+*   **Without Split:** Over-large Gaussians remain unbroken, causing blurry backgrounds [S1, unofficial].
+*   **Without Clone:** Under-covered thin structures (e.g., bicycle spokes) are lost [S1, unofficial].
+
+## Subtopics
+
+### [Fixed-Pool Relocation](3094-fixed-pool-relocation.md)
+A mechanism to redistribute splats every 50 iterations to improve coverage, using a fixed pool of splats. It differs from standard densification by targeting low-residual, low-importance splats for relocation to high-error regions rather than cloning or splitting existing structures, thereby maintaining a strict budget while correcting positional errors.
+
+### [Blind-Spot Cross-Validation](3102-blind-spot-cross-validation.md)
+A model selection procedure that determines the optimal number of Gaussians (splat budget) for a 3D Gaussian Splatting reconstruction without requiring noise-free ground truth references. It identifies the point of diminishing returns where additional splats begin to memorize noise rather than signal by monitoring the divergence between training and held-out PSNR metrics.
+
+### [Density-Aware Densification (Splitting Surfels)](4514-density-aware-densification-splitting-surfels.md)
+A mechanism for surfel densification that uses a density-aware splitting criterion based on local inter-sample spacing and a screen-space gradient accumulation strategy based on T-matrix backward passes. It replaces the ad-hoc projected 3D position gradient used in 2DGS with screen-space gradients from the T-matrix backward pass and replaces the global scale threshold used in 3DGS with a criterion that adapts to spatially varying overlap conditions.
+
+## Operating characteristics
+*   **Time Complexity:** The densification step involves sorting gradients and array manipulations. Sorting takes $O(n \log n)$, where $n$ is the number of Gaussians. The actual cloning/splitting/pruning is $O(n)$. Since this is done every $K$ iterations (e.g., 100), the amortized cost per iteration is $O(\frac{n \log n}{K})$.
+*   **Memory Complexity:** The memory usage is proportional to the number of Gaussians $n$. The algorithm enforces a hard limit $n_{max}$, ensuring memory does not grow unbounded. Default $n_{max}$ is 500,000 [S2].
+*   **Measured Performance:** The method allows the representation to densify exactly where the scene is complex and stay lean where it is simple, outperforming fixed grids [S1, unofficial]. Ablation studies show that disabling either cloning or splitting leads to significant quality degradation (blurry backgrounds or missing thin structures) [S1, unofficial].
+*   **Strengths:** Dynamic adaptation to scene complexity; prevents over-smoothing and under-reconstruction; maintains a fixed memory budget.
+*   **Limitations:** Requires careful tuning of thresholds ($\tau, \theta$); sensitive to gradient accumulation strategy; may introduce artifacts if thresholds are not well-chosen.
+*   **When to Use:** When reconstructing scenes with varying levels of detail, thin structures, and complex geometry where a fixed number of Gaussians is insufficient.
+*   **When Not to Use:** When the scene is simple and a fixed set of Gaussians is sufficient, or when computational resources are extremely limited and the overhead of sorting and array manipulation is prohibitive.
+
+## Background
+Adaptive Densification was introduced as part of the 3D Gaussian Splatting framework [S1, unofficial]. It was inspired by the adaptive density control utilized in 3D Gaussian Splatting [S2]. The method addresses the fundamental limitation of gradient-based optimization on fixed sets of primitives, which cannot create new structures or remove obsolete ones. By periodically inspecting view-space positional gradients, the method triggers cloning, splitting, and pruning actions to balance the number of Gaussians and reconstruction quality [S2]. The specific thresholds and operations (halving intensity for cloning, scaling by $\sqrt{3}/2$ for splitting) are derived from the original 3D Gaussian Splatting paper and subsequent implementations [S1, unofficial][S2].
+
+## Sources
+[S1] An Architectural Review of the 3D Gaussian Splatting Rendering Pipeline, https://doi.org/10.5281/zenodo.21739653, fetched 2026-10-26 (unofficial)
+[S2] Discretized Gaussian Representation for Tomographic Reconstruction, https://doi.org/10.1109/ICCV51701.2025.02325, fetched 2026-10-27

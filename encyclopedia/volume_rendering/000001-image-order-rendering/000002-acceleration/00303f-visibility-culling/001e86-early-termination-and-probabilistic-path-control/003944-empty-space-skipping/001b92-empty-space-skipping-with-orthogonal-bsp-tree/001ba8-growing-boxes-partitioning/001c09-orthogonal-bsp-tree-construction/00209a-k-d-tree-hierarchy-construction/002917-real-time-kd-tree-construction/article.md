@@ -1,0 +1,126 @@
+# Real-time KD Tree Construction
+
+Also called: BFS-based KD Tree Construction, GPU-based KD Tree Construction
+
+## Overview
+Real-time KD Tree Construction is a technique for building k-d tree spatial partitioning structures on the GPU to enable immediate use in rendering pipelines [S1]. It sets itself apart from its parent method, [K-D Tree Hierarchy Construction](2300-k-d-tree-hierarchy-construction.md), by utilizing GPU parallelism and breadth-first search (BFS) to achieve real-time performance [S1]. It differs from [GPU K-D Tree Ray Traversal](4575-gpu-k-d-tree-ray-traversal.md) by focusing on the *construction* phase rather than the *traversal* phase [G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: A set of primitives or voxel data to be partitioned.
+- Output: A k-d tree structure stored in GPU memory, ready for traversal [S1].
+
+**Data Structures:**
+The exact memory layout is not detailed in the sources, but the structure follows the standard k-d tree node definition: a split axis, split position, and child node indices [G]. The tree is constructed via breadth-first search rather than the prefix-order traversal used in the parent method [S1].
+
+**Steps:**
+1. Load input primitives or voxel data into GPU memory.
+2. Perform a breadth-first search (BFS) to determine the tree structure and split planes [S1].
+3. Store the resulting node information in GPU texture memory [S1].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Node:
+    def __init__(self, bbox=None):
+        self.id = 0
+        self.axis = 0
+        self.split = 0.0
+        self.left = None
+        self.right = None
+        self.bbox = bbox
+
+class BBox:
+    def __init__(self, min_val, max_val):
+        self.min = min_val
+        self.max = max_val
+
+def build_kd_tree_bfs_gpu(data):
+    # 1. Initialize root node with bounding box of all input data
+    root_bbox = compute_bbox(data)
+    root = Node(bbox=root_bbox)
+    queue = [root]
+    node_count = 0
+
+    # 2. BFS traversal to build tree level by level
+    while queue:
+        current = queue.pop(0)
+        current.id = node_count
+        node_count += 1
+
+        # Determine split axis and position for current bounding box
+        axis, split = compute_split(current.bbox)
+
+        # Partition data into left and right subsets based on split
+        left_data, right_data = partition(data, current.bbox, axis, split)
+
+        current.axis = axis
+        current.split = split
+
+        # Create child nodes if subsets are non-empty
+        if len(left_data) > 0:
+            current.left = Node(bbox=compute_bbox(left_data))
+            queue.append(current.left)
+        if len(right_data) > 0:
+            current.right = Node(bbox=compute_bbox(right_data))
+            queue.append(current.right)
+
+        # Store node in GPU texture memory
+        store_to_texture(current)
+
+    return root
+
+def compute_split(bbox):
+    # Standard k-d tree split: choose longest axis, split at midpoint
+    # Not given in the sources [G]
+    axis = max_axis(bbox)
+    split = (bbox.min[axis] + bbox.max[axis]) / 2.0
+    return axis, split
+
+def partition(data, bbox, axis, split):
+    # Split data into two lists based on axis and split value
+    # Not given in the sources [G]
+    left = [d for d in data if d.pos[axis] < split]
+    right = [d for d in data if d.pos[axis] >= split]
+    return left, right
+
+def compute_bbox(data):
+    # Compute bounding box from data points
+    # Not given in the sources [G]
+    min_val = min(d.pos for d in data)
+    max_val = max(d.pos for d in data)
+    return BBox(min_val, max_val)
+
+def store_to_texture(node):
+    # Write node data to GPU texture memory
+    # Not given in the sources [G]
+    pass
+```
+
+**Parameters:**
+- Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+- The original parallel construction scheme by Zellmann et al. was designed for multi-core CPU architectures [S2, unofficial].
+- The method is primarily effective for surface rendering according to the source [S1].
+- Precision issues in split plane calculation on GPU may arise if not carefully managed, though specific mitigation strategies are not cited [G].
+
+## Subtopics
+
+### Parallel KD-Tree Construction based on Summed-Volume Tables
+This variant uses summed-volume tables to accelerate the construction of k-d trees for sparse volumes [S2, unofficial]. The original work targeted multi-core CPU architectures [S2, unofficial]. A GPU-based adaptation exists [S2, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Real-time construction on the GPU [S1].
+- **Memory Complexity:** Depends on the tree size and data structure, stored in GPU texture memory [S1].
+- **Performance:** Specific measured performance metrics are not provided in the sources.
+- **Strengths:** Enables real-time spatial partitioning for rendering pipelines [S1].
+- **Limitations:** Primarily effective for surface rendering [S1]. The specific optimizations required for the CPU-to-GPU adaptation are not detailed [S2, unofficial].
+
+## Background
+The technique was first proposed by Zhou et al. [S1]. It was later adapted by Zellmann et al. for sparse volumes using summed-volume tables, with a subsequent GPU-based implementation [S2, unofficial].
+
+## Sources
+[S1] Real-time volume rendering for three-dimensional fetal ultrasound using volumetric photon mapping., https://doi.org/10.1186/s42492-024-00177-4, fetched 2026-10-26
+[S2] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

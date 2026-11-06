@@ -1,0 +1,326 @@
+--- v003.md
++++ v004.md
+@@ -1,186 +1,177 @@
+ # Camera Matrix Ray Generation
+ 
+-Also called: Camera Ray Generation, Raster-to-World Ray Construction, Ray Generation from Camera Matrix, Ray Initialization & AABB Intersection, getBound, initialRays
++Also called: Camera Ray Generation, Ray Generation from Camera Matrix, Ray Generation from Camera Parameters
+ 
+ ## Overview
+-Camera Matrix Ray Generation computes the origin and direction of a primary ray for each pixel in an image based on camera intrinsic parameters (focal length, principal point) and extrinsic parameters (camera-to-world pose) [S10, S13, S16, unofficial]. It solves the problem of mapping 2D raster coordinates to 3D world-space rays, enabling subsequent volume rendering or ray tracing operations [S1, S4, S5, unofficial]. Unlike orthographic generation which uses parallel rays, this method constructs perspective rays that diverge from a single viewpoint [S10, S16, unofficial].
++Camera Matrix Ray Generation computes the origin and direction vectors for primary rays corresponding to each pixel in an image, based on explicit camera intrinsic and extrinsic parameters. It solves the problem of mapping 2D raster coordinates to 3D world-space rays for volume rendering or ray tracing. It differs from [Orthographic (Parallel) Camera Ray Generation](1319-orthographic-parallel-camera-ray-generation.md) by using perspective projection (converging rays) and from [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md) by explicitly constructing and utilizing a calibration matrix $K$ rather than assuming a canonical pinhole model with unit focal length and center at the image center.
+ 
+ ## How it works
+ **Inputs:**
+-*   Image dimensions: $H$ (height), $W$ (width) [S10, S16, unofficial].
+-*   Camera intrinsic matrix $K$ (3x3) or parameters: focal lengths $f_x, f_y$, principal point $(c_x, c_y)$ [S10, S13, S27, unofficial].
+-*   Camera-to-world transformation matrix $T_{c2w}$ (4x4), where the upper-left 3x3 block is rotation $\mathbf{R}_{c2w}$ and the translation vector is $\mathbf{t}_{c2w}$ (camera origin) [S10, S16, S27, unofficial].
+-*   Optional: Axis-aligned bounding box (AABB) of the scene for early ray termination [S13, unofficial].
++*   Image dimensions: Width $W$, Height $H$ (integers).
++*   Camera Intrinsics: A 3x3 matrix $K$ (or parameters $f_x, f_y, c_x, c_y$).
++*   Camera Extrinsic: A 4x4 Camera-to-World transformation matrix $T_{c2w}$ (or SE(3) pose).
++*   Optional: Principal point offsets $(c_x, c_y)$ if not embedded in $K$; pixel centering flag.
+ 
+ **Outputs:**
+-*   Ray origins $\mathbf{o}$: Tensor of shape $(H, W, 3)$ in world space [S10, S16, unofficial].
+-*   Ray directions $\mathbf{d}$: Tensor of shape $(H, W, 3)$ in world space (often normalized) [S10, S16, unofficial].
+-*   Optional: Near and far t-values ($t_{min}, t_{max}$) for AABB intersection [S13, unofficial].
++*   Ray Origins: Tensor of shape $(H, W, 3)$ containing world-space origins.
++*   Ray Directions: Tensor of shape $(H, W, 3)$ containing world-space directions (often normalized).
+ 
+ **Data Structures:**
+-*   Pixel coordinate grids: 2D arrays of shape $(H, W)$ containing integer or float pixel indices $i$ (column, width) and $j$ (row, height) [S10, S16, S20, unofficial].
+-*   Intrinsic parameters: Extracted from $K$ as scalars or vectors [S10, S27, unofficial].
+-*   Transformation matrices: Stored as 4x4 matrices or separate rotation/translation components [S10, S16, unofficial].
++*   $K$: 3x3 matrix. $K_{0,0}=f_x, K_{1,1}=f_y, K_{0,2}=c_x, K_{1,2}=c_y$. Skew and aspect ratio are typically assumed 0 and 1 respectively in simplified models [S27, unofficial].
++*   $T_{c2w}$: 4x4 matrix. The upper-left 3x3 block is the rotation matrix $\mathbf{R}_{c2w}$. The rightmost column (indices 0-2 of column 3) is the translation vector $\mathbf{t}_{c2w}$ (camera origin in world space).
+ 
+ **Steps:**
+ 
+-1.  **Generate Pixel Coordinates:** Create 2D meshgrids for pixel indices $i \in [0, W)$ and $j \in [0, H)$ [S10, S16, S20, unofficial].
+-2.  **Center Pixel Coordinates (Optional):** Add 0.5 to $i$ and $j$ to target pixel centers instead of corners [S7, S13, S20, unofficial]. Note: Some implementations omit this if calibration accuracy is insufficient [S8, unofficial].
+-3.  **Compute Camera-Space Directions:** Calculate unnormalized direction vectors in the camera coordinate system [S10, S26, unofficial]. The camera typically looks along the negative Z-axis (OpenGL convention) or positive Z-axis (OpenCV convention) [S10, S25, S26, S9, unofficial]. For the standard OpenGL convention (looking down -Z):
++1.  **Generate Pixel Coordinates:**
++    Create 2D grids of pixel coordinates $(i, j)$ for $i \in [0, W)$ and $j \in [0, H)$.
++    *   Convention: $i$ corresponds to columns (x-axis), $j$ corresponds to rows (y-axis) [S11, S17, unofficial].
++    *   Pixel Centering: Add 0.5 to coordinates to target the center of each pixel: $i' = i + 0.5, j' = j + 0.5$. Some implementations omit this if calibration accuracy is insufficient [S9, S28, unofficial].
++
++2.  **Compute Camera-Space Directions:**
++    Calculate the unnormalized direction vector in the camera's local coordinate system. The camera typically looks down the negative Z-axis (OpenGL convention) or positive Z-axis (OpenCV convention). Most sources use the negative Z convention where the ray direction in camera space is:
+     $$
+-    \mathbf{d}_{cam} = \begin{bmatrix} \frac{i - c_x}{f_x} \\ -\frac{j - c_y}{f_y} \\ -1 \end{bmatrix}
++    \mathbf{d}_{\text{cam}} = \begin{bmatrix} \frac{i' - c_x}{f_x} \\ -\frac{j' - c_y}{f_y} \\ -1 \end{bmatrix}
+     $$
+-    where the negative sign on the Y-component accounts for the image Y-axis being opposite to the camera V-axis (down vs up) [S10, S20, S25, S26, unofficial]. For OpenCV convention (looking down +Z), the Z component is $1$ and Y sign may vary depending on image orientation [S9, S27, unofficial].
+-4.  **Transform Directions to World Space:** Rotate the camera-space directions into world space using the rotation part of the camera-to-world matrix:
+-    $$
+-    \mathbf{d}_{world} = \mathbf{R}_{c2w} \mathbf{d}_{cam}
+-    $$
+-    [S10, S16, S26, S27, unofficial].
+-5.  **Set Ray Origins:** The ray origin is the camera position in world space, extracted from the translation component of $T_{c2w}$:
+-    $$
+-    \mathbf{o}_{world} = \mathbf{t}_{c2w}
+-    $$
+-    This origin is broadcast to match the shape of the directions $(H, W, 3)$ [S10, S16, S20, unofficial].
+-6.  **Normalize Directions (Optional):** Normalize $\mathbf{d}_{world}$ to unit length if required by the renderer [S10, S15, unofficial].
+-7.  **Compute AABB Intersection (Optional):** If an AABB is provided, compute $t_{min}$ and $t_{max}$ for each ray to determine the valid marching range [S13, unofficial].
++    Note the negative sign on the $y$-component if the image y-axis (down) is opposite to the camera v-axis (up), and the $-1$ for the z-component indicating forward projection [S11, S17, S27, S28, unofficial].
++    *   Alternative formulation using normalized device coordinates (NDC) and FOV:
++        $$ x_{\text{ndc}} = \frac{2(i' + 0.5)}{W} - 1, \quad y_{\text{ndc}} = 1 - \frac{2(j' + 0.5)}{H} $$
++        $$ \mathbf{d}_{\text{cam}} = \begin{bmatrix} x_{\text{ndc}} \cdot \tan(\text{fov}_y/2) \cdot \frac{W}{H} \\ y_{\text{ndc}} \cdot \tan(\text{fov}_y/2) \\ -1 \end{bmatrix} $$
++        [S16, unofficial].
++
++3.  **Transform Directions to World Space:**
++    Rotate the camera-space directions into world space using the rotation part of the camera-to-world matrix.
++    $$ \mathbf{d}_{\text{world}} = \mathbf{d}_{\text{cam}} \cdot \mathbf{R}_{c2w}^\top $$
++    Or element-wise:
++    $$ \mathbf{d}_{\text{world}} = \sum_{k=0}^{2} d_{\text{cam}, k} \cdot \mathbf{R}_{c2w}[:, k] $$
++    [S8, S17, S27, S29, unofficial].
++
++4.  **Normalize Directions:**
++    Normalize $\mathbf{d}_{\text{world}}$ to unit length.
++    $$ \mathbf{d}_{\text{final}} = \frac{\mathbf{d}_{\text{world}}}{\|\mathbf{d}_{\text{world}}\|} $$
++    [S8, S16, unofficial].
++
++5.  **Set Ray Origins:**
++    The ray origin is the camera position in world space, extracted from the translation component of $T_{c2w}$.
++    $$ \mathbf{o}_{\text{world}} = T_{c2w}[:3, 3] $$
++    This origin is broadcast to all pixels $(H, W)$ [S17, S19, S21, unofficial].
+ 
+ **Pseudocode:**
+ 
+ ```python
+-def generate_rays(H, W, K, c2w, use_pixel_centers=True, compute_aabb=False, aabb_min=None, aabb_max=None):
++import torch
++
++def generate_camera_rays(W, H, K, c2w, use_pixel_centers=True):
++    """
++    Generate ray origins and directions for a perspective camera.
++    
++    Args:
++        W (int): Image width.
++        H (int): Image height.
++        K (torch.Tensor): 3x3 intrinsic matrix [[fx, 0, cx], [0, fy, cy], [0, 0, 1]].
++        c2w (torch.Tensor): 4x4 camera-to-world transformation matrix.
++        use_pixel_centers (bool): If True, add 0.5 to pixel coordinates.
++        
++    Returns:
++        rays_o (torch.Tensor): Shape (H, W, 3), ray origins in world space.
++        rays_d (torch.Tensor): Shape (H, W, 3), normalized ray directions in world space.
++    """
+     # 1. Extract intrinsics
+-    fx = K[0][0]
+-    fy = K[1][1]
+-    cx = K[0][2]
+-    cy = K[1][2]
++    fx = K[0, 0]
++    fy = K[1, 1]
++    cx = K[0, 2]
++    cy = K[1, 2]
+     
+-    # 2. Extract extrinsics
+-    R_c2w = [[c2w[r][c] for c in range(3)] for r in range(3)]
+-    t_c2w = [c2w[0][3], c2w[1][3], c2w[2][3]]
++    # 2. Generate pixel coordinate grids
++    # i: columns (0..W-1), j: rows (0..H-1)
++    i, j = torch.meshgrid(torch.arange(W, dtype=torch.float32), 
++                          torch.arange(H, dtype=torch.float32), 
++                          indexing='xy')
+     
+-    rays_o = []
+-    rays_d = []
+-    t_min_list = []
+-    t_max_list = []
++    # 3. Apply pixel centering
++    if use_pixel_centers:
++        i = i + 0.5
++        j = j + 0.5
++        
++    # 4. Compute camera-space directions
++    # Convention: Camera looks down -Z. Image Y is down, so we negate j component 
++    # if camera Y is up, or follow standard OpenGL mapping where y_ndc flips.
++    # Formula: d_cam = [(i - cx)/fx, -(j - cy)/fy, -1]
++    # Note: Some sources use +1 for z or different sign conventions for y.
++    # This implementation follows the common OpenGL/NeRF convention [S11, S17, S27, unofficial].
++    d_cam_x = (i - cx) / fx
++    d_cam_y = -(j - cy) / fy
++    d_cam_z = -torch.ones_like(i)
+     
+-    for j in range(H):
+-        row_o = []
+-        row_d = []
+-        row_tmin = []
+-        row_tmax = []
+-        for i in range(W):
+-            px = float(i)
+-            py = float(j)
+-            if use_pixel_centers:
+-                px += 0.5
+-                py += 0.5
+-                
+-            # 3. Camera-space direction (OpenGL: look down -Z)
+-            dx = (px - cx) / fx
+-            dy = -(py - cy) / fy
+-            dz = -1.0
+-            
+-            # 4. Transform to world space
+-            wx = R_c2w[0][0]*dx + R_c2w[0][1]*dy + R_c2w[0][2]*dz
+-            wy = R_c2w[1][0]*dx + R_c2w[1][1]*dy + R_c2w[1][2]*dz
+-            wz = R_c2w[2][0]*dx + R_c2w[2][1]*dy + R_c2w[2][2]*dz
+-            
+-            # 5. Normalize
+-            len_d = (wx*wx + wy*wy + wz*wz)**0.5
+-            if len_d > 0:
+-                wx, wy, wz = wx/len_d, wy/len_d, wz/len_d
+-                
+-            # 6. Origin
+-            ox, oy, oz = t_c2w[0], t_c2w[1], t_c2w[2]
+-            
+-            row_o.append((ox, oy, oz))
+-            row_d.append((wx, wy, wz))
+-            
+-            if compute_aabb and aabb_min is not None and aabb_max is not None:
+-                # 7. Ray-AABB intersection (slab method)
+-                def safe_div(num, den):
+-                    return num / den if den != 0 else float('inf')
+-                    
+-                t_x0 = safe_div(aabb_min[0] - ox, wx)
+-                t_x1 = safe_div(aabb_max[0] - ox, wx)
+-                t_y0 = safe_div(aabb_min[1] - oy, wy)
+-                t_y1 = safe_div(aabb_max[1] - oy, wy)
+-                t_z0 = safe_div(aabb_min[2] - oz, wz)
+-                t_z1 = safe_div(aabb_max[2] - oz, wz)
+-                
+-                # Ensure t0 < t1
+-                if t_x0 > t_x1: t_x0, t_x1 = t_x1, t_x0
+-                if t_y0 > t_y1: t_y0, t_y1 = t_y1, t_y0
+-                if t_z0 > t_z1: t_z0, t_z1 = t_z1, t_z0
+-                
+-                t_min = max(t_x0, t_y0, t_z0)
+-                t_max = min(t_x1, t_y1, t_z1)
+-                
+-                row_tmin.append(t_min)
+-                row_tmax.append(t_max)
+-            else:
+-                row_tmin.append(0.0)
+-                row_tmax.append(0.0)
+-                
+-        rays_o.append(row_o)
+-        rays_d.append(row_d)
+-        t_min_list.append(row_tmin)
+-        t_max_list.append(row_tmax)
+-        
+-    return rays_o, rays_d, t_min_list, t_max_list
++    # Stack into (H, W, 3)
++    directions_cam = torch.stack([d_cam_x, d_cam_y, d_cam_z], dim=-1)
++    
++    # 5. Extract rotation and translation from c2w
++    # c2w[:3, :3] is the rotation matrix R_c2w
++    # c2w[:3, 3] is the translation vector t_c2w (camera origin)
++    R_c2w = c2w[:3, :3] # Shape (3, 3)
++    t_c2w = c2w[:3, 3] # Shape (3,)
++    
++    # 6. Transform directions to world space
++    # d_world = d_cam @ R_c2w.T
++    # directions_cam shape: (H, W, 3)
++    # R_c2w.T shape: (3, 3)
++    # Result shape: (H, W, 3)
++    directions_world = torch.einsum('hwk,kj->hwj', directions_cam, R_c2w)
++    
++    # 7. Normalize directions
++    directions_world = torch.nn.functional.normalize(directions_world, dim=-1)
++    
++    # 8. Set origins
++    # Broadcast origin to all pixels
++    rays_o = t_c2w.unsqueeze(0).unsqueeze(0).expand(H, W, 3)
++    
++    return rays_o, directions_world
+ ```
+-
+-**Parameters:**
+-*   $f_x, f_y$: Focal lengths in pixels [S10, S18, unofficial].
+-*   $c_x, c_y$: Principal point coordinates in pixels [S10, S18, unofficial].
+-*   $H, W$: Image height and width in pixels [S10, S16, unofficial].
+-*   $T_{c2w}$: 4x4 camera-to-world matrix [S10, S16, unofficial].
+-*   `use_pixel_centers`: Boolean, default True [S20, unofficial].
+-
+-**Edge Cases and Pitfalls:**
+-*   **Division by Zero:** If $f_x$ or $f_y$ is zero, or if ray direction components are zero during AABB intersection, division by zero occurs [S13, unofficial]. IEEE 754 infinities may result, requiring explicit checks or clamping [S13, unofficial].
+-*   **Coordinate System Conventions:** OpenGL cameras look down -Z, OpenCV down +Z [S10, S9, unofficial]. Image Y-axis is typically down, while camera V-axis is up [S26, unofficial]. Signs in direction calculation must match these conventions [S10, S25, S26, unofficial].
+-*   **Pixel Centering:** Omitting +0.5 offset can cause slight misalignment, but may be acceptable if calibration is inaccurate [S8, unofficial].
+-*   **AABB Intersection:** If $t_{min} > t_{max}$, the ray does not intersect the AABB [S13, unofficial]. This case must be handled to avoid invalid marching ranges [S13, unofficial].
+ 
+ ## Subtopics
+ 
+-### [Pinhole Camera Ray Generation](5058-pinhole-camera-ray-generation.md)
+-Pinhole Camera Ray Generation computes the origin and direction vectors for rays corresponding to each pixel in an image plane, assuming an ideal pinhole camera model with no lens distortion or depth of field. It differs from its parent, Camera Matrix Ray Generation, by explicitly constructing the view frustum geometry (basis vectors and view plane bounds) from high-level camera parameters (eye, look-at, up, FOV) rather than relying on a pre-computed 4x4 projection/view matrix. It serves as the foundational ray setup for basic ray tracing and volume rendering pipelines where explicit control over the view plane sampling is required.
+-
+ ### Camera Intrinsics Simplification
+-Assumes a simplified intrinsic matrix $\mathbf{K}$ with zero skew and unit aspect ratio, where $f_x = f_y = f_{\text{camera}}$ and the principal point is centered at $(W/2, H/2)$ [S26, unofficial]. This reduces the number of parameters to a single focal length and image dimensions, streamlining ray generation when precise calibration is unnecessary [S26, unofficial].
+-
+-### Camera Intrinsic Matrix Construction
+-Builds a 3x3 camera intrinsic matrix $K$ from focal length and image dimensions [S10, unofficial]. The matrix is constructed as a 3x3 array with $K[0,0] = f$, $K[1,1] = f$, $K[0,2] = 0.5 \times W$, $K[1,2] = 0.5 \times H$, $K[2,2] = 1$, and all other elements zero [S10, unofficial]. This standardizes input for ray generation pipelines that expect a full intrinsic matrix [S10, unofficial].
++Constructs the 3x3 camera intrinsic matrix $K$ assuming zero skew and aspect ratio of 1. The matrix is defined as $K = \begin{bmatrix} f_{\text{camera}} & 0 & W/2 \\ 0 & f_{\text{camera}} & H/2 \\ 0 & 0 & 1 \end{bmatrix}$, where $f_{\text{camera}}$ is the focal length, $W$ is image width, and $H$ is image height [S27, unofficial]. This simplification assumes square pixels and a principal point at the image center.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(H \times W)$ for generating rays for all pixels, as each pixel's ray is computed independently [S10, S16, unofficial].
+-*   **Memory Complexity:** $O(H \times W)$ to store ray origins and directions [S10, S16, unofficial].
+-*   **Measured Performance:** Not given in the sources.
+-*   **Scaling:** Performance scales linearly with pixel count; batched tensor operations on GPUs reduce overhead compared to scalar loops [S10, S16, unofficial].
+-*   **Strengths:** Accurate perspective projection; supports arbitrary camera poses and intrinsics; efficient batch computation [S10, S16, unofficial].
+-*   **Limitations:** Requires accurate calibration data; sensitive to coordinate system mismatches; division-by-zero risks if intrinsics or directions are degenerate [S13, S26, unofficial].
+-*   **When to Use:** Standard perspective rendering, NeRF, volume rendering with known camera poses [S10, S16, unofficial].
+-*   **When Not to Use:** Orthographic scenes, object-space ray tracing, or when only FOV and aspect ratio are available [S10, S16, unofficial].
++*   **Time Complexity:** $O(W \times H)$ to generate rays for all pixels. The operations are element-wise vector math, highly parallelizable on GPU.
++*   **Memory Complexity:** $O(W \times H)$ to store the origin and direction tensors.
++*   **Strengths:** Explicit control over camera calibration; supports arbitrary principal points and focal lengths; standard in NeRF and modern rendering pipelines.
++*   **Limitations:** Requires accurate calibration data; sensitive to errors in $K$ or $T_{c2w}$; division by zero if focal length is 0.
++*   **When to use:** When camera parameters are known from calibration (e.g., COLMAP, sensor data) or when precise control over projection geometry is needed.
++*   **When not to use:** For simple orthographic views or when only relative camera motion is available without scale/intrinsics.
+ 
+ ## Background
+-Originating from standard computer graphics and photogrammetry, the method maps pixel coordinates to world rays using camera matrices [S10, S24, unofficial]. It is fundamental to NeRF (Neural Radiance Fields) implementations, where accurate ray generation is critical for training and rendering [S10, S20, unofficial]. The approach is widely used in volume rendering, ray tracing, and 3D reconstruction pipelines [S1, S5, S16, unofficial].
++Originating from standard computer graphics and photogrammetry, this method formalizes the pinhole camera model using matrix algebra. It is widely used in Neural Radiance Fields (NeRF) [S11, S17, S27, unofficial] and volume rendering pipelines [S1, S7, unofficial] to ensure consistency between training data poses and rendering rays. The explicit use of the intrinsic matrix $K$ allows for handling non-square pixels and off-center principal points, generalizing the basic pinhole model.
+ 
+ ## Sources
+ [S1] jamestkiernan/webgpu-voxel-raymarching, https://github.com/jamestkiernan/webgpu-voxel-raymarching, fetched 2026-10-24 (unofficial)
++[S2] Forceflow/cpu_voxel_raycaster, https://github.com/Forceflow/cpu_voxel_raycaster, fetched 2026-10-24 (unofficial)
++[S3] GitHub - DeadlockCode/voxel_ray_traversal, https://github.com/DeadlockCode/voxel_ray_traversal, fetched 2026-10-25 (unofficial)
+ [S4] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)
+ [S5] kkhese/Volume-Rendering, https://github.com/kkhese/Volume-Rendering, fetched 2026-10-26 (unofficial)
++[S6] Leesan-haruki/FunctionRenderer, https://github.com/Leesan-haruki/FunctionRenderer, fetched 2026-10-26 (unofficial)
+ [S7] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)
+-[S8] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)
+-[S9] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+-[S10] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+-[S13] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
+-[S15] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
+-[S16] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
+-[S18] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
+-[S20] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
+-[S24] 7.6. Neural Radiance Fields for Drones, https://www.roboticsbook.org/S76_drone_learning.html, fetched 2026-10-29 (unofficial)
+-[S25] NeRF: A Volume Rendering Perspective | Yue Yu - GitHub Pages, https://yconquesty.github.io/blog/ml/nerf/nerf_rendering.html, fetched 2026-10-29 (unofficial)
+-[S26] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
+-[S27] https://github.com/WangFeng18/3d-gaussian-splatting, https://github.com/WangFeng18/3d-gaussian-splatting, fetched 2026-10-30 (unofficial)+[S8] kwea123/nerf_pl, https://github.com/kwea123/nerf_pl, fetched 2026-10-26 (unofficial)
++[S9] yashbhalgat/HashNeRF-pytorch, https://github.com/yashbhalgat/HashNeRF-pytorch, fetched 2026-10-26 (unofficial)
++[S10] emmanueladutwum123/nerf-from-scratch, https://github.com/emmanueladutwum123/nerf-from-scratch, fetched 2026-10-26 (unofficial)
++[S11] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
++[S12] Adam-Gleave/sdf-terrain, https://github.com/Adam-Gleave/sdf-terrain, fetched 2026-10-26 (unofficial)
++[S13] ChadMcKinney/Dirac-Sea-Engine, https://github.com/ChadMcKinney/Dirac-Sea-Engine, fetched 2026-10-26 (unofficial)
++[S14] nortonBryan/Clear-plenoxels, https://github.com/nortonBryan/Clear-plenoxels, fetched 2026-10-27 (unofficial)
++[S15] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
++[S16] an1pse/voxel-traversal, https://github.com/an1pse/voxel-traversal, fetched 2026-10-27 (unofficial)
++[S17] rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, https://github.com/rigved-sanku/NeRF-Implementation-for-Efficient-3D-Scene-Reconstruction, fetched 2026-10-27 (unofficial)
++[S18] hopexn/VolumeRenderingParallel, https://github.com/hopexn/VolumeRenderingParallel, fetched 2026-10-27 (unofficial)
++[S19] wanmeihuali/taichi_3d_gaussian_splatting, https://github.com/wanmeihuali/taichi_3d_gaussian_splatting, fetched 2026-10-27 (unofficial)
++[S20] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
++[S21] bennyguo/instant-nsr-pl, https://github.com/bennyguo/instant-nsr-pl, fetched 2026-10-27 (unofficial)
++[S22] Linyou/taichi-ngp-renderer, https://github.com/Linyou/taichi-ngp-renderer, fetched 2026-10-27 (unofficial)
++[S23] blurgyy/jaxngp, https://github.com/blurgyy/jaxngp, fetched 2026-10-27 (unofficial)
++[S24] gkouros/ref-dvgo, https://github.com/gkouros/ref-dvgo, fetched 2026-10-28 (unofficial)
++[S25] Camera Model in Path Tracing - Pinhole, Lens, and DOF Guide | Dev ..., https://code-note-vr.vercel.app/pathtracer-learning-camera-model, fetched 2026-10-29 (unofficial)
++[S26] 7.6. Neural Radiance Fields for Drones, https://www.roboticsbook.org/S76_drone_learning.html, fetched 2026-10-29 (unofficial)
++[S27] NeRF: A Volume Rendering Perspective | Yue Yu - GitHub Pages, https://yconquesty.github.io/blog/ml/nerf/nerf_rendering.html, fetched 2026-10-29 (unofficial)
++[S28] https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, https://github.com/ZhenyangLiu/Collaborative-Neural-Radiance-Fields-for-Novel-View-Synthesis, fetched 2026-10-29 (unofficial)
++[S29] https://github.com/WangFeng18/3d-gaussian-splatting, https://github.com/WangFeng18/3d-gaussian-splatting, fetched 2026-10-30 (unofficial)
++[S30] Raymarching with Fennel and LÖVE · Andrey Listopadov, https://andreyor.st/posts/2020-10-15-raymarching-with-fennel-and-love/, fetched 2026-10-30 (unofficial)

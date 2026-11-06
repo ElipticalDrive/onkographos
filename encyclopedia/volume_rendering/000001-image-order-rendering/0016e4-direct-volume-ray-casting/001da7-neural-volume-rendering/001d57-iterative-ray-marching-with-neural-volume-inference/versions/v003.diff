@@ -1,0 +1,193 @@
+--- v002.md
++++ v003.md
+@@ -1,10 +1,7 @@
+ # Iterative Ray Marching with Neural Volume Inference
+-
+-
+ ## Overview
+ Iterative Ray Marching with Neural Volume Inference is a CUDA-based rendering method that splits the volume integration of a neural radiance field into multiple kernel launches to handle rays that do not fully converge (reach alpha $\ge 1$) in a single pass [S1, unofficial]. It distinguishes itself from in-shader neural volume ray marching by decoupling neural network inference from shading logic, using a counter-based compaction mechanism to track and process only active rays across iterations [S1, unofficial].
+-
+ ## How it works
+-The method processes rays in batches of size $N\_ITERS$. It separates the computation into three distinct phases per iteration: intersection (sample coordinate generation), inference (neural network evaluation), and composition (shading and alpha blending) [S1, unofficial]. A host-side loop manages the execution, checking for remaining active rays between kernel launches [S1, unofficial].
++The method processes rays in batches of size $N\_ITERS$ [S1, unofficial]. It separates the computation into three distinct phases per iteration: intersection (sample coordinate generation), inference (neural network evaluation), and composition (shading and alpha blending) [S1, unofficial]. A host-side loop manages the execution, checking for remaining active rays between kernel launches [S1, unofficial].
+ 
+ ### Inputs and Outputs
+@@ -54,18 +51,18 @@
+     *   Reset `params.counter` to zero using `cudaMemsetAsync` [S1, unofficial].
+     *   Launch `iterative_raygen_kernel` (either `camera` or `shadow` mode) to generate initial rays [S1, unofficial].
+-        *   **Camera Mode**: Generate jitter using `RandomTEA` seeded by `frame_index` and ray index. Compute ray origin/direction. If the ray intersects the volume, initialize `RayMarchingIter` and save payload. Otherwise, write default color [S1, unofficial].
+-        *   **Shadow Mode**: Use pre-computed `highest_org` and `jitter_ssh` from the previous camera pass. Create shadow ray. If it intersects and `highest_alpha > 0`, save payload; otherwise, write existing shading color [S1, unofficial].
++        *   **Camera Mode**: Generate jitter using `RandomTEA` seeded by `frame_index` and ray index [S1, unofficial]. Compute ray origin/direction. If the ray intersects the volume, initialize `RayMarchingIter` and save payload [S1, unofficial]. Otherwise, write default color [S1, unofficial].
++        *   **Shadow Mode**: Use pre-computed `highest_org` and `jitter_ssh` from the previous camera pass [S1, unofficial]. Create shadow ray. If it intersects and `highest_alpha > 0`, save payload; otherwise, write existing shading color [S1, unofficial].
+     *   Set `params.counter` to the number of rays saved in the payload [S1, unofficial].
+ 
+ 2.  **Main Iteration Loop**:
+-    *   **Check Active Rays**: Asynchronously copy `params.counter` to host memory and synchronize. If `count > 0`, continue [S1, unofficial].
++    *   **Check Active Rays**: Asynchronously copy `params.counter` to host memory and synchronize [S1, unofficial]. If `count > 0`, continue [S1, unofficial].
+     *   **Reset Counter**: Set `params.counter` to zero for the next iteration's compaction [S1, unofficial].
+     *   **Intersection Kernel**: Launch `iterative_intersect_kernel<MODE>` with $N\_ITERS$ threads [S1, unofficial].
+         *   For each sample $k$ in the batch:
+             *   Compute object space position $c$ using linear interpolation: $c = \text{lerp}(jitter, t.x, t.y)$ [S1, unofficial].
+-            *   If `GRADIENT_SHADING`: Compute gradient sample points $g_x, g_y, g_z$ by adding `gradientStep` to $c$. Store $c$ and gradients in the inference input buffer [S1, unofficial].
++            *   If `GRADIENT_SHADING`: Compute gradient sample points $g_x, g_y, g_z$ by adding `gradientStep` to $c$ [S1, unofficial]. Store $c$ and gradients in the inference input buffer [S1, unofficial].
+             *   If not gradient shading: Store $c$ in the inference input buffer [S1, unofficial].
+     *   **Neural Inference**:
+-        *   If a network is provided: Call `iterative_sampling_batch_inference` with input size `numCoordsPerSample * numRays`. Output is written to `params.inference_output` [S1, unofficial].
++        *   If a network is provided: Call `iterative_sampling_batch_inference` with input size `numCoordsPerSample * numRays` [S1, unofficial]. Output is written to `params.inference_output` [S1, unofficial].
+         *   If no network (Ground Truth): Launch `iterative_sampling_groundtruth_kernel` to sample the volume directly [S1, unofficial].
+     *   **Composition Kernel**: Launch `iterative_compose_kernel<MODE>` with $N\_ITERS$ threads [S1, unofficial].
+@@ -75,6 +72,6 @@
+             *   Apply `opacityCorrection` to `sampleAlpha` [S1, unofficial].
+             *   **Shading**:
+-                *   If `GRADIENT_SHADING`: Compute normal $N_o$ from gradients and sample value. Transform to world space $N_w$. Calculate `shadingColor` (e.g., Phong). Lerp with `sampleColor` using `shadingScale` [S1, unofficial].
+-                *   If `SINGLE_SHADE_HEURISTIC`: Track the highest alpha sample. If `ssh.highest_alpha < (1.0 - ray.alpha) * sampleAlpha`, update `ssh.highest_org`, `ssh.highest_color`, and `ssh.highest_alpha` [S1, unofficial].
++                *   If `GRADIENT_SHADING`: Compute normal $N_o$ from gradients and sample value [S1, unofficial]. Transform to world space $N_w$. Calculate `shadingColor` (e.g., Phong). Lerp with `sampleColor` using `shadingScale` [S1, unofficial].
++                *   If `SINGLE_SHADE_HEURISTIC`: Track the highest alpha sample [S1, unofficial]. If `ssh.highest_alpha < (1.0 - ray.alpha) * sampleAlpha`, update `ssh.highest_org`, `ssh.highest_color`, and `ssh.highest_alpha` [S1, unofficial].
+             *   **Volume Blending**:
+                 *   Calculate transmittance $tr = 1.0 - ray.alpha$ [S1, unofficial].
+@@ -137,8 +134,8 @@
+     volume_bounds: [[min_x, min_y, min_z], [max_x, max_y, max_z]].
+     """
+-    # 1. Initialize ray counter to zero
++    # 1. Initialize ray counter to zero [S1, unofficial]
+     params.counter = 0
+     
+-    # 2. Launch Ray Generation
++    # 2. Launch Ray Generation Kernel [S1, unofficial]
+     active_rays = []
+     h, w = params.framebuffer_size
+@@ -148,5 +145,5 @@
+             t_end = compute_ray_exit(ray_origin, ray_direction, volume_bounds)
+             if t_end > 0:
+-                # Camera mode: generate jitter
++                # Camera Mode: Generate jitter using RandomTEA seeded by frame_index and ray index [S1, unofficial]
+                 jitter = random.uniform(0.0, params.sampling_rate)
+                 ray_state = {
+@@ -159,14 +156,16 @@
+                 params.counter += 1
+             else:
+-                # Write default color if not SINGLE_SHADE_HEURISTIC
+-                pass
+-
+-    # 3. Enter main loop: check if any rays remain active
++                # Write default color if not SINGLE_SHADE_HEURISTIC [S1, unofficial]
++                pass # Framebuffer write omitted for brevity
++
++    # 3. Main Iteration Loop [S1, unofficial]
+     while params.counter > 0:
+-        # 4. Reset counter for next iteration's compaction check
++        # 4. Check Active Rays: Asynchronously copy params.counter to host memory and synchronize [S1, unofficial]
++        
++        # 5. Reset Counter for next iteration's compaction check [S1, unofficial]
+         params.counter = 0
+         next_active_rays = []
+         
+-        # 5. Intersection Kernel: compute sample coordinates
++        # 6. Intersection Kernel: compute sample coordinates [S1, unofficial]
+         for ray in active_rays:
+             t = ray['jitter']
+@@ -175,8 +174,8 @@
+                     break
+                     
+-                # Compute object space position c using lerp(jitter, t.x, t.y)
++                # Compute object space position c using lerp(jitter, t.x, t.y) [S1, unofficial]
+                 c = ray['origin'] + t * ray['direction']
+                 
+-                # If GRADIENT_SHADING, compute gradient sample points
++                # If GRADIENT_SHADING, compute gradient sample points by adding gradientStep to c [S1, unofficial]
+                 if params.rendering_mode == 'GRADIENT_SHADING':
+                     gx = c + [params.gradientStep, 0.0, 0.0]
+@@ -187,12 +186,13 @@
+                     inference_input = [c]
+                     
+-                # Neural Inference
++                # 7. Neural Inference [S1, unofficial]
+                 if network is not None:
++                    # Call iterative_sampling_batch_inference with input size numCoordsPerSample * numRays [S1, unofficial]
+                     sample_value = network(inference_input)
+                 else:
+-                    # Ground truth sampling
++                    # Launch iterative_sampling_groundtruth_kernel [S1, unofficial]
+                     sample_value = trilinear_interpolate(volume_data, c, volume_dims)
+                     
+-                # Composition Kernel
++                # 8. Composition Kernel [S1, unofficial]
+                 sample_color, sample_alpha = tfn(sample_value)
+                 sample_alpha *= params.opacityCorrection
+@@ -200,11 +200,10 @@
+                 # Shading
+                 if params.rendering_mode == 'GRADIENT_SHADING':
+-                    # Compute normal No from gradients and sample value
+-                    # Transform to world space Nw
+-                    # Calculate shadingColor
+-                    shading_color = sample_color # Simplified
++                    # Compute normal No from gradients and sample value [S1, unofficial]
++                    # Transform to world space Nw, calculate shadingColor, lerp with sampleColor using shadingScale [S1, unofficial]
++                    shading_color = sample_color # Simplified gradient shading logic
+                     sample_color = [sample_color[i] * (1 - params.shadingScale) + shading_color[i] * params.shadingScale for i in range(3)]
+                     
+-                # SINGLE_SHADE_HEURISTIC
++                # SINGLE_SHADE_HEURISTIC: Track the highest alpha sample [S1, unofficial]
+                 if params.rendering_mode == 'SINGLE_SHADE_HEURISTIC':
+                     if ray['ssh']['highest_alpha'] < (1.0 - ray['alpha']) * sample_alpha:
+@@ -213,5 +212,5 @@
+                         ray['ssh']['highest_alpha'] = (1.0 - ray['alpha']) * sample_alpha
+                         
+-                # Volume blending
++                # Volume blending [S1, unofficial]
+                 tr = 1.0 - ray['alpha']
+                 ray['alpha'] += tr * sample_alpha
+@@ -221,10 +220,10 @@
+                 t += params.sampling_rate
+                 
+-                # Continue iteration if k < N_ITERS and ray.alpha < nearly_one
++                # Continue iteration if k < N_ITERS and ray.alpha < nearly_one [S1, unofficial]
+                 if k < params.N_ITERS - 1 and ray['alpha'] < params.nearly_one:
+                     params.counter += 1
+                     next_active_rays.append(ray)
+                 else:
+-                    # Write final result
++                    # Write final result [S1, unofficial]
+                     if params.rendering_mode == 'SHADOW':
+                         ray['color'] = [ray['color'][i] + (1.0 - ray['alpha']) * ray['ssh']['highest_color'][i] * 0.5 for i in range(3)]
+@@ -233,29 +232,27 @@
+                     else:
+                         pass # Write ray.color and ray.alpha
+-                    # In actual implementation, write to framebuffer here
+-                    pass
++                    # Framebuffer write omitted for brevity
+                     
+         active_rays = next_active_rays
+ 
+     # Finalize
+-    # Ensure all writes are complete
+     pass
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Wired Error**: The intersection step is separated from ray generation and composition due to an unidentified "wired error" that occurred when they were merged. Merging them did not provide obvious performance benefits [S1, unofficial].
+-*   **Precision**: Alpha accumulation can suffer from precision issues if `nearly_one` is too close to 1.0 or if transmittance becomes very small.
+-*   **Boundary Conditions**: Rays that do not intersect the volume must be handled in the ray generation kernel to avoid undefined behavior in subsequent kernels.
+-*   **Gradient Shading**: Requires careful computation of finite differences. The `gradientStep` must be small enough to approximate the derivative but large enough to avoid numerical noise.
++*   **Wired Error**: The intersection step is separated from ray generation and composition due to an unidentified "wired error" that occurred when they were merged [S1, unofficial]. Merging them did not provide obvious performance benefits [S1, unofficial].
++*   **Precision**: Alpha accumulation can suffer from precision issues if `nearly_one` is too close to 1.0 or if transmittance becomes very small [G].
++*   **Boundary Conditions**: Rays that do not intersect the volume must be handled in the ray generation kernel to avoid undefined behavior in subsequent kernels [G].
++*   **Gradient Shading**: Requires careful computation of finite differences [G]. The `gradientStep` must be small enough to approximate the derivative but large enough to avoid numerical noise [G].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(R \cdot S / N\_ITERS)$ kernel launches, where $R$ is the number of rays and $S$ is the total number of samples per ray. Each launch involves $N\_ITERS$ samples. The total work is proportional to $R \cdot S$.
+-*   **Memory Complexity**: $O(N\_ITERS \cdot \text{coords\_per\_sample})$ for inference buffers, plus $O(R)$ for ray payloads and counters. The iterative nature allows processing large scenes with limited GPU memory by batching rays.
+-*   **Performance**: Performance depends heavily on the neural network inference speed and the efficiency of the counter-based compaction. The separation of kernels allows for better occupancy and memory coalescing compared to in-shader methods, but incurs kernel launch overhead.
+-*   **Strengths**: Handles rays that require many samples to converge without infinite loops in a single kernel. Decouples network inference from shading, allowing for optimized inference batching.
+-*   **Limitations**: Kernel launch overhead for each iteration. Complexity in managing ray state across iterations. The "wired error" suggests potential stability issues with merged kernels.
++*   **Time Complexity**: $O(R \cdot S / N\_ITERS)$ kernel launches, where $R$ is the number of rays and $S$ is the total number of samples per ray [G]. Each launch involves $N\_ITERS$ samples [G]. The total work is proportional to $R \cdot S$ [G].
++*   **Memory Complexity**: $O(N\_ITERS \cdot \text{coords\_per\_sample})$ for inference buffers, plus $O(R)$ for ray payloads and counters [G]. The iterative nature allows processing large scenes with limited GPU memory by batching rays [S1, unofficial].
++*   **Performance**: Performance depends heavily on the neural network inference speed and the efficiency of the counter-based compaction [G]. The separation of kernels allows for better occupancy and memory coalescing compared to in-shader methods, but incurs kernel launch overhead [G].
++*   **Strengths**: Handles rays that require many samples to converge without infinite loops in a single kernel [G]. Decouples network inference from shading, allowing for optimized inference batching [S1, unofficial].
++*   **Limitations**: Kernel launch overhead for each iteration [G]. Complexity in managing ray state across iterations [G]. The "wired error" suggests potential stability issues with merged kernels [S1, unofficial].
+ 
+ ## Background
+-The method is part of the `instantvnr` library by VIDILabs [S1, unofficial]. It is designed for real-time neural volume rendering, leveraging CUDA and tiny-cuda-nn (TCNN) for efficient inference. The iterative approach addresses the challenge of variable convergence rates among rays in neural volume rendering.
++The method is part of the `instantvnr` library by VIDILabs [S1, unofficial]. It is designed for real-time neural volume rendering, leveraging CUDA and tiny-cuda-nn (TCNN) for efficient inference [S1, unofficial]. The iterative approach addresses the challenge of variable convergence rates among rays in neural volume rendering [S1, unofficial].
+ 
+ ## Sources

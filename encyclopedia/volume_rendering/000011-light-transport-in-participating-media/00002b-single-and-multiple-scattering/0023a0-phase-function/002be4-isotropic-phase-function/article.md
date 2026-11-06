@@ -1,0 +1,116 @@
+# Isotropic Phase Function
+Also called: Uniform Phase Function, Constant Phase Function
+
+## Overview
+The Isotropic Phase Function models light scattering in a participating medium where all directions in the sphere of directions are equally likely to be chosen for scattering [S1, S2, unofficial][S3]. It solves the problem of defining a normalized angular distribution for symmetric media, serving as the baseline for comparison against anisotropic models like the [Henyey-Greenstein Phase Function](1010-henyey-greenstein-phase-function.md) or [Rayleigh Phase Function](3721-rayleigh-phase-function.md). Unlike anisotropic functions that depend on the scattering angle $\theta$, the isotropic function is constant and independent of both the incoming direction $\omega'$ and outgoing direction $-\omega$ [S3].
+
+## How it works
+**Inputs and Outputs:**
+*   Input: None (the function is constant).
+*   Output: The phase function value $f_p$, a scalar float.
+
+**Data Structures:**
+No specific data structures are required for the mathematical definition. In implementation contexts (e.g., pbrt), it may be part of a `PhaseFunction` interface [S3].
+
+**Formula:**
+The phase function value is defined as:
+$$f_p(x, \omega, \omega') = \frac{1}{4 \pi}$$
+where:
+*   $x$ is the spatial position in the medium.
+*   $\omega$ is the outgoing direction (towards the eye).
+*   $\omega'$ is the incoming direction (from the light source).
+*   $4 \pi$ is the solid angle of the full sphere, ensuring normalization [S1, S2, unofficial][S3].
+
+**Normalization:**
+The function is normalized such that the integral over the hemisphere (or full sphere, depending on convention) equals 1:
+$$\int_{\mathbb{S}^2} f_p(x, \omega, \omega') d\omega = 1$$
+This ensures that scattering does not add or subtract radiance energy artificially [S1, unofficial].
+
+**Sampling:**
+To sample a new direction $\omega$ given an incoming direction $\omega'$:
+1.  Generate a random unit vector $\mathbf{v}$ uniformly distributed on the unit sphere $\mathbb{S}^2$ [S1, S2, S4, unofficial].
+2.  The scattered direction is $\omega = \mathbf{v}$ (or relative to $\omega'$ if a local coordinate system is used, but the distribution is uniform regardless of $\omega'$) [S4, unofficial].
+3.  The probability density function (PDF) for any direction is $p(\omega) = \frac{1}{4 \pi}$ [S3].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def isotropic_phase_function_value():
+    """
+    Returns the constant value of the isotropic phase function.
+    """
+    return 1.0 / (4.0 * math.pi)
+
+def sample_isotropic_phase_function(omega_in, random_u):
+    """
+    Samples a new direction omega_out uniformly from the sphere.
+    
+    Args:
+        omega_in: Incoming direction vector (unused for isotropic, but part of interface).
+        random_u: Random 2D point (unused for isotropic, but part of interface).
+        
+    Returns:
+        omega_out: A random unit vector on the sphere.
+        pdf: The probability density, which is 1/(4*pi).
+    """
+    # Generate a random unit vector uniformly on the sphere
+    # Method: Rejection sampling or spherical coordinates with uniform cos(theta)
+    # Using spherical coordinates:
+    # theta = arccos(2 * random_u.y - 1)
+    # phi = 2 * pi * random_u.x
+    # However, standard library random_unit_vector() is assumed available [S4, unofficial]
+    
+    omega_out = random_unit_vector()
+    pdf = 1.0 / (4.0 * math.pi)
+    
+    return omega_out, pdf
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The value $1/(4\pi)$ is approximately $0.079577$. No special precision handling is required.
+*   **Boundaries:** The function is valid everywhere in the medium.
+*   **Degenerate Input:** None. The function is constant.
+
+## Subtopics
+
+### Isotropic Scattering
+A specific implementation variant often used in path tracers for materials (not just participating media) where scattering is uniform in all directions [S4, unofficial].
+*   **Definition:** Scatters incident light uniformly in all directions, with attenuation determined by a spatial texture [S4, unofficial].
+*   **Implementation:** Inherits from a `Material` class [S4, unofficial].
+*   **Fields:** `Texture *texture_` [S4, unofficial].
+*   **Constructor:** `explicit Isotropic(Texture *texture)` [S4, unofficial].
+*   **Step:**
+    1.  Generate a random unit vector for the scattered direction [S4, unofficial].
+    2.  Create a scattered ray from the hit point with this random direction [S4, unofficial].
+    3.  Set attenuation to the texture value at the hit point [S4, unofficial].
+    4.  Return true [S4, unofficial].
+*   **When to choose:** Use when modeling diffuse, non-directional scattering surfaces or simple volumetric clouds where directionality is negligible and spatial variation in density/color is important [S4, unofficial].
+
+## Operating characteristics
+**Time and Memory Complexity:**
+*   Time: $O(1)$ for evaluation and sampling.
+*   Memory: $O(1)$ for the mathematical definition. The `Isotropic Scattering` variant requires storage for a texture pointer [S4, unofficial].
+
+**Measured Performance:**
+Not given in the sources.
+
+**Scaling:**
+The computational cost does not scale with resolution or scene complexity, as it is a constant function.
+
+**Strengths and Limitations:**
+*   **Strengths:** Simple to implement and evaluate; computationally inexpensive; serves as a good baseline for testing [S1, unofficial][S3].
+*   **Limitations:** Physically inaccurate for most real-world media, which exhibit anisotropy (e.g., forward scattering in clouds or fog) [S1, S2, unofficial].
+
+**When to use it and when not:**
+*   **Use:** For educational purposes, baseline comparisons, or media where anisotropy is negligible (e.g., some types of smoke or very dense fog where multiple scattering dominates) [S1, S2, unofficial].
+*   **Do not use:** For realistic rendering of media with strong directionality, such as clouds, dust, or biological tissues, where [Henyey-Greenstein](1010-henyey-greenstein-phase-function.md) or [Rayleigh](3721-rayleigh-phase-function.md) are more appropriate [S1, S2, unofficial].
+
+## Background
+The isotropic phase function is a fundamental concept in radiative transfer and computer graphics [S1, unofficial][S3]. It was initially discussed in the context of diffuse radiation in the galaxy, though the Henyey-Greenstein function is more commonly associated with that specific historical application [S1, unofficial]. The term "isotropic" refers to the symmetry of the scattering process [S2, unofficial]. It is implemented in rendering systems like pbrt as part of the `PhaseFunction` interface [S3].
+
+## Sources
+[S1] From the Radiative Transfer Equation to the Volume Rendering Equation, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-summary-equations.html, fetched 2026-10-25 (unofficial)
+[S2] [Graphics] Volume Rendering - GitHub Pages, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
+[S3] 11.2 Phase Functions - pbr-book.org, https://pbr-book.org/3ed-2018/Volume_Scattering/Phase_Functions, fetched 2026-10-27
+[S4] TakTikFR/Volumetric-Path-Tracing, https://github.com/TakTikFR/Volumetric-Path-Tracing, fetched 2026-10-26 (unofficial)

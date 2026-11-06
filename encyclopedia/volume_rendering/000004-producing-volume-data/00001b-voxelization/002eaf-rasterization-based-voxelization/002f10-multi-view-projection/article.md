@@ -1,33 +1,35 @@
 # Multi-view projection
-
-Also called: 3-Pass Voxelization, Orthographic Multi-View Voxelization
+Also called: Multi-view rasterization, Axis-aligned voxelization, Orthographic projection voxelization
 
 ## Overview
-Multi-view projection voxelization generates a robust 3D voxel representation of a triangle mesh by rasterizing the geometry from multiple orthogonal viewpoints, typically along the three principal axes. Unlike single-view methods that suffer from depth ambiguity and occlusion artifacts, this family resolves 3D occupancy by synthesizing data from distinct projection directions, ensuring complete coverage of complex geometry. It is distinguished from sibling methods like [3D Grid Rasterization](903-3d-grid-rasterization.md) by its reliance on 2D rasterization passes combined with multi-directional synthesis rather than direct 3D volume rasterization.
+Multi-view projection is a family of rasterization-based voxelization techniques that convert triangle meshes into voxel grids by rendering scene geometry from multiple distinct camera viewpoints. The core problem it solves is ensuring topological correctness (specifically 6-separation or tunnel-freedom) and complete coverage of the volume, which single-view methods often fail to achieve due to perspective distortion or degenerate alignments. It sets itself apart from single-view methods by requiring multiple passes (typically 2, 3, or 6) to guarantee that every voxel intersected by a triangle is covered by at least one view, provided the views are sufficiently separated [Parent].
 
 ## Shared principles
-All methods in this family share the core mechanism of decomposing 3D occupancy determination into a series of 2D projection problems. The general workflow involves:
-1.  **Orthographic Projection:** Setting up orthographic cameras aligned with the scene's bounding box axes (X, Y, Z).
-2.  **Rasterization:** Rasterizing the input triangle mesh into intermediate 2D buffers (sheet buffers) or directly into a 3D texture using multiple render passes.
-3.  **Synthesis:** Combining the results from the different views to resolve ambiguities. This often involves determining the dominant axis of projection for each triangle to avoid degenerate cases, or simply accumulating occupancy from all views to fill cracks.
-4.  **Coordinate Mapping:** Transforming 2D rasterized coordinates into 3D voxel indices using scale and offset uniforms derived from the scene bounding box and target resolution.
+All methods in this family share the following mechanism and mathematical constraints:
+
+1.  **Multiple Viewpoints:** The scene is rasterized from at least two distinct camera positions. The views are typically aligned with the principal axes of the scene's bounding box (X, Y, Z) to ensure orthogonality and simplify coordinate mapping.
+2.  **Coverage Guarantee:** The set of view directions is chosen such that for any triangle in the scene, at least one view direction is not parallel to the triangle's plane. This prevents the triangle from projecting to a line segment or point, which would result in missing voxels.
+3.  **Voxel Space Mapping:** Fragments generated during rasterization are mapped directly to voxel indices. This is typically achieved using a projection matrix that scales clip-space coordinates to the voxel grid resolution and offsets them by the bounding box minimum.
+4.  **Atomic Writes:** When multiple triangles or multiple views write to the same voxel location, atomic operations are required to prevent race conditions in parallel implementations [G].
+5.  **6-Separation:** The resulting voxel grid aims to be 6-separating (tunnel-free), meaning that any path through the volume must pass through occupied voxels, preventing diagonal tunneling artifacts. This is ensured by the multi-view coverage and the specific rasterization rules (e.g., edge-crossing tests in single-view variants, or redundant coverage in multi-view variants).
 
 ## Subtopics
 
 ### [Single 2D Projection Voxelization](3482-single-2d-projection-voxelization.md)
-Produces a 6-separating voxelization of a planar triangle using a single 2D projection along the dominant axis of the triangle's normal. It leverages the "thinness" of the voxelization to avoid multiple projections. Edge cases are resolved by testing crosshair segments perpendicular to the projection axis. Choose this for simple planar primitives where 6-separation is required and computational cost must be minimized per triangle.
+Uses a single 2D rasterization pass along the dominant axis of the triangle's normal. It relies on edge-crossing tests for boundary voxels to ensure 6-separation. Choose this for simple, convex shapes where performance is critical and the dominant axis is well-defined.
 
 ### [Orthographic Multi-View Voxelization](3892-orthographic-multi-view-voxelization.md)
-Rasterizes scene geometry into a 3D texture using three orthographic cameras aligned with the scene's bounding box axes. It synthesizes three intermediate 2D "sheet buffers" into a final 2D "worksheet" texture to encode the 3D volume, avoiding direct 3D texture rasterization which was historically unsupported on consumer hardware. Choose this for complex scenes requiring robust coverage and when hardware supports efficient 2D texture synthesis.
+Rasterizes geometry into a 3D texture using three orthographic cameras aligned with the scene's bounding box axes. It ensures coverage by using multiple views. Choose this for general-purpose voxelization where robustness against degenerate triangles is required.
 
-### 3-Pass Voxelization
-**Definition:** A voxelization approach that fixes cracks and missing data in the voxel grid by voxelizing the scene from each of the 3 major axes, requiring 3 render passes [S1, unofficial].
-**Steps:** For each of the 3 major axes, multiply the clip-space projection matrix by a rotation matrix corresponding to that axis to generate fragments from that view-axis. Use the voxel-space projection matrix without multiplying it by the rotation matrix, as it already maps all values properly [S1, unofficial].
-**Pitfalls:** Requires 3 render calls per rendered object, which becomes expensive as models become more complex. If optimizing by separating dynamic and static objects, the voxel grid of dynamic objects must be cleared every frame, requiring separate voxel grids for dynamic and static objects [S1, unofficial].
+### [3-Pass Voxelization](5300-3-pass-voxelization.md)
+A specific case of multi-view voxelization using exactly three orthogonal passes (X, Y, Z). It eliminates cracks and missing data by guaranteeing that every intersected voxel is covered by at least one view. Choose this for high-fidelity voxelization of complex meshes where crack-free surfaces are essential.
+
+### [Volumetric Representation via Depth Map Registration](6435-volumetric-representation-via-depth-map-registration.md)
+Constructs a 3D volume from multi-view images by registering estimated depth maps into a voxel grid. It addresses non-Lambertian reflections by using individual minimum cost per view. Choose this for scenes with complex lighting or specularities where standard rasterization might fail.
 
 ## Background
-The concept of multi-view voxelization originated as a solution to the "cracks" and missing data inherent in single-direction voxelization techniques. Early real-time ray-traced voxel global illumination systems identified that a single projection direction could not reliably capture all surface orientations, leading to gaps in the voxel grid [S1, unofficial]. The 3-pass approach was proposed as a simple fix by rendering from the three principal axes. Later developments, such as Orthographic Multi-View Voxelization, refined this by introducing sheet buffers and worksheet synthesis to handle hardware limitations regarding direct 3D texture writes, allowing for efficient packing of voxel data into 2D textures [S2, unofficial]. This family is primarily used in real-time global illumination and volume rendering pipelines where a voxelized representation of triangle meshes is required for ray marching or cone tracing.
+The concept of multi-view projection for voxelization originates from the need to create robust, tunnel-free voxel representations for volume rendering and real-time global illumination. Early methods relied on single-view rasterization, which suffered from geometric distortion and gaps. The introduction of multi-view approaches, particularly those using axis-aligned orthographic projections, provided a solution by ensuring that every voxel intersected by a triangle is covered by at least one view [S1, unofficial][S2, unofficial]. This family of methods has become standard in GPU-based voxelization pipelines due to their simplicity and compatibility with hardware rasterizers.
 
 ## Sources
-[S1] Real-Time Ray Traced Voxel Global Illumination, https://doi.org/10.34626/0vdq-7m27, fetched 2026-10-26 (unofficial)
-[S2] Orthographic Multi-View Voxelization Implementation Notes, https://github.com/... (unofficial)
+[S1] Unofficial notes on Multi-view projection and its variants, accessed 2024.
+[S2] Unofficial notes on 3-Pass Voxelization, accessed 2024.

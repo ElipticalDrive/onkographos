@@ -1,0 +1,166 @@
+# Isomorphic Node Recycling (DAOG)
+Also called: Reciclaje de nodos isomorfos
+
+## Overview
+Isomorphic Node Recycling is a compression method that reduces the memory footprint of a Sparse Voxel Octree (SVO) by converting it into a Directed Acyclic Octal Graph (DAOG) [S1, unofficial]. It solves the problem of redundant storage by identifying and reusing structurally identical (isomorphic) subtrees [S1, unofficial]. Unlike standard SVOs where duplicate structures are stored multiple times, this method ensures that identical nodes share a single instance in memory [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** A voxel $v$, a current node $n$, a bitstream $b$ encoding the path, a depth counter $d$, and a hash table $ht$ [S1, unofficial].
+*   **Output:** The processed node reference and the updated hash table [S1, unofficial].
+
+**Data Structures:**
+*   **Node:** Contains an array of 8 pointers to children and a 64-bit integer for leaf data [S1, unofficial].
+    ```cpp
+    struct Node {
+        Node * children[8];
+        int64_t leafs;
+    };
+    ```
+*   **Hash Table:** Maps computed hash values to unique node instances to enable reuse [S1, unofficial].
+*   **Serialization Layout (GPU):** Nodes are stored in a contiguous vector. Pointers are replaced by 32-bit indices.
+    ```cpp
+    struct Node {
+        int32_t children[8];
+        int64_t leafs;
+    };
+    ```
+
+**Algorithm Steps:**
+1.  **Traversal and Hashing:** The tree is traversed recursively. For each node, a structure-dependent hash is computed to identify isomorphic nodes [S1, unofficial].
+2.  **Hash Computation:**
+    *   If the node is a voxel (leaf), the hash is derived from its information (e.g., color, density) [S1, unofficial].
+    *   If the node is internal, the hash is computed by XORing the recursive hashes of all its children [S1, unofficial].
+    *   *Optimization:* To distribute nodes uniformly in hash buckets, a linear congruential generator is applied: $k \leftarrow (a \cdot k + b) \pmod p$ [S1, unofficial].
+3.  **Node Reuse (Insertion):**
+    *   If depth $d > 0$, retrieve the child $c$ at the current bitstream group position [S1, unofficial].
+    *   If child $c$ exists, check if it is already in the hash table. If found, replace $c$ with the existing unique node instance [S1, unofficial].
+    *   If child $c$ does not exist, create a new node [S1, unofficial].
+    *   Recursively process the child with depth $d+1$ (Note: Source text specifies $d+1$, though standard depth reduction implies $d-1$; implementation follows source logic) [S1, unofficial].
+    *   If depth $d$ is 0 (leaf level), create node $n'$ with voxel $v$ [S1, unofficial].
+    *   Check if $n'$ is in the hash table. If found, replace $n'$ with the found node; otherwise, insert $n'$ into the hash table [S1, unofficial].
+4.  **Memoization Optimization:** To avoid redundant recursive hash computations, an external hash table caches computed hash values for memory addresses. If a node's address is registered, the cached value is returned. If the node structure is modified, its entry is removed from the cache [S1, unofficial].
+5.  **Serialization for GPU:**
+    *   Regroup nodes into a contiguous vector to eliminate memory gaps [S1, unofficial].
+    *   The first entry is always the root node [S1, unofficial].
+    *   Replace memory pointers with indices into the vector [S1, unofficial].
+    *   Serialize using a Depth-First traversal [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_hash(n):
+    """
+    Computes a structure-dependent hash for node n.
+    Uses XOR of children hashes for internal nodes.
+    """
+    if not n.is_voxel:
+        h = 0
+        for c in n.children:
+            if c is not None:
+                h = h ^ compute_hash(c)
+        # Optimization: Uniform distribution in buckets
+        # k = (a * h + b) % p
+        return h
+    else:
+        return n.info
+
+def insert_voxel(v, n, b, d, ht):
+    """
+    Inserts a voxel into the tree, reusing isomorphic nodes.
+    """
+    if d > 0:
+        # Get child index from bitstream group
+        child_idx = get_group(b, d, 3)
+        c = n.children[child_idx]
+        
+        if c is not None:
+            # Check hash table for existing isomorphic node
+            if c in ht:
+                c = ht[c]
+            else:
+                # Create new node if not in hash table
+                c = Node()
+        
+        # Recursive step
+        # Note: Source specifies d+1, potentially a typo for d-1
+        c, ht = insert_voxel(v, c, b, d + 1, ht)
+        
+        # Update parent pointer
+        n.children[child_idx] = c
+        return n, ht
+    else:
+        # Leaf level
+        n_prime = Node(v)
+        
+        if n_prime in ht:
+            n_prime = ht[n_prime]
+        else:
+            ht[n_prime] = n_prime
+            
+        return n_prime, ht
+
+def serialize_dag(root):
+    """
+    Serializes the DAOG into a contiguous vector for GPU.
+    """
+    nodes = []
+    
+    def dfs(node):
+        if node is None:
+            return
+        # Convert pointers to indices
+        serialized_node = Node()
+        for i, child in enumerate(node.children):
+            if child is not None:
+                # Find index of child in nodes list
+                # In a real implementation, this requires a map from node ptr to index
+                # or a two-pass approach.
+                child_idx = find_index(nodes, child)
+                serialized_node.children[i] = child_idx
+            else:
+                serialized_node.children[i] = -1 # Null index
+        serialized_node.leafs = node.leafs
+        nodes.append(serialized_node)
+        
+        # Depth First Traversal
+        for child in node.children:
+            if child is not None:
+                dfs(child)
+
+    dfs(root)
+    return nodes
+```
+
+**Parameters:**
+*   **Hash Table:** Stores references to unique node structures [S1, unofficial].
+*   **Serialization Indices:** `children` array uses `int32_t` indices [S1, unofficial].
+*   **Leaf Data:** `leafs` field uses `int64_t` [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Hash Collisions:** The source notes that hash collisions are handled by the hash table mechanism, but does not specify the collision resolution strategy (e.g., chaining, open addressing) [S1, unofficial].
+*   **Depth Counter:** The recursive call uses $d+1$ in the source text, which contradicts standard depth-first traversal where depth decreases. This may be a typo in the source or specific to the bitstream encoding [S1, unofficial].
+*   **Memory Gaps:** Without serialization, nodes are dispersed in memory, leading to inefficient cache usage and wasted space [S1, unofficial].
+
+## Subtopics
+
+### Octree Serialization for GPU
+A variant focused on preparing the DAOG for GPU transmission. It converts the sparse structure into a contiguous memory buffer using indices instead of pointers [S1, unofficial]. It reaggregates nodes into a vector to eliminate gaps, ensuring the root is the first entry [S1, unofficial]. Serialization follows a Depth-First traversal [S1, unofficial]. The node layout changes to `struct Node { int32_t children[8]; int64_t leafs; }` [S1, unofficial].
+
+### Structure-Dependent Hash Function
+A specific hashing strategy used to identify isomorphic nodes. It computes a hash based on the recursive structure of the node's children [S1, unofficial]. For internal nodes, it XORs the hashes of all children [S1, unofficial]. For leaf nodes, it returns the node's information [S1, unofficial]. An optimization applies a linear congruential generator to distribute nodes uniformly in hash buckets [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** The insertion process involves recursive traversal and hash table lookups. The use of memoization optimizes hash computation by caching results for node addresses [S1, unofficial].
+*   **Memory Complexity:** Reduces memory usage by sharing isomorphic nodes. Serialization further reduces overhead by removing pointer indirection and memory gaps [S1, unofficial].
+*   **Performance:** The hash table approach reduces algorithm efficiency due to lookup overhead, mitigated by memoization and uniform distribution optimizations [S1, unofficial].
+*   **Strengths:** Effective compression for scenes with repetitive structures. Enables efficient GPU transmission via serialization [S1, unofficial].
+*   **Limitations:** Hash table overhead. The impact of serialization order on rendering efficiency was not fully tested due to time constraints [S1, unofficial].
+
+## Background
+This method originates from a thesis on the compression and efficiency of Sparse Voxel Octrees for global illumination calculation [S1, unofficial]. It was developed to leverage the implicit position deduction of octrees and the similarity between nodes to compress the structure by reusing isomorphic nodes [S1, unofficial]. The resulting structure is a Directed Acyclic Octal Graph (DAOG) [S1, unofficial].
+
+## Sources
+[S1] Estudio de la compresión y la eficiencia del Sparse Voxel Octree en el cálculo de la Iluminación Global, https://hdl.handle.net/2117/445971, fetched 2026-10-26 (unofficial)

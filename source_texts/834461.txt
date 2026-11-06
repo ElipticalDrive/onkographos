@@ -1,0 +1,176 @@
+WebGL-based viewer for volumetric data. Contribute to d-v-b/neuroglancer development by creating an account on GitHub.
+
+feat(zarr): decode refkv.precomputed chunks, reading a shard through its indexes by d-v-b · Pull Request #19 · d-v-b/neuroglancer · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+d-v-b
+commented
+Nov 3, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+🤖 AI text below 🤖
+Neuroglancer's Zarr v3 reader now decodes refkv.precomputed, so an archive made by refkv's precomputed profile opens in the fork. A shard is read through its own indexes, as the precomputed data source reads it, and never whole.
+Through a 14.7 MB BANC archive from d-v-b/refkv#203, the viewer's rendering is pixel-identical to Neuroglancer's own precomputed:// reading of the same volume, in 6 views across zooms and the volume's edges. It makes the same number of requests, less info, none of them for a whole object.
+How it reads a shard
+The codec resolves as sharding_indexed does: Neuroglancer's chunk is one precomputed chunk (128 × 128 × 16 for BANC, not the 4096 × 2048 × 256 Zarr chunk). src/datasource/precomputed/sharded.ts now exposes its minishard index reader, so both data sources share it, along with the existing JPEG, PNG and compressed_segmentation decoders. A chunk takes three requests: the shard index's 16-byte entry, the minishard index, and the chunk. The 12-byte position is a literal in the archive and takes none. Clipped chunks are filled with the array's fill value, which codecs now receive through CodecArrayInfo.
+For your review
+Decision: an object stored with a Content-Encoding stays refused, so Harris15 opens but its chunks fail with an error. The agent measured this in all three browsers, against a server answering as S3 does:
+browser
+Range on a coded object
+no Range
+Chromium
+request fails, ERR_CONTENT_DECODING_FAILED, seen by a script as "Failed to fetch"
+decoded; Content-Length is the stored size
+Firefox, WebKit
+206 with a decoded body, truncated output for a partial range
+decoded; Content-Length is the stored size
+So fetch never gives the stored bytes, and refkv's spec revision 11.4 says that a reader using fetch does not make the exception for coded objects. The errors now name this cause, including Chromium's otherwise opaque "Failed to fetch", and src/kvstore/vzip/index.rst documents it. The one way to read such an object in a browser is a request without Range, which is what the precomputed:// data source does. That would need refkv's reader rule (§5.2 forbids it) and the vzip reader to change, since the value would no longer be the stored bytes. The agent did not make that change, and it is the choice to overrule if Harris15 should display here.
+Decision: where "exactly" stops for JPEG. jpgjs and libjpeg round the inverse DCT differently, so strict exactness would refuse BANC itself.
+JPEG
+difference from libjpeg
+here
+gray, 4 real BANC chunks
+at most 1 level, in 4–7% of voxels of the 3 that hold data
+shown; the precomputed:// data source uses the same decoder
+3 components with subsampled chroma, refkv's 4:2:0 fixture
+up to 10 levels, mean 2.9
+refused
+other than 8 bits
+not measured; no such chunk was available
+refused
+Refusing subsampled chroma means an RGB volume written that way shows errors here, although precomputed:// displays it with those differences. None of the volumes tested here is such a volume, and refkv's survey was not checked for this property.
+Also refused: a chunk stored as brotli without the header (no decoder here), a PNG of several 16-bit channels (from reading decompressPng, which transposes bytes rather than samples), and a compressed_segmentation stream cut short (the decoder would read zeros).
+Beyond the codec: a minishard index range that runs backwards, or an offset past 2^53, now fails in the precomputed:// data source too, where it read other bytes before. decode_jpeg and decode_png join Zarr's async computation modules, which only worked before because the precomputed data source was also enabled.
+Verification
+check
+result
+new tests: tests/codec/refkv_precomputed.browser_test.ts, tests/datasource/zarr_refkv_precomputed.spec.ts, tests/kvstore/vzip_http.spec.ts
+17, 17 and 3 passed; fixtures from refkv's volumes, compared with refkv's Python codec
+node and browser projects
+1023 passed, 13 skipped; tests/kvstore/gcs.spec.ts failed to start because the fake-gcs-server binary is missing from this worktree's node_modules, which is unrelated. Only comments changed after this run, and the new tests and the Zarr and precomputed browser tests were rerun
+tsc; oxlint, eslint, prettier on the changed files
+pass; the repository-wide lint:check was not run
+BANC archive against precomputed://, Chromium with a software GL, 1000 × 1000 screenshots
+max difference 0 at 5 zooms and positions, and in 3 of 3 runs of the whole-volume view. One earlier whole-volume run differed by one chunk, which was still loading after an 8 s wait
+Harris15 archive in Chromium
+chunks fail with ERR_CONTENT_DECODING_FAILED and the new message
+Not verified: the viewer was not run in Firefox or WebKit; only fetch's behavior was. BANC's edge views are mostly black, so clipped chunks holding data are covered by the fixtures rather than by BANC.
+Bookkeeping
+Merge order: either order works, since no code here depends on feat(zarrify): zarrify Neuroglancer precomputed volumes as one reference per object refkv#203 and that PR does not depend on this one. Merging feat(zarrify): zarrify Neuroglancer precomputed volumes as one reference per object refkv#203 first is better, because this PR's links to spec/zarrify/precomputed.md on refkv's main do not resolve until then.
+Not included: |refkv: on a precomputed store's URL still rejects it, because the vendored src/third_party/refkv predates feat(zarrify): zarrify Neuroglancer precomputed volumes as one reference per object refkv#203. An archive made by refkv's zarrifier opens today with |vzip:|zarr3:. Re-vendoring has to wait for that PR to merge.
+The fixtures in testdata/codec/refkv_precomputed were generated from feat(zarrify): zarrify Neuroglancer precomputed volumes as one reference per object refkv#203 at b69ff005 by the generate.py beside them.
+🤖 Generated with Claude Code
+d-v-b
+added 2 commits
+November 3, 2026 16:18
+refactor(precomputed): expose the minishard index reader for other sh…
+…
+18861ac
+```
+…ard holders
+
+readMinishardIndex reads one minishard's index from any file handle, which the
+refkv.precomputed Zarr codec needs, since its shards are not named by shard
+number. A minishard index range that runs backwards, or an offset past 2^53, now
+fails rather than read other bytes.
+
+Assisted-by: ClaudeCode:claude-opus-5-5
+```
+feat(zarr): decode refkv.precomputed chunks, reading a shard through …
+…
+70f74b5
+```
+…its indexes
+
+A Zarr chunk of the refkv.precomputed codec (refkv's spec/zarrify/precomputed.md,
+section 6) is a 12-byte position and one object of a Neuroglancer precomputed
+volume. An array of shards resolves as sharding_indexed does, with a precomputed
+chunk as Neuroglancer's chunk, found through the shard's own indexes: the shard
+is never read whole. Chunks decode with the precomputed encodings' decoders, and
+a clipped chunk is filled with the array's fill value, which codecs now receive.
+
+The codec refuses what it cannot decode as refkv's Python codec does: brotli, a
+JPEG with subsampled chroma or of other than 8 bits, a PNG of several 16-bit
+channels, and a compressed_segmentation stream cut short. A JPEG otherwise may
+differ from libjpeg's by 1 level, as the precomputed data source's do.
+
+An object stored with a Content-Encoding stays refused: Chromium fails such a
+range and Firefox and WebKit decode it, and refkv's reader rule says that a
+reader using fetch makes no exception. The errors now name the cause, and the
+vzip kvstore's page documents it.
+
+Assisted-by: ClaudeCode:claude-opus-5-5
+```
+d-v-b
+commented
+Nov 3, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+cc @perlman
+d-v-b
+mentioned this pull request
+Nov 3, 2026
+feat(kvstore): zarrify a precomputed store with refkv:
+#20
+Merged
+style(testdata): format the refkv.precomputed fixture generator as ru…
+…
+393ac75
+```
+…ff does
+
+Assisted-by: ClaudeCode:claude-opus-5-5
+```
+d-v-b
+added a commit
+that referenced
+this pull request
+Nov 3, 2026
+style(testdata): format refkv_precomputed's generate.py as ruff does
+…
+7479c5d
+```
+The Python CI jobs run `ruff format` and then fail on a dirty tree. The
+file comes from #19, on which this branch is built.
+
+Assisted-by: ClaudeCode:claude-opus-5-5
+```
+d-v-b
+mentioned this pull request
+Nov 4, 2026
+fix(demo): list every codec the Neuroglancer fork decodes
+d-v-b/refkv#218
+Merged
+Hide details
+View details
+d-v-b
+merged commit 0f1ae48
+into
+vzip
+Nov 4, 2026
+18 of 21 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,96 +1,130 @@
 # Average Pose Calculation
+
 Also called: Average Pose Computation, mean pose via SVD
+
 ## Overview
-Computes a representative camera pose from a set of input camera poses by averaging their translations and rotations. It differs from simple vector averaging by using Singular Value Decomposition (SVD) to ensure the resulting rotation matrix remains orthogonal and valid, addressing the non-linear nature of rotation space [S2, unofficial]. This method is primarily used to initialize a central view or create a canonical coordinate system for a scene [S1, S2, unofficial].
+Computes a representative camera pose (origin and orientation) from a set of input camera poses, typically used to initialize a scene or define a central viewing direction for volume rendering and NeRF training. It differs from [Camera Pose Transformation](1672-camera-pose-transformation.md) by aggregating multiple poses into one, and from [Orbit Camera Basis Computation](1749-orbit-camera-basis-computation.md) by not assuming a fixed orbital path. It addresses the problem of defining a canonical coordinate frame or initial camera position when no single pose is dominant.
 
 ## How it works
-**Inputs:**
-- `poses`: A list or array of $N$ camera poses. Each pose is a $3 \times 4$ or $4 \times 4$ transformation matrix (camera-to-world). The first $3 \times 3$ columns represent rotation, and the last column represents translation [S2, unofficial].
+The method computes an average translation and an average rotation. Two primary approaches exist: a simple arithmetic mean (often used in early NeRF implementations) and an SVD-based orthogonalization (used in more robust pipelines).
 
-**Outputs:**
-- `avg_pose`: A single $3 \times 4$ or $4 \times 4$ matrix representing the average pose [S2, unofficial].
+### Inputs and Outputs
+- **Input**: `poses`, a tensor of shape $[N, 3, 4]$ or $[N, 4, 4]$, where $N$ is the number of camera poses. Each pose is a $3 \times 4$ or $4 \times 4$ matrix representing the camera-to-world (c2w) transformation. The first three columns are the rotation basis vectors (right, up, forward/view), and the fourth column is the translation (origin).
+- **Output**: `avg_pose`, a $3 \times 4$ or $4 \times 4$ matrix representing the average camera pose.
 
-**Data Structures:**
-- `poses`: Shape $(N, 3, 4)$ or $(N, 4, 4)$.
-- `center`: Shape $(3,)$, the averaged translation vector.
-- `mean_rot`: Shape $(3, 3)$, the element-wise mean of the rotation matrices.
-- `avg_rot`: Shape $(3, 3)$, the orthogonalized average rotation matrix.
+### Data Structures
+- `poses`: Array of shape $(N, 3, 4)$ or $(N, 4, 4)$.
+- `center`: Vector of shape $(3,)$.
+- `avg_rot`: Matrix of shape $(3, 3)$.
+- `avg_pose`: Matrix of shape $(3, 4)$ or $(4, 4)$.
 
-**Steps:**
-1. **Extract Translation:** Calculate the average translation vector `center` by taking the mean of the translation columns (index 3) of all poses along the batch axis [S2, unofficial].
-   $$ \text{center} = \frac{1}{N} \sum_{i=1}^{N} \text{poses}_i[:, 3] $$
-2. **Compute Mean Rotation:** Calculate the element-wise mean of the rotation sub-matrices (indices 0-2) of all poses [S2, unofficial].
-   $$ \text{mean\_rot} = \frac{1}{N} \sum_{i=1}^{N} \text{poses}_i[:, :3, :3] $$
-3. **Orthogonalize Rotation:** Perform Singular Value Decomposition (SVD) on `mean_rot` to obtain matrices $U$ and $V^T$ [S2, unofficial].
-   $$ U, \Sigma, V^T = \text{SVD}(\text{mean\_rot}) $$
-   Compute the average rotation matrix `avg_rot` as:
+### Method 1: Arithmetic Mean (S1)
+This method averages the translation vectors and the rotation basis vectors directly. It is simple but does not guarantee the resulting rotation matrix is orthogonal.
+
+1. **Extract Intrinsic Scaling (Optional)**: If required by the downstream pipeline, extract the focal length scaling factor `hwf` from the first pose or intrinsic matrix [S1, unofficial].
+2. **Compute Average Translation**: Calculate the mean of the translation columns (column index 3) across all poses.
+   $$ \text{center} = \frac{1}{N} \sum_{i=0}^{N-1} \text{poses}_i[:, 3] $$
+3. **Compute Average Viewing Direction**: Sum the viewing direction vectors (typically column index 2, representing the negative z-axis in camera space) and normalize.
+   $$ \text{vec2} = \text{normalize}\left( \sum_{i=0}^{N-1} \text{poses}_i[:, 2] \right) $$
+4. **Compute Average Up Vector**: Sum the up vectors (typically column index 1) and normalize.
+   $$ \text{up} = \text{normalize}\left( \sum_{i=0}^{N-1} \text{poses}_i[:, 1] \right) $$
+5. **Construct Basis**: Compute the right vector (column 0) as the cross product of the up vector and the viewing direction to ensure orthogonality.
+   $$ \text{vec0} = \text{normalize}(\text{up} \times \text{vec2}) $$
+   $$ \text{vec1} = \text{vec2} \times \text{vec0} $$
+6. **Assemble Pose**: Construct the $3 \times 4$ matrix using `vec0`, `vec1`, `vec2`, and `center`.
+
+### Method 2: SVD-Based Orthogonalization (S2)
+This method averages the rotation matrices and uses Singular Value Decomposition (SVD) to project the result onto the Special Orthogonal group $SO(3)$, ensuring a valid rotation matrix.
+
+1. **Compute Average Translation**:
+   $$ \text{center} = \frac{1}{N} \sum_{i=0}^{N-1} \text{poses}_i[:, 3] $$
+2. **Compute Mean Rotation Matrix**: Calculate the element-wise mean of the $3 \times 3$ rotation submatrices (columns 0-2).
+   $$ \text{mean\_rot} = \frac{1}{N} \sum_{i=0}^{N-1} \text{poses}_i[:, :3, :3] $$
+3. **SVD Decomposition**: Perform SVD on `mean_rot`.
+   $$ U, \Sigma, V^T = \text{svd}(\text{mean\_rot}) $$
+4. **Compute Average Rotation**:
    $$ \text{avg\_rot} = U V^T $$
-   *Note:* If $\det(U V^T) = -1$, a correction is typically required to ensure a proper rotation (no reflection), though the sources do not explicitly detail this reflection handling [S2, unofficial].
-4. **Construct Average Pose:** Concatenate `avg_rot` and `center` (reshaped to a column vector) to form the final $3 \times 4$ pose matrix [S2, unofficial].
+   *Note*: If $\det(\text{avg\_rot}) = -1$, flip the sign of the last column of $U$ before multiplication to ensure a proper rotation (determinant +1) [G].
+5. **Assemble Pose**: Concatenate `avg_rot` and `center` (reshaped to a column vector) to form the $3 \times 4$ matrix.
 
-**Pseudocode:**
+### Pseudocode (Method 2)
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 import numpy as np
 
-def average_pose_calculation(poses):
+def compute_average_pose(poses):
     """
-    Compute the average camera pose from a set of poses using SVD for rotation averaging.
+    Compute average camera pose using SVD for rotation averaging.
     
     Args:
-        poses: numpy array of shape (N, 3, 4) or (N, 4, 4) containing camera-to-world matrices.
+        poses: np.ndarray of shape (N, 3, 4) or (N, 4, 4)
         
     Returns:
-        avg_pose: numpy array of shape (3, 4) or (4, 4) representing the average pose.
+        avg_pose: np.ndarray of shape (3, 4)
     """
-    # Ensure poses are 3x4 for consistency
-    if poses.shape[-2] == 4:
+    # Handle 4x4 input by taking top 3x4
+    if poses.shape[1] == 4:
         poses = poses[:, :3, :]
         
     N = poses.shape[0]
     
-    # Step 1: Calculate average translation (center)
-    # Mean of the translation columns (index 3)
+    # 1. Average Translation
+    # Sum translations (column 3) and divide by N
     center = np.mean(poses[:, :, 3], axis=0)
     
-    # Step 2: Calculate mean rotation
-    # Mean of the rotation sub-matrices (first 3 columns)
+    # 2. Average Rotation
+    # Mean of 3x3 rotation matrices
     mean_rot = np.mean(poses[:, :, :3], axis=0)
     
-    # Step 3: Orthogonalize rotation using SVD
-    # Perform SVD on the mean rotation matrix
+    # 3. SVD for Orthogonalization
     U, _, Vt = np.linalg.svd(mean_rot)
     
-    # Compute the orthogonal average rotation
+    # 4. Construct Rotation Matrix
     avg_rot = U @ Vt
     
-    # Step 4: Construct the average pose matrix
+    # Guard: Ensure determinant is +1 (proper rotation)
+    if np.linalg.det(avg_rot) < 0:
+        U[:, -1] *= -1
+        avg_rot = U @ Vt
+        
+    # 5. Assemble Pose
     # Concatenate rotation and translation
-    avg_pose = np.hstack((avg_rot, center.reshape(-1, 1)))
+    avg_pose = np.hstack([avg_rot, center.reshape(3, 1)])
     
     return avg_pose
 ```
 
-**Parameters:**
-- `poses`: Input poses, either $[N, 3, 4]$ or $[N, 4, 4]$ [S2, unofficial].
+### Parameters
+- `poses`: Input poses. Shape $[N, 3, 4]$ or $[N, 4, 4]$.
+- `N`: Number of poses.
 
-**Edge Cases and Pitfalls:**
-- **Reflection:** If the determinant of $U V^T$ is $-1$, the result is a reflection, not a rotation. Standard implementations often correct this by flipping the sign of the last column of $U$ or $V^T$, but this specific correction is not detailed in the provided sources [S2, unofficial].
-- **Degenerate Input:** If all poses are identical or collinear in rotation space, the mean rotation may be singular, leading to unstable SVD results [G].
-- **Precision:** Floating-point errors in the mean rotation matrix can lead to slight non-orthogonality before SVD, which SVD corrects [S2, unofficial].
+### Edge Cases and Pitfalls
+- **Degenerate Configurations**: If cameras are arranged in a line or plane, the average up vector may become zero or collinear with the viewing direction, causing normalization failures [G].
+- **Coordinate System Flips**: Different datasets may use different coordinate conventions (e.g., OpenGL vs. DirectX). Ensure all input poses share the same convention before averaging [S3, unofficial].
+- **Non-Orthogonal Result**: Method 1 (Arithmetic Mean) produces a non-orthogonal rotation matrix. It must be re-orthogonalized (e.g., via Gram-Schmidt or SVD) if used as a strict camera matrix [S1, S2, unofficial].
+
+## Subtopics
+
+### Bounding Sphere Estimation
+Estimates the radius and center of the scene to define the viewing frustum or sampling bounds. It converts camera world-to-view transforms to camera-to-world (c2w) matrices, adjusts for coordinate system flips (e.g., Y and Z axis inversion), calculates the scene center (often via `focus_point_fn`), and sets the radius as the minimum distance from the center to any camera center [S3, unofficial].
+
+### Focus Point Calculation
+Calculates the nearest point to all camera focal axes. It extracts directions (column 2) and origins (column 3) from poses, computes the projection matrix $M = I - d d^T$ for each camera, sums the outer products $\sum M^T M$, and solves for the focus point by inverting the mean of these sums and multiplying by the mean of $M^T M \cdot \text{origins}$ [S4, unofficial].
 
 ## Operating characteristics
-**Time Complexity:** $O(N \cdot d^2)$ where $N$ is the number of poses and $d=3$ is the dimensionality of the rotation matrix. The dominant operation is SVD, which is constant time for fixed $3 \times 3$ matrices.
-**Memory Complexity:** $O(N \cdot d^2)$ to store the input poses and intermediate mean rotation matrix.
-**Strengths:** Ensures the resulting rotation is valid (orthogonal) unlike simple averaging [S2, unofficial]. Simple to implement using standard linear algebra libraries [S2, unofficial].
-**Limitations:** Does not account for the geodesic distance on the rotation manifold (SO(3)), which can be less accurate for large angular differences between poses compared to iterative methods [G].
-**When to use:** When a quick, central reference pose is needed for initialization or alignment [S1, S2, unofficial].
-**When not to use:** When high precision in rotation averaging is required for widely varying camera orientations [G].
+- **Time Complexity**: $O(N)$ for translation averaging. $O(N \cdot 3^3)$ for rotation averaging (matrix multiplication) plus $O(1)$ for SVD on a $3 \times 3$ matrix. Overall $O(N)$.
+- **Memory Complexity**: $O(N)$ to store input poses. $O(1)$ auxiliary space.
+- **Strengths**: Simple to implement (Method 1); robust to noise and outliers (Method 2 via SVD); provides a canonical reference frame.
+- **Limitations**: Method 1 is not geometrically rigorous for rotations; Method 2 assumes all poses are equally weighted; sensitive to coordinate system inconsistencies across input poses.
+- **When to Use**: Initializing NeRF training, setting up a central camera for visualization, or defining the bounding volume for ray sampling.
+- **When Not to Use**: When poses are highly inconsistent or contain significant outliers (use robust statistics like RANSAC); when a specific target pose is required rather than an average.
 
 ## Background
-The method originates from implementations in NeRF (Neural Radiance Fields) pipelines, specifically for computing a canonical camera pose from a dataset of images [S1, S2, unofficial]. It is commonly referred to as `poses_avg` in codebases like `bmild/nerf` and `nerf-from-scratch` [S1, S2, unofficial]. The use of SVD for rotation averaging is a standard technique in computer vision for handling rotation matrices [S2, unofficial].
+Average pose calculation is a standard preprocessing step in neural radiance fields (NeRF) and 3D reconstruction pipelines. It was popularized by the original NeRF paper and subsequent implementations like [S1, unofficial] and [S2, unofficial], which used it to center the scene and define the initial camera parameters. The SVD-based approach is derived from standard rotation averaging techniques in computer vision [S2, unofficial].
 
 ## Sources
 [S1] bmild/nerf, https://github.com/bmild/nerf, fetched 2026-10-26 (unofficial)
 [S2] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S3] hbb1/2d-gaussian-splatting, https://github.com/hbb1/2d-gaussian-splatting, fetched 2026-10-27 (unofficial)
+[S4] ziplab/VolSplat, https://github.com/ziplab/VolSplat, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,1241 @@
+Parallel Scan on Ascend AI Accelerators
+arXiv:2505.15112v2 [cs.DC] 2 Jan 2026
+Bartlomiej Wróblewski∗
+Gioele Gottardo†
+Abstract. We design and implement parallel prefix sum (scan) algorithms using Ascend AI accelerators. Ascend accelerators feature specialized computing
+units—the cube units for efficient matrix multiplication
+and the vector units for optimized vector operations. A
+key feature of the proposed scan algorithms is their extensive use of matrix multiplications and accumulations
+enabled by the cube unit. To showcase the effectiveness of these algorithms, we also implement and evaluate several scan-based operators commonly used in AI
+workloads, including sorting, tensor masking, and top-k
+/ top-p sampling.
+Our single-core results demonstrate substantial performance improvements, with speedups ranging from
+5× to 9.6× compared to vector-only implementations
+for sufficiently large input lengths. Additionally, we
+present a multi-core scan algorithm that fully utilizes
+both the cube and vector units of Ascend, reaching
+up to 74.9% of the memory bandwidth achieved by
+memory copy. Furthermore, our radix sort implementation, which utilizes matrix multiplications for its parallel
+splits, showcases the potential of matrix engines to enhance complex operations, offering up to 3.3× speedup
+over the vector-only baseline.
+1 Introduction Parallel scan is a fundamental parallel computing paradigm with many applications [7, 30]. Due to its importance, parallel scan
+has been studied in several models of computation, including the circuit (work and depth) and the Parallel
+Random-Access Machine (PRAM) model [9]. In the
+circuit model, the depth and size trade-offs for parallel
+optimal prefix circuits are well-understood for binary
+operations [46, 52], but other models are yet to be explored, especially in the heterogeneous computing domain [13, 53].
+Despite many attempts, there is a large gap between abstract parallel machine models and the current state-of-the-art accelerators that contain heterogeneous computing units, see [37] and [2, 45, 27]. For
+example, hardware vendors have manufactured acceler∗ Work done while the author was employed at Huawei Zurich
+Research Center.
+† Computing Systems Lab, Huawei Zurich Research Center,
+Zurich, Switzerland (anastasios.zouzias@huawei.com).
+Anastasios Zouzias†
+ators with specialized compute engines known as matrix
+engines or tensor core units. A list of such specialized hardware units includes Google’s TPUs [24, 25],
+Nvidia’s Tensor Cores [41], AMD’s Matrix Cores [1]
+and Huawei’s Ascend Cube Unit [34, 35] to name a
+few. Moreover, in the CPU domain, examples of such
+units (or extensions) are ARM’s Scalable Matrix Extension (SME) [3], Intel’s Advanced Matrix Extensions
+(AMX) [22] and IBM’s POWER10 Matrix-Multiply Assist (MMA) [48]. Therefore, today’s high-performance
+processors contain matrix engines that allow efficient
+multiplication of constant-sized matrices, making ideas
+from the early 1980s [29, 47] a reality and initiating
+fruitful debates within the community [14].
+Given the presence of matrix engines in computing
+systems, a model of computation was recently proposed
+to capture matrix multiplication accelerators called
+the Tensor Core Unit (TCU) model [11, 12]. The
+authors of [12] initiated the study of TCU algorithms
+and revisited classical paradigms in the TCU model.
+The study of accelerating prefix sum (and reduction)
+operations using matrix multiplication units was first
+initiated in the seminal paper of [13]. A follow-up work
+presented a logarithmic-depth parallel scan algorithm
+in the TCU model of computation, where only matrix
+multiplication operations are required [53]. Although
+the main algorithm in [53] offers stronger theoretical
+guarantees than that of [13], its poor memory access
+patterns limit its practical performance.
+Here, we focus on simpler algorithms inspired
+by [13] that achieve performance close to hardware peak.
+Our top-performing multi-core scan kernels combine
+ideas from [13, Alg. 6], explicit software-managed asynchronous pipelining between matrix and vector cores,
+and a novel matrix-vector recomputation strategy in
+the up-sweep scan phase. Furthermore, we demonstrate
+that our proposed scan kernels can be easily composed
+to deliver the best-performing kernels for AI workloads
+on Ascend.
+In short, we draw inspiration from both these
+works [12, 13] to advance the study of parallel scans on
+matrix multiplication accelerators. As a case study and
+an evaluation environment, we use Huawei’s Ascend AI
+accelerators and the Compute Architecture for Neural
+Networks (CANN) software ecosystem of Ascend to
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+evaluate our proposals [33].
+Our main contributions are listed below:
+the algorithmic ideas and techniques underlying this
+result are well-established [10], we believe that it paves
+the way for interesting research directions in the future.
+As an example, we pose the following question, see also
+the presentation of [11]. Is it possible to also utilize the
+multiple-add capabilities of the matrix multiplications
+units to improve further the performance of parallel
+sorting? It is important to note that, despite relying on
+the matrix multiplications for scan operations during
+parallel splits, our radix sort does not exploit the
+multiply-add capability of the matrix unit.
+• We design, implement, and evaluate parallel scan
+algorithms specialized for the Ascend AI accelerator. The distinguishing feature of the proposed algorithms is the extensive use of the Ascend matrix
+multiplication engines (“Cube cores”). In particular, we implement several scan variants, including
+single-core and multi-core scans, scans on multiple arrays (batched scan), inclusive/exclusive scans
+and specialized scan implementations for boolean
+(mask) inputs using the cube unit’s 8-bit integer
+2 Background In this section, we give an overcapabilities.
+view of related work in computing parallel scans using
+accelerators, focusing mostly on matrix multiplication
+• We evaluated the proposed scan algorithms that accelerators. We also present the Tensor Core Unit
+use a single cube and vector units, demonstrating (TCU) model of computation, and we give a summary
+a 5× up to 9.6× speed-up compared to the baseline of a selected list of scan-based primitives. The incluscan (vector unit only).
+sive prefix sum of a sequence of elements x1 , x2 , x3 , . . .
+equipped with a binary associative operator ⊙ is the
+• We present multi-core scan algorithms that fully
+sequence x1 , x1 ⊙ x2 , x1 ⊙ x2 ⊙ x3 , . . . .
+utilize both the cube and vector units of the Ascend
+910B4 accelerator, reaching up to 74.9% of the
+2.1 Scan Strategies on Accelerators Numertheoretical memory bandwidth of memory copy. ous parallel scan implementations and libraries have
+Moreover, the MCScan algorithm (Algorithm 4.3) been proposed in the literature [15, 50, 20, 44, 4, 5, 40,
+attains a 15.2× speedup over the corresponding 38]. Here, we discuss the most relevant work focusing
+single-cube variant when utilizing all 20 available on scan implementations targeting accelerators, most
+AI cores.
+notably Graphics Processing Units (GPUs). Horn was
+one of the first to implement parallel scans in GPUs [43,
+• We implement a list of computational kernels (opChapter 36], followed up with several improvements.
+erators), including parallel split, compress/comIn a nutshell, GPU scan implementations primarily
+pact and top-p (nucleus) sampling essential to AI
+follow a two-level hierarchical approach where the highworkloads. In all of these cases, we demonstrate
+est level of the hierarchy is the block level. An efficient
+significant performance improvements.
+scan implementation follows one of these scan strate• Lastly, we implement radix sort, whose parallel gies: Scan-Scan-Add (SSA), Reduce-Scan-Scan (RSS),
+splits take advantage of the cube units. The radix or Stream-scan according to the state-of-the-art decousort implementation provides up to 3.3× speed-up ple lookback scan approach of [38]. Scan-Scan-Add
+over baseline sorting that does not utilize the cube (SSA) means that the (local) scans are initially computed per block. Second, the values of the largest inunits.
+dex of each block are collected and scanned. Third, the
+Next, we briefly emphasize the key distinction between collected per-block scan values are broadcast-added to
+the above contributions and prior art. First, the their corresponding blocks. Similarly, the RSS approach
+multi-core scan algorithm is novel (to the best of our makes a block-level reduction first, followed by a scan
+knowledge) since it performs partial recomputation of of the block-level reductions and a final scan of each
+the reduction values on both the cube and vector block. We refer the interested reader to [38, Section 3]
+units in its first phase. This recomputation strategy for a more detailed discussion.
+is different compared to all previously known scan
+Scan is a memory-bound operation and, hence, the
+strategies on accelerators, see Section 2.1. Such a main drawback of the SSA and RSS scan strategies
+recomputation strategy could be of interest to other is the high number of elements that are read and
+matrix multiplication accelerators as well.
+written to global memory. In particular, for input
+Second, our radix sort implementation yields an length N , SSA reads/writes ≈ 4N elements, whereas
+intriguing result: in practice, multiple small dense RSS reads/writes ≈ 3N elements. Such a reduction
+matrix multiplications can be leveraged to improve the in the memory access size is critical for improving the
+end-to-end performance of parallel sorting. Although performance of scans.
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+StreamScan and decouple look-back strategies access only 2N memory elements but need to efficiently
+handle the sequential data dependency of the scan
+computation using adjacent (block) synchronization,
+see [21, Chapter 11.7]. StreamScan is a single-pass
+approach in which each thread block is assigned a tile
+of input, and a serial dependency between the blocks
+exists [50]. The critical feature of StreamScan is that it
+requires synchronization between adjacent blocks only
+(without global block-level synchronization). The decoupled look-back strategy of [38] aims to alleviate the
+drawbacks of the serial dependency of StreamScan by
+performing redundant work to “dissociate” local computation from the latency of global prefix propagation.
+Both StreamScan and decouple look-back strategies require only 2N data movement to global memory: N
+input elements are read, N output elements are written.
+To the best of our knowledge, the state-of-theart scan algorithm on GPUs follows a highly-tuned
+decoupled look-back and backoff approach, which is
+briefly explained in [17].
+2.2 Tensor Core Unit (TCU) Model To the
+best of our knowledge, the Tensor Core Unit (TCU)
+model is the only model of computation that has
+been recently proposed to capture matrix multiplication accelerators [11]. The TCU model is a standard
+RAM model with an additional circuit, named tensor
+core unit, that performs matrix multiplication between
+constant-size matrices. Although the TCU model captures well a single matrix multiplication computational
+unit of today’s accelerators, it ignores other essential
+features: the presence of vector processing units and,
+more critically, the multi-core nature of these accelerators. Since the TCU model considers only a single
+matrix multiplication unit, it does not allow its users to
+conduct a work/depth algorithmic analysis [9]. Due to
+the above limitations, any algorithmic analysis in the
+TCU model will not correspond to a realistic execution in Ascend, i.e., ignoring parallelism and the vector
+units. Nevertheless, we discuss the work/depth asymptotic analysis of the proposed algorithms, assuming the
+presence of multiple matrix engines and vector units,
+considering their operations as basic operations.
+2.3 Applications of Parallel Scan Parallel
+scan has a plethora of applications [30, 7]. Here, we
+restrict our attention to scan applications that enable us
+to generate efficient computational kernels (operators)
+that appear in AI workloads. In particular, we have
+identified that sorting, weighted sampling, masking
+of tensors, and top-k/top-p sampling are essential.
+All these applications of the parallel scan are well-
+known, but the observation that top-p sampling can
+benefit from scan seems to be new (to the best of our
+knowledge).
+3 Ascend AI Accelerators In this section, we
+briefly discuss the DaVinci architecture of Ascend accelerators consisting of the cube and vector computing
+units, mostly following [35]. Moreover, we discuss the
+AscendC programming model of Ascend, a recently proposed programming model for Ascend operator development. All the material presented here is available online
+at https://www.hiascend.com.
+3.1 Ascend Hardware Huawei Ascend 910B is
+a recent series of Huawei chips designed to accelerate
+neural network training and inference. For the scope
+of the paper, an accelerator can be seen as a grid of
+computing units called AI Cores and a global High
+Bandwidth Memory (HBM) with L2 cache.
+In the Ascend 910B series, an AI Core consists of
+one AI Cube (AIC) core and multiple, usually two, AI
+Vector (AIV) cores. Each AIC and AIV core contains
+a scalar unit for basic arithmetic operations, program
+flow control, calculating addresses, and dispatching instructions. Each core also includes computing engines
+(either vector or cube ones), local memory buffers, and
+Memory Transfer Engines (MTEs). MTEs are responsible for moving data between global and local memory
+buffers. Both MTEs and computing engines have separate instruction queues and work in parallel, so it is the
+programmer’s responsibility to ensure synchronization.
+An AI Vector core performs vector operations similar to traditional SIMD operations. The input and output data of an AI Vector core must be allocated to the
+local scratchpad/buffer called Unified Buffer (UB). AIV
+cores support simple arithmetic operations such as vector addition and more complex ones such as gather and
+reduce.
+An AI Cube core is primarily responsible for matrix
+multiplication operations. The AI Cube core contains
+a hierarchical scratchpad memory structure (L1, L0A,
+L0B, L0C, BT, FP buffers) and a cube computing
+engine. An AIC core can be configured to multiply
+two matrices of almost arbitrary sizes. It also supports
+result accumulation, selected activation functions, and
+quantization operations. The cube core supports both
+floating point and low-precision integer data types,
+i.e. float16 (with float32 output) and int8 (with int32
+output).
+Figure 3.1 shows the Ascend architecture where the
+Cube and Vector units are separate cores. In the 910B
+architecture, data can only be exchanged using global
+memory and/or L2 cache.
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+rithm 4.1 computes s consecutive scans of smaller tiles
+of length s using a single matrix multiplication.
+G
+Cube Unit
+L0C Buffer
+L0B
+Buffer
+In Section 4.2, we present a multi-core scan algoL1 Buffer
+L
+O
+rithm
+(MCScan, Algorithm 4.3) tailored for the Ascend
+B
+BT Buffer
+A
+AI
+accelerator.
+A key feature of MCScan is that it utiFP Buffer
+L
+lizes
+all
+the
+available
+cube and vector cores. MCScan and
+FixPipe
+M
+E
+its
+extensions
+are
+designed
+for scenarios involving very
+Scalar Unit
+M
+large one-dimensional arrays.
+O
+AI Vector Unit 1
+AI Vector Unit 2
+R
+In Appendix B.1, we build on top of the ScanU and
+Vector Unit
+Vector Unit
+Y
+Scalar Unit
+Scalar Unit
+ScanUL1 algorithms and extend them into batched
+Vector Scratchpad Memory
+Vector Scratchpad Memory
+scan variants that operate on multi-dimensional arrays
+(tensors). We highlight that such extensions are nonFigure 3.1: Architecture of Ascend 910B accelerators. Each trivial, as several issues arise when scheduling many
+AI core contains one cube and two vector units.
+scan operations across multiple cores, including padding
+and improving load balancing on vector/cube units with
+a 2:1 ratio, among others.
+L0A Buffer
+AI Cube Unit
+4 Scan Algorithms on Ascend In this section,
+we discuss the design and implementation of parallel
+scan algorithms using matrix multiplication accelerators. Although the Ascend AI accelerator is used as
+a case study for the implementations, we aim to decouple the fundamental algorithmic ideas from the intricate
+architectural details of the Ascend accelerator as much
+as possible.
+Matrix multiplication is an essential operator in
+our discussions here; hence, we introduce some linear
+algebraic notation that will be used throughout the
+paper. We denote matrices using boldface font and
+capitals, i.e., A, B, C. We use s to denote the size of
+square matrices, i.e., As , and define ℓ := s2 . We drop
+the subscript on the matrices when the dimension is
+clear from the context. We denote matrix multiplication
+between A and B by C := A @ B. We denote by Us
+the upper-triangular all-ones square matrix of size s,
+including ones on the main diagonal. Ls is the lower
+triangular all-ones of size s. L−
+s is the strictly lower
+triangular all-ones of size s: L−
+has
+zeroes on the main
+s
+diagonal. 1s denotes the all-ones square matrix of size s.
+We denote one-dimensional arrays using boldface font
+and lower-case: r, x, y, z. We frequently partition an
+array x into tiles of length ℓ, i.e., tiles are contiguous
+blocks of ℓ entries of x. We note an arbitrary ℓ-tile of
+x by xℓ . We also view a tile xℓ as a row-major matrix
+A having s rows and s columns (zero-pad if necessary).
+In Section 4.1, we present two scan algorithms (Algorithm 4.1 and Algorithm 4.2) that use a single matrix multiplication unit; we call these algorithms respectively ScanU and ScanUL1, based on which constant
+matrices they use. The key ingredient here is to utilize Ascend’s cube unit effectively. In particular, Algorithm 4.2 performs multiple matrix multiplications and
+utilizes the accumulation buffer of the Cube unit to compute the scan of an input tile of length ℓ, whereas Algo-
+4.1 Warm-up: single cube scans In this section, we present two scan algorithms that utilize a single
+cube and vector units. Both algorithms are tailored to
+the DaVinci architecture and are based on the linear algebra fact that if A is the row-major matrix view with
+s columns of a vector x then:
+Matrix multiplication A @ Us computes “local” scans of tiles of size s of x.
+Us
+xl
+x
+x
+L0A
+1
+0
+L0B
+L1C
+Cube unit
+yl
++
++
++
++
+y
+UB
+Global Memory
+Vector unit
+Figure 4.1: Data path from an input tile xℓ to an output
+tile yℓ of the ScanU (Algorithm 4.1).
+Both algorithms process their tiles using a pipelined
+execution strategy. The critical path or span of both
+proposed algorithms is linear on the input length for
+constant values of s, since there is a sequential dependency on the partial sums. Therefore, these kernels are
+more effective when the input array to be scanned has a
+relatively short length. Additionally, designing and implementing scan algorithms that use a single cube core
+is a building block for extending these ideas to a multicore scenario, as seen in Sections B.1 and 4.2.
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+The first algorithm, ScanU (Algorithm 4.1), com- Algorithm 4.2 ScanUL1 is adaptation of [13, Alg. 6]
+putes s consecutive local scans of tiles of size s using
+1: procedure ScanUL1(x, s)
+the cube unit and then propagates the partial sums us2:
+Let y be the output array
+ing a single vector unit. More precisely, once the cube
+3:
+partial ← 0 ▷ Accumulation value (Vector Unit)
+unit has computed the local row scans of a matrix tile
+4:
+Load Us , L−
+s , 1s in L1
+of size ℓ, the tile is sent to a vector core for further pro5:
+for each s2 -tile of x: xℓ do ▷ Pipelined exec.
+cessing. The vector core will add a scalar to each row
+6:
+Load xℓ to L0A and 1s to L0B ▷ Cube unit
+to correct the prefix sum. It is important to note that
+7:
+C1 ← As @ 1s
+to obtain the correct prefix sum, the vector core keeps
+8:
+Copy C1 from L0C to L1
+track of the last value of each ℓ-tile and propagates it
+9:
+Load Us to L0B
+to the next tile.
+10:
+C2 ← As @ Us
+Figure 4.1 depicts the data movements and the 11:
+Load L−
+s in L0A and C1 in L0B
+memory view of ScanU. The input vector x is shown 12:
+C2 ← C2 + L−
+s @ C1
+in blue. A tile xℓ of x and Us are loaded into 13:
+Copy C2 from L0C to yℓ in GM
+the cube unit where the matrix multiplication occurs. 14:
+Vector unit waits tile from Cube unit
+The matrix multiplication result is written to global 15:
+Copy yℓ from GM to UB
+▷ Vector unit
+memory. The vector unit reads the cube unit output 16:
+yℓ ← yℓ + partial
+tile and propagates the prefix sum in place. The 17:
+partial ← last entry of yℓ
+whole process, which consists of memory transfers and 18:
+Copy yℓ from UB to GM
+cube/vector operations, is pipelined over the input tiles 19:
+Return y
+using AscendC software pipeline capability.
+Algorithm 4.1 Scan Cube-Vector (ScanU)
+1: procedure ScanU(x, s)
+2:
+Let y be the output array
+3:
+partial ← 0 ▷ Accumulation value (Vector Unit)
+4:
+Load Us in L0B
+5:
+for each s2 -tile of x: xℓ do ▷ Pipelined exec.
+6:
+Load xℓ to L0A
+▷ Cube unit
+7:
+C ← As @ Us
+▷ acc. off, free L0A
+8:
+Copy C from L0C to yℓ in GM
+9:
+Vector unit waits tile from Cube unit
+10:
+Copy yℓ from GM to UB
+▷ Vector unit
+11:
+for each s-tile of yℓ : ys do
+12:
+ys ← ys + partial
+13:
+partial ← last entry of ys
+14:
+Copy yℓ from UB to GM
+15:
+Return y
+sequentially. In a high-level, for each tile of size ℓ,
+the cube unit evaluates Equation 4.1 with the following
+sequence of matrix operations:
+C1 = As @ 1s
+C2 = As @ Us
+C2 = C2 + L−
+s @ C1 .
+The above sequence of matrix operations has two advantageous properties with respect to data movements.
+The first two steps of the above sequence share the left
+matrix operand A, allowing us to load A only once in
+L0A. Moreover, the third step effectively utilizes the accumulation buffer of the cube unit since C2 is reused in
+the last two steps. Once the local scan of a tile of size ℓ
+is computed, a single vector core adds the last value of
+the previous scanned tile to the current tile (see Lines
+The second algorithm, ScanUL1 (Algorithm 4.2), 14 − 16 of Algorithm 4.2).
+is an Ascend adaptation of [13, Algorithm 6] and is
+Does cube utilization imply performance? Although
+based on a matrix identity that expresses the scan of the above scan algorithms demonstrate that it is posan array z of length ℓ using matrix operations.√ View z sible to utilize the cube units for scan, it is unas a square row-major matrix A of size s = ⌈ ℓ⌉ (pad clear if cube utilization translates to performance imwith zeroes if needed). Given z, the inclusive scan of z provements compared to “vector only” scan algorithms.
+(scan(z)) can be computed as:
+We provide an experimental evaluation demonstrating the benefits of using the Cube unit. We devel(4.1)
+scan(z) = As @ Us + L−
+s @ As @ 1s ,
+oped a vector-only kernel that uses the CumSum AscendC API1 with CumSumInfo parameters set to 128
+ignoring any padded values. Equation 4.1 first appeared
+in [13]. ScanUL1 uses Equation 4.1 to scan each
+1 CumSum
+consecutive tile of size ℓ (Lines 6-12 of Algorithm 4.2),
+API
+documentation
+available
+at
+and then propagates the last value of the partial sums https://www.hiascend.com (accessed on 25 August 2024).
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+and 128. We also set s = 128 on the cube scan algorithms to ensure a fair comparison. Figure 4.2 compares the cube scan algorithms and the vector-only algorithm provided by AscendC. The figure demonstrates
+a significant performance improvement (5× for ScanU,
+and 9.6× for ScanUL1) compared to the vector-only
+CumSum algorithm. Moreover, the figure shows that the
+ScanUL1 scan algorithm has roughly a 2× speedup compared to ScanU. The critical insight here is that a more
+sophisticated usage of the computational capabilities of
+the cube unit can deliver further significant performance
+improvements.
+Figure 4.2: Execution time of AscendC::CumSum (vec only)
+versus ScanU and ScanUL1 (log-log scale).
+Work/Span Analysis of Single Core Scans. We
+bound the work and span of the single-core algorithms.
+For work, we separately report the number of square
+matrix multiplications of size s and the sum of lengths
+of the vector instructions similar to the Vector-RAM
+model [8]. The number of matrix multiplications/accumulations for ScanU and ScanUL1 are ⌈n/s2 ⌉ and
+3⌈n/s2 ⌉, respectively. The total vector work for both
+algorithms is O(n).
+Next, we bound the span of the algorithms. The
+number of vector instructions called by the algorithms
+ScanU and ScanUL1 are O(n/s) and O(n/s2 ), respectively. Notice that the vector length of the ScanUL1 vector operations is O(s2 ). Since the vector instructions are on the critical path, the span of ScanU and
+ScanUL1 is O(n/s) and O(n/s2 ), respectively. In summary, ScanUL1 has a O(s)-depth speed-up compared
+to ScanU, but, in practice, the achievable speed-up is
+≈ 1.92 for s = 128, see Figure 4.2.
+4.2 Multi-core Scan This section presents a
+multi-core scan algorithm (MCScan, Algorithm 4.3) to
+compute the prefix sum of large input arrays. For the
+sake of clarity, the presented algorithm employs a 1-to-
+1 vector-to-cube core ratio. Our implementation takes
+advantage of the 2-to-1 ratio of 910B, but we consider
+it an implementation detail.
+MCScan is similar to the Scan-Scan-Add (SSA) paradigm of computing scans using a hierarchical partition of the input into blocks (top-level of the hierarchy) and tiles within each block, as discussed in Section 2.1. MCScan consists of two phases separated by a
+global synchronization barrier across all cores (blocks).
+In contrast to previous methods, MCScan performs partial re-computation of the block-level reductions during
+its first phase, as we will explain next.
+In the first phase, the cube and vector units work
+in parallel to partially compute the first scan part of
+SSA simultaneously. The cube units compute the local
+prefix sums of all consecutive (row) tiles of size s and
+write them back to global memory. In parallel with
+the cube units, the vector units compute the reduction
+over the tiles and then hierarchically reduce the tile
+reductions on a block-level granularity. The result of
+these reductions is written in an array r where the i-th
+entry equals the reduction of all the values of the i-th
+block. By definition, r has length equal to the number
+of blocks, B.
+In the second phase, the vector units read the
+local s-tile scans and reduction values per block r from
+global memory. First, every vector core independently
+computes the prefix sum of the array r in its local
+scratchpad memory UB, i.e., performs a “small” scan
+on the block-level reduction. Next, each vector core
+uses the scanned reduction values to propagate (add)
+the results of the local s-tiled scans.
+Work/Span Analysis of MCScan. First, we bound
+the work of MCScan in terms of the number of matrix
+multiplications of size s, and the number of vector
+instructions (scalar-vector addition) of length s. The
+number of matrix multiplications of MCScan is ⌈n/s2 ⌉.
+The vector instructions of length s consist of O(n/s)
+reductions in the first phase, and O(n/s) scalar-vector
+additions in the second phase. Hence, the total number
+of vector operations is O(n/s). The critical path of
+MCScan is on the second phase where the vector units
+propagate the partial sums, thus the span of MCScan is
+n
+).
+O( sB
+Exclusive scan and int8 support. We have added
+support for exclusive scans and input with int8 data
+type to our MCScan. The interested reader is referred to
+Appendix B.2 for more details.
+5 Operators based on Scan In this section, we
+revisit several computational parallel primitives based
+on parallel scans [6, 44]. Scan-based primitive include
+weighted sampling, split and compress/compact (equivalent to the masked select Pytorch operator). It is
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+Algorithm 4.3 Multi-core Scan (MCScan)
+1: procedure MCScan(x, s, B) ▷ B: number of blocks
+2:
+Let y be the output array
+3:
+Let r be an array of length B in GM
+4:
+parfor i-th block of x: x[i] do
+▷ Phase I
+5:
+Load Us in L0B
+▷ Cube Units
+6:
+for each ℓ-tile of x[i]: xℓ do
+7:
+Load xℓ from GM to L0A
+8:
+C ← As @ Us
+9:
+Copy C in y[i] in GM
+10:
+Load x[i] to UB
+▷ Vector Units
+11:
+ri ← ReduceSum(x[i])
+12:
+Write ri on i-th entry of r in GM
+13:
+end parfor
+14:
+SyncAll: Synchronize all cube/vector cores
+15:
+parfor i-th block of y: y[i] do
+▷ Phase II
+16:
+Load r from GM to UB
+17:
+partial ← Sum first i entries of r
+18:
+for each ℓ-tile of y[i]: yℓ do
+19:
+for each s-tile of yℓ : ys do
+20:
+ys ← ys + partial
+21:
+partial ← last entry of ys
+22:
+Copy yℓ from UB to GM
+23:
+end parfor
+24:
+Return y
+dependencies between the scan-based primitives. Top-p
+sampling extensively uses multiple scan operations, as
+discussed in Section 5.5.
+5.1 Split The split operation takes as input an
+array x and a boolean flag array f of the same length.
+Split reorganizes the elements of x into an output
+array z as follows. It places all items of x where the
+corresponding flag is true at the beginning of the output
+array, followed by all items where the corresponding flag
+is false. One crucial property of split is the relative order
+of the elements is preserved, i.e., stable ordering.
+We implemented a split AscendC operator
+SplitInd that also returns the output indices corresponding to the original input locations. The output
+indices of SplitInd allow us to implement a sorting
+algorithm that satisfies the PyTorch API of sort(),
+which also returns the indices. SplitInd takes as input
+an array of 16-bit elements and a 0/1 mask array (flags
+are stored in int8). SplitInd executes an exclusive
+scan using MCScan on the mask array. Afterwards, it
+gathers the correct input elements and their indices,
+using vector core’s GatherMask instruction and it stores
+them in global memory at the offsets calculated by the
+scan.
+5.2 Compress Compress is a particular case of
+split in which only the first part of the output elements of the split are returned. We have implemented
+well-known that radix sort can be implemented on top a compress kernel that internally uses the exclusive
+of split [7, Section 1.3]. Also top-k can be imple- MCScan algorithm on the mask array whose data type is
+mented on top of split using a partial quick-sort/select 8-bit integers. Compress is equivalent to the PyTorch
+approach [9].
+torch.masked select operator that we use as a baseInterestingly enough, current AI workloads like line for comparison in the experimental section.
+Large Language Model (LLM) inference make implic5.3 Radix Sort Radix sort is a well-known apitly heavy use of scan-based computational primitives,
+plication
+of the split operator [7, 10]. A radix sort
+including top-k and top-p (nucleus) sampling [18], see
+algorithm
+loops over the bits of the input elements,
+also [16]. The top-p sampling implementation of the
+starting
+at
+the least significant bit and executes a
+popular open-source model Llama3 [49] contains a
+split
+where
+the
+mask is obtained by reading the corbatched sorting and prefix sum operation as the first
+responding
+bit
+(radix)
+on each iteration. We implement
+two PyTorch operations, see [39].
+a Least-Significant Bit (LSB) radix sort in AscendC
+using the split operator based on the MCScan algorithm. We implemented an additional vector-only kernel, RadixSingle, that extracts the radices of the inputs
+before the execution of the split. RadixSingle makes
+use of the AscendC vector instructions ShiftRight and
+Not to create the input mask for split. Additional
+pre-processing and post-processing phases are needed
+Figure 5.1: A diagram of well-known parallel scan applica- to support floats; see Exercises 8 and 9 in [26, Sections considered here along with their dependencies.
+tion 5.2.5]. The pre-processing phase encodes all the
+input elements by inverting the Most Significant Bit
+In the rest of the section, we describe the split, com- (MSB) of positive numbers and all the bits of the negapress, radix sort, top-k, top-p sampling and weighted tive numbers. Applying an unsigned integer radix sort
+sampling operators in more detail. Figure 5.1 depicts the on the encoded elements will correctly order them. The
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+post-processing phase is needed to decode the elements
+back to the original value. We have implemented the
+pre- and post-processing steps using AscendC bit-wise
+vector instructions, and thus, support sorting of fp16.
+The paper on evaluating radix sort using the Connection Machine (CM-2) came to our attention in the
+later stages of our radix sort development [10]. In this
+work, the authors share several important implementation details for radix sort and floats that are replicated
+here.
+5.4 Top-k Top-k selection is an essential operation in various settings, including similarity search
+queries [23] and Large Language Models (LLMs) inference where the output tokens are typically sampled from
+the k tokens having the highest probability for the given
+context [28]. The interested reader is referred to a recent
+survey on parallel top-k [51]. A recent work on top-k is
+Radik, a Radix-based GPU implementation that scales
+well for large values of k [31, 32].
+We implemented a top-k kernel using the selection
+(partial quicksort) algorithm based on our SplitInd operator and compared it against the baseline top-k operator. Unfortunately, although improving the performance of the top-k operator was a primary motivation
+for this work, we could not improve the performance of
+the baseline top-k for small values of k (k ≤ 4096).
+5.5 Top-p or Nucleus Sampling Top-p sampling in Large Language Model inference is an additional operation that applies sort and scan on the token
+probability vector [18]. These operations are usually
+batched with a constant batch size. Interestingly, if the
+sorting step is implemented using radix sort, the topp sampling operator becomes a scan-intensive operator!
+Indeed, top-p executes 17 scans for each batch: 16 scan
+operations for radix sort (one scan per bit, fp16) and an
+additional scan required by the algorithm.
+Due to space constraints, the study of the weighted
+sampling operator is deferred to the Appendix B.3.
+6 Experimental Evaluation In this section, we
+evaluate the performance of a selective list of parallel
+scan algorithms and applications presented in the previous sections using Ascend AI Accelerators.
+We evaluate the multi-core scan, compress, radix
+sort, batch scan, and top-p sampling. We have implemented all proposed algorithms in C++17 using the AscendC programming framework discussed in Section A.
+We used the Ascend CANN toolkit 8.0.RC3.alpha002
+with Ascend firmware and drivers versions 1.0 and
+23.0.0, respectively. All evaluations are performed on
+Huawei’s Ascend 910B4 accelerator. In particular,
+910B4 contains 20 Cube Units and 40 Vector Units (the
+vector-to-cube units ratio is 2-to-1). The theoretical
+memory bandwidth of 910B4 is 800 GB/s. The host
+CPU is an AMD EPYC processor running on Ubuntu
+22.04.
+All timing measurements are collected using the
+PyTorch profiler functionality in Python. We used
+Ascend’s PyTorch adapter2 with version v2.1.0 to report all our PyTorch-related measurements. To wrap
+our custom AscendC operators in PyTorch, we used
+the open-sourced operator plugin framework at https:
+//gitee.com/ascend/op-plugin. op-plugin allows its
+users to easily define a custom PyTorch operator. Before wrapping our operators using the op-plugin, we
+used the msopgen3 tool to wrap the AscendC operators.
+Evaluation against other accelerators/architectures
+In this work, our primary motivation is to improve the
+performance of parallel scans and their applications on
+Ascend. In particular, our main objective is to design
+and implement algorithms that saturate Ascend’s memory bandwidth. Comparing our results with architectures like GPUs or TPUs would likely translate to comparing the hardware specifications, i.e. memory bandwidth, rather than actually evaluating our algorithms.
+In addition, a comparison between accelerators that are
+not manufactured using the same technology node could
+lead the reader to wrong conclusions. Nevertheless, we
+present all our results in terms of bandwidth (GB/s or
+GElems/s), which allows for easy comparison with other
+architectures for the interested reader.
+Figure 6.1:
+Bandwidth of MCScan (Algorithm 4.3) for
+s = 32, 64, 128. MCScan has 15.2× speedup against ScanU on
+910B4 (20 AI cores).
+6.1 Multi-core Scan (MCScan) Figure 6.1 depicts the performance of MCScan (Algorithm 4.3) on Ascend 910B4 versus the state-of-the-art (torch.cumsum).
+2 https://gitee.com/ascend/pytorch
+3 https://www.hiascend.com/en/document
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+We integrated the multi-core algorithm in PyTorch to
+ensure a fair comparison and expose it as a custom PyTorch operator. The custom PyTorch operator statically pre-allocates an upper triangular all-ones matrix
+Us for all s = 32, 64, 128. The baseline operator doesn’t
+use the cube unit, while MCScan takes advantage of all
+the computing units reaching up to 37.5% of theoretical memory bandwidth (peak bandwidth is 800GB/s
+for 910B4). To have a more solid evaluation of our implementation, we compare it to a copy kernel that performs a memory copy; we used the torch.clone(). A
+clear trend is that the larger the matrix multiplication
+dimension s is, the better the performance of the multicore scan. s = 128 (almost) maximizes the utilization
+of the level-0 scratchpad memories L0A and L0B of the
+cube unit. We foresee that increasing the matrix multiplication tile size could lead to further performance
+improvements, but we leave this investigation to future
+work.
+In addition, we investigate the additional performance benefits of taking advantage of the lowerprecision input data (int8) capability of the cube unit;
+the interested reader is deferred to Section B.4.
+Figure 6.3: L2 cache optimization of MCScan (s = 128).
+Second, we designed and implemented a multi-core
+ScanUL1 algorithm for fp16 by replacing the single matrix multiplication during Phase I of MCScan with the
+three matrix multiplications of ScanUL1. We call the
+resulting algorithm, MCScanUL1. Figure 6.2 shows a performance improvement of 33% of MCScanUL1 versus
+MCScan and MCScanUL1 reaches up to 74.9% of the memcopy memory bandwidth as advertised in the abstract.
+The improvement comes from the fact that ScanUL1 has
+an O(s)-depth speedup compared to ScanU, see work/span discussion in Section 4.1.
+In addition, we provide a performance breakdown
+analysis of the up-sweep (Phase I) and down-sweep
+(Phase II) phases of both MCScan and MCScanUL1 in Figure 6.4. The figure shows that, although the up-sweep
+phase of MCScanUL1 is slightly longer than the up-sweep
+phase of MCScan, the down-sweep phase of MCScanUL1 is
+significantly shorter.
+Figure 6.2: MCScan versus multi-core ScanUL1
+6.1.1 Scan Improvements We have implemented two optimizations for MCScan. First, we implemented an L2 cache optimization that we call “L2 cache
+splitting”. This L2 cache optimization splits the input
+into consecutive chunks so that the input and intermediate arrays fit in the L2 cache during the processing of
+each chunk. Each chunk is processed serially, and the
+Figure 6.4: Break-down of up/down sweeps of scans.
+last value of each chunk is propagated to the next chunk
+to carry ahead the partial prefix sums. Figure 6.3 shows
+a performance improvement of 25% for MCScan when
+6.2 Compress Figure 6.5 depicts the perforthe “L2 cache splitting” optimization is enabled. This mance comparison between compress versus the baseoptimization is already integrated in the MCScan.
+line PyTorch masked select. We set the mask so that
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+type int8 (Algorithm 4.3) to perform the parallel split
+step. For input lengths greater than 525K, our “textbook” implementation of radix sort delivers a speedup
+between 1.3× and 3.3× compared to the torch.sort()
+baseline.
+Performance Opportunities for small bit-width inputs We expect additional performance improvements
+for low-precision data types (low bit-width) since the
+number of radix sort iterations equals the input bitwidth. Indeed, the trend in AI accelerators is to introduce low-precision formats like 8-bit floats or 4-bit integers (int4) [42]. Therefore, an additional performance
+Figure 6.5: Bandwidth of compress operator based on improvement (2×) for radix sorting in low-precision 8MCScan (s = 32, 64, 128) against torch.masked select.
+bit scenarios is expected without any extra development
+effort, see Figure B.4.
+each mask entry is independently set to true or false uniformly at random. The figure indicates that the baseline
+masked select operator is not optimized on Ascend,
+and a code investigation reveals that the baseline does
+not use the vector or cube units. On the other hand, our
+Compress kernel reaches up to 160GB/s (20% of peak
+memory bandwidth).
+6.4 Batched Scan Figure 6.7 depicts the performance of the batched scan kernels on Ascend for varying
+input batch sizes and input lengths equal to 65K. We
+depict the memory bandwidth achieved for tiling parameters s = 16, 32, 64 and 128. Our proposed batch scan
+operators for s = 64 and 128 reach up to 400 GB/s. Interestingly enough, for smaller values of s = 16, 32, the
+6.3 Radix Sort We modified the radix sort performance of the proposed batch scan kernels is poor.
+operator to additionally return indices that correspond In addition, the performance of our proposed batch scan
+to the input index of each output element. This kernel for s = 16 and the baseline is similar.
+modification ensures a fair comparison with the sort
+operator provided by the PyTorch Ascend adapter.
+The modification is based on the SplitInd operator
+by keeping track of the output indices on each split
+application. Our radix sort implementation is stable
+and supports unsigned (or signed) integers and floats
+(fp16).
+Figure 6.7: Bandwidth of batched scan based on Algorithm 4.1 for increasing batch sizes and s = 16, 32, 64, 128.
+Input length is 65K.
+6.5 Top-p Sampling Figure 6.8 depicts the execution time of drawing one sample using the top-p sampler as it is implemented in the Llama3 model, see [39].
+PyTorch corresponds to the Ascend implementation using the baseline sort and cumsum operators. The lineFigure 6.6: Comparison between radix sort and baseline plots with labels s = 32, 64, 128 are similar to the basetorch npu.sort() for half-precision (fp16).
+line by replacing the sort() and cumsum() operators
+with the proposed radix sort and multi-core scan, reFigure 6.6 shows the performance of a parallel fp16 spectively. The figure shows that the baseline top-p
+radix sort implementation using MCScan with input data sampling implementation scales poorly, mainly because
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+Figure 6.8:
+Execution time (in milliseconds) of top-p
+sampling of Llama3 operator for a single batch. The baseline
+is labeled PyTorch and supports only discrete distributions
+with at most 224 elements.
+the baseline torch.cumsum operator is not optimized for
+Ascend.
+7 Conclusion We developed and evaluated efficient parallel scan algorithms tailored to the Ascend architecture by leveraging the power of the cube (matrix
+multiplication) unit. Our results demonstrate substantial performance improvements, with speedups ranging
+from 5× to 9.6× compared to vector-only implementations for sufficiently large input lengths. Additionally,
+we presented a multi-core Ascend scan algorithm that
+fully utilizes both the cube and vector units of Ascend,
+reaching up to 74.9% of the theoretical memory bandwidth.
+Last, we extended our contributions to include
+crucial computational kernels for AI workloads, such as
+parallel split, compress/compact, and top-p (nucleus)
+sampling, all exhibiting significant performance gains.
+Furthermore, our optimized implementation of radix
+sort, which utilizes matrix multiplications for parallel
+splits, showcases the potential of matrix engines in
+enhancing complex operations, offering up to 3.3×
+speedup over the baseline.
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+References
+[1] AMD, AMD CDNA 2 Architecture, technical
+report, Advanced Micro Devices, Inc., 2022,
+https://www.amd.com/system/files/documents/
+amd-cdna2-white-paper.pdf. Accessed: 2024-09-09.
+[2] L. Arge, M. T. Goodrich, M. Nelson, and
+N. Sitchinava, Fundamental parallel algorithms for
+private-cache chip multiprocessors, in Proceedings of
+Symposium on Parallelism in Algorithms and Architectures (SPAA), SPAA ’08, New York, NY, USA, 2008,
+ACM, p. 197–206, https://doi.org/10.1145/1378533.
+1378573.
+[3] ARM, ARM architecture reference manual for aprofile architecture, 2024, https://developer.arm.com/
+documentation/ddi0487/ka/?lang=en.
+[4] S. Baxter, moderngpu 2.0.
+https://github.com/
+moderngpu/moderngpu/wiki, 2016.
+[5] N. Bell and J. Hoberock, Chapter 26 - thrust: A
+productivity-oriented library for cuda, in GPU Computing Gems Jade Edition, W. mei W. Hwu, ed., Applications of GPU Computing Series, Morgan Kaufmann Publishers Inc., Boston, 2012, pp. 359–371, https:
+//doi.org/10.1016/B978-0-12-385963-1.00026-5.
+[6] G. E. Blelloch, Scans as primitive parallel operations,
+IEEE Transactions on Computers, 38 (1989), pp. 1526–
+1538, https://doi.org/10.1109/12.42122.
+[7] G. E. Blelloch, Prefix sums and their applications,
+in Sythesis of parallel algorithms, Morgan Kaufmann
+Publishers Inc., San Francisco, CA, USA, 1st ed., 1990,
+pp. 35–60.
+[8] G. E. Blelloch, Vector models for data-parallel computing, MIT Press, Cambridge, MA, USA, 1990.
+[9] G. E. Blelloch, Programming parallel algorithms,
+Commun. ACM, 39 (1996), p. 85–97, https://doi.org/
+10.1145/227234.227246.
+[10] G. E. Blelloch, C. E. Leiserson, B. M. Maggs,
+C. G. Plaxton, S. J. Smith, and M. Zagha, A comparison of sorting algorithms for the connection machine cm-2, in Proceedings of Symposium on Parallelism in Algorithms and Architectures (SPAA), SPAA
+’91, New York, NY, USA, 1991, Association for Computing Machinery, p. 3–16, https://doi.org/10.1145/
+113379.113380.
+[11] R. Chowdhury, F. Silvestri, and F. Vella, A computational model for tensor core units, in Proceedings
+of Symposium on Parallelism in Algorithms and Architectures (SPAA), Philadelphia, USA, 2020, ACM,
+p. 519–521, https://doi.org/10.1145/3350755.3400252.
+[12] R. Chowdhury, F. Silvestri, and F. Vella,
+Algorithm design for tensor units, in International
+Conference on Parallel and Distributed Computing
+(Euro-Par), Lisbon, Portugal, 2021, Springer-Verlag,
+p. 353–367.
+[13] A. Dakkak, C. Li, J. Xiong, I. Gelado, and W.m. Hwu, Accelerating reduction and scan using tensor
+core units, in Proceedings of the ACM International
+Conference on Supercomputing (ICS), ICS ’19, Phoenix
+AZ, 2019, ACM, p. 46–57, https://doi.org/10.1145/
+3330345.3331057.
+[14] J. Domke, E. Vatai, A. Drozd, P. ChenT,
+Y. Oyama, L. Zhang, S. Salaria, D. Mukunoki,
+A. Podobas, M. WahibT, and S. Matsuoka, Matrix engines for high performance computing: A paragon
+of performance or grasping at straws?, in International
+Conference on Parallel & Distributed Processing Symposium (IPDPS), Los Alamitos, CA, USA, May 2021,
+IEEE Computer Society, pp. 1056–1065, https://doi.
+org/10.1109/IPDPS49936.2021.00114.
+[15] Y. Dotsenko, N. K. Govindaraju, P.-P. Sloan,
+C. Boyd, and J. Manferdelli, Fast scan algorithms
+on graphics processors, in Proceedings of the ACM
+International Conference on Supercomputing (ICS),
+ICS ’08, New York, NY, USA, 2008, ACM, p. 205–213,
+https://doi.org/10.1145/1375527.1375559.
+[16] A. Gu and T. Dao, Mamba: Linear-time sequence
+modeling with selective state spaces, 2024, https://
+openreview.net/forum?id=AL1fq05o7H.
+[17] J. Hemstad, Lecture 24: Scan at the speed of light.
+YouTube video, July 2024, https://www.youtube.com/
+watch?v=VLdm3bV4bKo. Online; posted on YouTube.
+[18] A. Holtzman, J. Buys, L. Du, M. Forbes,
+and Y. Choi, The curious case of neural text degeneration, in International Conference on Learning Representations (ICLR), Addis Ababa, Ethiopia,
+2020, OpenReview.net, https://openreview.net/forum?
+id=rygGQyrFvH.
+[19] L. Hübschle-Schneider and P. Sanders, Parallel
+weighted random sampling, ACM Trans. Math. Softw.,
+48 (2022), https://doi.org/10.1145/3549934.
+[20] W. W. Hwu, D. B. Kirk, and I. El Hajj, Chapter 11
+- prefix sum (scan), in Programming Massively Parallel
+Processors (Fourth Edition), Morgan Kaufmann Publishers Inc., Cambridge, Massachusetts, United States,
+fourth ed., 2023, pp. 253–256, https://doi.org/10.1016/
+B978-0-323-91231-0.00006-9.
+[21] W. W. Hwu, D. B. Kirk, and I. El Hajj, Programming Massively Parallel Processors (Fourth Edition),
+Morgan Kaufmann Publishers Inc., fourth ed., 2023,
+https://doi.org/10.1016/B978-0-323-91231-0.00006-9.
+[22] Intel Corporation, Intel architecture instruction set
+extensions programming reference, technical report, Intel Corporation, 2022. Accessed: 2024-09-09.
+[23] J. Johnson, M. Douze, and H. Jégou, Billion-scale
+similarity search with GPUs, IEEE Transactions on Big
+Data, 7 (2021), pp. 535–547, https://doi.org/10.1109/
+TBDATA.2019.2921572.
+[24] N. P. Jouppi and et al., In-datacenter performance
+analysis of a tensor processing unit, in Proceedings
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+of International Symposium on Computer Architecture
+(ISCA), Toronto, ON, Canada, 2017, ACM, p. 1–12,
+https://doi.org/10.1145/3079856.3080246.
+[25] N. P. Jouppi and et al., Ten lessons from three generations shaped google’s TPUv4i: Industrial product,
+in Proceedings of International Symposium on Computer Architecture (ISCA), Online – Worldwide, 2021,
+IEEE, pp. 1–14, https://doi.org/10.1109/ISCA52012.
+2021.00010.
+[26] D. E. Knuth, The art of computer programming: sorting and searching, vol. 3, Addison-Wesley Publishing
+Co., USA, 2nd ed., 1998.
+[27] A. Koike and K. Sadakane, A novel computational
+model for GPUs with application to I/O optimal sorting
+algorithms, in International Conference on Parallel &
+Distributed Processing Symposium (IPDPS), Milan,
+Italy, 2014, IEEE, pp. 614–623, https://doi.org/10.
+1109/IPDPSW.2014.72.
+[28] W. Kool, H. Van Hoof, and M. Welling, Stochastic
+beams and where to find them: The Gumbel-top-k
+trick for sampling sequences without replacement, in
+International Conference on Machine Learning (ICML),
+K. Chaudhuri and R. Salakhutdinov, eds., vol. 97
+of Proceedings of Machine Learning Research, Long
+Beach, California, USA, June 2019, PMLR, pp. 3499–
+3508, https://proceedings.mlr.press/v97/kool19a.html.
+[29] H. Kung and C. Leiserson, Systolic Arrays for
+(VLSI), CMU-CS, Carnegie-Mellon University, Department of Computer Science, 1978.
+[30] S. Lakshmivarahan and S. K. Dhall, Parallel Computing Using the Prefix Problem, Oxford University
+Press, Oxford, United Kingdom, 1994.
+[31] Y. Li, B. Zhou, J. Zhang, X. Wei, Y. Li, and
+Y. Chen, Poster: RadiK: Scalable radix top-k selection on GPUs, in Proceedings of the ACM Symposium on Principles and Practice of Parallel Programming (PPoPP), PPoPP ’24, New York, NY, USA, 2024,
+ACM, p. 472–474, https://doi.org/10.1145/3627535.
+3638478.
+[32] Y. Li, B. Zhou, J. Zhang, X. Wei, Y. Li, and
+Y. Chen, RadiK: Scalable and optimized GPU-parallel
+radix top-K selection, in Proceedings of the ACM
+International Conference on Supercomputing (ICS),
+ICS ’24, New York, NY, USA, 2024, ACM, p. 537–548,
+https://doi.org/10.1145/3650200.3656596.
+[33] X. Liang, Ascend AI Processor Architecture and Programming: Principles and Applications of CANN, Elsevier Science, 2020.
+[34] H. Liao, J. Tu, J. Xia, H. Liu, X. Zhou, H. Yuan,
+and Y. Hu, Ascend: a scalable and unified architecture
+for ubiquitous deep neural network computing: industry
+track paper, in Proceedings of International Symposium
+on High-Performance Computer Architecture (HPCA),
+Seoul, South Korea, 2021, IEEE, pp. 789–801, https:
+//doi.org/10.1109/HPCA51647.2021.00071.
+[35] H. Liao, J. Tu, J. Xia, and X. Zhou, DaVinci: A
+scalable architecture for neural network computing, in
+Hot Chips: A Symposium on High-Performance Chips
+(HCS), Cupertino, CA, USA, 2019, IEEE, pp. 1–44,
+https://doi.org/10.1109/HOTCHIPS.2019.8875654.
+[36] J. Lin, J. Tang, H. Tang, S. Yang, W.-M. Chen,
+W.-C. Wang, G. Xiao, X. Dang, C. Gan, and
+S. Han, AWQ: Activation-aware weight quantization
+for LLM compression and acceleration, in MLSys, Santa
+Clara, California, USA, 2024, mlsys.org, pp. 1–14.
+[37] Y. Matias, Parallel algorithms column: on the search
+for suitable models, SIGACT News, 28 (1997), p. 21–29,
+https://doi.org/10.1145/262301.262305.
+[38] D. Merrill and M. Garland, Single-pass parallel
+prefix scan with decoupled lookback, in Not available,
+Santa Clara, CA, USA, 2016, NVIDIA, pp. 1–9,
+https://research.nvidia.com/publication/2016-03
+single-pass-parallel-prefix-scan-decoupled-look-back.
+[39] Meta AI, Llama3 generation code - sample top p()
+method. https://github.com/meta-llama/llama3/blob/
+main/llama/generation.py#L358, 2024.
+Accessed:
+2024-09-24.
+[40] NVIDIA, Cooperative primitives for CUDA C++,
+2023, https://github.com/NVIDIA/cub.
+[41] NVIDIA
+Authors,
+NVIDIA
+DGX-1
+with
+Tesla V100 system architecture,
+Tech. Report MSU-CSE-06-2, Nvidia Corporation, Dec.
+2017,
+https://images.nvidia.com/content/pdf/
+dgx1-v100-system-architecture-whitepaper.pdf.
+[42] NVIDIA Corporation, NVIDIA A100 Tensor
+Core GPU Architecture, 2020. https://www.nvidia.
+com/content/dam/en-zz/Solutions/Data-Center/
+nvidia-ampere-architecture-whitepaper.pdf.
+[43] M. Pharr and R. Fernando, GPU Gems 2: Programming Techniques for High-Performance Graphics and General-Purpose Computation (GPU Gems),
+Addison-Wesley Publishing Co., Boston, USA, 2005.
+[44] S. Sengupta, M. Harris, Y. Zhang, and J. D.
+Owens, Scan primitives for GPU computing, in Proceedings of the Symposium on Graphics Hardware (EuroGraphics), GH ’07, Goslar, DEU, 2007, Eurographics
+Association, p. 97–106.
+[45] N. Sitchinava and V. Weichert, Provably efficient
+GPU algorithms, CoRR, abs/1306.5076 (2013), pp. 1–
+25, https://arxiv.org/abs/1306.5076.
+[46] M. Snir, Depth-size trade-offs for parallel prefix computation, Journal of Algorithms, 7 (1986), pp. 185–201,
+https://doi.org/10.1016/0196-6774(86)90003-9.
+[47] L. Snyder, L. H. Jamieson, D. B. Gannon, and
+H. J. Siegel, Algorithmically Specialized Parallel Computers, Academic Press, Cambridge, Massachusetts,
+United States, 1985.
+[48] W. J. Starke, B. W. Thompto, J. A. Stuecheli,
+and J. E. Moreira, IBM’s POWER10 processor,
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+IEEE Micro, 41 (2021), pp. 7–14, https://doi.org/10.
+1109/MM.2021.3058632.
+[49] H. Touvron, T. Lavril, G. Izacard, X. Martinet, M.-A. Lachaux, T. Lacroix, B. Rozière,
+N. Goyal, E. Hambro, F. Azhar, A. Rodriguez,
+A. Joulin, E. Grave, and G. Lample, Llama: Open
+and efficient foundation language models, 2023, https:
+//arxiv.org/abs/2302.13971.
+[50] S. Yan, G. Long, and Y. Zhang, StreamScan: fast
+scan algorithms for gpus without global barrier synchronization, SIGPLAN Not., 48 (2013), p. 229–238,
+https://doi.org/10.1145/2517327.2442539.
+[51] J. Zhang, A. Naruse, X. Li, and Y. Wang, Parallel
+top-k algorithms on GPU: A comprehensive study and
+new methods, in Proceedings of the International Conference for High Performance Computing, Networking,
+Storage and Analysis (SC), SC ’23, New York, NY,
+USA, 2023, ACM, https://doi.org/10.1145/3581784.
+3607062.
+[52] H. Zhu, C.-K. Cheng, and R. Graham, On the construction of zero-deficiency parallel prefix circuits with
+minimum depth, ACM Trans. Des. Autom. Electron.
+Syst., 11 (2006), p. 387–409, https://doi.org/10.1145/
+1142155.1142162.
+[53] A. Zouzias and W. F. McColl, A parallel scan
+algorithm in the tensor core unit model, in International
+Conference on Parallel and Distributed Computing
+(Euro-Par), vol. 14100 of Lecture Notes in Computer
+Science, Limassol, Cyprus, 2023, Springer, pp. 489–502,
+https://doi.org/10.1007/978-3-031-39698-4 33.
+A AscendC Programming Model Recently,
+a pipeline-based programming model for Ascend called
+AscendC has been developed. AscendC allows its users
+to build high-performance computational kernels for the
+Ascend architecture. Such kernels are usually called AscendC operators. The AscendC programming model is
+built on top of C++, and it allows its users to have
+fine-grained control of Ascend’s hardware components,
+such as MTEs, scalar, vector, and cube compute engines. At the same time, AscendC eliminates many potential problems, such as the need to explicitly synchronize hardware components within AIC and AIV cores.
+The AscendC programming model is based on a
+multiple pipeline abstraction model. AscendC provides
+users with some abstractions, including a context manager object, tensors, queues, and buffers.
+AscendC provides tensor structures as wrappers
+over data allocated in the global or core’s local memory.
+GlobalTensor is a structure that represents a buffer
+in global memory. In all operators, both input and
+output data come from global tensors. On the other
+hand, LocalTensor represents a buffer in the core’s local
+memory. Users can allocate local tensors in one of
+multiple possible hardware buffers (UB, L1, L0A, L0B,
+etc.).
+AscendC also provides the queues API – data
+structures used for managing tensors and resolving data
+dependencies between different hardware components
+which work on the same tensors. After a hardware
+component interacts with a tensor the Enque method
+is called, that saves the pointer into the queue. Then
+when the next hardware component needs to interact
+with the same tensor the Deque method is called, that
+waits for the corresponding Enque to be called, ensuring
+synchronization, and returns the pointer to the local
+tensor. This way, all data dependencies are explicit,
+and the computational pattern is consistent across all
+local tensors and all physical buffers. Queues can
+contain more than one tensor at a time – in many cases,
+implementing double buffering comes down to changing
+the queue capacity from the default value one to two.
+Naturally, the model also defines dozens of possible
+operations on tensors; we only mention some of the most
+frequently used here:
+• DataCopy. MTE’s function that copies data from
+an input to an output tensor. The basic version
+copies a number of continuous elements but can
+also be configured for strides and automatic layout
+transformations.
+• Mmad. AIC core’s function that multiplies two
+input matrices (local tensors) and writes the result
+to the output matrix (a local tensor). The result
+can be accumulated with existing values in the
+output tensor.
+• Adds. AIV core’s function that adds a scalar to
+an input local tensor and writes the result to the
+output local tensor.
+• GatherMask. AIV core’s function that takes an
+input local tensor and a binary mask, also a local
+tensor, and gathers all the elements from the input
+tensor for which the corresponding value in the
+mask is equal to 1. Gathered elements are stored
+in the contiguous form in the output local tensor.
+An operator is executed using multiple blocks –
+block is the smallest logical execution unit. The user
+specifies the number of blocks to be used when running
+the kernel. Another critical function AscendC provides
+is hardware synchronization among computing units –
+SyncAll allows the user to synchronize all blocks. The
+execution is continued only after each unit reaches the
+synchronization point.
+B
+Additional Material for Scans
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+B.1 Multiple (Batched) Scans The batched
+scan computes the prefix sum of a batch of input arrays
+of equal length in parallel. Given a scan algorithm for a
+1D array, a corresponding batched scan algorithm could
+be defined by deciding how to schedule the cube and
+vector computations into the multiple cores.
+1
+1 1 1 1 ... 1 0 1 1 ...
+x
+1
+0
+3
++
++
++
++
+Input
+Vector unit
+2
+x
+1
+0
+3
++
++
++
++
+Figure B.2: Execution time ratio between ScanUL1 and
+ScanU batched scan algorithms for various array length (xaxis) and batch sizes (y-axis). Baseline is ScanU.
+Vector unit
+Output
+Cube unit
+1
+Rowise scan of the i-th vector
+2
+Rowise scan of the (i + 1)-th vector
+3
+Parallel completion of scan for the i-th and (i + 1)-th vectors
+Global Memory
+Figure B.1: Batched scan algorithm based on ScanU. Blue
+and green denote the input and output array, respectively.
+Let’s discuss, as an example, a particular case where
+ScanU is used as a building block. The batched algorithm uses the same principles as the Algorithm 4.1 but
+also considers the 2-to-1 ratio between the vector and
+cube cores in the split Ascend architecture (910B). Figure B.1 depicts the main ideas behind our batched scan
+algorithm in this case. The algorithm starts by computing the local scans of size s of x of all input arrays.
+Each cube core computes the local scans of a tile of
+size ℓ in two batches at the same time; once the tiles
+of the first two batches are ready, two distinct vector
+cores will complete the scans independently over each
+batch by propagating the partial sums within the tiles.
+This process is pipelined through AscendC to efficiently
+use all available hardware (vector) resources. The second batched scan algorithm extends ScanUL1 (Algorithm 4.2) so that each AI core computes a scan on
+a separate array in the batch.
+Figure B.2 compares the two batched scan algorithms presented for increasing input batch size and array length. The first batched scan algorithm, based on
+ScanU (Algorithm 4.1), is used as our reference/baseline.
+Both algorithms have the same tiling strategy based on
+the input shapes to ensure a fair comparison. The figure demonstrates that the algorithms perform well in
+different cases and, more importantly, complement each
+other. In particular, ScanU is superior when the batch
+size is greater than 18, and the input length is smaller
+than 4K. On the other hand, ScanUL1 is superior when
+the batch size is smaller than 18 and the input length
+larger than 4K.
+B.2 Exclusive and int8 scan Here, we discuss
+a few extensions of the multi-core scan algorithm that
+we have implemented. In particular, we added support
+for exclusive scans and integer inputs. Typically, AI accelerators support low-precision arithmetic since inference of deep learning models is robust to extreme levels
+of quantization [36]. In particular, Ascend supports input matrices of 8-bit integers with output/accumulation
+in 32-bit integers. Since scan is a memory-bound operator, there is an opportunity to improve performance in
+terms of elements per second processed; see Figure B.3.
+We have implemented a specialization of Algorithm 4.3
+for integers with 8 bits, which is extensively used in our
+scan applications.
+We implemented exclusive scan by writing the output of the inclusive scan to global memory shifted by
+one element, discarding the last value and writing zero
+to the first position using the first block.
+B.3 Weighted Sampling We implement a parallel weighted sampling kernel using the well-known inverse transform sampling approach and a scan to compute the cumulative distribution. Given an array w of n
+positive weights, the goal is to draw a sample with proportional probability to the weights. The output is an
+index i of w with probability proportional to wi . First,
+we scan w, and then, given a uniform sample θ ∈ [0, 1],
+we invoke the SplitInd kernel withPinput scan(w) and
+the element-wise predicate ? > θ ∗ i wi . The last entry of the output indices array of SplitInd contains the
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited
+weighted sample. For more advanced parallel weighted
+sampling techniques, see [19].
+The performance improvement of our proposed
+weighted sampling kernel is not significant compared to
+the baseline for a single sample. However, our implementation does provide a functional improvement compared to the baseline operator. Indeed, the baseline Ascend weighted sampling operator torch.multinomial
+supports discrete distributions with support size up to
+224 elements, whereas our approach can support distributions with arbitrary support size. We leave as future work any further possible improvements on parallel weighted sampling. In particular, for the multiple
+sample generation scenario, the parallel alias table construction of [19] seems to be a promising direction.
+by reducing the number of radix sort iterations from 16
+to 4 or 8 (algorithmic correctness is not guaranteed).
+Notice that we still read and write using 16 bits per element. Figure B.4 shows a significant performance improvement of roughly 1.5× and 3× of our radix sort
+kernel for 8 and 4 bits inputs, respectively.
+B.4 Scan on low bit-width data types Next,
+we investigate the additional performance benefits of
+taking advantage of the lower-precision input data (int8)
+capability of the cube unit. Figure B.3 depicts the performance of the multi-core scan algorithm in terms of
+giga elements per second for input data types float16
+and 8-bit integers (int8). As depicted, there is only Figure B.4: Radix sort opportunity analysis for low bita small performance improvement for relatively small width inputs.
+length, which is mainly due to our current implementation. For example, additional performance can be
+achieved since the Cube unit can multiply, in a single
+instruction, matrices of sizes 128 × 256 and 256 × 128 in
+int8.
+Figure B.3:
+Giga elements per second comparison of
+MCScan for float16 (fp16) and 8-bit integers (int8) input data
+types.
+B.5 Radix sort on low bit-width inputs
+Here, we provide an estimate of the expected performance improvements of radix sort for the case where
+the input data type has 4 or 8 bit-width. To do so,
+we measure the execution time of our radix sort kernel
+Copyright © 20XX by SIAM
+Unauthorized reproduction of this article is prohibited

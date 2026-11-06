@@ -1,0 +1,120 @@
+--- v002.md
++++ v003.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-GigaVoxels is a GPU-based volume rendering technique that uses an octree structure to manage data at the brick level, traversing the tree to sample voxel data and performing front-to-back blending [S1, unofficial]. It distinguishes itself from standard sparse voxel octree traversal by decoupling the geometric hierarchy from the volumetric data storage in a global brick pool, enabling efficient memory residency management and level-of-detail culling based on brick occupancy [S1, unofficial].
++GigaVoxels is a GPU-based volume rendering technique that uses an octree structure to manage brick-level data, traversing the tree to sample voxel data and performing front-to-back blending [S1, unofficial]. It distinguishes itself from standard sparse voxel octree traversal by decoupling the geometric hierarchy from the volumetric data storage in a global brick pool, enabling efficient memory residency management and level-of-detail culling based on brick occupancy [S1, unofficial].
+ 
+ ## How it works
+@@ -61,35 +61,27 @@
+ ```python
+ def NodeIsConstant(octTreeNode):
+-    nodeTypeBits = octTreeNode[0]
+-    return (nodeTypeBits & 0x40000000) != 0
++    return (octTreeNode[0] & 0x40000000) != 0
+ 
+ def GetChildNodePointer(octTreeNode):
+-    childNodePtrBits = octTreeNode[0]
+-    x_ptr = (childNodePtrBits >> 20) & 0x3FF
+-    y_ptr = (childNodePtrBits >> 10) & 0x3FF
+-    z_ptr = childNodePtrBits & 0x3FF
+-    return (x_ptr, y_ptr, z_ptr)
++    ptr = octTreeNode[0]
++    return ((ptr >> 20) & 0x3FF, (ptr >> 10) & 0x3FF, ptr & 0x3FF)
+ 
+ def BrickIsLoaded(octTreeNode):
+-    brickIsLoadedBits = octTreeNode[0]
+-    return (brickIsLoadedBits & 0x80000000) != 0
++    return (octTreeNode[0] & 0x80000000) != 0
+ 
+-def GetBrickPointer(octTreeNode):
+-    brickPtrBits = octTreeNode[1]
+-    uiS = (brickPtrBits >> 20) & 0x3FF
+-    uiT = (brickPtrBits >> 10) & 0x3FF
+-    uiR = brickPtrBits & 0x3FF
+-    return (float(uiS) / BrickPoolDimension[0], float(uiT) / BrickPoolDimension[1], float(uiR) / BrickPoolDimension[2])
++def GetBrickPointer(octTreeNode, BrickPoolDimension):
++    ptr = octTreeNode[1]
++    s = (ptr >> 20) & 0x3FF
++    t = (ptr >> 10) & 0x3FF
++    r = ptr & 0x3FF
++    return (s / BrickPoolDimension[0], t / BrickPoolDimension[1], r / BrickPoolDimension[2])
+ 
+ def GetConstantValue(octTreeNode):
+-    constValueBits = octTreeNode[1]
+-    red = constValueBits & 0xFF
+-    constValueBits >>= 8
+-    green = constValueBits & 0xFF
+-    constValueBits >>= 8
+-    blue = constValueBits & 0xFF
+-    constValueBits >>= 8
+-    alpha = constValueBits & 0xFF
+-    return (float(red), float(green), float(blue), float(alpha)) / 255.0
++    bits = octTreeNode[1]
++    r = bits & 0xFF; bits >>= 8
++    g = bits & 0xFF; bits >>= 8
++    b = bits & 0xFF; bits >>= 8
++    a = bits & 0xFF
++    return (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
+ 
+ def ComputeRayBoxIntersection(rayOrigin, rayDir, extentMin, extentMax):
+@@ -114,27 +106,35 @@
+     return tMin
+ 
+-def TraverseConstant(rayWorldPosition, rayDir, numSteps, sampleRatio, dst, RayStepSize, currentNode):
++def TraverseConstant(rayWorldPosition, rayDir, numSteps, sampleRatio, dst, RayStepSize, currentNode, BrickPoolDimension):
+     constValue = GetConstantValue(currentNode)
+     if constValue[3] < 0.005:
+-        rayWorldPosition = rayWorldPosition + rayDir * (numSteps * RayStepSize)
++        rayWorldPosition = (rayWorldPosition[0] + rayDir[0] * (numSteps * RayStepSize),
++                            rayWorldPosition[1] + rayDir[1] * (numSteps * RayStepSize),
++                            rayWorldPosition[2] + rayDir[2] * (numSteps * RayStepSize))
+         return rayWorldPosition, dst
+ 
+-    worldRayStep = rayDir * RayStepSize
++    worldRayStep = (rayDir[0] * RayStepSize, rayDir[1] * RayStepSize, rayDir[2] * RayStepSize)
+     for i in range(numSteps):
+-        rayWorldPosition = rayWorldPosition + worldRayStep
++        rayWorldPosition = (rayWorldPosition[0] + worldRayStep[0],
++                            rayWorldPosition[1] + worldRayStep[1],
++                            rayWorldPosition[2] + worldRayStep[2])
+         if dst[3] > 0.995:
+-            rayWorldPosition = rayWorldPosition + rayDir * ((numSteps - i - 1) * RayStepSize)
++            remaining = numSteps - i - 1
++            rayWorldPosition = (rayWorldPosition[0] + rayDir[0] * (remaining * RayStepSize),
++                                rayWorldPosition[1] + rayDir[1] * (remaining * RayStepSize),
++                                rayWorldPosition[2] + rayDir[2] * (remaining * RayStepSize))
+             return rayWorldPosition, dst
+ 
+-        src = constValue
+-        src_a = 1.0 - pow(1.0 - src[3], sampleRatio)
+-        src_rgb = (src[0] * sampleRatio, src[1] * sampleRatio, src[2] * sampleRatio)
+-        dst = ((1.0 - dst[3]) * src_rgb[0] + dst[0], (1.0 - dst[3]) * src_rgb[1] + dst[1], (1.0 - dst[3]) * src_rgb[2] + dst[2], (1.0 - dst[3]) * src_a + dst[3])
++        src_a = 1.0 - pow(1.0 - constValue[3], sampleRatio)
++        src_rgb = (constValue[0] * sampleRatio, constValue[1] * sampleRatio, constValue[2] * sampleRatio)
++        dst = ((1.0 - dst[3]) * src_rgb[0] + dst[0],
++               (1.0 - dst[3]) * src_rgb[1] + dst[1],
++               (1.0 - dst[3]) * src_rgb[2] + dst[2],
++               (1.0 - dst[3]) * src_a + dst[3])
+     return rayWorldPosition, dst
+ 
+-def RenderRay(rayOrigin, rayDir):
++def RenderRay(rayOrigin, rayDir, RayStepSize, currentNode, BrickPoolDimension):
+     dst = (0.0, 0.0, 0.0, 0.0)
+     rayWorldPosition = rayOrigin
+-    currentNode = GetRootNode() # Assumed available from octree structure
+ 
+     tMin = ComputeRayBoxIntersection(rayOrigin, rayDir, currentNode.extentMin, currentNode.extentMax)
+@@ -144,7 +144,9 @@
+     distToNodeBoundary = tMin
+     numSteps = int(distToNodeBoundary / RayStepSize) + 1
+-    rayWorldPosition = rayWorldPosition + rayDir * (numSteps * RayStepSize)
++    rayWorldPosition = (rayWorldPosition[0] + rayDir[0] * (numSteps * RayStepSize),
++                        rayWorldPosition[1] + rayDir[1] * (numSteps * RayStepSize),
++                        rayWorldPosition[2] + rayDir[2] * (numSteps * RayStepSize))
+ 
+-    dst = TraverseConstant(rayWorldPosition, rayDir, numSteps, 1.0, dst, RayStepSize, currentNode)
++    dst = TraverseConstant(rayWorldPosition, rayDir, numSteps, 1.0, dst, RayStepSize, currentNode, BrickPoolDimension)
+     return dst
+ ```

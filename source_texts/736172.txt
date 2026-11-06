@@ -1,0 +1,701 @@
+A lightweight, GPU-accelerated terminal emulator in Rust. - render: mipmap kitty images drawn downscaled (SIZE-12) by EDToaster · Pull Request #34 · EDToaster/toastty
+
+render: mipmap kitty images drawn downscaled (SIZE-12) by EDToaster · Pull Request #34 · EDToaster/toastty · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+EDToaster
+commented
+Oct 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+Stacked on #40 (merge train position 20/32).
+Summary
+Closes SIZE-12 (checklist §2, P2): heavily downscaled images aliased.
+Image textures had one level and a bilinear sampler. When an image was drawn much smaller than its source, each screen pixel sampled a single 2×2 neighbourhood, and fine detail either vanished or turned into moiré. The checklist case is a 1500×900 grid pattern drawn at c=30: its vertical lines were gone and its horizontal lines came out as irregular stripes.
+Now a texture drawn downscaled gets the mip levels that draw samples, and the sampler is plain trilinear.
+Images drawn at 1:1 or larger never get mips. They cost nothing extra, and they render pixel-identically to before (magick compare -metric AE = 0 on the 1:1 and 2× images below, and the 1:1 crop matches the source PNG byte for byte).
+The work is bounded per frame (see design notes), so a thumbnail grid can't stall a frame.
+Review round 1 (see the reply on the PR for the item-by-item list):
+only the needed levels are built;
+small textures are built on the CPU;
+mip work is capped per frame and spread over later frames;
+odd sizes use 3-tap weights;
+queued work is dropped with its slot;
+a missing encode call is fail-safe and debug-asserted;
+a −0.5 LOD bias was tried and then removed in round 2 (below).
+The flat tint at c=30 (divergence, acknowledged by the PM)
+kitty's grid at c=30 is itself aliasing.
+150 grid lines across 1500 px, drawn into about 270 px, gives a true pitch of 1.8 px, which can't be displayed.
+kitty's visible lines are at x = 6, 15, 24, 33, 42, 60, 69, …: a 9 px pitch, i.e. every 5th source line, skipping one where the phase slips.
+A correct prefilter turns a sub-2-px grid into an even tint, which is what toastty draws. This is recorded in the checklist.
+At c=60 (4 px pitch) toastty shows an even grid in both directions.
+Design notes
+Levels per draw. levels = min(full, floor(log2(ratio)) + 2), where ratio is the larger of source px / drawn px on each axis. Trilinear reads floor(lod) and the next level.
+A ½-scale video frame needs 3 levels (2 passes, previously 9); a 128 px thumbnail drawn at 20 px needs 4.
+A later, smaller draw adds levels by rebuilding the texture in place, with the same texture_index.
+The byte budget counts the levels actually allocated.
+Where levels are built.
+Textures up to 256² texels build on the CPU (image/mip.rs::cpu_levels) and are uploaded with write_texture, so thumbnails need no render passes. The CPU path uses premultiplied linear-light floats, and the first level is reduced straight from the bytes. A 128² image to 4 levels takes about 0.13 ms at load average 67.
+Larger textures use one GPU pass per level (shaders/mip.wgsl), queued and then encoded into the frame's own command encoder by encode_pending_mips.
+Both paths use the same filter, and a test reads back the GPU levels and checks them against the CPU ones.
+Per-frame cap (MipLimits): 16 GPU passes, 256K CPU texels, and 4 ms of wall-clock CPU time. At least one image always progresses each frame.
+An image over the cap draws from the levels it already has (level 0 at worst) and reports ResolveStats::deferred.
+The renderer then keeps frames coming: through next_redraw_deadline (16 ms), past the idle skip gate, as full redraws, until nothing is deferred.
+A level is bound only once it's filled. The bind group's view covers 0..levels_ready.
+CPU levels become ready immediately. GPU levels become ready in encode_pending_mips.
+So if that call were dropped, images would only lose quality, never sample empty levels. render() also debug_asserts that no unencoded GPU work is pending, and a test locks that assertion.
+Queued GPU work is dropped when its slot is released or replaced, so skipped frames (Outdated, Timeout, Occluded) can't pile up work or keep dead textures alive.
+Filter.
+It is alpha-weighted, because kitty images are straight alpha.
+It runs in linear light: Rgba8UnormSrgb on the GPU, lookup tables on the CPU.
+Even axes use a 2×2 box. Odd axes use the 3-tap footprint (n−i, n, i+1)/(2n+1) over 2i … 2i+2, which preserves each source texel's weight. The reviewer's 1023-wide case now keeps its coverage at every level (unit test).
+No LOD bias (review round 2).
+A −0.5 bias sharpened thin lines but brought aliasing back at moderate downscales. On the reviewer's zone plate, the residual that should be flat rose from 20.9 to 41.2 at 1.5× and from 17.5 to 27.9 at 2×; Lanczos gives 23.3 and 14.8.
+Plain trilinear stays slightly soft: a 1 px diagonal widens to about 3 px at c=30. That trade-off is recorded in the checklist. A bias of at most −0.25 would only be considered after re-measuring.
+Timing
+Numbers are TOASTTY_TRACE_RENDER on Xvfb (RADV, software present), 1280×800. I ran three builds one after another: #26, this PR's first version ("old"), and this PR now ("new"). The host was very loaded (load average 35–83), so the before column itself swung up to 5×.
+Thumbnail grid (the reviewer's repro): N distinct 128×128 PNGs sent with a=t, then all placed at c=2,r=1 (20×19 px) in one synchronized update.
+before (#26)
+old
+new
+500, upload frame TOTAL
+194 ms (40 ms when less loaded)
+4136 ms (1625)
+60 ms (136 ms before the CPU path was optimised)
+500, upload frame submit+present
+16.6 ms
+3991 ms
+6.7 ms
+500, frames with mip work
+0
+1
+51, median 9.6 ms, p95 12.8 ms (about 9 images per frame under this load)
+50, upload frame TOTAL
+7.3 ms
+29.0 ms
+7.0 ms (work spread over 5 frames)
+mpv-style re-sends at ½ scale: 240 re-sends of i=50 (640×360 RGBA, a=T) at c=32,r=10. Each row is a full frame, including submit+present, over frames that uploaded (median / p95). I ran it twice, the second time in reverse build order.
+before (#26)
+old
+new
+run 1, TOTAL
+1.79 / 6.06 ms
+3.41 / 6.83 ms
+0.91 / 2.33 ms
+run 1, submit+present
+1.06 / 3.86 ms
+2.57 / 5.27 ms
+0.59 / 1.49 ms
+run 2 (reversed), TOTAL
+2.34 / 5.37 ms
+1.61 / 5.20 ms
+2.13 / 10.09 ms
+run 2 (reversed), submit+present
+1.31 / 3.24 ms
+1.28 / 3.47 ms
+1.32 / 6.58 ms
+mip passes per re-send
+0
+9
+1 (with the −0.5 bias)
+The new build is within noise of #26. The old build's gap was smaller here than in the reviewer's runs.
+After removing the bias, a re-send needs 2 passes. Re-measured against #26 in both orders (TOTAL, median / p95):
+render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26: 4.19 / 8.55 ms and 0.92 / 2.14 ms
+now: 2.08 / 8.43 ms and 1.57 / 6.73 ms
+That is still within noise. The load average was 43–58.
+Native-size re-sends (c=64,r=19) and real mpv --vo=kitty build no mips (mipped=0), the same code path as #26.
+Tests added
+image::mip:
+needed_levels_follow_the_draw_scale: 1:1 and upscaled need 1 level; 1.3× needs 2; ½ needs 3; 128→20 px needs 4; capped at the full chain; ratio taken from the larger axis and from the source rect.
+level_texels_sums_the_chain
+odd_axis_taps_cover_every_source_texel_equally
+odd_sizes_keep_coverage_down_the_chain: a 1023-wide row with its right quarter red keeps its mean at every level.
+cpu_filter_is_alpha_weighted_in_linear_light
+image::atlas: full_mip_count_rounds_down_like_wgpu, byte_size_counts_mip_levels.
+image::pipeline (GPU):
+resolve_builds_only_the_levels_the_draw_needs: 1, then 4, then 5 levels, in place, with bytes counted and no work afterwards.
+mip_work_is_capped_per_frame_and_finishes_later: on both the CPU and GPU paths, at most the cap per frame, every image still drawn, and all finished within a few frames.
+gpu_levels_bind_only_after_encode_pending_mips: before encoding, levels_ready == 1, and rendering trips the debug assert; after encoding, the levels are bound and the image is drawn everywhere.
+pending_mips_are_dropped_with_their_slot: five "skipped" re-sends keep one queued job, and deleting the image drops it.
+gpu_and_cpu_mips_agree: an odd-sized 37×21 texture with transparent texels; GPU levels read back match the CPU levels within ±2.
+one_to_one_draw_is_pixel_exact_with_and_without_mips: both paths, byte-exact.
+downscaled_thin_lines_stay_visible: both paths; it fails without mips.
+gpu_mip_ignores_rgb_of_transparent_texels
+cargo test --workspace passes, with no failures. cargo clippy --workspace --all-targets adds no new warnings (200).
+Screenshots
+The repro (scale_quality): a 1500×900 kgp.py grid pattern at c=30 (left) and c=60 (middle), plus a 100×57 pattern at 1:1 (c=10,r=3) and 2× (c=20,r=6) on the right.
+Before (#26): moiré stripes, and the vertical grid lines are gone.
+After: c=30 is an even tint. c=60 shows an even grid in both directions, and the diagonal is slightly soft (plain trilinear). 1:1 and 2× are pixel-identical to before.
+Reference kitty 0.49.2: crisp lines at the wrong pitch, which is aliasing.
+Zoom 4×, nearest-neighbour, before | after | kitty. c=30: before shows stripes, after a tint, kitty a false 9 px grid.
+c=60: before shows horizontal stripes only, after an even 4 px grid with a slightly soft diagonal, kitty uneven crisp lines.
+mpv --vo=kitty plays with no mips built (first version; the native-size path is unchanged).
+EDToaster
+force-pushed
+the
+kgp/c3-downscale-quality
+branch
+from
+90b2408 to
+4cb9828
+Compare
+October 22, 2026 02:41
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Review of #34 (SIZE-12 mipmaps): Changes requested
+The mip generation is correct and the visual result is a clear improvement. 1:1 stays byte-exact. The shader validates on every backend. The blocking problem is cost: building a chain takes one render pass per level, and with many downscaled images, or downscaled re-sends, that is far more expensive than the PR's timing section says. Details and numbers are below.
+Issues
+1. should-fix (perf): the first draw of many downscaled images stalls for hundreds of ms to seconds.
+crates/toastty-render/src/image/pipeline.rs:137-185 (MipGen::encode), :463 (levels = full_mip_count(..)), :360 (encode_pending_mips).
+Scenario: a thumbnail grid. I transmitted 500 distinct 128×128 images with a=t, then placed all 500 at c=2,r=1 (20×19 px) inside one synchronized update. Each image gets 8 levels, which is 3,500 render passes in that frame's encoder. I alternated the runs between builds. Numbers are TOASTTY_TRACE_RENDER for the frame that uploads:
+before (render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26)
+after (render: mipmap kitty images drawn downscaled (SIZE-12) #34)
+500 thumbs, render_term TOTAL
+28.2 / 8.0 / 7.7 ms
+2102 / 249 / 760 / 344 ms
+↳ encode_pass (CPU, mip encode)
+0.07–0.15 ms
+12–63 ms
+↳ submit+present
+1.3–2.5 ms
+225–1985 ms
+50 thumbs, render_term TOTAL
+2.8 ms
+11.9 / 30.7 ms
+The host load average was 15–68 and the GPU was shared with other agents, so the absolute numbers are inflated. The ratio was consistent across every alternated run, though: 30–250× for 500 images, and one to two dropped frames for 50. File-manager previews (yazi, ranger), timg --grid and kitten icat galleries all hit this path.
+Suggested fix (any of these, ideally the first two):
+Build only the levels the draw needs: levels = min(full_mip_count, floor(log2(max(src_w/box_w, src_h/box_h))) + 2). Rebuild in place when the image is later drawn smaller; the existing upgrade path already handles that, with a mip_levels < needed test in place of == 1. A 128→20 px thumbnail then needs 4 levels (3 passes) instead of 8 (7 passes). A ½-scale 640×360 video frame needs 3 levels (2 passes) instead of 10 (9 passes).
+Cap the mip passes per frame, e.g. about 64. Images over the cap draw single-level this frame and upgrade on a later one, so no single frame is unbounded.
+For small textures (say ≤ 256²), box-filter on the CPU and write_texture every level. That needs no render passes and no RENDER_ATTACHMENT usage.
+2. should-fix (perf, and the PR text): mpv-style re-sends at a downscale cost about +7 ms per frame, not +0.15 ms.
+Scenario: same shape as the PR's repro. 240 re-sends of i=50 (640×360 RGBA, a=T, ~60 Hz) at c=32 (about ½), alternating builds:
+before
+after
+run 1, render_term median / p95
+2.84 / 6.45 ms
+11.97 / 35.7 ms
+run 2, render_term median / p95
+4.96 / 10.8 ms
+12.19 / 20.3 ms
+submit+present median
+2.0–2.8 ms
+8.5–9.7 ms
+The CPU image-resolve time does match the PR (about 0.25 ms on both builds). The cost lands in submit and present, meaning GPU and driver time for 9 tiny passes per frame, which the PR's table doesn't measure. At native size (c=64) there is no regression (mipped=0; 3.66 → 2.03 ms median, which is noise). So real mpv is fine, but anything that sends frames larger than it draws them pays about half a 60 Hz frame budget.
+Fix: the "only the needed levels" change from paste: sanitise pasted text (fixes bracketed-paste injection) #1 (2 passes at ½ instead of 9). Also update the PR's timing table to include submit+present.
+3. nit (mip correctness, low impact): odd sizes drop the last row or column, which shifts content toward the top-left at heavy downscale.
+crates/toastty-render/shaders/mip.wgsl:28-33.
+The level-n texel i averages source [i·2ⁿ, (i+1)·2ⁿ), but UV maps level n across the full width. So every odd step loses up to one texel of that level at the right and bottom edges.
+Measured live: a 1023×1023 image whose right 25% is red. At c=1 the red coverage in linear light is 1.63 px against an ideal 2.50 (35% lost). At c=2 it is 4.13 against 5.00. The same image at 1024 wide is exact: 2.50 and 5.00.
+Typical images are only slightly affected: for 1500×900 at c=30 the loss is under 0.3%. It is still a systematic bias of up to about 1 output px on images like 1023 or 511 wide.
+Fix: when the source dimension is odd, use the standard 3-tap footprint for that axis. With n = dst_dim, the weights are (n-i)/(2n+1), n/(2n+1) and (i+1)/(2n+1) over source texels 2i, 2i+1 and 2i+2. Alpha-weight them as now.
+4. nit (robustness): pending_mips can grow while frames are skipped, and it keeps released textures alive.
+pipeline.rs:67 and :667, and lib.rs:3049.
+resolve_kitty_textures runs before get_current_texture(), but encode_pending_mips runs only after a successful acquire.
+On Outdated, Timeout or Occluded, a re-send at a downscale still pushes a full-chain texture clone that the byte budget doesn't count. If that repeats over a run of skipped frames (for example a hidden Hyprland workspace with FIFO acquire timeouts), the list grows. The next good frame then encodes passes for textures that were long since replaced.
+Fix: drop the pending entry when its slot is released or replaced. One way is to store (texture_index, Texture) and retain in release_texture and in the in-place rebuild. Another is to check at encode time that self.slots[idx] still holds that texture.
+5. nit (test gap): nothing locks the call at lib.rs:3049.
+Every new GPU test calls encode_pending_mips itself through render_offscreen. If the call in render_term were dropped or moved after the image passes, all tests would still pass.
+At runtime, though, downscaled images would sample wgpu's lazily zero-initialised levels, and would fade or vanish whenever they are drawn below 1:1.
+Fix: a renderer-level GPU test: render_term with one downscaled placement, then assert that the image region isn't background.
+6. nit (quality): trilinear overblurs thin features.
+At c=30 and c=60 the 1-px diagonal of the pattern becomes a grey band about 3 px wide (see the zooms below). This is the softness the PR acknowledges.
+If it matters later, textureSampleBias(.., -0.5) on instances flagged as downscaled, or anisotropic filtering, would sharpen it. It doesn't block this PR.
+Verified OK
+WGSL validity. No naga validation exists in the repo, so I built a throwaway checker against the repo's naga = 29.0.3. mip.wgsl and image.wgsl validate under default and empty capabilities. Both translate cleanly to SPIR-V, MSL, HLSL, GLSL ES 300 and GLSL 330, for both entry points.
+Colour space. Source and target are Rgba8UnormSrgb. textureLoad decodes and the attachment store re-encodes, so the box filter really runs in linear light.
+Alpha. image.wgsl outputs the straight-alpha sample for alpha-over blending, so alpha-weighting and un-premultiplying is the right choice.
+Live: a red disk with 2-px red lines on fully transparent green texels, drawn at c=5 and c=10. Before, the lines came out yellow-green from bleed, and kitty does the same. After, they are red with no green.
+Level counts. full_mip_count is floor(log2(max)) + 1, which matches wgpu's rounding down: 11 levels for 1500×900, and 15 at a 16384 limit, which is within limits. Oversized images (render: draw any number of kitty images (SIZE-8) #24) mip from the fitted texture, and the budget uses the fitted dims.
+Rebuilds (live, mipped= trace):
+A re-send under the same id with new pixels, while drawn downscaled, goes from red to blue. That is a fresh chain, not a stale one.
+An image drawn 1:1 and then also placed at c=5 is upgraded in place (uploaded=0 mipped=1).
+A later a=t re-transmit of that id shows the new content in both the 1:1 and the downscaled placements.
+1:1 exactness, byte for byte, live. I drew a 100×57 random-noise image at 1:1.
+It matches the source PNG with 0 differing channels out of 17,100, on both builds.
+It still matches after the same image gained a mip chain through a second, downscaled placement.
+The before and after screenshots differ only inside the downscaled placement's rect.
+Visual. Zone plate at ¼ and ½: heavy moiré before, close to correct after. c=60 shows an even grid in both directions.
+The flat tint at c=30 is acceptable in my view. A 1.8 px pitch can't be shown, and a correct prefilter must give a tint. kitty's crisp 9 px grid is aliasing, as the author analysed, and on the zone plate kitty aliases just as badly as toastty did before. The checklist records the divergence. PM, please acknowledge it, since it departs from "match kitty".
+Tests.
+cargo test --workspace passes, with 0 failures; this run even passed the usually-failing snapshot and grid tests.
+cargo clippy --workspace --all-targets gives 200 warnings, none in the changed files.
+I forced levels = 1 on upload and confirmed downscaled_thin_lines_stay_visible then fails (all 16 columns are 0), so the test does lock the fix.
+PR hygiene. The base is kgp/c2-z-below-bg with a "Stacked on render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26." line. SIZE-12 is ticked with "Fixed in render: mipmap kitty images drawn downscaled (SIZE-12) #34." The commit message follows render: …. The screenshot URLs return 200.
+Screenshots (zoom 4×, nearest-neighbour; left to right: before #26 | after #34 | kitty 0.49.2)
+c=30: before shows irregular horizontal stripes. After shows an even tint, with the diagonal kept but widened to about 3 px (#6). kitty shows a false 9 px grid.
+c=60: before shows horizontal stripes only. After shows an even grid in both directions. kitty shows unevenly spaced crisp lines.
+My own repro: a 512×512 zone plate drawn at about ¼ (c=13), zoom 3×. Before and kitty show strong moiré replicas. After suppresses nearly all of them.
+A straight-alpha image (red on transparent green texels) at c=10, zoom 3×. Before and kitty show green bleed on the lines. After the lines are red, with a faint darker rim on the disk from bilinear sampling of straight alpha, which isn't new to this PR.
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: bound mip work (needed levels, CPU small, per-frame cap)
+…
+1dc16fd
+```
+Review of #34:
+- Build only the levels a draw samples (floor(log2(ratio) - 0.5) + 2),
+  adding levels in place if the image is later drawn smaller. A half-scale
+  re-send now builds 1 GPU pass instead of 9.
+- Textures up to 256^2 build their levels on the CPU (premultiplied
+  linear floats, fused first level) and write_texture them: no render
+  passes for thumbnails.
+- Mip work is capped per frame (GPU passes, CPU texels, 4 ms of CPU);
+  over the cap an image draws from the levels it has and
+  ResolveStats::deferred keeps frames coming until it's done.
+- A level is bound for sampling only once filled (CPU: at once; GPU:
+  in encode_pending_mips), and render() debug-asserts no unencoded work,
+  so a missing encode call can't make images sample empty levels.
+- Queued GPU work is dropped when its slot is released or replaced.
+- Odd sizes use the 3-tap footprint (CPU and GPU) instead of dropping
+  the last row/column.
+- Sample with a -0.5 LOD bias to offset trilinear softness; 1:1 and
+  upscaled draws are unchanged.
+- docs: SIZE-12 records the PM-acknowledged c=30 divergence.
+```
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Thanks. All six items are addressed in 1dc16fd, and the description and timing tables are updated.
+Mip work for many downscaled images.
+Only the needed levels: min(full, floor(log2(ratio) − 0.5) + 2). A smaller later draw adds levels in place.
+CPU path for textures up to 256²: levels are built in image/mip.rs::cpu_levels (premultiplied linear floats, first level fused with the decode, about 0.13 ms for a 128² image) and uploaded with write_texture, so thumbnails need no render passes.
+Per-frame cap (MipLimits: 16 GPU passes, 256K CPU texels, 4 ms of CPU time, and at least one image always progresses).
+Images over the cap draw from the levels they have.
+ResolveStats::deferred makes the renderer keep scheduling frames (next_redraw_deadline, the skip gate, full redraws) until the work is done.
+Your 500-thumbnail repro, under load average 72–78:
+upload frame 60 ms, against 194 ms for render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26 and 4136 ms for the first version;
+then 51 frames with a median of 9.6 ms.
+50 thumbnails: a 7.0 ms upload frame against 7.3 ms for render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26.
+½-scale re-sends: one GPU pass per re-send (previously 9). Full frame time including submit+present is within noise of render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26 (median 0.91 / 2.13 ms against 1.79 / 2.34 ms, in two runs with opposite build order). The PR's table now reports TOTAL and submit+present.
+Odd sizes use the 3-tap footprint (n−i, n, i+1)/(2n+1) in both mip.wgsl and the CPU path. Tests:
+every source texel gets equal total weight;
+your 1023-wide right-quarter-red row keeps its coverage at every level;
+GPU levels read back match the CPU ones within ±2 on an odd 37×21 texture.
+pending_mips entries carry their slot index and are dropped when the slot is released or replaced. Test: five skipped-frame re-sends leave a single job, and deleting the image clears it.
+The encode call, made fail-safe and locked:
+A level is only bound for sampling once it's filled, so without encode_pending_mips an image samples only level 0 and never the zero-filled levels.
+render() debug_asserts that no unencoded work is pending.
+gpu_levels_bind_only_after_encode_pending_mips checks levels_ready before and after the encode, and that rendering without it panics in debug.
+A full render_term test still needs a window surface, so the call site itself isn't exercised headless. A dropped call would trip the assertion in any debug run.
+LOD bias −0.5 via textureSampleBias. At c=60 the diagonal is about 1 px again and the grid is crisper; see the new zoom in the description. 1:1 and 2× are still byte-identical.
+The PM has acknowledged the c=30 divergence, and the checklist records it.
+cargo test --workspace passes, and clippy is unchanged at 200 warnings.
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Re-review of #34 at 1dc16fd: Changes requested (one item left: the LOD bias)
+Every issue from my first review is fixed, and I re-measured each fix myself. The one thing I'm asking to change is the new −0.5 LOD bias. My nit #6 asked for it, but measured, it brings back much of the aliasing this PR removes at moderate downscales (1.4–2.5×). Please drop it (LOD_BIAS = 0) or limit it to about −0.25 after checking with the metric below. With that, this is an Approve from me.
+Remaining issue
+1. should-fix (quality): the −0.5 LOD bias brings back aliasing at 1.4–2.5× downscale.
+crates/toastty-render/shaders/image.wgsl:73, crates/toastty-render/src/image/mip.rs (LOD_BIAS).
+Repro: a 512×512 zone plate placed at c=41, c=34, c=26 and c=20 (1.25×, 1.5×, 2×, 2.56×), on render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26, on this PR before the fix (4cb9828, no bias) and at 1dc16fd.
+Metric: the standard deviation (sRGB 0–255) of the output inside the annulus where the plate's frequency is above the output Nyquist. An ideal prefilter gives flat grey there, so this measures aliasing energy directly. The reference is a linear-light Lanczos downscale.
+ratio
+Lanczos ref
+render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26
+4cb9828 (bias 0)
+1dc16fd (bias −0.5)
+1.5×
+23.3
+46.3
+20.9
+41.2
+2×
+14.8
+52.0
+17.5
+27.9
+2.56×
+9.9
+54.8
+13.3
+21.4
+At 1.5× the biased LOD is 0.585 − 0.5 ≈ 0.08. That is effectively plain bilinear from level 0, so the result is nearly back to render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26. At 2–2.56× the aliasing energy is 1.6× that of bias 0. The screenshots below show the replica rings coming back.
+(RMSE against the Lanczos reference favours the biased build, because it also rewards sharpness. The annulus is where only aliasing can show.)
+Fix: set LOD_BIAS = 0. needed_levels already reads the constant, so it follows automatically. The slightly soft 1-px diagonal that prompted my nit is the smaller problem. If you want some sharpening, −0.25 at most, and check it with the annulus metric.
+Verified fixed (re-measured on 1dc16fd, alternating with #26 under host load 29–55)
+paste: sanitise pasted text (fixes bracketed-paste injection) #1, many downscaled images.
+render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26 first frame
+1dc16fd first frame
+1dc16fd max frame
+frames until mips done
+500 thumbs
+11.0–15.8 ms
+18.5 / 25.7 / 104 ms
+18.5 / 25.7 / 104 ms
+28–67 (median frame 6.6–13 ms)
+50 thumbs
+1.5–1.8 ms
+5.7 / 7.4 ms
+7.8 ms
+3
+4cb9828 measured 249–2102 ms on the 500 case. The 104 ms outlier came while cargo test was running alongside. The per-frame caps hold: about 4 ms of CPU mip work per frame, and work spreads across frames as designed.
+mouse: honour legacy, utf-8 and urxvt encodings and x10 mode; fix ctrl+click #2, ½-scale re-sends (640×360 at c=32, GPU path, 2 passes): render_term median 0.92 / 1.25 ms against render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26's 1.53 / 0.90 ms. That is within noise.
+Idle. Once mips finish, there are 10 frames per 5 s (just cursor blink) on both builds, and idle CPU is the same on both (245–482 ticks per 5 s, with the builds alternating). The mip_work_pending frames stop.
+selection: alt screen, shift bypass, wrap/wide/word fixes #3, odd sizes, live. Red mass at the right edge of a block that is ¾ blue and ¼ red, in linear light, measured against the ideal:
+image (path)
+c=1
+c=2
+1023² (GPU)
+2.54 / 2.49 (4cb9828: 1.63)
+4.91 / 4.99
+257² (GPU)
+2.50 / 2.49
+4.98 / 4.98
+255² (CPU)
+2.51 / 2.47
+4.87 / 4.94
+1024², 256²
+exact
+exact
+CPU and GPU paths agree. I ran a throwaway probe, not committed: random RGBA with random alpha at 255×129, 1023×7, 301×300, 64×64, 3×5 and 511×255, every level, cpu_levels against the GPU pass read back. The maximum difference is 1 code in RGB and alpha at every level. This is stricter than the PR's test, which only uses alpha 0 and 255.
+clipboard: primary selection, copy/paste keys, osc 52 conformance #4 and copy: keep grapheme clusters and tabs #5. pending_mips is pruned in release_texture and replace_slot. Levels are bound only once filled, through the view's mip_level_count. The render() debug assert covers the missing-encode_pending_mips case.
+Regressions.
+1:1 stays byte-exact live (0 of 17,100 channels differ), also after an in-place mip upgrade.
+A re-send under the same id, and an a=t re-transmit, show the new pixels in all placements.
+cargo test --workspace gives 40 suites with 0 failures.
+Clippy gives 200 warnings, none in mip.rs or pipeline.rs.
+naga 29.0.3 validates mip.wgsl and image.wgsl and translates both to SPIR-V, MSL, HLSL, GLSL ES 300 and GLSL 330.
+Small observations, not blocking.
+A job needing more GPU passes than gpu_passes_per_frame can never run. The default of 16 is above the 14-pass maximum, so this is only reachable through set_mip_limits. A debug_assert would document it.
+The in-place upgrade path re-runs fit_to_max_dim on the CPU for oversized images. It is a one-off, so fine.
+Screenshots: zone plate, left to right #26 | 4cb9828 (bias 0) | 1dc16fd (bias −0.5)
+1.5× (c=34): the replica rings at the left, right, top and bottom that bias 0 removed are back at 1dc16fd, almost as strong as on #26.
+2× (c=26): 1dc16fd is better than #26 but visibly more aliased than bias 0.
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: drop the image LOD bias (plain trilinear)
+…
+d524b6d
+```
+Review of #34: the -0.5 bias sharpened thin features but brought aliasing
+back at moderate downscales (zone plate residual 20.9 -> 41.2 at 1.5x,
+17.5 -> 27.9 at 2x). LOD_BIAS is now 0 and image.wgsl samples with plain
+textureSample; needed_levels is floor(log2(ratio)) + 2. docs: the
+SIZE-12 entry records the blur trade-off.
+```
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Done in d524b6d.
+The LOD bias is removed.
+LOD_BIAS = 0 in image/mip.rs, and image.wgsl samples with plain textureSample again.
+needed_levels is now floor(log2(ratio)) + 2, and the tests are updated to match: ½ now needs 3 levels, ¼ needs 4.
+The checklist's SIZE-12 entry records the blur trade-off: trilinear stays slightly soft on thin features, and −0.5 doubled the zone-plate residual at 1.5×/2× (your numbers). −0.25 would only be considered after re-measuring.
+½-scale re-sends now take 2 passes. Re-measured against render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26 in both orders, the median full frame is 2.08 / 1.57 ms against 4.19 / 0.92 ms for render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26, which is within noise (load average 43–58).
+Screenshots and zooms in the description are refreshed. 1:1 and 2× are still byte-identical (AE = 0).
+cargo test --workspace passes, and clippy is unchanged at 200 warnings.
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Final re-review of #34 at d524b6d: Approve
+LOD_BIAS = 0 and plain textureSample fix the last item. I re-measured on d524b6d:
+Zone-plate aliasing. The metric is the standard deviation (sRGB) inside the band above the output Nyquist, where an ideal filter gives flat grey.
+ratio
+Lanczos ref
+render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26
+1dc16fd (−0.5)
+d524b6d
+1.5×
+23.3
+46.3
+41.2
+20.9
+2×
+14.8
+52.0
+27.9
+17.5
+2.56×
+9.9
+54.8
+21.4
+13.3
+All four zone-plate placements (1.25×, 1.5×, 2× and 2.56×) are pixel-identical to the original unbiased 4cb9828 (max diff 0).
+1:1 is still byte-exact, live: a 100×57 noise image has 0 of 17,100 differing channels, both before and after the same image gains mips through an in-place upgrade (mipped=1 uploaded=0).
+500 thumbnails still spread their work, alternating with render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26 under load 38–48. The first frame took 17–69 ms against render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26's 19–52 ms. The rest spread over 22–64 frames with a median frame of 6–12.5 ms.
+Tests. cargo test -p toastty-render: 306 + 7 tests pass, including the updated needed_levels_follow_the_draw_scale.
+One nit, not blocking: needed_levels has no slack at exactly 1:1. The earlier is_downscaled had 1e-4. If float noise ever gives a ratio of 1.00001, a 2-level chain would be built for a 1:1 draw. Sampling is unaffected because the LOD is still about 0, so the cost is only memory. I didn't see it happen in any live run.
+Everything from the earlier reviews still holds:
+CPU and GPU levels agree to within 1 code.
+Odd sizes come out correct on both paths.
+Downscaled re-sends cost the same as on render: z < INT32_MIN/2 images show through default-bg cells (SIZE-9) #26.
+Idle returns to cursor-blink frames only.
+naga validation passes.
+Clippy adds no new warnings.
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Nit fixed in a1e4c73: needed_levels treats ratios up to 1 + ONE_TO_ONE_SLACK (1e-4) as 1:1 again, so a 1:1 draw with float noise in its box gets no 2-level chain. The test covers 1.00001, the slack boundary, 1.001 (→ 2), NaN, and a 1:1 draw whose box is 1e-5 px short. cargo test -p toastty-render passes, and clippy is unchanged at 200 warnings.
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: treat draw ratios within 1e-4 of 1:1 as 1:1 for mips
+…
+a1e4c73
+```
+Review of #34: needed_levels had no tolerance, so float noise in a 1:1
+draw's box (ratio 1.00001) allocated a needless 2-level chain.
+```
+EDToaster
+added 4 commits
+October 21, 2026 23:29
+render: mipmap kitty images drawn downscaled (SIZE-12)
+…
+ae036ee
+```
+Downscaled images sampled level 0 bilinearly, so fine detail aliased:
+a 1500x900 grid at c=30 lost its vertical lines and showed moire.
+
+A texture now gets a full mip chain the first frame one of its
+placements is drawn smaller than its source rect, and the sampler is
+trilinear. The chain is built on the GPU by an alpha-weighted 2x2 box
+pass per level (shaders/mip.wgsl, linear light via the sRGB format),
+encoded into the frame's own command encoder ahead of the image passes
+rather than a separate submit. Images drawn at 1:1 or larger stay single
+level: no extra memory or upload work for them (mpv-style re-sends at
+native size), and 1:1 / upscaled sampling is unchanged (LOD <= 0 reads
+level 0). The byte budget counts mip levels.
+```
+render: bound mip work (needed levels, CPU small, per-frame cap)
+…
+3b3ceaa
+```
+Review of #34:
+- Build only the levels a draw samples (floor(log2(ratio) - 0.5) + 2),
+  adding levels in place if the image is later drawn smaller. A half-scale
+  re-send now builds 1 GPU pass instead of 9.
+- Textures up to 256^2 build their levels on the CPU (premultiplied
+  linear floats, fused first level) and write_texture them: no render
+  passes for thumbnails.
+- Mip work is capped per frame (GPU passes, CPU texels, 4 ms of CPU);
+  over the cap an image draws from the levels it has and
+  ResolveStats::deferred keeps frames coming until it's done.
+- A level is bound for sampling only once filled (CPU: at once; GPU:
+  in encode_pending_mips), and render() debug-asserts no unencoded work,
+  so a missing encode call can't make images sample empty levels.
+- Queued GPU work is dropped when its slot is released or replaced.
+- Odd sizes use the 3-tap footprint (CPU and GPU) instead of dropping
+  the last row/column.
+- Sample with a -0.5 LOD bias to offset trilinear softness; 1:1 and
+  upscaled draws are unchanged.
+- docs: SIZE-12 records the PM-acknowledged c=30 divergence.
+```
+render: drop the image LOD bias (plain trilinear)
+…
+06bbac3
+```
+Review of #34: the -0.5 bias sharpened thin features but brought aliasing
+back at moderate downscales (zone plate residual 20.9 -> 41.2 at 1.5x,
+17.5 -> 27.9 at 2x). LOD_BIAS is now 0 and image.wgsl samples with plain
+textureSample; needed_levels is floor(log2(ratio)) + 2. docs: the
+SIZE-12 entry records the blur trade-off.
+```
+render: treat draw ratios within 1e-4 of 1:1 as 1:1 for mips
+…
+9c87c2f
+```
+Review of #34: needed_levels had no tolerance, so float noise in a 1:1
+draw's box (ratio 1.00001) allocated a needless 2-level chain.
+```
+EDToaster
+force-pushed
+the
+kgp/c3-downscale-quality
+branch
+from
+a1e4c73 to
+9c87c2f
+Compare
+October 22, 2026 06:32
+EDToaster
+changed the base branch from
+kgp/c2-z-below-bg
+to
+kgp/a4-relative
+October 22, 2026 06:32
+EDToaster
+commented
+Oct 22, 2026
+Copy link
+Copy Markdown
+Owner
+Author
+Merge train: rebased onto #40 (position 20/23). There are no integration commits. The conflicts with #42's ImageKey were resolved inside the replayed commits:
+The mip path in resolve_kitty_textures binds by the instance's store key, like the rest of the texture cache.
+The new tests use ImageRegistry::<ImageKey> and ImageKey(n).
+ImageInstance's _pad is now key (kitty: per-screen image stores, re-transmit deletes placements, anonymous images (PLC-2, PLC-4, PLC-6) #42 on the train), and the test instance in mip.rs follows that.
+cargo test --workspace: 2236 passed, 0 failed.
+EDToaster
+mentioned this pull request
+Oct 22, 2026
+kitty: kitty's chunked transport (WIRE-4/9/10/11, DEL-3)
+#44
+Merged
+EDToaster
+added this pull request to stack #56
+October 22, 2026 07:16
+Hide details
+View details
+EDToaster
+merged commit 5592c84
+into
+kgp/f1-placeholders
+Oct 22, 2026
+2 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: bound mip work (needed levels, CPU small, per-frame cap)
+…
+044a293
+```
+Review of #34:
+- Build only the levels a draw samples (floor(log2(ratio) - 0.5) + 2),
+  adding levels in place if the image is later drawn smaller. A half-scale
+  re-send now builds 1 GPU pass instead of 9.
+- Textures up to 256^2 build their levels on the CPU (premultiplied
+  linear floats, fused first level) and write_texture them: no render
+  passes for thumbnails.
+- Mip work is capped per frame (GPU passes, CPU texels, 4 ms of CPU);
+  over the cap an image draws from the levels it has and
+  ResolveStats::deferred keeps frames coming until it's done.
+- A level is bound for sampling only once filled (CPU: at once; GPU:
+  in encode_pending_mips), and render() debug-asserts no unencoded work,
+  so a missing encode call can't make images sample empty levels.
+- Queued GPU work is dropped when its slot is released or replaced.
+- Odd sizes use the 3-tap footprint (CPU and GPU) instead of dropping
+  the last row/column.
+- Sample with a -0.5 LOD bias to offset trilinear softness; 1:1 and
+  upscaled draws are unchanged.
+- docs: SIZE-12 records the PM-acknowledged c=30 divergence.
+```
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: drop the image LOD bias (plain trilinear)
+…
+f923da7
+```
+Review of #34: the -0.5 bias sharpened thin features but brought aliasing
+back at moderate downscales (zone plate residual 20.9 -> 41.2 at 1.5x,
+17.5 -> 27.9 at 2x). LOD_BIAS is now 0 and image.wgsl samples with plain
+textureSample; needed_levels is floor(log2(ratio)) + 2. docs: the
+SIZE-12 entry records the blur trade-off.
+```
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: bound mip work (needed levels, CPU small, per-frame cap)
+…
+1e00fb1
+```
+Review of #34:
+- Build only the levels a draw samples (floor(log2(ratio) - 0.5) + 2),
+  adding levels in place if the image is later drawn smaller. A half-scale
+  re-send now builds 1 GPU pass instead of 9.
+- Textures up to 256^2 build their levels on the CPU (premultiplied
+  linear floats, fused first level) and write_texture them: no render
+  passes for thumbnails.
+- Mip work is capped per frame (GPU passes, CPU texels, 4 ms of CPU);
+  over the cap an image draws from the levels it has and
+  ResolveStats::deferred keeps frames coming until it's done.
+- A level is bound for sampling only once filled (CPU: at once; GPU:
+  in encode_pending_mips), and render() debug-asserts no unencoded work,
+  so a missing encode call can't make images sample empty levels.
+- Queued GPU work is dropped when its slot is released or replaced.
+- Odd sizes use the 3-tap footprint (CPU and GPU) instead of dropping
+  the last row/column.
+- Sample with a -0.5 LOD bias to offset trilinear softness; 1:1 and
+  upscaled draws are unchanged.
+- docs: SIZE-12 records the PM-acknowledged c=30 divergence.
+```
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: drop the image LOD bias (plain trilinear)
+…
+2e49e0b
+```
+Review of #34: the -0.5 bias sharpened thin features but brought aliasing
+back at moderate downscales (zone plate residual 20.9 -> 41.2 at 1.5x,
+17.5 -> 27.9 at 2x). LOD_BIAS is now 0 and image.wgsl samples with plain
+textureSample; needed_levels is floor(log2(ratio)) + 2. docs: the
+SIZE-12 entry records the blur trade-off.
+```
+EDToaster
+added a commit
+that referenced
+this pull request
+Oct 22, 2026
+render: treat draw ratios within 1e-4 of 1:1 as 1:1 for mips
+…
+7a1258f
+```
+Review of #34: needed_levels had no tolerance, so float noise in a 1:1
+draw's box (ratio 1.00001) allocated a needless 2-level chain.
+```
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

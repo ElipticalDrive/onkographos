@@ -1,0 +1,126 @@
+Deploying and developing royalty-free open standards for 3D graphics, Virtual and Augmented Reality, Parallel Computing, Neural Networks, and Vision Processing
+
+Mesh Shading for Vulkan
+Skip to main content
+Khronos Blogs
+Mesh Shading for Vulkan
+September 1, 2022
+by Christoph Kubisch, Principal Developer Technology Engineer, NVIDIA
+vulkan
+Introduction
+With the release of the VK_EXT_mesh_shader extension Vulkan gets an alternative geometry rasterization pipeline. This extension brings cross-vendor mesh shading to Vulkan, with a focus on improving functional compatibility with DirectX 12.
+Mesh and Task shaders follow the compute programming model and use threads cooperatively to generate meshes within a workgroup. The vertex and index data for these meshes are written similarly to shared memory in compute shaders. Mesh shader output is directly consumed by the rasterizer, as opposed to the previous approach of using a compute dispatch followed by an indirect draw. Therefore mesh shading applications can avoid preallocation of output buffers.
+Figure 1: Pipeline comparison
+The new mesh shading pipeline with the task and mesh shading stages provides an alternative to the traditional vertex, tessellation or geometry shader stages that feed into rasterization (see Figure 1). The use of the task shader (amplification shader in DirectX) is optional and provides a way to implement geometry amplification by creating variable mesh shader workgroups directly in the pipeline. Task shader workgroups can output an optional payload, which is visible as read-only input to all its child mesh shader workgroups.
+Before deciding to use mesh shaders, developers should ensure they are a good fit for their application. The traditional pipeline may still be best suited to many use cases, and it may not be trivial to improve performance using the mesh shading pipeline given the long evolution and optimization efforts applied to the traditional pipeline stages.
+Applications and games dealing with high geometric complexity can, however, benefit from the flexibility of the two-stage approach, which allows efficient culling, level-of-detail techniques as well as procedural generation. Compared to the traditional pipeline, the mesh shaders allow easy access to the topology of the generated primitives and developers are free to repurpose the threads to do both vertex shading and primitive shading work. This is in contrast to tessellation shaders, which, while fast, provide very limited control over the triangles created, and geometry shaders, which use a single thread programming model that is inefficient for modern streaming processors. In addition to improving graphics performance, using the task and mesh shader stages without feeding into rasterization can also perform simple nested compute operations.
+Geometry Representation
+Figure 1: Pipeline comparison
+Figure 2: The Stanford bunny model represented as triangle clusters
+When rasterizing geometry, mesh shaders typically make use of pre-computed triangle clusters (see Figure 2) of an upper bound in the number of vertices and triangles, also sometimes referred to as meshlets. Because task and mesh shaders, like compute, have only workgroup and invocation indices as input, all data fetching is handled by the application directly, which entirely removes fixed-function vertex processing and input assembly. This allows developers to be flexible in the storage of mesh data in both vertex and primitive topology representations. Another very common technique is to leverage the task shader and let one local invocation test one cluster for visibility. Through the use of subgroup operations developers can compute and write out information about the visible clusters into the task shader payload.
+Portability
+Compatibility with DirectX 12 was very important for this extension, therefore it follows the same capabilities, minimum limitations and restrictions. While it shares a lot of commonality with the existing VK_NV_mesh_shader extension, changes were made and the table below compares key details of all three definitions of mesh shading.
+DirectX 12
+VK_EXT_mesh_shader
+VK_NV_mesh_shader
+Optional expansion stage
+Amplification shader
+Task shader
+Task shader
+Supported primitives
+triangles, lines
+triangles, lines, points
+triangles, lines, points
+Grid dimensions
+3D
+3D
+1D
+Task shader output
+groupshared Type variable;
+Up to one such variable is allowed and can be passed to DispatchMesh.
+taskPayloadSharedEXT Type variable;
+Up to one such variable is allowed and is implicitly used by EmitMeshTasksEXT.
+Behaves like shared memory.
+out taskNV { … };
+single interface block, read/write access
+Task shader dispatching mesh shader workgroups
+Single workgroup-uniform call to
+DispatchMesh(x, y ,z,
+[optional payload variable]);
+Single workgroup-uniform call to
+EmitMeshTasksEXT(x, y, z);
+Uses value written to gl_TaskCountNV as task shader workgroup completes.
+Mesh shader input
+in payload Type variable
+can exist only once, read-only
+taskPayloadSharedEXT Type variable;
+can exist only once, read-only
+in taskNV { … };
+single interface block, read-only
+Mesh shader output maximum size
+out vertices Type vertices[ VERTS ],
+out indices uint3 indices[ PRIMS ]
+layout(
+max_vertices = VERTS,
+max_primitives = PRIMS) out;
+layout(
+max_vertices = VERTS,
+max_primitives = PRIMS) out;
+Mesh shader output counts
+SetMeshOutputCounts(
+vertexCount, primitiveCount);
+SetMeshOutputsEXT(
+vertexCount, primitiveCount);
+Vertex count always max_vertices, primitive count set by gl_PrimitiveCountNV
+Mesh shader output attributes
+Write-only, after SetMeshOutputCounts
+Write-only, after SetMeshOutputsEXT
+Read/write at any point (allows to avoid shared memory)
+Mesh shader output primitive indices
+Indices are an array of vectors. Write entire primitive at once
+(uint3 for triangle, uint2 for lines)
+Indices are an array of vectors. Write entire primitive at once
+(uvec3 for triangle, uvec2 for lines, uint for points)
+Indices are an array of flat values (uint). Can write partial primitives.
+Also has special intrinsic to fill indices writePackedPrimitiveIndices4x8NV
+Mesh shader per-primitive culling
+primitives[idx].SV_CullPrimitive
+gl_MeshPrimitivesEXT[idx].gl_CullPrimitiveEXT
+Not directly supported
+Basic function call
+DispatchMesh(x, y, z);
+vkCmdDrawMeshTasksEXT(... x, y, z);
+vkCmdDrawMeshTasksNV(... x, xOffset);
+It is important to note, that while portability between APIs can be achieved, portability in performance among vendors is much harder. This is one of the reasons why this extension has not been released as a ratified KHR extension and Khronos continues to investigate improvements to geometry rasterization.
+To improve the situation a little bit, VK_EXT_mesh_shader introduces various preferences that can be queried through VkPhysicalDeviceMeshShaderPropertiesEXT, and developers are encouraged to respect these in order to generate optimal shader permutations.
+VkPhysicalDeviceMeshShaderPropertiesEXT members for vendor preferences
+Description of mesh shader behavior
+maxPreferredTaskWorkGroupInvocations
+maxPreferredMeshWorkGroupInvocations
+While the minimum for maxTaskWorkGroupInvocations and maxMeshWorkGroupInvocations does match DirectX 12, these values reflect the preferred sizing of the workgroup.
+It is recommended to use a compile-time loop for processing vertices and primitives, so that the shader can cater to the case when the workgroup size is lower than the number of output vertices/primitives. This enables the developer to use the same meshlet size across different vendors.
+prefersLocalInvocationVertexOutput
+prefersLocalInvocationPrimitiveOutput
+If true, the vertex/primitive output arrays should be indexed by the gl_LocalInvocationIndex. This also implies that the mesh shader workgroup size should match the number of output vertices and primitives.
+For example: gl_MeshVerticesEXT[gl_LocalInvocationIndex].gl_Position = pos; gl_PrimitiveTriangleIndicesEXT[gl_LocalInvocationIndex] = indices;
+prefersCompactVertexOutput
+Indicates that the vertex output array should be compact (without gaps between vertices). This way only as much output space may be reserved as needed, which may improve performance.
+When false, compaction is not required for optimal performance, and the output vertex count can be left at the max_vertices value (or highest used vertex index + 1). A benefit of this is that the primitive indices do not have to be adjusted for vertex compaction.
+prefersCompactPrimitiveOutput
+Similar to the above. Indicates whether the primitive output array should be compact (without gaps).
+There are further aspects that can influence the performance of mesh shaders in a vendor dependent way:
+The number of maximum output vertices and primitives that a mesh shader is compiled with.
+The number of per-vertex and per-primitive output attributes that are passed to fragment shaders. For example, it may be beneficial to fetch additional attributes in the fragment shader and interpolate them via hardware barycentrics to reduce the output space of the mesh shader.
+The complexity of the culling performed in the mesh shader. For example details regarding the per-vertex and/or per-primitive culling with compact outputs compared to letting the hardware perform culling.
+The usage of additional shared memory. If possible developers should use subgroup operations (such as shuffle) instead.
+The task payload size.
+Task shaders may add overhead, use them only when they can cull a meaningful number of primitives or when actual geometry amplification is desired.
+Do not try to reimplement the fixed-function pipeline, strive for simpler algorithms instead.
+The meshlet / primitive cluster dimensions can have an especially big impact for the developer, as when streaming it is ideal to store assets with a fixed clustering in advance. Vendors may have different performance recommendations and so we suggest the use of smaller cluster sizes that work equally well across multiple vendors and process multiple small clusters at once on implementations that perform better with larger clusters. In this area we advise developers to experiment and consult with their hardware vendors for recommendations.
+The open source sample https://github.com/nvpro-samples/gl_vk_meshlet_cadscene has been updated to support and showcase the VK_EXT_mesh_shader extension. Please note that the shaderc library in the Vulkan SDK may not be updated to the necessary version yet, but this is coming soon.
+Further reading
+Introduction to Turing Mesh Shaders | NVIDIA Technical Blog
+Using Mesh Shaders for Professional Graphics | NVIDIA Technical Blog
+AMD GPU Open SAMPLER FEEDBACK & MESH SHADERS
+Mesh and task shader intro and basics | Timur's Blog
+devilish

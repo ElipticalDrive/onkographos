@@ -1,0 +1,513 @@
+In summary:
+
+\- Supersampling and anti-aliasing
+
+- Extend SSAA beyond the existing fixed 2× per-axis option.
+- Implement configurable supersampling multipliers, including fractional scales.
+- Bring SSAA support to the Metal renderer.
+- Add high-quality SSAA downsampling filters:
+  - Lanczos2 and Lanczos3.
+  - Mitchell–Netravali.
+  - Tuned Gaussian or other low-ringing kernels.
+- Investigate linear-light downsampling.
+- Support SSAA combined with SMAA.
+- Add temporal anti-aliasing (TAA).
+- Add SMAA T2x.
+- Add SMAA S2x and SMAA 4x.
+- Add NVIDIA DLAA.
+- Add AMD FSR Native AA.
+- Add Intel XeSS Native AA.
+
+\- Spatial upscaling
+
+- Add AMD FSR 1.0 with EASU and RCAS.
+- Add NVIDIA Image Scaling (NIS).
+- Decouple internal rendering resolution from output resolution.
+- Implement arbitrary internal rendering resolution multipliers.
+- Implement a common interface for different upscaling algorithms.
+
+\- Temporal upscaling
+
+- Add AMD FidelityFX Super Resolution temporal upscaling.
+- Add NVIDIA DLSS Super Resolution.
+- Add Intel XeSS Super Resolution.
+- Add Apple MetalFX temporal upscaling.
+- Implement subpixel camera jitter.
+- Generate accurate per-object motion vectors.
+- Add dedicated frame-history buffers.
+- Implement depth-aware temporal history rejection.
+- Implement disocclusion detection.
+- Add reactive masks for transparency and animated effects.
+- Improve anti-ghosting and temporal accumulation.
+- Correctly handle motion vectors with interpolated 30 Hz simulation states.
+- Support HDR-aware temporal reconstruction.
+
+\- Dynamic resolution and frame-rate technologies
+
+- Implement dynamic resolution scaling based on GPU frame times.
+- Add frame-time smoothing and resolution-change hysteresis.
+- Integrate dynamic resolution scaling with temporal upscalers.
+- Investigate frame generation.
+- Improve frame pacing and presentation consistency.
+
+\- Texture filtering and mipmapping
+
+- Implement alpha-coverage-preserving mipmap generation.
+- Improve mipmap generation for distant textures.
+- Improve filtering of normal maps and bump maps.
+- Implement specular anti-aliasing.
+- Improve mipmap LOD bias selection with upscaling and supersampling.
+- Improve texture stability under camera movement.
+
+\- Transparency and alpha handling
+
+- Improve alpha-tested geometry rendering.
+- Investigate stochastic alpha testing using blue-noise patterns.
+- Combine stochastic transparency with temporal reconstruction.
+- Improve premultiplied-alpha and straight-alpha handling.
+- Eliminate filtering halos around transparent texture borders.
+- Improve multisampled colour and alpha resolve accuracy.
+
+\- Panini projection and alternative projections
+
+- Improve Panini reconstruction filtering.
+- Investigate Jacobian-aware anisotropic reconstruction.
+- Investigate elliptical weighted-average (EWA) filtering for nonlinear projections.
+- Add stereographic projection.
+- Add equisolid-angle fisheye projection.
+- Add configurable cylindrical projection.
+- Implement smoother projection transitions when changing FOV or camera mode.
+
+\- Shadow quality
+
+- Improve percentage-closer filtering (PCF) for applicable shadow types.
+- Investigate improved shadow sampling patterns.
+- Implement temporal shadow stabilisation.
+- Reduce shadow flickering during movement.
+- Investigate contact-hardening shadows.
+- Improve shadow blur kernels.
+- Improve shadow atlas border handling.
+- Improve shadow texture-space stability.
+
+\- Colour accuracy and rendering precision
+
+- Add blue-noise dithering to reduce colour banding.
+- Audit precision throughout intermediate render passes.
+- Use higher-precision intermediate render targets where beneficial.
+- Improve HDR colour-space handling during post-processing.
+- Validate SDR and HDR output accuracy across platforms.
+- Improve the consistency of alpha blending and colour-space conversions.
+- Preserve original Xbox gamma-space blending where necessary for visual accuracy.
+
+\- GPU optimisation and VR
+
+- Investigate variable-rate shading (VRS).
+- Improve fixed foveated rendering.
+- Investigate eye-tracked foveated rendering.
+- Optimise GPU workload distribution using resolution scaling and reconstruction.
+
+\- Graphics capture, benchmarking and quality testing
+
+- Build a deterministic graphics quality regression suite.
+- Add repeatable camera-path and animation-state captures.
+- Generate high-resolution reference images for comparison.
+- Implement automated PSNR and SSIM measurements.
+- Measure temporal flickering and edge instability.
+- Detect ghosting around moving objects.
+- Measure changes in subpixel detail reconstruction.
+- Benchmark GPU performance and frame times for each rendering technique.
+- Test representative scenes containing foliage, reflective surfaces, transparent effects and fast camera movement.
+
+- More extensive contact-shadow enhancements.
+
+### Main Body
+
+OpenH1 has quite a lot of potential for graphics improvements, particularly because it's a native port with modern Vulkan and Metal renderers rather than an emulation layer.
+
+I'd approach this in the same way as the audio improvements: improve the accuracy and quality of the rendering pipeline itself, while retaining the original Halo aesthetic. Some of the most interesting changes would be almost invisible as features, but immediately noticeable in image quality, motion clarity or consistency.
+
+## What OpenH1 already has
+
+One important discovery from the repository: SSAA is already implemented!
+
+OpenH1's documentation confirms these existing features:
+
+| Feature               | Current implementation                                             |
+| --------------------- | ------------------------------------------------------------------ |
+| SSAA                  | `ssaa2x` — 2× resolution per axis, 4× the pixels                   |
+| MSAA                  | 2×, 4× and 8×                                                      |
+| SMAA / FXAA           | Both available; SMAA is the Enhanced preset default                |
+| Anisotropic filtering | Up to 16×                                                          |
+| HDR                   | Half-float rendering with HDR10/scRGB presentation where supported |
+| Ambient occlusion     | GTAO, currently optional                                           |
+| Dynamic lighting      | Enhanced per-pixel lighting                                        |
+| Shadows               | Higher-resolution shadow maps, up to 1024                          |
+| Panini projection     | Adjustable strength and vertical compression                       |
+| Frame interpolation   | Game-state interpolation between 30 Hz simulation ticks            |
+| High-resolution HUD   | Separate higher-resolution assets and rendering                    |
+
+The existing 2× SSAA option is unavailable on Android and Metal, while Vulkan desktop supports it. Panini also uses additional supersampling where needed to compensate for its centre magnification.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub+2
+
+
+
+That means several obvious features have already been tackled. The opportunities now lie in extending the AA pipeline, improving temporal image reconstruction, and refining rendering precision.
+
+## 1. Build a proper temporal anti-aliasing system
+
+Highest priority
+
+This is probably the most important missing foundation I could identify from the documented rendering options.
+
+SMAA is excellent at finding and smoothing existing geometric edges, but it generally cannot recover subpixel detail that changes between frames. This is why distant foliage, thin railings, specular reflections and fine texture patterns can still shimmer, even at relatively high resolutions.
+
+I would introduce temporal AA as a reusable renderer subsystem, with several options:
+
+| Technique      | Purpose                                                                 |
+| -------------- | ----------------------------------------------------------------------- |
+| TAA            | Accumulate information across frames to reduce shimmer                  |
+| SMAA T2x       | Combine morphological AA with temporal sampling                         |
+| SMAA S2x / 4x  | Combine spatial multisampling with SMAA; 4x also uses temporal sampling |
+| DLAA           | NVIDIA's native-resolution, DLSS-based anti-aliasing                    |
+| FSR Native AA  | Temporal reconstruction at native resolution                            |
+| XeSS Native AA | Intel's native-resolution temporal reconstruction, where supported      |
+
+The particularly interesting one is temporal supersampling, where successive frames are rendered with slightly different subpixel camera offsets and accumulated.
+
+A well-designed version could offer much better temporal stability than the current single-frame SMAA pass, often with a far smaller cost than 2× SSAA.
+
+However, it needs motion vectors, depth-aware history rejection, carefully chosen accumulation weights and anti-ghosting.
+
+Halo poses an unusual challenge here: although the original game simulates at 30 Hz, OpenH1 can render interpolated poses at the display refresh rate. The temporal AA system would need to track the actual previous rendered pose, not simply the previous simulation tick.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+Otherwise, incorrectly calculated motion vectors could cause ghosting on vehicles, moving characters and camera motion.
+
+## 2. Extend SSAA and improve its resolve filter
+
+Since 2× SSAA already exists, I would extend it rather than replace it.
+
+The first improvement would be a configurable render-resolution multiplier.
+
+SSAA resolution calculator
+
+Output resolution2560 × 1440
+
+Resolution multiplier, per axis
+
+1.50×
+
+Internal resolution
+
+## 3,840 × 2,160
+
+Pixel count versus native
+
+## 2.25×
+
+The multiplier is a proposed setting, not an existing OpenH1 option. Pixel count is not the same as total GPU workload.
+
+I would also investigate the existing SSAA downsampling process. The documentation says the high-resolution image is scaled down by the display blit, but doesn't establish the precise reconstruction filter used.
+
+A proper downsampling shader could offer:
+
+- Lanczos2 or Lanczos3.
+- Mitchell–Netravali filtering.
+- A tuned Gaussian or other low-ringing reconstruction kernel.
+- Linear-light downsampling, as an option, rather than averaging nonlinear sRGB values.
+
+The aim would be to balance sharpness, alias rejection and ringing. Lanczos can preserve fine detail particularly well, but may produce halos around high-contrast edges.
+
+I'd also allow SSAA in combination with SMAA, and investigate bringing it to the Metal renderer.
+
+One complication is that OpenH1 intentionally preserves the Xbox's original gamma-space blending in its HDR pipeline. I'd respect that decision and apply any alternative reconstruction mathematics at the final image-resampling stage, rather than silently changing the game's material blending.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+## 3. Add spatial upscaling first, then FSR, XeSS and DLSS
+
+I'd implement this in two stages.
+
+### Stage A: spatial upscaling
+
+[AMD FidelityFX™ Super Resolution 1 (FSR 1) - AMD GPUOpen](https://images.openai.com/static-rsc-4/p8TuZBsXuHC9RmoZ66CsxllilrNE_PB1GpJxDRXDMFFmaSjJ0crAzzG9Vct8Z9Ypt7sucq3eG4Y6_ZITe0VvDpITcCq4aftwGCKYI6rWs6XKsQInycaMo9Koxe5pciCwkuIsM7toM8HGSrRtKajPf7HFafJf91KH97-6xTLE22g?purpose=inline)
+
+FSR 1.0 (EASU + RCAS) would be an excellent first contribution.
+
+It requires only the current rendered image and is compatible with a wide range of graphics hardware. It doesn't need motion vectors, depth or previous-frame history.
+
+AMD's FSR 1 combines Edge-Adaptive Spatial Upsampling (EASU) with Robust Contrast Adaptive Sharpening (RCAS).&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://gpuopen.com\&sz=32)
+
+AMD GPUOpen
+
+
+
+I'd also consider NVIDIA Image Scaling (NIS) as an alternative spatial reconstruction option.
+
+The more useful change would be to decouple internal render resolution from display resolution. OpenH1 currently documents `display.resolution_scaling` as either native resolution or the Xbox's original 640×480 resolution.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+A flexible scaling system could permit arbitrary ratios below or above native and use an appropriate reconstruction method for each.
+
+### Stage B: temporal upscaling
+
+Once motion vectors and history handling exist, the more sophisticated technologies become possible.
+
+[We’re generating news on AMD FSR 3, so let’s put you in the frame! - AMD GPUOpen](https://images.openai.com/static-rsc-4/6QaV-OlHwamhMU6DWXkRj_dciA9LDOa2tjkDqnYcOd_w5tWRGRKQ_DnBphBBkmTqvbXKcV4MPkZ0qktaL86_Slo47L2pQjK3SCeMwWbmadJsb7U7bX4XJ0Wut1m4WoiQvnWFDGI4uFKjNZnqasxrUPTGqFm3_qAxkBvT8hnSeSc?purpose=inline)
+
+AMD FidelityFX Super Resolution
+
+The obvious cross-platform starting point is the open-source temporal FSR upscaler. It provides a relatively accessible implementation to validate the renderer's temporal inputs.
+
+[Intel XeSS kontra NVIDIA DLSS - sprawdzamy techniki upscalingu obrazu w Shadow of the Tomb Raider oraz HITMAN 3 | PurePC.pl](https://images.openai.com/static-rsc-4/ieZHeg1tV1E8ND-DRmPvKMravjZ0lH1jxFh3zk5cPj8Qm4yfNn0I2VOTU_JTwht0c42w4FeDW4zxt2wONZgm7lp_TEuRhuKgAFtHdcIWtfovcIMF5e0c6kZS55YOiwX4Ll1d49wEtUS-cKuGK1Z2OgDWAiOx04AIqqOGO6Bvjmw?purpose=inline)
+
+NVIDIA DLSS / DLAA
+
+A particularly attractive option for RTX users. The Vulkan renderer provides a potential integration route through NVIDIA NGX, subject to platform support and SDK licensing.
+
+[Nvidia DLSS 2 vs Intel XeSS vs AMD FSR 2 on Nvidia GeForce and AMD Radeon GPUs | TechSpot](https://images.openai.com/static-rsc-4/-px5x-jSxEH_Qs1uzSczVsgqGTKKJNa3P1mXwRBFscu_gT9LcuOlu4BGoLsabwcu2UD1q2CqAH60WHmy0T-QSWBmte60WpxH2aPgf4SSpN-nPSl2xs8RTHX-EIPu7dBdimE3v9KWfihLOVJyNUsydCE0Tz86AIDNMUav1rAVwjg?purpose=inline)
+
+Intel XeSS
+
+Another temporal reconstruction option, including support for suitable non-Intel GPUs through compatible implementations. Intel documents Vulkan integration and the required temporal inputs.
+
+Intel and AMD both document the need for appropriately calculated motion vectors, jitter and depth information, with additional masking helping difficult transparent and animated effects.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://gpuopen.com\&sz=32)
+
+GPUOpen Manuals+1
+
+
+
+The architectural change I'd make is a single upscaler interface in OpenH1. Each implementation would advertise which inputs it needs and whether it supports the selected hardware, HDR mode and render scale.
+
+I'd also consider MetalFX on macOS as the equivalent platform-native option.
+
+### The main technical obstacle
+
+The renderer needs to supply the history information that modern temporal upscalers expect.
+
+OpenH1 scene renderer
+
+Internal resolution, optional subpixel jitter
+
+Scene colour + depth
+
+Motion vectors
+
+Reactive / transparency masks
+
+Frame history + exposure
+
+Temporal reconstruction provider
+
+TAA / FSR / DLSS / XeSS / MetalFX
+
+Presentation processing
+
+Panini, colour mapping, HUD, display encoding
+
+Conceptual proposed pipeline. The exact order of tone mapping, reconstruction and projection must be designed around the chosen SDK and HDR colour space.
+
+The difficult content would be plasma effects, transparent energy shields, scrolling textures, explosions, foliage and animated characters.
+
+Those need proper velocities, disocclusion handling or reactive masks to avoid trails and smearing.
+
+The existing game's fixed-function-style rendering and separate game/render command streams make this a substantial project, but also give developers opportunities to instrument the pipeline.
+
+## 4. Improve transparency, foliage and texture aliasing
+
+This is one of the less glamorous improvements that could have a significant effect on Halo CE.
+
+The game contains lots of alpha-tested and partly transparent geometry. Grass, trees, grates, fences and various effects can become unstable at distance.
+
+OpenH1 already uses an alpha-to-coverage-like sample-mask approach for multisampled alpha-tested surfaces.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+I'd build on that with alpha-coverage-preserving mipmaps.
+
+Ordinary mipmap generation averages texture alpha values, which can cause thin details to disappear or change apparent coverage at distance. Coverage-preserving mip generation adjusts the alpha distribution so the thresholded texture maintains a more consistent visible area.
+
+This is particularly useful for foliage and chain-link-style surfaces.
+
+I'd also investigate stochastic alpha testing using spatial or temporal blue-noise patterns. With suitable temporal reconstruction, this can approximate fractional coverage without conventional blending.
+
+However, it must be carefully combined with the game's existing visibility and blending rules to avoid changing transparency semantics.
+
+Other useful texture-level improvements would be filtering normal/bump maps without introducing new specular aliasing, and controlling mip LOD bias appropriately when upscaling or supersampling.
+
+## 5. Improve Panini's reconstruction and add other projections
+
+Panini itself is already unusually well integrated in OpenH1. The documentation describes proper handling of weapon FOV, reticle position, waypoints, split-screen views and supersampling to compensate for the projection's magnification.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+Rather than simply adding more projections, I'd look at the resampling mathematics of the projection.
+
+A nonlinear warp changes the pixel footprint differently across the screen. A conventional bilinear sample doesn't always reconstruct that footprint optimally.
+
+Elliptical weighted-average filtering (EWA), or another Jacobian-aware anisotropic reconstruction method, could provide better sampling across strongly compressed or stretched regions of the image.
+
+That could reduce edge shimmer and preserve more detail near the centre and sides of a wide-FOV image.
+
+Additional projection options could include stereographic projection, equisolid-angle fisheye, and configurable cylindrical projection. These would be optional alternatives, not replacements for standard rectilinear perspective.
+
+A subtler improvement would be a projection whose distortion changes gradually with field of view or camera mode, avoiding abrupt changes when zooming or entering vehicles.
+
+## 6. Improve shadow reconstruction and stability
+
+OpenH1 already supports larger shadow maps and carefully adjusts blur to preserve the softness of the Xbox's projected shadows.
+
+That means simply adding higher shadow resolutions would have diminishing returns.
+
+I'd focus on the quality and stability of the final shadow sampling.
+
+For applicable shadow types, potentially useful techniques include:
+
+Improved PCF filtering. Percentage-closer filtering with carefully designed sample patterns can smooth depth-tested shadow boundaries. This is not a drop-in replacement for Halo's existing blurred projected object shadows, however.
+
+Temporal shadow stabilisation. Ensuring that tiny shadow changes don't produce visible flicker as the camera or caster moves.
+
+Contact-hardening shadows. An optional enhancement where shadow penumbrae change with separation from the caster, provided the chosen shadow representation has enough information to support it.
+
+For the existing projected shadows, a more conservative change would be to improve blur-kernel quality, atlas border handling and texture-space stability without introducing a different shadow model.
+
+## 7. Improve colour precision, blending and dithering
+
+This is an area where I'd be careful about preserving authenticity.
+
+OpenH1's HDR implementation is deliberately designed not to change the original SDR image indiscriminately. It uses half-float render targets but retains the game's original blending behaviour, which was authored for the Xbox's graphics pipeline.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+There are still useful investigations.
+
+For SDR output, I'd test whether final 8-bit quantisation creates visible banding in skies, fog and smooth gradients. If so, low-amplitude blue-noise dithering just before output conversion could reduce banding without changing the underlying scene.
+
+I'd also audit precision in intermediate passes, especially where multiple effects are composed or reconstructed. Some intermediate surfaces might benefit from higher precision even when the final image remains 8-bit.
+
+Finally, I'd investigate alpha correctness during post-processing and upscaling. Premultiplied versus straight-alpha handling, filtering across transparent borders and resolving multisampled colour can all produce halos or fringe artefacts if performed inconsistently.
+
+Those are the sort of issues where a very small DSP-style mathematical correction can produce a cleaner image.
+
+## 8. Dynamic resolution scaling
+
+Dynamic resolution scaling would complement spatial and temporal upscaling.
+
+Rather than running at one fixed internal resolution, the renderer could respond to measured GPU frame times.
+
+For example, a 4K output mode might render somewhere between 1440p and 2160p, adjusting gradually to maintain a selected frame-rate target.
+
+The important details would be frame-time smoothing, hysteresis to prevent constant resolution oscillation, and providing the correct changing render dimensions to the upscaler.
+
+This would be especially worthwhile on Android and the Steam Deck, and potentially in VR.
+
+OpenH1 already has GPU instrumentation and a renderer that separates its internal rendering from presentation, making this a logical extension.&#x20;
+
+[image](https://www.google.com/s2/favicons?domain=https://raw.githubusercontent.com\&sz=32)
+
+GitHub
+
+
+
+## 9. More advanced possibilities
+
+A few other features are worth putting on a longer-term roadmap.
+
+| Feature                               | Why it's interesting                                    | Caveat                                                        |
+| ------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------- |
+| Specular anti-aliasing                | Reduce shimmer from bump-mapped and reflective surfaces | Must fit Halo's existing material model                       |
+| Contact shadow refinement             | Improve how objects visually connect to nearby geometry | Can alter the original lighting                               |
+| Higher-quality texture mip generation | Better distant texture stability                        | Cannot restore detail lost in original assets                 |
+| Variable-rate shading                 | Save GPU work in less important parts of the image      | Primarily a performance feature                               |
+| Eye-tracked foveated rendering        | Improve VR resolution where the player is looking       | OpenH1 already has foveation work; this would refine it       |
+| Frame generation                      | Increase displayed frame rate on slower systems         | Lower priority given OpenH1's existing interpolated rendering |
+| Improved frame pacing                 | More consistent motion and responsiveness               | Existing low-latency work should be measured first            |
+
+I'd place ray tracing and wholesale physically based material conversion quite low on the list. They can be interesting, but they're substantial artistic changes rather than purely technical fidelity improvements.
+
+## My recommended development order
+
+Given the systems OpenH1 already has, I'd organise the work into the following phases.
+
+## 01
+
+Improve existing spatial rendering
+
+Generalised resolution scaling, SSAA resolve filters, alpha-coverage mipmaps and output dithering. These offer useful improvements without requiring significant new frame-history infrastructure.
+
+## 02
+
+Add spatial upscaling
+
+Start with FSR 1 and optional CAS/NIS. Keep the renderer's internal resolution independent of its display resolution.
+
+## 03
+
+Build temporal rendering infrastructure
+
+Add camera jitter, accurate per-object motion vectors, history buffers, disocclusion handling and reactive masks. Validate it first with a basic TAA implementation.
+
+## 04
+
+Add modern temporal reconstruction
+
+Integrate FSR, DLSS/DLAA, XeSS and MetalFX behind a common interface. Support native-resolution AA as well as lower-resolution upscaling.
+
+## 05
+
+Refine presentation and performance
+
+Dynamic resolution scaling, improved Panini resampling, temporal shadow stability, cross-platform HDR validation and GPU-driven performance tuning.
+
+## One extra feature I'd strongly recommend: deterministic graphics quality testing
+
+This would be the graphical equivalent of the audio DSP testing we discussed.
+
+OpenH1 already supports controlled captures and profiling. I'd extend that into a proper rendering-quality test suite.
+
+For each change, capture the same camera path with the same animation states, and measure spatial and temporal differences.
+
+Useful metrics would include PSNR and SSIM against a high-resolution reference, temporal flicker, ghosting around moving objects, edge stability, and GPU render time.
+
+I'd pay particular attention to four types of scene: distant foliage in Halo, reflective Forerunner corridors, transparent Covenant effects and rapid camera movement in combat. They stress very different parts of the renderer.
+
+For AA and temporal reconstruction especially, still-image comparisons are insufficient: a slightly softer image with excellent temporal stability can look substantially better in motion than a sharper image with constant shimmer.
+
+If I were choosing just one major project, I'd build the temporal reconstruction infrastructure. Not because DLSS or FSR is inherently necessary for a 2001 game, but because it enables native-resolution temporal AA, better reconstruction of subpixel detail, optional upscaling and potentially more advanced rendering features later.
+
+For smaller contributions with high confidence of measurable results, I'd start with SSAA downsampling quality and alpha-coverage-preserving mipmaps. Those are much closer to your sinc-interpolation example: improvements in how existing visual information is sampled and reconstructed, rather than new effects layered on top.
+
+&#x20;Create image

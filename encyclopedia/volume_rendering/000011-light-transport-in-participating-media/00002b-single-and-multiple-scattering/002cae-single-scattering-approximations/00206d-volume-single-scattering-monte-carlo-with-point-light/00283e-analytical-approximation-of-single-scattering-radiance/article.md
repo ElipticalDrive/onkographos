@@ -1,0 +1,290 @@
+# Analytical Approximation of Single Scattering Radiance
+
+Also called: First-Order Taylor Expansion of Incident Radiance, Legendre Polynomial Expansion Approximation
+
+## Overview
+This method computes the in-scattered single scattering radiance $J_{ss}$ by approximating the phase function and incident radiance with low-order expansions, allowing the scattering contribution to be decomposed into direction-independent terms that are pre-computed per voxel [S1]. It differs from Monte Carlo approaches by avoiding repeated ray tracing for incident light estimation during rendering, making it significantly more efficient for differentiable rendering or multi-viewpoint reconstruction where gradients are required [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   Density field $\rho(x)$ defined on a voxel grid.
+*   Extinction cross-section $\sigma_t$ (scalar).
+*   Scattering anisotropy factor $\bar{\mu}$.
+*   Ambient incident radiance field $L_{in}(x, \omega')$ (or a point light source model).
+*   Number of sample directions $N$ for pre-computation.
+
+**Outputs:**
+*   Pre-computed voxel grids: $Q_{ri}^0$, $Q_{ri}^1$, $\dot{Q}_{ri}^0$, $\dot{Q}_{ri}^1$.
+*   Final outgoing radiance $L_{out}$ per pixel.
+
+### Data Structures
+1.  **Density Grid:** 3D array storing $\rho(x)$ for each voxel.
+2.  **Extinction Grid:** 3D array storing $\kappa_t(x) = \sigma_t \rho(x)$.
+3.  **Pre-computed Term Grids:** Four 3D arrays storing the vectors/scalars $Q_{ri}^0(x)$, $Q_{ri}^1(x)$, $\dot{Q}_{ri}^0(x)$, $\dot{Q}_{ri}^1(x)$ for each voxel center.
+    *   $Q_{ri}^0(x)$: Scalar.
+    *   $Q_{ri}^1(x)$: 3D Vector.
+    *   $\dot{Q}_{ri}^0(x)$: Scalar (gradient w.r.t density).
+    *   $\dot{Q}_{ri}^1(x)$: 3D Vector (gradient w.r.t density).
+
+### Parameters
+*   $N$: Number of sample directions over the unit sphere for pre-computation. [S1]
+*   $\bar{\mu}$: Scattering anisotropy factor, defined as $\bar{\mu} = \frac{3}{2} \int_{-1}^{1} \mu p(\mu) d\mu$ [S1].
+
+### Formulas
+
+**Phase Function Approximation:**
+The phase function $p(\omega, \omega')$ is approximated using a truncated Legendre polynomial expansion after the first moment [S1]:
+$$ p(\omega, \omega') \approx \frac{1}{4\pi} (1 + \bar{\mu}(\omega \cdot \omega')) \quad (6) $$
+where $\omega$ is the view direction and $\omega'$ is the incident direction.
+
+**Incident Radiance Approximation:**
+The reduced incident radiance $L_{ri}$ is approximated using a first-order Taylor expansion in direction $\omega'$ [S1]:
+$$ L_{ri}(x_u, \omega') \approx L_{ri}^0(x_u) + L_{ri}^1(x_u) \cdot \omega' \quad (7) $$
+where $L_{ri}^0$ is the average radiance and $L_{ri}^1$ is the directional gradient vector.
+
+**In-scattered Radiance Decomposition:**
+Substituting the approximations into the single scattering integral yields [S1]:
+$$ J_{ss}(x_u, \omega) = \Omega (Q_{ri}^0(x_u) + Q_{ri}^1(x_u) \cdot \omega) \quad (8) $$
+where $\Omega$ is the solid angle factor (often absorbed into coefficients or set to 1 depending on normalization). The direction-independent terms are defined as [S1]:
+$$ Q_{ri}^0(x_u) = L_{ri}^0(x_u) \quad (9) $$
+$$ Q_{ri}^1(x_u) = \frac{\bar{\mu}}{3} L_{ri}^1(x_u) \quad (10) $$
+
+**Computation of $L_{ri}^0$ and $L_{ri}^1$:**
+These are computed via importance sampling over $N$ directions $\omega'_i$ on the unit sphere [S1]:
+$$ L_{ri}^0(x_u) = \frac{1}{N} \sum_{i=1}^N L_{ri}(x_u, \omega'_i) \quad (11) $$
+$$ L_{ri}^1(x_u) = \frac{3}{N} \sum_{i=1}^N L_{ri}(x_u, \omega'_i) \omega'_i \quad (12) $$
+The factor of 3 arises from the spherical integration of direction vectors.
+
+**Gradient Terms (for Differentiable Rendering):**
+The derivatives of the pre-computed terms with respect to density are computed similarly [S1]:
+$$ \dot{Q}_{ri}^0(x_u) = \frac{1}{N} \sum_{i=1}^N \dot{L}_{ri}(x_u, \omega'_i) \quad (19) $$
+$$ \dot{Q}_{ri}^1(x_u) = \frac{3}{N} \sum_{i=1}^N \dot{L}_{ri}(x_u, \omega'_i) \omega'_i \quad (20) $$
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def precompute_terms(density_grid, sigma_t, ambient_light_func, N, anisotropy_mu):
+    """
+    Pre-computes direction-independent terms for single scattering.
+    
+    Args:
+        density_grid: 3D numpy array of shape (D, H, W)
+        sigma_t: float, extinction cross-section
+        ambient_light_func: function(x, omega_prime) -> radiance, computes L_in
+        N: int, number of sample directions
+        anisotropy_mu: float, scattering anisotropy factor
+        
+    Returns:
+        Q0, Q1, dQ0, dQ1: 3D numpy arrays (Q1, dQ1 are vector fields)
+    """
+    D, H, W = density_grid.shape
+    # Initialize output grids
+    # Q0, dQ0: scalar fields
+    Q0 = np.zeros((D, H, W))
+    dQ0 = np.zeros((D, H, W))
+    # Q1, dQ1: vector fields (3 components)
+    Q1 = np.zeros((D, H, W, 3))
+    dQ1 = np.zeros((D, H, W, 3))
+    
+    # Generate N sample directions over the unit sphere
+    # Using uniform sampling or stratified sampling
+    omega_primes = generate_uniform_sphere_samples(N) # Shape (N, 3)
+    
+    # Pre-compute extinction field
+    kappa_t = sigma_t * density_grid
+    
+    # Iterate over each voxel
+    for d in range(D):
+        for h in range(H):
+            for w in range(W):
+                vp = np.array([d, h, w]) # Voxel position
+                
+                # Compute reduced incident radiance for each sample direction
+                L_ri_sum = 0.0
+                L_ri_vec_sum = np.zeros(3)
+                
+                # Gradient sums
+                dL_ri_sum = 0.0
+                dL_ri_vec_sum = np.zeros(3)
+                
+                for i in range(N):
+                    omega_p = omega_primes[i]
+                    
+                    # Compute reduced incident radiance L_ri(vp, omega_p)
+                    # L_ri = L_in * tau (transmittance from light to voxel)
+                    # For ambient light, tau is typically 1 or pre-computed
+                    # Assuming ambient_light_func returns L_in at vp for direction omega_p
+                    L_in = ambient_light_func(vp, omega_p)
+                    
+                    # For point lights, L_ri includes attenuation from light to vp
+                    # L_ri(vp, omega_p) = L_light * exp(-sigma_t * dist(light, vp)) / dist^2
+                    # This step requires tracing a ray from vp to the light source
+                    L_ri_val = compute_reduced_incident_radiance(vp, omega_p, sigma_t, density_grid)
+                    
+                    # Accumulate for L_ri^0 and L_ri^1
+                    L_ri_sum += L_ri_val
+                    L_ri_vec_sum += L_ri_val * omega_p
+                    
+                    # Compute gradients dL_ri/d_rho
+                    # This requires differentiating the transmittance and incident radiance
+                    dL_ri_val = compute_gradient_reduced_incident_radiance(vp, omega_p, sigma_t, density_grid)
+                    
+                    dL_ri_sum += dL_ri_val
+                    dL_ri_vec_sum += dL_ri_val * omega_p
+                
+                # Compute L_ri^0 and L_ri^1
+                L_ri_0 = L_ri_sum / N
+                L_ri_1 = (3.0 / N) * L_ri_vec_sum
+                
+                # Compute Q_ri^0 and Q_ri^1
+                Q0[d, h, w] = L_ri_0
+                Q1[d, h, w] = (anisotropy_mu / 3.0) * L_ri_1
+                
+                # Compute derivative terms
+                dL_ri_0 = dL_ri_sum / N
+                dL_ri_1 = (3.0 / N) * dL_ri_vec_sum
+                
+                dQ0[d, h, w] = dL_ri_0
+                dQ1[d, h, w] = (anisotropy_mu / 3.0) * dL_ri_1
+                
+    return Q0, Q1, dQ0, dQ1
+
+def ray_march_single_scattering(camera_ray, density_grid, sigma_t, Q0, Q1, dQ0, dQ1, N_steps):
+    """
+    Ray marches through the volume to compute single scattering radiance.
+    
+    Args:
+        camera_ray: Ray object with origin and direction
+        density_grid: 3D numpy array
+        sigma_t: float
+        Q0, Q1, dQ0, dQ1: Pre-computed grids
+        N_steps: int, number of steps along the ray
+        
+    Returns:
+        L_ss: float, total single scattering radiance
+        dL_ss: float, gradient of radiance w.r.t density
+    """
+    D, H, W = density_grid.shape
+    L_ss = 0.0
+    dL_ss = 0.0
+    
+    # Determine intersection with volume bounds
+    t_min, t_max = camera_ray.intersect_volume()
+    
+    if t_min >= t_max:
+        return 0.0, 0.0
+        
+    step_size = (t_max - t_min) / N_steps
+    current_t = t_min
+    
+    # Transmittance from back of volume to current point
+    tau_current = 1.0
+    
+    for step in range(N_steps):
+        # Sample point xu
+        xu = camera_ray.origin + camera_ray.direction * current_t
+        
+        # Fetch density and extinction using trilinear interpolation
+        rho_xu = trilinear_interpolate(density_grid, xu)
+        kappa_t_xu = sigma_t * rho_xu
+        
+        # Fetch pre-computed terms using trilinear interpolation
+        Q0_xu = trilinear_interpolate_scalar(Q0, xu)
+        Q1_xu = trilinear_interpolate_vector(Q1, xu)
+        dQ0_xu = trilinear_interpolate_scalar(dQ0, xu)
+        dQ1_xu = trilinear_interpolate_vector(dQ1, xu)
+        
+        # Compute in-scattered radiance J_ss
+        # J_ss = Omega * (Q0 + Q1 . omega)
+        # Assuming Omega is absorbed or 1 for normalized radiance
+        omega = camera_ray.direction
+        J_ss = Q0_xu + np.dot(Q1_xu, omega)
+        
+        # Compute derivative of J_ss w.r.t density
+        # dJ_ss = dQ0 + dQ1 . omega
+        dJ_ss = dQ0_xu + np.dot(dQ1_xu, omega)
+        
+        # Accumulate radiance
+        # Contribution = J_ss * exp(-integral(kappa_t from xu to back)) * step_size
+        # Transmittance from xu to back (xb) is tau_current
+        # Note: tau_current is transmittance from back to xu in forward march?
+        # Standard ray marching: tau(xu, xb) = exp(-int_{xu}^{xb} kappa_t ds)
+        # We accumulate from back to front.
+        
+        # Transmittance from current point to back of volume
+        # This requires integrating kappa_t from xu to t_max
+        # For simplicity, assume tau_current is pre-computed or updated incrementally
+        # Here, we assume tau_back_to_xu is maintained
+        tau_xu_to_back = compute_transmittance(camera_ray, xu, t_max, density_grid, sigma_t)
+        
+        contribution = J_ss * tau_xu_to_back * step_size
+        L_ss += contribution
+        
+        # Gradient accumulation
+        # dL_ss/d_rho involves derivative of transmittance and J_ss
+        # dL_ss = (dJ_ss * tau + J_ss * d_tau) * step_size
+        d_tau_xu_to_back = compute_transmittance_gradient(camera_ray, xu, t_max, density_grid, sigma_t)
+        d_contribution = (dJ_ss * tau_xu_to_back + J_ss * d_tau_xu_to_back) * step_size
+        dL_ss += d_contribution
+        
+        current_t += step_size
+        
+    return L_ss, dL_ss
+
+def trilinear_interpolate(grid, point):
+    # Standard trilinear interpolation implementation
+    pass
+
+def trilinear_interpolate_scalar(grid, point):
+    return trilinear_interpolate(grid, point)
+
+def trilinear_interpolate_vector(grid, point):
+    # Interpolate each component of the vector field
+    return np.array([trilinear_interpolate(grid[..., i], point) for i in range(3)])
+
+def compute_reduced_incident_radiance(vp, omega_p, sigma_t, density_grid):
+    # Trace ray from vp in direction omega_p to light source
+    # Return L_light * exp(-sigma_t * optical_distance) / distance^2
+    pass
+
+def compute_gradient_reduced_incident_radiance(vp, omega_p, sigma_t, density_grid):
+    # Compute d(L_ri)/d_rho
+    # This involves derivative of transmittance along the light ray
+    pass
+
+def compute_transmittance(ray, start_t, end_t, density_grid, sigma_t):
+    # Integrate sigma_t * rho along ray from start_t to end_t
+    pass
+
+def compute_transmittance_gradient(ray, start_t, end_t, density_grid, sigma_t):
+    # Compute derivative of transmittance w.r.t density
+    pass
+```
+
+### Edge Cases and Pitfalls
+*   **Interpolation Consistency:** Trilinear interpolation is used for sampling density and pre-computed terms. Gradients must be scattered back to the eight nearest voxels using the same interpolation weights to maintain consistency between forward and backward passes [S1].
+*   **Anisotropy Factor:** The approximation assumes the phase function can be well-approximated by the first two Legendre moments. For highly anisotropic media with sharp peaks, higher-order terms may be needed, but the method truncates after the first moment [S1].
+*   **Light Tracing:** The pre-computation step requires tracing rays from each voxel to the light source to compute $L_{ri}$. This can be expensive for complex scenes with multiple lights or occlusions [S1].
+
+## Operating characteristics
+
+*   **Time Complexity:** Pre-computation is $O(V \cdot N)$, where $V$ is the number of voxels and $N$ is the number of sample directions. Ray marching is $O(R \cdot S)$, where $R$ is the number of rays and $S$ is the number of steps per ray. This is significantly faster than Monte Carlo methods which require $O(R \cdot S \cdot N_{samples})$ per pixel.
+*   **Memory Complexity:** Requires storing four additional 3D grids ($Q_{ri}^0, Q_{ri}^1, \dot{Q}_{ri}^0, \dot{Q}_{ri}^1$) in addition to the density grid. Memory usage is $O(V)$.
+*   **Strengths:** Efficient for differentiable rendering as gradients are computed simultaneously with radiance. Avoids repeated ray tracing for incident light estimation.
+*   **Limitations:** Approximation error due to truncation of Legendre series and Taylor expansion. Less accurate for highly anisotropic scattering or complex lighting environments compared to full Monte Carlo integration.
+*   **When to Use:** Suitable for smoke/volumetric rendering where real-time or differentiable rendering is required, and the medium is not extremely anisotropic.
+*   **When Not to Use:** For highly anisotropic media (e.g., clouds with strong forward scattering) where higher-order phase function terms are critical, or for scenes with complex, dynamic lighting where pre-computation is not feasible.
+
+## Background
+
+This method was proposed in "A High-Efficiency Physics-Based Differentiable Renderer for Smoke Reconstruction" [S1]. It addresses the inefficiency of traditional ray tracing-based frameworks for computing single scattering radiance, particularly in the context of differentiable rendering where gradient computation requires tracing additional rays. By pre-computing direction-independent terms, the method avoids redundant calculations during rendering.
+
+## Sources
+
+[S1] A High-Efficiency Physics-Based Differentiable Renderer for Smoke Reconstruction, https://doi.org/10.26599/cvm.2026.9450546, fetched 2026-10-27

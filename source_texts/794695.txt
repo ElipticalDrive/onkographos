@@ -1,0 +1,509 @@
+This is my custom open-source C# game engine designed from the ground-up for maximum possible performance rendering in VR with multiple characters and mirrors. - Add animated gaussian splat previews: cache format, renderer and bake command by BlackJaxDev · Pull Request #94 · BlackJaxDev/XRENGINE
+
+Add animated gaussian splat previews: cache format, renderer and bake command by BlackJaxDev · Pull Request #94 · BlackJaxDev/XRENGINE · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+BlackJaxDev
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+What changed
+Gaussian cache format. GaussianCache is a new cooked asset for animated gaussian splat previews. It holds:
+a splat LOD tree whose merges are moment-matched;
+nested driver meshes, built with meshopt_simplify;
+temporal levels T0–T3;
+driver motion, stored as prediction residuals on a 16-bit grid and compressed with the meshoptimizer vertex codec;
+per-attribute splat streams with meshoptimizer filters.
+The cache is split into progressive chunks. Chunk 0 is at most 256 KB for avatars and items, and at most 1 MiB for worlds, so a viewer can render while the rest downloads.
+GPU splat renderer.
+Compute passes pose the driver meshes, choose the LOD cut and pose the splats.
+A GPU radix sort orders the splats by depth.
+Splats draw as EWA quads with the standard 3DGS Jacobian clamp.
+GaussianSplatComponent and GaussianCacheComponent render caches, and a streaming loader accepts chunks as they arrive.
+Draw order is deterministic when the renderer can hold every node, which bakes always can.
+Bake command. A new library, XREngine.GaussianBaking, plus the editor command --bake-splat-preview. It:
+loads a cooked prefab or world from a pak;
+samples surfaces;
+bakes lit-projection color from 32 views (64 for worlds);
+builds the tree, the drivers, the splat bindings and the cache;
+writes the cache with stable asset IDs and reads it back to check it;
+records loop videos (VP9 and H.264 OpenH264, 1080p and 480p) and WebP posters through an external ffmpeg;
+writes report.json. Each failure kind has its own exit code.
+meshoptimizer. The Meshoptimizer.NET package is replaced by native meshoptimizer v1.3, built from source at a locked commit by Tools/Dependencies/Build-Meshoptimizer.ps1 and called through P/Invoke. The ExecTool bootstrap runs the script. The dependency report generator now encodes spaces and parentheses in local license links, so its output reproduces the committed, encoded rows.
+Opaque deferred pass. State buckets used to be ordered by object hash codes. They are now ordered by first insertion at each grouping level (shader, material, render options, mesh renderer). The grouping is the same as before, but the order is now the same in every process, and the sort does not allocate after warm-up.
+Merge with master. The branch merges master 4cb65968b. Both new CI steps are kept: master's Streamline staging and this branch's meshoptimizer build. Master split the Windows Editor publish job into parallel jobs, so the meshoptimizer build now runs in their shared prepare-windows-editor action. docs/work is removed, as master moved work docs out of this repository. The validation below was done after the merge of dea102234; the later master changes touch only CI workflows and browser smoke scripts.
+Breaking changes
+GaussianSplatComponent is no longer a ModelComponent. Older cooked content that holds it as a model component fails to load, with CookedBinary.UnknownMember under the runtime read budget.
+ShaderHelper.GaussianSplatVertex and ShaderHelper.GaussianSplatFragment are removed. The splat renderer has its own shaders.
+GaussianCache.AcceptChunk now returns bool. When two components share one cache, a chunk that has already been accepted returns false; it no longer throws.
+Gaussian cache format version 0 is rejected. Only CurrentFormatVersion = 1 loads.
+In each chunk, triangle sections are decoded before the other sections, and splat bindings are checked against the decoded triangle count. Any other reader of the format, such as a future WGSL port, must decode in the same order.
+A loose cooked cache root cannot load through Engine.Assets.Load in a non-published build, because that path uses the YAML reader. A runtime viewer must load the cache from a published archive or add a direct cooked read. The bake's read-back uses PublishedCookedAssetReader.
+Why
+The web app's world, avatar and item previews should come from the engine's own renderer instead of three.js, and they should animate. This PR is the engine side of the first two rollout steps: the cache format, the renderer, and an offline bake that turns a cooked prefab or world into a streamable cache plus loop videos. The browser viewer comes in later steps.
+Validation
+Solution build (XRENGINE.slnx, Debug) after the merge with master: 0 warnings, 0 errors.
+Full unit suite after the merge: 8 failed, 6,258 passed, 6 skipped, 6,272 total.
+The 8 failures also fail on master dea102234. They are in NAudioTransportTests (1), GpuBvhFrustumParityIntegrationTests (2) and RenderProfileComparisonTests (5).
+Before the merge, the branch and its old base bd4a4fb0a had the same 407 failing tests.
+The 377 new tests all pass.
+GPU and ffmpeg hardware tests ran on an RTX 4070.
+Acceptance bakes of the fixture content:
+Bake
+Result
+Time
+Chunk 0
+Total cache
+Warnings
+Avatar
+ready
+41 s
+12,850 B
+277,896 B (8 chunks)
+none
+Item
+ready
+4 min 14 s
+16,870 B
+673,851 B
+none
+World
+ready
+5 min 20 s
+92,161 B
+3,461,512 B
+clip-static
+Determinism: each bake was run twice, in separate processes, and every output file except report.json was byte-identical. After the merge with master, the avatar bake gave the same content hash and the same 14 files.
+Loop check:
+The avatar loop is 7.75 s: the clip repeats 4 times during one camera orbit.
+The step from the last frame back to the first is as smooth as any two neighbouring frames.
+Every video carries BT.709 colour tags.
+Failure checks:
+A missing pak exits with code 3 and writes only report.json.
+An unrelated folder given as --output is refused with exit code 2 and is not changed.
+Risks and follow-ups
+Build prerequisite. A normal build now needs the native meshoptimizer DLL. Run Tools/Dependencies/Build-Meshoptimizer.ps1, or the ExecTool bootstrap, which needs git, CMake and a C++ toolchain. Design-time builds do not fail without it. The same script should build linux-x64, but that has not been tried. Build the DLL once in CI so that every bake machine gives the same output.
+ffmpeg. ffmpeg is an external tool and is not shipped. The code never selects libx264. The local bakes used a GPL ffmpeg build; a production worker should use an LGPL build if GPL obligations matter.
+Black worlds after engine start. A cooked world that loads after the engine has started captures black. The bake avoids this by loading its input first, but a live viewer will load worlds at runtime, so the root cause must be found before that.
+Skinned prefabs in cooked worlds. These do not animate: the engine rebinds their bones incorrectly. So world bakes come out still, with the warning clip-static.
+glTF import. The native glTF importer may store one joint's inverse bind matrix transposed. It was seen on the skinned-morph-animated fixture.
+Untrusted uploads. The bake is not yet hardened for them. It needs a read budget, a type allow-list, decompression limits, input caps, an overall timeout and sandboxing before it may process uploads.
+Draw order from several threads. If a pass with bucket sorting gets render commands from several threads at once, the bucket order follows which thread takes the lock first.
+Not checked by eye:
+the bake shows no window or taskbar entry;
+orbit and "frame selected" on splat components in the editor;
+the loop videos themselves.
+Licensing and contribution rights
+I created this contribution or identified every third-party source and
+compatible license.
+I disclosed material AI-assisted code and reviewed it for licensing,
+correctness, and security.
+By submitting this pull request, I accept LEGAL/CONTRIBUTING.md for
+contributions made through this GitHub account and confirm my authority,
+or the organization that owns this work has signed it privately.
+This change does not add or alter a dependency. If it does, I ran
+Tools/Generate-Dependencies.ps1 and reviewed the generated notices.
+This change does alter a dependency: Meshoptimizer.NET 1.0.7 is replaced by native meshoptimizer v1.3, which is MIT-licensed. Tools/Reports/Generate-Dependencies.ps1 now lists it, and docs/DEPENDENCIES.md is updated. The generator was run and the meshoptimizer notice was reviewed: its generated row matches the committed one.
+Versioned shader/converter changes
+Not applicable.
+BlackJaxDev
+added 30 commits
+October 26, 2026 10:32
+Add cooked bake input loader and bake fixtures
+e0337ff
+Add hidden bake host and multi-view capture
+d33072b
+Log shared GL context release failures at worker exit
+b03a2ee
+Load bake input before engine start and keep captures linear
+691c2f9
+Build meshoptimizer 1.3 from source
+77b57a7
+Resolve native meshoptimizer explicitly and copy it to the publish root
+17dfd41
+Bind meshoptimizer codecs, filters and point functions
+d5820e5
+Add GaussianCache asset types
+91a021d
+Add GaussianCache encoding primitives
+38bcd0d
+Add GaussianCache motion codec
+043da4e
+Harden GaussianCache motion store and add splat stream container
+0aabc7c
+Add deformed surface evaluation and bake motion selection
+40b25e9
+Add bake surface sampling
+40046f3
+Add driver hierarchy and splat binding
+721c917
+Scale driver simplification targets to the vertex budget
+e568a17
+Skip sliver triangles and verify splat bindings
+962fdbd
+Add splat LOD tree builder
+00607e2
+Add lit-projection color baking
+dddc5cd
+Test lit-projection color scale below the maximum luminance
+e05f08e
+Add GaussianCache builder and chunk acceptance
+562cec5
+Render gaussian splats as sorted instanced quads
+a49fe65
+Build the gaussian splat quad from positions only
+021d92c
+Report gaussian splat components in the browser capability audit
+772fd9d
+Clamp the gaussian splat projection Jacobian to the view guard band
+0dd5e9b
+Add the CPU reference of gaussian cache playback
+f0d8789
+Add GaussianCacheComponent playback
+928f55f
+Name the scene node in the gaussian cache overflow warning
+…
+a8a93cd
+```
+Clearing the cache also clears the culling volume.
+```
+Read gaussian cache overflow through a fenced copy and gate cache swi…
+…
+19fe5a7
+```
+…tches
+
+The overflow counter is copied on the GPU into a persistently mapped readback buffer and read only after its fence signals, one read per arm. A cache switch clears the level table and keeps the passes and the draw off until the new cache's first level table arrives.
+```
+Record gaussian preview loops and posters
+…
+571d5f8
+```
+LoopCameraPlanner plans one seamless pose per video frame (orbit or keyed path) and chooses the loop length; FfmpegEncoder runs pinned, bit-exact ffmpeg sessions for the VP9 and H.264 loops at 1080p and 480p and the WebP posters. RecordLoopAsync plays a fully accepted cache in the bake world, waits until its data is on the GPU, and streams tonemapped frames to the sessions through a small queue. PreviewCameraPathComponent holds the authored camera path.
+```
+Write gaussian cache splats at their node slots for a fixed draw order
+…
+26f2ae9
+```
+When the renderer has a slot for every node (the default and every bake), the cut pass writes each node at the slot of its global node index and marks unchosen nodes as empty slots (opacity -1). The depth key pass then reads all slots and gives empty slots the culled key, so the stable sort orders equal-depth splats by node index and the same frame renders the same pixels in each run. With fewer slots than nodes the atomic slot path stays, and its tie order is not fixed.
+```
+BlackJaxDev
+added 20 commits
+October 27, 2026 14:20
+Draw opaque state buckets in first insertion order
+…
+81b7451
+```
+The opaque state-bucket sort ordered buckets by identity hash codes of the
+shader list, material, render options, and mesh renderer. These codes come
+from per-thread generators, so they change with load and thread timing. The
+draw order of the opaque pass then changed between processes, and coplanar
+surfaces gave different pixels, which made multi-mesh gaussian preview bakes
+non-deterministic.
+
+The snapshot collection now uses the bucket keys only to put the entries of
+a bucket together, then puts the buckets in the order of their first
+insertion. The order inside a bucket does not change.
+```
+Hold the last loaded frame at the end of ping-pong and once playback
+06cbb6a
+Check splat bindings against the packed cache data
+…
+eb1d062
+```
+Bind splats to the dequantized frame 0 driver corners that the runtime
+uses. When the plane coordinates on the closest triangle are outside the
+pack range, prefer the closest triangle that keeps them inside it. The
+builder reconstructs each packed binding on the stored frame 0 corners,
+and report.json gives the count over the position error and the largest
+error, with a binding-error-exceeded warning. A binding that cannot be
+made, such as on a level of thin slivers, fails budget-exceeded.
+```
+Skip non-finite capture samples in the color bake
+…
+1376608
+```
+A NaN or infinite capture pixel made a leaf color NaN, and the bake then
+stopped with an unexpected error. The accumulator now clamps +Inf and
+values above the half-float maximum, skips samples that are NaN or -Inf
+after the filter, counts the samples that read a non-finite pixel, and
+keeps the color scale finite. The report gets a capture-non-finite
+warning with the count. The fill of unseen leaves is now linear in the
+leaf count and keeps its nearest-index rule.
+```
+Replace an output folder only when it is a bake output
+…
+3efd6fd
+```
+A folder with any top-level report.json was deleted on commit or failure,
+so a mistyped --output could remove a home folder or a drive. A folder is
+now an earlier bake output only when its report.json is a bake report
+(schema version, status, and kind) and every top-level entry is a name
+that the bake writes. Drive roots, share roots, and the user profile
+folder are always refused with invalid-arguments.
+```
+Bound the gaussian cache reader by format limits
+…
+8c25094
+```
+The reader trusted header sizes, so a header under 1 KB could ask for
+gigabytes, and it did not range-check the format version, motion codec
+version, loop mode, grid bits, frame rate, color scale, or chunk table.
+GaussianCacheHeader now has named format limits that are well above the
+bake budgets, and Validate checks every field on read, on decode, and in
+the builder. A bound splat can name only a decoded triangle, because the
+triangle sections of a chunk decode first. Chunk asset paths must be
+relative and stay in the folder of the root asset. Read errors in the
+decode become a GaussianCacheFormatException with a diagnostic code, and
+DecodeIndexBuffer rejects a count that is not a multiple of 3 before the
+native decoder writes past the destination.
+```
+Serialize chunk acceptance when components share one cache
+…
+1a913b2
+```
+The asset manager gives the same cached root asset to every component
+that loads it, so two components accepted the same chunks: the second
+one failed with ChunkOutOfOrder, or both decoded into the runtime arrays
+at the same time. The cache now owns a decode lock. The first decode,
+each accept, and the next-chunk lookup run under it, and a chunk that is
+accepted already counts as accepted without a second decode. The new
+GaussianCacheChunkLoader runs the load loop for the component, and the
+component copies decoded data under the same lock.
+```
+Keep the grouping of opaque state buckets in first insertion order
+…
+f49bbc7
+```
+Ordering whole buckets by first insertion let buckets that share a
+material interleave in scene order, which defeats the skip of a repeated
+material upload. The collection now orders the groups of the bucket key
+one level at a time by first insertion: passes, shader lists, materials,
+render options, and mesh renderers, with the near-to-far order inside
+each bucket. The order stays deterministic and moves only whole runs, with
+lists that the collection keeps.
+```
+Repeat short animated clips so the turntable takes at least 6 s
+…
+b16bf6a
+```
+An animated avatar or item looped for one playback period, so the camera
+turned 360 degrees in the length of the clip, about 2 s for the avatar
+fixture. The loop now repeats the playback period (one clip, or one
+ping-pong round trip) k = ceil(6 s / period) times, and the single orbit
+spans the full loop. The loop stays a whole number of periods, so it has
+no jump. Still content and worlds keep their loop length.
+```
+Read the written cache files back through the runtime path
+…
+3606009
+```
+Nothing loaded cache/root.asset and the chunk files the way the runtime
+does, so a defect in the stable-ID patch or the envelope would reach the
+next rollout steps unseen. The bake now reads the files back with the
+published cooked asset reader, accepts every chunk, and compares the
+header, chunk 0, the chunk paths, and each chunk with the built cache
+before it commits the output. A mismatch fails encode-failed. A test
+loads the files through the same path and the component load loop and
+compares the decoded data with the in-memory build.
+```
+Warn when no grid can meet the position error
+…
+9d7de1e
+```
+ChooseGridBits returns 16 bits when no grid size meets the largest
+position error of the budget, and the bake then went on without a word.
+The report now gets the grid-error-exceeded warning in that case.
+```
+Encode the loop videos as tagged BT.709 limited-range YUV
+…
+7fbf8ef
+```
+The RGB to YUV conversion used the BT.601 default of the converter and
+wrote no color tags, so players could show wrong colors. The H.264 and
+VP9 videos now convert with out_color_matrix=bt709 and out_range=tv and
+tag the BT.709 color space, primaries, and transfer. The single-thread
+bit-exact settings and the WebP posters do not change.
+```
+Correct the grid, duration, and shared context release docs
+…
+626d9d5
+```
+GridQuantizer.Dequantize returns a grid node, not a cell center.
+DurationSeconds now says that a ping-pong cache plays forward in
+(FrameCount - 1) / FrameRate and that its full loop is twice that. The
+shared context release at worker exit also runs on a normal context
+stop, so the comment says so and the warning names what stays allocated.
+```
+Document the native meshoptimizer step and keep design-time builds wo…
+…
+5b3798b
+```
+…rking
+
+The native meshoptimizer library is not in the repository, and its check
+also ran on AssignTargetPaths, so IDE design-time builds failed until the
+build script ran. The check now runs only before a real build, and its
+one error names the script and its prerequisites. ExecTool lists the
+script in its dependency group, so bootstrap runs it. The README,
+AGENTS.md, the native dependency guide, and the bootstrap guide describe
+the step and state that the linux-x64 build of the script is not verified.
+```
+Record the breaking changes of the gaussian preview work
+52084d1
+Tag the BT.709 primaries and transfer on the loop video frames
+…
+a80358d
+```
+The encoder takes the color properties of the frames, and the scale
+filter sets only the matrix and the range, so this ffmpeg build wrote
+the primaries and the transfer of the videos as unknown. A setparams
+filter after the scale now marks the frames with the BT.709 primaries
+and transfer.
+```
+Test that chunk decode read errors become DecodeFailed
+4f695d7
+Sort the opaque state-bucket runs with a cached comparison so the sor…
+…
+7ba478b
+```
+…t does not allocate
+```
+Check the stable asset IDs on bake read-back, retry the report read, …
+…
+5805046
+```
+…and note the cache decode order
+```
+Merge master into the gaussian preview branch
+625ce07
+chatgpt-codex-connector
+Bot
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+⚠️ Failed 2026-10-28T04:43:36.296930Z
+We couldn’t complete this review. Comment @codex review to try again.
+908c25b
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+chatgpt-codex-connector
+Bot
+commented
+Oct 28, 2026
+Copy link
+Copy Markdown
+You have reached your Codex usage limits for code reviews. You can see your limits in the Codex usage dashboard.
+To continue using code reviews, add credits to your account and enable them for code reviews in your settings.
+BlackJaxDev
+force-pushed
+the
+xrengine-web-rendering
+branch
+from
+908c25b to
+625ce07
+Compare
+October 28, 2026 06:39
+BlackJaxDev
+added 2 commits
+October 27, 2026 20:54
+Merge master into the gaussian preview branch
+…
+df91e96
+```
+Master split the Windows Editor publish job into parallel jobs that share
+the prepare-windows-editor action. Move the native meshoptimizer build
+step from the old single job into that action, so every Editor job that
+builds or runs the Editor has the library.
+```
+Encode spaces and parentheses in local license links of the dependenc…
+…
+fff086a
+```
+…y report
+
+Markdown link targets cannot contain spaces or parentheses, so the
+generator wrote broken links for license files with such names. The
+report now encodes them, which also reproduces the encoded meshoptimizer
+and Jolt rows that were edited by hand.
+```
+BlackJaxDev
+mentioned this pull request
+Oct 28, 2026
+Cache CI setup and cancel outdated browser runs on pull requests
+#95
+Merged
+4 tasks done
+BlackJaxDev
+force-pushed
+the
+master
+branch
+from
+d11ada6 to
+96560a4
+Compare
+October 29, 2026 07:00
+Merge master into xrengine-web-rendering
+…
+6bcd54f
+```
+In the shared Windows Editor action, keep the .NET SDK cache save from
+master, then this branch's native meshoptimizer build.
+```
+BlackJaxDev
+force-pushed
+the
+xrengine-web-rendering
+branch
+from
+09366e1 to
+6bcd54f
+Compare
+October 29, 2026 07:02
+Hide details
+View details
+BlackJaxDev
+merged commit 075dde3
+into
+master
+Oct 29, 2026
+19 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

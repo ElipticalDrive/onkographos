@@ -1,0 +1,134 @@
+--- v001.md
++++ v002.md
+@@ -4,99 +4,58 @@
+ 
+ ## Overview
+-Perspective Shear-Warp extends the Shear-warp algorithm to handle perspective viewing transformations, solving the problem of rendering volumetric data with correct depth cues and field-of-view distortion. Unlike its sibling [Shear-Warp Algorithm](4304-shear-warp-algorithm.md) which assumes parallel projection, this method scales voxels during the shear step to account for diverging rays, ensuring that the final image maintains geometric correctness for perspective cameras [S2, unofficial].
++Perspective Shear-Warp extends the Shear-warp algorithm to handle perspective projection, where viewing rays diverge from a focal point [S1, S2, unofficial]. It solves the problem of rendering volumetric data with perspective distortion by incorporating slice scaling into the shear phase, ensuring that the resampling footprint adapts to the increasing distance from the camera [S1, unofficial]. Unlike parallel Shear-warp, which assumes uniform ray spacing, this method accounts for the non-linear sampling density inherent in perspective views [S1, unofficial].
+ 
+ ## How it works
+-The method follows the standard Shear-warp factorization $M_{view} = M_{warp2D} \cdot M_{shear3D}$ [S3, unofficial], but modifies the shear and composite steps to handle perspective scaling.
++The method follows the standard Shear-warp factorization $M_{view} = M_{warp2D} \cdot S \cdot P$, but modifies the shear and compositing steps to handle diverging rays [S2, unofficial].
+ 
+ **Inputs and Outputs:**
+-*   **Input:** Volume data $V$, perspective view matrix $M_{view}$, image dimensions $W \times H$.
+-*   **Output:** 2D image $I$.
++*   **Input:** 3D volume data $V$, perspective view matrix $M_{view}$, focal length, image resolution.
++*   **Output:** 2D perspective image $I_{final}$.
+ 
+ **Data Structures:**
+-*   **Volume:** 3D array of density/opacity values.
+-*   **Sheared Slices:** 2D arrays representing resampled slices in sheared object space.
++*   **Volume:** Voxel grid with scalar values and opacity.
+ *   **Intermediate Image:** 2D array for front-to-back compositing.
++*   **RLE Tables:** For skipping transparent voxel runs and opaque pixel runs in the intermediate image [S2, unofficial].
+ 
+ **Steps:**
+ 
+-1.  **Factorization:** Decompose $M_{view}$ into shearing matrix $M_{shear}$ and warping matrix $M_{warp}$ [S3, unofficial].
+-2.  **Shear and Composite:**
+-    *   Iterate through volume slices along the primary axis (typically Z).
+-    *   For each slice, apply $M_{shear}$. In perspective, this involves both translation and **scaling** of the slice coordinates [S2, unofficial].
+-    *   Resample the slice into the intermediate image space. Because perspective rays diverge, voxel scanlines are not traversed at the same rate as image scanlines, and multiple voxel scanlines may contribute to a single image scanline [S2, unofficial].
+-    *   Use **adaptive area sampling**: since farther slices are scaled smaller, each ray effectively samples a larger portion of the volume as distance increases [S1, unofficial].
+-    *   Composite the resampled slice into the intermediate image using front-to-back accumulation [S2, unofficial].
+-3.  **Warp:** Apply $M_{warp}$ to the intermediate image to map it to the final screen coordinates [S3, unofficial].
++1.  **Permutation and Shear with Scaling:**
++    The volume is permuted so the principal viewing axis aligns with Z. A shear matrix $M_{shear}$ is applied, but unlike parallel projection, each slice $z$ is scaled by a factor $s_z$ to account for perspective divergence [S2, unofficial].
++    *   The shear coefficients $S_i, S_j$ are derived from the view direction, but the scaling factor $s_z$ depends on the distance from the focal point [S2, unofficial].
++    *   Formula for scaling: $s_z = \frac{d}{d + z}$, where $d$ is the distance from the focal point to the near clipping plane (or similar reference), and $z$ is the slice depth in sheared space [S2, unofficial].
++    *   This scaling ensures that farther slices are smaller, effectively increasing the sampling footprint of rays as they travel deeper into the volume [S1, unofficial].
+ 
+-**Formulas:**
+-The scaling factor for a voxel at depth $z$ in perspective projection is proportional to $1/z$ (or $z_{near}/z$ depending on coordinate system). The shear transformation translates slice $i$ by $t_i$ and scales it by $s_i$:
+-$$ P_{sheared} = s_i \cdot (P_{original} + t_i) $$
+-Where $s_i$ accounts for the perspective foreshortening [S2, unofficial].
++2.  **Shear and Composite with Adaptive Area Sampling:**
++    The volume is traversed slice-by-slice in the sheared space [S2, unofficial].
++    *   **Resampling:** Each slice is resampled into the intermediate 2D image using bilinear interpolation [S2, unofficial]. Because of the scaling, more than two voxel scanlines may contribute to a single intermediate image scanline, and they may not traverse at the same rate [S2, unofficial].
++    *   **Adaptive Area Sampling:** To handle the diverging rays, adaptive area sampling is used. Each sample point represents a larger portion of the volume as distance increases, preventing aliasing and ensuring correct density estimation [S1, unofficial].
++    *   **Compositing:** Samples are composited front-to-back:
++        $$ I_{int}[y, x] = I_{int}[y, x] + C \cdot \alpha \cdot (1 - A_{int}[y, x]) $$
++        $$ A_{int}[y, x] = A_{int}[y, x] + \alpha \cdot (1 - A_{int}[y, x]) $$
++        where $C$ is color, $\alpha$ is opacity, and $A_{int}$ is accumulated opacity [S2, unofficial].
++    *   **Optimization:** RLE is used to skip transparent voxel runs and opaque pixel runs [S2, unofficial].
+ 
+-**Parameters:**
+-*   Interpolation: Bilinear is standard, but trilinear is used in hardware implementations (e.g., VolumePro) for better quality [S1, unofficial].
+-*   RLE: Run-Length Encoding is used to skip transparent runs [S2, unofficial].
++3.  **Warp:**
++    The intermediate image is transformed to the final image space using the 2D warp matrix $M_{warp2D}$ [S2, unofficial]. This corrects the distortion introduced by the shear and scaling [S2, unofficial].
+ 
+ **Pitfalls:**
+-*   **Diverging Rays:** Perspective rays diverge, making uniform sampling difficult [S1, unofficial].
+-*   **Non-Uniform Traversal:** Voxel scanlines may not be traversed at the same rate as image scanlines, requiring careful handling of the resampling grid [S2, unofficial].
+-
+-```python
+-def perspective_shear_warp(volume, view_matrix, image_dims):
+-    # Factorize view matrix [S3, unofficial]
+-    M_shear, M_warp = factorize_view_matrix(view_matrix)
+-    
+-    intermediate_image = zeros(image_dims)
+-    alpha_accum = zeros(image_dims)
+-    
+-    # Step 1 & 2: Shear, Resample, and Composite
+-    for slice_idx in range(volume.depth):
+-        # Get slice at depth z
+-        z = get_depth(slice_idx)
+-        
+-        # Calculate perspective scale factor [S2, unofficial]
+-        # Scale depends on distance from camera center
+-        scale = perspective_scale(z, view_matrix)
+-        
+-        # Shear: Translate and Scale the slice
+-        sheared_slice = resample_slice_with_scale(
+-            volume[slice_idx], 
+-            M_shear, 
+-            scale
+-        )
+-        
+-        # Composite into intermediate image
+-        # Note: Voxel scanlines may not align 1-to-1 with image scanlines [S2, unofficial]
+-        for y, x in scanline_traversal(sheared_slice, intermediate_image):
+-            val = interpolate(sheared_slice, x, y)
+-            alpha = classify(val)
+-            
+-            # Front-to-back compositing
+-            intermediate_image[y, x] += val * alpha * (1 - alpha_accum[y, x])
+-            alpha_accum[y, x] += alpha * (1 - alpha_accum[y, x])
+-            
+-    # Step 3: Warp to final image space [S3, unofficial]
+-    final_image = zeros(image_dims)
+-    for y, x in image_scanlines:
+-        src_y, src_x = warp_coords(M_warp, y, x)
+-        final_image[y, x] = interpolate(intermediate_image, src_x, src_y)
+-        
+-    return final_image
+-```
++*   Perspective rays diverge, making uniform sampling difficult and leading to aliasing if not handled with adaptive area sampling [S1, unofficial].
++*   Voxel scanlines may not be traversed at the same rate as image scanlines, requiring careful interpolation logic [S2, unofficial].
+ 
+ ## Subtopics
+ 
+ ### Stereo Rendering via Similarity Utilization
+-This variant leverages the similarity between left and right eye views in stereo rendering to accelerate the process. By utilizing the shared structure of the volume data and the slight parallax between views, rendering time for stereo pairs can be reduced [S2, unofficial].
++This variant leverages the geometric similarities between left and right eye views in stereo rendering to accelerate the process [S2, unofficial]. By reusing computation or data from one eye's view for the other, rendering speed is increased [S2, unofficial]. It is chosen when stereo visualization is required and computational resources are limited.
+ 
+ ## Operating characteristics
+-*   **Complexity:** Time complexity is proportional to the number of visible voxels and image pixels. Memory complexity is dominated by the volume data and intermediate buffers.
+-*   **Performance:** Faster than ray-casting for large volumes due to cache-friendly scanline processing [S2, unofficial].
+-*   **Strengths:** Handles perspective correctly; efficient for opaque/transparent mix using RLE [S2, unofficial].
+-*   **Limitations:** Image quality depends on interpolation; perspective scaling can cause artifacts if not handled with adaptive sampling [S1, unofficial].
+-*   **When to use:** Interactive perspective volume rendering where performance is critical.
++*   **Time Complexity:** Generally $O(N)$ with respect to the number of voxels and pixels, but the adaptive sampling and scaling factors add overhead compared to parallel Shear-warp [S2, unofficial].
++*   **Memory Complexity:** Similar to parallel Shear-warp, dominated by the volume data and intermediate image buffers [S2, unofficial].
++*   **Strengths:** Correctly handles perspective distortion; adaptive sampling reduces aliasing in diverging rays [S1, unofficial].
++*   **Limitations:** More complex resampling logic due to slice scaling and non-uniform scanline traversal [S2, unofficial].
++*   **When to use:** When perspective projection is required for volumetric data.
++*   **When not to use:** When parallel projection is sufficient, as it adds unnecessary complexity [S1, unofficial].
+ 
+ ## Background
+-The Perspective Shear-Warp algorithm was developed to extend the parallel projection Shear-warp method to perspective views. It was described in the context of virtual environments and interactive visualization [S2, unofficial]. The approach builds on the foundational work of Lacroute and Levoy on Shear-warp rendering [S1, unofficial].
++The Perspective Shear-Warp algorithm is a direct extension of the Shear-warp algorithm by Lacroute and Levoy, adapted for perspective views [S2, unofficial]. It addresses the limitations of parallel projection in virtual environments where perspective is necessary for correct spatial perception [S2, unofficial]. The method builds on the factorization principles established in earlier Shear-warp literature [S3, unofficial].
+ 
+ ## Sources

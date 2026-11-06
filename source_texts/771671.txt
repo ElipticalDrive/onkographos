@@ -1,0 +1,305 @@
+# トゥーンキャラの顔影を SDF で切り替える — DirectX 11 シェーダー解説
+
+DirectX 11 上で実装したアニメ調キャラ用トゥーンシェーダーのうち、**顔の影を SDF (Signed Distance Field, ここでは符号付き距離場をマスク的に使ったもの) テクスチャで制御するシェーダー** について深掘りします。
+
+アニメ調キャラの顔影は、単純な Lambert 則 ($\vec{N} \cdot \vec{L}$ に基づくディフューズ) では出せない「鼻の根本に固定的に出る影」「光の左右に応じて切り替わる輪郭」を表現する必要があります。本稿では、これを SDF テクスチャとライト方向解析の組み合わせでどう実装しているかを、VS / PS 両方のコードと数式を交えて解説します。
+
+## 目次
+
+1. [なぜ顔影に SDF を使うのか](#1-なぜ顔影に-sdf-を使うのか)
+2. [SDF テクスチャの設計](#2-sdf-テクスチャの設計)
+3. [シェーダー全体の流れ](#3-シェーダー全体の流れ)
+4. [VS でのライト方向解析](#4-vs-でのライト方向解析)
+5. [PS での SDF 比較とスムーズ化](#5-ps-での-sdf-比較とスムーズ化)
+6. [Ramp テクスチャによる暖色シャドウ](#6-ramp-テクスチャによる暖色シャドウ)
+7. [アンビエント抑制と最終合成](#7-アンビエント抑制と最終合成)
+8. [なぜ VS でやるのか (実装上の工夫)](#8-なぜ-vs-でやるのか-実装上の工夫)
+9. [まとめ](#9-まとめ)
+
+---
+
+## 1. なぜ顔影に SDF を使うのか
+
+リアルタイム CG の標準的なディフューズ計算は **Lambert 則**、すなわち法線とライト方向の内積 $\vec{N} \cdot \vec{L}$ に基づきます。これをそのままキャラの顔に適用すると、光の角度がほんの少し変わるだけで顔の凹凸に対して忠実でリアルな影を細かく描き出し、アニメ的な「かわいい顔影」にはなりません。
+
+
+SDF 顔影は、
+
+- 影の出る位置はあらかじめテクスチャで決めておく
+- 光の向きに応じて「どこまでが影か」のしきい値だけを動かす
+- 左右どちらから光が来ているかで U 座標を反転させる
+
+という発想で、上記の挙動を再現する手法です。Lambert に比べて「画素ごとに違う閾値を持たせられる」のがミソで、これによってモデル形状を変えずに作画的な影を貼れます。
+
+>  ![スクリーンショット 2026-05-29 015206.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4202794/05441935-d4c6-4d6d-9b3b-a8aad8572dd1.png)![スクリーンショット 2026-05-29 015217.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4202794/4a400ac1-fdff-40af-a5ac-be0513a264ff.png)
+**[画像]** Lambert のみで描いた顔（上）とSDF 顔影を入れた顔（下）の比較
+
+(完全なSDFとの差分じゃないので対照実験になっていないのですがご了承ください…)
+
+---
+
+## 2. SDF テクスチャの設計
+
+>![sdf.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4202794/babb09fe-98dd-42d2-9a05-4e8559bf8ff2.png) 
+**[画像]** 本稿で使う Face SDF テクスチャ (グレースケール)
+
+ここでの SDF テクスチャは、顔の UV 空間に貼られた **1 チャンネルのグレースケールマスク** です。各画素は $[0, 1]$ の値を持ち、後段の `smoothstep` 比較によって「この画素は影 / 光のどちらに振るか」を切り分けるしきい値として機能します。
+
+直感的には、
+
+- 影が常に出てほしい場所 (鼻の根本、目の窪み、口の影など)
+- 光がよく当たる場所 (頬、額)
+
+を画素値の濃淡で塗り分けたマスクだとイメージしてください。具体的にどちらの極性 (黒を影と見るか、白を影と見るか) で塗るかは、PS 側の比較方向と整合させて決めます (詳細は §5)。
+
+なお、SDF 顔影テクスチャは **顔の左右対称性** を活かして片側ぶんだけ作るのが一般的です。本実装でも片側ぶんだけ用意し、ライトの向きに応じて U 座標をミラーリングして補います。
+
+SDFテクスチャは以下の動画の概要欄にあるツールを使わせていただきました。（実際に使ったのはサンプルモデルのデザイナーですが）
+>https://www.youtube.com/watch?v=D3nEolOME50
+YouTube
+
+---
+
+## 3. シェーダー全体の流れ
+
+このシェーダーの仕事は、ざっくり次の 4 ステップに分けられます。
+
+1. **VS** で、現在のライト方向が「顔の前後左右」に対してどちらを向いているかを解析し、SDF 比較用のしきい値 $\ell$ と U 反転フラグ $\phi\_{\mathrm{flip}}$ を作る
+2. **PS** で、$\phi\_{\mathrm{flip}}$ に応じて SDF UV をミラーリングし、SDF テクスチャをサンプリング
+3. SDF 値としきい値 $\ell$ を `smoothstep` で比較し、$[0, 1]$ の影マスク $s\_{\mathrm{face}}$ を得る
+4. $s\_{\mathrm{face}}$ を Ramp テクスチャに通して暖色化、ベース色と合成
+
+順に見ていきます。
+
+---
+
+## 4. VS でのライト方向解析
+
+VS 側の仕事は「現在のライトは、顔のどの方向から差してきているか?」を 2 つの数値に要約することです。
+
+### 4.1 顔のローカル軸を取り出す
+
+キャラはゲーム中で自由に向きを変えるため、「顔の前」「顔の右」「顔の上」がワールド空間でどちらを向いているかを、毎フレーム計算する必要があります。
+
+ベクトルを次のように定義します。
+
+- $\vec{r}\_{\mathrm{face}}$ : キャラの右手方向
+- $\vec{u}\_{\mathrm{face}}$ : 頭頂方向
+- $\vec{f}\_{\mathrm{face}}$ : 顔が向いている方向 (正面)
+
+これらは `World` 行列の各行から直接取り出せます。`World` がローカル → ワールド変換を担う **行優先 (row-major) 行列** のとき、ローカルの単位ベクトル $(1, 0, 0)$, $(0, 1, 0)$, $(0, 0, 1)$ を `World` に通すと、それぞれ `World` の **1 行目・2 行目・3 行目** がそのまま返ります。行ベクトル × 行列の積をほどけば直接確認できます。
+
+$$
+\vec{r}\_{\mathrm{face}} = \mathrm{normalize}(W\_{11},\ W\_{12},\ W\_{13})
+$$
+
+$$
+\vec{u}\_{\mathrm{face}} = \mathrm{normalize}(W\_{21},\ W\_{22},\ W\_{23})
+$$
+
+$$
+\vec{f}\_{\mathrm{face}} = \mathrm{normalize}(W\_{31},\ W\_{32},\ W\_{33})
+$$
+
+`normalize` で長さ 1 に揃えるのは、`World` にスケーリングが含まれていた場合の保険です。
+
+### 4.2 ライト方向の水平成分
+
+ライト方向 $\vec{L}$ は「サーフェスから光源を指すベクトル」として用意します。
+
+```hlsl
+float3 L = normalize(-Light.Direction.xyz);
+```
+
+SDF 顔影で気にしたいのは「光が顔の **前後左右** のどちらから来ているか」だけで、「上から差しているか / 下から差しているか」は SDF パターンに影響させません。なので $\vec{L}$ から「$\vec{u}\_{\mathrm{face}}$ 方向の成分」を取り除き、顔の水平面内に寝かせた水平成分 $\vec{L}\_{h}$ を作ります。
+
+ベクトル分解の基本に従い、
+
+$$
+\vec{L}\_{h} = \mathrm{normalize}\left(\vec{L} - [\vec{L} \cdot \vec{u}\_{\mathrm{face}}]\vec{u}\_{\mathrm{face}}\right)
+$$
+
+イメージとしては、斜め上から差す太陽の光を、地面 (= 顔の水平面) に落とした影の矢印が $\vec{L}\_{h}$ です。
+
+### 4.3 SDF しきい値の計算
+
+$\vec{L}\_{h}$ と $\vec{f}\_{\mathrm{face}}$ の内積を取ると、「水平光が顔の正面方向にどれだけ一致しているか」が $[-1, 1]$ で得られます ($+1$: 正面、$0$: 真横、$-1$: 真後ろ)。これを SDF テクスチャの値域 $[0, 1]$ に合わせるため、定番のリマップを掛けます。
+
+$$
+\ell = \mathrm{saturate}\left(\tfrac{1}{2}\[ \vec{L}\_{h} \cdot \vec{f}\_{\mathrm{face}}\ ] + \tfrac{1}{2}\right)
+$$
+
+- 内積 $= +1$ (光が正面) → $\ell = 1$
+- 内積 $= \phantom{+}0$ (光が真横) → $\ell = 0.5$
+- 内積 $= -1$ (光が真後ろ) → $\ell = 0$
+
+これが PS で SDF と比較する「しきい値」になります。
+
+### 4.4 U 反転フラグの計算
+
+SDF テクスチャは片側ぶんしか作っていないので、光が逆側から来た場合は U 座標を反転させて読みます。「光が右側から来ているか」は $\vec{L}\_{h} \cdot \vec{r}\_{\mathrm{face}}$ の符号で判定できます。
+
+$$
+\phi\_{\mathrm{flip}} = \begin{cases}
+1 & (\vec{L}\_{h} \cdot \vec{r}\_{\mathrm{face}} < 0) \\\ 
+0 & (\text{otherwise}) 
+\end{cases}
+$$
+
+このフラグが立っていれば、PS 側で `sdfUV.x = 1.0 - sdfUV.x` を実行します。
+
+### 4.5 VS コード全体
+
+```hlsl
+// vertexLightingOneSkinVS.hlsl (抜粋)
+float3 faceRight   = normalize(float3(World._11, World._12, World._13));
+float3 faceUp      = normalize(float3(World._21, World._22, World._23));
+float3 faceForward = normalize(float3(World._31, World._32, World._33));
+
+float3 L = normalize(-Light.Direction.xyz);
+
+// 光の水平成分 (顔の上下軸を取り除く)
+float3 L_horiz_raw = L - dot(L, faceUp) * faceUp;
+float  L_horiz_len = length(L_horiz_raw);
+float3 L_horiz = (L_horiz_len > 0.001f) ? (L_horiz_raw / L_horiz_len) : faceForward;
+
+// 前後成分 → SDF しきい値
+float frontDot = dot(L_horiz, faceForward);
+Out.FaceLightFactor = saturate(frontDot * 0.5f + 0.5f);
+
+// 右成分 → U 反転フラグ
+float rightDot = dot(L_horiz, faceRight);
+Out.FaceUFlip = (rightDot < 0.0f) ? 1.0f : 0.0f;
+```
+
+水平成分の長さが極端に小さい場合 (光がほぼ真上から差している場合など) は、ゼロ除算を避けるために $\vec{f}\_{\mathrm{face}}$ にフォールバックするセーフガードを入れています。
+
+---
+
+## 5. PS での SDF 比較とスムーズ化
+
+PS 側では、VS から渡された $\ell$ と $\phi\_{\mathrm{flip}}$ を使って、各画素の影 / 光を判定します。
+
+### 5.1 UV の反転と SDF サンプリング
+
+まず U 反転フラグに応じて UV を反転させ、SDF テクスチャからその画素の値を取得します。
+
+```hlsl
+float2 sdfUV = In.TexCoord;
+if (In.FaceUFlip > 0.5f) sdfUV.x = 1.0f - sdfUV.x;
+
+float lightFactor = In.FaceLightFactor;
+float sdfValue    = g_SdfTexture.Sample(g_SamplerState, sdfUV).r;
+```
+
+
+
+### §5.2 — SDF と smoothstep でしきい値判定
+
+UV を確定させたら、SDF をサンプリングしてしきい値 $\ell$ と比較します。
+
+```hlsl
+float lightFactor  = In.FaceLightFactor;
+float sdfValue     = g_SdfTexture.Sample(g_SamplerState, sdfUV).r;
+float shadowFactor = smoothstep(lightFactor - SDF_EDGE, lightFactor + SDF_EDGE, sdfValue);
+```
+
+$$
+s_{\mathrm{face}} = \mathrm{smoothstep}\left(\ell - \epsilon,\ \ell + \epsilon,\ \mathrm{sdf}(u, v)\right)
+$$
+
+$\ell$ ちょうどで二値判定すると境界がくっきりとしすぎて柔らかい質感が出ないので、幅 $2\epsilon$ のソフト帯で 0 → 1 へなめらかに切り替えています。
+
+> ![画面録画 2026-05-29 015051 (1).gif](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4202794/b280d6ee-3ccd-4b58-bb6e-ad11683a1475.gif)
+**[動画]** しきい値$\ell$ とSDF値の比較で影が生まれる様子
+
+---
+
+## 6. Ramp テクスチャによる暖色シャドウ
+
+ここまでで $s\_{\mathrm{face}} \in [0, 1]$ の影マスクは得られましたが、これをそのまま「光 = 1.0、影 = 0.0」の明度として使うと、影が黒く沈み「アニメ的な血色感」が出ません。アニメ調では影に暖色 (赤み) を入れたいので、$s\_{\mathrm{face}}$ を **Ramp テクスチャ** の U 座標として使い、グラデーション色をサンプリングします。
+
+ただし、SDF はほぼ二値判定 ($s\_{\mathrm{face}}$ が 0 か 1 に張り付きやすい) なので、Ramp の左端 (最暗) と右端 (最明) ばかりが採用され、コントラストが強すぎる結果になります。そこで Ramp サンプリング範囲を **中央寄りに圧縮** します。
+
+$$
+u\_{\mathrm{ramp}} = \mathrm{lerp}\left(u\_{\min},\ u\_{\max},\ s\_{\mathrm{face}}\right)
+$$
+
+本実装では $u\_{\min} = 0.5$、$u\_{\max} = 1.0$ としています。
+
+- $s\_{\mathrm{face}} = 0$ → $u\_{\mathrm{ramp}} = 0.5$ → Ramp の中央 (やや暖色)
+- $s\_{\mathrm{face}} = 1$ → $u\_{\mathrm{ramp}} = 1.0$ → Ramp の右端 (光色)
+
+「影側でも完全に黒には沈めない」「光側でも純白にはしない」ことで、SDF の二値性をマイルドにする狙いです。
+
+```hlsl
+static const float RAMP_U_MIN = 0.50f;
+static const float RAMP_U_MAX = 1.00f;
+
+float rampU = lerp(RAMP_U_MIN, RAMP_U_MAX, shadowFactor);
+float3 rampColor = g_RampTexture.Sample(g_SamplerState, float2(rampU, 0.5f)).rgb;
+```
+
+Ramp テクスチャ自体は横長 1 行ぶんのグラデーション画像で、左端から右端へ「影色 → 中間色 → 光色」と並んでいます ($v = 0.5$ でサンプリング)。
+
+>![ToonRamp_Body.png](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/4202794/9232902e-2e16-469c-a0fb-571d18bc5295.png)
+ **[画像]** Ramp テクスチャ (横長 1 行のグラデーション)
+
+---
+
+## 7. アンビエント抑制と最終合成
+
+最後にディフューズ・アンビエント・フォグを合成します。
+
+```hlsl
+static const float AMBIENT_SCALE = 0.5f;
+
+float3 diffuse = baseColor.rgb * Material.Diffuse.rgb * rampColor * Light.Diffuse.rgb;
+float3 ambient = baseColor.rgb * Material.Ambient.rgb * Light.Ambient.rgb * AMBIENT_SCALE;
+
+float4 outDiffuse;
+outDiffuse.rgb = diffuse + ambient;
+outDiffuse.a   = baseColor.a * Material.Diffuse.a;
+
+// フォグ
+float fogFactor = saturate((In.ViewDepth - Fog.Start) / (Fog.End - Fog.Start));
+outDiffuse.rgb  = lerp(outDiffuse.rgb, Fog.Color.rgb, fogFactor);
+```
+
+ポイントは `AMBIENT_SCALE = 0.5` です。アンビエントを半分に抑え、SDF で作った影のメリハリを残しています。アンビエントが強すぎると、せっかく作った鼻影が浮き上がって見えなくなります。
+
+---
+
+## 8. なぜ VS でやるのか (実装上の工夫)
+
+VS で `faceRight` / `faceUp` / `faceForward` を計算し、PS には 2 つのスカラ ($\ell$, $\phi\_{\mathrm{flip}}$) だけを渡す構造には、性能と堅牢性の 2 つの理由があります。
+
+1. **性能**: 顔のローカル軸とライト方向の解析は、頂点単位で 1 回計算すれば十分です。ピクセル単位で繰り返すのは無駄なので VS にオフロードしています。
+2. **堅牢性**: `World` cbuffer は VS には必ずバインドされていますが、PS では他のシェーダーとの兼ね合いで一時的に外れるケースがありました。当初 PS 側で `World` を読む実装にしたところ、bind 漏れで「光の方向が変わっても影が動かない」という不具合が出たため、VS で値を確定させて出力に乗せる形に書き換えています。
+
+このように、**データの計算位置 (VS / PS) を選ぶ際は、バインドの確実性も判断材料になる** ことを覚えておくと、似たような bind 漏れ事故を避けられます。
+
+---
+
+## 9. まとめ
+
+本稿では、アニメ調キャラの顔影を SDF テクスチャで制御するシェーダーについて、設計思想から実装まで解説しました。要点を再掲します。
+
+- **SDF テクスチャ** は、顔の UV 空間に「画素ごとのしきい値」を貼り付けたグレースケールマスク
+- **VS** で `World` 行列から顔のローカル軸 ($\vec{r}\_{\mathrm{face}}$, $\vec{u}\_{\mathrm{face}}$, $\vec{f}\_{\mathrm{face}}$) を取り出し、ライト方向を顔の水平面に投影し、SDF しきい値 $\ell$ と U 反転フラグ $\phi\_{\mathrm{flip}}$ を生成
+- **PS** で `smoothstep` を使って SDF 値としきい値を比較し、なめらかな影マスク $s\_{\mathrm{face}}$ を作る
+- **Ramp テクスチャ** に通して暖色化、サンプリング範囲を中央寄りに圧縮してコントラストを抑える
+- **アンビエント** は半分に抑え、SDF で作った影のメリハリを残す
+
+固定的に出続ける鼻影と、光の角度に応じて切り替わる左右反転を、SDF テクスチャ + ライト方向解析 + `smoothstep` のシンプルな組み合わせで実現できる、というのが SDF 顔影の魅力です。
+
+---
+#### 技術スタック
+
+- C++20 / DirectX 11
+- HLSL
+
+#### 参考
+
+- [UE5 SDF Face Shadowマッピングでアニメ顔用の影を作ろう - Hatena Blog](https://unrealengine.hatenablog.com/entry/2024/02/28/222220)
+- [Shader facial anime Genshin Impact in blender - Youtube](https://www.youtube.com/watch?v=D3nEolOME50)

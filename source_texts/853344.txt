@@ -1,0 +1,661 @@
+AI Toolkit for Healthcare Imaging. Contribute to Project-MONAI/MONAI development by creating an account on GitHub.
+
+Prevent half-precision mutual information overflow by yinkev · Pull Request #9023 · Project-MONAI/MONAI · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+yinkev
+commented
+Jul 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Fixes #7622.
+Description
+Gaussian global mutual information now avoids reduced-precision overflow in two places:
+Gaussian Parzen-window calculations use float32 internally for float16 and bfloat16 inputs, preventing an oversized kernel preterm from producing non-finite weights.
+Eager joint-histogram products accumulate in float32 with autocast disabled. TorchScript, which cannot compile a dynamic autocast-device context, computes the normalized joint histogram directly by scaling both operands by the square root of the sample count before matrix multiplication.
+Public weight, probability, loss, device, and gradient dtype contracts remain unchanged; float64 inputs continue to compute in float64. A finite Python scalar fallback preserves the Gaussian preterm when module-wide float16 conversion would otherwise overflow the registered buffer.
+Types of changes
+Non-breaking change (fix or new feature that would not break existing functionality).
+Breaking change (fix or new feature that would cause existing functionality to change).
+New tests added to cover the changes.
+Integration tests passed locally by running ./runtests.sh -f -u --net --coverage.
+Quick tests passed locally by running ./runtests.sh --quick --unittests --disttests.
+In-line docstrings updated.
+Documentation updated, tested make html command in the docs/ folder.
+Validation
+upstream/dev produces non-finite many-bin float16 Gaussian weights;
+under CPU float16 autocast, upstream/dev returns -inf with non-finite gradients on a 48³ volume;
+direct float16 and bfloat16 Parzen outputs preserve dtype/device, remain finite, and normalize to one;
+casting the loss module itself to float16 or bfloat16 with 256 bins remains finite in forward and backward;
+construction under a float16 default dtype also remains finite with 256 bins;
+nonconstant float16/bfloat16 losses track float32 within reduced-precision tolerance;
+nonconstant CPU float16 autocast matches float32 exactly in the tested path;
+scripted and eager outputs match outside autocast, and scripted CPU float16 autocast remains finite beyond 65,504 samples;
+exact final head 3dfbfe95 affected selection: 32 passed, 1 skipped, 1 deselected; the full local module was 32 passed, 1 failed, 1 skipped, with the sole Python 3.14/PyTorch 2.9.1 TorchScript incompatibility reproduced identically on prior head ceb19147;
+registration-loss integration module: 8 passed;
+MPS float16 module-cast forward/backward smoke test passed;
+Black, isort, Ruff, DCO, and git diff --check pass.
+Scope note
+The Parzen helper intentionally preserves its historical reduced-precision return dtype before the histogram stage. Avoiding that internal downcast would be a separate numerical-accuracy change rather than the scoped overflow fix.
+Sequencing
+This PR is ready for review. It overlaps #9022 in GlobalMutualInformationLoss; if #9022 merges first, this branch should be rebased before merge.
+fix(losses): avoid half precision mutual information overflow
+…
+27eb62d
+```
+Signed-off-by: kyinhub <kevinpyin@gmail.com>
+```
+yinkev
+requested review from
+KumoLiu,
+Nic-Ma and
+ericspod
+as code owners
+July 25, 2026 19:46
+coderabbitai
+Bot
+commented
+Jul 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Note
+Reviews paused
+It looks like this branch is under active development. To avoid overwhelming you with review comments due to an influx of new commits, CodeRabbit has automatically paused this review. You can configure this behavior by changing the reviews.auto_review.auto_pause_after_reviewed_commits setting.
+Use the following commands to manage reviews:
+@coderabbitai resume to resume automatic reviews.
+@coderabbitai review to trigger a single review.
+Use the checkboxes below for quick actions:
+▶️ Resume reviews
+🔍 Trigger review
+📝 Walkthrough
+Walkthrough
+GlobalMutualInformationLoss now stabilizes Gaussian Parzen parameters, promotes reduced-precision calculations where needed, controls autocast during mutual-information computation, and restores output dtypes. Tests cover finite outputs, losses, gradients, baseline agreement, large volumes, and eager/scripted CPU autocast.
+Estimated code review effort: 3 (Moderate) | ~20 minutes
+🚥 Pre-merge checks | ✅ 5
+✅ Passed checks (5 passed)
+Check name
+Status
+Explanation
+Linked Issues check
+✅ Passed
+The PR addresses #7622 by fixing the reduced-precision instability that caused non-finite GlobalMutualInformationLoss values.
+Out of Scope Changes check
+✅ Passed
+The changes stay focused on the overflow fix and regression coverage, with no clear unrelated additions.
+Docstring Coverage
+✅ Passed
+Docstring coverage is 92.31% which is sufficient. The required threshold is 80.00%.
+Title check
+✅ Passed
+The title is concise and accurately summarizes the main change: preventing half-precision mutual information overflow.
+Description check
+✅ Passed
+The description matches the template and includes the issue reference, change summary, type checkboxes, and validation notes.
+✨ Finishing Touches
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Thanks for using CodeRabbit! It's free for OSS, and your support helps us grow. If you like it, consider giving us a shout-out.
+❤️ Share
+X
+Mastodon
+Reddit
+LinkedIn
+Comment @coderabbitai help to get the list of available commands.
+yinkev
+mentioned this pull request
+Jul 25, 2026
+Prevent half-precision mutual information overflow
+#9017
+Closed
+3 of 7 tasks
+coderabbitai
+Bot
+reviewed
+Jul 25, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Actionable comments posted: 1
+🧹 Nitpick comments (3)
+monai/losses/image_dissimilarity.py (2)
+327-336: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Undocumented float16-only workaround + duplicated dtype-selection logic.
+The early img.float() conversion for float16 before clamp (but not for bfloat16) looks asymmetric/dead at first glance, but it's actually a workaround: PyTorch has historically lacked CPU kernels for clamp on Half, e.g. RuntimeError: "clamp_scalar_cpu" not implemented for 'Half', while bfloat16 has materially better CPU op coverage. Worth a one-line comment so a future refactor doesn't "clean up" this asymmetry into a bug.
+Separately, the compute_dtype = torch.float32 if X.dtype in (torch.float16, torch.bfloat16) else X.dtype expression is duplicated verbatim (structurally) here and in forward (Line 364). Extracting a tiny helper avoids drift if the reduced-precision dtype policy ever changes.
+♻️ Suggested cleanup
+```
++    `@staticmethod`
++    def _reduced_precision_compute_dtype(dtype: torch.dtype) -> torch.dtype:
++        """Returns float32 for float16/bfloat16 inputs, otherwise the input dtype unchanged."""
++        return torch.float32 if dtype in (torch.float16, torch.bfloat16) else dtype
++
+     def parzen_windowing_gaussian(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+         ...
+         output_dtype = img.dtype
++        # torch.clamp lacks a CPU kernel for float16 (bfloat16 has broader CPU op support),
++        # so upcast float16 before clamping to avoid a runtime error.
+         if output_dtype == torch.float16:
+             img = img.float()
+-        compute_dtype = torch.float32 if img.dtype in (torch.float16, torch.bfloat16) else img.dtype
++        compute_dtype = self._reduced_precision_compute_dtype(img.dtype)
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@monai/losses/image_dissimilarity.py` around lines 327 - 336, Add a concise
+comment before the float16-only conversion in the relevant loss computation,
+documenting the CPU clamp kernel limitation and preserving the intentional
+asymmetry with bfloat16. Extract the duplicated compute-dtype selection used
+here and in forward into a small shared helper, then update both call sites to
+use it.
+```
+358-368: 🎯 Functional Correctness | 🔵 Trivial | ⚡ Quick win
+Unnecessary float32→float16/bfloat16→float32 round-trip before histogram accumulation.
+parzen_windowing_gaussian downcasts weight/probability back to the original reduced-precision dtype, then forward immediately upcasts them back to float32 for the bmm/log computation. Since parzen_windowing is only invoked internally here, this quantizes the Parzen weights to float16/bfloat16 precision for no benefit before the very computation this PR is trying to make numerically stable.
+Consider adding an internal flag to skip the final downcast when called from forward (keeping the public dtype-preservation contract intact for direct callers/tests):
+♻️ Suggested approach
+```
+-    def parzen_windowing_gaussian(self, img: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
++    def parzen_windowing_gaussian(
++        self, img: torch.Tensor, restore_input_dtype: bool = True
++    ) -> tuple[torch.Tensor, torch.Tensor]:
+         ...
+-        if output_dtype in (torch.float16, torch.bfloat16):
++        if restore_input_dtype and output_dtype in (torch.float16, torch.bfloat16):
+             weight = weight.to(dtype=output_dtype)
+             probability = probability.to(dtype=output_dtype)
+         return weight, probability
+```
+parzen_windowing/forward would need to thread restore_input_dtype=False through for the internal call path.
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@monai/losses/image_dissimilarity.py` around lines 358 - 368, Add an internal
+restore_input_dtype control to parzen_windowing_gaussian/parzen_windowing and
+pass restore_input_dtype=False from forward, so the internal path retains
+float32 accumulation inputs instead of round-tripping through float16/bfloat16.
+Preserve the existing dtype-restoration behavior by default for direct callers
+and tests, then keep forward’s histogram computation unchanged.
+```
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py (1)
+203-217: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Consider asserting result.dtype for symmetry with the sibling test.
+test_half_precision_large_constant_volume_is_finite checks result.dtype == pred.dtype; this autocast variant doesn't, leaving the dtype-preservation contract unverified under autocast specifically.
+✅ Suggested addition
+```
+         self.assertTrue(torch.isfinite(result))
++        self.assertEqual(result.dtype, pred.dtype)
+         result.backward()
+```
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/losses/image_dissimilarity/test_global_mutual_information_loss.py`
+around lines 203 - 217, Update test_cpu_float16_autocast_large_volume_is_finite
+to assert that result.dtype matches pred.dtype, mirroring the existing dtype
+assertion in test_half_precision_large_constant_volume_is_finite while
+preserving the other finiteness, gradient, and device checks.
+```
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@monai/losses/image_dissimilarity.py`:
+- Around line 346-357: Update the docstring for the loss method containing the
+target.shape validation to document the ValueError raised when pred and target
+shapes differ, alongside the existing reduction ValueError in the Raises
+section.
+
+---
+
+Nitpick comments:
+In `@monai/losses/image_dissimilarity.py`:
+- Around line 327-336: Add a concise comment before the float16-only conversion
+in the relevant loss computation, documenting the CPU clamp kernel limitation
+and preserving the intentional asymmetry with bfloat16. Extract the duplicated
+compute-dtype selection used here and in forward into a small shared helper,
+then update both call sites to use it.
+- Around line 358-368: Add an internal restore_input_dtype control to
+parzen_windowing_gaussian/parzen_windowing and pass restore_input_dtype=False
+from forward, so the internal path retains float32 accumulation inputs instead
+of round-tripping through float16/bfloat16. Preserve the existing
+dtype-restoration behavior by default for direct callers and tests, then keep
+forward’s histogram computation unchanged.
+
+In `@tests/losses/image_dissimilarity/test_global_mutual_information_loss.py`:
+- Around line 203-217: Update test_cpu_float16_autocast_large_volume_is_finite
+to assert that result.dtype matches pred.dtype, mirroring the existing dtype
+assertion in test_half_precision_large_constant_volume_is_finite while
+preserving the other finiteness, gradient, and device checks.
+```
+🪄 Autofix (Beta)
+Fix all unresolved CodeRabbit comments on this PR:
+Push a commit to this branch (recommended)
+Create a new PR with the fixes
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 61ddddab-1114-4363-8c6e-caadeba8d25b
+📥 Commits
+Reviewing files that changed from the base of the PR and between 3ee058b and 27eb62d.
+📒 Files selected for processing (2)
+monai/losses/image_dissimilarity.py
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py
+Comment thread
+monai/losses/image_dissimilarity.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+yinkev
+marked this pull request as draft
+July 25, 2026 20:59
+yinkev
+force-pushed
+the
+7622-global-mi-half-overflow
+branch
+from
+1be4b14 to
+9c32c55
+Compare
+July 25, 2026 23:47
+yinkev
+commented
+Jul 25, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@coderabbitai review
+coderabbitai
+Bot
+commented
+Jul 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+✅ Action performed
+Review finished.
+Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits. This command is applicable only when automatic reviews are paused.
+coderabbitai
+Bot
+reviewed
+Jul 25, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+🧹 Nitpick comments (1)
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py (1)
+195-196: 📐 Maintainability & Code Quality | 🔵 Trivial | ⚡ Quick win
+Document the parameterized argument.
+Add Google-style Args: entries for dtype in both test docstrings.
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py#L195-L196: document dtype.
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py#L233-L234: document dtype.
+As per path instructions, “Docstrings should be present for all definition which describe each variable, return value, and raised exception in the appropriate section of the Google-style of docstrings.”
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/losses/image_dissimilarity/test_global_mutual_information_loss.py`
+around lines 195 - 196, Update the docstrings for
+test_module_cast_with_many_bins_remains_finite at
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py:195-196
+and the test at
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py:233-234
+to include Google-style Args: sections documenting the parameterized dtype
+argument; make no other changes.
+```
+Source: Path instructions
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Nitpick comments:
+In `@tests/losses/image_dissimilarity/test_global_mutual_information_loss.py`:
+- Around line 195-196: Update the docstrings for
+test_module_cast_with_many_bins_remains_finite at
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py:195-196
+and the test at
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py:233-234
+to include Google-style Args: sections documenting the parameterized dtype
+argument; make no other changes.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 8d459577-2b3c-46de-9958-44bd80925fea
+📥 Commits
+Reviewing files that changed from the base of the PR and between 27eb62d and 9c32c55.
+📒 Files selected for processing (2)
+monai/losses/image_dissimilarity.py
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py
+🚧 Files skipped from review as they are similar to previous changes (1)
+monai/losses/image_dissimilarity.py
+fix(losses): strengthen reduced-precision MI contracts
+…
+76a50a8
+```
+Signed-off-by: kyinhub <kevinpyin@gmail.com>
+```
+yinkev
+force-pushed
+the
+7622-global-mi-half-overflow
+branch
+from
+9c32c55 to
+76a50a8
+Compare
+July 26, 2026 00:02
+yinkev
+commented
+Jul 26, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+@coderabbitai review
+coderabbitai
+Bot
+commented
+Jul 26, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+✅ Action performed
+Review finished.
+Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits. This command is applicable only when automatic reviews are paused.
+yinkev
+marked this pull request as ready for review
+July 28, 2026 00:04
+fix(losses): retain Gaussian Parzen compute precision
+…
+f884e59
+```
+Signed-off-by: kyinhub <kevinpyin@gmail.com>
+```
+coderabbitai
+Bot
+reviewed
+Jul 30, 2026
+View reviewed changes
+coderabbitai
+Bot
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Caution
+Some comments are outside the diff and can’t be posted inline due to platform limitations.
+⚠️ Outside diff range comments (2)
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py (1)
+171-172: 📐 Maintainability & Code Quality | 🟡 Minor | ⚡ Quick win
+Document the dtype parameter in both test docstrings.
+Add an Args entry for dtype to match the other parameterized tests.
+As per path instructions, “Docstrings should be present for all definition which describe each variable.”
+Also applies to: 283-284
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@tests/losses/image_dissimilarity/test_global_mutual_information_loss.py`
+around lines 171 - 172, Add an Args section documenting the dtype parameter to
+both test docstrings, including
+test_half_precision_gaussian_weights_with_many_bins_are_finite and the other
+parameterized test near the referenced location. Describe what dtype controls,
+matching the existing docstring style for parameterized tests.
+```
+Source: Path instructions
+monai/losses/image_dissimilarity.py (1)
+245-250: 🎯 Functional Correctness | 🟠 Major | ⚡ Quick win
+Reject invalid Gaussian parameters.
+num_bins=1 makes sigma NaN; zero or non-finite sigma_ratio can leave preterm non-finite. The Gaussian weights then become NaN. Require at least two bins and a finite, nonzero sigma_ratio before computing preterm, and document the resulting ValueError.
+Proposed fix
+```
+         if self.kernel_type == "gaussian":
++            if num_bins < 2 or not math.isfinite(sigma_ratio) or sigma_ratio == 0.0:
++                raise ValueError("Gaussian kernel requires num_bins >= 2 and a finite, nonzero sigma_ratio.")
+             preterm = 1 / (2 * sigma**2)
+```
+As per path instructions, “Examine code for logical error or inconsistencies.”
+🤖 Prompt for AI Agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+In `@monai/losses/image_dissimilarity.py` around lines 245 - 250, Update the
+Gaussian parameter validation around preterm computation in the relevant loss
+class or method to raise ValueError unless num_bins is at least 2 and
+sigma_ratio is finite and nonzero. Validate these inputs before computing sigma
+or preterm, remove the fallback that permits non-finite values, and document the
+ValueError behavior in the associated API documentation.
+```
+Source: Path instructions
+🤖 Prompt for all review comments with AI agents
+```
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Outside diff comments:
+In `@monai/losses/image_dissimilarity.py`:
+- Around line 245-250: Update the Gaussian parameter validation around preterm
+computation in the relevant loss class or method to raise ValueError unless
+num_bins is at least 2 and sigma_ratio is finite and nonzero. Validate these
+inputs before computing sigma or preterm, remove the fallback that permits
+non-finite values, and document the ValueError behavior in the associated API
+documentation.
+
+In `@tests/losses/image_dissimilarity/test_global_mutual_information_loss.py`:
+- Around line 171-172: Add an Args section documenting the dtype parameter to
+both test docstrings, including
+test_half_precision_gaussian_weights_with_many_bins_are_finite and the other
+parameterized test near the referenced location. Describe what dtype controls,
+matching the existing docstring style for parameterized tests.
+```
+ℹ️ Review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Pro Plus
+Run ID: 0de8f397-89c2-40c6-b96f-7f24f4387180
+📥 Commits
+Reviewing files that changed from the base of the PR and between 76a50a8 and f884e59.
+📒 Files selected for processing (2)
+monai/losses/image_dissimilarity.py
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py
+yinkev
+added 2 commits
+July 29, 2026 22:34
+docs(losses): fix Gaussian Parzen docstring
+…
+ceb1914
+```
+Signed-off-by: kyinhub <kevinpyin@gmail.com>
+```
+fix(losses): validate Gaussian MI parameters
+…
+3dfbfe9
+```
+Signed-off-by: kyinhub <kevinpyin@gmail.com>
+```
+yinkev
+commented
+Jul 30, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Addressed the latest review in 3dfbfe95: Gaussian construction now rejects num_bins < 2 and non-finite or non-positive sigma_ratio before computing sigma/preterm. Constructor regressions cover one bin, zero/negative ratios, NaN, and both infinities, and both parameterized dtype tests now document dtype.
+Verified the 10 directly affected cases, the rest of the loss module (32 passed, 1 skipped), and MONAI_PY_EXE=python3 ./runtests.sh --codeformat. The excluded TorchScript case fails in this local Python 3.14/PyTorch 2.9.1 environment and reproduces unchanged on the prior PR head.
+ericspod
+previously approved these changes
+Oct 3, 2026
+View reviewed changes
+ericspod
+enabled auto-merge (squash)
+October 3, 2026 23:44
+Merge branch 'dev' into 7622-global-mi-half-overflow
+…
+1d858c0
+```
+Signed-off-by: Eric Kerfoot <17726042+ericspod@users.noreply.github.com>
+```
+ericspod
+dismissed
+their stale review
+via
+1d858c0
+October 4, 2026 09:54
+ericspod
+reviewed
+Oct 4, 2026
+View reviewed changes
+Comment thread
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+ericspod
+and others
+added 2 commits
+October 4, 2026 12:03
+Apply suggestion from @ericspod
+…
+7bd5f1c
+```
+Signed-off-by: Eric Kerfoot <17726042+ericspod@users.noreply.github.com>
+```
+[pre-commit.ci] auto fixes from pre-commit.com hooks
+…
+9b538a9
+```
+for more information, see https://pre-commit.ci
+```
+ericspod
+approved these changes
+Oct 4, 2026
+View reviewed changes
+ericspod
+added 4 commits
+October 4, 2026 09:15
+Merge branch 'dev' into 7622-global-mi-half-overflow
+7a7d4f0
+Merge branch 'dev' into 7622-global-mi-half-overflow
+4b45dca
+Merge branch 'dev' into 7622-global-mi-half-overflow
+b0b2ae0
+Merge branch 'dev' into 7622-global-mi-half-overflow
+aaf3327
+ericspod
+reviewed
+Oct 6, 2026
+View reviewed changes
+Comment thread
+tests/losses/image_dissimilarity/test_global_mutual_information_loss.py
+Comment on lines
++356
+to
++368
+def test_scripted_cpu_float16_autocast_large_volume_is_finite(self):
+"""Verify scripted loss avoids float16 histogram overflow under autocast."""
+pred = torch.zeros((1, 1, 257, 257), requires_grad=True)
+target = torch.zeros_like(pred)
+loss = torch.jit.script(GlobalMutualInformationLoss(kernel_type="gaussian"))
+with torch.autocast(device_type="cpu", dtype=torch.float16):
+result = loss(pred, target)
+self.assertTrue(torch.isfinite(result))
+result.backward()
+self.assertIsNotNone(pred.grad)
+self.assertTrue(torch.isfinite(pred.grad).all())
+ericspod
+Oct 6, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Suggested change
+def test_scripted_cpu_float16_autocast_large_volume_is_finite(self):
+"""Verify scripted loss avoids float16 histogram overflow under autocast."""
+pred = torch.zeros((1, 1, 257, 257), requires_grad=True)
+target = torch.zeros_like(pred)
+loss = torch.jit.script(GlobalMutualInformationLoss(kernel_type="gaussian"))
+with torch.autocast(device_type="cpu", dtype=torch.float16):
+result = loss(pred, target)
+self.assertTrue(torch.isfinite(result))
+result.backward()
+self.assertIsNotNone(pred.grad)
+self.assertTrue(torch.isfinite(pred.grad).all())
+Hi @yinkev we have an issue that torch.finfo is not supported by Torchscript. I think it's fine to remove this test as Torchscript is deprecated and we'll want to move away from it going forward but retain backwards compatibility where we can. I think we accept that GlobalMutualInformationLoss is not compatible and finish off this PR.
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

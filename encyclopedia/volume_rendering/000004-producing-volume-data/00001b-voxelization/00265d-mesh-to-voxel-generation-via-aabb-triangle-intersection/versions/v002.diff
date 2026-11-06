@@ -1,0 +1,475 @@
+--- v001.md
++++ v002.md
+@@ -4,101 +4,64 @@
+ 
+ ## Overview
+-This method generates a 3D voxel grid from a polygon mesh by explicitly testing every voxel cell in the mesh's bounding volume against every triangle in the mesh using an Axis-Aligned Bounding Box (AABB) vs. Triangle intersection test based on the Separating Axis Theorem (SAT) [S1, unofficial]. It differs from rasterization-based approaches [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by avoiding GPU projection and depth buffers, instead relying on precise geometric overlap checks in CPU memory. It is distinct from conservative voxelization [Conservative Voxelization](3247-conservative-voxelization.md) in its specific implementation of the SAT overlap test, which determines binary occupancy based on whether the triangle volume intersects the voxel volume [S1, unofficial].
++This method generates a 3D voxel grid from a triangle mesh by explicitly testing every voxel in the mesh's bounding volume against every triangle to determine occupancy [S1, unofficial]. It differs from rasterization-based methods [908-rasterization-based-voxelization.md] by avoiding GPU projection and instead using a CPU-based Separating Axis Theorem (SAT) intersection test, which guarantees conservative overlap detection without relying on sampling density [S1, unofficial]. It serves as the foundational broad-phase culling step for hierarchical voxelization, such as in Level 1 Triangle-Voxel Classification [4872-level-1-triangle-voxel-classification.md].
+ 
+ ## How it works
+-**Inputs:** A mesh (vertices, indices), a voxel unit size (`_unitSize`), and a transform matrix for world-space conversion.
+-**Outputs:** A 3D integer array `_voxels` of dimensions `[Y, Z, X]`, where values are `0` (empty), `1` (intersected, temporary), or `2` (occupied, final) [S1, unofficial].
+-
+-**Data Structures:**
+-*   `Triangle`: A struct containing three `Vector3` fields: `p1`, `p2`, `p3` representing the world-space vertices of the triangle [S1, unofficial].
++**Inputs and Outputs**
++*   **Input**: A triangle mesh defined by vertices and indices, a voxel side length `_unitSize` (default 0.05f [S1, unofficial]), and a world-space transformation matrix.
++*   **Output**: A 3D integer array `_voxels` of dimensions $[Y, Z, X]$, where values are `0` (empty), `1` (intersected), or `2` (occupied/final) [S1, unofficial].
++
++**Data Structures**
++*   `Triangle`: A struct containing three `Vector3` fields (`p1`, `p2`, `p3`) representing the world-space vertices of a triangle [S1, unofficial].
+ *   `_voxels`: A 3D array `int[Y, Z, X]` [S1, unofficial].
+ *   `_bounds`: A bounding box defined by `min` and `max` vectors in world space [S1, unofficial].
+ 
+-**Parameters:**
+-*   `_unitSize`: The side length of each voxel cube. Default value is `0.05f` [S1, unofficial].
+-
+-**Steps:**
+-
+-1.  **Transform and Bounds Calculation:**
+-    Retrieve mesh vertices and transform them to world space using the object's transform matrix: $v_{world} = T \cdot v_{local}$ [S1, unofficial].
+-    Compute the world-space bounding box by finding the component-wise minimum and maximum coordinates of all transformed vertices:
+-    $$ min = \min_i(v_{world, i}) $$
+-    $$ max = \max_i(v_{world, i}) $$
++**Algorithm Steps**
++
++1.  **Vertex Transformation**: Transform all mesh vertices from local space to world space using the object's transform matrix [S1, unofficial].
++2.  **Bounding Box Calculation**: Compute the world-space axis-aligned bounding box (AABB) of the mesh by finding the minimum and maximum coordinates across all transformed vertices [S1, unofficial].
++3.  **Grid Alignment**:
++    *   Round the bounding box `min` down to the nearest multiple of `_unitSize` using `RoundDown` [S1, unofficial].
++    *   Round the bounding box `max` up to the nearest multiple of `_unitSize` using `RoundUp` [S1, unofficial].
++    *   **Edge Case**: If any dimension of `max` equals `min` after rounding, add `_unitSize` to that dimension of `max` to ensure non-zero grid size [S1, unofficial].
++4.  **Grid Allocation**: Calculate grid dimensions $N_x, N_y, N_z$ as $\lfloor \frac{max - min}{\_unitSize} \rfloor$. Allocate `_voxels` with these dimensions [S1, unofficial]. Note: `Mathf.RoundToInt` is used, which may introduce slight inaccuracies in grid coverage relative to the exact bounding box [S1, unofficial].
++5.  **Voxel Iteration**: Iterate through all voxels in the grid, typically in Y, Z, X order [S1, unofficial].
++6.  **Voxel Center Calculation**: For each voxel at indices $(i_x, i_y, i_z)$, compute its world-space center:
++    $$
++    \text{center} = (i_x \cdot \text{_unitSize} + \frac{\text{_unitSize}}{2}, i_y \cdot \text{_unitSize} + \frac{\text{_unitSize}}{2}, i_z \cdot \text{_unitSize} + \frac{\text{_unitSize}}{2}) + \text{min}
++    $$
+     [S1, unofficial]
+-
+-2.  **Grid Alignment:**
+-    Round the bounding box `min` down to the nearest multiple of `_unitSize` using `RoundDown`.
+-    Round the bounding box `max` up to the nearest multiple of `_unitSize` using `RoundUp` [S1, unofficial].
+-    If any dimension of `max` equals `min` after rounding, add `_unitSize` to that dimension of `max` to ensure non-zero size [S1, unofficial].
+-    Set `_bounds.min = min` and `_bounds.max = max` [S1, unofficial].
+-
+-3.  **Grid Dimension Calculation:**
+-    Calculate the number of voxels per axis:
+-    $$ count_x = \lfloor \frac{max.x - min.x}{\_unitSize} \rfloor $$
+-    $$ count_y = \lfloor \frac{max.y - min.y}{\_unitSize} \rfloor $$
+-    $$ count_z = \lfloor \frac{max.z - min.z}{\_unitSize} \rfloor $$
+-    Allocate `_voxels` with dimensions `[count_y, count_z, count_x]` [S1, unofficial]. Note: The source uses `Mathf.RoundToInt` on the float division result, which may introduce slight inaccuracies in grid coverage if the bounds do not divide evenly by `_unitSize` [S1, unofficial].
+-
+-4.  **Triangle Extraction:**
+-    Iterate through the mesh triangle indices in steps of 3. For each triplet $(i, i+1, i+2)$, create a `Triangle` object using the corresponding world-space vertices $v_i, v_{i+1}, v_{i+2}$ [S1, unofficial].
+-
+-5.  **Voxel Iteration and Intersection:**
+-    Iterate through all voxels in Y, Z, X order (indices $iy, iz, ix$) [S1, unofficial].
+-    For each voxel, compute its center in world space:
+-    $$ center = (ix \cdot \_unitSize + \frac{\_unitSize}{2}, iy \cdot \_unitSize + \frac{\_unitSize}{2}, iz \cdot \_unitSize + \frac{\_unitSize}{2}) + min $$
++7.  **Intersection Test**: For each triangle in the mesh, perform an AABB-Triangle intersection test using the voxel center and `_unitSize` [S1, unofficial].
++8.  **Occupancy Update**: If the test returns true, set `_voxels[i_y, i_z, i_x] = 1` and break the triangle loop for that voxel [S1, unofficial].
++9.  **Finalization**: (Post-processing) Convert `1` to `2` for occupied voxels if required by downstream systems [S1, unofficial].
++
++**AABB-Triangle Intersection Test (SAT)**
++The function `AABBTriangleOverlaped(voxelCenter, voxelSize, triangle)` determines if the triangle intersects the voxel cube [S1, unofficial].
++
++1.  **Relative Coordinates**: Translate triangle vertices $v_1, v_2, v_3$ relative to the voxel center: $v_i' = v_i - \text{voxelCenter}$ [S1, unofficial].
++2.  **Edge Vectors**: Compute edges:
++    $$
++    e_1 = v_2' - v_1', \quad e_2 = v_3' - v_2', \quad e_3 = v_1' - v_3'
++    $$
+     [S1, unofficial]
+-
+-    For each triangle in the mesh:
+-    Perform the AABB-Triangle intersection test `AABBTriangleOverlaped(center, _unitSize, triangle)` [S1, unofficial].
+-    If the test returns true, set `_voxels[iy, iz, ix] = 1` and break the triangle loop (optimization: no need to check further triangles for this voxel) [S1, unofficial].
+-
+-6.  **Finalization:**
+-    After all voxels are processed, iterate through `_voxels` and set any value equal to `1` to `2` to mark it as occupied [S1, unofficial].
+-
+-**AABB-Triangle Intersection Test (SAT):**
+-The function `AABBTriangleOverlaped(voxelCenter, voxelSize, triangle)` implements the Separating Axis Theorem [S1, unofficial]:
+-
+-1.  **Relative Coordinates:**
+-    Let $boxcenter = voxelCenter$ and $halfboxsize = (\frac{voxelSize}{2}, \frac{voxelSize}{2}, \frac{voxelSize}{2})$ [S1, unofficial].
+-    Transform triangle vertices relative to the box center:
+-    $$ v1 = triangle.p1 - boxcenter $$
+-    $$ v2 = triangle.p2 - boxcenter $$
+-    $$ v3 = triangle.p3 - boxcenter $$
+-    [S1, unofficial]
+-
+-2.  **Edge Vectors:**
+-    Compute edge vectors:
+-    $$ e1 = v2 - v1 $$
+-    $$ e2 = v3 - v2 $$
+-    $$ e3 = v1 - v3 $$
+-    [S1, unofficial]
+-
+-3.  **Separating Axes Tests:**
+-    The test checks for separation along the following axes. If separation is found on any axis, the AABB and Triangle do not overlap [S1, unofficial]:
+-
+-    *   **X, Y, Z Axes:**
+-        Project the triangle vertices onto the axis. For the X-axis, the projection interval is $[min(v1.x, v2.x, v3.x), max(v1.x, v2.x, v3.x)]$. The AABB projection is $[-halfboxsize.x, halfboxsize.x]$. Separation occurs if the intervals do not overlap [S1, unofficial].
+-
+-    *   **Edge Cross Product Axes:**
+-        Test axes formed by the cross product of each triangle edge with the X, Y, and Z axes. There are 9 such axes: $e1 \times X, e1 \times Y, e1 \times Z, e2 \times X, \dots, e3 \times Z$ [S1, unofficial].
+-        For an axis $L = e \times Axis$, compute the projection of the triangle vertices onto $L$:
+-        $$ p_i = Dot(v_i, L) $$
+-        $$ min_p = \min(p_1, p_2, p_3) $$
+-        $$ max_p = \max(p_1, p_2, p_3) $$
+-        Compute the radius of the AABB projection onto $L$:
+-        $$ rad = |e.z| \cdot halfboxsize.y + |e.y| \cdot halfboxsize.z $$
+-        (For $L = e \times X$, the formula generalizes to sum of absolute edge components multiplied by corresponding half-box sizes, excluding the component parallel to the cross product axis) [S1, unofficial].
+-        Separation if $min_p > rad$ or $max_p < -rad$ [S1, unofficial].
+-
+-    *   **Triangle Normal Axis:**
+-        Compute the triangle normal:
+-        $$ normal = Cross(e1, e2) $$
+-        Compute the distance from the plane to the origin:
+-        $$ d = -Dot(normal, v1) $$
+-        Find the extremal points of the AABB along the normal direction ($vmin, vmax$).
+-        Separation if $Dot(normal, vmin) + d > 0$ [S1, unofficial].
+-        Intersection if $Dot(normal, vmax) + d \ge 0$ [S1, unofficial].
+-
+-**Pseudocode:**
++3.  **Separation Axes**: Test for separation along the following axes. If separation is found on any axis, the shapes do not intersect [S1, unofficial]:
++    *   **X, Y, Z Axes**: Project triangle vertices onto axes $(1,0,0), (0,1,0), (0,0,1)$. The projection interval for an axis test (e.g., X-axis with edge $e_1$) is calculated as:
++        $$
++        \text{min} = \min(a \cdot v_{1,y} - b \cdot v_{1,z}, a \cdot v_{3,y} - b \cdot v_{3,z})
++        $$
++        $$
++        \text{max} = \max(a \cdot v_{1,y} - b \cdot v_{1,z}, a \cdot v_{3,y} - b \cdot v_{3,z})
++        $$
++        $$
++        \text{rad} = |e_{1,z}| \cdot \text{halfboxsize}_y + |e_{1,y}| \cdot \text{halfboxsize}_z
++        $$
++        Separation occurs if $\text{min} > \text{rad}$ or $\text{max} < -\text{rad}$ [S1, unofficial].
++    *   **Edge Cross Axes**: Test axes $e_i \times \hat{x}, e_i \times \hat{y}, e_i \times \hat{z}$ for $i \in \{1,2,3\}$ [S1, unofficial].
++    *   **Triangle Normal**: Test the axis $\hat{n} = e_1 \times e_2$ [S1, unofficial].
++        *   Compute plane constant $d = -\text{Dot}(\hat{n}, v_1')$ [S1, unofficial].
++        *   Find extremal points of the box along $\hat{n}$: $v_{\text{min}}$ and $v_{\text{max}}$ [S1, unofficial].
++        *   Separation if $\text{Dot}(\hat{n}, v_{\text{min}}) + d > 0$ [S1, unofficial].
++        *   Intersection if $\text{Dot}(\hat{n}, v_{\text{max}}) + d \ge 0$ [S1, unofficial].
++
++**Pseudocode**
+ 
+ ```python
+@@ -112,17 +75,17 @@
+         self.z = z
+ 
+-    def __sub__(self, other: 'Vector3') -> 'Vector3':
++    def __sub__(self, other):
+         return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
+ 
+-    def __add__(self, other: 'Vector3') -> 'Vector3':
++    def __add__(self, other):
+         return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
+ 
+-    def __mul__(self, scalar: float) -> 'Vector3':
++    def __mul__(self, scalar):
+         return Vector3(self.x * scalar, self.y * scalar, self.z * scalar)
+ 
+-    def dot(self, other: 'Vector3') -> float:
++    def dot(self, other):
+         return self.x * other.x + self.y * other.y + self.z * other.z
+ 
+-    def cross(self, other: 'Vector3') -> 'Vector3':
++    def cross(self, other):
+         return Vector3(
+             self.y * other.z - self.z * other.y,
+@@ -138,114 +101,84 @@
+ 
+ def round_down(value: float, length: float) -> float:
+-    return math.floor(value / length) * length
++    return value - (value % length) if value >= 0 else value - (length - (value % length)) % length
+ 
+ def round_up(value: float, length: float) -> float:
+-    return math.ceil(value / length) * length
+-
+-def aabb_triangle_overlaped(voxel_center: Vector3, voxel_size: float, triangle: Triangle) -> bool:
+-    box_center = voxel_center
+-    half_box_size = Vector3(voxel_size * 0.5, voxel_size * 0.5, voxel_size * 0.5)
+-    
+-    v1 = triangle.p1 - box_center
+-    v2 = triangle.p2 - box_center
+-    v3 = triangle.p3 - box_center
+-    
++    return value + (length - (value % length)) % length
++
++def aabb_triangle_overlap(voxel_center: Vector3, voxel_size: float, triangle: Triangle) -> bool:
++    half_size = voxel_size * 0.5
++    half_box = Vector3(half_size, half_size, half_size)
++    
++    # Translate vertices relative to box center
++    v1 = triangle.p1 - voxel_center
++    v2 = triangle.p2 - voxel_center
++    v3 = triangle.p3 - voxel_center
++    
++    # Edge vectors
+     e1 = v2 - v1
+     e2 = v3 - v2
+     e3 = v1 - v3
+     
+-    # Test X, Y, Z axes
+-    # X-axis
+-    min_x = min(v1.x, v2.x, v3.x)
+-    max_x = max(v1.x, v2.x, v3.x)
+-    if min_x > half_box_size.x or max_x < -half_box_size.x:
+-        return False
+-    # Y-axis
+-    min_y = min(v1.y, v2.y, v3.y)
+-    max_y = max(v1.y, v2.y, v3.y)
+-    if min_y > half_box_size.y or max_y < -half_box_size.y:
+-        return False
+-    # Z-axis
+-    min_z = min(v1.z, v2.z, v3.z)
+-    max_z = max(v1.z, v2.z, v3.z)
+-    if min_z > half_box_size.z or max_z < -half_box_size.z:
+-        return False
+-        
+-    # Test Edge Cross Product Axes
+-    axes = [
+-        (e1, Vector3(1, 0, 0)), (e1, Vector3(0, 1, 0)), (e1, Vector3(0, 0, 1)),
+-        (e2, Vector3(1, 0, 0)), (e2, Vector3(0, 1, 0)), (e2, Vector3(0, 0, 1)),
+-        (e3, Vector3(1, 0, 0)), (e3, Vector3(0, 1, 0)), (e3, Vector3(0, 0, 1))
+-    ]
+-    
+-    for edge, axis in axes:
+-        L = edge.cross(axis)
+-        # Project triangle vertices
+-        p1 = v1.dot(L)
+-        p2 = v2.dot(L)
+-        p3 = v3.dot(L)
+-        min_p = min(p1, p2, p3)
+-        max_p = max(p1, p2, p3)
+-        
+-        # Project AABB
+-        # The radius is the sum of absolute components of the edge multiplied by the corresponding half-box sizes
+-        # For L = e x Axis, the projection of the AABB onto L is determined by the edge components perpendicular to Axis
+-        # General formula from source: rad = |e.z|*halfboxsize.y + |e.y|*halfboxsize.z for X-axis test
+-        # This implies: rad = sum(|e_i| * half_box_j) for i != j where j is the axis index? 
+-        # Actually, the source formula for X-axis test (L = e x X) is |e.z|*h.y + |e.y|*h.z.
+-        # This corresponds to the components of e that are NOT the axis component.
+-        
+-        if axis.x == 1: # X-axis
+-            rad = abs(edge.z) * half_box_size.y + abs(edge.y) * half_box_size.z
+-        elif axis.y == 1: # Y-axis
+-            rad = abs(edge.z) * half_box_size.x + abs(edge.x) * half_box_size.z
+-        else: # Z-axis
+-            rad = abs(edge.y) * half_box_size.x + abs(edge.x) * half_box_size.y
+-            
++    # Test axes: X, Y, Z
++    # X-axis test
++    # Projection of triangle onto X-axis is just min/max of x components
++    # Separation axis test for X-axis involves projecting edges onto YZ plane?
++    # The source formula: min = min(a*v1.y - b*v1.z, ...), rad = |e1.z|*half.y + |e1.y|*half.z
++    # This corresponds to the cross product of Edge and X-axis (0,1,0) x (1,0,0) = (0,0,-1)? 
++    # Actually, SAT for AABB vs Triangle tests 13 axes.
++    # 1. X, Y, Z axes of the box.
++    # 2. Normal of the triangle.
++    # 3. Cross products of each triangle edge with each of the box axes (3 edges * 3 axes = 9 axes).
++    
++    # Helper for separating axis test
++    def test_axis(axis: Vector3, verts: List[Vector3], half_box: Vector3) -> bool:
++        # Project vertices onto axis
++        projections = [v.dot(axis) for v in verts]
++        min_p = min(projections)
++        max_p = max(projections)
++        
++        # Project half-box onto axis
++        # The radius of the box projection is sum of abs(axis component) * half_size
++        rad = (abs(axis.x) * half_box.x + 
++               abs(axis.y) * half_box.y + 
++               abs(axis.z) * half_box.z)
++        
+         if min_p > rad or max_p < -rad:
+-            return False
+-            
+-    # Test Triangle Normal Axis
++            return False # Separated
++        return True # Not separated on this axis
++
++    # 1. Box Axes
++    if not test_axis(Vector3(1, 0, 0), [v1, v2, v3], half_box): return False
++    if not test_axis(Vector3(0, 1, 0), [v1, v2, v3], half_box): return False
++    if not test_axis(Vector3(0, 0, 1), [v1, v2, v3], half_box): return False
++
++    # 2. Triangle Normal
+     normal = e1.cross(e2)
+-    d = -normal.dot(v1)
+-    
+-    # Find vmin and vmax of the box along the normal
+-    # The extremal points of an AABB along a vector n are determined by the sign of n
+-    # vmin = box_center - half_box_size * sign(n) ? No, relative to center.
+-    # vmin_rel = Vector3( -half_box_size.x if normal.x > 0 else half_box_size.x, ... )
+-    # Actually, vmin is the corner that minimizes dot(n, p).
+-    # p = center + c, where c is a corner vector from center.
+-    # dot(n, p) = dot(n, center) + dot(n, c).
+-    # We want to minimize dot(n, c).
+-    # c_i = -half_box_size_i if n_i > 0 else half_box_size_i
+-    
+-    vmin_rel = Vector3(
+-        -half_box_size.x if normal.x > 0 else half_box_size.x,
+-        -half_box_size.y if normal.y > 0 else half_box_size.y,
+-        -half_box_size.z if normal.z > 0 else half_box_size.z
+-    )
+-    vmax_rel = Vector3(
+-        half_box_size.x if normal.x > 0 else -half_box_size.x,
+-        half_box_size.y if normal.y > 0 else -half_box_size.y,
+-        half_box_size.z if normal.z > 0 else -half_box_size.z
+-    )
+-    
+-    # Check separation
+-    # Separation if Dot(normal, vmin) + d > 0
+-    # Note: vmin here is relative to box center. The plane equation is Dot(n, p) + d = 0.
+-    # We check if the entire box is on the positive side of the plane.
+-    if normal.dot(vmin_rel) + d > 0:
+-        return False
+-        
+-    # Intersection if Dot(normal, vmax) + d >= 0
+-    # This check is technically part of the overlap confirmation, but if we passed all separation tests, it overlaps.
+-    # The source lists this as a condition for intersection.
+-    
++    if normal.x == 0 and normal.y == 0 and normal.z == 0:
++        return False # Degenerate triangle
++    if not test_axis(normal, [v1, v2, v3], half_box): return False
++
++    # 3. Edge Cross Axes
++    edges = [e1, e2, e3]
++    box_axes = [Vector3(1, 0, 0), Vector3(0, 1, 0), Vector3(0, 0, 1)]
++    
++    for edge in edges:
++        for box_axis in box_axes:
++            axis = edge.cross(box_axis)
++            if axis.x == 0 and axis.y == 0 and axis.z == 0:
++                continue
++            if not test_axis(axis, [v1, v2, v3], half_box): return False
++
+     return True
+ 
+-def mesh_to_voxel(mesh_vertices: List[Vector3], mesh_indices: List[int], transform_matrix, unit_size: float = 0.05) -> List[List[List[int]]]:
+-    # 1. Transform and Bounds
+-    world_vertices = [transform_matrix * v for v in mesh_vertices] # Assuming transform_matrix handles multiplication
+-    
++def mesh_to_voxel(mesh_vertices: List[Vector3], mesh_indices: List[int], 
++                  transform_matrix, unit_size: float = 0.05) -> List[List[List[int]]]:
++    
++    # 1. Transform vertices
++    # Assuming transform_matrix is a 4x4 matrix or similar; simplified here to identity for logic
++    # In practice: world_v = transform.TransformPoint(local_v)
++    world_vertices = [v for v in mesh_vertices] # Placeholder for transform
++    
++    # 2. Compute Bounding Box
+     min_v = Vector3(float('inf'), float('inf'), float('inf'))
+     max_v = Vector3(float('-inf'), float('-inf'), float('-inf'))
+@@ -259,8 +192,9 @@
+         max_v.z = max(max_v.z, v.z)
+         
+-    # 2. Grid Alignment
++    # 3. Round Bounds
+     min_v = Vector3(round_down(min_v.x, unit_size), round_down(min_v.y, unit_size), round_down(min_v.z, unit_size))
+     max_v = Vector3(round_up(max_v.x, unit_size), round_up(max_v.y, unit_size), round_up(max_v.z, unit_size))
+     
++    # Handle zero-size dimensions
+     if max_v.x == min_v.x: max_v.x += unit_size
+     if max_v.y == min_v.y: max_v.y += unit_size
+@@ -270,44 +204,40 @@
+     bounds_max = max_v
+     
+-    # 3. Grid Dimensions
+-    count_x = int(math.floor((max_v.x - min_v.x) / unit_size))
+-    count_y = int(math.floor((max_v.y - min_v.y) / unit_size))
+-    count_z = int(math.floor((max_v.z - min_v.z) / unit_size))
+-    
+-    # Initialize voxels
+-    voxels = [[[0 for _ in range(count_x)] for _ in range(count_z)] for _ in range(count_y)]
+-    
+-    # 4. Triangle Extraction
++    # 4. Allocate Grid
++    dim_x = int(math.floor((bounds_max.x - bounds_min.x) / unit_size))
++    dim_y = int(math.floor((bounds_max.y - bounds_min.y) / unit_size))
++    dim_z = int(math.floor((bounds_max.z - bounds_min.z) / unit_size))
++    
++    # Initialize voxels with 0
++    voxels = [[[0 for _ in range(dim_x)] for _ in range(dim_z)] for _ in range(dim_y)]
++    
++    # 5. Create Triangles
+     triangles = []
+     for i in range(0, len(mesh_indices), 3):
+-        v0 = world_vertices[mesh_indices[i]]
+-        v1 = world_vertices[mesh_indices[i+1]]
+-        v2 = world_vertices[mesh_indices[i+2]]
+-        triangles.append(Triangle(v0, v1, v2))
+-        
+-    # 5. Voxel Iteration
++        p1 = world_vertices[mesh_indices[i]]
++        p2 = world_vertices[mesh_indices[i+1]]
++        p3 = world_vertices[mesh_indices[i+2]]
++        triangles.append(Triangle(p1, p2, p3))
++        
+     unit_size_half = unit_size * 0.5
+     
+-    for iy in range(count_y):
+-        for iz in range(count_z):
+-            for ix in range(count_x):
++    # 6. Iterate Voxels
++    for iy in range(dim_y):
++        for iz in range(dim_z):
++            for ix in range(dim_x):
++                # Calculate voxel center
+                 center = Vector3(
+                     ix * unit_size + unit_size_half,
+                     iy * unit_size + unit_size_half,
+                     iz * unit_size + unit_size_half
+-                ) + bounds_min
++                )
++                center = center + bounds_min
+                 
++                # Test against triangles
+                 for tri in triangles:
+-                    if aabb_triangle_overlaped(center, unit_size, tri):
++                    if aabb_triangle_overlap(center, unit_size, tri):
+                         voxels[iy][iz][ix] = 1
+                         break
+                         
+-    # 6. Finalization
+-    for iy in range(count_y):
+-        for iz in range(count_z):
+-            for ix in range(count_x):
+-                if voxels[iy][iz][ix] == 1:
+-                    voxels[iy][iz][ix] = 2
+-                    
+     return voxels
+ ```
+@@ -316,20 +246,20 @@
+ 
+ ### [Level 1 Triangle-Voxel Classification](4872-level-1-triangle-voxel-classification.md)
+-Classifies input triangles into a coarse 3D voxel grid by mapping vertices to voxel indices and testing overlap with all candidate voxels the triangle spans. It differs by iterating triangles and marking voxels, rather than iterating voxels and checking triangles. Choose it for faster culling on sparse meshes.
++Classifies input triangles into a coarse 3D voxel grid by mapping vertices to voxel indices and testing overlap with all candidate voxels the triangle spans. It serves as the initial broad-phase culling step in hierarchical voxelization, building on [Mesh to Voxel Generation via AABB-Triangle Intersection](3775-mesh-to-voxel-generation-via-aabb-triangle-intersection.md) by applying the AABB-Triangle intersection test to a grid structure. It differs from [Tessellation-based Voxelization](5430-tessellation-based-voxelization.md) by using a fixed-resolution grid and explicit triangle-voxel overlap tests rather than GPU tessellation hardware.
+ 
+ ### [Tessellation-based Voxelization](5430-tessellation-based-voxelization.md)
+-Uses hardware tessellation stages to subdivide geometry before rasterizing into the voxel grid, enabling adaptive triangle density or displacement. Choose it when GPU acceleration and adaptive resolution are required.
++Tessellation-based Voxelization is a GPU-accelerated method for generating 3D voxel grids from triangle meshes by leveraging the hardware tessellation pipeline to subdivide geometry before rasterization. It differs from fixed-function or CPU-based voxelizers by enabling adaptive triangle density and displacement mapping during the generation phase, allowing for higher fidelity in complex regions.
+ 
+ ## Operating characteristics
+-**Time Complexity:** $O(V \cdot T)$, where $V$ is the number of voxels and $T$ is the number of triangles. This is a brute-force approach and can be slow for high-resolution grids and complex meshes [S1, unofficial].
+-**Memory Complexity:** $O(V)$ for the voxel grid [S1, unofficial].
+-**Measured Performance:** The source implementation uses asynchronous tasks (`Task.Run`) to parallelize the voxel iteration, which can improve performance on multi-core CPUs [S1, unofficial].
+-**Strengths:** Precise geometric overlap detection; no reliance on GPU rasterization pipelines; simple to implement in CPU-only environments.
+-**Limitations:** Computationally expensive for large voxel grids due to the nested loop structure; grid dimensions may not divide evenly by unit size, leading to slight inaccuracies in coverage [S1, unofficial].
+-**When to use:** When precise CPU-side voxelization is needed without GPU overhead, or for small to medium meshes.
+-**When not to use:** For very large meshes or high-resolution grids where performance is critical; consider rasterization-based methods [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) or hierarchical structures [Sparse and Hierarchical Structures](4391-sparse-and-hierarchical-structures.md) instead.
++*   **Time Complexity**: $O(N_v \cdot N_t)$, where $N_v$ is the number of voxels and $N_t$ is the number of triangles. This is a brute-force approach and becomes expensive for high-resolution grids or complex meshes [S1, unofficial].
++*   **Memory Complexity**: $O(N_v)$ for the voxel grid storage [S1, unofficial].
++*   **Performance**: The method is typically implemented on the CPU (e.g., using C# Tasks in Unity [S1, unofficial]). It is conservative, ensuring no intersections are missed due to sampling, but lacks the parallelism of GPU rasterization methods [S1, unofficial].
++*   **Strengths**: Simple to implement; guarantees geometric accuracy via SAT; no aliasing artifacts from rasterization.
++*   **Limitations**: Slow for large grids; does not scale well to high resolutions; requires explicit bounding box management [S1, unofficial].
++*   **When to use**: Small to medium meshes where exact geometric intersection is required and performance is not critical; as a broad-phase step in hierarchical voxelization [4872-level-1-triangle-voxel-classification.md].
++*   **When not to use**: Large-scale scenes requiring real-time performance; high-resolution grids where $O(N_v \cdot N_t)$ is prohibitive.
+ 
+ ## Background
+-This method is described in an unofficial tutorial by @fukaken5050 on Qiita, published in July 2017, using Unity 2017.1.0f3 [S1, unofficial]. It is presented as a component for generating voxel grids from mesh models, utilizing C# tasks for asynchronous processing.
++This method originates from a Unity-specific implementation for generating voxel grids from triangle meshes using the Separating Axis Theorem for intersection testing [S1, unofficial]. It was published as an unofficial guide on Qiita by @fukaken5050 in 2017, demonstrating a CPU-based approach using asynchronous tasks [S1, unofficial]. It is often used as a baseline or broad-phase step in more complex voxelization pipelines.
+ 
+ ## Sources

@@ -1,54 +1,93 @@
 # MPVONC
 
-Also called: MPVO Non-Convex
+Also called: MPVO Non-Convex, MPVONC heuristic
 
 ## Overview
-MPVONC is a heuristic visibility sorting algorithm for cell projection volume rendering that extends the MPVO method to non-convex meshes [S1, S2, unofficial]. It solves the problem of ordering non-convex cells back-to-front by augmenting the partial ordering of MPVO with a centroid-based sort of exterior front-facing cells, followed by a depth-first search (DFS) [S1, S2, unofficial]. Unlike exact methods such as SXMPVO or A-buffer sorting, MPVONC is significantly faster but is approximate; it may produce visual artifacts due to sorting errors when occlusion relationships are not captured by the topological graph [S1, S2, unofficial].
+MPVONC is a heuristic visibility sorting algorithm for cell projection volume rendering that extends the MPVO method to non-convex meshes [S1][S2, unofficial][S3, unofficial]. It solves the problem of ordering non-convex cells back-to-front by augmenting the partial ordering of MPVO with a centroid-based sort of exterior front-facing cells, followed by a depth-first search (DFS) [S1][S2, unofficial][S3, unofficial]. Unlike exact methods such as [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) or [A-buffer visibility sort for non-convex grids](1057-a-buffer-visibility-sort-for-non-convex-grids.md), MPVONC is significantly faster but is approximate; it may produce visual artifacts due to sorting errors when occlusion relationships are not captured by the topological graph [S1][S2, unofficial][S3, unofficial].
 
 ## How it works
 **Inputs:**
-*   A set of polyhedral cells forming a non-convex mesh.
+*   A set of polyhedral cells forming a non-convex mesh [S2, unofficial].
 *   A viewpoint position $V$.
-*   The directed graph $G$ of "behind" relationships derived from MPVO (edges point from occluded to occluding cells across shared faces) [S1, S2, unofficial].
+*   The directed graph $G=(C, E)$ of "behind" relationships derived from MPVO, where nodes $C$ are cells [S1][S2, unofficial][S3, unofficial].
 
 **Outputs:**
-*   A total ordering of cells suitable for back-to-front volume rendering.
+*   A total ordering of cells suitable for back-to-front volume rendering [S1][S2, unofficial][S3, unofficial].
 
 **Data Structures:**
-*   **Graph $G=(C, E)$**: Nodes $C$ are cells. Edges $E$ represent the MPVO partial ordering.
-*   **Exterior Front-Facing Set $S_{ext}$**: A subset of cells $c \in C$ that have at least one face visible from the viewpoint (exterior front-facing).
-*   **Centroid Distance**: For each cell $c$, the Euclidean distance $d(c, V)$ between its centroid $C_c$ and the viewpoint $V$.
+*   **Exterior Front-Facing Set $S_{ext}$**: A subset of cells $c \in C$ that have at least one face visible from the viewpoint (exterior front-facing) [S1][S2, unofficial][S3, unofficial].
+*   **Centroid Distance**: For each cell $c$, the Euclidean distance $d(c, V)$ between its centroid $C_c$ and the viewpoint $V$ [S1][S2, unofficial][S3, unofficial].
 
 **Steps:**
-1.  **Identify Exterior Front-Facing Cells**: Determine the set $S_{ext}$ of all cells that have at least one face that is front-facing with respect to the viewpoint [S1, S2, unofficial].
+1.  **Identify Exterior Front-Facing Cells**: Determine the set $S_{ext}$ of all cells that have at least one face that is front-facing with respect to the viewpoint [S1][S2, unofficial][S3, unofficial].
 2.  **Sort Exterior Cells**: Sort the cells in $S_{ext}$ in decreasing order of their centroid distance to the viewpoint:
     $$ d(c_i, V) \ge d(c_j, V) \implies c_i \text{ precedes } c_j $$
-    Let the sorted list be $L = [c_1, c_2, \dots, c_k]$ [S1, S2, unofficial].
+    Let the sorted list be $L = [c_1, c_2, \dots, c_k]$ [S1][S2, unofficial][S3, unofficial].
 3.  **Depth-First Search (DFS)**: Initialize an empty list `OrderedCells` [G]. Iterate through each cell $c$ in $L$:
-    *   If $c$ has not been visited in the current traversal or globally:
-        *   Perform a DFS starting from $c$ in the graph $G$.
-        *   Append visited nodes to `OrderedCells` in post-order (or as they are finalized by the DFS) to ensure back-to-front order relative to the graph edges [S1, S2, unofficial].
+    *   If $c$ has not been visited globally:
+        *   Perform a DFS starting from $c$ in the graph $G$ [S1][S2, unofficial][S3, unofficial].
+        *   Append visited nodes to `OrderedCells` in post-order to ensure back-to-front order relative to the graph edges [S1][S2, unofficial][S3, unofficial].
         *   Mark visited nodes to avoid re-processing [G].
-4.  **Result**: The `OrderedCells` list constitutes the total visibility ordering [S1, S2, unofficial].
+4.  **Result**: The DFS traversal constructs the total visibility ordering from the `<vp` relations [S1][S2, unofficial][S3, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def mpvonc_sort(cells, viewpoint, mpvo_graph):
+    # mpvo_graph: dict mapping cell_id to list of cell_ids it points to (behind relationships)
+    ordered = []
+    visited = set()
+
+    # 1. Identify exterior front-facing cells
+    ext_front = [c for c in cells if is_front_facing(c, viewpoint)]
+
+    # 2. Sort by decreasing centroid distance to viewpoint
+    ext_front.sort(key=lambda c: math.dist(c.centroid, viewpoint), reverse=True)
+
+    # 3. DFS from each sorted exterior cell
+    for c in ext_front:
+        if c.id not in visited:
+            dfs_visit(c, mpvo_graph, visited, ordered)
+
+    return ordered
+
+def dfs_visit(cell, graph, visited, ordered):
+    visited.add(cell.id)
+    for neighbor in graph.get(cell.id, []):
+        if neighbor.id not in visited:
+            dfs_visit(neighbor, graph, visited, ordered)
+    ordered.append(cell)
+
+def is_front_facing(cell, viewpoint):
+    # Standard face visibility test against viewpoint [G]
+    for face in cell.faces:
+        if face.normal.dot(viewpoint - face.centroid) > 0:
+            return True
+    return False
+```
 
 **Pitfalls:**
-*   **Sorting Errors**: MPVONC may fail to produce a correct ordering if one cell occludes another across a region where ray-gaps are possible [S1, S2, unofficial]. This occurs specifically when the occluding cell has a centroid farther from the viewpoint than the occluded cell's centroid [S1, S2, unofficial]. In such cases, the heuristic sort places the occluded cell before the occluding one, leading to visual artifacts [S1, S2, unofficial].
-*   **Non-Convexity**: The method assumes the underlying MPVO graph is valid. If the mesh is highly non-convex or contains complex topological features not captured by face-sharing relationships, the heuristic may not resolve all occlusions [S1, S2, unofficial].
+*   **Sorting Errors**: MPVONC may fail to produce a correct ordering if one cell occludes another across a region where ray-gaps are possible [S1][S2, unofficial][S3, unofficial]. This occurs specifically when the occluding cell has a centroid farther from the viewpoint than the occluded cell's centroid [S1][S2, unofficial][S3, unofficial]. In such cases, the heuristic sort places the occluded cell before the occluding one, leading to visual artifacts [S1][S2, unofficial][S3, unofficial].
+*   **Non-Convexity**: The method assumes the underlying MPVO graph is valid [G]. If the mesh is highly non-convex or contains complex topological features not captured by face-sharing relationships, the heuristic may not resolve all occlusions [S1][S2, unofficial][S3, unofficial].
 
 ## Subtopics
 
 ### Silva et al. Sweep Algorithm
-A variant that removes the assumption that the mesh is convex by combining a sweep algorithm with the MPVO method [S1, unofficial]. It is substantially faster than previous exact methods for general meshes [S1, unofficial].
+A variant that removes the assumption that the mesh is convex by combining a sweep algorithm with the MPVO method [S2, unofficial]. It is substantially faster than previous exact methods for general meshes [S2, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity**: Very fast, comparable to MPVO [S1, S2, unofficial]. The sorting step is $O(N \log N)$ for exterior cells, and DFS is $O(N+E)$ [G].
-*   **Accuracy**: Approximate. It usually generates a correct visibility ordering but is not guaranteed to be exact [S1, S2, unofficial].
-*   **Strengths**: Simple to implement, very fast, handles non-convex meshes better than standard MPVO [S1, S2, unofficial].
-*   **Limitations**: Prone to sorting errors and visual artifacts in specific non-convex configurations where centroid distance does not correlate with occlusion [S1, S2, unofficial]. Not suitable when artifact-free rendering is required.
+*   **Time Complexity**: Very fast, comparable to MPVO [S1][S2, unofficial][S3, unofficial]. The sorting step is $O(N \log N)$ for exterior cells, and DFS is $O(N+E)$ [G].
+*   **Accuracy**: Approximate. It usually generates a correct visibility ordering but is not guaranteed to be exact [S1][S2, unofficial][S3, unofficial].
+*   **Strengths**: Simple to implement, very fast, handles non-convex meshes better than standard MPVO [S1][S2, unofficial][S3, unofficial].
+*   **Limitations**: Prone to sorting errors and visual artifacts in specific non-convex configurations where centroid distance does not correlate with occlusion [S1][S2, unofficial][S3, unofficial]. Not suitable when artifact-free rendering is required [S1][S2, unofficial][S3, unofficial].
 
 ## Background
-MPVONC was described by Williams in [27] as a heuristic to extend the MPVO algorithm to non-convex meshes [S1, S2, unofficial]. It was developed to address the limitations of MPVO, which only computes an approximate ordering for general (non-convex) datasets, resulting in visual artifacts [S1, unofficial]. The method augments the MPVO partial ordering with a centroid-based sort and DFS [S1, S2, unofficial]. It is cited in works discussing image-space visibility ordering for cell projection volume rendering of unstructured data [S1, S2, unofficial].
+MPVONC was described by Williams in [27] as a heuristic to extend the MPVO algorithm to non-convex meshes [S1][S2, unofficial][S3, unofficial]. It was developed to address the limitations of MPVO, which only computes an approximate ordering for general (non-convex) datasets, resulting in visual artifacts [S1][S2, unofficial][S3, unofficial]. The method augments the MPVO partial ordering with a centroid-based sort and DFS [S1][S2, unofficial][S3, unofficial]. It is cited in works discussing image-space visibility ordering for cell projection volume rendering of unstructured data [S1][S2, unofficial][S3, unofficial].
 
 ## Sources
-[S1] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
-[S2] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)
+[S1] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://doi.org/10.1109/tvcg.2004.45, fetched 2026-10-25
+[S2] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+[S3] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,140 @@
+# TIGRE Geometry Setup
+Also called: TIGRE Geometry Configuration, TIGRE Scanner Mode Setup
+## Overview
+Configures a TIGRE geometry object from a configuration dictionary, setting detector, voxel, and offset parameters for cone or parallel beam modes [S1, unofficial]. It serves as the foundational step for defining the arbitrary source-detector geometry required by the parent projector, ensuring that ray origins and detector coordinates are mathematically consistent with the chosen scanner mode [S1, unofficial].
+## How it works
+**Inputs and Outputs:**
+- Input: A configuration dictionary `cfg` containing scanner parameters.
+- Output: A geometry object `geo` (or `TIGREGeometry`) with populated fields for source, detector, and voxel dimensions.
+
+**Data Structures:**
+The geometry object `geo` contains the following fields:
+- `geo.mode`: String, either `"parallel"` or `"cone"`.
+- `geo.DSD`: Float, Source-to-Detector distance.
+- `geo.DSO`: Float, Source-to-Origin distance.
+- `geo.nDetector`: Tuple or array, number of detector pixels in [width, height].
+- `geo.sDetector`: Tuple or array, size of a single detector pixel in [width, height].
+- `geo.dDetector`: Tuple or array, total detector size in [width, height], calculated as `nDetector * sDetector`.
+- `geo.nVoxel`: Tuple or array, number of voxels in [x, y, z].
+- `geo.sVoxel`: Tuple or array, size of a single voxel in [x, y, z].
+- `geo.dVoxel`: Tuple or array, total volume size in [x, y, z], calculated as `nVoxel * sVoxel`.
+- `geo.offset`: Tuple or array, offset of the detector or volume origin relative to the coordinate system center.
+
+**Steps:**
+1. Initialize the geometry object `geo`.
+2. Set `geo.mode` from `cfg["mode"]`.
+3. If `cfg["mode"]` is `"cone"`:
+   - Set `geo.DSD` (Source-to-Detector distance).
+   - Set `geo.DSO` (Source-to-Origin distance).
+   - Ensure `geo.DSD > geo.DSO` to place the detector behind the origin relative to the source.
+4. If `cfg["mode"]` is `"parallel"`:
+   - Set `geo.DSD` and `geo.DSO` to infinity or a sufficiently large value, or handle parallel projection logic specifically if the TIGRE implementation requires explicit large values [G].
+5. Set detector parameters:
+   - `geo.nDetector` from `cfg["nDetector"]`.
+   - `geo.sDetector` from `cfg["sDetector"]`.
+   - Calculate `geo.dDetector = geo.nDetector * geo.sDetector`.
+6. Set voxel/volume parameters:
+   - `geo.nVoxel` from `cfg["nVoxel"]`.
+   - `geo.sVoxel` from `cfg["sVoxel"]`.
+   - Calculate `geo.dVoxel = geo.nVoxel * geo.sVoxel`.
+7. Set offsets:
+   - `geo.offset` from `cfg["offset"]` or default to zero if not specified.
+8. Store additional configuration parameters for downstream use:
+   - `geo.accuracy` from `cfg["accuracy"]`.
+   - `geo.filter` from `cfg["filter"]`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def setup_tigre_geometry(cfg):
+    """
+    Configures a TIGRE geometry object based on a configuration dictionary.
+    
+    Args:
+        cfg (dict): Configuration dictionary with keys:
+            - mode (str): "parallel" or "cone"
+            - DSD (float): Source-to-Detector distance (cone only)
+            - DSO (float): Source-to-Origin distance (cone only)
+            - nDetector (tuple): (num_pixels_x, num_pixels_y)
+            - sDetector (tuple): (pixel_size_x, pixel_size_y)
+            - nVoxel (tuple): (num_voxels_x, num_voxels_y, num_voxels_z)
+            - sVoxel (tuple): (voxel_size_x, voxel_size_y, voxel_size_z)
+            - offset (tuple): (offset_x, offset_y, offset_z)
+            - accuracy (float): Accuracy setting for forward projection
+            - filter (str): Reconstruction filter type
+            
+    Returns:
+        geo: A geometry object with fields DSD, DSO, nDetector, sDetector, 
+             dDetector, nVoxel, sVoxel, dVoxel, offset, mode, accuracy, filter.
+    """
+    geo = {}
+    
+    # Set mode
+    geo["mode"] = cfg["mode"]
+    
+    # Set Source-Detector distances
+    if geo["mode"] == "cone":
+        geo["DSD"] = cfg["DSD"]
+        geo["DSO"] = cfg["DSO"]
+    elif geo["mode"] == "parallel":
+        # For parallel beam, DSD and DSO are often set to large values or handled differently
+        # TIGRE typically expects DSD and DSO even for parallel, or uses a specific parallel flag
+        # Assuming standard TIGRE behavior where parallel mode might use large DSD/DSO or specific constants
+        # If TIGRE requires explicit large values for parallel:
+        geo["DSD"] = 1e10
+        geo["DSO"] = 1e10
+    else:
+        raise ValueError("Mode must be 'parallel' or 'cone'")
+    
+    # Set detector parameters
+    n_det = cfg["nDetector"]
+    s_det = cfg["sDetector"]
+    geo["nDetector"] = n_det
+    geo["sDetector"] = s_det
+    # Calculate total detector size
+    geo["dDetector"] = (n_det[0] * s_det[0], n_det[1] * s_det[1])
+    
+    # Set voxel parameters
+    n_vox = cfg["nVoxel"]
+    s_vox = cfg["sVoxel"]
+    geo["nVoxel"] = n_vox
+    geo["sVoxel"] = s_vox
+    # Calculate total volume size
+    geo["dVoxel"] = (n_vox[0] * s_vox[0], n_vox[1] * s_vox[1], n_vox[2] * s_vox[2])
+    
+    # Set offsets
+    geo["offset"] = cfg.get("offset", (0, 0, 0))
+    
+    # Store additional configuration
+    geo["accuracy"] = cfg.get("accuracy", 1.0)
+    geo["filter"] = cfg.get("filter", "ramp")
+    
+    return geo
+```
+
+**Edge Cases and Pitfalls:**
+- **Parallel Mode Distances:** In parallel beam mode, the source is at infinity. TIGRE may require specific handling for `DSD` and `DSO` (e.g., large values or a specific parallel projection flag) [G]. If the implementation does not handle parallel mode explicitly, using large finite values may introduce numerical errors.
+- **Dimension Mismatch:** Ensure `nDetector` and `sDetector` have the same length (2 for 2D detector). Ensure `nVoxel` and `sVoxel` have the same length (3 for 3D volume).
+- **Offset Interpretation:** The offset defines the position of the detector or volume origin relative to the coordinate system center. Incorrect offsets lead to misaligned projections [S1, unofficial].
+- **Precision:** Floating-point precision for distances and sizes should be consistent to avoid accumulation errors in ray tracing [G].
+
+## Subtopics
+
+### TIGRE DRR Generation
+A technique to prepare 2D X-ray images from collected CT volumes to create paired datasets for training, overcoming the impracticality of collecting paired clinical data [S2]. It uses the TIGRE tomography toolbox to generate 50 X-ray images for each volume by covering 360° views [S2]. This is useful for training neural radiance fields or other reconstruction models where paired 2D-3D data is required [S2].
+
+## Operating characteristics
+- **Time Complexity:** The setup itself is $O(1)$ as it involves simple arithmetic and dictionary lookups. The actual ray generation or projection using the configured geometry depends on the number of rays and voxels.
+- **Memory Complexity:** $O(1)$ for the geometry object, which stores a fixed number of scalar and tuple values.
+- **Strengths:** Provides a flexible and standardized way to configure complex scanner geometries in TIGRE. Supports both parallel and cone beam modes.
+- **Limitations:** Requires careful configuration of distances and offsets to ensure correct ray tracing. Parallel mode handling may be implementation-specific.
+- **When to Use:** When setting up forward or backward projections in TIGRE for CT reconstruction or DRR generation.
+- **When Not to Use:** When using a different tomography toolbox or when the geometry is fixed and does not require dynamic configuration.
+
+## Background
+The TIGRE (Tomographic Iterative GPU-based Reconstruction Toolbox) is a widely used toolbox for CT reconstruction [S2]. The geometry setup is a fundamental component of TIGRE, allowing users to define the scanner parameters for various projection modes [S1, unofficial]. The method described here is based on the TIGRE API and common usage patterns in research projects utilizing TIGRE for medical image reconstruction [S1, unofficial][S2].
+
+## Sources
+[S1] wskingdom/DGR, https://github.com/wskingdom/DGR, fetched 2026-10-26 (unofficial)
+[S2] The Adaption of Recent New Concepts in Neural Radiance Fields and Their Role for High-Fidelity Volume Reconstruction in Medical Images., https://doi.org/10.3390/s24185923, fetched 2026-10-26

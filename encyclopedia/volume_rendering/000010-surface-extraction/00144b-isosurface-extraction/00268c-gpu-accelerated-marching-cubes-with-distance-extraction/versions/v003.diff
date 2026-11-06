@@ -1,0 +1,223 @@
+--- v002.md
++++ v003.md
+@@ -4,124 +4,127 @@
+ 
+ ## Overview
+-This method extracts an STL mesh from a signed distance function (SDF) defined in a GLSL shader by extracting vertex distances from the GPU first, then processing the data on the CPU. It sets itself apart from pure GPU implementations by avoiding the high cost and difficulty of retrieving large volumes of geometry data back from the GPU, which was found to be too slow [S1, unofficial].
++This method extracts a triangular mesh (STL) from a Signed Distance Function (SDF) by offloading the scalar field evaluation to the GPU via a fragment shader, while performing the topological connectivity and mesh generation on the CPU. It differs from pure GPU implementations by avoiding the performance penalty of reading large volumes of vertex data back from GPU memory, and from pure CPU implementations by leveraging the GPU's parallelism for the expensive distance function evaluations [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-- A signed distance function defined as a GLSL shader.
+-- Volume dimensions (`dims`): array of 3 integers.
+-- Volume bounds (`bounds`): array of 2 arrays of 3 floats (min and max coordinates).
++- A signed distance function $f(x, y, z)$ defined in GLSL.
++- Volume dimensions `dims` (array of 3 integers: $N_x, N_y, N_z$).
++- Volume bounds `bounds` (array of 2 arrays of 3 floats: min and max coordinates).
+ 
+ **Outputs:**
+-- An STL mesh file.
++- A triangular mesh (STL format).
+ 
+ **Data Structures:**
+-- `volume`: An object containing `dims` (array of 3 integers), `bounds` (array of 2 arrays of 3 floats), `vertexDims` (array of 3 integers), `vertexCount` (integer), and `size` (integer) [S1, unofficial].
+-- `blockPotentialBuffers`: An array of `ArrayBuffer` objects, each of size `volume.vertexCount * 4` bytes, storing `Float32` values [S1, unofficial].
++- `volume`: An object containing:
++  - `dims`: Array of 3 integers.
++  - `bounds`: Array of 2 arrays of 3 floats.
++  - `vertexCount`: Integer, calculated as $(N_x + 1)(N_y + 1)(N_z + 1)$.
++  - `size`: Integer, the texture dimension required to store vertices, calculated as $\lceil \sqrt{\text{vertexCount}} \rceil$.
++- `blockPotentialBuffers`: An array of `ArrayBuffer` objects. Each buffer has size `volume.vertexCount * 4` bytes, storing `Float32` values.
+ 
+ **Parameters:**
+-- `maxSize`: The maximum texture size for the GPU rendering buffer, capped at 4096 [S1, unofficial].
+-- `numWorkers`: The number of worker threads used for parallel processing, set to 4 [S1, unofficial].
+-- `blocks`: The number of chunks to split the volume into for worker distribution, set to 256 [S1, unofficial].
++- `maxSize`: Maximum texture size for the GPU rendering buffer. Capped at 4096 [S1, unofficial].
++- `numWorkers`: Number of worker threads for parallel processing. Default 4 [S1, unofficial].
++- `blocks`: Number of chunks to split the volume into for worker distribution. Default 256 [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Subdivision**: Subdivide the volume to be marched into blocks small enough to fit the maximum texture size (`maxSize`) [S1, unofficial].
+-2.  **Distance Extraction**: Extract distances for each cube vertex from the GLSL shader. This is done by rendering the shader to a framebuffer and reading the pixels [S1, unofficial].
+-3.  **Skip Empty Blocks**: Skip any blocks which are entirely inside (negative distance) or outside (positive distance) the surface. This saves time for models with a lot of empty space [S1, unofficial].
+-4.  **CPU Marching Cubes**: Run the standard Marching Cubes algorithm on the CPU for the remaining blocks [S1, unofficial].
++
++1.  **Volume Subdivision**:
++    The volume defined by `dims` and `bounds` is subdivided into smaller blocks (chunks) such that the vertex data for each block fits within a square texture of size `maxSize` $\times$ `maxSize`. The total number of vertices per block is limited by `maxSize`$^2$.
++
++2.  **Distance Extraction (GPU)**:
++    For each block:
++    a.  Initialize `numWorkers` `ArrayBuffer`s of size `volume.vertexCount * 4` bytes.
++    b.  Map the block's vertices to a 2D texture coordinate space.
++    c.  Render a full-screen quad (or appropriate geometry) using a fragment shader that evaluates the SDF $f(x, y, z)$ for each vertex position.
++    d.  Read the resulting pixel values (distances) from the GPU framebuffer using `gl.readPixels`.
++    e.  Store these distances in the `blockPotentialBuffers`.
++
++3.  **Block Filtering**:
++    Analyze the extracted distances for each block. If all vertices in a block have distances $> 0$ (outside) or all have distances $< 0$ (inside), the block is skipped. This optimization saves CPU processing time for empty or fully contained regions [S1, unofficial].
++
++4.  **Marching Cubes (CPU)**:
++    For each non-skipped block:
++    a.  Pass the distance values to a CPU-based Marching Cubes implementation.
++    b.  Generate triangles based on the standard Marching Cubes lookup tables.
++    c.  Output the triangles.
++
++5.  **Mesh Assembly**:
++    Combine the triangles from all blocks into a final mesh. Note that adjacent blocks may produce duplicate vertices or edges if not handled by a global vertex merging step, though the source implementation notes that large meshes are saved in parts and may require external tools like MeshLab for recombination [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def extract_mesh(shader, dims, bounds):
+-    # 1. Subdivision
+-    # Split volume into blocks fitting maxSize
+-    volumes = split_volume(dims, bounds, max_size=4096)
++def gpu_accelerated_marching_cubes(sdf_function, dims, bounds):
++    # 1. Setup
++    vertex_count = (dims[0] + 1) * (dims[1] + 1) * (dims[2] + 1)
++    size = ceil(sqrt(vertex_count))
++    max_size = min(size, 4096)
+     
+-    all_potentials_buffers = []
++    # Subdivide volume into blocks fitting within max_size
++    blocks = split_volume(dims, bounds, max_size)
+     
+-    for volume in volumes:
+-        # 2. Distance Extraction
+-        # Create buffers for workers
+-        num_workers = 4
++    num_workers = 4
++    worker_pool = WorkerPool(num_workers)
++    
++    all_triangles = []
++    
++    # 2. Process each block
++    for block in blocks:
++        # Calculate vertex count for this block
++        block_vertex_count = (block.dims[0] + 1) * (block.dims[1] + 1) * (block.dims[2] + 1)
++        
++        # Initialize buffers for workers
+         block_potential_buffers = []
+-        block_potentials = []
++        for i in range(num_workers):
++            buffer = ArrayBuffer(block_vertex_count * 4)
++            block_potential_buffers.append(buffer)
++            
++        # 3. Extract distances on GPU
++        # Render SDF values to texture, read back to buffers
++        potentials = extract_distances_gpu(block, sdf_function, block_potential_buffers)
+         
+-        for i in range(num_workers):
+-            buffer = ArrayBuffer(volume.vertex_count * 4)
+-            potentials = Float32Array(buffer)
+-            block_potential_buffers.append(buffer)
+-            block_potentials.append(potentials)
+-            
+-        # Render shader to get distances
+-        # uniforms: boundsA, boundsB, dims
+-        render_shader(shader, volume.bounds[0], volume.bounds[1], volume.dims)
+-        
+-        # Read pixels from GPU
+-        pixels = read_pixels()
+-        
+-        # Check for geometry and distribute to workers
+-        contains_geometry = False
+-        previous_value = None
+-        
+-        for i in range(len(pixels)):
+-            value = unpack_float(pixels[i])
+-            
+-            # Check if surface crosses this vertex relative to previous
+-            # Note: Logic from source checks sign change
+-            if previous_value is not None and (value > 0) != (previous_value > 0):
+-                contains_geometry = True
+-            
+-            previous_value = value
+-            
+-            # Distribute value to all worker buffers
+-            for bl in range(num_workers):
+-                block_potentials[bl][i] = value
+-                
+-        if not contains_geometry:
++        # 4. Filter blocks
++        if is_empty_or_full(potentials):
+             continue
+             
+-        all_potentials_buffers.append(block_potential_buffers)
++        # 5. Marching Cubes on CPU
++        # Distribute block processing to workers
++        triangles = worker_pool.run_marching_cubes(block, potentials)
++        all_triangles.extend(triangles)
+         
+-    # 3. CPU Marching Cubes
+-    # Initialize workers
+-    for buffer_set in all_potentials_buffers:
+-        for buffer in buffer_set:
+-            init_worker(buffer)
+-            
+-    # Process blocks
+-    blocks = 256
+-    for volume in volumes:
+-        cubes = volume.dims[0] * volume.dims[1] * volume.dims[2]
+-        start = 0
+-        end = 0
+-        current_blocks = blocks
+-        
+-        while current_blocks > 0:
+-            start = end
+-            end = start + floor((cubes - start) / current_blocks)
+-            
+-            # Send block range to workers
+-            # Workers process their assigned chunk of the volume
+-            process_block(start, end, all_potentials_buffers)
+-            
+-            current_blocks -= 1
+-            
+-    # Combine results
+-    mesh = combine_meshes()
+-    return mesh
++    return all_triangles
++
++def extract_distances_gpu(block, sdf_function, buffers):
++    # Map block vertices to 2D texture coordinates
++    # Render fragment shader evaluating sdf_function
++    # Read pixels into buffers
++    # Return combined potentials array
++    pass
++
++def is_empty_or_full(potentials):
++    # Check if all potentials are > 0 or all < 0
++    # Note: Zero crossing detection is implicit in Marching Cubes,
++    # but skipping purely inside/outside blocks is an optimization
++    pass
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- Large meshes are saved in parts and must be re-combined externally (e.g., with MeshLab) [S1, unofficial].
+-- Missing triangles (holes) may appear in the resulting mesh [S1, unofficial].
++## Subtopics
++
++### [Marching Cubes](30-isosurface-extraction.md)
++The core topological algorithm used on the CPU to generate triangles from the scalar field values.
++
++### [Isosurface extraction on arbitrary polyhedral grids](951-isosurface-extraction-on-arbitrary-polyhedral-grids.md)
++Alternative to regular grid marching cubes, not used here.
+ 
+ ## Operating characteristics
+-- **Time Complexity**: Depends on the number of blocks and the cost of GPU-CPU transfer. The method avoids the high cost of full GPU-side marching cubes data retrieval [S1, unofficial].
+-- **Memory Complexity**: Requires storing potential buffers for each worker per volume block. Buffer size is `volume.vertexCount * 4` bytes per worker [S1, unofficial].
+-- **Strengths**: Reduces GPU/CPU round trips by extracting distances first. Skips empty blocks efficiently [S1, unofficial].
+-- **Limitations**: Requires CPU processing for the actual mesh generation. Large meshes are split into parts. Potential for holes in the mesh [S1, unofficial].
+-- **When to use**: When extracting meshes from SDFs defined in shaders and pure GPU implementation is too slow due to data retrieval costs [S1, unofficial].
++- **Time Complexity**: Dominated by the GPU fragment shader evaluation for distance calculation and the CPU-based Marching Cubes traversal. The GPU acceleration reduces the cost of distance evaluation compared to a pure CPU approach, but the CPU bottleneck remains for mesh generation.
++- **Memory Complexity**: Requires storing vertex distances for each block. The memory footprint is proportional to the number of vertices in the volume, specifically `vertexCount * 4` bytes per block.
++- **Performance**: The method is faster than running the entire algorithm on the GPU due to the high cost of reading large amounts of data back from GPU memory [S1, unofficial]. It is slower than a pure CPU implementation for simple models because of the overhead of GPU-CPU communication and shader compilation, but scales better for complex SDFs [S1, unofficial].
++- **Strengths**: Efficient for complex SDFs where distance evaluation is expensive; reduces GPU/CPU round trips by batching distance extraction.
++- **Limitations**: Large meshes are saved in parts and must be recombined externally; missing triangles (holes) may appear in the resulting mesh [S1, unofficial]. The method is specific to WebGL/GLSL environments.
+ 
+ ## Background
+-This method is associated with the `glsl-marching-cubes` project by tdhooper [S1, unofficial]. It was developed as a WebGL-based solution for extracting STL meshes from signed distance functions. The approach was chosen because running the entire marching cubes algorithm on the GPU was found to be too slow due to the cost and difficulty of getting data back onto the CPU [S1, unofficial]. The JavaScript implementation is based on `mikolalysenko/isosurface` [S1, unofficial].
++This method was developed as part of the `glsl-marching-cubes` project by tdhooper, leveraging WebGL and Three.js to provide a browser-based signed distance function mesher [S1, unofficial]. It addresses the limitation of pure CPU Marching Cubes for complex implicit surfaces and the performance issues of pure GPU implementations in web contexts.
+ 
+ ## Sources

@@ -1,0 +1,481 @@
+Analytical inverse kinematics for 6R and 7R revolute arms. Returns every IK branch at machine-precision FK closure. Ships per-arm build artifacts; covers non-Pieper 6R and non-SRS 7R geometries. - #158/#162: Phase 5b — Study quaternion / dual-quaternion machinery by siddhss5 · Pull Request #166 · personalrobotics/ssik
+
+#158/#162: Phase 5b — Study quaternion / dual-quaternion machinery by siddhss5 · Pull Request #166 · personalrobotics/ssik · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+siddhss5
+commented
+May 2, 2026
+Copy link
+Copy Markdown
+Collaborator
+Summary
+Phase 5b of the 10-PR Husty-Pfurner sequence in Phase 5 execution plan: 10-PR sequence for HP (6R + 6R/P), validation harness first #162. The math-infra layer for SE(3) ↔ Study coordinates, dual-quaternion product, joint and chain composition. Every subsequent HP step (5c constraints, 5d elimination, 5f back-substitution) builds on this.
+66 tests covering round-trip, Study quadric invariance, composition equivalence, joint primitives (revolute + prismatic), and chain composition matching poe_forward_kinematics on JACO 2 / UR5 / Franka + a synthetic R-P-R fixture.
+Pure numpy. No algorithm content yet. No Cython yet (Phase 5h hot-spot escalation only).
+What's in this PR
+src/ssik/solvers/husty_pfurner/_study.py — math primitives:
+DQ_IDENTITY constant.
+dq_from_se3(T) → 8-vec and se3_from_dq(σ) → 4×4. Quaternion extraction uses Shepperd 1978 (numerically stable near 180° rotations, unlike the textbook trace-only method).
+dq_mul(σ_a, σ_b) — dual-quaternion product. Decomposition: (p_a + ε q_a)(p_b + ε q_b) = p_a p_b + ε(p_a q_b + q_a p_b).
+dq_conj(σ) — conjugate (Study-coordinate inverse on the quadric).
+dq_joint(axis, q, joint_type) — single joint as DQ. Revolute uses the standard half-angle quaternion; prismatic uses the ε half-translation. Raises ValueError on unsupported types.
+dq_chain(kb, q) — POE-normalised chain → final EE pose as DQ.
+study_quadric_residual(σ) — quadric check for diagnostics.
+tests/test_husty_pfurner_study.py — 66 tests across four oracle classes:
+Oracle
+Coverage
+1. SE(3) round-trip
+20 seeded + 200 Hypothesis-fuzzed rigid transforms; T → DQ → T identity at 1e-12.
+2. Study quadric invariance
+every dq_from_se3(T) lies on the quadric within 1e-12.
+3. Composition equivalence
+dq_mul matches matrix product; associativity; identity element; conjugate inverse. dq_chain matches poe_forward_kinematics on JACO 2 / UR5 / Franka (5 random q each) and on a synthetic R-P-R chain (mirrors the Phase 5a.5 RPR case).
+4. Joint primitives
+revolute about Z by π/2 produces the canonical 90° matrix; prismatic along X by d translates by (d, 0, 0); unsupported types raise.
+Plus a determinism check (byte-equal output across calls).
+Test plan
+uv run pytest tests/test_husty_pfurner_study.py -v — 66/66 pass at the documented tolerances.
+uv run mypy src/ssik/solvers/husty_pfurner/_study.py tests/test_husty_pfurner_study.py — clean.
+uv run ruff check + ruff format --check — clean.
+Branch dependency
+This PR is branched off m2-158-hp-skeleton (PR #163) because that PR creates the husty_pfurner package's __init__.py. Will rebase on main after #163 merges.
+What's NOT in this PR
+Constraint quadrics (Phase 5c) — needs the parametrised 3-space hyperplane equations from Capco et al. eq. (5).
+Elimination → degree-16 univariate (Phase 5d) — the resultant pipeline.
+Polynomial root finding (Phase 5e) and back-substitution (Phase 5f).
+Dispatcher wiring (Phase 5g).
+Algorithmic reference
+Capco, Loquias, Manongsong, Nemenzo (2019), 'Inverse Kinematics of Some General 6R/P Manipulators', arXiv 1906.07813, Section 2 (dual quaternions, Study coordinates, kinematic equation).
+Related
+Phase 5: Husty-Pfurner — universal 6R analytical IK fallback (pure Python, 100ms abort gate) #158 (strategic Phase 5 meta-issue, Option A: pure Python with 100 ms abort gate)
+Phase 5 execution plan: 10-PR sequence for HP (6R + 6R/P), validation harness first #162 (10-PR execution plan)
+#158/#162: Phase 5a — HP validation harness + skeleton solver #163 (Phase 5a — HP validation harness + skeleton; this PR depends on its package skeleton)
+#158/#162: Phase 5a.5 — POE FK prismatic-joint branch #164 (Phase 5a.5 — POE FK prismatic-joint branch; dq_joint mirrors that decision for prismatic chain composition)
+siddhss5
+mentioned this pull request
+May 2, 2026
+#158/#162: Phase 5c step 1 — V_1 hyperplane equations (RRR simplified form)
+#167
+Merged
+3 tasks done
+siddhss5
+force-pushed
+the
+m2-158-study-quaternion
+branch
+from
+5ac487c to
+5113f80
+Compare
+May 3, 2026 04:23
+siddhss5
+added a commit
+that referenced
+this pull request
+May 3, 2026
+#158/#162: Phase 5c step 1 -- V_1 hyperplane equations (RRR simplifie…
+…
+9c71c17
+```
+…d form)
+
+Phase 5c step 1 of the 10-PR Husty-Pfurner sequence in #162. Implements
+the simplified (pre-change-of-variables) hyperplane equations for the
+V_1 inner-2-chain workspace of the RRR case. This is the first
+algorithm-specific math in the HP pipeline; the next step (5c.2)
+applies Capco eq. (4) change of variables to inject v_1 and produce
+T(v_1) -- the actual 3-space the HP elimination consumes.
+
+* ``src/ssik/solvers/husty_pfurner/_constraints.py``:
+
+  - ``v1_hyperplanes_rrr(a_2, l_2)`` -- 4x8 coefficient matrix of the
+    four hyperplanes in P^7 that contain the V_1 workspace
+    ``{R_z(v_2) T_x(a_2) R_x(l_2) R_z(v_3) | v_2, v_3 in R}`` per
+    Capco et al. eq. (5) with the ``a_1 -> a_2, l_1 -> l_2``
+    substitution from the RRR adaptation paragraph.
+  - ``hyperplane_residuals(coeffs, sigma)`` -- evaluator helper
+    (``coeffs @ sigma``).
+
+  Coordinate convention: tan-half-angle (``v = tan(theta/2)``,
+  ``l = tan(alpha/2)``). Joint DQs are projective (no unit-norm
+  scaling required); ``dq_mul`` from Phase 5b composes correctly
+  on projective inputs.
+
+* ``tests/test_husty_pfurner_constraints.py`` (245 tests):
+
+  - **Hand-derived sanity**: V_1 DQ at v_2 = v_3 = 0 matches the
+    closed-form ``(1, l, 0, 0, -a*l/2, a/2, 0, 0)``; hyperplanes
+    evaluate to exact zero.
+  - **Parametric sweep** (240 cases, 3 a_2 * 5 alpha_2 * 4 v_2 *
+    4 v_3): every chain DQ satisfies all four hyperplanes within
+    1e-12.
+  - **Off-workspace rejection**: identity DQ for ``a, l != 0``
+    produces a nonzero residual (otherwise the equations would
+    be too loose).
+  - **Shape and rank**: 4x8 coefficient matrix, rank 4 -> defines
+    a 3-space in P^7.
+
+What's NOT in this PR (subsequent Phase 5c steps):
+
+- Change of variables (Capco eq. 4) to produce T(v_1) parametrised
+  by the first joint.
+- T(v_3) and T(v_2) cases.
+- Degenerate-DH-parameter handling (a_2 = 0 OR l_2 = 0 special cases).
+- 6R/P variants (RRP, RPR, RPP, PRR, PPR).
+
+Branch off ``m2-158-study-quaternion`` (PR #166) for ``dq_mul``.
+Will rebase on main after #163, #166 land.
+```
+siddhss5
+force-pushed
+the
+m2-158-study-quaternion
+branch
+from
+5113f80 to
+a7fd84c
+Compare
+May 3, 2026 04:37
+siddhss5
+added a commit
+that referenced
+this pull request
+May 3, 2026
+#158/#162: Phase 5c step 1 -- V_1 hyperplane equations (RRR simplifie…
+…
+9b962b0
+```
+…d form)
+
+Phase 5c step 1 of the 10-PR Husty-Pfurner sequence in #162. Implements
+the simplified (pre-change-of-variables) hyperplane equations for the
+V_1 inner-2-chain workspace of the RRR case. This is the first
+algorithm-specific math in the HP pipeline; the next step (5c.2)
+applies Capco eq. (4) change of variables to inject v_1 and produce
+T(v_1) -- the actual 3-space the HP elimination consumes.
+
+* ``src/ssik/solvers/husty_pfurner/_constraints.py``:
+
+  - ``v1_hyperplanes_rrr(a_2, l_2)`` -- 4x8 coefficient matrix of the
+    four hyperplanes in P^7 that contain the V_1 workspace
+    ``{R_z(v_2) T_x(a_2) R_x(l_2) R_z(v_3) | v_2, v_3 in R}`` per
+    Capco et al. eq. (5) with the ``a_1 -> a_2, l_1 -> l_2``
+    substitution from the RRR adaptation paragraph.
+  - ``hyperplane_residuals(coeffs, sigma)`` -- evaluator helper
+    (``coeffs @ sigma``).
+
+  Coordinate convention: tan-half-angle (``v = tan(theta/2)``,
+  ``l = tan(alpha/2)``). Joint DQs are projective (no unit-norm
+  scaling required); ``dq_mul`` from Phase 5b composes correctly
+  on projective inputs.
+
+* ``tests/test_husty_pfurner_constraints.py`` (245 tests):
+
+  - **Hand-derived sanity**: V_1 DQ at v_2 = v_3 = 0 matches the
+    closed-form ``(1, l, 0, 0, -a*l/2, a/2, 0, 0)``; hyperplanes
+    evaluate to exact zero.
+  - **Parametric sweep** (240 cases, 3 a_2 * 5 alpha_2 * 4 v_2 *
+    4 v_3): every chain DQ satisfies all four hyperplanes within
+    1e-12.
+  - **Off-workspace rejection**: identity DQ for ``a, l != 0``
+    produces a nonzero residual (otherwise the equations would
+    be too loose).
+  - **Shape and rank**: 4x8 coefficient matrix, rank 4 -> defines
+    a 3-space in P^7.
+
+What's NOT in this PR (subsequent Phase 5c steps):
+
+- Change of variables (Capco eq. 4) to produce T(v_1) parametrised
+  by the first joint.
+- T(v_3) and T(v_2) cases.
+- Degenerate-DH-parameter handling (a_2 = 0 OR l_2 = 0 special cases).
+- 6R/P variants (RRP, RPR, RPP, PRR, PPR).
+
+Branch off ``m2-158-study-quaternion`` (PR #166) for ``dq_mul``.
+Will rebase on main after #163, #166 land.
+```
+siddhss5
+mentioned this pull request
+May 3, 2026
+Fix #113: Puma cross-validation flake on branch-collapse poses
+#168
+Merged
+2 tasks done
+#158/#162: Phase 5b -- Study quaternion / dual-quaternion machinery
+…
+67f1355
+```
+Phase 5b of the 10-PR Husty-Pfurner sequence in #162. The math-infra
+layer that every subsequent HP step (5c constraints, 5d elimination,
+5f back-substitution) builds on. Pure numpy, no algorithm-specific
+content yet.
+
+* ``src/ssik/solvers/husty_pfurner/_study.py``:
+
+  - 8-vec dual-quaternion representation ``(p_0, p_1, p_2, p_3,
+    q_0, q_1, q_2, q_3)`` for SE(3) elements.
+  - ``dq_from_se3`` / ``se3_from_dq`` -- pose <-> Study coordinates.
+    Quaternion extraction uses Shepperd 1978 (numerically stable
+    near 180-degree rotations, vs the textbook trace-only method).
+  - ``dq_mul`` -- dual-quaternion product. Composition equivalence
+    holds: ``se3_from_dq(dq_mul(dq_a, dq_b)) == T_a @ T_b``.
+  - ``dq_conj`` -- conjugate (Study-coordinate inverse on the quadric).
+  - ``dq_joint(axis, q, joint_type)`` -- single joint as DQ. Revolute
+    via ``cos(q/2) + sin(q/2) * axis``; prismatic via the ``epsilon``
+    half-translation. ValueError on unsupported types.
+  - ``dq_chain(kb, q)`` -- full POE-normalised chain composition.
+    Output decodes to the same SE(3) as
+    :func:`ssik.kinematics.poe_fk.poe_forward_kinematics`.
+  - ``study_quadric_residual`` -- ``x_0 y_0 + x_1 y_1 + x_2 y_2 +
+    x_3 y_3``, zero on every valid pose.
+  - ``DQ_IDENTITY`` constant.
+
+* ``tests/test_husty_pfurner_study.py`` (66 tests):
+
+  - **Oracle 1 (round-trip)**: ``T -> dq -> T`` identity at 1e-12 over
+    20 seeded SE(3) samples + 200-example Hypothesis fuzz.
+  - **Oracle 2 (quadric invariance)**: every ``dq_from_se3(T)`` lies
+    on the Study quadric within 1e-12.
+  - **Oracle 3 (composition)**: ``dq_mul`` matches matrix product;
+    associativity; identity left-and-right; conjugate inverse.
+  - **Joint primitives**: revolute about Z by pi/2 produces the
+    canonical 90-deg matrix; prismatic along X by d translates by
+    (d, 0, 0); unsupported joint types raise ValueError.
+  - **Chain composition**: ``dq_chain`` matches
+    ``poe_forward_kinematics`` on JACO 2 + UR5 + Franka (5 random q
+    each), and on a synthetic R-P-R chain at the same RPR
+    cross-axis-rotation case ``test_poe_fk_prismatic.py`` exercises.
+  - **Determinism**: byte-equal output across calls.
+
+All 66 tests pass at the documented tolerances on the first run.
+mypy clean; ruff clean.
+
+Algorithmic reference: Capco, Loquias, Manongsong, Nemenzo (2019),
+'Inverse Kinematics of Some General 6R/P Manipulators',
+arXiv 1906.07813, Section 2.
+
+Branch is off ``m2-158-hp-skeleton`` (PR #163) so the husty_pfurner
+package directory is available; will rebase on main after #163 merges.
+```
+siddhss5
+force-pushed
+the
+m2-158-study-quaternion
+branch
+from
+a7fd84c to
+67f1355
+Compare
+May 3, 2026 05:39
+siddhss5
+added a commit
+that referenced
+this pull request
+May 3, 2026
+#158/#162: Phase 5c step 1 -- V_1 hyperplane equations (RRR simplifie…
+…
+1070a9b
+```
+…d form)
+
+Phase 5c step 1 of the 10-PR Husty-Pfurner sequence in #162. Implements
+the simplified (pre-change-of-variables) hyperplane equations for the
+V_1 inner-2-chain workspace of the RRR case. This is the first
+algorithm-specific math in the HP pipeline; the next step (5c.2)
+applies Capco eq. (4) change of variables to inject v_1 and produce
+T(v_1) -- the actual 3-space the HP elimination consumes.
+
+* ``src/ssik/solvers/husty_pfurner/_constraints.py``:
+
+  - ``v1_hyperplanes_rrr(a_2, l_2)`` -- 4x8 coefficient matrix of the
+    four hyperplanes in P^7 that contain the V_1 workspace
+    ``{R_z(v_2) T_x(a_2) R_x(l_2) R_z(v_3) | v_2, v_3 in R}`` per
+    Capco et al. eq. (5) with the ``a_1 -> a_2, l_1 -> l_2``
+    substitution from the RRR adaptation paragraph.
+  - ``hyperplane_residuals(coeffs, sigma)`` -- evaluator helper
+    (``coeffs @ sigma``).
+
+  Coordinate convention: tan-half-angle (``v = tan(theta/2)``,
+  ``l = tan(alpha/2)``). Joint DQs are projective (no unit-norm
+  scaling required); ``dq_mul`` from Phase 5b composes correctly
+  on projective inputs.
+
+* ``tests/test_husty_pfurner_constraints.py`` (245 tests):
+
+  - **Hand-derived sanity**: V_1 DQ at v_2 = v_3 = 0 matches the
+    closed-form ``(1, l, 0, 0, -a*l/2, a/2, 0, 0)``; hyperplanes
+    evaluate to exact zero.
+  - **Parametric sweep** (240 cases, 3 a_2 * 5 alpha_2 * 4 v_2 *
+    4 v_3): every chain DQ satisfies all four hyperplanes within
+    1e-12.
+  - **Off-workspace rejection**: identity DQ for ``a, l != 0``
+    produces a nonzero residual (otherwise the equations would
+    be too loose).
+  - **Shape and rank**: 4x8 coefficient matrix, rank 4 -> defines
+    a 3-space in P^7.
+
+What's NOT in this PR (subsequent Phase 5c steps):
+
+- Change of variables (Capco eq. 4) to produce T(v_1) parametrised
+  by the first joint.
+- T(v_3) and T(v_2) cases.
+- Degenerate-DH-parameter handling (a_2 = 0 OR l_2 = 0 special cases).
+- 6R/P variants (RRP, RPR, RPP, PRR, PPR).
+
+Branch off ``m2-158-study-quaternion`` (PR #166) for ``dq_mul``.
+Will rebase on main after #163, #166 land.
+```
+Hide details
+View details
+siddhss5
+merged commit 814b0c9
+into
+main
+May 3, 2026
+4 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+siddhss5
+added a commit
+that referenced
+this pull request
+May 3, 2026
+#158/#162: Phase 5c step 1 -- V_1 hyperplane equations (RRR simplifie…
+…
+45a7438
+```
+…d form)
+
+Phase 5c step 1 of the 10-PR Husty-Pfurner sequence in #162. Implements
+the simplified (pre-change-of-variables) hyperplane equations for the
+V_1 inner-2-chain workspace of the RRR case. This is the first
+algorithm-specific math in the HP pipeline; the next step (5c.2)
+applies Capco eq. (4) change of variables to inject v_1 and produce
+T(v_1) -- the actual 3-space the HP elimination consumes.
+
+* ``src/ssik/solvers/husty_pfurner/_constraints.py``:
+
+  - ``v1_hyperplanes_rrr(a_2, l_2)`` -- 4x8 coefficient matrix of the
+    four hyperplanes in P^7 that contain the V_1 workspace
+    ``{R_z(v_2) T_x(a_2) R_x(l_2) R_z(v_3) | v_2, v_3 in R}`` per
+    Capco et al. eq. (5) with the ``a_1 -> a_2, l_1 -> l_2``
+    substitution from the RRR adaptation paragraph.
+  - ``hyperplane_residuals(coeffs, sigma)`` -- evaluator helper
+    (``coeffs @ sigma``).
+
+  Coordinate convention: tan-half-angle (``v = tan(theta/2)``,
+  ``l = tan(alpha/2)``). Joint DQs are projective (no unit-norm
+  scaling required); ``dq_mul`` from Phase 5b composes correctly
+  on projective inputs.
+
+* ``tests/test_husty_pfurner_constraints.py`` (245 tests):
+
+  - **Hand-derived sanity**: V_1 DQ at v_2 = v_3 = 0 matches the
+    closed-form ``(1, l, 0, 0, -a*l/2, a/2, 0, 0)``; hyperplanes
+    evaluate to exact zero.
+  - **Parametric sweep** (240 cases, 3 a_2 * 5 alpha_2 * 4 v_2 *
+    4 v_3): every chain DQ satisfies all four hyperplanes within
+    1e-12.
+  - **Off-workspace rejection**: identity DQ for ``a, l != 0``
+    produces a nonzero residual (otherwise the equations would
+    be too loose).
+  - **Shape and rank**: 4x8 coefficient matrix, rank 4 -> defines
+    a 3-space in P^7.
+
+What's NOT in this PR (subsequent Phase 5c steps):
+
+- Change of variables (Capco eq. 4) to produce T(v_1) parametrised
+  by the first joint.
+- T(v_3) and T(v_2) cases.
+- Degenerate-DH-parameter handling (a_2 = 0 OR l_2 = 0 special cases).
+- 6R/P variants (RRP, RPR, RPP, PRR, PPR).
+
+Branch off ``m2-158-study-quaternion`` (PR #166) for ``dq_mul``.
+Will rebase on main after #163, #166 land.
+```
+siddhss5
+added a commit
+that referenced
+this pull request
+May 3, 2026
+#158/#162: Phase 5c step 1 -- V_1 hyperplane equations (RRR simplifie…
+…
+6271944
+```
+…d form) (#167)
+
+Phase 5c step 1 of the 10-PR Husty-Pfurner sequence in #162. Implements
+the simplified (pre-change-of-variables) hyperplane equations for the
+V_1 inner-2-chain workspace of the RRR case. This is the first
+algorithm-specific math in the HP pipeline; the next step (5c.2)
+applies Capco eq. (4) change of variables to inject v_1 and produce
+T(v_1) -- the actual 3-space the HP elimination consumes.
+
+* ``src/ssik/solvers/husty_pfurner/_constraints.py``:
+
+  - ``v1_hyperplanes_rrr(a_2, l_2)`` -- 4x8 coefficient matrix of the
+    four hyperplanes in P^7 that contain the V_1 workspace
+    ``{R_z(v_2) T_x(a_2) R_x(l_2) R_z(v_3) | v_2, v_3 in R}`` per
+    Capco et al. eq. (5) with the ``a_1 -> a_2, l_1 -> l_2``
+    substitution from the RRR adaptation paragraph.
+  - ``hyperplane_residuals(coeffs, sigma)`` -- evaluator helper
+    (``coeffs @ sigma``).
+
+  Coordinate convention: tan-half-angle (``v = tan(theta/2)``,
+  ``l = tan(alpha/2)``). Joint DQs are projective (no unit-norm
+  scaling required); ``dq_mul`` from Phase 5b composes correctly
+  on projective inputs.
+
+* ``tests/test_husty_pfurner_constraints.py`` (245 tests):
+
+  - **Hand-derived sanity**: V_1 DQ at v_2 = v_3 = 0 matches the
+    closed-form ``(1, l, 0, 0, -a*l/2, a/2, 0, 0)``; hyperplanes
+    evaluate to exact zero.
+  - **Parametric sweep** (240 cases, 3 a_2 * 5 alpha_2 * 4 v_2 *
+    4 v_3): every chain DQ satisfies all four hyperplanes within
+    1e-12.
+  - **Off-workspace rejection**: identity DQ for ``a, l != 0``
+    produces a nonzero residual (otherwise the equations would
+    be too loose).
+  - **Shape and rank**: 4x8 coefficient matrix, rank 4 -> defines
+    a 3-space in P^7.
+
+What's NOT in this PR (subsequent Phase 5c steps):
+
+- Change of variables (Capco eq. 4) to produce T(v_1) parametrised
+  by the first joint.
+- T(v_3) and T(v_2) cases.
+- Degenerate-DH-parameter handling (a_2 = 0 OR l_2 = 0 special cases).
+- 6R/P variants (RRP, RPR, RPP, PRR, PPR).
+
+Branch off ``m2-158-study-quaternion`` (PR #166) for ``dq_mul``.
+Will rebase on main after #163, #166 land.
+```
+This was referenced May 3, 2026
+#158/#162: Phase 5c step 3 — T(v_3) alternative parametrisation (RRR, bulletproof)
+#171
+Merged
+#158/#162: Phase 5d step 1 — T(v_6) right-chain hyperplanes (RRR, bulletproof)
+#172
+Merged
+siddhss5
+deleted the
+m2-158-study-quaternion
+branch
+June 7, 2026 00:48
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

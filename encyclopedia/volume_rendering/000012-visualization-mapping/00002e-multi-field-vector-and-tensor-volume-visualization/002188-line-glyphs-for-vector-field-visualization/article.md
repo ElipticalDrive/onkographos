@@ -1,0 +1,96 @@
+# Line Glyphs for Vector Field Visualization
+Also called: Glyph Lines, Line Glyphs, Vector Field Glyphs
+
+## Overview
+Line Glyphs is a visualization technique where vector fields are represented by line segments, with each line's orientation matching the vector field and its length and color determined by the vector magnitude [S1, unofficial]. It is distinguished from sibling methods like [Arrow Glyphs](2663-arrow-glyphs-for-vector-field-visualization.md) by its extreme computational efficiency and memory footprint, allowing for the rendering of millions of glyphs, but suffers from ambiguity regarding vector direction and 3D orientation due to the lack of shading [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+The method takes a 3D vector field texture storing vectors as `float4` (spatial components and magnitude), a 1D color transfer function texture mapping magnitude to color, grid dimensions, world size, and a fixed X-coordinate defining the visualization plane [S1, unofficial]. It outputs two arrays of `float3` vertices and `float3` colors, where each glyph consumes two consecutive entries for its start and end vertices [S1, unofficial].
+
+**Data Structures:**
+The 3D texture stores `float4` values and is accessed via 3D texture sampling [S1, unofficial]. The 1D texture stores `float4` values for RGBA color mapping and is accessed via 1D texture sampling [S1, unofficial]. The vertex array has size $2 \times N$, where $N$ is the number of glyphs [S1, unofficial]. The color array has size $2 \times N$ [S1, unofficial].
+
+**Parameters:**
+The grid dimension parameter specifies the number of glyphs in the Y and Z axes [S1, unofficial]. The world size parameter specifies the physical dimensions of the Y-Z plane [S1, unofficial]. The fixed X-coordinate parameter defines the plane on which the glyphs are placed [S1, unofficial].
+
+**Algorithm Steps:**
+1. Compute the global thread ID from block and thread indices [S1, unofficial].
+2. Calculate the total number of glyphs as the product of the grid dimensions [S1, unofficial].
+3. If the thread ID exceeds the total count, terminate the thread [S1, unofficial].
+4. Compute the Y and Z grid coordinates using modulo and integer division of the thread ID against the grid dimensions and world size [S1, unofficial].
+5. Sample the vector field at the computed $(x, y, z)$ position to retrieve the vector components and magnitude [S1, unofficial].
+6. Set the start vertex to the grid position $(x, y, z)$ [S1, unofficial].
+7. Compute the end vertex by adding the normalized spatial vector scaled by the magnitude to the start vertex [S1, unofficial].
+8. Sample the color from the magnitude transfer function using the vector magnitude [S1, unofficial].
+9. Assign the start vertex to the first output index and the end vertex to the second output index [S1, unofficial].
+10. Assign the sampled color to both output indices [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def normalize(v):
+    length = (v[0]**2 + v[1]**2 + v[2]**2)**0.5
+    if length == 0:
+        return (0.0, 0.0, 0.0)
+    return (v[0]/length, v[1]/length, v[2]/length)
+
+def sample_3d_texture(tex, x, y, z):
+    return tex[x, y, z]
+
+def sample_1d_texture(tex, t):
+    return tex[t]
+
+def glyph_lines_kernel(thread_id, out_vertices, out_colors, x, 
+                       glyphs_count_x, glyphs_count_y, 
+                       world_size_x, world_size_y, 
+                       vector_field_tex, magnitude_ctf_tex):
+    total_count = glyphs_count_x * glyphs_count_y
+    if thread_id >= total_count:
+        return
+
+    y = (thread_id % glyphs_count_x) * (world_size_x / glyphs_count_x)
+    z = (thread_id // glyphs_count_x) * (world_size_y / glyphs_count_y)
+
+    vector = sample_3d_texture(vector_field_tex, x, y, z)
+    vec_x, vec_y, vec_z, mag = vector
+
+    start_vertex = (x, y, z)
+    norm_vec = normalize((vec_x, vec_y, vec_z))
+    end_vertex = (
+        start_vertex[0] + norm_vec[0] * mag,
+        start_vertex[1] + norm_vec[1] * mag,
+        start_vertex[2] + norm_vec[2] * mag
+    )
+
+    color = sample_1d_texture(magnitude_ctf_tex, mag)
+    rgb = (color[0], color[1], color[2])
+
+    idx = thread_id * 2
+    out_vertices[idx] = start_vertex
+    out_vertices[idx + 1] = end_vertex
+    out_colors[idx] = rgb
+    out_colors[idx + 1] = rgb
+```
+
+**Edge Cases and Pitfalls:**
+*   **Zero Vector:** If the spatial components are zero, normalization fails; the implementation defaults to zero displacement [G].
+*   **Direction Ambiguity:** Line glyphs do not indicate vector direction (head vs. tail), making it difficult to distinguish flow direction without camera movement or color cues [S1, unofficial].
+*   **3D Orientation:** Without shading, it is hard to perceive the 3D orientation of lines in space [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** $O(N)$, where $N$ is the number of glyphs, because each glyph requires one texture lookup and simple arithmetic [S1, unofficial].
+*   **Memory Complexity:** $O(N)$ for output vertices and colors, with input memory dominated by the 3D texture [S1, unofficial].
+*   **Performance:** Computation time for nearly any amount of glyphs is less than 20 ms [S1, unofficial].
+*   **Performance:** On an NVIDIA Quadro K5000, nearly 13 million glyphs were computed in 26 ms [S1, unofficial].
+*   **Strengths:** The method reduces memory consumption by 1/3 compared to alternatives and can render huge amounts of lines to create a solid wall visualization of magnitude [S1, unofficial].
+*   **Limitations:** The visualization is ambiguous in direction and orientation, making it hard to read in static views compared to arrows [S1, unofficial].
+*   **When to use:** Use this method when exploring large vector fields interactively, visualizing magnitude distributions, or when performance is critical [S1, unofficial].
+*   **When not to use:** Do not use this method when precise directionality or 3D orientation is required without camera interaction [S1, unofficial].
+
+## Background
+This method was described by Marek Fiser in the context of real-time visualization of 3D vector fields using CUDA [S1, unofficial]. It was applied to visualize airflow around a delta-wing, demonstrating the ability to reveal vortices and recirculation bubbles [S1, unofficial].
+
+## Sources
+[S1] Realtime visualization of 3D vector fields using CUDA, https://marekfiser.com/projects/realtime-visualization-of-3D-vector-fields-using-CUDA/, fetched 2026-10-28 (unofficial)

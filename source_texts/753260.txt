@@ -1,0 +1,1534 @@
+OccluGaussian: Occlusion-Aware Gaussian Splatting
+for Large Scene Reconstruction and Rendering
+Shiyong Liu1∗ Xiao Tang1∗ Zhihao Li1∗ Yingfan He2
+Chongjie Ye Jianzhuang Liu3 Binxiao Huang4 Shunbo Zhou5 Xiaofei Wu1†
+1
+2
+Huawei Noah’s Ark Lab
+The Chinese University of Hong Kong (Shenzhen)
+3
+Shenzhen Institutes of Advanced Technology 4 The University of Hong Kong
+5
+Huawei Embodied Intelligence Lab
+arXiv:2503.16177v2 [cs.GR] 29 Nov 2025
+2
+Wall
+(b) Occlusion-agnostic division
+(a) A large scene with
+frequent occlusions
+(c) Occlusion-aware division
+LPIPS↓/ PSNR↑/FPS↑ 0.17/24.45/191.30
+Ground Truth
+VastGaussian
+0.07/28.45/261.78
+Our OccluGaussian
+Figure 1. (a) In large scene reconstruction from ground-level captures, there are frequent occlusions such as walls and buildings. (b)
+Previous scene division methods are occlusion-agnostic, so they produce regions with severe internal occlusions, leading to poor reconstruction results. (c) We propose an occlusion-aware division method to generate regions that better align with the scene layout (see the two
+regions highlighted in yellow in (b) and (c)), thus improving the reconstruction quality significantly. Besides, we introduce a region-based
+rendering technique to accelerate the rendering speed of 3D Gaussian splatting in a large scene with massive primitives.
+Abstract
+In large-scale scene reconstruction using 3D Gaussian
+splatting, it is common to partition the scene into multiple smaller regions and reconstruct them individually.
+However, existing division methods are occlusion-agnostic,
+meaning that each region may contain areas with severe
+occlusions. As a result, the cameras within those regions
+are less correlated, leading to a low average contribution
+to the overall reconstruction. In this paper, we propose an
+occlusion-aware scene division strategy that clusters training cameras based on their positions and co-visibilities to
+∗
+Equal contribution
+†
+Corresponding author
+acquire multiple regions. Cameras in such regions exhibit
+stronger correlations and a higher average contribution,
+facilitating high-quality scene reconstruction. We further
+propose a region-based rendering technique to accelerate
+large scene rendering, which culls Gaussians invisible to
+the region where the viewpoint is located. Such a technique significantly speeds up the rendering without compromising quality. Extensive experiments on multiple large
+scenes show that our method achieves superior reconstruction results with faster rendering speed compared to existing state-of-the-art approaches. Project page: https:
+//occlugaussian.github.io.
+1. Introduction
+Large scene reconstruction needs to process a huge amount
+of geometry and appearance information in 2D images to
+recover 3D structures for novel view synthesis. It is crucial in various applications, such as autonomous navigation [2, 9, 18, 47, 48], cultural heritage preservation [45],
+and immersive virtual/augmented reality [9, 13, 35], etc.
+Recent works in large scene reconstruction [22, 28, 32,
+47, 49, 51] mostly take radiance fields as the basic 3D
+representation, e.g., Neural Radiance Fields (NeRF) [33]
+and 3D Gaussian Splatting (3DGS) [21]. NeRF-based approaches struggle to scale for large scenes with rich details, as their implicit representations demand substantial resources for both training and rendering. 3DGS, a primitivebased rasterization technique, also faces scalability issues
+due to its memory-intensive representation, which quickly
+exceeds the capacity of high-end GPUs. To address these
+issues, a divide-and-conquer strategy is commonly applied,
+which partitions the scene into several smaller and more
+manageable regions. These regions are then individually
+reconstructed and finally merged to a complete model. Existing scene division strategies are mainly based on camera
+positions or point clouds [22, 28, 32, 47, 51]. While these
+approaches are suitable for occlusion-free scenes like aerial
+imagery or open spaces, they overlook scene layouts and
+occlusions, which are commonly present in indoor environments, as shown in Fig. 1. Comparing the two regions yellow highlighted in Fig. 1(b) and Fig. 1(c), the former have
+fewer training cameras with visible parts in common. The
+cameras for one area occupy a certain amount of training
+time and resources, but contribute little to the reconstruction
+of the other. In other words, putting them together involves
+too many training cameras whose average contribution to
+the region’s reconstruction is thus significantly reduced.
+In this paper, we introduce Occlusion-aware 3D Gaussian splatting (OccluGaussian) for large scene reconstruction and rendering. OccluGaussian incorporates an
+occlusion-aware scene division strategy that considers
+scene layout and occlusions. It enhances training efficiency
+and resource allocation by focusing on cameras that substantially contribute to the reconstruction of specific areas,
+rather than diluting efforts across less relevant regions, thus
+finally improving the reconstruction quality. Specifically,
+we first create an attributed view graph where nodes represent cameras with position features and edges denote their
+visibility correlations, based on the co-visibilities of the
+capturing cameras. Next, we apply a graph clustering algorithm to this graph, yielding division results that align with
+the scene layout, as shown in Fig. 1(c). Training cameras in
+such regions have stronger correlations, enhancing their average contribution and leading to improved reconstruction
+results. Finally, we reconstruct these regions individually
+and merge them together to produce the complete model.
+The reconstructed complete model often contains a huge
+amount of Gaussians, leading to slow rendering speeds.
+Existing methods [22, 32] often apply the level-of-details
+(LoD) technique to dynamically prune unnecessary small
+and distant Gaussians to boost the rendering efficiency.
+However, these methods are still occlusion-agnostic and
+process all 3D Gaussians within the view frustum of the
+rendering camera. The occluded Gaussians that are invisible from the camera can be culled in advance to accelerate
+rendering without any quality drop. To this end, we further propose a region-based rendering technique to accelerate the rendering of the large scene. Specifically, for each
+region generated from our scene division strategy, we record
+the visible 3D Gaussians of all training cameras located
+in it. During rendering, we process only the recorded 3D
+Gaussians of the region in which the rendering camera is located. Since our scene division strategy is occlusion-aware,
+we can effectively prune the occluded Gaussians that are
+invisible from the camera. This technique achieves much
+faster rendering without transition artifacts and noticeable
+loss in quality.
+Our contributions are summarized as follows:
+• We propose an occlusion-aware scene division strategy
+that considers the scene layout and camera co-visibilities.
+The resulting regions barely contain occlusions, and the
+corresponding training cameras have a higher average
+contribution, leading to improved reconstruction results.
+• We present a region-based rendering technique that accelerates 3D Gaussian splatting in large scenes. It eliminates
+much of the time-consuming processing of invisible 3D
+Gaussians, boosting rendering speeds without noticeable
+quality degradation.
+• We conduct extensive experiments on several large-scene
+datasets, and demonstrate that OccluGaussian achieves
+superior rendering quality and faster rendering speed
+compared to previous state-of-the-art methods.
+2. Related Work
+2.1. Large Scene Reconstruction
+3D reconstruction of large scenes from captured images has
+been a popular research topic for decades. Traditional methods use structure-from-motion (SfM) algorithms to generate sparse point clouds of the scene or further extract
+dense point clouds and meshes via multiview stereo methods [1, 14, 15, 17, 25, 40, 44, 46, 56]. Recently, Neural
+Radiance Fields (NeRF) [33, 47, 51, 55] and 3D Gaussian
+Splatting (3DGS) [6, 21, 28, 29, 31, 32, 50, 54] have been
+widely applied to large-scale scene reconstruction, as they
+outperform point clouds and meshes for novel view synthesis. A divide-and-conquer strategy is commonly applied for
+both NeRF and 3DGS methods. Such as, BlockNeRF [47],
+as a pioneering work, explicitly splits city-scale scenes into
+multiple blocks, then optimizes individual NeRF model for
+each, and seamlessly combining them by aligning their appearances. Mega-NeRF [49] also uses a grid-based division,
+and assigns each pixel’s ray to different grids that the ray
+intersects as it passes through the scene when optimizing
+NeRF models. NeRF-XL [24] distributes the divided blocks
+across multiple GPUs, allowing to reconstruct arbitrarily
+large scenes with more parameters and faster speed. As for
+3DGS-based methods, VastGaussian [28] uniformly divides
+the scene and introduces a progressive partitioning strategy to ensure sufficient supervision for each block. CityGaussian [32] splits a large scene in the contracted space
+to balance the optimization workload for each block. Distributed training systems with multiple GPUs [6, 54] are
+also explored to achieve faster optimization speed or hold
+more Gaussian primitives to improve reconstruction quality. However, these division approaches are mainly based
+on camera positions, and overlook the visibility correlations
+between cameras, making them occlusion-agnostic. While
+such methods work well for aerial captures in popular largescene datasets, they are less suitable for ground-level captures where occlusions occur frequently.
+2.2. Camera Clustering
+In camera pose estimation of large-scale scenes, partitioning methods are commonly utilized to cluster cameras and
+segment scenes for parallel processing, which helps to reduce the computational complexity [20, 26, 37, 43, 52].
+Some of them [5, 7, 37, 52, 56] use graph cut algorithms
+to aggregate cameras acoording to their co-visibilities, e.g.,
+Out-of-Core-BA [37] and COLMAP [44] use the Metis
+graph partitioner [20]. Others [26, 43] use clustering algorithms based on the features of images and 3D key points.
+However, these methods often adopt only image or matching features, which are not sufficient enough to avoid occlusions within the segmented regions, as shown in Fig. 6.
+In this paper, we propose a scene division technique that
+exploits both camera position and co-visibility information,
+which is occlusion-aware and capable of aligning with the
+scene layout to conduct partitioning.
+2.3. 3DGS Rendering Acceleration
+As large scenes contain a substantial number of Gaussian primitives, it is crucial to speed up 3DGS rendering for real-time performance. Recently, several methods [12, 16, 19, 23, 34, 36, 38] have been proposed to compress 3DGS by reducing the number of Gaussian primitives,
+which also helps accelerate rendering in large scenes. These
+methods prune 3D Gaussians that contribute minimally to
+the overall rendering, such as those with low opacities, to
+minimize the impact on visual quality. Another popular approach for rendering acceleration customizes the rendering
+for large scenes by using different level-of-details (LoD)
+at varying distances. For example, Octree-GS [42] incorporates an octree structure to hierarchically organize 3D
+Gaussians into multiple levels. CityGaussian [32] uses the
+compression algorithm from LightGaussian [12] to generate
+different detail levels in a block-wise manner. Hierarchical3DGS [22] introduces a novel hierarchy for 3DGS, enabling
+efficient level-of-detail selection and interpolation. From a
+different perspective compared to existing methods, OccluGaussian proposes a region-base rendering strategy, which
+culls occluded Gaussians that are invisible to the viewpoint
+in advance. This significantly reduces redundant computations and further boosts rendering speeds.
+3. Method
+We propose an occlusion-aware 3DGS framework (OccluGaussian) that achieves superior reconstruction quality and significantly faster rendering speed for large-scale
+scenes. The overview of OccluGaussian is given in Fig. 2.
+We first present a novel occlusion-aware scene division
+strategy based on attributed graph clustering in Sec. 3.1.
+Next, Sec. 3.2 details the optimization of each individual
+region and the merging process to obtain a complete model.
+Finally, we introduce a region-based rendering technique to
+accelerate rendering in large scenes in Sec. 3.3.
+3.1. Occlusion-Aware Scene Division
+Previous division methods [22, 28, 32, 47, 49, 51] typically ignore the scene layout and divide the scene uniformly
+based on camera positions or point clouds. A more effective division strategy should consider the occlusions in the
+scene, so that the cameras in each region have strong correlations and a higher average contribution to the reconstruction. Here, we introduce an occlusion-aware scene division
+strategy, as illustrated in the top-left part of Fig. 2.
+Attributed view graph. First, we create a view graph of
+n posed training cameras, which is an undirected attributed
+graph G = (V, E, X), where V, E and X denote the nodes,
+the edges with weights, and the feature matrix, respectively.
+Each node in V = {v1 , v2 , . . . , vn } corresponds to a camera. To derive the edges E, we directly utilize the structurefrom-motion results obtained during the camera pose estimation. An edge is established between two cameras if
+they share some visual contents in common, and we set its
+weight as the number of matched feature points between
+these two cameras. The set of edges E is finally represented
+as an adjacency matrix A = [aij ] ∈ Rn×n . The feature
+matrix X = [x1 , x2 , . . . , xn ]⊤ ∈ Rn×d contains the 3D
+coordinates of each camera with positional encoding [33].
+Intuitively, occluded or distant cameras typically share minimal overlapped views, which can be distinguished in our
+occlusion-aware view graph.
+View graph clustering. Then, we split the view graph G
+into multiple parts using graph clustering. We employ a
+Pos. feature
+A
+A
+Vis. correlation
+A
+A
+A
+A
+A
+(a) View graph
+(d) Final clustering result
+View graph clustering
+Individual recon.
+A
+A
+A
+(c) Refined clustering result
+Vanilla region-based rendering
+A
+A
+A
+A
+: border cam. trained with a lower frequency
+: 3D Gaussian
+: extended cam.
+: Invisible 3D Gaussian
+A
+A
+: base cam.
+A
+Target region
+Expanded border
+A
+A
+A
+A
+A
+A
+A
+A
+A
+Overlap: merge
+Too few: ignore
+Too many: split
+A
+A
+A
+A
+Refinement
+(b) Coarse clustering result
+: camera
+Original rendering
+Our region-based rendering
+Figure 2. Overview of OccluGaussian. Top left: To reconstruct a large scene, we divide it into multiple regions by adopting an occlusionaware scene division strategy. (a) We first create an attributed view graph from the posed cameras, where nodes represent cameras with
+positional features, and edges represent visibility correlations between them. (b) A graph clustering algorithm is applied to the view graph
+to cluster the cameras into multiple regions, and (c) we further refine them to obtain more balanced sizes. (d) The region boundaries are
+calculated based on the clustered cameras. Each region is individually reconstructed and finally merged into a complete model. Bottom
+left: Each region is reconstructed using three sets of training cameras: base cameras located inside the region, extended cameras providing
+adequate visual content of the region, and border cameras used to constrain Gaussian primitives near the boundaries. Right: We introduce
+a region-based rendering technique, which culls 3D Gaussians that are occluded from the region where the rendering viewpoint is located.
+Furthermore, we subdivide the scene into smaller sub-regions with fewer essential 3D Gaussians. This approach effectively reduces
+redundant computations and further boosts our rendering speed.
+attributed graph clustering algorithm [53], which performs
+graph convolution to generate smooth feature representations, followed by spectral clustering on the resulting features to group the nodes. The clustering process is outlined
+as follows:
+Given the adjacency matrix
+PnA and the degree matrix
+D = diag(d1 , · · · , dn ), di = j=1 aij , the symmetrically
+normalized graph Laplacian is defined as:
+\label {eq:laplacian} L_{s}=I-D^{-\frac 12}AD^{-\frac 12}.
+(1)
+Graph convolution is defined as the multiplication of a
+graph signal f with a graph filter G:
+\label {eq:graph convolution} \bm {\bar {f}}=G\cdot \bm f, \quad G=(I-\frac 12 L_s)^r,
+(2)
+where f¯ is the filtered graph signal, and r is a positive integer. Each column of the feature matrix X can be considered as a graph signal. By performing graph convolution on
+the feature matrix X, we obtain the filtered feature matrix
+X̄ = GX. Then, we calculate the similarity matrix W̄ :
+\label {eq:similarity_matrix} \bar {W}=\frac 12(\left |H\right |+\left |H^T\right |), \quad {H} = \bar {X}\bar {X}^T.
+(3)
+Since W̄ indicates the closeness between nodes in V, we
+apply spectral clustering algorithm [39] on W̄ to cluster V,
+which correspond to the training cameras. Cameras that
+share a large overlapping view or are spatially close are
+clustered into the same region, as shown in Fig. 2(b).
+Determining the clustering number. Most clustering algorithms need a predefined number of clusters. To address
+this, we propose an adaptive approach to determine the optimal number of clusters. The process starts by selecting
+an initial cluster number K, enabling graph clustering to
+generate K preliminary clusters. We then refine them by
+splitting clusters that contain too many cameras by further
+applying graph clustering, and by ignoring any cluster that
+either has too few cameras or whose convex hull is entirely
+covered by the convex hull of another cluster. These refinement steps are applied recursively until all clusters achieve
+a balanced number of cameras, thereby determining the optimal number of clusters for different scenes, (see Fig. 2(c)).
+Boundary calculation. Finally, we calculate explicit
+boundaries of each region based on its clustered cameras.
+These boundaries are crucial for border expansion (Sec. 3.2)
+and region-based rendering (Sec. 3.3). We use a linear classification method [8] to derive decision functions as boundary lines. Thanks to the occlusion-aware camera clustering,
+these boundary lines closely align with the scene layout.
+3.2. Individual Region Reconstruction
+After the occlusion-aware scene division, we reconstruct
+each region individually and finally merge them to form the
+complete model. In this subsection, we detail the strategy
+for selecting training cameras for each region and the algorithm used to seamlessly merge these regions.
+Training camera selection. As pointed out in [28, 32], it
+is crucial to select appropriate training cameras for 3D reconstruction. Too few training cameras cannot provide sufficient supervision, while too many irrelevant cameras will
+waste computational resources and reduce the average contribution of every camera. We select three sets of training
+cameras as shown in the bottom-left part of Fig. 2: 1) The
+base set, whose cameras are located within the region. 2)
+The extended set, whose cameras are outside the region but
+capture adequate visible content of it. We follow [32] to
+select the extended cameras based on their visibility contribution to the region. 3) The border set, whose cameras
+face the region but are occluded. These cameras help constrain Gaussian primitives near the boundaries for the final
+seamless merging. Without the border set, these Gaussian
+primitives can become very large or elongated, resulting in
+floaters or artifacts (see the qualitative results in the supplementary material). Compared to existing methods, our
+occlusion-aware scene division strategy requires fewer extended cameras for adequate supervision to reconstruct the
+target region, increasing the average contribution per camera and thereby improving reconstruction quality.
+Seamless region merging. We optimize 3D Gaussians for
+each region individually using its selected training cameras.
+And then, we remove all Gaussian primitives from each region that lie outside the region to create sharp borders. Finally, these regions are merged to form a complete model.
+3.3. Region-Based Rendering
+Large scenes contain a substantial number of 3D Gaussians, making rendering computationally expensive and
+slow. Considering that many Gaussian primitives in the
+scene are occluded, invisible to the viewpoint, culling them
+in advance can significantly reduce the processing load,
+thereby accelerating rendering speeds without sacrificing
+visual quality. Therefore, leveraging our occlusion-aware
+scene division, we propose a region-based rendering strategy that culls invisible Gaussians for efficient rendering in
+large scenes, as shown in the right part of Fig. 2.
+Region-based visibility calculation. Consider a large
+scene reconstructed by Ng 3D Gaussians and divided into
+k regions {Ri }ki=1 . For each region Rj , we define a visi-
+N
+g
+for all Ng 3D Gausbility mask Mj = {mji ∈ {0, 1}}i=1
+sians, indicating their visibility from any training viewpoint
+in Rj . To derive Mj , we perform 3DGS rasterization for
+each camera that is clustered into Rj , and calculate each
+3D Gaussian i’s maximal accumulated weight as its contribution to the rendered image. We mark mji = 1 if 3D Gaussian i’s contribution to any pixel exceeds 0.01. Note that we
+generate both the original view and the backside view from
+the camera position to comprehensively collect visible 3D
+Gaussians for each region. After iterating over all cameras
+in Rj , Gaussians with mji = 0 are treated as occluded and
+can be culled in advance when rendering.
+Region subdivision. Viewpoints near region borders often
+observe too many 3D Gaussians from neighboring regions,
+leading to redundant computations when rendering the interior of a region. To address this issue, we further subdivide each region into smaller sub-regions when deriving
+visibility masks: one interior sub-region, and several border
+sub-regions. First, we identify the boundary lines between
+the region and its neighboring regions. Then, we shrink the
+boundary lines inward by 0.1dmax , where dmax is the maximal distance between two cameras within the region, to
+obtain the corresponding border sub-regions. The remaining area in the region, excluding all the border sub-regions,
+forms the interior sub-region. Our region subdivision strategy leads to more compact region-based visibility masks,
+and thus further boosts the rendering speed.
+Rendering with region-based culling. To render at an arbitrary viewpoint in the complete model, we first identify
+the region Rj where the viewpoint belongs to, then use the
+corresponding visibility mask Mj to cull the occluded 3D
+Gaussians, and finally perform 3DGS rasterization for the
+remaining 3D Gaussians to generate the rendering image.
+By knowing the occlusions between regions, our culling
+strategy retains only the minimal set of necessary 3D Gaussians for rendering within each region. This approach leads
+to significant rendering speedup without noticeable quality
+drop, as shown in the supplementary material.
+4. Experiments
+4.1. Experimental Setup
+Dataset. Most existing large-scene datasets [27, 30] are
+primarily captured from aerial perspectives and thus with
+rare occlusions. Therefore, we construct a new dataset
+called OccluScene3D, containing three large-scale scenes in
+a campus with complex layouts and significant occlusions:
+G ALLERY, C ANTEEN and C LASS B UILDING. More details
+of OccluScene3D are in the supplementary material. We
+also assess our method on the Zip-NeRF dataset [4], including four large-scale scenes such as apartments and houses.
+To show the generality of our method, we further conduct
+experiments on occlusion-free scenes in the Mill-19 [49]
+Ground Truth
+OccluGaussian (Ours)
+VastGaussian
+CityGaussian
+3DGS
+Figure 3. Qualitative comparison with SOTA methods on three large scenes in the OccluScene3D dataset.
+Berlin
+London
+NYC
+GT
+OccluGaussian (Ours)
+RadSplat
+3DGS
+Zip-NeRF
+Figure 4. Qualitative comparison with SOTA methods on three large scenes in the Zip-NeRF dataset.
+and UrbanScene3D [30] datasets.
+Implementation details. The models are optimized for
+90,000 iterations with densification from iteration 1,500 to
+45,000 at intervals of 100. We adopt the appearance modeling in VastGaussian [28] to fit appearance variations across
+captured images. For clustering the view graph, we set a
+fixed initial cluster number K = 10. We iteratively refine
+the number of clusters until the camera count in each cluster
+falls within [Mc − σc Mc , Mc + σc Mc ], where σc = 0.5 and
+Mc is the average camera count across all clusters.
+Baselines. On the OccluScene3D dataset, we compare with
+scalable 3DGS-based methods [21, 22, 28, 32]. Since VastGaussian [28] is not open-sourced, we re-implement its
+scene division strategy and keep all other hyperparameters
+the same as ours during 3DGS optimization. For the Zip-
+NeRF dataset, we compare with methods that have evaluated on it [4, 10, 38, 41]. Following the evaluation protocol
+in RadSplat [38], we optimize two models: one for visualization, and another for quantitative analysis, excluding
+appearance modeling. We do not use the monocular depth
+prior in Hierarchical-GS [22] for fairness.
+Metrics. We evaluate the rendering quality using three
+commonly-used quantitative metrics: SSIM, PSNR and
+LPIPS. We also report the average rendering speed at 1080p
+resolution in frames per second (FPS).
+4.2. Result Analysis
+Reconstruction quality and rendering speeds. We
+present quantitative results for occluded scene reconstruction in Tab. 1 and Tab. 2. We are unable to evaluate
+Scene
+G ALLERY
+C ANTEEN
+C LASS B UILDING
+Metrics
+PSNR
+SSIM
+LPIPS
+FPS
+PSNR
+SSIM
+LPIPS
+FPS
+PSNR
+SSIM
+LPIPS
+FPS
+VastGaussian* [28]
+CityGaussian [32]
+Hierarchical-GS [22]
+3DGS [21]
+25.09
+21.98
+22.23
+21.36
+0.903
+0.808
+0.800
+0.843
+0.095
+0.294
+0.182
+0.213
+215.22
+119.86
+216.00
+344.92
+24.60
+20.41
+22.71
+21.86
+0.890
+0.794
+0.825
+0.847
+0.105
+0.275
+0.178
+0.183
+211.02
+54.02
+199.33
+525.93
+24.05
+20.48
+23.87
+19.41
+0.884
+0.840
+0.881
+0.871
+0.111
+0.244
+0.128
+0.186
+269.97
+65.57
+198.58
+395.13
+OccluGaussian
+25.81
+0.903
+0.094
+288.94
+25.25
+0.900
+0.100
+311.59
+25.33
+0.921
+0.083
+339.64
+Table 1. Quantitative comparison on the OccluScene3D dataset. We report SSIM ↑, PSNR ↑, LPIPS ↓ and FPS ↑ on the test views. The
+best and second best results are highlighted. * denotes that it is our re-implementation of VastGaussian.
+Metrics
+PSNR
+SSIM
+LPIPS
+MERF [41]
+SMERF [10]
+Zip-NeRF [4]
+23.49
+27.28
+27.37
+0.747
+0.829
+0.836
+0.445
+0.340
+0.305
+3DGS [21]
+RadSplat [38]
+25.50
+26.17
+0.809
+0.839
+0.369
+0.364
+OccluGaussian
+28.63
+0.880
+0.281
+Table 2. Quantitative comparison on the Zip-NeRF dataset.
+Scene
+M ILL -19
+U RBAN S CENE 3D
+Metrics
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+Mega-NeRF [49]
+Switch-NeRF [55]
+Grid-NeRF [51]
+23.09
+23.50
+24.37
+0.572
+0.590
+0.807
+0.393
+0.355
+0.142
+24.35
+24.84
+24.94
+0.659
+0.678
+0.787
+0.369
+0.333
+0.158
+Modified 3DGS [28]
+CityGaussian [32]
+Hierarchical-GS [22]
+DOGS [6]
+VastGaussian [28]
+24.90
+24.29
+22.95
+24.26
+25.21
+0.785
+0.771
+0.739
+0.762
+0.814
+0.163
+0.166
+0.291
+0.231
+0.131
+24.18
+23.87
+23.40
+25.69
+0.793
+0.821
+0.742
+0.851
+0.199
+0.161
+0.280
+0.132
+OccluGaussian
+25.97
+0.854
+0.103
+25.75
+0.858
+0.125
+Berlin Scene
+CityGaussian
+Hierarchical-GS
+OccluGaussian (Ours)
+VastGaussian
+DOGS
+Table 3. Quantitative comparison on aerial capture datasets, Mill19 and UrbanScene3D. We fail to test Hierarchical-GS [22] on the
+U RBAN S CENE 3D dataset due to an out-of-memory issue.
+DOGS [6] on the OccluScene3D and Zip-NeRF datasets
+due to insufficient GPU resources required from its distributed optimization strategy. OccluGaussian almost significantly outperforms the compared methods in all metrics,
+especially in PSNR. Regarding FPS, our method is faster
+than all methods except the original 3DGS [21], due to its
+less detailed reconstruction and fewer Gaussian primitives.
+Visual comparisons in Fig. 3 and Fig. 4 illustrate OccluGaussian’s superior detail in rendering. Additionally, Fig. 5
+shows OccluGaussian’s scene division aligns better with the
+scene layout. More visualizations are provided in the supplementary material.
+In Tab. 3, we validate our method on occlusion-free
+scenes using the Mill-19 [49] and UrbanScene3D [30]
+datasets. Our method maintains a clear advantage, highlighting the generality of our approach. These results show
+the effectiveness of our scene division strategy, which enhances the correlation among training cameras within each
+Figure 5. Different division results on the C ANTEEN scene (upper)
+and B ERLIN scene (lower). Green lines denote the physical walls,
+while black lines denote the boundaries of the divided regions. Notably, CityGaussian’s division is projected onto a contracted space.
+region and improves reconstruction quality.
+4.3. Comparison of Camera Clustering Methods
+We compare various camera clustering methods on the
+G ALLERY scene in the OccluScene3D dataset. As shown
+in Fig. 6, grid-based methods partition scenes into grids
+without considering clustering features and occlusions. The
+K-means algorithm, which relies solely on camera position features, is also oblivious to occlusions and performs worse when incorporating image features extracted
+by NetVLAD [3], failing to extract region boundaries. DBSCAN [11] does not require an initial cluster number, but
+Canteen
+K-means
+(camera position)
+K-means
+(camera position + NetVLAD)
+Grid-based
+Berlin
+PSNR
+LPIPS
+#Blocks
+PSNR
+LPIPS
+#Blocks
+VastGaussian [28]
+CityGaussian [32]
+Hierarchical-GS [22]
+DOGS [6]
+24.60
+24.16
+23.68
+24.66
+0.105
+0.114
+0.131
+0.108
+9
+9
+9
+9
+29.48
+28.68
+27.26
+28.15
+0.085
+0.091
+0.105
+0.095
+9
+9
+9
+9
+OccluGaussian
+25.25
+0.100
+5
+30.37
+0.076
+8
+Table 6. Different division strategies used in OccluGaussian.
+DBSCAN
+Metis
+Ours
+Figure 6. Scene division results by different methods are presented
+with points for cameras, color-coded by their respective regions.
+Method
+PSNR↑
+SSIM↑
+LPIPS↓
+Grid-based
+24.58
+0.892
+0.104
+K-means (CamP)
+K-means (CamPN)
+Metis [20]
+DBSCAN [11]
+24.94
+25.02
+25.00
+0.903
+0.903
+0.898
+0.094
+0.097
+0.111
+Ours
+25.46
+0.908
+0.094
+Table 4. Comparison of clustering methods. ‘CamP’ denotes camera position, ‘CamPN’ denotes camera position + NetVLAD. Kmeans (CamPN) fails due to its poor clustering results that prevent
+effective distinctions by the classification model.
+w/o RBR & RSD
+w/o RSD
+Full
+PSNR
+SSIM
+LPIPS
+FPS
+25.81
+25.81
+25.81
+0.903
+0.903
+0.903
+0.099
+0.099
+0.099
+189.52
+271.79
+288.94
+Table 5. Ablation study of the region-based rendering on the
+GALLERY scene. ‘RBR’ denotes vanilla region-based rendering;
+‘RSD’ denotes region subdivision in our region-based rendering.
+produces unevenly sized clusters and also lacks occlusion
+awareness. Metis [20] provides slightly better results by
+conducting graph clustering, but severe occlusions persist in the partitioned regions. We further perform 3DGS
+optimization based on these clustering results, as shown
+in Tab. 4, which demonstrates that our clustering method
+outperforms others in all metrics.
+4.4. Ablation Study
+Region-based rendering. We ablate our region-based rendering on the GALLERY scene, as shown in Tab. 5. Our
+region-based culling strategy significantly enhances rendering speeds without noticeable loss in visual quality. Additionally, the proposed region subdivision technique further accelerates rendering. It is important to note that our
+Initial K
+Final K
+PSNR
+SSIM
+LPIPS
+7
+10
+15
+6
+7
+8
+30.90
+31.33
+31.35
+0.898
+0.902
+0.901
+0.126
+0.121
+0.121
+Table 7. Different initial clustering numbers K on the NYC scene
+of Zip-NeRF dataset.
+culling strategy automatically removes Gaussian primitives
+with minimal contribution, reducing the overall number of
+Gaussian primitives in the final reconstructed model.
+Division strategy. To demonstrate the effectiveness of our
+occlusion-aware scene division, we evaluate it alongside
+VastGaussian, CityGaussian, Hierarchical-GS, and DOGS
+by replacing our scene division with theirs while keeping
+the same hyperparameters as ours for 3DGS optimization.
+We test on the C ANTEEN scene of OccluScene3D dataset
+and the B ERLIN scene of Zip-NeRF. Results in Tab. 6 shows
+that our occlusion-aware scene division still demonstrates
+a significant advantage. Additional visualizations can be
+found in the supplementary material.
+Initial clustering numbers. To show the robustness of our
+method, we vary the manually-set initial clustering number
+K on the NYC scene of Zip-NeRF dataset and find similar
+performance trends, as shown in Tab. 7. However, for huge
+scenes with dozens or hundreds of separated regions, setting
+an appropriate initial clustering number K remains crucial,
+which we leave for future exploration.
+5. Conclusion
+This paper presents OccluGaussian, a novel approach
+for high-quality reconstruction and real-time rendering of
+large-scale scenes. We propose an occlusion-aware scene
+division strategy that enhances reconstruction quality by optimizing the contribution of training cameras within each
+region. Furthermore, we propose a region-based rendering
+strategy that discards occluded 3D Gaussians, significantly
+accelerating rendering for large-scale scenes.
+Limitation. While OccluGaussian has made significant
+progress, limitations remain. For instance, our camera clustering starts with a fixed initial number, which works well in
+our experiments but may be insufficient for extremely large
+scenes. Future work will focus on dynamically determine
+the initial clustering number based on the number of training cameras to enhance robustness and scalability.
+References
+[1] Sameer Agarwal, Yasutaka Furukawa, Noah Snavely, Ian Simon, Brian Curless, Steven M Seitz, and Richard Szeliski.
+Building rome in a day. CACM, 2011. 2
+[2] Nurnajmin Qasrina Ann, MS Hendriyawan Achmad, Luhur
+Bayuaji, M Razali Daud, and Dwi Pebrianti. Study on 3D
+scene reconstruction in robot navigation using stereo vision.
+In I2CACIS, 2016. 2
+[3] Relja Arandjelovic, Petr Gronat, Akihiko Torii, Tomas Pajdla, and Josef Sivic. NetVLAD: Cnn architecture for weakly
+supervised place recognition. In CVPR, 2016. 7
+[4] Jonathan T Barron, Ben Mildenhall, Dor Verbin, Pratul P
+Srinivasan, and Peter Hedman. Zip-NeRF: Anti-aliased gridbased neural radiance fields. In ICCV, 2023. 5, 6, 7, 2, 3
+[5] Brojeshwar Bhowmick, Suvam Patra, Avishek Chatterjee,
+Venu Madhav Govindu, and Subhashis Banerjee. Divide and
+conquer: Efficient large-scale structure from motion using
+graph partitioning. In ACCV, 2015. 3
+[6] Yu Chen and Gim Hee Lee. DOGS: Distributed-oriented
+gaussian splatting for large-scale 3d reconstruction via gaussian consensus. NeurIPS, 37:34487–34512, 2025. 2, 3, 7, 8,
+1
+[7] Yu Chen, Shuhan Shen, Yisong Chen, and Guoping Wang.
+Graph-based parallel large scale structure from motion. PR,
+2020. 3
+[8] Corinna Cortes. Support-vector networks. Machine Learning, 1995. 5
+[9] Anurag Dalal, Daniel Hagen, Kjell G Robbersmyr, and Kristian Muri Knausgård. Gaussian splatting: 3d reconstruction
+and novel view synthesis: A review. IEEE Access, 2024. 2
+[10] Daniel Duckworth, Peter Hedman, Christian Reiser, Peter Zhizhin, Jean-François Thibert, Mario Lučić, Richard
+Szeliski, and Jonathan T Barron. Smerf: Streamable memory
+efficient radiance fields for real-time large-scene exploration.
+TOG, 2024. 6, 7, 3
+[11] Martin Ester, Hans-Peter Kriegel, Jörg Sander, Xiaowei Xu,
+et al. A density-based algorithm for discovering clusters in
+large spatial databases with noise. In KDD, 1996. 7, 8
+[12] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia
+Xu, Zhangyang Wang, et al. Lightgaussian: Unbounded
+3d gaussian compression with 15x reduction and 200+ fps.
+NeurIPS, 2024. 3
+[13] Ben Fei, Jingyi Xu, Rui Zhang, Qingyuan Zhou, Weidong
+Yang, and Ying He. 3D gaussian splatting as new era: A
+survey. TVCG, 2024. 2
+[14] Christian Früh and Avideh Zakhor. An automated method
+for large-scale, ground-based city model acquisition. IJCV,
+2004. 2
+[15] Yasutaka Furukawa, Brian Curless, Steven M Seitz, and
+Richard Szeliski. Towards internet-scale multi-view stereo.
+In CVPR, 2010. 2
+[16] Sharath Girish, Kamal Gupta, and Abhinav Shrivastava. Eagles: Efficient accelerated 3d gaussians with lightweight encodings. In ECCV. Springer, 2024. 3
+[17] Michael Goesele, Noah Snavely, Brian Curless, Hugues
+Hoppe, and Steven M Seitz. Multi-view stereo for community photo collections. In ICCV, 2007. 2
+[18] Lei He, Leheng Li, Wenchao Sun, Zeyu Han, Yichen Liu,
+Sifa Zheng, Jianqiang Wang, and Keqiang Li. Neural radiance field in autonomous driving: A survey. arXiv preprint
+arXiv:2404.13816, 2024. 2
+[19] Yuheng Jiang, Zhehao Shen, Penghao Wang, Zhuo Su, Yu
+Hong, Yingliang Zhang, Jingyi Yu, and Lan Xu. Hifi4G:
+High-fidelity human performance rendering via compact
+gaussian splatting. In CVPR, 2024. 3
+[20] George Karypis and Vipin Kumar. METIS: A software
+package for partitioning unstructured graphs, partitioning
+meshes, and computing fill-reducing orderings of sparse matrices. University of Minnesota, Department of Computer
+Science and Engineering, Army HPC Research Center, Minneapolis, MN, 1997. 3, 8
+[21] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3D Gaussian splatting for real-time
+radiance field rendering. TOG, 2023. 2, 6, 7, 3
+[22] Bernhard Kerbl, Andreas Meuleman, Georgios Kopanas,
+Michael Wimmer, Alexandre Lanvin, and George Drettakis.
+A hierarchical 3D Gaussian representation for real-time rendering of very large datasets. TOG, 2024. 2, 3, 6, 7, 8, 1
+[23] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3d gaussian representation for
+radiance field. In CVPR, 2024. 3
+[24] Ruilong Li, Sanja Fidler, Angjoo Kanazawa, and Francis
+Williams. NeRF-XL: Scaling nerfs with multiple gpus. In
+ECCV. Springer, 2024. 3
+[25] Xiaowei Li, Changchang Wu, Christopher Zach, Svetlana
+Lazebnik, and Jan-Michael Frahm. Modeling and recognition of landmark image collections using iconic scene
+graphs. In ECCV, 2008. 2
+[26] Yunpeng Li, Noah Snavely, and Daniel P Huttenlocher. Location recognition using prioritized feature matching. In
+ECCV, 2010. 3
+[27] Yixuan Li, Lihan Jiang, Linning Xu, Yuanbo Xiangli, Zhenzhi Wang, Dahua Lin, and Bo Dai. MatrixCity: A large-scale
+city dataset for city-scale neural rendering and beyond. In
+ICCV, 2023. 5
+[28] Jiaqi Lin, Zhihao Li, Xiao Tang, Jianzhuang Liu, Shiyong
+Liu, Jiayue Liu, Yangdi Lu, Xiaofei Wu, Songcen Xu, Youliang Yan, et al. VastGaussian: Vast 3D Gaussians for large
+scene reconstruction. In CVPR, 2024. 2, 3, 5, 6, 7, 8, 1
+[29] Jiaqi Lin, Zhihao Li, Binxiao Huang, Xiao Tang, Jianzhuang
+Liu, Shiyong Liu, Xiaofei Wu, Fenglong Song, and Wenming Yang. Decoupling appearance variations with 3d consistent features in gaussian splatting. In AAAI, 2025. 2
+[30] Liqiang Lin, Yilin Liu, Yue Hu, Xingguang Yan, Ke Xie, and
+Hui Huang. Capturing, reconstructing, and simulating: the
+urbanscene3d dataset. In ECCV, 2022. 5, 6, 7, 2
+[31] Jiayue Liu, Xiao Tang, Freeman Cheng, Roy Yang, Zhihao
+Li, Jianzhuang Liu, Yi Huang, Jiaqi Lin, Shiyong Liu, Xiaofei Wu, et al. Mirrorgaussian: Reflecting 3d gaussians for
+reconstructing mirror reflections. In ECCV, 2024. 2
+[32] Yang Liu, Chuanchen Luo, Lue Fan, Naiyan Wang, Junran
+Peng, and Zhaoxiang Zhang. Citygaussian: Real-time highquality large-scale scene rendering with gaussians. In ECCV.
+Springer, 2024. 2, 3, 5, 6, 7, 8, 1
+[33] Ben Mildenhall, Pratul P Srinivasan, Matthew Tancik,
+Jonathan T Barron, Ravi Ramamoorthi, and Ren Ng. NeRF:
+Representing scenes as neural radiance fields for view synthesis. CACM, 2021. 2, 3
+[34] Wieland Morgenstern, Florian Barthel, Anna Hilsmann, and
+Peter Eisert. Compact 3D scene representation via selforganizing gaussian grids. In ECCV. Springer, 2024. 3
+[35] Michela Mortara, Chiara Eva Catalano, Francesco Bellotti, Giusy Fiucci, Minica Houry-Panchetti, and Panagiotis
+Petridis. Learning cultural heritage by serious games. Journal of Cultural Heritage, 2014. 2
+[36] KL Navaneet, Kossar Pourahmadi Meibodi, Soroush Abbasi
+Koohpayegani, and Hamed Pirsiavash. Compact3D: Compressing Gaussian splat radiance field models with vector
+quantization. arXiv preprint arXiv:2311.18159, 2023. 3
+[37] Kai Ni, Drew Steedly, and Frank Dellaert. Out-of-core bundle adjustment for large-scale 3D reconstruction. In ICCV,
+2007. 3
+[38] Michael Niemeyer, Fabian Manhardt, Marie-Julie Rakotosaona, Michael Oechsle, Daniel Duckworth, Rama Gosula,
+Keisuke Tateno, John Bates, Dominik Kaeser, and Federico
+Tombari. Radsplat: Radiance field-informed Gaussian splatting for robust real-time rendering with 900+ FPS. 3DV,
+2025. 3, 6, 7
+[39] Pietro Perona and William Freeman. A factorization approach to grouping. In ECCV, 1998. 4
+[40] Marc Pollefeys, David Nistér, J-M Frahm, Amir Akbarzadeh, Philippos Mordohai, Brian Clipp, Chris Engels,
+David Gallup, S-J Kim, Paul Merrell, et al. Detailed realtime urban 3D reconstruction from video. IJCV, 2008. 2
+[41] Christian Reiser, Rick Szeliski, Dor Verbin, Pratul Srinivasan, Ben Mildenhall, Andreas Geiger, Jon Barron, and Peter Hedman. Merf: Memory-efficient radiance fields for realtime view synthesis in unbounded scenes. TOG, 2023. 6, 7
+[42] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu,
+Zhangkai Ni, and Bo Dai. Octree-GS: Towards consistent
+real-time rendering with lod-structured 3d gaussians. PAMI,
+2025. 3
+[43] Torsten Sattler, Bastian Leibe, and Leif Kobbelt. Improving
+image-based localization by active correspondence search.
+In ECCV, 2012. 3
+[44] Johannes L Schonberger and Jan-Michael Frahm. Structurefrom-motion revisited. In CVPR, 2016. 2, 3, 1
+[45] Roberto Scopigno, Paolo Cignoni, Nico Pietroni, Marco Callieri, and Matteo Dellepiane. Digital fabrication techniques
+for cultural heritage: a survey. In Computer graphics forum,
+2017. 2
+[46] Noah Snavely, Steven M Seitz, and Richard Szeliski. Photo
+tourism: exploring photo collections in 3D. In ACM siggraph. 2006. 2
+[47] Matthew Tancik, Vincent Casser, Xinchen Yan, Sabeek Pradhan, Ben Mildenhall, Pratul P Srinivasan, Jonathan T Barron,
+and Henrik Kretzschmar. Block-NeRF: Scalable large scene
+neural view synthesis. In CVPR, 2022. 2, 3
+[48] Sebastian Thrun et al. Robotic mapping: A survey. Exploring artificial intelligence in the new millennium, 2002. 2
+[49] Haithem Turki, Deva Ramanan, and Mahadev Satyanarayanan. Mega-NeRF: Scalable construction of large-scale
+NeRFs for virtual fly-throughs. In CVPR, 2022. 2, 3, 5, 7
+[50] Zipeng Wang and Dan Xu. PyGS: Large-scale scene representation with pyramidal 3D Gaussian splatting. arXiv
+preprint arXiv:2405.16829, 2024. 2
+[51] Linning Xu, Yuanbo Xiangli, Sida Peng, Xingang Pan,
+Nanxuan Zhao, Christian Theobalt, Bo Dai, and Dahua Lin.
+Grid-guided neural radiance fields for large urban scenes. In
+CVPR, 2023. 2, 3, 7
+[52] Runze Zhang, Siyu Zhu, Tian Fang, and Long Quan. Distributed very large scale bundle adjustment by global camera
+consensus. In ICCV, 2017. 3
+[53] Xiaotong Zhang, Han Liu, Qimai Li, Xiao-Ming Wu, and
+Xianchao Zhang. Adaptive graph convolution methods for
+attributed graph clustering. KDE, 2023. 4
+[54] Hexu Zhao, Haoyang Weng, Daohan Lu, Ang Li, Jinyang Li,
+Aurojit Panda, and Saining Xie. On scaling up 3d gaussian
+splatting training. In ECCV. Springer, 2024. 2, 3
+[55] MI Zhenxing and Dan Xu. Switch-NeRF: Learning scene
+decomposition with mixture of experts for large-scale neural
+radiance fields. In ICLR, 2022. 2, 7
+[56] Siyu Zhu, Runze Zhang, Lei Zhou, Tianwei Shen, Tian Fang,
+Ping Tan, and Long Quan. Very large-scale global sfm by
+distributed motion averaging. In CVPR, 2018. 2, 3
+OccluGaussian: Occlusion-Aware Gaussian Splatting
+for Large Scene Reconstruction and Rendering
+Supplementary Material
+Figure 7. Comparative analysis of scene division on G ALLERY,
+C ANTEEN and C LASS B UILDING in the OcclusionScene3D
+dataset. Notably, CityGaussian’s division is projected onto a contracted space.
+6. Training details
+All experiments were conducted on RTX 4090 GPUs, except for Hierarchical-GS on V100s due to higher memory
+demand. The reported time includes only 3DGS optimization, excluding preprocessing steps. Our division strategy
+takes an average of 9.28 minutes on the OccluScene3D
+dataset and can be greatly accelerated by porting it from
+CPU to GPU in future work. For fair comparison, we used
+consistent settings for all methods based on their public
+codes (except DOGS, which requires distributed training
+beyond our GPU capacitance) on the MILL-19 and URBANSCENE3D datasets: dividing each scene into 9 blocks,
+downsampling all images by 4, and optimizing each block
+for 60k steps with 200-step densification interval
+7. More Details of the OccluScene3D Dataset
+There are three scenes in the OccluScene3D dataset:
+G ALLERY, C ANTEEN and C LASS B UILDING. All the
+videos are recorded by a mobile phone with the wide-angle
+mode and landscape orientation at a frame rate of 60 Hz.
+We use COLMAP [44] to estimate the camera intrinsic and
+extrinsic parameters. More details are shown in Tab. 8.
+8. Additional Experimental Results
+8.1. Additional Quantitative Analysis
+Scene division strategy analysis. We present a comparison of scene division on the OccluScene3D dataset and
+the Zip-NeRF dataset among VastGaussian [28], CityGaussian [32], Hierarchical-GS [22], DOGS [6], and OccluGaussian in Fig. 7 and Fig. 8. The results demonstrate
+Figure 8. Comparative analysis of scene division on A LAMEDA,
+B ERLIN, L ONDON and NYC in the Zip-NeRF dataset. Notably,
+CityGaussian’s division is projected onto a contracted space.
+Scene
+Area (m2 )
+#Video
+Duration (min)
+#Image
+2500
+1500
+1000
+71
+46
+18
+174
+111
+76
+9881
+9034
+9118
+G ALLERY
+C ANTEEN
+C LASS B UILDING
+Table 8. Statistics of the OccluScene3D dataset with three real
+scenes. Area: covered area; #Video: total number of videos; Duration: total duration of all the videos; #Image: total number of
+sampled images for reconstruction.
+PSNR
+Train (m)
+Mem (GB)
+#GS (M)
+FPS
+VastGaussian
+CityGaussian
+Hierarchical-GS
+3DGS
+24.58
+20.96
+22.94
+20.88
+49.97
+106.35
+190.36
+86.8
+15.0
+8.2
+30.5
+23.9
+5.5
+6.4
+40.0
+0.9
+232
+80
+205
+422
+OccluGaussian
+25.46
+48.26
+12.2
+3.4
+313
+Table 9. More quantitative results on OccluScene3D dataset.
+Scene
+G ARDEN
+K ITCHEN
+Metrics
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+Vanilla 3DGS
+Ours (w/o division)
+Ours (two-block division)
+27.41
+27.32
+27.37
+0.868
+0.879
+0.879
+0.103
+0.068
+0.067
+30.31
+30.78
+30.73
+0.922
+0.922
+0.923
+0.12
+0.065
+0.064
+Table 10. Quantitative comparison on the Mip-NeRF 360 dataset.
+that the scene divisions produced by OccluGaussian better align with scene layouts. Consequently, OccluGaussian
+achieves superior reconstruction quality, which is proven by
+performing 3DGS optimization with the same hyperparameters across different scene division strategies, as illustrated
+in Fig. 9. For aerial datasets without severe occlusions, our
+method remains effective. Unlike previous methods using
+fixed layouts (e.g., 3×3 grid), our division approach is not
+strictly grid-based. Thanks to our view graph clustering,
+Figure 9. Quantitative evaluation of different division strategies applied under the same 3DGS optimization hyperparameters. Lines from
+top to bottom are the G ALLERY, and C LASSBUILDING scenes from the OccluScene3D dataset, as well as the B ERLIN scene from the
+Zip-NeRF dataset.
+M ILL -19
+Scene
+B UILDING
+U RBAN S CENE 3D
+RUBBLE
+C AMPUS
+R ESIDENCE
+S CI -A RT
+Metrics
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+VastGaussian [28]
+CityGaussian [32]
+Hierarchical-GS [22]
+3DGS [21]
+23.50
+22.59
+21.25
+23.01
+0.804
+0.757
+0.723
+0.769
+0.130
+0.174
+0.297
+0.164
+26.92
+25.98
+24.64
+26.78
+0.823
+0.784
+0.755
+0.800
+0.132
+0.158
+0.284
+0.161
+26.00
+23.89
+0.816
+0.712
+0.151
+0.289
+24.25
+23.25
+23.40
+0.852
+0.806
+0.825
+0.124
+0.156
+0.142
+26.81
+24.49
+25.24
+0.885
+0.836
+0.843
+0.121
+0.167
+0.166
+OccluGaussian [32]
+24.77
+0.853
+0.100
+27.16
+0.854
+0.105
+26.60
+0.836
+0.139
+24.24
+0.846
+0.122
+26.42
+0.890
+0.113
+Table 11. Quantitative evaluation of our method compared to previous work on the Mill-19 [49] and UrbanScene3D [30] datasets. The
+best and second best results are highlighted. Due to an out-of-memory issue, we were unable to test Hierarchical-GS [22] on the URBANSCENE3D dataset and CityGaussian on the CAMPUS scene.
+Figure 10. Different division results on aerial datasets.
+it can adapt to the distribution of cameras. This enables
+a more balanced number of cameras across blocks, which
+is crucial for higher performance, as also demonstrated by
+CityGaussian and DOGS. Such benefit is especially noticeable in elongated capturing scenarios (e.g., B UILDING,
+RUBBLE), but less so in square scenes (e.g., S CI -A RT), as
+illustrated in Fig. 10.
+We further compare vanilla 3DGS with our method on
+two scenes from the Mip-NeRF 360 dataset. We evaluate
+our method with both no-division and two-block division
+settings. As these scenes are relatively small and occlusionfree, the divided blocks contain nearly all cameras, showing
+little difference compared to vanilla 3DGS (see Tab. 10).
+Detailed quantitative analysis of OccluGaussian. We
+present the average PSNR, training time, allocated mem-
+ory, number of gaussians and FPS on OccluScene3D dataset
+in Tab. 9. We validate the methods on the Mill-19 [49],
+UrbanScene3D [30] and Zip-NeRF [4] datasets in Tab. 11
+and Tab. 12. It can be observed that OccluGaussian outperforms others in terms of LPIPS among all the datasets. It
+also overall holds a clear advantage over existing methods
+in other metrics, highlighting its generality. These results
+show the effectiveness of our scene division strategy, which
+strengthens the correlations among training cameras within
+each region, and achieves a higher average contribution to
+the reconstruction results.
+Extended camera ratios. We further compare the extended
+camera ratios of division strategy with those from VastGaussian [28], CityGaussian [32], Hierarchical-GS [22],
+DOGS [6] and OccluGaussian, as shown in Tab. 13. This ratio is defined as the total number of extended cameras across
+all regions divided by the total number of training cameras.
+A smaller ratio of extended cameras indicates that each
+partitioned region is more self-contained and can be wellreconstructed with fewer training iterations. Conversely,
+if region A and B are divided into occlusion-agnostic regions, many extended cameras for region A will be inside
+region B, and vice versa. In other words, these two sets of
+B ERLIN
+L ONDON
+NYC
+A LAMEDA
+Metrics
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+PSNR
+SSIM
+LPIPS
+3DGS [21]
+SMERF [10]
+Zip-NeRF [4]
+28.52
+28.52
+28.59
+0.887
+0.887
+0.891
+0.325
+0.325
+0.297
+27.05
+27.05
+27.06
+0.829
+0.829
+0.835
+0.342
+0.342
+0.304
+28.21
+28.21
+28.42
+0.844
+0.844
+0.850
+0.321
+0.321
+0.281
+25.35
+25.35
+25.41
+0.758
+0.758
+0.767
+0.37
+0.37
+0.338
+OccluGaussian
+30.37
+0.937
+0.076
+28.06
+0.868
+0.141
+31.33
+0.902
+0.121
+24.75
+0.814
+0.201
+Table 12. Quantitative evaluation of our method compared to previous work on the Zip-NeRF [4] datasets.
+PSNR
+Base cam.
+Extended cam.
+Ratio
+VastGaussian [28]
+CityGaussian [32]
+Hierarchical-GS [22]
+DOGS [6]
+24.58
+22.50
+23.93
+25.11
+9119
+9119
+9119
+9119
+8921
+5371
+6808
+8331
+97.8%
+58.90%
+74.66%
+91.36%
+OccluGaussian
+25.81
+9119
+4232
+46.41%
+Table 13. Extended camera comparison on OccluScene3D.
+#Clusters
+Fixed cluster number
+Mc ± 0.3Mc
+Mc ± 0.5Mc
+Mc ± 0.7Mc
+PSNR: 25.55
+FPS: 188.16
+PSNR: 25.55
+FPS: 346.30
+PSNR: 26.43
+FPS: 159.79
+PSNR: 26.43
+FPS: 256.41
+PSNR: 23.37
+FPS: 249.81
+PSNR: 23.37
+FPS: 290.70
+Metrics
+Initial K
+Final K
+PSNR
+SSIM
+LPIPS
+10
+10
+10
+10
+10
+8
+7
+6
+28.092
+28.090
+28.060
+28.043
+0.870
+0.870
+0.868
+0.862
+0.141
+0.141
+0.141
+0.142
+Table 14. Quantitative results of different camera count ranges.
+A: w/o Region-based culling
+B: Region-based rendering
+|A-B|（diff ）
+Figure 13. Quantitative evaluation of region-based rendering. The
+right-most image uses color coding to represent pixel differences:
+red for |A − B| > 1, blue for |A − B| = 1, and gray for AB = 0. The difference between A and B is almost less than 1
+pixel. Our approach achieves substantial enhancements in rendering speed without a perceptible loss in image quality.
+b) w/ border set
+a) w/o border set
+Figure 14. Ablation study of border set cameras on GALLERY
+and BERLIN. We also report the performance on the test sets.
+Figure 11. Division results of different camera count ranges for
+each cluster. The green lines denote the physical walls, and the
+red lines denote the boundaries of the divided regions.
+Study Room
+Hall
+Meeting Room
+Classbuilding B
+Classbuilding C
+Parking Lot
+Figure 15. Scene division on the OcclusionScene3D-E dataset.
+Figure 12. Ablation study of features in our attributed scene graph.
+training cameras are almost the same (all cameras), making it difficult to achieve good reconstruction with limited
+training iterations. Compared to VastGaussian, CityGaussian, Hierarchical-GS and DOGS, our extended cameras are
+greatly reduced by our occlusion-aware division strategy,
+which leads to a higher average contribution of all training cameras for the reconstruction of each region. This ad-
+PSNR：21.39
+PSNR：23.70
+Study Room
+Hall
+PSNR：24.93
+PSNR：24.86
+Meeting Room
+PSNR：26.23
+Classbuilding B
+PSNR：23.56
+Classbuilding C
+Parking Lot
+Figure 16. Quantitative Evaluation on the OcclusionScene3D-E Dataset. The first line shows the ground truth, while the second line
+presents the rendering results of our OccluGaussian method.
+vantage eventually leads to improved reconstruction quality, as proven by the results obtained when replacing our
+scene division strategy with others in our 3DGS optimization pipeline, as shown in Tab. 13.
+8.2. Additional Ablations
+Cluster number refinement. To obtain our final scene division, we iteratively refine the result from the graph clustering algorithm by splitting or ignoring clusters until the
+camera count in each cluster falls within [Mc −σc Mc , Mc +
+σc Mc ], where Mc is the average camera count across all
+clusters. Here we explore the influence with different σc
+choices, as shown in Fig. 11 and Tab. 14. The division
+results remain occlusion-aware, and similar performances
+are obtained. Note that without this refinement step, reconstruction quality remains comparable but demands more
+GPU resources for additional regions.
+Features in the scene graph. As shown in Fig. 12, both
+the position features in the node attribute and the visibility
+correlations encoded by the edge weight in the scene graph
+are important to achieve occlusion-aware division.
+Region-based rendering. The ablation study of our regionbased rendering is conducted on the OccluScene3D dataset,
+and the visual comparisons are shown in Fig. 13. Our
+region-based culling strategy substantially enhances rendering speeds without any perceptible loss in visual quality.
+Moreover, the proposed region subdivision technique further accelerates rendering.
+Training camera selection.The ablation study of border set
+cameras is shown in Fig. 14. Without the border set, Gaussian primitives can become excessively large or elongated,
+leading to floaters or artifacts at region boundaries.
+9. Extended Dataset
+To further advance research in occluded scene reconstruction, we introduce an extended version of the OccluScene3D dataset named OccluScene3D-E. It encompasses six diverse scenes: S TUDY ROOM, H ALL, M EETING ROOM , C LASS B UILDING B, C LASS B UILDING C, and
+Scene
+S TUDY ROOM
+H ALL
+M EETING ROOM
+C LASS B UILDING B
+C LASS B UILDING C
+PARKING L OT
+Area (m2 )
+#Video
+Duration (min)
+#Image
+500
+800
+1500
+1000
+1000
+500
+39
+33
+36
+27
+25
+38
+105
+97
+127
+63
+76
+78
+4752
+6000
+10000
+7603
+6435
+6060
+Table 15. Statistics of the OccluScene3D-E dataset with six real
+scenes.
+Scene
+PSNR
+SSIM
+LPIPS
+#GS (M)
+FPS
+S TUDY ROOM
+H ALL
+M EETING ROOM
+C LASS B UILDING B
+C LASS B UILDING C
+PARKING L OT
+22.52
+22.70
+27.00
+22.24
+23.90
+22.46
+0.84
+0.79
+0.90
+0.85
+0.88
+0.86
+0.190
+0.212
+0.12
+0.158
+0.123
+0.146
+2.6
+1.7
+3.5
+1.8
+1.4
+1.6
+314.73
+341.76
+407.51
+595.38
+420.94
+314.73
+Table 16. Quantitative results on the OccluScene3D-E dataset.
+Initial K
+Final K
+PSNR
+SSIM
+LPIPS
+1
+5
+7
+10
+15
+1
+5
+7
+7
+10
+25.18
+25.35
+25.59
+25.81
+25.33
+0.882
+0.895
+0.902
+0.903
+0.899
+0.145
+0.114
+0.103
+0.099
+0.101
+Table 17. Different initial clustering numbers K on the Gallery
+scene of OccluScene3D dataset.
+PARKING L OT, with detailed information in Tab. 15. As
+demonstrated in Fig. 15, applying OccluGaussian’s scene
+division method to OccluScene3D-E yields results that
+closely align with the underlying scene structures. Tab. 16
+details the quantitative metrics. Ablation study on initial
+clustering number K is shown in Tab. 17. The rendering outcomes for each scene, illustrated in Fig. 16, collectively confirm the robustness and effectiveness of our
+scene division strategy, as well as its capacity to produce high-fidelity visual results. Dataset page: https:
+//occlugaussian.github.io/OccluScene3D/
+index.html.

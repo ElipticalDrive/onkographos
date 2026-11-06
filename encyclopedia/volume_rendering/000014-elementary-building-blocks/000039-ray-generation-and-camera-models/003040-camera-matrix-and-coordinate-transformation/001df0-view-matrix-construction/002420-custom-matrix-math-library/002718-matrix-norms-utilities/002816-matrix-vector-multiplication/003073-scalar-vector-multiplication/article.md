@@ -1,0 +1,75 @@
+# Scalar-Vector Multiplication
+
+Also called: operator* (scalar, Vec4)
+
+## Overview
+Scalar-vector multiplication scales a vector by a scalar factor. It is the fundamental arithmetic operation underlying the linear combination of basis vectors in matrix-vector multiplication [S1]. Unlike matrix-vector multiplication, which transforms direction and position via rotation and shear, this operation uniformly scales magnitude without altering direction (for positive scalars) or reversing it (for negative scalars). It serves as the atomic step for computing dot products, norms, and affine transformations in the OpenVDB math library [S1].
+
+## How it works
+**Inputs:**
+- `scalar`: A numeric value (template parameter `T1`).
+- `vec`: A 4-dimensional vector (template parameter `T2`, e.g., `Vec4<T2>`).
+
+**Outputs:**
+- A new 4-dimensional vector where each component is the product of the scalar and the corresponding vector component.
+
+**Data Structures:**
+The vector `vec` is a template struct `Vec4<T2>` containing four fields: `x`, `y`, `z`, and `w`, all of type `T2`. The scalar is a primitive numeric type `T1`.
+
+**Algorithm:**
+1. Initialize a result vector `res` of type `Vec4<T2>`.
+2. Compute `res.x = scalar * vec.x`.
+3. Compute `res.y = scalar * vec.y`.
+4. Compute `res.z = scalar * vec.z`.
+5. Compute `res.w = scalar * vec.w`.
+6. Return `res`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def scalar_vector_multiply(scalar: float, vec: Vec4) -> Vec4:
+    """
+    Multiplies a scalar by a 4D vector component-wise.
+    
+    Args:
+        scalar: The scaling factor.
+        vec: A 4D vector with components x, y, z, w.
+        
+    Returns:
+        A new 4D vector with components scaled by the scalar.
+    """
+    return Vec4(
+        x=scalar * vec.x,
+        y=scalar * vec.y,
+        z=scalar * vec.z,
+        w=scalar * vec.w
+    )
+```
+
+**Parameters:**
+- `T1`: The type of the scalar. Common types include `float`, `double`, `int`.
+- `T2`: The type of the vector components. Must be compatible with `T1` for multiplication.
+
+**Edge Cases and Pitfalls:**
+- **Zero Division:** Not applicable for multiplication, but relevant for the variant "Scalar-Vector Division" (see Subtopics).
+- **Type Promotion:** If `T1` and `T2` differ, the result type is determined by the template specialization. In OpenVDB's `nanovdb::math`, the return type matches the vector's component type `T2` [S1]. Implementers must ensure `T1` is implicitly convertible to `T2` or explicitly cast to avoid precision loss or compilation errors.
+- **NaN/Inf:** If the scalar or any component is `NaN` or `Inf`, the result follows IEEE 754 floating-point rules (e.g., `0 * Inf = NaN`).
+
+## Subtopics
+
+### Scalar-Vector Division
+Divides a scalar by a 4D vector component-wise. Given a scalar `s` and vector `v`, the result is a vector where each component is `s / v_i`. This is distinct from vector division by a scalar (which scales the vector) and is primarily used in specific normalization or inverse-distance calculations. The return type matches the vector's component type `T2` [S1].
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$, involving exactly 4 multiplications and 4 assignments.
+- **Memory Complexity:** $O(1)$, requiring storage for one output vector.
+- **Performance:** Extremely fast; typically inlined by compilers. No branching or memory access beyond registers.
+- **Strengths:** Simple, predictable, and essential for linear algebra operations.
+- **Limitations:** None inherent to the operation itself. Precision depends on the floating-point format of `T1` and `T2`.
+
+## Background
+This operation is a standard linear algebra primitive. In the context of volume rendering and the OpenVDB library, it is part of the `nanovdb::math` namespace, which provides optimized, template-based vector and matrix operations for GPU and CPU execution [S1]. The `__hostdev__` specifier indicates it is designed to run on both host (CPU) and device (GPU) architectures, making it suitable for high-performance volume rendering pipelines where ray generation and transformation matrices are computed frequently.
+
+## Sources
+[S1] OpenVDB: nanovdb::math Namespace Reference, https://openvdb.org/documentation/doxygen/namespacenanovdb_1_1math.html, fetched 2026-10-24

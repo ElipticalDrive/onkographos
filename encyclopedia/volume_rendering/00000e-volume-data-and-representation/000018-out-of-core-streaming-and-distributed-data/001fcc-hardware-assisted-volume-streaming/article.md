@@ -3,87 +3,92 @@
 Also called: HAVS (Hardware-Assisted Volume Streaming), HAVS2, HAVS6
 
 ## Overview
-Hardware-Assisted Volume Streaming (HAVS) is an irregular volume rendering algorithm that streams volume data to perform rendering, solving the visibility sorting problem for unstructured grids by combining object-space and image-space processing [S1, unofficial]. It performs more accurate visibility sorting compared to centroid sort methods like HAPT, while avoiding the high memory overhead of storing the entire volume on the GPU [S1, unofficial].
+Hardware-Assisted Volume Streaming (HAVS) is an irregular volume rendering method that streams volumetric data to perform rendering, offering more accurate visibility sorting than centroid-based approaches like HAPT [S1, unofficial]. It distinguishes itself from methods requiring full volume upload to GPU memory (e.g., PTINT, HARC) by streaming chunks, thereby avoiding memory limitations and the performance penalties associated with repeated data transfers [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: Unstructured grid data (e.g., tetrahedral meshes), camera parameters, transfer functions.
-- Output: Rendered image.
+*   **Input:** Volumetric data (e.g., tetrahedral meshes), camera parameters, transfer functions.
+*   **Output:** Rendered image.
 
 **Data Structures:**
-- The method relies on streaming primitives (tetrahedra) rather than storing the whole volume in GPU memory [S1, unofficial].
-- Specific data structure layouts (fields, sizes, bit packing) are Not given in the sources.
+Not given in the sources.
 
 **Steps:**
-1. **Object-Space Partial Sort:** The CPU performs a partial sort of the primitives (tetrahedra) to reduce the sorting burden on the GPU [S2, unofficial].
-2. **Hardware-Assisted Sorting:** The GPU completes the sorting and compositing via a fixed-depth k-buffer [S2, unofficial]. This allows for incremental sorting of the fragment stream [S2, unofficial].
-3. **Rendering:** The sorted fragments are composited to produce the final image [S2, unofficial].
+1.  **Streaming:** The volume is partitioned into chunks and streamed to the rendering hardware. This allows rendering datasets larger than available GPU memory [S1, unofficial].
+2.  **Visibility Sorting:** HAVS performs visibility sorting on the streamed primitives. It is noted to be more accurate than the centroid sort methods used in HAPT (HAPTQ, HAPTB, HAPTS) [S1, unofficial].
+3.  **Rendering:** The hardware assists in the rendering process, likely leveraging GPU capabilities for fragment processing or sorting, though specific hardware mechanisms (e.g., k-buffer details) are not explicitly defined in the provided source text for the general HAVS method, only for its child HAVS [S1, unofficial].
 
 **Formulas:**
-- Not given in the sources.
+Not given in the sources.
 
 **Parameters:**
-- Variants include HAVS2 and HAVS6 [S1, unofficial].
-- Typical values for parameters are Not given in the sources.
+Not given in the sources.
 
 **Edge Cases and Pitfalls:**
-- Precision issues in sorting may arise if the k-buffer depth is insufficient for the scene complexity [S2, unofficial].
-- Boundary conditions for streaming chunks are Not given in the sources.
+*   **Memory Limits:** Unlike PTINT or HARC, HAVS does not require uploading the entire volume to GPU memory, avoiding the need for multiple upload/download cycles for animation frames [S1, unofficial].
+*   **Sorting Accuracy:** While more accurate than centroid sorts, the specific implementation details of the sorting algorithm (e.g., exact k-buffer size or sorting logic) are not provided in the source text for the general HAVS method [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-# HAVS Algorithm Pseudocode
-# Note: Specific implementation details for streaming and k-buffer management are not provided in the sources.
+# HAVS Implementation
+# Note: Specific algorithmic details for the streaming and sorting pipeline
+# are not provided in the source text [S1, unofficial].
+# The following represents the high-level flow described.
 
-def havs_render(scene, camera):
-    # 1. CPU performs partial sort of tetrahedra
-    sorted_primitives = cpu_partial_sort(scene.tetrahedra)
+def render_havs(volume_data, camera, transfer_function):
+    # 1. Partition volume into chunks suitable for streaming
+    chunks = partition_volume(volume_data)
     
-    # 2. GPU performs final sorting and compositing using fixed-depth k-buffer
-    # The k-buffer handles the incremental sorting of the fragment stream
-    image = gpu_kbuffer_composite(sorted_primitives, camera)
-    
-    return image
+    # 2. Stream chunks to GPU
+    for chunk in chunks:
+        # 3. Perform visibility sorting on the chunk
+        # HAVS uses a more accurate sort than HAPT centroid sorts [S1, unofficial]
+        sorted_primitives = sort_visibility(chunk)
+        
+        # 4. Render the sorted primitives
+        render_primitives(sorted_primitives, camera, transfer_function)
+        
+    # 5. Composite results (if necessary, though streaming often implies direct compositing)
+    # Specific compositing strategy not detailed in source [S1, unofficial]
+    return final_image
 ```
 
 ## Subtopics
 
 ### [Hardware Assisted Visibility Sorting (HAVS)](2918-hardware-assisted-visibility-sorting-havs.md)
-Hardware Assisted Visibility Sorting (HAVS) is a volume rendering algorithm for unstructured grids that combines object-space and image-space processing to handle arbitrary nonconvex meshes with low memory overhead. It solves the visibility sorting problem for unstructured data by using the CPU to perform a partial sort of primitives and the GPU to complete the sorting and compositing via a fixed-depth k-buffer. Unlike HAPT, which relies on centroid sorting, HAVS provides more accurate visibility sorting by incrementally sorting the fragment stream on the GPU [Parent]. It is distinct from pure object-space methods like ZSWEEP, which suffer from lower sorting efficiency and higher GPU burden.
+A hybrid volume rendering algorithm for unstructured grids that combines object-space sorting on the CPU with image-space fragment sorting on the GPU. It uses a fixed-depth "k-buffer" to incrementally sort fragments and composite colors, solving the visibility ordering problem for arbitrary non-convex meshes without topological connectivity.
 
 ## Operating characteristics
 **Time and Memory Complexity:**
-- HAVS avoids the significant memory footprint of algorithms like HARCn (144 bytes/tet) and HARCp (96 bytes/tet) by streaming data [S1, unofficial].
-- It offers a gain of approximately 50% in frame rates compared to HAPTQ x HAVS6 [S1, unofficial].
+Not given in the sources.
 
 **Measured Performance:**
-- Torso dataset (HAVS2): 3.7 FPS, 4.01 M Tet/s [S1, unofficial].
-- Fighter dataset (HAVS2): 2.9 FPS, 4.12 M Tet/s [S1, unofficial].
-- HAVS6 performance on torso dataset: 3.3 FPS, 3.60 M Tet/s [S1, unofficial].
-- HAVS6 performance on fighter dataset: 2.7 FPS, 3.89 M Tet/s [S1, unofficial].
+*   **Torso Dataset (HAVS2):** 3.7 FPS, 4.01 M Tet/s [S1, unofficial].
+*   **Fighter Dataset (HAVS2):** 2.9 FPS, 4.12 M Tet/s [S1, unofficial].
+*   **HAVS6 Performance:** 3.3 FPS (Torso?), 3.60 M Tet/s (Torso?); 2.7 FPS (Fighter?), 3.89 M Tet/s (Fighter?) [S1, unofficial].
+*   **Comparison:** HAVS6 offers a gain of approximately 50% in frame rates compared to HAPTQ when combined with HAVS6, and does not require multiple rendering passes [S1, unofficial].
 
 **Scaling:**
-- Scaling characteristics are Not given in the sources.
+Not given in the sources.
 
 **Strengths and Limitations:**
-- Strengths: More accurate visibility sorting than centroid sort methods; flexible pipeline; does not require multiple rendering passes [S1, unofficial].
-- Limitations: Performance is lower than some other methods (e.g., HARCn achieves 4.8 FPS on torso) [S1, unofficial].
+*   **Strengths:** More accurate visibility sorting than HAPT centroid sorts; avoids memory limitations by streaming; flexible pipeline [S1, unofficial].
+*   **Limitations:** Performance is lower than some other methods (e.g., HARCn, HARCp) in raw FPS comparisons on the tested datasets, though these methods require significantly more memory (144 bytes/tet and 96 bytes/tet respectively) [S1, unofficial].
 
 **When to Use:**
-- Use when accurate visibility sorting for unstructured grids is required and memory bandwidth is a constraint [S1, unofficial].
+Use when the volume is too large for GPU memory and accurate visibility sorting is required, particularly for irregular volumes like tetrahedral meshes [S1, unofficial].
 
 ## Background
 **Origin:**
-- HAVS is an irregular volume renderer that streams the volume to perform rendering [S1, unofficial].
-- It is one of the most popular irregular volume renderers [S1, unofficial].
+HAVS is described as one of the most popular irregular volume renderers [S1, unofficial]. It is part of the HAPT (Hardware-Assisted Projected Tetrahedra) family of algorithms.
 
-**History and Development:**
-- Developed as an alternative to methods that rely on storing the whole volume on GPU memory, such as PTINT and HARC [S1, unofficial].
+**History:**
+The method was discussed in the context of comparing various irregular volume rendering algorithms, including HAPT variants (HAPTQ, HAPTB, HAPTS, HAPTM), HARC, PTINT, GATOR, and HAVS variants (HAVS2, HAVS6) [S1, unofficial].
 
-**Where it is Used:**
-- Used for rendering unstructured grids, particularly in scientific visualization contexts involving large datasets [S1, unofficial].
+**Usage:**
+Used for rendering irregular volumetric data, such as tetrahedral meshes, where memory constraints prevent storing the entire volume on the GPU [S1, unofficial].
 
 ## Sources
 [S1] (PDF) Hardware-Assisted Projected Tetrahedra - Academia.edu, https://www.academia.edu/16536671/Hardware_Assisted_Projected_Tetrahedra, fetched 2026-10-28 (unofficial)

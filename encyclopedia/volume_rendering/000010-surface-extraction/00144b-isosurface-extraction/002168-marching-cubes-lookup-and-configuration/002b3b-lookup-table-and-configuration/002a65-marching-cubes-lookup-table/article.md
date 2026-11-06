@@ -7,24 +7,24 @@ The Marching Cubes Lookup Table (MC LUT) is a precomputed data structure that ma
 
 ## How it works
 **Inputs:**
-- A 3D scalar field $V$ sampled on a regular grid.
-- An isovalue $I$.
+- A 3D scalar field $V$ sampled on a regular grid [S7, unofficial].
+- An isovalue $I$ [S9, unofficial].
 - The precomputed lookup tables: `edgeTable` (or `cubeEdgeFlags`) and `triangleTable` (or `triangleConnectionTable`) [S2, S12, unofficial].
 
 **Outputs:**
-- A list of triangles, where each triangle is defined by three 3D vertex coordinates.
+- A list of triangles, where each triangle is defined by three 3D vertex coordinates [S12, unofficial].
 
 **Data Structures:**
-1.  **`edgeTable`**: An array of 256 integers (or shorts). Each entry is a 12-bit bitmask. Bit $k$ (0–11) is set if the isosurface intersects the $k$-th edge of the cube [S2, S11, S12, unofficial].
-    -   Edge numbering convention (standard):
-        -   Bottom face ($z=0$): $e_0=(0,1), e_1=(1,2), e_2=(2,3), e_3=(3,0)$
-        -   Top face ($z=1$): $e_4=(4,5), e_5=(5,6), e_6=(6,7), e_7=(7,4)$
+1.  **`edgeTable`**: An array of 256 integers (or shorts). Each entry is a 12-bit bitmask. Bit $k$ ($0 \le k \le 11$) is set if the isosurface intersects the $k$-th edge of the cube [S2, S11, S12, unofficial].
+    -   Edge numbering convention (standard) [S4, S12, unofficial]:
+        -   Bottom face ($z=0$): $e_0=(0,1), e_1=(1,2), e_2=(2,3), e_3=(3,0)$ [S4, S12, unofficial].
+        -   Top face ($z=1$): $e_4=(4,5), e_5=(5,6), e_6=(6,7), e_7=(7,4)$ [S4, S12, unofficial].
         -   Vertical edges: $e_8=(0,4), e_9=(1,5), e_{10}=(2,6), e_{11}=(3,7)$ [S4, S12, unofficial].
 2.  **`triangleTable`**: A 2D array of size $256 \times 16$ [S8, S12, unofficial].
-    -   Rows are indexed by the case index (0–255).
-    -   Columns store integer indices.
-    -   Indices 0–11 refer to the 12 cube edges.
-    -   Indices are grouped in triplets $(a, b, c)$ to form triangles.
+    -   Rows are indexed by the case index $C \in [0, 255]$ [S8, S12, unofficial].
+    -   Columns store integer indices [S8, S12, unofficial].
+    -   Indices $0–11$ refer to the 12 cube edges [S8, S12, unofficial].
+    -   Indices are grouped in triplets $(a, b, c)$ to form triangles [S8, S12, unofficial].
     -   The sequence is terminated by the value `-1` [S8, S12, unofficial].
     -   Maximum triangles per voxel is 5 (15 indices + 1 terminator) [S8, S12, unofficial].
 
@@ -36,7 +36,7 @@ The Marching Cubes Lookup Table (MC LUT) is a precomputed data structure that ma
     -   If any element is `-1`, terminate the loop for this voxel [S9, S12, unofficial].
     -   For each edge index $e$, calculate the intersection point $P_e$ on the corresponding cube edge using linear interpolation between the vertex values [S6, S12, unofficial].
     -   Form a triangle with vertices $P_{e_a}, P_{e_b}, P_{e_c}$ [S12, unofficial].
-5.  **Output**: Append the generated triangles to the mesh buffer.
+5.  **Output**: Append the generated triangles to the mesh buffer [S12, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -44,7 +44,6 @@ The Marching Cubes Lookup Table (MC LUT) is a precomputed data structure that ma
 ```python
 # Constants
 NUM_EDGES = 12
-NUM_VERTICES = 8
 TERMINATOR = -1
 
 # Edge definitions: list of (vertex_index_0, vertex_index_1)
@@ -57,11 +56,11 @@ EDGES = [
 def interpolate(v0, v1, iso, p0, p1):
     """Linearly interpolate the intersection point on an edge."""
     if v1 == v0:
-        return p0 # Avoid division by zero
+        return p0 # Avoid division by zero [G]
     t = (iso - v0) / (v1 - v0)
     return p0 + t * (p1 - p0)
 
-def get_triangle_vertices(case_index, edge_table, triangle_table, voxel_vertices, voxel_coords):
+def get_triangle_vertices(case_index, edge_table, triangle_table, voxel_vertices, voxel_coords, iso):
     """
     Generate triangles for a single voxel.
     
@@ -71,6 +70,7 @@ def get_triangle_vertices(case_index, edge_table, triangle_table, voxel_vertices
         triangle_table: array[256][16] of int
         voxel_vertices: array[8] of float (scalar values at corners)
         voxel_coords: array[8] of vec3 (3D coordinates of corners)
+        iso: float (isovalue threshold)
         
     Returns:
         list of tuples (vec3, vec3, vec3)
@@ -94,8 +94,6 @@ def get_triangle_vertices(case_index, edge_table, triangle_table, voxel_vertices
             val1 = voxel_vertices[v1_idx]
             p0 = voxel_coords[v0_idx]
             p1 = voxel_coords[v1_idx]
-            # Note: The case_index bit assignment must match the vertex ordering
-            # assumed by the edge_table generation. Standard assumes bit i corresponds to vertex i.
             edge_intersections[edge_idx] = interpolate(val0, val1, iso, p0, p1)
 
     # 4. Retrieve triangle topology
@@ -124,37 +122,37 @@ def get_triangle_vertices(case_index, edge_table, triangle_table, voxel_vertices
 ```
 
 **Parameters:**
--   `iso`: The isovalue threshold. Typical range depends on the scalar field normalization (e.g., -1.0 to 1.0 for signed distance fields) [S9, unofficial].
--   `edge_table` / `triangle_table`: Static, precomputed constants. Values are not generated at runtime in standard implementations [S7, S12, unofficial].
+-   `iso`: The isovalue threshold [S9, unofficial].
+-   `edge_table` / `triangle_table`: Static, precomputed constants [S3, S12, unofficial].
 
 **Edge Cases and Pitfalls:**
 -   **Ambiguous Cases**: Cases 46, 47, 98, 99, 210, 213, 214, 215 contain saddle points where the topology is ambiguous (the isosurface passes through the cube center) [S7, S8, unofficial]. The standard LUT uses a fixed triangulation for these, which can cause cracks or holes if adjacent voxels resolve the ambiguity differently [S7, S8, unofficial].
 -   **Terminator Check**: The loop must check for `-1` to prevent reading garbage memory or out-of-bounds data [S9, S12, unofficial].
--   **Vertex Ordering**: The case index bit assignment must strictly match the vertex ordering used to generate the LUT. Mismatches cause inverted normals or incorrect topology [S12, unofficial].
+-   **Vertex Ordering**: The case index bit assignment must strictly match the vertex ordering used to generate the LUT [S12, unofficial].
 -   **Division by Zero**: Linear interpolation requires handling cases where vertex values are equal to the isovalue or to each other [G].
 
 ## Subtopics
 
 ### [Smart Vertex Interpolation with Auxiliary Arrays](1137-smart-vertex-interpolation-with-auxiliary-arrays.md)
-A technique to avoid duplicate vertex calculation in Marching Cubes by computing vertex coordinates only the first time an active edge is considered, storing the index in auxiliary arrays to be reused by adjacent cells [1137-smart-vertex-interpolation-with-auxiliary-arrays.md]. It sets itself apart by reducing computational overhead for shared edges, trading increased memory access for reduced interpolation calculations. Choose this when interpolation cost is significant relative to lookup cost.
+A technique for Marching Cubes isosurface extraction that eliminates redundant vertex coordinate calculations by storing computed vertex indices in auxiliary data structures for reuse by adjacent cells. It sets itself apart from sibling methods like Layer-Based Cube Traversal by explicitly managing edge state across cell boundaries through dedicated auxiliary arrays, ensuring topological consistency without post-processing deduplication. Choose it when interpolation cost is significant relative to lookup cost.
 
 ### [Layer-Based Cube Traversal](1358-layer-based-cube-traversal.md)
-Layer-Based Cube Traversal is a memory-optimized implementation of the Marching Cubes algorithm that processes a 3D scalar field by iterating through it one $z$-slice at a time. It solves the problem of high memory consumption in naive voxel traversal by maintaining only two layers of voxel data in memory at any given time, rather than the entire volume. This approach sets it apart from standard Marching Cubes implementations by significantly reducing the spatial complexity from $O(N^3)$ to $O(N^2)$ for a grid of size $N$, making it suitable for large datasets or constrained memory environments [1358-layer-based-cube-traversal.md].
+A memory-optimized Marching Cubes implementation that processes a 3D scalar field by iterating through it one $z$-slice at a time. It reduces space complexity by maintaining only two layers of voxel data in memory at any given time, rather than the entire volume. This approach sets it apart from standard Marching Cubes implementations by significantly reducing spatial complexity for a grid of size $N$, making it suitable for large datasets or constrained memory environments.
 
 ### [Marching Cubes Edge Intersection and Topology Test](2251-marching-cubes-edge-intersection-and-topology-test.md)
-[2251-marching-cubes-edge-intersection-and-topology-test.md]
+A method that resolves the topological ambiguity of specific cases in the Marching Cubes algorithm by determining the correct triangulation of intersection points on a voxel edge based on the signs of the scalar field values at the four vertices of an adjacent face. It differs from standard Marching Cubes by relying on a directional mask and sign-change detection rather than a full 256-case lookup table, and is typically used in dual contouring or octree-based surface extraction where edge topology is managed via node indices.
 
 ## Operating characteristics
--   **Time Complexity**: O(1) per voxel for topology determination, as it requires only a direct array lookup and sequential reading of precomputed indices [S7, unofficial]. Total time is O(N) where N is the number of voxels.
+-   **Time Complexity**: O(1) per voxel for topology determination, as it requires only a direct array lookup and sequential reading of precomputed indices [S7, unofficial].
 -   **Memory Complexity**: O(1) per voxel for the table storage, with a fixed size of 256 entries for the LUTs [S7, unofficial]. The LUTs themselves occupy negligible memory (e.g., $256 \times 16 \times 4$ bytes $\approx$ 16 KB) [S8, S12, unofficial].
--   **Measured Performance**: In hardware-accelerated pipelines (e.g., GPU compute shaders), the LUT approach enables efficient parallel processing. Benchmarks show ~4.12 ms/frame for a $128^3$ volume on M-series hardware using WebGPU [S14, unofficial].
+-   **Measured Performance**: In hardware-accelerated pipelines (e.g., GPU compute shaders), the LUT approach enables efficient parallel processing [S7, unofficial]. Benchmarks show ~4.12 ms/frame for a $128^3$ volume on M-series hardware using WebGPU [S14, unofficial].
 -   **Strengths**: No runtime branching for topology; highly parallelizable; simple implementation; fast lookup.
--   **Limitations**: Ambiguous cases may produce topological artifacts (holes, spikes) if not handled by symmetry mapping or dynamic resolution [S7, S8, unofficial]. Fixed table size does not adapt to complex local geometry.
+-   **Limitations**: Ambiguous cases may produce topological artifacts (holes, spikes) if not handled by symmetry mapping or dynamic resolution [S7, S8, unofficial].
 -   **When to Use**: Real-time volume rendering, medical imaging, game engines where performance is critical and topological ambiguity is rare or acceptable [S7, unofficial].
 -   **When Not to Use**: When exact topological correctness is required for ambiguous cases (e.g., scientific visualization requiring precise manifold surfaces) without additional ambiguity resolution steps [S7, S8, unofficial].
 
 ## Background
-The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E. Cline in 1987 [S1, S7, unofficial]. The lookup table approach was developed to optimize the algorithm by precomputing the 256 possible triangulation cases, eliminating the need for runtime decision trees. The standard table handles ambiguous cases by fixing a specific triangulation, though later work (e.g., [S4, S13, unofficial]) proposed methods to resolve ambiguities using inverse configurations or sub-block subdivision. The method is widely used in real-time graphics and scientific visualization [S7, unofficial].
+The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E. Cline in 1987 [S1, S7, unofficial]. The lookup table approach was developed to optimize the algorithm by precomputing the 256 possible triangulation cases, eliminating the need for runtime decision trees [S8, unofficial]. The standard table handles ambiguous cases by fixing a specific triangulation, though later work (e.g., [S4, unofficial][S13]) proposed methods to resolve ambiguities using inverse configurations or sub-block subdivision. The method is widely used in real-time graphics and scientific visualization [S7, unofficial].
 
 ## Sources
 [S1] 3D Volume Calculation For the Marching Cubes Algorithm in Cartesian Coordinates, https://arxiv.org/abs/1308.0387v1, fetched 2026-10-26 (unofficial)
@@ -169,5 +167,5 @@ The Marching Cubes algorithm was introduced by William E. Lorensen and Harvey E.
 [S10] ForeverDavid/marching-cubes-cuda, https://github.com/ForeverDavid/marching-cubes-cuda, fetched 2026-10-26 (unofficial)
 [S11] HeartofTheForce/Isosurface, https://github.com/HeartofTheForce/Isosurface, fetched 2026-10-26 (unofficial)
 [S12] Marching Cubes algorithm, https://github.com/thejasonfisher/marchingCubes/blob/master/MarchingCubes.cs, fetched 2026-10-30 (unofficial)
-[S13] (No) More Marching Cubes, https://doi.org/10.2312/vg/vg07/081-090, fetched 2026-10-26 (unofficial)
+[S13] (No) More Marching Cubes, https://doi.org/10.2312/vg/vg07/081-090, fetched 2026-10-26
 [S14] Renderer: marching-cubes isosurface mesh (r=mesh, WebGPU), https://github.com/nikolai3d/waterfall/pull/17, fetched 2026-10-27 (unofficial)

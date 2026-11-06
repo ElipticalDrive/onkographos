@@ -3,24 +3,24 @@
 Also called: Binary Classifier
 
 ## Overview
-Binary classification is a volume rendering method that reduces memory consumption and accelerates rendering by categorizing input volume voxels into two distinct groups: 0-voxels and 1-voxels, based on a threshold value [S1, unofficial]. It solves the performance bottleneck of processing large volumes by discarding irrelevant data (0-voxels) entirely, allowing for real-time rendering speeds on architectures like the CUBE system [S1, unofficial]. Unlike soft classification methods that assign opacity to every voxel, binary classification makes hard "yes" or "no" decisions, creating sharp transitions in the output [S2, unofficial].
+Binary classification is a volume rendering method that reduces memory consumption and accelerates rendering by categorizing input volume voxels into two distinct groups: 0-voxels and 1-voxels, based on a threshold [S1, unofficial]. It solves the performance bottleneck of processing large volumes by discarding irrelevant data (0-voxels) entirely, allowing for real-time rendering speeds on architectures like the CUBE system [S1, unofficial]. Unlike soft classification methods that assign opacity to every voxel, binary classification makes hard "yes" or "no" decisions, creating sharp transitions in the output [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs**
-- **Input**: A 3D volume dataset where each voxel has an associated scalar value (e.g., density, intensity).
-- **Output**: A binary mask or a reduced dataset containing only 1-voxels, which are then rendered.
+- **Input**: A 3D volume dataset where each voxel has an associated scalar value (e.g., density, intensity) [S1, unofficial][S2, unofficial].
+- **Output**: A binary mask or a reduced dataset containing only 1-voxels, which are then rendered [S1, unofficial].
 
 **Data Structures**
-- **Volume Data**: A 3D array of scalar values.
-- **Binary Mask**: A 3D array of bits or boolean values corresponding to the volume dimensions, where `1` indicates inclusion and `0` indicates exclusion.
+- **Volume Data**: A 3D array of scalar values [G].
+- **Binary Mask**: A 3D array of bits or boolean values corresponding to the volume dimensions, where `1` indicates inclusion and `0` indicates exclusion [G].
 
 **Steps**
 1. **Threshold Selection**: Define a threshold range $[t_{min}, t_{max}]$ that defines the object of interest [S2, unofficial].
 2. **Classification**: For each voxel $v$ with value $f(v)$:
-   - If $t_{min} \le f(v) \le t_{max}$, classify $v$ as a 1-voxel (include).
-   - Otherwise, classify $v$ as a 0-voxel (exclude) [S1, unofficial][S2, unofficial].
+   - If $t_{min} \le f(v) \le t_{max}$, classify $v$ as a 1-voxel (include) [S2, unofficial].
+   - Otherwise, classify $v$ as a 0-voxel (exclude) [S1, unofficial].
 3. **Discarding**: Remove all 0-voxels from the rendering pipeline to reduce memory consumption and speed up processing [S1, unofficial].
-4. **Rendering**: Render only the 1-voxels.
+4. **Rendering**: Render only the 1-voxels [G].
 
 **Parameters**
 - **Threshold Range**: The specific range of values considered part of the object. Example: $[0.3, 0.7]$ [S2, unofficial].
@@ -46,7 +46,7 @@ def binary_classify(volume, t_min, t_max):
         binary_mask: 3D array of booleans (True for 1-voxels, False for 0-voxels).
     """
     height, width, depth = volume.shape
-    binary_mask = [[False] * depth for _ in range(width)]
+    binary_mask = [[[False] * depth for _ in range(width)] for _ in range(height)]
     
     for x in range(height):
         for y in range(width):
@@ -63,18 +63,18 @@ def binary_classify(volume, t_min, t_max):
 ## Subtopics
 
 ### [Piecewise-Linear Classification](881-piecewise-linear-classification.md)
-Uses linear segments to define classification ranges, offering smoother transitions than binary classification. Choose when gradual opacity changes are needed.
+Uses linear segments to define classification ranges, offering smoother transitions than binary classification [G]. Choose when gradual opacity changes are needed [G].
 
 ### [Soft Classification](6229-binary-and-soft-classification.md)
-Assigns varying degrees of acceptance (opacity) rather than hard yes/no decisions, reducing high-frequency artifacts. Choose when image quality is prioritized over maximum speed.
+Assigns varying degrees of acceptance (opacity) rather than hard yes/no decisions, reducing high-frequency artifacts [G]. Choose when image quality is prioritized over maximum speed [G].
 
 ## Operating characteristics
 - **Time Complexity**: The CUBE architecture using binary classification reduced image generation time from $O(n^3)$ to $O(n^2 \log n)$ for $n^3$ voxels [S1, unofficial].
 - **Memory Complexity**: Significantly reduced by discarding 0-voxels directly [S1, unofficial].
 - **Strengths**: Enables real-time rendering speeds for massive volume data [S1, unofficial].
 - **Limitations**: Introduces sharp transitions and high frequencies, leading to rendering artifacts [S2, unofficial]. Prone to false positives/negatives affecting image quality [S1, unofficial].
-- **When to use**: When real-time performance is critical and the volume data has distinct, separable value ranges.
-- **When not to use**: When high image quality with smooth edges is required, or when the data has ambiguous boundaries.
+- **When to use**: When real-time performance is critical and the volume data has distinct, separable value ranges [G].
+- **When not to use**: When high image quality with smooth edges is required, or when the data has ambiguous boundaries [G].
 
 ## Background
 Binary classification was a distinguishing feature of early real-time volume rendering algorithms, particularly those optimized for supercomputers and massive clusters [S1, unofficial]. Kaufman proposed the CUBE (CUbic frame Buffer) architecture, which utilized binary classification to achieve real-time rendering speeds [S1, unofficial]. The technique was later largely replaced by volumetric compositing, which assigns color and opacity to every voxel, eliminating the need for binary classification and its associated artifacts [S1, unofficial]. The artifacts caused by sharp transitions in binary classification were analyzed by Frieder [S2, unofficial].

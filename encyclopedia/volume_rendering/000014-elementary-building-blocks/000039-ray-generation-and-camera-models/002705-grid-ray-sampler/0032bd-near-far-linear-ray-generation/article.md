@@ -1,0 +1,177 @@
+# Near-Far Linear Ray Generation
+
+Also called: NeRF Near-Far Linear Ray Generation, Near-Far Disparity Linear Ray Generation
+
+## Overview
+Near-Far Linear Ray Generation is a method for sampling points along camera rays in volume rendering and neural radiance fields (NeRF). It generates ray samples using linear spacing from near to far, optionally applying random jitter within segments to reduce banding artifacts [S1, unofficial]. It differs from its sibling [Near-Middle-Far Ray Generation](6817-near-middle-far-ray-generation.md) by using a single linear interpolation between near and far planes rather than splitting the depth range into distinct near, middle, and far regions [S1, unofficial]. It is distinct from [Refined Ray Generation via PDF Sampling](6837-refined-ray-generation-via-pdf-sampling.md) as it does not use importance sampling or probability density functions, relying instead on deterministic or jittered uniform spacing [S1, unofficial].
+
+## How it works
+The method generates ray positions by computing sample depths ($t$) along the ray direction. The core logic involves creating a set of normalized values ($tvals$) in the range $[0, 1]$, converting them to physical depth values using near and far plane distances, and optionally jittering these values to break up regular sampling patterns.
+
+**Inputs:**
+- `campos`: Camera position (3D vector).
+- `raydir`: Ray direction (3D vector).
+- `near`: Near plane distance (scalar).
+- `far`: Far plane distance (scalar).
+- `point_count`: Number of samples per ray (integer).
+- `jitter`: Jitter magnitude parameter (scalar, typically $\in [0, 1]$).
+
+**Outputs:**
+- `raypos`: Ray positions at sample points (tensor of shape `[..., point_count, 3]`).
+- `ts`: Sample depths along the ray (tensor of shape `[..., point_count]`).
+
+**Data Structures:**
+- `tvals`: 1D tensor of shape `[..., N]` containing normalized depth values.
+- `segment_length`: 1D tensor of shape `[..., N-1]` containing the physical length of each segment.
+
+**Steps:**
+
+1.  **Generate Normalized Depths:**
+    Create a linearly spaced tensor `tvals` from 0 to 1 with `point_count` steps.
+    $$ tvals = \text{linspace}(0, 1, \text{point\_count}) $$
+
+2.  **Convert to Disparity Space (Optional but common in NeRF variants):**
+    The sources indicate a conversion to disparity space is often applied to `tvals` before jittering or final depth calculation, specifically using the formula:
+    $$ tvals = \frac{1}{\frac{1}{\text{near}} (1 - tvals) + \frac{1}{\text{far}} tvals} $$
+    *Note: Some implementations skip this disparity conversion if linear depth spacing is desired directly. However, the "Near-Far Disparity Linear Ray Generation with Jitter" variant explicitly uses this conversion [S1, unofficial]. The standard linear variant may use linear interpolation directly: $tvals = \text{near} \cdot (1 - tvals) + \text{far} \cdot tvals$ [S1, unofficial]. We describe the disparity variant as it is the more complex and cited "NeRF" style approach in the notes.*
+
+3.  **Jittering (if `jitter > 0`):**
+    If jitter is enabled, randomize the sample positions within their segments to avoid aliasing.
+    a. Compute midpoints of the current segments:
+       $$ \text{midpoints} = \frac{tvals[:-1] + tvals[1:]}{2} $$
+    b. Compute upper and lower bounds for jittering. The bounds are typically the segment endpoints.
+    c. Generate random values `t_rand` uniformly distributed in $[0, 1]$.
+    d. Adjust `tvals` within segments:
+       $$ tvals = \text{lower} + (\text{upper} - \text{lower}) \cdot t\_rand $$
+       *Note: The source notes describe a specific jitter implementation: `segment_length = (tvals[..., 1:] - tvals[..., :-1]) * (1 + jitter * (torch.rand(...) - 0.5))`. This implies a perturbation of segment lengths. A more robust interpretation for "jitter within segments" is shifting the sample points randomly within the interval defined by the linear spacing.*
+
+4.  **Compute Segment Lengths:**
+    Calculate the physical distance between consecutive samples.
+    $$ \text{segment\_lengths} = \text{diff}(tvals) $$
+    Append a large value (e.g., $10^{10}$) to the end to handle boundary conditions if needed for subsequent operations.
+    Multiply by the norm of the ray direction to convert from normalized/depth units to physical units:
+    $$ \text{segment\_lengths} = \text{segment\_lengths} \cdot \| \text{raydir} \| $$
+
+5.  **Compute Ray Positions:**
+    Calculate the 3D position for each sample.
+    $$ \text{raypos} = \text{campos} + \text{raydir} \cdot tvals $$
+    *Note: In some variants, `raypos` is computed using midpoints of segments if the samples represent segment centers rather than endpoints. The source notes mention `middle_point_ts` in one variant: `middle_point_ts = (end_point_ts[:, :, :-1] + end_point_ts[:, :, 1:]) / 2`. If using midpoints, `raypos = campos + raydir * middle_point_ts`.*
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import math
+
+def near_far_linear_ray_generation(campos, raydir, near, far, point_count, jitter=0.0):
+    """
+    Generates ray samples using near-far linear spacing with optional jitter.
+    
+    Args:
+        campos: Tensor of shape (..., 3), camera positions.
+        raydir: Tensor of shape (..., 3), ray directions.
+        near: Scalar or Tensor, near plane distance.
+        far: Scalar or Tensor, far plane distance.
+        point_count: Integer, number of samples per ray.
+        jitter: Scalar, jitter magnitude (0.0 to 1.0).
+        
+    Returns:
+        raypos: Tensor of shape (..., point_count, 3), ray positions.
+        ts: Tensor of shape (..., point_count), sample depths.
+    """
+    # Step 1: Create linear tvals from 0 to 1
+    # Using linspace to get point_count steps
+    tvals = torch.linspace(0, 1, point_count, device=campos.device)
+    
+    # Expand dimensions to match batch dimensions of campos/raydir
+    # Assuming campos has shape (..., 3), tvals needs to be broadcastable
+    # tvals shape: (..., point_count)
+    # We assume tvals is created with appropriate broadcasting or expanded
+    
+    # Step 2: Convert to disparity space (NeRF style)
+    # Formula: t = 1 / (1/near * (1-t) + 1/far * t)
+    # Handle potential division by zero if near or far is 0 (though typically > 0)
+    inv_near = 1.0 / near
+    inv_far = 1.0 / far
+    tvals = 1.0 / (inv_near * (1.0 - tvals) + inv_far * tvals)
+    
+    # Step 3: Jittering
+    if jitter > 0:
+        # Compute segment lengths in t-space (normalized/disparity space)
+        # diff(tvals) gives length of each segment
+        # We need to jitter the tvals within their segments
+        
+        # Get segment bounds
+        # tvals is sorted, so segments are [tvals[i], tvals[i+1]]
+        # To jitter, we replace tvals[i] with a random value in [tvals[i], tvals[i+1]]
+        # except for the last point? Or jitter all internal points?
+        # The source notes mention: "jitter tvals within segments using random values"
+        # and "tvals = lower + (upper - lower) * t_rand"
+        
+        # Create random values for jitter
+        # Shape: (..., point_count)
+        t_rand = torch.rand_like(tvals)
+        
+        # Define lower and upper bounds for each sample
+        # For sample i, lower is tvals[i], upper is tvals[i+1]
+        # For the last sample, it might be fixed or jittered against the last segment?
+        # Standard NeRF jitter: jitter all samples except possibly the last one, 
+        # or jitter all within their segment [t_i, t_{i+1}]
+        
+        # Let's assume jittering all samples within [t_i, t_{i+1}]
+        # Note: tvals[-1] has no upper bound in the array, usually fixed at far or jittered to far
+        
+        lower = tvals
+        upper = torch.cat([tvals[..., 1:], torch.tensor(far, device=campos.device).expand_as(tvals[..., -1:])], dim=-1)
+        
+        # Jitter
+        tvals = lower + (upper - lower) * t_rand
+        
+    # Step 4: Compute segment lengths for potential use in volume rendering (density integration)
+    # Segment lengths in physical depth
+    segment_lengths = torch.diff(tvals, dim=-1)
+    # Append a large value to handle the last segment if needed for some algorithms
+    # Not strictly needed for raypos calculation but often returned
+    segment_lengths = torch.cat([segment_lengths, torch.tensor(1e10, device=campos.device).expand_as(segment_lengths[..., -1:])], dim=-1)
+    
+    # Multiply by ray direction norm to get physical length
+    raydir_norm = torch.norm(raydir, dim=-1, keepdim=True)
+    segment_lengths = segment_lengths * raydir_norm
+    
+    # Step 5: Compute ray positions
+    # raypos = campos + raydir * tvals
+    # tvals is (..., point_count), raydir is (..., 3), campos is (..., 3)
+    # Broadcasting: tvals needs to be expanded to (..., point_count, 1)
+    tvals_expanded = tvals.unsqueeze(-1)
+    raypos = campos + raydir * tvals_expanded
+    
+    return raypos, tvals
+```
+
+**Edge Cases and Pitfalls:**
+- **Near/Far Zero:** If `near` or `far` is zero, the disparity formula involves division by zero. Ensure `near > 0`.
+- **Jitter Bounds:** When jittering, ensure the random values are correctly bounded within the segment. The last sample's upper bound is typically `far`.
+- **Precision:** Floating-point precision issues may arise when `near` and `far` differ significantly in magnitude. Using disparity space helps mitigate this for far distances.
+- **Segment Lengths:** The segment lengths must be computed carefully if jittering is applied, as the segments are no longer uniform.
+
+## Subtopics
+
+### Near-Far Disparity Linear Ray Generation with Jitter
+Generates ray samples using disparity spacing with random jitter within segments, similar to NeRF's sampling but with explicit segment length calculation [S1, unofficial]. It differs from the standard linear variant by explicitly converting to disparity space ($t = 1 / (1/near \cdot (1-t) + 1/far \cdot t)$) before jittering, which provides more uniform sampling in 3D space for perspective cameras [S1, unofficial]. Choose this variant when using perspective cameras and wanting to avoid over-sampling near the camera and under-sampling far away. It is the default in many NeRF implementations.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ per ray, where $N$ is `point_count`. The operations are vectorized and efficient on GPUs.
+- **Memory Complexity:** $O(N)$ per ray for storing `tvals` and `raypos`.
+- **Performance:** Highly efficient due to simple arithmetic operations. Jittering adds minimal overhead.
+- **Strengths:** Simple to implement, reduces banding artifacts with jitter, works well with perspective cameras when using disparity spacing.
+- **Limitations:** Does not adapt to scene content (unlike PDF sampling). May waste samples in empty space if the scene is sparse.
+- **When to use:** Standard volume rendering and NeRF training where simplicity and speed are prioritized over adaptive sampling.
+- **When not to use:** Scenes with large empty regions where importance sampling would be more efficient.
+
+## Background
+Originating from the NeRF (Neural Radiance Fields) paper [S1, unofficial], this method has become a standard baseline for ray sampling in neural rendering. It builds on the idea of uniform sampling along the ray, enhanced by jittering to reduce aliasing. The disparity spacing is crucial for perspective cameras to ensure uniform density in 3D space.
+
+## Sources
+[S1] Xharlie/pointnerf, https://github.com/Xharlie/pointnerf, fetched 2026-10-26 (unofficial)

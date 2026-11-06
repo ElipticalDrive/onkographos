@@ -1,147 +1,146 @@
 # Tucker Decomposition (HOSVD)
 
-Also called: Higher-Order Singular Value Decomposition, Tucker Model
+Also called: Higher-Order SVD, Higher-Order Singular Value Decomposition, Multilinear SVD, Tucker Model
 
 ## Overview
-Tucker Decomposition (HOSVD) is a global basis generation method that decomposes an $N$-dimensional input array into $N$ basis matrices and an $N$-dimensional core tensor [S1][S2, unofficial]. It solves the problem of storing and transmitting large volume datasets by reducing the reconstruction rank, thereby achieving data reduction [S1]. Unlike its sibling [CP Decomposition](2255-cp-decomposition.md), which sums rank-one tensors, Tucker Decomposition uses a multilinear product structure, allowing for a more compact representation of correlated data [S2, unofficial]. It is distinguished from its parent [Sparse Coding (K-SVD)](1018-sparse-coding-k-svd.md) by its specific application to global multiresolution basis generation for volume rendering, often integrated with octree hierarchies [S1].
+Tucker Decomposition (specifically via Higher-Order SVD) is a tensor factorization method that approximates an N-dimensional input array by decomposing it into a core tensor and a set of orthogonal factor matrices, one for each mode [S1, unofficial][S2][S3]. It solves the problem of representing high-dimensional data with a compact multilinear structure, serving as the foundational basis for Tensor Approximation (TA) in volume rendering [S2][S3]. Unlike CP Decomposition, which sums rank-one tensors, HOSVD produces a core tensor that retains the multi-linear structure of the data, allowing for efficient rank-truncation due to the core's all-orthogonal property [S1, unofficial][S2].
 
 ## How it works
-**Inputs and Outputs:**
-*   **Input:** An $N$-dimensional input dataset $A \in \mathbb{R}^{I_1 \times I_2 \times \dots \times I_N}$ [S2, unofficial].
-*   **Outputs:** $N$ basis matrices $U^{(n)} \in \mathbb{R}^{I_n \times R_n}$ for $n=1 \dots N$, and an $N$-dimensional core tensor $B \in \mathbb{R}^{R_1 \times R_2 \times \dots \times R_N}$ [S2, unofficial].
+**Inputs:**
+*   Input tensor $\mathcal{A} \in \mathbb{R}^{I_1 \times I_2 \times \dots \times I_N}$, representing the volume data or a block thereof.
+*   Target multilinear rank $(R_1, R_2, \dots, R_N)$, where $R_n \le I_n$. Typical initial values are $R_n = I_n / 2$ [S2][S3].
+
+**Outputs:**
+*   Factor matrices $\mathbf{U}^{(n)} \in \mathbb{R}^{I_n \times R_n}$ for each mode $n=1,\dots,N$. Columns are orthonormal.
+*   Core tensor $\mathcal{B} \in \mathbb{R}^{R_1 \times R_2 \times \dots \times R_N}$.
 
 **Data Structures:**
-*   **Basis Matrices ($U^{(n)}$):** Each matrix has $I_n$ rows (corresponding to the spatial resolution in dimension $n$) and $R_n$ columns (the rank). The rows are orthonormal [S1][S2, unofficial].
-*   **Core Tensor ($B$):** An $N$-dimensional array of size $R_1 \times R_2 \times \dots \times R_N$. It is "all-orthogonal," meaning the inner product of any two slices along the same mode is zero [S1][S2, unofficial].
-*   **Multilinear Rank:** Defined as $(R_1, R_2, \dots, R_N)$, where $R_n$ is the rank for dimension $n$ [S2, unofficial].
+*   **Tensor $\mathcal{A}$**: Stored as an N-dimensional array. For computation, it is "unfolded" (matricized) into matrices $\mathbf{A}^{(n)}$ of size $I_n \times (I_1 \dots I_{n-1} I_{n+1} \dots I_N)$ [S1, unofficial].
+*   **Factor Matrix $\mathbf{U}^{(n)}$**: A 2D matrix where column $k$ is the $k$-th basis vector for mode $n$.
+*   **Core Tensor $\mathcal{B}$**: An N-dimensional array of coefficients.
 
-**Parameters:**
-*   **Initial Rank ($R_n$):** Typically chosen as half the input data size in that dimension, i.e., $R_n = I_n / 2$ [S1][S2, unofficial]. This corresponds to an initial data reduction.
-*   **Block Rank (for multiresolution):** When applied to equally sized blocks of size $B$, the multilinear rank is often reduced to $R_1 = R_2 = R_3 = B/2$ [S1][S2, unofficial].
-*   **Quantization:** 8-bit encoding for core tensor coefficients and 16-bit encoding for basis matrices [S2, unofficial].
+**Algorithm Steps:**
 
-**Steps:**
-1.  **Generate Basis Matrices:** Apply Higher-Order Singular Value Decomposition (HOSVD) or Higher-Order Orthogonal Iteration (HOOI) to the input volume $A$ along every data direction [S1][S2, unofficial]. HOOI is an Alternating Least Squares (ALS) algorithm that optimizes the basis matrices one after another [S2, unofficial].
-2.  **Compute Core Tensor:** Once the basis matrices $U^{(n)}$ cannot be improved further, compute the core tensor $B$. $B$ represents the projection of $A$ onto the basis matrices $U^{(n)}$ [S1][S2, unofficial]. The coefficients of $B$ show the relationship between the original data and the bases [S2, unofficial].
-3.  **Rank Truncation:** Apply rank-truncation to the core tensor $B$. Because $B$ is all-orthogonal, this process is similar to matrix SVD truncation, exploiting the singular values embedded in the diagonal slices of the core tensor [S1][S2, unofficial]. Further adaptive rank reductions can be applied after the initial decomposition [S2, unofficial].
-4.  **Multiresolution Basis Generation (Optional/Contextual):** For multiresolution rendering, generate lower-resolution basis matrices $U^{(n)}_{\downarrow k}$ by employing mipmap reduction on the row space of $U^{(n)}$ [S1].
-5.  **Re-orthogonalization:** Perform re-orthogonalization to match basis matrix row blocks to multiresolution volume octree nodes [S1].
-6.  **Octree Construction:** Define a multiresolution volume octree with one small core tensor per node. Each node's core tensor is constructed by projecting the corresponding input volume brick onto the corresponding basis matrix rows [S1].
+1.  **Unfold and Decompose:** For each mode $n$ from $1$ to $N$:
+    a. Unfold $\mathcal{A}$ into matrix $\mathbf{A}^{(n)}$ [S1, unofficial].
+    b. Compute the Singular Value Decomposition (SVD) of $\mathbf{A}^{(n)}$:
+       $$ \mathbf{A}^{(n)} = \mathbf{U}^{(n)} \mathbf{\Sigma}^{(n)} \mathbf{V}^{(n)T} $$
+       where $\mathbf{U}^{(n)}$ contains the left singular vectors, $\mathbf{\Sigma}^{(n)}$ is diagonal, and $\mathbf{V}^{(n)}$ contains the right singular vectors [S1, unofficial].
+    c. Select the $R_n$ leading left singular vectors from $\mathbf{U}^{(n)}$ to form the basis matrix for mode $n$. Let this truncated matrix be denoted $\mathbf{U}^{(n)}_{trunc} \in \mathbb{R}^{I_n \times R_n}$ [S1, unofficial].
+
+2.  **Compute Core Tensor:** Calculate the core tensor $\mathcal{B}$ by projecting $\mathcal{A}$ onto the transposes of the computed factor matrices [S1, unofficial][S2]:
+    $$ \mathcal{B} = \mathcal{A} \times_1 \mathbf{U}^{(1)T} \times_2 \mathbf{U}^{(2)T} \times_3 \cdots \times_N \mathbf{U}^{(N)T} $$
+    In element-wise form:
+    $$ b_{r_1 r_2 \dots r_N} = \sum_{i_1=1}^{I_1} \sum_{i_2=1}^{I_2} \dots \sum_{i_N=1}^{I_N} a_{i_1 i_2 \dots i_N} \cdot u_{i_1, r_1}^{(1)} \cdot u_{i_2, r_2}^{(2)} \cdots u_{i_N, r_N}^{(N)} $$
+    [S1, unofficial].
+
+3.  **Reconstruction (Verification):** The approximation $\tilde{\mathcal{A}}$ is reconstructed via the n-mode product:
+    $$ \tilde{\mathcal{A}} = \mathcal{B} \times_1 \mathbf{U}^{(1)} \times_2 \mathbf{U}^{(2)} \times_3 \cdots \times_N \mathbf{U}^{(N)} $$
+    [S1, unofficial].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def tucker_decomposition_hosvd(A, initial_ranks=None):
+def hosvd(tensor_A, ranks):
     """
-    Performs Tucker Decomposition using HOSVD/HOOI.
+    Computes the Higher-Order SVD of tensor A.
     
     Args:
-        A: Input N-dimensional tensor of shape (I1, I2, ..., IN).
-        initial_ranks: List of ranks (R1, R2, ..., RN). If None, defaults to In/2.
+        tensor_A: numpy array of shape (I1, I2, ..., IN)
+        ranks: list of integers [R1, R2, ..., RN]
         
     Returns:
-        U: List of N basis matrices.
-        B: Core tensor.
+        core_B: numpy array of shape (R1, R2, ..., RN)
+        U_matrices: list of numpy arrays, where U_matrices[n] has shape (In, Rn)
     """
-    N = A.ndim
-    I = A.shape
+    N = tensor_A.ndim
+    U_matrices = []
     
-    if initial_ranks is None:
-        initial_ranks = [I[n] // 2 for n in range(N)]
-    
-    # Step 1: Generate Basis Matrices using HOOI
-    # HOOI optimizes basis matrices one after another via ALS
-    U = []
+    # Step 1: Compute factor matrices for each mode
     for n in range(N):
-        # Mode-n unfolding of A
-        A_unfolded = mode_n_unfold(A, n)
+        # Unfold tensor A along mode n
+        # Shape of A_folded: (In, product of all other dimensions)
+        A_folded = numpy.moveaxis(tensor_A, n, 0).reshape(
+            tensor_A.shape[n], -1
+        )
         
-        # Compute initial basis from SVD of unfolded matrix
-        # U_n_init, S_n, V_n = svd(A_unfolded)
-        # Select top R_n columns
-        R_n = initial_ranks[n]
-        U_n, _, _ = truncated_svd(A_unfolded, k=R_n)
+        # Compute SVD
+        # We only need the left singular vectors (U)
+        # numpy.linalg.svd returns U, S, Vh
+        U, S, Vh = numpy.linalg.svd(A_folded, full_matrices=False)
         
-        # Optimize U_n using ALS (HOOI)
-        # Iterate until convergence:
-        #   For each mode m != n:
-        #     Compute projection of A onto other bases
-        #     Update U_n via SVD of the projected matrix
-        # [G] Standard HOOI implementation details omitted for brevity
-        #     but must ensure U_n remains orthonormal.
-        U_n = hooi_optimize_mode_n(A, U, n)
-        U.append(U_n)
+        # Truncate to the desired rank Rn
+        Rn = ranks[n]
+        U_truncated = U[:, :Rn]
         
-    # Step 2: Compute Core Tensor B
-    # B is the projection of A onto the basis matrices U
-    # B = A x1 U1^T x2 U2^T ... xN UN^T
-    B = A
-    for n in range(N):
-        # Tensor-times-matrix product along mode n
-        # B = B x_n (U[n]^T)
-        B = mode_n_tensor_matrix_product(B, U[n].T, n)
+        U_matrices.append(U_truncated)
         
-    # Step 3: Rank Truncation (Optional)
-    # Exploit all-orthogonal property of B
-    # [G] In practice, compute singular values of core tensor slices
-    #     and truncate dimensions where singular values are small.
-    # B = truncate_core_tensor(B, target_ranks)
+    # Step 2: Compute the core tensor
+    # Core B = A x1 U1^T x2 U2^T ... xN UN^T
+    # We apply the transpose of each U matrix sequentially using n-mode product
+    core_B = tensor_A
     
-    return U, B
-
-def mode_n_unfold(A, n):
-    """Unfolds tensor A into a matrix along mode n."""
-    # Reshape A such that mode n is the row dimension
-    # and all other modes are combined into the column dimension
-    pass
-
-def truncated_svd(M, k):
-    """Returns the top k left singular vectors of M."""
-    U, S, Vt = np.linalg.svd(M, full_matrices=False)
-    return U[:, :k], S[:k], Vt[:k, :]
-
-def hooi_optimize_mode_n(A, U, n):
-    """
-    Optimizes the n-th basis matrix U[n] using Alternating Least Squares.
-    Assumes other U[m] are fixed.
-    """
-    # Compute the product of all other basis matrices
-    # This effectively projects A into the subspace defined by other bases
-    # [G] Implementation involves tensor contractions or unfolding
-    #     followed by SVD to update U[n].
-    pass
-
-def mode_n_tensor_matrix_product(T, M, n):
-    """
-    Computes the tensor-matrix product T x_n M.
-    """
-    # Reshape T, multiply M along mode n, reshape back
-    pass
+    for n in range(N):
+        # n-mode product: core_B = core_B x_n U_n^T
+        # In numpy, this is equivalent to contracting the n-th dimension of core_B
+        # with the columns of U_n.
+        # core_B shape: (..., R_n, ...) -> (..., R_n, ...)
+        # U_n^T shape: (R_n, I_n)
+        
+        # To perform tensor-matrix multiplication efficiently:
+        # Move mode n to the front
+        core_B_moved = numpy.moveaxis(core_B, n, 0)
+        # Reshape to 2D: (R_n, product of other dims)
+        core_B_2d = core_B_moved.reshape(core_B.shape[n], -1)
+        
+        # Multiply by U_n^T: (R_n, I_n) @ (I_n, other_dims) -> (R_n, other_dims)
+        # Note: U_matrices[n] is (I_n, R_n), so we use it directly as the right multiplier
+        # if we view the operation as contracting the I_n dimension.
+        # Actually, standard n-mode product definition:
+        # B = A x_n U means B_{... r_n ...} = sum_{i_n} A_{... i_n ...} U_{i_n, r_n}
+        # Here we want U^T, so we use U directly in the contraction if we align indices correctly.
+        # Let's use the explicit formula for clarity and correctness:
+        # B_r1...rn = sum_i A_i * U_i,r
+        # This is a contraction of the n-th index of A with the second index of U.
+        
+        # Efficient implementation using einsum or tensordot
+        # core_B = numpy.tensordot(core_B, U_matrices[n], axes=([n], [0]))
+        # This results in shape where the n-th dim of core_B is replaced by Rn.
+        
+        core_B = numpy.tensordot(core_B, U_matrices[n], axes=([n], [0]))
+        
+    return core_B, U_matrices
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Memory Management:** Large volumes require memory-mapped files and parallel memory-aligned matrix-matrix multiplications to handle the computational load [S1].
-*   **Coefficient Ordering:** Unlike matrix SVD, the ordering of coefficients in the core tensor $B$ is not strictly decreasing [S1][S2, unofficial]. However, progressive tensor rank truncation still works well in practice for adaptive multiscale reconstruction [S1][S2, unofficial].
-*   **Global vs. Local:** The global basis approach keeps storage costs low by maintaining only one set of basis matrices, independent of the initial data resolution $I_n$ [S1].
+*   **Non-Uniqueness:** The Tucker decomposition is not unique; core tensor rotations (simultaneous modification of $\mathcal{B}$ and $\mathbf{U}$) do not affect the model fit [S1, unofficial].
+*   **All-Orthogonality:** The core tensor produced by HOSVD is all-orthogonal, which facilitates rank-truncation [S2][S3].
+*   **Memory:** Large volumes require memory-mapped files and parallel memory-aligned matrix-matrix multiplications during the unfolding and SVD steps [S2].
 
 ## Subtopics
 
 ### [Tensor Approximation](5362-tensor-approximation.md)
-Tensor Approximation (TA) is a volume data compression method that interprets a volume dataset as a multi-dimensional tensor and factorizes it into a set of basis matrices and a core tensor. It solves the problem of storing and transmitting large volume datasets by reducing the reconstruction rank, thereby achieving data reduction. Unlike wavelet transforms, rank-reduced TA captures non-axis aligned features at different scales more effectively using the same number of coefficients. It is distinguished from its parent [Tucker Decomposition (HOSVD)](5352-tucker-decomposition-hosvd.md) by its specific integration into a multiresolution octree hierarchy with per-brick Tucker formulation and optimized GPU reconstruction.
+Interprets volume data as a multi-dimensional tensor and factorizes it into a core tensor and basis matrices. Unlike standard LOD, it removes small-scale features while highlighting structural patterns. It builds on HOSVD by applying rank-truncation to learn rank-reducible bases.
+
+### [Tensor-Specific Quantization](6775-tensor-specific-quantization.md)
+A fixed bit-length encoding strategy for Tucker coefficients. It uses uniform linear quantization for factor matrices and logarithmic quantization for the core tensor to reduce bandwidth.
+
+### Truncated Tensor Decomposition
+A rank-reduced approximation where the multilinear rank $(R_1, \dots, R_N)$ is explicitly chosen smaller than the input dimensions $(I_1, \dots, I_N)$ to achieve compression [S1, unofficial]. Unlike CP decomposition, which cannot be truncated ex post, Tucker decomposition allows progressive truncation due to the all-orthogonality of the core tensor [S1, unofficial]. This can be done by either starting with the desired lower rank or subsequently truncating the full decomposition [S1, unofficial]. The goal is to minimize the least-squares error $\|\mathcal{A} - \tilde{\mathcal{A}}\|^2$ by eliminating principal components with negligible coefficients [S1, unofficial].
 
 ## Operating characteristics
-*   **Time Complexity:** The decomposition involves SVDs on unfolded matrices and ALS iterations. The complexity is dominated by the SVDs of the mode-n unfoldings, which are $O(I_n \cdot \prod_{m \neq n} I_m \cdot R_n)$ per mode, plus the iterative convergence of HOOI [S1][S2, unofficial].
-*   **Memory Complexity:** Requires storing $N$ basis matrices of size $I_n \times R_n$ and a core tensor of size $\prod R_n$. With $R_n = I_n/2$, the storage is significantly reduced compared to the original data $I_1 \times \dots \times I_N$ [S1][S2, unofficial].
-*   **Measured Performance:** Achieves good approximation quality and data reduction levels for volume datasets [S2, unofficial].
-*   **Strengths:** Global bases capture non-axis aligned features effectively [S1]. The all-orthogonal core tensor allows for efficient rank truncation [S1][S2, unofficial]. Multiresolution generation via mipmap reduction on basis rows is efficient [S1].
-*   **Limitations:** The coefficient ordering in the core tensor is not strictly decreasing, requiring careful truncation strategies [S1][S2, unofficial]. Large volumes pose memory challenges [S1].
-*   **When to Use:** When global basis generation is desired for multiresolution volume rendering and data reduction is critical [S1][S2, unofficial].
-*   **When Not to Use:** When local adaptivity is more important than global basis efficiency, or when strict singular value ordering is required for truncation guarantees.
+*   **Time Complexity:** Dominated by the SVD computations on the unfolded matrices. For an N-dimensional tensor of size $I^N$ and rank $R$, computing the SVD for each mode takes $O(N \cdot I^N \cdot R^2)$ or similar depending on implementation [S1, unofficial][S2].
+*   **Memory Complexity:** Requires storing the input tensor, the unfolded matrices, and the resulting factor matrices and core tensor. The core tensor size is $\prod R_n$, and factor matrices are $\sum I_n R_n$. If $R_n \ll I_n$, this is significantly smaller than the original data [S1, unofficial].
+*   **Performance:** In volume rendering, using global bases with multiresolution octrees allows reducing the multilinear rank to half the block size ($R_n = B/2$), keeping storage costs low independent of initial resolution [S2].
+*   **Strengths:** Captures multi-linear structure; allows efficient rank-truncation; global bases reduce storage compared to per-block bases [S2][S3].
+*   **Limitations:** Not unique; requires careful handling of large data via memory mapping; quantization artifacts if not optimized [S1, unofficial][S2][S3].
 
 ## Background
-Tucker Decomposition, also known as the Tucker Model, was introduced as a generalization of matrix SVD to higher-order tensors. It is also known as Higher-Order PCA [S2, unofficial]. The method was applied to volume rendering by Suter et al. [SMP13] and [SIM*11], who exploited the Tucker model for global multiresolution basis generation [S1][S2, unofficial]. This approach allows for the creation of a multiresolution volume octree where each node contains a small core tensor projected from the global basis [S1].
+The Higher-Order SVD (HOSVD), also known as multilinear SVD, was introduced by De Lathauwer, De Moor, and Vandewalle in 2000 [S1, unofficial]. It is a higher-order generalization of the matrix SVD/PCA. In the context of volume rendering, it was adapted for Tensor Approximation (TA) by Suter et al. (2013) to create global multiresolution bases for direct volume rendering [S2][S3].
 
 ## Sources
-[S1] State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
-[S2] A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27 (unofficial)
+[S1] Interactive Multiresolution and Multiscale Visualization of Large Volume Data, https://doi.org/10.2312/diss.20138322, fetched 2026-10-26 (unofficial)
+[S2] PDF State-of-the-art in Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-1fe0-1a53-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27
+[S3] PDF A Survey of Compressed GPU-Based Direct Volume Rendering, https://www.ifi.uzh.ch/dam/jcr:00000000-7f10-48e5-ffff-ffff94c9f943/CompressedDVR.pdf, fetched 2026-10-27

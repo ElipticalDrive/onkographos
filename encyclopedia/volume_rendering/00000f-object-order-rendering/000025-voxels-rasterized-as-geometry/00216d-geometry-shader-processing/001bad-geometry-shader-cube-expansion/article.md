@@ -3,137 +3,156 @@
 Also called: GS Voxels, GS-based voxelizer, Geometry Shader (Voxels), Geometry Shader quads generated each frame from voxels, Point-to-Cube voxelization
 
 ## Overview
-Geometry Shader Cube Expansion is a technique that converts a stream of input primitives (triangles or points) into a voxel shell representation by expanding each input into a cube composed of 6 faces [S1, S2, S3, unofficial]. It solves the problem of rendering volumetric data or voxelized meshes on the GPU without pre-computing and storing full mesh geometry for every voxel [S2, S3, unofficial]. Unlike [Geometry Shader (Quads)](4369-geometry-shader-quads.md), which may store individual faces, this method typically stores a single point per voxel containing flags for all 6 faces, generating the geometry dynamically [S2, S3, unofficial]. It differs from [Active Cell Geometry Generation](3887-active-cell-geometry-generation.md) by deriving the voxel positions directly from input triangle centroids or a point stream, rather than iterating over a pre-computed flag volume [S1, unofficial].
+Geometry Shader Cube Expansion is a technique that converts scalar field data or point streams into geometric primitives by expanding each input voxel (represented as a single point) into a full cube shell composed of up to six faces [S1, S2, S3, unofficial]. It solves the problem of rendering volumetric data by generating visible surface geometry on the GPU, avoiding the memory overhead of storing pre-computed vertex buffers for every face [S2, S3, unofficial]. Unlike [Geometry Shader (Quads)](4369-geometry-shader-quads.md), which may break voxels down to individual face primitives, this method generates the entire cube structure from a single point primitive per voxel, optimizing memory usage by storing only center position, color, and face enable flags [S2, S3, unofficial].
 
 ## How it works
-The method operates in two primary modes depending on the input: triangle-to-point expansion or direct point expansion. Both modes rely on a geometry shader to generate cube geometry from a single input primitive.
+**Inputs and Outputs:**
+The method takes a stream of points (`GL_POINTS`) as input. Each point represents a voxel and contains its center position, color, and a bitmask indicating which of the six faces (+X, -X, +Y, -Y, +Z, -Z) should be rendered [S2, S3, unofficial]. The output is a stream of triangle strips, with a maximum of 12 vertices emitted per input point (representing up to 6 quads) [S2, S3, unofficial].
 
-### Inputs and Outputs
-*   **Input (Triangle Mode):** A stream of triangles (`GL_TRIANGLES`). Each triangle is processed to compute a centroid.
-*   **Input (Point Mode):** A stream of points (`GL_POINTS`). Each point represents a voxel center. The vertex buffer contains a structure `PointVertex` [S2, S3, unofficial].
-*   **Output:** A stream of triangle strips (`GL_TRIANGLE_STRIP`). Each input primitive generates up to 6 quads (24 vertices) if all faces are enabled, or fewer if culling/flags are used [S1, S2, S3, unofficial].
-
-### Data Structures
-For Point Mode, the input vertex structure is defined as [S2, S3, unofficial]:
+**Data Structures:**
+The input vertex structure is compact, totaling 25 bytes per voxel [S2, S3, unofficial]:
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```cpp
 struct PointVertex {
-    vec3 position;      // Voxel center coordinates
-    uint32_t packedColor; // Color information
-    uint8_t enabledFaces; // Bitmask for face visibility
+    vec3 position;      // 12 bytes: Voxel center in world or view space
+    uint32_t packedColor; // 4 bytes: Color information
+    uint8_t enabledFaces; // 1 byte: Bitmask for face visibility
 };
 ```
-The `enabledFaces` bitmask uses the following bits [S2, S3, unofficial]:
-*   Bit 0x01: +X face
-*   Bit 0x02: -X face
-*   Bit 0x04: +Y face
-*   Bit 0x08: -Y face
-*   Bit 0x10: +Z face
-*   Bit 0x20: -Z face
+The `enabledFaces` bitmask uses the following bit assignments [S2, S3, unofficial]:
+- Bit 0x01: +X face
+- Bit 0x02: -X face
+- Bit 0x04: +Y face
+- Bit 0x08: -Y face
+- Bit 0x10: +Z face
+- Bit 0x20: -Z face
 
-### Parameters
-*   `voxSize` (float): The side length of the generated cube. Default value is 0.25 [S2, S3, unofficial].
-*   `mvp` (mat4): The Model-View-Projection matrix, used to extract axis vectors [S2, S3, unofficial].
-*   `gColor` (vec3): The color to apply to the generated faces [S2, S3, unofficial].
+**Algorithm Steps:**
+1.  **Extract Voxel Data:** In the geometry shader, read the input point's position (`center`), color, and `enabledFaces` bitmask from `gl_in[0]` [S2, S3, unofficial].
+2.  **Compute Extent Vectors:** Calculate the half-extent vectors for the voxel in clip space by scaling the Model-View-Projection (MVP) matrix columns by half the voxel size (`voxSize`) [S2, S3, unofficial]:
+    $$
+    dx = \frac{MVP[0]}{2.0} \times voxSize
+    $$
+    $$
+    dy = \frac{MVP[1]}{2.0} \times voxSize
+    $$
+    $$
+    dz = \frac{MVP[2]}{2.0} \times voxSize
+    $$
+    Here, $MVP[i]$ refers to the $i$-th column of the MVP matrix [S2, S3, unofficial].
+3.  **Face Culling Check:** For each potential face, determine if it is back-facing relative to the camera. A face with normal vector $N$ is culled if $N_{view}.z > 0$ (assuming a right-handed view space where the camera looks down the negative Z axis, or specifically checking the Z component of the transformed normal) [S2, S3, unofficial]. Note: [S1, unofficial] uses a more complex normal calculation involving cross products and view space transformation, but [S2, S3, unofficial] simplify this to checking the Z-component of the extent vector itself in clip/view space [S2, S3, unofficial].
+4.  **Generate Visible Faces:** Iterate through the 6 bits of `enabledFaces`. If a bit is set and the corresponding face is not culled, generate a quad for that face [S2, S3, unofficial].
+5.  **Emit Quad:** For each visible face, emit 4 vertices forming a triangle strip. The vertices are computed by offsetting the center by the appropriate combinations of $dx, dy, dz$ [S2, S3, unofficial].
 
-### Steps
-
-#### 1. Triangle-to-Point Conversion (Vertex Shader)
-If the input is triangles, the vertex shader computes the centroid of the triangle and passes it to the geometry shader.
-1.  Receive vertices `gl_in[0]`, `gl_in[1]`, `gl_in[2]`.
-2.  Compute centroid:
-    $$ \text{center} = \frac{\text{gl\_in}[0].\text{gl\_Position}.xyz + \text{gl\_in}[1].\text{gl\_Position}.xyz + \text{gl\_in}[2].\text{gl\_Position}.xyz}{3.0} $$
-3.  Pass `center` to the geometry shader as a point primitive [S1, unofficial].
-
-#### 2. Geometry Shader Processing
-The geometry shader receives either the computed centroid (from triangles) or the point data (from points).
-
-**A. Extract Extents**
-Extract the axis vectors from the MVP matrix columns, scaled by half the voxel size [S2, S3, unofficial]:
-$$ dx = \frac{mvp[0]}{2.0} \times \text{voxSize} $$
-$$ dy = \frac{mvp[1]}{2.0} \times \text{voxSize} $$
-$$ dz = \frac{mvp[2]}{2.0} \times \text{voxSize} $$
-Note: `mvp[0]`, `mvp[1]`, `mvp[2]` are the first three columns of the matrix. `dx`, `dy`, `dz` are `vec4` vectors [S2, S3, unofficial].
-
-**B. Face Generation Logic**
-For each of the 6 faces, check if the corresponding bit is set in `enabledFaces` and if the face is not culled. If valid, call `AddQuad` with the appropriate offset and axis vectors.
-
-The culling function `IsCulled` checks if the normal's Z component in view space is positive (back-facing) [S2, S3, unofficial]:
+**Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def IsCulled(normal):
-    return normal.z > 0
-```
+# Geometry Shader Logic (GLSL-like pseudocode)
 
-The face checks are [S2, S3, unofficial]:
-1.  If `(enabledFaces & 0x01)` and `!IsCulled(dx)`: Call `AddQuad(center + dx, dy, dz)`
-2.  If `(enabledFaces & 0x02)` and `!IsCulled(-dx)`: Call `AddQuad(center - dx, dz, dy)`
-3.  If `(enabledFaces & 0x04)` and `!IsCulled(dy)`: Call `AddQuad(center + dy, dz, dx)`
-4.  If `(enabledFaces & 0x08)` and `!IsCulled(-dy)`: Call `AddQuad(center - dy, dx, dz)`
-5.  If `(enabledFaces & 0x10)` and `!IsCulled(dz)`: Call `AddQuad(center + dz, dx, dy)`
-6.  If `(enabledFaces & 0x20)` and `!IsCulled(-dz)`: Call `AddQuad(center - dz, dy, dx)`
+# Input layout
+# layout(points) in;
+# layout(triangle_strip, max_vertices = 12) out;
+# uniform float voxSize = 0.25;
+# uniform mat4 mvp;
+# flat in vec3 gColor[];
+# flat in int gEnabledFaces[];
+# flat out vec3 fColor;
 
-*Note: The order of arguments to `AddQuad` varies in the source to ensure correct winding order for the specific face orientation [S2, S3, unofficial].*
-
-**C. Emitting Quads**
-The `AddQuad` function emits 4 vertices for a triangle strip [S2, S3, unofficial]:
-> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
-
-```python
-def AddQuad(center, dy, dx):
-    # Vertex 0
-    gl_Position = center + (dx - dy)
+function AddQuad(center, dy, dx):
+    """
+    Emits a triangle strip for a single face.
+    center: vec4, center of the voxel
+    dy: vec4, half-extent vector along Y
+    dx: vec4, half-extent vector along X
+    """
     fColor = gColor[0]
+    
+    # Vertex 0: center + dx - dy
+    gl_Position = center + dx - dy
     EmitVertex()
     
-    # Vertex 1
-    gl_Position = center + (-dx - dy)
-    fColor = gColor[0]
+    # Vertex 1: center - dx - dy
+    gl_Position = center - dx - dy
     EmitVertex()
     
-    # Vertex 2
-    gl_Position = center + (dx + dy)
-    fColor = gColor[0]
+    # Vertex 2: center + dx + dy
+    gl_Position = center + dx + dy
     EmitVertex()
     
-    # Vertex 3
-    gl_Position = center + (-dx + dy)
-    fColor = gColor[0]
+    # Vertex 3: center - dx + dy
+    gl_Position = center - dx + dy
     EmitVertex()
     
     EndPrimitive()
+
+function IsCulled(normal):
+    """
+    Simple back-face culling based on the Z-component of the normal/extent vector.
+    """
+    return normal.z > 0
+
+void main():
+    vec4 center = gl_in[0].gl_Position
+    int faces = gEnabledFaces[0]
+    
+    # Calculate extent vectors from MVP matrix
+    vec4 dx = mvp[0] / 2.0 * voxSize
+    vec4 dy = mvp[1] / 2.0 * voxSize
+    vec4 dz = mvp[2] / 2.0 * voxSize
+    
+    # Check +X face (Bit 0x01)
+    if (faces & 0x01) and not IsCulled(dx):
+        AddQuad(center + dx, dy, dz)
+        
+    # Check -X face (Bit 0x02)
+    if (faces & 0x02) and not IsCulled(-dx):
+        AddQuad(center - dx, dz, dy)
+        
+    # Check +Y face (Bit 0x04)
+    if (faces & 0x04) and not IsCulled(dy):
+        AddQuad(center + dy, dz, dx)
+        
+    # Check -Y face (Bit 0x08)
+    if (faces & 0x08) and not IsCulled(-dy):
+        AddQuad(center - dy, dx, dz)
+        
+    # Check +Z face (Bit 0x10)
+    if (faces & 0x10) and not IsCulled(dz):
+        AddQuad(center + dz, dx, dy)
+        
+    # Check -Z face (Bit 0x20)
+    if (faces & 0x20) and not IsCulled(-dz):
+        AddQuad(center - dz, dy, dx)
 ```
 
-#### 3. Triangle Mode Normal Calculation (Alternative)
-In the triangle-based approach [S1, unofficial], normals are calculated per face within `EmitQuad` rather than using matrix-derived vectors for culling.
-1.  Define 4 corners `P0, P1, P2, P3` offset from `P` (centroid) by `±voxel_size/2.0`.
-2.  Compute vectors `V0 = P0 - P1` and `V1 = P2 - P1`.
-3.  Compute normal `N = normalize(cross(V1.xyz, V0.xyz))`.
-4.  Transform normal to view space: `v_normal = ModelViewMatrix * vec4(N, 0.0)`.
-5.  Emit vertices with `gl_Position = ModelViewProjectionMatrix * P_i` and attributes `vertex_normal`, `vertex_eyevec`, `vertex_lightdir` [S1, unofficial].
+**Parameters:**
+- `voxSize`: The side length of the voxel cube. Default value is 0.25 [S2, S3, unofficial].
+- `mvp`: The Model-View-Projection matrix [S2, S3, unofficial].
 
-### Edge Cases and Pitfalls
-*   **Interior Filling:** This method performs only shell voxelization. It does not fill the interior of the mesh, making it unsuitable for deep voxelization or solid volume rendering without additional techniques [S1, unofficial].
-*   **Aliasing:** Because it approximates the mesh surface with cubes centered on triangle centroids, it can produce aliasing and holes compared to precise ray-casting or rasterization-based voxelizers [S1, unofficial].
-*   **Vertex Output Limit:** The point-based method outputs up to 12 vertices per primitive (if `max_vertices` is set to 12 and all faces are drawn). This may be less efficient on some GPU architectures compared to limiting output to 4 vertices per primitive (as in the [Geometry Shader (Quads)](4369-geometry-shader-quads.md) variant) [S3, unofficial].
-*   **Culling:** The simple `IsCulled` check (`normal.z > 0`) assumes a standard view direction. It may fail for non-standard view matrices or if the MVP matrix is not properly constructed [S2, S3, unofficial].
+**Edge Cases and Pitfalls:**
+- **Precision:** The method relies on the accuracy of the MVP matrix columns. Small voxel sizes may lead to precision issues if the matrix values are very large or very small [S2, S3, unofficial].
+- **Culling Logic:** The simple `IsCulled` check (`normal.z > 0`) assumes a specific view space orientation. If the camera orientation changes significantly or the coordinate system differs, this culling may fail or cull visible faces [S2, S3, unofficial]. [S1, unofficial] provides a more robust normal calculation using cross products and view space transformation, which is safer for arbitrary camera orientations [S1, unofficial].
+- **Interior Voxelization:** This method only generates the shell of the voxel (surface representation). It does not fill the interior, making it unsuitable for deep voxelization or ray-marching inside the volume without additional techniques [S1, unofficial].
+- **Performance:** Emitting up to 12 vertices per primitive can be inefficient on some GPU architectures compared to limiting output to 4 vertices per primitive (as seen in [Geometry Shader (Quads)](4369-geometry-shader-quads.md)) [S3, unofficial].
 
 ## Subtopics
 
 ### [Active Cell Geometry Generation](3887-active-cell-geometry-generation.md)
-Generates cube geometry for active voxels in a volume dataset using a flag volume. It handles pre-computed active cells rather than generating geometry from raw triangle input or point streams.
+Generates cube geometry for active voxels in a volume dataset using a flag volume. It builds on this method by handling activity flags rather than raw triangle input.
 
 ## Operating characteristics
-*   **Memory Usage:** The point-based input format requires only 25 bytes per voxel (3 bytes position + 4 bytes color + 1 byte flags, padded to 8 bytes alignment or similar, totaling 25 bytes as cited) [S2, S3, unofficial]. This is significantly lower than previous techniques which required 96–576 bytes per voxel [S2, S3, unofficial].
-*   **Performance:** Geometry shaders provide low memory usage and render times close to display lists, though display lists may still be faster in some benchmarks [S2, S3, unofficial].
-*   **Scalability:** Performance scales with the number of voxels. The dynamic generation allows for efficient updates if the voxel data changes frequently, as geometry is regenerated each frame [S2, S3, unofficial].
-*   **Strengths:** Low memory footprint, simple implementation, dynamic generation of visible faces based on flags [S2, S3, unofficial].
-*   **Limitations:** Only supports shell voxelization; potential for aliasing; higher vertex output per primitive compared to face-based geometry shaders [S1, S3, unofficial].
+- **Time Complexity:** $O(N)$, where $N$ is the number of voxels. Each voxel is processed independently in the geometry shader.
+- **Memory Complexity:** 25 bytes per voxel [S2, S3, unofficial]. This is significantly lower than previous techniques which required 96-576 bytes per voxel depending on the number of faces [S2, S3, unofficial].
+- **Performance:** On a GTX 980 Ti with 16GB RAM and 1920x1080 resolution, geometry shaders provide low memory usage and render times close to display lists, though display lists may still be faster in raw frame time [S2, S3, unofficial].
+- **Strengths:** Low memory footprint, dynamic generation of visible faces, simple implementation [S2, S3, unofficial].
+- **Limitations:** Only suitable for shell voxelization (surface), potential aliasing and holes compared to precise ray-casting voxelizers [S1, unofficial], culling logic may need adjustment for different view spaces [S1, S3, unofficial].
+- **When to use:** When memory is constrained and only the surface of a voxelized mesh needs to be rendered, such as in voxel art or real-time visualization of sparse volumes [S1, S2, unofficial].
+- **When not to use:** When deep voxelization (interior rendering) is required, or when higher geometric accuracy is needed than what cube approximation provides [S1, unofficial].
 
 ## Background
-The technique was developed as part of a series of voxel rendering optimizations. It was introduced in discussions around 2016-2017 by developers exploring efficient GPU-based voxel rendering [S1, S2, S3, unofficial]. It was compared against display lists, vertex array objects, and other geometry shader variants in benchmarks run on a GTX 980 Ti with an Intel i7-4790k [S2, S3, unofficial]. The method was implemented in GeeXLab demos and published on blogs and Medium articles [S1, S2, S3, unofficial].
+The technique was developed as a method to reduce memory usage in voxel rendering by generating geometry on the fly. It was discussed in the context of comparing various voxel rendering techniques, highlighting the trade-offs between memory usage and render time [S2, S3, unofficial]. It is often compared against header-only C libraries for voxelization, which may produce higher quality results but require more CPU-side processing [S1, unofficial].
 
 ## Sources
 [S1] Mesh Voxelization - Geeks3D, https://www.geeks3d.com/20160531/mesh-voxelization/, fetched 2026-10-26 (unofficial)

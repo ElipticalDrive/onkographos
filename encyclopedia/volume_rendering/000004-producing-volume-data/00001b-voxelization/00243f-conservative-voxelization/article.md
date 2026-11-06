@@ -2,305 +2,262 @@
 
 
 ## Overview
-Conservative voxelization is a hardware-accelerated algorithm for converting polygonal models into a volumetric representation that guarantees **conservative correctness**: every voxel intersecting the input model is correctly recognized, solving the problem where previous approaches miss intersecting voxels [S1, unofficial]. It sets itself apart from standard rasterization-based voxelization by computing the exact depth range of a triangle within a fragment's column, rather than sampling a single depth value at the fragment center [S1, unofficial]. This ensures no intersecting voxels are omitted, which is critical for applications like collision detection and occlusion culling [S1, unofficial].
+Conservative voxelization is a hardware-accelerated algorithm for polygonal models that guarantees conservative correctness: every voxel intersecting the input model is correctly recognized, solving the problem where previous approaches miss intersecting voxels [S1, unofficial]. It differs from standard rasterization-based voxelization [Rasterization-based Voxelization] by computing the exact depth range of the intersection between the triangle and the voxel column, rather than using a single depth value (e.g., the fragment center) which leads to missed voxels [S1, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A triangular mesh (arbitrary polygonal models must be tessellated first), a projection direction (typically orthogonal), and a volumetric resolution along the projection direction, denoted as $res_z$ [S1, unofficial].
-*   **Output:** A set of voxels $(x, y, z^*)$ representing the intersection of the triangle with the voxel grid [S1, unofficial].
+- **Input:** A triangular model (tessellated from arbitrary polygons), a projection direction (typically orthogonal), and a volumetric resolution along the projection direction, $res_z$ [S1, unofficial].
+- **Output:** A set of voxels $(x, y, z^*)$ corresponding to all voxels intersected by the triangles [S1, unofficial].
 
 **Data Structures:**
-*   **Fragment Rectangle ($R$):** The 2D area on the viewing plane corresponding to a single voxel column $(x, y)$.
-*   **Projected Triangle ($T_p$):** The 2D projection of the 3D triangle $T$ onto the viewing plane.
-*   **Intersection Polygon ($I$):** The convex polygon resulting from the intersection of $R$ and $T_p$. It has up to seven vertices [S1, unofficial].
+- **Triangle Vertices:** Three vertices $P_1, P_2, P_3$ with 3D coordinates $(x_i, y_i, z_i)$ [S1, unofficial].
+- **Projected Triangle ($T_p$):** The 2D projection of $T$ onto the viewing plane with vertices $(x_i, y_i)$ [S1, unofficial].
+- **Fragment Rectangle ($R$):** The unit square (or pixel-sized rectangle) in the viewing plane corresponding to a fragment $(x, y)$ [S1, unofficial].
+- **Intersection Polygon ($I$):** The convex polygon resulting from the intersection of $T_p$ and $R$, with up to seven vertices [S1, unofficial].
 
 **Numbered Steps:**
 
-1.  **Tessellation:** If the input model is not triangular, tessellate it into triangular models [S1, unofficial].
-2.  **Rasterization:** Rasterize the projected triangle $T_p$ to generate fragments. Each fragment $(x, y)$ corresponds to a column of voxels $V(x, y)$ [S1, unofficial].
-3.  **Classification:** Determine if the fragment rectangle $R$ is an **interior fragment** (fully covered by $T_p$) or a **boundary fragment** (partially covered by $T_p$) [S1, unofficial].
-4.  **Depth Range Calculation:** Compute the minimal depth $z_{min}$ and maximal depth $z_{max}$ of the triangle within the fragment rectangle $R$.
-    *   **For Interior Fragments:**
-        Calculate the depth range using the center depth and partial derivatives [S1, unofficial]:
-        $$z_{min} = z_c - \Delta z$$
-        $$z_{max} = z_c + \Delta z$$
-        $$\Delta z = \frac{1}{2} \left( \left| \frac{\partial z}{\partial x} \right| + \left| \frac{\partial z}{\partial y} \right| \right)$$
-        Where $z_c$ is the depth value at the fragment center, and $\frac{\partial z}{\partial x}, \frac{\partial z}{\partial y}$ are the partial derivatives of the depth value [S1, unofficial].
-    *   **For Boundary Fragments:**
-        Compute the intersection polygon $I$ between $R$ and $T_p$. The vertices of $I$ consist of:
-        1.  Intersection points between the triangle edges and the fragment rectangle edges.
-        2.  Vertices of the triangle $T$ that lie inside $R$.
-        3.  Vertices of the fragment rectangle $R$ that lie inside $T_p$ [S1, unofficial].
-        
-        Identify $v_{min}$, the vertex of $R$ that satisfies $z(v_{min}) = \min_{p \in R} z(p)$ [S1, unofficial].
-        
-        Compute $z_{min}$:
-        *   If $v_{min} \in T_p$ (i.e., the minimum depth vertex of the rectangle is inside the triangle), then $z_{min} = z(v_{min})$ [S1, unofficial].
-        *   Otherwise, initialize $z_{min} = \text{HUGE\_VALUE}$. Iterate through all intersection points $Q_i$ and all triangle vertices $P_i$ inside $R$. Update $z_{min} = \min(z_{min}, z(Q_i))$ and $z_{min} = \min(z_{min}, z(P_i))$ [S1, unofficial].
-        
-        Compute $z_{max}$ in the same manner, identifying the vertex with maximum depth [S1, unofficial].
-5.  **Voxel Generation:** Convert the continuous depth range $[z_{min}, z_{max}]$ to voxel indices:
-    $$z^*_{min} = z_{min} \cdot res_z$$
-    $$z^*_{max} = z_{max} \cdot res_z$$
-    Generate voxels $(x, y, z^*)$ for all integer $z^*$ such that $z^*_{min} \le z^* \le z^*_{max}$ [S1, unofficial].
+1.  **Tessellation:** Tessellate arbitrary polygonal models into triangular models [S1, unofficial].
+2.  **Rasterization:** Rasterize the projected triangle $T_p$ to generate fragments. Each fragment $(x, y)$ corresponds to a column of voxels $V(x, y) = \{x, y, z | z = 0, ..., z_{res} - 1\}$ [S1, unofficial].
+3.  **Classification:** For each fragment, determine if it is an **interior fragment** (fully covered by $T_p$) or a **boundary fragment** (partially covered by $T_p$) [S1, unofficial].
+4.  **Depth Range Calculation:** Compute the minimal depth $z_{min}$ and maximal depth $z_{max}$ of the intersection between the triangle $T$ and the prism formed by $V(x, y)$ [S1, unofficial].
+    -   **Interior Fragments:** Use the center depth and partial derivatives [S1, unofficial].
+    -   **Boundary Fragments:** Compute the intersection polygon $I$ and evaluate depths at its vertices [S1, unofficial].
+5.  **Voxel Generation:** Convert the depth range $[z_{min}, z_{max}]$ to voxel indices: $z^*_{min} = z_{min} \cdot res_z$ and $z^*_{max} = z_{max} \cdot res_z$. Generate all voxels $(x, y, z)$ for $z \in [z^*_{min}, z^*_{max}]$ [S1, unofficial].
 
-**Formulas and Definitions:**
+**Formulas:**
 
-*   **Signed Area of $T_p$ ($S$):**
-    $$S = x_1 y_2 - x_2 y_1 + x_2 y_3 - x_3 y_2 + x_3 y_1 - x_1 y_3$$
-    Where $(x_i, y_i)$ are the 2D coordinates of the vertices of $T_p$ [S1, unofficial].
+**1. Interior Fragment Depth Range:**
+For an interior fragment, the depth range is calculated as:
+$$ z_{min} = z_c - \Delta z $$
+$$ z_{max} = z_c + \Delta z $$
+where $z_c$ is the depth value at the fragment center, and:
+$$ \Delta z = \frac{1}{2} \left( \left| \frac{\partial z}{\partial x} \right| + \left| \frac{\partial z}{\partial y} \right| \right) $$
+[S1, unofficial]
 
-*   **Partial Derivative of Barycentric Coordinate ($\mathbf{C}$) with respect to $x$:**
-    $$\frac{\partial \mathbf{C}}{\partial x} = \frac{(y_2 - y_3, y_3 - y_1, y_1 - y_2)}{S}$$
-    Where $\mathbf{C}$ is the barycentric coordinate vector of the fragment center [S1, unofficial].
+**2. Partial Derivatives:**
+The partial derivatives of depth and barycentric coordinates are computed using the triangle vertices $(x_i, y_i, z_i)$ for $i=1,2,3$:
 
-*   **Partial Derivative of Barycentric Coordinate ($\mathbf{C}$) with respect to $y$:**
-    $$\frac{\partial \mathbf{C}}{\partial y} = \frac{(x_3 - x_2, x_1 - x_3, x_2 - x_1)}{S}$$
-    [S1, unofficial]
+Signed area of $T_p$:
+$$ S = x_1 y_2 - x_2 y_1 + x_2 y_3 - x_3 y_2 + x_3 y_1 - x_1 y_3 $$
+[S1, unofficial]
 
-*   **Partial Derivative of Depth ($z$) with respect to $x$:**
-    $$\frac{\partial z}{\partial x} = (z_1, z_2, z_3) \cdot \frac{\partial \mathbf{C}}{\partial x}$$
-    Where $z_i$ are the depth values of the triangle vertices [S1, unofficial].
+Partial derivative of barycentric coordinate vector $\mathbf{C}$ with respect to $x$:
+$$ \frac{\partial \mathbf{C}}{\partial x} = \frac{(y_2 - y_3, y_3 - y_1, y_1 - y_2)}{S} $$
+[S1, unofficial]
 
-*   **Partial Derivative of Depth ($z$) with respect to $y$:**
-    $$\frac{\partial z}{\partial y} = (z_1, z_2, z_3) \cdot \frac{\partial \mathbf{C}}{\partial y}$$
-    [S1, unofficial]
+Partial derivative of barycentric coordinate vector $\mathbf{C}$ with respect to $y$:
+$$ \frac{\partial \mathbf{C}}{\partial y} = \frac{(x_3 - x_2, x_1 - x_3, x_2 - x_1)}{S} $$
+[S1, unofficial]
 
-*   **Barycentric Coordinate Difference ($\Delta \mathbf{C}$):**
-    $$\Delta \mathbf{C} = \frac{1}{2} \cdot \text{sign}\left(\frac{\partial z}{\partial x}\right) \cdot \frac{\partial \mathbf{C}}{\partial x} + \frac{1}{2} \cdot \text{sign}\left(\frac{\partial z}{\partial y}\right) \cdot \frac{\partial \mathbf{C}}{\partial y}$$
-    [S1, unofficial]
+Partial derivative of depth $z$ with respect to $x$:
+$$ \frac{\partial z}{\partial x} = (z_1, z_2, z_3) \cdot \frac{\partial \mathbf{C}}{\partial x} $$
+[S1, unofficial]
 
-**Parameters:**
-*   $res_z$: The volumetric resolution along the projection direction [S1, unofficial].
+Partial derivative of depth $z$ with respect to $y$:
+$$ \frac{\partial z}{\partial y} = (z_1, z_2, z_3) \cdot \frac{\partial \mathbf{C}}{\partial y} $$
+[S1, unofficial]
 
-**Edge Cases and Pitfalls:**
-*   **Over-conservative Results:** Using the simple interior fragment depth range formula for boundary fragments leads to over-conservative results, especially when the voxelizing triangle is nearly parallel to the projection direction [S1, unofficial].
-*   **Degenerate Triangles:** The signed area $S$ must be non-zero. If $S=0$, the triangle is degenerate in projection and should be skipped or handled separately [G].
-*   **Precision:** Computing intersection points $Q_i$ requires robust geometric predicates to avoid gaps or overlaps in the voxel grid [G].
+**3. Boundary Fragment Depth Range:**
+The intersection polygon $I$ vertices consist of:
+- Intersection points between $T_p$ and the edges of $R$.
+- Vertices of $T_p$ inside $R$.
+- Vertices of $R$ inside $T_p$.
+
+Let $v_{min}$ be the vertex of $R$ such that $z(v_{min}) = \min_{p \in R} z(p)$.
+If $v_{min} \in T_p$, then $z_{min} = z(v_{min})$.
+Otherwise, initialize $z_{min} = \text{HUGE\_VALUE}$ and update:
+$$ z_{min} = \min \left( z_{min}, z(Q_i) \right) \quad \text{for each intersection point } Q_i $$
+$$ z_{min} = \min \left( z_{min}, z(P_i) \right) \quad \text{for each vertex } P_i \text{ of } T \text{ inside } R $$
+$z_{max}$ is computed similarly [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def conservative_voxelization(triangle, res_z):
-    """
-    triangle: List of 3 vertices, each with (x, y, z) in 3D space.
-    res_z: Volumetric resolution along the projection direction (e.g., depth axis).
-    Returns: List of voxel indices (x, y, z_idx).
-    """
-    # 1. Project triangle to 2D (assuming orthogonal projection along Z)
-    # For this implementation, we assume the projection plane is XY and depth is Z.
-    # Vertices are (x, y, z). Projected vertices are (x, y).
-    v0, v1, v2 = triangle
-    p0 = (v0.x, v0.y)
-    p1 = (v1.x, v1.y)
-    p2 = (v2.x, v2.y)
-    
-    # 2. Compute Signed Area S
-    S = (p0[0]*p1[1] - p1[0]*p0[1] + 
-         p1[0]*p2[1] - p2[0]*p1[1] + 
-         p2[0]*p0[1] - p0[0]*p2[1])
-    
-    if S == 0:
-        return [] # Degenerate triangle
+import math
 
-    # 3. Compute Partial Derivatives of Barycentric Coordinates
-    # dC/dx = (y2-y3, y3-y1, y1-y2) / S
-    dC_dx = ((p1[1] - p2[1]), (p2[1] - p0[1]), (p0[1] - p1[1])) / S
-    # dC/dy = (x3-x2, x1-x3, x2-x1) / S
-    dC_dy = ((p2[0] - p1[0]), (p0[0] - p2[0]), (p1[0] - p0[0])) / S
-    
-    # 4. Compute Partial Derivatives of Depth
-    # z_vals = (z0, z1, z2)
-    z_vals = (v0.z, v1.z, v2.z)
-    
-    dz_dx = dot(z_vals, dC_dx)
-    dz_dy = dot(z_vals, dC_dy)
-    
-    # 5. Determine Bounding Box of Projected Triangle in Fragment Space
-    # Assume fragments are unit squares. We need to rasterize.
-    # For simplicity, we iterate over fragments covered by the triangle's bounding box.
-    # In a real GPU implementation, this is done via rasterization hardware.
-    # Here we simulate the logic for a single fragment rectangle R defined by [fx, fx+1] x [fy, fy+1].
-    
+def conservative_voxelization(triangles, res_z):
+    """
+    triangles: List of triangles, each triangle is a list of 3 vertices.
+               Each vertex is a tuple (x, y, z).
+    res_z: Volumetric resolution along the projection direction.
+    Returns: List of voxels (x, y, z_idx).
+    """
     voxels = []
     
-    # Get bounding box of triangle in integer fragment coordinates
-    min_x = floor(min(p0[0], p1[0], p2[0]))
-    max_x = ceil(max(p0[0], p1[0], p2[0]))
-    min_y = floor(min(p0[1], p1[1], p2[1]))
-    max_y = ceil(max(p0[1], p1[1], p2[1]))
-    
-    for fx in range(min_x, max_x):
-        for fy in range(min_y, max_y):
-            # Define Fragment Rectangle R: [fx, fx+1] x [fy, fy+1]
-            R = {
-                'min': (fx, fy),
-                'max': (fx + 1, fy + 1)
-            }
+    for tri in triangles:
+        # Tri vertices
+        p1, p2, p3 = tri
+        x1, y1, z1 = p1
+        x2, y2, z2 = p2
+        x3, y3, z3 = p3
+        
+        # Signed area of projected triangle
+        S = x1*y2 - x2*y1 + x2*y3 - x3*y2 + x3*y1 - x1*y3
+        
+        # Avoid division by zero for degenerate triangles
+        if S == 0:
+            continue
             
-            # Check if triangle intersects this fragment
-            if not triangle_intersects_rect(p0, p1, p2, R):
-                continue
-                
-            # Compute Center Depth and check if interior
-            center_x = fx + 0.5
-            center_y = fy + 0.5
-            
-            # Compute barycentric coords at center to check if inside
-            # C = (C0, C1, C2)
-            # C0 = ((y1-y2)*(x-x2) + (x2-x1)*(y-y2)) / (-S) ... wait, S definition varies.
-            # Using the derivative approach for interior check is complex.
-            # Let's use standard barycentric test.
-            C = compute_barycentric(center_x, center_y, p0, p1, p2, S)
-            
-            is_interior = (C[0] >= 0 and C[1] >= 0 and C[2] >= 0)
+        # Partial derivatives of barycentric coordinates
+        dC_dx = ((y2 - y3)/S, (y3 - y1)/S, (y1 - y2)/S)
+        dC_dy = ((x3 - x2)/S, (x1 - x3)/S, (x2 - x1)/S)
+        
+        # Partial derivatives of depth
+        dz_dx = z1*dC_dx[0] + z2*dC_dx[1] + z3*dC_dx[2]
+        dz_dy = z1*dC_dy[0] + z2*dC_dy[1] + z3*dC_dy[2]
+        
+        # Delta z for interior fragments
+        delta_z = 0.5 * (abs(dz_dx) + abs(dz_dy))
+        
+        # Rasterize the triangle to get fragments
+        # This step depends on the specific rasterizer implementation.
+        # We assume a function `rasterize_triangle` that returns a list of fragments.
+        # Each fragment has: (x, y, z_c, is_interior, intersection_polygon_vertices)
+        fragments = rasterize_triangle((x1, y1), (x2, y2), (x3, y3), (z1, z2, z3))
+        
+        for frag in fragments:
+            x, y, z_c, is_interior, poly_verts = frag
             
             if is_interior:
-                # Interior Fragment
-                z_c = dot(z_vals, C)
-                delta_z = 0.5 * (abs(dz_dx) + abs(dz_dy))
                 z_min = z_c - delta_z
                 z_max = z_c + delta_z
             else:
-                # Boundary Fragment
-                # Compute Intersection Polygon I
-                I = compute_intersection_polygon(p0, p1, p2, R)
-                
-                if not I:
-                    continue
-                    
-                # Find vmin: vertex of R with min depth
-                R_vertices = [
-                    (fx, fy),
-                    (fx + 1, fy),
-                    (fx + 1, fy + 1),
-                    (fx, fy + 1)
+                # Boundary fragment
+                # Find v_min: vertex of fragment rectangle R with min depth
+                # R vertices are typically (x, y), (x+1, y), (x, y+1), (x+1, y+1)
+                # Assuming unit fragment size for simplicity in depth calculation
+                # Depth is linear, so min depth is at one of the corners
+                r_verts = [
+                    (x, y), (x+1, y), (x, y+1), (x+1, y+1)
                 ]
+                # Calculate depth at each corner using barycentric interpolation
+                # Barycentric coords for a point (px, py)
+                # lambda1 = ((py-y3)*(x2-px) - (px-x3)*(y2-py)) / S ... etc
+                # Simplified: use the plane equation or barycentric formula
+                # For brevity, assume a helper `get_depth_at_point(px, py)`
+                # which returns the interpolated z value.
                 
-                # Compute depth for each R vertex
-                R_depths = []
-                for rv in R_vertices:
-                    C_rv = compute_barycentric(rv[0], rv[1], p0, p1, p2, S)
-                    # Only consider if inside triangle for vmin candidate? 
-                    # No, vmin is min depth vertex OF R, regardless of position.
-                    # But we need to know if vmin is inside Tp.
-                    z_rv = dot(z_vals, C_rv)
-                    R_depths.append((rv, z_rv, C_rv))
+                v_min_depth = float('inf')
+                for rv in r_verts:
+                    d = get_depth_at_point(rv[0], rv[1], (x1,y1,z1), (x2,y2,z2), (x3,y3,z3), S)
+                    if d < v_min_depth:
+                        v_min_depth = d
                 
-                # Find vertex with min depth
-                vmin_entry = min(R_depths, key=lambda k: k[1])
-                vmin = vmin_entry[0]
-                z_vmin = vmin_entry[1]
-                C_vmin = vmin_entry[2]
-                
-                # Check if vmin is inside Tp
-                if C_vmin[0] >= 0 and C_vmin[1] >= 0 and C_vmin[2] >= 0:
-                    z_min = z_vmin
+                # Check if v_min is inside T_p
+                # Point-in-triangle test
+                if is_point_in_triangle((x, y), (x1,y1), (x2,y2), (x3,y3), S):
+                    z_min = v_min_depth
                 else:
                     z_min = float('inf')
-                    
-                    # Check intersection points Qi
-                    for qi in I:
-                        C_qi = compute_barycentric(qi[0], qi[1], p0, p1, p2, S)
-                        z_qi = dot(z_vals, C_qi)
-                        if z_qi < z_min:
-                            z_min = z_qi
-                            
-                    # Check triangle vertices Pi inside R
-                    for pi_idx, pi in enumerate([p0, p1, p2]):
-                        if point_in_rect(pi, R):
-                            z_pi = [v0.z, v1.z, v2.z][pi_idx]
-                            if z_pi < z_min:
-                                z_min = z_pi
-                                
-                # Compute z_max similarly
-                vmax_entry = max(R_depths, key=lambda k: k[1])
-                vmax = vmax_entry[0]
-                z_vmax = vmax_entry[1]
-                C_vmax = vmax_entry[2]
-                
-                if C_vmax[0] >= 0 and C_vmax[1] >= 0 and C_vmax[2] >= 0:
-                    z_max = z_vmax
-                else:
                     z_max = float('-inf')
                     
-                    for qi in I:
-                        C_qi = compute_barycentric(qi[0], qi[1], p0, p1, p2, S)
-                        z_qi = dot(z_vals, C_qi)
-                        if z_qi > z_max:
-                            z_max = z_qi
+                    # Check intersection points
+                    for q in poly_verts:
+                        # q is an intersection point between triangle edge and fragment edge
+                        # Depth can be interpolated along the edge
+                        d = get_depth_at_point(q[0], q[1], (x1,y1,z1), (x2,y2,z2), (x3,y3,z3), S)
+                        z_min = min(z_min, d)
+                        z_max = max(z_max, d)
+                        
+                    # Check triangle vertices inside fragment
+                    for p in [(x1,y1,z1), (x2,y2,z2), (x3,y3,z3)]:
+                        if is_point_in_rect(p[0], p[1], x, y):
+                            z_min = min(z_min, p[2])
+                            z_max = max(z_max, p[2])
                             
-                    for pi_idx, pi in enumerate([p0, p1, p2]):
-                        if point_in_rect(pi, R):
-                            z_pi = [v0.z, v1.z, v2.z][pi_idx]
-                            if z_pi > z_max:
-                                z_max = z_pi
+                # Handle case where no vertices/intersections found (should not happen for valid intersection)
+                if z_min == float('inf'):
+                    z_min = z_c - delta_z
+                    z_max = z_c + delta_z
 
-            # Generate Voxels
-            z_idx_min = floor(z_min * res_z)
-            z_idx_max = ceil(z_max * res_z)
+            # Convert depth range to voxel indices
+            z_idx_min = int(math.floor(z_min * res_z))
+            z_idx_max = int(math.ceil(z_max * res_z))
             
+            # Generate voxels
             for z_idx in range(z_idx_min, z_idx_max + 1):
-                voxels.append((fx, fy, z_idx))
+                voxels.append((x, y, z_idx))
                 
     return voxels
 
-def dot(v1, v2):
-    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
-
-def compute_barycentric(x, y, p0, p1, p2, S):
-    # Barycentric coordinates for point (x,y) relative to triangle p0,p1,p2
-    # Using area method
-    # C0 = Area(p, p1, p2) / Area(p0, p1, p2)
-    # C1 = Area(p0, p, p2) / Area(p0, p1, p2)
-    # C2 = Area(p0, p1, p) / Area(p0, p1, p2)
+def get_depth_at_point(px, py, p1, p2, p3, S):
+    """Interpolate depth at (px, py) using barycentric coordinates."""
+    x1, y1, z1 = p1
+    x2, y2, z2 = p2
+    x3, y3, z3 = p3
     
-    def area(p1, p2, p3):
-        return (p1[0]*(p2[1]-p3[1]) + p2[0]*(p3[1]-p1[1]) + p3[0]*(p1[1]-p2[1])) / 2.0
-        
-    A = area(p0, p1, p2)
-    if A == 0: return (0,0,0)
+    # Barycentric coordinates
+    lambda1 = ((y2 - y3)*(px - x3) + (x3 - x2)*(py - y3)) / S
+    lambda2 = ((y3 - y1)*(px - x3) + (x1 - x3)*(py - y3)) / S
+    lambda3 = 1.0 - lambda1 - lambda2
     
-    C0 = area((x,y), p1, p2) / A
-    C1 = area(p0, (x,y), p2) / A
-    C2 = area(p0, p1, (x,y)) / A
+    return lambda1*z1 + lambda2*z2 + lambda3*z3
+
+def is_point_in_triangle(px, py, p1, p2, p3, S):
+    """Check if point (px, py) is inside triangle p1, p2, p3."""
+    x1, y1 = p1
+    x2, y2 = p2
+    x3, y3 = p3
     
-    return (C0, C1, C2)
-
-def triangle_intersects_rect(p0, p1, p2, R):
-    # Simplified check: bounding box overlap
-    min_x = min(p0[0], p1[0], p2[0])
-    max_x = max(p0[0], p1[0], p2[0])
-    min_y = min(p0[1], p1[1], p2[1])
-    max_y = max(p0[1], p1[1], p2[1])
+    # Barycentric coordinates
+    lambda1 = ((y2 - y3)*(px - x3) + (x3 - x2)*(py - y3)) / S
+    lambda2 = ((y3 - y1)*(px - x3) + (x1 - x3)*(py - y3)) / S
+    lambda3 = 1.0 - lambda1 - lambda2
     
-    return not (max_x < R['min'][0] or min_x > R['max'][0] or 
-                max_y < R['min'][1] or min_y > R['max'][1])
+    return lambda1 >= 0 and lambda2 >= 0 and lambda3 >= 0
 
-def compute_intersection_polygon(p0, p1, p2, R):
-    # Clip triangle against rectangle R
-    # Return list of points
-    # This is a standard Sutherland-Hodgman or similar clip
-    # For brevity, assume a helper exists
-    pass
-
-def point_in_rect(p, R):
-    return R['min'][0] <= p[0] <= R['max'][0] and R['min'][1] <= p[1] <= R['max'][1]
+def is_point_in_rect(px, py, rx, ry):
+    """Check if point (px, py) is inside rectangle with bottom-left (rx, ry) and size 1."""
+    return rx <= px <= rx + 1 and ry <= py <= ry + 1
 ```
 
+**Parameters:**
+- $res_z$: The volumetric resolution along the projection direction [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- Using the simple interior fragment depth range formula for boundary fragments leads to over-conservative results, especially when the voxelizing triangle is nearly parallel to the projection direction [S1, unofficial].
+- Degenerate triangles (area $S=0$) must be handled to avoid division by zero [G].
+
+## Subtopics
+
+### [Rasterization-based Voxelization](908-rasterization-based-voxelization.md)
+Uses standard rasterization coverage, often missing intersecting voxels. Choose when performance is critical and conservative correctness is not required.
+
+### [Interior Voxelize](995-interior-voxelize.md)
+Focuses on voxels strictly inside the mesh. Choose for solid volume representations where surface voxels are not needed.
+
+### [Point Cloud Voxelization](1000-point-cloud-voxelization.md)
+Maps points to voxels. Choose when input is unstructured point data rather than meshes.
+
+### [VoxelGrid from Mesh (Fill Method)](1013-voxelgrid-from-mesh-fill-method.md)
+Fills voxels based on ray casting or flood fill. Choose for closed meshes where interior filling is required.
+
+### [Per-Pixel Linked List Voxelization](1187-per-pixel-linked-list-voxelization.md)
+Uses linked lists to store multiple voxels per pixel. Choose when handling complex overlapping geometry without conservative guarantees.
+
+### [Voxel Carving](1213-voxel-carving.md)
+Subtracts voxels from a volume based on silhouettes. Choose for multi-view reconstruction.
+
+### [Signed Distance Field Voxelization](3849-signed-distance-field-voxelization.md)
+Computes SDF values. Choose for smooth surface representations and distance queries.
+
+### [Solid Voxelization via Octree](6830-solid-voxelization-via-octree.md)
+Uses octrees for hierarchical storage. Choose for large scenes with varying density.
+
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of fragments generated by rasterization. The boundary fragment calculation involves computing intersection polygons and checking vertices, which is constant time per fragment (up to 7 vertices) [S1, unofficial].
-*   **Memory Complexity:** Low. It requires no preprocessing and stores only the voxel data structure [S1, unofficial].
-*   **Measured Performance:** Experiments show lower memory consumption than previous approaches and higher efficiency when the volume resolution is high [S1, unofficial].
-*   **Strengths:** Guarantees conservative correctness; no preprocessing required; suitable for deformable models; hardware-accelerated [S1, unofficial].
-*   **Limitations:** More complex fragment shader logic for boundary fragments compared to simple center-depth sampling [S1, unofficial].
-*   **When to Use:** Collision detection, occlusion culling, visibility processing, and any application where missing intersecting voxels is unacceptable [S1, unofficial].
-*   **When Not to Use:** When performance is critical and approximate voxelization is acceptable, or when the triangle is nearly parallel to the projection direction and simple interior formulas are mistakenly used for boundary fragments [S1, unofficial].
+- **Time Complexity:** Linear with respect to the number of triangles and the number of fragments generated. The boundary fragment calculation adds overhead due to polygon intersection and vertex checks [S1, unofficial].
+- **Memory Complexity:** Depends on the number of intersecting voxels. The algorithm itself requires minimal temporary storage per fragment [S1, unofficial].
+- **Measured Performance:** Experiments show lower memory consumption than previous approaches and higher efficiency when the volume resolution is high [S1, unofficial].
+- **Strengths:** Guarantees conservative correctness; no preprocessing required; suitable for deformable models; hardware-accelerated [S1, unofficial].
+- **Limitations:** More complex implementation than simple rasterization-based methods; potential for over-conservative results if boundary handling is incorrect [S1, unofficial].
+- **When to Use:** Collision detection, occlusion culling, visibility processing, and applications requiring guaranteed intersection detection [S1, unofficial].
+- **When Not to Use:** When performance is the sole priority and missing some intersecting voxels is acceptable; when input is not polygonal [S1, unofficial].
 
 ## Background
-Conservative voxelization was proposed by researchers including David S. Ebert from Purdue University and authors from Zhejiang University [S1, unofficial]. The algorithm addresses the limitations of previous hardware-accelerated voxelization techniques that missed intersecting voxels by using only the center depth value [S1, unofficial]. It builds on the concept of conservative rasterization [S1, unofficial].
+The algorithm was proposed by researchers from Zhejiang University and Purdue University, as indicated by the affiliations in the source [S1, unofficial]. It addresses the limitations of previous hardware-accelerated voxelization algorithms that missed intersecting voxels, which is critical for applications like collision detection and occlusion culling [S1, unofficial]. The method leverages GPU rasterization capabilities to achieve efficiency [S1, unofficial].
 
 ## Sources
 [S1] Conservative voxelization, https://wo1fsea.github.io/files/About_NavMesh/P1_Conservative_voxelization.pdf, fetched 2026-10-27 (unofficial)

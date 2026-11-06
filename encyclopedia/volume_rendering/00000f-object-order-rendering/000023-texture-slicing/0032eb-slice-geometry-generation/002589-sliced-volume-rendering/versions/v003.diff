@@ -1,0 +1,243 @@
+--- v002.md
++++ v003.md
+@@ -1,153 +1,133 @@
+ # Sliced Volume Rendering
+-
+-Also called: vl::SlicedVolume
++Also called: Sliced Volume Rendering with Transfer Functions and Lighting, vl::SlicedVolume
+ 
+ ## Overview
+-Sliced Volume Rendering with Transfer Functions and Lighting is a real-time object-order technique that renders volumetric data by dynamically generating slice geometry and applying per-pixel lighting and classification via GLSL or precomputed textures [S1, unofficial]. It distinguishes itself from standard texture slicing by integrating dynamic lighting (up to 4 lights) and transfer functions directly into the rendering pipeline, either computed on-the-fly or precomputed into a single RGB texture [S1, unofficial].
++Sliced Volume Rendering is a technique that generates slice geometry on the fly to render volumetric data with real-time lighting and transfer functions [S1, unofficial]. It differs from standard texture slicing by decoupling the geometric generation of slices from the rasterization, allowing for dynamic per-pixel lighting (up to 4 lights) and flexible transfer function application via GLSL or precomputed textures [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A 3D scalar volume image (typically `IF_LUMINANCE` format), a bounding box (AABB) defining the volume extent, and configuration flags for GLSL usage and gradient precomputation.
+-*   **Output:** A rendered image with accumulated color and opacity, where intensity is mapped to color/opacity via a transfer function and shaded by lighting models.
++- Input: A 3D volume image (scalar data), a bounding box (AABB) defining the volume extent, and a slice count.
++- Output: A rendered image with alpha blending, where color and opacity are determined by the transfer function and lighting model.
+ 
+ **Data Structures:**
+-The method relies on the `vl::SlicedVolume` class which generates proxy geometry (parallel planes) on the fly. Key data structures include:
+-1.  **Volume Texture:** A 3D texture bound to texture unit 0, containing the scalar volume data.
+-2.  **Transfer Function Texture:** A 1D or 2D texture (e.g., color spectrum) bound to texture unit 1, mapping scalar values to RGBA.
+-3.  **Gradient Texture (Optional):** A 3D texture bound to texture unit 2, storing precomputed gradient normals in `TF_RGBA8` format.
+-4.  **Uniforms:**
+-    *   `volume_texunit` (int): Texture unit index for volume data.
+-    *   `trfunc_texunit` (int): Texture unit index for transfer function.
+-    *   `trfunc_delta` (float): Step size for transfer function lookup.
+-    *   `gradient_texunit` (int): Texture unit index for gradient normals.
+-    *   `precomputed_gradient` (int): Flag (0 or 1) indicating if normals are precomputed.
+-    *   `gradient_delta` (fvec3): Step size for on-the-fly gradient computation.
+-    *   `val_threshold` (float): Alpha bias/threshold for volume visualization (range 0.0–1.0).
++- `vl::SlicedVolume`: An object that manages the generation of slice geometry and binds it to an `Actor`.
++- `AABB`: Axis-Aligned Bounding Box defined by two `vec3` points (min and max).
++- `Texture Unit 0`: Binds the volume data (3D texture).
++- `Texture Unit 1`: Binds the transfer function (1D or 2D texture).
++- `Texture Unit 2`: Binds precomputed gradient normals (3D texture, format `TF_RGBA8`).
+ 
+ **Parameters:**
+-*   `SLICE_COUNT`: Integer, number of slices. Typical value: 1000 [S1, unofficial].
+-*   `PRECOMPUTE_GRADIENT`: Boolean. If true, generates a separate 3D texture for gradient normals [S1, unofficial].
+-*   `val_threshold`: Float, controls the alpha threshold. Modified interactively (e.g., mouse wheel) [S1, unofficial].
++- `SLICE_COUNT`: Number of slices. Typical value: 1000 [S1, unofficial].
++- `PRECOMPUTE_GRADIENT`: Boolean flag. If true, uses a precomputed gradient texture [S1, unofficial].
++- `val_threshold`: Shader uniform controlling alpha bias/threshold. Range: 0.0 to 1.0 [S1, unofficial].
++- `gradient_delta`: Uniform for on-the-fly normal computation, set to `fvec3(0.5f/img->width(), 0.5f/img->height(), 0.5f/img->depth())` [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Initialization:** Create a `vl::SlicedVolume` object and bind it to an `Actor`. Set the slice count (`SLICE_COUNT`) and the volume bounding box (`AABB`) [S1, unofficial].
+-2.  **Hardware Check:** Verify support for 3D textures (`Has_Texture_3D`) or GLSL (`Has_GLSL`). If neither is available, the application must terminate [S1, unofficial].
+-3.  **Mode Selection:** Determine if GLSL mode is enabled (`USE_GLSL`). If `USE_GLSL` is true, lighting and transfer functions are computed per-pixel. If false, precomputation is used [S1, unofficial].
+-4.  **Texture Binding:**
+-    *   Bind the input volume image as a 3D texture to texture unit 0. Set `volume_texunit` uniform to 0 [S1, unofficial].
+-    *   Generate texture coordinates for the slice geometry based on image dimensions (`width`, `height`, `depth`) using `generateTextureCoordinates(ivec3(w, h, d))` [S1, unofficial].
+-5.  **GLSL Mode Configuration (if `USE_GLSL`):**
+-    *   Attach vertex and fragment shaders (e.g., `volume_luminance_light.vs` and `.fs`) to the GLSL program [S1, unofficial].
+-    *   Bind the transfer function texture to texture unit 1. Set `trfunc_texunit` to 1 and `trfunc_delta` to $0.5 / \text{trfunc\_width}$ [S1, unofficial].
+-    *   **Gradient Handling:**
+-        *   If `PRECOMPUTE_GRADIENT` is true: Generate gradient normals using `vl::genGradientNormals(img)`. Bind this texture to unit 2. Set `precomputed_gradient` to 1 and `gradient_texunit` to 2 [S1, unofficial].
+-        *   If `PRECOMPUTE_GRADIENT` is false: Set `precomputed_gradient` to 0. Set `gradient_delta` to $fvec3(0.5/w, 0.5/h, 0.5/d)$ for on-the-fly normal computation [S1, unofficial].
+-    *   Disable alpha testing (`EN_ALPHA_TEST`) as fragment discarding is handled in the fragment shader [S1, unofficial].
+-6.  **Non-GLSL Mode Configuration (if not `USE_GLSL`):**
+-    *   Precompute the volume with transfer function and lighting into a single RGB texture using `vl::genRGBAVolume(img)` [S1, unofficial].
+-    *   Bind this resulting RGB texture to unit 0.
+-    *   Enable alpha testing with a threshold (`FU_GEQUAL`) [S1, unofficial].
+-7.  **Lighting Setup (GLSL Mode):**
+-    *   Attach light objects to the shader's render state. Up to 4 lights can be supported. If `COLORED_LIGHTS` is true, lights have ambient colors; otherwise, they may be monochromatic [S1, unofficial].
+-8.  **Rendering:** The `SlicedVolume` class generates the proxy geometry (slices) and renders them back-to-front. The fragment shader samples the volume texture, applies the transfer function, computes lighting (using precomputed or on-the-fly normals), and composites the result [S1, unofficial].
++1. **Initialization:** Create a `vl::SlicedVolume` object and bind it to an `Actor` [S1, unofficial].
++2. **Configuration:** Set the slice count (`setSliceCount`) and the volume bounding box (`setBox`) [S1, unofficial].
++3. **Texture Coordinate Generation:** Generate texture coordinates for the sliced volume geometry based on the input image dimensions (width, height, depth) using `generateTextureCoordinates` [S1, unofficial].
++4. **Mode Selection:** Determine if GLSL is supported and if dynamic lighting is enabled [S1, unofficial].
++5. **GLSL Mode Setup (if `USE_GLSL` is true):**
++   a. Attach the vertex and fragment shaders (e.g., `volume_luminance_light.vs` and `.fs`) to the GLSL program [S1, unofficial].
++   b. Bind the volume data as a 3D texture to texture unit 0 and set the `volume_texunit` uniform to 0 [S1, unofficial].
++   c. Bind the transfer function texture to texture unit 1 and set the `trfunc_texunit` uniform [S1, unofficial].
++   d. Set the `trfunc_delta` uniform to `0.5f / trfunc->width()` [S1, unofficial].
++   e. If `PRECOMPUTE_GRADIENT` is true:
++      i. Generate gradient normals using `vl::genGradientNormals(img)` [S1, unofficial].
++      ii. Bind the gradient texture to texture unit 2 (format `TF_RGBA8`) and set `gradient_texunit` to 2 [S1, unofficial].
++      iii. Set `precomputed_gradient` uniform to 1 [S1, unofficial].
++   f. If `PRECOMPUTE_GRADIENT` is false:
++      i. Set `precomputed_gradient` uniform to 0 [S1, unofficial].
++      ii. Set `gradient_delta` uniform to `fvec3(0.5f/img->width(), 0.5f/img->height(), 0.5f/img->depth())` [S1, unofficial].
++   g. Disable alpha testing (`EN_ALPHA_TEST`) as fragment discarding is handled in the fragment shader [S1, unofficial].
++6. **Non-GLSL Mode Setup (if `USE_GLSL` is false):**
++   a. Precompute the volume with transfer function and lighting using `vl::genRGBAVolume` [S1, unofficial].
++   b. Bind the resulting RGB volume texture to unit 0 [S1, unofficial].
++   c. Enable alpha testing with a `FU_GEQUAL` threshold [S1, unofficial].
++7. **Rendering:** The `SlicedVolume` object generates the slice geometry on the fly, which is then rasterized and composited [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def render_sliced_volume(volume_img, use_glsl, precompute_gradient, slice_count=1000):
+-    # 1. Check hardware support
+-    if not has_texture_3d and not has_glsl:
+-        raise Error("Requires 3D texture or GLSL support")
+-
+-    # 2. Initialize SlicedVolume
++def setup_sliced_volume(volume_img, volume_box, slice_count=1000, use_glsl=True, precompute_gradient=False):
++    # 1. Initialize SlicedVolume and bind to Actor
+     sliced_vol = SlicedVolume()
+     actor = Actor()
+     actor.set_effect(Effect())
+     sliced_vol.bind_actor(actor)
++    
++    # 2. Set parameters
+     sliced_vol.set_slice_count(slice_count)
++    sliced_vol.set_box(volume_box)
+     
+-    # Define bounding box (example: -10 to 10 in all axes)
+-    volume_box = AABB(vec3(-10, -10, -10), vec3(10, 10, 10))
+-    sliced_vol.set_box(volume_box)
+-
+-    # 3. Setup Shader/Effect
+-    effect = actor.get_effect()
+-    shader = effect.get_shader()
++    # 3. Generate texture coordinates
++    img_dims = ivec3(volume_img.width, volume_img.height, volume_img.depth)
++    sliced_vol.generate_texture_coordinates(img_dims)
++    
++    # 4. Setup shader program
++    shader = actor.effect().shader()
+     
+     if use_glsl:
+-        # Attach GLSL shaders
+-        glsl_program = GLSLProgram()
+-        glsl_program.attach_shader(GLSLVertexShader("volume_luminance_light.vs"))
+-        glsl_program.attach_shader(GLSLFragmentShader("volume_luminance_light.fs"))
+-        shader.set_render_state(glsl_program)
++        # 5a. Attach shaders
++        shader.attach_shader(GLSLVertexShader("/glsl/volume_luminance_light.vs"))
++        shader.attach_shader(GLSLFragmentShader("/glsl/volume_luminance_light.fs"))
+         
+-        # Bind Volume Texture
+-        vol_texture = Texture(volume_img)
+-        shader.goc_texture_sampler(0).set_texture(vol_texture)
++        # 5b. Bind volume texture
++        vol_tex = Texture(volume_img)
++        shader.goc_texture_sampler(0).set_texture(vol_tex)
+         shader.goc_uniform("volume_texunit").set_uniform_i(0)
+         
+-        # Generate Texture Coordinates
+-        sliced_vol.generate_texture_coordinates(ivec3(volume_img.width, volume_img.height, volume_img.depth))
++        # 5c. Bind transfer function
++        trfunc_tex = Texture(make_color_spectrum(128, blue, royalblue, green, yellow, crimson))
++        shader.goc_texture_sampler(1).set_texture(trfunc_tex)
++        shader.goc_uniform("trfunc_texunit").set_uniform_i(1)
++        shader.goc_uniform("trfunc_delta").set_uniform_f(0.5f / trfunc_tex.width)
+         
+-        # Bind Transfer Function
+-        trfunc_img = make_color_spectrum(128, color_white, color_white) # Example spectrum
+-        trfunc_texture = Texture(trfunc_img)
+-        shader.goc_texture_sampler(1).set_texture(trfunc_texture)
+-        shader.goc_uniform("trfunc_texunit").set_uniform_i(1)
+-        shader.goc_uniform("trfunc_delta").set_uniform_f(0.5 / trfunc_img.width)
+-        
+-        # Handle Gradients
++        # 5d/e. Handle gradients
+         if precompute_gradient:
+-            gradient_img = gen_gradient_normals(volume_img)
+-            gradient_texture = Texture(gradient_img, format=TF_RGBA8)
+-            shader.goc_texture_sampler(2).set_texture(gradient_texture)
++            gradient_tex = Texture(gen_gradient_normals(volume_img), format=TF_RGBA8)
++            shader.goc_texture_sampler(2).set_texture(gradient_tex)
++            shader.goc_uniform("gradient_texunit").set_uniform_i(2)
+             shader.goc_uniform("precomputed_gradient").set_uniform_i(1)
+-            shader.goc_uniform("gradient_texunit").set_uniform_i(2)
+         else:
+             shader.goc_uniform("precomputed_gradient").set_uniform_i(0)
+-            delta = fvec3(0.5 / volume_img.width, 0.5 / volume_img.height, 0.5 / volume_img.depth)
+-            shader.goc_uniform("gradient_delta").set_uniform(delta)
+-            
+-        # Disable Alpha Testing
++            shader.goc_uniform("gradient_delta").set_uniform_fvec3(
++                0.5f / volume_img.width, 
++                0.5f / volume_img.height, 
++                0.5f / volume_img.depth
++            )
++        
++        # 5g. Disable alpha testing
+         shader.disable(EN_ALPHA_TEST)
+         
+-        # Setup Lights (up to 4)
+-        light0 = Light()
+-        light0.set_ambient(fvec4(0.1, 0.1, 0.1, 1.0))
+-        shader.set_render_state(light0, 0)
+-        # Add more lights if DYNAMIC_LIGHTS is true...
++    else:
++        # 6. Non-GLSL mode
++        rgb_vol_tex = Texture(gen_rgba_volume(volume_img))
++        shader.goc_texture_sampler(0).set_texture(rgb_vol_tex)
++        shader.enable(EN_ALPHA_TEST)
++        shader.set_alpha_test_threshold(FU_GEQUAL, 0.5) # Typical threshold
+         
+-    else:
+-        # Non-GLSL: Precompute volume
+-        rgb_volume_img = gen_rgba_volume(volume_img)
+-        rgb_texture = Texture(rgb_volume_img)
+-        shader.goc_texture_sampler(0).set_texture(rgb_texture)
+-        
+-        # Enable Alpha Testing
+-        shader.enable(EN_ALPHA_TEST)
+-        shader.set_alpha_test_threshold(FU_GEQUAL, 0.5) # Threshold value
+-
+-    # 4. Set Threshold Uniform
+-    actor.goc_uniform("val_threshold").set_uniform_f(0.5)
+-    
+-    # 5. Add to Scene
++    # 7. Add actor to scene
+     scene_manager.tree().add_actor(actor)
+ ```
++
++**Edge Cases and Pitfalls:**
++- Requires OpenGL 3D texture support (`Has_Texture_3D`) or GLSL support (`Has_GLSL`). If neither is available, the application must exit [S1, unofficial].
++- Precomputing gradients can be slow and requires more memory [S1, unofficial].
++- Alpha testing must be disabled in GLSL mode to allow fragment shader-based discarding [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Interactive Slice and Point-Based Volume Rendering](4591-interactive-slice-and-point-based-volume-rendering.md)
+-Renders a 3D segmentation volume by dynamically extracting a 2D slice and overlaying segmentation labels as 3D points. It decouples intensity visualization from discrete label visualization, allowing distinct rendering pipelines and per-label coloring.
++Renders a 3D segmentation volume by dynamically extracting a 2D slice and overlaying segmentation labels as 3D points. It differs by decoupling volumetric intensity visualization from discrete label visualization.
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Rendering time is proportional to the number of slices (`SLICE_COUNT`) and the resolution of the volume. Higher slice counts improve quality but reduce frame rate [S1, unofficial].
+-*   **Memory Complexity:** Requires memory for the volume texture, transfer function texture, and optionally a gradient texture (if `PRECOMPUTE_GRADIENT` is true) [S1, unofficial].
+-*   **Performance:** Very fast on modern GPUs due to reliance on rasterization hardware and hardware-supported blending [S3, book]. GLSL mode allows real-time lighting with up to 4 lights [S1, unofficial].
+-*   **Strengths:** Real-time interactivity, support for dynamic lighting and transfer functions, flexible geometry generation [S1, unofficial].
+-*   **Limitations:** Requires OpenGL 3D texture or GLSL support [S1, unofficial]. Precomputing gradients increases memory usage [S1, unofficial]. Non-GLSL mode lacks dynamic lighting [S1, unofficial].
+-*   **When to use:** Interactive visualization of volumetric data where lighting and classification need to be adjusted in real-time [S1, unofficial].
+-*   **When not to use:** When hardware lacks 3D texture or GLSL support [S1, unofficial].
++- **Time Complexity:** Rendering time scales with the number of slices (`SLICE_COUNT`). Higher slice counts yield better quality but slower rendering [S1, unofficial].
++- **Memory Complexity:** Uses additional memory for precomputed gradient textures if `PRECOMPUTE_GRADIENT` is true [S1, unofficial].
++- **Performance:** Real-time lighting (up to 4 lights) is supported in GLSL mode [S1, unofficial]. Precomputed gradients can speed up lighting computations at the cost of memory [S1, unofficial].
++- **Strengths:** Dynamic lighting and transfer functions in real-time [S1, unofficial].
++- **Limitations:** Requires specific OpenGL features (3D textures or GLSL) [S1, unofficial]. Non-GLSL mode lacks dynamic lighting [S1, unofficial].
+ 
+ ## Background
+-The method is implemented in the Visualization Library (`vl::SlicedVolume`) and demonstrated in tutorials for real-time volume rendering with transfer functions and lighting [S1, unofficial]. It builds on the principles of texture slicing, leveraging graphics hardware for efficient rasterization [S3, book].
++This method is part of the Visualization Library (vl) documentation, specifically demonstrated in the `App_VolumeSliced` example [S1, unofficial]. It builds on the principles of texture slicing by automating the generation of slice geometry and integrating advanced shading techniques [S1, unofficial].
+ 
+ ## Sources

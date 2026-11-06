@@ -1,0 +1,277 @@
+--- v005.md
++++ v006.md
+@@ -4,117 +4,159 @@
+ 
+ ## Overview
+-This method accelerates the geometry-intensive stages of direct volume ray casting—specifically perspective transformation, gradient estimation, and volume data resampling—by offloading them to dedicated hardware logic within a geometry unit [S1]. It solves the bottleneck where software implementations consume up to 80% of computation time on these operations [S1]. It differs from sibling methods like [Hardware-Accelerated Volume Rendering via 3D Texturing](2799-hardware-accelerated-volume-rendering.md) by using explicit address generation and precalculated interpolation weights in custom silicon rather than relying on general-purpose texture sampling units [S1].
++This method implements the geometry-intensive portion of the volume rendering pipeline—specifically ray generation, perspective transformation, and volume data resampling—using dedicated hardware accelerators rather than general-purpose CPUs or programmable shaders [S1]. It solves the bottleneck of computing sampling locations and interpolating voxel values for millions of rays per second, which traditionally consumes the majority of rendering time in software implementations [S1]. Unlike sibling methods that rely on 3D texture mapping or pixel-based shading, this approach uses a specialized "Geometry Unit" to pre-calculate interpolation weights and perform backward-mapping resampling, feeding dense sample data to subsequent processing stages [S1, S2].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Ray starting point $\mathbf{o}$ and direction vector $\mathbf{d}$ for each scanline; volume dataset $V$; density lookup table (LUT).
+-*   **Output:** Resampled density values $\rho$ and gradient components $\nabla \rho$ (X and Y) for sampling locations along the ray.
++The method operates on a per-scanline basis, generating ray parameters and resampling the volume dataset into a rotated coordinate system suitable for ray casting [S1].
+ 
+-**Data Structures:**
+-*   **Weight Memory:** Size $256\text{K} \times 16$ bits. Stores precalculated interpolation weights. Addressed by three 6-bit fractional parts (one per coordinate) of the resampling location [S1].
+-*   **Gradient Buffer:** Limits the maximal resampled dataset size to $512^3$ [S1].
+-*   **Density LUT:** Maps raw voxel values to density values [S1].
+-*   **Cache:** 1-entry cache for previously used data voxels [S1].
++### Inputs and Outputs
++*   **Input:** Original volume dataset (voxel grid), camera parameters (ray origin and direction per scanline), density lookup table (LUT).
++*   **Output:** Resampled dataset containing density values and gradient components (X, Y) for each sample point, ready for the Ray-Casting Unit [S1].
+ 
+-**Steps:**
+-1.  **Ray Initialization:** For each scanline, store the ray starting point and the vector to the next resample location [S1].
+-2.  **Address Generation:** Use hardware to generate sampling point positions. Round the X, Y, Z components of the sampling location to obtain integer addresses of the 8 neighbor voxels in the original dataset [S1].
+-3.  **Data Access:** Access the 8 neighbor voxels conflict-free. The memory controller returns 0 for addresses outside the data cube [S1].
+-4.  **Density Mapping:** Map raw voxel values to density values using the density LUT [S1].
+-5.  **Resampling (Backward Mapping):** Perform weighted interpolation among the 8 voxel neighbors to compute the density value at the fractional sampling location. Interpolation weights are retrieved from the Weight Memory using the 6-bit fractional parts of the coordinates [S1].
+-6.  **Gradient Estimation:** Estimate the X and Y components of the gradient using 20 Sobel filters applied to the interpolated density values [S1].
++### Data Structures
++1.  **Weight Memory:** Stores pre-calculated interpolation weights.
++    *   **Layout:** $256\text{K} \times 16$ bits.
++    *   **Addressing:** Three 6-bit fractional parts (one per coordinate: $u, v, w$) index the weight. Total address space $2^6 \times 2^6 \times 2^6 = 2^{18} = 262,144$ entries [S1].
++2.  **Gradient Buffer:** Stores the resampled gradient values.
++    *   **Constraint:** Limits the maximal resampled dataset size to $512^3$ [S1].
++3.  **Density LUT:** Maps raw voxel values to optical density values [S1].
+ 
+-**Formulas:**
+-The Sobel filter weights for gradient estimation are defined as [S1]:
++### Numbered Steps
++
++1.  **Ray Parameter Initialization:** For each scanline, store the ray starting point $\mathbf{o}$ and the vector $\mathbf{d}$ to the next resample location [S1].
++2.  **Address Generation:** Calculate the continuous sampling position $\mathbf{p} = (x, y, z)$ for the current sample. Round the X, Y, and Z components to obtain integer addresses corresponding to the 8 neighboring voxels in the original dataset [S1].
++3.  **Voxel Access:** Retrieve the 8 neighbor voxel values from the memory system.
++    *   The memory system uses Fast Page Mode, alternate memory bank read-out, and a 1-entry cache for previously used voxels to achieve conflict-free access at up to 640 MB/s [S1].
++    *   If an address lies outside the data cube, the controller returns 0 [S1].
++4.  **Density Mapping:** Apply the Density LUT to the raw voxel values to obtain density values $d_i$ [S1].
++5.  **Weight Retrieval:** Retrieve the interpolation weights from the Weight Memory using the 6-bit fractional parts of $\mathbf{p}$ [S1].
++6.  **Backward Mapping Interpolation:** Perform weighted interpolation among the 8 density values to compute the resampled density $D$ at $\mathbf{p}$ [S1].
++    *   Standard trilinear interpolation is implied by the 8-neighbor access and weight structure [S1].
++7.  **Gradient Estimation:** Estimate the X and Y components of the gradient of the resampled field using 20 Sobel filters [S1].
++    *   The gradient is computed on the *resampled* (rotated) data, not the original grid [S1].
++8.  **Output:** Store the density $D$ and gradient components $(\nabla_x, \nabla_y)$ in the output buffer for the Ray-Casting Unit [S1].
++
++### Formulas
++
++**Sobel Filter Weights:**
++The gradient estimation uses Sobel filters with weights defined as [S1]:
++
+ $$
+ w_{i,j} = \frac{1}{8} \cdot \begin{bmatrix} 1 & 2 & 1 \\ 0 & 0 & 0 \\ -1 & -2 & -1 \end{bmatrix}
+ $$
+ 
+-**Parameters:**
++**Interpolation:**
++While the exact interpolation kernel is selectable (e.g., trilinear or sinc approximation), the standard implementation uses the pre-calculated weights $W_{uvw}$ for the 8 neighbors $V_{ijk}$ [S1]:
++
++$$
++D = \sum_{k=0}^{7} W_k \cdot d_k
++$$
++
++where $d_k$ are the density-mapped voxel values and $W_k$ are the weights retrieved from the Weight Memory based on the fractional coordinates [S1].
++
++### Parameters
+ *   **Data Resolution:** 16 bits for density and gradient values [S1].
+-*   **Fractional Precision:** 6 bits per coordinate for interpolation weight addressing [S1].
+-*   **Dataset Limits:** $256^3$ for 16-bit voxels with 4Mbit ORAMs; $512 \times 512 \times 256$ for 16Mbit DRAMs [S1].
+-*   **Throughput:** One geometry unit generates 26 to 36 million transformed locations per second [S1].
+-*   **Memory Bandwidth:** Up to 640 MBytes/second (40MHz $\times$ 8 neighbors $\times$ 2 Bytes/voxel) [S1].
++*   **Fractional Precision:** 6 bits per coordinate for interpolation weights [S1].
++*   **Dataset Size Limits:**
++    *   Original Dataset: $256^3$ for 16-bit voxels with 4 Mbit ORAMs; $512 \times 512 \times 256$ for 16 Mbit DRAMs [S1].
++    *   Resampled Dataset: Max $512^3$ (limited by gradient buffer size) [S1].
++*   **Performance:** One geometry unit generates 26 to 36 million transformed locations per second [S1].
+ 
+-**Pitfalls:**
+-*   **Discreteness Artifacts:** The precalculated weights have limited resolution (6 bits). This can cause visible artifacts, though 6 bits is considered sufficient to make them invisible to the viewer [S1].
+-*   **Boundary Handling:** The controller returns 0 for out-of-bounds addresses, which must be handled correctly to avoid incorrect gradient calculations at volume edges [S1].
++### Edge Cases and Pitfalls
++*   **Boundary Conditions:** Addresses outside the data cube return 0. This must be handled by the memory controller to prevent out-of-bounds errors [S1].
++*   **Quantization Artifacts:** The discreteness of the pre-calculated weights (6-bit resolution) can cause visible artifacts. The 6-bit resolution is chosen specifically to make these artifacts invisible to the viewer [S1].
++*   **Memory Bandwidth:** High data rates (640 MB/s) require careful memory bank management (Fast Page Mode, alternate read-out) to avoid conflicts when accessing 8 neighbors simultaneously [S1].
+ 
+-**Pseudocode:**
++### Pseudocode
++
+ ```python
+-# Hardware logic simulation
+-def geometry_unit_resample(ray_start, ray_dir, volume_data, density_lut, weight_memory):
++# Hardware-based Geometry Unit Resampling
++# Assumes access to hardware primitives: WeightMemory, VoxelMemory, GradientBuffer
++
++def geometry_unit_resample(scanline_origin, scanline_direction, volume_data, density_lut):
+     """
+-    Simulates the hardware geometry unit resampling process.
++    Resamples volume data for a single scanline using hardware-accelerated geometry operations.
++    
++    Args:
++        scanline_origin: (x, y, z) starting point of the ray
++        scanline_direction: (dx, dy, dz) vector to next resample location
++        volume_data: 3D array of raw voxel values
++        density_lut: Lookup table mapping raw values to density
++        
++    Returns:
++        resampled_data: List of (density, grad_x, grad_y) tuples
+     """
+-    # 1. Initialize ray parameters for the scanline
+-    current_pos = ray_start
+-    step_vector = ray_dir
++    resampled_data = []
+     
+-    # 2. Generate sampling points and addresses
+-    # Hardware rounds coordinates to find 8 neighbors
+-    x_int, y_int, z_int = round(current_pos.x), round(current_pos.y), round(current_pos.z)
++    # Initialize ray parameters
++    current_pos = scanline_origin
++    step = scanline_direction
+     
+-    # 3. Access 8 neighbors conflict-free
+-    # Returns 0 if address is outside volume bounds
+-    neighbors = []
+-    for dx in [0, 1]:
+-        for dy in [0, 1]:
+-            for dz in [0, 1]:
+-                addr_x = x_int + dx
+-                addr_y = y_int + dy
+-                addr_z = z_int + dz
+-                
+-                if is_valid_volume_address(addr_x, addr_y, addr_z):
+-                    # Read from memory (Fast Page Mode, alternate bank, cache check)
+-                    voxel_val = volume_data[addr_x, addr_y, addr_z]
+-                else:
+-                    voxel_val = 0
+-                neighbors.append(voxel_val)
+-    
+-    # 4. Map to density using LUT
+-    density_neighbors = [density_lut[v] for v in neighbors]
+-    
+-    # 5. Interpolation using precalculated weights
+-    # Weights addressed by 6-bit fractional parts
+-    fx = fractional_part(current_pos.x)
+-    fy = fractional_part(current_pos.y)
+-    fz = fractional_part(current_pos.z)
+-    
+-    # Retrieve weights from weight_memory (256Kx16 bits)
+-    # Weight index is derived from (fx, fy, fz)
+-    w = get_interpolation_weights(weight_memory, fx, fy, fz)
+-    
+-    # Compute resampled density
+-    resampled_density = dot_product(density_neighbors, w)
+-    
+-    # 6. Gradient Estimation using Sobel filters
+-    # Apply 20 Sobel filters to estimate X and Y gradients
+-    # Note: In hardware, this is done on the resampled/rotated dataset
+-    # Here we simulate the filter application on the neighbor grid
+-    gradient_x = apply_sobel_filter_x(density_neighbors, w)
+-    gradient_y = apply_sobel_filter_y(density_neighbors, w)
+-    
+-    return resampled_density, gradient_x, gradient_y
++    # Iterate through samples along the scanline
++    # Note: In hardware, this is a pipeline; here represented as a loop
++    while current_pos is within volume bounds:
++        # Step 1: Address Generation
++        # Round coordinates to get integer voxel indices
++        ix, iy, iz = round(current_pos.x), round(current_pos.y), round(current_pos.z)
++        
++        # Get fractional parts for weight lookup (6-bit resolution)
++        fx, fy, fz = fractional_part(current_pos.x), fractional_part(current_pos.y), fractional_part(current_pos.z)
++        
++        # Step 2: Voxel Access (8 neighbors)
++        neighbors = []
++        for k in range(8):
++            # Determine neighbor index based on fractional parts
++            nx = ix + ((k >> 0) & 1)
++            ny = iy + ((k >> 1) & 1)
++            nz = iz + ((k >> 2) & 1)
++            
++            # Access memory with boundary check
++            val = volume_data.get(nx, ny, nz, default=0)
++            
++            # Step 3: Density Mapping
++            density_val = density_lut.lookup(val)
++            neighbors.append(density_val)
++        
++        # Step 4: Weight Retrieval
++        # Address weight memory with 6-bit fractional parts
++        weight_index = (int(fx * 64) << 12) | (int(fy * 64) << 6) | int(fz * 64)
++        weights = WeightMemory.read(weight_index)
++        
++        # Step 5: Interpolation
++        density = 0.0
++        for k in range(8):
++            density += weights[k] * neighbors[k]
++        
++        # Step 6: Gradient Estimation
++        # Estimate X and Y gradients using Sobel filters on the resampled data
++        # Note: Hardware uses 20 Sobel filters; simplified here to standard 3x3
++        grad_x = sobel_filter_x(neighbors)
++        grad_y = sobel_filter_y(neighbors)
++        
++        # Step 7: Output
++        resampled_data.append((density, grad_x, grad_y))
++        
++        # Advance to next sample
++        current_pos = current_pos + step
++        
++    return resampled_data
+ 
+-def is_valid_volume_address(x, y, z):
+-    # Returns True if within volume bounds, False otherwise
+-    # Controller returns 0 for invalid addresses
+-    return 0 <= x < volume_width and 0 <= y < volume_height and 0 <= z < volume_depth
++def sobel_filter_x(values):
++    """Simplified Sobel X gradient estimation for 8 neighbors."""
++    # This is a placeholder for the specific 20-filter hardware implementation
++    # Standard Sobel X kernel:
++    # -1 0 1
++    # -2 0 2
++    # -1 0 1
++    # Mapping 8 neighbors to this kernel requires specific indexing logic
++    # defined by the hardware architecture [S1].
++    return 0.0 # Placeholder for hardware-specific logic
+ 
+-def fractional_part(val):
+-    # Extracts fractional part, truncated to 6 bits
+-    frac = val - floor(val)
+-    return int(frac * 64) / 64.0
+-
+-def apply_sobel_filter_x(densities, weights):
+-    # Simplified simulation of Sobel X gradient estimation
+-    # Uses the 16-bit precision as specified
+-    return 0 # Placeholder for specific hardware filter logic
+-
+-def apply_sobel_filter_y(densities, weights):
+-    # Simplified simulation of Sobel Y gradient estimation
+-    return 0 # Placeholder for specific hardware filter logic
++def sobel_filter_y(values):
++    """Simplified Sobel Y gradient estimation for 8 neighbors."""
++    # Standard Sobel Y kernel:
++    # 1 2 1
++    # 0 0 0
++    # -1 -2 -1
++    return 0.0 # Placeholder for hardware-specific logic
+ ```
+ 
+@@ -125,12 +167,14 @@
+ 
+ ## Operating characteristics
+-*   **Performance:** One geometry unit generates 26 to 36 million transformed locations per second [S1].
+-*   **Memory Bandwidth:** Achieves up to 640 MBytes/second using commercial DRAMs, Fast Page Mode, alternate memory bank read-out, and a 1-entry cache [S1].
+-*   **Memory Constraints:** Maximal original dataset size is $256^3$ for 16-bit voxels with 4Mbit ORAMs, or $512 \times 512 \times 256$ for 16Mbit DRAMs. The maximal resampled dataset size is limited to $512^3$ by the gradient buffer size [S1].
+-*   **Strengths:** High throughput for geometry operations; conflict-free memory access; real-time reloadable LUTs and memories [S1].
+-*   **Limitations:** Fixed hardware functionality; limited by gradient buffer size for resampled data; potential artifacts from discrete weight resolution [S1].
++*   **Performance:** One geometry unit can generate 26 to 36 million transformed locations per second using true 3D resampling [S1].
++*   **Memory Bandwidth:** Achieves up to 640 MB/s access rates using commercial DRAMs, enabled by conflict-free 8-neighbor access, Fast Page Mode, and alternate memory bank read-out [S1].
++*   **Memory Constraints:**
++    *   Original dataset size is limited by available RAM: $256^3$ for 4 Mbit ORAMs, $512 \times 512 \times 256$ for 16 Mbit DRAMs [S1].
++    *   Resampled dataset size is limited by the gradient buffer to $512^3$ [S1].
++*   **Strengths:** Offloads the most computationally intensive part of ray casting (geometry and resampling) from the CPU, allowing for real-time visualization of large biomedical datasets [S1, S2]. The use of pre-calculated weights and dedicated hardware ensures high throughput [S1].
++*   **Limitations:** Fixed-function hardware lacks the flexibility of programmable shaders. The 6-bit weight resolution, while sufficient for invisibility of artifacts, limits interpolation precision [S1]. The method is tied to the specific VIRIM architecture and is not a general-purpose GPU technique [S1, S2].
+ 
+ ## Background
+-This method was developed as part of the Heidelberg Raytracer and VIRIM (Volume Rendering Image Machine) architecture [S1]. It addresses the computational bottleneck of geometry operations, which consume 80% of computation time in software implementations [S1]. The approach uses special-purpose hardware for perspective calculations, gradient estimation, and resampling [S1].
++The method originates from the VIRIM (Volume Rendering Image Machine) project, developed at the University of Mannheim and later commercialized by Volume Graphics GmbH [S1, S2]. It was designed to address the high computational cost of geometry operations, which accounted for 80% of the computation time in software implementations of the basic visualization algorithm [S1]. The architecture was presented in the mid-1990s as a specialized hardware solution for real-time volume rendering [S1].
+ 
+ ## Sources

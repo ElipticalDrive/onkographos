@@ -1,0 +1,207 @@
+--- v004.md
++++ v005.md
+@@ -4,131 +4,123 @@
+ 
+ ## Overview
+-This method handles the transfer of classified RGBA volume data from CPU memory to GPU memory by uploading it into an OpenGL `GL_TEXTURE_3D` texture object [S1, unofficial]. It solves the problem of converting nested 3D array structures (common in JavaScript/Python data processing) into a flat, contiguous byte buffer required by OpenGL's `glTexImage3D` or `glTexSubImage3D` functions [S1, unofficial]. It is distinct from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md), which manages multiple smaller textures in an atlas layout, whereas this method focuses on a single monolithic 3D texture upload.
++This method handles the transfer of classified RGBA volume data from CPU memory to GPU memory by uploading it into an OpenGL `GL_TEXTURE_3D` texture object [S1, unofficial]. It solves the problem of converting nested 3D array structures (common in JavaScript/Python data processing) into a flat, contiguous byte buffer required by OpenGL's `glTexImage3D` or `glTexSubImage3D` functions [S1, unofficial]. It is distinct from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md), which manages multiple smaller textures in an atlas layout, whereas this method focuses on a single monolithic 3D texture upload [S1, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A contiguous 1D byte buffer containing the volume data. The data must be pre-classified into RGBA format (8-bit unsigned integer per channel) or single-channel intensity (8-bit unsigned integer), depending on the target internal format.
+-*   **Output:** An OpenGL texture object bound to `GL_TEXTURE_3D` containing the volume data, with mipmaps generated if requested.
++*   **Input:** A contiguous 1D byte buffer containing the volume data. The data must be pre-classified into RGBA format (4 bytes per voxel) [S1, unofficial].
++*   **Output:** An OpenGL texture object bound to `GL_TEXTURE_3D` containing the volume data, ready for sampling in shaders.
+ 
+ **Data Structures:**
+-The source data is a flat array of bytes. For RGBA data, the layout is interleaved: `[R0, G0, B0, A0, R1, G1, B1, A1, ...]`. For single-channel data (e.g., `GL_R8`), the layout is a single byte per voxel. The dimensions are $W \times H \times D$.
++The source data is a flat array of `GLubyte` (unsigned 8-bit integers). The layout corresponds to a 3D grid of dimensions $W \times H \times D$. The memory layout follows row-major ordering where the fastest-changing index is the X-coordinate, followed by Y, then Z [S1, unofficial].
++*   **Format:** `GL_RGBA`
++*   **Type:** `GL_UNSIGNED_BYTE`
++*   **Internal Format:** `GL_RGBA` (for standard upload) or `GL_R8` (for single-channel upload as seen in [S2, unofficial]).
++
++**Parameters:**
++*   **Dimensions:** Example dimensions are $200 \times 200 \times 200$ [S1, unofficial].
++*   **Wrap Modes:**
++    *   `GL_TEXTURE_WRAP_S`: `GL_CLAMP` [S1, unofficial] or `GL_CLAMP_TO_EDGE` [S2, unofficial].
++    *   `GL_TEXTURE_WRAP_T`: `GL_CLAMP` [S1, unofficial] or `GL_CLAMP_TO_EDGE` [S2, unofficial].
++    *   `GL_TEXTURE_WRAP_R`: `GL_CLAMP` [S1, unofficial] or `GL_CLAMP_TO_EDGE` [S2, unofficial].
++*   **Filters:**
++    *   `GL_TEXTURE_MIN_FILTER`: `GL_LINEAR_MIPMAP_LINEAR` [S1, unofficial] or `GL_LINEAR` [S2, unofficial].
++    *   `GL_TEXTURE_MAG_FILTER`: `GL_LINEAR` [S1, unofficial] or `GL_LINEAR` [S2, unofficial].
++*   **Mipmap Levels:** Base level 0, max level 4 [S1, unofficial].
++*   **Unpack Alignment:** `GL_UNPACK_ALIGNMENT` set to 1 to match host array byte alignment [S2, unofficial].
+ 
+ **Steps:**
+ 1.  **Generate and Bind:** Generate a texture ID using `glGenTextures` and bind it to `GL_TEXTURE_3D` using `glBindTexture`.
+-2.  **Set Wrapping:** Set the wrap modes for S, T, and R coordinates. Sources specify `GL_CLAMP` [S1, unofficial] or `GL_CLAMP_TO_EDGE` [S2, unofficial]. `GL_CLAMP_TO_EDGE` is the standard modern practice to avoid border sampling artifacts.
+-3.  **Set Filtering:** Set the magnification filter to `GL_LINEAR` [S1, unofficial][S2, unofficial]. Set the minification filter. Source [S1, unofficial] specifies `GL_LINEAR_MIPMAP_LINEAR` with base level 0 and max level 4, requiring mipmap generation. Source [S2, unofficial] specifies `GL_LINEAR` without mipmaps.
+-4.  **Set Unpack Alignment:** Set `GL_UNPACK_ALIGNMENT` to 1 to ensure the host array byte alignment matches the texture format, preventing stride errors [S2, unofficial].
+-5.  **Upload Data:** Call `glTexImage3D` with the appropriate internal format, dimensions, and data pointer.
+-    *   For RGBA: `internalFormat = GL_RGBA`, `format = GL_RGBA`, `type = GL_UNSIGNED_BYTE`.
+-    *   For Single-Channel: `internalFormat = GL_R8`, `format = GL_RED`, `type = GL_UNSIGNED_BYTE` [S2, unofficial].
+-6.  **Generate Mipmaps (Optional):** If the min filter requires mipmaps (e.g., `GL_LINEAR_MIPMAP_LINEAR`), call `glGenerateMipmap` [S1, unofficial].
+-
+-**Parameters:**
+-*   **Dimensions:** Example size is $200 \times 200 \times 200$ [S1, unofficial].
+-*   **Internal Format:** `GL_RGBA` [S1, unofficial] or `GL_R8` [S2, unofficial].
+-*   **Data Type:** `GL_UNSIGNED_BYTE` [S1, unofficial][S2, unofficial].
+-*   **Wrap Mode:** `GL_CLAMP` [S1, unofficial] or `GL_CLAMP_TO_EDGE` [S2, unofficial].
+-*   **Min Filter:** `GL_LINEAR_MIPMAP_LINEAR` [S1, unofficial] or `GL_LINEAR` [S2, unofficial].
+-*   **Mag Filter:** `GL_LINEAR` [S1, unofficial][S2, unofficial].
++2.  **Set Parameters:** Configure texture parameters for wrapping and filtering as specified above.
++3.  **Upload Data:** Call `glTexImage3D` with the appropriate internal format, dimensions, format, type, and data pointer.
++4.  **Generate Mipmaps (Optional):** If mipmaps are enabled (e.g., min filter is `GL_LINEAR_MIPMAP_LINEAR`), call `glGenerateMipmap` [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def upload_3d_texture(gl, data, width, height, depth, internal_format, format, use_mipmaps=False):
++def upload_3d_texture(gl, width, height, depth, data_buffer, internal_format, format, gl_type, wrap_mode, min_filter, mag_filter, generate_mipmaps=True):
+     """
+-    Uploads 3D volume data to an OpenGL texture.
++    Uploads a 3D volume texture to the GPU.
+     
+     Args:
+         gl: OpenGL context object.
+-        data: 1D numpy array or bytes object of volume data.
+         width, height, depth: Dimensions of the volume.
+-        internal_format: OpenGL internal format (e.g., GL_RGBA, GL_R8).
+-        format: OpenGL format (e.g., GL_RGBA, GL_RED).
+-        use_mipmaps: Boolean flag to generate mipmaps.
++        data_buffer: Contiguous 1D byte array (e.g., numpy array or ctypes buffer).
++        internal_format: Internal format (e.g., GL_RGBA, GL_R8).
++        format: Pixel format (e.g., GL_RGBA, GL_RED).
++        gl_type: Data type (e.g., GL_UNSIGNED_BYTE).
++        wrap_mode: Wrap mode for S, T, R (e.g., GL_CLAMP_TO_EDGE).
++        min_filter: Minification filter (e.g., GL_LINEAR_MIPMAP_LINEAR).
++        mag_filter: Magnification filter (e.g., GL_LINEAR).
++        generate_mipmaps: Whether to generate mipmaps.
+     """
+     # 1. Generate and bind texture
+-    tex_id = gl.glGenTextures(1)
+-    gl.glBindTexture(gl.GL_TEXTURE_3D, tex_id)
++    texture_id = gl.glGenTextures(1)
++    gl.glBindTexture(gl.GL_TEXTURE_3D, texture_id)
+     
+     # 2. Set wrap modes
+-    # Use GL_CLAMP_TO_EDGE as it is the standard modern equivalent of GL_CLAMP [S2, unofficial]
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_S, gl.GL_CLAMP_TO_EDGE)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, gl.GL_CLAMP_TO_EDGE)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, gl.GL_CLAMP_TO_EDGE)
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_S, wrap_mode)
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_T, wrap_mode)
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_WRAP_R, wrap_mode)
+     
+-    # 3. Set filtering
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR)
+-    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MAG_FILTER, gl.GL_LINEAR)
++    # 3. Set filters
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MIN_FILTER, min_filter)
++    gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MAG_FILTER, mag_filter)
+     
+-    if use_mipmaps:
+-        # If mipmaps are used, min filter should be appropriate for mipmaps [S1, unofficial]
+-        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MIN_FILTER, gl.GL_LINEAR_MIPMAP_LINEAR)
+-        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_BASE_LEVEL, 0)
+-        gl.glTexParameteri(gl.GL_TEXTURE_3D, gl.GL_TEXTURE_MAX_LEVEL, 4) # Example max level [S1, unofficial]
+-    
+-    # 4. Set unpack alignment to 1 for byte-aligned data [S2, unofficial]
++    # 4. Set unpack alignment to 1 for byte-aligned data
+     gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+     
+     # 5. Upload data
+-    # internalFormat, format, and type depend on the data structure
++    # Note: data_buffer must be contiguous and of the correct size (width * height * depth * bytes_per_voxel)
+     gl.glTexImage3D(
+         gl.GL_TEXTURE_3D,
+         0,                  # Level
+-        internal_format,    # Internal format (e.g., GL_RGBA or GL_R8)
+-        width,
+-        height,
+-        depth,
++        internal_format,    # Internal format
++        width,              # Width
++        height,             # Height
++        depth,              # Depth
+         0,                  # Border
+-        format,             # Format (e.g., GL_RGBA or GL_RED)
+-        gl.GL_UNSIGNED_BYTE,# Type
+-        data                # Data pointer
++        format,             # Format
++        gl_type,            # Type
++        data_buffer         # Data pointer
+     )
+     
+-    # 6. Generate mipmaps if requested
+-    if use_mipmaps:
++    # 6. Generate mipmaps if required
++    if generate_mipmaps:
+         gl.glGenerateMipmap(gl.GL_TEXTURE_3D)
+         
+-    return tex_id
++    return texture_id
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Alignment:** If `GL_UNPACK_ALIGNMENT` is not set to 1, OpenGL may misinterpret the data layout if the row width is not a multiple of 4 bytes, leading to corrupted images [S2, unofficial].
+-*   **Data Format Mismatch:** Ensure the `format` and `type` arguments in `glTexImage3D` match the actual layout of the `data` buffer. Mismatching `GL_RGBA` format with `GL_RED` data will cause undefined behavior or visual artifacts.
+-*   **Mipmap Generation:** Mipmaps can only be generated if the texture dimensions are powers of two or if the driver supports non-power-of-two mipmaps. If `GL_LINEAR_MIPMAP_LINEAR` is used without mipmaps, rendering may fail or produce incorrect results.
++*   **Data Layout:** OpenGL expects data in a specific memory order. If the source data is in a different order (e.g., Z-major), it must be transposed or reordered before upload [S1, unofficial].
++*   **Alignment:** `GL_UNPACK_ALIGNMENT` defaults to 4. If the data is not 4-byte aligned (e.g., `GL_RED` format with `GL_UNSIGNED_BYTE`), setting it to 1 is critical to avoid reading garbage data [S2, unofficial].
++*   **Mipmap Consistency:** If `GL_TEXTURE_MIN_FILTER` requires mipmaps (e.g., `GL_LINEAR_MIPMAP_LINEAR`), all mipmap levels must be defined. Calling `glGenerateMipmap` handles this, but if manual uploads are used, all levels must be filled [S1, unofficial].
++*   **Memory Size:** Ensure the data buffer size matches `width * height * depth * bytes_per_voxel`. Mismatched sizes lead to buffer overruns or incomplete uploads.
+ 
+ ## Subtopics
+ 
+-### [3D Texture Upload — 3D Texture Upload for Volume Data, GL_TEXTURE_3D volume upload, Volume Texture Binding](4890-3d-texture-upload-3d-texture-upload-for-volume-data-gl-textu.md)
+-This method handles the transfer of classified RGBA volume data from CPU memory to GPU memory by uploading it into an OpenGL `GL_TEXTURE_3D` texture object. It solves the problem of converting nested 3D array structures (common in JavaScript/Python data processing) into a flat, contiguous byte buffer required by OpenGL's `glTexImage3D` or `glTexSubImage3D` functions. It is distinct from [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md), which manages multiple smaller textures in an atlas layout, whereas this method focuses on a single monolithic 3D texture upload.
++### Brick Grid Texture Upload
++This variant handles the upload of a brick grid structure, which consists of multiple textures: an indirection texture, a range texture, and an atlas texture [S3, unofficial]. It differs from standard single-volume uploads by managing a hierarchical data structure for sparse or tiled volume rendering [S3, unofficial].
+ 
+-### [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md)
+-A method to populate a 3D volume atlas texture with sampled data values, tracking the minimum and maximum values encountered during the update process. It differs from standard single-volume uploads by mapping a sequence of timesteps into a multi-volume 3D texture array (atlas), allowing temporal data to be stored in a single GPU texture object for efficient rendering.
++**Steps:**
++1.  **Indirection Texture:** Create a `Texture3D` with dimensions `bricks->indirection.stride`, internal format `GL_RGB10_A2UI`, type `GL_UNSIGNED_INT_10_10_10_2`, and data from `bricks->indirection.data`. Set wrap modes to `GL_CLAMP_TO_BORDER` and filters to `GL_NEAREST` [S3, unofficial].
++2.  **Range Texture:** Create a `Texture3D` with dimensions `bricks->range.stride`, internal format `GL_RG16F`, type `GL_HALF_FLOAT`, and data from `bricks->range.data`. Set wrap modes to `GL_CLAMP_TO_BORDER` and filters to `GL_NEAREST` [S3, unofficial].
++3.  **Range Mipmaps:** Generate mipmaps for the range texture by iterating `i` from 0 to `bricks->range_mipmaps.size()`. Call `glTexImage3D` with level `i + 1`, internal format `GL_RG16F`, dimensions from `bricks->range_mipmaps[i].stride`, and data from `bricks->range_mipmaps[i].data` [S3, unofficial].
++4.  **Atlas Texture:** Create a `Texture3D` with dimensions `bricks->atlas.stride`, internal format `GL_COMPRESSED_RED`, type `GL_UNSIGNED_BYTE`, and data from `bricks->atlas.data`. Set wrap modes to `GL_CLAMP_TO_BORDER` and filters to `GL_NEAREST` [S3, unofficial].
++5.  **Return:** Return a `BrickGridGL` struct containing the created `indirection`, `range`, and `atlas` textures, along with `bricks->transform` [S3, unofficial].
+ 
+ ## Operating characteristics
+-**Time and Memory Complexity:**
+-*   **Time:** $O(N)$ where $N$ is the number of voxels, as the entire data buffer must be copied to the GPU. Mipmap generation adds an additional $O(N)$ cost.
+-*   **Memory:** $O(N)$ bytes for the texture storage on the GPU. For RGBA8, this is $4N$ bytes. For R8, this is $N$ bytes.
+-
+-**Measured Performance:**
+-*   Performance depends on the PCIe bandwidth and the size of the volume. For a $200 \times 200 \times 200$ RGBA volume, the data size is $3.2$ MB, which uploads quickly on modern hardware.
+-
+-**Scaling:**
+-*   Scaling is linear with volume size. Larger volumes require more bandwidth and memory.
+-
+-**Strengths and Limitations:**
+-*   **Strengths:** Simple to implement, widely supported, efficient for static or infrequently updated volumes.
+-*   **Limitations:** Not suitable for dynamic volumes that change every frame due to the overhead of CPU-to-GPU transfer. Mipmap generation requires power-of-two dimensions or specific driver support.
+-
+-**When to Use:**
+-*   Use for static volumes or volumes that change infrequently.
+-*   Use when the volume data is pre-classified and ready for rendering.
+-
+-**When Not to Use:**
+-*   Do not use for dynamic volumes requiring frequent updates; consider [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) or other methods for better performance.
+-*   Do not use if the volume dimensions are not compatible with the hardware's texture size limits.
++*   **Time Complexity:** $O(N)$ where $N$ is the number of voxels, as each voxel's data is copied once. Mipmap generation is $O(N)$ as well, assuming a constant number of levels.
++*   **Memory Complexity:** $O(N)$ for the GPU texture storage. The CPU buffer also requires $O(N)$ memory.
++*   **Performance:** Upload speed is limited by PCIe bandwidth. For a $200^3$ RGBA volume, the data size is $200^3 \times 4 = 3.2$ MB, which uploads quickly on modern hardware.
++*   **Strengths:** Simple to implement for dense volumes. OpenGL handles memory management and filtering.
++*   **Limitations:** Not suitable for very large volumes that exceed VRAM. Mipmap generation adds CPU overhead. The method assumes a monolithic texture, which may not be efficient for sparse data.
++*   **When to use:** Small to medium dense volumes where simplicity is preferred.
++*   **When not to use:** Very large sparse volumes (use [Sparse Volume Texture Setup](7432-sparse-volume-texture-setup.md) or brick grids) or when temporal data needs to be stored efficiently (use [Volume Atlas Texture Update](7157-volume-atlas-texture-update.md)).
+ 
+ ## Background
+-This method is based on standard OpenGL practices for uploading 3D texture data. The specific implementation details are derived from open-source volume rendering projects [S1, unofficial][S2, unofficial].
++The method originates from basic OpenGL volume rendering tutorials and implementations [S1, unofficial]. It is a standard technique for transferring volumetric data to the GPU for raycasting or other rendering techniques. The specific implementation details (such as `GL_CLAMP` vs `GL_CLAMP_TO_EDGE`) vary between implementations [S1, unofficial][S2, unofficial].
+ 
+ ## Sources
+ [S1] Dy111111/volumeRenderingGPU, https://github.com/Dy111111/volumeRenderingGPU, fetched 2026-10-26 (unofficial)
+-[S2] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)+[S2] GitHub - m-pilia/volume-raycasting: Simple visualiser based on GPU ..., https://github.com/m-pilia/volume-raycasting, fetched 2026-10-27 (unofficial)
++[S3] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)

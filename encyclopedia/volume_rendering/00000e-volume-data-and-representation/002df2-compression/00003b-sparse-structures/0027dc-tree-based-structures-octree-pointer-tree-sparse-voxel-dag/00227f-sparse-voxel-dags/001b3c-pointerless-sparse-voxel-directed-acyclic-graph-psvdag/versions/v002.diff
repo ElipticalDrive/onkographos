@@ -1,0 +1,246 @@
+--- v001.md
++++ v002.md
+@@ -33,9 +33,9 @@
+ *   **Header Tags (HT):** 2-bit identifiers for child references [S1]:
+     *   `'00'`: Passive child (empty). No further data follows.
+-    *   `'01'`: Label (LAB) child. The node is a unique template. Followed by a Label and the full binary representation of the child node.
+-    *   `'10'`: Caller (CAL) child. The node is a non-unique reference. Followed by a Caller.
+-    *   `'11'`: Direct child. The node is unique. Followed by the full binary representation of the child node.
++    *   `'01'`: Label (LAB) child. The node is a unique template. Followed by a Label and the full binary representation of the child node [S1].
++    *   `'10'`: Caller (CAL) child. The node is a non-unique reference. Followed by a Caller [S1].
++    *   `'11'`: Direct child. The node is unique. Followed by the full binary representation of the child node [S1].
+ *   **Label (LAB) and Caller (CAL):** Both have the structure `<SIZ><VAL>` [S1].
+-    *   **SIZ:** 5-bit unsigned integer (0–31). Represents the length of VAL minus 1.
++    *   **SIZ:** 5-bit unsigned integer (0–31). Represents the length of VAL minus 1 [S1].
+     *   **VAL:** Variable-length bit vector of length $SIZ + 1$ bits. Range $0$ to $2^{SIZ+1}-1$. If $SIZ=0$, VAL is 1 bit [S1].
+     *   **Uniqueness:** Labels and Callers are unique within a specific level $l$. The level index is not stored but derived during traversal [S1]. A Caller references the same node as a Label if they share the same level, SIZ, and VAL [S1].
+@@ -45,15 +45,14 @@
+ The construction follows the bottom-up reduction principles of SVDAGs [Parent], with specific adaptations for pointerless encoding [S1, S2]:
+ 
+-1.  **Voxelization:** Convert the input geometry into a binary voxel grid $R$ of size $2^n \times 2^n \times 2^n$ [S2].
+-2.  **Tree Construction:** Build a standard Sparse Voxel Octree (SVO) from the grid. Identify common subtrees to form a Sparse Voxel DAG (SVDAG) using bottom-up reduction [Parent].
+-3.  **Frequency Analysis:** For each level $l$ from $n-2$ down to 0:
++1.  **Tree Construction:** Build a standard Sparse Voxel Octree (SVO) from the grid, then identify common subtrees to form a Sparse Voxel DAG (SVDAG) using bottom-up reduction [Parent].
++2.  **Frequency Analysis:** For each level $l$ from $n-2$ down to 0:
+     *   Identify all nodes at level $l$ that are referenced more than once from level $l-1$. Let this set be $NOD$ [S1].
+-    *   Count the reference frequency for each node in $NOD$.
++    *   Count the reference frequency for each node in $NOD$ [S1].
+     *   Sort $NOD$ in descending order of frequency: $NOD = \{nod_0, nod_1, \dots, nod_{p-1}\}$ where $freq(nod_i) \ge freq(nod_{i+1})$ [S1].
+-4.  **Label Assignment (Frequency-Based Compaction):**
++3.  **Label Assignment (Frequency-Based Compaction):**
+     *   Generate a set of labels $LAB = \{lab_0, lab_1, \dots, lab_{p-1}\}$ sorted by ascending binary length [S1].
+     *   Assign the shortest label $lab_i$ to the most frequent node $nod_i$ [S1].
+-    *   The label $lab_i$ consists of $SIZ_i$ and $VAL_i$. The first label is $SIZ=0, VAL=0$. Subsequent labels increment $VAL$ until overflow, then increment $SIZ$ [S1].
+-5.  **Binary Encoding:**
++    *   The label $lab_i$ consists of $SIZ_i$ and $VAL_i$ [S1]. Labels are generated sequentially: $VAL$ increments by 1 until it reaches $2^{SIZ+1}-1$, then resets to 0 and $SIZ$ increments by 1 [S1].
++4.  **Binary Encoding:**
+     *   Traverse the SVDAG in Depth-First order [S1].
+     *   For each node at level $l$:
+@@ -65,144 +64,81 @@
+     *   Omit trailing passive children from the CHNM sequence [S1].
+     *   Prepend the ACHNC to each Inner Node [S1].
+-6.  **Leaf Encoding:** At level $n-1$, encode Leaf Nodes as 8-bit vectors using the selected space-filling curve [S1].
++5.  **Leaf Encoding:** At level $n-1$, encode Leaf Nodes as 8-bit vectors using the selected space-filling curve [S1].
+ 
+ **Pseudocode**
+ ```python
+-def encode_psvdag(voxel_grid, n):
++def encode_psvdag(nodes_per_level, n):
+     """
+-    Encodes a 3D voxel grid into a PSVDAG binary stream.
+-    voxel_grid: 3D array of size 2^n x 2^n x 2^n, values 0 or 1.
++    Encodes a pre-constructed PSVDAG (nodes per level) into a binary stream.
++    nodes_per_level: list of lists. nodes_per_level[l] contains nodes at level l.
++    Each node is a dict: {'id': int, 'child_mask': int (8 bits), 'children': list of node ids or None, 'freq': int, 'label': (SIZ, VAL) or None, 'voxels': list of 8 bits}
+     n: level count (grid size 2^n).
+-    Returns: binary stream (list of bits).
++    Returns: list of bits (0/1).
+     """
+-    # Step 1: Build SVO and SVDAG (Bottom-Up Reduction)
+-    # This step produces a DAG where nodes are identified by their child structure.
+-    # We assume a function build_svodag that returns a list of nodes per level.
+-    # Each node has: id, child_mask (8 bits), children (list of node ids or None), 
+-    # and frequency (number of parents referencing it).
+-    svodag_nodes = build_svodag(voxel_grid, n)
+-    
+-    # Step 2: Frequency-Based Label Assignment
+-    # For each level l from n-2 down to 0
+-    level_labels = {} # Maps level l to a list of (SIZ, VAL) tuples
+-    
+-    for l in range(n - 2, -1, -1):
+-        nodes_at_level = svodag_nodes[l]
+-        # Identify nodes referenced more than once
+-        frequent_nodes = [node for node in nodes_at_level if node.frequency > 1]
+-        
+-        if not frequent_nodes:
+-            level_labels[l] = []
+-            continue
+-            
+-        # Sort by frequency descending
+-        frequent_nodes.sort(key=lambda x: x.frequency, reverse=True)
+-        
+-        # Generate labels sorted by length ascending
+-        # Label 0: SIZ=0, VAL=0 (length 1 bit)
+-        # Label 1: SIZ=0, VAL=1 (length 1 bit) ... up to SIZ=0, VAL=1
+-        # Then SIZ=1, VAL=0 (length 2 bits), etc.
+-        labels = []
+-        siz = 0
+-        val = 0
+-        while len(labels) < len(frequent_nodes):
+-            # Length of this label is siz + 1
+-            labels.append((siz, val))
+-            val += 1
+-            if val >= (1 << (siz + 1)):
+-                val = 0
+-                siz += 1
+-                if siz > 31:
+-                    raise ValueError("Label space exhausted")
+-        
+-        # Assign labels to nodes
+-        for i, node in enumerate(frequent_nodes):
+-            node.label = labels[i]
+-            
+-        level_labels[l] = labels
++    stream = []
++    # Track which nodes at each level have already been encoded as templates
++    # to ensure DFS order emits Label before Caller.
++    template_emitted = [set() for _ in range(n - 1)]
+ 
+-    # Step 3: Encode Binary Stream
+-    stream = []
+-    
+-    # Helper to encode a node's binary representation recursively
+     def encode_node(node_id, level):
+-        node = svodag_nodes[level][node_id]
++        node = nodes_per_level[level][node_id]
+         
+         # Leaf Node (Level n-1)
+         if level == n - 1:
+-            # Encode 8 voxels based on space-filling curve
+-            voxels = get_voxels_for_octant(node_id, level, n)
+-            stream.extend(voxels)
++            # Encode 8 voxels based on space-filling curve (z-order or Hilbert)
++            stream.extend(node['voxels'])
+             return
+ 
+         # Inner Node
+         # 1. Encode ACHNC
+-        active_count = count_active_children(node)
++        active_count = sum(1 for c in node['children'] if c is not None)
+         achnc_val = active_count - 1
+         stream.extend(int_to_bits(achnc_val, 3))
+         
+         # 2. Encode CHNM (Header Tags)
+-        # Determine which children are active
+-        children = node.children
++        children = node['children']
+         active_indices = [i for i, c in enumerate(children) if c is not None]
++        last_active_idx = max(active_indices) if active_indices else -1
+         
+-        # Iterate through octants 0 to 7
+         for i in range(8):
+             child_id = children[i]
+             
+-            # Passive child
+             if child_id is None:
+-                # Only encode '00' if it appears before the last active child
+-                # Or if it's the only child? No, passive children after last active are omitted.
+-                # We need to know if this is the last active child.
+-                if i in active_indices:
+-                    # This is an active child.
+-                    # Check if it's the last active one
+-                    is_last_active = (i == max(active_indices))
+-                    
+-                    # Determine if this child is a template or a caller
+-                    # In the first pass (Depth-First), we encounter the template first.
+-                    # We need to know if this specific reference is the first one.
+-                    # This requires tracking state or a two-pass approach.
+-                    # For simplicity, assume we are building the stream in a way that
+-                    # templates are encountered before callers.
+-                    
+-                    # Check if this node has a label assigned (it is a common subtree)
+-                    if node_id in get_common_subtree_ids(level):
+-                        # It is a common subtree.
+-                        # If this is the first reference (template), encode Label + Node
+-                        # If this is a subsequent reference, encode Caller
+-                        # Note: The source implies Depth-First traversal ensures Label comes first.
+-                        # We need to track if we have already encoded the template for this node_id.
+-                        if not is_template_encoded(node_id):
+-                            mark_template_encoded(node_id)
+-                            stream.extend("01") # HT for Label
+-                            siz, val = node.label
+-                            stream.extend(int_to_bits(siz, 5))
+-                            stream.extend(int_to_bits(val, siz + 1))
+-                            encode_node(child_id, level + 1)
+-                        else:
+-                            stream.extend("10") # HT for Caller
+-                            siz, val = node.label
+-                            stream.extend(int_to_bits(siz, 5))
+-                            stream.extend(int_to_bits(val, siz + 1))
++                # Passive child
++                # Only encode '00' if it appears before or at the last active child
++                if i <= last_active_idx:
++                    stream.extend("00")
++                # Else: omit trailing passive children
++            else:
++                # Active child
++                # Check if this child node is a common subtree (freq > 1)
++                child_node = nodes_per_level[level + 1][child_id]
++                if child_node['freq'] > 1:
++                    # Common subtree: needs Label/Caller
++                    if child_id not in template_emitted[level + 1]:
++                        # First reference (template): emit Label + Node
++                        template_emitted[level + 1].add(child_id)
++                        stream.extend("01") # HT for Label
++                        siz, val = child_node['label']
++                        stream.extend(int_to_bits(siz, 5))
++                        stream.extend(int_to_bits(val, siz + 1))
++                        encode_node(child_id, level + 1)
+                     else:
+-                        # Unique node
+-                        stream.extend("11") # HT for Direct Node
+-                        encode_node(child_id, level + 1)
++                        # Subsequent reference (caller): emit Caller
++                        stream.extend("10") # HT for Caller
++                        siz, val = child_node['label']
++                        stream.extend(int_to_bits(siz, 5))
++                        stream.extend(int_to_bits(val, siz + 1))
+                 else:
+-                    # Passive child.
+-                    # Only encode if it is NOT after the last active child.
+-                    if i <= max(active_indices) if active_indices else True:
+-                        stream.extend("00") # HT for Passive
+-                    # Else: omit
+-            else:
+-                # Active child (child_id is not None)
+-                # This logic is handled inside the 'if i in active_indices' block above
+-                pass
+-                
+-        # Note: The above pseudocode simplifies the "first reference" logic.
+-        # In practice, a global state or a two-pass construction is needed to determine
+-        # which reference is the template.
++                    # Unique node: emit Direct Node
++                    stream.extend("11") # HT for Direct Node
++                    encode_node(child_id, level + 1)
++
++    def int_to_bits(value, num_bits):
++        return [(value >> (num_bits - 1 - i)) & 1 for i in range(num_bits)]
++
++    # Encode root at level 0
++    encode_node(0, 0)
++    return stream
+ ```
+ 
+@@ -212,4 +148,5 @@
+ *   **Traversal Order:** Depth-First traversal is required to ensure that a Label (template) is processed before any Callers referencing it [S1].
+ *   **Precision:** SIZ is limited to 5 bits, allowing VAL up to 32 bits. This limits the maximum number of unique nodes per level to $2^{32}$, but practically constrained by the grid size [S1].
++*   **2D Adaptation:** For 2D grids, ACHNC is 2 bits, CHNM contains 1–4 HTs, and LNODE is 4 bits [S1].
+ 
+ ## Subtopics
+@@ -219,5 +156,5 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Construction requires bottom-up reduction and frequency analysis, similar to SVDAG construction, plus label assignment. Traversal is more complex than SVO/SVDAG due to label resolution, requiring a stack or recursion to resolve callers to templates [S2].
++*   **Time Complexity:** Construction requires bottom-up reduction and frequency analysis, similar to SVDAG construction, plus label assignment. Traversal requires resolving labels and callers, making it unsuitable for quick traversal compared to pointer-based structures [S2].
+ *   **Memory Complexity:** Significantly lower than SVDAG and PSVO. By eliminating 32-bit pointers and using variable-length labels, PSVDAG achieves compression ratios up to 5.33-fold compared to standard SVDAGs [S1, S2].
+ *   **Performance:** Suitable for archiving and streaming due to compact binary representation [S2]. Unsuitable for real-time rendering or quick traversal due to the overhead of resolving labels and callers [S2].

@@ -1,0 +1,216 @@
+GPU-optimized version of the MuJoCo physics simulator, designed for NVIDIA hardware. - Fix native SDF gradients and rejected collision steps by ooctipus · Pull Request #1684 · google-deepmind/mujoco_warp
+
+Fix native SDF gradients and rejected collision steps by ooctipus · Pull Request #1684 · google-deepmind/mujoco_warp · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+ooctipus
+commented
+Sep 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Native SDF collision has three correctness differences from CPU MuJoCo: octree gradients omit the conversion from normalized cell coordinates to physical coordinates, an exhausted line search returns the rejected trial, and narrowphase samples empty AABB intersections admitted by the broadphase candidate gap.
+Apply the gradient chain rule, retain the previous point and distance when backtracking finds no improvement, and reject disjoint geometric bounds before sampling. These follow MuJoCo's octree derivatives, line-search fallback, and AABB rejection. The bounds check preserves CPU SDF behavior, including its use of unexpanded geometric bounds when margin or gap admits a broadphase candidate.
+Add regressions for an anisotropic linear field, a rejected step across a piecewise-linear minimum, and two separated SDF cubes with a candidate gap. The bounds test covers one and two worlds, prefills the contact count, and checks that only the overlapping world generates contacts. On upstream, the linear field returns [0.004, 0.016, 0.048] instead of [1, 2, 3], and the cubes generate 40 contacts instead of CPU MuJoCo's zero. All three new tests fail before the fixes. With gradient scaling corrected but the old fallback retained, the rejected-step test also fails independently: it returns a worse distance of about -0.000440 instead of preserving -0.000499.
+This is a focused correctness fix for the current collision path. The broader refactor in #1457 already includes the gradient scaling and rejected-step fallback, but also normalizes volume gradients and expands candidate bounds for margin/gap. This PR does not supersede that refactor; its regression coverage will need adaptation when the refactor is integrated.
+Validation on GPU1: all 74 collision-driver tests passed, including the four regression cases. Ruff, formatting and kernel analyzer passed. This fix is a prerequisite for the native threading benchmark in #1637.
+Correct native SDF gradients and rejected collision steps
+2b47a15
+ooctipus
+mentioned this pull request
+Sep 22, 2026
+Add native Panda threading control-replay benchmark
+#1637
+Closed
+thowell
+commented
+Sep 22, 2026
+Copy link
+Copy Markdown
+Collaborator
+@ooctipus please take a look at this sdf collision refactor #1457. should this pr (1684) supercede (1457)? thanks!
+ooctipus
+commented
+Sep 22, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks Taylor. I checked #1457; it already includes the gradient scaling and rejected-step fixes, plus the larger mesh–SDF/BVH changes, so this PR shouldn't replace it.
+I'd suggest merging this smaller fix first, then rebasing #1457. We'll need to adapt the tests there: #1457 normalizes the gradients and expands the bounds for margin/gap, while the tests here follow the CPU behavior.
+thowell
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Collaborator
+some recommendations:
+1. Hoist inv_cell Division and Branching in find_oct
+Issue: inv_cell = wp.cw_div(wp.vec3(1.0), vmax - vmin) executes 3 floating-point divisions unconditionally, even when grad=False (used during value-only clearance evaluations in line search). In addition, if not grad is evaluated inside the 8-iteration loop despite grad being invariant.
+Recommendation: Check if not grad once outside the loop and only compute inv_cell in the gradient evaluation branch.
+File: collision_sdf.py
+```
+# Before
+inv_cell = wp.cw_div(wp.vec3(1.0), vmax - vmin)
+for j in range(8):
+  if not grad:
+    rx[j] = (
+      (coord[0] if j & 1 else 1.0 - coord[0])
+      * (coord[1] if j & 2 else 1.0 - coord[1])
+      * (coord[2] if j & 4 else 1.0 - coord[2])
+    )
+  else:
+    # fmt: off
+    rx[j] = ((1.0 if j & 1 else -1.0) * (coord[1] if j & 2 else 1.0 - coord[1])
+             * (coord[2] if j & 4 else 1.0 - coord[2]) * inv_cell[0])
+    ry[j] = ((coord[0] if j & 1 else 1.0 - coord[0]) * (1.0 if j & 2 else -1.0)
+             * (coord[2] if j & 4 else 1.0 - coord[2]) * inv_cell[1])
+    rz[j] = ((coord[0] if j & 1 else 1.0 - coord[0]) * (coord[1] if j & 2 else 1.0 - coord[1])
+             * (1.0 if j & 4 else -1.0) * inv_cell[2])
+    # fmt: on
+return node, (rx, ry, rz)
+
+# After
+if not grad:
+  for j in range(8):
+    rx[j] = (
+      (coord[0] if j & 1 else 1.0 - coord[0])
+      * (coord[1] if j & 2 else 1.0 - coord[1])
+      * (coord[2] if j & 4 else 1.0 - coord[2])
+    )
+else:
+  inv_cell = wp.cw_div(wp.vec3(1.0), vmax - vmin)
+  for j in range(8):
+    # fmt: off
+    rx[j] = ((1.0 if j & 1 else -1.0) * (coord[1] if j & 2 else 1.0 - coord[1])
+             * (coord[2] if j & 4 else 1.0 - coord[2]) * inv_cell[0])
+    ry[j] = ((coord[0] if j & 1 else 1.0 - coord[0]) * (1.0 if j & 2 else -1.0)
+             * (coord[2] if j & 4 else 1.0 - coord[2]) * inv_cell[1])
+    rz[j] = ((coord[0] if j & 1 else 1.0 - coord[0]) * (coord[1] if j & 2 else 1.0 - coord[1])
+             * (1.0 if j & 4 else -1.0) * inv_cell[2])
+    # fmt: on
+return node, (rx, ry, rz)
+```
+2. Pre-Fill Tested Fields Before Collision Execution
+Issue: test_data.fixture initializes d from CPU reference state, where d.nacon starts at 0 for disjoint geoms. Asserting d.nacon == 0 without pre-filling could mask a failure where the kernel did not execute.
+Recommendation: Pre-fill d.nacon.fill_(-1) prior to invoking mjw.collision(m, d) to guarantee that mjw.collision ran and transitioned d.nacon to 0.
+File: collision_driver_test.py
+```
+# Before
+mujoco.mj_collision(mjm, mjd)
+mjw.collision(m, d)
+self.assertEqual(mjd.ncon, 0)
+self.assertEqual(d.nacon.numpy()[0], 0)
+
+# After
+mujoco.mj_collision(mjm, mjd)
+d.nacon.fill_(-1)
+mjw.collision(m, d)
+self.assertEqual(mjd.ncon, 0)
+self.assertEqual(d.nacon.numpy()[0], 0)
+```
+3. Multi-World Parameterization with Heterogeneous Worlds
+Issue: test_sdf_disjoint_bounds_with_candidate_gap only tests a single world (nworld=1). It does not verify that early-returning on empty AABB bounds in one world preserves valid contact generation across batched worlds.
+Recommendation: Parameterize for nworld: 1, 2 (@parameterized.parameters(1, 2)) and vary world 1 to have overlapping cubes generating active contacts.
+File: collision_driver_test.py
+```
+# Before
+def test_sdf_disjoint_bounds_with_candidate_gap(self):
+  """A candidate gap must not seed SDF minimization inside an empty AABB intersection."""
+  mjm, mjd, m, d = test_data.fixture(
+    xml="""...""",
+  )
+  mujoco.mj_collision(mjm, mjd)
+  mjw.collision(m, d)
+  self.assertEqual(mjd.ncon, 0)
+  self.assertEqual(d.nacon.numpy()[0], 0)
+
+# After
+@parameterized.parameters(1, 2)
+def test_sdf_disjoint_bounds_with_candidate_gap(self, nworld):
+  """A candidate gap must not seed SDF minimization inside an empty AABB intersection."""
+  mjm, mjd, m, d = test_data.fixture(
+    xml="""...""",
+    nworld=nworld,
+  )
+
+  mjds = [mjd]
+  if nworld == 2:
+    mjd1 = mujoco.MjData(mjm)
+    qpos = d.qpos.numpy()
+    qpos[1, 2] = 0.015  # shift z from 0.022 to 0.015 so world 1 penetrates
+    d.qpos.assign(qpos)
+    mjd1.qpos[:] = qpos[1]
+    mjds.append(mjd1)
+
+  for w in range(nworld):
+    mujoco.mj_collision(mjm, mjds[w])
+
+  d.nacon.fill_(-1)
+  mjw.collision(m, d)
+
+  self.assertEqual(mjds[0].ncon, 0)
+  if nworld == 1:
+    self.assertEqual(d.nacon.numpy()[0], 0)
+  else:
+    self.assertGreater(mjds[1].ncon, 0)
+    self.assertEqual(d.nacon.numpy()[0], mjds[1].ncon)
+```
+Hoist SDF gradient work and strengthen batched collision test
+5469f43
+ooctipus
+commented
+Sep 23, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Thanks Taylor, all three are in 5469f43. Moved the gradient branch outside the loop, added the -1 sentinel, and covered one and two worlds. The two-world test refreshes kinematics after moving the cube and checks that only the overlapping world produces contacts. All 74 collision-driver tests pass on GPU1, along with lint.
+thowell
+approved these changes
+Sep 23, 2026
+View reviewed changes
+thowell
+left a comment
+Copy link
+Copy Markdown
+Collaborator
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+thanks @ooctipus!
+Hide details
+View details
+thowell
+merged commit dcaa094
+into
+google-deepmind:main
+Sep 23, 2026
+23 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

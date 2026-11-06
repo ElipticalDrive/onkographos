@@ -1,0 +1,145 @@
+This has been come up a few times, and we discussed this yesterday If a user defined function includes iterative algorithm with a fixed point the implict gradient is 0, but autodiff will diff through that iterative algorithm which may si...
+
+User defined gradients · Issue #3432 · stan-dev/stan · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+User defined gradients #3432
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+User defined gradients#3432
+Copy link
+Labels
+feature
+Description
+avehtari
+opened on Sep 11, 2026
+Issue body actions
+This has been come up a few times, and we discussed this yesterday
+If a user defined function includes iterative algorithm with a fixed point the implict gradient is 0, but autodiff will diff through that iterative algorithm which may significant cost per each iteration. In such cases it would be useful if the user could define the gradient computation. If that gradient computation could be part of the user defined function (e.g. returning a tuple of value and gradient), then the value and gradient could be computed using the same intermediate values. This would be useful in cases, where the user defined function is something which would not be likely to be added to Stan math, but where avoiding the autodiff through iterative part could make the gradient computation order of magnitude faster.
+It's not clear how complicated this would be to implement, but it was suggested that I create this issue and tag @SteveBronder
+Activity
+shahd-elgouhary commented on Sep 14, 2026
+shahd-elgouhary
+on Sep 14, 2026
+More actions
+Can I take this issue, please?
+WardBrian commented on Sep 14, 2026
+WardBrian
+on Sep 14, 2026
+Member
+More actions
+Hi @shahd-elgouhary this issue is really intended more for discussion, and would be a larger project if/when implementation occurs.
+Can I recommend browsing "good first issues" here or in stan-dev/math?
+bob-carpenter commented on Sep 14, 2026
+bob-carpenter
+on Sep 14, 2026
+Member
+More actions
+The latest discussion I can find on user-defined is 4+ years old mostly between me and @andrjohns. Buried in it is a sketchy attempt to explain
+why it has to be in the adjoint-Jacobian product form rather than explicitly building Jacobians (e.g., quadratic vs. cubic memory), and
+why we would like to be able to share computation between values and gradients (e.g., not needing to recompute values or some of the terms or factors leading to them).
+https://discourse.mc-stan.org/t/user-defined-gradients-updates/26385
+bob-carpenter commented on Sep 14, 2026
+bob-carpenter
+on Sep 14, 2026
+Member
+More actions
+I just gave it a few more minutes thought and realize that our real problem is that we would really like this to return a continuation with closure. That is, ideally what a user-defined function would return would be like how we write autodiff internally---it would return a value and supply a closure to use as a continuation in the reverse pass. The signature would be something like this:
+```
+(value, continuation[1] ..., continuation[N])  f(argument[1], ..., argument[N])
+```
+If argument n is of type and size T[n] and the value is type and size T[0], then the continuations will have types:
+```
+continuation[n]: T[0] -> T[n]
+```
+I say that this is a closure, because you probably also want to save bits of the computation leading to the value for use in the continuation calculations. This is the part I don't know how to do---save intermediate values calculated in the forward pass for reuse in reverse pass.
+In the reverse pass, they will be given the adjoint of the return value and will be expected to return
+```
+continuation[n](v) = value.adjoint * gradient_arg[n] f(arg[1],..., arg[N])
+```
+where the * is conforming to whatever the types are. It's easiest to just think of this all as flattened arrays mathematically and in terms of the PyTree structures used by JAX computationally. Stan is a bit of hack in the middle ground where the argument types that matter here are scalar, vector, row vector, or matrix.
+Here's a short tutorial I wrote on the forums ages ago about how to think about autodiff this way and it explains what closures and continuations are (terms from programming language theory not everyone in stats is going to be familiar with).
+https://discourse.mc-stan.org/t/a-new-continuation-based-autodiff-by-refactoring/5037
+bob-carpenter commented on Sep 14, 2026
+bob-carpenter
+on Sep 14, 2026
+Member
+More actions
+The real question is whether there's a useful feature we can actually implement in the Stan language? Until there's a design, this issue isn't ready for coding.
+WardBrian commented on Sep 14, 2026
+WardBrian
+on Sep 14, 2026
+Member
+More actions
+The way that a system like JAX handles this is that a function with custom gradients has a forward, which returns a tuple where the first element is the value and all other elements are 'scratch space' for use in the reverse mode. The reverse mode function accepts the same tuple type and returns a tuple of the same size and types of the arguments of the forward function with the adjoints.
+This is actually perfectly adaptable to Stan, I think. Here's the straightforward translation of their example function:
+```
+real f(real x, real y){
+  return sin(x) * y;
+}
+
+tuple(real, tuple(real, real, real)) f_fwd(real x, real y) {
+  real sin_x = sin(x);
+  return sin_x * y, (cos(x), sin_x, y);
+}
+
+tuple(real, real) f_bwd(tuple(real, real, real) res, real g){
+  real cos_x, sin_x, y;
+  cos_x, sin_x, y = res;
+  return (cos_x * g * y, sin_x * g);
+}
+```
+👍React with 👍2Reacted by Bob Carpenter and Yi Zhang
+bob-carpenter commented on Sep 14, 2026
+bob-carpenter
+on Sep 14, 2026
+Member
+More actions
+This is really great, @WardBrian---I couldn't figure out how to do this even after tuples.
+I think it's also worth noting that both f_fwd and f_bwd are evaluated with double types not autodiff types even when f is being applied to autodiff types. That means it's equally efficient for these scalar types to pass x and compute cos(x) in f_bwd. I was generally lazy in the first pass of coding Stan autodiff. Or is there some situation where one would be preferred to the other?
+WardBrian commented on Sep 14, 2026
+WardBrian
+on Sep 14, 2026
+Member
+More actions
+I think it's also worth noting that both f_fwd and f_bwd are evaluated with double types not autodiff types even when f is being applied to autodiff types. That means it's equally efficient for these scalar types to pass x and compute cos(x) in f_bwd. I was generally lazy in the first pass of coding Stan autodiff. Or is there some situation where one would be preferred to the other?
+You are correct, I was just translating the JAX snippet directly (maybe there would be some reason to prefer it in their world?)
+WardBrian commented on Sep 14, 2026
+WardBrian
+on Sep 14, 2026
+Member
+More actions
+The other thing worth discussing is how we'd like the user to tell us they've done this. In JAX, you annotate f with @jax.custom_vjp and then have to call f.defvjp(f_fwd, f_bwd) at some later point.
+In Stan, we could rely on function names (meaning if you have the triplet of functions foo, foo_fwd, foo_bwd, we just assume you're doing this), but that would prevent some kinds of typechecking and help (e.g., if you accidentally named the function foo_backward, we'd have no way of knowing your intent, and you'd miss out on the functionality).
+So I'd like some other way of doing it, but I'm not sure what that is.
+avehtari
+added
+feature
+on Oct 19, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+feature
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

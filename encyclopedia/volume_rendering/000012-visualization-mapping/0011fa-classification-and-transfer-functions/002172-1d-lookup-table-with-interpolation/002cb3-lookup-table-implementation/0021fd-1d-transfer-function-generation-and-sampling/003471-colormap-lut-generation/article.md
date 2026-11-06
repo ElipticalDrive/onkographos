@@ -1,0 +1,123 @@
+# Colormap LUT Generation
+
+Also called: Named Colormap LUT Generation, TransferFunction Colormap Generation
+
+## Overview
+Colormap LUT Generation constructs a fixed-size lookup table (LUT) that maps scalar values to RGBA colors using a predefined named colormap (e.g., Viridis, Jet, Inferno) [S1, S2, unofficial]. It differs from manual transfer function definition by abstracting the color gradient into a standard library type, ensuring perceptual uniformity or specific visual properties defined by the colormap standard [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- `name`: String identifier for the colormap (e.g., 'inferno', 'viridis', 'jet') [S1, S2, unofficial].
+- `n_bins`: Integer number of entries in the LUT. Default is 256 [S1, S2, unofficial].
+
+**Outputs:**
+- A LUT array of size `n_bins` containing RGBA values. In [S1, unofficial], this is a `uint8` array of shape `(n_bins, 3)` for RGB. In [S2, unofficial], this is a vector of `glm::vec4` containing `(R, G, B, normalized_position)` [S1, S2, unofficial].
+
+**Data Structures:**
+- **LUT (S1):** `np.uint8` array, shape `(n_bins, 3)`. Values are 0–255.
+- **LUT (S2):** `std::vector<glm::vec4>` or GPU buffer. Each element stores `r, g, b` (0.0–1.0) and `a` (normalized scalar position 0.0–1.0) [S2, unofficial].
+
+**Steps:**
+1. Initialize the colormap object using the `name` parameter [S1, S2, unofficial].
+2. Iterate `i` from 0 to `n_bins - 1` [S2, unofficial].
+3. Calculate the normalized position `f`:
+   $$ f = \frac{i}{n\_bins} $$
+   [S2, unofficial]
+4. Retrieve the color at `f` from the colormap library [S1, S2, unofficial].
+   - [S1, unofficial] Uses `cm.lut()` to get a float array, selects the first 3 columns (RGB) [S1, unofficial].
+   - [S2, unofficial] Uses `tinycolormap::GetColor(f, type)` [S2, unofficial].
+5. Convert and store the color:
+   - [S1, unofficial] Multiply RGB floats by 255 and cast to `uint8`:
+     $$ \text{LUT}[i] = (\text{RGB} \times 255).\text{astype}(\text{uint8}) $$
+     [S1, unofficial]
+   - [S2, unofficial] Store as `glm::vec4(r, g, b, f)` and push to the LUT vector [S2, unofficial].
+6. Upload the LUT to GPU memory if required by the rendering pipeline [S2, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+
+def generate_colormap_lut(name: str, n_bins: int = 256):
+    """
+    Generates a 256-entry (or n_bins) LUT from a named colormap.
+    Returns RGB values as uint8.
+    """
+    # [G] Assuming 'cmap' library is available and initialized.
+    # In practice, this might require installing 'matplotlib' or 'cmap' package.
+    try:
+        import cmap
+    except ImportError:
+        raise ImportError("cmap library not found. Install via pip install cmap.")
+
+    # Step 1: Create Colormap object
+    cm = cmap.Colormap(name)
+
+    # Step 2: Get LUT data
+    # cm.lut() returns a float array of shape (n_bins, 4) or similar
+    lut_float = cm.lut()
+
+    # Step 3: Extract RGB and convert to uint8
+    # Take first 3 columns (RGB), multiply by 255, cast to uint8
+    # Note: Some colormaps include alpha; this method discards it or assumes opaque
+    rgb_uint8 = (lut_float[:, :3] * 255).astype(np.uint8)
+
+    return rgb_uint8
+
+def generate_colormap_lut_tinycolormap(name: str, n_bins: int = 256):
+    """
+    Generates LUT for C++/GLSL pipeline using tinycolormap logic.
+    Returns list of (r, g, b, f) tuples.
+    """
+    lut = []
+    for i in range(n_bins):
+        # Step 2: Calculate normalized position
+        f = float(i) / n_bins
+        
+        # Step 3: Get color from library
+        # [G] Assuming tinycolormap::GetColor returns a struct with r, g, b in [0,1]
+        color = get_color_from_tinycolormap(f, name)
+        
+        # Step 4: Store RGBA with position as alpha or separate field
+        # S2 stores f in the 4th component
+        lut.append((color.r, color.g, color.b, f))
+        
+    return lut
+```
+
+**Edge Cases:**
+- **Invalid Name:** If `name` is not recognized by the library, an exception is raised [S1, S2, unofficial].
+- **Precision:** [S1, unofficial] uses `uint8` (8-bit), limiting color depth to 256 levels per channel. [S2, unofficial] uses float precision for RGB but stores normalized position in the 4th component, which may require unpacking in GLSL [S2, unofficial].
+- **Alpha Channel:** [S1, unofficial] explicitly discards alpha by taking only the first 3 columns [S1, unofficial]. [S2, unofficial] repurposes the alpha channel to store the normalized scalar value `f`, which is non-standard for color LUTs and requires specific handling in the shader [S2, unofficial].
+
+## Subtopics
+
+### [Voxel Color Mapping](2970-voxel-color-mapping.md)
+Maps voxel values to colors using the generated LUT during ray casting.
+
+### [Color Specification](3969-color-specification.md)
+Defines the color space (e.g., sRGB, linear) for the LUT values.
+
+### [Color Blending](5150-color-blending.md)
+Blends colors during volume integration using the LUT outputs.
+
+### [Parametric Function Generation](5349-parametric-function-generation.md)
+Generates LUTs from mathematical functions rather than named presets.
+
+### [Transfer Function Editor (Alpha Pins)](6772-transfer-function-editor-alpha-pins.md)
+Interactive tool for defining custom transfer functions, distinct from named colormaps.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is `n_bins`. Generation is fast and typically done once at initialization [S1, S2, unofficial].
+- **Memory Complexity:** $O(N)$ for the LUT storage. For $N=256$, this is negligible (1 KB for RGB uint8) [S1, S2, unofficial].
+- **Performance:** Lookup is $O(1)$ via texture sampling or array indexing [S1, S2, unofficial].
+- **Strengths:** Standardized, perceptually uniform (e.g., Viridis) or high-contrast (e.g., Jet) color maps; easy to implement [S1, S2, unofficial].
+- **Limitations:** Fixed color gradient; cannot encode arbitrary scalar-to-opacity mappings as flexibly as manual transfer functions [S1, S2, unofficial]. [S2, unofficial]'s use of the alpha channel for scalar position is a specific implementation detail that may not be portable [S2, unofficial].
+
+## Background
+Named colormaps (e.g., Jet, Viridis) originated in scientific visualization libraries like MATLAB and later popularized by Python's Matplotlib and C++ libraries like `tinycolormap` [S1, S2, unofficial]. They are widely used in volume rendering for their ease of use and standardized visual properties [S1, S2, unofficial].
+
+## Sources
+[S1] webgl_volume_demo, https://github.com/PeterC-DLS/webgl_volume_demo, fetched 2026-10-27 (unofficial)
+[S2] volren, https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)

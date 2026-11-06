@@ -1,0 +1,182 @@
+--- v002.md
++++ v003.md
+@@ -14,7 +14,7 @@
+ The core data structure is a single mipmapped 32-bit integer RGBA texture attached to a Frame Buffer Object (FBO) [S1].
+ *   **Base Resolution:** The width ($w$) and height ($h$) of the texture correspond to the viewport dimensions [S1].
+-*   **Voxel Encoding:** Each pixel (texel) in the RGBA texture stores 32 bits of voxel data, representing a column of 32 voxels along the Z-axis [S1]. One bit corresponds to one voxel in the column.
+-*   **Depth Extension:** By using $N$ MRTs, the total depth resolution becomes $32 \times N$ [S1]. For example, 8 MRTs provide a depth of 1024 cells [S1].
+-*   **Hierarchy:** Each mip-level $L$ corresponds to an octree depth level. A texel at level $L$ represents a $2 \times 2$ block of texels from level $L-1$ in the X-Y plane. The value of a texel at level $L$ is the bitwise OR of its four parent texels from level $L-1$ [S1].
++*   **Voxel Encoding:** Each texel stores a 32-bit integer across its RGBA channels, representing a column of 32 voxels along the Z-axis, where one bit corresponds to one voxel in the column [S1].
++*   **Depth Extension:** By using $N$ Multiple Render Targets (MRTs), the total depth resolution becomes $32 \times N$ [S1]. For example, 8 MRTs provide a depth of 1024 cells [S1].
++*   **Hierarchy:** Each mip-level $L$ corresponds to an octree depth level. A texel at level $L$ represents a $2 \times 2$ block of texels from level $L-1$ in the X-Y plane [S1]. The value of a texel at level $L$ is the bitwise OR of its four parent texels from level $L-1$ [S1].
+ 
+ **Parameters:**
+@@ -27,5 +27,5 @@
+ 
+ 1.  **Geometry Transformation (Geometry Shader):**
+-    The input geometry is processed by a Geometry Shader. The geometry is transformed and emitted three times, corresponding to three viewing directions: $-X$, $-Y$, and $-Z$ [S1]. These three transformed versions are rendered into three layers of a layered texture in a single draw call to avoid multiple geometry submissions and reduce bandwidth [S1].
++    The input geometry is processed by a Geometry Shader [S1]. The geometry is transformed and emitted three times, corresponding to three viewing directions: $-X$, $-Y$, and $-Z$ [S1]. These three transformed versions are rendered into three layers of a layered texture in a single draw call to avoid multiple geometry submissions and reduce bandwidth [S1].
+ 
+ 2.  **Fragment Program Execution (Per Direction):**
+@@ -36,5 +36,5 @@
+        
+     b. **Grid Index Calculation:**
+-       Map the world space Z coordinate to the grid's discrete Z-index.
++       Map the world space Z coordinate to the grid's discrete Z-index [S1].
+        Let $minZ$ and $maxZ$ be the grid boundaries [S1].
+        Let $gridParams.z$ be the scaling factor $\frac{127}{maxZ - minZ}$ [S1].
+@@ -74,88 +74,77 @@
+ 
+ ```python
+-def compute_voxel_mask(fPosW, vtw_z_row, grid_min_z, grid_scale):
+-    # 1. Compute world space Z
+-    world_z = (fPosW[0] * vtw_z_row[0] + fPosW[1] * vtw_z_row[1] + 
+-               fPosW[2] * vtw_z_row[2] + fPosW[3] * vtw_z_row[3]) * fPosW[3]
+-    
+-    # 2. Compute local grid index in Z (0 to 127)
+-    local_z = (world_z - grid_min_z) * grid_scale
+-    
+-    # 3. Determine channel offset and bit index
+-    if local_z < 0 or local_z >= 128:
++def compute_voxel_mask(world_z, min_z, scale):
++    # Map world Z to grid index [0, 127]
++    idx = (world_z - min_z) * scale
++    if idx < 0 or idx >= 128:
+         return 0
+-    if local_z >= 96:
+-        channel_offset = 96
+-    elif local_z >= 64:
+-        channel_offset = 64
+-    elif local_z >= 32:
+-        channel_offset = 32
++    # Determine channel offset (0, 32, 64, 96)
++    if idx >= 96:
++        offset = 96
++    elif idx >= 64:
++        offset = 64
++    elif idx >= 32:
++        offset = 32
+     else:
+-        channel_offset = 0
+-        
+-    bit_index = int(local_z - channel_offset)
+-    
+-    # 4. Generate mask
+-    return 1 << bit_index
++        offset = 0
++    bit = int(idx - offset)
++    return 1 << bit
+ 
+-def hierarchical_voxelization(geometry, grid_min_z, grid_max_z, viewport_w, viewport_h, num_mrts):
+-    # Initialize base grid: viewport_w x viewport_h x (num_mrts * 4 channels)
+-    base_grid = [[[0] * viewport_w for _ in range(viewport_h)] for _ in range(num_mrts * 4)]
+-    
++def hierarchical_voxelization(geometry, min_z, max_z, w, h, num_mrts):
++    # Grid: 2D array of 32-bit integers. Each int stores 32 voxels in Z.
++    # Total depth = num_mrts * 32.
++    grid = [[0] * w for _ in range(h)]
++    scale = 127.0 / (max_z - min_z)
+     vtw_z_row = [0, 0, 1, 0] # Z-row of viewport-to-world matrix
+-    grid_scale = 127.0 / (grid_max_z - grid_min_z)
+-    
++
+     # Step 1 & 2: Render from three directions (-X, -Y, -Z)
++    # Geometry is transformed by a Geometry Shader into 3 layers.
+     directional_grids = []
+     for _ in range(3):
+-        current_grid = [row[:] for row in base_grid]
+-        for fragment in rasterize(geometry, current_view):
+-            mask = compute_voxel_mask(fragment.pos, vtw_z_row, grid_min_z, grid_scale)
+-            x, y = fragment.screen_coords
+-            for z_layer in range(len(current_grid)):
+-                current_grid[z_layer][y][x] |= mask
+-        directional_grids.append(current_grid)
+-        
+-    # Step 3: Union the three directional grids
+-    final_grid = [[[0] * viewport_w for _ in range(viewport_h)] for _ in range(num_mrts * 4)]
+-    for z_layer in range(len(base_grid)):
+-        for y in range(viewport_h):
+-            for x in range(viewport_w):
++        pass_grid = [[0] * w for _ in range(h)]
++        # GPU rasterization step produces fragments with screen coords and world-space positions
++        for frag in gpu_rasterize(geometry): 
++            world_z = (frag.pos[0] * vtw_z_row[0] + frag.pos[1] * vtw_z_row[1] +
++                       frag.pos[2] * vtw_z_row[2] + frag.pos[3] * vtw_z_row[3]) * frag.pos[3]
++            mask = compute_voxel_mask(world_z, min_z, scale)
++            x, y = frag.screen_coords
++            pass_grid[y][x] |= mask
++        directional_grids.append(pass_grid)
++
++    # Step 3: Union the three grids
++    final_grid = [[0] * w for _ in range(h)]
++    for y in range(h):
++        for x in range(w):
++            final_grid[y][x] = directional_grids[0][y][x] | directional_grids[1][y][x] | directional_grids[2][y][x]
++
++    # Step 4: Generate mipmaps (X-Y aggregation only, Z constant)
++    mipmaps = [final_grid]
++    curr_w, curr_h = w, h
++    while curr_w > 1 or curr_h > 1:
++        new_w = max(1, curr_w // 2)
++        new_h = max(1, curr_h // 2)
++        next_level = [[0] * new_w for _ in range(new_h)]
++        for y in range(new_h):
++            for x in range(new_w):
+                 val = 0
+-                for grid in directional_grids:
+-                    val |= grid[z_layer][y][x]
+-                final_grid[z_layer][y][x] = val
+-                
+-    # Step 4: Generate mipmaps via bitwise OR of 2x2 blocks in XY plane
+-    hierarchical_grids = [final_grid]
+-    w, h = viewport_w, viewport_h
+-    while w > 1 or h > 1:
+-        new_w = max(1, w // 2)
+-        new_h = max(1, h // 2)
+-        next_level = [[[0] * new_w for _ in range(new_h)] for _ in range(len(final_grid))]
+-        for z_layer in range(len(final_grid)):
+-            for y in range(new_h):
+-                for x in range(new_w):
+-                    val = 0
+-                    for dy in range(2):
+-                        for dx in range(2):
+-                            if y * 2 + dy < h and x * 2 + dx < w:
+-                                val |= final_grid[z_layer][y * 2 + dy][x * 2 + dx]
+-                    next_level[z_layer][y][x] = val
+-        hierarchical_grids.append(next_level)
+-        final_grid = next_level
+-        w, h = new_w, new_h
+-        
+-    return hierarchical_grids
++                for dy in range(2):
++                    for dx in range(2):
++                        if y * 2 + dy < curr_h and x * 2 + dx < curr_w:
++                            val |= mipmaps[-1][y * 2 + dy][x * 2 + dx]
++                next_level[y][x] = val
++        mipmaps.append(next_level)
++        curr_w, curr_h = new_w, new_h
++
++    return mipmaps
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Holes in Boundary Representation:** Single-direction rasterization creates holes where surface slopes are close to the grid's Z-axis. This method avoids this by rasterizing from three orthogonal directions and unioning the results [S1].
++*   **Holes in Boundary Representation:** Single-direction rasterization creates holes where surface slopes are close to the grid's Z-axis [S1]. This method avoids this by rasterizing from three orthogonal directions and unioning the results [S1].
+ *   **Precision:** The method relies on 32-bit integer arithmetic. Correct mapping from floating-point world coordinates to integer grid indices is required to avoid off-by-one errors [S1].
+-*   **Depth Range:** The grid depth is limited by the number of MRTs and channels. For depths exceeding 1024, texture tiling must be used [S1].
++*   **Depth Range:** The grid depth is limited by the number of MRTs and channels [S1]. For depths exceeding 1024, texture tiling must be used [S1].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The voxelization is a hardware rasterization process, making it highly efficient. Performance is largely independent of the fragment processing complexity, as the bottleneck is the fixed-function rasterizer [S1].
+-*   **Memory Complexity:** Memory usage is proportional to the grid resolution. A $512^3$ grid requires 16 MB (using 4 MRTs) [S1]. The theoretical maximum with 8 MRTs and tiling is a $4096^3$ grid (8 GB) [S1].
++*   **Time Complexity:** The voxelization is a hardware rasterization process, making it highly efficient [S1]. Performance is largely independent of the fragment processing complexity, as the bottleneck is the fixed-function rasterizer [S1].
++*   **Memory Complexity:** Memory usage is proportional to the grid resolution [S1]. A $512^3$ grid requires 16 MB (using 4 MRTs) [S1]. The theoretical maximum with 8 MRTs and tiling is a $4096^3$ grid (8 GB) [S1].
+ *   **Measured Performance:** On a G80 GPU, for a $128^3$ grid:
+     *   Knot model: 2.5 ms
+@@ -172,5 +161,5 @@
+     *   Orthographic projection is required for non-deformed voxelization [S1].
+ *   **When to Use:** Ideal for visibility computations, hierarchical collision detection, and CSG operations in dynamic scenes where speed and robustness are critical [S1].
+-*   **When Not to Use:** When perspective projection is strictly required without distortion correction, or when the hardware does not support the necessary 32-bit integer texture features.
++*   **When Not to Use:** When perspective projection is strictly required without distortion correction, or when the hardware does not support the necessary 32-bit integer texture features [S1].
+ 
+ ## Background

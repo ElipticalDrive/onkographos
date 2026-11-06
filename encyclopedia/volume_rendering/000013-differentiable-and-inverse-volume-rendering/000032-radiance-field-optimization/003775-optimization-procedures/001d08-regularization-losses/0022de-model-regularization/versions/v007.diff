@@ -1,0 +1,193 @@
+--- v006.md
++++ v007.md
+@@ -1,109 +1,115 @@
+ # Model Regularization
+ 
+-Also called: Model-specific regularization, architecture-aware regularization
++Also called: Model Regularization Loss, Regularization Losses
+ 
+ ## Overview
+-Model regularization applies penalty terms to the learnable parameters of the radiance field representation itself, distinct from data consistency or geometric alignment losses. It addresses the problem of overfitting and representation instability by enforcing structural priors on the model's internal state, such as density values, uncertainty estimates, or transfer function complexity. Unlike sibling methods that regularize the output image or the geometric structure of the scene, model regularization constrains the optimization landscape of the neural network or voxel grid directly. It is often combined with [Total Variation Regularization](860-total-variation-regularization.md) for spatial smoothness but operates on different parameter spaces (e.g., scalar uncertainty fields or transfer function coefficients).
++Model regularization applies penalty terms to the scene parameters (density, geometry, transfer functions) during radiance-field optimization to prevent overfitting, enforce physical plausibility, or simplify the learned representation. Unlike photometric losses that measure rendering fidelity against input images, these losses operate directly on the latent model parameters. It sets itself apart from sibling methods like [Total Variation Regularization](860-total-variation-regularization.md) by focusing on parameter magnitude and distribution priors rather than spatial smoothness or output noise characteristics.
+ 
+ ## How it works
+-Model regularization augments the total loss $\mathcal{L}_{total}$ with specific terms $\mathcal{L}_{reg}$ derived from the model's internal parameters. The general form is:
+-$$
+-\mathcal{L}_{total} = \mathcal{L}_{data} + \sum_k \lambda_k \mathcal{L}_{reg, k}
+-$$
+-where $\lambda_k$ is a hyperparameter weight. The implementation typically involves a dedicated module that computes these penalties based on the current state of the model.
++Model regularization is implemented as a set of auxiliary loss functions added to the total optimization objective. The process involves evaluating specific properties of the model's internal parameters and computing gradients to update them.
+ 
+-### Inputs and Outputs
+-*   **Inputs**: The current state of the model parameters (e.g., density $\sigma$, uncertainty $\delta$, transfer function coefficients $T$).
+-*   **Outputs**: A scalar loss value $\mathcal{L}_{reg}$ and its gradient with respect to the model parameters.
++**Inputs and Outputs:**
++*   **Input:** The current state of the radiance field model (e.g., density field $\sigma$, transfer functions for opacity and color, uncertainty estimates $\delta$).
++*   **Output:** A scalar regularization loss value $\mathcal{L}_{model}$ and its gradient with respect to the model parameters.
+ 
+-### Data Structures
+-The regularization losses are typically aggregated into a dictionary mapping loss names to their scalar values.
+-*   **Structure**: `Dict[str, float]`
+-*   **Fields**:
+-    *   `name`: String identifier for the regularization term (e.g., "l1_norm", "zero_reg").
+-    *   `value`: The computed scalar loss.
++**Data Structures:**
++The regularization losses are typically aggregated into a dictionary or list. Each entry contains a name (identifier) and a computed scalar value.
+ 
+-### Algorithm Steps
+-1.  **Compute Regularization Terms**: Call the model's regularization routine to compute individual loss components.
+-    *   Input: Current model parameters.
+-    *   Output: Dictionary of raw loss values.
+-2.  **Weight and Aggregate**: Iterate through the computed losses.
+-    *   For each loss name, retrieve the corresponding weight $\lambda$ from the configuration.
+-    *   Compute weighted loss: $\mathcal{L}_{weighted} = \lambda \times \mathcal{L}_{raw}$.
+-    *   Add $\mathcal{L}_{weighted}$ to the total regularization loss.
+-3.  **Backpropagation**: The combined regularization loss is added to the total loss, and gradients are computed via automatic differentiation.
++**Steps:**
++1.  **Evaluate Regularization Terms:** Iterate through the defined regularization types. For each type, compute the loss value based on the current model parameters.
++2.  **Aggregate Losses:** Sum the individual regularization losses, optionally weighted by hyperparameters $\lambda$.
++3.  **Backpropagation:** Compute gradients of the total regularization loss with respect to the model parameters using automatic differentiation or analytic gradients.
+ 
+-### Pseudocode
++**Formulas:**
++
++1.  **Uncertainty Regularization (Zero Loss):**
++    To prevent predicted uncertainty $\delta_i$ from blowing up, a loss encourages $\delta_i$ to be close to zero [S2]:
++    $$
++    \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)
++    $$
++    where $\mathcal{R}$ is the set of rays, $N$ is the number of samples per ray, and $c_i$ is the query coordinate for the $i$-th sample on ray $r$ [S2]. The total uncertainty loss combines this with a squared error term $\mathcal{L}_{SE}$:
++    $$
++    \mathcal{L}_{unct} = \alpha_1 \mathcal{L}_{SE} + \alpha_2 \mathcal{L}_0
++    $$
++    Typical weights are $\alpha_1 = 1.0$ and $\alpha_2 = 0.01$ [S2].
++
++2.  **Transfer Function (TF) Regularization:**
++    L1 norm regularization is applied to opacity and color transfer functions to avoid unnecessary complexity [S3]:
++    $$
++    \mathcal{L}_{TF} = \lambda_{TF} \left( \sum |TF_{opacity}| + \sum |TF_{color}| \right)
++    $$
++    This promotes simpler, more intuitive transfer functions by penalizing large values and reducing the likelihood of complex, multi-peaked opacity distributions [S3].
++
++**Pseudocode:**
+ ```python
+ def compute_model_regularization(model, config):
+     """
+-    Computes model-specific regularization losses.
++    Computes model regularization losses based on the current model state.
+     
+     Args:
+-        model: The radiance field model instance.
+-        config: Configuration object containing lambda weights.
++        model: The radiance field model containing density, TFs, and uncertainty.
++        config: Configuration object containing lambda weights for each loss.
+         
+     Returns:
+-        total_reg_loss: Scalar tensor of the total weighted regularization loss.
+-        losses_dict: Dictionary of individual weighted losses for logging.
++        total_loss: Scalar tensor representing the total regularization loss.
+     """
+-    # Step 1: Obtain raw regularization losses from the model
+-    # The model implements specific regularization logic for its parameters
+-    raw_losses = model.regularizations() 
++    total_loss = 0.0
+     
+-    total_reg_loss = 0.0
+-    losses_dict = {}
+-    
+-    # Step 2: Iterate and weight
+-    for name, raw_value in raw_losses.items():
+-        # Retrieve lambda from config, default to 0 if not specified
+-        lambda_key = f"lambda_{name}"
+-        lambda_val = config.system.loss.get(lambda_key, 0.0)
++    # 1. Uncertainty Regularization (if applicable)
++    if 'unct' in config.loss:
++        # Compute L_SE (Squared Error for uncertainty) - assumed defined elsewhere
++        # L_SE = mean((predicted_uncertainty - target_uncertainty)^2)
++        # Note: Specific L_SE formula not provided in sources, assumed standard MSE
++        l_se = compute_uncertainty_squared_error(model)
+         
+-        weighted_value = lambda_val * raw_value
+-        total_reg_loss = total_reg_loss + weighted_value
+-        losses_dict[name] = weighted_value
++        # Compute L_0: Encourage uncertainty to be near zero
++        # Sum of max(delta, 0) over all samples
++        l_0 = 0.0
++        for ray in model.rays:
++            for sample in ray.samples:
++                delta = sample.uncertainty
++                l_0 += max(delta, 0.0)
+         
+-    return total_reg_loss, losses_dict
++        alpha_1 = 1.0
++        alpha_2 = 0.01
++        l_unct = alpha_1 * l_se + alpha_2 * l_0
++        total_loss += l_unct * config.loss.lambda_unct
++
++    # 2. Transfer Function Regularization (L1 Norm)
++    if 'tf' in config.loss:
++        # Sum of absolute values of opacity and color TF parameters
++        tf_opacity = model.transfer_function.opacity
++        tf_color = model.transfer_function.color
++        
++        l_tf = sum(abs(tf_opacity)) + sum(abs(tf_color))
++        total_loss += l_tf * config.loss.lambda_tf
++
++    return total_loss
+ ```
+ 
+-### Formulas and Parameters
+-*   **Zero Regularization Loss**: Used to prevent uncertainty parameters $\delta$ from blowing up. It encourages $\delta_i$ to be close to zero.
+-    $$
+-    \mathcal{L}_0 = \sum_{r \in \mathcal{R}} \sum_{i=1}^N \max(\delta_{c_i}, 0)
+-    $$
+-    *   $\mathcal{R}$: Set of rays.
+-    *   $N$: Number of samples per ray.
+-    *   $\delta_{c_i}$: Predicted uncertainty at sample point $c_i$.
+-    *   $\lambda_0$: Typically set to $0.01$ [S2].
+-*   **L1 Norm Regularization**: Applied to transfer function (TF) opacity and color coefficients to prevent unnecessary complexity.
+-    $$
+-    \mathcal{L}_{L1} = \sum |T_j|
+-    $$
+-    *   $T_j$: Coefficients of the transfer function.
+-    *   $\lambda_{L1}$: Weight depends on the desired simplicity; e.g., $0.02$ for density priors in some TF designs [S3].
++**Parameters:**
++*   $\alpha_1, \alpha_2$: Weights for uncertainty loss components. Typical values: $\alpha_1=1.0, \alpha_2=0.01$ [S2].
++*   $\lambda_{TF}$: Weight for transfer function regularization. Not given in the sources.
++*   $\lambda_{name}$: Hyperparameter for each regularization term, scaled from configuration [S1, unofficial].
+ 
+-### Edge Cases and Pitfalls
+-*   **Uncertainty Blow-up**: Without $\mathcal{L}_0$, uncertainty predictions $\delta$ can grow arbitrarily large, destabilizing the training of shallow networks [S2].
+-*   **Over-Simplification**: Excessive L1 regularization on transfer functions may oversimplify the representation, losing semantic detail [S3].
+-*   **Weight Sensitivity**: The choice of $\lambda$ is critical. Incorrect weights can dominate the data loss or have negligible effect [S3].
++**Edge Cases and Pitfalls:**
++*   **Uncertainty Blowing Up:** Without $\mathcal{L}_0$, uncertainty predictions may diverge [S2].
++*   **Over-Regularization:** Excessive regularization weights can lead to underfitting, preventing the model from capturing fine details or complex transfer functions [S3].
++*   **TF Complexity:** Without regularization, optimization may yield complex transfer functions with multiple opacity peaks and unnecessary color mappings [S3].
+ 
+ ## Subtopics
+ 
+ ### Zero Regularization Loss
+-A specific regularization term used primarily in uncertainty-aware NeRF variants. It penalizes positive uncertainty values, encouraging the network to predict low uncertainty unless strongly supported by data. It is chosen when the model predicts explicit uncertainty fields that are prone to numerical instability or "blowing up" during optimization [S2].
+-
+-### L1 Norm Regularization for Transfer Functions
+-Applied to the parameters of volume rendering transfer functions (opacity and color mappings). It promotes sparsity in the TF coefficients, resulting in simpler, more interpretable functions with fewer peaks and color mappings. It is chosen when designing semantic or text-guided volume renderings where human interpretability of the TF is required [S3].
++A specific regularization term applied to uncertainty predictions to prevent them from growing arbitrarily large. It penalizes positive uncertainty values, encouraging them to stay near zero. It is used in conjunction with a squared error loss for uncertainty [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(N)$ where $N$ is the number of parameters being regularized (e.g., number of TF coefficients or uncertainty values). Negligible compared to rendering cost.
+-*   **Memory Complexity**: $O(1)$ additional memory for scalar loss accumulation.
+-*   **Strengths**: Stabilizes training of specific parameter types (uncertainty, TFs); improves interpretability of transfer functions.
+-*   **Limitations**: Requires careful tuning of $\lambda$; may oversimplify if weights are too high.
+-*   **When to use**: When using uncertainty-aware models or learnable transfer functions. Not applicable to standard fixed-color NeRFs without extensions.
++*   **Time Complexity:** Linear with respect to the number of samples or parameters being regularized. For uncertainty, it is $O(N \cdot R)$ where $N$ is samples per ray and $R$ is number of rays [S2]. For TF regularization, it is proportional to the size of the transfer function [S3].
++*   **Memory Complexity:** Minimal, as it typically operates on existing parameters without requiring large intermediate buffers.
++*   **Strengths:** Prevents overfitting, simplifies learned representations, improves interpretability of transfer functions [S3], stabilizes uncertainty predictions [S2].
++*   **Limitations:** Requires careful tuning of regularization weights; too much can degrade reconstruction quality [S3].
++*   **When to Use:** When the model tends to overfit, when transfer functions become too complex, or when uncertainty predictions are unstable [S2, S3].
+ 
+ ## Background
+-Model regularization in the context of differentiable volume rendering has evolved alongside the complexity of radiance field representations. Early NeRFs focused on photometric loss, but as models incorporated uncertainty [S2] and semantic transfer functions [S3], specific priors were introduced to constrain the internal parameters. The use of L1 norms for transfer functions draws from compressed sensing and sparse optimization principles, adapted for differentiable rendering pipelines [S3]. Uncertainty regularization addresses the specific instability of predicting variance in neural networks [S2].
++Model regularization in differentiable volume rendering has been adopted from general deep learning practices to stabilize training and improve generalization. Specific applications include uncertainty regularization in Recursive-NeRF [S2] and transfer function regularization in text-based semantic volume rendering [S3]. The implementation pattern of aggregating losses from a model's `regularizations` method is seen in frameworks like Instant-NSR-PL [S1, unofficial].
+ 
+ ## Sources

@@ -1,136 +1,263 @@
 # Topological Sort for Cell Projection
 
-Also called: MPVO, MPVO algorithm, Meshed Polyhedra Visibility Ordering, Maximal Polyhedra Visibility Ordering, Exact Meshed Polyhedra Visibility Ordering, Exact Visibility Ordering for Cell Projection
+Also called: Exact Meshed Polyhedra Visibility Ordering, Exact Visibility Ordering for Cell Projection, MPVO (Meshed Polyhedra Visibility Ordering), MPVO algorithm, Maximal Polyhedra Visibility Ordering, Meshed Polyhedra Visibility Ordering
 
 ## Overview
-Topological Sort for Cell Projection (MPVO) is an $O(n)$ algorithm for computing a back-to-front visibility ordering of convex polyhedral cells in a convex grid [S1][S3, book]. It solves the occlusion ordering problem required for correct alpha-blending in object-order volume rendering by constructing a directed graph of pairwise occlusion relations between adjacent cells and performing a topological sort [S1][S3, book]. Unlike [Tetrahedral Volume Rendering](820-tetrahedral-volume-rendering.md) or [Projected Tetrahedra](877-projected-tetrahedra.md) which may rely on simpler centroid or distance-based heuristics, MPVO guarantees a correct visibility order for convex meshes by respecting the transitive occlusion chain along viewing rays [S1][S3, book]. It fails on non-convex meshes because it ignores occlusion across empty space between non-adjacent cells [S1][S3, book].
+Topological Sort for Cell Projection, commonly known as Meshed Polyhedra Visibility Ordering (MPVO), is an object-space algorithm that computes a correct back-to-front visibility ordering for volume rendering on convex meshes composed of convex polyhedral cells [S1][S3][S4, unofficial]. It solves the problem of determining the rendering order required for correct alpha compositing by constructing a directed adjacency graph based on local face-sharing relationships and performing a topological sort [S1][S4, unofficial]. It sets itself apart from its siblings and nearest alternatives by relying exclusively on the mesh topology and convexity to guarantee correctness in $O(n)$ time, avoiding the expensive geometric ray-shooting queries of [XMPVO](1363-xmpvo.md) or the image-space rasterization of [SXMPVO](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) [S1][S2, S3]. Unlike [Convex Grid Topological Visibility Sorting](2370-convex-grid-topological-visibility-sorting.md), which is a specific application of this principle, MPVO is the general algorithmic framework described by Williams and Max [S1][S8, unofficial].
 
 ## How it works
-**Inputs:** A convex grid of convex polyhedral cells; a viewpoint $V$ (for perspective) or a projection direction vector $\vec{d}$ (for orthogonal) [S1][S3, book].
-**Outputs:** A list of cells sorted in back-to-front order, where an occluded cell precedes an occluder [S1][S3, book].
+**Inputs and Outputs:**
+*   **Input:** A convex mesh consisting of convex polyhedral cells. The mesh topology (adjacency graph) and the geometric coefficients of the shared faces (plane equations) are precomputed [S4, unofficial][S5, unofficial]. The current viewpoint $V$ (camera position) is provided at runtime [S1][S8, unofficial].
+*   **Output:** A total ordering sequence of cells such that if cell $A$ occludes cell $B$, $B$ appears before $A$ in the list [S1][S9, unofficial].
 
 **Data Structures:**
-1. **Cell Node:** Contains `incount` (integer, number of incoming edges), `outgoing` (list of cell references it occludes), and `incoming` (list of cell references that occlude it) [S1][S3, book].
-2. **Directed Graph:** Implicitly defined by adjacency, where nodes are cells and edges represent occlusion relations [S1][S3, book].
-3. **Queue:** A FIFO queue for cells with `incount == 0` [S1][S3, book].
+1.  **Adjacency Graph:** A directed graph where nodes represent cells. Edges represent shared faces. The graph is stored as an adjacency list or similar structure allowing iteration over outgoing and incoming edges for each cell [S1][S4, unofficial].
+2.  **Plane Coefficients:** For each shared face, the plane equation coefficients $(A, B, C, D)$ defining the boundary between two cells are stored [S4, unofficial][S5, unofficial].
+3.  **In-count Array:** An integer array `incount` indexed by cell ID, storing the number of incoming directed edges (cells that the current cell directly occludes across a shared face) [S2][S3].
+4.  **Queue:** A FIFO queue for cells with `incount` equal to zero [S2][S3].
+5.  **Output List:** A list to store the final sorted order of cells [S2][S3].
+6.  **Flags:** Each cell has a `visited` flag (boolean) and a `cycle_detection` flag (boolean) used during the DFS phase [S1][S8, unofficial].
 
-**Definitions:**
-*   Relation $B <_{vp} A$: Cell $B$ must be rendered before cell $A$ [S1]. This holds if the viewpoint $V$ is on the same side of the shared face $F$ between $A$ and $B$ as cell $A$ is [S1]. This implies $A$ occludes $B$, but $B$ cannot occlude $A$ [S1].
-*   Arrow Direction: The direction is calculated using the plane equation for the face and the coordinates of the viewpoint (for perspective views) or a vector along the direction of projection (for orthogonal views) [S4, unofficial].
+**Numbered Steps:**
 
-**Algorithm Steps:**
-1. **Phase I: Construct Partial Ordering (Graph Construction)**
-    *   Initialize all cells $C$: set $C.incount = 0$ [S1].
-    *   For each interior face $f$ shared by cells $c_1$ and $c_2$:
-        *   Determine the direction of occlusion using the face plane equation and viewpoint/projection vector [S4, unofficial].
-        *   **Perspective View:** If $V$ and $c_1$ are on the same side of the plane of $f$, then $c_1$ occludes $c_2$ [S1][S3, book].
-        *   **Orthogonal View:** If the projection direction $\vec{d}$ aligns with the outward normal of $c_1$ relative to $f$, $c_1$ is in front of $c_2$ [S4, unofficial].
-        *   Add a directed edge from the occluded cell to the occluder [S1].
-        *   Increment the occluder's `incount` [S1].
-    *   Identify **source cells**: Cells with $incount == 0$ [S1]. Add these to the `queue` [S1].
-2. **Phase II: Topological Sort (Kahn's Algorithm)**
-    *   While `queue` is not empty:
-        *   Dequeue a cell $C$ [S1].
-        *   Add $C$ to the sorted output list [S1].
-        *   For each neighbor $B$ in $C.outgoing$: decrement $B.incount$ [S1]. If $B.incount == 0$, enqueue $B$ [S1].
-    *   If the queue empties before all cells are output, a visibility cycle exists [S1][S3, book].
-    *   *Note:* An alternative Phase II uses Depth-First Search with `visited` and `cycle_detection` flags to output cells [S4, S5, unofficial].
+1.  **Preprocessing (Offline):** Construct the undirected adjacency graph of the mesh. For every shared face between two cells, store the plane equation coefficients. This step is performed once per mesh [S4, unofficial][S5, unofficial].
 
-**Pseudocode:**
+2.  **Phase I: Construct Directed Graph (Runtime):**
+    For each shared face $f$ between cells $c_1$ and $c_2$:
+    *   Evaluate the plane equation of $f$ at the viewpoint $V$.
+    *   Determine the "behind" relation: If $V$ lies in the half-space of $c_1$ (i.e., $c_1$ is "behind" the face relative to the viewer, or more precisely, the viewer is on the side of $c_1$), then $c_1$ occludes $c_2$. The directed edge points from $c_2$ to $c_1$ (or arrow points from $c_1$ to $c_2$ depending on convention; the standard MPVO definition states the arrow points from the cell *behind* to the cell *front*, such that the front cell is a sink).
+    *   *Clarification from sources:* Source [S1] and [S8, unofficial] state: "if cell $c_1$ and cell $c_2$ share $f$ and $c_1 <_{vp} c_2$ [c1 is behind c2], the arrow points from $c_1$ to $c_2$." Source [S3] defines $B <_{vp} A$ if $V$ is on the same side of face $F$ as cell $A$. This implies $A$ occludes $B$. The edge goes from $B$ to $A$.
+    *   *Consistent Implementation Logic:* Let the plane equation be $P(x,y,z) = Ax+By+Cz+D$. Let $n$ be the normal pointing into cell $c_1$. If $P(V) > 0$ (assuming $P$ is positive inside $c_1$), then $V$ is in $c_1$'s half-space. Thus $c_1$ is in front of $c_2$. $c_2$ occludes $c_1$? No, $c_1$ occludes $c_2$. So $c_2$ must come before $c_1$. The edge in the dependency graph (where edge $U \to V$ means $U$ must be rendered before $V$) goes from $c_2$ to $c_1$.
+    *   *Source [S1] specific phrasing:* "arrow points from $c_1$ to $c_2$ (outbound for $c_1$)" where $c_1 <_{vp} c_2$. Sink cells have no outbound arrows. Therefore, sinks are the front-most cells. The topological sort extracts sinks.
+    *   Calculate the direction for all interior faces.
+
+3.  **Phase II: Topological Sort (DFS-based):**
+    *   Initialize `incount` for all cells to 0.
+    *   For every directed edge from $B$ to $A$ (meaning $B$ is behind $A$, so $B$ must be rendered before $A$), increment `A.incount` [S2][S3]. Note: Source [S1] uses a DFS approach to identify sinks directly, while Source [S3] uses the Kahn's algorithm (in-count) approach. Both are valid topological sorts. The DFS approach is explicitly detailed in [S1] and [S8, unofficial]. We will provide the DFS approach as it handles cycle detection explicitly as described in the primary MPVO source [S1].
+    
+    *   *DFS Approach (from [S1][S8, unofficial]):*
+        1.  Identify **sink cells**: Cells with no outbound arrows (i.e., no cells in front of them). These are the front-most cells. Add them to a `sink_cell_list` [S1][S8, unofficial].
+        2.  Initialize `visited` and `cycle_detection` flags for all cells to `false` [S1][S8, unofficial].
+        3.  While `sink_cell_list` is not empty:
+            a. Remove a cell $C$ from `sink_cell_list`.
+            b. Call `RECURSIVE-DFS(C)`.
+        4.  `RECURSIVE-DFS(currentCell)`:
+            a. Set `currentCell.visited = true` and `currentCell.cycle_detection = true` [S1][S8, unofficial].
+            b. Identify **eligible neighbors**: Cells $N$ such that there is an arrow from $N$ to `currentCell` (i.e., $N$ is behind `currentCell`) [S1][S8, unofficial].
+            c. For each eligible neighbor $N$ that is not `visited`:
+                i. Call `RECURSIVE-DFS(N)`.
+            d. If an eligible neighbor $N$ is found where `N.visited` is `true` AND `N.cycle_detection` is `true`, a visibility cycle exists. Output a warning and exit [S1][S8, unofficial].
+            e. After processing all eligible neighbors, output `currentCell` to the sorted list (this adds front-most cells first, which is correct for back-to-front compositing if we append to the end, or reverse if we prepend. Standard compositing requires back-to-front. If sinks are front-most, we must output them last? No, compositing accumulates. If we render back-to-front, we render the back cell first. The topological sort of a DAG where edges point from Back to Front yields Front cells as sinks. If we extract sinks, we get Front cells. We need Back cells first.
+            *Correction:* Source [S1] says "c1 comes before c2 in the sequence whenever there is an edge... c1 <vp c2". If $c_1$ is behind $c_2$, edge is $c_1 \to c_2$. Sink is $c_2$ (front). DFS extracts sinks. If we output the cell when we finish DFS (post-order), we output the node after its dependencies. If edge is $Back \to Front$, dependencies of Front are Back. So we output Back first?
+            Let's trace: $B \to F$. DFS(B): visits B, no neighbors (if B is source). Outputs B. Then DFS(F)? No, F is not a sink if it has incoming edge from B? Wait. Sink has *no outbound*. $B \to F$. B has outbound to F. F has no outbound. F is sink.
+            If we start with Sink F: DFS(F). Neighbors of F (incoming edges reversed for "eligible neighbor" definition in [S1]: "eligible neighbor of a if arrow from c to a"). So eligible neighbor of F is B.
+            DFS(F) calls DFS(B).
+            DFS(B): no eligible neighbors (no arrows into B). Outputs B.
+            Back to DFS(F). Outputs F.
+            Result: B, F. Correct.
+            So, `RECURSIVE-DFS` outputs the cell *after* recursing into eligible neighbors.
+            f. Set `currentCell.cycle_detection = false` [S1][S8, unofficial].
+
+    *   *Kahn's Algorithm Approach (from [S2][S3]):*
+        1.  Compute `incount` for all cells (number of cells in front of it? No, `incount` counts incoming edges. If edge is $Back \to Front$, `incount` of Front is > 0. `incount` of Back is 0.
+        2.  Queue cells with `incount == 0` (Back-most cells).
+        3.  While Queue not empty:
+            a. Dequeue $C$.
+            b. Add $C$ to Output List.
+            c. For each neighbor $N$ such that $C \to N$ (C is behind N):
+                i. Decrement `N.incount`.
+                ii. If `N.incount == 0`, Enqueue $N$.
+        4.  If Output List size < Total Cells, cycle exists [S2][S3].
+
+**Formulas:**
+*   **Plane Equation:** For a face with normal $\mathbf{n} = (A, B, C)$ and a point $\mathbf{p}_0$ on the face, the plane equation is $P(\mathbf{x}) = \mathbf{n} \cdot (\mathbf{x} - \mathbf{p}_0) = A(x-x_0) + B(y-y_0) + C(z-z_0)$ [S1][S4, unofficial].
+*   **Behind Relation:** Cell $A$ is behind Cell $B$ ($A <_{vp} B$) if the viewpoint $V$ and Cell $A$ are on the same side of the shared face plane. Mathematically, if the normal $\mathbf{n}$ points into $B$, then $A <_{vp} B$ if $P(V) < 0$ (assuming $P$ is negative inside $A$) or simply by checking the sign of the dot product of the view vector and the face normal relative to the cell positions [S1][S3].
+*   **Edge Direction:** An edge exists from $B$ to $A$ if $B <_{vp} A$ [S3].
+
+**Parameters:**
+*   **Convexity:** The mesh and all cells must be convex for the total ordering to be guaranteed correct [S1][S4, unofficial].
+*   **Viewpoint:** Must be provided for each frame [S1][S4, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Visibility Cycles:** If a cycle exists in the directed graph, no valid visibility ordering is possible. The algorithm detects this via the `cycle_detection` flag in DFS or by checking if the output list is incomplete in Kahn's algorithm. The remedy is to subdivide the offending cells [S1][S8, unofficial].
+*   **Non-Convex Meshes:** The algorithm is not correct for non-convex grids because viewing rays may exit the grid through an external face, cross empty space, and re-enter another cell. The topological sort based only on shared faces misses these occlusions [S2][S3].
+*   **Geometric Degeneracies:** Implementation requires careful handling of degenerate cases (e.g., viewpoint lying exactly on a face plane) [S4, unofficial][S5, unofficial].
+
+**Pseudocode (DFS Variant):**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mpvo_sort(cells, interior_faces, viewpoint, is_orthogonal=False, projection_dir=None):
-    # Phase I: Initialize and build graph
-    for cell in cells:
-        cell.incount = 0
-        cell.outgoing = []
-        cell.incoming = []
-        
-    for c1, c2, face in interior_faces:
-        # Determine occlusion direction
-        if is_orthogonal:
-            n = face.normal
-            if dot(projection_dir, n) > 0:
-                occluder, occluded = c1, c2
-            else:
-                occluder, occluded = c2, c1
-        else:
-            # Perspective: V and c1 on same side of face plane -> c1 occludes c2
-            n = face.normal
-            P = face.center
-            d_v = dot(n, viewpoint - P)
-            d_c1 = dot(n, c1.center - P)
-            if (d_v > 0 and d_c1 > 0) or (d_v < 0 and d_c1 < 0):
-                occluder, occluded = c1, c2
-            else:
-                occluder, occluded = c2, c1
-                
-        # Add edge: occluded -> occluder
-        occluded.outgoing.append(occluder)
-        occluder.incoming.append(occluded)
-        occluder.incount += 1
-        
-    # Identify source cells (incount == 0)
-    queue = [c for c in cells if c.incount == 0]
-    
-    # Phase II: Topological Sort (Kahn's algorithm)
+def mpvo_sort(mesh, viewpoint):
+    """
+    mesh: object containing cells, adjacency list (outgoing_edges[cell_id] = [neighbor_ids]),
+          and face_plane_equations[cell_id][neighbor_id] = (A, B, C, D).
+    viewpoint: tuple (x, y, z)
+    Returns: list of cell_ids in back-to-front order.
+    """
+    num_cells = len(mesh.cells)
+    visited = [False] * num_cells
+    cycle_detection = [False] * num_cells
     sorted_output = []
-    head = 0
-    while head < len(queue):
-        current_cell = queue[head]
-        head += 1
-        sorted_output.append(current_cell)
-        
-        for neighbor in current_cell.outgoing:
-            neighbor.incount -= 1
-            if neighbor.incount == 0:
-                queue.append(neighbor)
-                
-    if len(sorted_output) < len(cells):
-        raise ValueError("Visibility cycle detected")
-        
-    return sorted_output
-```
+    
+    # Phase I: Identify Sink Cells (Front-most cells)
+    # A sink cell has no outgoing edges in the "behind" graph.
+    # Edge from B to A means B is behind A.
+    # Sink has no A such that Sink is behind A. i.e., Sink is in front of everyone it touches.
+    sink_cells = []
+    
+    for cell_id in range(num_cells):
+        is_sink = True
+        for neighbor_id in mesh.outgoing_edges[cell_id]:
+            # Check if cell_id is behind neighbor_id
+            # Get plane equation for face between cell_id and neighbor_id
+            # Normal points INTO neighbor_id
+            A, B, C, D = mesh.face_plane_equations[cell_id][neighbor_id]
+            
+            # Evaluate plane at viewpoint
+            # P(V) = A*Vx + B*Vy + C*Vz + D
+            # If normal points into neighbor_id, and P(V) < 0, V is in cell_id's half-space.
+            # Thus cell_id is in front of neighbor_id? 
+            # Let's stick to Source [S1] logic:
+            # "arrow points from c1 to c2 (outbound for c1)" if c1 <vp c2.
+            # c1 <vp c2 means c1 is behind c2.
+            # So if c1 is behind c2, edge is c1 -> c2.
+            # Sink has NO outbound arrows. So Sink is NOT behind any neighbor.
+            # Sink is in front of all neighbors.
+            
+            # Determine if cell_id is behind neighbor_id
+            # If V is on the same side of the face as cell_id, then cell_id is in front.
+            # If V is on the same side as neighbor_id, neighbor_id is in front.
+            
+            # Plane equation: Ax + By + Cz + D = 0.
+            # Let's assume the coefficients are stored such that they define the boundary.
+            # We need to know which side is which.
+            # Standard approach: Evaluate P(V). If P(V) has same sign as P(center_of_cell_id), 
+            # then V is in cell_id's half space.
+            
+            # Simplified check from [S1]:
+            # "arrow direction is calculated using the plane equation... and coordinates of viewpoint"
+            # We will assume a helper function `is_behind(c1, c2, V, plane_coeffs)`
+            # returns True if c1 is behind c2.
+            
+            if is_behind(cell_id, neighbor_id, viewpoint, mesh.face_plane_equations[cell_id][neighbor_id]):
+                is_sink = False
+                break
+        if is_sink:
+            sink_cells.append(cell_id)
 
-**Edge Cases and Pitfalls:**
-*   **Visibility Cycles:** If the graph contains a cycle, the topological sort fails [S3, book]. In the queue-based variant, this is detected if the queue empties before all cells are output [S1]. Cycles imply no global visibility order exists; cells must be subdivided or per-pixel sorting used [S1][S3, book].
-*   **Non-Convex Grids:** If the grid is non-convex, viewing rays may leave the volume through an external face, cross empty space, and re-enter another cell [S1]. MPVO only considers shared faces, so it misses these cross-gap occlusions [S1][S3, book].
-*   **Complexity Accounting:** Each cell is treated twice during initialization and once in the loop; each edge is treated once in initialization and once in the loop [S1].
+    # Phase II: Topological Sort via DFS
+    for cell in sink_cells:
+        if not visited[cell]:
+            recursive_dfs(cell, mesh, visited, cycle_detection, sorted_output)
+            
+    return sorted_output
+
+def is_behind(c1, c2, V, plane_coeffs):
+    """
+    Returns True if c1 is behind c2 relative to V.
+    Plane coeffs (A,B,C,D) define the face.
+    Assume normal (A,B,C) points INTO c2.
+    """
+    A, B, C, D = plane_coeffs
+    # Evaluate plane at V
+    val_v = A * V[0] + B * V[1] + C * V[2] + D
+    # Evaluate plane at c1 center (or any point in c1)
+    # We need c1_center. Assuming mesh provides it.
+    c1_center = mesh.cells[c1].center 
+    val_c1 = A * c1_center[0] + B * c1_center[1] + C * c1_center[2] + D
+    
+    # If V and c1 are on the same side, c1 is in front of the face relative to V?
+    # If V is in c1's half space, c1 is "between" V and the face? No.
+    # If V is in c1's half space, the ray from V hits c1 first?
+    # Actually, if V is in c1's half space, c1 occludes the face from V.
+    # So c1 is in front of c2.
+    # So c1 is NOT behind c2.
+    # c1 is behind c2 if V is in c2's half space.
+    
+    # Check signs
+    if (val_v > 0 and val_c1 > 0) or (val_v < 0 and val_c1 < 0):
+        # V and c1 are on same side. c1 is in front.
+        return False
+    else:
+        # V and c1 are on opposite sides. V is in c2's side (assuming c2 is opposite c1).
+        # So c2 is in front. c1 is behind.
+        return True
+
+def recursive_dfs(current_cell, mesh, visited, cycle_detection, sorted_output):
+    visited[current_cell] = True
+    cycle_detection[current_cell] = True
+    
+    # Eligible neighbors: cells N such that there is an arrow from N to current_cell.
+    # Arrow N -> current_cell means N is behind current_cell.
+    # So we need to find neighbors N where N is behind current_cell.
+    
+    # We need incoming edges. If mesh only stores outgoing (behind->front),
+    # we need to invert or store incoming.
+    # Let's assume mesh has `incoming_edges` or we iterate all cells?
+    # Better: mesh stores `adjacency` as undirected, and we check direction.
+    
+    for neighbor_id in mesh.adjacency[current_cell]:
+        # Check if arrow is from neighbor_id TO current_cell
+        # i.e., is neighbor_id behind current_cell?
+        if is_behind(neighbor_id, current_cell, mesh.viewpoint, mesh.face_plane_equations[neighbor_id][current_cell]):
+            if not visited[neighbor_id]:
+                recursive_dfs(neighbor_id, mesh, visited, cycle_detection, sorted_output)
+            elif cycle_detection[neighbor_id]:
+                raise Exception("Visibility cycle detected")
+                
+    # Output current_cell after processing dependencies (neighbors behind it)
+    sorted_output.append(current_cell)
+    
+    cycle_detection[current_cell] = False
+```
 
 ## Subtopics
 
+### [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md)
+SXMPVO is an algorithm that computes image-precision visibility ordering for volume rendering of unstructured meshes by scan-converting exterior faces into an A-Buffer to determine occlusion relations (Pseudoneighbor or PN relations) between cells, rather than computing object-precision ray shooting queries. It guarantees correct visibility order for a particular image resolution by using a strict object-space visibility order augmented with image-space data. It sets itself apart from its parent [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) and sibling [XMPVO](1363-xmpvo.md) by replacing expensive object-precision ray shooting with efficient scan conversion, achieving "image-space correctness" where the rendering resolution matches the ordering resolution. Unlike [BSP-XMPVO](1160-bsp-xmpvo.md), it avoids BSP tree construction and exact arithmetic, making it simpler and faster for general acyclic meshes.
+
 ### [A-buffer visibility sort for non-convex grids](1057-a-buffer-visibility-sort-for-non-convex-grids.md)
-Manages pixel-level intersection lists for exterior faces on non-convex grids, avoiding true visibility sort complexities while ensuring correct hardware rendering. Choose when exact ordering is needed but the mesh has concavities.
+This method extends the [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) to handle non-convex grids by resolving visibility gaps between boundary cells using an image-space A-buffer. It solves the problem where viewing rays exit the grid through an external face, traverse empty space, and re-enter the grid, creating occlusion relationships that are not captured by shared-face topology alone. It sets itself apart from sibling methods like [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) by avoiding expensive pairwise geometric occlusion tests or BSP-tree construction, instead relying on rasterization to implicitly determine segment ordering.
 
 ### [Power Distance Sort](1060-power-distance-sort.md)
-Sorts based on power distance with small constant computations. Choose when the mesh is a Delaunay triangulation, as it is not guaranteed to be accurate otherwise.
+Power Distance Sort is a visibility sorting method that orders primitives (triangles or tetrahedra) back-to-front relative to a camera origin by comparing the power of the viewpoint with respect to the circumcircles or circumspheres of the primitives. It leverages geometric properties of Delaunay triangulations/tetrahedralizations to guarantee correct visibility ordering, whereas it is not guaranteed to produce accurate ordering for non-Delaunay meshes. Unlike topological sort, it avoids storing and accessing an adjacency structure.
 
 ### [Per-Pixel Sorting (General Variant)](1061-per-pixel-sorting-general-variant.md)
-Sorts all faces projecting onto a pixel at render time. Choose when visibility cycles are expected, as a sort always exists per pixel center even without a global sort.
+Per-Pixel Sorting (General Variant) is an image-space visibility ordering method that sorts all cell faces projecting onto a specific pixel at render time, just prior to compositing. Unlike [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md), which sorts only exterior faces, this variant processes the entire set of projected faces. It handles visibility cycles gracefully because a local visibility sort always exists for each pixel center, even if no global cell sort exists. It differs from [Power Distance Sort](1060-power-distance-sort.md) and [Newell-based Visibility Sorting](1123-newell-based-visibility-sorting.md) by relying on explicit per-pixel sorting structures (buckets and lists) rather than distance metrics or normal-based approximations.
+
+### [Newell-based Visibility Sorting](1123-newell-based-visibility-sorting.md)
+Newell-based Visibility Sorting is an algorithm to sort cells into a back-to-front ordered list for correct hardware compositing. By definition, if cell A partially occludes cell B from a particular viewpoint V, cell B must come before cell A in the list. It extends the Newell, Newell, and Sancha polygon sorting method to the case of polyhedra.
 
 ### [XMPVO](1363-xmpvo.md)
-Augments MPVO by discovering exterior face relations using ray shooting queries at edge intersections and vertices of the projection complex. Choose when handling non-convex meshes requires exact ordering without per-pixel overhead.
+XMPVO is an algorithm that improves the runtime of the Meshed Polyhedra Visibility Ordering (MPVO) method by using ray shooting queries to discover exterior face relations for nonconvex meshes. It addresses the problem of determining the correct back-to-front rendering order for convex volumes filled with convex polyhedral cells when the standard topological sort is insufficient due to occlusions between exterior faces. It sets itself apart from its parent [Topological Sort for Cell Projection](999-topological-sort-for-cell-projection.md) by augmenting the graph with geometric visibility checks, and from its sibling [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) by performing these checks in object-space precision rather than image-space.
 
 ### [MPVONC](1377-mpvonc.md)
-Heuristic extension to nonconvex meshes sorting exterior cells by centroid distance. Choose for fast rendering of large non-convex datasets where real-time interaction is prioritized over exact correctness.
+MPVONC is a heuristic visibility sorting algorithm for cell projection volume rendering that extends the MPVO method to non-convex meshes. It solves the problem of ordering non-convex cells back-to-front by augmenting the partial ordering of MPVO with a centroid-based sort of exterior front-facing cells, followed by a depth-first search (DFS). Unlike exact methods such as [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) or [A-buffer visibility sort for non-convex grids](1057-a-buffer-visibility-sort-for-non-convex-grids.md), MPVONC is significantly faster but is approximate; it may produce visual artifacts due to sorting errors when occlusion relationships are not captured by the topological graph.
+
+### [Convex Grid Topological Visibility Sorting](2370-convex-grid-topological-visibility-sorting.md)
+Convex Grid Topological Visibility Sorting is an $O(n)$ algorithm for determining the back-to-front rendering order of cells in a convex grid composed of convex polyhedral cells. It solves the visibility sorting problem by constructing a directed graph of pairwise occlusion relations between adjacent cells and performing a topological sort. Unlike [Exact Visibility Ordering for Cell Projection Volume Rendering (SXMPVO)](944-exact-visibility-ordering-for-cell-projection-volume-renderi.md) which may require more complex geometric checks, this method relies solely on the convexity of the grid volume and the cells to guarantee that local face-sharing relations imply global visibility order.
 
 ## Operating characteristics
-*   **Time Complexity:** $O(n)$ for convex grids, where $n$ is the number of cells [S1][S3, book].
-*   **Memory Complexity:** Linear space $O(n)$ for data structures [S3, book].
-*   **Measured performance with hardware, resolution, and scene:** Not given in the sources.
-*   **Scaling:** Linear scaling with cell count $n$ [S1][S3, book].
-*   **Strengths:** Very fast, accurate for convex meshes, low computational overhead, detects visibility cycles [S3, book].
-*   **Limitations:** Fails for non-convex meshes (requires extra gap relations or approximate methods) [S1][S3, book]. Requires convexity of cells and grid [S1][S3, book].
-*   **When to use:** Convex grids of convex polyhedral cells where exact visibility ordering is required and performance is critical [S1][S3, book].
-*   **When not to use:** Non-convex meshes, non-planar faces, or when real-time interaction with very large non-convex datasets is needed (use Approximate MPVONC or Per-Pixel Sorting) [S2, unofficial][S3, book].
+*   **Time Complexity:** $O(n)$, where $n$ is the number of cells. Each cell is processed a constant number of times (twice in initialization, once in the loop) and each edge is processed once [S2][S3].
+*   **Space Complexity:** $O(n)$ for storing the adjacency graph, plane coefficients, and auxiliary arrays [S1][S9, unofficial].
+*   **Measured Performance:** Described as "very fast" with "low computational overhead" [S6, unofficial][S8, unofficial]. It allows for real-time interaction on convex meshes where other exact methods fail to do so [S7, book].
+*   **Scaling:** Linear scaling with mesh size. The preprocessing (graph construction) is done once and reused for all viewpoints on the same mesh [S4, unofficial][S5, unofficial].
+*   **Strengths:** Exact correctness for convex meshes; extremely fast; simple implementation; detects visibility cycles [S1][S8, unofficial].
+*   **Limitations:** Fails for non-convex meshes (requires extensions like MPVONC, XMPVO, or A-buffer methods); fails for meshes with visibility cycles (requires subdivision); sensitive to geometric degeneracies [S1][S4, unofficial][S5, unofficial].
+*   **When to use:** Convex meshes with convex cells where performance is critical and exact ordering is required.
+*   **When not to use:** Non-convex meshes, meshes with holes/cavities, or meshes with visibility cycles (unless subdivided).
 
 ## Background
-The MPVO algorithm was described by Williams [27] and similarly by Max et al. [15] [S3, book][S4, unofficial]. It is based on the observation that for convex meshes, local occlusion relations across shared faces define a partial order that can be topologically sorted to yield a correct global visibility order [S3, book]. It is a foundational method for cell projection volume rendering [S3, book]. It is used in direct volume rendering and scientific visualization [S2, unofficial].
+MPVO was introduced by Peter L. Williams in 1992 [S6, unofficial][S8, unofficial]. A similar algorithm was published by Max et al. in 1998 [S1][S8, unofficial]. It is a foundational algorithm for direct volume rendering of unstructured grids, particularly finite element data [S6, unofficial][S7, book]. It is widely cited as the basis for more complex sorting methods like XMPVO and SXMPVO [S1][S8, unofficial].
 
 ## Sources
-[S1] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27
-[S2] Tetrahedral projection using vertex shaders, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
-[S3] Cell projection of meshes with non-planar faces, https://digital.library.unt.edu/ark:/67531/metadc1408947/?q=projected tetrahedra, fetched 2026-10-28 (book)
-[S4] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
-[S5] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)
+[S1] Image-space visibility ordering for cell projection volume rendering of unstructured data, https://doi.org/10.1109/tvcg.2004.45, fetched 2026-10-25
+[S2] Volume rendering for curvilinear and unstructured grids, https://doi.org/10.1109/cgi.2003.1214468, fetched 2026-10-24
+[S3] Volume Rendering for Curvilinear and Unstructured Grids, https://www.sci.utah.edu/~csilva/papers/cgi2003.pdf, fetched 2026-10-27
+[S4] PDF A Survey of GPU-Based Volume Rendering of Unstructured Grids, https://www.sci.utah.edu/~stevec/papers/gputet_survey.pdf, fetched 2026-10-27 (unofficial)
+[S5] A Survey of GPU-Based Volume Rendering of Unstructured Grids., https://www.researchgate.net/publication/220162223_A_Survey_of_GPU-Based_Volume_Rendering_of_Unstructured_Grids, fetched 2026-10-28 (unofficial)
+[S6] (PDF) Tetrahedral projection using vertex shaders - ResearchGate, https://www.researchgate.net/publication/221247894_Tetrahedral_projection_using_vertex_shaders, fetched 2026-10-28 (unofficial)
+[S7] Cell projection of meshes with non-planar faces, https://digital.library.unt.edu/ark:/67531/metadc1408947/?q=projected tetrahedra, fetched 2026-10-28 (book)
+[S8] (PDF) Image-space visibility ordering for cell projection volume ..., https://www.researchgate.net/publication/8193687_Image-space_visibility_ordering_for_cell_projection_volume_rendering_of_unstructured_data, fetched 2026-10-29 (unofficial)
+[S9] PDF 0078-0903-2 1..13, https://sci.utah.edu/~csilva/papers/tvcg2004cr.pdf, fetched 2026-10-28 (unofficial)

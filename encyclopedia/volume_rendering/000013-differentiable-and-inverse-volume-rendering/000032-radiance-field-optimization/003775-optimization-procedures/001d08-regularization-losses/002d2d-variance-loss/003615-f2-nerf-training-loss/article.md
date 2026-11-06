@@ -1,0 +1,172 @@
+# F2-NeRF Training Loss
+
+Also called: F2-NeRF Loss, F2-NeRF Loss Function, F2-NeRF Regularization, F2-NeRF training objective
+
+## Overview
+The F2-NeRF training loss is a composite objective function used to optimize neural radiance fields with multiresolution hash grids, specifically designed to mitigate floating artifacts and enforce spatial smoothness in unbounded scenes. It extends the standard reconstruction loss by adding a disparity regularization term to penalize excessive inverse depth estimates and a total variation loss to ensure feature consistency across octree node boundaries. It differs from standard NeRF losses by explicitly targeting the stability of depth estimation in free-trajectory settings and the continuity of hash-grid features.
+
+## How it works
+The method computes the total loss as a weighted sum of three components: color reconstruction, disparity regularization, and total variation regularization.
+
+### Inputs and Outputs
+**Inputs:**
+*   $r$: A camera ray.
+*   $c(r)$: The rendered color for ray $r$, computed via volume rendering.
+*   $c_{\text{gt}}$: The ground-truth color for ray $r$.
+*   $\{t_i\}$: Sampled inverse distances (disparities) along the ray.
+*   $\{w_i\}$: Alpha weights computed during volume rendering for each sample $i$.
+*   $\text{feat}_0^k, \text{feat}_1^k$: Feature vectors fetched from the hash table for border points.
+
+**Outputs:**
+*   $\mathcal{L}$: The scalar training loss value.
+
+### Data Structures
+The implementation relies on the multiresolution hash grid structure described in the parent context. Specifically:
+*   **Hash Table:** Stores feature vectors. In F2-NeRF, this is typically configured with 16 levels, where each level contains $2^{19}$ feature vectors of dimension 2 [S1].
+*   **Hash Functions:** Two distinct hash functions are used to fetch features for neighboring octree nodes to compute the total variation loss.
+
+### Parameters
+*   $\epsilon$: Numerical stability constant for reconstruction loss. Value: $10^{-4}$ [S1].
+*   $\lambda_{\text{Disp}}$: Weight for disparity loss.
+    *   LLFF dataset: $2.5 \times 10^{-4}$ [S1].
+    *   Free and NeRF-360-V2 datasets: $10^{-3}$ [S1].
+*   $\lambda_{\text{TV}}$: Weight for total variation loss.
+    *   LLFF, Free, and NeRF-360-V2 datasets: $10^{-1}$ [S1].
+*   $n_b$: Number of border points sampled for total variation loss. Value: 8192 [S1].
+*   $n_r$: Number of rays processed in a batch.
+
+### Formulas
+The total loss is defined as [S1]:
+$$
+\mathcal{L} = \mathcal{L}_{\text{recon}}(c(r), c_{\text{gt}}) + \lambda_{\text{Disp}} \mathcal{L}_{\text{Disp}} + \lambda_{\text{TV}} \mathcal{L}_{\text{TV}}
+$$
+
+1.  **Reconstruction Loss** [S1]:
+    $$
+    \mathcal{L}_{\text{recon}}(c(r), c_{\text{gt}}) = \sqrt{(c(r) - c_{\text{gt}})^2 + \epsilon}
+    $$
+    Note: The source notation $\sqrt{(c(r) - c_{\text{gt}})^2 + \epsilon}$ implies a per-pixel or per-channel calculation followed by aggregation, or a specific variant of L1/L2. Given the square root of a squared difference plus epsilon, this is effectively a smoothed L1-like or Huber-like behavior, but strictly follows the provided formula.
+
+2.  **Disparity Loss** [S1]:
+    $$
+    \mathcal{L}_{\text{Disp}} = \frac{1}{n_r} \sum_{k=1}^{n_r} \text{disp}_k^2
+    $$
+    Where the disparity for ray $k$ is:
+    $$
+    \text{disp}_k = \sum_{i} w_i t_i
+    $$
+    Here, $t_i$ is the inverse distance (disparity) of the $i$-th sample, and $w_i$ is the corresponding volume rendering weight.
+
+3.  **Total Variation Loss** [S1]:
+    $$
+    \mathcal{L}_{\text{TV}} = \frac{1}{n_b} \sum_{k=1}^{n_b} \|\text{feat}_0^k - \text{feat}_1^k\|_2^2
+    $$
+    Where $\text{feat}_0^k$ and $\text{feat}_1^k$ are feature vectors fetched from the hash table using two different hash functions conditioned on the two neighboring octree nodes adjacent to the border point $k$.
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def compute_f2_nerf_loss(rendered_color, ground_truth_color, 
+                         weights, inverse_distances, 
+                         hash_table, hash_func_0, hash_func_1,
+                         epsilon=1e-4, lambda_disp=1e-3, lambda_tv=0.1):
+    """
+    Computes the F2-NeRF training loss.
+    
+    Args:
+        rendered_color: Tensor of shape (N_rays, 3) or (N_rays,).
+        ground_truth_color: Tensor of shape (N_rays, 3) or (N_rays,).
+        weights: Tensor of shape (N_rays, N_samples). Alpha weights from volume rendering.
+        inverse_distances: Tensor of shape (N_rays, N_samples). Sampled inverse depths t_i.
+        hash_table: The multiresolution hash grid storage.
+        hash_func_0: Hash function for the first neighboring node.
+        hash_func_1: Hash function for the second neighboring node.
+        epsilon: Numerical stability constant.
+        lambda_disp: Weight for disparity loss.
+        lambda_tv: Weight for total variation loss.
+        
+    Returns:
+        total_loss: Scalar tensor.
+    """
+    n_rays = rendered_color.shape[0]
+    
+    # 1. Reconstruction Loss
+    # Formula: sqrt((c(r) - c_gt)^2 + epsilon)
+    # Assuming element-wise operations for color channels
+    color_diff_sq = (rendered_color - ground_truth_color) ** 2
+    recon_loss_per_ray = torch.sqrt(color_diff_sq + epsilon)
+    # Average over rays and channels if necessary, or sum. 
+    # Standard practice averages over the batch. The source formula implies averaging over rays for L_Disp,
+    # and L_recon is typically averaged over pixels/rays.
+    l_recon = torch.mean(recon_loss_per_ray)
+    
+    # 2. Disparity Loss
+    # disp_k = sum_i (w_i * t_i)
+    # L_Disp = mean_k (disp_k^2)
+    # weights shape: (N_rays, N_samples)
+    # inverse_distances shape: (N_rays, N_samples)
+    disparities = torch.sum(weights * inverse_distances, dim=1) # Shape: (N_rays,)
+    l_disp = torch.mean(disparities ** 2)
+    
+    # 3. Total Variation Loss
+    # Sample n_b = 8192 points on octree borders.
+    # For each point k, fetch features from two neighboring nodes.
+    # L_TV = mean_k ||feat_0^k - feat_1^k||_2^2
+    
+    n_b = 8192
+    # Generate or retrieve n_b border points. 
+    # In implementation, these are coordinates on the boundaries of the octree nodes.
+    border_points = sample_border_points(n_b) # [G]: Implementation detail for sampling border points
+    
+    feat_0_list = []
+    feat_1_list = []
+    
+    for point in border_points:
+        # Determine the two neighboring octree nodes for this point
+        node_id_0, node_id_1 = get_neighboring_node_ids(point)
+        
+        # Fetch features using two different hash functions
+        # hash_func_0 and hash_func_1 map (node_id, coordinate_offset) -> index
+        # The source specifies "conditioned on its two neighboring octree nodes"
+        # and "using two different hash functions".
+        idx_0 = hash_func_0(node_id_0, point)
+        idx_1 = hash_func_1(node_id_1, point)
+        
+        feat_0 = hash_table[idx_0]
+        feat_1 = hash_table[idx_1]
+        
+        feat_0_list.append(feat_0)
+        feat_1_list.append(feat_1)
+        
+    feat_0 = torch.stack(feat_0_list) # Shape: (n_b, feature_dim)
+    feat_1 = torch.stack(feat_1_list) # Shape: (n_b, feature_dim)
+    
+    # Compute squared L2 distance
+    tv_diff = feat_0 - feat_1
+    l_tv = torch.mean(torch.sum(tv_diff ** 2, dim=1))
+    
+    # Total Loss
+    total_loss = l_recon + lambda_disp * l_disp + lambda_tv * l_tv
+    
+    return total_loss
+```
+
+### Edge Cases and Pitfalls
+*   **Hash Collisions:** The total variation loss relies on fetching features from specific hash table indices. Hash collisions in the multiresolution grid may cause $\text{feat}_0$ and $\text{feat}_1$ to refer to the same or correlated features even if nodes are distinct, reducing the effectiveness of the regularization [S1].
+*   **Border Point Sampling:** The method requires randomly sampling points on the borders of octree nodes. If the octree structure is not explicitly maintained or if border detection is inaccurate, the loss cannot be computed. The source specifies $n_b=8192$ points [S1].
+*   **Disparity Magnitude:** The disparity loss penalizes large inverse depths. In scenes with very deep geometry, this might bias the network towards shallower depths if $\lambda_{\text{Disp}}$ is too high. The source notes this is useful to reduce "floating artifacts" [S1].
+*   **Feature Dimension:** The hash features are small (dimension 2 in the reported implementation) [S1]. The L2 distance is computed on these low-dimensional vectors.
+
+## Operating characteristics
+*   **Time Complexity:** The reconstruction and disparity losses are linear in the number of rays and samples. The total variation loss adds a cost proportional to $n_b$ (8192) hash lookups and vector subtractions per iteration, which is constant relative to the number of rays but adds a fixed overhead per training step.
+*   **Memory Complexity:** No additional large memory structures are required beyond the hash table itself. The border points and fetched features are transient.
+*   **Strengths:** Effectively reduces floating artifacts in unbounded scenes by constraining disparity. Enforces spatial smoothness in the hash grid features, leading to better generalization in free-trajectory settings.
+*   **Limitations:** Requires explicit access to octree node boundaries and hash functions. The fixed number of border points ($n_b=8192$) may not scale perfectly with very large or complex scenes without adjustment.
+*   **When to use:** Recommended for F2-NeRF and Instant-NGP-style architectures with multiresolution hash grids, especially in unbounded scenes with free camera trajectories.
+
+## Background
+The F2-NeRF training loss was introduced in the paper "F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories" [S1]. It builds upon the Instant-NGP architecture [S1] and addresses challenges in novel view synthesis for unbounded scenes with free trajectories. The disparity loss and total variation loss were added to stabilize training and improve visual quality in these challenging settings.
+
+## Sources
+[S1] F2-NeRF: Fast Neural Radiance Field Training with Free Camera Trajectories, https://doi.org/10.1109/cvpr52729.2023.00404, fetched 2026-10-26

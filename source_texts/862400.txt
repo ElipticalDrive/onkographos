@@ -1,0 +1,117 @@
+Extension to import microCT data and conduct 3D morphometrics in Slicer - Add SurfaceResidualAnomalyDetector module by Pampaj7 · Pull Request #465 · SlicerMorph/SlicerMorph
+
+Add SurfaceResidualAnomalyDetector module by Pampaj7 · Pull Request #465 · SlicerMorph/SlicerMorph · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Pampaj7
+commented
+Jul 9, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Summary
+Repurposes the orphaned MeshDistanceMeasurement scaffold (never wired into the build) into a new, complete module: Surface Residual Anomaly Detector, which flags surface regions deviating from a smoothed reference of the same mesh, without any pretrained models.
+Core pipeline: triangulate → remove small disconnected components → optional progressive erosion to remove weakly-connected appendages (thin scan-merge bridges that strict connectivity filtering can't catch) → normals → reference smoothing (windowed sinc / Laplacian) → topology correspondence check → per-vertex residual (normal displacement / Euclidean) → neighborhood denoising → open-boundary detection and ring-based exclusion → robust median/MAD anomaly scoring → percentile thresholding → small anomaly cluster cleanup.
+Optionally augments the geometric score with an unsupervised Isolation Forest over local shape descriptors (curvature, normal variation, roughness, radial distance) and fuses both signals, gracefully falling back to geometry-only when scikit-learn is unavailable (never imported eagerly, never auto-installed).
+Adds a before/after comparison toggle, an adjustable heatmap display-range slider, and a JSON export of the per-vertex dataset (points, normals, residuals, scores, masks) for downstream analysis or training.
+Output nodes are reused across repeated runs; the original input model is never modified.
+Test plan
+python3 -m py_compile passes on the module file
+Full module import + Widget.setup() + buildSettings() exercised against minimal slicer/qt/ctk stubs (catches wiring/NameError bugs)
+Core algorithms (component removal, boundary detection/ring-exclusion, residual denoising, robust scoring, progressive erosion, AI feature extraction, percentile-rank normalization) validated standalone against real VTK/NumPy objects across multiple synthetic scenarios (fragmented mesh, cropped/open-boundary mesh, weakly-bridged appendage, closed mesh)
+Full Logic.run() pipeline exercised end-to-end against a fake MRML scene (fragment + boundary + AI-fusion-requested-but-unavailable scenario), confirming: output arrays present, node identity stable across repeated runs, visualization-mode switching does not mutate stored arrays, AI fallback logs a warning and never crashes, too-few-valid-vertices raises a clear RuntimeError
+Added 8 test methods to the module's own SurfaceResidualAnomalyDetectorTest class (registered via slicer_add_python_unittest in CMakeLists.txt)
+Tested inside a running 3D Slicer instance (UI, visualization, and workflow verified manually)
+Add SurfaceResidualAnomalyDetector module
+…
+dfd8602
+```
+Repurposes the orphaned MeshDistanceMeasurement scaffold (never wired into
+the build) into a new module that flags surface regions deviating from a
+smoothed reference of the same mesh, without any pretrained models.
+
+Core pipeline: triangulate -> remove small disconnected components ->
+optional progressive erosion to remove weakly-connected appendages (thin
+scan-merge bridges that strict connectivity filtering can't catch) ->
+normals -> reference smoothing (windowed sinc / Laplacian) -> topology
+correspondence check -> per-vertex residual (normal displacement /
+Euclidean) -> neighborhood denoising -> open-boundary detection and
+ring-based exclusion -> robust median/MAD anomaly scoring -> percentile
+thresholding -> small anomaly cluster cleanup.
+
+Optionally augments the geometric score with an unsupervised Isolation
+Forest over local shape descriptors (curvature, normal variation,
+roughness, radial distance) and fuses both signals, gracefully falling
+back to geometry-only when scikit-learn is unavailable (never imported
+eagerly, never auto-installed).
+
+Also includes a before/after comparison toggle, an adjustable heatmap
+display-range slider, and a JSON export of the per-vertex dataset
+(points, normals, residuals, scores, masks) for downstream analysis or
+training. Output nodes are reused across repeated runs; the original
+input model is never modified.
+
+Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>
+```
+muratmaga
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Thanks very much for this, @Pampaj7 — it's clearly a careful, thorough piece of work, and the test coverage and documentation are more complete than most first contributions we see. I went through the code in detail and it's competently built.
+Before we go further on the code, though, I'd like to step back to scope and fit, because that's the part I'm not yet clear on. SlicerMorph is a fairly focused geometric-morphometrics toolkit — most of what it does revolves around landmarks, semilandmarks, GPA/Procrustes, and shape statistics that flow out to R/geomorph. This module sits a bit outside that: it's a standalone surface-inspection/QC heatmap that doesn't produce or consume landmarks or shape variables, so it doesn't currently connect to the rest of the workflow. Some of what it does (mesh-to-mesh comparison, curvature/high-frequency visualization) also overlaps with tools already available in Slicer core (Model to Model Distance, Surface Toolbox).
+So a few questions would help me a lot:
+What specific specimen-analysis problem does this solve for you, and is it something a user asked for?
+How do you see it fitting into a morphometrics workflow — does its output feed into landmarking, GPA, or downstream shape analysis in some way I'm missing? Have you used it on real morphology (e.g. micro-CT surfaces), and on roughly what mesh sizes?
+Could I ask you to open an issue describing the use case first, so we can discuss whether this belongs in core SlicerMorph, would be a better fit as a standalone/Labs extension, or overlaps enough with existing tools that it isn't needed? That conversation will also determine the right home (e.g., possibly a dedicated extension of its own) and branch before any code review is worthwhile.
+One concrete technical note in the meantime: this PR targets master, but SlicerMorph is developed and released from the geomorphTab branch (that's what the Slicer Extensions Index builds), so as-is it wouldn't reach users even if merged.
+Thanks again for the effort and for the interest in SlicerMorph — I'd genuinely like to understand the intent before deciding on next steps.
+Pampaj7
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Author
+Hi @muratmaga,
+Thank you very much for the detailed and constructive feedback, and for taking the time to review the implementation.
+For context, I am one of the students attending the SlicerMorph PhD course, and this module started as the small project I have to present tomorrow. Since SlicerMorph is not directly aligned with the main focus of my PhD, I tried to build something around a practical problem that is relevant to the type of 3D data I often work with.
+The specific use case is quality control and automated denoising of reconstructed anatomical or surgical surfaces. These meshes often contain acquisition noise, disconnected fragments, open boundaries, and local high-frequency artifacts. At the moment, I usually have to inspect or clean these issues manually.
+The idea behind the module was therefore to:
+provide controllable smoothing and mesh-cleaning operations;
+compare the original surface with a smoothed reference;
+identify and visualize vertices with unusually high residuals;
+distinguish spatially coherent irregularities from isolated acquisition noise;
+eventually export the per-vertex scores, masks, and geometric descriptors, for example as JSON or another structured format, to generate training data for an automated anomaly-denoising model.
+So the heatmap itself is mainly an inspection and validation interface. The longer-term goal would be to use the detected vertices or regions as pseudo-labels or candidate annotations for training a model tailored to my own data.
+This was not developed in response to a direct user request, and I agree that in its current form the connection to the standard SlicerMorph landmark/GPA workflow is indirect. A possible morphometrics-related use would be as a preprocessing or QC step before landmark or semilandmark placement, to identify surface regions where acquisition artifacts may make correspondence or projection unreliable. However, I understand that this alone may not justify inclusion in the core extension.
+I have tested the prototype on real segmented anatomical meshes similar to those I routinely use, generally around 200,000–250,000 vertices. The examples contain substantial acquisition and segmentation noise, which is the difficult case that motivated the module.
+I will open an issue describing the use case, the intended downstream export/training workflow, and the overlap with Surface Toolbox and Model to Model Distance. I agree that a Labs module or a standalone extension may be a more appropriate home, especially unless a clearer integration with landmarking or morphometric analysis is developed.
+Thank you also for pointing out the geomorphTab branch. I had not realized that this is the branch used for development and release, so I will wait for the scope discussion before retargeting or making further changes to the PR.
+Thanks again for the feedback, See you tomorrow!
+muratmaga
+commented
+Jul 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Sorry I wasn't able to recognize the github handle. Looking forward to seeing it in action tomorrow. However, my feeling is that it will be best if you actually make this a small extension that you maintain yourself. That way you will get direct recognition for your contribution. SlicerMorph extension as is already too big (too many modules and code). We can discuss more tomorrow.
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

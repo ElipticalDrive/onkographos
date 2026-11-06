@@ -1,12 +1,10 @@
 # C-Arm to Camera Parameters Conversion
-
-
 ## Overview
-This method converts C-arm geometric parameters (Source-to-Image Distance, AP angle, lateral angle, center, table translation) into camera position, look-at point, and up vector in RAS coordinates [S1, unofficial]. It explicitly models the C-arm's mechanical degrees of freedom (AP and lateral tilts) relative to a patient-centered coordinate system to generate synthetic Digital Radiography (DRR) views [S1, unofficial].
+This method converts C-arm geometric parameters (Source-to-Image Distance, AP angle, lateral angle, center, table translation) into camera position, look-at point, and up vector in RAS coordinates [S1, unofficial]. It explicitly models the C-arm's mechanical degrees of freedom (AP and lateral tilts) relative to a patient-centered coordinate system to generate synthetic Digital Radiography (DRR) views [S1, unofficial]. Unlike sibling methods that handle isolated rotations or translations, this method composes them into a complete C-arm pose transformation pipeline [1720-rotatey.md][2279-rotation-transformation.md][2280-rotation-matrix-computation.md][2281-translation-transformation.md][3164-camera-matrix-decomposition.md].
 
 ## How it works
-**Inputs:** `sid` (float, mm), `ap_angle` (float, degrees), `lat_angle` (float, degrees), `center_ras` (3-element array, mm), `table_si` (float, mm, default 0.0).
-**Outputs:** `cam_pos` (3-element array, RAS), `look_at` (3-element array, RAS), `look_up` (3-element array, RAS).
+**Inputs:** `sid` (float, mm), `ap_angle` (float, degrees), `lat_angle` (float, degrees), `center_ras` (3-element array, mm), `table_si` (float, mm, default 0.0) [S1, unofficial].
+**Outputs:** `cam_pos` (3-element array, RAS), `look_at` (3-element array, RAS), `look_up` (3-element array, RAS) [S1, unofficial].
 **Data structures:** All vectors are 3-element arrays/tensors; rotation matrices are $3 \times 3$ matrices [G].
 **Steps:**
 1. Convert angles to radians: $\text{ap\_rad} = \text{deg2rad}(\text{ap\_angle})$, $\text{lat\_rad} = \text{deg2rad}(\text{lat\_angle})$ [S1, unofficial].
@@ -48,7 +46,7 @@ def c_arm_to_camera_params(sid, ap_angle, lat_angle, center_ras, table_si=0.0):
 ```
 
 **Parameters:**
-*   `sid`: Source-to-Image Distance in mm. Typical values: Not given in the sources.
+*   `sid`: Source-to-Image Distance in mm. Typical values: Not given in the sources [S1, unofficial].
 *   `ap_angle`: Anteroposterior angle in degrees. 0° = AP view. Positive = caudal (source tilts inferiorly). Negative = cranial (source tilts superiorly) [S1, unofficial].
 *   `lat_angle`: Lateral angle in degrees. 0° = AP view. Positive = RAO (source moves to patient's right). Negative = LAO (source moves to patient's left) [S1, unofficial].
 *   `center_ras`: Center point of the CT scan in RAS coordinates (mm). RAS = Right, Anterior, Superior [S1, unofficial].

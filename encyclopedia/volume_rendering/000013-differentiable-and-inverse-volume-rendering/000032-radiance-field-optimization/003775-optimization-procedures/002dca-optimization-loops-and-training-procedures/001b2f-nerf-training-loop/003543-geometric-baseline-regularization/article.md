@@ -1,0 +1,181 @@
+# Geometric Baseline Regularization
+
+Also called: Geometric Baseline, Geometric Loss
+
+## Overview
+Geometric Baseline Regularization is a composite loss function used during the optimization of Neural Radiance Fields (NeRFs) to prevent degenerate solutions, particularly in few-view settings where the network might otherwise collapse to memorizing training images. It combines a standard photometric reconstruction loss with three geometric regularizers: foreground, frustum, and distribution. It sets apart from basic NeRF training by explicitly penalizing density that is not supported by multiple views or that is poorly distributed along the ray, serving as a strong prior for geometry consistency [S1].
+
+## How it works
+The method computes a total loss $\mathcal{L}_{\text{geom}}$ by combining the photometric loss with three geometric regularization terms. The optimization targets the density $\sigma$ and color $\mathbf{c}$ fields.
+
+**Inputs:**
+- Training images $\mathcal{I} = \{I_1, \dots, I_{|\mathcal{I}|}\}$.
+- Camera poses for each training view.
+- Ray $\mathbf{r}$ defined by origin $\mathbf{o}$ and direction $\mathbf{d}$.
+- Sample points $t_i$ along the ray, with interval $[t_i, t_{i+1}]$.
+- Network outputs: density $\sigma_i$ and color $\mathbf{c}_i$ for each sample point $i=1 \dots N$.
+
+**Outputs:**
+- Scalar loss value $\mathcal{L}_{\text{geom}}$ and its gradients with respect to $\sigma$ and $\mathbf{c}$.
+
+**Data Structures:**
+- $w_i$: Weight contribution of sample $i$ to the final color. Calculated as $w_i = \alpha_i \prod_{j=1}^{i-1} (1-\alpha_j)$, where $\alpha_i = 1 - \exp(-\sigma_i \delta_i)$ and $\delta_i = t_{i+1} - t_i$.
+- $n_i$: Number of training view frustums containing the point at $t_i$. [G] This requires checking if the point $\mathbf{o} + t_i \mathbf{d}$ projects within the image bounds of each training camera.
+
+**Formulas:**
+
+1.  **Photometric Loss** [S1]:
+    $$ \mathcal{L}_{\text{photo}}(\sigma, \mathbf{c}) = \sum_{i=1}^{|\mathcal{I}|} ||I_i - \mathbf{C}_i||_2 $$
+    where $\mathbf{C}_i$ is the rendered color for view $i$, computed via volume rendering integration.
+
+2.  **Foreground Loss** [S1]:
+    $$ \mathcal{L}_{\text{fg}} = \left( 1 - \sum_{i=1}^N w_i \right)^2 $$
+    Encourages the sum of weights along a ray to equal 1, implying the ray is fully absorbed by scene geometry.
+
+3.  **Frustum Loss** [S1]:
+    $$ \mathcal{L}_{\text{fr}} = \sum_i w_i \mathbf{1}(n_i \le 1) $$
+    Penalizes weights located in points contained in only one training view frustum. $\mathbf{1}(\cdot)$ is the indicator function. This prevents "image plane" collapse.
+
+4.  **Distribution Loss** [S1]:
+    $$ \mathcal{L}_{\text{dist}} = \frac{1}{D(\mathbf{r})} \left( \sum_{i,j} w_i w_j \left| \frac{t_i + t_{i+1}}{2} - \frac{t_j + t_{j+1}}{2} \right| + \frac{1}{3} \sum_{i=1}^N w_i^2 (t_{i+1} - t_i) \right) $$
+    Encourages compact distribution of weights. Note: The source uses index $k$ in the summation term $\sum_{i,j} w_i w_k$, but context implies $j$ for the second weight term to match the absolute difference of midpoints. The source text contains a typo ($w_k$ vs $w_j$); standard interpretation of such variance-like terms uses symmetric weights. We assume $w_j$ based on the symmetry of the distance term.
+    
+    Expected depth $D(\mathbf{r})$ [S1]:
+    $$ D(\mathbf{r}) = \frac{\sum_{i=1}^N w_i t_i}{\sum_{i=1}^N w_i} $$
+
+5.  **Total Geometric Loss** [S1]:
+    $$ \mathcal{L}_{\text{geom}} = \mathcal{L}_{\text{photo}} + \lambda_{\text{fg}} \mathcal{L}_{\text{fg}} + \lambda_{\text{fr}} \mathcal{L}_{\text{fr}} + \lambda_{\text{dist}} \mathcal{L}_{\text{dist}} $$
+
+**Parameters:**
+- $\lambda_{\text{fg}}$: Weight for foreground loss. Value: Not given in the sources. [G] Typically set to 1.0 in similar regularization schemes if not specified, but strictly "Not given in the sources."
+- $\lambda_{\text{fr}}$: Weight for frustum loss. Value: Not given in the sources. [G] Typically set to 1.0 if not specified.
+- $\lambda_{\text{dist}}$: Weight for distribution loss. Value: 0 for the first 2500 steps. Then linearly increases to $1 \times 10^{-4}$ at step 8000 for the DTU dataset, and to $1.5 \times 10^{-5}$ at step 8000 for the LLFF dataset [S1].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def geometric_baseline_loss(rendered_colors, target_images, 
+                            weights, ts, ts_next, 
+                            frustum_counts, num_training_views,
+                            step, dataset_type):
+    """
+    Computes the Geometric Baseline Loss.
+    
+    Args:
+        rendered_colors: List of rendered images C_i for each training view.
+        target_images: List of target images I_i.
+        weights: List of lists, weights[i][j] is w_j for ray j in view i.
+        ts: List of lists, ts[i][j] is t_j for ray j in view i.
+        ts_next: List of lists, ts_next[i][j] is t_{j+1} for ray j in view i.
+        frustum_counts: List of lists, frustum_counts[i][j] is n_j for ray j in view i.
+        num_training_views: Number of training views |I|.
+        step: Current training step.
+        dataset_type: 'DTU' or 'LLFF'.
+        
+    Returns:
+        total_loss: Scalar tensor.
+    """
+    loss_photo = 0.0
+    loss_fg = 0.0
+    loss_fr = 0.0
+    loss_dist = 0.0
+    
+    for i in range(num_training_views):
+        # Photometric Loss
+        loss_photo += l2_norm(rendered_colors[i], target_images[i])
+        
+        w = weights[i]
+        t = ts[i]
+        t_next = ts_next[i]
+        n = frustum_counts[i]
+        
+        # Foreground Loss: (1 - sum(w))^2
+        sum_w = sum(w)
+        loss_fg += (1.0 - sum_w) ** 2
+        
+        # Frustum Loss: sum(w_i * 1(n_i <= 1))
+        for j in range(len(w)):
+            if n[j] <= 1:
+                loss_fr += w[j]
+                
+        # Distribution Loss
+        # Calculate expected depth D(r)
+        sum_w_t = sum(w[j] * t[j] for j in range(len(w)))
+        sum_w_val = sum(w)
+        
+        if sum_w_val == 0:
+            # Avoid division by zero; if no density, dist loss is 0
+            d_r = 0.0
+        else:
+            d_r = sum_w_t / sum_w_val
+            
+        if d_r == 0:
+            # Avoid division by zero
+            current_dist_loss = 0.0
+        else:
+            # Term 1: sum_{i,j} w_i w_j |mid_i - mid_j|
+            # midpoints
+            mids = [(t[j] + t_next[j]) / 2.0 for j in range(len(w))]
+            term1 = 0.0
+            for j in range(len(w)):
+                for k in range(len(w)):
+                    term1 += w[j] * w[k] * abs(mids[j] - mids[k])
+            
+            # Term 2: (1/3) * sum_i w_i^2 * (t_{i+1} - t_i)
+            term2 = 0.0
+            for j in range(len(w)):
+                delta = t_next[j] - t[j]
+                term2 += (w[j] ** 2) * delta
+            
+            current_dist_loss = (term1 + (1.0/3.0) * term2) / d_r
+            
+        loss_dist += current_dist_loss
+
+    # Schedule lambda_dist
+    if step < 2500:
+        lambda_dist = 0.0
+    else:
+        # Linear increase from 0 at step 2500 to max at step 8000
+        progress = (step - 2500) / (8000 - 2500)
+        if dataset_type == 'DTU':
+            max_lambda = 1e-4
+        elif dataset_type == 'LLFF':
+            max_lambda = 1.5e-5
+        else:
+            max_lambda = 1e-4 # Default fallback
+        lambda_dist = progress * max_lambda
+        
+    # Coefficients for fg and fr are not given in sources. 
+    # Assuming 1.0 as standard baseline if not specified, 
+    # but strictly following rules, we note they are undefined.
+    # However, the formula implies they are constants. 
+    # We will use 1.0 as a placeholder for implementation completeness [G],
+    # but the source does not specify them.
+    lambda_fg = 1.0 
+    lambda_fr = 1.0
+    
+    total_loss = loss_photo + lambda_fg * loss_fg + lambda_fr * loss_fr + lambda_dist * loss_dist
+    
+    return total_loss
+```
+
+**Edge Cases and Pitfalls:**
+- **Division by Zero:** If $\sum w_i = 0$ (no density), $D(\mathbf{r})$ is undefined. The implementation must handle this, typically by returning 0 for the distribution loss or skipping the ray [S1, G].
+- **Few-View Collapse:** Without $\mathcal{L}_{\text{fr}}$, NeRFs may collapse to placing density only in the frustum of a single camera, effectively copying the training image. $\mathcal{L}_{\text{fr}}$ specifically targets this by penalizing weights where $n_i \le 1$ [S1].
+- **Distribution Loss Strength:** The source deviates from the original formulation [2] by dividing by $D(\mathbf{r})$, which increases the regularizer's strength for geometry close to the camera [S1].
+
+## Operating characteristics
+- **Time Complexity:** The distribution loss involves a double summation over samples ($O(N^2)$ per ray), which can be computationally expensive. However, $N$ is typically small (e.g., 64-256). The frustum loss requires checking frustum containment for each sample against all training views ($O(N \cdot |\mathcal{I}|)$), which adds significant overhead compared to standard NeRF training.
+- **Memory Complexity:** Requires storing frustum counts for each sample, increasing memory usage slightly.
+- **Strengths:** Effectively prevents degenerate solutions in few-view scenarios. Provides a robust baseline for geometry.
+- **Limitations:** Computationally heavier due to frustum checks and $O(N^2)$ distribution term. Requires careful tuning of $\lambda_{\text{dist}}$ schedule.
+- **When to use:** Few-view reconstruction, scenes prone to image-plane collapse.
+- **When not to use:** Large-scale multi-view datasets where degeneracy is less likely, or when computational resources are extremely constrained.
+
+## Background
+Geometric Baseline Regularization was introduced in the context of regularizing NeRFs with Denoising Diffusion Models (DiffusioNeRF) [S1]. It builds upon earlier work on geometric regularization [2] but adapts the distribution loss by normalizing with expected depth. It serves as a strong baseline for comparing diffusion-regularized training methods [S1].
+
+## Sources
+[S1] DiffusioNeRF: Regularizing Neural Radiance Fields with Denoising Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00407, fetched 2026-10-26

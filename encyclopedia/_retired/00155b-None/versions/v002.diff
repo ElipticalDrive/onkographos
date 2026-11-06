@@ -1,0 +1,171 @@
+--- v001.md
++++ v002.md
+@@ -1,80 +1,112 @@
+ # Shadow Mapping
+ 
+-Also called: Depth Map Shadowing, Light Space Depth Testing
++Also called: Shadow Map, Depth Buffer Shadowing
+ 
+ ## Overview
+-Shadow Mapping is a technique to efficiently render shadows by rendering the scene from the light's point of view to generate a depth map (shadow map) [S1, unofficial]. It determines if a point is occluded by another object from the light's perspective [S1, unofficial]. It differs from [Shadow Ray Casting](2796-shadow-ray-casting.md) by using pre-rendered depth buffers instead of per-pixel ray traversal, and from [Two-Pass Shadow Casting (Kajiya and Von Herzen)](2196-two-pass-shadow-casting-kajiya-and-von-herzen.md) by relying on a single depth buffer comparison rather than geometric silhouette processing.
++Shadow Mapping is a technique to efficiently render shadows by rendering the scene from the light's point of view to generate a depth map (shadow map) [S1, unofficial]. It determines if a point is occluded by another object from the light's perspective, allowing the renderer to calculate direct illumination and shadowing for surfaces or volume boundaries [S1, unofficial]. It sets itself apart from ray-casting methods by using a precomputed buffer lookup rather than per-pixel ray traversal, trading memory bandwidth for reduced geometric intersection costs [S1, unofficial].
+ 
+ ## How it works
+-**Inputs:** Scene geometry, light position, light direction, light aperture angle, shadow map resolution.
+-**Outputs:** A binary shadow value (1.0 for lit, 0.0 for shadow) per fragment.
++**Inputs:**
++*   Light source position $\mathbf{p}_{light}$ and direction $\mathbf{d}_{light}$ (for spotlights).
++*   Light aperture angle $\theta$ (for spotlights).
++*   Scene geometry (meshes or voxelized volumes).
++*   Fragment position $\mathbf{p}_{frag}$ in world space.
++
++**Outputs:**
++*   Shadow map: A 2D depth texture storing the minimum distance from the light to the first occluder in each pixel.
++*   Shadow factor: A scalar value ($0.0$ or $1.0$) indicating occlusion for a given fragment.
+ 
+ **Data Structures:**
+-*   **Shadow Map:** A 2D texture (typically `GL_DEPTH_COMPONENT` or `GL_R32F`) storing depth values in light space.
+-*   **Light Space Coordinates:** Homogeneous coordinates $(x_l, y_l, z_l, w_l)$ resulting from transforming world positions by the light's view-projection matrix.
+-
+-**Parameters:**
+-*   **Bias:** A small positive value added to the depth comparison to prevent shadow acne [S1, unofficial]. Typical values depend on scene scale and depth precision; not given in the sources as a specific number [S1, unofficial].
+-*   **Spotlight Angle:** The aperture angle for the perspective projection [S1, unofficial].
+-*   **Near/Far Planes:** Depth bounds for the light's frustum [S1, unofficial].
++*   **Shadow Map:** A 2D texture (e.g., `GL_DEPTH_COMPONENT`). Each texel stores a single floating-point depth value representing the distance from the light origin to the nearest surface along the view ray.
+ 
+ **Steps:**
+ 
+-1.  **Generate Light View-Projection Matrix:**
+-    For a spotlight, construct the view matrix using the light's position and direction. To avoid gimbal lock when the light direction is parallel to the world up vector, select an appropriate up vector [S1, unofficial]:
+-    $$
+-    \text{up} = \begin{cases} 
+-    \text{normalize}(\text{cross}(\text{vec3}(0,0,1), \text{dir})) & \text{if } |\text{dot}(\text{dir}, \text{vec3}(0,0,1))| < 0.99 \\
+-    \text{normalize}(\text{cross}(\text{vec3}(1,0,0), \text{dir})) & \text{otherwise}
+-    \end{cases}
+-    $$
+-    Create the view matrix $V = \text{lookAt}(\text{pos}, \text{pos} + \text{dir}, \text{up})$ and the projection matrix $P = \text{perspective}(\text{angle}, 1.0, \text{near}, \text{far})$ [S1, unofficial]. The final matrix is $M = P \times V$.
++1.  **Generate Light View Matrix:**
++    Construct the view matrix for the light. For a spotlight, define an `up` vector to handle orientation. If the light direction $\mathbf{d}_{light}$ is nearly parallel to the world up vector $(0,0,1)$, use $(1,0,0)$ as the reference to avoid degeneracy [S1, unofficial]:
++    $$ \mathbf{up} = \begin{cases} \text{normalize}(\text{cross}((1,0,0), \mathbf{d}_{light})) & \text{if } |\mathbf{d}_{light} \cdot (0,0,1)| \ge 0.99 \\ \text{normalize}(\text{cross}((0,0,1), \mathbf{d}_{light})) & \text{otherwise} \end{cases} $$
++    Create the view matrix $M_{view}$ using `lookAt` with eye position $\mathbf{p}_{light}$, target $\mathbf{p}_{light} + \mathbf{d}_{light}$, and $\mathbf{up}$ [S1, unofficial].
+ 
+-2.  **Render Shadow Map:**
+-    Render the scene geometry using matrix $M$ into a depth buffer. This stores the minimum depth $z_l$ of visible surfaces from the light's perspective [S1, unofficial].
++2.  **Generate Projection Matrix:**
++    Create a perspective projection matrix $M_{proj}$ based on the light's aperture angle $\theta$, aspect ratio $1.0$ (for square frustum), near plane $n=0.01$, and far plane $f=3.0$ (typical values from source) [S1, unofficial]:
++    $$ M_{proj} = \text{perspective}(\theta, 1.0, 0.01, 3.0) $$
++    The combined light-space transformation is $M_{light} = M_{proj} \times M_{view}$ [S1, unofficial].
+ 
+-3.  **Sample Shadow Map (Fragment Shader):**
+-    For each fragment in the main pass:
+-    a. Transform the fragment's world position $P_{world}$ to light space: $P_{light} = M \times P_{world}$.
+-    b. Perform perspective division to get normalized device coordinates (NDC) in light space:
+-    $$
+-    P_{ndc} = \left( \frac{x_l}{w_l}, \frac{y_l}{w_l}, \frac{z_l}{w_l} \right)
+-    $$
+-    c. Convert NDC to texture coordinates (assuming OpenGL-style depth range $[0, 1]$):
+-    $$
+-    \text{coords} = P_{ndc} \times 0.5 + 0.5
+-    $$
+-    d. Sample the depth value from the shadow map:
+-    $$
+-    \text{shadowDepth} = \text{texture}(u_{\text{shadowMap}}, \text{coords}.xy).r
+-    $$
+-    e. Compare the fragment's depth against the stored depth, applying a bias to mitigate self-shadowing artifacts (shadow acne) [S1, unofficial]:
+-    $$
+-    \text{shadowVal} = \begin{cases} 
+-    1.0 & \text{if } \frac{z_l}{w_l} \ge \text{shadowDepth} + \text{bias} \\
+-    0.0 & \text{otherwise}
+-    \end{cases}
+-    $$
++3.  **Render Shadow Map:**
++    Render the scene geometry using $M_{light}$. Store the depth values (distance from light) in the shadow map texture.
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Shadow Acne:** Caused by quantization errors in the depth buffer where a surface incorrectly shadows itself. Mitigated by the bias parameter [S1, unofficial].
+-*   **Perspective Distortion:** Standard shadow maps suffer from uneven sampling density. Not addressed in the basic method described [S1, unofficial].
+-*   **Light Space Calculation:** Incorrect up vector selection when the light direction aligns with the world up vector causes singular view matrices [S1, unofficial].
++4.  **Sample Shadow Map (Fragment Shader):**
++    For a fragment at world position $\mathbf{p}_{frag}$:
++    a. Transform $\mathbf{p}_{frag}$ to light clip space:
++    $$ \mathbf{p}_{clip} = M_{light} \times \begin{pmatrix} \mathbf{p}_{frag} \\ 1 \end{pmatrix} $$
++    b. Perform perspective division and convert to normalized device coordinates (NDC) range $[0, 1]$:
++    $$ \mathbf{p}_{ndc} = \frac{\mathbf{p}_{clip}.xyz}{\mathbf{p}_{clip}.w} $$
++    $$ \mathbf{coords} = \mathbf{p}_{ndc} \times 0.5 + 0.5 $$
++    c. Sample the stored depth from the shadow map:
++    $$ d_{map} = \text{texture}(u_{shadowMap}, \mathbf{coords}.xy).r $$
++    d. Compare the fragment's depth $z_{frag} = \mathbf{p}_{ndc}.z$ against the map depth plus a bias $b$ to prevent shadow acne (quantization errors) [S1, unofficial]:
++    $$ \text{shadowVal} = \begin{cases} 1.0 & \text{if } z_{frag} \ge d_{map} + b \\ 0.0 & \text{otherwise} \end{cases} $$
++
++**Parameters:**
++*   **Bias ($b$):** A small positive value added to the depth comparison to avoid self-shadowing artifacts (shadow acne) caused by floating-point precision errors [S1, unofficial]. Typical value: Not given in the sources.
++
++**Pseudocode:**
++
++```python
++def generate_shadow_map(scene, light_pos, light_dir, light_angle):
++    # 1. Calculate Up Vector
++    world_up = vec3(0, 0, 1)
++    if abs(dot(light_dir, world_up)) < 0.99:
++        up = normalize(cross(world_up, light_dir))
++    else:
++        up = normalize(cross(vec3(1, 0, 0), light_dir))
++    
++    # 2. Create View Matrix
++    view = look_at(light_pos, light_pos + light_dir, up)
++    
++    # 3. Create Projection Matrix
++    # Using typical values from source: aspect=1.0, near=0.01, far=3.0
++    proj = perspective(radians(light_angle), 1.0, 0.01, 3.0)
++    
++    # 4. Render Scene
++    shadow_map = render_depth(scene, proj * view)
++    return shadow_map
++
++def sample_shadow_map(shadow_map, frag_world_pos, light_matrix, bias):
++    # Transform fragment to light clip space
++    frag_vec4 = vec4(frag_world_pos, 1.0)
++    clip_pos = light_matrix * frag_vec4
++    
++    # Perspective division
++    ndc_pos = clip_pos.xyz / clip_pos.w
++    
++    # Convert to texture coordinates [0, 1]
++    coords = ndc_pos * 0.5 + 0.5
++    
++    # Sample depth from shadow map
++    shadow_depth = texture(shadow_map, coords.xy).r
++    
++    # Compare depths with bias
++    # Note: In practice, coords.z should be clamped to [0,1] to handle points outside frustum
++    if coords.z >= shadow_depth + bias:
++        return 1.0
++    else:
++        return 0.0
++```
+ 
+ ## Subtopics
+ 
+ ### Variance Shadow Mapping
+-A shadow mapping technique that smoothens depth to calculate the probability of shadows using Chebyshev's inequality, producing soft shadow edges instead of the abrupt 0/1 values of naive shadow mapping [S2]. It requires storing two depth maps and filtering them, resulting in only slightly increased computational overhead compared to standard shadow mapping [S2]. It is chosen when soft shadows are desired with minimal performance cost [S2].
++A shadow mapping technique that smoothens depth to calculate the probability of shadows using Chebyshev's inequality, producing soft shadow edges instead of the abrupt 0/1 values of naive shadow mapping [S2]. It requires storing two depth maps (mean and variance) and filtering them, resulting in only slightly increased computational overhead compared to standard shadow mapping [S2]. It is chosen when soft shadows are desired with minimal performance cost [S2].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ for rendering the shadow map (where $N$ is the number of triangles) and $O(1)$ per fragment for sampling.
+-*   **Memory Complexity:** $O(W \times H)$ for the shadow map texture, where $W$ and $H$ are the resolution.
+-*   **Strengths:** Efficient for static scenes; no per-pixel ray tracing overhead; simple to implement [S1, unofficial].
+-*   **Limitations:** Produces hard shadows in the basic form; suffers from aliasing and precision issues (Peter Panning, Shadow Acne) without bias or variance techniques [S1, unofficial][S2].
+-*   **When to use:** Real-time rendering where performance is critical and hard shadows are acceptable, or when extended to Variance Shadow Mapping for soft shadows [S1, unofficial][S2].
+-*   **When not to use:** When physically accurate soft shadows with complex penumbras are required without approximation [S2].
++*   **Time Complexity:** $O(N)$ for rendering the shadow map (where $N$ is the number of polygons/voxels) and $O(1)$ per fragment for sampling.
++*   **Memory Complexity:** $O(W \times H)$ for the shadow map texture, where $W, H$ are the resolution. Variance Shadow Mapping doubles this to $2 \times W \times H$ [S2].
++*   **Strengths:** Efficient for static scenes; supports soft shadows (with VSM); no ray-tracing overhead [S1, unofficial][S2].
++*   **Limitations:** Prone to aliasing (jagged edges) and shadow acne without bias/filtering; perspective aliasing (resolution varies with distance); limited to hard or filtered soft shadows, not physically accurate penumbra [S1, unofficial][S2].
++*   **When to use:** Real-time rendering where performance is critical and hard/soft shadows are sufficient [S1, unofficial][S2].
++*   **When not to use:** When physically accurate soft shadows with complex penumbra are required, or when the scene has high dynamic range depth variations that cause precision issues [S2].
+ 
+ ## Background
+-Shadow mapping was introduced by Lance Williams in 1978 [S1, unofficial]. It is widely used in real-time graphics pipelines for efficient shadow generation [S1, unofficial]. The method described here focuses on spotlights for indoor scenes, as directional lights are less suitable at close distances due to perspective effects, and point lights require more complex cube map handling [S1, unofficial].
++Shadow mapping was introduced as a standard technique for efficient shadow rendering in real-time graphics [S1, unofficial]. It is widely used in game engines and real-time renderers due to its balance of quality and performance [S1, unofficial]. Variance Shadow Mapping was later developed to address the hard-edge limitation of standard shadow mapping by leveraging statistical properties of depth distributions [S2].
+ 
+ ## Sources

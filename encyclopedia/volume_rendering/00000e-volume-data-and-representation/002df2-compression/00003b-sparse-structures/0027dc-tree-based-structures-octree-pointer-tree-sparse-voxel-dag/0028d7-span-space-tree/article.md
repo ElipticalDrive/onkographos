@@ -1,0 +1,98 @@
+# Span Space Tree
+Also called: Interval Tree, Livnat's Span Space Tree
+## Overview
+The Span Space Tree is a hierarchical data structure designed to accelerate the rendering and extraction of large-scale volumetric data by reducing the number of visited cells during traversal [S1, unofficial]. It refines the interval tree concept to manage scene complexity for volumes larger than standard interactive resolutions [S1, unofficial]. It sets itself apart from sibling structures like the Sparse Voxel Octree (SVO) by explicitly organizing data along axis-aligned spans (intervals) rather than just voxel occupancy, allowing for more efficient culling of empty or uniform regions during ray casting or surface extraction.
+## How it works
+The Span Space Tree is built upon the concept of an interval tree, which is embedded within a hierarchical structure (often an octree or similar subdivision) to represent the extent of non-empty data along specific axes.
+
+**Inputs and Outputs:**
+- Input: A 3D volumetric dataset (scalar or vector field).
+- Output: A tree structure where nodes represent bounding intervals (spans) of non-zero or active data.
+
+**Data Structures:**
+Each node in the Span Space Tree typically contains:
+- `min`: The minimum coordinate value of the span along a specific axis.
+- `max`: The maximum coordinate value of the span along that axis.
+- `children`: Pointers to child nodes (if the node is not a leaf).
+- `data`: Reference to the actual voxel data or compressed representation if it is a leaf.
+
+The structure leverages the spatial coherence of the volume. Empty regions are represented by the absence of children or null intervals, providing compression proportional to sparsity [S1, unofficial].
+
+**Steps to Build:**
+1. **Subdivision:** Recursively subdivide the 3D domain into sub-volumes (e.g., using an octree approach).
+2. **Span Calculation:** For each node, calculate the bounding box (min/max) of all non-empty voxels within that sub-volume.
+3. **Interval Encoding:** Store these min/max values as intervals. If a sub-volume is entirely empty, the node may be pruned or marked as null.
+4. **Refinement:** Continue subdivision until a desired resolution or error tolerance is reached, or until the node represents a single voxel.
+
+**Formulas:**
+For a node covering a spatial region $R$, the span along axis $i$ is defined as:
+$$ S_i = [\min_{v \in R, v \neq \emptyset} v_i, \max_{v \in R, v \neq \emptyset} v_i] $$
+where $v_i$ is the coordinate of voxel $v$ along axis $i$.
+
+**Parameters:**
+- Subdivision depth: Determines the granularity of the tree.
+- Threshold: Minimum value to consider a voxel "non-empty" (for sparse data).
+
+**Edge Cases:**
+- **Empty Regions:** Handled by null pointers or absence of children, similar to other sparse structures [S1, unofficial].
+- **Precision:** Floating-point precision in min/max calculations can affect culling accuracy.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class SpanNode:
+    def __init__(self, min_val, max_val):
+        self.min = min_val
+        self.max = max_val
+        self.children = []
+        self.data = None
+
+def build_span_space_tree(volume, bounds, depth):
+    """
+    Recursively builds the Span Space Tree.
+    volume: 3D array of voxel data.
+    bounds: Tuple (min_x, min_y, min_z, max_x, max_y, max_z) defining the current node's spatial extent.
+    depth: Current recursion depth.
+    """
+    # Calculate the bounding box of non-empty voxels in the current bounds
+    min_x, min_y, min_z, max_x, max_y, max_z = bounds
+    
+    # Find actual min/max of non-zero data within this bounds
+    # This step involves scanning the volume subset defined by bounds
+    active_voxels = get_active_voxels_in_bounds(volume, bounds)
+    
+    if not active_voxels:
+        return None  # Empty node
+    
+    # Compute spans
+    span_min = [min(active_voxels, key=lambda v: v[i])[i] for i in range(3)]
+    span_max = [max(active_voxels, key=lambda v: v[i])[i] for i in range(3)]
+    
+    node = SpanNode(span_min, span_max)
+    
+    # If leaf condition met (e.g., depth limit or single voxel)
+    if depth == 0 or is_single_voxel(bounds):
+        node.data = get_data_for_bounds(volume, bounds)
+        return node
+    
+    # Subdivide
+    children_bounds = subdivide_bounds(bounds)
+    for child_bounds in children_bounds:
+        child_node = build_span_space_tree(volume, child_bounds, depth - 1)
+        if child_node is not None:
+            node.children.append(child_node)
+            
+    return node
+```
+## Subtopics
+## Operating characteristics
+- **Time Complexity:** Building time depends on the volume size and sparsity. Traversal time is reduced compared to brute-force voxel access due to culling of empty spans.
+- **Memory Complexity:** Proportional to the number of non-empty spans. More efficient than dense grids for sparse data.
+- **Performance:** Enables interactive rendering of data up to $512^3$ resolution [S1, unofficial]. For larger data, it facilitates efficient visualization by reducing visited cells.
+- **Strengths:** Efficient culling of empty regions; suitable for large-scale volumes.
+- **Limitations:** Building the tree can be computationally expensive for very large datasets. Performance degrades if the data is dense.
+## Background
+The Span Space Tree was introduced by Livnat et al. as a refinement of the interval tree concept to manage scene complexity for larger volume data [S1, unofficial]. It builds on earlier work by Wilhelms and Van Gelder, who proposed a min-max hierarchy embedded in a branch-on-need octree for trivially ignoring empty regions [S1, unofficial]. The method is cited in the context of enabling interactive rendering of large volumetric datasets [S1, unofficial].
+## Sources
+[S1] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

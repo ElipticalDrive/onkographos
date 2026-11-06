@@ -1,0 +1,113 @@
+# Ray-OBB Intersection Test
+
+Also called: OBB slab test, Ray-AABB intersection (OBB variant), Ray-Oriented Bounding Box (OBB) Intersection, Slab method for Oriented Bounding Box
+
+## Overview
+The Ray-OBB Intersection Test determines if a ray intersects an Oriented Bounding Box (OBB) and computes the distance to the nearest intersection point [S1, unofficial]. It extends the slab method used for Axis-Aligned Bounding Boxes (AABBs) by projecting the ray onto the OBB's local axes, allowing for efficient intersection testing of rotated and translated boxes [S1, unofficial]. Unlike [Ray-box intersection](776-ray-box-intersection.md) which assumes axis alignment, this method handles arbitrary orientations by transforming the problem into the OBB's local coordinate space implicitly through dot products [S1, unofficial].
+
+## How it works
+**Inputs:**
+- Ray origin $\mathbf{O}$ and direction $\mathbf{D}$ (normalized).
+- OBB defined by its world-space position $\mathbf{P}$, local axes $\mathbf{X}, \mathbf{Y}, \mathbf{Z}$ (unit vectors, columns of the rotation matrix), and half-extents $a_{min}, a_{max}$ along each axis (often symmetric, i.e., $a_{min} = -a_{max} = a$).
+- Parallelism threshold $\epsilon = 0.001$ [S1, unofficial].
+
+**Outputs:**
+- Boolean indicating intersection.
+- If intersecting, the distance $t_{min}$ to the nearest intersection point along the ray.
+
+**Data Structures:**
+- The OBB is represented by its transformation matrix or explicitly by its position and three orthogonal unit vectors. The source uses a column-major matrix representation where columns 0, 1, 2 are the X, Y, Z axes respectively [S1, unofficial].
+- The box bounds are defined by minimum and maximum values along each local axis, $aabb\_min[i]$ and $aabb\_max[i]$ [S1, unofficial].
+
+**Steps:**
+1.  **Initialization:** Set $t_{min} = 0.0$ and $t_{max} = \infty$ (or a large value like $100000.0$) [S1, unofficial]. Compute the vector from the ray origin to the OBB center: $\mathbf{delta} = \mathbf{P} - \mathbf{O}$ [S1, unofficial].
+2.  **Iterate over local axes:** For each axis $i \in \{X, Y, Z\}$:
+    a.  Extract the local axis vector $\mathbf{axis}$ from the OBB's orientation (e.g., $\mathbf{X}$ axis) [S1, unofficial].
+    b.  Compute the projection of the delta vector onto the axis: $e = \mathbf{axis} \cdot \mathbf{delta}$ [S1, unofficial].
+    c.  Compute the projection of the ray direction onto the axis: $f = \mathbf{axis} \cdot \mathbf{D}$ [S1, unofficial].
+    d.  **Non-parallel case:** If $|f| > \epsilon$:
+        i.  Compute the entry and exit distances for the slab: $t_1 = (e + aabb\_min[i]) / f$ and $t_2 = (e + aabb\_max[i]) / f$ [S1, unofficial].
+        ii. Ensure $t_1 \le t_2$ by swapping if necessary [S1, unofficial].
+        iii. Update the global interval: $t_{max} = \min(t_{max}, t_2)$ and $t_{min} = \max(t_{min}, t_1)$ [S1, unofficial].
+        iv. If $t_{max} < t_{min}$, the ray misses the box; return false [S1, unofficial].
+    e.  **Parallel case:** If $|f| \le \epsilon$ (ray is parallel to the slab planes):
+        i.  Check if the ray origin offset lies within the slab bounds. Specifically, check if $(-e + aabb\_min[i] > 0.0)$ OR $(-e + aabb\_max[i] < 0.0)$ [S1, unofficial].
+        ii. If either condition is true, the ray is outside the slab; return false [S1, unofficial].
+3.  **Result:** If the loop completes without early exit, an intersection exists. Set the intersection distance to $t_{min}$ and return true [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_obb_intersection(ray_origin, ray_direction, obb_position, obb_axes, obb_min, obb_max, epsilon=0.001):
+    """
+    ray_origin: Vector3
+    ray_direction: Vector3 (assumed normalized)
+    obb_position: Vector3
+    obb_axes: List of 3 Vector3 (X, Y, Z axes)
+    obb_min: List of 3 floats (min bounds along each axis)
+    obb_max: List of 3 floats (max bounds along each axis)
+    epsilon: float, parallelism threshold
+    """
+    t_min = 0.0
+    t_max = 100000.0  # Large value representing infinity
+    
+    # Delta from ray origin to OBB center
+    delta = obb_position - ray_origin
+    
+    for i in range(3):
+        axis = obb_axes[i]
+        
+        # Projections
+        e = dot(axis, delta)
+        f = dot(axis, ray_direction)
+        
+        if abs(f) > epsilon:
+            # Non-parallel case
+            t1 = (e + obb_min[i]) / f
+            t2 = (e + obb_max[i]) / f
+            
+            # Ensure t1 is entry, t2 is exit
+            if t1 > t2:
+                t1, t2 = t2, t1
+            
+            # Update interval
+            if t2 < t_max:
+                t_max = t2
+            if t1 > t_min:
+                t_min = t1
+            
+            # Reject if interval is empty
+            if t_min > t_max:
+                return False, None
+        else:
+            # Parallel case
+            # Check if ray origin is outside the slab
+            # The condition derived from source: (-e + aabb_min > 0) OR (-e + aabb_max < 0)
+            # Note: This logic assumes specific sign conventions for min/max relative to the axis direction.
+            if (-e + obb_min[i] > 0.0) or (-e + obb_max[i] < 0.0):
+                return False, None
+                
+    return True, t_min
+```
+
+**Parameters:**
+- $\epsilon = 0.001$: Threshold for determining if the ray is parallel to the OBB axis [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+- **Ray Parallel to Axis:** If the ray direction is perpendicular to the slab normal (parallel to the planes), division by zero is avoided by checking $|f| \le \epsilon$. The ray must still pass through the slab's extent in the perpendicular direction [S1, unofficial].
+- **Precision:** The threshold $\epsilon$ is arbitrary and may need adjustment for different scales [S1, unofficial].
+- **Sign Conventions:** The source code uses specific formulas for the parallel case ($-e + aabb\_min > 0$) which depend on the definition of $aabb\_min$ and $aabb\_max$ relative to the axis direction [S1, unofficial].
+
+## Operating characteristics
+**Time Complexity:** $O(1)$, as it performs a fixed number of dot products and comparisons (3 axes).
+**Memory Complexity:** $O(1)$, requiring only a few scalar variables.
+**Performance:** Efficient for real-time applications due to minimal arithmetic operations.
+**Strengths:** Handles rotated boxes without transforming the ray into local space, which can be beneficial for cache coherence or when the ray is already in world space.
+**Limitations:** The choice of $\epsilon$ can affect robustness. The source's parallel case logic is specific and may not generalize to all OBB definitions without careful verification of sign conventions [S1, unofficial].
+
+## Background
+The method is derived from the slab method for AABBs, extended to oriented boxes by using the box's local axes for projection [S1, unofficial]. It is commonly used in volume rendering and collision detection for efficient culling of primitives [S1, unofficial].
+
+## Sources
+[S1] abhishektrip/SliceBasedVolumeRendering, https://github.com/abhishektrip/SliceBasedVolumeRendering, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,203 @@
+# 3-Sphere Intersection (Trilateration)
+Also called: Sphere Trilateration, Trilateration
+
+## Overview
+The 3-Sphere Intersection method computes the geometric points where the surfaces of three distinct spheres intersect. In volume rendering, specifically within sphere carving algorithms, this operation generates new sample points on the boundary of a carved volume by finding the intersection of the boundaries of three existing empty spheres [S1]. It is distinct from standard ray-sphere intersection [Ray-Sphere Intersection] because it solves a system of three quadratic equations to find a specific point in space defined by three constraints, rather than finding the intersection of a line and a single surface.
+
+## How it works
+**Inputs:** Three spheres $S_0, S_1, S_2$, defined by their centers $\mathbf{p}_0, \mathbf{p}_1, \mathbf{p}_2$ and radii $r_0, r_1, r_2$.
+**Outputs:** A set of intersection points $\mathbf{p}$. Typically, there are zero, one, or two solutions.
+
+**Data Structures:**
+The algorithm operates on 3D vectors. No persistent data structures are required beyond the input sphere parameters.
+
+**Steps:**
+
+1.  **Construct Local Frame:**
+    Define an orthonormal basis $(\mathbf{e}_x, \mathbf{e}_y, \mathbf{e}_z)$ aligned with the plane passing through the sphere centers.
+    *   Compute the normal to the plane defined by the three centers:
+        $$ \mathbf{n} = (\mathbf{p}_1 - \mathbf{p}_0) \times (\mathbf{p}_2 - \mathbf{p}_0) $$
+    *   Set $\mathbf{e}_z$ to the normalized normal:
+        $$ \mathbf{e}_z = \frac{\mathbf{n}}{\|\mathbf{n}\|} $$
+    *   Set $\mathbf{e}_x$ to the normalized vector from $\mathbf{p}_0$ to $\mathbf{p}_1$:
+        $$ \mathbf{e}_x = \frac{\mathbf{p}_1 - \mathbf{p}_0}{\|\mathbf{p}_1 - \mathbf{p}_0\|} $$
+    *   Set $\mathbf{e}_y$ to complete the right-handed orthonormal basis. The source text contains a typo ($e_y = e_x \times e_x$); geometrically, this must be the cross product of $\mathbf{e}_z$ and $\mathbf{e}_x$ (or $\mathbf{e}_x \times \mathbf{e}_z$ with sign adjustment) to ensure orthogonality. The standard construction is:
+        $$ \mathbf{e}_y = \mathbf{e}_z \times \mathbf{e}_x $$
+        [G] *Note: The source explicitly writes $e_y = e_x \times e_x$, which yields the zero vector. This is identified as a typo in the original publication [S1]. The correct geometric operation to form an orthogonal basis from $\mathbf{e}_x$ and $\mathbf{e}_z$ is $\mathbf{e}_y = \mathbf{e}_z \times \mathbf{e}_x$.*
+
+2.  **Compute Local Coordinates of Centers:**
+    Project the relative positions of the centers onto the local frame to determine parameters $a, b, c$.
+    *   $a = \|\mathbf{p}_1 - \mathbf{p}_0\|$
+    *   $\mathbf{v}_{20} = \mathbf{p}_2 - \mathbf{p}_0$
+    *   $b = \mathbf{v}_{20} \cdot \mathbf{e}_x$
+    *   $c = \mathbf{v}_{20} \cdot \mathbf{e}_y$
+
+3.  **Solve for Local Coordinates $(x, y, z)$:**
+    The intersection point $\mathbf{p}$ in the local frame is $(x, y, z)$. The system of equations is:
+    $$ x^2 + y^2 + z^2 = r_0^2 $$
+    $$ (x - a)^2 + y^2 + z^2 = r_1^2 $$
+    $$ (x - b)^2 + (y - c)^2 + z^2 = r_2^2 $$
+
+    *   **Solve for $x$:**
+        Subtract the first equation from the second to eliminate $y^2$ and $z^2$:
+        $$ (x - a)^2 - x^2 = r_1^2 - r_0^2 $$
+        $$ x^2 - 2ax + a^2 - x^2 = r_1^2 - r_0^2 $$
+        $$ -2ax + a^2 = r_1^2 - r_0^2 $$
+        $$ x = \frac{r_0^2 - r_1^2 + a^2}{2a} $$
+
+    *   **Solve for $y$:**
+        Subtract the second equation from the third:
+        $$ (x - b)^2 + (y - c)^2 - (x - a)^2 - y^2 = r_2^2 - r_1^2 $$
+        Expanding and simplifying (noting that $x$ is known):
+        $$ (x^2 - 2bx + b^2) + (y^2 - 2cy + c^2) - (x^2 - 2ax + a^2) - y^2 = r_2^2 - r_1^2 $$
+        $$ -2bx + b^2 - 2cy + c^2 + 2ax - a^2 = r_2^2 - r_1^2 $$
+        $$ -2cy = r_2^2 - r_1^2 + 2bx - b^2 - 2ax + a^2 - c^2 $$
+        The source provides a simplified form for $y$:
+        $$ y = \frac{r_1^2 - r_2^2 - (x - a)^2 + (x - b)^2 + c^2}{2c} $$
+        [G] *Verification: The source formula is algebraically equivalent to the expansion above. Specifically, $(x-b)^2 - (x-a)^2 = x^2 - 2bx + b^2 - (x^2 - 2ax + a^2) = 2ax - 2bx + b^2 - a^2$. Substituting this into the numerator matches the derived linear equation for $y$.*
+
+    *   **Solve for $z$:**
+        Substitute $x$ and $y$ into the first sphere equation:
+        $$ z^2 = r_0^2 - x^2 - y^2 $$
+        $$ z = \sqrt{r_0^2 - x^2 - y^2} $$
+        If $r_0^2 - x^2 - y^2 < 0$, the spheres do not intersect (or intersect at a single point if equal to 0).
+
+4.  **Transform to Global Frame:**
+    The intersection points in global coordinates are:
+    $$ \mathbf{p} = \mathbf{p}_0 + x \cdot \mathbf{e}_x + y \cdot \mathbf{e}_y \pm z \cdot \mathbf{e}_z $$
+    This yields up to two points, symmetric with respect to the plane defined by the three sphere centers.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+from typing import List, Tuple
+
+def vec_sub(v1, v2):
+    return (v1[0] - v2[0], v1[1] - v2[1], v1[2] - v2[2])
+
+def vec_add(v1, v2):
+    return (v1[0] + v2[0], v1[1] + v2[1], v1[2] + v2[2])
+
+def vec_scale(v, s):
+    return (v[0] * s, v[1] * s, v[2] * s)
+
+def vec_dot(v1, v2):
+    return v1[0]*v2[0] + v1[1]*v2[1] + v1[2]*v2[2]
+
+def vec_cross(v1, v2):
+    return (
+        v1[1]*v2[2] - v1[2]*v2[1],
+        v1[2]*v2[0] - v1[0]*v2[2],
+        v1[0]*v2[1] - v1[1]*v2[0]
+    )
+
+def vec_len(v):
+    return math.sqrt(v[0]**2 + v[1]**2 + v[2]**2)
+
+def sphere_trilateration(p0, r0, p1, r1, p2, r2):
+    """
+    Computes intersection points of three spheres.
+    Returns a list of 3D points (tuples).
+    """
+    # 1. Local Frame Construction
+    # e_z: Normal to the plane of centers
+    v10 = vec_sub(p1, p0)
+    v20 = vec_sub(p2, p0)
+    
+    n = vec_cross(v10, v20)
+    n_len = vec_len(n)
+    
+    # Edge case: Centers are collinear. The plane is undefined.
+    if n_len < 1e-9:
+        return [] # No unique plane, infinite or no solution depending on radii
+    
+    e_z = vec_scale(n, 1.0 / n_len)
+    
+    # e_x: Direction from p0 to p1
+    v10_len = vec_len(v10)
+    if v10_len < 1e-9:
+        return [] # p0 and p1 are coincident
+    
+    e_x = vec_scale(v10, 1.0 / v10_len)
+    
+    # e_y: Orthogonal to e_x and e_z
+    # Corrected from source typo: e_y = e_z x e_x
+    e_y = vec_cross(e_z, e_x)
+    
+    # 2. Local Coordinates
+    a = v10_len
+    b = vec_dot(v20, e_x)
+    c = vec_dot(v20, e_y)
+    
+    # 3. Solve for x, y, z
+    # Solve for x
+    # x = (r0^2 - r1^2 + a^2) / (2a)
+    x = (r0**2 - r1**2 + a**2) / (2.0 * a)
+    
+    # Solve for y
+    # y = (r1^2 - r2^2 - (x - a)^2 + (x - b)^2 + c^2) / (2c)
+    if abs(c) < 1e-9:
+        # Edge case: p2 projects onto the line p0-p1 in the local frame (c=0).
+        # The three centers are collinear in the projection, or p2 lies on the line p0-p1.
+        # This implies the centers are coplanar with the x-axis, but since e_z is normal,
+        # it means p0, p1, p2 are collinear. Handled by n_len check above?
+        # If n_len > 0 but c=0, p2 is in the x-z plane of the local frame? 
+        # Actually, if c=0, p2 lies in the plane defined by p0, p1 and e_z? 
+        # No, c is the y-component. If c=0, p2 is in the x-z plane of the local frame.
+        # The system becomes singular for y calculation if we divide by c.
+        # However, if c=0, the equation for y simplifies. 
+        # From derivation: -2cy = ... If c=0, we must have RHS=0 for solution.
+        # If c=0, the centers are not forming a proper triangle for trilateration in y.
+        return [] # Degenerate case
+    
+    term1 = r1**2 - r2**2
+    term2 = -(x - a)**2
+    term3 = (x - b)**2
+    term4 = c**2
+    y = (term1 + term2 + term3 + term4) / (2.0 * c)
+    
+    # Solve for z
+    rad = r0**2 - x**2 - y**2
+    
+    if rad < 0:
+        return [] # No intersection
+    
+    z = math.sqrt(rad)
+    
+    # 4. Transform to Global Frame
+    # p = p0 + x*ex + y*ey +/- z*ez
+    pt1 = vec_add(p0, vec_add(vec_scale(e_x, x), vec_add(vec_scale(e_y, y), vec_scale(e_z, z))))
+    pt2 = vec_add(p0, vec_add(vec_scale(e_x, x), vec_add(vec_scale(e_y, y), vec_scale(e_z, -z))))
+    
+    if rad == 0:
+        return [pt1]
+    else:
+        return [pt1, pt2]
+```
+
+**Parameters:**
+*   $a = \|\mathbf{p}_1 - \mathbf{p}_0\|$
+*   $b = (\mathbf{p}_2 - \mathbf{p}_0) \cdot \mathbf{e}_x$
+*   $c = (\mathbf{p}_2 - \mathbf{p}_0) \cdot \mathbf{e}_y$
+
+**Edge Cases and Pitfalls:**
+*   **Collinear Centers:** If $\mathbf{p}_0, \mathbf{p}_1, \mathbf{p}_2$ are collinear, the cross product $(\mathbf{p}_1 - \mathbf{p}_0) \times (\mathbf{p}_2 - \mathbf{p}_0)$ is zero, making $\mathbf{e}_z$ undefined. The algorithm should return no solution or handle this degenerate case separately [S1].
+*   **Coincident Centers:** If $\mathbf{p}_0 = \mathbf{p}_1$ or $\mathbf{p}_0 = \mathbf{p}_2$, the denominators $a$ or $c$ may become zero.
+*   **No Intersection:** If $r_0^2 - x^2 - y^2 < 0$, the spheres do not intersect at a common point.
+*   **Precision:** Floating-point errors in the calculation of $x$ and $y$ can lead to a slightly negative value under the square root for $z$ when the spheres theoretically intersect at a single point. A small epsilon guard is recommended [G].
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per triplet of spheres. The computation involves a constant number of vector operations, dot products, and square roots.
+*   **Memory Complexity:** $O(1)$ auxiliary space.
+*   **Strengths:** Deterministic analytical solution; no iterative convergence required; efficient for generating dense point clouds on implicit surfaces.
+*   **Limitations:** Only works for exactly three spheres. Requires the spheres to actually intersect. Degenerate configurations (collinear centers) must be handled.
+*   **Use Cases:** Sphere carving algorithms for generating signed distance fields from point clouds or meshes [S1].
+
+## Background
+The method is described in the context of "Sphere Carving," a technique for bounding volumes for signed distance fields. It was introduced by Cédric Zanni in 2024 [S1]. The algorithm relies on the property that sampling the initial volume densely enough creates sphere intersections, which are then used to place new spheres on the surface of the carved volume. This process ensures convergence of the carved volume to the target shape. The specific trilateration formulas are detailed in Appendix A.2 of the source paper [S1].
+
+## Sources
+[S1] Sphere Carving: Bounding Volumes for Signed Distance Fields, https://doi.org/10.1145/3730845, fetched 2026-10-27

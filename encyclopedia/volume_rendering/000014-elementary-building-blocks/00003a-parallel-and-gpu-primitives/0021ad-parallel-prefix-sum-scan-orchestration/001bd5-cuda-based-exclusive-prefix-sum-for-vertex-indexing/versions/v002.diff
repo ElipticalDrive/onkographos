@@ -1,0 +1,145 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-This method solves the duplicate vertex calculation problem in GPU-based parallel isosurface extraction by using an exclusive prefix sum (scan) to compute correct global vertex indices for vertices found by parallel threads [S1]. Unlike sibling methods that may only apply stream compaction to triangles, this approach applies scan-based indexing to both vertices and triangles, ensuring that vertices identified by different threads are assigned unique, non-overlapping global indices without requiring expensive post-processing merging [S1]. It builds on [Parallel Prefix Sum (Scan) Orchestration](2593-parallel-prefix-sum-scan-orchestration.md) by providing the specific data structures and kernel orchestration required for volume rendering mesh generation.
++This method solves the duplicate vertex calculation problem in GPU-based parallel isosurface extraction by using an exclusive prefix sum (scan) to compute correct global vertex indices for vertices found by parallel threads [S1]. Unlike sibling methods that may only apply stream compaction to triangles, this approach applies scan-based indexing to both vertices and triangles, ensuring that vertices identified by different threads are assigned unique, non-overlapping global indices without requiring expensive post-processing merging [S1].
+ 
+ ## How it works
+@@ -14,5 +14,5 @@
+ 
+ **Outputs:**
+-- Compacted arrays of unique vertex coordinates (`resvert`) and triangle indices (`restrinumvect`) [S1].
++- Compacted arrays of unique vertex coordinates (`resvert`) and triangle counts (`restrinumvect`) [S1].
+ - Global vertex indices assigned to each detected vertex [S1].
+ 
+@@ -35,5 +35,5 @@
+ ### Numbered Steps
+ 
+-1.  **Initialization:** For each cell in the slice pair, a dedicated thread executes the `VerticesCalc` kernel. The thread identifies vertices on the cell's edges and writes their coordinates to the respective `xvert`, `yvert`, `Xvert`, `Yvert`, and `zvert` matrices. It also writes a label of 1 to the corresponding label matrix (`xlabel`, etc.) to mark the vertex's presence [S1].
++1.  **Initialization:** For each cell in the slice pair, a dedicated thread executes the `VerticesCalc` kernel [S1]. The thread identifies vertices on the cell's edges and writes their coordinates to the respective `xvert`, `yvert`, `Xvert`, `Yvert`, and `zvert` matrices [S1]. It also writes a label of 1 to the corresponding label matrix (`xlabel`, etc.) to mark the vertex's presence [S1].
+ 
+ 2.  **Exclusive Prefix Sum (Scan):** Perform an exclusive prefix sum operation on each of the five label matrices (`xlabel` through `zlabel`) using the CUDPP library [S1]. The output is stored in the corresponding scan matrices (`xscan` through `zscan`) [S1].
+@@ -42,5 +42,5 @@
+     -   Example: If `xlabel` contains $\{5, 6, 2, 4, 0, 2, 0, 1\}$, then `xscan` contains $\{0, 5, 11, 13, 17, 17, 19, 19\}$ [S1].
+ 
+-3.  **Index Assignment:** The value in the scan matrix at a given cell's position indicates the number of vertices of that type found in all preceding cells. This value serves as the base global index for the vertices found in the current cell [S1].
++3.  **Index Assignment:** The value in the scan matrix at a given cell's position indicates the number of vertices of that type found in all preceding cells [S1]. This value serves as the base global index for the vertices found in the current cell [S1].
+     -   If thread $k$ finds $N$ vertices, and the scan output for its cell is $S$, the global indices for these vertices are $S, S+1, \dots, S+N-1$ [S1].
+     -   The total number of vertices is obtained by summing the last elements of the input label vector and the output scan vector (e.g., $1 + 19 = 20$) [S1].
+@@ -49,22 +49,19 @@
+     -   The scan output matrices (`xscan` through `zscan`) are used to determine the write positions in `resvert` [S1].
+     -   Vertices are stored in a specific order: `xvert`, `yvert`, `Xvert`, `Yvert`, `zvert` [S1].
+-    -   The global index of a vertex in the final mesh is calculated by summing the counts of previous edge types. For example, if 100 vertices were found previously, and the current cell has 10 X-edges, 20 Y-edges, and 7 Z-edges, the first Z-vertex gets global index $100 + 10 + 20 = 130$ [S1].
++    -   The global index of a vertex in the final mesh is calculated by summing the counts of previous edge types [S1]. For example, if 100 vertices were found previously, and the current cell has 10 X-edges, 20 Y-edges, and 7 Z-edges, the first Z-vertex gets global index $100 + 10 + 20 = 130$ [S1].
+     -   However, its position in the compacted `resvert` vector is based on local offsets within the current cell's contribution, specifically position $30$ ($10+20$) relative to the start of the current cell's block in the compacted array [S1].
+ 
+-5.  **Stream Compaction (Triangles):** Execute a second compaction kernel to process the `trinumvect` array into `restrinumvect` [S1]. This step also uses the scan operation to determine write positions for triangle data, ensuring compact storage of triangle indices [S1].
++5.  **Stream Compaction (Triangles):** Execute a second compaction kernel to process the `trinumvect` array into `restrinumvect` [S1]. This step also uses the scan operation to process result vectors and produce smaller vectors containing only the non-empty elements [S1].
+ 
+ ### Pseudocode
+ 
+ ```python
+-# Kernel 1: VerticesCalc
+-# Each thread processes one cell (i, j) in the W x H slice pair
+-def VerticesCalc(cell_i, cell_j, volume_lower, volume_upper, 
++def VerticesCalc(cell_i, cell_j, volume_lower, volume_upper,
+                  xvert, yvert, Xvert, Yvert, zvert,
+                  xlabel, ylabel, Xlabel, Ylabel, zlabel):
++    # Determine vertex presence on each of the 12 edges of the cell
++    # (Isosurface criteria not specified in sources [G])
+     
+-    # Identify vertices on the 12 edges of the cell
+-    # Determine if a vertex exists on each edge based on isosurface criteria
+-    
+-    # Write coordinates to global memory matrices
++    # Write coordinates and label 1 if vertex exists, else 0
+     if vertex_exists_on_lower_x_edge:
+         xvert[cell_i, cell_j] = compute_vertex_coord(...)
+@@ -97,11 +94,9 @@
+         zlabel[cell_i, cell_j] = 0
+ 
+-# Kernel 2: VerticesCompact
+-# Compacts vertex coordinates and updates indices
+-def VerticesCompact(cell_i, cell_j, 
++def VerticesCompact(cell_i, cell_j,
+                     xvert, yvert, Xvert, Yvert, zvert,
++                    xlabel, ylabel, Xlabel, Ylabel, zlabel,
+                     xscan, yscan, Xscan, Yscan, zscan,
+                     resvert):
+-    
+     # Calculate base indices for this cell based on scan results
+     base_x = xscan[cell_i, cell_j]
+@@ -118,7 +113,6 @@
+     count_z = zlabel[cell_i, cell_j]
+     
+-    # Write to compacted array in order: x, y, X, Y, z
+-    # The position in resvert is determined by the cumulative sum of counts
+-    # within the current cell's contribution, but the global index is derived from scan
++    # Calculate flat write position in resvert by summing all scan bases
++    flat_start = base_x + base_y + base_X + base_Y + base_z
+     
+     offset = 0
+@@ -126,25 +120,25 @@
+     # Write X vertices
+     for k in range(count_x):
+-        resvert[base_x + offset] = xvert[cell_i, cell_j] # Assuming single vertex per edge for simplicity
++        resvert[flat_start + offset] = xvert[cell_i, cell_j]
+         offset += 1
+         
+     # Write Y vertices
+     for k in range(count_y):
+-        resvert[base_y + offset] = yvert[cell_i, cell_j]
++        resvert[flat_start + offset] = yvert[cell_i, cell_j]
+         offset += 1
+         
+     # Write X (upper) vertices
+     for k in range(count_X):
+-        resvert[base_X + offset] = Xvert[cell_i, cell_j]
++        resvert[flat_start + offset] = Xvert[cell_i, cell_j]
+         offset += 1
+         
+     # Write Y (upper) vertices
+     for k in range(count_Y):
+-        resvert[base_Y + offset] = Yvert[cell_i, cell_j]
++        resvert[flat_start + offset] = Yvert[cell_i, cell_j]
+         offset += 1
+         
+     # Write Z vertices
+     for k in range(count_z):
+-        resvert[base_z + offset] = zvert[cell_i, cell_j]
++        resvert[flat_start + offset] = zvert[cell_i, cell_j]
+         offset += 1
+ 
+@@ -158,5 +152,7 @@
+     # CUDPP_scan(xlabel, xlabel, W*H, ADD)
+     # CUDPP_scan(ylabel, ylabel, W*H, ADD)
+-    # ... repeat for Xlabel, Ylabel, zlabel
++    # CUDPP_scan(Xlabel, Xlabel, W*H, ADD)
++    # CUDPP_scan(Ylabel, Ylabel, W*H, ADD)
++    # CUDPP_scan(zlabel, zlabel, W*H, ADD)
+     
+     # 3. Launch VerticesCompact kernel
+@@ -164,5 +160,5 @@
+     
+     # 4. Perform Stream Compaction for triangles (similar scan + compact steps)
+-    # ...
++    # (Implementation details for triangle compaction not specified in sources [G])
+ ```
+ 
+@@ -174,11 +170,11 @@
+ ### Edge Cases and Pitfalls
+ -   **GPU Memory Limitation:** The large size of auxiliary data structures for large slices (up to 1168 MB) necessitates processing one pair of slices at a time [S1].
+--   **Data Transfer Overhead:** The effective number of vertices and triangles is much lower than the size of the data structures, leading to expensive data transfers. Stream compaction is critical to mitigate this [S1].
++-   **Data Transfer Overhead:** The effective number of vertices and triangles is much lower than the size of the data structures, leading to expensive data transfers [S1]. Stream compaction is critical to mitigate this [S1].
+ -   **Search Structures:** Search structures are disregarded because they also consume GPU memory, which is limited [S1].
+ 
+ ## Operating characteristics
+ 
+--   **Time Complexity:** The method involves four kernels: two for vertex/triangle computation and two for stream compaction and scan operations [S1]. The scan operation is typically $O(N)$ where $N$ is the number of cells [S1].
+--   **Memory Complexity:** Memory usage is proportional to the slice size $W \times H$. For $512 \times 512$ to $2048 \times 2048$ slices, memory occupancy ranges from 78 to 1168 MB [S1].
++-   **Time Complexity:** The method involves four kernels: two for vertex/triangle computation and two for stream compaction and scan operations [S1].
++-   **Memory Complexity:** Memory usage is proportional to the slice size $W \times H$ [S1]. For $512 \times 512$ to $2048 \times 2048$ slices, memory occupancy ranges from 78 to 1168 MB [S1].
+ -   **Strengths:**
+     -   Solves the duplicate vertex calculation problem efficiently without post-processing merging [S1].

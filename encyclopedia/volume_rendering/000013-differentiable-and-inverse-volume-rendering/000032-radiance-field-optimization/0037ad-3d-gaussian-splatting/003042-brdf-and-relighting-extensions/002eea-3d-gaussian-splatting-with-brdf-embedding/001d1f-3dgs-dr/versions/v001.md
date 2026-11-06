@@ -1,0 +1,65 @@
+# 3DGS-DR
+
+Also called: 3D Gaussian Splatting with Diffuse-Reflective shading
+
+## Overview
+3DGS-DR is a method that incorporates classical reflection and shading concepts into the 3D Gaussian Splatting (3DGS) framework [S1, unofficial]. It addresses the limitation of standard 3DGS, which uses an emission-absorption model that bakes lighting conditions into spherical harmonics coefficients, thereby limiting performance on highly reflective surfaces and preventing relighting [S1, unofficial]. By introducing physically based shading, it enables the representation of specular highlights and diffuse reflections, distinguishing it from sibling methods like GaussianShader and IRGS which also integrate shading but may differ in specific BRDF parameterization or optimization strategies [S1, unofficial].
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** A set of multi-view images of a scene.
+*   **Outputs:** A set of 3D Gaussians, where each Gaussian is augmented with BRDF parameters (diffuse and specular coefficients) in addition to the standard 3DGS attributes (position, covariance, opacity, spherical harmonics for view-dependent color).
+
+**Data Structures:**
+Each Gaussian $i$ stores:
+*   $\mathbf{p}_i$: 3D position.
+*   $\mathbf{R}_i$: Rotation matrix (quaternion).
+*   $\mathbf{s}_i$: Scaling vector.
+*   $\alpha_i$: Opacity.
+*   $\mathbf{c}_i^{diff}$: Diffuse albedo color (intrinsic).
+*   $\mathbf{c}_i^{spec}$: Specular color/intensity parameters.
+*   $\mathbf{sh}_i$: Spherical Harmonics coefficients (for diffuse view-dependent shading, if used, or residual view-dependent effects).
+
+**Rendering Equation:**
+The color $C$ of a pixel is computed by volume rendering the Gaussians along the ray. For each Gaussian, the shading is computed using a classical BRDF model (e.g., Blinn-Phong or similar) at the intersection point or centroid projected onto the surface, combining diffuse and specular components [S1, unofficial].
+
+$$ C = \int_{t_n}^{t_f} T(t) \cdot c(t) \cdot \alpha(t) \, dt $$
+
+Where $c(t)$ is the shaded color of the primitive at $t$, derived from:
+$$ c(t) = c_{diff} \cdot (\mathbf{n} \cdot \mathbf{l}) + c_{spec} \cdot (\mathbf{r} \cdot \mathbf{v})^\gamma $$
+*(Note: Exact BRDF formula details are not explicitly provided in the sources beyond the general concept of incorporating reflection/shading. The sources mention "classical reflection and shading concepts" [S1, unofficial].)*
+
+**Optimization Steps:**
+1.  Initialize Gaussians from structure-from-motion (SfM) points.
+2.  Augment each Gaussian with BRDF parameters (diffuse and specular).
+3.  Render images using the shaded color model.
+4.  Compute loss against input images (typically L1 + SSIM).
+5.  Optimize all parameters (position, scale, rotation, opacity, BRDF coefficients) using stochastic gradient descent.
+
+**Parameters:**
+*   BRDF model type: Not specified in sources, but implied to be classical (e.g., Blinn-Phong) [S1, unofficial].
+*   Learning rate: Not given in the sources.
+
+**Edge Cases and Pitfalls:**
+*   **Aliasing:** Standard 3DGS uses a dilation filter which fails to suppress high-frequency artifacts when varying focal length or camera distance [S1, unofficial]. 3DGS-DR inherits this issue unless combined with techniques like MIP-Splatting [S1, unofficial].
+*   **Relighting Limitations:** While it enables relighting, the exact separation of intrinsic color and lighting depends on the training data and BRDF parameterization.
+
+## Subtopics
+
+### iVR-GS Training Setup
+A training configuration for iVR-GS that uses a Blinn-Phong shading model to decompose each Gaussian's color into intrinsic color and lighting components, enabling post-training appearance and illumination editing [S2, unofficial]. It composes multiple base models, each trained under one basic transformation function (TF) [S2, unofficial]. For lighting-free evaluation, training images are generated from DVR renders with lighting disabled to ensure identical rendering settings [S2, unofficial]. Minor brightness variations may persist in rendered outputs despite disabling lighting, due to the inherent view-dependent nature of the iVR-GS training formulation [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Enables physically based rendering, specular highlights, and relighting capabilities which are absent in standard emission-based 3DGS [S1, unofficial].
+*   **Limitations:** Susceptible to aliasing artifacts from dilation filters under varying camera parameters unless mitigated [S1, unofficial]. Performance on highly reflective surfaces is improved but depends on the accuracy of the BRDF parameterization [S1, unofficial].
+*   **When to use:** When physically based shading, specular reflections, or relighting is required.
+*   **When not to use:** When simple emission-based rendering suffices, or when high-frequency aliasing artifacts from camera movement are a critical concern without additional filtering.
+
+## Background
+3DGS-DR was introduced to address the limitations of the emission-absorption model in standard 3DGS, which bakes lighting into spherical harmonics and prevents relighting [S1, unofficial]. It is part of a family of methods including GaussianShader and IRGS that incorporate classical reflection and shading concepts into the 3DGS framework [S1, unofficial]. The method builds on the 3D Gaussian Splatting foundation [Parent](1174-3d-gaussian-splatting-with-brdf-embedding.md).
+
+## Sources
+[S1] From Volume Rendering to 3D Gaussian Splatting, https://www.visgraf.impa.br/Data/RefBib/PS_PDF/tutorial-sib2025/tutorial-sib2025.pdf, fetched 2026-10-28 (unofficial)
+[S2] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)

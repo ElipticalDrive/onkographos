@@ -1,0 +1,157 @@
+# Parallel Prefix Sum (Scan) Orchestration
+
+Also called: Exclusive/Inclusive Scan via Ping-Pong, Parallel Prefix Sum, Prefix Sum
+
+## Overview
+Parallel Prefix Sum (Scan) Orchestration is a GPU-based method for computing prefix sums (scans) of an input array using a multi-timestep iterative reduction strategy with ping-pong buffers. It solves the problem of efficiently aggregating data across parallel threads without race conditions, serving as a foundational primitive for operations like voxel compaction and vertex indexing in volume rendering pipelines. It sets itself apart from sibling methods like [Tiled Parallel Compositing](1192-tiled-parallel-compositing.md) by focusing on the low-level data movement and synchronization required for global aggregation, rather than high-level compositing logic.
+
+## How it works
+**Inputs and Outputs:**
+- Input: An input array of values (e.g., vertex counts or boolean flags) stored in a storage buffer.
+- Output: The computed prefix sum array, with the total sum available in the last element of the active buffer.
+
+**Data Structures:**
+- `prefixSumPingBuffer`: A `std430` storage buffer used for reading and writing during even timesteps.
+- `prefixSumPongBuffer`: A `std430` storage buffer used for reading and writing during odd timesteps.
+- `totalSumBufferHost`: A host-accessible buffer used to retrieve the final total sum from the active ping/pong buffer after computation.
+- Push Constant: A 32-bit integer `timestep` indicating the current iteration step.
+
+**Numbered Steps:**
+1.  **Initialization:** Create two ping-pong storage buffers (`prefixSumPingBuffer`, `prefixSumPongBuffer`) and a host-accessible buffer (`totalSumBufferHost`). Determine the number of vertices $N$ in the scene.
+2.  **Iteration Count Calculation:** Calculate the number of iterations required: $I = \lceil \log_2(N) \rceil$.
+3.  **Loop Setup:** Loop for $t$ from $0$ to $I$ inclusive.
+4.  **Dispatch:** For each timestep $t$:
+    -   Set the push constant to $t$.
+    -   Dispatch the compute shader with workgroup count $W = \lceil N / 256 \rceil$ and local group size $256 \times 1 \times 1$.
+5.  **Buffer Swap and Synchronization:** After each dispatch, swap the ping-pong buffers. Apply synchronization barriers based on the parity of $t$ to ensure read/write consistency.
+6.  **Finalization:** After the loop, copy the last element of the active buffer to `totalSumBufferHost`.
+
+**Formulas:**
+For a given timestep $t$ and global invocation index $i$:
+-   If $t$ is even:
+    $$
+    dst[i] = \begin{cases} 
+    src[i] & \text{if } i < 2^t \\
+    src[i] + src[i - 2^t] & \text{otherwise}
+    \end{cases}
+    $$
+-   If $t$ is odd:
+    $$
+    src[i] = \begin{cases} 
+    dst[i] & \text{if } i < 2^t \\
+    dst[i] + dst[i - 2^t] & \text{otherwise}
+    \end{cases}
+    $$
+    Where $src$ and $dst$ refer to the read and write buffers for the current timestep, respectively.
+
+**Parameters:**
+-   `timestep`: Integer push constant, current iteration step $t$.
+-   `numGroups`: Number of compute shader workgroups, calculated as $\lceil N / 256 \rceil$.
+-   `iters`: Number of iterations, calculated as $\lceil \log_2(N) \rceil$.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def parallel_prefix_sum_orchestration(scene_num_vertices):
+    N = scene_num_vertices
+    iters = ceil(log2(N))
+    
+    # Initialize buffers
+    ping_buffer = allocate_storage_buffer(N, uint32)
+    pong_buffer = allocate_storage_buffer(N, uint32)
+    total_sum_host = allocate_host_buffer(uint32)
+    
+    # Initial data load would happen here, assumed to be in ping_buffer
+    
+    for t in range(iters + 1):
+        # Dispatch compute shader
+        dispatch_compute_shader(
+            shader_source=prefix_sum_kernel,
+            push_constants={'timestep': t},
+            workgroups=(N + 255) // 256,
+            local_size=(256, 1, 1)
+        )
+        
+        # Synchronize and swap buffers based on timestep parity
+        if t % 2 == 0:
+            # Even timestep: ping was written, pong was read
+            # Swap so ping is now the source for next step
+            swap_buffers(ping_buffer, pong_buffer)
+        else:
+            # Odd timestep: pong was written, ping was read
+            # Swap so pong is now the source for next step
+            swap_buffers(ping_buffer, pong_buffer)
+            
+        # Apply barriers to ensure memory visibility
+        apply_memory_barrier(ping_buffer, pong_buffer)
+        
+    # Copy final result
+    last_index = N - 1
+    copy_region = BufferCopy(
+        src_offset=last_index * sizeof(uint32),
+        dst_offset=0,
+        size=sizeof(uint32)
+    )
+    copy_buffer_to_host(ping_buffer if iters % 2 == 0 else pong_buffer, total_sum_host, copy_region)
+    
+    return total_sum_host[0]
+
+def prefix_sum_kernel(global_id, timestep, src_buffer, dst_buffer):
+    index = global_id.x
+    N = src_buffer.length()
+    
+    if index >= N:
+        return
+        
+    power_of_two = 1 << timestep  # Optimized power of 2 calculation
+    
+    if timestep % 2 == 0:
+        # Even timestep: dst = ping, src = pong
+        if index < power_of_two:
+            dst_buffer[index] = src_buffer[index]
+        else:
+            index2 = index - power_of_two
+            dst_buffer[index] = src_buffer[index] + src_buffer[index2]
+    else:
+        # Odd timestep: src = ping, dst = pong
+        if index < power_of_two:
+            src_buffer[index] = dst_buffer[index]
+        else:
+            index2 = index - power_of_two
+            src_buffer[index] = dst_buffer[index] + dst_buffer[index2]
+```
+
+**Edge Cases and Pitfalls:**
+-   **Power Calculation:** Using a naive loop for power calculation is inefficient; bit shifting (`1 << timestep`) should be used [S1, unofficial].
+-   **Barrier Ordering:** Synchronization barriers must strictly match the ping-pong swap direction to avoid GPU read/write conflicts [S1, unofficial].
+-   **Boundary Conditions:** Ensure bounds checking (`index < N`) is performed before accessing buffer elements to prevent out-of-bounds memory access [S1, unofficial].
+
+## Subtopics
+
+### [CUDA-based Exclusive Prefix Sum for Vertex Indexing](1112-cuda-based-exclusive-prefix-sum-for-vertex-indexing.md)
+Solves duplicate vertex calculation in GPU-based parallel isosurface extraction by applying scan-based indexing to both vertices and triangles.
+
+### [Wait-Free Radix Sort](1879-wait-free-radix-sort.md)
+A parallel sorting algorithm for WebGPU that uses a hierarchical Blelloch scan to compute element positions, avoiding inter-workgroup spin-waiting.
+
+### [Group Prefix Sum for Shell Lists](2746-group-prefix-sum-for-shell-lists.md)
+A parallel compaction method for reorganizing shell list data structures in GPU-based isosurface extraction, integrating with group-shared memory constraints.
+
+### [Exclusive Prefix Sum (Scan)](3007-exclusive-prefix-sum-scan.md)
+The fundamental parallel primitive mapping an input list to an output list where each element is the sum of all preceding elements, primarily used for voxel compaction.
+
+## Operating characteristics
+-   **Time Complexity:** $O(\log N)$ timesteps, with $O(N)$ work per timestep, resulting in $O(N \log N)$ total work.
+-   **Memory Complexity:** $O(N)$ for the ping-pong buffers.
+-   **Performance:** Performance depends on the efficiency of the compute shader dispatch and memory synchronization. The naive power calculation can impact performance for large $N$ [S1, unofficial].
+-   **Strengths:** Simple implementation, robust synchronization via ping-pong buffers, suitable for irregular data sizes.
+-   **Limitations:** $O(N \log N)$ work is less efficient than $O(N)$ algorithms like Blelloch scan. Requires multiple kernel launches and synchronization barriers.
+-   **When to Use:** When implementing a simple, robust prefix sum on Vulkan/OpenGL compute shaders without access to optimized libraries.
+-   **When Not to Use:** When performance is critical and $O(N)$ algorithms are available, or when working in environments with efficient warp-level primitives.
+
+## Background
+This method is derived from a Vulkan-based Gaussian Splatting implementation [S1, unofficial]. It represents a straightforward, iterative approach to parallel prefix sums, often used in educational or prototype contexts where simplicity and correctness are prioritized over optimal performance. The ping-pong buffer strategy is a common technique in GPU programming to manage read/write dependencies in iterative algorithms.
+
+## Sources
+[S1] Show HN: 3DGS.cpp – performant, cross platform Gaussian Splatting with Vulkan, https://github.com/shg8/3DGS.cpp, fetched 2026-10-26 (unofficial)

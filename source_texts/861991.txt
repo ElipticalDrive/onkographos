@@ -1,0 +1,925 @@
+Parse, view, query, edit, validate and export building models. Browser-first WebGPU viewer, TypeScript SDK, CLI, MCP server and Rust/WASM core with dual exact-arithmetic & SMlib geometry kernels. - fix(geometry): weld source vertices in the object frame, not after the bake (#4103) by louistrue · Pull Request #4121 · LTplus-AG/ifc-lite
+
+fix(geometry): weld source vertices in the object frame, not after the bake (#4103) by louistrue · Pull Request #4121 · LTplus-AG/ifc-lite · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+louistrue
+commented
+Sep 7, 2026
+•
+edited by coderabbitai
+Bot
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Closes #4103.
+Ten IfcFurnishingElement sharing one IfcRepresentationMap produced ten
+different mesh buffers, and no route deduplicated them. Same triangle counts,
+vertex counts spread over 0.9%.
+The reporter's diagnosis was right. The mechanism is sharper than "welding runs
+after placement".
+Root cause
+mesh_weld's vertex key carries the raw f32 BIT PATTERN of the position:
+```
+fn vkey(p: &[f32], n: &[f32], uv: [f32; 2]) -> VKey {
+    (p[0].to_bits(), p[1].to_bits(), p[2].to_bits(), ...)
+```
+So what it merges depends on the magnitude of the coordinates it is handed. One
+f32 ULP is ~6e-8 m at 0.5 m and ~2e-6 m at 30 m. Welding baked world coordinates
+therefore applied an epsilon that grew with the element's distance from the
+origin, and the same source geometry welded differently at every placement.
+That broke a contract the pipeline depends on and states in instancing/mod.rs:
+All occurrences of one rep_identity are produced from the same cached
+source-coords geometry [...] so their canonical geometry is bit-identical.
+It is not, if a later stage rewrites the vertices per occurrence.
+collate_refs refuses a group whose members disagree on vertex count
+(instancing/group.rs:209, verify.rs:119), all-or-nothing per group, so
+nothing collated. The content-hash tier in parquet_optimized.rs could not fire
+either.
+The fix
+The weld runs in the object frame, from the two placement appliers, the last
+point at which the vertices are still in the frame the geometry was authored in.
+All three placement sites in router/processing.rs go through those two
+functions, so there is no fourth site to forget.
+Normals had to move with it, and this is the part that makes the change
+non-obvious. They are computed in element.rs AFTER the bake, and
+weld_indexed refuses a mesh whose normals do not match its positions 1:1. A
+weld moved earlier without them merges NOTHING, on every model, while looking
+byte-identical to a fingerprint check. weld_mesh / weld_sub_mesh call
+calculate_normals first; it accumulates from triangle winding, so it needs only
+positions and indices, and transform_mesh_world_framed already rotates normals
+into world with the positions.
+build_mesh_data still welds, via the new weld_baked, but only meshes carrying
+no instance_meta: a void cut (voids::process_element_with_voids clears it
+precisely because a cut body no longer reproduces its representation), a layer
+slice, a textured type part. None of those reaches a placement applier and none
+has a cross-occurrence identity to protect, so they are welded in the frame they
+ship in. Without that split the kernel's per-face output ships unwelded and
+voided walls inflate: C20-Institute-Var-2 by 90%, ISSUE_098 by 7%.
+Measured
+Vertices that must ship after collate_refs(&refs, 2, [0,0,0]), the same call
+parquet_instancing.rs makes:
+model
+main
+this PR
+repro, site placement neutralised
+1,581,404
+156,211 (-90%)
+dental_clinic
+309,684
+179,840 (-42%)
+Office_A_20110811
+81,766
+54,591 (-33%)
+duplex
+40,785
+28,668 (-30%)
+ISSUE_098 (site-local)
+3,461,037
+3,278,926 (-5%)
+AC20-FZK-Haus
+32,116
+32,116 (0%)
+C20-Institute-Var-2
+16,097
+16,117 (+0.1%)
+Collation rejections drop to 0 on duplex (4), dental_clinic (8) and Office_A (4).
+schependomlaan keeps its 2.
+End to end on the #4103 attachment, both server binaries built here, each with a
+fresh CACHE_DIR. Main reproduces the reporter's bytes exactly, so this is
+measured against their environment:
+file
+route
+main
+this PR
+as authored
+/parse/parquet
+30,408,159
+30,329,804
+as authored
+/parse/parquet/optimized
+16,804,132
+16,676,055
+site neutralised
+/parse/parquet
+30,329,870
+30,255,284
+site neutralised
+/parse/parquet/optimized
+16,785,313
+1,682,818
+optimization_stats on the neutralised file goes unique_meshes: 30, mesh_reuse_ratio: 1.0 to unique_meshes: 3, mesh_reuse_ratio: 10.0.
+The attachment as authored improves only 0.8%, and that is the honest headline
+for this PR. Its IfcSite placement carries a 34 degree rotation, so
+element.rs:766 discards every mesh's instancing metadata before collation can
+see it. Separate mechanism, separate fix, filed as #4118 with this measurement.
+What this PR does prove on the reporter's own file is the thing they reported:
+within-group vertex spread 84 / 527 / 2712 goes to 0 / 0 / 0.
+Two tests were measuring the wrong layer
+Corrected, not weakened:
+issue_846_revolved_beam demanded bit-identical normals within a triangle at
+the ROUTER output. The SHIPPED mesh for that same beam has had 42 triangles
+over that 1e-5 bar since the weld landed (measured on main); under this
+change it has 19, and the worst within-triangle deviation is 6.4e-5, three
+orders of magnitude below a crease. The threshold moves to the weld's own
+normal quantization grid, and a new control smooth-shades the same mesh and
+asserts it blows past the threshold, so the bar still catches the IfcBeam geometry error with IfcRevolvedAreaSolid #846
+regression it exists for.
+11 geometry_correctness_harness snapshots move. Every change is
+total_vertices and every one goes DOWN; triangles, surface area, bbox and
+error counts are untouched. All 25 were diffed before any was accepted.
+The regression test
+41 entities, inline, no external fixture. One IfcRepresentationMap holding two
+coplanar quads whose x coordinates differ by 1e-6 m, each authored as two
+triangular faces so the source carries genuine per-face duplication, mapped at
+x = 0, 64 and 128. It discriminates three outcomes rather than two:
+what the pipeline does
+vertices per occurrence
+no weld at all
+12
+weld after the bake (the defect)
+8 at x=0, 4 at x=128
+weld the source, in the object frame
+8 everywhere
+It also asserts that at x=128 the two quads' four corner pairs share f32 world
+positions AND normals and are still separate vertices, which is only true of a
+mesh welded in the object frame. The local frame is forced off rather than
+inherited, so it measures the same thing in every environment.
+A residual, measured rather than hidden
+The weld's no-duplicate-key invariant now holds in the frame the weld runs in.
+A rigid placement can still map two distinct object-frame vertices onto one f32
+world position, and those are no longer merged, because merging them is exactly
+the placement-dependent behaviour this PR removes. Across six ara3d models that
+is 104 meshes of 15,211 and 494 vertices of 1,093,616: 0.68% of meshes, 0.045%
+of vertices. soupy meshes (>= 2.9 vertices per triangle) carrying
+instance_meta are identical on main and this PR, so nothing became soup.
+Verification
+```
+cargo test --workspace --no-fail-fast    exit 0
+cargo clippy --workspace --all-targets -- -D warnings   exit 0
+```
+No changeset: no packages/* files changed.
+🤖 Generated with Claude Code
+https://claude.ai/code/session_01NfAavu3wBCfAPxEsv9BJ4K
+Summary by CodeRabbit
+New Features
+Improved mesh vertex welding across placements while preserving UV mappings, surface normals, and crease sharpness.
+Added support for welding meshes with incomplete normal data.
+Preserved shared and instanced geometry identity during processing and collation.
+Bug Fixes
+Prevented incorrect world-coordinate collisions from affecting shared geometry.
+Improved flat-shading consistency and mesh cleanliness across processed and exported geometry.
+Documentation
+Clarified when and how mesh welding is applied throughout geometry processing and export.
+Tests
+Added regression coverage for shared mapped geometry and mesh-welding behavior.
+vercel
+Bot
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+The latest updates on your projects. Learn more about Vercel for GitHub.
+2 Skipped Deployments
+Project
+Deployment
+Actions
+Updated
+ifc-lite-dev
+Ignored
+Sep 7, 2026 11:19pm UTC
+ifc-lite-viewer-embed
+Ignored
+Sep 7, 2026 11:19pm UTC
+cursor
+Bot
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Bugbot couldn't run - usage limit reached
+Bugbot is counted against Cursor usage for this user or team, and this run hit a usage or spend limit.
+A user or team admin can review and increase usage limits in the Cursor dashboard.
+(requestId: serverGenReqId_3671715a-17b8-4bc2-8e97-09e6e86db800)
+chatgpt-codex-connector
+Bot
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Codex Review Summary
+This comment shows the latest Codex review activity on this pull request.
+Review
+Status
+Commit
+Review trigger
+📝 Code Review
+✅ Completed 2026-09-07T22:35:37.143310Z
+4013904
+PR opened
+ℹ️ About Codex in GitHub
+Your team has set up Codex to review pull requests in this repo. Reviews are triggered when you
+Open a pull request for review
+Mark a draft as ready
+Comment "@codex review" or "@codex security review".
+Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.
+coderabbitai
+Bot
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+No actionable comments were generated in the recent review. 🎉
+ℹ️ Recent review info
+⚙️ Run configuration
+Configuration used: Path: .coderabbit.yaml
+Review profile: CHILL
+Plan: Team
+Run ID: 4a88fb26-30e6-4af6-bd7d-b5e2aaacb47e
+📥 Commits
+Reviewing files that changed from the base of the PR and between 4638f74 and dce6016.
+⛔ Files ignored due to path filters (11)
+rust/geometry/tests/snapshots/annex_e__advanced__basin-tessellation.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__advanced__bath-csg-solid_780.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__basic__triangulated-item.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__tess-style__individual-colors.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__tess__beam-curved-i.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__tess__beam-straight-i.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__tess__column-rectangle.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__tess__polygonal-face.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/annex_e__tess__slab-unique-vertices.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/issue_218_window_rendering.snap is excluded by !**/*.snap
+rust/geometry/tests/snapshots/issue_472_SurfaceModel_support.snap is excluded by !**/*.snap
+📒 Files selected for processing (10)
+docs/architecture/geometry-pipeline.md
+rust/export/src/gltf/from_meshes.rs
+rust/geometry/src/geom_closure.rs
+rust/geometry/src/mesh.rs
+rust/geometry/src/mesh_weld.rs
+rust/geometry/src/router/transforms/mod.rs
+rust/geometry/tests/issue_846_revolved_beam.rs
+rust/processing/src/element.rs
+rust/processing/tests/issue_4103_shared_map_buffer_identity.rs
+rust/processing/tests/source_vertex_weld.rs
+Included review availability: Your plan provides up to 10 included reviews per hour; 1 remains after this review.
+📝 Walkthrough
+Walkthrough
+Mesh welding now occurs in object coordinates before placement transforms. Ordinary meshes use the shared welding API after processing, while shared geometry skips a second weld. Tests cover instancing, UV handling, vertex identity, and flat-shading tolerance.
+Changes
+Frame-aware mesh welding
+Layer / File(s)
+Summary
+Welding APIs and buffer handling
+rust/geometry/src/mesh_weld.rs, rust/geometry/src/mesh.rs, rust/geometry/src/geom_closure.rs
+Added in-place welding for meshes and sub-meshes. The implementation prepares normals, preserves UV mappings, avoids replacing unchanged buffers, and documents welding order.
+Placement and processing integration
+rust/geometry/src/router/transforms/mod.rs, rust/processing/src/element.rs, rust/export/src/gltf/from_meshes.rs, docs/architecture/geometry-pipeline.md, rust/processing/tests/source_vertex_weld.rs
+Placement appliers weld object-frame geometry before transforms. build_mesh_data welds ordinary meshes and skips geometry with instance_meta. Export consumes pre-welded mesh data.
+Regression and shading validation
+rust/processing/tests/issue_4103_shared_map_buffer_identity.rs, rust/geometry/tests/issue_846_revolved_beam.rs
+Added shared-map processing and collation coverage. Updated flat-shading checks to use the weld tolerance and a position-welded control.
+Priority: ➖ Normal — Impact reflects medium issue severity.
+Estimated code review effort: 4 (Complex) | ~45 minutes
+Merge Risk: ⚪ Minimal · up to dce60
+No merge-blocking issue was identified in the reviewed welding and instancing changes.
+Sequence Diagram(s)
+```
+sequenceDiagram
+  participant PlacementApplier
+  participant mesh_weld
+  participant build_mesh_data
+  participant Collation
+  PlacementApplier->>mesh_weld: weld mesh in object coordinates
+  mesh_weld->>PlacementApplier: return welded geometry
+  PlacementApplier->>PlacementApplier: apply placement and world transforms
+  build_mesh_data->>mesh_weld: weld ordinary mesh
+  build_mesh_data->>Collation: provide matching mesh buffers
+  Collation->>Collation: reuse shared geometry
+```
+Loading
+Possibly related PRs
+LTplus-AG/ifc-lite#1562: Both changes modify mesh welding and the processing funnel.
+Suggested reviewers: bimvoice
+🚥 Pre-merge checks | ✅ 8
+✅ Passed checks (8 passed)
+Check name
+Status
+Explanation
+Description Check
+✅ Passed
+Check skipped - CodeRabbit’s high-level summary is enabled.
+Title check
+✅ Passed
+The title accurately identifies the main change: welding source vertices in the object frame before placement baking.
+Linked Issues check
+✅ Passed
+The changes address issue #4103 by welding shared source geometry before placement, preserving consistent occurrence buffers. The added regression test verifies identical mesh buffers, successful inst…
+Out of Scope Changes check
+✅ Passed
+The implementation, documentation updates, and regression tests are related to object-frame mesh welding, placement behavior, and shared-geometry deduplication. No unrelated code changes are evident.
+Docstring Coverage
+✅ Passed
+Docstring coverage is 92.86% which is sufficient. The required threshold is 80.00%. Docstring coverage is scoped to functions touched by this diff. Analyzed 14 functions across 9 files. (1 skipped: 1 …
+Changeset Bump Matches The Api Surface
+✅ Passed
+The check applies only when the PR adds or edits a file under .changeset/. The actual diff from the PR commit’s recorded parent changes 21 files, all under docs/ or rust/; the .changeset/-scop…
+Verification Evidence Is Present
+✅ Passed
+The PR description provides direct verification evidence. It states that cargo test --workspace --no-fail-fast and cargo clippy --workspace --all-targets -- -D warnings were run and exited 0. It r…
+One Defect Class Per Pr
+✅ Passed
+The PR does not fix the welding defect as unrelated one-off patches. It adds the shared mesh_weld::weld implementation in rust/geometry/src/mesh_weld.rs:256-312, with weld_mesh and `weld_sub_mes…
+✨ Finishing Touches
+📝 Generate docstrings
+Create stacked PR
+Commit on current branch
+🧪 Generate unit tests (beta)
+Create PR with unit tests
+Commit unit tests in branch fix/4103-weld-in-local-frame
+Comment @coderabbitai help to get the list of available commands.
+github-actions
+Bot
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Contributor
+Claude review - no findings for 401390416
+Reviewed this diff and found nothing to flag.
+github-actions
+Bot
+added
+the
+llm-reviewed
+A review was verified as posted for this PR's head.
+label
+Sep 7, 2026
+github-actions
+Bot
+commented
+Sep 7, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Viewer benchmark
+✅ No threshold regressions detected.
+01_Snowdon_Towers_Sample_Structural(1).ifc
+Baseline recorded 2026-07-01T20:31:05.538Z on github-actions ubuntu-latest, viewer-benchmark-ci (headless Chrome, SwiftShader ANGLE), production build.
+Metric
+Current
+Baseline
+Delta
+Threshold
+Status
+firstBatchWaitMs
+1949ms
+2905ms
+-32.9%
++50%
+✅
+firstVisibleGeometryMs
+3060ms
+3652ms
+-16.2%
++50%
+✅
+streamCompleteMs
+3278ms
+3598ms
+-8.9%
++50%
+✅
+spatialReadyMs
+1480ms
+1032ms
++43.4%
++50%
+✅
+metadataCompleteMs
+1993ms
+3063ms
+-34.9%
++50%
+✅
+totalWallClockMs
+3600ms
+3700ms
+-2.7%
++50%
+✅
+AC20-FZK-Haus.ifc
+Baseline recorded 2026-07-01T20:30:59.972Z on github-actions ubuntu-latest, viewer-benchmark-ci (headless Chrome, SwiftShader ANGLE), production build.
+Metric
+Current
+Baseline
+Delta
+Threshold
+Status
+firstBatchWaitMs
+340ms
+1075ms
+-68.4%
++50%
+✅
+firstVisibleGeometryMs
+1244ms
+1572ms
+-20.9%
++50%
+✅
+streamCompleteMs
+907ms
+1980ms
+-54.2%
++50%
+✅
+spatialReadyMs
+963ms
+915ms
++5.2%
++50%
+✅
+metadataCompleteMs
+1068ms
+1392ms
+-23.3%
++50%
+✅
+totalWallClockMs
+1400ms
+3300ms
+-57.6%
++50%
+✅
+Refresh the baseline from a CI run: dispatch the Benchmark workflow with record_baseline, download the benchmark-baseline artifact, and commit baseline.json (see tests/benchmark/README.md).
+This was referenced Sep 7, 2026
+geometry: carry a welded-in-object-frame bit on Mesh, to unblock welding at the cached source (#4103 residual)
+#4122
+Closed
+Opening classification gates on raw vertex count, so authoring redundancy decides the CSG-vs-AABB branch
+#4119
+Closed
+fix(geometry): weld source vertices in the object frame, not after th…
+…
+dce6016
+```
+…e bake (#4103)
+
+Ten `IfcFurnishingElement` sharing one `IfcRepresentationMap` produced ten
+different mesh buffers, and no route deduplicated them. Same triangle counts,
+vertex counts spread over 0.9%.
+
+`mesh_weld`'s vertex key carries the raw f32 BIT PATTERN of the position, so
+what it merges depends on the magnitude of the coordinates it is handed. One
+f32 ULP is ~6e-8 m at 0.5 m and ~2e-6 m at 30 m, so welding baked world
+coordinates applied an epsilon that grew with the element's distance from the
+origin: the same source geometry welded differently at every placement.
+
+That broke a contract the pipeline depends on and states in
+`instancing/mod.rs`. Every occurrence of one `IfcRepresentationMap` is a clone
+of ONE cached source mesh (`router::mapped_item`), and every direct-solid
+`rep_identity` is a hash of the mesh BEFORE placement
+(`router::processing::direct_rep_identity`), so occurrences of one
+representation are meant to be bit-identical. A post-bake weld rewrote each of
+them differently, and `collate_refs` refuses a group whose members disagree on
+vertex count (`instancing/group.rs:209`, `verify.rs:119`), so nothing collated
+and the content-hash tier could not fire either.
+
+The weld now runs in the object frame, from the two placement appliers, which
+is the last point at which the vertices are still in the frame the geometry was
+authored in. All three placement sites in `router/processing.rs` go through
+those two functions. That covers the whole shipped path, but it is not every
+bake in the crate: `voids::probe::get_opening_item_meshes_world` calls
+`transform_mesh_world_framed` directly, so it does produce unwelded meshes that
+carry `instance_meta`. Those are void cutters and volume probes and never become
+element MeshData, so nothing ships unwelded, but the pairing is inferred rather
+than recorded. #4122 tracks putting the answer on the mesh.
+
+Normals had to move with it. They are computed in `element.rs` AFTER the bake,
+and `weld_indexed` refuses a mesh whose normals do not match its positions 1:1,
+so a weld inserted before placement without them merges NOTHING - which is why
+this looks free to measure and is not. `weld_mesh`/`weld_sub_mesh` call
+`calculate_normals` first; it accumulates from the triangle winding, so it needs
+only positions and indices, and `transform_mesh_world_framed` already rotates
+normals into world with the positions.
+
+`build_mesh_data` still welds, but only meshes carrying no `instance_meta`:
+a void cut (`voids::process_element_with_voids` clears it precisely because a
+cut body no longer reproduces its representation), a layer slice, a #858
+palette split, a textured type part. What they have in common is that none has
+a cross-occurrence identity to protect, so `weld_baked` welds them in the frame
+they ship in. Not that none reaches a placement applier - a void host does, and
+is welded there before it is cut, so for that population this is a second weld.
+`weld_baked`'s doc names both cases. Without that split, the kernel's per-face output ships unwelded
+and voided walls inflate: C20-Institute-Var-2 by 90%, ISSUE_098 by 7%.
+
+Measured, vertices that must ship after `collate_refs(&refs, 2, [0,0,0])`, the
+same call `parquet_instancing.rs` makes:
+
+  dental_clinic          309,684 -> 179,840   (-42%)
+  Office_A_20110811       81,766 ->  54,591   (-33%)
+  duplex                  40,785 ->  28,668   (-30%)
+  ISSUE_098 (site-local) 3,461,037 -> 3,278,926 (-5%)
+  AC20-FZK-Haus           32,116 ->  32,116   (0%)
+  C20-Institute-Var-2     16,097 ->  16,117   (+0.1%)
+
+Collation rejections drop to 0 on duplex (4), dental_clinic (8) and Office_A
+(4); schependomlaan keeps its 2.
+
+End to end on the #4103 attachment, both binaries built here, each with a fresh
+CACHE_DIR. Main reproduces the reporter's bytes exactly:
+
+  as authored          /parse/parquet            30,408,159 -> 30,329,804
+                       /parse/parquet/optimized  16,804,132 -> 16,676,055
+  site placement       /parse/parquet            30,329,870 -> 30,255,284
+  neutralised          /parse/parquet/optimized  16,785,313 ->  1,682,818
+
+and `optimization_stats` on the neutralised file goes
+`unique_meshes: 30, mesh_reuse_ratio: 1.0` to `unique_meshes: 3,
+mesh_reuse_ratio: 10.0`.
+
+The attachment as authored improves only 0.8%, and that is honest: its IfcSite
+placement carries a 34 degree rotation, so `element.rs:766` discards every
+mesh's instancing metadata before any collation can see it. That is a separate
+defect with a separate mechanism, filed as #4118 with this measurement.
+
+Two tests were measuring the wrong layer and are corrected here, not weakened:
+
+- `issue_846_revolved_beam` demanded bit-identical normals within a triangle at
+  the ROUTER output, where the mesh was still unwelded and every triangle owned
+  its three vertices. That bar never described the shipped mesh: on main the
+  weld ran afterwards at `build_mesh_data` and merged normals within the same
+  1e-3 cell, putting the identical jitter into the `MeshData` users get. Moving
+  the weld ahead of the placement makes the router's output show what the
+  shipped mesh always showed. Measured on the branch: of 644 triangles, 25
+  exceed 1e-5 and 4 exceed 1e-4, worst within-triangle deviation 1.6e-4. The
+  threshold moves to the weld's own normal quantization grid (1e-3), and a new
+  control smooth-shades the same mesh and measures 2.0 there - four orders the
+  other way - so the bar sits in the gap and still catches the #846 regression
+  it exists for.
+- 11 `geometry_correctness_harness` snapshots move. Every VALUE that changes is
+  `total_vertices` and every one goes DOWN; triangles, surface area, bbox and
+  error counts are untouched. Two of the 11 also drop a stale
+  `assertion_line: 628` header, matching the nine others here: that is insta
+  metadata, it was already stale on main, and it churns on any unrelated edit to
+  the harness. All 25 were diffed before any was accepted.
+
+The new regression test is a 41-entity inline IFC: one `IfcRepresentationMap`
+holding two coplanar quads whose x coordinates differ by 1e-6 m, each authored
+as two triangular faces so the source carries genuine per-face duplication,
+mapped at x = 0, 64 and 128. It discriminates three outcomes rather than two:
+12 vertices means nothing welded, 8 at x=0 and 4 at x=128 means the weld ran on
+baked coordinates, 8 everywhere is the fix. It also asserts that at x=128 the
+two quads' four corner pairs share f32 world positions AND normals and are
+still separate vertices, which is only true of a mesh welded in the object
+frame.
+
+One behaviour change outside the mesh buffers, disclosed rather than tuned.
+`voids/synthesis.rs:102` classifies an opening by its cutter's RAW vertex count
+and sends `> 100` single-body cutters down the #635 AABB fallback. Welding the
+cutter reduces that count without changing its geometry, so 7 of 618 openings in
+the fixture corpus move to the exact CSG path: 250 -> 92, 250 -> 92, 122 -> 80,
+and 108 -> 56 four times. The move is toward what the gate's own comment says it
+is for ("won't fit through the CSG safety thresholds"), because 92 distinct
+vertices really is a simpler cutter than a 250-slot soup, and the full suite is
+green either way since nothing asserts the classification. The gate measuring
+authoring redundancy instead of complexity is a defect in its own right, filed
+as #4119: retuning it re-classifies all 618 openings, not these 7, so it needs
+its own before/after and its own review.
+
+Review, all three outcomes on the record:
+
+- The claim "no fourth site to forget" was false as written, and the same claim
+  in `element.rs`'s guard comment ("every producer that sets `instance_meta`
+  routes through a placement applier") was false the same way. `probe.rs:521` is
+  the counterexample. Fixed above: both now say what is actually true, which is
+  that everything ARRIVING at `build_mesh_data` came through an applier.
+- "Every change is total_vertices" was false: two snapshots also moved
+  `assertion_line`. Fixed by stripping that header from those two as well, so
+  the claim is true of the diff rather than the diff being described loosely.
+- Deferred to #4122: a real `welded_in_object_frame` bit on `Mesh` so the guard
+  can assert instead of trust. It touches ~25 struct literals, which is a wider
+  diff than this fix.
+
+/simplify, second pass:
+
+- `weld_baked` was a byte-identical alias of the private `weld_in_place`, and two
+  reviewers found it independently. Five entry points collapsed to three: one
+  public `weld` carrying the body, plus `weld_mesh` and `weld_sub_mesh`.
+  `ensure_normals` is inlined into it, which also merges two doc paragraphs that
+  read as contradicting each other (they described different call-site
+  populations 15 lines apart). `mesh_weld.rs` 327 -> 316 lines.
+- Dropped the position-delta loop from the regression test. Any tolerance loose
+  enough for f32 world storage at 128 m (one ULP is 1.5e-5 there) is far looser
+  than the 1e-6 separating the two quads, so it could not tell them apart and
+  only restated the vertex count. Removing it left `world()` dead, which is the
+  tell that it was the odd assertion out. The index and normal equality stay
+  (they do not depend on `collate`'s internals) and so does the exact
+  coincident-pair count, which is the sharp form.
+- Rejected: replacing that coincident count with `weld_indexed(..).is_some()`.
+  Bit-exact equality is strictly STRONGER than the weld's quantized key, so a
+  bit-identical pair is necessarily one the key would merge, and `== 4` pins the
+  fixture's structure where `is_some()` would not.
+- Rejected: dropping `flat_indices.is_empty()` as derivable from the other two
+  collation assertions. An assertion that names its own failure mode earns its
+  line.
+- Deferred: replacing the `FRAME_OVERRIDE` mutex with a `LazyLock`. The mutex
+  exists because this test hit that exact flake; swapping it buys nothing
+  behavioural.
+
+Perf, measured rather than argued (`scripts/perf/ab.sh`, 15 interleaved rounds,
+`profiling` profile, base `4638f7491`):
+
+    FM_ARC_DigitalHub.ifc   geometry 162 -> 159 ms  (-1.9%, noise +/-23%)
+    dental_clinic.ifc       geometry  58 ->  57 ms  (-1.7%, noise +/-17%)
+
+`parse` flat on both as the control. Every delta is inside the noise band: NO
+proven regression and no proven win on native. Native runs with
+`local_frame_enabled() == false`, so this never exercises the relativizing branch
+in `mesh_world.rs` that allocates 24 B/vertex per element; that is the wasm and
+viewer path, where the saving should be larger and is unmeasured here.
+
+Two costs the reorder introduces, both recorded on issues rather than fixed here:
+`ensure_normals`' output is discarded whenever the orienter flips (and the
+processors that leave normals absent are the ones that flip), and opening cutters
+are now welded although `mesh_to_tris` ignores normals and they never reach
+`build_mesh_data`. The second is the mechanism behind the 7-of-618 opening
+reclassification described above, so it is on #4119; the first is on #4122.
+
+/code-review, third pass. It traced every router entry point `element.rs` calls
+and every producer of `instance_meta` and found NO live hole in the discriminator,
+and confirmed the `geom_closure` claim (`mesh_orient` really does quantize to a
+10 um grid, which an exact-bit weld refines). Four findings:
+
+- FIXED: a dangling intra-doc link to `weld_baked`, which the /simplify collapse
+  above had just deleted. `cargo doc` warns and the docs lane is
+  `continue-on-error`, so nothing would have caught it. `mesh_weld` now emits
+  zero doc warnings.
+- FIXED: the `issue_846` tolerance derivation was wrong by a factor of two. The
+  comment reasoned over ONE merge class, but the assertion compares three
+  vertices that can survive in three DIFFERENT cells, so straddling
+  representatives can differ by about two cells (~2e-3), which is ABOVE the 1e-3
+  bar. It passes at 1.6e-4, six times inside, but the comment was telling the
+  next maintainer to re-derive from a bad model. Corrected, and it now says
+  plainly that the control is what proves the bar, not the constant. (Fable
+  raised the same point earlier and it was left; two reviewers agreeing is what
+  made me look properly.)
+- DISCLOSED, not fixed: a THIRD residual the module doc did not list. Welding is
+  not the only stage that can make two occurrences disagree; anything editing
+  INDICES post-bake can too. `degenerate::clean` compares a triangle height from
+  f32 world positions against an ABSOLUTE 15.3 um threshold, and `mesh_orient`'s
+  10 um adjacency grid is finer than the f32 world grid past 128 m (one ULP is
+  1.5e-5 m there). Either can leave two occurrences with different index buffers,
+  which `instancing::group` rejects: the #4103 symptom by another route. Reasoned
+  from the thresholds, NOT observed, and this fixture's half-unit squares cannot
+  exercise it, so it is recorded as unmeasured rather than claimed.
+- DEFERRED to #4122: non-instanced elements now pay two weld passes where main
+  paid one. Real, but the A/B above bounds it at inside-noise on two real models,
+  and skipping the second pass needs the `welded` marker that issue is about.
+
+Closes #4103
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01NfAavu3wBCfAPxEsv9BJ4K
+```
+louistrue
+force-pushed
+the
+fix/4103-weld-in-local-frame
+branch
+from
+4013904 to
+dce6016
+Compare
+September 7, 2026 23:19
+cursor
+Bot
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Bugbot couldn't run - usage limit reached
+Bugbot is counted against Cursor usage for this user or team, and this run hit a usage or spend limit.
+A user or team admin can review and increase usage limits in the Cursor dashboard.
+(requestId: serverGenReqId_21b0b7cb-7352-4e93-a3b2-5c378ec8c3ca)
+louistrue
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Pushed dce60168. Full detail in the commit message; the short version of what review
+changed.
+Two false claims corrected. "No fourth site to forget" was wrong, and the matching
+guard comment in element.rs ("every producer that sets instance_meta routes through
+a placement applier") was wrong the same way.
+voids::probe::get_opening_item_meshes_world bakes with transform_mesh_world_framed
+directly and does produce unwelded meshes carrying instance_meta. They are void
+cutters and volume probes and never become element MeshData, so nothing ships unwelded,
+but the sentence claimed more than was true. Both now say what actually holds: everything
+ARRIVING at build_mesh_data came through an applier.
+"Every change is total_vertices" was also wrong: two snapshots additionally moved
+assertion_line. Fixed by stripping that stale header from those two as well, matching
+the nine others in the diff, so the claim is true of what is there rather than
+approximately true.
+A tolerance comment that was wrong by 2x. The issue_846 derivation reasoned over
+one merge class, but the assertion compares three vertices that can survive in three
+different cells, so straddling representatives can differ by about two cells (2e-3),
+above the 1e-3 bar. It passes at 1.6e-4. The constant stays; the comment no longer
+claims to be a proof, and points at the control instead.
+A third residual, disclosed rather than found later. Welding is not the only stage
+that can make two occurrences disagree. degenerate::clean compares a height from f32
+world positions against an absolute 15.3 um threshold, and the orienter's 10 um grid is
+finer than the f32 world grid past 128 m. Either can leave two occurrences with
+different index buffers, which instancing::group rejects: the same symptom by another
+route. Reasoned from the thresholds, not observed, and marked unmeasured in the module
+doc.
+Perf, measured (scripts/perf/ab.sh, 15 interleaved rounds, profiling, base
+4638f7491): FM_ARC_DigitalHub geometry 162 to 159 ms (noise +/-23%), dental_clinic 58
+to 57 ms (noise +/-17%), parse flat as the control. No proven regression and no proven
+win on native. Native runs with the local frame off, so this never touches the
+relativizing branch that allocates 24 B/vertex per element; that is the wasm path and it
+is unmeasured here.
+Deferred with the arguments recorded: #4122 (carry a welded bit on Mesh, which also
+collapses M per-occurrence welds to one and closes the MappingTarget residual), and the
+cutter-weld mechanism behind the 7-of-618 opening reclassification, added to #4119.
+Two things a reviewer should know rather than infer:
+Cursor Bugbot reported "usage limit reached" on this PR and its check shows
+skipping, so that lane is green without having reviewed anything.
+I have NOT exercised this on the wasm/viewer path or the weekly determinism lane.
+For a change that alters vertex buffers, I would want both before merge.
+github-actions
+Bot
+removed
+the
+llm-reviewed
+A review was verified as posted for this PR's head.
+label
+Sep 7, 2026
+github-actions
+Bot
+commented
+Sep 7, 2026
+Copy link
+Copy Markdown
+Contributor
+Claude review - no findings for dce601681
+Reviewed this diff and found nothing to flag.
+github-actions
+Bot
+added
+the
+llm-reviewed
+A review was verified as posted for this PR's head.
+label
+Sep 7, 2026
+louistrue
+commented
+Sep 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@coderabbitai review
+coderabbitai
+Bot
+commented
+Sep 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+✅ Action performed
+Review finished.
+Note: CodeRabbit is an incremental review system and does not re-review already reviewed commits. This command is applicable only when automatic reviews are paused.
+louistrue
+mentioned this pull request
+Sep 8, 2026
+geometry-census-heavy has never completed: both runs cancelled at the 60-minute timeout, no census row ever emitted
+#4127
+Closed
+louistrue
+commented
+Sep 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@coderabbitai full review
+coderabbitai
+Bot
+commented
+Sep 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+⚠️ Action not completed
+Review rate limited.
+Your included review limit is currently reached under our Fair Usage Limits Policy. This review may still proceed through usage-based billing if eligible. Your next included review will be available in 38 minutes.
+louistrue
+commented
+Sep 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+@coderabbitai full review
+coderabbitai
+Bot
+commented
+Sep 8, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+✅ Action performed
+Full review finished.
+petruconduraru
+commented
+Sep 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Reviewed adversarially — sound, merge as-is
+Sharing is restored, measured rather than inferred. Ran the new regression test on the actual code: three occurrences of one IfcRepresentationMap at x=0/64/128 collate into 1 template, 0 collation rejections, 8 vertices at every placement.
+Mutation — reverted to the world-frame weld by removing the weld_mesh/weld_sub_mesh calls from apply_placement/apply_submesh_placement and welding unconditionally in element.rs, approximating main's old behaviour. Both new tests fail, reproducing the defect exactly: vertices == [8, 4, 4] instead of [8, 8, 8], and templates.len() == 0 instead of 1. Reverted clean.
+On tolerance — worth stating clearly since a scale-dependent epsilon is a recurring hazard here: the weld key is exact f32 bit-pattern equality on position (p[i].to_bits(), mesh_weld.rs), not an epsilon, and that is unchanged by this PR. The fix changes only which frame the exact match runs in. That is the right diagnosis — it removes the placement dependence without introducing a new tunable.
+As a proxy tolerance check I fetched the missing fixture and ran the flat-shading test at its real FLAT_SHADING_TOLERANCE = 1e-3 (passes), then tightened it 10× to 1e-4: fails at worst = 1.5931766e-4, matching the PR body's stated ~1.6e-4 almost exactly. So that number is real and the tolerance is calibrated, not vacuously loose.
+Placement ordering, cited not inferred: transforms/mod.rs:150 calls weld_mesh(mesh) as the first statement of apply_placement, before get_placement_transform/scale_transform/transform_mesh_world (~166-176). Same shape in apply_submesh_placement. The weld is strictly on the correct side of scale and placement bake.
+Mirrored / non-uniform scale: world-space normals go through the inverse-transpose path in mesh_world.rs (pre-existing, untouched). Since the weld now runs entirely in the object frame, which vertices merge no longer depends on the per-occurrence placement at all — that is the mechanism, and it composes correctly with the existing normal transform.
+Suites (targeted, no workspace build): -p ifc-lite-geometry -p ifc-lite-processing green; csg_manifold_gate green; csg_topology_gate green except topology_gate_census_over_the_fixture_corpus, which panics with "no fixtures on disk" — an environment gap, not this PR. module_size_ratchet 6/6, with git diff confirming no allowlist or budget touched.
+One prose nit, flagged only because this repo holds descriptions to the code's accuracy bar: the body says build_mesh_data welds "via the new weld_baked", but the function introduced is named weld (mesh_weld.rs:217) — weld_baked appears nowhere in the diff. Harmless, worth a one-word edit.
+What failed to break it: reverting the weld frame (caught), tightening the tolerance 10× (behaved exactly as predicted). No way found to make the fix silently pass.
+Hide details
+View details
+louistrue
+merged commit 12cdf0f
+into
+main
+Sep 8, 2026
+90 of 93 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+louistrue
+deleted the
+fix/4103-weld-in-local-frame
+branch
+September 8, 2026 11:55
+davidezani7
+mentioned this pull request
+Sep 21, 2026
+?parquet_layout=shared-shapes collates nothing on a public model (1.00×, +25.4% bytes) while /optimized collates 9.28× on the same file
+#5130
+Closed
+1 task done
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+llm-reviewed
+A review was verified as posted for this PR's head.
+2 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

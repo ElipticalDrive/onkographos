@@ -1,0 +1,261 @@
+# RLE4 Compression
+
+Also called: Map4 generation, RLE4, RLE4 Voxel Compression, RLE4::compress, Slab-based RLE voxel encoding
+
+## Overview
+RLE4 Compression converts a dense 3D voxel grid into a sparse, column-oriented structure called **Map4** to solve memory bloat in large volumes with significant empty space [S1, unofficial]. It processes the volume slice-by-slice (XZ planes), encoding runs of empty space (skip) and occupied space (solid) along the Y-axis into 16-bit words, while storing per-voxel color and intensity data in a separate texture buffer [S1, unofficial]. Unlike [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) which stores binary occupancy, RLE4 preserves per-voxel material and intensity information for splatting [S1, unofficial]. It differs from [Run-length encoded voxel runs](1209-run-length-encoded-voxel-runs.md) by using a fixed 16-bit RLE format with specific bit-widths for solid (6 bits) and skip (10 bits) runs, and by including a perturbation step for surface normals [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `mem`: Bit-packed array representing the 3D voxel grid. Size is $\lceil (sx \cdot sy \cdot sz) / 8 \rceil$ bytes.
+- `col1`, `col2`: Optional bit-packed arrays for material identification (2 bits total).
+- `sx`, `sy`, `sz`: Dimensions of the volume. Typical values: $sx=1024, sy=256, sz=1024$ [S1, unofficial].
+- `mip_lvl`: Mipmap level used to calculate the `scale` parameter.
+
+**Outputs:**
+- `map4`: A structure containing:
+  - `sx`, `sy`, `sz`: Dimensions.
+  - `map`: `uint*` array of size $sx \cdot sz$. `map[x + z*sx]` stores the byte offset into `slabs` for column $(x,z)$.
+  - `slabs`: `ushort*` array containing concatenated slab data.
+  - `slabs_size`: Total size of `slabs` in bytes.
+
+**Data Structures:**
+1. **Map4 Header**:
+   - `map[x + z*sx]`: Offset (in bytes or ushort count? Source says `uint*` but offsets into `ushort*` slabs. Source code implies byte offset or index. Note: `map[ i+k*sx ] = slab.size()` where `slab` is a vector of `ushort`. So `map` stores index into `slabs` array).
+2. **Slab Layout** (per column $x,z$):
+   - `[slab_len: ushort]`: Number of RLE entries.
+   - `[tex_len: ushort]`: Number of texture entries.
+   - `[RLE entries: ushort...]`: Alternating solid/skip runs.
+   - `[Texture entries: ushort...]`: Per-voxel color/intensity data.
+3. **RLE Entry** (`ushort`, 16 bits):
+   - Bits 0-9 (10 bits): Skip run length ($0 \dots 1023$).
+   - Bits 10-15 (6 bits): Solid run length ($0 \dots 63$).
+   - Format: `(solid << 10) | skip`. If `solid==0`, it is a skip run. If `skip==0`, it is a solid run.
+4. **Texture Entry** (`ushort`, 16 bits):
+   - Bits 0-7 (8 bits): Intensity.
+   - Bits 8-9 (2 bits): Color index ($0 \dots 3$).
+   - Bits 10-15: Unused/Padding.
+   - Format: `intensity | (color << 8)`.
+
+**Parameters:**
+- `scale`: Integer multiplier, `1 << mip_lvl`. Used for noise perturbation [S1, unofficial].
+- Max Solid Run: 63 (6 bits) [S1, unofficial].
+- Max Skip Run: 1023 (10 bits) [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. Initialize `map` array of size $sx \cdot sz$.
+2. Iterate $i$ from $0$ to $sx-1$ and $k$ from $0$ to $sz-1$ (X and Z coordinates):
+   a. Record current slab offset: `map[i + k*sx] = slabs.size()`.
+   b. Reserve space for headers: `slab_len_pos = slabs.size()`; `slabs.push_back(0)`; `tex_len_pos = slabs.size()`; `slabs.push_back(0)`.
+   c. Initialize counters: `solid = 0`, `skip = 0`, `store = false`.
+   d. Clear `texture` buffer.
+   e. Iterate $j$ from $0$ to $sy$ (inclusive, to flush final run):
+      i. Check if voxel $(i, j, k)$ is set in `mem`.
+         - If $j < sy$: `f = (mem[(i + j*sx + k*sxy) >> 3] >> (i & 7)) & 1`.
+         - If $j == sy$: `f = 0` (end of volume).
+      ii. If `f` is true (voxel is solid):
+          - Compute perturbed normal:
+            - Initialize `mx=0, my=0, mz=0, cnt=0`.
+            - Loop $a, b, c$ from $-1$ to $1$:
+              - If neighbor $(i+a, j+b, k+c)$ is within bounds and set in `mem`:
+                - `mx += a`, `my += b`, `mz += c`, `cnt++`.
+            - If `cnt < 27` (not fully surrounded):
+              - `centroid = (-mx, my, -mz)`. Normalize `centroid`.
+              - Quantize to 8-bit: `nx = clamp(int(127.0 * centroid.x + 128.0), 0, 255)`, same for `ny, nz`.
+          - Extract material bits:
+            - `bit1 = (col1[...] & (1<<(i&7))) ? 256 : 0`.
+            - `bit2 = (col2[...] & (1<<(i&7))) ? 512 : 0`.
+            - `mat = (bit1 | bit2) >> 8`.
+          - Calculate noise:
+            - `rnd1, rnd2, rnd3` using sine/cosine of coordinates scaled by `scale` and dimensions.
+            - `rnd4 = rnd1 + rnd2 + rnd3 + 3`.
+          - Perturb `ny` based on `mat`:
+            - If `mat == 0`: `ny = (ny * (((((i*scale) ^ (k*scale)) >> 4) & 15) + 15)) >> 5`.
+            - If `mat == 3`: `ny = (ny * (((((i*scale) ^ (k*scale)) >> 3) & 15) + 25)) >> 5`.
+            - Clamp `ny` to $0 \dots 255$.
+          - Store in texture: `texture.push_back(ny | bit1 | bit2)`.
+          - Set `store = true`.
+      iii. If `f` is false (voxel is empty):
+          - Set `store = false`.
+      iv. Flush runs if state changed or end of column:
+          - If `solid > 0` and `!store`:
+            - While `skip > 1023`: `slabs.push_back(1023)`; `skip -= 1023`.
+            - While `solid > 63`: `slabs.push_back((63 << 10) | (skip & 1023))`; `solid -= 63`; `skip = 0`.
+            - `slabs.push_back((solid & 63) << 10 | (skip & 1023))`.
+            - `solid = 0`; `skip = 0`.
+          - If `solid == 0` and `store`:
+            - (Implicitly handled by next solid run or end).
+      v. Update counters:
+          - If `store` is true: `solid++`.
+          - Else: `skip++`.
+   f. Finalize slab:
+      - `slabs[slab_len_pos] = slabs.size() - (slab_len_pos + 2)`.
+      - `slabs[tex_len_pos] = texture.size()`.
+      - Append `texture` entries to `slabs`.
+3. Allocate `map4.map` of size $sx \cdot sz$. Copy `map` data.
+4. Set `map4.slabs` to `slabs` data, `map4.slabs_size` to `slabs.size() * 2`.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def rle4_compress(mem, col1, col2, sx, sy, sz, mip_lvl):
+    scale = 1 << mip_lvl
+    sxy = sx * sy
+    map_offsets = [0] * (sx * sz)
+    slabs = []
+    
+    for i in range(sx):
+        for k in range(sz):
+            idx = i + k * sx
+            map_offsets[idx] = len(slabs)
+            
+            # Reserve header slots
+            slab_len_pos = len(slabs)
+            slabs.append(0)
+            tex_len_pos = len(slabs)
+            slabs.append(0)
+            
+            solid = 0
+            skip = 0
+            store = False
+            texture = []
+            
+            for j in range(sy + 1):
+                # Check voxel status
+                if j < sy:
+                    byte_idx = (i + j * sxy + k * sxy) // 8 # Note: source uses (i+j*sx+k*sxy)>>3. Assuming sxy=sx*sy? No, source says k*sxy. Wait, source: mem[(i+j*sx+k*sxy)>>3]. This implies sxy is not sx*sy but maybe stride? Or typo in source? 
+                    # Source: mem[(i+j*sx+k*sxy)>>3]. If sxy = sx*sy, then index is i + j*sx + k*sx*sy. This is standard row-major.
+                    # Let's assume standard layout: index = i + j*sx + k*sx*sy.
+                    # Source code snippet: mem[(i+j*sx+k*sxy)>>3]. If sxy is defined as sx*sy elsewhere, this is correct.
+                    # We will use standard 3D indexing: x + y*sx + z*sx*sy.
+                    voxel_idx = (i + j * sx + k * sx * sy) >> 3
+                    bit_pos = i & 7
+                    f = (mem[voxel_idx] >> bit_pos) & 1
+                else:
+                    f = 0
+                
+                if f:
+                    # Compute normal perturbation
+                    mx, my, mz, cnt = 0, 0, 0, 0
+                    for a in range(-1, 2):
+                        for b in range(-1, 2):
+                            for c in range(-1, 2):
+                                nx, ny, nz = i + a, j + b, k + c
+                                if 0 <= nx < sx and 0 <= ny < sy and 0 <= nz < sz:
+                                    n_idx = (nx + ny * sx + nz * sx * sy) >> 3
+                                    n_bit = nx & 7
+                                    if (mem[n_idx] >> n_bit) & 1:
+                                        mx += a
+                                        my += b
+                                        mz += c
+                                        cnt += 1
+                    
+                    ny_val = 128 # Default
+                    if cnt < 27:
+                        cx, cy, cz = -mx, my, -mz
+                        len_sq = cx*cx + cy*cy + cz*cz
+                        if len_sq > 0:
+                            inv_len = 1.0 / (len_sq ** 0.5)
+                            cx *= inv_len
+                            cy *= inv_len
+                            cz *= inv_len
+                        nx_val = int(127.0 * cx + 128.0)
+                        ny_val = int(127.0 * cy + 128.0)
+                        nz_val = int(127.0 * cz + 128.0)
+                    else:
+                        nx_val, ny_val, nz_val = 128, 128, 128
+                    
+                    # Clamp
+                    nx_val = max(0, min(255, nx_val))
+                    ny_val = max(0, min(255, ny_val))
+                    nz_val = max(0, min(255, nz_val))
+                    
+                    # Material bits
+                    bit1 = 256 if (col1[(i + j * sx + k * sx * sy) >> 3] >> (i & 7)) & 1 else 0
+                    bit2 = 512 if (col2[(i + j * sx + k * sx * sy) >> 3] >> (i & 7)) & 1 else 0
+                    mat = (bit1 | bit2) >> 8
+                    
+                    # Noise perturbation for ny
+                    # Simplified noise from source: sine/cosine scaled. 
+                    # Source formula: ny = (ny * (((((i*scale) ^ (k*scale ))>>4)&15)+15)) >> 5;
+                    # This looks like a pseudo-random perturbation based on coords.
+                    if mat == 0:
+                        noise_factor = ((((i * scale) ^ (k * scale)) >> 4) & 15) + 15
+                        ny_val = (ny_val * noise_factor) >> 5
+                    elif mat == 3:
+                        noise_factor = ((((i * scale) ^ (k * scale)) >> 3) & 15) + 25
+                        ny_val = (ny_val * noise_factor) >> 5
+                    
+                    ny_val = max(0, min(255, ny_val))
+                    
+                    # Store texture
+                    texture.append(ny_val | bit1 | bit2)
+                    store = True
+                else:
+                    store = False
+                
+                # Flush runs
+                if solid > 0 and not store:
+                    while skip > 1023:
+                        slabs.append(1023)
+                        skip -= 1023
+                    while solid > 63:
+                        slabs.append((63 << 10) | (skip & 1023))
+                        solid -= 63
+                        skip = 0
+                    slabs.append((solid & 63) << 10 | (skip & 1023))
+                    solid = 0
+                    skip = 0
+                
+                if store:
+                    solid += 1
+                else:
+                    skip += 1
+            
+            # Finalize slab
+            slabs[slab_len_pos] = len(slabs) - (slab_len_pos + 2)
+            slabs[tex_len_pos] = len(texture)
+            slabs.extend(texture)
+            
+    map4 = {
+        'sx': sx,
+        'sy': sy,
+        'sz': sz,
+        'map': map_offsets,
+        'slabs': slabs,
+        'slabs_size': len(slabs) * 2
+    }
+    return map4
+```
+
+## Subtopics
+
+### [Run-length encoded voxel runs](1209-run-length-encoded-voxel-runs.md)
+General RLE for voxels. Choose when variable-length runs are acceptable and no fixed 16-bit constraint exists.
+
+### [Voxel File I/O (binvox/rawvox)](1698-voxel-file-i-o-binvox-rawvox.md)
+Standard file formats. Choose for storage/transfer, not real-time rendering.
+
+### [Voxel Indexing and Bit Compression](1707-voxel-indexing-and-bit-compression.md)
+General bit-packing. Choose for dense storage without run-length optimization.
+
+### [Dense-grid to Voxlap-slab packing](2155-dense-grid-to-voxlap-slab-packing.md)
+Packing for GPU textures. Choose when targeting texture-based rendering rather than splatting.
+
+## Operating characteristics
+- **Time Complexity**: $O(sx \cdot sy \cdot sz)$ for compression, as each voxel is visited once per column. Normal computation adds a constant factor (27 neighbors).
+- **Memory Complexity**: $O(N_{solid} \cdot C + N_{runs})$, where $N_{solid}$ is the number of solid voxels, $C$ is color bits, and $N_{runs}$ is the number of RLE entries. Significantly less than dense $O(sx \cdot sy \cdot sz)$ for sparse volumes.
+- **Performance**: Efficient for sparse volumes with large empty regions. Performance degrades if the volume is fully dense, as overhead of headers and RLE splitting adds complexity.
+- **Strengths**: Preserves per-voxel color/intensity. Fast decoding for splatting. Compact for sparse data.
+- **Limitations**: Fixed run lengths (6/10 bits) may waste space if runs are very long or very short. Normal perturbation is heuristic.
+- **When to use**: Real-time voxel splatting with sparse data.
+- **When not to use**: Dense volumes, or when exact geometric normals are required without perturbation.
+
+## Background
+RLE4 Compression was introduced in the OpenGL Voxel Splatting project by sp4cerat [S1, unofficial]. It is designed for real-time rendering of voxel data using OpenGL, specifically targeting the `GLX` and `GL` extensions for texture mapping. The method is part of a pipeline that includes voxelization and binary RLE encoding, optimizing the data for GPU splatting.
+
+## Sources
+[S1] sp4cerat/OpenGL-Voxel-Splatting, https://github.com/sp4cerat/OpenGL-Voxel-Splatting, fetched 2026-10-27 (unofficial)

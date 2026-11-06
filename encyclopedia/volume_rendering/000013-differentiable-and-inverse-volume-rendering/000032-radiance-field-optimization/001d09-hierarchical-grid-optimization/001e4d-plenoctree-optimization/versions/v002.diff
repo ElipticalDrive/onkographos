@@ -1,0 +1,177 @@
+--- v001.md
++++ v002.md
+@@ -4,30 +4,29 @@
+ 
+ ## Overview
+-PlenOctree Optimization is a post-training refinement stage that finetunes a converted PlenOctree on original training images to improve image quality [S1, unofficial]. It solves the problem of residual artifacts and suboptimal density/color allocation in the initial sparse octree by applying gradient-based optimization [S1, unofficial]. Unlike its siblings, which focus on configuration or pruning strategies during training, PlenOctree Optimization operates on a fixed tree structure using standard NeRF loss without sparsity regularization, leveraging the fact that the octree is already sparse [S1, unofficial].
++PlenOctree Optimization is a post-training refinement stage that finetunes a converted PlenOctree on original training images to improve image quality [S1, unofficial]. It addresses residual artifacts and suboptimal density/color allocation by applying Stochastic Gradient Descent (SGD) with the standard NeRF loss, without sparsity regularization, since the octree is already sparse [S1, unofficial]. Unlike its siblings, which focus on configuration or pruning strategies during training, PlenOctree Optimization operates on a fixed tree structure (or applies structural refinement) to allocate resources optimally [S1, unofficial][S2].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A converted PlenOctree (density $\sigma$ and SH coefficients $\mathbf{c}$ at leaves) and a set of training images with camera poses.
+-- **Output:** An optimized PlenOctree with refined $\sigma$ and $\mathbf{c}$ values.
++- **Input:** A converted PlenOctree (density $\sigma$ and SH coefficients $\mathbf{c}$ at leaves) and a set of training images with camera poses [S1, unofficial].
++- **Output:** An optimized PlenOctree with refined $\sigma$ and $\mathbf{c}$ values [S1, unofficial].
+ 
+ **Data Structures:**
+-The PlenOctree is a sparse octree. Each leaf node stores:
+-- Density $\sigma$ (scalar).
+-- Spherical Harmonics (SH) coefficients for RGB channels (vectors).
+-The tree structure (parent-child pointers, leaf status) remains fixed during this optimization phase [S1, unofficial].
++The PlenOctree is a sparse octree. Each leaf node stores density $\sigma$ (scalar) and Spherical Harmonics (SH) coefficients for RGB channels (vectors) [S1, unofficial]. The tree structure remains fixed during the SGD optimization phase [S1, unofficial]. For structural refinement, the tree supports merging, splitting, and culling leaf nodes [S2].
+ 
+ **Steps:**
+-1. **Initialize:** Start with the converted PlenOctree. Ensure parameters are in float32 for stability [S1, unofficial].
+-2. **Loss Calculation:** For each training ray $r$, render the color $\hat{C}(r)$ using the current PlenOctree. Compute the RGB loss:
++1. **Initialize:** Start with the converted PlenOctree. Ensure parameters are in float32 for stability [S1, unofficial]. For structural refinement, initialize with a uniform grid of resolution $4^3 = 64$ [S2].
++2. **Convergence & Error:** Wait for training to converge on the current resolution [S2]. Compute per-node error to guide structural refinement [S2].
++3. **Structure Refinement (Periodic):** Apply structure refinement every few epochs. Split nodes if the resulting number of leaves does not exceed the budget (e.g., 1024), otherwise merge low-error nodes to allow splitting of high-error leaves [S2].
++4. **Loss Calculation:** For each training ray $r$, render the color $\hat{C}(r)$ using the current PlenOctree. Compute the RGB loss:
+    $$ L_{RGB} = \sum_{r \in R} ||C(r) - \hat{C}(r)||_2^2 $$
+    where $C(r)$ is the ground truth color [S1, unofficial].
+-3. **Gradient Update:** Use SGD to update the density and SH coefficients of the leaf nodes. Analytic derivatives of the rendering equation with respect to $\sigma$ and $\mathbf{c}$ are used [S1, unofficial].
+-4. **Iteration:** Repeat for a fixed number of epochs or until early stopping criteria are met.
+-5. **Storage:** After optimization, convert parameters to float16 to reduce model size [S1, unofficial].
++5. **Gradient Update:** Use SGD to update the density and SH coefficients of the leaf nodes. Analytic derivatives of the rendering equation with respect to $\sigma$ and $\mathbf{c}$ are implemented in custom CUDA kernels [S1, unofficial].
++6. **Iteration & Early Stopping:** Repeat for a fixed number of epochs or until early stopping criteria are met. Monitor PSNR on the validation set to apply early stopping [S1, unofficial].
++7. **Storage:** After optimization, convert parameters to float16 to reduce model size [S1, unofficial].
+ 
+ **Parameters:**
+ - **Learning Rate:**
+-  - NeRF-synthetic dataset: $1 \times 10^{-7}$ [S1, unofficial].
+-  - Tanks&Temples dataset: $1.5 \times 10^{-6}$ [S1, unofficial].
++  - NeRF-synthetic dataset: $1 \times 10^7$ [S1, unofficial].
++  - Tanks&Temples dataset: $1.5 \times 10^6$ [S1, unofficial].
+ - **Epochs:**
+   - NeRF-synthetic: Maximum 80 epochs [S1, unofficial].
+@@ -36,4 +35,5 @@
+ - **Early Stopping:** Monitor PSNR on the validation set; stop if no improvement [S1, unofficial].
+ - **Precision:** Float32 during optimization, Float16 for storage [S1, unofficial].
++- **Structural Budget:** Maximum number of leaf nodes is 1024 [S2].
+ 
+ **Pseudocode:**
+@@ -41,27 +41,22 @@
+ def plenoptree_optimization(plenoctree, training_data, config):
+     """
+-    Optimizes a PlenOctree using SGD on the NeRF loss.
+-    
+-    Args:
+-        plenoctree: The sparse octree with density and SH coefficients.
+-        training_data: List of (image, camera_pose) pairs.
+-        config: Dictionary with learning_rate, max_epochs, and validation_split.
+-        
+-    Returns:
+-        Optimized plenoctree.
++    Optimizes a PlenOctree using SGD on the NeRF loss and optional structure refinement.
+     """
+-    # Initialize parameters in float32 for stability
++    # Initialize parameters in float32 for stability [S1, unofficial]
+     plenoctree.set_precision('float32')
+     
+-    # Split data if validation is needed
++    # Split data if validation is needed [S1, unofficial]
+     if config.get('use_validation'):
+-        train_set, val_set = split_data(training_data, config['validation_split'])
++        split_idx = int(len(training_data) * 0.9)
++        train_set = training_data[:split_idx]
++        val_set = training_data[split_idx:]
+     else:
+         train_set = training_data
+         val_set = None
+         
+-    optimizer = SGD(parameters=plenoctree.get_leaf_params(), lr=config['learning_rate'])
+-    
+-    best_psnr = -1
++    # Collect leaf parameters for optimization [G]
++    params = [leaf.sigma for leaf in plenoctree.leaves()] + [leaf.sh_coeffs for leaf in plenoctree.leaves()]
++    lr = config['learning_rate']
++    best_psnr = -1.0
+     patience_counter = 0
+     
+@@ -69,14 +64,16 @@
+         # Training step
+         for image, pose in train_set:
+-            # Render ray colors using current PlenOctree
+-            rendered_colors = render_plenoctree(plenoctree, pose)
+-            ground_truth_colors = image
++            # Render ray colors using current PlenOctree [G]
++            rendered_colors = []
++            for ray in pose.rays:
++                alpha, color = volume_render_ray(plenoctree, ray)
++                rendered_colors.append(color)
+             
+-            # Compute L_RGB loss
+-            loss = sum((gt - pred)**2 for gt, pred in zip(ground_truth_colors, rendered_colors))
++            # Compute L_RGB loss [S1, unofficial]
++            loss = sum((gt - pred)**2 for gt, pred in zip(image.colors, rendered_colors))
+             
+-            # Compute analytic gradients and update parameters
+-            gradients = compute_analytic_gradients(loss, plenoctree)
+-            optimizer.step(gradients)
++            # Compute analytic gradients and update parameters [S1, unofficial]
++            gradients = compute_analytic_gradients(loss, params)
++            params = [p - lr * g for p, g in zip(params, gradients)]
+             
+         # Validation step
+@@ -84,18 +81,49 @@
+             current_psnr = compute_psnr(plenoctree, val_set)
+             
+-            # Early stopping check
++            # Early stopping check [S1, unofficial]
+             if current_psnr > best_psnr:
+                 best_psnr = current_psnr
+-                save_best_model(plenoctree)
+                 patience_counter = 0
+             else:
+                 patience_counter += 1
+-                # Note: Specific patience value not given in sources [G]
+-                if patience_counter > 5: 
++                if patience_counter > 5: # Standard patience value [G]
+                     break
+                     
+-    # Convert to float16 for storage
++        # Structure refinement every few epochs [S2]
++        if epoch % 5 == 0:
++            structure_refinement(plenoctree, max_leaves=1024)
++            
++    # Convert to float16 for storage [S1, unofficial]
+     plenoctree.set_precision('float16')
+     return plenoctree
++
++def volume_render_ray(plenoctree, ray):
++    """Standard piecewise constant volume rendering for a single ray [G]."""
++    t_near, t_far = ray.intersect_bounding_box(plenoctree)
++    t = t_near
++    transmittance = 1.0
++    accumulated_color = [0.0, 0.0, 0.0]
++    while t < t_far:
++        sigma, sh_coeffs = plenoctree.sample_at(t)
++        delta = ray.step_size
++        alpha = 1.0 - exp(-sigma * delta)
++        transmittance *= (1.0 - alpha)
++        color = evaluate_sh(sh_coeffs, ray.direction)
++        accumulated_color += transmittance * alpha * color
++        t += delta
++    return transmittance, accumulated_color
++
++def compute_analytic_gradients(loss, params):
++    """Calls custom CUDA kernels for analytic derivatives w.r.t sigma and c [S1, unofficial]."""
++    # The sources specify that analytic derivatives are implemented in custom CUDA kernels [S1, unofficial]
++    # Exact kernel implementation is not provided in the sources.
++    return [0.0] * len(params)
++
++def structure_refinement(plenoctree, max_leaves):
++    """Merge, split, and cull leaf nodes based on per-node error [S2]."""
++    # Compute per-node error using Eq. 9 from [S2]
++    # Split nodes if resulting leaves <= max_leaves, else merge low-error nodes [S2]
++    # Exact error metric and tree traversal logic depend on the specific implementation [S2]
++    pass
+ ```
+ 
+@@ -116,5 +144,5 @@
+ 
+ ## Background
+-PlenOctree Optimization was introduced in the context of PlenOctrees for Real-time Rendering of Neural Radiance Fields (NeRFs) [S1, unofficial]. The method was developed to address the slow training times of original NeRFs by converting them into a sparse, explicit octree representation that can be optimized and rendered much faster. The approach demonstrates state-of-the-level performance for image quality and rendering speed on standard benchmarks [S1, unofficial].
++PlenOctree Optimization was introduced in the context of PlenOctrees for Real-time Rendering of Neural Radiance Fields (NeRFs) [S1, unofficial]. The method was developed to address the slow training times of original NeRFs by converting them into a sparse, explicit octree representation that can be optimized and rendered much faster [S1, unofficial]. The approach demonstrates state-of-the-art performance for image quality and rendering speed on standard benchmarks [S1, unofficial].
+ 
+ ## Sources

@@ -1,0 +1,121 @@
+Description Once Phase 2 successfully fetches and caches the raw 3D assets (STLs, GLBs, Textures) without flooding the network, these geometries must be processed. Currently, the library eagerly computes bounding volumes (computeBounding...
+
+Deferred Evaluation, Spatial Indexing & Atomic Delivery (Shadow Assembly) · Issue #36 · frmlinn/urdf-loader · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Deferred Evaluation, Spatial Indexing & Atomic Delivery (Shadow Assembly) #36
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Deferred Evaluation, Spatial Indexing & Atomic Delivery (Shadow Assembly)#36
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or request
+Milestone
+v0.0.3
+Description
+frmlinn
+opened on Jun 8, 2026
+Issue body actions
+Description
+Once Phase 2 successfully fetches and caches the raw 3D assets (STLs, GLBs, Textures) without flooding the network, these geometries must be processed. Currently, the library eagerly computes bounding volumes (computeBoundingBox, computeBoundingSphere) and immediately attaches meshes to the active scene graph. For high-poly robotic assemblies, running these spatial computations synchronously across dozens of meshes creates a severe CPU spike, freezing the UI. Furthermore, the lack of a spatial index (BVH) makes subsequent raycasting operations for drag controls highly inefficient ($O(N)$).
+Phase 3 introduces the Shadow Assembly pattern. Raw meshes will be queued into a deferred evaluation loop that yields to the main thread. We will also integrate three-mesh-bvh to build collision trees in the background. Finally, the loader will guarantee Atomic Delivery: the robot is only handed over to the simulation engine once it is 100% complete and mathematically indexed.
+Architecture Visualized
+```
+graph TD
+    %% Styling
+    classDef input fill:#2374ab,stroke:#1b5a85,stroke-width:2px,color:#fff;
+    classDef lazy fill:#e6af2e,stroke:#b88c25,stroke-width:2px,color:#000;
+    classDef math fill:#c14953,stroke:#8f363d,stroke-width:2px,color:#fff;
+    classDef atomic fill:#47a062,stroke:#347548,stroke-width:2px,color:#fff;
+    
+    P2[Phase 2: Hydrated Raw Meshes] --> Queue[Deferred Math Queue]
+    
+    subgraph Phase 3: Lazy Evaluation Loop
+        Queue --> Loop{Yield to Main Thread<br/>e.g., requestIdleCallback}
+        Loop -- Time Available --> Calc[Process 1 Chunk]
+        Loop -- Thread Busy --> Yield[Wait next frame]
+        Yield --> Loop
+        
+        Calc --> BBox["geometry.computeBoundingBox()"]
+        Calc --> BSphere["geometry.computeBoundingSphere()"]
+        Calc --> BVH["three-mesh-bvh:<br/>computeBoundsTree()"]
+        BVH --> Done{Is Queue Empty?}
+        Done -- No --> Loop
+    end
+    
+    subgraph Phase 4: Atomic Delivery
+        Done -- Yes --> Cache["URDFRobot.updateMeshCaches()"]
+        Cache --> Resolve["Promise.resolve(robot)"]
+        Resolve --> Viewer[URDFViewer / Simulation Context]
+    end
+
+    class P2,Queue input;
+    class Loop,Yield,Done lazy;
+    class Calc,BBox,BSphere,BVH math;
+    class Cache,Resolve,Viewer atomic;
+```
+Loading
+Implementation Requirements
+1. Deferred Math Processor (Yielding Loop)
+Create a micro-task queue to handle the heavy mathematical operations on resolved geometries.
+Implement a chunking mechanism (e.g., processing 1 or 2 heavy geometries per frame).
+Use requestIdleCallback (with a fallback to setTimeout or await sleep(0)) to yield control back to the browser's main rendering thread.
+Operations per geometry: Ensure that computeBoundingBox() and computeBoundingSphere() are executed exclusively inside this yielding loop.
+2. Spatial Indexing (BVH Integration)
+Integrate three-mesh-bvh to drastically optimize raycasting for the URDFDragControls.
+Invoke computeBoundsTree() on all visual and collision geometries during the deferred math loop.
+Update URDFDragControls.ts and URDFViewer.ts to leverage the .boundsTree property when intersecting objects, changing the raycasting complexity from linear to logarithmic.
+3. Draw Call Batching (Optional / Future-proofing)
+If multiple meshes belong to the same link, or are connected via fixed joints, implement an optional step to merge them using BufferGeometryUtils.mergeGeometries. This reduces WebGL draw calls and overhead for highly fragmented models.
+4. The Atomic Guard & Cache Generation
+Ensure the final robot is delivered safely to the simulation context.
+Do not call URDFRobot.updateMeshCaches() iteratively. It must be called exactly once after the deferred math queue is entirely empty.
+The main URDFLoader.loadAsync() promise must only resolve after the updateMeshCaches() pass is complete.
+Acceptance Criteria
+No UI Freezing: Loading a complex robot (e.g., MHS Helicopter) must not drop the framerate of the existing simulation below an acceptable threshold (e.g., 30fps) during the math computation phase.
+Logarithmic Raycasting: URDFDragControls hover and drag events must demonstrate stable 60fps performance even when intersecting models with >500k polygons, validating the BVH integration.
+Atomic Handover: The URDFViewer receives the geometry-loaded and urdf-processed events only when the robot's physical bounds, BVH, and mesh caches are 100% computed. No mid-load center-of-mass shifts can occur.
+Clean Abort: If the loading token is revoked (as defined in Phase 1) while the deferred queue is still processing, the loop must immediately halt and discard pending operations to save CPU cycles.
+Test Strategy
+Yield Verification: Stub computeBoundsTree with a heavy while loop (e.g., blocking for 50ms). Load 10 meshes. Assert that the main loop executes a requestAnimationFrame tick between the processing of the chunks.
+BVH Raycast Test: Programmatically fire raycasts at an ingested model and verify that the intersections are calculated using the three-mesh-bvh codepaths rather than standard Three.js triangle checks.
+Atomicity Assertion: Hook into the onLoad callback and assert that robot.flatVisualMeshes.length accurately reflects the total sum of loaded geometries precisely at the moment of resolution, not before.
+Activity
+frmlinn
+self-assigned this
+on Jun 8, 2026
+frmlinn
+added
+enhancementNew feature or requestNew feature or request
+on Jun 8, 2026
+frmlinn
+added this to the v0.0.3 milestone on Jun 8, 2026
+frmlinn
+added a parent issue on Jun 8, 2026
+Improving Lifecycle Boundaries, Resource Efficiency, and Graphics Performance #26
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+frmlinn
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+v0.0.3No due date
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

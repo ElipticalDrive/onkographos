@@ -1,0 +1,84 @@
+# Octree Subdivision
+
+Also called: LiNode::subdivide
+
+## Overview
+Octree Subdivision is the fundamental operation that refines a non-regular volume representation by splitting a single octree node into eight children. It solves the problem of insufficient spatial resolution in regions of interest by recursively halving the bounding box along each axis. Unlike fixed-grid voxelization, this method adapts the grid density locally, redistributing surface elements (surfels) to the new children to maintain geometric fidelity. It serves as the core refinement step in adaptive octree construction pipelines, building on [Octree Balance Subdivision](847-octree-balance-subdivision.md).
+
+## How it works
+**Inputs:** An octree node defined by its axis-aligned bounding box (AABB) with minimum corner `_min` and maximum corner `_max`.
+**Outputs:** Eight child nodes, each with their own AABB, and the redistribution of any associated surfels from the parent to the appropriate child based on spatial position.
+
+**Data Structures:**
+The node is represented by two 3D vectors, `_min` and `_max`, defining the bounding box. The children are stored in a fixed array of size 8, indexed $i \in [0, 7]$.
+
+**Algorithm Steps:**
+1.  **Calculate Subdivision Size:** Compute the vector `size` representing half the extent of the parent node along each axis:
+    $$ \text{size} = (\text{max} - \text{min}) \times 0.5 $$
+2.  **Validation:** Check for degenerate nodes. If the length of `size` is less than a small epsilon (e.g., $10^{-8}$), the node is invalid; print an error and exit. [S1, unofficial]
+3.  **Iterate Children:** Loop over child index $i$ from 0 to 7:
+    a.  Determine the binary offset components $(x, y, z)$ for the child:
+        $$ x = i \pmod 2 $$
+        $$ y = \lfloor i / 2 \rfloor \pmod 2 $$
+        $$ z = \lfloor i / 4 \rfloor $$
+    b.  Compute the child's minimum corner:
+        $$ \text{min}_i = \text{min} + \text{size} \times (x, y, z) $$
+    c.  Compute the child's maximum corner:
+        $$ \text{max}_i = \text{min}_i + \text{size} $$
+    d.  Create the new child node with bounds $(\text{min}_i, \text{max}_i)$. [S1, unofficial]
+4.  **Redistribute Surfels:** For each surfel associated with the parent, determine which child's bounding box contains the surfel's position and attach it to that child. [S1, unofficial]
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def subdivide(node):
+    # node.min and node.max are Vec3
+    size = (node.max - node.min) * 0.5
+    
+    # Check for degenerate node [S1, unofficial]
+    if size.length() < 0.00000001:
+        raise Error("Node too small to subdivide")
+    
+    children = []
+    for i in range(8):
+        # Determine x, y, z offset based on index i [S1, unofficial]
+        x = i % 2
+        y = (i // 2) % 2
+        z = i // 4
+        
+        # Calculate child bounds [S1, unofficial]
+        child_min = node.min + size * Vec3(x, y, z)
+        child_max = child_min + size
+        
+        # Create child node
+        child = LiNode(child_min, child_max)
+        children.append(child)
+        
+    # Redistribute surfels [S1, unofficial]
+    # For each surfel in node.surfels:
+    #   Find child index k such that child_min[k] <= surfel.pos < child_max[k]
+    #   Add surfel to children[k].surfels
+    
+    return children
+```
+
+## Subtopics
+
+### Dimensional Splitting
+Dimensional Splitting is a variant where subdivision is not uniform across all three axes. Instead, each dimension is either halved or left unsubdivided depending on the node's extent relative to the other dimensions. For example, if a node's extent is $(4, 2, 2)$ voxels, only the dimension with extent 4 is subdivided. This iterative process continues until the node size in voxels is less than or equal to a specified leaf-node size in each dimension. [S2, unofficial] This approach can result in an octree that resembles a quadtree or binary tree at certain levels, depending on the volume's aspect ratio and the chosen leaf-node size. [S2, unofficial] It is chosen when the volume data has strong anisotropy or when memory efficiency is prioritized over strict octree symmetry. [S2, unofficial]
+
+## Operating characteristics
+**Time Complexity:** $O(N)$ where $N$ is the number of surfels associated with the node, as each surfel must be tested against the 8 child bounding boxes. The geometric subdivision itself is $O(1)$.
+**Memory Complexity:** $O(1)$ per node for the bounding box data; increases total memory by creating 8 child nodes.
+**Strengths:** Provides high-resolution detail in specific regions without increasing global memory usage. Simple to implement.
+**Limitations:** Can lead to irregular structures (quadtrees/binary trees) if not balanced, potentially complicating traversal. [S2, unofficial] Degenerate nodes (zero volume) must be handled explicitly. [S1, unofficial]
+**When to use:** When adaptive resolution is required to capture fine details in sparse or complex surfaces.
+**When not to use:** When strict hierarchical balance is required for predictable traversal performance, or when the volume is isotropic and uniform.
+
+## Background
+The basic octree subdivision logic, specifically the mapping of child indices to spatial offsets via bitwise operations on the index $i$, is documented in the Mr-Voxel project by C. Gibson. [S1, unofficial] The concept of iterative subdivision constrained by leaf-node size and dimensional splitting to handle anisotropic volumes is described in the thesis "Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze" by Skalier. [S2, unofficial]
+
+## Sources
+[S1] Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S2] Skalierbares Webbasiertes Volume Rendering großer biomedizinischer Datensätze, https://doi.org/10.34726/hss.2023.106203, fetched 2026-10-26 (unofficial)

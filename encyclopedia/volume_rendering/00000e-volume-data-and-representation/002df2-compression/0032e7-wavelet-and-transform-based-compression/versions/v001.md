@@ -1,0 +1,33 @@
+# Wavelet and Transform-based Compression
+
+Also called: Transform-based Volume Compression, Frequency Domain Compression
+
+## Overview
+This family compresses volumetric data by projecting it into a frequency or multi-resolution domain using linear filter banks, enabling efficient storage through coefficient pruning and quantization [S1, S2]. It is distinguished from sibling methods like [Sparse structures](5-sparse-structures.md) by its explicit use of orthogonal or biorthogonal bases to achieve spatial-frequency localization, and from [Value compression](6-value-compression.md) by its basis transformation prior to quantization [S1, S2, S3].
+
+## Shared principles
+All methods in this family share the mechanism of decomposing the input volume $V$ into a set of coefficients $C$ using a linear transform, followed by encoding and optional decoding for rendering.
+
+1.  **Transform:** The volume is decomposed using a separable 1D filter bank applied along each axis. For a 3D volume, this results in subbands representing different frequency components. In wavelet transforms, these are typically approximation (low-pass) and detail (high-pass) coefficients. In Laplacian pyramids, they are detail residuals between levels of a Gaussian pyramid.
+2.  **Hierarchy:** The decomposition is recursive. The approximation subband from level $j$ is further decomposed at level $j+1$, creating a tree-like structure of coefficients. This allows for multi-resolution access, where coarse data is available at the root and fine details are deeper in the tree.
+3.  **Quantization and Entropy Encoding:** Coefficients are quantized (lossy) or kept precise (lossless). Entropy coding (e.g., Huffman, Arithmetic, Run-Length) is applied to the quantized or raw coefficients to produce the compressed bitstream.
+4.  **Reconstruction:** To render, the necessary coefficients are decoded and the inverse transform is applied. This can be done globally (full reconstruction) or locally (block-wise or point-wise) to support adaptive resolution rendering.
+
+## Subtopics
+
+### [Value compression](6-value-compression.md)
+Reduces storage by encoding scalar values directly, distinct from spatial compression. It manipulates the amplitude domain through transforms or predictive coding to minimize bit-depth.
+
+### [Wavelet and Pyramid Transforms](3856-wavelet-and-pyramid-transforms.md)
+Uses orthogonal, biorthogonal, or Gaussian-based filter banks to create hierarchical representations enabling spatial and frequency localization.
+
+### [Blockwise Wavelet Compression](6100-blockwise-wavelet-compression.md)
+Splits 3D data into small blocks of equal size for independent compression and decompression along three axes.
+
+## Background
+Originating from the application of signal processing techniques to image and volume data, wavelet transforms were adapted for volume rendering to address the high memory bandwidth requirements of large-scale datasets [S1, S2]. The use of pyramids dates back to early multi-resolution image analysis, while wavelet-based compression gained prominence in the 1990s for its superior rate-distortion performance compared to DCT-based methods [S1, S2, unofficial]. These methods are widely used in scientific visualization and medical imaging where multi-resolution access and high compression ratios are critical [S1, S2, unofficial].
+
+## Sources
+[S1] Wavelet and Transform-based Compression notes
+[S2] Wavelet and Pyramid Transforms notes
+[S3] Blockwise Wavelet Compression notes

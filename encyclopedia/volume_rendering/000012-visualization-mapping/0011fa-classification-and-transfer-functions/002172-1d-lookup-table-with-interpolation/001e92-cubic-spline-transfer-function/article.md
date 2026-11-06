@@ -1,0 +1,147 @@
+# Cubic Spline Transfer Function
+Also called: TF1DCubic
+## Overview
+A 1D transfer function that maps a scalar field value in $[0, 1]$ to density and attenuation color using cubic spline interpolation of control points [S1, unofficial]. It builds on [1D Lookup Table with Interpolation](2528-1d-lookup-table-with-interpolation.md) by providing $C^1$ continuous derivatives for smoother visual transitions compared to linear methods [S1, unofficial].
+## How it works
+**Inputs and outputs:**
+- Input: A scalar value $x \in [0, 1]$.
+- Input: A set of $N$ control points $P_i = (v_i, c_i)$, where $v_i$ is the scalar value (domain) and $c_i$ is the output color/density (range). The points are sorted by $v_i$.
+- Output: A color/density vector $C(x)$.
+
+**Data structures:**
+- `ControlPoint`: Struct containing `value` (float, domain) and `output` (Vec3, range).
+- `ControlPoints`: Array of `ControlPoint` structs, size $N$.
+
+**Steps:**
+1. **Find the interval:** Determine the index `left_point` such that $v_{\text{left\_point}} \le x < v_{\text{left\_point} + 1}$.
+   - Iterate: `while (x > control_points[left_point + 1].value) ++left_point;`
+   - Clamp: `left_point = clamp(left_point, 0, N - 2)` [S1, unofficial].
+2. **Compute slope $m_k$ at $P_k$ (where $k = \text{left\_point}$):**
+   - If $k = 0$: $m_k = \frac{c_1 - c_0}{v_1 - v_0}$ [S1, unofficial].
+   - Otherwise: $m_k = \frac{1}{2} \left( \frac{c_k - c_{k-1}}{v_k - v_{k-1}} + \frac{c_{k+1} - c_k}{v_{k+1} - v_k} \right)$ [S1, unofficial].
+3. **Compute slope $m_{k+1}$ at $P_{k+1}$:**
+   - If $k + 1 = N - 1$: $m_{k+1} = \frac{c_{k+1} - c_k}{v_{k+1} - v_k}$ [S1, unofficial].
+   - Otherwise: $m_{k+1} = \frac{1}{2} \left( \frac{c_{k+2} - c_{k+1}}{v_{k+2} - v_{k+1}} + \frac{c_{k+1} - c_k}{v_{k+1} - v_k} \right)$ [S1, unofficial].
+4. **Evaluate Cubic Spline:**
+   - Compute $\Delta = v_{k+1} - v_k$.
+   - Compute $t = \frac{x - v_k}{\Delta}$.
+   - Compute basis functions:
+     $$h_{00} = 2t^3 - 3t^2 + 1$$
+     $$h_{10} = t^3 - 2t^2 + t$$
+     $$h_{01} = -2t^3 + 3t^2$$
+     $$h_{11} = t^3 - t^2$$
+   - Result: $C(x) = h_{00} c_k + h_{10} \Delta m_k + h_{01} c_{k+1} + h_{11} \Delta m_{k+1}$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def cubic_spline_transfer_function(x, control_points):
+    """
+    x: float in [0, 1]
+    control_points: list of tuples (value, output_color)
+    output: Vec3 color
+    """
+    n = len(control_points)
+    if n < 2:
+        return control_points[0][1] if n == 1 else Vec3(0, 0, 0)
+
+    # Step 1: Find left_point
+    left_point = 0
+    while left_point < n - 2 and x > control_points[left_point + 1][0]:
+        left_point += 1
+    # Clamp to valid range [0, n-2]
+    left_point = max(0, min(left_point, n - 2))
+
+    k = left_point
+    v_k, c_k = control_points[k]
+    v_k1, c_k1 = control_points[k + 1]
+
+    # Step 2: Compute slope m_k
+    if k == 0:
+        # Difference quotient between 0 and 1
+        delta_v_01 = control_points[1][0] - control_points[0][0]
+        if delta_v_01 == 0:
+            m_k = Vec3(0, 0, 0)
+        else:
+            m_k = (control_points[1][1] - control_points[0][1]) / delta_v_01
+    else:
+        # Average of difference quotients (k-1, k) and (k, k+1)
+        delta_v_km1_k = control_points[k][0] - control_points[k - 1][0]
+        delta_v_k_k1 = control_points[k + 1][0] - control_points[k][0]
+        
+        if delta_v_km1_k == 0 or delta_v_k_k1 == 0:
+            m_k = Vec3(0, 0, 0)
+        else:
+            slope_prev = (control_points[k][1] - control_points[k - 1][1]) / delta_v_km1_k
+            slope_next = (control_points[k + 1][1] - control_points[k][1]) / delta_v_k_k1
+            m_k = (slope_prev + slope_next) * 0.5
+
+    # Step 3: Compute slope m_k1
+    if k + 1 == n - 1:
+        # Difference quotient between k and k+1
+        delta_v_k_k1 = v_k1 - v_k
+        if delta_v_k_k1 == 0:
+            m_k1 = Vec3(0, 0, 0)
+        else:
+            m_k1 = (c_k1 - c_k) / delta_v_k_k1
+    else:
+        # Average of difference quotients (k, k+1) and (k+1, k+2)
+        delta_v_k_k1 = v_k1 - v_k
+        delta_v_k1_k2 = control_points[k + 2][0] - v_k1
+        
+        if delta_v_k_k1 == 0 or delta_v_k1_k2 == 0:
+            m_k1 = Vec3(0, 0, 0)
+        else:
+            slope_prev = (c_k1 - c_k) / delta_v_k_k1
+            slope_next = (control_points[k + 2][1] - c_k1) / delta_v_k1_k2
+            m_k1 = (slope_prev + slope_next) * 0.5
+
+    # Step 4: Evaluate Cubic Spline
+    delta = v_k1 - v_k
+    if delta == 0:
+        return c_k
+    
+    t = (x - v_k) / delta
+    t2 = t * t
+    t3 = t2 * t
+
+    h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+    h10 = t3 - 2.0 * t2 + t
+    h01 = -2.0 * t3 + 3.0 * t2
+    h11 = t3 - t2
+
+    return h00 * c_k + h10 * delta * m_k + h01 * c_k1 + h11 * delta * m_k1
+```
+
+**Parameters:**
+- Control points: Defined by the user. Typical values depend on the dataset.
+- $x$: Scalar value from the volume, normalized to $[0, 1]$.
+
+**Edge cases and pitfalls:**
+- Division by zero: If $v_{k+1} = v_k$, the slope calculation involves division by zero. The implementation should handle this by setting the slope to zero or using a fallback [G].
+- Boundary conditions: The slopes at the endpoints ($k=0$ and $k=N-1$) are computed using one-sided difference quotients or averages as specified [S1, unofficial].
+- Precision: Floating-point precision issues may arise if $x$ is very close to a control point value. Clamping $t$ to $[0, 1]$ is recommended [G].
+
+## Subtopics
+
+### [Cubic Spline Transfer Function with Indexed Caching](3772-cubic-spline-transfer-function-with-indexed-caching.md)
+This method manages 1D transfer functions for volume rendering by mapping scalar density values (0–255) to RGBA colors using cubic spline interpolation of control points, while caching the results in a 256-entry indexed array for fast integer lookup. It builds on [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) by adding an explicit indexed cache and lazy texture synchronization, distinguishing itself from standard spline implementations by decoupling the smooth float-based interpolation logic from the discrete integer-based rendering lookup.
+
+## Operating characteristics
+- Time complexity: $O(N)$ for finding the interval if linear search is used, where $N$ is the number of control points. With binary search, it is $O(\log N)$. The evaluation itself is $O(1)$.
+- Memory complexity: $O(N)$ to store the control points.
+- Measured performance: Not given in the sources.
+- Scaling: Performance scales linearly with the number of control points if linear search is used.
+- Strengths: Smooth $C^1$ continuous transitions, intuitive control via control points.
+- Limitations: More computationally expensive than linear interpolation. Potential for overshoot if control points are not well-placed.
+- When to use: When smooth visual transitions are required and the number of control points is small.
+- When not: When performance is critical and the number of control points is large, or when sharp transitions are desired.
+
+## Background
+Origin: The method is implemented in the SRaimondi/VolumeRender repository [S1, unofficial]. The specific implementation details, including the slope calculation and cubic spline evaluation, are derived from this source.
+History and development: Not given in the sources.
+Where it is used: Volume rendering applications requiring smooth transfer functions.
+
+## Sources
+[S1] SRaimondi/VolumeRender, https://github.com/SRaimondi/VolumeRender, fetched 2026-10-27 (unofficial)

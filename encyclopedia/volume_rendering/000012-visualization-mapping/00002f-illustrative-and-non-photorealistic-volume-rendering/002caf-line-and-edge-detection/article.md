@@ -1,0 +1,36 @@
+# Line and Edge Detection
+
+Also called: Line Illustration, Edge Highlighting, Silhouette Detection
+
+## Overview
+Line and Edge Detection is a family of Non-Photorealistic Rendering (NPR) techniques designed to detect and render lines within volume data to communicate structure, shape, and boundaries [S1, unofficial]. It solves the problem of visualizing complex geometry and internal structures in volumetric datasets where traditional photorealistic rendering may obscure topological details [S1, unofficial]. What sets this family apart from its siblings is its specific focus on line-based abstraction rather than surface shading or contour outlines; it distinguishes itself from [Face-based volume rendering with edge highlights](2453-face-based-volume-rendering-with-edge-highlights.md) by generating lines that represent intrinsic surface properties (like curvature) rather than just silhouette edges, and from [Outline and Contour Generation](4137-outline-and-contour-generation.md) by often utilizing vector-oriented or texture-based approaches that are viewpoint-independent or analytically derived, rather than purely image-space depth-difference extraction.
+
+## Shared principles
+The family is unified by the categorization of detection methods into two primary paradigms: analytical and pixel-based [S1, unofficial].
+
+1.  **Analytical Approaches**: These are vector-oriented and resolution-independent [S1, unofficial]. They rely on explicit analytical representations of the model or volume data. Because they are vector-based, they can be transformed (rotated, scaled) without introducing aliasing artifacts [S1, unofficial]. They are considered more general and flexible but require the availability of explicit analytical forms [S1, unofficial].
+2.  **Pixel-Based Approaches**: These are image-space methods, often utilizing G-buffers (storing geometric properties like depth, normal, or color) [S1, unofficial]. They are generally faster and simpler to implement than analytical methods [S1, unofficial]. They are employed when explicit analytical representations are not available or practical [S1, unofficial]. A key advantage is that G-buffers can be reused without recalculation, and 2D image processing operators are fast [S1, unofficial].
+
+Both approaches aim to generate lines that enhance the perception of form, with the choice between them dictated by the availability of analytical data and performance constraints [S1, unofficial].
+
+## Subtopics
+
+### [Line Illustration Detection](772-line-illustration-detection.md)
+Line Illustration Detection is a family of Non-Photorealistic Rendering (NPR) techniques designed to detect and render lines within volume data to communicate structure, shape, and boundaries. It solves the problem of visualizing complex geometry and internal structures in volumetric datasets where traditional photorealistic rendering may obscure topological details. What sets this family apart from its siblings is its specific focus on line-based abstraction rather than surface shading or contour outlines; it distinguishes itself from [Face-based volume rendering with edge highlights](2453-face-based-volume-rendering-with-edge-highlights.md) by generating lines that represent intrinsic surface properties (like curvature) rather than just silhouette edges, and from [Outline and Contour Generation](4137-outline-and-contour-generation.md) by often utilizing vector-oriented or texture-based approaches that are viewpoint-independent or analytically derived, rather than purely image-space depth-difference extraction.
+
+### [Face-based volume rendering with edge highlights](2453-face-based-volume-rendering-with-edge-highlights.md)
+This method renders volumetric data by coloring scalar cells based on their average value while simultaneously detecting and highlighting topological edges (faces of tetrahedra or quads) to provide structural clarity. It distinguishes itself from [Line Illustration Detection](772-line-illustration-detection.md) by operating on face-based primitives rather than extracted skeletal lines, and from [Outline and Contour Generation](4137-outline-and-contour-generation.md) by integrating edge highlights directly into the volume fragment shader rather than post-processing silhouettes. The technique uses a Per-Pixel Linked List (PPLL) structure to manage fragment depth sorting, allowing for correct alpha blending of semi-transparent volume cells and sharp edge highlights in a single pass.
+
+### [Outline and Contour Generation](4137-outline-and-contour-generation.md)
+
+### [LOG-based Silhouette Detection](6322-log-based-silhouette-detection.md)
+A volumetric edge detection technique used to identify silhouette voxels for rendering sketch-like curves, replacing a more exhaustive 3x3x3 subspace search to improve performance.
+
+### Voxel Highlight Edge Detection
+- [S1, unofficial] Calculate entry point $hp = org + dir \times t_{cur}$. Calculate local cell coordinates $local = (hp - bmin) / cell$. Extract 2D face coordinates $f$ based on entry axis: if axis=0, $f=fract(local.yz)$; if axis=1, $f=fract(local.xz)$; if axis=2, $f=fract(local.xy)$. Calculate edge distance $edge = \min(\min(f.x, 1.0-f.x), \min(f.y, 1.0-f.y))$. If $edge < 0.06$, highlight color is yellow $(1.0, 0.85, 0.1)$; otherwise mix lit color with yellow at 0.35 weight.
+
+## Background
+Not given in the sources.
+
+## Sources
+[S1] wlim33/vox-ocean, https://github.com/wlim33/vox-ocean, fetched 2026-10-27 (unofficial)

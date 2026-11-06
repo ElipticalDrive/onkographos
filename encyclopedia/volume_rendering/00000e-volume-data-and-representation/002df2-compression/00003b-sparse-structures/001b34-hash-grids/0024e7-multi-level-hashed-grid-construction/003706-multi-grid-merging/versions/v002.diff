@@ -1,0 +1,168 @@
+--- v001.md
++++ v002.md
+@@ -1,96 +1,99 @@
+ # Multi-Grid Merging
+-Also called: Merging Multiple Grids
++
++Also called: Merging Multiple Grids, Min Compositing
++
+ ## Overview
+-Multi-Grid Merging is a post-processing step in multi-level hashed grid construction that combines data from multiple propagation grids into a unified representation. It solves the problem of undersampling artifacts that arise when individual propagation grids are oriented arbitrarily in space. It sets itself apart from standard grid merging by explicitly upscaling the resolution to ensure isotropic sampling, a requirement specific to principal-ordinates propagation methods [S1].
++Multi-Grid Merging combines two sparse hash grids into a single grid by taking the union of their active voxels. It resolves overlaps by applying a compositing operator (typically minimum, but also maximum, sum, or product) to the values at shared coordinates [S1, unofficial]. This method is distinct from simple concatenation because it actively resolves spatial conflicts between overlapping cells, ensuring a consistent density or opacity representation across merged data structures [S1, unofficial].
++
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A set of sparse hashed grids, each associated with a specific propagation direction (ordinate).
+-- Output: A single merged hashed grid with doubled resolution relative to the individual input grids.
++**Inputs:** Two sparse hash grids, `grid_a` and `grid_b`, containing active voxels with associated scalar values.
++**Outputs:** A new sparse hash grid, `data`, containing the merged result.
+ 
+ **Data Structures:**
+-The output is a standard sparse hashed grid. The hash function maps 3D coordinates $(x, y, z)$ to memory locations. The resolution of the coordinate space is doubled compared to the source grids to prevent aliasing.
++The implementation uses a hash map (dictionary) where keys are voxel coordinates (e.g., integer triplets or hashed indices) and values are the scalar data stored at those coordinates.
+ 
+ **Steps:**
+-1. **Determine Target Resolution:** Calculate the resolution of the individual propagation grids. The merged grid resolution is set to double this value in each dimension. This step is determined at initialization [S1].
+-2. **Upsample and Merge:** Iterate through all cells in the input grids. For each non-empty cell in an input grid at position $P_{in}$, map its value to the corresponding position $P_{out}$ in the merged grid. Since the merged grid has double the resolution, the mapping involves scaling the coordinates by a factor of 2.
+-   - If the input grid spacing is $\Delta x$, the merged grid spacing is $\Delta x / 2$.
+-   - A value at index $i$ in an input grid corresponds to index $2i$ in the merged grid.
+-   - Values are accumulated or overwritten based on the specific merging policy (e.g., sum, max, or average) for overlapping regions.
+-3. **Handle Arbitrary Orientations:** Because the input grids are oriented arbitrarily, simple coordinate scaling is insufficient if the grids are rotated relative to each other. However, in the context of Principal-Ordinates Propagation, the grids are typically aligned with the principal axes or specific ordinates. The upsampling ensures that even with arbitrary orientations, the sampling density is sufficient to avoid undersampling artifacts [S1].
+-4. **Convergence Check:** The merging process assumes that the solution is converged when all $L_n$ (error metrics or residuals) are below a small threshold $\epsilon_L$. This check is performed on the merged data or the underlying propagation results [S1].
+-
+-**Formulas:**
+-- Upsampling factor: $2$ [S1].
+-- Anisotropy threshold condition for distance $t$:
+-  $$ a_b \cdot g_{\sigma_s \cdot t} = \epsilon_a $$
+-  where $\sigma_s$ is the average scattering coefficient, $a_b$ is a coefficient, and $g$ is a function of the scattering coefficient and travel distance [S1].
+-- Convergence condition:
+-  $$ L_n < \epsilon_L $$
+-  where $L_n$ represents the residual or error metric for the $n$-th ordinate [S1].
+-
+-**Parameters:**
+-- $\epsilon_a$: Anisotropy threshold. Typical value not given in sources.
+-- $\epsilon_L$: Convergence threshold. Typical value not given in sources.
+-- Resolution multiplier: $2$ [S1].
+-
+-**Edge Cases and Pitfalls:**
+-- **Undersampling:** Failing to double the resolution results in undersampling due to the arbitrary orientations of the propagation grids [S1].
+-- **Precision:** The upsampling step is described as "very fast," implying it does not significantly impact performance, but precision must be maintained during coordinate mapping [S1].
+-- **Initialization:** The resolution is determined at initialization, so the merging step must be aware of the initial grid setup [S1].
++1.  **Initialize:** Create an empty hash map `data`.
++2.  **Copy Grid A:** Iterate through all active voxels in `grid_a`. For each voxel at coordinate `c` with value `v`, insert `(c, v)` into `data`.
++3.  **Merge Grid B:** Iterate through all active voxels in `grid_b`. For each voxel at coordinate `c` with value `v`:
++    *   If `c` exists in `data`, let `existing` be the value currently stored at `data[c]`. Update `data[c]` using the compositing operator: `data[c] = operator(existing, v)`.
++    *   If `c` does not exist in `data`, insert `(c, v)` into `data`.
++4.  **Upsampling (Optional/Contextual):** In specific contexts involving propagation grids with arbitrary orientations, the merged grid may be upsampled to double the resolution of the individual propagation grids to prevent undersampling [S2]. This step is performed after merging if the resulting grid is used for subsequent propagation calculations [S2].
+ 
+ **Pseudocode:**
+ ```python
+-def merge_grids(input_grids, initial_resolution):
++def merge_grids(grid_a, grid_b, operator=min):
+     """
+-    Merges multiple propagation grids into a single grid with doubled resolution.
++    Merges two sparse hash grids.
+     
+     Args:
+-        input_grids: List of sparse hashed grids. Each grid is a dictionary 
+-                     mapping (x, y, z) tuples to values.
+-        initial_resolution: The resolution of the individual input grids.
++        grid_a: Iterable of (coordinate, value) tuples.
++        grid_b: Iterable of (coordinate, value) tuples.
++        operator: Function taking two values and returning one. Defaults to min.
+         
+     Returns:
+-        merged_grid: A sparse hashed grid with resolution 2 * initial_resolution.
++        dict: A hash map of coordinate -> value.
+     """
+-    merged_resolution = 2 * initial_resolution
+-    merged_grid = {}
++    data = {}
+     
+-    # Iterate through each input grid
+-    for grid in input_grids:
+-        for coords, value in grid.items():
+-            # Scale coordinates by 2 to upsample
+-            # Assuming coords are integers representing indices
+-            x, y, z = coords
+-            new_coords = (2 * x, 2 * y, 2 * z)
++    # Step 1: Copy grid_a
++    for coord, val in grid_a:
++        data[coord] = val
++        
++    # Step 2: Merge grid_b
++    for coord, val in grid_b:
++        if coord in data:
++            existing = data[coord]
++            data[coord] = operator(existing, val)
++        else:
++            data[coord] = val
+             
+-            # Merge value into the new grid
+-            # Depending on the specific merging policy (e.g., sum, max),
+-            # this step might need adjustment. Here we assume simple overwriting
+-            # or accumulation if the key exists.
+-            if new_coords in merged_grid:
+-                merged_grid[new_coords] += value  # Example: accumulation
+-            else:
+-                merged_grid[new_coords] = value
+-                
+-    return merged_grid
++    return data
+ ```
+-Note: The pseudocode assumes a simple coordinate scaling. In practice, if the grids are rotated, a rotation matrix would be applied before scaling. However, the sources emphasize the resolution doubling to handle arbitrary orientations in the context of principal-ordinates, suggesting the orientations are handled by the grid structure itself or the propagation method [S1].
++
++**Parameters:**
++*   `operator`: The compositing function. Common values are `min`, `max`, `add`, `mul` [S1, unofficial].
++*   `upsample`: Boolean flag indicating whether to double the resolution post-merge. Default is `False` unless specified by the propagation context [S2].
++
++**Edge Cases and Pitfalls:**
++*   **Precision:** When using floating-point values, repeated compositing operations (especially multiplication or summation) may lead to precision loss or overflow/underflow. [G] Ensure appropriate data types are chosen based on the expected value range.
++*   **Boundaries:** The hash map handles arbitrary coordinates, but if the grids represent bounded volumes, ensure that coordinates outside the intended domain are filtered or handled appropriately before merging.
++*   **Degenerate Input:** If one grid is empty, the result is a copy of the other grid.
+ 
+ ## Subtopics
+ 
+ ### Grid Deformation with Entropy Coding
+-This variant involves compressing the data differences between registered adjacent data slices using entropy coding. It uses a Lorenz predictor to estimate current voxel values based on neighboring voxels, and the prediction error is compressed using arithmetic coding. This method is used for efficient compression of volume data, particularly in medical imaging, where it supports fast visualization and selective decompression [S2, unofficial].
++This variant applies entropy coding to compress the data differences between registered adjacent data slices after merging or deformation [S3, unofficial]. It uses grid deformation techniques to align adjacent slices, then compresses the residual data using entropy coding (e.g., arithmetic coding) [S3, unofficial]. This approach is suitable for scenarios requiring high compression ratios while maintaining the ability to selectively decompress data for visualization [S3, unofficial].
++
++### Max Compositing
++Returns a new grid whose active voxels are the union of two grids, taking the maximum value at overlapping coordinates [S1, unofficial].
++**Steps:**
++1. Copy all active voxels from grid `a` to `data`.
++2. Iterate active voxels from grid `b`. If `c` exists in `data`, update `data[c] = max(existing, v)`. Else, set `data[c] = v` [S1, unofficial].
++
++### Multiply Compositing
++Returns a new grid whose active voxels are the union of two grids. Overlapping values are multiplied [S1, unofficial].
++**Steps:**
++1. Copy all active voxels from grid `a` to `data`.
++2. Iterate active voxels from grid `b`. If `c` exists in `data`, update `data[c] = existing * v`. Else, set `data[c] = v` [S1, unofficial].
++
++### Sum Compositing
++Returns a new grid whose active voxels are the union of two grids. Overlapping values are summed [S1, unofficial].
++**Steps:**
++1. Copy all active voxels from grid `a` to `data`.
++2. Iterate active voxels from grid `b`. If `c` exists in `data`, update `data[c] = existing + v`. Else, set `data[c] = v` [S1, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** The merging step is described as "very fast" [S1]. The complexity is linear with respect to the number of non-empty cells in the input grids.
+-- **Memory Complexity:** The output grid has double the resolution in each dimension, leading to a potential $2^3 = 8$ times increase in the coordinate space size. However, since it is a sparse grid, the actual memory usage depends on the number of non-empty cells.
+-- **Performance:** The upsampling step allows the remainder of the pipeline to stay virtually identical to the single-ordinate setting, maintaining real-time rendering capabilities [S1].
+-- **Strengths:** Prevents undersampling artifacts; fast execution; compatible with existing pipelines.
+-- **Limitations:** Increases memory usage due to higher resolution; requires careful initialization of resolution.
++**Time Complexity:** $O(N_A + N_B)$, where $N_A$ and $N_B$ are the number of active voxels in grid A and grid B, respectively. Each voxel is visited once for insertion or lookup [S1, unofficial].
++**Memory Complexity:** $O(N_A + N_B)$ in the worst case (no overlaps). Memory usage scales with the number of unique active voxels in the merged grid.
++**Performance:** The merging process is generally fast, dominated by hash map operations. Upsampling, if required, adds a cost proportional to the number of voxels in the upsampled grid [S2].
++**Strengths:** Efficiently combines sparse data structures; flexible compositing operators allow for various physical interpretations (e.g., density, opacity).
++**Limitations:** Does not inherently handle interpolation or smoothing between overlapping cells; relies on the discrete voxel values. Upsampling increases memory and computational cost [S2].
+ 
+ ## Background
+-Multi-Grid Merging is part of the Principal-Ordinates Propagation method for real-time volume rendering. It was introduced in the context of handling anisotropic scattering in participating media. The method leverages the self-convolution property of hashed grids to approximate the distance light travels before its anisotropy falls below a threshold [S1]. The approach allows for efficient rendering of complex volumetric scenes by breaking down the problem into multiple propagation directions and merging the results.
++Multi-Grid Merging is a technique used in volume rendering and sparse data processing to combine multiple levels or sources of data into a unified representation. The specific implementation details, including the use of hash grids and compositing operators, are documented in the Lyr.jl repository [S1, unofficial]. The context of upsampling to prevent undersampling in propagation grids is described in the Principal-Ordinates Propagation paper [S2]. The broader context of compressing and merging volume data slices using entropy coding is discussed in the survey on volume data compression techniques [S3, unofficial].
+ 
+ ## Sources
+-[S1] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29
+-[S2] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)+[S1] Lyr.jl, https://github.com/tobiasosborne/Lyr.jl, fetched 2026-10-26 (unofficial)
++[S2] Principal-Ordinates Propagation for Real-Time Rendering ..., https://cg.ivd.kit.edu/publications/2015/principal-ordinates/ElekCAG2014.pdf, fetched 2026-10-29
++[S3] 体数据压缩技术综述, https://www.jcad.cn/article/id/9d3ce9cd-c97c-4fab-9291-a72fbe7ba37e, fetched 2026-10-30 (unofficial)

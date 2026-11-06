@@ -1,0 +1,399 @@
+Contribute to Biohub/idetik development by creating an account on GitHub.
+
+feat: refactor to share chunk data across multiple layers/viewports by aganders3 · Pull Request #531 · Biohub/idetik · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+aganders3
+commented
+Nov 18, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Summary
+This is picking up where #514 left off, basically just that PR rebased on main.
+This PR introduces a ChunkStore/ChunkStoreView architecture to enable efficient chunk sharing across multiple viewports. Currently, ChunkManagerSource conflates two responsibilities: managing a canonical chunk data store (for a given source) and determining viewport-specific chunk visibility. This design prevents resource sharing when multiple viewports render overlapping portions of the same data source.
+The implementation splits ChunkManagerSource into two complementary classes:
+ChunkStore: Manages the canonical data store and global state for all chunks for a single source by aggregating view state across associated ChunkStoreView objects
+ChunkStoreView: Represents a layer/viewport-specific "view" into that store, calculating LOD, visibility, and prefetch requirements based on its camera and slice position
+Multiple layers (including in separate viewports) can now share the same ChunkStore while each maintains its own ChunkStoreView. The ChunkStore aggregates chunk requirements across all views: chunks are kept loaded if any view needs them, and disposed when no views reference them. Priority for loading is determined by taking the minimum priority across all views.
+ChunkStoreView maintains an efficient sparse Map<Chunk, ChunkViewState> rather than tracking all chunks. View state aggregation happens synchronously during the update cycle, with maybeForgetChunk() called inline to clean up no-longer-visible chunks within a view.
+chunkManager.update() is now called after rendering, as chunk view states are updated as the runtime iterates over viewports to render. This performs the view state aggregation and ultimately chunk queueing and discarding.
+Related Issue
+For architecture diagrams and class relationships, see the multiple viewports tech spec.
+This is the final PR of the multi-viewport implementation plan (see tech spec):
+Multiple Viewports: WebGLState and Renderer updates for gl.viewport and gl.scissor #407: WebGL infrastructure
+Multiple Viewports: Introduce Viewport class and update Renderer.render() to take viewport #419: Viewport class
+Add an EventDispatcher to each Viewport for viewport-scoped events #451: Viewport events
+Introduce multiple-viewport API (breaking changes) #506: Idetik API integration
+feat: refactor to share chunk data across multiple layers/viewports #531 (this PR): ChunkManagerSource refactor
+Tests & Checks
+Existing chunk management tests updated to use new ChunkStore/ChunkStoreView API
+All tests pass
+Existing examples work without modification
+Added a second ChunkedImageLayer to the multi-viewport example and confirmed it behaves as expected, with chunk memory sharing confirmed (according to stats.js)
+Validated that chunks are properly disposed when no views need them (memory goes back down)
+aganders3
+added 8 commits
+November 17, 2025 10:16
+Refactor ChunkManagerSource into ChunkStore + ChunkStoreView
+8331864
+Simplify multi_viewport example to demonstrate chunk sharing
+928a62b
+Rename getChunks to getChunksToRender for clarity
+ea489be
+Update aggregation to take orderKey from min priority chunk
+e4b406c
+Changes from PR review
+…
+20641fb
+```
+  - Restore channels validation and updating naming
+  - Move allVisibleLowestLODLoaded to ChunkStoreView
+  - Naming
+  - Move store/view management and aggregation to ChunkManager
+  - Remove ChunkStore stored on layer
+```
+Update example to show two slices and volume
+04a869b
+Actually remove chunk_manager_source.ts
+a8545f8
+Aggregate chunks after views update
+e4db0bd
+aganders3
+requested review from
+andy-sweet,
+phoenixAja and
+shlomnissan
+November 18, 2025 15:15
+aganders3
+mentioned this pull request
+Nov 18, 2025
+[WIP] Refactoring to share chunk data across multiple viewports
+#514
+Closed
+aganders3
+changed the title
+Refactoring to share chunk data across multiple layers/viewports
+feat: refactor to share chunk data across multiple layers/viewports
+Nov 18, 2025
+andy-sweet
+suggested changes
+Nov 18, 2025
+View reviewed changes
+andy-sweet
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+No major issues here since I looked at a slightly older version of this, but I did find one bug that needs to be addressed, hence the request for changes. Even after addressing that, I think this PR should get more than just my approval before being merged - let me know if that doesn't make sense!
+Comment thread
+packages/core/src/layers/chunked_image_layer.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/core/src/idetik.ts
+this.renderer_.render(viewport);
+}
+this.chunkManager_.update();
+andy-sweet
+Nov 18, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+This change in order of render/update is worth calling out in the PR description, especially because I've temporarily forgotten why it is needed...
+Intuitively (without any other context), I think I'd expect update to come first followed by render (i.e. load then present), but in practice I'm not sure it's critical.
+Comment thread
+packages/core/src/renderers/webgl_renderer.ts
+Outdated
+for (const layer of opaque) {
+layer.update();
+layer.update({ viewport });
+andy-sweet
+Nov 18, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Nit: you could define the context object once outside the loops, though no idea if this has any practical effect on performance.
+Comment thread
+packages/core/src/core/chunk_manager.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Comment thread
+packages/core/src/core/chunk_manager.ts
+Outdated
+}
+if (chunk.priority === null && chunk.state === "loaded") {
+store.disposeChunk(chunk);
+andy-sweet
+Nov 18, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+The new simpler disposal logic seems to reintroduce the bug that following PR fixed: https://github.com/chanzuckerberg/idetik/pull/524/files
+I can reproduce that by running the main chunk streaming example, panning, and observing that the number of ready chunks drops while prefetched chunks are refetched.
+On main, the key is understanding the difference between chunk.prefetch and eligibleForPrefetch (which takes into account LOD and loading state). I'm not sure how best to translate that into this PR.
+aganders3
+Nov 19, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Thanks for the reminder - I'll take a closer look at this.
+aganders3
+Nov 19, 2025
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Can you check with 913c9b4?
+I removed some outdated stuff that was accidentally included from before the loading policies were added.
+I also made a change to pretty much treat prefetch as eligibleForPrefetch which I think is more intuitive. It means not trying to juggle prefetch/loaded as mutually exclusive states, but as separate properties (which they are).
+andy-sweet
+Nov 19, 2025
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+That fixes the bug. I still find it hard to reason about the prefetch property, but that was true before this PR too. I agree that this PR makes things less confusing by removing eligibleForPrefetch.
+Fix loaded prefetched chunks from being disposed
+913c9b4
+aganders3
+force-pushed
+the
+aganders3/chunk-store-refactor-redux
+branch
+from
+36d8d95 to
+913c9b4
+Compare
+November 19, 2025 15:52
+Remove chunkStore property - redundant and only used in chunk info ov…
+…
+8ec6ab3
+```
+…erlay
+```
+andy-sweet
+reviewed
+Nov 19, 2025
+View reviewed changes
+Comment thread
+packages/core/src/core/chunk_manager.ts
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+andy-sweet
+approved these changes
+Nov 19, 2025
+View reviewed changes
+andy-sweet
+left a comment
+Copy link
+Copy Markdown
+Contributor
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+I'm approving this to acknowledge that I previously requested changes, but you should probably at least one other approval before merging.
+Move chunk disposal to ChunkManager
+269be6c
+aganders3
+force-pushed
+the
+aganders3/chunk-store-refactor-redux
+branch
+from
+ae762a3 to
+269be6c
+Compare
+November 20, 2025 14:54
+Throw if failing to remove ChunkStoreView
+b57e42a
+aganders3
+force-pushed
+the
+aganders3/chunk-store-refactor-redux
+branch
+from
+d67dd3b to
+b57e42a
+Compare
+November 20, 2025 15:34
+shlomnissan
+commented
+Nov 20, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+@aganders3 @andy-sweet Continuing the conversation about ChunkStore and ChunkStoreView:
+I still think their relationship is flipped:
+Right now ChunkManager tracks views_ per store and even does a reverse lookup.
+It also owns aggregateChunkViewStates and updateAndCollectChunkChanges.
+These are per-store responsibilities, yet they live in the manager.
+A cleaner split IMO:
+ChunkStore owns its ChunkStoreView[]. It’s the place where all view states are merged into final chunk state.
+ChunkManager owns the set of ChunkStores (one per ChunkSource) and the global ChunkQueue store lifecycle.
+ChunkStoreView focused on cameras, viewports, and policies. Computes per-view ChunkViewState. Nothing else.
+ChunkStore just collects those states and resolves the final flags for each chunk.
+This feels like the right interim model. Thoughts?
+I’ll keep reviewing/thinking about it tomorrow.
+These are the open questions I have:
+How do we reprioritize when a viewport is minimized?
+What does sharing a single layer across multiple viewports look like? (separate views per layer?)
+Is the layer manager even useful now?
+I'm happy to stamp as it is so we can work on the demo and we can revisit this design later
+aganders3
+commented
+Nov 21, 2025
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Author
+Initially I instead had views_: ChunkStoreView[] as a property on ChunkStore, which I think is what you're suggesting. This also works, but I lifted some of the responsibilities out to the ChunkManager in order to break the parent/child relationship and (direct) cycle between the ChunkStore and ChunkStoreView. However I agree it created this awkward set of maps:
+```
+class ChunkManager {
+  private readonly stores_ = new Map<ChunkSource, ChunkStore>();
+  private readonly views_ = new Map<ChunkStore, ChunkStoreView[]>();
+```
+The other motivation was this way a layer would only need a reference to a ChunkStoreView instead of also holding a reference to the corresponding ChunkStore. Given we have ChunkStoreView.store as a public property, maybe this is a distinction without a difference. We can also avoid needing this reference by adding ChunkStoreView.dispose() to have it remove itself from ChunkStore._views (instead of needing ChunkStoreView.removeView(view)).
+I think you're right though, and I'm talking myself (back) into the design you're proposing...
+How do we reprioritize when a viewport is minimized?
+I think this is still an open question, but I honestly haven't given it much thought. It does seem reasonable to distinguish between "closed" and "minimized", where a minimized viewport would continue to request data in the background but at a lower priority, but it may need to keep track of some things e.g. what size it expects to be restored to. This could also be related to disposal policies and resource management. For example I think Neuroglancer maintains some number of chunks in a "recent" state before freeing memory.
+What does sharing a single layer across multiple viewports look like? (separate views per layer?) (from Slack: I assume the same layer will need to have separate store views?)
+In the current implementation this is not supported. The simple workaround is to make another instance of the layer and it can share some, though I recognize this is a little unsatisfactory and perhaps unintuitive.
+I don't really like the idea of a layer having multiple ChunkStoreView instances because I think it would also need to maintain separate lists of renderables for each (or its list of renderables will be constantly changing), but there might be a better solution I'm not thinking of.
+I have an open question which is: what should happen if a layer is in multiple viewports? I'm thinking here if a ChunkedImageLayer is placed in a 2D viewport (as we have) and then we also want to see it represented in the 3D view intersecting a volume rendering. In Neuroglancer for example the 3D view ("sections") is a representation of what you see in the 2D views. If the layer had a ChunkStoreView for each viewport, it would show the whole slice in 3D, not the crop of the viewport (what we probably want).
+Is the layer manager even useful now?
+The layer manager has had pretty small utility in general to this point, so I'm not sure. Ultimately it is a list, and with 3D views and OIT even the ordering in the list is perhaps not as important as we once thought. Maybe it could be useful as an intermediary for managing layers in multiple viewports, instead of introducing multi-viewport-aware logic in a layer itself? That's a pretty speculative idea though.
+Hide details
+View details
+aganders3
+merged commit ca1b622
+into
+main
+Nov 24, 2025
+9 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+aganders3
+deleted the
+aganders3/chunk-store-refactor-redux
+branch
+November 24, 2025 18:15
+phoenixAja
+commented
+Nov 24, 2025
+Copy link
+Copy Markdown
+🎉 This PR is included in version 0.2.0 🎉
+The release is available on:
+npm package (@latest dist-tag)
+GitHub release
+Your semantic-release bot 📦🚀
+phoenixAja
+added
+the
+released
+label
+Nov 24, 2025
+aganders3
+mentioned this pull request
+Dec 1, 2025
+feat: allow simple LOD and time coordinate selection in volume layer
+#532
+Closed
+This was referenced Dec 3, 2025
+Add viewport support with shared data sources
+#486
+Closed
+refactor: Move ChunkStoreView ownership to ChunkStore
+#545
+Merged
+aganders3
+added a commit
+that referenced
+this pull request
+Dec 4, 2025
+refactor: Move ChunkStoreView ownership to ChunkStore (#545)
+…
+0eb0ccd
+```
+### Summary
+This is a follow-up for #531 as discussed in
+#531 (comment).
+
+The main purpose of this refactor is to transfer ownership of the
+`ChunkStoreView` instances to their corresponding `ChunkStore`, away
+from `ChunkManager`.
+* Added natural `ChunkStore.views_ : ChunkStoreView[]` 
+* Removed confusing mapping and reverse-lookup on `ChunkManager`
+* Moved store-specific functions to `ChunkStore`:
+  * `updateAndCollectChunkChanges`
+  * `aggregateChunkViewStates`
+* `ChunkStoreView.store` is no longer a public attribute
+* Automated cleanup of `ChunkStore` when no views remain
+
+### Related Issue
+#486
+
+### Tests & Checks
+Tested all examples
+```
+andy-sweet
+mentioned this pull request
+Jan 15, 2026
+Temporal prefetching over time ignores channel index
+#569
+Closed
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+released
+4 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

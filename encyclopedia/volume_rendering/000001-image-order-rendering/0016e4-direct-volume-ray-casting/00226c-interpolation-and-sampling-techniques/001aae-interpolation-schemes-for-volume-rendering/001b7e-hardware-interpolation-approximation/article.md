@@ -3,54 +3,56 @@
 Also called: Piecewise Bilinear/Trilinear Interpolation via Polygon Subdivision
 
 ## Overview
-This method approximates volume rendering integration by leveraging standard graphics hardware rasterization, assuming linear interpolation along ray segments [S1, unofficial]. It sets itself apart from analytical integration schemes by relying on the implicit interpolation of the GPU's rasterizer, resulting in view-dependent piecewise bilinear or trilinear interpolation depending on how the hardware subdivides polygons [S1, unofficial].
+Hardware Interpolation Approximation is a volume rendering technique that leverages graphics hardware rasterization to approximate the volume rendering integral. It solves the problem of efficient integration by assuming linear interpolation along ray segments, effectively mapping the volume data to polygonal primitives where the GPU's built-in interpolation performs the sampling [S1, unofficial]. It sets itself apart from its siblings by relying on view-dependent, hardware-enforced piecewise interpolation (bilinear or trilinear) determined by polygon subdivision, rather than explicit, view-independent kernel-based reconstruction [S1, unofficial].
 
 ## How it works
+The method approximates the continuous volume rendering integral by discretizing the volume into polygons (typically quadrilaterals or triangles) and utilizing the graphics pipeline's interpolation capabilities.
+
 **Inputs and Outputs:**
-* **Input:** A volume dataset represented as a polygonal mesh (typically quadrilateral faces) and a view direction [S1, unofficial].
-* **Output:** A rendered image where color and opacity are accumulated based on the hardware-interpolated scalar field values along rays [G].
+- Input: Volume data represented as a mesh of non-planar faces (quadrilaterals or triangles).
+- Input: Transfer function mapping scalar values to color and opacity.
+- Output: Rendered image with integrated color and opacity.
 
 **Data Structures:**
-* The volume is represented as a polygonal mesh with quadrilateral faces [S1, unofficial].
-* Exact field layouts, sizes, and bit packing are not given in the sources.
-* No explicit lookup tables or pre-computed integrals are required for the interpolation itself [G].
+- The volume is represented as a set of polygons. Each polygon has vertices defined in voxel space or world space.
+- Vertex attributes include the scalar value (and potentially gradient or other metadata) at each corner.
 
 **Steps:**
-1. **Polygon Subdivision:** The graphics hardware subdivides the input quadrilateral faces into primitives suitable for rasterization [S1, unofficial]. The specific subdivision strategy determines the interpolation order [S1, unofficial]:
-   * **Case 1 (Triangles):** The hardware divides the quadrilateral into two triangles, and linear interpolation is performed across each triangle [S1, unofficial].
-   * **Case 2 (Trapezoids):** The hardware divides the quadrilateral into trapezoids using horizontal lines through the vertices, and bilinear interpolation is performed within each trapezoid [S1, unofficial]. If a trapezoid degenerates into a triangle, linear interpolation is used [S1, unofficial].
-2. **Ray Segment Interpolation:** Along each ray segment passing through a rasterized primitive, the scalar field value is assumed to vary linearly [S1, unofficial].
-3. **Integration Approximation:** The accumulation of color and opacity along the ray is computed based on these linearly interpolated values [G]. The resulting interpolation is piecewise bilinear (if triangles are used) or piecewise trilinear (if trapezoids are used) [S1, unofficial].
+1. **Polygon Subdivision:** The volume geometry is divided into polygons suitable for rasterization. The specific interpolation behavior depends on how the hardware handles these polygons [S1, unofficial].
+2. **Rasterization:** The polygons are projected onto the screen. The graphics hardware interpolates vertex attributes (scalar values) across the surface of the polygon.
+3. **Interpolation Mode Determination:** The type of interpolation applied by the hardware depends on the subdivision strategy:
+   - If the polygon is divided into triangles, the hardware performs linear interpolation across each triangle. Since the ray segment lies within this linear interpolation, the overall effect is **piecewise bilinear interpolation** [S1, unofficial].
+   - If the polygon is divided into trapezoids (via horizontal lines through vertices), the hardware performs bilinear interpolation within each trapezoid. If the trapezoid degenerates into a triangle, it performs linear interpolation. This results in **piecewise trilinear interpolation** (or bilinear in degenerate cases) [S1, unofficial].
+4. **Integration Approximation:** The method assumes linear interpolation along the ray segments passing through the volume. This assumption, combined with the hardware's spatial interpolation, approximates the integration of the transfer function along the ray [S1, unofficial].
 
 **Formulas:**
-Let $V(x)$ be the scalar field. The hardware approximation assumes $V(x)$ is linear within each rasterized primitive [S1, unofficial]. For a ray segment parameterized by $t$, the value is interpolated as:
-$$ V(t) = V_0 + t(V_1 - V_0) $$
-where $V_0$ and $V_1$ are the values at the endpoints of the segment within the primitive [G]. The exact functional form depends on the primitive type and the hardware's specific rasterization rules [S1, unofficial].
+The interpolation is view-dependent. The exact interpolation function $I(\mathbf{p})$ at a point $\mathbf{p}$ is not fully determined by the OpenGL specifications but is constrained by the subdivision:
+- For triangle subdivision: $I(\mathbf{p})$ is linear within each triangle.
+- For trapezoid subdivision: $I(\mathbf{p})$ is bilinear within each trapezoid.
 
 **Parameters:**
-* **Subdivision Strategy:** Determined by the graphics API/hardware [S1, unofficial].
-* **Primitive Type:** Triangle or Trapezoid [S1, unofficial].
+- Subdivision strategy: Triangles vs. Trapezoids. This choice dictates the interpolation order (bilinear vs. trilinear) [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-* **View Dependence:** The interpolation is view-dependent because the subdivision into pieces depends on the subdivision of the view plane into polygons and any further subdivision produced by the hardware [S1, unofficial].
-* **Specification Ambiguity:** The exact interpolation produced by the hardware scheme is hard to determine because interpolation across polygons is not completely determined in the OpenGL specifications [S1, unofficial].
-* **Non-Planar Faces:** The method's behavior with non-planar faces is not fully determined by OpenGL specifications [S1, unofficial].
+- **Non-planar Faces:** If the volume faces are non-planar, subdividing them (e.g., by diagonals) introduces artifacts because the interpolation across the diagonal is not consistent with the true volume field [S1, unofficial].
+- **View Dependence:** The interpolation is view-dependent because the subdivision into pieces depends on the subdivision of the view plane into polygons and any further subdivision produced by the hardware. It only corresponds to finite element interpolation functions in very special viewing situations [S1, unofficial].
+- **Specification Ambiguity:** The exact interpolation produced by the hardware scheme is hard to determine because interpolation across polygons is not completely determined in the OpenGL specifications [S1, unofficial].
 
 ## Subtopics
 
 ### [First Order Integration (Trapezoid Rule)](2077-first-order-integration-trapezoid-rule.md)
-First Order Integration approximates the volume rendering integral by assuming a linear interpolation of the scalar field between two discrete sample points, corresponding to the trapezoid rule. Unlike the piecewise-constant Riemann sum used in zero-order integration, this method captures higher frequencies of the transfer function, reducing visual artifacts caused by discontinuities between consecutive samples. It sets itself apart by requiring pre-computation of integrals into a lookup table indexed by segment endpoints and length, rather than evaluating the transfer function per sample.
+First Order Integration approximates the volume rendering integral along a ray segment by assuming the scalar field varies linearly between the segment's endpoints, effectively applying the trapezoid rule. This method improves upon zero-order (piecewise-constant) Riemann sums by capturing higher frequencies of the transfer function. It sets itself apart from its parent, Hardware Interpolation Approximation, by explicitly modeling the linear variation of the scalar field to enable pre-integration, whereas the parent scheme relies on hardware interpolation assumptions.
 
 ## Operating characteristics
-* **Time Complexity:** Not given in the sources.
-* **Memory Complexity:** Not given in the sources.
-* **Strengths:** Leverages existing hardware rasterization pipelines, potentially offering high performance without custom shaders or complex pre-computation [G].
-* **Limitations:** The interpolation is view-dependent and not strictly equivalent to finite element interpolation functions except in very special viewing situations [S1, unofficial]. The exact behavior is ambiguous due to OpenGL specification limitations [S1, unofficial].
-* **When to use:** When hardware acceleration is desired and strict interpolation accuracy is secondary to performance [G].
-* **When not to use:** When view-independent interpolation or precise control over the interpolation scheme is required [G].
+- **Time Complexity:** Depends on the rasterization speed of the hardware. Generally faster than CPU-based ray casting for large volumes due to parallelization in the GPU.
+- **Memory Complexity:** Requires storing the volume as a mesh of polygons. The memory footprint depends on the resolution and the number of polygons used to represent the volume.
+- **Strengths:** Leverages existing hardware acceleration; simple to implement if the volume can be represented as a mesh.
+- **Limitations:** Interpolation is view-dependent and not strictly equivalent to standard trilinear interpolation; artifacts can arise from non-planar faces and subdivision choices; limited control over the interpolation kernel compared to software-based methods.
+- **When to use:** When hardware acceleration is critical and the volume can be reasonably approximated by polygonal meshes.
+- **When not to use:** When strict view-independent interpolation is required or when the volume has complex internal structures that are poorly represented by planar faces.
 
 ## Background
-The method is discussed in the context of cell projection of meshes with nonplanar faces [S1, unofficial]. It highlights the challenges of mapping volume data to screen space using standard graphics hardware, where the rasterization process implicitly defines the interpolation scheme [S1, unofficial].
+The method originates from the need to accelerate volume rendering using graphics hardware. It was discussed in the context of cell projection of meshes with non-planar faces [S1, unofficial]. The approach highlights the limitations of relying on hardware interpolation for scientific visualization, where precise control over the interpolation kernel is often necessary.
 
 ## Sources
 [S1] Cell projection of meshes with nonplanar faces, https://www.sciweavers.org/publications/cell-projection-meshes-non-planar-faces, fetched 2026-10-29 (unofficial)

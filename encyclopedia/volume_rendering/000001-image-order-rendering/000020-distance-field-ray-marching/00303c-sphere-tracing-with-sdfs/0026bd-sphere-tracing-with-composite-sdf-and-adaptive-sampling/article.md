@@ -1,0 +1,330 @@
+# Sphere Tracing with Composite SDF and Adaptive Sampling
+
+Also called: Ray Marching with Character SDFs, SDF Sphere Tracing with Letter/Arc Geometry, SDF-Sphere-Tracing
+
+## Overview
+This method renders scenes containing primitive shapes, character segments (letters), and arcs by combining their Signed Distance Functions (SDFs) into a composite scene and tracing rays via sphere tracing [S1, unofficial]. It extends standard sphere tracing by handling specific geometric primitives (line segments with thickness and arcs) alongside standard SDF shapes, and employs a path tracing loop with up to 3 bounces to compute lighting [S1, unofficial]. The method distinguishes itself by using adaptive sampling with variance-based convergence to determine when a pixel has reached sufficient quality, rather than using a fixed sample count [S1, unofficial]. It builds on [Distance-field ray marching](21-distance-field-ray-marching.md) and [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md).
+
+## How it works
+**Inputs and Outputs:**
+- **Inputs:** Camera parameters (origin, direction, FOV, resolution), scene objects (diffuse shapes, character segments, arcs, bounding box), material properties, and sampling parameters.
+- **Outputs:** A rendered image where each pixel contains the accumulated radiance.
+
+**Data Structures:**
+- `shapes`: A list of pointers to `Shape` objects. Each `Shape` implements a `Distance(vec3 p)` method returning the SDF value [S1, unofficial].
+- `characters`: A `vector<vec3>` storing line segments as pairs of endpoints. Index $j$ is the start point, $j+1$ is the end point [S1, unofficial].
+- `arcs`: A list of `Arc` objects, each implementing a `distance(vec3 p)` method [S1, unofficial].
+- `surronding_bbox`: A `Box` object used for acceleration, implementing `Distance(vec3 p)` [S1, unofficial].
+- `Material`: An abstract class with a virtual method `bsdf_sample(const vec3& dir_in, const vec3& n)` and `isSpecular()` [S1, unofficial].
+
+**Parameters:**
+- `thicc`: Thickness offset for characters. Value: $0.6$ [S1, unofficial].
+- `maximum_hit_distance`: Maximum ray march distance. Value: $1000.0$ [S1, unofficial].
+- `minimum_hit_distance`: Hit threshold. Value: $0.0001$ [S1, unofficial].
+- `bbox_threshold`: Distance threshold to check characters/arcs. Value: $5.5$ [S1, unofficial].
+- `ns`: Total number of samples per pixel. Value: $16$ [S1, unofficial].
+- `step`: Step size for adaptive sampling loop. Value: $16$ [S1, unofficial].
+- `convergence_rate`: Threshold for variance to stop sampling. Value: $0.0001$ [S1, unofficial].
+- `FOV`: Field of view. Value: $32$ degrees [S1, unofficial].
+- `Max Bounces`: Maximum path tracing bounces. Value: $3$ [S1, unofficial].
+- `Light Color`: Direct light contribution. Value: $\text{vec3}(500, 400, 100)$ [S1, unofficial].
+- `Background Color`: Value: $\text{vec3}(50, 80, 100)$ [S1, unofficial].
+- `smallStep`: Step size for normal estimation. Value: $0.001$ [S1, unofficial].
+- `Bias`: Added before tone mapping. Value: $14.0/241.0$ [S1, unofficial].
+
+**Step-by-Step Method:**
+
+1. **Ray Generation:** For each pixel $(i, j)$, generate a ray $r$ with origin $r.o$ and direction $r.d$ using a pinhole camera model with $32^\circ$ FOV [S1, unofficial].
+
+2. **Adaptive Sampling Loop:** Initialize `sum` (radiance accumulator) to $\text{vec3}(0)$, `sum_square` to $0$, `sum_so_far` to $0$, and `num_sample_used` to $0$ [S1, unofficial]. Loop while `num_sample_used < ns` [S1, unofficial]:
+   a. For `num` from $0$ to `step`:
+      i. Generate a jittered ray $r$ by adding random offsets to pixel coordinates [S1, unofficial].
+      ii. Compute radiance $color$ by calling `path_tracing(r)` (see below) [S1, unofficial].
+      iii. Add $color$ to `sum` [S1, unofficial].
+      iv. Compute luminance $L = 0.2126 \cdot color.x + 0.7152 \cdot color.y + 0.0722 \cdot color.z$ [S1, unofficial].
+      v. Update `sum_square += L^2` and `sum_so_far += L` [S1, unofficial].
+   b. Increment `num_sample_used` by `step` [S1, unofficial].
+   c. Compute mean $\mu = \text{sum\_so\_far} / \text{num\_sample\_used}$ and variance $\sigma^2 = \frac{\sum L^2}{N} - \mu^2$ where $N = \text{num\_sample\_used}$ [S1, unofficial].
+   d. If $\sigma^2 < \text{convergence\_rate}$ and $\min(color.x, color.y, color.z) > 0.2$, stop sampling for this pixel [S1, unofficial].
+
+3. **Path Tracing (`path_tracing`):**
+   a. Initialize radiance $L = \text{vec3}(0)$ and throughput $T = \text{vec3}(1)$ [S1, unofficial].
+   b. Loop `bounce` from $0$ to $2$:
+      i. Call `Sphere_Tracing` with current ray to find hit point $hit\_point$, distance $t$, and hit type (DIFFUSE, LETTER, ARC, SUN) [S1, unofficial].
+      ii. If no hit, add $T \cdot \text{vec3}(50, 80, 100)$ to $L$ and return $L$ [S1, unofficial].
+      iii. Update $T *= 0.2$ [S1, unofficial].
+      iv. If hit type is DIFFUSE:
+          - Compute normal $n$ using finite differences on the shape's SDF [S1, unofficial].
+          - Sample BSDF to get new direction $d_{new}$ [S1, unofficial].
+          - Create shadow ray towards light direction $\text{vec3}(0.6, 0.6, 1.0)$ [S1, unofficial].
+          - If shadow ray hits SUN, add $T \cdot \text{vec3}(500, 400, 100) \cdot \max(0, n \cdot light\_direction)$ to $L$ [S1, unofficial].
+      v. If hit type is LETTER or ARC:
+          - Compute normal $n$ using finite differences with `smallStep` ($0.001$) [S1, unofficial].
+          - Compute reflected direction $d_{refl} = r.d - 2(r.d \cdot n)n$ [S1, unofficial].
+          - Offset hit point by $n \cdot 0.2$ [S1, unofficial].
+          - Create new ray with origin $hit\_point + n \cdot 0.1$ and direction $d_{refl}$ [S1, unofficial].
+      vi. If hit type is SUN, add $T \cdot \text{vec3}(50, 80, 100)$ to $L$ and return $L$ [S1, unofficial].
+   c. Return $L$ [S1, unofficial].
+
+4. **Sphere Tracing (`Sphere_Tracing`):**
+   a. Initialize `total_distance_travel = 0`, `mint = 1e20`, `hit_type = DIFFUSE` [S1, unofficial].
+   b. Loop while `total_distance_travel <= maximum_hit_distance` and step count $< 1024$:
+      i. Compute current position $p = r.o + r.d \cdot total\_distance\_travel$ [S1, unofficial].
+      ii. For each shape $j$, compute $d = shapes[j].Distance(p)$. If $d < mint$, update $mint = d$, $shape\_id = j$, $hit\_type = DIFFUSE$ [S1, unofficial].
+      iii. Compute $dist\_bbox = surronding\_bbox.Distance(p)$ [S1, unofficial].
+      iv. If $dist\_bbox < 5.5$:
+          - For each character pair $(begin, end)$ at indices $j, j+1$:
+              - Compute $begin\_end = end - begin$ [S1, unofficial].
+              - Compute projection parameter $begin\_x = \min(\max(-\frac{(begin - p) \cdot begin\_end}{\|begin\_end\|^2}, 0), 1)$ [S1, unofficial].
+              - Compute closest point $hit\_point\_letter = begin + begin\_x \cdot begin\_end$ [S1, unofficial].
+              - Compute distance $d = \|p - hit\_point\_letter\| - 0.6$ [S1, unofficial].
+              - If $d < mint$, update $mint = d$, $character\_id = j$, $hit\_type = LETTER$ [S1, unofficial].
+          - For each arc $j$, compute $d = arc[j].distance(p)$. If $d < mint$, update $mint = d$, $arc\_id = j$, $hit\_type = ARC$ [S1, unofficial].
+      v. Update `total_distance_travel += mint` [S1, unofficial].
+      vi. If $mint < 0.0001$:
+          - Compute hit point $hit\_point = r.o + r.d \cdot total\_distance\_travel$ [S1, unofficial].
+          - Check if hit is SUN: if $19.9 - hit\_point.y < 0$, set $hit\_type = SUN$ [S1, unofficial].
+          - Return true with $t = total\_distance\_travel$ and $hit\_type$ [S1, unofficial].
+      vii. If `total_distance_travel > maximum_hit_distance`, return false [S1, unofficial].
+   c. Return false [S1, unofficial].
+
+5. **Tone Mapping:**
+   a. For each pixel, compute $color = \frac{sum}{ns} + \frac{14.0}{241.0}$ [S1, unofficial].
+   b. Apply Reinhard tone mapping: $color_{final} = \frac{color}{color + 1.0} \cdot 255$ [S1, unofficial].
+   c. Convert to 8-bit integer [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+import random
+
+def sphere_tracing(r_o, r_d, shapes, characters, arcs, surrounding_bbox, max_steps=1024, max_hit_distance=1000.0, min_hit_distance=0.0001):
+    total_distance_travel = 0.0
+    mint = 1e20
+    hit_type = "DIFFUSE"
+    shape_id = -1
+    character_id = -1
+    arc_id = -1
+    
+    for _ in range(max_steps):
+        position = r_o + r_d * total_distance_travel
+        
+        # Check shapes
+        for j, shape in enumerate(shapes):
+            d = shape.distance(position)
+            if d < mint:
+                mint = d
+                shape_id = j
+                hit_type = "DIFFUSE"
+                
+        # Check characters and arcs if close to bounding box
+        dist_bbox = surrounding_bbox.distance(position)
+        if dist_bbox < 5.5:
+            # Check characters
+            for j in range(0, len(characters), 2):
+                begin = characters[j]
+                end = characters[j+1]
+                begin_end = end - begin
+                begin_end_len2 = dot(begin_end, begin_end)
+                
+                # Projection parameter
+                proj = -dot(begin - position, begin_end) / begin_end_len2
+                begin_x = max(0.0, min(1.0, proj))
+                
+                hit_point_letter = begin + begin_x * begin_end
+                d = length(position - hit_point_letter) - 0.6
+                
+                if d < mint:
+                    mint = d
+                    character_id = j
+                    hit_type = "LETTER"
+                    
+            # Check arcs
+            for j, arc in enumerate(arcs):
+                d = arc.distance(position)
+                if d < mint:
+                    mint = d
+                    arc_id = j
+                    hit_type = "ARC"
+                    
+        total_distance_travel += mint
+        
+        if mint < min_hit_distance:
+            hit_point = r_o + r_d * total_distance_travel
+            # Check for SUN
+            if 19.9 - hit_point.y < 0:
+                hit_type = "SUN"
+            return True, total_distance_travel, hit_type, shape_id, character_id, arc_id
+            
+        if total_distance_travel > max_hit_distance:
+            return False, 0, "MISS", -1, -1, -1
+            
+    return False, 0, "MISS", -1, -1, -1
+
+def path_tracing(r, shapes, characters, arcs, mats, surrounding_bbox, max_bounces=3):
+    L = vec3(0.0)
+    T = vec3(1.0)
+    light_direction = normalize(vec3(0.6, 0.6, 1.0))
+    
+    for bounce in range(max_bounces):
+        hit, t, hit_type, shape_id, character_id, arc_id = sphere_tracing(r.o, r.d, shapes, characters, arcs, surrounding_bbox)
+        
+        if not hit:
+            L += T * vec3(50, 80, 100)
+            return L
+            
+        hit_point = r.o + r.d * t
+        T *= 0.2
+        
+        if hit_type == "DIFFUSE":
+            normal = calc_normal(hit_point, shapes[shape_id])
+            # Sample BSDF (simplified as diffuse reflection for this example)
+            # In original code, mats[shape_id]->bsdf_sample is used
+            # Assuming a simple diffuse sample for demonstration
+            new_dir = sample_diffuse(normal)
+            
+            # Shadow ray
+            shadow_hit, _, shadow_type, _, _, _ = sphere_tracing(hit_point, light_direction, shapes, characters, arcs, surrounding_bbox)
+            if shadow_type == "SUN":
+                incident = max(0.0, dot(normal, light_direction))
+                L += T * vec3(500, 400, 100) * incident
+                
+        elif hit_type in ["LETTER", "ARC"]:
+            small_step = 0.001
+            if hit_type == "LETTER":
+                # Compute normal using finite differences on character SDF
+                # Note: In original code, compute_distance_letter_optimize is used
+                # Here we assume a generic SDF function for the character
+                dx = compute_char_dist(hit_point + vec3(small_step, 0, 0), character_id) - compute_char_dist(hit_point - vec3(small_step, 0, 0), character_id)
+                dy = compute_char_dist(hit_point + vec3(0, small_step, 0), character_id) - compute_char_dist(hit_point - vec3(0, small_step, 0), character_id)
+                dz = compute_char_dist(hit_point + vec3(0, 0, small_step), character_id) - compute_char_dist(hit_point - vec3(0, 0, small_step), character_id)
+            else:
+                dx = compute_arc_dist(hit_point + vec3(small_step, 0, 0), arc_id) - compute_arc_dist(hit_point - vec3(small_step, 0, 0), arc_id)
+                dy = compute_arc_dist(hit_point + vec3(0, small_step, 0), arc_id) - compute_arc_dist(hit_point - vec3(0, small_step, 0), arc_id)
+                dz = compute_arc_dist(hit_point + vec3(0, 0, small_step), arc_id) - compute_arc_dist(hit_point - vec3(0, 0, small_step), arc_id)
+                
+            normal = normalize(vec3(dx, dy, dz))
+            direction = r.d - 2.0 * dot(r.d, normal) * normal
+            hit_point += normal * 0.2
+            r.o = hit_point + normal * 0.1
+            r.d = normalize(direction)
+            
+        elif hit_type == "SUN":
+            L += T * vec3(50, 80, 100)
+            return L
+            
+    return L
+
+def compute_char_dist(p, char_id):
+    # Simplified character distance calculation
+    begin = characters[char_id]
+    end = characters[char_id+1]
+    begin_end = end - begin
+    begin_end_len2 = dot(begin_end, begin_end)
+    proj = -dot(begin - p, begin_end) / begin_end_len2
+    begin_x = max(0.0, min(1.0, proj))
+    hit_point_letter = begin + begin_x * begin_end
+    return length(p - hit_point_letter) - 0.6
+
+def compute_arc_dist(p, arc_id):
+    # Placeholder for arc distance calculation
+    return arcs[arc_id].distance(p)
+
+def calc_normal(hit_point, shape):
+    small_step = 0.001
+    dx = shape.distance(hit_point + vec3(small_step, 0, 0)) - shape.distance(hit_point - vec3(small_step, 0, 0))
+    dy = shape.distance(hit_point + vec3(0, small_step, 0)) - shape.distance(hit_point - vec3(0, small_step, 0))
+    dz = shape.distance(hit_point + vec3(0, 0, small_step)) - shape.distance(hit_point - vec3(0, 0, small_step))
+    return normalize(vec3(dx, dy, dz))
+
+def sample_diffuse(normal):
+    # Simple diffuse sampling (not fully specified in source, using reflected direction as proxy for simplicity in this context)
+    # Original code uses mats[shape_id]->bsdf_sample which implies a more complex BSDF
+    # For the purpose of this article, we assume a simple diffuse sample
+    return normalize(normal + vec3(random.gauss(0, 1), random.gauss(0, 1), random.gauss(0, 1)))
+
+def main():
+    width = 960
+    height = 540
+    ns = 16
+    step = 16
+    convergence_rate = 0.0001
+    
+    # Initialize scene objects (shapes, characters, arcs, bbox)
+    shapes = initialize_shapes()
+    characters = initialize_characters()
+    arcs = initialize_arcs()
+    surrounding_bbox = initialize_bbox()
+    mats = [diffuse_room]
+    
+    c = [vec3(0.0) for _ in range(width * height)]
+    
+    for j in range(height):
+        for i in range(width):
+            sum_color = vec3(0.0)
+            sum_square = 0.0
+            sum_so_far = 0.0
+            num_sample_used = 0
+            converge = False
+            
+            for s in range(0, ns, step):
+                for num in range(step):
+                    p = (i + random.random()) / width
+                    q = (j + random.random()) / height
+                    r = camera.generate_ray(p, q)
+                    color = path_tracing(r, shapes, characters, arcs, mats, surrounding_bbox)
+                    sum_color += color
+                    
+                    luminance = 0.2126 * color.x + 0.7152 * color.y + 0.0722 * color.z
+                    sum_square += luminance * luminance
+                    sum_so_far += luminance
+                    
+                num_sample_used += step
+                mean = sum_so_far / num_sample_used
+                variance = (sum_square / num_sample_used) - (mean ** 2)
+                
+                if variance < convergence_rate and min(sum_color.x, sum_color.y, sum_color.z) > 0.2:
+                    converge = True
+                    break
+                    
+            if not converge:
+                c[j * width + i] = sum_color / ns
+                
+    # Tone mapping and output
+    for i in range(width * height):
+        color = c[i] + vec3(14.0/241.0)
+        color = vec3(color.x / (color.x + 1.0), color.y / (color.y + 1.0), color.z / (color.z + 1.0)) * 255.0
+        # Convert to 8-bit and write to file
+```
+
+## Subtopics
+
+### [SDF Primitive Definitions](1578-sdf-primitive-definitions.md)
+Defines the basic SDFs for primitives like spheres and boxes used in the scene.
+
+### [Lighting and Shading Models](2055-lighting-and-shading-models.md)
+Describes the BSDF sampling and lighting calculations used for DIFFUSE hits.
+
+### [SDF Normal Estimation via Finite Differences](4619-sdf-normal-estimation-via-finite-differences.md)
+Details the method for computing normals from SDFs using finite differences, used for LETTER and ARC hits.
+
+### [Antialiasing (AA)](4802-antialiasing-aa.md)
+Discusses the adaptive sampling and variance-based convergence used for antialiasing in this method.
+
+## Operating characteristics
+- **Time Complexity:** The sphere tracing loop runs up to `MAX_STEPS` (1024) times per ray, with each step iterating over all shapes, characters, and arcs. The path tracing loop adds up to 3 bounces. Adaptive sampling adds a variable number of samples per pixel, up to `ns` (16).
+- **Memory Complexity:** Linear in the number of shapes, characters, and arcs.
+- **Performance:** The method is computationally intensive due to the full search over characters and arcs at each sphere tracing step. The use of a surrounding bounding box provides some acceleration by only checking characters/arcs when the ray is close to the box [S1, unofficial].
+- **Strengths:** Handles complex character geometry and arcs efficiently within the SDF framework. Adaptive sampling reduces unnecessary computation for converged pixels.
+- **Limitations:** The full search over characters and arcs at each step can be slow for scenes with many characters/arcs. The method does not use advanced acceleration structures like BVH for the character/arc search, relying instead on the bounding box threshold [S1, unofficial].
+- **When to use:** Suitable for rendering scenes with specific geometric primitives like letters and arcs where SDFs are available.
+- **When not to use:** Not suitable for scenes with very large numbers of characters/arcs due to the lack of efficient spatial acceleration for these primitives.
+
+## Background
+This method originates from a GitHub repository by AlerianEmperor, titled "SDF-Sphere-Tracing" [S1, unofficial]. It is an implementation of sphere tracing with path tracing, specifically designed to handle character segments and arcs in addition to standard SDF primitives. The code includes optimizations for fast trigonometric functions and uses adaptive sampling for antialiasing.
+
+## Sources
+[S1] AlerianEmperor/SDF-Sphere-Tracing, https://github.com/AlerianEmperor/SDF-Sphere-Tracing, fetched 2026-10-26 (unofficial)

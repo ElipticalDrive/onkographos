@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-GsplatVolumeLighting is a volume lighting and occlusion technique for 3D Gaussian Splatting (3DGS) that ray-marches through a 3D density texture to compute transmittance for shadow and volume occlusion, combined with per-light attenuation and diffuse shading [S1, unofficial]. It differs from sibling methods like [Duplex-GS](1988-duplex-gs.md) and [4DGS-Volume-Cloud Two-Stage Relighting](4101-4dgs-volume-cloud-two-stage-relighting.md) by integrating the volume occlusion directly into the per-splat lighting evaluation loop using a shared 3D density texture, rather than treating volume as a separate post-process or distinct geometric primitive [S1, unofficial].
++GsplatVolumeLighting is a volume lighting and occlusion technique for 3D Gaussian Splatting (3DGS) that ray-marches through a 3D density texture to compute transmittance for shadow and volume occlusion, combined with per-light attenuation and diffuse shading [S1, unofficial]. It is implemented within the per-splat lighting evaluation loop using a shared 3D density texture [S1, unofficial].
+ 
+ ## How it works
+@@ -23,5 +23,5 @@
+     *   `_GsplatVolumeLightColors`: Array of light colors [S1, unofficial].
+     *   Light properties: `lightType` (directional < 0.5, point/spot > 0.5), `lightPosition` (w > 0.5 for point lights), `lightDirection`, `lightDirection.w` (range fade parameter), `spotParams` (x: min cosine, y: exponent) [S1, unofficial].
+-    *   Splat properties: `center` (local), `normal` (local), `viewDirection` (world) [S1, unofficial].
++    *   Splat data: local center, local normal, and world view direction [S1, unofficial].
+ *   **Outputs:**
+     *   Final lighting value (float), typically added to the splat's base color or used as a multiplier [S1, unofficial].
+@@ -119,24 +119,25 @@
+     # 1. Ray-Box Intersection
+     direction = normalize(light_direction_world)
+-    # Clamp direction magnitude to prevent division by zero
+-    if length(direction) < 1e-5:
+-        return 1.0
+-    direction = direction / max(length(direction), 1e-5)
+-    
+-    direction_sign = lerp(-1.0, 1.0, step(0.0, direction))
+-    
+-    # Compute t0/t1 against bounds
+-    # Note: Exact t0/t1 formula depends on standard ray-box intersection logic
+-    # t0 = (boundsMin - center) / direction
+-    # t1 = (boundsMax - center) / direction
+-    # t_entry = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
+-    # t_exit = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
+-    # For simplicity, assuming a helper or inline calculation for ray-box exit distance
+-    # The source specifies: return max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))
+-    # This implies farDistance is the exit distance along the ray
+-    ray_length = compute_ray_box_exit_distance(direction, volume_bounds_min, volume_bounds_max)
+-    
++    dir_len = length(direction)
++    if dir_len < 1e-5:
++        return 1.0
++    direction = direction / max(dir_len, 1e-5)
++    
++    # directionSign = lerp(-1.0, 1.0, step(0.0, direction))
++    direction_sign = where(direction >= 0.0, 1.0, -1.0)
++    
++    # Compute t0/t1 against boundsMin/BoundsMax
++    t0 = (volume_bounds_min - splat_center_local) / direction
++    t1 = (volume_bounds_max - splat_center_local) / direction
++    t_near = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
++    t_far = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
++    
++    # Return max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))
++    ray_length = max(0.0, min(t_far.x, min(t_far.y, t_far.z)))
++
+     # 2. Light Direction Transformation
+-    local_light_direction = gsplat_volume_world_to_local(light_direction_world)
++    # Transform light direction to local space using _GsplatVolumeWorldToLocal
++    # (Not given in the sources. Standard inverse rotation matrix multiplication.)
++    local_light_direction = light_direction_world 
+     local_light_direction = normalize(local_light_direction)
+     if length(local_light_direction) <= 1e-6:
+@@ -164,5 +165,4 @@
+     # 6. Initialization
+     # UVW at midpoint of first step
+-    # uvw = (localCenter + localDirection * (startDistance + 0.5 * stepLength) - boundsMin) * invSize
+     uvw = (splat_center_local + local_light_direction * (start_distance + 0.5 * step_length) - volume_bounds_min) * volume_bounds_inv_size
+     uvw_step = local_light_direction * step_length * volume_bounds_inv_size
+@@ -182,5 +182,5 @@
+             
+         # Sampling
+-        d = texture_sample(volume_density_sampler, uvw).r
++        d = texture3D(volume_density_sampler, uvw).r
+         optical_depth += d * d
+         
+@@ -192,6 +192,7 @@
+     # 9. Per-Splat Lighting Evaluation
+     # Transform center and normal to world space
+-    center_world = transform_to_world(splat_center_local)
+-    normal_world = normalize(transform_normal_to_world(splat_normal_local))
++    # (Not given in the sources. Standard transformation matrix multiplication.)
++    center_world = splat_center_local 
++    normal_world = normalize(splat_normal_local)
+     
+     # Flip normal if back-facing
+@@ -203,5 +204,4 @@
+ 
+     # 10. Per-Light Processing
+-    # Assuming single light for this function context, or loop over lights
+     # Compute toLight and distance
+     to_light = light_position - center_world
+@@ -236,52 +236,4 @@
+     direct *= volume_lighting_params.z
+     return max(ambient + direct, 0.0)
+-
+-def compute_ray_box_exit_distance(direction, bounds_min, bounds_max):
+-    """
+-    Computes the exit distance of a ray from an AABB.
+-    """
+-    direction_sign = lerp(-1.0, 1.0, step(0.0, direction))
+-    # Clamp direction magnitude
+-    dir_len = length(direction)
+-    if dir_len < 1e-5:
+-        return 0.0
+-    direction = direction / dir_len
+-    
+-    # t0 and t1 calculations
+-    t0 = (bounds_min - center) / direction # center is implicit or passed
+-    t1 = (bounds_max - center) / direction
+-    
+-    # Standard ray-box intersection logic
+-    # t_entry = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
+-    # t_exit = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
+-    # The source specifies: return max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))
+-    # This suggests farDistance is the exit distance vector components
+-    # Assuming farDistance is computed as (boundsMax - center) / direction for positive direction
+-    # and (boundsMin - center) / direction for negative direction?
+-    # The source text is slightly ambiguous on the exact t0/t1 derivation but specifies the final return.
+-    # We follow the source's return statement.
+-    
+-    # Re-reading source: "compute t0/t1 against boundsMin/BoundsMax, and return max(0.0, min(farDistance.x, min(farDistance.y, farDistance.z)))"
+-    # This implies farDistance is the exit point distance.
+-    # Let's assume standard ray-box intersection where farDistance is the exit distance.
+-    
+-    # To be precise and implementable:
+-    # t0 = (boundsMin - center) / direction
+-    # t1 = (boundsMax - center) / direction
+-    # t_near = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
+-    # t_far = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
+-    # return max(0.0, t_far)
+-    
+-    # However, the source says "min(farDistance.x, min(farDistance.y, farDistance.z))"
+-    # This might refer to a specific implementation detail where farDistance is a vector of exit distances along axes?
+-    # Given the ambiguity, we stick to the standard interpretation of ray-box exit distance.
+-    
+-    # Let's use the standard formula which is robust.
+-    t0 = (bounds_min - center) / direction
+-    t1 = (bounds_max - center) / direction
+-    t_near = max(min(t0.x, t1.x), min(t0.y, t1.y), min(t0.z, t1.z))
+-    t_far = min(max(t0.x, t1.x), max(t0.y, t1.y), max(t0.z, t1.z))
+-    
+-    return max(0.0, t_far)
+ ```
+ 
+@@ -290,5 +242,5 @@
+ *   **Memory Complexity:** $O(V)$ for the 3D density texture, where $V$ is the volume resolution. The texture is shared across splats [S1, unofficial].
+ *   **Performance:** The method is designed for real-time rendering in Unity 6, leveraging GPU compute and texture sampling [S1, unofficial].
+-*   **Strengths:** Provides volumetric occlusion and lighting for 3DGS, enhancing realism. Integrates seamlessly with existing 3DGS rendering pipelines [S1, unofficial].
++*   **Strengths:** Provides volumetric occlusion and lighting for 3DGS, enhancing realism. Supports Built-in Render Pipeline, URP, and HDRP [S1, unofficial].
+ *   **Limitations:** Limited to 4 lights. Max 24 samples per ray march. Requires a 3D density texture [S1, unofficial].
+ *   **When to Use:** When volumetric occlusion and lighting are required for 3DGS content in Unity 6 [S1, unofficial].

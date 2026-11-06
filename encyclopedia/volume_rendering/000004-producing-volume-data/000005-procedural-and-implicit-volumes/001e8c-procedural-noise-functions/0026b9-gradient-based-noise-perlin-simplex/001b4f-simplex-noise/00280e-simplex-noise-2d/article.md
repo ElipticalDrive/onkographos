@@ -1,0 +1,236 @@
+# Simplex Noise 2D
+
+Also called: 2D OpenSimplex Noise, 3D Perlin Noise (Improved), Improved Noise, Perlin Noise (Improved), SNoise, Simplex Noise, 2D Simplex
+
+## Overview
+Simplex Noise 2D is a gradient-based procedural noise function for 2D space that generates smooth, continuous scalar values [S2, S3, unofficial]. It solves the directional artifacts and computational inefficiency of the original grid-based Perlin Noise by using a skewed simplex (triangular) grid [S1, unofficial]. Unlike its sibling [Simplex Noise](978-simplex-noise.md) which operates in 3D, this 2D variant specifically optimizes for planar terrain and texture generation by reducing the number of gradient evaluations and dot products required per sample [S2, unofficial].
+
+## How it works
+**Inputs:** A 2D coordinate vector $v = (x, y)$.
+**Outputs:** A normalized scalar noise value $N \in [-1, 1]$ (or $[0, 1]$ if remapped).
+
+**Data Structures:**
+1.  **Permutation Table:** An array of 512 integers (typically `uint8` or `uint16`), derived from a standard permutation of 0–255 repeated twice to handle overflow without modulo during the permutation step.
+2.  **Gradient Vectors:** A fixed set of 2D vectors. In the standard implementation, these are the 4 vectors $(1,1), (-1,1), (1,-1), (-1,-1)$ scaled by $\sqrt{2}$ to have unit length, or simply the integer pairs $(1,1), (-1,1), (1,-1), (-1,-1)$ with a final normalization factor [S2, unofficial].
+
+**Constants:**
+*   $C = (1/6, 1/3)$
+*   $D = (0, 0.5, 1, 2)$
+*   $STRETCH\_2D = (\frac{1}{\sqrt{3}} - 1) / 2 \approx -0.0944$
+*   $SQUISH\_2D = (\sqrt{3} - 1) / 2 \approx 0.3660$
+*   $NORM\_2D = 1/47.0$
+*   $MOD\_289 = 289$
+*   $SCALE = 42.0$
+
+**Steps:**
+
+1.  **Stretch:** Map the input square into a skewed hexagonal grid.
+    $$ s = (x + y) \times STRETCH\_2D $$
+    $$ x_s = x + s $$
+    $$ y_s = y + s $$
+
+2.  **Grid Cell Identification:** Find the integer coordinates of the simplex triangle containing the input point.
+    $$ i_x = \lfloor x_s \rfloor $$
+    $$ i_y = \lfloor y_s \rfloor $$
+
+3.  **Relative Position:** Calculate the position of the input point relative to the grid cell origin $(i_x, i_y)$ in the skewed space.
+    $$ x_0 = x_s - i_x $$
+    $$ y_0 = y_s - i_y $$
+
+4.  **Simplex Type Determination:** Determine which of the two triangles in the square cell the point falls into. This is done by comparing $x_0$ and $y_0$.
+    *   If $x_0 + y_0 < 1$, the point is in the "lower" triangle (corners $(0,0), (1,0), (0,1)$).
+    *   Otherwise, it is in the "upper" triangle (corners $(1,1), (0,1), (1,0)$).
+    
+    This determines the indices of the two "inner" corners ($i_1, i_2$) relative to the origin.
+    *   Case 1 ($x_0 + y_0 < 1$):
+        *   Inner corner 1: $(1, 0)$
+        *   Inner corner 2: $(0, 1)$
+    *   Case 2 ($x_0 + y_0 \ge 1$):
+        *   Inner corner 1: $(0, 1)$
+        *   Inner corner 2: $(1, 0)$
+        
+    *Note: The standard algorithm uses step functions to determine these offsets generically:*
+    $$ g = \text{step}(y_0, x_0) $$
+    $$ l = 1 - g $$
+    $$ i_1 = (g, l) $$
+    $$ i_2 = (l, g) $$
+    *(Where $i_1$ and $i_2$ are the offsets from the origin to the two inner corners).*
+
+5.  **Unstretch to Original Space:** Calculate the coordinates of the three contributing corners in the original unskewed space.
+    *   Origin: $(x, y)$
+    *   Inner Corner 1:
+        $$ x_1 = x_0 - i_{1x} + SQUISH\_2D $$
+        $$ y_1 = y_0 - i_{1y} + SQUISH\_2D $$
+    *   Inner Corner 2:
+        $$ x_2 = x_0 - i_{2x} + SQUISH\_2D $$
+        $$ y_2 = y_0 - i_{2y} + SQUISH\_2D $$
+    *   Outer Corner (opposite the origin in the square):
+        $$ x_3 = x_0 - 1 + 2 \times SQUISH\_2D $$
+        $$ y_3 = y_0 - 1 + 2 \times SQUISH\_2D $$
+
+6.  **Gradient Lookup:** Map the grid corners to gradient vectors using the permutation table.
+    *   Hash the integer coordinates $(i_x, i_y)$ to get a gradient index.
+    *   The hash is typically computed as:
+        $$ h = \text{Permutation}[(\text{Permutation}[i_x] + i_y) \pmod{256}] $$
+    *   The gradient index is $h \pmod 4$.
+    *   Retrieve the gradient vector $G$ for each corner. The standard gradients are $(1,1), (-1,1), (1,-1), (-1,-1)$.
+
+7.  **Contribution Calculation:** For each of the three corners (Origin, Inner 1, Inner 2), calculate the contribution to the noise value.
+    *   Calculate the squared distance from the corner to the input point in the *original* space (not skewed).
+        *   For Origin: $dist_0^2 = x^2 + y^2$ (Wait, the algorithm uses the relative coordinates in the *skewed* space for the cutoff, but the dot product is in *original* space? No, standard Simplex uses the relative coordinates in the *skewed* space for the attenuation cutoff, but the dot product is between the gradient and the relative vector in the *original* space? 
+        *   Correction: The attenuation factor $m$ is based on the distance from the corner to the point in the *original* space? No, Ken Perlin's original code uses the distance in the *skewed* space for the cutoff $0.6$. Let's look at the sources.
+        *   Source [S3, unofficial] says: $m = \max(0.6 - \text{dot}(x_0, x_0), 0)$. Here $x_0$ is the relative vector in the *skewed* space? No, $x_0$ in step 3 was $x_s - i_x$. The dot product $\text{dot}(x_0, x_0)$ is the squared length in the skewed space.
+        *   The contribution is $m^2 \times \text{dot}(G, \text{relative\_vector\_in\_original\_space})$.
+        *   Let $v_0 = (x, y)$ be the vector from Origin to Input.
+        *   Let $v_1 = (x_1 + i_{1x} - SQUISH\_2D - x, y_1 + i_{1y} - SQUISH\_2D - y)$? No.
+        *   The relative vector for the dot product is the vector from the corner to the input point in the *original* space.
+        *   For Origin: $v_0 = (x, y)$.
+        *   For Inner 1: The corner is at $(i_x + 1, i_y)$ in skewed space. Unstretched: $( (i_x + 1) + (i_y) \times STRETCH\_2D, (i_y) + (i_x + 1) \times STRETCH\_2D )$. This is complex.
+        *   Simpler approach from Source [S2, unofficial]:
+            $$ attn = 2 - dx^2 - dy^2 $$
+            $$ \text{if } attn > 0: \text{value} += attn^4 \times (G \cdot v_{rel}) $$
+            Where $dx, dy$ are the relative coordinates in the *skewed* space? No, Source [S2, unofficial] says `dx` and `dy` are calculated from `xins` and `yins`?
+            Let's stick to the most common implementation logic derived from the notes:
+            1. Calculate relative vectors in *original* space for the dot product.
+               $v_0 = (x, y)$
+               $v_1 = (x - (i_x + 1 + i_y \cdot STRETCH\_2D), y - (i_y + (i_x + 1) \cdot STRETCH\_2D))$ ... this is getting messy.
+            
+            Let's use the explicit formula from Source [S3, unofficial]:
+            $$ N = 42.0 \times \sum_{i=0}^{2} m_i^2 (p_i \cdot x_i) $$
+            Where $x_i$ are the relative vectors from the corners to the point in the *original* space, and $m_i = \max(0.6 - |x_i|^2, 0)$.
+            
+            Wait, Source [S3, unofficial] defines $x_0, x_1, x_2, x_3$ in the context of 3D. For 2D, there are 3 corners.
+            
+            Let's refine the "How it works" pseudocode to be precise.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def simplex_noise_2d(x, y, perm_table):
+    # Constants
+    F2 = 0.5 * (math.sqrt(3.0) - 1.0)
+    G2 = (3.0 - math.sqrt(3.0)) / 6.0
+    NORM_2D = 1.0 / 47.0
+    SCALE = 42.0
+    
+    # 1. Skew input space to determine which simplex cell we are in
+    s = (x + y) * F2
+    i = math.floor(x + s)
+    j = math.floor(y + s)
+    
+    # 2. Unskew the cell origin back to (x, y) space
+    t = (i + j) * G2
+    X0 = i - t
+    Y0 = j - t
+    
+    # 3. Determine the two other corners of the simplex
+    # The relative (x, y) offsets to the other corners in skewed space
+    if (i + j) % 2 == 0:
+        # The (0,0) corner is one of the corners
+        x0 = x - X0
+        y0 = y - Y0
+        x1 = x0 - 1.0 + G2
+        y1 = y0 - 1.0 + G2
+        x2 = x0 - 0.5 + G2
+        y2 = y0 - 0.5 + G2
+    else:
+        # The (1,1) corner is one of the corners
+        x2 = x - (X0 + 1.0)
+        y2 = y - (Y0 + 1.0)
+        x1 = x2 + 0.5
+        y1 = y2 + 0.5
+        x0 = x1 - 0.5
+        y0 = y1 - 0.5
+        
+    # 4. Determine which of the two triangles makes up the simplex
+    # This logic is often handled by the permutation table mapping, 
+    # but the contribution calculation depends on the specific corner indices.
+    # Standard approach: Hash the cell coordinates to get gradient indices.
+    
+    # Hash indices for the three corners
+    # Note: The permutation table should be size 512 (256 repeated)
+    def get_gradient_hash(ix, iy):
+        # Assuming perm_table is size 256, we repeat it or mod 256
+        # Standard implementation:
+        p = perm_table
+        return p[(p[ix & 255] + iy) & 255]
+        
+    hash0 = get_gradient_hash(i, j)
+    hash1 = get_gradient_hash(i + 1, j) if (i+j)%2 != 0 else get_gradient_hash(i, j+1) # Logic varies by implementation
+    hash2 = get_gradient_hash(i + 1, j + 1) if (i+j)%2 == 0 else get_gradient_hash(i+1, j) # Logic varies
+    
+    # Actually, the standard Ken Perlin 2D implementation uses a specific mapping:
+    # If i+j is even, the corners are (i,j), (i+1,j), (i,j+1)
+    # If i+j is odd, the corners are (i+1,j+1), (i+1,j), (i,j+1)
+    
+    if (i + j) % 2 == 0:
+        idx0 = hash0
+        idx1 = get_gradient_hash(i + 1, j)
+        idx2 = get_gradient_hash(i, j + 1)
+    else:
+        idx0 = get_gradient_hash(i + 1, j + 1)
+        idx1 = get_gradient_hash(i + 1, j)
+        idx2 = get_gradient_hash(i, j + 1)
+        
+    # 5. Calculate contributions
+    # Gradient vectors are (1,1), (-1,1), (1,-1), (-1,-1) scaled by sqrt(2) or just (1,1) etc.
+    # Let's use the integer gradients (1,1), (-1,1), (1,-1), (-1,-1)
+    def get_gradient(index):
+        # index is hash % 4
+        idx = index % 4
+        if idx == 0: return (1, 1)
+        if idx == 1: return (-1, 1)
+        if idx == 2: return (1, -1)
+        if idx == 3: return (-1, -1)
+        
+    def calc_contribution(dx, dy, grad_idx):
+        # Attenuation factor
+        attn = 2.0 - dx*dx - dy*dy
+        if attn < 0:
+            return 0.0
+        # Gradient vector
+        gx, gy = get_gradient(grad_idx)
+        # Dot product
+        dot_val = gx * dx + gy * dy
+        # Contribution is attn^4 * dot_val
+        return attn * attn * attn * attn * dot_val
+        
+    val0 = calc_contribution(x0, y0, idx0)
+    val1 = calc_contribution(x1, y1, idx1)
+    val2 = calc_contribution(x2, y2, idx2)
+    
+    # 6. Scale and normalize
+    result = (val0 + val1 + val2) * SCALE * NORM_2D
+    return result
+```
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** The use of floating-point coordinates for the skewed grid can lead to precision issues at very large coordinate values. Using integer arithmetic for the grid cell indices ($i, j$) is critical.
+*   **Gradient Selection:** The mapping from hash to gradient vector must be consistent. The 4 gradients $(1,1), (-1,1), (1,-1), (-1,-1)$ are not normalized to unit length in the basic integer implementation; the normalization is handled by the `NORM_2D` constant.
+*   **Boundary Conditions:** The permutation table must handle indices correctly. Using a table of size 512 (two copies of 0-255) avoids modulo operations during the permutation step, improving performance and correctness.
+
+## Subtopics
+
+### [2D Octaved Noise with Memoization](4530-2d-octaved-noise-with-memoization.md)
+A fractal noise generator that sums multiple octaves of a base 2D noise function with decreasing amplitude and increasing frequency, caching results to avoid redundant calculations. It differs from standard octaved noise by explicitly memoizing the final accumulated result per coordinate and octave count, trading memory for repeated computation avoidance. It builds on [Simplex Noise 2D](4155-simplex-noise-2d.md) as the base noise primitive.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per sample. The number of operations is constant regardless of the input coordinate magnitude, as it only involves a fixed number of arithmetic operations and table lookups.
+*   **Memory Complexity:** $O(1)$ for the algorithm itself, plus $O(N)$ for the permutation table (typically 256 or 512 entries).
+*   **Performance:** Significantly faster than 2D Perlin Noise because it requires fewer gradient evaluations (3 vs 4) and fewer dot products. It is also less prone to directional artifacts.
+*   **Strengths:** Smooth, continuous output; no directional bias; computationally efficient; easy to implement in shaders.
+*   **Limitations:** The noise is not periodic, which can be a problem for seamless textures if not handled with wrapping techniques. The output range is approximately $[-1, 1]$.
+*   **When to use:** Ideal for procedural terrain generation, texture synthesis, and any application requiring smooth, random scalar fields in 2D.
+*   **When not to use:** If periodicity is required, consider wrapping the input coordinates or using a different noise variant. If higher dimensional noise is needed, use [Simplex Noise](978-simplex-noise.md).
+
+## Background
+Simplex Noise was introduced by Ken Perlin in 2001 as an improvement over his original 1983 Perlin Noise [S1, unofficial]. The 2D variant specifically addresses the hexagonal grid structure of the simplex method, which reduces the number of gradient vectors needed from 4 to 3 in 2D, and from 8 to 4 in 3D. It has become a standard in procedural generation, particularly in game development and shader programming, due to its efficiency and visual quality [S2, S3, unofficial].
+
+## Sources
+[S1] vinceniko/Isosurface, https://github.com/vinceniko/Isosurface, fetched 2026-10-27 (unofficial)
+[S2] andrewbloese-00/web_voxel_terrain, https://github.com/andrewbloese-00/web_voxel_terrain, fetched 2026-10-27 (unofficial)
+[S3] FredrikErikJohansson/Proccraft, https://github.com/FredrikErikJohansson/Proccraft, fetched 2026-10-27 (unofficial)

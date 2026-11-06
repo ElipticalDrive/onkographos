@@ -1,0 +1,204 @@
+--- v001.md
++++ v002.md
+@@ -4,132 +4,96 @@
+ 
+ ## Overview
+-Plenoxels optimization configuration defines the gradient-based learning strategy for optimizing voxel opacity ($\sigma$) and spherical harmonic (SH) coefficients in the Plenoxels representation. It addresses the problem of efficiently training a 3D voxel grid from multi-view images without neural networks. It sets itself apart from sibling methods by relying on standard gradient descent variants (specifically RMSProp) with distinct learning rate schedules for opacity versus SH coefficients, rather than the coarse-to-fine pruning or tree-based structures used by its siblings [S1].
++Plenoxels Optimization Configuration defines the gradient-based training protocol for optimizing voxel opacity ($\sigma$) and spherical harmonic (SH) coefficients in a static 3D voxel grid. It solves the problem of efficiently fitting multi-view images into a discretized radiance field without neural network MLPs. It differs from its siblings by using a fixed-resolution grid optimized via specific learning rate schedules and optimizer choices, whereas [Coarse-to-Fine Optimization with Pruning](1153-coarse-to-fine-optimization-with-pruning.md) dynamically adjusts grid density, and [PlenOctree Optimization](1291-plenoctree-optimization.md) uses a hierarchical tree structure.
+ 
+ ## How it works
+-The method optimizes the parameters of a 3D voxel grid using gradient-based optimizers. The core parameters are the voxel opacity $\sigma$ and the spherical harmonic coefficients representing view-dependent color.
+-
+-**Inputs:**
+-- Multi-view images of a scene.
+-- Camera poses for each view.
+-- Voxel grid resolution (e.g., $256^3$).
+-
+-**Outputs:**
+-- Optimized voxel opacity $\sigma$.
+-- Optimized spherical harmonic coefficients.
++**Inputs and Outputs:**
++- Input: Multi-view images, camera poses, and a target voxel grid resolution (e.g., $256^3$).
++- Output: Optimized voxel opacity values ($\sigma$) and SH coefficients for each voxel.
+ 
+ **Data Structures:**
+ - **Voxel Grid:** A 3D array of size $N \times N \times N$. Each voxel stores:
+-  - Opacity $\sigma$: A scalar value.
+-  - SH Coefficients: A vector of coefficients for the spherical harmonic basis functions. The degree of SH is typically fixed (e.g., degree 3 for 12 coefficients per color channel, or degree 4 for 20). The exact dimension depends on the chosen SH degree.
+-- **Optimizer State:** Maintained per parameter group (SH coefficients and $\sigma$).
++  - Opacity ($\sigma$): A scalar value.
++  - SH Coefficients: A vector of coefficients representing directional color/intensity. The degree of SH determines the vector size (e.g., degree 9 requires specific coefficient counts).
+ 
+-**Algorithm Steps:**
+-1. **Initialization:** Initialize voxel opacities $\sigma$ to small positive values (e.g., $10^{-4}$) and SH coefficients to zero or small random values.
+-2. **Sampling:** For each training step, sample rays through the voxel grid.
+-3. **Rendering:** Compute the rendered color for each ray using volume rendering integration. The transmittance $T$ and accumulated color $C$ are computed as:
+-   $$ T_i = \prod_{j=1}^{i-1} \exp(-\sigma_j \delta_j) $$
+-   $$ C = \sum_{i=1}^{n} T_i (1 - \exp(-\sigma_i \delta_i)) c_i $$
+-   where $\sigma_i$ is the opacity, $\delta_i$ is the ray segment length, and $c_i$ is the color computed from the SH coefficients at the sample point.
+-4. **Loss Computation:** Compute the loss between the rendered image and the ground truth image (e.g., L1 or L2 loss).
+-5. **Backpropagation:** Compute gradients with respect to $\sigma$ and SH coefficients.
+-6. **Parameter Update:** Update parameters using the selected optimizer and learning rate schedule.
++**Numbered Steps:**
++1. **Initialization:** Initialize the voxel grid with opacity and SH coefficients. [G] Typically, opacity is initialized to a small positive value or derived from space carving, and SH coefficients to zero or mean color.
++2. **Optimizer Selection:** Select the gradient-based optimizer. RMSProp is preferred over SGD, particularly for optimizing SH coefficients, though the method is robust to variations [S1].
++3. **Learning Rate Schedule Configuration:** Configure distinct learning rate schedules for $\sigma$ and SH coefficients. The optimal configuration uses a delayed learning rate schedule for $\sigma$ and a constant schedule for SH [S1].
++4. **Training Loop:**
++   - Render images from current voxel grid.
++   - Compute loss (e.g., MSE) against ground truth images.
++   - Compute gradients for $\sigma$ and SH coefficients.
++   - Update parameters using the selected optimizer and schedules.
++5. **Regularization (Optional):** Apply TV loss or sparsity constraints if specified [S1].
+ 
+-**Optimizer and Learning Rate Schedule:**
+-- **Optimizer:** RMSProp is preferred over SGD. RMSProp is used for both SH coefficients and $\sigma$ to achieve the best results [S1].
+-- **Learning Rate Schedule:**
+-  - **SH Coefficients:** Exponential decay learning rate schedule.
+-  - **Opacity $\sigma$:** Delayed learning rate schedule. This means the learning rate for $\sigma$ starts lower or is applied after a certain number of steps compared to SH, or follows a different decay curve. The specific "delayed" schedule yields the best PSNR [S1].
+-  - Alternative schedules (constant for both, or exponential for both) result in lower quality [S1].
++**Formulas:**
++- Rendering involves integrating opacity and SH along rays. The specific SH evaluation formula depends on the degree.
++- Loss function: Typically Mean Squared Error (MSE) between rendered and target images.
++
++**Parameters:**
++- **Optimizer:** RMSProp [S1].
++- **Resolution:** $256^3$ for standard benchmarks [S1].
++- **SH Degree:** Not explicitly fixed in the primary configuration notes, but degree 9 is used in related implementations [S2, unofficial].
++
++**Edge Cases and Pitfalls:**
++- **Precision:** Ensure stable gradient updates for SH coefficients, which may have varying magnitudes.
++- **Boundaries:** Handle voxel boundaries carefully during interpolation or rendering.
+ 
+ **Pseudocode:**
+ ```python
+-import torch
+-import torch.nn as nn
++# Configuration
++resolution = 256
++optimizer_type = "RMSProp" # Preferred over SGD
++lr_schedule_sigma = "Delayed" # Delayed schedule
++lr_schedule_sh = "Constant" # Constant schedule
+ 
+-def optimize_plenoxels(voxel_grid, images, poses, num_steps, lr_sh, lr_sigma, decay_sh, decay_sigma):
+-    """
+-    Optimizes Plenoxels voxel grid.
++# Initialization
++voxel_grid = initialize_voxel_grid(resolution) # Opacity and SH coeffs
++optimizer = create_optimizer(voxel_grid, optimizer_type)
++
++# Training Loop
++for epoch in range(num_epochs):
++    # Render and compute loss
++    rendered_images = render(voxel_grid, camera_poses)
++    loss = compute_mse_loss(rendered_images, ground_truth_images)
+     
+-    Args:
+-        voxel_grid: Object containing SH coefficients and opacity sigma.
+-        images: Ground truth images.
+-        poses: Camera poses.
+-        num_steps: Number of optimization steps.
+-        lr_sh: Initial learning rate for SH coefficients.
+-        lr_sigma: Initial learning rate for opacity sigma.
+-        decay_sh: Decay factor for SH learning rate.
+-        decay_sigma: Decay factor for sigma learning rate.
+-        
+-    Returns:
+-        Optimized voxel_grid.
+-    """
+-    # Initialize optimizer
+-    # RMSProp is preferred
+-    optimizer = torch.optim.RMSprop([
+-        {'params': voxel_grid.sh_coeffs, 'lr': lr_sh},
+-        {'params': voxel_grid.sigma, 'lr': lr_sigma}
+-    ])
++    # Backpropagation
++    gradients = compute_gradients(loss, voxel_grid)
+     
+-    for step in range(num_steps):
+-        # Sample rays
+-        rays = sample_rays(images, poses)
+-        
+-        # Render
+-        rendered_colors = render_plenoxels(voxel_grid, rays)
+-        
+-        # Compute loss
+-        loss = compute_loss(rendered_colors, rays.gt_colors)
+-        
+-        # Backpropagate
+-        optimizer.zero_grad()
+-        loss.backward()
+-        
+-        # Update parameters
+-        optimizer.step()
+-        
+-        # Update learning rates
+-        # SH uses exponential decay
+-        current_lr_sh = lr_sh * (decay_sh ** step)
+-        # Sigma uses delayed schedule (simplified as different decay or start)
+-        # Note: The exact "delayed" schedule implementation is not fully specified in sources [S1]
+-        # Assuming a different decay or a step-based start for sigma
+-        current_lr_sigma = lr_sigma * (decay_sigma ** step) 
+-        
+-        # Adjust LR in optimizer (simplified)
+-        for param_group in optimizer.param_groups:
+-            if param_group['params'] is voxel_grid.sh_coeffs:
+-                param_group['lr'] = current_lr_sh
+-            else:
+-                param_group['lr'] = current_lr_sigma
+-                
+-    return voxel_grid
++    # Update with specific schedules
++    # Note: Implementation of 'Delayed' vs 'Constant' schedules
++    # depends on the optimizer library. Here we assume a wrapper.
++    update_parameters(voxel_grid, gradients, lr_schedule_sigma, lr_schedule_sh)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-- **Precision:** Standard float32 is typically used.
+-- **Boundaries:** Ensure ray marching does not go out of bounds of the voxel grid.
+-- **Degenerate Input:** If images are poorly aligned, optimization may fail.
+ 
+ ## Subtopics
+ 
+-### [Plenoxels Training with Progressive Growing](1493-plenoxels-training-with-progressive-growing.md)
+-A training procedure for Plenoxels that uses progressive growing of the receptive field size to optimize a 3D voxel grid from multi-view images, incorporating TV loss and beta loss for regularization.
++### Space Carving and Opaque Voxels Optimization with Spherical Harmonics
++A technique composed of two steps: space carving and opaque voxels optimization, used to generate neural radiance fields based on plenoxels [S2, unofficial]. Spherical harmonics of degree 9 are used to render the shading of each voxel [S2, unofficial]. Running the implementation `main_carve_sph.py` takes approximately 4 minutes on a single GPU [S2, unofficial].
+ 
+-### [Joint Finetuning for Vector-Quantized Radiance Fields](1871-joint-finetuning-for-vector-quantized-radiance-fields.md)
+-Joint finetuning is a post-compression optimization procedure applied to vector-quantized radiance fields to recover rendering quality lost during voxel pruning and codebook initialization. It distinguishes itself from standard neural teacher training by operating on a sparse, quantized representation, thereby eliminating hash collisions inherent in dense hash grids and leveraging a larger effective parameter count to exceed the teacher's performance. This method builds on [Plenoxels Optimization Configuration](929-plenoxels-optimization-configuration.md) by adapting gradient-based optimization specifically for the constraints of vector-quantized structures.
++### Plenoxels Training
++Training implementation of plenoxels that saves the final voxel grid [S2, unofficial]. The final voxel grid resolution is 128x128x128 [S2, unofficial]. Running the training implementation `main.py` takes approximately 30 minutes on a single GPU [S2, unofficial].
+ 
+ ## Operating characteristics
+-- **Time Complexity:** Depends on the number of rays sampled and the depth of the voxel grid. Each ray requires traversing the grid and evaluating SH functions.
+-- **Memory Complexity:** Proportional to the number of voxels times the size of SH coefficients and opacity. For a $256^3$ grid, this is significant but manageable.
+-- **Measured Performance:** On 8 synthetic NeRF scenes at $256^3$ resolution, RMSProp for both SH and $\sigma$ with the recommended schedule achieves PSNR 30.57, SSIM 0.950, LPIPS 0.065 [S1].
+-- **Scaling:** The method scales with resolution. Higher resolutions require more memory and computation.
+-- **Strengths:** Simple to implement, robust to variations in optimizer choice, good performance with RMSProp.
+-- **Limitations:** Dense voxel grid can be memory-intensive for high resolutions. SH basis functions may not capture high-frequency details as well as neural networks.
+-- **When to use:** When a fast, non-neural network-based radiance field representation is needed, and high-quality rendering is required.
+-- **When not to use:** When extreme compression is needed (consider PlenOctree) or when very high-frequency details are critical (consider neural radiance fields).
++**Time and Memory Complexity:**
++- Memory: Scales with $N^3$ for the voxel grid, where $N$ is the resolution. Each voxel stores opacity and SH coefficients.
++- Time: Training time depends on resolution and number of views. For $256^3$ resolution, training time is not explicitly given in [S1], but [S2, unofficial] reports ~30 minutes for $128^3$ on a single GPU.
++
++**Measured Performance:**
++- On 8 synthetic NeRF scenes at $256^3$ resolution, RMSProp for both SH and $\sigma$ achieves PSNR 30.57, SSIM 0.950, LPIPS 0.065 [S1].
++- SGD for both drops to PSNR 29.35, SSIM 0.932, LPIPS 0.087 [S1].
++- Delayed schedule for $\sigma$ and constant for SH yields best results (PSNR 30.57) [S1]. Constant for both yields lower quality (PSNR 30.13) [S1].
++
++**Strengths and Limitations:**
++- Strengths: Fast training compared to MLP-based NeRFs; robust to variations in optimizer and schedule [S1].
++- Limitations: Fixed resolution may lead to inefficiencies in sparse regions; requires careful tuning of SH degree and resolution.
++
++**When to Use:**
++- Use when fast training and inference are required, and the scene can be represented well by a fixed-resolution voxel grid.
+ 
+ ## Background
+-Plenoxels was introduced by Verbin et al. in 2022 [S1]. It proposes a radiance field representation without neural networks, using a voxel grid with spherical harmonics. The optimization configuration described here is based on the experiments in the original paper, which compared different optimizers and learning rate schedules.
++Originated in the paper "Plenoxels: Radiance Fields without Neural Networks" [S1]. It represents an alternative to MLP-based NeRFs by using a voxel grid with SH coefficients. The method is part of the broader field of differentiable and inverse volume rendering.
+ 
+ ## Sources
+-[S1] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26+[S1] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26
++[S2] nissmar/Radiance-Fields, https://github.com/nissmar/Radiance-Fields, fetched 2026-10-27 (unofficial)

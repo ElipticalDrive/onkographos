@@ -1,0 +1,229 @@
+--- v001.md
++++ v002.md
+@@ -1,141 +1,111 @@
+ # Instanced Voxel Renderer
+ 
+-Also called: Chunk-based Instanced Voxel Rendering, Cubic-Grid Voxel Renderer
++Also called: Chunk-based Instanced Voxel Rendering, Cubic-Grid Voxel Renderer, Indirect Rendering via SSBO, SSBO-based Instanced Rendering (Pipeline A)
+ 
+ ## Overview
+-A GPU-driven voxel rendering technique that packs shape instances into large Shader Storage Buffer Objects (SSBOs), groups them into spatial chunks, and renders them via instanced drawing with per-chunk frustum culling [S1, unofficial]. It differs from [Procedural Instancing for Voxel Blocks](1637-procedural-instancing-for-voxel-blocks.md) by relying on explicit, pre-allocated instance buffers and chunk-based spatial partitioning rather than purely procedural generation during the draw call, and from [Cube Rasterization via SSBO](2267-cube-rasterization-via-ssbo.md) by introducing a hierarchical chunking structure to manage VRAM allocation and culling efficiency [S1, unofficial].
++The Instanced Voxel Renderer is a GPU-driven technique that packs shape instances into large Shader Storage Buffer Objects (SSBOs), groups them into spatial chunks, and renders them via instanced drawing with per-chunk frustum culling [S1, S2, unofficial]. It differs from procedural instancing by pre-computing and storing packed geometric data in buffers, allowing for complex, non-uniform shapes and texture atlasing, while avoiding the vertex buffer overhead of naive cube rasterization by using indirect draw calls [S1, S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** A set of block definitions (each containing geometry, texture indices, and transparency mode), a camera matrix (view/projection), and configuration parameters (`chunkLength`, `vramBufferRegionSize`).
+-*   **Outputs:** A rasterized image of the voxel world.
++### Inputs and Outputs
++**Inputs:**
++- A set of block definitions (shapes) with associated textures and properties [S1, unofficial].
++- A world grid composed of chunks, where each chunk contains a local array of block IDs [S1, S2, unofficial].
++- Camera matrices (View, Projection) and frustum planes [S1, unofficial].
+ 
+-**Data Structures:**
+-1.  **Texture Array:** A `Texture2DArray` with dimensions $maxX \times maxY \times N$, where $N$ is the number of unique textures. Format is typically RGBA. Filters are set to Nearest [S1, unofficial].
+-2.  **Condensed Shapes Buffer (SSBO):** A flat array of size $S \times V_{max}$, where $S$ is the number of unique shapes and $V_{max}$ is the maximum vertex count across all input shapes. Vertices are padded with a default vertex if a shape has fewer than $V_{max}$ vertices. This buffer is bound at a specific SSBO binding point (e.g., index 3) [S1, unofficial].
+-3.  **Instance Buffer (SSBO):** A large buffer containing `ShapeInstance` structs. Each `ShapeInstance` contains fields for texture index, tint color, shape ID, and rotation. The memory layout is determined by `Marshal.OffsetOf<ShapeInstance>` for each field [S1, unofficial].
+-4.  **Chunk Data:** A logical grouping of instances. Each chunk has a 3D position and a reference to its region in the SSBO.
++**Outputs:**
++- Rasterized pixels on the screen representing the voxel world [S1, S2, unofficial].
+ 
+-**Parameters:**
+-*   `chunkLength`: Width/height/depth of a single chunk in blocks. Typical value: 33 [S1, unofficial].
+-*   `vramBufferRegionSize`: VRAM batch size in bytes reserved for SSBO regions. Must be $\ge$ `chunkVolumeSize` and $\le$ `MaxShaderStorageBlockSize` [S1, unofficial].
++### Data Structures
+ 
+-**Steps:**
++**1. ShapeInstance (SSBO Binding Point 3)**
++Stores per-shape metadata. Fields include texture index, tint color, shape ID, and rotation [S1, unofficial]. The memory size is fixed per shape type, calculated via `ShapeInstance.MemorySize` [S1, unofficial].
+ 
+-1.  **Initialize Texture Array:**
+-    *   Determine $maxX$ and $maxY$ from all input images.
+-    *   Create a `Texture2DArray` with dimensions $maxX \times maxY \times N$ (where $N$ is the number of textures).
+-    *   Set minification/magnification filters to `Nearest` and wrap mode to `Repeat` [S1, unofficial].
+-    *   Upload each texture $i$ using `GL.TexSubImage3D` at the z-offset $i$ [S1, unofficial].
++**2. PackedVertex (uint32)**
++A compact representation of a vertex stored in the SSBO. Layout:
++- Bits 0-4 (5 bits): X coordinate (relative to block) [S2, unofficial].
++- Bits 5-9 (5 bits): Z coordinate (relative to block) [S2, unofficial].
++- Bits 10-20 (11 bits): Y coordinate (relative to block) [S2, unofficial].
++- Bits 21-23 (3 bits): Face ID [S2, unofficial].
++- Bits 24-29 (6 bits): Texture Index [S2, unofficial].
+ 
+-2.  **Condense Shapes:**
+-    *   Find $V_{max} = \max_{s} (\text{vertices}(s).\text{length})$ across all shapes.
+-    *   Allocate a flat array `condensedShapes` of size $S \times V_{max}$.
+-    *   For each shape $s$ and vertex index $v$:
+-        *   If $v < \text{vertices}(s).\text{length}$, copy `vertices(s)[v]`.
+-        *   Else, assign a default `Vertex()` [S1, unofficial].
+-    *   Upload `condensedShapes` to the SSBO at the designated binding point [S1, unofficial].
++**3. DrawIndirectBuffer Command**
++Stores rendering commands for indirect drawing [S2, unofficial]:
++- `count`: Number of vertices to draw (`faceCount * 6`) [S2, unofficial].
++- `instanceCount`: Always 1 [S2, unofficial].
++- `first`: Offset in the SSBO (in vertices) (`offset * 6`) [S2, unofficial].
++- `baseInstance`: Chunk index [S2, unofficial].
+ 
+-3.  **Register Chunks (SSBO Population):**
+-    *   Calculate `chunkVolumeSize` = $chunkLength^3$.
+-    *   For each chunk of shapes:
+-        *   Calculate required size = $\text{shapes.Length} \times \text{ShapeInstance.MemorySize}$.
+-        *   If the current SSBO region cannot fit the chunk, allocate a new SSBO region of size `vramBufferRegionSize` [S1, unofficial].
+-        *   Write the `ShapeInstance` data to the SSBO at the current `BytePointer`.
+-        *   Store `ChunkRenderingData` including `RegionInstanceIndex` = $\text{index} / \text{ShapeInstance.MemorySize}$ [S1, unofficial].
+-        *   Advance `BytePointer` by the chunk size [S1, unofficial].
++**4. MegaSSBO (Free List Management)**
++Manages memory allocation within the large SSBO using a free list [S2, unofficial].
++- `FreeList`: List of `{offset, size}` pairs representing unused regions [S2, unofficial].
++- `Allocate(faceCount)`: First-fit algorithm to find a contiguous block of sufficient size [S2, unofficial].
++- `Release(offset, faceCount)`: Returns memory to the free list and merges adjacent free blocks [S2, unofficial].
+ 
+-4.  **Render Pass:**
+-    *   Compute view and projection matrices.
+-    *   Extract frustum planes from the view matrix [S1, unofficial].
+-    *   For each region (SSBO batch):
+-        *   Bind the SSBO.
+-        *   For each chunk in the region:
+-            *   Calculate `offsetPos` = $\text{chunk.Position} - \text{camera.Position}$.
+-            *   Compute `chunkLength` vector (e.g., $[chunkLength, chunkLength, chunkLength]$).
+-            *   **Frustum Cull:** If `!MatrixPlanes.IsBoxInFrustum(planes, offsetPos, offsetPos + chunkLength)`, skip this chunk [S1, unofficial].
+-            *   Set `chunkPos` uniform.
+-            *   Issue draw call: `GL.DrawArraysInstancedBaseInstance(Triangles, 0, verticesPerShape, chunk.Shapes.Length, chunk.RegionInstanceIndex)` [S1, unofficial].
++### Steps
+ 
+-**Pseudocode:**
++1. **Initialize Texture Array**:
++   - Determine `maxX` and `maxY` from all input textures [S1, unofficial].
++   - Create a `Texture2DArray` with dimensions `maxX`, `maxY`, and `numTextures` [S1, unofficial].
++   - Set min/mag filters to `Nearest` and wrap to `Repeat` [S1, unofficial].
++   - Upload each texture `i` using `GL.TexSubImage3D` at z-offset `i` [S1, unofficial].
+ 
+-```python
+-def render_instanced_voxels(camera, chunks, ssbo_region, vram_buffer_size, chunk_length):
+-    """
+-    Renders voxel chunks using instanced drawing with frustum culling.
+-    """
+-    # 1. Setup Frustum
+-    view_matrix = camera.get_view_matrix()
+-    projection_matrix = camera.get_projection_matrix()
+-    frustum_planes = extract_frustum_planes(view_matrix, projection_matrix)
+-    
+-    # 2. Bind Shader and Texture Array
+-    shader.bind()
+-    texture_array.bind(unit=0)
+-    ssbo_region.bind(unit=3) # Assuming binding point 3 for shapes/instances
+-    
+-    # 3. Iterate Chunks
+-    for chunk in chunks:
+-        # Calculate world-space bounding box relative to camera
+-        chunk_min = chunk.position
+-        chunk_max = chunk.position + vec3(chunk_length, chunk_length, chunk_length)
+-        
+-        # Transform to camera space for culling
+-        cam_min = view_matrix * vec4(chunk_min, 1.0)
+-        cam_max = view_matrix * vec4(chunk_max, 1.0)
+-        
+-        # Simple AABB vs Frustum Plane check (pseudo-function)
+-        if not is_box_in_frustum(frustum_planes, cam_min, cam_max):
+-            continue
+-            
+-        # Set uniforms
+-        shader.set_uniform("chunk_pos", chunk.position)
+-        
+-        # Draw Instanced
+-        # base_vertex: 0
+-        # vertex_count: vertices_per_shape (from condensed shapes)
+-        # instance_count: chunk.shape_count
+-        # base_instance: chunk.region_instance_index
+-        gl_draw_arrays_instanced_base_instance(
+-            primitive_type=TRIANGLES,
+-            first=0,
+-            count=chunk.vertices_per_shape,
+-            instance_count=chunk.shape_count,
+-            base_instance=chunk.region_instance_index
+-        )
+-```
++2. **Condense Shapes**:
++   - Find `verticesPerShape` = maximum vertex count across all input shapes [S1, unofficial].
++   - Allocate a flat array `condensedShapes` of size `numShapes * verticesPerShape` [S1, unofficial].
++   - For each shape `s` and vertex `v`:
++     - If `v < shape[s].Vertices.Length`, copy `shape[s].Vertices[v]` [S1, unofficial].
++     - Else, assign a default `Vertex()` (padding) [S1, unofficial].
++   - Upload `condensedShapes` to SSBO at binding point 3 [S1, unofficial].
+ 
+-**Edge Cases and Pitfalls:**
+-*   **VRAM Limits:** `vramBufferRegionSize` must not exceed the hardware's `MaxShaderStorageBlockSize`. If it does, an exception must be thrown [S1, unofficial].
+-*   **Alignment:** `vramBufferRegionSize` must be $\ge$ `chunkVolumeSize`. If less, an exception must be thrown [S1, unofficial].
+-*   **Waste:** If `vramBufferRegionSize` is not a multiple of `chunkVolumeSize`, the remaining bytes are wasted: $\text{waste} = \text{vramBufferRegionSize} \pmod{\text{chunkVolumeSize}}$ [S1, unofficial].
+-*   **Vertex Padding:** Shapes with fewer vertices than $V_{max}$ must be explicitly padded with a default vertex to maintain the flat array layout [S1, unofficial].
++3. **Register Chunks (SSBO Allocation)**:
++   - For each chunk, calculate `size = shapes.Length * ShapeInstance.MemorySize` [S1, unofficial].
++   - Check if `vramBufferRegionSize` (total SSBO size) is valid:
++     - Must be `>= chunkVolumeSize` [S1, unofficial].
++     - Must be `<= MaxShaderStorageBlockSize` [S1, unofficial].
++     - If not a multiple of `chunkVolumeSize`, waste `vramBufferRegionSize % chunkVolumeSize` bytes [S1, unofficial].
++   - Allocate space in the MegaSSBO using `Allocate(size)` [S2, unofficial].
++   - Write shape instances to the SSBO at the allocated offset [S1, unofficial].
++   - Store `ChunkRenderingData` with `RegionInstanceIndex = offset / ShapeInstance.MemorySize` [S1, unofficial].
++   - Advance the free list pointer [S1, unofficial].
+ 
+-## Subtopics
++4. **Render Pass**:
++   - Compute View and Projection matrices [S1, unofficial].
++   - Extract frustum planes from the View matrix [S1, unofficial].
++   - For each chunk:
++     - Bind the SSBO [S1, unofficial].
++     - Calculate `offsetPos = chunk.Position - cam.Position` [S1, unofficial].
++     - Cull if `!MatrixPlanes.IsBoxInFrustum(planes, offsetPos, offsetPos + Vector3.One * chunkLength)` [S1, unofficial].
++     - Set `chunkPos` uniform [S1, unofficial].
++     - Call `GL.DrawArraysInstancedBaseInstance(Triangles, 0, verticesPerShape, chunk.Shapes.Length, chunk.RegionInstanceIndex)` [S1, unofficial].
+ 
+-### Chunk-Based Spatial Partitioning
+-*   **What it is:** Grouping voxel instances into fixed-size 3D blocks (chunks) to manage memory and culling.
+-*   **Differentiation:** Unlike flat instance lists, it allows for coarse-grained frustum culling at the chunk level, reducing draw call overhead for distant or occluded regions.
+-*   **When to choose:** Large worlds with sparse voxel distribution where many chunks are outside the view frustum.
+-*   **Link:** [Chunk-Based Spatial Partitioning](link-to-chunk-partitioning.md)
++### Vertex Shader Logic
++- Unpack face data from the SSBO using `gl_VertexID` to determine face and corner index [S2, unofficial].
++- Decode chunk position from `gl_BaseInstance`:
++  - `chunkX = (base & 0xFFFF) - 32768` [S2, unofficial].
++  - `chunkZ = ((base >> 16) & 0xFFFF) - 32768` [S2, unofficial].
++- Compute world position: `chunkWorldPos + blockPos + corner`, where `blockPos` is `(bx, by, bz)` and `corner` is from `faceCorners[faceId][cornerIndex]` [S2, unofficial].
++- Apply face-specific lighting from `faceLights` array [S2, unofficial].
+ 
+-### SSBO-Based Instance Management
+-*   **What it is:** Using Shader Storage Buffer Objects to hold large arrays of instance data (position, rotation, texture ID) accessible by shaders.
+-*   **Differentiation:** Provides higher bandwidth and larger capacity than traditional Uniform Buffers or Texture Buffers for instance data.
+-*   **When to choose:** When the number of instances exceeds the limits of uniform buffers or when dynamic updates to instance data are required.
+-*   **Link:** [SSBO-Based Instance Management](link-to-ssbo-instancing.md)
++### Parameters
++- `chunkLength`: Width/height/depth of a single chunk in blocks. Typical value: 33 [S1, unofficial].
++- `vramBufferRegionSize`: VRAM batch size in bytes for SSBO regions. Must be `>= chunkVolumeSize` and `<= MaxShaderStorageBlockSize` [S1, unofficial].
++- `faceLights`: Lighting coefficients per face. +X=0.6, -X=0.6, +Y=1.0, -Y=0.3, +Z=0.8, -Z=0.8 [S2, unofficial].
++- `u_AtlasTileSize`: Uniform `(1.0/atlasWidth, 1.0/atlasHeight)` [S2, unofficial].
++
++### Edge Cases and Pitfalls
++- **VRAM Limits**: `vramBufferRegionSize` must not exceed `MaxShaderStorageBlockSize` [S1, unofficial].
++- **Memory Waste**: If `vramBufferRegionSize` is not a multiple of `chunkVolumeSize`, unused bytes are wasted [S1, unofficial].
++- **Boundary Access**: When accessing adjacent chunks for culling, handle boundary conditions by returning air (0) if the neighbor chunk does not exist [S2, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Culling is $O(C)$ where $C$ is the number of chunks. Rendering is $O(I)$ where $I$ is the number of visible instances, but batched into fewer draw calls per chunk.
+-*   **Memory Complexity:** $O(V \cdot S + I \cdot M)$, where $V$ is max vertices per shape, $S$ is number of shapes, $I$ is total instances, and $M$ is memory per instance. VRAM usage is bounded by `vramBufferRegionSize`.
+-*   **Measured Performance:** Performance scales with the number of visible chunks. Frustum culling significantly reduces draw calls in large scenes.
+-*   **Strengths:** Efficient culling, high instance count support, flexible shape definition via condensed buffers.
+-*   **Limitations:** VRAM fragmentation if `vramBufferRegionSize` is not aligned with chunk sizes; overhead of managing SSBO regions.
+-*   **When to use:** Large-scale voxel worlds (e.g., Minecraft-like) requiring efficient culling and dynamic updates.
+-*   **When not:** Small scenes where overhead of chunk management outweighs benefits; hardware with small `MaxShaderStorageBlockSize`.
++- **Time Complexity**: O(N) for chunk registration, where N is the number of chunks. Rendering is O(M) where M is the number of visible chunks.
++- **Memory Complexity**: O(V) for the SSBO, where V is the total number of voxels in the batched chunks.
++- **Strengths**: Efficient culling at the chunk level reduces overdraw. Indirect rendering allows dynamic updates without CPU-side buffer rebuilds.
++- **Limitations**: Fixed chunk size may lead to memory waste if not aligned. Complex shapes require pre-condensation.
+ 
+ ## Background
+-The technique is derived from the "Cubic-Grid Voxel Renderer" project by rarefushion, which demonstrates a GPU-driven approach to rendering voxel worlds using SSBOs and instancing [S1, unofficial]. It builds upon the principles of buffer-based instancing [6501-buffer-based-instancing-ssbo-instance-buffers.md] by adding spatial hierarchy and explicit VRAM management.
++The technique is implemented in open-source voxel engines such as `Cubic-Grid_Voxel_Renderer` [S1, unofficial] and `VoxelEngine` [S2, unofficial]. It leverages modern OpenGL features like SSBOs and indirect drawing to achieve high performance in voxel-based applications.
+ 
+ ## Sources
+-[S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)+[S1] rarefushion/Cubic-Grid_Voxel_Renderer, https://github.com/rarefushion/Cubic-Grid_Voxel_Renderer, fetched 2026-10-27 (unofficial)
++[S2] adrienlabayle/VoxelEngine, https://github.com/adrienlabayle/VoxelEngine, fetched 2026-10-27 (unofficial)

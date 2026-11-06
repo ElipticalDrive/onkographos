@@ -1,0 +1,2035 @@
+# OBJ Solidizer And Voxelizer
+Voxelizes OBJ geometry (vertices and faces) by interpreting it as a boundary of solid geometry (brushes or portals).
+
+Makes use of syoyo's tinyobjloader for opening OBJ files: https://github.com/syoyo/tinyobjloader
+
+This project was born out of the idea of recreating a map from a [portal engine](http://en.wikipedia.org/wiki/Portal_rendering "Wikipedia: Portal rendering") based game (Blade Of Darkness) in Minecraft (a sandbox game with a voxel-like landscape); however, it can be used for voxelizing any OBJ geometry in general. In the future, I'll provide a small library for reading the output files of OBJ Solidizer And Voxelizer.
+
+Current status: infinitely deep alpha. Doesn't actually do what it's supposed to do (yet).
+
+*"I'm a solidizer*  
+*Object voxelizer"*  
+� Lolzo, upon seeing the project name
+
+## Roadmap
+
+Short-term plans:
+- Make the working proof-of-concept version. Barely any optimizations.
+- Fix the disastrously long operation of writing the OBJ file.
+
+Medium-term plans:
+- Implement multithreading
+- Add various voxelization parameters
+- Heavily optimize the engine:
+ - More compact storage of voxel data
+ - Algorithm optimizations
+ - Use octrees for storing / accessing geometry - 
+- Use std::vectors wherever possible
+
+Long-term plans:
+- Optimize the cube representation of the voxelized geometry
+- Export the results to a Minecraft world
+- Visualization of the process (or input / output data)
+- Make a good-looking, user-friendly GUI
+
+### src/Engine.cpp
+```
+#include "Engine.h"
+
+Engine::Engine()
+{
+	//
+}
+
+Engine::~Engine()
+{
+	//
+}
+
+void Engine::initialize()
+{
+	geometryData = new OBJGeometryData();
+	voxelizer = new Voxelizer();
+}
+
+DWORD WINAPI loadFileWrapper(LPVOID lpParameter)
+{
+	PtrAndString * ptrAndString = (PtrAndString *)lpParameter;
+	ptrAndString->objGeometryData->loadFile(ptrAndString->filenameString);
+	return 0;
+}
+
+void Engine::loadFile(UnicodeString filename)
+{
+	PtrAndString * ptrAndString = new PtrAndString;
+	ptrAndString->objGeometryData = geometryData;
+	ptrAndString->filenameString = filename;
+	CreateThread(NULL, 0, loadFileWrapper, (void *)ptrAndString, 0, NULL);
+}
+
+DWORD WINAPI saveFileWrapper(LPVOID lpParameter)
+{
+	PtrAndString * ptrAndString = (PtrAndString *)lpParameter;
+	ptrAndString->objGeometryData->saveFile(ptrAndString->filenameString);
+	return 0;
+}
+
+void Engine::saveFile(UnicodeString filename)
+{
+	PtrAndString * ptrAndString = new PtrAndString;
+	ptrAndString->objGeometryData = geometryData;
+	ptrAndString->filenameString = filename;
+	CreateThread(NULL, 0, saveFileWrapper, (void *)ptrAndString, 0, NULL);
+}
+
+void Engine::initVoxelizer()
+{
+	voxelizer->setGeometryData(geometryData);
+}
+
+DWORD WINAPI voxelizeWrapper(LPVOID lpParameter)
+{
+	Voxelizer * pVoxelizer = (Voxelizer *)lpParameter;
+	pVoxelizer->process();
+}
+
+void Engine::voxelize()
+{
+	CreateThread(NULL, 0, voxelizeWrapper, (void *)voxelizer, 0, NULL);
+}
+
+void Engine::createOptimalGrid(float desiredStep)
+{
+	voxelizer->initVoxelGrid(voxelizer->computeOptimalGridDimensions(desiredStep));
+}
+
+void Engine::saveVoxelsAsCubeGeometry(UnicodeString filename/*, OperationStatus * progressTracking*/)
+{
+	OBJGeometryData * outputGeometryData = new OBJGeometryData();
+	//progressTracking = &(outputGeometryData->saveFileStatus);
+	outputGeometryData->generateFromVoxelGrid(voxelizer->voxelGrid);
+	outputGeometryData->saveFile(filename);
+	//delete outputGeometryData;
+}
+```
+
+### src/Engine.h
+```
+#ifndef EngineH
+#define EngineH
+
+#include "OBJGeometryData.h"
+#include "Voxelizer.h"
+
+class Engine
+{
+public:
+	Engine();
+	~Engine();
+
+	void initialize();
+
+	OBJGeometryData * geometryData;
+	Voxelizer * voxelizer;
+
+	void loadFile(UnicodeString filename);
+	void saveFile(UnicodeString filename);
+
+	void initVoxelizer();
+
+	void createOptimalGrid(float desiredStep);
+
+	void voxelize();
+
+	void saveVoxelsAsCubeGeometry(UnicodeString filename/*, OperationStatus * progressTracking*/);
+};
+
+#endif
+```
+
+### src/Face.cpp
+```
+#include "Face.h"
+```
+
+### src/Face.h
+```
+#ifndef FaceH
+#define FaceH
+
+class Face
+{
+public:
+	Face() {};
+	~Face() {};
+
+	int v1;
+	int v2;
+	int v3;
+};
+
+#endif
+```
+
+### src/FileIO.cpp
+```
+#include "FileIO.h"
+#include "vcl.h"
+
+namespace fileio
+{
+	void writeFile(UnicodeString filename, UnicodeString content)
+	{
+		TMemo * memo = new TMemo((HWND)NULL);
+		memo->Text = content;
+		memo->Lines->SaveToFile(filename);
+	}
+}
+```
+
+### src/FileIO.h
+```
+#ifndef FileIOH
+#define FileIOH
+
+#include <vcl.h>
+
+/*
+
+File input / output operations are generally platform dependent,
+so I've moved everything related to them into a separate file
+(and separate namespace).
+
+*/
+
+namespace fileio
+{
+	void writeFile(UnicodeString filename, UnicodeString content);
+}
+
+#endif
+```
+
+### src/MainForm.cpp
+```
+//---------------------------------------------------------------------------
+
+#include <vcl.h>
+#pragma hdrstop
+
+#include "MainForm.h"
+#include "Engine.h"
+
+//---------------------------------------------------------------------------
+#pragma package(smart_init)
+#pragma resource "*.dfm"
+TForm1 *Form1;
+
+Engine * engine;
+//---------------------------------------------------------------------------
+__fastcall TForm1::TForm1(TComponent* Owner)
+	: TForm(Owner)
+{
+	engine = new Engine();
+	engine->initialize();
+}
+//---------------------------------------------------------------------------
+void __fastcall TForm1::ButtonLoadFileClick(TObject *Sender)
+{
+	engine->loadFile(Form1->EditInputOBJFile->Text);
+	Form1->TimerTrackLoadFileOperationStatus->Enabled = true;
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::TimerTrackLoadFileOperationStatusTimer(TObject *Sender)
+{
+	if(engine->geometryData->loadFileStatus.status != 0)
+	{
+		Form1->TimerTrackLoadFileOperationStatus->Enabled = false;
+		Form1->LabelOBJInformationAmountOfVertices->Caption = "Amount of vertices: " + UnicodeString(engine->geometryData->spatialInformation.verticesCount);
+		Form1->LabelOBJInformationAmountOfFaces->Caption = "Amount of triangles: " + UnicodeString(engine->geometryData->spatialInformation.facesCount);
+		Form1->LabelOBJInformationXMin->Caption = "X min: " + UnicodeString(engine->geometryData->spatialInformation.xMin);
+		Form1->LabelOBJInformationXMax->Caption = "X max: " + UnicodeString(engine->geometryData->spatialInformation.xMax);
+		Form1->LabelOBJInformationYMin->Caption = "Y min: " + UnicodeString(engine->geometryData->spatialInformation.yMin);
+		Form1->LabelOBJInformationYMax->Caption = "Y max: " + UnicodeString(engine->geometryData->spatialInformation.yMax);
+		Form1->LabelOBJInformationZMin->Caption = "Z min: " + UnicodeString(engine->geometryData->spatialInformation.zMin);
+		Form1->LabelOBJInformationZMax->Caption = "Z max: " + UnicodeString(engine->geometryData->spatialInformation.zMax);
+	}
+	Form1->LabelOpenFileCurrentOperation->Caption = "Current operation: " + engine->geometryData->loadFileStatus.currentOperationName;
+	Form1->ProgressBarOpenFileCurrentOperation->Position = (int)(engine->geometryData->loadFileStatus.currentOperationProgress * 100.0f);
+	Form1->ProgressBarOpenFileOverallProgress->Position = (int)(engine->geometryData->loadFileStatus.overallProgress * 100.0f);
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::ButtonResaveFileClick(TObject *Sender)
+{
+	engine->saveFile(Form1->EditResavedOBJFile->Text);
+	Form1->TimerTrackResaveFileOperationStatus->Enabled = true;
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::TimerTrackResaveFileOperationStatusTimer(TObject *Sender)
+{
+	if(engine->geometryData->saveFileStatus.status != 0)
+	{
+		Form1->TimerTrackResaveFileOperationStatus->Enabled = false;
+	}
+	Form1->LabelResaveFileCurrentOperation->Caption = "Current operation: " + engine->geometryData->saveFileStatus.currentOperationName;
+	Form1->ProgressBarResaveFileCurrentOperation->Position = (int)(engine->geometryData->saveFileStatus.currentOperationProgress * 100.0f);
+	Form1->ProgressBarResaveFileOverallProgress->Position = (int)(engine->geometryData->saveFileStatus.overallProgress * 100.0f);
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::ButtonInitVoxelizerClick(TObject *Sender)
+{
+	engine->initVoxelizer();
+
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::ButtonSetOptimalGridClick(TObject *Sender)
+{
+	engine->createOptimalGrid(0.2f);
+
+	Dimensions optimalDimensions = engine->voxelizer->getVoxelGridDimensions();
+	Form1->LabelGridDimensionsStartX->Caption = UnicodeString(optimalDimensions.x.start);
+	Form1->LabelGridDimensionsCountX->Caption = UnicodeString(optimalDimensions.x.count);
+	Form1->LabelGridDimensionsEndX->Caption = UnicodeString(optimalDimensions.x.start + optimalDimensions.x.step * (float)(optimalDimensions.x.count - 1));
+	Form1->LabelGridDimensionsStartY->Caption = UnicodeString(optimalDimensions.y.start);
+	Form1->LabelGridDimensionsCountY->Caption = UnicodeString(optimalDimensions.y.count);
+	Form1->LabelGridDimensionsEndY->Caption = UnicodeString(optimalDimensions.y.start + optimalDimensions.y.step * (float)(optimalDimensions.y.count - 1));
+	Form1->LabelGridDimensionsStartZ->Caption = UnicodeString(optimalDimensions.z.start);
+	Form1->LabelGridDimensionsCountZ->Caption = UnicodeString(optimalDimensions.z.count);
+	Form1->LabelGridDimensionsEndZ->Caption = UnicodeString(optimalDimensions.z.start + optimalDimensions.z.step * (float)(optimalDimensions.z.count - 1));
+
+	Form1->LabelGridStep->Caption = "Grid step = " + UnicodeString(optimalDimensions.x.step);
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::ButtonRandomizeClick(TObject *Sender)
+{
+	engine->voxelize();
+	Form1->TimerTrackProgressOperationStatus->Enabled = true;
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::TimerTrackProgressOperationStatusTimer(TObject *Sender)
+{
+	if(engine->voxelizer->processStatus.status != 0)
+	{
+        Form1->TimerTrackProgressOperationStatus->Enabled = false;
+	}
+	Form1->LabelProcessCurrentOperation->Caption = "Current operation: " + engine->voxelizer->processStatus.currentOperationName;
+	Form1->ProgressBarProcessCurrentOperation->Position = (int)(engine->voxelizer->processStatus.currentOperationProgress * 100.0f);
+	Form1->ProgressBarProcessOverallProgress->Position = (int)(engine->voxelizer->processStatus.overallProgress * 100.0f);
+}
+//---------------------------------------------------------------------------
+
+void __fastcall TForm1::ButtonOutputCubesOBJFileClick(TObject *Sender)
+{
+	engine->saveVoxelsAsCubeGeometry(Form1->EditOutputCubesOBJFile->Text);
+}
+//---------------------------------------------------------------------------
+```
+
+### src/MainForm.h
+```
+//---------------------------------------------------------------------------
+
+#ifndef MainFormH
+#define MainFormH
+//---------------------------------------------------------------------------
+#include <Classes.hpp>
+#include <Controls.hpp>
+#include <StdCtrls.hpp>
+#include <Forms.hpp>
+#include <ExtCtrls.hpp>
+#include <ComCtrls.hpp>
+//---------------------------------------------------------------------------
+class TForm1 : public TForm
+{
+__published:	// IDE-managed Components
+	TTimer *TimerTrackResaveFileOperationStatus;
+	TGroupBox *GroupBoxLoadOBJFile;
+	TButton *ButtonLoadFile;
+	TEdit *EditInputOBJFile;
+	TLabel *LabelInputOBJFile;
+	TLabel *LabelOpenFileCurrentOperation;
+	TProgressBar *ProgressBarOpenFileCurrentOperation;
+	TLabel *LabelOpenFileOverallProgress;
+	TProgressBar *ProgressBarOpenFileOverallProgress;
+	TTimer *TimerTrackLoadFileOperationStatus;
+	TGroupBox *GroupBoxResaveOBJFile;
+	TLabel *LabelResavedOBJFile;
+	TEdit *EditResavedOBJFile;
+	TButton *ButtonResaveFile;
+	TLabel *LabelResaveFileCurrentOperation;
+	TProgressBar *ProgressBarResaveFileCurrentOperation;
+	TLabel *LabelResaveFileOverallProgress;
+	TProgressBar *ProgressBarResaveFileOverallProgress;
+	TGroupBox *GroupBoxOBJGeometryInformation;
+	TLabel *LabelOBJInformationAmountOfVertices;
+	TLabel *LabelOBJInformationAmountOfFaces;
+	TLabel *LabelOBJInformationXMin;
+	TLabel *LabelOBJInformationXMax;
+	TLabel *LabelOBJInformationYMin;
+	TLabel *LabelOBJInformationYMax;
+	TLabel *LabelOBJInformationZMin;
+	TLabel *LabelOBJInformationZMax;
+	TGroupBox *GroupBoxVoxelizationSettings;
+	TButton *ButtonInitVoxelizer;
+	TLabel *LabelGridDimensionsStart;
+	TLabel *LabelGridDimensionsCount;
+	TLabel *LabelGridDimensionsEnd;
+	TLabel *LabelGridDimensionsX;
+	TLabel *LabelGridDimensionsY;
+	TLabel *LabelGridDimensionsZ;
+	TLabel *LabelGridDimensionsStartX;
+	TLabel *LabelGridDimensionsStartY;
+	TLabel *LabelGridDimensionsStartZ;
+	TLabel *LabelGridDimensionsCountX;
+	TLabel *LabelGridDimensionsCountY;
+	TLabel *LabelGridDimensionsCountZ;
+	TLabel *LabelGridDimensionsEndX;
+	TLabel *LabelGridDimensionsEndY;
+	TLabel *LabelGridDimensionsEndZ;
+	TLabel *LabelGridStep;
+	TLabel *LabelGridDimensions;
+	TButton *ButtonSetOptimalGrid;
+	TGroupBox *GroupBoxProcess;
+	TButton *ButtonRandomize;
+	TLabel *LabelProcessCurrentOperation;
+	TProgressBar *ProgressBarProcessCurrentOperation;
+	TLabel *LabelProcessOverallProgress;
+	TProgressBar *ProgressBarProcessOverallProgress;
+	TTimer *TimerTrackProgressOperationStatus;
+	TGroupBox *GroupBoxOutput;
+	TLabel *LabelOutputCubesOBJFileFileName;
+	TEdit *EditOutputCubesOBJFile;
+	TButton *ButtonOutputCubesOBJFile;
+	TLabel *LabelOutputCubesOBJFileCurrentOperation;
+	TProgressBar *ProgressBarOutputCubesOBJFileCurrentOperation;
+	TLabel *LabelOutputCubesOBJFileOverallProgress;
+	TProgressBar *ProgressBarOutputCubesOBJFileOverallProgress;
+	TTimer *TimerTrackOutputOperationStatus;
+	TEdit *EditGithubURL;
+	void __fastcall ButtonLoadFileClick(TObject *Sender);
+	void __fastcall TimerTrackLoadFileOperationStatusTimer(TObject *Sender);
+	void __fastcall TimerTrackResaveFileOperationStatusTimer(TObject *Sender);
+	void __fastcall ButtonResaveFileClick(TObject *Sender);
+	void __fastcall ButtonInitVoxelizerClick(TObject *Sender);
+	void __fastcall ButtonSetOptimalGridClick(TObject *Sender);
+	void __fastcall ButtonRandomizeClick(TObject *Sender);
+	void __fastcall TimerTrackProgressOperationStatusTimer(TObject *Sender);
+	void __fastcall ButtonOutputCubesOBJFileClick(TObject *Sender);
+private:	// User declarations
+public:		// User declarations
+	__fastcall TForm1(TComponent* Owner);
+};
+//---------------------------------------------------------------------------
+extern PACKAGE TForm1 *Form1;
+//---------------------------------------------------------------------------
+#endif
+```
+
+### src/OBJGeometryData.cpp
+```
+#include "OBJGeometryData.h"
+
+OBJGeometryData::OBJGeometryData()
+{
+	filename = "";
+}
+
+OBJGeometryData::~OBJGeometryData()
+{
+	//
+}
+
+void OBJGeometryData::loadFile(UnicodeString OBJFilename)
+{
+	std::vector<tinyobj::shape_t> shapes;
+	std::vector<tinyobj::material_t> materials;
+
+	loadFileStatus.currentOperationName = "Loading the file using Tiny OBJ Loader...";
+	loadFileStatus.currentOperationProgress = 0.5f;
+	loadFileStatus.overallProgress = 0.0f;
+	loadFileStatus.status = 0;
+
+	// Switching to the standard C locale for numerals (you'll be surprised
+	// what (and why) can happen if you don't!)
+	setlocale(LC_NUMERIC, "C");
+	std::string error = tinyobj::LoadObj(shapes, materials, OBJFilename.t_str());
+	// Switching back to system default locale for numerals
+	setlocale(LC_NUMERIC, "");
+
+	if(!error.empty())
+	{
+		loadFileStatus.currentOperationName = "ERROR! Tiny OBJ Loader's message: " + UnicodeString(error.c_str());
+		loadFileStatus.currentOperationProgress = 0.0f;
+		loadFileStatus.overallProgress = 0.0f;
+		loadFileStatus.status = 2;
+	}
+	else
+	{
+		loadFileStatus.currentOperationName = "Counting vertices and indices...";
+		loadFileStatus.currentOperationProgress = 0.5f;
+		loadFileStatus.overallProgress = 0.0f;
+
+		spatialInformation.verticesCount = 0;
+		for(size_t s = 0; s < shapes.size(); ++s)
+		{
+			spatialInformation.verticesCount += shapes[s].mesh.positions.size() / 3;
+		}
+		vertices = new OneDimensionalArray<Vertex>(spatialInformation.verticesCount);
+
+		spatialInformation.facesCount = 0;
+		for(size_t s = 0; s < shapes.size(); ++s)
+		{
+			spatialInformation.facesCount += shapes[s].mesh.indices.size() / 3;
+		}
+		faces = new OneDimensionalArray<Face>(spatialInformation.facesCount);
+
+		loadFileStatus.currentOperationName = "Parsing vertices...";
+
+		double dblCurrentElapsedIterations = 0.0;
+		double dblCurrentTotalIterations = (double)(spatialInformation.verticesCount);
+		double dblOverallElapsedIterations = 0.0;
+		double dblOverallTotalIterations = (double)(2 * spatialInformation.verticesCount + spatialInformation.facesCount);
+
+		for(size_t s = 0; s < shapes.size(); ++s)
+		{
+			int verticesIndexOffset = 0;
+			int currentAddedShape = 0;
+			while(currentAddedShape < (int)s)
+			{
+				verticesIndexOffset += shapes[currentAddedShape].mesh.positions.size() / 3;
+				currentAddedShape++;
+            }
+			for(size_t v = 0; v < shapes[s].mesh.positions.size() / 3; ++v)
+			{
+				vertices->getElement(verticesIndexOffset + v)->x =
+				shapes[s].mesh.positions[v * 3 + 0];
+				vertices->getElement(verticesIndexOffset + v)->y =
+				shapes[s].mesh.positions[v * 3 + 1];
+				vertices->getElement(verticesIndexOffset + v)->z =
+				shapes[s].mesh.positions[v * 3 + 2];
+
+				dblCurrentElapsedIterations += 1.0;
+				dblOverallElapsedIterations += 1.0;
+				loadFileStatus.currentOperationProgress = (float)(dblCurrentElapsedIterations / dblCurrentTotalIterations);
+				loadFileStatus.overallProgress = (float)(dblOverallElapsedIterations / dblOverallTotalIterations);
+			}
+		}
+
+		dblCurrentElapsedIterations = 0.0;
+		dblCurrentTotalIterations = (double)(spatialInformation.facesCount);
+
+		loadFileStatus.currentOperationName = "Parsing faces...";
+
+		for(size_t s = 0; s < shapes.size(); ++s)
+		{
+			int verticesIndexOffset = 0;
+			int facesIndexOffset = 0;
+			int currentAddedShape = 0;
+			while(currentAddedShape < (int)s)
+			{
+				verticesIndexOffset += shapes[currentAddedShape].mesh.positions.size() / 3;
+				facesIndexOffset += shapes[currentAddedShape].mesh.indices.size() / 3;
+				currentAddedShape++;
+			}
+			for(size_t i = 0; i < shapes[s].mesh.indices.size() / 3; ++i)
+			{
+				faces->getElement(facesIndexOffset + i)->v1 = verticesIndexOffset + shapes[s].mesh.indices[i * 3 + 0];
+				faces->getElement(facesIndexOffset + i)->v2 = verticesIndexOffset + shapes[s].mesh.indices[i * 3 + 1];
+				faces->getElement(facesIndexOffset + i)->v3 = verticesIndexOffset + shapes[s].mesh.indices[i * 3 + 2];
+
+				dblCurrentElapsedIterations += 1.0;
+				dblOverallElapsedIterations += 1.0;
+				loadFileStatus.currentOperationProgress = (float)(dblCurrentElapsedIterations / dblCurrentTotalIterations);
+				loadFileStatus.overallProgress = (float)(dblOverallElapsedIterations / dblOverallTotalIterations);
+			}
+		}
+
+		dblCurrentElapsedIterations = 0.0;
+		dblCurrentTotalIterations = (double)(spatialInformation.verticesCount);
+
+		loadFileStatus.currentOperationName = "Computing the bounding box...";
+
+		spatialInformation.xMin = FLT_MAX;
+		spatialInformation.xMax = FLT_MIN;
+		spatialInformation.yMin = FLT_MAX;
+		spatialInformation.yMax = FLT_MIN;
+		spatialInformation.zMin = FLT_MAX;
+		spatialInformation.zMax = FLT_MIN;
+
+		for(int v = 0; v < spatialInformation.verticesCount; ++v)
+		{
+			if(vertices->getElement(v)->x < spatialInformation.xMin)
+			{
+				spatialInformation.xMin = vertices->getElement(v)->x;
+			}
+			if(vertices->getElement(v)->x > spatialInformation.xMax)
+			{
+				spatialInformation.xMax = vertices->getElement(v)->x;
+			}
+			if(vertices->getElement(v)->y < spatialInformation.yMin)
+			{
+				spatialInformation.yMin = vertices->getElement(v)->y;
+			}
+			if(vertices->getElement(v)->y > spatialInformation.yMax)
+			{
+				spatialInformation.yMax = vertices->getElement(v)->y;
+			}
+			if(vertices->getElement(v)->z < spatialInformation.zMin)
+			{
+				spatialInformation.zMin = vertices->getElement(v)->z;
+			}
+			if(vertices->getElement(v)->z > spatialInformation.zMax)
+			{
+				spatialInformation.zMax = vertices->getElement(v)->z;
+			}
+
+			dblCurrentElapsedIterations += 1.0;
+			dblOverallElapsedIterations += 1.0;
+			loadFileStatus.currentOperationProgress = (float)(dblCurrentElapsedIterations / dblCurrentTotalIterations);
+			loadFileStatus.overallProgress = (float)(dblOverallElapsedIterations / dblOverallTotalIterations);
+        }
+
+		loadFileStatus.currentOperationName = "Done!";
+		loadFileStatus.status = 1;
+	}
+}
+
+void OBJGeometryData::saveFile(UnicodeString OBJFilename)
+{
+	UnicodeString outputString = "";
+	UnicodeString lineBreak = "\r\n";
+
+	outputString = outputString + "# OBJ geometry as re-saved by OBJ Solidizer And Voxelizer by Anton Martynov." + lineBreak;
+
+	// Switching to the standard C locale for numerals (you'll be surprised
+	// what (and why) can happen if you don't!)
+	setlocale(LC_NUMERIC, "C");
+
+	double dblCurrentElapsedIterations = 0.0;
+	double dblCurrentTotalIterations = (double)(vertices->getCount());
+	double dblOverallElapsedIterations = 0.0;
+	double dblOverallTotalIterations = (double)(vertices->getCount() + faces->getCount());
+
+	saveFileStatus.currentOperationName = "Writing vertices information...";
+	saveFileStatus.status = 0;
+	for(int v = 0; v < vertices->getCount(); ++v)
+	{
+		outputString = outputString + "v " + UnicodeString(vertices->getElement(v)->x) + " " +
+											 UnicodeString(vertices->getElement(v)->y) + " " +
+											 UnicodeString(vertices->getElement(v)->z) + lineBreak;
+
+		dblCurrentElapsedIterations += 1.0;
+		dblOverallElapsedIterations += 1.0;
+		saveFileStatus.currentOperationProgress = (float)(dblCurrentElapsedIterations / dblCurrentTotalIterations);
+		saveFileStatus.overallProgress = (float)(dblOverallElapsedIterations / dblOverallTotalIterations);
+	}
+
+	dblCurrentElapsedIterations = 0.0;
+	dblCurrentTotalIterations = (double)(faces->getCount());
+
+	saveFileStatus.currentOperationName = "Writing indices information...";
+	saveFileStatus.status = 0;
+	for(int f = 0; f < faces->getCount(); ++f)
+	{
+		outputString = outputString + "f " + UnicodeString(faces->getElement(f)->v1 + 1) + " " +
+											 UnicodeString(faces->getElement(f)->v2 + 1) + " " +
+											 UnicodeString(faces->getElement(f)->v3 + 1) + lineBreak;
+
+		dblCurrentElapsedIterations += 1.0;
+		dblOverallElapsedIterations += 1.0;
+		saveFileStatus.currentOperationProgress = (float)(dblCurrentElapsedIterations / dblCurrentTotalIterations);
+		saveFileStatus.overallProgress = (float)(dblOverallElapsedIterations / dblOverallTotalIterations);
+	}
+
+	// Switching back to system default locale for numerals
+	setlocale(LC_NUMERIC, "");
+
+	saveFileStatus.currentOperationName = "Writing the OBJ contents to file...";
+	saveFileStatus.currentOperationProgress = 0.5f;
+
+	fileio::writeFile(OBJFilename, outputString);
+
+	saveFileStatus.currentOperationProgress = 1.0f;
+
+	saveFileStatus.currentOperationName = "Done!";
+	saveFileStatus.status = 1;
+}
+
+void OBJGeometryData::generateFromVoxelGrid(VoxelGrid * voxelGrid)
+{
+	int filledVoxelsCount = 0;
+	for(int x = 0; x < voxelGrid->getDimensions().x.count; ++x)
+	{
+		for(int y = 0; y < voxelGrid->getDimensions().y.count; ++y)
+		{
+			for(int z = 0; z < voxelGrid->getDimensions().z.count; ++z)
+			{
+				if(voxelGrid->getData()[x][y][z] == true)
+				{
+					filledVoxelsCount++;
+				}
+			}
+		}
+	}
+	spatialInformation.verticesCount = filledVoxelsCount * 8;
+	vertices = new OneDimensionalArray<Vertex>(spatialInformation.verticesCount);
+	spatialInformation.facesCount = filledVoxelsCount * 12;
+	faces = new OneDimensionalArray<Face>(spatialInformation.facesCount);
+
+	int currentVoxelIndex = 0;
+	for(int x = 0; x < voxelGrid->getDimensions().x.count; ++x)
+	{
+		for(int y = 0; y < voxelGrid->getDimensions().y.count; ++y)
+		{
+			for(int z = 0; z < voxelGrid->getDimensions().z.count; ++z)
+			{
+				if(voxelGrid->getData()[x][y][z] == true)
+				{
+					float xCoord = voxelGrid->getDimensions().getXValue(x);
+					float yCoord = voxelGrid->getDimensions().getYValue(y);
+					float zCoord = voxelGrid->getDimensions().getZValue(z);
+					float halfStep = voxelGrid->getDimensions().x.step / 2;
+					generateCubeFromVoxel(currentVoxelIndex, halfStep, xCoord, yCoord, zCoord);
+					currentVoxelIndex++;
+				}
+			}
+		}
+	}
+}
+
+void OBJGeometryData::generateCubeFromVoxel(int voxelIndex, float halfStep, float xCoord, float yCoord, float zCoord)
+{
+	// procedural generation of cube vertices
+	for(int v = 0; v < 8; ++v)
+	{
+		Vertex * pVertex = vertices->getElement(voxelIndex * 8 + v);
+		pVertex->x = xCoord + halfStep * ((v & (1<<2)) ? 1 : (-1));
+		pVertex->y = yCoord + halfStep * ((v & (1<<1)) ? 1 : (-1));
+		pVertex->z = zCoord + halfStep * ((v & (1<<0)) ? 1 : (-1));
+	}
+	// unfortunately, cube faces cannot be procedurally generated
+	setFaceForCubeGenerator(voxelIndex,  0, 0, 1, 2);
+	setFaceForCubeGenerator(voxelIndex,  1, 1, 3, 2);
+	setFaceForCubeGenerator(voxelIndex,  2, 1, 5, 3);
+	setFaceForCubeGenerator(voxelIndex,  3, 5, 7, 3);
+	setFaceForCubeGenerator(voxelIndex,  4, 5, 4, 7);
+	setFaceForCubeGenerator(voxelIndex,  5, 4, 6, 7);
+	setFaceForCubeGenerator(voxelIndex,  6, 4, 0, 6);
+	setFaceForCubeGenerator(voxelIndex,  7, 0, 2, 6);
+	setFaceForCubeGenerator(voxelIndex,  8, 2, 3, 6);
+	setFaceForCubeGenerator(voxelIndex,  9, 3, 7, 6);
+	setFaceForCubeGenerator(voxelIndex, 10, 4, 5, 0);
+	setFaceForCubeGenerator(voxelIndex, 11, 1, 0, 5);
+}
+
+void OBJGeometryData::setFaceForCubeGenerator(int voxelIndex, int faceIndexInCube, int v1, int v2, int v3)
+{
+	faces->getElement(voxelIndex * 12 + faceIndexInCube)->v1 = voxelIndex * 8 + v1;
+	faces->getElement(voxelIndex * 12 + faceIndexInCube)->v2 = voxelIndex * 8 + v2;
+	faces->getElement(voxelIndex * 12 + faceIndexInCube)->v3 = voxelIndex * 8 + v3;
+}
+```
+
+### src/OBJGeometryData.h
+```
+#ifndef OBJGeometryDataH
+#define OBJGeometryDataH
+
+#include "Vertex.h"
+#include "Face.h"
+#include "OneDimensionalArray.h"
+#include "FileIO.h"
+#include "tiny_obj_loader.h"
+#include "float.h"
+#include "VoxelGrid.h"
+#include "OperationStatus.h"
+
+/*
+Issues / TODO:
+1. Needs proper return codes for loading / saving files
+2. I might be better off using smth like std::string instead of UnicodeString
+   (not sure, since filenames can be Unicode)
+*/
+
+struct OBJInformation
+{
+	int verticesCount;
+	int facesCount;
+	float xMin;
+	float xMax;
+	float yMin;
+	float yMax;
+	float zMin;
+	float zMax;
+};
+
+class OBJGeometryData
+{
+public:
+
+	OBJGeometryData();
+	~OBJGeometryData();
+
+	OBJInformation spatialInformation;
+
+	void loadFile(UnicodeString OBJFilename);
+	OperationStatus loadFileStatus;
+	void saveFile(UnicodeString OBJFilename);
+	OperationStatus saveFileStatus;
+	void generateFromVoxelGrid(VoxelGrid * voxelGrid);
+
+private:
+
+	UnicodeString filename;
+	OneDimensionalArray<Vertex> * vertices;
+	OneDimensionalArray<Face> * faces;
+
+	void generateCubeFromVoxel(int voxelIndex, float halfStep, float xCoord, float yCoord, float zCoord);
+	void setFaceForCubeGenerator(int voxelIndex, int faceIndexInCube, int v1, int v2, int v3);
+};
+
+struct PtrAndString
+{
+	OBJGeometryData * objGeometryData;
+	UnicodeString filenameString;
+};
+
+#endif
+```
+
+### src/OBJSolidizerAndVoxelizer.cpp
+```
+//---------------------------------------------------------------------------
+
+#include <vcl.h>
+#pragma hdrstop
+#include <tchar.h>
+//---------------------------------------------------------------------------
+USEFORM("MainForm.cpp", Form1);
+//---------------------------------------------------------------------------
+WINAPI _tWinMain(HINSTANCE, HINSTANCE, LPTSTR, int)
+{
+	try
+	{
+		Application->Initialize();
+		Application->MainFormOnTaskBar = true;
+		Application->CreateForm(__classid(TForm1), &Form1);
+		Application->Run();
+	}
+	catch (Exception &exception)
+	{
+		Application->ShowException(&exception);
+	}
+	catch (...)
+	{
+		try
+		{
+			throw Exception("");
+		}
+		catch (Exception &exception)
+		{
+			Application->ShowException(&exception);
+		}
+	}
+	return 0;
+}
+//---------------------------------------------------------------------------
+```
+
+### src/OneDimensionalArray.cpp
+```
+#include "OneDimensionalArray.h"
+```
+
+### src/OneDimensionalArray.h
+```
+#ifndef OneDimensionalArrayH
+#define OneDimensionalArrayH
+
+/*
+This thing needs some refactoring.
+1. For now it's all in one .h file - should be split into .h and .cpp.
+2. Initialize might fail when a huge file is specified (there may not be
+   a contigous region of memory for a piece of data this big)
+3. Init / DeInit / GetElement must have boundary and memory checks and proper
+   return codes.
+4. Probably I'm better off just using std::vector instead of all this, though.
+*/
+
+template <class T>
+class OneDimensionalArray
+{
+public:
+
+	OneDimensionalArray(int initSize)
+	{
+		initialize(initSize);
+    }
+	~OneDimensionalArray()
+	{
+        deInitialize();
+    }
+
+	T * getElement(int index)
+	{
+		return &(data[index]);
+    }
+	int getCount()
+	{
+		return count;
+    }
+
+private:
+
+	void initialize(int initSize)
+	{
+		data = new T [initSize];
+		count = initSize;
+    }
+	void deInitialize()
+	{
+		delete [] data;
+    }
+	int count;
+	T * data;
+};
+
+#endif
+```
+
+### src/OperationStatus.cpp
+```
+#include "OperationStatus.h"
+```
+
+### src/OperationStatus.h
+```
+#ifndef OperationStatusH
+#define OperationStatusH
+
+#include "vcl.h"
+
+struct OperationStatus
+{
+	UnicodeString currentOperationName;
+	float currentOperationProgress;
+	float overallProgress;
+	int status; // 0 - in progress, 1 - finished, 2 - error (currentOperationName has description)
+};
+
+#endif
+```
+
+### src/Vertex.cpp
+```
+
+```
+
+### src/Vertex.h
+```
+#ifndef VertexH
+#define VertexH
+
+class Vertex
+{
+	public:
+	Vertex() {};
+	~Vertex() {};
+
+	float x;
+	float y;
+	float z;
+};
+
+#endif
+```
+
+### src/VoxelGrid.cpp
+```
+#include "VoxelGrid.h"
+
+VoxelGrid::VoxelGrid(Dimensions initDimensions)
+{
+	setDimensions(initDimensions);
+	allocate();
+}
+
+VoxelGrid::~VoxelGrid()
+{
+	deallocate();
+}
+
+void VoxelGrid::setDimensions(Dimensions initDimensions)
+{
+	dimensions = initDimensions;
+}
+
+void VoxelGrid::allocate()
+{
+	data = new bool ** [dimensions.x.count];
+	for(int x = 0; x < dimensions.x.count; ++x)
+	{
+		data[x] = new bool * [dimensions.y.count];
+		for(int y = 0; y < dimensions.y.count; ++y)
+		{
+			data[x][y] = new bool [dimensions.z.count];
+        }
+    }
+}
+
+void VoxelGrid::deallocate()
+{
+	for(int x = 0; x < dimensions.x.count; ++x)
+	{
+		for(int y = 0; y < dimensions.y.count; ++y)
+		{
+			delete [] data[x][y];
+		}
+		delete [] data[x];
+	}
+	delete [] data;
+}
+
+Dimensions VoxelGrid::getDimensions()
+{
+	return dimensions;
+}
+
+bool *** VoxelGrid::getData()
+{
+    return data;
+}
+```
+
+### src/VoxelGrid.h
+```
+#ifndef VoxelGridH
+#define VoxelGridH
+
+struct AxisParameters
+{
+	float start;
+	float step;
+	int count;
+	float getValue(int index)
+	{
+		return start + step * (float)index;
+    }
+};
+
+struct Dimensions
+{
+	AxisParameters x;
+	AxisParameters y;
+	AxisParameters z;
+	float getXValue(int index)
+	{
+		return x.getValue(index);
+	}
+	float getYValue(int index)
+	{
+		return y.getValue(index);
+	}
+	float getZValue(int index)
+	{
+        return z.getValue(index);
+    }
+};
+
+class VoxelGrid
+{
+public:
+
+	VoxelGrid(Dimensions initDimensions);
+	~VoxelGrid();
+	void allocate();
+	void deallocate();
+	Dimensions getDimensions();
+	bool *** getData();
+
+private:
+
+	Dimensions dimensions;
+	bool *** data; // far from perfect, since bools take up much more than 1 bit of memory.
+				   // I'll come up with a better solution soon
+
+	void setDimensions(Dimensions initDimensions);
+};
+
+#endif
+```
+
+### src/Voxelizer.cpp
+```
+#include "Voxelizer.h"
+
+Voxelizer::Voxelizer()
+{
+	//
+}
+
+Voxelizer::~Voxelizer()
+{
+	//
+}
+
+void Voxelizer::setGeometryData(OBJGeometryData * newGeometryData)
+{
+	geometryData = newGeometryData;
+}
+
+Dimensions Voxelizer::computeOptimalGridDimensions(float desiredStep)
+{
+	float geometryLengthX = geometryData->spatialInformation.xMax - geometryData->spatialInformation.xMin;
+	float geometryLengthY = geometryData->spatialInformation.yMax - geometryData->spatialInformation.yMin;
+	float geometryLengthZ = geometryData->spatialInformation.zMax - geometryData->spatialInformation.zMin;
+
+	float optimalLengthX = (float)(ceil(geometryLengthX / desiredStep)) * desiredStep;
+	float optimalLengthY = (float)(ceil(geometryLengthY / desiredStep)) * desiredStep;
+	float optimalLengthZ = (float)(ceil(geometryLengthZ / desiredStep)) * desiredStep;
+
+	Dimensions optimalDimensions;
+
+	optimalDimensions.x.start = geometryData->spatialInformation.xMin - (optimalLengthX - geometryLengthX) / 2;
+	optimalDimensions.x.step = desiredStep;
+	optimalDimensions.x.count = (int)(ceil(geometryLengthX / desiredStep)) + 1;
+	optimalDimensions.y.start = geometryData->spatialInformation.yMin - (optimalLengthY - geometryLengthY) / 2;
+	optimalDimensions.y.step = desiredStep;
+	optimalDimensions.y.count = (int)(ceil(geometryLengthY / desiredStep)) + 1;
+	optimalDimensions.z.start = geometryData->spatialInformation.zMin - (optimalLengthZ - geometryLengthZ) / 2;
+	optimalDimensions.z.step = desiredStep;
+	optimalDimensions.z.count = (int)(ceil(geometryLengthZ / desiredStep)) + 1;
+
+	return optimalDimensions;
+}
+
+void Voxelizer::initVoxelGrid(Dimensions dimensions)
+{
+    voxelGrid = new VoxelGrid(dimensions);
+}
+
+Dimensions Voxelizer::getVoxelGridDimensions()
+{
+    return voxelGrid->getDimensions();
+}
+
+void Voxelizer::randomizeVoxelValues()
+{
+	processStatus.currentOperationName = "Voxelizing...";
+	processStatus.currentOperationProgress = 0.0f;
+	processStatus.overallProgress = 0.0f;
+	processStatus.status = 0;
+
+	randomize();
+	Dimensions dimensions = voxelGrid->getDimensions();
+	bool *** data = voxelGrid->getData();
+	double dblElapsedIterations = 0.0;
+	double dblTotalIterations = (double)(dimensions.x.count) * (double)(dimensions.y.count) * (double)(dimensions.z.count);
+	for(int x = 0; x < dimensions.x.count; ++x)
+	{
+		for(int y = 0; y < dimensions.y.count; ++y)
+		{
+			for(int z = 0; z < dimensions.z.count; ++z)
+			{
+				data[x][y][z] = rand() % 2 == 0 ? false : true;
+				dblElapsedIterations += 1.0;
+				processStatus.currentOperationProgress = (float)(dblElapsedIterations / dblTotalIterations);
+				processStatus.overallProgress = (float)(dblElapsedIterations / dblTotalIterations);
+			}
+        }
+	}
+
+	processStatus.currentOperationName = "Done!";
+	processStatus.status = 1;
+}
+
+void Voxelizer::process()
+{
+	randomizeVoxelValues();
+}
+
+void Voxelizer::processThread(int threadNumber)
+{
+    //
+}
+```
+
+### src/Voxelizer.h
+```
+#ifndef VoxelizerH
+#define VoxelizerH
+
+#include "OBJGeometryData.h"
+#include "VoxelGrid.h"
+#include "math.h"
+#include "OperationStatus.h"
+
+class Voxelizer
+{
+public:
+
+	Voxelizer();
+	~Voxelizer();
+
+	void setGeometryData(OBJGeometryData * newGeometryData);
+	Dimensions computeOptimalGridDimensions(float desiredStep);
+	void initVoxelGrid(Dimensions dimensions);
+	Dimensions getVoxelGridDimensions();
+	void process();
+	void processThread(int threadNumber);
+	OperationStatus processStatus;
+
+//private:
+
+	OBJGeometryData * geometryData;
+	VoxelGrid * voxelGrid;
+
+	void randomizeVoxelValues();
+
+};
+
+#endif
+```
+
+### src/tiny_obj_loader.cpp
+```
+//
+// Copyright 2012-2013, Syoyo Fujita.
+//
+// Licensed under 2-clause BSD liecense.
+//
+
+//
+// version 0.9.7: Support multi-materials(per-face material ID) per object/group.
+// version 0.9.6: Support Ni(index of refraction) mtl parameter.
+//                Parse transmittance material parameter correctly.
+// version 0.9.5: Parse multiple group name.
+//                Add support of specifying the base path to load material file.
+// version 0.9.4: Initial suupport of group tag(g)
+// version 0.9.3: Fix parsing triple 'x/y/z'
+// version 0.9.2: Add more .mtl load support
+// version 0.9.1: Add initial .mtl load support
+// version 0.9.0: Initial
+//
+
+
+#include <stdlib>
+#include <stdio>
+#include <cstring>
+#include <cassert>
+
+#include <string>
+#include <vector>
+#include <map>
+#include <fstream>
+#include <sstream>
+
+#include "tiny_obj_loader.h"
+
+namespace tinyobj {
+
+struct vertex_index {
+  int v_idx, vt_idx, vn_idx;
+  vertex_index() {};
+  vertex_index(int idx) : v_idx(idx), vt_idx(idx), vn_idx(idx) {};
+  vertex_index(int vidx, int vtidx, int vnidx) : v_idx(vidx), vt_idx(vtidx), vn_idx(vnidx) {};
+
+};
+// for std::map
+static inline bool operator<(const vertex_index& a, const vertex_index& b)
+{
+  if (a.v_idx != b.v_idx) return (a.v_idx < b.v_idx);
+  if (a.vn_idx != b.vn_idx) return (a.vn_idx < b.vn_idx);
+  if (a.vt_idx != b.vt_idx) return (a.vt_idx < b.vt_idx);
+
+  return false;
+}
+
+struct obj_shape {
+  std::vector<float> v;
+  std::vector<float> vn;
+  std::vector<float> vt;
+};
+
+static inline bool isSpace(const char c) {
+  return (c == ' ') || (c == '\t');
+}
+
+static inline bool isNewLine(const char c) {
+  return (c == '\r') || (c == '\n') || (c == '\0');
+}
+
+// Make index zero-base, and also support relative index.
+static inline int fixIndex(int idx, int n)
+{
+  int i;
+
+  if (idx > 0) {
+    i = idx - 1;
+  } else if (idx == 0) {
+    i = 0;
+  } else { // negative value = relative
+    i = n + idx;
+  }
+  return i;
+}
+
+static inline std::string parseString(const char*& token)
+{
+  std::string s;
+  int b = strspn(token, " \t");
+  int e = strcspn(token, " \t\r");
+  s = std::string(&token[b], &token[e]);
+
+  token += (e - b);
+  return s;
+}
+
+static inline int parseInt(const char*& token)
+{
+  token += strspn(token, " \t");
+  int i = atoi(token);
+  token += strcspn(token, " \t\r");
+  return i;
+}
+
+static inline float parseFloat(const char*& token)
+{
+  token += strspn(token, " \t");
+  float f = (float)atof(token);
+  token += strcspn(token, " \t\r");
+  return f;
+}
+
+static inline void parseFloat2(
+  float& x, float& y,
+  const char*& token)
+{
+  x = parseFloat(token);
+  y = parseFloat(token);
+}
+
+static inline void parseFloat3(
+  float& x, float& y, float& z,
+  const char*& token)
+{
+  x = parseFloat(token);
+  y = parseFloat(token);
+  z = parseFloat(token);
+}
+
+
+// Parse triples: i, i/j/k, i//k, i/j
+static vertex_index parseTriple(
+  const char* &token,
+  int vsize,
+  int vnsize,
+  int vtsize)
+{
+    vertex_index vi(-1);
+
+    vi.v_idx = fixIndex(atoi(token), vsize);
+    token += strcspn(token, "/ \t\r");
+    if (token[0] != '/') {
+      return vi;
+    }
+    token++;
+
+    // i//k
+    if (token[0] == '/') {
+      token++;
+      vi.vn_idx = fixIndex(atoi(token), vnsize);
+      token += strcspn(token, "/ \t\r");
+      return vi;
+    }
+
+    // i/j/k or i/j
+    vi.vt_idx = fixIndex(atoi(token), vtsize);
+    token += strcspn(token, "/ \t\r");
+    if (token[0] != '/') {
+      return vi;
+    }
+
+    // i/j/k
+    token++;  // skip '/'
+    vi.vn_idx = fixIndex(atoi(token), vnsize);
+    token += strcspn(token, "/ \t\r");
+    return vi;
+}
+
+static unsigned int
+updateVertex(
+  std::map<vertex_index, unsigned int>& vertexCache,
+  std::vector<float>& positions,
+  std::vector<float>& normals,
+  std::vector<float>& texcoords,
+  const std::vector<float>& in_positions,
+  const std::vector<float>& in_normals,
+  const std::vector<float>& in_texcoords,
+  const vertex_index& i)
+{
+  const std::map<vertex_index, unsigned int>::iterator it = vertexCache.find(i);
+
+  if (it != vertexCache.end()) {
+    // found cache
+    return it->second;
+  }
+
+  assert(in_positions.size() > (unsigned int) (3*i.v_idx+2));
+
+  positions.push_back(in_positions[3*i.v_idx+0]);
+  positions.push_back(in_positions[3*i.v_idx+1]);
+  positions.push_back(in_positions[3*i.v_idx+2]);
+
+  if (i.vn_idx >= 0) {
+    normals.push_back(in_normals[3*i.vn_idx+0]);
+    normals.push_back(in_normals[3*i.vn_idx+1]);
+    normals.push_back(in_normals[3*i.vn_idx+2]);
+  }
+
+  if (i.vt_idx >= 0) {
+    texcoords.push_back(in_texcoords[2*i.vt_idx+0]);
+    texcoords.push_back(in_texcoords[2*i.vt_idx+1]);
+  }
+
+  unsigned int idx = positions.size() / 3 - 1;
+  vertexCache[i] = idx;
+
+  return idx;
+}
+
+void InitMaterial(material_t& material) {
+  material.name = "";
+  material.ambient_texname = "";
+  material.diffuse_texname = "";
+  material.specular_texname = "";
+  material.normal_texname = "";
+  for (int i = 0; i < 3; i ++) {
+    material.ambient[i] = 0.f;
+    material.diffuse[i] = 0.f;
+    material.specular[i] = 0.f;
+    material.transmittance[i] = 0.f;
+    material.emission[i] = 0.f;
+  }
+  material.illum = 0;
+  material.dissolve = 1.f;
+  material.shininess = 1.f;
+  material.ior = 1.f;
+  material.unknown_parameter.clear();
+}
+
+static bool
+exportFaceGroupToShape(
+  shape_t& shape,
+  std::map<vertex_index, unsigned int> vertexCache,
+  const std::vector<float> &in_positions,
+  const std::vector<float> &in_normals,
+  const std::vector<float> &in_texcoords,
+  const std::vector<std::vector<vertex_index> >& faceGroup,
+  const int material_id,
+  const std::string &name,
+  bool clearCache)
+{
+  if (faceGroup.empty()) {
+    return false;
+  }
+
+  // Flatten vertices and indices
+  for (size_t i = 0; i < faceGroup.size(); i++) {
+    const std::vector<vertex_index>& face = faceGroup[i];
+
+    vertex_index i0 = face[0];
+    vertex_index i1(-1);
+    vertex_index i2 = face[1];
+
+    size_t npolys = face.size();
+
+    // Polygon -> triangle fan conversion
+    for (size_t k = 2; k < npolys; k++) {
+      i1 = i2;
+      i2 = face[k];
+
+      unsigned int v0 = updateVertex(vertexCache, shape.mesh.positions, shape.mesh.normals, shape.mesh.texcoords, in_positions, in_normals, in_texcoords, i0);
+      unsigned int v1 = updateVertex(vertexCache, shape.mesh.positions, shape.mesh.normals, shape.mesh.texcoords, in_positions, in_normals, in_texcoords, i1);
+      unsigned int v2 = updateVertex(vertexCache, shape.mesh.positions, shape.mesh.normals, shape.mesh.texcoords, in_positions, in_normals, in_texcoords, i2);
+
+      shape.mesh.indices.push_back(v0);
+      shape.mesh.indices.push_back(v1);
+      shape.mesh.indices.push_back(v2);
+
+      shape.mesh.material_ids.push_back(material_id);
+    }
+
+  }
+
+  shape.name = name;
+
+  if (clearCache)
+      vertexCache.clear();
+
+  return true;
+
+}
+
+std::string LoadMtl (
+  std::map<std::string, int>& material_map,
+  std::vector<material_t>& materials,
+  std::istream& inStream)
+{
+  material_map.clear();
+  std::stringstream err;
+
+  material_t material;
+
+  int maxchars = 8192;  // Alloc enough size.
+  std::vector<char> buf(maxchars);  // Alloc enough size.
+  while (inStream.peek() != -1) {
+    inStream.getline(&buf[0], maxchars);
+
+    std::string linebuf(&buf[0]);
+
+    // Trim newline '\r\n' or '\n'
+    if (linebuf.size() > 0) {
+      if (linebuf[linebuf.size()-1] == '\n') linebuf.erase(linebuf.size()-1);
+    }
+    if (linebuf.size() > 0) {
+      if (linebuf[linebuf.size()-1] == '\r') linebuf.erase(linebuf.size()-1);
+    }
+
+    // Skip if empty line.
+    if (linebuf.empty()) {
+      continue;
+    }
+
+    // Skip leading space.
+    const char* token = linebuf.c_str();
+    token += strspn(token, " \t");
+
+    assert(token);
+    if (token[0] == '\0') continue; // empty line
+
+    if (token[0] == '#') continue;  // comment line
+
+    // new mtl
+    if ((0 == strncmp(token, "newmtl", 6)) && isSpace((token[6]))) {
+      // flush previous material.
+      if (!material.name.empty())
+      {
+          material_map.insert(std::pair<std::string, int>(material.name, materials.size()));
+          materials.push_back(material);
+      }
+
+      // initial temporary material
+      InitMaterial(material);
+
+      // set new mtl name
+      char namebuf[4096];
+	  token += 7;
+	  sscanf(token, "%s", namebuf);
+      material.name = namebuf;
+      continue;
+    }
+
+    // ambient
+    if (token[0] == 'K' && token[1] == 'a' && isSpace((token[2]))) {
+      token += 2;
+      float r, g, b;
+      parseFloat3(r, g, b, token);
+      material.ambient[0] = r;
+      material.ambient[1] = g;
+      material.ambient[2] = b;
+      continue;
+    }
+
+    // diffuse
+    if (token[0] == 'K' && token[1] == 'd' && isSpace((token[2]))) {
+      token += 2;
+      float r, g, b;
+      parseFloat3(r, g, b, token);
+      material.diffuse[0] = r;
+      material.diffuse[1] = g;
+      material.diffuse[2] = b;
+      continue;
+    }
+
+    // specular
+    if (token[0] == 'K' && token[1] == 's' && isSpace((token[2]))) {
+      token += 2;
+      float r, g, b;
+      parseFloat3(r, g, b, token);
+      material.specular[0] = r;
+      material.specular[1] = g;
+      material.specular[2] = b;
+      continue;
+    }
+
+    // transmittance
+    if (token[0] == 'K' && token[1] == 't' && isSpace((token[2]))) {
+      token += 2;
+      float r, g, b;
+      parseFloat3(r, g, b, token);
+      material.transmittance[0] = r;
+      material.transmittance[1] = g;
+      material.transmittance[2] = b;
+      continue;
+    }
+
+    // ior(index of refraction)
+    if (token[0] == 'N' && token[1] == 'i' && isSpace((token[2]))) {
+      token += 2;
+      material.ior = parseFloat(token);
+      continue;
+    }
+
+    // emission
+    if(token[0] == 'K' && token[1] == 'e' && isSpace(token[2])) {
+      token += 2;
+      float r, g, b;
+      parseFloat3(r, g, b, token);
+      material.emission[0] = r;
+      material.emission[1] = g;
+      material.emission[2] = b;
+      continue;
+    }
+
+    // shininess
+    if(token[0] == 'N' && token[1] == 's' && isSpace(token[2])) {
+      token += 2;
+      material.shininess = parseFloat(token);
+      continue;
+    }
+
+    // illum model
+    if (0 == strncmp(token, "illum", 5) && isSpace(token[5])) {
+      token += 6;
+      material.illum = parseInt(token);
+      continue;
+    }
+
+    // dissolve
+    if ((token[0] == 'd' && isSpace(token[1]))) {
+      token += 1;
+      material.dissolve = parseFloat(token);
+      continue;
+    }
+    if (token[0] == 'T' && token[1] == 'r' && isSpace(token[2])) {
+      token += 2;
+      material.dissolve = parseFloat(token);
+      continue;
+    }
+
+    // ambient texture
+    if ((0 == strncmp(token, "map_Ka", 6)) && isSpace(token[6])) {
+      token += 7;
+      material.ambient_texname = token;
+      continue;
+    }
+
+    // diffuse texture
+    if ((0 == strncmp(token, "map_Kd", 6)) && isSpace(token[6])) {
+      token += 7;
+      material.diffuse_texname = token;
+      continue;
+    }
+
+    // specular texture
+    if ((0 == strncmp(token, "map_Ks", 6)) && isSpace(token[6])) {
+      token += 7;
+      material.specular_texname = token;
+      continue;
+    }
+
+    // normal texture
+    if ((0 == strncmp(token, "map_Ns", 6)) && isSpace(token[6])) {
+      token += 7;
+      material.normal_texname = token;
+      continue;
+    }
+
+    // unknown parameter
+    const char* _space = strchr(token, ' ');
+    if(!_space) {
+      _space = strchr(token, '\t');
+    }
+    if(_space) {
+      int len = _space - token;
+      std::string key(token, len);
+      std::string value = _space + 1;
+      material.unknown_parameter.insert(std::pair<std::string, std::string>(key, value));
+    }
+  }
+  // flush last material.
+  material_map.insert(std::pair<std::string, int>(material.name, materials.size()));
+  materials.push_back(material);
+
+  return err.str();
+}
+
+std::string MaterialFileReader::operator() (
+    const std::string& matId,
+    std::vector<material_t>& materials,
+    std::map<std::string, int>& matMap)
+{
+  std::string filepath;
+
+  if (!m_mtlBasePath.empty()) {
+    filepath = std::string(m_mtlBasePath) + matId;
+  } else {
+    filepath = matId;
+  }
+
+  std::ifstream matIStream(filepath.c_str());
+  return LoadMtl(matMap, materials, matIStream);
+}
+
+std::string
+LoadObj(
+  std::vector<shape_t>& shapes,
+  std::vector<material_t>& materials,   // [output]
+  const char* filename,
+  const char* mtl_basepath)
+{
+
+  shapes.clear();
+
+  std::stringstream err;
+
+  std::ifstream ifs(filename);
+  if (!ifs) {
+    err << "Cannot open file [" << filename << "]" << std::endl;
+    return err.str();
+  }
+
+  std::string basePath;
+  if (mtl_basepath) {
+    basePath = mtl_basepath;
+  }
+  MaterialFileReader matFileReader( basePath );
+
+  return LoadObj(shapes, materials, ifs, matFileReader);
+}
+
+std::string LoadObj(
+  std::vector<shape_t>& shapes,
+  std::vector<material_t>& materials,   // [output]
+  std::istream& inStream,
+  MaterialReader& readMatFn)
+{
+  std::stringstream err;
+
+  std::vector<float> v;
+  std::vector<float> vn;
+  std::vector<float> vt;
+  std::vector<std::vector<vertex_index> > faceGroup;
+  std::string name;
+
+  // material
+  std::map<std::string, int> material_map;
+  std::map<vertex_index, unsigned int> vertexCache;
+  int  material = -1;
+
+  shape_t shape;
+
+  int maxchars = 8192;  // Alloc enough size.
+  std::vector<char> buf(maxchars);  // Alloc enough size.
+  while (inStream.peek() != -1) {
+    inStream.getline(&buf[0], maxchars);
+
+    std::string linebuf(&buf[0]);
+
+    // Trim newline '\r\n' or '\n'
+    if (linebuf.size() > 0) {
+      if (linebuf[linebuf.size()-1] == '\n') linebuf.erase(linebuf.size()-1);
+    }
+    if (linebuf.size() > 0) {
+      if (linebuf[linebuf.size()-1] == '\r') linebuf.erase(linebuf.size()-1);
+    }
+
+    // Skip if empty line.
+    if (linebuf.empty()) {
+      continue;
+    }
+
+    // Skip leading space.
+    const char* token = linebuf.c_str();
+    token += strspn(token, " \t");
+
+    assert(token);
+    if (token[0] == '\0') continue; // empty line
+
+    if (token[0] == '#') continue;  // comment line
+
+    // vertex
+    if (token[0] == 'v' && isSpace((token[1]))) {
+      token += 2;
+      float x, y, z;
+      parseFloat3(x, y, z, token);
+      v.push_back(x);
+      v.push_back(y);
+      v.push_back(z);
+      continue;
+    }
+
+    // normal
+    if (token[0] == 'v' && token[1] == 'n' && isSpace((token[2]))) {
+      token += 3;
+      float x, y, z;
+      parseFloat3(x, y, z, token);
+      vn.push_back(x);
+      vn.push_back(y);
+      vn.push_back(z);
+      continue;
+    }
+
+    // texcoord
+    if (token[0] == 'v' && token[1] == 't' && isSpace((token[2]))) {
+      token += 3;
+      float x, y;
+      parseFloat2(x, y, token);
+      vt.push_back(x);
+      vt.push_back(y);
+      continue;
+    }
+
+    // face
+    if (token[0] == 'f' && isSpace((token[1]))) {
+      token += 2;
+      token += strspn(token, " \t");
+
+      std::vector<vertex_index> face;
+      while (!isNewLine(token[0])) {
+        vertex_index vi = parseTriple(token, v.size() / 3, vn.size() / 3, vt.size() / 2);
+        face.push_back(vi);
+        int n = strspn(token, " \t\r");
+        token += n;
+      }
+
+      faceGroup.push_back(face);
+
+      continue;
+    }
+
+    // use mtl
+    if ((0 == strncmp(token, "usemtl", 6)) && isSpace((token[6]))) {
+
+      char namebuf[4096];
+      token += 7;
+      sscanf(token, "%s", namebuf);
+
+      faceGroup.clear();
+
+      if (material_map.find(namebuf) != material_map.end()) {
+        material = material_map[namebuf];
+      } else {
+        // { error!! material not found }
+        material = -1;
+      }
+
+      continue;
+
+    }
+
+    // load mtl
+    if ((0 == strncmp(token, "mtllib", 6)) && isSpace((token[6]))) {
+      char namebuf[4096];
+      token += 7;
+      sscanf(token, "%s", namebuf);
+
+      std::string err_mtl = readMatFn(namebuf, materials, material_map);
+      if (!err_mtl.empty()) {
+        faceGroup.clear();  // for safety
+        return err_mtl;
+      }
+
+      continue;
+    }
+
+    // group name
+    if (token[0] == 'g' && isSpace((token[1]))) {
+
+      // flush previous face group.
+      bool ret = exportFaceGroupToShape(shape, vertexCache, v, vn, vt, faceGroup, material, name, true);
+      if (ret) {
+        shapes.push_back(shape);
+      }
+
+      shape = shape_t();
+
+      //material = -1;
+      faceGroup.clear();
+
+      std::vector<std::string> names;
+      while (!isNewLine(token[0])) {
+        std::string str = parseString(token);
+        names.push_back(str);
+        token += strspn(token, " \t\r"); // skip tag
+      }
+
+      assert(names.size() > 0);
+
+      // names[0] must be 'g', so skipt 0th element.
+      if (names.size() > 1) {
+        name = names[1];
+      } else {
+        name = "";
+      }
+
+      continue;
+    }
+
+    // object name
+    if (token[0] == 'o' && isSpace((token[1]))) {
+
+      // flush previous face group.
+      bool ret = exportFaceGroupToShape(shape, vertexCache, v, vn, vt, faceGroup, material, name, true);
+      if (ret) {
+        shapes.push_back(shape);
+      }
+
+      //material = -1;
+      faceGroup.clear();
+      shape = shape_t();
+
+      // @todo { multiple object name? }
+      char namebuf[4096];
+      token += 2;
+      sscanf(token, "%s", namebuf);
+      name = std::string(namebuf);
+
+
+      continue;
+    }
+
+    // Ignore unknown command.
+  }
+
+  bool ret = exportFaceGroupToShape(shape, vertexCache, v, vn, vt, faceGroup, material, name, true);
+  if (ret) {
+    shapes.push_back(shape);
+  }
+  faceGroup.clear();  // for safety
+
+  return err.str();
+}
+
+
+}
+```
+
+### src/tiny_obj_loader.h
+```
+//
+// Copyright 2012-2013, Syoyo Fujita.
+//
+// Licensed under 2-clause BSD liecense.
+//
+#ifndef _TINY_OBJ_LOADER_H
+#define _TINY_OBJ_LOADER_H
+
+#include <string>
+#include <vector>
+#include <map>
+
+namespace tinyobj {
+
+typedef struct
+{
+    std::string name;
+
+    float ambient[3];
+    float diffuse[3];
+    float specular[3];
+    float transmittance[3];
+    float emission[3];
+    float shininess;
+    float ior;                // index of refraction
+    float dissolve;           // 1 == opaque; 0 == fully transparent
+    // illumination model (see http://www.fileformat.info/format/material/)
+    int illum;
+
+    std::string ambient_texname;
+    std::string diffuse_texname;
+    std::string specular_texname;
+    std::string normal_texname;
+    std::map<std::string, std::string> unknown_parameter;
+} material_t;
+
+typedef struct
+{
+    std::vector<float>          positions;
+    std::vector<float>          normals;
+    std::vector<float>          texcoords;
+    std::vector<unsigned int>   indices;
+    std::vector<int>            material_ids; // per-mesh material ID
+} mesh_t;
+
+typedef struct
+{
+    std::string  name;
+    mesh_t       mesh;
+} shape_t;
+
+class MaterialReader
+{
+public:
+    MaterialReader(){}
+    virtual ~MaterialReader(){}
+
+    virtual std::string operator() (
+        const std::string& matId,
+        std::vector<material_t>& materials,
+        std::map<std::string, int>& matMap) = 0;
+};
+
+class MaterialFileReader:
+  public MaterialReader
+{
+    public:
+        MaterialFileReader(const std::string& mtl_basepath): m_mtlBasePath(mtl_basepath) {}
+        virtual ~MaterialFileReader() {}
+        virtual std::string operator() (
+          const std::string& matId,
+          std::vector<material_t>& materials,
+          std::map<std::string, int>& matMap);
+
+    private:
+        std::string m_mtlBasePath;
+};
+
+/// Loads .obj from a file.
+/// 'shapes' will be filled with parsed shape data
+/// The function returns error string.
+/// Returns empty string when loading .obj success.
+/// 'mtl_basepath' is optional, and used for base path for .mtl file.
+std::string LoadObj(
+    std::vector<shape_t>& shapes,   // [output]
+    std::vector<material_t>& materials,   // [output]
+    const char* filename,
+    const char* mtl_basepath = NULL);
+
+/// Loads object from a std::istream, uses GetMtlIStreamFn to retrieve
+/// std::istream for materials.
+/// Returns empty string when loading .obj success.
+std::string LoadObj(
+    std::vector<shape_t>& shapes,   // [output]
+    std::vector<material_t>& materials,   // [output]
+    std::istream& inStream,
+    MaterialReader& readMatFn);
+
+/// Loads materials into std::map
+/// Returns an empty string if successful
+std::string LoadMtl (
+  std::map<std::string, int>& material_map,
+  std::vector<material_t>& materials,
+  std::istream& inStream);
+}
+
+#endif  // _TINY_OBJ_LOADER_H
+```

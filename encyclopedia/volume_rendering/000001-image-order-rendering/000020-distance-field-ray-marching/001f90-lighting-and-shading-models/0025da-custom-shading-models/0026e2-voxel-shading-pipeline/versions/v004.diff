@@ -1,0 +1,320 @@
+--- v003.md
++++ v004.md
+@@ -4,177 +4,177 @@
+ 
+ ## Overview
+-The Voxel Shading Pipeline is a fragment-shader-based lighting model for ray-marched voxel worlds that combines Lambertian diffuse shading, rim lighting, indirect ambient reflection, and a compact microfacet specular term [S1, unofficial]. It solves the problem of providing visually plausible surface lighting for discrete voxel geometry without requiring explicit mesh generation or complex global illumination [S2, unofficial]. It differs from sibling methods by integrating hard shadow casting and emissive block handling directly into the ray-marched hit loop, whereas [GGX Microfacet BRDF](3715-ggx-microfacet-brdf.md) focuses on analytical surface scattering and [Fast Shading for Voxel Engines](5606-fast-shading-for-voxel-engines.md) optimizes for engine integration [S1, S2, unofficial].
++The Voxel Shading Pipeline is a per-voxel lighting model that computes illumination for surface points identified by ray marching through a voxel grid [S1, S2, unofficial]. It combines Lambertian diffuse reflection, rim lighting, indirect ambient contribution, and a microfacet-based specular term, modulated by hard shadows and tone mapping [S1, unofficial]. It differs from continuous surface shading by operating on discrete voxel coordinates, often using the voxel face normal directly rather than interpolating across a mesh, and typically employs hard shadows due to the binary nature of voxel occupancy [S2, unofficial].
+ 
+ ## How it works
+-**Inputs:** Camera position (`camPos`), ray direction (`rayDir`), ray hit result (`tr` containing `hit`, `t`, `cell`, `normal`), block type (`b`), sun direction (`L`), and time (`time`) for sun rotation [S1, unofficial].
+-**Outputs:** Final pixel color (`finalColor`) [S1, unofficial].
++**Inputs:**
++- Camera position $\mathbf{c}$ and ray direction $\mathbf{v}_{ray}$ [S1, unofficial].
++- Voxel grid data: block type, albedo texture, emissive intensity [S1, unofficial].
++- Light direction $\mathbf{L}$ (sun vector) [S1, S2, unofficial].
++- Parameters: `lightColor`, `ambient`, `roughness`, `F0`, `tLimit`, `maxSteps` [S1, unofficial].
++
++**Outputs:**
++- Final pixel color $\mathbf{C}_{final}$ [S1, unofficial].
+ 
+ **Data Structures:**
+-*   `TraceResult`: Contains `hit` (bool), `t` (float, distance), `cell` (integer 3-tuple), `normal` (float 3-tuple) [S1, unofficial].
+-*   `BlockType`: Enum including `BLOCK_EMISSIVE` [S1, unofficial].
+-
+-**Parameters:**
+-*   `lightColor`: `vec3(1.0, 0.96, 0.85)` [S1, unofficial].
+-*   `ambient`: `vec3(0.12, 0.14, 0.18)` [S1, unofficial].
+-*   `roughness`: `0.54` [S1, unofficial].
+-*   `F0`: `0.14` [S1, unofficial].
+-*   `rimPower`: `2.2` [S1, unofficial].
+-*   `rimIntensity`: `0.12` [S1, unofficial].
+-*   `indirectFactor`: `0.25` [S1, unofficial].
+-*   `emissiveIndirectFactor`: `0.35` [S1, unofficial].
+-*   `emissiveDirectFactor`: `0.5` [S1, unofficial].
+-*   `rimSpecularFactor`: `0.6` [S1, unofficial].
+-*   `toneMapScale`: `2.0` [S1, unofficial].
+-*   `SUN_ROT_SPEED`: Constant for sun rotation [S1, unofficial].
+-*   `ENABLE_SHADOW`: Boolean flag [S1, unofficial].
+-*   `ENABLE_ATMOSPHERE`: Boolean flag [S1, unofficial].
++- `TraceResult`: Contains `hit` (bool), `t` (float, distance), `cell` (ivec3, voxel coordinates), `normal` (vec3, face normal) [S1, unofficial].
++- `BlockType`: Enum identifying material properties (e.g., `BLOCK_EMISSIVE`) [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Ray Hit Validation:** If `tr.hit` is false, return sky color [S1, unofficial]. If `tr.t <= 0.0`, set `hitPosition = camPos`; else `hitPosition = camPos + rayDir * (tr.t + 1e-5)` [S1, unofficial].
+-2.  **Normal and Vector Setup:** Normalize `tr.normal` to get surface normal `N` [S1, unofficial]. Compute view vector `V = normalize(rayDir)` [S1, unofficial]. Compute sun direction `L` based on time [S1, unofficial].
+-3.  **Atmosphere/Absorption:** Compute `absorpColor` using atmospheric scattering or absorption model [S1, unofficial]. If `ENABLE_ATMOSPHERE`, compute sky color via atmosphere function; else `sky = absorpColor` [S1, unofficial].
+-4.  **Local Coordinates:** Calculate local position within the voxel: `local = hitPosition - vec3(float(hitCell.x), float(hitCell.y), float(hitCell.z))` [S1, unofficial]. Apply `fract()` to get `localPos` [S1, unofficial].
+-5.  **Albedo Sampling:** Sample block albedo texture using `hitCell` and `localPos` [S1, unofficial].
+-6.  **Diffuse Lighting:** Compute `nDotL = max(0.0, dot(N, L))` [S1, unofficial]. Lambertian term `lambert = nDotL` [S1, unofficial].
+-7.  **Rim Lighting:** Compute `rim = pow(1.0 - max(0.0, dot(N, V)), 2.2) * 0.12` [S1, unofficial].
+-8.  **Shadow Casting:** Initialize `shadow = 1.0` [S1, unofficial]. If `ENABLE_SHADOW`, trace a secondary ray from `hitPosition + N * 0.01` in direction `L` [S1, unofficial]. If the trace hits a voxel, set `shadow = 0.0` [S1, unofficial].
+-9.  **Direct and Indirect Light:** `directLight = lightColor * lambert` [S1, unofficial]. `indirectLight = 0.25 * albedo` [S1, unofficial].
+-10. **Emissive Handling:** If block type is `BLOCK_EMISSIVE`: get emission color and intensity. `indirectLight += 0.35 * emission` [S1, unofficial]. `directLight += emission * 0.5` [S1, unofficial].
+-11. **Lighting Integration:** Compute `diffAlbedo = albedo * absorpColor` [S1, unofficial]. Calculate lit color:
+-    $$ lit = (shadow \cdot directLight + ambient) \cdot diffAlbedo + (indirectLight \cdot absorpColor) + rim \cdot 0.6 \cdot absorpColor $$
++
++1.  **Ray Marching:** Trace the ray from the camera. If a hit occurs at distance $t$, compute the hit position $\mathbf{p}$ and the voxel cell $\mathbf{c}_{vox}$ [S1, unofficial].
++    $$ \mathbf{p} = \begin{cases} \mathbf{c} & \text{if } t \le 0 \\ \mathbf{c} + \mathbf{v}_{ray} (t + \epsilon) & \text{otherwise} \end{cases} $$
++    where $\epsilon = 10^{-5}$ [S1, unofficial].
++
++2.  **Geometric Setup:**
++    - Compute the surface normal $\mathbf{n}$ from the hit face normal [S1, unofficial].
++    - Compute the view direction $\mathbf{V} = -\mathbf{v}_{ray}$ (normalized) [S1, unofficial].
++    - Compute the light direction $\mathbf{L}$ (normalized) [S1, S2, unofficial].
++    - Calculate the local position within the voxel: $\mathbf{p}_{local} = \text{fract}(\mathbf{p} - \mathbf{c}_{vox})$ [S1, unofficial].
++
++3.  **Material Sampling:**
++    - Sample the albedo $\mathbf{A}$ using the voxel cell and local position [S1, unofficial].
++    - Determine block type $b$ [S1, unofficial].
++
++4.  **Lighting Components:**
++    - **Diffuse:** $\mathbf{D}_{diff} = \max(0, \mathbf{n} \cdot \mathbf{L})$ [S1, unofficial].
++    - **Rim:** $\mathbf{R} = \text{pow}(1.0 - \max(0, \mathbf{n} \cdot \mathbf{V}), 2.2) \times 0.12$ [S1, unofficial].
++    - **Shadow:** Cast a secondary ray from $\mathbf{p} + \mathbf{n}\epsilon$ in direction $\mathbf{L}$. If it hits, shadow factor $S = 0$, else $S = 1$ [S1, S2, unofficial].
++    - **Direct Light:** $\mathbf{L}_{dir} = \mathbf{C}_{light} \times \mathbf{D}_{diff}$ [S1, unofficial].
++    - **Indirect Light:** $\mathbf{L}_{ind} = 0.25 \times \mathbf{A}$ [S1, unofficial].
++    - **Emissive:** If $b = \text{BLOCK\_EMISSIVE}$, add emission $\mathbf{E}$:
++      $$ \mathbf{L}_{ind} \leftarrow \mathbf{L}_{ind} + 0.35 \mathbf{E} $$
++      $$ \mathbf{L}_{dir} \leftarrow \mathbf{L}_{dir} + 0.5 \mathbf{E} $$
++      [S1, unofficial].
++
++5.  **Accumulation:**
++    Combine terms using the absorption color $\mathbf{C}_{abs}$ (from atmosphere or base color) [S1, unofficial]:
++    $$ \mathbf{L}_{lit} = (S \cdot \mathbf{L}_{dir} + \mathbf{C}_{amb}) \cdot (\mathbf{A} \cdot \mathbf{C}_{abs}) + (\mathbf{L}_{ind} \cdot \mathbf{C}_{abs}) + \mathbf{R} \cdot 0.6 \cdot \mathbf{C}_{abs} $$
+     [S1, unofficial].
+-12. **Specular Integration:** Compute microfacet specular term using GGX-like distribution [S1, unofficial]:
+-    *   `alpha = roughness * roughness` [S1, unofficial].
+-    *   `H = normalize(L - V)` [S1, unofficial].
+-    *   `dotLH = max(0.0, dot(L, H))`, `dotNH = max(0.0, dot(N, H))`, `dotNL = max(0.0, dot(N, L))` [S1, unofficial].
+-    *   `alphaSqr = alpha * alpha` [S1, unofficial].
+-    *   `denom = dotNH * dotNH * (alphaSqr - 1.0) + 1.0` [S1, unofficial].
+-    *   `D = alphaSqr / (PI * denom * denom + 1e-6)` [S1, unofficial].
+-    *   `F = F0 + (1.0 - F0) * pow(1.0 - dotLH, 5.0)` [S1, unofficial].
+-    *   `k = 0.5 * alpha`, `k2 = k * k` [S1, unofficial].
+-    *   Specular contribution: `spec = shadow * (dotNL * D * F / (max(1e-6, dotLH * dotLH * (1.0 - k2)) + k2)) * absorpColor * lit` [S1, unofficial].
+-    *   `lit += spec` [S1, unofficial].
+-    *   Apply shadow to final lit value: `lit *= max(0.7, shadow)` [S1, unofficial].
+-13. **Tone Mapping:** Apply Reinhard-like tone mapping: `finalColor = 1.0 - exp(-2.0 * lit)` [S1, unofficial].
++
++6.  **Specular (Microfacet):**
++    Compute a GGX-like specular term [S1, unofficial]:
++    - Half vector $\mathbf{H} = \text{normalize}(\mathbf{L} + \mathbf{V})$ [S1, unofficial].
++    - $\alpha = \text{roughness}^2$ [S1, unofficial].
++    - Normal Distribution $D = \frac{\alpha^2}{\pi (\cos^2\theta_h (\alpha^2 - 1) + 1)^2}$ [S1, unofficial].
++    - Fresnel $F = F_0 + (1 - F_0)(1 - \mathbf{L} \cdot \mathbf{H})^5$ [S1, unofficial].
++    - Geometry/Approximation factor $k = 0.5\alpha$ [S1, unofficial].
++    - Add to lit color:
++      $$ \mathbf{L}_{lit} \leftarrow \mathbf{L}_{lit} + S \cdot \frac{(\mathbf{n} \cdot \mathbf{L}) D F}{\max(\epsilon, (\mathbf{L} \cdot \mathbf{H})^2 (1 - k^2)) + k^2} \cdot \mathbf{C}_{abs} \cdot \mathbf{L}_{lit} $$
++      [S1, unofficial].
++    - Modulate by shadow: $\mathbf{L}_{lit} \leftarrow \mathbf{L}_{lit} \cdot \max(0.7, S)$ [S1, unofficial].
++
++7.  **Tone Mapping:**
++    $$ \mathbf{C}_{final} = 1.0 - \exp(-2.0 \cdot \mathbf{L}_{lit}) $$
++    [S1, unofficial].
+ 
+ **Pseudocode:**
++
+ ```python
+-def voxel_shading_pipeline(camPos, rayDir, tr, time, enable_atmosphere=True, enable_shadow=True):
+-    # tr: object with .hit, .t, .cell, .normal
++def voxel_shading_pipeline(ray_dir, cam_pos, sun_vec, time, grid, params):
++    # 1. Ray Marching
++    tr = trace_voxel(cam_pos, ray_dir, params.tLimit, params.maxSteps)
+     if not tr.hit:
+-        return compute_sky(rayDir, enable_atmosphere)
++        return sky_color(ray_dir, sun_vec)
+ 
+-    # 1. Hit Position
++    # Hit position calculation
+     if tr.t <= 0.0:
+-        hitPosition = camPos
++        hit_pos = cam_pos
+     else:
+-        hitPosition = camPos + rayDir * (tr.t + 1e-5)
+-
+-    hitCell = tr.cell
+-    hitFaceNormal = tr.normal
+-    N = normalize(hitFaceNormal)
+-    V = normalize(rayDir)
+-    L = normalize(sun_direction(time * SUN_ROT_SPEED))
+-
+-    # 2. Atmosphere/Sky
+-    absorpColor = atmospheric_absorption(vec3(0,1,0), camPos, L) # Standard atmospheric model [G]
+-    if enable_atmosphere:
+-        sky = 1.0 - exp(atmospheric_scattering(rayDir, camPos, L))
+-    else:
+-        sky = absorpColor
+-
+-    # 3. Local Coords & Albedo
+-    local = hitPosition - vec3(float(hitCell.x), float(hitCell.y), float(hitCell.z))
+-    localPos = fract(local)
+-    b = get_block_type(hitCell)
+-    albedo = sample_block_albedo(hitCell, localPos, N)
+-
+-    # 4. Basic Lighting Terms
+-    nDotL = max(0.0, dot(N, L))
+-    lambert = nDotL
++        hit_pos = cam_pos + ray_dir * (tr.t + 1e-5)
++    
++    hit_cell = tr.cell
++    hit_normal = tr.normal
++    
++    # 2. Geometric Setup
++    N = normalize(hit_normal)
++    L = normalize(sun_vec(time))
++    V = normalize(-ray_dir)
++    
++    # Local position for texture sampling
++    local_pos = fract(hit_pos - vec3(float(hit_cell.x), float(hit_cell.y), float(hit_cell.z)))
++    
++    # 3. Material Sampling
++    block_type = get_block_type(hit_cell)
++    albedo = sample_albedo(hit_cell, local_pos)
++    
++    # 4. Lighting Components
++    n_dot_l = max(0.0, dot(N, L))
++    lambert = n_dot_l
+     rim = pow(1.0 - max(0.0, dot(N, V)), 2.2) * 0.12
+-
+-    lightColor = vec3(1.0, 0.96, 0.85)
++    
++    light_color = vec3(1.0, 0.96, 0.85)
+     ambient = vec3(0.12, 0.14, 0.18)
+-
+-    # 5. Shadow
++    
++    # Hard Shadow
+     shadow = 1.0
+     if enable_shadow:
+-        # Voxel tracing algorithm not given in sources [G]
+-        sh = trace_voxel(hitPosition + N * 0.01, L, tLimit=100, maxSteps=64)
++        sh = trace_voxel(hit_pos + N * 0.01, L, params.tLimit, params.maxSteps)
+         if sh.hit:
+             shadow = 0.0
+-
+-    # 6. Direct/Indirect Light
+-    directLight = lightColor * lambert
+-    indirectLight = 0.25 * albedo
+-
+-    if b == BLOCK_EMISSIVE:
+-        emission = get_emissive_color(hitCell) * get_emissive_intensity(hitCell)
+-        indirectLight += 0.35 * emission
+-        directLight += emission * 0.5
+-
+-    # 7. Integration
+-    diffAlbedo = albedo * absorpColor
+-    lit = (shadow * directLight + ambient) * diffAlbedo + (indirectLight * absorpColor) + rim * 0.6 * absorpColor
+-
+-    # 8. Specular (GGX-like)
++            
++    direct_light = light_color * lambert
++    indirect_light = 0.25 * albedo
++    
++    # Emissive Handling
++    if block_type == BLOCK_EMISSIVE:
++        emission = get_emissive_color(hit_cell) * get_emissive_intensity(hit_cell)
++        indirect_light += 0.35 * emission
++        direct_light += 0.5 * emission
++        
++    # Absorption/Atmosphere Color
++    absorp_color = compute_absorption(cam_pos, L)
++    
++    # 5. Accumulation
++    diff_albedo = albedo * absorp_color
++    lit = (shadow * direct_light + ambient) * diff_albedo + (indirect_light * absorp_color) + rim * 0.6 * absorp_color
++    
++    # 6. Specular (GGX-like)
+     roughness = 0.54
+     F0 = 0.14
+     alpha = roughness * roughness
+-    H = normalize(L - V)
+-    dotLH = max(0.0, dot(L, H))
+-    dotNH = max(0.0, dot(N, H))
+-    dotNL = max(0.0, dot(N, L))
+-
+-    alphaSqr = alpha * alpha
+-    denom = dotNH * dotNH * (alphaSqr - 1.0) + 1.0
+-    D = alphaSqr / (PI * denom * denom + 1e-6)
+-    F = F0 + (1.0 - F0) * pow(1.0 - dotLH, 5.0)
++    alpha_sqr = alpha * alpha
++    
++    H = normalize(L + V)
++    dot_LH = max(0.0, dot(L, H))
++    dot_NH = max(0.0, dot(N, H))
++    dot_NL = max(0.0, dot(N, L))
++    
++    denom = dot_NH * dot_NH * (alpha_sqr - 1.0) + 1.0
++    D = alpha_sqr / (PI * denom * denom + 1e-6)
++    F = F0 + (1.0 - F0) * pow(1.0 - dot_LH, 5.0)
+     k = 0.5 * alpha
+     k2 = k * k
+-
+-    spec = shadow * (dotNL * D * F / (max(1e-6, dotLH * dotLH * (1.0 - k2)) + k2)) * absorpColor * lit
+-    lit += spec
++    
++    specular_term = shadow * (dot_NL * D * F / (max(1e-6, dot_LH * dot_LH * (1.0 - k2)) + k2))
++    lit += specular_term * absorp_color * lit
++    
+     lit *= max(0.7, shadow)
+-
+-    # 9. Tone Mapping
+-    finalColor = 1.0 - exp(-2.0 * lit)
+-    return finalColor
+-
+-# Helper definitions (standard math/vector operations [G])
+-def normalize(v): return v / length(v)
+-def dot(a, b): return sum(a[i]*b[i] for i in range(3))
+-def vec3(x, y, z): return (x, y, z)
+-def fract(v): return v - floor(v)
+-def sun_direction(t): return normalize(vec3(cos(t), sin(t), 0.5))
+-def get_block_type(cell): return BLOCK_EMISSIVE if cell == (0,0,0) else BLOCK_GRASS # Standard lookup [G]
+-def sample_block_albedo(cell, localPos, normal): return vec3(0.8, 0.8, 0.8) # Standard texture fetch [G]
+-def get_emissive_color(cell): return vec3(1.0, 0.5, 0.0) # Standard lookup [G]
+-def get_emissive_intensity(cell): return 1.0 # Standard lookup [G]
+-def trace_voxel(origin, direction, tLimit, maxSteps): # Voxel tracing algorithm not given in sources [G]
+-    return {'hit': False, 't': tLimit}
+-def atmospheric_absorption(pos, camPos, lightDir): return vec3(0.1, 0.15, 0.2) # Standard model [G]
+-def atmospheric_scattering(rayDir, camPos, lightDir): return vec3(0.5, 0.6, 0.8) # Standard model [G]
+-def compute_sky(rayDir, enable_atmosphere): return atmospheric_scattering(rayDir, vec3(0,0,0), vec3(0,0,1)) # Standard fallback [G]
++    
++    # 7. Tone Mapping
++    final_color = 1.0 - exp(-2.0 * lit)
++    
++    return final_color
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-*   **Precision:** Use `1e-5` offset in ray origin to avoid self-intersection artifacts [S1, unofficial].
+-*   **Shadow Bias:** Use `N * 0.01` offset for shadow ray origin [S1, unofficial].
+-*   **Division by Zero:** Add `1e-6` to denominators in specular calculation [S1, unofficial].
+-*   **Overbright:** Atmosphere sky color is exponentiated negatively to reduce brightness [S1, unofficial].
++**Parameters:**
++- `lightColor`: RGB $(1.0, 0.96, 0.85)$ [S1, unofficial].
++- `ambient`: RGB $(0.12, 0.14, 0.18)$ [S1, unofficial].
++- `roughness`: $0.54$ [S1, unofficial].
++- `F0`: $0.14$ [S1, unofficial].
++
++**Edge Cases:**
++- If $t \le 0$, the hit position is set to the camera position [S1, unofficial].
++- Precision issues in denominator of specular term are guarded with $\epsilon = 10^{-6}$ [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** O(1) per pixel for shading, plus O(N) for shadow ray marching where N is steps to sun [S1, unofficial].
+-*   **Memory Complexity:** O(1) per pixel, plus texture memory for albedo [S1, unofficial].
+-*   **Performance:** Interactive on modern GPUs due to simple shading model and hard shadows [S2, unofficial].
+-*   **Strengths:** Simple implementation, visually pleasing for voxel worlds, handles emissive blocks [S1, S2, unofficial].
+-*   **Limitations:** Hard shadows only, no soft shadows or global illumination [S1, S2, unofficial].
++- **Time Complexity:** $O(N)$ where $N$ is the number of steps in ray marching, plus one additional trace for shadowing if enabled [S1, S2, unofficial].
++- **Memory Complexity:** $O(1)$ per pixel, assuming the voxel grid is accessible via hashing or uniform sampling [S1, unofficial].
++- **Strengths:** Simple to implement; hard shadows are cheap in voxel grids; fits the aesthetic of block-based worlds [S2, unofficial].
++- **Limitations:** Hard shadows can appear jagged; specular highlights are per-voxel, potentially causing aliasing at grazing angles [S2, unofficial].
+ 
+ ## Background
+-The method is documented in community shader repositories and graphics programming blog posts detailing ray-marched voxel rendering techniques [S1, S2, unofficial]. It is applied in indie voxel games and educational graphics projects to achieve real-time lighting on discrete voxel geometry [S1, S2, unofficial].
++The method originates from interactive voxel rendering techniques popularized in indie game development and educational ray marching projects [S1, S2, unofficial]. It adapts standard PBR concepts (GGX, Fresnel) to the discrete voxel domain, often simplifying geometry to face normals [S1, S2, unofficial].
+ 
+ ## Sources
+-[S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader ..., https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
++[S1] GitHub - razzle-reinizu/Voxel-World-Shader: A GLSL voxel-world shader, https://github.com/razzle-reinizu/Voxel-World-Shader, fetched 2026-10-25 (unofficial)
+ [S2] Ray-Marched Voxel Simulation - Joris Rijsdijk, https://www.jorisar.nl/blog/VoxelPlayground/, fetched 2026-10-25 (unofficial)

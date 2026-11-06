@@ -1,98 +1,97 @@
 # Global Cloud Flow
 Also called: Global Wind Speed Noise Offset, Two-Tier Cloud Flow
 ## Overview
-Global Cloud Flow simulates the large-scale, directional movement of volumetric clouds across a scene by offsetting noise sampling coordinates over time. It addresses the problem of static or unnaturally drifting cloud textures by introducing two distinct wind speeds: one for the overall cloud shape and another for fine details. It differs from [Local Cloud Flow with FlowMap](2258-local-cloud-flow-with-flowmap.md) by using global vector parameters rather than per-pixel texture lookups, making it suitable for sky-level clouds where local turbulence is less critical than global advection.
+Global Cloud Flow simulates global cloud movement by offsetting noise texture sampling coordinates over time using two global wind speeds [S1, unofficial]. It differs from [Local Cloud Flow with FlowMap](2258-local-cloud-flow-with-flowmap.md) by applying uniform vector offsets instead of per-pixel texture lookups [S1, unofficial].
 ## How it works
 **Inputs:**
-- `time`: Current simulation time (scalar).
-- `shape_wind`: 3D vector representing the global wind speed for the cloud's overall structure.
-- `detail_wind`: 3D vector representing the global wind speed for fine cloud details.
-- `cloud_map`: 2D or 3D texture storing the base cloud distribution.
-- `shape_noise`: 3D texture storing the large-scale cloud shape.
-- `detail_noise`: 3D texture storing high-frequency cloud details.
+- `time`: Current simulation time (scalar) [G].
+- `shape_wind`: 3D vector representing the global wind speed for the cloud's overall structure [S1, unofficial].
+- `detail_wind`: 3D vector representing the global wind speed for fine cloud details [S1, unofficial].
+- `cloud_map`: 2D or 3D texture storing the base cloud distribution [S1, unofficial].
+- `shape_noise`: 3D texture storing the large-scale cloud shape [S1, unofficial].
+- `detail_noise`: 3D texture storing high-frequency cloud details [S1, unofficial].
+- `base_pos`: Base world position or UV coordinate for the current raymarch step [G].
 
 **Outputs:**
-- Final cloud density and color contribution for a given raymarching step.
+- Final cloud density and color contribution for a given raymarching step [G].
 
 **Data Structures:**
-- No complex data structures are required. Standard 3D vector types (`vec3`) and texture samplers are used.
+- No complex data structures are required [G]. Standard 3D vector types (`vec3`) and texture samplers are used [G].
 
 **Steps:**
-1. **Calculate Shape Noise Offset:** Compute the sampling coordinate for the shape noise by adding the product of `shape_wind` and `time` to the base world position.
-   $$ P_{shape} = P_{base} + shape\_wind \times time $$
-2. **Calculate Detail Noise Offset:** Compute the sampling coordinate for the detail noise by adding the product of `detail_wind` and `time` to the base world position.
-   $$ P_{detail} = P_{base} + detail\_wind \times time $$
-3. **Calculate Cloud Map Offset:** If using a 2D Cloud Map, offset its UV coordinates using the horizontal (XZ) components of `shape_wind` and `time`. If using a 3D texture, use the full 3D offset similar to shape noise.
-   $$ UV_{map} = UV_{base} + (shape\_wind.xz \times time) $$
-4. **Y-Axis Rolling (Shape Noise):** To change the cloud distribution over time, the Y component of `shape_wind` is used to roll the shape noise texture along the Y-axis. This effectively shifts the vertical distribution of clouds.
-   $$ P_{shape\_rolled} = P_{shape} + vec3(0.0, shape\_wind.y \times time, 0.0) $$
-   *Note: In some implementations, the Y component is applied directly to the 3D coordinate offset as shown in Step 1, leveraging the 3D texture's ability to wrap or scroll vertically.*
-5. **Sample Textures:**
-   - Sample `shape_noise` at $P_{shape\_rolled}$.
-   - Sample `detail_noise` at $P_{detail}$.
-   - Sample `cloud_map` at $UV_{map}$.
-6. **Combine:** Mix the sampled values to determine the final cloud density. The shape noise defines the bulk structure, while detail noise adds high-frequency variation.
+1. **Calculate Shape Noise and Cloud Map Offset:** Compute the sampling coordinate for the shape noise by adding the product of `shape_wind` and `time` to the base position [S1, unofficial]. For a 2D Cloud Map, offset its UV coordinates using the horizontal (XZ) components of `shape_wind` and `time` [S1, unofficial].
+2. **Calculate Detail Noise Offset:** Compute the sampling coordinate for the detail noise by adding the product of `detail_wind` and `time` to the base position [S1, unofficial].
+3. **Y-Axis Rolling (Shape Noise):** To change the cloud distribution over time, add the Y component of `shape_wind` scaled by `time` to the shape noise coordinate, rolling the shape noise texture along the Y-axis [S1, unofficial].
+4. **Sample Textures:** Sample `shape_noise` at the rolled coordinate, `detail_noise` at its offset coordinate, and `cloud_map` at its offset UV [S1, unofficial].
+5. **Combine:** Mix the sampled values to determine the final cloud density, where the shape noise defines the bulk structure and detail noise adds high-frequency variation [G].
+
+**Formulas:**
+- Shape offset: $P_{shape} = P_{base} + \text{shape\_wind} \times \text{time}$
+- Detail offset: $P_{detail} = P_{base} + \text{detail\_wind} \times \text{time}$
+- Y-rolling: $P_{shape\_rolled} = P_{shape} + \text{vec3}(0.0, \text{shape\_wind}.y \times \text{time}, 0.0)$
+- Cloud Map UV offset: $UV_{map} = UV_{base} + \text{vec2}(\text{shape\_wind}.x, \text{shape\_wind}.z) \times \text{time}$
 
 **Parameters:**
-- `shape_wind`: Typical values depend on scene scale. For a sky dome of radius 1000, speeds might range from 10-50 units/sec.
-- `detail_wind`: Typically faster than `shape_wind` to simulate turbulent eddies.
-- `time`: Accumulated time, often modulo'd to prevent floating-point precision issues over long runs.
+- `shape_wind`, `detail_wind`, `time`: Typical values are Not given in the sources. [G]
 
 **Edge Cases and Pitfalls:**
-- **Precision Loss:** Over long simulation times, large coordinate values can cause floating-point precision loss in texture sampling. Use `fract(time)` or modulo arithmetic to keep coordinates bounded if the textures are periodic.
-- **Boundary Wrapping:** Ensure textures are set to wrap mode (GL_REPEAT, etc.) to avoid seams when coordinates exceed texture bounds.
-- **Y-Axis Rolling:** If using a 2D Cloud Map, Y-rolling is not possible. The method relies on 3D textures for vertical distribution changes [S1, unofficial].
+- **Y-Axis Rolling:** Requires 3D textures to change vertical cloud distribution over time [S1, unofficial].
+- **Precision and Wrapping:** Large coordinate values may cause floating-point precision loss; use modulo arithmetic or `fract(time)` for periodic textures [G]. Ensure textures use wrap mode to avoid seams [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def global_cloud_flow(base_pos, time, shape_wind, detail_wind, cloud_map, shape_noise, detail_noise):
+    # Standard texture sampling operations [G]
+    def sample_3d(tex, coord):
+        # Performs a standard 3D texture lookup with wrapping enabled
+        return tex[coord]
+
+    def sample_2d(tex, uv):
+        # Performs a standard 2D texture lookup with wrapping enabled
+        return tex[uv]
+
     # 1. Calculate offsets
     shape_offset = shape_wind * time
     detail_offset = detail_wind * time
-    
-    # 2. Sample Shape Noise with Y-rolling
-    # The Y component of shape_wind rolls the texture vertically
-    shape_pos = base_pos + shape_offset
-    # If shape_noise is 3D, the Y component naturally scrolls it
-    shape_val = sample_3d_texture(shape_noise, shape_pos)
-    
-    # 3. Sample Detail Noise
+
+    # 2. Y-axis rolling for shape noise
+    shape_pos_rolled = base_pos + shape_offset + vec3(0.0, shape_wind.y * time, 0.0)
+
+    # 3. Detail noise offset
     detail_pos = base_pos + detail_offset
-    detail_val = sample_3d_texture(detail_noise, detail_pos)
-    
-    # 4. Sample Cloud Map (assuming 2D UV based on XZ world position)
-    # Offset UV by the XZ components of the shape wind
-    uv_offset = vec2(shape_wind.x, shape_wind.z) * time
-    cloud_uv = base_pos.xz + uv_offset
-    cloud_val = sample_2d_texture(cloud_map, cloud_uv)
-    
-    # 5. Combine (example combination)
-    # Shape noise defines the base structure, detail adds variation
+
+    # 4. Cloud Map UV offset (XZ components)
+    cloud_uv = base_pos.xz + vec2(shape_wind.x, shape_wind.z) * time
+
+    # 5. Sample textures
+    shape_val = sample_3d(shape_noise, shape_pos_rolled)
+    detail_val = sample_3d(detail_noise, detail_pos)
+    cloud_val = sample_2d(cloud_map, cloud_uv)
+
+    # 6. Combine
     final_density = shape_val * cloud_val + detail_val * 0.5
-    
+
     return final_density
 ```
 ## Subtopics
 
 ### Wind Skewing
-Skews the sample point in the wind direction based on the height fraction of the cloud layer. This creates a parallax-like effect where higher clouds move differently than lower ones.
-- **Step:** Calculate height fraction (0 at bottom, 1 at top). Skew the point: `point += height_fraction * WIND_DIRECTION * CLOUD_TOP_OFFSET * 0.009`.
-- **Animation:** Animate by adding wind direction with an upward bias: `point += (WIND_DIRECTION + vec3(0.0, 0.1, 0.0)) * CLOUD_SPEED * time.y`.
-- **When to use:** When you want to simulate wind shear, where upper atmosphere winds differ in speed or direction from lower winds.
-- **Link:** [Global Cloud Flow](52-global-cloud-flow.md)
+Skews the sample point in the wind direction based on the height fraction of the cloud layer [S2, unofficial]. It sets itself apart from uniform global flow by introducing height-dependent parallax [G]. Use it when simulating wind shear where upper atmosphere winds differ from lower winds [G]. Link: [Global Cloud Flow](52-global-cloud-flow.md) [G].
+- **Step:** Calculate height fraction (0 at bottom, 1 at top). Skew the point: `point += height_fraction * WIND_DIRECTION * CLOUD_TOP_OFFSET * 0.009` [S2, unofficial].
+- **Animation:** Animate cloud movement by adding wind direction with an upward bias: `point += (WIND_DIRECTION + vec3(0.0, 0.1, 0.0)) * CLOUD_SPEED * time.y` [S2, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** O(1) per sample. The cost is constant regardless of scene complexity, as it only involves vector addition and texture sampling.
-- **Memory Complexity:** O(1) additional memory. No extra buffers are required beyond the noise textures.
-- **Performance:** Very fast. It avoids the overhead of sampling a FlowMap texture, which can be expensive if done per raymarch step.
-- **Strengths:** Simple to implement, computationally cheap, effective for large-scale sky clouds.
-- **Limitations:** Cannot represent complex, localized turbulence or swirls. The flow is uniform across the entire sky, which may look unrealistic for storm clouds or terrain-following clouds.
-- **When to use:** For sky-level volumetric clouds where global advection is sufficient.
-- **When not to use:** For low-altitude clouds, storm clouds, or scenes requiring detailed local turbulence. Use [Local Cloud Flow with FlowMap](2258-local-cloud-flow-with-flowmap.md) instead.
+- **Time Complexity:** O(1) per sample, as it involves constant vector additions and texture lookups [G].
+- **Memory Complexity:** O(1) additional memory, requiring no extra buffers beyond the noise textures [G].
+- **Performance:** Very fast, avoiding the overhead of per-pixel FlowMap lookups [G].
+- **Strengths:** Simple to implement and computationally cheap for large-scale sky clouds [G].
+- **Limitations:** Cannot represent complex, localized turbulence or swirls; flow is uniform across the sky [G].
+- **When to use:** For sky-level volumetric clouds where global advection is sufficient [G].
+- **When not to use:** For low-altitude clouds, storm clouds, or scenes requiring detailed local turbulence; use [Local Cloud Flow with FlowMap](2258-local-cloud-flow-with-flowmap.md) instead [G].
 ## Background
-Global Cloud Flow is a common technique in real-time volumetric cloud rendering, particularly in game engines like Unity HDRP. It was popularized by implementations that sought to balance visual fidelity with performance. The two-tier approach (separate shape and detail winds) allows for more natural-looking cloud movement by decoupling the large-scale structure from the fine details. The Y-axis rolling technique leverages the properties of 3D noise textures to create dynamic cloud distributions without additional computational cost.
+Global Cloud Flow is implemented in real-time rendering pipelines such as Unity HDRP, which uses it to balance visual fidelity and performance [S1, unofficial]. The two-tier approach decouples large-scale structure from fine details, and Y-axis rolling leverages 3D noise textures for dynamic distribution changes without additional computational cost [S1, unofficial].
 ## Sources
 [S1] 体积云效果的实现，游戏世界的云合雾集, https://leihuo.163.com/institution/news/20230719/38423_1099592.html, fetched 2026-10-30 (unofficial)
 [S2] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)

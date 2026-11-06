@@ -1,0 +1,325 @@
+Contribute to diziet/mathviz development by creating an account on GitHub.
+
+Task 23: Mandelbulb, Julia 3D, and fractal cross-sections by claude-code-agent-diziet[bot] · Pull Request #23 · diziet/mathviz · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Summary
+This PR adds three new 3D fractal generators (Mandelbulb, Julia 3D, and fractal cross-section) to the mathviz project, backed by numba-JIT-compiled escape-time kernels for performance. It also implements the previously-stubbed SPARSE_SHELL representation strategy, which samples mesh surfaces into sparse point clouds.
+Key changes
+New _escape_kernel module — numba-JIT-compiled inner loops for Mandelbulb and Julia 3D escape-time iteration on 3D voxel grids
+Mandelbulb generator — evaluates the escape-time field on a voxel grid and extracts the boundary surface via marching cubes (default representation: SPARSE_SHELL)
+Julia 3D generator — same iteration as Mandelbulb but with a fixed c parameter; also uses marching cubes for mesh extraction
+Fractal slice generator — produces a 2D cross-section through the Mandelbulb field along a configurable axis, outputting a scalar field for HEIGHTMAP_RELIEF representation
+SPARSE_SHELL representation implemented — samples mesh surfaces at reduced density using trimesh to produce a sparse point cloud with normals; removed from the unimplemented stub list
+numba added as optional dependency — available via [performance] extra and included in [dev]
+Comprehensive tests — covers mesh generation, determinism, registry discovery, default representations, sparse shell point cloud output, fractal slice shape/content, and numba JIT verification
+alex-claude
+and others
+added 6 commits
+March 15, 2026 00:33
+chore: add numba to performance optional dependencies
+…
+0d39c50
+```
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+feat: add Mandelbulb generator with numba JIT escape-time kernel
+…
+51d4c49
+```
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+feat: add Julia 3D generator with numba JIT escape-time kernel
+…
+4c25de9
+```
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+feat: add fractal cross-section (slice) generator
+…
+ad21c5b
+```
+Evaluates Mandelbulb field on a 2D plane for HEIGHTMAP_RELIEF output.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+feat: implement SPARSE_SHELL representation handler
+…
+511c29c
+```
+Samples mesh surface at reduced density to produce a sparse point cloud
+that preserves fractal detail without opacity. Adds default configs for
+mandelbulb, julia3d, and fractal_slice generators.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+test: add tests for Mandelbulb, Julia 3D, fractal slice, and SPARSE_S…
+…
+4a6afd3
+```
+…HELL
+
+Covers: non-empty mesh output, determinism, SPARSE_SHELL point cloud density,
+fractal slice heightmap, numba JIT flag, registry discovery, and default
+representations. Updates existing SPARSE_SHELL stub test.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 Design Review
+Here are the design issues I found:
+Dead parameter — seed is accepted but never used (mandelbulb.py:108, julia3d.py:107, fractal_slice.py:127): All three generators accept a seed parameter in generate() and pass it through to MathObject, but the actual computation is fully deterministic (fixed linspace grids, no randomness). The seed parameter creates a false contract — callers may believe changing it affects output, but it doesn't. This is harmless today but becomes a bug if anyone adds stochastic behavior and forgets to wire seed into the RNG. Minimal fix: Document explicitly (e.g., in docstring) that seed is stored for metadata only and does not affect fractal computation, or remove it from the signature if GeneratorBase doesn't mandate it.
+NUMBA_JIT_ACTIVE is a hardcoded constant, not a runtime check (_escape_kernel.py:16): The flag NUMBA_JIT_ACTIVE = True is set unconditionally at module level. The test test_numba_jit_is_active asserts it's True, but this only verifies a constant — it doesn't confirm numba JIT is actually working. If numba is installed but JIT compilation silently falls back (e.g., NUMBA_DISABLE_JIT=1 env var), the flag still reads True. Minimal fix: Check at runtime, e.g., NUMBA_JIT_ACTIVE = not numba.config.DISABLE_JIT or inspect the compiled function's type.
+_apply_sparse_shell uses config.volume_density for a surface-sampling density (representation_strategy.py:283): The field volume_density semantically describes volumetric fill density, but SPARSE_SHELL is a surface-sampling operation. Reusing this field creates a semantic mismatch — a caller setting volume_density=0.5 for a VOLUME_FILL config would get a completely different behavior if that config were accidentally applied as SPARSE_SHELL. Additionally, the formula int(total_area * density * 1000) has an unexplained magic number 1000 with no documentation of what units density is in. Minimal fix: Either add a dedicated surface_density field to RepresentationConfig, or document the units and the *1000 scaling factor.
+Validation gap — julia3d.py does not validate c_re, c_im, c_z (julia3d.py:36-48): The _validate_params function validates power, max_iterations, voxel_resolution, and extent, but the three c_* parameters are passed straight through without any bounds checking. While mathematically any complex c value is valid, extremely large values (e.g., c_re=1e308) could cause floating-point overflow in the kernel. The fractal_slice.py validator shows a similar pattern — it validates slice_position against extent, demonstrating the codebase's convention of boundary-checking spatial parameters. Minimal fix: Add a sanity check that c_* values are within a reasonable range (e.g., abs(c_re) <= some_limit), or document why unbounded values are acceptable.
+Contract drift — _escape_kernel.py docstring says "0 = inside set" but the semantic is inverted for marching cubes (_escape_kernel.py:32, mandelbulb.py:120): The kernel docstrings state "Returns … iteration counts (0 = inside set)." The marching cubes isosurface extraction at iso = 0.5 treats values > 0.5 as outside. This means "inside the Mandelbulb set" maps to field value 0, and "outside" maps to positive iteration counts. The isosurface at 0.5 therefore extracts the boundary between 0 (inside) and ≥1 (escaped on first iteration). This is correct but fragile — the comment on line 120 of mandelbulb.py says "points that just escaped (iteration > 0)" which is subtly misleading since the surface includes points at exactly 0 on one side. If anyone changes max_iterations to return fractional smooth iteration counts (common in fractal rendering), the iso = 0.5 threshold would silently break. Minimal fix: Define the isolevel as a named constant shared between generators, and document its relationship to the kernel's return values.
+Reviewed at commit 4a6afd3
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 DRY Review
+Here are the duplication issues found in this PR:
+_mandelbulb_voxel and _julia3d_voxel are near-identical (_escape_kernel.py lines 55–78 vs 113–137). The entire spherical-coordinate iteration body (r, theta, phi, r_n, sin/cos recombination) is copy-pasted — the only difference is what's added at the end (cx/cy/cz vs c_re/c_im/c_z). This is ~20 lines of non-trivial math duplicated. Extract a single _iterate_voxel kernel that takes 6 floats (x0, y0, z0, cx, cy, cz) and have Mandelbulb call it with cx=x0, cy=y0, cz=z0 while Julia3D passes the fixed c values.
+_validate_params is duplicated across three files — mandelbulb.py (lines 33–48) and julia3d.py (lines 34–49) are identical (power, max_iterations, voxel_resolution, extent checks). fractal_slice.py (lines 36–62) repeats the same power/max_iterations/extent checks with two additional params. Extract a shared validate_fractal_params(power, max_iterations, resolution, extent) into a common module (e.g., _validation.py in the fractals package), then have fractal_slice call it plus its own extra checks.
+_build_escape_field is duplicated between mandelbulb.py and julia3d.py (lines 51–66 and 53–71 respectively). Both create SpatialBounds from (-extent, -extent, -extent) to (extent, extent, extent), generate three identical np.linspace arrays, then call the kernel. The only difference is the extra c_re/c_im/c_z args passed to the Julia kernel. Extract a shared helper that builds the bounds + coordinate arrays, leaving only the kernel call to the caller.
+Shared constants are repeated across files — _DEFAULT_POWER = 8.0, _DEFAULT_EXTENT = 1.5, _MIN_VOXEL_RESOLUTION = 4 / _MIN_PIXEL_RESOLUTION = 4, and _MIN_MAX_ITERATIONS = 1 appear in all three generator files. Move these to a shared _constants.py or the common validation module.
+Reviewed at commit 4a6afd3
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 General Review
+Here are the issues I found:
+_escape_kernel.py — numba is a hard import despite being listed as optional dependency. The pyproject.toml places numba under [project.optional-dependencies] performance, implying it's optional. However, _escape_kernel.py does import numba unconditionally at the top level, and mandelbulb.py, julia3d.py, and fractal_slice.py all import from _escape_kernel unconditionally. This means installing mathviz without pip install mathviz[performance] will crash with ImportError as soon as any fractal generator is loaded. Either move numba to the required [dependencies] list, or add a try/except fallback with pure-Python kernels.
+_escape_kernel.py line 16 — NUMBA_JIT_ACTIVE = True is a hardcoded constant, not a runtime check. This flag is always True regardless of whether numba's JIT is actually functioning (e.g., numba could fall back to object mode silently, or the @njit compilation could fail at import time). If the intent is to verify JIT is active, this should be set dynamically (e.g., by checking numba.config.DISABLE_JIT or inspecting the compiled function's type).
+test_fractals.py test_numba_jit_is_active — test is vacuous. It imports a hardcoded True constant and asserts it's True. This will never fail and proves nothing about whether the numba kernel is actually JIT-compiled. To be meaningful, the test should verify the compiled function's type (e.g., isinstance(mandelbulb_escape_field, numba.core.registry.CPUDispatcher)).
+representation_strategy.py _apply_sparse_shell — tm.sample() is not seeded, producing non-deterministic output. trimesh.Trimesh.sample() uses random sampling internally. The generate() methods accept a seed parameter, and determinism tests exist for the generators, but once _apply_sparse_shell is called in the pipeline, the output becomes non-deterministic. If the pipeline calls apply() on the generated MathObject, downstream results will differ across runs even with the same seed. Consider passing an np.random.Generator or setting np.random.seed() before sampling.
+Reviewed at commit 4a6afd3
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 Performance Review
+Missing numba.prange for parallel execution (src/mathviz/generators/fractals/_escape_kernel.py, lines 36-48 and 95-107)
+Both mandelbulb_escape_field and julia3d_escape_field use range for the outer loop over an O(N³) voxel grid. At voxel_resolution=128, that's ~2 million voxels computed serially. Switching the outermost loop to numba.prange with @numba.njit(parallel=True, cache=True) would distribute work across cores for a near-linear speedup on multi-core machines (the Mac Mini M4 has multiple performance cores).
+```
+# Before
+@numba.njit(cache=True)
+def mandelbulb_escape_field(...):
+    ...
+    for ix in range(nx):  # serial
+
+# After
+@numba.njit(parallel=True, cache=True)
+def mandelbulb_escape_field(...):
+    ...
+    for ix in numba.prange(nx):  # parallel across cores
+```
+Same fix applies to julia3d_escape_field.
+Redundant sin(theta_n) computation in hot inner loop (src/mathviz/generators/fractals/_escape_kernel.py, lines 72-76 and 127-131)
+In both _mandelbulb_voxel and _julia3d_voxel, np.sin(theta_n) is evaluated twice per iteration (for x and y components). This is a transcendental function call inside the innermost loop that runs max_iterations times per voxel × N³ voxels. Cache it:
+```
+sin_theta_n = np.sin(theta_n)
+cos_theta_n = np.cos(theta_n)
+x = r_n * sin_theta_n * np.cos(phi_n) + cx
+y = r_n * sin_theta_n * np.sin(phi_n) + cy
+z = r_n * cos_theta_n + cz
+```
+Numba does not guarantee CSE (common subexpression elimination) for math intrinsics, so this is likely a real 2× reduction in sin calls on the hot path.
+Reviewed at commit 4a6afd3
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔍 Security Review
+No issues found.
+Reviewed at commit 4a6afd3
+fix: address PR review feedback for fractal generators
+…
+338b55c
+```
+DRY:
+- Extract shared _iterate_voxel kernel (was duplicated as _mandelbulb_voxel
+  and _julia3d_voxel)
+- Create _common.py with shared constants, validation, and voxel grid builder
+- Remove duplicated _validate_params and _build_escape_field across generators
+
+Design:
+- NUMBA_JIT_ACTIVE now checks numba.config.DISABLE_JIT at runtime
+- Add surface_density field to RepresentationConfig (replaces volume_density
+  for SPARSE_SHELL); document the formula
+- Add c_re/c_im/c_z validation in Julia3D (MAX_C_MAGNITUDE=10.0)
+- Extract ESCAPE_ISOLEVEL constant with documentation
+- Document that seed is metadata-only in all generator docstrings
+
+General:
+- Move numba from optional to required dependencies
+- Seed np.random before tm.sample() for deterministic SPARSE_SHELL output
+- Fix test_numba_jit_is_active to check CPUDispatcher type
+
+Performance:
+- Use numba.prange for parallel outer loop in escape-time kernels
+- Cache sin(theta_n)/cos(theta_n) to avoid duplicate transcendental calls
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+```
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+🔧 Fixer Completed
+Post-fix tests: ✅ Passed
+Tests: 442 total, 442 passed, 0 failed in 14s
+Fixer summary
+All review feedback has been addressed and pushed. Here's a summary of the changes:
+DRY fixes:
+Extracted shared _iterate_voxel kernel (was duplicated as _mandelbulb_voxel and _julia3d_voxel)
+Created _common.py with shared constants (DEFAULT_POWER, DEFAULT_EXTENT, ESCAPE_ISOLEVEL, etc.), validate_fractal_params(), validate_c_params(), and build_voxel_grid()
+Removed duplicated _validate_params and _build_escape_field from all three generator files
+Design fixes:
+NUMBA_JIT_ACTIVE now checks numba.config.DISABLE_JIT at runtime
+Added surface_density field to RepresentationConfig (replaces misuse of volume_density)
+Added c_re/c_im/c_z validation in Julia3D (MAX_C_MAGNITUDE=10.0)
+Extracted ESCAPE_ISOLEVEL constant with documentation explaining the kernel return value semantics
+Documented that seed is metadata-only in all generator docstrings
+General fixes:
+Moved numba from optional to required dependencies
+Seeded np.random before tm.sample() for deterministic SPARSE_SHELL output
+Fixed test_numba_jit_is_active to verify CPUDispatcher type
+Performance fixes:
+... (truncated)
+Commits:
+```
+338b55c fix: address PR review feedback for fractal generators
+```
+claude-code-agent-diziet
+Bot
+merged commit 1400619
+into
+main
+Mar 14, 2026
+claude-code-agent-diziet
+Bot
+deleted the
+autopilot/task-23
+branch
+March 14, 2026 16:47
+claude-code-agent-diziet
+Bot
+commented
+Mar 14, 2026
+Copy link
+Copy Markdown
+Contributor
+Author
+Task 23: Mandelbulb, Julia 3D, and fractal cross-sections
+Phase
+Wall
+API
+Turns
+Tokens In
+Tokens Out
+Cache Read
+Cache Create
+Retries
+Cost
+Coder
+422s
+378s
+66
+2,027
+21,385
+3,312,387
+73,826
+0
+$2.66
+Fixer
+308s
+287s
+38
+35
+16,580
+3,799,349
+124,127
+0
+$3.09
+Review
+126s
+126s
+7
+11
+5,174
+70,738
+86,495
+0
+$0.70
+Merger
+25s
+25s
+1
+3
+1,018
+8,888
+21,863
+0
+$0.17
+Total
+14m43s
+—
+112
+2,076
+44,157
+—
+—
+0
+$6.62
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+0 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

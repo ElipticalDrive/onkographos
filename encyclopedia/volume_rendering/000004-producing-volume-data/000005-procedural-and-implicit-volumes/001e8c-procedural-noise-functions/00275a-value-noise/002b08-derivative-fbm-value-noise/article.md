@@ -1,0 +1,188 @@
+# Derivative FBM (Value Noise)
+Also called: Analytic Derivative Value Noise
+## Overview
+Derivative FBM (Value Noise) is a procedural noise generation method that computes the fractal Brownian motion (FBM) value of a value noise function alongside its exact spatial derivatives. It solves the problem of obtaining smooth, continuous gradients for applications such as lighting, erosion simulation, and terrain generation without relying on finite difference approximations. It differs from standard Value Noise by returning analytic derivatives via Hermite interpolation, and from Gradient Noise by deriving these gradients analytically from scalar lattice values rather than storing vector gradients at lattice points.
+## How it works
+### Inputs and Outputs
+- **Input**: A 2D coordinate vector $x \in \mathbb{R}^2$ (or 3D for 3D noise, though the source examples use 2D).
+- **Output**: A scalar FBM value $a$ (for terrain/erosion) or a tuple $(value, \frac{\partial value}{\partial x}, \frac{\partial value}{\partial y})$ for the base noise cell.
+
+### Data Structures
+- **Lattice Hashes**: The method assumes a `hash(p)` function that maps integer lattice coordinates to a pseudo-random scalar in $[0, 1]$. The specific hash implementation is not defined in the source, but it must be deterministic and fast.
+- **Interpolation Weights**: Hermite interpolation weights $u$ and their derivatives $du$.
+
+### Steps
+
+#### 1. Base Noise with Analytic Derivatives
+The core primitive is a single octave of value noise that returns the value and its gradient.
+
+1.  **Lattice and Fraction**: Compute the integer lattice point $p = \lfloor x \rfloor$ and the fractional part $f = x - p$.
+2.  **Hermite Interpolation**: Compute the smooth interpolation weight $u$ and its derivative $du$ with respect to $f$:
+    $$ u = 3f^2 - 2f^3 $$
+    $$ du = 6f(1 - f) $$
+3.  **Lattice Retrieval**: Retrieve four hash values from the lattice corners surrounding $f$:
+    $$ a = \text{hash}(p + (0, 0)) $$
+    $$ b = \text{hash}(p + (1, 0)) $$
+    $$ c = \text{hash}(p + (0, 1)) $$
+    $$ d = \text{hash}(p + (1, 1)) $$
+4.  **Value Calculation**: Compute the interpolated noise value $V$ using bilinear interpolation with Hermite weights:
+    $$ V = a + (b - a)u_x + (c - a)u_y + (a - b - c + d)u_x u_y $$
+5.  **Derivative Calculation**: Compute the gradient components $\frac{\partial V}{\partial x}$ and $\frac{\partial V}{\partial y}$ using the chain rule and the derivative of the Hermite weight $du$:
+    $$ \frac{\partial V}{\partial x} = du_x \cdot \left( (b - a) + (a - b - c + d)u_y \right) $$
+    $$ \frac{\partial V}{\partial y} = du_y \cdot \left( (c - a) + (a - b - c + d)u_x \right) $$
+    *Note: The source code computes this as `du * (vec2(b - a, c - a) + (a - b - c + d) * u.yx)`, which corresponds to the component-wise multiplication described above.*
+6.  **Return**: Return the tuple $(V, \frac{\partial V}{\partial x}, \frac{\partial V}{\partial y})$.
+
+#### 2. Erosion FBM Accumulation
+The FBM is constructed by summing multiple octaves of the base noise, modified by an "erosion" factor based on the accumulated gradient magnitude.
+
+1.  **Initialization**: Initialize the result accumulator $a = 0$, amplitude $b = 1$, accumulated gradient vector $d = (0, 0)$, and coordinate $x$.
+2.  **Octave Loop**: For each octave $i$ (e.g., 16 iterations):
+    a.  **Sample Noise**: Compute $n = \text{noised}(x)$, where $n = (n_x, n_y, n_z)$ corresponds to $(V, \frac{\partial V}{\partial x}, \frac{\partial V}{\partial y})$.
+    b.  **Accumulate Gradient**: Update the accumulated gradient vector:
+        $$ d \leftarrow d + (n_y, n_z) $$
+    c.  **Erosion Factor**: Compute the erosion scaling factor based on the squared magnitude of the accumulated gradient:
+        $$ \text{factor} = \frac{1}{1 + \|d\|^2} = \frac{1}{1 + d_x^2 + d_z^2} $$
+    d.  **Accumulate Value**: Add the scaled noise value to the result:
+        $$ a \leftarrow a + b \cdot n_x \cdot \text{factor} $$
+    e.  **Decay Amplitude**: Reduce the amplitude for the next octave:
+        $$ b \leftarrow b \cdot 0.5 $$
+    f.  **Rotate and Scale Coordinate**: Transform the coordinate for the next octave to prevent alignment artifacts:
+        $$ x \leftarrow M \cdot x \cdot 2 $$
+        Where $M$ is a rotation matrix. The source uses:
+        $$ M = \begin{pmatrix} 0.8 & -0.6 \\ 0.6 & 0.8 \end{pmatrix} $$
+3.  **Return**: Return the final accumulated value $a$.
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def hash(p):
+    """
+    Placeholder for a deterministic integer-to-float hash function.
+    Must return a value in [0, 1].
+    """
+    # Implementation details not provided in source [S1].
+    # A common implementation involves integer hashing and normalization.
+    # [G] Example: return (math.sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453) % 1.0
+    raise NotImplementedError("Hash function implementation required.")
+
+def noised(x):
+    """
+    Computes value noise and its analytic derivatives for a single octave.
+    
+    Args:
+        x: vec2, input coordinate.
+        
+    Returns:
+        vec3: (value, dFdx, dFdy)
+    """
+    p_x = math.floor(x[0])
+    p_y = math.floor(x[1])
+    f_x = x[0] - p_x
+    f_y = x[1] - p_y
+    
+    # Hermite interpolation weights
+    u_x = 3.0 * f_x * f_x - 2.0 * f_x * f_x * f_x
+    u_y = 3.0 * f_y * f_y - 2.0 * f_y * f_y * f_y
+    
+    # Derivatives of Hermite weights
+    du_x = 6.0 * f_x * (1.0 - f_x)
+    du_y = 6.0 * f_y * (1.0 - f_y)
+    
+    # Lattice hashes
+    a = hash((p_x, p_y))
+    b = hash((p_x + 1, p_y))
+    c = hash((p_x, p_y + 1))
+    d = hash((p_x + 1, p_y + 1))
+    
+    # Value calculation
+    value = a + (b - a) * u_x + (c - a) * u_y + (a - b - c + d) * u_x * u_y
+    
+    # Derivative calculation
+    # Source: du * (vec2(b - a, c - a) + (a - b - c + d) * u.yx)
+    # This implies:
+    # dFdx = du_x * ((b - a) + (a - b - c + d) * u_y)
+    # dFdy = du_y * ((c - a) + (a - b - c + d) * u_x)
+    
+    common_term = a - b - c + d
+    
+    dFdx = du_x * ((b - a) + common_term * u_y)
+    dFdy = du_y * ((c - a) + common_term * u_x)
+    
+    return (value, dFdx, dFdy)
+
+def terrainFBM(x):
+    """
+    Computes Erosion FBM using Derivative Value Noise.
+    
+    Args:
+        x: vec2, input coordinate.
+        
+    Returns:
+        float: The accumulated FBM value.
+    """
+    # Rotation matrix from source [S1]
+    # m2 = mat2(0.8, -0.6, 0.6, 0.8)
+    # Rotation and scaling factor
+    rot_x = 0.8
+    rot_y = -0.6
+    rot_z = 0.6
+    rot_w = 0.8
+    
+    a = 0.0
+    b = 1.0
+    d_x = 0.0
+    d_y = 0.0
+    
+    for i in range(16):
+        n = noised(x)
+        n_val = n[0]
+        n_dx = n[1]
+        n_dy = n[2]
+        
+        # Accumulate gradient
+        d_x += n_dx
+        d_y += n_dy
+        
+        # Erosion factor: 1 / (1 + |grad|^2)
+        grad_sq = d_x * d_x + d_y * d_y
+        erosion_factor = 1.0 / (1.0 + grad_sq)
+        
+        # Add to result
+        a += b * n_val * erosion_factor
+        
+        # Decay amplitude
+        b *= 0.5
+        
+        # Rotate and scale coordinate
+        new_x = rot_x * x[0] + rot_y * x[1]
+        new_y = rot_z * x[0] + rot_w * x[1]
+        x = (new_x * 2.0, new_y * 2.0)
+        
+    return a
+```
+
+### Parameters and Edge Cases
+- **Octaves**: The source uses 16 octaves. This is a typical value for high-frequency detail but increases computational cost.
+- **Amplitude Decay**: The amplitude $b$ is halved each octave ($b \leftarrow b \cdot 0.5$). This is standard for FBM to ensure convergence.
+- **Rotation Matrix**: The matrix $\begin{pmatrix} 0.8 & -0.6 \\ 0.6 & 0.8 \end{pmatrix}$ is used to rotate coordinates. Note that this matrix is not orthonormal ($0.8^2 + 0.6^2 = 1$, but the determinant is $0.64 - (-0.36) = 1$, so it is a rotation combined with scaling if not normalized, but here it acts as a rotation since $0.8^2+0.6^2=1$). The source multiplies by 2.0 after rotation, effectively scaling the frequency by 2 per octave.
+- **Precision**: The analytic derivatives avoid the numerical instability of finite differences near lattice boundaries or in flat regions where finite differences might yield zero or noisy gradients.
+- **Hash Function**: The quality of the noise depends heavily on the `hash` function. Poor hashing can lead to visible patterns or correlations.
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot O)$, where $N$ is the number of samples and $O$ is the number of octaves. Each octave requires a constant number of hash lookups and arithmetic operations.
+- **Memory Complexity**: $O(1)$ auxiliary space, as the hash function is typically stateless or uses a small lookup table.
+- **Strengths**: Provides exact gradients for smooth lighting and erosion effects. Avoids the artifacts of finite difference approximations.
+- **Limitations**: More computationally expensive than standard value noise due to derivative calculations. The erosion factor depends on the accumulated gradient, which can dampen high-frequency details if the gradient grows large.
+- **When to Use**: Terrain generation, procedural erosion, and any application requiring smooth, continuous gradients from value noise.
+- **When Not to Use**: When performance is critical and gradients are not needed, or when the scene is too large for the hash function to handle efficiently (though hash functions are generally fast).
+
+## Background
+Derivative FBM (Value Noise) is a technique described in shader development resources for creating procedural textures and terrains. It builds on the concept of Value Noise, which uses scalar lattice values and Hermite interpolation. The addition of analytic derivatives allows for more physically plausible effects like erosion, where the slope of the terrain influences the accumulation of material. The specific erosion formula $1/(1+\|d\|^2)$ is a heuristic to reduce the contribution of noise in areas with high accumulated gradient, simulating the smoothing effect of erosion.
+
+## Sources
+[S1] skills/skills/shader-dev/techniques/procedural-noise.md at main ..., https://github.com/MiniMax-AI/skills/blob/main/skills/shader-dev/techniques/procedural-noise.md, fetched 2026-10-27

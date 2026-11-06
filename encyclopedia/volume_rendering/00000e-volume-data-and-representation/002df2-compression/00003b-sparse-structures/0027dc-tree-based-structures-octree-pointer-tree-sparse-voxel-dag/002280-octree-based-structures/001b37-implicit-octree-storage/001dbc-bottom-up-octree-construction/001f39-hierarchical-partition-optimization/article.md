@@ -38,66 +38,70 @@ The first term handles the case where the volume is not further partitioned; the
 ```python
 def hierarchical_partition_optimization(volume, methods, min_block_size, delta):
     # Step 1 & 2: Build maximal tree
-    # Sources do not specify tree construction details; standard recursive subdivision to min_block_size [G]
     P_max = build_full_octree(volume, min_block_size)
 
     # Step 3: Estimate costs for all nodes and methods
-    # Sources do not specify cost estimation; implement domain-specific models [G]
-    M = {}
-    E = {}
-    for node in P_max.all_nodes():
-        for method in methods:
-            M[node][method] = estimate_memory(node.block, method)
-            E[node][method] = estimate_time(node.block, method)
-
-    # Precompute overheads for partitioning
-    Delta_M = 0.0  # Additional storage space to indicate a split [S1, unofficial]
-    Delta_E_T = 0.0  # Expected time to check a node during extraction [S1, unofficial]
+    M = {node: {method: estimate_memory(node.block, method) for method in methods} for node in P_max.all_nodes()}
+    E = {node: {method: estimate_time(node.block, method) for method in methods} for node in P_max.all_nodes()}
+    Delta_M = {node: estimate_split_overhead_memory(node) for node in P_max.all_nodes()}
+    Delta_E_T = {node: estimate_split_overhead_time(node) for node in P_max.all_nodes()}
 
     # Step 4: Choose lambda sequence
-    # Sources do not specify sequence generation; use a logarithmic or linear sweep [G]
-    lambdas = generate_lambda_sequence()
-
-    results = []
+    lambdas = [0.1, 1.0, 10.0]  # Initial sequence [G]
+    results = {}
 
     # Step 5 & 6: Iterate and refine
-    for lam in lambdas:
-        optimal_costs = {}
-        optimal_assignments = {}
+    while True:
+        for lam in lambdas:
+            optimal_costs = {}
+            optimal_assignments = {}
 
-        for node in P_max.bottom_up_order():
-            # Option 1: Trivial partition (no split)
-            best_triv_cost = float('inf')
-            best_triv_method = None
-            for method in methods:
-                cost = E[node][method] + lam * M[node][method]
-                if cost < best_triv_cost:
-                    best_triv_cost = cost
-                    best_triv_method = method
+            for node in P_max.bottom_up_order():
+                # Option 1: Trivial partition (no split)
+                best_triv_cost = float('inf')
+                best_triv_method = None
+                for method in methods:
+                    cost = E[node][method] + lam * M[node][method]
+                    if cost < best_triv_cost:
+                        best_triv_cost = cost
+                        best_triv_method = method
 
-            # Option 2: Partition (split into children)
-            if node.is_leaf():
-                best_part_cost = float('inf')
-            else:
-                sum_children_costs = 0
-                for child in node.children:
-                    sum_children_costs += optimal_costs[child]
-                best_part_cost = Delta_E_T + lam * Delta_M + sum_children_costs
+                # Option 2: Partition (split into children)
+                if node.is_leaf():
+                    best_part_cost = float('inf')
+                else:
+                    sum_children_costs = sum(optimal_costs[child] for child in node.children)
+                    best_part_cost = Delta_E_T[node] + lam * Delta_M[node] + sum_children_costs
 
-            if best_triv_cost <= best_part_cost:
-                optimal_costs[node] = best_triv_cost
-                optimal_assignments[node] = ('trivial', best_triv_method)
-            else:
-                optimal_costs[node] = best_part_cost
-                optimal_assignments[node] = ('partition', None)
+                if best_triv_cost <= best_part_cost:
+                    optimal_costs[node] = best_triv_cost
+                    optimal_assignments[node] = ('trivial', best_triv_method)
+                else:
+                    optimal_costs[node] = best_part_cost
+                    optimal_assignments[node] = ('partition', None)
 
-        total_memory = compute_total_memory(P_max, optimal_assignments)
-        results.append((lam, total_memory, optimal_assignments))
+            total_memory = compute_total_memory(P_max, optimal_assignments)
+            results[lam] = (total_memory, optimal_assignments)
 
-    refined_lambdas = refine_lambda_sequence(results, delta)
-    final_result = run_optimization_with_lambdas(P_max, M, E, Delta_M, Delta_E_T, refined_lambdas)
+        # Check refinement condition
+        sorted_lambdas = sorted(results.keys())
+        needs_refinement = False
+        for i in range(len(sorted_lambdas) - 1):
+            lam_curr = sorted_lambdas[i]
+            lam_next = sorted_lambdas[i+1]
+            mem_curr = results[lam_curr][0]
+            mem_next = results[lam_next][0]
+            if mem_curr / mem_next > 1 + delta:
+                new_lam = (lam_curr + lam_next) / 2
+                if new_lam not in results:
+                    lambdas.append(new_lam)
+                    needs_refinement = True
 
-    return final_result.optimal_partition, final_result.optimal_assignment
+        if not needs_refinement:
+            break
+
+    best_lam = min(results.keys(), key=lambda l: results[l][0])
+    return results[best_lam][1]
 
 # Helper definitions
 def build_full_octree(volume, min_block_size):
@@ -112,20 +116,16 @@ def estimate_time(block, method):
     # Domain-specific time cost model [G]
     pass
 
-def generate_lambda_sequence():
-    # Standard sweep strategy (e.g., logarithmic) [G]
+def estimate_split_overhead_memory(node):
+    # Storage overhead to indicate a split at node [G]
+    pass
+
+def estimate_split_overhead_time(node):
+    # Time overhead to check node during extraction [G]
     pass
 
 def compute_total_memory(tree, assignments):
     # Recursively sum M[node][method] for trivial nodes, or children's memory for partition nodes [G]
-    pass
-
-def refine_lambda_sequence(results, delta):
-    # Insert new lambdas between existing ones where memory ratio > 1 + delta [G]
-    pass
-
-def run_optimization_with_lambdas(tree, M, E, Delta_M, Delta_E_T, lambdas):
-    # Re-runs the main loop with refined lambdas and returns final partition/assignment [G]
     pass
 ```
 
@@ -140,9 +140,9 @@ def run_optimization_with_lambdas(tree, M, E, Delta_M, Delta_E_T, lambdas):
 Restricted Adjacency Merging is a strategy for merging extracted isosurface components from adjacent spatial blocks in sparse volume rendering. It solves the problem of inefficiently merging blocks that do not share a true geometric boundary by restricting merges to only those blocks (brothers or nephews) that are adjacent in space.
 
 ## Operating characteristics
-- **Time Complexity:** The preprocessing phase runs in $O(N \cdot m \cdot L)$, where $N$ is the number of nodes in $P_{max}$, $m$ is the number of methods, and $L$ is the number of Lagrange multipliers [S1, unofficial]. Each node is processed once per lambda value.
+- **Time Complexity:** The preprocessing phase runs in $O(N \cdot m \cdot L)$, where $N$ is the number of nodes in $P_{max}$, $m$ is the number of methods, and $L$ is the number of Lagrange multipliers [S1, unofficial]. Each node is processed once per lambda value [S1, unofficial].
 - **Memory Complexity:** $O(N \cdot m)$ to store cost estimates and optimal assignments [S1, unofficial].
-- **Performance:** The method is designed for offline use. The preprocessing needs to be executed only once and can be carried out offline. Results can be stored to a file and used multiple times for different memory constraints [S1, unofficial].
+- **Performance:** The method is designed for offline use. The preprocessing needs to be executed only once and can be carried out offline [S1, unofficial]. Results can be stored to a file and used multiple times for different memory constraints [S1, unofficial].
 - **Strengths:** Provides an optimal trade-off between memory and time for a given $\lambda$. Can handle multiple extraction methods simultaneously [S1, unofficial].
 - **Limitations:** Requires prior knowledge of memory and time costs for all blocks and methods. The bottom-up approach assumes that the optimal solution for a node depends only on the optimal solutions of its children (Principle of Optimality) [S1, unofficial].
 

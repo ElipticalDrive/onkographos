@@ -1,0 +1,108 @@
+# GPU Implementation of Style Transfer Function Lookup
+
+Also called: Three-Texture Style Lookup
+
+## Overview
+This method implements the Style Transfer Function (1D) on GPU hardware by decomposing the mapping from data values and surface normals to color/opacity into three separate 1D and 3D textures. It solves the memory bandwidth and storage inefficiency of using a single 3D texture for style interpolation, allowing for efficient trilinear interpolation of styles without the high storage cost [S1]. It differs from [Mip-Mapping for Style Functions](782-mip-mapping-for-style-functions.md) by explicitly decoupling the index mapping from the style storage to avoid mipmapping artifacts, and from [Multi-dimensional Style Transfer Function (2D)](813-multi-dimensional-style-transfer-function-2d.md) by restricting the domain to 1D data values.
+
+## How it works
+**Inputs:**
+- Sample data value $s$ (e.g., density, intensity).
+- Eye-space surface normal $\mathbf{n} = (n_x, n_y, n_z)$.
+
+**Outputs:**
+- Final color $(r, g, b)$ and derived opacity $\alpha_d$.
+- Uniform opacity $\alpha_u$ (used for compositing).
+
+**Data Structures:**
+1.  **Transfer Function Texture (tft):** A 1D texture. Each entry stores a tuple $(i, \alpha_u)$.
+    -   $i$: Index value ranging from $0$ to $N-1$, where $N$ is the number of styles specified in the style transfer function. Fractional values in $i$ indicate interpolation between two discrete styles.
+    -   $\alpha_u$: Uniform opacity value.
+2.  **Index Function Texture (ift):** A 1D texture. Maps index values $i$ (range $0$ to $N-1$) to style locations $j$ (range $0$ to $M-1$) in the style function texture.
+    -   $M$: Number of distinct styles in the style transfer function.
+    -   This mapping is discrete; no interpolation is performed during lookup.
+3.  **Style Function Texture (sft):** Stores $M$ distinct styles. Each style is a 2D image (representing a lit sphere map).
+    -   Stored as a 3D texture or an alternative format to avoid mipmapping problems associated with 3D textures [S1].
+    -   Lookup coordinates are $(n_x, n_y, j)$, where $j$ is the style index.
+
+**Parameters:**
+-   $N$: Number of styles specified in the style transfer function (range of index values in `tft`).
+-   $M$: Number of distinct styles in the style transfer function (range of locations in `sft`).
+
+**Algorithm Steps:**
+1.  **Retrieve Index and Opacity:** Lookup $(i, \alpha_u) = \text{tft}(s)$ using the sample value $s$.
+2.  **Compute Interpolation Weights:** Calculate integer indices $i_0 = \lfloor i \rfloor$, $i_1 = i_0 + 1$, and the interpolation weight $w = i - i_0$.
+3.  **Retrieve Style Indices:** Lookup style indices $j_0 = \text{ift}(i_0)$ and $j_1 = \text{ift}(i_1)$.
+    -   *Pitfall:* If no style is used multiple times in the style transfer function (i.e., $N=M$ and the mapping is identity), these lookups can be skipped or optimized, as $j_0 = i_0$ and $j_1 = i_1$ [S1].
+4.  **Interpolate Style:** Perform lookups into the style function texture using the normal components $n_x, n_y$ and the style indices $j_0, j_1$. Linearly interpolate between the results:
+    $$ (r, g, b, \alpha_d) = \text{sft}(n_x, n_y, j_0) \cdot (1 - w) + \text{sft}(n_x, n_y, j_1) \cdot w $$
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def style_transfer_lookup(s, nx, ny, tft, ift, sft, N, M):
+    """
+    Perform GPU style transfer function lookup.
+    
+    Args:
+        s: Sample data value.
+        nx, ny: Components of the eye-space normal.
+        tft: 1D texture storing (index, alpha_u).
+        ift: 1D texture mapping index to style location.
+        sft: 3D texture storing M distinct 2D style images.
+        N: Number of styles in tft range.
+        M: Number of distinct styles in sft range.
+        
+    Returns:
+        (r, g, b, alpha_d, alpha_u): Color, derived opacity, and uniform opacity.
+    """
+    # Step 1: Retrieve index i and uniform opacity alpha_u from tft
+    # tft is sampled at s. It returns a vec2 or similar structure.
+    index_and_opacity = tft.sample(s)
+    i = index_and_opacity.x
+    alpha_u = index_and_opacity.y
+    
+    # Step 2: Compute interpolation weights
+    i0 = floor(i)
+    i1 = i0 + 1
+    w = i - i0
+    
+    # Step 3: Retrieve style indices j0 and j1 from ift
+    # Note: ift lookup is discrete. 
+    # Optimization: If no style is used multiple times, j0=i0, j1=i1.
+    # However, we perform the lookup as per the general method.
+    j0 = ift.sample(i0) # Returns integer style location
+    j1 = ift.sample(i1)
+    
+    # Step 4: Interpolate style colors
+    # sft is sampled at (nx, ny, j). 
+    # Assuming sft returns vec4 (r, g, b, alpha_d)
+    style0 = sft.sample(nx, ny, j0)
+    style1 = sft.sample(nx, ny, j1)
+    
+    # Linear interpolation
+    r = style0.r * (1.0 - w) + style1.r * w
+    g = style0.g * (1.0 - w) + style1.g * w
+    b = style0.b * (1.0 - w) + style1.b * w
+    alpha_d = style0.a * (1.0 - w) + style1.a * w
+    
+    return (r, g, b, alpha_d, alpha_u)
+```
+
+**Edge Cases and Pitfalls:**
+-   **Boundary Conditions:** Ensure $s$ is clamped to the valid range of `tft` to avoid out-of-bounds sampling.
+-   **Index Mapping:** If $N > M$, multiple $i$ values map to the same $j$. The `ift` texture handles this. If $N=M$ and the mapping is 1:1, `ift` lookups are redundant but harmless.
+-   **Mipmapping:** Using a 3D texture for `sft` can cause mipmapping artifacts if not handled correctly. An alternative storage format (e.g., a 2D texture array or a 1D texture with manual indexing) may be required to avoid these issues [S1].
+
+## Operating characteristics
+-   **Memory Complexity:** The memory usage is $O(N + M \cdot \text{style\_size})$, where $\text{style\_size}$ is the size of one 2D style image. This is significantly lower than a single 3D texture which would require $O(N \cdot \text{style\_size})$ if storing all styles for all indices, or $O(N \cdot M \cdot \text{style\_size})$ if storing a full 3D volume of styles.
+-   **Performance:** Requires three texture lookups per sample (one for `tft`, one or two for `ift`, and two for `sft`). The `ift` lookup can be optimized if the mapping is identity.
+-   **Strengths:** Avoids high storage requirements of 3D textures; allows efficient interpolation between discrete styles; leverages native trilinear interpolation for style blending.
+-   **Limitations:** Requires careful handling of `sft` storage to avoid mipmapping issues; discrete nature of `ift` means style changes are not smooth unless interpolated via `tft` indices.
+
+## Background
+This method was introduced in the context of illustrative volume rendering to provide artists with control over the visual appearance of volume data. It extends the concept of 1D transfer functions by incorporating surface normals to drive style variations (e.g., lighting effects) while maintaining memory efficiency. The approach was developed to address the impracticality of using a single 3D texture for style interpolation due to high storage requirements [S1].
+
+## Sources
+[S1] Style Transfer Functions for Illustrative Volume Rendering, https://doi.org/10.1111/j.1467-8659.2007.01095.x, fetched 2026-10-26

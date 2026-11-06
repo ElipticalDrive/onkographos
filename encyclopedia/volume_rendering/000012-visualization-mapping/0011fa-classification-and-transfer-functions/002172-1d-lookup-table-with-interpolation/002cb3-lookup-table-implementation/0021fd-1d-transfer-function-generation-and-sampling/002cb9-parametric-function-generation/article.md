@@ -1,56 +1,77 @@
 # Parametric Function Generation
 
-Also called: Analytic Transfer Functions, Parametric Color Mapping
 
 ## Overview
-Parametric Function Generation constructs transfer functions (TFs) by evaluating analytic mathematical functions rather than interpolating discrete control points. It solves the problem of creating smooth, continuous, and often perceptually uniform color gradients or localized highlights without the manual tuning required by piecewise linear or Gaussian bump methods. It is distinguished from its parent [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by replacing the key-value pair interpolation with closed-form expressions, and from siblings like [Voxel Color Mapping](2970-voxel-color-mapping.md) by its reliance on global parametric definitions rather than local voxel properties.
+Parametric Function Generation constructs transfer functions by evaluating mathematical functions of a scalar input to determine RGBA output values, rather than relying on piecewise linear interpolation between discrete control points. It solves the problem of defining smooth, continuous, and often perceptually optimized color mappings with a compact set of parameters. It differs from its siblings by using explicit analytical formulas (such as cosines, Gaussians, or sigmoids) to define the color space trajectory, offering a global, oscillating, or localized basis for color transitions instead of the local linear segments of [Voxel Color Mapping](2970-voxel-color-mapping.md) or the fixed palettes of [Colormap LUT Generation](7229-colormap-lut-generation.md).
 
 ## Shared principles
-The family shares the mechanism of mapping a scalar input $t \in [0, 1]$ (representing normalized data values such as density or temperature) to an output color vector $\mathbf{c} \in [0, 1]^3$ and/or opacity $\alpha \in [0, 1]$ via a deterministic function $f(t)$.
+The family shares the mechanism of mapping a normalized scalar input $t \in [0, 1]$ to an RGBA vector $\mathbf{C}$ via a parametric equation. The input $t$ is typically derived from volume data values normalized to the domain $[0, 1]$ by the parent method [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md).
 
-1.  **Analytic Continuity**: Unlike discrete lookup tables built from splines, the output is differentiable almost everywhere. This ensures smooth color transitions without the "kinks" inherent in low-order polynomial interpolation.
-2.  **Parameterization**: The function is defined by a small set of constant vectors or scalars (e.g., amplitude, frequency, phase, center, width). These parameters define the shape of the transfer function.
-3.  **Component-wise Evaluation**: In the most common implementations (e.g., Cosine Palette), the RGB channels are computed independently using the same scalar input $t$ but with different phase/frequency offsets. This creates complex, non-repeating color patterns from simple periodic functions.
-4.  **Normalization**: Outputs are typically clamped to $[0, 1]$. In additive models (like Gaussian TFs), normalization steps may be required to prevent color overflow when multiple basis functions overlap.
+The core mathematical structure for the RGB channels is generally:
+$$ \mathbf{C}_{rgb} = f(t; \mathbf{p}) $$
+where $\mathbf{p}$ represents a set of parameters (vectors or scalars) that control the shape, amplitude, frequency, and phase of the function. The alpha channel $A$ is often treated separately or derived from the same parametric logic, though in some variants (like Cosine Palette) it is constant or handled by a separate function.
+
+Key shared implementation details include:
+1.  **Normalization**: The input scalar must be clamped or normalized to $[0, 1]$ to ensure the parametric function behaves predictably within its defined domain [G].
+2.  **Component-wise Operation**: For multi-channel outputs (RGB), the function is applied component-wise using parameter vectors $\mathbf{a}, \mathbf{b}, \mathbf{c}$, etc., where each component corresponds to Red, Green, or Blue [S1, unofficial].
+3.  **Clamping**: The resulting RGB values are clamped to $[0, 1]$ to handle numerical precision issues or out-of-bounds results from the parametric evaluation [G].
+4.  **Normalization (Specific to Gaussian)**: In methods using additive basis functions (like Gaussians), RGB channels may be normalized by their maximum sum to prevent overflow and ensure perceptual consistency [S1, unofficial].
 
 ## Subtopics
 
 ### [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md)
-Generates a smooth, perceptually uniform color gradient from a scalar input value using a parametric cosine function. It is distinguished from sibling methods like the Gaussian Transfer Function by its analytic, periodic nature and lack of explicit peak definitions, relying instead on phase-shifted cosine waves to create distinct color bands. It is chosen when a continuous, rainbow-like but perceptually improved gradient is needed without defining specific data ranges for highlighting.
+- **What it is**: Generates smooth, perceptually distinct color gradients from a scalar input using a parametric cosine function with specific vector parameters.
+- **Difference**: Unlike [Gaussian Transfer Function](4408-gaussian-transfer-function.md) which uses bell curves for localized highlighting, this method uses a single cosine wave per channel to create global, oscillating color transitions. It differs from [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md) by providing a multi-channel color palette rather than a single-channel scalar mapping.
+- **When to choose**: When a visually rich, continuous, and non-monochromatic gradient is required without the complexity of multi-component basis functions or piecewise linear control points.
+- **Link**: [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md)
 
 ### [Gaussian Transfer Function](4408-gaussian-transfer-function.md)
-Constructs a 4-channel RGBA lookup table (LUT) using three Gaussian bumps to map scalar values to color and opacity. It differs from sibling methods like [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md) by using parametric Gaussian distributions centered at specific scalar positions rather than a fixed palette, allowing for localized highlighting of specific data ranges. It is chosen when the user needs to emphasize specific scalar values (e.g., tissue types in medical imaging) while suppressing others.
+- **What it is**: Constructs a 4-channel RGBA transfer function texture using three Gaussian bumps to control opacity and color contribution based on scalar value position.
+- **Difference**: Explicitly normalizes RGB channels by their maximum sum to prevent overflow and ensures smooth, differentiable transitions via Gaussian basis functions, unlike the piecewise or sigmoidal approaches of [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md) or the palette-based mapping of [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md).
+- **When to choose**: When localized highlighting of specific scalar ranges is needed with smooth, bell-shaped transitions for both color and opacity.
+- **Link**: [Gaussian Transfer Function](4408-gaussian-transfer-function.md)
+
+### [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md)
+- **What it is**: Computes the logistic sigmoid function and its analytical derivative for scalar inputs. It is used in volume rendering transfer function generation to map normalized scalar values to opacity or color intensity with smooth, differentiable transitions.
+- **Difference**: Uses a monotonic S-shaped curve rather than the bell-shaped curve of [Gaussian Transfer Function](4408-gaussian-transfer-function.md), and provides a single-channel scalar mapping rather than the multi-channel color palette of [Cosine Palette Color Mapping](3359-cosine-palette-color-mapping.md).
+- **When to choose**: When a smooth, monotonic transition (e.g., for opacity ramps or thresholding) is required, and the derivative is needed for optimization or gradient-based methods.
+- **Link**: [Sigmoid Function with Jacobian](6497-sigmoid-function-with-jacobian.md)
 
 ### Rainbow Transfer Function Preset
-**Definition**
-Generates a transfer function initialized with a 7-segment rainbow color map spanning $[0, 1]$, with no Gaussian objects [S1, unofficial].
-
-**Step**
-1. Create TF with given resolution.
-2. Clear existing controls.
-3. Add 7 ColorControls at positions $0/6, 1/6, 2/6, 3/6, 4/6, 5/6, 6/6$.
-4. Assign RGB values: $(0, 0.364706, 1)$, $(0, 1, 0.976471)$, $(0, 1, 0.105882)$, $(0.968627, 1, 0)$, $(1, 0.490196, 0)$, $(1, 0, 0)$, $(0.662745, 0, 1)$.
-5. Clear Gaussian objects.
-6. Call `updateColorMap()` [S1, unofficial].
+- **Definition**: Generates a transfer function initialized with a 7-segment rainbow color map spanning $[0, 1]$, with no Gaussian objects [S1, unofficial].
+- **Steps**:
+    1. Create TF with given resolution.
+    2. Clear existing controls.
+    3. Add 7 ColorControls at positions $0/6, 1/6, 2/6, 3/6, 4/6, 5/6, 6/6$.
+    4. Assign RGB values: $(0, 0.364706, 1)$, $(0, 1, 0.976471)$, $(0, 1, 0.105882)$, $(0.968627, 1, 0)$, $(1, 0.490196, 0)$, $(1, 0, 0)$, $(0.662745, 0, 1)$.
+    5. Clear Gaussian objects.
+    6. Call `updateColorMap()` [S1, unofficial].
+- **Link**: See [Colormap LUT Generation](7229-colormap-lut-generation.md) for general LUT generation context.
 
 ### Style Function Animation
-**Definition**
-A time-varying coefficient function $S(t)$ used to modify rendering style, providing smooth transitions based on user interaction start/stop events [S2, unofficial].
+- **Definition**: A time-varying coefficient function $S(t)$ used to modify rendering style, providing smooth transitions based on user interaction start/stop events [S2, unofficial].
+- **Steps**:
+    - For rotation, the style function value is the same for the whole object [S2, unofficial].
+    - For zooming, a spatially-dependent factor is transferred: style parameters are adjusted so that the closer a voxel's projection is to the interaction point, the higher the style-function value is [S2, unofficial].
+- **Formula**:
+    $$ S(t_{current}) = S(t_{start}) \cdot e^{-(t_{current} - t_{start})} + S(t_{dest}) \cdot (1 - e^{-(t_{current} - t_{start})}) $$
+    where $S(t_{current})$ is the current style function value, $S(t_{start})$ is the value before interaction start/end, $S(t_{dest})$ is 0 if interaction stopped and 1 if started, $t_{current}$ is current time, and $t_{start}$ is start time [S2, unofficial].
+- **Parameters**: Output range is a floating point value in interval $[0, 1]$. 0 corresponds to no interaction, 1 to very long interaction [S2, unofficial].
+- **Link**: See [Dynamic Focus+Context for Volume Rendering](2689-1d-transfer-function-generation-and-sampling.md) for interaction context.
 
-**Step**
-- For rotation, the style function value is the same for the whole object [S2, unofficial].
-- For zooming, a spatially-dependent factor is transferred: style parameters are adjusted so that the closer a voxel's projection is to the interaction point, the higher the style-function value is [S2, unofficial].
-
-**Formula**
-$$ S(t_{current}) = S(t_{start}) \cdot e^{-(t_{current} - t_{start})} + S(t_{dest}) \cdot (1 - e^{-(t_{current} - t_{start})}) $$
-where $S(t_{current})$ is the current style function value, $S(t_{start})$ is the value before interaction start/end, $S(t_{dest})$ is 0 if interaction stopped and 1 if started, $t_{current}$ is current time, and $t_{start}$ is start time [S2, unofficial].
-
-**Parameter**
-Output range: Floating point value in interval $[0, 1]$. 0 corresponds to no interaction, 1 to very long interaction [S2, unofficial].
+### Random Transfer Function Generation
+- **Definition**: Generates a random transfer function LUT [S3, unofficial].
+- **Steps**:
+    1. Clear the LUT.
+    2. Iterate `i` from 0 to `n_bins - 1`. If `i == 0`, push `glm::vec4(0)`. Otherwise, push `glm::vec4(randf(), randf(), randf(), randf())`.
+    3. Call `upload_gpu()` [S3, unofficial].
+- **Parameters**: `n_bins`: Number of bins. Default value is 8 [S3, unofficial].
+- **Link**: See [Colormap LUT Generation](7229-colormap-lut-generation.md) for LUT structure.
 
 ## Background
-The concept of parametric color mapping in volume rendering gained prominence through the work of Inigo Quilez, who popularized the "Cosine Palette" for procedural shading in computer graphics [S1, unofficial]. This approach was adapted for volume rendering transfer functions to provide perceptually uniform gradients that avoid the pitfalls of standard rainbow colormaps. The Gaussian Transfer Function approach relies on the superposition of basis functions, a technique common in signal processing and image blending, applied here to scalar-to-color mapping [S1, unofficial]. The Style Function Animation technique was introduced by Sikachev, Rautek, Bruckner, and Gröller in 2010 to support dynamic focus+context interactions in volume rendering, allowing the rendering style to evolve smoothly with user input [S2, unofficial].
+Parametric function generation in volume rendering transfer functions has evolved from simple piecewise linear interpolation to more sophisticated analytical models. The use of Gaussian basis functions allows for localized, smooth highlighting of scalar ranges, a technique popularized in early volume rendering systems for its differentiability and ease of parameterization [S1, unofficial]. Cosine palettes, derived from techniques in procedural texture generation (such as those by Inigo Quilez), offer a compact way to generate perceptually uniform color gradients without the need for multiple control points [S1, unofficial]. The sigmoid function is widely used for its monotonic properties and analytical derivative, useful in optimization-based transfer function design [S1, unofficial]. Style functions using exponential decay for interaction-based rendering were introduced to provide smooth visual transitions during user interaction, such as zooming or rotating [S2, unofficial]. Random generation is often used for testing or procedural visualization [S3, unofficial].
 
 ## Sources
 [S1] wilsonCernWq/TransferFunctionModule, https://github.com/wilsonCernWq/TransferFunctionModule, fetched 2026-10-27 (unofficial)
 [S2] (PDF) Dynamic Focus+Context for Volume Rendering - ResearchGate, https://www.researchgate.net/publication/220839241_Dynamic_FocusContext_for_Volume_Rendering, fetched 2026-10-27 (unofficial)
+[S3] nihofm/volren: Simple OpenGL-based renderer for ..., https://github.com/nihofm/volren, fetched 2026-10-29 (unofficial)

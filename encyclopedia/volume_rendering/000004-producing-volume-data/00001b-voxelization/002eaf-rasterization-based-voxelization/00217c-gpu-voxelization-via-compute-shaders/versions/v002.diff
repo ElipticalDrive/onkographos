@@ -1,0 +1,414 @@
+--- v001.md
++++ v002.md
+@@ -4,85 +4,173 @@
+ 
+ ## Overview
+-GPU Voxelization via Compute Shaders is a family of techniques that convert 3D triangle meshes into a uniform 3D voxel grid by leveraging the parallel processing power of the GPU. Unlike traditional rasterization-based voxelization which projects triangles into the grid via rendering pipelines, compute shader methods typically use explicit geometric tests or specialized kernels to determine voxel occupancy [S1, unofficial][S3]. The approach solves the problem of generating volumetric data for ray marching or other volume rendering techniques with high throughput [S1, unofficial]. It differs from [Rasterization-based Voxelization](2520-rasterization-based-voxelization.md) by decoupling the intersection logic from the graphics pipeline's fixed-function rasterizer, allowing for custom intersection tests and atomic operations on 3D textures or buffers [S1, unofficial][S3].
++GPU Voxelization via Compute Shaders converts a triangle mesh into a voxel grid by parallelizing geometric intersection tests or rasterization steps across GPU compute threads [S1, unofficial][S2, unofficial][S3]. It differs from [Rasterization-based Voxelization](908-rasterization-based-voxelization.md) by explicitly managing voxel occupancy and attributes via compute kernels (e.g., SAT or plane tests) or by using compute shaders to drive the accumulation of rasterized fragments, avoiding the limitations of fixed-function depth buffers for complex surface reconstruction [S1, unofficial][S3].
+ 
+ ## How it works
+-The implementation varies between two primary architectural patterns found in the sources: a Direct3D 11/12 rasterization-assisted approach (AHD/VoxelizerX12) and a pure compute shader geometric approach (GPU Boxelizer). Both share common preprocessing steps but diverge in the core voxelization kernel.
++The method generally follows a two-phase or single-pass compute approach, depending on the specific implementation variant (AHD, VoxelizerX12, or GPU Boxelizer). The core logic involves preparing resources, calculating grid bounds, and dispatching compute kernels to determine voxel occupancy.
+ 
+ ### Inputs and Outputs
+ **Inputs:**
+-*   Triangle mesh data: Vertex positions (3 floats), optional normals, indices (16 or 32-bit integers) [S1, unofficial][S3].
+-*   Grid parameters: Resolution ($N_x, N_y, N_z$), bounding box bounds ($\mathbf{Start}, \mathbf{End}$), and voxel unit size ($u$) [S3].
+-*   Optional: Texture maps for color/normal mapping [S1, unofficial].
++*   Triangle mesh data: Vertex positions (3 floats), normals (3 floats, optional), indices (uint16 or uint32).
++*   Grid parameters: Resolution ($N_x, N_y, N_z$), bounding box center, and voxel size (unit).
++*   View/Projection matrices (for rasterization variants) or geometric transforms (for intersection variants).
+ 
+ **Outputs:**
+-*   A 3D grid of voxels. Depending on the variant, this is stored as:
+-    *   A 1D `ComputeBuffer` or `RWTexture3D` of `Voxel_t` structures [S3].
+-    *   A UAV buffer of `Voxel` structs with an initial count pass [S1, unofficial].
+-    *   Multiple `Texture3D` grids if mutexing is required [S2, unofficial].
++*   A voxel grid: A 1D array of `Voxel_t` structures representing the 3D grid, stored linearly to optimize GPU access [S3].
++*   Occupancy flags, surface normals, and optional attributes (color, texture coordinates) [S1, unofficial][S3].
+ 
+ ### Data Structures
+-
+-**1. Voxel Resource (AHD/D3D11)**
+-*   `mVertexBuffer`: `ID3D11Buffer` containing vertex data.
+-*   `mIndexBuffer`: `ID3D11Buffer` containing index data.
+-*   `mAABB`: Axis-Aligned Bounding Box of the mesh.
+-*   `mVertexStride`: Byte size of a vertex.
+-*   `mIndexStride`: 2 or 4 bytes [S1, unofficial].
+-
+-**2. Voxel_t Structure (GPU Boxelizer)**
+-*   Stored in a 1D `ComputeBuffer` of size $W \times H \times D$.
+-*   Fields: Occupancy flag, surface attributes (color, normal) [S3].
+-*   Index calculation: $idx = x + y \cdot W + z \cdot W \cdot H$ [S3].
+-
+-**3. Constant Buffers**
+-*   **AHD `EffectParameter`**: `bcount` (bool), `world` (matrix), `width/height/depth` (float), `views` (array of 4 matrices) [S1, unofficial].
+-*   **GPU Boxelizer Uniforms**: `_Start`, `_End`, `_Size` (Vector3); `_Unit`, `_InvUnit`, `_HalfUnit` (float); `_Width`, `_Height`, `_Depth` (int) [S3].
+-
+-### Preprocessing (Common)
+-1.  **Bounding Box Calculation**: Compute the AABB of the input mesh. Determine the center $\mathbf{c}$ and max dimension $L_{max}$ [S1, unofficial][S3].
+-2.  **Grid Dimensions**:
+-    *   Calculate voxel unit size: $u = L_{max} / \text{resolution}$ [S3].
+-    *   Expand bounds by one unit to ensure coverage: $\mathbf{Start} = \mathbf{min} - u$, $\mathbf{End} = \mathbf{max} + u$ [S3].
+-    *   Calculate grid dimensions: $W = \lceil (\mathbf{End}_x - \mathbf{Start}_x) / u \rceil$, similarly for $H, D$ [S3].
+-3.  **Buffer Allocation**: Create GPU buffers for vertices, indices, and the voxel grid [S1, unofficial][S3].
+-
+-### Variant 1: Two-Pass Rasterization-Assisted (AHD / VoxelizerX12)
+-This method uses the graphics pipeline to count voxels and then writes them, often using depth peeling for solid voxelization [S1, S2, unofficial].
+-
+-1.  **Pass 1: Count**:
+-    *   Render the scene to a UAV counter buffer with `bcount=true` [S1, unofficial].
+-    *   Use 4 orthographic views along principal axes (X, Y, Z) to project triangles [S1, unofficial].
+-    *   Read back the total voxel count `numVoxels` to CPU [S1, unofficial].
+-2.  **Allocation**:
+-    *   Allocate a UAV buffer of size `numVoxels * sizeof(Voxel)` [S1, unofficial].
+-3.  **Pass 2: Write**:
+-    *   Render the scene again with `bcount=false` to write voxel data into the allocated buffer [S1, unofficial].
+-    *   For solid voxelization, use depth peeling to fill interior voxels [S2, unofficial].
+-
+-### Variant 2: Pure Compute Shader Geometric (GPU Boxelizer)
+-This method uses explicit geometric containment tests within compute kernels [S3].
+-
+-1.  **Dispatch SurfaceFront Kernel**:
+-    *   Launch compute shader with thread group size $(\lceil \text{triangleCount} / \text{ThreadX} \rceil, 1, 1)$ [S3].
+-    *   Each thread processes one triangle.
+-2.  **SurfaceFront Kernel Logic**:
+-    *   Retrieve triangle vertices $\mathbf{v}_0, \mathbf{v}_1, \mathbf{v}_2$ from buffers [S3].
+-    *   Determine front/back facing: $\mathbf{n} = \text{normalize}((\mathbf{v}_1-\mathbf{v}_0) \times (\mathbf{v}_2-\mathbf{v}_1))$. If $\mathbf{n} \cdot (0,0,1) > 0$, it is front-facing [S3].
+-    *   If back-facing, return [S3].
+-    *   Calculate triangle AABB in voxel space.
+-    *   Iterate through all voxels in the AABB.
+-    *   Perform plane intersection test: Check if the voxel center lies on the correct side of the triangle plane [S3].
+-    *   Write to voxel buffer using atomic operations if necessary [S3].
+-3.  **Dispatch SurfaceBack Kernel**:
+-    *   Launch with same dimensions [S3].
+-    *   Process only back-facing triangles. This order (Front then Back) allows back-facing flags to override front-facing flags in case of collision, resolving race conditions [S3].
+-4.  **Dispatch Volume Kernel**:
+-    *   Launch with thread group size $(\lceil W/\text{ThreadX} \rceil, \lceil H/\text{ThreadY} \rceil, \lceil D/\text{ThreadZ} \rceil)$ [S3].
+-    *   Iterate through all lattice coordinates $(x,y,z)$.
+-    *   Fill interior voxels based on surface occupancy [S3].
+-
+-### Pseudocode (GPU Boxelizer Variant)
++**Voxel_t (Logical 3D, Physical 1D):**
++The voxel grid is allocated as a 1D `ComputeBuffer` of size $W \times H \times D$ [S3].
++*   `x, y, z`: Integer coordinates within the grid.
++*   `front`: Boolean flag indicating if the voxel is intersected by a front-facing triangle [S3].
++*   `back`: Boolean flag indicating if the voxel is intersected by a back-facing triangle [S3].
++*   `color`: Optional attribute (e.g., `float4`) [S1, unofficial].
++*   `normal`: Optional attribute (e.g., `float3`) [S3].
++
++**Constant Buffers (Uniforms):**
++*   `_Start, _End, _Size`: `Vector3` defining the spatial bounds and dimensions of the voxel grid [S3].
++*   `_Unit, _InvUnit, _HalfUnit`: `float` values for voxel size, inverse voxel size, and half-voxel size ($0.5 \times \text{unit}$) [S3].
++*   `_Width, _Height, _Depth`: `int` dimensions of the grid [S3].
++*   `_TriangleCount`: `int` number of triangles in the mesh [S3].
++*   `World, View, Projection`: Matrices for transforming vertices to clip space [S1, unofficial].
++*   `bcount`: `bool` flag to switch between counting pass and writing pass (AHD specific) [S1, unofficial].
++
++**Buffers:**
++*   `Vertex Buffer`: `ComputeBuffer` of `Vector3`, size equal to mesh vertex count [S3].
++*   `Triangle Index Buffer`: `ComputeBuffer` of `int`, size equal to mesh index count (3 indices per triangle) [S3].
++*   `Voxel Buffer`: `RWBuffer` or `RWTexture3D` for reading/writing voxel data [S1, unofficial][S3].
++
++### Steps
++
++1.  **Resource Preparation:**
++    *   Load mesh vertices and indices into GPU buffers [S3].
++    *   Compute the Axis-Aligned Bounding Box (AABB) of the mesh [S1, unofficial][S3].
++    *   Calculate the grid dimensions:
++        $$ \text{maxLength} = \max(\text{bounds.size.x}, \text{bounds.size.y}, \text{bounds.size.z}) $$
++        $$ \text{unit} = \frac{\text{maxLength}}{\text{resolution}} $$
++        $$ \text{start} = \text{bounds.min} - \text{unit} \cdot (1, 1, 1) $$
++        $$ \text{end} = \text{bounds.max} + \text{unit} \cdot (1, 1, 1) $$
++        $$ W = \lceil \frac{\text{end.x} - \text{start.x}}{\text{unit}} \rceil, \quad H = \lceil \frac{\text{end.y} - \text{start.y}}{\text{unit}} \rceil, \quad D = \lceil \frac{\text{end.z} - \text{start.z}}{\text{unit}} \rceil $$
++        [S3]
++    *   For AHD: Compute translation matrix to center AABB at origin: $M_{\text{trans}} = \text{XMMatrixTranslation}(-\text{center})$ [S1, unofficial].
++
++2.  **Dispatch Surface Kernels (Intersection-Based):**
++    *   **SurfaceFront:** Dispatch compute shader with thread group size $(\lceil \text{TriangleCount} / \text{ThreadX} \rceil, 1, 1)$ [S3]. Each thread processes one triangle.
++        *   Retrieve triangle vertices from buffers [S3].
++        *   Determine front/back face based on normal dot product with view direction (e.g., $(0,0,1)$) [S3].
++        *   If front-facing, calculate triangle AABB, map to voxel grid indices, clamp to grid bounds, and iterate through voxels to check intersection (e.g., using SAT or plane tests) [S3].
++        *   Set `front` flag in voxel data [S3].
++    *   **SurfaceBack:** Dispatch compute shader with same dimensions [S3].
++        *   Process only back-facing triangles [S3].
++        *   Set `back` flag in voxel data [S3].
++        *   *Note:* Back-facing triangles override front-facing flags if both intersect the same voxel, resolving race conditions [S3].
++
++3.  **Dispatch Volume Kernel (Interior Filling):**
++    *   Dispatch compute shader with thread group size $(\lceil W / \text{ThreadX} \rceil, \lceil H / \text{ThreadY} \rceil, \lceil D / \text{ThreadZ} \rceil)$ [S3].
++    *   Each thread processes one voxel coordinate.
++    *   Check if the voxel is inside the mesh (e.g., ray casting or parity check) and fill interior voxels [S3].
++
++4.  **Rasterization-Based Variant (AHD/VoxelizerX12):**
++    *   **Pass 1 (Count):** Render scene to a UAV counter buffer with `bcount=true` [S1, unofficial]. This counts the total number of voxels generated. Read back count to CPU [S1, unofficial].
++    *   **Allocate Output:** Create UAV buffer of size `numVoxels * sizeof(Voxel)` [S1, unofficial].
++    *   **Pass 2 (Write):** Render scene to allocated UAV buffer with `bcount=false` [S1, unofficial].
++    *   **Views:** Use 4 orthographic views along principal axes (X, Y, Z) [S1, unofficial].
++        *   View 1: Eye=0, Dir=X, Up=Y
++        *   View 2: Eye=0, Dir=Y, Up=Z
++        *   View 3: Eye=0, Dir=Z, Up=Y (Non-standard, but implemented) [S1, unofficial]
++        *   View 4: (Implicitly required for full coverage, typically Dir=-X or similar) [S1, unofficial]
++    *   **Projection:** Orthographic projection matrix:
++        $$ P = \text{XMMatrixOrthographicOffCenterLH}(-\text{half}, \text{half}, -\text{half}, \text{half}, -\text{half}, \text{half}) $$
++        where $\text{half} = \text{length} / 2$ [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
++# GPU Voxelization via Compute Shaders (Intersection-Based Variant)
++
++def voxelize_compute(mesh, resolution):
++    # 1. Prepare Resources
++    vertices = mesh.vertices  # List of Vector3
++    indices = mesh.triangles  # List of int (3 per triangle)
++    triangle_count = len(indices) // 3
++    
++    # 2. Calculate Grid Parameters
++    bounds = mesh.bounds
++    max_length = max(bounds.size.x, bounds.size.y, bounds.size.z)
++    unit = max_length / resolution
++    half_unit = unit * 0.5
++    
++    start = bounds.min - Vector3(unit, unit, unit)
++    end = bounds.max + Vector3(unit, unit, unit)
++    size = end - start
++    
++    width = ceil(size.x / unit)
++    height = ceil(size.y / unit)
++    depth = ceil(size.z / unit)
++    
++    # 3. Allocate Voxel Buffer (1D array)
++    voxel_buffer = ComputeBuffer(width * height * depth, sizeof(Voxel_t))
++    
++    # 4. Dispatch SurfaceFront Kernel
++    thread_x = 8  # Example thread group size
++    dispatch_x = ceil(triangle_count / thread_x)
++    dispatch_y = 1
++    dispatch_z = 1
++    
++    kernel_surface_front = ComputeShaderKernel("SurfaceFront")
++    kernel_surface_front.set_buffer("_VoxelBuffer", voxel_buffer)
++    kernel_surface_front.set_buffer("_VertBuffer", vertices)
++    kernel_surface_front.set_buffer("_TriBuffer", indices)
++    kernel_surface_front.set_int("_TriangleCount", triangle_count)
++    kernel_surface_front.set_vector("_Start", start)
++    kernel_surface_front.set_vector("_End", end)
++    kernel_surface_front.set_float("_Unit", unit)
++    kernel_surface_front.set_float("_InvUnit", 1.0 / unit)
++    kernel_surface_front.set_float("_HalfUnit", half_unit)
++    kernel_surface_front.set_int("_Width", width)
++    kernel_surface_front.set_int("_Height", height)
++    kernel_surface_front.set_int("_Depth", depth)
++    
++    kernel_surface_front.dispatch(dispatch_x, dispatch_y, dispatch_z)
++    
++    # 5. Dispatch SurfaceBack Kernel
++    kernel_surface_back = ComputeShaderKernel("SurfaceBack")
++    kernel_surface_back.set_buffer("_VoxelBuffer", voxel_buffer)
++    kernel_surface_back.set_buffer("_VertBuffer", vertices)
++    kernel_surface_back.set_buffer("_TriBuffer", indices)
++    kernel_surface_back.set_int("_TriangleCount", triangle_count)
++    kernel_surface_back.set_vector("_Start", start)
++    kernel_surface_back.set_vector("_End", end)
++    kernel_surface_back.set_float("_Unit", unit)
++    kernel_surface_back.set_float("_InvUnit", 1.0 / unit)
++    kernel_surface_back.set_float("_HalfUnit", half_unit)
++    kernel_surface_back.set_int("_Width", width)
++    kernel_surface_back.set_int("_Height", height)
++    kernel_surface_back.set_int("_Depth", depth)
++    
++    kernel_surface_back.dispatch(dispatch_x, dispatch_y, dispatch_z)
++    
++    # 6. Dispatch Volume Kernel (Interior Filling)
++    kernel_volume = ComputeShaderKernel("Volume")
++    kernel_volume.set_buffer("_VoxelBuffer", voxel_buffer)
++    kernel_volume.set_vector("_Start", start)
++    kernel_volume.set_vector("_End", end)
++    kernel_volume.set_float("_Unit", unit)
++    kernel_volume.set_float("_InvUnit", 1.0 / unit)
++    kernel_volume.set_float("_HalfUnit", half_unit)
++    kernel_volume.set_int("_Width", width)
++    kernel_volume.set_int("_Height", height)
++    kernel_volume.set_int("_Depth", depth)
++    
++    dispatch_vol_x = ceil(width / 8)
++    dispatch_vol_y = ceil(height / 8)
++    dispatch_vol_z = ceil(depth / 8)
++    
++    kernel_volume.dispatch(dispatch_vol_x, dispatch_vol_y, dispatch_vol_z)
++    
++    # 7. Read Back Results
++    voxel_data = voxel_buffer.read_back()
++    return voxel_data
++
+ # Compute Shader Kernel: SurfaceFront
+ [numthreads(8, 1, 1)]
+@@ -90,45 +178,56 @@
+     int idx = id.x;
+     if (idx >= _TriangleCount) return;
+-
+-    // Get triangle vertices and front/back flag
++    
+     float3 va, vb, vc;
+     bool front;
+     get_triangle(idx, va, vb, vc, front);
+-
+-    // Skip back-facing triangles
++    
+     if (!front) return;
+-
+-    // Calculate triangle AABB in voxel space
++    
++    surface(va, vb, vc, front);
++}
++
++# Helper: get_triangle
++void get_triangle(int idx, out float3 va, out float3 vb, out float3 vc, out bool front) {
++    int i0 = _TriBuffer[idx * 3];
++    int i1 = _TriBuffer[idx * 3 + 1];
++    int i2 = _TriBuffer[idx * 3 + 2];
++    
++    va = _VertBuffer[i0];
++    vb = _VertBuffer[i1];
++    vc = _VertBuffer[i2];
++    
++    float3 normal = normalize(cross(vb - va, vc - vb));
++    front = dot(normal, float3(0, 0, 1)) > 0;
++}
++
++# Helper: surface
++void surface(float3 va, float3 vb, float3 vc, bool front) {
++    // Calculate triangle AABB
+     float3 min_v = min(va, min(vb, vc));
+     float3 max_v = max(va, max(vb, vc));
+     
+-    // Map to voxel indices
+-    int ix_min = floor((min_v.x - _Start.x) * _InvUnit);
+-    int iy_min = floor((min_v.y - _Start.y) * _InvUnit);
+-    int iz_min = floor((min_v.z - _Start.z) * _InvUnit);
+-    int ix_max = floor((max_v.x - _Start.x) * _InvUnit);
+-    int iy_max = floor((max_v.y - _Start.y) * _InvUnit);
+-    int iz_max = floor((max_v.z - _Start.z) * _InvUnit);
+-
++    // Map to voxel grid indices
++    int3 min_idx = floor((min_v - _Start) * _InvUnit);
++    int3 max_idx = floor((max_v - _Start) * _InvUnit);
++    
+     // Clamp to grid bounds
+-    ix_min = max(0, ix_min); iy_min = max(0, iy_min); iz_min = max(0, iz_min);
+-    ix_max = min(_Width - 1, ix_max); iy_max = min(_Height - 1, iy_max); iz_max = min(_Depth - 1, iz_max);
+-
+-    // Iterate through voxels in AABB
+-    for (int z = iz_min; z <= iz_max; z++) {
+-        for (int y = iy_min; y <= iy_max; y++) {
+-            for (int x = ix_min; x <= ix_max; x++) {
+-                // Calculate voxel center
+-                float3 voxel_center = _Start + float3(x + 0.5f, y + 0.5f, z + 0.5f) * _Unit;
++    min_idx = clamp(min_idx, int3(0, 0, 0), int3(_Width - 1, _Height - 1, _Depth - 1));
++    max_idx = clamp(max_idx, int3(0, 0, 0), int3(_Width - 1, _Height - 1, _Depth - 1));
++    
++    // Iterate through voxels and check intersection
++    for (int z = min_idx.z; z <= max_idx.z; z++) {
++        for (int y = min_idx.y; y <= max_idx.y; y++) {
++            for (int x = min_idx.x; x <= max_idx.x; x++) {
++                int3 voxel_coord = int3(x, y, z);
++                float3 voxel_center = _Start + (voxel_coord + 0.5) * _Unit;
+                 
+-                // Plane intersection test
+-                // Check if voxel center is on the front side of the triangle plane
+-                float3 normal = normalize(cross(vb - va, vc - va));
+-                float dist = dot(normal, voxel_center - va);
+-                
+-                if (dist > 0) { // Front side
+-                    // Write to voxel buffer
+-                    // Use atomic operation if multiple threads might write to same voxel
+-                    atomic_add(&voxel_buffer[x + y * _Width + z * _Width * _Height], 1);
++                if (intersect_triangle(voxel_center, va, vb, vc)) {
++                    int voxel_idx = x + y * _Width + z * _Width * _Height;
++                    if (front) {
++                        _VoxelBuffer[voxel_idx].front = true;
++                    } else {
++                        _VoxelBuffer[voxel_idx].back = true;
++                    }
+                 }
+             }
+@@ -137,51 +236,48 @@
+ }
+ 
+-// Helper: Get triangle data
+-void get_triangle(int tri_idx, out float3 va, out float3 vb, out float3 vc, out bool front) {
+-    int i0 = tri_buffer[tri_idx * 3];
+-    int i1 = tri_buffer[tri_idx * 3 + 1];
+-    int i2 = tri_buffer[tri_idx * 3 + 2];
+-    
+-    va = vert_buffer[i0];
+-    vb = vert_buffer[i1];
+-    vc = vert_buffer[i2];
+-    
+-    float3 normal = normalize(cross(vb - va, vc - va));
+-    front = dot(normal, float3(0, 0, 1)) > 0;
++# Helper: intersect_triangle (Simplified)
++bool intersect_triangle(float3 voxel_center, float3 va, float3 vb, float3 vc) {
++    // Check if voxel center is inside triangle projection or use SAT
++    // This is a placeholder for the actual geometric intersection test
++    return true; // [G] Placeholder for actual intersection logic
+ }
+ ```
+ 
+-### Parameters and Typical Values
+-*   **Resolution**: Typically $64^3$ to $256^3$ for real-time applications [S3].
+-*   **Thread Group Size**: $(8, 1, 1)$ for triangle-based dispatch [S3].
+-*   **Index Format**: 16-bit (`R16_UINT`) or 32-bit (`R32_UINT`) [S1, unofficial].
+-*   **USE_MUTEX**: Compile-time flag. If true, uses 4 `Texture3D` grids and a mutex texture; if false, uses a single `Texture3D` with atomic overrides [S2, unofficial].
++### Parameters
++*   `resolution`: Target voxel grid resolution (e.g., 128, 256) [S3].
++*   `USE_MUTEX`: Compile-time flag for VoxelizerX12 to use multiple mutexed grids or a single grid with atomic operations [S2, unofficial].
++*   `scale`: Scaling factor for grid dimensions (AHD) [S1, unofficial].
++*   `FrameCount`: Number of frames for double/triple buffering of constant buffers (VoxelizerX12) [S2, unofficial].
+ 
+ ### Edge Cases and Pitfalls
+-*   **Race Conditions**: Multiple threads may access the same voxel simultaneously. The Front-then-Back processing order helps, but atomic operations are required for correctness [S3].
+-*   **Index Stride**: Must be exactly 2 or 4 bytes. Other strides cause exceptions [S1, unofficial].
+-*   **Texture Handling**: Textures must be added to the voxelizer before voxelization and bound as SRVs with anisotropic filtering and wrap addressing [S1, unofficial].
+-*   **Precision**: Floating point comparisons in plane tests should account for epsilon errors near triangle edges [G].
++*   **Race Conditions:** Multiple threads may access the same voxel data simultaneously. The implementation prioritizes back-facing triangles by processing front-facing triangles first, then back-facing ones, allowing back flags to override front flags if both intersect the same voxel [S3].
++*   **Index Format:** Index buffer stride must be 2 or 4 bytes. If 2, format is `R16_UINT`; if 4, format is `R32_UINT`. Other strides throw an exception [S1, unofficial].
++*   **Texture Handling:** If a resource has a texture, it must be added to the Voxelizer via `addTexture` before voxelization. The texture is bound as a Shader Resource View (SRV) with anisotropic filtering and wrap addressing [S1, unofficial].
++*   **Precision:** Floating-point precision issues may arise when mapping continuous coordinates to discrete voxel indices. Using `_InvUnit` and `_HalfUnit` helps mitigate this [S3].
+ 
+ ## Subtopics
+ 
+ ### [GPU Mesh Voxelization (Schwarz & Seidel 2010)](1633-gpu-mesh-voxelization-schwarz-seidel-2010.md)
+-Uses explicit geometric containment tests per voxel within a triangle's bounding box, providing exact surface occupancy. It differs from rasterization-based methods by avoiding projection artifacts and is chosen when geometric precision is critical.
++GPU Mesh Voxelization converts a triangle mesh into a set of occupied voxel coordinates within a 3D grid by performing explicit geometric intersection tests on the GPU. It differs from rasterization-based voxelization [Multi-channel Surface Voxelization](1899-multi-channel-surface-voxelization.md) by avoiding fragment shaders and depth buffers, instead using compute shaders to iterate over voxels or triangles and applying Separating Axis Theorem (SAT) or plane/projection tests. This method provides exact surface intersection results without the aliasing artifacts common in rasterization, though it is computationally more expensive for high-poly meshes due to its brute-force nature.
+ 
+ ### [Multi-channel Surface Voxelization](1899-multi-channel-surface-voxelization.md)
+-Extends surface voxelization to store multiple attributes (albedo, normals, SH coefficients) per voxel in a single pass. It is chosen when rich surface data is needed for rendering, at the cost of higher memory bandwidth.
++Multi-channel surface voxelization is a real-time GPU technique that rasterizes 3D geometry into a uniform voxel grid while simultaneously computing and storing multiple surface attributes (such as albedo, normals, and spherical harmonics coefficients) per voxel. It distinguishes itself from binary occupancy voxelization methods by supporting partial occupancy, transparency, and rich multi-channel data in a single pass, albeit at a higher computational cost.
+ 
+ ### [GPU Rasterization-based Octree Building](2406-gpu-rasterization-based-octree-building.md)
+-Builds an octree structure directly on the GPU using rasterization techniques to determine node occupancy. It is chosen for adaptive resolution scenes where memory efficiency is prioritized over uniform grid simplicity.
++GPU Rasterization-based Octree Building is a technique for constructing sparse voxel octrees directly on the GPU by exploiting the rasterization pipeline to identify occupied leaf nodes. It solves the problem of efficiently generating hierarchical voxel data for fully dynamic scenes by rasterizing geometry from multiple orthogonal directions to eliminate boundary holes inherent in single-pass methods. Unlike sibling methods that may require pre-processing or specific primitive types, this approach handles any hardware-supported rasterizable geometry in a single geometry submission pass, leveraging 32-bit integer textures and bitwise operations for high performance. It differs from [GPU Voxelization via Compute Shaders](2549-gpu-voxelization-via-compute-shaders.md) by using rasterization fragments to drive the octree traversal rather than a purely compute-based atomic accumulation, and from [GPU Mesh Voxelization (Schwarz & Seidel 2010)](1633-gpu-mesh-voxelization-schwarz-seidel-2010.md) by explicitly building the hierarchical octree structure during the rasterization phase rather than just filling a flat voxel grid.
+ 
+ ## Operating characteristics
+-*   **Time Complexity**: $O(T \cdot B)$ for compute shader variants, where $T$ is the number of triangles and $B$ is the average number of voxels in a triangle's bounding box [S3]. For rasterization-assisted variants, complexity is proportional to the number of fragments generated across 4 views [S1, unofficial].
+-*   **Memory Complexity**: $O(W \cdot H \cdot D)$ for the voxel grid [S3]. Additional memory for vertex/index buffers and temporary UAVs [S1, unofficial].
+-*   **Performance**: Real-time performance is achievable on modern GPUs (DX11/DX12) for resolutions up to $256^3$ [S1, S2, unofficial].
+-*   **Strengths**: High parallelism, flexible intersection logic, supports solid voxelization via depth peeling [S2, unofficial].
+-*   **Limitations**: Race conditions require careful synchronization; bounding box iteration can be inefficient for sparse meshes [S3].
++*   **Time Complexity:** $O(T \cdot V)$ for intersection-based methods, where $T$ is the number of triangles and $V$ is the number of voxels in the triangle's bounding box [S3]. For rasterization-based methods, it is $O(N^2)$ per view, where $N$ is the grid resolution [S1, unofficial].
++*   **Memory Complexity:** $O(W \cdot H \cdot D)$ for the voxel grid [S3].
++*   **Measured Performance:** Real-time voxelization is achievable with DirectX 12 and compute shaders, especially for dynamic scenes [S2, unofficial].
++*   **Strengths:** Parallelizable, flexible, supports complex attributes [S3].
++*   **Limitations:** Computationally expensive for high-poly meshes in intersection-based methods [S2, unofficial]. Race conditions require careful handling [S3].
++*   **When to Use:** When exact surface intersection is required or when custom attributes need to be computed per voxel [S3].
++*   **When Not to Use:** When performance is critical and the mesh is very high-poly, consider rasterization-based methods [S1, unofficial].
+ 
+ ## Background
+-The technique originated from the need for fast, GPU-accelerated voxelization for real-time ray marching and volume rendering. The "AfterHumanDeclined" (AHD) implementation popularized the D3D11 two-pass approach [S1, unofficial]. VoxelizerX12 extended this to DirectX 12 with tessellation and depth peeling [S2, unofficial]. The "GPU Boxelizer" approach, detailed in Unity Graphics Programming, demonstrated the feasibility of pure compute shader geometric tests [S3].
++*   **Origin:** The method is based on GPU-based voxelization techniques using Direct3D 11 and Shader Model 5.0 [S1, unofficial]. It has been extended to DirectX 12 for real-time solid voxelization [S2, unofficial].
++*   **History:** The technique has been developed in various forms, including the AfterHumanDeclined (AHD) voxelizer [S1, unofficial], VoxelizerX12 [S2, unofficial], and GPU Boxelizer [S3].
++*   **Usage:** Used in real-time rendering, volume rendering, and collision detection [S2, unofficial][S3].
+ 
+ ## Sources

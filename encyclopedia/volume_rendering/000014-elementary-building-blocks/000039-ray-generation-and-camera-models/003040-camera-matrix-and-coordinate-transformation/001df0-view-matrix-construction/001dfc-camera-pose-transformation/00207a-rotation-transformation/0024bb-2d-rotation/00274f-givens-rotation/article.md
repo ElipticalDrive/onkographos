@@ -1,131 +1,141 @@
 # Givens Rotation
-
 Also called: plane rotation
 
 ## Overview
-A Givens rotation is a 2D rotation applied to a 3x3 matrix to zero out or transform specific elements [S1, unofficial]. It operates on a single plane defined by two axes while leaving the third axis invariant, allowing for targeted element elimination in matrix factorization [S1, unofficial].
+A Givens rotation is a 2D rotation applied to a 3x3 matrix to zero out or transform specific elements, used here for QR decomposition or SVD-like iterative solving [S1, unofficial]. It sets itself apart from general 3D rotation matrices by operating on a specific plane (defined by two indices) while leaving the third dimension unchanged, allowing for targeted element elimination in linear algebra algorithms [S1, unofficial].
 
 ## How it works
-**Inputs and outputs:**
-- Input: A 3x3 matrix $M$ with elements $m_{ij}$ [S1, unofficial].
-- Input: Rotation parameters $c$ (cosine) and $s$ (sine) [S1, unofficial].
-- Output: Modified 3x3 matrix $M'$ with specific elements transformed [S1, unofficial].
+**Inputs and Outputs:**
+- Input: A $3 \times 3$ matrix $M$ (stored as a 1D array or 2D array), two indices $i$ and $j$ specifying the plane of rotation, and two scalars $c$ (cosine) and $s$ (sine) of the rotation angle.
+- Output: The modified matrix $M'$ with elements in rows/columns $i$ and $j$ rotated.
 
-**Data structures:**
-- Matrix $M$: 9 floating-point values indexed as $m_{00}$ through $m_{22}$ [S1, unofficial].
-
-**Steps:**
-1. Select the plane of rotation (0-1, 0-2, or 1-2) [S1, unofficial].
-2. Apply the rotation formulas for the selected plane [S1, unofficial].
-3. Leave all elements outside the selected 2x2 submatrix in the rotated dimensions unchanged [S1, unofficial].
-
-**Formulas:**
-For **rot01_post** (rotating in the 0-1 plane, affecting columns 0 and 1):
-$$
-\begin{aligned}
-m_{00}' &= c m_{00} - s m_{01} \\
-m_{01}' &= s m_{00} + c m_{01} \\
-m_{10}' &= c m_{10} - s m_{11} \\
-m_{11}' &= s m_{10} + c m_{11} \\
-m_{20}' &= c m_{20} - s m_{21} \\
-m_{21}' &= s m_{20} + c m_{21}
-\end{aligned}
-$$
-Elements $m_{02}, m_{12}, m_{22}$ remain unchanged for this specific rotation [S1, unofficial].
-
-For **rot02_post** (rotating in the 0-2 plane, affecting columns 0 and 2):
-$$
-\begin{aligned}
-m_{00}' &= c m_{00} - s m_{02} \\
-m_{02}' &= s m_{00} + c m_{02} \\
-m_{10}' &= c m_{10} - s m_{12} \\
-m_{12}' &= s m_{10} + c m_{12} \\
-m_{20}' &= c m_{20} - s m_{22} \\
-m_{22}' &= s m_{20} + c m_{22}
-\end{aligned}
-$$
-Elements $m_{01}, m_{11}, m_{21}$ remain unchanged for this specific rotation [S1, unofficial].
-
-For **rot12_post** (rotating in the 1-2 plane, affecting columns 1 and 2):
-$$
-\begin{aligned}
-m_{01}' &= c m_{01} - s m_{02} \\
-m_{02}' &= s m_{01} + c m_{02} \\
-m_{11}' &= c m_{11} - s m_{12} \\
-m_{12}' &= s m_{11} + c m_{12} \\
-m_{21}' &= c m_{21} - s m_{22} \\
-m_{22}' &= s m_{21} + c m_{22}
-\end{aligned}
-$$
-Elements $m_{00}, m_{10}, m_{20}$ remain unchanged for this specific rotation [S1, unofficial].
+**Data Structures:**
+- Matrix $M$: A $3 \times 3$ array of floats. Let $M_{r,c}$ denote the element at row $r$ and column $c$ (0-indexed).
 
 **Parameters:**
-- $c$: Cosine of the rotation angle [S1, unofficial].
-- $s$: Sine of the rotation angle [S1, unofficial].
-- Typical values: $c^2 + s^2 = 1$ [G].
+- $c$: Cosine of the rotation angle.
+- $s$: Sine of the rotation angle.
+- Indices $i, j$: Must be distinct integers from $\{0, 1, 2\}$.
 
-**Edge cases and pitfalls:**
-- Precision: Standard floating-point arithmetic may accumulate error in iterative applications [G].
-- Boundary: Ensure $c$ and $s$ are normalized to avoid scaling the matrix [G].
+**Steps:**
+The rotation is applied as a post-multiplication (column rotation) or pre-multiplication (row rotation). The source notes specify "post" rotations, which correspond to column operations. The general form for a rotation in the $(i, j)$ plane applied to a matrix $M$ updates the columns $i$ and $j$ as follows:
+
+For each row $k \in \{0, 1, 2\}$:
+$$
+\begin{aligned}
+M'_{k,i} &= c M_{k,i} - s M_{k,j} \\
+M'_{k,j} &= s M_{k,i} + c M_{k,j}
+\end{aligned}
+$$
+All other elements $M'_{k,l}$ where $l \neq i, j$ remain unchanged ($M'_{k,l} = M_{k,l}$).
+
+The source provides explicit formulas for three specific cases:
+
+1.  **rot01_post** (Plane 0-1, columns 0 and 1):
+    $$
+    \begin{aligned}
+    m_{00}' &= c m_{00} - s m_{01} \\
+    m_{01}' &= s m_{00} + c m_{01} \\
+    m_{10}' &= c m_{10} - s m_{11} \\
+    m_{11}' &= s m_{10} + c m_{11} \\
+    m_{20}' &= c m_{20} - s m_{21} \\
+    m_{21}' &= s m_{20} + c m_{21}
+    \end{aligned}
+    $$
+    Elements $m_{02}, m_{12}, m_{22}$ are unchanged.
+
+2.  **rot02_post** (Plane 0-2, columns 0 and 2):
+    $$
+    \begin{aligned}
+    m_{00}' &= c m_{00} - s m_{02} \\
+    m_{02}' &= s m_{00} + c m_{02} \\
+    m_{10}' &= c m_{10} - s m_{12} \\
+    m_{12}' &= s m_{10} + c m_{12} \\
+    m_{20}' &= c m_{20} - s m_{22} \\
+    m_{22}' &= s m_{20} + c m_{22}
+    \end{aligned}
+    $$
+    Elements $m_{01}, m_{11}, m_{21}$ are unchanged.
+
+3.  **rot12_post** (Plane 1-2, columns 1 and 2):
+    $$
+    \begin{aligned}
+    m_{01}' &= c m_{01} - s m_{02} \\
+    m_{02}' &= s m_{01} + c m_{02} \\
+    m_{11}' &= c m_{11} - s m_{12} \\
+    m_{12}' &= s m_{11} + c m_{12} \\
+    m_{21}' &= c m_{21} - s m_{22} \\
+    m_{22}' &= s m_{21} + c m_{22}
+    \end{aligned}
+    $$
+    Elements $m_{00}, m_{10}, m_{20}$ are unchanged.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def givens_rotation_3x3(M, c, s, plane):
+def apply_givens_rotation_post(matrix, i, j, c, s):
     """
-    Apply a Givens rotation to a 3x3 matrix M.
-    M is a flat list of 9 floats: [m00, m01, m02, m10, m11, m12, m20, m21, m22]
-    plane: '01', '02', or '12'
+    Applies a Givens rotation to columns i and j of a 3x3 matrix.
+    matrix: list of lists or 2D array of size 3x3
+    i, j: indices of the columns to rotate (0, 1, or 2)
+    c: cosine of rotation angle
+    s: sine of rotation angle
     """
-    m00, m01, m02, m10, m11, m12, m20, m21, m22 = M
+    # Create a copy to avoid in-place modification issues if needed, 
+    # though in-place is standard for QR/SVD steps.
+    # We will modify in-place.
+    
+    for row in range(3):
+        # Store original values for column i and j
+        val_i = matrix[row][i]
+        val_j = matrix[row][j]
+        
+        # Apply rotation formulas
+        matrix[row][i] = c * val_i - s * val_j
+        matrix[row][j] = s * val_i + c * val_j
+        
+    return matrix
 
-    if plane == '01':
-        m00_new = c * m00 - s * m01
-        m01_new = s * m00 + c * m01
-        m10_new = c * m10 - s * m11
-        m11_new = s * m10 + c * m11
-        m20_new = c * m20 - s * m21
-        m21_new = s * m20 + c * m21
-        m02_new, m12_new, m22_new = m02, m12, m22
-    elif plane == '02':
-        m00_new = c * m00 - s * m02
-        m02_new = s * m00 + c * m02
-        m10_new = c * m10 - s * m12
-        m12_new = s * m10 + c * m12
-        m20_new = c * m20 - s * m22
-        m22_new = s * m20 + c * m22
-        m01_new, m11_new, m21_new = m01, m11, m21
-    elif plane == '12':
-        m01_new = c * m01 - s * m02
-        m02_new = s * m01 + c * m02
-        m11_new = c * m11 - s * m12
-        m12_new = s * m11 + c * m12
-        m21_new = c * m21 - s * m22
-        m22_new = s * m21 + c * m22
-        m00_new, m10_new, m20_new = m00, m10, m20
+def compute_givens_parameters(a, b):
+    """
+    Computes c and s to zero out b in a 2-vector [a, b]^T.
+    Result: [r, 0]^T where r = sqrt(a^2 + b^2).
+    """
+    # Avoid overflow/underflow in practice, but basic formula:
+    r = (a**2 + b**2)**0.5
+    if r == 0:
+        c = 1.0
+        s = 0.0
     else:
-        raise ValueError("Plane must be '01', '02', or '12'")
-
-    return [m00_new, m01_new, m02_new, m10_new, m11_new, m12_new, m20_new, m21_new, m22_new]
+        c = a / r
+        s = b / r
+    return c, s
 ```
+
+**Edge Cases and Pitfalls:**
+- If $c^2 + s^2 \neq 1$, the transformation is not orthogonal, leading to scaling artifacts.
+- Division by zero in `compute_givens_parameters` if both $a$ and $b$ are zero.
+- Precision loss when $a \gg b$ or $b \gg a$ in parameter computation; robust implementations use `hypot` or similar stable routines.
 
 ## Subtopics
 
-### 2x2 SVD
-An analytical method to compute the SVD of a 2x2 matrix $M = U \cdot \text{diag}(S) \cdot V^T$ [S2, unofficial]. It uses Givens-like rotations via angles $b$ and $r$ to construct $U$ and $V^T$ [S2, unofficial]. Compute intermediate values $E, F, G, H$ from $M$: $E = 0.5 \cdot (M_{00} + M_{11})$, $F = 0.5 \cdot (M_{00} - M_{11})$, $G = 0.5 \cdot (M_{01} + M_{10})$, $H = 0.5 \cdot (M_{01} - M_{10})$ [S2, unofficial]. Compute half-sum and half-difference of singular values: $hw1pw2 = \sqrt{E^2 + H^2}$, $hw1mw2 = \sqrt{F^2 + G^2}$ [S2, unofficial]. Compute singular values: $S_0 = hw1pw2 + hw1mw2$, $S_1 = hw1pw2 - hw1mw2$ [S2, unofficial]. Compute angles: $atangf = \text{atan2}(g, f)$ if $g,f$ not both 0 else 0; $atanhe = \text{atan2}(h, e)$ if $h,e$ not both 0 else 0; $b = 0.5 \cdot (atanhe - atangf)$; $r = 0.5 \cdot (atanhe + atangf)$ [S2, unofficial]. Construct $U$: $U_{00}=\cos(b)$, $U_{01}=\sin(b)$, $U_{10}=-\sin(b)$, $U_{11}=\cos(b)$ [S2, unofficial]. Construct $V^T$: $V^T_{00}=\cos(r)$, $V^T_{01}=\sin(r)$, $V^T_{10}=-\sin(r)$, $V^T_{11}=\cos(r)$ [S2, unofficial]. Choose this when an analytical SVD for 2x2 matrices is needed [S2, unofficial].
+### [2x2 SVD](4377-2x2-svd.md)
+An analytical method to compute the Singular Value Decomposition (SVD) of a 2x2 matrix $M = U \Sigma V^T$. It sets itself apart from iterative siblings like [Symmetric Givens Rotation (Jacobi SVD)](6213-symmetric-givens-rotation-jacobi-svd.md) by providing a closed-form solution that avoids convergence loops, making it suitable for real-time or deterministic graphics pipelines.
+
+### [Symmetric Givens Rotation (Jacobi SVD)](6213-symmetric-givens-rotation-jacobi-svd.md)
+An iterative method to diagonalize a $3 \times 3$ symmetric matrix using a sequence of 2D Givens rotations, implemented via the `Schur2` and `SVD` classes in the DualContouringCSharp repository. It sets itself apart from direct algebraic solvers by using orthogonal transformations to zero out off-diagonal elements, ensuring numerical stability for ill-conditioned matrices, though it is generally slower than closed-form solutions for small fixed dimensions.
 
 ## Operating characteristics
-- Time complexity: $O(1)$ for a single rotation application [G].
-- Memory complexity: $O(1)$ additional space [G].
-- Strengths: Targeted element elimination and numerical stability for small rotations [G].
-- Limitations: Requires pre-computed $c$ and $s$ values [G].
-- When to use: QR decomposition, SVD, or when zeroing specific matrix elements [S1, unofficial].
-- When not to use: When full 3D rotation is required [G].
+- **Time Complexity:** $O(1)$ for a single rotation application on a $3 \times 3$ matrix (constant number of arithmetic operations).
+- **Memory Complexity:** $O(1)$ auxiliary space if done in-place.
+- **Strengths:** Numerically stable for zeroing specific elements; orthogonal transformations preserve vector norms and condition numbers.
+- **Limitations:** Requires sequential application for full decomposition (e.g., QR or SVD); not a standalone solver for large systems.
+- **When to use:** When targeting specific matrix elements for elimination in iterative algorithms like Jacobi SVD or QR decomposition.
+- **When not to use:** For general 3D rotations of vectors where a full $3 \times 3$ rotation matrix is more appropriate; for large-scale linear systems where direct solvers are preferred.
 
 ## Background
-The technique originates from numerical linear algebra for matrix factorization [G]. In the provided implementation context, it is applied to 3x3 matrices for targeted element transformation [S1, unofficial].
+The Givens rotation is named after Wallace Givens. It is a fundamental building block in numerical linear algebra, particularly for QR decomposition and eigenvalue computations. In the context of volume rendering and geometry processing, it is used in algorithms like Dual Contouring for computing SVDs of local matrices [S1, unofficial].
 
 ## Sources
 [S1] tuckbone/DualContouringCSharp, https://github.com/tuckbone/DualContouringCSharp, fetched 2026-10-26 (unofficial)
-[S2] thebusytypist/cudc, https://github.com/thebusytypist/cudc, fetched 2026-10-26 (unofficial)

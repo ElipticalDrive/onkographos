@@ -1,0 +1,96 @@
+# Uniform Sphere Tracing
+
+Also called: Ray Marching for Volumes, Uniform Density Volume Rendering, Volume Rendering with Ray Marching (Uniform Sphere)
+
+## Overview
+Uniform Sphere Tracing renders participating media by computing the exact geometric intersection of a camera ray with a volume primitive (typically a sphere) and applying Beer's Law to determine transmission and scattering [S1, unofficial]. Unlike adaptive methods that sample density fields at discrete intervals, this method calculates the precise entry and exit points to evaluate the optical depth in a single analytical step [S1, unofficial]. It is distinguished from its sibling [Raymarched SDF Volume Rendering](3663-raymarched-sdf-volume-rendering.md) by its reliance on closed-form geometric intersections rather than iterative distance-field queries for volume boundaries.
+
+## How it works
+**Inputs and Outputs:**
+*   **Input:** Camera ray origin $ro$, normalized ray direction $v$, volume primitive (e.g., Sphere with center $c$, radius $r$, absorption coefficient $\sigma_a$, and scatter color $C_{vol}$), and background color $C_{bg}$.
+*   **Output:** Final pixel color $C_{final}$.
+
+**Data Structures:**
+The volume primitive is defined by the following fields [S1, unofficial]:
+*   `center`: `vec3` (position of the sphere center).
+*   `radius`: `float` (radius of the sphere).
+*   `sigma_a`: `float` (absorption coefficient, controlling opacity).
+*   `scatter`: `vec3` (color of the light scattered by the volume).
+
+**Algorithm Steps:**
+1.  **Ray-Primitive Intersection:** Compute the intersection of the ray $(ro, v)$ with the volume primitive. For a sphere, solve for the distances $t_0$ (entry) and $t_1$ (exit) along the ray [S1, unofficial].
+    *   If no intersection exists, return $C_{bg}$ [S1, unofficial].
+2.  **Calculate Path Length:** Determine the entry point $p_1 = ro + t_0 v$ and exit point $p_2 = ro + t_1 v$ [S1, unofficial]. The distance traveled through the volume is $d = t_1 - t_0$ (assuming normalized $v$) [S1, unofficial].
+3.  **Compute Transmission:** Apply Beer's Law to calculate the fraction of light transmitted through the volume [S1, unofficial]:
+    $$ T = e^{-d \cdot \sigma_a} $$
+    where $d$ is the path length and $\sigma_a$ is the absorption coefficient [S1, unofficial].
+4.  **Blend Colors:** Combine the attenuated background color with the volume's scattered color [S1, unofficial]:
+    $$ C_{final} = T \cdot C_{bg} + (1 - T) \cdot C_{vol} $$
+    where $C_{vol}$ is the uniform scatter color of the volume [S1, unofficial].
+
+**Parameters:**
+*   $\sigma_a$: Absorption coefficient. Typical value: $0.1$ [S1, unofficial].
+*   $C_{vol}$: Scatter color. Typical value: $(0.8, 0.1, 0.5)$ [S1, unofficial].
+*   $C_{bg}$: Background color. Typical value: $(0.572, 0.772, 0.921)$ [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Normalized Direction:** The simplification $d = t_1 - t_0$ is valid only if the ray direction $v$ is normalized [S1, unofficial]. If not, the Euclidean distance $\|p_2 - p_1\|$ must be used [S1, unofficial].
+*   **No Scattering Source:** This basic model assumes the volume color $C_{vol}$ is pre-defined or uniformly lit. It does not account for dynamic lighting or internal scattering variations without further extension [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def uniform_sphere_trace(ro, v, sphere, background_color):
+    # 1. Intersect ray with sphere
+    # Solve quadratic equation for ray-sphere intersection
+    oc = ro - sphere.center
+    a = dot(v, v)
+    b = 2.0 * dot(oc, v)
+    c = dot(oc, oc) - sphere.radius * sphere.radius
+    discriminant = b * b - 4 * a * c
+    
+    if discriminant < 0:
+        return background_color
+    
+    sqrt_disc = sqrt(discriminant)
+    t0 = (-b - sqrt_disc) / (2.0 * a)
+    t1 = (-b + sqrt_disc) / (2.0 * a)
+    
+    # Ensure we hit the front face first
+    if t0 < 0:
+        t0 = t1
+    if t0 < 0:
+        return background_color # Ray starts inside or misses
+        
+    # 2. Calculate distance through volume
+    # Assuming v is normalized, distance is t1 - t0
+    distance = t1 - t0
+    
+    # 3. Compute transmission using Beer's Law
+    transmission = exp(-distance * sphere.sigma_a)
+    
+    # 4. Blend background and volume scatter
+    final_color = transmission * background_color + (1.0 - transmission) * sphere.scatter
+    
+    return final_color
+```
+
+## Subtopics
+
+### [Spectral Tracking](4664-spectral-tracking.md)
+Extends uniform tracing by decomposing optical properties per wavelength to handle spectral variations in absorption and scattering, enabling accurate color rendering in participating media.
+
+## Operating characteristics
+*   **Time Complexity:** $O(1)$ per pixel for a single primitive, as it involves a fixed number of arithmetic operations and a single exponential evaluation [S1, unofficial].
+*   **Memory Complexity:** $O(1)$, requiring only the storage of primitive parameters and ray state [S1, unofficial].
+*   **Strengths:** Exact geometric handling of uniform volumes; no sampling noise; computationally inexpensive for simple shapes [S1, unofficial].
+*   **Limitations:** Limited to simple, analytically intersectable primitives (spheres, planes); does not handle complex, non-uniform density distributions or multiple scattering events without significant modification [S1, unofficial].
+*   **When to use:** Ideal for simple, uniform participating media where performance is critical and lighting is static or pre-computed [S1, unofficial].
+*   **When not to use:** Unsuitable for complex scenes with varying density, dynamic lighting, or multiple scattering [S1, unofficial].
+
+## Background
+The method originates from basic volume rendering principles described in introductory tutorials, specifically applying Beer's Law to uniform media intersected by camera rays [S1, unofficial]. It serves as a foundational concept for understanding how light interacts with participating media before introducing more complex techniques like ray marching through density fields or spectral tracking [S1, unofficial].
+
+## Sources
+[S1] 体渲染简明教程 - BimAnt, https://bimant.com/blog/volume-rendering-brief-intro/, fetched 2026-10-30 (unofficial)

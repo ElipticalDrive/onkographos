@@ -1,0 +1,293 @@
+# IEEE-754 Bit Manipulation Octree Traversal
+
+Also called: Bitwise Octree Traversal, IEEE-754 Voxel Traversal, Mantissa-based Octree Traversal, Octree Ray Tracing with Bitwise Cell Indexing, Ray Traversal in Octree using IEEE-754 Bit Manipulation
+
+## Overview
+This method performs ray traversal through a sparse voxel octree by interpreting the IEEE-754 bit representation of floating-point coordinates to determine node depth and child indices, avoiding explicit pointer chasing or coordinate division [S1, unofficial]. It replaces arithmetic division and modulo operations with bitwise shifts and masks on the mantissa [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ in camera space (normalized device coordinates, range $[-1, 1]$) [S1, unofficial].
+*   Octree data structure containing nodes and voxels (see Data Structures) [S1, unofficial].
+*   Maximum traversal depth `MAX_DEPTH` (default 12) [S1, unofficial].
+*   Maximum iteration count `MAX_ITERS` (default 128) [S1, unofficial].
+*   Epsilon `EPSILON` (default $10^{-4}$) [S1, unofficial].
+
+**Outputs:**
+*   Hit result: boolean `hit`, and if true, the color of the first occupied voxel encountered [S1, unofficial].
+
+### Data Structures
+The octree is stored in a flat array (e.g., SSBO in GPU implementations) [S1, unofficial].
+
+**OctreeNode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct OctreeNode {
+    uint info;      // Bit 0: leaf flag (1 if leaf, 0 if internal). Bits 1-8: child occupancy mask (8 bits).
+    uint childPtr;  // Index into the nodes or voxels array.
+};
+```
+*   If `info & 1` is set, the node is a leaf [S1, unofficial].
+*   If `info & 1` is clear, the node is internal [S1, unofficial].
+*   The occupancy mask in `info` (bits 1-8) indicates which of the 8 children exist [S1, unofficial].
+*   The offset to the $i$-th child is calculated by counting the number of set bits in `mask & ((1 << i) - 1)` [S1, unofficial].
+
+**OctreeVoxel**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```cpp
+struct OctreeVoxel {
+    uint rgb; // Packed RGB color. R in bits 24-31, G in 16-23, B in 8-15.
+};
+```
+*   Color components are extracted by shifting right by 24, 16, and 8 bits, masking with `0xFF`, and dividing by 255.0 [S1, unofficial].
+
+### Algorithm Steps
+
+1.  **Ray Initialization**:
+    *   Scale ray origin from camera space $[-1, 1]$ to world space $[1, 2]$ [S1, unofficial].
+    *   Fix zero direction components: if any component of $\mathbf{d}$ is zero, replace it with $\pm \text{EPSILON}$ preserving the original sign [S1, unofficial].
+    *   Clamp the magnitude of each component to at least EPSILON [S1, unofficial].
+    *   Normalize $\mathbf{d}$ and compute inverse direction $\mathbf{invDir} = 1.0 / \mathbf{d}$ [S1, unofficial].
+    *   Intersect ray with root AABB $[1, 2]^3$ [S1, unofficial].
+    *   Calculate $t_{enter}$ and $t_{exit}$ [S1, unofficial].
+    *   If $t_{exit} < t_{enter}$ or $t_{exit} < 0$, return miss [S1, unofficial].
+    *   Advance origin: $\mathbf{o} \leftarrow \mathbf{o} + \mathbf{d} \cdot \max(t_{enter}, 0.0)$ [S1, unofficial].
+    *   Clamp $\mathbf{o}$ to $[1, 1.9999999]^3$ to prevent precision issues at the exact boundary [S1, unofficial].
+
+2.  **Traversal Loop**:
+    *   Initialize `mantissaBitIdx = 22` (corresponding to the root level, as the mantissa has 23 bits, index 22 is the MSB of the fractional part) [S1, unofficial].
+    *   Initialize `nodeIdx` to the root node index (last element in OctreeNodesSSBO) [S1, unofficial].
+    *   Loop for `iter` from 0 to `MAX_ITERS`:
+        a.  **Quantize Position**:
+            *   Convert current position $\mathbf{pos}$ to unsigned integer representation: $u = \text{floatBitsToUint}(\mathbf{pos})$ [S1, unofficial].
+            *   Create mask to zero out lower bits: $mask = \sim(0u \ll \text{mantissaBitIdx})$ [S1, unofficial].
+            *   Quantize position to cell minimum: $\mathbf{cellMin} = \text{uintBitsToFloat}(u \ \& \ mask)$ [S1, unofficial].
+        
+        b.  **Compute Cell Size**:
+            *   Calculate cell size using IEEE-754 exponent manipulation:
+                $$ \text{cellSize} = \text{uintBitsToFloat}((127 + \text{mantissaBitIdx} - 23) \ll 23) $$
+                This effectively computes $2^{\text{mantissaBitIdx} - 23}$ [S1, unofficial].
+        
+        c.  **Calculate Child Index**:
+            *   Extract child index from the mantissa bits of $\mathbf{pos}$:
+                $$ \text{childIdx} = \text{getCellIdx}(\mathbf{pos}, \text{mantissaBitIdx}) $$
+                This extracts 3 bits (X, Y, Z) at the current mantissa position to form a 0-7 index [G].
+        
+        d.  **Descend or Hit**:
+            *   Check if current node is a leaf (`node.info & 1`) [S1, unofficial].
+            *   If leaf:
+                *   Check if the specific child voxel is occupied using the occupancy mask or direct index [S1, unofficial].
+                *   If occupied, return hit with color from `OctreeVoxel[nodeIdx + childIdx]` (or appropriate offset) [S1, unofficial].
+            *   If not leaf:
+                *   Check if child `childIdx` exists in `node.info` mask [S1, unofficial].
+                *   If child exists:
+                    *   Calculate `childPtr` offset: `offset = popcount(node.info.mask & ((1 << childIdx) - 1))` [S1, unofficial].
+                    *   Update `nodeIdx = node.childPtr + offset` [S1, unofficial].
+                    *   Push `nodeIdx` to stack `sh_Stack[gl_LocalInvocationIndex][22 - mantissaBitIdx]` if using stack-based backtracking [S1, unofficial].
+                    *   Decrement `mantissaBitIdx` by 1 [S1, unofficial].
+                    *   Recompute `childIdx` for the new level [S1, unofficial].
+                *   If child does not exist:
+                    *   **Ascend**: Find the common ancestor between the previous position (`cellMin`) and the new position (`pos`) using XOR and findMSB on their IEEE-754 representations [S1, unofficial].
+                    *   Update `mantissaBitIdx` to the level of the common ancestor [S1, unofficial].
+                    *   Update `nodeIdx` to the ancestor node [S1, unofficial].
+                    *   Continue loop.
+        
+        e.  **Advance Ray**:
+            *   Compute the position of the plane exiting the current cell along the ray direction:
+                $$ \mathbf{planePos} = \mathbf{cellMin} + \text{step}(0.0, \mathbf{d}) \cdot \text{cellSize} $$
+                Where `step(0.0, d)` is 1.0 if $d_i > 0$ else 0.0 for each component [S1, unofficial].
+            *   Calculate distance to exit plane $t_{max}$ using inverse ray direction: $t_{max} = (\mathbf{planePos} - \mathbf{pos}) \cdot \mathbf{invDir}$ [G].
+            *   Clamp new position $\mathbf{pos}$ to this distance: $\mathbf{pos} \leftarrow \mathbf{pos} + \mathbf{d} \cdot t_{max}$ [G].
+            *   Clamp $\mathbf{pos}$ to the neighbor cell's AABB to avoid precision issues at boundaries [S1, unofficial].
+            *   Calculate `neighborMin` and `neighborMax` using bit manipulation to subtract the smallest epsilon [S1, unofficial].
+
+3.  **Termination**:
+    *   If loop completes without finding a hit, return miss [S1, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def float_to_uint(f):
+    import struct
+    return struct.unpack('I', struct.pack('f', f))[0]
+
+def uint_to_float(u):
+    import struct
+    return struct.unpack('f', struct.pack('I', u))[0]
+
+def popcount(n):
+    return bin(n).count('1')
+
+def find_msb(n):
+    if n == 0: return -1
+    return n.bit_length() - 1
+
+def step(edge, x):
+    return 1.0 if x >= edge else 0.0
+
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
+
+def get_cell_idx(pos, mantissa_bit_idx):
+    u = (float_to_uint(pos[0]), float_to_uint(pos[1]), float_to_uint(pos[2]))
+    return ((u[0] >> mantissa_bit_idx) & 1) | \
+           (((u[1] >> mantissa_bit_idx) & 1) << 1) | \
+           (((u[2] >> mantissa_bit_idx) & 1) << 2)
+
+def traverse_octree(ray_origin_ndc, ray_dir_ndc, octree_nodes, octree_voxels):
+    EPSILON = 1e-4
+    MAX_ITERS = 128
+
+    # 1. Ray Initialization
+    ray_origin = (ray_origin_ndc[0] * 0.5 + 1.5, ray_origin_ndc[1] * 0.5 + 1.5, ray_origin_ndc[2] * 0.5 + 1.5)
+    ray_dir = list(ray_dir_ndc)
+
+    for i in range(3):
+        if ray_dir[i] == 0.0:
+            ray_dir[i] = EPSILON if ray_dir[i] >= 0 else -EPSILON
+        elif abs(ray_dir[i]) < EPSILON:
+            ray_dir[i] = EPSILON if ray_dir[i] >= 0 else -EPSILON
+    l = (ray_dir[0]**2 + ray_dir[1]**2 + ray_dir[2]**2)**0.5
+    ray_dir = (ray_dir[0]/l, ray_dir[1]/l, ray_dir[2]/l)
+    inv_dir = (1.0 / ray_dir[0], 1.0 / ray_dir[1], 1.0 / ray_dir[2])
+
+    # Intersect with root AABB [1, 2]^3
+    t1 = ((1.0 - ray_origin[0]) * inv_dir[0], (1.0 - ray_origin[1]) * inv_dir[1], (1.0 - ray_origin[2]) * inv_dir[2])
+    t2 = ((2.0 - ray_origin[0]) * inv_dir[0], (2.0 - ray_origin[1]) * inv_dir[1], (2.0 - ray_origin[2]) * inv_dir[2])
+    t_enter_val = max(min(t1[0], t2[0]), min(t1[1], t2[1]), min(t1[2], t2[2]))
+    t_exit_val = min(max(t1[0], t2[0]), max(t1[1], t2[1]), max(t1[2], t2[2]))
+
+    if t_exit_val < t_enter_val or t_exit_val < 0.0:
+        return {"hit": False}
+
+    ray_origin = (ray_origin[0] + ray_dir[0] * max(t_enter_val, 0.0),
+                  ray_origin[1] + ray_dir[1] * max(t_enter_val, 0.0),
+                  ray_origin[2] + ray_dir[2] * max(t_enter_val, 0.0))
+    ray_origin = (clamp(ray_origin[0], 1.0, 1.9999999),
+                  clamp(ray_origin[1], 1.0, 1.9999999),
+                  clamp(ray_origin[2], 1.0, 1.9999999))
+
+    # 2. Traversal
+    mantissa_bit_idx = 22
+    node_idx = len(octree_nodes) - 1  # Root per source
+    pos = ray_origin
+    stack = []
+
+    for _ in range(MAX_ITERS):
+        # Quantize position to cell min
+        u_pos = (float_to_uint(pos[0]), float_to_uint(pos[1]), float_to_uint(pos[2]))
+        mask = ~((1 << mantissa_bit_idx) - 1) & 0xFFFFFFFF
+        cell_min = (uint_to_float(u_pos[0] & mask),
+                    uint_to_float(u_pos[1] & mask),
+                    uint_to_float(u_pos[2] & mask))
+
+        # Compute cell size
+        exp_bits = (127 + mantissa_bit_idx - 23) << 23
+        cell_size = uint_to_float(exp_bits)
+
+        # Calculate child index
+        child_idx = get_cell_idx(pos, mantissa_bit_idx)
+
+        node = octree_nodes[node_idx]
+        info = node['info']
+        child_ptr = node['child_ptr']
+        occupancy_mask = (info >> 1) & 0xFF
+
+        # Check if leaf
+        if info & 1:
+            if occupancy_mask & (1 << child_idx):
+                voxel = octree_voxels[child_ptr + child_idx]
+                r = ((voxel['rgb'] >> 24) & 0xFF) / 255.0
+                g = ((voxel['rgb'] >> 16) & 0xFF) / 255.0
+                b = ((voxel['rgb'] >> 8) & 0xFF) / 255.0
+                return {"hit": True, "color": (r, g, b)}
+            else:
+                # Leaf but empty, ascend
+                pass
+        else:
+            # Internal node
+            if not (occupancy_mask & (1 << child_idx)):
+                # Child does not exist, ascend
+                pass
+            else:
+                # Descend
+                offset = popcount(occupancy_mask & ((1 << child_idx) - 1))
+                stack.append(node_idx)
+                node_idx = child_ptr + offset
+                mantissa_bit_idx -= 1
+                if mantissa_bit_idx < 0:
+                    break
+                # Recompute childIdx for new level
+                u_pos = (float_to_uint(pos[0]), float_to_uint(pos[1]), float_to_uint(pos[2]))
+                child_idx = get_cell_idx(pos, mantissa_bit_idx)
+                continue
+
+        # Ascend logic
+        cell_min_uint = (float_to_uint(cell_min[0]), float_to_uint(cell_min[1]), float_to_uint(cell_min[2]))
+        xor_val = u_pos[0] ^ cell_min_uint[0]
+        common_level = find_msb(xor_val)
+        mantissa_bit_idx = common_level
+        if stack:
+            node_idx = stack.pop()
+        else:
+            node_idx = len(octree_nodes) - 1 # Reset to root if stack empty [G]
+
+        # Advance ray to next cell boundary
+        plane_pos = (cell_min[0] + step(0.0, ray_dir[0]) * cell_size,
+                     cell_min[1] + step(0.0, ray_dir[1]) * cell_size,
+                     cell_min[2] + step(0.0, ray_dir[2]) * cell_size)
+        t_max_dist = ((plane_pos[0] - pos[0]) * inv_dir[0],
+                      (plane_pos[1] - pos[1]) * inv_dir[1],
+                      (plane_pos[2] - pos[2]) * inv_dir[2])
+        t_step = min(t_max_dist[0], t_max_dist[1], t_max_dist[2])
+
+        if t_step <= 0.0:
+            pos = (cell_min[0] + ray_dir[0] * 1e-6, cell_min[1] + ray_dir[1] * 1e-6, cell_min[2] + ray_dir[2] * 1e-6)
+        else:
+            pos = (pos[0] + ray_dir[0] * t_step, pos[1] + ray_dir[1] * t_step, pos[2] + ray_dir[2] * t_step)
+
+        # Clamp pos to neighbor AABB
+        u_pos_new = (float_to_uint(pos[0]), float_to_uint(pos[1]), float_to_uint(pos[2]))
+        epsilon_bits = 1
+        neighbor_min = (uint_to_float(u_pos_new[0] - epsilon_bits),
+                        uint_to_float(u_pos_new[1] - epsilon_bits),
+                        uint_to_float(u_pos_new[2] - epsilon_bits))
+        neighbor_max = (uint_to_float(u_pos_new[0] + epsilon_bits),
+                        uint_to_float(u_pos_new[1] + epsilon_bits),
+                        uint_to_float(u_pos_new[2] + epsilon_bits))
+        pos = (clamp(pos[0], neighbor_min[0], neighbor_max[0]),
+               clamp(pos[1], neighbor_min[1], neighbor_max[1]),
+               clamp(pos[2], neighbor_min[2], neighbor_max[2]))
+
+    return {"hit": False}
+```
+
+### Parameters
+*   `MAX_DEPTH`: 12 [S1, unofficial].
+*   `MAX_ITERS`: 128 [S1, unofficial].
+*   `EPSILON`: $10^{-4}$ [S1, unofficial].
+*   `mantissaBitIdx`: Starts at 22, decrements by 1 per level. Cell size = $2^{\text{mantissaBitIdx} - 23}$ [S1, unofficial].
+
+### Edge Cases and Pitfalls
+*   **Zero Direction Components**: Cause division by zero in `invDir`. Fixed by replacing zeros with $\pm \text{EPSILON}$ while preserving sign [S1, unofficial].
+*   **Boundary Precision**: Ray origin must be clamped to $[1, 1.9999999]$ to prevent floating-point precision issues at the exact AABB boundary [S1, unofficial].
+*   **Precision at Boundaries**: Clamping the new position to the neighbor cell's AABB avoids precision issues when the ray exits a cell exactly on a boundary [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity**: $O(D)$ where $D$ is the depth of the octree, as each iteration moves one level deeper or ascends. The bitwise operations are $O(1)$ [G].
+*   **Memory Complexity**: $O(1)$ auxiliary space if stack is not used, or $O(D)$ if stack is used for backtracking. The octree itself is stored in a flat array [S1, unofficial].
+*   **Strengths**: Avoids expensive division and modulo operations by using bitwise manipulations on IEEE-754 floats. Efficient for GPU implementation due to predictable memory access patterns and lack of dynamic branching for pointer chasing [S1, unofficial].
+*   **Limitations**: Requires the octree to be built with a specific coordinate system and depth. Precision issues can arise at cell boundaries if not handled carefully [S1, unofficial].
+*   **When to Use**: Ideal for GPU-based ray tracing of sparse voxel octrees where performance is critical and the octree depth is limited (e.g., 12 levels) [S1, unofficial].
+*   **When Not to Use**: Not suitable for very deep octrees or when dynamic node allocation is required [G].
+
+## Background
+This method is derived from implementations in modern voxel engines and ray tracers, specifically those utilizing GPU shaders for efficient traversal. It leverages the properties of IEEE-754 floating-point numbers to encode spatial hierarchy in the mantissa bits [S1, unofficial].
+
+## Sources
+[S1] rayferric/voxel-engine, https://github.com/rayferric/voxel-engine, fetched 2026-10-24 (unofficial)

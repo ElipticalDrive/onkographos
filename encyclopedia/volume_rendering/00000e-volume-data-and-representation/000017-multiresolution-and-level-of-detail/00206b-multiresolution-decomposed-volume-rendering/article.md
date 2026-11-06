@@ -11,23 +11,34 @@ Multiresolution Decomposed Volume Rendering is a general framework for rendering
 *   **Output:** A rendered image with properties including adaptive resolution, progressive refinement, and error-bounded accuracy [S1, unofficial].
 
 **Data Structures:**
-The data structure consists of a hierarchy of coefficient sets representing different resolution levels. The specific layout depends on the chosen decomposition transform (e.g., Fourier coefficients, Wavelet subbands, or DCT blocks) [S1, unofficial]. The framework does not prescribe a single bit-packing scheme but relies on the properties of the underlying decomposition to allow selective access to coefficients [S1, unofficial].
+The data structure consists of a hierarchy of coefficient sets representing different resolution levels [S1, unofficial]. The specific layout depends on the chosen decomposition transform (e.g., Fourier coefficients, Wavelet subbands, or DCT blocks) [S1, unofficial]. The framework does not prescribe a single bit-packing scheme but relies on the properties of the underlying decomposition to allow selective access to coefficients [S1, unofficial]. Exact field layouts and sizes are not given in the sources.
 
 **Steps:**
 1.  **Decomposition:** The original 3D volume data is decomposed into multiresolution components using a transform such as Fourier, Wavelet, or Discrete Cosine Transform (DCT) [S1, unofficial].
-2.  **Selection:** Select a subset of coefficients corresponding to the desired resolution level or feature set. This selection enables adaptive rendering and error bounds checking [S1, unofficial].
-3.  **Rendering:** Perform volume rendering directly on the selected decomposed coefficients. This step avoids the need to reconstruct the full-resolution volume data before rendering, allowing for efficient use of compressed data [S1, unofficial].
+2.  **Selection:** Select a subset of coefficients corresponding to the desired resolution level or feature set [S1, unofficial]. This selection enables adaptive rendering and error bounds checking [S1, unofficial].
+3.  **Rendering:** Perform volume rendering directly on the selected decomposed coefficients [S1, unofficial]. This step avoids the need to reconstruct the full-resolution volume data before rendering, allowing for efficient use of compressed data [S1, unofficial].
 4.  **Progressive Refinement:** To achieve coarse-to-fine rendering, start with low-resolution coefficients and progressively add higher-resolution coefficients to refine the image [S1, unofficial].
 5.  **Error Checking:** Use the multiresolution structure to estimate rendering errors and ensure they remain within acceptable bounds [S1, unofficial].
 
+**Formulas:**
+Not given in the sources.
+
 **Parameters:**
-*   **Resolution Level:** Determines the granularity of the rendering. Lower levels provide faster, coarser images; higher levels provide detail [S1, unofficial].
-*   **Coefficient Threshold:** Used for feature enhancement and data reduction by discarding insignificant coefficients [S1, unofficial].
+*   **Resolution Level:** Determines the granularity of the rendering [G].
+*   **Coefficient Threshold:** Not given in the sources.
 
 **Edge Cases and Pitfalls:**
 *   **Oversampling:** Some decomposition schemes (e.g., simple difference signals) may result in oversampling, where a low-resolution version and a full-resolution difference signal are both stored, leading to redundancy [S1, unofficial].
 *   **Occlusion Loss:** If Fourier transformation is used, the resulting image may suffer from a lack of proper occlusion handling [S1, unofficial].
 *   **Reconstruction Dependency:** If the method inadvertently requires full reconstruction (as seen in some early Wavelet applications by Muraki), it fails to leverage the advantages of compressed data [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode not provided in the sources.
+# Implementation follows the numbered steps above.
+```
 
 ## Subtopics
 
@@ -40,7 +51,7 @@ A technique for rendering large out-of-core CT human cadaver volumes using GPU r
 *   **Memory:** Memory usage is lower than storing full-resolution volumes due to compression inherent in the decomposition [S1, unofficial]. For out-of-core schemes, memory is managed via load-on-demand strategies [S2].
 
 **Measured Performance:**
-*   Specific performance metrics are not given in the sources. The framework is noted to enable "time efficiency" when using Fourier transforms, though with trade-offs [S1, unofficial].
+*   Specific performance metrics are not given in the sources.
 
 **Scaling:**
 *   The framework scales well with dataset size by allowing adaptive rendering and progressive refinement [S1, unofficial]. Out-of-core variants scale to datasets larger than available GPU memory [S2].

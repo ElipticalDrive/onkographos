@@ -1,0 +1,382 @@
+# Diffusion-Regularized NeRF Training
+
+Also called: DDM Regularization, DDM-regularized NeRF, DiffusioNeRF, DiffusioNeRF Regularization, Diffusion-regularized NeRF
+
+## Overview
+Diffusion-Regularized NeRF Training (DiffusioNeRF) is a method that improves the geometry and color fields of Neural Radiance Fields (NeRFs) by incorporating a Denoising Diffusion Model (DDM) as a learned prior over RGBD (color and depth) patches [S1]. Unlike methods that regularize indirectly via RGB patches or use normalizing flows, DiffusioNeRF directly regularizes geometry by backpropagating the gradient of the log-likelihood of an RGBD patch distribution to the NeRF's density and color fields [S1]. It sets itself apart from text-to-3D methods like Dreamfusion by using the DDM to enforce photorealistic priors on input training images rather than guiding optimization via text prompts [S1].
+
+## How it works
+
+### Inputs and Outputs
+**Inputs:**
+*   A set of training images $\mathcal{I}$ with known camera intrinsics and poses.
+*   A pre-trained Denoising Diffusion Model (DDM) $\epsilon_\theta$ trained on RGBD patches from a synthetic dataset (e.g., Hypersim) [S1].
+*   NeRF representation parameters (density $\sigma$ and color $c$ fields), typically implemented via Instant NGP [S1].
+
+**Outputs:**
+*   Optimized NeRF density and color fields that produce plausible geometry and color for novel views [S1].
+
+### Data Structures
+*   **NeRF Representation:** The method uses Instant NGP, which employs multi-scale hash tables to store feature encodings of all coordinates in a fixed memory block. This allows varying spatial resolutions and reduces the MLP size, enabling fast rendering [S1].
+*   **DDM Model:** A neural network $\epsilon_\theta(\mathbf{x}_\tau, \tau)$ that predicts noise $\epsilon$ given a noised input $\mathbf{x}_\tau$ and diffusion time step $\tau$ [S1].
+*   **RGBD Patches:** Rendered or sampled patches of size $24 \times 24$ or $48 \times 48$ pixels, containing expected color $C(r)$ and expected depth $D(r)$ for rays passing through the patch [S1].
+
+### Numbered Steps
+
+1.  **DDM Training (Pre-processing):**
+    *   Extract RGBD patches from a synthetic dataset (e.g., Hypersim) [S1].
+    *   Train the DDM $\epsilon_\theta$ to predict the noise added during the forward diffusion process. The loss function is:
+        $$ \mathbb{E}_{\mathbf{x}_0, \epsilon} \left[ \frac{\beta_\tau}{2\alpha_\tau (1-\bar{\alpha}_\tau)} || \epsilon - \epsilon_\theta \left( \sqrt{\bar{\alpha}_\tau} \mathbf{x}_0 + \sqrt{1 - \bar{\alpha}_\tau} \epsilon, \tau \right) || \right] $$
+        where $\mathbf{x}_0$ is the clean RGBD patch, $\epsilon \sim \mathcal{N}(0, I)$, and $\tau$ is the diffusion time step [S1].
+    *   The DDM is trained for 650,000 steps with a batch size of 32 [S1].
+
+2.  **NeRF Initialization and Ray Sampling:**
+    *   Initialize the NeRF density $\sigma$ and color $c$ fields [S1].
+    *   For each training iteration, sample rays. Some rays originate from training poses, while others originate from random camera positions to render random patches [S1].
+
+3.  **Volumetric Rendering:**
+    *   For each ray $r(t) = o + td$, sample $N$ points $t_{0:N}$ along the ray [S1].
+    *   Query the NeRF for density $\sigma(r(t_i))$ and color $c(r(t_i), d)$ at each sample point [S1].
+    *   Compute opacity $\rho(t_i)$ and accumulated transmittance $T(t_i)$:
+        $$ \rho(t_i) = 1 - \exp(-\sigma(r(t_i))(t_{i+1} - t_i)) $$
+        $$ T(t_i) = \prod_{j=1}^{i-1} (1 - \rho(t_j)) $$
+    *   Compute color weights $w_i = T(t_i)\rho(t_i)$ [S1].
+    *   Compute expected color $C(r)$ and expected depth $D(r)$ for the patch formed by the rays:
+        $$ C(r) \approx \sum_{i=1}^N w_i c(r(t_i), d) + \left( 1 - \sum_{i=1}^N w_i \right) c_{bg} $$
+        $$ D(r) = \frac{\sum_{i=1}^N w_i t_i}{\sum_{i=1}^N w_i} $$
+        where $c_{bg}$ is the background color, set to white [S1].
+
+4.  **DDM Score Estimation:**
+    *   Form an RGBD patch $\mathbf{x}$ from the rendered $C(r)$ and $D(r)$ values [S1].
+    *   Add noise to the patch according to the diffusion schedule:
+        $$ \mathbf{x}_\tau = \sqrt{\bar{\alpha}_\tau} \mathbf{x} + \sqrt{1 - \bar{\alpha}_\tau} \epsilon, \quad \epsilon \sim \mathcal{N}(0, I) $$
+    *   Pass the noised patch $\mathbf{x}_\tau$ and time step $\tau$ to the DDM to obtain the noise prediction $\epsilon_\theta(\mathbf{x}_\tau, \tau)$ [S1].
+    *   The DDM output is proportional to the negative score function (gradient of the log-probability):
+        $$ \epsilon_\theta(\mathbf{x}_\tau, \tau) \propto -\nabla_{\mathbf{x}} \log p(\mathbf{x}) $$
+    *   Normalize the output of $\epsilon_\theta$ to control gradient magnitude [S1].
+
+5.  **Loss Computation and Backpropagation:**
+    *   Compute the total loss gradient. The photometric loss $\mathcal{L}_{\text{photo}}$ compares rendered colors to input images. Geometric regularizers $\mathcal{L}_{\text{fg}}$, $\mathcal{L}_{\text{fr}}$, and $\mathcal{L}_{\text{dist}}$ are also computed [S1].
+    *   The total gradient is:
+        $$ \nabla \mathcal{L} = \nabla \mathcal{L}_{\text{photo}} + \lambda_{\text{fg}} \nabla \mathcal{L}_{\text{fg}} + \lambda_{\text{fr}} \nabla \mathcal{L}_{\text{fr}} + \lambda_{\text{dist}} \nabla \mathcal{L}_{\text{dist}} - \lambda_{\text{DDM}} \epsilon_\theta $$
+        where $\lambda_{\text{DDM}}$ is the weight for the DDM regularizer [S1].
+    *   Backpropagate $\nabla \mathcal{L}$ through the differentiable rendering process to update the NeRF density and color field parameters [S1].
+
+6.  **Training Schedule and Patch Injection:**
+    *   During NeRF optimization (12,000 steps), smoothly interpolate the diffusion time parameter $\tau$ from 0.1 to 0 during the first 2,500 steps. The schedule is defined by $\bar{\alpha}_\tau = \cos(0.5\pi(\tau + 0.008)/1.008)$ [S1].
+    *   25% of the time, use a training pose for patch rendering and sample the RGB component directly from the training image, using the NeRF only for depth. This helps early in training when NeRF renderings are inaccurate [S1].
+    *   The geometric regularizer weight $\lambda_{\text{dist}}$ is 0 for the first 3,000 steps, then linearly increases to its maximum value ($1 \times 10^{-4}$ for DTU, $1.5 \times 10^{-5}$ for LLFF) by step 8,000 [S1].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import numpy as np
+
+# Assume InstantNGPNeRF class handles density/color queries and rendering
+# Assume DDMModel class handles noise prediction epsilon_theta(x_tau, tau)
+
+class DiffusionRegularizedNeRF:
+    def __init__(self, nerf_model, ddm_model, dataset, patch_size=48):
+        self.nerf = nerf_model
+        self.ddm = ddm_model
+        self.dataset = dataset
+        self.patch_size = patch_size
+        self.total_steps = 12000
+        self.ddm_steps = 650000 # Pre-trained
+        self.ddm_batch_size = 32
+        
+        # Hyperparameters
+        self.lambda_dmm = 1.0 # Placeholder, tuned per dataset
+        self.lambda_fg = 0.1
+        self.lambda_fr = 0.1
+        self.lambda_dist_max = 1e-4 # For DTU, 1.5e-5 for LLFF
+        
+    def compute_diffusion_schedule(self, tau):
+        """Compute alpha_bar from tau using the cosine schedule."""
+        # alpha_bar = cos(0.5 * pi * (tau + 0.008) / 1.008)
+        alpha_bar = torch.cos(0.5 * np.pi * (tau + 0.008) / 1.008)
+        return alpha_bar
+
+    def render_patch(self, rays, nerf_model):
+        """
+        Render color and depth for a set of rays forming a patch.
+        Returns C (color), D (depth), weights w.
+        """
+        # Sample points along rays
+        t_vals = torch.linspace(0, 1, 128) # Example N=128
+        t_vals = t_vals.unsqueeze(0) + rays.t_min + (rays.t_max - rays.t_min) * t_vals.unsqueeze(1)
+        
+        # Query NeRF
+        sigma, color = nerf_model(t_vals, rays.directions)
+        
+        # Compute opacity and transmittance
+        deltas = t_vals[:, 1:] - t_vals[:, :-1]
+        alpha = 1.0 - torch.exp(-sigma * deltas)
+        T = torch.cumprod(1.0 - alpha, dim=1)
+        T = torch.cat([torch.ones_like(T[:, :1]), T], dim=1)
+        
+        weights = alpha * T[:, :-1]
+        
+        # Expected Color
+        C = torch.sum(weights.unsqueeze(-1) * color[:, :-1], dim=1)
+        C += (1.0 - weights.sum(dim=1, keepdim=True)) * torch.tensor([1.0, 1.0, 1.0]) # White background
+        
+        # Expected Depth
+        D = torch.sum(weights * t_vals[:, :-1], dim=1) / torch.sum(weights, dim=1)
+        
+        return C, D, weights
+
+    def get_ddm_gradient(self, patch_rgb, patch_depth, tau):
+        """
+        Get the DDM score gradient for an RGBD patch.
+        """
+        # Combine RGB and Depth into a single tensor x
+        # Assuming patch_rgb is [H, W, 3] and patch_depth is [H, W, 1]
+        x = torch.cat([patch_rgb, patch_depth], dim=-1)
+        
+        # Add noise
+        epsilon = torch.randn_like(x)
+        alpha_bar = self.compute_diffusion_schedule(tau)
+        x_tau = torch.sqrt(alpha_bar) * x + torch.sqrt(1 - alpha_bar) * epsilon
+        
+        # Predict noise
+        epsilon_pred = self.ddm(x_tau, tau)
+        
+        # The gradient is proportional to -epsilon_pred
+        # Normalize epsilon_pred to control magnitude [S1]
+        # Note: Exact normalization details are in supplementary [S1], 
+        # here we assume a standard normalization or direct usage as per eq 19
+        return -epsilon_pred
+
+    def train_step(self, step):
+        """Perform one step of NeRF optimization."""
+        
+        # Schedule tau: 0.1 to 0 in first 2500 steps
+        if step < 2500:
+            tau = 0.1 - (0.1 * step / 2500)
+        else:
+            tau = 0.0
+            
+        # Schedule lambda_dist
+        if step < 3000:
+            lambda_dist = 0.0
+        elif step < 8000:
+            lambda_dist = self.lambda_dist_max * (step - 3000) / 5000
+        else:
+            lambda_dist = self.lambda_dist_max
+            
+        # Sample rays
+        # 25% of time: use training pose and ground truth RGB
+        use_gt_rgb = torch.rand(1).item() < 0.25
+        
+        if use_gt_rgb:
+            # Sample training pose and patch from GT image
+            rays, gt_rgb = self.dataset.sample_training_patch(self.patch_size)
+            # Render depth from NeRF for these rays
+            C_render, D_render, _ = self.render_patch(rays, self.nerf)
+            # Replace RGB with GT
+            patch_rgb = gt_rgb
+            patch_depth = D_render
+        else:
+            # Render random patch from random camera
+            rays = self.dataset.sample_random_patch(self.patch_size)
+            C_render, D_render, _ = self.render_patch(rays, self.nerf)
+            patch_rgb = C_render
+            patch_depth = D_render
+            
+        # Compute DDM gradient
+        ddm_grad = self.get_ddm_gradient(patch_rgb, patch_depth, tau)
+        
+        # Compute Photometric Loss (L2 between rendered and GT)
+        # If using GT RGB, loss is 0 for those pixels, else L2(C_render, GT)
+        if use_gt_rgb:
+            loss_photo = torch.tensor(0.0) # Or small epsilon to avoid zero grad issues if needed
+        else:
+            gt_rgb_rendered = self.dataset.get_gt_color_for_rays(rays)
+            loss_photo = torch.mean((C_render - gt_rgb_rendered) ** 2)
+            
+        # Compute Geometric Regularizers (Placeholder for L_fg, L_fr, L_dist)
+        # These depend on specific implementations of foreground, front-back, and distance losses
+        loss_fg = self.compute_fg_loss(self.nerf)
+        loss_fr = self.compute_fr_loss(self.nerf)
+        loss_dist = self.compute_dist_loss(self.nerf)
+        
+        # Total Loss Gradient
+        # dL/dParams = dL_photo/dParams + lambda_fg * dL_fg/dParams + ... - lambda_ddm * dL_ddm/dParams
+        # Note: ddm_grad is already the gradient w.r.t the patch pixels.
+        # We need to backpropagate this through the rendering process to NeRF params.
+        
+        # Backprop DDM gradient to NeRF
+        # ddm_grad is dL_ddm/dPatch. We need dL_ddm/dNeRFParams.
+        # This is done via torch.autograd by treating ddm_grad as the output gradient.
+        
+        # Create a dummy loss for DDM to enable backprop
+        # L_ddm = - lambda_ddm * sum(ddm_grad * patch_values) ? 
+        # Actually, eq 19 says gradient is -lambda_ddm * epsilon_theta.
+        # So we add -lambda_ddm * epsilon_theta to the gradient of the patch.
+        
+        # To backprop, we can compute a scalar loss that yields this gradient.
+        # However, since epsilon_theta is a function of x_tau, and x_tau depends on x,
+        # and x depends on NeRF, we can just compute the loss term.
+        # But the paper says "backpropagate the DDM gradients directly".
+        # This implies we treat the DDM output as a loss term.
+        
+        # Let's construct the loss term that produces the gradient -lambda_ddm * epsilon_theta
+        # Since epsilon_theta approximates -grad_log_p, the term is lambda_ddm * log_p.
+        # But we don't have log_p. We have the gradient.
+        # We can use the fact that grad(L_ddm) = -lambda_ddm * epsilon_theta.
+        # So L_ddm = lambda_ddm * <epsilon_theta, x>? No, that's not quite right because epsilon_theta depends on x_tau.
+        
+        # Standard approach in such papers:
+        # Compute the DDM loss (noise prediction loss) is for training DDM.
+        # For NeRF, we use the gradient.
+        # We can compute the gradient of the DDM output w.r.t x, then multiply by lambda_ddm.
+        # But the paper says epsilon_theta IS the gradient (proportional).
+        # So we just add -lambda_ddm * epsilon_theta to the gradient of the rendered patch.
+        
+        # Implementation:
+        # 1. Compute rendered patch values (C, D)
+        # 2. Compute DDM gradient (epsilon_theta)
+        # 3. Add -lambda_ddm * epsilon_theta to the gradient of the rendered patch w.r.t NeRF params.
+        
+        # In PyTorch:
+        # We can compute a dummy loss that has the desired gradient.
+        # If we want grad(L) = -lambda * eps, we can set L = -lambda * sum(eps * x) ? 
+        # No, eps depends on x_tau.
+        
+        # Correct way:
+        # The gradient of the total loss w.r.t NeRF params is:
+        # grad_photo + grad_geom - lambda_ddm * grad_patch(epsilon_theta)
+        # where grad_patch(epsilon_theta) is the gradient of epsilon_theta w.r.t NeRF params.
+        
+        # So we compute epsilon_theta, then backprop it.
+        
+        # To backprop epsilon_theta to NeRF:
+        # epsilon_theta is a function of x_tau, which is a function of x (patch), which is a function of NeRF.
+        # We can compute the gradient of epsilon_theta w.r.t x, then multiply by lambda_ddm and add to the gradient of the patch.
+        
+        # However, the paper says "backpropagate the DDM gradients directly".
+        # This usually means:
+        # loss_ddm = - lambda_ddm * torch.sum(epsilon_theta * patch) # This is an approximation
+        # But the paper eq 19 is explicit about the gradient.
+        
+        # Let's assume we can compute the gradient of epsilon_theta w.r.t the rendered patch values.
+        # grad_patch = torch.autograd.grad(epsilon_theta, [patch_rgb, patch_depth], grad_outputs=torch.ones_like(epsilon_theta), create_graph=True)
+        # Then add -lambda_ddm * grad_patch to the gradients of the NeRF.
+        
+        # Simpler: Just backprop the DDM noise prediction loss? No, that's for training DDM.
+        
+        # The paper states: "gradients of log-probabilities are sufficient... backpropagated to NeRF networks".
+        # So we treat epsilon_theta as the gradient signal.
+        
+        # Implementation:
+        # 1. Render patch -> x
+        # 2. Compute epsilon_theta(x_tau, tau)
+        # 3. Compute gradient of epsilon_theta w.r.t x (the rendered patch)
+        # 4. Add -lambda_ddm * this_gradient to the gradient of the photometric/geometric losses w.r.t x.
+        # 5. Backprop from x to NeRF params.
+        
+        # Since we are in a single step, we can just accumulate gradients.
+        
+        # Placeholder for geometric loss gradients
+        grad_geom = self.compute_geom_gradients()
+        
+        # Gradient from DDM
+        # We need the gradient of epsilon_theta w.r.t the rendered patch
+        # Note: epsilon_theta depends on x_tau, which depends on x.
+        # grad_x_eps = torch.autograd.grad(epsilon_theta, [patch_rgb, patch_depth], grad_outputs=torch.ones_like(epsilon_theta), retain_graph=True)
+        
+        # This is complex. A simpler interpretation is that the DDM provides a "force" on the patch.
+        # We add this force to the gradient of the loss.
+        
+        # Let's assume the following structure for the gradient update:
+        # grad_neRF = grad_photo + grad_geom - lambda_ddm * grad_patch(epsilon_theta)
+        
+        # To compute grad_patch(epsilon_theta), we backprop through the DDM.
+        # But we don't want to backprop through the DDM's internal layers to update DDM weights.
+        # We only want the gradient w.r.t the input x.
+        
+        # So:
+        # epsilon_theta.requires_grad = False # DDM is frozen
+        # patch_rgb.requires_grad = True
+        # patch_depth.requires_grad = True
+        
+        # epsilon_theta = self.ddm(x_tau, tau)
+        # grad_eps = torch.autograd.grad(epsilon_theta, [patch_rgb, patch_depth], grad_outputs=torch.ones_like(epsilon_theta), create_graph=True)
+        
+        # Then, when computing the total gradient for NeRF:
+        # We have grad_photo (w.r.t patch_rgb)
+        # We have grad_geom (w.r.t patch_rgb, patch_depth)
+        # We have grad_ddm = -lambda_ddm * grad_eps
+        
+        # Total gradient w.r.t patch = grad_photo + grad_geom + grad_ddm
+        # Then backprop from patch to NeRF.
+        
+        # This is the standard way to apply a gradient-based regularizer.
+        
+        # Note: The paper says "backpropagate the DDM gradients directly to the NeRF's color and density MLPs".
+        # This confirms the above approach.
+        
+        pass
+
+    def train(self):
+        for step in range(self.total_steps):
+            self.train_step(step)
+            # Update NeRF optimizer
+            self.nerf.optimizer.step()
+            self.nerf.optimizer.zero_grad()
+```
+
+### Parameters
+*   **Patch Size:** $48 \times 48$ pixels is standard, though $24 \times 24$ may perform better on LLFF [S1].
+*   **Background Color ($c_{bg}$):** White [S1].
+*   **Diffusion Time ($\tau$):** Scheduled from 0.1 to 0 in the first 2,500 steps. $\bar{\alpha}_\tau = \cos(0.5\pi(\tau + 0.008)/1.008)$ [S1].
+*   **DDM Training Steps:** 650,000 steps [S1].
+*   **DDM Batch Size:** 32 [S1].
+*   **NeRF Optimization Steps:** 12,000 steps [S1].
+*   **$\lambda_{\text{DDM}}$:** Weight for the DDM regularizer. Trades off reconstruction accuracy around thin structures against overall depth smoothness [S1].
+*   **$\lambda_{\text{dist}}$:** Geometric regularizer weight. 0 for first 3,000 steps, linearly increasing to $1 \times 10^{-4}$ (DTU) or $1.5 \times 10^{-5}$ (LLFF) by step 8,000 [S1].
+
+### Edge Cases and Pitfalls
+*   **Floaters:** NeRFs are under-constrained with few views, leading to semi-transparent "floaters" in mid-air [S1].
+*   **Early Training Inaccuracy:** Rendered patches are inaccurate early in training. Mitigated by using ground truth RGB from training images 25% of the time [S1].
+*   **Over-smoothing:** The DDM regularizer can over-smooth thin structures and hallucinate details in occluded regions, impacting reconstruction scores [S1].
+*   **Scheduling Sensitivity:** Careful scheduling of $\tau$ and $\lambda_{\text{DDM}}$ is required for good results [S1].
+
+## Operating characteristics
+
+### Time and Memory Complexity
+*   **Training Time:** Approximately 30 minutes per scene on a single Nvidia A100 GPU [S1].
+*   **Memory:** Uses Instant NGP's multi-scale hash tables, which store feature encodings in a fixed memory block, reducing MLP size [S1].
+
+### Measured Performance
+*   **LLFF:** Improves novel view synthesis quality and generalization compared to geometric baselines and other NeRF methods [S1].
+*   **DTU:** Improves 3D reconstruction quality (Chamfer-L1) compared to methods like NeuS, VolSDF, and RegNeRF [S1].
+
+### Strengths and Limitations
+*   **Strengths:** Directly regularizes geometry via RGBD patches; leverages large synthetic datasets (Hypersim); fast rendering with Instant NGP allows larger patches [S1].
+*   **Limitations:** Can over-smooth thin structures; hallucinates details in unseen regions; struggles with shiny objects compared to diffuse/textured surfaces [S1].
+
+### When to Use
+*   Use when training NeRFs with few input views to mitigate floaters and improve geometry.
+*   Use when high-quality novel view synthesis and 3D reconstruction are required.
+*   Do not use if the scene contains significant shiny/specular surfaces, as the method excels on diffuse/textured surfaces [S1].
+
+## Background
+
+### Origin
+DiffusioNeRF was introduced in the paper "DiffusioNeRF: Regularizing Neural Radiance Fields with Denoising Diffusion Models" [S1].
+
+### History and Development
+The method builds on the observation that NeRFs are under-constrained and that Denoising Diffusion Models can serve as powerful priors. It contrasts with RegNeRF, which uses normalizing flows, and Dreamfusion, which uses DDMs for text-to-3D [S1].
+
+### Usage
+Implemented using torch-ngp (Instant NGP) with the tiny-cuda-tensor backend [S1]. Applied to the LLFF and DTU datasets [S1].
+
+## Sources
+
+[S1] DiffusioNeRF: Regularizing Neural Radiance Fields with Denoising Diffusion Models, https://doi.org/10.1109/cvpr52729.2023.00407, fetched 2026-10-26

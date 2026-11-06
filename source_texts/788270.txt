@@ -1,0 +1,187 @@
+In your code, I found that the calculation method of psnr is different from the methods in other papers. Will this cause a big error in the results?
+
+About the calculation of psnr. · Issue #2 · J911/MISO-VFI · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+About the calculation of psnr. #2
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+About the calculation of psnr.#2
+Copy link
+Description
+SHH-Han
+opened on Nov 30, 2023
+Issue body actions
+In your code, I found that the calculation method of psnr is different from the methods in other papers. Will this cause a big error in the results?
+Activity
+J911 commented on Nov 30, 2023
+J911
+on Nov 30, 2023
+Owner
+More actions
+Hi @SHH-Han,
+Thank you for your interest in our research.
+I think the reason why our method is different from the PSNR calculation method of other studies is the difference in expression.
+For example, (1) is our PSNR calculation formula, (2)is the calculation formula for IFRNet.
+```
+(1) PSNR = 20 * np.log10(255) - 10 * np.log10(mse)
+(2) PSNR = -10 * torch.log10(((img1 - img2) * (img1 - img2)).mean())
+```
+In the case of (2), it can be expressed as follows by replacing it with MSE.
+```
+(2) PSNR = -10 * torch.log10(MSE)
+```
+However, looking at the original PSNR calculation formula below, you can see a difference. In the case of IFRNet, the inference values range from 0 to 1, so the MAX^2 part has been omitted.
+$$PSNR = 10log_{10}(\frac{MAX^2}{MSE})$$
+(if MAX == 1)
+$$PSNR = 10log_{10}(\frac{1}{MSE}) = -10log_{10}(MSE)$$
+However, we calculate based on images with values ranging from 0 to 255.
+(if MAX == 255)
+$$PSNR = 10log_{10}(\frac{255^2}{MSE}) = 20log_{10}(255) - 10log_{10}(MSE)$$
+Furthermore, we borrowed it from E3d-LSTM.
+I hope our response has been helpful.
+Thank you.
+SHH-Han commented on Nov 30, 2023
+SHH-Han
+on Nov 30, 2023
+Author
+More actions
+Thanks for your reply.
+I understand what you mean, but your code is as follows:
+mse = np.mean((np.uint8(pred * 255)-np.uint8(true * 255))**2)
+Among them, np.uint8(*) will affect the results. I think this operation should be deleted.
+Is it more reasonable to change it to the following:
+mse = np.mean((pred * 255-true * 255)**2)
+J911 commented on Nov 30, 2023
+J911
+on Nov 30, 2023
+Last edited by J911
+Owner
+More actions
+@SHH-Han
+As mentioned, using np.uint8() can potentially alter the values of the original data.
+However, for the GT case, since the original image itself is in the form of uint8, it ultimately returns the same value.
+For example, by executing the code below, you can confirm that the value becomes 0:
+```
+print((np.uint8(true * 255) - true * 255).sum()) # print 0
+```
+Not only that, but E3D-LSTM also follows a similar approach as ours.
+Nevertheless, to address your ambiguity, we conducted the test without converting to np.uint8.
+To achieve this, we modified the dataloader to skip normalization for the ground truth (GT). Additionally, we modified the evaluation code as follows:
+```
+# dataloader
+# This process is similar to the data loader for video frame prediction.
+# However, in 'exp.py', it eventually transforms into the structure of Video Frame Interpolation.
+# ...
+def __getitem__(self, idx):
+  frames = []
+  for img_idx in range(1, 4):
+      _img = cv2.cvtColor(cv2.imread(os.path.join(self.sequence_list[idx], f'im{str(img_idx)}.png')), cv2.COLOR_BGR2RGB)
+      _img = Image.fromarray(_img)
+      if img_idx == 2: # index of gt
+          gt = np.asarray(_img)
+          gt = np.transpose(gt, (2, 0, 1))
+      _img = transforms.ToTensor()(_img).unsqueeze(0)
+      frames.append(_img)
+  frames = torch.cat([*frames], 0)
+  inp = frames[:2]
+  out = frames[2:]
+  return inp, out, np.array([gt]) # before: return inp, out
+# ...
+```
+```
+# new metric
+def PSNR(pred, true):
+  mse = np.mean((np.uint8(pred * 255)-true)**2)
+  return 20 * np.log10(255) - 10 * np.log10(mse)
+```
+As a result, we confirmed the same result as the result we reported.
+Thank you once again for your deep interest in our research.
+Thank you.
+SHH-Han commented on Dec 1, 2023
+SHH-Han
+on Dec 1, 2023
+Author
+More actions
+Thanks for your reply.
+But you still use np.uint8(*) for pred. This operation does not exist in IFRNet. So I think it's unfair.
+When you use mse = np.mean((pred * 255-true * 255)**2) , I think it is completely equivalent to IFRNet.
+Alternatively, I think you can use the code in IFRNet to test directly to ensure the fairness of the experiment.
+When testing using the above two methods, I found that your test results were not satisfactory.
+At the same time, I also modified the code for psnr calculation in IFRNet:
+```
+def calculate_psnr(img1, img2):
+    img1 = img1.cpu().numpy() * 255.0
+    img2 = img2.cpu().numpy() * 255.0
+    mse = np.mean(((np.uint8(img1)-np.uint8(img2)) ** 2))
+    psnr = 20 * np.log10(255) - 10 * np.log10(mse)
+    return psnr
+```
+I found that the psnr value on vimeo-triplet using IFRNet-S pretrained model is 39.21.
+J911 commented on Dec 4, 2023
+J911
+on Dec 4, 2023
+Owner
+More actions
+Thank you for your feedback. Following your comment, we have reviewed the official codes of most VFI (Video Frame Interpolation) studies.
+As your observation, the majority of official codes indeed implement PSNR (Peak Signal-to-Noise Ratio) calculations using float32 (or float64) types within the range of 0 to 1 (or -1 to 1). However, we still feel weird. VFI is a generative model at the image level, and we think evaluation at the image level (uint8, 0-255) is reasonable. Moreover, such an evaluation method is commonly employed in research such as Video Prediction task.
+Fortunately, these differences do not impact the concept and motivation of our study, which focuses on Multi-In-Single-Out.
+However, as you pointed out, comparing it with other models seems to have a problem with fairness. Therefore, we plan to evaluate all cited studies in our proposed manner and revise our manuscript accordingly.
+yuhui-Xue commented on Dec 4, 2023
+yuhui-Xue
+on Dec 4, 2023
+More actions
+The problem with the PSNR calculation here is not the range. There will not be a big difference when calculating on float32 (or float64), but it comes from a low-level error, an overflow problem caused by improper use of np.uint8, mse = np.mean( ((np.uint8(img1)-np.uint8(img2)) ** 2)), here np.uint8(img1)-np.uint8(img2) will judge the negative result as overflow (for example, -1 will get 255), and the result of the subsequent **2 operation will still be affected by overflow, so that many **2 results will become 0, thus causing the final PSNR value to be high. There is a problem with this code for calculating PSNR, please correct it. And for a frame insertion algorithm engineer, when the PSNR and SSIM of the model have inconsistent performance, they should be more vigilant to find the problem. In addition, for the questions raised by SHH-Han, you should humbly review your own code instead of always quoting classics to avoid problems.
+👍React with 👍1Reacted by Chee Kim, Gan
+yuhui-Xue commented on Dec 4, 2023
+yuhui-Xue
+on Dec 4, 2023
+More actions
+Modify the code for calculating PSNR mse = np.mean(((np.uint8(img1)-np.uint8(img2)) ** 2)) to mse = np.mean((((np.uint8(img1). astype(np.int)-np.uint8(img2).astype(np.int))) ** 2)) can get the correct result in the uint8 range. This modification not only confirms your desire to obtain PSNR under uint8, but also avoids the occurrence of overflow.
+Thank you for your feedback. Following your comment, we have reviewed the official codes of most VFI (Video Frame Interpolation) studies.
+As your observation, the majority of official codes indeed implement PSNR (Peak Signal-to-Noise Ratio) calculations using float32 (or float64) types within the range of 0 to 1 (or -1 to 1). However, we still feel weird. VFI is a generative model at the image level, and we think evaluation at the image level (uint8, 0-255) is reasonable. Moreover, such an evaluation method is commonly employed in research such as Video Prediction task.
+Fortunately, these differences do not impact the concept and motivation of our study, which focuses on Multi-In-Single-Out.
+However, as you pointed out, comparing it with other models seems to have a problem with fairness. Therefore, we plan to evaluate all cited studies in our proposed manner and revise our manuscript accordingly.
+Thank you for your feedback. Following your comment, we have reviewed the official codes of most VFI (Video Frame Interpolation) studies.
+As your observation, the majority of official codes indeed implement PSNR (Peak Signal-to-Noise Ratio) calculations using float32 (or float64) types within the range of 0 to 1 (or -1 to 1). However, we still feel weird. VFI is a generative model at the image level, and we think evaluation at the image level (uint8, 0-255) is reasonable. Moreover, such an evaluation method is commonly employed in research such as Video Prediction task.
+Fortunately, these differences do not impact the concept and motivation of our study, which focuses on Multi-In-Single-Out.
+However, as you pointed out, comparing it with other models seems to have a problem with fairness. Therefore, we plan to evaluate all cited studies in our proposed manner and revise our manuscript accordingly.
+👍React with 👍1Reacted by Chee Kim, Gan
+❤️React with ❤️1Reacted by seominseok
+J911 commented on Dec 5, 2023
+J911
+on Dec 5, 2023
+Owner
+More actions
+We sincerely appreciate the thorough review by @SHH-Han and @yuhui-Xue.
+Through the information shared by @yuhui-Xue, we have clearly identified the issues.
+In order to prevent confusion in the academic field, we have decided to withdraw both our arXiv submission and code release, and we will conduct a thorough revision of the manuscript.
+We would like to express our profound gratitude for your deep interest and efforts in the academic field.
+Thank you.
+Authors.
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+No labels
+No labels
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

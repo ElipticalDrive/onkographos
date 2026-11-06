@@ -1,0 +1,414 @@
+--- v001.md
++++ v002.md
+@@ -4,109 +4,110 @@
+ 
+ ## Overview
+-Spherical Volume Voxel Traversal is an algorithm that traces a ray with a unit direction over a spherical voxel grid, returning a vector of the spherical coordinate voxels traversed [S1, unofficial]. It serves as the spatial acceleration structure for rendering volumetric data defined in spherical coordinates, replacing the uniform Cartesian grid used in standard ray marching. Unlike Cartesian traversal which steps through axis-aligned boxes, this method navigates the curved boundaries of radial, polar, and azimuthal sectors, handling the topological singularities at the poles and the center [S1, unofficial].
++Spherical Volume Voxel Traversal is an algorithm that traces a ray with a unit direction over a spherical voxel grid, returning a vector of the spherical coordinate voxels traversed [S1, unofficial]. It is designed for rendering volumetric data defined on a spherical domain, such as planetary atmospheres or stellar models, where Cartesian grids introduce significant distortion or boundary artifacts. Unlike Cartesian voxel traversal which relies on axis-aligned bounding boxes, this method computes intersections with radial shells and angular planes (polar and azimuthal) to determine the next voxel boundary [S1, unofficial]. It serves as the spatial acceleration structure for sphere tracing within a spherical volume, replacing the generic Signed Distance Function (SDF) query with exact geometric boundary checks [S1, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs**
+-*   **Input**: A `Ray` struct (origin, direction, inverse direction), a `SphericalVoxelGrid` (containing bounds, trigonometric values, and section counts), and `max_t` (unitized time limit, typically $[0.0, 1.0]$) [S1, unofficial].
+-*   **Output**: A `std::vector<SphericalVoxel>` containing the sequence of voxels traversed, where each voxel stores its radial, polar, and azimuthal indices and its entry/exit times [S1, unofficial].
+-
+-**Data Structures**
+-The grid and ray are defined by the following structures [S1, unofficial]:
+-
+-```cpp
+-struct BoundVec3 { double x, y, z; };
+-struct FreeVec3 { double x, y, z; };
+-struct UnitVec3 { double x, y, z; };
+-struct BoundVec3 { double radial, polar, azimuthal; }; // Note: Source uses 'BoundVec3' for angular bounds, likely representing angular coordinates
+-struct Ray {
+-    const BoundVec3 origin_;
+-    const UnitVec3 direction_;
+-    const FreeVec3 inverse_direction_;
+-    const enum DirectionIndex NZD_index_; // Non-zero direction index
+-};
+-struct SphericalVoxel {
+-    int radial;
+-    int polar;
+-    int azimuthal;
+-    double enter_t;
+-    double exit_t;
+-};
+-struct TrigonometricValues { double cosine, sine; };
+-```
+-
+-**Algorithm Steps**
+-
+-1.  **Initialization and Entrance Calculation**:
+-    *   If `max_t <= 0.0`, return an empty vector [S1, unofficial].
+-    *   Calculate the vector from the ray origin to the sphere center: $rsv = \text{grid.sphereCenter}() - \text{ray.pointAtParameter}(0.0)$ [S1, unofficial].
+-    *   Compute $rsvd = \|rsv\|^2$ and $v = rsv \cdot \text{ray.direction}()$ [S1, unofficial].
+-    *   Determine the radial entrance voxel by finding the smallest `radial_entrance_voxel` such that $rsvd \ge \text{grid.deltaRadiiSquared}(\text{radial\_entrance\_voxel})$ [S1, unofficial].
+-    *   Check if the ray origin is outside the grid: `ray_origin_is_outside_grid` is true if `radial_entrance_voxel == 0` [S1, unofficial].
+-    *   Calculate the entry radius squared: `entry_radius_squared` = `grid.deltaRadiiSquared`(vector_index), where `vector_index` = `radial_entrance_voxel` - `!ray_origin_is_outside_grid` [S1, unofficial].
+-    *   Calculate the perpendicular distance squared from the ray to the sphere center: $rsvd\_minus\_v\_squared = rsvd - v^2$ [S1, unofficial].
+-    *   If `entry_radius_squared <= rsvd_minus_v_squared`, the ray does not intersect the sphere; return empty vector [S1, unofficial].
+-    *   Calculate the intersection distances: $d = \sqrt{\text{entry\_radius\_squared} - rsvd\_minus\_v\_squared}$ [S1, unofficial].
+-    *   Calculate ray exit time: $t\_ray\_exit = \text{ray.timeOfIntersectionAt}(v + d)$ [S1, unofficial]. If $t\_ray\_exit < 0.0$, return empty vector [S1, unofficial].
+-    *   Calculate ray entrance time: $t\_ray\_entrance = \text{ray.timeOfIntersectionAt}(v - d)$ [S1, unofficial].
+-    *   Set `current_radial_voxel` = `radial_entrance_voxel` + `ray_origin_is_outside_grid` [S1, unofficial].
+-
+-2.  **Boundary Segment Initialization**:
+-    *   Initialize `P_polar` and `P_azimuthal` vectors of line segments representing voxel boundaries in the XY and XZ planes, respectively, using `initializeVoxelBoundarySegments` [S1, unofficial]. This function uses precomputed trigonometric values and the current radius to define the line segments for polar and azimuthal cuts [S1, unofficial].
+-
+-3.  **Time Limit Adjustment**:
+-    *   Calculate `unitized_ray_time` = `max_t` * `grid.sphereMaxDiameter()` + `t_ray_entrance` * `ray_origin_is_outside_grid` [S1, unofficial].
+-    *   Adjust `max_t`: if `ray_origin_is_outside_grid`, `max_t` = $\min(t\_ray\_exit, \text{unitized\_ray\_time})$; otherwise, `max_t` = `unitized_ray_time` [S1, unofficial].
+-
+-4.  **Traversal Loop**:
+-    *   Initialize `t` = $t\_ray\_entrance$ * `ray_origin_is_outside_grid` [S1, unofficial].
+-    *   Initialize `current_polar_voxel` and `current_azimuthal_voxel` to 0 (or appropriate start indices) [S1, unofficial].
+-    *   Push the first voxel onto the `voxels` vector with `enter_t` = `t` [S1, unofficial].
+-    *   Loop while `t < max_t`:
+-        *   Calculate intersection times for radial, polar, and azimuthal boundaries:
+-            *   `radial` = `radialHit(...)`
+-            *   `polar` = `polarHit(...)`
+-            *   `azimuthal` = `azimuthalHit(...)` [S1, unofficial].
+-        *   Determine the next intersection using `minimumIntersection(radial, polar, azimuthal)` [S1, unofficial]. This function compares `tMax` values and handles equality cases (e.g., `RadialPolar`, `PolarAzimuthal`) [S1, unofficial].
+-        *   If all `tMax` values are `DOUBLE_MAX` or the radial voxel index becomes 0, set `voxels.back().exit_t = t_ray_exit` and return `voxels` [S1, unofficial].
+-        *   Update `t` and voxel indices based on the intersection type:
+-            *   **Radial**: `t = radial.tMax`, `current_radial_voxel += radial.tStep` [S1, unofficial].
+-            *   **Polar**: `t = polar.tMax`. Check bounds using `inBoundsPolar`. If out of bounds, set `exit_t` and return. Else, `current_polar_voxel = (current_polar_voxel + polar.tStep) % grid.numPolarSections()` [S1, unofficial].
+-            *   **Azimuthal**: `t = azimuthal.tMax`. Check bounds using `inBoundsAzimuthal`. If out of bounds, set `exit_t` and return. Else, `current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal.tStep) % grid.numAzimuthalSections()` [S1, unofficial].
+-            *   **RadialPolar**: Update both radial and polar indices [S1, unofficial].
+-            *   **RadialAzimuthal**: Update both radial and azimuthal indices [S1, unofficial].
+-            *   **PolarAzimuthal**: Update both polar and azimuthal indices [S1, unofficial].
+-            *   **RadialPolarAzimuthal**: Update all three indices [S1, unofficial].
+-        *   **Duplicate Check**: If the new voxel coordinates are identical to the last voxel in `voxels`, `continue` to the next iteration [S1, unofficial].
+-        *   Set `voxels.back().exit_t = t` and push a new `SphericalVoxel` with `enter_t = t` [S1, unofficial].
+-
+-**Pseudocode**
++The algorithm determines the sequence of voxels $(r, \theta, \phi)$ intersected by a ray $r(t) = \mathbf{o} + t\mathbf{d}$, where $\mathbf{d}$ is a unit vector. The grid is defined by $N_r$ radial sections, $N_\theta$ polar sections, and $N_\phi$ azimuthal sections.
++
++### Inputs and Outputs
++**Inputs:**
++- `ray`: A ray defined by origin $\mathbf{o}$, direction $\mathbf{d}$, and precomputed inverse direction $\mathbf{i} = 1/\mathbf{d}$ (handling zero components via a `DirectionIndex`) [S1, unofficial].
++- `grid`: The spherical voxel grid containing:
++  - `sphereCenter`: Center of the spherical volume [S1, unofficial].
++  - `deltaRadiiSquared`: Array of squared radii boundaries for radial shells [S1, unofficial].
++  - `deltaRadius`: Radial step size [S1, unofficial].
++  - `numRadialSections`, `numPolarSections`, `numAzimuthalSections`: Grid dimensions [S1, unofficial].
++  - `pMaxPolar`, `pMaxAzimuthal`: Precomputed boundary vectors for angular planes [S1, unofficial].
++  - `polarTrigValues`: Precomputed sine/cosine values for polar angles [S1, unofficial].
++- `max_t`: A unitized time parameter. The actual maximum travel distance is calculated as `ray_travel_duration = time_to_entrance + sphere.diameter() * max_t` [S1, unofficial]. If `max_t <= 0.0`, no voxels are traversed. If `max_t >= 1.0`, the entire sphere is traversed [S1, unofficial].
++
++**Outputs:**
++- `voxels`: A vector of `SphericalVoxel` structs, each containing:
++  - `radial`, `polar`, `azimuthal`: Integer indices of the voxel [S1, unofficial].
++  - `enter_t`: The $t$ value where the ray entered the voxel [S1, unofficial].
++  - `exit_t`: The $t$ value where the ray exits the voxel [S1, unofficial].
++
++### Data Structures
++- `BoundVec3`: Vector with bounded coordinates (e.g., normalized to $[0,1]$ or similar) [S1, unofficial].
++- `FreeVec3`: Standard 3D vector [S1, unofficial].
++- `UnitVec3`: Normalized direction vector [S1, unofficial].
++- `Ray`: Contains `origin_`, `direction_`, `inverse_direction_`, and `NZD_index_` (Non-Zero Direction index) [S1, unofficial].
++- `RaySegment`: Represents the current segment of the ray within a voxel, containing `P1_` (start), `P2_` (end), and `ray_segment_` (direction) [S1, unofficial].
++- `HitParameters`: Structure holding `tMax` (time to next boundary) and `tStep` (step direction, +1 or -1) for radial, polar, and azimuthal dimensions [S1, unofficial].
++
++### Algorithm Steps
++
++1. **Initialization and Entrance Calculation:**
++   - If `max_t <= 0.0`, return empty list [S1, unofficial].
++   - Calculate the vector from ray origin to sphere center: $\mathbf{rsv} = \text{grid.sphereCenter} - \mathbf{o}$ [S1, unofficial].
++   - Compute squared distance from center: $SED = \|\mathbf{rsv}\|^2$ [S1, unofficial].
++   - Determine the entrance radial voxel index `radial_entrance_voxel` by finding the smallest $i$ such that $SED < \text{grid.deltaRadiiSquared}(i)$ [S1, unofficial].
++   - Determine if the ray origin is outside the grid: `ray_origin_is_outside_grid = (radial_entrance_voxel == 0)` [S1, unofficial].
++   - Calculate the entry radius squared: $R_{entry}^2 = \text{grid.deltaRadiiSquared}(\text{radial\_entrance\_voxel} - \text{ray\_origin\_is\_outside\_grid})$ [S1, unofficial].
++   - Calculate the entry radius: $R_{entry} = \text{grid.deltaRadius} \times (N_r - (\text{radial\_entrance\_voxel} - \text{ray\_origin\_is\_outside\_grid}))$ [S1, unofficial].
++   - Compute dot products: $v = \mathbf{rsv} \cdot \mathbf{d}$, $rsvd = \|\mathbf{rsv}\|^2$, $rsvd\_minus\_v^2 = rsvd - v^2$ [S1, unofficial].
++   - Check if the ray misses the sphere: If $R_{entry}^2 \le rsvd\_minus\_v^2$, return empty list [S1, unofficial].
++   - Calculate intersection distances: $d = \sqrt{R_{entry}^2 - rsvd\_minus\_v^2}$ [S1, unofficial].
++   - Calculate ray exit time: $t_{ray\_exit} = \text{ray.timeOfIntersectionAt}(v + d)$ [S1, unofficial]. If $t_{ray\_exit} < 0$, return empty list [S1, unofficial].
++   - Calculate ray entrance time: $t_{ray\_entrance} = \text{ray.timeOfIntersectionAt}(v - d)$ [S1, unofficial].
++   - Set initial radial voxel: `current_radial_voxel = radial_entrance_voxel + ray_origin_is_outside_grid` [S1, unofficial].
++
++2. **Boundary Segment Initialization:**
++   - Initialize `P_polar` and `P_azimuthal` line segment arrays representing the boundaries of the current radial shell in the XY and XZ planes respectively [S1, unofficial].
++   - If the ray origin is outside the grid, use precomputed `grid.pMaxPolar` and `grid.pMaxAzimuthal` [S1, unofficial].
++   - Otherwise, compute segments based on `current_radius` (derived from `entry_radius`) and trigonometric values from the grid [S1, unofficial].
++
++3. **Ray Segment Setup:**
++   - Define the initial ray segment starting from the entrance point [S1, unofficial].
++   - Calculate `unitized_ray_time` based on `max_t` and sphere diameter [S1, unofficial].
++   - Update `max_t` to be the minimum of the calculated unitized time and the actual ray exit time if starting from outside [S1, unofficial].
++
++4. **Traversal Loop:**
++   - Initialize `t = t_{ray\_entrance} * \text{ray\_origin\_is\_outside\_grid}` [S1, unofficial].
++   - Push the first voxel to `voxels` with `enter_t = t` [S1, unofficial].
++   - While `t < max_t`:
++     - Calculate `tMax` and `tStep` for the next radial, polar, and azimuthal boundaries using `radialHit`, `polarHit`, and `azimuthalHit` functions [S1, unofficial]. These functions solve for the intersection of the ray with the spherical shells and angular planes [S1, unofficial].
++     - Determine the next intersection type using `minimumIntersection`, which compares `tMax` values for radial, polar, and azimuthal boundaries, handling equality cases (e.g., `RadialPolar`, `PolarAzimuthal`, `RadialPolarAzimuthal`) [S1, unofficial].
++     - Update `t` to the minimum `tMax` [S1, unofficial].
++     - Update voxel indices based on the intersection type:
++       - **Radial:** `current_radial_voxel += tStep` [S1, unofficial].
++       - **Polar:** Check bounds using `inBoundsPolar`. If out of bounds, set `exit_t = t_{ray\_exit}` and return. Otherwise, `current_polar_voxel = (current_polar_voxel + tStep) \% N_\theta` [S1, unofficial].
++       - **Azimuthal:** Check bounds using `inBoundsAzimuthal`. If out of bounds, set `exit_t = t_{ray\_exit}` and return. Otherwise, `current_azimuthal_voxel = (current_azimuthal_voxel + tStep) \% N_\phi` [S1, unofficial].
++       - **Combined Intersections:** Update multiple indices simultaneously (e.g., `RadialPolar` updates both radial and polar) [S1, unofficial].
++     - **Duplicate Check:** If the new voxel indices are identical to the last voxel in `voxels`, continue to the next iteration (skip adding) [S1, unofficial].
++     - Set `voxels.back().exit_t = t` [S1, unofficial].
++     - Push a new `SphericalVoxel` with the updated indices and `enter_t = t` [S1, unofficial].
++
++### Pseudocode
+ 
+ ```python
+-import math
+-
+-def walk_spherical_volume(ray_origin, ray_direction, grid, max_t):
++def walk_spherical_volume(ray, grid, max_t):
+     if max_t <= 0.0:
+         return []
+ 
+-    # Ray-Sphere Vector
+-    rsv = grid.sphere_center - ray_origin
+-    rsvd = dot(rsv, rsv)
+-    v = dot(rsv, ray_direction)
+-    
+-    # Find radial entrance voxel
++    # 1. Initialization
++    rsv = grid.sphere_center - ray.origin
++    sed = rsv.squared_length()
++    
++    # Find entrance radial voxel
+     radial_entrance_voxel = 0
+-    while rsvd < grid.delta_radii_squared(radial_entrance_voxel):
++    while sed < grid.delta_radii_squared[radial_entrance_voxel]:
+         radial_entrance_voxel += 1
+         
+     ray_origin_is_outside_grid = (radial_entrance_voxel == 0)
++    
++    # Calculate entry radius
+     vector_index = radial_entrance_voxel - (0 if ray_origin_is_outside_grid else 1)
+-    entry_radius_squared = grid.delta_radii_squared(vector_index)
+-    
++    entry_radius_squared = grid.delta_radii_squared[vector_index]
++    entry_radius = grid.delta_radius * (grid.num_radial_sections - vector_index)
++    
++    rsvd = rsv.squared_length()
++    v = rsv.dot(ray.direction)
+     rsvd_minus_v_squared = rsvd - v * v
+     
++    # Check if ray misses
+     if entry_radius_squared <= rsvd_minus_v_squared:
+         return []
+         
+-    d = math.sqrt(entry_radius_squared - rsvd_minus_v_squared)
++    d = sqrt(entry_radius_squared - rsvd_minus_v_squared)
+     t_ray_exit = ray.time_of_intersection(v + d)
+     if t_ray_exit < 0.0:
+@@ -116,121 +117,118 @@
+     current_radial_voxel = radial_entrance_voxel + (1 if ray_origin_is_outside_grid else 0)
+     
+-    # Initialize boundary segments
+-    P_polar = initialize_voxel_boundary_segments(grid, entry_radius, is_outside=ray_origin_is_outside_grid)
+-    P_azimuthal = initialize_voxel_boundary_segments(grid, entry_radius, is_outside=ray_origin_is_outside_grid, axis='z')
+-    
+-    unitized_ray_time = max_t * grid.sphere_max_diameter() + (t_ray_entrance if ray_origin_is_outside_grid else 0.0)
+-    if ray_origin_is_outside_grid:
+-        max_t = min(t_ray_exit, unitized_ray_time)
+-    else:
+-        max_t = unitized_ray_time
+-        
+-    t = t_ray_entrance if ray_origin_is_outside_grid else 0.0
+-    current_polar_voxel = 0
+-    current_azimuthal_voxel = 0
++    # 2. Boundary Initialization
++    P_polar = initialize_voxel_boundary_segments(grid, entry_radius, ray_origin_is_outside_grid, "polar")
++    P_azimuthal = initialize_voxel_boundary_segments(grid, entry_radius, ray_origin_is_outside_grid, "azimuthal")
++    
++    # 3. Ray Segment Setup
++    ray_sphere = grid.sphere_center - ray.point_at_parameter(t_ray_entrance) if ray_origin_is_outside_grid else rsv
++    ray_segment = RaySegment(P1=ray.point_at_parameter(t_ray_entrance), P2=ray.point_at_parameter(t_ray_entrance + 1), direction=ray.direction)
++    
++    unitized_ray_time = max_t * grid.sphere_max_diameter() + (t_ray_entrance if ray_origin_is_outside_grid else 0)
++    max_t = min(t_ray_exit, unitized_ray_time) if ray_origin_is_outside_grid else unitized_ray_time
++    
++    t = t_ray_entrance * (1 if ray_origin_is_outside_grid else 0)
++    collinear_times = [0.0, ray.time_of_intersection(...)] # Placeholder for specific collinear logic
+     
+     voxels = []
+-    voxels.append({
+-        'radial': current_radial_voxel,
+-        'polar': current_polar_voxel,
+-        'azimuthal': current_azimuthal_voxel,
+-        'enter_t': t,
+-        'exit_t': 0.0
+-    })
+-    
++    voxels.append(SphericalVoxel(
++        radial=current_radial_voxel,
++        polar=0, # Initial polar/azimuthal indices depend on entrance point calculation
++        azimuthal=0,
++        enter_t=t
++    ))
++    
++    # 4. Traversal Loop
+     while t < max_t:
+-        radial_hit = radial_hit_calculation(ray, grid, current_radial_voxel, t, max_t)
+-        polar_hit = polar_hit_calculation(ray, grid, current_polar_voxel, t, max_t)
+-        azimuthal_hit = azimuthal_hit_calculation(ray, grid, current_azimuthal_voxel, t, max_t)
+-        
+-        intersection_type = minimum_intersection(radial_hit, polar_hit, azimuthal_hit)
+-        
+-        if (current_radial_voxel + radial_hit.t_step == 0 or
+-            (radial_hit.t_max == float('inf') and 
+-             polar_hit.t_max == float('inf') and 
+-             azimuthal_hit.t_max == float('inf'))):
+-            voxels[-1]['exit_t'] = t_ray_exit
++        radial_hit = radial_hit_calculation(ray, grid, ray_segment, collinear_times, current_radial_voxel, t, max_t)
++        polar_hit = polar_hit_calculation(ray, grid, ray_segment, collinear_times, current_polar_voxel, t, max_t)
++        azimuthal_hit = azimuthal_hit_calculation(ray, grid, ray_segment, collinear_times, current_azimuthal_voxel, t, max_t)
++        
++        # Check for exit conditions
++        if current_radial_voxel + radial_hit.t_step == 0 or \
++           (radial_hit.t_max == INF and polar_hit.t_max == INF and azimuthal_hit.t_max == INF):
++            voxels[-1].exit_t = t_ray_exit
+             return voxels
+             
+-        t = float('inf')
+-        if intersection_type == 'Radial':
+-            t = radial_hit.t_max
+-            current_radial_voxel += radial_hit.t_step
+-        elif intersection_type == 'Polar':
++        intersection_type = minimum_intersection(radial_hit, polar_hit, azimuthal_hit)
++        
++        if intersection_type == Radial:
++            t = radial_hit.t_max
++            current_radial_voxel += radial_hit.t_step
++        elif intersection_type == Polar:
+             t = polar_hit.t_max
+             if not in_bounds_polar(grid, polar_hit.t_step, current_polar_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections()
+-        elif intersection_type == 'Azimuthal':
++                voxels[-1].exit_t = t_ray_exit
++                return voxels
++            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections
++        elif intersection_type == Azimuthal:
+             t = azimuthal_hit.t_max
+             if not in_bounds_azimuthal(grid, azimuthal_hit.t_step, current_azimuthal_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections()
+-        elif intersection_type == 'RadialPolar':
+-            t = radial_hit.t_max
+-            current_radial_voxel += radial_hit.t_step
++                voxels[-1].exit_t = t_ray_exit
++                return voxels
++            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections
++        elif intersection_type == RadialPolar:
++            t = radial_hit.t_max
+             if not in_bounds_polar(grid, polar_hit.t_step, current_polar_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections()
+-        elif intersection_type == 'RadialAzimuthal':
+-            t = radial_hit.t_max
+-            current_radial_voxel += radial_hit.t_step
++                voxels[-1].exit_t = t_ray_exit
++                return voxels
++            current_radial_voxel += radial_hit.t_step
++            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections
++        elif intersection_type == RadialAzimuthal:
++            t = radial_hit.t_max
+             if not in_bounds_azimuthal(grid, azimuthal_hit.t_step, current_azimuthal_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections()
+-        elif intersection_type == 'PolarAzimuthal':
++                voxels[-1].exit_t = t_ray_exit
++                return voxels
++            current_radial_voxel += radial_hit.t_step
++            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections
++        elif intersection_type == PolarAzimuthal:
+             t = polar_hit.t_max
+-            if not in_bounds_polar(grid, polar_hit.t_step, current_polar_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            if not in_bounds_azimuthal(grid, azimuthal_hit.t_step, current_azimuthal_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections()
+-            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections()
+-        elif intersection_type == 'RadialPolarAzimuthal':
+-            t = radial_hit.t_max
+-            current_radial_voxel += radial_hit.t_step
+-            if not in_bounds_polar(grid, polar_hit.t_step, current_polar_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            if not in_bounds_azimuthal(grid, azimuthal_hit.t_step, current_azimuthal_voxel):
+-                voxels[-1]['exit_t'] = t_ray_exit
+-                return voxels
+-            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections()
+-            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections()
++            if not in_bounds_azimuthal(grid, azimuthal_hit.t_step, current_azimuthal_voxel) or \
++               not in_bounds_polar(grid, polar_hit.t_step, current_polar_voxel):
++                voxels[-1].exit_t = t_ray_exit
++                return voxels
++            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections
++            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections
++        elif intersection_type == RadialPolarAzimuthal:
++            t = radial_hit.t_max
++            if not in_bounds_azimuthal(grid, azimuthal_hit.t_step, current_azimuthal_voxel) or \
++               not in_bounds_polar(grid, polar_hit.t_step, current_polar_voxel):
++                voxels[-1].exit_t = t_ray_exit
++                return voxels
++            current_radial_voxel += radial_hit.t_step
++            current_polar_voxel = (current_polar_voxel + polar_hit.t_step) % grid.num_polar_sections
++            current_azimuthal_voxel = (current_azimuthal_voxel + azimuthal_hit.t_step) % grid.num_azimuthal_sections
+             
+         # Duplicate check
+-        last_voxel = voxels[-1]
+-        if (last_voxel['radial'] == current_radial_voxel and
+-            last_voxel['polar'] == current_polar_voxel and
+-            last_voxel['azimuthal'] == current_azimuthal_voxel):
++        if voxels[-1].radial == current_radial_voxel and \
++           voxels[-1].polar == current_polar_voxel and \
++           voxels[-1].azimuthal == current_azimuthal_voxel:
+             continue
+             
+-        voxels[-1]['exit_t'] = t
+-        voxels.append({
+-            'radial': current_radial_voxel,
+-            'polar': current_polar_voxel,
+-            'azimuthal': current_azimuthal_voxel,
+-            'enter_t': t,
+-            'exit_t': 0.0
+-        })
++        voxels[-1].exit_t = t
++        voxels.append(SphericalVoxel(
++            radial=current_radial_voxel,
++            polar=current_polar_voxel,
++            azimuthal=current_azimuthal_voxel,
++            enter_t=t
++        ))
+         
+     return voxels
+ ```
+ 
++### Parameters and Edge Cases
++- **max_t**: Must be in $[0.0, 1.0]$ for standard usage. Values $> 1.0$ traverse the entire sphere regardless of ray exit [S1, unofficial].
++- **Precision**: The algorithm uses `double` precision for calculations to minimize floating-point errors in boundary intersection [S1, unofficial].
++- **Collinear Hits**: Special handling is required when the ray is parallel to a boundary plane (e.g., constant polar angle). The `collinear_times` array and specific hit functions handle these degenerate cases [S1, unofficial].
++- **Duplicate Voxels**: If the computed next voxel is identical to the current one (due to precision or geometry), it is skipped to prevent infinite loops or redundant processing [S1, unofficial].
++
+ ## Operating characteristics
+-*   **Time Complexity**: Proportional to the number of voxels traversed by the ray. In the worst case, this is $O(N_r + N_p + N_a)$ where $N_r, N_p, N_a$ are the number of radial, polar, and azimuthal sections [S1, unofficial].
+-*   **Memory Complexity**: $O(N_r + N_p + N_a)$ to store the output voxel list [S1, unofficial].
+-*   **Strengths**: Efficiently handles spherical symmetry and avoids the distortion artifacts of Cartesian grids when rendering spherical volumes. It correctly handles the topology of spherical coordinates [S1, unofficial].
+-*   **Limitations**: Complex implementation due to the need to handle multiple intersection types and boundary conditions. Performance degrades if the ray passes near the poles or center where voxel sizes shrink [S1, unofficial].
+-*   **When to use**: When rendering volumetric data that is naturally defined in spherical coordinates (e.g., planetary atmospheres, spherical clouds) [S1, unofficial].
++- **Time Complexity**: Linear in the number of voxels traversed. Each step involves constant-time geometric calculations for boundary intersections [S1, unofficial].
++- **Memory Complexity**: Proportional to the number of voxels traversed, stored in a vector. Precomputed grid data (trig values, boundary segments) is stored in the grid structure [S1, unofficial].
++- **Strengths**: Exact boundary intersection for spherical grids, avoiding the approximation errors of Cartesian voxel traversal on spherical domains. Efficient for rendering spherical volumes like atmospheres [S1, unofficial].
++- **Limitations**: Complex implementation due to handling multiple intersection types and edge cases (collinear hits, boundary bounds). Performance degrades if the ray traverses a large number of small voxels [S1, unofficial].
+ 
+ ## Background
+-The algorithm was introduced in the context of spherical volume rendering, specifically in the `svr-algorithm` repository [S1, unofficial]. It addresses the need for efficient traversal of non-Cartesian voxel grids, which are common in scientific visualization of spherical domains [S1, unofficial].
++The algorithm is part of the Spherical Volume Rendering (SVR) project, which aims to provide efficient rendering techniques for volumetric data on spherical domains [S1, unofficial]. It addresses the limitations of Cartesian ray marching when applied to spherical geometries, where boundary handling and distortion are significant issues [S1, unofficial].
+ 
+ ## Sources

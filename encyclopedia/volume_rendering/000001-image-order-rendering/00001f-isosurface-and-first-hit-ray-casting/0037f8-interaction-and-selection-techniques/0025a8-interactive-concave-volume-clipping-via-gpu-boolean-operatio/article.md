@@ -1,0 +1,106 @@
+# Interactive Concave Volume Clipping via GPU Boolean Operations
+
+Also called: Concave Volume Clipping, GPU Ray Casting with Boolean Clipping
+
+## Overview
+This method enables the interactive visualization of inner structures in volumetric datasets by performing clipping via Boolean operations (intersection, subtraction, union) directly on the GPU [S1, unofficial]. It solves the problem of specifying complex transfer functions for revealing internal features by instead using geometric primitives to define visible regions [S1, unofficial]. It differs from standard convex clipping by supporting concave volumes through the decomposition of 3D Boolean operations into 1D operations along the ray, avoiding the high video memory costs associated with storing complex analytical convex objects [S1, unofficial].
+
+## How it works
+The method implements both the volume rendering and the Boolean logic on the graphics hardware to achieve interactive frame rates [S1, unofficial].
+
+**Inputs and Outputs:**
+*   **Input:** Volumetric dataset, user-defined clipping geometry (parameters for common analytical convex objects such as polyhedrons and spheres), and a color scheme [S1, unofficial].
+*   **Output:** Rendered image with inner structures visible, enhanced by pseudo-color and Phong illumination on clipped surfaces [S1, unofficial].
+
+**Data Structures:**
+*   **Clipping Primitives:** Defined by parameters. The method leverages the fact that common analytical convex objects consume very little video memory [S1, unofficial].
+*   **Ray State:** For each pixel, a ray is cast. The intersection of the ray with the volume and the clipping primitives is computed.
+
+**Algorithm Steps:**
+1.  **Ray Casting:** Cast rays from the camera through each pixel into the volumetric dataset [S1, unofficial].
+2.  **3D to 1D Conversion:** Convert the 3D Boolean operations (intersection, subtraction, union) of the clipping geometry into 1D Boolean operations along the ray [S1, unofficial]. This allows the GPU to evaluate visibility against complex concave shapes using simple scalar logic on the ray parameter $t$.
+3.  **Boolean Evaluation:** Evaluate the 1D Boolean logic to determine if the current sample point along the ray is inside the clipped region [S1, unofficial].
+4.  **Rendering:** Apply a pseudo-color based rendering model to the visible samples [S1, unofficial].
+5.  **Shading:** Enable the Phong illumination model on the clipped surfaces to enhance visual effects [S1, unofficial].
+6.  **Color Selection:** Allow users to select from pre-defined color schemes or specify their own to clarify inner anatomical structures [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+# Pseudocode for a single ray cast with Boolean clipping
+# Note: Specific 1D conversion formulas are not provided in the source [S1, unofficial].
+# The following represents the logical flow described.
+
+def render_volume_with_boolean_clipping(volume_data, camera_ray, clipping_primitives, color_scheme):
+    """
+    Renders a volume slice along a ray, applying Boolean clipping.
+    """
+    # 1. Initialize ray parameters
+    t_min = volume_entry_t
+    t_max = volume_exit_t
+    
+    # 2. Convert 3D clipping primitives to 1D intervals along the ray
+    # This step converts the geometric intersection of the ray with 
+    # convex objects (polyhedrons, spheres) into valid t-intervals.
+    # Let I_clip be the set of 1D intervals representing the clipping volume.
+    I_clip = convert_3d_to_1d_boolean(clipping_primitives, camera_ray)
+    
+    # 3. Define the base volume interval
+    I_vol = [t_min, t_max]
+    
+    # 4. Apply Boolean Operation (e.g., Intersection)
+    # The visible interval is the intersection of the volume and the clip
+    I_visible = boolean_intersect_1d(I_vol, I_clip)
+    
+    # 5. Sample the volume along the visible interval
+    color = (0, 0, 0, 0) # Initial color
+    
+    for t in sample_range(I_visible):
+        sample = sample_volume(volume_data, camera_ray.origin + t * camera_ray.direction)
+        
+        # 6. Apply Pseudo-Color Rendering Model
+        # Map sample value to color based on the selected scheme
+        c = apply_pseudo_color(sample, color_scheme)
+        
+        # 7. Composite (Standard Volume Rendering Composite)
+        # Alpha compositing
+        color = composite(color, c)
+        
+        if color.alpha >= 1.0:
+            break
+            
+    # 8. Apply Phong Illumination on clipped surfaces
+    # If the ray exits the clipping boundary, apply lighting to that surface point
+    if is_boundary_exit(t):
+        normal = compute_normal(volume_data, camera_ray.origin + t * camera_ray.direction)
+        color = apply_phong_illumination(color, normal, camera_ray.direction)
+        
+    return color
+```
+
+**Parameters:**
+*   **Color Scheme:** Users can select from several pre-defined schemes or specify their own [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Precision:** Not given in the sources.
+*   **Boundaries:** The method relies on converting 3D operations to 1D; degenerate cases where the ray is tangent to a clipping primitive may require specific handling not detailed in the source [S1, unofficial].
+
+## Subtopics
+
+### Automatic Cut-Away and Ghosted Views (Volumetric)
+This variant automatically generates cut-away and ghosted views from volumetric data by employing additional information about the importance of particular features [S2, unofficial]. It maps clipping operations to commodity graphics hardware to achieve interactive framerates, performing all rendering computations on the graphics hardware [S2, unofficial]. It uses per-fragment operations to estimate on-the-fly visibility according to the clipping geometry and adjusts shading in areas where clipping occurs [S2, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Interactive frame rates are achieved [S1, unofficial].
+*   **Memory Complexity:** Consumes very little video memory because common analytical convex objects are determined by parameters rather than storing complex geometry [S1, unofficial].
+*   **Measured Performance:** Tested on a standard PC with a GeForce FX8600 graphics card, achieving interactive frame rates [S1, unofficial].
+*   **Strengths:** Avoids difficulties in specifying appropriate transfer functions; supports concave volumes; low memory footprint for clipping geometry.
+*   **Limitations:** Relies on common analytical convex objects for the Boolean primitives; specific performance metrics beyond "interactive" are not given [S1, unofficial].
+
+## Background
+The method was presented by Feiniu Yuan in January 2012 [S1, unofficial]. It builds on the general applicability of clipping operations in computer graphics and the need for effective techniques to increase performance and visual quality in volumetric visualization [S2, unofficial]. The approach is part of a broader effort to map complex visualization tasks to commodity graphics hardware for interactivity [S2, unofficial].
+
+## Sources
+[S1] Volume and Isosurface Rendering with GPU‐Accelerated Cell Projection, https://www.researchgate.net/publication/227523087_Volume_and_Isosurface_Rendering_with_GPU-Accelerated_Cell_Projection, fetched 2026-10-27 (unofficial)
+[S2] Illustrative Visualization for Medicine and Science, https://doi.org/10.2312/egt.20061068, fetched 2026-10-26 (unofficial)

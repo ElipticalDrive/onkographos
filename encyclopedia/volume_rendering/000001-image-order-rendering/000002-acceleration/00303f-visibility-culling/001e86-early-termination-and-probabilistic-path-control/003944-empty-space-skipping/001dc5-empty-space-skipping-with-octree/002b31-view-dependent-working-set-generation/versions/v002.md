@@ -1,0 +1,72 @@
+# View-Dependent Working Set Generation
+
+Also called: Incremental refinement procedure
+
+## Overview
+This method constructs a view-dependent working set of octree nodes for out-of-core volume rendering by incrementally refining a sorted set of visible, non-empty nodes [S1]. It solves the problem of GPU stalls caused by out-of-core data access latency by hiding these delays through asynchronous data loading and a hierarchical cache system [S1]. Unlike static culling methods, it dynamically adapts the working set based on projected screen-space size and visibility, ensuring that only necessary data is loaded into the GPU texture cache [S1].
+
+## How it works
+**Inputs:** Octree structure with min/max values per node; transfer function (for volume rendering); camera parameters (view frustum, projection); current GPU cache state; system memory (CPU cache) [S1].
+**Outputs:** A sorted list of active octree nodes (the working set) present in both CPU and GPU caches [S1].
+
+**Data Structures:**
+1. **Working Set:** A list of octree nodes [S1].
+2. **CPU Cache:** A pool of blocks managed with LRU policy, using system memory to avoid disk I/O [S1].
+3. **GPU Texture Cache:** A large preallocated 3D texture managed as a pool of blocks [S1].
+    * **Value Texture:** 16-bit single channel [S1].
+    * **Gradient Texture:** RGBA8 texture. RGB components store normalized gradients; A component stores gradient norm [S1].
+4. **Summed-Area Table (SAT):** Used for volume rendering emptiness checks [S1].
+
+**Algorithm Steps:**
+
+1. **Initialization:** Initialize the working set with the octree root node [S1].
+2. **Sorting:** Sort the working set by decreasing projected screen-space size of the voxels represented by the nodes [S1]. Visibility information (frustum culling) can be incorporated here [S1].
+3. **Refinement Loop:** While termination conditions are not met:
+    a. **Select Node:** Pick the highest-priority node from the sorted working set [S1].
+    b. **Emptiness Check:** Determine if the node is empty [S1].
+        * *Isosurface Rendering:* A node is non-empty if the isovalue $I$ satisfies $min \le I \le max$, where $min$ and $max$ are the minimum and maximum values stored in the node [S1].
+        * *Volume Rendering:* Use summed-area tables of transfer function opacity [S1]. Let $T_{opacity}$ be the SAT. Let $v_{min}$ and $v_{max}$ be the minimum and maximum block values. The node is non-empty if $SAT(v_{max}) - SAT(v_{min}) > 0$ [S1].
+    c. **Terminal Check:** If the node is empty or outside the view frustum, mark it as terminal and do not refine further [S1].
+    d. **Cache Availability Check:** Check if data for the node's children is immediately available in the CPU cache or system memory [S1].
+    e. **GPU Cache Space Check:** Check if there is sufficient space in the GPU texture cache to store the refined children [S1].
+    f. **Refinement:** If data is available and GPU space exists:
+        i. Subdivide the node into its 8 children [S1].
+        ii. Remove the parent from the working set [S1].
+        iii. Add the 8 children to the working set [S1].
+        iv. Update the GPU texture cache using `glTexSubImage` to move the new data [S1].
+        v. Re-sort the working set based on projected screen-space size [S1].
+    g. **Asynchronous Loading:** If data is not immediately available, issue an asynchronous data access request to load the data from disk/system memory into the CPU cache [S1]. Do not refine this node in the current frame step; proceed to the next node in the sorted list [S1].
+4. **Cache Management:** Maintain both CPU and GPU caches using a Least Recently Used (LRU) policy [S1]. The CPU cache acts as a level-2 cache to prevent disk accesses for recently used blocks [S1].
+
+**Termination Conditions:**
+Refinement stops when any of the following is true:
+1. All nodes in the working set are adequately refined (e.g., reached maximum resolution or are terminal) [S1].
+2. No data is currently available in-core to perform a refinement for any remaining node in the working set [S1].
+3. No more space is available in the GPU cache for further subdivision [S1].
+
+**Parameters:**
+* **Cache Policy:** LRU for both CPU and GPU caches [S1].
+* **GPU Value Texture Format:** 16-bit single channel [S1].
+* **GPU Gradient Texture Format:** RGBA8 (RGB: normalized gradients, A: gradient norm) [S1].
+* **Asynchronous Loading:** Enabled to hide latency [S1].
+
+**Edge Cases and Pitfalls:**
+* **Precision:** Not given in the sources.
+* **Boundaries:** Nodes outside the view frustum are treated as terminal [S1].
+* **Degenerate Input:** If the octree root is empty, the working set remains empty or contains only the root as terminal [S1].
+
+## Operating characteristics
+* **Time Complexity:** Not given in the sources.
+* **Memory Complexity:** Depends on the size of the GPU texture cache and CPU cache [S1]. The GPU cache is a preallocated 3D texture [S1].
+* **Measured Performance:** Not given in the sources.
+* **Scaling:** The method is designed for out-of-core rendering, scaling to datasets larger than GPU memory by using the CPU cache and asynchronous loading [S1].
+* **Strengths:** Hides out-of-core data access latency; reduces GPU stalls; adapts to view-dependent visibility [S1].
+* **Limitations:** Requires asynchronous loading infrastructure; cache management complexity; dependent on the effectiveness of the emptiness check [S1].
+* **When to use:** Interactive out-of-core volume rendering where data exceeds GPU memory and latency must be hidden [S1].
+* **When not to use:** Not given in the sources.
+
+## Background
+This method was introduced in the paper "A single-pass GPU ray casting framework for interactive out-of-core volume rendering" by Vic et al. (2008) [S1]. It is part of a framework designed to reduce GPU stalls by exploiting feedback from the renderer to avoid refinement and data loading of occluded zones [S1]. The approach builds on earlier work in octree traversal and cache management [S1].
+
+## Sources
+[S1] A single-pass GPU ray casting framework for interactive out-of-core ..., https://www.crs4.it/vic/data/papers/cgi2008-movr.pdf, fetched 2026-10-29

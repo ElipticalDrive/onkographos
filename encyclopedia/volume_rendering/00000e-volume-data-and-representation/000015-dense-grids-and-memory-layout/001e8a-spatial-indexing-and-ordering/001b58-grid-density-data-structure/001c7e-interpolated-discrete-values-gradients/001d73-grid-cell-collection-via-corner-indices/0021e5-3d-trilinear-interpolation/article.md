@@ -1,110 +1,131 @@
 # 3D Trilinear Interpolation
 
-Also called: 3D Linear Interpolation, Trilinear Interpolant, Trilinear Interpolation (Standard), Trilinear Interpolation on Regular Mesh, Trilinear Voxel Interpolation, Voxel Trilinear Interpolation
+Also called: 3D Linear Interpolation, Trilinear Interpolant, Trilinear Interpolation, Trilinear Interpolation on Regular Mesh, Trilinear SDF Interpolation, Trilinear Voxel Interpolation, Voxel Trilinear Interpolation
 
 ## Overview
-3D Trilinear Interpolation estimates the value of a scalar or vector field at an arbitrary point $P=(x,y,z)$ within a grid cell by combining the values at the cell's eight corners [S1][S2, S3, unofficial]. It solves the problem of sampling dense volumetric data at sub-voxel resolution, providing smoother results than nearest-neighbor sampling [S4, S5, unofficial]. It is distinguished from higher-order methods like [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md) by its use of only 8 neighbors and linear basis functions, which ensures $C^0$ continuity on regular rectilinear grids but lacks the derivative continuity of cubic methods [S1][S2, unofficial].
+3D Trilinear Interpolation estimates the value of a scalar field at an arbitrary point $P=(x,y,z)$ within a voxel by linearly interpolating the values at the eight corners of the enclosing grid cell [S1][S2, S3, S4, S5, S6, S7, S8, unofficial]. It solves the problem of sampling dense volume data at sub-voxel resolution, providing smoother results than nearest-neighbor sampling while remaining computationally cheaper than higher-order methods like trilinear or tricubic interpolation [S2, S4, S5, unofficial]. It differs from [VoxelGrid](2159-voxelgrid.md) by providing continuous value estimation rather than discrete cell access, and from [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md) by using only the 8 immediate corner values rather than a larger stencil [S2, S4, unofficial].
 
 ## How it works
-**Inputs:**
-- A point $P = (x, y, z)$ in world or grid coordinates [S1][S6, unofficial].
-- A dense 3D grid of values $V$ with dimensions $N_x \times N_y \times N_z$ [S3, S7, unofficial].
-- Grid origin $O = (o_x, o_y, o_z)$ and voxel spacings $D = (d_x, d_y, d_z)$ [S6, unofficial]. If the grid is unit-spaced and origin-aligned, these are implicit.
-
-**Outputs:**
-- A scalar value $F(P)$ or vector field value at $P$ [S1][S7, unofficial].
+**Inputs and Outputs:**
+*   **Input:** A query point $P = (x, y, z)$ in continuous coordinates; a dense 3D grid of values $V$ with dimensions $N_x \times N_y \times N_z$ (or extent $E$ and origin) [S1][S3, S5, S6, S7, S9, unofficial].
+*   **Output:** A single interpolated scalar value $F(P)$ [S1][S5, S7, unofficial].
 
 **Data Structures:**
-- The grid $V$ is typically stored as a contiguous array or multi-dimensional array [S3, unofficial]. For a grid with dimensions $N_x, N_y, N_z$, access is often $V[z][y][x]$ or flattened with stride-based indexing [S3, unofficial].
-- Corner indices are integers $x_0, x_1, y_0, y_1, z_0, z_1$ where $x_1 = x_0 + 1$, etc. [S5, unofficial].
+The grid is typically stored as a contiguous array or multi-dimensional array. For a rectilinear grid with uniform spacing, the layout is often `data[z][y][x]` or `data[x][y][z]` depending on memory layout conventions (row-major vs column-major) [S3, unofficial]. The values at the eight corners are accessed via integer indices derived from the floor of the query coordinates [S5, S6, S7, unofficial].
 
-**Steps:**
+**Numbered Steps:**
+1.  **Boundary Check:** If the query point $P$ lies outside the grid bounds ($x < 0$ or $x \ge N_x$, etc.), return a default value (typically 0 or clamped) [S5, unofficial].
+2.  **Floor Coordinates:** Compute the integer indices of the minimum corner of the enclosing voxel:
+    $$x_0 = \lfloor x \rfloor, \quad y_0 = \lfloor y \rfloor, \quad z_0 = \lfloor z \rfloor$$
+    [S5, S6, S7, S8, unofficial].
+3.  **Ceiling Coordinates:** Compute the integer indices of the maximum corner:
+    $$x_1 = x_0 + 1, \quad y_1 = y_0 + 1, \quad z_1 = z_0 + 1$$
+    [S5, S6, unofficial].
+4.  **Fractional Distances:** Compute the normalized distances (weights) within the voxel for each axis. For uniform grids with unit spacing, this is simply the fractional part of the coordinate [S5, S6, S8, unofficial]:
+    $$t_x = x - x_0, \quad t_y = y - y_0, \quad t_z = z - z_0$$
+    If the grid has non-uniform spacing or physical extents, normalize by the voxel size or cell dimensions:
+    $$t_x = \frac{x - x_0}{x_1 - x_0}, \quad t_y = \frac{y - y_0}{y_1 - y_0}, \quad t_z = \frac{z - z_0}{z_1 - z_0}$$
+    [S7, S8, S9, unofficial]. Note: $t_x, t_y, t_z \in [0, 1)$.
+5.  **Corner Retrieval:** Retrieve the values at the eight corners of the voxel:
+    *   $V_{000} = V(x_0, y_0, z_0)$
+    *   $V_{100} = V(x_1, y_0, z_0)$
+    *   $V_{010} = V(x_0, y_1, z_0)$
+    *   $V_{110} = V(x_1, y_1, z_0)$
+    *   $V_{001} = V(x_0, y_0, z_1)$
+    *   $V_{101} = V(x_1, y_0, z_1)$
+    *   $V_{011} = V(x_0, y_1, z_1)$
+    *   $V_{111} = V(x_1, y_1, z_1)$
+    [S5, S6, S7, S8, unofficial].
+6.  **Interpolation:** Perform linear interpolation along the x-axis, then y-axis, then z-axis (or any order, as the operation is commutative) [S3, S7, S8, S9, unofficial].
+    *   **X-interpolation:**
+        $$C_{00} = V_{000}(1 - t_x) + V_{100}t_x$$
+        $$C_{01} = V_{001}(1 - t_x) + V_{101}t_x$$
+        $$C_{10} = V_{010}(1 - t_x) + V_{110}t_x$$
+        $$C_{11} = V_{011}(1 - t_x) + V_{111}t_x$$
+        [S8, unofficial]. Alternatively, grouped by z-level:
+        $$V_{y1z0} = V_{010}(1 - t_x) + V_{110}t_x, \quad V_{y0z0} = V_{000}(1 - t_x) + V_{100}t_x$$
+        [S3, unofficial].
+    *   **Y-interpolation:**
+        $$C_0 = C_{00}(1 - t_y) + C_{10}t_y$$
+        $$C_1 = C_{01}(1 - t_y) + C_{11}t_y$$
+        [S8, unofficial]. Alternatively:
+        $$V_{z0} = V_{y0z0}(1 - t_y) + V_{y1z0}t_y$$
+        $$V_{z1} = V_{y0z1}(1 - t_y) + V_{y1z1}t_y$$
+        [S3, unofficial].
+    *   **Z-interpolation (Final Result):**
+        $$F(P) = C_0(1 - t_z) + C_1t_z$$
+        [S8, unofficial]. Alternatively:
+        $$F(P) = V_{z0}(1 - t_z) + V_{z1}t_z$$
+        [S3, unofficial].
 
-1. **Coordinate Normalization:** If the input coordinates are in world space, normalize them to voxel space.
-   $$ xyz = \frac{P - O}{D} $$
-   [S6, unofficial]
+**Formula:**
+The expanded form of the trilinear interpolant is:
+$$F(P) = (1-t_z)(1-t_y)(1-t_x)V_{000} + (1-t_z)(1-t_y)t_x V_{100} + (1-t_z)t_y(1-t_x)V_{010} + (1-t_z)t_y t_x V_{110} + t_z(1-t_y)(1-t_x)V_{001} + t_z(1-t_y)t_x V_{101} + t_z t_y(1-t_x)V_{011} + t_z t_y t_x V_{111}$$
+[S5, S7, unofficial].
 
-2. **Cell Identification:** Determine the integer coordinates of the lower corner of the enclosing voxel.
-   $$ x_0 = \lfloor x \rfloor, \quad y_0 = \lfloor y \rfloor, \quad z_0 = \lfloor z \rfloor $$
-   [S5, S6, unofficial]
-   The upper corner indices are:
-   $$ x_1 = x_0 + 1, \quad y_1 = y_0 + 1, \quad z_1 = z_0 + 1 $$
-   [S5, unofficial]
+This can also be viewed as solving for constants $a \dots h$ in the polynomial $F(P) = a + bx + cy + dz + exy + fxz + gyz + hxyz$ such that it matches the 8 corner values [S1]. However, the recursive linear interpolation method above is the standard implementation [S3, S7, S8, unofficial].
 
-3. **Fractional Parts (Weights):** Compute the fractional offset within the voxel.
-   $$ \alpha = x - x_0, \quad \beta = y - y_0, \quad \gamma = z - z_0 $$
-   [S5, unofficial]
-   Alternatively defined as ratios $R_x, R_y, R_z \in [0, 1]$ [S7, unofficial].
+**Parameters:**
+*   **Grid Dimensions:** $N_x, N_y, N_z$ [S1][S9, unofficial].
+*   **Voxel Spacing:** $dx, dy, dz$ (often 1.0 for normalized grids) [S6, S9, unofficial].
+*   **Origin:** The coordinate of the $(0,0,0)$ voxel corner [S6, unofficial].
 
-4. **Boundary Check:** If any coordinate is outside the valid grid range (e.g., $x < 0$ or $x \ge N_x$), return a default value (typically 0) or clamp indices [S5, unofficial]. Note: Clamping indices may cause artifacts at boundaries; returning 0 is common for sparse or bounded volumes [S5, unofficial].
-
-5. **Corner Value Retrieval:** Retrieve the 8 corner values from the grid $V$. The indexing order must be consistent. A common mapping (matching [S6, unofficial]) is:
-   - $v_{000} = V(x_0, y_0, z_0)$
-   - $v_{100} = V(x_1, y_0, z_0)$
-   - $v_{010} = V(x_0, y_1, z_0)$
-   - $v_{110} = V(x_1, y_1, z_0)$
-   - $v_{001} = V(x_0, y_0, z_1)$
-   - $v_{101} = V(x_1, y_0, z_1)$
-   - $v_{011} = V(x_0, y_1, z_1)$
-   - $v_{111} = V(x_1, y_1, z_1)$
-   [S5, S6, unofficial]
-
-6. **Interpolation:** Perform linear interpolation along each axis [S4, unofficial]. This can be done sequentially or via the explicit polynomial form [S1].
-   
-   *Sequential Method (X, then Y, then Z):*
-   $$
-   \begin{aligned}
-   V_{z0} &= (1-\alpha)(1-\beta)v_{000} + \alpha(1-\beta)v_{100} + (1-\alpha)\beta v_{010} + \alpha\beta v_{110} \\
-   V_{z1} &= (1-\alpha)(1-\beta)v_{001} + \alpha(1-\beta)v_{101} + (1-\alpha)\beta v_{011} + \alpha\beta v_{111} \\
-   F(P) &= (1-\gamma)V_{z0} + \gamma V_{z1}
-   \end{aligned}
-   $$
-   [S3, S5, unofficial]
-
-   *Explicit Polynomial Form:*
-   The value is approximated by:
-   $$ F(P) = a + bx + cy + dz + exy + fxz + gyz + hxyz $$
-   where constants $a \dots h$ are determined by the corner values [S1]. For a unit cube aligned with axes starting at $(x_0, y_0, z_0)$, the weights for the 8 corners are products of $(1-\alpha)$ or $\alpha$, $(1-\beta)$ or $\beta$, and $(1-\gamma)$ or $\gamma$ [S5, unofficial].
+**Edge Cases and Pitfalls:**
+*   **Boundary Conditions:** Points outside the grid must be handled. Common strategies include clamping to the nearest edge, returning 0, or using periodic boundary conditions [S5, unofficial].
+*   **Continuity:** Trilinear interpolation provides $C^0$ continuity along interior faces for properly-oriented rectangular grids [S1]. However, continuity is not guaranteed for curvilinear or arbitrarily oriented cells, and the function may vary depending on which adjacent cell the point is assumed to belong to [S1].
+*   **Artifacts:** At large magnification factors, trilinear interpolation can produce "three-dimensional crosses" or diamond-shaped artifacts due to the nature of the kernel [S4, unofficial].
+*   **Precision:** When computing fractional parts, ensure that $t_x, t_y, t_z$ are correctly calculated as $x - \lfloor x \rfloor$ to avoid precision errors near integer boundaries [S6, S8, unofficial].
 
 **Pseudocode:**
-
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-def trilinear_interpolation(grid, x, y, z, origin=(0.0, 0.0, 0.0), spacing=(1.0, 1.0, 1.0)):
+def trilinear_interpolation(grid, x, y, z):
     """
-    Performs 3D trilinear interpolation at point (x, y, z).
-    grid: 3D array-like, shape (Nx, Ny, Nz).
-    x, y, z: float coordinates in world space.
-    origin: tuple (ox, oy, oz) of grid origin in world space.
-    spacing: tuple (dx, dy, dz) of voxel dimensions.
-    """
-    # 1. Normalize to voxel space
-    vx = (x - origin[0]) / spacing[0]
-    vy = (y - origin[1]) / spacing[1]
-    vz = (z - origin[2]) / spacing[2]
-
-    # 2. Boundary check
-    if (vx < 0 or vy < 0 or vz < 0 or 
-        vx >= grid.shape[0] or vy >= grid.shape[1] or vz >= grid.shape[2]):
-        return 0.0
-
-    # 3. Compute floor coordinates and fractional parts
-    x0 = math.floor(vx)
-    y0 = math.floor(vy)
-    z0 = math.floor(vz)
+    Performs 3D trilinear interpolation on a dense grid.
     
+    Args:
+        grid: 3D numpy array or list of lists of lists, shape (Nx, Ny, Nz).
+              Assumed to be indexed as grid[x][y][z] or grid[z][y][x].
+              For this implementation, we assume grid[x, y, z] for clarity,
+              but the logic applies to any contiguous memory layout if indices
+              are mapped correctly.
+        x, y, z: Float coordinates of the query point.
+        
+    Returns:
+        Interpolated scalar value.
+    """
+    # 1. Boundary Check
+    # Assuming grid dimensions are known or can be inferred
+    Nx, Ny, Nz = grid.shape
+    
+    if x < 0 or x >= Nx or y < 0 or y >= Ny or z < 0 or z >= Nz:
+        return 0.0  # Default boundary condition [S5, unofficial]
+
+    # 2. Floor Coordinates
+    x0 = int(np.floor(x))
+    y0 = int(np.floor(y))
+    z0 = int(np.floor(z))
+
+    # 3. Ceiling Coordinates
     x1 = x0 + 1
     y1 = y0 + 1
     z1 = z0 + 1
+
+    # 4. Fractional Distances (Weights)
+    # For uniform grids with unit spacing, this is simply the fractional part
+    tx = x - x0
+    ty = y - y0
+    tz = z - z0
     
-    alpha = vx - x0
-    beta = vy - y0
-    gamma = vz - z0
-    
-    # 4. Retrieve corner values
+    # If non-uniform, normalize:
+    # tx = (x - x0) / (x1 - x0)
+    # ty = (y - y0) / (y1 - y0)
+    # tz = (z - z0) / (z1 - z0)
+
+    # 5. Corner Retrieval
+    # Accessing the 8 corners. Note: Array indexing order depends on memory layout.
+    # Assuming grid[x, y, z] access for logical clarity.
     v000 = grid[x0, y0, z0]
     v100 = grid[x1, y0, z0]
     v010 = grid[x0, y1, z0]
@@ -113,21 +134,22 @@ def trilinear_interpolation(grid, x, y, z, origin=(0.0, 0.0, 0.0), spacing=(1.0,
     v101 = grid[x1, y0, z1]
     v011 = grid[x0, y1, z1]
     v111 = grid[x1, y1, z1]
+
+    # 6. Interpolation
     
-    # 5. Interpolate
-    # Interpolate along X
-    v00 = (1 - alpha) * v000 + alpha * v100
-    v01 = (1 - alpha) * v001 + alpha * v101
-    v10 = (1 - alpha) * v010 + alpha * v110
-    v11 = (1 - alpha) * v011 + alpha * v111
-    
-    # Interpolate along Y
-    v0 = (1 - beta) * v00 + beta * v10
-    v1 = (1 - beta) * v01 + beta * v11
-    
-    # Interpolate along Z
-    result = (1 - gamma) * v0 + gamma * v1
-    
+    # X-interpolation
+    c00 = v000 * (1 - tx) + v100 * tx
+    c01 = v001 * (1 - tx) + v101 * tx
+    c10 = v010 * (1 - tx) + v110 * tx
+    c11 = v011 * (1 - tx) + v111 * tx
+
+    # Y-interpolation
+    c0 = c00 * (1 - ty) + c10 * ty
+    c1 = c01 * (1 - ty) + c11 * ty
+
+    # Z-interpolation
+    result = c0 * (1 - tz) + c1 * tz
+
     return result
 ```
 
@@ -136,24 +158,32 @@ def trilinear_interpolation(grid, x, y, z, origin=(0.0, 0.0, 0.0), spacing=(1.0,
 ### [Trilinear Interpolation (Compressed/Linked)](2629-trilinear-interpolation-compressed-linked.md)
 This method performs trilinear interpolation on a compressed sparse grid using a links array to map voxel indices to compressed value indices, handling boundary checks via masking or a zero-value hack. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by adding a link lookup step that translates grid coordinates to compressed indices while retaining the regular 8-corner neighborhood structure.
 
-### [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md)
-Cubic Volume Interpolation extends standard trilinear interpolation by using cubic mixture weights for each axis to sample a 3D texture at 8 corners defined by those weights. It provides higher-order continuity and smoother gradients compared to linear methods, at the cost of increased computational complexity and memory bandwidth usage.
+### [Trilinear Gradient Interpolation](3470-trilinear-gradient-interpolation.md)
+Trilinear Gradient Interpolation computes the gradient or surface normal at an arbitrary point within a voxel by interpolating pre-computed vector values stored at the eight corners of the surrounding unit cube. It solves the problem of obtaining smooth, continuous directional derivatives from discrete grid data, which is essential for shading and ray marching in volume rendering. It differs from standard [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by operating on vector fields rather than scalar values, and from [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md) by using only corner data without higher-order derivative constraints. Trilinear Gradient Interpolation extends standard trilinear interpolation to vector fields.
 
-### Trilinear Gradient Interpolation
-Computes the gradient of the field at point $P$ by interpolating the gradients stored at the 8 corner points of the enclosing voxel using the same trilinear weights [S8, unofficial]. The result is typically normalized from $[-1, 1]$ to $[0, 1]$ if the gradient data is encoded in that range [S8, unofficial].
+### [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md)
+Cubic Volume Interpolation extends standard trilinear interpolation by using cubic mixture weights for each axis to sample a 3D texture at 8 corners defined by those weights.
+
+### [Quantile Interpolation for Uncertain Data](5008-quantile-interpolation-for-uncertain-data.md)
+Quantile Interpolation is a method for interpolating nonparametric probability distributions (PDFs) represented as histograms or Kernel Density Estimates (KDEs) within a volume rendering pipeline. It solves the problem of efficiently computing the uncertainty distribution at arbitrary 3D positions during Direct Volume Rendering (DVR), where traditional convolution-based nonparametric approaches suffer from exponential time complexity. Unlike its siblings, it preserves the modality of probability distributions and provides a closed-form solution with linear time complexity relative to the number of quantiles, making it feasible for real-time DVR reconstruction. It builds on [3D Trilinear Interpolation](2613-3d-trilinear-interpolation.md) by extending the spatial interpolation logic to the statistical moments (quantile widths) of the data.
 
 ### Grid Querying with Interpolation
-In some volume rendering pipelines (e.g., EgoNeRF), trilinear interpolation is used to query density $\sigma$ and color $c$ from feature grids along camera rays [S9]. To reduce computational burden, this can be replaced by linear/bilinear interpolation of vector/matrix factors [S9].
+Querying volume density sigma and color c from feature grids along camera rays using interpolation operators [S10]. It reduces computational burden by replacing trilinear interpolation with linear/bilinear interpolation of vector/matrix factors [S10].
+
+### Majorant Fix for Interpolation
+Adjusts the stored maximum density value in each leaf node to account for interpolation artifacts. When interpolating near leaf boundaries, the stencil may sample neighboring leaves with higher values, causing the leaf's stored max to be an underestimate. This function ensures the majorant is a valid upper bound for any interpolated value within the leaf [S11, unofficial]. It iterates over all leaves, computes the interpolation Area of Effect (AoE) bounding box, and updates the leaf's max density based on neighbors [S11, unofficial]. The parameter `order` is 1 for trilinear interpolation [S11, unofficial].
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample point, involving a constant number of arithmetic operations and memory accesses [S4, S6, unofficial].
-- **Memory Complexity:** $O(1)$ auxiliary space per sample [G]. The grid storage is $O(N_x N_y N_z)$ [S3, unofficial].
-- **Performance:** Significantly faster than tricubic interpolation, which requires 64 samples [S2, unofficial]. On rectilinear grids, it is efficient; on curvilinear grids, precalculation of coefficients can take ~110 seconds, and intersection testing becomes the bottleneck [S1].
-- **Strengths:** Simple implementation, low computational cost, $C^0$ continuity on regular grids [S1][S5, unofficial].
-- **Limitations:** Artifacts such as "3D crosses" or diamonds appear at large magnification factors due to the linear kernel [S4, unofficial]. Continuity is not guaranteed for irregular, rotated, or curvilinear grids [S1]. Degenerate cases may occur where the trilinear function cannot be fit [S1].
+*   **Time Complexity:** $O(1)$ per query point, involving a constant number of arithmetic operations (18 multiplications and 14 additions in the expanded form, or fewer in the recursive form) [S4, S6, S8, unofficial].
+*   **Memory Complexity:** $O(N_x N_y N_z)$ for the dense grid storage [S1][S3, unofficial].
+*   **Measured Performance:** Trilinear interpolation is significantly faster than tricubic interpolation, which uses 64 points [S2, unofficial]. Rendering rectilinear grids with trilinear interpolation is faster than curvilinear volumes, where precalculation of coefficients can take ~110 seconds and intersection testing dominates [S1].
+*   **Strengths:** Simple to implement, computationally efficient, provides smoother results than nearest-neighbor [S4, S5, unofficial].
+*   **Limitations:** $C^0$ continuity only; artifacts (diamonds) at high magnification [S4, unofficial]; not suitable for irregular or rotated grids without modification [S1].
+*   **When to Use:** Standard volume rendering where performance is critical and high-frequency detail is not required.
+*   **When Not to Use:** When $C^1$ continuity is required (use cubic or higher-order methods) or when dealing with highly irregular/curvilinear grids [S1][S4, unofficial].
 
 ## Background
-Trilinear interpolation was developed as a standard method for volume rendering of curvilinear and rectilinear volumes [S1]. It is used in raycasting renderers to sample dense volumetric data at sub-voxel resolution [S3, S5, unofficial]. The method assumes the underlying function varies linearly along edges, quadratically across faces, and cubically within the cell [S1]. It is a fundamental component of raycasting renderers and is used in modern neural rendering pipelines like EgoNeRF for querying feature grids [S9].
+Trilinear interpolation was developed as a standard method for volume rendering of rectilinear and curvilinear grids [S1]. It is a fundamental technique in computer graphics for sampling 3D textures and volume data [S2, S3, S4, S5, S6, S7, S8, S9, unofficial]. The method assumes the underlying function varies linearly along lines parallel to the cartesian axes [S1]. It is widely used in direct volume rendering (DVR) and is a component of more complex methods like [Trilinear Gradient Interpolation](3470-trilinear-gradient-interpolation.md) and [Cubic Volume Interpolation](4278-cubic-volume-interpolation.md) [S1][S3, S4, S11, unofficial].
 
 ## Sources
 [S1] Direct volume rendering of curvilinear volumes, https://doi.org/10.1145/99308.99318, fetched 2026-10-28
@@ -162,6 +192,8 @@ Trilinear interpolation was developed as a standard method for volume rendering 
 [S4] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
 [S5] faviasono/raycastingrendering, https://github.com/faviasono/raycastingrendering, fetched 2026-10-26 (unofficial)
 [S6] szat/Jax-Volumetric-Renderer, https://github.com/szat/Jax-Volumetric-Renderer, fetched 2026-10-27 (unofficial)
-[S7] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
-[S8] ldarnbr/volumetric-cloud-renderer, https://github.com/ldarnbr/volumetric-cloud-renderer, fetched 2026-10-27 (unofficial)
-[S9] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29
+[S7] YueJiang-nj/CVPR2020-SDFDiff, https://github.com/YueJiang-nj/CVPR2020-SDFDiff, fetched 2026-10-27 (unofficial)
+[S8] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)
+[S9] Real-Time Smoke Volume Rendering, http://v22015081501727525.yourvserver.net/webpage/dirkfiles/betreutearbeiten/Sowinski_MA_2012.pdf, fetched 2026-10-31 (unofficial)
+[S10] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29
+[S11] Shibodd/volume_path_tracer, https://github.com/Shibodd/volume_path_tracer, fetched 2026-10-26 (unofficial)

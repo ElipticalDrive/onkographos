@@ -1,0 +1,282 @@
+MobilityDB is a geospatial trajectory data management & analysis platform, built on PostgreSQL and PostGIS. - Search the in-memory box indexes without a call per entry, on the axes their boxes carry by estebanzimanyi · Pull Request #2783 · MobilityDB/MobilityDB
+
+Search the in-memory box indexes without a call per entry, on the axes their boxes carry by estebanzimanyi · Pull Request #2783 · MobilityDB/MobilityDB · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+estebanzimanyi
+commented
+Sep 19, 2026
+Copy link
+Copy Markdown
+Member
+Search an index of spatiotemporal boxes for overlaps without a call per entry
+A tree holds boxes of one shape, which its extent carries, so rtree_search decides the axes the query and the entries share once, and node_search_overlaps_stbox compares the bounds inline.
+Why: an overlap search tested every entry through the operation's switch in leaf_consistent, then through the tree's bbox_overlaps function pointer, which kept bbox_overlaps_stbox from being inlined, and that test read the X, Z and T flags of both boxes again for every entry.
+It answers every search exactly as node_search does: the leaf and inner tests of INDEX_OVERLAPS are both bbox_overlaps, and the time test reads the period through bbox_overlaps_span, which honours the inclusivity of its bounds, as bbox_overlaps_stbox does. Every other operation and box type keeps node_search.
+Measured in callgrind instructions against GEOS 3.14 called directly, on the areal matrix whose operands read their edges through a kept index, the native side falls from 3.10 to 1.85 of GEOS, contains from 4.96 to 2.78 and touches from 3.83 to 2.34.
+Refuse at the entry an index query that shares no dimension with the boxes
+Witness: an R-tree or a space-partitioning tree of spatiotemporal boxes checked a query only for its SRID, and a tree of temporal boxes checked nothing. A query sharing no axis with the stored boxes was then answered by whatever each entry test did with it, and the two trees disagreed. Searching boxes STBOX X((1,1),(2,2)) with STBOX T([2001-01-01, 2001-01-02]), or boxes TBOXFLOAT X([1, 2]) with TBOX T([2001-01-01, 2001-01-02]):
+rtree_search answered 1, raising nothing: the overlap test of the
+descent compares no axis for such a pair and accepts it
+sptree_search raised 'The temporal values must have at least one
+common dimension' from inside the leaf test, once per
+box, and then answered 0
+ensure_valid_rtree_box and ensure_valid_sptree_box make on the query, once, the checks the external box predicates make on every pair: ensure_valid_stbox_stbox, which compares the SRID and the geodetic flag where both boxes carry X, or ensure_valid_tbox_tbox, which compares the type of the value spans where both boxes carry one, and ensure_common_dimension. Both searches answer -1 with that error for the queries above, as the documented error return states, and the descent compares boxes the entry has already admitted. A query carrying time only is not compared by the SRID it does not carry.
+The index tests rtree_mest, rtree_knn, rtree_load, rtree_span, sptree, sptree_load and index_position pass.
+Search a space-partitioning tree of spatiotemporal boxes for overlaps without a call per node
+Why: an overlap search visited every node through three function pointers of the tree -- the leaf test, the region test and the next region -- each dispatching again on the operation, and the leaf test was overlaps_stbox_stbox, the external predicate, which validates the pair on every stored box.
+sptree_search reads, once, the axes the query and the stored boxes share, and spnode_search_overlaps_stbox descends with the leaf and region tests inline and stboxnode_quadtree_next or stboxnode_kdtree_next called directly. The leaf test is the comparison stbox_overlaps makes, which the entry has made sound by refusing a query sharing no axis; the region test reads the axes the query shares with the stored boxes, which prunes what overlap8D prunes since a region is unbounded on an axis the boxes lack. The period of a stored box is read through span_overlaps, which honours the inclusivity of its bounds. Every other operation and box type keeps spnode_search.
+Measured in callgrind instructions, overlaps queries with each of the 50910 segment boxes of 142 natural areas against a tree of those boxes fall from 4522 to 3431 million on a quad-tree and from 6588 to 3453 million on a k-d tree; on the 2189 boxes of 160 geometries, from 413 to 295 million and from 367 to 198 million. Every search answers the same ids, and the index tests pass.
+Name the internal twin of a function with the suffix _intl
+An internal twin -- the function that asserts what its external counterpart tests, for callers that have already validated -- carries the suffix _intl. The seven twins read _intl: cbuffer_set_srid_intl, pose_set_srid_intl, posechain_set_srid_intl, temporal_time_split_intl, tgeo_from_base_temp_intl, tspatialrel_tcbuffer_cbuffer_intl and meos_array_reset_intl. cmp_int, an integer comparator, is not a twin and keeps its name.
+Why: the suffix _int, which the twins carried, is far more often the integer argument token of the naming convention of MEOS: of the 69 distinct *_int names in meos/ and mobilitydb/, 61 read int as a type (contains_set_int, add_tint_int, datum_float_to_int).
+Each twin is defined directly above the external function it serves, as a _set function sits above the bare function that allocates, so no file declares one ahead of its definition. meos_array_reset_intl moves above meos_array_reset, and meos_array_destroy_free, the one caller above it, calls meos_array_reset_free, which is what its documentation already states it does.
+Search an index from inside MEOS without validating every query
+rtree_search and sptree_search are the external entries: they test the arguments and check the query box against the tree, then search.
+Why: MEOS calls rtree_search from 22 places -- the relate engine, the temporal and circular-buffer distances, point clipping, buffers, linear union -- each asking one index thousands of times with query boxes it builds itself, so every query paid the entry's tests again.
+rtree_search_intl and sptree_search_intl hold the search and assert what the entries test; rtree_search and sptree_search validate and delegate to them, each twin defined directly above its entry. The 22 callers read the twins. Each builds its query as the tree it searches is built: an X box with SRID 0 over a tree of SRID-0 boxes, or, in point clipping, in the SRID the tree is built with (build_edge_rtree, rtree_query_srid), so every query is one the entry admits. The twins are declared in meos_internal.h under a new group, meos_internal_box_index.
+The index tests rtree_mest, rtree_knn, rtree_load, rtree_span, sptree, sptree_load and index_position pass.
+Search an index of spatiotemporal boxes for containment without a call per entry
+The scans DuckDB runs on these indexes ask three operations: overlaps, contains and contained by, and each descends with its tests inline.
+Why: contains and contained by went through the operation's switch and the tree's function pointers, and the leaf and inner tests of the R-tree and the leaf test of the space-partitioning tree were contains_stbox_stbox, the external predicate, which validates the pair on every entry: an R-tree contains search cost ten times its overlaps search over the same tree.
+node_search_contain_stbox and spnode_search_contain_stbox descend for both, with the comparison stbox_contains makes inline and the axes decided once. A subtree or a region can hold a box containing the query only where it contains the query, and a box contained by the query only where it overlaps it, as inner_consistent and contain8D state. Overlaps keeps its own descent, so its searches cost what they did. stbox_period_test searches an R-tree, a quad-tree and a k-d tree of boxes with and without X for the three operations, over periods of every inclusivity, against the span predicates.
+Measured in callgrind instructions, one search per segment box of 142 natural areas against a tree of the 50910 boxes, contains falls from 3283 to 367 million on the R-tree, from 4245 to 3257 million on a quad-tree and from 6391 to 3428 million on a k-d tree; contained by from 2046 to 373, 4525 to 3464 and 6616 to 3553 million. Every search answers the same ids on the three indexes, before and after, and the index tests pass.
+Partition spatiotemporal boxes only on the axes they carry
+Why: a quad-tree or k-d tree of spatiotemporal boxes -- the SP-GiST operator classes of PostgreSQL and the in-memory SPTree, which share the partitioning code of tspatial_spgist.c -- counted six dimensions for any box without Z and eight with it. A box with X and no T, or T and no X, was partitioned on bounds it does not carry: getQuadrant8D set the period bits of a spatial box from bounds that are all equal, so a node allocated 64 children, 128 in the SP-GiST picksplit, of which a spatial box can reach 16, and every search walked all of them; a k-d level cycled over the six bounds, so two levels in six split a spatial box on a period it does not have and separated nothing.
+The bounds a node partitions on are read from the axes of its centroid. stbox_index_dims gives their number (4 for X, 2 for T, 6 for X and T, 8 for X, Z and T), stbox_kd_dim the bound a k-d level splits on, cycling over those bounds in the order xmin, xmax, ymin, ymax, zmin, zmax, lower and upper period bound, and stbox_quadrant_bit the quadrant bit of a bound. getQuadrant8D, stboxnode_quadtree_next, stboxnode_kdtree_next, overlapKD and containKD read them, the SP-GiST picksplit allocates one node per quadrant and its k-d choose and picksplit order on the bound of the level, and the SPTree takes its dimensions, children and k-d bits from them. A box with X and T, or X, Z and T, keeps the numbering of earlier versions.
+SP-GiST indexes over spatiotemporal boxes built by an earlier version are rebuilt (REINDEX) on upgrade: the quadrant a spatial or temporal box falls in, and the bound a k-d level splits on, are not the ones that version stored.
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against a quad-tree of the 50910 boxes falls from 3432 to 1829 million, and from 1175 to 663 million on a tree built by sptree_load; every search answers the same ids on the R-tree, the quad-tree and the k-d tree. The index tests rtree_mest, rtree_knn, rtree_load, rtree_span, sptree, sptree_load and index_position pass.
+Measure the boxes of an R-tree only on the axes they carry
+Why: an R-tree of spatiotemporal boxes took three axes, X, Y and time, or four with Z, whatever the boxes carried. A spatial box has a zero length on time, so box_area answered zero for every box and every union: the least-enlargement choice of an insertion saw no difference between subtrees, and each box went to the first child that contained it or, failing that, to child 0. A temporal box had the same problem on X and Y, and the Sort-Tile-Recursive load sorted it on those two coordinates.
+rtree_set_axes reads the axes from the first box a tree receives -- X and Y, then Z, then time, as far as the box carries them -- and rtree_axis reads a box through that map in the area, the split, its sort and the bulk load. A span tree, whose one axis every span carries, keeps it. The choice of subtree also breaks ties as Guttman's does: among the children that already contain the box it takes the smallest, and between equal enlargements the smaller box.
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against an R-tree of the 50910 boxes inserted one at a time in a fixed shuffled order falls from 4483 to 247 million, against 189 million for the tree rtree_load builds; inserted in the order the boundaries list them, from 303 to 168 million. Every search answers the same ids, and the index tests pass.
+Split index nodes of boxes by one double sorting split shared with GiST
+Why: the GiST operator classes of the extension split a node of temporal, spatiotemporal or point cloud boxes by the double sorting split of Korotkov (bbox_gist_picksplit), while the in-memory R-tree of MEOS split its nodes through the largest axis of the node, comparing lengths in the units of each axis -- degrees against microseconds for a spatiotemporal box, so such a node always split on time.
+The split lives in MEOS: bbox_split takes an array of boxes and says which group each goes to, and both the GiST picksplit, which only reads its entries and writes its two groups around it, and node_split of the R-tree call it. The boxes are grown and measured by stbox_adjust, stbox_penalty, tbox_adjust and tbox_penalty, which move to MEOS with it; a point cloud box, which shares the fields of a spatiotemporal box they read, uses the spatiotemporal ones, and its copies are removed. The split types, the minimum ratio and the NaN-aware comparisons move to temporal/bbox_index.h.
+The split considers only the axes the boxes carry. On an axis they lack, every box projects on the same point, the range is zero and the overlap of every candidate is NaN, and every comparison with NaN is false.
+Why the axes: for a box carrying time only, reading every axis selects the first candidate, on X, and never replaces it.
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against an R-tree of the 50910 boxes inserted one at a time in a fixed shuffled order falls from 247 to 135 million, below the 189 million of the tree rtree_load builds; inserted in the order the boundaries list them, from 168 to 136 million. Building the tree by insertion costs 753 million instructions, 202 million of them in 1200 splits. Every search answers the same ids, and the index tests pass.
+Read an axis of a span or a temporal box through its base type
+The R-tree measures a span, or the value span of a temporal box, by reading its bounds as doubles, and read them by casting the Datum. The Datum of a float is the bit pattern of the double, and the Datum of a negative integer or timestamp is its two's complement read as an unsigned value, so the cast gives neither: a negative bound reads as a number near 1.8e19, and a float bound as its bit pattern, which grows with the value only within one power of two. Every area, enlargement and split the tree computes on such spans is computed on those numbers.
+span_bound_double reads a bound through its base type, datum_double for the numbers and the timestamp for a period, and get_axis_span and get_axis_tbox read through it.
+Measured in callgrind instructions, one search per segment box of 142 natural areas against an R-tree of the 50910 float spans inserted one at a time: with the areas shifted to negative coordinates, overlaps falls from 16280 to 2248 million, contains from 16498 to 2082 and contained by from 16618 to 2228; with the areas as they are, whose coordinates stay near 2^19, overlaps goes from 2160 to 2248 million, contains from 1987 to 2082 and contained by from 2142 to 2228. The typed read gives the same tree and the same cost at both positions of the data, and the cast does not. The search reads no axis, so the 4% is the shape of the tree: its entry test runs 1634 million instructions against 1555. The loaded tree and the space-partitioning trees cost what they did, and every search answers the same ids.
+Partition temporal boxes only on the axes they carry
+Why: a quad-tree or k-d tree of temporal boxes -- the SP-GiST operator classes of PostgreSQL and the in-memory SPTree, which share the partitioning code of tnumber_spgist.c -- counted four dimensions whatever the box carried. A box with a value span and no period, or a period and no value span, was partitioned on bounds it does not carry: getQuadrant4D set the bits of the missing axis from bounds that are all equal, so a node allocated 16 children of which such a box can reach 4, and every search walked all of them; a k-d level cycled over the four bounds, so every other level split the box on an axis it does not have and separated nothing.
+The bounds a node partitions on are read from the axes of its centroid, as they are for spatiotemporal boxes. tbox_index_dims gives their number (2 for X or T, 4 for X and T), tbox_kd_dim the bound a k-d level splits on, cycling over those bounds in the order lower and upper value bound, lower and upper period bound, and tbox_quadrant_bit the quadrant bit of a bound. getQuadrant4D, tboxnode_quadtree_next, tboxnode_kdtree_next and tbox_level_cmp read them, the SP-GiST picksplit allocates one node per quadrant and its k-d picksplit orders on the bound of the level, and the SPTree takes its dimensions, children and k-d bits from them. A box with X and T keeps the numbering of earlier versions.
+SP-GiST indexes over temporal boxes with one axis built by an earlier version are rebuilt (REINDEX) on upgrade: the quadrant such a box falls in, and the bound a k-d level splits on, are not the ones that version stored.
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against trees of the 50910 boxes, the boxes carrying the X extent of the segment as a value span: inserted in a shuffled order, the quad-tree falls from 3140 to 2793 million and the k-d tree from 13966 to 10193; built by sptree_load, from 2733 to 2304 and from 19706 to 15555. Inserted in the order the boundaries list their segments, which chains the trees over 600 levels deep, the quad-tree falls from 10066 to 8887 million and the k-d tree rises from 11683 to 13323. Boxes carrying a value span and a period keep their partition and pay about 2% for reading the bound of a level from the flags of the centroid: 2186 to 2240 million on the shuffled quad-tree, 12781 to 13030 on the k-d tree. Every search answers the same ids on the three trees.
+Measure the temporal boxes of an R-tree only on the axes they carry
+Why: an R-tree of temporal boxes took two axes, the value span and the period, whatever the boxes carried. A box with a value span and no period, or a period and no value span, has a zero length on the axis it lacks, so box_area answered zero for every box and every union: the least-enlargement choice of an insertion saw no difference between subtrees, and the Sort-Tile-Recursive load sorted the boxes on an axis they do not have. This is the defect the spatiotemporal boxes had.
+rtree_set_axes reads the axes of a temporal box tree from the first box it receives, the value span then the period as far as the box carries them, as it does for spatiotemporal boxes, and it takes the box rather than its flags since the two box types store their flags at different offsets.
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against an R-tree of the 50910 boxes carrying the X extent of the segment as a value span: inserted in a shuffled order, the search falls from 8026 to 1936 million; inserted in the order the boundaries list their segments, from 3512 to 2017, and contains from 5519 to 2991. The tree rtree_load builds, and the trees of boxes carrying both axes, cost what they did, and every search answers the same ids.
+Search an index of temporal boxes without a call per entry
+An overlaps, contains or contained-by search over an R-tree or a space-partitioning tree of temporal boxes tested every entry through the operation's switch and the tree's function pointers, and every region through the generic node test, as the spatiotemporal boxes did before their own descents.
+node_search_tbox and spnode_search_tbox descend for the three operations with the tests tbox_overlaps and tbox_contains make read inline, the value span and the period through the span predicates, and the axes the query shares with the stored boxes decided once at the entry. A subtree or a region can hold a box containing the query only where it contains the query, and a box overlapping the query or contained by it only where it overlaps it. A region is read on the same axes as an entry, those the query shares with the stored boxes.
+Witness: 200 periods of one hour starting every half hour, stored as temporal boxes, queried with TBOXINT XT([5, 10],[2001-01-02, 2001-01-03]). The periods overlapping the query's period are 51 and those it contains 47, which the R-tree, the quad-tree and the k-d tree all answer. Read on the axes of the query instead, the regions of both space-partitioning trees are pruned on the value axis the periods lack, and both answer 0 and 0. sptree_test carries the case, on 2048 random periods, and fails 4 of its checks that way.
+Why: a region of a space-partitioning tree bounds the stored boxes only on the axes they carry. On an axis they lack it holds the bounds tboxnode_init gives it, float infinities for a tree of periods, which say nothing about the boxes and which an integer query reads as 0. A bound of the query on that axis therefore cannot rule a region out, exactly as it cannot rule out an entry, whose test the query's axes do not decide either.
+Measured in callgrind instructions, one search per segment box of 142 natural areas against trees of the 50910 boxes inserted in a shuffled order, overlaps on boxes carrying a value span falls from 1936 to 1475 million on the R-tree, 2793 to 1925 on the quad-tree and 10193 to 6888 on the k-d tree, and on boxes carrying a value span and a period from 1712 to 1355, 2240 to 1324 and 13030 to 7370. Inserted in the order the boundaries list them, contains on boxes carrying both axes falls from 1691 to 933 million on the R-tree, 4556 to 2683 on the quad-tree and 8731 to 4978 on the k-d tree. Every search answers the same ids on the three trees.
+estebanzimanyi
+added 13 commits
+September 19, 2026 11:59
+Search an index of spatiotemporal boxes for overlaps without a call p…
+…
+0124952
+```
+…er entry
+
+A tree holds boxes of one shape, which its extent carries, so rtree_search decides the axes the query and the entries share once, and node_search_overlaps_stbox compares the bounds inline.
+
+Why: an overlap search tested every entry through the operation's switch in leaf_consistent, then through the tree's bbox_overlaps function pointer, which kept bbox_overlaps_stbox from being inlined, and that test read the X, Z and T flags of both boxes again for every entry.
+
+It answers every search exactly as node_search does: the leaf and inner tests of INDEX_OVERLAPS are both bbox_overlaps, and the time test reads the period through bbox_overlaps_span, which honours the inclusivity of its bounds, as bbox_overlaps_stbox does. Every other operation and box type keeps node_search.
+
+Measured in callgrind instructions against GEOS 3.14 called directly, on the areal matrix whose operands read their edges through a kept index, the native side falls from 3.10 to 1.85 of GEOS, contains from 4.96 to 2.78 and touches from 3.83 to 2.34.
+```
+Refuse at the entry an index query that shares no dimension with the …
+…
+49a8b6b
+```
+…boxes
+
+Witness: an R-tree or a space-partitioning tree of spatiotemporal boxes checked a query only for its SRID, and a tree of temporal boxes checked nothing. A query sharing no axis with the stored boxes was then answered by whatever each entry test did with it, and the two trees disagreed. Searching boxes STBOX X((1,1),(2,2)) with STBOX T([2001-01-01, 2001-01-02]), or boxes TBOXFLOAT X([1, 2]) with TBOX T([2001-01-01, 2001-01-02]):
+
+  rtree_search       answered 1, raising nothing: the overlap test of the
+                     descent compares no axis for such a pair and accepts it
+  sptree_search      raised 'The temporal values must have at least one
+                     common dimension' from inside the leaf test, once per
+                     box, and then answered 0
+
+ensure_valid_rtree_box and ensure_valid_sptree_box make on the query, once, the checks the external box predicates make on every pair: ensure_valid_stbox_stbox, which compares the SRID and the geodetic flag where both boxes carry X, or ensure_valid_tbox_tbox, which compares the type of the value spans where both boxes carry one, and ensure_common_dimension. Both searches answer -1 with that error for the queries above, as the documented error return states, and the descent compares boxes the entry has already admitted. A query carrying time only is not compared by the SRID it does not carry.
+
+The index tests rtree_mest, rtree_knn, rtree_load, rtree_span, sptree, sptree_load and index_position pass.
+```
+Search a space-partitioning tree of spatiotemporal boxes for overlaps…
+…
+b954c3a
+```
+… without a call per node
+
+Why: an overlap search visited every node through three function pointers of the tree -- the leaf test, the region test and the next region -- each dispatching again on the operation, and the leaf test was overlaps_stbox_stbox, the external predicate, which validates the pair on every stored box.
+
+sptree_search reads, once, the axes the query and the stored boxes share, and spnode_search_overlaps_stbox descends with the leaf and region tests inline and stboxnode_quadtree_next or stboxnode_kdtree_next called directly. The leaf test is the comparison stbox_overlaps makes, which the entry has made sound by refusing a query sharing no axis; the region test reads the axes the query shares with the stored boxes, which prunes what overlap8D prunes since a region is unbounded on an axis the boxes lack. The period of a stored box is read through span_overlaps, which honours the inclusivity of its bounds. Every other operation and box type keeps spnode_search.
+
+Measured in callgrind instructions, overlaps queries with each of the 50910 segment boxes of 142 natural areas against a tree of those boxes fall from 4522 to 3431 million on a quad-tree and from 6588 to 3453 million on a k-d tree; on the 2189 boxes of 160 geometries, from 413 to 295 million and from 367 to 198 million. Every search answers the same ids, and the index tests pass.
+```
+Name the internal twin of a function with the suffix _intl
+…
+4f37727
+```
+An internal twin -- the function that asserts what its external counterpart tests, for callers that have already validated -- carries the suffix _intl. The seven twins read _intl: cbuffer_set_srid_intl, pose_set_srid_intl, posechain_set_srid_intl, temporal_time_split_intl, tgeo_from_base_temp_intl, tspatialrel_tcbuffer_cbuffer_intl and meos_array_reset_intl. cmp_int, an integer comparator, is not a twin and keeps its name.
+
+Why: the suffix _int, which the twins carried, is far more often the integer argument token of the naming convention of MEOS: of the 69 distinct *_int names in meos/ and mobilitydb/, 61 read int as a type (contains_set_int, add_tint_int, datum_float_to_int).
+
+Each twin is defined directly above the external function it serves, as a _set function sits above the bare function that allocates, so no file declares one ahead of its definition. meos_array_reset_intl moves above meos_array_reset, and meos_array_destroy_free, the one caller above it, calls meos_array_reset_free, which is what its documentation already states it does.
+```
+Search an index from inside MEOS without validating every query
+…
+1a5ecef
+```
+rtree_search and sptree_search are the external entries: they test the arguments and check the query box against the tree, then search.
+
+Why: MEOS calls rtree_search from 22 places -- the relate engine, the temporal and circular-buffer distances, point clipping, buffers, linear union -- each asking one index thousands of times with query boxes it builds itself, so every query paid the entry's tests again.
+
+rtree_search_intl and sptree_search_intl hold the search and assert what the entries test; rtree_search and sptree_search validate and delegate to them, each twin defined directly above its entry. The 22 callers read the twins. Each builds its query as the tree it searches is built: an X box with SRID 0 over a tree of SRID-0 boxes, or, in point clipping, in the SRID the tree is built with (build_edge_rtree, rtree_query_srid), so every query is one the entry admits. The twins are declared in meos_internal.h under a new group, meos_internal_box_index.
+
+The index tests rtree_mest, rtree_knn, rtree_load, rtree_span, sptree, sptree_load and index_position pass.
+```
+Search an index of spatiotemporal boxes for containment without a cal…
+…
+7ed97ff
+```
+…l per entry
+
+The scans DuckDB runs on these indexes ask three operations: overlaps, contains and contained by, and each descends with its tests inline.
+
+Why: contains and contained by went through the operation's switch and the tree's function pointers, and the leaf and inner tests of the R-tree and the leaf test of the space-partitioning tree were contains_stbox_stbox, the external predicate, which validates the pair on every entry: an R-tree contains search cost ten times its overlaps search over the same tree.
+
+node_search_contain_stbox and spnode_search_contain_stbox descend for both, with the comparison stbox_contains makes inline and the axes decided once. A subtree or a region can hold a box containing the query only where it contains the query, and a box contained by the query only where it overlaps it, as inner_consistent and contain8D state. Overlaps keeps its own descent, so its searches cost what they did. stbox_period_test searches an R-tree, a quad-tree and a k-d tree of boxes with and without X for the three operations, over periods of every inclusivity, against the span predicates.
+
+Measured in callgrind instructions, one search per segment box of 142 natural areas against a tree of the 50910 boxes, contains falls from 3283 to 367 million on the R-tree, from 4245 to 3257 million on a quad-tree and from 6391 to 3428 million on a k-d tree; contained by from 2046 to 373, 4525 to 3464 and 6616 to 3553 million. Every search answers the same ids on the three indexes, before and after, and the index tests pass.
+```
+Partition spatiotemporal boxes only on the axes they carry
+…
+bdb99cc
+```
+Why: a quad-tree or k-d tree of spatiotemporal boxes -- the SP-GiST operator classes of PostgreSQL and the in-memory SPTree, which share the partitioning code of tspatial_spgist.c -- counted six dimensions for any box without Z and eight with it. A box with X and no T, or T and no X, was partitioned on bounds it does not carry: getQuadrant8D set the period bits of a spatial box from bounds that are all equal, so a node allocated 64 children, 128 in the SP-GiST picksplit, of which a spatial box can reach 16, and every search walked all of them; a k-d level cycled over the six bounds, so two levels in six split a spatial box on a period it does not have and separated nothing.
+
+The bounds a node partitions on are read from the axes of its centroid. stbox_index_dims gives their number (4 for X, 2 for T, 6 for X and T, 8 for X, Z and T), stbox_kd_dim the bound a k-d level splits on, cycling over those bounds in the order xmin, xmax, ymin, ymax, zmin, zmax, lower and upper period bound, and stbox_quadrant_bit the quadrant bit of a bound. getQuadrant8D, stboxnode_quadtree_next, stboxnode_kdtree_next, overlapKD and containKD read them, the SP-GiST picksplit allocates one node per quadrant and its k-d choose and picksplit order on the bound of the level, and the SPTree takes its dimensions, children and k-d bits from them. A box with X and T, or X, Z and T, keeps the numbering of earlier versions.
+
+SP-GiST indexes over spatiotemporal boxes built by an earlier version are rebuilt (REINDEX) on upgrade: the quadrant a spatial or temporal box falls in, and the bound a k-d level splits on, are not the ones that version stored.
+
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against a quad-tree of the 50910 boxes falls from 3432 to 1829 million, and from 1175 to 663 million on a tree built by sptree_load; every search answers the same ids on the R-tree, the quad-tree and the k-d tree. The index tests rtree_mest, rtree_knn, rtree_load, rtree_span, sptree, sptree_load and index_position pass.
+```
+Measure the boxes of an R-tree only on the axes they carry
+…
+3b79bfc
+```
+Why: an R-tree of spatiotemporal boxes took three axes, X, Y and time, or four with Z, whatever the boxes carried. A spatial box has a zero length on time, so box_area answered zero for every box and every union: the least-enlargement choice of an insertion saw no difference between subtrees, and each box went to the first child that contained it or, failing that, to child 0. A temporal box had the same problem on X and Y, and the Sort-Tile-Recursive load sorted it on those two coordinates.
+
+rtree_set_axes reads the axes from the first box a tree receives -- X and Y, then Z, then time, as far as the box carries them -- and rtree_axis reads a box through that map in the area, the split, its sort and the bulk load. A span tree, whose one axis every span carries, keeps it. The choice of subtree also breaks ties as Guttman's does: among the children that already contain the box it takes the smallest, and between equal enlargements the smaller box.
+
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against an R-tree of the 50910 boxes inserted one at a time in a fixed shuffled order falls from 4483 to 247 million, against 189 million for the tree rtree_load builds; inserted in the order the boundaries list them, from 303 to 168 million. Every search answers the same ids, and the index tests pass.
+```
+Split index nodes of boxes by one double sorting split shared with GiST
+…
+c736595
+```
+Why: the GiST operator classes of the extension split a node of temporal, spatiotemporal or point cloud boxes by the double sorting split of Korotkov (bbox_gist_picksplit), while the in-memory R-tree of MEOS split its nodes through the largest axis of the node, comparing lengths in the units of each axis -- degrees against microseconds for a spatiotemporal box, so such a node always split on time.
+
+The split lives in MEOS: bbox_split takes an array of boxes and says which group each goes to, and both the GiST picksplit, which only reads its entries and writes its two groups around it, and node_split of the R-tree call it. The boxes are grown and measured by stbox_adjust, stbox_penalty, tbox_adjust and tbox_penalty, which move to MEOS with it; a point cloud box, which shares the fields of a spatiotemporal box they read, uses the spatiotemporal ones, and its copies are removed. The split types, the minimum ratio and the NaN-aware comparisons move to temporal/bbox_index.h.
+
+The split considers only the axes the boxes carry. On an axis they lack, every box projects on the same point, the range is zero and the overlap of every candidate is NaN, and every comparison with NaN is false.
+
+Why the axes: for a box carrying time only, reading every axis selects the first candidate, on X, and never replaces it.
+
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against an R-tree of the 50910 boxes inserted one at a time in a fixed shuffled order falls from 247 to 135 million, below the 189 million of the tree rtree_load builds; inserted in the order the boundaries list them, from 168 to 136 million. Building the tree by insertion costs 753 million instructions, 202 million of them in 1200 splits. Every search answers the same ids, and the index tests pass.
+```
+Read an axis of a span or a temporal box through its base type
+…
+7fd356b
+```
+The R-tree measures a span, or the value span of a temporal box, by reading its bounds as doubles, and read them by casting the Datum. The Datum of a float is the bit pattern of the double, and the Datum of a negative integer or timestamp is its two's complement read as an unsigned value, so the cast gives neither: a negative bound reads as a number near 1.8e19, and a float bound as its bit pattern, which grows with the value only within one power of two. Every area, enlargement and split the tree computes on such spans is computed on those numbers.
+
+span_bound_double reads a bound through its base type, datum_double for the numbers and the timestamp for a period, and get_axis_span and get_axis_tbox read through it.
+
+Measured in callgrind instructions, one search per segment box of 142 natural areas against an R-tree of the 50910 float spans inserted one at a time: with the areas shifted to negative coordinates, overlaps falls from 16280 to 2248 million, contains from 16498 to 2082 and contained by from 16618 to 2228; with the areas as they are, whose coordinates stay near 2^19, overlaps goes from 2160 to 2248 million, contains from 1987 to 2082 and contained by from 2142 to 2228. The typed read gives the same tree and the same cost at both positions of the data, and the cast does not. The search reads no axis, so the 4% is the shape of the tree: its entry test runs 1634 million instructions against 1555. The loaded tree and the space-partitioning trees cost what they did, and every search answers the same ids.
+```
+Partition temporal boxes only on the axes they carry
+…
+23b47eb
+```
+Why: a quad-tree or k-d tree of temporal boxes -- the SP-GiST operator classes of PostgreSQL and the in-memory SPTree, which share the partitioning code of tnumber_spgist.c -- counted four dimensions whatever the box carried. A box with a value span and no period, or a period and no value span, was partitioned on bounds it does not carry: getQuadrant4D set the bits of the missing axis from bounds that are all equal, so a node allocated 16 children of which such a box can reach 4, and every search walked all of them; a k-d level cycled over the four bounds, so every other level split the box on an axis it does not have and separated nothing.
+
+The bounds a node partitions on are read from the axes of its centroid, as they are for spatiotemporal boxes. tbox_index_dims gives their number (2 for X or T, 4 for X and T), tbox_kd_dim the bound a k-d level splits on, cycling over those bounds in the order lower and upper value bound, lower and upper period bound, and tbox_quadrant_bit the quadrant bit of a bound. getQuadrant4D, tboxnode_quadtree_next, tboxnode_kdtree_next and tbox_level_cmp read them, the SP-GiST picksplit allocates one node per quadrant and its k-d picksplit orders on the bound of the level, and the SPTree takes its dimensions, children and k-d bits from them. A box with X and T keeps the numbering of earlier versions.
+
+SP-GiST indexes over temporal boxes with one axis built by an earlier version are rebuilt (REINDEX) on upgrade: the quadrant such a box falls in, and the bound a k-d level splits on, are not the ones that version stored.
+
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against trees of the 50910 boxes, the boxes carrying the X extent of the segment as a value span: inserted in a shuffled order, the quad-tree falls from 3140 to 2793 million and the k-d tree from 13966 to 10193; built by sptree_load, from 2733 to 2304 and from 19706 to 15555. Inserted in the order the boundaries list their segments, which chains the trees over 600 levels deep, the quad-tree falls from 10066 to 8887 million and the k-d tree rises from 11683 to 13323. Boxes carrying a value span and a period keep their partition and pay about 2% for reading the bound of a level from the flags of the centroid: 2186 to 2240 million on the shuffled quad-tree, 12781 to 13030 on the k-d tree. Every search answers the same ids on the three trees.
+```
+Measure the temporal boxes of an R-tree only on the axes they carry
+…
+a0048df
+```
+Why: an R-tree of temporal boxes took two axes, the value span and the period, whatever the boxes carried. A box with a value span and no period, or a period and no value span, has a zero length on the axis it lacks, so box_area answered zero for every box and every union: the least-enlargement choice of an insertion saw no difference between subtrees, and the Sort-Tile-Recursive load sorted the boxes on an axis they do not have. This is the defect the spatiotemporal boxes had.
+
+rtree_set_axes reads the axes of a temporal box tree from the first box it receives, the value span then the period as far as the box carries them, as it does for spatiotemporal boxes, and it takes the box rather than its flags since the two box types store their flags at different offsets.
+
+Measured in callgrind instructions, one overlaps search per segment box of 142 natural areas against an R-tree of the 50910 boxes carrying the X extent of the segment as a value span: inserted in a shuffled order, the search falls from 8026 to 1936 million; inserted in the order the boundaries list their segments, from 3512 to 2017, and contains from 5519 to 2991. The tree rtree_load builds, and the trees of boxes carrying both axes, cost what they did, and every search answers the same ids.
+```
+Search an index of temporal boxes without a call per entry
+…
+f90317e
+```
+An overlaps, contains or contained-by search over an R-tree or a space-partitioning tree of temporal boxes tested every entry through the operation's switch and the tree's function pointers, and every region through the generic node test, as the spatiotemporal boxes did before their own descents.
+
+node_search_tbox and spnode_search_tbox descend for the three operations with the tests tbox_overlaps and tbox_contains make read inline, the value span and the period through the span predicates, and the axes the query shares with the stored boxes decided once at the entry. A subtree or a region can hold a box containing the query only where it contains the query, and a box overlapping the query or contained by it only where it overlaps it. A region is read on the same axes as an entry, those the query shares with the stored boxes.
+
+Witness: 200 periods of one hour starting every half hour, stored as temporal boxes, queried with TBOXINT XT([5, 10],[2001-01-02, 2001-01-03]). The periods overlapping the query's period are 51 and those it contains 47, which the R-tree, the quad-tree and the k-d tree all answer. Read on the axes of the query instead, the regions of both space-partitioning trees are pruned on the value axis the periods lack, and both answer 0 and 0. sptree_test carries the case, on 2048 random periods, and fails 4 of its checks that way.
+
+Why: a region of a space-partitioning tree bounds the stored boxes only on the axes they carry. On an axis they lack it holds the bounds tboxnode_init gives it, float infinities for a tree of periods, which say nothing about the boxes and which an integer query reads as 0. A bound of the query on that axis therefore cannot rule a region out, exactly as it cannot rule out an entry, whose test the query's axes do not decide either.
+
+Measured in callgrind instructions, one search per segment box of 142 natural areas against trees of the 50910 boxes inserted in a shuffled order, overlaps on boxes carrying a value span falls from 1936 to 1475 million on the R-tree, 2793 to 1925 on the quad-tree and 10193 to 6888 on the k-d tree, and on boxes carrying a value span and a period from 1712 to 1355, 2240 to 1324 and 13030 to 7370. Inserted in the order the boundaries list them, contains on boxes carrying both axes falls from 1691 to 933 million on the R-tree, 4556 to 2683 on the quad-tree and 8731 to 4978 on the k-d tree. Every search answers the same ids on the three trees.
+```
+estebanzimanyi
+force-pushed
+the
+perf/index-search
+branch
+from
+2735893 to
+f90317e
+Compare
+September 19, 2026 09:59
+Hide details
+View details
+estebanzimanyi
+merged commit 15c3b0e
+into
+MobilityDB:master
+Sep 19, 2026
+46 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+estebanzimanyi
+deleted the
+perf/index-search
+branch
+September 19, 2026 10:46
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

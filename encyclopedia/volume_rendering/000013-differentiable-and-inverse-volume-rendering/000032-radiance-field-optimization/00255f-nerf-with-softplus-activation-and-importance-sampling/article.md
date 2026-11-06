@@ -1,0 +1,184 @@
+# NeRF with Softplus Activation and Importance Sampling
+
+Also called: Original NeRF architecture with proposed reparameterization
+
+## Overview
+This method implements the original Neural Radiance Fields (NeRF) architecture [S1, unofficial] with two specific modifications: replacing the ReLU output activation for volume density $\sigma$ with a Softplus function to ensure non-zero gradients, and employing an importance-sampling reparameterization technique for color estimation [S1, unofficial]. It solves the problem of gradient vanishing at zero density and provides a stochastic estimator for the volume rendering integral that is computationally efficient during training [S1, unofficial]. Unlike the full NeRF model which uses a second "fine" network to re-weight output points, this model weights samples with uniform weights in the color estimate [S1, unofficial].
+
+## How it works
+**Inputs:** A set of training images with known camera poses; a scene bounding box defining the ray segment.
+**Outputs:** A neural network model (MLP) parameterized by weights $W$, and rendered images $\hat{C}(\mathbf{r})$.
+
+**Data Structures:**
+*   **Ray Grid:** A piecewise linear density approximation constructed by slightly perturbing a uniform ray grid with $K_{grid} = 256$ knots [S1, unofficial].
+*   **Training Batch:** A subset of $N_{img} = 64$ training images, with $N_{ray} = 64$ rays sampled per image [S1, unofficial].
+
+**Parameters:**
+*   $\beta$: Softplus temperature parameter. Value: $10$ [S1, unofficial].
+*   $k$: Number of samples for importance-sampling reparameterization during training. Typical value: $32$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Batch Construction:** Select a random subset of 64 training images. For each image, sample 64 rays [S1, unofficial].
+2.  **Grid Generation:** Construct a piecewise linear density approximation by slightly perturbing a uniform ray grid with 256 knots [S1, unofficial].
+3.  **Density Evaluation:** For each sample point $i$ along a ray $\mathbf{r}$, query the neural network to obtain the raw output $z_i$. Apply the Softplus activation to get the volume density $\sigma_i$:
+    $$ \sigma_i = \frac{1}{\beta} \ln(1 + \exp(\beta z_i)) $$
+    where $\beta = 10$ [S1, unofficial].
+4.  **Transmittance Calculation:** Compute the transmittance $T_i$ for each sample using the standard volume rendering accumulation:
+    $$ T_i = \exp\left(-\sum_{j=1}^{i-1} \sigma_j \delta_j\right) $$
+    where $\delta_j$ is the distance between sample $j$ and $j+1$ [S1, unofficial][S5].
+5.  **Color Estimation (Importance Sampling):** Estimate the expected color $\hat{C}(\mathbf{r})$ using $k$ samples. The samples are weighted uniformly in the color estimate [S1, unofficial]. The specific formula (Equation 10 in [S1, unofficial]) is not explicitly provided in the text, but the method is described as an "importance-sampling reparameterization" [S1, unofficial]. The implementation uses $k=32$ samples during training [S1, unofficial].
+6.  **Loss Computation:** Compute the loss between the rendered color $\hat{C}(\mathbf{r})$ and the ground truth image color $C(\mathbf{r})$.
+7.  **Optimization:** Update network weights $W$ using gradient descent. The Softplus activation ensures non-zero gradients for $\sigma$ even when the raw output $z_i$ is negative, avoiding the zero-gradient problem of ReLU [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class SoftplusNeRF:
+    def __init__(self, beta=10.0, k_train=32, k_infer=32):
+        self.beta = beta
+        self.k_train = k_train
+        self.k_infer = k_infer
+        # Placeholder for the actual NeRF MLP architecture
+        self.mlp = None 
+
+    def softplus_activation(self, z):
+        """
+        Applies Softplus activation with temperature beta.
+        Ensures non-zero gradients for density.
+        """
+        return (1.0 / self.beta) * torch.log(1.0 + torch.exp(self.beta * z))
+
+    def render_ray(self, ray_origin, ray_direction, num_samples, k_samples, is_training=False):
+        """
+        Renders a single ray using importance-sampling reparameterization.
+        
+        Args:
+            ray_origin: (3,) tensor
+            ray_direction: (3,) tensor
+            num_samples: Total number of points to query the MLP (e.g., 256)
+            k_samples: Number of samples for the stochastic color estimate
+            is_training: If True, use k_train samples; else use k_infer
+            
+        Returns:
+            color: (3,) tensor
+        """
+        # 1. Generate sample points along the ray
+        # Assuming a standard interval [t_near, t_far]
+        t_vals = torch.linspace(t_near, t_far, num_samples)
+        points = ray_origin.unsqueeze(0) + t_vals.unsqueeze(1) * ray_direction.unsqueeze(0)
+        
+        # 2. Query MLP for raw outputs
+        # raw_outputs shape: (num_samples, 4) -> [sigma_raw, r, g, b]
+        raw_outputs = self.mlp(points)
+        sigma_raw = raw_outputs[:, 0]
+        colors = raw_outputs[:, 1:]
+        
+        # 3. Apply Softplus activation to density
+        sigmas = self.softplus_activation(sigma_raw)
+        
+        # 4. Compute transmittance
+        # delta_t is the distance between adjacent samples
+        delta_t = t_vals[1:] - t_vals[:-1]
+        # Pad for the first sample
+        delta_t = torch.cat([delta_t[:1], delta_t])
+        
+        # Exponential term for opacity
+        alpha = 1.0 - torch.exp(-sigmas * delta_t)
+        
+        # Transmittance T_i = exp(-sum_{j=1}^{i-1} sigma_j * delta_j)
+        # Using cumulative sum
+        exp_term = torch.exp(-torch.cumsum(sigmas * delta_t, dim=0))
+        T = torch.cat([torch.ones_like(exp_term[:1]), exp_term[:-1]])
+        
+        # 5. Importance Sampling Reparameterization
+        # The method uses k samples to estimate the color.
+        # The samples are weighted uniformly in the color estimate [S1, unofficial].
+        # Note: The exact formula for Equation 10 is not provided in the source.
+        # Standard importance sampling would weight by alpha * T.
+        # However, the source states "samples in our model are weighted with uniform weights".
+        # This implies a simple average of k selected samples, or a specific reparameterized estimator.
+        # Given the description "importance-sampling reparameterization", we assume
+        # the samples are drawn according to some distribution (likely proportional to alpha*T)
+        # but the final color estimate uses uniform weighting or a specific unbiased estimator.
+        
+        # For implementation purposes, if k < num_samples, we select k indices.
+        # The source mentions "stochastic estimate variance" [S1, unofficial].
+        
+        if is_training:
+            k = self.k_train
+        else:
+            k = self.k_infer
+            
+        # Select k samples. In a full implementation, these would be importance-sampled.
+        # Since the source does not provide the exact sampling distribution or Equation 10,
+        # we assume a uniform selection for the placeholder, but note that this is incomplete.
+        # The source emphasizes that this is an "importance-sampling reparameterization".
+        # A common reparameterization for volume rendering involves sampling t ~ p(t) and weighting by 1/p(t).
+        # Without the explicit formula, we cannot implement the exact estimator.
+        # However, the source states "weighted with uniform weights in the color estimate".
+        # This might mean the final aggregation is a simple mean of the k samples.
+        
+        # Placeholder for the specific Equation 10 logic
+        # indices = torch.multinomial(weights, k, replacement=False) # Example importance sampling
+        # selected_colors = colors[indices]
+        # color = selected_colors.mean(dim=0) # Uniform weighting
+        
+        # Since the exact method is not fully specified in the text, we return the standard volumetric rendering
+        # as a fallback, but note that the training uses k=32 samples for the stochastic estimate.
+        # The source says "calculated Equation 10 with k=32 samples to estimate color".
+        
+        # Standard volumetric rendering for completeness, though the method uses k samples.
+        # color = sum(T_i * alpha_i * c_i)
+        color = torch.sum(T * alpha * colors, dim=0)
+        
+        return color
+
+    def train_step(self, rays):
+        """
+        Performs one training step.
+        """
+        # 1. Batch construction: 64 images, 64 rays per image [S1, unofficial]
+        # 2. Grid generation: 256 knots [S1, unofficial]
+        
+        colors_pred = []
+        colors_gt = []
+        
+        for ray in rays:
+            color = self.render_ray(ray.origin, ray.direction, num_samples=256, k_samples=32, is_training=True)
+            colors_pred.append(color)
+            colors_gt.append(ray.gt_color)
+            
+        colors_pred = torch.stack(colors_pred)
+        colors_gt = torch.stack(colors_gt)
+        
+        loss = F.mse_loss(colors_pred, colors_gt)
+        loss.backward()
+        
+        return loss
+```
+
+**Edge Cases and Pitfalls:**
+*   **Variance:** The stochastic estimate variance prevents the model from finding the fine optimum compared to deterministic baselines, resulting in slightly worse quantitative results than NeRF without hierarchical sampling despite similar grid density [S1, unofficial].
+*   **Noise Artifacts:** Noise artifacts are present in renders when the number of inference samples $k$ is low (e.g., $k=1, 2, 4$). Artifacts only disappear for $k \ge 8$ [S1, unofficial].
+*   **Zero Gradients:** The original ReLU activation causes zero gradients for $\sigma$ when the output is negative. Softplus with $\beta=10$ avoids this [S1, unofficial].
+
+## Operating characteristics
+*   **Time Complexity:** Rendering speed increases with the number of samples $k$. On an NVIDIA V100, rendering time for the Lego scene (800x800) ranges from 20.18s ($k=1$) to 25.74s ($k=64$) [S1, unofficial].
+*   **Memory Complexity:** Memory usage is relatively stable, ranging from 4.189 Gb ($k=1$) to 4.209 Gb ($k=64$) [S1, unofficial]. This is significantly lower than the full NeRF model (6.742 Gb) [S1, unofficial].
+*   **Performance:** On the Lego scene (800x800, NVIDIA V100), the model with 32 samples achieved PSNR 30.72, SSIM 0.946, LPIPS 0.0801 [S1, unofficial]. With 1 sample: PSNR 25.67, SSIM 0.870, LPIPS 0.1768 [S1, unofficial]. With 64 samples: PSNR 30.72, SSIM 0.947, LPIPS 0.0794 [S1, unofficial].
+*   **Scaling:** Rendering quality metrics (PSNR, SSIM, LPIPS) saturate at approximately 16 samples for the Lego scene [S1, unofficial].
+*   **Strengths:** Lower memory footprint and faster rendering time compared to full NeRF with hierarchical sampling [S1, unofficial]. Non-zero gradients for density [S1, unofficial].
+*   **Limitations:** Slightly worse quantitative results than NeRF without hierarchical sampling due to stochastic variance [S1, unofficial]. Noise artifacts at low sample counts [S1, unofficial].
+
+## Background
+This method is based on the original Neural Radiance Fields (NeRF) architecture [S1, unofficial]. It was proposed as a modification to address gradient issues and provide a stochastic estimation framework. The work is part of the broader field of differentiable volume rendering and neural radiance fields.
+
+## Sources
+[S1] Differentiable Rendering With Reparameterized Volume Sampling, https://openreview.net/pdf?id=zHSaBQtj-l, fetched 2026-10-29 (unofficial)

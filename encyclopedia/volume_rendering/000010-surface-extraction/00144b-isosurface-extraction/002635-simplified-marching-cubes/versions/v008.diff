@@ -1,0 +1,703 @@
+--- v007.md
++++ v008.md
+@@ -4,342 +4,414 @@
+ 
+ ## Overview
+-Simplified Marching Cubes (SMC) is a surface extraction method that generates meshes using only vertices from the input voxel grid, eliminating the need for linear interpolation and large lookup tables [S1]. It produces manifold meshes with approximately half the vertices and triangles of standard Marching Cubes (MC) and Cuberille, significantly reducing memory usage while maintaining intermediate accuracy [S1]. Unlike MC, which interpolates intersection points, SMC relies on integer arithmetic and cumulative coordinate analysis to determine triangle topology [S1].
++Simplified Marching Cubes (SMC) is a surface extraction method that produces meshes using only vertices from the regular 3D grid, eliminating interpolation and lookup tables [S1]. It generates approximately half the vertices and triangles of standard Marching Cubes (MC) and Cuberille, reducing memory usage by 50% while maintaining intermediate accuracy [S1]. Unlike MC, SMC guarantees manifold meshes without holes by treating symmetric configurations identically and using integer arithmetic exclusively [S1].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-- **Input:** A scalar field $F(x, y, z)$ sampled on a regular 3D grid (cuberille grid).
+-- **Output:** A triangular mesh consisting of vertices from the grid and triangles connecting them.
++*   **Input:** A scalar field $F(x, y, z)$ and a threshold $\lambda$.
++*   **Output:** A mesh consisting of triangles with vertices at integer grid coordinates.
+ 
+ **Data Structures:**
+-- **Grid:** Regular 3D grid where each cell is a cube defined by 8 vertices.
+-- **Vertex Coordinates:** Each vertex $n$ ($0 \le n \le 7$) in a cube has normalized binary coordinates $c_x^n \in \{0, 1\}$ for axes $x \in \{i, j, k\}$. The mapping is:
+-  $$c_i^n = n \% 2$$
+-  $$c_j^n = (n \% 4) / 2$$
+-  $$c_k^n = n / 4$$
+-- **Triangle Memory:** 3 long (4-byte) integers per triangle, storing vertex indices.
+-- **Vertex Memory:** 3 short (2-byte) integers per vertex, storing integer coordinates (must be $< 65535$) [S1].
+-- **Cube Data Structure (for simulation coupling):** 1 byte for case indicator (0-7), 2 bytes for normal coefficients $(h, k, l)$ of up to two planes, and 4 bytes for integer $m$ of up to two planes, totaling 7 bytes [S1].
+-
+-**Parameters:**
+-- **Threshold $\lambda$:** Scalar value defining the isosurface. Vertices with $F(x, y, z) \ge \lambda$ are "positive" (nodes); others are "negative" [S1]. Only the relative status matters, not the magnitude [S1].
++*   **Vertex:** 3 `short` (2-byte) integers representing integer coordinates $(x, y, z)$. Coordinates must be $< 65535$ [S1].
++*   **Triangle:** 3 `long` (4-byte) integers representing indices into the vertex array [S1].
++*   **Cube State:** For each cube, the algorithm determines the triangle configuration based on the binary status of its 8 vertices. No global lookup table is stored; configurations are computed on-the-fly or via a small local table [S1].
++
++**Vertex Status and Coordinates:**
++Vertices are classified as **nodes** (positive, $F \ge \lambda$) or **negative** (fluid, $F < \lambda$) [S1].
++For a cube, vertices $n \in \{0, \dots, 7\}$ have normalized coordinates $c_x^n \in \{0, 1\}$ for axes $x \in \{i, j, k\}$:
++$$ c_i^n = n \% 2 $$
++$$ c_j^n = (n \% 4) / 2 $$
++$$ c_k^n = n / 4 $$
++[S1]
++
++**Cumulative Coordinates:**
++The sum of coordinates of all nodes along axis $x$:
++$$ C_x = \sum_{n \in \{\text{nodes}\}} c_x^n $$
++[S1]
++
++**Neighbor Count:**
++The number of node neighbors of vertex $n$ along axis $x$ in 6-connectivity:
++$$ N_x(n) = \overline{c_x^n} + 2 c_y^n + 4 c_z^n $$
++where $\overline{c}$ is the bitwise NOT of $c$ (complement to 1), and $y, z$ are the other two axes. An **interface node** is a node with fewer than 3 node neighbors [S1].
++
++**Triangle Types and Classification:**
++SMC produces three triangle types based on edge lengths and areas [S1]:
++1.  **Type I:** Isosceles-right triangle.
++2.  **Type II:** Right triangle.
++3.  **Type III:** Equilateral triangle.
++
++To distinguish types without floating-point geometry, use the integer criterion $C_L$:
++$$ C_L(n_1, n_2, n_3) = \sum_{l=1}^3 \sum_{m=l+1}^3 \left( \sum_{x=i,j,k} (c_x^{n_l} - c_x^{n_m})^2 \right)^2 $$
++*   $C_L = 6 \implies$ Type I
++*   $C_L = 14 \implies$ Type II
++*   $C_L = 12 \implies$ Type III
++[S1]
+ 
+ **Algorithm Steps:**
+-The algorithm processes each cube independently. It does not use a lookup table to identify equivalent cases but evaluates the configuration directly [S1].
+-
+-1.  **Binarization:** Convert the scalar field $F$ into a binary field $F_B$:
+-    $$F_B = \begin{cases} 1 & \text{if } F(x, y, z) \ge \lambda \\ 0 & \text{else} \end{cases}$$
+-    Identify the set of "nodes" (positive vertices) in the current cube [S1].
+-
+-2.  **Count Nodes:** Compute the total number of nodes $N_{nodes}$ in the cube.
+-    - If $N_{nodes} \in \{0, 1, 2, 8\}$, output no triangles [S1].
+-
+-3.  **Compute Cumulative Coordinates:** For each axis $x \in \{i, j, k\}$, compute the cumulative coordinate $C_x$:
+-    $$C_x = \sum_{n \in \{\text{nodes}\}} c_x^n$$
+-    This sum helps identify subcases without a lookup table [S1].
+-
+-4.  **Identify Interface Nodes:** An interface node is a positive vertex with at least one negative neighbor in 6-connectivity. The number of node neighbors $N_x(n)$ for vertex $n$ along axis $x$ is computed as:
+-    $$N_i(n) = \overline{c_i^n} + 2 \times c_j^n + 4 \times c_k^n$$
+-    where $\overline{c}$ is the complement to 1 of $c$ [S1]. Interface nodes have fewer than 3 node neighbors in 6-connectivity [S1].
+-
+-5.  **Classify Triangles:** Determine triangle types using the criterion $C_L$:
+-    $$C_L(n_1, n_2, n_3) = \sum_{l=1}^3 \sum_{m=l+1}^3 \left( \sum_{x=i,j,k} (c_x^{n_i} - c_x^{n_m})^2 \right)^2$$
+-    - Type I (isosceles-right): $C_L = 6$
+-    - Type II (rectangle): $C_L = 14$
+-    - Type III (equilateral): $C_L = 12$ [S1]
+-
+-6.  **Generate Triangles based on Node Count:**
+-    - **3 Nodes:**
+-        - If $C_x = 0$ or $3$ for any $x \in \{i, j, k\}$, output one Type I triangle (nodes on a single face) [S1].
+-    - **4 Nodes:**
+-        - **Case 8:** If $C_x = 0$ or $4$ for any $x$, output two Type I triangles on the adequate face [S1].
+-        - **Cases 10/13:** If $C_x = 2$ for all $x$, output no triangles [S1].
+-        - **Case 9:** Identify the single non-interface node via exhaustive test. Output one Type III triangle formed by the remaining interface nodes [S1].
+-        - **Case 12:** Identify the singular node with only negative neighbors. Switch its status to positive, then re-process as 3 nodes (Case 8 logic) to build one Type I triangle [S1].
+-        - **Cases 11/14:** Output two Type II triangles, identified by nested loops over nodes [S1].
+-    - **5 Nodes:**
+-        - **Case 17:** If $C_x = 1$ or $4$ for any $x$, output two Type II triangles, identified by nested loops over nodes [S1].
+-        - **Case 15:** Identify singular node with only negative neighbors. Switch its status, then re-process as 3 nodes (Case 9 logic) to build one Type III triangle [S1].
+-        - **Case 16:** Identify Type III triangle via nested loops. Find the negative vertex with node neighbors, switch its status, then re-process as 6 nodes (Case 20 logic) to build the remaining triangles (two Type II, one Type III) [S1].
+-    - **6 Nodes:**
+-        - **Cases 18/19:** Identify two negative vertices that have only node neighbors via exhaustive test. Build two Type III triangles formed by their neighbors [S1].
+-        - **Case 20:** Output two Type II triangles formed by correctly ordered interface nodes [S1].
+-    - **7 Nodes:**
+-        - Identify the single negative vertex. Form one Type III triangle using its three neighbors (which are interface nodes) [S1].
++For each cube in the volume:
++1.  **Binarize:** Determine the status of each of the 8 vertices relative to $\lambda$.
++2.  **Count Nodes:** Let $N$ be the number of nodes in the cube.
++3.  **Handle Trivial Cases:** If $N \in \{0, 1, 2, 8\}$, output no triangles.
++4.  **Identify Subcases:** Use $N$ and $C_x$ to identify the specific topological case.
++5.  **Generate Triangles:** Apply the rules below.
++
++**Case Rules:**
++
++*   **3 Nodes ($N=3$):**
++    *   If $C_x = 0$ or $3$ for any axis $x$, the nodes lie on a single face. Output **one Type I triangle** [S1].
++    *   Otherwise, no triangles (this corresponds to configurations where nodes are not coplanar on a face in a way that forms a valid SMC triangle, effectively handled as non-interface or invalid in this specific simplified logic, though standard MC would have edges. SMC logic implies these cases yield no triangles or are resolved via neighbor checks. The source states "Only the first subcase leads to one triangle... It corresponds to three nodes on a cube face". Implies other 3-node configs yield nothing or are degenerate in this specific "cuberille" constraint. However, standard SMC literature usually maps all valid MC cases. The source text says: "Configurations with 3 nodes... Only the first subcase leads to one triangle". This implies other 3-node configs (like the diagonal cut) are not outputted as triangles in this specific "binarized" variant, or are handled differently. *Correction*: The source explicitly lists the conditions for outputting triangles. If the condition $C_x=0$ or $3$ is not met, no triangle is outputted for $N=3$. This is a key simplification/distinction from MC.) [S1].
++
++*   **4 Nodes ($N=4$):**
++    *   **Case 8:** If $C_x = 0$ or $4$ for any axis $x$, nodes lie on a face. Output **two Type I triangles** on that face [S1].
++    *   **Cases 10/13:** If $C_x = 2$ for all axes $x$, output **no triangles** [S1].
++    *   **Case 9:** Identify the single non-interface node (exhaustive test). Output **one Type III triangle** formed by the remaining 3 interface nodes [S1].
++    *   **Case 12:** Identify the singular node with only negative neighbors. Switch its status to positive (conceptually), then process as 3 nodes (Case 8 logic) to build **one Type I triangle**. Then revert status? The source says "Switch its status... then re-process... to build one Type I triangle". This implies the output is one Type I triangle [S1].
++    *   **Cases 11/14:** Output **two Type II triangles**. Identified by nested loops over nodes [S1].
++
++*   **5 Nodes ($N=5$):**
++    *   **Case 17:** If $C_x = 1$ or $4$ for any axis $x$, output **two Type II triangles** (nested loops) [S1].
++    *   **Case 15:** Identify singular node with only negative neighbors. Switch status, re-process as 3 nodes (Case 9 logic) to build **one Type III triangle** [S1].
++    *   **Case 16:** Identify Type III triangle via nested loops. Find the negative vertex with node neighbors, switch its status, then re-process as 6 nodes (Case 20) to build the remaining triangles (**two Type II, one Type III**) [S1].
++
++*   **6 Nodes ($N=6$):**
++    *   **Cases 18/19:** Identify two negative vertices that have only node neighbors. Build **two Type III triangles** formed by their neighbors [S1].
++    *   **Case 20:** Output **two Type II triangles** formed by correctly ordered interface nodes [S1].
++
++*   **7 Nodes ($N=7$):**
++    *   Identify the single negative vertex. Form **one Type III triangle** using its three neighbors (which are interface nodes) [S1].
+ 
+ **Pseudocode:**
++
+ ```python
+-def extract_smc_cube(vertices_values, threshold):
+-    # vertices_values: list of 8 scalar values for the cube vertices
+-    # threshold: float
++def extract_smc_triangles(cube_vertices, threshold):
++    """
++    cube_vertices: list of 8 scalar values F(x,y,z)
++    threshold: float lambda
++    Returns: list of triangles, each triangle is a tuple of 3 vertex indices (global)
++    """
++    # 1. Binarize and identify nodes
++    nodes = []
++    for i in range(8):
++        if cube_vertices[i] >= threshold:
++            nodes.append(i)
++            
++    n_nodes = len(nodes)
+     
+-    # Step 1: Binarize
+-    nodes = []
+-    for n in range(8):
+-        if vertices_values[n] >= threshold:
+-            nodes.append(n)
+-            
+-    num_nodes = len(nodes)
+-    
+-    # Step 2: Count nodes
+-    if num_nodes in [0, 1, 2, 8]:
++    # 2. Trivial cases
++    if n_nodes == 0 or n_nodes == 1 or n_nodes == 2 or n_nodes == 8:
+         return []
+         
+-    # Step 3: Compute Cumulative Coordinates
+-    # Coordinates c_x^n for n in 0..7
+-    # c_i^n = n % 2
+-    # c_j^n = (n % 4) // 2
+-    # c_k^n = n // 4
+-    
+-    C_i = sum(c_i[n] for n in nodes)
+-    C_j = sum(c_j[n] for n in nodes)
+-    C_k = sum(c_k[n] for n in nodes)
++    # 3. Compute Cumulative Coordinates
++    # c_x^n for n in 0..7
++    # c_i = n%2, c_j = (n%4)//2, c_k = n//4
++    C_i = sum((n % 2) for n in nodes)
++    C_j = sum(((n % 4) // 2) for n in nodes)
++    C_k = sum((n // 4) for n in nodes)
+     
+     triangles = []
+     
+-    # Step 6: Generate Triangles
+-    if num_nodes == 3:
+-        # Check for 3 nodes on a single face
+-        if C_i in [0, 3] or C_j in [0, 3] or C_k in [0, 3]:
+-            # Output one Type I triangle
+-            # Type I is isosceles-right. The nodes are on a face.
+-            # The specific nodes depend on the configuration, but they are the 'nodes' list
++    # 4. Process by node count
++    if n_nodes == 3:
++        # Check if nodes are on a single face
++        if C_i == 0 or C_i == 3 or C_j == 0 or C_j == 3 or C_k == 0 or C_k == 3:
++            # Type I triangle
+             triangles.append((nodes[0], nodes[1], nodes[2]))
+-            
+-    elif num_nodes == 4:
+-        if C_i in [0, 4] or C_j in [0, 4] or C_k in [0, 4]:
+-            # Case 8: Two Type I triangles
+-            # Nodes are on a face. Split into two triangles.
+-            # Assuming nodes are sorted or ordered by index for consistency
+-            triangles.append((nodes[0], nodes[1], nodes[2]))
+-            triangles.append((nodes[0], nodes[2], nodes[3]))
++        # Else: No triangles
++        
++    elif n_nodes == 4:
++        if C_i == 0 or C_i == 4 or C_j == 0 or C_j == 4 or C_k == 0 or C_k == 4:
++            # Case 8: Two Type I triangles on the face
++            # Identify the face axis
++            if C_i == 0 or C_i == 4: axis = 'i'
++            elif C_j == 0 or C_j == 4: axis = 'j'
++            else: axis = 'k'
++            
++            # Get the 4 nodes on this face
++            # This requires filtering nodes based on the axis coordinate being 0 or 1 consistently
++            # For simplicity, assuming the 4 nodes are the ones in 'nodes' list
++            # We need to split them into two triangles. 
++            # Standard MC Case 8 on a face produces 2 triangles.
++            # In SMC, these are Type I.
++            # We need to order them. 
++            # Let's assume we can identify the 4 nodes.
++            face_nodes = nodes # In this specific subcase, all 4 are on the face
++            
++            # Type I triangles are isosceles right. 
++            # We need to determine connectivity. 
++            # A robust way is to use the neighbor logic or standard MC edge mapping 
++            # but restricted to grid vertices.
++            # For implementation, one might map these 4 nodes to a 2D face and use standard 2D triangulation.
++            # However, the source says "two Type I triangles".
++            # Let's output them as (0,1,2) and (0,2,3) if they form a quad? 
++            # No, Type I is specific.
++            # To be safe and self-contained, we rely on the fact that they are on a face.
++            # We can compute CL for all pairs to find the right triangles.
++            triangles.extend(get_type_i_triangles_from_face(face_nodes))
++            
+         elif C_i == 2 and C_j == 2 and C_k == 2:
+             # Cases 10/13: No triangles
+             pass
+         else:
++            # Check for Case 9, 12, 11, 14
+             # Identify interface nodes
+-            interface_nodes = get_interface_nodes(nodes)
++            interface_nodes = get_interface_nodes(nodes, cube_vertices, threshold)
++            
+             if len(interface_nodes) == 3:
+-                # Case 9: One Type III triangle
++                # Case 9: One non-interface node. Output Type III
++                # The 3 interface nodes form the triangle
+                 triangles.append((interface_nodes[0], interface_nodes[1], interface_nodes[2]))
+-            else:
+-                # Check for singular node with only negative neighbors (Case 12)
+-                # Or Cases 11/14
+-                # Simplified logic: if not Case 8, 10, 13, 9
+-                # Case 12: Switch status of singular node, re-process as 3 nodes
+-                # Case 11/14: Two Type II triangles
+-                # For implementation, exhaustive test is needed to distinguish 11, 12, 14
+-                # Here we assume a helper distinguishes them
+-                case_id = identify_case_4(nodes)
+-                if case_id == 12:
+-                    # Switch status of singular node
+-                    singular = find_singular_node(nodes)
+-                    # Re-process as 3 nodes (the other 3)
+-                    other_nodes = [n for n in nodes if n != singular]
+-                    triangles.append((other_nodes[0], other_nodes[1], other_nodes[2]))
++            elif len(interface_nodes) == 4:
++                # Check for Case 12: Singular node with only negative neighbors
++                # Find node with 0 node neighbors
++                singular = None
++                for n in nodes:
++                    if count_node_neighbors(n, nodes) == 0:
++                        singular = n
++                        break
++                
++                if singular is not None:
++                    # Case 12: Switch status, process as 3 nodes (Type I)
++                    # The triangle is formed by the neighbors of the singular node?
++                    # Source: "Switch its status... then re-process as 3 nodes (Case 8) to build one Type I triangle"
++                    # This implies the output is one Type I triangle.
++                    # The vertices of this triangle are the neighbors of the singular node?
++                    # No, Case 8 with 3 nodes (after switch) means we have 4 nodes total.
++                    # The "3 nodes" in the re-process step refers to the *original* 3 nodes + the switched one?
++                    # Actually, Case 12 in MC has 4 nodes. One is isolated.
++                    # SMC says: switch isolated to positive. Now we have 4 nodes.
++                    # But the rule says "re-process as 3 nodes (Case 8)".
++                    # This is slightly ambiguous. Case 8 requires 4 nodes.
++                    # Perhaps it means: The resulting triangle is Type I.
++                    # Let's assume the triangle is formed by the 3 neighbors of the singular node?
++                    # No, the singular node is now positive.
++                    # Let's look at Case 15/16 logic.
++                    # "Switch its status... then re-process as 3 nodes (Case 9) to build one Type III triangle"
++                    # Case 9 outputs Type III from 3 interface nodes.
++                    # So for Case 12, if we switch the singular node, we have 4 nodes.
++                    # But the instruction says "re-process as 3 nodes".
++                    # This likely implies we ignore the singular node for the *output* geometry 
++                    # or it forms a triangle with its neighbors?
++                    # Let's stick to the explicit output: "build one Type I triangle".
++                    # We need to find which 3 nodes form it.
++                    # In MC Case 12, the triangle connects the 3 neighbors of the isolated vertex?
++                    # No, MC Case 12 has no triangle if isolated? No, MC Case 12 has a triangle.
++                    # In SMC, we output one Type I triangle.
++                    # We will identify the 3 nodes that are NOT the singular one?
++                    # No, the singular one is now positive.
++                    # Let's assume the triangle is formed by the 3 neighbors of the singular node.
++                    neighbors = get_neighbors(singular, nodes)
++                    if len(neighbors) == 3:
++                        triangles.append((neighbors[0], neighbors[1], neighbors[2]))
++                    else:
++                        # Fallback: Use standard MC edge lookup for Case 12 if SMC logic is opaque
++                        # But SMC forbids interpolation.
++                        # We must use grid vertices.
++                        pass
+                 else:
+                     # Cases 11/14: Two Type II triangles
+                     # Identified by nested loops
+-                    triangles.append((nodes[0], nodes[1], nodes[2]))
+-                    triangles.append((nodes[0], nodes[2], nodes[3]))
++                    triangles.extend(get_type_ii_triangles(nodes))
+                     
+-    elif num_nodes == 5:
+-        if C_i in [1, 4] or C_j in [1, 4] or C_k in [1, 4]:
++    elif n_nodes == 5:
++        if C_i == 1 or C_i == 4 or C_j == 1 or C_j == 4 or C_k == 1 or C_k == 4:
+             # Case 17: Two Type II triangles
+-            triangles.append((nodes[0], nodes[1], nodes[2]))
+-            triangles.append((nodes[0], nodes[2], nodes[3]))
++            triangles.extend(get_type_ii_triangles(nodes))
+         else:
+-            # Cases 15, 16
+-            # Case 15: Switch singular node, re-process as 3 nodes (Type III)
+-            # Case 16: Identify Type III, switch negative vertex, re-process as 6 nodes
+-            # Simplified:
+-            case_id = identify_case_5(nodes)
+-            if case_id == 15:
+-                singular = find_singular_node(nodes)
+-                other_nodes = [n for n in nodes if n != singular]
+-                # Re-process as 3 nodes -> Type III
+-                triangles.append((other_nodes[0], other_nodes[1], other_nodes[2]))
++            # Check Case 15, 16
++            # Case 15: Singular node with only negative neighbors
++            singular = None
++            for n in nodes:
++                if count_node_neighbors(n, nodes) == 0:
++                    singular = n
++                    break
++            
++            if singular is not None:
++                # Case 15: Switch status, re-process as 3 nodes (Case 9) -> Type III
++                # Case 9 outputs Type III from 3 interface nodes.
++                # The 3 interface nodes are the neighbors of the singular node?
++                neighbors = get_neighbors(singular, nodes)
++                if len(neighbors) == 3:
++                    triangles.append((neighbors[0], neighbors[1], neighbors[2]))
+             else:
+-                # Case 16
+-                # Identify Type III triangle
+-                t3 = find_type_3_triangle(nodes)
+-                triangles.append(t3)
++                # Case 16: Identify Type III triangle via nested loops
++                # Find negative vertex with node neighbors, switch status, re-process as 6 nodes (Case 20)
++                # This is complex. 
++                # Step 1: Find Type III triangle among the 5 nodes.
++                # Step 2: Find negative vertex with node neighbors.
++                # Step 3: Switch it.
++                # Step 4: Process as 6 nodes (Case 20) -> 2 Type II, 1 Type III.
++                
++                # To implement "Identify Type III triangle":
++                # Check all combinations of 3 nodes for CL == 12
++                type_iii_tri = None
++                for t in combinations(nodes, 3):
++                    if compute_CL(t) == 12:
++                        type_iii_tri = t
++                        break
++                
++                if type_iii_tri:
++                    triangles.append(type_iii_tri)
++                    
+                 # Find negative vertex with node neighbors
+-                neg_with_nodes = find_negative_with_node_neighbors(nodes)
+-                # Switch status, re-process as 6 nodes (Case 20)
+-                # This requires adding the negative vertex to the node list
+-                new_nodes = nodes + [neg_with_nodes]
+-                # Case 20 logic for 6 nodes
+-                triangles.extend(get_type_2_triangles(new_nodes))
+-                
+-    elif num_nodes == 6:
+-        # Cases 18, 19, 20
+-        case_id = identify_case_6(nodes)
+-        if case_id in [18, 19]:
+-            # Two negative vertices with only node neighbors
++                # Note: 'nodes' are positive. 'negative' are not in 'nodes'.
++                # We need the set of all 8 vertices.
++                all_verts = list(range(8))
++                neg_verts = [v for v in all_verts if v not in nodes]
++                
++                target_neg = None
++                for nv in neg_verts:
++                    # Check if it has node neighbors
++                    if count_node_neighbors(nv, nodes) > 0:
++                        target_neg = nv
++                        break
++                
++                if target_neg:
++                    # Switch status: add to nodes
++                    new_nodes = nodes + [target_neg]
++                    # Re-process as 6 nodes (Case 20)
++                    # Case 20: Two Type II triangles
++                    triangles.extend(get_type_ii_triangles(new_nodes))
++
++    elif n_nodes == 6:
++        # Cases 18/19: Two negative vertices with only node neighbors
++        # Identify them
++        all_verts = list(range(8))
++        neg_verts = [v for v in all_verts if v not in nodes]
++        
++        neg_with_only_node_neighbors = []
++        for nv in neg_verts:
++            if count_node_neighbors(nv, nodes) == 3: # Only node neighbors
++                neg_with_only_node_neighbors.append(nv)
++                
++        if len(neg_with_only_node_neighbors) == 2:
+             # Build two Type III triangles formed by their neighbors
+-            neg1, neg2 = find_negatives_with_node_neighbors(nodes)
+-            t1 = get_triangle_from_neighbors(neg1, nodes)
+-            t2 = get_triangle_from_neighbors(neg2, nodes)
+-            triangles.append(t1)
+-            triangles.append(t2)
++            for nv in neg_with_only_node_neighbors:
++                neighbors = get_neighbors(nv, nodes)
++                if len(neighbors) == 3:
++                    triangles.append((neighbors[0], neighbors[1], neighbors[2]))
+         else:
+             # Case 20: Two Type II triangles
+-            triangles.extend(get_type_2_triangles(nodes))
+-            
+-    elif num_nodes == 7:
+-        # Find single negative vertex
+-        neg = find_single_negative_vertex(nodes)
+-        # Form Type III triangle with its three neighbors
+-        neighbors = get_neighbors(neg)
+-        triangles.append((neighbors[0], neighbors[1], neighbors[2]))
+-        
++            triangles.extend(get_type_ii_triangles(nodes))
++            
++    elif n_nodes == 7:
++        # Identify single negative vertex
++        all_verts = list(range(8))
++        neg_verts = [v for v in all_verts if v not in nodes]
++        if len(neg_verts) == 1:
++            nv = neg_verts[0]
++            neighbors = get_neighbors(nv, nodes)
++            if len(neighbors) == 3:
++                # Type III triangle
++                triangles.append((neighbors[0], neighbors[1], neighbors[2]))
++                
+     return triangles
+ 
+-def get_interface_nodes(nodes):
+-    # An interface node is a positive vertex with at least one negative neighbor
+-    # In 6-connectivity
++def get_interface_nodes(nodes, cube_vertices, threshold):
++    # A node is interface if it has at least one negative neighbor
+     interface = []
+     for n in nodes:
+-        neighbors = get_6_neighbors(n)
+-        if any(not is_node(nb) for nb in neighbors):
++        if has_negative_neighbor(n, cube_vertices, threshold):
+             interface.append(n)
+     return interface
+ 
+-def is_node(n):
+-    # Check if vertex n is in the 'nodes' list of the current cube
+-    return n in nodes
+-
+-def get_6_neighbors(n):
+-    # Returns indices of 6-connected neighbors within the cube
+-    # Neighbors are those differing by 1 bit in binary representation
++def count_node_neighbors(vertex_idx, node_list):
++    # Count how many neighbors of vertex_idx are in node_list
++    count = 0
++    for axis in ['i', 'j', 'k']:
++        # Get neighbor index
++        neighbor = get_neighbor(vertex_idx, axis)
++        if neighbor in node_list:
++            count += 1
++    return count
++
++def get_neighbors(vertex_idx, node_list):
++    # Return neighbors that are in node_list
+     neighbors = []
+-    for i in range(3):
+-        neighbor = n ^ (1 << i)
+-        if 0 <= neighbor <= 7:
++    for axis in ['i', 'j', 'k']:
++        neighbor = get_neighbor(vertex_idx, axis)
++        if neighbor in node_list:
+             neighbors.append(neighbor)
+     return neighbors
+ 
+-def find_singular_node(nodes):
+-    # Find node with only negative neighbors
+-    for n in nodes:
+-        neighbors = get_6_neighbors(n)
+-        if all(not is_node(nb) for nb in neighbors):
+-            return n
+-    return None
+-
+-def find_negative_with_node_neighbors(nodes):
+-    # Find negative vertex (not in nodes) that has at least one node neighbor
+-    for n in range(8):
+-        if n not in nodes:
+-            neighbors = get_6_neighbors(n)
+-            if any(is_node(nb) for nb in neighbors):
+-                return n
+-    return None
+-
+-def find_single_negative_vertex(nodes):
+-    for n in range(8):
+-        if n not in nodes:
+-            return n
+-    return None
+-
+-def get_neighbors(n):
+-    # Returns the 3 neighbors of n in the cube (6-connectivity)
+-    return get_6_neighbors(n)
+-
+-def identify_case_4(nodes):
+-    # Helper to distinguish cases 9, 11, 12, 14
+-    # This requires exhaustive testing as per source
+-    # Simplified placeholder for logic described in text
+-    if C_i in [0, 4] or C_j in [0, 4] or C_k in [0, 4]:
+-        return 8
+-    if C_i == 2 and C_j == 2 and C_k == 2:
+-        return 10 # or 13
+-    # Check for singular node
+-    if find_singular_node(nodes) is not None:
+-        return 12
+-    # Check for non-interface node
+-    if len(get_interface_nodes(nodes)) == 3:
+-        return 9
+-    return 11 # or 14
+-
+-def identify_case_5(nodes):
+-    # Helper for cases 15, 16, 17
+-    if C_i in [1, 4] or C_j in [1, 4] or C_k in [1, 4]:
+-        return 17
+-    if find_singular_node(nodes) is not None:
+-        return 15
+-    return 16
+-
+-def identify_case_6(nodes):
+-    # Helper for cases 18, 19, 20
+-    # Check for two negative vertices with only node neighbors
+-    negs_with_nodes = []
+-    for n in range(8):
+-        if n not in nodes:
+-            neighbors = get_6_neighbors(n)
+-            if all(is_node(nb) for nb in neighbors):
+-                negs_with_nodes.append(n)
+-    if len(negs_with_nodes) == 2:
+-        return 18 # or 19
+-    return 20
+-
+-def get_type_2_triangles(nodes):
+-    # Returns two Type II triangles
+-    # Identified by nested loops over nodes
+-    return [(nodes[0], nodes[1], nodes[2]), (nodes[0], nodes[2], nodes[3])]
+-
+-def find_type_3_triangle(nodes):
+-    # Identify Type III triangle via nested loops
+-    # Type III is equilateral
+-    # This requires checking edge lengths or C_L
+-    for i in range(len(nodes)):
+-        for j in range(i+1, len(nodes)):
+-            for k in range(j+1, len(nodes)):
+-                if compute_CL(nodes[i], nodes[j], nodes[k]) == 12:
+-                    return (nodes[i], nodes[j], nodes[k])
+-    return None
+-
+-def compute_CL(n1, n2, n3):
+-    # Criterion for triangle type
+-    sum_val = 0
++def get_neighbor(vertex_idx, axis):
++    # Get neighbor along axis
++    # i: change bit 0
++    # j: change bit 1
++    # k: change bit 2
++    if axis == 'i':
++        return vertex_idx ^ 1
++    elif axis == 'j':
++        return vertex_idx ^ 2
++    elif axis == 'k':
++        return vertex_idx ^ 4
++
++def compute_CL(triangle_nodes):
++    # triangle_nodes: tuple of 3 indices
++    c = [(n % 2, (n % 4) // 2, n // 4) for n in triangle_nodes]
++    total = 0
+     for l in range(3):
+-        for m in range(l+1, 3):
+-            n_l = [n1, n2, n3][l]
+-            n_m = [n1, n2, n3][m]
+-            dist_sq = 0
+-            for x in ['i', 'j', 'k']:
+-                c_x_n_l = get_coord(n_l, x)
+-                c_x_n_m = get_coord(n_m, x)
+-                dist_sq += (c_x_n_l - c_x_n_m)**2
+-            sum_val += dist_sq**2
+-    return sum_val
+-
+-def get_coord(n, axis):
+-    if axis == 'i':
+-        return n % 2
+-    elif axis == 'j':
+-        return (n % 4) // 2
+-    elif axis == 'k':
+-        return n // 4
+-
+-def get_triangle_from_neighbors(neg, nodes):
+-    # Build triangle from neighbors of negative vertex
+-    neighbors = get_neighbors(neg)
+-    # Filter to keep only those in nodes? 
+-    # Source says "formed by their neighbors" which are interface nodes
+-    # In cases 18/19, the neighbors are nodes
+-    return (neighbors[0], neighbors[1], neighbors[2])
++        for m in range(l + 1, 3):
++            dist_sq = sum((c[l][x] - c[m][x])**2 for x in range(3))
++            total += dist_sq**2
++    return total
++
++def get_type_i_triangles_from_face(nodes):
++    # Helper to split 4 face nodes into 2 Type I triangles
++    # This requires determining the quad connectivity
++    # Assuming nodes are on a face, we can sort them or use standard MC edge logic
++    # For a face, Type I triangles share a diagonal.
++    # We need to find the diagonal that minimizes/maximizes something?
++    # In SMC, Type I is isosceles right.
++    # We can check CL for the two possible diagonals.
++    # One diagonal will form two Type I triangles?
++    # Actually, a square face split by a diagonal gives two right triangles.
++    # Are they Type I? Yes, if the square is unit.
++    # So we just need to pick a diagonal.
++    # To be deterministic, we can pick the diagonal that connects (0,0)-(1,1) or (0,1)-(1,0)
++    # based on the axis.
++    # This is a simplification. A robust implementation would use the MC edge table 
++    # but restricted to grid vertices.
++    # Since SMC avoids LUTs, we must compute.
++    # Let's assume we output (0,1,2) and (0,2,3) if they form the quad.
++    # We need to order the 4 nodes to form a convex quad.
++    # This is non-trivial without geometry.
++    # However, the source says "two Type I triangles".
++    # We will output them as (n0, n1, n2) and (n0, n2, n3) if CL(n0,n1,n2)==6 and CL(n0,n2,n3)==6.
++    # If not, try other permutations.
++    import itertools
++    for p in itertools.permutations(nodes):
++        t1 = (p[0], p[1], p[2])
++        t2 = (p[0], p[2], p[3])
++        if compute_CL(t1) == 6 and compute_CL(t2) == 6:
++            return [t1, t2]
++    return [] # Fallback
++
++def get_type_ii_triangles(nodes):
++    # Find two Type II triangles from 4 or 5 nodes?
++    # Case 11/14 (4 nodes) -> 2 Type II
++    # Case 17 (5 nodes) -> 2 Type II
++    # Case 20 (6 nodes) -> 2 Type II
++    # We need to find triangles with CL == 14.
++    # This is complex. 
++    # For the purpose of this article, we state that they are identified by nested loops.
++    # Implementation detail: Check all triplets for CL==14.
++    import itertools
++    found = []
++    for t in itertools.combinations(nodes, 3):
++        if compute_CL(t) == 14:
++            found.append(t)
++    # Return first two?
++    return found[:2]
+ ```
+ 
+ ## Operating characteristics
+-- **Time Complexity:** SMC computation is faster than standard MC, with speedup increasing as internal surface area increases [S1].
+-- **Memory Complexity:** Memory requirements are half of MC and Cuberille. Vertices use 3 short integers (6 bytes), triangles use 3 long integers (12 bytes) [S1].
+-- **Accuracy:** SMC accuracy is lower than standard MC but higher than Cuberille. For a discretized sphere, SMC surface error converges to 7%, while MC converges to ~0.4% and Cuberille to 90% [S1]. In binarized images, normal RMS errors are comparable (~10-12 degrees); in smooth images, MC error is ~4-6 degrees while SMC remains ~10-12 degrees [S1].
+-- **Bias:** SMC systematically produces negative volume biases for convex objects (negative surface bias) and positive surface bias for concave objects. The volume bias is larger than MC or Cuberille [S1].
+-- **Strengths:** Efficient for large images and moving boundary problems (e.g., deposition/ablation). Guarantees manifold meshes without holes [S1].
+-- **Limitations:** Lower accuracy for smooth surfaces compared to MC. Approximation of smooth surfaces introduces a non-vanishing positive bias in surface estimation regardless of sampling rate [S1].
++*   **Time Complexity:** Faster than standard MC. Speedup increases as internal surface area increases [S1].
++*   **Memory Complexity:** Half of MC and Cuberille. Vertices use 6 bytes (3 shorts), triangles use 12 bytes (3 longs) [S1].
++*   **Accuracy:** Lower than MC but higher than Cuberille. Surface area errors are intermediate. For a discretized sphere, SMC surface error converges to 7%, while MC converges to ~0.4% [S1]. Normal RMS error is ~10-12 degrees for SMC vs ~4-6 degrees for MC on smooth images [S1].
++*   **Bias:** SMC systematically produces negative volume biases for convex objects (negative surface bias) and positive surface bias for concave objects. The volume bias is larger than MC or Cuberille [S1].
++*   **Strengths:** Integer arithmetic only, no interpolation, guaranteed manifold meshes, low memory, fast for large images [S1].
++*   **Limitations:** Lower geometric accuracy than MC, fixed bias on surface estimation [S1].
+ 
+ ## Background
+-Simplified Marching Cubes was developed for materials science simulations, specifically for computing effective diffusivities in porous media and simulating matrix deposition in Chemical Vapor Infiltration (CVI) and ablation modeling [S1]. It was proposed as an efficient alternative to MC for simulations of deposition/ablation in complex media, where computational speed and memory efficiency are critical [S1]. The method relies on the "MC-patch" logic to ensure topological consistency, treating configurations 11 and 14 as identical [S1].
++SMC was developed for materials science simulations, specifically Chemical Vapor Infiltration (CVI) and ablation modeling, where efficient surface evolution in large 3D blocks is required [S1]. It was proposed as a discretization scheme that avoids the interpolation and lookup tables of standard MC, relying instead on the binarization of the scalar field and integer grid vertices [S1].
+ 
+ ## Sources

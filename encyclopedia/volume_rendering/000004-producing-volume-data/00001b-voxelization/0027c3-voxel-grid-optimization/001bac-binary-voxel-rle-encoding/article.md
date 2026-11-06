@@ -3,49 +3,35 @@
 Also called: Run-Length Encoding Output Compression, binvox-like RLE, run-length encoded voxel writer
 
 ## Overview
-Binary Voxel RLE Encoding compresses a 3D voxel grid into a binary stream using run-length encoding (RLE) to store occupancy data efficiently [S1, unofficial]. It solves the problem of large memory footprint and I/O latency for dense voxel grids by storing only voxels within the minimal bounding box of the mesh [S2, unofficial]. It differs from [3D Voxel Grid Smoothing](833-3d-voxel-grid-smoothing.md) by focusing on lossless compression of binary occupancy rather than geometric regularization, and from [Occupancy Voxel Creation](2628-occupancy-voxel-creation.md) by adding a specific serialization format that packs runs of identical values into pairs of (value, count) [S2, unofficial].
+Binary Voxel RLE Encoding compresses a 3D voxel grid into a binary stream using run-length encoding (RLE) to store occupancy data efficiently [S1, unofficial]. It stores only voxels within the minimal bounding box of the mesh to reduce the output file size [S2, unofficial]. The method packs runs of identical values into pairs of (value, count) [S2, unofficial].
 
 ## How it works
 **Inputs:**
-- `m_dimX`, `m_dimY`, `m_dimZ`: Integer dimensions of the voxel grid along the X, Y, and Z axes.
-- `m_spacing`: Floating-point voxel grid spacing (world units per voxel).
-- `isInside(x, y, z)`: A function returning `true` (1) if the voxel at integer coordinates $(x, y, z)$ is occupied by the mesh, and `false` (0) otherwise.
+- `m_dimX`, `m_dimY`, `m_dimZ`: Integer dimensions of the voxel grid along the X, Y, and Z axes [S1, unofficial].
+- `m_spacing`: Floating-point voxel grid spacing (world units per voxel) [S1, unofficial].
+- `isInside(x, y, z)`: A function returning `true` (1) if the voxel at integer coordinates $(x, y, z)$ is occupied by the mesh, and `false` (0) otherwise [S1, unofficial].
 - `x_vox_lb`, `y_vox_lb`, `z_vox_lb`: The lower bound coordinates of the minimal bounding box in voxelized space, used for coordinate reconstruction [S2, unofficial].
 
 **Outputs:**
-- A binary file/stream containing an ASCII header followed by compressed RLE data.
+- A binary file/stream containing an ASCII header followed by compressed RLE data [S1, unofficial][S2, unofficial].
 
 **Data Structures:**
-- **Header:** ASCII text containing the string `"scale "`, followed by the floating-point value of `m_spacing`, followed by the string `"data"`.
-- **RLE Stream:** A sequence of bytes. Each run is encoded as two bytes:
-    1. `value`: 1 byte, representing the occupancy state (0 for empty, 1 for solid).
-    2. `count`: 1 byte, representing the length of the run. The stored value $c$ corresponds to a run length of $c+1$. Thus, the valid range for the byte is $[0, 255]$, representing run lengths $[1, 256]$ [S2, unofficial].
+- **Header:** ASCII text containing the string `"scale "`, followed by the floating-point value of `m_spacing`, followed by the string `"data"` [S1, unofficial].
+- **RLE Stream:** A sequence of bytes. Each run is encoded as two bytes: `value` (1 byte, representing 0 for empty or 1 for solid) and `count` (stored in two bytes, representing a range of [1, 256] as values 0-255) [S2, unofficial].
 
 **Algorithm Steps:**
-1. Write the ASCII header: `"scale "` + `m_spacing` + `"data"`.
-2. Initialize the run state:
-   - Set `currentvalue = char(isInside(0, 0, 0))`.
-   - Set `current_seen = 1`.
-   - Write `currentvalue` to the output stream.
-3. Iterate through the voxel grid in the order: $x$ from $0$ to $m\_dimX-1$, $z$ from $0$ to $m\_dimY-1$, $y$ from $0$ to $m\_dimZ-1$.
-4. For each voxel $(x, y, z)$:
-   - If $x=0, y=0, z=0$, skip (the first voxel was already written in step 2).
-   - Compute `nextvalue = char(isInside(x, y, z))`.
-   - If `nextvalue != currentvalue` OR `current_seen == 255`:
-     - Write `current_seen` to the output stream.
-     - Reset `current_seen = 1`.
-     - Update `currentvalue = nextvalue`.
-     - Write `currentvalue` to the output stream.
-   - Else:
-     - Increment `current_seen`.
-5. After the loops complete, write the final `current_seen` count to the output stream.
-6. Close the file.
+1. Write the ASCII header: `"scale "` + `m_spacing` + `"data"` [S1, unofficial].
+2. Initialize the run state: Set `currentvalue = char(isInside(0, 0, 0))` and `current_seen = 1` [S1, unofficial]. Write `currentvalue` to the output stream [S1, unofficial].
+3. Iterate through the voxel grid in the order: $x$ from $0$ to $m\_dimX-1$, $z$ from $0$ to $m\_dimY-1$, $y$ from $0$ to $m\_dimZ-1$ [S1, unofficial].
+4. For each voxel $(x, y, z)$: If $x=0, y=0, z=0$, skip (the first voxel was already written in step 2) [S1, unofficial]. Compute `nextvalue = char(isInside(x, y, z))` [S1, unofficial]. If `nextvalue != currentvalue` OR `current_seen == 255`: Write `current_seen` to the output stream [S1, unofficial]. Reset `current_seen = 1` [S1, unofficial]. Update `currentvalue = nextvalue` [S1, unofficial]. Write `currentvalue` to the output stream [S1, unofficial]. Else: Increment `current_seen` [S1, unofficial].
+5. After the loops complete, write the final `current_seen` count to the output stream [S1, unofficial].
+6. Close the file [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def encode_binary_voxel_rle(dim_x, dim_y, dim_z, spacing, is_inside, lb_x, lb_y, lb_z):
+def encode_binary_voxel_rle(dim_x, dim_y, dim_z, spacing, is_inside):
     """
     Encodes a 3D voxel grid into Binary Voxel RLE format.
     
@@ -53,7 +39,6 @@ def encode_binary_voxel_rle(dim_x, dim_y, dim_z, spacing, is_inside, lb_x, lb_y,
         dim_x, dim_y, dim_z: Grid dimensions.
         spacing: Voxel spacing.
         is_inside(x, y, z): Returns 1 if occupied, 0 if empty.
-        lb_x, lb_y, lb_z: Lower bounds of the bounding box for coordinate decoding.
         
     Returns:
         bytes: The encoded binary stream.
@@ -61,18 +46,12 @@ def encode_binary_voxel_rle(dim_x, dim_y, dim_z, spacing, is_inside, lb_x, lb_y,
     output = bytearray()
     
     # Step 1: Write ASCII Header
-    # Format: "scale " <float> "data"
     header = f"scale {spacing} data".encode('ascii')
     output.extend(header)
     
     # Step 2: Initialize first voxel (0,0,0)
-    # Note: The source code initializes with (0,0,0) and writes its value immediately.
-    # It assumes the grid starts at 0,0,0 relative to the bounding box or that 
-    # the encoding covers the full grid defined by dims.
     current_value = 1 if is_inside(0, 0, 0) else 0
     current_seen = 1
-    
-    # Write the first value byte
     output.append(current_value)
     
     # Step 3-4: Iterate through the grid
@@ -89,8 +68,7 @@ def encode_binary_voxel_rle(dim_x, dim_y, dim_z, spacing, is_inside, lb_x, lb_y,
                 # Check for run change or max run length (255 stored -> 256 length)
                 if next_value != current_value or current_seen == 255:
                     # Write the count for the previous run
-                    # Count is stored as length - 1
-                    output.append(current_seen - 1)
+                    output.append(current_seen)
                     
                     # Start new run
                     current_seen = 1
@@ -102,72 +80,9 @@ def encode_binary_voxel_rle(dim_x, dim_y, dim_z, spacing, is_inside, lb_x, lb_y,
                     current_seen += 1
     
     # Step 5: Write final run count
-    output.append(current_seen - 1)
+    output.append(current_seen)
     
     return bytes(output)
-
-def decode_binary_voxel_rle(encoded_data, dim_x, dim_y, dim_z, lb_x, lb_y, lb_z):
-    """
-    Decodes a Binary Voxel RLE stream back to voxel coordinates.
-    Note: This function reconstructs coordinates relative to the bounding box.
-    """
-    # Skip header to find data start
-    # Header format is "scale <float> data"
-    # In practice, one might parse the float to skip, or assume fixed header length if known.
-    # For robustness, we scan for "data" marker.
-    header_end = encoded_data.find(b"data")
-    if header_end == -1:
-        raise ValueError("Invalid RLE format: 'data' marker not found")
-    
-    data_start = header_end + 4 # "data" is 4 bytes
-    stream = encoded_data[data_start:]
-    
-    voxels = []
-    idx = 0
-    n = len(stream)
-    
-    while idx < n:
-        # Read value
-        if idx >= n: break
-        value = stream[idx]
-        idx += 1
-        
-        # Read count (stored as length-1)
-        if idx >= n: break
-        count_byte = stream[idx]
-        idx += 1
-        count = count_byte + 1
-        
-        # Expand run
-        for _ in range(count):
-            # The source implies the linear index in the stream corresponds to 
-            # the iteration order x, z, y.
-            # We need to map linear index to (x, y, z) or just store (x,y,z) directly.
-            # However, the source note [S2, unofficial] says: 
-            # "let (x,y,z) denote the voxel coordinate extracted from the output binary string"
-            # and "coordinate in voxelized space is (x+x_vox_lb, ...)"
-            # This implies the decoder must know the linear index's position in the 
-            # x-z-y iteration space.
-            
-            # Calculate linear index in the iteration space
-            # Total voxels = dim_x * dim_y * dim_z
-            # But we only decode what is in the stream.
-            # We need to track the current linear position.
-            pass 
-            
-    # Note: Full decoding requires tracking the linear index across the x-z-y loops.
-    # The source does not provide explicit decoding pseudocode, only the coordinate transformation formula.
-    # Implementation detail [G]: To decode, maintain a linear counter `lin_idx` initialized to 0.
-    # For each expanded voxel, calculate:
-    #   x = lin_idx % dim_x
-    #   temp = lin_idx // dim_x
-    #   z = temp % dim_y
-    #   y = temp // dim_y
-    #   lin_idx += 1
-    #   world_x = x + lb_x
-    #   world_y = y + lb_y
-    #   world_z = z + lb_z
-    pass
 ```
 
 **Parameters:**
@@ -175,7 +90,7 @@ def decode_binary_voxel_rle(encoded_data, dim_x, dim_y, dim_z, lb_x, lb_y, lb_z)
 - `m_dimX`, `m_dimY`, `m_dimZ`: Grid dimensions in each axis, used as loop bounds [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Maximum Run Length:** The count is stored in a single byte (0-255), representing run lengths 1-256. If a run exceeds 256 voxels, the encoder must force a new run when `current_seen` reaches 255 (stored as 254) to prevent overflow [S1, unofficial].
+- **Maximum Run Length:** The count is stored in a single byte (0-255), representing run lengths 1-256. If a run exceeds 256 voxels, the encoder must force a new run when `current_seen` reaches 255 to prevent overflow [S1, unofficial].
 - **First Voxel Initialization:** The first voxel $(0,0,0)$ is written before the loop to initialize the run state. The loop explicitly skips $(0,0,0)$ to avoid double-writing [S1, unofficial].
 - **Coordinate Reconstruction:** To retrieve the original voxel coordinate $(x, y, z)$ from the compressed output, the decoder must add the lower bound of the minimal bounding box: $(x + x_{vox\_lb}, y + y_{vox\_lb}, z + z_{vox\_lb})$ [S2, unofficial].
 
@@ -188,7 +103,7 @@ A pre-processing optimization for volume rendering where voxel runs are compress
 Exports voxelized geometry data to standard file formats for interchange with other graphics applications. It implements two primary output modes: the `binvox` format, which uses a compact binary run-length encoding for occupancy data, and the `rawvox` format, which provides a simple binary dump of grid dimensions and metadata. Unlike its sibling [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) which focuses on the internal compression algorithm, this method handles the specific file headers, coordinate transformations, and I/O protocols required by external tools.
 
 ### [Voxel Indexing and Bit Compression](1707-voxel-indexing-and-bit-compression.md)
-Voxel Indexing and Bit Compression maps 3D voxel coordinates to a 1D linear index and packs the resulting occupancy data into a compact bit-array, typically stored as an array of 64-bit integers. It solves the problem of efficiently storing sparse or dense binary voxel grids by reducing memory overhead and enabling parallel write operations via atomic bit-setting. It differs from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by storing the raw bit-stream directly rather than compressing runs of identical values, and from [RLE Index Computation](4339-rle-index-computation.md) by focusing on the storage format of the index itself rather than generating a lookup structure for RLE offsets.
+Voxel Indexing and Bit Compression maps 3D voxel coordinates to a 1D linear index and packs the resulting occupancy data into a compact bit-array, typically stored as an array of 64-bit integers. It solves the problem of efficiently storing sparse or dense binary voxel grids by reducing memory overhead and enabling parallel write operations via atomic bit-setting. It differs from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by storing the raw bit-stream directly rather than compressing runs of identical values, and from [RLE Index Computation](4339-rle-index-computation.md) by focusing on the storage format of the index itself rather than generating a lookup structure for RLE offsets [G].
 
 ### [Dense-grid to Voxlap-slab packing](2155-dense-grid-to-voxlap-slab-packing.md)
 Converts a dense 3D voxel mask and color grid into the Voxlap slab-RLE column format, seeding an all-solid VXL and carving air voxels using a column function to preserve buried-voxel-aware encoding. It differs from [Binary Voxel RLE Encoding](1071-binary-voxel-rle-encoding.md) by maintaining explicit column offsets and supporting direct color attachment per column, and from [Run-length encoded voxel runs](1209-run-length-encoded-voxel-runs.md) by using a slab-based internal structure rather than simple run lists.
@@ -198,14 +113,14 @@ A compression algorithm that converts a 3D voxel grid (stored as bit-packed voxe
 
 ## Operating characteristics
 - **Time Complexity:** The encoding process is $O(N)$ where $N$ is the total number of voxels in the grid ($m\_dimX \times m\_dimY \times m\_dimZ$), as each voxel is visited exactly once [S2, unofficial].
-- **Memory Complexity:** The output size is proportional to the number of runs, which is at most $N$ (worst case: alternating 0/1) and at best $N/256$ (best case: single long run). The input grid must be fully resident in memory to query `isInside`.
-- **Strengths:** Simple implementation; significant compression for smooth or solid objects; standard binary format compatible with tools like `binvox`.
-- **Limitations:** Does not handle color or opacity natively (binary only); compression ratio degrades for noisy or highly detailed surfaces; limited to 256 voxel runs per segment.
-- **When to use:** When exporting binary occupancy grids for interchange or storage where file size is a concern and the geometry is relatively smooth.
-- **When not to use:** When color/opacity data is required (use [Run-length encoded voxel runs](1209-run-length-encoded-voxel-runs.md) or [Dense-grid to Voxlap-slab packing](2155-dense-grid-to-voxlap-slab-packing.md)); when the grid is extremely sparse and irregular (use [Voxel Indexing and Bit Compression](1707-voxel-indexing-and-bit-compression.md)).
+- **Memory Complexity:** The output size is proportional to the number of runs, which is at most $N$ (worst case: alternating 0/1) and at best $N/256$ (best case: single long run) [G]. The input grid must be fully resident in memory to query `isInside` [G].
+- **Strengths:** Simple implementation [G]; significant compression for smooth or solid objects [G]; standard binary format compatible with tools like `binvox` [G].
+- **Limitations:** Does not handle color or opacity natively (binary only) [G]; compression ratio degrades for noisy or highly detailed surfaces [G]; limited to 256 voxel runs per segment [S1, unofficial].
+- **When to use:** When exporting binary occupancy grids for interchange or storage where file size is a concern and the geometry is relatively smooth [G].
+- **When not to use:** When color/opacity data is required (use [Run-length encoded voxel runs](1209-run-length-encoded-voxel-runs.md) or [Dense-grid to Voxlap-slab packing](2155-dense-grid-to-voxlap-slab-packing.md)); when the grid is extremely sparse and irregular (use [Voxel Indexing and Bit Compression](1707-voxel-indexing-and-bit-compression.md)) [G].
 
 ## Background
-The method originates from open-source voxelization projects such as `kctess5/voxelizer` and `topskychen/voxelizer`, which implement a simple RLE output format for voxelized mesh data [S1, unofficial][S2, unofficial]. It is often referred to as "binvox-like" because it shares structural similarities with the `binvox` format, although the specific header and encoding details may vary. The approach is commonly used in computer graphics for preparing voxel data for ray marching or other volume rendering techniques.
+The method is implemented in open-source voxelization projects that output a simple RLE format for voxelized mesh data [S1, unofficial][S2, unofficial]. It is often referred to as "binvox-like" because it shares structural similarities with the `binvox` format, although the specific header and encoding details may vary [G]. The approach is commonly used in computer graphics for preparing voxel data for ray marching or other volume rendering techniques [G].
 
 ## Sources
 [S1] kctess5/voxelizer, https://github.com/kctess5/voxelizer, fetched 2026-10-26 (unofficial)

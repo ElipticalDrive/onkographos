@@ -1,113 +1,148 @@
 # Octree Volume Structure
 
-Also called: Cap node octree, Octree Data Format with Caps and Child Arrays, Octree Data Layout, Octree Volume Format, Parent-based node storage, Parent-centric octree storage
+Also called: Cap node octree, Octree Volume Format
 
 ## Overview
-The Octree Volume Structure is a memory-efficient storage scheme for 3D scalar fields that represents an octree by storing nodes corresponding to the parents of logical octree nodes [S1, S2]. It solves the problem of high memory overhead in standard octree representations by eliminating explicit leaf nodes for the deepest level of interior nodes, instead embedding scalar values directly within parent structures [S2, S3]. This approach serves as a lossless compression format for scalar data while simultaneously providing an acceleration structure for ray traversal via a built-in min/max tree [S1][S5, unofficial]. It differs from standard octrees by using "cap" nodes at the maximum depth and "scalar leaves" embedded in interior nodes, rather than distinct leaf node types [S2, S3].
+The Octree Volume Structure is a memory-efficient storage format for sparse voxel octrees that eliminates explicit leaf nodes by storing nodes corresponding to the parents of logical octree nodes [S2, S3][S4, S7, unofficial]. It solves the problem of high memory overhead in traditional pointer-based octrees by embedding scalar values directly within interior nodes (scalar leaves) and using a specialized "cap" structure at the maximum depth [S3][S7, unofficial]. Unlike standard octrees where leaves are distinct structures, this format integrates compression and acceleration data (min/max bounds) into a unified layout suitable for interactive ray tracing [S1, S2].
 
 ## How it works
-### Inputs and Outputs
-**Input:** A 3D rectilinear grid of scalar values [S1, S2].
-**Output:** An `OctreeData` structure containing arrays of `OctNode` pointers, an `OctCap` array, and precomputed hashing data [S1, S2].
+**Inputs and Outputs:**
+*   **Input:** A 3D rectilinear grid of scalar values (voxels).
+*   **Output:** An `OctreeData` structure containing arrays of `OctNode` pointers, an `OctCap` array, and precomputed hashing constants.
 
-### Data Structures
-The structure consists of three main components [S1, S2][S4, unofficial]:
+**Data Structures:**
+The structure consists of three main components [S1, S2, S3][S4, S5, unofficial]:
 
-1. **`OctreeData`**: The root container [S1, S2].
-   - `OctNode* nodes[max_depth]`: An array of pointers to interior nodes, indexed by depth from 0 (root) to `max_depth - 2` [S1, S2].
-   - `OctCap* caps`: A pointer to an array of cap nodes [S1, S2].
-   - `int child_bit_depth[max_depth]`: A precomputed array for hashing, where `child_bit_depth[d] = 1 << (max_depth - d - 1)` [S1, S3].
+1.  **`OctreeData`**: The root container.
+    *   `int max_depth`: The maximum depth of the octree, $d_{max}$.
+    *   `OctNode* nodes[max_depth]`: An array of pointers to `OctNode` arrays. `nodes[d]` points to the array of interior nodes at depth $d$. Valid depths are $0$ to $d_{max}-2$.
+    *   `OctCap* caps`: A pointer to the array of cap nodes at depth $d_{max}-1$.
+    *   `int child_bit_depth[max_depth]`: A precomputed array for hashing (see below).
 
-2. **`OctNode`**: Represents an interior node (parent of logical nodes) [S1, S2].
-   - `T child_scalars[8]`: Stores scalar values for children that are scalar leaves [S1, S2].
-   - `T child_mins[8]` and `T child_maxs[8]`: Stores the minimum and maximum values of the 8 children for pruning [S1][S5, unofficial].
-   - `unsigned int child_start`: A base index (pointer offset) for the children's location in the `caps` or subsequent node arrays [S1, S2].
-   - `char child_offset[8]`: An array of 8 signed bytes. Each entry stores the offset from `child_start` to the child node. If the child is a scalar leaf, the value is `-1` [S2].
+2.  **`OctNode`**: Represents an interior node at depth $d < d_{max}-1$. It stores data for its 8 children.
+    *   `T child_scalars[8]`: Stores scalar values for children that are **scalar leaves**. A child is a scalar leaf if its corresponding offset is -1.
+    *   `T child_mins[8]`: Stores the minimum value of the 8-voxel cell (including forward neighbors) for each child.
+    *   `T child_maxs[8]`: Stores the maximum value of the 8-voxel cell for each child.
+    *   `unsigned int child_start`: A base index (pointer offset) into the `nodes` or `caps` arrays for the children that are *not* scalar leaves.
+    *   `char child_offset[8]`: An array of 8 signed bytes. For child $i$:
+        *   If `child_offset[i] == -1`: The child is a scalar leaf. Its value is in `child_scalars[i]`.
+        *   If `child_offset[i] != -1`: The child is an interior node or cap. Its location is `child_start + child_offset[i]`.
 
-3. **`OctCap`**: Represents nodes at depth `max_depth - 1` [S1, S2].
-   - `T scalars[8]`: Stores the 8 scalar values of the finest-level voxels. Cap nodes always contain scalars and never have children [S1, S3].
+3.  **`OctCap`**: Represents nodes at depth $d_{max}-1$.
+    *   `T scalars[8]`: Stores the 8 scalar values for the finest-level voxels. These are logically leaves but stored in a dedicated structure because they cannot be embedded in a parent (as there is no parent at $d_{max}$).
 
-*Note: `T` is the scalar type of the input data (e.g., `float`, `int16_t`) [G].*
+**Construction Algorithm:**
+The structure is built bottom-up from the input 3D grid [S1, S2, S3][S7, unofficial].
 
-### Build Process
-The structure is built bottom-up from the input 3D grid [S1, S2].
+1.  **Determine Dimensions:**
+    *   Let $N$ be the smallest power of 2 that encompasses the largest dimension of the input volume.
+    *   Set $d_{max} = \log_2(N)$.
 
-1. **Determine Dimensions:** Calculate $N$, the smallest power of 2 that encompasses the largest dimension of the input volume. Set `max_depth` = $\log_2(N)$ [S2].
-2. **Precompute Hashing:** Compute `child_bit_depth` for all depths $d$ from 0 to `max_depth - 1`:
-   $$ \text{child\_bit\_depth}[d] = 1 \ll (\text{max\_depth} - d - 1) $$ [S1, S3].
-3. **Initialize Caps:** Assign groups of 8 voxels from the original structured grid to `OctCap` nodes. These caps correspond to the finest level of the octree (depth `max_depth`) [S2].
-4. **Bottom-Up Consolidation:** Iterate from depth `max_depth - 2` down to 0 [S1, S2].
-   - For each group of 8 children (which may be `OctNode`s or `OctCap`s), check if they are identical [S1, S2].
-   - **Scalar Leaf Consolidation:** If 8 children are identical scalar values (or consolidate into identical values), store that single value in the parent's `child_scalars` array. Mark the corresponding `child_offset` entry as `-1` [S2].
-   - **Pointer Assignment:** If children are not identical, assign pointers. Set `child_start` to the base index of the children in the memory layout. Set `child_offset[i]` to the offset of the $i$-th child from `child_start` [S2].
-   - **Min/Max Computation:** Simultaneously compute the min/max tree [S2]. For each parent, calculate the minimum and maximum of the 8 children's values. Store these in `child_mins` and `child_maxs` [S2]. The min/max values represent the bounds of the 8 children, allowing rejection of subtrees during traversal without accessing them [S1].
-5. **Memory Management:** Remove child nodes from memory once they have been consolidated into their parent. Scalar values are retrieved from the original data only for cap nodes; parent nodes are computed solely from their children's values [S2].
+2.  **Precompute Hashing Constants:**
+    *   Compute `child_bit_depth` array for $d$ from $0$ to $d_{max}-1$:
+        $$ \text{child\_bit\_depth}[d] = 1 \ll (d_{max} - d - 1) $$
+    *   This avoids costly arbitrary bit shifts during traversal [S1, S2, S3][S4, unofficial].
 
-### Point Location Algorithm
-To retrieve a scalar value at a specific 3D coordinate, use the precomputed `child_bit_depth` array to avoid costly arbitrary bit shifts [S4, unofficial].
+3.  **Initialize Caps:**
+    *   Assign groups of 8 voxels from the input grid to `OctCap` nodes at depth $d_{max}-1$.
+    *   Retrieve scalar values from the original data for these caps [S2][S7, unofficial].
+
+4.  **Bottom-Up Consolidation:**
+    *   Iterate from depth $d = d_{max}-2$ down to $0$.
+    *   For each group of 8 children (which are either `OctCap` nodes or `OctNode` arrays from depth $d+1$):
+        *   **Check for Scalar Leaf:** If all 8 children have identical scalar values, consolidate them into a single **scalar leaf**.
+            *   Set `child_offset[i] = -1` for all $i$.
+            *   Set `child_scalars[i]` to the common value.
+            *   Set `child_mins[i]` and `child_maxs[i]` to this value.
+            *   Do not create a child node; remove the child node reference [S2][S7, unofficial].
+        *   **Create Interior Node:** If children are not identical:
+            *   Create a new `OctNode`.
+            *   For each child $i$:
+                *   If child $i$ is a scalar leaf (from a deeper level consolidation), set `child_offset[i] = -1` and `child_scalars[i]` to the leaf value.
+                *   Otherwise, compute the offset relative to `child_start` and store in `child_offset[i]`.
+            *   Compute `child_mins[i]` and `child_maxs[i]` for each child.
+                *   *Note:* The min/max is computed over the 8 voxels of the child's cell **plus** their forward neighbors (a 3x3x3 block of cells, or 27 voxels total) to support neighbor finding during ray traversal [S2][S7, unofficial].
+            *   Store the pointer to the new node in the parent's `child_start` and `child_offset` arrays [S2][S7, unofficial].
+
+5.  **Finalize:**
+    *   Repeat until the root node (depth 0) is complete [S2][S7, unofficial].
+
+**Point Location (Lookup):**
+To retrieve a scalar value at coordinate $(x, y, z)$ at a specific depth:
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def point_locate(dest: Tuple[int, int, int], depth: int, index: int, data: OctreeData) -> T:
+def point_locate(octdata, dest_x, dest_y, dest_z, depth, index):
     """
-    Retrieve scalar value at coordinate 'dest' starting from node at 'depth' and 'index'.
+    Retrieves the scalar value for the voxel at (dest_x, dest_y, dest_z)
+    starting from node at (depth, index).
     """
     while True:
-        node = data.nodes[depth][index]
-        child_bit = data.child_bit_depth[depth]
+        node = octdata.nodes[depth][index]
+        child_bit = octdata.child_bit_depth[depth]
         
-        # Determine child index (0-7) based on coordinate bits
-        child = (((dest[0] & child_bit) != 0) << 2) | \
-                (((dest[1] & child_bit) != 0) << 1) | \
-                ((dest[2] & child_bit) != 0)
+        # Determine child index (0-7) based on coordinates
+        # Using precomputed bit depth to avoid arbitrary shifts
+        child_x = (dest_x & child_bit) != 0
+        child_y = (dest_y & child_bit) != 0
+        child_z = (dest_z & child_bit) != 0
+        child_idx = (child_x << 2) | (child_y << 1) | child_z
         
-        offset = node.child_offset[child]
+        offset = node.child_offset[child_idx]
         
         if offset == -1:
-            # Child is a scalar leaf embedded in the parent
-            return node.child_scalars[child]
+            # Scalar leaf
+            return node.child_scalars[child_idx]
         
-        if depth == data.max_depth - 2:
-            # Reached the level above caps; child is in the caps array
+        if depth == octdata.max_depth - 2:
+            # Reached cap level
             cap_index = node.child_start + offset
-            # Final child index within the cap (LSB of coordinates)
-            final_child = ((dest[0] & 1) << 2) | \
-                          ((dest[1] & 1) << 1) | \
-                          (dest[2] & 1)
-            return data.caps[cap_index].scalars[final_child]
+            # Final bit to select voxel within cap
+            final_x = (dest_x & 1) != 0
+            final_y = (dest_y & 1) != 0
+            final_z = (dest_z & 1) != 0
+            final_child = (final_x << 2) | (final_y << 1) | final_z
+            return octdata.caps[cap_index].scalars[final_child]
         
-        # Move to next depth
+        # Move to next level
         index = node.child_start + offset
         depth += 1
 ```
 
-### Parameters
-*   **`max_depth`**: Determined by the input volume dimensions. Must be a power of 2 [S1, S2].
-*   **`child_bit_depth`**: Cached array to optimize point location and neighbor finding [S3].
+**Parameters:**
+*   $N$: Smallest power of 2 covering the volume dimension.
+*   $d_{max}$: $\log_2(N)$.
+*   $T$: Scalar type (e.g., `float`, `int`).
 
-### Edge Cases and Pitfalls
-*   **Performance of Bit Arithmetic:** Early implementations used binary arithmetic masks and bit-counting to determine leaves, but left-shifting by a non-constant hampered performance. The final implementation uses explicit offset arrays (`child_offset`) to avoid this [S3].
-*   **Scalar Leaf Ambiguity:** Scalar leaves are not separate structures but single values embedded in the parent. A null pointer (represented by `-1` in `child_offset`) indicates a leaf [S3].
-*   **Min/Max Bounds:** The min/max values stored in interior nodes are derived from the 8 children. This allows for efficient rejection during ray traversal [S3].
+**Edge Cases and Pitfalls:**
+*   **Performance of Bit Masks:** Early implementations used binary arithmetic masks and bit-counting to determine leaves, but left-shifting by non-constant values hampered performance. The array-based offset approach (`child_offset`) is required for speed [S1, S3][S4, S7, unofficial].
+*   **Min/Max Computation:** The min/max values must include forward neighbors (27 voxels) to correctly support neighbor-finding algorithms during ray traversal, not just the 8 voxels of the immediate child cell [S2][S7, unofficial].
+*   **Scalar Leaf Ambiguity:** Scalar leaves are not separate structures but are embedded in the parent. A null pointer is represented by the offset value `-1` [S2, S3][S4, unofficial].
 
 ## Subtopics
 
 ### [Octree Volume Ray Tracing](1990-octree-volume-ray-tracing.md)
-A technique for interactive isosurface rendering of large compressed structured volumes by using a single octree structure that serves simultaneously as a lossless compression format for scalar data and an acceleration structure for ray traversal.
+Octree Volume Ray Tracing is a technique for interactive isosurface rendering of large compressed structured volumes by using a single octree structure that serves simultaneously as a lossless compression format for scalar data and an acceleration structure for ray traversal. It solves the problem of rendering multi-gigabyte volumes on commodity hardware by avoiding the memory overhead of separate acceleration structures (which can exceed 3x the data size) and the topological inaccuracies of mesh extraction methods. Unlike siblings such as [Compact Octree Memory Layout](2828-compact-octree-memory-layout.md) which focus on storage efficiency, this method integrates traversal and compression into a unified rendering pipeline.
+
+### [Compact Octree Memory Layout](2828-compact-octree-memory-layout.md)
+Compact Octree Memory Layout is a memory-efficient storage format for voxel octrees that packs node validity and leaf status into compact bitmasks while using relative pointers to minimize address space usage. It solves the problem of high memory overhead in traditional pointer-based octrees by embedding structural metadata directly within node structures and deferring large address offsets to separate indirection entries. Unlike sibling methods that may use explicit parent pointers or full-resolution grids, this layout optimizes for cache locality and reduced pointer size, making it suitable for large-scale volume rendering where memory bandwidth is a constraint.
 
 ## Operating characteristics
-*   **Memory Efficiency:** By storing nodes as parents and embedding scalar leaves, the structure avoids explicit leaf nodes for the deepest level. Cap nodes store only 8 scalars. This reduces memory overhead compared to standard octrees where every leaf is a distinct node [S2, S3].
-*   **Min/Max Tree Overhead:** The min/max tree adds approximately 22% footprint on top of the raw octree voxel data, providing a serviceable acceleration structure for ray tracing [S5, unofficial].
-*   **Traversal Speed:** The use of precomputed `child_bit_depth` and explicit offset arrays allows for fast point location and neighbor finding without costly bit manipulation [S3].
-*   **Limitations:** The structure is optimized for structured grids. Coherent traversal optimization is noted as future work [S1].
+*   **Time Complexity:** Construction is $O(N^3)$ where $N$ is the volume dimension, as it processes each voxel once. Point location is $O(d_{max}) = O(\log N)$ per lookup.
+*   **Memory Complexity:** Significantly lower than standard octrees because it avoids storing explicit leaf nodes and uses compact offsets. The min/max tree adds approximately 22% overhead on top of the raw octree voxel data [S6].
+*   **Performance:** Optimized for ray tracing on commodity hardware. The unified structure reduces cache misses by allowing rejection of children without traversal using the min/max bounds [S2][S7, unofficial].
+*   **Strengths:** Low memory footprint, fast point location, integrated acceleration structure.
+*   **Limitations:** Requires power-of-2 volume dimensions (padding may be needed). Neighbor finding requires careful handling of the 27-voxel min/max computation [S2][S7, unofficial].
 
 ## Background
-The Octree Volume Structure was introduced in the context of interactive isosurface ray tracing of large volumes [S1]. It was developed to address the memory and performance limitations of uncompressed structured data and standard octree representations [S1, S2]. The specific optimization of using parent-based storage with cap nodes and embedded scalar leaves was detailed in the paper "Interactive Isosurface Ray Tracing of Large Octree Volumes" [S1, S2].
+The Octree Volume Structure was introduced by Knoll et al. in 2006 for interactive isosurface ray tracing of large volumes [S1, S2, S3][S4, S5, S7, unofficial]. It builds on earlier work in octree-based volume rendering and spatial data structures [S2, S3]. The method addresses the limitations of uncompressed structured data and separate acceleration structures, providing a compact, cache-friendly format for real-time visualization [S1, S2].
 
 ## Sources
-[S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
-[S2] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://collections.lib.utah.edu/dl_files/1d/58/1d589a03a725c9d894a3866ad32f1386f0613f9d.pdf, fetched 2026-10-28
-[S3] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29
-[S4] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
-[S5] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://pdfs.semanticscholar.org/aef9/6e0dd17920d0c70cbf0dd43f494cab1c0bcc.pdf, fetched 2026-10-28 (unofficial)
+[S1] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~wald/Publications/2006/OctIso/octiso.pdf, fetched 2026-10-27
+[S2] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.sci.utah.edu/~knolla/octiso-rt06.pdf, fetched 2026-10-28
+[S3] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://collections.lib.utah.edu/dl_files/1d/58/1d589a03a725c9d894a3866ad32f1386f0613f9d.pdf, fetched 2026-10-28
+[S4] Interactive isosurface ray tracing of large octree volumes, https://www.researchgate.net/publication/310054812_Interactive_isosurface_ray_tracing_of_large_octree_volumes, fetched 2026-10-29 (unofficial)
+[S5] Interactive Isosurface Ray Tracing of Large Octree Volumes, https://www.researchgate.net/publication/261082346_Interactive_Isosurface_Ray_Tracing_of_Large_Octree_Volumes, fetched 2026-10-29 (unofficial)
+[S6] PDF Interactive Isosurface Ray Tracing of Large Octree Volumes, https://pdfs.semanticscholar.org/aef9/6e0dd17920d0c70cbf0dd43f494cab1c0bcc.pdf, fetched 2026-10-28
+[S7] RAY TRACING IMPLICIT SURFACES FOR INTERACTIVE ..., https://www.sci.utah.edu/~knolla/thesis.pdf, fetched 2026-10-29 (unofficial)

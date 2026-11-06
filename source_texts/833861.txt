@@ -1,0 +1,316 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - feat(gsplat): unify `lod` into one `--recipe` command (+ partitioned & multiscale topologies) by royerloic · Pull Request #377 · royerlab/luxar
+
+feat(gsplat): unify `lod` into one `--recipe` command (+ partitioned & multiscale topologies) by royerloic · Pull Request #377 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Jun 13, 2026
+Copy link
+Copy Markdown
+Member
+What & why
+Luxar scenes are composed in Python by design — the CLI's job is the other
+half: turning a fitted splat set into the right renderable representation tree.
+A scene-authoring review found the CLI couldn't build the two most useful
+large-data gsplat topologies at all, and exposed LOD as three disconnected
+subcommands. This unifies them and adds the missing topologies.
+luxar gsplat lod is now one command driven by a required --recipe flag:
+recipe
+tree
+scale
+flat
+single leaf
+small
+additive
+one leaf + additive (prefix-sum) ladder
+medium
+partitioned
+BSP kind=partition, each part with its own additive ladder
+large
+multiscale
+unbalanced kind=lod: coarse substitutive cap + a partitioned fine branch
+huge
+substitutive / pyramid
+the absorbed primitives
+—
+partitioned and multiscale were previously unbuildable from the CLI (the
+old partition collapsed each part to a single level). multiscale is
+unbalanced by design: a cheap coarse cap for the far view, deep partition→LOD
+only on the fine branch — detail structure exists only where you look closely.
+Design (avoids the god-file)
+Pure builders in new gsplats/lod/recipes.py (GSplatData → GSplatNode): only
+composes existing make_additive_lod / make_substitutive_lod /
+make_lod_pyramid / to_spatial_partition — no new algorithms.
+Thin CLI wrapper in new cli/lod.py (registered onto app_gsplat); removes
+the ~700-line app_lod block from the 5.4k-line gsplat_commands.py (net -718).
+stats→fitting_info extraction factored into save_gsplats.split_fitting_info,
+shared by GSplatData.save and the composed-recipe write path (DRY).
+Matrix recipes return GSplatData written via .save (byte-identical to the
+absorbed subcommands); composed recipes write the node tree via write_gsplats_tree.
+The .gsplats.zarr format and the Python builders are unchanged. Output stays a
+standalone v3.0 .gsplats.zarr to graft into a scene via add_gsplats_from_file /
+gsplat convert.
+Behavior notes
+--recipe is required (clear error listing the choices).
+Options irrelevant to the chosen recipe are rejected (e.g. --max-elements
+with --recipe additive), not silently ignored.
+Auto recipe-selection by N is intentionally deferred (out of scope for v1).
+Tests & gates
+New gsplats/lod/tests/test_recipes.py — tree shape per recipe, splat-count
+conservation, ladder-clamping on tiny parts, and an absorption regression
+proving additive/substitutive/pyramid match the old builders.
+Rewrote TestLODCommand — required-recipe, option-relevance, round-trip per
+recipe, and the partitioned/multiscale on-disk trees.
+Full suite: 3846 passed, 0 failed. ruff clean; mypy clean (242 files).
+Propagation
+Updated gsplat_commands.py, CLI tests, CLAUDE.md, cli/gsplats/gsplats/lod
+READMEs, docs/api/gsplats.rst, docs/tutorials/gaussian_splatting.rst,
+CHANGELOG.md, TODO.md, and scripts/add_additive_lod_to_demos.py. Also fixed
+the stale gsplat convert help text (.zarr → .luxar.zarr).
+Not gated (per plan)
+The viewer rendering the multiscale lod→partition nesting is exercised by a
+manual smoke (convert → serve); the serializer half is covered by round-trip
+unit tests.
+🤖 Generated with Claude Code
+royerloic
+and others
+added 6 commits
+June 13, 2026 09:23
+feat(gsplat): unify lod into one --recipe command with partitione…
+…
+9493319
+```
+…d + multiscale topologies
+
+Replace the three `gsplat lod additive|substitutive|pyramid` subcommands with a
+single `luxar gsplat lod --recipe {flat,additive,partitioned,multiscale,
+substitutive,pyramid}` command. `--recipe` is required; options irrelevant to
+the chosen recipe are rejected with a clear error.
+
+Two large-data topologies that were previously unbuildable from the CLI:
+- partitioned: a spatial BSP `kind=partition` where each part carries its own
+  additive ladder (the old `partition` collapsed parts to a single level).
+- multiscale: an unbalanced-by-design `kind=lod` — a single coarse substitutive
+  cap for the far view above a `partitioned` fine branch, so detail structure
+  exists only where you look closely.
+
+Organization (avoids the 5.4k-line `gsplat_commands.py` god file):
+- Pure builders in new `gsplats/lod/recipes.py` (GSplatData -> GSplatNode; only
+  composes the existing make_*_lod / to_spatial_partition; no new algorithms).
+- Thin CLI wrapper in new `cli/lod.py` (registered onto app_gsplat); removes the
+  ~700-line `app_lod` block from `gsplat_commands.py`.
+- Extract the stats->fitting_info split into `save_gsplats.split_fitting_info`,
+  shared by `GSplatData.save` and the composed-recipe write path (DRY).
+
+Matrix recipes (flat/additive/substitutive/pyramid) return GSplatData written via
+`.save` — byte-identical to the absorbed subcommands; composed recipes write the
+node tree via `write_gsplats_tree`. The `.gsplats.zarr` format and the Python
+builders are unchanged.
+
+Tests: pure recipe-shape + conservation + absorption-regression tests
+(`gsplats/lod/tests/test_recipes.py`) and rewritten CLI tests
+(`TestLODCommand`) covering required-recipe, option-relevance, round-trip, and
+the partitioned/multiscale on-disk trees. Docs propagated (CLAUDE.md, READMEs,
+rst, CHANGELOG, TODO); `gsplat convert` help fixed to `.luxar.zarr`.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+test/docs(gsplat-lod): strengthen absorption test + fix stale lod-gro…
+…
+d3a94fd
+```
+…up doc refs
+
+Deep-double-check follow-ups (all doc/test; no production-logic change):
+- Strengthen the additive absorption regression to compare ORDERED sub-LOD
+  centers, not just per-level counts: with equal-count breakpoints the counts
+  are method-independent, so a counts-only check could not catch a dropped
+  `method`/`seed` forwarding. Mutation-verified (fails when build_additive
+  hardcodes the method). Adds a guard asserting the comparison is method-sensitive.
+- cli/README.md: drop the stale "lod group: additive/substitutive/pyramid"
+  description; document the new cli/lod.py `lod --recipe` command instead.
+- CHANGELOG: note that the niche `lod additive --substitutive-level` CLI flag is
+  dropped (the capability remains in the Python make_additive_lod API).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+fix(gsplat-lod): clean errors for 2D/partition, bad --ordering, --max…
+…
+879247e
+```
+…-elements; substitutive flag hint
+
+Deep-double-check pass 2 (multi-agent fan-out) surfaced 3 confirmed error-handling
+UX inconsistencies in the new `lod --recipe` command — all minor, no correctness
+defects. The command validates most bad input cleanly (typer.BadParameter) but a
+few cases slipped through to a raw traceback / silent semantic change:
+
+- `--recipe partitioned|multiscale` on a 2D (ndim<3) input dumped a traceback
+  (BSP needs >=3 dims). Now an early typer.BadParameter, matching the command's
+  validation style. (Matrix recipes still work on 2D.)
+- bad `--ordering` and `--max-elements 0`/negative reached a deep traceback;
+  now `--ordering` is validated up front and `--max-elements` carries min=1
+  (mirroring `--parts`).
+- `--recipe substitutive -m <algo>` (the old `lod substitutive -m`) now errors
+  (`-m`/`--method` is the additive method under recipes); the relevance error
+  now points substitutive users to `--substitutive-method`, and the CHANGELOG
+  documents the flag move.
+
+Regression tests added (all fail on the pre-fix code, verified via baseline swap):
+2D partition/multiscale clean-error, 2D matrix recipe still works, invalid
+ordering clean-error, substitutive -m hint.
+
+Refuted by adversarial verification (not changed): the pyramid `--additive-method`
+-> `--method` move is consistent and fine. Confirmed-correct (non-bugs): splat
+conservation across median/midpoint/sah, the full option-relevance matrix,
+old-subcommand default/structure parity, doc runnability, and the CLI->scene
+graft (info/convert/add_gsplats_from_file) for both new topologies.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+fix(gsplat-lod): correct persisted fitting/n_splats; clean errors for…
+…
+238abff
+```
+… out-of-range breakpoints
+
+Deep-double-check pass 3 (multi-agent fan-out, fresh angles) surfaced 2 confirmed
+minor issues; the fan-out also positively confirmed compress round-trip for
+composed recipes, determinism, encoding-mode coverage, 40k-scale tree integrity,
+and idempotency are all clean.
+
+- `fitting/n_splats` was inherited verbatim from the source-fit stats, so for
+  count-growing recipes (multiscale synthesises a coarse cap; substitutive
+  synthesises representative levels) the persisted value was STALE and
+  contradicted the file's own leaf arrays (e.g. fitting/n_splats=6000 while the
+  leaves total 7495). Corrected at the single write chokepoint:
+  write_gsplats_tree now overwrites fitting_info['n_splats'] with the true leaf
+  total (total_splats(node)) — fixing both the new composed path and the
+  pre-existing substitutive `.save` path uniformly. (n_splats means "count in
+  this artifact" per fitting/results.py.)
+- Out-of-range `--breakpoints` (`energy:1.5`, `counts:999999`) dumped a raw
+  traceback. Now: energy fractions are range-checked to (0,1] and counts to
+  positive at parse time (clean BadParameter, no N needed), and the N-dependent
+  case (counts > N) is caught around build_recipe and re-raised as BadParameter
+  — matching the command's clean-error style.
+
+Regression tests added (all fail on pre-fix code, verified via baseline swap):
+fitting/n_splats == true leaf total after a count-growing recipe; out-of-range
+breakpoints error cleanly without a traceback.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+fix(security): reject symlink/hardlink members in tar.gz gsplats load…
+…
+feef4ea
+```
+…er (path escape)
+
+Deep-double-check pass 4 (+creative) found a pre-existing tar.gz symlink-escape in
+the compressed-archive loader: the tar.gz branch validated only `member.name`
+(which resolves inside the temp dir) but never `member.linkname`/link type, then
+`extractall` faithfully recreated a symlink — so a crafted archive (symlink `d` ->
+/outside + file `d/x`) wrote arbitrary files outside the extraction dir. Reachable
+from any command that loads a compressed input (`gsplat lod/convert/info/cull/...`),
+including the new `gsplat lod --recipe`. (zip path is already safe — zipfile does
+not recreate symlinks.)
+
+Fix: a legitimate `.gsplats.zarr` archive contains only regular files and
+directories, so reject any sym/hard-link member in the validation pre-loop —
+before `extractall`, so a malicious archive cannot write a single byte. Keeps the
+existing name-escape check; raises the same ValueError style.
+
+Pre-existing (load_gsplats.py is unchanged at the branch base; folded into this PR
+per request rather than a separate security PR). Regression test
+`TestCompressedLoadSecurity::test_targz_symlink_escape_rejected` fails on the
+pre-fix loader (writes outside the temp dir) and passes after (baseline-verified).
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+test(gsplat-lod): strengthen recipe smoke + add nD (2D/4D) boundary c…
+…
+fc93ac5
+```
+…overage
+
+test-audit adherence (the work was checked against the 12 principles):
+- [P2] test_all_recipe_names_build asserted only `is not None` (kills no mutants);
+  now asserts each build carries the full splat set (matrix: count == N;
+  composed: leaf total >= N).
+- [P5] all recipe-builder tests used ndim=3; add `ndim in {2,4}` boundary
+  coverage: matrix recipes are dimension-agnostic + conserve count; partitioned/
+  multiscale build and conserve at 4D.
+
+(P12 Hypothesis property tests intentionally skipped — no new dependency, per user.)
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+royerloic
+mentioned this pull request
+Jun 14, 2026
+refactor(cli): break up the 4.7k-line gsplat_commands.py god-file into gsplat_ops/
+#378
+Merged
+test(gsplat-lod): strip ANSI in CLI _io helper — fix color-only CI fa…
+…
+5a747bd
+```
+…ilure
+
+CI (python-tests 3.10/3.11/3.12) failed on test_substitutive_method_short_flag_hint
+while local passed: under FORCE_COLOR (CI's environment) Rich renders the error
+panel with per-segment SGR codes, splitting `--substitutive-method` across ANSI
+sequences, so the contiguous-substring assertion missed it. Local CliRunner emits
+no color (no TTY), so the brittleness was invisible — a textbook local≠CI gap.
+
+Fix: strip CSI escape sequences in TestLODCommand._io so every message-substring
+assertion is colour-agnostic (hardens the 2D / ordering / substitutive-method
+tests alike). Reproduced locally with FORCE_COLOR=1 (fails pre-fix, passes after);
+verified green both with and without forced colour. Behaviour/production code
+unchanged — test-only fix.
+
+Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
+```
+Hide details
+View details
+royerloic
+merged commit 3dc9735
+into
+main
+Jun 14, 2026
+6 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+royerloic
+deleted the
+feat/gsplat-lod-recipes
+branch
+June 30, 2026 04:25
+royerloic
+mentioned this pull request
+Aug 14, 2026
+Build(deps): bump Swatinem/rust-cache from e18b497796c12c097a38f9edb9d0641fb99eee32 to 258712b0b7b1ddf8bddc9fc3b0faca682b2736c3
+#1594
+Merged
+royerloic
+mentioned this pull request
+Aug 21, 2026
+Build(deps): Bump Swatinem/rust-cache from 258712b0b7b1ddf8bddc9fc3b0faca682b2736c3 to f0d9c3887740aee45f6153b24b3a6b815192ec16
+#1823
+Merged
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

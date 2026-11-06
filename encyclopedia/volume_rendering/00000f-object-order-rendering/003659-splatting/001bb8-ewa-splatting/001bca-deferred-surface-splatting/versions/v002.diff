@@ -1,0 +1,107 @@
+--- v001.md
++++ v002.md
+@@ -8,14 +8,14 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** Unstructured point cloud (positions, colors, optional normals), camera parameters (view-projection matrix, FOV, viewport size), rendering parameters (point radius, epsilon multiplier, shading mode).
+-*   **Output:** Final shaded image in the default framebuffer.
++*   **Input:** Unstructured point cloud (positions, colors, optional normals), camera parameters (view-projection matrix, FOV, viewport size), rendering parameters (point radius, epsilon multiplier, shading mode) [S2, unofficial].
++*   **Output:** Final shaded image in the default framebuffer [S2, unofficial].
+ 
+ **Data Structures:**
+-The method uses a multi-pass pipeline writing to a G-Buffer (off-screen framebuffer) and a final resolve pass.
++The method uses a multi-pass pipeline writing to a G-Buffer (off-screen framebuffer) and a final resolve pass [S2, unofficial].
+ 
+ 1.  **G-Buffer Framebuffer Attachments:**
+-    *   **Depth Attachment:** `GL_DEPTH_ATTACHMENT` using `GL_DEPTH_COMPONENT32F` texture. Stores front-surface depth.
++    *   **Depth Attachment:** `GL_DEPTH_ATTACHMENT` using `GL_DEPTH_COMPONENT32F` texture. Stores front-surface depth [S2, unofficial].
+     *   **Normal Attachment:** `GL_COLOR_ATTACHMENT0` using `GL_RGBA32F` texture. Stores view-space normals. The Alpha channel is allocated but unused [S2, unofficial].
+-    *   **Color/Weight Attachment:** `GL_COLOR_ATTACHMENT1` using `GL_RGBA32F` texture. Stores `(colorR, colorG, colorB, weight)`.
++    *   **Color/Weight Attachment:** `GL_COLOR_ATTACHMENT1` using `GL_RGBA32F` texture. Stores `(colorR, colorG, colorB, weight)` [S2, unofficial].
+     *   **Draw Buffers:** `{GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1}` [S2, unofficial].
+ 
+@@ -26,5 +26,5 @@
+ 
+ **Parameters:**
+-*   `particle_radius`: The size of the splat.
++*   `particle_radius`: The size of the splat [S2, unofficial].
+ *   `epsilon`: A float parameter calculated as `_renderingParams->_epsilonMultiplier * _renderingParams->_pointSize`. It defines the depth slab thickness [S2, unofficial].
+ *   `SMOOTH`: Boolean flag (1 if smooth shading, 0 if flat) [S1, unofficial].
+@@ -41,6 +41,6 @@
+ 2.  **Depth Pass (Visibility):**
+     *   Bind G-Buffer.
+-    *   Set color mask to false for RGB (only write depth).
+-    *   Draw scene using `_shader_depth` (vertex: `splat.vert`, fragment: `splat_depth.frag`).
++    *   Set color mask to false for RGB (only write depth) [S2, unofficial].
++    *   Draw scene using `_shader_depth` (vertex: `splat.vert`, fragment: `splat_depth.frag`) [S2, unofficial].
+     *   Uniforms: `view_proj_matrix`, `fov_y`, `viewport_size`, `epsilon`, `particle_radius`, `z_near`, `z_far` [S2, unofficial].
+     *   *Fragment Shader Logic:* For each point, generate a sphere impostor. Fragments outside the unit disk are discarded. The analytic front-surface depth is calculated:
+@@ -51,13 +51,13 @@
+     *   Bind G-Buffer.
+     *   Bind `_gDepthTex` to `GL_TEXTURE0`.
+-    *   Set color mask to true for all channels.
+-    *   Disable depth mask (do not write depth).
++    *   Set color mask to true for all channels [S2, unofficial].
++    *   Disable depth mask (do not write depth) [S2, unofficial].
+     *   Disable depth test.
+     *   Enable blending with `GL_ONE, GL_ONE` (pure additive) [S2, unofficial].
+-    *   Draw scene using `_shader_attr` (vertex: `splat.vert`, fragment: `splat_attributes.frag`).
++    *   Draw scene using `_shader_attr` (vertex: `splat.vert`, fragment: `splat_attributes.frag`) [S2, unofficial].
+     *   Uniforms: `view_proj_matrix`, `fov_y`, `viewport_size`, `epsilon`, `particle_radius`, `z_near`, `z_far` [S2, unofficial].
+     *   *Fragment Shader Logic:*
+-        *   Compare the fragment's sphere depth against the depth texture from Pass 1.
+-        *   Discard fragments that fall behind the $\varepsilon$ slab (i.e., depth > `depth_tex_value + epsilon`).
++        *   Compare the fragment's sphere depth against the depth texture from Pass 1 [S2, unofficial].
++        *   Discard fragments that fall behind the $\varepsilon$ slab (i.e., depth > `depth_tex_value + epsilon`) [S2, unofficial].
+         *   Calculate weights for surviving fragments:
+             $$w_{radial} = 1 - \frac{d}{r}$$
+@@ -79,5 +79,5 @@
+         *   Initialize result accumulator `res` to `vec4(0.0)` [S1, unofficial].
+         *   If `MULTISAMPLING` is defined:
+-            *   Convert texture UVs to integer coordinates `itexture_uv` using `textureSize` and `In.texture_uv`.
++            *   Convert texture UVs to integer coordinates `itexture_uv` using `textureSize` and `In.texture_uv` [S1, unofficial].
+             *   Loop `i` from 0 to 3.
+         *   Inside loop (or directly if not multisampling):
+@@ -96,4 +96,42 @@
+         *   After loop/processing:
+             *   If `MULTISAMPLING`, output `frag_color` as `sqrt(res / 4.0)`; otherwise `sqrt(res)` [S1, unofficial].
++
++**Pseudocode (Finalization Pass):**
++```python
++def finalization_pass(color_texture, normal_texture, depth_texture, projection_matrix_inv, viewport, smooth, multisampling):
++    res = vec4(0.0)
++    if multisampling:
++        itexture_uv = textureSize(color_texture, 0) * In.texture_uv
++        for i in range(4):
++            pixel = texelFetch(color_texture, itexture_uv + vec2(i), 0)
++            if smooth:
++                normal = normalize(texelFetch(normal_texture, itexture_uv + vec2(i), 0))
++                depth = texelFetch(depth_texture, itexture_uv + vec2(i), 0)
++            if pixel.a > 0.0:
++                p_ndc = vec4(viewport.xy + pixel.xy * viewport.zw, depth.r, 1.0)
++                v_eye = (projection_matrix_inv * p_ndc).xyz / p_ndc.w
++                if smooth:
++                    res += vec4(lighting(normal, v_eye, pixel.rgb / pixel.a, material_shininess), 1.0)
++                else:
++                    res += vec4(pixel.rgb / pixel.a, 1.0)
++            else:
++                res += vec4(1.0)
++        frag_color = sqrt(res / 4.0)
++    else:
++        pixel = texture(color_texture, In.texture_uv)
++        if smooth:
++            normal = normalize(texture(normal_texture, In.texture_uv))
++            depth = texture(depth_texture, In.texture_uv)
++        if pixel.a > 0.0:
++            p_ndc = vec4(viewport.xy + pixel.xy * viewport.zw, depth.r, 1.0)
++            v_eye = (projection_matrix_inv * p_ndc).xyz / p_ndc.w
++            if smooth:
++                res += vec4(lighting(normal, v_eye, pixel.rgb / pixel.a, material_shininess), 1.0)
++            else:
++                res += vec4(pixel.rgb / pixel.a, 1.0)
++        else:
++            res += vec4(1.0)
++        frag_color = sqrt(res)
++```
+ 
+ **Edge Cases and Pitfalls:**

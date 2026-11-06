@@ -1,0 +1,123 @@
+# GPU Octree Volume Rasterization with Shadow Mapping
+
+Also called: asvo renderer, voxel-based octree traversal
+
+## Overview
+This method implements high-performance GPU volume rendering by decoupling the branch-intensive octree traversal from the raycasting loop, using a rasterization pass to identify active voxels and a shadow mapping pass for lighting [S1, unofficial][S2, abstract only, unofficial]. It solves the performance bottleneck of traditional raycasting on sparse data by moving empty-space culling into a graphics pipeline stage, achieving 2 to 4 times faster rendering speeds than state-of-the-art algorithms on large out-of-core datasets [S2, abstract only, unofficial]. Unlike sibling methods that rely on pure ray-tracing traversal or fixed-step DDA, this approach uses view-dependent proxy geometry rasterization to generate a per-pixel list of penetrated bricks, ensuring front-to-back processing and tighter ray segments [S2, abstract only, unofficial].
+
+## How it works
+The method operates in two main phases: a traversal/rasterization phase to identify active volume regions, and a rendering phase that may include a shadow map pass.
+
+### Inputs and Outputs
+*   **Inputs:**
+    *   Octree structure composed of bricks, where each brick is split into regular macrocells [S2, abstract only, unofficial].
+    *   Frame dimensions: `m_frameWidth`, `m_frameHeight` [S1, unofficial].
+    *   Camera and light parameters [S1, unofficial].
+    *   Job queue for parallel traversal [S1, unofficial].
+*   **Outputs:**
+    *   Final color buffer (via PBO/Texture) [S1, unofficial].
+    *   Shadow map (if shadow pass is enabled) [S1, unofficial].
+
+### Data Structures
+*   **Traversal Queue:** A device pointer `dTravQueuePtr` used to manage parallel traversal jobs. It is initialized to `hEndIndex` before traversal begins [S1, unofficial].
+*   **Depth Buffer Texture:** Configured with `cudaTextureDesc`:
+    *   `addressMode[0] = cudaAddressModeClamp`
+    *   `filterMode = cudaFilterModePoint`
+    *   `normalizedCoords = false`
+    *   `readMode = cudaReadModeElementType` [S1, unofficial].
+*   **Shadow Map:** Stores minimum depth values. Initialized with `minDepth = INT_MAX` [S1, unofficial].
+
+### Algorithm Steps
+1.  **Initialization:**
+    *   Set `hStartIndex = 0` and `hEndIndex = obj.data()->jobs().size()` [S1, unofficial].
+    *   Initialize `dTravQueuePtr[0] = hEndIndex` [S1, unofficial].
+    *   Set `octreeLevel = 0` [S1, unofficial].
+
+2.  **Traversal Loop:**
+    *   While `hEndIndex - hStartIndex > 0`:
+        1.  Launch the `traverse` kernel with job range `[hStartIndex, hEndIndex)` and current `octreeLevel` [S1, unofficial].
+        2.  Update `hStartIndex = hEndIndex` [S1, unofficial].
+        3.  Update `hEndIndex = dTravQueuePtr[0]` [S1, unofficial].
+        4.  Increment `octreeLevel` [S1, unofficial].
+    *   *Pitfall:* If `dTravQueuePtr[0]` is not updated correctly by the kernel, the loop may infinite loop or terminate prematurely [S1, unofficial].
+
+3.  **Rendering Pass:**
+    *   If `shadowPass` is true:
+        1.  Launch `drawShadowMap` kernel [S1, unofficial].
+        2.  *Pitfall:* If no voxels are found, `minDepth` remains `INT_MAX` and `shadowMap[index]` is not written [S1, unofficial].
+    *   Else:
+        1.  Launch `draw` kernel [S1, unofficial].
+
+### Rasterization-Based Empty Space Culling (Variant Detail)
+For the variant described in [S2, abstract only, unofficial], the traversal is replaced/augmented by a rasterization pass:
+1.  **Proxy Geometry:** Generate proxy geometry representing a view-dependent cut of the octree nodes [S2, abstract only, unofficial].
+2.  **Rasterization:** Rasterize this proxy geometry to capture all penetrated bricks in a per-pixel list [S2, abstract only, unofficial].
+3.  **Ordering:** Ensure the per-pixel list is captured in front-to-back order [S2, abstract only, unofficial].
+4.  **Raycasting:** Cast rays only inside the tighter segments defined by the penetrated bricks/macrocells [S2, abstract only, unofficial].
+5.  **Culling:** Achieve two levels of empty space skipping: brick level and macrocell level [S2, abstract only, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def render_frame(model, camera, light, window_width, window_height):
+    # 1. Initialize traversal state
+    h_start_index = 0
+    h_end_index = model.jobs().size()
+    d_trav_queue_ptr[0] = h_end_index
+    octree_level = 0
+    
+    # 2. Parallel Traversal Loop
+    while h_end_index - h_start_index > 0:
+        # Launch traverse kernel for current job range and depth
+        launch_traverse_kernel(
+            job_start=h_start_index,
+            job_end=h_end_index,
+            level=octree_level,
+            camera=camera,
+            model=model
+        )
+        
+        # Update indices based on device queue pointer
+        h_start_index = h_end_index
+        h_end_index = d_trav_queue_ptr[0]
+        octree_level += 1
+        
+    # 3. Rendering Pass
+    if shadow_pass_enabled:
+        # Shadow map generation
+        launch_draw_shadow_map_kernel(
+            camera=camera,
+            light=light,
+            model=model,
+            min_depth_init=INT_MAX
+        )
+    else:
+        # Direct volume rendering
+        launch_draw_kernel(
+            camera=camera,
+            light=light,
+            model=model
+        )
+```
+
+## Subtopics
+
+### Octree Rasterization for Volume Rendering
+A GPU-based high-quality volume rendering approach for large out-of-core volume data that reduces rendering time by moving branch-intensive accelerating structure traversal out of the GPU raycasting loop and introducing efficient empty-space culling via rasterization [S2, abstract only, unofficial]. It stores the volume in an octree of bricks, further splitting every brick into regular macrocells [S2, abstract only, unofficial]. The method rasterizes proxy geometry of a view-dependent cut of octree nodes to capture penetrated bricks in a per-pixel list in front-to-back order [S2, abstract only, unofficial]. This allows raycasting to occur only inside tighter ray segments, achieving two levels of empty space skipping (brick and macrocell) [S2, abstract only, unofficial]. It achieved 2 to 4 times faster rendering speed than current state-of-the-art algorithms across various datasets [S2, abstract only, unofficial].
+
+## Operating characteristics
+*   **Performance:** Achieves 2 to 4 times faster rendering speed than state-of-the-art algorithms on large out-of-core datasets [S2, abstract only, unofficial].
+*   **Complexity:** Reduces branch divergence by moving traversal out of the raycasting loop [S2, abstract only, unofficial].
+*   **Memory:** Requires storage for octree bricks and macrocells [S2, abstract only, unofficial].
+*   **Strengths:** Efficient empty-space culling, suitability for large out-of-core data, reduced GPU branch intensity [S2, abstract only, unofficial].
+*   **Limitations:** Complexity of managing rasterization-based culling and proxy geometry generation [S2, abstract only, unofficial].
+*   **When to use:** Large out-of-core volume datasets where traditional raycasting traversal is a bottleneck [S2, abstract only, unofficial].
+*   **When not to use:** Small in-core datasets where overhead may outweigh benefits, or when strict real-time constraints require simpler traversal methods [Not given in the sources].
+
+## Background
+The method originates from research on GPU-based high-quality volume rendering of large out-of-core volume data, focusing on reducing rendering time by optimizing ray traversal costs [S2, abstract only, unofficial]. The "asvo" implementation provides a CUDA-based reference for this approach [S1, unofficial].
+
+## Sources
+[S1] denniskb/asvo, https://github.com/denniskb/asvo, fetched 2026-10-26 (unofficial)
+[S2] accelerating high-quality out-of-core GPU volume rendering, https://pubmed.ncbi.nlm.nih.gov/22778151/, fetched 2026-10-29 (abstract only, unofficial)

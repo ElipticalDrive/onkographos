@@ -1,0 +1,169 @@
+--- v002.md
++++ v003.md
+@@ -25,6 +25,6 @@
+ 
+ **Formulas:**
+-Let $C_i = (R_i, G_i, B_i, A_i)$ be the color vector (RGB) and opacity scalar for class $i$.
+-Let $L_i$ be the sampled scalar value (luminance/opacity) from texture $i$ at the current coordinate.
++Let $C_i = (R_i, G_i, B_i, A_i)$ be the color vector (RGB) and opacity scalar for class $i$ [S2, unofficial].
++Let $L_i$ be the sampled scalar value (luminance/opacity) from texture $i$ at the current coordinate [S2, unofficial].
+ The contribution color $K_i$ for class $i$ is:
+ $$ K_i = (R_i \cdot L_i, G_i \cdot L_i, B_i \cdot L_i, A_i \cdot L_i) $$
+@@ -43,99 +43,50 @@
+ ```python
+ def trilinear_sample(volume, x, y, z):
+-    # Clamp coordinates to [0, 1]
+-    x = max(0.0, min(1.0, x))
+-    y = max(0.0, min(1.0, y))
+-    z = max(0.0, min(1.0, z))
+-    
+-    # Convert to voxel indices
+-    dx = len(volume) - 1
+-    dy = len(volume[0]) - 1
+-    dz = len(volume[0][0]) - 1
+-    
+-    ix = int(x * dx)
+-    iy = int(y * dy)
+-    iz = int(z * dz)
+-    
+-    # Clamp indices to valid range
+-    ix = min(max(ix, 0), dx)
+-    iy = min(max(iy, 0), dy)
+-    iz = min(max(iz, 0), dz)
+-    
+-    # Fractional parts for interpolation
+-    fx = x * dx - ix
+-    fy = y * dy - iy
+-    fz = z * dz - iz
+-    
+-    # Fetch 8 neighbors
+-    v000 = volume[ix][iy][iz]
+-    v100 = volume[min(ix+1, dx)][iy][iz]
+-    v010 = volume[ix][min(iy+1, dy)][iz]
+-    v110 = volume[min(ix+1, dx)][min(iy+1, dy)][iz]
+-    v001 = volume[ix][iy][min(iz+1, dz)]
+-    v101 = volume[min(ix+1, dx)][iy][min(iz+1, dz)]
+-    v011 = volume[ix][min(iy+1, dy)][min(iz+1, dz)]
+-    v111 = volume[min(ix+1, dx)][min(iy+1, dy)][min(iz+1, dz)]
+-    
+-    # Interpolate along x
+-    v00 = v000 * (1-fx) + v100 * fx
+-    v01 = v010 * (1-fx) + v110 * fx
+-    v10 = v001 * (1-fx) + v101 * fx
+-    v11 = v011 * (1-fx) + v111 * fx
+-    
+-    # Interpolate along y
+-    v0 = v00 * (1-fy) + v01 * fy
+-    v1 = v10 * (1-fy) + v11 * fy
+-    
+-    # Interpolate along z
+-    return v0 * (1-fz) + v1 * fz
++    # Standard trilinear interpolation [G]
++    Dx, Dy, Dz = len(volume), len(volume[0]), len(volume[0][0])
++    ix = int(x * (Dx - 1))
++    iy = int(y * (Dy - 1))
++    iz = int(z * (Dz - 1))
++    ix = max(0, min(ix, Dx - 1))
++    iy = max(0, min(iy, Dy - 1))
++    iz = max(0, min(iz, Dz - 1))
++    fx = x * (Dx - 1) - ix
++    fy = y * (Dy - 1) - iy
++    fz = z * (Dz - 1) - iz
++    def v(x, y, z): return volume[max(0, min(x, Dx-1))][max(0, min(y, Dy-1))][max(0, min(z, Dz-1))]
++    v000 = v(ix, iy, iz)
++    v100 = v(ix+1, iy, iz)
++    v010 = v(ix, iy+1, iz)
++    v110 = v(ix+1, iy+1, iz)
++    v001 = v(ix, iy, iz+1)
++    v101 = v(ix+1, iy, iz+1)
++    v011 = v(ix, iy+1, iz+1)
++    v111 = v(ix+1, iy+1, iz+1)
++    v00 = v000 * (1 - fx) + v100 * fx
++    v01 = v010 * (1 - fx) + v110 * fx
++    v10 = v001 * (1 - fx) + v101 * fx
++    v11 = v011 * (1 - fx) + v111 * fx
++    v0 = v00 * (1 - fy) + v01 * fy
++    v1 = v10 * (1 - fy) + v11 * fy
++    return v0 * (1 - fz) + v1 * fz
+ 
+-def render_multi_volume(origin, direction, step, bounds_min, bounds_max, textures, tissue_colors):
+-    # Initialize output color
++def render_multi_volume_fragment(tex_coords, textures, tissue_colors):
++    """
++    Computes the final color for a single fragment by sampling N textures
++    and accumulating contributions, matching the source fragment shader.
++    """
+     final_color = [0.0, 0.0, 0.0, 0.0]
+-    
+-    # Handle zero direction components to avoid division by zero
+-    safe_dir = [max(abs(d), 1e-6) * (1 if d >= 0 else -1) for d in direction]
+-    
+-    # Compute ray length inside bounds
+-    t_min = 0.0
+-    t_max = float('inf')
+-    for i in range(3):
+-        t1 = (bounds_min[i] - origin[i]) / safe_dir[i]
+-        t2 = (bounds_max[i] - origin[i]) / safe_dir[i]
+-        t_enter = min(t1, t2)
+-        t_exit = max(t1, t2)
+-        t_min = max(t_min, t_enter)
+-        t_max = min(t_max, t_exit)
+-        
+-    if t_min >= t_max:
+-        return final_color
+-        
+-    # Ray march
+-    t = t_min
+-    while t < t_max:
+-        # World position
+-        pos = [origin[i] + direction[i] * t for i in range(3)]
+-        
+-        # Convert to texture coordinates [0, 1]
+-        tex_coord = [(pos[i] - bounds_min[i]) / (bounds_max[i] - bounds_min[i]) for i in range(3)]
+-        
+-        # Accumulate contributions from all channels
+-        for i in range(len(textures)):
+-            # Sample scalar value from texture i
+-            sample_val = trilinear_sample(textures[i], tex_coord[0], tex_coord[1], tex_coord[2])
+-            
+-            # Compute color contribution: base_color * sample_val
+-            contrib = [
+-                tissue_colors[i][0] * sample_val,
+-                tissue_colors[i][1] * sample_val,
+-                tissue_colors[i][2] * sample_val,
+-                tissue_colors[i][3] * sample_val
+-            ]
+-            
+-            # Accumulate (simple addition as per source)
+-            final_color = [final_color[j] + contrib[j] for j in range(4)]
+-        
+-        t += step
+-        
++    for i in range(len(textures)):
++        # Sample scalar value (luminance/opacity) from texture i
++        sample_val = trilinear_sample(textures[i], tex_coords[0], tex_coords[1], tex_coords[2])
++        # Compute color contribution: base_color * sample_val
++        contrib = [
++            tissue_colors[i][0] * sample_val,
++            tissue_colors[i][1] * sample_val,
++            tissue_colors[i][2] * sample_val,
++            tissue_colors[i][3] * sample_val
++        ]
++        # Accumulate (simple addition as per source)
++        final_color = [final_color[j] + contrib[j] for j in range(4)]
+     return final_color
+ ```
+@@ -143,5 +94,5 @@
+ ## Operating characteristics
+ *   **Time Complexity:** Linear with respect to the number of channels $N$ per fragment, as $N$ texture fetches and additions are performed [S2, unofficial].
+-*   **Memory Complexity:** $O(N \cdot V)$, where $V$ is the volume of the data. All $N$ textures must reside in GPU memory simultaneously [S1, unofficial].
++*   **Memory Complexity:** Not given in the sources.
+ *   **Strengths:** Simple implementation; allows independent transfer functions per class; supports runtime channel switching [S1, unofficial].
+ *   **Limitations:** Strictly limited by GPU memory capacity; no out-of-core support; hardware-dependent maximum channel count [S1, S2, unofficial].
+@@ -150,5 +101,5 @@
+ 
+ ## Background
+-The technique originates from early GPU volume rendering research, specifically utilizing OpenGL's multitexturing capabilities. It was documented in the context of visualizing biomedical data with multiple tissue classes (gray matter, muscle, skin, fat, bone) using GeForce FX hardware [S2, unofficial]. It is also referenced in modern web-based volume renderers like Viv and Neuroglancer [S1, unofficial].
++The technique was documented in the context of visualizing biomedical data with multiple tissue classes (gray matter, muscle, skin, fat, bone) using GeForce FX hardware and OpenGL multitexturing extensions [S2, unofficial]. It is also referenced in modern web-based volume renderers like Viv and Neuroglancer [S1, unofficial].
+ 
+ ## Sources

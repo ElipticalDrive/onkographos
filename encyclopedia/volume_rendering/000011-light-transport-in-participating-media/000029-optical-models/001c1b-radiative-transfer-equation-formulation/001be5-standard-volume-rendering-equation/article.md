@@ -1,0 +1,205 @@
+# Standard volume rendering equation
+
+Also called: Classical volume rendering, Light Transport Equation, Light Transport Equation / Alpha Blending, NeRF volume rendering, Porter-Duff Over Operator, Standard Volume Rendering, Volume Rendering Equation (VRE), Volume Rendering Integral, Volume Rendering Integration Formula, Volumetric Rendering Equation, Volumetric Rendering Formula
+
+## Overview
+
+The standard volume rendering equation computes the final pixel color by integrating the radiance emitted or scattered by a participating medium along a camera ray, attenuated by the medium's extinction coefficient [S3, S18, unofficial]. It solves the problem of projecting 3D volumetric data (such as smoke, clouds, or neural radiance fields) onto a 2D image plane by accounting for both the light generated within the volume and the background light passing through it [S1, S18, unofficial]. It differs from the [Absorption-only model](839-absorption-only-model.md) by including emission/scattering terms, and from the [Single Scattering Model](1053-single-scattering-model.md) by integrating the source term directly without solving for complex angular scattering distributions [S3, S18, unofficial]. Its core mechanism is front-to-back alpha compositing, which is mathematically equivalent to the Porter-Duff over operator [S7, S18, unofficial].
+
+## How it works
+
+### Inputs and Outputs
+
+**Inputs:**
+*   Ray origin $\mathbf{o}$ and direction $\mathbf{d}$ (unit vector).
+*   Near bound $t_n$ and far bound $t_f$ defining the intersection segment $[t_n, t_f]$ with the volume [S18, unofficial].
+*   Volume density field $\sigma(\mathbf{x})$ (extinction coefficient, units $m^{-1}$ or $cm^{-1}$) [S18, unofficial].
+*   Emitted radiance field $c(\mathbf{x}, \mathbf{d})$ (RGB color) [S18, unofficial]. In neural representations, this is often output by a network given position and view direction [S15].
+*   Background color $C_{bg}$ [S1, unofficial].
+
+**Outputs:**
+*   Final pixel color $C$ [S18, unofficial].
+*   (Optional) Accumulated depth or weights for differentiable training [S10, unofficial].
+
+### Data Structures
+
+The method operates on a sequence of $N$ samples along the ray. For each sample $i$ (where $i=1 \dots N$):
+*   Position: $\mathbf{x}_i = \mathbf{o} + t_i \mathbf{d}$ [S18, unofficial].
+*   Segment length: $\delta_i = t_{i+1} - t_i$ [S10, unofficial].
+*   Density: $\sigma_i = \sigma(\mathbf{x}_i)$ [S18, unofficial].
+*   Color: $c_i = c(\mathbf{x}_i, \mathbf{d})$ [S18, unofficial].
+
+### Formulas
+
+The continuous volume rendering equation is the integral form of the Radiative Transfer Equation (RTE) under the assumption of emission-absorption (or null-scattering) [S18, unofficial]:
+
+$$
+L(\mathbf{o}, \mathbf{d}) = \int_{t_n}^{t_f} T(t) \sigma(\mathbf{x}(t)) c(\mathbf{x}(t), \mathbf{d}) \, dt + T(t_f) C_{bg}
+$$
+
+Where:
+*   $T(t)$ is the transmittance from the ray origin to distance $t$:
+    $$
+    T(t) = \exp\left( - \int_{t_n}^{t} \sigma(\mathbf{x}(s)) \, ds \right)
+    $$
+*   $T(t_f) C_{bg}$ is the background color attenuated by the total transmittance through the volume [S1, unofficial].
+
+### Discrete Implementation
+
+The integral is approximated using a Riemann sum (quadrature) over $N$ samples [S10, S18, unofficial].
+
+1.  **Compute Opacity:** For each sample $i$, compute the opacity $\alpha_i$ of the segment:
+    $$
+    \alpha_i = 1 - \exp(-\sigma_i \delta_i)
+    $$
+    [S18, unofficial]
+
+2.  **Compute Transmittance:** Compute the accumulated transmittance $T_i$ to the start of sample $i$ (probability that the ray reaches sample $i$ without being absorbed/scattered by previous samples):
+    $$
+    T_i = \prod_{j=1}^{i-1} (1 - \alpha_j) = \exp\left( - \sum_{j=1}^{i-1} \sigma_j \delta_j \right)
+    $$
+    [S18, unofficial]
+    Note: $T_1 = 1$.
+
+3.  **Compute Weights:** The weight $w_i$ of sample $i$ is the probability that the ray terminates at sample $i$:
+    $$
+    w_i = T_i \alpha_i
+    $$
+    [S18, unofficial]
+
+4.  **Accumulate Color:** The final color is the weighted sum of sample colors plus the attenuated background:
+    $$
+    C = \sum_{i=1}^{N} w_i c_i + T_{N+1} C_{bg}
+    $$
+    Where $T_{N+1} = \prod_{j=1}^{N} (1 - \alpha_j)$ is the transmittance after the last sample [S18, unofficial].
+
+### Pseudocode
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def standard_volume_rendering(ray_origin, ray_direction, t_near, t_far, num_samples, density_func, color_func, background_color):
+    """
+    Renders a volume along a single ray using the standard volume rendering equation.
+    
+    Args:
+        ray_origin: vec3, origin of the ray.
+        ray_direction: vec3, unit direction of the ray.
+        t_near: float, near bound of the volume intersection.
+        t_far: float, far bound of the volume intersection.
+        num_samples: int, number of samples along the ray.
+        density_func: function(x) -> float, returns density sigma at position x.
+        color_func: function(x, d) -> vec3, returns emitted radiance c at position x and direction d.
+        background_color: vec3, color behind the volume.
+        
+    Returns:
+        vec3, final pixel color.
+    """
+    # 1. Calculate step size
+    step_size = (t_far - t_near) / num_samples
+    
+    accumulated_transmittance = 1.0
+    accumulated_color = vec3(0.0, 0.0, 0.0)
+    
+    # 2. Iterate from front to back (t_near to t_far)
+    for i in range(num_samples):
+        # Calculate sample position at the center of the segment
+        t = t_near + (i + 0.5) * step_size
+        position = ray_origin + t * ray_direction
+        
+        # 3. Sample density and color
+        sigma = density_func(position)
+        c = color_func(position, ray_direction)
+        
+        # 4. Compute opacity for this segment
+        # alpha = 1 - exp(-sigma * delta_t)
+        alpha = 1.0 - math.exp(-sigma * step_size)
+        
+        # 5. Accumulate color contribution
+        # weight = transmittance_to_this_sample * alpha
+        weight = accumulated_transmittance * alpha
+        accumulated_color += weight * c
+        
+        # 6. Update transmittance for the next sample
+        # transmittance *= (1 - alpha)
+        accumulated_transmittance *= (1.0 - alpha)
+        
+        # Optimization: Early exit if the ray is fully opaque
+        if accumulated_transmittance < 0.001:
+            break
+            
+    # 7. Add attenuated background
+    final_color = accumulated_color + accumulated_transmittance * background_color
+    
+    return final_color
+```
+
+### Parameters and Typical Values
+
+*   **Number of Samples ($N$):** High quality typically requires 64–256 samples per ray [S18, unofficial]. Neural Radiance Fields (NeRF) often use 64 coarse samples and 128 fine samples [S10, unofficial].
+*   **Density ($\sigma$):** Units are inverse length ($m^{-1}$ or $cm^{-1}$). Values must be consistent with the scene scale [S1, unofficial].
+*   **Step Size ($\Delta s$):** Must correspond to the density units. If $\sigma$ is in $m^{-1}$, $\Delta s$ must be in meters [S19, unofficial].
+
+### Edge Cases and Pitfalls
+
+*   **Unit Mismatch:** The absorption/extinction coefficient depends on the unit of distance. A value of 0.2 in $mm^{-1}$ becomes 200 in $m^{-1}$. Incorrect units lead to physically incorrect opacity [S1, S19, unofficial].
+*   **High Density/Small Steps:** If the extinction coefficient is high but the step size is too large, the approximation $\alpha \approx \sigma \Delta s$ may fail, though the exponential form $1 - e^{-\sigma \Delta s}$ remains stable [S19, unofficial].
+*   **Unbounded Scenes:** For scenes without explicit bounds, techniques like inverted sphere parameterization or space contraction are required to define valid $t_n$ and $t_f$ [S18, unofficial].
+*   **Aliasing:** Jittering the sample positions within the segment can mitigate ringing artifacts [S5, unofficial].
+*   **Computational Cost:** Standard volume rendering requires evaluating the density/color function $N$ times per ray, which is computationally expensive for high $N$ [S16, unofficial].
+
+## Subtopics
+
+### [NeRF Rendering Formula](1362-nerf-rendering-formula.md)
+The NeRF Rendering Formula transforms raw neural network predictions (density and color features) into final RGB, depth, and accumulation maps by discretizing the volume rendering integral along camera rays. It differs from generic volume rendering by explicitly handling sigmoid color activation, density noise injection for regularization, and the specific discrete weighting scheme required for differentiable training of implicit representations.
+
+### [Discrete Volume Transmittance Integration](3905-discrete-volume-transmittance-integration.md)
+Discrete Volume Transmittance Integration computes the fraction of light that travels from a ray origin to a distance $t$ without being absorbed or scattered by sampling the extinction coefficient along the ray path. It solves the visibility problem in participating media by approximating the continuous optical depth integral as a discrete sum, which is then exponentiated to yield transmittance. Unlike the NeRF Rendering Formula, which often couples this integration with density prediction and color accumulation in a single pass, or Sub-interval Radiative Transfer Equation Combination, which handles complex scattering phases, this method focuses strictly on the attenuation (visibility) component. It is the foundational step for computing the weight of emitted or scattered light contributions in the standard volume rendering equation.
+
+### [Sub-interval Radiative Transfer Equation (RTE) Combination](3971-sub-interval-radiative-transfer-equation-rte-combination.md)
+Sub-interval RTE Combination is a method for computing full-interval radiance and optical depth by partitioning the integration path of the Radiative Transfer Equation (RTE) at an intermediate point, allowing solutions from multiple slice planes to be combined. It solves the problem of visualizing participating media (such as smoke and fire) by rendering one partially transparent slice at a time and merging them using video hardware, rather than integrating over the entire volume in a single pass. It differs from [Standard volume rendering equation](1165-standard-volume-rendering-equation.md) by processing data in discrete 2D slices rather than a continuous ray integral, and from [Discrete Volume Transmittance Integration](3905-discrete-volume-transmittance-integration.md) by relying on hardware compositing of pre-solved slice radiance rather than per-sample accumulation.
+
+### Neural Volumes rendering formula
+Computes ray color using a transmittance formulation where opacity is treated as absolute and ray-independent, clipped to a maximum value of 1 [S6]. The transmittance is defined as $T_i = \min \left\{ 1, \sum_{j=1}^{i-1} \exp(-\delta_i \sigma_i) \right\}$ and color as $\hat{C}(\mathbf{r}) = \sum_{i=1}^N (T_i - T_{i+1}) \mathbf{c}_i$ [S6]. In this formula, $\alpha_i$ depends only on the opacity and sampling distance of sample $i$, whereas the standard Max formula makes it dependent on all preceding samples [S6]. On 8 synthetic NeRF scenes at fixed resolution $256^3$ with RMSProp optimizer, the Neural Volumes formula achieves a mean PSNR of 26.05, SSIM of 0.893, and LPIPS of 0.160 [S6].
+
+### Physical Quantity Measurement via Optical Depth
+Uses opacities in the radiative transfer equation to compute physical quantities (mass, momentum, kinetic energy) by measuring optical depth instead of intensity [S22]. Opacities are defined as $\alpha_M = \rho$ (for mass M), $\alpha_P = \rho v$ (for momentum P), $\alpha_E = 0.5 \rho v^2$ (for kinetic energy E), where $\rho$ is gas density and $v$ is velocity [S22]. This is useful when outflows are misaligned with grid axes, making direct measurement from simulation data difficult [S22].
+
+## Operating characteristics
+
+*   **Time Complexity:** $O(N)$ per ray, where $N$ is the number of samples. For neural representations, this involves $N$ forward passes through the network [S15][S16, unofficial].
+*   **Memory Complexity:** $O(1)$ per ray if samples are processed on-the-fly, or $O(N)$ if storing all samples for post-processing [S10, unofficial].
+*   **Performance:** High quality requires many samples (64-256), leading to high computational cost [S18, unofficial]. Early termination optimizations can reduce average sample count for opaque regions [S2, unofficial].
+*   **Strengths:** Physically plausible (under emission-absorption assumption), differentiable (enables training of neural fields), handles complex geometry implicitly [S18, unofficial].
+*   **Limitations:** Ignores in-scattering from other directions (unless added explicitly), computationally expensive for high $N$, sensitive to density unit scaling [S1, S18, unofficial].
+*   **When to use:** Neural Radiance Fields (NeRF), 3D Gaussian Splatting, medical CT visualization, cloud/smoke simulation [S18, unofficial].
+*   **When not to use:** When in-scattering is dominant and cannot be approximated, or when real-time performance is critical without acceleration structures [S18, unofficial].
+
+## Background
+
+The standard volume rendering equation is derived from the Radiative Transfer Equation (RTE) [S18, unofficial]. It assumes the null-scattering or emission-absorption model, ignoring in-scattering from other directions [S18, unofficial]. The integral form is widely used in computer graphics for rendering participating media [S3, unofficial]. It is the core rendering equation for Neural Radiance Fields (NeRF), 3D Gaussian Splatting, and Plenoxels [S18, unofficial]. The discrete formulation is mathematically identical to back-to-front alpha compositing [S18, unofficial].
+
+## Sources
+
+[S1] An Introduction to Volume Rendering, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/intro-volume-rendering.html, fetched 2026-10-25 (unofficial)
+[S2] The Ray-Marching Algorithm, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/ray-marching-algorithm.html, fetched 2026-10-25 (unofficial)
+[S3] From the Radiative Transfer Equation to the Volume Rendering Equation, https://scratchapixel.com/lessons/3d-basic-rendering/volume-rendering-for-developers/volume-rendering-summary-equations.html, fetched 2026-10-25 (unofficial)
+[S4] Direct rendering of multiresolution decomposed volume data., https://doi.org/10.82465/4870, fetched 2026-10-26 (unofficial)
+[S5] VIDILabs/instantvnr, https://github.com/VIDILabs/instantvnr, fetched 2026-10-26 (unofficial)
+[S6] Plenoxels: Radiance Fields without Neural Networks, https://doi.org/10.1109/cvpr52688.2022.00542, fetched 2026-10-26
+[S7] Interactive Volume-Rendering Techniques for Medical Data Visualization, https://doi.org/10.2312/diss.20018138, fetched 2026-10-26 (unofficial)
+[S8] Real-Time Mono- and Multi-Volume Rendering of Large Medical Datasets on Standard PC Hardware, https://doi.org/10.2312/diss.20058170, fetched 2026-10-26 (unofficial)
+[S9] damn8daniel/nerf-from-scratch, https://github.com/damn8daniel/nerf-from-scratch, fetched 2026-10-26 (unofficial)
+[S10] yashtmy/nerf-3d-vision, https://github.com/yashtmy/nerf-3d-vision, fetched 2026-10-26 (unofficial)
+[S11] KaanAres10/Volume-Rendering, https://github.com/KaanAres10/Volume-Rendering, fetched 2026-10-26 (unofficial)
+[S12] | Evolve, https://www.evolvebenchmark.com/blog-posts/intro-to-rendering-of-animated-volumetric-models-in-breda, fetched 2026-10-27 (unofficial)
+[S13] [Graphics] Volume Rendering - GitHub Pages, https://leeyngdo.github.io/blog/computer-graphics/2024-03-28-volume-rendering/, fetched 2026-10-27 (unofficial)
+[S14] 14 Rendering Volume and Subsurface Scattering - Foundations of Visual ..., https://learnvisualcomputing.github.io/rendering-rte.html, fetched 2026-10-27
+[S15] PDF Volume Feature Rendering for Fast Neural Radiance Field Reconstruction, https://papers.neurips.cc/paper_files/paper/2023/file/ce182e31662883d4decc84a0255335b6-Paper-Conference.pdf, fetched 2026-10-27
+[S16] (PDF) Volume Feature Rendering for Fast Neural Radiance Field ..., https://www.researchgate.net/publication/371136390_Volume_Feature_Rendering_for_Fast_Neural_Radiance_Field_Reconstruction, fetched 2026-10-27 (unofficial)
+[S17] GPU-accelerated single-pass volumetric raycasting in Qt ..., https://martinopilia.com/posts/2018/09/17/volume-raycasting.html, fetched 2026-10-27 (unofficial)
+[S18] Volume Rendering Integral: Definition & AI/ML Use, https://inferensys.com/glossary/neural-radiance-fields-and-spatial-computing/neural-scene-representations/volume-rendering-integral, fetched 2026-10-28 (unofficial)
+[S19] Volumetric Rendering - Computer Graphics Learning, https://cglearn.eu/pub/advanced-computer-graphics/volumetric-rendering, fetched 2026-10-28 (unofficial)
+[S20] 7.6. Neural Radiance Fields for Drones, https://www.roboticsbook.org/S76_drone_learning.html, fetched 2026-10-29 (unofficial)
+[S21] A Null-Scattering Path Integral Formulation of Light Transport, https://www.scribd.com/document/1067625811/A-Null-scattering-Path-Integral-Formulation-of-Light-Transport, fetched 2026-10-29 (unofficial)
+[S22] The physics of volume rendering, https://arxiv.org/abs/1410.6022v1, fetched 2026-10-26

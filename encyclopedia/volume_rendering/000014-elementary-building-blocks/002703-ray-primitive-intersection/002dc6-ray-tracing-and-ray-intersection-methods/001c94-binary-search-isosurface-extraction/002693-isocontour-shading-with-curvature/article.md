@@ -1,0 +1,164 @@
+# Isocontour Shading with Curvature
+
+Also called: RayEvaluationSteppingIso
+
+## Overview
+Isocontour Shading with Curvature is a shading method for isosurfaces that uses surface features including first curvature ($k_1$), second curvature ($k_2$), mean curvature ($(k_1+k_2)/2$), Gaussian curvature ($k_1 \cdot k_2$), or a curvature texture [S1, unofficial]. It distinguishes itself from sibling methods by explicitly incorporating curvature data and multi-level isocontour highlighting into the shading kernel [S1, unofficial].
+
+## How it works
+### Inputs and Outputs
+**Inputs:**
+1. `rayDirections`: Tensor of shape $(N, 3)$ [S1, unofficial].
+2. `normals`: Tensor of shape $(N, 3)$ [S1, unofficial].
+3. `curvature`: Optional tensor of shape $(N, 2)$ [S1, unofficial].
+4. `isovalue_`: Scalar threshold for extraction, default $0.5$ [S1, unofficial].
+5. `binarySearchSteps_`: Number of binary search steps, default $0$ [S1, unofficial].
+6. `numIsocontours_`: Number of isocontours to highlight, default $5$ [S1, unofficial].
+7. `isocontourRange_`: Range for isocontour highlighting, default $5$ [S1, unofficial].
+
+**Outputs:**
+1. `colors`: Tensor of shape $(N, 4)$ [S1, unofficial].
+
+### Data Structures
+1. **Isocontour Texture (`isocontourTextureObject_`)**:
+   - **Layout**: CUDA array `isocontourTextureArray_` [S1, unofficial].
+   - **Channel Descriptor**: `(32, 32, 32, 32, cudaChannelFormatKindFloat)` [S1, unofficial].
+   - **Size**: `ISOCONTOUR_TEXTURE_RESOLUTION` [S1, unofficial].
+   - **Addressing**: Clamp [S1, unofficial].
+   - **Filtering**: Linear [S1, unofficial].
+   - **Coordinates**: Normalized [S1, unofficial].
+
+2. **Curvature Texture (`curvatureTextureObject_`)**:
+   - **Layout**: CUDA array `curvatureTextureArray_` [S1, unofficial].
+   - **Channel Descriptor**: `(8, 8, 8, 8, cudaChannelFormatKindUnsigned)` [S1, unofficial].
+   - **Size**: `textureWidth` x `textureHeight` [S1, unofficial].
+   - **Source**: Loaded from `shaders/curvature-texture.png` (RGBA 8-bit) [S1, unofficial].
+   - **Addressing**: Clamp [S1, unofficial].
+   - **Filtering**: Linear [S1, unofficial].
+   - **Read Mode**: Normalized float [S1, unofficial].
+
+### Parameters and Constants
+- `ISO_WIDTH`: Constant value $20$ [S1, unofficial].
+- `COLOR_NEGATIVE`: Magenta [S1, unofficial].
+- `COLOR_ZERO`: White [S1, unofficial].
+- `COLOR_POSITIVE`: Green [S1, unofficial].
+- `COLOR_ISO_ZERO`: Dark blue [S1, unofficial].
+- `COLOR_ISO_OTHER`: Black [S1, unofficial].
+- `KERNEL_DOUBLE_PRECISION`: Integer flag ($1$ for double, $0$ for single) [S1, unofficial].
+- `RAY_EVALUATION_STEPPING__SURFACE_FEATURE`: Integer enum indicating the selected surface feature [S1, unofficial].
+
+### Algorithm Steps
+The shading kernel `RayEvaluationIsoShadingCurvature` executes the following logic for each ray:
+
+1. **Generate Isocontour Texture Coordinate & Base Color**:
+   For each index $i$ in $[0, \text{ISOCONTOUR\_TEXTURE\_RESOLUTION})$, convert to $v_1$ in $[-1, +1]$ via $v_1 = 2 \cdot i / (\text{ISOCONTOUR\_TEXTURE\_RESOLUTION} - 1.0) - 1.0$ [S1, unofficial].
+   Compute base color: if $v_1 < 0$, $\text{lerp}(\text{COLOR\_NEGATIVE}, \text{COLOR\_ZERO}, v_1 + 1.0)$; else $\text{lerp}(\text{COLOR\_ZERO}, \text{COLOR\_POSITIVE}, v_1)$ [S1, unofficial].
+
+2. **Apply Isocontour Highlighting**:
+   If $\text{numIsocontours\_} > 0$, compute $v_2 = v_1 \cdot \text{numIsocontours\_}$, $\text{closestIsovalue} = \text{round}(v_2)$, $\text{distanceToIso} = |v_2 - \text{closestIsovalue}|$, $\text{isoBlend} = \max(0.0, 1.0 - \text{ISO\_WIDTH} \cdot \text{distanceToIso})$ where $\text{ISO\_WIDTH} = 20$ [S1, unofficial].
+   Blend with isocolor: if $\text{closestIsovalue} == 0$, $\text{isocolor} = \text{COLOR\_ISO\_ZERO}$; else $\text{isocolor} = \text{COLOR\_ISO\_OTHER}$ [S1, unofficial].
+   Final $\text{rgb} = \text{lerp}(\text{rgb}, \text{isocolor}, \text{isoBlend})$ [S1, unofficial].
+
+3. **Shading Kernel Launch**:
+   Kernel name is `RayEvaluationIsoShadingCurvature` [S1, unofficial].
+   Inputs are `rayDirections` $(N, 3)$, `normals` $(N, 3)$, and optionally `curvature` $(N, 2)$ [S1, unofficial].
+   Output is `colors` $(N, 4)$ [S1, unofficial].
+   Defines passed: `KERNEL_DOUBLE_PRECISION` ($1$ if double, $0$ otherwise), `RAY_EVALUATION_STEPPING__SURFACE_FEATURE` (int of selected feature) [S1, unofficial].
+
+4. **Kernel Arguments**:
+   `virtual_size` $(N, 1, 1)$, `accNormals`, `accCurvature` (or empty if not provided), `accRayDirections`, `accColors`, `isocontourRange_`, and texture object (`curvatureTextureObject_` if `CURVATURE_TEXTURE` feature selected, else `isocontourTextureObject_`) [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def ray_evaluation_iso_shading_curvature(
+    v1_values,          # Array of N normalized scalar values in [-1, 1]
+    ray_directions,     # Array of N vectors (N, 3)
+    normals,            # Array of N vectors (N, 3)
+    curvature,          # Array of N vectors (N, 2) or None
+    num_isocontours,    # int, default 5
+    isocontour_texture, # Texture object for isocontour
+    curvature_texture,  # Texture object for curvature (optional)
+    surface_feature     # int, 0 for OFF, 1 for CURVATURE_TEXTURE, 2 for MEAN, 3 for GAUSSIAN
+):
+    N = len(v1_values)
+    colors = []
+    ISO_WIDTH = 20.0
+    COLOR_NEGATIVE = [1.0, 0.0, 1.0]  # Magenta
+    COLOR_ZERO = [1.0, 1.0, 1.0]      # White
+    COLOR_POSITIVE = [0.0, 1.0, 0.0]  # Green
+    COLOR_ISO_ZERO = [0.0, 0.0, 0.5]  # Dark blue
+    COLOR_ISO_OTHER = [0.0, 0.0, 0.0] # Black
+
+    requires_curvature = surface_feature != 0
+
+    if requires_curvature and curvature is None:
+        raise RuntimeError("A surface feature requiring curvature is needed, but no curvature tensor is passed")
+
+    for i in range(N):
+        v1 = v1_values[i]
+
+        # 1. Base color from isocontour texture
+        if v1 < 0:
+            base_color = lerp(COLOR_NEGATIVE, COLOR_ZERO, v1 + 1.0)
+        else:
+            base_color = lerp(COLOR_ZERO, COLOR_POSITIVE, v1)
+
+        # 2. Isocontour highlighting
+        final_color = base_color
+        if num_isocontours > 0:
+            v2 = v1 * num_isocontours
+            closest_iso = round(v2)
+            dist_to_iso = abs(v2 - closest_iso)
+            iso_blend = max(0.0, 1.0 - ISO_WIDTH * dist_to_iso)
+
+            if closest_iso == 0:
+                iso_color = COLOR_ISO_ZERO
+            else:
+                iso_color = COLOR_ISO_OTHER
+
+            final_color = lerp(base_color, iso_color, iso_blend)
+
+        # 3. Curvature modulation
+        if requires_curvature:
+            if surface_feature == 1: # CURVATURE_TEXTURE
+                cur_val = curvature_texture.sample(v1, v1)
+                final_color = [c * cur_val for c in final_color]
+            else:
+                k1, k2 = curvature[i]
+                if surface_feature == 2: # FEATURE_MEAN
+                    cur_val = (k1 + k2) / 2.0
+                elif surface_feature == 3: # FEATURE_GAUSSIAN
+                    cur_val = k1 * k2
+                else:
+                    cur_val = 1.0
+                final_color = [c * cur_val for c in final_color]
+
+        colors.append(final_color + [1.0]) # RGBA
+
+    return colors
+
+def lerp(a, b, t):
+    t = max(0.0, min(1.0, t))
+    return [a[j] + t * (b[j] - a[j]) for j in range(len(a))]
+```
+
+### Edge Cases and Pitfalls
+- **Missing Curvature**: If `selectedSurfaceFeature_` is not `OFF` and no curvature tensor is provided, the method throws a runtime error: "A surface feature requiring curvature is needed, but no curvature tensor is passed" [S1, unofficial].
+- **Batched Isovalues**: If `isovalue_` is a tensor (batched), `getBatches` returns the size of the first dimension of the tensor; otherwise, it returns an empty optional [S1, unofficial].
+- **Precision**: The method supports double precision via the `KERNEL_DOUBLE_PRECISION` flag [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: Not given in the sources.
+- **Memory Complexity**: Not given in the sources.
+- **Strengths**: Not given in the sources.
+- **Limitations**: Not given in the sources.
+- **When to use**: Not given in the sources.
+- **When not to use**: Not given in the sources.
+
+## Background
+The method is part of the `fV-SRN` (Feature Volume - Scene Reconstruction Networks) project, an unofficial implementation by shamanDevel [S1, unofficial]. It is designed to work with Scene Reconstruction Networks (SRNs) that use tensor cores for volume interpolation [S1, unofficial]. The shading method is implemented in CUDA and integrated into the `renderer_ray_evaluation_stepping_iso.cuh` module [S1, unofficial].
+
+## Sources
+[S1] shamanDevel/fV-SRN, https://github.com/shamanDevel/fV-SRN, fetched 2026-10-26 (unofficial)

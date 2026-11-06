@@ -1,0 +1,90 @@
+# Scaling Matrix Construction
+
+Also called: Mat.scale, Scaling Matrix
+
+## Overview
+Constructs a 4x4 homogeneous transformation matrix that scales coordinates along the principal axes. It serves as the fundamental building block for non-uniform scaling in 3D graphics, distinct from translation or rotation. It differs from sibling utilities like [Matrix Norms & Utilities](3938-matrix-norms-utilities.md) by performing geometric transformation rather than mathematical analysis.
+
+## How it works
+**Inputs:**
+- `s`: A scalar number or a 4D vector (or 3D vector treated as xyz components).
+
+**Outputs:**
+- `mat`: A 4x4 matrix (represented as a 2D array or flat list of 16 floats).
+
+**Data Structure:**
+The matrix is stored in row-major order (or column-major depending on convention, but indices are explicit below). The structure is:
+$$
+\begin{bmatrix}
+s_x & 0 & 0 & 0 \\
+0 & s_y & 0 & 0 \\
+0 & 0 & s_z & 0 \\
+0 & 0 & 0 & 1
+\end{bmatrix}
+$$
+
+**Steps:**
+1. Initialize a 4x4 matrix `mat` with zeros.
+2. If `s` is a scalar:
+   - Set `mat[0][0] = s`
+   - Set `mat[1][1] = s`
+   - Set `mat[2][2] = s`
+3. If `s` is a vector (length 3 or 4):
+   - Set `mat[0][0] = s[0]`
+   - Set `mat[1][1] = s[1]`
+   - Set `mat[2][2] = s[2]`
+4. Set `mat[3][3] = 1.0` to preserve homogeneous coordinates.
+5. Return `mat`.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def construct_scaling_matrix(s):
+    # Initialize 4x4 zero matrix
+    mat = [[0.0 for _ in range(4)] for _ in range(4)]
+    
+    # Handle scalar input
+    if isinstance(s, (int, float)):
+        mat[0][0] = s
+        mat[1][1] = s
+        mat[2][2] = s
+    # Handle vector input (list or array)
+    elif hasattr(s, '__len__') and len(s) >= 3:
+        mat[0][0] = s[0]
+        mat[1][1] = s[1]
+        mat[2][2] = s[2]
+    else:
+        raise ValueError("s must be a scalar or a vector with at least 3 components")
+        
+    # Homogeneous coordinate
+    mat[3][3] = 1.0
+    
+    return mat
+```
+
+**Parameters:**
+- `s`: Scaling factors. Typical values are positive floats. Negative values flip the axis.
+
+**Edge Cases:**
+- If `s` is zero, the object collapses to a line or point.
+- Precision issues may arise if scaling factors are extremely large or small; standard float32 is typically sufficient for general graphics [S1, unofficial].
+
+## Subtopics
+
+### Scaling and Rotation Matrix Construction
+Combines scaling and rotation into a single 3x3 matrix. It constructs a diagonal scaling matrix $L$ and multiplies it by a rotation matrix $R$ ($M = L \times R$). This is implemented on CUDA for batched operations, where $L$ is initialized to zeros and diagonal elements are set from a scale vector $s$, while $R$ is generated via `build_rotation(r)` [S2, unofficial]. This variant is chosen when affine transformations require both orientation and size adjustment in a single step, avoiding separate matrix multiplications in the shader or CPU.
+
+## Operating characteristics
+- **Time Complexity:** $O(1)$ for scalar/vector input.
+- **Memory Complexity:** $O(1)$ (fixed 16 floats).
+- **Strengths:** Simple, fast, numerically stable.
+- **Limitations:** Does not handle rotation or translation; requires composition for full affine transforms.
+- **Use Case:** Essential for resizing objects, normalizing coordinate spaces, or adjusting voxel grid dimensions in volume rendering.
+
+## Background
+Originated from standard linear algebra applied to computer graphics. The specific implementation details for scalar/vector handling are documented in the [chloearluck/volume_rendering](https://github.com/chloearluck/volume_rendering) repository [S1, unofficial]. The batched CUDA variant for combined scaling/rotation is found in [NVlabs/InstantSplat](https://github.com/NVlabs/InstantSplat) [S2, unofficial].
+
+## Sources
+[S1] chloearluck/volume_rendering, https://github.com/chloearluck/volume_rendering, fetched 2026-10-24 (unofficial)
+[S2] NVlabs/InstantSplat, https://github.com/NVlabs/InstantSplat, fetched 2026-10-27 (unofficial)

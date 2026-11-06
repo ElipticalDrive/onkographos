@@ -1,0 +1,309 @@
+--- v001.md
++++ v002.md
+@@ -4,150 +4,193 @@
+ 
+ ## Overview
+-Sample Matching for Extinction Gradients is a technique for differentiating volumetric transport with respect to the extinction coefficient by evaluating the scattering term (positive contribution) and the transmittance term (negative contribution) at shared locations along each path segment, turning their negative correlation into variance reduction [S1, unofficial]. Unlike standard estimators that evaluate these terms at unrelated points, this method aligns the sampling locations to reduce variance in gradient estimation [S1, unofficial]. It is implemented as the `prbvolpath_sm` plugin in Mitsuba 3, supporting both RGB and spectral variants [S1, unofficial].
++Sample Matching for Extinction Gradients is a differentiable volumetric path tracing method that reduces the variance of extinction coefficient gradients by evaluating the positive scattering term and the negative transmittance term at shared spatial locations along each path segment [S1, S2, unofficial]. Unlike the base [Volumetric Path Tracing](1863-volumetric-path-tracing.md) method, which estimates these two opposing terms at unrelated points, this technique exploits their negative correlation to cancel variance, while maintaining the same primal rendering output [S1, S2, unofficial].
+ 
+ ## How it works
+-The method splits the computation into two separate megakernels: a primal pass and an adjoint pass. The primal pass runs path tracing identical to [prbvolpath](35-single-and-multiple-scattering.md) but performs no gradient sampling. It writes one small record per segment with a masked scatter, letting values die at the end of the iteration. The adjoint pass reads the segment records back and performs gradient sampling, processing one lane per record [S1, unofficial].
++The method operates in two distinct phases: a primal pass identical to the base [Volumetric Path Tracing](1863-volumetric-path-tracing.md) integrator, and an adjoint pass that computes gradients via a two-kernel pipeline [S1, S2, unofficial].
+ 
+ ### Inputs and Outputs
+-**Inputs:**
+-*   Scene geometry and medium properties (extinction coefficient $\sigma_t$, scattering coefficient $\sigma_s$, phase function $p$).
+-*   Camera parameters and pixel batch.
+-*   Integrator parameters: `segment_slots`, `gradient_samples_per_segment`.
+-
+-**Outputs:**
+-*   Radiance image (primal pass).
+-*   Gradient of radiance with respect to extinction coefficients (adjoint pass).
++*   **Inputs:** Scene geometry, participating media (defined by extinction $\sigma_t$, scattering $\sigma_s$, and emission $\sigma_e$), camera parameters, and the primal path records generated in the first pass [S1, S2, unofficial].
++*   **Outputs:** Radiance image (identical to base method) and gradients of radiance with respect to the extinction coefficient $\sigma_t$ [S1, S2, unofficial].
+ 
+ ### Data Structures
+-**Segment Record:**
+-*   Contains masked scatter values for segment data.
+-*   Fields are generated from the variant's spectrum size (RGB or spectral).
+-*   Each record carries the path's wavelengths so the second kernel evaluates the medium at the correct wavelengths [S1, unofficial].
++The core data structure is the **Segment Record**, written during the primal pass and read during the adjoint pass [S2, unofficial].
++
++**Segment Record Layout:**
++*   **Masked Scatter Values:** Fields generated from the variant's spectrum size (RGB or spectral) [S2, unofficial].
++*   **Wavelengths:** The path's specific wavelengths, ensuring the second kernel evaluates the medium at the correct spectral channels [S2, unofficial].
++*   **Segment Data:** Position, direction, and optical depth information for the specific segment [S2, unofficial].
+ 
+ ### Parameters
+-*   `segment_slots`: Selects between estimators.
+-    *   Default: `max_depth + 1` (one record slot per lane per completed segment). Registered as `prbvolpath_sm_quad`.
+-    *   Value `1`: One weighted reservoir per lane. The retained segment stands in for the whole path, scaled by the inverse selection probability. Registered as `prbvolpath_sm_linear`.
+-    *   Value `>1`: Linear mapping where segment $j$ goes to slot $\min(j, \text{segment\_slots} - 1)$. The first `segment_slots - 1` segments are kept exactly; everything from there on shares one reserved row per lane and is resolved by a weighted reservoir [S1, unofficial].
+-*   `gradient_samples_per_segment`: Number of gradient samples taken per segment. Typical values are 1 or 4. Raising from 1 to 4 costs about 35% in time but reduces variance [S1, unofficial].
++*   **`segment_slots`:** The number of records a path may keep.
++    *   **Default:** `max_depth + 1` (registered as `prbvolpath_sm_quad`). Every completed segment gets a record slot [S1, S2, unofficial].
++    *   **Value 1:** One weighted reservoir per lane. The retained segment stands in for the whole path, scaled by the inverse selection probability (registered as `prbvolpath_sm_linear`) [S2, unofficial].
++    *   **Value >1:** Linear mapping where segment $j$ goes to slot $\min(j, \text{segment\_slots} - 1)$. The first `segment_slots - 1` segments are kept exactly; the rest are pooled into one reserved row per lane via weighted reservoir sampling [S2, unofficial].
++*   **`gradient_samples_per_segment`:** Number of gradient samples taken per segment.
++    *   **Typical Values:** 1 or 4.
++    *   **Trade-off:** Raising from 1 to 4 costs ~35% time but reduces variance [S2, unofficial].
+ 
+ ### Algorithm Steps
+ 
+-1.  **Primal Pass (Path Tracing):**
+-    1.  Initialize path state.
+-    2.  Loop over path segments $j = 0, 1, \dots$:
+-        a.  Sample distance to next interaction using [Homogeneous Medium Sampling](980-homogeneous-medium-sampling.md) or [Delta tracking](985-delta-tracking.md).
+-        b.  Compute transmittance $T$ and scattering contribution $S$ for the segment.
+-        c.  Store a **Segment Record** containing the masked scatter values and the path's wavelengths.
+-        d.  Update reservoir running weight (only one scalar kept in loop state to avoid continuation spills) [S1, unofficial].
+-        e.  If Russian Roulette terminates the path, break.
+-    3.  Accumulate radiance for the pixel.
++#### 1. Primal Pass (Path Tracing)
++The primal pass is identical to the base [Volumetric Path Tracing](1863-volumetric-path-tracing.md) method [S1, unofficial]. It performs no gradient sampling [S2, unofficial].
+ 
+-2.  **Adjoint Pass (Gradient Sampling):**
+-    1.  Read Segment Records from the primal pass output.
+-    2.  For each lane/record:
+-        a.  For $k = 1$ to `gradient_samples_per_segment`:
+-            i.   Trace a fresh sub-path (or use sample matching logic) to estimate the gradient contribution.
+-            ii.  Evaluate the medium at the shared locations along the segment using the stored wavelengths.
+-            iii. Accumulate gradient estimates.
+-    3.  Output gradients [S1, unofficial].
++1.  Initialize path state.
++2.  Loop through path depth:
++    *   Sample interaction distance using [Homogeneous Medium Sampling](980-homogeneous-medium-sampling.md) or [Delta tracking](985-delta-tracking.md) [S1, S2, unofficial].
++    *   If a null collision occurs (empty space), skip efficiently [S2, unofficial].
++    *   At interaction point $\mathbf{p}$:
++        *   Evaluate scattering and emission terms.
++        *   Update radiance contribution.
++        *   **Write Segment Record:** Store masked scatter values and wavelengths for the current segment.
++        *   **Reservoir Logic (if `segment_slots` < `max_depth + 1`):** Update the weighted reservoir running weight. Only this scalar is kept in loop state to avoid continuation spills [S2, unofficial].
++    *   Terminate path via Russian Roulette or max depth.
++
++#### 2. Adjoint Pass (Gradient Estimation)
++The adjoint pass executes as two distinct kernels to avoid GPU continuation spills associated with tracing rays inside a loop [S2, unofficial].
++
++**Kernel 1: Path Replay**
++1.  Replay the primal path for each pixel.
++2.  For each segment, write the corresponding **Segment Record** to a global buffer.
++3.  The values in the record "die" at the end of the iteration; no gradient sampling occurs here [S2, unofficial].
++
++**Kernel 2: Gradient Sampling**
++1.  Read Segment Records from the buffer.
++2.  For each record (one lane per record):
++    *   Retrieve segment data (position $\mathbf{p}$, direction $\boldsymbol{\omega}$, wavelengths).
++    *   **Sample Matching:**
++        *   Trace fresh sub-paths from $\mathbf{p}$ to estimate the **scattering term** (positive contribution) [S2, unofficial].
++        *   Trace fresh sub-paths from $\mathbf{p}$ to estimate the **transmittance term** (negative contribution) [S2, unofficial].
++        *   *Note:* Reconnection (reusing the path's own continuation) was tested but dropped because it resulted in higher variance due to unstable transmittance ratios in the shift mapping weight [S2, unofficial].
++    *   Compute the gradient estimate by combining the two terms evaluated at the same location [S1, S2, unofficial].
++    *   Accumulate gradient into the output buffer.
+ 
+ ### Pseudocode
+ 
+ ```python
+-def primal_pass(scene, camera, pixel_batch, segment_slots, max_depth):
+-    """
+-    Runs path tracing identical to prbvolpath.
+-    Writes segment records to a buffer.
+-    """
+-    # Buffer for segment records. Size depends on segment_slots and wavefront size.
+-    segment_records = allocate_buffer(segment_slots * wavefront_size)
+-    
+-    for lane in wavefront:
+-        path_state = initialize_path(camera, lane)
++# Primal Pass (Identical to prbvolpath)
++def primal_pass(scene, camera, rng):
++    for pixel in camera.rays:
++        path_radiance = 0.0
++        throughput = 1.0
++        current_pos = pixel.origin
++        current_dir = pixel.direction
++        
++        # Reservoir state for segment selection (if needed)
+         reservoir_weight = 0.0
++        selected_segment_idx = -1
+         
+-        for j in range(max_depth):
+-            # Sample next interaction
+-            dist, hit_point = sample_interaction(scene, path_state)
++        for depth in range(max_depth):
++            # Sample distance to next interaction
++            dist = sample_distance(current_pos, current_dir, scene.medium)
++            next_pos = current_pos + dist * current_dir
+             
+-            # Compute transmittance and scattering
+-            # T is transmittance over the segment
+-            # S is the scattered radiance contribution
+-            T, S = compute_transmittance_and_scatter(scene, path_state, dist)
++            # Evaluate medium at next_pos
++            sigma_t = scene.medium.extinction(next_pos)
++            sigma_s = scene.medium.scattering(next_pos)
++            sigma_e = scene.medium.emission(next_pos)
+             
+-            # Mask scatter if terminated or other conditions
+-            masked_S = apply_mask(S, path_state)
++            # Transmittance to this point
++            tau = sigma_t * dist
++            T = exp(-tau)
+             
+-            # Store record
+-            # Slot index: min(j, segment_slots - 1) for linear mapping
+-            # Or specific slot for quad mapping (default max_depth + 1)
+-            slot_idx = min(j, segment_slots - 1)
+-            segment_records[lane, slot_idx] = {
+-                'scatter': masked_S,
+-                'wavelengths': path_state.wavelengths,
+-                'hit_point': hit_point
+-            }
++            # Update radiance
++            path_radiance += throughput * sigma_e * T * dist # Simplified emission term
+             
+-            # Update reservoir weight
+-            reservoir_weight += masked_S
+-            
+-            # Russian Roulette
+-            if terminate_path(path_state):
+-                break
++            # Sample scattering direction
++            if sigma_s > 0:
++                new_dir = sample_phase(current_dir, scene.phase)
++                throughput *= (sigma_s / sigma_t) * T * scene.phase(current_dir, new_dir)
++                
++                # Write Segment Record
++                record = {
++                    'pos': next_pos,
++                    'dir': current_dir,
++                    'throughput': throughput,
++                    'wavelengths': pixel.wavelengths,
++                    'depth': depth
++                }
++                write_segment_record(record)
++                
++                # Reservoir Logic (if segment_slots < max_depth + 1)
++                if segment_slots < max_depth + 1:
++                    # Update reservoir weight
++                    current_weight = throughput * sigma_s / sigma_t # Example weight
++                    reservoir_weight += current_weight
++                    if rng.uniform() < current_weight / reservoir_weight:
++                        selected_segment_idx = depth
++                        selected_segment_record = record
++                
++                current_pos = next_pos
++                current_dir = new_dir
++            else:
++                break # No scattering, path ends or continues as pure transmission
++                
++        # If using reservoir, write the selected segment record explicitly
++        if segment_slots == 1 and selected_segment_idx != -1:
++            write_segment_record(selected_segment_record)
++
++# Adjoint Pass Kernel 1: Replay
++def adjoint_kernel_1(scene, camera, rng):
++    for pixel in camera.rays:
++        # Replay primal path logic exactly
++        # Write segment records to global buffer
++        pass
++
++# Adjoint Pass Kernel 2: Gradient Sampling
++def adjoint_kernel_2(scene, segment_records, rng):
++    for record in segment_records:
++        pos = record['pos']
++        dir = record['dir']
++        throughput = record['throughput']
++        wavelengths = record['wavelengths']
+         
+-        # Final radiance accumulation
+-        pixel_batch[lane] += reservoir_weight
+-
+-def adjoint_pass(scene, segment_records, gradient_samples_per_segment):
+-    """
+-    Reads segment records and performs gradient sampling.
+-    """
+-    gradients = allocate_buffer(wavefront_size)
+-    
+-    for lane in wavefront:
+-        lane_gradient = 0.0
++        # Sample Matching: Evaluate both terms at 'pos'
++        # 1. Scattering Term (Positive)
++        scattering_grad = 0.0
++        for _ in range(gradient_samples_per_segment):
++            # Trace fresh sub-path from pos to estimate scattering contribution
++            sub_path_radiance = trace_sub_path(pos, dir, scene, rng)
++            scattering_grad += sub_path_radiance
++        scattering_grad /= gradient_samples_per_segment
+         
+-        # Iterate over stored segment records for this lane
+-        for slot_idx in range(segment_records.size(lane)):
+-            record = segment_records[lane, slot_idx]
+-            
+-            # Skip empty records
+-            if record is None:
+-                continue
+-                
+-            # Sample gradient contributions
+-            for k in range(gradient_samples_per_segment):
+-                # Trace fresh sub-path or use sample matching
+-                # Evaluate medium at shared locations using record's wavelengths
+-                grad_contribution = estimate_gradient_contribution(
+-                    scene, 
+-                    record['hit_point'], 
+-                    record['wavelengths'],
+-                    record['scatter']
+-                )
+-                lane_gradient += grad_contribution
++        # 2. Transmittance Term (Negative)
++        transmittance_grad = 0.0
++        for _ in range(gradient_samples_per_segment):
++            # Trace fresh sub-path from pos to estimate transmittance sensitivity
++            sub_path_transmittance = trace_sub_path_transmittance(pos, dir, scene, rng)
++            transmittance_grad += sub_path_transmittance
++        transmittance_grad /= gradient_samples_per_segment
+         
+-        gradients[lane] = lane_gradient
+-
+-    return gradients
++        # Combine terms
++        # The gradient is the difference between the scattering sensitivity and transmittance sensitivity
++        # evaluated at the same point, leveraging negative correlation
++        gradient = throughput * (scattering_grad - transmittance_grad)
++        
++        accumulate_gradient(gradient)
+ ```
+ 
+ ### Edge Cases and Pitfalls
+-*   **Continuation Spills:** Keeping a segment's record in loop state (named variables or `dr.alloc_local`) causes +2.5 KiB/thread of continuation spills and +45% adjoint time on the bunny scene, with no benefit under analytic intersection. This is avoided by splitting the pass into two kernels [S1, unofficial].
+-*   **Reconnection:** Reusing the path's own continuation instead of tracing fresh sub-paths was tried but dropped. It resulted in worse variance due to shift mapping weights carrying transmittance ratios ranging from $10^{-9}$ to 356, with only 4.8% of samples reusable [S1, unofficial].
++*   **Continuation Spills:** Keeping a segment's record in loop state (using `dr.alloc_local` or named variables) causes +2.5 KiB/thread of continuation spills and +45% adjoint time on complex scenes (e.g., Bunny cloud) [S2, unofficial]. This is avoided by splitting the pass into two kernels [S2, unofficial].
++*   **Reconnection Variance:** Reusing the path's own continuation for gradient samples (reconnection) results in higher variance than tracing fresh sub-paths. The shift mapping weight carries a transmittance ratio ranging from $10^{-9}$ to 356, and only 4.8% of samples could be reused [S2, unofficial].
++*   **Unsupported Variants:** Polarized variants and forward mode are not supported, consistent with the base `prbvolpath` method [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** The primal pass is faster than `prbvolpath` because it consumes null collisions in one fused C++ walk instead of paying `optixTrace` for each. On a Bunny cloud scene (768x576, 64 spp), `prbvolpath` took 104.5 s and `prbvolpath_sm` took 72.1 s [S1, unofficial]. The adjoint pass adds overhead; raising `gradient_samples_per_segment` from 1 to 4 costs about 35% in time [S1, unofficial].
+-*   **Memory Complexity:** Memory usage scales with `segment_slots`. For a wavefront size resulting in 4.6 GB overhead per slot per segment, `prbvolpath_sm_quad` (default) uses ~8301 MiB (7042 MiB above idle), while `prbvolpath_sm_linear` (1 slot) uses ~3725 MiB (2466 MiB above idle) [S1, unofficial].
+-*   **Variance Reduction:** On a Bunny cloud scene (768x576, 8 spp, N=516 adjoint renders), sample matching with 4 slots reduced variance from 136.5 (DRT reference) to 46.4 (occupied voxels) and 81.4 (all voxels), a 0.26x factor [S1, unofficial].
+-*   **Strengths:** Significant variance reduction for extinction gradients. Efficient primal rendering.
+-*   **Limitations:** Higher memory usage with more segment slots. Adjoint pass is slower than primal pass.
++*   **Time Complexity:** The primal pass is identical to [Volumetric Path Tracing](1863-volumetric-path-tracing.md). The adjoint pass adds overhead proportional to `gradient_samples_per_segment` and the number of segments [S2, unofficial].
++*   **Memory Complexity:** Depends on `segment_slots`.
++    *   `segment_slots = 1`: ~32 MiB overhead (vs base) [S2, unofficial].
++    *   `segment_slots = max_depth + 1`: ~4.6 GB overhead (vs base) on a typical wavefront [S2, unofficial].
++*   **Performance:**
++    *   **Primal Speedup:** The plugin can be faster than base `prbvolpath` in primal mode (e.g., 72.1 s vs 104.5 s) because it consumes null collisions in one fused C++ walk instead of paying `optixTrace` for each [S2, unofficial].
++    *   **Gradient Variance:** On a Bunny cloud scene (768x576, 8 spp), sample matching with 4 slots reduced variance from 136.5 (DRT reference) to 46.4 (occupied voxels) and 81.4 (all voxels), a 0.26x factor [S2, unofficial].
++    *   **Accuracy:** Gradients agree with finite differences within 1% in RGB and spectral variants [S1, unofficial].
++*   **Strengths:** Significant variance reduction for extinction gradients; supports spectral and RGB variants; efficient primal rendering.
++*   **Limitations:** High memory usage with default `segment_slots`; adjoint pass is slower than primal; not suitable for polarized or forward-mode differentiation [S1, S2, unofficial].
+ 
+ ## Background
+-*   **Origin:** Implemented as the `prbvolpath_sm` plugin in Mitsuba 3. The technique was developed by AuroraRyan0301 and presented in a review branch pull request [S1, unofficial].
+-*   **History:** The method addresses the high variance in differentiating volumetric transport by aligning the evaluation points of scattering and transmittance terms. It was developed as part of the Mitsuba 3 retargetable forward and inverse renderer project [S1, unofficial].
+-*   **Usage:** Used in inverse rendering applications, such as optimizing extinction coefficients in participating media. It supports both RGB and spectral variants [S1, unofficial].
++*   **Origin:** Introduced in 2026 as part of the Mitsuba 3 renderer development [S1, S2, unofficial].
++*   **Development:** The method was developed to address the high variance of extinction gradients in differentiable volumetric path tracing. Initial attempts using reconnection (reusing path continuations) were abandoned due to instability in transmittance ratios [S2, unofficial].
++*   **Usage:** Implemented as the `prbvolpath_sm` plugin in Mitsuba 3, supporting both RGB and spectral variants [S2, unofficial].
+ 
+ ## Sources
+-[S1] Sample matching for extinction gradients (review branch), https://github.com/AuroraRyan0301/mitsuba3/pull/1, fetched 2026-10-26 (unofficial)+[S1] Add prbvolpath_sm: new unbiased differentiable volume integrator with sample matching, https://github.com/mitsuba-renderer/mitsuba3/pull/1939, fetched 2026-10-26 (unofficial)
++[S2] Sample matching for extinction gradients (review branch), https://github.com/AuroraRyan0301/mitsuba3/pull/1, fetched 2026-10-26 (unofficial)

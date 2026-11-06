@@ -1,0 +1,120 @@
+# Sparse AABB Sweep Test
+
+Also called: SweepAabb
+
+## Overview
+The Sparse AABB Sweep Test is a voxel occupancy test that determines whether an Axis-Aligned Bounding Box (AABB) moving along a displacement vector intersects any occupied voxels in a sparse volume [S1, unofficial]. It approximates continuous collision detection by sampling the displacement path at discrete intervals [S1, unofficial]. It differs from its sibling [Support Below Search](5414-support-below-search.md) by testing the entire swept volume rather than just the base support, and from its parent [Sparse AABB Collision Test](3047-sparse-aabb-collision-test.md) by handling non-zero displacement vectors through temporal sampling [S1, unofficial].
+
+## How it works
+**Inputs:**
+- `aabb`: The initial axis-aligned bounding box (`SparseCollisionAabb`) [S1, unofficial].
+- `deltaX`, `deltaY`, `deltaZ`: Components of the displacement vector [S1, unofficial].
+- `steps`: Number of intermediate probes (`uint32_t`) [S1, unofficial].
+- `liquidsBlock`: Boolean flag indicating if liquid voxels count as solid obstacles [S1, unofficial].
+
+**Outputs:**
+- `blocked`: Boolean indicating if a collision occurred [S1, unofficial].
+- `safeFraction`: The fraction of the path traveled before the collision (`float`) [S1, unofficial].
+- `hitFraction`: The fraction of the path where the collision was detected (`float`) [S1, unofficial].
+- `hitVolume`: Details of the volume block that caused the collision (`SparseCollisionVolumeResult`) [S1, unofficial].
+
+**Data Structures:**
+The method uses `SparseCollisionAabb` to represent the bounding box and `SparseCollisionVolumeResult` to return test outcomes [S1, unofficial]. The exact internal layout of these structures is not specified in the source [S1, unofficial].
+
+**Algorithm:**
+1. Validate finiteness of `aabb` and `deltaX`, `deltaY`, `deltaZ`; if any component is non-finite, return `blocked=true`, `safeFraction=0.0`, `hitFraction=0.0` [S1, unofficial].
+2. If `|deltaX|`, `|deltaY|`, `|deltaZ|` are all less than `0.0001f`, bypass the sweep loop and call `TestAabb` on the original `aabb` [S1, unofficial].
+3. Clamp `steps` to `[1, kMaxCollisionSweepSteps]`, where `kMaxCollisionSweepSteps = 1024` [S1, unofficial].
+4. Initialize `lastSafeFraction = 0.0f` [S1, unofficial].
+5. Loop `step` from `1` to `steps` (inclusive):
+   a. Calculate `fraction = step / steps` [S1, unofficial].
+   b. Translate `aabb` by `delta * fraction` to form `probe` [S1, unofficial].
+   c. Call `TestAabb(probe, liquidsBlock)` [S1, unofficial].
+   d. If `TestAabb` returns `blocked=true`, set `result.blocked=true`, `result.safeFraction=lastSafeFraction`, `result.hitFraction=fraction`, set `result.hitVolume` to the test result, and return `result` [S1, unofficial].
+   e. Update `lastSafeFraction = fraction` [S1, unofficial].
+6. If the loop completes without blocking, set `result.safeFraction=1.0f`, `result.hitFraction=1.0f`, and return `result` [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+class SparseCollisionAabb:
+    def __init__(self, minX, minY, minZ, maxX, maxY, maxZ):
+        self.minX = minX; self.minY = minY; self.minZ = minZ
+        self.maxX = maxX; self.maxY = maxY; self.maxZ = maxZ
+
+class SparseCollisionVolumeResult:
+    def __init__(self, blocked, safeFraction, hitFraction, hitVolume):
+        self.blocked = blocked
+        self.safeFraction = safeFraction
+        self.hitFraction = hitFraction
+        self.hitVolume = hitVolume
+
+def is_finite(val):
+    return math.isfinite(val)
+
+def TranslateAabb(aabb, dx, dy, dz):
+    return SparseCollisionAabb(aabb.minX + dx, aabb.minY + dy, aabb.minZ + dz,
+                               aabb.maxX + dx, aabb.maxY + dy, aabb.maxZ + dz)
+
+def TestAabb(aabb, liquidsBlock):
+    # Calls parent Sparse AABB Collision Test method [G]
+    # Returns a SparseCollisionVolumeResult
+    pass
+
+def SparseAABBSweepTest(aabb, deltaX, deltaY, deltaZ, steps, liquidsBlock):
+    if not is_finite(aabb.minX) or not is_finite(aabb.maxX) or not is_finite(deltaX) or not is_finite(deltaY) or not is_finite(deltaZ):
+        return SparseCollisionVolumeResult(blocked=True, safeFraction=0.0, hitFraction=0.0, hitVolume=None)
+
+    if abs(deltaX) < 0.0001 and abs(deltaY) < 0.0001 and abs(deltaZ) < 0.0001:
+        return TestAabb(aabb, liquidsBlock)
+
+    kMaxCollisionSweepSteps = 1024
+    steps = max(1, min(steps, kMaxCollisionSweepSteps))
+
+    lastSafeFraction = 0.0
+
+    for step in range(1, steps + 1):
+        fraction = step / steps
+        probe = TranslateAabb(aabb, deltaX * fraction, deltaY * fraction, deltaZ * fraction)
+        volume = TestAabb(probe, liquidsBlock)
+
+        if volume.blocked:
+            return SparseCollisionVolumeResult(
+                blocked=True,
+                safeFraction=lastSafeFraction,
+                hitFraction=fraction,
+                hitVolume=volume
+            )
+        lastSafeFraction = fraction
+
+    return SparseCollisionVolumeResult(
+        blocked=False,
+        safeFraction=1.0,
+        hitFraction=1.0,
+        hitVolume=None
+    )
+```
+
+**Parameters:**
+- `kMaxCollisionSweepSteps`: `1024` [S1, unofficial].
+- Threshold for near-zero displacement: `0.0001f` [S1, unofficial].
+
+**Edge Cases:**
+- **Non-finite inputs:** Handled by immediate return with `blocked=true` and zero fractions [S1, unofficial].
+- **Near-zero displacement:** Handled by falling back to static `TestAabb` to avoid numerical instability or unnecessary computation [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources.
+- **Performance:** Not given in the sources.
+- **Strengths and Limitations:** Not given in the sources.
+- **When to use / When not to use:** Not given in the sources.
+
+## Background
+The Sparse AABB Sweep Test originates from the `voxelrender` repository by asajid2-cell [S1, unofficial]. It is designed for voxel-based physics simulations, such as sand or liquid dynamics, where objects move through a sparse voxel grid [S1, unofficial]. The method adapts standard sweep-and-prune or continuous collision detection techniques to the discrete nature of voxel data [S1, unofficial].
+
+## Sources
+[S1] asajid2-cell/voxelrender, https://github.com/asajid2-cell/voxelrender, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,134 @@
+# Point Query × Point Data, 3D Blur
+
+Also called: Conventional Radiance Estimation, Standard volumetric radiance estimate, Jensen and Christensen estimate
+
+## Overview
+This method estimates the in-scattered radiance at a specific query point $\mathbf{x}$ by summing contributions from the $n$ closest photons stored within a spherical kernel of radius $r$ [S1, S2]. It solves the problem of computing incident radiance for volumetric scattering by treating discrete photon points as samples of a continuous density field, blurring their energy in three dimensions [S2]. It is distinguished from its sibling, the [Extended Balance Heuristic](5601-extended-balance-heuristic.md), by its reliance on a fixed spherical kernel and simple nearest-neighbor density estimation rather than balance heuristics to combine multiple estimators [S2].
+
+## How it works
+**Inputs and Outputs**
+*   **Input:** A query point $\mathbf{x}$, a view direction $\vec{\omega}$, a set of stored photons (each with position $\mathbf{x}_p$, power $\Phi_p$, and incident direction), and a kernel radius $r$.
+*   **Output:** The estimated in-scattered radiance $L_i(\mathbf{x} \rightarrow \vec{\omega})$ at the query point.
+
+**Data Structures**
+The method requires a spatial data structure to efficiently retrieve the $n$ closest photons to $\mathbf{x}$ or all photons within a radius $r$. Common implementations use a k-d tree or a uniform grid [S1, S2]. Each photon node stores:
+*   Position $\mathbf{x}_p$ (3 floats)
+*   Power $\Phi_p$ (1 float, typically W/sr)
+*   Incident direction $\vec{\omega}_i$ (3 floats, unit vector)
+
+**Parameters**
+*   $r$: The radius of the spherical query region. Typical values depend on photon density; it must be large enough to contain sufficient photons but small enough to preserve detail [S1, S2].
+*   $n$: The number of closest photons used for density estimation [S1]. In the standard formulation, all photons within radius $r$ are used, effectively making $n$ variable based on density [S2].
+
+**Formulas**
+The in-scattered radiance is estimated by averaging the photon power over the volume of the query region $R$, weighted by the phase function [S2]:
+
+$$ L_i(\mathbf{x} \rightarrow \vec{\omega}) \approx \frac{1}{\sigma_s \mu_R(r^3)} \sum_{p \in R} f(\theta_p) \Phi_p $$
+
+Where:
+*   $\sigma_s$ is the scattering coefficient ($m^{-1}$) [S2].
+*   $\mu_R(r^3)$ is the measure (volume) of the query region. For a sphere of radius $r$, $\mu_R(r^3) = \frac{4}{3} \pi r^3$ [S2].
+*   $f(\theta_p)$ is the phase function value for the angle $\theta_p$ between the photon's incident direction and the view direction $\vec{\omega}$ [S2].
+*   $\Phi_p$ is the power of photon $p$ [S2].
+*   $R$ is the set of photons within distance $r$ of $\mathbf{x}$ [S2].
+
+Alternatively, using the material shading function $s(\mathbf{x}', \omega_i, \omega_0)$ which incorporates the phase function and scattering coefficient, the estimate is often written as [S1]:
+
+$$ L_{ms}(\mathbf{x}, \omega_0) \approx \sum_{i=1}^{n} s(\mathbf{x}', \omega_i, \omega_0) \frac{\Delta \Phi(\mathbf{x}', \omega_i)}{\frac{4}{3}\pi r^3} $$
+
+Where $\Delta \Phi$ is the flux of photon $i$ [S1].
+
+**Steps**
+1.  **Query:** Search for all photons $p$ within a spherical region $R$ of radius $r$ centered at the query point $\mathbf{x}$.
+2.  **Initialize:** Set accumulator $L_{acc} = 0$.
+3.  **Iterate:** For each photon $p$ found in $R$:
+    a. Calculate the angle $\theta_p$ between the photon's incident direction $\vec{\omega}_{i,p}$ and the view direction $\vec{\omega}$.
+    b. Evaluate the phase function $f(\theta_p)$ (e.g., Henyey-Greenstein or Schlick's approximation) [S2].
+    c. Add the contribution to the accumulator: $L_{acc} \leftarrow L_{acc} + f(\theta_p) \Phi_p$.
+4.  **Normalize:** Divide the accumulator by the scattering coefficient $\sigma_s$ and the volume of the sphere $\frac{4}{3} \pi r^3$.
+    $$ L_i = \frac{L_{acc}}{\sigma_s \cdot \frac{4}{3} \pi r^3} $$
+5.  **Return:** $L_i$.
+
+**Pseudocode**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def estimate_in_scattered_radiance(query_point, view_direction, photon_map, radius, scattering_coefficient):
+    """
+    Estimates in-scattered radiance at a point using 3D blurred photon points.
+    
+    Args:
+        query_point: 3D vector (x, y, z)
+        view_direction: Unit 3D vector
+        photon_map: Spatial index (e.g., k-d tree) of photons
+        radius: Float, radius of the spherical kernel
+        scattering_coefficient: Float, sigma_s (1/m)
+        
+    Returns:
+        Float, estimated radiance
+    """
+    # 1. Find all photons within radius r of the query point
+    nearby_photons = photon_map.query_sphere(query_point, radius)
+    
+    accumulated_weighted_power = 0.0
+    
+    for photon in nearby_photons:
+        # 2. Calculate angle between photon incident direction and view direction
+        # photon.incident_direction is the direction the photon traveled to reach this point
+        cos_theta = dot(photon.incident_direction, view_direction)
+        
+        # 3. Evaluate phase function f(theta)
+        # Example: Schlick's approximation with asymmetry parameter g
+        # f(theta) = (1 - g^2) / (1 - g * cos_theta)^2
+        phase_value = evaluate_phase_function(cos_theta, photon.asymmetry_parameter)
+        
+        # 4. Accumulate weighted power
+        accumulated_weighted_power += phase_value * photon.power
+        
+    # 5. Normalize by scattering coefficient and volume of sphere
+    volume_of_sphere = (4.0 / 3.0) * pi * (radius ** 3)
+    
+    if scattering_coefficient == 0 or volume_of_sphere == 0:
+        return 0.0
+        
+    radiance = accumulated_weighted_power / (scattering_coefficient * volume_of_sphere)
+    
+    return radiance
+
+def evaluate_phase_function(cos_theta, g):
+    """Schlick's approximation for Henyey-Greenstein phase function."""
+    if abs(cos_theta) > 1.0:
+        cos_theta = sign(cos_theta) # Clamp to [-1, 1]
+    numerator = 1.0 - (g * g)
+    denominator = (1.0 - g * cos_theta) ** 2
+    if denominator == 0:
+        return 0.0
+    return numerator / denominator
+```
+
+**Edge Cases and Pitfalls**
+*   **Empty Kernel:** If no photons are found within radius $r$, the estimate is zero. This causes dark spots in sparse regions. [G] A common mitigation is to increase $r$ dynamically or fall back to a larger radius search.
+*   **Heterogeneous Media:** The standard formula assumes a homogeneous medium where $\sigma_s$ is constant. In heterogeneous media, $\sigma_s$ varies with position, and the simple division by $\sigma_s$ is an approximation. More rigorous treatments integrate $\sigma_s$ over the kernel volume, but this is computationally expensive [S2].
+*   **Boundary Conditions:** Photons near the boundary of the medium may have their kernels truncated. The standard method does not account for this, leading to bias. [G] Adaptive kernel sizes or boundary corrections can mitigate this.
+*   **Precision:** The volume term $\frac{4}{3} \pi r^3$ can become very small for small $r$, leading to large radiance values if photon power is significant. Ensure floating-point precision is sufficient.
+
+## Subtopics
+
+### [Beam Query × Beam Data, 2D Blur](4555-beam-query-beam-data-2d-blur.md)
+This method estimates the accumulated in-scattered radiance along a camera ray by integrating a point-wise radiance estimate that blurs photon beam energy only in the two dimensions perpendicular to the beam direction. It solves the problem of bias introduced by blurring along the beam length in 3D estimates, offering a simpler evaluation than the 3D variant while maintaining lower bias for the same radius. It is derived by substituting the 2D blurred in-scattered radiance estimate into the beam radiance integral.
+
+## Operating characteristics
+*   **Time Complexity:** $O(N \log N)$ for building the photon map (k-d tree), and $O(\log N + k)$ for querying $k$ photons within radius $r$ using a k-d tree [S1, S2]. The number of photons $k$ depends on density and radius.
+*   **Memory Complexity:** $O(N)$ to store the photon map, where $N$ is the total number of photons.
+*   **Measured Performance:** In homogeneous media, this method is efficient as it avoids ray marching for transmittance calculation along the camera ray, replacing multiple ray marching evaluations with a single evaluation per query point [S2]. However, it requires storing all photons in memory.
+*   **Strengths:** Simple to implement; provides a smooth estimate of radiance; widely used as a baseline [S1, S2].
+*   **Limitations:** Biased estimator; requires careful tuning of kernel radius $r$; performance degrades in sparse regions; assumes homogeneous medium for the standard formula [S1, S2].
+*   **When to Use:** When a simple, robust estimate of in-scattered radiance is needed, and the medium is relatively homogeneous. It is suitable for offline rendering where accuracy is prioritized over speed, or for real-time rendering with precomputed photon maps.
+*   **When Not to Use:** In highly heterogeneous media where the assumption of constant $\sigma_s$ breaks down; when memory is constrained and storing all photons is infeasible; when unbiased results are required.
+
+## Background
+The method was introduced by Henrik Wann Jensen and Hans H. Christensen in 1998 as part of the photon mapping technique for global illumination [S1, S2]. It was originally designed for surface illumination but was later adapted for volumetric rendering by Jarosz et al. in 2011 [S2]. The technique is a direct application of kernel density estimation to radiance estimation in participating media. It is widely used in volumetric photon mapping and is considered the standard baseline for volumetric radiance estimation [S1, S2].
+
+## Sources
+[S1] Real-time volume rendering for three-dimensional fetal ultrasound using volumetric photon mapping., https://doi.org/10.1186/s42492-024-00177-4, fetched 2026-10-26
+[S2] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

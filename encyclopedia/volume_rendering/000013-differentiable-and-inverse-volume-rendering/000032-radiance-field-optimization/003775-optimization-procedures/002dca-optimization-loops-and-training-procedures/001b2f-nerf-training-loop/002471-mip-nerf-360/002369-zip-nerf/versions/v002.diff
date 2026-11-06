@@ -1,0 +1,150 @@
+--- v001.md
++++ v002.md
+@@ -1,5 +1,4 @@
+ # Zip-NeRF
+ 
+-Also called: Anti-Aliased Grid-Based Neural Radiance Fields
+ 
+ ## Overview
+@@ -8,10 +7,10 @@
+ ## How it works
+ **Inputs and Outputs:**
+-*   **Input:** A set of posed images and a sparse initial point cloud (typically from COLMAP SfM) [S1].
++*   **Input:** A set of posed images [S1].
+ *   **Output:** A radiance field model capable of rendering anti-aliased images at various scales [S1].
+ 
+ **Data Structures:**
+ *   **Instant-NGP Structure ($G_\theta$):** A pyramid of voxel grids and hashes replacing the large MLP used in mip-NeRF 360 [S1].
+-*   **Feature Codes:** Stored in the grids/hashes. Each level $l$ has a resolution $n_l$ [S2, unofficial].
++*   **Feature Codes:** Stored in the grids/hashes. Each level $\ell$ has a resolution $n_\ell$ [S2, unofficial].
+ *   **Proposal Networks:** Separate iNGP and MLP structures for each round of proposal sampling [S1].
+ *   **NeRF MLP:** Uses a larger view-dependent branch than the standard iNGP [S1].
+@@ -30,11 +29,11 @@
+ 
+ 2.  **Initialization:**
+-    Initialize the scene representation using a set of 3D points $\{v_i\}$ from SfM and the Instant-NGP data structure $G_\theta$ [S1].
++    Initialize the Instant-NGP grid pyramid, proposal networks, and NeRF MLP parameters [G].
+ 
+ 3.  **Multiscale Training Loop:**
+     For each training iteration:
+     a.  **Ray Sampling:** Cast rays through the multiscale images.
+-    b.  **Downweighting:** When querying the Instant-NGP grid at level $l$ with resolution $n_l$ for a query with filter variance $\sigma$, apply the downweighting factor $\phi(\sigma)$ [S2, unofficial]:
+-        $$ \phi(\sigma) = \text{erf}\left(\frac{1}{\sqrt{8\sigma^2 n_l^2}}\right) $$
++    b.  **Downweighting:** When querying the Instant-NGP grid at level $\ell$ with resolution $n_\ell$ for a query with filter variance $\sigma$, apply the downweighting factor $\phi(\sigma)$ [S2, unofficial]:
++        $$ \phi(\sigma) = \text{erf}\left(\frac{1}{\sqrt{8\sigma^2 n_\ell^2}}\right) $$
+         This convolves the output with a Gaussian, reducing the impact of higher-resolution features for larger queries [S2, unofficial].
+     c.  **Multisampling:** Use the anti-aliased multisampling strategy (hexagonal pattern or similar) to sample within the sub-frusta defined by mip-NeRF 360 [S1].
+@@ -44,7 +43,7 @@
+         i.  **Data Term:** Multiply the standard data term (reconstruction loss) by the scale factor $s$ of the current ray/image [S1].
+         ii. **Normalized Weight Decay:** Calculate the loss $\ell$ for feature codes in the pyramid:
+-            $$ \ell = \text{mean}(V_l^2) $$
+-            where $V_l$ is the set of grid/hash values at pyramid level $l$. Sum this mean across levels. This penalizes coarse scales more heavily than fine scales [S1]. Apply multiplier $0.1$ [S1].
+-        iii. **Anti-aliased Interlevel Loss:** Impose the interlevel loss on both proposal rounds with pulse width $r$ (0.03 for round 1, 0.003 for round 2) and multiplier $0.01$ [S1].
++            $$ \ell = \text{mean}(V_\ell^2) $$
++            where $V_\ell$ is the set of grid/hash values at pyramid level $\ell$. Sum this mean across levels. This penalizes coarse scales more heavily than fine scales [S1]. Apply multiplier $0.1$ [S1].
++        iii. **Anti-aliased Interlevel Loss:** Impose the interlevel loss on both proposal rounds with pulse width $r$ ($0.03$ for round 1, $0.003$ for round 2) and multiplier $0.01$ [S1].
+     g.  **Optimization:** Update parameters using JAX [S1].
+ 
+@@ -55,58 +54,58 @@
+ 
+ ```python
+-def train_zip_nerf(images, poses, initial_points):
+-    # Initialize Instant-NGP grid structure G_theta
+-    # Initialize proposal networks G_prop1, G_prop2
+-    # Initialize NeRF MLP M_nerf
+-    
+-    # Multiscale dataset: images_s = [bicubic_downsample(img, s) for s in [1, 2, 4, 8]]
+-    
++import math
++
++def train_zip_nerf(images, poses, num_iterations=100000):
++    # Initialize Instant-NGP grid pyramid, proposal networks, and NeRF MLP
++    grid_pyramid = initialize_ngp_pyramid()
++    proposal_net_1 = initialize_proposal_network()
++    proposal_net_2 = initialize_proposal_network()
++    nerf_mlp = initialize_nerf_mlp(view_dependent_branch_size='large')
++
++    # Multiscale dataset: bicubically downsample by [1, 2, 4, 8]
++    images_s = [bicubic_downsample(img, s) for s in [1, 2, 4, 8]]
++
+     for iteration in range(num_iterations):
+         for scale_factor in [1, 2, 4, 8]:
+-            # Get downsampled image and corresponding poses
+-            img_s = images_s[scale_factor]
+-            
+-            for ray in rays_in(img_s):
+-                # 1. Query Instant-NGP with downweighting
+-                # sigma is derived from the ray's cone size at the query point
+-                # n_l is the resolution of grid level l
++            img_s = images_s[scale_factor - 1]
++            rays = cast_rays(img_s, poses)
++
++            for ray in rays:
++                # Helper: Downweight Instant-NGP query
+                 def query_ngp_downweighted(coord, sigma):
+-                    value = 0
+-                    for l in range(num_levels):
+-                        n_l = grid_resolution(l)
+-                        raw_val = G_theta.query(coord, level=l)
+-                        phi = erf(1.0 / sqrt(8 * sigma**2 * n_l**2))
++                    value = 0.0
++                    for l in range(grid_pyramid.num_levels):
++                        n_l = grid_pyramid.resolution(l)
++                        raw_val = grid_pyramid.query(coord, level=l)
++                        phi = math.erf(1.0 / math.sqrt(8 * sigma**2 * n_l**2))
+                         value += raw_val * phi
+                     return value
+-                
+-                # 2. Proposal Sampling Round 1
+-                samples_1 = proposal_sample(G_prop1, ray, num_samples=64)
+-                # Apply anti-aliased interlevel loss with r=0.03
++
++                # Proposal Sampling Round 1 (64 samples)
++                samples_1 = sample_proposal(proposal_net_1, ray, num_samples=64)
++                # Compute anti-aliased interlevel loss over samples (formula not specified in sources)
+                 loss_prop1 = compute_interlevel_loss(samples_1, r=0.03)
+-                
+-                # 3. Proposal Sampling Round 2
+-                samples_2 = proposal_sample(G_prop2, ray, num_samples=64)
+-                # Apply anti-aliased interlevel loss with r=0.003
++
++                # Proposal Sampling Round 2 (64 samples)
++                samples_2 = sample_proposal(proposal_net_2, ray, num_samples=64)
+                 loss_prop2 = compute_interlevel_loss(samples_2, r=0.003)
+-                
+-                # 4. Final NeRF Sampling
+-                samples_final = nerf_sample(M_nerf, ray, num_samples=32)
+-                
+-                # 5. Compute Data Loss with scale weighting
+-                rendered_color = render(samples_final, M_nerf)
++
++                # Final NeRF Sampling (32 samples)
++                samples_final = sample_nerf(nerf_mlp, ray, num_samples=32)
++
++                # Data Loss with scale weighting
++                rendered_color = render_ray(samples_final, nerf_mlp, query_ngp_downweighted)
+                 data_loss = mean_squared_error(rendered_color, img_s) * scale_factor
+-                
+-                # 6. Compute Normalized Weight Decay
+-                weight_decay_loss = 0
+-                for l in range(num_levels):
+-                    V_l = G_theta.get_values(level=l)
++
++                # Normalized Weight Decay
++                weight_decay_loss = 0.0
++                for l in range(grid_pyramid.num_levels):
++                    V_l = grid_pyramid.get_values(level=l)
+                     weight_decay_loss += mean(V_l**2)
+                 weight_decay_loss *= 0.1
+-                
+-                # 7. Total Loss
+-                total_loss = data_loss + \
+-                             0.01 * (loss_prop1 + loss_prop2) + \
+-                             weight_decay_loss
+-                             
++
++                # Total Loss
++                total_loss = data_loss + 0.01 * (loss_prop1 + loss_prop2) + weight_decay_loss
++
+                 update_parameters(total_loss)
+ ```

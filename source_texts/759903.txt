@@ -1,0 +1,1154 @@
+AbacusGS: Gaussian Splatting without Per-Splat Sorting
+Jiacheng Ding1 Yanliang Qi1 Cong Guo1 Peihua Mai2
+1
+University of Memphis 2 National University of Singapore
+arXiv:2611.01534v1 [cs.CV] 1 Nov 2026
+{jding2, yqi2, cguo}@memphis.edu
+peihua.m@u.nus.edu
+Figure 1. AbacusGS renders the left image from octree boxes of splats, shown in the middle with one color per box, and in each frame it
+sorts only the visible boxes, shaded from near to far on the right, and reads blue boxes forward and orange boxes backward.
+Abstract
+loses 0.13 dB PSNR on average against an equally finetuned 3DGS model. In an OpenGL viewer that orders splats
+on the CPU, AbacusGS renders frames 4.5 times faster than
+per-splat sorting. We also present a compact format of 17
+bytes per splat and a CUDA tile renderer that use the same
+order. The code will be released.
+3D Gaussian Splatting sorts every splat by depth in every
+frame. Viewers that draw splats with the hardware rasterizer and sort them on the CPU, as most web and mobile viewers do, spend most of the frame time in this sort.
+We present AbacusGS, which stores the blending order of
+a 3DGS scene in the scene layout. AbacusGS groups the
+splats into octree boxes of at most 128 splats and stores
+each box in order along an axis chosen at write time. In
+each frame, AbacusGS sorts only the visible boxes, and one
+dot product per box decides whether the box is read forward or backward. A short order-aware fine-tuning converts an existing 3DGS model, and the over operator of
+3DGS stays unchanged. On 13 standard scenes, AbacusGS
+1. Introduction
+3D Gaussian Splatting (3DGS) [21] represents a scene with
+millions of anisotropic Gaussians. A renderer projects each
+Gaussian to a screen-space ellipse [50], sorts the resulting
+splats by the depth of their centers, and blends them with
+the over operator [37]. The depth order changes with the
+camera. 3DGS recomputes the sort from scratch in every
+1
+frame.
+The cost of the sort depends on the platform. On desktop
+GPUs, a radix sort in CUDA or WebGPU orders millions of
+splats in well under a millisecond [13, 36]. Web and mobile
+viewers draw one instanced quad per splat with the hardware rasterizer and sort the splats in a CPU thread [25]. Web
+pages and phone browsers show captured scenes with these
+viewers and download each scene before its first frame. Visionary [13] reports 173 ms for a CPU sort of 6 million
+splats. In our OpenGL viewer, the CPU sort takes 24.1 ms
+of a 26.8 ms frame. Each new order also uploads an index
+buffer with one entry per splat.
+Existing work reduces this cost in three ways. The first
+way keeps a per-splat order and computes it less often.
+Neo [34] and Lumina [10] reuse the sorted lists of previous frames and update them per splat. The second way
+removes the order. Sort-free methods replace the over operator with weighted sums [17], order-independent transparency [6, 32, 46], or stochastic transparency [18, 23]. The
+new operators differ from the operator that the scene was
+optimized with, and stochastic estimators add noise at realtime sample counts. The third way orders groups of splats.
+Duplex-GS [28] sorts cells and blends the Gaussians inside
+a cell with a weighted sum. StreamingGS [49] sorts voxels and still sorts the Gaussians inside each voxel in every
+frame. Outside Gaussian splatting, Voxlines [35] sorts the
+voxels of a streamline rendering and stores line orders along
+the coordinate axes inside each voxel.
+AbacusGS also orders groups of splats and keeps the
+over operator inside each group. On an abacus, the position of a bead stores a digit and also holds a partial result
+of the computation. AbacusGS uses the order of its storage
+in the same way. The splats are grouped into small octree
+boxes, and the splats of one box usually cover a small patch
+of surface. The depth order inside a box changes little with
+the camera, apart from a reversal when the camera moves to
+the other side of the patch. AbacusGS sorts each box once
+at write time along an axis that it derives from the training
+cameras. At render time, AbacusGS sorts only the visible
+boxes, and one dot product per box decides whether the box
+is read forward or backward. A short fine-tuning adapts the
+model to the remaining ordering errors. On a hardware rasterizer, each visible box becomes one command of a multidraw indirect call, and the frame needs no per-splat index
+buffer.
+Keeping the over operator has practical value. Existing
+3DGS models, training code, and viewers assume this operator. AbacusGS converts an existing model with a short
+fine-tuning, and a viewer changes only how it orders and
+draws the splats. Sort-free methods retrain or fine-tune the
+scene for a new operator.
+Our paper has three contributions. The first is the task
+of converting an existing 3DGS model to a blending order
+stored in the scene layout, together with an evaluation that
+compares each converted model with a control fine-tuned
+for the same number of steps and times all methods in one
+hardware rasterizer with ordering on the CPU. The second
+is the method, which stores one order per octree box along
+an axis derived from the training cameras, chooses only
+the reading direction in every frame, fine-tunes the model
+with exactly this order, and draws each visible box with one
+multi-draw command. The third is a set of findings on 13
+standard scenes. Fine-tuning reduces the average loss of the
+two-level order from 1.27 to 0.13 dB PSNR. An octree BSP
+order, which is exact for the cells, loses more PSNR than
+the centroid-depth order for overlapping Gaussians. The
+speedup is largest when the CPU orders the splats, where
+frames render 4.5 times faster than with per-splat sorting,
+and it shrinks when the GPU sorts or the resolution grows.
+A compact format of 17 bytes per splat and a CUDA tile
+renderer use the same order, and we will release the code.
+2. Related Work
+We divide the related work by four smaller problems behind
+our goal. The four problems are computing the per-splat order quickly, compositing without an order, ordering groups
+of splats, and storing the scene compactly.
+Computing the per-splat order. 3DGS [21] sorts one
+key per pair of tile and splat with a GPU radix sort.
+OneSweep [1] is a faster least-significant-digit radix sort
+for GPUs. FlashGS [9] reduces the number of pairs
+with a tighter intersection test between tiles and ellipses.
+HiGS [36] reports sort times below 0.1 ms at 4K with a
+hierarchical renderer. GS-TG [20] shares one sort among
+groups of screen tiles in a hardware accelerator. WebSplatter [15] sorts with a hierarchical radix sort in WebGPU, and
+Texture3dgs [40] lays out a bitonic sort for the texture cache
+of mobile GPUs. StopThePop [38] sorts hierarchically per
+pixel and removes popping at extra cost, and VRSplat [44]
+fine-tunes models with the sort of StopThePop for virtual reality. Neo [34] and Lumina [10] reuse the sorted lists of previous frames on mobile hardware, and the WebGL viewer
+splat [25] skips the sort while the view direction barely
+changes. CoherentRaster [42] shares per-splat sorts among
+the views of a light-field display. Each of these methods
+keeps one entry per splat in the order of every frame, and
+AbacusGS keeps one entry per visible box.
+Compositing without an order. WSR [17] replaces the
+over operator with a learned weighted sum. MobileGS [6] combines order-independent rendering with distillation and pruning for mobile devices. Moment-based transmittance [32] and an active-set method [46] improve orderindependent transparency [29]. Hybrid transparency [14]
+2
+3. Method
+sorts a few front layers per pixel and blends the remaining splats without order. StochasticSplats [23] builds on
+stochastic transparency [7] and estimates the blending integral without bias. The images of StochasticSplats are
+noisy at low sample counts. Gaussian Stippling [18] adds
+spatiotemporal reuse to stochastic sampling, and SteadySplats [45] resamples low-variance Gaussians to reduce the
+noise. Every method in this paragraph changes the compositing operator of 3DGS.
+3.1. Problem definition and notation
+A 3DGS scene consists of N Gaussians with means µi , covariances Σi , opacities oi , and view-dependent colors ci . A
+camera at position o with viewing axis f projects Gaussian
+i to a 2D Gaussian with opacity αi (p) at pixel p [50]. For
+an order π of the n splats that cover pixel p, the color of the
+pixel is
+C(p) =
+Ordering groups of splats. Duplex-GS [28] sorts cells
+of 5 to 10 neural Gaussians per tile and blends inside each
+cell with a weighted sum. StreamingGS [49] orders voxels, corrects the errors between voxels with fine-tuning,
+and sorts the Gaussians inside each voxel in every frame
+on dedicated hardware. Hierarchical 3DGS [22], OctreeGS [39], and V3DG [47] group splats into trees or clusters
+to select a level of detail and then sort the selected splats.
+Voxlines [35] is the closest prior design. Voxlines renders transparent streamlines, sorts uniform voxels in every
+frame, stores line orders along the coordinate axes inside
+each voxel, and reverses a stored order for the opposite direction. Depth-presorted triangle lists [4] let each viewpoint
+select an exactly sorted subsequence of one stored triangle
+sequence, and presorted index buffers draw hair without a
+runtime sort [41]. A VRChat viewer [30] stores orders of a
+whole Gaussian scene for a set of view directions. Front-toback traversal of presorted voxel grids is a classic technique
+of volume rendering [11], BSP trees [12] give an exact visibility order for disjoint cells, and SVRaster [43] renders
+sparse voxels in a view-dependent Morton order. AbacusGS
+differs from these methods in three ways. AbacusGS stores
+one order per adaptive box along an axis derived from the
+training cameras, fine-tunes the model with exactly this order, and draws each box with one indirect command.
+n
+X
+cπ(k) απ(k) (p)
+k=1
+Y
+
+1 − απ(j) (p) .
+(1)
+j<k
+3DGS sorts the splats by the depth zi = f · (µi − o) of their
+centers. The center-depth order approximates the per-pixel
+order [38]. A CUDA tile renderer sorts one key per pair of
+tile and splat. A hardware rasterizer sorts the N depths and
+uploads the permutation as an index buffer. Both renderers
+repeat the sort in every frame.
+We seek an order whose per-frame cost grows with the
+number of visible groups of splats, together with model
+parameters for which Eq. (1) under this order stays close
+to the images of 3DGS. The groups are B boxes. Box b
+holds nb ≤ K splats in a contiguous range that starts at
+startb . The centroid of these splats is µ̄b , and its depth is
+z̄b = f · (µ̄b − o). Each box also stores a unit axis ab for
+the order of its splats.
+3.2. Boxes
+AbacusGS sorts the splats by the 48-bit Morton code [31] of
+their centers and builds an adaptive octree on these codes.
+The leaves are the largest octree nodes that hold at most K
+splats, and K=128 unless stated otherwise. A node that
+holds more than K splats at depth 16 is split into chunks of
+K splats. Each leaf is a box. The splats of a box occupy
+one contiguous range in the same way as a row of a CSR
+matrix. A box holds 31 splats on average. The header of
+a box stores its start offset, its octree cell, a culling radius,
+and its axis ab .
+Storing the scene compactly. Niedermayr et al. [33]
+cluster colors and shapes into codebooks with sensitivityaware k-means and render directly from the compressed
+data. Lee et al. [26] remove splats with learned masks and
+store geometry in learned codebooks. LightGaussian [8]
+prunes splats, distills spherical harmonics, and quantizes
+the remaining attributes. HAC [5] compresses anchor-based
+scenes with a hash-grid context model. A recent survey [2]
+compares these and later methods. The compressed PLY
+format of PlayCanvas [19] quantizes each splat to 16 bytes
+relative to the bounds of its chunk of 256 splats. The compact format of AbacusGS quantizes positions relative to octree cells, follows Niedermayr et al. for the codebooks, and
+also stores the blending order in its layout.
+3.3. A two-level blending order
+AbacusGS replaces the per-splat order with the two-level
+order
+
+
+π = ρb1 , ρb2 , . . . , ρbV ,
+z̄b1 ≤ z̄b2 ≤ · · · ≤ z̄bV .
+(2)
+The visible boxes b1 , . . . , bV are sorted by centroid depth,
+and ρb is the order of the splats inside box b.
+Reversible stored order. At write time, AbacusGS stores
+the splats of box b in ascending order of ab · µi . For a
+camera that looks along ab , the stored order runs from front
+3
+camera o2 : sb = −1, draw n, …, 2, 1
+ab
+1 2 3
+4
+5 6 7
+glMultiDrawElementsIndirect
+box 17
+n=37
+s=+1
+box 4
+n=128
+s=-1
+box 92
+n=61
+s=+1
+vertex shader
+b = gl_DrawID
+i = s[b]>0 ? k
+: n[b]-1-k
+j = start[b] + i
+project splat j
+-> EWA quad
+...
+camera o1 : sb = +1, draw 1, 2, …, n
+sb = sign ((μb̄ − o) ⋅ ab)
+(a) Write once: octree boxes of
+at most 128 splats, each stored
+in order along an axis ab
+(b) Every frame: sort the visible boxes
+by centroid depth; one dot product
+sets the direction of each box
+hardware blending,
+no per-splat index upload
+(c) Draw: one indirect command
+per box with the over operator
+of 3DGS
+Figure 2. Overview of AbacusGS at write time (a), in every frame (b), and in the draw call of a hardware rasterizer (c).
+to back. For a camera that looks along −ab , the reversed
+stored order runs from front to back. The sign
+sb = sign (µ̄b − o) · ab
+
+31 splats per box on average, V is at most about N/31. The
+work inside a box is fixed at write time.
+(3)
+Ordering error. The two-level order equals the centerdepth order of 3DGS when two conditions hold. The depth
+ranges of the visible boxes do not overlap, and the stored
+axis of each box is parallel to the viewing axis. Neighboring
+boxes overlap in depth near their shared faces, and the axis
+of a box is parallel to the viewing axis only for some cameras. Both errors stay local to pairs of neighboring boxes
+and to the splats inside one box. Order-aware fine-tuning
+adapts the affected splats to these errors, and Sec. 4.4 measures the second error for cameras away from the training
+views.
+selects the direction. The renderer reads box b in the stored
+order when sb > 0 and in reverse otherwise
+P (Fig.⊤2b). The
+axis ab is the principal eigenvector of c vbc vbc
+, where
+vbc is the unit vector from training camera c to the centroid
+of box b. The training cameras see the box mostly along
+this axis. The mean of the directions cancels out for 360degree captures, and the principal axis stays defined. We
+call this order the reversible stored order. Two other inbox orders serve as references in Sec. 4.3. The stored order
+keeps one direction for every camera. The per-frame in-box
+sort sorts each box by depth in every frame, as StreamingGS
+does [49].
+3.4. Order-aware fine-tuning
+AbacusGS fine-tunes a converged 3DGS model with the order of Eq. (2) in both the forward and the backward pass.
+Our implementation replaces the depth key of each splat in
+a differentiable tile rasterizer [48] with κi = 212 r(bi ) + ℓi .
+Here r(b) is the rank of box b in the box order, and ℓi is the
+position of splat i in the traversal of its box. The list of every tile then follows π, and the gradients use the same order.
+The box partition and the stored orders stay fixed during
+fine-tuning because they are part of the stored format. Densification is disabled. The position learning rate is the final
+value of the 3DGS schedule, and the other learning rates are
+the constant values of gsplat [48]. The float model trains for
+3,000 steps and the compact model for 10,000 steps.
+Figure 3 compares the two-level order with the per-splat
+order of 3DGS and with stochastic transparency. Before
+fine-tuning, the two-level order leaves visible blotches, for
+example on the pavement of Truck. After fine-tuning, the
+crops of AbacusGS resemble those of 3DGS. StochasticSplats removes the order from the operator and shows noise
+at 16 samples per pixel.
+Box order. Octree cells admit an exact visibility order. A
+BSP traversal visits first, at every node, the child on the
+camera side of each split plane [12]. The traversal needs no
+sort and changes only when the camera crosses a split plane.
+AbacusGS sorts the boxes by centroid depth instead. Splats
+extend across the faces of their cells. When a split plane is
+nearly parallel to the viewing rays, the BSP order can draw
+a far splat of one box before a near splat of the neighboring
+box. The centroid-depth order stays closer to the per-splat
+depth order that the model was trained with (Sec. 4.3). The
+centroid-depth order costs one sort of the visible boxes and
+one dot product per box in every frame.
+Per-frame cost. For N splats and V visible boxes, 3DGS
+sorts N keys in every frame, and a hardware rasterizer uploads N indices. AbacusGS sorts V keys and computes V
+dot products. A multi-draw call submits one indirect command of 20 bytes per visible box and no per-splat data. With
+4
+Ground truth
+3DGS, per-splat sort
+StochasticSplats, 16 spp
+Two-level order,
+no fine-tuning
+AbacusGS
+25.77 dB
+22.52 dB
+24.69 dB
+25.50 dB
+33.86 dB
+29.73 dB
+31.82 dB
+33.67 dB
+30.35 dB
+28.32 dB
+29.61 dB
+30.01 dB
+Figure 3. Crops of a test view rendered from the same base model by 3DGS, by StochasticSplats at 16 samples per pixel, by the two-level
+order before fine-tuning, and by AbacusGS, labeled with the PSNR of the full image.
+3.5. Compact format
+cusGS issues one indirect draw command per visible box
+with glMultiDrawElementsIndirect. The vertex shader reads the box index from gl_DrawID. The
+shader maps instance k to splat startb +k, or to splat
+startb +nb −1−k when box b is read in reverse (Fig. 2c). No
+per-splat index buffer is built or uploaded. Platforms without multi-draw expand the box ranges into an index buffer.
+The hardware blends from back to front, and the renderer
+traverses the order of Eq. (2) in reverse.
+The position of a splat is stored relative to the octree cell
+of its box with 10 bits per axis. Opacity, the three DC
+color coefficients, and the mean log-scale take 8 bits each.
+One 16-bit index selects the scale anisotropy and the rotation from a shape codebook. A second 16-bit index selects the spherical-harmonic bands 1 to 3 from a color codebook. Each codebook has 65,536 entries. The shape codebook clusters log-Euclidean features of the normalized covariance, and isotropic splats share one shape code regardless of their rotation. Both codebooks come from k-means
+weighted by the sensitivity of each splat. Niedermayr et
+al. [33] measure this sensitivity with the sum of all pixel values, and we measure it with the training loss. Fine-tuning
+keeps the codebook assignments fixed and refines the codebook entries and the remaining per-splat values. The scalar
+values are quantized to 8 or 10 bits after fine-tuning. A box
+header takes 16 bytes, and a splat takes 13 bytes. Codebooks, box headers, and box centroids computed at load
+time raise the average to 17.3 bytes per splat in memory.
+Our CUDA renderer decodes a variant of the format with
+larger box headers inside its projection kernel without a decompression pass.
+CUDA tile renderer. The CUDA renderer replaces the
+global sort of pairs of tile and splat with a two-level index.
+Pairs of tile and box are sorted by tile and by box rank. Each
+tile streams the splats of its boxes in traversal order, skips
+the splats whose screen rectangle misses the tile, and blends
+the remaining splats in order. On a synthetic test scene with
+300,000 Gaussians, the CUDA renderer matches the differentiable reference renderer at 108 dB PSNR or higher with
+the same order and the same data. The OpenGL renderer
+matches the reference renderer at 54.4 dB PSNR in the median over 26 test views.
+4. Experiments
+3.6. Renderers
+The evaluation answers three questions. Section 4.1 measures how much image quality the two-level order costs.
+Section 4.2 measures how much per-frame work it removes.
+Section 4.3 identifies the design choices that make the order
+learnable. Section 4.4 then tests the stored axes on cameras
+away from the training views.
+Hardware rasterization. Our OpenGL renderer builds
+on the open-source GaussianSplattingViewer [27] and follows common web viewers. Each splat is an instanced
+quad, the vertex shader performs the EWA projection,
+and the fixed-function unit blends the fragments. Aba5
+Method
+Splat
+Mip-NeRF 360
+Tanks&Temples
+Deep Blending
+Over sort PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+Official 3DGS rasterizer and metrics
+3DGS [21], reported
+✓
+3DGS, our retraining
+✓
+StochasticSplats, 16 spp
+✗
+StochasticSplats, 64 spp
+✗
+StochasticSplats, 1024 spp
+✗
+✓
+✓
+✗
+✗
+✗
+27.21
+27.49
+24.06
+26.25
+27.33
+0.815
+0.816
+0.589
+0.730
+0.807
+0.214
+0.215
+0.401
+0.279
+0.205
+23.14
+23.75
+20.65
+22.64
+23.56
+0.841
+0.853
+0.504
+0.691
+0.832
+0.183
+0.169
+0.439
+0.307
+0.176
+29.41
+29.75
+27.33
+28.99
+29.72
+0.903
+0.907
+0.688
+0.830
+0.901
+0.243
+0.239
+0.395
+0.283
+0.219
+Our rasterizer and metrics
+3DGS, +3k steps
+3DGS, +10k steps
+AbacusGS, no fine-tuning
+AbacusGS, +3k steps
+AbacusGS compact, +10k steps
+✓
+✓
+✗
+✗
+✗
+27.43
+27.48
+26.05
+27.29
+27.26
+0.815
+0.815
+0.794
+0.813
+0.811
+0.260
+0.258
+0.281
+0.262
+0.267
+23.71
+23.72
+22.56
+23.56
+23.55
+0.851
+0.852
+0.820
+0.848
+0.847
+0.207
+0.204
+0.239
+0.211
+0.212
+29.64
+29.66
+28.74
+29.56
+29.66
+0.905
+0.905
+0.897
+0.904
+0.905
+0.316
+0.316
+0.331
+0.319
+0.319
+✓
+✓
+✓
+✓
+✓
+Table 1. Image quality on 13 scenes, with the upper block evaluated by the official 3DGS code and the lower block evaluated by our
+renderer and metrics.
+0.0
+Setup. We use the 13 scenes on which 3DGS was evaluated, from Mip-NeRF 360 [3], Tanks and Temples [24],
+and Deep Blending [16]. Every eighth image is held out for
+testing. The base models come from the official 3DGS implementation, trained for 30,000 steps with its default configuration. The base models hold 1.07 to 4.88 million splats,
+and their test PSNR exceeds the published numbers on all
+three datasets (Tab. 1). Every fine-tuned model has a control. The control continues training the same base model
+for the same number of steps with the per-splat depth order.
+Fine-tuned models are rendered with our reference renderer
+and scored with our metric code. Our metric code reports
+higher LPIPS than the official scripts, and we compare finetuned models only within our pipeline. All timings use one
+NVIDIA RTX 6000 Ada GPU.
+ΔPSNR (dB)
+−0.1
+−0.2
+−0.3
+float, +3k steps
+compact, +10k steps
+n
+in
+flo
+we
+rs
+bic
+yc
+le
+stu
+mp
+pla
+yro
+om
+tre
+eh
+ill
+dr
+joh
+ns
+on
+tra
+ck
+rd
+e
+tru
+ga
+r
+m
+ro
+o
+co
+un
+te
+bo
+kit
+ns
+ai
+ch
+en
+−0.4
+Figure 4. PSNR change of every scene against its equally finetuned control, sorted by the change of the compact model.
+At 16 and 64 samples per pixel, StochasticSplats loses more
+PSNR than AbacusGS, and its crops in Fig. 3 show noise.
+Table 2 lists the PSNR change of sort-free and coarseorder methods relative to the 3DGS row of each paper. In
+our runs, the reference is the base model for StochasticSplats and the equally fine-tuned control for AbacusGS.
+AbacusGS is the only method in the table that keeps the
+over operator and sorts no splats at render time. DuplexGS, Mobile-GS, and WSR train a new representation from
+scratch and exceed their 3DGS baselines on some datasets.
+Training from scratch does not convert an existing 3DGS
+model.
+4.1. Image quality
+The first question is how much image quality the two-level
+order costs. Table 1 reports the average metrics of each
+dataset, and Fig. 4 shows the PSNR change of every scene
+against its control. Without fine-tuning, the two-level order
+lowers PSNR on all three datasets. Order-aware fine-tuning
+brings the float model close to its control in PSNR, SSIM,
+and LPIPS. The compact model loses slightly more against
+a control that trains for the same 10,000 steps. With the
+compact format, the four indoor scenes of Mip-NeRF 360
+lose the most, and the two Deep Blending scenes and Treehill lose almost nothing. Figure 5 shows two test views with
+a large loss of the compact model. The crops of the compact model differ from the control mainly in smooth regions
+such as the sky and the ceiling. On the gsplat base models,
+a second fine-tuning seed gives a similar loss (Tab. 5).
+We fine-tune StochasticSplats [23] from the same base
+models with the protocol of its authors. StochasticSplats
+approaches its base model only at 1,024 samples per pixel.
+4.2. Per-frame work
+The second question is how much per-frame work the twolevel order removes. Table 3 times one OpenGL renderer
+that draws the same splats for every method on all 13
+scenes. Table 4 reports memory, loading, and a browser
+setting.
+6
+Ground truth
+3DGS, +10k steps
+AbacusGS compact
+Method
+23.10 dB
+33.04 dB
+OpenGL, ordering on one CPU thread
+3DGS, depth sort
+24.1
+3DGS, box culling, depth sort
+33.1
+Per-frame in-box sort
+48.9
+AbacusGS, expanded indices
+8.8
+AbacusGS, multi-draw
+4.6
+AbacusGS, multi-draw, K=64
+8.5
+OpenGL, ordering on the GPU
+3DGS, depth sort
+1.3
+AbacusGS, multi-draw
+1.1
+CUDA tile renderer
+3DGS, training order
+–
+3DGS, box order
+–
+3DGS, box order, compact data 0.32
+AbacusGS, compact data
+0.17
+22.85 dB
+32.54 dB
+Figure 5. Crops of the compact model and its control on two test
+views with a large loss of the compact model, labeled with the
+PSNR of the full image.
+Method
+Compositing
+Sorted
+From M360 T&T
+Order
+1×
+1×
+Frame
+Items
+2× 4K per frame
+26.8
+35.0
+50.7
+10.7
+6.0
+10.1
+27.3
+35.4
+51.3
+11.4
+7.2
+10.0
+30.6
+39.0
+54.0
+13.7
+9.3
+12.5
+2,058k
+1,099k
+1,099k
+1,099k
+35k
+66k
+3.8
+2.6
+5.5
+3.7
+7.3
+6.3
+2,058k
+35k
+1.64
+1.41
+1.33
+0.97
+3.04
+2.84
+2.52
+1.84
+5.23
+5.06
+4.49
+3.22
+–
+–
+–
+–
+Table 3. Ordering and frame time in milliseconds, as medians over
+13 scenes for OpenGL and means over 13 scenes for CUDA.
+DB
+WSR [17]
+weighted sum nothing scratch -0.02 +0.47 +0.22
+Mobile-GS [6]
+order-indep. nothing scratch -0.09 -0.05 +0.52
+Duplex-GS [28]
+sum in cell
+cells
+scratch +0.22 +0.75 +0.65
+Stippling [18], 1 spp
+stochastic
+nothing 3DGS -1.18 -0.67 -0.19
+†
+StochasticSplats , 64 spp
+stochastic
+nothing 3DGS -1.25 -1.11 -0.75
+StochasticSplats† , 1024 spp stochastic
+nothing 3DGS -0.16 -0.19 -0.03
+AbacusGS†
+over
+boxes
+3DGS -0.13 -0.14 -0.08
+AbacusGS† compact
+over
+boxes
+3DGS -0.22 -0.17 +0.00
+Scene storage, bytes per splat and load time
+Method
+File GPU memory
+3DGS, PLY file
+AbacusGS, our loader
+AbacusGS, 16-byte headers∗
+248.0
+19.3
+17.1
+Load, 1st frame
+236.5
+36.8
+17.3
+WebGL2 in headless Chrome, phone viewport, CPU throttled 4×
+Method
+Order (ms)
+Frame (ms)
+Table 2. PSNR change of sort-free and coarse-order methods relative to the 3DGS row of each paper, where † marks our runs from
+the official 3DGS models.
+3DGS, depth sort
+AbacusGS, expanded indices
+AbacusGS, multi-draw
+45.2
+6.3
+4.2
+65.7
+23.5
+21.6
+293 ms
+69 ms
+–
+FPS
+26–51
+60
+60
+Table 4. File size, GPU memory, and loading time averaged over
+13 scenes, with the row marked by ∗ computed from the format,
+and medians of the browser emulation over four scenes.
+Hardware rasterization. With ordering on one CPU
+thread, as in web viewers, the per-splat sort takes most of
+the frame time of 3DGS. AbacusGS replaces this sort with
+a sort of the visible boxes, and the frame time drops with
+the ordering time. Multi-draw orders faster than expanded
+indices because multi-draw builds and uploads no per-splat
+index buffer. The gain shrinks at higher resolution, where
+drawing takes a larger share of the frame. Culling the invisible boxes before the per-splat sort makes the frame of 3DGS
+longer in our implementation. Sorting every box in every
+frame on the CPU, as StreamingGS does, takes longer than
+the per-splat sort of 3DGS. With ordering on the GPU, both
+orders take a similar time, and AbacusGS draws only the
+splats of visible boxes. AbacusGS renders faster at 1× on
+every scene, and at 4K four of the 13 scenes render slightly
+slower than 3DGS.
+setting, 3DGS stays below the 60 frames per second of the
+display on all four scenes, and AbacusGS reaches this rate
+on all four.
+CUDA tile renderer. With the same compact data, the
+two-level index renders frames faster than the 3DGS
+pipeline at all three resolutions. Building the per-frame index takes less time because the index sorts pairs of tile and
+box. Storing the splats in box order already speeds up the
+unmodified 3DGS pipeline, and all CUDA comparisons of
+AbacusGS use this storage order.
+Browser emulation. We also run a WebGL2 viewer in
+headless Chrome on four scenes. The viewport is that of a
+phone, and the CPU is throttled by a factor of 4, as in the
+mobile setting of Lighthouse. The ordering code runs on
+the main thread of the page because the DevTools throttling
+does not reach Web Workers. The drawing still runs on the
+desktop GPU, which is faster than a phone GPU. In this
+Memory. The compact file of AbacusGS is an order of
+magnitude smaller than the PLY file of 3DGS. In GPU
+memory, the format with 16-byte headers needs less than
+a tenth of the bytes of 3DGS. Our prototype loader keeps
+two extra index arrays and needs about a sixth. A compact
+scene also loads and renders its first frame faster than the
+PLY file of 3DGS.
+7
+4.3. Design choices
+∆PSNR
+Worst ∆SSIM
+no FT
+FT scene
+FT
+Variant
+The third question is which design choices make the twolevel order learnable. Table 5 reports each choice as the
+change against an equally fine-tuned control.
+Official 3DGS base models, K=128
+reversible order
+Float
+per-frame in-box sort
+reversible, K=64
+reversible, full header
+per-frame in-box sort
+Compact
+reversible, K=64
+reversible, 16-byte header
+Box order. We trace camera rays through the boxes of a
+gsplat Truck model with K=128 and check whether each
+order draws consecutive boxes along a ray from front to
+back. The BSP order passes this check for every tested
+pair, and the centroid-depth order fails it for about a tenth
+of the pairs. Splats extend across the faces of their cells,
+and the BSP order still loses more PSNR before and after
+fine-tuning.
+In-box order and box size. After fine-tuning, the stored
+order and the reversible stored order come close to the perframe in-box sort, which reproduces the depth order inside
+every box. On the gsplat base models, reversal reduces the
+loss only before fine-tuning. Smaller boxes lower the loss
+and raise the number of draw commands, and K=64 lengthens the OpenGL frame (Tab. 3). We keep K=128.
+-1.27
+–
+-0.93
+-1.57
+-1.33
+-1.24
+–
+-0.126
+-0.089
+-0.089
+-0.172
+-0.153
+-0.158
+-0.176
+-0.31
+-0.20
+-0.21
+-0.46
+-0.48
+-0.47
+-0.47
+-0.0019
+-0.0013
+-0.0014
+-0.0037
+-0.0033
+-0.0034
+-0.0038
+gsplat base models, K=32 unless noted
+Box order octree BSP
+-2.89
+per-frame sort
+-0.75
+stored order
+-0.98
+In-box
+reversible order
+-0.91
+reversible, second seed
+-0.95
+K=64
+-1.24
+Box size K=128
+-1.65
+K=256
+-2.12
+16k entries
+-3.64
+64k entries
+-3.08
+Codebook
+64k, sensitivity
+-2.52
+64k, loss sens., log-Eucl. -1.92
+-0.246
+-0.058
+-0.083
+-0.084
+-0.097
+-0.112
+-0.153
+-0.186
+-0.311
+-0.224
+-0.209
+-0.161
+-0.77
+-0.26
+-0.30
+-0.30
+-0.29
+-0.33
+-0.36
+-0.43
+-0.93
+-0.68
+-0.61
+-0.48
+-0.0022
+-0.0011
+-0.0014
+-0.0014
+-0.0015
+-0.0019
+-0.0024
+-0.0030
+-0.0092
+-0.0061
+-0.0058
+-0.0038
+Table 5. PSNR and SSIM change of design variants against the
+equally fine-tuned control.
+Compact format. Larger codebooks and sensitivity
+weighting each lower the loss of the compact format. The
+last codebook row switches to log-Euclidean shape features
+and measures sensitivity with the training loss, and it lowers the loss further. The 16-byte box header changes PSNR
+very little.
+Cameras
+test cameras
+moved backward
+moved forward
+moved up
+moved sideways
+Median
+Lowest
+Largest drop
+37.6
+37.1
+38.0
+37.1
+37.2
+33.4
+28.4
+31.5
+31.1
+31.7
+–
+5.0
+1.9
+3.5
+1.7
+Table 6. PSNR in decibels between the two-level order and the
+per-splat depth order on the same splats over 13 scenes.
+4.4. Cameras away from the training views
+The axes of the stored orders come from the training cameras, and this test measures the ordering error for cameras
+away from the training views. We move the first eight test
+cameras of each scene backward, forward, up, and sideways
+by 30% of their distance to the centroid of all camera positions. For every camera, we render the compact model with
+the two-level order and with the per-splat depth order and
+compute the PSNR between the two images. In Tab. 6, the
+median PSNR of every direction stays close to that of the
+test cameras. Moving the Train cameras backward gives the
+largest drop.
+from a throttled desktop CPU and a desktop GPU, and we
+have not measured real phones.
+5. Conclusion
+AbacusGS stores the blending order of 3DGS in the layout
+of the scene. In every frame, AbacusGS sorts the visible
+boxes and reads each box in a stored order or in its reverse,
+and a short fine-tuning adapts an existing model to this order. The over operator of 3DGS stays unchanged, and the
+image quality stays close to that of an equally fine-tuned
+3DGS model. On a hardware rasterizer, every visible box
+becomes one draw command, and the frame needs neither
+a per-splat sort nor an index upload. The same layout also
+yields a compact format and a faster CUDA tile renderer.
+4.5. Limitations
+The two-level order approximates the per-splat depth order,
+which itself approximates the per-pixel order. Every model
+needs order-aware fine-tuning, and the box order still sorts
+the visible boxes in every frame. Splats larger than their box
+receive no special treatment. On desktop GPUs with fast
+radix sorts, the CUDA renderer gains less than the OpenGL
+renderer. Our OpenGL renderer reads splats decoded to
+floating point, and decoding the compact format in the vertex shader is not implemented. The browser results come
+LLM Usage Statement
+We used Claude extensively for code, experiments, literature search, figures, and text; the authors verified all results
+and take responsibility.
+8
+References
+Model Carrier Built on WebGPU-Powered Gaussian Splatting Platform. arXiv preprint arXiv:2512.08478, 2025.
+[14] Florian Hahlbohm, Fabian Friederichs, Tim Weyrich, Linus Franke, Moritz Kappel, Susana Castillo, Marc Stamminger, Martin Eisemann, and Marcus Magnor. Efficient Perspective-Correct 3D Gaussian Splatting Using Hybrid Transparency.
+Computer Graphics Forum, 2025.
+arXiv:2410.08129.
+[15] Yudong Han, Chao Xu, Xiaodan Ye, Weichen Bi, Zilong
+Dong, and Yun Ma. WebSplatter: Enabling cross-device
+efficient Gaussian splatting in web browsers via WebGPU.
+arXiv preprint arXiv:2602.03207, 2026.
+[16] Peter Hedman, Julien Philip, True Price, Jan-Michael Frahm,
+George Drettakis, and Gabriel Brostow. Deep blending for
+free-viewpoint image-based rendering. ACM Transactions
+on Graphics, 37(6), 2018.
+[17] Qiqi Hou, Randall Rauwendaal, Zifeng Li, Hoang Le, Farzad
+Farhadzadeh, Fatih Porikli, Alexei Bourd, and Amir Said.
+Sort-free Gaussian Splatting via Weighted Sum Rendering.
+In International Conference on Learning Representations
+(ICLR), 2025. arXiv:2410.18931.
+[18] Zijian Huang, Suiliang Mai, Chuankun Zheng, Yuan
+Meng, and Yuchi Huo. Gaussian Stippling: Efficient
+Sorting-Free 3D Gaussian Rendering through Hybrid Sampling and Spatiotemporal Reconstruction. arXiv preprint
+arXiv:2609.38488, 2026.
+[19] Donovan Hutchence.
+Compressing Gaussian splats.
+PlayCanvas blog, https://blog.playcanvas.com/
+compressing-gaussian-splats/, 2023.
+[20] Joongho Jo and Jongsun Park. GS-TG: 3D Gaussian splatting accelerator with tile grouping for reducing redundant
+sorting while preserving rasterization efficiency. In Design
+Automation Conference (DAC), 2025.
+[21] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3D Gaussian Splatting for Real-Time
+Radiance Field Rendering. ACM Transactions on Graphics,
+42(4), 2023. arXiv:2308.04079.
+[22] Bernhard Kerbl, Andréas Meuleman, Georgios Kopanas,
+Michael Wimmer, Alexandre Lanvin, and George Drettakis.
+A Hierarchical 3D Gaussian Representation for Real-Time
+Rendering of Very Large Datasets. ACM Transactions on
+Graphics, 43(4), 2024. arXiv:2406.12080.
+[23] Shakiba Kheradmand, Delio Vicini, George Kopanas,
+Dmitry Lagun, Kwang Moo Yi, Mark Matthews, and Andrea Tagliasacchi. StochasticSplats: Stochastic Rasterization for Sorting-Free 3D Gaussian Splatting. In Proceedings
+of the IEEE/CVF International Conference on Computer Vision (ICCV), 2025. arXiv:2503.24366.
+[24] Arno Knapitsch, Jaesik Park, Qian-Yi Zhou, and Vladlen
+Koltun. Tanks and Temples: Benchmarking large-scale
+scene reconstruction. ACM Transactions on Graphics, 36
+(4), 2017.
+[25] Kevin Kwok. splat: A WebGL viewer for 3D Gaussian
+splatting. https://github.com/antimatter15/
+splat, 2023.
+[26] Joo Chan Lee, Daniel Rho, Xiangyu Sun, Jong Hwan Ko,
+and Eunbyung Park. Compact 3D Gaussian Representation
+[1] Andy Adinets and Duane Merrill. Onesweep: A Faster
+Least Significant Digit Radix Sort for GPUs. arXiv preprint
+arXiv:2206.01784, 2022.
+[2] Muhammad Salman Ali, Chaoning Zhang, Marco Cagnazzo,
+Giuseppe Valenzise, Enzo Tartaglione, and Sung-Ho Bae.
+Compression in 3D Gaussian Splatting: A Survey of
+Methods, Trends, and Future Directions. arXiv preprint
+arXiv:2502.19457, 2025.
+[3] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+Anti-Aliased Neural Radiance Fields. In Proceedings of
+the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR), 2022. arXiv:2111.12077.
+[4] Ge Chen, Pedro V. Sander, Diego Nehab, Lei Yang, and
+Liang Hu. Depth-presorted triangle lists. ACM Transactions
+on Graphics, 31(6):160:1–160:9, 2012.
+[5] Yihang Chen, Qianyi Wu, Weiyao Lin, Mehrtash Harandi,
+and Jianfei Cai. HAC: Hash-grid Assisted Context for 3D
+Gaussian Splatting Compression. In European Conference
+on Computer Vision (ECCV), 2024. arXiv:2403.14530.
+[6] Xiaobiao Du, Yida Wang, Kun Zhan, and Xin Yu. MobileGS: Real-time Gaussian Splatting for Mobile Devices. In International Conference on Learning Representations (ICLR),
+2026. arXiv:2603.11531.
+[7] Eric Enderton, Erik Sintorn, Peter Shirley, and David Luebke. Stochastic transparency. In Proceedings of the ACM
+SIGGRAPH Symposium on Interactive 3D Graphics and
+Games (I3D), 2010.
+[8] Zhiwen Fan, Kevin Wang, Kairun Wen, Zehao Zhu, Dejia Xu, and Zhangyang Wang. LightGaussian: Unbounded
+3D Gaussian Compression with 15x Reduction and 200+
+FPS. In Advances in Neural Information Processing Systems
+(NeurIPS), 2024. arXiv:2311.17245.
+[9] Guofeng Feng, Siyan Chen, Rong Fu, Zimu Liao, Yi Wang,
+Tao Liu, Zhilin Pei, Hengjie Li, Xingcheng Zhang, and
+Bo Dai. FlashGS: Efficient 3D Gaussian Splatting for
+Large-scale and High-resolution Rendering. arXiv preprint
+arXiv:2408.07967, 2024.
+[10] Yu Feng, Weikai Lin, Yuge Cheng, Zihan Liu, Jingwen
+Leng, Minyi Guo, Chen Chen, Shixuan Sun, and Yuhao
+Zhu. Lumina: Real-Time Mobile Neural Rendering by
+Exploiting Computational Redundancy.
+arXiv preprint
+arXiv:2506.05682, 2025.
+[11] Gideon Frieder, Dan Gordon, and R. Anthony Reynolds.
+Back-to-front display of voxel-based objects. IEEE Computer Graphics and Applications, 5(1), 1985.
+[12] Henry Fuchs, Zvi M. Kedem, and Bruce F. Naylor. On visible surface generation by a priori tree structures. In Proceedings of ACM SIGGRAPH, 1980.
+[13] Yuning Gong, Yifei Liu, Yifan Zhan, Muyao Niu, Xueying Li, Yuanjun Liao, Jiaming Chen, Yuanyuan Gao, Jiaqi
+Chen, Minming Chen, Li Zhou, Yuning Zhang, Wei Wang,
+Xiaoqing Hou, Huaxi Huang, Shixiang Tang, Le Ma, Dingwen Zhang, Xue Yang, Junchi Yan, Yanchi Zhang, Yinqiang
+Zheng, Xiao Sun, and Zhihang Zhong. Visionary: The World
+9
+[42] Gyujin Sim, Seungjoo Shin, Hosung Jeon, Gwangsoon Lee,
+Hyon-Gon Choo, and Sunghyun Cho. CoherentRaster: Efficient 3D Gaussian Splatting for Light Field Displays. In
+SIGGRAPH Conference Papers, 2026. arXiv:2605.04509.
+[43] Cheng Sun, Jaesung Choe, Charles Loop, Wei-Chiu Ma, and
+Yu-Chiang Frank Wang. Sparse Voxels Rasterization: Realtime High-fidelity Radiance Field Rendering. In Proceedings of the IEEE/CVF Conference on Computer Vision and
+Pattern Recognition (CVPR), 2025. arXiv:2412.04459.
+[44] Xuechang Tu, Lukas Radl, Michael Steiner, Markus Steinberger, Bernhard Kerbl, and Fernando de la Torre. VRSplat:
+Fast and robust Gaussian splatting for virtual reality. Proceedings of the ACM on Computer Graphics and Interactive
+Techniques, 8(1), 2025.
+[45] Felix Windisch, Thomas Köhler, Lukas Radl, Chris Wyman,
+Georgios Kopanas, Bernhard Kerbl, and Markus Steinberger. SteadySplats: Resampling of Low-Variance Gaussians for High-Fidelity Stochastic Rendering. arXiv preprint
+arXiv:2610.05576, 2026.
+[46] Wentao Yang, Fanzhen Kong, Zejian Kang, and Xiangru
+Huang. SparseOIT: Improving Order-Independent Transparency 3DGS via Active Set Method. arXiv preprint
+arXiv:2605.13855, 2026.
+[47] Xijie Yang, Linning Xu, Lihan Jiang, Dahua Lin, and Bo
+Dai. Virtualized 3D Gaussians: Flexible Cluster-based
+Level-of-Detail System for Real-Time Rendering of Composed Scenes. arXiv preprint arXiv:2505.06523, 2025.
+[48] Vickie Ye, Ruilong Li, Justin Kerr, Matias Turkulainen,
+Brent Yi, Zhuoyang Pan, Otto Seiskari, Jianbo Ye, Jeffrey
+Hu, Matthew Tancik, and Angjoo Kanazawa. gsplat: An
+Open-Source Library for Gaussian Splatting. arXiv preprint
+arXiv:2409.06765, 2024.
+[49] Chenqi Zhang, Yu Feng, Jieru Zhao, Guangda Liu, Wenchao Ding, Chentao Wu, and Minyi Guo. STREAMINGGS: Voxel-Based Streaming 3D Gaussian Splatting
+with Memory Optimization and Architectural Support. In
+ACM/IEEE Design Automation Conference (DAC), 2025.
+arXiv:2506.09070.
+[50] Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and
+Markus Gross. EWA volume splatting. In Proceedings of
+IEEE Visualization, 2001.
+for Radiance Field. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR),
+2024. arXiv:2311.13681.
+[27] limacv. GaussianSplattingViewer: An OpenGL viewer
+for 3D gaussian splatting. https://github.com/
+limacv/GaussianSplattingViewer, 2023.
+[28] Weihang Liu, Yuke Li, Yuxuan Li, Jingyi Yu, and Xin
+Lou. Duplex-GS: Proxy-Guided Weighted Blending for
+Real-Time Order-Independent Gaussian Splatting. arXiv
+preprint arXiv:2508.03180, 2025.
+[29] Morgan McGuire and Louis Bavoil. Weighted blended orderindependent transparency. Journal of Computer Graphics
+Techniques, 2(2), 2013.
+[30] Michael Moroz.
+VRChat Gaussian splatting.
+https://github.com/MichaelMoroz/
+VRChatGaussianSplatting, 2025.
+[31] Guy M. Morton. A computer oriented geodetic data base and
+a new technique in file sequencing. Technical report, IBM,
+1966.
+[32] Jan U. Müller, Robin Tim Landsgesell, Leif Van Holland, Patrick Stotko, and Reinhard Klein. Moment-Based
+3D Gaussian Splatting: Resolving Volumetric Occlusion
+with Order-Independent Transmittance.
+arXiv preprint
+arXiv:2512.11800, 2025.
+[33] Simon Niedermayr, Josef Stumpfegger, and Rüdiger Westermann. Compressed 3D Gaussian Splatting for Accelerated
+Novel View Synthesis. In Proceedings of the IEEE/CVF
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2024. arXiv:2401.02436.
+[34] Changhun Oh, Seongryong Oh, Jinwoo Hwang, Yoonsung
+Kim, Hardik Sharma, and Jongse Park. Neo: Real-Time OnDevice 3D Gaussian Splatting with Reuse-and-Update Sorting Acceleration. arXiv preprint arXiv:2511.12930, 2025.
+[35] Besm Osman, Mestiez Pereira, Huub van de Wetering, and
+Maxime Chamberland. Voxlines: Streamline transparency
+through voxelization and view-dependent line orders. In
+Computational Diffusion MRI Workshop (CDMRI) at MICCAI, 2023. arXiv:2308.08436.
+[36] Dawid Paj ˛
+ak, Martin Bisson, and Rodolfo Lima. HiGS:
+A Hierarchical Rendering Architecture for Real-Time 3D
+Gaussian Splatting. arXiv preprint arXiv:2606.00352, 2026.
+[37] Thomas Porter and Tom Duff. Compositing digital images.
+In Proceedings of ACM SIGGRAPH, 1984.
+[38] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+StopThePop: Sorted Gaussian Splatting for View-Consistent
+Real-time Rendering. ACM Transactions on Graphics, 43
+(4), 2024. arXiv:2402.00525.
+[39] Kerui Ren, Lihan Jiang, Tao Lu, Mulin Yu, Linning Xu,
+Zhangkai Ni, and Bo Dai. Octree-GS: Towards Consistent
+Real-time Rendering with LOD-Structured 3D Gaussians.
+arXiv preprint arXiv:2403.17898, 2024.
+[40] Md Musfiqur Rahman Sanim, Zhihao Shu, Bahram Afsharmanesh, AmirAli Mirian, Jiexiong Guan, Wei Niu, Bin Ren,
+and Gagan Agrawal. Optimizing 3D Gaussian splattering for
+mobile GPUs. arXiv preprint arXiv:2511.16298, 2025.
+[41] Thorsten Scheuermann. Practical real-time hair rendering
+and shading. In ACM SIGGRAPH 2004 Sketches, 2004.
+10

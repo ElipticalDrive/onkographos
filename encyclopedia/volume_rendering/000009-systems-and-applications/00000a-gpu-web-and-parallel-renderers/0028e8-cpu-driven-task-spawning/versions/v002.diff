@@ -1,0 +1,128 @@
+--- v001.md
++++ v002.md
+@@ -4,69 +4,84 @@
+ 
+ ## Overview
+-CPU-driven task spawning is a rendering architecture where the CPU acts as the central governor, deciding when and how GPU tasks are launched, while the GPU executes these work requests as a coprocessor [S1, unofficial]. This model solves the problem of centralized control by leveraging the CPU's role as the system's hub for memory, storage, and peripheral management [S1, unofficial]. It is distinct from GPU-driven approaches because the GPU cannot generate new work requests on its own, creating a dependency on the CPU for every dispatch [S1, unofficial]. This contrasts with siblings like [WebSplatter](1741-websplatter.md) or [ClearView (Unified) Renderer](2460-clearview-unified-renderer.md), which may utilize more autonomous or hybrid execution models to mitigate CPU bottlenecks.
++CPU-driven task spawning is a GPU execution model where the CPU acts as the central governor, deciding when and how GPU tasks are launched, while the GPU functions as a coprocessor that executes work requests but cannot generate new ones [S1, unofficial]. This approach centralizes decision-making logic but suffers from high CPU-GPU communication latency, making it ineffective for pipelines with fine-grain micro-dependencies or stages that dynamically compute the work for subsequent stages [S1, unofficial]. It differs from GPU-driven spawning (where the GPU generates its own work) and asynchronous submission (which hides latency but still relies on CPU-initiated commands) by strictly enforcing a top-down control hierarchy [S1, unofficial].
+ 
+ ## How it works
+-The method relies on the CPU issuing commands to the GPU, which then executes them. Due to high communication latency, pure synchronous control is often ineffective, leading to variants like asynchronous and indirect submission.
+-
+ **Inputs and Outputs:**
+-*   **Input:** CPU-side decision logic, task parameters (initially), and GPU memory addresses (for indirect submission).
+-*   **Output:** GPU execution of workloads (compute, rasterization, ray tracing).
++*   **Input:** Volumetric data structures (e.g., textures, sparse grids) and CPU-side control logic determining task parameters (dispatch counts, buffer addresses).
++*   **Output:** GPU execution of compute, rasterization, or ray-tracing tasks; completion signals returned to the CPU.
+ 
+ **Data Structures:**
+-*   **Submission Queue:** A buffer or list where the CPU places commands before they are processed by the GPU driver/hardware.
+-*   **Indirect Parameter Buffer:** A GPU-accessible memory region containing the actual parameters (e.g., workgroup counts, vertex counts) for indirect submissions [S1, unofficial].
++*   **Command Buffers/Lists:** Linear memory structures containing encoded GPU commands. In modern APIs, these may be pre-allocated arrays of command headers or indirect parameter blocks.
++*   **Submission Queues:** Ordered lists of commands submitted to the GPU hardware.
++*   **Indirect Parameter Blocks:** GPU memory locations containing dynamic parameters (e.g., number of workgroups, vertex counts) read by the GPU at execution time.
+ 
+-**Steps:**
+-1.  **Command Generation:** The CPU determines the necessary work for the current frame or pipeline stage.
+-2.  **Submission:** The CPU places the command into a submission queue.
+-    *   *Standard:* Parameters are embedded in the command.
+-    *   *Indirect:* The command contains a pointer to a GPU memory location [S1, unofficial].
+-3.  **Execution (GPU):**
+-    *   *Standard:* The GPU reads the embedded parameters and executes the task.
+-    *   *Indirect:* The GPU reads the pointer, fetches the parameters from the GPU memory buffer, and then executes the task [S1, unofficial].
+-4.  **Synchronization:** If dependencies exist, barriers are inserted.
+-    *   *Coarse:* A barrier forces all subsequent tasks to wait for all preceding tasks in the same queue [S1, unofficial].
+-    *   *Queue-Specific:* If multiple queues are used, barriers only enforce dependencies between tasks within the same queue [S1, unofficial].
++**Numbered Steps:**
++1.  **CPU Decision:** The CPU analyzes the current state of the volume rendering pipeline (e.g., visibility culling results, load balancing metrics) to determine the necessary work for the GPU.
++2.  **Command Encoding:** The CPU encodes GPU commands into a command buffer. If using indirect submission, the CPU encodes a command with a pointer to GPU memory rather than immediate parameter values [S1, unofficial].
++3.  **Submission:** The CPU submits the command buffer to a GPU submission queue.
++4.  **Execution:** The GPU hardware fetches commands from the queue. If indirect, it reads the parameter block from GPU memory to determine execution parameters [S1, unofficial].
++5.  **Synchronization:** The CPU may wait for a completion signal (fence/sync object) before proceeding, incurring round-trip latency [S1, unofficial].
+ 
+ **Formulas:**
+-*   **Latency:** $L_{CPU-GPU} \approx 20\text{--}30 \, \mu s$ for an empty round-trip submission (CPU $\to$ GPU $\to$ CPU) [S1, unofficial].
++*   **Round-Trip Latency ($L_{RT}$):** The time elapsed between CPU submission and CPU receipt of completion signal.
++    $$ L_{RT} \approx 20\text{--}30 \, \mu s $$
++    This value is measured for empty submissions and is independent of GPU type (integrated vs. dedicated) [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Queue Limits:**
+-    *   Vulkan: 24 queues (Nvidia), 16 queues (AMD), 5 queues (Intel) [S1, unofficial].
+-    *   CUDA: Unlimited logical streams, mapped to 32 internal hardware queues [S1, unofficial].
+-*   **Task Size:** Can be set to zero to cancel a submission, though submission overhead remains [S1, unofficial].
++*   **Task Size:** Can be set to zero to cancel a submission, but the submission overhead remains [S1, unofficial].
++*   **Queue Count:** Limited by hardware/API. Vulkan reports 24 queues for Nvidia, 16 for AMD, 5 for Intel, and 1 for mobile [S1, unofficial]. CUDA maps unlimited streams to 32 internal queues [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Latency Bottleneck:** The 20–30 µs latency is significant compared to sub-nanosecond CPU/GPU clocks, making synchronous control ineffective for pipelines with fine-grain micro-dependencies [S1, unofficial].
+-*   **Indirect Submission Overhead:** If the number of pipeline passes is unknown, the CPU must issue indirect submissions for the maximum possible passes and cancel unnecessary ones, incurring overhead repeatedly [S1, unofficial].
+-*   **Barrier Granularity:** Barriers block all tasks submitted after them, not just dependent ones, leading to unnecessary stalling [S1, unofficial].
+-*   **Queue Limitations:** The limited number of queues (e.g., max 24 in Vulkan) is insufficient for micro-dependencies at the GPU core granularity (modern GPUs have 50–100 cores) [S1, unofficial].
+-*   **Hybrid Complexity:** Indirect submission is an "awkward hybrid" where the GPU controls parameters but cannot initiate submissions, making it error-prone [S1, unofficial].
++*   **Latency Bottleneck:** The 20–30 µs round-trip latency is significant compared to sub-nanosecond CPU/GPU clocks, creating a bottleneck for fine-grained control [S1, unofficial].
++*   **Indirect Submission Overhead:** If the number of pipeline passes is unknown, the CPU must issue indirect submissions for a maximum number of passes and cancel unnecessary ones, incurring overhead repeatedly [S1, unofficial].
++*   **Barrier Granularity:** Barriers enforce dependencies at a coarse granularity, potentially stalling more GPU work than necessary [S1, unofficial].
++*   **Queue Limitations:** The limited number of submission queues (e.g., 24 max on Nvidia) is insufficient for enforcing dependencies at the GPU core granularity (50–100 cores) [S1, unofficial].
++
++**Pseudocode:**
++```python
++# CPU-side logic for CPU-driven task spawning
++def cpu_driven_spawn(volume_data, culling_results):
++    # 1. CPU decides work based on culling results
++    num_workgroups = calculate_workgroups(culling_results)
++    
++    # 2. Encode command
++    # If using indirect submission, write parameters to GPU memory first
++    if use_indirect:
++        gpu_param_block = allocate_gpu_memory()
++        write_to_gpu_memory(gpu_param_block, num_workgroups)
++        command = create_indirect_command(address=gpu_param_block)
++    else:
++        command = create_direct_command(workgroups=num_workgroups)
++        
++    # 3. Submit to queue
++    submit_to_queue(command)
++    
++    # 4. Wait for completion (incurring latency)
++    wait_for_fence()
++```
+ 
+ ## Subtopics
+ 
+ ### [Asynchronous Submission](5531-asynchronous-submission.md)
+-A model where the CPU places GPU commands into a queue and the GPU executes them as resources become available, but the CPU returns immediately without waiting for completion. This mitigates the CPU-GPU latency bottleneck by allowing the CPU to continue processing other tasks while the GPU works. It is a partial solution to the latency issues inherent in synchronous CPU-driven spawning. See [Asynchronous Submission](5531-asynchronous-submission.md).
++Asynchronous submission is a model where GPU commands are placed into a queue and executed by the GPU as soon as required resources are available, but they return immediately from the point of view of the CPU. It solves the problem of high CPU-GPU communication latency inherent in synchronous control, allowing the CPU and GPU to work concurrently. Unlike synchronous submission, which blocks the CPU until the GPU completes a task, asynchronous submission removes round-trip latency and enables parallel execution of many small tasks or chaining of big tasks.
+ 
+ ### Indirect Submission
+-A semi-GPU-driven variant where the CPU emits commands, but the parameters (e.g., workgroup count, vertex count) are stored in GPU memory and read by the GPU at execution time [S1, unofficial].
+-*   **Mechanism:** A first pass writes parameters to a GPU memory pointer; a barrier ensures completion before the second pass (the actual command) executes [S1, unofficial].
+-*   **Capabilities:** Advanced implementations (DirectX ExecuteIndirect, Vulkan `VK_EXT_device_generated_commands`) can indirectly select shaders, bind resources, and set rasterization states [S1, unofficial].
+-*   **Limitations:** The GPU cannot create *new* submissions. If pass counts are unknown, the CPU must pre-allocate maximum passes and cancel unused ones, paying overhead for each [S1, unofficial]. It is considered unintuitive and error-prone due to its hybrid nature [S1, unofficial].
++Indirect submission is a model where the CPU emits all GPU commands, but the parameters of said commands are filled by the GPU. The command contains an address in GPU memory, which the GPU reads before execution to determine parameters [S1, unofficial]. A first pass writes to the pointer in GPU memory to decide the command's parameters, and a barrier must be placed between the two passes to ensure correct execution [S1, unofficial]. Task size can be set to zero to effectively cancel a submission, but the submission overhead is still incurred [S1, unofficial]. It is not possible to dynamically create new submissions from the GPU; if the number of required passes is not known in advance, one must issue indirect submissions for a maximum number of passes and dynamically cancel unnecessary ones, paying overhead many times [S1, unofficial]. It is an awkward hybrid model where the GPU controls most aspects but cannot initiate submissions, making it unintuitive and error-prone [S1, unofficial]. It is widely available and in use today for indirect control of task size (number of workgroups, vertices, rays), with advanced iterations including DirectX ExecuteIndirect and Vulkan VK_EXT_device_generated_commands [S1, unofficial].
+ 
+ ### Multiple submission queues
+-A solution to coarse barrier granularity where commands are submitted to specific queues rather than a single global queue [S1, unofficial].
+-*   **Mechanism:** Barriers only enforce dependencies between tasks within the *same* queue. Tasks in different queues can run independently [S1, unofficial].
+-*   **Limits:** The number of queues is restricted (Vulkan: 24 Nvidia/16 AMD/5 Intel; CUDA: 32 internal) [S1, unofficial]. This is insufficient for micro-dependencies across the 50–100 cores of modern GPUs [S1, unofficial].
++Multiple submission queues is a solution where GPU commands are submitted to specific queues instead of directly to the GPU. Barriers only enforce dependencies between tasks of the same queue, allowing tasks in different queues to run independently [S1, unofficial]. For example, submitting task C to a different queue than task A and B lets it run independently of A or B [S1, unofficial]. Vulkan reports 24 queues for Nvidia GPUs, 16 for AMD, 5 for Intel, and usually only 1 for mobiles [S1, unofficial]. CUDA lets you have an unlimited number of streams, but behind the scenes maps them to 32 internal queues [S1, unofficial]. The restricted number of queues is not enough for micro-dependencies; modern GPUs can have 50 to 100 cores, so it is not possible to use queues to enforce dependencies at the GPU core granularity [S1, unofficial].
+ 
+ ## Operating characteristics
+-*   **Latency:** High CPU-GPU round-trip latency (20–30 µs) is the primary bottleneck, regardless of whether the GPU is integrated or dedicated [S1, unofficial].
+-*   **Complexity:** Managing dependencies via barriers and queues is complex. Barriers cause coarse-grained stalling, and queue management is limited by hardware constraints [S1, unofficial].
+-*   **Flexibility:** Indirect submission offers flexibility in parameter determination but lacks the ability to dynamically spawn new tasks from the GPU [S1, unofficial].
+-*   **Suitability:** Best suited for coarse-grained parallelism where dependencies are minimal or can be managed via multiple queues. Unsuitable for fine-grain micro-dependencies or pipelines requiring dynamic task generation from the GPU [S1, unofficial].
++*   **Time Complexity:** Submission latency is dominated by driver overhead and CPU-GPU communication, measured at 20–30 µs per round trip [S1, unofficial]. This latency is constant regardless of GPU type (integrated or dedicated) [S1, unofficial].
++*   **Memory Complexity:** Requires command buffers and potentially indirect parameter blocks in GPU memory.
++*   **Measured Performance:** The 20–30 µs latency is significant for fine-grained tasks, creating a bottleneck for pipelines with micro-dependencies [S1, unofficial].
++*   **Scaling:** Scaling is limited by the number of submission queues (e.g., 24 on Nvidia) and the inability to enforce dependencies at the core level (50–100 cores) [S1, unofficial].
++*   **Strengths:** Centralized control logic; simple programming model for coarse-grained tasks.
++*   **Limitations:** High latency; awkward hybrid models for indirect submission; limited queue granularity.
++*   **When to Use:** Coarse-grained volume rendering pipelines where tasks are large and dependencies are minimal.
++*   **When Not to Use:** Pipelines with fine-grain micro-dependencies or stages that dynamically compute work for subsequent stages [S1, unofficial].
+ 
+ ## Background
+-The CPU-driven model stems from the traditional view of GPUs as coprocessors [S1, unofficial]. As GPUs evolved to support more complex workloads, the limitations of this model—specifically high latency and lack of GPU-initiated work—became apparent. Variants like indirect submission and multiple queues were developed to patch these issues, though they remain imperfect solutions compared to fully GPU-driven approaches [S1, unofficial].
++The CPU-driven task spawning model originated from the traditional view of GPUs as coprocessors, where the CPU is the central processing unit and the GPU executes work requests [S1, unofficial]. This model was theoretically simple but became a bottleneck due to high CPU-GPU latency [S1, unofficial]. Techniques such as asynchronous submission, indirect submission, and multiple queues were invented to partially solve these issues, but they remain imperfect solutions [S1, unofficial]. The model is widely used in modern graphics APIs (Vulkan, DirectX, CUDA) but is increasingly contrasted with GPU-driven approaches for complex, dynamic workloads [S1, unofficial].
+ 
+ ## Sources

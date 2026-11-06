@@ -1,0 +1,1061 @@
+ClickHouse® is a real-time analytics database management system - Decode morton codes without a lookup table on AArch64 by groeneai · Pull Request #116205 · ClickHouse/ClickHouse
+
+Decode morton codes without a lookup table on AArch64 by groeneai · Pull Request #116205 · ClickHouse/ClickHouse · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+groeneai
+commented
+Aug 24, 2026
+•
+edited by robot-clickhouse
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Collaborator
+Closes: #116080
+Changelog category (leave one):
+Performance Improvement
+Changelog entry (a user-readable short description of the changes that goes into CHANGELOG.md):
+Speed up mortonDecode on AArch64 by decoding with compile-time shift and mask sequences instead of a lookup table. The output is unchanged on every architecture.
+Description
+mortonDecode picks its decoder with #if !defined(__BMI2__): x86 with BMI2, and everything else. AArch64 has no pdep/pext equivalent, so it always falls through to MortonNDLutDecoder. All seven instantiations have ChunkCount = 8, so a row costs 8 loads from a 256-entry table plus a shift-and-or fold per output field.
+This adds the missing arm: a branch-free parallel-suffix bit compress ("sheep and goats", Hacker's Delight 7-4) with every mask folded by constexpr. It is portable scalar code with no intrinsics and no lookup table: a field costs at most six shift-and-mask steps and no data-dependent load. At ND=7 clang loads the masks from the constant pool: fixed addresses with no data dependence, rather than a per-row table access.
+One correction to the report: the eight table loads are not a dependency chain. Each index is a ubfx/lsr/and off the input code, never a prior lookup, so they issue in parallel; the cost is eight L1 accesses plus the fold, not stalls.
+Scope is ND=2/3/5/7, from egor-click's table re-timed against the generic template, not the stale figures in his patch comment. ND=4 measures inside noise there and ND=8 slower, so both keep the decoder they had. ND=6 keeps it too: his table predicts the CI Arm deltas at ND=2/3/5/7 to within 11 points, but the two arm_release runs of the new perf test put ND=6 at -13.1% then +2.5%, neither classified as a change.
+x86 is unaffected by construction: the new code sits inside #if !defined(__BMI2__), which a default x86-64-v3 build cannot preprocess. The one x86 build that compiles it, amd64compat (no BMI2), still selects the table decoder because selection is gated on __aarch64__: compile coverage, no behavior change.
+I have no AArch64 host, so the ns/row figures are egor-click's; I measured equivalence, arm selection, and the morton_decode.xml Arm deltas cited above.
+Validation and the AArch64 measurements
+egor-click's timings, one pinned core, 10M rows, best of 5, ns/row, against the generic template:
+ND
+table
+compress
+speedup
+switched
+2
+3.718
+2.532
+1.47x
+yes
+3
+5.168
+3.414
+1.51x
+yes
+4
+5.744
+5.403
+1.06x
+no, noise
+5
+10.117
+4.704
+2.15x
+yes
+6
+10.777
+7.698
+1.40x
+no, not on Arm CI
+7
+11.481
+7.858
+1.46x
+yes
+8
+10.542
+15.070
+0.70x
+no, slower
+Mine, clang++-21 --target=aarch64-linux-gnu with the flags from cmake/cpu_features.cmake, -O3, one translation unit per decoder in the shape the DECODE loop ships:
+Register-indexed loads across ND=2/3/5/7: table 8 at ND=2, compress 0 everywhere. ND=7 loads 8 mask vectors from fixed constant-pool addresses.
+Bit-identical to the table decoder over 500,146 codes per dimension, ND=2 through 8, full 64-bit range: every single-bit and single-zero pattern, every chunk boundary and complement, zero, all-ones, span endpoints, 500,000 pseudorandom. 0 mismatches. The obvious i < FieldBits field mask diverges at ND=3/5/6/7, so the check can fail.
+Arm selection, from this file's assembly: AArch64 instantiates compress at exactly ND=2/3/5/7 and the table at ND=4/6/8, while a non-BMI2 x86 build keeps all seven on the table.
+Compiles clean on x86-64-v3, x86-64 level 1, armv8.2-a+... and armv8+crc (v80compat), each checked against a broken copy to confirm sensitivity.
+Tests cover round-trip identity at every dimension, maximum in-domain and chunk-boundary codes, and every shrink ratio (the second consumer, through shrink()). 100/100 green over 50 randomized runs. Forcing the new decoder live on x86 and dropping a compress step reddens both files.
+No out-of-domain reference is asserted: there the table and BMI2 decoders already disagree on master for ND=3/5/6/7, so such a reference would be red on one architecture.
+Design and patch by egor-click.
+Workflow [PR]
+Sync PR [sync-upstream/pr/116205]
+Version info
+Merged into: 26.10.1.1699-master (included in 26.10 and later)
+groeneai
+added 2 commits
+August 24, 2026 19:09
+Decode morton codes without a lookup table on AArch64
+…
+f36ecb4
+```
+mortonDecode selects its decoder with a single compile-time test,
+#if !defined(__BMI2__), which has two outcomes: x86 with BMI2, and
+everything else. __BMI2__ is an x86 ISA extension and AArch64 has no
+pdep/pext equivalent, so AArch64 can never take the fast arm, and since
+nothing sits between the two arms it falls through to
+mortonnd::MortonNDLutDecoder. Every one of the seven instantiations has
+ChunkCount = 8, so each row costs eight loads from a 512-byte table plus
+a shift-and-or fold per output field.
+
+Add the missing arm: a branch-free parallel-suffix bit compress (the
+"sheep and goats" routine, Hacker's Delight 7-4) with every mask folded
+at compile time by constexpr. On AArch64 clang turns it into NEON with no
+intrinsics written by hand.
+
+Scope is ND=2/3/5/6/7. As the field count grows the table's one shared
+load amortises over more outputs while the compress cost is paid per
+field, so the crossover is real: ND=4 measures inside noise and ND=8
+measures slower, and both keep the table decoder.
+
+The report described the eight table loads as a dependency chain. They
+are not: each chunk index is computed from the input code, never from a
+prior lookup result, so they issue in parallel. In the AArch64 assembly
+every index is a ubfx/lsr/and off the original code register. The cost is
+the eight L1 accesses plus the per-chunk fold.
+
+x86 is unaffected by construction, since the new region is nested inside
+#if !defined(__BMI2__) and a default x86-64-v3 build defines __BMI2__.
+The amd64compat build is non-BMI2 x86 and stays on the table decoder,
+because the selection is gated on __aarch64__.
+
+Validation. The new decoder is bit-identical to the table decoder it
+replaces over 500,146 codes per dimension for ND=2 through 8 across the
+full 64-bit range, covering every single-bit and single-zero pattern,
+every 8-bit chunk boundary and its complement, zero, all-ones, the span
+endpoints and 500,000 pseudorandom codes, with zero mismatches. Building
+the field mask the obvious way, iterating i < FieldBits, diverges from
+the table decoder at ND=3/5/6/7, because MortonNDLutDecoder folds bit
+positions above ND*FieldBits back into the low fields; fieldMask()
+therefore has to run to bit 63.
+
+The tests assert no code above 2^(ND*FieldBits)-1. Above that the table
+and BMI2 decoders already disagree with each other, so such a reference
+would be red on one architecture or the other. That difference is
+pre-existing and is not addressed here.
+
+The ns/row figures in the linked issue were measured by egor-click, who
+also wrote this decoder; I had no AArch64 host and did not reproduce
+them. No performance test covers the improvement.
+
+Closes: ClickHouse#116080
+```
+Guard the compress decoder's field mask span at compile time
+…
+c159c34
+```
+The field mask in the AArch64 compress decoder covers every bit position
+congruent to 0 mod ND up to bit 63, not merely the low FieldBits of them.
+The narrower span looks equivalent and is not: MortonNDLutDecoder folds
+bits above the field width back into the low fields, so shortening the
+mask changes what the decoder returns for codes with the top bits set,
+and this arm exists to stand in for that decoder.
+
+No SQL test can catch a regression here. The differing bit sits at 63 for
+ND=3 and ND=7 and at 60 for ND=5 and ND=6, always above the in-domain
+range, so no in-domain case observes it. An out-of-domain reference is
+barred as well: BMI2's BuildSelector<FieldBits> matches the narrow form,
+so x86 and AArch64 genuinely return different values there, and a
+.reference capturing either would be permanently red on the other. That
+divergence is pre-existing and not addressed here.
+
+A static_assert on Decode() therefore has to carry the invariant. It
+covers the mask, moveMasks() and the compressStep chain end to end, runs
+on every non-BMI2 target including amd64compat, and costs nothing at
+runtime. ND=2, 4 and 8 are excluded because both spans are identical
+there and an assertion would be vacuous.
+```
+groeneai
+added
+can be tested
+Allows running workflows for external contributors
+groeneai-origin-request
+PR origin: a maintainer pinged or directed groeneai
+labels
+Aug 24, 2026
+groeneai
+commented
+Aug 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Internal second-model review
+Two independent reviews of this change over two rounds: a cold code review and a separate
+second-model gate, each without access to the other's notes. Verdicts below, with the evidence for
+anything I declined.
+❌ Test liveness of the field mask bound (raised independently by both reviews, round 1)
+fieldMask() spans every bit position congruent to 0 mod ND up to bit 63, not just the low
+FieldBits of them. The shorter span decodes a code with the top bit set into the wrong field
+width, so the bound is load-bearing. No SQL test can cover it: the extra bit sits at bit 63 for
+ND=3 and ND=7, and bit 60 for ND=5 and ND=6, always above the documented input domain, and an
+out-of-domain reference is not available either, since BMI2's selector matches the shorter span and
+so genuinely returns the other answer on x86. Measured per domain: the shorter span produces 0
+in-domain mismatches at every dimension, and 10,078 / 18,710 / 18,740 / 10,034 out-of-domain
+mismatches at ND=3/5/6/7.
+Fixed with a static_assert on the decoder's compile-time output at those four dimensions, inside
+the non-BMI2 block and outside the AArch64 guard, so every non-BMI2 target checks it. Verified in
+both directions: clean as written, and shortening the bound fails the build at all four. ND=2/4/8
+are omitted because both spans are identical there, so an assert would be vacuous.
+❌ "Zero loads" was too strong (round 2, and it corrects my own wording from round 1)
+The draft claimed the compress decoder performs zero loads and references no data symbol. That is
+false at ND=6 and ND=7: clang outlines the decoder there and loads its mask vectors from
+.rodata.cst16. I reproduced it on the shipped kernel with the CI AArch64 flags and counted rodata
+references per dimension: 0, 0, 0, 5, 8 for ND=2/3/5/6/7.
+The distinction that survives is data dependence, so I measured that instead. Register-indexed
+loads, the shape a table lookup has, are 8 for the table decoder at ND=2 and zero for the compress
+decoder at every one of ND=2/3/5/6/7; total loads are 9/24/33/43/60 against 2/3/4/13/17. The
+constant-pool loads sit in the outlined helper's prologue and are loop-invariant, not per-row table
+accesses. The description now says exactly that.
+❌ Table size stated for one dimension only (round 2)
+The draft said "512-byte table" while describing all seven instantiations. Measured
+sizeof(LookupTable): 512, 768, 1024, 1280, 1536, 1792 and 2048 bytes for ND=2 through 8, with
+LutSize 256 and ChunkCount 8 in every case. Reworded to "256-entry table", which is the
+dimension-independent fact the argument needs.
+⚠️ AArch64 vectorization claim - raised by me, then withdrawn on measurement. I flagged the
+original body's NEON claim as unsupported. Recompiling the shipped kernel shape for
+armv8.2-a+simd+... refuted my own objection: the ND=2 kernel is 43 of 95 instructions vector, the
+ND=6 decode helper 84 of 147, on v*.2d/v*.16b. The claim was correct.
+💡 amd64compat framing - reworded. That build (X86_ARCH_LEVEL=1, no BMI2) is the only x86
+configuration that compiles the new region, so it is the compile-coverage argument rather than a
+caveat. It still selects the table decoder, since selection is gated on __aarch64__.
+Confirmed and unchanged, re-verified in round 2 rather than inherited: the new decoder is
+bit-identical to the lookup-table decoder it replaces, checked against LUT semantics re-derived
+independently from the vendored header over roughly 60,000 codes per dimension for ND=2 through 8,
+covering zero, all-ones, every single-bit and single-zero 64-bit pattern, and every 8-bit chunk
+boundary and its complement; all 11 new reference constants recomputed from an independent model,
+matched, and confirmed in-domain; shrink() really is the second consumer of the changed typedefs
+and every ratio is covered; non-BMI2 targets other than AArch64 keep the table decoder bit-for-bit;
+no new setting, no format change, no weakened assertion.
+The new tests were also checked against a second mutation class: dropping any single compress step
+reddens the round-trip block at every dimension, except the highest step at ND=2 and ND=3 where it
+is a no-op in-domain, and those two are caught by the maximum-in-domain constants. Every dimension
+has at least one assertion that fails for each active step.
+Not covered: I have no AArch64 host, so the timings are the reporter's and no performance test
+exercises the win. The body says so.
+clickhouse-gh
+Bot
+closed this
+Aug 24, 2026
+clickhouse-gh
+Bot
+reopened this
+Aug 24, 2026
+groeneai
+commented
+Aug 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Pre-PR validation gate (click to expand)
+#
+Question
+Answer
+a
+Deterministic repro?
+Yes, structural rather than timing: there is no AArch64 host available to me, so the repro is one command per configuration showing that on AArch64 the table kernel issues 8 register-indexed table loads at ND=2 while the compress kernel issues none at any of ND=2/3/5/6/7 (at ND=6 and ND=7 it does load 5 and 8 loop-invariant mask vectors from the constant pool, which are not data-dependent). clang++-21 --target=aarch64-linux-gnu -march=armv8.2-a+... -O3, one translation unit per decoder in the shape the DECODE loop ships.
+b
+Root cause explained?
+Yes. #if !defined(__BMI2__) has two outcomes, x86-with-BMI2 and everything else. __BMI2__ is an x86 ISA extension, so AArch64 can never satisfy it, and no arm sits between the two, so it falls through to MortonNDLutDecoder. All seven instantiations have ChunkCount = 8, giving 8 table loads plus a shift-and-or fold per output field, per row.
+c
+Fix matches root cause?
+Yes. It adds the missing arm at the layer where the gate lives and swaps only the seven decoder typedefs. No widened bound, no no-random-* tag, no reduced dataset, no defensive check.
+d
+Test intent preserved / new tests added?
+Yes. No existing assertion weakened or removed. Both existing morton test files gained coverage of the changed path: round-trip identity at every dimension, maximum in-domain and chunk-boundary codes, and every shrink ratio, which exercises shrink(), the second consumer of these decoders.
+e
+Both directions demonstrated?
+Yes. The output is bit-identical to master on every architecture, so the failing direction cannot be "master reds it". Instead I forced the new decoder live on x86 and mutated it: dropping one compress step reddens both test files, while the unmutated forced-live build passes both. Each probe build carries its own Build-ID and an assertion that the compress decoder is actually present in the binary.
+f
+Fix is general across code paths?
+Yes. Both consumers of the changed typedefs are covered, the DECODE loop and shrink(), and a repo-wide grep confirms nothing outside this file names them. src/Functions/mortonEncode.cpp has the identical gate and is deliberately out of scope, per the reporter.
+g
+Fix generalizes across inputs (params/datatypes/wrappers)?
+Yes. Bit-identical to the table decoder over 500,146 codes per dimension for ND=2 through 8 across the full 64-bit range: every single-bit and single-zero pattern, every 8-bit chunk boundary and its complement, zero, all-ones, span endpoints and 500,000 pseudorandom codes, 0 mismatches. A negative control using the obvious i < FieldBits field mask diverges at ND=3/5/6/7, so the check can fail. mortonDecode takes UInt64, so there is no Nullable, LowCardinality or Array wrapper surface at this layer.
+h
+Backward compatible? (maintainer-approved exception only)
+Yes, trivially. No setting, no default change, no serialization format change, so SettingsChangesHistory.cpp is not engaged. Output is bit-identical on the modified arm, so there is no user-visible behaviour change.
+i
+Invariants and contracts preserved?
+Yes. The decoder is a pure constexpr value type with no state, no allocation, no locking and no error path, and Decode() keeps its signature and tuple arity per dimension. The one non-obvious invariant is that fieldMask() must run to bit 63, because MortonNDLutDecoder folds positions above ND*FieldBits back into the low fields; it is enforced and covered by the negative control in (g).
+Session id: cron:clickhouse-impl-slot-5:20260824-170900
+groeneai
+mentioned this pull request
+Aug 24, 2026
+mortonDecode has no pdep/pext equivalent on aarch64 and decodes through eight dependent table lookups per row
+#116080
+Closed
+clickhouse-gh
+Bot
+commented
+Aug 24, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Workflow [PR], commit [58e25bc]
+Summary: ✅
+Performance Comparison: Performance dashboard
+AI Review
+Summary
+This PR switches mortonDecode on AArch64 from the lookup-table decoder to a constexpr bit-compress decoder for ND=2/3/5/7, keeps ND=4/6/8 on the existing lookup-table path, documents the supported code domain, and adds stateless plus performance coverage. After reading the current diff, the prior discussion, and the current code at 58e25bc6cb1170ab2b4c571705073995fdee6d83, I do not see a remaining correctness, contract, or performance-validation issue in the patched version.
+Final Verdict
+Status: ✅ Approve
+LLVM Coverage Report
+Measured on commit 58e25bc.
+Metric
+Baseline
+Current
+Δ
+Lines
+88.20%
+88.30%
++0.10%
+Functions
+91.80%
+92.10%
++0.30%
+Branches
+79.70%
+79.70%
++0.00%
+Changed lines: Changed C/C++ lines covered: 6/6 (100.00%) · Uncovered code
+Full report · Diff report
+clickhouse-gh
+Bot
+added
+the
+pr-performance
+Pull request with some performance improvements
+label
+Aug 24, 2026
+groeneai
+commented
+Aug 24, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+cc @nihalzp @Ergus, could you review this? mortonDecode selects its decoder with #if !defined(__BMI2__), so AArch64, which has no pdep/pext, always falls through to the 8-lookup table decoder; this adds a portable constexpr parallel-suffix bit compress arm for it at ND=2/3/5/6/7, bit-identical to the table decoder and inert on x86.
+clickhouse-gh
+Bot
+commented
+Aug 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+Build profile diff (arm_release)
+Comparing 58e25bc6c with master a2e4282a1 (stripped binary size, per-symbol sizes and ThinLTO time; compile times per translation unit against the most recent warmup build that recompiled it).
+✅ No significant changes.
+Binary sizes
+programs/clickhouse-stripped: smaller than the master baseline by the known offset between the two builds, so the difference is not shown. A delta that differs from the offset by more than 50% of it is shown, in either direction.
+The official master build is compiled with -g and a pull request build is not, and XRay counts debug instructions towards its instrumentation threshold, so master instruments thousands of functions more and its binary is ~0.4% larger no matter what the pull request does.
+Object file sizes
+4 object files changed (-71.75 KiB total), 0 added.
+Object file
+Master
+PR
+Δ
+src/Functions/CMakeFiles/clickhouse_functions_obj.dir/mortonDecode.cpp.o
+451.79 KiB
+380.03 KiB
+-71.76 KiB (-15.88%)
+719 more object files are built by the master warmup baseline only (it builds every object-file target, a pull request build only clickhouse-bundle) and not compared.
+Compile time of recompiled translation units
+7 translation units recompiled, 8 s compile time in total, 7 of them have a recent master baseline.
+Job report
+clickhouse-gh
+Bot
+commented
+Aug 25, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Contributor
+📊 Cloud Performance Report
+⚠️ AI verdict: not_sure — 1 query(s) improved out of 32 analysed
+Release-transition baseline: compared against the most recent available 26.9 masters at or before the trusted base-commit anchor because no 26.10 master baseline exists there.
+This PR only changes how mortonDecode decodes values on AArch64: it replaces the lookup-table decoder with a shift-and-mask decoder for 2, 3, 5 and 7 dimensions, and no ClickBench or TPC-H query calls that function. I downgraded four of the five flagged improvements (ClickBench Q18 and Q28, TPC-H Q1 and Q7) to not_sure because the diff can't explain them, and the two TPC-H queries are also noisy on master. ClickBench Q32 (-43.5%) stays an improvement because the delta is too large to override, but it can't be attributed to this diff either. Its CPU drop more likely comes from the source build being based on a newer master (v26.10 against a v26.9 baseline). The new morton_decode performance test is the right place to judge this change, and none of these benchmarks covers it.
+clickbench
+🟢 1 improved · ⚠️ 2 inconclusive
+Flagged queries (3 of 43)
+Query
+Verdict
+Baseline median (ms)
+PR median (ms)
+Change
+q-value
+Hint
+🟢
+32
+improvement
+1376
+777
+-43.5%
+<0.0001
+aggregation: The verdict is locked by the large-delta rule, but Q32 never calls mortonDecode. The -43.5% change and the CPU drop more likely come from the newer source base than from this diff.
+⚠️
+18
+not_sure
+1101
+976
+-11.4%
+<0.0001
+Q18 never calls mortonDecode, and the PR only changes that function's decoder on AArch64. This -11.4% cannot be attributed to the diff.
+⚠️
+28
+not_sure
+1099
+1024
+-6.9%
+<0.0001
+Q28 does not execute mortonDecode, the only code path this PR changes. The -6.9% shift is not attributable to the diff.
+Change = percent below ×2; the ratio of medians (×N faster/slower) beyond, where percent understates the scale. q-value = BH-FDR adjusted p; smaller is stronger evidence. MIRAI flags a query when q < fdr_q (default 0.10) — the value the verdict is based on.
+tpch_adapted_1_official
+⚠️ 2 inconclusive
+Flagged queries (2 of 22)
+Query
+Verdict
+Baseline median (ms)
+PR median (ms)
+Change
+q-value
+Hint
+⚠️
+1
+not_sure
+67
+52
+-22.4%
+<0.0001
+TPC-H Q1 does not use mortonDecode, and this query is noisy on master. The -22.4% change, only 15 ms, is not attributable to this PR.
+⚠️
+7
+not_sure
+82
+66
+-19.5%
+<0.0001
+TPC-H Q7 does not touch mortonDecode, and this query is noisy on master. The -19.5% change, only 16 ms, cannot come from this diff.
+Change = percent below ×2; the ratio of medians (×N faster/slower) beyond, where percent understates the scale. q-value = BH-FDR adjusted p; smaller is stronger evidence. MIRAI flags a query when q < fdr_q (default 0.10) — the value the verdict is based on.
+Debug info
+StressHouse run: 320d6ee3-772e-4c5d-9128-896826ca861a
+MIRAI run: 1869c4af-f410-4784-945c-17fcf87a7081
+PR check IDs:
+clickbench_3459324_1791249083
+clickbench_3459437_1791249101
+clickbench_3459555_1791249123
+tpch_adapted_1_official_3459684_1791249203
+tpch_adapted_1_official_3459788_1791249211
+tpch_adapted_1_official_3459899_1791249218
+snelheidai
+mentioned this pull request
+Sep 2, 2026
+mortonEncode/mortonDecode read every input value through a virtual IColumn::getUInt in the row loop
+#117652
+Closed
+george-larionov
+self-assigned this
+Sep 3, 2026
+clickhouse-gh
+Bot
+added
+the
+comp-regular-function
+Regular scalar functions: string processing, data conversion, arithmetic, math, comparison, condi...
+label
+Sep 4, 2026
+george-larionov
+commented
+Sep 4, 2026
+Copy link
+Copy Markdown
+Member
+Can't we add a perf test to run automatically in CI? Something like tests/performance/morton_decode.xml:
+```
+  <test>
+      <settings>
+          <max_threads>1</max_threads>
+      </settings>
+      <substitutions>
+          <substitution>
+              <name>nd</name>
+              <values>
+                  <value>2</value><value>3</value><value>5</value>
+                  <value>6</value><value>7</value><value>8</value>
+              </values>
+          </substitution>
+      </substitutions>
+
+      <query>SELECT mortonDecode({nd}, number) FROM numbers(50000000) FORMAT Null</query>
+  </test>
+```
+george-larionov
+commented
+Sep 4, 2026
+Copy link
+Copy Markdown
+Member
+We should consider re-running the perf tests that determined which NDs to compress/lookup for with more data or more runs. Specifically for ND=4, for which the speedup was deemed 'noise' but the compress was still faster.
+george-larionov
+reviewed
+Sep 4, 2026
+View reviewed changes
+Comment thread
+src/Functions/mortonDecode.cpp
+Outdated
+static_assert(std::get<0>(MortonNDCompressDecoder<3>().Decode(0x8000000000000000ULL)) == 2097152);
+static_assert(std::get<0>(MortonNDCompressDecoder<5>().Decode(0x1000000000000000ULL)) == 4096);
+static_assert(std::get<0>(MortonNDCompressDecoder<6>().Decode(0x1000000000000000ULL)) == 1024);
+static_assert(std::get<0>(MortonNDCompressDecoder<7>().Decode(0x8000000000000000ULL)) == 512);
+george-larionov
+Sep 4, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+There's a lot of complex bit math in this PR. To ensure that it is all correct we could add a compile-time test like:
+```
+  /// Both decoders are GF(2)-linear bit maps, so agreement on the 64 single-bit codes implies
+  /// agreement on every 64-bit code. Checked at compile time, so a change to fieldMask,
+  /// moveMasks or the dimension list cannot silently alter what mortonDecode returns.
+  template <size_t Dimensions, size_t FieldBits>
+  constexpr bool compressMatchesLut()
+  {
+      constexpr auto lut = mortonnd::MortonNDLutDecoder<Dimensions, FieldBits, 8>();
+      constexpr auto compress = MortonNDCompressDecoder<Dimensions>();
+      for (size_t bit = 0; bit < 64; ++bit)
+      {
+          const UInt64 code = UInt64(1) << bit;
+          bool equal = true;
+          [&]<size_t... I>(std::index_sequence<I...>)
+          {
+              ((equal = equal
+                    && UInt64(std::get<I>(lut.Decode(code))) == UInt64(std::get<I>(compress.Decode(code)))), ...);
+          }(std::make_index_sequence<Dimensions>{});
+          if (!equal)
+              return false;
+      }
+      return true;
+  }
+
+  static_assert(compressMatchesLut<2, 32>());
+  static_assert(compressMatchesLut<3, 21>());
+  static_assert(compressMatchesLut<5, 12>());
+  static_assert(compressMatchesLut<6, 10>());
+  static_assert(compressMatchesLut<7, 9>());
+```
+Tested this, it adds less than a second to the build time and isn't built on BMI2 builds at all. This might be controversial though, willing to hear a counterargument.
+groeneai
+Sep 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+Adopted in 57ac0d4, replacing the four constant assertions rather than sitting beside them: yours states the same property properly, so keeping both is redundant.
+No counterargument. Two things I checked first. Your linearity premise holds exhaustively, not just on a sample: decoding the 64 single-bit codes shows that in both decoders every input bit lands in at most one output bit and no two input bits land in the same one, so the fold's OR is an XOR and both maps are linear on all 2^64 inputs. And nothing is lost by the swap: building the field mask the narrow way makes your assertions fail at ND=3, 5, 6 and 7, exactly the four the constants covered, while dropping a compress step fails all five including ND=2, where the constants had no coverage at all.
+Your build claims check out. Zero occurrences of compressMatchesLut survive preprocessing on x86-64-v3, against six on aarch64 and six on x86-64 level 1. On a non-BMI2 target the translation unit costs 1.2 s more, best of three, and generates identical code: the aarch64 and x86-64 level 1 assembly is byte identical before and after.
+Comment thread
+src/Functions/mortonDecode.cpp
+Outdated
+}
+/// Per-step "bits to move" masks of a parallel-suffix bit compress over fieldMask().
+/// A zero mask marks a step that moves nothing, so a narrow field costs fewer steps.
+george-larionov
+Sep 4, 2026
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+It seems to me that "narrowness" of the field is not actually related to # of steps. Can you double check if this is the case and update this comment if it isnt?
+groeneai
+Sep 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+You are right, fixed in 866027a. Counting nonzero move masks over ND=2 to 8 gives 5, 5, 6, 4, 6, 5, 6, so the widest field (ND=2, 32 bits) needs 5 of the 6 steps while the narrowest (ND=8, 8 bits) needs all 6.
+The relationship is the travel distance, not the width. The bit at position i*ND has to move i*(ND-1) places, so the step that shifts by 1<<k is needed only when some bit travels a distance with bit k set. A factor of two in ND-1 kills the low steps, which is why ND=5 needs only 4 of them, and the longest travel bounds the top step, which is why ND=2 skips the 32 place step.
+groeneai
+added 3 commits
+September 4, 2026 23:46
+Correct what makes a compress step drop out in mortonDecode
+…
+866027a
+```
+The comment said a narrow field costs fewer steps. Measured, that is not the
+relationship. Counting nonzero move masks over ND=2 to 8 gives 5, 5, 6, 4, 6, 5,
+6, so the widest field, ND=2 at 32 bits, needs 5 of the 6 steps while the
+narrowest, ND=8 at 8 bits, needs all 6.
+
+The bit at position i*ND has to travel i*(ND-1) places, so the step that shifts
+by 1<<k is needed only when some bit travels a distance with bit k set. Two
+things drop steps out of that set. A factor of two in ND-1 kills the low steps,
+which is why ND=5 needs only 4 of them, and the longest travel bounds the top
+step, which is why ND=2 skips the 32 place step. Neither is the field width.
+
+Reported by george-larionov.
+```
+Check the compress decoder against the lookup table on all 64 basis v…
+…
+57ac0d4
+```
+…ectors
+
+Replaces the four hand derived constant assertions with the equivalence test
+george-larionov proposed in review, which is a stronger statement of the same
+property.
+
+Its premise holds exhaustively, not just on a sample. Decoding each of the 64
+single bit codes and comparing the results shows that for ND=2 through 8, in both
+decoders, every input bit lands in at most one output bit and no two input bits
+land in the same one. Disjoint supports mean the fold's OR is an XOR, so both maps
+are linear over GF(2) on all 2^64 inputs and agreement on the 64 basis vectors
+implies agreement everywhere. The constants only sampled four points.
+
+Nothing is lost by the replacement. Building the field mask the narrow way makes
+the new assertions fail at ND=3, 5, 6 and 7, exactly the dimensions the constants
+covered. Dropping a compress step makes them fail at all five, including ND=2,
+where the constants had no coverage at all because both mask forms are identical
+there.
+
+The test is nested inside #if !defined(__BMI2__), so a default x86-64-v3 build
+preprocesses none of it: zero occurrences of compressMatchesLut survive
+preprocessing there, against six on aarch64 and six on x86-64 level 1. On a non
+BMI2 target this translation unit costs 1.2 seconds more to compile, best of
+three, and produces identical code. The aarch64 and x86-64 level 1 assembly is
+byte identical before and after.
+```
+Add a performance test for mortonDecode
+…
+ee52f2b
+```
+Requested in review. This PR had no performance coverage, which is why the AArch64
+figures in the description are the reporter's own and not reproduced. Performance
+Comparison runs on arm_release as well as amd_release, so a test in tree gives the
+per architecture comparison on every run from now on.
+
+ND=4 and ND=8 keep the lookup table on every target, so their rows are the in run
+control: they have to stay flat while the compressed dimensions move. ND=4 is in
+the list even though it is not in the suggested snippet, because the open question
+about it is whether compress wins there on AArch64, and this is the row that will
+answer it once the dimension list changes.
+
+Sizing: 50 million rows, single threaded. The heaviest dimension takes 0.7 seconds
+here on a debug build against the runner's 15 second per query limit. The time
+grows with the row count and with the dimension count, so the decode is what is
+being measured rather than the numbers generator.
+```
+groeneai
+commented
+Sep 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Added as tests/performance/morton_decode.xml in ee52f2b, close to your snippet, with two deliberate differences.
+Sizing is measured: 50M rows single threaded takes 0.7 s for the heaviest dimension here on a debug build, against the runner's 15 s per-query limit, and the time scales with both rows and ND, so the decode is what is measured and not the numbers generator. I also put ND=4 in the value list next to your ND=8, because those two keep the lookup table on every target, which makes their rows the in-run control: they have to stay flat while the compressed dimensions move.
+On ND=4, agreed, and it is not settled. The 1.06x is egor-click's; my own x86 measurement with BMI2 disabled put ND=4 at 1.76x, but that is a different microarchitecture and a different ISA, so it does not decide the target and I would rather not widen the scope on it. I have no AArch64 host, but Performance Comparison runs on arm_release as well as amd_release, so the test above is the cheapest route to a real number: moving ND=4 into the compress list is a one word change to the predicate, and the same test then reports the delta per architecture. Say if you would rather have that inside this PR and I will push it so the numbers land here.
+clickhouse-gh
+Bot
+reviewed
+Sep 5, 2026
+View reviewed changes
+Comment thread
+tests/queries/0_stateless/02457_morton_coding.sql
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Document the input domain of the mortonDecode code argument
+…
+db6675b
+```
+`FunctionDocumentation` described `code` as a plain `UInt64`, which is wider
+than the values the function actually defines. A code only carries
+`N * intDiv(64, N)` bits for an `N`-dimensional decode, and above that bound
+the two decoder arms disagree: measured on this tree, `mortonDecode(3,
+0x8000000000000000)` returns `(2097152,0,0)` from the table decoder and
+`(0,0,0)` from the BMI2 one, and the same split appears at ND=5, 6 and 7.
+ND=2, 4 and 8 use all 64 bits, so they have no out-of-domain region at all.
+
+The bound is the upstream library's own contract - `MortonNDLutDecoder`
+exposes `InputMask` to clear exactly those upper bits before a `Decode` call -
+and `mortonDecode` never applies it, so it is a property users have to know
+rather than one the function enforces. Both arms already behave this way on
+master; nothing here changes what any build returns.
+
+The generated reference page is left alone: the source registration is the
+source of truth for it, and the documentation autogeneration workflow
+regenerates the `.mdx`.
+```
+groeneai
+commented
+Sep 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+CI finish ledger - db6675b
+Every failure below has an owner: a fixing PR (mine or external), or a full-effort fix task
+whose fixing-PR link will be posted here when it opens. Only CH Inc sync is exempt.
+Check / test
+Reason
+Owner / fixing PR
+Docker server image / clickhouse/clickhouse-server:head-arm64
+infra: the in-image apt-get update got 503 Service Unavailable from us-east-1.ec2.ports.ubuntu.com on the jammy and jammy-updates indices, so the RUN layer exited 100. Breadth over 4 days: 52 rows, 30 distinct pull requests, 5 true-master rows, so it is not reachable from this diff
+#118023 (mine, open)
+Finish Workflow completed 2026-09-05T06:33:50Z; 154 checks succeeded, 15 were skipped, 1 failed. All five flaky checks concluded success.
+Session id: cron:our-pr-ci-monitor:20260905-073118
+george-larionov
+approved these changes
+Sep 8, 2026
+View reviewed changes
+george-larionov
+left a comment
+Copy link
+Copy Markdown
+Member
+There was a problem hiding this comment.
+Choose a reason for hiding this comment
+The reason will be displayed to describe this comment to others. Learn more.
+LGTM. @groeneai I think you have to resolve some conflicts before being able to merge.
+Merge remote-tracking branch 'origin/master' into morton-decode-aarch…
+…
+3e2dc2b
+```
+…64-compress
+
+# Conflicts:
+#	tests/queries/0_stateless/02457_morton_coding_with_mask.reference
+#	tests/queries/0_stateless/02457_morton_coding_with_mask.sql
+```
+groeneai
+commented
+Sep 8, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Thanks for the review. Conflicts resolved: master is merged into the branch at 3e2dc2b, and GitHub now reports the PR mergeable.
+The conflict came from #117727, which landed earlier today and rewrote the same EXECUTE() macro body in mortonDecode.cpp (per-row getUInt replaced by code_span[i], mask ratios hoisted out of the loop). Both changes are kept. The effective diff against master is still only the compress decoder, its compile-time equivalence check, the tests and the code argument documentation, and 02457_morton_coding_with_mask.{sql,reference} now carry both appended blocks, the oversized-mask-tuple one from #117727 followed by the shrink-ratio coverage from this PR.
+Verified on the merge commit: full build (build id c405a2f631dd629c1c42fa2d963a74b07e90c524), 02457_morton_coding and 02457_morton_coding_with_mask both pass against it, and a corrupted reference line still fails them. The cross-target compile matrix is unchanged at 11/11 (aarch64 armv8.2-a+... and armv8+crc, x86-64 level 1 and x86-64-v3), with both mutants of the field-mask bound and the compress step still failing on the non-BMI2 arms only. Style checks are clean.
+One description fix while I was here: I dropped the word "loop-invariant". At ND=6 and ND=7 clang outlines the decode helper and calls it once per row, so the constant-pool mask loads are at fixed addresses with no data dependence rather than hoisted out of the loop. The measured claim, zero register-indexed loads at every dimension, is unchanged.
+clickhouse-gh
+Bot
+reviewed
+Sep 8, 2026
+View reviewed changes
+Comment thread
+src/Functions/mortonDecode.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Correct two comment defects in the AArch64 decoder arm
+…
+07d73ca
+```
+The selection comment justified keeping the table decoder at ND=4 and ND=8 with
+"one shared load amortises over enough output fields". That cannot be the reason
+at ND=4, because ND=5, 6 and 7 have more output fields and the compress decoder
+is used at all three: no monotone threshold in the number of output fields
+yields the {4, 8} pattern. The per-field load count does not fall with the
+dimension either. Compiled for the CI AArch64 arch flags, the table decoder
+emits 9 loads for 2 output fields and 53 for 8, which is 4.5 against 6.6 per
+field. The dimension list came out of timings, so the comment now says that and
+nothing more.
+
+The other comments write class and function names as plain text, and one of them
+as shrink(). Wrap them in inline code blocks and drop the parentheses, which is
+what `AGENTS.md` asks for and what the surrounding comments in
+02457_morton_coding_with_mask.sql already do.
+
+Comments only. The AArch64 assembly for this translation unit is byte-identical
+before and after with both clang-22 and clang-21.
+```
+groeneai
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Arm numbers from the new perf test
+tests/performance/morton_decode.xml has now run twice on Performance Comparison (arm_release), so the AArch64 side of this PR is no longer measured only on the reporter's machine. client_time, PR against master head, query index N is ND=N+2:
+ND
+decoder here
+db6675b9
+3e2dc2b
+2
+compress
+-35.5%
+-36.6%
+3
+compress
+-32.4%
+-25.9%
+4
+table
+-1.3%
+0.0%
+5
+compress
+-46.9%
+-43.0%
+6
+compress
+-13.1%
++2.5%
+7
+compress
+-32.7%
+-32.1%
+8
+table
+-3.8%
+-1.0%
+ND=2/3/5/7 clear the runner's own significance threshold in both runs. ND=4 and ND=8 are flat, which is what keeping the table decoder there should look like.
+ND=6 is the one that does not hold up: -13.1% then +2.5%, neither significant, so the 1.40x in the reporter's table does not reproduce on this runner. There is no regression either, and the two runs average slightly favourable, so I am flagging this rather than deciding it. Dropping ND=6 back to the table decoder is a one-word change to use_compress_decoder, and I will push it if you would rather every included dimension carry a reproducible Arm win. The push above adds a third measurement on the current base.
+On the ND=4 question from your earlier comment, this still does not answer it: the perf job compares this PR against master, and both run the table decoder at ND=4, so it cannot show what compress would do there. That needs an AArch64 host running the two decoders side by side, which I do not have.
+The push itself only corrects comments. The AArch64 assembly for mortonDecode.cpp is byte-identical before and after with both clang-22 and clang-21.
+clickhouse-gh
+Bot
+reviewed
+Sep 9, 2026
+View reviewed changes
+Comment thread
+src/Functions/mortonDecode.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+Keep the table decoder at ND=6 on AArch64
+…
+3cfdbdb
+```
+Decoder selection is gated on __aarch64__, so the CI Performance Comparison
+(arm_release) run is the only measurement that covers what actually ships. Two
+runs of the new tests/performance/morton_decode.xml disagree at ND=6, -13.1%
+then +2.5%, and neither was classified as a change, while ND=2/3/5/7 cleared the
+threshold in both.
+
+Calibrating against the reporter's AArch64 micro-benchmark makes the gap
+concrete. Converted to relative differences, his figures predict the CI deltas
+at ND=2/3/5/7 to within 11 points, but ND=6 misses by 15.5 and 31.1 points.
+ND=7 decodes more fields over a longer baseline than ND=6 and still replicates
+to within 1.2 points, so per-query overhead does not explain the miss.
+
+ND=6 therefore stays on the decoder master already uses, which cannot regress,
+and every dimension left in the compress set carries a win reproduced on the
+target runner. compressMatchesLut<6, 10> goes with it: that list mirrors the
+compress set, and ND=4 and ND=8 have no entry either.
+```
+groeneai
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+ND=6 moves back to the table decoder
+Pushed in 3cfdbdb. The compress set is now ND=2/3/5/7.
+First, a correction. I said the previous push would add a third Arm measurement on the current base. That was wrong, and the reason sits in the same comment: the AArch64 assembly was byte-identical, so praktika reused the earlier Performance Comparison results and scheduled no new perf job. The two published runs are the measurement, and they measure exactly the code that is on this branch.
+What decided it was calibrating those runs against egor-click's micro-benchmark. Converting his ns/row figures to relative differences and comparing with client_time on arm_release:
+ND
+his figure
+predicted
+run 1
+run 2
+miss (points)
+2
+1.47x
+-31.9%
+-35.5%
+-36.6%
+3.6 / 4.7
+3
+1.51x
+-33.9%
+-32.4%
+-25.9%
+1.5 / 8.0
+5
+2.15x
+-53.5%
+-46.9%
+-43.0%
+6.6 / 10.5
+6
+1.40x
+-28.6%
+-13.1%
++2.5%
+15.5 / 31.1
+7
+1.46x
+-31.6%
+-32.7%
+-32.1%
+1.1 / 0.5
+Four of the five predict the runner to within 11 points. ND=6 is the only one that does not. ND=7 decodes more fields over a longer baseline than ND=6 and still replicates to within 1.2 points, so per-query overhead does not explain the miss.
+So ND=6 keeps the decoder master already uses, which cannot regress, and every dimension left in the set has a win reproduced twice on the runner. compressMatchesLut<6, 10> went with it, matching ND=4 and ND=8, which carry no entry either.
+Verified on the CI AArch64 target with both clang-22 and clang-21: MortonNDCompressDecoder<6> drops from 7 references to 0, MortonNDLutDecoder<6, 10, 8> appears, and ND=2/3/5/7 and ND=4/8 are untouched. 02457_morton_coding and 02457_morton_coding_with_mask are 40/40 green.
+This narrows the scope that was already approved, so if keeping ND=6 on the compress decoder is preferred, restoring it is one line in use_compress_decoder plus its comment and the static_assert.
+groeneai
+commented
+Sep 9, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+CI finish ledger - 3cfdbdb
+Every failure below has an owner: a fixing PR (mine or external), or a full-effort fix task
+whose fixing-PR link will be posted here when it opens. Only CH Inc sync is exempt.
+Check / test
+Reason
+Owner / fixing PR
+Stress test (amd_asan_ubsan) / 05097_ast_fuzzer_oracle_apply_aggregate.sql
+fuzzer-oracle false positive, not a product defect: Code: 906 AST_FUZZER_ORACLE_MISMATCH ("TLP Aggregate oracle mismatch") on SELECT max(i), approx_top_k(d) FROM ... WHERE i > 1, whose metamorphic rewrite merges approx_top_kState across three complementary partitions. approx_top_k is approximate and order dependent, so the partitioned merge is not required to equal the whole-table result, and QueryOracleChecker's non-deterministic deny list does not carry the approx_top_* family. Breadth over 30 days: 16 rows across 12 pull requests plus 5 true-master rows, so it is not reachable from this diff, which only changes the AArch64 decoder selection in src/Functions/mortonDecode.cpp and does not appear in the reproducer (which ran on amd64)
+#117200 (external, open)
+PR, Mergeable Check
+aggregate statuses reflecting the single red above
+#117200 (external, open)
+Finish Workflow concluded success at 2026-09-09T12:24:17Z: 154 checks succeeded, 15 were skipped, 1 failed.
+Session id: cron:our-pr-ci-monitor:20260909-130530
+george-larionov
+commented
+Sep 10, 2026
+Copy link
+Copy Markdown
+Member
+@groeneai merge in master
+Merge remote-tracking branch 'origin/master' into morton-decode-aarch…
+…
+693b717
+```
+…64-compress
+```
+groeneai
+commented
+Sep 10, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Merged master in. New head 693b717ad927b6966e69c542d0ff04e5ddf677da, no conflicts and no change to the PR's own diff.
+clickhouse-gh
+Bot
+reviewed
+Sep 10, 2026
+View reviewed changes
+Comment thread
+src/Functions/mortonDecode.cpp
+Resolved
+Uh oh!
+There was an error while loading. Please reload this page.
+groeneai
+commented
+Sep 11, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+CI finish ledger - 693b717
+Every failure below has an owner: a fixing PR (mine or external), or a full-effort fix task
+whose fixing-PR link will be posted here when it opens. Only CH Inc sync is exempt.
+Check / test
+Reason
+Owner / fixing PR
+Stress test (amd_tsan) / Logical error: Virtual row has different type for A. Expected B, got C (STID 1637-309b)
+LOGICAL_ERROR raised from setVirtualRow, a read-in-order defect on master: matchTrees maps a sorting key expression to the query's copy on structure alone, so a key whose result type follows a session setting (CAST(json.b, 'String') under cast_keep_nullable = 1) makes read-in-order advertise an order the parts do not have. Not reachable from this diff, which only changes AArch64 decoder selection in src/Functions/mortonDecode.cpp. Breadth over 30 days: 11 rows across 11 pull requests plus 1 true-master row, on Stress test (amd_tsan, amd_debug, arm_debug) and Upgrade check (amd_release)
+#119385 (ours, open)
+PR, Mergeable Check
+aggregate statuses reflecting the single red above
+#119385 (ours, open)
+Finish Workflow concluded success at 2026-09-11T05:39:21Z: 157 checks succeeded, 14 were skipped, 3 failed (the stress test plus the two aggregate statuses above).
+Session id: cron:our-pr-ci-monitor:20260911-060054
+george-larionov
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Member
+@groeneai merge in recent master
+Merge remote-tracking branch 'origin/master' into morton-decode-aarch…
+…
+58e25bc
+```
+…64-compress
+```
+groeneai
+commented
+Oct 5, 2026
+Copy link
+Copy Markdown
+Collaborator
+Author
+Merged master in. New head 58e25bc6cb1170ab2b4c571705073995fdee6d83, no conflicts and no change to the PR's own diff.
+george-larionov
+added this pull request to the merge queue
+Oct 6, 2026
+Hide details
+View details
+Merged
+via the queue into
+ClickHouse:master
+with commit 6b4fb9f
+Oct 6, 2026
+149 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+robot-ch-test-poll
+added
+the
+pr-synced-to-cloud
+The PR is synced to the cloud repo
+label
+Oct 6, 2026
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+can be tested
+Allows running workflows for external contributors
+comp-regular-function
+Regular scalar functions: string processing, data conversion, arithmetic, math, comparison, condi...
+groeneai-origin-request
+PR origin: a maintainer pinged or directed groeneai
+pr-performance
+Pull request with some performance improvements
+pr-synced-to-cloud
+The PR is synced to the cloud repo
+3 participants
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

@@ -1,0 +1,345 @@
+**This PR changes the output of DomainWarpSimplex and DomainWarpSuperSimplex for every seed.** It covers both Vectorization Schemes in 2D, 3D and 4D, except GradientOuterProduct 3D, which stays bit-identical. Everything built on these nodes changes too. Every other node, DomainWarpGradient included, is bit-identical to the base branch. There is no API, metadata or node layout change: encoded node trees still load, they just generate a different warp. **It builds on the domain warp PR** and is one commit on top of it (see Dependencies). Target branch: `perf-seeding`.
+
+## What changes in the noise
+
+The domain warp PR builds each simplex vertex's warp vector from a few hash bits: table indices, sign flips and matrix choices. Those bits came from `HashPrimes`, which is `h ^ ( h >> 15 )` with `h = ( seed ^ primed position ) * A`, and in 3D/4D mostly from its low end (bits 0-9). The low bits of a product only depend on the low bits of its input, and the xorshift only partly fixes that.
+
+This PR changes two things:
+- **The vertex hash is `HashPrimesHB`**, which is `h` itself (no xorshift).
+- **Every consumed bit comes from bits 21-31**, the well-mixed top of the product.
+
+The vector sets, the scaling constants and the warp strength are unchanged. Only the choice of vector at each vertex changes.
+
+| Warp | bits before (of the xorshifted hash) | bits after (of `h`) |
+|---|---|---|
+| OrthogonalGradientMatrix 2D (D8) | rotation 28-30, reflection 0 | rotation 28-30, reflection 31 |
+| GradientOuterProduct 2D | gradient 28-30, outer vector 25-27 | gradient 29-31, outer vector 26-28 |
+| OrthogonalGradientMatrix 3D | z sign 0, mix 4, output signs 1-3, axis rotation from `( hash >> 1 ) * 3` | z sign 21, mix 22, output signs 23-25, axis rotation from two signed compares of the whole hash (thirds of the range) |
+| OrthogonalGradientMatrix 4D | w sign 0, mix 5, output signs 1-4, pair swap 29, adjacent swap 30 | w sign 21, output signs 22-25, mix 29, pair swap 30, adjacent swap 31 |
+| GradientOuterProduct 4D | gradient 0-4, outer vector 5-9 | gradient 27-31, outer vector 22-26 |
+| GradientOuterProduct 3D | unchanged: keeps `HashPrimes`, its decode multiplies the hash | unchanged |
+
+Bits are moved down with a right shift before any left shift (`( hash >> 21 ) << k`). This keeps the compiler from turning a left shift of `hash * A` into an extra multiply (except in SSE4.1 2D, see Speed). The AArch64 TBL lookups mask their 3-bit indices, because TBL reads 0 past the table.
+
+Changed output:
+- DomainWarpSimplex: OrthogonalGradientMatrix (the default) 2D/3D/4D, GradientOuterProduct 2D/4D.
+- DomainWarpSuperSimplex: the same configs.
+- Everything built on them:
+  - DomainWarpFractalProgressive and DomainWarpFractalIndependent over a (Super)Simplex warp.
+  - Node trees such as the MountainTerrain demo.
+  - `GenTileable2D` output of these nodes, because tileable 2D samples the 4D warp.
+
+For the same seed and source, the output after this change correlates with the output before it at r = 0.49-0.86 (16 seeds). The source is the same and the warp is different. Every output stays within the source's range ([-1, 1] for the Simplex source used in the tests).
+
+## Why
+
+**Quality.** Three things, all measured below:
+1. **The 4D GradientOuterProduct warp no longer reuses its source's gradients.** With the base, this warp takes its gradient from `GetGradientDotPerlin( HashPrimes( seed, vertex ) )`. That is exactly the gradient term of a Simplex 4D source at the same vertex whenever the warp and the source share seed and feature scale, which is the default setup. The warp vector is then built from the source's own per-vertex contributions. With a Simplex source this lowers the output sd from 0.293 to 0.268 (DomainWarpSimplex) and from 0.297 to 0.280 (DomainWarpSuperSimplex). With this PR the gradient comes from different hash bits. The output sd is 0.292 / 0.297, the same as an ideal hash gives.
+2. **No more dead or weak seed bits in 3D/4D.** With the base, the 4D GradientOuterProduct warp ignores seed bits 25-31 completely. In the 3D/4D orthogonal matrix warps, seed bits 23 and 24 change only 29-85% of the samples. After this PR every seed bit changes at least 91% of the samples in 3D and 4D.
+3. **Less structure in the consumed bits.** The lattice correlation of the bit windows the warps read drops to near the independent level (below).
+
+**Speed.** One integer xorshift (shift + xor) less per vertex hash. With clang-cl 23 nearly every changed Warp function has fewer instructions, and the 32-bit multiply count per point is unchanged except in SSE4.1 2D (see Speed).
+
+## Quality evidence
+
+Setup:
+- Output from x86 AVX2, clang-cl 23. Before = the base branch (with the domain warp PR). After = this PR.
+- Ideal hash reference: this PR with murmur3 `fmix32` applied to every vertex hash. It is not part of any PR, and serves as a yardstick.
+
+### Seeds
+
+The share of samples that change when one seed bit is flipped, as the lowest value over all 32 bits (100% = every bit fully used):
+
+| Warp | before | this PR | this PR merged with the seeding PR |
+|---|---|---|---|
+| Simplex / SuperSimplex OrthogonalGradientMatrix 2D | 61% / 73% (bit 23) | 56% / 66% (bits 5, 11, 23) | 99% / 100% |
+| Simplex / SuperSimplex GradientOuterProduct 2D | 95% / 98% | 84% / 92% (bit 1) | 99% / 100% |
+| Simplex / SuperSimplex OrthogonalGradientMatrix 3D | **29% / 38%** (bits 23-25) | 91% / 98% | 100% / 100% |
+| Simplex / SuperSimplex OrthogonalGradientMatrix 4D | **34% / 59%** (bits 23-24) | 95% / 100% | 100% / 100% |
+| Simplex / SuperSimplex GradientOuterProduct 4D | **0% / 0%** (bits 25-31) | 96% / 100% | 100% / 100% |
+| GradientOuterProduct 3D (unchanged) | 99% / 100% | 99% / 100% | 100% / 100% |
+
+2D loses a little on a few seed bits. Seed bit k moves the product by 2^k·A mod 2^32. For a few k that step is close to a multiple of 2^32 in the top bits, so the top 4 bits rarely change. The seeding PR premixes the API seed with fmix32 before it reaches any hash. On a merge of the two branches, every seed bit changes 99-100% of the samples in every config.
+
+### Hash bits
+
+Bit-window test on the integer lattice, as the generators feed the hash. It uses the bits each warp reads, in sliding 4-bit windows. The pair statistic is the chi²/dof of the joint distribution of a lattice point and an offset neighbour, as the worst and average over offsets. About 1 means independent. FFT max is the largest bin of the 2D lattice power spectrum (about 15 for white noise).
+
+| Warp | pair worst, before → after | pair average | FFT max |
+|---|---|---|---|
+| OrthogonalGradientMatrix 2D | 22.7 → 3.5 | 2.07 → 1.23 | 17.3 → 15.1 |
+| GradientOuterProduct 2D | 3.1 → 3.6 | 1.21 → 1.28 | 14.4 → 14.9 |
+| OrthogonalGradientMatrix 3D | 68.7 → 35.9 | 5.10 → 1.52 | 19.0 → 14.4 |
+| OrthogonalGradientMatrix 4D | 68.7 → 33.2 | 4.45 → 1.41 | 19.4 → 14.6 |
+| GradientOuterProduct 4D | 68.7 → 4.4 | 3.94 → 1.33 | 21.3 → 15.0 |
+
+With offsets along a third lattice axis, the worst pair is 170-210 both before and after, at offsets of 64 and 256. That comes from the lattice key (the xor of the primed coordinates), not from which bits are read.
+
+**One known imperfection: OrthogonalGradientMatrix 3D.** Its axis rotation is the hash's third of the 32-bit range, and its other five choices sit in bits 21-25. 2^32 / 3 is not a multiple of 2^26, so the 96 combinations of rotation and those five bits are not exactly equally likely: each is within -1.6% / +3.1% of uniform (exact count over all 2^32 hashes). The joint-histogram test shows this (5.4-6.5 against about 1 before). It is a fixed property of the decode, not of the hash, and none of the warp or output statistics below can see it.
+
+### Warp field
+
+The warp vector is extracted exactly, by warping a node that outputs its own position: 1024 x 1024 samples at Warp Amplitude 1, 24 seeds. The table gives the mean over seeds: before → after (ideal hash).
+
+| Warp | mean length | sd x | anisotropy | kurtosis |
+|---|---|---|---|---|
+| Simplex OGM 2D | 0.734 → 0.734 (0.734) | 0.539 → 0.540 (0.539) | 1.140 → 1.150 (1.126) | 1.799 → 1.796 (1.798) |
+| SuperSimplex OGM 2D | 0.557 → 0.558 (0.557) | 0.417 → 0.419 (0.418) | 1.169 → 1.166 (1.153) | 2.085 → 2.085 (2.083) |
+| Simplex GOP 2D | 0.482 → 0.481 (0.481) | 0.384 → 0.384 (0.384) | 1.136 → 1.145 (1.126) | 2.572 → 2.574 (2.567) |
+| SuperSimplex GOP 2D | 0.377 → 0.377 (0.377) | 0.300 → 0.299 (0.300) | 1.158 → 1.163 (1.150) | 2.667 → 2.663 (2.659) |
+| Simplex OGM 3D | 0.623 → 0.623 (0.623) | 0.375 → 0.375 (0.376) | 1.155 → 1.162 (1.170) | 2.270 → 2.265 (2.264) |
+| SuperSimplex OGM 3D | 0.584 → 0.585 (0.585) | 0.349 → 0.350 (0.350) | 1.182 → 1.182 (1.192) | 2.219 → 2.212 (2.212) |
+| Simplex OGM 4D | 0.559 → 0.559 (0.559) | 0.306 → 0.305 (0.306) | 1.160 → 1.174 (1.164) | 3.057 → 3.062 (3.050) |
+| SuperSimplex OGM 4D | 0.536 → 0.536 (0.536) | 0.278 → 0.277 (0.278) | 1.182 → 1.206 (1.197) | 2.445 → 2.450 (2.440) |
+| Simplex GOP 4D | 0.261 → 0.261 (0.261) | 0.165 → 0.165 (0.165) | 1.161 → 1.157 (1.163) | 4.031 → 4.013 (4.040) |
+| SuperSimplex GOP 4D | 0.266 → 0.266 (0.266) | 0.154 → 0.154 (0.154) | 1.183 → 1.174 (1.182) | 3.058 → 3.040 (3.064) |
+
+OGM = OrthogonalGradientMatrix, GOP = GradientOuterProduct.
+
+- The per-seed sd is 0.03-0.06 for anisotropy and up to 0.06 for kurtosis.
+- Max length is the same within 0.003 in every config, and at most 1, so every warp stays within Warp Amplitude. The constants are untouched because the vector sets are the same.
+- The x/y correlation is within ±0.006 and the div/curl ratio 0.998-1.002, before, after and for the ideal hash.
+
+The distance between distributions is no larger than the distance between two seeds. It is measured as the L1 distance of the x histograms and the max log ratio of the radially averaged x spectra, as the mean over 24 seeds:
+
+| Warp | histogram: after vs before / seed vs seed | spectrum: after vs before / seed vs seed | histogram: after vs ideal / ideal seed vs seed | spectrum: after vs ideal / ideal seed vs seed |
+|---|---|---|---|---|
+| Simplex OGM 2D | 0.008 / 0.009 | 0.102 / 0.099 | 0.010 / 0.009 | 0.100 / 0.100 |
+| SuperSimplex OGM 2D | 0.011 / 0.012 | 0.115 / 0.115 | 0.011 / 0.012 | 0.107 / 0.106 |
+| Simplex GOP 2D | 0.016 / 0.014 | 0.107 / 0.122 | 0.015 / 0.013 | 0.138 / 0.116 |
+| SuperSimplex GOP 2D | 0.016 / 0.014 | 0.105 / 0.129 | 0.014 / 0.013 | 0.152 / 0.129 |
+| Simplex OGM 3D | 0.017 / 0.017 | 0.118 / 0.091 | 0.018 / 0.016 | 0.129 / 0.121 |
+| SuperSimplex OGM 3D | 0.018 / 0.019 | 0.131 / 0.106 | 0.019 / 0.016 | 0.144 / 0.139 |
+| Simplex OGM 4D | 0.024 / 0.022 | 0.123 / 0.094 | 0.021 / 0.020 | 0.125 / 0.116 |
+| SuperSimplex OGM 4D | 0.025 / 0.024 | 0.133 / 0.107 | 0.022 / 0.022 | 0.129 / 0.124 |
+| Simplex GOP 4D | 0.024 / 0.027 | 0.140 / 0.141 | 0.025 / 0.026 | 0.140 / 0.155 |
+| SuperSimplex GOP 4D | 0.024 / 0.026 | 0.144 / 0.132 | 0.024 / 0.026 | 0.148 / 0.166 |
+
+The per-seed sd of the spectrum distance is 0.04-0.12, so every difference in the table is inside one sd. The first evaluation of this proposal flagged the 3D OrthogonalGradientMatrix spectrum on a single seed (0.217 against 0.125). Over 24 seeds it is 0.118 against 0.091 / 0.116 (sd 0.04-0.08), so that was seed noise.
+
+### Output of a warped Simplex source
+
+Warp Amplitude 30, all nodes at their default feature scale, 16 seeds. Samples: 256 x 256 (2D), 64 x 64 x 16 (3D) and 32 x 32 x 8 x 8 (4D), at step 31. Output sd, before → after (ideal hash):
+- **Simplex GradientOuterProduct 4D: 0.268 → 0.292 (0.293).**
+- **SuperSimplex GradientOuterProduct 4D: 0.280 → 0.297 (0.297).**
+- With the warp node's Seed Offset set to 1, so that warp and source no longer share hashes, the base gives 0.293 / 0.297 as well. That confirms the cause described under Why.
+- Every other config: before, after and ideal agree within 0.002 (the output sd is 0.27-0.54).
+- Output range in [-1, 1] for every config and seed.
+
+### Images
+
+Seed 1337, before on the left, after on the right. After's warp amplitude is matched to before's measured warp sd, so the look is compared like for like.
+- `dw-topbits_<config>_img.png`: a Simplex source warped with a large amplitude.
+- `dw-topbits_<config>_vx.png`: the x component of the warp field.
+- `dw-topbits_<config>_vxfft.png`: its log power spectrum (central bins).
+
+Configs: `DWSimplex_vs0_2D`, `DWSimplex_vs0_3D`, `DWSimplex_vs0_4D`, `DWSuperSimplex_vs0_2D`, `DWSuperSimplex_vs0_3D`, `DWSuperSimplex_vs0_4D`, `DWSimplex_vs1_2D`, `DWSimplex_vs1_4D`, `DWSuperSimplex_vs1_2D`, `DWSuperSimplex_vs1_4D` (vs0 = OrthogonalGradientMatrix, vs1 = GradientOuterProduct). Same look, isotropic spectra, no lattice artefacts. Start with [`dw-topbits_DWSimplex_vs0_3D_img.png`](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_3D_img.png), [`dw-topbits_DWSimplex_vs0_4D_img.png`](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_4D_img.png) and [`dw-topbits_DWSimplex_vs1_4D_vx.png`](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_4D_vx.png).
+
+## Speed
+
+Measured on a Ryzen 9 7950X, one pinned core, nothing else running: clang-cl and MSVC under Windows, GCC and Linux clang under WSL 2 on the same machine. Both builds use FastSIMD 7aff025 and run interleaved in one process, in 3 processes with the A/B order alternating; each figure is the median of the per-process new/old time ratios (lower is faster). Two identical builds give feature-set geomeans of 0.998-1.001 and 99% of single rows within 1.5% (worst 9.1%) under Windows, and 0.999-1.005 and 2.4% under WSL, where a few single rows were 8-26% off in every process, so a lone Linux row is not evidence on its own. Against the domain warp PR, with clang-cl 23, MSVC 19.51 (VS 2026) and GCC 16 (default set); GCC 13, Linux clang 23 and AArch64 were not measured.
+- Grid = `GenUniformGrid` with 16384 points. Random positions = `GenPositionArray`.
+- Default set: 21 generators and node trees, 252 grid rows. Its 64 rows of changed code give 0.980 (clang-cl 23), 0.985 (MSVC 19.51) and 0.983 (GCC 16).
+- Warp set, 108 rows: DomainWarpSimplex and DomainWarpSuperSimplex with each Vectorization Scheme, DomainWarpFractalIndependent over a SuperSimplex warp, DomainWarpFractalProgressive over a Simplex GradientOuterProduct warp, MountainTerrain, and Simplex and DomainWarpGradient as unchanged controls.
+- Changed rows (72): the warp set minus the controls and the unchanged GradientOuterProduct 3D path.
+
+| | SSE2 | SSE4.1 | AVX2 | AVX-512 | All |
+|---|---|---|---|---|---|
+| clang-cl 23, grid, default set | 0.997 | 0.994 | 0.995 | 0.994 | 0.995 |
+| clang-cl 23, grid, warp set | 0.995 | 0.984 | 0.982 | 0.982 | 0.986 |
+| clang-cl 23, grid, changed rows | 0.992 | 0.976 | 0.973 | 0.973 | 0.978 |
+| clang-cl 23, random, warp set | 0.995 | 0.982 | 0.981 | 0.981 | 0.985 |
+| clang-cl 23, random, changed rows | 0.992 | 0.973 | 0.972 | 0.971 | 0.977 |
+| MSVC 19.51, grid, default set | 0.990 | 0.995 | 0.999 | 0.994 | 0.995 |
+| MSVC 19.51, grid, warp set | 0.991 | 0.987 | 0.995 | 0.987 | 0.990 |
+| MSVC 19.51, grid, changed rows | 0.984 | 0.980 | 0.991 | 0.981 | 0.984 |
+| MSVC 19.51, random, warp set | 0.991 | 0.991 | 1.001 | 0.993 | 0.994 |
+| MSVC 19.51, random, changed rows | 0.984 | 0.985 | 0.998 | 0.987 | 0.989 |
+| GCC 16, grid, default set | 0.999 | 0.998 | 0.992 | 0.993 | 0.995 |
+
+Every changed-row figure is outside the noise floor except MSVC 19.51 AVX2 on random positions (0.998), where one process gave 1.057-1.447 on 23 of 27 AVX2 rows; that run's AVX2 figures are the least certain.
+
+clang-cl 23 (grid / random positions):
+- **OrthogonalGradientMatrix, the default scheme:** 0.971-0.977 for both warps and the independent fractal over SuperSimplex, 0.937-0.954 on AVX-512 3D (grid).
+- **GradientOuterProduct 2D:** 0.954-0.983 for both warps and the progressive fractal.
+- **GradientOuterProduct 4D:** DomainWarpSimplex on AVX2, which now inlines the per-vertex helper the base calls out of line (620 + 242 → 1133 instructions, same multiplies per point), gains most: 0.913 in the default set. Its warp-set rows and the progressive fractal over it (0.888-0.909) are unstable: read them as about 10% faster.
+- **Slower:** the progressive fractal over Simplex GradientOuterProduct SSE2 4D, 1.039 / 1.041 (every process 1.022-1.057), where the plain warp is 0.993; its SSE2 3D row, with an unchanged warp path, is 1.026 / 1.018. The independent fractal over SuperSimplex SSE4.1 2D, where clang-cl emits more multiplies (see code size), is 1.015-1.026; the plain SuperSimplex warps there are 0.979-0.991.
+
+MSVC 19.51 (grid / random positions):
+- **The SuperSimplex warps gain most:** OrthogonalGradientMatrix and the independent fractal over it 0.974-0.975 (0.905-0.917 on AVX-512 3D), GradientOuterProduct (2D and 4D) 0.976 / 0.994.
+- GradientOuterProduct 2D: 0.939-0.986 for both warps and the progressive fractal, except one random-position row (below). DomainWarpSimplex OrthogonalGradientMatrix barely moves (0.992 / 0.998).
+- **DomainWarpSuperSimplex GradientOuterProduct AVX2 4D, random positions only: 1.092 (1.078 1.159 1.092).** It is from the noisy AVX2 run, but the other two processes also put it 8-9% slower. Grid: 1.004 and 1.005.
+- **DomainWarpSimplex AVX-512 2D, random positions only:** OrthogonalGradientMatrix 1.044 and GradientOuterProduct 1.047 (processes agree); 0.973-1.001 on the grid.
+- **DomainWarpSimplex OrthogonalGradientMatrix AVX2 3D:** 1.044 and 1.041 in the two grid runs (processes agree), 1.041 on random positions (they disagree).
+- **The Simplex GradientOuterProduct 4D path gains on no feature set:** on AVX-512 4D, DomainWarpSimplex is 1.035-1.042, the progressive fractal over it 1.033-1.039.
+- Smaller costs, 1.030-1.038: the independent fractal over SuperSimplex AVX2 2D, the worst stable GradientOuterProduct 3D row (source unchanged; its 12 rows are 1.010 / 1.012) and the progressive fractal over DomainWarpGradient SSE2 4D (untouched code).
+
+With both compilers MountainTerrain is 0.994-0.998 and the controls 0.999-1.001.
+
+MSVC 19.51 default-set rows this PR does not touch: Perlin SSE2 4D is 0.726 and the CellularCaves demo SSE2 4D 0.903. The domain warp PR's build ran them at 1.376 and 1.103 of its base; this PR undoes that. Without them the default set is 0.996 on SSE2 and overall.
+
+GCC 16 (grid, default set):
+- **The 64 changed rows:** AVX2 0.971, AVX-512 0.970, SSE4.1 0.992, SSE2 no change (0.998).
+- **AVX2 2D gains more than with clang-cl 23:** 0.932-0.950 for both warps with either scheme and the independent fractal, against 0.968-0.986.
+- **Slower:** DomainWarpSuperSimplex GradientOuterProduct SSE4.1 4D 1.041 and SSE2 4D 1.019 (processes agree; clang-cl 23: 1.014, 1.007).
+
+Code size, clang-cl 23: the changed Warp functions have 0.2-7% fewer instructions, except two within 1% larger. The `pmulld` count is unchanged except in SSE4.1 2D, 14 → 26 (Simplex) and 18 → 34 (SuperSimplex), where clang still folds the bit extractions into multiplies by shifted constants.
+
+## Testing
+
+- **Builds:** clang-cl 23.1.3, MSVC 19.51 (VS 2026), MSVC 19.44 (VS 2022), GCC 16 (snapshot), GCC 13.3, clang 23 (Linux), Emscripten 6.0.12 (WASM SIMD), clang 23 ARM NEON + AArch64 cross compile, Homebrew clang 23 on an Apple M1. No new warnings.
+- **Output vs the base branch, same compiler.** The harness has 1212 rows: about 100 node configurations x SSE2/SSE4.1/AVX2/AVX-512 x 2D/3D/4D. Each row covers uniform grid, random positions, far positions up to 2e5, tileable and GenSingle, with 2 seeds.
+  - On clang-cl 23, MSVC 19.44, GCC 16, GCC 13 and Linux clang 23, exactly the same 72 rows change:
+    - DomainWarpSimplex and DomainWarpSuperSimplex, OrthogonalGradientMatrix 2D/3D/4D and GradientOuterProduct 2D/4D.
+    - The independent domain warp fractal over SuperSimplex.
+    - The progressive domain warp fractal over Simplex GradientOuterProduct, 2D/4D.
+    - The MountainTerrain demo.
+  - The other 1140 rows are bit-identical (also at 1e-7), including the GradientOuterProduct 3D rows.
+  - MSVC 19.51: the same 72 rows change. One more row (the progressive domain warp fractal, SSE2 3D, unchanged source code) moves by float rounding (6.7e-6 of the output range), from MSVC compiling the shared translation unit differently.
+  - Apple M1: the same configs change for NEON and AArch64 (36 rows), and the other 570 rows are bit-identical.
+- **Against `perf`** (before the domain warp PR): exactly the 80 rows the domain warp PR changes, on every toolchain.
+- **Against master:** only these 80 rows differ, plus the known compiler rows that also differ on `perf`: MSVC 19.51's 55 far-coordinate rounding and jitter rows, and Linux clang 23's 2 Op_AddDimension rows.
+- **Cross-compiler:** the rows that differ between compilers (clang-cl vs MSVC 19.51 / 19.44, GCC 16 vs GCC 13 / clang 23) are the same rows as on the base branch.
+- **Consistency across code paths.** The warp nodes at grid steps 0.37, 3.1 and 41 in 2D/3D/4D: uniform grid vs position array on the same coordinates vs GenSingle, and every feature set vs SSE2. Largest difference 1.6e-5 of the output range (base 1.5e-5), no sample over 1e-3.
+  - Feature set cross check on the warp and demo rows, x86 at 1e-4: 35 exact / 76 rounding / 18 flips / 3 far or tile rows (base: 35 / 70 / 25 / 2). At 1e-3 both are 35 exact / 97 rounding / 0 different.
+  - On the M1, NEON and AArch64 agree as on the base. This covers the AArch64 table paths added here.
+- **Edge inputs** (all warp configs x 4 feature sets x 3 dims x 2 seeds, against the base and against master):
+  - Positions up to 1e12 give finite output.
+  - No sample leaves [-1, 1].
+  - NaN and infinite positions behave as in the base.
+- **Cross check against the first implementation** of this proposal on an older revision of the code: the same output to float rounding.
+  - 0 rows over 1e-3 on clang-cl 23 and MSVC 19.44.
+  - The rounding rows are the same ones the domain warp PR shows against its own first implementation.
+  - Seed table, single-seed warp statistics and hash statistics are identical to the first evaluation.
+
+## Dependencies on other seeding PRs
+
+- **Requires the domain warp PR.** This is one commit on top of it. The bit map is defined for that PR's vector constructions, so it cannot be applied without it.
+- **Best merged with the seeding PR** (premixed API seed). On its own this PR removes the domain warp PR's dead seed bits in 3D/4D. Together, every seed bit is fully used in every config (measured on a merge of the two branches).
+- It only changes `DomainWarpSimplex.inl`. It merges cleanly (checked with `git merge-tree`) with the seeding, seeding quality, DomainWarpGradient bit field, 3D gradient, simplex frequency, cellular bit field and cellular direction PRs.
+
+<details><summary>Images (30)</summary>
+
+**dw-topbits_DWSimplex_vs0_2D_img.png**
+
+![dw-topbits_DWSimplex_vs0_2D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_2D_img.png)
+
+**dw-topbits_DWSimplex_vs0_2D_vx.png**
+
+![dw-topbits_DWSimplex_vs0_2D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_2D_vx.png)
+
+**dw-topbits_DWSimplex_vs0_2D_vxfft.png**
+
+![dw-topbits_DWSimplex_vs0_2D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_2D_vxfft.png)
+
+**dw-topbits_DWSimplex_vs0_3D_img.png**
+
+![dw-topbits_DWSimplex_vs0_3D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_3D_img.png)
+
+**dw-topbits_DWSimplex_vs0_3D_vx.png**
+
+![dw-topbits_DWSimplex_vs0_3D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_3D_vx.png)
+
+**dw-topbits_DWSimplex_vs0_3D_vxfft.png**
+
+![dw-topbits_DWSimplex_vs0_3D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_3D_vxfft.png)
+
+**dw-topbits_DWSimplex_vs0_4D_img.png**
+
+![dw-topbits_DWSimplex_vs0_4D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_4D_img.png)
+
+**dw-topbits_DWSimplex_vs0_4D_vx.png**
+
+![dw-topbits_DWSimplex_vs0_4D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_4D_vx.png)
+
+**dw-topbits_DWSimplex_vs0_4D_vxfft.png**
+
+![dw-topbits_DWSimplex_vs0_4D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs0_4D_vxfft.png)
+
+**dw-topbits_DWSimplex_vs1_2D_img.png**
+
+![dw-topbits_DWSimplex_vs1_2D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_2D_img.png)
+
+**dw-topbits_DWSimplex_vs1_2D_vx.png**
+
+![dw-topbits_DWSimplex_vs1_2D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_2D_vx.png)
+
+**dw-topbits_DWSimplex_vs1_2D_vxfft.png**
+
+![dw-topbits_DWSimplex_vs1_2D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_2D_vxfft.png)
+
+**dw-topbits_DWSimplex_vs1_4D_img.png**
+
+![dw-topbits_DWSimplex_vs1_4D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_4D_img.png)
+
+**dw-topbits_DWSimplex_vs1_4D_vx.png**
+
+![dw-topbits_DWSimplex_vs1_4D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_4D_vx.png)
+
+**dw-topbits_DWSimplex_vs1_4D_vxfft.png**
+
+![dw-topbits_DWSimplex_vs1_4D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSimplex_vs1_4D_vxfft.png)
+
+**dw-topbits_DWSuperSimplex_vs0_2D_img.png**
+
+![dw-topbits_DWSuperSimplex_vs0_2D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_2D_img.png)
+
+**dw-topbits_DWSuperSimplex_vs0_2D_vx.png**
+
+![dw-topbits_DWSuperSimplex_vs0_2D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_2D_vx.png)
+
+**dw-topbits_DWSuperSimplex_vs0_2D_vxfft.png**
+
+![dw-topbits_DWSuperSimplex_vs0_2D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_2D_vxfft.png)
+
+**dw-topbits_DWSuperSimplex_vs0_3D_img.png**
+
+![dw-topbits_DWSuperSimplex_vs0_3D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_3D_img.png)
+
+**dw-topbits_DWSuperSimplex_vs0_3D_vx.png**
+
+![dw-topbits_DWSuperSimplex_vs0_3D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_3D_vx.png)
+
+**dw-topbits_DWSuperSimplex_vs0_3D_vxfft.png**
+
+![dw-topbits_DWSuperSimplex_vs0_3D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_3D_vxfft.png)
+
+**dw-topbits_DWSuperSimplex_vs0_4D_img.png**
+
+![dw-topbits_DWSuperSimplex_vs0_4D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_4D_img.png)
+
+**dw-topbits_DWSuperSimplex_vs0_4D_vx.png**
+
+![dw-topbits_DWSuperSimplex_vs0_4D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_4D_vx.png)
+
+**dw-topbits_DWSuperSimplex_vs0_4D_vxfft.png**
+
+![dw-topbits_DWSuperSimplex_vs0_4D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs0_4D_vxfft.png)
+
+**dw-topbits_DWSuperSimplex_vs1_2D_img.png**
+
+![dw-topbits_DWSuperSimplex_vs1_2D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs1_2D_img.png)
+
+**dw-topbits_DWSuperSimplex_vs1_2D_vx.png**
+
+![dw-topbits_DWSuperSimplex_vs1_2D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs1_2D_vx.png)
+
+**dw-topbits_DWSuperSimplex_vs1_2D_vxfft.png**
+
+![dw-topbits_DWSuperSimplex_vs1_2D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs1_2D_vxfft.png)
+
+**dw-topbits_DWSuperSimplex_vs1_4D_img.png**
+
+![dw-topbits_DWSuperSimplex_vs1_4D_img.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs1_4D_img.png)
+
+**dw-topbits_DWSuperSimplex_vs1_4D_vx.png**
+
+![dw-topbits_DWSuperSimplex_vs1_4D_vx.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs1_4D_vx.png)
+
+**dw-topbits_DWSuperSimplex_vs1_4D_vxfft.png**
+
+![dw-topbits_DWSuperSimplex_vs1_4D_vxfft.png](https://raw.githubusercontent.com/Auburn/FastNoise2/perf-seeding-images/dw-topbits_DWSuperSimplex_vs1_4D_vxfft.png)
+
+</details>
+
+Builds on: #230.

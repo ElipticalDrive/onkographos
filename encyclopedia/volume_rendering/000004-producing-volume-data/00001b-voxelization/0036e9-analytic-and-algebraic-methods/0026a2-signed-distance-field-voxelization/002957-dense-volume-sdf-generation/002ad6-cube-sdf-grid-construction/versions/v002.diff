@@ -1,0 +1,208 @@
+--- v001.md
++++ v002.md
+@@ -1,150 +1,94 @@
+ # Cube SDF Grid Construction
+ ## Overview
+-Constructs a discrete Signed Distance Field (SDF) grid for a cube centered in the grid using analytical distance formulas for interior and exterior voxels [S1, unofficial]. It serves as a deterministic, noise-free initialization for dense volume SDF generation, providing a ground-truth reference or a simplified primitive for neural rendering pipelines [S1, unofficial]. Unlike sphere-based constructions which rely on radial symmetry, this method handles the axis-aligned geometry of a cube, requiring distinct logic for face, edge, and corner projections in the exterior region [S1, unofficial].
++Constructs a discrete Signed Distance Field (SDF) grid for a cube centered in the grid using analytical distance formulas for interior and exterior voxels [S1, unofficial]. It differs from its sibling [Sphere SDF Grid Construction](4895-sphere-sdf-grid-construction.md) by using box-based min/max operations rather than spherical symmetry and Euclidean distance from the center.
+ ## How it works
+ **Inputs:**
+ - `grid_res`: Integer, the resolution of the cubic grid (N x N x N).
+-- `bounding_box_min`: Vector (3 floats), the minimum coordinates of the bounding box.
+-- `bounding_box_max`: Vector (3 floats), the maximum coordinates of the bounding box.
++- `bounding_box_min`: 3D vector, the minimum coordinates of the bounding box.
++- `bounding_box_max`: 3D vector, the maximum coordinates of the bounding box.
+ 
+ **Outputs:**
+-- `grid`: A 3D tensor of shape `(grid_res, grid_res, grid_res)` containing the SDF values.
++- `grid`: 3D tensor of shape `(grid_res, grid_res, grid_res)` containing the SDF values.
+ 
+ **Data Structures:**
+-- The grid is stored as a dense 3D array. Each element `grid[i, j, k]` holds the signed distance value for the voxel at integer indices `i, j, k`.
+-- Indices are 0-based, ranging from `0` to `grid_res - 1`.
++- The grid is a dense 3D array where each element corresponds to a voxel index $(i, j, k)$.
++- Indices are integer ranges $[0, \text{grid\_res}-1]$.
+ 
+ **Parameters:**
+-- `voxel_size`: Derived from the bounding box and resolution.
+-- `cube_center`: The central index of the grid.
+-- `cube_left_bound_index` and `cube_right_bound_index`: Define the spatial extent of the cube's interior in index space.
++- `voxel_size`: Calculated as $(\text{bounding\_box\_max} - \text{bounding\_box\_min}) / (\text{grid\_res} - 1)$.
++- `cube_center`: Index coordinate of the grid center, calculated as $(\text{grid\_res} - 1) / 2$.
++- `cube_left_bound_index`: Index coordinate of the left boundary of the cube, calculated as $(\text{grid\_res} - 1) / 4$.
++- `cube_right_bound_index`: Index coordinate of the right boundary of the cube, calculated as $3 \times (\text{grid\_res} - 1) / 4$.
+ 
+ **Steps:**
+-1.  **Calculate Voxel Size:** Compute the physical size of a single voxel along each axis.
+-    $$ v = \frac{\text{bounding\_box\_max} - \text{bounding\_box\_min}}{\text{grid\_res} - 1} $$
+-    Note: This assumes a uniform grid where the bounding box spans exactly `grid_res - 1` voxel intervals.
++1. Calculate `voxel_size`, `cube_left_bound_index`, `cube_right_bound_index`, and `cube_center` using the formulas above.
++2. Initialize a 3D grid of size `grid_res` x `grid_res` x `grid_res`.
++3. Iterate over all voxel indices $i, j, k$ from $0$ to $\text{grid\_res}-1$.
++4. Determine if the voxel $(i, j, k)$ is inside the cube. A voxel is inside if:
++   $$ \text{cube\_left\_bound\_index} \le i \le \text{cube\_right\_bound\_index} $$
++   $$ \text{cube\_left\_bound\_index} \le j \le \text{cube\_right\_bound\_index} $$
++   $$ \text{cube\_left\_bound\_index} \le k \le \text{cube\_right\_bound\_index} $$
++5. If inside, compute the interior SDF:
++   $$ \text{grid}[i,j,k] = \text{voxel\_size} \times \max(|i - \text{cube\_center}|, |j - \text{cube\_center}|, |k - \text{cube\_center}|) - 1 $$
++6. If outside, compute the exterior SDF by projecting to the nearest face. Calculate the clamped distances to the cube boundaries:
++   $$ \Delta x = \max(i - \text{cube\_right\_bound\_index}, \text{cube\_left\_bound\_index} - i, 0) $$
++   $$ \Delta y = \max(j - \text{cube\_right\_bound\_index}, \text{cube\_left\_bound\_index} - j, 0) $$
++   $$ \Delta z = \max(k - \text{cube\_right\_bound\_index}, \text{cube\_left\_bound\_index} - k, 0) $$
++   Then compute:
++   $$ \text{grid}[i,j,k] = \sqrt{(\text{voxel\_size} \cdot \Delta x)^2 + (\text{voxel\_size} \cdot \Delta y)^2 + (\text{voxel\_size} \cdot \Delta z)^2} $$
+ 
+-2.  **Define Cube Geometry in Index Space:**
+-    Determine the indices that bound the cube. The cube is centered in the grid and occupies the middle 50% of the grid's span (from 25% to 75% of the range).
+-    $$ c = \frac{\text{grid\_res} - 1}{2} $$
+-    $$ l = \frac{\text{grid\_res} - 1}{4} $$
+-    $$ r = \frac{3 \times (\text{grid\_res} - 1)}{4} $$
+-    Here, $c$ is the center index, $l$ is the left/bottom/back bound index, and $r$ is the right/top/front bound index.
+-
+-3.  **Initialize Grid:**
+-    Create a tensor `grid` of shape `(grid_res, grid_res, grid_res)`.
+-
+-4.  **Iterate and Compute SDF:**
+-    Loop over all integer indices $i, j, k$ from $0$ to $\text{grid\_res} - 1$. For each voxel, determine if it is inside or outside the cube and compute the distance accordingly.
+-
+-    **Inside the Cube:**
+-    If the voxel indices satisfy $l \le i \le r$, $l \le j \le r$, and $l \le k \le r$, the voxel is inside. The SDF is the distance to the nearest face. Since the cube is axis-aligned and centered, this is determined by the maximum absolute deviation from the center, scaled by voxel size, minus the half-width of the cube (which is 1 unit in the normalized space implied by the formula, or effectively the distance from center to face).
+-    $$ \text{grid}[i,j,k] = v \cdot \max(|i - c|, |j - c|, |k - c|) - 1 $$
+-    *Note: The "-1" term implies the cube has a physical half-width of 1 unit in the coordinate system defined by the bounding box scaling, or that the bounding box represents a cube of side length 2 centered at the origin. Specifically, if the bounding box spans $[-1, 1]$ in physical space, the cube faces are at $\pm 0.5$? No, the formula subtracts 1. Let's trace: At the center $(c,c,c)$, distance is $-1$. At the face, e.g., $i=r$, $|r-c| = r-c = \frac{3(N-1)}{4} - \frac{N-1}{2} = \frac{N-1}{4}$. The term becomes $v \cdot \frac{N-1}{4} - 1$. Since $v = \frac{2}{N-1}$ (assuming box size 2), $v \cdot \frac{N-1}{4} = 0.5$. So $0.5 - 1 = -0.5$. This suggests the cube extends from -0.5 to 0.5 in physical space, and the bounding box is larger? Or the bounding box is the cube itself? If the bounding box is the cube, the max distance inside should be 0 at the surface. The formula yields -1 at center. This implies the "1" is a normalization constant or the cube size is defined such that the distance from center to face is 1. Given the code uses `bounding_box_max - bounding_box_min`, if the box is $[-1,1]$, size is 2. $v = 2/(N-1)$. The distance from center to face in indices is $(N-1)/4$. Physical distance is $v \times (N-1)/4 = 0.5$. The formula gives $0.5 - 1 = -0.5$. This is consistent with a cube of side length 1 centered at 0 (extending -0.5 to 0.5). The bounding box likely encompasses a larger area or the "1" is a hardcoded scale factor for a unit cube. We stick to the provided formula.*
+-
+-    **Outside the Cube:**
+-    If the voxel is outside, compute the distance to the nearest point on the cube surface. This involves projecting the voxel coordinates to the nearest face, edge, or corner.
+-    Calculate the clamped distances to the cube boundaries in index space:
+-    $$ \Delta x = \max(i - r, l - i, 0) $$
+-    $$ \Delta y = \max(j - r, l - j, 0) $$
+-    $$ \Delta z = \max(k - r, l - k, 0) $$
+-    These $\Delta$ terms are non-zero only if the index is outside the $[l, r]$ range.
+-    Convert these index differences to physical distances by multiplying by `voxel_size` ($v$).
+-    $$ d_x = v \cdot \Delta x $$
+-    $$ d_y = v \cdot \Delta y $$
+-    $$ d_z = v \cdot \Delta z $$
+-    The SDF is the Euclidean distance of this projection vector:
+-    $$ \text{grid}[i,j,k] = \sqrt{d_x^2 + d_y^2 + d_z^2} $$
++**Formula:**
++The SDF value for a voxel at indices $(i,j,k)$ is given by:
++$$ SDF(i,j,k) = \begin{cases} v \cdot \max(|i-c|, |j-c|, |k-c|) - 1 & \text{if inside} \\ \sqrt{(v \cdot \Delta x)^2 + (v \cdot \Delta y)^2 + (v \cdot \Delta z)^2} & \text{if outside} \end{cases} $$
++where $v$ is `voxel_size`, $c$ is `cube_center`, and $\Delta$ terms are clamped to 0.
+ 
+ **Pseudocode:**
+ ```python
+ import math
+-import numpy as np
+ 
+ def grid_construction_cube(grid_res, bounding_box_min, bounding_box_max):
+-    """
+-    Constructs a discrete SDF grid for a cube centered in the grid.
++    # Calculate geometric parameters
++    voxel_size = (bounding_box_max - bounding_box_min) / (grid_res - 1)
++    cube_left_bound_index = float(grid_res - 1) / 4.0
++    cube_right_bound_index = float(grid_res - 1) / 4.0 * 3.0
++    cube_center = float(grid_res - 1) / 2.0
+     
+-    Args:
+-        grid_res (int): Resolution of the grid (N).
+-        bounding_box_min (array-like): Min coordinates of the bounding box [x, y, z].
+-        bounding_box_max (array-like): Max coordinates of the bounding box [x, y, z].
+-        
+-    Returns:
+-        numpy.ndarray: 3D array of shape (grid_res, grid_res, grid_res) with SDF values.
+-    """
+-    # 1. Calculate voxel size
+-    # Note: The source divides by (grid_res - 1). This implies the bounding box 
+-    # spans the full range of the grid indices from 0 to grid_res-1.
+-    voxel_size = (np.array(bounding_box_max) - np.array(bounding_box_min)) / (grid_res - 1)
++    # Initialize grid
++    grid = [[[[0.0 for _ in range(grid_res)] for _ in range(grid_res)] for _ in range(grid_res)]]
+     
+-    # 2. Define cube bounds in index space
+-    # The cube occupies the middle 50% of the grid indices.
+-    # Center is at the midpoint of the index range [0, grid_res-1]
+-    cube_center = float(grid_res - 1) / 2.0
+-    # Left bound is at 25% of the index range
+-    cube_left_bound_index = float(grid_res - 1) / 4.0
+-    # Right bound is at 75% of the index range
+-    cube_right_bound_index = float(grid_res - 1) / 4.0 * 3.0
+-    
+-    # 3. Initialize grid
+-    grid = np.zeros((grid_res, grid_res, grid_res))
+-    
+-    # 4. Iterate over all voxels
+     for i in range(grid_res):
+         for j in range(grid_res):
+             for k in range(grid_res):
+                 # Check if inside the cube bounds
+-                if (cube_left_bound_index <= i <= cube_right_bound_index and
+-                    cube_left_bound_index <= j <= cube_right_bound_index and
+-                    cube_left_bound_index <= k <= cube_right_bound_index):
+-                    
+-                    # Inside: Distance to nearest face
+-                    # Formula: v * max(|i-c|, |j-c|, |k-c|) - 1
+-                    # The "-1" is a constant offset from the source code.
+-                    dist_to_center = max(abs(i - cube_center), abs(j - cube_center), abs(k - cube_center))
+-                    grid[i, j, k] = voxel_size[0] * dist_to_center - 1
+-                    
++                if (i >= cube_left_bound_index and i <= cube_right_bound_index and
++                    j >= cube_left_bound_index and j <= cube_right_bound_index and
++                    k >= cube_left_bound_index and k <= cube_right_bound_index):
++                    # Interior SDF
++                    dist = max(abs(i - cube_center), abs(j - cube_center), abs(k - cube_center))
++                    grid[i][j][k] = voxel_size * dist - 1.0
+                 else:
+-                    # Outside: Distance to nearest surface point (face, edge, or corner)
+-                    # Calculate clamped distances to the cube boundaries in index space
+-                    dx_idx = max(i - cube_right_bound_index, cube_left_bound_index - i, 0)
+-                    dy_idx = max(j - cube_right_bound_index, cube_left_bound_index - j, 0)
+-                    dz_idx = max(k - cube_right_bound_index, cube_left_bound_index - k, 0)
+-                    
+-                    # Convert to physical distance
+-                    dx = voxel_size[0] * dx_idx
+-                    dy = voxel_size[0] * dy_idx
+-                    dz = voxel_size[0] * dz_idx
+-                    
+-                    # Euclidean distance
+-                    grid[i, j, k] = math.sqrt(dx**2 + dy**2 + dz**2)
++                    # Exterior SDF
++                    dx = max(i - cube_right_bound_index, cube_left_bound_index - i, 0)
++                    dy = max(j - cube_right_bound_index, cube_left_bound_index - j, 0)
++                    dz = max(k - cube_right_bound_index, cube_left_bound_index - k, 0)
++                    grid[i][j][k] = math.sqrt((voxel_size * dx)**2 + (voxel_size * dy)**2 + (voxel_size * dz)**2)
+                     
+     return grid
+ ```
+ 
+-**Edge Cases and Pitfalls:**
+-- **Precision:** The use of floating-point division for indices (`cube_left_bound_index`, etc.) means that for small `grid_res`, the bounds may not align perfectly with integer indices. The comparison `cube_left_bound_index <= i` handles this, but ensure consistent floating-point behavior.
+-- **Bounding Box Assumption:** The formula assumes the cube is centered and scaled such that the distance from the center to the face corresponds to a specific physical value (implied by the `-1` constant). If the bounding box does not represent a cube of side length 2 centered at the origin (in the normalized space where the cube faces are at $\pm 0.5$), the `-1` offset may need adjustment. The source code hardcodes this, implying a specific normalization.
+-- **Voxel Size Calculation:** Dividing by `grid_res - 1` assumes the grid points are spaced evenly across the bounding box, with the first and last points at the boundaries. If the grid represents cell centers, the calculation might differ. The source uses this specific formula.
+-- **Performance:** The triple loop is $O(N^3)$. For large `grid_res`, this will be slow. Vectorized implementations (e.g., using NumPy broadcasting or PyTorch) are recommended for production, but the loop structure is provided for clarity and direct translation from the source [S1, unofficial].
+-
+ ## Subtopics
+ 
+ ### [Sphere SDF Grid Construction](4895-sphere-sdf-grid-construction.md)
+-Constructs a discrete SDF grid for a sphere using its analytical implicit surface equation, vectorized with PyTorch broadcasting. It differs from Cube SDF Grid Construction by using radial distance ($\sqrt{x^2+y^2+z^2}$) instead of axis-aligned max-norm and clamped projections, and is chosen when spherical symmetry is required.
++Constructs a discrete SDF grid for a sphere using analytical implicit surface equations. Choose this for spherical primitives or tori; it uses spherical symmetry rather than box-based min/max operations.
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N^3)$, where $N$ is `grid_res`. The algorithm iterates over every voxel exactly once.
+-- **Memory Complexity:** $O(N^3)$ to store the grid.
+-- **Performance:** The pure Python loop implementation is slow for large $N$. Vectorized versions (using NumPy or PyTorch) can achieve significant speedups by eliminating the loop overhead and leveraging SIMD instructions.
+-- **Strengths:** Deterministic, analytically exact for the cube primitive, no sampling noise, fast to compute for small to medium resolutions.
+-- **Limitations:** Only applicable to cubes. The hardcoded `-1` offset assumes a specific normalization of the bounding box relative to the cube size. Not suitable for complex, non-convex, or arbitrary shapes.
+-- **When to use:** When a ground-truth SDF for a cube is needed for testing, initialization, or as a simple primitive in a scene.
+-- **When not to use:** For arbitrary meshes, complex organic shapes, or when high performance on very large grids is required without vectorization.
+-
++- **Time Complexity:** $O(N^3)$ where $N$ is `grid_res`, as every voxel is visited once.
++- **Memory Complexity:** $O(N^3)$ to store the dense grid.
++- **Strengths:** Simple analytical implementation; no ray casting or point cloud processing required; deterministic results.
++- **Limitations:** Only applicable to axis-aligned cubes centered in the grid; resolution-dependent accuracy for the distance field.
++- **When to use:** When a simple, analytically defined cube SDF is needed for testing or as a base volume.
++- **When not to use:** For arbitrary shapes, non-cube primitives, or when memory efficiency is critical (consider sparse representations).
+ ## Background
+-This method originates from the `SDFDiff` project, which focuses on differentiable rendering using Signed Distance Fields [S1, unofficial]. The specific function `grid_construction_cube` was implemented to provide a simple, analytically defined SDF for a cube, likely used as a baseline or a component in more complex scene generation pipelines. The approach relies on basic geometric properties of axis-aligned boxes and does not involve ray marching or mesh processing.
+-
++Originated in the context of differentiable rendering and SDF generation, specifically referenced in the `CVPR2020-SDFDiff` repository [S1, unofficial]. It serves as a basic building block for generating test volumes for methods like Marching Tetrahedra [S2, unofficial].
+ ## Sources
+ [S1] YueJiang-nj/CVPR2020-SDFDiff, https://github.com/YueJiang-nj/CVPR2020-SDFDiff, fetched 2026-10-27 (unofficial)

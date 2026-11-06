@@ -1,0 +1,288 @@
+--- v002.md
++++ v003.md
+@@ -4,207 +4,83 @@
+ 
+ ## Overview
+-Deferred Shading for Isosurfaces is a multi-pass image-space technique that computes surface geometry and illumination for isosurfaces extracted from scalar volumes by decoupling shading from volume sampling [S1]. It solves the problem of high computational cost and memory bandwidth required for per-pixel lighting in ray-casted volumes by pre-computing differential properties (position, gradient, Hessian, curvature) into off-screen buffers and applying lighting only to visible pixels in a final pass [S1]. It sets itself apart from its siblings, such as [Surface shading for thresholded volumes](1159-surface-shading-for-thresholded-volumes.md), by explicitly computing second-order differential properties (Hessian and principal curvatures) via tri-cubic B-spline filtering in separate rendering passes, rather than relying on immediate gradient calculations or z-buffer slopes [S1][S2, unofficial].
++Deferred Shading for Isosurfaces is a multi-pass image-space technique that computes surface geometry (position, gradient, Hessian, curvature) in separate rendering passes and uses these pre-computed property images in a final shading pass [S1]. It decouples shading from volume sampling, calculating lighting only for visible pixels, which ensures that the computational complexity is independent of the underlying grid size [S1]. It sets itself apart from its sibling [Isosurface Color Enhancement](7670-isosurface-color-enhancement.md) by explicitly deriving high-order differential properties (Hessian and principal curvatures) via tri-cubic B-spline convolution in image space, rather than relying on simpler color or intensity enhancements [S1].
+ 
+ ## How it works
+-The method operates as a pipeline of rendering passes, each writing a specific property to an off-screen pixel buffer (texture) [S1]. The complexity is independent of the grid size, depending only on the image resolution [S1].
++The method operates as a deferred shading pipeline consisting of five distinct stages. Each stage renders a screen-aligned quad to invoke a fragment shader for every output pixel, writing results to off-screen floating-point pixel buffers (textures) [S1].
+ 
+-### Inputs and Outputs
+-*   **Input:** 3D scalar volume texture $V$, camera parameters, isovalue $\tau$.
+-*   **Intermediate Outputs:**
+-    *   Position image $\mathbf{p}$ (RGB floating point).
+-    *   Gradient image $\mathbf{g}$ (RGB floating point).
+-    *   Hessian image $\mathbf{H}$ (stored in two RGB floating point images).
+-    *   Curvature images: Principal curvatures $\kappa_1, \kappa_2$ and directions $\mathbf{e}_1, \mathbf{e}_2$ (stored in two floating point targets) [S1].
+-*   **Final Output:** Shaded color image [S1].
++**Inputs and Outputs:**
++*   **Input:** Scalar volume texture $V$, camera parameters, isosurface threshold $T$.
++*   **Intermediate Outputs:** Position image ($pos$), Gradient image ($g$), Hessian image ($H$), Curvature images ($\kappa_1, \kappa_2, e_1, e_2$).
++*   **Final Output:** Shaded image.
+ 
+-### Data Structures
+-*   **Position Image:** Stores the 3D intersection coordinates $(x, y, z)$ in the RGB channels of a floating-point texture [S1].
+-*   **Gradient Image:** Stores the partial derivatives $(\frac{\partial f}{\partial x}, \frac{\partial f}{\partial y}, \frac{\partial f}{\partial z})$ in the RGB channels of a floating-point texture [S1].
+-*   **Hessian Image:** Stores the six unique second partial derivatives. Due to symmetry ($\frac{\partial^2 f}{\partial x \partial y} = \frac{\partial^2 f}{\partial y \partial x}$, etc.), the components are stored across two RGB floating-point textures [S1].
+-*   **Curvature Images:** Store $\kappa_1, \kappa_2$ and direction vectors $\mathbf{e}_1, \mathbf{e}_2$ in floating-point targets [S1].
++**Data Structures:**
++*   **Position Image:** RGB floating-point image storing the 3D intersection position of the ray with the isosurface [S1].
++*   **Gradient Image:** Single RGB floating-point image storing the three components of the gradient vector $\nabla f$ [S1].
++*   **Hessian Image:** Two RGB floating-point images storing the six unique coefficients of the symmetric Hessian matrix $\nabla^2 f$ [S1].
++*   **Curvature Images:** Two floating-point targets storing principal curvature magnitudes ($\kappa_1, \kappa_2$) and directions ($e_1, e_2$) [S1].
+ 
+-### Numbered Steps
++**Numbered Steps:**
+ 
+ 1.  **Ray-Casting (Position):**
+-    *   Perform ray-casting for each pixel to find the first intersection with the isosurface $f(\mathbf{p}) = \tau$.
+-    *   Store the intersection position $\mathbf{p}$ in the Position Image [S1].
+-    *   *Note:* The parent article details the ray construction and intersection refinement. This pass assumes a valid hit is found [S1].
++    *   **Passes:** 3 [S1].
++    *   **Input:** Volume $V$.
++    *   **Output:** Position image ($pos$).
++    *   **Method:** Perform ray-casting to find the intersection of each view ray with the isosurface defined by threshold $T$. Store the 3D world position of the intersection in the position image [S1].
+ 
+ 2.  **Gradient Computation:**
+-    *   Compute the gradient $\mathbf{g} = \nabla f$ in three rendering passes, one for each partial derivative component [S1].
+-    *   In each pass, evaluate a tri-cubic B-spline convolution sum to compute one first-order partial derivative [S1].
+-    *   Each pass requires eight texture fetches from the 3D volume texture and three fetches from 1D filter weight textures [S1].
+-    *   Store the resulting $\mathbf{g}$ in the Gradient Image [S1].
++    *   **Passes:** 3 [S1].
++    *   **Input:** Position image ($pos$), Volume $V$.
++    *   **Output:** Gradient image ($g$).
++    *   **Method:** Compute the gradient $g = \nabla f$ in three passes, one for each partial derivative ($\partial f/\partial x, \partial f/\partial y, \partial f/\partial z$). In each pass, evaluate a tri-cubic B-spline convolution sum. This requires eight texture fetches from the 3D volume texture and three fetches from 1D filter weight textures [S1]. The resulting gradient components are stored in a single RGB floating-point image [S1].
+ 
+ 3.  **Hessian Computation:**
+-    *   Compute the Hessian $\mathbf{H} = \nabla \mathbf{g}$ in six rendering passes, one for each unique second partial derivative [S1].
+-    *   Each pass uses either eleven or fourteen texture fetches (from volume and 1D weight textures) [S1].
+-    *   Store the six coefficients in two RGB floating-point images [S1].
++    *   **Passes:** 6 [S1].
++    *   **Input:** Position image ($pos$), Volume $V$.
++    *   **Output:** Hessian image ($H$).
++    *   **Method:** Compute the Hessian $H = \nabla g$ (second partial derivatives) in six passes, one for each unique component due to symmetry ($\partial^2 f/\partial x^2, \partial^2 f/\partial y^2, \partial^2 f/\partial z^2, \partial^2 f/\partial xy, \partial^2 f/\partial xz, \partial^2 f/\partial yz$). Each pass uses either eleven or fourteen texture fetches [S1]. The six coefficients are stored in two RGB floating-point images [S1].
+ 
+ 4.  **Curvature Computation:**
+-    *   Compute principal curvature magnitudes $\kappa_1, \kappa_2$ and directions $\mathbf{e}_1, \mathbf{e}_2$ in a single rendering pass [S1].
+-    *   Inputs are the Gradient Image $\mathbf{g}$ and Hessian Image $\mathbf{H}$ [S1].
+-    *   Calculate the shape operator $\mathbf{S}$, defined as the tangent space projection of the normalized Hessian:
+-        $$ \mathbf{S} = \mathbf{P}^T \frac{\mathbf{H}}{|\mathbf{g}|} \mathbf{P} $$
+-        where $\mathbf{P} = \mathbf{I} - \frac{\mathbf{g}\mathbf{g}^T}{|\mathbf{g}|^2}$ is the projection matrix onto the tangent plane, and $|\mathbf{g}|$ is the magnitude of the gradient [S1].
+-    *   Let $\mathbf{A}$ be the $2 \times 2$ matrix representation of $\mathbf{S}$ in the tangent basis. Compute the principal curvatures:
+-        $$ \kappa_{1,2} = \frac{1}{2} \left( \text{trace}(\mathbf{A}) \pm \sqrt{\text{trace}(\mathbf{A})^2 - 4 \det(\mathbf{A})} \right) $$
+-        [S1]
+-    *   Compute the principal directions $\mathbf{e}_i$ using the formula:
+-        $$ \mathbf{e}_i = \kappa_i \mathbf{u} + (\kappa_i + a_{22} - a_{11}) \mathbf{v} $$
+-        where $\mathbf{u}, \mathbf{v}$ are the basis vectors of the tangent plane and $a_{11}, a_{22}$ are diagonal elements of $\mathbf{A}$ [S1].
+-    *   Store $\kappa_1, \kappa_2, \mathbf{e}_1, \mathbf{e}_2$ in the curvature targets [S1].
++    *   **Passes:** 1 [S1].
++    *   **Input:** Gradient image ($g$), Hessian image ($H$).
++    *   **Output:** Principal curvatures $\kappa_1, \kappa_2$ and directions $e_1, e_2$.
++    *   **Method:** Compute principal curvature magnitudes and directions from $g$ and $H$.
++        *   Calculate the shape operator $S$ in the tangent basis:
++            $$ \mathbf{S} = \mathbf{P}^T \frac{\mathbf{H}}{|\mathbf{g}|} \mathbf{P} $$
++            where $\mathbf{P} = \mathbf{I} - \frac{\mathbf{g}\mathbf{g}^T}{|\mathbf{g}|^2}$ is the projection matrix onto the tangent plane [S1].
++        *   Let $\mathbf{A}$ be the $2 \times 2$ matrix representation of $S$ in the tangent basis. Compute principal curvature magnitudes $\kappa_{1,2}$ as the eigenvalues of $\mathbf{A}$:
++            $$ \kappa_{1,2} = \frac{1}{2} \left( \text{trace}(\mathbf{A}) \pm \sqrt{\text{trace}(\mathbf{A})^2 - 4 \det(\mathbf{A})} \right) $$
++            [S1]
++        *   Compute principal curvature directions $e_i$ using the formula:
++            $$ \mathbf{e}_i = \kappa_i \mathbf{u} + (\kappa_i + a_{22} - a_{11}) \mathbf{v} $$
++            where $\mathbf{u}, \mathbf{v}$ are the basis vectors of the tangent plane [S1].
++        *   Render magnitudes and directions to two floating-point targets [S1].
+ 
+ 5.  **Shading:**
+-    *   Render the shaded isosurface to the viewport using the property images as inputs [S1].
+-    *   Apply lighting models (e.g., Blinn-Phong) using the normal vector $\mathbf{n} = \pm \mathbf{g}/|\mathbf{g}|$ derived from the Gradient Image [S1].
+-    *   Optional effects:
+-        *   **Curvature Color Mapping:** Map $\kappa_1, \kappa_2$, mean curvature $(\kappa_1+\kappa_2)/2$, or Gaussian curvature $\kappa_1\kappa_2$ to colors via 1D or 2D lookup textures [S1].
+-        *   **Accessibility Shading:** Darken areas with large negative maximum curvature using a 1D or 2D curvature transfer function [S1].
+-        *   **Curvature-Aligned Flow Advection:** Project 3D curvature direction vectors to the 2D image plane and advect flow on a per-pixel basis [S1].
+-        *   **Non-Photorealistic Effects:** Silhouette outlining controlled by curvature, or ridge/valley line depiction specified in the $(\kappa_1, \kappa_2)$ domain [S1].
++    *   **Passes:** 1 [S1].
++    *   **Input:** Position ($pos$), Gradient ($g$), Curvatures ($\kappa_1, \kappa_2, e_1, e_2$).
++    *   **Output:** Final shaded image.
++    *   **Method:** Use the property images to render the shaded isosurface. Common shading modes include:
++        *   **Blinn-Phong/Tone Shading:** Uses the normal vector derived from the gradient image ($n = \pm g/|g|$) [S1].
++        *   **Curvature Color Mapping:** Maps curvature measures (principal, mean $\frac{\kappa_1+\kappa_2}{2}$, Gaussian $\kappa_1\kappa_2$) to colors via 1D or 2D lookup textures [S1].
++        *   **Accessibility Shading:** Uses a 1D curvature transfer function to darken areas with large negative maximum curvature, or a 2D function for finer control [S1].
++        *   **Curvature-Aligned Flow Advection:** Projects 3D curvature direction vectors to the 2D image plane and advects flow on a per-pixel basis [S1].
++        *   **Non-Photorealistic Effects:** Silhouette outlining (curvature-controlled thickness) and ridge/valley line depiction (specified via colors in the $\kappa_1, \kappa_2$ domain) [S1].
+ 
+-### Pseudocode
++**Parameters:**
++*   **Isosurface Threshold ($T$):** Determines the surface location. Not given in the sources.
++*   **B-Spline Order:** Tri-cubic (degree 3) is used for reconstruction and derivative estimation [S1].
+ 
+-```python
+-# Pass 1: Ray-Casting (Position)
+-# Assumes parent method provides intersection position p for each pixel
+-def pass_ray_casting(volume, camera, isovalue):
+-    for each pixel (u, v):
+-        ray = camera.construct_ray(u, v)
+-        hit = ray_cast_intersection(ray, volume, isovalue)
+-        if hit.valid:
+-            position_image[u, v] = hit.position
+-        else:
+-            position_image[u, v] = (0, 0, 0) # Or transparent
+-
+-# Pass 2: Gradient Computation (3 passes)
+-def pass_gradient(volume, position_image):
+-    # Compute one component of gradient per pass
+-    for component in [0, 1, 2]: # x, y, z
+-        for each pixel (u, v):
+-            p = position_image[u, v]
+-            # Evaluate tri-cubic B-spline convolution sum for partial derivative
+-            # Requires 8 fetches from volume, 3 from 1D weight textures
+-            grad_val = evaluate_tricubic_partial_derivative(volume, p, component)
+-            gradient_image[u, v][component] = grad_val
+-
+-# Pass 3: Hessian Computation (6 passes)
+-def pass_hessian(volume, position_image):
+-    # Compute 6 unique second partial derivatives
+-    hessian_components = [
+-        (0, 0), (1, 1), (2, 2), # d2/dx2, d2/dy2, d2/dz2
+-        (0, 1), (0, 2), (1, 2)  # d2/dxdy, d2/dxdz, d2/dydz
+-    ]
+-    for i, (c1, c2) in enumerate(hessian_components):
+-        for each pixel (u, v):
+-            p = position_image[u, v]
+-            # Evaluate tri-cubic B-spline convolution sum for second partial derivative
+-            # Requires 11 or 14 fetches depending on implementation
+-            hess_val = evaluate_tricubic_second_partial_derivative(volume, p, c1, c2)
+-            # Store in two RGB images
+-            if i < 3:
+-                hessian_image_1[u, v][i] = hess_val
+-            else:
+-                hessian_image_2[u, v][i-3] = hess_val
+-
+-# Pass 4: Curvature Computation
+-def pass_curvature(gradient_image, hessian_image_1, hessian_image_2):
+-    # Combine Hessian components from two images
+-    H = combine_hessian_images(hessian_image_1, hessian_image_2)
+-    
+-    for each pixel (u, v):
+-        g = gradient_image[u, v]
+-        mag_g = length(g)
+-        if mag_g < epsilon:
+-            curvature_image[u, v] = (0, 0, 0, 0) # No curvature if no gradient
+-            continue
+-        
+-        # Compute projection matrix P
+-        # P = I - (g * g^T) / |g|^2
+-        P = identity_matrix(3) - outer_product(g, g) / (mag_g * mag_g)
+-        
+-        # Compute Shape Operator S = P^T * (H / |g|) * P
+-        # Note: H is 3x3, P is 3x3
+-        H_norm = H / mag_g
+-        S = transpose(P) @ (H_norm @ P)
+-        
+-        # Project S onto tangent basis to get 2x2 matrix A
+-        # Basis vectors u, v are orthogonal to g
+-        # This step requires constructing the basis from g
+-        u, v = construct_tangent_basis(g)
+-        
+-        # A_ij = u_i^T S u_j
+-        A = matrix(2, 2)
+-        A[0, 0] = dot(u, S @ u)
+-        A[0, 1] = dot(u, S @ v)
+-        A[1, 0] = dot(v, S @ u)
+-        A[1, 1] = dot(v, S @ v)
+-        
+-        # Compute eigenvalues (principal curvatures)
+-        tr_A = A[0, 0] + A[1, 1]
+-        det_A = A[0, 0] * A[1, 1] - A[0, 1] * A[1, 0]
+-        discriminant = tr_A * tr_A - 4 * det_A
+-        
+-        if discriminant < 0:
+-            kappa1 = 0
+-            kappa2 = 0
+-        else:
+-            sqrt_disc = sqrt(discriminant)
+-            kappa1 = 0.5 * (tr_A + sqrt_disc)
+-            kappa2 = 0.5 * (tr_A - sqrt_disc)
+-            
+-        # Compute principal directions in 3D
+-        # e_i = kappa_i * u + (kappa_i + A[1,1] - A[0,0]) * v
+-        e1 = kappa1 * u + (kappa1 + A[1, 1] - A[0, 0]) * v
+-        e2 = kappa2 * u + (kappa2 + A[1, 1] - A[0, 0]) * v
+-        
+-        curvature_image[u, v] = (kappa1, kappa2, e1, e2)
+-
+-# Pass 5: Shading
+-def pass_shading(position_image, gradient_image, curvature_image, light_positions, light_colors):
+-    for each pixel (u, v):
+-        p = position_image[u, v]
+-        g = gradient_image[u, v]
+-        kappa1, kappa2, e1, e2 = curvature_image[u, v]
+-        
+-        # Normal
+-        n = normalize(g)
+-        
+-        # Lighting (e.g., Blinn-Phong)
+-        color = ambient_light
+-        for light in lights:
+-            L = normalize(light.position - p)
+-            V = normalize(camera.position - p)
+-            H = normalize(L + V)
+-            diff = max(0, dot(n, L))
+-            spec = pow(max(0, dot(n, H)), shininess)
+-            color += light.color * (diff * diffuse_coeff + spec * specular_coeff)
+-            
+-        # Optional: Curvature-based effects
+-        # e.g., map kappa1 to color or adjust opacity
+-        final_color = apply_curvature_mapping(color, kappa1, kappa2)
+-        
+-        output_image[u, v] = final_color
+-```
+-
+-### Parameters and Typical Values
+-*   **Filter:** Tri-cubic B-spline convolution [S1].
+-*   **Texture Fetches:** 8 volume + 3 1D weights for gradient; 11 or 14 for Hessian [S1].
+-*   **Floating Point Precision:** Used for intermediate images (position, gradient, Hessian, curvature) [S1].
+-*   **Shading Model:** Blinn-Phong, tone shading [S1].
+-
+-### Edge Cases and Pitfalls
+-*   **Zero Gradient:** If $|\mathbf{g}| \approx 0$, the normal and shape operator are undefined. The implementation should handle this, e.g., by setting curvature to zero [S1].
++**Edge Cases and Pitfalls:**
+ *   **Flow Advection Seams:** Advecting flow along curvature directions may produce visible seams because the orientation of curvature direction vectors is not uniquely defined [S1].
+-*   **Precision:** High-order derivatives are sensitive to noise in the volume data. Tri-cubic filtering helps but does not eliminate sensitivity [S1].
++*   **Gradient Zero:** If $|g| \approx 0$, the normal and shape operator are undefined. The sources do not specify a guard for this case [G].
++*   **Precision:** The method relies on floating-point textures for intermediate properties. Precision loss in gradient/Hessian estimation can affect curvature accuracy [S1].
+ 
+ ## Subtopics
+ 
+ ### [Surface shading for thresholded volumes](1159-surface-shading-for-thresholded-volumes.md)
+-Applies lighting to isosurfaces by determining geometry and illumination in image space or via rasterization, distinct from direct volume rendering. It sets itself apart from Deferred Shading for Isosurfaces by avoiding the high memory and computational costs of per-ray cell storage or repeated neighbor-finding, often relying on z-buffer slopes or precomputed gradients rather than deferred multi-pass normal accumulation.
++Surface shading for thresholded volumes applies lighting models to isosurfaces extracted from scalar volumes by determining surface geometry and illumination in image space or via rasterization hardware, distinct from direct volume rendering shading. It sets itself apart from [Deferred Shading for Isosurfaces](867-deferred-shading-for-isosurfaces.md) by avoiding the high memory and computational costs of per-ray cell storage or repeated neighbor-finding, often relying on z-buffer slopes or precomputed gradients rather than deferred multi-pass normal accumulation.
+ 
+ ### [Normal-based Contextual Shading](6617-normal-based-contextual-shading.md)
+-An object-space shading technique applied to isosurfaces to achieve higher visual quality than image-space depth-gradient shading. It solves the problem of inaccurate surface normals in ray-casted volumes by fitting a local surface approximation to the set of closest intersection points, thereby estimating surface inclination more robustly. It sets itself apart from its sibling [Surface shading for thresholded volumes](1159-surface-shading-for-thresholded-volumes.md) by explicitly using a larger voxel neighborhood to fit a function (linear or biquadratic) to the iso-surface points, rather than relying solely on immediate gradient calculations or thresholded binary data.
++Normal-based Contextual Shading is an object-space shading technique applied to isosurfaces to compute surface normals for illumination, offering superior visual quality compared to image-space depth-gradient shading. It solves the problem of inaccurate or artifact-prone normals in volume rendering by fitting a local surface approximation to the 3D intersection points of rays with the isosurface. It differs from its sibling, Surface shading for thresholded volumes, by explicitly estimating surface inclination via local regression rather than relying on thresholded binary data properties.
+ 
+ ### Deferred Shading for Volume Rendering
+@@ -212,14 +88,14 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Independent of grid size; depends on image resolution and number of passes (3 for gradient, 6 for Hessian, 1 for curvature, 1 for shading) [S1].
+-*   **Memory Complexity:** Requires storage for multiple floating-point images (position, gradient, Hessian, curvature) [S1].
+-*   **Performance:** Moderate number of vector and matrix multiplications, solving a quadratic polynomial, and texture instructions per pixel [S1].
+-*   **Strengths:** High-quality shading and curvature visualization; decoupled shading allows for complex lighting effects; image-space complexity [S1].
+-*   **Limitations:** High memory bandwidth usage due to multiple passes and large floating-point textures; seams in flow advection [S1].
+-*   **When to Use:** When high-quality surface shading and curvature analysis are required for large volumes, and memory bandwidth is not the primary bottleneck [S1].
+-*   **When Not to Use:** When memory is constrained or real-time performance is critical and simpler shading methods suffice [S1].
++*   **Time Complexity:** Image-space complexity, meaning it is independent of the grid size [S1]. The total number of passes is 14 (3 for position, 3 for gradient, 6 for Hessian, 1 for curvature, 1 for shading) [S1].
++*   **Memory Complexity:** Requires storage for multiple floating-point textures: position (3 floats), gradient (3 floats), Hessian (6 floats, stored in 2 images), and curvature (2 magnitudes + 2 directions) [S1].
++*   **Measured Performance:** Implemented on an NVIDIA GeForce 6800, achieving real-time rates for the differential property computation and flow advection [S1]. Tested on NVIDIA GTX 1080 Ti in related surface splatting implementations [S2, unofficial].
++*   **Strengths:** High-quality shading decoupled from volume sampling; ability to compute complex differential properties (curvature) in image space; supports various shading effects (Blinn-Phong, NPR, flow advection) [S1].
++*   **Limitations:** High number of rendering passes (14 total); requires floating-point texture support; flow advection may exhibit seams due to non-unique curvature directions [S1].
++*   **When to Use:** When high-quality isosurface shading with curvature-based effects is required and the hardware supports multiple render targets and floating-point textures.
++*   **When Not to Use:** When memory bandwidth is a bottleneck due to the large number of texture fetches and passes; when real-time performance on older hardware is critical.
+ 
+ ## Background
+-Originated in the paper "Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces" by Christoph Schüller, Daniel Weiskopf, and Thomas Ertl (2005) [S1]. The method was developed to provide high-quality shading and differential property visualization for isosurfaces extracted from scalar volumes, leveraging GPU capabilities for deferred shading [S1]. It is used in scientific visualization for analyzing the shape and structure of isosurfaces, such as in medical imaging or fluid dynamics [S1].
++The method was introduced by Christoph Schüller, Daniel Weiskopf, and Thomas Ertl in their 2005 paper "Real-Time Ray-Casting and Advanced Shading of Discrete Isosurfaces" [S1]. It builds on the use of tri-cubic B-spline reconstruction filters for accurate derivative estimation [S1]. The approach leverages the GPU's ability to perform parallel fragment shading to compute differential properties in image space, enabling advanced shading effects that were previously computationally expensive [S1].
+ 
+ ## Sources

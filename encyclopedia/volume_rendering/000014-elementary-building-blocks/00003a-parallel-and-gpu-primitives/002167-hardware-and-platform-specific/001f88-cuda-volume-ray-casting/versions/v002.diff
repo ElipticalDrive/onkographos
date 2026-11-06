@@ -1,0 +1,215 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-CUDA Volume Ray Casting is a direct volume rendering method that parallelizes the ray casting algorithm on the GPU using the CUDA programming model, avoiding intermediate geometric entities to directly generate 2D images from 3D scalar data sets [S1][S3, unofficial]. It distinguishes itself from shader-based GPU approaches by utilizing explicit CUDA kernels for memory management and computation, offering performance improvements over standard OpenGL-based ray casting implementations [S1]. It builds on the general principles of [Direct volume ray casting](1117-direct-volume-ray-casting.md).
++CUDA Volume Ray Casting is a direct volume rendering method that parallelizes the ray casting algorithm on the GPU using the CUDA programming model, avoiding intermediate geometric entities to directly generate 2D images from 3D scalar data sets [S1][S3, unofficial]. It distinguishes itself from shader-based GPU approaches by utilizing explicit CUDA kernels for memory management and computation, offering performance improvements over standard OpenGL-based ray casting implementations [S1]. It builds on the general principles of [Direct volume ray casting](1117-direct-volume-ray-casting.md) [S4, unofficial].
+ 
+ ## How it works
+@@ -10,5 +10,5 @@
+ **Inputs:**
+ *   **Volume Data:** 3D scalar field stored in device memory. Typically loaded as a 1D unsigned char array and mapped to a CUDA 3D Array bound to a 3D texture [S1][S3, unofficial].
+-*   **Transfer Function:** Defines the mapping from scalar values to color (RGBA). Can be provided as a 1D texture or a text file specifying control points [S3, unofficial].
++*   **Transfer Function:** Defines the mapping from scalar values to color (RGBA). Can be provided as a 1D texture or a text file specifying control points [S1][S3, unofficial].
+ *   **Camera Parameters:** Eye position, view direction, and inverse view matrix [S1][S3, S4, unofficial].
+ *   **Geometry Bounds:** A bounding box (Ray-Box) defining the volume extent, typically $[-1, 1]^3$ or $[-0.5, 0.5]^3$ [S1][S3, S4, unofficial].
+@@ -19,5 +19,5 @@
+ ### Data Structures
+ *   **3D Texture (`volume`):** Type `VolumeType` (e.g., `unsigned char`), accessed with `cudaReadModeNormalizedFloat`. Uses linear filtering and clamp addressing [S3, unofficial].
+-*   **Transfer Function Texture (`transferFunction`):** 2D texture of type `float4`. Stores RGBA values normalized to $[0.0, 1.0]$. Uses linear filtering and clamp addressing [S3, unofficial].
++*   **Transfer Function Texture (`transferFunction`):** 2D texture of type `float4`. Stores RGBA values normalized to $[0.0, 1.0]$ [S3, unofficial]. Uses linear filtering and clamp addressing [S3, unofficial].
+ *   **Ray-Box:** Axis-aligned bounding box. In [S1], defined by lower corner $(-1, -1, -1)$ and upper corner $(1, 1, 1)$. In [S3, unofficial], the volume is centered at $(0,0,0)$ with extent $[-0.5, 0.5]$, requiring coordinate shifts for texture lookup [S3, unofficial].
+ 
+@@ -35,5 +35,5 @@
+     *   If the ray does not intersect or $t_{out} < s$ (scale factor), skip the ray [S4, unofficial].
+ 4.  **Ray Sampling Loop:**
+-    *   Iterate from $t_{out}$ down to $t_{in}$ (or vice versa, depending on compositing order) with a step size $h$ [S1][S3, S4, unofficial].
++    *   Iterate from $t_{in}$ to $t_{out}$ with a step size $h$ [S1][S3, S4, unofficial].
+     *   Calculate sample position: $P = O + D \cdot t$ [S1][S4, unofficial].
+     *   Convert $P$ to texture coordinates. For a box $[-1, 1]^3$, use $T = (P + 1) / 2$ [S1]. For a box $[-0.5, 0.5]^3$, shift by $+0.5$ for $x,y$ and use $1.0 - (z + 0.5)$ for $z$ to map to $[0, 1]$ [S3, unofficial].
+@@ -59,102 +59,79 @@
+ 
+ ```python
+-# CUDA Kernel for Volume Ray Casting
+-# Assumes global variables: volumeTex (3D texture), tfTex (2D texture), 
+-# invViewMatrix (float4x4), constantH (float step size), opacityThreshold (float)
++import math
+ 
+-__global__ void volumeRayCastKernel(unsigned char* output, int width, int height) {
+-    // 1. Thread Indexing
+-    int x = blockIdx.x * blockDim.x + threadIdx.x;
+-    int y = blockIdx.y * blockDim.y + threadIdx.y;
++def ray_box_intersect(ray_origin, ray_direction, box_min, box_max):
++    """G. Scott Owen slab method for AABB intersection."""
++    t_min = float('-inf')
++    t_max = float('inf')
++    for i in range(3):
++        if ray_direction[i] == 0.0:
++            if ray_origin[i] < box_min[i] or ray_origin[i] > box_max[i]:
++                return False, 0.0, 0.0
++        else:
++            t1 = (box_min[i] - ray_origin[i]) / ray_direction[i]
++            t2 = (box_max[i] - ray_origin[i]) / ray_direction[i]
++            if t1 > t2:
++                t1, t2 = t2, t1
++            t_min = max(t_min, t1)
++            t_max = min(t_max, t2)
++            if t_min > t_max:
++                return False, 0.0, 0.0
++    return True, t_min, t_max
+ 
+-    if (x >= width || y >= height) return;
+-
+-    // 2. Ray Initialization
+-    // Normalize pixel coordinates to [-1, 1]
+-    float u = (2.0f * x / (float)width) - 1.0f;
+-    float v = (2.0f * y / (float)height) - 1.0f;
+-
+-    // Ray direction in view space (assuming camera looks down -Z)
+-    // Note: [S4, unofficial] uses normalize(make_float3(u, v, -2.0f)) then transforms by invViewMatrix
+-    float3 rayDirView = make_float3(u, v, -2.0f);
+-    rayDirView = normalize(rayDirView);
+-    
+-    // Transform direction to world space
+-    float3 rayDirWorld = mul(invViewMatrix, make_float4(rayDirView, 0.0f)).xyz;
+-    
+-    // Ray origin is camera position (transformed from view space origin)
+-    float3 rayOriginWorld = mul(invViewMatrix, make_float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+-
+-    // 3. Ray-Box Intersection
+-    // Assuming unit box [-1, 1]^3 as per [S1]
+-    float t_near = -1.0f;
+-    float t_far = 1.0f;
+-    
+-    // Simplified Ray-Box Intersection (G. Scott Owen method)
+-    // This is a placeholder for the actual slab method implementation
+-    float t_in, t_out;
+-    bool hit = rayBoxIntersect(rayOriginWorld, rayDirWorld, t_in, t_out);
+-
+-    if (!hit) return;
+-
+-    // Clamp to near plane if necessary (constantNCP)
+-    // t_in = max(t_in, constantNCP); 
+-
+-    // 4. Sampling Loop
+-    float4 accumColor = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+-    float accumAlpha = 0.0f;
+-
+-    // Iterate from t_in to t_out
+-    // Note: [S3, unofficial] iterates t from 0 to D with step constantH
+-    // [S4, unofficial] iterates from outAbs down to inAbs
+-    for (float t = t_in; t <= t_out; t += constantH) {
+-        
+-        // Sample Point Calculation
+-        float3 pos = rayOriginWorld + rayDirWorld * t;
+-
+-        // Texture Coordinate Conversion
+-        // Map [-1, 1] to [0, 1]
+-        float3 texCoord = (pos + 1.0f) / 2.0f;
+-
+-        // Boundary check
+-        if (texCoord.x < 0.0f || texCoord.x > 1.0f ||
+-            texCoord.y < 0.0f || texCoord.y > 1.0f ||
+-            texCoord.z < 0.0f || texCoord.z > 1.0f) {
+-            continue;
+-        }
+-
+-        // Data Sampling
+-        float scalar = tex3D(volumeTex, texCoord);
+-
+-        // Transfer Function Lookup
+-        // [S3, unofficial] uses 2D texture, [S1] uses 1D lookup
+-        float4 tfColor = tex1D(transferFunction, scalar); // Assuming 1D for simplicity based on [S1]
+-        
+-        // Opacity Conversion (if needed, e.g., [S3, unofficial])
+-        // float alpha_now = 1.0f - expf(-0.5f * tfColor.w);
+-        float alpha_now = tfColor.w; 
+-
+-        // 5. Compositing (Front-to-Back)
+-        // C_out * alpha_out = C_in * alpha_in + C_now * alpha_now * (1 - alpha_in)
+-        // alpha_out = alpha_in + alpha_now * (1 - alpha_in)
+-        
+-        float weight = alpha_now * (1.0f - accumAlpha);
+-        accumColor.rgb += tfColor.rgb * weight;
+-        accumAlpha += weight;
+-
+-        // 6. Early Termination
+-        if (accumAlpha >= opacityThreshold) {
+-            break;
+-        }
+-    }
+-
+-    // 7. Result Storage
+-    // Convert to 8-bit
+-    int idx = y * width + x;
+-    output[idx * 4 + 0] = (unsigned char)(accumColor.r * 255.0f);
+-    output[idx * 4 + 1] = (unsigned char)(accumColor.g * 255.0f);
+-    output[idx * 4 + 2] = (unsigned char)(accumColor.b * 255.0f);
+-    output[idx * 4 + 3] = (unsigned char)(accumColor.a * 255.0f);
+-}
++def cuda_volume_ray_casting_kernel(output_buffer, width, height, volume_texture, transfer_function, inv_view_matrix, constant_h, opacity_threshold, near_clip_plane):
++    # Simulates parallel execution per pixel
++    for y in range(height):
++        for x in range(width):
++            # 1. Thread Indexing & Coordinate Normalization
++            u = (x / width) * 2.0 - 1.0
++            v = (y / height) * 2.0 - 1.0
++            
++            # 2. Ray Initialization
++            view_dir = [u, v, -2.0]
++            ray_dir = normalize(inv_view_matrix * view_dir)
++            ray_origin = inv_view_matrix * [0.0, 0.0, 0.0, 1.0]
++            
++            # 3. Ray-Box Intersection
++            box_min = [-1.0, -1.0, -1.0]
++            box_max = [1.0, 1.0, 1.0]
++            hit, t_in, t_out = ray_box_intersect(ray_origin, ray_dir, box_min, box_max)
++            
++            if not hit or t_out < 0.0:
++                continue
++                
++            t_in = max(t_in, near_clip_plane)
++            
++            # 4. Sampling Loop
++            accum_color = [0.0, 0.0, 0.0, 0.0]
++            accum_alpha = 0.0
++            
++            t = t_in
++            while t <= t_out:
++                pos = add_vectors(ray_origin, scale_vector(ray_dir, t))
++                tex_coord = [(pos[i] + 1.0) / 2.0 for i in range(3)]
++                
++                if not (0.0 <= tex_coord[i] <= 1.0 for i in range(3)):
++                    t += constant_h
++                    continue
++                    
++                scalar = volume_texture[tex_coord]
++                tf_color = transfer_function[scalar]
++                
++                alpha_now = 1.0 - math.exp(-0.5 * tf_color[3])
++                
++                weight = alpha_now * (1.0 - accum_alpha)
++                accum_color[0] += tf_color[0] * weight
++                accum_color[1] += tf_color[1] * weight
++                accum_color[2] += tf_color[2] * weight
++                accum_alpha += weight
++                
++                if accum_alpha >= opacity_threshold:
++                    break
++                    
++                t += constant_h
++                
++            idx = y * width + x
++            output_buffer[idx] = [accum_color[i] * 255.0 for i in range(4)]
+ ```
+ 
+@@ -173,6 +150,6 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N \cdot M)$, where $N$ is the number of pixels (threads) and $M$ is the number of samples per ray. Early termination reduces $M$ on average.
+-*   **Memory Complexity:** $O(V)$ for the volume data, where $V$ is the volume size. Additional memory for transfer function and PBO.
++*   **Time Complexity:** Not given in the sources.
++*   **Memory Complexity:** Not given in the sources.
+ *   **Performance:** 
+     *   On NVIDIA GeForce 8400M GS, CUDA-based ray casting was 1.16x faster than a standard GPU-based (OpenGL shader) algorithm for a $64^3$ dataset (0.703s vs 0.812s) and 1.15x faster for a $256^3$ dataset (0.735s vs 0.842s) [S1].

@@ -1,0 +1,144 @@
+Compile and explore arbitrarily large n-dimensional scientific data in the browser — points, lines, Gaussian splats and meshes, streamed from Zarr and rendered on the GPU. - A fit in physical coordinates still gets a PSNR by royerloic · Pull Request #1668 · royerlab/luxar
+
+A fit in physical coordinates still gets a PSNR by royerloic · Pull Request #1668 · royerlab/luxar · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+royerloic
+commented
+Aug 16, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Member
+output_space="real" is the default, and results.py skipped the post-fit quality metrics whenever it was combined with a voxel_size — the splats no longer sat on config.V's grid, so the render had nothing to compare against. Ten demos pass a voxel_size. Every one of them has been writing cached archives with no psnr_db at all, and since #1661 no foreground_psnr_db either: exactly the numbers the Zenodo records exist to publish.
+Found by measurement, not by reading: a refit of cells3d on obsidian produced format 3.4 with correct source-grid stamps and no PSNR of any kind, while fit_gaussian_splats reported a healthy fit.
+The fix. The physical conversion is a pure per-axis rescale of centers and Cholesky rows with amplitudes untouched, so the pre-conversion arrays describe the same mixture on config.V's own grid. Those are kept and scored; the caller still receives physical coordinates. The cost is one round-trip render: the same one the voxel-space path has always paid, but new work here — a real-space fit rendered nothing before, and a real-space tiled fit now renders once per tile.
+Tests. test_results.py::test_postfit_metrics_skipped_for_physical_coords asserted the defect as a contract; it is now ..._present_for_physical_coords and additionally checks the returned centers are still physical, so the scoring copy cannot leak back. New test_results_quality_real_space.py adds the equivalence that matters: the same fit scored through output_space="real" and "voxel" gives the same PSNR / foreground PSNR / foreground fraction. The voxel size is deliberately anisotropic (4, 1, 1) — an isotropic one would hide a per-axis bug in the row-by-row Cholesky scaling.
+354 passed across gsplats/fitting/tests + test_metrics.py.
+Known gap, tracked separately and NOT in this PR: fit_tiled stamps no merged-volume PSNR at all (its per-tile fits now get one). That affects cmu1 and the other tiled archives and needs its own approach, since tiles overlap and are apodized so per-tile errors do not compose.
+royerloic
+added 2 commits
+August 16, 2026 12:09
+Score a fit even when it hands back physical coordinates
+9ec0810
+Add the changelog fragment for #1668
+aaa7c87
+royerloic
+commented
+Aug 16, 2026
+Copy link
+Copy Markdown
+Member
+Author
+No blocking findings.
+Checked packages/luxar/src/luxar/gsplats/fitting/results.py: the voxel-space arrays are retained before physical-coordinate conversion, metrics render the correct coordinate space, amplitudes remain unchanged, and the caller still receives the requested physical-space result. Existing exception handling and device cleanup remain intact.
+Checked the updated and new tests: they cover metric presence, output-space score equivalence with anisotropic voxel sizes, the no-voxel-size path, and preservation of physical output coordinates. No security regressions or unsafe input-handling changes found.
+royerloic
+mentioned this pull request
+Aug 16, 2026
+A tiled fit scores the archive it actually ships
+#1669
+Merged
+royerloic
+added
+the
+priority
+High priority: prioritised by the orchestrator and the fleet
+label
+Aug 16, 2026
+Pin the physical-coordinate assertion to the indices it converted from
+…
+c45a7ce
+```
+The check added alongside the metrics fix could not fail: the fixture's
+centers come from torch.rand(5, 2), all below 1.0, while the bound was
+0.5 * 16 = 8. Removing the physical conversion outright left it green.
+Compare against the pre-conversion centers instead, which does go red.
+
+Also: the changelog claimed the fix costs no extra rendering, which is
+only true of the voxel-space path — a real-space fit rendered nothing
+before and now renders once (once per tile when tiled). And note in the
+format spec that the score is always taken on the fitter's voxel grid,
+so the stored physical centers of a real-space dataset do not reproduce
+the published PSNR without dividing the spacing back out.
+```
+royerloic
+mentioned this pull request
+Aug 17, 2026
+Commands that rewrite a dataset must be idempotent for everything they don't own
+#1600
+Closed
+royerloic
+commented
+Aug 17, 2026
+Copy link
+Copy Markdown
+Member
+Author
+Reviewed at aaa7c87, then pushed the fixes below (c45a7ce).
+What it does
+finalize_results skipped the post-fit round-trip metrics whenever output_space="real" was combined with a voxel_size — the splats no longer sat on config.V's grid, so there was nothing to render against. Since that is the default output space, every fit passing a voxel spacing wrote an archive with no psnr_db and (since #1661) no foreground_psnr_db. The fix keeps the pre-conversion arrays, which are the ones that live on config.V's grid, and scores those; the caller still gets physical coordinates back.
+The approach is right, and it's the same reasoning #1587 encoded in reject_rescaled_volume_refit: a real-space fit's centers are in a different frame than the voxel grid, so anything that wants the grid has to work from the pre-conversion copy. Verified the equivalence test is a real control — forcing scored = result (i.e. re-introducing the bug) makes test_the_score_does_not_depend_on_the_output_coordinate_space fail, and only that one.
+Fixed and pushed
+test_results.py:1209 — the physical-coordinate assertion could not fail. The new check read result.centers.max() <= 0.5 * max(config.V.shape), i.e. <= 8, but the fixture's centers are torch.rand(5, 2), all below 1.0. I removed the physical conversion outright (centers_np * np.ones_like(vs)) and the test stayed green — so the "the scoring copy cannot leak back" control its comment advertises wasn't there. Now pinned to the pre-conversion centers with assert_allclose(result.centers, 0.5 * voxel_centers), which does go red under that mutation. (The real control does exist in the new file, via the ×4 z axis — this one just wasn't pulling its weight.)
+Changelog/PR-body cost claim. Both said the fix adds no rendering work. That's true of the voxel-space path but not of the one being fixed: a real-space fit rendered nothing before and now renders once, and a real-space tiled fit renders once per tile. Reworded both — the cost is worth paying for the metric, it just shouldn't read as free.
+GSPLATS_ZARR_FORMAT.md — the spec says the metrics are "measured by re-rendering the splats against the volume they were fitted to". For a real-space archive the stored splats are physical, so someone trying to reproduce a published PSNR from the dataset would get a wildly different number. Added a sentence saying the score is always taken on the fitter's voxel grid and the spacing has to be divided back out first.
+Deferred
+psnr_db / ssim / mse / foreground_* aren't in _REGION_SCOPED_STATS_KEYS, so nothing scrubs them when a command changes which splats an artifact contains. Measured: a fit at 28 splats scoring 44.4587 dB, culled to 12 splats, still reports 44.4587 dB — the culled archive publishes the pre-cull score as its own. Pre-existing (arrived with the metrics in #1661), but this PR makes the default path carry them, so more archives will be exposed. It isn't a one-liner: _is_crop's "did a spatial restriction remove splats" is the wrong predicate — an amplitude cull leaves the region intact and the reconstruction completely changed — so it needs a second category of invalidation wired through cull/filter/slice/decimate with its own tests. Added it as a case on #1600, which already asks for exactly this enumeration.
+Also dropped: the metrics still score a background-relative render against a raw (un-floored) reference, which understates PSNR wherever a floor was subtracted. Not this PR's doing and already tracked in #1173.
+Checked clean
+Aliasing. voxel_space_arrays captures the arrays before centers_np * vs / cholesky_packed * tril_scales, both of which allocate rather than mutate, so the retained copy really is the pre-conversion one. Nothing between the capture and the render writes in place.
+The mirror cases. output_space="voxel" with a voxel_size, and "real" without one, both leave voxel_space_arrays at None and score result directly — same behaviour as before.
+Determinism of the equivalence test. Four identical fits give bit-identical psnr_db / foreground_psnr_db / n_splats, so comparing two separate fits at rel=1e-4 isn't flaky.
+Other producers. fit_progressive_gaussian_splats pops output_space/voxel_size and converts at the end itself, so its per-pass fits were already voxel-space and are unaffected. fit_planned strips both with a warning (content boxes are voxel-space end to end). fit_tiled's flat merge drops tile stats rather than promoting one, so no tile's PSNR gets lifted onto the merged result as a whole-volume claim; the partition path keeps them per-leaf, which is honest, and _safe_lod_stats still filters non-finite values out of lod_stats on the way to disk.
+Downscaled fits. The centers are rescaled back to original coordinates before the capture, so the scored copy is on config.V's grid, not the downscaled one.
+nD. compute_ssim averages over 3-D sub-volumes above 3-D, so a 4-D real-space fit gets scored rather than throwing into the except and losing everything.
+Failure modes. An OOM or shape mismatch inside the metric block still degrades to "no metrics" rather than failing the fit; the scored construction sits outside the try, but it can't raise where result's didn't — same shapes, same amplitudes, same truncation radius.
+No stale contract elsewhere. Nothing else in the tree asserts the metrics' absence for real-space output, and no docstring or doc page claimed the skip.
+psnr_db and the foreground trio are in _FITTING_INFO_KEYS, so the recovered numbers actually reach fitting/.zattrs.
+Tests: 417 passed across gsplats/fitting/tests + test_tiled_fitting.py + test_progressive_fitting.py; ruff check/format, mypy on the touched files, and make check-docs all clean.
+royerloic
+enabled auto-merge (squash)
+August 17, 2026 07:17
+Hide details
+View details
+royerloic
+merged commit bc7c2a7
+into
+dev
+Aug 17, 2026
+11 checks passed
+Uh oh!
+There was an error while loading. Please reload this page.
+This was referenced Aug 19, 2026
+A content-tiled fit records no quality metrics, and does not say so
+#1733
+Closed
+skill(gsplat): the convention mismatches that produce believable wrong dB
+#2147
+Merged
+royerloic
+deleted the
+fit-quality-real-space
+branch
+August 31, 2026 15:00
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+priority
+High priority: prioritised by the orchestrator and the fleet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

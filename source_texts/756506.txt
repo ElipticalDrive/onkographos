@@ -1,0 +1,2652 @@
+arXiv:2610.05576v2 [cs.CV] 6 Oct 2026
+SteadySplats: Resampling of Low-Variance Gaussians for High-Fidelity
+Stochastic Rendering
+Felix Windisch*
+Graz University of Technology
+Thomas Köhler*
+Graz University of Technology
+felix.windisch@tugraz.at
+t.koehler@tugraz.at
+Lukas Radl
+Graz University of Technology
+Chris Wyman
+NVIDIA
+Georgios Kopanas
+Google DeepMind
+lukas.radl@tugraz.at
+chris.wyman@acm.org
+gkopanas@google.com
+Bernhard Kerbl
+University of Copenhagen
+Markus Steinberger
+Graz University of Technology
+beke@di.ku.dk
+steinberger@tugraz.at
+sis level. During stochastic rendering, our history-based
+spatial resampling scheme drastically accelerates image
+convergence, while temporal importance resampling ensures coherence under camera movement. During training,
+a color regularizer implicitly reduces the variance along
+view rays in the 3DGS models. With these properties,
+our optimized, Vulkan-based renderer effectively mitigates
+output noise at low and high sample counts, achieving a
+substantial 13 dB PSNR increase in quality over previous
+stochastic methods at 1 sample per pixel and quickly converging to sorted 3DGS with an average L1 error of less
+than 10−4 .
+Figure 1. Through optimized training and inference, our stochastic OIT renderer achieves significantly better image quality than
+prior art with the same number of random samples. Our approach
+makes single-sample rendering a viable candidate for applications
+that demand high quality, as well as extremely high frame rates.
+Measurements were performed using each method’s original implementation.
+1. Introduction
+The rapid evolution of novel view synthesis has been largely
+driven by the advent of radiance fields and, more recently,
+primitive-based representations in particular. Methods such
+as 3D Gaussian Splatting (3DGS) [11] have demonstrated
+exceptional visual fidelity and real-time rendering capabilities by modeling complex scenes as unstructured collections of volumetric primitives. Traditionally, fast rendering of these representations relies on alpha-blending sorted
+primitives using a tile-based rasterizer.
+Stochastic order-independent transparency (OIT)
+presents an elegant, efficient alternative for rendering
+primitive-based radiance fields. By probabilistically sampling visible primitives rather than sorting them, stochastic
+OIT dramatically simplifies and accelerates the rendering
+pipeline. However, despite its structural advantages, this
+approach has remained largely impractical for novel view
+Abstract
+Stochastic order-independent transparency enables efficient
+and elegant rendering of primitive-based radiance fields
+like 3D Gaussian Splatting models, but remains impractical
+due to the inherent visible noise in the output. We propose a
+principled approach to minimize high-frequency noise, addressing its sources at the representation and image synthe* Both authors contributed equally to this work.
+1
+synthesis. The stochastic nature of the visibility evaluation
+inherently introduces high-frequency noise in the resulting
+images (cf . Fig. 1). Across novel view trajectories, this
+uncorrelated noise manifests itself as severe temporal
+flickering and “boiling” artifacts [28], to which human
+visual perception is sensitive. Mitigating this issue and
+suppressing these artifacts below visible thresholds requires accumulating hundreds of samples per pixel, which
+directly negates the performance advantages of sorting-free
+rendering [13].
+In this work, we propose solutions that make stochastic
+order-independent transparency practical for high-fidelity
+rendering by aggressively tackling noise at both ends of the
+pipeline: training and inference. All of our contributions are
+implemented in a high-performance Vulkan-based renderer:
+• Color Variance Regularization: A training objective
+that penalizes high-variance primitive configurations, implicitly conditioning the 3D model to produce less noise
+during stochastic sampling.
+• History-Based Spatial Resampling: An efficient,
+inference-time resampling technique to massively accelerate convergence of image synthesis with minimal bias.
+• Temporal Consistency: We demonstrate that under mild
+assumptions, spatio-temporal resampling can be implemented as a recursive exponential moving average filter
+to efficiently mitigate temporal artifacts. Stratifying samples using per-primitive Spatio-Temporal Blue Noise further improves convergence.
+We demonstrate that our combined approach successfully
+renders clean, high-fidelity images at low sample counts,
+achieving higher frame rates than vanilla 3DGS with nearindistinguishable quality.
+independent accumulation with a K-buffer [6] to bypass full
+radix sorting. Weighted sum rendering [3, 8] completely
+eliminates sorting during training and inference at the cost
+of reduced image quality.
+Order-Independent and Stochastic Transparency. To
+fundamentally circumvent the sorting bottleneck, recent
+literature has adapted stochastic order-independent transparency (OIT). Originally introduced to 3D graphics by
+Enderton et al. [4], stochastic transparency replaces sorted
+alpha-blending with a randomized Monte Carlo estimator.
+StochasticSplats [13] successfully integrates this estimator
+into 3DGS by keeping each fragment as an opaque sample with probability equal to its alpha value, completely
+bypassing depth-sorting while accurately blending overlapping Gaussians. Similarly, Gaussian Point Splatting [24]
+treats Gaussians as discrete point clouds, sampling pixelsized opaque points independently and splatting them via
+64-bit atomics to achieve massive parallelism. While these
+approaches eliminate the need for sorting, they inherently
+introduce severe high-frequency noise into the rendered
+images and must rely on expensive sample accumulation
+or temporal anti-aliasing (TAA) [10, 36]. Stochastic approaches can also be applied to ray tracing 3D Gaussians for
+relightable reconstruction [35] and semi-transparency [31].
+Stochastic Gaussian Splatting [27] moves the stochasticity
+into the Gaussian parameters themselves in order to estimate reconstruction uncertainty.
+Denoising and Resampling. Early real-time denoising
+relied heavily on analytical spatial and temporal filters,
+most notably Spatiotemporal Variance-Guided Filtering
+(SVGF) [28] to accumulate temporal history while preserving edges. As deep learning matured, denoising networks
+such as kernel prediction networks [5, 17, 32], neural bilateral grids [16], and Deep Learning Super Sampling [19, 20]
+gained popularity. Spatiotemporal Reservoir Resampling
+(ReSTIR) [34] and descendant methods [7, 12, 21, 37, 38]
+directly improve the quality of the Monte Carlo integration
+in a principled manner before the denoising step. By leveraging temporal history and spatial neighbors, the impact of
+each individual sample is amplified.
+2. Related Work
+3D Gaussian Splatting and the Sorting Bottleneck. 3D
+Gaussian Splatting (3DGS) has emerged as a highly efficient representation for real-time novel view synthesis [11].
+Traditionally, it relies on a tile-based rasterizer that strictly
+sorts semi-transparent primitives based on a per-primitive
+depth to perform deterministic alpha-compositing. However, this global sorting operation is computationally expensive, scales poorly with increasing scene complexity,
+especially on low-end hardware, and introduces temporal
+discontinuities known as “popping” artifacts when slight
+camera movements alter the primitive order. Several methods have attempted to address these limitations. StopThePop [22] eliminates popping through computationally intensive per-pixel sorting based on the maximal Gaussian response. Alternatively, exact volumetric intermixing can be
+achieved by ray tracing of constant density ellipsoids [15]
+or by reconstructing the transmittance function from analytic moments [18]. Other approaches approximate alphablending via proxy-guided weighted blending [14] or order-
+3. Preliminaries
+In this section, we detail how the stochastic paradigm diverges from traditional 3DGS rendering.
+3.1. 3D Gaussian Splatting (3DGS)
+3D Gaussian Splatting represents complex scenes as an
+unstructured collection of anisotropic 3D Gaussians [11].
+Each Gaussian primitive i is defined by a set of optimizable
+parameters {µi , Σi , σi , ci }, which encode its mean position
+2
+Stochastic (unsorted)
+1
+Ĉx,y = N
+P
+The radiance Cx,y is estimated by randomly and independently sampling N Gaussian indices r1 , . . . , rN from a
+probability mass function Px,y :
+r j ∼ Px,y
+j cr j ,
+N
+Ĉx,y =
+z
+1 X
+c j,
+N j=1 r
+with rj ∼ Px,y ,
+(2)
+(
+αi (x, y) Ti (x, y) if i ∈ G(x, y) ,
+Px,y (i) =
+0
+otherwise,
+(x, y)
+Deterministic (sorted)
+Cx,y =
+P
+i.e., each Gaussian is sampled with exactly its blending
+weight from Eq. (1). A single draw r ∼ Px,y thus yields
+an unbiased one-sample
+estimate cr of the pixel color,
+P
+Er∼Px,y [cr ] = i Px,y (i) ci = Cx,y .
+In practical hardware implementations, r is sampled by
+leveraging standard, unsorted rasterization with a Z-buffer.
+For each fragment, a uniform random number ui ∼ U (0, 1)
+is sampled; the fragment is kept as fully opaque if ui <
+αi (x, y), and discarded otherwise. The Z-buffer then retains
+the nearest kept fragment, whose index r therefore follows
+Px,y .
+Gaussian Point Splatting produces samples from the
+same underlying distribution Px,y using a massively parallelized point-sampling technique. As such, its output is
+near-identical to StochasticSplats except for small biases introduced by approximations. Further details can be found in
+Sec. 11.
+i ci α i T i
+Figure 2. Illustration of deterministic and stochastic rendering of
+3D Gaussians.
+(µi ), 3D covariance matrix (Σi ), opacity (σi ), and viewdependent color (ci ), typically modeled using spherical harmonics.
+To synthesize a novel view, these 3D Gaussians are
+“splatted” to a screen-space 2D Gaussian distribution G2D
+and depth zi using an affine approximation for projection [40]. We denote by G(x, y) the set of Gaussians intersecting the pixel (x, y), by αi (x, y) = σi · G2D
+i (x, y) the
+alpha-blending factor of Gaussian i, and by Cx,y the final
+pixel radiance, which is classically computed by evaluating
+the volume rendering equation through deterministic alphacompositing [11]:
+X
+Y
+Cx,y =
+ci αi (x, y) (1 − αk (x, y)) ,
+(1)
+i∈G(x,y)
+Temporal Reuse. Because 1-sample stochastic splats
+produce noisy raw frames, temporal accumulation is essential for stability. Existing methods address this in two distinct ways. StochasticSplats maintains an unweighted Cumulative Moving Average (CMA),
+k∈G(x,y)|zk <zi
+|
+{z
+Ti (x,y)
+}
+where zk < zi denotes all intersecting primitives located in
+front of primitive i along the ray. In standard 3DGS, primitives are sorted by zi priorQto blending, which simplifies the
+transmittance Ti (x, y) to k<i (1 − αk (x, y)).
+While this sorted alpha-blending ensures a stable and
+noise-free image, the global sorting operation imposes significant computational overhead and memory bandwidth
+bottlenecks, limiting scalability, especially on low-power
+devices, and producing temporal popping artifacts [22].
+
+t
+Ĉx,y
+= 1−
+1
+1  t−1
+Ĉx′ ,y′ + t crt ,
+t
+Nx,y
+Nx,y
+t
+where rt ∼ Px,y
+is the sample drawn in frame t, (x′ , y ′ )
+is the reprojection of (x, y) into the previous frame, and
+t
+Nx,y
+= Nxt−1
+′ ,y ′ + 1 counts the accumulated samples, resett
+ting the sample counter Nx,y
+← 1 whenever relative depth
+error exceeds a threshold τ .
+Gaussian Point Splatting instead uses a fixed-weight exponential moving average (EMA) with a bounded temporal
+window, borrowing AABB color clamping from standard
+temporal anti-aliasing (TAA) [10, 26] to suppress ghosting
+by restricting reprojected history to within γ standard deviations of the local color mean.
+3.2. Stochastic and Order-Independent 3DGS
+StochasticSplats [13] fundamentally alters the rendering
+pipeline by adapting stochastic order-independent transparency (OIT) [4]. Rather than sorting primitives globally, stochastic transparency replaces deterministic alphablending with an unbiased Monte Carlo estimator. The two
+approaches are contrasted in Fig. 2.
+The core idea is to probabilistically assign fully opaque
+samples to a pixel according to the fragments’ alphablending factors, evaluating the color without any sorting.
+4. Method
+The noise produced by stochastic 3DGS methods [13, 24] is
+a direct result of the variance in the Monte Carlo estimator
+3
+with hyperparameters λ, λvar and photometric losses
+Lℓ1 , LD-SSIM . The resulting models significantly reduce
+variance in the estimator and image noise with no modifications to the rendering procedure. For efficiency, the expecgt
+tation Cx,y can be replaced with the ground truth color Cx,y
+gt
+during training, assuming Cx,y ≈ Cx,y for a converged
+model.
+While this training objective has already found application in the context of sparse-view reconstruction [9] and
+mesh extraction [23, 39], its significant applications to
+stochastic rendering have thus far been unexplored.
+Figure 3. By default, 3DGS optimization blends disparate colors
+to match the ground truth. With λvar > 0, the blended colors align
+to reduce color variance.
+4.2. Spatial Resampling
+By exploiting the fact that color distributions are similar across neighboring pixels (e.g., Px,y (i) ≈ Px+1,y (i)),
+the information gain from each individual sample can be
+amplified by mixing the colors of neighboring samples.
+Naive reuse causes blurring artifacts, which can be mitigated by computing resampling weights that minimize the
+introduced bias.
+Ĉx,y , which determines its root-mean-square error:
+p
+q 
+ q
+Var[cr ]
+2
+√
+. (3)
+E ∥Ĉx,y − Cx,y ∥ = Var[Ĉx,y ] =
+N
+To reduce this error, either the color variance Var[cr ] at each
+pixel must be decreased or the sample count N increased.
+Neighbor Reuse. Let N (x, y) define the set of neighboring pixels around (x, y) from which samples will be reused.
+The final rendered color for a single sample is then given
+by:
+P
+n∈N (x,y) wn→x,y (rn ) · crn
+spatial
+,
+(9)
+Ĉx,y = P
+n∈N (x,y) wn→x,y (rn )
+4.1. Color Variance Regularization
+Previous stochastic methods for 3DGS [13, 24] reduce the
+error by increasing N through expensive supersampling or
+artifact-prone temporal accumulation, while ignoring the
+variance of the sampled colors Var[cr ], which directly represents the power of the noise produced by the renderer:
+
+
+Varr∼Px,y [cr ] = Er∼Px,y ∥cr − Er∼Px,y [cr ]∥2
+(4)
+
+
+= Er∼Px,y ∥cr − Cx,y ∥2
+(5)
+X
+2
+=
+Px,y (i) · ∥ci − Cx,y ∥ . (6)
+where rn ∼ Pn is the sample chosen at pixel n and wn→x,y
+is the spatial resampling weight. Here and in all following sums over N (x, y), the pixel’s own sample r ∼ Px,y
+is included with weight wx,y→x,y (r) = 1; |N (x, y)| counts
+only the neighbors. The normalization factor is imposed by
+self-normalized importance sampling (SNIS). Equation (9)
+can also be interpreted as a convolution of the 1-sample image with a dynamic kernel defined by N and wn→x,y . If
+wn→x,y is chosen simply as a Gaussian falloff according
+to pixel distance, this operation is equivalent to a Gaussian
+blur, which successfully reduces noise but converges to a
+biased, blurry result.
+To achieve noise reduction while minimizing bias, the
+expected value of the weighted samples from pixel n must
+match the expected value of the target distribution at pixel
+(x, y):
+i∈G(x,y)
+Our key insight is that standard, deterministic 3DGS
+training produces significantly higher color variance
+Var[cr ] than necessary to represent the scene at high fidelity.
+To minimize Var[cr ] during optimization, we add a color
+variance term Lvar normalized by the resolution H × W to
+the loss function:
+W H
+1 XX X
+Px,y (i) · ∥ci − Cx,y ∥2 . (7)
+Lvar =
+H · W x=1 y=1
+i∈G(x,y)
+Intuitively, this encourages all Gaussians that splat onto
+the same pixel to share the same color, instead of matching
+the ground truth by blending disparate colors. Figure 3 illustrates how Lvar aligns colors splatted onto a pixel. Note
+that Px,y (i) is already computed for each Gaussian during
+deterministic 3DGS rasterization and is commonly referred
+to as the Gaussian weight.
+Our complete loss function is:
+L = λvar · Lvar + (1 − λ) · Lℓ1 + λ · LD-SSIM ,
+Ern ∼Pn [wn→x,y (rn ) · crn ] = Er∼Px,y [cr ].
+(10)
+By expanding both expectations into their respective sums
+over the domain G, we obtain:
+X
+X
+Pn (i) · wn→x,y (i) · ci =
+Px,y (i) · ci . (11)
+i∈G(n)
+i∈G(x,y)
+For this equality to hold for any arbitrary signal ci , the
+corresponding terms inside the summations must be equal.
+(8)
+4
+(a) The resample weight from neighbor n (A) to pixel (x, y) (B) for the current frame is computed using the
+buffer Kn (KA ) of previous samples.
+(b) Temporal resampling is computed recursively.
+Figure 4. Overview of spatial and temporal sample reuse.
+Equating the coefficients yields:
+Pn (i) · wn→x,y (i) = Px,y (i) .
+In essence, the samples we draw from each pixel act as importance samples for Gaussians that are likely to be dominant occluders. We can therefore approximate the change
+in occlusion by taking the product not over all Gaussians
+splatted onto the pixel, but only over those that have been
+sampled on the same pixel in the last K iterations.
+To this end, for each pixel (x, y), we store the unique
+values of okx,y→n for all neighbors n (computed in an extra
+rendering pass), the index k, and the corresponding depth
+zk across the K previous samples. Using the set Kn stored
+at the source pixel n, we estimate wn→x,y as:
+(12)
+Solving this directly provides the unbiased resample
+P
+(rn )
+weights: wn→x,y (rn ) = Px,y
+. If wn→x,y (rn ) > 1, then
+n (rn )
+rn is more likely to be sampled at pixel (x, y) than at pixel
+n, and vice versa. The assumption G(x, y) = G(n) used in
+Eq. (12) is justified in Sec. 10.
+P
+(r )
+n
+represents the
+Approximating wn→x,y . While Px,y
+n (rn )
+ideal, unbiased weights, they are difficult to compute in
+practice due to their dependence on occlusion from closer
+primitives:
+wn→x,y (i) =
+ok
+n→x,y
+αr (x, y)
+Px,y (rn )
+= n
+Pn (rn )
+αrn (n)
+Y
+k∈G(x,y)
+∧ zk <zrn
+z
+}|
+{
+1 − αk (x, y)
+.
+1 − αk (n)
+Px,y (i)
+αi (x, y)
+≈
+Pn (i)
+αi (n)
+Y
+okn→x,y . (14)
+k∈Kn
+∧ zk <zi
+Due to the unbounded support of the Gaussian kernel, as
+K → ∞, {k ∈ G(x, y) | zk < zi } ⊆ Kn holds with probability approaching one and the equality becomes exact. Figure 4a sketches the computation of this reuse weight.
+Note that the stored buffer of past samples is deduplicated: we do not weight the importance of a Gaussian by
+its sample frequency (which would introduce substantial
+noise), but rather take the condition that it was sampled at
+least once as a signal to include its occlusion factor.
+(13)
+The first term accounts for the change in 2D Gaussian opacity between the two pixels and is evaluated directly by sampling the 2D Gaussian G2D
+rn on neighboring pixels. However, the second term okn→x,y , representing the change in occlusion of rn between pixels, presumes knowledge of the set
+of occluding Gaussians {k ∈ G(x, y) | zk < zrn }, which
+would require an expensive global sorting step or second
+sampling pass.
+Our key insight is that the expected number of occluding Gaussians on each pixel is very small (cf. Fig. 16) if the
+scene is trained with Lvar . As such, this product is dominated by a small subset of Gaussians that have a high probability of being sampled because they represent the foreground. In turn, it is highly likely that these important occluding Gaussians were sampled recently on the same pixel.
+4.3. Spatio-Temporal Resampling
+Color distributions are coherent not only across spatial
+neighborhoods, but also temporally along motion trajectories. While evaluating full spatio-temporal resampling
+weights across multiple frames is intractable for real-time
+rendering, we show that under mild assumptions, full
+spatio-temporal resampling reduces to an efficient, closedform recursive filter.
+5
+27
+5
+0
+26
+25
+0.4
+26
+0.7
+0.3
+24
+0.03
+5
+0.8
+0.5
+0
+5
+1
+0.000 0.025 0.050 0.075 0.100 0.125 0.150
+Variance
+(a) PSNR and variance Lvar
+for varying λvar ∈ [0, 5].
+0.6
+Sample Count
+256
+1
+Sample Count
+256
+5
+2
+1
+0.5
+0.2
+0.1
+0
+0.1
+1
+Sample Count
+256
+var
+0.04
+28
+LPIPS
+28
+0
+0.05
+SSIM
+29
+55
+5
+L1
+PSNR
+30
+bicycle
+bonsai
+counter
+kitchen
+room
+stump
+0
+31
+PSNR
+0 0
+32
+1
+Sample Count
+256
+(b) Comparison of average quality metrics across varying stochastic sample counts for models trained with different
+λvar . The bottom bar denotes the optimal λvar for each sample count. The baseline (λvar = 0) is shown dashed.
+Figure 5. Average quality metrics on the Mip-NeRF 360 dataset for varying λvar with deterministic (Fig. 5a) and stochastic (Fig. 5b)
+blending.
+Temporal Importance Resampling. The spatial reuse
+weights wn→x,y extend to the temporal domain by evaluating the target-to-proposal PDF ratio:
+t̃→t
+wn→x,y
+(rnt̃ ) =
+t
+Px,y
+(rnt̃ )
+Pnt̃ (rnt̃ )
+,
+A detailed proof is provided in Sec. 14.1. Theorem 1
+reduces spatio-temporal SNIS to a two-state recursion per
+t
+pixel: the running estimate Ĉx,y
+P andt the accumulated
+t−1
+t
+t
+(rnt ).
+weight mass Dx,y = δx,y Dx,y + n wn→x,y
+t
+t−1
+At steady state (Dx,y ≈ Dx,y ), the recursion in Theorem 1 is equivalent to an EMA filter with history weight
+t
+∈ (0, 1), commonly used in TAA [10, 36]. Both
+δx,y
+prior temporal
+cases: without spatial
+P t schemes are special
+t
+= 1 yields the CMA of
+reuse ( n wn→x,y
+= 1), δx,y
+StochasticSplats (Sec. 3.2), whose depth reset corresponds
+t
+t
+to δx,y
+= 0, and a constant δx,y
+< 1 yields the fixed-weight
+EMA of Gaussian Point Splatting. We use the steady-state
+form, so only the running estimate needs to be stored:
+(15)
+where rnt̃ is the Gaussian sample drawn at pixel n on prior
+frame t̃ ∈ T . The full spatio-temporal SNIS estimator is
+then:
+P
+P
+t̃
+t̃→t
+t̃
+t̃∈T wn→x,y (rn ) · crn
+n∈N
+(x,y)
+t
+Ĉx,y = P
+.
+(16)
+P
+t̃→t (r t̃ )
+w
+n→x,y n
+t̃∈T
+n∈N (x,y)
+t
+t
+t−1
+t
+t,spatial
+Ĉx,y
+= δx,y
+Ĉx,y
++ (1 − δx,y
+) Ĉx,y
+,
+Assuming sample relevance decays by a per-frame factor
+t
+∈ [0, 1] shared by all samples in the history, the spatioδx,y
+temporal weights factorize as:
+t̃→t
+t̃
+wn→x,y
+(rnt̃ ) = wn→x,y
+(rnt̃ )
+t
+Y
+u
+δx,y
+,
+t
+= δ̄ that is reduced
+with a fixed nominal history weight δx,y
+only by soft history rejection (Eq. (21)).
+(17)
+Moving Camera. Theorem 1 is stated for a fixed pixel.
+With a moving camera, we apply Eq. (20) along the motion
+trajectory and read the history at the reprojection (x′ , y ′ ) of
+t−1
+becomes Ĉxt−1
+(x, y) into the previous frame, i.e., Ĉx,y
+′ ,y ′
+(Sec. 8). This is exact only if the reprojection is exact and
+the surface remains visible; otherwise, the fetched history is
+t
+an approximation, and the history weight δx,y
+controls how
+much of it is kept. The occlusion buffer of Sec. 4.2 is kept
+in screen space and not reprojected, so under motion it may
+contain occluders of nearby surface points.
+u=t̃+1
+This formulation is illustrated in Fig. 4b.
+Theorem 1. Under the assumption of a per-frame temporal
+discount shared by all history samples (cf. Eq. (17)), the
+spatio-temporal reuse estimator
+P
+t
+Ĉx,y
+=
+n∈N (x,y)
+X
+t̃→t
+t̃
+t̃
+t̃∈T wn→x,y (rn ) · crn
+P
+X
+t̃→t
+wn→x,y
+(rnt̃ )
+(20)
+(18)
+n∈N (x,y) t̃∈T
+|
+{z
+t
+Dx,y
+}
+Soft History Rejection. Prior temporal approaches for
+stochastic splatting present a clear trade-off. Pure depthtested CMA maintains an unbounded sample history that
+causes persistent ghosting whenever depth differences are
+small, while its hard binary resets trigger visible popping
+on foliage and fine geometry. In contrast, standard TAA
+color clamping directly clamps Ĉxt−1
+′ ,y ′ to a local neighborhood bounding box, which clips valid Monte Carlo variance
+can be expressed as an exponential moving average filter:
+t
+Ĉx,y
+=
+t
+t−1
+δx,y
+· Dx,y
+t−1
+· Ĉx,y
+t
+Dx,y
+P
+t
+t
+n∈N (x,y) wn→x,y (rn )
+t,spatial
+· Ĉx,y
+.
++
+t
+Dx,y
+(19)
+6
+The quality of stochastic rendering for these models with
+varying sample count is reported in Fig. 5b. The results
+show that with increasing sample count, the optimal value
+of λvar decreases. The reason for this is that error is dominated by noise at low sample counts and by bias at high
+sample counts. A small amount of variance regularization
+leads to almost universal gains, significantly outperforming
+baseline trained models across all image metrics for at least
+the first 200 samples. For the following evaluations, we use
+models trained with λvar = 1 as a compromise between fast
+and correct convergence.
+tails, introduces bias, and interferes with spatial reuse distributions [29, 30, 36].
+To avoid both issues, we replace color clipping and binary depth resets with history weight modulation [30, 36].
+We leave the historical color Ĉxt−1
+′ ,y ′ unclipped, and instead
+t
+change the history weight δx,y
+based on the L∞ distance
+m of the reprojected history Ĉxt−1
+′ ,y ′ from the mean of the
+current samples crq in a 3 × 3 neighborhood (in YCoCg
+space), normalized by velocity-adaptive confidence halfextents (Sec. 8):
+
+
+1
+t
+,
+(21)
+δx,y = δ̄ · min 1,
+m
+Spatial Reuse. To validate the effectiveness of the spatial reuse component, we evaluate quality metrics over all
+test poses of the Mip-NeRF 360 scenes on models trained
+with λvar = 1 and rendered stochastically with up to 100
+samples. As baseline methods, we use unmodified StochasticSplats outputs and various fixed 3 × 3 normalized blur
+kernels and compare against our kernel with dynamic reuse
+weights for the four direct pixel neighbors with varying
+buffer sizes K. Figure 6 shows the resulting difference in
+quality metrics compared to deterministic α-blending. For
+low sample counts, spatial reuse and blurring achieve an immediate and significant quality improvement over StochasticSplats. However, the convergence of the naive blur kernels quickly plateaus at a blurry and biased result, while
+our method continues to increase in quality, outperforming
+all baseline methods for 100 samples even with a buffer size
+of only K = 4.
+where δ̄ is the fixed nominal history weight. For outlier
+samples (m > 1), this smoothly shifts history retention tot
+ward the new spatial estimate (δx,y
+→ 0) without distorting valid color distributions. Implementation details and
+our velocity-adaptive confidence bounds are described in
+Sec. 8.
+Per-Primitive Spatio-Temporal Blue Noise. Instead of
+independent white noise, we sample the fragment visibility thresholds ui (Sec. 3.2) from a precomputed SpatioTemporal Blue Noise (STBN) volume [33]. To decorrelate overlapping fragments at every pixel, each primitive
+applies an R2 low-discrepancy spatial offset [25], combined with a golden-ratio Cranley-Patterson rotation [2] to
+prevent temporal repetition. This per-primitive stratification preserves blue-noise spectral properties and estimator unbiasedness, resulting in improved quantitative metrics compared to white noise and visibly smoother images
+(cf . Fig. 24).
+Performance. While the quality gains for integrating spatial reuse are significant, they also come at a small cost
+in performance: Fig. 7 compares the performance overhead of spatial reuse against basic stochastic and deterministic blending, implemented in the same optimized Vulkan
+renderer for fair comparison and run on an RTX 5090.
+The results show that even for relatively large buffer sizes
+(K < 14), our method achieves higher frame rates than
+deterministic α-blending. The overhead of spatial reuse increases slowly until K = 14, at which point the shared
+memory is filled up.
+In order to evaluate the performance-quality trade-off for
+spatial sample reuse, we introduce the excess quality factor: An excess quality factor of Q means that enabling spatial resampling achieves the same quality as accumulating
+Q · N samples in the time it takes to draw N samples (with
+M < N samples due to the resampling overhead). As such,
+any Q > 1 is a net-gain in quality at identical convergence
+time. Figure 8 shows the excess quality factor achieved
+for various values of buffer size K and sample count. The
+largest benefit is observed for low sample counts, with up
+to Q = 3.5. The quality factor for small buffers starts high,
+5. Evaluation
+For the evaluation, we use the StochasticSplats method of
+drawing samples and render each sample individually (i.e.,
+no batching) for minimal latency.
+Variance-Quality Trade-off. While Lvar effectively mitigates noise, it also dilutes the training signal of the ℓ1 and
+SSIM photometric losses, resulting in a compromise between noise and visual fidelity. To examine this trade-off,
+we train the scenes from the Mip-NeRF 360 dataset [1] for
+15k iterations using original 3DGS training and then another 15k iterations from the same checkpoint with varying
+values of λvar . The results in Fig. 5a show that color variance as defined in Eq. (4) can be decreased significantly
+with minimal impact on converged image quality. On the
+other hand, there appears to be a hard lower limit around
+Var ≈ 0.01 on color variance for each scene, beyond which
+severe quality loss occurs.
+7
+Table 1. Quantitative comparison on the camera path benchmark (21 trajectories, 3,152 frames across 7 Mip-NeRF 360 scenes). We
+ablate progressive pipeline components against the 1-sample StochasticSplats baseline (λvar = 0), temporal reuse (CMA, τ = 0.20), our
+variance loss (λvar = 1) with spatial reuse, and our full spatio-temporal model (Ours + Temporal, δ̄ = 0.7). All variants are evaluated
+against sorted α-blending ground truth.
+PSNR (dB) ↑
+Method
+Avg. PSNR (dB) ↑
+SSIM ↑
+LPIPS ↓
+tPSNR (dB) ↑
+Indoor
+Outdoor
+18.336
+21.954
+31.437
+35.085
+0.293
+0.552
+0.845
+0.937
+0.667
+0.524
+0.345
+0.209
+15.235
+19.450
+28.410
+32.449
+19.562
+23.313
+32.978
+37.161
+16.701
+20.141
+29.381
+32.318
+StochasticSplats [13]
+StochasticSplats + Temporal [13]
+Ours
+Ours + Temporal
+Average Frame Time (ms)
+PSNR (Higher is better)
+2.5
+10 1
+100
+Bicycle
+Bonsai
+Counter
+Garden
+Kitchen
+2.0
+Room
+Stump
+Sorted
+No Reuse
+Overall
+1.5
+1.0
+0.5
+0.0
+0 1 2
+4
+8
+12
+16
+20
+24
+28
+32
+History Buffer Size (K)
+40
+60
+Sample Count
+80
+100
+Figure 7. Average frame time for rendering all test views of the
+Mip-NeRF 360 dataset. We average the frame time for 200 frames
+per view.
+10 2
+Excess Quality Factor (PSNR)
+Excess Quality Factor (SSIM)
+3.5
+10 1
+20
+40
+60
+Sample Count
+80
+100
+Excess Quality Factor
+3.0
+Excess Quality Factor
+SSIM (Higher is better)
+20
+2.5
+2.0
+1.5
+1.0
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+0.5
+0
+20
+40
+60
+80
+100
+0.5
+0
+20
+Sample Count
+Colormap for K values with = 4
+40
+60
+Sample Count
+80
+100
+Colormap for K values with = 4
+K=0
+K=0
+K=1
+K=2
+K=4
+K=8
+K=16
+K=32
+K=1
+K=2
+K=4
+K=8
+K=16
+K=32
+Figure 8. Excess Quality Factor on the test views of the Mip-NeRF
+360 dataset for PSNR and SSIM quality metrics.
+Figure 6. Average residual of test quality metrics on the MipNeRF 360 dataset trained with λvar = 1, comparing static blur
+kernels against spatial reuse weights with varying K. Log-scale is
+used to visualize small differences.
+original RNG used in StochasticSplats was used as a baseline. The results show that enabling STBN gives a small, but
+not insignificant boost in quality after roughly three samples
+that persists for a long time during convergence.
+but drops more quickly, making larger buffer sizes more optimal for longer convergence windows.
+5.1. Camera Motion
+Since temporal filtering cannot be evaluated on isolated
+static views, we evaluate all methods on continuous camera
+sequences across 7 scenes of the Mip-NeRF 360 dataset.
+STBN. Figure 9 compares stochastic rendering quality
+with and without STBN converging on a static camera. The
+8
+PSNR (Higher is better)
+Table 2. Component ablation on camera path benchmark. We ablate Lvar , Spatial Reuse, and Temporal Reuse combinations across 21
+camera trajectories on the Mip-NeRF 360 dataset (3 per scene) against sorted rendering. For Spatial Reuse we set K = 4, and Temporal
+Reuse evaluates EMA filtering with our soft history rejection at fixed δ̄ = 0.70. STBN was used for all evaluations.
+Lvar
+Spatial Reuse
+Temporal Reuse
+tPSNR (dB) ↑
+SSIM ↑
+LPIPS ↓
+Avg. PSNR (dB) ↑
+—
+—
+—
+—
+—
+✓
+—
+✓
+—
+—
+✓
+✓
+15.235
+21.720
+22.204
+27.188
+0.293
+0.586
+0.619
+0.817
+0.667
+0.498
+0.522
+0.365
+18.336
+24.774
+25.227
+29.946
+✓
+✓
+✓
+✓
+—
+✓
+—
+✓
+—
+—
+✓
+✓
+22.423
+28.410
+28.980
+32.449
+0.613
+0.845
+0.863
+0.937
+0.525
+0.345
+0.357
+0.209
+25.561
+31.437
+31.953
+35.085
+and temporal reuse. As reported in Tab. 2, each component in isolation provides a substantial gain over the raw
+1-sample baseline. Enabling all three components achieves
+the best performance across all metrics. This demonstrates
+that the three components work synergistically: Enabling
+variance regularization drops the expected number of occluders for each sample (cf. Fig. 16c), which in turn increases the accuracy of our reuse weight approximation
+through historical samples. Further, it reduces noise not
+only in RGB, but also in depth (cf. Fig. 14), which strengthens the accuracy of temporal sample reprojection. Both the
+variance regularizer and spatial reuse reduce output variance, enabling the dynamic blending weight (cf. Eq. (21))
+to more effectively distinguish between variance caused by
+disocclusions or by sample noise, thereby reducing ghosting artifacts.
+We refer to the supplementary material for extensive parameter ablations and per-scene metric breakdowns.
+Figure 10 shows visual ablation of all our components.
+10 1
+StochasticSplats
+| | = 4, K = 1
+| | = 4, K = 32
+StochasticSplats (STBN)
+| | = 4, K = 1 (STBN)
+| | = 4, K = 32 (STBN)
+100
+10
+20
+30
+40
+Sample Count
+50
+60
+Figure 9. Average residual of test PSNR on the Mip-NeRF 360
+dataset trained with λvar = 1 rendered with and without STBN
+compared against sorted rendering. Log-scale is used to visualize
+small differences.
+Following standard practice, we evaluate on the training
+view resolution, where indoor scenes are downsampled by
+2× and outdoor scenes by 4×. For each scene, we generate 3 continuous camera paths (21 trajectories, totaling
+3,152 frames) by smoothly interpolating keyframe poses
+from the dataset at 60 FPS. Ground truth sequences are rendered along the exact same trajectories using deterministic sorted 3DGS. We report standard reconstruction metrics
+(Avg. PSNR, SSIM, and LPIPS) to measure visual quality,
+as well as temporal PSNR (tPSNR) on inter-frame differences to measure temporal stability and flicker during motion. As summarized in Tab. 1, our pipeline outperforms
+original StochasticSplats by a large margin in the temporal
+domain, yielding significantly higher temporal stability and
+reduced flicker under continuous camera motion. The significant noise reduction of our other components leads to
+significant gains in quality under motion even without temporal smoothing.
+6. Discussion
+In this work, we have demonstrated that the severe highfrequency noise inherently produced by stochastic orderindependent transparency (OIT) rendering methods can be
+effectively suppressed during both training and inference
+time with minimal bias. By introducing color variance regularization during optimization and a history-based spatial
+resampling scheme during inference, our method achieves
+clean, high-fidelity rendering from just a single primitive
+sample per pixel.
+Different Primitives. Our method is not limited strictly
+to 3D Gaussian Splatting. The principles of our approach
+could be used on any semi-transparent rasterized primitive
+that typically requires computationally expensive depthsorting, extending the benefits of efficient stochastic rendering to a broader range of representations.
+Component Ablation. To evaluate the individual contribution, we conduct a full ablation over our three core components: the variance regularization loss Lvar , spatial reuse,
+9
+(a) Visual ablation of variance regularization and
+spatial reuse on 1 sample per pixel.
+(b) Convergence to sorted 3DGS (128 samples per
+pixel). Left: Gaussian cross kernel. Right: Spatial
+reuse with K = 4, |N | = 4. Bottom: ℓ1 error.
+(c) Comparison between StochasticSplats and
+Ours with temporal smoothing shows significant
+noise reduction even under camera motion.
+Figure 10. Visual Ablations.
+6.1. Limitations
+Acknowledgements
+Despite the massive acceleration in convergence and reduction in noise, our approach introduces a few notable tradeoffs:
+We thank Alex Evans for his valuable help in the early
+stages of the project.
+• Quality Metric Trade-off: Our color variance loss (Lvar )
+effectively mitigates noise but also dilutes the training
+signal of the L1 and SSIM photometric losses, resulting
+in a slight decrease in peak quality metrics for fully converged models.
+• Overhead of Reuse: While spatial resampling avoids
+the exhaustive global sorting of primitives, populating
+and reading from the K-buffer to evaluate neighboring
+samples takes additional memory and computational time
+during inference.
+• Loss of Strict Unbiasedness: Standard stochastic transparency is unbiased. However, to maintain high performance, our spatial reuse implementation approximates
+the exact transmittance using only a limited set of K previous samples. Because of this approximation, the spatial
+resampling is no longer strictly unbiased, exchanging a
+small degree of mathematical correctness for significantly
+accelerated convergence.
+6.2. Future Work
+Future research should explore dynamic or adaptive sizing
+of both the spatial neighborhood N (x, y) and the K-buffer
+capacity. By intelligently allocating K-buffer size based on
+local scene complexity or depth variance, it may be possible
+to reduce the memory overhead and time required for sample reuse without sacrificing noise reduction. Additionally,
+investigating adaptive weighting for the variance loss could
+help minimize the trade-off in photometric quality metrics,
+allowing for optimal visual fidelity across varying primitive distributions. A fast approximation of the full spatiotemporal SNIS estimator could further improve the temporal quality as well.
+10
+References
+Jonathan T. Barron, and Yinda Zhang. EVER: Exact volumetric ellipsoid rendering for real-time view synthesis. In
+ICCV, pages 4930–4939, 2025. 2
+[16] Xiaoxu Meng, Quan Zheng, Amitabh Varshney, Gurprit
+Singh, and Matthias Zwicker. Real-time Monte Carlo denoising with the neural bilateral grid. In Eurographics Symposium on Rendering – DL-only Track, pages 13–24. The
+Eurographics Association, 2020. 2
+[17] Ben Mildenhall, Jonathan T. Barron, Jiawen Chen, Dillon
+Sharlet, Ren Ng, and Robert Carroll. Burst denoising with
+kernel prediction networks. In CVPR, pages 2502–2510,
+2018. 2
+[18] Jan U. Müller, Robin Tim Landsgesell, Leif Van Holland, Patrick Stotko, and Reinhard Klein.
+Momentbased 3D gaussian splatting: Resolving volumetric occlusion with order-independent transmittance. arXiv preprint
+arXiv:2512.11800, 2025. 2
+[19] NVIDIA Corporation. NVIDIA DLSS 3.5 features ray reconstruction, 2023. Accessed: 2026-08-21. 2
+[20] NVIDIA Corporation. NVIDIA DLSS - neural rendering
+technologies, 2026. Accessed: 2026-08-21. 2
+[21] Yaobin Ouyang, Shiqiu Liu, Markus Kettunen, Matt Pharr,
+and Jacopo Pantaleoni. ReSTIR GI: Path resampling for
+real-time path tracing. Comput. Graph. Forum, 40(8):17–29,
+2021. 2
+[22] Lukas Radl, Michael Steiner, Mathias Parger, Alexander Weinrauch, Bernhard Kerbl, and Markus Steinberger.
+StopThePop: Sorted gaussian splatting for view-consistent
+real-time rendering. ACM TOG, 43(4):1–17, 2024. 2, 3
+[23] Lukas Radl, Felix Windisch, Andreas Kurz, Thomas Köhler,
+Michael Steiner, and Markus Steinberger. Confidence-based
+mesh extraction from 3D gaussians. In ECCV. Springer,
+2026. 4, S3, S6
+[24] Joris Rijsdijk, Christoph Peters, Michael Weinmann, and Ricardo Marroquim. Gaussian point splatting. ACM TOG, 45
+(4):45:1–45:11, 2026. 2, 3, 4, S6
+[25] Martin Roberts. The unreasonable effectiveness of quasirandom sequences. https://web.archive.org/web/
+20220114023542 / http : / / extremelearning .
+com . au / unreasonable - effectiveness - of quasirandom-sequences/, 2018. Archived from the
+original on January 14, 2022. 7
+[26] Marco Salvi. An excursion in temporal supersampling. In
+Game Developers Conference (GDC), 2016. 3
+[27] Luca Savant Aira, Diego Valsesia, and Enrico Magli. Modeling uncertainty for gaussian splatting. IEEE TNNLS, 36(6):
+11657–11663, 2025. 2
+[28] Christoph Schied, Anton Kaplanyan, Chris Wyman, Anjul
+Patney, Chakravarty R. Alla Chaitanya, John Burgess, Shiqiu
+Liu, Carsten Dachsbacher, Aaron Lefohn, and Marco Salvi.
+Spatiotemporal variance-guided filtering: Real-time reconstruction for path-traced global illumination. In Proceedings
+of High Performance Graphics, pages 2:1–2:12, 2017. 2
+[29] Christoph Schied, Christoph Peters, and Carsten Dachsbacher. Gradient estimation for real-time adaptive temporal
+filtering. Proceedings of the ACM on Computer Graphics
+and Interactive Techniques, 1(2):24:1–24:16, 2018. 7
+[1] Jonathan T. Barron, Ben Mildenhall, Dor Verbin, Pratul P.
+Srinivasan, and Peter Hedman. Mip-NeRF 360: Unbounded
+anti-aliased neural radiance fields. In CVPR, pages 5470–
+5479, 2022. 7
+[2] R. Cranley and T. N. L. Patterson. Randomization of number
+theoretic methods for multiple integration. SIAM Journal on
+Numerical Analysis, 13(6):904–914, 1976. 7
+[3] Xiaobiao Du, Yida Wang, Kun Zhan, and Xin Yu. MobileGS: Real-time gaussian splatting for mobile devices. In
+ICLR, 2026. 2
+[4] Eric Enderton, Erik Sintorn, Peter Shirley, and David Luebke. Stochastic transparency. In Proceedings of the ACM
+SIGGRAPH Symposium on Interactive 3D Graphics and
+Games, pages 157–164, 2010. 2, 3
+[5] Hangming Fan, Rui Wang, Yuchi Huo, and Hujun Bao. Realtime Monte Carlo denoising with weight sharing kernel prediction network. Comput. Graph. Forum, 40(4):15–27, 2021.
+2
+[6] Florian Hahlbohm, Fabian Friederichs, Tim Weyrich, Linus Franke, Moritz Kappel, Susana Castillo, Marc Stamminger, Martin Eisemann, and Marcus Magnor. Efficient
+perspective-correct 3D gaussian splatting using hybrid transparency. Comput. Graph. Forum, 44(2):e70014, 2025. 2
+[7] Trevor Hedstrom, Markus Kettunen, Daqi Lin, Chris
+Wyman, and Tzu-Mao Li. ReSTIR BDPT: Bidirectional
+ReSTIR path tracing with caustics. ACM TOG, 44(5):1–16,
+2025. 2
+[8] Qiqi Hou, Randall Rauwendaal, Zifeng Li, Hoang Le, Farzad
+Farhadzadeh, Fatih Porikli, Alexei Bourd, and Amir Said.
+Sort-free gaussian splatting via weighted sum rendering. In
+ICLR, 2025. 2
+[9] Shubhendu Jena, Amine Ouasfi, Mae Younes, and Adnane
+Boukhayma. Sparfels: Fast reconstruction from sparse unposed imagery. In ICCV, pages 27476–27487, 2025. 4
+[10] Brian Karis. High-quality temporal supersampling. In Advances in Real-Time Rendering in Games, ACM SIGGRAPH
+Courses. ACM, 2014. 2, 3, 6
+[11] Bernhard Kerbl, Georgios Kopanas, Thomas Leimkühler,
+and George Drettakis. 3D gaussian splatting for real-time
+radiance field rendering. ACM TOG, 42(4):1–14, 2023. 1, 2,
+3
+[12] Markus Kettunen, Daqi Lin, Ravi Ramamoorthi, Thomas
+Bashford-Rogers, and Chris Wyman. Conditional resampled
+importance sampling and ReSTIR. In SIGGRAPH Asia Conference Papers, pages 1–11, 2023. 2
+[13] Shakiba Kheradmand, Delio Vicini, George Kopanas,
+Dmitry Lagun, Kwang Moo Yi, Mark Matthews, and Andrea
+Tagliasacchi. StochasticSplats: Stochastic rasterization for
+sorting-free 3D gaussian splatting. In ICCV, pages 26326–
+26335, 2025. 2, 3, 4, 8, S1
+[14] Weihang Liu, Yuke Li, Yuxuan Li, Jingyi Yu, and Xin Lou.
+Duplex-GS: Proxy-guided weighted blending for real-time
+order-independent gaussian splatting. IEEE TCSVT, 36(7):
+9418–9431, 2026. 2
+[15] Alexander Mai, Peter Hedman, George Kopanas, Dor
+Verbin, David Futschik, Qiangeng Xu, Falko Kuester,
+11
+[30] Tomasz Stachowiak. Stochastic screen-space reflections.
+In Advances in Real-Time Rendering in Games, ACM SIGGRAPH Courses, 2015. 7
+[31] Xin Sun, Iliyan Georgiev, Yun Fei, and Miloš Hašan.
+Stochastic ray tracing of transparent 3D gaussians. In Eurographics Symposium on Rendering. The Eurographics Association, 2025. 2
+[32] Thijs Vogels, Fabrice Rousselle, Brian McWilliams, Gerhard
+Röthlin, Alex Harvill, David Adler, Mark Meyer, and Jan
+Novák. Denoising with kernel prediction and asymmetric
+loss functions. ACM TOG, 37(4):1–15, 2018. 2
+[33] Alan Wolfe, Nathan Morrical, Tomas Akenine-Möller, and
+Ravi Ramamoorthi. Spatiotemporal blue noise masks. In
+Eurographics Symposium on Rendering. The Eurographics
+Association, 2022. 7
+[34] Chris Wyman, Markus Kettunen, Daqi Lin, Benedikt Bitterli,
+Cem Yuksel, Wojciech Jarosz, and Pawel Kozlowski. A gentle introduction to ReSTIR: Path reuse in real-time. In ACM
+SIGGRAPH Courses, pages 1–38. ACM, 2023. 2
+[35] Peiyu Xu, Xin Sun, Krishna Mullia, Raymond Fei, Iliyan
+Georgiev, and Shuang Zhao. Stochastic ray tracing for the
+reconstruction of 3D gaussian splatting. In CVPR, 2026. 2
+[36] Lei Yang, Shiqiu Liu, and Marco Salvi. A survey of temporal
+antialiasing techniques. Comput. Graph. Forum, 39(2):607–
+621, 2020. 2, 6, 7, S2
+[37] Zheng Zeng, Markus Kettunen, Chris Wyman, Lifan Wu,
+Ravi Ramamoorthi, Ling-Qi Yan, and Daqi Lin. ReSTIR
+PG: Path guiding with spatiotemporally resampled paths. In
+SIGGRAPH Asia Conference Papers, pages 1–11, 2025. 2
+[38] Song Zhang, Daqi Lin, Markus Kettunen, Cem Yuksel, and
+Chris Wyman. Area ReSTIR: Resampling for real-time defocus and antialiasing. ACM TOG, 43(4):1–13, 2024. 2
+[39] Ziyi Zhang, Nicolas Roussel, Thomas Müller, Tizian Zeltner,
+Merlin Nimier-David, Fabrice Rousselle, and Wenzel Jakob.
+Radiance surfaces: Optimizing surface representations with
+a 5D radiance field loss. In ACM SIGGRAPH Conference
+Papers, pages 1–10, 2025. 4
+[40] Matthias Zwicker, Hanspeter Pfister, Jeroen van Baar, and
+Markus Gross. EWA volume splatting. In IEEE Visualization, pages 29–36, 2001. 3
+12
+SteadySplats: Resampling of Low-Variance Gaussians for High-Fidelity
+Stochastic Rendering
+Supplementary Material
+Algorithm 2 Spatial Resampling
+In this supplementary document, we provide full algorithm
+details, additional proofs, and extended ablation results.
+1: r, zr ← Algorithm 1
+2: unique ← true
+3: for n ∈ N (x, y) do
+7. Pseudocode
+▷ r ∼ Px,y and its depth
+(n)
+wx,y→n ← ααrr(x,y)
+5: end for
+6: for each k ∈ Kx,y do
+▷ Stored: k, zk , okx,y→n
+7:
+if k == r then
+8:
+unique ← false
+9:
+end if
+10:
+if zk < zr then
+11:
+for n ∈ N (x, y) do
+12:
+wx,y→n ← wx,y→n · okx,y→n
+13:
+end for
+14:
+end if
+15: end for
+16: if unique then
+17:
+insert r, zr into Kx,y , evicting the oldest entry if
+|Kx,y | = K
+18:
+for n ∈ N (x, y) do
+1−αr (n)
+19:
+orx,y→n ← 1−α
+r (x,y)
+20:
+end for
+21: end if
+22: Sx,y ← cr
+23: Wx,y ← 1
+24: S YNC()
+▷ Wait for all writes to finish
+25: for n ∈ N (x, y) do
+26:
+Sn ← Sn + wx,y→n · cr
+27:
+Wn ← Wn + wx,y→n
+28: end for
+29: S YNC()
+▷ Wait for all writes to finish
+Sx,y
+spatial
+30: return Ĉx,y = W
+x,y
+4:
+Algorithm 1 details the sampling procedure introduced in
+StochasticSplats to sample r ∼ Px,y .
+Algorithm 1 StochasticSplats Sampling [13]
+1: r ← ∅, zr ← ∞
+▷ ∅: background, c∅ = cbackground
+2: for each Gaussian i ∈ G(x, y) in unsorted order do
+3:
+ui ∼ U (0, 1)
+4:
+if ui < αi (x, y) and zi < zr then
+5:
+r←i
+6:
+zr ← zi
+7:
+end if
+8: end for
+9: return r, zr
+If no fragment survives, Algorithm 1 returns the background
+(r = ∅).
+This happens with probability
+Q
+(1
+−
+α
+(x,
+y)),
+the mass that is missing from
+k
+k∈G(x,y)
+Px,y ; the color variance in Eq. (4) and Lvar assume full coverage, where this mass vanishes.
+Algorithm 2 gives a full overview of how one frame is
+rendered with spatial resampling. It is written in scatter
+form: each pixel (x, y) weights its own sample r for every
+neighbor n with wx,y→n (r), using its own buffer Kx,y , and
+accumulates the result at n. Up to the order of summation,
+this equals the gather form of Eq. (9), in which the sample
+of each neighbor n is weighted by wn→x,y (rn ) using Kn ,
+plus the pixel’s own sample with weight one.
+8. Temporal Recurrence and Soft Rejection
+Implementation
+The screen-space motion magnitude is v = ∥p − p′ ∥2 . If p′
+lies outside the viewport or within two pixels of its boundary, temporal accumulation is bypassed and the spatial estimate Ĉpt,spatial is output directly. Otherwise, we retrieve
+the historical radiance Ĉpt−1
+= S AMPLE(It−1 , p′ ) using
+′
+Catmull-Rom bicubic sampling to minimize interpolation
+blur.
+This section provides implementation details for the temporal recurrence pass of Sec. 4.3, executed immediately after
+spatial resampling (Sec. 4.2) in the same compute pipeline.
+Reprojection and History Fetch. For each pixel p =
+(x, y) with depth zp of its sampled fragment, we reconstruct its view-space position and reproject it into the previous frame’s screen space using the prior view-projection
+matrix:
+
+p′ = (x′ , y ′ ) = πt−1 πt−1 (p, zp ) .
+(22)
+Neighborhood Moments in Color Space. To estimate
+the local radiance distribution, we evaluate the first and second moments of the current samples crq over a 3×3 window
+S1
+N3 (p) centered at p:
+1 X
+c rq ,
+C̄p =
+9
+q∈N3 (p)
+v
+u
+ 1 X
+
+u
+sp = tmax 0,
+c2rq − C̄p2 .
+9
+Algorithm 3 Temporal Resampling with Soft History Rejection
+(23)
+Require: Spatial estimate Ĉpt,spatial , current samples crq , depth zp ,
+history texture It−1 , camera projections πt , πt−1 , nominal
+history weight δ̄, parameters γstatic , γmot , v0 , emin
+Ensure: Filtered radiance Ĉpt
+// 1. Backward Reprojection
+
+1: p′ ← πt−1 πt−1 (p, zp )
+2: if p′ outside viewport then return Ĉpt,spatial
+3: v ← ∥p − p′ ∥2
+▷ Velocity magnitude in pixels
+4: Ĉpt−1
+← S AMPLE(It−1 , p′ )
+′
+// 2. Neighborhood
+Moments (channel-wise)
+P
+5: C̄p ← 19
+c
+rq
+3 (p)
+r q∈N
+
+
+P
+2
+2
+6: sp ← max 0, 91
+q∈N3 (p) crq − C̄p
+(24)
+q∈N3 (p)
+Moments are computed channel-wise in YCoCg space to
+decouple luminance variance from chromaticity. The confidence half-extents are:
+e = max(γsp , emin ) ,
+(25)
+where emin = (0.01, 0.005, 0.005) prevents degenerate
+zero-volume bounds on flat regions.
+// 3. Velocity-Adaptive Confidence Bounds
+
+7: γ ← lerp γstatic , γmot , min(1.0, v/v0 )
+8: e ← max(γsp , emin )
+Velocity-Adaptive Confidence Scaling (γ). Stationary
+regions require wider confidence bounds to preserve accumulated history and avoid premature rejection, whereas
+moving regions require tighter bounds to flush stale history
+across disocclusions. Following established real-time practice [36], we dynamically scale γ with screen velocity v:
+
+
+
+v
+,
+(26)
+γ = lerp γstatic , γmot , min 1,
+v0
+// 4. Normalized Discrepancy & Soft Rejection
+9: d ← Ĉpt−1
+− C̄p
+′
+
+10: m ← max |dY /eY |, |dCo /eCo |, |dCg /eCg |
+11: if m > 1.0 then
+12:
+ρ ← 1.0/m
+▷ Retention factor
+13:
+δpt ← ρ δ̄
+▷ Attenuate history weight
+14: else
+15:
+δpt ← δ̄
+▷ Inlier sample
+16: end if
+where lerp(a, b, θ) = (1 − θ) a + θ b, γstatic = 4.0 covers 99.99% of a normal distribution on stationary surfaces,
+γmot = 1.0 tightens the rejection envelope under movement, and v0 = 4.0 px is the velocity threshold.
+// 5. Temporal Blend
+17: Ĉpt ← δpt Ĉpt−1
++ (1 − δpt ) Ĉpt,spatial
+′
+18: return Ĉpt
+Statistical Distance and Soft History Blending. Given
+the discrepancy vector d = Ĉpt−1
+− C̄p , we compute its L∞
+′
+distance from the neighborhood mean, normalized by the
+confidence half-extents so that m = 1 on the boundary of
+the confidence box:
+
+
+dY
+dCo
+dCg
+m = max
+,
+,
+.
+(27)
+eY
+eCo
+eCg
+9. Additional Experiments
+9.1. Effects of Lvar
+In this section, we examine the impact of Lvar on the trained
+Gaussian model.
+• Opacity: The results from Fig. 11 show that Lvar naturally acts as a binarization penalty on opacity, pushing
+Gaussians towards either full opacity or full transparency.
+When m > 1, the historical sample is an outlier. Rather
+than projecting Ĉpt−1
+onto the box boundary along d/m
+′
+(which biases color ratios), we compute a continuous retention factor ρ = 1/m ∈ (0, 1) and attenuate the history
+weight as in Eq. (21):
+(
+δ̄
+if m ≤ 1 ,
+t
+δp =
+(28)
+ρ δ̄ if m > 1 ,
+• Scale: Increasing the effect of λvar shifts the size distribution shown in Fig. 12 towards smaller Gaussians. At the
+same time, we observe an increase in very large Gaussians
+for high values of λvar .
+• Image Quality: High values of λvar restrict the optimizer’s ability to use blending for approximating certain
+view-dependent effects and compensating for inconsistencies in the input images. Figure 13 shows a comparison of rendered images on models trained with varying
+strength of Lvar . For small values of λvar , the difference
+is barely noticeable, while for high values a loss of fine
+details and general blurriness can be observed.
+• Color: As shown in Fig. 15, Lvar suppresses outliers in
+with nominal history weight δ̄ = 0.70, i.e., the new spatial
+estimate receives a nominal weight of 1 − δ̄ = 0.30. The final temporal radiance is obtained by blending the unclipped
+historical color directly, which is Eq. (20) with the history
+read at p′ (Sec. 4.3):
+Ĉpt = δpt Ĉpt−1
++ (1 − δpt ) Ĉpt,spatial .
+′
+(29)
+Algorithm 3 summarizes the complete procedure.
+S2
+9.2. Additional Quality Metrics
+Figures 17 to 19 contain additional quality metrics corresponding to the evaluations from Figs. 5a, 6 and 8, respectively.
+9.3. Pareto Analysis
+The parameter K in our spatial reuse component represents specific trade-offs between fast and exact convergence. Each combination of sample count and K yields a
+specific image quality in a certain amount of sampling time.
+To evaluate the trade-off, we find the Pareto-optimal combinations of K and sample count, i.e., those combinations that
+produce a specific image quality (measured across different
+metrics) in the shortest rendering time. Figure 21 compares
+the quality/time trade-off against standard StochasticSplats
+(our Vulkan reimplementation) with and without a blur kernel. StochasticSplats has the fastest rendering time, but is
+immediately overtaken in quality by the noise reduction enabled by using a Gaussian blur. Initially, the blur kernel
+wins out due to its low overhead, but all quality metrics
+agree that after 5 samples its quality is superseded by spatial reuse with a small buffer. At this point, the more accurate convergence of the spatial reuse weights overcomes
+the small performance overhead to achieve optimal quality.
+With more time to render, increasingly large buffer sizes become optimal, which provide better convergence at higher
+performance cost, until the unbiasedness of pure stochastic rendering catches up in quality, which happens for L1 at
+136 samples and for LPIPS at 33. In PSNR and SSIM, a
+large reuse buffer remains dominant for 256+ samples. In
+summary, the optimal value for buffer size scales with the
+available amount of time for the image to converge. For
+practical rendering, a buffer size of K ∈ [4, 8] is a reasonable choice, representing the optimal configuration between
+∼ 5–50 samples.
+The heatmaps in Fig. 20 show a more detailed view of the
+relationship between buffer size, sample count, and quality:
+as the number of samples increases, the isolines become increasingly curved, meaning that small sample buffers require rapidly increasing amounts of samples to match the
+quality of larger buffer sizes. For instance, with |N | = 4,
+256 samples are required with K = 1 to achieve the same
+PSNR quality as just 31 samples with K = 16. We also
+find that except for very low sample counts, a smaller kernel size achieves better quality overall, validating our design
+decision to choose |N | = 4.
+Figure 11. Log-scale histogram of primitive counts with respect
+to activated opacity over all Mip-NeRF 360 scenes trained with
+various values of λvar .
+Figure 12. Histogram of primitive counts with respect to Gaussian
+size (log-scale) over all Mip-NeRF 360 scenes trained with various
+values of λvar .
+RGB space. In particular, it reduces the number of bright
+primitives, which are often floater artifacts.
+• Blending: We render test images using vanilla 3DGS
+for all scenes of the Mip-NeRF 360 dataset and store for
+each pixel the number of Gaussians that are blended before early exit, the expected transmittance, and the expected number of occluders on StochasticSplats samples.
+The results in Fig. 16 show that increasing λvar leads to
+more Gaussians being blended for each pixel, but also simultaneously decreases the expected number of occluders and expected transmittance. This indicates that the
+sampling distribution Px,y is shifted towards the camera.
+Whereas standard 3DGS often represents surfaces as a set
+of opaque Gaussians and a set of semi-transparent “fuzz”
+on top to add details, the variance loss shifts the radiance
+mass forward along the ray and thereby greatly reduces
+the number and opacity of occluders for importancesampled Gaussians.
+• Depth: The variance regularizer not only reduces variance in color, but also in depth, as illustrated in Fig. 14.
+For more discussion of the geometric effects of Lvar , we
+refer to Radl et al. [23].
+9.4. 8-Neighborhood Resampling
+Spatial resampling weights may be used on neighborhoods
+of arbitrary size. In Fig. 22, we compare quality metrics
+between using a cross kernel (|N | = 4) and a box kernel (|N | = 8) for spatial reuse. While the larger kernel
+achieves faster convergence for the first 10 samples because
+S3
+(a) λvar = 0
+(b) λvar = 1
+(c) λvar = 2
+(d) λvar = 3
+(e) λvar = 4
+Figure 13. Test view of the bicycle scene, rendered deterministically with models trained with varying λvar .
+Bicycle
+(a) λvar = 0
+(b) λvar = 1
+Kitchen
+Figure 14. Increasing λvar also reduces variance in stochastically
+rendered depth. Images were rendered at 1 sample per pixel.
+the larger sample pool is more effective at reducing variance, it also introduces additional bias, which leads to suboptimal convergence. As larger kernels are also associated
+with increased performance overhead, we find increasing
+the kernel size beyond a four-neighborhood to be an overall
+poor trade-off.
+(c) λvar = 0
+10. Bias
+(d) λvar = 1
+Figure 15. Distribution of primitive base colors in RGB space for
+scenes of Mip-NeRF 360 trained with and without variance loss.
+In this section, we examine the sources of bias that stochastic sampling and spatial resampling introduce in comparison to standard 3DGS.
+boring tile, which would not use this Gaussian in deterministic 3DGS rendering. However, this also implies that the
+maximal α value of that Gaussian in the neighboring tile
+1
+is less than 256
+, so that its sampling probability there is
+1
+Px,y (rn ) ≤ αrn (x, y) < 256
+, which bounds its expected
+contribution. Because these cases are rare and are guaranteed to introduce only negligible bias, it is not worth the
+overhead to explicitly check for them.
+Self-Normalized
+Importance
+Sampling. Using
+as a normalization factor introduces bias for finite samples, because the denominator is a
+random variable. This bias decreases as O(1/N ) with the
+number of samples, so the estimator is consistent. As the
+evaluation demonstrates, the achieved reduction in variance
+far outweighs the impact of the introduced bias.
+1
+n∈N (x,y) wn→x,y (rn )
+P
+Early Exit. In standard 3DGS, the blending procedure
+terminates once transmittance falls below a certain threshold (typically 0.0001) and all subsequent Gaussians are
+skipped. While this is not the case in StochasticSplats or
+Gaussian Point Splatting (GPS), the maximal difference
+caused is strictly bounded by the threshold value and is thus
+Tile-Based Splatting. In Eq. (12), we make the assumption that G(x, y) = G(n) for all n ∈ N (x, y). In tile-based
+rasterization, this holds as long as n is in the same 16 × 16
+tile as (x, y). Otherwise, it is possible for a Gaussian to be
+sampled on a border pixel and then propagated to a neighS4
+(a) Number of Gaussians blended per pixel before early exit.
+(b) Expected transmittance of sampled Gaussian.
+(c) Expected number of occluding primitives
+for a sampled Gaussian.
+Figure 16. Effect of Lvar on alpha-blending.
+0.90
+0
+5
+5
+55
+0
+0
+0
+0.80
+0
+0.75
+0.70
+0.00
+10 3
+55
+0.05
+5
+0.040
+0.10
+Variance
+5
+0.030
+0.015
+0.00
+55
+55
+0 0
+0.05
+60
+80
+100
+20
+40
+60
+80
+100
+Sample Count
+0.35
+0.30
+0.25
+0.20
+0.15
+00
+0.10
+Variance
+40
+0.40
+0.025
+0.020
+20
+0.45
+0.15
+bicycle
+bonsai 0
+counter
+kitchen
+0
+room
+stump
+0.035
+L1
+10 2
+0
+LPIPS (Lower is better)
+SSIM
+0.85
+bicycle
+bonsai
+counter
+kitchen
+room
+stump
+L1 Error (Lower is better)
+0.95
+Sample Count
+Colormap for K values with = 4
+0.15
+K=0
+Figure 17. Comparison of quality metrics and variance for trained
+models with varying λvar on scenes from the Mip-NeRF 360
+dataset.
+K=1
+K=2
+K=4
+K=8
+K=16
+K=32
+Figure 18. Average residual of L1 score and values for LPIPS on
+the Mip-NeRF 360 dataset trained with λvar = 1, comparing static
+blur kernels against spatial reuse weights with varying K. Logscale is used for L1 to visualize small differences.
+negligible.
+the target pixel, whereas Algorithm 2 evaluates it only over
+the at most K deduplicated Gaussians stored in the buffer
+Kn of the source pixel. An occluder that has not been sam-
+Finite History Buffer. Equation (13) requires the occlusion product over all Gaussians in front of the sample rn at
+S5
+Excess Quality Factor (L1)
+ting produces stochastic OIT samples almost identical to
+StochasticSplats and achieves very similar base quality. As
+such, all of our components can be used with GPS as a
+“sampling backbone”, while also benefiting from its scalability. Figure 23 shows a comparison between StochasticSplats, GPS, and our spatial reuse applied to GPS samples.
+Just as with StochasticSplats, sample reuse leads to significantly faster convergence.
+Excess Quality Factor
+3.0
+2.5
+2.0
+1.5
+1.0
+0.5
+0.0
+0.5
+12. Spatio-Temporal Blue Noise
+0
+20
+40
+60
+Sample Count
+80
+100
+Figure 24 compares white-noise and spatio-temporal bluenoise sampling of the fragment thresholds ui (Sec. 4.3).
+Colormap for K values with = 4
+K=0
+K=1
+K=2
+K=4
+K=8
+K=16
+K=32
+13. Gradients of the Color Variance Loss
+Figure 19. Excess Quality Factor on the test views of the MipNeRF 360 dataset for the L1 quality metric.
+The color variance loss Lvar represents the average weighted
+RGB variance for each pixel:
+pled at the pixel within the buffer’s lifetime is missing from
+the product; omitting its factor okn→x,y amounts to assuming that its alpha value αk is identical at (x, y) and at n. The
+resulting weight error is therefore largest for neighbor samples whose occluders differ strongly between the two pixels, i.e., at depth discontinuities and along the silhouettes of
+thin structures, and it decreases with K (Fig. 6); as K → ∞
+the stored set contains every occluder with probability approaching one and the weights become exact (Sec. 4.2). Because the buffer is deduplicated, frequently sampled foreground primitives do not evict rare occluders, so the missing
+factors are predominantly those of low-opacity Gaussians
+with okn→x,y ≈ 1.
+Lvar =
+W H
+1 XX X
+gt 2
+Px,y (i) · ∥ci − Cx,y
+∥ .
+H · W x=1 y=1
+i∈G(x,y)
+(30)
+We
+derive
+the
+gradients
+of
+the
+per-pixel
+term
+L
+x,y =
+P
+gt 2
+∥
+;
+the
+gradient
+of
+L
+P
+(i)
+∥c
+−
+C
+var is their
+i
+x,y
+i∈G(x,y) x,y
+average over all pixels. The gradients with respect to viewdependent color can be computed using the chain rule (similar to the derivation in [23]):
+∂Lx,y
+gt
+= 2Px,y (i)(ci − Cx,y
+).
+∂ci
+(31)
+We can compute the gradient with regard to αi (x, y) as
+follows, with Gaussians indexed in depth order as in deterministic training:
+11. Gaussian Point Splatting Evaluation
+The stochastic rendering approach in Gaussian Point Splatting [24] replaces traditional alpha-blended rasterization
+with a massively parallel stochastic point-sampling technique. Instead of sorting and sequentially evaluating semitransparent Gaussians, the renderer samples opaque, pixelsized points and splats them directly into a 64-bit atomic
+depth buffer. Because threads sample points independently,
+multiple points from the same Gaussian can collide on
+the same pixel, which would normally reduce the effective
+opacity. To counteract this, the method treats the sampling
+as a Poisson point process and dynamically sets the number
+of points to sample, ng , using a Poisson distribution with
+a rate parameter Λ. The authors derive a corrected proba1
+bility density function, f (q) = − ΛA
+ln(1 − α(q)), which
+concentrates more points toward the center of the Gaussian.
+This mathematical correction ensures that the probability of
+splatting exactly zero points into a subpixel of area A is precisely 1 − α(q), perfectly preserving the original Gaussian’s
+intended opacity while achieving high scalability.
+The rendering procedure of Gaussian Point Splat-
+∂Lx,y
+gt 2
+= ∥ci − Cx,y
+∥ ,
+∂Px,y (i)
+(32)
+i−1
+Y
+∂Px,y (i)
+=
+(1 − αj (x, y)) = Ti (x, y) ,
+∂αi (x, y) j=1
+(33)
+∂Lx,y
+∂Lx,y
+∂Px,y (i)
+=
+·
+∂αi (x, y)
+∂Px,y (i) ∂αi (x, y)
+(34)
+gt 2
+= ∥ci − Cx,y
+∥ Ti (x, y) .
+This gradient does not account for the effect of αi (x, y)
+on subsequent Gaussians j > i, which include (1 −
+αi (x, y)) in their weight Px,y (j). Because αi (x, y) < 1
+∂P
+(j)
+Px,y (j)
+= − 1−α
+holds, giving, with j
+by definition, ∂αx,y
+i (x,y)
+i (x,y)
+ranging over all Gaussians in G(x, y) behind i:
+
+
+X
+Px,y (j)
+gt 2
+∥cj − Cx,y
+∥ −
+1 − αi (x, y)
+j>i
+(35)
+X
+1
+gt 2
+=−
+Px,y (j) ∥cj − Cx,y
+∥ .
+1 − αi (x, y) j>i
+S6
+Number of Samples
+PSNR (dB)
+0.76
+0.74
+32
+32
+0.85
+0.84
+SSIM
+0.82
+0.80
+0.84
+Number of Samples
+0.78
+225
+193
+161
+129
+97
+65
+33
+0.84
+1 12 4 8
+0.8
+5
+0.85
+0.80
+SSIM
+Number of Samples
+PSNR (dB)
+16
+0.85
+0.82
+28.0
+27.8
+27.6
+27.4
+27.2
+27.0
+26.8
+26.6
+27.72
+0.85
+5
+0.84
+0.85
+Number of Samples
+07
+28.
+0.85
+Buffer Size (K)
+08
+Buffer Size (K)
+0.84
+0.8
+0.85
+0.85
+225
+193
+161
+129
+97
+65
+0
+33 .84
+0.84
+1 12 4 8 0.83
+16
+0.85
+28.
+28.04
+Buffer Size (K)
+32
+28.06
+16
+28.00
+28.09
+27.82
+225
+193
+161
+129
+97
+65
+33
+1 12 4 8
+27.94
+28.06
+28.00
+27.75
+27.50
+27.25
+27.00
+26.75
+26.50
+26.25
+27.85
+1
+28.1
+28.10
+28.01
+225
+193
+161
+129
+97
+65
+33
+27.94
+1 12 4 8
+28.12 28.12
+0.78
+16
+32
+Buffer Size (K)
+(a) |N | = 4
+(b) |N | = 8
+Figure 20. Heatmaps of quality metrics over sample counts and buffer sizes on Mip-NeRF 360.
+The final gradient for αi (x, y) is then:
+spatio-temporal reuse estimator
+P
+P
+∂Lx,y
+gt 2
+= ∥ci − Cx,y
+∥ Ti (x, y)
+∂αi (x, y)
+X
+1
+gt 2
+−
+Px,y (j) ∥cj − Cx,y
+∥ .
+1 − αi (x, y) j>i
+t
+Ĉx,y
+=
+n∈N (x,y)
+X
+t̃→t
+t̃
+t̃
+t̃∈T wn→x,y (rn ) · crn
+X
+t̃→t
+wn→x,y
+(rnt̃ )
+(18)
+n∈N (x,y) t̃∈T
+|
+(36)
+{z
+t
+Dx,y
+}
+can be expressed as an exponential moving average filter:
+14. Spatio-Temporal Resampling
+t
+Ĉx,y
+=
+14.1. Proofs
+Here we include the full proof for our main theoretical result.
+t
+t−1
+δx,y
+· Dx,y
+t−1
+· Ĉx,y
+t
+Dx,y
+P
+t
+t
+n∈N (x,y) wn→x,y (rn )
+t,spatial
++
+· Ĉx,y
+.
+t
+Dx,y
+(19)
+Proof. For brevity, write T t for the set of frames contributing at time t, so that T t = T t−1 ∪ {t}, write ct̃n = crnt̃ , and
+Theorem 1. Under the assumption of a per-frame temporal
+discount shared by all history samples (cf. Eq. (17)), the
+omit the sample arguments (rnt̃ ) of the weights. Define the
+S7
+Pareto-Optimal Configurations (PSNR)
+(Measured K values only (Averaged across 7 scenes))
+250
+250
+28
+PSNR (Higher is better)
+Pareto-Optimal Configurations (L1)
+(Measured K values only (Averaged across 7 scenes))
+0.0450
+200
+0.0375
+L1
+Sample Count
+0.0400
+150
+0.0350
+100
+Sample Count
+0.0425
+27
+150
+26
+PSNR (dB)
+200
+100
+25
+0.0325
+50
+50
+0.0300
+24
+0.0275
+0
+2
+3
+4
+6
+Buffer Size (K)
+8
+10
+Stoch
+Blur 1 2 3 4
+12
+250
+8 10 12 14 16
+Buffer Size (K)
+22
+28
+32
+60
+0.45
+0.80
+50
+0.40
+0.75
+40
+0.35
+30
+0.30
+0.70
+SSIM
+150
+100
+Sample Count
+200
+Sample Count
+6
+Pareto-Optimal Configurations (LPIPS)
+(Measured K values only (Averaged across 7 scenes))
+Pareto-Optimal Configurations (SSIM)
+(Measured K values only (Averaged across 7 scenes))
+0.65
+20
+0.60
+10
+50
+0
+SSIM (Higher is better)
+1
+0.25
+0.20
+0
+Stoch
+Blur 1 2 3 4
+6
+8 10 12 14 16
+Buffer Size (K)
+22
+28
+100
+0
+LPIPS
+Stoch Blur
+10 1
+32
+StochBlur
+1
+2
+3
+4
+6
+Buffer Size (K)
+8
+10
+12
+14
+10
+20
+10
+20
+30
+40
+50
+60
+30
+40
+50
+60
+K=16
+K=32
+K=16
+K=32
+Sample Count
+10 2
+10 1
+Figure 21. Pareto-optimal combinations of sample count and K
+for L1, PSNR, SSIM, and LPIPS. Stoch denotes stochastic rendering without spatial reuse and blur denotes stochastic rendering
+with a Gaussian cross-blur kernel.
+Sample Count
+discounted color mass:
+t
+Sx,y
+=
+X
+t
+X Y
+n∈N (x,y) t̃∈T t
+Colormap for K values with = 4
+
+u
+t̃
+δx,y
+wn→x,y
+ct̃n ,
+u=t̃+1
+K=0
+t
+t
+=
+as defined, Eq. (17) yields Ĉx,y
+so that, with Dx,y
+t
+t
+Sx,y /Dx,y . Splitting off the term t̃ = t (whose product
+t
+is empty and equals one) and factoring δx,y
+out of every
+remaining product yields the recursions:
+X
+t
+t
+t−1
+t
+Sx,y
+= δx,y
+Sx,y
++
+wn→x,y
+ctn ,
+X
+K=2
+K=4
+K=8
+Colormap for K values with = 8
+K=0
+K=1
+K=2
+K=4
+K=8
+Figure 22. Average residual of test quality metrics on the MipNeRF 360 dataset trained with λvar = 1, comparing spatial reuse
+of 4- and 8-neighborhood kernels with varying K. Log-scale is
+used to visualize small differences.
+n∈N (x,y)
+t
+t
+t−1
+Dx,y
+= δx,y
+Dx,y
++
+K=1
+t
+wn→x,y
+.
+n∈N (x,y)
+t
+t−1
+Dividing the first equation by Dx,y
+and using Sx,y
+=
+t−1 t−1
+Dx,y Ĉx,y :
+the combination is convex. For a moving camera, the same
+recursion is applied along the motion trajectory (Sec. 4.3).
+t
+t−1
+δx,y
+Dx,y
+t−1
+Ĉx,y
+t
+Dx,y
+P t
+P t
+t
+n wn→x,y
+n wn→x,y cn
+P
++
+·
+t
+t
+Dx,y
+n wn→x,y
+P
+t
+t−1
+t
+δx,y
+Dx,y
+wn→x,y
+t−1
+t,spatial
+=
+Ĉx,y
++ n t
+Ĉx,y
+,
+t
+Dx,y
+Dx,y
+t
+Ĉx,y
+=
+14.2. Additional Ablations
+where the last factor is Eq. (9) evaluated in frame t. The
+two coefficients are non-negative
+recursion for
+P t and,by the
+t
+t
+t−1
+t
+Dx,y
+, sum to δx,y
+Dx,y
++ n wn→x,y
+/Dx,y
+= 1, proving
+S8
+Table 3. Per-scene temporal consistency tPSNR (dB). Evaluated on 7 Mip-NeRF 360 scenes (3 trajectories each).
+Configuration
+Bicycle
+Bonsai
+Counter
+Garden
+Kitchen
+Room
+Stump
+Overall Mean
+Standard 3DGS (λvar = 0)
+No Reuse
+Spatial Reuse
+Temporal Reuse
+Spatio-Temporal Reuse
+13.230
+19.140
+19.767
+23.757
+16.230
+23.077
+23.020
+28.140
+15.780
+22.643
+22.427
+27.963
+13.343
+19.080
+20.390
+24.650
+15.610
+22.377
+22.857
+28.377
+18.183
+25.083
+25.757
+31.513
+14.267
+20.640
+21.210
+25.913
+15.235
+21.720
+22.204
+27.188
+Variance Regularized (λvar = 1)
+No Reuse
+20.767
+Spatial Reuse
+26.007
+Temporal Reuse
+26.473
+Spatio-Temporal Reuse
+28.540
+23.770
+30.070
+30.263
+34.067
+23.210
+29.573
+29.563
+33.687
+21.587
+26.507
+28.063
+30.070
+22.580
+28.983
+29.643
+33.830
+24.433
+31.077
+31.933
+36.533
+20.617
+26.657
+26.917
+30.417
+22.423
+28.410
+28.980
+32.449
+Table 4. Per-scene PSNR (dB). Evaluated on 7 Mip-NeRF 360 scenes (3 trajectories each).
+Configuration
+Bicycle
+Bonsai
+Counter
+Garden
+Kitchen
+Room
+Stump
+Overall Mean
+Standard 3DGS (λvar = 0)
+No Reuse
+Spatial Reuse
+Temporal Reuse
+Spatio-Temporal Reuse
+16.340
+22.217
+22.727
+26.453
+19.307
+26.120
+25.980
+30.837
+18.880
+25.697
+25.590
+30.867
+16.397
+22.063
+23.410
+27.440
+18.750
+25.490
+25.957
+31.287
+21.313
+28.157
+28.803
+34.273
+17.367
+23.673
+24.123
+28.463
+18.336
+24.774
+25.227
+29.946
+Variance Regularized (λvar = 1)
+No Reuse
+23.863
+Spatial Reuse
+29.043
+Temporal Reuse
+29.337
+Spatio-Temporal Reuse
+31.293
+26.877
+33.070
+33.220
+36.573
+26.333
+32.613
+32.690
+36.450
+24.637
+29.443
+31.013
+32.787
+25.767
+32.043
+32.717
+36.557
+27.730
+34.187
+34.993
+39.063
+23.720
+29.657
+29.703
+32.873
+25.561
+31.437
+31.953
+35.085
+Table 5. Per-scene SSIM ↑. Evaluated on 7 Mip-NeRF 360 scenes (3 trajectories each).
+Configuration
+Bicycle
+Bonsai
+Counter
+Garden
+Kitchen
+Room
+Stump
+Overall Mean
+Standard 3DGS (λvar = 0)
+No Reuse
+Spatial Reuse
+Temporal Reuse
+Spatio-Temporal Reuse
+0.272
+0.538
+0.579
+0.767
+0.293
+0.612
+0.625
+0.832
+0.301
+0.607
+0.614
+0.826
+0.276
+0.538
+0.609
+0.791
+0.297
+0.601
+0.640
+0.843
+0.344
+0.646
+0.684
+0.872
+0.265
+0.559
+0.582
+0.785
+0.293
+0.586
+0.619
+0.817
+Variance Regularized (λvar = 1)
+No Reuse
+0.598
+Spatial Reuse
+0.825
+Temporal Reuse
+0.849
+Spatio-Temporal Reuse
+0.915
+0.664
+0.887
+0.896
+0.961
+0.628
+0.864
+0.865
+0.948
+0.640
+0.838
+0.880
+0.926
+0.635
+0.856
+0.879
+0.951
+0.615
+0.855
+0.874
+0.952
+0.513
+0.792
+0.799
+0.904
+0.613
+0.845
+0.863
+0.937
+S9
+Table 6. Per-scene LPIPS ↓. Evaluated on 7 Mip-NeRF 360 scenes (3 trajectories each).
+Configuration
+Bicycle
+Bonsai
+Counter
+Garden
+Kitchen
+Room
+Stump
+Overall Mean
+Standard 3DGS (λvar = 0)
+No Reuse
+Spatial Reuse
+Temporal Reuse
+Spatio-Temporal Reuse
+0.636
+0.478
+0.504
+0.363
+0.693
+0.531
+0.569
+0.420
+0.690
+0.518
+0.542
+0.380
+0.584
+0.417
+0.421
+0.282
+0.677
+0.499
+0.514
+0.331
+0.687
+0.523
+0.538
+0.382
+0.701
+0.522
+0.564
+0.398
+0.667
+0.498
+0.522
+0.365
+Variance Regularized (λvar = 1)
+No Reuse
+0.498
+Spatial Reuse
+0.322
+Temporal Reuse
+0.330
+Spatio-Temporal Reuse
+0.204
+0.552
+0.372
+0.392
+0.209
+0.534
+0.355
+0.373
+0.208
+0.424
+0.252
+0.245
+0.147
+0.513
+0.320
+0.319
+0.178
+0.562
+0.398
+0.403
+0.243
+0.591
+0.400
+0.433
+0.270
+0.525
+0.345
+0.357
+0.209
+S10
+PSNR (Higher is better)
+28
+27
+26
+25
+24
+10
+20
+30
+40
+Sample Count
+50
+60
+SSIM (Higher is better)
+0.85
+0.80
+(a) Uniform random noise (PCG32)
+0.75
+0.70
+0.65
+0.60
+0.55
+10
+20
+30
+40
+Sample Count
+50
+60
+(b) Spatio-temporal Blue Noise (128 × 128 × 64)
+Figure 24. Comparison of uniform random noise sampling
+(PCG32) against per-primitive spatio-temporal blue noise sampling.
+Figure 23. Average quality comparison of StochasticSplats and
+Gaussian Point Splatting with and without spatial reuse on the
+Mip-NeRF 360 dataset. Models were trained with λvar = 1.
+S11

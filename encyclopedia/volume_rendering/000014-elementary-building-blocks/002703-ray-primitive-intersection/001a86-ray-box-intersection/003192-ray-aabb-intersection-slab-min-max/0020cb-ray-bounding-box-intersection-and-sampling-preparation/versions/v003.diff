@@ -1,0 +1,64 @@
+--- v002.md
++++ v003.md
+@@ -1,5 +1,5 @@
+ # Ray-Bounding Box Intersection and Sampling Preparation
+ 
+-Also called: Ray-Bounding Box Intersection and Sampling, Coarse Geometry Hit Check
++Also called: Coarse Geometry Hit Check, DVGO Ray Sampling, Ray-Bounding Box Intersection and Sampling
+ 
+ ## Overview
+@@ -39,8 +39,8 @@
+ 3. **Compute Intersection Bounds ($t_{min}, t_{max}$):** Calculate intermediate intersection values for max and min bounds: $ax = (xyz_{max}[0] - rays\_o[0]) / vec[0]$, $bx = (xyz_{min}[0] - rays\_o[0]) / vec[0]$, and similarly for $y, z$ [S3, unofficial]. Compute $t_{min} = \text{clamp}(\max(\min(ax, bx), \min(ay, by), \min(az, bz)), near, far)$ and $t_{max} = \text{clamp}(\min(\max(ax, bx), \max(ay, by), \max(az, bz)), near, far)$ [S3, unofficial]. If $t_{min} > t_{max}$, the ray misses the box [S3, unofficial].
+ 4. **Compute Number of Samples ($n_{samples}$):** Calculate the physical step distance: $stepdist = stepsize \times voxel\_size$ [S3, unofficial]. Compute the ray direction norm: $r_{norm} = \sqrt{rays\_d[0]^2 + rays\_d[1]^2 + rays\_d[2]^2}$ [S3, unofficial]. The number of samples is $n_{samples} = \max(\lceil (t_{max} - t_{min}) \times r_{norm} / stepdist \rceil, 1.0)$ [S3, unofficial]. Store these in `N_steps`.
+-5. **Generate Sample Positions ($t_{samples}$):** Create normalized positions in $[0, 1]$ using `linspace` with length $n_{samples}$, then map them to the clamped interval: $t_{samples} = t_{min} + t_{normalized} \times (t_{max} - t_{min})$ [S1, unofficial]. If randomization is enabled, add uniform jitter: $jitter = \text{torch.rand\_like}(t_{samples}) \times bin\_size$, where $bin\_size = (t_{max} - t_{min}) / n_{samples}$ [S1, unofficial].
++5. **Generate Sample Positions ($t_{samples}$):** Create normalized positions in $[0, 1]$ using `linspace` with length $n_{samples}$, then map them to the clamped interval: $t_{samples} = t_{min} + t_{normalized} \times (t_{max} - t_{min})$ [S3, unofficial]. If randomization is enabled, add uniform jitter: $jitter = \text{torch.rand\_like}(t_{samples}) \times bin\_size$, where $bin\_size = (t_{max} - t_{min}) / n_{samples}$ [S3, unofficial].
+ 6. **Compute Ray Start and Normalized Direction:** $rays_{start} = rays\_o + rays\_d \times t_{min}$ and $rays_{dir} = rays\_d / r_{norm}$ [S3, unofficial].
+-7. **Flatten and Index Points:** Calculate $total\_len = \sum N_{steps}$ [S3, unofficial]. Compute cumulative sum $N_{steps\_cumsum}$. Initialize `ray_id` of size $total\_len$ with zeros. Set `ray_id[N_steps_cumsum[i-1]] = 1` for $i > 0$, then perform an in-place cumulative sum to assign ray indices [S3, unofficial]. Compute `step_id`: for index $idx$, let $rid = ray\_id[idx]$. Then $step\_id[idx] = idx - (N_{steps\_cumsum}[rid-1] \text{ if } rid > 0 \text{ else } 0)$ [S3, unofficial].
+-8. **Generate Query Points:** For each index $idx$, let $i_{ray} = ray\_id[idx]$ and $i_{step} = step\_id[idx]$. Compute distance $dist = stepdist \times i_{step}$. The point is $p = rays_{start}[i_{ray}] + rays_{dir}[i_{ray}] \times dist$ [S3, unofficial].
++7. **Flatten and Index Points:** Calculate $total\_len = \sum N_{steps}$ [S3, unofficial]. Compute cumulative sum $N_{steps\_cumsum}$ [S3, unofficial]. Initialize `ray_id` of size $total\_len$ with zeros [S3, unofficial]. Set `ray_id[N_steps_cumsum[i-1]] = 1` for $i > 0$, then perform an in-place cumulative sum to assign ray indices [S3, unofficial]. Compute `step_id`: for index $idx$, let $rid = ray\_id[idx]$ [S3, unofficial]. Then $step\_id[idx] = idx - (N_{steps\_cumsum}[rid-1] \text{ if } rid > 0 \text{ else } 0)$ [S3, unofficial].
++8. **Generate Query Points:** For each index $idx$, let $i_{ray} = ray\_id[idx]$ and $i_{step} = step\_id[idx]$ [S3, unofficial]. Compute distance $dist = stepdist \times i_{step}$ [S3, unofficial]. The point is $p = rays_{start}[i_{ray}] + rays_{dir}[i_{ray}] \times dist$ [S3, unofficial].
+ 9. **Bounding Box Culling Mask:** Check if the generated point lies outside the bounding box: $mask_{outbbox}[idx] = (xyz_{min}[0] > p[0]) \lor (xyz_{min}[1] > p[1]) \lor (xyz_{min}[2] > p[2]) \lor (xyz_{max}[0] < p[0]) \lor (xyz_{max}[1] < p[1]) \lor (xyz_{max}[2] < p[2])$ [S3, unofficial].
+ 10. **Hit Detection:** Initialize a `hit` tensor of zeros (bool) with length $N$ [S3, unofficial]. A ray is considered to have hit if $t_{min} \le t_{max}$ after clamping [S3, unofficial].
+@@ -52,5 +52,5 @@
+ 
+ **Parameters:**
+-- `near`, `far`: Clipping planes for $t_{min}$ and $t_{max}$ [S1, unofficial]. `far` is often set to $10^9$ to prevent rays from stopping early when hitting the scene bounding box [S3, unofficial].
++- `near`, `far`: Clipping planes for $t_{min}$ and $t_{max}$ [S3, unofficial]. `far` is often set to $10^9$ to prevent rays from stopping early when hitting the scene bounding box [S3, unofficial].
+ - `stepdist`: The fixed distance between consecutive sample points along a ray. Typical value not specified in the sources, used as a float constant [S3, unofficial].
+ 
+@@ -78,5 +78,6 @@
+     n_samples = torch.clamp(torch.ceil((t_max - t_min) * r_norm / stepdist), min=1.0)
+     # 5. Sample positions
+-    t_norm = torch.linspace(0, 1, steps=int(n_samples.max()), device=rays_o.device)
++    max_samples = int(n_samples.max())
++    t_norm = torch.linspace(0, 1, steps=max_samples, device=rays_o.device)
+     t_samples = t_min[:, None] + t_norm[None, :] * (t_max[:, None] - t_min[:, None])
+     if rng is not None:
+@@ -109,5 +110,5 @@
+ 
+ ### NDC Bounding Box Computation
+-Computes the bounding box in Normalized Device Coordinates (NDC) space from a set of rays. It calculates the minimum and maximum of ray origins and endpoints in NDC space and returns the stacked min/max bounds [S4, unofficial].
++Computes the bounding box in Normalized Device Coordinates (NDC) space from a set of rays [S4, unofficial]. It calculates the minimum and maximum of ray origins and endpoints in NDC space and returns the stacked min/max bounds [S4, unofficial].
+ 
+ ### [Clipping Distance Computation via Volume Corners](2622-clipping-distance-computation-via-volume-corners.md)
+@@ -115,14 +116,14 @@
+ 
+ ## Operating characteristics
+-- **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the average number of samples per ray. The intersection calculation is $O(N)$, and point generation is $O(N \cdot S)$.
+-- **Memory Complexity:** $O(N \cdot S)$ to store the generated points, masks, and indices.
++- **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of rays and $S$ is the average number of samples per ray [G]. The intersection calculation is $O(N)$, and point generation is $O(N \cdot S)$ [G].
++- **Memory Complexity:** $O(N \cdot S)$ to store the generated points, masks, and indices [G].
+ - **Performance:** The method is highly parallelizable and is typically implemented in CUDA for performance. Batching rays (e.g., 10,000 per batch) helps manage GPU memory usage [S3, unofficial].
+-- **Strengths:** Ensures samples are only generated within the valid scene volume, reducing unnecessary computations for empty space. Handles edge cases like zero-direction rays and near-far clipping robustly.
++- **Strengths:** Ensures samples are only generated within the valid scene volume, reducing unnecessary computations for empty space [S3, unofficial]. Handles edge cases like zero-direction rays and near-far clipping robustly [S3, unofficial].
+ - **Limitations:** The fixed step size may lead to aliasing if the step size is too large relative to the scene features. The method assumes an axis-aligned bounding box, which may not tightly fit rotated or irregular geometries [G].
+-- **When to Use:** When rendering volumetric data within a known bounding box, especially in coarse geometry search phases or when using fixed-step ray marching.
+-- **When Not to Use:** When the scene geometry is highly irregular and a tight bounding box is not available, or when adaptive step sizes are required for high-frequency details.
++- **When to Use:** When rendering volumetric data within a known bounding box, especially in coarse geometry search phases or when using fixed-step ray marching [S3, unofficial].
++- **When Not to Use:** When the scene geometry is highly irregular and a tight bounding box is not available, or when adaptive step sizes are required for high-frequency details [G].
+ 
+ ## Background
+-This method is a core component of differentiable volume rendering pipelines, particularly those based on Direct Volume Rendering (DVR) or Neural Radiance Fields (NeRF) with explicit bounding boxes. It is used in frameworks like DirectVoxGO [S1, unofficial] and FLASH [S2, unofficial] to efficiently sample the volume grid. The approach of computing ray-box intersections and then discretizing the intersection interval is a standard technique in computer graphics for ray tracing and volume rendering. The specific implementation details, such as handling zero-direction components and generating ray IDs for flattened arrays, are derived from practical implementations in PyTorch-based rendering engines [S3, unofficial].
++This method is a core component of differentiable volume rendering pipelines, particularly those based on Direct Volume Rendering (DVR) or Neural Radiance Fields (NeRF) with explicit bounding boxes [S3, unofficial]. It is used in frameworks like DirectVoxGO [S1, unofficial] and FLASH [S2, unofficial] to efficiently sample the volume grid. The specific implementation details, such as handling zero-direction components and generating ray IDs for flattened arrays, are derived from practical implementations in PyTorch-based rendering engines [S3, unofficial].
+ 
+ ## Sources

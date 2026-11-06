@@ -3,107 +3,91 @@
 Also called: Base Cloud Density Generation, Low-Frequency Cloud Density, SampleCloudDensity, Schneider's Cloud Noise
 
 ## Overview
-Cloud Density Sampling generates the base volumetric density of clouds by combining low-frequency 3D noise textures using a weighted sum (Fractal Brownian Motion, FBM) and remapping the result to control cloud shape and coverage [S1, unofficial]. It differs from its siblings by explicitly separating the generation of the base cloud structure (via low-frequency textures and height gradients) from high-frequency detail (via curl noise displacement and high-frequency textures) and by using a specific channel-weighted FBM from a single RGBA texture sample rather than procedural noise functions [S1, unofficial]. It builds on [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by providing the specific evaluation routine for the density field.
+Cloud Density Sampling generates the base volumetric density of clouds by combining low-frequency 3D noise textures using a weighted sum (Fractal Brownian Motion, FBM) and remapping the result to control cloud shape and coverage [S1, unofficial]. It solves the problem of creating spatially coherent, physically plausible cloud layers by explicitly separating vertical stratification (via height gradients) from horizontal structure (via noise and coverage masks). It differs from generic noise-based volume generation by integrating wind skew, time-based movement, and specific channel-weighted FBM calculations directly into the density evaluation step [S1, unofficial].
 
 ## How it works
-**Inputs:**
-- `samplepoint`: `vec3`, world or texture space coordinate for density evaluation [S1, unofficial].
-- `weather_data`: `vec4`, containing cloud coverage in the red channel (`weather_data.r`) [S1, unofficial].
-- `relativeHeight`: `float`, normalized height of the sample point within the atmosphere [S1, unofficial].
-- `iscCheap`: `bool`, if true, skips high-frequency sampling [S1, unofficial].
-- `wind_direction`: `vec3`, default `(1.0, 0.0, 0.0)` [S1, unofficial].
-- `cloud_speed`: `float`, default `10.0` [S1, unofficial].
-- `cloud_top_offset`: `float`, default `5.0` [S1, unofficial].
-- `Time`: `float`, global time variable [S1, unofficial].
-- `lowFrequencyTexture`: `sampler3D`, precomputed noise texture [S1, unofficial].
-- `highFrequencyTexture`: `sampler3D`, precomputed high-frequency noise texture [S1, unofficial].
-- `curlNoiseTexture`: `sampler2D`, precomputed curl noise texture [S1, unofficial].
-
-**Outputs:**
-- `final_cloud`: `float`, the computed cloud density value in the range $[0.0, 1.0]$ (clamped) [S1, unofficial].
+**Inputs and Outputs:**
+*   **Inputs:**
+    *   `samplepoint`: `vec3`, world or texture space coordinate for density evaluation.
+    *   `weather_data`: Struct containing coverage data (`r` channel).
+    *   `relativeHeight`: `float`, normalized height within the atmosphere.
+    *   `iscCheap`: `bool`, if true, skips high-frequency sampling.
+    *   `wind_direction`: `vec3`, default `(1.0, 0.0, 0.0)`.
+    *   `cloud_speed`: `float`, default `10.0`.
+    *   `cloud_top_offset`: `float`, default `5.0`.
+    *   `Time`: `float`, global time variable.
+    *   `lowFrequencyTexture`: `sampler3D`, precomputed noise texture.
+    *   `highFrequencyTexture`: `sampler3D`, precomputed high-frequency noise texture (used if `!iscCheap`).
+    *   `curlNoiseTexture`: `sampler2D`, precomputed curl noise texture (used if `!iscCheap`).
+*   **Outputs:**
+    *   `final_cloud`: `float`, the computed cloud density value in the range $[0.0, 1.0]$.
 
 **Data Structures:**
-- `lowFrequencyTexture`: A 3D texture where:
-  - Channel R stores base noise values [S1, unofficial].
-  - Channel G stores the component weighted by 0.625 [S1, unofficial].
-  - Channel B stores the component weighted by 0.250 [S1, unofficial].
-  - Channel A stores the component weighted by 0.125 [S1, unofficial].
-- `highFrequencyTexture`: A 3D texture sampled at a scaled coordinate [S1, unofficial].
-- `curlNoiseTexture`: A 2D texture sampled at the XY coordinates of the sample point [S1, unofficial].
+*   **Low-Frequency Texture (`lowFrequencyTexture`):** A 3D texture where channels store specific noise components for FBM calculation:
+    *   Channel `R`: Base noise values.
+    *   Channel `G`: Weight component for 62.5% ($0.625$).
+    *   Channel `B`: Weight component for 25.0% ($0.250$).
+    *   Channel `A`: Weight component for 12.5% ($0.125$).
+*   **High-Frequency Texture (`highFrequencyTexture`):** A 3D texture where channels store noise components for high-frequency FBM:
+    *   Channel `R`: Weight component for 62.5% ($0.625$).
+    *   Channel `G`: Weight component for 25.0% ($0.250$).
+    *   Channel `B`: Weight component for 12.5% ($0.125$).
 
 **Formulas:**
 The remapping function is defined as:
 $$ \text{Remap}(v, v_{min}, v_{max}, u_{min}, u_{max}) = u_{min} + \frac{v - v_{min}}{v_{max} - v_{min}}(u_{max} - u_{min}) $$
-[S1, unofficial]
 
-The low-frequency FBM is computed from the RGBA sample $N$ of the low-frequency texture:
-$$ F_{low} = 0.625 N_g + 0.250 N_b + 0.125 N_a $$
-[S1, unofficial]
+The low-frequency FBM is calculated as:
+$$ F_{low} = N_g \cdot 0.625 + N_b \cdot 0.250 + N_a \cdot 0.125 $$
+where $N$ is the RGBA sample from the low-frequency texture.
 
-The base cloud density before height/coverage masking is:
+The base cloud density is remapped:
 $$ D_{base} = \text{Remap}(N_r, -(1.0 - F_{low}), 1.0, 0.0, 1.0) $$
-[S1, unofficial]
 
-The high-frequency FBM is computed from the RGBA sample $H$ of the high-frequency texture:
-$$ F_{high} = 0.625 H_r + 0.250 H_g + 0.125 H_b $$
-[S1, unofficial]
+The high-frequency FBM is calculated as:
+$$ F_{high} = N_r \cdot 0.625 + N_g \cdot 0.250 + N_b \cdot 0.125 $$
+where $N$ is the RGBA sample from the high-frequency texture.
 
 The high-frequency noise modifier is:
-$$ M_{high} = \text{mix}(F_{high}, 1.0 - F_{high}, \text{clamp}(relativeHeight \times 10.0, 0.0, 1.0)) $$
-[S1, unofficial]
+$$ M_{high} = \text{mix}(F_{high}, 1.0 - F_{high}, \text{clamp}(relativeHeight \cdot 10.0, 0.0, 1.0)) $$
 
 **Steps:**
-1. **Apply Wind Skew:** Adjust the sample point based on relative height and wind direction.
-   $$ \mathbf{p}_{skewed} = \mathbf{p} + relativeHeight \times \mathbf{wind\_direction} \times cloud\_top\_offset \times 0.005 $$
-   [S1, unofficial]
-2. **Apply Time-Based Movement:** Displace the sample point by wind and vertical movement over time.
-   $$ \mathbf{p}_{time} = \mathbf{p}_{skewed} + (\mathbf{wind\_direction} + (0.0, 1.0, 0.0)) \times Time \times cloud\_speed \times 0.001 $$
-   [S1, unofficial]
-3. **Sample Low-Frequency Texture:**
-   $$ N = \text{SampleLowFrequencyTexture}(\mathbf{p}_{time}) $$
-   [S1, unofficial]
-4. **Compute Low-Frequency FBM:**
-   $$ F_{low} = N_g \times 0.625 + N_b \times 0.250 + N_a \times 0.125 $$
-   [S1, unofficial]
-5. **Compute Base Cloud:**
-   $$ D_{base} = \text{Remap}(N_r, -(1.0 - F_{low}), 1.0, 0.0, 1.0) $$
-   [S1, unofficial]
-6. **Apply Height Gradient:**
-   $$ D_{height} = D_{base} \times \text{GetDensityHeightGradientForPoint}(\mathbf{p}_{time}, weather\_data, relativeHeight) $$
-   [S1, unofficial]
-7. **Apply Coverage Mask:**
-   $$ D_{coverage} = \text{Remap}(D_{height}, weather\_data.r, 1.0, 0.0, 1.0) $$
-   [S1, unofficial]
-8. **Clamp and Enhance:**
-   $$ D_{enhanced} = \text{clamp}(D_{coverage}, 0.0, 1.0) \times (weather\_data.r \times 4.0) $$
-   [S1, unofficial]
-9. **High-Frequency Details (if !iscCheap and $D_{enhanced} > 0.0$):**
-   a. Sample Curl Noise:
-      $$ C = \text{SampleCurlNoiseTexture}(\mathbf{p}_{time}.xy) $$
-      [S1, unofficial]
-   b. Displace UVs:
-      $$ \mathbf{p}_{disp} = \mathbf{p}_{time} + C.xy \times (1.0 - relativeHeight) $$
-      [S1, unofficial]
-   c. Sample High-Frequency Texture:
-      $$ H = \text{SampleHighFrequencyTexture}(\mathbf{p}_{disp} \times 0.1) $$
-      [S1, unofficial]
-   d. Compute High-Frequency FBM and Modifier:
-      $$ F_{high} = H_r \times 0.625 + H_g \times 0.250 + H_b \times 0.125 $$
-      [S1, unofficial]
-      $$ M_{high} = \text{mix}(F_{high}, 1.0 - F_{high}, \text{clamp}(relativeHeight \times 10.0, 0.0, 1.0)) $$
-      [S1, unofficial]
-   e. Erode by Remapping:
-      $$ D_{final} = \text{Remap}(\text{clamp}(D_{enhanced}, 0.2 \times M_{high}, 1.0), 0.2 \times M_{high}, 1.0, 0.0, 1.0) $$
-      [S1, unofficial]
-10. **Return:** $D_{final}$ if !iscCheap, else $D_{enhanced}$ [S1, unofficial].
+1.  **Apply Wind Skew:** Adjust the sample point based on height and wind direction.
+    $$ \mathbf{p} = \mathbf{samplepoint} + relativeHeight \cdot \mathbf{wind\_direction} \cdot cloud\_top\_offset \cdot 0.005 $$
+2.  **Apply Time-Based Movement:** Move the sample point over time.
+    $$ \mathbf{p} = \mathbf{p} + (\mathbf{wind\_direction} + \text{vec3}(0.0, 1.0, 0.0)) \cdot Time \cdot cloud\_speed \cdot 0.001 $$
+3.  **Sample Low-Frequency Texture:** Retrieve noise values.
+    $$ \mathbf{N}_{low} = \text{SampleLowFrequencyTexture}(\mathbf{p}) $$
+4.  **Compute Low-Frequency FBM:**
+    $$ F_{low} = \mathbf{N}_{low}.g \cdot 0.625 + \mathbf{N}_{low}.b \cdot 0.250 + \mathbf{N}_{low}.a \cdot 0.125 $$
+5.  **Calculate Base Cloud Density:**
+    $$ D_{base} = \text{Remap}(\mathbf{N}_{low}.r, -(1.0 - F_{low}), 1.0, 0.0, 1.0) $$
+6.  **Apply Height Gradient:** Get the density height gradient for the point and multiply.
+    $$ G_{height} = \text{GetDensityHeightGradientForPoint}(\mathbf{p}, \mathbf{weather\_data}, relativeHeight) $$
+    $$ D_{base} = D_{base} \cdot G_{height} $$
+7.  **Apply Coverage Mask:** Get cloud coverage from weather data and remap.
+    $$ C_{coverage} = \mathbf{weather\_data}.r $$
+    $$ D_{covered} = \text{Remap}(D_{base}, C_{coverage}, 1.0, 0.0, 1.0) $$
+8.  **Clamp and Enhance:** Clamp the result and enhance aesthetics.
+    $$ D_{covered} = \text{clamp}(D_{covered}, 0.0, 1.0) $$
+    $$ D_{covered} = D_{covered} \cdot C_{coverage} \cdot 4.0 $$
+9.  **High-Frequency Details (if `!iscCheap`):**
+    *   If $D_{covered} > 0.0$:
+        *   Sample curl noise: $\mathbf{N}_{curl} = \text{SampleCurlNoiseTexture}(\mathbf{p}.xy)$.
+        *   Displace UVs: $\mathbf{p}.xy = \mathbf{p}.xy + \mathbf{N}_{curl}.xy \cdot (1.0 - relativeHeight)$.
+        *   Sample high-frequency texture: $\mathbf{N}_{high} = \text{SampleHighFrequencyTexture}(\mathbf{p} \cdot 0.1)$.
+        *   Compute high-frequency FBM: $F_{high} = \mathbf{N}_{high}.r \cdot 0.625 + \mathbf{N}_{high}.g \cdot 0.250 + \mathbf{N}_{high}.b \cdot 0.125$.
+        *   Compute modifier: $M_{high} = \text{mix}(F_{high}, 1.0 - F_{high}, \text{clamp}(relativeHeight \cdot 10.0, 0.0, 1.0))$.
+        *   Clamp base cloud against modifier: $D_{covered} = \text{clamp}(D_{covered}, 0.2 \cdot M_{high}, 1.0)$.
+        *   Erode by remapping: $D_{final} = \text{Remap}(D_{covered}, 0.2 \cdot M_{high}, 1.0, 0.0, 1.0)$.
+    *   Else: $D_{final} = D_{covered}$.
+10. **Return:** $D_{final}$.
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def SampleCloudDensity(samplepoint, weather_data, relativeHeight, ischeap, 
-                       wind_direction, cloud_speed, cloud_top_offset, Time,
-                       lowFrequencyTexture, highFrequencyTexture, curlNoiseTexture):
+def SampleCloudDensity(samplepoint, weather_data, relativeHeight, isCheap, wind_direction, cloud_speed, cloud_top_offset, Time, lowFrequencyTexture, highFrequencyTexture, curlNoiseTexture):
     # Step 1: Apply Wind Skew
     p = samplepoint + relativeHeight * wind_direction * cloud_top_offset * 0.005
     
@@ -111,96 +95,96 @@ def SampleCloudDensity(samplepoint, weather_data, relativeHeight, ischeap,
     p = p + (wind_direction + vec3(0.0, 1.0, 0.0)) * Time * cloud_speed * 0.001
     
     # Step 3: Sample Low-Frequency Texture
-    N = lowFrequencyTexture.sample(p) # Returns vec4 (r, g, b, a)
+    N_low = SampleLowFrequencyTexture(p)
     
     # Step 4: Compute Low-Frequency FBM
-    low_freq_FBM = N.g * 0.625 + N.b * 0.250 + N.a * 0.125
+    F_low = N_low.g * 0.625 + N_low.b * 0.250 + N_low.a * 0.125
     
-    # Step 5: Compute Base Cloud
-    # Remap(N.r, -(1.0 - low_freq_FBM), 1.0, 0.0, 1.0)
-    v_min = -(1.0 - low_freq_FBM)
-    v_max = 1.0
-    u_min = 0.0
-    u_max = 1.0
-    base_cloud = u_min + (N.r - v_min) / (v_max - v_min) * (u_max - u_min)
+    # Step 5: Calculate Base Cloud Density
+    base_cloud = Remap(N_low.r, -(1.0 - F_low), 1.0, 0.0, 1.0)
     
     # Step 6: Apply Height Gradient
-    # GetDensityHeightGradientForPoint is assumed to return a float multiplier
     density_height_gradient = GetDensityHeightGradientForPoint(p, weather_data, relativeHeight)
-    base_cloud *= density_height_gradient
+    base_cloud = base_cloud * density_height_gradient
     
     # Step 7: Apply Coverage Mask
     cloud_coverage = weather_data.r
-    # Remap(base_cloud, cloud_coverage, 1.0, 0.0, 1.0)
-    v_min = cloud_coverage
-    v_max = 1.0
-    base_cloud_with_coverage = u_min + (base_cloud - v_min) / (v_max - v_min) * (u_max - u_min)
+    base_cloud_with_coverage = Remap(base_cloud, cloud_coverage, 1.0, 0.0, 1.0)
     
     # Step 8: Clamp and Enhance
     base_cloud_with_coverage = clamp(base_cloud_with_coverage, 0.0, 1.0)
-    base_cloud_with_coverage *= cloud_coverage * 4.0
+    base_cloud_with_coverage = base_cloud_with_coverage * cloud_coverage * 4.0
     
     # Step 9: High-Frequency Details
-    if not ischeap and base_cloud_with_coverage > 0.0:
-        # Sample Curl Noise
-        curl_noise = curlNoiseTexture.sample(vec2(p.x, p.z)) # Assuming XY mapping as per source
+    if not isCheap and base_cloud_with_coverage > 0.0:
+        # Sample curl noise
+        curl_noise = SampleCurlNoiseTexture(p.xy)
         
         # Displace UVs
-        p_disp = p
-        p_disp.x += curl_noise.x * (1.0 - relativeHeight)
-        p_disp.z += curl_noise.y * (1.0 - relativeHeight)
+        p_xy = p.xy + curl_noise.xy * (1.0 - relativeHeight)
         
-        # Sample High-Frequency Texture
-        H = highFrequencyTexture.sample(p_disp * 0.1)
+        # Sample high-frequency texture
+        high_frequency_noises = SampleHighFrequencyTexture(p_xy * 0.1)
         
-        # Compute High-Frequency FBM
-        high_freq_FBM = H.r * 0.625 + H.g * 0.250 + H.b * 0.125
+        # Compute high-frequency FBM
+        F_high = high_frequency_noises.r * 0.625 + high_frequency_noises.g * 0.250 + high_frequency_noises.b * 0.125
         
-        # Compute High-Frequency Noise Modifier
-        mix_factor = clamp(relativeHeight * 10.0, 0.0, 1.0)
-        high_freq_noise_modifier = mix(high_freq_FBM, 1.0 - high_freq_FBM, mix_factor)
+        # Compute modifier
+        height_factor = clamp(relativeHeight * 10.0, 0.0, 1.0)
+        high_freq_noise_modifier = mix(F_high, 1.0 - F_high, height_factor)
         
-        # Erode by Remapping
-        # Clamp base_cloud_with_coverage against modifier
-        clamped_val = clamp(base_cloud_with_coverage, 0.2 * high_freq_noise_modifier, 1.0)
-        # Remap
-        v_min = 0.2 * high_freq_noise_modifier
-        v_max = 1.0
-        final_cloud = u_min + (clamped_val - v_min) / (v_max - v_min) * (u_max - u_min)
-        return final_cloud
+        # Clamp base cloud against modifier
+        base_cloud_with_coverage = clamp(base_cloud_with_coverage, 0.2 * high_freq_noise_modifier, 1.0)
+        
+        # Erode by remapping
+        final_cloud = Remap(base_cloud_with_coverage, 0.2 * high_freq_noise_modifier, 1.0, 0.0, 1.0)
     else:
-        return base_cloud_with_coverage
+        final_cloud = base_cloud_with_coverage
+        
+    return final_cloud
+
+def Remap(v, v_min, v_max, u_min, u_max):
+    return u_min + (v - v_min) / (v_max - v_min) * (u_max - u_min)
 ```
-[S1, unofficial]
 
 **Edge Cases and Pitfalls:**
-- If `relativeHeight` is outside $[0.0, 1.0]$, the `clamp` operations in the modifier and coverage mask may produce unexpected results if not handled by the caller.
-- The `Remap` function divides by $(v_{max} - v_{min})$. If $v_{max} = v_{min}$, division by zero occurs. In Step 5, $v_{max}=1.0$ and $v_{min}=-(1.0-F_{low})$. Since $F_{low} \in [0,1]$, $v_{min} \in [-1, 0]$, so $v_{max} \neq v_{min}$. In Step 7, $v_{min}=cloud\_coverage$. If `cloud_coverage` is 1.0, division by zero occurs. [G] Guard against this by returning 0.0 or the input value if $v_{max} \approx v_{min}$.
-- The curl noise displacement uses `samplepoint.xy`. If the sample point is in world space, this assumes the curl noise texture is aligned with the XZ plane (or XY depending on coordinate system convention). The source uses `samplepoint.xy` [S1, unofficial].
+*   **Precision:** The remapping function involves division by $(v_{max} - v_{min})$. If $v_{max} \approx v_{min}$, precision loss or division by zero may occur. In this method, $v_{max}$ is always $1.0$, but $v_{min}$ depends on $F_{low}$. If $F_{low} \approx 1.0$, $v_{min} \approx 0.0$, which is safe. If $F_{low} \approx -1.0$ (unlikely given weights), $v_{min} \approx -2.0$. The source does not specify handling for degenerate noise ranges.
+*   **Boundaries:** The `GetDensityHeightGradientForPoint` function is assumed to handle boundary conditions for the atmosphere. The `SampleLowFrequencyTexture` and `SampleHighFrequencyTexture` functions must handle texture wrapping or clamping appropriately for world-space coordinates.
+*   **Degenerate Input:** If `weather_data.r` (coverage) is 0, the output density is 0. If `relativeHeight` is outside $[0, 1]$, the `clamp` operations in the high-frequency modifier and the height gradient function must handle it.
 
 ## Subtopics
 
 ### [Procedural 3D Worley-Perlin Fractal Noise Density](5267-procedural-3d-worley-perlin-fractal-noise-density.md)
-Generates billowy cloud shapes by synthesizing cloud density $\rho(\mathbf{x})$ procedurally using inverted Worley fractal Brownian motion (FBM), vertical gradient attenuation, and coverage thresholding. It differs from standard Perlin-based cloud noise by using the distance-to-nearest-cell metric of Worley noise, inverted to create bright, puffy "billowy" structures characteristic of cumulus clouds, rather than the smooth, turbulent gradients of Perlin noise. Choose this when simulating cumulus clouds with distinct, puffy tops. See [Procedural 3D Worley-Perlin Fractal Noise Density](5267-procedural-3d-worley-perlin-fractal-density.md).
+Generates billowy cloud shapes by synthesizing cloud density $\rho(\mathbf{x})$ procedurally using inverted Worley fractal Brownian motion (FBM), vertical gradient attenuation, and coverage thresholding. It differs from standard Perlin-based cloud noise by using the distance-to-nearest-cell metric of Worley noise, inverted to create bright, puffy "billowy" structures characteristic of cumulus clouds, rather than the smooth, turbulent gradients of Perlin noise.
+
+### [Full Cloud Density Function](5875-full-cloud-density-function.md)
+The Full Cloud Density Function is a procedural volume sampling method that computes cloud density by combining a vertical atmospheric profile with horizontal footprint and high-frequency noise, modulated by a global coverage mask. It solves the problem of generating visually distinct, physically plausible cloud layers within a unified framework. It differs from generic noise-based volume generation by explicitly separating vertical stratification (Gaussian profiles) from horizontal structure (footprints and clusters), modulated by type-specific noise functions.
 
 ### Cone Tracing Cloud Sampling
-Samples cloud density along a cone by iterating through a pre-generated noise kernel, transforming positions to weather map coordinates, and summing densities. It differs from standard ray-marching by evaluating density along a cone spread to approximate volumetric scattering or shadowing effects more efficiently than a single ray. Choose this when approximating volumetric light transport or shadowing in cloud rendering. See [Cone Tracing Cloud Sampling](5267-cone-tracing-cloud-sampling.md).
+Samples cloud density along a cone by iterating through a pre-generated noise kernel, transforming positions to weather map coordinates, and summing densities [S1, unofficial].
 
-### Full Cloud Density Function
-Uses a combination of Perlin octaves, a vertical profile texture, and a cube map for global cloud cover to compute density. It differs from the base method by using a cube map for global coverage and a separate vertical profile function, rather than a single RGBA texture with weighted FBM. Choose this when global coverage maps and distinct vertical profiles are required. See [Full Cloud Density Function](5267-full-cloud-density-function.md).
+**Steps:**
+1.  Initialize `density_along_cone = 0.0`.
+2.  Loop `i` from 0 to 5.
+3.  Calculate light position: `lightpos = posInAtm + (cone_spread_multiplier * noise_kernel[i] * float(i))`.
+4.  Get weather map coordinates: `weatherpoint = GetRelativePointToWeatherMap(lightpos, rayOrigin, earthCenter, ATMOSPHERE_OUTER_RADIUS)`.
+5.  Sample weather data: `weather_data = SampleWeatherTexture(weatherpoint)`.
+6.  Get relative height: `relativeHeight = GetRelativeHeightInAtmosphere(lightpos, earthCenter)`.
+7.  Get atmosphere position: `p = GetPositionInAtmosphere(lightpos, earthCenter, THICK_ATMOSPHERE) * 0.5`.
+8.  Accumulate density: `density_along_cone += SampleCloudDensity(p, weather_data, relativeHeight, false)`.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per sample for the base method, assuming texture lookups are $O(1)$. The high-frequency branch adds constant overhead. Cone tracing is $O(k)$ where $k$ is the number of cone samples (e.g., 5) [S1, unofficial].
-- **Memory Complexity:** Depends on the size of the precomputed textures (low-frequency, high-frequency, curl noise, weather data). Not given in the sources for specific resolutions, but [S2, unofficial] mentions 64x64x64 for noise and 512x512 for cover maps.
-- **Measured Performance:** [S2, unofficial] reports 28.5 FPS on an AMD Ryzen 7 4700U at 640x480 resolution, using 3 deep opacity maps, one 512x512 offset layer, a 7x512x512 transmittance array, 5 octaves of 64x64x64 Worley noise for high-frequency detail, and 3 octaves of 64x64x64 Perlin-Worley noise for horizontal shapes.
-- **Strengths:** Efficient evaluation using precomputed textures; flexible control over cloud shape via FBM weights and height gradients; supports time-based animation.
-- **Limitations:** Requires precomputed textures; high-frequency details are skipped if `iscCheap` is true; coverage masking is simple and may not handle complex weather patterns without additional data.
-- **When to Use:** Real-time cloud rendering where performance is critical and precomputed textures are available.
-- **When Not to Use:** When procedural noise without textures is required, or when high-fidelity volumetric scattering is needed without approximation.
+*   **Time Complexity:** $O(1)$ per sample point for the base low-frequency sampling. If `!iscCheap`, it adds constant overhead for curl noise sampling, high-frequency texture sampling, and displacement calculations.
+*   **Memory Complexity:** $O(1)$ auxiliary memory. Requires storage for pre-computed 3D noise textures (`lowFrequencyTexture`, `highFrequencyTexture`) and 2D curl noise texture (`curlNoiseTexture`).
+*   **Measured Performance:** Not given in the sources.
+*   **Scaling:** Performance scales linearly with the number of sample points. The use of pre-computed textures allows for efficient GPU sampling.
+*   **Strengths:** Provides visually plausible cloud density with relatively low computational cost per sample. The separation of low and high-frequency details allows for optimization (skipping high-frequency details for distant clouds).
+*   **Limitations:** Relies on pre-computed textures, which may not adapt dynamically to changing weather conditions without texture updates. The specific channel weights and remapping functions are hardcoded, limiting flexibility.
+*   **When to use:** Real-time cloud rendering where performance is critical and visual fidelity is acceptable with pre-computed noise.
+*   **When not to use:** When dynamic, physically-based cloud formation is required, or when high-frequency details must be generated procedurally without pre-computation.
 
 ## Background
-The method originates from the "realtime-volumetric-cloudscapes" project by erickTornero [S1, unofficial]. It is also associated with Jan Wedekind's work on procedural volumetric clouds [S2, unofficial]. The technique is used in real-time cloud rendering to generate dense, volumetric cloud fields efficiently.
+Cloud Density Sampling is a method for generating volumetric cloud density in real-time graphics. It is based on techniques described in the repository `erickTornero/realtime-volumetric-cloudscapes` [S1, unofficial]. The method combines low-frequency noise for base cloud structure with high-frequency noise for detail, modulated by atmospheric parameters like height and coverage.
 
 ## Sources
 [S1] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
-[S2] Procedural Volumetric Clouds · Jan Wedekind, https://www.wedesoft.de/software/2023/05/03/volumetric-clouds/, fetched 2026-10-28 (unofficial)

@@ -1,0 +1,174 @@
+Currently AaConfig have three different modes for how to calculate AA, but I'm missing one which is perhaps the simplest: Don't do any anti-aliasing. My need for this is in creating an ID-buffer to power a hitmap. Each object is rendered...
+
+Add a non-AA mode · Issue #1832 · linebender/vello · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Add a non-AA mode #1832
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+Add a non-AA mode#1832
+Copy link
+Labels
+vello-researchApplies to the classic `vello_research` crateApplies to the classic `vello_research` crate
+Description
+thomasp85
+opened on Aug 18, 2026
+Issue body actions
+Currently AaConfig have three different modes for how to calculate AA, but I'm missing one which is perhaps the simplest: Don't do any anti-aliasing.
+My need for this is in creating an ID-buffer to power a hitmap. Each object is rendered to the buffer with a color corresponding to the id and a look-up allows you very fast information on what you are hovering over.
+The issue is that AA "makes up" ids along the edges of the rendering and thus it needs to be turned off
+Activity
+b0nes164 commented on Aug 18, 2026
+b0nes164
+on Aug 18, 2026
+Member
+More actions
+For which backend? And do you need the data on the CPU? Or can it stay on the GPU?
+thomasp85 commented on Aug 19, 2026
+thomasp85
+on Aug 19, 2026
+Author
+More actions
+Ah sorry, I'm using the standard GPU backend so it would be in addition to the area and multi-sampling aa shaders. The scene is then read into the cpu
+b0nes164 commented on Aug 19, 2026
+b0nes164
+on Aug 19, 2026
+Member
+More actions
+For Vello Classic, this usage does not match the design because you would have to readback (and wait on the readback for) the pixel intersections from GPU memory.
+In Vello Hybrid, the pixel intersections are calculated on the CPU and it should be fairly straightforward to add a side car to store this data during normal rendering (so you don't have to run the pipeline a second time just to get the pixel intersections).
+thomasp85 commented on Aug 19, 2026
+thomasp85
+on Aug 19, 2026
+Author
+More actions
+Is this concern with Vello Classic about allowing AA or about reading back onto the CPU?
+b0nes164 commented on Aug 20, 2026
+b0nes164
+on Aug 20, 2026
+Member
+More actions
+Yes, I don't think we should encourage use that is anti-design. In Vello Classic's case the pipeline is meant to be fire-and-forget all GPU.
+My other concern is that you really don't want to run the pipeline a second time. For Vello Classic, this becomes a much more difficult problem because you can't malloc in a compute shader, so to be safe you would have to overallocate and allocate enough intersection bits for pixels on the screen. Clipping and blending would also be tricky.
+thomasp85 commented on Aug 20, 2026
+thomasp85
+on Aug 20, 2026
+Author
+More actions
+Hmm... I think we might be slightly talking past each other (if not, I apologise - I do not intend to dismiss your objections).
+At the base of it, what I'm truly asking for is a rasteriser with binary coverage (ie non-AA).
+I do not want nor need Vello to track pixel intersections - I just need to be able to render a scene that only contains the color values I explicitly uses (ie no AA-induced alpha blending).
+Is there core concerns about adding a "simple" rasteriser to the fine shader?
+b0nes164 commented on Aug 20, 2026
+b0nes164
+on Aug 20, 2026
+Last edited by b0nes164
+Member
+More actions
+I apologize as well; I didn't explain pixel intersections clearly enough either.
+By "pixel intersections," I also meant "rasteriser with binary coverage;" "pixel intersections" is confusing because it implies ignoring the fill.
+What I meant was that, only pixels crossed by the line need AA, and so when you ignore AA, all you need to do is find which pixels the line intersects in addition to the fill you would have done otherwise.
+Going back to adding the feature, implementation details aside, my primary concern is intent: Are we adding non-AA rasterization because users actually want aliased rendering? In your case, you want to use for hit detection. I agree this is a clever usage, but will the feature be used for its intended use case? e.g. aliased rendering?
+I believe the answer is no, but I do think that convenient pixel perfect hit detection could be useful. But given the implementation constraints I described above, the correct place to do it is Vello Hybrid.
+thomasp85 commented on Aug 21, 2026
+thomasp85
+on Aug 21, 2026
+Author
+More actions
+Thanks for the clarification. Do you imply that the feature does not yet work in Hybrid mode or would set_aliasing_threshold(Some(128)) give me that binary threshold I'm after?
+thomasp85 commented on Aug 21, 2026
+thomasp85
+on Aug 21, 2026
+Author
+More actions
+I have successfully made an alternative rendering pipeline with Vello Hybrid to check it out (using set_aliasing_threshold(Some(128))). It works, but it does struggle performance-wise on heavy scenes (my use case is data visualization and at a 100k scatterplot it looses smooth resizing etc, something that Vello Classic handled without a hitch (though it had some hard limits on number of points it could draw before a buffer overflow killed it).
+Now, we can both agree that 100k scatterplots are rarely informative, but as a stresstest for e.g. complex network diagrams etc it works well. Hybrid is clearly (and understandably) less performant than the pure GPU rendering (by my benchmarks around ~3x slower).
+Do you gather that this is primarily a feature of it being newer and still being optimised. E.g. the hybrid renderer does not expose the same multithreading knobs as vello-cpu for strip generation?
+If the performance is expected to remain >2x below Classic I'd like to ask you (a final time, I promise :-) ) to reconsider adding a thresholded rasteriser to Classic since a switch to hybrid is not always an option for performance reasons.
+b0nes164 commented on Aug 24, 2026
+b0nes164
+on Aug 24, 2026
+Last edited by b0nes164
+Member
+More actions
+Using set_alias_threshold is kind of a hack and could get something close to what you want, but without getting into the weeds, I think you will get off by one results with it.
+Now, we can both agree that 100k scatterplots are rarely informative, but as a stresstest for e.g. complex network diagrams etc it works well. Hybrid is clearly (and understandably) less performant than the pure GPU rendering (by my benchmarks around ~3x slower).
+Yes, in these stress test scenarios, the GPU rendering will outperform Hybrid; however if I understand correctly, you are running the pipeline twice, once to draw, and a second time aliased to get hit data. If we added support, you would be able to run the pipeline once and both draw and get the hit data. Napkin math, maybe it would be 2x-1.5x classic?
+Regardless, I need to discuss with others
+thomasp85 commented on Aug 25, 2026
+thomasp85
+on Aug 25, 2026
+Author
+More actions
+Thanks. Agree that the set_alias_threshold is hackish as it doesn't provide the performance benefits a non-AA rendering usually gets, but otherwise it is correct (one-pixel differences at the edges is fine for e.g. hovering).
+It's true I'm running the pipeline twice, but since the two scenes are fundamentally different (not just the rasterisation) I can't see how to avoid this (the brush used for ID is fundamentally different to the one used for presentation). But maybe I'm misunderstanding your proposal and it goes beyond just providing a binary rasteriser.
+Anyway, I appreciate your time in answering all my questions and will look forward to whatever falls out.
+PS
+These are the benchmark I recorded for a 100k scatterplot at 900x560px:
+```
+         display  display + pick  second pass costs
+Classic  27.4 ms  39.4 ms         +44%
+Hybrid   84.8 ms  145.0 ms        +71%
+```
+ds84182 commented on Aug 26, 2026
+ds84182
+on Aug 26, 2026
+More actions
+Can you elaborate a bit more on why you're using a hitmap?
+Would spatial partitioning with an r-tree of bounding boxes https://lib.rs/crates/rstar + path hit testing with https://docs.rs/zeno/0.3.3/zeno/struct.HitTest.html work better here? Searching an r-tree is O(log n), afterwards AABB quick reject is basically free, and then zeno is quite fast at hit testing.
+thomasp85 commented on Aug 27, 2026
+thomasp85
+on Aug 27, 2026
+Author
+More actions
+Well, the basic reasoning is that it is fast and that hit testing is O(1) once rendered so hovering over a plot with your mouse does not cause any computations. Again, the needs for a dataviz engine is somewhat different from that of a ui etc and a hitmap is in many ways a great solution (it does have downsides though such as only revealing the topmost element)
+ds84182 commented on Aug 27, 2026
+ds84182
+on Aug 27, 2026
+More actions
+r-trees are designed for this. this is the very reason why they exist.
+You should evaluate the performance of r-trees, or any spatial indexing data structure, for hit detection. it can also query closest objects to a point, as well as objects intersecting a bounding box.
+thomasp85 commented on Aug 27, 2026
+thomasp85
+on Aug 27, 2026
+Author
+More actions
+I did do some basic comparisons with the R-tree being slightly slower to build than a render of the hitmap (plus, lookup+refinement was slower than an array lookup). However, this was before the AA-issue forced me to consider using the slower hybrid render so perhaps a spatial tree approach is more favourable now.
+I'll give it a second probe
+b0nes164 commented on Aug 28, 2026
+b0nes164
+on Aug 28, 2026
+Member
+More actions
+After discussion during office hours, we don't plan to implement this.
+grebmeg
+added
+vello-researchApplies to the classic `vello_research` crateApplies to the classic `vello_research` crate
+on Oct 28, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+vello-researchApplies to the classic `vello_research` crateApplies to the classic `vello_research` crate
+Type
+No type
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

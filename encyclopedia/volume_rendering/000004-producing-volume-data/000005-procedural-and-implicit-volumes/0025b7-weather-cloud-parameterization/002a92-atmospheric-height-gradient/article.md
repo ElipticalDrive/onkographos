@@ -1,0 +1,163 @@
+# Atmospheric Height Gradient
+
+Also called: Cloud Type Vertical Profile, GetDensityHeightGradientForPoint, GetGradientHeightFactor, Height Density Gradient, Vertical Density Profile Gradient
+
+## Overview
+The Atmospheric Height Gradient method defines the vertical density profile for volumetric cloud layers based on cloud type (Stratus, Cumulus, Cumulonimbus, Cirrus), creating bell-shaped or plateau-shaped density distributions relative to the atmosphere thickness [S1, S2, unofficial]. It differs from [Volumetric Cloud Raymarching](1248-volumetric-cloud-raymarching.md) by providing the analytic shape function rather than the integration step, and from [Procedural Volume Cloud Modeling](2256-procedural-volume-cloud-modeling.md) by focusing specifically on the vertical altitude-based falloff rather than spatial noise or geometry [S1, S2, unofficial].
+
+## How it works
+**Inputs:**
+- `altitude`: The vertical position (altitude) of the point being evaluated, in kilometers [S2, unofficial].
+- `cloud_type`: An identifier for the cloud layer type [S1, S2, unofficial].
+- `layer_bounds`: The `bottomAltitudeKm` and `topAltitudeKm` for the specific cloud type [S2, unofficial].
+- `cloud_type_params`: Parameters controlling the shape of the gradient, specifically `timewidthup`, `starttimeup`, and `starttimedown` [S1, unofficial].
+
+**Outputs:**
+- `density_gradient`: A scalar value representing the vertical shape factor (0.0 to ~1.2) [S1, S2, unofficial].
+
+**Data Structures:**
+The method uses a preset structure for cloud layers. While [S2, unofficial] defines `CloudAltitudeLayer` with fields `bottomAltitudeKm`, `topAltitudeKm`, `coverage`, `densityMultiplier`, and `precipitationFactor`, the gradient calculation primarily relies on the altitude bounds and type-specific shape parameters [S1, S2, unofficial].
+
+**Parameters:**
+The following presets define the base altitude bounds and shape parameters for each cloud type [S1, S2, unofficial]:
+
+| Cloud Type | Bottom (km) | Top (km) | `timewidthup` | `starttimeup` | `starttimedown` |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Stratus | 1.0 | 2.2 | 0.08 | 0.08 | 0.2 |
+| Cumulus | 1.5 | 4.5 | 0.14 | 0.1 | 0.5 |
+| Cumulonimbus | 1.2 | 9.0 | 0.2 | 0.10 | 0.7 |
+| Cirrus | 7.0 | 10.5 | Not given in the sources. | Not given in the sources. | Not given in the sources. |
+
+**Steps:**
+1.  **Boundary Check:** If `altitude` is less than `bottomAltitudeKm` or greater than `topAltitudeKm`, return 0.0 [S2, unofficial].
+2.  **Normalized Height:** Calculate the normalized height fraction $h$ within the layer:
+    $$ h = \frac{\text{altitude} - \text{bottomAltitudeKm}}{\text{topAltitudeKm} - \text{bottomAltitudeKm}} $$
+    [S2, unofficial]
+3.  **Cloud Type Selection:** Determine the specific gradient logic based on `cloud_type` [S1, S2, unofficial].
+    -   If `cloud_type` is Stratus: Use a sine-based profile with soft edges [S2, unofficial].
+    -   If `cloud_type` is Cumulus: Use a power-sine profile for fluffy tops [S2, unofficial].
+    -   If `cloud_type` is Cumulonimbus: Use a sine profile with an anvil flare [S2, unofficial].
+    -   If `cloud_type` is Cirrus: Use the Stratus-like profile or a specific falloff [S2, unofficial].
+4.  **Gradient Calculation:** Compute the density gradient based on the selected type [S1, S2, unofficial].
+
+**Formulas:**
+The sources provide two distinct implementations for the gradient calculation.
+
+**Implementation A (Sine-based with linear ramps) [S1, unofficial]:**
+This method uses `starttimeup`, `starttimedown`, and `timewidthup` to define linear rise and fall regions, with a constant plateau in between.
+-   If `altitude` < `starttimeup`, `density_gradient` = 0.0.
+-   If `starttimeup` <= `altitude` < `starttimeup` + `timewidthup`:
+    $$ \text{factor} = \frac{2.0 \cdot \pi}{2.0 \cdot \text{timewidthup}} $$
+    $$ \text{density\_gradient} = 0.5 \cdot \sin(\text{factor} \cdot \text{altitude} - \frac{\pi}{2.0} - \text{factor} \cdot \text{starttimeup}) + 0.5 $$
+-   If `starttimeup` + `timewidthup` <= `altitude` < `starttimedown`:
+    $$ \text{density\_gradient} = 1.0 $$
+-   If `starttimedown` <= `altitude` < `starttimedown` + `timewidthup`:
+    $$ \text{factor} = \frac{2.0 \cdot \pi}{2.0 \cdot \text{timewidthup}} $$
+    $$ \text{density\_gradient} = 0.5 \cdot \sin(\text{factor} \cdot \text{altitude} - \frac{\pi}{2.0} - \text{factor} \cdot (\text{starttimedown} + \text{timewidthup})) + 0.5 $$
+-   If `altitude` >= `starttimedown` + `timewidthup`, `density_gradient` = 0.0.
+
+**Implementation B (Normalized Height Fraction) [S2, unofficial]:**
+This method uses the normalized height $h$ calculated in Step 2.
+-   **Stratus:**
+    $$ \text{density\_gradient} = \sin(h \cdot \pi) \cdot 0.9 $$
+-   **Cumulus:**
+    $$ \text{density\_gradient} = \sin(h^{0.7} \cdot \pi) $$
+-   **Cumulonimbus:**
+    -   If $h > 0.8$:
+        $$ \text{density\_gradient} = 1.2 $$
+    -   Else:
+        $$ \text{density\_gradient} = 0.6 + 0.4 \cdot \sin(h \cdot \pi) $$
+-   **Cirrus:**
+    -   The source notes mention Cirrus but do not provide a specific formula distinct from the others in the code snippet, though it is listed in presets [S2, unofficial]. The `computeVerticalProfile` function in [S2, unofficial] implies a switch statement, but the code is truncated. Based on the notes, Cirrus is a valid type [S2, unofficial].
+
+**Pseudocode:**
+The following pseudocode implements the logic from [S2, unofficial] as it is more self-contained and uses the normalized height fraction, which is more robust for arbitrary layer bounds. It merges the specific formulas for Stratus, Cumulus, and Cumulonimbus.
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def compute_vertical_profile(altitude_km: float, cloud_type: str) -> float:
+    """
+    Computes the vertical density gradient for a given cloud type and altitude.
+    
+    Args:
+        altitude_km: The altitude in kilometers.
+        cloud_type: One of 'stratus', 'cumulus', 'cumulonimbus', 'cirrus'.
+        
+    Returns:
+        The density gradient value.
+    """
+    # Presets from [S2, unofficial]
+    presets = {
+        'stratus': {'bottom': 1.0, 'top': 2.2},
+        'cumulus': {'bottom': 1.5, 'top': 4.5},
+        'cumulonimbus': {'bottom': 1.2, 'top': 9.0},
+        'cirrus': {'bottom': 7.0, 'top': 10.5}
+    }
+    
+    if cloud_type not in presets:
+        return 0.0
+        
+    layer = presets[cloud_type]
+    bottom = layer['bottom']
+    top = layer['top']
+    
+    # Boundary check
+    if altitude_km < bottom or altitude_km > top:
+        return 0.0
+        
+    # Normalized height fraction
+    height_fraction = (altitude_km - bottom) / (top - bottom)
+    
+    # Calculate gradient based on cloud type
+    if cloud_type == 'stratus':
+        # Flat sheet with soft transitions at edges
+        return math.sin(height_fraction * math.pi) * 0.9
+    elif cloud_type == 'cumulus':
+        # Fluffy rounded tops, flatter bottoms
+        return math.sin(math.pow(height_fraction, 0.7) * math.pi)
+    elif cloud_type == 'cumulonimbus':
+        # Anvil / dome shaping
+        if height_fraction > 0.8:
+            return 1.2
+        else:
+            return 0.6 + 0.4 * math.sin(height_fraction * math.pi)
+    elif cloud_type == 'cirrus':
+        # Cirrus is listed in presets but specific formula is not provided in the truncated source.
+        # Using a generic sine profile similar to Stratus as a fallback [G].
+        return math.sin(height_fraction * math.pi) * 0.9
+    else:
+        return 0.0
+```
+
+**Edge Cases and Pitfalls:**
+-   **Precision:** When `altitude` is very close to `bottom` or `top`, floating-point errors might cause the normalized height to be slightly outside [0, 1]. The boundary check in Step 1 handles this by returning 0.0.
+-   **Degenerate Input:** If `bottom` equals `top`, division by zero occurs in the normalized height calculation. This should be guarded against by checking if `top > bottom` before calculating `height_fraction` [G].
+-   **Cloud Type Selection:** The source [S1, unofficial] mentions a cloud type selection based on `weather_data.z`, but this is context-dependent and not part of the core gradient function. The gradient function itself takes the cloud type as an input [S2, unofficial].
+
+## Subtopics
+
+### Cloud Type Presets
+Defines the base altitude bounds and visual properties (coverage, density multiplier) for each cloud type. It sets the domain for the gradient function. Choose it when you need to define the vertical extent of a cloud layer. See [Cloud Type Presets](3617-weather-cloud-parameterization.md#cloud-type-presets).
+
+### Vertical Density Profile
+The specific shape function (sine, power-sine) applied to the normalized height. It determines the visual "fluffiness" or flatness of the cloud. Choose it when you need to differentiate between Stratus, Cumulus, and Cumulonimbus appearances. See [Vertical Density Profile](3617-weather-cloud-parameterization.md#vertical-density-profile).
+
+## Operating characteristics
+-   **Time Complexity:** $O(1)$ per point evaluation. The calculation involves basic arithmetic and trigonometric functions.
+-   **Memory Complexity:** $O(1)$ if using presets, or $O(N)$ if storing the gradient profile in a texture for lookup.
+-   **Measured Performance:** Not given in the sources.
+-   **Scaling:** The method scales linearly with the number of points evaluated. It is independent of the horizontal resolution of the volume.
+-   **Strengths:** Simple to implement, analytically defined, allows for easy variation of cloud types via parameters.
+-   **Limitations:** Does not account for horizontal variations or noise. The vertical profile is static and does not change with weather conditions beyond the cloud type selection.
+-   **When to use:** When rendering volumetric clouds with distinct vertical structures for different cloud types.
+-   **When not to use:** When horizontal variation or dynamic weather changes are required within a single cloud layer.
+
+## Background
+The Atmospheric Height Gradient method originates from implementations of realtime volumetric cloud rendering, specifically in the context of procedural cloud parameterization. It is used to define the vertical density falloff for different cloud types, ensuring that clouds have realistic vertical structures (e.g., flat Stratus, fluffy Cumulus, towering Cumulonimbus). The method is found in open-source projects such as `erickTornero/realtime-volumetric-cloudscapes` and `nff747/volumetric-clouds-wgsl` [S1, S2, unofficial].
+
+## Sources
+[S1] erickTornero/realtime-volumetric-cloudscapes, https://github.com/erickTornero/realtime-volumetric-cloudscapes, fetched 2026-10-27 (unofficial)
+[S2] nff747/volumetric-clouds-wgsl, https://github.com/nff747/volumetric-clouds-wgsl, fetched 2026-10-27 (unofficial)

@@ -1,0 +1,87 @@
+Follow-up to: PR #11 (SVS_VAMANA core integration). The user-facing RAW_VECTOR_STORAGE surface was removed in that PR because the knob was accepted but ignored. This issue tracks implementing it properly so the knob -- in whatever form i...
+
+SVS_VAMANA: implement RAW_VECTOR_STORAGE DROP end-to-end · Issue #14 · eshenayo/valkey-search · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+SVS_VAMANA: implement RAW_VECTOR_STORAGE DROP end-to-end #14
+New issue
+Copy link
+New issue
+Copy link
+Open
+Open
+SVS_VAMANA: implement RAW_VECTOR_STORAGE DROP end-to-end#14
+Copy link
+Assignees
+Labels
+enhancementNew feature or requestNew feature or request
+Description
+eshenayo
+opened on Oct 2, 2026
+Issue body actions
+Follow-up to: PR #11 (SVS_VAMANA core integration). The user-facing RAW_VECTOR_STORAGE surface was removed in that PR because the knob was accepted but ignored. This issue tracks implementing it properly so the knob -- in whatever form it ultimately takes -- actually changes engine behavior.
+Why
+Under the open compression kinds (FP16 and the eventual SQ8), SVS already stores a compressed representation of each vector internally. When the caller only needs KNN results and tolerates lossy ComputeDistance, the duplicate raw vector that valkey-search currently keeps in label_to_record_ is pure memory overhead -- roughly num_vectors x DIM x sizeof(T) bytes.
+For a 10M x 128-d FP32 index that's ~5 GiB. Operators with memory-bound workloads should be able to opt out of that overhead and accept lossy reconstruct for distance recomputation.
+Current state after PR #11
+Proto field SVSVamanaAlgorithm.raw_vector_storage = 8 and enum RawVectorStorage { KEEP, DROP } are still defined in src/index_schema.proto for wire compatibility.
+No user- or operator-facing entry point sets it; it defaults to KEEP.
+label_to_record_ is populated unconditionally in VectorSVS<T>::AddRecordImpl and ModifyRecordImpl.
+VectorSVS<T>::ComputeDistance reaches into vector_record->GetRawVector() via the hnswlib space_.
+vector_svs.h imports normalize_ from VectorBase but never uses it; relevant to the DROP + COSINE combo if that ever lands (COSINE itself is fenced in PR SVS_VAMANA vector index: core integration over the SVS C API submodule #11).
+Scope
+Operator surface
+Expose a configuration entry point. Candidates:
+Module config knob search.svs.default-raw-vector-storage (KEEP|DROP), read at index creation and threaded into SVSBuildConfig. Matches the existing max-prefixes/max-tag-field-length pattern (vmsdk::config::Register).
+Startup CLI flag --svs-raw-vector-storage KEEP|DROP, same wiring.
+Per-index proto field populated from the module config at FT.CREATE time (not from a user FT.CREATE keyword), so RDB round-trips the per-index decision.
+Default should be the right-of-least-surprise, likely KEEP.
+Engine support
+AddRecordImpl / ModifyRecordImpl: when raw_vector_storage == DROP, skip populating label_to_record_ with a usable VectorRecord. Either store a nullptr sentinel to preserve existence semantics, or stop using the map for existence and route label-existence checks through SVS directly.
+ComputeDistance (src/indexes/vector_svs.cc:685-696): when DROP, use SVS's native svs_distance_compute / svs_index_reconstruct to obtain the stored (compressed, lossy) vector bytes and feed them to space_->get_dist_func(). Document that pre-filter scores under DROP + FP16/SQ8 are approximations of the KEEP scores.
+GetVector / GetVectorForSearch paths used by FT.HYBRID, FT.AGGREGATE, cluster fan-out: either route through reconstruct, or return an informative error under DROP for operations that need the exact original vector.
+normalize_: wire if DROP + COSINE combination lands. (COSINE is fenced in PR SVS_VAMANA vector index: core integration over the SVS C API submodule #11.)
+Decide whether DROP is permitted with COMPRESSION NONE (where SVS has no compressed copy to fall back to -- DROP + NONE would mean "lose vectors entirely", which is almost certainly wrong). Likely require COMPRESSION != NONE when DROP is selected and reject the combination at FT.CREATE / in Verify.
+RDB load path
+PR #12 (RDB save/load) needs to know not to look for raw bytes on disk when DROP is set, and must round-trip the field without changing semantics on restart.
+Tests
+KEEP mode: unchanged behavior (existing smoke tests).
+DROP + FP16: ingest N vectors, run KNN, assert result shape matches KEEP; assert memory footprint shrinks by roughly N x DIM x sizeof(T).
+DROP + NONE: rejected at FT.CREATE (assuming the decision above).
+DROP + ComputeDistance under FP16: pre-filter path returns scores within an epsilon of the KEEP equivalent on a hand-computable 4-d set.
+FT.HYBRID / FT.AGGREGATE under DROP: either return reconstructed vectors (bounded error) or produce a clear error.
+Priority
+Medium. Correctness-neutral under KEEP; blocks SVS adoption at scale where the duplicate raw-vector overhead dominates memory. Depends on SQ8 calibration (separate issue) for DROP + SQ8 to be useful; DROP + FP16 is independently valuable.
+Related
+PR SVS_VAMANA vector index: core integration over the SVS C API submodule #11 -- user surface removed, proto field preserved.
+PR feat(svs): implement RDB save/load via the SVS streaming C API #12 -- RDB save/load; raw_vector_storage state round-trips through the SVS header there.
+SVS SQ8 calibration (separate issue) -- DROP + SQ8 only becomes useful once SQ8 is calibrated correctly.
+Activity
+eshenayo
+added
+enhancementNew feature or requestNew feature or request
+on Oct 2, 2026
+eshenayo
+self-assigned this
+on Oct 2, 2026
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+eshenayo
+Labels
+enhancementNew feature or requestNew feature or request
+Projects
+No projects
+Milestone
+No milestone
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.

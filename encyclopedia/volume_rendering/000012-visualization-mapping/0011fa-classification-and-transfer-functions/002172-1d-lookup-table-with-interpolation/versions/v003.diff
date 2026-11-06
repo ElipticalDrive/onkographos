@@ -1,0 +1,254 @@
+--- v002.md
++++ v003.md
+@@ -4,142 +4,155 @@
+ 
+ ## Overview
+-This method maps scalar volume data (typically Hounsfield Units) to optical properties (attenuation coefficients, color, opacity) using a piecewise linear function defined by user-specified keypoints, implemented via a 1D lookup table or direct interpolation. It solves the problem of translating discrete physical density values into continuous visual attributes for volume rendering. Unlike [Binary and Soft Classification](6229-binary-and-soft-classification.md) which uses hard thresholds or complex analytic functions, this method provides a computationally efficient, linearly interpolated mapping between control points. It differs from [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) by using linear segments (resulting in $C^0$ continuity) rather than smooth cubic curves, and from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by allowing arbitrary non-uniform placement of control points rather than fixed uniform grid indexing.
++This method maps scalar volume data values (typically Hounsfield Units) to optical properties (attenuation coefficients, color, and opacity) using a piecewise linear function defined by user-specified keypoints [S1, unofficial]. It solves the problem of converting discrete voxel intensities into continuous visual attributes for volume rendering [S4, unofficial]. Unlike [Binary and Soft Classification](6229-binary-and-soft-classification.md) which may use hard thresholds or complex parametric curves, this method provides a computationally efficient, linear interpolation between control points, balancing visual smoothness with implementation simplicity [S1, unofficial]. It differs from [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md) by lacking $C^1$ continuity guarantees, potentially resulting in sharper but less smooth transitions [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+-*   Volume data $V$: A 3D grid of scalar values (e.g., HU).
+-*   Keypoints $K$: A set of $N$ control points defining the transfer function. Each point $k_i$ consists of an input value $x_i$ (e.g., HU) and an output value $y_i$ (e.g., attenuation $\mu$ or opacity $\alpha$).
+-*   Input range bounds: Minimum and maximum expected input values for normalization (e.g., -3500 to 3500 for HU).
++*   Volume data tensor $V$ of shape $(D, H, W)$ or $(1, 1, D, H, W)$ containing scalar values (e.g., HU) [S1, unofficial].
++*   Keypoints tensor $K$ of shape $(K, 2)$, where $K$ is the number of keypoints. The first column represents input domain values (e.g., HU), and the second column represents output range values (e.g., attenuation $\mu$) [S1, unofficial].
+ 
+ **Outputs:**
+-*   Transferred volume $V'$: A 3D grid of optical properties (attenuation, color, opacity) corresponding to $V$.
++*   Attenuation map $\mu_{tf}$ of the same shape as the input volume, containing the mapped attenuation coefficients [S1, unofficial].
+ 
+ **Data Structures:**
+-*   **Keypoints Tensor:** A 2D array of shape $(N, 2)$, where $N$ is the number of keypoints.
+-    *   Column 0: Input values ($x$).
+-    *   Column 1: Output values ($y$).
+-*   **Lookup Table (Optional):** A 1D texture or array of size $M$ (power of 2, e.g., 256 or 1024) storing pre-computed RGBA values. Index $i$ corresponds to normalized input $i/(M-1)$.
++*   **Keypoints:** A 2D array/tensor. Each row $i$ contains $(x_i, y_i)$, where $x_i$ is the input scalar value and $y_i$ is the target output value. The input values $x_i$ must be sorted in ascending order [S1, unofficial].
+ 
+ **Steps:**
+-1.  **Define Keypoints:** Specify $N$ keypoints $(x_i, y_i)$. Ensure $x_i$ are sorted in ascending order.
+-2.  **Normalize Input:** Map raw input values $v$ from the volume to the normalized range $[0, 1]$ using the formula:
+-    $$ v_{norm} = \frac{v - x_{min}}{x_{max} - x_{min}} $$
+-    Where $x_{min}$ and $x_{max}$ are the bounds of the input domain (e.g., -3500 and 3500 for standard CT HU). [S1, unofficial]
+-3.  **Identify Interval:** For each normalized input $v_{norm}$, find the index $i$ such that $x_{i, norm} \le v_{norm} < x_{i+1, norm}$, where $x_{i, norm}$ are the normalized keypoint inputs.
+-4.  **Linear Interpolation:** Compute the output value $y_{out}$ using linear interpolation between the two surrounding keypoints:
+-    $$ t = \frac{v_{norm} - x_{i, norm}}{x_{i+1, norm} - x_{i, norm}} $$
+-    $$ y_{out} = y_{i, norm} + t \cdot (y_{i+1, norm} - y_{i, norm}) $$
+-    Where $y_{i, norm}$ are the normalized keypoint outputs. [S1, unofficial]
+-5.  **Clamping:** If $v_{norm} < x_{0, norm}$, output $y_{0, norm}$. If $v_{norm} > x_{N-1, norm}$, output $y_{N-1, norm}$. [G]
+-6.  **Apply to Volume:** Replace each voxel value in $V$ with the corresponding $y_{out}$ (or RGBA tuple if mapping to color/opacity).
++1.  **Normalization:** Normalize the input domain values (e.g., HU) to the range $[0, 1]$. For medical CT data, the standard range is $[-3500, 3071]$. The normalization formula is:
++    $$ x_{norm} = \frac{x + 3500}{7000} $$
++    Apply this to all input domain values in the keypoints $K$ to get normalized keypoints $K_{norm}$ [S1, unofficial].
++2.  **Extraction:** Extract the normalized input domain values $x_p$ and output range values $y_p$ as 1D tensors of shape $(1, K)$ [S1, unofficial].
++3.  **Interpolation:** For each voxel value $v$ in the volume:
++    a. Normalize $v$ using the same offset and scale as step 1.
++    b. Find the interval $[x_{p,i}, x_{p,i+1}]$ such that $x_{p,i} \le v_{norm} \le x_{p,i+1}$.
++    c. Perform linear interpolation:
++       $$ \mu = y_{p,i} + \frac{(v_{norm} - x_{p,i})}{(x_{p,i+1} - x_{p,i})} (y_{p,i+1} - y_{p,i}) $$
++    d. Clamp the result if necessary [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def piecewise_linear_interpolation(volume, keypoints, x_min, x_max):
++import torch
++import math
++
++def normalize_hu(hu_values, offset=3500.0, scale=7000.0):
++    """Normalize HU values to [0, 1] range."""
++    return (hu_values + offset) / scale
++
++def piecewise_linear_interpolation(volume, keypoints):
+     """
+-    volume: 3D numpy array of scalar values
+-    keypoints: list of tuples (x, y), sorted by x
+-    x_min, x_max: float, bounds of the input domain
+-    Returns: 3D numpy array of interpolated values
++    Map volume values to attenuation using piecewise linear interpolation.
++    
++    Args:
++        volume: Tensor of shape (..., D, H, W) or (..., 1, D, H, W) containing HU values.
++        keypoints: Tensor of shape (K, 2). Column 0: HU values, Column 1: Attenuation values.
++        
++    Returns:
++        Tensor of same shape as volume containing attenuation values.
+     """
+-    if len(keypoints) < 2:
+-        raise ValueError("At least two keypoints are required for interpolation")
++    # Ensure keypoints are sorted by input domain (HU)
++    keypoints = keypoints[torch.argsort(keypoints[:, 0])]
++    
++    # Extract normalized input and output values
++    # Normalize HU range [-3500, 3071] to [0, 1]
++    kp_input = keypoints[:, 0]
++    kp_output = keypoints[:, 1]
++    
++    # Normalize keypoints
++    kp_input_norm = normalize_hu(kp_input)
++    
++    # Expand volume for broadcasting if needed
++    # Assuming volume is already normalized or we normalize it here
++    # Note: In practice, volume might need to be normalized similarly
++    vol_norm = normalize_hu(volume)
++    
++    # Initialize output tensor
++    attenuation = torch.zeros_like(volume)
++    
++    # Vectorized interpolation
++    # Find indices where vol_norm falls between keypoints
++    # This is a simplified version; robust implementation requires searchsorted
++    
++    # For each point in volume, find the segment
++    # Using torch.searchsorted for efficiency
++    indices = torch.searchsorted(kp_input_norm, vol_norm, side='right') - 1
++    
++    # Clamp indices to valid range [0, K-2]
++    indices = torch.clamp(indices, 0, len(kp_input_norm) - 2)
++    
++    # Get left and right keypoints
++    x0 = kp_input_norm[indices]
++    x1 = kp_input_norm[indices + 1]
++    y0 = kp_output[indices]
++    y1 = kp_output[indices + 1]
++    
++    # Linear interpolation
++    # Avoid division by zero if x0 == x1 (duplicate keypoints)
++    denom = x1 - x0
++    denom = torch.where(denom == 0, torch.ones_like(denom), denom)
++    
++    t = (vol_norm - x0) / denom
++    t = torch.clamp(t, 0.0, 1.0)
++    
++    result = y0 + t * (y1 - y0)
++    
++    return result
+ 
+-    # Extract x and y values from keypoints
+-    x_vals = [kp[0] for kp in keypoints]
+-    y_vals = [kp[1] for kp in keypoints]
+-    n = len(keypoints)
+-
+-    # Precompute normalized keypoint values
+-    x_norm = [(x - x_min) / (x_max - x_min) for x in x_vals]
+-    y_norm = y_vals  # Assuming y is already in [0, 1] or appropriate range
+-
+-    # Initialize output array
+-    output = np.zeros_like(volume)
+-
+-    # Iterate over all voxels
+-    for idx in np.ndindex(volume.shape):
+-        v = volume[idx]
+-
+-        # Normalize input
+-        v_norm = (v - x_min) / (x_max - x_min)
+-
+-        # Clamp to range
+-        if v_norm < x_norm[0]:
+-            output[idx] = y_norm[0]
+-            continue
+-        if v_norm > x_norm[-1]:
+-            output[idx] = y_norm[-1]
+-            continue
+-
+-        # Find interval
+-        # Linear search for simplicity; binary search is more efficient for large N
+-        i = 0
+-        while i < n - 1 and x_norm[i + 1] < v_norm:
+-            i += 1
+-
+-        # Interpolate
+-        x0 = x_norm[i]
+-        x1 = x_norm[i + 1]
+-        y0 = y_norm[i]
+-        y1 = y_norm[i + 1]
+-
+-        if x1 == x0:
+-            t = 0.0
+-        else:
+-            t = (v_norm - x0) / (x1 - x0)
+-
+-        output[idx] = y0 + t * (y1 - y0)
+-
+-    return output
++# Example usage with keypoints for air, lung, soft tissue, bone, metal
++# HU: -1000, -500, 0, 1000, 2000
++# Attenuation: 0.0, 0.1, 0.2, 0.5, 1.0
++keypoints = torch.tensor([
++    [-1000.0, 0.0],
++    [-500.0, 0.1],
++    [0.0, 0.2],
++    [1000.0, 0.5],
++    [2000.0, 1.0]
++])
+ ```
+ 
+ **Parameters:**
+-*   **Keypoints:** Typically 4-6 points for medical imaging (e.g., air, lung, soft tissue, bone). [S1, unofficial]
+-*   **Normalization Range:** For CT data, often -3500 to 3500 HU. [S1, unofficial]
++*   **Keypoints:** User-defined. Typical medical imaging keypoints include air (-1000 HU), lung/soft-tissue (-500 to 0 HU), soft tissue (0-100 HU), cortical bone (1000+ HU), and dense bone/metal (2000+ HU) [S1, unofficial].
++*   **Normalization Offset/Scale:** Default for CT is offset=3500, scale=7000, mapping [-3500, 3071] to [0, 1] [S1, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Unsorted Keypoints:** The algorithm assumes $x_i$ are sorted. Unsorted keypoints will produce incorrect results. [G]
+-*   **Duplicate X Values:** If $x_i = x_{i+1}$, division by zero occurs in interpolation. Check for duplicates and remove or merge. [G]
+-*   **Out-of-Bounds Values:** Values outside the keypoint range must be clamped to the nearest endpoint value to avoid extrapolation errors. [G]
+-*   **Precision:** Using floating-point arithmetic for normalization and interpolation is standard. Double precision may be needed for very large dynamic ranges. [G]
++*   **Duplicate Keypoints:** If two keypoints have the same input domain value, the denominator in interpolation becomes zero. The implementation must handle this by clamping or skipping [S1, unofficial].
++*   **Out-of-Bounds Values:** Values outside the range of the keypoints must be clamped to the first or last keypoint's output value [S1, unofficial].
++*   **Precision:** Using floating-point arithmetic for normalization and interpolation is standard. Double precision may be required for high dynamic range data [S1, unofficial].
+ 
+ ## Subtopics
+ 
+ ### [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md)
+-A 1D transfer function that maps a scalar field value in $[0, 1]$ to density and attenuation color using cubic spline interpolation of control points. It builds on [1D Lookup Table with Interpolation](2528-1d-lookup-table-with-interpolation.md) by providing $C^1$ continuous derivatives for smoother visual transitions compared to linear methods. Choose this when smooth gradients are critical and computational cost is acceptable.
++A 1D transfer function that maps a scalar field value in $[0, 1]$ to density and attenuation color using cubic spline interpolation of control points. It builds on [1D Lookup Table with Interpolation](2528-1d-lookup-table-with-interpolation.md) by providing $C^1$ continuous derivatives for smoother visual transitions compared to linear methods. Choose this when visual smoothness is critical and computational cost is acceptable. Link: [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md).
+ 
+ ### [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md)
+-Linear look-up table classification is a volume rendering method that maps voxel intensity values to material composition percentages using a pre-calculated linear table. It solves the problem of assigning physical properties to discrete voxel data by treating classification as a nearest-neighbor decision based on density peaks. Unlike cubic spline or piecewise linear interpolation methods which allow arbitrary opacity curves, this method enforces a strict linear ordering of materials, making it computationally simple but restricted to scenarios where materials are distinct and adjacent in density space. Choose this for simple, fast material assignment in homogeneous datasets.
++Linear look-up table classification is a volume rendering method that maps voxel intensity values to material composition percentages using a pre-calculated linear table. It solves the problem of assigning physical properties to discrete voxel data by treating classification as a nearest-neighbor decision based on density peaks. Unlike cubic spline or piecewise linear interpolation methods which allow arbitrary opacity curves, this method enforces a strict linear ordering of materials, making it computationally simple but restricted to scenarios where materials are distinct and adjacent in density space. Link: [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md).
+ 
+ ### [Piecewise Linear Interpolation (Lookup Table)](2643-piecewise-linear-interpolation-lookup-table.md)
+-Piecewise Linear Interpolation (Lookup Table) evaluates scalar-to-color and scalar-to-opacity transfer functions by linearly interpolating between adjacent control points. It solves the problem of mapping discrete scalar values from a volume dataset to continuous RGBA output values for volume rendering. It differs from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by explicitly supporting arbitrary control point placement and binary search for interval identification rather than fixed uniform grid indexing. Choose this for general-purpose transfer functions with arbitrary shapes.
++Piecewise Linear Interpolation (Lookup Table) evaluates scalar-to-color and scalar-to-opacity transfer functions by linearly interpolating between adjacent control points. It solves the problem of mapping discrete scalar values from a volume dataset to continuous RGBA output values for volume rendering. It differs from [Linear Look-up Table Classification](2636-linear-look-up-table-classification.md) by explicitly supporting arbitrary control point placement and binary search for interval identification rather than fixed uniform grid indexing. Link: [Piecewise Linear Interpolation (Lookup Table)](2643-piecewise-linear-interpolation-lookup-table.md).
+ 
+ ### [Shading Lookup Table Computation](3589-shading-lookup-table-computation.md)
+-Shading Lookup Table Computation is the process of generating or updating a color lookup table (LUT) that maps scalar data values to RGB colors and opacity, incorporating current lighting, material, and view transformation parameters. It solves the problem of efficiently applying complex shading models to volume data during rendering by pre-computing these effects into a 1D texture, allowing the renderer to fetch shaded colors via simple texture lookups. It is distinguished from its siblings by its reliance on **color index mode** (storing indices and transforming them at render time) rather than pre-shaded color values, which enables interactive manipulation of visual quantities like lighting and material properties. Choose this when dynamic lighting changes are frequent.
++Shading Lookup Table Computation is the process of generating or updating a color lookup table (LUT) that maps scalar data values to RGB colors and opacity, incorporating current lighting, material, and view transformation parameters. It solves the problem of efficiently applying complex shading models to volume data during rendering by pre-computing these effects into a 1D texture, allowing the renderer to fetch shaded colors via simple texture lookups. It is distinguished from its siblings by its reliance on **color index mode** (storing indices and transforming them at render time) rather than pre-shaded color values, which enables interactive manipulation of visual quantities like lighting and material properties. Link: [Shading Lookup Table Computation](3589-shading-lookup-table-computation.md).
+ 
+ ### [Lookup Table Implementation](5347-lookup-table-implementation.md)
+-Lookup Table Implementation refers to the mechanism of storing, updating, and sampling 1D transfer functions (TFs) as discrete arrays or textures on the GPU to map scalar volume data to RGBA optical properties. It solves the problem of efficient, hardware-accelerated classification by replacing per-voxel function evaluation with fast texture lookups. Unlike [Cubic Spline Transfer Function](1811-cubic-spline-transfer-function.md), which computes basis functions dynamically, or [Parametric Function Generation](5349-parametric-function-generation.md), which uses analytic formulas, this approach relies on pre-computed or dynamically generated discrete samples. Choose this for real-time rendering performance.
++Lookup Table Implementation is the mechanism that materializes a 1D transfer function into a hardware-accessible data structure, typically a 1D texture or Shader Storage Buffer Object (SSBO), for use during volume rendering. It solves the problem of efficiently mapping scalar volume data values to RGBA optical properties by converting user-defined control points or parametric definitions into a dense, sampled array. It differs from [1D Transfer Function Generation and Sampling](2689-1d-transfer-function-generation-and-sampling.md) by focusing on the data upload and GPU state management rather than the mathematical generation of the LUT values, and from [Hardcoded Transfer Function](1098-hardcoded-transfer-function.md) by supporting dynamic updates and complex data structures. Link: [Lookup Table Implementation](5347-lookup-table-implementation.md).
+ 
+ ### Cosine Ramp Table Generation
+-A helper procedure that generates a cosine-shaped ramp table for smoothly attenuating density values. It is used to fade out volume data near boundaries or centers. The table is generated by looping from $i=0$ to $RAMP\_SIZE-1$, computing $dist = i / (RAMP\_SIZE - 1.0)$, and setting $ramp[i] = (\cos(dist \cdot \pi) + 1.0) / 2.0$. [S2, unofficial]
++A helper procedure that generates a cosine-shaped ramp table for smoothly attenuating density values [S2, unofficial]. It is used to fade out density at the boundaries of a volume slab. The ramp is computed by looping from $i=0$ to $RAMP\_SIZE-1$, calculating $dist = i / (RAMP\_SIZE - 1.0)$, and setting $ramp[i] = (\cos(dist \cdot \pi) + 1.0) / 2.0$ [S2, unofficial]. Link: [Cosine Ramp Table Generation](2528-1d-lookup-table-with-interpolation.md#cosine-ramp-table-generation).
+ 
+ ### Target Value Configuration
+-User configuration of up to five target data values, their associated RGB colors, allowable value deviation windows, and maximum opacity. Up to five target data values can be selected. RGB triplets are expressed as three real numbers ranging from 0.0 to 1.0 and must be distinct for each target to avoid color ambiguity and crossover. The allowable value deviation defines a "window" where samples near the center are more opaque than those near the edges. Maximum opacity ranges from 0.0 to 1.0. [S3, unofficial]
++User configuration of up to five target data values, their associated RGB colors, allowable value deviation windows, and maximum opacity [S3, unofficial]. Parameters include: up to five target data values, RGB triplets (0.0-1.0, must be distinct to avoid ambiguity), allowable value deviation (window size), and maximum opacity (0.0-1.0) [S3, unofficial]. Pitfall: Using identical RGB triplets for different target values causes surfaces to appear with the same color, leading to ambiguity. RGB triplets must be distinct enough to prevent color crossover caused by surface highlighting variations [S3, unofficial]. Link: [Target Value Configuration](2528-1d-lookup-table-with-interpolation.md#target-value-configuration).
+ 
+ ### Smoothstep Interpolation
+-Clamps and interpolates $x$ between $edge0$ and $edge1$ using a cubic Hermite spline for smooth transitions. Steps: 1. $t = \text{clamp}((x - edge0) / (edge1 - edge0), 0.0, 1.0)$. 2. Return $t \cdot t \cdot (3.0 - 2.0 \cdot t)$. [S4, unofficial]
++Clamps and interpolates $x$ between $edge0$ and $edge1$ using a cubic Hermite spline for smooth transitions [S4, unofficial]. Steps: 1. $t = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0)$. 2. Return $t \cdot t \cdot (3.0 - 2.0 \cdot t)$ [S4, unofficial]. Link: [Smoothstep Interpolation](2528-1d-lookup-table-with-interpolation.md#smoothstep-interpolation).
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N)$ per voxel for linear search, or $O(\log N)$ with binary search, where $N$ is the number of keypoints. With a pre-computed LUT, sampling is $O(1)$.
+-*   **Memory Complexity:** $O(N)$ for keypoints. $O(M)$ for LUT, where $M$ is the LUT size (typically 256-1024).
+-*   **Performance:** Very fast on CPU for small $N$. On GPU, LUT-based sampling is extremely fast due to hardware texture caching. [S1, unofficial]
+-*   **Strengths:** Simple to implement, intuitive control via keypoints, efficient.
+-*   **Limitations:** Linear interpolation results in $C^0$ continuity, which may appear less smooth than cubic splines. Sensitive to keypoint placement.
+-*   **When to Use:** General-purpose volume rendering, medical imaging (CT), when real-time performance is needed.
+-*   **When Not to Use:** When smooth gradients are critical and computational cost allows for cubic splines, or when complex multi-dimensional transfer functions are required.
++*   **Time Complexity:** $O(N)$ for $N$ voxels, with $O(\log K)$ or $O(1)$ lookup per voxel depending on implementation (binary search vs. direct indexing) [S1, unofficial].
++*   **Memory Complexity:** $O(K)$ for storing keypoints, where $K$ is the number of keypoints [S1, unofficial].
++*   **Performance:** Fast and suitable for real-time rendering on GPU [S1, unofficial].
++*   **Strengths:** Simple to implement, computationally efficient, easy to adjust via keypoints [S1, unofficial].
++*   **Limitations:** Linear interpolation may produce visible "kinks" at keypoints if not enough points are used [S1, unofficial].
++*   **When to Use:** When performance is critical and smoothness requirements are moderate [S1, unofficial].
++*   **When Not to Use:** When high visual smoothness is required (use Cubic Spline) or when complex non-linear mappings are needed [S1, unofficial].
+ 
+ ## Background
+-The method originates from early volume rendering techniques where piecewise linear functions were used to map scalar data to visual properties. It is widely used in medical imaging (CT scans) where Hounsfield Units have a well-defined physical meaning. The use of lookup tables for transfer function evaluation became standard with the advent of GPU hardware acceleration. [S1, unofficial][S3, unofficial]
++The method originates from early volume rendering techniques that mapped scalar data to visual properties using simple linear functions [S1, unofficial]. It is widely used in medical imaging (CT scans) where Hounsfield Units have a well-defined physical meaning [S1, unofficial]. The technique is foundational for more complex transfer functions and is often implemented as a lookup table for efficiency [S1, unofficial].
+ 
+ ## Sources

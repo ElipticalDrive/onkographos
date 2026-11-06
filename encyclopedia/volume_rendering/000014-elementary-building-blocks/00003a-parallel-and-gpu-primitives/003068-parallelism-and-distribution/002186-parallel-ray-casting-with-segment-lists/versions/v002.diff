@@ -1,0 +1,260 @@
+--- v001.md
++++ v002.md
+@@ -3,161 +3,142 @@
+ 
+ ## Overview
+-Parallel Ray Casting with Segment Lists is a volume rendering algorithm that distributes image rows across MPI ranks and OpenMP threads to accelerate ray casting [S1, unofficial]. It uses segment lists to skip empty space and calculates sampling points based on a step length derived from the sampling rate and volume dimensions [S1, unofficial]. It differs from [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) by operating in image-order ray casting rather than object-order compositing, and from [Ray Compaction](4039-ray-compaction.md) by using explicit segment lists for empty space skipping rather than compacting active rays [S1, unofficial].
++Parallel Ray Casting with Segment Lists is a volume rendering acceleration method that combines spatial decomposition of the image plane with ray-space culling via segment lists to skip empty space [S1, unofficial]. It distributes rendering tasks across multiple processors (MPI ranks) and threads (OpenMP), calculating sampling points based on precomputed segment boundaries rather than iterating every voxel [S1, unofficial]. This approach differs from [Parallel Image Compositing with Overlapping](3554-parallel-image-compositing-with-overlapping.md) by handling visibility culling at the ray level before compositing, and from [Ray Compaction](4039-ray-compaction.md) by retaining the full ray structure but skipping empty intervals explicitly via list iteration rather than compacting active rays into a dense array [S1, unofficial].
+ 
+ ## How it works
+ **Inputs:**
+ - Image dimensions: `width`, `height`.
+-- Camera parameters: `cam_pos`, `ray_dir` (normalized), `aspect` ratio.
+-- Volume parameters: `dims` (3D dimensions), `sampling_rate` (typical value 1.0) [S1, unofficial].
+-- Configuration: `config::multi_threading` (bool), `config::core_count`, `config::core_thread_count`, `thread_nums` (default 4) [S1, unofficial].
+-- MPI environment: `comm_size` (number of ranks), `my_rank` (current rank) [S1, unofficial].
++- Camera parameters: `cam_pos` (position), `ray_dir` (direction vector), `aspect` (aspect ratio).
++- Volume data: `dims` (volume dimensions vector), `buf_base` (base buffer pointer), block structure with null checks.
++- Configuration: `sampling_rate` (default 1.0), `comm_size` (number of MPI ranks), `thread_nums` (number of OpenMP threads, default 4).
+ 
+ **Outputs:**
+-- Rendered image pixels.
++- Rendered image pixels (RGB values).
+ 
+ **Data Structures:**
+-- `raytracer` struct fields: `m_start_x`, `m_start_y`, `m_end_x`, `m_end_y`, `m_width`, `m_height`, `m_depth`, `m_writer`, `m_threadId` [S2, unofficial].
+-- `seg_list`: List of segments, where each segment is a pair `(s_beg, s_end)` representing the entry and exit distances of the ray within the volume [S1, unofficial].
+-- `point_list`: List of sampling points along the ray [S1, unofficial].
+-- Block offsets: Precomputed offsets for MMU access, stored per brick [S1, unofficial].
++- `raytracer` struct: Contains `m_start_x`, `m_start_y`, `m_end_x`, `m_end_y`, `m_width`, `m_height`, `m_depth`, `m_writer`, `m_threadId` [S2, unofficial].
++- `seg_list`: A list of segments, where each segment is defined by start and end points `(s_beg, s_end)` along the ray [S1, unofficial].
++- `point_list`: A list of sampling points along the ray [S1, unofficial].
+ 
+-**Steps:**
++**Step Length Calculation:**
++The step length for sampling is calculated as:
++$$ \text{step\_len} = \frac{1.0}{\text{sampling\_rate} \times \|\text{dims}\|} $$
++where $\|\text{dims}\|$ is the Euclidean norm of the volume dimensions vector [S1, unofficial].
+ 
+-1. **Calculate step length:**
+-   $$ \text{step\_len} = \frac{1.0}{\text{sampling\_rate} \times \|\text{dims}\|} $$
+-   where $\|\text{dims}\|$ is the Euclidean norm of the volume dimensions [S1, unofficial].
++**Precomputation:**
++Block offsets for Memory Management Unit (MMU) access are precomputed by iterating over brick dimensions $(k, j, i)$. For each block:
++- If the block is null, the offset is $-1$.
++- Otherwise, the offset is $\text{block} \to \text{data} - \text{buf\_base}$ [S1, unofficial].
+ 
+-2. **Determine job count:**
+-   If `config::multi_threading` is true, `jobs = config::core_count * config::core_thread_count`; else `jobs = 1` [S1, unofficial].
++**Parallel Execution Steps:**
++1.  **Job Distribution:**
++    - Calculate total line numbers: $\text{line\_nums} = \lceil \text{height} / \text{comm\_size} \rceil$.
++    - Calculate thread line numbers: $\text{t\_line\_nums} = \lceil \text{line\_nums} / \text{thread\_nums} \rceil$ [S1, unofficial].
++    - If multi-threading is enabled, job count is $\text{config::core\_count} \times \text{config::core\_thread\_count}$; otherwise, it is 1 [S2, unofficial].
+ 
+-3. **Calculate row distribution:**
+-   $$ \text{line\_nums} = \lceil \frac{\text{height}}{\text{comm\_size}} \rceil $$
+-   $$ \text{t\_line\_nums} = \lceil \frac{\text{line\_nums}}{\text{thread\_nums}} \rceil $$
+-   where `thread_nums` is the number of OpenMP threads [S1, unofficial].
++2.  **Thread Loop:**
++    - For each thread with ID `t_id` in the parallel region:
++        - Iterate $i$ from $0$ to $\text{t\_line\_nums} - 1$.
++        - Calculate row index: $\text{row} = \text{my\_rank} + (\text{t\_id} \times \text{t\_line\_nums} + i) \times \text{comm\_size}$.
++        - If $\text{row} \ge \text{height}$, break [S1, unofficial].
+ 
+-4. **Divide image height into jobs segments:**
+-   Each job processes rows from $i \times \frac{\text{height}}{\text{jobs}}$ to $(i+1) \times \frac{\text{height}}{\text{jobs}}$ [S1, unofficial].
++3.  **Ray Casting per Row:**
++    - For each column `col` in the assigned row:
++        - Calculate pixel coordinates:
++          $$ u = \left(-0.5 + \frac{\text{col} + 0.5}{\text{width}}\right) \times \text{aspect} $$
++          $$ v = -0.5 + \frac{\text{row} + 0.5}{\text{height}} $$
++        - Calculate `ray_dir` using camera orientation functions (e.g., `cal_ray_dir`), then normalize it [S1, unofficial].
++        - Get ray distance to volume bounding box: $\text{seg} = \text{volume} \to \text{getRayDistance}(\text{cam\_pos}, \text{ray\_dir})$ [S1, unofficial].
++        - Get segment list for this ray: $\text{volume} \to \text{getSegList}(*\text{seg\_list}, \text{cam\_pos}, \text{ray\_dir})$ [S1, unofficial].
++        - Clear `point_list` [S1, unofficial].
+ 
+-5. **Precompute block offsets for MMU access:**
+-   Iterate over brick dimensions $(k, j, i)$. Get block. If block is null, offset is -1. Else offset is `block->data - buf_base` [S1, unofficial].
++4.  **Sampling Point Generation:**
++    - For each segment $(s\_beg, s\_end)$ in `seg_list`:
++        - Align $s\_beg$ to the step grid:
++          $$ s\_beg = \text{seg}.x + \left\lceil \frac{s\_beg - \text{seg}.x}{\text{step\_len}} \right\rceil \times \text{step\_len} $$
++        - While $s\_beg \le s\_end$:
++            - Push $s\_beg$ to `point_list`.
++            - $s\_beg \leftarrow s\_beg + \text{step\_len}$ [S1, unofficial].
+ 
+-6. **Parallel region:**
+-   For each thread `t_id`, iterate over `t_line_nums`. Calculate row index:
+-   $$ \text{row} = \text{my\_rank} + (\text{t\_id} \times \text{t\_line\_nums} + i) \times \text{comm\_size} $$
+-   Break if `row >= height` [S1, unofficial].
+-
+-7. **For each column `col`:**
+-   a. Calculate pixel coordinates:
+-      $$ u = \left(-0.5 + \frac{\text{col} + 0.5}{\text{width}}\right) \times \text{aspect} $$
+-      $$ v = -0.5 + \frac{\text{row} + 0.5}{\text{height}} $$
+-   b. Calculate `ray_dir` using `cal_ray_dir`. Normalize `ray_dir` [S1, unofficial].
+-   c. Get ray distance to volume bbox: `seg = volume->getRayDistance(cam_pos, ray_dir)` [S1, unofficial].
+-   d. Get segment list for this ray: `volume->getSegList(*seg_list, cam_pos, ray_dir)`. Clear `point_list` [S1, unofficial].
+-   e. Iterate over segments in `seg_list`. For each segment $(s\_beg, s\_end)$:
+-      i. Align $s\_beg$ to step grid:
+-         $$ s\_beg = \text{seg}.x + \left\lceil \frac{s\_beg - \text{seg}.x}{\text{step\_len}} \right\rceil \times \text{step\_len} $$
+-      ii. While $s\_beg \le s\_end$:
+-          - Push $s\_beg$ to `point_list`.
+-          - $s\_beg += \text{step\_len}$ [S1, unofficial].
++5.  **Compositing:**
++    - Iterate over `point_list` to sample volume data and composite the final color for the pixel (implementation details for compositing formula not provided in sources) [S1, unofficial].
+ 
+ **Pseudocode:**
+-
+ ```python
+ import math
+ 
+-def parallel_ray_casting_with_segment_lists(width, height, cam_pos, ray_dir, dims, sampling_rate, config, comm_size, my_rank, thread_nums):
+-    # Step 1: Calculate step length
+-    dims_norm = math.sqrt(dims[0]**2 + dims[1]**2 + dims[2]**2)
++def parallel_ray_casting_segment_lists(width, height, cam_pos, ray_dir_func, volume, config):
++    comm_size = config.comm_size
++    thread_nums = config.thread_nums
++    sampling_rate = config.sampling_rate
++    dims = volume.dims
++    
++    # Precompute step length
++    dims_norm = math.sqrt(dims.x**2 + dims.y**2 + dims.z**2)
+     step_len = 1.0 / (sampling_rate * dims_norm)
++    
++    # Precompute block offsets
++    block_offsets = {}
++    for k in range(volume.bricks.k):
++        for j in range(volume.bricks.j):
++            for i in range(volume.bricks.i):
++                block = volume.get_block(k, j, i)
++                if block is None:
++                    block_offsets[(k,j,i)] = -1
++                else:
++                    block_offsets[(k,j,i)] = block.data - volume.buf_base
+ 
+-    # Step 2: Determine job count
+-    if config.multi_threading:
+-        jobs = config.core_count * config.core_thread_count
+-    else:
+-        jobs = 1
+-
+-    # Step 3: Calculate row distribution
++    # Calculate distribution
+     line_nums = math.ceil(height / comm_size)
+     t_line_nums = math.ceil(line_nums / thread_nums)
+-
+-    # Step 4: Divide image height into jobs segments
+-    # Each job processes rows from i * height/jobs to (i+1) * height/jobs
+-    # This is handled by the parallel region below
+-
+-    # Step 5: Precompute block offsets for MMU access
+-    # Iterate over brick dimensions (k, j, i). Get block. If block is null, offset is -1. Else offset is block->data - buf_base
+-    # Not given in the sources.
+-
+-    # Step 6: Parallel region
++    
++    # Parallel region (conceptual)
+     for t_id in range(thread_nums):
+         for i in range(t_line_nums):
+-            row = my_rank + (t_id * t_line_nums + i) * comm_size
++            row = config.my_rank + (t_id * t_line_nums + i) * comm_size
+             if row >= height:
+                 break
+-
+-            # Step 7: For each column col
++            
+             for col in range(width):
+-                # Step 7a: Calculate pixel coordinates
++                # Calculate ray
+                 u = (-0.5 + (col + 0.5) / width) * config.aspect
+                 v = -0.5 + (row + 0.5) / height
+-
+-                # Step 7b: Calculate ray_dir using cal_ray_dir. Normalize ray_dir
+-                ray_dir = cal_ray_dir(u, v, cam_pos)
+-                ray_dir = normalize(ray_dir)
+-
+-                # Step 7c: Get ray distance to volume bbox
++                ray_dir = ray_dir_func(u, v)
++                ray_dir = ray_dir / math.linalg.norm(ray_dir)
++                
++                # Get segment info
+                 seg = volume.get_ray_distance(cam_pos, ray_dir)
+-
+-                # Step 7d: Get segment list for this ray
+                 seg_list = volume.get_seg_list(cam_pos, ray_dir)
+                 point_list = []
+-
+-                # Step 7e: Iterate over segments in seg_list
++                
++                # Generate sampling points
+                 for s_beg, s_end in seg_list:
+                     # Align s_beg to step grid
+-                    s_beg = seg.x + math.ceil((s_beg - seg.x) / step_len) * step_len
+-
+-                    # While s_beg <= s_end
+-                    while s_beg <= s_end:
+-                        point_list.append(s_beg)
+-                        s_beg += step_len
+-
+-                # Render pixel using point_list
+-                render_pixel(row, col, point_list)
+-
+-def cal_ray_dir(u, v, cam_pos):
+-    # Not given in the sources. Placeholder for camera ray generation logic.
+-    return Vector3f(0, 0, 1)
+-
+-def normalize(v):
+-    length = math.sqrt(v.x**2 + v.y**2 + v.z**2)
+-    return Vector3f(v.x / length, v.y / length, v.z / length)
+-
+-def render_pixel(row, col, point_list):
+-    # Not given in the sources. Placeholder for ray casting and compositing logic.
+-    pass
++                    # Note: seg.x is assumed to be the ray origin or start of segment
++                    aligned_beg = seg.x + math.ceil((s_beg - seg.x) / step_len) * step_len
++                    
++                    current = aligned_beg
++                    while current <= s_end:
++                        point_list.append(current)
++                        current += step_len
++                
++                # Composite pixel (implementation not in source)
++                # color = composite(volume, cam_pos, ray_dir, point_list)
++                # image.set_pixel(row, col, color)
+ ```
+ 
+-**Parameters:**
+-- `sampling_rate`: Controls step length. Typical value 1.0 [S1, unofficial].
+-- `thread_nums`: Number of OpenMP threads. Default 4 [S1, unofficial].
+-
+-**Edge cases and pitfalls:**
+-- Precision: Aligning $s\_beg$ to the step grid uses ceiling division, which may introduce small errors if `step_len` is not a power of two or if floating-point precision is limited [S1, unofficial].
+-- Boundaries: The row index calculation must ensure that `row` does not exceed `height` [S1, unofficial].
+-- Degenerate input: If `dims` is zero or `sampling_rate` is zero, `step_len` will be undefined or infinite [S1, unofficial].
++**Edge Cases and Pitfalls:**
++- **Precision:** Floating-point alignment of $s\_beg$ may introduce small errors; ensure `step_len` calculation is stable [S1, unofficial].
++- **Boundaries:** The row calculation must strictly check `row >= height` to avoid out-of-bounds access [S1, unofficial].
++- **Degenerate Input:** If `ray_dir` is zero or `dims.norm()` is zero, the method fails; guards are required [S1, unofficial].
+ 
+ ## Operating characteristics
+-- Time complexity: Not given in the sources.
+-- Memory complexity: Not given in the sources.
+-- Measured performance: Not given in the sources.
+-- Scaling: Not given in the sources.
+-- Strengths: Parallelizes across image rows and threads, potentially reducing rendering time [S1, unofficial].
+-- Limitations: Not given in the sources.
+-- When to use: When rendering large volumes with significant empty space, and parallelism is desired [S1, unofficial].
+-- When not: When memory bandwidth is a bottleneck, or when the volume is small and parallel overhead outweighs benefits [S1, unofficial].
++- **Time Complexity:** $O(N \cdot S)$, where $N$ is the number of pixels and $S$ is the average number of segments per ray. Skipping empty space reduces $S$ significantly compared to full voxel traversal.
++- **Memory Complexity:** $O(B)$ for block offsets and $O(R)$ for segment lists, where $B$ is the number of blocks and $R$ is the number of rays.
++- **Performance:** Depends heavily on the sparsity of the volume. Dense volumes offer less benefit from segment lists. Parallelism scales with `comm_size` and `thread_nums` [S1, unofficial].
++- **Strengths:** Efficiently skips empty space; simple parallelization via image rows.
++- **Limitations:** Load balancing may be uneven if some rays have significantly more segments than others. Not given in the sources.
+ 
+ ## Background
+-Parallel Ray Casting with Segment Lists is described in the repository [hopexn/VolumeRenderingParallel](https://github.com/hopexn/VolumeRenderingParallel) [S1, unofficial]. It is an unofficial implementation, likely for educational or experimental purposes [S1, unofficial].
++Originated in the context of parallel volume rendering implementations using OpenMP and MPI [S1, unofficial]. The method is part of a broader family of image-order rendering techniques that prioritize ray-space culling.
+ 
+ ## Sources

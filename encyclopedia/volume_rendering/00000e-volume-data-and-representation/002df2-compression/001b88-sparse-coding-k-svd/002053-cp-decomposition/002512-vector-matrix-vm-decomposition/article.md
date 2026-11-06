@@ -1,118 +1,127 @@
 # Vector-Matrix (VM) Decomposition
 
-Also called: Tensor Decomposition, VM decomposition
+Also called: Tensor Decomposition, VM Decomposition
 
 ## Overview
-Vector-Matrix (VM) decomposition is a tensor factorization technique that relaxes the low-rank constraints for two modes of a tensor by factorizing it into compact vector and matrix factors, effectively acting as a special case of Block Term Decomposition (BTD) [S1][S2, unofficial][S3, unofficial]. Unlike [CP Decomposition](2255-cp-decomposition.md), which uses a sum of outer products of pure vectors, VM uses a sum of vector-matrix outer products [S1][S2, unofficial]. This allows each component to express more complex tensor data of higher ranks, significantly reducing the required number of components compared to CP while maintaining a memory complexity of $O(N^2)$ compared to the $O(N^3)$ of dense grids [S1][S3, unofficial].
+Vector-Matrix (VM) decomposition is a tensor factorization technique that reduces the memory footprint of high-dimensional data by factorizing a tensor into a sum of vector-matrix outer products [S2][S3, S4, unofficial]. It solves the problem of excessive memory usage in explicit grid-based scene representations (such as Plenoxels) by relaxing the low-rank constraints for two modes of a tensor, allowing each component to express more complex data than pure vector-based methods [S2][S4, unofficial]. Unlike [CP Decomposition](2255-cp-decomposition.md), which uses a sum of rank-one components (outer products of pure vectors), VM uses a sum of vector-matrix outer products, effectively acting as a special case of Block Term Decomposition (BTD) [S2][S3, S4, unofficial]. This trade-off increases the model size per component compared to CP but significantly reduces the required number of components $R$ for the same expression capacity [S2][S4, unofficial].
 
 ## How it works
-**Inputs and Outputs**
-*   **Input:** A 3D tensor $\mathcal{T}$ of dimensions $I \times J \times K$ (e.g., representing a radiance field feature grid) [S4].
-*   **Output:** A set of vector factors $\mathbf{v}$ and matrix factors $\mathbf{M}$ that approximate $\mathcal{T}$ [S1][S4].
+**Inputs and Outputs:**
+*   **Input:** A 3D tensor $\mathcal{T} \in \mathbb{R}^{I \times J \times K}$ representing discrete data (e.g., a voxel grid of features) [S1, S2].
+*   **Output:** A set of low-rank factors: vectors $\mathbf{v}$ and matrices $\mathbf{M}$ that reconstruct $\mathcal{T}$ [S1, S2].
 
-**Data Structures**
-The decomposition represents the tensor as a sum of three types of components, one for each mode being the "rank-one" vector [S3, unofficial]. For a tensor with modes corresponding to spatial axes $X, Y, Z$ (with dimensions $I, J, K$ respectively), the factors are [S1][S2, unofficial][S3, unofficial]:
-1.  **X-mode components:** A vector $\mathbf{v}_r^X \in \mathbb{R}^I$ and a matrix $\mathbf{M}_r^{Y,Z} \in \mathbb{R}^{J \times K}$.
-2.  **Y-mode components:** A vector $\mathbf{v}_r^Y \in \mathbb{R}^J$ and a matrix $\mathbf{M}_r^{X,Z} \in \mathbb{R}^{I \times K}$.
-3.  **Z-mode components:** A vector $\mathbf{v}_r^Z \in \mathbb{R}^K$ and a matrix $\mathbf{M}_r^{X,Y} \in \mathbb{R}^{I \times J}$.
+**Data Structures and Layout:**
+The method stores vectors and matrices instead of the direct tensor values [S1]. Features stored in these factors are typically decoded by an MLP to produce final values (e.g., density and color) [S1].
+*   **Vectors:** $\mathbf{v}_r^1 \in \mathbb{R}^I$, $\mathbf{v}_r^2 \in \mathbb{R}^J$, $\mathbf{v}_r^3 \in \mathbb{R}^K$ [S1, S2].
+*   **Matrices:** $\mathbf{M}_r^{2,3} \in \mathbb{R}^{J \times K}$, $\mathbf{M}_r^{1,3} \in \mathbb{R}^{I \times K}$, $\mathbf{M}_r^{1,2} \in \mathbb{R}^{I \times J}$ [S1, S2].
+*   **Parameters:** $R_1, R_2, R_3$ are the number of components for each mode combination. They can be set differently based on the complexity of each mode, but are often set equal ($R_1=R_2=R_3=R$) for scenes with uniform complexity [S2][S3, S4, unofficial]. A typical value for $R$ in radiance field modeling is 48 [S1].
 
-**Parameters**
-*   $R_1, R_2, R_3$: The number of components for each mode combination. These can be set differently depending on the complexity of each mode [S2, unofficial][S3, unofficial].
-*   In the context of 3D scene modeling (e.g., TensoRF), it is common to assume equal complexity along axes, setting $R_1 = R_2 = R_3 = R$ [S1][S2, unofficial][S3, unofficial].
-
-**Formula**
-The tensor $\mathcal{T}$ is decomposed as [S1][S2, unofficial][S3, unofficial]:
+**Formula:**
+The tensor $\mathcal{T}$ is decomposed as follows [S1, S2][S3, S4, unofficial]:
 
 $$
 \mathcal{T} = \sum_{r=1}^{R_1} \mathbf{v}_r^1 \circ \mathbf{M}_r^{2,3} + \sum_{r=1}^{R_2} \mathbf{v}_r^2 \circ \mathbf{M}_r^{1,3} + \sum_{r=1}^{R_3} \mathbf{v}_r^3 \circ \mathbf{M}_r^{1,2}
 $$
 
-Where $\circ$ denotes the outer product between a vector and a matrix [S1][S4]. Specifically, for scene modeling with $R_1=R_2=R_3=R$ and axes $X,Y,Z$, the formula is [S1][S2, unofficial][S3, unofficial]:
+where $\circ$ represents the outer product [S1]. For scene modeling with XYZ axes, where $R_1=R_2=R_3=R$, this is expressed as [S2][S3, S4, unofficial]:
 
 $$
 \mathcal{T} = \sum_{r=1}^R \mathbf{v}_r^X \circ \mathbf{M}_r^{Y,Z} + \mathbf{v}_r^Y \circ \mathbf{M}_r^{X,Z} + \mathbf{v}_r^Z \circ \mathbf{M}_r^{X,Y}
 $$
 
-The element $\mathcal{T}_{ijk}$ is computed as [S2, unofficial][S3, unofficial]:
+The element $\mathcal{T}_{ijk}$ is computed as [S2][S3, S4, unofficial]:
 
 $$
-\mathcal{T}_{ijk} = \sum_{r=1}^R \sum_{m \in \{X, Y, Z\}} \mathcal{A}_{r,ijk}^m
+\mathcal{T}_{ijk} = \sum_{r=1}^R \sum_{m \in \{X,Y,Z\}} \mathcal{A}_{r,ijk}^m
 $$
 
-Where the component tensors $\mathcal{A}$ are defined as [S2, unofficial][S3, unofficial]:
+where the component tensors are defined as:
 *   $\mathcal{A}_{r,ijk}^X = \mathbf{v}_{r,i}^X \mathbf{M}_{r,jk}^{YZ}$
 *   $\mathcal{A}_{r,ijk}^Y = \mathbf{v}_{r,j}^Y \mathbf{M}_{r,ik}^{XZ}$
 *   $\mathcal{A}_{r,ijk}^Z = \mathbf{v}_{r,k}^Z \mathbf{M}_{r,ij}^{XY}$
 
-**Algorithm Steps**
-1.  **Initialization:** Initialize the vector factors $\mathbf{v}_r^X, \mathbf{v}_r^Y, \mathbf{v}_r^Z$ and matrix factors $\mathbf{M}_r^{Y,Z}, \mathbf{M}_r^{X,Z}, \mathbf{M}_r^{X,Y}$ with random values or via a CP decomposition initialization [G].
-2.  **Optimization:** Minimize the reconstruction error between the original tensor $\mathcal{T}$ and the decomposed approximation using gradient descent. The decomposition acts as a low-rank regularization term during the optimization of the radiance field [S1][S3, unofficial].
-3.  **Evaluation:** To evaluate the tensor at any point (or for rendering), compute the sum of the outer products of the learned factors according to the formula above [G].
-
-**Pseudocode**
-The following Python-like pseudocode demonstrates the evaluation of a VM-decomposed tensor element $\mathcal{T}_{ijk}$ given the learned factors [G].
+**Pseudocode:**
+The following Python-like pseudocode demonstrates the reconstruction of a tensor element $\mathcal{T}_{ijk}$ given the factors.
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def evaluate_vm_tensor(i, j, k, R, v_X, M_YZ, v_Y, M_XZ, v_Z, M_XY):
+def reconstruct_tensor_element(vectors, matrices, i, j, k, R):
     """
-    Evaluate the element at index (i, j, k) of a tensor decomposed via VM.
+    Reconstructs a single element T[i,j,k] of the tensor.
     
     Args:
-        i, j, k: Indices along the three modes (dimensions I, J, K).
-        R: Number of components (assumed equal for all modes).
-        v_X: List of R vectors, each of size I. v_X[r] is v_r^X.
-        M_YZ: List of R matrices, each of size J x K. M_YZ[r] is M_r^{Y,Z}.
-        v_Y: List of R vectors, each of size J. v_Y[r] is v_r^Y.
-        M_XZ: List of R matrices, each of size I x K. M_XZ[r] is M_r^{X,Z}.
-        v_Z: List of R vectors, each of size K. v_Z[r] is v_r^Z.
-        M_XY: List of R matrices, each of size I x J. M_XY[r] is M_r^{X,Y}.
+        vectors (dict): Dictionary containing vectors for each mode.
+                        keys: 'X', 'Y', 'Z'
+                        values: list of vectors, e.g., vectors['X'][r] is v_r^X
+        matrices (dict): Dictionary containing matrices for each mode pair.
+                         keys: 'YZ', 'XZ', 'XY'
+                         values: list of matrices, e.g., matrices['YZ'][r] is M_r^{YZ}
+        i (int): Index along mode X (size I)
+        j (int): Index along mode Y (size J)
+        k (int): Index along mode Z (size K)
+        R (int): Number of components (assumed equal for all modes)
         
     Returns:
-        The scalar value T_{ijk}.
+        float: The value of T[i,j,k]
     """
-    total = 0.0
+    total_sum = 0.0
     
     for r in range(R):
-        # Component type X: v_r^X (size I) outer product M_r^{Y,Z} (size J x K)
-        # Element contribution: v_r^X[i] * M_r^{Y,Z}[j, k]
-        term_X = v_X[r][i] * M_YZ[r][j][k]
+        # Component type X: Vector v_r^X (size I) outer product with Matrix M_r^{YZ} (size JxK)
+        # Element contribution: v_r^X[i] * M_r^{YZ}[j, k]
+        v_x = vectors['X'][r][i]
+        m_yz = matrices['YZ'][r][j][k]
+        total_sum += v_x * m_yz
         
-        # Component type Y: v_r^Y (size J) outer product M_r^{X,Z} (size I x K)
-        # Element contribution: v_r^Y[j] * M_r^{X,Z}[i, k]
-        term_Y = v_Y[r][j] * M_XZ[r][i][k]
+        # Component type Y: Vector v_r^Y (size J) outer product with Matrix M_r^{XZ} (size IxK)
+        # Element contribution: v_r^Y[j] * M_r^{XZ}[i, k]
+        v_y = vectors['Y'][r][j]
+        m_xz = matrices['XZ'][r][i][k]
+        total_sum += v_y * m_xz
         
-        # Component type Z: v_r^Z (size K) outer product M_r^{X,Y} (size I x J)
-        # Element contribution: v_r^Z[k] * M_r^{X,Y}[i, j]
-        term_Z = v_Z[r][k] * M_XY[r][i][j]
+        # Component type Z: Vector v_r^Z (size K) outer product with Matrix M_r^{XY} (size IxJ)
+        # Element contribution: v_r^Z[k] * M_r^{XY}[i, j]
+        v_z = vectors['Z'][r][k]
+        m_xy = matrices['XY'][r][i][j]
+        total_sum += v_z * m_xy
         
-        total += term_X + term_Y + term_Z
-        
-    return total
+    return total_sum
 ```
+
+**Edge Cases and Pitfalls:**
+*   **Interpolation:** Since the tensor expresses discrete data, efficient trilinear interpolation is enabled for the representation to model a continuous field [S2].
+*   **Rank Relaxation:** The method relaxes the ranks of two modes to be arbitrarily large while restricting the third mode to be rank-one [S2][S4, unofficial]. This allows each component to express more complex tensor data of higher ranks compared to pure vector-based CP decomposition [S2][S4, unofficial].
 
 ## Subtopics
 
-### Balanced Spherical Feature Grid Decomposition
-An application of VM decomposition to the density feature grid $G_\sigma$ and appearance feature grid $G_a$, which are composed of two overset tensors (Yin and Yang) [S4]. The appearance grid $G_a$ is a 4D tensor $\mathbb{R}^{2N_y^r \times N_y^\theta \times N_y^\phi \times C}$. For the appearance feature mode ($C$), only vector components $\mathbf{b}$ are assigned instead of matrix components [S4]. The decomposition for the appearance grid is given by [S4]:
+### [Decomposed Low-Rank Tensor (VM-Decomposition)](7116-decomposed-low-rank-tensor-vm-decomposition.md)
+Decomposed Low-Rank Tensor (VM-Decomposition) is a scene representation method that factorizes high-dimensional density and color tensors into compact vector and matrix factors to reduce memory footprint. It sets itself apart from sibling methods like CP Decomposition by relaxing low-rank constraints for two modes of a tensor, effectively acting as a special case of Block Term Decomposition (BTD) [Parent]. Unlike direct storage methods, it stores features decoded by an MLP rather than direct color values.
+
+#### Balanced Spherical Feature Grid Decomposition
+This variant applies VM decomposition to density feature grid $G_\sigma$ and appearance feature grid $G_a$, which are composed of two overset tensors (Yin and Yang) [S5]. The appearance grid $G_a$ is a 4D tensor $\mathbb{R}^{2N_y^r \times N_y^\theta \times N_y^\phi \times C}$. For the appearance feature mode ($C$), only vector components $\mathbf{b}$ are assigned instead of matrix components [S5]. The decomposition for the appearance grid Yin component is [S5]:
+
 $$
 \mathcal{G}_a^y = \sum_{n=1}^{N_a} \mathbf{v}_{a,n}^{y,R} \otimes \mathbf{M}_{a,n}^{y,\Theta\Phi} \otimes \mathbf{b}_{3n-2}^y + \mathbf{v}_{a,n}^{y,\Theta} \otimes \mathbf{M}_{a,n}^{y,\Phi R} \otimes \mathbf{b}_{3n-1}^y + \mathbf{v}_{a,n}^{y,\Phi} \otimes \mathbf{M}_{a,n}^{y,R\Theta} \otimes \mathbf{b}_{3n}^y
 $$
-where $\mathbf{B} \in \mathbb{R}^{C \times 6N_a}$ is a matrix obtained by stacking all $\mathbf{b}^y$ vectors columnwise [S4]. The number of decomposed components for the density grid is typically $N_\sigma = 16$ [S4].
+
+where $\mathbf{b} \in \mathbb{R}^{C \times 6N_a}$ is a matrix obtained by stacking all $\mathbf{b}^y$ s columnwise [S5]. The number of decomposed components for the density grid, $N_\sigma$, is typically 16 [S5].
 
 ## Operating characteristics
-*   **Time Complexity:** Reconstruction time is significantly faster than NeRF. TensoRF with VM decomposition achieves reconstruction in less than 10 minutes, which is about 100x faster than NeRF [S1][S3, unofficial].
-*   **Memory Complexity:** Reduces space complexity from $O(N^3)$ (dense voxel grid) to $O(N^2)$ [S1][S2, unofficial][S3, unofficial].
-*   **Model Size:** Retains a compact model size of less than 75 MB for typical scenes [S1][S3, unofficial]. Note that VM increases the model size per component compared to CP, but significantly reduces the required number of components $R$ for the same expression capacity [S2, unofficial][S3, unofficial].
-*   **Strengths:** Higher expressivity than CP; faster reconstruction than NeRF; lower memory footprint than dense grids [S1][S3, unofficial].
-*   **Limitations:** Larger model size per component than CP; requires careful tuning of $R$ if scene complexity varies significantly across axes [S2, unofficial][S3, unofficial].
+*   **Time Complexity:** TensoRF with VM decomposition achieves reconstruction time of less than 10 minutes, which is about 100x faster than NeRF [S2][S4, unofficial].
+*   **Memory Complexity:** Reduces memory complexity from $O(N^3)$ (dense grid) to $O(N^2)$ [S2][S3, S4, unofficial].
+*   **Model Size:** Retains a compact model size of less than 75 MB [S2][S4, unofficial].
+*   **Strengths:** Significantly reduces the required number of components compared to CP decomposition by allowing each component to express more complex tensor data of higher ranks [S2][S4, unofficial]. Enables efficient trilinear interpolation [S2].
+*   **Limitations:** Increases model size per component compared to pure vector-based factorization in CP [S2][S3, S4, unofficial].
+*   **When to Use:** When high rendering quality is required with fast reconstruction times and compact memory footprint, and the scene complexity is relatively uniform across axes [S2][S4, unofficial].
+*   **When Not to Use:** When extreme compactness per component is prioritized over expression capacity, or when the scene has highly anisotropic complexity that cannot be well-approximated by the symmetric $R_1=R_2=R_3$ assumption [S2][S4, unofficial].
 
 ## Background
-VM decomposition was proposed in the context of Tensorial Radiance Fields (TensoRF) by Chen et al. in 2022 [S1][S2, unofficial][S3, unofficial]. It is inspired by CP decomposition and Block Term Decomposition (BTD) [S2, unofficial][S3, unofficial]. The method was introduced to address the high computational costs of radiance field reconstruction by providing a more efficient tensor factorization than CP, allowing for faster training and rendering while maintaining high quality [S1][S3, unofficial].
+VM decomposition was inspired by CP decomposition and Block Term Decomposition (BTD) [S3, unofficial]. It was proposed by Chen et al. in the TensoRF paper [S1, S2][S3, S4, unofficial][S5]. It is primarily used in the context of Tensorial Radiance Fields (TensoRF) for novel view synthesis and 3D scene reconstruction [S2][S3, S4, unofficial].
 
 ## Sources
-[S1] TensoRF: Tensorial Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_20, fetched 2026-10-26
-[S2] PDF TensoRF: Tensorial Radiance Fields - ECVA, https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136920332.pdf, fetched 2026-10-29 (unofficial)
-[S3] Tensorial Radiance Fields - TensoRF, https://www.cvlibs.net/publications/Chen2022ECCV.pdf, fetched 2026-10-29 (unofficial)
-[S4] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29
+[S1] One Is All: Bridging the Gap between Neural Radiance Fields Architectures with Progressive Volume Distillation, https://doi.org/10.1609/aaai.v37i1.25135, fetched 2026-10-26
+[S2] TensoRF: Tensorial Radiance Fields, https://doi.org/10.1007/978-3-031-19824-3_20, fetched 2026-10-26
+[S3] PDF TensoRF: Tensorial Radiance Fields - ECVA, https://www.ecva.net/papers/eccv_2022/papers_ECCV/papers/136920332.pdf, fetched 2026-10-29 (unofficial)
+[S4] Tensorial Radiance Fields - TensoRF, https://www.cvlibs.net/publications/Chen2022ECCV.pdf, fetched 2026-10-29 (unofficial)
+[S5] Balanced Spherical Grid for Egocentric View Synthesis, https://doi.org/10.1109/cvpr52729.2023.01592, fetched 2026-10-29

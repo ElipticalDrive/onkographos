@@ -1,0 +1,206 @@
+--- v001.md
++++ v002.md
+@@ -1,36 +1,55 @@
+ # Texture Uniting (Multi-Channel Packing)
+ 
++Also called: multi-channel packing, texture merging
+ 
+ ## Overview
+-Texture Uniting is a technique to combine four separate 3D textures (e.g., noise, detail, light, mask) into a single RGBA 3D texture to optimize memory bandwidth and sampling [S1, unofficial]. It sets itself apart from sibling methods like [3D Texture Proxy Geometry](870-3d-texture-proxy-geometry.md) by focusing on data consolidation for sampling efficiency rather than geometric approximation. Unlike [Volume Texture Creation](1857-volume-texture-creation.md) which may handle single-channel data, this method explicitly manages multi-channel alignment and resolution differences using linear clamping [S1, unofficial].
++Texture Uniting is a technique to combine four separate 3D textures (e.g., noise, detail, light, mask) into a single RGBA 3D texture to optimize memory bandwidth and sampling [S1, unofficial]. It differs from simple storage by actively aggregating distinct logical channels into one hardware resource, whereas [3D Texture Storage and Sampling](3064-3d-texture-storage-and-sampling.md) describes the underlying mechanism of storing and accessing individual volumes.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Inputs:** Four source 3D textures: `noise_texture`, `detail_texture`, `light_texture`, `mask_texture`. Each has an integer dimension ($N_{noise}, N_{detail}, N_{light}, N_{mask}$).
+-*   **Outputs:** A single unified RGBA 3D texture (`united_texture`) with dimension $N_{united}$ (assumed cubic).
++**Inputs:**
++- Source 3D textures: $T_{noise}, T_{detail}, T_{light}, T_{mask}$ with dimensions $(N_{noise}, N_{detail}, N_{light}, N_{mask})$.
++- Target unified texture: $T_{united}$ with cubic dimension $N_{united}$.
+ 
+ **Data Structures:**
+-*   `united_texture`: 3D texture of format RGBA. Each texel stores four floating-point values $(x, y, z, w)$.
+-*   Source textures: 3D textures of format R (single channel).
++- $T_{united}$: A 3D texture object (e.g., `GL_TEXTURE_3D`) with format `RGBA32F` or equivalent, dimensions $(N_{united}, N_{united}, N_{united})$.
++
++**Steps:**
++1.  **Normalize Coordinates:** For each voxel index $(i, j, k)$ in the unified texture, compute normalized coordinates $u, v, w \in [0, 1]$:
++    $$
++    u = \frac{i}{N_{united}}, \quad v = \frac{j}{N_{united}}, \quad w = \frac{k}{N_{united}}
++    $$
++2.  **Sample Noise Channel:** Sample the noise texture at normalized coordinates. Assuming the noise texture is also normalized to $[0,1]$ or scaled appropriately:
++    $$
++    x = T_{noise}.SampleLevel(sampler_{linear}, (u, v, w), 0).r
++    $$
++    [S1, unofficial].
++3.  **Sample Detail Channel:**
++    $$
++    y = T_{detail}.SampleLevel(sampler_{linear}, (u, v, w), 0).r
++    $$
++    [S1, unofficial].
++4.  **Sample Light Channel:**
++    $$
++    z = T_{light}.SampleLevel(sampler_{linear}, (u, v, w), 0).r
++    $$
++    [S1, unofficial].
++5.  **Sample and Normalize Mask Channel:**
++    $$
++    w = \frac{T_{mask}.SampleLevel(sampler_{linear}, (u, v, w), 0).r}{32.0}
++    $$
++    [S1, unofficial].
++6.  **Write to Unified Texture:**
++    $$
++    T_{united}[i, j, k] = (x, y, z, w)
++    $$
++    [S1, unofficial].
+ 
+ **Parameters:**
+-*   $N_{united}$: Integer dimension of the output unified texture.
+-*   $N_{noise}, N_{detail}, N_{light}, N_{mask}$: Integer dimensions of the source textures.
++- $N_{united}$: Integer dimension of the output unified texture (assumed cubic) [S1, unofficial].
++- $N_{noise}, N_{detail}, N_{light}, N_{mask}$: Integer dimensions of the source textures [S1, unofficial].
+ 
+-**Steps:**
+-1.  Initialize `united_texture` with dimensions $N_{united} \times N_{united} \times N_{united}$.
+-2.  Iterate through every voxel coordinate $(i, j, k)$ in the unified texture, where $0 \le i, j, k < N_{united}$.
+-3.  Compute normalized coordinates for sampling:
+-    $$ u = \frac{i}{N_{united}}, \quad v = \frac{j}{N_{united}}, \quad w = \frac{k}{N_{united}} $$
+-4.  Sample the noise channel from `noise_texture` using linear clamping sampling at normalized coordinates $(u, v, w)$:
+-    $$ x = \text{SampleLevel}(\text{sampler\_linear\_clamp}, (u, v, w), 0).r $$
+-5.  Sample the detail channel from `detail_texture` using linear clamping sampling at normalized coordinates $(u, v, w)$:
+-    $$ y = \text{SampleLevel}(\text{sampler\_linear\_clamp}, (u, v, w), 0).r $$
+-6.  Sample the light channel from `light_texture` using linear clamping sampling at normalized coordinates $(u, v, w)$:
+-    $$ z = \text{SampleLevel}(\text{sampler\_linear\_clamp}, (u, v, w), 0).r $$
+-7.  Sample the mask channel from `mask_texture` using linear clamping sampling at normalized coordinates $(u, v, w)$ and normalize the result:
+-    $$ w_{val} = \frac{\text{SampleLevel}(\text{sampler\_linear\_clamp}, (u, v, w), 0).r}{32.0} $$
+-8.  Write the packed vector to the unified texture:
+-    $$ \text{united_texture}[i, j, k] = (x, y, z, w_{val}) $$
++**Edge Cases and Pitfalls:**
++- **Resolution Mismatch:** The method uses normalized coordinates (`id / united_texture_size`) rather than integer scaling (`id * source_size / united_texture_size`). This allows for bilinear/trilinear filtering across resolution boundaries between source textures, smoothing out discrepancies in grid resolution [S1, unofficial].
++- **Precision:** Arithmetic operations are performed in 32-bit floating point, but results are truncated when written to destination textures if lower precision formats (e.g., 16-bit) are used [S3, unofficial].
+ 
+ **Pseudocode:**
+@@ -38,92 +57,63 @@
+ def unite_textures(noise_tex, detail_tex, light_tex, mask_tex, united_size):
+     """
+-    Combines four 3D scalar textures into one RGBA 3D texture.
++    Combines four 3D textures into a single RGBA 3D texture.
+     
+     Args:
+-        noise_tex: 3D texture object, dimension N_noise
+-        detail_tex: 3D texture object, dimension N_detail
+-        light_tex: 3D texture object, dimension N_light
+-        mask_tex: 3D texture object, dimension N_mask
+-        united_size: int, dimension of the output texture
++        noise_tex: 3D texture object for noise channel
++        detail_tex: 3D texture object for detail channel
++        light_tex: 3D texture object for light channel
++        mask_tex: 3D texture object for mask channel
++        united_size: int, dimension of the cubic output texture
+         
+     Returns:
+-        united_tex: 3D texture object, dimension united_size x united_size x united_size, format RGBA
++        united_tex: 3D texture object with RGBA channels
+     """
+-    # Initialize output texture
+-    united_tex = create_3d_texture(width=united_size, height=united_size, depth=united_size, format=RGBA)
++    # Initialize unified texture with RGBA32F format
++    united_tex = create_3d_texture(width=united_size, height=united_size, depth=united_size, format='RGBA32F')
+     
+-    # Pre-calculate inverse sizes for normalized coordinate conversion
+-    inv_united = 1.0 / united_size
++    # Define linear clamp sampler
++    sampler = create_sampler(filter_mode='linear', address_mode='clamp_to_edge')
+     
+     for i in range(united_size):
+         for j in range(united_size):
+             for k in range(united_size):
+-                # Compute normalized coordinates [0, 1]
+-                u = i * inv_united
+-                v = j * inv_united
+-                w = k * inv_united
++                # Normalize coordinates to [0, 1]
++                u = i / united_size
++                v = j / united_size
++                w = k / united_size
+                 
+-                # Sample noise channel (R)
+-                # Uses linear clamping to handle resolution differences between source textures
+-                x = sample_linear_clamp(noise_tex, u, v, w)
++                # Sample each channel
++                # Note: SampleLevel assumes normalized coordinates for the sampler
++                x = noise_tex.sample_level(sampler, (u, v, w), mip_level=0).r
++                y = detail_tex.sample_level(sampler, (u, v, w), mip_level=0).r
++                z = light_tex.sample_level(sampler, (u, v, w), mip_level=0).r
+                 
+-                # Sample detail channel (R)
+-                y = sample_linear_clamp(detail_tex, u, v, w)
+-                
+-                # Sample light channel (R)
+-                z = sample_linear_clamp(light_tex, u, v, w)
+-                
+-                # Sample mask channel (R) and normalize
+-                mask_val = sample_linear_clamp(mask_tex, u, v, w)
+-                w_val = mask_val / 32.0
++                # Sample mask and normalize
++                mask_val = mask_tex.sample_level(sampler, (u, v, w), mip_level=0).r
++                w_channel = mask_val / 32.0
+                 
+                 # Write to unified texture
+-                united_tex.set_pixel(i, j, k, float4(x, y, z, w_val))
++                united_tex.set_value(i, j, k, (x, y, z, w_channel))
+                 
+     return united_tex
+-
+-def sample_linear_clamp(tex, u, v, w):
+-    """
+-    Samples a 3D texture at normalized coordinates [0,1] using linear filtering and clamp wrapping.
+-    This mimics HLSL SampleLevel with sampler_linear_clamp.
+-    """
+-    # Convert normalized coordinates to texture space coordinates
+-    # Assuming tex has dimensions D x D x D
+-    dim = tex.get_dimension()
+-    tx = u * dim
+-    ty = v * dim
+-    tz = w * dim
+-    
+-    # Perform trilinear interpolation
+-    # Note: In a real implementation, this involves fetching 8 neighboring texels and interpolating.
+-    # For the purpose of this algorithm description, we assume a standard hardware or library function
+-    # that performs this operation given normalized coordinates and a linear clamp sampler.
+-    return tex.sample_linear_clamp(tx, ty, tz)
+ ```
+-
+-**Edge Cases and Pitfalls:**
+-*   **Resolution Mismatch:** The method uses normalized coordinates and linear clamping to handle cases where source textures have different resolutions ($N_{noise} \neq N_{detail}$, etc.) [S1, unofficial]. This allows for bilinear filtering across resolution boundaries [S1, unofficial].
+-*   **Mask Normalization:** The mask channel is divided by 32.0. If the source mask values are not in the expected range, this normalization may produce incorrect weights [S1, unofficial].
+-*   **Precision:** Arithmetic operations are performed in 32-bit floating point, but results are truncated when written to the destination texture if the texture format uses lower precision (e.g., 16-bit) [S3, unofficial].
+ 
+ ## Subtopics
+ 
+ ### PBR Material Channel Packing
+-Packs PBR material properties into standard texture formats to optimize storage and sampling [S2, unofficial]. BaseColor and Alpha are packed into RGBA, while Metallic and Roughness are packed into RGB (R=0, G=Roughness, B=Metallic) [S2, unofficial]. This is chosen when rendering PBR materials with limited texture slots. Pitfalls include ensuring `alphaMode` is 'OPAQUE' and `doubleSided` is set correctly if not remeshing [S2, unofficial].
++Packs PBR material properties into standard texture formats: BaseColor and Alpha into RGBA, Metallic and Roughness into RGB (R=0, G=Roughness, B=Metallic) [S2, unofficial]. Steps: 1. Pack BaseColor/Alpha: `np.concatenate([base_color, alpha], axis=-1)`. 2. Pack Metallic/Roughness: `np.concatenate([np.zeros_like(metallic), roughness, metallic], axis=-1)` [S2, unofficial]. Parameters: `alphaMode: 'OPAQUE'`, `doubleSided: True` if not remesh else `False` [S2, unofficial].
+ 
+ ### Texture Packing Strategy
+-Avoids packing multiple cell attributes into a single texture if it increases memory bandwidth usage unnecessarily [S3, unofficial]. Frequently accessed attributes (like inside-outside for pressure solve) should be kept in their own scalar textures to minimize bandwidth [S3, unofficial]. A key pitfall is that packing inside-outside and velocity into a single RGBA texture increases memory transfer by 4x, which is inefficient if velocity is unused during pressure solving [S3, unofficial].
++Avoids packing multiple cell attributes into a single texture if it increases memory bandwidth usage unnecessarily [S3, unofficial]. Steps: Keep frequently accessed attributes (like inside-outside for pressure solve) in their own scalar textures to minimize bandwidth [S3, unofficial]. Pitfall: Packing inside-outside and velocity into a single RGBA texture increases memory transfer by 4x, which is inefficient if velocity is unused during pressure solving [S3, unofficial].
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** $O(N_{united}^3)$, where $N_{united}$ is the dimension of the unified texture. Each voxel requires four samples from source textures.
+-*   **Memory Complexity:** $O(N_{united}^3 \times 4 \times \text{bytes\_per\_channel})$. The unified texture uses 4x the memory of a single-channel texture of the same resolution, but reduces the number of texture objects and potentially improves cache locality during sampling.
+-*   **Performance:** Optimizes memory bandwidth by reducing the number of texture fetches per pixel during rendering from four separate textures to one [S1, unofficial]. However, if the source textures have vastly different resolutions, the linear clamping sampling may introduce artifacts or require more complex filtering [S1, unofficial].
+-*   **Strengths:** Reduces texture object overhead, simplifies shader code (single texture lookup), and can improve cache efficiency if the unified texture is accessed frequently [S1, unofficial].
+-*   **Limitations:** Increases memory usage for the unified texture compared to individual scalar textures if not carefully managed. Not suitable if attributes have vastly different access patterns or if bandwidth is not the primary bottleneck [S3, unofficial].
+-*   **When to use:** When rendering requires frequent access to multiple scalar fields (e.g., density, temperature, velocity components) and memory bandwidth is a constraint.
+-*   **When not to use:** When attributes have very different access frequencies or when memory usage is more critical than bandwidth [S3, unofficial].
++- **Time Complexity:** $O(N^3)$ where $N$ is the unified texture dimension, as each voxel requires four samples and one write.
++- **Memory Complexity:** Reduces overhead from four separate texture objects to one, but increases per-voxel memory usage from 1 channel to 4 channels.
++- **Performance:** Optimizes memory bandwidth by reducing the number of texture fetches during rendering if the unified texture is sampled once per ray step instead of four times [S1, unofficial]. However, if only a subset of channels is needed, unpacking or separate textures may be more efficient [S3, unofficial].
++- **Strengths:** Reduces texture object overhead, simplifies shader code for multi-channel data, and leverages hardware filtering for resolution mismatches [S1, unofficial].
++- **Limitations:** Increases memory bandwidth if all channels are not used simultaneously; potential precision loss if using lower-bit formats [S3, unofficial].
+ 
+ ## Background
+-Originated in the context of volumetric smoke rendering and fluid simulation, specifically in the implementation of `VolumetricSmoke` [S1, unofficial]. The technique is also discussed in the context of real-time fluid simulation and rendering, where memory bandwidth optimization is critical [S3, unofficial]. It is a practical adaptation of multi-channel packing techniques used in computer graphics to optimize texture sampling performance.
++Originated in real-time volumetric rendering and fluid simulation to manage memory bandwidth and simplify multi-channel data access [S1, S3, unofficial]. The technique is commonly used in GPU-based smoke and fluid simulations where multiple physical properties (density, velocity, temperature) need to be sampled efficiently [S1, unofficial].
+ 
+ ## Sources

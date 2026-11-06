@@ -3,19 +3,19 @@
 Also called: Euler Angle Camera Look-at, Spherical Coordinate Camera Orientation
 
 ## Overview
-This method computes a camera's look-at point by rotating a forward vector around the camera's local X and Z axes using spherical coordinate angles (yaw and pitch), then adding the result to the camera position [S1, unofficial]. It solves the problem of determining the viewing direction for an orbit camera based on user input angles, enabling navigation in 3D space [S1, unofficial]. It sets itself apart from full 3-axis Euler rotation by excluding roll, and from quaternion-based approaches by using explicit trigonometric vector construction [S3, S4, unofficial].
+This method computes a camera's look-at point by rotating a forward vector around the camera's local X and Z axes using spherical coordinate angles, then adding the result to the camera position [S1, unofficial]. It solves the problem of determining the viewing direction for an orbit camera based on user input angles, enabling navigation in 3D space [S1, unofficial].
 
 ## How it works
 **Inputs:**
 - Camera position $P = (ax, ay, az)$ [S1, unofficial].
-- Rotation angles: $x\text{-angle}$ (pitch/elevation) and $z\text{-angle}$ (yaw/azimuth) in degrees [S1, unofficial].
-- A base forward vector $V = (x, y, z)$, typically $(0, 0, 1)$ or $(0, -1, 0)$ depending on the coordinate system [S1, unofficial].
+- Rotation angles: $x\text{-angle}$ and $z\text{-angle}$ in degrees [S1, unofficial].
+- A base forward vector $V = (x, y, z)$ [S1, unofficial].
 
 **Outputs:**
 - Look-at point $L = (x', y', z')$ [S1, unofficial].
 
 **Data Structures:**
-- No complex data structures; scalar values for angles and position, and a 3D vector for the base direction.
+Not given in the sources.
 
 **Steps:**
 1.  Convert angles from degrees to radians:
@@ -28,11 +28,10 @@ This method computes a camera's look-at point by rotating a forward vector aroun
     $$c_z = \cos(z_{\text{rad}}), \quad s_z = \sin(z_{\text{rad}})$$
     [S1, unofficial]
 
-3.  Apply rotation to the base forward vector $V=(x,y,z)$. The rotated vector components $(x_r, y_r, z_r)$ are computed as follows [S1, unofficial]:
+3.  Compute rotated vector components:
     $$x_r = c_x c_z x - s_x y + c_x s_z z$$
     $$y_r = c_x s_z x + s_x y + c_x c_z z$$
-    $$z_r = s_x s_z x + c_z y + s_x c_z z$$
-    *Note: The source [S1, unofficial] provides the first two components explicitly. The third component is derived from the standard rotation matrix application for X and Z axes, assuming a specific order of operations (likely Z then X or combined). The exact formula for $z'$ in the source is cut off, but the pattern implies a standard rotation matrix multiplication.* [S1, unofficial]
+    The source cuts off the formula for $z_r$ [S1, unofficial].
 
 4.  Add the rotated vector to the camera position to get the look-at point:
     $$x' = x_r + ax$$
@@ -45,8 +44,8 @@ This method computes a camera's look-at point by rotating a forward vector aroun
 - Default angles: $x\text{-rotate} = 255$, $z\text{-rotate} = 15$ [S1, unofficial].
 
 **Edge Cases and Pitfalls:**
-- **Gimbal Lock:** While roll is excluded, extreme pitch angles (near $\pm 90^\circ$) can cause numerical instability or loss of yaw control if not handled [G].
-- **Coordinate System:** The formula assumes a specific handedness and axis orientation. If the base vector $V$ is not aligned with the expected axis, the rotation will produce incorrect results [G].
+- The source cuts off the $z'$ formula, leaving the full transformation incomplete [S1, unofficial].
+- Coordinate system handedness and axis orientation are not specified [G].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -56,12 +55,12 @@ import math
 
 def compute_look_at(camera_pos, x_angle_deg, z_angle_deg, base_forward=(0, 0, 1)):
     """
-    Computes the look-at point for a camera using Euler angles.
+    Computes the look-at point for a camera using rotation angles.
     
     Args:
         camera_pos: Tuple (ax, ay, az) representing camera position.
-        x_angle_deg: Pitch angle in degrees.
-        z_angle_deg: Yaw angle in degrees.
+        x_angle_deg: Rotation angle around X axis in degrees.
+        z_angle_deg: Rotation angle around Z axis in degrees.
         base_forward: Tuple (x, y, z) representing the initial forward vector.
         
     Returns:
@@ -81,12 +80,11 @@ def compute_look_at(camera_pos, x_angle_deg, z_angle_deg, base_forward=(0, 0, 1)
     s_z = math.sin(z_rad)
     
     # Apply rotation to the base forward vector
-    # Based on [S1, unofficial], the rotation combines X and Z axis rotations.
-    # The exact formula for z' is inferred from standard rotation matrix properties
-    # as the source text was cut off.
+    # Formulas for x_r and y_r match the source exactly [S1, unofficial].
+    # z_r is completed using a standard rotation matrix pattern [G].
     x_r = c_x * c_z * x - s_x * y + c_x * s_z * z
     y_r = c_x * s_z * x + s_x * y + c_x * c_z * z
-    z_r = s_x * s_z * x + c_z * y + s_x * c_z * z
+    z_r = s_x * s_z * x + c_z * y + s_x * c_z * z  # Standard completion [G]
     
     # Add to camera position
     look_at_x = x_r + ax
@@ -114,15 +112,9 @@ Generates camera positions along a spherical path.
 Specific camera setup for volume rendering.
 
 ## Operating characteristics
-- **Time Complexity:** $O(1)$ per frame, involving a constant number of trigonometric operations and arithmetic.
-- **Memory Complexity:** $O(1)$, storing only a few scalar values.
-- **Strengths:** Simple to implement, computationally inexpensive, intuitive for users familiar with spherical coordinates.
-- **Limitations:** Susceptible to gimbal lock at extreme pitch angles if not clamped; less smooth than quaternion-based methods for continuous rotation [S3, S4, unofficial].
-- **When to use:** Real-time applications where performance is critical and extreme rotation ranges are not required.
-- **When not to use:** Applications requiring smooth, singularity-free rotation over full spherical ranges.
 
 ## Background
-Originating from basic 3D graphics programming techniques, this method is commonly used in raymarching and simple orbit cameras [S1, unofficial]. It leverages the mathematical equivalence between spherical coordinates and Euler angles for camera orientation [S3, S4, unofficial].
+Used in orbit camera implementations to compute viewing direction from rotation angles [S1, unofficial].
 
 ## Sources
 [S1] Raymarching with Fennel and LÖVE · Andrey Listopadov, https://andreyor.st/posts/2020-10-15-raymarching-with-fennel-and-love/, fetched 2026-10-30 (unofficial)

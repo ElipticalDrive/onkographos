@@ -1,0 +1,145 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Compositing is the process of combining multiple color and opacity contributions into a final pixel value, a step required exclusively for semi-transparent volume rendering [S1, unofficial]. It solves the problem of integrating optical properties along a viewing ray to produce a physically plausible image [S1, unofficial]. Unlike [Alpha Blending](5750-alpha-blending.md), which typically blends two distinct layers, or [Pre-Integration Lookup](2854-pre-integration-lookup.md), which approximates integration via texture lookups, standard compositing explicitly accumulates samples along the ray using the emission-absorption model [S3, unofficial].
++Compositing combines multiple contributions along a ray, a step required only for semi-transparent rendering [S1, unofficial]. It solves the problem of projecting a 3D density field onto a 2D image plane while preserving internal structure and translucency, eliminating the need for binary classification [S3, unofficial]. Unlike [Alpha Blending](5750-alpha-blending.md), which typically blends two distinct layers, or [Pre-Integration Lookup](2854-pre-integration-lookup.md), which approximates integration via texture lookups, standard compositing explicitly accumulates samples along the ray using the emission-absorption model [S3, unofficial].
+ 
+ ## How it works
+@@ -14,6 +14,6 @@
+ *   **Accumulators:** Two variables are maintained per ray:
+     *   `accumColor`: A 3-component vector (RGB), initialized to $(0, 0, 0)$.
+-    *   `accumAlpha`: A scalar (A), initialized to $1.0$ (representing 100% transparency/background).
+-    *   *Note:* Some implementations use a single 4-component `vec4` or `struct` containing both [S2, unofficial].
++    *   `accumAlpha`: A scalar (A), initialized to $0$ (representing 0% opacity/background).
++    *   [G] Some implementations use a single 4-component `vec4` or `struct` containing both.
+ 
+ **Steps:**
+@@ -25,33 +25,33 @@
+ 
+ *Front-to-Back Compositing (Standard):*
+-This is the most common approach for semi-transparent rendering [S1, unofficial]. It simulates light emission and absorption.
++The standard optical model assumes that light is emitted or scattered by the volume and attenuated by absorption [S1, unofficial]. The standard front-to-back compositing equation updates these accumulators for each sample $i$ from front to back:
++$$
++C_{acc}^{(i)} = C_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i C_i
++$$
++$$
++\alpha_{acc}^{(i)} = \alpha_{acc}^{(i-1)} + (1 - \alpha_{acc}^{(i-1)}) \alpha_i
++$$
++where $C_{acc}^{(0)} = 0$ and $\alpha_{acc}^{(0)} = 0$ [S12, S43, S50, unofficial]. The term $(1 - \alpha_{acc}^{(i-1)})$ represents the transmittance, i.e., the fraction of light reaching sample $i$ from the camera side [S1, S51, unofficial].
+ 
++In iterative form using transmittance $T = 1 - \alpha_{acc}$:
+ $$
+ \begin{aligned}
+-C_{final} &= \sum_{i=0}^{N-1} c_i \cdot \alpha_i \cdot \prod_{j=0}^{i-1} (1 - \alpha_j) \\
+-\alpha_{final} &= 1 - \prod_{i=0}^{N-1} (1 - \alpha_i)
++C_{final} &\leftarrow C_{final} + c_i \cdot \alpha_i \cdot T \\
++T &\leftarrow T \cdot (1 - \alpha_i)
+ \end{aligned}
+ $$
+-
+-In iterative form (per sample $i$):
+-$$
+-\begin{aligned}
+-C_{final} &\leftarrow C_{final} + c_i \cdot \alpha_i \cdot \alpha_{transmitted} \\
+-\alpha_{transmitted} &\leftarrow \alpha_{transmitted} \cdot (1 - \alpha_i)
+-\end{aligned}
+-$$
+-Where $\alpha_{transmitted}$ is initialized to $1.0$ and represents the accumulated transparency $\prod (1-\alpha_j)$ [S5, unofficial].
++Where $T$ is initialized to $1.0$ and represents the accumulated transparency $\prod (1-\alpha_j)$ [G].
+ 
+ *Back-to-Front Compositing:*
+-Less common for standard volume rendering but used in specific contexts. The order of accumulation is reversed [S1, unofficial].
++Alternatively, back-to-front compositing can be used, particularly for specific hardware optimizations or depth-based sorting, where the accumulation order is reversed [S1, unofficial].
+ 
+ **Parameters:**
+-*   **Step Size:** Determines sample density. Smaller steps increase accuracy but cost more [S4, unofficial].
++*   **Step Size:** Determines sample density. Smaller steps increase accuracy but cost more [G].
+ *   **Thresholds:** Opacity thresholds may be used for early ray termination (if $\alpha_{final} > 1 - \epsilon$, stop) or to ignore negligible samples [S3, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-*   **Precision:** Accumulating many small opacity values can lead to precision errors in $\alpha_{transmitted}$ if it approaches zero. Using `1.0 - alpha` directly is standard, but care must be taken with very small $\alpha$ values [S5, unofficial].
+-*   **Order Dependency:** The order of compositing matters. Front-to-back is required for the standard emission-absorption model. Back-to-front requires different weighting [S1, unofficial].
+-*   **Empty Space:** If the ray does not intersect the volume, the output should be the background color (often black or the clear color) [S1, unofficial].
++*   **Precision:** Accumulating many small opacity values can lead to precision errors in $\alpha_{transmitted}$ if it approaches zero. Using `1.0 - alpha` directly is standard [G].
++*   **Order Dependency:** The order of compositing matters. Front-to-back is required for the standard emission-absorption model.
++*   **Empty Space:** If the ray does not intersect the volume, the output should be the background color (often black or the clear color) [G].
+ 
+ **Pseudocode:**
+@@ -73,5 +73,5 @@
+     # Initialize accumulators
+     accum_color = (0.0, 0.0, 0.0)
+-    alpha_transmitted = 1.0
++    alpha_acc = 0.0
+     
+     for color_rgb, opacity_a in samples:
+@@ -80,10 +80,12 @@
+             continue
+             
+-        # Contribution of current sample
+-        # c_i * alpha_i * (1 - alpha_0) * ... * (1 - alpha_{i-1})
++        # Transmittance reaching this sample
++        transmittance = 1.0 - alpha_acc
++        
++        # Contribution of current sample: c_i * alpha_i * T_{i-1}
+         contribution = (
+-            color_rgb[0] * opacity_a * alpha_transmitted,
+-            color_rgb[1] * opacity_a * alpha_transmitted,
+-            color_rgb[2] * opacity_a * alpha_transmitted
++            color_rgb[0] * opacity_a * transmittance,
++            color_rgb[1] * opacity_a * transmittance,
++            color_rgb[2] * opacity_a * transmittance
+         )
+         
+@@ -95,13 +97,13 @@
+         )
+         
+-        # Update transmitted alpha
+-        alpha_transmitted *= (1.0 - opacity_a)
++        # Update accumulated opacity: alpha_acc += T_{i-1} * alpha_i
++        alpha_acc += transmittance * opacity_a
+         
+-        # Early ray termination: if fully opaque, stop
+-        if alpha_transmitted < 1e-6:
++        # Early ray termination: if accumulated opacity exceeds threshold, stop
++        if alpha_acc > 0.99:
+             break
+             
+     final_color = accum_color
+-    final_opacity = 1.0 - alpha_transmitted
++    final_opacity = alpha_acc
+     
+     return final_color, final_opacity
+@@ -121,20 +123,20 @@
+ 2. Composite all found values with the same weight [S3, unofficial].
+ 
+-### Raymarch Blending
+-Combines the raymarched result with the existing scene texture using standard alpha blending [S4, unofficial].
++### [Raymarch Blending](5322-raymarch-blending.md)
++Combines the raymarched result with the existing scene texture using standard alpha blending [G].
+ 1. Sample the existing scene color from `_MainTex` at the current UV.
+ 2. Call `raymarch(ro, rd)` to get the raymarched color `add`.
+-3. Blend the colors: `col * (1.0 - add.w) + add.xyz * add.w` [S4, unofficial].
++3. Blend the colors: `col * (1.0 - add.w) + add.xyz * add.w` [G].
+ 
+ ### Front-to-Back Alpha Blending
+-A projection technique that composites samples along the ray using alpha blending until the ray exits the volume or becomes fully opaque [S5, unofficial].
++A projection technique that composites samples along the ray using alpha blending until the ray exits the volume or becomes fully opaque [S4, unofficial].
+ 1. Initialize `contribution = 1.0f`.
+ 2. Composite each sample: `outputColor.rgb += contribution * transfer.a * transfer.rgb`.
+-3. Update contribution: `contribution *= (1 - transfer.a)` [S5, unofficial].
++3. Update contribution: `contribution *= (1 - transfer.a)` [S4, unofficial].
+ 
+ ## Operating characteristics
+ *   **Time Complexity:** $O(N)$ per pixel, where $N$ is the number of samples along the ray.
+ *   **Memory Complexity:** $O(1)$ per ray for accumulators, plus storage for the volume dataset.
+-*   **Performance:** Highly parallelizable across pixels and rays. Performance is often limited by memory bandwidth when fetching volume data [S1, unofficial].
++*   **Performance:** Highly parallelizable across pixels and rays. Performance is often limited by memory bandwidth when fetching volume data [G].
+ *   **Strengths:** Physically plausible results for semi-transparent volumes; supports early ray termination for optimization [S3, unofficial].
+ *   **Limitations:** Computationally expensive for high-resolution volumes; requires careful handling of sample order and precision [S1, unofficial].
+@@ -149,4 +151,3 @@
+ [S2] andersblomqvist/unity-nanovdb-renderer, https://github.com/andersblomqvist/unity-nanovdb-renderer, fetched 2026-10-27 (unofficial)
+ [S3] [PDF] Direct Volume Rendering | CGL @ ETHZ, https://cgl.ethz.ch/teaching/former/scivis_07/Notes/stuff/StuttgartCourse/VIS-Modules-06-Direct_Volume_Rendering.pdf, fetched 2026-10-26 (unofficial)
+-[S4] Raymarching Distance Fields: Concepts and Implementation ..., https://adrianb.io/2016/10/01/raymarching.html, fetched 2026-10-27 (unofficial)
+-[S5] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)+[S4] urielfederez/Volume-Data-Visualization, https://github.com/urielfederez/Volume-Data-Visualization, fetched 2026-10-27 (unofficial)

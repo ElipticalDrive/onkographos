@@ -3,12 +3,12 @@
 Also called: Real-time Volumetric Rendering, Volumetric Cloud Rendering, Volumetric Cloud Rendering with Ray Marching
 
 ## Overview
-Ray marching with single scattering is a real-time technique for rendering volumetric clouds using OpenGL/WebGL ray marching, procedural noise for density, and physically-based single scattering illumination [S1, S2, unofficial]. It solves the problem of rendering translucent, animated volumetric media efficiently by approximating light transport with a single scattering event per sample, balancing visual fidelity against computational cost [S1, S2, unofficial]. It differs from [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) by using procedural noise instead of signed distance fields for density, and from [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md) by focusing on localized cloud volumes with explicit bounding boxes and wind animation rather than global atmospheric scattering [S1, S2, unofficial].
+Ray marching with single scattering is a real-time technique for rendering volumetric clouds using OpenGL/WebGL ray marching, procedural noise or 3D textures for density, and physically-based single scattering illumination [S1, S2, unofficial]. It solves the problem of rendering translucent, animated volumetric media efficiently by approximating light transport with a single scattering event per sample, balancing visual fidelity against computational cost [S1, S2, unofficial]. It differs from [SDF Cloud Rendering](2064-sdf-cloud-rendering.md) by generating density via procedural noise or texture lookups rather than signed distance fields, and from [Atmospheric Ray Marching](4874-atmospheric-ray-marching.md) by targeting localized cloud volumes with explicit bounding or spherical boundaries and wind animation rather than global atmospheric scattering [S1, S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- **Inputs:** Eye position ($e$), screen position ($s$), camera rotation matrix ($camRot$), bounding box ($bMin, bMax$), sun position ($uUserSunPos$), sun color ($uUserSunColor$), time ($uTime$), resolution ($uResolution$), and various uniform parameters (step sizes, coefficients, noise settings).
-- **Output:** Fragment color ($fColor$).
+- **Inputs:** Eye position ($e$), screen position ($s$), camera rotation matrix ($camRot$), bounding box ($bMin, bMax$), sun position ($uUserSunPos$), sun color ($uUserSunColor$), time ($uTime$), resolution ($uResolution$), and uniform parameters for step sizes, coefficients, and noise settings [S1, S2, unofficial].
+- **Output:** Fragment color ($fColor$) [S1, unofficial].
 
 **Data Structures:**
 - **Bounding Box:** Defined by $bMin$ and $bMax$. The effective bounds are adjusted by $uUserSize$: $bMin.x -= uUserSize.x$, $bMax.x += uUserSize.x$, etc. [S2, unofficial].
@@ -45,7 +45,7 @@ Ray marching with single scattering is a real-time technique for rendering volum
   backward = \frac{1 - g_2^2}{(1 + g_2^2 - 2g_2 cos\Theta)^{1.5}}, \quad g_2 = -0.2
   $$
   [S1, unofficial].
-- **Beer-Lambert Law:** $transmittance *= exp(-density \times extinctionCoeff \times STEP\_SIZE \times 1.5)$ [S1, unofficial]. Note: The source code applies an additional multiplier of 1.5 to the exponent [S1, unofficial].
+- **Beer-Lambert Law:** $transmittance *= exp(-density \times extinctionCoeff \times STEP\_SIZE \times 1.5)$ [S1, unofficial]. The source implementation applies an additional multiplier of 1.5 to the exponent [S1, unofficial].
 - **Single Scattering Approximation:** $scattering = (1. - localTransmittance) \times currentLightRayT$ [S2, unofficial].
 
 **Pseudocode:**
@@ -53,137 +53,86 @@ Ray marching with single scattering is a real-time technique for rendering volum
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def ray_march_single_scattering(e, s, camRot, uUserSize, uBoundingBox, uTime, uUserSpeed, uRandomVector, uUserSunPos, uUserSunColor, uUserDensity, uUserScale, uUserZoom, uUserControl, uMouse, sunset):
-    # 1. Initialize Ray
+def ray_march_single_scattering(e, s, uUserZoom, uUserControl, uMouse, uTime, sunset):
+    # Constants from sources
+    MAX_STEPS = 50
+    STEP_SIZE = 0.08
+    MAX_STEPS_LIGHT = 5
+    STEP_SIZE_LIGHT = 0.6
+    WIND = (0.7, 0.2, -0.5)
+    SUN = normalize((1.5, 1.0, 1.0))
+    SUN_COLOUR_SUNSET = (1.8, 1.1, 0.6)
+    SUN_COLOUR_DAY = (1.5, 1.3, 0.9)
+    scatteringCoeff = 1.5 if sunset else 1.2
+    absorptionCoeff = 0.4 if sunset else 0.2
+    extinctionCoeff = scatteringCoeff + absorptionCoeff
+    maxOctaves = 4  # Standard fBm iteration count [G]
+
     rayDir = normalize(s - e)
-    
-    # 2. Camera Setup
-    CAM = vec3(0.0, 0.0, uUserZoom)
-    if uUserControl == 1:
-        camRot = create_rotation_matrix(uMouse.x, uMouse.y) # [G] Helper to create rotation matrix from mouse coords
-    else:
-        camRot = create_rotation_matrix(mod(uTime * 5.0, 350.0), 0.0) # [G] Helper to create rotation matrix from time
-
-    # 3. Sky Color
     sky = calculate_sky_color(rayDir, sunset)
+    sunColour = SUN_COLOUR_SUNSET if sunset else SUN_COLOUR_DAY
 
-    # 4. Bounding Box Adjustment
-    bMin = uBoundingBox.bMin - uUserSize
-    bMax = uBoundingBox.bMax + uUserSize
-
-    # 5. Main Loop Variables
     transmittance = 1.0
     t = 0.0
-    colour = vec3(0.0)
+    colour = (0.0, 0.0, 0.0)
 
-    # 6. Main Ray Marching Loop
     for i in range(MAX_STEPS):
-        p = e + t * rayDir
-        
-        # Check if inside volume (using sphere SDF as example from S1, or bounding box from S2)
-        # S1 uses sphere SDF: dist = sdfSphere(p, 2.0)
-        # S2 uses rayMarch function with bounding box intersection
-        # Merging logic: Check if p is within bMin and bMax
-        if not (all(p >= bMin) and all(p <= bMax)):
+        p = add(e, scale(rayDir, t))
+
+        # S1 uses sphere SDF for soft boundary
+        dist = -length(p) + 2.0
+        if dist <= 0.0:
             t += STEP_SIZE
             continue
 
-        # Calculate Density
-        # S1: Procedural Noise
-        # density = clamp(octaves(p + animationIndex * WIND), 0.0, 1.0) * smoothstep(0.0, 1.0, dist)
-        # S2: Texture-based or procedural
-        # density = volumetricDensityMap3d(marchPoint, textureOffset, uUserScale) / uUserDensity
-        
-        # Using procedural noise as primary method from S1
-        animationIndex = uTime # [G] Assuming animationIndex is derived from time
-        density = clamp(octaves(p + animationIndex * WIND), 0.0, 1.0)
-        # Apply soft boundary if using SDF
-        # dist = sdfSphere(p, 2.0)
-        # density *= smoothstep(0.0, 1.0, dist)
+        density = clamp(octaves(add(p, scale(WIND, uTime)), maxOctaves), 0.0, 1.0)
+        density *= smoothstep(0.0, 1.0, dist)
 
-        # Early exit for low density
         if density < 0.01:
             t += STEP_SIZE
             continue
 
-        # Light Marching Loop
+        # Light march
         transmittanceLight = 1.0
         tLight = 0.0
-        lightColor = vec3(0.0)
-        
         for j in range(MAX_STEPS_LIGHT):
-            pLight = p + tLight * SUN
-            
-            # Calculate Light Density
-            # S1: Procedural
-            densityLight = clamp(octaves(pLight + animationIndex * WIND), 0.0, 1.0)
-            # S2: Texture-based
-            # lightDensity = volumetricDensityMap3d(lightMarchPoint, textureOffset, uUserScale) / uUserDensity
-            
-            # Early exit for light
+            pLight = add(p, scale(SUN, tLight))
+            densityLight = clamp(octaves(add(pLight, scale(WIND, uTime)), maxOctaves), 0.0, 1.0)
+
             if densityLight < 0.05:
                 tLight += STEP_SIZE_LIGHT
                 continue
 
-            # Update Light Transmittance (Beer-Lambert)
-            # Note: Source S1 uses extinctionCoeff * 1.5 multiplier
             transmittanceLight *= exp(-densityLight * extinctionCoeff * STEP_SIZE_LIGHT * 1.5)
-            
             if transmittanceLight < 0.05:
                 break
-                
             tLight += STEP_SIZE_LIGHT
 
-        # Calculate Scattering
-        # Phase Function
         cosTheta = dot(rayDir, SUN)
         phase = henyey_greenstein(cosTheta)
-        
-        # Ambient
-        ambient = sky * 0.7
-        
-        # Scattered Light
-        sunColour = uUserSunColor if not sunset else SUN_COLOUR_SUNSET # [G] Select sun color based on mode
-        scattered = ((sunColour * transmittanceLight * phase * 6.0) + ambient) * scatteringCoeff
-        
-        # Local Transmittance
+        ambient = scale(sky, 0.7)
+        scattered = add(scale(sunColour, transmittanceLight * phase * 6.0), ambient)
+        scattered = scale(scattered, scatteringCoeff)
+
         localTransmittance = exp(-density * extinctionCoeff * STEP_SIZE * 1.5)
-        
-        # Single Scattering Contribution
-        # S2: scattering = (1. - localTransmittance) * currentLightRayT
-        # S1: colour += transmittance * density * scattered * STEP_SIZE
-        # Merging: Use S1's accumulation with S2's scattering approximation if preferred, 
-        # but S1's code explicitly accumulates density * scattered. 
-        # We follow S1's accumulation logic as it is more detailed in the shader.
-        
-        colour += transmittance * density * scattered * STEP_SIZE
-        
-        # Update Main Transmittance
+        colour = add(colour, scale(scattered, transmittance * density * STEP_SIZE))
+
         transmittance *= localTransmittance
-        
-        # Early exit for main ray
         if transmittance < 0.01:
             break
-            
         t += STEP_SIZE
 
-    # 7. Final Composition
-    # Add sky contribution
-    colour += transmittance * sky
-    
-    # S2 adds cloudColor + col * globalTransmittance, but S1 accumulates directly into colour.
-    # We stick to S1's final output.
-    fColor = vec4(colour, 1.0)
-    return fColor
+    colour = add(colour, scale(sky, transmittance))
+    return (colour[0], colour[1], colour[2], 1.0)
 
 def calculate_sky_color(rayDir, sunset):
     screenRange = clamp(rayDir.y * 0.5 + 0.5, 0.0, 1.0)
     if sunset:
-        skyTop = vec3(0.15, 0.30, 0.60)
-        skyBottom = vec3(0.85, 0.45, 0.30)
+        skyTop = (0.15, 0.30, 0.60)
+        skyBottom = (0.85, 0.45, 0.30)
     else:
-        skyTop = vec3(0.2, 0.4, 0.8)
-        skyBottom = vec3(0.7, 0.85, 1.0)
+        skyTop = (0.2, 0.4, 0.8)
+        skyBottom = (0.7, 0.85, 1.0)
     return mix(skyBottom, skyTop, screenRange)
 
 def henyey_greenstein(cosTheta):
@@ -197,14 +146,14 @@ def henyey_greenstein(cosTheta):
     
     return mix(forward, backward, 0.4) * 0.4
 
-def octaves(p):
+def octaves(p, maxOctaves):
     f = 0.0
     amp = 0.5
     freq = 2.0
-    for i in range(maxOctaves):
-        noise_val = cnoise(p) # or snoise(p)
+    for _ in range(maxOctaves):
+        noise_val = cnoise(p)  # or snoise(p)
         f += amp * noise_val
-        p *= freq
+        p = scale(p, freq)
         freq += 0.20
         amp *= 0.5
     return f

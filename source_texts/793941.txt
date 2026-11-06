@@ -1,0 +1,95 @@
+pouët.net - your online demoscene resource
+
+Anyone ever implemented sphere-tracing with proper cone-tracing? :: pouët.net
+Anyone ever implemented sphere-tracing with proper cone-tracing?
+category: code [glöplog]
+Note, this is not about "cone-marching" (ie. multi-pass low-resolution pre-color distance finding) but cone-tracing.
+Going through zeno.pdf chapter 3 "Antialiasing". Of course this isn't about smoothing the final picture via sampling, but about aliasing artifacts resulting from a single-line ray hitting an object at a distance at just one random point within the whole area the "cone" would ideally cover. With the cone model, ideally "all points" hit by the increasing-in-size-with-distance cone would be sampled and blended together -- aka filtering. Same for normals (and normal filtering can't be done with just a linear interpolation but let's ponder this one another day).
+Now, some here posted in other threads that sphere tracing == cone-tracing because we increase "radius eps with distance". This is only half the story, it's very well for the intersection testing but does not blend together the entire area covered at the intersection point into a single pixel. I'm working off the classical simple raymarching loop used in all kinds of demos done here by iq / las / mrdoob / countless others with slightly less memorable nicknames. Now as far as I can see in all the demos/samples I've so far looked at, there isn't any real filtering done for materials (or normals). Distant errors are smoothed out by fog. That's OK but I wanna know if anyone has managed to implement a practical version of zeno.pdf chapter 3 "antialiasing"? Or anyone got any good blog posts or other notable discussions about it? Chapter 3 is only a brief theoretical overview, not particular actionable for Joe Shader Coder.
+Hart writes: "Sphere tracing is easily coerced into detecting and approximating cone intersections." (This is what we do by increasing radius eps with distance by a factor determined from framebuffer resolution.) BUT "One must still implement the details of the cone tracing algorithm ... sphere tracing only enhances the detection of cone intersections at silhouette edges and is of no help in the other forms of aliasing cone tracing also fixes". Anyone ever played with implementing cone-tracing in a raymarcher / sphere-tracer or read about it?
+Sure, the easy answer (and the hard way) is to go read the paper on cone-tracing ... but just curious if anyone here ever "distilled the essence" and transformed formulas into pseudocode etc.
+Also, sphere-tracing is already slowing down as the scene complexity grows, so doing academically accurate filtering may just be prohibitively expensive for real-time apps. Just something that's been on my mind right now.
+added on the 2012-05-07 12:36:27 by voxelizr
+Interesting - thought about that stuff yesterday... I'm also interested in the "distilled essence" :)
+added on the 2012-05-07 12:42:17 by las
+Further thinking... it would be prohibitive to sample n points per pixel especially as n would be growing with distance, only to later be smoothed out by fog anyway. I suppose the correct way to go about it is have the "material function" be distance-aware, so that the albedo and other properties are pre-filtered by the getMaterial() function (or by the sceneDistance() function if that's where the pixel's material is determined). For the normal it's all about a proper epsilon, I guess? Not sure if that's the complete answer, we're still sampling a random point "rayhitpos" inside a much bigger cone coverage area.
+What's the proper "distance aware" normal epsilon? Using 0.001 for near *and* far and all objects is going to be the wrong answer 99.99% of the time. I'm now using the last "nearLimit" after the raymarching loop. That begins as 0.000004 and at every iteration step is set to "total distance travelled so far multiplied by 1/min(width,height) * 1/min(width,height) ... looks OK but still wondering if really "as accurate as could be" :D
+added on the 2012-05-07 12:56:38 by voxelizr
+I wondered about the cone-tracing concept too. That got me thinking something slightly different though:
+If you can trace a cone, and determine the objects that intersect it and filter them to get a final composite value for the pixel... then you can do DoF too by modifying the cone.
+Instead of starting at the camera position and taking that as the point of your cone, you give it a negative radius at this point (but always treat it as positive, if it ever matters). Then you increase the radius with distance. Instead of a simple cone, you now have a 'negative radius' cone at the start, that shrinks to zero radius and then increases as a normal cone. You increase size with distance in the normal way (based on pixel size) but also an extra amount - the extra determines where the cone radius is zero, which is the camera 'focus point'.
+Hopefully that makes some sense. Implementation is the hard part. I did some thinking about it, didn't get far enough to try it. The difficulty is this: You really need to calculate the coverage of each shape that the cone intersects, and you need to calculate the normal, lighting, material, and even shadows / reflections etc. *for the whole part of the surface* that it intersects. Even taking a few point samples and blending, it's not really feasible.
+There could be a demo in it though. If you take the most simple shapes (planes and spheres), you don't need to march - you can trace them extremely quickly. You can also calculate the coverage without too much difficulty, and you can approximate things like normals over the coverage area. I.e. it might be practical with very simple scenes.
+added on the 2012-05-08 00:56:15 by psonice
+Good thinking! Haven't pondered DoF yet ... just getting started with all the fun here.
+The great thing about shooting rays (whether tracing, marching or casting) -- compared to rasterizing triangles -- is that we elegantly simulate a camera. So I agree there must be a smart way to bend or twist the ray or cone in some way quite similar to the real camera to get DoF, Bokeh etc without post-processing or multiple samples. Your above idea might be that way, remains to be tried =) to further digress, I remember back when I read the GigaVoxels paper -- awesome stuff by the way, but at the end of the day still voxels -- they got very good DoF "for free", in fact the blurrier parts of the final image rendered faster, as they could sample a much lower LOD octree level for that. We don't have quite the same setup here in sphere-tracing but still...
+About my above pondering, I think "I got it" now:
+even if the color/material function is LOD aware and returns a distance-based filtered value for an "object", that's not good enough. My current (and I suspect most implementations out there) naive marching loop may increase the cone radius properly with distance but at every marching step it still only takes the *closest* "object" at that point inside the cone radius. Not just when but *until* the ray stops, we need to take all the objects the cone intersects but that may not be the final object, take their colors and blend them in a way that weighs their contribution.
+This should be some weird trickery. And we cannot even properly estimate their real contribution until the ray finally stops. Anyone got some pseudocode for the above in some drawer yet? :D
+added on the 2012-05-08 01:18:57 by voxelizr
+Btw for DoF / camera effects there's something called ray jittering. Fragmentarium has some DoF logic in src/Examples/3D.frag -- might warrant some investigation =) as long as I don't shoot multiple rays per pixel or do expensive post-process gaussian blurs, I'll be happy to do so after implementing cone-marching (the multi-pass depth-test variant this time).
+added on the 2012-05-08 02:04:38 by voxelizr
+I thought about this a bit more earlier. Anything 'accurate' is going to be very hard, but maybe some 'inaccurate' methods can be fast enough and give reasonable results? How about this:
+1. You change the march algo, so instead of completing the march and then doing the normal calc, material + lighting etc. (lets call this 'drawing the point'), when the march loop detects a hit it calls a a function to draw the point and then it can continue.
+2. When it hits something and draws the point, we shrink the size of the cone and continue. Maybe the radius should be 50%, maybe it should be 0. This lets the ray continue without immediate collision.
+3. You allow say 4 ray hits, and then you stop the loop.
+4. The draw point function: We initialise the output pixel value at 0. The draw point function calculates the pixel colour (with lighting, material etc.) and adds it to the the output pixel value. At the end of the march we divide this by the 4 (not the number of ray hits, or you get no AA where the ray only hits one object once).
+That should give some anti-aliasing without too much performance penalty. Quality will not be great, because it doesn't calculate coverage correctly (e.g. an object can cover 30% of the pixel, but still cause 4 hits and draw as 100%).
+added on the 2012-05-08 15:09:01 by psonice
+Yeah... ignoring performance constraints, one would ideally at each step collect *all* distances that fall within the sphere, not just the min (-- but dammit that might kinda break opUnion etc. --) and base their fractional contribution on their relative distance compared to the others or some such. However for alpha blending they'd have to be traversed in z-order of course. So a blue sphere and a red box both are within coverage, 10% of the cone coverage on the left is a blue sphere "in front of" (z-wise) a red box covering 40% of the cone to the right. Then the blue sphere contribution is very very transparent but when blending with the much more (but still not fully) opaque red box portion it still needs to be an OVER blend operation.
+Ultimately one would want to support transparency anyway, so the ray does not stop until full opacity (or maxDist) is reached.
+2. Why do we shrink the cone size? For avoiding repeated collision with the same object again, couldn't we step over its full boundary extent, if this is known? Of course, that's the thing, figuring out the "object size" would require another distance-function-to-only-that-object the opposite direction -- could be from maxDist-curPos to ensure one such call is sufficient to obtain the object bounds and jump over it before proceeding with further marching.
+3. Hard limits always a good idea as each additional alpha blended contribution is increasingly less noticable and distance fog washes things out too.
+Good ideas here for sure! This solves the anti-aliasing artifacts caused by sampling distant points inside a growing cone frustum.
+That other anti-aliasing of pixel-stairs? Without reverting to super-sampling / sub-sampling / post-process? I'm thinking iq's "soft shadows" technique gives a good idea here. He gets soft penumbras if the object-light-ray is not actually fully occluded but "almost so" by a given threshold. Why don't we do the same thing in primary-ray marching?
+See, currently if something is closer than epsilon threshold, we record a hit and draw it, else we proceed by a large step. If that something did not exactly meet the threshold / cone radius / epsilon / nearLimit but "almost would have", why not shade an alpha pixel and proceed? This should give perfectly rounded spheres for example with the right blending logic. This is definitely something I gotta experiment with. You ever played with this or anyone else here? =)
+added on the 2012-05-08 17:23:24 by voxelizr
+Quote:
+So a blue sphere and a red box both are within coverage, 10% of the cone coverage on the left is a blue sphere "in front of" (z-wise) a red box covering 40% of the cone to the right. Then the blue sphere contribution is very very transparent but when blending with the much more (but still not fully) opaque red box portion it still needs to be an OVER blend operation.
+What I was thinking with the method I suggested, was that the cone would hit the blue sphere. You add this to the pixel (which starts at r,g,b 0,0,0) so you get 0,0,1. Then the cone shrinks and continues. It hits the red box, so you add a red pixel to get 1,0,1. Then the ray continues, but doesn't hit anything.
+At the end, you divide by 4 (max hits), so your pixel's RGB values are 0.25, 0., 0.25. Not "correct" but at least it's blended the blue, the red, and the black background - you have AA.
+Quote:
+2. Why do we shrink the cone size? For avoiding repeated collision with the same object again, couldn't we step over its full boundary extent, if this is known? Of course, that's the thing, figuring out the "object size" would require another distance-function-to-only-that-object the opposite direction -- could be from maxDist-curPos to ensure one such call is sufficient to obtain the object bounds and jump over it before proceeding with further marching.p
+The cone shrink is important. Consider a few cases:
+1. The cone hits the centre of a red object. In this case, the cone shrinks 3 times and hits the same object 3 more times. Your final colour is the (4,0,0)/4, which is correct.
+2. The cone hits the edge of the object. In this case the object affects the output colour, but the cone shrinks, the ray continues, and it doesn't hit the object again. Maybe it hits other objects. This gives edge antialiasing.
+3. The cone hits a plane with a checkerboard texture, at an angle, at one of the black/white edges. It doesn't just hit the surface once, it hits 4 times, from 4 positions, then blends the colours. It anti-aliases the texture too.
+I've not experimented with this yet, I'll give it a quick go when I get time.
+added on the 2012-05-08 18:03:47 by psonice
+Thanks for clearing those up. Awesome thoughts. Still not sure about shrinking the cone, though you do bring up good reasons -- when would you "restore the cone to its proper size" -- at the next "real" marching step I guess. Gonna play with all of this after I have cone-marching implemented and post results here =)
+added on the 2012-05-08 18:21:23 by voxelizr
+The cone should never return to full size. If you consider an 'accurate' version, say the cone intersects a sphere first. The arc of the sphere cuts the cone. After that, you shouldn't trace the full cone or you might intersect objects hidden behind the sphere, which is wrong. You should trace using a cone-minus-arc. Which would be even more of a bitch ;)
+Therefore, shrink the cone to approximate the reduction after coverage.
+added on the 2012-05-08 23:31:40 by psonice
+Quote:
+See, currently if something is closer than epsilon threshold, we record a hit and draw it, else we proceed by a large step. If that something did not exactly meet the threshold / cone radius / epsilon / nearLimit but "almost would have", why not shade an alpha pixel and proceed? This should give perfectly rounded spheres for example with the right blending logic. This is definitely something I gotta experiment with. You ever played with this or anyone else here? =)
+i think this is how you want to do antialiasing :) (basically, the soft shadows idea). the threshold of acceptance for shading+blending is dependent on distance to camera, such that the threshold distance projects to one pixel size in screen space (basically, the threshold is linear with the distance to camera). that's pretty much what zeno.pdf proposes, no?
+added on the 2012-05-09 00:31:54 by iq
+It does? Suppose then I have to re-parse academic-lingo zeno.pdf :D
+added on the 2012-05-09 04:43:01 by voxelizr
+Quote:
+i think this is how you want to do antialiasing :) (basically, the soft shadows idea). the threshold of acceptance for shading+blending is dependent on distance to camera, such that the threshold distance projects to one pixel size in screen space (basically, the threshold is linear with the distance to camera). that's pretty much what zeno.pdf proposes, no?
+Without some 'safety system', if the ray travels parallel to a surface but very close to it (i.e. everywhere you need AA) you end up evaluating the surface material / lighting every step.
+Either you limit the number of samples along the ray (and possibly use them all on the first object the ray passes and then never sample the 2nd object, which would cause artefacts) of you have to make some other compromise. Otherwise I can see this being very, very slow.
+Maybe mix with my 'reduce cone radius' suggestion? Or does the xeno paper suggest something else?
+added on the 2012-05-09 13:19:56 by psonice
+Yeah you're right! One gotta be careful. A very naive safety system that doesn't rely on branching or keeping track of object IDs or complicated book-keeping might just be to use an extremely small alpha contribution to begin with. As we pass by an object very closely without hitting it, indeed we could accumulate alpha shading at every step many times -- shouldn't be too expensive (an addition only in the best case).
+Not sure what zeno says on this, gotta read it more carefully and completely -- only scanned it briefly as I already had gotten the raymarching basics first via some webgl demos and then iq's awesome collection of stuff.
+added on the 2012-05-10 02:30:04 by voxelizr
+I don't get how you can reduce the shading to just an add (unless you're doing unlit black + white or something). Surely to get useful colour values, you have to get the object material and also light the current point? That means getting the normal, lighting, possibly texturing + calculating shadows/reflections etc. too. Is there a better way?
+added on the 2012-05-10 12:43:55 by psonice
+Yeah not really just an add -- what I meant is, don't collect all colors in some array for later blending, accumulate with mix() with a really low alpha. A lot more than just an add, granted. Sorry for the confusion =)
+added on the 2012-05-10 13:24:40 by voxelizr
+What if one area of the cone repeatedly gets partial coverage, while one never does?
+added on the 2012-05-10 15:09:29 by Lord Graga
+Then you get bad AA :)
+The only way to avoid that is to attempt to trace a cone with pieces missing from it, which doesn't look particularly practical to me.
+Or you could offset the cone away from the surface it hit, and shrink it. Actually maybe that's workable? If you get a hit, you calculate the normal to get the lighting and you know the distance from the surface. You'd need to move the cone's axis in the direction of the normal, but perpendicular to the cone axis (if that makes sense - you can't move along the normal, because if the ray hits straight-on you would keep stepping back from the surface).
+That way the new cone is outside the 'coverage area' of the hit. You no longer get lots of hits in the same part of the cone.
+added on the 2012-05-10 16:29:50 by psonice
+Smart.
+added on the 2012-05-10 19:33:18 by Lord Graga
+login
+login via SceneID
+log in ::
+register

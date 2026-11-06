@@ -1,0 +1,161 @@
+--- v001.md
++++ v002.md
+@@ -8,7 +8,7 @@
+ ## How it works
+ **Inputs:**
+-- Camera rays `cam_rays_now` (origin and direction).
+-- Initial depth offsets `init_zdepth_now` derived from an `unfinished_mask`.
+-- A neural network decoder `self.decoder` and a latent code vector `latent`.
++- Camera rays `cam_rays_now` (origin and direction) [S1, unofficial].
++- Initial depth offsets `init_zdepth_now` derived from an `unfinished_mask` [S1, unofficial].
++- A neural network decoder `self.decoder` and a latent code vector `latent` [S1, unofficial].
+ - Parameters: `clamp_dist` (default 0.1), `stop_threshold`, `ray_marching_ratio`, `maxbound_zdepth`, `march_step`, `buffer_size` [S1, unofficial].
+ 
+@@ -17,5 +17,5 @@
+ 
+ **Data Structures:**
+-- `unfinished_mask`: A boolean tensor indicating which rays are still active.
++- `unfinished_mask`: Boolean tensor indicating which rays are still active.
+ - `marching_zdepth`: Accumulated step distance along the ray.
+ - `points_now`: 3D coordinates of sample points.
+@@ -30,13 +30,12 @@
+ 5. Update `marching_zdepth` by adding `sdf_marching * ray_marching_ratio` [S1, unofficial].
+ 6. Update `unfinished_mask`:
+-   - Keep rays where `marching_zdepth + init_zdepth < maxbound_zdepth`.
++   - Keep rays where the total depth (`marching_zdepth + init_zdepth`) is less than `maxbound_zdepth`.
+    - Keep rays where `abs(sdf_marching) >= stop_threshold`.
+    - Keep rays that were previously unfinished [S1, unofficial].
+-7. Terminate if `torch.nonzero(unfinished_mask).shape[0] == 0` [S1, unofficial].
+-8. Pad result lists to `self.buffer_size` if necessary [S1, unofficial].
++7. Terminate the loop if no rays remain unfinished (`torch.nonzero(unfinished_mask).shape[0] == 0`), padding the result lists to `self.buffer_size` if necessary [S1, unofficial].
+ 
+ **Pseudocode:**
+ ```python
+-def aggressive_ray_marching(cam_rays_now, init_zdepth_now, unfinished_mask, 
++def aggressive_ray_marching(cam_rays_origins, cam_rays_directions, init_zdepth_now, unfinished_mask, 
+                             decoder, latent, clamp_dist=0.1, stop_threshold=0.01, 
+                             ray_marching_ratio=1.0, maxbound_zdepth=10.0, 
+@@ -44,20 +43,5 @@
+     """
+     Performs aggressive ray marching using SDF values.
+-    
+-    Args:
+-        cam_rays_now: Tensor of camera rays (origins, directions).
+-        init_zdepth_now: Initial depth offsets for unfinished rays.
+-        unfinished_mask: Boolean tensor of active rays.
+-        decoder: Neural network function to decode SDF from latent and points.
+-        latent: Latent code vector.
+-        clamp_dist: Maximum SDF value for clamping.
+-        stop_threshold: Minimum absolute SDF to continue marching.
+-        ray_marching_ratio: Scaling factor for SDF step size.
+-        maxbound_zdepth: Maximum total depth bound.
+-        march_step: Maximum number of steps.
+-        buffer_size: Size to pad output tensors.
+-        
+-    Returns:
+-        sdf_list, marching_zdepth_list, points_list: Concatenated tensors.
++    Assumes cam_rays_origins and cam_rays_directions are arrays of shape (N, 3).
+     """
+     sdf_list = []
+@@ -65,55 +49,52 @@
+     points_list = []
+     
+-    marching_zdepth_now = torch.zeros_like(init_zdepth_now)
++    marching_zdepth_now = [0.0] * len(init_zdepth_now)
+     
+     for step in range(march_step):
+         # Check if any rays are unfinished
+-        if not torch.any(unfinished_mask):
++        if not any(unfinished_mask):
+             break
+             
+         # Get indices of unfinished rays
+-        active_indices = torch.nonzero(unfinished_mask).squeeze()
++        active_indices = [i for i, active in enumerate(unfinished_mask) if active]
+         
+         # Initialize depths for current step
+-        # Note: init_zdepth_now is assumed to be constant or pre-computed
+-        current_z = init_zdepth_now[active_indices] + marching_zdepth_now[active_indices]
++        current_z = [init_zdepth_now[i] + marching_zdepth_now[i] for i in active_indices]
+         
+         # Generate 3D point samples along camera rays
+-        # Assuming cam_rays_now has structure (origin, direction)
+-        origins = cam_rays_now[active_indices, :3]
+-        directions = cam_rays_now[active_indices, 3:6]
+-        points_now = origins + directions * current_z.unsqueeze(1)
++        # points = origin + direction * depth
++        points_now = []
++        for i, idx in enumerate(active_indices):
++            ox, oy, oz = cam_rays_origins[idx]
++            dx, dy, dz = cam_rays_directions[idx]
++            z = current_z[i]
++            points_now.append((ox + dx * z, oy + dy * z, oz + dz * z))
+         
+         # Decode SDF values
+-        sdf_now = decoder(points_now, latent)
++        sdf_now = [decoder(p, latent) for p in points_now]
+         
+         # Clamp SDF values
+-        sdf_marching = torch.clamp(sdf_now, -clamp_dist, clamp_dist)
++        sdf_marching = [max(-clamp_dist, min(clamp_dist, s)) for s in sdf_now]
+         
+         # Update marching depth
+-        marching_zdepth_now[active_indices] += sdf_marching * ray_marching_ratio
++        for i, idx in enumerate(active_indices):
++            marching_zdepth_now[idx] += sdf_marching[i] * ray_marching_ratio
+         
+         # Store results
+-        sdf_list.append(sdf_marching.unsqueeze(0))
+-        marching_zdepth_list.append(marching_zdepth_now[active_indices].unsqueeze(0))
+-        points_list.append(points_now.unsqueeze(0))
++        sdf_list.append(sdf_marching)
++        marching_zdepth_list.append([marching_zdepth_now[i] for i in active_indices])
++        points_list.append(points_now)
+         
+         # Update unfinished mask
+-        total_depth = marching_zdepth_now + init_zdepth_now
+-        condition_depth = total_depth < maxbound_zdepth
+-        condition_sdf = torch.abs(sdf_marching) >= stop_threshold
+-        
+-        # Combine conditions
+-        unfinished_mask[active_indices] = condition_depth & condition_sdf
+-        
++        for i, idx in enumerate(active_indices):
++            total_depth = marching_zdepth_now[idx] + init_zdepth_now[idx]
++            condition_depth = total_depth < maxbound_zdepth
++            condition_sdf = abs(sdf_marching[i]) >= stop_threshold
++            unfinished_mask[idx] = condition_depth and condition_sdf
++            
+     # Pad results to buffer_size
+-    # Note: This is a simplified padding logic; actual implementation may vary
+-    # based on how buffer_size is used (e.g., for batch processing)
++    # Note: Actual padding logic depends on batch processing requirements.
+     # The source indicates concatenation along dim 0 to form (march_step, N)
+     # Here we assume the lists are already structured for concatenation
+-    
+-    sdf_list = torch.cat(sdf_list, dim=0)
+-    marching_zdepth_list = torch.cat(marching_zdepth_list, dim=0)
+-    points_list = torch.cat(points_list, dim=0)
+     
+     return sdf_list, marching_zdepth_list, points_list
+@@ -127,5 +108,5 @@
+ **Edge Cases:**
+ - If `latent_tensor` does not correspond to a valid shape, `points_tmp` is `None` and Chamfer distance calculation fails [S1, unofficial].
+-- Precision issues may arise if `stop_threshold` is too small relative to floating-point precision.
++- Precision issues may arise if `stop_threshold` is too small relative to floating-point precision [G].
+ - Boundary conditions are handled by `maxbound_zdepth` [S1, unofficial].
+ 
+@@ -141,5 +122,5 @@
+ **Time Complexity:** Linear with respect to the number of active rays and steps, but reduced by large skips in empty space [S1, unofficial][S2].
+ **Memory Complexity:** Proportional to `march_step * N` for storing SDF, depth, and point lists [S1, unofficial].
+-**Performance:** Efficient for scenes with large empty regions due to SDF-based leaping [S2]. Performance degrades if `stop_threshold` is too low, causing excessive steps near surfaces [S1, unofficial].
++**Performance:** Efficient for scenes with large empty regions due to SDF-based leaping [S2].
+ **Strengths:** Adaptive step size, efficient empty space skipping, compatible with neural implicit representations [S1, unofficial][S2].
+ **Limitations:** Requires SDF computation (neural or explicit), sensitive to `clamp_dist` and `stop_threshold` parameters [S1, unofficial].
+@@ -148,5 +129,5 @@
+ 
+ ## Background
+-Originated in the context of neural implicit surface reconstruction and rendering, specifically in the DIST-Renderer project [S1, unofficial]. It leverages the properties of SDFs for efficient ray traversal, a concept well-established in computer graphics, but applies it within a neural rendering framework using latent codes [S1, unofficial]. The technique is part of a broader family of SDF-accelerated ray marching methods [1629-performance-optimizations-for-sdf-ray-marching.md].
++The technique leverages the properties of SDFs for efficient ray traversal, a concept well-established in computer graphics, but applies it within a neural rendering framework using latent codes [S1, unofficial]. It is part of a broader family of SDF-accelerated ray marching methods [1629-performance-optimizations-for-sdf-ray-marching.md].
+ 
+ ## Sources

@@ -4,16 +4,16 @@ Also called: Per-pixel transparent fragment sorting
 Mammen's Technique is a software algorithm to sort per-pixel transparent fragments in front of the front-most opaque one [S1, unofficial]. It addresses the visibility ordering problem in object-order rendering where transparent surfaces must be composited from back to front [G]. Unlike incremental methods that exploit spatial coherence between adjacent pixels, Mammen's Technique performs independent, complete sorts for each pixel from scratch [S1, unofficial].
 ## How it works
 **Inputs and Outputs:**
-- Input: A set of polygonal fragments projected onto a specific pixel. Each fragment has a depth value ($z$) and an opacity/transparency attribute [G].
-- Output: A sorted list of transparent fragments ordered from back to front, ready for compositing in front of the front-most opaque fragment [S1, unofficial].
+- Input: A set of polygonal fragments projected onto a specific pixel, each containing a depth value ($z$) and an opacity attribute [G].
+- Output: A sorted list of transparent fragments ordered from back to front, followed by the front-most opaque fragment [S1, unofficial].
 
 **Data Structures:**
-- A list of fragments projecting onto the current pixel. Each fragment contains its depth $z$ and rendering attributes [G].
+- A list of fragments projecting onto the current pixel [G]. Each fragment stores its depth $z$ and rendering attributes [G].
 
 **Steps:**
-1. **Projection:** Project all scene polygons onto the current pixel. Identify fragments that cover the pixel [G].
-2. **Opaque Identification:** Identify the front-most opaque fragment. Let its depth be $z_{opaque}$ [G].
-3. **Transparent Filtering:** Collect all transparent fragments with depth $z < z_{opaque}$ [S1, unofficial]. Fragments with $z > z_{opaque}$ are occluded by the opaque fragment and discarded [G].
+1. **Projection:** Project all scene polygons onto the current pixel and identify fragments that cover it [G].
+2. **Opaque Identification:** Identify the front-most opaque fragment and record its depth as $z_{opaque}$ [G].
+3. **Transparent Filtering:** Collect all transparent fragments with depth $z < z_{opaque}$ (assuming $z$ increases away from the camera) [G]. Fragments with $z > z_{opaque}$ are occluded by the opaque fragment and discarded [G].
 4. **Sorting:** Sort the collected transparent fragments by depth $z$ in ascending order (back to front) [S1, unofficial].
 5. **Compositing:** Composite the sorted transparent fragments in order, then composite the front-most opaque fragment [G].
 
@@ -71,7 +71,7 @@ The R-Buffer is a hardware architectural proposal for implementing order-indepen
 ## Operating characteristics
 - **Time Complexity:** $O(N \log N)$ per pixel for sorting $N$ transparent fragments, plus $O(N)$ for filtering and identification [G]. Since the sort is performed independently for each pixel without exploiting coherence, the total time is proportional to the number of pixels times the average number of fragments per pixel [S1, unofficial].
 - **Memory Complexity:** $O(N)$ per pixel to store the fragments [G].
-- **Measured Performance:** Not given in the sources.
+- **Measured Performance:** Not given in the sources [G].
 - **Scaling:** Performance degrades linearly with the number of fragments per pixel. It does not scale well with high fragment density compared to incremental methods [G].
 - **Strengths:** Simple to implement; handles visibility cycles gracefully per pixel; correctly handles occlusion by the front-most opaque fragment [G].
 - **Limitations:** Computationally expensive due to repeated sorting; does not exploit spatial coherence; requires multiple passes through polygons in naive implementations [S1, unofficial].

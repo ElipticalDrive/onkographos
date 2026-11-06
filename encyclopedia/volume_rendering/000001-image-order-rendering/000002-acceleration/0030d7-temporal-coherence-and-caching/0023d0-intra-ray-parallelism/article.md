@@ -1,0 +1,106 @@
+# Intra-ray Parallelism
+
+Also called: GPU-acceleration through intra-ray parallelism
+
+## Overview
+Intra-ray parallelism is a rendering acceleration scheme that partitions each ray into depth bins to enable efficient parallel accumulation of primitive contributions during rendering [S1, unofficial]. It differs from sibling methods like [Temporal Differential Rendering](5499-temporal-differential-rendering.md) and [Exploiting Temporal Coherence (C-Buffer)](5560-exploiting-temporal-coherence-c-buffer.md) by focusing on spatial-parallel decomposition of the ray-marching process itself rather than temporal reuse of frame buffers or differential computation of changes. It builds on [Temporal Coherence and Caching](6372-temporal-coherence-and-caching.md) by utilizing the same tile-based spatial partitioning logic but applies it to parallelize the accumulation step within a single frame's ray traversal.
+
+## How it works
+**Inputs and Outputs:**
+*   **Inputs:** Image dimensions $w, h$; number of depth bins $b$; set of ellipsoid primitives $E$ (defined by mean $\mu$ and covariance $\Sigma$); transfer function $TF$ mapping intensity to color and opacity; camera view configuration $View$ [S1, unofficial].
+*   **Output:** Rendered image $I$ [S1, unofficial].
+
+**Data Structures:**
+*   **Tiles ($T$):** A grid structure derived from image dimensions and bin count. Each tile $t$ represents a 3D volume subdivision, including depth-wise subdivisions corresponding to the $b$ bins.
+*   **Lists ($L, K$):** $L$ contains the visible primitives; $K$ contains 3D keys associated with each primitive, indicating which tile it belongs to.
+*   **Ranges ($R$):** For each tile $t$, a range $[R[t].start, R[t].end]$ defining the subset of primitives in $L$ assigned to that tile.
+*   **Per-bin Canvas ($I_{bin}$):** A 3D buffer indexed by pixel $i$ and bin index $t_z$ (where $0 \le t_z < b$), initialized to 0.
+
+**Algorithm Steps:**
+1.  **Tile Creation:** Create tiles $T$ from image dimensions $w, h$ and bin count $b$. Tiles include depth-wise subdivisions [S1, unofficial].
+2.  **Culling:** Cull ellipsoids $E$ based on the current $View$ to produce the visible set $E_{visible}$ [S1, unofficial].
+3.  **Key Generation:** Duplicate visible ellipsoids with 3D keys relative to tiles $T$ to produce lists $L$ (primitives) and $K$ (keys) [S1, unofficial].
+4.  **Sorting:** Sort lists $K$ and $L$ by tile keys. Note: No intra-tile depth sorting is performed [S1, unofficial].
+5.  **Range Identification:** Identify ranges $R$ for each tile $t$, defining the range of primitives assigned to that 3D tile [S1, unofficial].
+6.  **Initialization:** Initialize per-bin canvas $I_{bin}$ to 0 [S1, unofficial].
+7.  **Tile Processing Loop:**
+    *   For all tiles $t$ in $T$:
+        *   Extract primitives $E_t$ assigned to tile $t$ from list $L$ using range $R[t]$ [S1, unofficial].
+        *   For all pixels $i$ in tile $t$:
+            *   Compute ray $ray[i, t_z]$ by sampling intensity from primitives $E$ [S1, unofficial].
+            *   Blend the partial ray result into the per-bin canvas: $I_{bin}[i, t_z] \leftarrow \text{BlendPartialRay}(ray[i, t_z])$ [S1, unofficial].
+8.  **Tile Reset:** After processing all tiles, reset tile grid $z=1$ by creating new tiles $T$ with bin count 1: $T \leftarrow \text{CreateTiles}(w, h, 1)$ [S1, unofficial].
+9.  **Merging:** For all pixels $i$ in image $I$:
+    *   Merge Z-bins by blending across $b$ bins: $I[i] \leftarrow \text{MergeZBins}(I_{bin}[i, 0:b])$ [S1, unofficial].
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def RENDER(w, h, b, E, TF, View):
+    # 1. Create tiles with depth-wise subdivisions
+    T = CreateTiles(w, h, b)
+    
+    # 2. Cull ellipsoids based on view
+    E_visible = CullEllipsoid(E, View)
+    
+    # 3. Duplicate visible ellipsoids with 3D keys relative to tiles
+    L, K = DuplicateWithKeys3D(E_visible, T)
+    
+    # 4. Sort by tile keys (no intra-tile depth sorting)
+    SortByTileKeys(K, L)
+    
+    # 5. Identify ranges of primitives per 3D tile
+    R = IdentifyTileRanges(K)
+    
+    # 6. Initialize per-bin canvas
+    I_bin = InitializeZero(w, h, b)
+    
+    # 7. Process each tile
+    for t in T:
+        # Extract primitives assigned to tile t
+        start = R[t].start
+        end = R[t].end
+        E_t = L[start:end]
+        
+        # Process pixels in the tile
+        for i in PixelsInTile(t):
+            # Sample intensity from primitives for the ray segment in this bin
+            ray = IntensitySample(i, E_t, TF)
+            
+            # Blend partial ray result into the specific bin for this pixel
+            t_z = GetBinIndex(t)
+            I_bin[i, t_z] = BlendPartialRay(ray)
+            
+    # 8. Reset tile grid for merging phase
+    T_merged = CreateTiles(w, h, 1)
+    
+    # 9. Merge Z-bins across all depth bins for each pixel
+    for i in AllPixels(w, h):
+        I[i] = MergeZBins(I_bin[i, 0:b])
+        
+    return I
+```
+
+**Parameters:**
+*   $w, h$: Width and height of the image to rasterize [S1, unofficial].
+*   $b$: Number of depth bins [S1, unofficial].
+*   $TF$: Transfer function to map intensity to color and opacity [S1, unofficial].
+*   $View$: View configuration of the current camera [S1, unofficial].
+
+**Edge Cases and Pitfalls:**
+*   **Intra-tile Sorting:** The method explicitly states that no intra-tile depth sorting is performed. This implies that the blending function must handle potential overdraw or order-independent transparency within the bin, or that the binning granularity is sufficient to mitigate sorting requirements [S1, unofficial].
+*   **Bin Count ($b$):** The choice of $b$ affects memory usage ($I_{bin}$ size) and the granularity of depth resolution. A higher $b$ increases parallelism potential but also memory overhead.
+
+## Operating characteristics
+*   **Time Complexity:** Not given in the sources. The sorting step dominates the preprocessing, likely $O(N \log N)$ where $N$ is the number of visible primitives. The rendering loop is parallelized over tiles and pixels.
+*   **Memory Complexity:** Proportional to $w \times h \times b$ for the per-bin canvas $I_{bin}$, plus storage for the sorted lists $L$ and $K$.
+*   **Strengths:** Enables efficient parallel accumulation of primitive contributions by partitioning rays into depth bins, leveraging GPU parallelism for tile-based processing [S1, unofficial].
+*   **Limitations:** Requires explicit binning and merging steps. The lack of intra-tile depth sorting may impact accuracy for complex overlapping primitives within a bin [S1, unofficial].
+*   **When to use:** Suitable for GPU-accelerated rendering of sparse volumes represented by ellipsoid primitives where parallel accumulation can be exploited [S1, unofficial].
+
+## Background
+This method is described in the context of 3D Ellipsoid-based Sparse Volume Rendering. It is presented as a GPU acceleration technique that utilizes structure-aware primitive learning and per-primitive ray sampling [S1, unofficial].
+
+## Sources
+[S1] ESVR: 3D Ellipsoid-based Sparse Volume Rendering via Structure-aware Primitive Learning and Per-primitive Ray Sampling, https://arxiv.org/abs/2608.05564v1, fetched 2026-10-26 (unofficial)

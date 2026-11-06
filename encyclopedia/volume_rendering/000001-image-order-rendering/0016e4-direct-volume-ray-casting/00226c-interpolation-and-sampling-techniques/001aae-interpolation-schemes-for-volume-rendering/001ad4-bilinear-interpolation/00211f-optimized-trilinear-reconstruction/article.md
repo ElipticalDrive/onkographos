@@ -1,111 +1,113 @@
 # Optimized Trilinear Reconstruction
-
 Also called: Trilinear interpolation optimized using SIMD
-
 ## Overview
-Optimized Trilinear Reconstruction is a method for accelerating the trilinear interpolation of color and opacity values during direct volume ray casting by utilizing SIMD processor extensions such as MMX, SSE, or 3DNow! [S1]. It builds on [Bilinear Interpolation](858-bilinear-interpolation.md) by extending the interpolation to three dimensions while optimizing the underlying arithmetic and memory operations for specific hardware capabilities. It differs from standard trilinear interpolation by reducing computational overhead through parallel processing of multiple samples, and from [Multi-Dimensional Interpolation Extension](2784-multi-dimensional-interpolation-extension.md) by focusing specifically on the 3D trilinear case with fixed-point integer arithmetic.
-
+Optimized Trilinear Reconstruction is a method for accelerating the trilinear interpolation of volume data during direct volume ray casting by leveraging SIMD (Single Instruction, Multiple Data) processor extensions such as MMX, SSE, or 3DNow! [S1]. It improves memory copying and interpolation speed compared to scalar implementations, serving as a foundational optimization for subsequent techniques like the NV Rendering Formula [5960-nv-rendering-formula-trilerp.md].
 ## How it works
 **Inputs and Outputs:**
-*   Input: A 3D volume dataset, camera rays, and rendering parameters.
-*   Output: Rendered image with color and opacity values.
+- Input: Volume data containing color and opacity values.
+- Output: Interpolated color and opacity values for ray casting.
 
 **Data Structures:**
-*   Color and opacity values are stored and processed as 16-bit unsigned integers [S1].
-*   To reduce cache misses, the volume is decomposed into small blocks containing $32^3$ samples [S1].
-*   Memory addresses for these blocks are generated using bit-interleaved coordinates. For coordinates $(X, Y, Z)$, the bits are interleaved as follows:
-    $$ (X_{n \dots 0}, Y_{n \dots 0}, Z_{n \dots 0}) \implies Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5} Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0 $$
-    A 32-entry table and binary operators are used to interleave the five lower bits to generate the new memory address [S1].
+- Color and opacity values are stored as 16-bit unsigned integers [S1].
+- Volume data may be decomposed into small blocks of 323 samples to reduce cache misses, using bit-interleaved coordinates [S1].
 
 **Steps:**
-1.  **Ray Casting:** For each pixel, cast a ray through the volume.
-2.  **Block Access:** Determine the volume block containing the current sample point using the bit-interleaved addressing scheme [S1].
-3.  **SIMD Interpolation:** Perform trilinear interpolation on the 8 neighboring voxels.
-    *   Load voxel data into SIMD registers.
-    *   Perform arithmetic operations (multiplication, addition) in parallel using MMX, SSE, or 3DNow! instructions [S1].
-    *   Compute color and opacity using 16-bit unsigned integer arithmetic [S1].
-4.  **Compositing:** Accumulate the interpolated color and opacity along the ray using standard volume rendering integration.
-5.  **Output:** Write the final pixel color to the frame buffer.
+1. **Data Preparation:** If cache optimization is enabled, decompose the volume into blocks of 323 samples. Interleave the bits of the coordinates $(X, Y, Z)$ to generate memory addresses. For the five lower bits, use a 32-entry table and binary operators to interleave $X_{n \dots 0}, Y_{n \dots 0}, Z_{n \dots 0}$ into the format $Z_{n \dots 5} Y_{n \dots 5} X_{n \dots 5} Z_4 Y_4 X_4 \dots Z_0 Y_0 X_0$ [S1].
+2. **SIMD Execution:** Use SIMD extensions (MMX, SSE, or 3DNow!) to perform memory copying and trilinear interpolation operations on the 16-bit unsigned integer data [S1].
+3. **Interpolation:** Compute the trilinear interpolation of color and opacity values using the SIMD instructions [S1].
+
+**Parameters:**
+- Data type: 16-bit unsigned integers for color and opacity values [S1].
+
+**Edge Cases and Pitfalls:**
+- On MMX-only processors, line equation tests cannot be performed, which may lead to minor artifacts in the rendered image [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def optimized_trilinear_reconstruction(volume_data, rays, options):
-    # volume_data: 3D array of 16-bit unsigned integers
-    # rays: list of ray origins and directions
-    # options: rendering parameters
+# Pseudocode for Optimized Trilinear Reconstruction
+# Note: Specific SIMD intrinsics are hardware-dependent and not detailed in sources [S1]
+
+def optimized_trilinear_reconstruction(volume_data, ray_origin, ray_direction, resolution):
+    """
+    Perform trilinear interpolation using SIMD optimizations.
     
-    # Precompute bit-interleaved address table for lower 5 bits
-    # This is a constant lookup table of size 32x32x32 or similar structure
-    # depending on implementation details not fully specified in [S1]
-    address_table = compute_bit_interleave_table()
-    
-    for ray in rays:
-        color = 0
-        opacity = 0
-        t = ray.origin
+    Args:
+        volume_data: Array of 16-bit unsigned integers representing color and opacity.
+        ray_origin: Starting point of the ray.
+        ray_direction: Direction of the ray.
+        resolution: Dimensions of the volume grid.
         
-        while t < ray.end:
-            # Get voxel coordinates
-            x, y, z = get_voxel_coords(t)
+    Returns:
+        Interpolated color and opacity values.
+    """
+    # Initialize result variables
+    color = 0
+    opacity = 0
+    
+    # Step 1: Prepare data if cache optimization is used
+    # Decompose volume into blocks of 323 samples and interleave coordinates
+    # This step is implicit in the memory layout described in [S1]
+    
+    # Step 2: Iterate along the ray
+    t = 0
+    while t < max_distance:
+        # Calculate current position
+        x = ray_origin.x + t * ray_direction.x
+        y = ray_origin.y + t * ray_direction.y
+        z = ray_origin.z + t * ray_direction.z
+        
+        # Check if position is within volume bounds
+        if not is_within_bounds(x, y, z, resolution):
+            break
             
-            # Determine block and offset using bit-interleaved addressing
-            block_addr = compute_block_address(x, y, z, address_table)
-            
-            # Fetch 8 neighboring voxels
-            # Note: Exact SIMD load instructions depend on hardware (MMX/SSE/3DNow!)
-            # This is a conceptual representation
-            v000 = load_voxel(block_addr, 0, 0, 0)
-            v100 = load_voxel(block_addr, 1, 0, 0)
-            v010 = load_voxel(block_addr, 0, 1, 0)
-            v110 = load_voxel(block_addr, 1, 1, 0)
-            v001 = load_voxel(block_addr, 0, 0, 1)
-            v101 = load_voxel(block_addr, 1, 0, 1)
-            v011 = load_voxel(block_addr, 0, 1, 1)
-            v111 = load_voxel(block_addr, 1, 1, 1)
-            
-            # Compute interpolation weights
-            dx = x - floor(x)
-            dy = y - floor(y)
-            dz = z - floor(z)
-            
-            # Perform trilinear interpolation using SIMD
-            # Using 16-bit unsigned integer arithmetic
-            color_sample = trilerp_simd(v000, v100, v010, v110, v001, v101, v011, v111, dx, dy, dz)
-            opacity_sample = trilerp_simd_opacity(v000, v100, v010, v110, v001, v101, v011, v111, dx, dy, dz)
-            
-            # Composite
-            color, opacity = composite(color, opacity, color_sample, opacity_sample)
-            
-            t += ray.step_size
-            
-        write_pixel(ray.pixel_id, color, opacity)
+        # Step 3: Perform SIMD-based trilinear interpolation
+        # Use MMX, SSE, or 3DNow! instructions to interpolate
+        # This involves loading 16-bit unsigned integers and performing arithmetic
+        interpolated_value = simd_trilinear_interpolate(volume_data, x, y, z)
+        
+        # Accumulate results (simplified compositing)
+        color += interpolated_value.color
+        opacity += interpolated_value.opacity
+        
+        # Advance along the ray
+        t += step_size
+        
+    return color, opacity
+
+def is_within_bounds(x, y, z, resolution):
+    """Check if coordinates are within the volume grid."""
+    return 0 <= x < resolution.x and 0 <= y < resolution.y and 0 <= z < resolution.z
+
+def simd_trilinear_interpolate(volume_data, x, y, z):
+    """
+    Perform trilinear interpolation using SIMD instructions.
+    This function is a placeholder for hardware-specific SIMD code [S1].
+    """
+    # Load 16-bit unsigned integers from volume_data
+    # Perform trilinear interpolation using SIMD arithmetic
+    # Return interpolated color and opacity
+    pass
 ```
-
-**Parameters:**
-*   Data type: 16-bit unsigned integers for color and opacity values [S1].
-
-**Edge Cases and Pitfalls:**
-*   On MMX-only processors, line equation tests cannot be performed, leading to minor artifacts in the image [S1].
-*   Precision loss may occur due to the use of 16-bit unsigned integers instead of floating-point arithmetic [S1].
-
 ## Subtopics
-
-### NV Rendering Formula (Trilerp)
-Implements an 'NV' rendering formula using trilinear interpolation (trilerp). Includes forward, backward, and fused variants [S2, unofficial]. The forward variant computes the output tensor directly. The backward variant computes gradients for the grid output. The fused variant combines the forward pass with additional parameters (likely learning rates or scaling factors) and computes gradients [S2, unofficial].
-
 ## Operating characteristics
-*   **Time Complexity:** Improved over standard trilinear interpolation due to SIMD parallelism. Exact speedup depends on the specific SIMD extension (MMX, SSE, 3DNow!) and hardware [S1].
-*   **Memory Complexity:** Reduced cache misses due to bit-interleaved block decomposition ($32^3$ samples) [S1].
-*   **Strengths:** Faster interpolation and memory copying on supported hardware [S1].
-*   **Limitations:** Artifacts on MMX-only processors [S1]. Precision limitations due to 16-bit integer arithmetic [S1].
-*   **When to use:** When rendering performance is critical and the target hardware supports MMX, SSE, or 3DNow! [S1].
-*   **When not to use:** On MMX-only processors if artifacts are unacceptable [S1]. On hardware without SIMD support or when higher precision is required [S1].
+**Time and Memory Complexity:**
+- Time complexity is reduced compared to scalar trilinear interpolation due to SIMD parallelism [S1].
+- Memory complexity is optimized by decomposing the volume into small blocks of 323 samples to reduce cache misses [S1].
+
+**Measured Performance:**
+- Specific performance metrics are not provided in the sources [S1].
+
+**Strengths and Limitations:**
+- Strengths: Improved memory copying and interpolation speed using SIMD extensions [S1].
+- Limitations: Minor artifacts may occur on MMX-only processors due to the inability to perform line equation tests [S1].
+
+**When to Use:**
+- Use when hardware supports MMX, SSE, or 3DNow! SIMD extensions and performance optimization is critical [S1].
+- Avoid on MMX-only processors if artifact-free rendering is required [S1].
 
 ## Background
-The method was introduced in "A new object-order ray-casting algorithm" [S1]. It leverages existing SIMD processor extensions to optimize volume rendering performance. The bit-interleaved addressing scheme is also described in this work [S1].
-
+Optimized Trilinear Reconstruction was introduced in the paper "A new object-order ray-casting algorithm" [S1]. It builds on the principles of trilinear interpolation and applies SIMD optimizations to enhance performance in direct volume ray casting.
 ## Sources
 [S1] A new object-order ray-casting algorithm, https://doi.org/10.5555/602099.602130, fetched 2026-10-26
-[S2] sxyu/svox2, https://github.com/sxyu/svox2, fetched 2026-10-27 (unofficial)

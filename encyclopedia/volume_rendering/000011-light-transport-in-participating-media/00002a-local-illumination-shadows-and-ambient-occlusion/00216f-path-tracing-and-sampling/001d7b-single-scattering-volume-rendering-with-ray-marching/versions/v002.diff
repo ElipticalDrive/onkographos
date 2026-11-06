@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -4,5 +4,5 @@
+ 
+ ## Overview
+-Single Scattering Volume Rendering with Ray Marching is a GPU-based algorithm that computes volumetric light-shafts (god rays) in participating media by assuming light scatters only once before reaching the camera [S1][S4, unofficial]. It solves the radiative transport equation by ignoring multiple scattering, allowing the in-scattering term to be computed independently of unknown radiance [S1]. Unlike screen-space radial blur methods, this technique handles multiple light sources, colored fog, varying density, and physically correct behavior from any viewing angle, though it is more computationally expensive [S3, unofficial].
++Single Scattering Volume Rendering with Ray Marching is a GPU-based algorithm that computes volumetric light-shafts in participating media by assuming light scatters only once before reaching the camera [S1][S4, unofficial]. It solves the radiative transport equation by ignoring multiple scattering, which allows the in-scattering term to be computed independently of unknown radiance [S1]. Unlike screen-space radial blur methods, this technique handles multiple light sources, colored fog, varying density, and physically correct behavior from any viewing angle, though it is more computationally expensive [S3, unofficial].
+ 
+ ## How it works
+@@ -10,9 +10,9 @@
+ 
+ **Inputs and Outputs:**
+-- **Inputs:** Camera position $c$, surface point $p$, surface radiance $L_o(p,v)$, light positions $p_{light_i}$, light intensities/colors, shadow maps (for opaque occlusion), and volume density/absorption coefficients.
+-- **Outputs:** Final radiance $L(c, -v)$ at the camera.
++- **Inputs:** Camera position $c$, surface point $p$, surface radiance $L_o(p,v)$, light positions $p_{light_i}$, light intensities/colors, shadow maps (for opaque occlusion), and volume density/absorption coefficients [S2, S4, unofficial].
++- **Outputs:** Final radiance $L(c, -v)$ at the camera [S2, unofficial].
+ 
+ **Data Structures:**
+-- **Ray Parameters:** Origin $c$, direction $v = (c-p)/d$, length $d = |c-p|$.
++- **Ray Parameters:** Origin $c$, direction $v = (c-p)/d$, length $d = |c-p|$ [S2, unofficial].
+ - **Step Size:** Fixed step size $step = d/n$ for camera ray, where $n$ is the number of march steps [S2, unofficial].
+ - **Accumulators:** `accumLight` (in-scattering), `transmittance` (current ray transmittance), `tau` (optical depth) [S2, S3, unofficial].
+@@ -69,18 +69,21 @@
+ **Pseudocode:**
+ ```python
++import math
++
+ def single_scattering_volume_rendering(camera_pos, surface_pos, surface_radiance, lights, shadow_map, sigma_a, sigma_s, g):
+     # 1. Initialize Ray Parameters
+-    d = length(camera_pos - surface_pos)
+-    v = normalize(camera_pos - surface_pos)
++    d = math.sqrt(sum((camera_pos[i] - surface_pos[i])**2 for i in range(3)))
++    if d == 0: return surface_radiance  # Guard for degenerate input [G]
++    v = [(camera_pos[i] - surface_pos[i]) / d for i in range(3)]
+     n = 30  # Camera ray steps
+     step = d / n
+     
+     tau = 0.0
+-    accum_light = vec3(0.0)
++    accum_light = [0.0, 0.0, 0.0]
+     
+     # 2. Camera Ray Marching
+     for i in range(n):
+         t = i * step
+-        x_t = camera_pos - v * t
++        x_t = [camera_pos[i] - v[i] * t for i in range(3)]
+         
+         # Update optical depth for transmittance from x_t to camera
+@@ -89,11 +92,14 @@
+         
+         # Current transmittance from sample point to camera
+-        tr_camera = exp(-tau)
++        tr_camera = math.exp(-tau)
+         
+         # 3. In-Scattering Calculation
+-        light_contribution = vec3(0.0)
++        light_contribution = [0.0, 0.0, 0.0]
+         for light in lights:
+             # Direction to light
+-            l_i = normalize(light.position - x_t)
++            l_i = [(light.position[i] - x_t[i]) for i in range(3)]
++            l_len = math.sqrt(sum(l_i[i]**2 for i in range(3)))
++            if l_len > 0:
++                l_i = [l_i[i] / l_len for i in range(3)]
+             
+             # Visibility: Shadow Map + Light-to-Point Transmittance
+@@ -106,16 +112,16 @@
+             if not in_shadow:
+                 # Phase Function (Henyey-Greenstein)
+-                cos_theta = dot(v, l_i)
++                cos_theta = sum(v[i] * l_i[i] for i in range(3))
+                 phase = henyey_greenstein(cos_theta, g)
+                 
+                 # Add scattering contribution
+-                # L_scat approx: pi * sigma_s * phase * visibility * light_intensity
+-                # Note: Source [S2, unofficial] includes pi, [S3, unofficial] implies direct intensity. 
+-                # We follow [S2, unofficial] formula structure for physical accuracy.
+-                light_contribution += sigma_s * phase * tr_light * light.intensity
++                # L_scat approx: pi * sigma_s * phase * visibility * light_intensity [S2, unofficial]
++                for c in range(3):
++                    light_contribution[c] += math.pi * sigma_s * phase * tr_light * light.intensity[c]
+         
+         # Accumulate In-Scattering
+         # L_is += Tr(x_t, c) * L_scat(x_t, v) * dt
+-        accum_light += tr_camera * light_contribution * step
++        for c in range(3):
++            accum_light[c] += tr_camera * light_contribution[c] * step
+         
+         # 4. Emittance (Optional, if volume emits light)
+@@ -123,15 +129,15 @@
+ 
+     # 5. Final Surface Transmittance and Radiance
+-    tr_surface = exp(-tau)
+-    l_surf = tr_surface * surface_radiance
++    tr_surface = math.exp(-tau)
++    l_surf = [tr_surface * surface_radiance[c] for c in range(3)]
+     
+     # 6. Combine
+     # Precision optimization: sum L_is and L_e into L_a before adding L_surf [S2, unofficial]
+-    return l_surf + accum_light
++    return [l_surf[c] + accum_light[c] for c in range(3)]
+ 
+ def calculate_light_transmittance(origin, light_pos, sigma_a, sigma_s, steps=15):
+-    d = length(light_pos - origin)
++    d = math.sqrt(sum((light_pos[i] - origin[i])**2 for i in range(3)))
+     if d == 0: return 1.0
+-    v = normalize(light_pos - origin)
++    v = [(light_pos[i] - origin[i]) / d for i in range(3)]
+     step = d / steps
+     tau = 0.0
+@@ -139,14 +145,19 @@
+     for i in range(steps):
+         t = i * step
+-        x_t = origin + v * t
++        x_t = [origin[i] + v[i] * t for i in range(3)]
+         sigma_e = sigma_a + sigma_s
+         tau += sigma_e * step
+         
+-    return exp(-tau)
++    return math.exp(-tau)
+ 
+ def henyey_greenstein(cos_theta, g):
+     g_sq = g * g
+     denom = 1.0 + g_sq - 2.0 * g * cos_theta
+-    return (1.0 - g_sq) / (4.0 * 3.14159265 * pow(denom, 1.5))
++    return (1.0 - g_sq) / (4.0 * math.pi * math.pow(denom, 1.5))
++
++def sample_shadow_map(shadow_map, light, pos):
++    # Standard shadow map lookup: project pos to light space, sample depth, compare with stored depth
++    # Returns True if occluded, False if lit
++    return shadow_map.is_occluded(light, pos)
+ ```
+ 
+@@ -160,5 +171,5 @@
+ 
+ ### Volumetric Lighting with Phase Functions
+-Uses secondary raymarching (4-6 steps) towards the sun to integrate optical thickness and applies the Henyey-Greenstein phase function for directional scattering. Uses $g \approx 0.8$ for forward scattering and $g \approx -0.2$ for backward scattering to create edge highlights [S5, unofficial].
++Uses secondary raymarching (4-6 steps) towards the sun to integrate optical thickness and applies the Henyey-Greenstein phase function for directional scattering [S5, unofficial]. Uses $g \approx 0.8$ for forward scattering and $g \approx -0.2$ for backward scattering to create edge highlights [S5, unofficial].
+ 
+ ### Optimization Strategies for Volumetric Lighting

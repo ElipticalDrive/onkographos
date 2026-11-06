@@ -1,0 +1,1512 @@
+I NTERPOLATION VARIABLE R ATE I MAGE C OMPRESSION
+Zhenhong Sun, Zhiyu Tan, Xiuyu Sun∗, Fangyi Zhang, Yichen Qian, Dongyang Li, Hao Li
+arXiv:2109.09280v1 [eess.IV] 20 Sep 2021
+Alibaba Group, China
+{zhenhong.szh, zhiyu.tzy, xiuyu.sxy, zhiyuan.zfy,
+yichen.qyc, yingtian.ldy, lihao.lh}@alibaba-inc.com
+A BSTRACT
+Compression standards have been used to reduce the cost of image storage and transmission for
+decades. In recent years, learned image compression methods have been proposed and achieved
+compelling performance to the traditional standards. However, in these methods, a set of different
+networks are used for various compression rates, resulting in a high cost in model storage and training.
+Although some variable-rate approaches have been proposed to reduce the cost by using a single
+network, most of them brought some performance degradation when applying fine rate control. To
+enable variable-rate control without sacrificing the performance, we propose an efficient Interpolation
+Variable-Rate (IVR) network, by introducing a handy Interpolation Channel Attention (InterpCA)
+module in the compression network. With the use of two hyperparameters for rate control and linear
+interpolation, the InterpCA achieves a fine PSNR interval of 0.001 dB and a fine rate interval of
+0.0001 Bits-Per-Pixel (BPP) with 9000 rates in the IVR network. Experimental results demonstrate
+that the IVR network is the first variable-rate learned method that outperforms VTM 9.0 (intra) in
+PSNR and Multiscale Structural Similarity (MS-SSIM).
+1
+Introduction
+Image compression aims to improve the efficiency of image storage and transmission by reducing data irrelevance and
+redundancy. In the past decades, many image compression standards have been proposed and widely used in the domain,
+such as JPEG [29], JPEG2000 [21], AVC/H.264 [31], HEVC/H.265 [24], etc. In recent years, with the development of
+deep learning and its advances shown in various computer vision applications [10, 30], more attention is paid to learned
+compression models via deep neural networks.
+Inspired by the deep learning based transform coding [12], learned compression methods were proposed to use an
+entropy model to approximate the distribution of the compressible latents with CNNs [2, 25], showing promising
+performance comparable to those traditional image codecs. On the basis of the entropy model, the performance of
+learned compression methods was further improved by introducing hierarchical structures, better entropy estimation
+models, and more appropriate network architectures [3, 19, 16, 7, 17]. These methods quickly outperformed BPG (the
+intra image compression of HEVC) in terms of PSNR and MS-SSIM, among which the state-of-the-art method [17] is
+still competitive to the recent VTM 9.0 (intra) – the latest reference software of the VVC/H.266 standard [20].
+However, the aforementioned methods usually require training a set of separate networks for different compression rates,
+resulting in a high cost in model storage and training when multiple compression rates are desired in real applications.
+To reduce the cost, methods have been proposed to enable variable-rate control in a single network, by using a tuned
+loss function and additional hyperparameters (Lagrange multiplier and/or quantization step) to control the scale of the
+intermediate outputs or the latents [8, 32, 1]. While these methods significantly reduced the cost of model storage and
+training, they brought some performance degradation when applying fine rate control. There have been few works that
+achieve a good balance between the compression performance and the variable-rate control.
+∗
+Corresponding author.
+BPG
+QP=40
+0.1140bpp
+32.83dB
+0.9543
+VTM9.0
+QP=38
+0.1020bpp
+33.70dB
+0.9615
+VTM9.0
+QP=37
+0.1142bpp
+34.23dB
+0.9656
+IVR
+(MSE)
+j=1,
+α=0.572
+0.0999bpp
+34.25dB
+0.9680
+j=1,
+α=0.123
+0.1140bpp
+34.82dB
+0.9720
+j=1,
+α=0.509
+0.1020bpp
+34.33dB
+0.9688
+j=1,
+α=0.119
+0.1142bpp
+34.83dB
+0.9720
+IVR
+(MSSSIM)
+Original
+Image
+BPG
+QP=41
+0.0999bpp
+32.29dB
+0.9493
+j=0,
+α=0.932
+0.0999bpp
+30.82dB
+0.9761
+j=0,
+α=0.626
+0.1140bpp
+31.20dB
+0.9795
+j=0,
+α=0.884
+0.1020bpp
+30.89dB
+0.9766
+j=0,
+α=0.622
+0.1142bpp
+31.20dB
+0.9796
+Figure 1: Visualization of sample images (Kodim23 from Kodak dataset) reconstructed by BPG, VTM 9.0, and the
+proposed IVR networks. The adjacent quantizer parameters (QPs) are used in BPG and VTM 9.0 to evaluate the
+fineness of their variable-rate control. By adjusting j and α, the IVR networks match the rates of BPG and VTM 9.0
+with the fineness of 0.0001 BPP.
+In this paper, we propose an efficient interpolation variable-rate network to enable variable-rate control without
+sacrificing the performance. The approach inserts InterpCA modules into the Encoder and Decoder of a baseline
+compression network without any modifications to the entropy model, reducing the risk of performance decline. The
+minimal plug-in design also makes the InterpCA module applicable to most types of entropy-based networks. The
+module has two crucial hyperparameters: (i) a rate hyperparameter to bind different rates with different settings in
+the InterpCA for coarse variable-rate control; (ii) an interpolation hyperparameter to interpolate the values of these
+settings for fine variable-rate control. With these two parameters, the IVR network can be trained with a range of sparse
+interpolation values to reduce the training cost, yet retain the variable-rate control with thousands of times finer rates
+during inference. This design is the key to the fine variable-rate control of the IVR method.
+Besides, optimizations are also made on the baseline autoregressive and hierarchical structure [19]. In the IVR model,
+most of the uniform-noise-addition operations are replaced by the quantization operations for latents to reduce the
+difference between training and inference. This design increases the accuracy of the entropy estimation and therefore
+improves the performance without increasing the computational complexity. In addition, a Unet post-network is also
+introduced to the pipeline in a modular manner to enhance the reconstruction. Benefiting from these optimizations, the
+IVR method is the first variable-rate learned method that outperforms VTM 9.0 (intra) in PSNR and MS-SSIM.
+In particular, this paper has three major contributions:
+• By analyzing the histogram of latents, the principle of variable rates in learned image compression is explored,
+which inspires our design of the efficient variable-rate image compression.
+• An interpolation method named as InterpCA is proposed to enable the variable-rate control without performance
+degradation. The minimal plug-in design of the InterpCA module makes it compatible with most entropy-model
+based methods.
+• Comprehensive comparison and ablation studies are conducted to analyze the feasibility of the approach and how
+each component contributes to the performance improvement.
+2
+Related Work
+2.1
+Learned Single Rate Image Compression
+Initially, recurrent neural networks were utilized in some works [26, 27, 15] to recursively compress residual information
+using a binary representation to encode the latents of each iteration. Then the entropy-based method was proposed by
+Ballé et al. [2] and Theis et al. [25], which is the basis for the learned image compression methods. The entropy-based
+method consists of an Encoder to transform an image to a latent, an entropy model to reduce the entropy of the latent,
+and a Decoder to reconstruct the image from the latent, which resembles an autoencoder [13] with an entropy model.
+A hierarchical prior network was adopted in [3] to enhance the entropy model by estimating the zero-mean Gaussian
+2
+Conv 256x5x5/2↓
+LeakyRelu
+Conv 256x5x5/2↓
+LeakyRelu
+Conv 256x3x3/1
+Interpolation CA
+Conv 320x5x5/2↓
+GDN
+Interpolation CA
+Conv 256x5x5/2↓
+GDN
+Interpolation CA
+Conv 256x5x5/2↓
+GDN
+Interpolation CA
+Conv 256x5x5/2↓
+Input Image
+Q
+AE
+AE
+Context
+Model
+640x5x5/1
+Bits
+Bits
+AD
+Conv 256x5x5/2↑
+LeakyRelu
+Conv 384x5x5/2↑
+LeakyRelu
+Conv 640x3x3
+Concat
+Entropy Parametes
+Interpolation CA
+Conv 256x5x5/2↑
+IGDN
+Interpolation CA
+Conv 256x5x5/2↑
+IGDN
+Interpolation CA
+Conv 256x5x5/2↑
+IGDN
+Conv 3x5x5/2↑
+Interpolation CA
+AD
+Reconstrution
+Q
+Component
+Input Image
+Reconstruction
+Encoder
+Latent
+Latent(noised)
+Latent(quantized)
+Decoder
+Hyper Encoder
+Hyper Latent
+Hyper Latent(noised)
+Hyper Latent(quantized)
+Hyper Decoder
+Context Model
+Entropy Parameters
+Unet Post-network
+Post Reconstruction
+Symbol
+x
+x̂
+fe (x; θe )
+y
+ỹ
+ŷ
+fd (ŷ; θd )
+fhe (ŷ; θhe )
+z
+z̃
+ẑ
+fhd (ẑ; θhd )
+fcm (ŷmask ; θcm )
+fep (·; θep )
+fu (·; θu )
+ẍ
+Figure 2: IVR Network architecture. AE/AD: Arithmetic Encoding/Decoding. Interpolation CA: Interpolation Channel
+Attention. Convolution parameters are denoted as the number of filters×kernel height×kernel width / downsampling
+or upsampling stride, where ↑ indicates upsampling and ↓ downsampling. Ignoring the Interpolation CA, the remaining
+network structure is consistent with the structure of Minnen’s autoregressive and hierarchical framework [19].
+distribution of the latent representations. Mentzer et al. [18] directly modeled the entropy of the latent representation by
+using a 3D-CNN Context Model. Since those spatially adjacent representations of latents have high correlations, Minnen
+et al. [19] and Lee et al. [16] utilized context-adaptive entropy model with none zero-mean Gaussian distribution. Cheng
+et al. [7] proposed an attention module to enhance the reconstruction and discretized Gaussian mixture likelihoods to
+improve the entropy model. Lee et al. [17] jointly optimized both the image compression and the quality enhancement
+with a Gaussian mixture model.
+2.2
+Learned Variable Rate Image Compression
+Conditional Convolutions were proposed by Choi et al. [8] to realize a variable-rate image compression using the
+two-stage training. In the first training stage, the coarse variable-rate control was achieved by varying the Lagrange
+multiplier in the conditional model. While the fine variable-rate control was realized by tuning the quantization bin
+size of the latents in the second training stage. Yang et al. [32] proposed a similarly modulated autoencoder with
+different Lagrange multipliers to realize a coarse variable-rate control. In [1], a B-bit quantizer with multiple values was
+introduced to realize the variable-rate image compression. Besides, to further improve the performance, the residual
+between the original image and the reconstructed image was encoded by BPG. Tong Chen and Zhan Ma proposed a
+set of quality scaling factors embedded after the Encoder network to achieve variable rates [6]. These methods have
+achieved variable rates, but they don’t consider the balance between the compression performance and the fine variable
+rates, which is vital to guarantee a good compression performance.
+3
+Preliminary
+3.1
+Autoregressive and Hierarchical Structure
+Figure 2 shows the proposed IVR network architecture. If without the InterpCA (see Section 4), the rest parts in Figure 2
+compose the commonly used autoregressive and hierarchical framework [19] for image compression. The Encoder
+transforms the input image x into a latent y by a transformation fe (x; θe ), which is then quantized into ŷ for the next
+transformation. ŷ can be losslessly compressed by arithmetic encoding (AE) and transmitted into a string of bits, using
+a probability distribution pŷ (ŷ). A hyper-network (Hyper Encoder fhe (ŷ; θhe ) and Hyper Decoder fhd (ẑ; θhd )) with
+the Context Model and the Entropy Parameters network [19], is utilized to learn the probability distribution of ŷ. The
+Context Model generates rough probability distribution parameters using a linear 5 × 5 masked convolution. Then,
+outputs of the Context Model and the Hyper Decoder are concatenated to generate accurate probability distribution
+parameters (µy , σy ) by the Entropy Parameters network.
+The learning goal of the entropy-based methods is to minimize the expected length of the bitstream as well as the
+expected distortion between the reconstructed and original images, leading to a Rate-Distortion (RD) optimization
+problem. This can be formulated as:
+L = R + λj D
+= Ex∼px [− log2 pŷ (ŷ)) − log2 pẑ (ẑ))] + λj Ex∼px [d(x, x̂)],
+3
+(1)
+where λj is the jth Lagrange multiplier λ that determines the desired rate-distortion trade-off, R is referred to as
+the expected length of the compressed bitstream, and D is the distortion measured by either Mean Squared Error
+(MSE) or MS-SSIM. Similar to the traditional image codecs, the entropy model uses lossless entropy encoding to
+generate the final bitstream (such as arithmetic [22]), or lossless decoding algorithms to restore the latent from the
+bitstream (such as Huffman coding [28]). When multiple compression rates are desired in the single rate structure, these
+methods [19, 7, 16, 17] normally require training a set of separate networks with different λ for different compression
+rates, resulting in a very high cost in model storage and training.
+Ch
+Ch
+Onehot(λj)
+λ0
+λ0
+0
+λ1
+0
+λj
+1
+λj+1
+0
+λj+1
+0
+λn-1
+n
+λn-1
+Weights in FCN
+λj
+Biases in FCN
+Softplus
+λj
+Xi
+λ1
+n
+= Yi
+λj
+Mask-W
+Mask-B
+Figure 3: Conditional Convolution in Choi’s paper [8]. n is the number of λ, ch is the output channel of the convolution,
+Xi is the output of the convolution, Yi is the output of the module. FCN: Fully-Connected Network.
+0.4
+0.3
+0.15
+λ=480
+λ=1000
+λ=1350
+0.10
+λ=1780
+λ=2302
+0.05
+0.2
+1
+2
+3
+4
+1
+Encoder Layers
+3
+1
+2
+3
+0.00
+4
+1
+λ=2302
+1.0
+0.5
+2
+3
+0.1
+0.0
+λ=480
+λ=1000
+λ=1350
+−0.1
+−0.2
+λ=1780
+λ=2302
+−0.3
+0.0
+1
+4
+1
+Decoder Layers
+2
+3
+HyperEncoder Layers
+2
+Average Biases
+0.4
+1.5
+λ=1780
+λ=2302
+−0.10
+0.0
+λ=1000
+λ=1350
+λ=1780
+2.0
+λ=480
+λ=1000
+λ=1350
+−0.05
+Encoder Layers
+Average Biases
+λ=2302
+0.000
+0.05
+λ=480
+Average Weights
+Average Weights
+λ=1000
+λ=1350
+λ=1780
+0.6
+λ=1780
+λ=2302
+0.005
+HyperEncoder Layers
+λ=480
+0.8
+2
+Average Biases
+λ=1780
+λ=2302
+0.5
+λ=480
+λ=1000
+λ=1350
+0.20
+Average Biases
+λ=480
+λ=1000
+λ=1350
+0.6
+Average Weights
+Average Weights
+0.7
+3
+−0.5
+−1.0
+λ=480
+λ=1000
+λ=1350
+−1.5
+−2.0
+λ=1780
+λ=2302
+−2.5
+1
+2
+HyperDecoder Layers
+3
+4
+1
+Decoder Layers
+(a) m(λj )
+2
+3
+HyperDecoder Layers
+(b) b(λj )
+Figure 4: The average values of m(λj ) and b(λj ) in different layers with different λ in Conditional Convolution [8].
+The larger index corresponds to the rear layer of the network flow, e.g., the 4 th layer in Decoder layers is the last layer
+of the network.
+1.0
+1.0
+Value Ratio
+-3 0.4%
+-2 1.0%
+-1 5.3%
+-0 86.0%
+1 5.1%
+2 0.9%
+3 0.3%
+0.8
+0.6
+0.4
+λ=480
+bpp_y=0.600
+bpp_z=0.009
+Min=-23
+Max=36
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.6%
+-2 1.5%
+-1 7.2%
+-0 79.8%
+1 7.3%
+2 1.5%
+3 0.5%
+0.8
+0.6
+0.4
+λ=1000
+bpp_y=0.918
+bpp_z=0.011
+Min=-33
+Max=52
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.7%
+-2 2.0%
+-1 8.5%
+-0 75.5%
+1 8.6%
+2 1.9%
+3 0.7%
+0.8
+0.6
+0.4
+λ=1350
+bpp_y=1.119
+bpp_z=0.011
+Min=-39
+Max=61
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.9%
+-2 2.4%
+-1 9.5%
+-0 71.6%
+1 9.7%
+2 2.3%
+3 0.9%
+0.8
+0.6
+0.4
+λ=1780
+bpp_y=1.303
+bpp_z=0.012
+Min=-46
+Max=72
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 1.2%
+-2 2.9%
+-1 11.0%
+-0 66.8%
+1 10.6%
+2 2.9%
+3 1.2%
+0.8
+0.6
+0.4
+λ=2302
+bpp_y=1.536
+bpp_z=0.012
+Min=-55
+Max=87
+0.2
+0.0
+−4
+−2
+0
+2
+4
+Value Ratio
+-3 1.7%
+-2 3.9%
+-1 12.5%
+-0 58.6%
+1 12.1%
+2 4.0%
+3 1.7%
+0.8
+0.6
+0.4
+λ=2915
+bpp_y=1.969
+bpp_z=0.013
+Min=-73
+Max=112
+0.2
+0.0
+−4
+−2
+0
+2
+4
+(a) Histograms of ŷ
+1.0
+1.0
+Value Ratio
+-3 0.1%
+-2 0.3%
+-1 1.8%
+-0 96.3%
+1 1.3%
+2 0.1%
+3 0.0%
+0.8
+0.6
+0.4
+λ=480
+bpp_y=0.600
+bpp_z=0.009
+Min=-6
+Max=4
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.1%
+-2 0.4%
+-1 2.1%
+-0 95.4%
+1 1.5%
+2 0.2%
+3 0.0%
+0.8
+0.6
+0.4
+λ=1000
+bpp_y=0.918
+bpp_z=0.011
+Min=-11
+Max=8
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.1%
+-2 0.4%
+-1 2.1%
+-0 95.2%
+1 1.6%
+2 0.2%
+3 0.1%
+0.8
+0.6
+0.4
+λ=1350
+bpp_y=1.119
+bpp_z=0.011
+Min=-13
+Max=9
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.2%
+-2 0.4%
+-1 2.2%
+-0 94.9%
+1 1.3%
+2 0.6%
+3 0.1%
+0.8
+0.6
+0.4
+λ=1780
+bpp_y=1.303
+bpp_z=0.012
+Min=-14
+Max=10
+0.2
+0.0
+−4
+−2
+0
+2
+4
+1.0
+Value Ratio
+-3 0.1%
+-2 0.4%
+-1 2.2%
+-0 94.8%
+1 1.3%
+2 0.6%
+3 0.1%
+0.8
+0.6
+0.4
+λ=2302
+bpp_y=1.536
+bpp_z=0.012
+Min=-15
+Max=11
+0.2
+0.0
+−4
+−2
+0
+2
+4
+Value Ratio
+-3 0.2%
+-2 0.6%
+-1 2.9%
+-0 93.3%
+1 2.2%
+2 0.3%
+3 0.1%
+0.8
+0.6
+0.4
+λ=2915
+bpp_y=1.969
+bpp_z=0.013
+Min=-17
+Max=11
+0.2
+0.0
+−4
+−2
+0
+2
+4
+(b) Histograms of ẑ
+Figure 5: Histograms of ŷ and ẑ in Single Rate Network (SinRN) with different λ on Kodim01. The solid line represents
+the histogram distribution, and the dotted line represents the Laplace fitting distribution.
+4
+3.2
+Conditional Convolution
+The Conditional Convolutions [8] realized the variable-rate control in an entropy-based single model. To figure out its
+principle, a detailed structure diagram is given in Figure 3. Let Xi be a 3-dimensional (3-D) feature map output of the
+ith convolution with channel ch, and Yi be a 3-D feature map output of the Conditional Convolution with the same
+channel ch as Xi .
+Yi = m(λj ) ⊗ Xi + b(λj )
+
+= sof tplus F CN (Onehot(λj ) ⊗ Xi + F CN (Onehot(λj ))
+(2)
+with λj ∈ {λ0 , λ1 , ..., λn−2 , λn−1 },
+where j ∈ {0, 1, ..., n − 1}, and n is the number of pre-defined Lagrange multiplier values to control the variable rates.
+m(λj ) and b(λj ) are the channel-wised mask weights and biases for Xi .
+In Choi’s paper [8], all traditional Convolutions are replaced by the Conditional Convolutions to realize the coarse
+variable-rate control, while the fine variable-rate control was realized by tuning the quantization bin size of the latents.
+The compression performance on the Kodak dataset is wavy and incoherent (RD curves are shown in Figure 10(a)),
+which leads to some performance degradation compared with Minnen’s method [19].
+3.3
+Analysis of Variable Rates
+In the compression process, the entropy loss occurs in the Encoder to generate ŷ and the process of Hyper compression
+is lossless to compress ŷ with the AE [3, 19, 16, 7, 17]. To verify the difference of variable rates in the Single Rate
+Networks (SinRNs), some experiments were conducted to display the distributions of latents with different λ and
+Histograms of ŷ and ẑ are extracted and shown in Figure 5. In the Histograms of ŷ, more values of input images are
+transformed to zero to reduce the whole entropy and the BPP of ŷ decreases with the decrease of λ, so the SinRNs
+achieve different compression rates. Different from ŷ, the distributions of hyper-latents ẑ remain nearly the same,
+indicating that the lossless Hyper compression might be independent of different compression rates.
+Meanwhile, Conditional Convolutions [8] were reproduced to evaluate the function of m(λj ) and b(λj ), and their
+average values of different layers are diplayed in Figure 4. Under fixed λ, the average weights decrease with the depth
+of the layers in Encoder Layers and HyperEncoder Layers, and increase with the depth of the layers in HyperDecoder
+Layers and Decoder Layers. Besides, the average weights are also affected by the value of λ. In particular, the average
+weights increase with λ in the Encoder Layers and decrease in the other layers. Compared with the average weights of
+m(λj ), the average biases, most of which are valued around zero, do not exhibit apparent patterns. Considering this
+phenomenon, b(λj ) might be not necessary for Conditional Convolutions, whose removal could potentially help reduce
+the computational complexity.
+Similar to the situation of SinRNs, the Conditional Convolutions in the Encoder are controlled by λj to produce ŷ
+with different scaling coefficients, generating more zeros and realize a higher compression rate. Theoretically, as
+long as the set of λ is large enough and there are enough parameters in the Fully-Connected Network (FCN), it is
+possible for the model to obtain the fine variable-rate control. However, as shown in Figure 3, parameters in a row
+correspond to one λ and they are independent of other rows of parameters during training and inference. If the set of
+λ is large, each row of parameters may have fewer training iterations and be trapped in poor convergence, resulting
+in degraded compression performance. Additionally, the distributions of ẑ are nearly the same as those in Figure 5,
+hence the use of Conditional Convolutions might also bring performance degradation. Observing the red line (λ = 480)
+and the green one (λ = 1000) in Figure 4(a), if there exists another line between them, the model would be able to
+obtain an intermediate compression rate between λ = 480 and λ = 1000. Based on these analyses, an interpolation
+variable-rate method is therefore proposed in this paper for a good balance between the compression performance and
+the variable-rate control.
+4
+Proposed method
+4.1
+Interpolation Variable Rate
+To solve the none correlations of parameters in Conditional Convolutions, a newly-elaborated method named InterpCA
+is proposed to bind different values of λ with different rates by introducing a rate hyperparameter j and an interpolation
+hyperparameter α. The compression network takes j and α as input hyperparameters that determine the value of λj,α
+according to the following equation:
+λj,α = αλj + (1 − α)λj+1
+(3)
+with λj or λj+1 ∈ {λ0 , λ1 , ..., λn−2 , λn−1 },
+5
+where j ∈ {0, 1, ..., n − 2}, α ∈ [0, 1] and n is the number of pre-defined Lagrange multiplier values. Then, the loss
+function of Eq. (1) can be expressed as:
+L = R + λj,α D.
+(4)
+Figure 6 demonstrates the implementation of the InterpCAs, which are inserted behind each convolution layer in the
+Encoder fe (x; θe ) and the Decoder fd (ŷ; θd ). The output Xi of each convolution layer can be transformed to Yi in the
+following way:
+
+Yi = sof tplus F CN (In (j, α)) ⊗ Xi
+(5)
+with In (j, α) = αIn [j] + (1 − α)In [j + 1],
+where In is a two-dimensional identity matrix showed, ⊗ denotes element-wised multiplication, In [j/j + 1] is the
+j/j + 1 th row vector of In (i.e., Onehot(λj/j+1) ), and the output shape of sof tplus is [Batchsize, 1, 1, ch].
+Ch
+n
+α×Onehot(λj)
+(1-α)×Onehot(λj+1)
+λ0
+0
+0
+λ1
+0
+0
+λj
+α
+0
+λj+1
+0
+1-α
+0
+0
+λn-1
+Weights in FCN
+Softplus
+Mask-W
+Xi
+λj
+λj+1
+= Yi
+Figure 6: Interpolation channel attention (InterpCA). n is the number of λ, ch is the output channel of the convolution,
+Xi is the output of convolution, Yi is the output of the module. In InerpCA, j and α determine the final value of λ.
+Mask biases are not used in InterpCA.
+It is worth noting that the value range of α is different in training and inference. In each iteration of training, j and α are
+randomly sampled within the value range (i.e., α ∈ {0, 0.5, 1}) and then fed into the network. When α is equal to 0.5,
+λj,α is interpolated by λj and λj+1 as λj,0.5 = (λj + λj+1 )/2. In inference, α ∈ {0, 1/M, ..., M − 1/M, 1} is used
+to make full use of the correlations between the parameters in fully connected neural layers to realize nearly continuous
+rate control. Compared with existing methods, the InterpCA method has obvious advantages. One of the assets of the
+technique is its simplicity and efficiency, which helps most of the entropy-based SinRNs upgrade to the variable-rate
+network. Another advantage is that the rough range of interpolation hyperparameter enhances the robustness of the
+network and speeds up the convergence in training, and the superfine rate control could be realized by selecting an
+appropriate M in inference. There are two reasons why InterpCA does not bring performance degradation. One is
+that inserting InterpCA into the Encoder and Decoder brings no change to the entropy model, and the other is that the
+InterpCA makes full use of the parameters in FCNs.
+4.2
+Improved Single Rate Network
+Figure 7 shows the operation diagrams of the improved SinRN. Compared with [19], most of the uniform-noise-addition
+operations are replaced by the quantization operations for latents in training that reduce the difference between the
+training and inference. Similar to [33], the probability pŷ (ŷ) of quantized latent ŷ is modeled as Laplacian distributions:
+pŷ (ŷ|ẑ, θhd , θcm , θep ) =
+Y  Z ŷi + 21
+
+Lap(y; µy , eσy ) dy .
+(6)
+ŷi − 12
+i=1
+To simulate the quantized process during training, we model each latent ỹ = y + U (− 12 , 12 ) as a Laplacian convolved
+with a unit uniform distribution. This ensures a good match between Encoder and Decoder distributions of both the
+quantized latents and continuous-valued latents subjected to additive uniform noise. The probability of ỹ is
+pỹ (ỹ|z̃, θhd , θcm , θep ) =
+Y  Z ỹi + 12
+ỹi − 12
+i=1
+6
+
+Lap(y; µy , eσy ) dy .
+(7)
+U
+Q
+ç
+Q
+Q
+U
+(a) Train
+(b) Inference
+Figure 7: Operational Diagrams of SinRN. Q denotes the operation of quantization. U denotes the operation of adding
+uniform noise. The relationships between other symbols and components are summarized in Figure 2.
+For the hyper latent z, a set of channel-wise trainable parameters (µz , σz ) are defined to learn the Laplacian distribution
+of the quantized latent ẑ or noised latent z̃:
+
+Y  Z ẑi + 12
+pẑ (ẑ) =
+Lap(z; µz , eσz ) dz ,
+(8)
+i=1
+pz̃ (z̃) =
+ẑi − 21
+Y  Z z̃i + 21
+i=1
+
+Lap(z; µz , eσz ) dz .
+(9)
+z̃i − 21
+Particularly, transforming z̃ to the Hyper Decoder in the training period helps improve the entropy estimation of pỹ (ỹ)
+because additional uniform noise is beneficial for learning the probability distribution of ỹ. The Decoder fd transforms
+ŷ into the reconstruction x̂. Because both the compressed latent and the compressed hyper latent are compressed by AE,
+the full loss function of the IVR network reads
+L = Ry + Rz + λj,α D
+= Ex∼px [− log2 pỹ (ỹ)) − log2 pz̃ (z̃))] + λj,α Ex∼px [d(x, x̂)].
+(10)
+To further enhance the reconstruction like [17], a separable Unet post-network [23] shared by all rates is introduced to
+the model in this paper. Details of the Unet post-network are present in Supplementary Materials.
+5
+Experiments
+5.1
+Implementation Details
+Details For Training
+The networks were trained on a body of color PNG images licensed under creative commons,
+about 30K images downloaded from CVPR workshop CLIC training dataset [9] and the world wide web. The networks
+were optimized using Adam with a batch size of 8 and a patch size of 256 × 256 randomly extracted from the training
+dataset. There were multistage learning rates ({1e − 4, 5e − 5, 1e − 5, 5e − 6, 1e − 6}) that changed with boundaries
+({1600000, 2100000, 2300000, 2400000, 2500000}).
+The IVR network was optimized with two quality metrics, i.e., MSE and MS-SSIM. When optimized by MSE, λ lain in
+{50, 160, 300,
+480, 710, 1000, 1350, 1780, 2302, 2915} and α lain in {0, 0.5, 1.0}.
+Different from MSE, λ lain in
+{1, 2, 3, 5, 8, 10, 15, 20, 25, 30}, when optimized by 1 − M S − SSIM . Finally, the IVR network was enhanced
+by the Unet post-network to achieve better performance. Additional details about the network are shown in Figure 2.
+Details for Inference
+We evaluated the compression performance on the commonly used 24 Kodak lossless
+images [11] with a size of 768 x 512 and 102 high-resolution CLIC validation images [9]. For the IVR network, M was
+set as 5 for drawing the whole RD curves and M was set as 100/1000/1000 to evaluate the fine rate control at j = 8. To
+evaluate the rate-distortion performance, the rate was measured by BPP, and the quality was measured by either PSNR
+or MS-SSIM, corresponding to the optimized distortion metric.
+Details For VVC and HEVC We used the official test model VTM 9.0 [14] with intra profile and BPG software [4]
+to test the performance. For both of them, YUV444 format was used as the configuration to maximize the compression
+performance.
+7
+30.0
+34.0
+37.5
+33.5
+37.0
+29.5
+Proposed Single-rates
+Proposed
+Proposed w/o α (n=10)
+Proposed w/o α (n=100)
+Proposed w/o α (n=1000)
+Proposed-Hyper w/o α (n=10)
+Proposed-Hyper w/o α (n=100)
+Proposed-Hyper w/o α (n=1000)
+BPG (4:4:4)
+28.0
+27.5
+27.0
+26.5
+0.08
+0.10
+0.12
+0.14
+0.16
+0.18
+0.20
+33.0
+Proposed Single-rates
+Proposed
+Proposed w/o α (n=10)
+Proposed w/o α (n=100)
+Proposed w/o α (n=1000)
+Proposed-Hyper w/o α (n=10)
+Proposed-Hyper w/o α (n=100)
+Proposed-Hyper w/o α (n=1000)
+BPG (4:4:4)
+32.5
+32.0
+31.5
+0.300
+0.325
+0.350
+Bits per pixel (BPP)
+0.375
+0.400
+0.425
+0.450
+0.475
+0.500
+PSNR (dB)
+28.5
+PSNR (dB)
+PSNR (dB)
+29.0
+36.5
+Proposed Single-rates
+Proposed
+Proposed w/o α (n=10)
+Proposed w/o α (n=100)
+Proposed w/o α (n=1000)
+Proposed-Hyper w/o α (n=10)
+Proposed-Hyper w/o α (n=100)
+Proposed-Hyper w/o α (n=1000)
+BPG (4:4:4)
+36.0
+35.5
+35.0
+0.700
+0.725
+0.750
+Bits per pixel (BPP)
+0.775
+0.800
+0.825
+0.850
+0.875
+0.900
+Bits per pixel (BPP)
+Figure 8: Ablation study of the IVR based on autoregressive and hierarchical structure [19] over the Kodak dataset.
+Three figures consist of the complete RD curves. IVR variants: "Proposed" is the baseline with InterpCA. "Proposed
+Single-rates" is the base SinRN. "Proposed w/o α" represents the case without interpolation, which is realized by
+setting interpolation hyperparameter α to 1 in Eq. 3. "Proposed-hyper w/o α" means the InterpCA is used in both
+Encoder/Decoder network and Hyper-Encoder/Decoder network with α = 1, which is similar to the case in [8].
+5.2
+Ablation Study
+To verify the effectiveness of the interpolation variable-rate method, three kinds of IVR variants are implemented,
+i.e., the Proposed, the Proposed without α and the Proposed-Hyper without α. the Proposed is the baseline with
+InterpCA. the Proposed without α represents the case without interpolation, which is realized by setting interpolation
+hyperparameter α to 1 in Eq. 3. the Proposed-Hyper without α means the InterpCA is used in both Encoder/Decoder
+network and Hyper-Encoder/Decoder network with α = 1, which is similar to the case in [8]. Meanwhile, these variants
+are deployed in two of the most common structures: autoregressive and hierarchical structure [19], and hierarchical
+structure [3]. These networks were all optimized by MSE, and results are summarized in Figure 8, Figure 9 and
+Table 1. Figure 8 illustrates that compared with the SinRN for fixed λ, the proposed IVR network has no performance
+degradation on the whole and is better at some points. The part A of Table 1 shows that the proposed model performs
+better than other IVR variants, saving 0.28%, 2.28%, 3.33% bits (bits-saving is all measured by Bjøntegaard Delta Bit
+Rate (BDBR) [5]) compared with SinRNs, the Proposed without α (n=1000), the Proposed-Hyper without α (n=1000)
+on the Kodak dataset, respectively.
+The structure without α is equivalent to the Conditional Convolutions, the performance of the Proposed without
+α (n=1000) deteriorates 1.93% compared with the structure of 10 rates. This demonstrates that the compression
+performance decreases when using a large set of λ. When inserting Conditional Convolutions into the Hyper Encoder
+and the Hyper Decoder, the performance of Proposed-Hyper without α drops 1.13% (n=10), 1.47% (n=100) and 1.05%
+(n=1000), respectively. That means that sharing a common set of parameters in the Hyper-autoencoder network is
+sufficient for different compression rates.
+Table 1: BD-Rate Gains against the SinRNs with and without the CM, corresponding to Part A and B respectively.
+Negative values in BDBR represent the bits saving.
+A
+B
+Methods
+BDBR
+Proposed
+Proposed w/o α (n=10)
+Proposed w/o α (n=100)
+Proposed w/o α (n=1000)
+Proposed-Hyper w/o α (n=10)
+Proposed-Hyper w/o α (n=100)
+Proposed-Hyper w/o α (n=1000)
+Proposed w/o CM
+Proposed w/o (CM & α) (n=10)
+Proposed-Hyper w/o (CM & α) (n=10)
+-0.2898%
+0.0592%
+1.3114%
+1.9872%
+1.1857%
+2.7815%
+3.0409%
+-0.4740%
+1.1733%
+1.6358%
+BD-PSNR
+(dB)
+0.0107
+-0.0040
+-0.0609
+-0.0937
+-0.0580
+-0.1185
+-0.1340
+0.0193
+-0.0482
+-0.0662
+Different from the part serial compression of the autoregressive and hierarchical structure [19], the hierarchical
+structure [3] could be speeded up in parallel completely, which is more likely to be used in practice. The RD curves
+in Figure 9 and BDBRs in the part B of Table 1 demonstrate the same conclusions as the ablation study based on the
+autoregressive and hierarchical structure. The part B of Table 1 shows that the proposed model without CM saves bits
+up to 1.65%, 2.11% compared with the Proposed without CM and α (n=10), and the Proposed-Hyper without CM and
+α (n=10). This indicates interpolation variable-rate method has more advantages in the hierarchical structure.
+8
+Proposed Single-rates w/o CM
+Proposed w/o CM
+Proposed w/o (CM & α) (n=10)
+Proposed-Hyper w/o (CM & α) (n=10)
+BPG (4:4:4)
+36
+PSNR (dB)
+34
+30
+32
+29
+30
+28
+27
+28
+26
+26
+0.1
+0.2
+0.3
+0.10
+0.4
+0.5
+0.15
+0.6
+0.20
+0.7
+0.8
+0.9
+Bits per pixel (BPP)
+Figure 9: Ablation study of the IVR based on hierarchical structure [3] over the Kodak dataset. "w/o CM" means the
+network is without the Context Model and the Entropy Parameters. Other variants are the same as Figure 8.
+35
+34
+23
+22
+21
+20
+MS-SSIM (dB)
+36
+PSNR (dB)
+24
+Proposed+Unet [MSE]
+Proposed [MSE]
+Lee [MSE] (2020)
+Cheng [MSE] (CVPR20)
+Minnen [MSE] (NIPS18)
+Yoojin [MSE] (ICCV19)
+VTM 9.0 (4:4:4)
+BPG (4:4:4)
+37
+33
+34.0
+32
+33.5
+31
+19
+18
+17
+16
+15
+33.0
+30
+14
+32.5
+13
+29
+32.0
+12
+28
+31.5
+0.30 0.32 0.34 0.36 0.38 0.40 0.42 0.44 0.46
+11
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+0.7
+0.8
+10
+0.1
+0.9
+Proposed+Unet [MS-SSIM]
+Proposed [MS-SSIM]
+Lee [MS-SSIM] (2020)
+Cheng [MS-SSIM] (CVPR20)
+Minnen [MS-SSIM] (NIPS18)
+VTM 9.0 (4:4:4)
+BPG (4:4:4)
+18.2
+17.8
+0.2
+0.3
+0.4
+Bits per pixel (BPP)
+38
+37
+Proposed+Unet [MSE]
+Proposed+Unet [MSE]
+VTM 9.0 (4:4:4)
+BPG (4:4:4)
+0.7
+0.34
+0.36
+0.37
+0.8
+0.35
+0.9
+1.0
+0.7
+0.8
+0.9
+Proposed+Unet [MS-SSIM]
+Proposed [MS-SSIM]
+VTM 9.0 (4:4:4)
+BPG (4:4:4)
+23
+22
+21
+20
+MS-SSIM (dB)
+PSNR (dB)
+0.33
+(b) MS-SSIM on Kodak
+24
+36
+35
+34
+33
+35.0
+32
+19
+18
+17
+16
+15
+14
+34.5
+31
+13
+12
+30
+29
+0.0
+0.32
+0.6
+Bits per pixel (BPP)
+(a) PSNR on Kodak
+39
+0.5
+0.1
+0.2
+0.3
+34.0
+0.25
+0.26
+0.4
+0.5
+0.27
+0.28
+0.6
+0.29
+0.30
+0.7
+0.8
+11
+10
+0.0
+Bits per pixel (BPP)
+0.1
+0.2
+0.3
+0.4
+0.5
+0.6
+Bits per pixel (BPP)
+(c) PSNR on CLIC validation dateset
+(d) MS-SSIM on CLIC validation dateset
+Figure 10: RD curves aggregated over the Kodak and CLIC validation dataset. IVR-Unet (MSE) has a competitive
+rate-distortion performance on the Kodak image set as measured by PSNR (RGB) compared to all other methods. To
+our knowledge, this is the first learned variable-rate method that outperforms the VTM 9.0. MS-SSIM values converted
+to decibels (−10log10 (1 − M S − SSIM )). The IVR-Unet (MS-SSIM) is slightly worse than [17].
+5.3
+Rate Distortion Performance
+Figure 10 demonstrates the rate-distortion performance on the Kodak and CLIC validation dataset, where the IVR is
+compared with other previous methods, including well-known compression standards such as BPG and VVC, as well
+as recent entropy-based learned compression methods, such as Minnen’s [19], Cheng’s [7], Lee’s [17] and Choi’s [8].
+RD curves of Minnen’s [19] and Cheng’s [7] are from the released LaTex code [7] in arXiv. RD curves of Lee’s [17]
+and Choi’s [8] are obtained by contacting the author. Regarding the metric of PSNR, the IVR network with Unet
+outperforms all other previous methods, achieving the state-of-the-art performance of its kind as shown in Figure 10 and
+Table 2. By setting the BPG as the anchor, the improvements of SinRN save 4.71% bits than Minnen’s [19] (Quantized
+9
+Table 2: BD-Rate Gains of Proposed, Lee’s [17], Cheng’s [7], VTM 9.0 [20], Minnen’s [19], against the BPG [4]. “/”
+represents that the method didn’t evaluate the RD performance on the dataset in that column.
+Methods
+Proposed + Unet
+Proposed
+Lee’s [17]
+Cheng’s [7]
+VTM 9.0 [20]
+Minnen’s [19]
+Kodak
+PSNR
+MS-SSIM
+-21.25%
+-56.36%
+-12.85%
+-52.71%
+-20.75%
+-57.98%
+-17.24%
+-57.38%
+-20.76%
+-20.13%
+-8.14%
+-47.948%
+CLIC
+PSNR
+MS-SSIM
+-36.09%
+-58.31%
+-27.54%
+-54.26%
+/
+/
+/
+/
+-35.69%
+-28.43%
+/
+/
+operations contribute about 3.5% and the Laplacian distribution contributes about 1%) and Unet post-network boosts the
+performance about 8.40% bits-saving. Although the improvements of SinRN promote the performance smaller than that
+of Unet post-network, it does not increase the computational complexity relative to Minnen’s [19]. Regarding the metric
+of MS-SSIM, it achieves a competitive performance among the learned image compression methods, which is only a
+little worse than Lee’s [17] and Cheng’s [7]. It is also the first variable-rate image compression method that outperforms
+the ongoing compression method VTM 9.0 (intra) in both PSNR and MS-SSIM. The results on the CLIC validation
+dataset show the IVR method also works for high-resolution images, apart from low-resolution Kodak images.
+We verify the rate fineness of the IVR-Unet network by changing the parameters M with j set as 8. The results in
+Table 3 illustrate that the variable-rate RD points start to appear a disorder until M = 10000. In reality, traditional
+image codecs provide hundreds of variable-rate RD points to meet the basic requirement of applications. Compared
+with that, considering that the length of the values of j is 9, the IVR network obtains 9000 effective variable-rate RD
+points with a very fine PSNR interval of 0.001 dB at M = 1000. Moreover, as shown in Figure 1, the IVR network
+realizes a fine rate interval of 0.0001 BPP compared with the traditional image codecs. Except for the variable-rate
+control, Figure 1 also reveals that the IVR image compression method provides better reconstruction quality with fewer
+artifacts in terms of PSNR, MS-SSIM, and perception.
+Table 3: Fine variable-rate Test over the Kodak Dataset in IVR-Unet network (MSE).
+j=8
+α
+1
+1 − 1/M
+1 − 2/M
+1 − 3/M
+1 − 4/M
+1 − 5/M
+1 − 6/M
+6
+M=100
+BPP
+PSNR(dB)
+0.8023736 37.02175
+0.8032523 37.02725
+0.8040930 37.03298
+0.8049592 37.03910
+0.8058211 37.04532
+0.8066999 37.05148
+0.8076027 37.05822
+M=1000
+BPP
+PSNR(dB)
+0.8023736 37.02175
+0.8024466 37.02241
+0.8025299 37.02305
+0.8026113 37.02374
+0.8027042 37.02438
+0.8027963 37.02463
+0.8029035 37.02518
+M=10000
+BPP
+PSNR(dB)
+0.8023736 37.02175
+0.8023781 37.02176
+0.8023888 37.02185
+0.8023969 37.02196
+0.8024009 37.02206
+0.8024107 37.02214
+0.8024225 37.02213
+Conclusion
+In this paper, we proposed an efficient IVR network for image compression by introducing an InterpCA module
+and using an improved SinRN. The original SinRN was optimized by replacing most of the uniform-noise-addition
+operations with quantization ones for more accurate entropy estimation, therefore bringing performance improvement
+without extra computational complexity. A modular Unet post-network was also introduced to the pipeline to further
+enhance the reconstruction. Most importantly, benefitting from the InterpCA module which was used in both Encoder
+and Decoder of the SinRN, the IVR network can provide fine variable-rate control without performance degradation.
+In addition, the minimal plug-in design of the InterpCA makes it compatible with most entropy-based methods. As
+illustrated in Table 3, the proposed IVR network obtained 9000 effective variable-rate points with a fine PSNR interval
+of 0.001 dB and a fine BPP interval of 0.0001, when M = 1000. The RD curves in Figure 10 validated that the IVR
+network outperformed VTM 9.0 (intra) in both PSNR and MS-SSIM. To the best of our knowledge, this is the first
+variable-rate learned image compression method achieving such competitive performance.
+References
+[1] Mohammad Akbari, Jie Liang, Jingning Han, and Chengjie Tu. Learned variable-rate image compression with residual divisive
+normalization. In 2020 IEEE International Conference on Multimedia and Expo, pages 1–6. IEEE, 2020.
+[2] Johannes Ballé, Valero Laparra, and Eero P. Simoncelli. End-to-end optimized image compression. In International Conference
+on Learning Representations, 2017.
+[3] Johannes Ballé, David Minnen, Saurabh Singh, Sung Jin Hwang, and Nick Johnston. Variational image compression with a
+scale hyperprior. In International Conference on Learning Representations, 2018.
+10
+[4] Fabrice Bellard. Bpg image format, 2018.
+[5] Gisle Bjontegaard. Calculation of average psnr differences between rd-curves. VCEG-M33, 2001.
+[6] Tong Chen and Zhan Ma. Variable bitrate image compression with quality scaling factors. In ICASSP 2020-2020 IEEE
+International Conference on Acoustics, Speech and Signal Processing, pages 2163–2167. IEEE, 2020.
+[7] Zhengxue Cheng, Heming Sun, Masaru Takeuchi, and Jiro Katto. Learned image compression with discretized gaussian mixture
+likelihoods and attention modules. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages
+7939–7948, 2020.
+[8] Yoojin Choi, Mostafa El-Khamy, and Jungwon Lee. Variable rate deep image compression with a conditional autoencoder. In
+Proceedings of the IEEE International Conference on Computer Vision, pages 3146–3154, 2019.
+[9] CLIC. Challenge on learned image compression, 2018.
+[10] P. N. Druzhkov and V. D. Kustikova. A survey of deep learning methods and software tools for image classification and object
+detection. Pattern Recognition and Image Analysis, 26(1):9–15, 2016.
+[11] Rich Franzen. Kodak lossless true color image suite, 2013.
+[12] Vivek K Goyal. Theoretical foundations of transform coding. IEEE Signal Processing Magazine, 18(5):9–21, 2001.
+[13] Geoffrey E Hinton and Ruslan R Salakhutdinov. Reducing the dimensionality of data with neural networks. science,
+313(5786):504–507, 2006.
+[14] ISO/IEC MPEG ITU-T VCEG. Vvcsoftware vtm, 2020.
+[15] Nick Johnston, Damien Vincent, David Minnen, Michele Covell, Saurabh Singh, Troy Chinen, Sung Jin Hwang, Joel Shor, and
+George Toderici. Improved lossy image compression with priming and spatially adaptive bit rates for recurrent networks. In
+Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages 4385–4393, 2018.
+[16] Jooyoung Lee, Seunghyun Cho, and Seung-Kwon Beack. Context-adaptive entropy model for end-to-end optimized image
+compression. In International Conference on Learning Representations, 2019.
+[17] Jooyoung Lee, Seunghyun Cho, and Munchurl Kim. A hybrid architecture of jointly learning image compression and quality
+enhancement with improved entropy minimization. arXiv preprint arXiv:1912.12817, 2019.
+[18] Fabian Mentzer, Eirikur Agustsson, Michael Tschannen, Radu Timofte, and Luc Van Gool. Conditional probability models
+for deep image compression. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition, pages
+4394–4402, 2018.
+[19] David Minnen, Johannes Ballé, and George D Toderici. Joint autoregressive and hierarchical priors for learned image
+compression. In Advances in Neural Information Processing Systems, pages 10771–10780, 2018.
+[20] Jens-Rainer Ohm and Gary J Sullivan. Versatile video coding–towards the next generation of video compression. In Picture
+Coding Symposium, volume 2018, 2018.
+[21] Majid Rabbani and Rajan Joshi. An overview of the jpeg 2000 still image compression standard. Signal processing: Image
+communication, 17(1):3–48, 2002.
+[22] Jorma Rissanen and Glen Langdon. Universal modeling and coding. IEEE Transactions on Information Theory, 27(1):12–23,
+1981.
+[23] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net: Convolutional networks for biomedical image segmentation. In
+International Conference on Medical image computing and computer-assisted intervention, pages 234–241. Springer, 2015.
+[24] Gary J Sullivan, Jens-Rainer Ohm, Woo-Jin Han, and Thomas Wiegand. Overview of the high efficiency video coding (hevc)
+standard. IEEE Transactions on circuits and systems for video technology, 22(12):1649–1668, 2012.
+[25] Lucas Theis, Wenzhe Shi, Andrew Cunningham, and Ferenc Huszár. Lossy image compression with compressive autoencoders.
+In International Conference on Learning Representations, 2017.
+[26] George Toderici, Sean M O’Malley, Sung Jin Hwang, Damien Vincent, David Minnen, Shumeet Baluja, Michele Covell, and
+Rahul Sukthankar. Variable rate image compression with recurrent neural networks. arXiv preprint arXiv:1511.06085, 2015.
+[27] George Toderici, Damien Vincent, Nick Johnston, Sung Jin Hwang, David Minnen, Joel Shor, and Michele Covell. Full
+resolution image compression with recurrent neural networks. In Proceedings of the IEEE Conference on Computer Vision and
+Pattern Recognition, pages 5306–5314, 2017.
+[28] Jan Van Leeuwen. On the construction of huffman trees. In International Colloquium on Automata, Languages and
+Programming, pages 382–410, 1976.
+[29] Gregory K Wallace. The jpeg still picture compression standard. IEEE transactions on consumer electronics, 38(1):xviii–xxxiv,
+1992.
+[30] Zhihao Wang, Jian Chen, and Steven C. H Hoi. Deep learning for image super-resolution: A survey. 2019.
+[31] Thomas Wiegand, Gary J Sullivan, Gisle Bjontegaard, and Ajay Luthra. Overview of the h. 264/avc video coding standard.
+IEEE Transactions on circuits and systems for video technology, 13(7):560–576, 2003.
+[32] Fei Yang, Luis Herranz, Joost van de Weijer, José A Iglesias Guitián, Antonio M López, and Mikhail G Mozerov. Variable rate
+deep image compression with modulated autoencoder. IEEE Signal Processing Letters, 27:331–335, 2020.
+[33] Lei Zhou, Zhenhong Sun, Xiangji Wu, and Junmin Wu. End-to-end optimized image compression with attention mechanism.
+In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition Workshops, June 2019.
+11
+A
+Details of Entropy Parameters
+Post Reconstruction
+Conv 640x1x1/1
+LeakyRelu
+Conv 853x1x1/1
+LeakyRelu
+C_in=1280
+Conv 1066x1x1/1
+Reconstrution
+Conv 3x3x3
+Conv CHx3x3
+Leaky ReLU
+Conv CHx3x3
+Leaky ReLU
+Max Pooling 2x2
+C_out=640
+DownBlock-64
+UpBlock-64
+UpBlock-128
+DownBlock-256
+UpBlock-256
+DownBlock-512
+UpBlock-512
+Conv 1024x3x3
+Leaky ReLU
+(a) Entropy Parameters module
+DownBlock-CH
+Concatenation
+DownBlock-128
+Conv 1024x3x3
+Leaky ReLU
+Conv CHx3x3
+Leaky ReLU
+Conv CHx3x3
+Leaky ReLU
+Conv CHx3x3/2↑
+Leaky ReLU
+UpBlock-CH
+(b) Unet Post-network
+Figure 11: Network architectures. Convolution parameters are denoted as the number of filters×kernel height×kernel
+width / stride. Reconstruction x̂ is down-up fourth in Unet structure to generate reconstruction ẍ.
+The network architecture of the Entropy Parameters module is shown in Figure 11(a). The number of the input channels
+is equal to 1280, which is four times the channels of the latents ŷ. Due to generating the probability distribution
+parameters (µy , σy ), the final layer of the Entropy Parameters module has exactly twice as many channels as the latents
+ŷ. According to the channels of the input and the output, the number of 1 × 1 convolution channels decreases in a
+certain proportion ( 56 , 23 , 21 ).
+B
+Details of Unet Post-network
+To further enhance the reconstruction x̂, a separable Unet post-network [23] is also introduced to the SinRN as shown
+in Figure 11(b). In the Unet post-network, all convolution layers are followed by a LeakyReLu, except for the last
+output layer. Combining this sub-network with the main network for end-to-end training can bring a little performance
+improvement [17]. While the introduction of separated sub-networks has two advantages: (i) the separated sub-network
+can be replaced by other post-processing modules according to the actual needs, such as denoising, defogging, and so
+on, (ii) the separated sub-network can also be removed to reduce the computational cost for the fast decoding.
+Compared with the baseline Minnen’s method [19], Cheng’s method [7] saves 9.1% bits with the complex Gaussian
+Mixture Model (GMM) entropy model and complex Encoder/Decoder, Lee’s method [17] saves 12.61% bits with
+a similar GMM entropy model and Grouped Residual Dense Network (GRDN), and IVR saves 13.11% bits with
+improved entropy model and Unet. With the same input resolution of 1920 × 1080 × 3, the main network of IVR has
+28M parameters with 1.6 TFLOPs, the Unet has 32M parameters with 2.0 TFLOPs and saves 8.4% bits. GRDN in
+Lee’s method [17] has fewer parameters (5M, but they need to multiply N for N rates) with high FLOPs (3.0 TFLOPs)
+and saves 8.6% bits (shown in their paper). So the Unet is used for a fair comparison with the SOTA Lee’s method,
+based on the same order of complexity of the Decoder.
+C
+Visualizations on Kodak
+Figure 12 and Figure 13 show the decoded images of Kodim23 and Kodim20 by our IVR networks, VTM 9.0, and
+BPG. These figures reveal that the IVR method provides better reconstruction quality with fewer artifacts in terms of
+PSNR, MS-SSIM.
+12
+Figure 12: Visualization of sample images (Kodim23 from Kodak dataset) reconstructed by our IVR networks, BPG
+and VTM 9.0. By adjusting j and α, the IVR networks (with Unet post-network) match the rates of BPG and VTM 9.0
+with the fineness of 0.0001 BPP.
+13
+Figure 13: Visualization of sample images (Kodim20 from Kodak dataset) reconstructed by our IVR networks, BPG
+and VTM 9.0. By adjusting j and α, the IVR networks (with Unet post-network) match the rates of BPG and VTM 9.0
+with the fineness of 0.0001 BPP.
+14

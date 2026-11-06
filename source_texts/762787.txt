@@ -1,0 +1,1367 @@
+Head Avatars with Dynamic Explicit Hair
+Vanessa Sklyarova1,2⋆ , Haonan Chen1⋆ , Berna Kabadayi2,4 , Tobias
+Kirschstein5 , Zicong Fan1 , Xi Wang1,5,8 , Gerard Pons-Moll3,4 , Matthias
+Nießner5 , Marc Pollefeys1,7 , Michael J. Black2† , and Justus Thies6†
+ETH Zürich, Switzerland
+Max Planck Institute for Intelligent Systems, Tübingen, Germany
+3
+Max Planck Institute for Informatics, Saarland Informatics Campus, Germany
+4
+Tübingen AI Center, University of Tübingen, Germany
+5
+Technical University of Munich, Germany
+6
+Technical University of Darmstadt, Germany
+7
+Microsoft
+8
+MCML
+1
+arXiv:2607.23861v1 [cs.CV] 26 Jul 2026
+2
+Fig. 1: DynHair is a novel method for learning hair dynamics of 3D strands from data.
+It leverages multi-view video input to learn a dynamic hair strand deformation model
+based on the velocity and acceleration of the human head.
+Abstract. We present DynHair, a novel method for tracking and modeling dynamic hair for human head avatars. From video input, we reconstruct a dynamic head avatar with an explicit strand-based hair representation using structured 3D Gaussian Splatting. In contrast to the face
+region of human head avatars, which can be modeled with 3D Gaussians that are attached or generated with respect to some expressive
+3D head model, hair is particularly challenging as it exhibits dynamic
+motion effects. Therefore, we present a novel method that models the
+dynamic deformations of the hair strands using a temporal network that
+is conditioned on angular velocity and acceleration of the head, as well
+as relative gravity. Specifically, an LSTM encodes the motion history
+and modulates per-point strand features via FiLM conditioning which
+is then used by an MLP to produce physically plausible displacements
+to the canonical hairstyle. We jointly optimize this motion and appearance representation of the hair, with a 3DGS-based representation of
+the face-region, via differentiable Gaussian splatting with photometric,
+geometric, and physics-based supervision. As a result, we obtain hair
+⋆ Equal contribution.
+† Equal supervision.
+2
+V. Sklyarova et al.
+tracking of the training video data and an animatable head avatar with
+controllable hair dynamics. In our experiments, we demonstrate stateof-the-art performance in terms of hair dynamics, temporal consistency,
+and generalization across subjects. Our data and code are available at
+https://dynhair.is.tue.mpg.de/.
+Keywords: Digital Humans · Dynamic Hair Modeling · Hair Tracking
+1
+Introduction
+In the past few years, there has been tremendous progress in modeling photorealistic 3D digital human appearance for applications in e-commerce, entertainment, and telepresence in AR/VR [75]. Especially, the introduction of neural
+radiance fields [41] and 3D Gaussian splatting [31] has led to a series of works
+[9, 24, 29, 54, 57] focusing on visual quality [18, 32, 49, 64], runtime [26, 72, 73],
+few-shot reconstruction [10, 33, 74], and disentanglement [14, 56]. In addition to
+photorealism, realistic motion [3,12,55] is a critical aspect for immersive avatars.
+Avatars should behave like their physical counterparts. However, current avatar
+methods concentrate mostly on the face region, where they use 3D morphable
+model-based [34, 45] conditioning to handle expression-dependent deformations,
+ignoring dynamic hair motion. The lack of dynamic hair breaks the sense of realism as the avatars do not follow physical principles. When the head rotates to
+the side, the hair should follow the direction of gravity. When the head shakes,
+the hair should lag behind, swing with inertia, and exhibit physically plausible
+follow-through and settling behavior.
+Such behavior can be modeled with physics-based simulation [1, 11], requiring a strand-based reconstruction of the hair and appropriate physics parameters
+for mass, stiffness, damping, friction and more. Recovering such a strand-based
+reconstruction is highly challenging as most of the hair strands are occluded
+and only the outer hair layer is visible. Existing works that aim at reconstructing strand-based hair [4, 21, 48, 52, 62, 67] from images and video assume static
+hair geometry and exploit learned hairstyle priors that help reconstruct the inner structure of the hair. They demonstrate animation with such reconstructed
+hairstyles, but the physics parameters for simulation are hand-tuned and not
+recovered from the observations. Automatically finding realistic physics parameters for simulation is currently an unsolved problem, as it would require efficient
+differentiable hair simulation. In contrast, we propose to learn hair dynamics
+directly from data with physics-based losses.
+Specifically, we propose DynHair, a method to learn dynamic strand-based
+hair directly from multi-view video. It captures appearance through strandaligned 3D Gaussians that follow the underlying hair geometry. The canonical
+hairstyle is initialized from a strand-based hair prior [52] and deformed at each
+timestep based on the head motion history. The key component is the temporal motion model for the hair that is conditioned on gravity, and the velocity
+and acceleration of the head. Specifically, we extract angular velocity, acceleration, and relative gravity from 3D head tracking and encode a sliding window of
+Head Avatars with Dynamic Explicit Hair
+3
+these to condition an LSTM to produce a temporal motion embedding. Based
+on this motion embedding, we use FiLM [46] conditioning to modulate perpoint strand features before a strand MLP predicts displacements of the 3D
+Gaussians. A learnable root attenuation factor encodes the physical prior that
+strand roots anchored to the scalp move less than free-moving tips. To train the
+method end-to-end, we combine photometric losses (RGB, SSIM, perceptual)
+with hair-geometric supervision (silhouette, orientation, penetration), physicsbased regularization (elastic stretch preservation), and color regularization for
+spatially and temporally coherent hair appearance. In addition to the hair, we
+jointly render and train the upper body region as an unstructured set of 3D
+Gaussians, whose positions and attributes are conditioned on facial expression
+and pose via deformation MLPs following [64].
+Our approach combines the rendering quality of Gaussian-based avatars with
+the geometric fidelity and physical plausibility of explicit strand representations.
+The experiments demonstrate state-of-the-art results on dynamic head avatars,
+with improved hair dynamics, temporal consistency, and generalization across
+subjects and motion patterns compared to existing methods. In summary, our
+main contributions are:
+– We propose a dynamic hair motion model based on structured hair strands.
+An LSTM encoder processes head-local angular velocity, acceleration, and
+relative gravity as temporal conditioning signals. The resulting pose features modulate canonical hair point features via FiLM layers, which are
+then passed to an MLP to predict non-rigid hair motion.
+– We propose an avatar reconstruction approach that disentangles hair and
+upper body regions, with region-dependent motion modeling and appearance
+representations learned from multi-view video.
+2
+Related Work
+Head avatars. Early head avatar approaches rely on explicit geometric representations, including meshes [6, 7, 19, 27, 61] and volumetric primitives [17, 38].
+Subsequently, following NeRF [41], implicit representations [40, 41, 66] have become predominant [15,16,29,32,42–44,69,73]. Initial efforts focus on deformable
+NeRFs; for instance, Park et al . [44] learn a hyperspace that maps observation
+space to a canonical space via a learnable latent code. Parametric face models
+such as FLAME [34] and BFM [45] are widely used to guide the deformation
+from observation space to canonical space [15, 16, 73]. For example, Kirschstein
+et al . [32] introduce a deformation field and an ensemble of 3D multi-resolution
+hash encodings to construct high-fidelity human heads from multi-view videos.
+IMavatar [69] learns an expression-conditioned occupancy network from monocular video similar to SNARF [8].
+Although implicit representations achieve high realism, they require dense
+sampling in 3D space, which limits rendering efficiency. To overcome this, recent
+works use Gaussian Splatting [31] for head avatar modeling [9, 18, 33, 47, 50, 56,
+4
+V. Sklyarova et al.
+57,63,64], offering real time rendering while maintaining visual fidelity. Gaussian
+Head Avatar (GHA) [64] conditions Gaussians on BFM parameters and incorporates a super resolution module for high quality rendering. GaussianAvatars [47]
+attaches Gaussians to a rigged FLAME mesh to enable controllable animation.
+SplattingAvatar [50] embeds Gaussians on a triangular mesh using barycentric
+coordinates. Similarly, FlashAvatar [63] embeds Gaussians in the UV space of a
+FLAME mesh with a learnable offset for fine details. GaussianHead [57] uses a
+parametric face mesh to describe large scale motion and stores view-dependent
+appearance in tri-planes. Unlike our approach, all the above methods treat hair
+implicitly as part of the head representation, limiting strand-level detail and hair
+motion. We disentangle the hair and the face, introducing a new hair model, and
+represent the head following GHA [64].
+Hair Animation. Hair motion plays a crucial role in character animation,
+games, and virtual avatars, yet remains challenging due to the large number
+of strands, complex physical behavior, and frequent self- and body-collisions.
+Methods that model hair dynamics can be broadly categorized into physicsbased simulators [5, 13, 22, 25], approaches that approximate simulator behavior
+with learned models [53, 58, 70], and methods that learn dynamics from image
+observations [36, 59, 60, 65].
+Physics-based simulators generate hair dynamics using numerical solvers and
+are widely integrated in production [1, 2, 11, 20]. While stable and interpretable,
+they are computationally expensive and require manual parameter tuning for
+each hairstyle type.
+Learned approximations of simulation. Recent methods, such as GroomGen [70]
+and DGH [58], approximate the simulator’s behavior by training a neural network on 3D data generated in Houdini. Quaffure [53] extends this direction
+with self-supervised learning of hair dynamics conditioned on body pose using
+physics-based constraints. However, none of these methods are personalized, nor
+do they model full avatar appearance.
+Capture-based methods learn dynamics directly from an observed video. Yang et
+al. [65] reconstruct dynamic hair from a monocular video using separate networks
+for spatial occupancy and temporal motion. HVH [60] represents hair volumetrically and learns dynamics via guide-strand tracking with RGB and optical flow
+supervision. NeuWigs [59] learns a compressed appearance representation followed by a temporal transfer module for latent-space dynamics. HHAvatar [36]
+models hair with unstructured Gaussians and predicts deformations via an MLP
+conditioned on past hair states and head poses. PhysHead [28] first reconstructs
+a static strand-based hairstyle using Neural Haircut [51], then animates the resulting Gaussians with dynamics from the physics-based simulator Maya. While
+PhysHead optimizes hair appearance from a static time step, we optimize from
+a dynamic sequence. Concurrent work HADES [35] also uses strand-based geometry and learns dynamics conditioned on head pose for full-body avatars, but
+conditions on a history of past hair states and models only a sparse set of strands,
+interpolating the rest via nearest neighbors.
+Head Avatars with Dynamic Explicit Hair
+5
+Fig. 2: Method overview. Given multi-view video input, we first initialize a canonical hybrid model for the upper body and hair. Hair strands are initialized using the
+Im2Haircut [52] prior model, and the upper body is represented with unstructured 3D
+Gaussians [64]. We then jointly optimize hair and head deformations with two separate
+motion models. The hair deformation is conditioned on BFM motion history with an
+additional rigid transformation, while the head deformation is conditioned on facial
+expressions and pose parameters. Finally, the hair and upper body Gaussians are composited and rendered via differentiable splatting to produce the output images.
+In contrast to these capture-based methods, we model hair motion in a structured manner using a strand-based representation. We predict deformations for
+all strands relative to canonical hair, rather than from a history of past states,
+and optimize appearance directly from a dynamic sequence rather than a static
+one. We further incorporate acceleration and gravity as explicit inputs and introduce a physics-based elastic term to improve the realism of the resulting motion.
+3
+Method
+Our method models a dynamic head avatar with explicit strand-based hair from
+multi-view videos. As shown in Figure 2, our proposed method disentangles hair
+and the upper body. Both regions, and especially their deformations, are handled
+differently. Following [64], the upper body is represented with an unstructured
+set of 3D Gaussians whose positions and attributes are conditioned on facial
+expression and pose. In contrast to [64], which does not disentangle body and
+hair, we model the hairstyle separately as a set of explicit polyline strands with
+strand-aligned Gaussian primitives and a learned dynamic deformation module
+that is conditioned on the head motion history and gravity. At each timestep, we
+predict deformations of both the upper body and the hair, concatenate all their
+Gaussians, and render them jointly via differentiable Gaussian Splatting [31] to
+obtain RGB color, segmentation labels, and strand orientation maps enabling
+joint supervision through photometric losses, hair-geometric constraints, and
+physics-based regularization. In the following, we introduce our novel hair modeling, while the upper body model is detailed in the suppl. material.
+6
+3.1
+V. Sklyarova et al.
+Modeling Dynamic Hair
+Our dynamic hair modeling consists of two stages: static hairstyle reconstruction
+at the initial timestep, followed by learning a head motion-conditioned deformation network for dynamic animation of hair.
+Canonical representation. We model the hairstyle H as a set of N polylines originating from a scalp mesh: H = {Si }N
+i=1 , where each strand Si =
+{pij }L
+consists
+of
+L
+points.
+To
+obtain
+the
+canonical
+hairstyle, we leverage
+j=1
+Im2Haircut [52], a PCA-based hair prior with learned coarse-to-fine encoders.
+Given multi-view images at the initial timestep (t=0), the encoder predicts PCA
+coefficients that are decoded into strand geometry through a learned shape basis. The resulting strands are upsampled to the target resolution, filtered using a
+scalp silhouette mask to remove spurious strands, and then resampled to L = 40
+points per strand. We jointly optimize the strand geometry using the Im2Haircut
+reconstruction losses and additional regularization for geometric consistency:
+\mathcal {L}_\text {static} = \mathcal {L}_\text {im2haircut} + \lambda _\text {pca}\mathcal {L}_\text {pca} + \lambda _\text {length}\mathcal {L}_\text {length} + \lambda _\text {smooth}\mathcal {L}_\text {smooth} + \lambda _\text {consist}\mathcal {L}_\text {consist} ,
+(1)
+where Lpca regularizes PCA coefficients, Llength and Lsmooth encourage nearby
+strands to have similar lengths and shapes (measured via root-based KNN), and
+Lconsist enforces that the PCA distribution of back-view strands matches that
+of front-view strands, improving geometry in occluded regions. This yields the
+canonical hairstyle H0 used as input for the dynamic stage.
+Motion conditioning. Hair dynamics result from both rigid head motion and
+non-rigid deformations caused by inertia and gravity. To model these dynamics,
+we extract the global pose Pt = {Rt , Tt , St } from the parametric face model [45]
+at each timestep t and compute the angular velocity, acceleration, and relative
+gravity direction. The angular velocity and acceleration of the head are computed
+using central differences. At each timestep t, they are given by:
+\boldsymbol {\omega }^\text {world}_t = \frac {\mathrm {Log}\!\left (R_{t+1}\, R_{t-1}^\top \right )}{2\,\Delta t}, ~~~~~ \boldsymbol {\alpha }^\text {world}_t = \frac {\boldsymbol {\omega }^\text {world}_{t+1} - \boldsymbol {\omega }^\text {world}_{t-1}}{2\,\Delta t},
+(2)
+where Log(·) converts a rotation from SO(3) to R3 . Both signals are then rotated
+into the head-local frame to obtain pose-invariant conditioning: ω t = Rt⊤ ω world
+t
+and αt = Rt⊤ αworld
+. The relative gravity direction, defined as the gravity vector
+t
+in the head-local frame, is obtained by rotating the canonical gravity vector:
+\mathbf {g}_t = \mathrm {normalize}\!\left (R_t^\top \, [0,\, {-1},\, 0]^\top \right ).
+(3)
+For training and inference stability, we normalize ω τ and ατ per-axis by precomputed maximum absolute values from the training set and clamped to [−1, 1].
+Hair deformation network. We train a hair deformer network Dhair that
+predicts non-rigid per-point displacements for the canonical hairstyle, conditioned on the head motion history of the past T frames. Specifically, for each
+Head Avatars with Dynamic Explicit Hair
+7
+frame τ in the sliding window {t−T, . . . , t}, we form the conditioning vector
+cτ = [ω τ , ατ , gτ ] ∈ R9 . Each cτ is mapped through positional encoding γ(cτ )
+and then processed by an LSTM with learnable initial hidden states (h0 , c0 ) to
+produce a temporal motion embedding zt :
+\mathbf {z}_t &= \mathrm {LSTM}\!\left (\{\gamma (\mathbf {c}_\tau )\}_{\tau =t-T}^{t};\; h_0, c_0\right ).
+(4)
+The motion embedding zt modulates per-point strand features via Feature-wise
+Linear Modulation (FiLM) [46]. A linear layer maps zt to scale and shift parameters (γ film , β film ), which modulate the positional encoding of strand point pij :
+(\boldsymbol {\gamma }_\text {film}, \boldsymbol {\beta }_\text {film}) &= \mathrm {Linear}(\mathbf {z}_t), & \mathrm {FiLM(p_{ij})} &= \gamma (p_{ij}) \odot (1 + \boldsymbol {\gamma }_\text {film}) + \boldsymbol {\beta }_\text {film} .
+(5)
+The modulated features are concatenated with a strand position embedding
+(encoding the normalized position j/L along the strand) and passed through a
+strand-wise MLP to predict per-point displacements:
+\Delta p_{ij} = \mathrm {MLP}\Big (\mathrm {FiLM(p_{ij})}, \gamma (j/L)\Big ) \cdot \rho _j ,
+(6)
+where ρj is a learnable root attenuation factor initialized as a linear ramp from
+small values near the root to 1.0 at the tip. This encodes the physical prior
+that strand roots anchored to the scalp exhibit less displacement than freemoving tips. The final MLP layer is initialized near zero to ensure small initial
+deformations and stable early training. The deformed hairstyle is:
+\mathcal {H}_t = \mathcal {H}_0 + \Delta \mathcal {H}_t,
+(7)
+which is rigidly transformed to world coordinates using the head’s global pose.
+Strand-aligned Gaussian rendering. Following [39, 67, 71], we constrain the
+3D Gaussian primitives to lie on the strand polylines Si . The mean of each
+Gaussian is placed at the midpoint of a line segment, its primary scale axis is
+aligned with the segment direction (with magnitude proportional to the segment
+length), and the two cross-sectional scale axes are set to a fixed strand width.
+The Gaussian rotation quaternion is computed via parallel transport from the
+reference axis to the segment direction. We taper the Gaussians near strand
+roots to reduce visual artifacts at the scalp boundary.
+3.2
+Joint Training and Losses
+We concatenate the 3D Gaussians for the hair and upper body and jointly render them via differentiable Gaussian Splatting [31] to obtain RGB images, segmentation masks for hair and body, and orientation maps for hair. Training is
+performed in two stages: (i) the static initialization stage, where we optimize
+for the canonical hairstyle H0 using the first timestep across all views; and (ii)
+the dynamic training stage, where we jointly train the hair deformation network
+8
+V. Sklyarova et al.
+Dhair , H0 with small learning rate, head deformation networks, and hair appearance. The objective combines photometric, hair-geometric, physics-based, and
+color-regularization losses:
+\mathcal {L}_\text {dynamic} = \mathcal {L}_\text {photo} + \mathcal {L}_\text {hair} + \mathcal {L}_\text {color\_reg} .
+(8)
+Photometric losses. We supervise the rendered images using a combination
+of pixel-wise, structural similarity, and perceptual losses:
+\mathcal {L}_\text {photo} = \lambda _\text {rgb}\mathcal {L}_\text {rgb} + \lambda _\text {ssim}\mathcal {L}_\text {ssim} + \lambda _\text {vgg}\mathcal {L}_\text {vgg},
+(9)
+where Lrgb is the L1 distance between the rendered and ground-truth images.
+ˆ I) penalizes deviations
+The structural dissimilarity loss Lssim = 1 − SSIM(I,
+in local image structure using a Gaussian-windowed SSIM computation. The
+perceptual loss Lvgg is the LPIPS distance [68] computed with a pre-trained
+VGG backbone, encouraging realistic texture and high-frequency detail.
+Geometric losses. To supervise geometry, we introduce losses on the silhouette,
+strand orientation, head-hair penetration and inextensibility constraints:
+\mathcal {L}_\text {hair} = \lambda _\text {seg}\mathcal {L}_\text {seg} + \lambda _\text {orient}\mathcal {L}_\text {orient} + \lambda _\text {penetr}\mathcal {L}_\text {penetr} + \lambda _\text {elastic}\mathcal {L}_\text {elastic} .
+(10)
+The segmentation loss Lseg encourages the rendered hair silhouette to match
+the ground-truth hair mask M̂h . We use an asymmetric recall formulation that
+penalizes missing ground-truth coverage more strongly than over-coverage:
+\mathcal {L}_\text {seg} = \frac {1}{|\Omega |}\sum _\Omega \max \!\left (\hat {M}_h - M_h,\, 0\right ) + \frac {0.5}{|\Omega |}\sum _\Omega \max \!\left (M_h - \hat {M}_h,\, 0\right ),
+(11)
+where Mh is the predicted hair silhouette and Ω denotes the set of visible pixels. An exponential decay schedule is applied after a warm-up period to avoid
+over-constraining the silhouette. The orientation loss Lorient matches predicted
+2D strand orientations with ground-truth orientation maps. Since undirected
+orientations have 180◦ ambiguity, we use a wrap-aware formulation:
+\mathcal {L}_\text {orient} = \frac {\pi }{|\Omega _h|}\sum _{\Omega _h}\min \!\left (|\theta _\text {pred} - \theta _\text {gt}|,\; |\theta _\text {pred} - \theta _\text {gt} - 1|,\; |\theta _\text {pred} - \theta _\text {gt} + 1|\right ), (12)
+where Ωh is the intersection of predicted and ground-truth hair masks. The
+penetration loss Lpenetr prevents hair strands from penetrating the head mesh.
+We randomly sample up to 10,000 strand points and use signed queries to identify points inside the head mesh M. For inside points, we penalize the squared
+distance to the nearest mesh triangle:
+\mathcal {L}_\text {penetr} = \frac {1}{|\mathcal {P}_\text {in}|}\sum _{p \in \mathcal {P}_\text {in}} d^2(p,\, \mathcal {M}), \quad \mathcal {P}_\text {in} = \left \{p_{ij} : \mathrm {inside}(p_{ij},\, \mathcal {M}) \right \},
+(13)
+where d2 (p, M) denotes the squared point-to-mesh distance. The elastic regularization term penalizes stretching and compression of hair segments during
+Head Avatars with Dynamic Explicit Hair
+9
+deformation. For consecutive strand points pj and pj+1 , let drest = p0j+1 − p0j
+and dposed = ptj+1 − ptj denote the segment vectors in the rest and posed configurations, respectively. We apply this loss only after static initialization:
+\mathcal {L}_\text {elastic} = \frac {1}{N L}\sum _{i=1}^{N}\sum _{j=1}^{L-1}\left (\|d_{ij}^\text {posed}\| - \|d_{ij}^\text {rest}\|\right )^2 .
+(14)
+Hair color regularization. We introduce three complementary color regularization terms to ensure spatially and temporally coherent hair appearance:
+\mathcal {L}_\text {color\_reg} = \lambda _\text {cg}\mathcal {L}_\text {cg} + \lambda _\text {cs}\mathcal {L}_\text {cs} + \lambda _\text {cc}\mathcal {L}_\text {cc} .
+(15)
+The color gradient loss Lcg penalizes abrupt
+color changes between consecuP
+tive points along each strand: Lcg = N1L i,j ∥ci,j+1 − ci,j ∥2 . The spatial color
+smoothness loss Lcs encourages spatially nearby Gaussians (across different
+strands) to share
+Psimilar colors, computed via k-nearest-neighbor (k=8) matching: Lcs = |N1 | (a,b)∈N ∥ca − cb ∥2 . The color consistency loss Lcc encourages
+uniform color along each
+P strand by penalizing the deviation from the per-strand
+mean color: Lcc = N1L i,j ∥ci,j − c̄i ∥2 . See suppl. material for loss weights.
+4
+Experiments
+Dataset details. We train DynHair on two multiview datasets: three scenes
+from the HHAvatar dataset [36] and two from a newly captured dataset. HHAvatar has 4 synchronized cameras, about 3 minutes per scene at 2048 × 2048
+resolution, with diverse hair motion and facial expressions. Our new dataset
+captures actors with 15 synchronized cameras following a setup similar to [32].
+It includes a predefined set of diverse hair motions, spanning slow to rapid accelerations, nodding, tilting, rotations, lateral moves, sudden stops, with varied
+facial expressions. All participants performed the same 22 actions, 10 targeting
+hair dynamics. Sequences are at 4k and 72 FPS. We provide an additional 360°
+coverage with and without hairnet for static geometry estimation.
+Training details. We train DynHair in three stages. In Stage 1, we train a
+mesh-based head model to obtain canonical head geometry. In Stage 2, we first
+reconstruct the canonical hairstyle using Im2Haircut [52] from all views and then
+we train the hair deformation and optimize the head and hair Gaussian primitives
+jointly. We train our full model for 320,000 iterations on a single A100, increasing
+the VGG perceptual loss weight for the last 80,000 iterations to enhance finegrained appearance details. In all experiments, we use a resolution 1024 × 1024,
+window history of 5 frames, 40 points per strand, and around 11,000 strands
+depending on hairstyle. See details in suppl. material.
+4.1
+Comparison and Results
+Baselines. To our knowledge, there is no publicly available method that learns
+hair dynamics from data for direct comparison. Therefore, we evaluate our ap-
+10
+V. Sklyarova et al.
+Input image
+Simulator
+GA [47]
+GHA [64]
+Ours
+Fig. 3: Self-reenactment comparison. Each row shows a different test frame or
+subject. Columns from left to right: ground-truth image, physics-based simulator from
+Maya [1], GaussianAvatars [47], Gaussian Head Avatar [64], and our method. Our approach produces sharper strand-level detail and more temporally coherent hair motion.
+proach against state-of-the-art multi-view dynamic head avatar methods, Gaussian Head Avatar [64] (GHA) and GaussianAvatars (GA) [47] as well as a physics
+simulator (Maya [1]) that computes hair dynamics via numerical integration of
+Newtonian forces. Since it outputs geometry only, we apply our estimated colors
+and drive Gaussians using the simulated motion.
+Qualitative evaluation. We compare with the baselines under both selfreenactment and cross-reenactment settings by evaluating appearance fidelity
+and motion realism in each scenario. Figure 3 shows self-reenactment results on
+held-out test sequences. Our method produces sharper hair details and more temporally coherent strand motion than baselines, which produce over-smoothed and
+flickering hair regions. The physics-based simulator deviates from the true hair
+motion due to manually obtained parameters and the bounded accuracy of the
+physical model. Moreover, directly attaching learned appearance to simulatordriven strand positions results in degraded rendering quality (see Figure 3, middle row). This further motivates our joint learning approach.
+Figure 4 presents cross-reenactment results, where the driving signal comes
+from a different subject. Our explicit strand-based representation, conditioned on
+relative motion, produces geometry-consistent hair animation for novel driving
+sequences, while baselines struggle to preserve identity and realistic dynamics.
+Quantitative evaluation. For quantitative comparison, we report pixel-aligned
+metrics (PSNR, SSIM) alongside perceptual LPIPS [68] and measure distribution realism (FID) [23]. We evaluate on both full images and the hair region,
+computed on a test set of three subjects. Our method achieves slightly lower
+Head Avatars with Dynamic Explicit Hair
+11
+Table 1: Quantitative comparison. Self-reenactment results averaged across test
+sets of 3 subjects. As pixel-wise alignment metrics are insufficient to fully capture hair
+motion quality, we additionally report tLP IP Sex as a dedicated temporal measure.
+tIoUgt
+hair is equal to 0.946, and tLP IP Sex should be close to 0.
+Full Image
+Method
+PSNR↑ SSIM↑ LPIPS↓
+GA [47]
+20.17 0.7787 0.2536
+GHA [64] 22.33 0.7925 0.2056
+19.39 0.6610 0.2465
+Maya*
+Ours
+21.60 0.7638 0.2010
+Hair Region
+Temporal Motion (×10−3 )
+FID↓ PSNR↑ SSIM↑ LPIPS↓ IoUhair ↑ tIoUhair ↑ FID↓ tLPIPSex vel.↑
+accel.↓
+45.73 19.94 0.7335 0.1362
+–
+–
+126.93 -0.0230 0.40
+0.08
+36.25 22.15 0.7446 0.1086
+–
+–
+81.07
+-0.0127 2.17
+0.24
+62.64 17.89 0.5182 0.1484
+0.776
+0.925
+121.97 0.0183
+2.38
+0.11
+30.06 21.01 0.6885 0.1101
+0.878
+0.936
+37.51
+0.0045
+2.41
+0.19
+PSNR and SSIM compared to GHA [64]. This behavior is expected: enforcing
+strand-level geometric consistency prevents the model from arbitrarily smoothing high-frequency structures. While this introduces small pixel-wise deviations
+that negatively affect reconstruction metrics, it better preserves fine strand-level
+details and overall geometric fidelity. The marginally higher hair LPIPS similarly
+reflects a fundamental metric mismatch, as LPIPS penalizes any deviation from
+a single GT strand configuration regardless of physical plausibility, and thus
+favors appearance memorization over dynamic correctness. As a method that
+explicitly models hair dynamics, ours generates temporally coherent, physically
+plausible motion rather than reproducing one specific GT realization. We show
+superior performance in terms of the FID metric, which measures perceptual
+realism and better reflects the goals of hair dynamics learning than pixel-aligned
+reconstruction scores. To measure temporal flickering, we compute tLPIPSex =
+\frac {1}{T-1}\sum _{t=1}^{T-1} \Big [ \,\mathrm {LPIPS}\!\left ( I_t \odot \hat {M}_t,\, I_{t+1} \odot \hat {M}_t \right ) \nonumber -\mathrm {LPIPS}\!\left ( \hat {I}_t \odot \hat {M}_t,\, \hat {I}_{t+1} \odot \hat {M}_t \right ) \Big ],
+where M̂t = clamp (Ĥt + Ĥt+1 , 0, 1). Here, It and Iˆt denote the predicted and
+ground-truth images at frame t, respectively, and Ĥt is the ground-truth hair
+segmentation mask at frame t. LPIPS between consecutive frames measures perceptual temporal variation. Subtracting the corresponding ground-truth temporal LPIPS isolates excess perceptual change introduced by the model, yielding
+a measure of temporal fidelity beyond natural motion. Values near zero indicate
+alignment with the ground truth, positive values indicate excess variation, and
+negative values indicate over-smoothing.
+Temporal evaluation highlights the benefit of explicit strand-based modeling. Baselines produce negative tLPIPSex , indicating over-smoothed, stiff motion, while our method better matches ground-truth hair dynamics. These results demonstrate a principled trade-off: unconstrained Gaussians optimize pixel
+alignment at the cost of sharp high-frequency detail and realistic temporal behavior, while our structured representation prioritizes geometric and temporal
+consistency, producing sharper and more dynamically faithful hair reconstructions while maintaining competitive global image quality.
+We also compute the non-rigid hair velocity and acceleration by unposing the
+head to a fixed canonical pose. Then, we define velocity as the mean nearest-
+12
+V. Sklyarova et al.
+Reference
+GHA [64]
+Simulator
+Ours
+Fig. 4: Cross-reenactment comparison. The 1st row shows left-right head rotation,
+while the second row corresponds to nodding. Our hairstyle better follows physics
+constraints and gravity. The image in the first column serves as a reference for human
+motion. While the hairstyle should follow general dynamics, it is not an exact match.
+neighbor displacement between consecutive hair point clouds in this head-local
+frame, and acceleration as its finite difference. For our method and simulator,
+we use the structured strand vertices; for baselines with unstructured Gaussians,
+we select those whose projections fall within the hair silhouette mask at the
+first frame and use the same fixed indices across all subsequent frames. Both
+representations are subsampled to the same point count for fair comparison. Our
+method produces higher hair velocity, indicating more expressive hair motion
+(see Tab. 1), compared to baselines with unstructured representation. The Maya
+simulator achieves lower acceleration, demonstrating more temporally coherent
+hair dynamics; however, there is increased error in IoUhair and tIoUhair .
+4.2
+Ablation Study
+Tab. 2 presents an ablation of our key design choices. Hair dynamics are evaluated using (1) image-space temporal metrics and (2) motion-based metrics,
+including velocity explosion ratio, curvature temporal smoothness, displacement
+spike, and drift.
+Visual metrics. For visual 2D metrics, we compute IoUhair , which measures
+the overlap between predicted and ground-truth hair silhouettes, and tIoUhair ,
+which measures temporal stability by computing the overlap between predicted
+hair masks in consecutive frames. The ground-truth tIoUhair averaged across all
+scenes is 0.951. We also include LPIPS in hair region and tLPIPSex .
+Physical realism. To evaluate the realism of hair dynamics beyond standard
+image-quality metrics, we introduce four motion-based metrics. Let ptij ∈ R3 be
+Head Avatars with Dynamic Explicit Hair
+13
+Fig. 5: We show more results on newly captured sequences with diverse hair motions.
+Notably, ours recovers per-strand temporal hair motion. We include an ablation without
+the non-rigid deformation module, where hair moves rigidly with the head transform.
+the position of the j-th point on the i-th strand at frame t, and ∆t the time
+step. Then velocity explosion ratio (VER) is defined as the ratio of maximum to
+median speed across all points and frames:
+\text {VER} = \frac {\max _{t,i,j} \|v_{ij}^t\|}{\operatorname {median}_{t,i,j} \|v_{ij}^t\| + \epsilon }, \quad v_{ij}^t = \frac {p_{ij}^{t+1} - p_{ij}^t}{\Delta t}.
+(16)
+We also include Curvature Temporal Smoothness (CTS), which quantifies
+temporal jitter in strand curvature by averaging the frame-to-frame change in
+curvature vectors across all frames, strands, and strand points. Lower values
+indicate smoother, more temporally consistent hair deformation.
+To detect sudden, physically implausible positional jumps, we introduce the
+Displacement Spike (P95-Disp) metric, which is defined as the 95th percentile
+of per-frame maximum strand displacements:
+\text {P95-Disp} = \operatorname {P}_{95}\!\left (\left \{\max _{i,j} \|p_{ij}^{t+1} - p_{ij}^t\|\right \}_{t=1}^{T-1}\right ).
+(17)
+Finally, Angular Momentum Drift (AMD) measures violations of angular momentum conservation. In an isolated system, angular momentum should remain
+constant over time:
+\text {AMD} = \frac {1}{T-1}\sum _{t=1}^{T-1}\|L^t - L^1\|, \quad L^t = \sum _{i,j} \left (p_{ij}^t - \bar {p}^t\right ) \times v_{ij}^t,
+(18)
+14
+V. Sklyarova et al.
+Reconstructed hairstyle
+Brightness↑
+Brightness ↓Brightness ↓ + trim (20 %)
+Fig. 6: Hairstyle manipulation. The reconstructed dynamic hairstyle can be further
+manipulated by changing the brightness of Gaussians or trimming them.
+Table 2: Quantitative comparison on physical realism of hair motion. Results are averaged across 2 scenes and 3 motion types, estimated at the same number of iterations.
+Silhouette & Appearance
+Physics
+IoUhair ↑ tIoUhair ↑ LPIPShair ↓ tLPIPSex VER↓ P95↓ CTS↓ AMD↓
+Ours
+0.883
+0.945
+0.101
+0.0024
+26.88 0.071 0.00022 7787
+Maya (Reference)
+0.789
+0.941
+0.131
+0.0080
+33.73 0.057 0.00010 7120
+w/ pose
+0.885
+0.945
+0.101
+0.0028
+36.27 0.071 0.00019 7816
+0.878
+0.944
+0.101
+0.0026
+29.05 0.077 0.00021 8332
+w/o acc.
+w/o g
+0.852
+0.932
+0.104
+0.0058
+23.13 0.070 0.00022 8159
+w/o Lelastic
+0.873
+0.943
+0.103
+0.0047
+283.75 1.159 0.00156 196993
+0.877
+0.945
+0.102
+0.0009
+40.46 0.104 0.00038 8277
+w/o film
+w/ mlp enc.
+0.879
+0.949
+0.102
+-0.0010
+32.18 0.065 0.00020 7377
+Method
+P
+where p̄t = N1M i,j ptij is the center of mass. For all metrics, lower values
+indicate more physically plausible motion.
+In Tab. 2, we compute all metrics for the same number of iterations (240k),
+averaged across 2 scenes with 3 motion types: nodding, left-right motion, and
+head rotation. Maya-simulated strands are included for reference. While Maya
+simulations expectedly produce better physics metrics (except VER), we observe
+degradation in coverage metrics due to suboptimal parameters. We study the effect of each conditioning signal in the hair deformation model. Conditioning on
+absolute pose worsens generalization, while removing gravity prevents strands
+from falling properly (e.g., during nodding). Removing acceleration (“w/o acc”)
+slightly degrades the metrics and reduces motion expressiveness. We find that
+the deformation model plays a crucial role. Without it, hair motion appears rigid
+and unrealistic (see “Rigid Hair” vs. “Dynamic Hair” in Fig. 5). Replacing the
+LSTM head pose encoder with an MLP results in stiffer motion (see negative
+tLPIPSex ). Modulating strand features with head pose features improves performance across all metrics (compare ours with “w/o film”). Removing Lelastic
+significantly degrades results. Strands tend to stretch, reducing physical plausibility. See more ablations in suppl. material.
+5
+Discussion
+Applications. Disentangled modeling of head and hairstyle provides rich possibilities for direct hair manipulation. For example, we can edit the brightness
+of Gaussians or trim the hairstyle length while preserving realistic hair motion
+Head Avatars with Dynamic Explicit Hair
+15
+dynamics (see Fig. 6). Furthermore, the explicit strand-based representation allows us to derive physically meaningful motion signals from the reconstructed
+hair geometry, see Fig. 5, which can be used for transfer applications.
+Limitations. Our method models only hair–head interactions; hair–body collisions are handled implicitly through data-driven priors and are not explicitly
+resolved. The approach depends on hair silhouette estimates from pre-trained
+segmentation models, which can be inaccurate for complex hairstyles or under
+occlusion. We also observe that rendering quality at hair–head boundaries can
+exhibit artifacts due to the discrete transition between the two Gaussian representations. Additionally, reliance on the landmark detector and tracker can lead
+to incorrect reconstructions when hair occludes the face. Our formulation provides a foundation for future large-scale learning of dynamic hair, where richer
+datasets and explicit collision modeling can be naturally integrated.
+Conclusion. In this work, we presented a novel dynamic head avatar framework with explicit strand-based hair, learned end-to-end from multi-view video.
+Our method represents hair as strand-aligned 3D Gaussians whose deformations are predicted by a temporal motion model conditioned on head angular
+velocity, acceleration, and relative gravity. By combining an LSTM head pose
+encoder with FiLM modulation and physics-based regularization, the approach
+produces temporally coherent hair dynamics with strand-level geometric fidelity.
+Experiments demonstrate high visual quality and improved motion plausibility
+compared with state-of-the-art head avatar methods, both quantitatively and
+qualitatively. We believe that explicitly modeling hair structure and dynamics
+within a unified Gaussian avatar framework is a step toward more realistic and
+controllable digital humans.
+6
+Acknowledgements
+Vanessa Sklyarova is supported by the Max Planck ETH Center for Learning Systems. Justus Thies is supported by the ERC Starting Grant 101162081 “LeMo”
+and the DFG Excellence Strategy - EXC-3057. This work is supported by the
+ERC Consolidator Grant Gen3D (101171131). Berna Kabadayi is supported by
+the IMPRS-IS. Gerard Pons-Moll is a member of the ML Cluster of Excellence, EXC-2064/1 – Project No. 390727645, and is endowed by the Carl Zeiss
+Foundation. This work is supported by the BMBF: Tübingen AI Center, FKZ:
+01IS18039A, and by the DFG – 409792180. This work is supported by the Swiss
+National Science Foundation Advanced Grant 216260: “Beyond Frozen Worlds:
+Capturing Functional 3D Digital Twins from the Real World.”
+The authors would like to thank Zhanfeng Liao for providing data from
+HHAvatar, Egor Zakharov for supervising Haonan during his time at ETH, and
+Benjamin Pellkofer for IT support.
+Disclosure. While MJB is employed by Epic Games, this work was performed
+solely at, and funded solely by, the Max Planck Society.
+16
+V. Sklyarova et al.
+References
+1. Autodesk, INC. maya. Maya, accessed: 2025-10-10
+2. Epic Games unreal engine. Unreal Engine, accessed: 2025-10-10
+3. Aneja, S., Sevastopolsky, A., Kirschstein, T., Thies, J., Dai, A., Nießner, M.: Gaussianspeech: Audio-driven personalized 3d gaussian avatars. In: Proceedings of the
+IEEE/CVF International Conference on Computer Vision (ICCV). pp. 13065–
+13075 (October 2025)
+4. Ben Ayed, F., Becherini, G., Thies, J., Sklyarova, V.: Vid2Haircut: 3D StrandBased Hairstyle Reconstruction from Video. In: Musialski, P., Lim, I. (eds.) Eurographics 2026 - Short Papers. The Eurographics Association (2026)
+5. Bertails, F., Audoly, B., Cani, M.P., Querleux, B., Leroy, F., Lévêque, J.L.: Superhelices for predicting the dynamics of natural hair. Transactions on Graphics,
+(Proc. SIGGRAPH) 25(3), 1180–1187 (2006)
+6. Blanz, V., Basso, C., Poggio, T., Vetter, T.: Reanimating faces in images and video.
+In: Computer graphics forum. vol. 22, pp. 641–650. Wiley Online Library (2003)
+7. Bouaziz, S., Wang, Y., Pauly, M.: Online modeling for realtime facial animation
+32(4) (Jul 2013)
+8. Chen, X., Zheng, Y., Black, M.J., Hilliges, O., Geiger, A.: SNARF: Differentiable
+forward skinning for animating non-rigid neural implicit shapes. In: International
+Conference on Computer Vision (ICCV) (2021)
+9. Chen, Y., Wang, L., Li, Q., Xiao, H., Zhang, S., Yao, H., Liu, Y.: Monogaussianavatar: Monocular gaussian point-based head avatar. In: SIGGRAPH Conference
+Papers (SA). pp. 1–9 (2024)
+10. Chu, X., Harada, T.: Generalizable and animatable gaussian head avatar. In: The
+Thirty-eighth Annual Conference on Neural Information Processing Systems (2024)
+11. Community, B.O.: Blender - a 3d modelling and rendering package (2018)
+12. Daněček, R., Schmitt, C., Polikovsky, S., Black, M.J.: Supervising 3D talking head
+avatars with analysis-by-audio-synthesis. In: International Conference on 3D Vision
+(3DV) (2026)
+13. Daviet, G.: Interactive hair simulation on the gpu using admm. In: SIGGRAPH
+Conference Papers (SA). SIGGRAPH ’23, Association for Computing Machinery,
+New York, NY, USA (2023)
+14. Feng, Y., Liu, W., Bolkart, T., Yang, J., Pollefeys, M., Black, M.J.: Learning disentangled avatars with hybrid 3d representations. arXiv preprint arXiv:2309.06441
+(2023)
+15. Gafni, G., Thies, J., Zollhofer, M., Nießner, M.: Dynamic neural radiance fields
+for monocular 4d facial avatar reconstruction. In: Conference on Computer Vision
+and Pattern Recognition (CVPR). pp. 8649–8658 (2021)
+16. Gao, X., Zhong, C., Xiang, J., Hong, Y., Guo, Y., Zhang, J.: Reconstructing personalized semantic facial nerf models from monocular video. ACM Transactions on
+Graphics (TOG) 41(6), 1–12 (2022)
+17. Garbin, S.J., Kowalski, M., Estellers, V., Szymanowicz, S., Rezaeifar, S., Shen, J.,
+Johnson, M.A., Valentin, J.: Voltemorph: Real-time, controllable and generalizable
+animation of volumetric representations. In: Computer graphics forum. vol. 43, p.
+e15117. Wiley Online Library (2024)
+18. Giebenhain, S., Kirschstein, T., Rünz, M., Agapito, L., Nießner, M.: Npga: Neural
+parametric gaussian avatars. In: SIGGRAPH Asia 2024 Conference Papers. pp.
+1–11 (2024)
+Head Avatars with Dynamic Explicit Hair
+17
+19. Grassal, P.W., Prinzler, M., Leistner, T., Rother, C., Nießner, M., Thies, J.: Neural head avatars from monocular rgb videos. In: Proceedings of the IEEE/CVF
+conference on computer vision and pattern recognition. pp. 18653–18664 (2022)
+20. He, C., Amador Herrera, J.A., Zhou, Y., Shu, Z., Sun, X., Feng, Y., Pirk, S.,
+Michels, D.L., Zhang, M., Wang, T.Y., Rushmeier, H.: Digital salon: An ai and
+physics-driven tool for 3d hair grooming and simulation. In: SIGGRAPH Asia 2024
+Real-Time Live! SA Real-Time Live! ’24 (2024)
+21. He, C., Sun, X., Shu, Z., Luan, F., Pirk, S., Herrera, J.A.A., Michels, D.L., Wang,
+T.Y., Zhang, M., Rushmeier, H., Zhou, Y.: Perm: A parametric representation for
+multi-style 3d hair modeling. In: International Conference on Learning Representations (ICLR) (2025)
+22. Herrera, J.A.A., Zhou, Y., Sun, X., Shu, Z., He, C., Pirk, S., Michels, D.L.: Augmented mass-spring model for real-time dense hair simulation. In: International
+Conference on Computer Vision (ICCV) (2024)
+23. Heusel, M., Ramsauer, H., Unterthiner, T., Nessler, B., Hochreiter, S.: Gans trained
+by a two time-scale update rule converge to a local nash equilibrium (2018)
+24. Hong, Y., Peng, B., Xiao, H., Liu, L., Zhang, J.: Headnerf: A real-time nerf-based
+parametric head model. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition. pp. 20374–20384 (2022)
+25. Huang, L., Yang, F., Wei, C., Chen, Y.J.E., Yuan, C., Gao, M.: Towards realtime:
+A hybrid physics-based method for hair animation on gpu. Computer Graphics
+and Interactive Techniques (PACMCGIT) 6(3) (2023)
+26. Iandola, F., Pidhorskyi, S., Santesteban, I., Gupta, D., Pahuja, A., Bartolovic, N.,
+Yu, F., Garbin, E., Simon, T., Saito, S.: SqueezeMe: Mobile-ready distillation of
+gaussian full-body avatars. In: SIGGRAPH. ACM (2025)
+27. Ichim, A.E., Bouaziz, S., Pauly, M.: Dynamic 3d avatar creation from hand-held
+video input. ACM Trans. Graph. 34(4) (Jul 2015)
+28. Kabadayi, B., Sklyarova, V., Zielonka, W., Thies, J., Pons-Moll, G.: PhysHead:
+Simulation-ready gaussian head avatars. In: Proc. IEEE/CVF Conf. on Computer
+Vision and Pattern Recognition (CVPR) (June 2026)
+29. Kabadayi, B., Zielonka, W., Bhatnagar, B.L., Pons-Moll, G., Thies, J.: Gan-avatar:
+Controllable personalized gan-based human head avatar. In: International Conference on 3D Vision (3DV) (March 2024)
+30. Ke, Z., Sun, J., Li, K., Yan, Q., Lau, R.W.: Modnet: Real-time trimap-free portrait
+matting via objective decomposition. In: AAAI (2022)
+31. Kerbl, B., Kopanas, G., Leimkühler, T., Drettakis, G.: 3d gaussian splatting for
+real-time radiance field rendering. Transactions on Graphics, (Proc. SIGGRAPH)
+42(4), 139–1 (2023)
+32. Kirschstein, T., Qian, S., Giebenhain, S., Walter, T., Nießner, M.: Nersemble:
+Multi-view radiance field reconstruction of human heads. ACM Transactions on
+Graphics (TOG) 42(4), 1–14 (2023)
+33. Kirschstein, T., Romero, J., Sevastopolsky, A., Nießner, M., Saito, S.: Avat3r: Large
+animatable gaussian reconstruction model for high-fidelity 3d head avatars. In:
+Proceedings of the IEEE/CVF International Conference on Computer Vision. pp.
+12089–12100 (2025)
+34. Li, T., Bolkart, T., Black, M.J., Li, H., Romero, J.: Learning a model of facial shape
+and expression from 4d scans. Transactions on Graphics, (Proc. SIGGRAPH Asia)
+36(6), 194–1 (2017)
+35. Liao, Z., Tu, H., Peng, C., Zhang, H., Zhou, B., Liu, Y.: Hades: Human avatar
+with dynamic explicit hair strands. In: Proceedings of the IEEE/CVF International
+Conference on Computer Vision (ICCV) (October 2025)
+18
+V. Sklyarova et al.
+36. Liao, Z., Xu, Y., Li, Z., Li, Q., Zhou, B., Bai, R., Xu, D., Zhang, H., Liu, Y.: Hhavatar: Gaussian head avatar with dynamic hairs. Transactions on Pattern Analysis
+and Machine Intelligence (TPAMI) PP (2025)
+37. Liu, K., Choi, O., Wang, J., Hwang, W.: Cdgnet: Class distribution guided network
+for human parsing. In: Proceedings of the IEEE/CVF Conference on Computer
+Vision and Pattern Recognition (CVPR). pp. 4473–4482 (June 2022)
+38. Lombardi, S., Simon, T., Schwartz, G., Zollhoefer, M., Sheikh, Y., Saragih, J.:
+Mixture of volumetric primitives for efficient neural rendering. Transactions on
+Graphics, (Proc. SIGGRAPH) 40(4) (2021)
+39. Luo, H., Ouyang, M., Zhao, Z., Jiang, S., Zhang, L., Zhang, Q., Yang, W., Xu,
+L., Yu, J.: GaussianHair: Hair modeling and rendering with light-aware gaussians.
+arXiv (2024)
+40. Mescheder, L., Oechsle, M., Niemeyer, M., Nowozin, S., Geiger, A.: Occupancy
+networks: Learning 3d reconstruction in function space. In: Proceedings of the
+IEEE/CVF conference on computer vision and pattern recognition. pp. 4460–4470
+(2019)
+41. Mildenhall, B., Srinivasan, P.P., Tancik, M., Barron, J.T., Ramamoorthi, R., Ng,
+R.: Nerf: Representing scenes as neural radiance fields for view synthesis. In: European Conference on Computer Vision (ECCV). Springer (2020)
+42. Nehvi, J., Kabadayi, B., Valentin, J., Thies, J.: Volumetric portrait avatar. In:
+DAGM German Conference on Pattern Recognition. pp. 3–19. Springer (2024)
+43. Park, K., Sinha, U., Barron, J.T., Bouaziz, S., Goldman, D.B., Seitz, S.M., MartinBrualla, R.: Nerfies: Deformable neural radiance fields. In: Proceedings of the
+IEEE/CVF international conference on computer vision. pp. 5865–5874 (2021)
+44. Park, K., Sinha, U., Hedman, P., Barron, J.T., Bouaziz, S., Goldman, D.B., MartinBrualla, R., Seitz, S.M.: Hypernerf: A higher-dimensional representation for topologically varying neural radiance fields. ACM Trans. Graph. 40(6) (dec 2021)
+45. Paysan, P., Knothe, R., Amberg, B., Romdhani, S., Vetter, T.: A 3d face model
+for pose and illumination invariant face recognition. In: 2009 sixth IEEE international conference on advanced video and signal based surveillance. pp. 296–301.
+Ieee (2009)
+46. Perez, E., Strub, F., de Vries, H., Dumoulin, V., Courville, A.C.: Film: Visual
+reasoning with a general conditioning layer. In: AAAI (2018)
+47. Qian, S., Kirschstein, T., Schoneveld, L., Davoli, D., Giebenhain, S., Nießner, M.:
+Gaussianavatars: Photorealistic head avatars with rigged 3d gaussians. In: Conference on Computer Vision and Pattern Recognition (CVPR). pp. 20299–20309
+(2024)
+48. Rosu, R.A., Wu, K., Feng, Y., Zheng, Y., Black, M.J.: DiffLocks: Generating 3d
+hair from a single image using diffusion models. In: Conference on Computer Vision
+and Pattern Recognition (CVPR) (2025)
+49. Saito, S., Schwartz, G., Simon, T., Li, J., Nam, G.: Relightable gaussian codec
+avatars. In: Proceedings of the IEEE/CVF conference on computer vision and
+pattern recognition. pp. 130–141 (2024)
+50. Shao, Z., Wang, Z., Li, Z., Wang, D., Lin, X., Zhang, Y., Fan, M., Wang, Z.:
+Splattingavatar: Realistic real-time human avatars with mesh-embedded gaussian
+splatting. In: Conference on Computer Vision and Pattern Recognition (CVPR).
+pp. 1606–1616 (2024)
+51. Sklyarova, V., Chelishev, J., Dogaru, A., Medvedev, I., Lempitsky, V., Zakharov,
+E.: Neural haircut: Prior-guided strand-based hair reconstruction. 2023 IEEE/CVF
+International Conference on Computer Vision (ICCV) pp. 19705–19716 (2023)
+Head Avatars with Dynamic Explicit Hair
+19
+52. Sklyarova, V., Zakharov, E., Prinzler, M., Becherini, G., Black, M., Thies, J.:
+Im2haircut: Single-view strand-based hair reconstruction for human avatars. In:
+International Conference on Computer Vision (ICCV) (2025)
+53. Stuyck, T., Lin, G.W.C., Larionov, E., Chen, H.y., Bozic, A., Sarafianos, N., Roble,
+D.: Quaffure: Real-time quasi-static neural hair simulation. In: Conference on Computer Vision and Pattern Recognition (CVPR) (2024)
+54. Teotia, K., Rhodin, H., Mendiratta, M., Kim, H., Habermann, M., Theobalt, C.:
+Audio driven universal gaussian head avatars. In: Proceedings of the SIGGRAPH
+Asia 2025 Conference Papers. SA Conference Papers ’25, Association for Computing Machinery, New York, NY, USA (2025)
+55. Thambiraja, B., Prinzler, M., Aliakbarian, S., Cosker, D., Thies, J.: 3diFACE:
+Synthesizing and editing holistic 3d facial animation. In: International Conference
+on 3D Vision 2025 (2025)
+56. Wang, C., Kang, D., Sun, H., Qian, S., Wang, Z., Bao, L., Zhang, S.H.: Mega:
+Hybrid mesh-gaussian head avatar for high-fidelity rendering and head editing.
+In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern
+Recognition (CVPR). pp. 26274–26284 (June 2025)
+57. Wang, J., Xie, J.C., Li, X., Xu, F., Pun, C.M., Gao, H.: Gaussianhead: Highfidelity head avatars with learnable gaussian derivation. IEEE Transactions on
+Visualization and Computer Graphics (2025)
+58. Wang, J., Xu, Y., Tretschk, E., Wang, Z., Ianina, A., Bozic, A., Neumann, U., Tung,
+T.: Dgh: Dynamic gaussian hair. In: Advances in Neural Information Processing
+Systems (NeurIPS) (2025)
+59. Wang, Z., Nam, G., Stuyck, T., Lombardi, S., Cao, C., Saragih, J., Zollhoefer, M.,
+Hodgins, J., Lassner, C.: Neuwigs: A neural dynamic model for volumetric hair capture and animation. In: Conference on Computer Vision and Pattern Recognition
+(CVPR) (2023)
+60. Wang, Z., Nam, G., Stuyck, T., Lombardi, S., Zollhoefer, M., Hodgins, J., Lassner,
+C.: Hvh: Learning a hybrid neural volumetric representation for dynamic hair
+performance capture. In: Conference on Computer Vision and Pattern Recognition
+(CVPR) (2022)
+61. Weise, T., Bouaziz, S., Li, H., Pauly, M.: Realtime performance-based facial animation. ACM transactions on graphics (TOG) 30(4), 1–10 (2011)
+62. Wu, K., Yang, L., Kuang, Z., Feng, Y., Han, X., Shen, Y., Fu, H., Zhou, K., Zheng,
+Y.: Monohair: High-fidelity hair modeling from a monocular video. In: Conference
+on Computer Vision and Pattern Recognition (CVPR) (2024)
+63. Xiang, J., Gao, X., Guo, Y., Zhang, J.: Flashavatar: High-fidelity head avatar
+with efficient gaussian embedding. In: Conference on Computer Vision and Pattern
+Recognition (CVPR). pp. 1802–1812 (2024)
+64. Xu, Y., Chen, B., Li, Z., Zhang, H., Wang, L., Zheng, Z., Liu, Y.: Gaussian head
+avatar: Ultra high-fidelity head avatar via dynamic gaussians. In: Conference on
+Computer Vision and Pattern Recognition (CVPR). pp. 1931–1941 (2024)
+65. Yang, L., Shi, Z., Zheng, Y., Zhou, K.: Dynamic hair modeling from monocular
+videos using deep neural networks. Transactions on Graphics, (Proc. SIGGRAPH)
+38(6) (2019)
+66. Yariv, L., Gu, J., Kasten, Y., Lipman, Y.: Volume rendering of neural implicit
+surfaces. In: Thirty-Fifth Conference on Neural Information Processing Systems
+(2021)
+67. Zakharov, E., Sklyarova, V., Black, M.J., Nam, G., Thies, J., Hilliges, O.: Human
+hair reconstruction with strand-aligned 3d gaussians. In: European Conference of
+Computer Vision (ECCV) (2024)
+20
+V. Sklyarova et al.
+68. Zhang, R., Isola, P., Efros, A.A., Shechtman, E., Wang, O.: The unreasonable
+effectiveness of deep features as a perceptual metric. In: Proceedings of the IEEE
+conference on computer vision and pattern recognition. pp. 586–595 (2018)
+69. Zheng, Y., Abrevaya, V.F., Bühler, M.C., Chen, X., Black, M.J., Hilliges, O.: Im
+avatar: Implicit morphable head avatars from videos. In: Conference on Computer
+Vision and Pattern Recognition (CVPR). pp. 13545–13555 (2022)
+70. Zhou, Y., Chai, M., Pepe, A., Gross, M., Beeler, T.: Groomgen: A high-quality
+generative hair model using hierarchical latent representations. Transactions on
+Graphics, (Proc. SIGGRAPH) (2023)
+71. Zhou, Y., Chai, M., Wang, D., Winberg, S., Wood, E., Sarkar, K., Gross, M.,
+Beeler, T.: Groomcap: High-fidelity prior-free hair capture. Transactions on Graphics, (Proc. SIGGRAPH) (2024)
+72. Zielonka, W., Bolkart, T., Beeler, T., Thies, J.: Gaussian eigen models for human
+heads. In: CVPR (June 2025)
+73. Zielonka, W., Bolkart, T., Thies, J.: Instant volumetric head avatars. In: Proceedings of the IEEE/CVF conference on computer vision and pattern recognition. pp.
+4574–4584 (2023)
+74. Zielonka, W., Garbin, S.J., Lattas, A., Kopanas, G., Gotardo, P., Beeler, T., Thies,
+J., Bolkart, T.: Synthetic prior for few-shot drivable head avatar inversion. In: Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) (June 2025)
+75. Zielonka, W., Kirschstein, T., Bolkart, T., Giebenhain, S., Sklyarova, V., Deng, X.,
+Xiang, D., Saito, S., Liu, Y., Nießner, M., Thies, J.: How to build digital humans?
+from priors to photorealistic avatars. Computer Graphics Forum (Eurographics
+State-of-the-Art Report) 45(2) (2026)
+Head Avatars with Dynamic Explicit Hair
+A
+Background
+A.1
+Dynamic Head Avatar
+21
+We model the expression- and pose-dependent head and upper body following
+the GHA method [64]. Specifically, we adopt a geometry-guided initialization
+strategy based on an implicit SDF and Deep Marching Tetrahedra to initialize
+the canonical representation of 3D Gaussians with dynamic network weights,
+which improves the stability and convergence of training. During each iteration,
+three pairs of specialized MLPs predict position displacement, appearance, and
+Gaussian attributes. For each pair of MLPs, the individual predictions conditioned on pose parameters and expression parameters are subsequently fused
+using spatially-varying blending weights wkexp , wkpose , which are computed based
+on the proximity of each point to 3D facial landmarks. Those predictions are
+used to further refine the canonical state for the non-rigid deformed Gaussian
+representation. Finally, a global rigid transformation is applied to project the
+deformed Gaussians into the world coordinate system.
+Canonical representation of the head. Following [64], we first train a meshbased head model that learns neural geometry and appearance fields on a tetrahedral grid conditioned on BFM [45] parameters. From the converged mesh head
+model, we extract a canonical set of K 3D Gaussian primitives. Each primitive
+is parameterized by its position xk ∈ R3 , a learned feature vector fk ∈ R128 ,
+log-scale sk ∈ R3 , rotation quaternion qk ∈ R4 , and logit-opacity ok ∈ R. To
+improve mouth interior quality, we augment the canonical set with additional
+Gaussians that are randomly sampled around mouth landmarks.
+Deformation module. Two separate MLPs predict per-point displacements
+driven by facial expression and head pose for each Gaussian primitive. Specifexp
+ically, the expression deformation MLP fdef
+takes as input the positional encoding γ(·) of canonical coordinates concatenated with the expression coefficient
+vector e ∈ R64 :
+\Delta \mathbf {x}^\text {exp}_k = f^\text {exp}_\text {def} \!\left ( \gamma (\mathbf {x}_k), \mathbf {e} \right ).
+(19)
+pose
+Similarly, the pose deformation MLP fdef
+takes as input canonical coordinates
+6
+and the pose p ∈ R (global translation and rotation):
+\Delta \mathbf {x}^\text {pose}_k = f^\text {pose}_\text {def} \!\left ( \gamma (\mathbf {x}_k), \gamma (\mathbf {p}) \right ).
+(20)
+The two deformations are fused using spatially varying weights determined by
+proximity to 3D facial landmarks. Let dk be the distance from the point k to its
+nearest landmark. We define blending weights as:
+w^\text {exp}_k = \mathrm {clamp}\!\left (\frac {d_\text {far} - d_k}{d_\text {far} - d_\text {near}},\, 0,\, 1\right ), \quad w^\text {pose}_k = 1 - w^\text {exp}_k,
+(21)
+where dnear and dfar define a transition region. Points near landmarks (small dk )
+are primarily expression-driven, while distant points follow the global head pose.
+22
+V. Sklyarova et al.
+The final deformed position is given by:
+\mathbf {x}'_k = \mathbf {x}_k + \alpha \!\left (w^\text {exp}_k \cdot \Delta \mathbf {x}^\text {exp}_k + w^\text {pose}_k \cdot \Delta \mathbf {x}^\text {pose}_k\right ),
+(22)
+where α is a predefined deformation scale factor that prevents large displacements.
+Appearance and attributes. Two additional pairs of MLPs take per-point
+learned features fk as inputs and predict per-point appearance and Gaussian
+attribute offsets. The color MLPs take (fk , e) and (fk , γ(p)) as inputs for the
+expression- and pose-conditioned branches, respectively, producing 32-channel
+color features cexp
+and cpose
+that are blended with the same landmark-based
+k
+k
+exp
+pose
+weights wk , wk . The final color c′k is obtained by:
+\mathbf {c}'_k = w^\text {exp}_k \cdot \mathbf {c}^{exp}_k + w^\text {pose}_k \cdot \mathbf {c}^{pose}_k .
+(23)
+The attribute MLPs share the same inputs and predict 8-dimensional offsets
+δk = [δsk , δqk , δok ] (3 for scale, 4 for rotation, 1 for opacity), also blended via
+landmark weights. The final Gaussian attributes are obtained by applying the
+scaled offsets to the canonical values:
+\mathbf {s}'_k = \exp \!\left (\mathbf {s}_k + \beta \, \delta \mathbf {s}_k\right ), \quad \mathbf {q}'_k = \mathrm {normalize}\!\left (\mathbf {q}_k + \beta \, \delta \mathbf {q}_k\right ), \quad o'_k = \sigma \!\left (o_k + \beta \, \delta o_k\right ),
+(24)
+where β is an attribute scale factor and σ denotes the sigmoid function. Lastly,
+all head Gaussians are transformed to world coordinates using the global rigid
+pose.
+A.2
+Gaussian Splatting for hair rasterization
+To use 3D Gaussian Splatting for soft-rasterization of hair, we force Gaussians
+to lie on line segments. The mean of each
+ Gaussian is attached to the middle of
+each line segment µij = 12 pij + pi,j+1 . The generated Gaussians have a scaling
+vector sij that is set to be proportional to the length of the strand, while the
+other scales are set to small values ϵ: sij = { 21 ∥pij+1 − pi,j ∥2 , ϵ, ϵ}, where the
+rotation quaternion for the x-axis is aligned with the segment direction dij . All
+opacity values for the hair Gaussians are set to 1.
+B
+Training details
+In this section, we provide additional details on data preprocessing, optimization,
+datasets, and compute used for training and inference.
+B.1
+Optimization details
+Canonical initialization. For the body, we use the geometry-guided initialization strategy from Gaussian Head Avatar [64] with default weights and apply it
+to all timesteps.
+Head Avatars with Dynamic Explicit Hair
+23
+To obtain the canonical hairstyle, we incorporate the single-view
+Im2Haircut [52] prior and optimize it across all available views. To improve
+the scalp region for strand growth, we discard strand roots outside the hair silhouette. The static reconstruction loss consists of photometric, geometric, and
+regularization terms:
+\begin {split} \mathcal {L}_\text {static} = {} & \lambda _\text {rgb}\mathcal {L}_\text {rgb} + \lambda _\text {ssim}\mathcal {L}_\text {ssim} + \lambda _\text {vgg}\mathcal {L}_\text {vgg} \\ & + \lambda _\text {seg}\mathcal {L}_\text {seg} + \lambda _\text {orient}\mathcal {L}_\text {orient} + \lambda _\text {pen}\mathcal {L}_\text {pen} \\ & + \lambda _\text {shape}\mathcal {L}_\text {shape} + \lambda _\text {smooth}\mathcal {L}_\text {smooth} + \lambda _\text {length}\mathcal {L}_\text {length} + \lambda _\text {pca}\mathcal {L}_\text {pca} , \end {split}
+(25)
+ˆ I) is the structural
+where Lrgb is the L1 photometric loss, Lssim = 1 − SSIM(I,
+similarity loss, and Lvgg is the LPIPS perceptual loss. Lseg supervises the rendered hair silhouette using an asymmetric recall loss with exponential decay during training. Lorient matches predicted hair strand orientations to ground truth
+orientation maps using a circular distance formulation. Lpen prevents strand–
+head penetration by penalizing the distance from strand points detected inside the FLAME mesh to its surface. To further increase smoothness due to
+sparse views with limited coverage, we introduce spatial regularization losses.
+Let Si = {pi1 , . . . , piL } denote strand i with L points, and let Nk (i) denote its
+k nearest neighbors based on root position (k=4).
+Shape consistency. Lshape penalizes curvature signature differences between
+neighboring strands. We first compute a per-strand curvature descriptor as the
+sequence of bending angles between consecutive edges:
+\kappa _{im} = \arccos \left (\frac {(p_{i,m+1} - p_{i,m}) \cdot (p_{i,m+2} - p_{i,m+1})}{\|p_{i,m+1} - p_{i,m}\| \, \|p_{i,m+2} - p_{i,m+1}\|}\right ),
+(26)
+yielding a descriptor κi = (κi1 , . . . , κi,L−2 ) per strand. The loss is:
+\mathcal {L}_\text {shape} = \frac {1}{Nk} \sum _{i=1}^{N} \sum _{j \in \mathcal {N}_k(i)} \|\boldsymbol {\kappa }_i - \boldsymbol {\kappa }_j\|^2 .
+(27)
+Strand smoothness. Lsmooth encourages neighboring strands to have similar
+shapes by comparing root-normalized geometry:
+\mathcal {L}_\text {smooth} = \frac {1}{Nk} \sum _{i=1}^{N} \sum _{j \in \mathcal {N}_k(i)} \sum _{l=1}^{L} \|(p_{il} - p_{i1}) - (p_{jl} - p_{j1})\|^2 .
+(28)
+Length smoothness. Llength enforces similar total arc lengths among neighboring
+PL−1
+strands. Denoting the total length of strand i as ℓi = m=1 ∥pi,m+1 − pi,m ∥:
+\mathcal {L}_\text {length} = \frac {1}{Nk} \sum _{i=1}^{N} \sum _{j \in \mathcal {N}_k(i)} (\ell _i - \ell _j)^2 .
+(29)
+24
+V. Sklyarova et al.
+PCA consistency. Lpca regularizes strands on the back of the head (which receive
+less multi-view coverage) by matching their PCA coefficient distribution to that
+of front-view strands. Let µf , σ f and µb , σ b denote the per-component mean and
+variance of PCA coefficients for front and back strands, respectively. The loss
+applies an exponentially decaying weight wd = exp(−0.05 d) over PCA dimension
+d:
+\mathcal {L}_\text {pca} = \frac {1}{D}\sum _{d=1}^{D} w_d \left (|\mu ^f_d - \mu ^b_d| + \tfrac {1}{2}|\sigma ^f_d - \sigma ^b_d|\right ) .
+(30)
+The loss weights are set as follows: λrgb =0.2, λssim =0.02, λvgg =0.01, λseg =1.0,
+λorient =0.5, λpen =20.0, λshape =λsmooth =λlength =0.001, and λpca =0.0001. The
+prior learning rates are set to 10−5 for both the coarse and fine models. We
+optimize for 1200 iterations with 4 views for HHAvatar [36] scenes and for 5000
+iterations for our captured scenes, which have static 360◦ coverage. This yields
+the canonical hairstyle H0 used as input for the dynamic stage. The obtained
+hair strands have 200 points.
+Dynamic training stage. At the beginning of the dynamic stage, we resample
+the hairstyle to ensure that each strand contains 40 points. Since predicting
+shifts for each strand point introduces high degrees of freedom that can lead to
+spikes and zigzag artifacts, we apply strand smoothing for interior points using
+a 1D averaging filter on each strand at every iteration. Specifically, each interior
+point is replaced by the average of itself and its two neighbors along the strand.
+This acts as a spatial low-pass filter along the strand curve, ensuring that the
+deformed hair strands remain smooth polylines rather than exhibiting jagged
+kinks. The operation is lightweight (a single pass with a 3-point average) and
+fully differentiable, so gradients flow through it during training.
+We optimize the dynamic model for 320,000 iterations. The loss weights
+are set as follows: λrgb =2.0, λssim =0.2, λvgg =0.1, λseg =10.0 (with exponential
+decay), λorient =1.0, λpenetr =1.0, λelastic =500.0, and λcg =λcs =λcc =0.01 for the
+three color regularization terms. We increase the VGG weight to λvgg =0.6 for
+the last 80,000 iterations to enhance the appearance.
+For hair rasterization, we represent appearance using spherical harmonics of
+degree 3 (SH=3) and fix the opacity to 1.
+B.2
+Data preprocessing
+Head tracking: To obtain consistent head tracking from multi-view images, we
+use a BFM-based [45] multi-view 3DMM fitting method∗∗ . The tracker estimates identity, expression, and pose parameters of the face by fitting the Basel
+Face Model to all views simultaneously, producing temporally and geometrically
+consistent face alignment across cameras.
+∗∗ https://github.com/YuelangX/Multiview-3DMM-Fitting
+Head Avatars with Dynamic Explicit Hair
+25
+Segmentation masks: For image preprocessing, we extract segmentation masks
+for the body using MODNet [30], which provides robust human matting and foreground segmentation. Hair masks are predicted using CDGNet [37], a semantic
+segmentation network specialized for hair region detection.
+Hair orientation maps: To estimate local hair directions, we compute orientation maps using a bank of Gabor filters applied to the input images. Following
+prior work [39, 51, 62, 67] on hair reconstruction, the filter bank spans multiple
+orientations, and the dominant response at each pixel is used to estimate the
+local hair strand direction within the hair mask. We additionally use the preprocessing scripts provided by Im2Haircut [52] to generate the input representation
+required by the static hair prior model.
+B.3
+Datasets
+HHAvatar dataset: We show results on 3 scenes from the HHAvatar [36] dataset,
+which includes videos with 4 synchronized cameras, with around 3 minutes per
+scene. We use a 60%/40% train–test split for the black and yellow hair scenes
+from HHAvatar [36], and an 80%/20% split for the brown hair scene.
+New dataset: For our new dataset, we capture subjects using 15 synchronized
+multi-view video cameras with an angular coverage of 93◦ left-to-right and 32◦
+up-to-down. The sequences are recorded at a resolution of 7.1 MP and 72 fps,
+resulting in approximately three minutes of footage per subject. In addition, we
+capture a full 360◦ spinning sequence of each subject both with and without a
+hair cap, enabling reconstruction of otherwise occluded regions such as the ears
+and neck, and improving hairstyle reconstruction quality. The dataset includes
+10 recordings focused on facial expressions and 10 recordings containing diverse
+hair motions. These sequences cover a wide range of motions, including emotional
+expressions (e.g., shout + laugh, angry + sad), isolated facial articulations (eyes,
+mouth, jaw, and tongue), and head movements such as rotation, nodding, tilting, impulse motion, and horizontal figure-eight trajectories. Additionally, the
+dataset contains dedicated test sequences for hair-only motion, expression-only
+motion, and joint motion involving both hair dynamics and facial expressions.
+B.4
+Compute time
+Static hairstyle optimization takes 24 min on HHAvatar sequences and 100 min
+on newly-captured data. MeshHead initialization takes ∼3–4 hours, and fullmodel training takes ∼5 days. Model inference runs at ∼21 FPS (23 FPS with
+all data preloaded on GPU) at 1024 × 1024 resolution on an A100.
+C
+Evaluation details
+In this section, we provide more details on the baselines and metrics used for
+evaluation of our method.
+26
+V. Sklyarova et al.
+C.1
+Baselines
+DynHair is a person-specific method: for each subject, the model is trained on
+multi-view video capturing diverse head motions, and at test time generalizes to
+novel motions of that same subject. Concurrent works on dynamic hair modeling,
+such as HADES [35] and HHAvatar [36], do not provide publicly available implementations, making direct comparison difficult. Therefore, we instead compare
+with dynamic head avatar methods, including Gaussian Head Avatar (GHA) [64]
+and GaussianAvatars (GA) [47], as well as a physics-based simulator. All methods are evaluated on the same subjects, input videos, and train/test splits.
+We launch Gaussian Head Avatar [64] and GaussianAvatars [47] using the
+code from their official repositories. We train each baseline for around 600,000
+iterations. For comparison with the physics-based simulator, we use Maya [1]
+due to its flexibility in exporting 3D positions. We simulate 200 sparse strands
+(16 points each) and interpolate to 40 points for each strand and to the original hairstyle using the k-nearest neighbors with k = 10. The parameters used
+for dynamic hair simulation are as follows: selfCollide = 1, friction = 0.51087,
+stickiness = 0.51087, stretchResistance = 600, compressionResistance = 600.0,
+bendResistance = 60, twistResistance = 1.718, extraBendLinks = 3, mass = 2,
+drag = 0.65, tangentialDrag = 0.0965909, damp = 0.8, stretchDamp = 1, dynamicsWeight = 1, staticCling = 0.025, and startCurveAttract = 0.6.
+C.2
+Metrics
+For quantitative evaluation in Table 1 of the main paper, we use 229 frames ×
+4 views for the brown scene, 400 frames × 4 views for the yellow scene, and
+280 frames × 4 views for the black scene, all taken from the test split. For FID
+calculation, we compute the distance between distributions on joint datasets.
+In Table 1 of the main paper, we compute the velocity and acceleration
+of Gaussians that belong to hair regions across all methods. As point correspondences are not guaranteed for methods that use unstructured Gaussians,
+we compute per-frame velocity based on mean nearest-neighbour displacements.
+The acceleration is computed as the finite difference between velocities, which
+is defined as at = |vt+1 − vt | , t = 0, . . . , T − 3. In this case, lower acceleration gives better results, because it measures temporal smoothness, not physical
+realism. at shows how abruptly the mean hair displacement changes with high
+values indicating sudden jumps, flickering, and inconsistencies in temporal hair
+motion. For fair comparison, we use the same number of Gaussians for metric
+calculation defined by minimum number of Gaussians across all methods.
+In Table 2 of the main paper, we calculate Curvature Temporal Smoothness
+(CTS) metric that quantifies temporal jitter in strand curvature and is defined
+as:
+\text {CTS} = \frac {1}{(T{-}1)N(M{-}2)} \sum _{t,i,m} \|\boldsymbol {\kappa }_{im}^{t+1} - \boldsymbol {\kappa }_{im}^t\|.
+(31)
+Head Avatars with Dynamic Explicit Hair
+D
+27
+Applications
+Temporal Strand Correspondence. Our hair representation defines strands
+in a shared canonical space, where each strand is deformed per-frame by a deformation network that is conditioned on head velocity, acceleration, and gravity.
+As a result, strand correspondence across frames is established by construction:
+strand i at frame t corresponds to the same canonical strand at any other frame
+t′ . This consistent indexing enables temporally coherent hair editing: any perstrand operation, such as trimming, thinning, or recoloring, defined at a single
+frame automatically propagates to the entire sequence without requiring explicit
+per-frame user annotation.
+Editing. We apply hairstyle edits as a post-processing step on the deformed
+hair Gaussians. At each frame, the full hair strand representation is first
+passed through the learned deformation network to obtain pose- and expressiondependent Gaussian attributes (position, color, scale, rotation, opacity). Edits
+are then applied to the resulting Gaussians before rendering. Each strand i consists of L Gaussians {pij }L
+j=1 ordered from root to tip.
+Hairstyle color. Color adjustment is performed by uniformly scaling the RGB
+color attributes of all hair Gaussians by a user-specified factor α ∈ (0, 1), i.e.,
+cij ← α·cij . For example, α = 0.7 reduces brightness by 30%. This preserves the
+relative color variation and shading across the hair while uniformly darkening
+the overall appearance.
+Trimming. Given a user-specified keep ratio r ∈ (0, 1], we set the opacity of
+the tail Gaussians {pij }L
+j=⌊r·L⌋ to zero, effectively shortening the visible hair
+while preserving the natural deformation of the remaining portion. This postdeformation editing strategy ensures that the deformation network operates on
+the same strand topology it was trained on.
+E
+Additional experiments
+In this section, we provide additional experiments on baseline comparisons and
+an extended ablation study.
+E.1
+Comparison with baselines
+User study. To further evaluate our method, we conducted a user study with
+16 participants on 9 test sequences of hair motion, shown in Tab. 3. Participants were asked to evaluate three aspects: (1) Appearance Quality: “Which
+rendering looks more realistic, especially in the hair region?”; (2) Hair Motion: “Does the hair move and react naturally to physics (e.g., gravity, inertia)
+and to the character’s head or body motion?”; and (3) Overall Preference:
+28
+V. Sklyarova et al.
+Table 3: User study results. Our method outperforms the baselines in appearance
+quality, hair motion, and overall preference.
+Method
+Appearance Quality
+Hair Motion
+Overall Preference
+GHA [64]
+Maya [1]
+Ours
+9.72%
+22.22%
+68.06%
+9.72%
+32.64%
+57.64%
+11.11%
+23.61%
+65.28%
+Table 4: Ablation study on importance of color regularization, increased weight for
+the VGG loss and number of views.
+Method
+Ours
+w/o increased λvgg
+w/o Lcolor_reg
+1 view
+PSNR↑
+21.21
+20.88
+20.95
+17.35
+Full Image
+SSIM↑ LPIPS↓
+0.738
+0.189
+0.753
+0.195
+0.737
+0.189
+0.706
+0.250
+Hair Region
+PSNR↑ SSIM↑ LPIPS↓
+20.52
+0.645
+0.098
+20.01
+0.670
+0.100
+20.27
+0.644
+0.098
+15.80
+0.600
+0.113
+Temporal
+tLPIPSex ↓
+0.005
+0.003
+0.006
+0.003
+IoU↑
+0.882
+0.881
+0.884
+0.763
+Hair Silhouette
+tIoUpred ↑ tIoUgt ↑
+0.943
+0.952
+0.943
+0.952
+0.943
+0.952
+0.939
+0.946
+“Which method do you prefer overall?” The participants found that our method
+has significantly better appearance quality. It exhibits less jitter and follows the
+head motion more accurately than the physics simulator [1] and GHA [64].
+Comparison on new scenes. In Tab. 5, we evaluate metrics for comparison
+with GHA [64] on 2 newly captured test sequences. We report results averaged across all available cameras as well as on a held-out view. For reference,
+tIoUgt =0.933 and tIoUgt =0.902 on scenes 603 and 604 self-reenactment, and
+tIoUgt =0.937 and tIoUgt =0.911 for novel view metrics.
+In Fig. 9 and Fig. 10, we present qualitative comparisons with GHA [64] and
+simulations from Maya [1]. Our method is able to produce finer high-frequency
+details. Meanwhile, GHA suffers from blurry results and poor temporal consistency, while Maya has sagging effect artifacts due to manually obtained physical
+parameters.
+E.2
+Extended ablation
+In Tab. 4, we ablate the importance of color regularization, VGG loss weight,
+and number of input views. Results are averaged across the test sets of 2 subjects at 320,000 iterations. Omitting the color regularization loss Lcolor_reg leads
+to decreased performance across the majority of metrics. Training without an
+increased λvgg also yields worse results. Finally, while our method could operate
+in a monocular setting, using a single view leads to consistently worse performance. Note that for the monocular experiment, we report metrics only for the
+view used during training, whereas all other experiments average metrics across
+all views. We also present a visual ablation in Fig. 7, showing that the results
+become blurrier without increasing λvgg . In contrast, removing Lcolor_reg does
+not noticeably degrade the quality of visible strands.
+Head Avatars with Dynamic Explicit Hair
+GT
+Ours
+w/o increased λvgg
+29
+w/o Lcolor_reg
+Fig. 7: Ablation on color regularization and increased weight for the VGG loss.
+E.3
+Limitations
+Despite producing plausible dynamic hair geometry and appearance, our method
+has several limitations.
+Hair-face boundary artifacts. Since hair and face are reconstructed with
+separate representations, strand-based Gaussians for hair and mesh-anchored
+Gaussians for the face, visible artifacts can occur at their boundary. The quality
+of this blending depends on accurate per-frame segmentation and tracking, and
+errors in either can propagate into the rendered boundary region. Improving
+the robustness of this blending, for instance through joint segmentation-aware
+optimization or learned boundary blending, is a promising direction for future
+work.
+Quality at extreme head rotations. At extreme yaw angles, artifacts can
+arise primarily from inaccuracies in the landmark detector and tracker, whose
+performance is known to degrade for non-frontal head poses. This effect may be
+further amplified in regions with limited training coverage. While our model remains stable under such conditions and continues to produce plausible geometry
+and appearance, this is a common challenge across video-based avatar methods
+more broadly.
+Tracking and segmentation failures. Our method can also be affected
+by loss of tracking during fast motion and by inaccuracies in the segmentation
+maps, which can lead to poor disentanglement between clothing and hair color,
+see Fig. 8.
+Inherited limitations from GHA. As we build our representation for the
+face and upper body on the GHA method [64], we inherit its limitations. In
+particular, shoulder motion is not handled well, since it relies solely on BFM
+tracking.
+30
+V. Sklyarova et al.
+Reference
+Tracking [64]
+Ground-truth
+Reconstruction
+Hair mask
+Fig. 8: Limitations of our method: tracking errors of the face caused by occlusions
+(left) and hair structure in regions where the segmentation masks have artifacts.
+Table 5: Quantitative comparison on new sequences. Metrics are averaged across all
+views and reported separately for the novel view.
+Novel view
+Self-reenact
+Scenario Subject Method
+E.4
+603
+604
+603
+604
+Maya
+GHA
+Ours
+Maya
+GHA
+Ours
+Maya
+GHA
+Ours
+Maya
+GHA
+Ours
+PSNR↑
+16.86
+21.35
+19.77
+13.72
+18.30
+18.42
+17.72
+21.36
+20.06
+13.55
+17.86
+18.06
+Full Image
+Hair Region
+SSIM↑ LPIPS↓ PSNR↑ SSIM↑ LPIPS↓
+0.4912 0.2471
+15.64 0.3864 0.1442
+0.6613 0.2019
+21.49 0.6493 0.1186
+0.6013 0.2163
+19.42 0.5556 0.1181
+0.6023 0.2483
+11.75 0.4642 0.1339
+0.7125 0.2212
+17.86 0.6485 0.1116
+0.6978 0.2142
+18.15 0.6183 0.1038
+0.4692 0.2695
+16.70 0.3594 0.1542
+0.6578 0.2224
+22.33 0.6486 0.1253
+0.5937 0.2370
+19.87 0.5464 0.1268
+0.5813 0.2889
+11.97 0.4417 0.1553
+0.6960 0.2581
+18.87 0.6226 0.1326
+0.6750 0.2521
+18.59 0.5882 0.1219
+Hair Silhouette
+Temporal
+IoU↑ tIoUpred ↑ tLPIPSexcess ↓
+0.758
+0.905
+0.0126
+—
+—
+-0.0188
+0.820
+0.925
+0.0036
+0.702
+0.881
+-0.0033
+—
+—
+-0.0210
+0.855
+0.896
+-0.0077
+0.784
+0.912
+0.0152
+—
+—
+-0.0190
+0.832
+0.931
+0.0051
+0.718
+0.892
+-0.0038
+—
+—
+-0.0254
+0.871
+0.904
+-0.0096
+Additional discussion
+Reliance on human-defined priors. While our work depends on additional
+priors, our modeling choices are minimal and physically grounded: (i) a strandbased parametrization that enforces meaningful curve structure on hair, (ii) conditioning the motion network on standard inputs to rigid-body dynamics, such
+as angular velocity, acceleration, and gravity, and (iii) an elastic term that discourages non-physical stretching. The temporal dynamics themselves are fully
+learned from data via the LSTM and MLP. Given the limited scale of available multi-view dynamic hair data, these constraints serve to enforce physical
+plausibility without overly restricting what the network can learn.
+Frame-to-frame sequential optimization vs. canonical prediction. Unlike methods such as HHAvatar, which represent hair with unstructured Gaussians and predict each frame from the previous hair state, DynHair predicts
+each frame relative to a canonical hairstyle. We hypothesize that frame-to-frame
+prediction yields smoother short-term motion but is more susceptible to drift
+accumulating over long sequences, a failure mode that canonical-frame prediction avoids by design. Each approach carries distinct tradeoffs between local
+smoothness and long-term stability, and combining the strengths of both is an
+interesting direction for future work.
+Head Avatars with Dynamic Explicit Hair
+GT
+Simulator
+GHA
+Ours
+Fig. 9: Extended comparison with baselines on new captures.
+31
+32
+V. Sklyarova et al.
+GT
+Simulator
+GHA
+Ours
+Fig. 10: Extended comparison with baselines on new captures.

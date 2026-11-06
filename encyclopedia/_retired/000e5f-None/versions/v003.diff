@@ -1,0 +1,150 @@
+--- v002.md
++++ v003.md
+@@ -1,30 +1,46 @@
+ # Mesh Refinement via Vertex Optimization
+ 
++Also called: Mesh Optimization
+ 
+ ## Overview
+-Mesh Refinement via Vertex Optimization improves the geometric fidelity of a mesh by adjusting vertex positions to better fit an underlying occupancy field [S1, unofficial]. It distinguishes itself from grid-based refinement methods by operating directly on the mesh topology, using face subsampling to maintain computational efficiency during the optimization loop [S1, unofficial].
++Mesh Refinement via Vertex Optimization adjusts the vertex positions and colors of a template mesh to match input photographs, using multi-layer splatting for stability [S1]. It solves the problem of fitting a parametric surface to multi-view imagery where single-layer splatting is unstable due to the flexibility of the optimization and the sensitivity of image derivatives [S1]. It differs from pose estimation because each vertex depends on fewer pixels, making derivative errors more significant, and from grid-based methods by operating directly on mesh topology rather than occupancy fields [S1][S2, unofficial].
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-*   **Input:** Initial mesh vertex positions $V_0$, latent code $c$, occupancy field representation, and optimization hyperparameters [S1, unofficial].
+-*   **Output:** Optimized vertex positions $V^*$ [S1, unofficial].
++**Inputs:**
++- A template mesh with initial vertex positions $V_0$ and uniform gray colors.
++- Input photographs from $N$ camera views (typically 3) [S1].
++- A background rectangle placed behind the subject to reveal multiple geometry layers [S1].
++
++**Outputs:**
++- Optimized vertex positions $V$ and colors $C$.
+ 
+ **Data Structures:**
+-*   **Vertex Parameters:** A PyTorch `torch.nn.Parameter` tensor initialized from $V_0$ [S1, unofficial].
+-*   **Face DataLoader:** A data structure batching faces for efficient processing [S1, unofficial].
++- Vertex parameters: $v = \text{torch.nn.Parameter}(v_0.\text{clone}())$ [S2, unofficial].
++- Face batch: A subset of mesh faces for efficient processing.
+ 
+ **Steps:**
+-1.  **Initialization:** Create a trainable parameter for vertex positions: $v = \text{torch.nn.Parameter}(v_0.\text{clone}())$ [S1, unofficial].
+-2.  **Latent Detachment:** Detach the latent code $c$ from the computation graph to prevent gradient retention during this phase: $c = c.\text{detach}()$ [S1, unofficial].
+-3.  **Optimizer Setup:** Initialize an RMSprop optimizer for the vertex parameters with a learning rate of $1 \times 10^{-5}$: $\text{optimizer} = \text{optim.RMSprop}([v], \text{lr}=1\text{e-}5)$ [S1, unofficial].
+-4.  **Face Sampling:** Create a DataLoader for the mesh faces with a batch size of `refine_max_faces` and `shuffle=True` [S1, unofficial].
+-5.  **Optimization Loop:** Iterate for `refinement_step` iterations, processing batches of faces from the dataloader [S1, unofficial].
++1. **Initialization**: Roughly align the hand template mesh to the input images and assign a uniform gray color [S1]. Initialize vertex parameters $v$ from the mesh vertices [S2, unofficial].
++2. **Optimizer Setup**: Initialize the optimizer. Sources suggest Adam [S1] or RMSprop with learning rate $1e-5$ [S2, unofficial].
++3. **Batching**: Create a DataLoader for faces with batch size `refine_max_faces` (default 10000) and `shuffle=True` [S2, unofficial].
++4. **Optimization Loop**: Iterate for `refinement_step` iterations (default 0) [S2, unofficial].
++   - Sample a batch of faces.
++   - Detach latent codes $c$ to prevent graph retention: $c = c.\text{detach}()$ [S2, unofficial].
++   - Render the mesh using multi-layer splatting to match input photographs [S1].
++   - Compute loss against input images.
++   - Apply regularization using As-Rigid-As-Possible (ARAP) deformation energy [S1].
++   - Update vertex positions using the optimizer.
++
++**Formulas:**
++- ARAP Regularization: Minimizes the deviation from rigid transformations of local neighborhoods [S1].
++- Multi-layer Splatting: Renders multiple layers of geometry to handle transparency and occlusion, crucial for convergence [S1].
+ 
+ **Parameters:**
+-*   `refinement_step`: Number of optimization iterations. Default: 0 [S1, unofficial].
+-*   `refine_max_faces`: Maximum number of faces used as the batch size for refinement. Default: 10,000 [S1, unofficial].
++- `refinement_step`: Number of optimization iterations. Default: 0 [S2, unofficial].
++- `refine_max_faces`: Max number of faces used as batch size. Default: 10000 [S2, unofficial].
++- Learning Rate: $1e-5$ (RMSprop) [S2, unofficial].
+ 
+ **Edge Cases and Pitfalls:**
+-Not given in the sources.
++- Single-layer splatting is unstable at higher learning rates and leads to slower convergence [S1].
++- Errors in image derivatives are more significant because each vertex depends on fewer pixels compared to pose estimation [S1].
+ 
+ **Pseudocode:**
+@@ -32,30 +48,42 @@
+ import torch
+ import torch.optim as optim
+-from torch.utils.data import DataLoader, TensorDataset
+ 
+-def mesh_refinement_via_vertex_optimization(v0, c, faces, refinement_step=0, refine_max_faces=10000):
+-    # Step 1: Initialize vertex parameters from the mesh vertices
+-    v = torch.nn.Parameter(v0.clone())
+-
+-    # Step 2: Detach the latent code to prevent graph retention
+-    c = c.detach()
+-
+-    # Step 3: Initialize RMSprop optimizer
+-    optimizer = optim.RMSprop([v], lr=1e-5)
+-
+-    # Step 4: Create a DataLoader for faces
+-    face_dataset = TensorDataset(faces)
+-    face_loader = DataLoader(face_dataset, batch_size=refine_max_faces, shuffle=True)
+-
+-    # Step 5: Loop for refinement_step iterations
+-    for _ in range(refinement_step):
+-        for batch_faces in face_loader:
++def mesh_refinement(mesh_v0, images, camera_params, num_iterations=0, max_faces=10000, lr=1e-5):
++    """
++    Optimizes mesh vertex positions and colors to match input images.
++    """
++    # Initialize vertex parameters
++    v = torch.nn.Parameter(mesh_v0.clone().detach())
++    
++    # Initialize optimizer (RMSprop as per S2, Adam as per S1)
++    optimizer = optim.RMSprop([v], lr=lr)
++    
++    # Create face batch loader
++    # Note: In a real implementation, this would involve sampling faces
++    face_loader = create_face_loader(mesh_faces, batch_size=max_faces, shuffle=True)
++    
++    for iteration in range(num_iterations):
++        for faces in face_loader:
+             optimizer.zero_grad()
+-            # [G] Compute differentiable rendering loss against the occupancy field
+-            # loss = compute_rendering_loss(v, c, batch_faces)
+-            # loss.backward()
+-            # optimizer.step()
+-            # The sources do not provide the specific loss function or rendering routine.
+-    return v.detach()
++            
++            # Detach latent codes if present
++            # c = c.detach() # [G] Placeholder for latent code handling
++            
++            # Render mesh using multi-layer splatting
++            # This step is critical for stability [S1]
++            rendered_images = multi_layer_splat_render(v, faces, camera_params)
++            
++            # Compute loss against input images
++            loss = compute_rendering_loss(rendered_images, images)
++            
++            # Add ARAP regularization [S1]
++            # arap_loss = compute_arap_regularization(v)
++            # total_loss = loss + arap_loss
++            
++            # Backpropagate and update
++            loss.backward()
++            optimizer.step()
++            
++    return v
+ ```
+ 
+@@ -66,9 +94,17 @@
+ 
+ ## Operating characteristics
+-Not given in the sources.
++- **Time Complexity**: Not given in the sources.
++- **Memory Complexity**: Not given in the sources.
++- **Measured Performance**: Total runtimes of approximately 4 seconds to convergence, similar between Adam and LM (Levenberg-Marquardt) despite LM's extra cost [S1].
++- **Scaling**: Not given in the sources.
++- **Strengths**: Robust convergence with multi-layer splatting; handles complex geometry via template deformation [S1].
++- **Limitations**: Single-layer splatting is unstable; sensitive to image derivative errors due to low pixel-to-vertex ratio [S1].
++- **When to use**: When fitting a parametric mesh to multi-view images with stable convergence requirements.
++- **When not**: When single-layer rendering is sufficient or when computational resources are extremely limited.
+ 
+ ## Background
+-This method is part of the Differentiable Volumetric Rendering framework, specifically within the context of adaptive subdivision and mesh refinement [S1, unofficial]. It is documented in the `autonomousvision/differentiable_volumetric_rendering` repository [S1, unofficial].
++Originated in the context of differentiable surface rendering, specifically for optimizing parametric surfaces like hand templates [S1]. The method leverages ARAP deformation energy for regularization [S1]. It is used in applications requiring high-fidelity mesh reconstruction from photographs, such as hand modeling [S1].
+ 
+ ## Sources
+-[S1] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)+[S1] Differentiable Surface Rendering via Non-Differentiable Sampling, https://doi.org/10.1109/iccv48922.2021.00603, fetched 2026-10-26
++[S2] autonomousvision/differentiable_volumetric_rendering, https://github.com/autonomousvision/differentiable_volumetric_rendering, fetched 2026-10-26 (unofficial)

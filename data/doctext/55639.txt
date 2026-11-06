@@ -1,0 +1,1613 @@
+Progressive Volume Distillation with Active Learning for
+Efficient NeRF Architecture Conversion
+arXiv:2304.04012v2 [cs.CV] 18 May 2024
+Shuangkang Fang 1 · Yufeng Wang2Q · Yi Yang3 · Weixin Xu3 ·
+Heng Wang3 · Wenrui Ding2 · Shuchang Zhou3
+Abstract Neural Radiance Fields (NeRF) have been
+widely adopted as practical and versatile representations for 3D scenes, facilitating various downstream
+tasks. However, different architectures, including the
+plain Multi-Layer Perceptron (MLP), Tensors, low-rank
+Tensors, Hashtables, and their combinations, entail distinct trade-offs. For instance, representations based on
+Hashtables enable faster rendering but lack clear geometric meaning, thereby posing challenges for spatialrelation-aware editing. To address this limitation and
+maximize the potential of each architecture, we propose
+Progressive Volume Distillation with Active Learning
+(PVD-AL), a systematic distillation method that enables any-to-any conversion between diverse architectures. PVD-AL decomposes each structure into two
+parts and progressively performs distillation from shallower to deeper volume representation, leveraging effective information retrieved from the rendering process. Additionally, a three-level active learning technique provides continuous feedback from teacher to
+student during the distillation process, achieving highperformance outcomes. Experimental evidence showcases the effectiveness of our method across multiple benchmark datasets. For instance, PVD-AL can
+distill an MLP-based model from a Hashtables-based
+model at a 10×∼20× faster speed and 0.8dB∼2dB
+higher PSNR than training the MLP-based model from
+scratch. Moreover, PVD-AL permits the fusion of diverse features among distinct structures, enabling models with multiple editing properties and providing a
+1
+School of Electrical Information Engineering, Beihang University, Beijing, China
+2
+Institute of Unmanned System, Beihang University, Beijing,
+China
+3
+Megvii Research, Megvii Inc., Beijing, China
+Q
+Corresponding author: wyfeng@buaa.edu.cn
+more efficient model to meet real-time requirements like
+mobile devices.
+1 Introduction
+Novel view synthesis (NVS) generates photo-realistic
+2D images for unknown view-ports of a 3D scene (Zhou
+et al., 2018; Chan et al., 2021; Sitzmann et al., 2019),
+which has wide applications in rendering, localization,
+and robot arm manipulations (Adamkiewicz et al.,
+2022; Moreau et al., 2022; Peng et al., 2021), especially with the neural modeling capabilities offered by
+the NeRF (Mildenhall et al., 2020). By exploiting the
+implicit modeling capabilities of MLP, NeRF can significantly improve the quality of NVS. Several following developments incorporate feature tensors as complementary explicit representations to relieve the MLP
+from remembering all details of the scene, resulting in
+faster training speed and more flexible manipulation
+of geometric structure. The bloated size of the feature
+tensors in turn spurs works targeting more compact
+representations, like Plenoxels (Fridovich-Keil et al.,
+2022) that exploits the sparsity of the tensor, TensoRF (Chen et al., 2022) that leverages VM (vectormatrix) decomposition and canonical polyadic decomposition (CPD), and Instant Neural Graphics Primitives (INGP) (Müller et al., 2022) that utilizes multilevel Hashtables for effective compression of feature tensors. All these schemes have their own advantages and
+limitations. Generally, with implicit representations, it
+would be easier to perform texture editing, artistic
+stylization, and dynamic scene modeling (Fang et al.,
+2023a; Kobayashi et al., 2022; Wang et al., 2024; Gu
+et al., 2021; Li et al., 2023). On the other hand, methods
+with explicit representation usually enjoy faster training due to the shallower representations and cope bet-
+!"#$%&'!( )*+,-**'#'!./',/!.0(0(1 !'23*',452'#,6.!.4'/'!7
+Shuangkang Fang 1 et al.
+PVD-AL
+Reference
+appearance
+erasing
+editing color
+decompose
+compose
+enlarge or shrink
+high FPS
+)C
+Ours: in any representation
+(b) Improve
+distillation
+with a
+Hash-based
+teacher
+efficiency
+ive
+t
+g
+Ac plu
+(c) as a
+All of
+them
+(a
+One of
+them
+ha
+r
+m
+igr acte
+r
+at
+ion istic
+2
+Reference
+Tensors Ours: s-Tensors MLP Ours: s-MLP
+(1.8G/0.7h)
+(14M/24h) (11M/1.6h)
+- in
+ing
+rn
+l ea
+(4.4G/0.7h)
+active learning
+as a plug-in for
+R2L task
+different NeRF
+architectures
+Reference
+R2L
+Ours: R2L+AL
+Fig. 1 Capabilities of the proposed PVD-AL method. PVD-AL facilitates different NeRF architecture conversions,
+breaking down the barrier of independent research between them. Its efficient and flexible design supports versatile applications.
+(a) PVD-AL has the ability to migrate any architecture’s attributes to other architectures or concentrate them on a single
+architecture. (b) A model obtained by PVD-AL performs better than by training it from scratch, with less parameters and
+training time. (c) Active learning strategy can be plugged into other NeRF-related distillation tasks (like radiance field to light
+field: R2L(Wang et al., 2022b)) to enhance final performance. More results can be found in Section 4.
+ter with geometric-aware editing (Tang et al., 2022; Yu
+et al., 2021; Fridovich-Keil et al., 2022), like merging
+and other manipulations of scenes, which is in clear contrast to the case of purely implicit representations. Besides, the compatibility of different architectures with
+various hardware platforms can vary substantially.
+Due to the diversity of downstream tasks of NVS,
+there is no single answer as to which representation is
+the best. The particular choice would depend on the
+specific application scenarios and the available hardware resources. Researching them independently can not
+reach their full potential. In this paper, we tackle the
+problem from another perspective. Instead of focusing
+on an ideal representation that embraces the advantages of all variants, we propose a method to achieve
+arbitrary conversions between known NeRF architectures, including MLP, sparse Tensors, low-rank Tensors, Hashtables, and combinations thereof. Such flexible conversions can obviously bring the following advantages: (1) The study would throw insights into the
+modeling capabilities and limitations of the already
+rich and ever-growing constellation of architectures of
+NeRF. (2) The possibility of such conversions would
+free the designer from the burden of pinning down ar-
+chitectures beforehand, as now they can simply adapt a
+trained model agilely to other architectures to meet the
+needs of later discovered application scenarios. (3) Attributes between different structures can complement
+each other. For instance, the implicit MLP can inherit
+spatial-aware editing capabilities from the explicit Tensors. (4) This research offers the opportunity to transfer
+knowledge of high-quality 3D representations to downstream tasks, demonstrating significant practical value.
+In order to convert between various architectures,
+two issues must be addressed. One is that there are
+significant differences in training and inference speeds
+across different architectures. How can we ensure that
+the slower model does not hinder conversion efficiency?
+The second is how to condense the most relevant and
+useful information from a well-trained model and transfer it to another model.
+We propose PVD-AL as a solution to address the
+two issues noted above. It decomposes each architecture into two parts and applies the effective information retrieved from the rendering process to perform
+the distillation process progressively, stage-by-stage, on
+different levels of volume representation, from shallower
+to deeper, thus accomplishing the objective of rapid
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+3
+However, we find that relying solely on the techniques mentioned above may not be adequate for effective learning. For example, some sampling rays that
+pass through blank areas can be easily fitted by students, whereas for rays that intersect object surfaces,
+students typically require more time to fit. Similar rules
+apply to camera poses and sample points along a ray.
+Therefore, we introduce an active learning strategy in
+PVD-AL. By including this strategy in the distillation procedure, students would be informed in real-time
+which camera poses, sample rays and sample points offer the greatest challenge. Then students will pay more
+attention to these vital pieces of knowledge after obtaining this feedback in the next training step, leading
+to high-performance distillation results.
+This article constitutes a substantial extension of
+our previous work (Fang et al., 2023b), differing primarily in four aspects: (1) We introduce a novel threelevel active learning strategy to fully exploit the potential for transformation between different NeRF structures and conduct entirely new mutual-conversion and
+visualization experiments to validate the effectiveness
+of the new method. (2) We thoroughly explore the capabilities of PVD-AL, including the transfer of editing
+abilities across different architectures, model compression, model acceleration, and as a plugin to enhance the
+performance of other NeRF-based distillation methods.
+(3) We corroborate PVD-AL’s value in practical applications by obtaining 3D models operable in real-time on
+mobile devices and expanding the diversity of scenes on
+such devices. (4) We conduct ablation experiments to
+investigate the importance of the various components
+introduced in the new method, and further present and
+analyze the results of fine-tuning after distillation.
+To sum up, the contributions of this paper are summarized as follows:
+2 Related Work
+distillation. In this design, the teacher directs student
+training with the high-level semantic information of the
+model’s middle layer, the density and color of the spatial points, and the rendered RGB values.
+– We propose PVD-AL, a distillation framework to
+accelerate the training procedure based on a unified view that allows conversions between different
+NeRF architectures, including MLP, sparse Tensors,
+low-rank Tensors, and Hashtables. To the best of
+our knowledge, this is the first systematic attempt
+at such conversions.
+– We introduce an active learning strategy so that
+students can acquire knowledge from teachers to
+the greatest extent. We continuously evaluate the
+camera poses, sample rays, and sample points that
+are difficult to fit for students, which help them actively enhance the learning of crucial knowledge.
+The three-level active learning strategy is decoupled
+and flexible; thus can also be easily applied as a
+plug-in to other distillation tasks based on NeRF.
+– Using high-performance teachers, such as Hashtables and VM-decomposition structures, frequently
+improves student model synthesis quality while taking less time than training the student from scratch.
+Consequently, our technique serves as a valuable
+tool for model training and compression, yielding
+more effective models for various applications.
+– PVD-AL allows for the fusion of various properties
+between different structures. For example, we can
+call PVD-AL multiple times to obtain models with
+diverse editing properties or to convert a scene under a specific model to another one that runs more
+efficiently to meet real-time requirements and enrich
+scene content on mobile devices.
+2.1 Neural Implicit Representations
+Neural implicit representation methods use MLP to
+construct a 3D scene from coordinate space, as proposed in NeRF (Mildenhall et al., 2020). The input of
+the MLP is a 5D coordinate (spatial location [x, y, z]
+and viewing direction [θ, ϕ]), and the output is the volume density and color. An advantage of implicit modeling is that it is conducive to controlling or changing
+the texture-like attributes of the scene (Liu et al., 2023;
+Wang et al., 2022a). For example, DFFs (Kobayashi
+et al., 2022) use the pretrained CLIP model (Radford
+et al., 2021) to induce editing of NeRF representation
+of a scene. DoReNeRF (Lou et al., 2024) successfully
+applies NeRF to the rendering of dynamic scenes by
+mapping time t to implicit space through an MLP.
+NeRFW (Martin-Brualla et al., 2021) realizes the control of scene lighting by adding appearance embedding
+using an MLP. However, the MLP-based model requires
+on-the-fly dense sampling of spatial points, which leads
+to multiple queries of the MLP during training and inference, resulting in slower running speed.
+2.2 Neural Explicit Representations and Hybrids
+With explicit representations, a scene is placed directly
+on a 3D grid. Each voxel on the grid stores information
+on density and color. Plenoxels (Fridovich-Keil et al.,
+2022) shows that a 3D scene can be represented by an
+explicit grid, with the spherical harmonic coefficients
+Shuangkang Fang 1 et al.
+4
+Progressive Volume Distillation (PVD)
+Progressive Volume Distillation with Active Learning (PVD-AL)
+Fig. 2 Illustration of the PVD-AL framework. Given one trained NeRF model, different NeRF architectures, such as the
+MLP, sparse Tensors, low-rank Tensors, and Hashtables can be quickly obtained through PVD-AL. The loss in intermediate
+volume representations (shown as a double arrow symbol in PVD) like the output of ϕ1∗ , color, and density are used alongside
+the final rendered RGB volume to accelerate distillation. In PVD-AL, regular feedback from the teacher will be given to the
+student. This form of feedback is organized into three tiers based on camera poses, sample rays, and sample points, which
+prepares the student to proactively learn what they need to be strengthened for the next round of training.
+at each voxel enabling the retrieval of density and color
+values at any spatial point via trilinear interpolation.
+The training and inference speed of Plenoxels is significantly superior to that of MLP-based NeRF. Motivated
+by the low-rank tensor approximation algorithm, TensoRF (Chen et al., 2022) decomposes the explicit tensor
+into low-rank components, which significantly reduces
+the model size. PeRF (Rasmuson et al., 2022) continues
+to evolve the explicit expression and regard the optimization of the grid as a non-linear least squares optimization problem that can be solved more efficiently
+by the Gauss-Newton method. With explicit representation, it is not as easy to make artistic creations as with
+implicit representation. Nevertheless, explicit representations facilitate the geometry editing of the scene, including merging of multiple scenes, inpainting, and manipulations of objects at specific positions (Tang et al.,
+2022; Yu et al., 2021; Fridovich-Keil et al., 2022).
+There are also attempts exploiting a hybrid of the
+explicit and implicit representations as NeRF architectures (Wang et al., 2024; Zhang et al., 2023; Usvyatsov
+et al., 2022; Müller et al., 2022; Chen et al., 2022; Wu
+et al., 2022). The explicit part usually stores features related to the scene, while the implicit part is typically an
+MLP that interprets the features to obtain densities and
+colors. Differences between hybrid representations are
+mainly exhibited in the explicit part. NSVF (Liu et al.,
+2020) uses a spare grid to store features, while Plenoctrees (Yu et al., 2021) optimizes the 3D grid through
+an octree. Nex (Wizadwongsa et al., 2021) proposes an
+Implicit-Explicit modeling strategy by storing the coefficient as a learnable parameter to accelerate the training procedure. Recently, INGP (Müller et al., 2022) proposes the multi-resolution hash encoding (MHE), which
+maps the given coordinate to a feature via a cascade
+of Hashtables at different scales. Like TensoRF (Chen
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+et al., 2022), MHE significantly reduces memory footprint and improves inference speed. However, the compactness of MHE comes at the cost of less straightforward geometric interpretation, as there are abundant
+spatial aliases caused by the hash mechanism.
+2.3 Knowledge Distillation
+Knowledge distillation commonly refers to training a
+small model to match the output of a larger model
+(maybe trained beforehand or on the fly), which
+is widely used in model optimization and compression (Hinton et al., 2015; Huang et al., 2024; Hao et al.,
+2024; Leng et al., 2023). Multiple attempts have been
+made in the field of NVS. Mip-nerf 360 (Barron et al.,
+2022) proposes an online distillation method to improve
+the quality of rendering. R2L (Wang et al., 2022b) and
+MobileR2L (Cao et al., 2023) convert a NeRF model
+into a model based on neural light fields. The most related to our work is KiloNeRF (Reiser et al., 2021),
+which uses a huge pretrained NeRF (teacher) to guide
+thousands of small NeRF models (students) for speeding up. However, KiloNeRF only performs distillation
+between the same MLP architecture and the distilling
+process is significantly slowed down by the continuous
+querying of the huge MLP in the teacher model.
+ever-increasing number of such architectures, we are
+not attempting to achieve these conversions one by
+one. Rather, we first formulate typical architectures in
+a unified form and then design a systematic distillation scheme based on the unified view. These architectures include implicit representations like MLP in
+NeRF, explicit representations like sparse Tensors in
+Plenoxels, and two hybrid representations: Hashtables
+(in INGP) and low-rank Tensors (VM-decomposition
+in TensoRF). We first cover some preliminary topics in
+Subsection 3.1, then moving on to a detailed description of PVD-AL in Subsection 3.2, including the loss
+design, density range constraint, block-wise distillation,
+and three levels of active learning.
+3.1 Preliminaries
+Neural Radiance Fields. NeRF represents scenes
+with an implicit function that maps spatial point x =
+(x, y, z) and view direction d = (θ, ϕ) into the density
+σ and color c. Given a ray r originating at o with direction d, the RGB value Ĉ(r) of the corresponding pixel
+is estimated by the numerical quadrature of the color
+ci and density σi of the spatial points xi = o + ti d
+sampled along the ray:
+Ĉ(r) =
+N
+X
+3 Method
+Our method aims to achieve mutual conversions between different NeRF architectures. Since there is an
+Ti (1 − exp(−σi δi ))ci ,
+(1)
+i
+2.4 Active Learning
+Active learning is a special case of machine learning in
+which a learning algorithm can interactively query a
+teacher to label new data points with the desired outputs(Ren et al., 2021; Tharwat and Schenck, 2023a;
+Manjah et al., 2023; Boreshban et al., 2023). There
+are situations in which unlabeled data is abundant but
+manual labeling is expensive. In such a scenario, learning algorithms can actively query the user or teacher
+for labels. This type of iterative supervised learning
+is called active learning. In such a learning process,
+the learner selects examples, potentially reducing the
+number needed to grasp a concept compared to traditional supervised learning (Tharwat and Schenck,
+2023b; Rangnekar et al., 2023; Gao et al., 2020). ActiveNeRF(Pan et al., 2022) proposes to supplement the
+existing training set with newly captured samples by
+camera based on an active learning scheme, which is
+totally different from our PVD-AL method.
+5
+Pi−1
+where Ti = exp(− j=1 σi δi ), and δi is the distance
+between adjacent samples.
+Tensors and low-rank Tensors. The Plenoxels directly represents a 3D scene by an explicit grid (sparse
+Tensors) (Fridovich-Keil et al., 2022). Each grid point
+stores density and spherical harmonic (SH) coefficients.
+The color c is obtained according to the SH and the
+view direction d as follows:
+!
+ℓX
+ℓ
+max X
+m m
+c=S
+kℓ Yℓ (d) ,
+(2)
+ℓ=0 m=−ℓ
+m:−ℓ≤m≤ℓ
+where S : x 7→ (1 + exp(−x))−1 , k = (kℓm )ℓ:0≤ℓ≤ℓmax ,
+and kℓm is a set of coefficients, and l is the degree of the
+SH function Yℓm .
+The performance of explicit sparse Tensors depends
+excessively on the spatial resolution of the grid. In order to reduce the memory footprint caused by the enormous size of the tensor, The VM (Vector-Matrix) decomposition (Chen et al., 2022) factorizes the huge tensor T ∈ RI×J×K into low-rank matrices M and vectors
+v as follows:
+T =
+R
+1
+X
+r=1
+vr1 ◦ M2,3
+r +
+R
+2
+X
+r=1
+vr2 ◦ M1,3
+r +
+R
+3
+X
+r=1
+vr3 ◦ M1,2
+r , (3)
+Shuangkang Fang 1 et al.
+6
+Table 1 Division of each typical model under our unified two-level view. Each architecture is represented as a
+cascade of two modules ϕ1∗ and ϕ2∗ .
+methods
+NeRF
+Plenoxels
+TensoRF
+INGP
+ϕ1∗
+first K layers
+full
+decomposed tensors
+Hashtables
+ϕ2∗
+remaining MLP
+identity function
+MLP decoder
+MLP decoder
+where vr1 ∈ RI , vr2 ∈ RJ , vr3 ∈ RK , M2,3
+∈ RJ×K ,
+r
+1,3
+I×K
+1,2
+I×J
+Mr ∈ R
+, and Mr ∈ R
+. And ◦ represents
+the outer product. Unlike Plenoxels, VM decomposition
+does not store color directly but rather features that can
+be decoded by an MLP.
+Multi-resolution Hash Encoding. INGP (Müller
+et al., 2022) maps a series of grids of different scales
+to the corresponding feature vectors with a fixed size.
+It uses a hash function as in Eq. (4) to map a spatial
+point in the grid to a hashtable with different resolutions that are adopted to details of different levels of
+these grids:
+h(x) =
+d
+M
+!
+xi πi
+mod
+S,
+(4)
+i=1
+L
+where
+denotes bit-wise XOR operation. πi is an
+unique large prime number. And S is the hashtable size.
+These Hashtables store learnable parameters, which are
+fed to a shallow MLP to interpret densities and colors. INGP effectively reduces the model size by these
+Hashtables and improves the synthesis quality by introducing multi-resolution.
+3.2.1 Loss Design
+In our method, we not only use the RGB but also the
+density, color and an additional intermediate volume
+feature to calculate loss between different structures.
+We have observed that the implicit and explicit structures in the hybrid representation are naturally separated and correspond to different learning objectives.
+Therefore, we consider splitting a model into these similar expression forms so that different parts can be
+aligned during distillation. Specifically, given a model
+ϕ∗ , we represent them as a cascade of two modules as
+follows:
+ϕ∗ (x, d) = ϕ2∗ (ϕ1∗ (x, d)),
+where * can be either a teacher or a student. We choose
+the first K layers of MLP in NeRF as ϕ1∗ , and the remaining parts as ϕ2∗ . For hybrid representations, we directly regard the explicit part as ϕ1∗ , and the implicit
+part as ϕ2∗ . As for the purely explicit representation of
+Plenoxels, we still formulate it into two parts by letting ϕ2∗ be the identity, though it can be transformed
+without splitting. The specific splitting of the model
+is shown in Table 1. Based on the splitting, we design
+volume-aligned losses as follows:
+Lv2 = ϕ1t (x, d) − ϕ1s (x, d) 2 ,
+We propose PVD-AL to realize the mutual conversion
+between different architectures. To speed up the training process, we develop a volume-aligned loss and construct a block-wise distillation method based on a unified perspective of various NeRF architectures in PVDAL. We also employ a special treatment of the dynamic
+density volume range by clipping for its specific numerical instability, which improves the training stability and
+significantly improves the synthesis quality. Furthermore, leveraging the unique characteristics of such distillation in NeRF, we devise three levels of active learning strategies that notably enhance distillation performance, surpassing even training a model from scratch.
+The overview pipeline of PVD-AL is shown in Fig. 2
+(6)
+where L2 indicates the mean-squared error (MSE). The
+reason for designing this loss is that models in different forms can be mapped to the same space that represents the scene. Our experiments have shown that
+this volume-aligned loss can accelerate the distillation
+and improve the quality significantly. The complete loss
+function during distillation is as follows:
+L = ω1 Lv2 + ω2 Lσ2 + ω3 Lc2 + ω4 Lrgb
+2 + ω5 Lreg ,
+3.2 PVD-AL: Progressive Volume Distillation with
+Active Learning
+(5)
+(7)
+where Lσ , Lc , and Lrgb denote the density, color and
+RGB losses, respectively. The last item Lreg represents the regularization term, which depends on the
+form of the student model. For Plenoxels and VMdecomposition, we add L1 sparsity loss and total variation (TV) regularization loss. It should be noted that
+we only perform density, color, RGB and regularization
+loss on Plenoxels for its explicit representation.
+3.2.2 Density Range Constrain
+We have found that the density loss Lσ2 is hardly directly optimized. We impute this problem to its specific numerical instability. That is, the density reflects
+the light transmittance of a point in space. When σ
+is greater than or less than a certain value, its physical meaning is consistent (i.e., completely transparent
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+Algorithm 1 PyTorch pseudocode of active learning
+strategy in PVD-AL.
+# TCP : important camera poses
+# TSR : important sample rays
+# TSP : important sample points
+initial ( TCP , TSR , TSP )
+for each epoch :
+# generate random poses and sample important poses
+train_poses =[ GenRandomPoses () , RandomSelect ( TCP )]
+all_batch_rays = SampleRays ( train_poses )
+7
+block-wise strategy to mitigate this issue. Specifically,
+we initiate training by only forwarding stage 1, followed by sequential execution of stages 2 and 3, as illustrated in Fig. 2. Consequently, both the student and
+the teacher networks are spared from the need to forward the entire network and render RGB outputs in
+the early training phases, significantly accelerating the
+distillation process.
+for each batch_rays :
+# generate random rays and sample important rays
+train_rays =[ batch_rays , RandomSelect ( TSR )]
+3.2.4 Three-Level of Active Learning
+train_data = SamplePoints ( train_rays )
+# distillation process
+tea_out = tea_model ( train_data )
+stu_out = stu_model ( train_data )
+For the purpose of facilitating the most efficient possible transfer of knowledge from teachers to students,
+# select important points TSP by its weights : PW we propose an active learning technique in PVD-AL.
+PW =[ tea_out [ PW ] , stu_out [ PW ]]
+sortedPW = GetPointsIdx ( sort ( PW ))
+We continually analyze the camera poses, sample rays,
+TSP = sortedPW [: Nsp ]
+and sample points that are tough to suit for students
+# use TSP to calculate loss sigma and loss color
+loss_s = L2 ( tea_out [ ‘ s ’ ][ TSP ] , stu_out [ ‘ s ’ ][ TSP ]) from coarse to fine, which helps students actively boost
+loss_c = L2 ( tea_out [ ‘ c ’ ][ TSP ] , stu_out [ ‘ c ’ ][ TSP ]) their understanding of this crucial knowledge as de# calculate loss rgb and other losses
+picted in Fig. 2. The specific execution process of the
+loss_rgb = L2 ( tea_out [ ‘ rgb ’] , stu_out [ ‘ rgb ’ ])
+active learning strategy is outlined in Algorithm 1.
+loss_other = C a l c u l a t e O t h e r L o s s e s ()
+Important camera poses. Once a teacher model is
+# select important rays TSR by loss rgb
+sortedRays = GetRaysIdx ( sort ( loss_rgb ))
+trained, it can generate images corresponding to any
+TSR [ replace_idx ]= sortedRays [: Nsr ]
+specified camera pose, obviating the need for real data
+# record img loss by train_rays
+loss_img [ RaysMapToImgIdx ( batch_rays )]+= loss_rgb during distill the student model, which is instead guided
+backward_option ()
+by the teacher-rendered images. Our experimental find# select important poses TCP by loss img
+ings reveal a significant performance disparity between
+sortedImgs = GetPoses ( loss_img )
+the teacher and student models under certain poses. To
+TCP [ repalce_idx ]= sortedImgs [: Ncp ]
+bridge this gap, we propose actively incorporating these
+challenging poses into the student’s distillation process.
+or completely opaque). Thus, while the value range of
+Given several camera poses, the images rendered by the
+σ may be extensive, only a specific interval of density
+teacher and student are respectively marked as It and
+values is crucial. To address this, we constrain the nuIs , and the important camera poses T CP can be obmerical range of σ to [a, b], and compute Lσ2 as follows:
+tained by the selection function fcp :
+Lσ2 = ∥min(max(σt , a), b) − min(max(σs , a), b)∥2 ,
+(8)
+where σt for teacher model and σs for student model.
+This restriction has an inappreciable impact on the performance of teachers and brings a tremendous benefit
+to the distillation. Another way to optimize σ involves
+directly performing the density loss on the exp(−σi δi ),
+but we discover it is inefficient since the gradient of exp
+is easier to saturate, and it requires computing an exponent that increases the amount of calculation when
+the block-wise is implemented.
+3.2.3 Block-wise Distillation
+During volume rendering, a significant portion of computation is dedicated to MLP forwarding for each sampled point and integrating the output along each ray.
+This intensive process notably hampers training and
+distillation efficiency. In our PVD-AL framework, the
+utilization of Lv2 allows for the implementation of a
+T CP = fcp (It , Is , Ncp ).
+(9)
+The function fcp will select the Ncp poses with the
+largest gap between It and Is .
+Important sample rays. Sample rays carry varying
+amounts of information depending on the location they
+travel through. For example, some rays traverse fully
+opaque object surfaces, while others may pass through
+translucent sections. Each type of ray presents a unique
+challenge to students. Therefore, we provide students
+with feedback for the rays where there are substantial
+performance gaps between students and teachers. Given
+several sample rays, the RGB values rendered by the
+teacher and student are respectively marked as RGBt
+and RGBs , and the important sample rays T SR can
+be obtained by the selection function fsr :
+T SR = fsr (RGB t , RGB s , Nsr ).
+(10)
+The function fsr will select the Nsr rays with the largest
+gap between RGB t and RGB s .
+Shuangkang Fang 1 et al.
+8
+Important sample points. When performing the
+sigma and color loss as defined in Eq. (7), by default,
+all sampling points of the rays are considered. However,
+not all sampling points contribute equally to the final
+RGB value. Points closer to the object’s surface are
+more influential, whereas those farther away contribute
+minimally or nothing at all. Therefore, when distillation, we force the student to prioritize sample points
+that significantly affect the final RGB value. Given
+several sample points along a ray, the weight of each
+point calculated by teacher and student is respectively
+marked as Wt and Ws , the important sample points
+T SP can be obtained by the selection function fsp :
+T SP = fsp ([Wt : Ws ], Nsp ),
+(11)
+where [:] means concatenate, and W∗ is calculated from
+Eq. (1) as
+W∗ =
+N
+X
+Ti (1 − exp(−σi δi )).
+(12)
+i
+The function fsr will select the Nsp points with the
+largest value of Wt and Ws .
+4 Experiments
+In this section, we first demonstrate the effectiveness
+of the PVD-AL method in achieving seamless conversions between different NeRF architectures (Fig. 3 and
+Table 2). We prove its significant advantage in enhancing model performance, whereby utilizing PVD-AL as
+a training tool yields student models that outperform
+those trained from scratch (Fig. 1, 4 and 5). Subsequently, we analyze the role of the proposed active
+learning strategies (Fig. 8) and visualize the important camera poses, sampled rays, and sampled points
+involved (Fig. 7). We then explore the flexibility of these
+strategies, applying them as plugins to various methods
+and significantly improving their performance (Table 3
+and Fig. 1). We then validate the enormous potential
+of PVD-AL in attribute transfer between different models: By employing PVD-AL, the editing capabilities of
+different models can be concentrated onto any desired
+model (Fig. 1 and 6). Additionally, we confirm the role
+of PVD-AL in compressing model parameters and reducing training time (Table 4). We further apply the
+capabilities of PVD-AL to terminal interactive tasks,
+successfully achieving richer scenes and faster interactive models on mobile devices (Fig. 9), demonstrating
+the significant application value of PVD-AL. Finally,
+we test the results of continued fine-tuning of the distilled models (Table 5) and conduct ablation experiments (Tables 6 and 7) to verify the importance of each
+component proposed in our method.
+4.1 Implementation Details
+Datasets. Our experiments are conducted mainly on
+the three datasets: Synthetic-NeRF (Mildenhall et al.,
+2020), forward-facing (LLFF) (Mildenhall et al., 2019)
+and TanksAndTemple (Knapitsch et al., 2017). We
+solely use the aforementioned datasets to train teacher
+models. During the distillation phase, we generate
+pseudo-labels using the teacher to create synthetic images, without touching the real training data.
+Network Architecture. We try to stick as close to
+the original paper settings as feasible for each structure
+(MLP / sparse Tensors / low-rank Tensors / Hashtables). For MLP (Yen-Chen, 2020), positional encoding is also utilized for coordinates and view directions.
+For sparse Tensors (Fridovich-Keil et al., 2022), we use
+spherical harmonics of degree 2, and the 128×128×128
+grid for Synthetic-NeRF dataset and TankAndTemple
+dataset, 512×512×128 grid for LLFF dataset. For lowrank Tensors (VM-decomposition) (Chen et al., 2022),
+we take 48 components in total. For Hashtables (Müller
+et al., 2022), we set the coarsest resolution, the finest
+resolution, levels, hashtable size and feature dimensions
+to 16, 2048 × scene scope, 14, 219 , and 2 respectively.
+Training and Distilling Details. We implement our
+method with the PyTorch framework (Paszke et al.,
+2019) to train teachers and distill students. We use
+Adam optimizer (Kingma and Ba, 2014) with initial
+learning rates of 0.02 and run 20k steps with a batch
+size of 4096 rays. For distilling, we initial the loss rate
+for volume-aligned, density, color, and RGB with 2e-3,
+2e-3, 2e-3, and 1, respectively. The first stage consumes
+3k steps, the second stage consumes 5k steps, and the
+third stage will take all the resting steps. Three levels
+of active learning strategy will be incorporated into the
+rest training process after the first two phases have been
+completed. We set 10% of important rays as important
+rays and 30% sample points as important points in each
+training iteration, and 10% camera poses as important
+poses in each training epoch. All the experiments are
+performed on a single NVIDIA V100 GPU.
+4.2 Mutul-Conversion between Different Architectures
+4.2.1 Quantitative Results
+We first train four teachers with different structures for
+each scene in the three benchmark datasets, yielding
+84 teacher models in total, and then perform mutual
+conversion between the four structures for each scene,
+totaling 336 distillation experiments. We then average
+the PSNR / SSIM (higher is better) and LPIPS (Zhang
+et al., 2018) (lower is better) results for these distillation
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+Teacher
+9
+Student
+s-Hash
+s-VM
+s-MLP
+s-Tensors
+34.33
+34.31
+33.56
+32.88
+29.65
+33.21
+33.07
+33.21
+31.95
+29.8
+31.88
+31.88
+31.75
+31.88
+29.74
+29.07
+29.02
+29.05
+28.92
+29.05
+t-Hash
+t-VM
+t-MLP
+t-Tensors
+Fig. 3 Results of mutual-conversion between different NeRF architectures. We perform the PVD-AL between
+Hashtables, VM-decomposition, MLP and sparse Tensors on the chair scene from the Synthetic-NeRF dataset. The numbers
+above the image indicate PSNR. The ‘s-’ stands for student, and the ‘t-’ denotes teacher.
+Table 2 Quantitative results of mutual-conversion between different NeRF architectures. Metrics are averaged
+over the Synthetic-NeRF, LLFF, and TanksAndTemple datasets. We first train four teachers with different structures for each
+scene in the three datasets, yielding 84 teacher models in total. We then perform the mutual conversion between four structures
+for each scene, for a total of 336 distillation experiments.
+PSNR↑
+LPIPSalex ↓
+SSIM↑
+LPIPSvgg ↓
+t-Hash t-VM t-MLP t-Tensors t-Hash t-VM t-MLP t-Tensors t-Hash t-VM t-MLP t-Tensors t-Hash t-VM t-MLP t-Tensors
+Synthetic-NeRF
+teacher
+32.58
+31.52
+30.78
+27.49
+0.96
+0.955
+0.946
+0.917
+0.032
+0.04
+0.049
+0.122
+0.055
+0.061
+0.075
+0.112
+s-Hash
+s-VM
+s-MLP
+s-Tensors
+32.58
+31.83
+31.63
+28.19
+31.35
+31.52
+30.78
+28.2
+30.75
+30.57
+30.78
+28.09
+27.44
+27.48
+27.38
+27.49
+0.96
+0.957
+0.953
+0.924
+0.954
+0.955
+0.948
+0.923
+0.947
+0.945
+0.946
+0.921
+0.915
+0.916
+0.914
+0.917
+0.032
+0.038
+0.043
+0.102
+0.042
+0.04
+0.05
+0.103
+0.051
+0.053
+0.049
+0.105
+0.117
+0.121
+0.119
+0.122
+0.055
+0.06
+0.069
+0.105
+0.067
+0.061
+0.076
+0.107
+0.077
+0.077
+0.075
+0.11
+0.116
+0.114
+0.118
+0.112
+teacher
+26.7
+25.27
+25
+21.33
+0.832
+0.777
+0.748
+0.59
+0.13
+0.196
+0.227
+0.53
+0.231
+0.295
+0.344
+0.512
+s-Hash
+s-VM
+s-MLP
+s-Tensors
+26.68
+25.98
+25.95
+21.87
+25.36
+25.24
+24.89
+21.26
+25.09
+24.85
+25.01
+21.34
+21.39
+21.39
+21.33
+21.44
+0.83
+0.793
+0.786
+0.611
+0.782
+0.774
+0.741
+0.59
+0.754
+0.74
+0.748
+0.586
+0.592
+0.591
+0.592
+0.591
+0.133
+0.19
+0.201
+0.512
+0.195
+0.197
+0.253
+0.543
+0.233
+0.251
+0.227
+0.536
+0.526
+0.529
+0.53
+0.527
+0.23
+0.29
+0.315
+0.499
+0.287
+0.292
+0.361
+0.514
+0.334
+0.346
+0.347
+0.517
+0.511
+0.511
+0.524
+0.512
+teacher
+29.26
+27.27
+25.96
+25
+0.915
+0.897
+0.879
+0.865
+0.106
+0.189
+0.201
+0.279
+0.134
+0.182
+0.2
+0.225
+s-Hash
+s-VM
+s-MLP
+s-Tensors
+29.24
+28.3
+27.97
+25.43
+27.13
+27.27
+26.71
+25.31
+25.94
+25.89
+25.93
+24.84
+24.92
+24.96
+24.78
+24.98
+0.915
+0.906
+0.9
+0.865
+0.893
+0.895
+0.887
+0.867
+0.88
+0.879
+0.876
+0.863
+0.863
+0.865
+0.863
+0.865
+0.106
+0.153
+0.152
+0.263
+0.184
+0.188
+0.201
+0.262
+0.203
+0.201
+0.218
+0.266
+0.271
+0.28
+0.273
+0.281
+0.134
+0.165
+0.175
+0.228
+0.183
+0.181
+0.197
+0.222
+0.201
+0.204
+0.201
+0.224
+0.229
+0.227
+0.23
+0.225
+LLFF
+TanksAndTemples
+Shuangkang Fang 1 et al.
+10
+Fig. 4 Quantitative comparison between the model obtained by PVD-AL and that trained from scratch. PVDAL demonstrates markedly superior performance in terms of PSNR compared to training a model from scratch.
+experiments, which are shown in Table 2. This table
+demonstrates that our method is able to successfully
+complete the mutual-conversion between four different
+structures, and the students who are the outcome of our
+method display exceptionally competitive performance.
+We further experimentally validated the assistance
+provided by PVD-AL in enhancing the performance
+limit of the student, wherein a student distilled from a
+high-performance teacher exhibits better performance
+than one trained from scratch, as seen in Fig. 4. For instance, when distilling a Hashtables-based model to an
+MLP-based model, the PSNR on the TanksAndTemple dataset increases by 2dB compared to training the
+MLP-based model from scratch, demonstrating the superiority of our distillation scheme.
+Further analysis in Table 2 reveals that the student’s
+performance is constrained by two factors: the teacher’s
+performance and the student’s own capacity. When the
+student’s modeling abilities are inferior to or comparable to those of the teacher, the student can strive to
+mimic the teacher’s performance to the fullest extent
+possible. Conversely, if a student’s modeling capabilities surpass those of the teacher, the student can undergo further enhancement through fine-tuning, which
+will be covered in detail in Subsection 4.7.
+4.2.2 Qualitative Results
+Fig. 3 illustrates an example of mutual-conversion
+visualization results on the chair scene from the
+Synthetic-NeRF dataset amongst different architectures of Hashtables, VM-decomposition, MLP, and
+sparse Tensors. The visual quality of the student is frequently indistinguishable from that of the teacher, illustrating the outstanding features of our method for
+sustaining synthesis quality. We also present a visual
+comparison between the model obtained by our method
+and the model trained from scratch, as shown in Fig. 5.
+It can be observed that the rendering images produced
+by PVD-AL are superior to those produced by training
+the student from scratch. This advancement is mostly
+attributable to our distillation method across distinct
+structures, which makes it possible for an experienced
+teacher to break the upper limit of a student’s capabilities. Therefore, PVD-AL can serve as a novel training
+tool to attain higher-performing NeRF series models.
+4.3 Editing Ability Conversion
+In addition to the various advantages mentioned above,
+one of the most important features of our approach is
+the implementation of property migration between different structures, which is the key motivation of this paper, i.e., there is no single “best” architecture for neural
+rendering. For example, we find that Hashtables-based
+11
+Ours: s-VM
+VM
+Our: s-MLP
+MLP
+Our: s-Tesnsors
+Tensors
+t-Hash
+GT
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+Fig. 5 Qualitative comparison between the model obtained by PVD-AL and that trained from scratch. The
+synthetic quality of our method is preferable to train a model from scratch.
+Shuangkang Fang 1 et al.
+12
+(a)
+(1) reference
+(2) appearance in MLP
+(3) erasing in Tensors
+(4) appearance + erasing
+in MLP or Tensors
+(1) reference
+(2) decompose in MLP
+(3) compose in Tensors
+(4) decompose + compose
+in Tensors or MLP
+(1) reference
+(2) editing flower in MLP
+FPS!"# = 0.12
+(3) MLP to VM
+FPS$! = 2.7
+(4) MLP to Hash
+FPS%&'( = 14.3
+(b)
+(c)
+decompose +
+editing color +
+stylization+
+compose +
+high FPS+
+high performance
+(d)
+(1) reference
+(2) reference style
+(3) various attributes in
+different architecture
+(4) combine various
+attributes in one architecture
+Fig. 6 Transferring of different characteristics between diverse architectures. PVD-AL enables the superposition of
+distinct editing skills, high performance, and high FPS benefits. This is difficult to accomplish previously on a single structure.
+architecture is fast and produces high-quality modeling but lacks clear geometric interpretation due to the
+spatial aliasing caused by its Hashtables. Consequently,
+tasks like geometric editing, such as erasing or combining, are challenging compared to those facilitated by
+explicit Tensor structures. Similarly, the MLP offers an
+implicit space conducive to embedding various features,
+enabling artistic-style rendering. Nonetheless, its geometric structure remains ambiguous.
+As one concrete example, we first run an editing experiment by distilling between MLP and Tensors. We train an MLP-based model with appearance (Martin-Brualla et al., 2021) in Lego scene as
+shown in Fig. 6(a)(2), a Tensors-based model with erasing bucket as shown in Fig. 6(a)(3). Then, we can trans-
+fer the appearance from MLP to Tensors by PVD-AL
+and simply erase the bucket in the scene using Tensors’
+clear geometric. Finally, we obtain a scene with both
+appearance and geometry changes represented by Tensors. Likewise, we can also transfer the erasing ability
+from Tensors to MLP to empower MLP with two editing capabilities as shown in Fig. 6(a)(4).
+The decomposition and composition of scenes is another illustration of the migration property between implicit MLP and explicit Tensors. The hidden space vector of the MLP can be employed as a retrievable feature
+to achieve semantic-level deconstruction (Kobayashi
+et al., 2022), as shown in Fig. 6(b)(2). The unambiguous
+spatial geometric relationship of explicit Tensors can be
+used to combine various scenes (Tang et al., 2022), as
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+13
+0
+scenes
+(a) important poses
+(b) important rays
+(c) important points
+Fig. 7 Visualization of important camera poses, sample rays, and sample points during the distillation process.
+(a) illustrates the distribution of camera poses, where red indicates important poses. (b) demonstrates the distribution of pixels
+corresponding to important rays. (c) showcases the sample points along rays and their corresponding weights, where larger
+points denote the important sample points.
+Fig. 8 Trend of maximum, minimum and average
+PSNR on validation set when distilling VM to Tensors in Truck scene from TanksAndTemples dataset.
+Solid lines indicate the utilization of active learning, while
+dashed lines represent its absence.
+Nevertheless, MLP-based models typically suffer from
+sluggish inference speed and low FPS, reducing their
+usefulness in practical applications. In this instance,
+we can transfer the MLP scenes with artistic effects to
+other faster architectures (such as VM and Hash) by our
+PVD-AL, as depicted in Fig. 6(c)(3) and Fig. 6(c)(4).
+It should be emphasized that our method does not
+place a cap on the number of characteristics that can
+be migrated. Hence, all the characteristics shown in
+Fig. 6 can be incorporated into a single model. By transforming the appearance, erasing, editing color, decomposition, composition, high-FPS and high-performance
+properties from many structures to one structure, we
+have successfully merged the benefits of various structures, which was difficult to accomplish previously on a
+single structure, as seen in Fig. 1(a) and Fig. 6(d).
+4.4 Properties of Active Learning
+4.4.1 Role of Active Learning
+shown in Fig. 6(b)(3). Our method may simultaneously
+realize decomposition and composition and describe it
+as any architecture like in Fig. 6(b)(4).
+The third illustration is the aesthetic editing of a
+specific object in a scene utilizing implicit MLP-based
+models (Kobayashi et al., 2022), as seen in Fig. 6(c)(2).
+We analyze the PSNR trend for our method with
+(PVD-AL) and without (PVD) active learning during
+training. Fig. 8 illustrates the variations in the maximum, minimum, and mean PSNR values across all images in the validation set. The results show that while
+14
+Shuangkang Fang 1 et al.
+Fig. 9 Expansion of virtual interaction on iPhone 13 device. By leveraging the editing capabilities and model compression efficiency of PVD-AL, the diversity and real-time responsiveness of interactions can be effectively enhanced, a feat
+unattainable by the vanilla mobileR2L method (Cao et al., 2023).
+the maximum PSNR of PVD-AL is slightly lower, the
+minimum PSNR is significantly higher compared to
+PVD. This suggests that the active learning technique
+enhances student performance on challenging samples,
+leading to a more balanced overall performance and a
+higher average PSNR.
+4.4.2 Visualization of Active Learning
+We extract the important camera poses, the pixel positions corresponding to important rays, and the weights
+of sample points found by our active learning strategy
+and depict them in Fig. 7.
+Fig. 7(a) illustrates that important camera poses
+are concentrated in specific areas rather than randomly
+distributed. This suggests that students encounter difficulties primarily with a small subset of camera poses,
+and focusing more on these poses during training can
+notably enhance the student’s performance.
+For the display of important rays in Fig. 7(b), it
+is evident that, during the distillation process, our active learning strategy concentrates mostly on the highfrequency information of the images, which is consistent with the results of Fig. 5 that the synthetic quality in high-frequency areas is improved. Notably, the
+absence of important rays in spatially empty zones suggests that students can readily adapt to these regions.
+Consequently, indiscriminate fitting of such areas would
+result in the student engaging in futile efforts. Our approach addresses this issue by directing the student’s
+learning focus towards the most crucial regions within
+a scene, thus optimizing learning potential.
+In Fig. 7(c), we present two important rays and illustrate the weights assigned to the sample points along
+each ray. These weights exhibit a clear impulse distribution, suggesting that sample points with higher weights
+have a greater impact on the resulting RGB values. By
+identifying these crucial points to students in advance,
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+Table 3 Scalability of the proposed active learning strategy to other NeRF-based distillation tasks.
+“+AL” indicates that active learning is employed as a plugin, where the performance is further improved.
+Synthetic-NeRF
+LLFF
+TanksAndTemples
+PSNR
+SSIM
+PSNR SSIM PSNR
+30.42
+30.02
+30.35
+0.946
+0.938
+0.94
+27.54 0.896
+27.19 0.89
+27.27 0.891
+teacher
+31.14
+28.02
+KiloNeRF
+KiloNeRF+AL 29.21
+0.952
+0.921
+0.943
+teacher
+R2L
+R2L+AL
+-
+-
+SSIM
+-
+-
+28.26
+26.18
+27.41
+0.901
+0.793
+0.847
+Table 4 Ability of PVD-AL to compress model parameters and reduce training time. The teacher is based
+on the representation of Hashtables.
+Synthetic-NeRF
+LLFF
+TanksAndTemples
+Method PSNR Memory Time PSNR Memory Time PSNR Memory Time
+Plenoxles 27.74 560M 0.34h 21.72
+s-Tensors 28.19 233M 0.42h 21.87
+2.2G
+1.8G
+0.76h 25.75
+0.91h 25.43
+4.4G
+1.8G
+0.62h
+0.78h
+NeRF
+s-MLP
+14M
+11M
+25.7h 26.02
+2.02h 27.28
+14M
+11M
+24.7h
+1.87h
+31.21
+31.14
+14M
+11M
+19.5h 25.2
+1.4h 25.61
+they can better prioritize fitting them during the distillation process.
+4.4.3 Improving Other Methods As a Plug-in
+Our active learning strategy not only applies to PVDAL but is also readily extendable to various NeRFbased distillation tasks, thereby enhancing their performance. For example, we deploy this strategy to augment the R2L method (Wang et al., 2022b), which distills a radiation field model into a light field model, as
+well as KiloNeRF (Reiser et al., 2021), which distills
+a high-capacity MLP into thousands of smaller MLP.
+For ease of implementation, we exclusively focus on important sample rays and camera poses for the aforementioned models. The visualization outcomes are depicted
+in Fig. 1(c), while the metric results are presented in
+Table 3. It can be seen that the integration of our active learning strategy has markedly enhanced the performance of R2L and KiloNeRF, underscoring the generalizability of our approach. Besides, it is worth noting
+that the design of the three levels of the active learning
+strategy in this study is decoupled and allows users to
+integrate only certain levels, making it highly adaptable
+when applied to other methods.
+4.5 Compressing Model Size and Training Time
+PVD-AL is able to produce better outcomes with a
+more concise parameter representation for students
+with inferior modeling capabilities since it can help students study more thoroughly. In order to confirm this,
+15
+we compress the parameters of the NeRF and Plenoxels,
+and compare them trained from scratch with the same
+number of iterations. The results are displayed in Table 4. The model produced by PVD-AL still performs
+fairly or even better with fewer parameters than the
+model trained from scratch. Consequently, our method
+can be utilized as a compression tool, which is advantageous in situations with limited hardware resources.
+4.6 Deployment to Mobile Device
+We further explore the application value of PVD-AL.
+Specifically, we integrate active learning as a plugin into
+the mobileR2L method (Cao et al., 2023) to enhance its
+rendering quality. Subsequently, we leverage PVD-AL’s
+capability of attribute transfer to generate new scenes
+with editing effects. Finally, utilizing PVD-AL’s ability
+of model compression, we obtain models with smaller
+parameter sizes and faster running speeds and deploy
+these models on iPhone 13 devices as shown in Fig. 9.
+It is evident that PVD-AL successfully extends mobileR2L’s functionality on resource-constrained mobile
+devices, enabling the generation of distinctive, interactively editable 3D scenes and significantly enhancing
+user interactions’ real-time responsiveness.
+4.7 Finetuning Effects
+The finetuning effects after distillation, as delineated in
+Table 5, are categorized into two cases. Case 1: When
+the teacher exhibits superior modeling capabilities, finetuning yields minimal benefits. The main reason is
+that a superior teacher can provide sufficient pseudo
+datasets to train students adequately. Therefore, the final performance boost from using real data is limited.
+Case 2: The student demonstrates superior modeling
+capabilities, finetuning enhances the student’s performance. This improvement occurs because the student’s
+performance is capped by the teacher when distilling.
+It’s essential to emphasize that our method primarily aims to leverage the distinct properties of various
+structures, as elaborated in Subsection 4.3. Therefore,
+it still remains meaningful when distilling a student architecture with inferior modeling capabilities. To mitigate unnecessary information loss, employing common
+techniques like augmenting model parameters can help
+better align the capabilities of teachers and students.
+4.8 Ablation Study of PVD-AL Components
+To evaluate the importance of each component of PVDAL, we conduct several groups of ablation experiments,
+Shuangkang Fang 1 et al.
+16
+Table 5 Finetuning results of the model obtained from PVD-AL. Metrics are averaged over the scenes on the
+Synthetic-NeRF, LLFF, and TanksAndTemple datasets. Case 1: The teacher is superior in modeling capabilities. Case 2:The
+student is superior in modeling capabilities.
+Synthetic-NeRF
+t-Hash (Case 1)
+LLFF
+t-Tesnors (Case 2)
+t-Hash (Case 1)
+TanksAndTemples
+t-Tesnors (Case 2)
+t-Hash (Case 1)
+t-Tesnors (Case 2)
+PSNR SSIM LPIPSalex PSNR SSIM LPIPSalex PSNR SSIM LPIPSalex PSNR SSIM LPIPSalex PSNR SSIM LPIPSalex PSNR SSIM LPIPSalex
+32.58 0.96
+0.032
+27.49 0.917
+0.122
+26.7 0.832
+0.13
+21.33 0.59
+0.53
+29.26 0.915
+0.106
+25
+0.865
+0.279
+s-VM
+s-VMf t
+31.83 0.957
+31.72 0.956
+0.038
+0.037
+27.48 0.916
+31.5 0.955
+0.121
+0.042
+25.98 0.793
+26.11 0.795
+0.19
+0.192
+21.39 0.591
+25.25 0.77
+0.529
+0.194
+28.3 0.906
+28.22 0.906
+0.153
+0.156
+24.96 0.865
+27.2 0.892
+0.28
+0.186
+s-MLP
+31.63 0.953
+s-MLPf t 31.46 0.95
+0.043
+0.046
+27.38 0.914
+30.81 0.948
+0.119
+0.045
+25.95 0.786
+25.84 0.788
+0.201
+0.201
+21.33 0.592
+25.04 0.75
+0.53
+0.22
+27.97 0.9
+27.93 0.896
+0.152
+0.155
+24.78 0.863
+25.89 0.877
+0.273
+0.205
+Table 6 Ablation study of each designed component.
+Metrics are averaged over the 5 scenes from TanksAndTemples dataset in the conversion from VM-decomposition to
+MLP.
+w/o Lv
+2
+w/o Lσ
+2
+c
+w/o L2
+w/o Lrgb
+2
+w/o sigma-restric
+w/o block-wise
+w/o posesAL
+w/o raysAL
+w/o pointsAL
+w/all
+PSNR
+SSIM
+Lpipsalex
+Lpipsvgg
+25.87
+26.16
+26.34
+24.53
+25.19
+26.13
+26.34
+26.03
+26.52
+26.71
+0.858
+0.873
+0.873
+0.808
+0.849
+0.868
+0.876
+0.869
+0.881
+0.887
+0.208
+0.205
+0.206
+0.225
+0.214
+0.206
+0.204
+0.205
+0.201
+0.201
+0.202
+0.201
+0.199
+0.232
+0.207
+0.203
+0.200
+0.207
+0.199
+0.197
+Table 7 Ablation study of the division position for
+MLP. Metrics are averaged over the 8 scenes on SyntheticNeRF dataset in the conversion from Hashtables to MLP.
+PSNR
+Time
+K=2
+K=3
+K=4
+K=5
+K=6
+31.35
+1.35h
+31.55
+1.39h
+31.63
+1.42h
+31.69
+1.47h
+31.70
+1.53h
+the results of which are presented in Table 6. The experiments indicate that our developed loss contributes to
+a PSNR improvement ranging from approximately 0.4
+to 2.2 dB. Furthermore, we observe that unregulated
+density values adversely affect performance. Additionally, omitting the block-wise technique during distillation led to inferior outcomes. Lastly, we underscore the
+importance of the active learning strategy at each level.
+We also conduct an ablation experiment on the K
+value in Table 1, and the average PSNR and training time are as shown in Table 7. In general, picking
+a proper K value is a process of striking a balance
+between performance and training time. In general, a
+larger K results in a higher PSNR, indicating that using
+more layers to fit Hashtables can enhance performance.
+Conversely, a smaller K reduces training time due to
+our blockwise distillation strategy. In this context, K=4
+would be a Pareto optimum.
+5 Discussion and Conclusion
+In this work, we present PVD-AL, a systematic distillation method that allows conversions between different NeRF architectures, including MLP, sparse Tensors, low-rank Tensors, and Hashtables, while maintaining high synthesis quality. Empirical experiments
+solidly demonstrate the efficiency of our approach, on
+both synthetic and real-world datasets.
+Critical to the success of PVD-AL is the meticulous design of loss functions, progressive and blockwise
+distillation schemes utilizing intermediate volume representations, and special treatment of density values.
+Additionally, we introduce a three-level active learning
+methodology. This strategy continually evaluates and
+updates the challenging camera poses, sample rays, and
+sample points for students, enhancing their comprehension of these crucial elements. This three-level active
+learning strategy is decoupled and adaptable, serving
+as versatile plug-ins for other distillation tasks.
+By breaking down barriers between different NeRF
+architectures, PVD-AL can be easily employed to assist
+downstream tasks. For instance, it serves as a tool for
+efficiently training and compressing models, acquiring
+them in a faster, higher-performing manner compared
+to training from scratch. PVD-AL also allows for the
+fusion of various attributes across different structures,
+enabling the acquisition of models with multiple editing
+abilities. Furthermore, it facilitates the transformation
+of models into a specific one that runs more efficiently,
+meeting the real-time demands of hardware resources
+(such as mobile devices).
+In view of the limitations of PVD-AL, we consider possible corresponding solutions. For instance,
+the student’s performance is inherently bounded by
+the teacher’s capability. This limitation can be addressed either by fine-tuning the student or enhancing
+the teacher’s modeling capacity. Furthermore, concurrent execution of both teacher and student models during distillation may trigger memory overflow issues. In
+such instances, a viable solution is to execute the distillation process sequentially.
+Progressive Volume Distillation with Active Learning for Efficient NeRF Architecture Conversion
+Data availability statement The data utilized in Tables 2 to 7 and Figs. 1 to 9 all can be accessed from the
+following public repositories:
+– Synthetic-NeRF
+dataset:
+https://drive.
+google.com/drive/folders/128yBriW1IG_
+3NJ5Rp7APSTZsJqdJdfc1
+– LLFF
+dataset:
+https://cseweb.ucsd.edu/
+~viscomp/projects/LF/papers/SIG19/lffusion
+– TanksAndTemples
+dataset:
+https://www.
+tanksandtemples.org/download
+Acknowledgements This work is supported by the National Natural Science Foundation of China (U20B2042,
+62076019).
+References
+Adamkiewicz M, Chen T, Caccavale A, Gardner R, Culbertson P, Bohg J, Schwager M (2022) Vision-only
+robot navigation in a neural radiance world. IEEE
+Robotics and Automation Letters 7(2):4606–4613
+Barron JT, Mildenhall B, Verbin D, Srinivasan PP,
+Hedman P (2022) Mip-nerf 360: Unbounded antialiased neural radiance fields. In: CVPR, pp 5470–
+5479
+Boreshban Y, Mirbostani SM, Ghassem-Sani G, Mirroshandel SA, Amiriparian S (2023) Improving question answering performance using knowledge distillation and active learning. Engineering Applications of
+Artificial Intelligence 123:106137
+Cao J, Wang H, Chemerys P, Shakhrai V, Hu J, Fu Y,
+Makoviichuk D, Tulyakov S, Ren J (2023) Real-time
+neural light field on mobile devices. In: CVPR, pp
+8328–8337
+Chan ER, Monteiro M, Kellnhofer P, Wu J, Wetzstein
+G (2021) pi-gan: Periodic implicit generative adversarial networks for 3d-aware image synthesis. In:
+CVPR, pp 5799–5809
+Chen A, Xu Z, Geiger A, Yu J, Su H (2022)
+Tensorf: Tensorial radiance fields. arXiv preprint
+arXiv:220309517
+Fang S, Wang Y, Yang Y, Tsai YH, Ding W, Zhou S,
+Yang MH (2023a) Editing 3d scenes via text prompts
+without retraining. arXiv e-prints pp arXiv–2309
+Fang S, Xu W, Wang H, Yang Y, Wang Y, Zhou S
+(2023b) One is all: Bridging the gap between neural
+radiance fields architectures with progressive volume
+distillation. In: AAAI
+Fridovich-Keil S, Yu A, Tancik M, Chen Q, Recht B,
+Kanazawa A (2022) Plenoxels: Radiance fields without neural networks. In: CVPR, pp 5501–5510
+Gao M, Zhang Z, Yu G, Arık SÖ, Davis LS, Pfister T (2020) Consistency-based semi-supervised ac-
+17
+tive learning: Towards minimizing labeling cost. In:
+ECCV, Springer, pp 510–526
+Gu J, Liu L, Wang P, Theobalt C (2021) Stylenerf:
+A style-based 3d-aware generator for high-resolution
+image synthesis. arXiv preprint arXiv:211008985
+Hao Z, Guo J, Han K, Tang Y, Hu H, Wang Y, Xu
+C (2024) One-for-all: Bridge the gap between heterogeneous architectures in knowledge distillation. In:
+NeurIPS
+Hinton G, Vinyals O, Dean J, et al. (2015) Distilling
+the knowledge in a neural network. arXiv preprint
+arXiv:150302531 2(7)
+Huang T, Zhang Y, Zheng M, You S, Wang F, Qian C,
+Xu C (2024) Knowledge diffusion for distillation. In:
+NeurIPS
+Kingma DP, Ba J (2014) Adam: A method for stochastic optimization. arXiv preprint arXiv:14126980
+Knapitsch A, Park J, Zhou QY, Koltun V (2017) Tanks
+and temples: Benchmarking large-scale scene reconstruction. ACM Transactions on Graphics (ToG)
+36(4):1–13
+Kobayashi S, Matsumoto E, Sitzmann V (2022) Decomposing nerf for editing via feature field distillation.
+arXiv preprint arXiv:220515585
+Leng H, Fang S, Wang Y, Zhang Z, Qi D, Ding W
+(2023) Dffg: Fast gradient iteration for data-free
+quantization. In: BMVC
+Li Y, Lin ZH, Forsyth D, Huang JB, Wang S (2023)
+Climatenerf: Extreme weather synthesis in neural radiance field. In: CVPR, pp 3227–3238
+Liu K, Zhan F, Chen Y, Zhang J, Yu Y, El Saddik A, Lu
+S, Xing EP (2023) Stylerf: Zero-shot 3d style transfer
+of neural radiance fields. In: CVPR, pp 8338–8348
+Liu L, Gu J, Lin KZ, Chua TS, Theobalt C (2020)
+Neural sparse voxel fields. In: NeurIPS
+Lou A, Planche B, Gao Z, Li Y, Luan T, Ding H, Chen
+T, Noble J, Wu Z (2024) Darenerf: Direction-aware
+representation for dynamic scenes. arXiv preprint
+arXiv:240302265
+Manjah D, Cacciarelli D, Standaert B, Benkedadra
+M, De Hertaing GR, Macq B, Galland S,
+De Vleeschouwer C (2023) Stream-based active distillation for scalable model deployment. In: CVPR,
+pp 4998–5006
+Martin-Brualla R, Radwan N, Sajjadi MS, Barron JT,
+Dosovitskiy A, Duckworth D (2021) Nerf in the wild:
+Neural radiance fields for unconstrained photo collections. In: CVPR, pp 7210–7219
+Mildenhall B, Srinivasan PP, Ortiz-Cayon R, Kalantari
+NK, Ramamoorthi R, Ng R, Kar A (2019) Local light
+field fusion: Practical view synthesis with prescriptive
+sampling guidelines. ACM Transactions on Graphics
+(TOG) 38(4):1–14
+18
+Mildenhall B, Srinivasan PP, Tancik M, Barron JT,
+Ramamoorthi R, Ng R (2020) Nerf: Representing
+scenes as neural radiance fields for view synthesis.
+In: ECCV, Springer, pp 405–421
+Moreau A, Piasco N, Tsishkou D, Stanciulescu B,
+de La Fortelle A (2022) Lens: Localization enhanced
+by nerf synthesis. In: CoRL, PMLR, pp 1347–1356
+Müller T, Evans A, Schied C, Keller A (2022) Instant neural graphics primitives with a multiresolution hash encoding. arXiv preprint arXiv:220105989
+Pan X, Lai Z, Song S, Huang G (2022) Activenerf:
+Learning where to see with uncertainty estimation.
+In: ECCV, Springer, pp 230–246
+Paszke A, Gross S, Massa F, Lerer A, Bradbury J,
+Chanan G, Killeen T, Lin Z, Gimelshein N, Antiga
+L, et al. (2019) Pytorch: An imperative style, highperformance deep learning library. In: NeurIPS
+Peng S, He Z, Zhang H, Yan R, Wang C, Zhu Q, Liu
+X (2021) Megloc: A robust and accurate visual localization pipeline. arXiv preprint arXiv:211113063
+Radford A, Kim JW, Hallacy C, Ramesh A, Goh G,
+Agarwal S, Sastry G, Askell A, Mishkin P, Clark J,
+et al. (2021) Learning transferable visual models from
+natural language supervision. In: ICML, PMLR, pp
+8748–8763
+Rangnekar A, Kanan C, Hoffman M (2023) Semantic
+segmentation with active semi-supervised learning.
+In: WACV, pp 5966–5977
+Rasmuson S, Sintorn E, Assarsson U (2022) Perf: performant, explicit radiance fields. Frontiers in Computer Science 4:871808
+Reiser C, Peng S, Liao Y, Geiger A (2021) Kilonerf:
+Speeding up neural radiance fields with thousands of
+tiny mlps. In: ICCV, pp 14335–14345
+Ren P, Xiao Y, Chang X, Huang PY, Li Z, Gupta BB,
+Chen X, Wang X (2021) A survey of deep active
+learning. ACM computing surveys (CSUR) 54(9):1–
+40
+Sitzmann V, Zollhöfer M, Wetzstein G (2019) Scene
+representation networks: Continuous 3d-structureaware neural scene representations
+Tang J, Chen X, Wang J, Zeng G (2022) Compressiblecomposable nerf via rank-residual decomposition.
+arXiv preprint arXiv:220514870
+Tharwat A, Schenck W (2023a) A survey on active
+learning: state-of-the-art, practical challenges and research directions. Mathematics 11(4):820
+Tharwat A, Schenck W (2023b) A survey on active
+learning: state-of-the-art, practical challenges and research directions. Mathematics 11(4):820
+Usvyatsov M, Ballester-Rippoll R, Bashaeva L,
+Schindler K, Ferrer G, Oseledets I (2022) T4dt: Tensorizing time for learning temporal 3d visual data.
+Shuangkang Fang 1 et al.
+arXiv preprint arXiv:220801421
+Wang C, Chai M, He M, Chen D, Liao J (2022a) Clipnerf: Text-and-image driven manipulation of neural
+radiance fields. In: CVPR, pp 3835–3844
+Wang H, Ren J, Huang Z, Olszewski K, Chai M, Fu
+Y, Tulyakov S (2022b) R2l: Distilling neural radiance field to neural light field for efficient novel view
+synthesis. arXiv preprint arXiv:220317261
+Wang Y, Fang S, Zhang H, Li H, Zhang Z, Zeng X,
+Ding W (2024) Uav-enerf: Text-driven uav scene editing with neural radiance fields. IEEE Transactions on
+Geoscience and Remote Sensing
+Wizadwongsa S, Phongthawee P, Yenphraphai J, Suwajanakorn S (2021) Nex: Real-time view synthesis with
+neural basis expansion. In: CVPR, pp 8534–8543
+Wu L, Lee JY, Bhattad A, Wang YX, Forsyth D (2022)
+Diver: Real-time and accurate neural radiance fields
+with deterministic integration for volume rendering.
+In: CVPR, pp 16200–16209
+Yen-Chen L (2020) Nerf-pytorch. https://github.
+com/yenchenlin/nerf-pytorch/
+Yu A, Li R, Tancik M, Li H, Ng R, Kanazawa A (2021)
+Plenoctrees for real-time rendering of neural radiance
+fields. In: ICCV, pp 5752–5761
+Zhang R, Isola P, Efros AA, Shechtman E, Wang O
+(2018) The unreasonable effectiveness of deep features as a perceptual metric. In: CVPR, pp 586–595
+Zhang Y, Chen G, Cui S (2023) Efficient largescale scene representation with a hybrid of highresolution grid and plane features. arXiv preprint
+arXiv:230303003
+Zhou T, Tucker R, Flynn J, Fyffe G, Snavely N (2018)
+Stereo magnification: Learning view synthesis using
+multiplane images. arXiv preprint arXiv:180509817

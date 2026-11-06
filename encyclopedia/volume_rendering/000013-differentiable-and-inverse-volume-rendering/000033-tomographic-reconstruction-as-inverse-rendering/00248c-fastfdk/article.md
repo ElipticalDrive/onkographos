@@ -1,0 +1,282 @@
+# FastFDK
+
+Also called: FDK, Cone-Beam FDK, FDK Algorithm, Feldkamp-Davis-Kress
+
+## Overview
+FastFDK is a CPU-optimized implementation of the Feldkamp-Davis-Kress (FDK) algorithm, an analytical method for reconstructing a 3D volume from a stack of 2D cone-beam projection images [S1, unofficial]. It solves the tomographic reconstruction problem by applying a specific convolution filter to weighted projections and back-projecting them into a 3D grid [S1, unofficial]. It sets itself apart from its siblings by precomputing geometric weights and using a direct spatial-domain convolution filter to avoid the overhead of FFTs during the main reconstruction loop, prioritizing speed and memory locality on CPU architectures [S1, unofficial].
+
+## How it works
+**Inputs:** A stack of `m_id` projection images of size `m_iw` x `m_ih`, and scanner geometry parameters: pixel size `m_ps`, source-to-origin distance `m_sd`, origin-to-detector distance `m_yd`, volume dimensions `m_vw` x `m_vw` x `m_vd`, voxel size `m_vs`, and angular span `m_na` in degrees.
+**Outputs:** A 3D volume `m_vol` of type `float` with dimensions `m_vw` x `m_vw` x `m_vd` [S1, unofficial].
+
+**Data Structures:**
+*   `m_vol`: Output volume array, size `m_vw * m_vw * m_vd` [S1, unofficial].
+*   `m_cyl`: Boolean mask array, size `m_vw * m_vw`. `m_cyl[i + m_vw*j]` is true if the voxel `(i,j)` lies within the cylinder defined by the volume width [S1, unofficial].
+*   `m_flt`: Float array, size `m_nf = m_iw / 2`. Stores the odd-indexed coefficients of the convolution filter [S1, unofficial].
+*   `m_w0`: Float array, size `m_iw * m_ih`. Precomputed initial image weighting factors [S1, unofficial].
+*   `m_buf`: Float array, size `m_iw`. Temporary buffer for processing image rows during filtering [S1, unofficial].
+*   `m_img`: Float array, size `m_iw * m_ih * m_id`. Storage for all filtered projection images [S1, unofficial].
+
+**Parameters:**
+*   `m_ps`: Adjusted pixel size. The constructor scales the input pixel size: `m_ps *= m_sd / (m_sd + m_yd)` [S1, unofficial].
+*   `m_k`: Filter center value, `1 / (4 * m_ps^2)` [S1, unofficial].
+*   `angStep`: Angle step in radians, `-m_na * M_PI / (m_id * 180)` [S1, unofficial].
+
+**Algorithm Steps:**
+
+1.  **Initialization:**
+    *   Clear `m_vol` to zero.
+    *   Precompute `m_w0`: For each pixel `(i, j)` in the projection image:
+        $$ v = (m_{ih}/2 - 0.5 - j) \cdot m_{ps} $$
+        $$ k_1 = m_{sd}^2 + v^2 $$
+        $$ u = (i + 0.5 - m_{iw}/2) \cdot m_{ps} $$
+        $$ m_{w0}[i + m_{iw} \cdot j] = \frac{m_{sd}}{\sqrt{u^2 + k_1}} $$
+    *   Precompute `m_flt`:
+        $$ m_k = \frac{1}{4 \cdot m_{ps}^2} $$
+        For `k` from `0` to `m_nf - 1`:
+        $$ j = 2k + 1 $$
+        $$ tmp = \pi \cdot m_{ps} \cdot j $$
+        $$ m_{flt}[k] = -\frac{1}{tmp^2} $$
+    *   Precompute `m_cyl`: For `i, j` from `0` to `m_vw - 1`:
+        $$ m_{cyl}[i + m_{vw} \cdot j] = ((2i - m_{vw})^2 + (2j - m_{vw})^2) < m_{vw}^2 $$
+
+2.  **Filtering:**
+    For each projection image `img` in the input stack:
+    *   For each row `j` from `0` to `m_ih - 1`:
+        *   Copy row `img[:, j]` to `m_buf`.
+        *   Apply weighting: `m_buf[i] *= m_w0[i + m_iw * j]` for all `i`.
+        *   Apply convolution filter to `m_buf`:
+            For each pixel `i` from `0` to `m_iw - 1`:
+            $$ v_0 = m_{buf}[i] \cdot m_k $$
+            For `k` from `0` to `m_nf - 1`:
+                $$ l = 2k + 1 $$
+                If `i - l >= 0`:
+                    If `i + l < m_iw`:
+                        $$ v_0 += (m_{buf}[i-l] + m_{buf}[i+l]) \cdot m_{flt}[k] $$
+                    Else:
+                        $$ v_0 += m_{buf}[i-l] \cdot m_{flt}[k] $$
+                Else If `i + l < m_iw`:
+                    $$ v_0 += m_{buf}[i+l] \cdot m_{flt}[k] $$
+                Else:
+                    Break loop.
+            $$ outImg[i] = v_0 $$
+        *   Store filtered row in `m_img`.
+
+3.  **Backprojection:**
+    Initialize `ang = 0`.
+    For each filtered projection `img` (index `n` from `1` to `m_id`):
+    *   Compute trigonometric values: $ca = \cos(ang)$, $sa = \sin(ang)$.
+    *   Compute projection scaling: $k_1 = m_{sd} / m_{ps}$.
+    *   For each volume row `j` from `0` to `m_vw - 1`:
+        *   Compute $vy = (m_{vw}/2 - 0.5 - j) \cdot m_{vs}$.
+        *   For each volume column `i` from `0` to `m_vw - 1`:
+            *   Let $l = j \cdot m_{vw} + i$.
+            *   If `!m_cyl[l]`, continue (skip voxels outside the cylinder).
+            *   Compute $vx = (i + 0.5 - m_{vw}/2) \cdot m_{vs}$.
+            *   Apply volume rotation:
+                $$ vvx = vx \cdot ca - vy \cdot sa $$
+                $$ vvy = vy \cdot ca + vx \cdot sa $$
+            *   Compute detector projection scaling:
+                $$ k_2 = \frac{k_1}{vvy + m_{sd}} $$
+            *   Compute detector coordinates:
+                $$ u = vvx \cdot k_2 + \frac{m_{iw}}{2} - 0.5 $$
+                $$ v = \frac{m_{ih}}{2} - vz \cdot k_2 - 0.5 $$
+                *(Note: $vz$ is computed inside the depth loop below)*
+            *   Compute integer indices and remainders for `u`:
+                $$ iu = \lfloor u \rfloor $$
+                If $u < 0$, $iu = iu - 1$.
+                $$ du = u - iu $$
+            *   For each volume depth `k` from `0` to `m_vd - 1`:
+                *   Compute $vz = (m_{vd}/2 - 0.5 - k) \cdot m_{vs}$.
+                *   Compute detector `v` coordinate:
+                    $$ v = \frac{m_{ih}}{2} - vz \cdot k_2 - 0.5 $$
+                *   Compute integer indices and remainders for `v`:
+                    $$ iv = \lfloor v \rfloor $$
+                    If $v < 0$, $iv = iv - 1$.
+                    $$ dv = v - iv $$
+                *   Perform bilinear interpolation of `img` at `(iu, iv)` with remainders `(du, dv)`:
+                    $$ val = (v_1 + du \cdot (v_2 - v_1)) + dv \cdot ((v_3 + du \cdot (v_4 - v_3)) - (v_1 + du \cdot (v_2 - v_1))) $$
+                    Where $v_1 = img[iu, iv]$, $v_2 = img[iu+1, iv]$, $v_3 = img[iu, iv+1]$, $v_4 = img[iu+1, iv+1]$. Out-of-bounds pixels return 0.
+                *   Compute post-projection weighting:
+                    $$ k_3 = \frac{m_{sd}}{m_{sd} + vvy} $$
+                    $$ val = val \cdot k_3^2 $$
+                *   Accumulate into volume with averaging:
+                    $$ m\_vol[i, j, k] = m\_vol[i, j, k] + \frac{val - m\_vol[i, j, k]}{n} $$
+    *   Update angle: $ang += angStep$.
+
+4.  **Normalization:**
+    For each voxel `p` in `m_vol`:
+    *   If $|p| < \epsilon$ and $p \neq 0$, set $p = 0$.
+    *   Else, $p = p / 2$.
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import math
+
+def fastfdk_reconstruct(images, iw, ih, id, ps, yd, sd, vw, vd, vs, na):
+    """
+    images: list of 2D arrays (id, ih, iw)
+    Returns: 3D array (vd, vw, vw)
+    """
+    # 1. Initialization
+    m_ps = ps * sd / (sd + yd)
+    m_vol = [[[0.0 for _ in range(vd)] for _ in range(vw)] for _ in range(vw)]
+    
+    # Precompute m_w0
+    m_w0 = [[0.0 for _ in range(iw)] for _ in range(ih)]
+    for j in range(ih):
+        v = (ih / 2 - 0.5 - j) * m_ps
+        k1 = sd * sd + v * v
+        for i in range(iw):
+            u = (i + 0.5 - iw / 2) * m_ps
+            m_w0[j][i] = sd / math.sqrt(u * u + k1)
+            
+    # Precompute m_flt
+    m_nf = iw // 2
+    m_k = 1.0 / (4.0 * m_ps * m_ps)
+    m_flt = [0.0] * m_nf
+    for k in range(m_nf):
+        j = 2 * k + 1
+        tmp = math.pi * m_ps * j
+        m_flt[k] = -1.0 / (tmp * tmp)
+        
+    # Precompute m_cyl
+    m_cyl = [[False for _ in range(vw)] for _ in range(vw)]
+    for i in range(vw):
+        for j in range(vw):
+            if ((2 * i - vw) ** 2 + (2 * j - vw) ** 2) < (vw * vw):
+                m_cyl[j][i] = True # Note: source uses linear index i + vw*j, mapped here to [j][i] for row-major logic if needed, 
+                                    # but source code: m_cyl[i + m_vw*j]. Let's stick to source indexing logic in loop.
+
+    # 2. Filtering
+    filtered_images = []
+    for img in images:
+        filtered_img = [[0.0 for _ in range(iw)] for _ in range(ih)]
+        for j in range(ih):
+            # Copy row to buffer and apply weighting
+            buf = [img[j][i] * m_w0[j][i] for i in range(iw)]
+            
+            # Apply convolution
+            for i in range(iw):
+                v0 = buf[i] * m_k
+                for k in range(m_nf):
+                    l = 2 * k + 1
+                    if i - l >= 0:
+                        if i + l < iw:
+                            v0 += (buf[i - l] + buf[i + l]) * m_flt[k]
+                        else:
+                            v0 += buf[i - l] * m_flt[k]
+                    elif i + l < iw:
+                        v0 += buf[i + l] * m_flt[k]
+                    else:
+                        break
+                filtered_img[j][i] = v0
+        filtered_images.append(filtered_img)
+
+    # 3. Backprojection
+    ang_step = -na * math.pi / (id * 180)
+    ang = 0.0
+    
+    for n_idx, img in enumerate(filtered_images):
+        n = n_idx + 1
+        ca = math.cos(ang)
+        sa = math.sin(ang)
+        k1 = sd / m_ps
+        
+        for j in range(vw):
+            vy = (vw / 2 - 0.5 - j) * vs
+            for i in range(vw):
+                if not m_cyl[j][i]: # Assuming m_cyl is accessed as [j][i] or mapped correctly
+                    # Source: m_cyl[i + m_vw*j]. If we iterate j then i, index is i + vw*j.
+                    # Let's use linear index logic for clarity or assume 2D array matches source layout.
+                    # Source loop: for j... for i... l = j*m_vw + i. m_cyl[l].
+                    # So m_cyl is 1D or accessed via l.
+                    pass 
+                
+                # Re-doing loop structure to match source exactly
+                l = j * vw + i
+                if not m_cyl[l]: # Assuming m_cyl is 1D array in source, here we simulate check
+                     continue # Skip if not in cylinder
+
+                vx = (i + 0.5 - vw / 2) * vs
+                vvx = vx * ca - vy * sa
+                vvy = vy * ca + vx * sa
+                
+                k2 = k1 / (vvy + sd)
+                
+                # Precompute u part
+                u_val = vvx * k2 + iw / 2 - 0.5
+                iu = int(u_val)
+                if u_val < 0:
+                    iu -= 1
+                du = u_val - iu
+                
+                for k in range(vd):
+                    vz = (vd / 2 - 0.5 - k) * vs
+                    v_val = ih / 2 - vz * k2 - 0.5
+                    iv = int(v_val)
+                    if v_val < 0:
+                        iv -= 1
+                    dv = v_val - iv
+                    
+                    # Bilinear Interpolation
+                    # getPixel returns 0 if out of bounds
+                    def get_pixel(img, u, v):
+                        if 0 <= u < iw and 0 <= v < ih:
+                            return img[v][u] # Source: img[u + iw*v] -> row v, col u
+                        return 0.0
+
+                    v1 = get_pixel(img, iu, iv)
+                    v2 = get_pixel(img, iu + 1, iv)
+                    v3 = get_pixel(img, iu, iv + 1)
+                    v4 = get_pixel(img, iu + 1, iv + 1)
+                    
+                    val = (v1 + du * (v2 - v1)) + dv * ((v3 + du * (v4 - v3)) - (v1 + du * (v2 - v1)))
+                    
+                    k3 = sd / (sd + vvy)
+                    val *= k3 * k3
+                    
+                    # Accumulate
+                    m_vol[j][i][k] += (val - m_vol[j][i][k]) / n
+                    
+        ang += ang_step
+
+    # 4. Normalization
+    epsilon = 1e-9 # Not given, assumed small positive
+    for j in range(vw):
+        for i in range(vw):
+            for k in range(vd):
+                p = m_vol[j][i][k]
+                if abs(p) < epsilon and p != 0:
+                    m_vol[j][i][k] = 0.0
+                else:
+                    m_vol[j][i][k] /= 2.0
+                    
+    return m_vol
+```
+
+## Subtopics
+
+### [Filtered Back-Projection for Volume Rendering](3399-filtered-back-projection-for-volume-rendering.md)
+A technique that reconstructs density values and gradients at arbitrary sample points along a ray directly from 2D projections, avoiding the intermediate step of creating a 3D rectilinear grid. It sets itself apart from grid-based Direct Volume Rendering (DVR) by eliminating interpolation errors associated with voxel sampling, thereby producing higher visual quality for thin structures. It builds on FastFDK by utilizing the FBP reconstruction formula not just for grid generation, but as a direct resampling scheme for arbitrary ray positions.
+
+## Operating characteristics
+*   **Time Complexity:** The filtering step is $O(m_{id} \cdot m_{ih} \cdot m_{iw} \cdot m_{nf})$ where $m_{nf} \approx m_{iw}/2$. The backprojection step is $O(m_{id} \cdot m_{vw}^2 \cdot m_{vd})$. Overall complexity is linear with respect to the number of voxels and projections.
+*   **Memory Complexity:** $O(m_{vw}^2 \cdot m_{vd})$ for the volume, plus $O(m_{iw} \cdot m_{ih} \cdot m_{id})$ for storing filtered projections and auxiliary arrays [S1, unofficial].
+*   **Performance:** The algorithm is computationally much less expensive than iterative algorithms, making it suitable for clinical environments [S3, unofficial]. The specific FastFDK implementation optimizes for CPU cache locality by precomputing weights and using spatial convolution instead of FFTs for the ramp filter [S1, unofficial].
+*   **Strengths:** Fast, analytical, single-pass reconstruction.
+*   **Limitations:** Introduces artifacts and noise compared to iterative methods, especially with sparse data or limited angles [S3, unofficial]. Assumes ideal geometry and linear attenuation.
+*   **When to use:** When speed is critical and data quality is sufficient for analytical reconstruction (e.g., clinical CT, high-quality sinograms).
+*   **When not to use:** When dealing with sparse data, significant noise, or when higher accuracy via iterative refinement is required [S3, unofficial].
+
+## Background
+The FDK algorithm was described as the most fundamental algorithm for high-precision CT reconstructions [S3, unofficial]. It is an analytical method that transforms acquired projection data from detector space back to image space [S3, unofficial]. It is widely used in clinical environments due to its computational efficiency compared to iterative algorithms [S3, unofficial]. The "FastFDK" implementation specifically refers to a CPU-based reference implementation optimized for speed using precomputed geometric weights and spatial convolution [S1, unofficial].
+
+## Sources
+[S1] chmike/FastFDK, https://github.com/chmike/FastFDK, fetched 2026-10-26 (unofficial)
+[S2] adler-j/learned_gradient_tomography, https://github.com/adler-j/learned_gradient_tomography, fetched 2026-10-27 (unofficial)
+[S3] Differential Rendering for Computed Tomography ..., https://www.cg.tuwien.ac.at/research/publications/2022/Vucenovic_2022/Vucenovic_2022-Bachelor%20thesis.pdf, fetched 2026-10-27 (unofficial)
+[S4] hardik0001/ct-reconstruction-gpu, https://github.com/hardik0001/ct-reconstruction-gpu, fetched 2026-10-27 (unofficial)

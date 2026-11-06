@@ -1,0 +1,278 @@
+Modular node graph based noise generation library using SIMD, C++17 and templates - Perf-Seeding: Divide, Fade, Remap: multiply by a reciprocal computed once for constant denominators (ulp level output change) by Auburn · Pull Request #235 · Auburn/FastNoise2
+
+Perf-Seeding: Divide, Fade, Remap: multiply by a reciprocal computed once for constant denominators (ulp level output change) by Auburn · Pull Request #235 · Auburn/FastNoise2 · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+Conversation
+Auburn
+commented
+Oct 28, 2026
+•
+edited
+Loading
+Uh oh!
+There was an error while loading. Please reload this page.
+Copy link
+Copy Markdown
+Owner
+This PR changes FastNoise2's output, but only at float rounding level, and only for three nodes. For every seed, Divide with a constant RHS, Fade with constant Fade Min and Fade Max, and Remap with all four range values constant (and every node tree that contains one of them) give values that differ from before by about one ulp: at most 3.7e-7 of the output range in the measurements below, typically 5e-8, with 2-57% of the samples changing. It is not a re-seeding: the noise pattern, statistics and look are unchanged. With a generator connected to Divide's RHS, to Fade Min or Fade Max, or to any of Remap's range inputs, the nodes are bit identical to before, and so is every other node. One visible edge case changes: a constant RHS of 0 in Divide now gives +-inf with every compiler (clang and GCC builds gave NaN, MSVC builds already gave +-inf). No API, metadata or node layout change. Worth a line in the release notes for users who compare outputs bit for bit.
+What changes in the noise
+All three nodes divided by a value that is the same for every point, once per point:
+node
+condition
+before (per point)
+after
+Divide
+RHS is a constant
+lhs / rhs
+lhs * r, r = 1 / rhs
+Fade
+Fade Min and Fade Max are constants
+( fade - min ) / ( max - min )
+( fade - min ) * r, r = 1 / ( max - min )
+Remap
+From Min/Max and To Min/Max are constants
+toMin + ( source - fromMin ) / ( fromMax - fromMin ) * ( toMax - toMin )
+FMulAdd( source - fromMin, s, toMin ), s = ( toMax - toMin ) / ( fromMax - fromMin )
+r and s are scalar divisions computed once per call, which every compiler rounds correctly. Before, the per point division was compiled differently per compiler: clang and GCC (-ffast-math) turn a vector division into a reciprocal estimate plus one Newton step, which is not correctly rounded, and MSVC uses a real division. So before, the same node gave slightly different values on MSVC, clang and GCC builds; now every compiler multiplies by the same correctly rounded r / s (see "Compiler consistency" below). Remap's multiply-add is FastSIMD's FMulAdd, as in the other modifiers: fused on AVX2/AVX-512, a multiply and an add on SSE2/SSE4.1, the same with every x86 compiler (WASM and AArch64 follow FastSIMD's FMulAdd for those targets). The clamp of Remap, the interpolation and zero range handling of Fade are unchanged.
+Which outputs change. Only the three nodes in the conditions above, and the node trees that contain them. In the test harness (1212 rows: about 100 node configurations x 4 feature sets x 2D/3D/4D x grid / random / far / tileable / GenSingle x 2 seeds) the only rows that are not bit identical are Op_Divide, Op_Fade and (GCC only) Op_Remap; at a tolerance of 1e-3 of the output range only the 12 Op_Divide rows differ, because that harness case divides by the default RHS of 0 (NaN before, +-inf now on clang and GCC; bit identical on MSVC). The harness Op_Fade / Op_Remap cases use power of two ranges, so they change by at most 1.3e-7 of the range there.
+How big the change is (1 ulp of the output is 6e-8 for values near 1). Node trees with non-trivial constants, AVX2, 512 x 512 samples over about 5 noise periods, |after - before| relative to the output range:
+configuration
+samples that change
+max (clang-cl 23)
+max (MSVC 19.51)
+max (GCC 16)
+Divide( Simplex, 3.7 )
+39%
+5.5e-8
+5.5e-8
+5.5e-8
+Divide( Simplex, -0.3 )
+23-30%
+3.6e-8
+3.6e-8
+3.6e-8
+Divide( Value, 0.1 )
+7%
+5.2e-8
+5.2e-8
+5.2e-8
+Divide( FBm Perlin, 3.7 )
+38-39%
+5.2e-8
+5.2e-8
+5.2e-8
+Fade( Simplex, Perlin, Value, -0.3 .. 0.55 ), linear
+17%
+6.1e-8
+6.1e-8
+6.1e-8
+same, Hermite
+14%
+1.2e-7
+1.2e-7
+1.2e-7
+Fade -0.7 .. 0.1, quintic
+2.4%
+3.7e-7
+3.5e-7
+3.5e-7
+Fade with FBm sources
+14%
+6.1e-8
+6.1e-8
+6.1e-8
+Remap( Simplex, -0.8 .. 0.9 -> 2 .. 7.5 )
+18-35%
+1.5e-7
+7.4e-8
+7.4e-8
+Remap( Simplex, -0.6 .. 0.7 -> -3 .. 11 ), clamped
+33-40%
+6.8e-8
+6.8e-8
+6.8e-8
+Remap( FBm Perlin, -0.7 .. 0.7 -> -3 .. 11 )
+46-57%
+4.5e-8
+9.1e-8
+9.1e-8
+Add( Divide( FBm, 3.7 ), Remap( FBm ) )
+45-56%
+8.8e-8
+1.3e-7
+8.8e-8
+Over all feature sets, dimensions and paths (uniform grids of two shapes, random positions, GenSingle, GenTileable2D), the largest Divide change is 2 ulp on clang/GCC builds and 1 ulp on MSVC builds (where the old division was already correctly rounded). Fade and Remap outputs show large ulp counts only on values close to zero, where the output crosses zero after the lerp or the To Min offset (an absolute change of about one ulp of the intermediate value); relative to the output range the change stays within the numbers above.
+Degenerate inputs.
+input
+before
+after
+Divide, constant RHS 0
+NaN (clang, GCC), +-inf (MSVC)
++-inf with every compiler (0 / 0: NaN)
+Fade, Fade Min == Fade Max (constants)
+0.5
+0.5, bit identical
+Remap, From Min == From Max (constants)
+non-finite
+non-finite (+-inf / NaN, as for Divide)
+Block paths. The composite block evaluation uses the same maths as the per vector path. Divide's block path used to decline a constant RHS (only so the block loop wouldn't compile the division into a multiply by the reciprocal, which would have changed the output); now that both multiply, a constant RHS over an LHS with its own block path (fractals, other composites) is evaluated a block at a time, exactly like Multiply with a constant RHS. Fade's and Remap's block paths take the reciprocal / scale computed once per block call. Modulus keeps its per point division and its per vector constant RHS path (comment updated).
+Why
+Speed. A multiply (Remap: one multiply-add) instead of a division per point: with clang/GCC the division is a reciprocal estimate, a Newton step and a multiply (about 4 dependent operations), with MSVC a divps (about 10 cycles latency on Zen 4 and several times the throughput cost of a multiply). The gain is limited to these three nodes, and in the benchmarks only Divide shows it; Remap is slower with MSVC in 3D. See Speed.
+Compiler consistency. These three nodes now round the same with every compiler (their sources can still differ between compilers, as before). With White noise sources (which are bit identical across compilers, so only the operator's rounding is compared), Divide, Fade and Remap outputs over 4 feature sets x 2D/3D/4D x grid and random positions are byte identical between clang-cl 23, MSVC 19.51, MSVC 19.44, GCC 16, GCC 13 and Linux clang 23. Before, MSVC builds differed from clang builds in 13%, 3% and 29% of the samples (Divide, Fade, Remap) and GCC builds in up to 44%. In the test harness, clang-cl 23 vs MSVC 19.51 builds differ in 91 rows at 1e-3 instead of 103 (the x / 0 rows now agree).
+Path consistency. With clang the old per point division compiled differently depending on where the node was inlined (uniform grid row loops, block loops, per vector position array path), so grid, position array and GenSingle could disagree in the last bit. With the precomputed scale, Remap's outputs at the same coordinates differ between those paths in about half as many samples as before on clang builds (7618 instead of 16812 samples over the test set, clamped 7938 instead of 26441, FBm source 10258 instead of 18086); the remaining differences come from the lattice sources and match the generator-input controls. MSVC and GCC builds didn't have this and are unchanged within a few percent either way. On no toolchain does the maximum difference between paths grow for any configuration.
+Quality evidence
+Before = base branch, after = this PR, clang-cl 23 unless stated. Hashing, gradients and seed handling are not touched, so seed statistics and spectra are those of the base branch; the output moves by at most 3.7e-7 of its range, which bounds any change of the output statistics to that level.
+Images (512 x 512, left before, middle after, right |after - before| scaled to its own maximum, black = identical): constdiv_Divide_FBm.png (max 5.2e-8 of the range), constdiv_Fade_FBm.png (6.1e-8), constdiv_Fade_quintic.png (3.7e-7), constdiv_Remap_FBm.png (4.5e-8), constdiv_Remap_FBm_clamp.png (9.9e-8), constdiv_Tree_Add_Divide_Remap.png (8.8e-8). Before and after look identical; the difference images are rounding noise that follows the magnitude of the output.
+Same result as the first implementation of this change (on the earlier perf branch). With White sources, which are identical in both branches, the Divide, Fade and Remap outputs of this PR are byte identical to it on every feature set, dimension and path, although the two base branches differ there (their per point divisions round differently in the newer row and block paths). With lattice sources, Divide and Fade change the same samples within 0.3% with the same maximum ulps; Remap's changed sample counts differ (the "before" side differs between the bases), the maxima relative to the range are the same.
+Finite outputs and ranges. Far (|coord| ~2e5), huge (3e7 .. 1e12) and NaN / inf / 1e30 input sets, every feature set and dimension, all six compilers: no sample is non-finite after the change where it was finite before (with ordinary inputs). The only non-finite outputs on ordinary inputs are division by zero (constant RHS 0, and a generator RHS that is exactly 0), the same samples before and after. Clamped Remap never leaves [To Min, To Max].
+Consistency across code paths (grid vs position array vs GenSingle at the same coordinates, random positions vs GenSingle, every feature set vs SSE2): the maximum path difference of no configuration grows, on any toolchain.
+Speed
+Divide gets faster with both compilers and Fade does not change measurably. Remap is unchanged with clang-cl 23 and slower with MSVC 19.51 (VS 2026), almost all of it in 3D. Nothing else moves.
+Measured on a Ryzen 9 7950X, one pinned core, nothing else running: clang-cl and MSVC under Windows, GCC and Linux clang under WSL 2 on the same machine. Both builds use FastSIMD 7aff025 and run interleaved in one process, in 3 processes with the A/B order alternating; each figure is the median of the per-process new/old time ratios (lower is faster). Two identical builds give feature-set geomeans of 0.998-1.001 and 99% of single rows within 1.5% (worst 9.1%) under Windows, and 0.999-1.005 and 2.4% under WSL, where a few single rows were 8-26% off in every process, so a lone Linux row is not evidence on its own. This PR against the base branch, on a 16384-point GenUniformGrid. Default set: 21 generators and node trees, 2D/3D/4D, 252 rows, none with the three nodes. Divide/Fade/Remap set: Op_Divide (Simplex divided by a constant 0), Op_Fade and Op_Remap (constant ranges), controls Value and White, 60 rows.
+case
+build
+SSE2
+SSE4.1
+AVX2
+AVX-512
+All
+default set
+clang-cl 23
+1.000
+1.000
+0.999
+1.000
+1.000
+default set
+MSVC 19.51
+0.990 (disturbed)
+0.996 (disturbed)
+0.999
+1.000
+0.996
+default set
+GCC 16
+1.000
+1.000
+0.999
+0.999
+1.000
+Divide/Fade/Remap set
+clang-cl 23
+0.994
+0.991
+0.994
+0.995
+0.994
+Divide/Fade/Remap set
+MSVC 19.51
+1.002
+0.998
+0.995
+0.992
+0.997
+Op_Divide
+clang-cl 23
+0.973
+0.966
+0.977
+0.979
+0.974
+Op_Divide
+MSVC 19.51
+1.003
+0.971
+0.961
+0.943
+0.969
+Op_Fade
+clang-cl 23
+1.000
+0.990
+0.999
+0.997
+0.997
+Op_Fade
+MSVC 19.51
+0.999
+1.001
+1.004
+1.001
+1.001
+Op_Remap
+clang-cl 23
+1.000
+1.001
+0.996
+0.999
+0.999
+Op_Remap
+MSVC 19.51
+1.012
+1.023
+1.018
+1.024
+1.019
+Value / White (controls)
+clang-cl 23
+1.000 / 0.999
+Value / White (controls)
+MSVC 19.51
+0.999 / 0.996
+Divide. The gain is largest in 2D (clang-cl 23: 0.960; MSVC 19.51: 0.955, AVX-512 0.929) and smallest in 4D (0.985, 0.981).
+Fade. The harness case evaluates three noise sources and interpolates, so its one division is a small part of the cost.
+Remap, MSVC 19.51. Three stable regressions, all in 3D: AVX-512 1.137 (processes 1.137, 1.138, 1.111), SSE4.1 1.052 and SSE2 1.038. AVX2 2D (1.058) and AVX-512 2D (0.969) are unstable. The cause has not been investigated: the new code only drops the division, and neither 4D nor clang-cl 23 shows it.
+Default set. MSVC 19.51 SSE2 and SSE4.1 come from a disturbed run (65 of their rows with processes more than 0.05 apart); the rows whose processes agree give 0.998 and 0.997.
+GCC 16. Only the default set was measured: no change beyond noise, 0.999-1.000 per feature set and no row above 1.03.
+Not measured: GCC 13 and Linux clang 23 builds, the Divide/Fade/Remap set with GCC 16, AArch64, random positions, and Divide with a constant RHS over a composite LHS (the new block path).
+Testing
+Builds: clang-cl 23, MSVC 19.51, MSVC 19.44 (Windows), GCC 16, GCC 13, clang 23 (Linux), Emscripten 6.0.12 (WASM, no warnings), clang 23 AArch64 cross compile (NEON and AArch64 feature sets).
+Test harness vs the base branch, every toolchain: at 1e-7 only Op_Divide, Op_Fade, Op_Remap rows are not bit identical (MSVC 19.51/19.44: all 1212 rows bit identical); at 1e-3 only the 12 Op_Divide rows (x / 0, NaN -> +-inf) on clang-cl 23, Linux clang 23, GCC 16 and GCC 13. Against master built with the same FastSIMD, the DIFF rows are those of the base branch (MSVC 19.51 far coordinate / jitter rows, Linux clang 23 Op_AddDimension) plus these 12 Op_Divide rows.
+Constant denominator test (new tool): 22 node trees (Divide by 3.7 / -0.3 / 0.1 / 0 with Simplex, Value, FBm and White sources; Fade with constant ranges, linear / Hermite / quintic, FBm and White sources, zero range; Remap with and without clamp, FBm and White sources; an Add tree of Divide and Remap; controls with a generator in the denominator) x 2D/3D/4D x 4 feature sets x two grid shapes (block path with a partial last block, row path), 4099 random positions, GenSingle and GenTileable2D, on all six compilers: changes within 2 ulp / the table above, controls and zero range Fade bit identical, no larger path differences, no finiteness changes, clamp respected; edge input sets as above; byte comparison of the White-source outputs across the six compilers.
+Dependencies
+None. Independent of the other output-changing PRs: it only touches Divide, Modulus (a comment), Fade (Blends.inl) and Remap (Modifiers.inl), and merges cleanly with each of them.
+Images (6)
+constdiv_Divide_FBm.png
+constdiv_Fade_FBm.png
+constdiv_Fade_quintic.png
+constdiv_Remap_FBm.png
+constdiv_Remap_FBm_clamp.png
+constdiv_Tree_Add_Divide_Remap.png
+Divide, Fade, Remap: multiply by a reciprocal computed once for const…
+…
+69b5222
+```
+…ant denominators (output change)
+
+Divide with a constant RHS multiplies by 1 / RHS, Fade with a constant fade min
+and max by 1 / ( max - min ), and Remap with constant ranges applies one
+precomputed scale with a multiply-add, instead of dividing per point (rcp +
+Newton step with clang and GCC fast-math, divps with MSVC). The reciprocal or
+scale is a scalar division computed once per call, so every compiler and feature
+set multiplies by the same correctly rounded value. Results differ from the
+division by about an ulp; a constant RHS of 0 now gives +-inf with every compiler
+(clang and GCC gave NaN from the refined rcp, MSVC already gave +-inf).
+
+The block paths use the same maths as the per vector paths: Divide's GenBlock no
+longer declines a constant RHS (it only did so the block loop wouldn't turn the
+division into a multiply by the reciprocal) and evaluates it like Multiply's
+constant RHS; Fade's and Remap's GenBlock take the reciprocal / scale computed
+once.
+```
+This branch has not been deployed
+No deployments
+Sign up for free
+to join this conversation on GitHub.
+Already have an account?
+Sign in to comment
+Uh oh!
+There was an error while loading. Please reload this page.
+Labels
+None yet
+1 participant
+Add this suggestion to a batch that can be applied as a single commit.This suggestion is invalid because no changes were made to the code.Suggestions cannot be applied while the pull request is closed.Suggestions cannot be applied while viewing a subset of changes.Only one suggestion per line can be applied in a batch.Add this suggestion to a batch that can be applied as a single commit.Applying suggestions on deleted lines is not supported.You must change the existing code in this line in order to create a valid suggestion.Outdated suggestions cannot be applied.This suggestion has been applied or marked resolved.Suggestions cannot be applied from pending reviews.Suggestions cannot be applied on multi-line comments.Suggestions cannot be applied while the pull request is queued to merge.Suggestion cannot be applied right now. Please check back later.
+You can’t perform that action at this time.

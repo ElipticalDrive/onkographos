@@ -1,0 +1,371 @@
+# Ray Marching Sandbox
+
+A simple project showing how to integrate a signed distance field (SDF) based
+ray marcher into Unity's deferred shading pipeline.
+
+![Screenshot](http://i.imgur.com/g25vLbp.png)
+
+Our implementation fills in the necessary information garnered from the virtual
+scene's SDF into Unity's G-buffer, into which Unity further writes, throughout
+the G-buffer construction part of its deferred shading pipeline.
+
+The result is a seamless composition of our virtual scene and the actual scene
+in Unity.
+
+## License
+
+The author(s) of this software hate viral software licenses (hi, GPL) and
+really annoying stuff like software patents. That's why this entire thing is
+wholly public domain, yo!
+
+Any being (not just humans) is free to copy, modify, publish, use, compile,
+sell or distribute this software, either in source code form or as a compiled
+binary, for any purpose, commercial or non-commercial, and by any means.
+
+## Contributors
+
+Here's a list of great apes that pressed a few keys on this weird thing called
+a keyboard, or gave some feedback about why shit is going bonkers, and made
+stuff happen on the screen:
+
+* Goksel Goktas (author)
+* Jens Holm (author)
+* ~~Sly~~ Tim Cooper
+* Kasper Engelstoft
+
+### Assets/Scripts/SDFRayMarching.cs
+```
+using UnityEngine;
+using UnityEngine.Rendering;
+
+using System.Collections;
+
+[ExecuteInEditMode]
+[RequireComponent(typeof (Camera))]
+public class SDFRayMarching : MonoBehaviour
+{
+    [Range(1, 1000)]
+    public int maximumIterationCount = 128;
+
+    [Range(0.0001f, 0.1f)]
+    public float epsilon = 0.0025f;
+
+    private Shader m_Shader;
+    public Shader shader
+    {
+        get
+        {
+            if (m_Shader == null)
+                m_Shader = Shader.Find("Hidden/SDF Ray Marching");
+
+            return m_Shader;
+        }
+    }
+
+    private Material m_Material;
+    public Material material
+    {
+        get
+        {
+            if (m_Material == null)
+            {
+                if (shader == null || !shader.isSupported)
+                    return null;
+
+                m_Material = new Material(shader);
+            }
+
+            return m_Material;
+        }
+    }
+
+    private Camera m_Camera;
+    public new Camera camera
+    {
+        get
+        {
+            if (m_Camera == null)
+                m_Camera = GetComponent<Camera>();
+
+            return m_Camera;
+        }
+    }
+
+    private Mesh m_Quad;
+    private Mesh quad
+    {
+        get
+        {
+            if (m_Quad == null)
+            {
+                Vector3[] vertices = new Vector3[4]
+                {
+                    new Vector3(1.0f, 1.0f, 0.0f),
+                    new Vector3(-1.0f, 1.0f, 0.0f),
+                    new Vector3(-1.0f, -1.0f, 0.0f),
+                    new Vector3(1.0f, -1.0f, 0.0f),
+                };
+
+                int[] indices = new int[6] { 0, 1, 2, 2, 3, 0 };
+
+                m_Quad = new Mesh();
+                m_Quad.vertices = vertices;
+                m_Quad.triangles = indices;
+            }
+
+            return m_Quad;
+        }
+    }
+
+    private CommandBuffer m_CommandBuffer;
+
+    void OnEnable()
+    {
+        camera.depthTextureMode = DepthTextureMode.Depth;
+    }
+
+    void OnDisable()
+    {
+        if (camera != null)
+        {
+            if (m_CommandBuffer != null)
+            {
+                camera.RemoveCommandBuffer(CameraEvent.AfterGBuffer, m_CommandBuffer);
+            }
+
+            m_CommandBuffer = null;
+        }
+    }
+
+    void OnPreRender()
+    {
+        material.SetInt("_MaximumIterationCount", maximumIterationCount);
+        material.SetFloat("_Epsilon", epsilon);
+
+        if (m_CommandBuffer == null)
+        {
+            m_CommandBuffer = new CommandBuffer();
+            m_CommandBuffer.name = "Ray Marching";
+            m_CommandBuffer.DrawMesh(quad, Matrix4x4.identity, material, 0, 0, null);
+
+            camera.AddCommandBuffer(CameraEvent.AfterGBuffer, m_CommandBuffer);
+        }
+    }
+}
+```
+
+### Assets/Resources/Shaders/SDFRayMarching.shader
+```
+Shader "Hidden/SDF Ray Marching"
+{
+    CGINCLUDE
+    #define UNITY_SAMPLE_FULL_SH_PER_PIXEL 1
+
+    #include "UnityCG.cginc"
+    #include "UnityGlobalIllumination.cginc"
+
+    struct Input
+    {
+        float4 vertex : POSITION;
+    };
+
+    struct Varyings
+    {
+        float4 vertex : SV_POSITION;
+        float2 uv : TEXCOORD0;
+    };
+
+    struct GBuffer
+    {
+        half4 diffuse : SV_Target0;
+        half4 specularSmoothness : SV_Target1;
+        half4 normal : SV_Target2;
+        half4 emission : SV_Target3;
+
+        float depth : SV_Depth;
+    };
+
+    float4 _MainTex_TexelSize;
+
+    int _MaximumIterationCount;
+    float _Epsilon;
+
+    Varyings vertex(in Input input)
+    {
+        Varyings output;
+
+        output.vertex = input.vertex;
+        output.uv = input.vertex;
+
+#if defined(UNITY_UV_STARTS_AT_TOP)
+        output.uv.y = -input.vertex.y;
+#endif
+
+        return output;
+    }
+
+    float grain(in float seed)
+    {
+        return frac(sin(seed) * 423145.92642);
+    }
+
+    float query(in float3 position)
+    {
+        return length(position - float3(-1.5, 0., 0.)) - .5;
+    }
+
+    float march(in float3 origin, in float3 direction, out float depth)
+    {
+        float sample = _ProjectionParams.z;
+        depth = _ProjectionParams.y;
+
+        float3 position = origin;
+
+        int i = 0;
+        for (; i < _MaximumIterationCount; ++i)
+        {
+            position = origin + direction * depth;
+            sample = query(position);
+
+            if (sample < _Epsilon)
+            {
+                break;
+            }
+
+            depth += max(_Epsilon, sample) + _Epsilon * (.5 + .5 * grain(position.z));
+
+            if (depth >= (_ProjectionParams.z - _ProjectionParams.y))
+            {
+                break;
+            }
+        }
+
+        if (i == _MaximumIterationCount)
+        {
+            depth = 1.;
+        }
+
+        return sample;
+    }
+
+    float3 calculateNormal(in float3 position)
+    {
+        return normalize(float3(
+            query(position + float3(_Epsilon, 0., 0.)) - query(position - float3(_Epsilon, 0., 0.)),
+            query(position + float3(0., _Epsilon, 0.)) - query(position - float3(0., _Epsilon, 0.)),
+            query(position + float3(0., 0., _Epsilon)) - query(position - float3(0., 0., _Epsilon))
+        ));
+    }
+
+    float3 calculateApproximateNormal(in float3 position, in float d)
+    {
+        return normalize(
+            float3(query(position + float3(_Epsilon, 0., 0.)),
+                query(position + float3(0., _Epsilon, 0.)),
+                query(position + float3(0., 0., _Epsilon))
+            ) - d
+        );
+    }
+
+    float calculateAOFactor(in float3 position, in float3 normal)
+    {
+        float sum = 0.;
+
+        float offset = .1;
+        float amplitude = 1.;
+
+        for (int i = 0; i < 9; ++i)
+        {
+            sum += amplitude * (offset - query(position + normal * offset));
+
+            amplitude *= .7;
+            offset += .1;
+        }
+
+        return max(0., 1. - .7 * sum);
+    }
+
+    float calculateDepth(in float4 clipSpacePosition)
+    {
+        #if defined (UNITY_UV_STARTS_AT_TOP)
+            return clipSpacePosition.z / clipSpacePosition.w;
+        #else
+            return ((clipSpacePosition.z / clipSpacePosition.w) + 1.) * .5;
+        #endif
+    }
+
+    float3 getDirection(in float2 uv)
+    {
+        return normalize(float3(
+            UNITY_MATRIX_V[0].xyz * uv.x +
+            UNITY_MATRIX_V[1].xyz * uv.y -
+            UNITY_MATRIX_V[2].xyz * abs(UNITY_MATRIX_P[1][1])));
+    }
+
+    GBuffer fragment(in Varyings input)
+    {
+        GBuffer output;
+
+        float2 coordinates = input.uv;
+        coordinates.x *= _ScreenParams.x / _ScreenParams.y;
+
+        float3 origin = _WorldSpaceCameraPos;
+        float3 direction = getDirection(coordinates);
+
+        float depth = 0.;
+        float sample = march(origin, direction, depth);
+
+        float3 position = origin;
+        float3 normal = 0.;
+
+        output.diffuse = float4(0., 0., 0., 1.);
+
+        if (sample < _Epsilon)
+        {
+            position = origin + direction * depth;
+            normal = calculateApproximateNormal(position, sample);
+
+            output.diffuse = float4(1., 1., 1., 1.);
+            output.depth = calculateDepth(mul(UNITY_MATRIX_VP, float4(position, 1.)));
+        }
+        else
+        {
+            discard;
+        }
+
+        output.specularSmoothness = float4(0., 0., 0., 0.);
+        output.normal = float4(normal * .5 + .5, 1.);
+
+        half3 ambient = ShadeSHPerPixel(normal, 0., position) * calculateAOFactor(position, normal);
+        output.emission = float4(ambient, 0.);
+
+        return output;
+    }
+    ENDCG
+
+    SubShader
+    {
+        Tags { "RenderType" = "Opaque" }
+
+        Cull Off
+
+        Pass
+        {
+            Tags { "LightMode" = "Deferred" }
+
+            Stencil
+            {
+                Comp Always
+                Pass Replace
+                Ref 128
+            }
+
+            CGPROGRAM
+            #pragma target 4.0
+            #pragma vertex vertex
+            #pragma fragment fragment
+            ENDCG
+        }
+    }
+}
+```

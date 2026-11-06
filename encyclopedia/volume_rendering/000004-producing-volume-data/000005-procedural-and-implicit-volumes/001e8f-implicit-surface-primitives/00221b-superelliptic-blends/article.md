@@ -7,27 +7,27 @@ Superelliptic blends (also known as pseudonorm blends) are a local blending tech
 
 ## How it works
 **Inputs:**
-*   Two signed distance functions (SDFs), $f_1(\mathbf{x})$ and $f_2(\mathbf{x})$, defining the constituent implicit surfaces.
+*   Two signed distance functions (SDFs), $f_1(\mathbf{x})$ and $f_2(\mathbf{x})$, defining the constituent implicit surfaces [S1].
 *   A blend parameter $\epsilon > 0$, which delineates the extent of the local blend in Euclidean units [S1].
-*   A shape parameter $p \ge 1$, which controls how tightly the blend adheres to the original surfaces [S1].
+*   A thumbweight $p$, which describes how tightly the blend adheres to the original surfaces [S1].
 
 **Outputs:**
 *   The blended signed distance function value $g(\mathbf{x})$ at a query point $\mathbf{x}$ [S1].
 
 **Data Structures:**
-*   No persistent data structures are required. The method is stateless and evaluates point-wise [S1, S2].
+*   No persistent data structures are required, as the method is a local, point-wise evaluation [S1].
 
 **Preprocessing:**
 The source functions must be reformulated to be strictly non-negative within the blend domain, following Ricci's formulation [S1]. Define the auxiliary functions $g_1$ and $g_2$ as:
 $$ g_i(\mathbf{x}) = \max(1 - f_i(\mathbf{x}), 0) \quad \text{for } i \in \{1, 2\} \quad \text{(Eq. 42)} $$
-This ensures that $g_i(\mathbf{x})$ is non-zero only when $f_i(\mathbf{x}) < 1$, effectively limiting the influence of each surface to a unit-radius neighborhood (if $f_i$ is an SDF) [S1].
+This ensures that $g_i(\mathbf{x})$ is non-zero only when $f_i(\mathbf{x}) < 1$, effectively limiting the influence of each surface to a unit-radius neighborhood if $f_i$ is an SDF [S1].
 
 **Algorithm:**
 The superelliptic blend of the union of the implicit surfaces defined by $f_1$ and $f_2$ is defined by the implicit surface of the function $h(\mathbf{x})$ [S1]:
 
 $$ h(\mathbf{x}) = \left( \frac{g_1(\mathbf{x})^p + g_2(\mathbf{x})^p}{g_1(\mathbf{x})^p + g_2(\mathbf{x})^p + \epsilon^p} \right)^{1/p} $$
 
-The blended distance value $g(\mathbf{x})$ is derived from $h(\mathbf{x})$. Based on the definition that the blend returns the $p$-norm distance to the blended union, and following the structure of Eq. 43 in [S1], the value is:
+The blended distance value $g(\mathbf{x})$ is derived from $h(\mathbf{x})$ [S1]. Based on the definition that the blend returns the $p$-norm distance to the blended union, and following the structure of Eq. 43 in [S1], the value is:
 
 $$ g(\mathbf{x}) = 1 - h(\mathbf{x}) $$
 
@@ -36,8 +36,8 @@ Substituting $h(\mathbf{x})$:
 $$ g(\mathbf{x}) = 1 - \left( \frac{g_1(\mathbf{x})^p + g_2(\mathbf{x})^p}{g_1(\mathbf{x})^p + g_2(\mathbf{x})^p + \epsilon^p} \right)^{1/p} $$
 
 **Parameters:**
-*   $\epsilon$: Controls the size of the blend region. Typical values depend on the scale of the SDFs. If $f_i$ are SDFs, $\epsilon$ represents the Euclidean distance from the surface where the blend effect vanishes [S1].
-*   $p$: A "thumbweight" describing the tightness of the blend. Higher $p$ values result in blends that adhere more closely to the original surfaces, approaching the maximum operator as $p \to \infty$ [S1].
+*   $\epsilon$: Controls the size of the blend region [S1]. Not given in the sources.
+*   $p$: A thumbweight describing the tightness of the blend [S1].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
@@ -52,7 +52,7 @@ def superelliptic_blend(f1, f2, x, epsilon, p):
         f2: Function returning signed distance for surface 2.
         x: Query point (vector).
         epsilon: Blend extent parameter (> 0).
-        p: Shape parameter (>= 1).
+        p: Thumbweight describing blend tightness.
         
     Returns:
         Blended signed distance value.
@@ -62,24 +62,17 @@ def superelliptic_blend(f1, f2, x, epsilon, p):
     dist2 = f2(x)
     
     # 2. Reformulate to non-negative g functions (Eq. 42)
-    # g(x) = max(1 - f(x), 0)
     g1 = max(1.0 - dist1, 0.0)
     g2 = max(1.0 - dist2, 0.0)
     
-    # 3. Compute the blend numerator and denominator components
-    # Note: If both g1 and g2 are 0, the blend is undefined or trivially 1.
-    # In this case, the point is outside the influence of both surfaces.
-    if g1 == 0.0 and g2 == 0.0:
-        return 1.0 # Or appropriate background value
-        
+    # 3. Compute powers
     g1_p = g1 ** p
     g2_p = g2 ** p
     epsilon_p = epsilon ** p
     
+    # 4. Compute h(x) (Eq. 43 structure)
     numerator = g1_p + g2_p
     denominator = numerator + epsilon_p
-    
-    # 4. Compute h(x) (Eq. 43 structure)
     h = (numerator / denominator) ** (1.0 / p)
     
     # 5. Return blended distance g(x) = 1 - h(x)
@@ -87,16 +80,16 @@ def superelliptic_blend(f1, f2, x, epsilon, p):
 ```
 
 **Edge Cases and Pitfalls:**
-*   **Gradient Discontinuities:** The domain of the smooth blend is restricted to the area where $g_1(\mathbf{x})$ and $g_2(\mathbf{x})$ are non-zero. Outside this domain, the function transitions abruptly, resulting in a crease in the space surrounding the blend [S1, S2].
-*   **Root Finding Instability:** These gradient discontinuities can be disastrous for iterative root finders (e.g., Newton-Raphson) that rely on smooth derivatives [S1, S2].
-*   **Sphere Tracing Compatibility:** The discontinuities do not impact sphere tracing (geometric ray intersection), as sphere tracing relies on the Lipschitz continuity of the distance function (which holds) rather than the smoothness of the gradient [S1, S2].
-*   **Scaling:** When scaling implicit surfaces, the distance to the scaled surface $S(f^{-1}(0))$ is given by $d(\mathbf{x}, S(f^{-1}(0))) = s \cdot d(S^{-1}(\mathbf{x}), f^{-1}(0))$, where $s$ is the scale factor and the Lipschitz constant of the inverse scale is $1/s$ [S2].
+*   **Gradient Discontinuities:** The domain of the smooth blend is restricted to the area where $g_1(\mathbf{x})$ and $g_2(\mathbf{x})$ are non-zero [S1]. Outside this domain, it is impossible to smoothly combine the results, resulting in a crease in the space surrounding the blend [S1].
+*   **Root Finding Instability:** These gradient discontinuities can be disastrous for some root finders [S1, S2].
+*   **Sphere Tracing Compatibility:** The discontinuities do not impact sphere tracing (geometric ray intersection) [S1, S2].
+*   **Scaling:** When scaling implicit surfaces, the distance to a scaled surface is given by $d(\mathbf{x}, S(f^{-1}(0))) = s \cdot d(S^{-1}(\mathbf{x}), f^{-1}(0))$, where $s$ is the scale factor and the Lipschitz constant of the inverse scale is $1/s$ [S2].
 
 ## Operating characteristics
-*   **Time Complexity:** $O(1)$ per query point, assuming constant-time evaluation of the constituent SDFs.
-*   **Memory Complexity:** $O(1)$ auxiliary memory.
-*   **Strengths:** Local computation allows for efficient rendering via sphere tracing without global data structures. It is simple to implement and robust for geometric ray intersection [S1, S2].
-*   **Limitations:** The method is not $C^1$ continuous at the boundary of the blend domain. This makes it unsuitable for applications requiring smooth gradients, such as certain physics simulations or gradient-based optimization/root finding [S1, S2].
+*   **Time Complexity:** Not given in the sources.
+*   **Memory Complexity:** Not given in the sources.
+*   **Strengths:** Local computation allows for efficient rendering via sphere tracing without global data structures [S1, S2]. It is simple to implement and robust for geometric ray intersection [S1, S2].
+*   **Limitations:** The method is not $C^1$ continuous at the boundary of the blend domain [S1]. This makes it unsuitable for applications requiring smooth gradients, such as certain physics simulations or gradient-based optimization/root finding [S1, S2].
 *   **When to use:** Ideal for real-time rendering of metaballs or implicit surfaces using sphere tracing where performance is critical and smooth gradients are not required for the intersection algorithm [S1, S2].
 *   **When not to use:** Avoid if the downstream application requires smooth derivatives for root finding or if the visual artifact of the "crease" outside the blend domain is unacceptable [S1, S2].
 

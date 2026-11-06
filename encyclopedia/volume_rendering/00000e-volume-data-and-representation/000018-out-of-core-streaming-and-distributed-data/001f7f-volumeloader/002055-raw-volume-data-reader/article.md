@@ -1,75 +1,81 @@
 # Raw Volume Data Reader
-Also called: BrickDensityRegion, Volume Slice Loading, RawReader
+Also called: BrickDensityRegion Volume Slice Loading, RawReader, Volume Data Loading
 
 ## Overview
-The Raw Volume Data Reader is a specialized loader for ingesting raw binary volume data files directly into memory. It solves the problem of converting high-precision raw sensor data (e.g., from CT scanners) into a usable format for volume rendering or sparse voxel construction. It differs from generic loaders by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline rather than treating data as opaque bytes [S1, S2, unofficial].
+The Raw Volume Data Reader loads raw binary volume data files directly into memory [S1, unofficial]. It parses a fixed header, reads voxel values, applies density clamping and normalization, and maps the data to 3D coordinates [S2, S3, unofficial]. It differs from generic loaders by handling coordinate mapping and density scaling directly during the load phase rather than treating the data as opaque bytes [S2, unofficial].
 
 ## How it works
 **Inputs and Outputs:**
-- Input: A raw binary file containing unsigned short (16-bit) values.
-- Output: A contiguous memory block of `unsigned short` values representing the 3D volume, optionally normalized and clamped.
+- Input: A raw binary file containing a header and voxel data [S3, unofficial].
+- Output: A contiguous memory block of processed voxel values and coordinates [S1, S2, unofficial].
 
 **Data Structures:**
-The core data structure `RawReader` (or `BrickDensityRegion`) contains:
+The core data structure `RawReader` contains:
 - `m_data`: A pointer to `unsigned short` (`unsigned short*`) pointing to a contiguous memory block of size $Z \times Y \times X \times \text{sizeof(unsigned short)}$ [S1, unofficial].
 
 **Parameters:**
-- `iso_min`, `iso_max`: Thresholds for iso-clamping. Values outside this range are set to 0 [S2, unofficial].
+- `iso_min`, `iso_max`: Thresholds for iso-clamping; values outside this range are set to 0 [S2, unofficial].
 - `m_density_mult`: A multiplier for density calculation [S2, unofficial].
 - `max`: The maximum value used for normalization scaling [S2, unofficial].
-- `vol_res`: The target volume resolution (X, Y, Z) [S2, unofficial].
-- `file_res`: The source file resolution (X, Z) [S2, unofficial].
+- `vol_res`: The target volume resolution dimensions (X, Y, Z) [S2, unofficial].
+- `file_res`: The source file resolution dimensions (X, Z) [S2, unofficial].
 - `multiply`: Scaling factor calculated as `vol_res.x() / file_res.x()` [S2, unofficial].
+- `VOLUME_MIN_DENSITY`, `VOLUME_MAX_DENSITY`: Constants defining the clamping range for volume density values [S3, unofficial].
 
 **Steps:**
-1. Open the file in binary read mode with the `ate` flag to determine file size [S1, unofficial].
-2. Calculate expected file size: $Size = Z \times Y \times X \times \text{sizeof(unsigned short)}$ [S1, unofficial].
-3. Assert that the actual file size matches the expected size [S1, unofficial].
-4. Allocate memory for the data buffer using `malloc` [S1, unofficial].
+1. Open the file in binary read mode with the `ate` flag to determine the file size [S1, unofficial].
+2. Read the file header: 3 integers for grid dimensions and 3 floats for bounding box size [S3, unofficial].
+3. Calculate the expected file size as $Z \times Y \times X \times \text{sizeof(unsigned short)}$ and assert that the actual file size matches this value [S1, unofficial].
+4. Allocate memory for `m_data` using `malloc` [S1, unofficial].
 5. Seek to the beginning of the file and read the entire content into the allocated memory [S1, unofficial].
 6. Close the file [S1, unofficial].
-7. Iterate through the data to apply normalization and clamping:
-   - Find min and max values in the buffer to determine normalization range [S2, unofficial].
-   - For each element, apply iso-clamping: if value $< iso\_min$ or value $> iso\_max$, set to 0 [S2, unofficial].
-   - Calculate density value: $val = tmp \times m\_density\_mult \times multiply / max$ [S2, unofficial].
-   - Calculate 3D voxel coordinates:
-     - $x = i \times multiply$
-     - $y = vol\_res.y() - y\_val - 1$
-     - $z = j \times multiply$
-     where $i$ iterates from 0 to `file_res.x()` and $j$ iterates from 0 to `file_res.z()` [S2, unofficial].
-8. Store the processed values in `m_data` [S1, S2, unofficial].
-9. Free allocated memory in the destructor [S1, unofficial].
+7. Iterate through the buffer to find the minimum and maximum values for the normalization range [S2, unofficial].
+8. For each element, apply iso-clamping: if $tmp < iso\_min$ or $tmp > iso\_max$, set $tmp = 0$ [S2, unofficial].
+9. Calculate the density value: $val = tmp \times m\_density\_mult \times multiply / max$ [S2, unofficial].
+10. Calculate the 3D voxel coordinates: $x = i \times multiply$, $y = vol\_res.y() - y\_val - 1$, $z = j \times multiply$, where $i$ iterates from 0 to `file_res.x()`, $j$ iterates from 0 to `file_res.z()`, and $y\_val$ corresponds to the current slice index [S2, unofficial].
+11. Store the processed values in `m_data` [S1, S2, unofficial].
+12. Free the allocated memory in the destructor [S1, unofficial].
 
 **Pseudocode:**
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def load_raw_volume(filename, vol_res, file_res, iso_min, iso_max, m_density_mult, max_val):
-    # Step 1-3: Open file and verify size
-    file_size = get_file_size(filename)
-    expected_size = vol_res.z * vol_res.y * vol_res.x * 2  # 2 bytes for unsigned short
-    if file_size != expected_size:
-        raise ValueError("File size mismatch")
+import os
+import struct
 
-    # Step 4-6: Read file into memory
-    m_data = malloc(expected_size)
+def load_raw_volume(filename, vol_res, file_res, iso_min, iso_max, m_density_mult, max_val):
+    # Step 1: Open file with ate flag to get size
+    file_size = os.path.getsize(filename)
+    
+    # Step 2: Read header (3 ints, 3 floats)
     with open(filename, 'rb') as f:
+        header = f.read(24) # 3*4 + 3*4 bytes
+        grid_dims = struct.unpack('3i', header[:12])
+        bbox_size = struct.unpack('3f', header[12:24])
+        
+        # Step 3: Assert file size matches expected volume size
+        expected_size = grid_dims[0] * grid_dims[1] * grid_dims[2] * 2 # 2 bytes for unsigned short
+        if file_size != expected_size:
+            raise ValueError("File size mismatch")
+            
+        # Step 4-5: Allocate memory and read entire file content
         f.seek(0)
-        data = f.read(expected_size)
-        # Convert bytes to unsigned short array
-        buffer = unpack_unsigned_shorts(data)
+        raw_data = f.read(expected_size)
+        
+    # Step 6: Close file (handled by context manager)
     
-    # Step 7: Process data
-    multiply = vol_res.x / file_res.x
-    processed_data = []
-    
-    # Find min/max if not provided
+    # Step 7: Unpack unsigned shorts and find min/max
+    buffer = list(struct.unpack('<' + str(expected_size // 2) + 'H', raw_data))
     min_val = min(buffer)
     max_val_actual = max(buffer)
     
-    for j in range(file_res.z):
-        for i in range(file_res.x):
-            tmp = buffer[j * file_res.x + i]
+    # Step 8-10: Process data
+    multiply = vol_res[0] / file_res[0]
+    processed_data = []
+    
+    for j in range(file_res[2]):
+        for i in range(file_res[0]):
+            tmp = buffer[j * file_res[0] + i]
             
             # Iso-clamping
             if tmp < iso_min or tmp > iso_max:
@@ -78,24 +84,22 @@ def load_raw_volume(filename, vol_res, file_res, iso_min, iso_max, m_density_mul
             # Density calculation
             val = tmp * m_density_mult * multiply / max_val
             
-            # Coordinate calculation (for mapping if needed)
+            # Coordinate calculation
             x = i * multiply
-            y = vol_res.y - (j * multiply) - 1  # Note: y_val logic from source
+            y = vol_res[1] - j - 1  # y_val corresponds to slice index j
             z = j * multiply
             
             processed_data.append(val)
             
-    # Store in m_data structure
-    m_data = processed_data
-    return m_data
+    return processed_data
 
 def free_raw_volume(m_data):
-    free(m_data)
+    del m_data # Explicit deallocation handled by Python runtime
 ```
 
 **Edge Cases and Pitfalls:**
-- File size mismatch: The method asserts that the file size matches the expected volume size. If the file is corrupted or incomplete, this will fail [S1, unofficial].
-- Precision: The method uses `unsigned short` (16-bit) for storage. If the source data has higher precision, it may be truncated during the initial read or normalization [S1, S2, unofficial].
+- File size mismatch: The method asserts that the file size matches the expected volume size; if the file is corrupted or incomplete, this will fail [S1, unofficial].
+- Precision: The method uses `unsigned short` (16-bit) for storage; if the source data has higher precision, it is truncated to 16-bit during the initial read [S1, unofficial].
 - Boundary conditions: The iso-clamping sets values outside the range to 0, which may result in loss of data if the range is not chosen carefully [S2, unofficial].
 
 ## Subtopics
@@ -104,16 +108,17 @@ def free_raw_volume(m_data):
 Defines the procedure for ingesting raw binary volume data, applying domain-specific quantization to reduce precision, and preparing the data for GPU transfer. It differs by embedding specific quantization logic (scaling and thresholding) directly into the loading pipeline.
 
 ## Operating characteristics
-- **Time Complexity:** $O(N)$, where $N$ is the number of voxels, due to single-pass reading and processing [S1, S2, unofficial].
+- **Time Complexity:** $O(N)$ for reading and processing, where $N$ is the number of voxels [S1, S2, unofficial].
 - **Memory Complexity:** $O(N)$, storing all voxels in memory as `unsigned short` [S1, unofficial].
-- **Strengths:** Simple, fast, and direct loading of raw binary data without complex format parsing [S1, S2, unofficial].
-- **Limitations:** Lacks support for various medical imaging formats (e.g., DICOM, NIfTI) and does not handle coordinate system alignment or resampling [S1, S2, unofficial].
-- **When to use:** When working with raw binary volume data files and needing a quick, simple loading mechanism [S1, S2, unofficial].
-- **When not to use:** When dealing with standard medical imaging formats or requiring advanced features like resampling or coordinate alignment [S1, S2, unofficial].
+- **Strengths:** Direct loading of raw binary data without complex format parsing [S1, unofficial].
+- **Limitations:** Lacks support for standard medical imaging formats and does not handle coordinate system alignment or resampling [S1, S2, unofficial].
+- **When to use:** When working with raw binary volume data files and needing a quick loading mechanism [S1, unofficial].
+- **When not to use:** When dealing with standard medical imaging formats or requiring advanced features like resampling [S1, S2, unofficial].
 
 ## Background
-The Raw Volume Data Reader is part of the VolumeLoader framework, which supports various medical imaging formats. It is used in contexts where raw binary data from CT scanners or specific model formats needs to be quickly ingested into memory for further processing or rendering [S1, S2, unofficial].
+The Raw Volume Data Reader is part of the VolumeLoader framework, which supports various medical imaging formats [Parent]. It is used for ingesting raw binary data into memory for further processing [S1, unofficial].
 
 ## Sources
 [S1] upupming/marching-cubes, https://github.com/upupming/marching-cubes, fetched 2026-10-27 (unofficial)
 [S2] cgibson/Mr-Voxel, https://github.com/cgibson/Mr-Voxel, fetched 2026-10-27 (unofficial)
+[S3] GitHub - yuehaowang/volume_renderer: CUDA-based interactive volume ..., https://github.com/yuehaowang/volume_renderer, fetched 2026-10-29 (unofficial)

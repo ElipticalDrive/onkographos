@@ -1,0 +1,140 @@
+--- v001.md
++++ v002.md
+@@ -3,86 +3,81 @@
+ 
+ ## Overview
+-This method filters Signed Distance Field (SDF) samples to distinguish between valid near-surface points and invalid far-field points using a relaxation threshold. It solves the problem of ambiguous SDF values in sparse or noisy evaluations by classifying samples into positive, negative, and valid (near-zero) categories. It differs from [SDF Training with Eikonal Loss](2553-sdf-training-with-eikonal-loss.md) by applying a static geometric threshold rather than optimizing field gradients, and from [SDF Evaluation Implementation](1658-sdf-evaluation-implementation.md) by adding a specific validity classification step.
++This method filters Signed Distance Field (SDF) samples to distinguish between valid near-surface values and invalid or noisy estimates by applying a relaxation threshold relative to the voxel size. It solves the problem of ray marching through regions where the SDF magnitude is ambiguous, preventing artifacts caused by treating noisy near-zero values as exact surface intersections. It differs from [Batched SDF Inference](2329-batched-sdf-inference.md) by focusing on post-evaluation validation rather than generation, and from [Eikonal SDF Refinement](4597-eikonal-sdf-refinement.md) by using a simple threshold check rather than solving the Eikonal equation for gradient correction.
+ 
+ ## How it works
+-**Inputs and Outputs:**
+-- Input: A set of SDF samples, where each sample consists of a signed distance value $d$ and the associated voxel size $v$.
+-- Output: A classification of each sample into one of three sets: Positive, Negative, or Valid.
++**Inputs:**
++- `sdf_values`: Array of SDF values for a batch of samples.
++- `voxel_size`: The spatial size of the voxel grid cell.
++- `relaxation`: A dimensionless constant factor defining the validity threshold.
++
++**Outputs:**
++- `valid_mask`: Boolean array indicating which samples are within the valid relaxation band.
++- `positive_mask`: Boolean array for samples with SDF > threshold.
++- `negative_mask`: Boolean array for samples with SDF < -threshold.
+ 
+ **Data Structures:**
+-- `samples`: A list or array of tuples/objects containing fields `value` (float, the SDF result) and `voxel_size` (float, the spatial resolution of the query point).
++- `sdf_values`: 1D or N-dimensional array of floats.
++- `valid_mask`, `positive_mask`, `negative_mask`: Boolean arrays of the same shape as `sdf_values`.
+ 
+ **Parameters:**
+-- `relaxation`: A constant factor defining the width of the "valid" band around the zero-level set. Typical value: $1.5$ [S1, unofficial].
++- `relaxation`: Default value is 1.5 [S1, unofficial].
+ 
+ **Steps:**
+-1. For each sample $i$ with SDF value $d_i$ and voxel size $v_i$:
+-2. Calculate the threshold $T = v_i \times \text{relaxation}$.
+-3. Classify the sample:
+-   - If $d_i > T$, mark as **Positive**.
+-   - If $-d_i > T$ (i.e., $d_i < -T$), mark as **Negative**.
+-   - If $|d_i| \le T$, mark as **Valid**.
+-
+-**Formulas:**
+-The classification logic is defined by:
+-$$
+-\text{class}(d, v) = 
+-\begin{cases} 
+-\text{Positive} & \text{if } d > v \cdot \text{relaxation} \\
+-\text{Negative} & \text{if } d < -v \cdot \text{relaxation} \\
+-\text{Valid} & \text{otherwise}
+-\end{cases}
+-$$
++1. Calculate the relaxation threshold: $T = \text{voxel\_size} \times \text{relaxation}$.
++2. Identify positive samples: those where $\text{sdf} > T$.
++3. Identify negative samples: those where $-\text{sdf} > T$ (equivalent to $\text{sdf} < -T$).
++4. Identify valid samples: those where $|\text{sdf}| \le T$.
+ 
+ **Pseudocode:**
+ ```python
+-def check_valid(samples, relaxation=1.5):
++def check_valid(sdf_values, voxel_size, relaxation=1.5):
+     """
+-    Classifies SDF samples based on a relaxation threshold relative to voxel size.
++    Classify SDF samples based on relaxation threshold.
+     
+     Args:
+-        samples: List of objects/tuples with attributes 'value' (float) and 'voxel_size' (float).
+-        relaxation: Float constant for threshold scaling (default 1.5).
++        sdf_values: Array of SDF values.
++        voxel_size: Size of one voxel in world units.
++        relaxation: Threshold factor (default 1.5).
+         
+     Returns:
+-        List of tuples: (original_sample, classification_string)
+-        classification_string is one of: 'Positive', 'Negative', 'Valid'
++        valid_mask: Samples near zero (|sdf| <= threshold).
++        positive_mask: Samples far positive (sdf > threshold).
++        negative_mask: Samples far negative (sdf < -threshold).
+     """
+-    results = []
+-    for sample in samples:
+-        d = sample.value
+-        v = sample.voxel_size
+-        
+-        threshold = v * relaxation
+-        
+-        if d > threshold:
+-            classification = 'Positive'
+-        elif d < -threshold:
+-            classification = 'Negative'
+-        else:
+-            classification = 'Valid'
+-            
+-        results.append((sample, classification))
+-        
+-    return results
++    # Calculate threshold
++    threshold = voxel_size * relaxation
++    
++    # Identify positive samples: SDF value > voxel_size * relaxation
++    positive_mask = sdf_values > threshold
++    
++    # Identify negative samples: -SDF value > voxel_size * relaxation
++    # Equivalent to sdf_values < -threshold
++    negative_mask = -sdf_values > threshold
++    
++    # Identify valid samples: absolute SDF value <= voxel_size * relaxation
++    valid_mask = abs(sdf_values) <= threshold
++    
++    return valid_mask, positive_mask, negative_mask
+ ```
+ 
+ **Edge Cases and Pitfalls:**
+-- **Zero Voxel Size:** If $v_i = 0$, the threshold becomes 0, potentially misclassifying small non-zero distances. [G] Ensure voxel sizes are strictly positive.
+-- **Precision Errors:** Floating-point inaccuracies near the boundary $|d| \approx T$ may cause jitter between "Valid" and "Positive/Negative". [G] Consider epsilon tolerance if stability is critical.
+-- **Degenerate Input:** Samples with undefined or NaN SDF values should be filtered out before this check.
++- If `voxel_size` is zero, the threshold becomes zero, potentially misclassifying all non-zero values as invalid. [G] Guard against division by zero or invalid grid configurations.
++- Precision issues near the threshold boundary may cause flickering if the SDF value oscillates around $T$. [G] Consider using a small epsilon for floating-point comparisons if stability is required.
+ 
+ ## Subtopics
+ 
++### [Eikonal SDF Refinement](4597-eikonal-sdf-refinement.md)
++Corrects inaccurate SDF values near the zero-level set by solving the Eikonal equation $|\nabla \phi| = 1$ over neighboring voxels. It sets itself apart by using an analytical solution to ensure the gradient magnitude is exactly 1, rather than just smoothing values. It builds on this method.
++
+ ## Operating characteristics
+-- **Time Complexity:** $O(N)$, where $N$ is the number of samples. Each sample requires constant-time arithmetic operations.
+-- **Memory Complexity:** $O(N)$ to store the classification results.
+-- **Strengths:** Simple, fast, and robust for filtering out irrelevant far-field data in ray marching or training pipelines.
+-- **Limitations:** Does not correct the SDF values themselves, only classifies them. Relies on accurate voxel size estimation.
+-- **When to use:** When preprocessing SDF data for rendering or training to ignore points too far from the surface.
+-- **When not to use:** When the goal is to refine the SDF geometry itself (use [Eikonal SDF Refinement](4597-eikonal-sdf-refinement.md) instead).
++- **Time Complexity:** $O(N)$, where $N$ is the number of samples. The operation involves simple arithmetic comparisons.
++- **Memory Complexity:** $O(N)$ for storing the three boolean masks.
++- **Strengths:** Computationally inexpensive; effectively filters out noisy or ambiguous SDF values that could cause ray marching artifacts.
++- **Limitations:** Does not correct the SDF values, only classifies them. May discard valid samples if the relaxation factor is too small or the voxel size is inaccurate.
++- **When to use:** When post-processing SDF evaluations to ensure robust ray marching, especially in neural or implicit representations where noise is present.
++- **When not to use:** When precise surface reconstruction is required without subsequent refinement steps.
+ 
+ ## Background
+-This method is implemented in the DIST-Renderer project by B1ueber2y. It serves as a utility for filtering SDF samples during synthesis or evaluation phases. The relaxation factor of 1.5 is a heuristic choice to define a "valid" band around the implicit surface.
++This method is derived from the DIST-Renderer project, which implements distance-based rendering techniques. It is used in the context of synthesizing 3D data from 2D images, particularly in neural rendering pipelines where SDFs are evaluated during training or inference. The relaxation factor of 1.5 is a heuristic value chosen to balance between accepting valid near-surface samples and rejecting noise.
+ 
+ ## Sources

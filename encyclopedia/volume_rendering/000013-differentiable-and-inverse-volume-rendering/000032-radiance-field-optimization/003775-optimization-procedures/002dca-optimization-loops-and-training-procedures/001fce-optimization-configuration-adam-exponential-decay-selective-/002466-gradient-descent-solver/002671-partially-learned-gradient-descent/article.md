@@ -1,0 +1,186 @@
+# Partially Learned Gradient Descent
+
+Also called: Learned Gradient Descent, Learned iterative reconstruction, Partially learned gradient descent without regularizer, Unrolled Optimization with Learned Updates, Unrolled optimization
+
+## Overview
+Partially Learned Gradient Descent is an iterative reconstruction method that unrolls a fixed number of optimization steps into a neural network, combining a fixed physics-based gradient step with a learnable convolutional network update [S1, unofficial]. It initializes the reconstruction with a filtered backprojection (FBP) estimate and, in its base form, does not use a regularization term in the network input [S1, unofficial]. Unlike standard Gradient Descent which uses a fixed step size, this method learns the update rule via convolutional layers while retaining the physical forward model and gradient structure, making it more interpretable and robust to distribution shifts than fully learned end-to-end CNNs [S1, unofficial]. It builds on [Gradient Descent Solver](3280-gradient-descent-solver.md) [G].
+
+## How it works
+**Inputs and Outputs:**
+- Input: Noisy projection data $y$, initial estimate $x_0$ (typically FBP of $y$), forward operator $\mathcal{A}$ (e.g., RayTransform), and its adjoint $\mathcal{A}^*$ [S1, unofficial].
+- Output: Reconstructed image $x$ after $n_{iter}$ steps [S1, unofficial].
+
+**Data Structures:**
+- $x$: Current reconstruction estimate, shape `[batch, height, width, 1]` [S1, unofficial].
+- $s$: Hidden state memory buffer, shape `[batch, height, width, n_memory]`. Initialized to zeros [S1, unofficial].
+- $y$: Noisy projection data, shape `[batch, proj_height, proj_width, 1]` [S1, unofficial].
+- $x_{true}$: Ground truth for loss calculation, shape `[batch, height, width, 1]` [S1, unofficial].
+
+**Parameters:**
+- $n_{iter}$: Number of unrolled iterations. Typical value: 10 [S1, unofficial].
+- $n_{memory}$: Number of channels in the hidden state memory tensor $s$. Typical value: 5 [S1, unofficial].
+- $\mu_{water}$: Attenuation coefficient of water for nonlinear forward models. Typical value: 0.02 [S1, unofficial].
+- $photons_{per\_pixel}$: Number of photons per pixel for noise simulation. Typical value: 10000 [S1, unofficial].
+- $\epsilon$: Small constant for numerical stability in log operations. Value: $1/photons_{per\_pixel}$ [S1, unofficial].
+- $opnorm$: Operator norm of $\mathcal{A}$, computed via power iteration for scale invariance [S1, unofficial].
+
+**Convolutional Network Layout:**
+The network takes a concatenated input tensor $u$ and produces an update $dx$ and new memory $s_{new}$ [S1, unofficial].
+- Input channels: Concatenation of $x$, gradient(s), and $s$. Base variant uses $n_{memory} + 2$ channels; with-regularizer variant uses $n_{memory} + 3$ channels [S1, unofficial].
+- Layer 1: Conv2D kernel $W_1$ shape `[3, 3, in_channels, 32]`, bias $b_1$ shape `[1, 1, 1, 32]`. Activation: ReLU [S1, unofficial].
+- Layer 2: Conv2D kernel $W_2$ shape `[3, 3, 32, 32]`, bias $b_2$ shape `[1, 1, 1, 32]`. Activation: ReLU [S1, unofficial].
+- Layer 3: Conv2D kernel $W_3$ shape `[3, 3, 32, n_memory + 1]`, bias $b_3$ shape `[1, 1, 1, n_memory + 1]`. Activation: Linear [S1, unofficial].
+- Output split: $dx = h_3[:, :, :, 0:1]$, $s_{new} = \text{ReLU}(h_3[:, :, :, 1:])$ [S1, unofficial].
+
+**Algorithm Steps:**
+
+1. **Preprocessing:**
+   - Compute operator norm: $opnorm = \|\mathcal{A}\|$ [S1, unofficial].
+   - Normalize operator: $\mathcal{A}_{norm} = \frac{1}{opnorm} \mathcal{A}$ [S1, unofficial].
+   - Normalize pseudoinverse: $\mathcal{A}_{pinv} = \mathcal{A}_{pinv} \cdot opnorm$ [S1, unofficial].
+   - Initialize $x_0 = \mathcal{A}_{pinv}(y)$ (FBP) [S1, unofficial].
+   - Initialize $s = 0$ with shape `[batch, height, width, n_memory]` [S1, unofficial].
+
+2. **Iteration Loop** (for $i = 0$ to $n_{iter}-1$):
+   - Compute forward projection: $Tx = \mathcal{A}_{norm}(x)$ [S1, unofficial].
+   - Compute data gradient $g_{data}$:
+     - For linear models: $g_{data} = \mathcal{A}_{norm}^*(Tx - y)$ [S1, unofficial].
+     - For nonlinear models (e.g., CT with attenuation): $y_{pred} = \exp(-\mu_{water} \cdot Tx)$, then $g_{data} = \mu_{water} \cdot \mathcal{A}^*(y - y_{pred})$ [S1, unofficial].
+   - Compute regularization gradient $g_{reg}$ (if using variant with regularizer):
+     - $g_{reg} = (\partial_0^* \partial_0 + \partial_1^* \partial_1)(x)$, where $\partial_0, \partial_1$ are partial derivatives [S1, unofficial].
+   - Concatenate inputs along channel axis to form $u$:
+     - Base variant: $u = \text{concat}(x, g_{data}, s)$ [S1, unofficial].
+     - With regularizer variant: $u = \text{concat}(x, g_{data}, g_{reg}, s)$ [S1, unofficial].
+   - Apply convolutional network:
+     - $h_1 = \text{ReLU}(W_1 * u + b_1)$
+     - $h_2 = \text{ReLU}(W_2 * h_1 + b_2)$
+     - $h_3 = W_3 * h_2 + b_3$
+   - Split output:
+     - $dx = h_3[:, :, :, 0:1]$
+     - $s_{new} = \text{ReLU}(h_3[:, :, :, 1:])$
+   - Update state:
+     - $s = s_{new}$
+     - $x = x + dx$ [S1, unofficial]
+
+3. **Loss and Training:**
+   - Loss function: $L = \frac{1}{N} \sum_{b=1}^{N} \sum_{i,j} (x_{b,i,j} - x_{true,b,i,j})^2$ [S1, unofficial].
+   - Optimizer: RMSProp with inverse time decay [S1, unofficial].
+     - Starter learning rate: $1e-3$ [S1, unofficial].
+     - Decay rate: $1.0$ [S1, unofficial].
+     - Decay steps: $500$ [S1, unofficial].
+     - Staircase: True [S1, unofficial].
+
+**Pseudocode:**
+
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+import numpy as np
+import tensorflow as tf
+
+def conv2d(x, W, stride=(1, 1)):
+    """Standard 2D convolution with SAME padding."""
+    return tf.nn.conv2d(x, W, strides=[1, stride[0], stride[1], 1], padding='SAME')
+
+def regularizer_adjoint(x):
+    """Adjoint of the Laplacian regularizer (partial0^* partial0 + partial1^* partial1)."""
+    kernel = np.array([[-1, -1, -1],
+                       [-1,  8, -1],
+                       [-1, -1, -1]], dtype=np.float32)
+    kernel = kernel.reshape(3, 3, 1, 1)
+    return conv2d(x, kernel)
+
+def partially_learned_gradient_descent(x_0, y, x_true, operator, operator_adjoint, 
+                                       operator_norm, n_iter=10, n_memory=5, 
+                                       mu_water=0.02, use_regularizer=False):
+    """
+    Implements Partially Learned Gradient Descent.
+    """
+    # Normalize operator for scale invariance
+    scaled_operator = lambda x: operator(x) / operator_norm
+    scaled_adjoint = lambda x: operator_adjoint(x) * operator_norm
+    
+    # Initialize memory state s to zeros
+    batch_size = tf.shape(x_0)[0]
+    img_h, img_w = tf.shape(x_0)[1], tf.shape(x_0)[2]
+    s = tf.zeros([batch_size, img_h, img_w, n_memory])
+    
+    # Define convolutional network weights and biases
+    # Shapes depend on the variant (2 or 3 gradient channels + memory)
+    in_channels = n_memory + 2 if not use_regularizer else n_memory + 3
+    w1 = tf.Variable(tf.random_normal([3, 3, in_channels, 32]))
+    b1 = tf.Variable(tf.zeros([1, 1, 1, 32]))
+    w2 = tf.Variable(tf.random_normal([3, 3, 32, 32]))
+    b2 = tf.Variable(tf.zeros([1, 1, 1, 32]))
+    w3 = tf.Variable(tf.random_normal([3, 3, 32, n_memory + 1]))
+    b3 = tf.Variable(tf.zeros([1, 1, 1, n_memory + 1]))
+    
+    x = x_0
+    for i in range(n_iter):
+        # 1. Forward projection
+        Tx = scaled_operator(x)
+        
+        # 2. Data gradient
+        if mu_water > 0: # Nonlinear model
+            y_pred = tf.exp(-mu_water * Tx)
+            gradx = scaled_adjoint(y - y_pred) * mu_water
+        else:
+            gradx = scaled_adjoint(Tx - y)
+            
+        # 3. Regularization gradient (if applicable)
+        if use_regularizer:
+            gradreg = regularizer_adjoint(x)
+        else:
+            gradreg = None
+            
+        # 4. Concatenate inputs
+        if use_regularizer:
+            update_input = tf.concat([x, gradx, gradreg, s], axis=3)
+        else:
+            update_input = tf.concat([x, gradx, s], axis=3)
+            
+        # 5. Convolutional Network
+        h1 = tf.nn.relu(conv2d(update_input, w1) + b1)
+        h2 = tf.nn.relu(conv2d(h1, w2) + b2)
+        h3 = conv2d(h2, w3) + b3
+        
+        # 6. Split output
+        dx = h3[:, :, :, 0:1]
+        s_new = tf.nn.relu(h3[:, :, :, 1:])
+        
+        # 7. Update
+        s = s_new
+        x = x + dx
+        
+    return x
+```
+
+**Edge Cases and Pitfalls:**
+- **Nonlinear Model Stability:** The exponential function in the nonlinear forward model ($\exp(-\mu_{water} \cdot Tx)$) can saturate or become numerically unstable if the input is not scaled correctly or if $\mu_{water}$ is incorrect [S1, unofficial].
+- **Momentum Non-negativity:** The momentum buffer $s$ is updated using ReLU, ensuring it remains non-negative to prevent oscillatory behavior from negative momentum values [S1, unofficial].
+- **Scale Invariance:** The operator and pseudoinverse must be normalized by the operator norm to ensure scale invariance [S1, unofficial].
+- **Input Shape:** The input tensor to the convolutional network must have the correct channel dimension based on the variant (2 or 3 gradient channels + memory) [S1, unofficial].
+
+## Subtopics
+
+### Partially Learned Gradient Descent (With Regularizer)
+A variant that includes a Tikhonov-like regularization term (adjoint of partial derivatives) in the network input concatenation [S1, unofficial]. It computes the regularization gradient $g_{reg} = (\partial_0^* \partial_0 + \partial_1^* \partial_1)(x)$ and concatenates it with $x$, $g_{data}$, and $s$ [S1, unofficial]. The input channel count is $n_{memory} + 3$ [S1, unofficial].
+
+### Velocity Reconstruction (VelRecon)
+A method for estimating velocity fields from density changes, using a proximal operator and momentum terms [S2]. It updates velocity estimates using auxiliary variables and error thresholds [S2]. This is distinct from the image reconstruction focus of Partially Learned Gradient Descent and is used in fluid modeling contexts [S2].
+
+## Operating characteristics
+- **Time Complexity:** Linear in the number of iterations $n_{iter}$ and the cost of the forward/backward projections and convolutional network passes per iteration [S1, unofficial].
+- **Memory Complexity:** Proportional to the image size and $n_{memory}$ for the hidden state $s$, plus the memory for the convolutional network weights [S1, unofficial].
+- **Performance:** Demonstrated on head CT and phantom data with 128x128 or 512x512 resolutions [S1, unofficial]. Typical values: 30 angles for parallel beam geometry, 1000 for fan beam geometry [S1, unofficial].
+- **Strengths:** Retains physical interpretability by using the actual forward model and gradients, unlike end-to-end CNNs [S1, unofficial].
+- **Limitations:** Requires training data and computational resources for training the network. The performance depends on the quality of the learned weights. The nonlinear forward model requires careful scaling [S1, unofficial].
+- **When to use:** When you want the benefits of learned optimization dynamics but need to maintain physical consistency and interpretability. Suitable for medical imaging reconstruction tasks [S1, unofficial].
+- **When not to use:** When computational resources for training are unavailable, or when a purely analytical solution (like FBP) is sufficient for the required quality [S1, unofficial].
+
+## Background
+Partially Learned Gradient Descent was developed in the context of learned iterative reconstruction for medical imaging, specifically using the Open Data Library (ODL) and TensorFlow [S1, unofficial]. It was introduced by Adler et al. in the repository `learned_gradient_tomography` [S1, unofficial]. The method unrolls optimization steps into a neural network, learning the update rules while keeping the physics-based gradient computation fixed [S1, unofficial]. It has been applied to head CT reconstruction and phantom data [S1, unofficial].
+
+## Sources
+[S1] adler-j/learned_gradient_tomography, https://github.com/adler-j/learned_gradient_tomography, fetched 2026-10-27 (unofficial)
+[S2] Physics-Based Differentiable Rendering for Efficient and Plausible Fluid Modeling from Monocular Video, https://doi.org/10.3390/e25091348, fetched 2026-10-26

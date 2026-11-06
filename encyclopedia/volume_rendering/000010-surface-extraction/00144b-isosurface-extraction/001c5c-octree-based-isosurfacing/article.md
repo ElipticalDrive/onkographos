@@ -3,132 +3,137 @@
 Also called: Contouring using Octrees, Isosurfacing with Octree discretization
 
 ## Overview
-Octree-based isosurfacing replaces the uniform Cartesian grid of standard isosurface extraction algorithms (such as Marching Cubes or Dual Contouring) with an adaptive octree spatial discretization [S1]. This approach allows for variable resolution, refining the mesh only where the scalar field exhibits high complexity, thereby reducing memory usage and computation time for sparse or heterogeneous data [S1]. Unlike uniform grid methods, it lacks inherent topological guarantees; specifically, if the octree depth varies discontinuously around the isosurface, standard algorithms like Marching Cubes may produce topological cracks in the resulting mesh [S1].
+Octree-based isosurfacing replaces the regular Cartesian grid with an adaptive octree spatial discretization structure for surface extraction algorithms such as Marching Cubes and Dual Contouring [S1]. This approach allows for adaptive resolution, concentrating computational resources near the surface while coarsening the representation in empty or uniform regions [S1]. Unlike its sibling [Marching Cubes with Octree](1259-marching-cubes-with-octree.md) which may enforce specific grid constraints, this general method operates on arbitrary octree structures, though it sacrifices the topological guarantees of uniform grids, potentially leading to cracks if the tree is not sufficiently adapted to the geometry [S1].
 
 ## How it works
-The method operates by constructing a hierarchical spatial partition of the domain and evaluating the scalar field on this structure. The implementation typically follows a domain-object pattern where the octree, value function, and gradient function are encapsulated to decouple traversal logic from the specific surface extraction algorithm [S1].
+The method consists of three phases: octree construction, domain definition, and surface extraction.
 
-### Inputs and Outputs
-*   **Inputs**:
-    *   `bbox`: A 3D bounding box defined by minimum and maximum corner points.
-    *   `split_predicate`: A function or criterion determining whether an octree node should be subdivided.
-    *   `value_function`: A function $V(P)$ returning the scalar value at any point $P$ in space.
-    *   `gradient_function`: (Optional, required for Dual Contouring) A function $G(P)$ returning the gradient vector at any point $P$.
-    *   `isovalue`: The scalar threshold $t$ defining the isosurface.
-*   **Outputs**:
-    *   `points`: A collection of 3D vertices forming the mesh.
-    *   `triangles`: A collection of triangle indices (or polygons) forming the mesh surface.
+**Inputs:**
+- A 3D bounding box defined by minimum and maximum corner points.
+- A split predicate function (boolean) that determines whether a node should be subdivided based on the scalar field.
+- A value function that returns the scalar field value at any point in space.
+- A gradient function that returns the gradient vector at any point in space (required for Dual Contouring; optional for Marching Cubes).
+- An isovalue threshold.
 
-### Data Structures
-*   **Octree Node**: Represents a cubic region of space. Each node maintains a bounding box and a list of children (up to 8). Leaf nodes represent the finest resolution cells where the scalar field is sampled or interpolated.
-*   **Domain Object**: A generic interface that binds the octree structure with the value and gradient functions. It provides methods to query values at specific locations and traverse the tree structure [S1].
+**Outputs:**
+- A set of vertices and triangles (or polygons) representing the isosurface.
 
-### Steps
-1.  **Initialize Octree**: Create an octree rooted at the bounding box defined by `bbox_min` and `bbox_max` [S1].
-2.  **Refine Octree**: Recursively subdivide nodes based on the `split_predicate`. The predicate typically checks if the range of scalar values within the node's bounding box contains the `isovalue` or if the geometric complexity exceeds a threshold [S1].
-3.  **Traverse to Leaves**: Collect all leaf nodes of the refined octree. These leaves define the active cells for surface extraction [S1].
-4.  **Construct Domain**: Instantiate a domain object that associates the octree with the `value_function` and `gradient_function`. This allows the extraction algorithm to query scalar values at arbitrary points within the octree's spatial hierarchy [S1].
-5.  **Execute Extraction Algorithm**: Run the chosen isosurfacing algorithm (e.g., Marching Cubes or Dual Contouring) on the domain object.
-    *   For **Marching Cubes**: The algorithm traverses the octree leaves, identifies edges crossing the isovalue, and generates triangles. Note that mismatched depths between adjacent leaves can lead to cracks [S1].
-    *   For **Dual Contouring**: The algorithm computes vertices inside cells and projects them onto the isosurface using gradients. It may skip face triangulation if specified [S1].
+**Data Structures:**
+- **Octree:** A hierarchical spatial partition. Each node has up to 8 children. Leaf nodes represent the finest resolution cells.
+- **Domain Object:** Encapsulates the octree, value function, and gradient function. It provides the interface for the isosurfacing algorithm to query values and gradients at arbitrary locations or cell vertices.
 
-### Pseudocode
+**Steps:**
+
+1.  **Initialize Octree:** Create an octree rooted at the bounding box defined by `min_corner` and `max_corner` [S1].
+2.  **Refine Octree:** Recursively subdivide nodes using the `split_predicate`. A node is split if the predicate returns true for its region (e.g., if the isovalue lies within the range of values in the cell) [S1].
+3.  **Traverse and Collect:** Traverse the octree to collect all leaf nodes. These leaves define the active cells for surface extraction [S1].
+4.  **Construct Domain:** Bind the value and gradient functions to the octree structure to create a `Domain` object. This allows the algorithm to evaluate the scalar field and its derivatives at any point, including vertices of non-uniform cells [S1].
+5.  **Extract Surface:** Run the chosen isosurfacing algorithm (e.g., Dual Contouring or Marching Cubes) on the `Domain` object with the specified `isovalue` [S1].
+
+**Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
 def octree_isosurfacing(bbox_min, bbox_max, split_predicate, value_func, gradient_func, isovalue, algorithm="dual_contouring"):
-    # 1. Initialize Octree
+    """
+    Perform isosurfacing using an adaptive octree.
+    
+    Args:
+        bbox_min: Point (x, y, z) defining the minimum corner of the bounding box.
+        bbox_max: Point (x, y, z) defining the maximum corner of the bounding box.
+        split_predicate: Function(Point) -> bool. Returns True if the node containing Point should be split.
+        value_func: Function(Point) -> float. Returns the scalar value at Point.
+        gradient_func: Function(Point) -> Vector. Returns the gradient at Point.
+        isovalue: float. The threshold value for the isosurface.
+        algorithm: str. Either "dual_contouring" or "marching_cubes".
+        
+    Returns:
+        vertices: List of Points.
+        triangles: List of Triangles (indices into vertices).
+    """
+    # Step 1: Initialize Octree
     octree = Octree()
     octree.initialize(bbox_min, bbox_max)
     
-    # 2. Refine Octree
-    # The split_predicate determines if a node should be subdivided.
-    # It typically evaluates the range of values in the node's bounding box.
+    # Step 2: Refine Octree
+    # The refine method recursively calls split_predicate on nodes.
+    # If split_predicate returns True, the node is subdivided into 8 children.
     octree.refine(split_predicate)
     
-    # 3. Traverse to Leaves
-    # Collect all leaf nodes to define the active domain
-    leaves = octree.traverse_leaves()
+    # Step 3: Traverse to collect leaves (implicit in Domain construction for most implementations)
+    # The domain object will handle traversal internally or expose leaf iterators.
     
-    # 4. Construct Domain Object
-    # Bind the octree structure with the value and gradient functions
+    # Step 4: Construct Domain
+    # Bind functions to the octree structure
     values = ValueFunction(value_func, octree)
     gradients = GradientFunction(gradient_func, octree)
     domain = Domain(octree, values, gradients)
     
-    # 5. Execute Extraction
-    points = []
-    triangles = []
-    
+    # Step 5: Extract Surface
     if algorithm == "dual_contouring":
-        # Run Dual Contouring
-        # Parameters: do_not_triangulate_faces=True, constrain_to_cell=False
-        dual_contouring(domain, isovalue, points, triangles, 
-                        do_not_triangulate_faces=True, 
-                        constrain_to_cell=False)
+        # Dual Contouring requires gradients for QEF solving
+        # Parameters: do_not_triangulate_faces=True, constrain_to_cell=False [S1]
+        vertices, triangles = dual_contouring(domain, isovalue, 
+                                              do_not_triangulate_faces=True, 
+                                              constrain_to_cell=False)
     elif algorithm == "marching_cubes":
-        # Run Marching Cubes
-        # Note: Cracks may appear if octree is not adapted to surface
-        marching_cubes(domain, isovalue, points, triangles)
+        # Marching Cubes uses linear interpolation on edges
+        vertices, triangles = marching_cubes(domain, isovalue)
+    else:
+        raise ValueError("Unsupported algorithm")
         
-    return points, triangles
+    return vertices, triangles
 ```
 
-### Parameters
-*   `do_not_triangulate_faces`: Boolean flag for Dual Contouring. If `true`, skips the triangulation of polygonal faces, outputting polylines or polygons instead of triangles [S1].
-*   `constrain_to_cell`: Boolean flag for Dual Contouring. If `false`, allows vertices to be placed anywhere within the cell, not just constrained to the cell boundaries [S1].
+**Parameters:**
+- `do_not_triangulate_faces`: Boolean. If true, skips face triangulation during Dual Contouring [S1].
+- `constrain_to_cell`: Boolean. If false, allows vertices to move outside their parent cells (standard behavior) [S1].
 
-### Edge Cases and Pitfalls
-*   **Cracks**: In Marching Cubes, if adjacent octree leaves have different depths (i.e., one leaf is a child of a coarse node while its neighbor is a coarse node itself), the shared face may not be triangulated consistently, leading to topological holes or cracks [S1].
-*   **Lack of Guarantees**: Unlike uniform grid methods, octree-based extraction does not guarantee a watertight mesh unless specific constraints or post-processing (like crack-fixing algorithms) are applied [S1].
-*   **Predicate Design**: The `split_predicate` must be robust. If it fails to subdivide a node containing the isosurface, the surface will be missed. If it over-subdivides, performance degrades [S1].
+**Edge Cases and Pitfalls:**
+- **Cracks:** If the octree is not sufficiently adapted to the surface geometry, cracks can appear in the Marching Cubes surface [S1]. This is because adjacent cells of different sizes may not share vertices consistently.
+- **Loss of Guarantees:** Using an octree loses the topological guarantees provided by regular Cartesian grids [S1].
+- **Gradient Availability:** Dual Contouring requires accurate gradients. If the gradient function is not provided or is inaccurate, the resulting mesh quality will degrade [S1].
 
 ## Subtopics
 
 ### [Standard Interval Tree for Isosurface Extraction](1230-standard-interval-tree-for-isosurface-extraction.md)
-The Standard Interval Tree is a spatial indexing structure used to efficiently identify active cells (cells intersected by an isosurface) in volumetric data, serving as a pre-processing step for surface extraction algorithms like Marching Cubes or Marching Tetrahedra. It solves the problem of $O(N)$ traversal cost by providing optimal output-sensitive query complexity $O(\log n + k)$, where $n$ is the number of cells and $k$ is the number of active cells. It sets itself apart from its parent [Octree-based Isosurfacing](1247-octree-based-isosurfacing.md) by operating on a fixed logical grid structure rather than an adaptive octree, and from siblings like [IsoOctree](1744-isooctree.md) by using a binary tree of value intervals rather than a spatial hierarchy of cell groups.
-
-### [Marching Cubes with Octree](1259-marching-cubes-with-octree.md)
-Marching Cubes with Octree extracts a triangle mesh from an implicit scalar field defined over an adaptive octree structure, replacing the uniform Cartesian grid of standard Marching Cubes. It sets itself apart from its siblings by relying on a generic domain interface (`MC_Domain`) that decouples the traversal logic from the specific octree implementation, allowing for parallel execution and arbitrary split predicates. Unlike uniform grid methods, it adapts resolution to the field's complexity, but it lacks inherent guarantees against topological cracks if the octree depth varies discontinuously around the isosurface.
+Uses a binary tree of value intervals on a fixed Cartesian grid to identify active cells, decoupling spatial locality from value-based filtering.
 
 ### [IsoOctree](1744-isooctree.md)
-IsoOctree is an unconstrained isosurface extraction method that operates on arbitrary octrees by computing the Euclidean Distance Transform (EDT) of an input mesh and adapting the octree to sample this transform. It solves the problem of generating simplified, adaptive polygonal representations of meshes by refining the octree resolution near the surface and in high-curvature regions. It sets itself apart from constrained octree methods by allowing arbitrary octree structures (non-conforming) and by operating on the distance field rather than raw scalar voxel data, enabling direct mesh simplification.
+Adapts an octree to sample a Euclidean Distance Transform (EDT) of an input mesh, enabling adaptive simplification of existing meshes rather than raw scalar fields.
 
 ### [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md)
-A hierarchical spatial subdivision method using an octree to accelerate isosurface extraction by pruning branches that cannot contain the isosurface. It differs from uniform grid methods by adapting resolution to data density and from sibling octree methods by relying on strict value-range bounding intervals for early termination during traversal.
+Accelerates cell enumeration by pruning octree branches that cannot contain the target isovalue using interval-based culling.
 
 ### [Ashida and Badla Octree Contouring](2117-ashida-and-badla-octree-contouring.md)
-Ashida and Badla Octree Contouring is an isosurface extraction method that operates directly on adaptive octrees, avoiding the need for a uniform grid or dual hexahedral mesh. It identifies cycles of contour faces intersecting each octree cell and generates one vertex per cycle. Unlike [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md) which may require complex crack-fixing, this method aims for manifold output through cycle identification, though it is computationally expensive and prone to non-manifold artifacts between neighboring cells.
+Extracts contours directly from octrees by identifying cycles of contour faces, avoiding uniform grids but potentially producing non-manifold edges.
 
 ### [Unconstrained Isosurface Extraction on Arbitrary Octrees](2413-unconstrained-isosurface-extraction-on-arbitrary-octrees.md)
-This method extracts a provably watertight isosurface directly from an arbitrary octree without requiring tree refinement or modification of vertex values. Unlike dual marching cubes, which can generate topological holes in flat regions, this primal approach guarantees that the isosurface separates samples on opposite sides of the isovalue by introducing an isovertex along every isovalue-crossing edge. It sets itself apart by using binary edge-trees to resolve inconsistencies at face boundaries between leaf nodes of different depths, ensuring watertightness even when the octree topology is unconstrained.
+Guarantees watertightness on arbitrary octrees by introducing isovertices on every isovalue-crossing edge and using binary edge-trees to resolve inconsistencies.
 
 ### [Consistent Isovertex Definition via Edge-Trees](2427-consistent-isovertex-definition-via-edge-trees.md)
-This method defines the position of an isovertex on an octree edge consistently by traversing an "edge-tree" to a unique leaf node with value 1, ensuring watertightness in isosurface extraction. It solves the problem of ambiguous isovertex positions when a coarse edge contains multiple sign changes, which causes standard polygonization methods like [Blo88] to fail. Unlike methods that refine the tree or modify vertex values, this approach uses the existing edge-tree structure to resolve ambiguity, ensuring that the extracted isopolylines are closed loops and each edge is shared by exactly two isopolygons. It differs from the minimal edge definition in [JLSW02] only when there is more than one isovalue-crossing along an edge.
+Defines isovertex positions consistently by traversing edge-trees to unique leaves, resolving ambiguity in coarse edges with multiple sign changes.
 
 ### [Adaptive Octree Generation with Flatness Criterion](2482-adaptive-octree-generation-with-flatness-criterion.md)
-This method generates an adaptive octree for isosurface extraction by recursively refining nodes based on the geometric flatness of the surface intersection, assigning vertex values via Euclidean distance transform sampling. It differs from sibling methods like [IsoOctree](1744-isooctree.md) and [Wilhelms and Van Gelder Octree](2107-wilhelms-and-van-gelder-octree.md) by using a curvature-based flatness metric rather than simple field uniformity or depth constraints to determine refinement, allowing for coarser representation of planar surface regions.
+Refines octrees based on geometric flatness (curvature) rather than field uniformity, allowing coarser representation of planar regions.
 
 ### [Sampled DMC](3813-sampled-dmc.md)
-Sampled DMC is a mesh generation technique that adapts the Dual Marching Cubes (DMC) algorithm to hashed octrees using Morton keys. It constructs a dual grid where vertices are located at the center of each octree leaf node, allowing for adaptive resolution isosurfacing without requiring a uniform grid. Unlike standard Marching Cubes implementations that expect Signed Distance Functions (SDFs) as direct input, Sampled DMC takes the data octree itself, making it suitable for storing and extracting meshes from sampled points, complex SDFs, or destructible environments.
+Adapts Dual Marching Cubes to hashed octrees using Morton keys, constructing a dual grid at leaf centers for adaptive resolution from sampled points.
 
-### [Hierarchical Marching Cubes Enumeration](5223-hierarchical-marching-cubes-enumeration.md)
-Hierarchical Marching Cubes Enumeration is a recursive octree traversal algorithm designed to extract isosurface meshes from volumetric data discretized by an octree. It solves the problem of adapting standard Marching Cubes to non-uniform spatial structures by explicitly enumerating voxel faces, edges, and vertices across potentially mismatched tree depths, delegating the actual mesh generation to a standard Marching Cubes routine only at leaf nodes. It distinguishes itself from sibling methods by its explicit separation of traversal logic (face, edge, vertex enumeration) from the surface extraction logic, allowing for robust handling of arbitrary octree configurations without requiring a globally consistent grid.
-
-### Canonical Enumeration
-The elementary method for cell extraction that sequentially visits all cells in the volume to identify active cells containing the isosurface [S2, unofficial]. For each cell $C_{i,j,k}$, it checks if the isovalue $t$ is contained in the half-open interval $[v_{min}, v_{max})$, where $v_{min} = \min(V_{i,j,k})$ and $v_{max} = \max(V_{i,j,k})$ [S2, unofficial]. The range of the interpolation function $\hat{f}$ in a cell is defined as $\hat{f}(C_{i,j,k}) = [v_{min}, v_{max}]$ [S2, unofficial]. This method requires only storage for the original volume data and a small constant amount for variables, with a time complexity of $O(n)$, where $n$ is the size of the volume data [S2, unofficial].
+### [Point-based Isosurface Extraction with Octree Pruning](6707-point-based-isosurface-extraction-with-octree-pruning.md)
+A view-dependent method that subdivides cells until sub-pixel resolution is achieved, rendering geometry as point primitives for interactive performance.
 
 ## Operating characteristics
-*   **Time Complexity**: The time complexity depends on the extraction algorithm and the octree structure. For canonical enumeration on the octree leaves, it is linear in the number of leaves $n$ [S2, unofficial]. However, the refinement phase adds overhead. The primary benefit is that the number of active cells (leaves) is often much smaller than the total number of cells in a uniform grid of equivalent maximum resolution, leading to faster extraction for sparse data.
-*   **Memory Complexity**: The octree structure requires additional memory for node pointers and metadata compared to a flat array. However, it significantly reduces memory usage compared to a uniform grid of the same maximum resolution, as only relevant regions are stored [S1][S2, unofficial].
-*   **Strengths**: Adaptive resolution allows for high-fidelity representation of complex surfaces with fewer polygons. Efficient pruning of empty space.
-*   **Limitations**: Lack of topological guarantees (cracks) in standard algorithms like Marching Cubes. Increased implementation complexity due to tree traversal and domain abstraction. Performance can degrade if the split predicate causes excessive refinement.
-*   **When to Use**: Suitable for large, sparse, or heterogeneous volumetric data where uniform grid resolution is prohibitive. Ideal for applications requiring variable detail levels.
-*   **When Not to Use**: When topological correctness (watertightness) is critical and cannot be ensured by post-processing or specific algorithm variants (like Unconstrained Isosurface Extraction). When the data is dense and uniform, a simple Cartesian grid may be faster and simpler.
+- **Time Complexity:** Depends on the number of leaf nodes in the octree and the complexity of the split predicate. Traversal is $O(L)$ where $L$ is the number of leaves. Surface extraction is linear in the number of active cells.
+- **Memory Complexity:** Proportional to the number of octree nodes. Adaptive structures can significantly reduce memory usage compared to uniform grids for sparse or complex fields.
+- **Strengths:** Adaptive resolution allows high detail where needed and coarse representation elsewhere. Efficient for large domains with localized features.
+- **Limitations:** Loss of topological guarantees (cracks in Marching Cubes). More complex implementation than uniform grid methods. Gradient computation may be expensive or inaccurate if not carefully defined.
+- **When to use:** When the scalar field has varying frequency or when memory constraints prohibit uniform high-resolution grids.
+- **When not to use:** When strict watertightness and topological correctness are required without additional post-processing or constrained tree structures.
 
 ## Background
-Octree-based isosurfacing emerged as a solution to the memory and computational limitations of uniform grid methods for large-scale volumetric data. Wilhelms and Van Gelder proposed using octrees for isosurface extraction to accelerate the cell identification phase by pruning branches that cannot contain the isosurface [S2, unofficial]. This approach was later integrated with standard algorithms like Marching Cubes and Dual Contouring, as demonstrated in libraries such as CGAL [S1]. The method addresses the need for adaptive resolution in scientific visualization and computer graphics, allowing for detailed surface representation where needed while ignoring empty space.
+The method is implemented in libraries such as CGAL's Isosurfacing_3 module, which provides examples of using octrees for Dual Contouring and Marching Cubes [S1]. It builds on the general principles of isosurface extraction [30-isosurface-extraction.md] but adapts the domain traversal to a hierarchical spatial structure.
 
 ## Sources
 [S1] 3D Isosurfacing, https://doc.cgal.org/latest/Isosurfacing_3/index.html, fetched 2026-10-29
-[S2] Optimal hybrid memory constrained isosurface extraction, http://nbn-resolving.de/urn:nbn:de:bsz:352-130091, fetched 2026-10-30 (unofficial)

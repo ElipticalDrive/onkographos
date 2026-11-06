@@ -1,0 +1,210 @@
+--- v001.md
++++ v002.md
+@@ -4,12 +4,13 @@
+ 
+ ## Overview
+-Training Ray Compositing performs the forward and backward passes of volume rendering specifically for gradient-based optimization. It composites ray samples (RGB and density) into final image colors, alpha weights, and depth using the standard volume rendering integral [S1, S4, unofficial]. Unlike inference-only compositing, this method explicitly computes gradients for network outputs (sigmas and RGBs) to enable backpropagation through the rendering equation [S3, unofficial]. It is distinguished from standard [Compositing](2436-compositing.md) by its dual forward/backward CUDA kernel implementation and from [Pre-Integration Lookup](2854-pre-integration-lookup.md) by its direct sample-wise accumulation rather than texture-based approximation.
++Training Ray Compositing composites ray colors and depths according to the volume rendering formula during training [S1, S4, unofficial]. It explicitly computes gradients for density and color parameters to enable backpropagation through the rendering equation [S3, S4, unofficial]. It is distinguished from standard [Compositing](2436-compositing.md) by its dual forward/backward CUDA kernel implementation [S3, S4, unofficial].
+ 
+ ## How it works
+ **Inputs and Outputs:**
+-*   `sigmas`: Density values, `float` array of shape `[M]` [S1, unofficial].
++*   `sigmas`: Density values, `float` array of shape `[M]` [S1, S3, unofficial].
+ *   `rgbs`: RGB colors at sampled points, `float` array of shape `[M, 3]` [S1, S3, unofficial].
+-*   `deltas`: Step sizes (distances between samples), `float` array of shape `[M, 2]` [S1, unofficial]. Note: Some implementations use a single channel for step size [S3, unofficial].
++*   `deltas`: Step sizes and real deltas, `float` array of shape `[M, 2]` [S1, S3, unofficial].
+ *   `rays`: Ray metadata, `int32` array of shape `[N, 3]`. Each row is `[ray_index, start_point_index, num_steps]`, where `ray_index` maps to the output pixel, `start_point_index` is the offset in the sample arrays, and `num_steps` is the number of valid samples for that ray [S1, S3, S4, unofficial].
++*   `positions`: Sample positions along the ray, `float` array of shape `[M]` [G].
+ *   `T_thresh`: Transparency threshold for early termination, `float`, default $10^{-4}$ [S1, S4, unofficial].
+ *   **Outputs:**
+@@ -19,14 +20,14 @@
+ 
+ **Data Structures:**
+-The method operates on contiguous CUDA tensors. The `rays` array acts as a sparse index into the dense `sigmas`, `rgbs`, and `deltas` arrays, allowing variable numbers of samples per ray [S1, S3, unofficial].
++The method operates on contiguous CUDA tensors [S1, S3, unofficial]. The `rays` array acts as a sparse index into the dense `sigmas`, `rgbs`, `deltas`, and `positions` arrays, allowing variable numbers of samples per ray [S1, S3, unofficial].
+ 
+ **Algorithm (Forward Pass):**
+ 1.  **Initialization:** Ensure input tensors are contiguous [S1, unofficial]. Initialize accumulators for the current ray: transmittance $T = 1.0$, and color accumulators $r=0, g=0, b=0$ [S3, unofficial]. Alternatively, initialize `rgb_temp`, `depth_temp`, `opacity_temp` to zero [S2, unofficial].
+ 2.  **Ray Iteration:** Iterate over active rays $n$ [S1, S2, unofficial]. Retrieve ray metadata: `index` (pixel ID), `offset` (sample start), `num_steps` (sample count) from `rays[n]` [S3, unofficial].
+-3.  **Validation:** Check for empty rays or buffer overflow (`num_steps == 0` or `offset + num_steps >= M`). If invalid, set `weights_sum[index] = 0` and `image[index] = 0`, then skip [S3, unofficial].
++3.  **Validation:** Check for empty rays or buffer overflow (`num_steps == 0` or `offset + num_steps >= M`) [S3, unofficial]. If invalid, set `weights_sum[index] = 0` and `image[index] = 0`, then skip [S3, unofficial].
+ 4.  **Sample Loop:** For each sample $s$ from $0$ to `num_steps` - 1:
+     a.  **Alpha Calculation:** Compute the probability of absorption at this step:
+         $$ \alpha = 1 - e^{-\sigma \delta} $$
+-        where $\sigma = \text{sigmas}[offset + s]$ and $\delta = \text{deltas}[offset + s]$ [S3, unofficial].
++        where $\sigma = \text{sigmas}[offset + s]$ and $\delta = \text{deltas}[offset + s, 0]$ [S3, unofficial].
+     b.  **Weight Calculation:** Compute the contribution weight:
+         $$ w = \alpha \cdot T $$
+@@ -36,5 +37,5 @@
+         $$ g \leftarrow g + w \cdot \text{rgbs}[offset + s, 1] $$
+         $$ b \leftarrow b + w \cdot \text{rgbs}[offset + s, 2] $$
+-        $$ \text{depth} \leftarrow \text{depth} + w \cdot \text{position}[offset + s] \quad \text{[S2, unofficial]} $$
++        $$ \text{depth} \leftarrow \text{depth} + w \cdot \text{positions}[offset + s] \quad \text{[S2, unofficial]} $$
+         $$ \text{opacity} \leftarrow \text{opacity} + w \quad \text{[S2, unofficial]} $$
+     d.  **Transmittance Update:** Update transmittance for the next sample:
+@@ -46,5 +47,5 @@
+ 1.  **Gradient Inputs:** Receive gradients from the loss function with respect to the output `image` (`grad_image`) and `weights_sum` (`grad_weights_sum`) [S4, unofficial].
+ 2.  **Kernel Execution:** Call the backward CUDA kernel `composite_rays_train_backward` [S3, S4, unofficial].
+-3.  **Gradient Computation:** The kernel computes gradients for `sigmas` and `rgbs` by reversing the compositing chain. It uses the saved forward pass values (weights, transmittance) to calculate $\frac{\partial L}{\partial \sigma}$ and $\frac{\partial L}{\partial \text{rgb}}$ [S3, S4, unofficial].
++3.  **Gradient Computation:** The kernel computes gradients for `sigmas` and `rgbs` by reversing the compositing chain [S3, S4, unofficial]. It uses the saved forward pass values (weights, transmittance) to calculate $\frac{\partial L}{\partial \sigma}$ and $\frac{\partial L}{\partial \text{rgb}}$ [S3, S4, unofficial].
+ 4.  **Depth Gradient:** Note that gradients for depth are not propagated back to sigmas in the standard implementation [S1, S4, unofficial].
+ 
+@@ -54,21 +55,20 @@
+ import math
+ 
+-def composite_rays_train_forward(sigmas, rgbs, deltas, rays, T_thresh=1e-4):
++def composite_rays_train_forward(sigmas, rgbs, deltas, rays, positions, T_thresh=1e-4):
+     """
+     Forward pass for Training Ray Compositing.
+     sigmas: [M] float
+     rgbs: [M, 3] float
+-    deltas: [M] float (step sizes)
++    deltas: [M, 2] float (step size at index 0, real delta at index 1)
+     rays: [N, 3] int32 (ray_index, start_offset, num_steps)
++    positions: [M] float (sample positions along ray)
+     """
+     N = rays.shape[0]
+     M = sigmas.shape[0]
+     
+-    # Output buffers
+     image = torch.zeros((N, 3), dtype=torch.float32)
+     weights_sum = torch.zeros((N), dtype=torch.float32)
+     depth = torch.zeros((N), dtype=torch.float32)
+     
+-    # Process each ray
+     for n in range(N):
+         ray_idx = int(rays[n, 0])
+@@ -76,5 +76,4 @@
+         num_steps = int(rays[n, 2])
+         
+-        # Edge case: empty ray or overflow
+         if num_steps == 0 or start_idx + num_steps > M:
+             continue
+@@ -85,62 +84,69 @@
+         b_acc = 0.0
+         depth_acc = 0.0
+-        opacity_acc = 0.0
+         
+         for s in range(num_steps):
+             sigma = sigmas[start_idx + s]
+-            delta = deltas[start_idx + s]
++            delta = deltas[start_idx + s, 0]
+             rgb = rgbs[start_idx + s]
++            pos = positions[start_idx + s]
+             
+-            # Alpha calculation: alpha = 1 - exp(-sigma * delta)
+             alpha = 1.0 - math.exp(-sigma * delta)
+-            
+-            # Weight calculation: w = alpha * T
+             w = alpha * T
+             
+-            # Accumulate
+             r_acc += w * rgb[0]
+             g_acc += w * rgb[1]
+             b_acc += w * rgb[2]
++            depth_acc += w * pos
+             
+-            # Depth accumulation (assuming positions are stored or derived; 
+-            # here we assume a placeholder for position 'pos' if not explicitly in deltas)
+-            # In many implementations, deltas are step sizes, positions are accumulated separately.
+-            # If 'deltas' contains positions, adjust accordingly. 
+-            # Based on [S2, unofficial], depth_temp accumulates w * ts[sn]. 
+-            # We assume 'positions' tensor exists or is derived. For this generic impl:
+-            # pos = ... # Derived from ray origin and accumulated deltas
+-            # depth_acc += w * pos 
+-            
+-            opacity_acc += w
+-            
+-            # Update transmittance
+             T = T * (1.0 - alpha)
+             
+-            # Early termination
+             if T < T_thresh:
+                 break
+         
+-        # Write results
+         image[ray_idx] = torch.tensor([r_acc, g_acc, b_acc])
+-        weights_sum[ray_idx] = 1.0 - T # Total opacity
+-        # depth[ray_idx] = depth_acc # If depth is tracked
++        weights_sum[ray_idx] = 1.0 - T
++        depth[ray_idx] = depth_acc
+         
+     return image, weights_sum, depth
+ 
+-def composite_rays_train_backward(grad_image, grad_weights_sum, sigmas, rgbs, deltas, rays, T_thresh=1e-4):
++def composite_rays_train_backward(grad_image, grad_weights_sum, sigmas, rgbs, deltas, rays, positions, T_thresh=1e-4):
+     """
+-    Backward pass stub. Computes gradients for sigmas and rgbs.
+-    In practice, this is implemented in CUDA to avoid Python loop overhead.
++    Backward pass for Training Ray Compositing.
++    Computes gradients for sigmas and rgbs by reversing the compositing chain.
+     """
+-    # The backward pass replays the forward logic to compute:
+-    # dL/d_sigma and dL/d_rgb using the chain rule through alpha and T.
+-    # dL/d_sigma = sum(w * (-delta) * (1-alpha)/T * dL/d_C + ...)
+-    # dL/d_rgb = sum(w * dL/d_C)
++    N = rays.shape[0]
++    M = sigmas.shape[0]
+     
+-    # Placeholder for the actual CUDA kernel call or complex gradient derivation
+-    # grad_sigmas = ...
+-    # grad_rgbs = ...
++    grad_sigmas = torch.zeros_like(sigmas)
++    grad_rgbs = torch.zeros_like(rgbs)
+     
+-    # Note: Gradients for depth are NOT propagated to sigmas [S1, S4, unofficial].
++    for n in range(N):
++        ray_idx = int(rays[n, 0])
++        start_idx = int(rays[n, 1])
++        num_steps = int(rays[n, 2])
++        
++        if num_steps == 0 or start_idx + num_steps > M:
++            continue
++            
++        T = 1.0
++        grad_r = grad_image[ray_idx, 0]
++        grad_g = grad_image[ray_idx, 1]
++        grad_b = grad_image[ray_idx, 2]
++        
++        for s in range(num_steps):
++            sigma = sigmas[start_idx + s]
++            delta = deltas[start_idx + s, 0]
++            alpha = 1.0 - math.exp(-sigma * delta)
++            w = alpha * T
++            
++            grad_c = grad_r + grad_g + grad_b
++            grad_rgbs[start_idx + s] += w * grad_c
++            grad_sigmas[start_idx + s] += w * (-delta) * (1.0 - alpha) / T * grad_c
++            
++            T = T * (1.0 - alpha)
++            
++            if T < T_thresh:
++                break
++                
+     return grad_sigmas, grad_rgbs
+ ```
+@@ -149,5 +155,5 @@
+ 
+ ### [Training Ray Compositing (Sigma)](3868-training-ray-compositing-sigma.md)
+-Computes gradients specifically for sigmas, RGBs, and ambient light during training. It supports a custom backward pass, allowing for specialized gradient handling for density parameters.
++Training Ray Compositing (Sigma) is a differentiable volume rendering method that composites per-ray samples of density ($\sigma$) and color ($\mathbf{c}$) into final image colors, alpha weights, and depth, while simultaneously computing gradients with respect to the input parameters for training. It extends standard alpha compositing by including ambient light contributions and supporting a custom backward pass to propagate gradients from the loss function back to the density and color fields. It is distinguished from its sibling [Training Ray Compositing (Backward)](3893-training-ray-compositing-backward.md) by handling the forward composition and the joint forward-backward logic in a unified CUDA kernel interface, whereas the backward variant focuses specifically on the gradient computation logic.
+ 
+ ### Multi-Layer Compositing with Gradient Backpropagation
+@@ -155,13 +161,13 @@
+ 
+ ## Operating characteristics
+-*   **Time Complexity:** Linear with respect to the total number of samples $M$ and rays $N$. The forward pass is $O(M)$ and the backward pass is $O(M)$ [S3, unofficial].
+-*   **Memory Complexity:** $O(M)$ for storing input tensors and $O(N)$ for output buffers. The backward pass requires storing intermediate values (weights, transmittance) for each sample, increasing memory usage by a factor proportional to the number of samples per ray [S4, unofficial].
++*   **Time Complexity:** Linear with respect to the total number of samples $M$ and rays $N$ [S3, unofficial].
++*   **Memory Complexity:** $O(M)$ for storing input tensors and $O(N)$ for output buffers [S4, unofficial].
+ *   **Performance:** Implemented as CUDA kernels for high performance on GPUs [S3, S4, unofficial]. Typical thread block size is 256 threads [S3, unofficial].
+ *   **Strengths:** Enables end-to-end training of neural radiance fields by providing exact gradients through the volume rendering integral [S1, S3, unofficial].
+ *   **Limitations:** High memory consumption during training due to storing intermediate values for backpropagation [S4, unofficial]. Early termination ($T_{\text{thresh}}$) can introduce approximation errors if set too high, potentially affecting gradient accuracy [S4, unofficial].
+-*   **When to use:** During the training phase of neural volume rendering methods (e.g., NeRF, Instant-NGP) where gradients are required [S1, S4, unofficial]. Not suitable for inference-only scenarios where gradient computation is unnecessary overhead.
++*   **When to use:** During the training phase of neural volume rendering methods (e.g., NeRF, Instant-NGP) where gradients are required [S1, S4, unofficial].
+ 
+ ## Background
+-Training Ray Compositing is a fundamental component of differentiable volume rendering, enabling the optimization of neural scene representations. It was popularized by implementations in efficient NeRF frameworks such as Instant-NGP and its derivatives [S3, S4, unofficial]. The method relies on the analytical derivative of the volume rendering equation, allowing gradients to flow from the pixel loss back to the network's density and color outputs [S1, S3, unofficial]. Variants like the one in ER-NeRF extend this to handle specific training pipelines for talking portraits [S1, unofficial].
++Training Ray Compositing is a fundamental component of differentiable volume rendering, enabling the optimization of neural scene representations [S1, S3, unofficial]. It was popularized by implementations in efficient NeRF frameworks such as Instant-NGP and its derivatives [S3, S4, unofficial]. The method relies on the analytical derivative of the volume rendering equation, allowing gradients to flow from the pixel loss back to the network's density and color outputs [S1, S3, unofficial]. Variants like the one in ER-NeRF extend this to handle specific training pipelines for talking portraits [S1, unofficial].
+ 
+ ## Sources

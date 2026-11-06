@@ -1,0 +1,3356 @@
+# VolRen
+
+Simple, yet fast OpenGL-based volume path tracer. Supports volumes in isolation lit by a environment map while employing NEE, MIS, RR and a fast volume tracking algorithm published in [Ray Tracing Gems 2](https://link.springer.com/chapter/10.1007/978-1-4842-7185-8_43).
+Volumes may be animated and read from OpenVDB, NanoVDB, DICOM or serialized dense or sparse grids. Also supports simple emission and LUT-based transfer functions.
+
+Example rendering of the [Disney cloud](https://www.disneyanimation.com/resources/clouds/) dataset:
+
+<img src="imgs/wdas_cloud.jpg" width="500"/>
+
+# Submodules
+
+Either clone the repository using `--recursive` flag, or run `git submodule update --init --recursive` in the root folder to pull the submodules after cloning.
+
+# Dependencies (Ubuntu)
+
+    apt-get install -y build-essential cmake
+    apt-get install -y libx11-dev xorg-dev libopengl-dev freeglut3-dev # OpenGL dependencies
+    apt-get install -y libassimp-dev libopenvdb-dev # reduce compile times and enable OpenVDB support
+    apt-get install -y python3-dev # for python bindings
+
+# Build
+
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -Wno-dev && cmake --build build --parallel
+
+Currently, only Linux is supported and tested.
+
+# Usage
+
+After building, run the `volren` executable in the root directory. It expects shader source files to be present in `./shader/*`, so make sure to either execute from the root directory or copy the `shader` folder as well when moving the executable.
+
+For command line arguments see the function `init_opengl_from_args()` in `main.cpp` for OpenGL-related arguments and `parse_cmd()` in `main.cpp` for arguments to the renderer. Some example calls are provided below.
+
+In interactive mode, move the camera using the `WASD` and `RFEQ` keys, click and drag the mouse to move the camera and scroll the mousewheel to increase or decrease camera movement speed.
+The `F1` key toggles the GUI, where all parameters can also be interactively edited during rendering.
+Press `Space` to toggle an animation and `Esc` to terminate the program.
+
+## DICOM grids
+
+While there is basic support to load DICOM volumes via the [Imebra](https://imebra.com/) library, it is impossible to support all of the DICOM standard and you may need to hack the `voldata::DICOMGrid` to fit your needs.
+Simple rgba-based transfer functions, as often used in medical rendering contexts, are also supported and can be read from a simple text-based lookup table in the format `%f, %f, %f, %f` per line/entry.
+
+Example rendering of a fullbody CT scan with a transfer function:
+
+<img src="imgs/fullbody_spline.jpg" width="500"/>
+
+## Interactive mode
+
+Start an interactive viewer using the provided volume data and envmap without transfer function:
+
+    ./volren data/smoke.brick data/table_mountain_2_puresky_1k.hdr
+
+Start an interactive viewer using the provided volume data and envmap with transfer function:
+
+    ./volren data/smoke.brick data/table_mountain_2_puresky_1k.hdr data/lut.txt
+
+Example screenshot of an interactive session rendering a explosion cloud from [JangaFX](https://jangafx.com/software/embergen/download/free-vdb-animations/):
+
+<img src="imgs/interactive.jpg" width="500"/>
+
+Example rendering of an industrial CT scan with a transfer function:
+
+<img src="imgs/power_supply.jpg" width="500"/>
+
+## Offline rendering
+
+Offline render a volume using defaults:
+
+    ./volren data/smoke.brick data/table_mountain_2_puresky_1k.hdr -w 1920 -h 1080 --render
+
+Offline render a volume using some additional command line arguments:
+
+    ./volren data/smoke.brick data/table_mountain_2_puresky_1k.hdr -w 1024 -h 1024 --render --spp 4096 --bounces 128 \
+    --albedo 0.8 --phase 0.3 --density 100 --env_strength 3 --env_rot 270 --exposure 3 --gamma 2.0 --cam_fov 40
+
+Expected result of the above command (without alpha channel):
+
+<img src="imgs/example.jpg" width="281"/>
+
+Note that resulting images are saved including alpha to enable blending or masking. Just drop the alpha channel if background color is desired.
+If a provided path is a directory, it is assumed to contain discretized grids of a volume animation and all contained volume data will be loaded and rendered in alphanumerical order.
+Example public domain volume animation data can be downloaded from [JangxFX](https://jangafx.com/software/embergen/download/free-vdb-animations/), for example.
+
+## Python scripts
+
+For more complex tasks like generating data for ML, see `bindings.cpp` for Python bindings or `scripts/*.py` for some examples.
+Note that due to executing python scripts in embedded mode, there is no direct possibility to use arguments for the python scripts, and thus paths and settings need to the provided in the scripts directly. Feel free to add or hack the bindings to your liking.
+
+To setup a python environment using virtualenv:
+
+    virtualenv -p python3 env
+    source env/bin/activate
+    pip3 install -r scripts/requirements.txt
+
+### COLMAP data generation
+
+Modify `scripts/datagen_colmap.py` to change path to volume data and settings.
+
+    ./volren scripts/datagen_colmap.py --render -w 1024 -h 1024
+
+### DL denoising data generation (using hdf5 in fp16 layout)
+
+Modify `scripts/datagen_denoise.py` to point to your dataset of volume and envmap files.
+Creates a randomized HDF5 dataset of noisy and clean image data in fp16 layout. Only color data is exported, but it can easily be extended for auxiliary feature data as well.
+
+    ./volren scripts/datagen_denoise.py --render -w 1024 -h 1024
+
+### Styletransfer
+
+There is a basic styletransfer script using gradient descent on a VGG-based style loss included in `scripts/styletransfer.py`. Look at the beginning of the script for command line arguments. Basic usage is:
+
+    python scripts/styletransfer.py <content_image> <style_image>
+
+Example result using stock photos from [Pexels](https://www.pexels.com/) `python scripts/styletransfer.py imgs/cat.jpg imgs/style.jpg`:
+
+<img src="imgs/p_style.jpg" width="500"/>
+
+# Licence
+
+This code is under MIT license and freely usable, however note that the [Imebra](https://imebra.com/) submodule of the `voldata` library to support DICOM grids is licenced under GPL.
+
+### scripts/datagen_colmap.py
+```
+import os
+import sys
+import numpy as np
+from scipy.stats import qmc
+# import colmap import/export script
+sys.path.append(os.path.dirname(__file__))
+import read_write_model as colmap
+# import renderer module
+import volpy
+
+# helper functions
+def sample_unit_sphere(sample):
+    import math
+    z = 1.0 - 2.0 * sample[0]
+    r = math.sqrt(max(0.0, 1.0 - z * z))
+    phi = 2.0 * math.pi * sample[1]
+    return volpy.vec3(r * math.cos(phi), r * math.sin(phi), z)
+
+if __name__ == "__main__":
+
+    ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+
+    # settings
+    OUT_PATH = os.path.join(ROOT_DIR, 'colmap')
+    OUT_FORMAT = ".txt"
+    N_VIEWS = 256
+    VOLUME = os.path.join(ROOT_DIR, 'data/smoke.brick')
+    ALBEDO = volpy.vec3(0.9, 0.9, 0.9)
+    PHASE = 0.5
+    DENSITY_SCALE = 1.0
+    ENVMAP = os.path.join(ROOT_DIR, 'data/table_mountain_2_puresky_1k.hdr')
+    ENV_STRENGTH = 2.0
+    SAMPLES = 1 << 12
+    BOUNCES = 128
+    FOVY = 70
+    SEED = 42
+    BACKGROUND = True
+    TONEMAPPING = True
+
+    print(OUT_PATH, VOLUME, ENVMAP)
+
+    # ------------------------------------------
+    # Render colmap dataset
+
+    # init
+    renderer = volpy.Renderer()
+    renderer.init()
+    renderer.draw()
+    os.makedirs(OUT_PATH, exist_ok=True)
+
+    # setup scene
+    renderer.seed = SEED
+    renderer.bounces = BOUNCES
+    renderer.volume = volpy.Volume(VOLUME)
+    renderer.albedo = ALBEDO
+    renderer.phase = PHASE
+    renderer.density_scale = DENSITY_SCALE
+    renderer.environment = volpy.Environment(ENVMAP)
+    renderer.environment.strength = ENV_STRENGTH
+    renderer.show_environment = BACKGROUND
+    renderer.tonemapping = TONEMAPPING
+    renderer.scale_and_move_to_unit_cube()
+    renderer.commit()
+
+    cameras = {}
+    images = {}
+    points3D = {}
+
+    # HACK: write world-space AABB of volume as point3D (pos + rgb) to dataset
+    points3D[0] = colmap.Point3D(id=0, xyz=np.array(renderer.volume.AABB("density")[0]), rgb=np.array(renderer.volume.AABB("density")[1]), error=0, image_ids=np.array([]), point2D_idxs=np.array([]))
+
+    # write camera
+    cameras[0] = colmap.Camera(id=0, model="SIMPLE_PINHOLE", width=renderer.resolution().x, height=renderer.resolution().y, params=np.array([renderer.colmap_focal_length(), renderer.resolution().x//2, renderer.resolution().y//2]))
+
+    # random sampler
+    samplerOut = qmc.Sobol(d=2, seed=SEED+1)
+    samplerIn = qmc.Sobol(d=2, seed=SEED+2)
+
+    # write views
+    for i in range(N_VIEWS):
+        print(f'rendering {i+1}/{N_VIEWS}..')
+        # setup camera
+        bb_min, bb_max = renderer.volume.AABB("density")
+        center = bb_min + (bb_max - bb_min) * 0.5
+        radius = (bb_max - center).length()
+        renderer.cam_pos = center + sample_unit_sphere(samplerOut.random()[0, 0:2]) * radius
+        renderer.cam_dir = (center + sample_unit_sphere(samplerIn.random()[0, 0:2]) * radius * 0.1 - renderer.cam_pos).normalize()
+        renderer.cam_fov = FOVY
+        # render view
+        renderer.render(SAMPLES)
+        renderer.draw()
+        # store view
+        filename = f"view_{i:06}.png"
+        renderer.save_with_alpha(os.path.join(OUT_PATH, filename))
+        images[i] = colmap.Image(id=i, qvec=np.array(renderer.colmap_view_rot())[[3, 0, 1, 2]], tvec=np.array(renderer.colmap_view_trans()), camera_id=0, name=filename, xys=np.array([]), point3D_ids=np.array([]))
+
+    print('--------------------')
+    print("#cameras:", len(cameras))
+    print("#images:", len(images))
+    print("#points3D:", len(points3D))
+
+    colmap.write_model(cameras, images, points3D, path=OUT_PATH, ext=OUT_FORMAT)
+
+    renderer.shutdown()
+```
+
+### scripts/datagen_denoise.py
+```
+import os
+import h5py
+import math
+import random
+import numpy as np
+# import renderer module
+import volpy
+
+if __name__ == "__main__":
+
+    ROOT_DIR = os.path.dirname(os.path.dirname(__file__))
+
+    # settings
+    N_IMAGES = 256
+    N_SAMPLES_TARGET = 1 << 12
+    SEED = 42
+    H5_NAME = 'dataset'
+    VOLPATH = os.path.join(ROOT_DIR, './data')
+    ENVPATH = os.path.join(ROOT_DIR, './data')
+    ENABLE_RANDOM_TRANSFERFUNC = False
+
+    # init renderer
+    renderer = volpy.Renderer()
+    renderer.init()
+    renderer.draw()
+    random.seed(SEED)
+
+    # collect envmap and volume files recursively
+    def glob_directory(root, ext='.hdr'):
+        entries = []
+        for dirname, _, files in os.walk(root):
+            for fname in files:
+                if os.path.splitext(fname)[1] == ext:
+                    entries.append(os.path.join(dirname, fname))
+        return sorted(entries)
+
+    volumes = glob_directory(VOLPATH, '.brick')
+    envmaps = glob_directory(ENVPATH, '.hdr')
+
+    print('#volumes:', len(volumes))
+    print('#envmaps:', len(envmaps))
+
+    # init h5 datasets
+    SIZE = renderer.resolution()
+    filename_input = H5_NAME + '_input.h5'
+    filename_target = H5_NAME + '_target.h5'
+    if os.path.isfile(filename_input): os.remove(filename_input)
+    if os.path.isfile(filename_target): os.remove(filename_target)
+    file_input = h5py.File(filename_input, 'w')
+    dataset_input = file_input.create_dataset('color', shape=(N_IMAGES, 3, SIZE.y, SIZE.x), dtype=np.float16)
+    file_target = h5py.File(filename_target, 'w')
+    dataset_target = file_target.create_dataset('color', shape=(N_IMAGES, 3, SIZE.y, SIZE.x), dtype=np.float16)
+
+    def uniform_sample_sphere():
+        z = 1.0 - 2.0 * random.random()
+        r = math.sqrt(max(0.0, 1.0 - z * z))
+        phi = 2.0 * math.pi * random.random()
+        return volpy.vec3(r * math.cos(phi), r * math.sin(phi), z)
+
+    def randomize_parameters():
+        params = {}
+        # define range of randomized parameters
+        params['samples'] = random.randint(1, 32+1)
+        params['max_bounces'] = random.randint(1, 128+1)
+        params['seed_input'] = random.randint(0, 2**31)
+        params['seed_target'] = random.randint(0, 2**31)
+        params['env_path'] = random.choice(envmaps)
+        params['env_strength'] = 0.5 + random.random() * 10
+        params['env_show'] = random.random() < 0.1
+        params['lut_n_bins'] = random.randint(2, 32+1)
+        params['lut_window_left'] = random.random() * 0.25
+        params['lut_window_width'] = random.random()
+        params['vol_path'] = random.choice(volumes)
+        params['vol_albedo'] = volpy.vec3(random.random(), random.random(), random.random())
+        params['vol_phase'] = -0.9 + (random.random() * 1.8)
+        params['vol_density_scale'] = 0.01 + random.random() * 5
+        params['cam_pos_sample'] = uniform_sample_sphere()
+        params['cam_dir_sample'] = uniform_sample_sphere()
+        params['cam_fov'] = 25 + (random.random() * 70)
+        return params
+
+    for i, params in enumerate([randomize_parameters() for i in range(N_IMAGES)]):
+        print(f'rendering {i+1}/{N_IMAGES}..')
+        # load volume
+        renderer.volume = volpy.Volume(params['vol_path'])
+        renderer.commit()
+        renderer.albedo = params['vol_albedo']
+        renderer.phase = params['vol_phase']
+        renderer.density_scale = params['vol_density_scale']
+        # load envmap
+        renderer.environment = volpy.Environment(params['env_path'])
+        renderer.environment.strength = params['env_strength']
+        renderer.show_environment = params['env_show']
+        # randomze transferfunc?
+        if (ENABLE_RANDOM_TRANSFERFUNC):
+            renderer.transferfunc = volpy.TransferFunction()
+            renderer.transferfunc.randomize(params['lut_n_bins'])
+            renderer.transferfunc.window_left = params['lut_window_left']
+            renderer.transferfunc.window_width = params['lut_window_width']
+        else:
+            renderer.transferfunc = None
+        # setup camera
+        bb_min, bb_max = renderer.volume.AABB("density")
+        center = bb_min + (bb_max - bb_min) * 0.5
+        radius = (bb_max - center).length()
+        renderer.cam_pos = center + params['cam_pos_sample'] * radius
+        renderer.cam_dir = (center + params['cam_dir_sample'] * radius * 0.1 - renderer.cam_pos).normalize()
+        renderer.cam_fov = params['cam_fov']
+        # render noisy
+        renderer.seed = params['seed_input']
+        renderer.bounces = params['max_bounces']
+        renderer.render(params['samples'])
+        data_input = np.flip(np.array(renderer.fbo_data()), axis=0)
+        dataset_input[i] = np.transpose(data_input.astype(np.float16), [2, 1, 0])
+        renderer.draw()
+        # render converged reference
+        renderer.seed = params['seed_target']
+        renderer.bounces = params['max_bounces']
+        renderer.render(N_SAMPLES_TARGET)
+        data_target = np.flip(np.array(renderer.fbo_data()), axis=0)
+        dataset_target[i] = np.transpose(data_target.astype(np.float16), [2, 1, 0])
+        renderer.draw()
+
+    renderer.shutdown()
+```
+
+### scripts/read_write_model.py
+```
+# Copyright (c) 2023, ETH Zurich and UNC Chapel Hill.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#     * Redistributions of source code must retain the above copyright
+#       notice, this list of conditions and the following disclaimer.
+#
+#     * Redistributions in binary form must reproduce the above copyright
+#       notice, this list of conditions and the following disclaimer in the
+#       documentation and/or other materials provided with the distribution.
+#
+#     * Neither the name of ETH Zurich and UNC Chapel Hill nor the names of
+#       its contributors may be used to endorse or promote products derived
+#       from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+#
+# Author: Johannes L. Schoenberger (jsch-at-demuc-dot-de)
+
+import os
+import collections
+import numpy as np
+import struct
+import argparse
+
+
+CameraModel = collections.namedtuple(
+    "CameraModel", ["model_id", "model_name", "num_params"])
+Camera = collections.namedtuple(
+    "Camera", ["id", "model", "width", "height", "params"])
+BaseImage = collections.namedtuple(
+    "Image", ["id", "qvec", "tvec", "camera_id", "name", "xys", "point3D_ids"])
+Point3D = collections.namedtuple(
+    "Point3D", ["id", "xyz", "rgb", "error", "image_ids", "point2D_idxs"])
+
+
+class Image(BaseImage):
+    def qvec2rotmat(self):
+        return qvec2rotmat(self.qvec)
+
+
+CAMERA_MODELS = {
+    CameraModel(model_id=0, model_name="SIMPLE_PINHOLE", num_params=3),
+    CameraModel(model_id=1, model_name="PINHOLE", num_params=4),
+    CameraModel(model_id=2, model_name="SIMPLE_RADIAL", num_params=4),
+    CameraModel(model_id=3, model_name="RADIAL", num_params=5),
+    CameraModel(model_id=4, model_name="OPENCV", num_params=8),
+    CameraModel(model_id=5, model_name="OPENCV_FISHEYE", num_params=8),
+    CameraModel(model_id=6, model_name="FULL_OPENCV", num_params=12),
+    CameraModel(model_id=7, model_name="FOV", num_params=5),
+    CameraModel(model_id=8, model_name="SIMPLE_RADIAL_FISHEYE", num_params=4),
+    CameraModel(model_id=9, model_name="RADIAL_FISHEYE", num_params=5),
+    CameraModel(model_id=10, model_name="THIN_PRISM_FISHEYE", num_params=12)
+}
+CAMERA_MODEL_IDS = dict([(camera_model.model_id, camera_model)
+                         for camera_model in CAMERA_MODELS])
+CAMERA_MODEL_NAMES = dict([(camera_model.model_name, camera_model)
+                           for camera_model in CAMERA_MODELS])
+
+
+def read_next_bytes(fid, num_bytes, format_char_sequence, endian_character="<"):
+    """Read and unpack the next bytes from a binary file.
+    :param fid:
+    :param num_bytes: Sum of combination of {2, 4, 8}, e.g. 2, 6, 16, 30, etc.
+    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
+    :param endian_character: Any of {@, =, <, >, !}
+    :return: Tuple of read and unpacked values.
+    """
+    data = fid.read(num_bytes)
+    return struct.unpack(endian_character + format_char_sequence, data)
+
+
+def write_next_bytes(fid, data, format_char_sequence, endian_character="<"):
+    """pack and write to a binary file.
+    :param fid:
+    :param data: data to send, if multiple elements are sent at the same time,
+    they should be encapsuled either in a list or a tuple
+    :param format_char_sequence: List of {c, e, f, d, h, H, i, I, l, L, q, Q}.
+    should be the same length as the data list or tuple
+    :param endian_character: Any of {@, =, <, >, !}
+    """
+    if isinstance(data, (list, tuple)):
+        bytes = struct.pack(endian_character + format_char_sequence, *data)
+    else:
+        bytes = struct.pack(endian_character + format_char_sequence, data)
+    fid.write(bytes)
+
+
+def read_cameras_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasText(const std::string& path)
+        void Reconstruction::ReadCamerasText(const std::string& path)
+    """
+    cameras = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                camera_id = int(elems[0])
+                model = elems[1]
+                width = int(elems[2])
+                height = int(elems[3])
+                params = np.array(tuple(map(float, elems[4:])))
+                cameras[camera_id] = Camera(id=camera_id, model=model,
+                                            width=width, height=height,
+                                            params=params)
+    return cameras
+
+
+def read_cameras_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasBinary(const std::string& path)
+        void Reconstruction::ReadCamerasBinary(const std::string& path)
+    """
+    cameras = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_cameras = read_next_bytes(fid, 8, "Q")[0]
+        for _ in range(num_cameras):
+            camera_properties = read_next_bytes(
+                fid, num_bytes=24, format_char_sequence="iiQQ")
+            camera_id = camera_properties[0]
+            model_id = camera_properties[1]
+            model_name = CAMERA_MODEL_IDS[camera_properties[1]].model_name
+            width = camera_properties[2]
+            height = camera_properties[3]
+            num_params = CAMERA_MODEL_IDS[model_id].num_params
+            params = read_next_bytes(fid, num_bytes=8*num_params,
+                                     format_char_sequence="d"*num_params)
+            cameras[camera_id] = Camera(id=camera_id,
+                                        model=model_name,
+                                        width=width,
+                                        height=height,
+                                        params=np.array(params))
+        assert len(cameras) == num_cameras
+    return cameras
+
+
+def write_cameras_text(cameras, path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasText(const std::string& path)
+        void Reconstruction::ReadCamerasText(const std::string& path)
+    """
+    HEADER = "# Camera list with one line of data per camera:\n" + \
+             "#   CAMERA_ID, MODEL, WIDTH, HEIGHT, PARAMS[]\n" + \
+             "# Number of cameras: {}\n".format(len(cameras))
+    with open(path, "w") as fid:
+        fid.write(HEADER)
+        for _, cam in cameras.items():
+            to_write = [cam.id, cam.model, cam.width, cam.height, *cam.params]
+            line = " ".join([str(elem) for elem in to_write])
+            fid.write(line + "\n")
+
+
+def write_cameras_binary(cameras, path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::WriteCamerasBinary(const std::string& path)
+        void Reconstruction::ReadCamerasBinary(const std::string& path)
+    """
+    with open(path_to_model_file, "wb") as fid:
+        write_next_bytes(fid, len(cameras), "Q")
+        for _, cam in cameras.items():
+            model_id = CAMERA_MODEL_NAMES[cam.model].model_id
+            camera_properties = [cam.id,
+                                 model_id,
+                                 cam.width,
+                                 cam.height]
+            write_next_bytes(fid, camera_properties, "iiQQ")
+            for p in cam.params:
+                write_next_bytes(fid, float(p), "d")
+    return cameras
+
+
+def read_images_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesText(const std::string& path)
+        void Reconstruction::WriteImagesText(const std::string& path)
+    """
+    images = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                image_id = int(elems[0])
+                qvec = np.array(tuple(map(float, elems[1:5])))
+                tvec = np.array(tuple(map(float, elems[5:8])))
+                camera_id = int(elems[8])
+                image_name = elems[9]
+                elems = fid.readline().split()
+                xys = np.column_stack([tuple(map(float, elems[0::3])),
+                                       tuple(map(float, elems[1::3]))])
+                point3D_ids = np.array(tuple(map(int, elems[2::3])))
+                images[image_id] = Image(
+                    id=image_id, qvec=qvec, tvec=tvec,
+                    camera_id=camera_id, name=image_name,
+                    xys=xys, point3D_ids=point3D_ids)
+    return images
+
+
+def read_images_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesBinary(const std::string& path)
+        void Reconstruction::WriteImagesBinary(const std::string& path)
+    """
+    images = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_reg_images = read_next_bytes(fid, 8, "Q")[0]
+        for _ in range(num_reg_images):
+            binary_image_properties = read_next_bytes(
+                fid, num_bytes=64, format_char_sequence="idddddddi")
+            image_id = binary_image_properties[0]
+            qvec = np.array(binary_image_properties[1:5])
+            tvec = np.array(binary_image_properties[5:8])
+            camera_id = binary_image_properties[8]
+            image_name = ""
+            current_char = read_next_bytes(fid, 1, "c")[0]
+            while current_char != b"\x00":   # look for the ASCII 0 entry
+                image_name += current_char.decode("utf-8")
+                current_char = read_next_bytes(fid, 1, "c")[0]
+            num_points2D = read_next_bytes(fid, num_bytes=8,
+                                           format_char_sequence="Q")[0]
+            x_y_id_s = read_next_bytes(fid, num_bytes=24*num_points2D,
+                                       format_char_sequence="ddq"*num_points2D)
+            xys = np.column_stack([tuple(map(float, x_y_id_s[0::3])),
+                                   tuple(map(float, x_y_id_s[1::3]))])
+            point3D_ids = np.array(tuple(map(int, x_y_id_s[2::3])))
+            images[image_id] = Image(
+                id=image_id, qvec=qvec, tvec=tvec,
+                camera_id=camera_id, name=image_name,
+                xys=xys, point3D_ids=point3D_ids)
+    return images
+
+
+def write_images_text(images, path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesText(const std::string& path)
+        void Reconstruction::WriteImagesText(const std::string& path)
+    """
+    if len(images) == 0:
+        mean_observations = 0
+    else:
+        mean_observations = sum((len(img.point3D_ids) for _, img in images.items()))/len(images)
+    HEADER = "# Image list with two lines of data per image:\n" + \
+             "#   IMAGE_ID, QW, QX, QY, QZ, TX, TY, TZ, CAMERA_ID, NAME\n" + \
+             "#   POINTS2D[] as (X, Y, POINT3D_ID)\n" + \
+             "# Number of images: {}, mean observations per image: {}\n".format(len(images), mean_observations)
+
+    with open(path, "w") as fid:
+        fid.write(HEADER)
+        for _, img in images.items():
+            image_header = [img.id, *img.qvec, *img.tvec, img.camera_id, img.name]
+            first_line = " ".join(map(str, image_header))
+            fid.write(first_line + "\n")
+
+            points_strings = []
+            for xy, point3D_id in zip(img.xys, img.point3D_ids):
+                points_strings.append(" ".join(map(str, [*xy, point3D_id])))
+            fid.write(" ".join(points_strings) + "\n")
+
+
+def write_images_binary(images, path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadImagesBinary(const std::string& path)
+        void Reconstruction::WriteImagesBinary(const std::string& path)
+    """
+    with open(path_to_model_file, "wb") as fid:
+        write_next_bytes(fid, len(images), "Q")
+        for _, img in images.items():
+            write_next_bytes(fid, img.id, "i")
+            write_next_bytes(fid, img.qvec.tolist(), "dddd")
+            write_next_bytes(fid, img.tvec.tolist(), "ddd")
+            write_next_bytes(fid, img.camera_id, "i")
+            for char in img.name:
+                write_next_bytes(fid, char.encode("utf-8"), "c")
+            write_next_bytes(fid, b"\x00", "c")
+            write_next_bytes(fid, len(img.point3D_ids), "Q")
+            for xy, p3d_id in zip(img.xys, img.point3D_ids):
+                write_next_bytes(fid, [*xy, p3d_id], "ddq")
+
+
+def read_points3D_text(path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DText(const std::string& path)
+        void Reconstruction::WritePoints3DText(const std::string& path)
+    """
+    points3D = {}
+    with open(path, "r") as fid:
+        while True:
+            line = fid.readline()
+            if not line:
+                break
+            line = line.strip()
+            if len(line) > 0 and line[0] != "#":
+                elems = line.split()
+                point3D_id = int(elems[0])
+                xyz = np.array(tuple(map(float, elems[1:4])))
+                rgb = np.array(tuple(map(int, elems[4:7])))
+                error = float(elems[7])
+                image_ids = np.array(tuple(map(int, elems[8::2])))
+                point2D_idxs = np.array(tuple(map(int, elems[9::2])))
+                points3D[point3D_id] = Point3D(id=point3D_id, xyz=xyz, rgb=rgb,
+                                               error=error, image_ids=image_ids,
+                                               point2D_idxs=point2D_idxs)
+    return points3D
+
+
+def read_points3D_binary(path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DBinary(const std::string& path)
+        void Reconstruction::WritePoints3DBinary(const std::string& path)
+    """
+    points3D = {}
+    with open(path_to_model_file, "rb") as fid:
+        num_points = read_next_bytes(fid, 8, "Q")[0]
+        for _ in range(num_points):
+            binary_point_line_properties = read_next_bytes(
+                fid, num_bytes=43, format_char_sequence="QdddBBBd")
+            point3D_id = binary_point_line_properties[0]
+            xyz = np.array(binary_point_line_properties[1:4])
+            rgb = np.array(binary_point_line_properties[4:7])
+            error = np.array(binary_point_line_properties[7])
+            track_length = read_next_bytes(
+                fid, num_bytes=8, format_char_sequence="Q")[0]
+            track_elems = read_next_bytes(
+                fid, num_bytes=8*track_length,
+                format_char_sequence="ii"*track_length)
+            image_ids = np.array(tuple(map(int, track_elems[0::2])))
+            point2D_idxs = np.array(tuple(map(int, track_elems[1::2])))
+            points3D[point3D_id] = Point3D(
+                id=point3D_id, xyz=xyz, rgb=rgb,
+                error=error, image_ids=image_ids,
+                point2D_idxs=point2D_idxs)
+    return points3D
+
+
+def write_points3D_text(points3D, path):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DText(const std::string& path)
+        void Reconstruction::WritePoints3DText(const std::string& path)
+    """
+    if len(points3D) == 0:
+        mean_track_length = 0
+    else:
+        mean_track_length = sum((len(pt.image_ids) for _, pt in points3D.items()))/len(points3D)
+    HEADER = "# 3D point list with one line of data per point:\n" + \
+             "#   POINT3D_ID, X, Y, Z, R, G, B, ERROR, TRACK[] as (IMAGE_ID, POINT2D_IDX)\n" + \
+             "# Number of points: {}, mean track length: {}\n".format(len(points3D), mean_track_length)
+
+    with open(path, "w") as fid:
+        fid.write(HEADER)
+        for _, pt in points3D.items():
+            point_header = [pt.id, *pt.xyz, *pt.rgb, pt.error]
+            fid.write(" ".join(map(str, point_header)) + " ")
+            track_strings = []
+            for image_id, point2D in zip(pt.image_ids, pt.point2D_idxs):
+                track_strings.append(" ".join(map(str, [image_id, point2D])))
+            fid.write(" ".join(track_strings) + "\n")
+
+
+def write_points3D_binary(points3D, path_to_model_file):
+    """
+    see: src/base/reconstruction.cc
+        void Reconstruction::ReadPoints3DBinary(const std::string& path)
+        void Reconstruction::WritePoints3DBinary(const std::string& path)
+    """
+    with open(path_to_model_file, "wb") as fid:
+        write_next_bytes(fid, len(points3D), "Q")
+        for _, pt in points3D.items():
+            write_next_bytes(fid, pt.id, "Q")
+            write_next_bytes(fid, pt.xyz.tolist(), "ddd")
+            write_next_bytes(fid, pt.rgb.tolist(), "BBB")
+            write_next_bytes(fid, pt.error, "d")
+            track_length = pt.image_ids.shape[0]
+            write_next_bytes(fid, track_length, "Q")
+            for image_id, point2D_id in zip(pt.image_ids, pt.point2D_idxs):
+                write_next_bytes(fid, [image_id, point2D_id], "ii")
+
+
+def detect_model_format(path, ext):
+    if os.path.isfile(os.path.join(path, "cameras"  + ext)) and \
+       os.path.isfile(os.path.join(path, "images"   + ext)) and \
+       os.path.isfile(os.path.join(path, "points3D" + ext)):
+        print("Detected model format: '" + ext + "'")
+        return True
+
+    return False
+
+
+def read_model(path, ext=""):
+    # try to detect the extension automatically
+    if ext == "":
+        if detect_model_format(path, ".bin"):
+            ext = ".bin"
+        elif detect_model_format(path, ".txt"):
+            ext = ".txt"
+        else:
+            print("Provide model format: '.bin' or '.txt'")
+            return
+
+    if ext == ".txt":
+        cameras = read_cameras_text(os.path.join(path, "cameras" + ext))
+        images = read_images_text(os.path.join(path, "images" + ext))
+        points3D = read_points3D_text(os.path.join(path, "points3D") + ext)
+    else:
+        cameras = read_cameras_binary(os.path.join(path, "cameras" + ext))
+        images = read_images_binary(os.path.join(path, "images" + ext))
+        points3D = read_points3D_binary(os.path.join(path, "points3D") + ext)
+    return cameras, images, points3D
+
+
+def write_model(cameras, images, points3D, path, ext=".bin"):
+    if ext == ".txt":
+        write_cameras_text(cameras, os.path.join(path, "cameras" + ext))
+        write_images_text(images, os.path.join(path, "images" + ext))
+        write_points3D_text(points3D, os.path.join(path, "points3D") + ext)
+    else:
+        write_cameras_binary(cameras, os.path.join(path, "cameras" + ext))
+        write_images_binary(images, os.path.join(path, "images" + ext))
+        write_points3D_binary(points3D, os.path.join(path, "points3D") + ext)
+    return cameras, images, points3D
+
+
+def qvec2rotmat(qvec):
+    return np.array([
+        [1 - 2 * qvec[2]**2 - 2 * qvec[3]**2,
+         2 * qvec[1] * qvec[2] - 2 * qvec[0] * qvec[3],
+         2 * qvec[3] * qvec[1] + 2 * qvec[0] * qvec[2]],
+        [2 * qvec[1] * qvec[2] + 2 * qvec[0] * qvec[3],
+         1 - 2 * qvec[1]**2 - 2 * qvec[3]**2,
+         2 * qvec[2] * qvec[3] - 2 * qvec[0] * qvec[1]],
+        [2 * qvec[3] * qvec[1] - 2 * qvec[0] * qvec[2],
+         2 * qvec[2] * qvec[3] + 2 * qvec[0] * qvec[1],
+         1 - 2 * qvec[1]**2 - 2 * qvec[2]**2]])
+
+
+def rotmat2qvec(R):
+    Rxx, Ryx, Rzx, Rxy, Ryy, Rzy, Rxz, Ryz, Rzz = R.flat
+    K = np.array([
+        [Rxx - Ryy - Rzz, 0, 0, 0],
+        [Ryx + Rxy, Ryy - Rxx - Rzz, 0, 0],
+        [Rzx + Rxz, Rzy + Ryz, Rzz - Rxx - Ryy, 0],
+        [Ryz - Rzy, Rzx - Rxz, Rxy - Ryx, Rxx + Ryy + Rzz]]) / 3.0
+    eigvals, eigvecs = np.linalg.eigh(K)
+    qvec = eigvecs[[3, 0, 1, 2], np.argmax(eigvals)]
+    if qvec[0] < 0:
+        qvec *= -1
+    return qvec
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Read and write COLMAP binary and text models")
+    parser.add_argument("--input_model", help="path to input model folder")
+    parser.add_argument("--input_format", choices=[".bin", ".txt"],
+                        help="input model format", default="")
+    parser.add_argument("--output_model",
+                        help="path to output model folder")
+    parser.add_argument("--output_format", choices=[".bin", ".txt"],
+                        help="outut model format", default=".txt")
+    args = parser.parse_args()
+
+    cameras, images, points3D = read_model(path=args.input_model, ext=args.input_format)
+
+    print("num_cameras:", len(cameras))
+    print("num_images:", len(images))
+    print("num_points3D:", len(points3D))
+
+    if args.output_model is not None:
+        write_model(cameras, images, points3D, path=args.output_model, ext=args.output_format)
+
+
+if __name__ == "__main__":
+    main()
+```
+
+### scripts/styletransfer.py
+```
+# external imports
+import PIL
+import time
+import torch
+import argparse
+import torchvision
+
+# -----------------------------------------------------------
+# cmd line settings
+
+cmdline = argparse.ArgumentParser(description='Neural style transfer')
+# required args
+cmdline.add_argument('content_path', help='path to content image')
+cmdline.add_argument('style_path', help='path to style image')
+# optional args
+cmdline.add_argument('-e', '--epochs', type=int, default=1000, help='number of epochs to train')
+cmdline.add_argument('-lr', '--learning_rate', type=float, default=0.1, help='adam hyperparameter: learning rate')
+cmdline.add_argument('-b1', '--beta1', type=float, default=0.9, help='adam hyperparameter: beta1')
+cmdline.add_argument('-b2', '--beta2', type=float, default=0.999, help='adam hyperparameter: beta2')
+cmdline.add_argument('-c', '--clip', type=float, default=1, help='value for gradient value/norm clipping')
+cmdline.add_argument('-g', '--gamma', type=float, default=0.999, help='step lr gamma parameter')
+cmdline.add_argument('--save_epochs', type=int, default=50, help='after which number of epochs to save image')
+cmdline.add_argument('--image_size', type=int, default=512, help='output image size')
+cmdline.add_argument('--content', type=float, default=1, help='content loss weight')
+cmdline.add_argument('--style', type=float, default=3000, help='style loss weight')
+cmdline.add_argument('--dropout', type=float, default=0.0, help='gradient dropout probability')
+cmdline.add_argument('--noise', action="store_true", help="start from random noise")
+
+# -----------------------------------------------------------
+# Helper funcs and modules
+
+# L2 loss
+def l2(img1, img2):
+    return torch.nn.functional.mse_loss(img1, img2)
+
+# SMAPE loss
+def smape(img1, img2):
+    return torch.mean(torch.abs(img1 - img2) / (torch.abs(img1) + torch.abs(img2) + 0.1))
+
+# compute gram matrix
+def gram_matrix(img):
+    b, c, h, w = img.size()
+    tmp = img.view(b*c, h*w)
+    return torch.mm(tmp, tmp.t()) / (b*c*h*w)
+
+# VGG style loss module
+class VGGStyleLoss(torch.nn.Module):
+    def __init__(self, content_weight, style_weight, dropout):
+        super(VGGStyleLoss, self).__init__()
+        self.model = torchvision.models.vgg11(weights=torchvision.models.vgg.VGG11_Weights.DEFAULT).features
+        self.model.eval()
+        self.content_weight = content_weight
+        self.style_weight = style_weight
+        self.dropout = dropout
+
+    def get_features(self, x):
+        features = []
+        for layer in self.model.children():
+            x = layer(x)
+            if isinstance(layer, torch.nn.ReLU):
+                features.append(torch.nn.functional.dropout(x, self.dropout))
+        return features
+
+    def forward(self, image, content, style):
+        self.model.to(image.get_device())
+        mask = torch.where(content > 0, 1, 0)
+        features = self.get_features(torch.cat([mask * image, content, style]))
+        feature_loss, style_loss = 0.0, 0.0
+        for i in range(len(features)):
+            f_input, f_content, f_style = features[i][0:1], features[i][1:2], features[i][2:3]
+            feature_loss += self.content_weight * l2(f_input, f_content)
+            style_loss += self.style_weight * smape(gram_matrix(f_input), gram_matrix(f_style))
+        return (feature_loss + style_loss) / len(features)
+
+# -----------------------------------------------------------
+# MAIN
+
+if __name__ == "__main__":
+
+    # parse command line
+    args = cmdline.parse_args()
+    print('----------')
+    print('args:')
+    for key in vars(args):
+        print(key, ":", vars(args)[key])
+    print('----------')
+
+    # check for GPUs
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f'Using device: {device}')
+    if torch.cuda.is_available():
+        print(f'Num GPUs: {torch.cuda.device_count()}')
+
+    def image_loader(filename):
+        return torchvision.transforms.ToTensor()(PIL.Image.open(filename))[0:3].unsqueeze(0).to(device, torch.float)
+
+    # load content and style images
+    content = image_loader(args.content_path)
+    style = image_loader(args.style_path)
+    content = torch.nn.functional.interpolate(content, scale_factor=min(1.0, args.image_size / max(content.size())), recompute_scale_factor=False, mode='bicubic')
+    style = torch.nn.functional.interpolate(style, size=content.size()[-2:], mode='bicubic')
+    # setup image to optimize
+    image = torch.rand(content.size(), device=device) * torch.where(content > 0, 1, 0) if args.noise else content.clone()
+
+    # setup optimizer, scheduler and loss function
+    optimizer = torch.optim.Adam([image.requires_grad_()], lr=args.learning_rate, betas=(args.beta1, args.beta2))
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, args.gamma)
+    loss_fn = VGGStyleLoss(content_weight=args.content, style_weight=args.style, dropout=max(0.0, min(args.dropout, 1.0)))
+
+    # run training
+    print(f'Transferring style from {args.style_path} to {args.content_path} ({style.size()[-1]}x{style.size()[-2]}) for {args.epochs} epochs.')
+
+    for epoch in range(1, args.epochs + 1):
+        start = time.time()
+        optimizer.zero_grad()
+        loss = loss_fn(image, content, style)
+        loss.backward()
+        max_grad = torch.max(image.grad.data.abs())
+        torch.nn.utils.clip_grad_value_([image], args.clip)
+        optimizer.step()
+        scheduler.step()
+        image.data.clamp_(0, 1)
+        # save image?
+        if epoch % args.save_epochs == 0:
+            torchvision.utils.save_image(image, f'styletransfer.png', nrow=1)
+            torchvision.utils.save_image(torch.cat((content, image, style), dim=-1), f'p_style.jpg', nrow=1)
+        torch.cuda.synchronize()
+        end = time.time()
+        print(f"Train epoch {epoch:04}:",
+                f"LR: {optimizer.param_groups[0]['lr']:0.6f},",
+                f"loss: {loss:3.6f},",
+                f"max grad: {max_grad:4.4f},",
+                f"time: {(end - start)*1000:.0f}ms (remaining: ~{(end - start) * (args.epochs - epoch) / 60:.1f}min)", end='\r')
+    print('')
+
+    # finished, save image
+    torchvision.utils.save_image(image, f'styletransfer.png', nrow=1)
+```
+
+### shader/common.glsl
+```
+// --------------------------------------------------------------
+// constants and helper funcs
+
+#define M_PI float(3.14159265358979323846)
+#define inv_PI (1.f / M_PI)
+#define inv_2PI (1.f / (2 * M_PI))
+#define inv_4PI (1.f / (4 * M_PI))
+#define FLT_MAX float(3.402823466e+38)
+
+float sqr(float x) { return x * x; }
+vec3 sqr(vec3 x) { return x * x; }
+
+float sum(const vec3 x) { return x.x + x.y + x.z; }
+
+float mean(const vec3 x) { return sum(x) / 3.f; }
+
+float sanitize(const float x) { return isnan(x) || isinf(x) ? 0.f : x; }
+vec3 sanitize(const vec3 x) { return mix(x, vec3(0), isnan(x) || isinf(x)); }
+vec4 sanitize(const vec4 x) { return mix(x, vec4(0), isnan(x) || isinf(x)); }
+
+float luma(const vec3 col) { return dot(col, vec3(0.212671f, 0.715160f, 0.072169f)); }
+
+float saturate(const float x) { return clamp(x, 0.f, 1.f); }
+
+vec3 align(const vec3 N, const vec3 v) {
+    // build tangent frame
+    const vec3 T = abs(N.x) > abs(N.y) ?
+        vec3(-N.z, 0, N.x) / sqrt(N.x * N.x + N.z * N.z) :
+        vec3(0, N.z, -N.y) / sqrt(N.y * N.y + N.z * N.z);
+    const vec3 B = cross(N, T);
+    // tangent to world
+    return normalize(v.x * T + v.y * B + v.z * N);
+}
+
+float power_heuristic(const float a, const float b) { return sqr(a) / (sqr(a) + sqr(b)); }
+
+// --------------------------------------------------------------
+// random number generation helpers
+
+uint tea(const uint val0, const uint val1, const uint N) { // tiny encryption algorithm (TEA) to calculate a seed per launch index and iteration
+    uint v0 = val0;
+    uint v1 = val1;
+    uint s0 = 0;
+    for (uint n = 0; n < N; ++n) {
+        s0 += 0x9e3779b9;
+        v0 += ((v1 << 4) + 0xA341316C) ^ (v1 + s0) ^ ((v1 >> 5) + 0xC8013EA4);
+        v1 += ((v0 << 4) + 0xAD90777D) ^ (v0 + s0) ^ ((v0 >> 5) + 0x7E95761E);
+    }
+    return v0;
+}
+
+float rng(inout uint previous) { // return a random sample in the range [0, 1) with a simple linear congruential generator
+    previous = previous * 1664525u + 1013904223u;
+    return float(previous & 0x00FFFFFFu) / float(0x01000000u);
+}
+
+vec2 rng2(inout uint previous) {
+    return vec2(rng(previous), rng(previous));
+}
+
+vec3 rng3(inout uint previous) {
+    return vec3(rng(previous), rng(previous), rng(previous));
+}
+
+vec4 rng4(inout uint previous) {
+    return vec4(rng(previous), rng(previous), rng(previous), rng(previous));
+}
+
+// --------------------------------------------------------------
+// camera helper
+
+uniform vec3 cam_pos;
+uniform float cam_fov;
+uniform mat3 cam_transform;
+
+vec3 view_dir(const ivec2 xy, const ivec2 wh, const vec2 pixel_sample) {
+    const vec2 pixel = (xy + pixel_sample - wh * .5f) / vec2(wh.y);
+    const float z = -.5f / tan(.5f * M_PI * cam_fov / 180.f);
+    return normalize(cam_transform * normalize(vec3(pixel.x, pixel.y, z)));
+}
+
+// --------------------------------------------------------------
+// environment helper (input vectors assumed in world space!)
+
+uniform mat3 env_transform;
+uniform mat3 env_inv_transform;
+uniform float env_strength;
+uniform vec2 env_imp_inv_dim;
+uniform int env_imp_base_mip;
+uniform sampler2D env_envmap;
+uniform sampler2D env_impmap;
+
+vec3 lookup_environment(const vec3 dir) {
+    const vec3 idir = env_inv_transform * dir;
+    const float u = atan(idir.z, idir.x) / (2 * M_PI) + 0.5f;
+    const float v = 1.f - acos(idir.y) / M_PI;
+    return env_strength * texture(env_envmap, vec2(u, v)).rgb;
+}
+
+vec4 sample_environment(const vec2 rng, out vec3 w_i) {
+    ivec2 pos = ivec2(0);   // pixel position
+    vec2 p = rng;           // sub-pixel position
+    // warp sample over mip hierarchy
+    for (int mip = env_imp_base_mip - 1; mip >= 0; mip--) {
+        pos *= 2; // scale to mip
+        float w[4]; // four relevant texels
+        w[0] = texelFetch(env_impmap, pos + ivec2(0, 0), mip).r;
+        w[1] = texelFetch(env_impmap, pos + ivec2(1, 0), mip).r;
+        w[2] = texelFetch(env_impmap, pos + ivec2(0, 1), mip).r;
+        w[3] = texelFetch(env_impmap, pos + ivec2(1, 1), mip).r;
+        float q[2]; // bottom / top
+        q[0] = w[0] + w[2];
+        q[1] = w[1] + w[3];
+        // horizontal
+        int off_x;
+        const float d = q[0] / max(1e-8f, q[0] + q[1]);
+        if (p.x < d) { // left
+            off_x = 0;
+            p.x = p.x / d;
+        } else { // right
+            off_x = 1;
+            p.x = (p.x - d) / (1.f - d);
+        }
+        pos.x += off_x;
+        // vertical
+        float e = w[off_x] / q[off_x];
+        if (p.y < e) { // bottom
+            //pos.y += 0;
+            p.y = p.y / e;
+        } else { // top
+            pos.y += 1;
+            p.y = (p.y - e) / (1.f - e);
+        }
+    }
+    // compute sample uv coordinate and (world-space) direction
+    const vec2 uv = (vec2(pos) + p) * env_imp_inv_dim;
+    const float theta = saturate(1.f - uv.y) * M_PI;
+    const float phi   = (saturate(uv.x) * 2.f - 1.f) * M_PI;
+    const float sin_t = sin(theta);
+    w_i = env_transform * vec3(sin_t * cos(phi), cos(theta), sin_t * sin(phi));
+    // sample envmap and compute pdf
+    const vec3 Le = env_strength * texture(env_envmap, uv).rgb;
+    const float avg_w = texelFetch(env_impmap, ivec2(0, 0), env_imp_base_mip).r;
+    const float pdf = texelFetch(env_impmap, pos, 0).r / avg_w;
+    return vec4(Le, pdf * inv_4PI);
+}
+
+float pdf_environment(const vec3 dir) {
+    const float avg_w = texelFetch(env_impmap, ivec2(0, 0), env_imp_base_mip).r;
+    const float pdf = luma(lookup_environment(dir)) / avg_w;
+    return pdf * inv_4PI;
+}
+
+// --------------------------------------------------------------
+// box intersect helper
+
+bool intersect_box(const vec3 pos, const vec3 dir, const vec3 bb_min, const vec3 bb_max, out vec2 near_far) {
+    const vec3 inv_dir = 1.f / dir;
+    const vec3 lo = (bb_min - pos) * inv_dir;
+    const vec3 hi = (bb_max - pos) * inv_dir;
+    const vec3 tmin = min(lo, hi), tmax = max(lo, hi);
+    near_far.x = max(0.f, max(tmin.x, max(tmin.y, tmin.z)));
+    near_far.y = min(tmax.x, min(tmax.y, tmax.z));
+    return near_far.x <= near_far.y;
+}
+
+// --------------------------------------------------------------
+// phase function helpers
+
+float phase_isotropic() { return inv_4PI; }
+
+float phase_henyey_greenstein(const float cos_t, const float g) {
+    const float denom = 1 + sqr(g) + 2 * g * cos_t;
+    return inv_4PI * (1 - sqr(g)) / (denom * sqrt(denom));
+}
+
+vec3 sample_phase_isotropic(const vec2 phase_sample) {
+    const float cos_t = 1.f - 2.f * phase_sample.x;
+    const float sin_t = sqrt(max(0.f, 1.f - sqr(cos_t)));
+    const float phi = 2.f * M_PI * phase_sample.y;
+    return normalize(vec3(sin_t * cos(phi), sin_t * sin(phi), cos_t));
+}
+
+vec3 sample_phase_henyey_greenstein(const vec3 dir, const float g, const vec2 phase_sample) {
+    const float cos_t = abs(g) < 1e-4f ? 1.f - 2.f * phase_sample.x :
+        (1 + sqr(g) - sqr((1 - sqr(g)) / (1 - g + 2 * g * phase_sample.x))) / (2 * g);
+    const float sin_t = sqrt(max(0.f, 1.f - sqr(cos_t)));
+    const float phi = 2.f * M_PI * phase_sample.y;
+    return align(dir, vec3(sin_t * cos(phi), sin_t * sin(phi), cos_t));
+}
+
+// --------------------------------------------------------------
+// transfer function helper
+
+layout(std430, binding = 4) buffer LUTBuffer {
+    vec4 tf_lut[];
+};
+
+uniform uint tf_size;
+uniform float tf_window_left;
+uniform float tf_window_width;
+
+float tf_window(float d) {
+    return clamp((d - tf_window_left) / tf_window_width, 0.0, 1.0 - 1e-6);
+}
+
+vec4 tf_lookup(float d) {
+    const float tc = tf_window(d);
+    const int idx = int(floor(tc * tf_size));
+    const float f = fract(tc * tf_size);
+    return mix(tf_lut[idx], tf_lut[min(idx + 1, tf_size - 1)], f);
+}
+
+// --------------------------------------------------------------
+// stochastic filter helpers
+
+ivec3 stochastic_trilinear_filter(const vec3 ipos, inout uint seed) {
+    return ivec3(ipos - 0.5 + rng3(seed));
+}
+
+ivec3 stochastic_tricubic_filter(const vec3 ipos, inout uint seed) {
+    // from "Stochastic Texture Filtering": https://arxiv.org/pdf/2305.05810.pdf
+    const ivec3 iipos = ivec3(floor(ipos - 0.5));
+    const vec3 t = (ipos - 0.5) - iipos;
+    const vec3 t2 = t * t;
+    // weighted reservoir sampling, first tap always accepted
+    vec3 w = (1.f / 6.f) * (-t * t2 + 3 * t2 - 3 * t + 1);
+    vec3 sumWt = w;
+    ivec3 idx = ivec3(0);
+    // sample second tap
+    w = (1.f / 6.f) * (3 * t * t2 - 6 * t2 + 4);
+    sumWt = w + sumWt;
+    idx = mix(idx, ivec3(1), lessThan(rng3(seed), w / max(vec3(1e-3), sumWt)));
+    // sample third tap
+    w = (1.f / 6.f) * (-3 * t * t2 + 3 * t2 + 3 * t + 1);
+    sumWt = w + sumWt;
+    idx = mix(idx, ivec3(2), lessThan(rng3(seed), w / max(vec3(1e-3), sumWt)));
+    // sample fourth tap
+    w = (1.f / 6.f) * t * t2;
+    sumWt = w + sumWt;
+    idx = mix(idx, ivec3(3), lessThan(rng3(seed), w / max(vec3(1e-3), sumWt)));
+    // return tap location
+    return iipos + idx - 1;
+}
+
+// --------------------------------------------------------------
+// volume sampling helpers (input vectors assumed in index space!)
+
+uniform vec3 vol_bb_min;
+uniform vec3 vol_bb_max;
+uniform float vol_minorant;
+uniform float vol_majorant;
+uniform float vol_inv_majorant;
+uniform vec3 vol_albedo;
+uniform float vol_phase_g;
+uniform float vol_density_scale;
+uniform float vol_emission_scale;
+uniform float vol_emission_norm;
+
+// density brick grid stored as textures
+uniform mat4 vol_density_transform;
+uniform mat4 vol_density_inv_transform;
+uniform usampler3D vol_density_indirection;
+uniform sampler3D vol_density_range;
+uniform sampler3D vol_density_atlas;
+
+// brick grid voxel density lookup (nearest neighbor)
+float lookup_density_brick(const vec3 ipos) {
+    const ivec3 iipos = ivec3(floor(ipos));
+    const ivec3 brick = iipos >> 3;
+    const uvec3 ptr = texelFetch(vol_density_indirection, brick, 0).xyz;
+    const vec2 range = texelFetch(vol_density_range, brick, 0).xy;
+    const float value_unorm = texelFetch(vol_density_atlas, ivec3(ptr << 3) + (iipos & 7), 0).x;
+    return range.x + value_unorm * (range.y - range.x);
+}
+
+// brick majorant lookup (nearest neighbor)
+float lookup_majorant(const vec3 ipos, int mip) {
+    const ivec3 brick = ivec3(floor(ipos)) >> (3 + mip);
+    return vol_density_scale * texelFetch(vol_density_range, brick, mip).y;
+}
+
+// density lookup (nearest neighbor)
+float lookup_density(const vec3 ipos) {
+    return vol_density_scale * lookup_density_brick(ipos);
+}
+
+// density lookup (trilinear filter)
+float lookup_density_trilinear(const vec3 ipos) {
+    const vec3 f = fract(ipos - 0.5);
+    const ivec3 iipos = ivec3(floor(ipos - 0.5));
+    const float lx0 = mix(lookup_density_brick(iipos + ivec3(0, 0, 0)), lookup_density_brick(iipos + ivec3(1, 0, 0)), f.x);
+    const float lx1 = mix(lookup_density_brick(iipos + ivec3(0, 1, 0)), lookup_density_brick(iipos + ivec3(1, 1, 0)), f.x);
+    const float hx0 = mix(lookup_density_brick(iipos + ivec3(0, 0, 1)), lookup_density_brick(iipos + ivec3(1, 0, 1)), f.x);
+    const float hx1 = mix(lookup_density_brick(iipos + ivec3(0, 1, 1)), lookup_density_brick(iipos + ivec3(1, 1, 1)), f.x);
+    return vol_density_scale * mix(mix(lx0, lx1, f.y), mix(hx0, hx1, f.y), f.z);
+}
+
+// density lookup (stochastic tricubic filter)
+float lookup_density_stochastic(const vec3 ipos, inout uint seed) {
+    // return lookup_density(ivec3(ipos));
+    // return lookup_density(stochastic_trilinear_filter(ipos, seed));
+    return lookup_density(stochastic_tricubic_filter(ipos, seed));
+}
+
+// temperature brick grid stored as textures
+uniform mat4 vol_emission_transform;
+uniform mat4 vol_emission_inv_transform;
+uniform usampler3D vol_emission_indirection;
+uniform sampler3D vol_emission_range;
+uniform sampler3D vol_emission_atlas;
+
+// brick grid voxel temperature lookup (nearest neighbor)
+float lookup_temperature_brick(const vec3 ipos) {
+    const ivec3 iipos = ivec3(floor(ipos));
+    const ivec3 brick = iipos >> 3;
+    const uvec3 ptr = texelFetch(vol_emission_indirection, brick, 0).xyz;
+    const vec2 range = texelFetch(vol_emission_range, brick, 0).xy;
+    const float value_unorm = texelFetch(vol_emission_atlas, ivec3(ptr << 3) + (iipos & 7), 0).x;
+    return range.x + value_unorm * (range.y - range.x);
+}
+
+// emission lookup (stochastic tricubic filter)
+vec3 lookup_emission(const vec3 ipos, inout uint seed) {
+    const vec3 ipos_emission = vec3(vol_emission_inv_transform * vol_density_transform * vec4(ipos, 1));
+    const float t = lookup_temperature_brick(stochastic_tricubic_filter(ipos_emission, seed)) * vol_emission_norm;
+    return vol_emission_scale * sqr(vec3(t, sqr(t), sqr(sqr(t))));
+}
+
+// --------------------------------------------------------------
+// null-collision methods
+
+float transmittance(const vec3 wpos, const vec3 wdir, inout uint seed) {
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(wpos, wdir, vol_bb_min, vol_bb_max, near_far)) return 1.f;
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(wpos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(wdir, 0)); // non-normalized!
+    // ratio tracking
+    float t = near_far.x - log(1 - rng(seed)) * vol_inv_majorant, Tr = 1.f;
+    while (t < near_far.y) {
+#ifdef USE_TRANSFERFUNC
+        const vec4 rgba = tf_lookup(lookup_density_trilinear(ipos + t * idir) * vol_inv_majorant);
+        const float d = vol_majorant * rgba.a;
+#else
+        const float d = lookup_density_stochastic(ipos + t * idir, seed);
+#endif
+        // track ratio of real to null particles
+        Tr *= 1 - d * vol_inv_majorant;
+        // russian roulette
+        if (Tr < .1f) {
+            const float prob = 1 - Tr;
+            if (rng(seed) < prob) return 0.f;
+            Tr /= 1 - prob;
+        }
+        // advance
+        t -= log(1 - rng(seed)) * vol_inv_majorant;
+    }
+    return Tr;
+}
+
+bool sample_volume(const vec3 wpos, const vec3 wdir, out float t, inout vec3 throughput, inout vec3 Le, inout uint seed) {
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(wpos, wdir, vol_bb_min, vol_bb_max, near_far)) return false;
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(wpos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(wdir, 0)); // non-normalized!
+    // delta tracking
+    t = near_far.x - log(1 - rng(seed)) * vol_inv_majorant;
+    while (t < near_far.y) {
+#ifdef USE_TRANSFERFUNC
+        const vec4 rgba = tf_lookup(lookup_density_trilinear(ipos + t * idir) * vol_inv_majorant);
+        const float d = vol_majorant * rgba.a;
+#else
+        const float d = lookup_density_stochastic(ipos + t * idir, seed);
+#endif
+        const float P_real = d * vol_inv_majorant;
+        Le += throughput * (1 - vol_albedo) * lookup_emission(ipos + t * idir, seed) * P_real;
+        // classify as real or null collison
+        if (rng(seed) < P_real) {
+#ifdef USE_TRANSFERFUNC
+            throughput *= rgba.rgb * vol_albedo;
+#else
+            throughput *= vol_albedo;
+#endif
+            return true;
+        }
+        // advance
+        t -= log(1 - rng(seed)) * vol_inv_majorant;
+    }
+    return false;
+}
+
+// --------------------------------------------------------------
+// DDA-based null-collision methods
+
+#define MIP_START 3
+#define MIP_SPEED_UP 0.25
+#define MIP_SPEED_DOWN 2
+
+// perform DDA step on given mip level
+float stepDDA(const vec3 pos, const vec3 inv_dir, const int mip) {
+    const float dim = 8 << mip;
+    const vec3 offs = mix(vec3(-0.5f), vec3(dim + 0.5f), greaterThanEqual(inv_dir, vec3(0)));
+    const vec3 tmax = (floor(pos * (1.f / dim)) * dim + offs - pos) * inv_dir;
+    return min(tmax.x, min(tmax.y, tmax.z));
+}
+
+// DDA-based transmittance
+float transmittanceDDA(const vec3 wpos, const vec3 wdir, inout uint seed) {
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(wpos, wdir, vol_bb_min, vol_bb_max, near_far)) return 1.f;
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(wpos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(wdir, 0)); // non-normalized!
+    const vec3 ri = 1.f / idir;
+    // march brick grid
+    float t = near_far.x + 1e-6f, Tr = 1.f, tau = -log(1.f - rng(seed)), mip = MIP_START;
+    while (t < near_far.y) {
+        const vec3 curr = ipos + t * idir;
+#ifdef USE_TRANSFERFUNC
+        const float majorant = vol_majorant * tf_lookup(lookup_majorant(curr, int(round(mip))) * vol_inv_majorant).a;
+#else
+        const float majorant = lookup_majorant(curr, int(round(mip)));
+#endif
+        const float dt = stepDDA(curr, ri, int(round(mip)));
+        t += dt;
+        tau -= majorant * dt;
+        mip = min(mip + MIP_SPEED_UP, 3.f);
+        if (tau > 0) continue; // no collision, step ahead
+        t += tau / majorant; // step back to point of collision
+        if (t >= near_far.y) break;
+#ifdef USE_TRANSFERFUNC
+        const vec4 rgba = tf_lookup(lookup_density_trilinear(ipos + t * idir) * vol_inv_majorant);
+        const float d = vol_majorant * rgba.a;
+#else
+        const float d = lookup_density_stochastic(ipos + t * idir, seed);
+#endif
+        if (rng(seed) * majorant < d) { // check if real or null collision
+            Tr *= max(0.f, 1.f - vol_majorant / majorant); // adjust by ratio of global to local majorant
+            // russian roulette
+            if (Tr < .1f) {
+                const float prob = 1 - Tr;
+                if (rng(seed) < prob) return 0.f;
+                Tr /= 1 - prob;
+            }
+        }
+        tau = -log(1.f - rng(seed));
+        mip = max(0.f, mip - MIP_SPEED_DOWN);
+    }
+    return Tr;
+}
+
+// DDA-based volume sampling
+bool sample_volumeDDA(const vec3 wpos, const vec3 wdir, out float t, inout vec3 throughput, inout vec3 Le, inout uint seed) {
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(wpos, wdir, vol_bb_min, vol_bb_max, near_far)) return false;
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(wpos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(wdir, 0)); // non-normalized!
+    const vec3 ri = 1.f / idir;
+    // march brick grid
+    t = near_far.x + 1e-6f;
+    float tau = -log(1.f - rng(seed)), mip = MIP_START;
+    while (t < near_far.y) {
+        const vec3 curr = ipos + t * idir;
+#ifdef USE_TRANSFERFUNC
+        const float majorant = vol_majorant * tf_lookup(lookup_majorant(curr, int(round(mip))) * vol_inv_majorant).a;
+#else
+        const float majorant = lookup_majorant(curr, int(round(mip)));
+#endif
+        const float dt = stepDDA(curr, ri, int(round(mip)));
+        t += dt;
+        tau -= majorant * dt;
+        mip = min(mip + MIP_SPEED_UP, 3.f);
+        if (tau > 0) continue; // no collision, step ahead
+        t += tau / majorant; // step back to point of collision
+        if (t >= near_far.y) break;
+#ifdef USE_TRANSFERFUNC
+        const vec4 rgba = tf_lookup(lookup_density_trilinear(ipos + t * idir) * vol_inv_majorant);
+        const float d = vol_majorant * rgba.a;
+#else
+        const float d = lookup_density_stochastic(ipos + t * idir, seed);
+#endif
+        Le += throughput * (1.f - vol_albedo) * lookup_emission(ipos + t * idir, seed) * d * vol_inv_majorant;
+        if (rng(seed) * majorant < d) { // check if real or null collision
+            throughput *= vol_albedo;
+#ifdef USE_TRANSFERFUNC
+            throughput *= rgba.rgb;
+#endif
+            return true;
+        }
+        tau = -log(1.f - rng(seed));
+        mip = max(0.f, mip - MIP_SPEED_DOWN);
+    }
+    return false;
+}
+
+// --------------------------------------------------------------
+// ray-marching
+
+#define RAYMARCH_STEPS 64
+
+float transmittance_raymarch(const vec3 wpos, const vec3 wdir, inout uint seed) {
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(wpos, wdir, vol_bb_min, vol_bb_max, near_far)) return 1.f;
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(wpos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(wdir, 0)); // non-normalized!
+    // ray marching
+    const float dt = (near_far.y - near_far.x) / float(RAYMARCH_STEPS);
+    near_far.x += rng(seed) * dt; // jitter starting position
+    float tau = 0.f;
+    for (int i = 0; i < RAYMARCH_STEPS; ++i) {
+#ifdef USE_TRANSFERFUNC
+        tau += tf_lookup(lookup_density_stochastic(ipos + min(near_far.x + i * dt, near_far.y) * idir, seed) * vol_inv_majorant).a * vol_majorant * dt;
+#else
+        tau += lookup_density_stochastic(ipos + min(near_far.x + i * dt, near_far.y) * idir, seed) * dt;
+#endif
+    }
+    return exp(-tau);
+}
+
+bool sample_volume_raymarch(const vec3 wpos, const vec3 wdir, out float t, inout vec3 throughput, out float pdf, inout uint seed) {
+    pdf = 1.f;
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(wpos, wdir, vol_bb_min, vol_bb_max, near_far)) return false;
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(wpos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(wdir, 0)); // non-normalized!
+    // ray marching
+    const float tau_target = -log(1.f - rng(seed));
+    const float dt = (near_far.y - near_far.x) / float(RAYMARCH_STEPS);
+    near_far.x += rng(seed) * dt; // jitter starting position
+    float tau = 0.f;
+    for (int i = 0; i < RAYMARCH_STEPS; ++i) {
+        t = min(near_far.x + i * dt, near_far.y);
+#ifdef USE_TRANSFERFUNC
+        const float d = lookup_density_stochastic(ipos + t * idir, seed);
+        const vec4 rgba = tf_lookup(d * vol_inv_majorant);
+        tau += rgba.a * vol_majorant * dt;
+#else
+        const float d = lookup_density_stochastic(ipos + t * idir, seed);
+        tau += d * dt;
+#endif
+        if (tau >= tau_target) {
+            // TODO revert to exact hit pos
+#ifdef USE_TRANSFERFUNC
+            const vec3 albedo = rgba.rgb * vol_albedo;
+#else
+            const vec3 albedo = vec3(vol_albedo);
+#endif
+            pdf = mean(albedo) * d * exp(-tau_target);
+            throughput *= albedo;
+            return true;
+        }
+    }
+    pdf = exp(-tau);
+    return false;
+}
+
+// --------------------------------------------------------------
+// simple direct volume rendering
+
+vec3 direct_volume_rendering(vec3 pos, vec3 dir, inout uint seed) {
+    vec3 L = vec3(0);
+    // clip volume
+    vec2 near_far;
+    if (!intersect_box(pos, dir, vol_bb_min, vol_bb_max, near_far)) return lookup_environment(dir);
+    // to index-space
+    const vec3 ipos = vec3(vol_density_inv_transform * vec4(pos, 1));
+    const vec3 idir = vec3(vol_density_inv_transform * vec4(dir, 0)); // non-normalized!
+    // ray marching
+    const float dt = (near_far.y - near_far.x) / float(RAYMARCH_STEPS);
+    near_far.x += rng(seed) * dt; // jitter starting position
+    float Tr = 1.f;
+    for (int i = 0; i < RAYMARCH_STEPS; ++i) {
+        const vec4 rgba = tf_lookup(lookup_density_trilinear(ipos + min(near_far.x + i * dt, near_far.y) * idir) * vol_inv_majorant);
+        const float dtau = rgba.a * vol_majorant * dt;
+        L += rgba.rgb * dtau * Tr;
+        Tr *= exp(-dtau);
+        if (Tr <= 1e-6) return L;
+    }
+    return L + lookup_environment(dir) * Tr;
+}
+
+// --------------------------------------------------------------
+// volumetric path tracing
+
+uniform int bounces;
+uniform int show_environment;
+
+vec4 trace_path(vec3 pos, vec3 dir, inout uint seed) {
+    // trace path
+    vec3 L = vec3(0);
+    vec3 throughput = vec3(1);
+    bool free_path = true;
+    uint n_paths = 0;
+    float t, f_p; // t: end of ray segment (i.e. sampled position or out of volume), f_p: last phase function sample for MIS
+#ifdef USE_DDA
+    while (sample_volumeDDA(pos, dir, t, throughput, L, seed)) {
+#else
+    while (sample_volume(pos, dir, t, throughput, L, seed)) {
+#endif
+        // advance ray
+        pos = pos + t * dir;
+
+        // sample light source (environment)
+        vec3 w_i;
+        const vec4 Le_pdf = sample_environment(rng2(seed), w_i);
+        if (Le_pdf.w > 0) {
+            f_p = phase_henyey_greenstein(dot(-dir, w_i), vol_phase_g);
+            const float mis_weight = show_environment > 0 ? power_heuristic(Le_pdf.w, f_p) : 1.f;
+#ifdef USE_DDA
+            const float Tr = transmittanceDDA(pos, w_i, seed);
+#else
+            const float Tr = transmittance(pos, w_i, seed);
+#endif
+            L += throughput * mis_weight * f_p * Tr * Le_pdf.rgb / Le_pdf.w;
+        }
+
+        // early out?
+        if (++n_paths >= bounces) { free_path = false; break; }
+        // russian roulette
+        const float rr_val = luma(throughput);
+        if (rr_val < .1f) {
+            const float prob = 1 - rr_val;
+            if (rng(seed) < prob) { free_path = false; break; }
+            throughput /= 1 - prob;
+        }
+
+        // scatter ray
+        const vec3 scatter_dir = sample_phase_henyey_greenstein(dir, vol_phase_g, rng2(seed));
+        f_p = phase_henyey_greenstein(dot(-dir, scatter_dir), vol_phase_g);
+        dir = scatter_dir;
+    }
+
+    // free path? -> add envmap contribution
+    if (free_path && show_environment > 0) {
+        const vec3 Le = lookup_environment(dir);
+        const float mis_weight = n_paths > 0 ? power_heuristic(f_p, pdf_environment(dir)) : 1.f;
+        L += throughput * mis_weight * Le;
+    }
+
+    return vec4(L, clamp(n_paths, 0.f, 1.f));
+}
+```
+
+### shader/env_setup.glsl
+```
+#version 450 core
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (binding = 0, r32f) uniform image2D impmap;
+
+uniform sampler2D envmap;
+uniform ivec2 output_size;
+uniform ivec2 output_size_samples;
+uniform ivec2 num_samples;
+uniform float inv_samples;
+
+// ---------------------------------------------------
+// main
+
+float luma(const vec3 col) { return dot(col, vec3(0.212671f, 0.715160f, 0.072169f)); }
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(pixel, output_size))) return;
+    const ivec2 size_env = textureSize(envmap, 0);
+
+    // compute importance
+    float importance = 0.f;
+    for (int y = 0; y < num_samples.y; ++y) {
+        for (int x = 0; x < num_samples.x; ++x) {
+            const vec2 uv = (pixel * num_samples + vec2(x + .5f, y + .5f)) / output_size_samples;
+            importance += luma(texture(envmap, uv).rgb);
+        }
+    }
+
+    // write averaged output
+    imageStore(impmap, pixel, vec4(importance * inv_samples));
+}
+```
+
+### shader/pathtracer_brick.glsl
+```
+#version 450 core
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (binding = 0, rgba32f) uniform image2D color;
+
+// ---------------------------------------------------
+// settings
+
+#define USE_DDA
+#include "common.glsl"
+
+// ---------------------------------------------------
+// uniforms
+
+uniform int current_sample;
+uniform int seed;
+uniform ivec2 resolution;
+
+// ---------------------------------------------------
+// main
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(pixel, resolution))) return;
+
+    // setup random seed and camera ray
+    uint seed = tea(seed * (pixel.y * resolution.x + pixel.x), current_sample, 32);
+    const vec3 pos = cam_pos;
+    const vec3 dir = view_dir(pixel, resolution, rng2(seed));
+
+    // trace ray
+    const vec4 L = trace_path(pos, dir, seed);
+
+    // write result
+    imageStore(color, pixel, mix(imageLoad(color, pixel), sanitize(L), 1.f / current_sample));
+}
+```
+
+### shader/pathtracer_brick_tf.glsl
+```
+#version 450 core
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (binding = 0, rgba32f) uniform image2D color;
+
+// ---------------------------------------------------
+// settings
+
+#define USE_DDA
+#define USE_TRANSFERFUNC
+#include "common.glsl"
+
+// ---------------------------------------------------
+// uniforms
+
+uniform int current_sample;
+uniform int seed;
+uniform ivec2 resolution;
+
+// ---------------------------------------------------
+// main
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(pixel, resolution))) return;
+
+    // setup random seed and camera ray
+    uint seed = tea(seed * (pixel.y * resolution.x + pixel.x), current_sample, 32);
+    const vec3 pos = cam_pos;
+    const vec3 dir = view_dir(pixel, resolution, rng2(seed));
+
+    // trace ray
+    const vec4 L = trace_path(pos, dir, seed);
+
+    // write result
+    imageStore(color, pixel, mix(imageLoad(color, pixel), sanitize(L), 1.f / current_sample));
+}
+```
+
+### shader/tonemap.glsl
+```
+#version 450 core
+
+layout (local_size_x = 16, local_size_y = 16) in;
+
+layout (binding = 0, rgba32f) uniform image2D color;
+
+uniform float exposure;
+uniform float gamma;
+uniform ivec2 resolution;
+
+float luma(const vec3 col) { return dot(col, vec3(0.212671f, 0.715160f, 0.072169f)); }
+
+vec3 hable(in vec3 rgb) {
+    const float A = 0.15f;
+    const float B = 0.50f;
+    const float C = 0.10f;
+    const float D = 0.20f;
+    const float E = 0.02f;
+    const float F = 0.30f;
+    return ((rgb * (A * rgb + C * B) + D * E) / (rgb * (A * rgb + B) + D * F)) - E / F;
+}
+vec3 hable_tonemap(in vec3 rgb, in float exposure) {
+    const float W = 11.2f;
+    return hable(exposure * rgb) / hable(vec3(W));
+}
+
+vec4 sanitize(const vec4 x) { return mix(x, vec4(0), isnan(x) || isinf(x)); }
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (any(greaterThanEqual(pixel, resolution))) return;
+    // tonemap
+    vec4 out_col = imageLoad(color, pixel);
+    out_col.rgb = pow(hable_tonemap(out_col.rgb, exposure), vec3(1.f / gamma));
+    imageStore(color, pixel, sanitize(out_col));
+}
+```
+
+### src/bindings.cpp
+```
+#define GLM_ENABLE_EXPERIMENTAL
+#include <glm/glm.hpp>
+#include <glm/gtx/quaternion.hpp>
+
+#include <cppgl.h>
+#include <voldata.h>
+
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <pybind11/embed.h>
+#include <pybind11/numpy.h>
+#include <pybind11/operators.h>
+
+#include "renderer.h"
+#include "environment.h"
+#include "transferfunc.h"
+
+using namespace cppgl;
+
+// ------------------------------------------------------------------------
+// python bindings
+
+template <typename VecT, typename ScalarT>
+pybind11::class_<VecT> register_vector_operators(pybind11::class_<VecT>& pyclass) {
+    return pyclass
+        .def(pybind11::self + pybind11::self)
+        .def(pybind11::self + ScalarT())
+        .def(ScalarT() + pybind11::self)
+        .def(pybind11::self += pybind11::self)
+        .def(pybind11::self += ScalarT())
+        .def(pybind11::self - pybind11::self)
+        .def(pybind11::self - ScalarT())
+        .def(ScalarT() - pybind11::self)
+        .def(pybind11::self -= pybind11::self)
+        .def(pybind11::self -= ScalarT())
+        .def(pybind11::self * pybind11::self)
+        .def(pybind11::self * ScalarT())
+        .def(ScalarT() * pybind11::self)
+        .def(pybind11::self *= pybind11::self)
+        .def(pybind11::self *= ScalarT())
+        .def(pybind11::self / pybind11::self)
+        .def(pybind11::self / ScalarT())
+        .def(ScalarT() / pybind11::self)
+        .def(pybind11::self /= pybind11::self)
+        .def(pybind11::self /= ScalarT())
+        .def(-pybind11::self);
+}
+
+template <typename MatT, typename ScalarT>
+pybind11::class_<MatT> register_matrix_operators(pybind11::class_<MatT>& pyclass) {
+    return pyclass
+        .def(pybind11::self + pybind11::self)
+        .def(pybind11::self += pybind11::self)
+        .def(pybind11::self - pybind11::self)
+        .def(pybind11::self -= pybind11::self)
+        .def(pybind11::self * pybind11::self)
+        .def(pybind11::self * ScalarT())
+        .def(ScalarT() * pybind11::self)
+        .def(pybind11::self *= pybind11::self)
+        .def(pybind11::self *= ScalarT())
+        .def(-pybind11::self);
+}
+
+PYBIND11_EMBEDDED_MODULE(volpy, m) {
+
+    // ------------------------------------------------------------
+    // voldata::Buf3D bindings
+
+    pybind11::class_<voldata::Buf3D<float>, std::shared_ptr<voldata::Buf3D<float>>>(m, "ImageDataFloat", pybind11::buffer_protocol())
+        .def_buffer([](voldata::Buf3D<float>& buf) -> pybind11::buffer_info {
+            return pybind11::buffer_info(buf.data.data(),
+                    sizeof(float),
+                    pybind11::format_descriptor<float>::format(),
+                    3,
+                    { buf.stride.x, buf.stride.y, buf.stride.z },
+                    { sizeof(float) * buf.stride.z * buf.stride.y, sizeof(float) * buf.stride.z, sizeof(float) });
+        });
+
+    // ------------------------------------------------------------
+    // voldata::Volume bindings
+
+    pybind11::class_<voldata::Volume, std::shared_ptr<voldata::Volume>>(m, "Volume")
+        .def(pybind11::init<>())
+        .def(pybind11::init<std::string>())
+        .def(pybind11::init<size_t, size_t, size_t, const uint8_t*>())
+        .def(pybind11::init<size_t, size_t, size_t, const float*>())
+        .def("load_grid", &voldata::Volume::load_grid)
+        .def("clear", &voldata::Volume::clear)
+        .def("add_grid_frame", &voldata::Volume::add_grid_frame)
+        .def("update_grid_frame", &voldata::Volume::update_grid_frame)
+        .def("AABB", &voldata::Volume::AABB) // TODO default argument
+        .def_readwrite("grid_frame_counter", &voldata::Volume::grid_frame_counter)
+        .def("minorant_majorant", &voldata::Volume::minorant_majorant)
+        .def("__repr__", &voldata::Volume::to_string, pybind11::arg("indent") = "");
+
+    // ------------------------------------------------------------
+    // environment bindings
+
+    pybind11::class_<Environment, std::shared_ptr<Environment>>(m, "Environment")
+        .def(pybind11::init<std::string>())
+        .def_readwrite("strength", &Environment::strength);
+
+    // ------------------------------------------------------------
+    // transferfunc bindings
+
+    pybind11::class_<TransferFunction, std::shared_ptr<TransferFunction>>(m, "TransferFunction")
+        .def(pybind11::init<>())
+        .def(pybind11::init<const std::string&>())
+        .def(pybind11::init<const std::vector<glm::vec4>&>())
+        .def("randomize", &TransferFunction::randomize)
+        .def_readwrite("window_left", &TransferFunction::window_left)
+        .def_readwrite("window_width", &TransferFunction::window_width);
+
+    // ------------------------------------------------------------
+    // renderer bindings
+
+    pybind11::class_<RendererOpenGL, std::shared_ptr<RendererOpenGL>>(m, "Renderer")
+        .def(pybind11::init<>())
+        .def("init", &RendererOpenGL::init)
+        .def("commit", &RendererOpenGL::commit)
+        .def("trace", &RendererOpenGL::trace)
+        .def("reset", &RendererOpenGL::reset)
+        .def("scale_and_move_to_unit_cube", &RendererOpenGL::scale_and_move_to_unit_cube)
+        .def("render", [](const std::shared_ptr<RendererOpenGL>& renderer, int spp) {
+            current_camera()->update();
+            renderer->sample = 0;
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            while (renderer->sample < spp) {
+                renderer->trace();
+                Context::swap_buffers(); // keep interactivity
+            }
+        })
+        .def("draw", [](const std::shared_ptr<RendererOpenGL>& renderer) {
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            renderer->draw();
+            Context::swap_buffers();
+        })
+        .def_static("resolution", []() {
+            return Context::resolution();
+        })
+        .def("fbo_data", [](const std::shared_ptr<RendererOpenGL>& renderer) {
+            auto tex = renderer->color;
+            auto buf = std::make_shared<voldata::Buf3D<float>>(glm::uvec3(tex->w, tex->h, 3));
+            glBindTexture(GL_TEXTURE_2D, tex->id);
+            glGetTexImage(GL_TEXTURE_2D, 0, GL_RGB, GL_FLOAT, &buf->data[0]);
+            glBindTexture(GL_TEXTURE_2D, 0);
+            return buf;
+        })
+        .def("save", [](const std::shared_ptr<RendererOpenGL>& renderer, const std::string& filename = "out.png") {
+            const glm::ivec2 size = Context::resolution();
+            std::vector<uint8_t> pixels(size.x * size.y * 3);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, size.x, size.y, GL_RGB, GL_UNSIGNED_BYTE, pixels.data());
+            const fs::path outfile = fs::path(filename);
+            image_store_ldr(outfile, pixels.data(), size.x, size.y, 3);
+            std::cout << outfile << " written." << std::endl;
+        })
+        .def("save_with_alpha", [](const std::shared_ptr<RendererOpenGL>& renderer, const std::string& filename = "out.png") {
+            const glm::ivec2 size = Context::resolution();
+            std::vector<uint8_t> pixels(size.x * size.y * 4);
+            glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            glReadPixels(0, 0, size.x, size.y, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+            const fs::path outfile = fs::path(filename).replace_extension(".png");
+            image_store_ldr(outfile, pixels.data(), size.x, size.y, 4);
+            std::cout << outfile << " written." << std::endl;
+        })
+        // members
+        .def_readwrite("volume", &RendererOpenGL::volume)
+        .def_readwrite("environment", &RendererOpenGL::environment)
+        .def_readwrite("transferfunc", &RendererOpenGL::transferfunc)
+        .def_readwrite("sample", &RendererOpenGL::sample)
+        .def_readwrite("sppx", &RendererOpenGL::sppx)
+        .def_readwrite("bounces", &RendererOpenGL::bounces)
+        .def_readwrite("seed", &RendererOpenGL::seed)
+        .def_readwrite("tonemap_exposure", &RendererOpenGL::tonemap_exposure)
+        .def_readwrite("tonemap_gamma", &RendererOpenGL::tonemap_gamma)
+        .def_readwrite("tonemapping", &RendererOpenGL::tonemapping)
+        .def_readwrite("show_environment", &RendererOpenGL::show_environment)
+        .def_readwrite("albedo", &RendererOpenGL::albedo)
+        .def_readwrite("phase", &RendererOpenGL::phase)
+        .def_readwrite("density_scale", &RendererOpenGL::density_scale)
+        .def_readwrite("emission_scale", &RendererOpenGL::emission_scale)
+        .def_readwrite("vol_clip_min", &RendererOpenGL::vol_clip_min)
+        .def_readwrite("vol_clip_max", &RendererOpenGL::vol_clip_max)
+        // camera
+        .def_readwrite_static("cam_pos", &current_camera()->pos)
+        .def_readwrite_static("cam_dir", &current_camera()->dir)
+        .def_readwrite_static("cam_up", &current_camera()->up)
+        .def_readwrite_static("cam_fov", &current_camera()->fov_degree)
+        .def_readwrite_static("cam_near", &current_camera()->near)
+        .def_readwrite_static("cam_far", &current_camera()->far)
+        .def_readwrite_static("view_matrix", &current_camera()->view)
+        .def_readwrite_static("proj_matrix", &current_camera()->proj)
+        .def_static("cam_aspect", &current_camera()->aspect_ratio)
+        // colmap stuff
+        .def_static("colmap_view_trans", []() {
+            const glm::mat4 GL_TO_COLMAP = glm::inverse(glm::mat4(1, 0, 0, 0,   0, -1, 0, 0,    0, 0, -1, 0,    0, 0, 0, 1));
+            return glm::vec3((GL_TO_COLMAP * current_camera()->view)[3]);
+        })
+        .def_static("colmap_view_rot", []() {
+            const glm::mat4 GL_TO_COLMAP = glm::inverse(glm::mat4(1, 0, 0, 0,   0, -1, 0, 0,    0, 0, -1, 0,    0, 0, 0, 1));
+            return glm::normalize(glm::toQuat(GL_TO_COLMAP * current_camera()->view));
+        })
+        .def_static("colmap_focal_length", []() {
+            return Context::resolution().y / (2 * tan(0.5 * glm::radians(current_camera()->fov_degree)));
+        })
+        .def_static("shutdown", []() {
+            exit(0);
+        });
+
+    // ------------------------------------------------------------
+    // glm vector bindings
+
+    register_vector_operators<glm::vec2, float>(
+        pybind11::class_<glm::vec2>(m, "vec2")
+            .def(pybind11::init<>())
+            .def(pybind11::init<float>())
+            .def(pybind11::init<float, float>())
+            .def_readwrite("x", &glm::vec2::x)
+            .def_readwrite("y", &glm::vec2::y)
+            .def("normalize", [](const glm::vec2& v) { return glm::normalize(v); })
+            .def("length", [](const glm::vec2& v) { return glm::length(v); })
+            .def("__repr__", [](const glm::vec2& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::vec3, float>(
+        pybind11::class_<glm::vec3>(m, "vec3", pybind11::buffer_protocol())
+            .def(pybind11::init<>())
+            .def(pybind11::init<float>())
+            .def(pybind11::init<float, float, float>())
+            .def_readwrite("x", &glm::vec3::x)
+            .def_readwrite("y", &glm::vec3::y)
+            .def_readwrite("z", &glm::vec3::z)
+            .def("normalize", [](const glm::vec3& v) { return glm::normalize(v); })
+            .def("length", [](const glm::vec3& v) { return glm::length(v); })
+            .def_buffer([](glm::vec3& m) -> pybind11::buffer_info {
+                return pybind11::buffer_info(&m[0],
+                        sizeof(float),
+                        pybind11::format_descriptor<float>::format(),
+                        1,
+                        { 3 },
+                        { sizeof(float) });
+            })
+            .def("__repr__", [](const glm::vec3& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::vec4, float>(
+        pybind11::class_<glm::vec4>(m, "vec4", pybind11::buffer_protocol())
+            .def(pybind11::init<>())
+            .def(pybind11::init<float>())
+            .def(pybind11::init<float, float, float, float>())
+            .def_readwrite("x", &glm::vec4::x)
+            .def_readwrite("y", &glm::vec4::y)
+            .def_readwrite("z", &glm::vec4::z)
+            .def_readwrite("w", &glm::vec4::w)
+            .def("normalize", [](const glm::vec4& v) { return glm::normalize(v); })
+            .def("length", [](const glm::vec4& v) { return glm::length(v); })
+            .def_buffer([](glm::vec4& m) -> pybind11::buffer_info {
+                return pybind11::buffer_info(&m[0],
+                        sizeof(float),
+                        pybind11::format_descriptor<float>::format(),
+                        1,
+                        { 4 },
+                        { sizeof(float) });
+            })
+            .def("__repr__", [](const glm::vec4& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::ivec2, int>(
+        pybind11::class_<glm::ivec2>(m, "ivec2")
+            .def(pybind11::init<>())
+            .def(pybind11::init<int>())
+            .def(pybind11::init<int, int>())
+            .def_readwrite("x", &glm::ivec2::x)
+            .def_readwrite("y", &glm::ivec2::y)
+            .def("__repr__", [](const glm::ivec2& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::ivec3, int>(
+        pybind11::class_<glm::ivec3>(m, "ivec3")
+            .def(pybind11::init<>())
+            .def(pybind11::init<int>())
+            .def(pybind11::init<int, int, int>())
+            .def_readwrite("x", &glm::ivec3::x)
+            .def_readwrite("y", &glm::ivec3::y)
+            .def_readwrite("z", &glm::ivec3::z)
+            .def("__repr__", [](const glm::ivec3& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::ivec4, int>(
+        pybind11::class_<glm::ivec4>(m, "ivec4")
+            .def(pybind11::init<>())
+            .def(pybind11::init<int>())
+            .def(pybind11::init<int, int, int, int>())
+            .def_readwrite("x", &glm::ivec4::x)
+            .def_readwrite("y", &glm::ivec4::y)
+            .def_readwrite("z", &glm::ivec4::z)
+            .def_readwrite("w", &glm::ivec4::w)
+            .def("__repr__", [](const glm::ivec4& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::uvec2, uint32_t>(
+        pybind11::class_<glm::uvec2>(m, "uvec2")
+            .def(pybind11::init<>())
+            .def(pybind11::init<uint32_t>())
+            .def(pybind11::init<uint32_t, uint32_t>())
+            .def_readwrite("x", &glm::uvec2::x)
+            .def_readwrite("y", &glm::uvec2::y)
+            .def("__repr__", [](const glm::uvec2& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::uvec3, uint32_t>(
+        pybind11::class_<glm::uvec3>(m, "uvec3")
+            .def(pybind11::init<>())
+            .def(pybind11::init<uint32_t>())
+            .def(pybind11::init<uint32_t, uint32_t, uint32_t>())
+            .def_readwrite("x", &glm::uvec3::x)
+            .def_readwrite("y", &glm::uvec3::y)
+            .def_readwrite("z", &glm::uvec3::z)
+            .def("__repr__", [](const glm::uvec3& v) {
+                return glm::to_string(v);
+            }));
+
+    register_vector_operators<glm::uvec4, uint32_t>(
+        pybind11::class_<glm::uvec4>(m, "uvec4")
+            .def(pybind11::init<>())
+            .def(pybind11::init<uint32_t>())
+            .def(pybind11::init<uint32_t, uint32_t, uint32_t, uint32_t>())
+            .def_readwrite("x", &glm::uvec4::x)
+            .def_readwrite("y", &glm::uvec4::y)
+            .def_readwrite("z", &glm::uvec4::z)
+            .def_readwrite("w", &glm::uvec4::w)
+            .def("__repr__", [](const glm::uvec4& v) {
+                return glm::to_string(v);
+            }));
+
+    // ------------------------------------------------------------
+    // glm matrix bindings
+
+    register_matrix_operators<glm::mat3, float>(
+        pybind11::class_<glm::mat3>(m, "mat3", pybind11::buffer_protocol())
+            .def(pybind11::init<>())
+            .def(pybind11::init<float>())
+            .def(pybind11::init<glm::vec3, glm::vec3, glm::vec3>())
+            .def("column", [](const std::shared_ptr<glm::mat3>& m, uint32_t i) {
+                return m->operator[](i);
+            })
+            .def("value", [](const std::shared_ptr<glm::mat3>& m, uint32_t i, uint32_t j) {
+                return m->operator[](i)[j];
+            })
+            .def_buffer([](glm::mat3& m) -> pybind11::buffer_info {
+                return pybind11::buffer_info(&m[0],
+                        sizeof(float),
+                        pybind11::format_descriptor<float>::format(),
+                        2,
+                        { 3, 3 },
+                        { sizeof(float) * 3, sizeof(float) });
+            })
+            .def("__repr__", [](const glm::mat3& m) {
+                return glm::to_string(m);
+            }));
+
+    register_matrix_operators<glm::mat4, float>(
+        pybind11::class_<glm::mat4>(m, "mat4", pybind11::buffer_protocol())
+            .def(pybind11::init<>())
+            .def(pybind11::init<float>())
+            .def(pybind11::init<glm::vec4, glm::vec4, glm::vec4, glm::vec4>())
+            .def("column", [](const std::shared_ptr<glm::mat4>& m, uint32_t i) {
+                return m->operator[](i);
+            })
+            .def("value", [](const std::shared_ptr<glm::mat4>& m, uint32_t i, uint32_t j) {
+                return m->operator[](i)[j];
+            })
+            .def_buffer([](glm::mat4& m) -> pybind11::buffer_info {
+                return pybind11::buffer_info(&m[0],
+                        sizeof(float),
+                        pybind11::format_descriptor<float>::format(),
+                        2,
+                        { 4, 4 },
+                        { sizeof(float) * 4, sizeof(float) });
+            })
+            .def("__repr__", [](const glm::mat4& m) {
+                return glm::to_string(m);
+            }));
+    
+    // ------------------------------------------------------------
+    // glm quaternion bindings
+
+    register_matrix_operators<glm::quat, float>(
+        pybind11::class_<glm::quat>(m, "quat", pybind11::buffer_protocol())
+            .def(pybind11::init<>())
+            .def(pybind11::init<glm::vec3>())
+            .def(pybind11::init<glm::mat3>())
+            .def(pybind11::init<glm::mat4>())
+            .def_readwrite("x", &glm::quat::x)
+            .def_readwrite("y", &glm::quat::y)
+            .def_readwrite("z", &glm::quat::z)
+            .def_readwrite("w", &glm::quat::w)
+            .def_buffer([](glm::quat& m) -> pybind11::buffer_info {
+                return pybind11::buffer_info(&m[0],
+                        sizeof(float),
+                        pybind11::format_descriptor<float>::format(),
+                        1,
+                        { 4 },
+                        { sizeof(float) });
+            })
+            .def("__repr__", [](const glm::quat& v) {
+                return glm::to_string(v);
+            }));
+}
+```
+
+### src/environment.cpp
+```
+#include "environment.h"
+
+using namespace cppgl;
+
+// importance map parameters (power of two!)
+const uint32_t DIMENSION = 512;
+const uint32_t SAMPLES = 64;
+
+Environment::Environment(const std::string& path) : Environment(Texture2D("environment", path)) {}
+
+Environment::Environment(const Texture2D& envmap) :
+    transform(1),
+    strength(1),
+    envmap(envmap),
+    impmap(envmap->name + "_importance", DIMENSION, DIMENSION, GL_R32F, GL_RED, GL_FLOAT)
+{
+    // build importance map
+    static Shader setup_shader = Shader("env_setup", "shader/env_setup.glsl");
+    const uint32_t n_samples = (uint32_t)std::sqrt(SAMPLES);
+    setup_shader->bind();
+    impmap->bind_image(0, GL_WRITE_ONLY, GL_R32F);
+    setup_shader->uniform("envmap", envmap, 0);
+    setup_shader->uniform("output_size", glm::ivec2(DIMENSION));
+    setup_shader->uniform("output_size_samples", glm::ivec2(DIMENSION * n_samples, DIMENSION * n_samples));
+    setup_shader->uniform("num_samples", glm::ivec2(n_samples, n_samples));
+    setup_shader->uniform("inv_samples", 1.f / (n_samples * n_samples));
+    setup_shader->dispatch_compute(DIMENSION, DIMENSION);
+    impmap->unbind_image(0);
+    setup_shader->unbind();
+    impmap->bind(0);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    impmap->unbind();
+}
+
+Environment::~Environment() {}
+
+uint32_t Environment::num_mip_levels() const {
+    return 1 + floor(log2(DIMENSION));
+}
+
+uint32_t Environment::dimension() const {
+    return DIMENSION;
+}
+
+void Environment::set_uniforms(const Shader& shader, uint32_t& texture_unit) const {
+    shader->uniform("env_model", transform);
+    shader->uniform("env_inv_model", glm::inverse(transform));
+    shader->uniform("env_strength", strength);
+    shader->uniform("env_imp_inv_dim", glm::vec2(1.f / DIMENSION));
+    shader->uniform("env_imp_base_mip", int(floor(log2(DIMENSION))));
+    shader->uniform("env_envmap", envmap, texture_unit++);
+    shader->uniform("env_impmap", impmap, texture_unit++);
+}
+```
+
+### src/environment.h
+```
+#pragma once
+
+#include <vector>
+#include <cppgl.h>
+#include <glm/glm.hpp>
+
+class Environment {
+public:
+    Environment(const std::string& path);
+    Environment(const cppgl::Texture2D& envmap);
+    virtual ~Environment();
+
+    explicit inline operator bool() const  { return envmap->operator bool() && impmap->operator bool(); }
+
+    uint32_t num_mip_levels() const;
+    uint32_t dimension() const;
+    void set_uniforms(const cppgl::Shader& shader, uint32_t& texture_unit) const;
+
+    // data
+    glm::mat3 transform;
+    float strength;
+    cppgl::Texture2D envmap, impmap;
+};
+```
+
+### src/main.cpp
+```
+#include <iostream>
+#include <fstream>
+#include <filesystem>
+
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+#include <cppgl.h>
+#include <voldata.h>
+
+#include <pybind11/embed.h>
+#include <pybind11/eval.h>
+
+#include "renderer.h"
+
+using namespace cppgl;
+
+// ------------------------------------------
+// settings
+
+static bool use_vsync = false;
+static float shader_check_delay_ms = 1000;
+
+static bool animate = false;
+static float animation_fps = 30;
+
+static bool interactive = true;
+static std::string out_filename = "output.png";
+
+static std::shared_ptr<RendererOpenGL> renderer;
+
+// ------------------------------------------
+// helper funcs
+
+inline float randf() { return rand() / (RAND_MAX + 1.f); }
+
+void load_volume(const std::string& path) {
+    try {
+        std::cout << "load volume: " << path << std::endl;
+        if (fs::is_directory(path)) {
+            // load contents of folder
+            renderer->volume = voldata::Volume::load_folder(path, { "density", "temperature", "flame", "flames" });
+        } else {
+            // load single grid
+            renderer->volume = std::make_shared<voldata::Volume>(path);
+            // try to add emission grid
+            if (std::filesystem::path(path).extension() == ".vdb") {
+                for (const auto& name : { "flame", "flames", "temperature" }) {
+                    try {
+                        renderer->volume->update_grid_frame(renderer->volume->grid_frame_counter, voldata::Volume::load_grid(path, name), name);
+                    } catch (std::runtime_error& e) {}
+                }
+            }
+        }
+        renderer->density_scale = 1.f;
+        renderer->scale_and_move_to_unit_cube();
+        renderer->commit();
+        renderer->sample = 0;
+    } catch (std::runtime_error& e) {
+        std::cerr << "Unable to load volume from " << path << ": " << e.what() << std::endl;
+    }
+}
+
+void load_envmap(const std::string& path) {
+    try {
+        renderer->environment = std::make_shared<Environment>(path);
+        renderer->sample = 0;
+    } catch (std::runtime_error& e) {
+        std::cerr << "Unable to load envmap from " << path << ": " << e.what() << std::endl;
+    }
+}
+
+void load_transferfunc(const std::string& path) {
+    try {
+        renderer->transferfunc = std::make_shared<TransferFunction>(path);
+        renderer->show_environment = false;
+        renderer->sample = 0;
+    } catch (std::runtime_error& e) {
+        std::cerr << "Unable to load transferfunc from " << path << ": " << e.what() << std::endl;
+    }
+}
+
+void run_script(const std::string& path) {
+    try {
+        pybind11::scoped_interpreter guard{};
+        pybind11::eval_file(path);
+        renderer->sample = 0;
+    } catch (pybind11::error_already_set& e) {
+        std::cerr << "Error executing python script " << path << ": " << e.what() << std::endl;
+    }
+}
+
+void handle_path(const std::string& path) {
+    if (std::filesystem::path(path).extension() == ".py")
+        run_script(path);
+    else if (std::filesystem::path(path).extension() == ".hdr")
+        load_envmap(path);
+    else if (std::filesystem::path(path).extension() == ".txt")
+        load_transferfunc(path);
+    else
+        load_volume(path);
+}
+
+// ------------------------------------------
+// callbacks
+
+void resize_callback(int w, int h) {
+    // resize buffers
+    renderer->resize(w, h);
+    // restart rendering
+    renderer->reset();
+}
+
+void keyboard_callback(int key, int scancode, int action, int mods) {
+    if (ImGui::GetIO().WantCaptureKeyboard) return;
+    if (key == GLFW_KEY_B && action == GLFW_PRESS) {
+        renderer->show_environment = !renderer->show_environment;
+        renderer->reset();
+    }
+    if (key == GLFW_KEY_V && action == GLFW_PRESS) {
+        use_vsync = !use_vsync;
+        Context::set_swap_interval(use_vsync ? 1 : 0);
+    }
+    if (key == GLFW_KEY_T && action == GLFW_PRESS)
+        renderer->tonemapping = !renderer->tonemapping;
+    if (key == GLFW_KEY_SPACE && action == GLFW_PRESS) {
+        animate = !animate;
+        renderer->reset();
+    }
+    if (key == GLFW_KEY_ENTER && action == GLFW_PRESS)
+        Context::screenshot("screenshot.png");
+}
+
+void mouse_button_callback(int button, int action, int mods) {
+    if (ImGui::GetIO().WantCaptureMouse) return;
+}
+
+void mouse_callback(double xpos, double ypos) {
+    static double old_xpos = -1, old_ypos = -1;
+    if (old_xpos == -1 || old_ypos == -1) {
+        old_xpos = xpos;
+        old_ypos = ypos;
+    }
+    if (!ImGui::GetIO().WantCaptureMouse && renderer->transferfunc) {
+        if (Context::mouse_button_pressed(GLFW_MOUSE_BUTTON_RIGHT)) {
+            const auto [min, maj] = renderer->volume->current_grid()->minorant_majorant();
+            if (Context::key_pressed(GLFW_KEY_LEFT_SHIFT)) {
+                renderer->transferfunc->window_width = glm::clamp(renderer->transferfunc->window_width + (xpos - old_xpos) * (maj - min) * 0.001, 0.0, 1.0);
+            } else {
+                renderer->transferfunc->window_left = glm::clamp(renderer->transferfunc->window_left + (xpos - old_xpos) * (maj - min) * 0.001, -1.0, 1.0);
+            }
+            renderer->sample = 0;
+        }
+    }
+    old_xpos = xpos;
+    old_ypos = ypos;
+}
+
+void drag_drop_callback(GLFWwindow* window, int path_count, const char* paths[]) {
+    for (int i = 0; i < path_count; ++i)
+        handle_path(paths[i]);
+}
+
+void gui_callback(void) {
+    const glm::ivec2 size = Context::resolution();
+    ImGui::SetNextWindowPos(ImVec2(size.x-300, 20));
+    ImGui::SetNextWindowSize(ImVec2(300, -1));
+    if (ImGui::Begin("Stuff", 0, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoFocusOnAppearing)) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, .9f);
+        static float est_ravg = 0.f;
+        est_ravg = glm::mix(est_ravg, float(Context::frame_time() * (renderer->sppx - renderer->sample) / 1000.f), 0.1f);
+        ImGui::Text("Sample: %i/%i (est: %um, %us)", renderer->sample, renderer->sppx, uint32_t(est_ravg) / 60, uint32_t(est_ravg) % 60);
+        if (ImGui::InputInt("Sppx", &renderer->sppx)) renderer->reset();
+        if (ImGui::InputInt("Bounces", &renderer->bounces)) renderer->reset();
+        if (ImGui::Checkbox("Vsync", &use_vsync)) Context::set_swap_interval(use_vsync ? 1 : 0);
+        ImGui::Separator();
+        if (ImGui::Checkbox("Environment", &renderer->show_environment)) renderer->reset();
+        if (ImGui::DragFloat("Env strength", &renderer->environment->strength, 0.01f, 0.f, 1000.f)) renderer->reset();
+        if (ImGui::Button("White background")) {
+            glm::vec3 color(1);
+            renderer->environment = std::make_shared<Environment>(Texture2D("white_background", 1, 1, GL_RGB32F, GL_RGB, GL_FLOAT, &color.x));
+            renderer->reset();
+        }
+        ImGui::Separator();
+        ImGui::Checkbox("Tonemapping", &renderer->tonemapping);
+        if (ImGui::DragFloat("Exposure", &renderer->tonemap_exposure, 0.01f, 0.f))
+            renderer->tonemap_exposure = fmaxf(0.f, renderer->tonemap_exposure);
+        ImGui::DragFloat("Gamma", &renderer->tonemap_gamma, 0.01f, 0.f);
+        ImGui::Separator();
+        if (ImGui::DragFloat3("Albedo", &renderer->albedo.x, 0.01f, 0.f, 1.f)) renderer->reset();
+        if (ImGui::DragFloat("Density scale", &renderer->density_scale, 0.1f, 0.f, 1e6f)) renderer->reset();
+        if (ImGui::DragFloat("Emission scale", &renderer->emission_scale, 0.1f, 0.f, 1e6f)) renderer->reset();
+        if (ImGui::SliderFloat("Phase g", &renderer->phase, -.95f, .95f)) renderer->reset();
+        size_t frame_min = 0, frame_max = renderer->volume->n_grid_frames() - 1;
+        if (ImGui::SliderScalar("Grid frame", ImGuiDataType_U64, &renderer->volume->grid_frame_counter, &frame_min, &frame_max)) renderer->reset();
+        ImGui::Checkbox("Animate Volume", &animate);
+        ImGui::SameLine();
+        ImGui::DragFloat("FPS", &animation_fps, 0.01, 1, 60);
+        ImGui::Separator();
+        if (ImGui::Button("Clear TF")) {
+            renderer->transferfunc.reset();
+            renderer->reset();
+        }
+        if (ImGui::Button("Random TF")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Gradient TF")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>(std::vector<glm::vec4>({ glm::vec4(0), glm::vec4(1) }));
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("RGB TF")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>(std::vector<glm::vec4>({ glm::vec4(0), glm::vec4(1,0,0,0.25), glm::vec4(0,1,0,0.5), glm::vec4(0,0,1,0.75), glm::vec4(1) }));
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("FAU TF")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>(std::vector<glm::vec4>({ glm::vec4(0), glm::vec4(4/255.f, 49/255.f, 106/255.f, 0.33), glm::vec4(38/255.f, 97/255.f, 65/255.f, 0.66), glm::vec4(151/255.f, 27/255.f, 47/255.f, 1) }));
+            renderer->reset();
+        }
+        if (ImGui::Button("Turbo")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Turbo);
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Viridis")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Viridis);
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cividis")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Cividis);
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Magma")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Magma);
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cubehelix")) {
+            renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Cubehelix);
+            renderer->reset();
+        }
+        if (renderer->transferfunc) {
+            if (ImGui::Button("Write TF"))
+                    renderer->transferfunc->write_to_file("tf_lut.txt");
+            if (ImGui::DragFloat("Window left", &renderer->transferfunc->window_left, 0.01f, -1.f, 1.f)) renderer->reset();
+            if (ImGui::DragFloat("Window width", &renderer->transferfunc->window_width, 0.01f, 0.f, 1.f)) renderer->reset();
+        }
+        ImGui::Separator();
+        if (ImGui::SliderFloat("Vol crop min X", &renderer->vol_clip_min.x, 0.f, 1.f)) renderer->reset();
+        if (ImGui::SliderFloat("Vol crop min Y", &renderer->vol_clip_min.y, 0.f, 1.f)) renderer->reset();
+        if (ImGui::SliderFloat("Vol crop min Z", &renderer->vol_clip_min.z, 0.f, 1.f)) renderer->reset();
+        if (ImGui::SliderFloat("Vol crop max X", &renderer->vol_clip_max.x, 0.f, 1.f)) renderer->reset();
+        if (ImGui::SliderFloat("Vol crop max Y", &renderer->vol_clip_max.y, 0.f, 1.f)) renderer->reset();
+        if (ImGui::SliderFloat("Vol crop max Z", &renderer->vol_clip_max.z, 0.f, 1.f)) renderer->reset();
+        ImGui::Separator();
+        ImGui::Text("Modelmatrix:");
+        glm::mat4 row_maj = glm::transpose(renderer->volume->transform);
+        bool modified = false;
+        if (ImGui::InputFloat4("row0", &row_maj[0][0], "%.2f")) modified = true;
+        if (ImGui::InputFloat4("row1", &row_maj[1][0], "%.2f")) modified = true;
+        if (ImGui::InputFloat4("row2", &row_maj[2][0], "%.2f")) modified = true;
+        if (ImGui::InputFloat4("row3", &row_maj[3][0], "%.2f")) modified = true;
+        if (modified) {
+            renderer->volume->transform = glm::transpose(row_maj);
+            renderer->reset();
+        }
+        ImGui::Separator();
+        ImGui::Text("Rotate VOLUME");
+        if (ImGui::Button("90° X##V")) {
+            renderer->volume->transform = glm::rotate(renderer->volume->transform, .5f * float(M_PI), glm::vec3(1, 0, 0));
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("90° Y##V")) {
+            renderer->volume->transform = glm::rotate(renderer->volume->transform, .5f * float(M_PI), glm::vec3(0, 1, 0));
+            renderer->reset();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("90° Z##V")) {
+            renderer->volume->transform = glm::rotate(renderer->volume->transform, .5f * float(M_PI), glm::vec3(0, 0, 1));
+            renderer->reset();
+        }
+        ImGui::Separator();
+        static float env_rot_y_deg = 0.f;
+        if (ImGui::SliderFloat("ENVMAP rotation", &env_rot_y_deg, 0.f, 359.9f)) {
+            renderer->environment->transform = glm::mat3(glm::rotate(glm::mat4(1), glm::radians(env_rot_y_deg), glm::vec3(0, 1, 0)));
+            renderer->reset();
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Print volume properties"))
+            std::cout << "volume: " << std::endl << renderer->volume->to_string("\t") << std::endl;
+        ImGui::PopStyleVar();
+        ImGui::End();
+    }
+}
+
+// ------------------------------------------
+// command line options
+
+// parse gl cmd line args
+static void init_opengl_from_args(int argc, char** argv) {
+    // collect args
+    ContextParameters params;
+    params.title = "VolRen";
+    params.swap_interval = use_vsync ? 1 : 0;
+    params.gl_debug_context = GLFW_FALSE;
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "-w")
+            params.width = std::stoi(argv[++i]);
+        else if (arg == "-h")
+            params.height = std::stoi(argv[++i]);
+        else if (arg == "--title")
+            params.title = argv[++i];
+        else if (arg == "--major")
+            params.gl_major = std::stoi(argv[++i]);
+        else if (arg == "--minor")
+            params.gl_major = std::stoi(argv[++i]);
+        else if (arg == "--no-resize")
+            params.resizable = GLFW_FALSE;
+        else if (arg == "--hidden" || arg == "--render")
+            params.visible = GLFW_FALSE;
+        else if (arg == "--no-decoration")
+            params.decorated = GLFW_FALSE;
+        else if (arg == "--floating")
+            params.floating = GLFW_TRUE;
+        else if (arg == "--maximised")
+            params.maximised = GLFW_TRUE;
+        else if (arg == "---debug")
+            params.gl_debug_context = GLFW_TRUE;
+        else if (arg == "--swap")
+            params.swap_interval = std::stoi(argv[++i]);
+        else if (arg == "--font")
+            params.font_ttf_filename = argv[++i];
+        else if (arg == "--fontsize")
+            params.font_size_pixels = std::stoi(argv[++i]);
+    }
+    // create context
+    try  {
+        Context::init(params);
+    } catch (std::runtime_error& e) {
+        std::cerr << "Failed to create context: " << e.what() << std::endl;
+        std::cerr << "Retrying for offline rendering..." << std::endl;
+        params.visible = GLFW_FALSE;
+        Context::init(params);
+    }
+}
+
+// parse regular cmd line args
+static void parse_cmd(int argc, char** argv) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--render") {
+            interactive = false;
+        } else if (arg == "--output") {
+            out_filename = argv[++i];
+        } else if (arg == "--samples" || arg == "--spp" || arg == "--sppx") {
+            renderer->sppx = std::stoi(argv[++i]);
+        } else if (arg == "--bounces") {
+            renderer->bounces = std::stoi(argv[++i]);
+        } else if (arg == "--albedo") {
+            renderer->albedo = glm::vec3(std::stof(argv[++i]));
+        } else if (arg == "--density") {
+            renderer->density_scale = std::stof(argv[++i]);
+        } else if (arg == "--emission") {
+            renderer->emission_scale = std::stof(argv[++i]);
+        } else if (arg == "--phase") {
+            renderer->phase = std::stof(argv[++i]);
+        } else if (arg == "--env_strength") {
+            renderer->environment->strength = std::stof(argv[++i]);
+        } else if (arg == "--env_rot") {
+            renderer->environment->transform = glm::mat3(glm::rotate(glm::mat4(1), glm::radians(std::stof(argv[++i])), glm::vec3(0, 1, 0)));
+        } else if (arg == "--env_hide") {
+            renderer->show_environment = false;
+        } else if (arg == "--turbo") {
+            if (!renderer->transferfunc)
+                renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Turbo);
+        } else if (arg == "--viridis") {
+            if (!renderer->transferfunc)
+                renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc->colormap(tinycolormap::ColormapType::Viridis);
+        } else if (arg == "--fau") {
+            if (!renderer->transferfunc)
+                renderer->transferfunc = std::make_shared<TransferFunction>();
+            renderer->transferfunc = std::make_shared<TransferFunction>(std::vector<glm::vec4>({ glm::vec4(0), glm::vec4(4/255.f, 49/255.f, 106/255.f, 0.33), glm::vec4(38/255.f, 97/255.f, 65/255.f, 0.66), glm::vec4(151/255.f, 27/255.f, 47/255.f, 1) }));
+        } else if (arg == "--tf_left") {
+            if (renderer->transferfunc)
+                renderer->transferfunc->window_left = std::stof(argv[++i]);
+        } else if (arg == "--tf_width") {
+            if (renderer->transferfunc)
+                renderer->transferfunc->window_width = std::stof(argv[++i]);
+        } else if (arg == "--cam_pos") {
+            current_camera()->pos.x = std::stof(argv[++i]);
+            current_camera()->pos.y = std::stof(argv[++i]);
+            current_camera()->pos.z = std::stof(argv[++i]);
+        } else if (arg == "--cam_dir") {
+            current_camera()->dir.x = std::stof(argv[++i]);
+            current_camera()->dir.y = std::stof(argv[++i]);
+            current_camera()->dir.z = std::stof(argv[++i]);
+        } else if (arg == "--cam_fov")
+            current_camera()->fov_degree = std::stof(argv[++i]);
+        else if (arg == "--exposure") {
+            renderer->tonemap_exposure = std::stof(argv[++i]);
+        } else if (arg == "--gamma") {
+            renderer->tonemap_gamma = std::stof(argv[++i]);
+        } else if (arg == "--vol_rot_x") {
+            renderer->volume->transform = glm::mat3(glm::rotate(glm::mat4(renderer->volume->transform), glm::radians(std::stof(argv[++i])), glm::vec3(1, 0, 0)));
+        } else if (arg == "--vol_rot_y") {
+            renderer->volume->transform = glm::mat3(glm::rotate(glm::mat4(renderer->volume->transform), glm::radians(std::stof(argv[++i])), glm::vec3(0, 1, 0)));
+        } else if (arg == "--vol_rot_z") {
+            renderer->volume->transform = glm::mat3(glm::rotate(glm::mat4(renderer->volume->transform), glm::radians(std::stof(argv[++i])), glm::vec3(0, 0, 1)));
+        } else if (arg == "--vol_crop_min") {
+            renderer->vol_clip_min.x = std::stof(argv[++i]);
+            renderer->vol_clip_min.y = std::stof(argv[++i]);
+            renderer->vol_clip_min.z = std::stof(argv[++i]);
+        } else if (arg == "--vol_crop_max") {
+            renderer->vol_clip_max.x = std::stof(argv[++i]);
+            renderer->vol_clip_max.y = std::stof(argv[++i]);
+            renderer->vol_clip_max.z = std::stof(argv[++i]);
+        } else if (fs::is_regular_file(argv[i]) || fs::is_directory(argv[i])) {
+            handle_path(argv[i]);
+        }
+    }
+}
+
+// ------------------------------------------
+// main
+
+int main(int argc, char** argv) {
+    // initialize OpenGL
+    init_opengl_from_args(argc, argv);
+
+    // initialize Renderer
+    renderer = std::make_shared<RendererOpenGL>();
+    renderer->init();
+
+    // install callbacks for interactive mode
+    Context::set_resize_callback(resize_callback);
+    Context::set_keyboard_callback(keyboard_callback);
+    Context::set_mouse_button_callback(mouse_button_callback);
+    Context::set_mouse_callback(mouse_callback);
+    gui_add_callback("vol_gui", gui_callback);
+    glfwSetDropCallback(Context::instance().glfw_window, drag_drop_callback);
+    Context::swap_buffers(); // fetch updates once
+
+    // default cam pos
+    current_camera()->pos = glm::vec3(1, 0, 1);
+    current_camera()->dir = glm::normalize(-current_camera()->pos);
+
+    // parse command line arguments
+    parse_cmd(argc, argv);
+
+    // set some defaults if no volume has been loaded
+    if (renderer->volume->grids.empty()) {
+        // load debug box
+        const uint32_t size = 4;
+        const float scale = 1.f;
+        std::vector<float> values = { 1, 2.5, 5, 10 };
+        auto box = std::make_shared<voldata::DenseGrid>(1, 1, 4, values.data());
+        box->transform = glm::translate(glm::scale(glm::mat4(1), glm::vec3(scale)), 2 * scale * current_camera()->dir + glm::vec3(0, -0.5, -2));
+        renderer->volume = std::make_shared<voldata::Volume>(box);
+        renderer->commit();
+    }
+    renderer->reset();
+
+    if (interactive) {
+        // setup timers
+        auto timer_trace = TimerQueryGL("trace");
+        // run the main loop
+        float shader_timer = 0, animation_timer = 0;
+        while (Context::running()) {
+            // handle input
+            if (CameraImpl::default_input_handler(Context::frame_time())) {
+                renderer->reset();
+            }
+
+            // update
+            current_camera()->update();
+            // reload shaders?
+            shader_timer -= Context::frame_time();
+            if (shader_timer <= 0) {
+                if (reload_modified_shaders())
+                    renderer->reset();
+                shader_timer = shader_check_delay_ms;
+            }
+            // advance animation?
+            if (animate) {
+                animation_timer -= Context::frame_time();
+                if (animation_timer <= 0) {
+                    animation_timer = 1000 / animation_fps;
+                    renderer->volume->grid_frame_counter = (renderer->volume->grid_frame_counter + 1) % renderer->volume->n_grid_frames();
+                    renderer->reset();
+                }
+            }
+
+            // trace
+            if (renderer->sample < renderer->sppx) {
+                timer_trace->begin();
+                renderer->trace();
+                timer_trace->end();
+                if (renderer->sample == renderer->sppx)
+                    renderer->color->save_ldr(out_filename, true, true); // TODO: apply tonemapping?
+            } else
+                glfwWaitEventsTimeout(1.f / 10); // 10fps idle
+
+            // draw results
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            renderer->draw();
+
+            // finish frame
+            Context::swap_buffers();
+        }
+    } else {
+        // prepare rendering
+        current_camera()->update();
+        reload_modified_shaders();
+        // render
+        std::cout << "rendering..." << std::endl;
+        for (int i = 0; i < renderer->volume->n_grid_frames(); ++i) {
+            renderer->reset();
+            renderer->volume->grid_frame_counter = i;
+            while (renderer->sample < renderer->sppx) {
+                renderer->trace();
+                std::cout << renderer->sample << " / " << renderer->sppx << "\r" << std::flush;
+                Context::swap_buffers(); // sync (this is required for >= 1024spp)
+            }
+            glMemoryBarrier(GL_ALL_BARRIER_BITS);
+            // tonemap
+            static Shader tonemap_shader("tonemap", "shader/tonemap.glsl");
+            tonemap_shader->bind();
+            renderer->color->bind_image(0, GL_READ_WRITE, GL_RGBA32F);
+            const glm::ivec2 resolution = Context::resolution();
+            tonemap_shader->uniform("resolution", resolution);
+            tonemap_shader->uniform("exposure", renderer->tonemap_exposure);
+            tonemap_shader->uniform("gamma", renderer->tonemap_gamma);
+            tonemap_shader->dispatch_compute(resolution.x, resolution.y);
+            renderer->color->unbind_image(0);
+            tonemap_shader->unbind();
+            glMemoryBarrier(GL_ALL_BARRIER_BITS);
+            // write result
+            const size_t n_zero = 6;
+            std::string out_fn = fs::path(out_filename).stem().string() + "_" + std::string(n_zero - std::min(n_zero, std::to_string(i).length()), '0') + std::to_string(i) + ".png";
+            renderer->color->save_ldr(out_fn);
+            std::cout << out_fn << " written." << std::endl;
+            Context::swap_buffers();
+        }
+    }
+}
+```
+
+### src/renderer.cpp
+```
+#include "renderer.h"
+
+using namespace cppgl;
+
+// -----------------------------------------------------------
+// helper funcs
+
+void blit(const Texture2D& tex) {
+    static Shader blit_shader = Shader("blit", "shader/quad.vs", "shader/blit.fs");
+    blit_shader->bind();
+    blit_shader->uniform("tex", tex, 0);
+    Quad::draw();
+    blit_shader->unbind();
+}
+
+void tonemap(const Texture2D& tex, float exposure, float gamma) {
+    static Shader tonemap_shader = Shader("tonemap", "shader/quad.vs", "shader/tonemap.fs");
+    tonemap_shader->bind();
+    tonemap_shader->uniform("tex", tex, 0);
+    tonemap_shader->uniform("exposure", exposure);
+    tonemap_shader->uniform("gamma", gamma);
+    Quad::draw();
+    tonemap_shader->unbind();
+}
+
+// -----------------------------------------------------------
+// OpenGL renderer
+
+void RendererOpenGL::init() {
+    // load default volume
+    if (!volume)
+        volume = std::make_shared<voldata::Volume>();
+
+    // load default environment map
+    if (!environment) {
+        glm::vec3 color(1.f);
+        environment = std::make_shared<Environment>(Texture2D("background", 1, 1, GL_RGB32F, GL_RGB, GL_FLOAT, &color.x));
+    }
+    // compile shaders
+    if (!trace_shader)
+        trace_shader = Shader("trace", "shader/pathtracer_brick.glsl");
+    if (!trace_shader_tf)
+        trace_shader_tf = Shader("trace_tf", "shader/pathtracer_brick_tf.glsl");
+
+    // setup color texture
+    if (!color) {
+        const glm::ivec2 res = Context::resolution();
+        color = Texture2D("color", res.x, res.y, GL_RGBA32F, GL_RGBA, GL_FLOAT);
+    }
+}
+
+void RendererOpenGL::resize(uint32_t w, uint32_t h) {
+    if (color) color->resize(w, h);
+}
+
+void RendererOpenGL::commit() {
+    density_grids.clear();
+    emission_grids.clear();
+    majorant_emission = 0.f;
+    std::cout << "Preparing brick grids for OpenGL..." << std::endl;
+    for (const auto& frame : volume->grids) {
+        voldata::Volume::GridPtr density_grid = frame.at("density");
+        density_grids.push_back(brick_grid_to_textures(voldata::Volume::to_brick_grid(density_grid)));
+        voldata::Volume::GridPtr emission_grid;
+        for (const auto& name : { "flame", "flames", "temperature" }) {
+            if (frame.find(name) != frame.end()) {
+                emission_grid = frame.at(name);
+                break;
+            }
+        }
+        if (emission_grid) {
+            emission_grids.push_back(brick_grid_to_textures(voldata::Volume::to_brick_grid(emission_grid)));
+            majorant_emission = std::max(majorant_emission, emission_grid->minorant_majorant().second);
+        }
+    }
+}
+
+void RendererOpenGL::trace() {
+    // select shader
+    Shader& shader = transferfunc ? trace_shader_tf : trace_shader;
+
+    // bind
+    shader->bind();
+    color->bind_image(0, GL_READ_WRITE, GL_RGBA32F);
+
+    // uniforms
+    uint32_t tex_unit = 0;
+    shader->uniform("bounces", bounces);
+    shader->uniform("seed", seed);
+    shader->uniform("show_environment", show_environment ? 1 : 0);
+    shader->uniform("optimization", 0);
+    // camera
+    shader->uniform("cam_pos", current_camera()->pos);
+    shader->uniform("cam_fov", current_camera()->fov_degree);
+    shader->uniform("cam_transform", glm::inverse(glm::mat3(current_camera()->view)));
+    // volume
+    const auto [bb_min, bb_max] = volume->AABB();
+    const auto [min, maj] = volume->minorant_majorant();
+    shader->uniform("vol_bb_min", bb_min + vol_clip_min * (bb_max - bb_min));
+    shader->uniform("vol_bb_max", bb_min + vol_clip_max * (bb_max - bb_min));
+    shader->uniform("vol_minorant", min * density_scale);
+    shader->uniform("vol_majorant", maj * density_scale);
+    shader->uniform("vol_inv_majorant", 1.f / (maj * density_scale));
+    shader->uniform("vol_albedo", albedo);
+    shader->uniform("vol_phase_g", phase);
+    shader->uniform("vol_density_scale", density_scale);
+    shader->uniform("vol_emission_scale", emission_scale);
+    shader->uniform("vol_emission_norm", majorant_emission > 0.f ? 1.f / fmaxf(majorant_emission, 1e-4f) : 1.f);
+    // density brick grid data
+    const BrickGridGL density = density_grids[volume->grid_frame_counter];
+    shader->uniform("vol_density_transform", volume->transform * density.transform);
+    shader->uniform("vol_density_inv_transform", glm::inverse(volume->transform * density.transform));
+    shader->uniform("vol_density_indirection", density.indirection, tex_unit++);
+    shader->uniform("vol_density_range", density.range, tex_unit++);
+    shader->uniform("vol_density_atlas", density.atlas, tex_unit++);
+    // emission brick grid data
+    if (volume->grid_frame_counter < emission_grids.size()) {
+        const BrickGridGL emission = emission_grids[volume->grid_frame_counter];
+        shader->uniform("vol_emission_transform", volume->transform * emission.transform);
+        shader->uniform("vol_emission_inv_transform", glm::inverse(volume->transform * emission.transform));
+        shader->uniform("vol_emission_indirection", emission.indirection, tex_unit++);
+        shader->uniform("vol_emission_range", emission.range, tex_unit++);
+        shader->uniform("vol_emission_atlas", emission.atlas, tex_unit++);
+    }
+    // transfer function
+    if (transferfunc) transferfunc->set_uniforms(shader, 4);
+    // environment
+    shader->uniform("env_transform", environment->transform);
+    shader->uniform("env_inv_transform", glm::inverse(environment->transform));
+    shader->uniform("env_strength", environment->strength);
+    shader->uniform("env_imp_inv_dim", glm::vec2(1.f / environment->dimension()));
+    shader->uniform("env_imp_base_mip", int(floor(log2(environment->dimension()))));
+    shader->uniform("env_envmap", environment->envmap, tex_unit++);
+    shader->uniform("env_impmap", environment->impmap, tex_unit++);
+
+    // trace
+    const glm::ivec2 resolution = Context::resolution();
+    shader->uniform("current_sample", ++sample);
+    shader->uniform("resolution", resolution);
+    shader->dispatch_compute(resolution.x, resolution.y);
+
+    // unbind
+    color->unbind_image(0);
+    shader->unbind();
+}
+
+void RendererOpenGL::draw() {
+    if (!color) return;
+    if (tonemapping)
+        tonemap(color, tonemap_exposure, tonemap_gamma);
+    else
+        blit(color);
+}
+
+void RendererOpenGL::reset() {
+    sample = 0;
+}
+
+BrickGridGL RendererOpenGL::brick_grid_to_textures(const std::shared_ptr<voldata::BrickGrid>& bricks) {
+    // create indirection texture
+    Texture3D indirection = Texture3D("brick indirection",
+            bricks->indirection.stride.x,
+            bricks->indirection.stride.y,
+            bricks->indirection.stride.z,
+            GL_RGB10_A2UI,
+            GL_RGBA_INTEGER,
+            GL_UNSIGNED_INT_10_10_10_2,
+            bricks->indirection.data.data());
+    indirection->bind(0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    indirection->unbind();
+    // create range texture
+    Texture3D range = Texture3D("brick range",
+            bricks->range.stride.x,
+            bricks->range.stride.y,
+            bricks->range.stride.z,
+            GL_RG16F,
+            GL_RG,
+            GL_HALF_FLOAT,
+            bricks->range.data.data());
+    range->bind(0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    // create min/max mipmaps
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_BASE_LEVEL, 0);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAX_LEVEL, bricks->range_mipmaps.size());
+    for (uint32_t i = 0; i < bricks->range_mipmaps.size(); ++i) {
+        glTexImage3D(GL_TEXTURE_3D,
+                i + 1,
+                GL_RG16F,
+                bricks->range_mipmaps[i].stride.x,
+                bricks->range_mipmaps[i].stride.y,
+                bricks->range_mipmaps[i].stride.z,
+                0,
+                GL_RG,
+                GL_HALF_FLOAT,
+                bricks->range_mipmaps[i].data.data());
+    }
+    range->unbind();
+    // create atlas texture
+    Texture3D atlas = Texture3D("brick atlas",
+            bricks->atlas.stride.x,
+            bricks->atlas.stride.y,
+            bricks->atlas.stride.z,
+            GL_COMPRESSED_RED,
+            GL_RED,
+            GL_UNSIGNED_BYTE,
+            bricks->atlas.data.data());
+    atlas->bind(0);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    atlas->unbind();
+    // return BrickGridGL
+    return BrickGridGL{ indirection, range, atlas, bricks->transform };
+}
+
+void RendererOpenGL::scale_and_move_to_unit_cube() {
+    // compute max AABB over whole volume (animation)
+    glm::vec3 bb_min = glm::vec3(FLT_MAX), bb_max = glm::vec3(FLT_MIN);
+    for (const auto frame : volume->grids) {
+        const auto grid = frame.at("density");
+        bb_min = glm::min(bb_min, glm::vec3(grid->transform * glm::vec4(0, 0, 0, 1)));
+        bb_max = glm::max(bb_max, glm::vec3(grid->transform * glm::vec4(glm::vec3(grid->index_extent()), 1)));
+    }
+    // scale to unit cube and move to origin
+    const glm::vec3 extent = bb_max - bb_min;
+    const float size = fmaxf(extent.x, fmaxf(extent.y, extent.z));
+    if (size != 1.f) {
+        volume->transform = glm::translate(glm::scale(glm::mat4(1), glm::vec3(1.f / size)), -bb_min - 0.5f * extent);
+        density_scale *= size;
+    }
+}
+```
+
+### src/renderer.h
+```
+#pragma once
+
+#include <cppgl.h>
+#include <voldata.h>
+
+#include "environment.h"
+#include "transferfunc.h"
+
+struct BrickGridGL {
+    cppgl::Texture3D indirection;
+    cppgl::Texture3D range;
+    cppgl::Texture3D atlas;
+    glm::mat4 transform;
+};
+
+struct RendererOpenGL {
+    // Renderer interface
+    void init();
+    void resize(uint32_t w, uint32_t h);
+    void commit();
+    void trace();
+    void draw();
+    void reset();
+
+    // helper to convert brick grid to OpenGL 3D textures
+    BrickGridGL brick_grid_to_textures(const std::shared_ptr<voldata::BrickGrid>& grid);
+    // scale and move volume to fit into [-0.5, 0.5] unit cube
+    void scale_and_move_to_unit_cube();
+
+    // General settings
+    int sample = 0;
+    int sppx = 1024;
+    int seed = 42;
+    int bounces = 100;
+    float tonemap_exposure = 5.f;
+    float tonemap_gamma = 2.2f;
+    bool tonemapping = true;
+    bool show_environment = true;
+
+    // Volume settings
+    glm::vec3 albedo = glm::vec3(0.9);  // volume albedo
+    float phase = 0.f;                  // volume phase (henyey-greenstein g parameter)
+    float density_scale = 1.f;          // volume density scaling factor
+    float emission_scale = 100.f;       // volume emission scaling factor
+
+    // OpenGL data
+    cppgl::Shader trace_shader, trace_shader_tf, tonemap_shader;
+    cppgl::Texture2D color;
+    std::vector<BrickGridGL> density_grids;
+    std::vector<BrickGridGL> emission_grids;
+    float majorant_emission = 0.f;
+
+    // Volume data
+    std::shared_ptr<voldata::Volume> volume;
+
+    // Volume clip planes
+    glm::vec3 vol_clip_min = glm::vec3(0.f);
+    glm::vec3 vol_clip_max = glm::vec3(1.f);
+
+    // Scene data
+    std::shared_ptr<Environment> environment;
+    std::shared_ptr<TransferFunction> transferfunc;
+};
+```
+
+### src/transferfunc.cpp
+```
+#include "transferfunc.h"
+#include <fstream>
+#include <sstream>
+#include <iostream>
+#include <filesystem>
+
+TransferFunction::TransferFunction() : window_left(0), window_width(1) {
+    randomize();
+}
+
+TransferFunction::TransferFunction(const std::filesystem::path& path) : TransferFunction() {
+    load_from_file(path);
+}
+
+TransferFunction::TransferFunction(tinycolormap::ColormapType type) : TransferFunction() {
+    colormap(type);
+}
+
+TransferFunction::TransferFunction(const std::vector<glm::vec4>& lut) : TransferFunction() {
+    this->lut = lut;
+    upload_gpu();
+}
+
+TransferFunction::~TransferFunction() {}
+
+void TransferFunction::set_uniforms(const cppgl::Shader& shader, uint32_t buffer_binding) const {
+    lut_ssbo->bind_base(buffer_binding);
+    shader->uniform("tf_size", uint32_t(lut_ssbo->size_bytes / sizeof(glm::vec4)));
+    shader->uniform("tf_window_left", window_left);
+    shader->uniform("tf_window_width", window_width);
+}
+
+std::vector<glm::vec4> TransferFunction::compute_lut_cdf(const std::vector<glm::vec4>& lut) {
+    // copy
+    auto lut_cdf = lut;
+    // build density CDF to ensure alpha monotonically nondecreasing
+    for (uint32_t i = 1; i < lut_cdf.size(); ++i)
+        lut_cdf[i].a += lut_cdf[i-1].a;
+    const float integral = lut_cdf[lut_cdf.size()-1].a;
+    for (uint32_t i = 0; i < lut_cdf.size(); ++i)
+        lut_cdf[i].a = integral <= 0.f ? (i + 1) / float(lut_cdf.size()) : lut_cdf[i].a / integral;
+    return lut_cdf;
+}
+
+void TransferFunction::upload_gpu() {
+    // check if lut is monotonically nondecreasing (hard requirement of DDA optimization)
+    bool needs_cdf = false;
+    for (uint i = 1; i < lut.size(); ++i) {
+        if (lut[i-1].a > lut[i].a) {
+            needs_cdf = true;
+            break;
+        }
+    }
+    // setup and fill lut SSBO
+    lut_ssbo = cppgl::SSBO("transferfunc_ssbo");
+    const auto lut_gpu = needs_cdf ? compute_lut_cdf(lut) : lut;
+    lut_ssbo->upload_data(lut_gpu.data(), lut_gpu.size() * sizeof(glm::vec4));
+}
+
+static inline float randf() { return rand() / (RAND_MAX + 1.f); }
+
+void TransferFunction::randomize(size_t n_bins) {
+    lut.clear();
+    for (int i = 0; i < n_bins; ++i)
+        lut.push_back(i == 0 ? glm::vec4(0) : glm::vec4(randf(), randf(), randf(), randf()));
+    upload_gpu();
+}
+
+void TransferFunction::colormap(tinycolormap::ColormapType type, size_t n_bins) {
+    lut.clear();
+    for (int i = 0; i < n_bins; ++i) {
+        const float f = float(i) / n_bins;
+        const tinycolormap::Color color = tinycolormap::GetColor(f, type);
+        lut.push_back(glm::vec4(color.r(), color.g(), color.b(), f));
+    }
+    upload_gpu();
+}
+
+void TransferFunction::load_from_file(const std::filesystem::path& path) {
+    // load lut from file (format: %f, %f, %f, %f)
+    std::ifstream lut_file(path);
+    if (!lut_file.is_open())
+        throw std::runtime_error("Unable to read file: " + path.string());
+    lut.clear();
+    std::cout << "Loading LUT: " << path << std::endl;
+    char tmp[256];
+    while (lut_file.getline(tmp, 256)) {
+        float r, g, b, a;
+        sscanf(tmp, "%f, %f, %f, %f", &r, &g, &b, &a);
+        lut.emplace_back(r, g, b, a);
+    }
+    upload_gpu();
+}
+
+void TransferFunction::write_to_file(const std::string& filename) {
+    std::filesystem::path filepath = filename;
+    filepath.replace_extension(".txt"); // ensure text-based file
+    std::ofstream file(filepath);
+    if (file.is_open()) {
+        char tmp[256];
+        for (const auto& rgba : lut) {
+            snprintf(tmp, 256, "%f, %f, %f, %f", rgba.x, rgba.y, rgba.z, rgba.a);
+            file << tmp << std::endl;
+        }
+    }
+}
+```
+
+### src/transferfunc.h
+```
+#pragma once
+
+#include <vector>
+#include <memory>
+#include <glm/glm.hpp>
+#include <tinycolormap.hpp>
+#include <cppgl.h>
+
+class TransferFunction {
+public:
+    TransferFunction();
+    TransferFunction(const std::filesystem::path& path);
+    TransferFunction(tinycolormap::ColormapType type);
+    TransferFunction(const std::vector<glm::vec4>& lut);
+    virtual ~TransferFunction();
+
+    // bind uniforms to given shader
+    void set_uniforms(const cppgl::Shader& shader, uint32_t buffer_binding) const;
+
+    // compute density-CDF lut from given lut
+    static std::vector<glm::vec4> compute_lut_cdf(const std::vector<glm::vec4>& lut);
+
+    // push cdf lut data to GPU texture
+    void upload_gpu();
+
+    // randomize contents
+    void randomize(size_t n_bins = 8);
+
+    // set to colormap: Parula, Heat, Jet, Turbo, Hot, Gray, Magma, Inferno, Plasma, Viridis, Cividis, Github, Cubehelix, HSV
+    void colormap(tinycolormap::ColormapType type, size_t n_bins = 256);
+
+    // load LUT from file
+    void load_from_file(const std::filesystem::path& path);
+
+    // write current LUT to (text-)file
+    void write_to_file(const std::string& filename);
+
+    // data
+    float window_left, window_width;
+    std::vector<glm::vec4> lut;
+    cppgl::SSBO lut_ssbo;
+};
+```

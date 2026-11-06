@@ -1,0 +1,92 @@
+# Ray Marching with Octant Masking
+
+Also called: Ray march, Ray struct
+
+## Overview
+Ray Marching with Octant Masking is a method for traversing a uniform voxel grid by advancing a ray origin in discrete steps determined by a precomputed octant mask. It differs from analytical grid traversal methods (like DDA) by using fixed-step increments rather than calculating exact boundary crossing distances, relying on the octant mask to determine traversal direction and visibility logic. This approach is often used in conjunction with neighbor-sensitive masking to optimize rendering of dense voxel textures by hiding internal faces [S1, S2, unofficial].
+
+## How it works
+**Inputs:** Ray origin $\mathbf{o}$, ray direction $\mathbf{d}$, voxel grid dimensions, and a step size (amount).
+**Outputs:** Updated ray origin, traversal state, and visibility mask.
+
+**Data Structures:**
+The core data structure is the `Ray` struct, which contains:
+- `origin`: A 3D vector representing the current ray position.
+- `direction`: A 3D vector representing the ray direction.
+- `negdir`: A 3D vector (noted as unused in the reference implementation).
+- `init_origin`: A 3D vector storing the starting position.
+
+**Algorithm Steps:**
+1.  **Initialization:**
+    - Store the initial origin in `init_origin`.
+    - Clamp any component of `direction` with magnitude less than $\epsilon$ to $\epsilon$ with the same sign to prevent division by zero or degenerate cases [S1, unofficial].
+2.  **Octant Mask Calculation:**
+    - Compute an 8-bit integer mask (`octant_mask`) based on the signs of the direction components [S1, unofficial]:
+      - Bit 2 (value 4) is set if `direction.x >= 0`.
+      - Bit 1 (value 2) is set if `direction.y >= 0`.
+      - Bit 0 (value 1) is set if `direction.z >= 0`.
+    - This mask identifies the octant in which the ray is traveling.
+3.  **Marching:**
+    - Advance the ray origin by adding the product of the direction and a specified step amount:
+      $$ \mathbf{o}_{new} = \mathbf{o}_{old} + \mathbf{d} \times \text{amount} $$
+    - The `march(amount)` function updates the `origin` and returns the ray object [S1, unofficial].
+4.  **Distance Tracking:**
+    - Calculate the squared Euclidean distance from `init_origin` to the current `origin` using `square_distance()` [S1, unofficial]. This is used to determine if the ray has exceeded a maximum traversal distance or volume boundary.
+
+**Pseudocode:**
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+class Ray:
+    def __init__(self, origin, direction):
+        self.origin = origin.copy()
+        self.direction = direction.copy()
+        # negdir is unused in the reference implementation
+        self.init_origin = origin.copy()
+        self._clamp_direction()
+
+    def _clamp_direction(self):
+        epsilon = 1e-6
+        for i in range(3):
+            if abs(self.direction[i]) < epsilon:
+                self.direction[i] = epsilon if self.direction[i] >= 0 else -epsilon
+
+    def octant_mask(self):
+        mask = 0
+        if self.direction.x >= 0:
+            mask |= 4  # Bit 2
+        if self.direction.y >= 0:
+            mask |= 2  # Bit 1
+        if self.direction.z >= 0:
+            mask |= 1  # Bit 0
+        return mask
+
+    def march(self, amount):
+        self.origin = self.origin + (self.direction * amount)
+        return self
+
+    def square_distance(self):
+        return sum((self.origin[i] - self.init_origin[i]) ** 2 for i in range(3))
+```
+
+**Edge Cases:**
+- **Zero Direction Components:** If a direction component is zero, it is clamped to $\pm \epsilon$ to avoid numerical instability [S1, unofficial].
+- **Boundary Checks:** The method relies on external logic (e.g., `square_distance`) to determine when to stop marching, as the basic `march` function does not inherently check grid bounds.
+
+## Subtopics
+
+### [Ray Marching Voxel Textures with Neighbor-Sensitive Masking](4995-ray-marching-voxel-textures-with-neighbor-sensitive-masking.md)
+This method renders dense voxel data by combining geometry shader instancing for component-level bounding boxes with ray marching through dense volume textures for the interior. It utilizes a neighbor-sensitive bitmask to determine voxel visibility based on adjacent components, effectively hiding internal faces without storing dense geometry for every voxel. Unlike pure instancing or static vertex buffers, this hybrid approach allows for dynamic updates without recomputing complex meshes while avoiding the high vertex count of instanced cubes. It builds on [Ray Marching with Octant Masking](2488-ray-marching-with-octant-masking.md) by replacing octant-based traversal with uniform grid ray marching through a 2D array texture.
+
+## Operating characteristics
+- **Time Complexity:** $O(N)$ where $N$ is the number of steps taken. Each step is $O(1)$.
+- **Memory Complexity:** $O(1)$ auxiliary space for the ray state.
+- **Strengths:** Simple implementation; low overhead per step; easy to integrate with GPU shaders.
+- **Limitations:** Fixed step size may lead to aliasing or missed features if the step is too large; less efficient than analytical traversal for sparse data as it samples every voxel along the path regardless of content.
+- **When to use:** Dense voxel rendering where simplicity and uniform sampling are prioritized over precise boundary detection.
+
+## Background
+The method is documented in the open-source project `zazen` by Gabriel Muller, which implements a voxel ray marcher using this specific octant masking technique [S1, unofficial]. It is a practical implementation detail found in real-time voxel rendering engines.
+
+## Sources
+[S1] gabrielmuller/zazen, https://github.com/gabrielmuller/zazen, fetched 2026-10-26 (unofficial)

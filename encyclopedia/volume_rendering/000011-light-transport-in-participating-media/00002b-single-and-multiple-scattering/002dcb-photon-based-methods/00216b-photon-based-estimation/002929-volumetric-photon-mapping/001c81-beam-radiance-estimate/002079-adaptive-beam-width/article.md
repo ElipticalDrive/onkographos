@@ -1,118 +1,130 @@
 # Adaptive Beam Width
 
-Also called: Adaptive Beam Blur, Photon Beam Rendering with Adaptive Width, Photon Beams, Varying Kernel Beam Estimate, beam tracing for participating media, photon point beams
+Also called: Photon Beams, Continuous Photon Beams, Beam Radiance Estimation, 2D Beam Radiance Estimate, Varying Kernel Beam Estimate, Jarosz et al. estimate, Photon Beam Rendering with Adaptive Width, Adaptive Beam Width via Photon Differentials
 
 ## Overview
-Adaptive Beam Width is a radiance estimation technique for participating media that uses photon differentials to dynamically adjust the smoothing kernel width of photon beams [S1]. It solves the over-blurring and banding artifacts inherent in fixed-width beam estimates, particularly around sharp lighting features like volume caustics [S1]. Unlike fixed-width methods, it assigns small beam widths in focused regions and larger widths in sparse regions, enabling crisp reconstruction with significantly fewer photons [S1].
+Adaptive Beam Width is a radiance estimation technique that models photon energy as continuous beams and integrates their contribution along a camera ray, using photon differentials to determine the beam's cross-sectional size and shape [S1]. It sets itself apart from fixed-width beam methods by adapting the blur kernel to the expected local photon density, thereby avoiding the over-blurring and banding artifacts common in focused regions like volume caustics [S1]. Unlike the 3D beam estimate which averages transmittance through the kernel depth, this method evaluates transmittance at the intersection point and divides by the 2D area, making it more practical for heterogeneous media [S1].
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** Photon beams generated during the photon tracing stage, including photon differentials (Jacobian matrices of the photon path) at each beam's start point [S1].
-*   **Output:** Radiance estimate at a query point or along a camera ray [S1].
+- **Input:** Camera ray origin $\mathbf{x}_c$ and direction $\vec{\omega}_c$; a set of photon beams $B$, where each beam $b$ has a central position/direction, power $\Phi_b$, phase function $f(\theta)$, and differential rays defining its geometry.
+- **Output:** Estimated radiance $L_b(\mathbf{x}_c \leftarrow \vec{\omega}_c, s)$ along the camera ray segment $s$.
 
 **Data Structures:**
-*   **Photon Beam:** Extends the standard photon point representation [S1]. For heterogeneous media, it stores a 1D transmittance function along the beam's length, analogous to deep shadow maps, which can be significantly compressed for efficient storage [S1]. Exact field layouts, sizes, and bit packing are not given in the sources [S1].
-*   **Photon Differentials:** Stored at the start of each beam, representing the local mapping from the light source parameter space to spatial position, enabling local cross-section and width calculation [S1].
+A photon beam is defined by:
+1.  **Central Ray:** Origin $\mathbf{x}$, direction $\vec{\omega}$.
+2.  **Differential Rays:** Two auxiliary rays with origins $\mathbf{x}_u, \mathbf{x}_v$ and directions $\vec{\omega}_u, \vec{\omega}_v$. These form a conical frustum with the central ray [S1].
+3.  **Heterogeneous Storage (Optional):** For heterogeneous media, store a 1D transmittance function along each beam, analogous to deep shadow maps [S1].
 
 **Parameters:**
-*   **Beam Width:** Determined adaptively by the photon differentials rather than a fixed scalar [S1]. Typical values are not given in the sources [S1].
+-   **Beam Width Factor ($\alpha$):** A global multiplier for the computed beam widths to adjust the tradeoff between banding and blur. Typical value: 3.0 [S1].
+-   **Kernel:** Biweight kernel $K(x) = \frac{15}{16}(1 - x^2)^2$ for $x \in [0, 1]$ [S1].
 
-**Steps:**
-1.  **Photon Tracing:** Trace photons through the scene and store the resulting beams [S1]. Compute and store the photon differentials at each beam's start point [S1].
-2.  **Heterogeneous Transmittance (Optional):** If the medium is heterogeneous, compute and store a 1D transmittance function along each beam during the tracing stage [S1]. This enables accurate visibility calculations during rendering without ray marching [S1].
-3.  **Radiance Estimation (Beam x Beam Query):** For a query point or along a camera ray, identify all photon beams that contribute to the estimate [S1].
-4.  **Adaptive Width Calculation:** For each contributing beam, calculate its effective width using the photon differentials [S1]. The differentials define the local density and spread of the photon flux [S1].
-5.  **Cross-Section Calculation:** For secondary scattering events, compute the cross-section at the start of the child beam using the photon differentials' footprint [S1]. This induces a conical frustum shape and avoids division by zero [S1].
-6.  **Kernel Evaluation:** Use the adaptive width to define the smoothing kernel [S1]. The kernel width is small in focused regions (high density) and large in sparse regions [S1].
-7.  **Aggregation:** Sum the contributions of all contributing beams, weighted by their respective kernels and the stored transmittance if applicable [S1].
+**Algorithm Steps:**
 
-**Formulas:**
-The radiance estimate at a query point $x$ is computed as:
-$$L(x) = \sum_{i} \frac{P_i \cdot T_i(x) \cdot K(\|x - c_i\|, w_i)}{A_i}$$
-where $L(x)$ is the estimated radiance, $P_i$ is the power of beam $i$, $T_i(x)$ is the transmittance along beam $i$ to point $x$, $K$ is the smoothing kernel, $\|x - c_i\|$ is the perpendicular distance from $x$ to the beam axis, $w_i$ is the adaptive beam width, and $A_i$ is the cross-section at the beam start [S1].
+1.  **Compute Beam Cross-Section:**
+    For a query point at distance $t$ along the central beam ray $\mathbf{r}(t) = \mathbf{x} + t\vec{\omega}$, compute the positions on the differential rays:
+    $$ \mathbf{r}_u(t) = \mathbf{x}_u + t\vec{\omega}_u $$
+    $$ \mathbf{r}_v(t) = \mathbf{x}_v + t\vec{\omega}_v $$
+    The semi-major and semi-minor axes of the elliptical cross-section are the Euclidean distances:
+    $$ a(t) = \|\mathbf{r}(t) - \mathbf{r}_u(t)\| $$
+    $$ b(t) = \|\mathbf{r}(t) - \mathbf{r}_v(t)\| $$
+    The area of the cross-section is $\mu_R(t) = \pi a(t) b(t)$ [S1].
+
+2.  **Query Photons:**
+    Identify all photon beams $b$ that intersect the camera ray's search region. This is typically accelerated using a BVH over all beams [S1].
+
+3.  **Compute Transmittance and Integration:**
+    For each photon beam $b$, determine the overlap interval $[t_b^-, t_b^+]$ along the beam and the corresponding interval $[t_c^-, t_c^+]$ along the camera ray.
+    
+    If the media is homogeneous, the integral of the two transmittance terms can be solved analytically [S1]:
+    $$ \int_{t_c^-}^{t_c^+} e^{-\sigma_t t_c} e^{-\sigma_t t_b^c} dt_c = \frac{e^{-\sigma_t (t_c^- - t_c^+)} (|\cos \theta_b| - 1) - 1}{e^{\sigma_t (t_c^- + t_b^-)} \sigma_t (|\cos \theta_b| - 1)} $$
+    where $t_b^c = t_b^- - (t_c - t_c^-)|\cos \theta_b|$ is the projected distance along the photon beam, and $\cos \theta_b = \vec{\omega}_c \cdot \vec{\omega}_b$ [S1].
+    
+    If the media is heterogeneous, evaluate the transmittance $e^{-\sigma_t t_{p,c}}$ at the intersection point using ray marching, and divide by the 2D measure $\pi r^2$ (where $r$ is the effective radius derived from the cross-section) [S1].
+
+4.  **Sum Contributions:**
+    Sum the contributions of all intersecting beams. For the 2D estimate (Equation 14 in [S1]):
+    $$ L_b(\mathbf{x}_c \leftarrow \vec{\omega}_c, s) \approx \frac{1}{\pi r^2} \sum_{p \in R} f(\theta_p) \Phi_p e^{-\sigma_{t_{p,c}}} $$
+    where $r$ is the beam radius at the intersection, scaled by $\alpha$ [S1].
+
+5.  **Handle Singularities:**
+    For secondary scattering or area lights, ensure the beam start cross-section is non-zero to avoid division by zero. Use the differential footprint to induce a conical frustum shape [S1].
 
 **Pseudocode:**
+
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-import math
-
-class Vec3:
-    def __init__(self, x, y, z):
-        self.x, self.y, self.z = x, y, z
-    def __add__(self, other): return Vec3(self.x + other.x, self.y + other.y, self.z + other.z)
-    def __mul__(self, scalar): return Vec3(self.x * scalar, self.y * scalar, self.z * scalar)
-    def dot(self, other): return self.x*other.x + self.y*other.y + self.z*other.z
-    def norm(self): return math.sqrt(self.dot(self))
-
-EPSILON = 1e-6
-
-def estimate_radiance_adaptive(query_point, photon_beams, heterogeneous=False):
-    """Estimate radiance at query_point using adaptive beam widths."""
-    radiance = Vec3(0.0, 0.0, 0.0)
-    for beam in photon_beams:
-        # Sources do not give the exact beam intersection test. [G] Typically checks if query point lies within the beam's conical frustum bounds.
-        if not _beam_contains_point(beam, query_point):
-            continue
-        width = _calculate_adaptive_width(beam.differentials)
-        cross_section = _calculate_cross_section(beam.differentials)
-        if cross_section < EPSILON:
-            cross_section = EPSILON
-        distance_to_axis = _distance_to_axis(beam, query_point)
-        kernel_weight = _kernel_function(distance_to_axis, width)
-        beam_energy = beam.power
-        transmittance = _get_transmittance(beam, query_point) if heterogeneous else 1.0
-        contribution = (beam_energy * transmittance * kernel_weight) / cross_section
-        radiance = radiance + contribution
+def estimate_radiance(camera_ray, photon_beams, alpha, sigma_t):
+    """
+    camera_ray: (origin, direction, length)
+    photon_beams: list of Beam objects
+    alpha: global width multiplier
+    sigma_t: extinction coefficient (homogeneous) or function (heterogeneous)
+    """
+    radiance = 0.0
+    
+    # 1. Query intersecting beams using BVH
+    intersecting_beams = query_bvh(camera_ray, photon_beams)
+    
+    for beam in intersecting_beams:
+        # 2. Compute cross-section at intersection
+        # Assume intersection point t_c along camera ray is known from BVH query
+        t_c = camera_ray.origin + camera_ray.direction * intersection_distance
+        
+        # Compute beam cross-section at the point on the beam closest to t_c
+        # Project t_c onto beam direction to find t_b
+        cos_theta = dot(camera_ray.direction, beam.direction)
+        t_b = dot(t_c - beam.origin, beam.direction) / dot(beam.direction, beam.direction)
+        
+        # Get differential ray positions at t_b
+        r_center = beam.origin + beam.direction * t_b
+        r_u = beam.origin_u + beam.direction_u * t_b
+        r_v = beam.origin_v + beam.direction_v * t_b
+        
+        # Semi-axes
+        a = norm(r_center - r_u)
+        b = norm(r_center - r_v)
+        
+        # Effective radius for 2D measure, scaled by alpha
+        r_eff = alpha * sqrt(a * b)
+        area = pi * r_eff * r_eff
+        
+        # 3. Compute Transmittance
+        # For homogeneous media, use analytical integral if needed, 
+        # or simple evaluation at intersection for 2D estimate
+        if is_homogeneous:
+            # Analytical integral of transmittance along overlap
+            # Simplified for 2D estimate: evaluate at intersection
+            transmittance = exp(-sigma_t * distance(beam.origin, t_c))
+        else:
+            # Ray march from beam origin to intersection for heterogeneous
+            transmittance = ray_march_transmittance(beam.origin, t_c, sigma_t)
+            
+        # 4. Add contribution
+        phase = phase_function(beam.direction, camera_ray.direction)
+        radiance += (phase * beam.power * transmittance) / area
+        
     return radiance
-
-def _beam_contains_point(beam, point):
-    # Sources do not give the exact beam intersection test. [G] Typically checks if query point lies within the beam's conical frustum bounds.
-    return point.norm() <= beam.max_length
-
-def _calculate_adaptive_width(differentials):
-    # Sources do not give the exact formula for width from differentials. [G] Typically derived from the Jacobian determinant or norm.
-    return math.sqrt(abs(differentials.determinant()))
-
-def _calculate_cross_section(differentials):
-    # Sources do not give the exact formula for cross-section from differentials. [G] Corresponds to the area element defined by the differential mapping at the beam start.
-    return abs(differentials.determinant())
-
-def _distance_to_axis(beam, point):
-    # Sources do not give the exact distance projection formula. [G] Projects query point onto beam axis and computes perpendicular distance.
-    return (point - beam.origin).norm()
-
-def _kernel_function(distance, width):
-    # Standard isotropic smoothing kernel (uniform disk)
-    if distance <= width:
-        return 1.0 / (math.pi * width * width)
-    return 0.0
-
-def _get_transmittance(beam, point):
-    # Sources do not give the exact transmittance lookup. [G] Interpolates the stored 1D transmittance function along the beam's depth.
-    depth = (point - beam.origin).dot(beam.direction)
-    return beam.transmittance_function.interpolate(depth)
 ```
 
-**Edge Cases and Pitfalls:**
-*   **Division by Zero:** Fixed-width beams or beams with zero cross-section at the start can lead to division by zero [S1]. Using photon differentials to induce a conical frustum shape with a non-zero starting cross-section avoids this [S1].
-*   **Banding Artifacts:** Fixed-width beams result in over-blurring and banding artifacts, especially in focused regions of volume caustics [S1]. Adaptive widths mitigate this [S1].
-*   **Multiple Scattering:** While adaptive widths work well for single scattering and caustics, they were not as successful for multiple scattering in the reported implementation [S1].
-*   **Heterogeneous Media:** Handling heterogeneous transmittance along photon beams is more costly than homogeneous media [S1]. It requires storing and querying 1D transmittance functions [S1].
+## Subtopics
+
+### Light Source Emission with Differentials
+This variant defines the initial geometry of photon beams based on the light source type to ensure tight packing and correct angular coverage [S1].
+-   **Singularity Lights (Point/Spot):** Differential ray origins are set to the light source location. Directions are set to cover the angular extent with minimal overlap, where the solid angle per beam is $1/(pdf(\omega) \cdot N)$ [S1].
+-   **Area Lights:** The surface is discretized into a jittered grid. Central ray origins are at grid centers, differential origins at grid edges. Directions follow the angular emission PDF [S1].
 
 ## Operating characteristics
-*   **Time Complexity:** The current implementation uses a BVH over all beams to accelerate Beam x Beam queries, though room for improvement exists via tailored data structures [S1].
-*   **Memory Complexity:** Storing photon beams with 1D transmittance functions for heterogeneous media increases memory usage compared to simple photon points, though these functions can be significantly compressed [S1].
-*   **Measured Performance:** In a volume caustic scene, photon beams converged to a crisp solution using 32k beams in 43 seconds, whereas 512k photons took almost twice the time and resulted in an over-blurred and noisy caustic [S1]. In the bumpy sphere scene, 90k photon beams reconstructed sharp features in about 100 seconds, whereas the same number of photon points suffered from over-blurring [S1].
-*   **Strengths:** Reduces bias and variance compared to photon points [S1]. Eliminates shadow rays by reusing visibility information from the photon tracing stage [S1]. Avoids VPL singularities by using finite cross-sections instead of clamping inverse-squared distance terms [S1]. Renders extremely sharp details with tens of thousands of beams, whereas previous methods required millions or billions of photons [S1].
-*   **Limitations:** Adaptive widths were not as successful for multiple scattering [S1]. Current BVH acceleration structure may not be optimal [S1]. Handling heterogeneous media adds computational and memory overhead [S1].
-*   **When to Use:** Use when rendering scenes with sharp lighting features like volume caustics, especially with area lights or multiple bounces, and when computational resources are limited compared to the requirements of photon point methods [S1].
-*   **When Not to Use:** Avoid for multiple scattering if the adaptive width implementation does not perform well, or if heterogeneous media handling is too costly for the application [S1].
+-   **Time Complexity:** Dominated by the BVH traversal for beam intersection. Current implementations use a BVH over all beams [S1].
+-   **Memory Complexity:** Linear in the number of photon beams. Heterogeneous media require storing 1D transmittance functions, which can be compressed [S1].
+-   **Performance:** Converges significantly faster than photon points for sharp features. In a volume caustic scene, 32k beams converged in 43 seconds, while 512k photons took nearly twice as long and produced a noisier, over-blurred result [S1].
+-   **Strengths:** Eliminates shadow rays by reusing visibility from photon tracing; handles area lights and multiple bounces naturally; avoids singularities via finite cross-sections [S1].
+-   **Limitations:** Adaptive width based on differentials works well for single scattering and caustics but is less successful for multiple scattering [S1]. Fixed-width beams cause banding [S1].
 
 ## Background
-*   **Origin:** Introduced by [S1] as part of a comprehensive theory of volumetric radiance estimation using photon points and beams.
-*   **History:** The method generalizes photon points to beams, allowing for area light sources and multiple specular and diffuse bounces [S1]. It builds on the concept of photon mapping and beam tracing [S1].
-*   **Usage:** Used in volumetric photon mapping for rendering participating media, particularly for efficient estimation of in-scattered radiance [S1].
+Adaptive Beam Width is part of the photon beam framework introduced by Jarosz et al. [2008] as a generalization of photon mapping [S1]. It builds on the concept of photon differentials from Igehy [1999] and surface-based methods [Schjøth et al. 2007; Fabianowski and Dingliana 2009]. The method was developed to provide a compact, expressive intermediate representation for lighting in participating media, allowing for efficient radiance estimation without shadow rays [S1].
 
 ## Sources
 [S1] A comprehensive theory of volumetric radiance estimation using photon points and beams, https://doi.org/10.1145/1899404.1899409, fetched 2026-10-26

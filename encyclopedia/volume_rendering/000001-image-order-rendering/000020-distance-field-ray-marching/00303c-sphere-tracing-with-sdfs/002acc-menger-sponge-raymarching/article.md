@@ -1,0 +1,183 @@
+# Menger Sponge Raymarching
+Also called: Menger Journey, Menger Tower, Menger sponge
+## Overview
+Menger Sponge Raymarching is a specific application of sphere tracing that renders the Menger sponge fractal by evaluating a recursive Signed Distance Function (SDF) [S1, unofficial]. It differs from generic SDF rendering by using a specific iterative folding and scaling technique to define the fractal geometry, allowing for the rendering of complex, self-similar voids without explicit mesh data [S1, unofficial]. It builds on [Sphere Tracing with SDFs](6223-sphere-tracing-with-sdfs.md).
+## How it works
+### Inputs and Outputs
+**Inputs:**
+- Camera position `prp` (vec3) [S1, unofficial].
+- Camera up vector `vuv` (vec3, typically `(0,1,0)`) [S1, unofficial].
+- View reference point `vrp` (vec3, typically `(0,0,0)`) [S1, unofficial].
+- Resolution `resolution` (vec2) [S1, unofficial].
+- Pixel coordinates `vPos` (vec2, range -1 to 1) [S1, unofficial].
+- Number of Menger iterations `M` (int, typically 3) [S1, unofficial].
+- Box size `b` (vec3, typically `(4.0, 4.0, 4.0)`) [S1, unofficial].
+- Epsilon for normal estimation `e` (vec3, typically `(0.02, 0, 0)`) [S1, unofficial].
+- Maximum ray depth `maxd` (float, typically 100.0) [S1, unofficial].
+- Hit threshold `hit_threshold` (float, typically 0.001) [S1, unofficial].
+- Maximum steps `MAX_STEPS` (int, typically 256) [S1, unofficial].
+
+**Outputs:**
+- Fragment color `gl_FragColor` (vec4) [S1, unofficial].
+
+### Data Structures
+The SDF returns a `vec2` where `.x` is the distance and `.y` is the material ID (0 for floor, 1 for sponge) [S1, unofficial].
+
+### Formulas
+1. **Box SDF**:
+   $$d_{box}(p) = \min(mc, \| \max(d_i, 0.0) \|)$$
+   Where $d_i = |p| - b$ and $mc = \max(d_i.x, \max(d_i.y, d_i.z))$ [S1, unofficial].
+
+2. **Cross SDF (Center Hole)**:
+   The cross shape is formed by the union of three orthogonal boxes. The SDF is:
+   $$d_{cross}(p) = \min(d_a.x, \min(d_b.x, d_c.x))$$
+   Where $d_a, d_b, d_c$ are the results of `obj_box_s` applied to permuted coordinates with infinite extent in one axis [S1, unofficial].
+
+3. **Menger Sponge SDF (Recursive)**:
+   The fractal is constructed by iteratively subtracting the cross shape from the current distance field, scaled and folded:
+   $$a = \text{mod}(p \cdot s, 2.0) - 1.0$$
+   $$r = 1.0 - 4.0|a|$$
+   $$c = \frac{\text{obj\_cross}(r)}{s}$$
+   $$d.x = \max(d.x, c.x)$$
+   Where $s$ starts at 1.0 and is multiplied by 3.0 in each iteration [S1, unofficial].
+
+4. **Union**:
+   $$d_{union} = \min(d_1, d_2)$$
+   Implemented by comparing `.x` components and returning the smaller distance, preserving the material ID of the closer object [S1, unofficial].
+
+5. **Normal Estimation**:
+   $$n = \text{normalize}(d(p) - d(p - e))$$
+   Using central differences with epsilon vector $e$ [S1, unofficial].
+
+6. **Lighting**:
+   $$color = (diffuse \cdot c + specular) \cdot fog$$
+   Where $diffuse = \dot(n, \text{normalize}(prp - p))$, $specular = pow(diffuse, 60.0)$, and $fog = 1.0 - f \cdot 0.01$ [S1, unofficial].
+
+### Pseudocode
+> **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
+
+```python
+def menger_sponge_sdf(p, b=vec3(4.0, 4.0, 4.0)):
+    """SDF for a single box centered at origin."""
+    di = abs(p) - b
+    mc = max(di.x, max(di.y, di.z))
+    d = min(mc, length(max(di, 0.0)))
+    return d
+
+def obj_cross(p):
+    """SDF for a cross shape (union of 3 boxes)."""
+    inf = 100.0
+    # Box along X axis (infinite in X, limited in Y, Z)
+    da = menger_sponge_sdf(vec3(p.x, p.y, p.z), vec3(inf, 2.0, 2.0))
+    # Box along Y axis
+    db = menger_sponge_sdf(vec3(p.y, p.z, p.x), vec3(2.0, inf, 2.0))
+    # Box along Z axis
+    dc = menger_sponge_sdf(vec3(p.z, p.x, p.y), vec3(2.0, 2.0, inf))
+    return min(da, min(db, dc))
+
+def menger_sponge_iterative(p, iterations=3):
+    """Recursive Menger Sponge SDF."""
+    # Base box
+    d = menger_sponge_sdf(p, vec3(4.0, 4.0, 4.0))
+    s = 1.0
+    for _ in range(iterations):
+        # Fold and scale
+        a = mod(p * s, 2.0) - 1.0
+        s *= 3.0
+        # Calculate distance to cross hole at this scale
+        r = 1.0 - 4.0 * abs(a)
+        c = obj_cross(r) / s
+        # Subtract the hole (max of current distance and hole distance)
+        d = max(d, c)
+    return d
+
+def distance_to_obj(p):
+    """Scene SDF: Menger Sponge + Floor."""
+    # Floor at y = -10
+    floor_d = p.y + 10.0
+    floor_mat = 0.0
+    
+    # Menger Sponge
+    sponge_d = menger_sponge_iterative(p)
+    sponge_mat = 1.0
+    
+    # Union
+    if floor_d < sponge_d:
+        return floor_d, floor_mat
+    else:
+        return sponge_d, sponge_mat
+
+def ray_march_menger(prp, scp, maxd=100.0, max_steps=256, hit_threshold=0.001):
+    """Raymarching loop for Menger Sponge."""
+    f = 0.0
+    for i in range(max_steps):
+        d, mat = distance_to_obj(prp + scp * f)
+        
+        if abs(d) < hit_threshold:
+            return f, d, mat, True
+        
+        if f > maxd:
+            return f, d, mat, False
+            
+        f += d
+        
+    return f, d, mat, False
+
+def render_menger(prp, scp, resolution, mouse):
+    """Full fragment shader logic."""
+    f, d, mat, hit = ray_march_menger(prp, scp)
+    
+    if hit:
+        p = prp + scp * f
+        
+        # Color selection
+        if mat == 0:
+            c = floor_color(p)
+        else:
+            c = prim_c(p)
+            
+        # Normal estimation
+        e = vec3(0.02, 0, 0)
+        n = normalize(vec3(
+            d - distance_to_obj(p - e)[0],
+            d - distance_to_obj(p - vec3(0, 0.02, 0))[0],
+            d - distance_to_obj(p - vec3(0, 0, 0.02))[0]
+        ))
+        
+        # Lighting
+        light_dir = normalize(prp - p)
+        b = dot(n, light_dir)
+        diffuse = b * c
+        specular = pow(b, 60.0)
+        fog = 1.0 - f * 0.01
+        
+        return (diffuse + specular) * fog
+    else:
+        return vec3(0, 0, 0)
+```
+
+### Parameters
+- `iterations`: 3 [S1, unofficial].
+- `b`: `(4.0, 4.0, 4.0)` [S1, unofficial].
+- `maxd`: 100.0 [S1, unofficial].
+- `max_steps`: 256 [S1, unofficial].
+- `hit_threshold`: 0.001 [S1, unofficial].
+- `e`: `(0.02, 0, 0)` [S1, unofficial].
+
+### Edge Cases and Pitfalls
+- **Driver Crashes**: NVIDIA OpenGL drivers on Windows (e.g., R334.67) may crash with "lost connection" messages when rendering this fractal on certain hardware (e.g., GeForce GTX 660) [S1, unofficial]. AMD hardware (Radeon R7) tested without issues [S1, unofficial].
+- **Precision**: The recursive folding relies on `mod` and scaling. Insufficient precision or incorrect iteration counts may result in visual artifacts or incorrect voids [S1, unofficial].
+- **Normal Estimation**: The normal is estimated using central differences with a fixed epsilon `e=0.02`. This may be inaccurate for very small features if the scale changes significantly, but is sufficient for the base parameters [S1, unofficial].
+
+## Operating characteristics
+- **Time Complexity**: $O(N \cdot M)$, where $N$ is the number of raymarch steps and $M$ is the number of Menger iterations (typically 3) [S1, unofficial]. Each step requires evaluating the SDF, which involves $M$ iterations of folding and cross subtraction.
+- **Memory Complexity**: $O(1)$, as the SDF is computed analytically without storing geometry [S1, unofficial].
+- **Performance**: The fractal is computationally intensive due to the nested loops and trigonometric/modulo operations in the SDF. The specific implementation uses GLSL 120, which may have performance implications on older hardware [S1, unofficial].
+- **Strengths**: No mesh generation required; infinite detail at higher iterations (up to floating-point limits); compact code [S1, unofficial].
+- **Limitations**: Driver instability on some NVIDIA hardware; normal estimation is approximate; no shadowing or global illumination in the basic implementation [S1, unofficial].
+
+## Background
+The method originates from Inigo Quilez's articles on raymarching and SDFs, specifically his work on the Menger sponge fractal [S1, unofficial]. The provided implementation is a GLSL 120 adaptation for the GLSL Hacker framework, updated in 2014 to ensure compatibility with modern GLSL versions and hardware [S1, unofficial]. It is used in educational and demo contexts to showcase the power of SDFs in rendering complex fractal geometry [S1, unofficial].
+
+## Sources
+[S1] (GLSL) Menger Sponge, Raymarching Code Samples Updated, https://www.geeks3d.com/20140201/glsl-menger-sponge-raymarching-code-samples-updated/, fetched 2026-10-26 (unofficial)

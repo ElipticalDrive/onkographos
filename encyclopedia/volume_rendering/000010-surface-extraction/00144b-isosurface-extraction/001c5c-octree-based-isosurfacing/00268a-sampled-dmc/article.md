@@ -7,79 +7,83 @@ Sampled DMC is a mesh generation technique that adapts the Dual Marching Cubes (
 
 ## How it works
 **Inputs and Outputs:**
-*   **Input:** A `HashedOctree<T>` where `T` implements the `McNode` trait, providing `density()` (distance from node center to contour) and `normal()` (normalized gradient of the SDF) for each node. A `scale` parameter (`f32`) applied to vertex positions.
-*   **Output:** A `Mesh` struct containing a `Vec<Vertex>` and `Vec<u32>` indices. Vertices are in counter-clockwise order.
+*   **Input:** A `HashedOctree<T>` where `T` implements the `McNode` trait, providing `density()` (distance from node center to contour) and `normal()` (normalized gradient of the SDF) for each node [S1, unofficial]. A `scale` parameter (`f32`) applied to vertex positions [S1, unofficial].
+*   **Output:** A `Mesh` struct containing a `Vec<Vertex>` and `Vec<u32>` indices. Vertices are in counter-clockwise order [S1, unofficial].
 
 **Data Structures:**
-*   `McNode`: Trait requiring `density(&self) -> f32` and `normal(&self) -> Vector3<f32>`.
-*   `NodeData`: Struct with `density: f32` and `normal: Vector3<f32>`.
-*   `Vertex`: Struct with `position: Point3<f32>` and `normal: Vector3<f32>`. Normals are normalized.
-*   `DualGrid`: Constructed from the octree. Contains `volumes`, where each volume is an array of 8 `MortonKey`s representing the corners of a dual cell.
-*   `CellVertexData`: Struct with `positions: [Point3<f32>; 12]` and `normals: [Vector3<f32>; 12]`.
+*   `McNode`: Trait requiring `density(&self) -> f32` and `normal(&self) -> Vector3<f32>` [S1, unofficial].
+*   `NodeData`: Struct with `density: f32` and `normal: Vector3<f32>` [S1, unofficial].
+*   `Vertex`: Struct with `position: Point3<f32>` and `normal: Vector3<f32>`. Normals are normalized [S1, unofficial].
+*   `DualGrid`: Constructed from the octree. Contains `volumes`, where each volume is an array of 8 `MortonKey`s representing the corners of a dual cell [S1, unofficial].
+*   `CellVertexData`: Struct with `positions: [Point3<f32>; 12]` and `normals: [Vector3<f32>; 12]` [S1, unofficial].
 
 **Numbered Steps:**
 
-1.  **Construct Dual Grid:** Call `DualGrid::from_octree(octree)`.
-    *   Get all leaf nodes of the octree.
-    *   For each leaf, determine its vertex keys.
-    *   For each vertex key, find neighboring leaves at the same level.
-    *   Filter neighbors to ensure they match the current leaf's level and are not the source vertex itself.
-2.  **Process Volumes in Parallel:** Iterate over `dual.volumes` using a parallel iterator (e.g., `rayon`).
-3.  **Fetch Volume Data:** For each volume, call `fetch_volume_data(volume, octree)`.
-    *   Initialize `cube_index = 0` and an array of 8 `NodeData`.
-    *   Map volume vertex indices to Marching Cubes vertex indices using `VOLUME_TO_MC_VERTEX: [3, 2, 7, 6, 0, 1, 4, 5]`.
-    *   If any vertex key is `MortonKey::none()`, return immediately (boundary handling).
-    *   Retrieve `density` and `normal` from the octree for each vertex.
-    *   If `density > 0.0`, set the corresponding bit in `cube_index`.
-    *   Store density and normal in the `nodes` array.
-4.  **Filter Visibility:** Call `is_cell_visible(cube_index)`. If `cube_index` is 0 (all negative) or 0xFF (all positive), skip the volume.
-5.  **Calculate Interpolated Data:** For visible volumes, call `calculate_mc_vertex_data(volume, nodes, cube_index, scale)`.
-    *   Get the edge mask from `tables::EDGE_TABLE[cube_index]`.
+1.  **Construct Dual Grid:** Call `DualGrid::from_octree(octree)` [S1, unofficial].
+    *   Get all leaf nodes of the octree [S1, unofficial].
+    *   For each leaf, determine its vertex keys [S1, unofficial].
+    *   For each vertex key, find neighboring leaves at the same level [S1, unofficial].
+    *   Filter neighbors to ensure they match the current leaf's level and are not the source vertex itself [S1, unofficial].
+2.  **Process Volumes in Parallel:** Iterate over `dual.volumes` using a parallel iterator (e.g., `rayon`) [S1, unofficial].
+3.  **Fetch Volume Data:** For each volume, call `fetch_volume_data(volume, octree)` [S1, unofficial].
+    *   Initialize `cube_index = 0` and an array of 8 `NodeData` [S1, unofficial].
+    *   Map volume vertex indices to Marching Cubes vertex indices using `VOLUME_TO_MC_VERTEX: [3, 2, 7, 6, 0, 1, 4, 5]` [S1, unofficial].
+    *   If any vertex key is `MortonKey::none()`, return immediately (boundary handling) [S1, unofficial].
+    *   Retrieve `density` and `normal` from the octree for each vertex [S1, unofficial].
+    *   If `density > 0.0`, set the corresponding bit in `cube_index` [S1, unofficial].
+    *   Store density and normal in the `nodes` array [S1, unofficial].
+4.  **Filter Visibility:** Call `is_cell_visible(cube_index)` [S1, unofficial]. If `cube_index` is 0 (all negative) or 0xFF (all positive), skip the volume [S1, unofficial].
+5.  **Calculate Interpolated Data:** For visible volumes, call `calculate_mc_vertex_data(volume, nodes, cube_index, scale)` [S1, unofficial].
+    *   Get the edge mask from `tables::EDGE_TABLE[cube_index]` [S1, unofficial].
     *   For each of the 12 edges, if the edge is active (bit set in mask):
-        *   Get the two volume vertex indices from `MC_CUBE_EDGES`.
+        *   Get the two volume vertex indices from `MC_CUBE_EDGES` [S1, unofficial].
         *   Calculate the interpolation factor `R` using the densities of the two vertices.
         *   Interpolate the position and normal using `R`.
-        *   Scale the position by `vertex_position_scale`.
-6.  **Obtain Vertices:** Call `obtain_mc_vertices(cell_data, cube_index)`.
-    *   Get triangle indices from `tables::TRI_TABLE[cube_index]`.
-    *   Chunk the table into groups of 3.
-    *   For each valid chunk, create `Vertex` structs using the interpolated positions and normals.
-7.  **Collect Results:** Collect all vertices into a `Vec`. Generate indices as `(0..vertices.len() as u32).collect()`.
+        *   Scale the position by `vertex_position_scale` [S1, unofficial].
+6.  **Obtain Vertices:** Call `obtain_mc_vertices(cell_data, cube_index)` [S1, unofficial].
+    *   Get triangle indices from `tables::TRI_TABLE[cube_index]` [S1, unofficial].
+    *   Chunk the table into groups of 3 [S1, unofficial].
+    *   For each valid chunk, create `Vertex` structs using the interpolated positions and normals [S1, unofficial].
+7.  **Collect Results:** Collect all vertices into a `Vec`. Generate indices as `(0..vertices.len() as u32).collect()` [S1, unofficial].
 
 **Formulas:**
 *   **Interpolation Factor:**
     $$ R = \frac{0 - p_1}{p_2 - p_1} $$
-    Where $p_1$ and $p_2$ are the densities at the two endpoints of the edge. This estimates the relative value $R$ such that $p_1 + (p_2 - p_1) \cdot R == 0$.
+    Where $p_1$ and $p_2$ are the densities at the two endpoints of the edge. This estimates the relative value $R$ such that $p_1 + (p_2 - p_1) \cdot R == 0$ [S1, unofficial].
     *   Special cases:
         *   If $|p_1| < 0.00001$, return $p_1$.
         *   If $|p_2| < 0.00001$, return $p_2$.
         *   If $|p_1 - p_2| < 0.00001$, return $p_1$.
 *   **Position Interpolation:**
-    $$ \text{pos} = (\text{pos}_1 \oplus \text{pos}_2, R) \cdot \text{scale} $$
-    Where $\oplus$ denotes linear interpolation.
+    $$ \text{pos} = \text{interpolate}(\text{pos}_1, \text{pos}_2, R) \cdot \text{scale} $$
+    Where $\text{interpolate}$ denotes linear interpolation [S1, unofficial].
 *   **Normal Interpolation:**
-    $$ \text{norm} = \text{norm}_1 \oplus \text{norm}_2, R $$
-    (Note: The source code does not explicitly normalize the interpolated normal, but the `McNode` trait requires normalized normals, and the `Vertex` struct stores normalized normals. The implementation relies on the input normals being normalized.)
+    $$ \text{norm} = \text{interpolate}(\text{norm}_1, \text{norm}_2, R) $$
+    (Note: The source code does not explicitly normalize the interpolated normal, but the `McNode` trait requires normalized normals, and the `Vertex` struct stores normalized normals. The implementation relies on the input normals being normalized.) [S1, unofficial]
 
 **Parameters:**
-*   `scale`: `f32`. A scaling factor applied to vertex positions.
+*   `scale`: `f32`. A scaling factor applied to vertex positions [S1, unofficial].
 
 **Pitfalls:**
-*   **Boundary Handling:** If any vertex in a volume is `MortonKey::none()`, the volume is on the edge of the octree. The function returns immediately, skipping that volume. This may result in missing mesh parts at the boundary.
-*   **Cell Visibility:** Cells with `cube_index == 0` or `cube_index == 0xFF` are filtered out. This is correct for isosurfacing but must be understood to avoid expecting triangles in uniform regions.
-*   **Vertex Merging:** The algorithm does not merge vertices. Indices are simply incremental integers. This can lead to higher vertex counts and potential visual artifacts at shared edges if normals are not consistent.
+*   **Boundary Handling:** If any vertex in a volume is `MortonKey::none()`, the volume is on the edge of the octree. The function returns immediately, skipping that volume. This may result in missing mesh parts at the boundary [S1, unofficial].
+*   **Cell Visibility:** Cells with `cube_index == 0` or `cube_index == 0xFF` are filtered out. This is correct for isosurfacing but must be understood to avoid expecting triangles in uniform regions [S1, unofficial].
+*   **Vertex Merging:** The algorithm does not merge vertices. Indices are simply incremental integers. This can lead to higher vertex counts and potential visual artifacts at shared edges if normals are not consistent [S1, unofficial].
 
 **Pseudocode:**
 
 > **Unverified code.** The code below did not pass a test run against a reference implementation, or no test fits it, so it may contain errors.
 
 ```python
-def mesh_from_octree(octree: HashedOctree, scale: f32) -> Mesh:
+def mesh_from_octree(octree, scale):
     dual = DualGrid.from_octree(octree)
     vertices = []
     
-    for volume in dual.volumes.par_iter():
-        nodes, cube_index = fetch_volume_data(volume, octree)
+    for volume in dual.volumes:  # Parallel iteration handled by framework
+        result = fetch_volume_data(volume, octree)
+        if result is None:
+            continue
+            
+        nodes, cube_index = result
         
         if not is_cell_visible(cube_index):
             continue
@@ -90,7 +94,7 @@ def mesh_from_octree(octree: HashedOctree, scale: f32) -> Mesh:
     indices = list(range(len(vertices)))
     return Mesh(vertices, indices)
 
-def fetch_volume_data(volume: [MortonKey; 8], octree: HashedOctree) -> (VolumeData):
+def fetch_volume_data(volume, octree):
     VOLUME_TO_MC_VERTEX = [3, 2, 7, 6, 0, 1, 4, 5]
     nodes = [None] * 8
     cube_index = 0
@@ -99,8 +103,8 @@ def fetch_volume_data(volume: [MortonKey; 8], octree: HashedOctree) -> (VolumeDa
         mc_i = VOLUME_TO_MC_VERTEX[volume_i]
         
         if key == MortonKey.none():
-            return VolumeData(nodes, 0) # Skip boundary
-        
+            return None  # Boundary handling: skip volume
+            
         node_data = octree.value(key)
         density = node_data.density()
         normal = node_data.normal()
@@ -110,9 +114,9 @@ def fetch_volume_data(volume: [MortonKey; 8], octree: HashedOctree) -> (VolumeDa
             
         nodes[volume_i] = NodeData(density, normal)
         
-    return VolumeData(nodes, cube_index)
+    return (nodes, cube_index)
 
-def calculate_mc_vertex_data(volume: [MortonKey; 8], nodes: [NodeData; 8], cube_index: u8, scale: f32) -> CellVertexData:
+def calculate_mc_vertex_data(volume, nodes, cube_index, scale):
     MC_CUBE_EDGES = [
         (4, 5), (1, 5), (0, 1), (0, 4),
         (6, 7), (3, 7), (2, 3), (2, 6),
@@ -138,21 +142,21 @@ def calculate_mc_vertex_data(volume: [MortonKey; 8], nodes: [NodeData; 8], cube_
             
     return CellVertexData(positions, normals)
 
-def obtain_mc_vertices(cell_data: CellVertexData, cube_index: u8) -> [Vertex]:
+def obtain_mc_vertices(cell_data, cube_index):
     tri_table = tables.TRI_TABLE[cube_index]
     vertices = []
     
-    for chunk in tri_table.chunks(3):
-        if chunk[0] == -1:
+    for i in range(0, len(tri_table), 3):
+        if tri_table[i] == -1:
             break
             
-        v1 = cell_data.positions[chunk[0]]
-        v2 = cell_data.positions[chunk[1]]
-        v3 = cell_data.positions[chunk[2]]
+        v1 = cell_data.positions[tri_table[i]]
+        v2 = cell_data.positions[tri_table[i+1]]
+        v3 = cell_data.positions[tri_table[i+2]]
         
-        n1 = cell_data.normals[chunk[0]]
-        n2 = cell_data.normals[chunk[1]]
-        n3 = cell_data.normals[chunk[2]]
+        n1 = cell_data.normals[tri_table[i]]
+        n2 = cell_data.normals[tri_table[i+1]]
+        n3 = cell_data.normals[tri_table[i+2]]
         
         vertices.append(Vertex(v1, n1))
         vertices.append(Vertex(v2, n2))
@@ -160,7 +164,7 @@ def obtain_mc_vertices(cell_data: CellVertexData, cube_index: u8) -> [Vertex]:
         
     return vertices
 
-def interpolation_factor(p1: f32, p2: f32) -> f32:
+def interpolation_factor(p1, p2):
     if abs(p1) < 0.00001:
         return p1
     if abs(p2) < 0.00001:
@@ -171,13 +175,13 @@ def interpolation_factor(p1: f32, p2: f32) -> f32:
 ```
 
 ## Operating characteristics
-*   **Time Complexity:** Linear with respect to the number of dual volumes (leaf nodes in the octree). Parallel processing is used via `rayon`.
-*   **Memory Complexity:** Linear with respect to the number of dual volumes. Each volume is processed independently, and vertices are collected into a single vector.
-*   **Performance:** Fast due to parallel processing and efficient data structures. The use of Morton keys allows for efficient spatial locality.
-*   **Strengths:** Adaptive resolution via octree; no need for uniform grid; suitable for dynamic/destructible environments; parallelizable.
-*   **Limitations:** No vertex merging (higher vertex count); boundary handling skips cells; requires `McNode` implementation; not suitable for non-octree data.
-*   **When to use:** When working with octree-based data structures, adaptive resolution is needed, or the environment is dynamic.
-*   **When not to use:** When vertex merging is critical for performance or visual quality, or when working with uniform grid data.
+*   **Time Complexity:** Linear with respect to the number of dual volumes (leaf nodes in the octree). Parallel processing is used via `rayon` [S1, unofficial].
+*   **Memory Complexity:** Linear with respect to the number of dual volumes. Each volume is processed independently, and vertices are collected into a single vector [S1, unofficial].
+*   **Performance:** Fast due to parallel processing and efficient data structures. The use of Morton keys allows for efficient spatial locality [S1, unofficial].
+*   **Strengths:** Adaptive resolution via octree; no need for uniform grid; suitable for dynamic/destructible environments; parallelizable [S1, unofficial].
+*   **Limitations:** No vertex merging (higher vertex count); boundary handling skips cells; requires `McNode` implementation; not suitable for non-octree data [S1, unofficial].
+*   **When to use:** When working with octree-based data structures, adaptive resolution is needed, or the environment is dynamic [S1, unofficial].
+*   **When not to use:** When vertex merging is critical for performance or visual quality, or when working with uniform grid data [S1, unofficial].
 
 ## Background
 Sampled DMC is an implementation of the Dual Marching Cubes technique, also known as Linear Hashed Marching Cubes [S1, unofficial]. It was developed as part of the `dmc` crate, available on crates.io [S1, unofficial]. The method adapts the original Marching Cubes algorithm, which uses a uniform grid, to hashed octrees using Morton keys [S1, unofficial]. This allows for adaptive resolution isosurfacing, which is particularly useful for complex SDFs, destructible environments, or objects with different levels of detail (LODs) [S1, unofficial]. The crate uses `cgmath` for vector math and `rayon` for parallel processing [S1, unofficial].

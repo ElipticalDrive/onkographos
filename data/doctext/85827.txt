@@ -1,0 +1,1024 @@
+# Ray-marchingAuctuxYourube
+ Following Ray marching In a nutshell - Signed Distance Function https://www.youtube.com/watch?v=SdNb7-I1TtA&t=9s&ab_channel=Auctux
+
+### Assets/generatedSound.cs
+```
+using System.Collections;
+using System.Collections.Generic;
+using UnityEngine;
+
+public class generatedSound : MonoBehaviour
+{
+    [SerializeField, Range(0, 1)] private float amplitude = 0.5f;
+    [SerializeField] private float frequency = 261.62f;
+
+    private double _phase;
+    private int _sampleRate;
+    private void Awake()
+    {
+
+        _sampleRate = AudioSettings.outputSampleRate;
+    }
+
+    private void OnAudioFilterRead(float[] data, int channels)
+    {
+        double phaseIncrement = frequency / _sampleRate;
+        for (int sample = 0; sample < data.Length; sample+=channels)
+        {
+            float value = Mathf.Sin((float)_phase * 2 * Mathf.PI) * amplitude;
+            _phase = (_phase + phaseIncrement) % 1;
+
+            for (int channel = 0; channel < channels; channel++)
+            {
+                data[sample + channel] = value;
+
+            }
+
+        }
+    }
+}
+```
+
+### Assets/Materials/raymarchShader.shader
+```
+Shader "PeerPlay/RaymarchShader"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+    }
+    SubShader
+    {
+        // No culling or depth
+        Cull Off ZWrite Off ZTest Always
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma target 3.0
+
+            #include "UnityCG.cginc"
+            #include "DistanceFunctions.cginc"
+            
+            sampler2D _MainTex;
+            uniform sampler2D _CameraDepthTexture;
+
+            uniform float4x4 _CamFrustum, _CamToWorld;
+            uniform float _maxDistance;
+            uniform float4 _sphere1,_sphere2,  _box1, _torus1, _cone1, _hexPrism1;
+            uniform float3 _mandleBrot1;
+            uniform float4 _mandleBrotColor1;
+            uniform float3 _modInterval;
+            uniform float3 _lightDir;
+            uniform fixed4 _mainColor;
+
+
+            uniform float _box1Round, _boxSphereSmooth,_sphereIntersectSmooth;
+           
+
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+                float3 ray:TEXCOORD1;
+
+            };
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                half index= v.vertex.z;
+                v.vertex.z= 0;
+
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv;
+                o.ray= _CamFrustum[(int)index].xyz;
+
+                o.ray /= abs( o.ray.z);
+
+                o.ray = mul(_CamToWorld, o.ray);
+
+                return o;
+            }
+
+            float BoxSphere(float3 p){
+
+                 float  Sphere1= sdSphere(p - _sphere1.xyz, _sphere1.w);
+                float Box1 = sdRoundBox(p- _box1.xyz, _box1.www, _box1Round);
+                float combine1= opSS( Sphere1,Box1, _boxSphereSmooth);
+                float  Sphere2= sdSphere(p - _sphere2.xyz, _sphere2.w);
+                float combine2 = opSS(Sphere2 , combine1, _sphereIntersectSmooth);
+                return combine2;
+
+
+            }
+            float distanceField (float3 p)
+            {
+                //float modX= pMod1(p.x,_modInterval.x);
+                //float modY= pMod1(p.y,_modInterval.y);
+                //float modZ= pMod1(p.z,_modInterval.z);
+
+                float ground= sdPlane(p, float3(0,1,0),0);
+           
+               // float Torus1= sdCappedTorus(p- _torus1.xyz,_torus1.www, _torus1.x,_torus1.y);
+               // float Cone1 = sdCone(p- _cone1.xyz, _cone1.ww);
+                // float HexPrism1 = sdHexPrism(p- _hexPrism1.xyz, _hexPrism1.ww);
+
+              ///float MandleBrot1 = mandleBulb(p-_mandleBrot1.xyz,_mandleBrotColor1.xyzw);
+                 float boxSphere1= BoxSphere(p);
+                
+                return opU(ground, boxSphere1);
+            }
+
+
+            float3 getNormal(float3 p)
+            {
+                const float2 offset= float2 (0.001,0);
+                float3 n= float3(
+                    distanceField ((p+ offset.xyy) - distanceField (p- offset.xyy)),
+                    distanceField ((p+ offset.yxy) - distanceField (p- offset.yxy)),
+                    distanceField ((p+ offset.yyx) - distanceField (p- offset.yyx))
+                );
+                return normalize(n);
+            }
+
+            fixed4 raymarching(float3 ro, float3 rd, float depth)
+            {
+                fixed4 result = fixed4(1,1,1,1);
+
+                const int max_iteration = 164;
+                float t=0; //distance traveled along a ray direction
+
+                for  (int i=0; i<max_iteration ; i++)
+                {
+                    if(t> _maxDistance || t>= depth)
+                    {
+                        result = fixed4(rd,1);
+                        break;
+                    }
+                    float3 p= ro + rd* t;
+                    // check for hit in distance field
+                    float d= distanceField(p);
+
+                    if(d<0.01)
+                    {
+                        //shading#
+                        float3 n= getNormal(p);
+                        float light = dot(-_lightDir,n);
+
+                        result= fixed4(_mainColor.rgb*light ,1);
+
+                        break;
+
+                    }
+                    t+=d;
+
+                }
+
+
+                return result;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                float depth = LinearEyeDepth (tex2D (_CameraDepthTexture,i.uv).r);
+                
+                depth *= length (i.ray);
+
+                float3 col = tex2D(_MainTex,i.uv);
+
+                float3 rayDirection = normalize (i.ray.xyz);
+                float3 rayOrigin = _WorldSpaceCameraPos;
+
+                fixed4 result = raymarching(rayOrigin, rayDirection, depth);
+
+                return fixed4 (col *(1.0- result.w)+ result.xyz* result.w, 1.0);
+            }
+            ENDCG
+        }
+    }
+}
+```
+
+### Assets/Scripts/SceneViewFilter.cs
+```
+﻿using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
+
+public class SceneViewFilter : MonoBehaviour
+{
+#if UNITY_EDITOR
+    bool hasChanged = false;
+
+    public virtual void OnValidate()
+    {
+        hasChanged = true;
+    }
+
+    static SceneViewFilter()
+    {
+        SceneView.duringSceneGui += CheckMe;
+    }
+
+    static void CheckMe(SceneView sv)
+    {
+        if (Event.current.type != EventType.Layout)
+            return;
+        if (!Camera.main)
+            return;
+        // Get a list of everything on the main camera that should be synced.
+        SceneViewFilter[] cameraFilters = Camera.main.GetComponents<SceneViewFilter>();
+        SceneViewFilter[] sceneFilters = sv.camera.GetComponents<SceneViewFilter>();
+
+        // Let's see if the lists are different lengths or something like that. 
+        // If so, we simply destroy all scene filters and recreate from maincame
+        if (cameraFilters.Length != sceneFilters.Length)
+        {
+            Recreate(sv);
+            return;
+        }
+        for (int i = 0; i < cameraFilters.Length; i++)
+        {
+            if (cameraFilters[i].GetType() != sceneFilters[i].GetType())
+            {
+                Recreate(sv);
+                return;
+            }
+        }
+
+        // Ok, WHICH filters, or their order hasn't changed.
+        // Let's copy all settings for any filter that has changed.
+        for (int i = 0; i < cameraFilters.Length; i++)
+            if (cameraFilters[i].hasChanged || sceneFilters[i].enabled != cameraFilters[i].enabled)
+            {
+                EditorUtility.CopySerialized(cameraFilters[i], sceneFilters[i]);
+                cameraFilters[i].hasChanged = false;
+            }
+    }
+
+    static void Recreate(SceneView sv)
+    {
+        SceneViewFilter filter;
+        while (filter = sv.camera.GetComponent<SceneViewFilter>())
+            DestroyImmediate(filter);
+
+        foreach (SceneViewFilter f in Camera.main.GetComponents<SceneViewFilter>())
+        {
+            SceneViewFilter newFilter = sv.camera.gameObject.AddComponent(f.GetType()) as SceneViewFilter;
+            EditorUtility.CopySerialized(f, newFilter);
+        }
+    }
+#endif
+}
+```
+
+### Assets/Scripts/cameraMovement.cs
+```
+﻿using UnityEngine;
+using System.Collections;
+
+public class cameraMovement : MonoBehaviour
+{
+
+    /*
+    Writen by Windexglow 11-13-10.  Use it, edit it, steal it I don't care.  
+    Converted to C# 27-02-13 - no credit wanted.
+    Simple flycam I made, since I couldn't find any others made public.  
+    Made simple to use (drag and drop, done) for regular keyboard layout  
+    wasd : basic movement
+    shift : Makes camera accelerate
+    space : Moves camera on X and Z axis only.  So camera doesn't gain any height*/
+
+
+    public float mainSpeed = 100.0f; //regular speed
+    public float shiftAdd = 250.0f; //multiplied by how long shift is held.  Basically running
+    public float maxShift = 1000.0f; //Maximum speed when holdin gshift
+    public float camSens = 0.25f; //How sensitive it with mouse
+    private Vector3 lastMouse = new Vector3(255, 255, 255); //kind of in the middle of the screen, rather than at the top (play)
+    private float totalRun = 1.0f;
+
+    void Update()
+    {
+        lastMouse = Input.mousePosition - lastMouse;
+        lastMouse = new Vector3(-lastMouse.y * camSens, lastMouse.x * camSens, 0);
+        lastMouse = new Vector3(transform.eulerAngles.x + lastMouse.x, transform.eulerAngles.y + lastMouse.y, 0);
+        transform.eulerAngles = lastMouse;
+        lastMouse = Input.mousePosition;
+        //Mouse  camera angle done.  
+
+        //Keyboard commands
+        float f = 0.0f;
+        Vector3 p = GetBaseInput();
+        if (Input.GetKey(KeyCode.LeftShift))
+        {
+            totalRun += Time.deltaTime;
+            p = p * totalRun * shiftAdd;
+            p.x = Mathf.Clamp(p.x, -maxShift, maxShift);
+            p.y = Mathf.Clamp(p.y, -maxShift, maxShift);
+            p.z = Mathf.Clamp(p.z, -maxShift, maxShift);
+        }
+        else
+        {
+            totalRun = Mathf.Clamp(totalRun * 0.5f, 1f, 1000f);
+            p = p * mainSpeed;
+        }
+
+        p = p * Time.deltaTime;
+        Vector3 newPosition = transform.position;
+        if (Input.GetKey(KeyCode.Space))
+        { //If player wants to move on X and Z axis only
+            transform.Translate(p);
+            newPosition.x = transform.position.x;
+            newPosition.z = transform.position.z;
+            transform.position = newPosition;
+        }
+        else
+        {
+            transform.Translate(p);
+        }
+
+    }
+
+    private Vector3 GetBaseInput()
+    { //returns the basic values, if it's 0 than it's not active.
+        Vector3 p_Velocity = new Vector3();
+        if (Input.GetKey(KeyCode.W))
+        {
+            p_Velocity += new Vector3(0, 0, 1);
+        }
+        if (Input.GetKey(KeyCode.S))
+        {
+            p_Velocity += new Vector3(0, 0, -1);
+        }
+        if (Input.GetKey(KeyCode.A))
+        {
+            p_Velocity += new Vector3(-1, 0, 0);
+        }
+        if (Input.GetKey(KeyCode.D))
+        {
+            p_Velocity += new Vector3(1, 0, 0);
+        }
+        return p_Velocity;
+    }
+}
+```
+
+### Assets/Shaders/CameraController.cs
+```
+﻿using UnityEngine;
+
+[ExecuteInEditMode]
+[RequireComponent(typeof(Camera))]
+public class CameraController : SceneViewFilter
+{
+    private Material r_material;
+    public float r_maxDistance;
+    public Vector3 r_modInterval;
+    public Vector4 r_sphere;
+    public float r_radius;
+
+    public Vector4 r_box;
+    public Vector4 r_sphere2;
+    public float r_boxSphereSmooth;
+    public float r_boxRound;
+    public float r_sphereIntersectSmooth;
+    public float r_shadowIntensity;
+    public float r_lightIntensity;
+    public Vector2 r_shadowDistance;
+    public Color r_lightColor;
+    public float r_shadowPenumbra;
+    public int r_maxIterations;
+    public float r_accuracy;
+    public Transform r_light;
+    public Color r_color;
+    public int r_ambientIterations;
+    public float r_ambientIntesity;
+    public float r_ambientSteps;
+
+
+    [Header("fractals")]
+    public Vector3 _mandleBrot1;
+    public Vector4 _mandleBrotColor1;
+    public float _power;
+
+
+    public Vector4 r_sphere4;
+    public float r_sphereSmooth;
+    public float r_degreeRotate;
+    public float r_rotationDegree;
+
+    public int r_reflectionCount;
+    public float r_reflectionIntensity;
+    public float r_environmentIntensity;
+    public Cubemap r_reflectionCube;
+
+    [Header("Bubbles")]
+
+    [SerializeField]
+    private Shader r_shader;
+    public Material raymarchingMaterial
+    {
+        get
+        {
+            if (!r_material && r_shader)
+            {
+                r_material = new Material(r_shader);
+                r_material.hideFlags = HideFlags.HideAndDontSave;
+            }
+            return r_material;
+        }
+    }
+  
+    private Camera r_camera;
+    public Camera raymarchingCamera
+    {
+        get
+        {
+            if (!r_camera)
+            {
+                r_camera = GetComponent<Camera>();
+            }
+            return r_camera;
+        }
+    }
+
+
+    public void updateSphereRadius()
+    {
+    }
+    //SignalProcessor signalProcessor = new SignalProcessor(20, true);
+    //public void OnDataReceived(string data, UduinoDevice device)
+    //{
+    //    float value = float.Parse(data);
+    //    signalProcessor.AddValue(value);
+    //    float n = signalProcessor.GetNormalized();
+    //}
+    private void OnRenderImage(RenderTexture source, RenderTexture destination)
+    {
+        if (!raymarchingMaterial)
+        {
+            Graphics.Blit(source, destination);
+            return;
+        }
+
+
+        raymarchingMaterial.SetVector("_mandleBrot1", _mandleBrot1);
+        raymarchingMaterial.SetVector("_mandleBrotColor1", _mandleBrotColor1);
+        raymarchingMaterial.SetFloat("_power", _power);
+
+        raymarchingMaterial.SetInt("r_maxIterations", r_maxIterations);
+        raymarchingMaterial.SetFloat("r_accuracy", r_accuracy);
+        raymarchingMaterial.SetVector("r_sphere", r_sphere);
+        raymarchingMaterial.SetVector("r_box", r_box);
+
+
+        raymarchingMaterial.SetVector("r_light", r_light ? r_light.forward : Vector3.down);
+
+        raymarchingMaterial.SetColor("r_lightColor", r_lightColor);
+        raymarchingMaterial.SetFloat("r_lightIntensity", r_lightIntensity);
+        raymarchingMaterial.SetFloat("r_shadowIntensity", r_shadowIntensity);
+        raymarchingMaterial.SetFloat("r_shadowPenumbra", r_shadowPenumbra);
+        raymarchingMaterial.SetVector("r_shadowDistance", r_shadowDistance);
+        raymarchingMaterial.SetInt("r_ambientIterations", r_ambientIterations);
+        raymarchingMaterial.SetFloat("r_ambientSteps", r_ambientSteps);
+        raymarchingMaterial.SetFloat("r_ambientIntesity", r_ambientIntesity);
+        raymarchingMaterial.SetVector("r_sphere4", r_sphere4);
+        raymarchingMaterial.SetFloat("r_sphereSmooth", r_sphereSmooth);
+        raymarchingMaterial.SetFloat("r_degreeRotate", r_degreeRotate);
+
+        raymarchingMaterial.SetMatrix("r_cameraFrustum", cameraFrustum(raymarchingCamera));
+        raymarchingMaterial.SetMatrix("r_cameraToWorld", raymarchingCamera.cameraToWorldMatrix);
+        raymarchingMaterial.SetFloat("r_maxdistance", r_maxDistance);
+        raymarchingMaterial.SetVector("r_modInterval", r_modInterval);
+        raymarchingMaterial.SetVector("r_sphere2", r_sphere2);
+        raymarchingMaterial.SetFloat("r_boxRound", r_boxRound);
+        raymarchingMaterial.SetFloat("r_boxSphereSmooth", r_boxSphereSmooth);
+        raymarchingMaterial.SetFloat("r_sphereIntersectSmooth", r_sphereIntersectSmooth);
+
+        raymarchingMaterial.SetInt("r_reflectionCount", r_reflectionCount);
+        raymarchingMaterial.SetFloat("r_reflectionIntensity", r_reflectionIntensity);
+        raymarchingMaterial.SetFloat("r_environmentIntensity", r_environmentIntensity);
+        raymarchingMaterial.SetTexture("r_reflectionCube", r_reflectionCube);
+
+        RenderTexture.active = destination;
+
+
+        raymarchingMaterial.SetTexture("_MainTex", source);
+
+        GL.PushMatrix();
+        GL.LoadOrtho();
+        raymarchingMaterial.SetPass(0);
+        GL.Begin(GL.QUADS);
+
+        //bottom left
+        GL.MultiTexCoord2(0, 0.0f, 0.0f);
+        GL.Vertex3(0.0f, 0.0f, 3.0f);
+        //bottom right
+        GL.MultiTexCoord2(0, 1.0f, 0.0f);
+        GL.Vertex3(1.0f, 0.0f, 2.0f);
+        //top right
+        GL.MultiTexCoord2(0, 1.0f, 1.0f);
+        GL.Vertex3(1.0f, 1.0f, 1.0f);
+        // top left
+        GL.MultiTexCoord2(0, 0.0f, 1.0f);
+        GL.Vertex3(0.0f, 1.0f, 0.0f);
+
+        GL.End();
+        GL.PopMatrix();
+    }
+
+    private Matrix4x4 cameraFrustum(Camera camera)
+    {
+        Matrix4x4 frustum = Matrix4x4.identity;
+        float fieldOfView = Mathf.Tan((camera.fieldOfView * 0.5f) * Mathf.Deg2Rad);
+
+        Vector3 r_UP = Vector3.up * fieldOfView;
+        Vector3 r_RIGHT = Vector3.right * fieldOfView * camera.aspect;
+        Vector3 r_BOTTOMLEFT = (-Vector3.forward - r_RIGHT - r_UP);
+        Vector3 r_BOTTOMRIGHT = (-Vector3.forward + r_RIGHT - r_UP);
+        Vector3 r_TOPLEFT = (-Vector3.forward - r_RIGHT + r_UP);
+        Vector3 r_TOPRIGHT = (-Vector3.forward + r_RIGHT + r_UP);
+
+        frustum.SetRow(3, r_BOTTOMLEFT);
+        frustum.SetRow(2, r_BOTTOMRIGHT);
+        frustum.SetRow(1, r_TOPRIGHT);
+        frustum.SetRow(0, r_TOPLEFT);
+
+
+        return frustum;
+    }
+}
+```
+
+### Assets/Shaders/CloudShader.shader
+```
+Shader "Custom/CloudShader"
+{
+    Properties
+    {
+        _MainTex ("Texture", 3D) = "white" {}
+        _CloudDensity ("Cloud Density", Range(0.1, 1.0)) = 0.5
+        _CloudSpeed ("Cloud Speed", Range(0.1, 10.0)) = 1.0
+        _CloudScale ("Cloud Scale", Range(1.0, 100.0)) = 10.0
+    }
+    
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+        
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            
+            #include "UnityCG.cginc"
+            
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+            
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+            };
+            
+            float _CloudDensity;
+            float _CloudSpeed;
+            float _CloudScale;
+            sampler3D _MainTex;
+            
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv;
+                return o;
+            }
+            
+            fixed4 frag (v2f i) : SV_Target
+            {
+                float2 uv = i.uv * _CloudScale;
+                float2 p = uv;
+                float cloudDensity = _CloudDensity;
+                float cloudSpeed = _CloudSpeed;
+                float cloudHeight = 0.5;
+                
+                float3 col = float3(0.0, 0.0, 0.0);
+                float t = 0.0;
+                
+                // Raymarching loop
+                for (int j = 0; j < 50; j++)
+                {
+                    float3 ray = float3(p, cloudHeight);
+                    float3 pos = ray * t;
+                    
+                    // Sample density from 3D noise texture
+                    float density = tex3D(_MainTex, pos).r;
+                    
+                    // Accumulate color based on density
+                    col += density * float3(1.0, 1.0, 1.0);
+                    
+                    // Increment time and raymarch distance
+                    t += 0.01;
+                    
+                    // Exit the loop if we're inside the cloud
+                    if (density > cloudDensity)
+                        break;
+                }
+                
+                // Apply lighting and return final color
+                col *= 0.2;
+                
+                return fixed4(col, 1.0);
+            }
+            
+            ENDCG
+        }
+    }
+}
+```
+
+### Assets/Shaders/RayMarching.shader
+```
+﻿Shader "Auctux/RayMarching"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+    }
+    SubShader
+    {
+        // No culling or depth
+        Cull Off ZWrite Off ZTest Always
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma target 3.0
+
+            #include "UnityCG.cginc"
+            #include "DistanceFunctions.cginc"
+
+
+            sampler2D _MainTex;
+            uniform fixed4 r_mainColor;
+            uniform sampler2D _CameraDepthTexture;
+            uniform float4x4 r_cameraFrustum, r_cameraToWorld;
+            uniform float4 r_box, r_sphere, r_sphere2;
+            uniform float r_boxRound, r_boxSphereSmooth, r_sphereIntersectSmooth;
+
+            uniform float3 r_modInterval;
+            uniform float3 r_light, r_lightColor;
+            uniform float r_lightIntensity;
+            uniform float r_maxdistance;
+            uniform float2 r_shadowDistance;
+            uniform float r_shadowIntensity;
+            uniform float r_shadowPenumbra;
+            uniform float r_ambientSteps;
+            uniform int r_ambientIterations;
+            uniform float r_ambientIntensity;
+            uniform int r_maxIterations;
+            uniform float r_accuracy;
+
+            uniform float4 r_sphere4;
+            uniform float r_sphereSmooth;
+            uniform float r_degreeRotate;
+            uniform float r_rotationDegree;
+
+            uniform int r_reflectionCount;
+            uniform float r_reflectionIntensity;
+            uniform float r_environmentIntensity;
+            uniform samplerCUBE r_reflectionCube;
+
+             uniform float3 _mandleBrot1;
+            uniform float4 _mandleBrotColor1;
+
+            uniform int _power;
+
+
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {   
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+                // ray direction
+                float3 ray: TEXCOORD1;
+                
+            };
+
+            v2f vert (appdata v)
+            {
+                
+                v2f o;
+                half index = v.vertex.z;
+                v.vertex.z = 0;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = v.uv.xy;
+                o.ray = r_cameraFrustum[(int)index].xyz;
+                o.ray /= abs(o.ray.z);
+                o.ray = mul(r_cameraToWorld, o.ray);
+                return o;
+            }
+
+            float3 Rotatey(float3 v, float degree) {
+                float rad = 0.01745329 * degree;
+                float cosY = cos(rad);
+                float sinY = sin(rad);
+                return float3(cosY * v.x - sinY * v.z, v.y, sinY * v.x + cosY * v.z);
+            }
+
+            float ground(float3 p){
+                float ground = dot(p,normalize(float3(0,1,0)))+sin(p.x+_Time.y);
+                
+                //float modX = pMod1(p.x, r_modInterval.x);
+                float sphere = sdSphere(p - r_sphere4.xyz, r_sphere4.w);
+                for (int i = 0; i < 8; i++)
+                {
+                    float sphereAdd = sdSphere(Rotatey(p, r_degreeRotate * i) - r_sphere4.xyz, r_sphere4.w);
+                    sphere = opUS(sphere, sphereAdd, r_sphereSmooth);
+                }
+                return  opU(sphere,ground);
+
+            }
+            float sphereBox(float3 p){
+                        float sphere = sdSphere(p - r_sphere.xyz, r_sphere.w);
+                  float Box1 = sdBox(p - r_box.xyz, r_box.www);
+                 return opUS(sphere, Box1,r_boxSphereSmooth);
+
+            }
+            float r_distanceField(float3 p) {
+                /*
+               */
+                                 
+                  //
+                  //float modX = pMod1(p.x, r_modInterval.x);
+                  //float modY = pMod1(p.y, r_modInterval.y);
+                  
+                  //float MandleBrot1 = mandleBulb(p-_mandleBrot1.xyz,_mandleBrotColor1.xyzw);
+                  //float fractal1 = DE(p-_mandleBrot1.xyz,_power);
+                 // return fractal1;
+
+                  //
+                  //                  float modZ = pMod1(p.z, r_modInterval.z);
+                  return  ground(p);
+          
+
+            }
+
+            float3 getNormal(float3 p) {
+                const float2 offset = float2(0.001, 0.0);
+                float3 n = float3(
+                    r_distanceField(p + offset.xyy) - r_distanceField(p - offset.xyy),
+                    r_distanceField(p + offset.yxy) - r_distanceField(p - offset.yxy),
+                    r_distanceField(p + offset.yyx) - r_distanceField(p - offset.yyx)
+                    );
+                return normalize(n);
+                    
+            }
+            float hardShadow(float3 ray_o, float3 ray_d, float mint, float maxt) {
+                for (float t = mint; t < maxt;)
+                {
+                    float h = r_distanceField(ray_o + ray_d * t);
+                    if (h < 0.001) {
+                        return 0.0;
+                    }
+                    t += h;
+                }
+                return 1.0;
+            }
+            float softShadow(float3 ray_o, float3 ray_d, float min_travel, float max_travel, float k) {
+                float result = 1.0;
+                for (float t = min_travel; t < max_travel;)
+                {
+                    float h = r_distanceField(ray_o + ray_d * t);
+                    if (h < 0.001) {
+                        return 0.0;
+                    }
+                    result = min(result, k * h / t);
+                    t += h;
+                }
+                return result;
+            }
+            float AmbientOcclusion(float3 p, float3 n) {
+                float step = r_ambientSteps;
+                float ao = 0.0;
+                float dist;
+                for (int i=1; i <= r_ambientIterations; i++) {
+                    dist = step * i;
+                    ao += max ( 0.0, (dist - r_distanceField(p + n * dist)) / dist);
+                }
+                return (1.0 - ao * r_ambientIntensity);
+            }
+            float3 Shading(float3 p, float3 n) {
+                // light
+                float3 result;
+                float3 color = r_mainColor.rgb;
+                float3 light = (r_lightColor * dot(-r_light, n) *0.5 + 0.5) * r_lightIntensity;
+                //shadows
+                float shadow = softShadow(p, -r_light, r_shadowDistance.x, r_shadowDistance.y, r_shadowPenumbra) * 0.5 + 0.5;
+                shadow = max(0.0, pow(shadow, r_shadowIntensity));
+                float ao = AmbientOcclusion(p, n);
+                result = color * light * shadow * ao;
+                return result;
+            }
+            bool raymarching( float3 r_origin, float3 r_direction, float this_depth, float maxDistance, float maxIterations, inout float3 pos) {
+                
+                bool hit;
+                float ray_dist = 0;
+
+                for (int i = 0; i < maxIterations; i++)
+                {
+                    if ( ray_dist > maxDistance || ray_dist >= this_depth ) {
+                        hit = false;
+                        break;
+                    }
+                     pos = r_origin + r_direction * ray_dist;
+                    //collision check
+                    float r_dist = r_distanceField(pos);
+                    if (r_dist < r_accuracy) {
+
+                        hit = true;
+                        break;
+                    }
+                    ray_dist += r_dist;
+
+                }
+                return hit;
+            }
+
+            fixed4 frag(v2f i) : SV_Target
+            {
+                float r_depth = LinearEyeDepth(tex2D(_CameraDepthTexture, i.uv).r);
+                r_depth *= length(i.ray);
+                fixed3 col = tex2D(_MainTex, i.uv);
+                float3 ray_direction = normalize(i.ray.xyz);
+                float3 ray_origin = _WorldSpaceCameraPos;
+                fixed4 result;
+                float3 hit_position; 
+                bool hit = raymarching(ray_origin, ray_direction, r_depth, r_maxdistance, r_maxIterations, hit_position);
+                if (hit) {
+                    float3 n = getNormal(hit_position);
+                    float3 shade = Shading(hit_position, n);
+                    result = fixed4(shade, 1);
+                    result += fixed4(texCUBE(r_reflectionCube, n).rgb * r_environmentIntensity * r_reflectionIntensity, 0);
+                    if (r_reflectionCount > 0) {
+                        ray_direction = normalize(reflect(ray_direction, n));
+                        ray_origin = hit_position + (ray_direction * 0.01);
+                        hit = raymarching(ray_origin, ray_direction, r_maxdistance, r_maxdistance*0.5, r_maxIterations /2, hit_position);
+                        if (hit) {
+                            float3 n = getNormal(hit_position);
+                            float3 shade = Shading(hit_position, n);
+                            result += fixed4(shade * r_reflectionIntensity, 0);
+                            if (r_reflectionCount > 1) {
+                                ray_direction = normalize(reflect(ray_direction, n));
+                                ray_origin = hit_position + (ray_direction * 0.01);
+                                hit = raymarching(ray_origin, ray_direction, r_maxdistance, r_maxdistance *0.25, r_maxIterations /4, hit_position);
+                                if (hit) {
+                                    float3 n = getNormal(hit_position);
+                                    float3 shade = Shading(hit_position, n);
+                                    result += fixed4(shade * r_reflectionIntensity * 0.5, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+                else {
+                    result = fixed4(0, 0, 0, 0);
+                }
+                
+                
+
+                return fixed4(col * (1.0 - result.w) + result.xyz * result.w , 1.0);
+                
+            }
+            ENDCG
+        }
+    }
+}
+```
+
+### Assets/Shaders/testShader.shader
+```
+Shader "Unlit/testShader"
+{
+    Properties
+    {
+        _MainTex ("Texture", 2D) = "white" {}
+        
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" }
+        LOD 100
+
+        Pass
+        {
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+
+            #include "UnityCG.cginc"
+            #define MAX_STEPS  100
+            #define MAX_DIST 100
+            #define SURF_DIST 1e-3
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float2 uv : TEXCOORD0;
+            };
+
+            struct v2f
+            {
+                float2 uv : TEXCOORD0;
+                float4 vertex : SV_POSITION;
+                float3 ro : TEXCOORD1;
+                float3 hitPos : TEXCOORD2;
+            };
+
+            sampler2D _MainTex;
+            float4 _MainTex_ST;
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.uv = TRANSFORM_TEX(v.uv, _MainTex);
+                o.ro = mul(unity_WorldToObject,float4(_WorldSpaceCameraPos,1));
+                o.hitPos = v.vertex;
+                return o;
+            }
+             float GetDist(float3 p){
+                //float d = length(p)- .5;
+                float d= length(float2(length(p.xy)- .5, p.z))-.5*sin(_Time.w); 
+                return d;
+            }
+            float3 GetNormal(float3 p){
+                float2 e= float2 (1e-2,0);
+            float3 n= GetDist(p)-float3(GetDist(p-e.xyy), GetDist(p-e.yxy), GetDist(p-e.yyx));
+            return normalize(n);
+            }
+
+           
+            float Raymarch(float3 ro, float3 rd){
+                float dO;
+                for (int i=0; i<MAX_STEPS;i++) {
+
+                    float3    p= ro+ dO*rd;
+
+                    float dS=GetDist(p);
+                    dO += dS;
+                
+                    if(dS<SURF_DIST || dS>MAX_DIST) break;
+    
+
+                }
+                return dO;
+            }
+            fixed4 frag (v2f i) : SV_Target
+            {
+                float2 uv = i.uv-.5;
+                float3 ro= i.ro;
+                float3 rd= normalize(i.hitPos- ro);//normalize(float3 (uv.x, uv.y,1));
+                // sample the texture
+                float d= Raymarch(ro,rd);
+
+                fixed4 col = 0;
+                if(d<MAX_DIST){
+                    float3 p = ro+ d*rd;
+                    float3 n = GetNormal(p);
+                    col=tex2D(_MainTex,i.uv);
+                } else discard;
+
+                //col.gb= uv.xy;
+                return col;
+            }
+            ENDCG
+        }
+    }
+}
+```

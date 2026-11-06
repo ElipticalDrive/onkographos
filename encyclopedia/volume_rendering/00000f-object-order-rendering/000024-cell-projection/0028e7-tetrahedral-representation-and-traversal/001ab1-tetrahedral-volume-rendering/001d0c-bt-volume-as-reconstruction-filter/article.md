@@ -7,20 +7,21 @@ This method represents the result of convolving an arbitrary scalar-valued volum
 
 ## How it works
 **Inputs:**
-- A scalar volume $A$ defined on a regular grid with voxel indices $(a,b,c) \in C$.
-- A reconstruction filter $G$ represented as a BT Volume.
+- A scalar volume $A$ defined on a regular grid with voxel indices $(a,b,c) \in C$ [S1].
+- A reconstruction filter $G$ represented as a BT Volume [S1].
 - The filter voxels must coincide with the voxels in the scalar volume [S1].
 
 **Outputs:**
-- A resulting BT Volume representing the convolved data.
+- A resulting BT Volume representing the convolved data [S1].
 
 **Data Structures:**
-- The BT Volume consists of a grid of cubic Bezier Tetrahedra (BT). Each BT is defined by weights $w_{ijkl}$ for $i+j+k+l=3$ and a $\kappa$ function that maps a local coordinate to a tetrahedron index [S1].
+- The BT Volume consists of a grid of cubic Bezier Tetrahedra (BT) [S1].
+- Each BT is defined by weights $w_{ijkl}$ for $i+j+k+l=3$ and a $\kappa$ function that maps a local coordinate to a tetrahedron index [S1].
 - The $\kappa$ function determines which tetrahedron within a voxel contains a query point [S1].
 
 **Steps:**
 
-1.  **Voxel Inversion:** Invert each voxel in the scalar volume $A$ in place before evaluation. This is necessary because the order of voxels is reversed in the convolution filter [S1]. This step ensures continuity between voxels in the result [S1]. Note that this inversion causes the $\kappa$ function of the resulting BT Volume to be an inverted version of the filter's $\kappa$ function [S1].
+1.  **Voxel Inversion:** Invert each voxel in the scalar volume $A$ in place before evaluation [S1]. This is necessary because the order of voxels is reversed in the convolution filter [S1]. This step ensures continuity between voxels in the result [S1]. Note that this inversion causes the $\kappa$ function of the resulting BT Volume to be an inverted version of the filter's $\kappa$ function [S1].
 
 2.  **Filter Evaluation Setup:** For a query point $\mathbf{X}$, determine the tetrahedron index $h = \kappa(\mathbf{X} - \lfloor \mathbf{X} \rfloor)$ [S1]. Since $\kappa$ is defined not to have overlap, we only loop for tetrahedra with this specific index [S1].
 
@@ -56,7 +57,7 @@ BT Volume Isosurface Rendering is a real-time technique for rendering exact isos
 
 ## Operating characteristics
 - **Time Complexity:** The method allows for real-time rendering of high-quality convolved volumes [S1]. The convolution itself involves summing contributions from overlapping BT kernels, but the closure property ensures the result is a single BT Volume, avoiding explicit mesh generation [S1].
-- **Memory Complexity:** Not given in the sources.
+- **Memory Complexity:** Not given in the sources [S1].
 - **Strengths:** Represents a volume convolved with a BT filter as a BT Volume, enabling real-time rendering [S1]. Resolution independent [S1].
 - **Limitations:** Requires the reconstruction filter to be representable as a BT Volume sharing a similar $\kappa$ function [S1].
 - **When to use:** When high-quality, continuous volumetric data is needed from discrete samples and real-time rendering is required [S1].

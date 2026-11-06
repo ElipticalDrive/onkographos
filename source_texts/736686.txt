@@ -1,0 +1,688 @@
+In the current implementation of the TriangularMesh magnet class there are checks against bad triangle orientation, open mesh and disjoint mesh, but none against self-intersection. This issue is to discuss its implementation. As this fea...
+
+TriangularMesh - self-intersection check · Issue #589 · magpylib/magpylib · GitHub
+Skip to content
+You signed in with another tab or window. Reload to refresh your session.
+You signed out in another tab or window. Reload to refresh your session.
+You switched accounts on another tab or window. Reload to refresh your session.
+Dismiss alert
+TriangularMesh - self-intersection check #589
+New issue
+Copy link
+New issue
+Copy link
+Closed
+Closed
+TriangularMesh - self-intersection check#589
+Copy link
+Labels
+I am boredfeature-request
+Milestone
+4.3
+Description
+Alexboiboi
+opened on Feb 18, 2023
+Issue body actions
+In the current implementation of the TriangularMesh magnet class there are checks against bad triangle orientation, open mesh and disjoint mesh, but none against self-intersection. This issue is to discuss its implementation.
+As this feature is computationally expensive, this should be an opt-in parameter.
+Once implemented it could be used as
+```
+import numpy as np
+import magpylib as magpy
+
+self_intersecting_mesh3d = {
+    "x": [-1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 0.5],
+    "y": [-1.0, 1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 0.1],
+    "z": [-1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0, 1.0, -3.0],
+    "i": [7, 0, 0, 0, 2, 6, 4, 0, 3, 7, 4, 5, 6, 7],
+    "j": [0, 7, 1, 2, 1, 2, 5, 5, 2, 2, 5, 6, 7, 4],
+    "k": [3, 4, 2, 3, 5, 5, 0, 1, 7, 6, 8, 8, 8, 8],
+}
+vertices = np.array([v for k, v in self_intersecting_mesh3d.items() if k in "xyz"]).T
+triangles = np.array([v for k, v in self_intersecting_mesh3d.items() if k in "ijk"]).T
+
+trimesh = magpy.magnet.TriangularMesh(
+    magnetization=(0, 0, 1000),
+    vertices=vertices,
+    triangles=triangles,
+    validate_connected=False,
+    reorient_triangles=False,
+)
+trimesh.style.mesh.intersect.marker.size = 15
+trimesh.style.mesh.intersect.line.color = "orange"
+trimesh.show(style_opacity=0.5, backend="plotly")
+```
+Useful links
+pyvista/pyvista#2345
+Activity
+Alexboiboi
+added
+I am bored
+feature-request
+on Feb 18, 2023
+Alexboiboi commented on Feb 18, 2023
+Alexboiboi
+on Feb 18, 2023
+Last edited by Alexboiboi
+MemberAuthor
+More actions
+```
+import ipywidgets as ipw
+import magpylib as magpy
+import numpy as np
+import plotly.graph_objects as go
+from magpylib._src.display.traces_utility import merge_mesh3d
+
+magpy.defaults.display.backend = "plotly"
+
+# helper functions
+def signed_volume(a, b, c, d):
+    """Computes the signed volume of a series of tetrahedrons defined by the vertices in
+    a, b c and d. The ouput is an SxT array which gives the signed volume of the tetrahedron
+    defined by the line segment 's' and two vertices of the triangle 't'."""
+
+    return np.sum((a - d) * np.cross(b - d, c - d), axis=2)
+
+
+def segments_intersect_triangle(segments, facets, summation=True):
+    """For each line segment in `segments`, this function computes how many times it intersects
+    any of the facets given in `facets`.
+
+    Parameters
+    ----------
+    segments: Sx2x3 array
+        Array of `S` line segments where the first index specifies the S^th line segment, the
+        second index refers to the start or end point of the segment, and the third index points
+        to the x, y, z coordinates of the line segment point.
+
+    facets: Tx3x3
+        Array of `T` triangular facets, where the first index specifies the T^th triangle, the
+        second index refers to one of the three vertices (which don't have to be in any particular
+        order), and the third index points to the x,y,z coordinates the the triangle vertex.
+
+    summation: bool, optional
+        If `True`, a binary array is return which only tells if the S^th line segment intersects
+        any of  the facets given. If `False`, returns a SxT array that tells which facets are
+        intersected.
+
+    Returns
+    -------
+        If `'summation'` is `True`, returns a binary array of size S which tells whether the S^th
+        line segment intersects any of the facets given. Otherwise returns a SxT array that tells
+        which facets are intersected.
+    """
+
+    s, t = segments, facets
+    # compute the normals to each triangle
+    normals = np.cross(t[:, 2] - t[:, 0], t[:, 2] - t[:, 1])
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+
+    # get sign of each segment endpoint, if the sign changes then we know this segment crosses the
+    # plane which contains a triangle. If the value is zero the endpoint of the segment lies on the
+    # plane.
+    s0, s1 = s[:, :1], s[:, 1:]  # -> S x T x 3 arrays
+    sign1 = np.sign(np.sum(normals * (s0 - t[:, 2]), axis=2))  # S x T
+    sign2 = np.sign(np.sum(normals * (s1 - t[:, 2]), axis=2))  # S x T
+
+    # determine segments which cross the plane of a triangle.
+    #  -> 1 if the sign of the end points of s is
+    # different AND one of end points of s is not a vertex of t
+    cross = (sign1 != sign2) * (sign1 != 0) * (sign2 != 0)  # S x T
+
+    # get signed volumes
+    v = [
+        np.sign(signed_volume(t[:, i], t[:, j], s0, s1))
+        for i, j in zip((0, 1, 2), (1, 2, 0))
+    ]  # S x T
+    same_volume = np.logical_and(
+        (v[0] == v[1]), (v[1] == v[2])
+    )  # 1 if s and t have same sign in v0, v1 and v2
+
+    res = cross * same_volume
+    if summation:
+        res = np.sum(res, axis=1)
+
+    return res
+
+
+def update_fig(x=1.2, y=0.9, z=1.1):
+    with fig.batch_update():
+        # create model3d
+        c1 = magpy.graphics.model3d.make_Cuboid(dimension=(2, 2, 2))
+        c2 = magpy.graphics.model3d.make_Cuboid(dimension=(2, 2, 2), position=(x, y, z))
+        mesh3d = c1.copy()
+        mesh3d["kwargs"] = merge_mesh3d(c1["kwargs"], c2["kwargs"])
+
+        vertices = np.array([v for k, v in mesh3d["kwargs"].items() if k in "xyz"]).T
+        triangles = np.array([v for k, v in mesh3d["kwargs"].items() if k in "ijk"]).T
+
+        i, j, k = triangles.T
+        trace_mesh3d.update(**{**mesh3d["kwargs"], **{"i": i, "j": j, "k": k}})
+
+        edges = np.concatenate(
+            [triangles[:, 0:2], triangles[:, 1:3], triangles[:, ::2]], axis=0
+        )
+        edges_uniq, edges_counts = np.unique(
+            np.sort(edges, axis=1), axis=0, return_counts=True
+        )
+        lines = vertices[edges_uniq]
+        trace_all_edges.update(to_xyz(lines))
+
+
+        # intersting edges
+        facets = vertices[triangles]
+        segments = vertices[edges_uniq]
+        intersecting_mask = segments_intersect_triangle(segments, facets) != 0
+        lines = segments[intersecting_mask]
+        trace_intersect_edges.update(to_xyz(lines))
+
+
+def to_xyz(lines):
+    """insert None to draw discontinuous line and return coords"""
+    lines = np.insert(lines, 2, None, axis=1).reshape(-1, 3)
+    x, y, z = lines.T
+    return {"x": x, "y": y, "z": z}
+
+
+fig = go.FigureWidget()
+fig.layout.scene.camera.eye = {"x": 0.8, "y": -0.9, "z": 0.5}
+
+fig.add_mesh3d(name="2Cubes", opacity=0.5, showlegend=True)
+
+fig.add_scatter3d(
+    line_width=2,
+    name="all edges",
+    line_color="black",
+    mode="lines",
+    opacity=0.5,
+    showlegend=False,
+)
+
+fig.add_scatter3d(
+    line_width=10,
+    name="self intersecting edges",
+    line_color="magenta",
+    mode="lines",
+    opacity=0.5,
+    showlegend=True,
+)
+
+trace_mesh3d, trace_all_edges, trace_intersect_edges = fig.data
+slider = lambda **kwargs: ipw.FloatSlider(min=-2, max=3, **kwargs)
+widgets = ipw.interactive(
+    update_fig,
+    x=slider(value=1.7),
+    y=slider(value=1.8),
+    z=slider(value=1.9),
+)
+display(widgets, fig)
+```
+Alexboiboi commented on Mar 3, 2023
+Alexboiboi
+on Mar 3, 2023
+Last edited by Alexboiboi
+MemberAuthor
+More actions
+```
+import ipywidgets as ipw
+import magpylib as magpy
+import numpy as np
+import plotly.graph_objects as go
+import pyvista
+import scipy.spatial
+
+
+def segments_intersect_facets(segments, facets, eps1=1e-5, eps2=1e-5):
+    """Pair-wise detect if set of segments intersect set of facets.
+
+    Parameters
+    -----------
+
+    segments: np.ndarray, shape (n,3,3)
+        Set of segments.
+
+    facets: np.ndarray, shape (n,3,3)
+        Set of facets.
+
+    eps1: float
+        Point to face tolerance detection.
+
+    eps2: float
+        Point to point tolerance detection. Must be strictly positive,
+        otherwise vertices of their own triangle will be detected as
+        intersection.
+    """
+    S0, S1 = segments.swapaxes(0, 1)
+    V0, V1, V2 = facets.swapaxes(0, 1)  # triangle vertices
+    D = S1 - S0
+    norm = np.sqrt((D**2).sum(-1))
+    D = (D.T / norm).T  # normalized segment directions
+
+    E1 = V1 - V0  # edge 1 of triangle
+    E2 = V2 - V0  # edge 2 of triangle
+
+    # if det is near 0, ray lies in triangle's plane
+    P = np.cross(D, E2)
+    det = np.einsum("...i,...i", E1, P)
+    det_bool = np.abs(det) > eps1
+
+    # avoid zero-division with non zero mask
+    mask = det != 0
+    det = det[mask]
+
+    # barycentric coordinates of intersections
+    T = S0 - V0
+    u = np.einsum("...i,...i", T[mask], P[mask]) / det
+    u_bool = np.logical_and(u > eps2, u < 1.0 - eps2)
+
+    Q = np.cross(T, E1)
+    v = np.einsum("...i,...i", D[mask], Q[mask]) / det
+    v_bool = np.logical_and(v > eps2, u + v < 1.0 - eps2)
+
+    # coordinates along segment of the intersections
+    t = np.einsum("...i,...i", E2[mask], Q[mask]) / det
+    t_bool = np.logical_and(t > 0.0, t < 1.0)
+
+    det_bool[mask] = det_bool[mask] * u_bool * v_bool * t_bool
+    return det_bool
+
+
+def oneway_facets_intersect_facets(facets1, facets2, eps1=1e-5, eps2=1e-5):
+    """Pair-wise detect if set edges of first triangles intersect set of second
+    triangles. Intersection is detected if one edge from each triangle
+    intersect or if two edges of one intersect the other one.
+
+    Parameters
+    ----------
+    facets1: np.ndarray, shape (n,3,3)
+        First set of facets
+
+    facets2: np.ndarray, shape (n,3,3)
+        First set of facets
+
+    eps1: float
+        Point to face tolerance detection.
+
+    eps2: float
+        Point to point tolerance detection. Must be strictly positive,
+        otherwise vertices of their own triangle will be detected as
+        intersection.
+
+    Notes
+    -----
+    This function does not fully detect if the two triangles intersect but
+    rather if first intersects second. Also this is only a pair-wise check and
+    will not perform an each against each check.
+    """
+    s = 0
+    for inds in [[0, 1], [1, 2], [2, 0]]:
+        s += segments_intersect_facets(facets1[:, inds], facets2, eps1=eps1, eps2=eps2)
+    return s > 0
+
+
+def get_intersecting_triangles(
+    vertices, triangles, r=None, r_tol_perc=1, eps1=1e-5, eps2=1e-5
+):
+    """Return intersecting triangles indices from a triangular mesh described
+    by vertices and triangles indices.
+
+    Parameters
+    ----------
+    vertices: np.ndarray, shape (n,3)
+        Vertices/points of the mesh.
+
+    triangles: np.ndarray, shape (n,3), dtype int
+        Triples of vertices indices that build each triangle of the mesh.
+
+    r: int or None
+        The radius of the ball-point query for the k-d tree. If None:
+        r=max_distance_between_center_and_vertices*(1+tolerance_percent/100)
+
+    eps1: float
+        Point to face tolerance detection.
+
+    eps2: float
+        Point to point tolerance detection. Must be strictly positive,
+        otherwise vertices of their own triangle will be detected as
+        intersection.
+
+    """
+    vertices = vertices.astype(np.float32)
+    facets = vertices[triangles]
+    centers = np.mean(facets, axis=1)
+
+    if r is None:
+        dist_max = np.sqrt(((facets - centers[:, None, :]) ** 2).sum(-1)).max()
+        radius = dist_max * (1 + r_tol_perc / 100)
+
+    kdtree = scipy.spatial.KDTree(centers)
+    near_cells = kdtree.query_ball_point(
+        centers, radius, return_sorted=False, workers=-1
+    )
+    near_cells_lengths = [len(n) for n in near_cells]
+    tria1 = np.repeat(np.arange(len(near_cells)), near_cells_lengths)
+    tria2 = np.concatenate(near_cells)
+
+    # one-way only necessary, since check is caught by reversed pair
+    # also present in the indices
+    mask = oneway_facets_intersect_facets(
+        facets[tria2], facets[tria1], eps1=eps1, eps2=eps2
+    )
+    return tria1[mask]
+
+
+def update_fig(N=200, gap=0.5):
+    res = int(np.sqrt(N))
+    sphere_a = pyvista.Sphere(theta_resolution=res, phi_resolution=res)
+    sphere_b = pyvista.Sphere(
+        theta_resolution=res, phi_resolution=res, center=(1 + gap, 0, 0)
+    )
+    mesh = sphere_a.merge(sphere_b)
+
+    magnet = magpy.magnet.TriangularMesh.from_pyvista(
+        magnetization=(0, 0, 100),
+        polydata=mesh,
+        validate_connected=False,
+        validate_closed=False,
+        reorient_triangles=False,
+    )
+    temp_fig = magnet.show(
+        backend="plotly", return_fig=True, layout_height=800, style_opacity=0.5
+    )
+
+    vertices, triangles = magnet.vertices, magnet.triangles
+    tri = triangles[get_intersecting_triangles(vertices, triangles)]
+    (x, y, z), (i, j, k) = magnet.vertices.T, tri.T
+    with fig.batch_update():
+        fig.data[0].update(temp_fig.data[0])
+        fig.data[1].update(temp_fig.data[1])
+        fig.data[2].update(
+            x=x,
+            y=y,
+            z=z,
+            i=i,
+            j=j,
+            k=k,
+            name=f"Intersecting triangles ({len(tri)})",
+            showlegend=True,
+        )
+
+
+fig = go.FigureWidget()
+for i in range(3):
+    fig.add_mesh3d()
+
+# update_fig()
+
+widgets = ipw.interactive(
+    update_fig,
+    gap=ipw.FloatSlider(min=-1, max=1, step=0.05, value=-0.2, description="gap"),
+    N=ipw.IntSlider(min=100, max=1000, value=100, description="ntriangles"),
+)
+display(widgets, fig)
+```
+Alexboiboi commented on Mar 5, 2023
+Alexboiboi
+on Mar 5, 2023
+Last edited by Alexboiboi
+MemberAuthor
+More actions
+```
+import ipywidgets as ipw
+import magpylib as magpy
+import numpy as np
+import plotly.graph_objects as go
+import pyvista
+import scipy.spatial
+from magpylib._src.display.traces_utility import merge_mesh3d
+
+
+def segments_intersect_facets(segments, facets, eps=1e-6):
+    """Pair-wise detect if set of segments intersect set of facets.
+
+    Parameters
+    -----------
+    segments: np.ndarray, shape (n,3,3)
+        Set of segments.
+
+    facets: np.ndarray, shape (n,3,3)
+        Set of facets.
+
+    eps: float
+        Point to point tolerance detection. Must be strictly positive,
+        otherwise triangle will be detected as intersecting itself.
+    """
+    if eps <= 0:
+        raise ValueError("eps must be stricly positive")
+
+    s, t = segments.swapaxes(0, 1), facets.swapaxes(0, 1)
+
+    # compute the normals to each triangle
+    normals = np.cross(t[2] - t[0], t[2] - t[1])
+    normals /= np.linalg.norm(normals, axis=1, keepdims=True)
+
+    # get sign of each segment endpoint, if the sign changes then we know this
+    # segment crosses the plane which contains a triangle. If the value is zero
+    # the endpoint of the segment lies on the plane.
+    g1 = np.sum(normals * (s[0] - t[2]), axis=1)
+    g2 = np.sum(normals * (s[1] - t[2]), axis=1)
+
+    # determine segments which cross the plane of a triangle.
+    #  -> 1 if the sign of the end points of s is
+    # different AND one of end points of s is not a vertex of t
+    cross = (np.sign(g1) != np.sign(g2)) * (np.abs(g1) > eps) * (np.abs(g2) > eps)
+
+    v = []  # get signed volumes
+    for i, j in zip((0, 1, 2), (1, 2, 0)):
+        sv = np.sum((t[i] - s[1]) * np.cross(t[j] - s[1], s[0] - s[1]), axis=1)
+        v.append(np.sign(sv))
+
+    # same volume if s and t have same sign in v0, v1 and v2
+    same_volume = np.logical_and((v[0] == v[1]), (v[1] == v[2]))
+
+    return cross * same_volume
+
+
+def get_intersecting_triangles(vertices, triangles, r=None, r_factor=1.5, eps=1e-6):
+    """Return intersecting triangles indices from a triangular mesh described
+    by vertices and triangles indices.
+
+    Parameters
+    ----------
+    vertices: np.ndarray, shape (n,3)
+        Vertices/points of the mesh.
+
+    triangles: np.ndarray, shape (n,3), dtype int
+        Triples of vertices indices that build each triangle of the mesh.
+
+    r: float or None
+        The radius of the ball-point query for the k-d tree. If None:
+        r=max_distance_between_center_and_vertices*2
+
+    r_factor: float
+        The factor by which to multiply the radius `r` of the ball-point query.
+        Note that increasing this value will drastically augment computation
+        time.
+
+    eps: float
+        Point to point tolerance detection. Must be strictly positive,
+        otherwise triangle will be detected as intersecting itself.
+    """
+    if r_factor < 1:
+        raise ValueError("r_factor must be greater or equal to 1")
+
+    vertices = vertices.astype(np.float32)
+    facets = vertices[triangles]
+    centers = np.mean(facets, axis=1)
+
+    if r is None:
+        radius = r_factor * np.sqrt(((facets - centers[:, None, :]) ** 2).sum(-1)).max()
+
+    kdtree = scipy.spatial.KDTree(centers)
+    near = kdtree.query_ball_point(centers, radius, return_sorted=False, workers=-1)
+    tria1 = np.concatenate(near)
+    tria2 = np.repeat(np.arange(len(near)), [len(n) for n in near])
+    pairs = np.stack([tria1, tria2], axis=1)
+    pairs = pairs[pairs[:, 0] != pairs[:, 1]]  # remove check against itself
+    f1, f2 = facets[pairs[:, 0]], facets[pairs[:, 1]]
+    sums = 0
+    for inds in [[0, 1], [1, 2], [2, 0]]:
+        sums += segments_intersect_facets(f1[:, inds], f2, eps=eps)
+    return np.unique(pairs[sums > 0])
+```
+```
+def update_fig(N=200, gap=0.5, r_factor=1, eps=1e-6):
+    res = int(np.sqrt(N / 4))
+    sphere_a = pyvista.Sphere(theta_resolution=res, phi_resolution=res)
+    sphere_b = pyvista.Sphere(
+        theta_resolution=res, phi_resolution=res, center=(1 + gap, 0, 0)
+    )
+    mesh = sphere_a.merge(sphere_b)
+
+    magnet = magpy.magnet.TriangularMesh.from_pyvista(
+        magnetization=(0, 0, 100),
+        polydata=mesh,
+        validate_connected=False,
+        validate_closed=False,
+        reorient_triangles=False,
+    )
+    temp_fig = magnet.show(
+        backend="plotly", return_fig=True, layout_height=800, style_opacity=0.5
+    )
+
+    vertices, triangles = magnet.vertices, magnet.triangles
+    tri = triangles[
+        get_intersecting_triangles(vertices, triangles, r_factor=r_factor, eps=eps)
+    ]
+    (x, y, z), (i, j, k) = magnet.vertices.T, tri.T
+    with fig.batch_update():
+        fig.data[0].update(temp_fig.data[0])
+        fig.data[1].update(temp_fig.data[1])
+        fig.data[2].update(
+            x=x,
+            y=y,
+            z=z,
+            i=i,
+            j=j,
+            k=k,
+            name=f"Intersecting triangles ({len(tri)})",
+            showlegend=True,
+        )
+        edges = np.concatenate(
+            [triangles[:, 0:2], triangles[:, 1:3], triangles[:, ::2]], axis=0
+        )
+        edges = np.sort(edges, axis=1)
+        edges = np.unique(edges, axis=0)
+        lines = vertices[edges].reshape(-1, 2, 3)
+        lines = np.insert(lines, 2, None, axis=1).reshape(-1, 3)
+        x, y, z = lines.T
+        fig.data[3].update(x=x, y=y, z=z)
+
+
+fig = go.FigureWidget()
+for i in range(3):
+    fig.add_mesh3d()
+fig.add_scatter3d(mode="lines", showlegend=False)
+
+widgets = ipw.interactive(
+    update_fig,
+    gap=ipw.FloatSlider(min=-1, max=1, step=0.01, value=-0.2, description="gap"),
+    N=ipw.IntSlider(min=100, max=10000, value=400, description="ntriangles"),
+    r_factor=ipw.FloatSlider(min=1, max=10, value=1.05),
+    eps=ipw.FloatLogSlider(min=-16, max=0, value=1e-5),
+)
+display(widgets, fig)
+```
+```
+def update_fig(x=1.2, y=0.9, z=1.1, r_factor=1, eps=1e-5):
+    with fig.batch_update():
+        # create model3d
+        c1 = magpy.graphics.model3d.make_Cuboid(dimension=(2, 2, 2))
+        c2 = magpy.graphics.model3d.make_Cuboid(dimension=(2, 2, 2), position=(x, y, z))
+        mesh3d = c1.copy()
+        mesh3d["kwargs"] = merge_mesh3d(c1["kwargs"], c2["kwargs"])
+
+        vertices = np.array([v for k, v in mesh3d["kwargs"].items() if k in "xyz"]).T
+        triangles = np.array([v for k, v in mesh3d["kwargs"].items() if k in "ijk"]).T
+        
+        i, j, k = triangles.T
+        trace_mesh3d.update(**{**mesh3d["kwargs"], **{"i": i, "j": j, "k": k}})
+
+        edges = np.concatenate(
+            [triangles[:, 0:2], triangles[:, 1:3], triangles[:, ::2]], axis=0
+        )
+        edges_uniq, edges_counts = np.unique(
+            np.sort(edges, axis=1), axis=0, return_counts=True
+        )
+        lines = vertices[edges_uniq]
+        trace_all_edges.update(to_xyz(lines))
+
+        # intersting edges
+        tri = triangles[
+            get_intersecting_triangles(vertices, triangles, r_factor=r_factor, eps=eps)
+        ]
+        (x, y, z), (i, j, k) = vertices.T, tri.T
+        trace_intersect.update(x=x, y=y, z=z, i=i, j=j, k=k)
+
+
+def to_xyz(lines):
+    """insert None to draw discontinuous line and return coords"""
+    lines = np.insert(lines, 2, None, axis=1).reshape(-1, 3)
+    x, y, z = lines.T
+    return {"x": x, "y": y, "z": z}
+
+
+fig = go.FigureWidget()
+fig.layout.scene.camera.eye = {"x": 0.8, "y": -0.9, "z": 0.5}
+
+fig.add_mesh3d(name="2Cubes", opacity=0.5, showlegend=True)
+
+fig.add_scatter3d(
+    line_width=2,
+    name="all edges",
+    line_color="black",
+    mode="lines",
+    opacity=0.5,
+    showlegend=False,
+)
+
+fig.add_mesh3d(opacity=0.5, showlegend=True, name="Intersecting triangles")
+
+trace_mesh3d, trace_all_edges, trace_intersect = fig.data
+slider = lambda **kwargs: ipw.FloatSlider(min=-2, max=3, **kwargs)
+widgets = ipw.interactive(
+    update_fig,
+    x=slider(value=1.7),
+    y=slider(value=1.8),
+    z=slider(value=1.9),
+    r_factor=ipw.FloatSlider(min=1, max=10, value=1.5),
+    eps=ipw.FloatLogSlider(min=-16, max=0, value=1e-5),
+)
+display(widgets, fig)
+```
+Alexboiboi
+modified the milestones: Future, 4.4 on Jun 22, 2023
+Alexboiboi
+closed this as completedon Jun 27, 2023
+Alexboiboi
+modified the milestones: 4.4, 4.3 on Jul 31, 2023
+Sign up for free to join this conversation on GitHub. Already have an account? Sign in to comment
+Metadata
+Metadata
+Assignees
+No one assigned
+Labels
+I am boredfeature-request
+Type
+No type
+Projects
+No projects
+Milestone
+4.3
+Relationships
+None yet
+Development
+No branches or pull requests
+Issue actions
+Open in GitHub Copilot app
+You can’t perform that action at this time.
